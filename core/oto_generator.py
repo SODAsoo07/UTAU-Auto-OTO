@@ -1346,6 +1346,8 @@ def _apply_soft_mel_offset_cutoff_guard(
     ovl,
     alias_type,
     mel_ctx=None,
+    onset_hint="",
+    alias_text="",
 ):
     """
     이른 단계 soft guard:
@@ -1386,23 +1388,47 @@ def _apply_soft_mel_offset_cutoff_guard(
 
     offset_shift_ms = 0.0
     cutoff_shift_ms = 0.0
+    hint = (onset_hint or "").strip().lower()
+    if hint in {"ɯ", "a", "i", "u", "e", "o"}:
+        hint = ""
+    if not hint and alias_text:
+        parts = [p.strip().lower() for p in str(alias_text).split() if p.strip()]
+        token = ""
+        if parts:
+            if alias_type in {"cv_head", "vcv"} and len(parts) >= 2:
+                token = parts[1]
+            else:
+                token = parts[-1]
+        token = re.sub(r"[^a-z]", "", token)
+        if token:
+            m = re.match(r"^([bcdfghjklmnpqrstvwxyz]+)", token)
+            if m:
+                hint = m.group(1)
+    # 유성/비음 계열(m,n,r,l,w,y...)은 멜 저역 에너지가 약해
+    # offset guard가 모음 시작으로 과도 이동할 수 있어 보수적으로 처리한다.
+    low_energy_voiced = hint in {
+        "m", "n", "ny", "ng", "r", "l", "ry", "w", "y", "j",
+        "g", "d", "b", "z", "dz", "v", "gy", "dy", "by",
+        "ɴ", "ŋ", "ɲ", "ɾ", "ɹ",
+    } or hint.startswith("m")
 
     # ---- soft offset guard ----
-    off_silent = bool(silence_mask[off_idx])
-    pre_sound = bool(sound_mask[pre_idx] or (en[pre_idx] > 0.20))
-    if off_silent and pre_sound:
-        lo = max(0, pre_idx - 120)
-        seg = sound_mask[lo:pre_idx + 1]
-        if np.any(seg):
-            rel = int(np.where(seg)[0][0])
-            sound_start_idx = lo + rel
-            target_offset = float(t_ms[sound_start_idx]) - 12.0
-            target_offset = max(0.0, min(pre_abs - 18.0, target_offset))
-            new_offset = _blend(offset, target_offset, 0.36)
-            offset_shift_ms = float(new_offset - offset)
-            offset = new_offset
-            pre = max(pre_abs - offset, 0.0)
-            consonant = max(cons_abs - offset, pre + 8.0)
+    if not low_energy_voiced:
+        off_silent = bool(silence_mask[off_idx])
+        pre_sound = bool(sound_mask[pre_idx] or (en[pre_idx] > 0.20))
+        if off_silent and pre_sound:
+            lo = max(0, pre_idx - 120)
+            seg = sound_mask[lo:pre_idx + 1]
+            if np.any(seg):
+                rel = int(np.where(seg)[0][0])
+                sound_start_idx = lo + rel
+                target_offset = float(t_ms[sound_start_idx]) - 12.0
+                target_offset = max(0.0, min(pre_abs - 18.0, target_offset))
+                new_offset = _blend(offset, target_offset, 0.36)
+                offset_shift_ms = float(new_offset - offset)
+                offset = new_offset
+                pre = max(pre_abs - offset, 0.0)
+                consonant = max(cons_abs - offset, pre + 8.0)
 
     # ---- soft cutoff guard ----
     cut_idx = _nearest_time_index(t_ms, cut_abs)

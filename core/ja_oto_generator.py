@@ -918,6 +918,31 @@ def _extract_ja_cv_target_syllable(alias, alias_type="cv"):
     return _normalize_ja_syllable_token(parts[-1])
 
 
+def _extract_ja_onset_token(token):
+    t = _normalize_ja_syllable_token(token)
+    if not t:
+        return ""
+    onset, vowel = split_ja_romaji_syllable(t)
+    if vowel in JA_VOWELS:
+        return (onset or "").lower()
+    if t in JA_VOWELS:
+        return ""
+    return t
+
+
+def _ja_onset_class(onset):
+    o = (onset or "").strip().lower()
+    if not o:
+        return "other"
+    if o in JA_NASAL_ONSETS or o.startswith("m"):
+        return "nasal"
+    if o in JA_VOICED_ONSETS:
+        return "voiced"
+    if o in JA_VOICELESS_ONSETS:
+        return "voiceless"
+    return "other"
+
+
 def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type="cv"):
     if not syllables_info:
         return 0
@@ -931,17 +956,37 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
     end = min(n, e + 5)
     best_idx = e
     best_score = -10**9
-    expected_score = _vcv_syllable_match_score(target, _syllable_info_token(syllables_info[e]))
-    for i in range(start, end):
+    target_onset = _extract_ja_onset_token(target)
+    target_cls = _ja_onset_class(target_onset)
+    dist_penalty = 7 if target_cls in {"nasal", "voiced"} else 6
+
+    def _score_idx(i):
         cand = _syllable_info_token(syllables_info[i])
-        score = _vcv_syllable_match_score(target, cand) - abs(i - e) * 6
+        cand_onset = _extract_ja_onset_token(cand)
+        cand_cls = _ja_onset_class(cand_onset)
+        score = _vcv_syllable_match_score(target, cand) - abs(i - e) * dist_penalty
+        # m/n/ny 계열은 한 음절 밀림이 체감이 커서 비호환 onset에 강한 페널티를 준다.
+        if target_cls == "nasal" and cand_cls != "nasal":
+            score -= 18
+        elif target_cls == "voiced" and cand_cls == "voiceless":
+            score -= 12
+        elif target_cls == "voiceless" and cand_cls == "voiced":
+            score -= 8
+        if target_onset and cand_onset and target_onset[:1] == cand_onset[:1]:
+            score += 4
+        return score
+
+    expected_score = _score_idx(e)
+    for i in range(start, end):
+        score = _score_idx(i)
         if score > best_score:
             best_score = score
             best_idx = i
 
     if best_score >= 54:
         # Diphthong/glide rows can over-jump; keep expected index when nearly tied.
-        if best_idx > e and expected_score >= max(50, best_score - 9):
+        hold_margin = 6 if target_cls in {"nasal", "voiced"} else 9
+        if best_idx > e and expected_score >= max(50, best_score - hold_margin):
             return e
         return best_idx
     return e
@@ -2799,6 +2844,7 @@ def generate_ja_oto(
                 source_profile = _parse_oto_line_profile(line)
 
                 alias_type = classify_ja_alias(alias, custom_map)
+                onset_hint_local = ""
 
                 # 포맷 강제 시 VCV 오인식을 보정
                 if format_type in ('cvvc', 'cvc') and alias_type == 'vcv':
@@ -2864,6 +2910,7 @@ def generate_ja_oto(
 
                     curr_syl = syllables_info[current_w_idx]
                     curr_phones = curr_syl['phones']
+                    onset_hint_local = curr_phones[0].mark if curr_phones else ""
                     v_phone = curr_phones[-1]
                     v_end = v_phone.maxTime * 1000
                     v_start = v_phone.minTime * 1000
@@ -2923,7 +2970,8 @@ def generate_ja_oto(
                         alias, prev_v_start, prev_v_end, c_boundary, n_end, base_shape=base_shape
                     )
                     offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
-                        offset, consonant, cutoff, pre, ovl, "vcv", mel_ctx_for_file
+                        offset, consonant, cutoff, pre, ovl, "vcv", mel_ctx_for_file,
+                        onset_hint=onset_hint_local, alias_text=alias
                     )
                     if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
                         log(
@@ -2974,6 +3022,7 @@ def generate_ja_oto(
                     offset = max(c_start - 50, 0)
                     pre = c_end - offset if c_end > c_start else 30
                     c_hint = curr_phones[0].mark if curr_phones else ""
+                    onset_hint_local = c_hint
                     ovl = _adaptive_ja_overlap(pre, c_hint, mode="cv_head")
                     
                     cv_vowel_len = n_end - n_start
@@ -2982,7 +3031,8 @@ def generate_ja_oto(
                     consonant = pre + added_cons
                     cutoff = -(consonant + cv_vowel_len * 0.25)
                     offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
-                        offset, consonant, cutoff, pre, ovl, "cv_head", mel_ctx_for_file
+                        offset, consonant, cutoff, pre, ovl, "cv_head", mel_ctx_for_file,
+                        onset_hint=onset_hint_local, alias_text=alias
                     )
                     if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
                         log(
@@ -3057,6 +3107,7 @@ def generate_ja_oto(
                     pre = boundary - offset
                     if pre < 10: pre = 10
                     c_hint = curr_phones[0].mark if curr_phones else ""
+                    onset_hint_local = c_hint
                     ovl = _adaptive_ja_overlap(pre, c_hint, mode="cv")
 
                     v_ref = max(cv_vowel_len, 120)
@@ -3261,7 +3312,8 @@ def generate_ja_oto(
 
                 if alias_type in {"cv", "cv_head", "vcv"}:
                     offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
-                        offset, consonant, cutoff, pre, ovl, alias_type, mel_ctx_for_file
+                        offset, consonant, cutoff, pre, ovl, alias_type, mel_ctx_for_file,
+                        onset_hint=onset_hint_local, alias_text=alias
                     )
                     if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
                         log(
