@@ -211,3 +211,11 @@ UTAU_Auto_OTO.exe
 UTAU_Auto_OTO_Release/
 logs/
 assets/profiles/kr_oto_reference_profile.json
+
+# Local run/test outputs
+error_report_*.txt
+test_wavs/*.ini
+test_wavs/*.validation.txt
+test_wavs/*.wav
+custom_test_wavs/*.lab
+custom_test_wavs/*_dict.txt
