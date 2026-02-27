@@ -13,6 +13,11 @@ import logging
 import unicodedata
 import textgrid
 import copy
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover
+    np = None
 from core.lab_generator import load_custom_phonemes
 from core.textio_utils import load_template_oto_lines
 from core.oto_profile_presets import get_kr_profile_preset
@@ -549,6 +554,19 @@ def _cv_match_score(alias_token, syllable_token):
     if a in s or s in a:
         score += 10
     return max(0, min(score, 100))
+
+
+def _extract_kr_cv_alias_token(alias):
+    """CV 매핑용 에일리어스 핵심 토큰을 추출합니다."""
+    parts = [p for p in re.split(r"\s+", (alias or "").strip().lower()) if p]
+    if not parts:
+        return ""
+    if parts[0] == "-" and len(parts) >= 2:
+        tok = parts[1]
+    else:
+        tok = parts[-1]
+    tok = re.sub(r"[^a-z]", "", tok)
+    return _kr_cv_kernel(tok)
 
 
 def classify_alias(alias, custom_map=None):
@@ -1136,6 +1154,446 @@ def _wav_duration_ms(wav_path):
         return 0.0
 
 
+def _read_wav_mono_np(wav_path):
+    if np is None:
+        return None, None
+    try:
+        with wave.open(wav_path, "rb") as wf:
+            sr = wf.getframerate()
+            n_ch = wf.getnchannels()
+            sw = wf.getsampwidth()
+            n_frames = wf.getnframes()
+            raw = wf.readframes(n_frames)
+    except Exception:
+        return None, None
+
+    if sw == 1:
+        audio = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
+        audio = (audio - 128.0) / 128.0
+    elif sw == 2:
+        audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    elif sw == 4:
+        audio = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+    else:
+        return None, None
+
+    if n_ch > 1:
+        audio = audio.reshape(-1, n_ch).mean(axis=1)
+    return audio, sr
+
+
+def _estimate_f0_voicing_strength(frame, sr):
+    """
+    간단한 자기상관 기반 유성도(0~1) 추정.
+    정확한 F0 추적이 아니라 보정 보조 지표로만 사용합니다.
+    """
+    if np is None or frame is None or len(frame) < 96 or sr <= 0:
+        return 0.0
+    x = frame.astype(np.float64)
+    x = x - np.mean(x)
+    rms = float(np.sqrt(np.mean(x * x) + 1e-12))
+    if rms < 1e-4:
+        return 0.0
+
+    ac = np.correlate(x, x, mode="full")[len(x) - 1:]
+    if len(ac) < 8:
+        return 0.0
+    ac0 = float(ac[0])
+    if ac0 <= 1e-9:
+        return 0.0
+
+    min_lag = max(2, int(sr / 500.0))
+    max_lag = min(len(ac) - 1, int(sr / 70.0))
+    if max_lag <= min_lag + 1:
+        return 0.0
+
+    search = ac[min_lag:max_lag + 1]
+    peak_rel = int(np.argmax(search))
+    peak = float(search[peak_rel])
+    lag = min_lag + peak_rel
+    if lag <= 0:
+        return 0.0
+    f0 = float(sr) / float(lag)
+    if f0 < 70.0 or f0 > 500.0:
+        return 0.0
+
+    clarity = peak / (ac0 + 1e-9)
+    if clarity < 0.25:
+        return 0.0
+    return float(np.clip((clarity - 0.25) / 0.45, 0.0, 1.0))
+
+
+def _mel_envelope(audio, sr):
+    if np is None or audio is None or sr is None or len(audio) == 0:
+        return None
+    n_fft = 1024
+    hop = max(1, int(sr * 0.005))
+    win = min(n_fft, max(256, int(sr * 0.025)))
+    window = np.hanning(win).astype(np.float64)
+
+    f_min = 0.0
+    f_max = sr / 2.0
+    mel_min = 2595.0 * np.log10(1.0 + f_min / 700.0)
+    mel_max = 2595.0 * np.log10(1.0 + f_max / 700.0)
+    mel_points = np.linspace(mel_min, mel_max, 42)
+    hz_points = 700.0 * (10.0 ** (mel_points / 2595.0) - 1.0)
+    bins = np.floor((n_fft + 1) * hz_points / sr).astype(int)
+    bins = np.clip(bins, 0, n_fft // 2)
+
+    fb = np.zeros((40, n_fft // 2 + 1), dtype=np.float64)
+    for i in range(1, 41):
+        left = bins[i - 1]
+        center = bins[i]
+        right = bins[i + 1]
+        if right <= left:
+            continue
+        if center <= left:
+            center = left + 1
+        if right <= center:
+            right = center + 1
+        for j in range(left, center):
+            fb[i - 1, j] = (j - left) / float(center - left)
+        for j in range(center, right):
+            fb[i - 1, j] = (right - j) / float(right - center)
+
+    frames = []
+    db_vals = []
+    f0_voicing = []
+    times = []
+    last_voicing = 0.0
+    frame_idx = 0
+    for st in range(0, max(len(audio) - win + 1, 1), hop):
+        fr_raw = audio[st:st + win]
+        if len(fr_raw) < win:
+            fr_raw = np.concatenate([fr_raw, np.zeros(win - len(fr_raw), dtype=np.float32)], axis=0)
+
+        rms = float(np.sqrt(np.mean(fr_raw.astype(np.float64) ** 2) + 1e-12))
+        db_vals.append(20.0 * np.log10(max(rms, 1e-7)))
+
+        # F0는 저가중치 보조 신호만 제공하도록 저밀도 계산.
+        if (frame_idx % 3) == 0:
+            last_voicing = _estimate_f0_voicing_strength(fr_raw, sr)
+        f0_voicing.append(last_voicing)
+
+        fr = fr_raw.astype(np.float64) * window
+        if n_fft > win:
+            fr = np.pad(fr, (0, n_fft - win))
+        spec = np.fft.rfft(fr)
+        power = (spec.real ** 2 + spec.imag ** 2)
+        mel = fb @ power
+        frames.append(np.log1p(np.maximum(mel, 0.0)).mean())
+        times.append(st * 1000.0 / sr)
+        frame_idx += 1
+
+    if not frames:
+        return None
+
+    e = np.array(frames, dtype=np.float64)
+    p10 = float(np.percentile(e, 10))
+    p90 = float(np.percentile(e, 90))
+    span = max(p90 - p10, 1e-6)
+    en = (e - p10) / span
+    en = np.clip(en, 0.0, 1.0)
+    db_arr = np.array(db_vals, dtype=np.float64) if db_vals else np.zeros_like(en)
+    f0v_arr = np.array(f0_voicing, dtype=np.float64) if f0_voicing else np.zeros_like(en)
+    if len(f0v_arr) >= 3:
+        f0v_arr = np.convolve(f0v_arr, np.array([0.2, 0.6, 0.2], dtype=np.float64), mode="same")
+    f0v_arr = np.clip(f0v_arr, 0.0, 1.0)
+
+    db_p20 = float(np.percentile(db_arr, 20)) if len(db_arr) else -60.0
+    db_sil_th = max(-58.0, min(-28.0, db_p20 + 6.0))
+    return {
+        "times_ms": np.array(times, dtype=np.float64),
+        "energy": en,
+        "span": span,
+        "db_db": db_arr,
+        "db_silence_th": float(db_sil_th),
+        "f0_voicing": f0v_arr,
+    }
+
+
+def _find_wav_path_for_name(wav_name, wav_dir, wav_index):
+    cands = [
+        os.path.join(wav_dir, wav_name),
+        os.path.join(wav_dir, os.path.basename(wav_name)),
+    ]
+    for p in cands:
+        if os.path.exists(p):
+            return p
+    key = normalize_key(wav_name)
+    return wav_index.get(key, "")
+
+
+def _nearest_time_index(times_ms, t_ms):
+    if np is None or times_ms is None or len(times_ms) == 0:
+        return -1
+    idx = int(np.searchsorted(times_ms, t_ms))
+    if idx <= 0:
+        return 0
+    if idx >= len(times_ms):
+        return len(times_ms) - 1
+    prev_i = idx - 1
+    if abs(float(times_ms[idx]) - t_ms) < abs(float(times_ms[prev_i]) - t_ms):
+        return idx
+    return prev_i
+
+
+def _apply_soft_mel_offset_cutoff_guard(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    ovl,
+    alias_type,
+    mel_ctx=None,
+):
+    """
+    이른 단계 soft guard:
+    - dB 최소 임계값 + mel 에너지로 무음/유음 전이를 감지
+    - F0 유성도는 낮은 가중치(보조)로만 반영
+    """
+    if np is None or not mel_ctx:
+        return offset, consonant, cutoff, pre, ovl, 0.0, 0.0
+    if alias_type not in {"cv", "cv_head", "vcv"}:
+        return offset, consonant, cutoff, pre, ovl, 0.0, 0.0
+
+    t_ms = mel_ctx.get("times_ms")
+    en = mel_ctx.get("energy")
+    db_arr = mel_ctx.get("db_db")
+    f0v_arr = mel_ctx.get("f0_voicing")
+    db_sil_th = float(mel_ctx.get("db_silence_th", -42.0))
+    if t_ms is None or en is None or len(t_ms) < 8 or len(en) != len(t_ms):
+        return offset, consonant, cutoff, pre, ovl, 0.0, 0.0
+    if db_arr is None or len(db_arr) != len(en):
+        db_arr = np.zeros_like(en, dtype=np.float64)
+    if f0v_arr is None or len(f0v_arr) != len(en):
+        f0v_arr = np.zeros_like(en, dtype=np.float64)
+
+    pre_abs = float(offset) + float(pre)
+    cons_abs = float(offset) + float(consonant)
+    cut_abs = float(offset) + abs(float(cutoff))
+    if cut_abs <= pre_abs + 18.0:
+        return offset, consonant, cutoff, pre, ovl, 0.0, 0.0
+
+    sound_mask = (db_arr > (db_sil_th + 1.5)) & (en > 0.14)
+    silence_mask = (db_arr <= db_sil_th) | (en <= 0.10)
+
+    off_idx = _nearest_time_index(t_ms, offset)
+    pre_idx = _nearest_time_index(t_ms, pre_abs)
+    cut_idx = _nearest_time_index(t_ms, cut_abs)
+    if min(off_idx, pre_idx, cut_idx) < 0:
+        return offset, consonant, cutoff, pre, ovl, 0.0, 0.0
+
+    offset_shift_ms = 0.0
+    cutoff_shift_ms = 0.0
+
+    # ---- soft offset guard ----
+    off_silent = bool(silence_mask[off_idx])
+    pre_sound = bool(sound_mask[pre_idx] or (en[pre_idx] > 0.20))
+    if off_silent and pre_sound:
+        lo = max(0, pre_idx - 120)
+        seg = sound_mask[lo:pre_idx + 1]
+        if np.any(seg):
+            rel = int(np.where(seg)[0][0])
+            sound_start_idx = lo + rel
+            target_offset = float(t_ms[sound_start_idx]) - 12.0
+            target_offset = max(0.0, min(pre_abs - 18.0, target_offset))
+            new_offset = _blend(offset, target_offset, 0.36)
+            offset_shift_ms = float(new_offset - offset)
+            offset = new_offset
+            pre = max(pre_abs - offset, 0.0)
+            consonant = max(cons_abs - offset, pre + 8.0)
+
+    # ---- soft cutoff guard ----
+    cut_idx = _nearest_time_index(t_ms, cut_abs)
+    cut_sound = bool(sound_mask[cut_idx] or (en[cut_idx] > 0.22))
+    if cut_sound:
+        start_idx = _nearest_time_index(t_ms, pre_abs + 16.0)
+        if start_idx < 0:
+            start_idx = 0
+        if start_idx < cut_idx:
+            seg = np.where(silence_mask[start_idx:cut_idx + 1])[0]
+            if len(seg) > 0:
+                last_sil_idx = int(start_idx + seg[-1])
+                target_cut_abs = float(t_ms[last_sil_idx]) + 4.0
+                target_cut_abs = max(pre_abs + 20.0, min(target_cut_abs, cut_abs))
+                if target_cut_abs < cut_abs - 8.0:
+                    # F0 유성도는 보조(저가중치)로만 반영
+                    f0v = float(f0v_arr[last_sil_idx])
+                    blend_w = 0.42 - (0.08 * f0v)
+                    blend_w = max(0.26, min(0.44, blend_w))
+                    new_cut_abs = _blend(cut_abs, target_cut_abs, blend_w)
+                    cutoff_shift_ms = float(cut_abs - new_cut_abs)
+                    cut_abs = new_cut_abs
+                    cutoff = -(cut_abs - offset)
+                    consonant = min(consonant, (cut_abs - offset) - 10.0)
+                    consonant = max(consonant, pre + 8.0)
+
+    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    return offset, consonant, cutoff, pre, ovl, offset_shift_ms, cutoff_shift_ms
+
+
+def _apply_kr_mel_refine_to_oto_file(oto_path, wav_dir, custom_map=None):
+    """
+    멜 스펙트로그램 에너지 골짜기를 이용해 CV 계열 cutoff 과연장을 후처리 보정합니다.
+    """
+    if os.environ.get("UTOA_DISABLE_MEL_REFINER", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return 0
+    if np is None or not oto_path or not os.path.exists(oto_path) or not os.path.isdir(wav_dir):
+        return 0
+
+    raw_lines = []
+    parsed = []
+    with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
+        for idx, raw in enumerate(f):
+            line = raw.rstrip("\n")
+            raw_lines.append(line)
+            row = _parse_oto_line_profile(line)
+            if row:
+                parsed.append((idx, row))
+    if not parsed:
+        return 0
+
+    wav_index = {}
+    try:
+        for fn in os.listdir(wav_dir):
+            if fn.lower().endswith(".wav"):
+                wav_index[normalize_key(fn)] = os.path.join(wav_dir, fn)
+    except Exception:
+        pass
+
+    by_wav = {}
+    for line_idx, row in parsed:
+        by_wav.setdefault(row["wav"], []).append((line_idx, row))
+
+    mel_cache = {}
+    changed = 0
+    for wav_name, rows in by_wav.items():
+        wav_path = _find_wav_path_for_name(wav_name, wav_dir, wav_index)
+        if not wav_path:
+            continue
+        mel_ctx = mel_cache.get(wav_path)
+        if mel_ctx is None:
+            audio, sr = _read_wav_mono_np(wav_path)
+            mel_ctx = _mel_envelope(audio, sr)
+            mel_cache[wav_path] = mel_ctx
+        if not mel_ctx:
+            continue
+
+        t_ms = mel_ctx["times_ms"]
+        en = mel_ctx["energy"]
+        db_arr = mel_ctx.get("db_db")
+        f0v_arr = mel_ctx.get("f0_voicing")
+        db_sil_th = float(mel_ctx.get("db_silence_th", -42.0))
+        if db_arr is None or len(db_arr) != len(en):
+            db_arr = np.zeros_like(en, dtype=np.float64)
+        if f0v_arr is None or len(f0v_arr) != len(en):
+            f0v_arr = np.zeros_like(en, dtype=np.float64)
+        if len(t_ms) < 8:
+            continue
+
+        for i, (_line_idx, row) in enumerate(rows):
+            alias = row["alias"]
+            alias_type = classify_alias(alias, custom_map)
+            if alias_type not in {"cv", "cv_head"}:
+                continue
+
+            off = float(row["offset"])
+            pre_abs = off + float(row["pre"])
+            cons_abs = off + float(row["cons"])
+            cut_abs = off + abs(float(row["cutoff"]))
+            if cut_abs <= pre_abs + 24.0:
+                continue
+
+            next_anchor = None
+            for j in range(i + 1, len(rows)):
+                a2 = rows[j][1]["alias"]
+                t2 = classify_alias(a2, custom_map)
+                if t2 in {"cv", "cv_head", "vcv", "mono"}:
+                    next_anchor = float(rows[j][1]["offset"]) + float(rows[j][1]["pre"])
+                    break
+
+            search_start = pre_abs + 14.0
+            search_end = cut_abs - 8.0
+            if next_anchor is not None:
+                search_end = min(search_end, next_anchor - 8.0)
+            if search_end <= search_start + 25.0:
+                continue
+
+            mask = np.where((t_ms >= search_start) & (t_ms <= search_end))[0]
+            if len(mask) < 5:
+                continue
+
+            local_e = en[mask]
+            local_db = db_arr[mask]
+            local_f0v = f0v_arr[mask]
+            silence_flags = local_db <= db_sil_th
+            candidate_mask = mask[silence_flags] if np.any(silence_flags) else mask
+
+            # dB+mel을 주축으로 골짜기 선택, F0는 낮은 가중치(보조)로만 반영.
+            best_idx = int(candidate_mask[0])
+            best_score = -1e9
+            for ci in candidate_mask:
+                e_v = float(en[ci])
+                db_v = float(db_arr[ci])
+                f0_v = float(f0v_arr[ci])
+                silence_bonus = 0.28 if db_v <= db_sil_th else 0.0
+                score = (1.0 - e_v) + silence_bonus - (0.08 * f0_v)
+                if score > best_score:
+                    best_score = score
+                    best_idx = int(ci)
+
+            valley_t = float(t_ms[best_idx])
+            valley_e = float(en[best_idx])
+            valley_db = float(db_arr[best_idx])
+            valley_f0v = float(f0v_arr[best_idx])
+            cut_idx = int(np.argmin(np.abs(t_ms - cut_abs)))
+            cut_e = float(en[cut_idx])
+            cut_db = float(db_arr[cut_idx])
+            contrast = cut_e - valley_e
+            db_drop = cut_db - valley_db
+
+            if contrast < 0.12 and db_drop < 2.5:
+                continue
+            if valley_e > 0.38 and valley_db > (db_sil_th + 6.0):
+                continue
+            if valley_f0v > 0.70 and contrast < 0.18:
+                continue
+            if valley_t >= cut_abs - 12.0:
+                continue
+
+            target_cut_abs = valley_t + 2.0
+            min_cut_abs = pre_abs + 20.0
+            if target_cut_abs <= min_cut_abs:
+                continue
+
+            new_cons_abs = min(cons_abs, target_cut_abs - 12.0)
+            new_cons_abs = max(new_cons_abs, pre_abs + 8.0)
+            row["cons"] = max(new_cons_abs - off, 0.0)
+            row["cutoff"] = -(target_cut_abs - off)
+            changed += 1
+
+    if changed <= 0:
+        return 0
+
+    replace_map = {line_idx: row for line_idx, row in parsed}
+    out_lines = []
+    for i, line in enumerate(raw_lines):
+        row = replace_map.get(i)
+        if not row:
+            out_lines.append(line)
+            continue
+        o, c, ct, p, ov = validate_oto_params(
+            row["offset"], row["cons"], row["cutoff"], row["pre"], row["ovl"]
+        )
+        out_lines.append(f"{row['wav']}={row['alias']},{o:.2f},{c:.2f},{ct:.2f},{p:.2f},{ov:.2f}")
+
+    with open(oto_path, "w", encoding="utf-8") as f:
+        for line in out_lines:
+            f.write(line + "\n")
+    return changed
+
+
 def _median(vals):
     if not vals:
         return 0.0
@@ -1280,18 +1738,33 @@ def _normalize_alias_for_profile(alias):
     return a
 
 
+def _read_text_with_fallback(path):
+    try:
+        raw = open(path, "rb").read()
+    except Exception:
+        return ""
+    for enc in ("utf-8-sig", "cp932", "utf-8", "euc-kr", "latin-1"):
+        try:
+            text = raw.decode(enc)
+            if "=" in text:
+                return text
+        except Exception:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 def _read_kr_oto_rows_for_profile(path):
     rows = []
     if not path or not os.path.exists(path):
         return rows
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        for raw in f:
-            row = _parse_oto_line_profile(raw)
-            if not row:
-                continue
-            row["wav_norm"] = row["wav"].strip().lower()
-            row["alias_norm"] = _normalize_alias_for_profile(row["alias"])
-            rows.append(row)
+    text = _read_text_with_fallback(path)
+    for raw in text.splitlines():
+        row = _parse_oto_line_profile(raw)
+        if not row:
+            continue
+        row["wav_norm"] = row["wav"].strip().lower()
+        row["alias_norm"] = _normalize_alias_for_profile(row["alias"])
+        rows.append(row)
     return rows
 
 
@@ -1890,6 +2363,16 @@ def generate_oto(
                 
     processed = 0
     total = len(file_groups)
+    wav_root_for_signal = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
+    wav_index_for_signal = {}
+    try:
+        if os.path.isdir(wav_root_for_signal):
+            for fn in os.listdir(wav_root_for_signal):
+                if fn.lower().endswith(".wav"):
+                    wav_index_for_signal[normalize_key(fn)] = os.path.join(wav_root_for_signal, fn)
+    except Exception:
+        pass
+    mel_cache_for_signal = {}
 
     for fname, lines in file_groups.items():
         tg_info = _resolve_tg_info(fname)
@@ -1903,6 +2386,14 @@ def generate_oto(
             
         tg_path = tg_info['path']
         real_wav_name = tg_info['real_name']
+        wav_path_for_signal = _find_wav_path_for_name(real_wav_name, wav_root_for_signal, wav_index_for_signal)
+        mel_ctx_for_file = None
+        if wav_path_for_signal:
+            mel_ctx_for_file = mel_cache_for_signal.get(wav_path_for_signal)
+            if mel_ctx_for_file is None:
+                audio_sig, sr_sig = _read_wav_mono_np(wav_path_for_signal)
+                mel_ctx_for_file = _mel_envelope(audio_sig, sr_sig)
+                mel_cache_for_signal[wav_path_for_signal] = mel_ctx_for_file
 
         try:
             tg = textgrid.TextGrid.fromFile(tg_path)
@@ -2029,7 +2520,7 @@ def generate_oto(
                 base_score = _score_kr_syllable_mapping(syllables_info, cv_targets)
                 alt_score = _score_kr_syllable_mapping(alias_based, cv_targets)
                 # TextGrid(words) 결과를 우선 사용하되, alias/filename 기준과 심하게 어긋난 경우만 보정.
-                if base_score < 54.0 and alt_score >= (base_score + 12.0):
+                if base_score < 66.0 and alt_score >= 70.0 and alt_score >= (base_score + 8.0):
                     syllables_info = alias_based
                     log(
                         f"🧭 {fname}: 매핑 이탈 보정 적용 "
@@ -2205,6 +2696,45 @@ def generate_oto(
                 i: _estimate_cv_anchor(i)
                 for i in range(len(syllables_info))
             }
+
+            def _guard_cv_cutoff_to_next_onset(offset, consonant, cutoff, pre, syll_idx):
+                """CV/CV_HEAD cutoff이 다음 음절 onset을 침범하지 않도록 상한을 건다."""
+                if syll_idx is None or syll_idx < 0:
+                    return offset, consonant, cutoff, pre, 0.0
+                if (syll_idx + 1) >= len(syllables_info):
+                    return offset, consonant, cutoff, pre, 0.0
+
+                next_syl = syllables_info[syll_idx + 1]
+                next_phones = next_syl.get("phones") or []
+                if not next_phones:
+                    return offset, consonant, cutoff, pre, 0.0
+
+                next_mark = (next_phones[0].mark or "").strip().lower()
+                hard_next = is_plosive_ipa(next_mark) or next_mark in {
+                    "s", "ss", "sh", "ch", "j", "jj", "c", "ts", "h"
+                }
+                safety = 16.0 if hard_next else 10.0
+                next_onset_rel = (next_phones[0].minTime * 1000.0) - offset
+                max_cutoff_abs = next_onset_rel - safety
+                if max_cutoff_abs <= (pre + 18.0):
+                    return offset, consonant, cutoff, pre, 0.0
+
+                original_cutoff_abs = abs(cutoff)
+                consonant = min(consonant, max_cutoff_abs - 14.0)
+                consonant = max(consonant, pre + 10.0)
+
+                cutoff_abs = min(original_cutoff_abs, max_cutoff_abs)
+                if cutoff_abs <= (consonant + 8.0):
+                    cutoff_abs = min(max_cutoff_abs, consonant + 10.0)
+                    if cutoff_abs <= (consonant + 6.0):
+                        consonant = max(pre + 8.0, cutoff_abs - 10.0)
+                cutoff = -cutoff_abs
+
+                offset, consonant, cutoff, pre, _ovl = validate_oto_params(
+                    offset, consonant, cutoff, pre, 0.0
+                )
+                reduction = max(0.0, original_cutoff_abs - abs(cutoff))
+                return offset, consonant, cutoff, pre, reduction
             
             for line_num, line in enumerate(lines):
                 parts = line.split('=', 1)
@@ -2255,7 +2785,7 @@ def generate_oto(
                 is_cv_head = alias_type == 'cv_head'
                 is_diph = is_diphthong(alias)
                 
-                target_clean = re.sub(r'[^a-zA-Z]', '', alias.lower())
+                target_clean = _extract_kr_cv_alias_token(alias)
 
 
 
@@ -2412,6 +2942,13 @@ def generate_oto(
                     if added_cons < 50: added_cons = 50
                     consonant = pre + added_cons
                     cutoff = -(consonant + vowel_len * 0.25)
+                    offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
+                        offset, consonant, cutoff, pre, ovl, "vcv", mel_ctx_for_file
+                    )
+                    if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
+                        log(
+                            f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
+                        )
 
                     offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
                         offset, consonant, cutoff, pre, ovl, base_shape, alias_type="vcv"
@@ -2479,10 +3016,22 @@ def generate_oto(
                             added_cons = 80
                     consonant = pre + added_cons
                     cutoff = -(consonant + cv_vowel_len * 0.25)
+                    offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
+                        offset, consonant, cutoff, pre, ovl, "cv_head", mel_ctx_for_file
+                    )
+                    if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
+                        log(
+                            f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
+                        )
 
                     offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
                         offset, consonant, cutoff, pre, ovl, base_shape, alias_type="cv_head"
                     )
+                    offset, consonant, cutoff, pre, cutoff_reduced = _guard_cv_cutoff_to_next_onset(
+                        offset, consonant, cutoff, pre, current_w_idx
+                    )
+                    if cutoff_reduced > 0.5:
+                        log(f"🛡️ {fname}: CV 컷오프 과연장 보정(-{cutoff_reduced:.1f}ms) [{alias}]")
                     offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
                     
                     aliases_to_write = generate_openutau_aliases(alias) if generate_openutau else [alias]
@@ -2792,6 +3341,14 @@ def generate_oto(
                         consonant = pre + added_cons
                         cutoff = -(consonant + max(cv_vowel_len * 0.25, 45))
 
+                if alias_type in {"cv", "cv_head", "vcv"}:
+                    offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
+                        offset, consonant, cutoff, pre, ovl, alias_type, mel_ctx_for_file
+                    )
+                    if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
+                        log(
+                            f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
+                        )
                 if not is_vc_plosive_coda:
                     offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
                         offset, consonant, cutoff, pre, ovl, base_shape, alias_type=alias_type
@@ -2799,6 +3356,12 @@ def generate_oto(
                 offset, consonant, cutoff, pre, ovl = _stabilize_params_to_phone_activity(
                     offset, consonant, cutoff, pre, ovl, ph_intervals, alias_type=alias_type
                 )
+                if alias_type in {"cv", "cv_head"}:
+                    offset, consonant, cutoff, pre, cutoff_reduced = _guard_cv_cutoff_to_next_onset(
+                        offset, consonant, cutoff, pre, current_w_idx
+                    )
+                    if cutoff_reduced > 0.5:
+                        log(f"🛡️ {fname}: CV 컷오프 과연장 보정(-{cutoff_reduced:.1f}ms) [{alias}]")
                 offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
                 aliases_to_write = generate_openutau_aliases(alias) if generate_openutau else [alias]
@@ -2898,13 +3461,18 @@ def generate_oto(
             for line in final_lines:
                 f.write(line + "\n")
         log(f"완료: OTO 파일 저장 -> {out_path}")
+        wav_dir_for_profile = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
         if kr_profile:
-            wav_dir_for_profile = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
             changed = _apply_kr_profile_to_oto_file(
                 out_path, wav_dir_for_profile, kr_profile, custom_map=custom_map
             )
             if changed > 0:
                 log(f"[KR-Profile] 기준 프로파일 보정 적용: {changed} lines")
+        mel_changed = _apply_kr_mel_refine_to_oto_file(
+            out_path, wav_dir_for_profile, custom_map=custom_map
+        )
+        if mel_changed > 0:
+            log(f"[KR-Mel] 멜 에너지 기반 cutoff 보정 적용: {mel_changed} lines")
     except Exception as e:
         err = f"OTO 파일 저장 실패: {e}"
         logger.error(err)

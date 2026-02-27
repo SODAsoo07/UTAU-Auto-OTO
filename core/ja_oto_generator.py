@@ -907,6 +907,46 @@ def _select_vcv_syllable_index(alias, expected_idx, syllables_info):
     return e
 
 
+def _extract_ja_cv_target_syllable(alias, alias_type="cv"):
+    parts = (alias or "").strip().split()
+    if not parts:
+        return ""
+    if alias_type in {"cv_head", "vcv"} and len(parts) >= 2:
+        return _normalize_ja_syllable_token(parts[1])
+    if len(parts) >= 2 and parts[0] == "-":
+        return _normalize_ja_syllable_token(parts[1])
+    return _normalize_ja_syllable_token(parts[-1])
+
+
+def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type="cv"):
+    if not syllables_info:
+        return 0
+    n = len(syllables_info)
+    e = max(0, min(int(expected_idx), n - 1))
+    target = _extract_ja_cv_target_syllable(alias, alias_type=alias_type)
+    if not target:
+        return e
+
+    start = max(0, e - 1)
+    end = min(n, e + 5)
+    best_idx = e
+    best_score = -10**9
+    expected_score = _vcv_syllable_match_score(target, _syllable_info_token(syllables_info[e]))
+    for i in range(start, end):
+        cand = _syllable_info_token(syllables_info[i])
+        score = _vcv_syllable_match_score(target, cand) - abs(i - e) * 6
+        if score > best_score:
+            best_score = score
+            best_idx = i
+
+    if best_score >= 54:
+        # Diphthong/glide rows can over-jump; keep expected index when nearly tied.
+        if best_idx > e and expected_score >= max(50, best_score - 9):
+            return e
+        return best_idx
+    return e
+
+
 def _expand_vcv_lines_for_cvvc(lines, custom_map=None, include_bridge=True):
     """
     VCV alias를 CVVC 처리용으로 전개합니다.
@@ -1331,18 +1371,33 @@ def _normalize_alias_for_profile(alias):
     return a
 
 
+def _read_text_with_fallback(path):
+    try:
+        raw = open(path, "rb").read()
+    except Exception:
+        return ""
+    for enc in ("utf-8-sig", "cp932", "utf-8", "euc-kr", "latin-1"):
+        try:
+            text = raw.decode(enc)
+            if "=" in text:
+                return text
+        except Exception:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 def _read_oto_rows_for_profile(path):
     rows = []
     if not path or not os.path.exists(path):
         return rows
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        for raw in f:
-            p = _parse_oto_line_profile(raw)
-            if not p:
-                continue
-            p["wav_norm"] = p["wav"].strip().lower()
-            p["alias_norm"] = _normalize_alias_for_profile(p["alias"])
-            rows.append(p)
+    text = _read_text_with_fallback(path)
+    for raw in text.splitlines():
+        p = _parse_oto_line_profile(raw)
+        if not p:
+            continue
+        p["wav_norm"] = p["wav"].strip().lower()
+        p["alias_norm"] = _normalize_alias_for_profile(p["alias"])
+        rows.append(p)
     return rows
 
 
@@ -1394,11 +1449,14 @@ def _find_reference_oto(out_path):
 
     out_dir = os.path.dirname(os.path.abspath(out_path or "")) or os.getcwd()
     candidates = [
+        "base_oto.ini",
+        "oto.base.ini",
         "oto.manual.ini",
         "oto.correct.ini",
         "oto.reference.ini",
         "oto.gold.ini",
         "oto.human.ini",
+        "oto_old.ini",
     ]
     for name in candidates:
         p = os.path.join(out_dir, name)
@@ -1697,6 +1755,174 @@ def _apply_profile_to_oto_file(oto_path, profile, custom_map=None):
     return changed
 
 
+def _apply_ja_mel_refine_to_oto_file(oto_path, wav_dir, custom_map=None):
+    """
+    멜 에너지 골짜기 기준으로 일본어 CV 계열 cutoff 과연장을 후처리 보정합니다.
+    """
+    if os.environ.get("UTOA_DISABLE_MEL_REFINER", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return 0
+    if not oto_path or not os.path.exists(oto_path) or not os.path.isdir(wav_dir):
+        return 0
+    try:
+        import numpy as np
+    except Exception:
+        return 0
+
+    # Reuse tested mel helpers from KR generator to keep behavior aligned.
+    from core.oto_generator import _read_wav_mono_np, _mel_envelope, _find_wav_path_for_name
+
+    raw_lines = []
+    parsed = []
+    with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
+        for idx, raw in enumerate(f):
+            line = raw.rstrip("\n")
+            raw_lines.append(line)
+            row = _parse_oto_line_profile(line)
+            if row:
+                parsed.append((idx, row))
+    if not parsed:
+        return 0
+
+    wav_index = {}
+    try:
+        for fn in os.listdir(wav_dir):
+            if fn.lower().endswith(".wav"):
+                wav_index[normalize_key(fn)] = os.path.join(wav_dir, fn)
+    except Exception:
+        pass
+
+    by_wav = {}
+    for line_idx, row in parsed:
+        by_wav.setdefault(row["wav"], []).append((line_idx, row))
+
+    mel_cache = {}
+    changed = 0
+    for wav_name, rows in by_wav.items():
+        wav_path = _find_wav_path_for_name(wav_name, wav_dir, wav_index)
+        if not wav_path:
+            continue
+        mel_ctx = mel_cache.get(wav_path)
+        if mel_ctx is None:
+            audio, sr = _read_wav_mono_np(wav_path)
+            mel_ctx = _mel_envelope(audio, sr)
+            mel_cache[wav_path] = mel_ctx
+        if not mel_ctx:
+            continue
+
+        t_ms = mel_ctx["times_ms"]
+        en = mel_ctx["energy"]
+        db_arr = mel_ctx.get("db_db")
+        f0v_arr = mel_ctx.get("f0_voicing")
+        db_sil_th = float(mel_ctx.get("db_silence_th", -42.0))
+        if db_arr is None or len(db_arr) != len(en):
+            db_arr = np.zeros_like(en, dtype=np.float64)
+        if f0v_arr is None or len(f0v_arr) != len(en):
+            f0v_arr = np.zeros_like(en, dtype=np.float64)
+        if len(t_ms) < 8:
+            continue
+
+        for i, (_line_idx, row) in enumerate(rows):
+            alias = row["alias"]
+            alias_type = classify_ja_alias(alias, custom_map)
+            if alias_type not in {"cv", "cv_head", "vcv"}:
+                continue
+
+            off = float(row["offset"])
+            pre_abs = off + float(row["pre"])
+            cons_abs = off + float(row["cons"])
+            cut_abs = off + abs(float(row["cutoff"]))
+            if cut_abs <= pre_abs + 24.0:
+                continue
+
+            next_anchor = None
+            for j in range(i + 1, len(rows)):
+                a2 = rows[j][1]["alias"]
+                t2 = classify_ja_alias(a2, custom_map)
+                if t2 in {"cv", "cv_head", "vcv", "mono"}:
+                    next_anchor = float(rows[j][1]["offset"]) + float(rows[j][1]["pre"])
+                    break
+
+            search_start = pre_abs + 14.0
+            search_end = cut_abs - 8.0
+            if next_anchor is not None:
+                search_end = min(search_end, next_anchor - 8.0)
+            if search_end <= search_start + 25.0:
+                continue
+
+            mask = np.where((t_ms >= search_start) & (t_ms <= search_end))[0]
+            if len(mask) < 5:
+                continue
+
+            local_e = en[mask]
+            local_db = db_arr[mask]
+            local_f0v = f0v_arr[mask]
+            silence_flags = local_db <= db_sil_th
+            candidate_mask = mask[silence_flags] if np.any(silence_flags) else mask
+
+            # dB+mel 기반 선택을 우선, F0는 낮은 비중으로만 반영.
+            best_idx = int(candidate_mask[0])
+            best_score = -1e9
+            for ci in candidate_mask:
+                e_v = float(en[ci])
+                db_v = float(db_arr[ci])
+                f0_v = float(f0v_arr[ci])
+                silence_bonus = 0.28 if db_v <= db_sil_th else 0.0
+                score = (1.0 - e_v) + silence_bonus - (0.08 * f0_v)
+                if score > best_score:
+                    best_score = score
+                    best_idx = int(ci)
+
+            valley_t = float(t_ms[best_idx])
+            valley_e = float(en[best_idx])
+            valley_db = float(db_arr[best_idx])
+            valley_f0v = float(f0v_arr[best_idx])
+            cut_idx = int(np.argmin(np.abs(t_ms - cut_abs)))
+            cut_e = float(en[cut_idx])
+            cut_db = float(db_arr[cut_idx])
+            contrast = cut_e - valley_e
+            db_drop = cut_db - valley_db
+
+            if contrast < 0.11 and db_drop < 2.2:
+                continue
+            if valley_e > 0.40 and valley_db > (db_sil_th + 6.0):
+                continue
+            if valley_f0v > 0.72 and contrast < 0.16:
+                continue
+            if valley_t >= cut_abs - 12.0:
+                continue
+
+            target_cut_abs = valley_t + 2.0
+            min_cut_abs = pre_abs + 20.0
+            if target_cut_abs <= min_cut_abs:
+                continue
+
+            new_cons_abs = min(cons_abs, target_cut_abs - 12.0)
+            new_cons_abs = max(new_cons_abs, pre_abs + 8.0)
+            row["cons"] = max(new_cons_abs - off, 0.0)
+            row["cutoff"] = -(target_cut_abs - off)
+            changed += 1
+
+    if changed <= 0:
+        return 0
+
+    replace_map = {line_idx: row for line_idx, row in parsed}
+    out_lines = []
+    for i, line in enumerate(raw_lines):
+        row = replace_map.get(i)
+        if not row:
+            out_lines.append(line)
+            continue
+        o, c, ct, p, ov = validate_oto_params(
+            row["offset"], row["cons"], row["cutoff"], row["pre"], row["ovl"]
+        )
+        out_lines.append(f"{row['wav']}={row['alias']},{o:.2f},{c:.2f},{ct:.2f},{p:.2f},{ov:.2f}")
+
+    with open(oto_path, "w", encoding="utf-8") as f:
+        for line in out_lines:
+            f.write(line + "\n")
+    return changed
+
+
 def train_ja_autotune_profile(auto_oto_path, manual_oto_path, custom_phonemes_path=""):
     """부분 수동 OTO와 자동 OTO를 매칭해 일본어 델타 기반 프로파일을 학습합니다."""
     custom_map = load_custom_phonemes(custom_phonemes_path)
@@ -1767,6 +1993,13 @@ def generate_ja_oto(
 
     if params is None:
         params = JA_DEFAULT_PARAMS.copy()
+    # KR 생성기와 동일한 신호 분석 헬퍼를 재사용해 멜 기반 가드 동작을 맞춘다.
+    from core.oto_generator import (
+        _read_wav_mono_np,
+        _mel_envelope,
+        _find_wav_path_for_name,
+        _apply_soft_mel_offset_cutoff_guard,
+    )
 
     # GUI 형식 지정:
     # - "자동 감지"면 강제 지정 없이 템플릿/에일리어스를 자동 판별
@@ -2041,6 +2274,16 @@ def generate_ja_oto(
 
     processed = 0
     total = len(file_groups)
+    wav_root_for_signal = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
+    wav_index_for_signal = {}
+    try:
+        if os.path.isdir(wav_root_for_signal):
+            for fn in os.listdir(wav_root_for_signal):
+                if fn.lower().endswith(".wav"):
+                    wav_index_for_signal[normalize_key(fn)] = os.path.join(wav_root_for_signal, fn)
+    except Exception:
+        pass
+    mel_cache_for_signal = {}
 
     for fname, lines in file_groups.items():
         tg_info = _resolve_tg_info(fname)
@@ -2054,6 +2297,14 @@ def generate_ja_oto(
             
         tg_path = tg_info['path']
         real_wav_name = tg_info['real_name']
+        wav_path_for_signal = _find_wav_path_for_name(real_wav_name, wav_root_for_signal, wav_index_for_signal)
+        mel_ctx_for_file = None
+        if wav_path_for_signal:
+            mel_ctx_for_file = mel_cache_for_signal.get(wav_path_for_signal)
+            if mel_ctx_for_file is None:
+                audio_sig, sr_sig = _read_wav_mono_np(wav_path_for_signal)
+                mel_ctx_for_file = _mel_envelope(audio_sig, sr_sig)
+                mel_cache_for_signal[wav_path_for_signal] = mel_ctx_for_file
         
         try:
             tg = textgrid.TextGrid.fromFile(tg_path)
@@ -2357,7 +2608,7 @@ def generate_ja_oto(
                 base_score = _score_ja_syllable_mapping(syllables_info, cv_targets)
                 alt_score = _score_ja_syllable_mapping(alias_based, cv_targets)
                 # TextGrid 정렬 결과를 우선하되, alias/filename 기준과 크게 어긋난 경우에만 보정한다.
-                if base_score < 54.0 and alt_score >= (base_score + 12.0):
+                if base_score < 66.0 and alt_score >= 70.0 and alt_score >= (base_score + 8.0):
                     syllables_info = alias_based
                     log(
                         f"🧭 {fname}: 매핑 이탈 보정 적용 "
@@ -2484,6 +2735,47 @@ def generate_ja_oto(
                 i: _estimate_ja_cv_anchor(i)
                 for i in range(len(syllables_info))
             }
+
+            def _guard_ja_cv_cutoff_to_next_onset(offset, consonant, cutoff, pre, syll_idx):
+                """CV/CV_HEAD cutoff이 다음 음절 onset을 넘어가지 않도록 제한."""
+                if syll_idx is None or syll_idx < 0:
+                    return offset, consonant, cutoff, pre, 0.0
+                if (syll_idx + 1) >= len(syllables_info):
+                    return offset, consonant, cutoff, pre, 0.0
+
+                next_syl = syllables_info[syll_idx + 1]
+                next_phones = next_syl.get("phones") or []
+                if not next_phones:
+                    return offset, consonant, cutoff, pre, 0.0
+
+                next_mark = _clean_phone_mark(getattr(next_phones[0], "mark", ""))
+                hard_next = (
+                    next_mark in JA_PLOSIVE_CONSONANTS
+                    or next_mark in JA_SIBILANT_ONSETS
+                    or next_mark in {"ts", "ch", "j", "sh", "s", "z", "h"}
+                )
+                safety = 14.0 if hard_next else 9.0
+                next_onset_rel = (next_phones[0].minTime * 1000.0) - offset
+                max_cutoff_abs = next_onset_rel - safety
+                if max_cutoff_abs <= (pre + 18.0):
+                    return offset, consonant, cutoff, pre, 0.0
+
+                original_cutoff_abs = abs(cutoff)
+                consonant = min(consonant, max_cutoff_abs - 14.0)
+                consonant = max(consonant, pre + 10.0)
+
+                cutoff_abs = min(original_cutoff_abs, max_cutoff_abs)
+                if cutoff_abs <= (consonant + 8.0):
+                    cutoff_abs = min(max_cutoff_abs, consonant + 10.0)
+                    if cutoff_abs <= (consonant + 6.0):
+                        consonant = max(pre + 8.0, cutoff_abs - 10.0)
+                cutoff = -cutoff_abs
+
+                offset, consonant, cutoff, pre, _ovl = validate_oto_params(
+                    offset, consonant, cutoff, pre, 0.0
+                )
+                reduction = max(0.0, original_cutoff_abs - abs(cutoff))
+                return offset, consonant, cutoff, pre, reduction
 
             # CV 순서 카운터로 리스트 순서 우선 매핑
             current_w_idx = 0
@@ -2630,6 +2922,13 @@ def generate_ja_oto(
                     offset, consonant, cutoff, pre, ovl = _compute_vcv_params_from_virtual_split(
                         alias, prev_v_start, prev_v_end, c_boundary, n_end, base_shape=base_shape
                     )
+                    offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
+                        offset, consonant, cutoff, pre, ovl, "vcv", mel_ctx_for_file
+                    )
+                    if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
+                        log(
+                            f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
+                        )
                     
                     offset, consonant, cutoff, pre, ovl = _post_adjust_params(
                         offset, consonant, cutoff, pre, ovl, alias_type='vcv', alias_text=alias
@@ -2645,8 +2944,16 @@ def generate_ja_oto(
                 # === 어두 CV (- a) 처리 ===
                 if is_cv_head:
                     if cv_seq_idx < len(syllables_info):
-                        current_w_idx = cv_seq_idx
-                        cv_seq_idx = current_w_idx + 1
+                        expected_idx = cv_seq_idx
+                    else:
+                        expected_idx = len(syllables_info) - 1
+                    mapped_idx = _select_ja_cv_syllable_index(
+                        alias, expected_idx, syllables_info, alias_type="cv_head"
+                    )
+                    if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
+                        log(f"🧭 {fname}: CV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
+                    current_w_idx = mapped_idx
+                    cv_seq_idx = current_w_idx + 1
                     if current_w_idx >= len(syllables_info):
                         current_w_idx = len(syllables_info) - 1
                         
@@ -2674,6 +2981,13 @@ def generate_ja_oto(
                     if added_cons < 80: added_cons = 80
                     consonant = pre + added_cons
                     cutoff = -(consonant + cv_vowel_len * 0.25)
+                    offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
+                        offset, consonant, cutoff, pre, ovl, "cv_head", mel_ctx_for_file
+                    )
+                    if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
+                        log(
+                            f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
+                        )
 
                     offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
                         offset, consonant, cutoff, pre, ovl, base_shape, alias_type="cv_head"
@@ -2681,6 +2995,14 @@ def generate_ja_oto(
                     
                     offset, consonant, cutoff, pre, ovl = _post_adjust_params(
                         offset, consonant, cutoff, pre, ovl, alias_type='cv_head', alias_text=alias
+                    )
+                    offset, consonant, cutoff, pre, cutoff_reduced = _guard_ja_cv_cutoff_to_next_onset(
+                        offset, consonant, cutoff, pre, current_w_idx
+                    )
+                    if cutoff_reduced > 0.5:
+                        log(f"🛡️ {fname}: CV 컷오프 과연장 보정(-{cutoff_reduced:.1f}ms) [{alias}]")
+                    offset, consonant, cutoff, pre, ovl = validate_oto_params(
+                        offset, consonant, cutoff, pre, ovl
                     )
                     
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
@@ -2694,8 +3016,16 @@ def generate_ja_oto(
                 if not is_vc:
                     # CV 에일리어스: 순서대로 다음 음절에 매핑
                     if cv_seq_idx < len(syllables_info):
-                        current_w_idx = cv_seq_idx
-                        cv_seq_idx = current_w_idx + 1
+                        expected_idx = cv_seq_idx
+                    else:
+                        expected_idx = len(syllables_info) - 1
+                    mapped_idx = _select_ja_cv_syllable_index(
+                        alias, expected_idx, syllables_info, alias_type="cv"
+                    )
+                    if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
+                        log(f"🧭 {fname}: CV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
+                    current_w_idx = mapped_idx
+                    cv_seq_idx = current_w_idx + 1
 
                     if current_w_idx >= len(syllables_info):
                         current_w_idx = len(syllables_info) - 1
@@ -2929,12 +3259,30 @@ def generate_ja_oto(
                         cutoff_abs = min(cutoff_abs, onset_guard + 6.0)
                         cutoff = -cutoff_abs
 
+                if alias_type in {"cv", "cv_head", "vcv"}:
+                    offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
+                        offset, consonant, cutoff, pre, ovl, alias_type, mel_ctx_for_file
+                    )
+                    if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
+                        log(
+                            f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
+                        )
+
                 offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
                     offset, consonant, cutoff, pre, ovl, base_shape, alias_type=alias_type
                 )
                 offset, consonant, cutoff, pre, ovl = _post_adjust_params(
                     offset, consonant, cutoff, pre, ovl, alias_type=alias_type, alias_text=alias
                 )
+                if alias_type in {"cv", "cv_head"}:
+                    offset, consonant, cutoff, pre, cutoff_reduced = _guard_ja_cv_cutoff_to_next_onset(
+                        offset, consonant, cutoff, pre, current_w_idx
+                    )
+                    if cutoff_reduced > 0.5:
+                        log(f"🛡️ {fname}: CV 컷오프 과연장 보정(-{cutoff_reduced:.1f}ms) [{alias}]")
+                    offset, consonant, cutoff, pre, ovl = validate_oto_params(
+                        offset, consonant, cutoff, pre, ovl
+                    )
 
                 aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
                 for a in aliases_to_write:
@@ -3042,6 +3390,17 @@ def generate_ja_oto(
                 log("[AutoTune] 참고 OTO를 찾았지만 프로파일 학습용 매칭 샘플이 충분하지 않습니다.")
     except Exception as e:
         log(f"[AutoTune] 내부 튜닝 프로파일 갱신 실패: {e}")
+
+    # Default runtime path: apply mel-based refinement for end users as well.
+    try:
+        wav_dir_for_mel = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
+        mel_changed = _apply_ja_mel_refine_to_oto_file(
+            out_path, wav_dir_for_mel, custom_map=custom_map
+        )
+        if mel_changed > 0:
+            log(f"[JA-Mel] 멜 에너지 기반 cutoff 보정 적용: {mel_changed} lines")
+    except Exception as e:
+        log(f"[JA-Mel] 보정 스킵: {e}")
 
     _log_unset_summary()
     return processed, total, errors

@@ -222,3 +222,5 @@ test_wavs/*.wav
 custom_test_wavs/*.lab
 custom_test_wavs/*_dict.txt
 /.env_sofa
+/.tmp_ext
+/.sofa
