@@ -166,10 +166,27 @@ class AppRuntimeMixin:
         ctk.CTkButton(btns, text="닫기", width=90, command=win.destroy).pack(side="right", padx=(0, 8))
 
     def _set_status(self, msg):
+        color = self._status_color_for_message(msg)
+
         def _do():
-            self.status_label.configure(text=msg)
+            self.status_label.configure(text=msg, text_color=color)
 
         self._after_safe(_do)
+
+    def _status_color_for_message(self, msg):
+        text = str(msg or "")
+        lowered = text.lower()
+
+        if self.is_running:
+            # 작업 중 상태는 눈에 띄도록 밝은 색 사용
+            return "#FFE082"
+        if text.strip().startswith("❌") or "error" in lowered or "실패" in text or "오류" in text:
+            return "#FF6B6B"
+        if text.strip().startswith("⚠") or "warning" in lowered or "경고" in text:
+            return "#FFB74D"
+        if text.strip().startswith("✅") or "success" in lowered or "완료" in text:
+            return "#66BB6A"
+        return "gray"
 
     def _run_auto_validation(self, wav_dir, tg_folder, out_path):
         self._append_log("🧪 OTO 자동 검증 시작...")
@@ -196,6 +213,9 @@ class AppRuntimeMixin:
         def _do():
             state = "disabled" if running else "normal"
             self.run_btn.configure(state=state)
+            if hasattr(self, "status_label"):
+                current_text = self.status_label.cget("text")
+                self.status_label.configure(text_color=self._status_color_for_message(current_text))
 
         self._after_safe(_do)
 
@@ -386,4 +406,3 @@ class ConfigMixin:
                         self.param_vars[key].set(val)
         except Exception as e:
             self.logger.error(f"설정 불러오기 실패: {e}")
-

@@ -265,8 +265,12 @@ def _apply_kr_consonant_timing_shaping(alias, pre, cons, cutoff, ovl):
     pre/overlap/cons_gap/cut_gap을 미세 보정합니다.
     """
     traits = _get_kr_timing_traits_from_alias(alias)
+    onset = traits["onset"]
     manner = traits["manner"]
     voicing = traits["voicing"]
+    coda_canon = _canonicalize_kr_coda(_extract_vc_right_token(alias))
+    is_tense_onset = onset in KR_TENSE_CONSONANTS
+    is_stop_coda_alias = coda_canon in {"k", "t", "p"}
 
     pre_mul = 1.0
     cons_gap_mul = 1.0
@@ -294,6 +298,21 @@ def _apply_kr_consonant_timing_shaping(alias, pre, cons, cutoff, ovl):
         cons_gap_mul *= 0.95
         cut_gap_mul *= 0.97
         ovl_bias -= 0.02
+
+    if is_tense_onset:
+        pre_mul *= 1.08
+        cons_gap_mul *= 1.05
+        cut_gap_mul *= 0.90
+        ovl_bias -= 0.04
+
+    if is_stop_coda_alias:
+        if coda_canon in {"t", "p"}:
+            cons_gap_mul *= 0.86
+            cut_gap_mul *= 0.72
+        else:
+            cons_gap_mul *= 0.92
+            cut_gap_mul *= 0.80
+        ovl_bias -= 0.03
 
     pre_new = _clamp(pre * pre_mul, 20.0, 360.0)
     cons_gap_now = max(cons - pre, 10.0)
@@ -943,8 +962,13 @@ def _stabilize_params_to_phone_activity(offset, consonant, cutoff, pre, ovl, ph_
             # VC/VV는 다음 음절 입구를 겨냥하되, 경계보다 약간 앞에서 잡는다.
             target = next_start - 6.0
             target = max(target, prev_end + 4.0)
+        elif alias_type in {"cv", "cv_head"}:
+            # CV 계열은 이전 음절 끝으로 끌어당기지 않고,
+            # 현재 자음 onset 직전으로 스냅해 앞 발음 유입을 줄인다.
+            target = next_start - 4.0
+            target = max(target, prev_end + 3.0)
         else:
-            # CV/VCV 등은 이전 음절 끝 경계 근처로 당겨서 공백 정렬을 방지한다.
+            # VCV 등은 이전 음절 끝 경계 근처로 당겨서 공백 정렬을 방지한다.
             target = prev_end
 
     delta = target - pre_abs
@@ -2600,22 +2624,22 @@ def generate_oto(
 
                 if is_diph_syl:
                     c_len = max(c_end - c_start, 10.0)
-                    target_pre = max(72.0, min(148.0, c_len + 18.0))
+                    target_pre = max(64.0, min(136.0, c_len + 14.0))
                     if is_tense_cv:
-                        target_pre = max(60.0, target_pre - 10.0)
+                        target_pre = _clamp(target_pre + 3.0, 66.0, 146.0)
                     elif is_sonorant_cv:
-                        target_pre = min(164.0, target_pre + 12.0)
+                        target_pre = min(150.0, target_pre + 10.0)
                     offset = max(boundary - target_pre, 0.0)
                     pre = boundary - offset
                     ovl = adaptive_overlap(pre, c_hint, mode='cv')
                     if is_tense_cv:
-                        ovl = min(ovl, max(pre * 0.34, 10.0))
+                        ovl = min(ovl, max(pre * 0.32, 9.0))
                     elif is_sonorant_cv:
                         ovl = max(ovl, min(pre * 0.50, max(pre - 8.0, 0.0)))
 
                     v_ref = max(cv_vowel_len, 140.0)
                     if is_tense_cv:
-                        added_cons = min(max(v_ref * 0.48, 82.0), 190.0)
+                        added_cons = min(max(v_ref * 0.52, 86.0), 196.0)
                     elif is_sonorant_cv:
                         added_cons = min(max(v_ref * 0.62, 98.0), 240.0)
                     else:
@@ -2627,27 +2651,27 @@ def generate_oto(
                     is_plosive = first_phone_plosive or is_plosive_roman(alias_onset) if alias_onset else first_phone_plosive
 
                     if is_tense_cv:
-                        offset = max(c_start - 40.0, 0.0)
+                        offset = max(c_start - 48.0, 0.0)
                         pre = boundary - offset
                         ovl = adaptive_overlap(pre, c_hint, mode='cv')
-                        ovl = min(ovl, max(pre * 0.34, 10.0))
+                        ovl = min(ovl, max(pre * 0.32, 9.0))
                     elif is_sonorant_cv:
-                        offset = max(c_start - 92.0, 0.0)
+                        offset = max(c_start - 72.0, 0.0)
                         pre = boundary - offset
                         ovl = adaptive_overlap(pre, c_hint, mode='cv')
                         ovl = max(ovl, min(pre * 0.50, max(pre - 8.0, 0.0)))
                     elif is_plosive:
-                        offset = max(c_start - 50.0, 0.0)
+                        offset = max(c_start - 44.0, 0.0)
                         pre = boundary - offset
                         ovl = adaptive_overlap(pre, c_hint, mode='cv')
                     else:
-                        offset = max(c_start - 80.0, 0.0)
+                        offset = max(c_start - 62.0, 0.0)
                         pre = boundary - offset
                         ovl = adaptive_overlap(pre, c_hint, mode='cv')
 
                     v_ref = max(cv_vowel_len, 130.0)
                     if is_tense_cv:
-                        added_cons = min(max(v_ref * 0.38, 62.0), 150.0)
+                        added_cons = min(max(v_ref * 0.42, 68.0), 162.0)
                     elif is_sonorant_cv:
                         added_cons = min(max(v_ref * 0.52, 86.0), 210.0)
                     else:
@@ -3018,22 +3042,22 @@ def generate_oto(
                     is_sonorant_cv = _is_sonorant_consonant(c_hint, alias_onset)
 
                     if is_tense_cv:
-                        offset = max(c_start - 40, 0)
+                        offset = max(c_start - 46, 0)
                     elif is_sonorant_cv:
-                        offset = max(c_start - 90, 0)
+                        offset = max(c_start - 72, 0)
                     else:
-                        offset = max(c_start - 50, 0)
+                        offset = max(c_start - 44, 0)
 
                     pre = c_end - offset if c_end > c_start else 30
                     ovl = adaptive_overlap(pre, c_hint, mode='cv_head')
                     if is_tense_cv:
-                        ovl = min(ovl, max(pre * 0.34, 10.0))
+                        ovl = min(ovl, max(pre * 0.32, 9.0))
                     elif is_sonorant_cv:
                         ovl = max(ovl, min(pre * 0.48, max(pre - 10.0, 0.0)))
                     
                     cv_vowel_len = n_end - n_start
                     if is_tense_cv:
-                        added_cons = min(max(cv_vowel_len * 0.42, 68), 140)
+                        added_cons = min(max(cv_vowel_len * 0.46, 72), 156)
                     elif is_sonorant_cv:
                         added_cons = min(max(cv_vowel_len * 0.58, 88), 190)
                     else:
@@ -3165,6 +3189,8 @@ def generate_oto(
 
                     if is_vc_plosive_coda:
                         # 종성 파열음은 받침 구간을 먹지 않도록 모음 끝 직전에 pre를 고정합니다.
+                        coda_canon = _canonicalize_kr_coda(c_char)
+                        is_hard_stop_coda = coda_canon in {"t", "p"}
                         v_idx = None
                         v_phone = None
                         if curr_phones:
@@ -3181,26 +3207,48 @@ def generate_oto(
                             if next_syl.get('phones'):
                                 coda_start = next_syl['phones'][0].minTime * 1000
 
-                        boundary = max(vowel_start + 16.0, vowel_end - 10.0)
+                        boundary = max(vowel_start + 16.0, vowel_end - (14.0 if is_hard_stop_coda else 11.0))
                         if coda_start is not None:
-                            boundary = min(boundary, coda_start - 8.0)
-                            boundary = max(boundary, vowel_start + 14.0)
+                            coda_margin = 12.0 if is_hard_stop_coda else 9.0
+                            boundary = min(boundary, coda_start - coda_margin)
+                            boundary = max(boundary, vowel_start + (12.0 if is_hard_stop_coda else 14.0))
 
-                        pre_target = _clamp(boundary - vowel_start, 45.0, 145.0)
+                        pre_target = _clamp(
+                            boundary - vowel_start,
+                            42.0 if is_hard_stop_coda else 45.0,
+                            132.0 if is_hard_stop_coda else 145.0,
+                        )
                         offset = max(boundary - pre_target, 0.0)
                         pre = boundary - offset
                         ovl = adaptive_overlap(pre, c_char, mode='vc')
                         ovl = min(ovl, max(pre - 12.0, 0.0))
 
+                        tail_floor = 10.0 if is_hard_stop_coda else 12.0
                         if coda_start is not None:
-                            tail_room = max(coda_start - boundary, 14.0)
+                            tail_room = max(coda_start - boundary, tail_floor)
                         else:
-                            tail_room = max(n_start - boundary, 14.0)
+                            tail_room = max(n_start - boundary, tail_floor)
 
-                        added_cons = _clamp(tail_room * 0.65, 16.0, 42.0)
+                        cons_mul = 0.54 if is_hard_stop_coda else 0.62
+                        cons_min = 10.0 if is_hard_stop_coda else 12.0
+                        cons_max = 30.0 if is_hard_stop_coda else 38.0
+                        added_cons = _clamp(tail_room * cons_mul, cons_min, cons_max)
                         consonant = pre + added_cons
-                        cut_gap = _clamp(tail_room * 0.95, 50.0, 90.0)
-                        cutoff = -(consonant + cut_gap)
+                        cut_mul = 0.56 if is_hard_stop_coda else 0.70
+                        cut_min = 20.0 if is_hard_stop_coda else 24.0
+                        cut_max = 52.0 if is_hard_stop_coda else 64.0
+                        cut_gap = _clamp(tail_room * cut_mul, cut_min, cut_max)
+
+                        cutoff_abs = consonant + cut_gap
+                        next_onset_rel = max(n_start - offset, pre + 12.0)
+                        cutoff_soft_cap = next_onset_rel + (4.0 if is_hard_stop_coda else 8.0)
+                        cutoff_min_abs = consonant + (8.0 if is_hard_stop_coda else 10.0)
+                        if cutoff_soft_cap <= cutoff_min_abs:
+                            consonant = min(consonant, max(next_onset_rel - 6.0, pre + 8.0))
+                            cutoff_min_abs = consonant + (6.0 if is_hard_stop_coda else 8.0)
+                            cutoff_soft_cap = max(cutoff_soft_cap, cutoff_min_abs)
+                        cutoff_abs = _clamp(cutoff_abs, cutoff_min_abs, cutoff_soft_cap)
+                        cutoff = -cutoff_abs
                     else:
                         vc_anchor_params = None
                         if current_w_idx + 1 < len(syllables_info):
@@ -3268,7 +3316,7 @@ def generate_oto(
                         boundary = c_end
                         # 이중모음 CV는 pre가 과도하게 길어지지 않도록 자음 길이 기반으로 제한
                         c_len = max(c_end - c_start, 10.0)
-                        target_pre = max(72.0, min(148.0, c_len + 18.0))
+                        target_pre = max(64.0, min(136.0, c_len + 14.0))
                         offset = max(boundary - target_pre, 0)
                         
                         pre = boundary - offset
@@ -3277,22 +3325,22 @@ def generate_oto(
                         is_tense_cv = _is_tense_consonant(c_hint, alias_onset)
                         is_sonorant_cv = _is_sonorant_consonant(c_hint, alias_onset)
                         if is_tense_cv:
-                            target_pre = max(60.0, target_pre - 10.0)
+                            target_pre = _clamp(target_pre + 3.0, 66.0, 146.0)
                             offset = max(boundary - target_pre, 0)
                             pre = boundary - offset
                         elif is_sonorant_cv:
-                            target_pre = min(164.0, target_pre + 12.0)
+                            target_pre = min(150.0, target_pre + 10.0)
                             offset = max(boundary - target_pre, 0)
                             pre = boundary - offset
                         ovl = adaptive_overlap(pre, c_hint, mode='cv')
                         if is_tense_cv:
-                            ovl = min(ovl, max(pre * 0.34, 10.0))
+                            ovl = min(ovl, max(pre * 0.32, 9.0))
                         elif is_sonorant_cv:
                             ovl = max(ovl, min(pre * 0.50, max(pre - 8.0, 0.0)))
 
                         v_ref = max(cv_vowel_len, 140)
                         if is_tense_cv:
-                            added_cons = min(max(v_ref * 0.48, 82), 190)
+                            added_cons = min(max(v_ref * 0.52, 86), 196)
                         elif is_sonorant_cv:
                             added_cons = min(max(v_ref * 0.62, 98), 240)
                         else:
@@ -3334,32 +3382,32 @@ def generate_oto(
                         is_plosive = first_phone_plosive or roman_plosive
                         
                         if is_tense_cv:
-                            offset = max(c_start - 40, 0)
+                            offset = max(c_start - 48, 0)
                             pre = boundary - offset
                             ovl = adaptive_overlap(pre, c_hint, mode='cv')
-                            ovl = min(ovl, max(pre * 0.34, 10.0))
+                            ovl = min(ovl, max(pre * 0.32, 9.0))
                         elif is_sonorant_cv:
-                            offset = max(c_start - 92, 0)
+                            offset = max(c_start - 72, 0)
                             pre = boundary - offset
                             ovl = adaptive_overlap(pre, c_hint, mode='cv')
                             ovl = max(ovl, min(pre * 0.50, max(pre - 8.0, 0.0)))
                         elif is_plosive:
 
 
-                            offset = max(c_start - 50, 0)
+                            offset = max(c_start - 44, 0)
                             pre = boundary - offset
                             ovl = adaptive_overlap(pre, c_hint, mode='cv')
                         else:
 
 
-                            offset = max(c_start - 80, 0)
+                            offset = max(c_start - 62, 0)
                             pre = boundary - offset         # C-V boundary
                             ovl = adaptive_overlap(pre, c_hint, mode='cv')
                         
 
                         v_ref = max(cv_vowel_len, 130)
                         if is_tense_cv:
-                            added_cons = min(max(v_ref * 0.38, 62), 150)
+                            added_cons = min(max(v_ref * 0.42, 68), 162)
                         elif is_sonorant_cv:
                             added_cons = min(max(v_ref * 0.52, 86), 210)
                         else:

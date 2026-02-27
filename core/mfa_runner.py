@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 ALERT_MSVC_REQUIRED = "__ALERT__MSVC_REQUIRED__"
 ALERT_MFA_PERMISSION_DENIED = "__ALERT__MFA_PERMISSION_DENIED__"
 MSVC_REQUIRED_TEXT = "microsoft visual c++ 14.0 or greater is required"
+_MFA_SINGLE_SPEAKER_FLAG_CACHE = {}
 
 
 def _stderr_has_msvc_requirement(text):
@@ -110,6 +111,38 @@ def _get_conda_env(mfa_path):
         env['PATH'] = os.pathsep.join(new_paths) + os.pathsep + current_path
         env['CONDA_PREFIX'] = env_dir
     return env
+
+
+def _resolve_single_speaker_flag(mfa_path, env=None):
+    """
+    MFA 버전에 따라 단일 화자 옵션 표기가 다를 수 있어(--single-speaker / --single_speaker)
+    help 출력을 보고 지원되는 표기를 선택합니다.
+    """
+    key = os.path.abspath(mfa_path or "")
+    cached = _MFA_SINGLE_SPEAKER_FLAG_CACHE.get(key)
+    if cached:
+        return cached
+
+    candidates = ["--single-speaker", "--single_speaker"]
+    try:
+        res = subprocess.run(
+            [mfa_path, "align", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=env,
+        )
+        help_text = f"{res.stdout or ''}\n{res.stderr or ''}".lower()
+        for flag in candidates:
+            if flag in help_text:
+                _MFA_SINGLE_SPEAKER_FLAG_CACHE[key] = flag
+                return flag
+    except Exception:
+        pass
+
+    # 기본값은 요청에 맞춰 하이픈 표기 우선
+    _MFA_SINGLE_SPEAKER_FLAG_CACHE[key] = "--single-speaker"
+    return "--single-speaker"
 
 
 def find_mfa_executable():
@@ -224,10 +257,10 @@ def ensure_korean_support(mfa_path, callback=None):
             conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
             cmds = []
             if os.path.exists(conda_exe):
-                cmds.append([conda_exe, 'install', '-y', '-p', env_dir, 'libexpat'])
+                cmds.append([conda_exe, 'install', '-y', '--solver', 'classic', '-p', env_dir, 'libexpat'])
             system_conda = shutil.which('conda')
             if system_conda:
-                cmds.append([system_conda, 'install', '-y', '-p', env_dir, 'libexpat'])
+                cmds.append([system_conda, 'install', '-y', '--solver', 'classic', '-p', env_dir, 'libexpat'])
             for cmd in cmds:
                 log(f"   -> repair cmd: {' '.join(cmd)}")
                 res = subprocess.run(cmd, capture_output=True, text=True, env=env)
@@ -326,7 +359,7 @@ def ensure_japanese_support(mfa_path, callback=None):
         install_cmd = None
         if os.path.exists(conda_exe):
             install_cmd = [
-                conda_exe, 'install', '-y', '-p', env_dir,
+                conda_exe, 'install', '-y', '--solver', 'classic', '-p', env_dir,
                 '-c', 'conda-forge', '--override-channels',
                 'spacy', 'sudachipy', 'sudachidict-core'
             ]
@@ -334,7 +367,7 @@ def ensure_japanese_support(mfa_path, callback=None):
             system_conda = shutil.which('conda')
             if system_conda:
                 install_cmd = [
-                    system_conda, 'install', '-y', '-p', env_dir,
+                    system_conda, 'install', '-y', '--solver', 'classic', '-p', env_dir,
                     '-c', 'conda-forge', '--override-channels',
                     'spacy', 'sudachipy', 'sudachidict-core'
                 ]
@@ -446,19 +479,21 @@ def run_mfa_align(mfa_path, wav_folder, dict_path, output_folder, language='kore
             log(err)
             return False, err
     os.makedirs(output_folder, exist_ok=True)
+    env = _get_conda_env(mfa_path)
     ok, preflight_err = _preflight_compute_mfcc(mfa_path, callback=callback)
     if not ok:
         return False, preflight_err
+    single_speaker_flag = _resolve_single_speaker_flag(mfa_path, env=env)
     cmd = [
         mfa_path, 'align',
         wav_folder, dict_path, model_name, output_folder,
+        single_speaker_flag,
         '--clean', '--fine_tune', '--textgrid_cleanup',
         '--beam', '1000', '--retry_beam', '4000',
         '--num_jobs', '1',
     ]
-    log('Starting MFA alignment...')
+    log(f'Starting MFA alignment... ({single_speaker_flag})')
     try:
-        env = _get_conda_env(mfa_path)
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
