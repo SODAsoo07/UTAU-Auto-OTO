@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# UTAU Auto OTO project artifacts
+UTAU_Auto_OTO.exe
+UTAU_Auto_OTO_Release/
+logs/
+assets/profiles/kr_oto_reference_profile.json

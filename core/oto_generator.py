@@ -189,6 +189,27 @@ KR_SONORANT_CONSONANTS = {
     "n", "m", "r", "l", "ng", "y", "w", "ry", "ly", "ny", "my",
 }
 
+KR_SIBILANT_ONSETS = {
+    "s", "ss", "sh", "h", "f", "z",
+}
+
+KR_PLOSIVE_ONSETS = {
+    "g", "gg", "k", "kk",
+    "d", "dd", "t", "tt",
+    "b", "bb", "p", "pp",
+    "j", "jj", "ch", "c", "q",
+}
+
+KR_VOICED_ONSETS = {
+    "g", "d", "b", "j", "z", "v",
+    "n", "m", "r", "l", "ng", "y", "w",
+}
+
+KR_VOICELESS_ONSETS = {
+    "k", "kk", "t", "tt", "p", "pp",
+    "s", "ss", "sh", "h", "f", "ch", "c", "q",
+}
+
 
 def _extract_alias_onset(alias):
     """CV 에일리어스에서 초성(로마자 자음군)을 추출합니다."""
@@ -209,6 +230,80 @@ def _is_sonorant_consonant(ipa_hint="", roman_hint=""):
     i = normalize_ipa_mark(ipa_hint or "")
     r = re.sub(r"[^a-z]", "", (roman_hint or "").lower())
     return i in KR_SONORANT_CONSONANTS or r in KR_SONORANT_CONSONANTS
+
+
+def _get_kr_timing_traits_from_alias(alias):
+    onset = _extract_alias_onset(alias or "")
+    if not onset:
+        return {"onset": "", "manner": "other", "voicing": "unknown"}
+    c = onset.lower()
+    manner = "other"
+    if c in KR_SIBILANT_ONSETS:
+        manner = "sibilant"
+    elif c in KR_PLOSIVE_ONSETS:
+        manner = "plosive"
+
+    voicing = "unknown"
+    if c in KR_VOICED_ONSETS:
+        voicing = "voiced"
+    elif c in KR_VOICELESS_ONSETS:
+        voicing = "voiceless"
+    return {"onset": c, "manner": manner, "voicing": voicing}
+
+
+def _apply_kr_consonant_timing_shaping(alias, pre, cons, cutoff, ovl):
+    """
+    한국어 프리셋 적용 후 자음 성질(치찰/파열, 유성/무성)에 맞춰
+    pre/overlap/cons_gap/cut_gap을 미세 보정합니다.
+    """
+    traits = _get_kr_timing_traits_from_alias(alias)
+    manner = traits["manner"]
+    voicing = traits["voicing"]
+
+    pre_mul = 1.0
+    cons_gap_mul = 1.0
+    cut_gap_mul = 1.0
+    ovl_bias = 0.0
+
+    if manner == "plosive":
+        pre_mul *= 0.94
+        cons_gap_mul *= 0.92
+        cut_gap_mul *= 0.94
+        ovl_bias -= 0.05
+    elif manner == "sibilant":
+        pre_mul *= 1.08
+        cons_gap_mul *= 1.04
+        cut_gap_mul *= 1.03
+        ovl_bias += 0.06
+
+    if voicing == "voiced":
+        pre_mul *= 1.04
+        cons_gap_mul *= 1.05
+        cut_gap_mul *= 1.02
+        ovl_bias += 0.02
+    elif voicing == "voiceless":
+        pre_mul *= 0.96
+        cons_gap_mul *= 0.95
+        cut_gap_mul *= 0.97
+        ovl_bias -= 0.02
+
+    pre_new = _clamp(pre * pre_mul, 20.0, 360.0)
+    cons_gap_now = max(cons - pre, 10.0)
+    cons_gap_new = _clamp(cons_gap_now * cons_gap_mul, 8.0, 260.0)
+    cons_new = pre_new + cons_gap_new
+
+    ovl_ratio_now = _safe_ratio(ovl, pre, fallback=0.30)
+    ovl_ratio_new = _clamp(ovl_ratio_now + ovl_bias, 0.08, 0.80)
+    ovl_new = max(0.0, pre_new * ovl_ratio_new)
+
+    cut_gap_now = max(abs(cutoff) - cons, 20.0)
+    cut_gap_new = _clamp(cut_gap_now * cut_gap_mul, 18.0, 220.0)
+    cutoff_new = -(cons_new + cut_gap_new)
+    _, cons_new, cutoff_new, pre_new, ovl_new = validate_oto_params(
+        0.0, cons_new, cutoff_new, pre_new, ovl_new
+    )
+    return pre_new, cons_new, cutoff_new, ovl_new
+
 
 def adaptive_overlap(pre, consonant_hint="", mode="cv"):
     """
@@ -1000,6 +1095,9 @@ def _apply_kr_profile_to_oto_file(oto_path, wav_dir, profile, custom_map=None):
             ovl_ratio_t = _clamp(stat.get("ovl_ratio", ovl_ratio_now), 0.05, 0.78)
             ovl_ratio = _blend(ovl_ratio_now, ovl_ratio_t, w)
             ovl = max(0.0, pre * max(0.10, min(0.80, ovl_ratio)))
+            pre, cons, cutoff, ovl = _apply_kr_consonant_timing_shaping(
+                row.get("alias", ""), pre, cons, cutoff, ovl
+            )
 
             if idx == 0 and dur_ms > 0 and stat.get("head_off_ratio") is not None:
                 target_ratio = _clamp(stat["head_off_ratio"], 0.0, 0.35)

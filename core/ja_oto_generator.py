@@ -88,6 +88,26 @@ JA_PLOSIVE_CONSONANTS = [
     'ky', 'gy', 'ty', 'dy', 'by', 'py',
 ]
 
+JA_SIBILANT_ONSETS = {
+    's', 'z', 'sh', 'j', 'ts', 'dz', 'ch',
+}
+
+JA_PLOSIVE_ONSETS = {
+    'k', 'g', 't', 'd', 'b', 'p', 'q', 'c',
+    'kk', 'tt', 'pp', 'dd', 'gg', 'bb',
+    'ky', 'gy', 'ty', 'dy', 'by', 'py',
+}
+
+JA_VOICED_ONSETS = {
+    'g', 'z', 'd', 'b', 'j', 'dz', 'v',
+    'm', 'n', 'ny', 'r', 'l', 'ry', 'w', 'y',
+}
+
+JA_VOICELESS_ONSETS = {
+    'k', 's', 't', 'p', 'h', 'f', 'sh', 'ch', 'ts',
+    'q', 'c', 'ky', 'ty', 'py', 'hy', 'ss', 'kk', 'tt', 'pp',
+}
+
 
 def validate_oto_params(offset, consonant, cutoff, pre, ovl):
     """
@@ -657,7 +677,100 @@ def _apply_ja_autotune_profile(alias_type, offset, consonant, cutoff, pre, ovl, 
     return validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
 
-def _apply_ja_style_profile(alias_type, offset, consonant, cutoff, pre, ovl, profile):
+def _ja_extract_onset_for_timing(alias_text, alias_type):
+    alias = (alias_text or "").strip().lower()
+    if not alias:
+        return ""
+    parts = alias.split()
+    token = alias
+
+    if len(parts) >= 2:
+        if alias_type in {"vc", "vv", "vcv"}:
+            token = parts[1]
+        elif alias_type == "cv_head":
+            token = parts[1]
+        else:
+            token = parts[0] if parts[0] != "-" else parts[1]
+    elif alias.startswith("-"):
+        token = alias[1:]
+
+    token = token.strip("-_ ")
+    if token in JA_CONSONANTS:
+        return token
+    onset, _ = split_ja_romaji_syllable(token)
+    return (onset or token).lower()
+
+
+def _get_ja_timing_traits(alias_text, alias_type):
+    onset = _ja_extract_onset_for_timing(alias_text, alias_type)
+    if not onset:
+        return {"onset": "", "manner": "other", "voicing": "unknown"}
+
+    manner = "other"
+    if onset in JA_SIBILANT_ONSETS:
+        manner = "sibilant"
+    elif onset in JA_PLOSIVE_ONSETS:
+        manner = "plosive"
+
+    voicing = "unknown"
+    if onset in JA_VOICED_ONSETS:
+        voicing = "voiced"
+    elif onset in JA_VOICELESS_ONSETS:
+        voicing = "voiceless"
+    return {"onset": onset, "manner": manner, "voicing": voicing}
+
+
+def _apply_ja_consonant_timing_shaping(alias_text, alias_type, pre, consonant, cutoff, ovl):
+    traits = _get_ja_timing_traits(alias_text, alias_type)
+    manner = traits["manner"]
+    voicing = traits["voicing"]
+
+    pre_mul = 1.0
+    cons_gap_mul = 1.0
+    cut_gap_mul = 1.0
+    ovl_bias = 0.0
+
+    if manner == "plosive":
+        pre_mul *= 0.95
+        cons_gap_mul *= 0.93
+        cut_gap_mul *= 0.95
+        ovl_bias -= 0.05
+    elif manner == "sibilant":
+        pre_mul *= 1.07
+        cons_gap_mul *= 1.04
+        cut_gap_mul *= 1.03
+        ovl_bias += 0.06
+
+    if voicing == "voiced":
+        pre_mul *= 1.03
+        cons_gap_mul *= 1.05
+        cut_gap_mul *= 1.02
+        ovl_bias += 0.02
+    elif voicing == "voiceless":
+        pre_mul *= 0.97
+        cons_gap_mul *= 0.95
+        cut_gap_mul *= 0.98
+        ovl_bias -= 0.02
+
+    pre_new = _clamp_range(pre * pre_mul, 18.0, 360.0)
+    cons_gap_now = max(consonant - pre, 8.0)
+    cons_gap_new = _clamp_range(cons_gap_now * cons_gap_mul, 8.0, 260.0)
+    cons_new = pre_new + cons_gap_new
+
+    ovl_ratio_now = (ovl / pre) if pre > 0 else 0.30
+    ovl_ratio_new = _clamp_range(ovl_ratio_now + ovl_bias, 0.06, 0.82)
+    ovl_new = max(0.0, pre_new * ovl_ratio_new)
+
+    cut_gap_now = max(abs(cutoff) - consonant, 16.0)
+    cut_gap_new = _clamp_range(cut_gap_now * cut_gap_mul, 16.0, 240.0)
+    cutoff_new = -(cons_new + cut_gap_new)
+    _, cons_new, cutoff_new, pre_new, ovl_new = validate_oto_params(
+        0.0, cons_new, cutoff_new, pre_new, ovl_new
+    )
+    return pre_new, cons_new, cutoff_new, ovl_new
+
+
+def _apply_ja_style_profile(alias_type, offset, consonant, cutoff, pre, ovl, profile, alias_text=""):
     if not profile:
         return offset, consonant, cutoff, pre, ovl
     buckets = profile.get("buckets") or {}
@@ -688,6 +801,9 @@ def _apply_ja_style_profile(alias_type, offset, consonant, cutoff, pre, ovl, pro
     ovl_ratio_now = (ovl / pre) if pre > 0 else 0.3
     ovl_ratio_new = _blend(ovl_ratio_now, ovl_ratio_t, w)
     ovl_new = max(0.0, pre_new * _clamp_range(ovl_ratio_new, 0.0, 0.82))
+    pre_new, cons_new, cutoff_new, ovl_new = _apply_ja_consonant_timing_shaping(
+        alias_text, alias_type, pre_new, cons_new, cutoff_new, ovl_new
+    )
 
     if alias_type == "cv_head" and stat.get("head_offset") is not None:
         head_off_t = _clamp_range(stat.get("head_offset", offset), 0.0, 2200.0)
@@ -1109,7 +1225,7 @@ def generate_ja_oto(
                     boundary_points_ms.add(float(w.maxTime * 1000.0))
             boundary_points_ms = sorted(boundary_points_ms)
 
-            def _post_adjust_params(offset, consonant, cutoff, pre, ovl, alias_type='cv'):
+            def _post_adjust_params(offset, consonant, cutoff, pre, ovl, alias_type='cv', alias_text=''):
                 offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
                 pre_abs = offset + pre
@@ -1145,7 +1261,7 @@ def generate_ja_oto(
                 offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
                 if ja_style_enabled and ja_style_profile and not autotune_profile:
                     offset, consonant, cutoff, pre, ovl = _apply_ja_style_profile(
-                        alias_type, offset, consonant, cutoff, pre, ovl, ja_style_profile
+                        alias_type, offset, consonant, cutoff, pre, ovl, ja_style_profile, alias_text=alias_text
                     )
                 if autotune_profile:
                     offset, consonant, cutoff, pre, ovl = _apply_ja_autotune_profile(
@@ -1212,7 +1328,7 @@ def generate_ja_oto(
                     cutoff = -(v_len * 0.8)
 
                     offset, consonant, cutoff, pre, ovl = _post_adjust_params(
-                        offset, consonant, cutoff, pre, ovl, alias_type='br'
+                        offset, consonant, cutoff, pre, ovl, alias_type='br', alias_text=alias
                     )
 
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
@@ -1361,7 +1477,7 @@ def generate_ja_oto(
                     consonant = min(br_len * 0.3, 100)
                     cutoff = -(br_len * 0.85)
                     offset, consonant, cutoff, pre, ovl = _post_adjust_params(
-                        offset, consonant, cutoff, pre, ovl, alias_type='vc'
+                        offset, consonant, cutoff, pre, ovl, alias_type='vc', alias_text=alias
                     )
                     
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
@@ -1393,7 +1509,7 @@ def generate_ja_oto(
                     cutoff = -(consonant + 38)
 
                     offset, consonant, cutoff, pre, ovl = _post_adjust_params(
-                        offset, consonant, cutoff, pre, ovl, alias_type='mono'
+                        offset, consonant, cutoff, pre, ovl, alias_type='mono', alias_text=alias
                     )
 
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
@@ -1449,7 +1565,7 @@ def generate_ja_oto(
                     cutoff = -(consonant + vowel_len * 0.25)
                     
                     offset, consonant, cutoff, pre, ovl = _post_adjust_params(
-                        offset, consonant, cutoff, pre, ovl, alias_type='vcv'
+                        offset, consonant, cutoff, pre, ovl, alias_type='vcv', alias_text=alias
                     )
                     
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
@@ -1493,7 +1609,7 @@ def generate_ja_oto(
                     cutoff = -(consonant + cv_vowel_len * 0.25)
                     
                     offset, consonant, cutoff, pre, ovl = _post_adjust_params(
-                        offset, consonant, cutoff, pre, ovl, alias_type='cv_head'
+                        offset, consonant, cutoff, pre, ovl, alias_type='cv_head', alias_text=alias
                     )
                     
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
@@ -1647,7 +1763,7 @@ def generate_ja_oto(
                         cutoff = -cutoff_abs
 
                 offset, consonant, cutoff, pre, ovl = _post_adjust_params(
-                    offset, consonant, cutoff, pre, ovl, alias_type=alias_type
+                    offset, consonant, cutoff, pre, ovl, alias_type=alias_type, alias_text=alias
                 )
 
                 aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
