@@ -11,6 +11,7 @@ import wave
 import datetime
 import logging
 import unicodedata
+from functools import lru_cache
 import textgrid
 import copy
 
@@ -112,6 +113,7 @@ def is_diphthong_file(filename):
     return False
 
 
+@lru_cache(maxsize=16384)
 def is_diphthong(alias):
     """에일리어스 문자열에 이중모음 패턴이 있는지 확인합니다."""
     clean = alias.replace(' ', '').lower()
@@ -219,6 +221,7 @@ KR_VOICELESS_ONSETS = {
 }
 
 
+@lru_cache(maxsize=32768)
 def _extract_alias_onset(alias):
     """CV 에일리어스에서 초성(로마자 자음군)을 추출합니다."""
     a = re.sub(r"[^a-z]", "", (alias or "").lower())
@@ -596,6 +599,85 @@ def _guard_cv_cutoff_to_next_onset(offset, consonant, cutoff, pre, syll_idx, syl
     return offset, consonant, cutoff, pre, reduction
 
 
+def _guard_cv_head_offset_to_current_onset(offset, consonant, cutoff, pre, syll_idx, syllables_info):
+    """
+    CV_HEAD(- CV) offset이 현재 음절 onset보다 과도하게 앞서지 않도록 제한합니다.
+    공백 영역 과포함을 줄이기 위한 가드입니다.
+    """
+    if syll_idx is None or syll_idx < 0:
+        return offset, consonant, cutoff, pre, 0.0
+    if not syllables_info or syll_idx >= len(syllables_info):
+        return offset, consonant, cutoff, pre, 0.0
+
+    curr_syl = syllables_info[syll_idx]
+    curr_phones = curr_syl.get("phones") or []
+    if not curr_phones:
+        return offset, consonant, cutoff, pre, 0.0
+
+    c_start = float(curr_phones[0].minTime) * 1000.0
+    c_hint = (curr_phones[0].mark or "").strip().lower()
+    try:
+        _v_idx, v_phone = find_vowel_phone(curr_phones)
+        c_end = float(v_phone.minTime) * 1000.0
+    except Exception:
+        c_end = float(curr_phones[0].maxTime) * 1000.0
+    c_len = max(0.0, c_end - c_start)
+
+    # onset 특성별 허용 리드(ms): 파열/치찰은 조금 넓게, 공명음은 더 타이트하게.
+    if is_plosive_ipa(c_hint) or c_hint in {"s", "ss", "sh", "ch", "j", "jj", "c", "ts", "h"}:
+        base_lead = 44.0
+    elif c_hint in {"m", "n", "ng", "l", "r", "y", "w", "ny"}:
+        base_lead = 30.0
+    else:
+        base_lead = 36.0
+    lead_cap = min(base_lead, max(22.0, c_len + 16.0))
+    offset_floor = max(0.0, c_start - lead_cap)
+    if offset >= offset_floor:
+        return offset, consonant, cutoff, pre, 0.0
+
+    new_offset = offset_floor
+    # 오프셋만 당길 때 상대 길이(pre/cons/cutoff)가 급격히 줄어들지 않도록
+    # 기존 상대 파라미터를 우선 보존한다.
+    new_pre = max(float(pre), 8.0)
+    new_consonant = max(float(consonant), new_pre + 8.0)
+    new_cut_abs = max(abs(float(cutoff)), new_consonant + 12.0)
+    new_cutoff = -new_cut_abs
+
+    new_offset, new_consonant, new_cutoff, new_pre, _ovl = validate_oto_params(
+        new_offset, new_consonant, new_cutoff, new_pre, 0.0
+    )
+    reduced_ms = max(0.0, new_offset - offset)
+    return new_offset, new_consonant, new_cutoff, new_pre, reduced_ms
+
+
+def _ensure_cv_head_min_vowel_coverage(offset, consonant, cutoff, pre, vowel_start_ms, vowel_end_ms):
+    """
+    CV_HEAD(-CV)에서 컷오프가 너무 이르게 닫혀 모음이 거의 포함되지 않는 경우를 방지합니다.
+    """
+    v_start = float(vowel_start_ms)
+    v_end = float(vowel_end_ms)
+    v_len = max(0.0, v_end - v_start)
+    if v_len < 40.0:
+        return offset, consonant, cutoff, pre, 0.0
+
+    cut_abs = abs(float(cutoff))
+    # 모음 구간을 최소 일부(비율+하한) 포함하도록 컷오프 하한을 설정.
+    keep_v_ms = min(max(v_len * 0.30, 70.0), 190.0)
+    vowel_start_rel = max(v_start - float(offset), float(pre) + 8.0)
+    # pre 이후 너무 빨리 닫히는 케이스(자음만 남는 길이)를 방지.
+    min_from_pre = min(max(v_len * 0.24, 90.0), 180.0)
+    min_cut_abs = max(float(consonant) + 12.0, vowel_start_rel + keep_v_ms, float(pre) + min_from_pre)
+    if cut_abs >= min_cut_abs:
+        return offset, consonant, cutoff, pre, 0.0
+
+    new_cutoff = -min_cut_abs
+    offset, consonant, new_cutoff, pre, _ovl = validate_oto_params(
+        offset, consonant, new_cutoff, pre, 0.0
+    )
+    extended_ms = max(0.0, abs(new_cutoff) - cut_abs)
+    return offset, consonant, new_cutoff, pre, extended_ms
+
+
 def _prepare_vcv_syllable_timing(syllables_info, current_w_idx, cv_seq_idx, diphthong_cv_consonant_ratio):
     """VCV 계산에 필요한 음절 인덱스 갱신과 기본 타이밍을 산출합니다."""
     if cv_seq_idx < len(syllables_info):
@@ -701,7 +783,7 @@ def _prepare_cv_head_syllable_timing(syllables_info, current_w_idx, cv_seq_idx, 
 
     consonant = pre + added_cons
     cutoff = -(consonant + cv_vowel_len * 0.25)
-    return current_w_idx, cv_seq_idx, offset, consonant, cutoff, pre, ovl
+    return current_w_idx, cv_seq_idx, offset, consonant, cutoff, pre, ovl, n_start, n_end
 
 
 def _append_alias_rows(
@@ -1156,6 +1238,7 @@ def _extract_vowel_consonant(text):
     return None, text
 
 
+@lru_cache(maxsize=65536)
 def _split_kr_syllable_parts(text):
     """
     한국어 로마자 음절을 (초성, 중성, 종성)으로 분해합니다.
@@ -1187,6 +1270,7 @@ def _split_kr_syllable_parts(text):
     return onset, v_val, coda
 
 
+@lru_cache(maxsize=65536)
 def _kr_cv_kernel(text):
     """비교용 CV 핵심 문자열(onset+vowel)을 반환합니다."""
     onset, vowel, _ = _split_kr_syllable_parts(text)
@@ -1242,6 +1326,7 @@ def _is_kr_plosive_coda_alias(alias):
     return canon in {"k", "t", "p"}
 
 
+@lru_cache(maxsize=65536)
 def _normalize_cv_match_token(token):
     """CV 음절 매핑 비교용 정규화(r/l 혼용 등)를 적용합니다."""
     t = re.sub(r"[^a-z]", "", (token or "").lower())
@@ -1254,6 +1339,7 @@ def _normalize_cv_match_token(token):
     return t
 
 
+@lru_cache(maxsize=131072)
 def _cv_match_score(alias_token, syllable_token):
     """에일리어스 CV와 음절 로마자 간 매핑 점수를 계산합니다."""
     a = _normalize_cv_match_token(alias_token)
@@ -1298,6 +1384,7 @@ def _cv_match_score(alias_token, syllable_token):
     return max(0, min(score, 100))
 
 
+@lru_cache(maxsize=65536)
 def _extract_kr_cv_alias_token(alias):
     """CV 매핑용 에일리어스 핵심 토큰을 추출합니다."""
     parts = [p for p in re.split(r"\s+", (alias or "").strip().lower()) if p]
@@ -1408,8 +1495,15 @@ def detect_alias_format(alias_list, custom_map=None):
     """파일 단위 에일리어스 목록의 전체 포맷(CVC/CVVC/VCV 등)을 추정합니다."""
     if not alias_list:
         return 'cvc'
-    
-    types = [classify_alias(a, custom_map) for a in alias_list]
+
+    type_cache = {}
+    types = []
+    for a in alias_list:
+        t = type_cache.get(a)
+        if t is None:
+            t = classify_alias(a, custom_map)
+            type_cache[a] = t
+        types.append(t)
     type_set = set(types)
     
 
@@ -1469,13 +1563,17 @@ def _alias_to_cv_target(alias, alias_type):
 
 def _extract_cv_targets_from_lines(lines, custom_map=None):
     targets = []
+    type_cache = {}
     for line in lines or []:
         if "=" not in line:
             continue
         alias = line.split("=", 1)[1].split(",", 1)[0].strip()
         if not alias:
             continue
-        a_type = classify_alias(alias, custom_map)
+        a_type = type_cache.get(alias)
+        if a_type is None:
+            a_type = classify_alias(alias, custom_map)
+            type_cache[alias] = a_type
         tok = _alias_to_cv_target(alias, a_type)
         if tok:
             targets.append(tok)
@@ -1858,6 +1956,13 @@ def _apply_base_shape_blend(offset, consonant, cutoff, pre, ovl, base_shape, ali
         return validate_oto_params(offset, consonant, cutoff, pre, ovl)
     if not base_shape:
         return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    if alias_type == "cv_head":
+        # 템플릿의 head 라인이 비정상적으로 짧은 경우(cut_gap 과소),
+        # 그대로 블렌딩하면 -CV 길이가 급격히 줄어들 수 있어 보수적으로 생략한다.
+        src_cut_gap = float(base_shape.get("cut_gap", max(abs(cutoff) - consonant, 20.0)))
+        src_pre = float(base_shape.get("pre", pre))
+        if src_cut_gap < 90.0 or src_pre > 280.0:
+            return validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
     if alias_type in {"vc", "vv"}:
         w = 0.30
@@ -2238,6 +2343,14 @@ def _apply_kr_mel_refine_to_oto_file(oto_path, wav_dir, custom_map=None):
     by_wav = {}
     for line_idx, row in parsed:
         by_wav.setdefault(row["wav"], []).append((line_idx, row))
+    alias_type_cache = {}
+
+    def _classify_cached(alias_text):
+        t = alias_type_cache.get(alias_text)
+        if t is None:
+            t = classify_alias(alias_text, custom_map)
+            alias_type_cache[alias_text] = t
+        return t
 
     mel_cache = {}
     changed = 0
@@ -2267,7 +2380,7 @@ def _apply_kr_mel_refine_to_oto_file(oto_path, wav_dir, custom_map=None):
 
         for i, (_line_idx, row) in enumerate(rows):
             alias = row["alias"]
-            alias_type = classify_alias(alias, custom_map)
+            alias_type = _classify_cached(alias)
             if alias_type not in {"cv", "cv_head"}:
                 continue
 
@@ -2281,7 +2394,7 @@ def _apply_kr_mel_refine_to_oto_file(oto_path, wav_dir, custom_map=None):
             next_anchor = None
             for j in range(i + 1, len(rows)):
                 a2 = rows[j][1]["alias"]
-                t2 = classify_alias(a2, custom_map)
+                t2 = _classify_cached(a2)
                 if t2 in {"cv", "cv_head", "vcv", "mono"}:
                     next_anchor = float(rows[j][1]["offset"]) + float(rows[j][1]["pre"])
                     break
@@ -2404,6 +2517,14 @@ def _build_kr_reference_profile_from_dirs(ref_dirs, custom_map=None):
     bucket_values = {}
     total_rows = 0
     total_wavs = 0
+    alias_type_cache = {}
+
+    def _classify_cached(alias_text):
+        t = alias_type_cache.get(alias_text)
+        if t is None:
+            t = classify_alias(alias_text, custom_map)
+            alias_type_cache[alias_text] = t
+        return t
 
     for ref_dir in ref_dirs:
         if not ref_dir or not os.path.isdir(ref_dir):
@@ -2427,7 +2548,7 @@ def _build_kr_reference_profile_from_dirs(ref_dirs, custom_map=None):
                 continue
             total_wavs += 1
             for idx, row in enumerate(rows):
-                alias_type = classify_alias(row["alias"], custom_map)
+                alias_type = _classify_cached(row["alias"])
                 b = bucket_values.setdefault(alias_type, {
                     "pre": [],
                     "cons_gap": [],
@@ -2560,6 +2681,14 @@ def train_kr_autotune_profile(auto_oto_path, manual_oto_path, custom_phonemes_pa
         return None
 
     custom_map = load_custom_phonemes(custom_phonemes_path)
+    alias_type_cache = {}
+
+    def _classify_alias_cached(alias_text):
+        t = alias_type_cache.get(alias_text)
+        if t is None:
+            t = classify_alias(alias_text, custom_map)
+            alias_type_cache[alias_text] = t
+        return t
     auto_map = _occurrence_map(auto_rows)
     manual_map = _occurrence_map(manual_rows)
 
@@ -2571,7 +2700,7 @@ def train_kr_autotune_profile(auto_oto_path, manual_oto_path, custom_phonemes_pa
         if not m_row:
             continue
         alias_for_cls = re.sub(r"_[A-Za-z0-9]{1,8}$", "", a_row["alias"])
-        alias_type = classify_alias(alias_for_cls, custom_map)
+        alias_type = _classify_alias_cached(alias_for_cls)
         b = buckets.setdefault(alias_type, {f: [] for f in fields})
         for f in fields:
             b[f].append(float(m_row[f]) - float(a_row[f]))
@@ -2646,6 +2775,15 @@ def apply_kr_autotune_profile_to_oto(oto_path, profile, custom_phonemes_path="")
     custom_map = load_custom_phonemes(custom_phonemes_path)
     changed = 0
     out_lines = []
+    alias_type_cache = {}
+
+    def _classify_cached(alias_text):
+        t = alias_type_cache.get(alias_text)
+        if t is None:
+            t = classify_alias(alias_text, custom_map)
+            alias_type_cache[alias_text] = t
+        return t
+
     with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
         for raw in f:
             row = _parse_oto_line_profile(raw)
@@ -2654,7 +2792,7 @@ def apply_kr_autotune_profile_to_oto(oto_path, profile, custom_phonemes_path="")
                 continue
 
             alias_for_cls = re.sub(r"_[A-Za-z0-9]{1,8}$", "", row["alias"])
-            alias_type = classify_alias(alias_for_cls, custom_map)
+            alias_type = _classify_cached(alias_for_cls)
             stat = buckets.get(alias_type)
             if not stat:
                 out_lines.append(raw.rstrip("\n"))
@@ -2720,10 +2858,19 @@ def _apply_kr_profile_to_oto_file(oto_path, wav_dir, profile, custom_map=None):
 
     out_lines = []
     changed = 0
+    alias_type_cache = {}
+
+    def _classify_cached(alias_text):
+        t = alias_type_cache.get(alias_text)
+        if t is None:
+            t = classify_alias(alias_text, custom_map)
+            alias_type_cache[alias_text] = t
+        return t
+
     for wav_name, rows in rows_by_wav.items():
         dur_ms = _wav_duration_ms(os.path.join(wav_dir, wav_name))
         for idx, row in enumerate(rows):
-            alias_type = classify_alias(row["alias"], custom_map)
+            alias_type = _classify_cached(row["alias"])
             stat = buckets.get(alias_type)
             if not stat:
                 out_lines.append(
@@ -2992,6 +3139,14 @@ def generate_oto(
 
 
     custom_map = load_custom_phonemes(custom_phonemes_path)
+    alias_type_cache = {}
+
+    def _classify_alias_cached(alias_text):
+        t = alias_type_cache.get(alias_text)
+        if t is None:
+            t = classify_alias(alias_text, custom_map)
+            alias_type_cache[alias_text] = t
+        return t
 
 
     use_template = bool(template_lines)
@@ -3256,7 +3411,7 @@ def generate_oto(
                 final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
                 processed += 1
                 continue
-            file_format = detect_alias_format(alias_names)
+            file_format = detect_alias_format(alias_names, custom_map=custom_map)
             log(f"처리: {fname}: 형식 감지 -> {file_format.upper()}")
             
             is_vc_only = (file_format == 'vc_only')
@@ -3353,7 +3508,7 @@ def generate_oto(
                 base_shape = _extract_base_timing_shape(line)
                 
 
-                alias_type = classify_alias(alias)
+                alias_type = _classify_alias_cached(alias)
                 
 
                 if alias_type == 'br':
@@ -3567,6 +3722,8 @@ def generate_oto(
                         cutoff,
                         pre,
                         ovl,
+                        n_start,
+                        n_end,
                     ) = _prepare_cv_head_syllable_timing(
                         syllables_info,
                         current_w_idx,
@@ -3596,9 +3753,41 @@ def generate_oto(
                         syllables_info=syllables_info,
                         is_vc_plosive_coda=False,
                         enable_stabilize=False,
-                        enable_cutoff_guard=True,
+                        enable_cutoff_guard=False,
                     )
+                    (
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        offset_reduced,
+                    ) = _guard_cv_head_offset_to_current_onset(
+                        offset, consonant, cutoff, pre, current_w_idx, syllables_info
+                    )
+                    (
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        cutoff_extended,
+                    ) = _ensure_cv_head_min_vowel_coverage(
+                        offset, consonant, cutoff, pre, n_start, n_end
+                    )
+                    (
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        cutoff_reduced_after_offset,
+                    ) = _guard_cv_cutoff_to_next_onset(
+                        offset, consonant, cutoff, pre, current_w_idx, syllables_info
+                    )
+                    cutoff_reduced += cutoff_reduced_after_offset
                     _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
+                    if offset_reduced > 1.0:
+                        log(f"🛡️ {fname}: CV_HEAD 오프셋 과선행 보정(+{offset_reduced:.1f}ms) [{alias}]")
+                    if cutoff_extended > 1.0:
+                        log(f"🛡️ {fname}: CV_HEAD 모음 길이 보정(+{cutoff_extended:.1f}ms) [{alias}]")
                     
                     _append_alias_rows(
                         final_lines,
