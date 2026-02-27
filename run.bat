@@ -4,21 +4,30 @@ title UTAU Auto OTO Generator
 cd /d "%~dp0"
 
 echo [Checking core dependencies...]
-python -m pip install -r requirements.txt -q --user --no-warn-script-location
+set "HAS_SYS_PY=0"
+where python >nul 2>nul && set "HAS_SYS_PY=1"
+
 if exist ".env\python.exe" (
-    .env\Scripts\pip.exe install -r requirements.txt -q --user --no-warn-script-location
+    .env\Scripts\pip.exe install -r requirements.txt -q --disable-pip-version-check
+) else if "%HAS_SYS_PY%"=="1" (
+    python -m pip install -r requirements.txt -q --user --no-warn-script-location --disable-pip-version-check
 )
 
-REM 포터블 환경이 있으면 그걸 사용
 if exist ".env\python.exe" (
     .env\python.exe main.py
-) else (
+) else if "%HAS_SYS_PY%"=="1" (
     python main.py
+) else (
+    echo.
+    echo [ERROR] Python is not installed and .env is missing.
+    echo         Run setup_mfa.bat first, or launch UTAU_Auto_OTO.exe.
+    pause
+    exit /b 1
 )
 
 if errorlevel 1 (
     echo.
-    echo ❌ 프로그램 실행 중 오류가 발생했습니다.
-    echo    logs 폴더의 로그 파일을 확인해 주세요.
+    echo [ERROR] Program execution failed.
+    echo        Check files in the logs folder.
     pause
 )

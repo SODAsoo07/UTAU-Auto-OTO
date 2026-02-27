@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('C:\\Users\\oyh57\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\customtkinter', 'customtkinter/')],
+    datas=[('C:\\Users\\oyh57\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\customtkinter', 'customtkinter/'), ('C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\build_assets\\ffmpeg\\bin', 'ffmpeg/bin')],
     hiddenimports=['textgrid', 'customtkinter'],
     hookspath=[],
     hooksconfig={},

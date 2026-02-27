@@ -215,8 +215,10 @@ assets/profiles/kr_oto_reference_profile.json
 # Local run/test outputs
 config.json
 error_report_*.txt
+build_assets/
 test_wavs/*.ini
 test_wavs/*.validation.txt
 test_wavs/*.wav
 custom_test_wavs/*.lab
 custom_test_wavs/*_dict.txt
+/.env_sofa

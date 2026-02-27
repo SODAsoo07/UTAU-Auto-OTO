@@ -13,6 +13,83 @@ import shutil
 
 logger = logging.getLogger(__name__)
 
+ALERT_MSVC_REQUIRED = "__ALERT__MSVC_REQUIRED__"
+ALERT_MFA_PERMISSION_DENIED = "__ALERT__MFA_PERMISSION_DENIED__"
+MSVC_REQUIRED_TEXT = "microsoft visual c++ 14.0 or greater is required"
+
+
+def _stderr_has_msvc_requirement(text):
+    if not text:
+        return False
+    lowered = text.lower()
+    return (
+        MSVC_REQUIRED_TEXT in lowered
+        or "visual-cpp-build-tools" in lowered
+        or "microsoft c++ build tools" in lowered
+    )
+
+
+def _emit_msvc_required_notice(callback, log_fn):
+    if callback:
+        callback(ALERT_MSVC_REQUIRED)
+    log_fn("⚠ Microsoft Visual C++ 14.0+ (C++ Build Tools)가 필요합니다.")
+    log_fn("   설치 링크: https://visualstudio.microsoft.com/visual-cpp-build-tools/")
+
+
+def _preflight_compute_mfcc(mfa_path, callback=None):
+    """MFA 정렬 시작 전에 compute-mfcc-feats 실행 가능 여부를 점검합니다."""
+    def log(msg):
+        logger.info(msg)
+        if callback:
+            callback(msg)
+
+    if not mfa_path:
+        return False, "MFA 실행 파일 경로가 비어 있습니다."
+
+    env = _get_conda_env(mfa_path)
+    candidates = []
+    if sys.platform == 'win32' and 'Scripts' in mfa_path:
+        env_dir = os.path.dirname(os.path.dirname(mfa_path))
+        candidates.append(os.path.join(env_dir, 'Library', 'bin', 'compute-mfcc-feats.exe'))
+        candidates.append('compute-mfcc-feats.exe')
+    candidates.append('compute-mfcc-feats')
+
+    last_not_found = None
+    for candidate in candidates:
+        try:
+            # Windows + Python 3.13 조합에서는 확장자 없는 실행명 검색이 실패할 수 있다.
+            subprocess.run(
+                [candidate, '--help'],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=env,
+            )
+            return True, ""
+        except FileNotFoundError as e:
+            last_not_found = e
+            continue
+        except PermissionError as e:
+            if callback:
+                callback(ALERT_MFA_PERMISSION_DENIED)
+            err = (
+                "compute-mfcc-feats 실행 권한이 없어 MFA 정렬을 시작할 수 없습니다. "
+                "(WinError 5: Access denied)"
+            )
+            log(f"❌ {err}")
+            log("   보안 프로그램/권한 정책/파일 차단 여부를 확인해 주세요.")
+            return False, f"{err}: {e}"
+        except Exception as e:
+            err = f"compute-mfcc-feats 사전 점검 중 오류: {e}"
+            log(f"❌ {err}")
+            return False, err
+
+    err = "compute-mfcc-feats를 찾지 못했습니다. MFA 환경이 손상되었을 수 있습니다."
+    log(f"❌ {err}")
+    if last_not_found:
+        return False, f"{err}: {last_not_found}"
+    return False, err
+
 def _get_conda_env(mfa_path):
     """
     Windows 환경에서 Conda 활성화 없이 mfa.exe를 직접 호출할 때 
@@ -159,6 +236,8 @@ def ensure_korean_support(mfa_path, callback=None):
             result = subprocess.run(install_cmd, capture_output=True, text=True)
             if result.returncode != 0:
                  log(f"   ⚠️ 설치 중 에러: {result.stderr}")
+                 if _stderr_has_msvc_requirement(result.stderr):
+                    _emit_msvc_required_notice(callback, log)
             log("✅ 설치 시도 완료! MFA 한국어 연동 패치를 진행합니다...")
             patch_mfa_korean_support(mfa_path, callback)
         return True
@@ -336,6 +415,9 @@ def run_mfa_align(mfa_path, wav_folder, dict_path, output_folder, language='kore
 
     os.makedirs(output_folder, exist_ok=True)
     log(f"📂 출력 폴더 생성/확인: {output_folder}")
+    ok, preflight_err = _preflight_compute_mfcc(mfa_path, callback=callback)
+    if not ok:
+        return False, preflight_err
 
     cmd = [
         mfa_path, 'align',

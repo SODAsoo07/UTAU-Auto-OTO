@@ -1,53 +1,110 @@
-import os
+﻿import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import urllib.request
+import zipfile
+
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+BUILD_ASSET_DIR = os.path.join(APP_DIR, "build_assets")
+FFMPEG_DIR = os.path.join(BUILD_ASSET_DIR, "ffmpeg")
+FFMPEG_BIN_DIR = os.path.join(FFMPEG_DIR, "bin")
+FFMPEG_RELEASE_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+
+
+def _ensure_ffmpeg_bin():
+    ffmpeg_exe = os.path.join(FFMPEG_BIN_DIR, "ffmpeg.exe")
+    ffprobe_exe = os.path.join(FFMPEG_BIN_DIR, "ffprobe.exe")
+    if os.path.exists(ffmpeg_exe) and os.path.exists(ffprobe_exe):
+        print(f"✅ FFmpeg 바이너리 재사용: {FFMPEG_BIN_DIR}")
+        return FFMPEG_BIN_DIR
+
+    os.makedirs(BUILD_ASSET_DIR, exist_ok=True)
+    tmp_zip = os.path.join(BUILD_ASSET_DIR, "ffmpeg_release_essentials.zip")
+    tmp_extract = tempfile.mkdtemp(prefix="ffmpeg_extract_", dir=BUILD_ASSET_DIR)
+    try:
+        print("📦 FFmpeg(Windows shared build) 다운로드 중...")
+        with urllib.request.urlopen(FFMPEG_RELEASE_ZIP_URL, timeout=180) as resp:
+            with open(tmp_zip, "wb") as f:
+                f.write(resp.read())
+
+        print("📦 FFmpeg 압축 해제 중...")
+        with zipfile.ZipFile(tmp_zip, "r") as zf:
+            zf.extractall(tmp_extract)
+
+        source_bin = ""
+        for root, dirs, _ in os.walk(tmp_extract):
+            if "bin" in dirs and os.path.exists(os.path.join(root, "bin", "ffmpeg.exe")):
+                source_bin = os.path.join(root, "bin")
+                break
+        if not source_bin:
+            raise RuntimeError("압축 내부에서 ffmpeg.exe를 찾지 못했습니다.")
+
+        if os.path.exists(FFMPEG_DIR):
+            shutil.rmtree(FFMPEG_DIR)
+        os.makedirs(FFMPEG_DIR, exist_ok=True)
+        shutil.copytree(source_bin, FFMPEG_BIN_DIR)
+        print(f"✅ FFmpeg 준비 완료: {FFMPEG_BIN_DIR}")
+        return FFMPEG_BIN_DIR
+    finally:
+        if os.path.exists(tmp_zip):
+            try:
+                os.remove(tmp_zip)
+            except OSError:
+                pass
+        shutil.rmtree(tmp_extract, ignore_errors=True)
+
 
 def main():
-    print("📦 [1/4] 파이프라인 패키징 시작: 필요한 빌드 모듈 확인 중...")
+    os.chdir(APP_DIR)
+    print("🚀 [1/5] 빌드 의존성 설치 중...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller", "customtkinter", "textgrid", "numpy"])
 
-    print("🚀 [2/4] PyInstaller 모듈 로딩 중...")
+    print("🚀 [2/5] FFmpeg 바이너리 준비 중...")
+    ffmpeg_bin = _ensure_ffmpeg_bin()
+
+    print("🚀 [3/5] PyInstaller 모듈 로딩 중...")
     import PyInstaller.__main__
     import customtkinter
-    
+
     ctk_path = os.path.dirname(customtkinter.__file__)
-    
-    print("⚙️ [3/4] UTAU_Auto_OTO.exe 컴파일 빌드 시작 (수 분이 소요될 수 있습니다)...")
-    
+    print("🚀 [4/5] UTAU_Auto_OTO.exe 빌드 중...")
     PyInstaller.__main__.run([
-        'main.py',                       # 메인 진입점
-        '--name=UTAU_Auto_OTO',          # 생성될 exe 이름
-        '--windowed',                    # 콘솔 창 숨기기 (GUI 전용)
-        '--onefile',                     # 단일 실행 파일로 압축
-        '--noconfirm',                   # 기존 빌드 덮어쓰기
-        '--clean',                       # 캐시 정리
-        f'--add-data={ctk_path};customtkinter/', # CustomTkinter 인터페이스 에셋 포함
-        '--hidden-import=textgrid',      # 명시적 textgrid 포함
-        '--hidden-import=customtkinter', # 명시적 ctk 포함
+        "main.py",
+        "--name=UTAU_Auto_OTO",
+        "--windowed",
+        "--onefile",
+        "--noconfirm",
+        "--clean",
+        f"--add-data={ctk_path};customtkinter/",
+        f"--add-data={ffmpeg_bin};ffmpeg/bin",
+        "--hidden-import=textgrid",
+        "--hidden-import=customtkinter",
     ])
 
-    print("📁 [4/4] 배포용 폴더 조립 중...")
-    release_dir = "UTAU_Auto_OTO_Release"
+    print("🚀 [5/5] 배포 폴더 구성 중...")
+    release_dir = os.path.join(APP_DIR, "UTAU_Auto_OTO_Release")
     if os.path.exists(release_dir):
         shutil.rmtree(release_dir)
-    os.makedirs(release_dir)
+    os.makedirs(release_dir, exist_ok=True)
 
-    # 1. 단일 실행 파일 복사
-    exe_path = os.path.join("dist", "UTAU_Auto_OTO.exe")
+    exe_path = os.path.join(APP_DIR, "dist", "UTAU_Auto_OTO.exe")
     if os.path.exists(exe_path):
         shutil.copy(exe_path, release_dir)
-        print(f"   -> {exe_path} 복사 완료")
+        print(f"   -> 복사 완료: {exe_path}")
     else:
-        print("   ❌ 빌드된 exe 파일을 찾을 수 없습니다!")
+        raise FileNotFoundError("빌드 결과 exe를 찾지 못했습니다.")
 
-    # 2. MFA 설치용 스크립트 복사
-    setup_path = "setup_mfa.bat"
+    setup_path = os.path.join(APP_DIR, "setup_mfa.bat")
     if os.path.exists(setup_path):
         shutil.copy(setup_path, release_dir)
-        print("   -> setup_mfa.bat 복사 완료")
+        print("   -> 복사 완료: setup_mfa.bat")
 
-    print(f"\n🎉 [완료] 모든 빌드 과정이 성공했습니다! '{release_dir}' 폴더를 확인해 주세요.")
+    print(f"\n✅ 빌드 완료: {release_dir}")
+    print("ℹ FFmpeg는 exe 내부에 포함되어 별도 설치 없이 배포 가능합니다.")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

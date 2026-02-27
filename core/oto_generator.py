@@ -79,7 +79,7 @@ DEFAULT_PARAMS = {
 
 def normalize_key(name):
     base = os.path.splitext(name)[0]
-    clean = re.sub(r"[^a-zA-Z0-9・-德｣]", "", base)
+    clean = re.sub(r"[^a-zA-Z0-9가-힣]", "", base)
     return clean.lower()
 
 
@@ -126,13 +126,14 @@ def normalize_ipa_mark(mark):
     base = clean_phone_mark(mark)
     nfd = unicodedata.normalize("NFD", base)
     stripped = "".join(ch for ch in nfd if not unicodedata.combining(ch))
-    stripped = stripped.replace("?", "").replace("?", "").replace("?", "").replace("?", "")
+    # 장음/강세/기식 기호를 제거해 비교를 안정화합니다.
+    stripped = stripped.replace("ː", "").replace("ˈ", "").replace("ˌ", "").replace("ʰ", "")
     return stripped
 
 
 def is_glide(phone_mark):
     clean = normalize_ipa_mark(phone_mark)
-    return clean in ['j', 'w', 'y', '?', '?', '?']
+    return clean in ['j', 'w', 'y', 'ɥ', 'ɰ', 'ʋ']
 
 
 # MFA phone tier에서 자주 보이는 모음/파열음 표기를 넓게 커버
@@ -169,7 +170,7 @@ def is_plosive_ipa(phone_mark):
     clean = normalize_ipa_mark(phone_mark)
     if clean in IPA_PLOSIVES:
         return True
-    # ???/??? ????? ??? ??? ?? (?: t? -> t)
+    # 기식/장음 기호 제거 후 남는 기본 파열음도 인정
     return clean in {'k', 't', 'p', 'c', 'g', 'd', 'b'}
 
 
@@ -362,7 +363,7 @@ KR_CONSONANTS = {
 KR_BATCHIM_MARKERS = {'N', 'L', 'M', 'NG', 'K', 'T', 'P', 'H'}
 
 
-GLOTTAL_MARKS = {'繝ｻ', '.'}
+GLOTTAL_MARKS = {"'", "’", ".", "ʔ"}
 
 
 def _detect_glottal_kind(alias):
@@ -714,6 +715,72 @@ def _parse_oto_line_profile(line):
         "pre": pre,
         "ovl": ovl,
     }
+
+
+def _extract_base_timing_shape(line):
+    """
+    base oto 한 줄에서 상대 타이밍 shape를 추출합니다.
+    절대 시각 복사보다 pre/cons_gap/cut_gap/ovl_ratio 블렌딩에 사용.
+    """
+    p = _parse_oto_line_profile(line)
+    if not p:
+        return None
+    pre = max(float(p["pre"]), 0.0)
+    cons = max(float(p["cons"]), 0.0)
+    cut_abs = abs(float(p["cutoff"]))
+    ovl = max(float(p["ovl"]), 0.0)
+    off = max(float(p["offset"]), 0.0)
+
+    # 템플릿 없는 자동 생성(0,0,0,0,0) 라인은 shape로 사용하지 않음.
+    if pre < 1.0 and cons < 1.0 and cut_abs < 1.0 and ovl < 1.0:
+        return None
+
+    cons_gap = max(cons - pre, 8.0)
+    cut_gap = max(cut_abs - cons, 16.0)
+    ovl_ratio = (ovl / pre) if pre > 1e-6 else 0.30
+    return {
+        "offset": off,
+        "pre": pre,
+        "cons_gap": cons_gap,
+        "cut_gap": cut_gap,
+        "ovl_ratio": _clamp(ovl_ratio, 0.04, 0.86),
+    }
+
+
+def _apply_base_shape_blend(offset, consonant, cutoff, pre, ovl, base_shape, alias_type="cv"):
+    if os.environ.get("UTOA_DISABLE_BASE_SHAPE_BLEND", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    if not base_shape:
+        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+
+    if alias_type in {"vc", "vv"}:
+        w = 0.30
+    elif alias_type == "vcv":
+        w = 0.34
+    elif alias_type == "cv_head":
+        w = 0.22
+    else:
+        w = 0.24
+
+    pre_t = _clamp(base_shape.get("pre", pre), 12.0, 420.0)
+    cons_gap_t = _clamp(base_shape.get("cons_gap", max(consonant - pre, 10.0)), 8.0, 260.0)
+    cut_gap_t = _clamp(base_shape.get("cut_gap", max(abs(cutoff) - consonant, 20.0)), 16.0, 300.0)
+    ovl_ratio_t = _clamp(base_shape.get("ovl_ratio", (ovl / pre) if pre > 0 else 0.30), 0.04, 0.86)
+
+    pre_new = _blend(pre, pre_t, w)
+    cons_gap_now = max(consonant - pre, 10.0)
+    cons_gap_new = _blend(cons_gap_now, cons_gap_t, min(0.42, w + 0.07))
+    cons_new = pre_new + cons_gap_new
+
+    cut_gap_now = max(abs(cutoff) - consonant, 20.0)
+    cut_gap_new = _blend(cut_gap_now, cut_gap_t, min(0.38, w + 0.03))
+    cutoff_new = -(cons_new + cut_gap_new)
+
+    ovl_ratio_now = (ovl / pre) if pre > 1e-6 else 0.30
+    ovl_ratio_new = _blend(ovl_ratio_now, ovl_ratio_t, min(0.38, w + 0.04))
+    ovl_new = max(0.0, pre_new * _clamp(ovl_ratio_new, 0.04, 0.86))
+
+    return validate_oto_params(offset, cons_new, cutoff_new, pre_new, ovl_new)
 
 
 def _wav_duration_ms(wav_path):
@@ -1612,6 +1679,7 @@ def generate_oto(
                     preserved = f"{real_wav_name}={parts[1]}"
                     final_lines.append(apply_suffix_to_oto_line(preserved, alias_suffix))
                     continue
+                base_shape = _extract_base_timing_shape(line)
                 
 
                 alias_type = classify_alias(alias)
@@ -1805,7 +1873,10 @@ def generate_oto(
                     if added_cons < 50: added_cons = 50
                     consonant = pre + added_cons
                     cutoff = -(consonant + vowel_len * 0.25)
-                    
+
+                    offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
+                        offset, consonant, cutoff, pre, ovl, base_shape, alias_type="vcv"
+                    )
                     offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
                     
                     aliases_to_write = generate_openutau_aliases(alias) if generate_openutau else [alias]
@@ -1869,7 +1940,10 @@ def generate_oto(
                             added_cons = 80
                     consonant = pre + added_cons
                     cutoff = -(consonant + cv_vowel_len * 0.25)
-                    
+
+                    offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
+                        offset, consonant, cutoff, pre, ovl, base_shape, alias_type="cv_head"
+                    )
                     offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
                     
                     aliases_to_write = generate_openutau_aliases(alias) if generate_openutau else [alias]
@@ -2106,8 +2180,9 @@ def generate_oto(
                         consonant = pre + added_cons
                         cutoff = -(consonant + max(cv_vowel_len * 0.25, 45))
 
-
-
+                offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
+                    offset, consonant, cutoff, pre, ovl, base_shape, alias_type=alias_type
+                )
                 offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
                 aliases_to_write = generate_openutau_aliases(alias) if generate_openutau else [alias]

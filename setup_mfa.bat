@@ -25,7 +25,7 @@ set "MFA_EXE=%ENV_DIR%\Scripts\mfa.exe"
 
 REM === Non-ASCII app path fallback ===
 set "APP_DIR_NONASCII=0"
-for /f %%i in ('powershell -NoProfile -Command "$p=$env:APP_DIR; if($p.ToCharArray() ^| ? {[int]$_ -gt 127}){'1'} else {'0'}"') do set "APP_DIR_NONASCII=%%i"
+for /f %%i in ('powershell -NoProfile -Command "$p=$env:APP_DIR; if($p -match '[^\x00-\x7F]'){'1'} else {'0'}"') do set "APP_DIR_NONASCII=%%i"
 if "!APP_DIR_NONASCII!"=="1" (
     set "ENV_DIR=%PUBLIC_ROOT%\UTAU_Auto_OTO_v3\.env"
     set "MFA_EXE=%ENV_DIR%\Scripts\mfa.exe"
@@ -53,10 +53,36 @@ if exist "%MFA_EXE%" (
     echo Checking dependencies...
     if exist "%ENV_DIR%\Scripts\conda.exe" (
         "%ENV_DIR%\Scripts\conda.exe" run -p "%ENV_DIR%" pip install --no-cache-dir eunjeon jamo textgrid
+        if errorlevel 1 (
+            echo [FAILED] Extra Python dependency install failed.
+            echo [HINT] If the log mentions "Microsoft Visual C++ 14.0 or greater is required",
+            echo        install C++ Build Tools from:
+            echo        https://visualstudio.microsoft.com/visual-cpp-build-tools/
+            pause
+            exit /b 1
+        )
         "%ENV_DIR%\Scripts\conda.exe" install -y -p "%ENV_DIR%" -c conda-forge --override-channels spacy sudachipy sudachidict-core
+        if errorlevel 1 (
+            echo [FAILED] Japanese tokenizer dependency install failed.
+            pause
+            exit /b 1
+        )
     ) else if defined SYSTEM_CONDA (
         "%SYSTEM_CONDA%" run -p "%ENV_DIR%" pip install --no-cache-dir eunjeon jamo textgrid
+        if errorlevel 1 (
+            echo [FAILED] Extra Python dependency install failed.
+            echo [HINT] If the log mentions "Microsoft Visual C++ 14.0 or greater is required",
+            echo        install C++ Build Tools from:
+            echo        https://visualstudio.microsoft.com/visual-cpp-build-tools/
+            pause
+            exit /b 1
+        )
         "%SYSTEM_CONDA%" install -y -p "%ENV_DIR%" -c conda-forge --override-channels spacy sudachipy sudachidict-core
+        if errorlevel 1 (
+            echo [FAILED] Japanese tokenizer dependency install failed.
+            pause
+            exit /b 1
+        )
     )
     echo.
     echo Checking Korean model...
@@ -83,6 +109,9 @@ if defined SYSTEM_CONDA (
     "%SYSTEM_CONDA%" run -p "%ENV_DIR%" pip install --no-cache-dir eunjeon jamo textgrid
     if errorlevel 1 (
         echo [FAILED] Extra Python dependency install failed.
+        echo [HINT] If the log mentions "Microsoft Visual C++ 14.0 or greater is required",
+        echo        install C++ Build Tools from:
+        echo        https://visualstudio.microsoft.com/visual-cpp-build-tools/
         pause
         exit /b 1
     )
@@ -147,6 +176,9 @@ if defined SYSTEM_CONDA (
     "%ENV_DIR%\Scripts\conda.exe" run -p "%ENV_DIR%" pip install --no-cache-dir eunjeon jamo textgrid
     if errorlevel 1 (
         echo [FAILED] Extra Python dependency install failed.
+        echo [HINT] If the log mentions "Microsoft Visual C++ 14.0 or greater is required",
+        echo        install C++ Build Tools from:
+        echo        https://visualstudio.microsoft.com/visual-cpp-build-tools/
         pause
         exit /b 1
     )

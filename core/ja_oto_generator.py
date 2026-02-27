@@ -1,4 +1,4 @@
-"""
+﻿"""
 日本語 CVVC OTO.ini 自動生成モジュール
 - TextGrid 基準の OTO パラメータ計算
 - CV, VC, VV, V タイプの自動分類と処理
@@ -14,7 +14,13 @@ import textgrid
 import copy
 from types import SimpleNamespace
 from core.lab_generator import load_custom_phonemes
-from core.ja_lab_generator import romaji_to_ipa, parse_ja_filename, split_ja_romaji_syllable
+from core.ja_lab_generator import (
+    romaji_to_ipa,
+    parse_ja_filename,
+    split_ja_romaji_syllable,
+    KANA_COMBO_ROMAJI,
+    KANA_SINGLE_ROMAJI,
+)
 from core.textio_utils import load_template_oto_lines
 from core.oto_profile_presets import get_ja_profile_preset
 
@@ -56,6 +62,142 @@ def apply_suffix_to_oto_line(line, suffix):
         return f"{left}={alias_part},{rest}"
     alias_part = apply_alias_suffix(right.strip(), suf)
     return f"{left}={alias_part}"
+
+
+def _replace_alias_in_oto_line(line, new_alias):
+    """`wav=alias,params...` line의 alias만 교체합니다."""
+    if not line or "=" not in line:
+        return line
+    left, right = line.split("=", 1)
+    if "," in right:
+        _, rest = right.split(",", 1)
+        return f"{left}={new_alias},{rest}"
+    return f"{left}={new_alias}"
+
+
+def _katakana_to_hiragana(text):
+    out = []
+    for ch in text or "":
+        code = ord(ch)
+        if 0x30A1 <= code <= 0x30F6:
+            out.append(chr(code - 0x60))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+_ROMAJI_TO_HIRA = {}
+for _k, _v in KANA_COMBO_ROMAJI.items():
+    _ROMAJI_TO_HIRA.setdefault(_v, _k)
+for _k, _v in KANA_SINGLE_ROMAJI.items():
+    _ROMAJI_TO_HIRA.setdefault(_v, _k)
+_ROMAJI_TO_HIRA.update({
+    "si": "し",
+    "zi": "じ",
+    "ti": "てぃ",
+    "tu": "とぅ",
+    "di": "でぃ",
+    "du": "どぅ",
+    "ji": "じ",
+    "hu": "ふ",
+    "chi": "ち",
+    "tsu": "つ",
+    "fu": "ふ",
+    "wi": "うぃ",
+    "we": "うぇ",
+    "wo": "を",
+})
+
+
+def _looks_japanese_kana(text):
+    return bool(re.search(r"[\u3041-\u3096\u30A1-\u30FA\u30FC]", text or ""))
+
+
+def _romaji_token_to_hiragana(token):
+    t = (token or "").strip().lower()
+    if not t:
+        return t
+    # VC의 자음 단독 토큰(k, s...)은 그대로 유지
+    if re.fullmatch(r"[bcdfghjklmnpqrstvwxyz]{1,3}", t):
+        return t
+    syls = parse_ja_filename(t)
+    if not syls:
+        return t
+    out = []
+    for syl in syls:
+        out.append(_ROMAJI_TO_HIRA.get(syl, syl))
+    return "".join(out)
+
+
+def _token_to_romaji(token):
+    t = (token or "").strip()
+    if not t:
+        return ""
+    if _looks_japanese_kana(t):
+        syls = parse_ja_filename(t)
+        return "".join(syls).lower() if syls else t.lower()
+    return t.lower()
+
+
+def _bridge_prefix_vowel_romaji(parts):
+    """
+    VC/VCV 계열(`V C` / `V CV`)의 앞 V를 로마자로 고정합니다.
+    """
+    if not parts or len(parts) < 2:
+        return ""
+    left = _token_to_romaji(parts[0])
+    if not left:
+        return ""
+    if left in {"n", "nn", "xn", "m"}:
+        return "n"
+    onset, vowel = split_ja_romaji_syllable(left)
+    if not onset and vowel in {"a", "i", "u", "e", "o"}:
+        return vowel
+    return ""
+
+
+def convert_ja_alias_style(alias, alias_style="original"):
+    """
+    일본어 에일리어스를 표기 스타일에 맞게 변환합니다.
+    alias_style: original | hiragana | romaji
+    """
+    style = (alias_style or "original").strip().lower()
+    if style in {"", "original", "원본", "원본 그대로"}:
+        return alias
+
+    parts = re.split(r"\s+", (alias or "").strip())
+    if not parts or parts == [""]:
+        return alias
+
+    bridge_v_prefix = _bridge_prefix_vowel_romaji(parts)
+    out_parts = []
+    for i, tok in enumerate(parts):
+        if tok in {"-", "R", "H", "r", "h"}:
+            out_parts.append(tok)
+            continue
+
+        if style in {"romaji", "roma", "로마자"}:
+            if _looks_japanese_kana(tok):
+                syls = parse_ja_filename(tok)
+                out_parts.append("".join(syls) if syls else tok)
+            else:
+                out_parts.append(tok.lower())
+            continue
+
+        if style in {"hiragana", "hira", "히라가나"}:
+            # VC/VCV 계열의 앞 V는 표기 옵션과 무관하게 로마자 유지
+            if i == 0 and bridge_v_prefix:
+                out_parts.append(bridge_v_prefix)
+                continue
+            if _looks_japanese_kana(tok):
+                out_parts.append(_katakana_to_hiragana(tok))
+            else:
+                out_parts.append(_romaji_token_to_hiragana(tok))
+            continue
+
+        out_parts.append(tok)
+
+    return " ".join(out_parts)
 
 # 기본 파라미터
 JA_DEFAULT_PARAMS = {
@@ -106,6 +248,139 @@ JA_VOICED_ONSETS = {
 JA_VOICELESS_ONSETS = {
     'k', 's', 't', 'p', 'h', 'f', 'sh', 'ch', 'ts',
     'q', 'c', 'ky', 'ty', 'py', 'hy', 'ss', 'kk', 'tt', 'pp',
+}
+
+JA_NASAL_ONSETS = {'m', 'n', 'ny', 'ng', 'ngy'}
+JA_LIQUID_ONSETS = {'r', 'ry', 'l'}
+JA_GLIDE_ONSETS = {'y', 'w'}
+JA_FRICATIVE_ONSETS = {'h', 'f', 'v', 'hy', 's', 'z', 'sh'}
+
+# vcv2cvvc(setting.csv) 방식의 p1~p4 구조를 직접 복제하지 않고,
+# 자음군별 상대 규칙으로 일반화한 CVVC 브릿지 보정 프리셋.
+JA_CVVC_BRIDGE_TIMING = {
+    'default': {
+        'offset_pad': 86.0,
+        'offset_pad_min': 42.0,
+        'offset_pad_floor': 36.0,
+        'offset_len_mul': 0.08,
+        'pre_lead_mul': 0.35,
+        'pre_lead_min': 8.0,
+        'pre_lead_max': 30.0,
+        'ovl_ratio': 0.50,
+        'ovl_min_ratio': 0.40,
+        'ovl_pre_margin': 6.0,
+        'tail_margin_base': 10.0,
+        'tail_margin_mul': 0.05,
+        'cons_add_base': 36.0,
+        'cons_add_mul': 0.12,
+        'cons_add_min': 20.0,
+        'cons_add_max': 68.0,
+        'cons_floor': 18.0,
+        'cons_to_next_margin': 8.0,
+        'cut_add_base': 58.0,
+        'cut_add_mul': 0.20,
+        'cut_add_min': 34.0,
+        'cut_add_max': 120.0,
+        'cut_min_gap': 16.0,
+        'cut_to_next_allow': 22.0,
+    },
+    'plosive': {
+        'offset_pad': 92.0,
+        'offset_len_mul': 0.07,
+        'pre_lead_mul': 0.42,
+        'ovl_ratio': 0.44,
+        'ovl_min_ratio': 0.34,
+        'tail_margin_base': 8.0,
+        'tail_margin_mul': 0.03,
+        'cons_add_base': 22.0,
+        'cons_add_mul': 0.08,
+        'cons_add_max': 46.0,
+        'cons_floor': 14.0,
+        'cut_add_base': 40.0,
+        'cut_add_mul': 0.16,
+        'cut_add_max': 82.0,
+        'cut_to_next_allow': 16.0,
+    },
+    'sibilant': {
+        'offset_pad': 114.0,
+        'offset_len_mul': 0.10,
+        'pre_lead_mul': 0.30,
+        'ovl_ratio': 0.58,
+        'ovl_min_ratio': 0.48,
+        'tail_margin_base': 13.0,
+        'tail_margin_mul': 0.06,
+        'cons_add_base': 44.0,
+        'cons_add_mul': 0.15,
+        'cons_add_max': 82.0,
+        'cut_add_base': 78.0,
+        'cut_add_mul': 0.24,
+        'cut_add_max': 148.0,
+        'cut_to_next_allow': 26.0,
+    },
+    'nasal': {
+        'offset_pad': 70.0,
+        'offset_len_mul': 0.06,
+        'pre_lead_mul': 0.22,
+        'ovl_ratio': 0.62,
+        'ovl_min_ratio': 0.50,
+        'tail_margin_base': 11.0,
+        'tail_margin_mul': 0.05,
+        'cons_add_base': 56.0,
+        'cons_add_mul': 0.16,
+        'cons_add_max': 94.0,
+        'cut_add_base': 88.0,
+        'cut_add_mul': 0.22,
+        'cut_add_max': 168.0,
+        'cut_to_next_allow': 32.0,
+    },
+    'liquid': {
+        'offset_pad': 64.0,
+        'offset_len_mul': 0.06,
+        'pre_lead_mul': 0.24,
+        'ovl_ratio': 0.60,
+        'ovl_min_ratio': 0.48,
+        'tail_margin_base': 10.0,
+        'tail_margin_mul': 0.05,
+        'cons_add_base': 52.0,
+        'cons_add_mul': 0.14,
+        'cons_add_max': 88.0,
+        'cut_add_base': 84.0,
+        'cut_add_mul': 0.20,
+        'cut_add_max': 152.0,
+        'cut_to_next_allow': 28.0,
+    },
+    'glide': {
+        'offset_pad': 66.0,
+        'offset_len_mul': 0.06,
+        'pre_lead_mul': 0.26,
+        'ovl_ratio': 0.56,
+        'ovl_min_ratio': 0.46,
+        'tail_margin_base': 10.0,
+        'tail_margin_mul': 0.05,
+        'cons_add_base': 46.0,
+        'cons_add_mul': 0.13,
+        'cons_add_max': 84.0,
+        'cut_add_base': 78.0,
+        'cut_add_mul': 0.20,
+        'cut_add_max': 148.0,
+        'cut_to_next_allow': 26.0,
+    },
+    'fricative': {
+        'offset_pad': 102.0,
+        'offset_len_mul': 0.09,
+        'pre_lead_mul': 0.30,
+        'ovl_ratio': 0.55,
+        'ovl_min_ratio': 0.46,
+        'tail_margin_base': 12.0,
+        'tail_margin_mul': 0.05,
+        'cons_add_base': 42.0,
+        'cons_add_mul': 0.14,
+        'cons_add_max': 84.0,
+        'cut_add_base': 72.0,
+        'cut_add_mul': 0.22,
+        'cut_add_max': 148.0,
+        'cut_to_next_allow': 26.0,
+    },
 }
 
 
@@ -496,6 +771,137 @@ def _select_vcv_syllable_index(alias, expected_idx, syllables_info):
     return e
 
 
+def _expand_vcv_lines_for_cvvc(lines, custom_map=None, include_bridge=True):
+    """
+    VCV alias를 CVVC 처리용으로 전개합니다.
+    - `a ka` -> `a k` + `ka` (bridge + CV)
+    - `a a`  -> `a a` + `a`  (VV + CV)
+    """
+    expanded = []
+    stats = {
+        "converted": 0,
+        "added_bridge": 0,
+        "added_cv": 0,
+    }
+    for raw in lines or []:
+        if "=" not in raw:
+            expanded.append(raw)
+            continue
+
+        rhs = raw.split("=", 1)[1]
+        alias = rhs.split(",", 1)[0].strip()
+        if not alias:
+            expanded.append(raw)
+            continue
+
+        alias_type = classify_ja_alias(alias, custom_map)
+        if alias_type != "vcv":
+            expanded.append(raw)
+            continue
+
+        parts = alias.split()
+        if len(parts) < 2:
+            expanded.append(raw)
+            continue
+
+        left_norm = _normalize_ja_syllable_token(parts[0])
+        right_norm = _normalize_ja_syllable_token(parts[1])
+        if not right_norm:
+            expanded.append(raw)
+            continue
+
+        _, left_vowel = split_ja_romaji_syllable(left_norm)
+        left_v = left_vowel if left_vowel in JA_VOWELS else left_norm
+        onset, vowel = split_ja_romaji_syllable(right_norm)
+
+        if include_bridge and left_v:
+            bridge_alias = ""
+            if onset:
+                bridge_alias = f"{left_v} {onset}"
+            elif vowel:
+                bridge_alias = f"{left_v} {vowel}"
+            if bridge_alias:
+                expanded.append(_replace_alias_in_oto_line(raw, bridge_alias))
+                stats["added_bridge"] += 1
+
+        expanded.append(_replace_alias_in_oto_line(raw, right_norm))
+        stats["added_cv"] += 1
+        stats["converted"] += 1
+
+    return expanded, stats
+
+
+def _compute_vcv_params_from_virtual_split(alias, prev_v_start, prev_v_end, c_boundary, n_end, base_shape=None):
+    """
+    VCV를 가상 `VC + CV`로 나눠 계산한 뒤 하나의 VCV 파라미터로 재조합합니다.
+    """
+    prev_v_len = max(float(prev_v_end) - float(prev_v_start), 40.0)
+    curr_v_len = max(float(n_end) - float(c_boundary), 40.0)
+    transition_gap = max(float(c_boundary) - float(prev_v_end), 0.0)
+
+    target = _extract_vcv_target_syllable(alias)
+    onset, _ = split_ja_romaji_syllable(target)
+    onset = (onset or "").strip().lower()
+    profile = _get_ja_cvvc_bridge_profile(onset)
+
+    pre_lead = _clamp_range(
+        transition_gap * profile.get("pre_lead_mul", 0.35),
+        profile.get("pre_lead_min", 8.0),
+        profile.get("pre_lead_max", 30.0),
+    )
+    boundary = max(float(prev_v_end) + 6.0, float(c_boundary) - pre_lead)
+
+    base_pad = profile.get("offset_pad", 86.0)
+    dyn_pad = base_pad + max(prev_v_len - 120.0, 0.0) * profile.get("offset_len_mul", 0.08)
+    pad_lo = profile.get("offset_pad_min", 42.0)
+    pad_hi = min(260.0, max(prev_v_len * 0.94, base_pad + 40.0))
+    offset_padding = _clamp_range(dyn_pad, pad_lo, pad_hi)
+    if prev_v_len < offset_padding:
+        offset_padding = max(prev_v_len * 0.76, profile.get("offset_pad_floor", 36.0))
+
+    offset = max(boundary - offset_padding, 0.0)
+    pre = max(boundary - offset, 8.0)
+
+    tail_margin = profile.get("tail_margin_base", 10.0) + prev_v_len * profile.get("tail_margin_mul", 0.05)
+    tail_margin = _clamp_range(tail_margin, 4.0, 24.0)
+    target_ovl_abs = float(prev_v_end) - tail_margin
+    upper_ovl = max(pre - profile.get("ovl_pre_margin", 6.0), 0.0)
+    lower_ovl = min(pre * profile.get("ovl_min_ratio", 0.40), upper_ovl)
+    ovl_anchored = min(upper_ovl, max(lower_ovl, target_ovl_abs - offset))
+    ovl = _blend(ovl_anchored, pre * profile.get("ovl_ratio", 0.50), 0.34)
+    ovl = min(upper_ovl, max(lower_ovl, ovl))
+
+    n_ref = max(curr_v_len, 60.0)
+    cons_add = profile.get("cons_add_base", 36.0) + max(n_ref - 70.0, 0.0) * profile.get("cons_add_mul", 0.12)
+    cons_add = _clamp_range(
+        cons_add,
+        profile.get("cons_add_min", 20.0),
+        profile.get("cons_add_max", 68.0),
+    )
+    consonant = pre + cons_add
+    consonant = max(consonant, pre + profile.get("cons_floor", 18.0))
+    consonant = min(consonant, pre + max(curr_v_len * 0.72, 96.0))
+
+    cut_add = profile.get("cut_add_base", 58.0) + max(n_ref - 70.0, 0.0) * profile.get("cut_add_mul", 0.20)
+    cut_add = _clamp_range(
+        cut_add,
+        profile.get("cut_add_min", 34.0),
+        profile.get("cut_add_max", 120.0),
+    )
+    cutoff_abs = max(
+        consonant + profile.get("cut_min_gap", 16.0),
+        pre + cut_add,
+    )
+    end_rel = max(float(n_end) - offset, pre + 40.0)
+    cutoff_abs = min(cutoff_abs, end_rel + profile.get("cut_to_next_allow", 22.0))
+    if cutoff_abs <= consonant + 10.0:
+        cutoff_abs = consonant + 12.0
+    cutoff = -cutoff_abs
+
+    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    return _apply_base_shape_blend(offset, consonant, cutoff, pre, ovl, base_shape, alias_type="vcv")
+
+
 def _mk_phone(start_t: float, end_t: float, mark: str):
     return SimpleNamespace(minTime=float(start_t), maxTime=float(end_t), mark=str(mark))
 
@@ -591,6 +997,72 @@ def _parse_oto_line_profile(line):
         "pre": pre,
         "ovl": ovl,
     }
+
+
+def _extract_base_timing_shape(line):
+    """
+    base oto 한 줄에서 상대 타이밍 shape를 추출합니다.
+    절대값(offset)은 직접 복사하지 않고, gap/ratio 중심으로 사용합니다.
+    """
+    p = _parse_oto_line_profile(line)
+    if not p:
+        return None
+    pre = max(float(p["pre"]), 0.0)
+    cons = max(float(p["cons"]), 0.0)
+    cut_abs = abs(float(p["cutoff"]))
+    ovl = max(float(p["ovl"]), 0.0)
+    off = max(float(p["offset"]), 0.0)
+
+    # auto-generated 0줄(템플릿 없음 fallback)은 shape로 쓰지 않는다.
+    if pre < 1.0 and cons < 1.0 and cut_abs < 1.0 and ovl < 1.0:
+        return None
+
+    cons_gap = max(cons - pre, 8.0)
+    cut_gap = max(cut_abs - cons, 16.0)
+    ovl_ratio = (ovl / pre) if pre > 1e-6 else 0.30
+    return {
+        "offset": off,
+        "pre": pre,
+        "cons_gap": cons_gap,
+        "cut_gap": cut_gap,
+        "ovl_ratio": _clamp_range(ovl_ratio, 0.04, 0.86),
+    }
+
+
+def _apply_base_shape_blend(offset, consonant, cutoff, pre, ovl, base_shape, alias_type="cv"):
+    if os.environ.get("UTOA_DISABLE_BASE_SHAPE_BLEND", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    if not base_shape:
+        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+
+    if alias_type in {"vc", "vv"}:
+        w = 0.30
+    elif alias_type == "vcv":
+        w = 0.34
+    elif alias_type == "cv_head":
+        w = 0.22
+    else:
+        w = 0.24
+
+    pre_t = _clamp_range(base_shape.get("pre", pre), 12.0, 420.0)
+    cons_gap_t = _clamp_range(base_shape.get("cons_gap", max(consonant - pre, 10.0)), 8.0, 260.0)
+    cut_gap_t = _clamp_range(base_shape.get("cut_gap", max(abs(cutoff) - consonant, 20.0)), 16.0, 300.0)
+    ovl_ratio_t = _clamp_range(base_shape.get("ovl_ratio", (ovl / pre) if pre > 0 else 0.30), 0.04, 0.86)
+
+    pre_new = _blend(pre, pre_t, w)
+    cons_gap_now = max(consonant - pre, 10.0)
+    cons_gap_new = _blend(cons_gap_now, cons_gap_t, min(0.42, w + 0.07))
+    cons_new = pre_new + cons_gap_new
+
+    cut_gap_now = max(abs(cutoff) - consonant, 20.0)
+    cut_gap_new = _blend(cut_gap_now, cut_gap_t, min(0.38, w + 0.03))
+    cutoff_new = -(cons_new + cut_gap_new)
+
+    ovl_ratio_now = (ovl / pre) if pre > 1e-6 else 0.30
+    ovl_ratio_new = _blend(ovl_ratio_now, ovl_ratio_t, min(0.38, w + 0.04))
+    ovl_new = max(0.0, pre_new * _clamp_range(ovl_ratio_new, 0.04, 0.86))
+
+    return validate_oto_params(offset, cons_new, cutoff_new, pre_new, ovl_new)
 
 
 def _normalize_alias_for_profile(alias):
@@ -822,6 +1294,27 @@ def _get_ja_timing_traits(alias_text, alias_type):
     return {"onset": onset, "manner": manner, "voicing": voicing}
 
 
+def _get_ja_cvvc_bridge_profile(onset):
+    o = (onset or "").strip().lower()
+    key = "default"
+    if o in JA_SIBILANT_ONSETS:
+        key = "sibilant"
+    elif o in JA_PLOSIVE_ONSETS:
+        key = "plosive"
+    elif o in JA_NASAL_ONSETS:
+        key = "nasal"
+    elif o in JA_LIQUID_ONSETS:
+        key = "liquid"
+    elif o in JA_GLIDE_ONSETS:
+        key = "glide"
+    elif o in JA_FRICATIVE_ONSETS:
+        key = "fricative"
+
+    merged = dict(JA_CVVC_BRIDGE_TIMING["default"])
+    merged.update(JA_CVVC_BRIDGE_TIMING.get(key, {}))
+    return merged
+
+
 def _apply_ja_consonant_timing_shaping(alias_text, alias_type, pre, consonant, cutoff, ovl):
     traits = _get_ja_timing_traits(alias_text, alias_type)
     manner = traits["manner"]
@@ -979,6 +1472,7 @@ def generate_ja_oto(
     fallback_format='cvvc',
     custom_phonemes_path='',
     alias_suffix='',
+    alias_style='original',
     auto_format=None,
     callback=None
 ):
@@ -995,6 +1489,7 @@ def generate_ja_oto(
         fallback_format: 템플릿이 없을 때 사용할 포맷 ('cvc', 'cvvc', 'vcv')
         custom_phonemes_path: 특수 발음 매핑 파일 경로
         alias_suffix: 생성되는 모든 에일리어스에 부여할 접미사 (예: 'C4' -> '_C4')
+        alias_style: 일본어 에일리어스 표기 방식 ('original'|'hiragana'|'romaji')
         auto_format: GUI 드롭다운 포맷 문자열 (있으면 fallback_format을 자동 매핑)
         callback: 진행 상황 콜백 함수
     
@@ -1044,6 +1539,10 @@ def generate_ja_oto(
         logger.info(msg)
         if callback:
             callback(msg)
+
+    def _alias_out(a):
+        a_conv = convert_ja_alias_style(a, alias_style=alias_style)
+        return apply_alias_suffix(a_conv, alias_suffix)
 
     errors = []
     skipped_entries = []
@@ -1473,7 +1972,7 @@ def generate_ja_oto(
 
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
                     for a in aliases_to_write:
-                        a2 = apply_alias_suffix(a, alias_suffix)
+                        a2 = _alias_out(a)
                         new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
                         final_lines.append(new_line)
                 processed += 1
@@ -1553,12 +2052,26 @@ def generate_ja_oto(
                 processed += 1
                 continue
 
+            lines_for_mapping = lines
+            if format_type in ('cvvc', 'cvc'):
+                lines_for_mapping, expand_stats = _expand_vcv_lines_for_cvvc(
+                    lines,
+                    custom_map=custom_map,
+                    include_bridge=(format_type == 'cvvc'),
+                )
+                if expand_stats.get("converted", 0) > 0:
+                    log(
+                        f"🧩 {fname}: VCV→{format_type.upper()} 전개 "
+                        f"(원본 {len(lines)}줄 → 전개 {len(lines_for_mapping)}줄, "
+                        f"bridge {expand_stats.get('added_bridge', 0)}개)"
+                    )
+
             # CV 순서 카운터로 리스트 순서 우선 매핑
             current_w_idx = 0
             cv_seq_idx = 0
             vc_seq_idx = 0
 
-            for line_num, line in enumerate(lines):
+            for line_num, line in enumerate(lines_for_mapping):
                 parts = line.split('=', 1)
                 if len(parts) < 2:
                     _record_unset("malformed_line", fname, line)
@@ -1571,6 +2084,7 @@ def generate_ja_oto(
                     preserved = f"{real_wav_name}={parts[1]}"
                     final_lines.append(apply_suffix_to_oto_line(preserved, alias_suffix))
                     continue
+                base_shape = _extract_base_timing_shape(line)
 
                 alias_type = classify_ja_alias(alias, custom_map)
 
@@ -1622,7 +2136,7 @@ def generate_ja_oto(
                     
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
                     for a in aliases_to_write:
-                        a2 = apply_alias_suffix(a, alias_suffix)
+                        a2 = _alias_out(a)
                         new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
                         final_lines.append(new_line)
                     continue
@@ -1654,7 +2168,7 @@ def generate_ja_oto(
 
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
                     for a in aliases_to_write:
-                        a2 = apply_alias_suffix(a, alias_suffix)
+                        a2 = _alias_out(a)
                         new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
                         final_lines.append(new_line)
                     continue
@@ -1691,24 +2205,10 @@ def generate_ja_oto(
                     else:
                         c_boundary = curr_phones[0].minTime * 1000
                         n_end = curr_phones[0].maxTime * 1000
-                        
-                    prev_v_len = prev_v_end - prev_v_start
-                    offset_padding = min(prev_v_len * 0.6, 200)
-                    if offset_padding < 80:
-                        offset_padding = max(prev_v_len * 0.5, 50)
-                        
-                    offset = prev_v_end - offset_padding
-                    if offset < 0: offset = 0
-                    
-                    pre = c_boundary - offset
-                    c_hint = curr_phones[0].mark if curr_phones else ""
-                    ovl = _adaptive_ja_overlap(pre, c_hint, mode="vcv")
-                    
-                    vowel_len = n_end - c_boundary
-                    added_cons = min(vowel_len * 0.5, 200)
-                    if added_cons < 80: added_cons = 80
-                    consonant = pre + added_cons
-                    cutoff = -(consonant + vowel_len * 0.25)
+
+                    offset, consonant, cutoff, pre, ovl = _compute_vcv_params_from_virtual_split(
+                        alias, prev_v_start, prev_v_end, c_boundary, n_end, base_shape=base_shape
+                    )
                     
                     offset, consonant, cutoff, pre, ovl = _post_adjust_params(
                         offset, consonant, cutoff, pre, ovl, alias_type='vcv', alias_text=alias
@@ -1716,7 +2216,7 @@ def generate_ja_oto(
                     
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
                     for a in aliases_to_write:
-                        a2 = apply_alias_suffix(a, alias_suffix)
+                        a2 = _alias_out(a)
                         new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
                         final_lines.append(new_line)
                     continue
@@ -1753,6 +2253,10 @@ def generate_ja_oto(
                     if added_cons < 80: added_cons = 80
                     consonant = pre + added_cons
                     cutoff = -(consonant + cv_vowel_len * 0.25)
+
+                    offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
+                        offset, consonant, cutoff, pre, ovl, base_shape, alias_type="cv_head"
+                    )
                     
                     offset, consonant, cutoff, pre, ovl = _post_adjust_params(
                         offset, consonant, cutoff, pre, ovl, alias_type='cv_head', alias_text=alias
@@ -1760,7 +2264,7 @@ def generate_ja_oto(
                     
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
                     for a in aliases_to_write:
-                        a2 = apply_alias_suffix(a, alias_suffix)
+                        a2 = _alias_out(a)
                         new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
                         final_lines.append(new_line)
                     continue
@@ -1839,20 +2343,33 @@ def generate_ja_oto(
                     v_len = c_end - c_start
                     n_len = n_end - n_start
                     transition_gap = max(n_start - c_end, 0.0)
+                    c_char = get_vc_consonant(alias)
+                    bridge_profile = _get_ja_cvvc_bridge_profile(c_char) if alias_type == 'vc' else None
 
                     # VC는 pre 기준점을 약간 앞당겨(다음 자음 시작 직전) 박자 밀림을 완화한다.
                     if alias_type == 'vc':
-                        pre_lead = min(max(transition_gap * 0.45, 10.0), 32.0)
+                        pre_lead_mul = bridge_profile.get('pre_lead_mul', 0.35) if bridge_profile else 0.35
+                        pre_lead_min = bridge_profile.get('pre_lead_min', 8.0) if bridge_profile else 8.0
+                        pre_lead_max = bridge_profile.get('pre_lead_max', 32.0) if bridge_profile else 32.0
+                        pre_lead = min(max(transition_gap * pre_lead_mul, pre_lead_min), pre_lead_max)
                         boundary = max(c_end + 8.0, boundary - pre_lead)
 
-                    offset_padding = 180
-                    if v_len < offset_padding:
-                        offset_padding = max(v_len * 0.8, 50)
+                    if alias_type == 'vc' and bridge_profile:
+                        base_pad = bridge_profile.get('offset_pad', 86.0)
+                        dyn_pad = base_pad + max(v_len - 140.0, 0.0) * bridge_profile.get('offset_len_mul', 0.08)
+                        pad_lo = bridge_profile.get('offset_pad_min', 42.0)
+                        pad_hi = min(240.0, max(v_len * 0.92, base_pad + 36.0))
+                        offset_padding = _clamp_range(dyn_pad, pad_lo, pad_hi)
+                        if v_len < offset_padding:
+                            offset_padding = max(v_len * 0.78, bridge_profile.get('offset_pad_floor', 36.0))
+                    else:
+                        offset_padding = 180
+                        if v_len < offset_padding:
+                            offset_padding = max(v_len * 0.8, 50)
 
                     offset = boundary - offset_padding
                     pre = boundary - offset
 
-                    c_char = get_vc_consonant(alias)
                     ovl_mode = 'vv' if alias_type == 'vv' else 'vc'
                     ovl = _adaptive_ja_overlap(pre, c_char, mode=ovl_mode)
 
@@ -1860,11 +2377,23 @@ def generate_ja_oto(
                     # 절대 위치 기준으로 맞춘 뒤, pre보다 작게 유지한다.
                     if pre > 0:
                         if alias_type == 'vc':
-                            tail_margin = min(max(v_len * 0.08, 4.0), 18.0)
+                            if bridge_profile:
+                                tail_margin = bridge_profile.get('tail_margin_base', 10.0) + v_len * bridge_profile.get('tail_margin_mul', 0.05)
+                                tail_margin = _clamp_range(tail_margin, 4.0, 24.0)
+                                ovl_pre_margin = bridge_profile.get('ovl_pre_margin', 6.0)
+                                ovl_min_ratio = bridge_profile.get('ovl_min_ratio', 0.40)
+                                ovl_ratio = bridge_profile.get('ovl_ratio', 0.50)
+                            else:
+                                tail_margin = min(max(v_len * 0.08, 4.0), 18.0)
+                                ovl_pre_margin = 6.0
+                                ovl_min_ratio = 0.40
+                                ovl_ratio = 0.50
                             target_ovl_abs = c_end - tail_margin
-                            upper_ovl = max(pre - 6.0, 0.0)
-                            lower_ovl = min(pre * 0.58, upper_ovl)
-                            ovl = min(upper_ovl, max(lower_ovl, target_ovl_abs - offset))
+                            upper_ovl = max(pre - ovl_pre_margin, 0.0)
+                            lower_ovl = min(pre * ovl_min_ratio, upper_ovl)
+                            ovl_anchored = min(upper_ovl, max(lower_ovl, target_ovl_abs - offset))
+                            ovl = _blend(ovl_anchored, pre * ovl_ratio, 0.28)
+                            ovl = min(upper_ovl, max(lower_ovl, ovl))
                         elif alias_type == 'vv':
                             tail_margin = min(max(v_len * 0.12, 6.0), 22.0)
                             target_ovl_abs = c_end - tail_margin
@@ -1878,7 +2407,32 @@ def generate_ja_oto(
                     # 음소 경계 이상치(긴 무음/정렬 흔들림)로 인한 과도 확장 방지
                     next_cv_pre_rel = min(next_cv_pre_rel, pre + 260)
 
-                    if is_plosive:
+                    if alias_type == 'vc' and bridge_profile:
+                        n_ref = max(n_len, 60.0)
+                        cons_add = bridge_profile.get('cons_add_base', 36.0) + max(n_ref - 70.0, 0.0) * bridge_profile.get('cons_add_mul', 0.12)
+                        cons_add = _clamp_range(
+                            cons_add,
+                            bridge_profile.get('cons_add_min', 20.0),
+                            bridge_profile.get('cons_add_max', 68.0),
+                        )
+                        consonant = min(pre + cons_add, next_cv_pre_rel - bridge_profile.get('cons_to_next_margin', 8.0))
+                        consonant = max(consonant, pre + bridge_profile.get('cons_floor', 18.0))
+
+                        cut_add = bridge_profile.get('cut_add_base', 58.0) + max(n_ref - 70.0, 0.0) * bridge_profile.get('cut_add_mul', 0.20)
+                        cut_add = _clamp_range(
+                            cut_add,
+                            bridge_profile.get('cut_add_min', 34.0),
+                            bridge_profile.get('cut_add_max', 120.0),
+                        )
+                        cutoff_abs = max(
+                            consonant + bridge_profile.get('cut_min_gap', 16.0),
+                            pre + cut_add,
+                        )
+                        cutoff_abs = min(cutoff_abs, next_cv_pre_rel + bridge_profile.get('cut_to_next_allow', 22.0))
+                        if cutoff_abs <= consonant + 8:
+                            cutoff_abs = consonant + 10
+                        cutoff = -cutoff_abs
+                    elif is_plosive:
                         # 파열/파찰음은 VC 쪽에서 자음을 과감히 절단해 중복 파열을 방지
                         n_ref = max(n_len, 60)
                         added_cons = min(max(n_ref * 0.25, 18), 40)
@@ -1908,13 +2462,16 @@ def generate_ja_oto(
                         cutoff_abs = min(cutoff_abs, consonant + 95)
                         cutoff = -cutoff_abs
 
+                offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
+                    offset, consonant, cutoff, pre, ovl, base_shape, alias_type=alias_type
+                )
                 offset, consonant, cutoff, pre, ovl = _post_adjust_params(
                     offset, consonant, cutoff, pre, ovl, alias_type=alias_type, alias_text=alias
                 )
 
                 aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
                 for a in aliases_to_write:
-                    a2 = apply_alias_suffix(a, alias_suffix)
+                    a2 = _alias_out(a)
                     new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
                     final_lines.append(new_line)
 
@@ -1980,7 +2537,7 @@ def generate_ja_oto(
 
                         aliases_to_write = generate_ja_openutau_aliases(detected_vowel) if generate_openutau else [detected_vowel]
                         for a in aliases_to_write:
-                            a2 = apply_alias_suffix(a, alias_suffix)
+                            a2 = _alias_out(a)
                             new_line = f"{tg_info['real_name']}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
                             final_lines.append(new_line)
                 except:
