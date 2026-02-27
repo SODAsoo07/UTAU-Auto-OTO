@@ -733,7 +733,7 @@ def _resolve_cv_syllable_index(target_clean, romaji_syllables, cv_seq_idx, curre
     best_score = -1
     # diphthong/r-l 혼용 케이스를 위해 탐색 범위를 넓혀 안정적으로 음절 정렬
     scan_start = max(cv_seq_idx - 1, 0)
-    scan_end = min(cv_seq_idx + 5, len(romaji_syllables))
+    scan_end = min(cv_seq_idx + 4, len(romaji_syllables))
     for i in range(scan_start, scan_end):
         score = _cv_match_score(target_clean, romaji_syllables[i])
         score -= abs(i - cv_seq_idx) * 4
@@ -766,6 +766,13 @@ def _resolve_cv_syllable_index(target_clean, romaji_syllables, cv_seq_idx, curre
             and expected_score >= max(50, best_score - 20)
         ):
             chosen_idx = cv_seq_idx
+        if name_match_idx > (cv_seq_idx + 1):
+            if expected_score >= 46:
+                chosen_idx = cv_seq_idx
+            elif best_gain < 30:
+                chosen_idx = cv_seq_idx
+            elif same_vowel_expected and best_gain < 34:
+                chosen_idx = cv_seq_idx
         # 한 음절 점프는 충분히 큰 이득이 없으면 보수적으로 유지합니다.
         if abs(name_match_idx - cv_seq_idx) == 1:
             min_gain = 22
@@ -775,12 +782,18 @@ def _resolve_cv_syllable_index(target_clean, romaji_syllables, cv_seq_idx, curre
                 min_gain = 20
             if best_gain < min_gain:
                 chosen_idx = cv_seq_idx
+            # 기대 음절이 이미 target 모음을 만족하면, 모음 불일치 전진 점프를 차단한다.
+            if same_vowel_expected and (not best_vowel_match) and name_match_idx > cv_seq_idx:
+                chosen_idx = cv_seq_idx
             if same_vowel_expected and (not best_vowel_match) and best_gain < 22:
                 chosen_idx = cv_seq_idx
             if same_onset_expected and (not (target_onset and best_onset and target_onset[:1] == best_onset[:1])) and best_gain < 24:
                 chosen_idx = cv_seq_idx
         # 뒤로 가는 선택도 점수 이득이 충분하지 않으면 방지합니다.
-        if name_match_idx < cv_seq_idx and best_gain < 24:
+        if name_match_idx < cv_seq_idx:
+            if same_vowel_expected or expected_score >= 38 or best_gain < 32:
+                chosen_idx = cv_seq_idx
+        if chosen_idx < cv_seq_idx:
             chosen_idx = cv_seq_idx
         current_w_idx = chosen_idx
     else:
@@ -788,6 +801,47 @@ def _resolve_cv_syllable_index(target_clean, romaji_syllables, cv_seq_idx, curre
 
     cv_seq_idx = current_w_idx + 1
     return current_w_idx, cv_seq_idx
+
+
+def _find_kr_cv_vowel_match_index(target_clean, romaji_syllables, expected_idx, search_back=1, search_fwd=2):
+    """
+    CV 목표 모음과 일치하는 음절을 기대 인덱스 근방에서 재탐색합니다.
+    한 음절 밀림(특히 이중모음/반모음) 보정용 안전장치입니다.
+    """
+    if not target_clean or not romaji_syllables:
+        return None
+    n = len(romaji_syllables)
+    if n <= 0:
+        return None
+    e = max(0, min(int(expected_idx), n - 1))
+
+    t_onset, t_vowel, _t_coda = _split_kr_syllable_parts(target_clean)
+    if not t_vowel:
+        return None
+
+    lo = max(0, e - max(0, int(search_back)))
+    hi = min(n - 1, e + max(0, int(search_fwd)))
+    best_idx = None
+    best_score = -10**9
+    for i in range(lo, hi + 1):
+        cand = romaji_syllables[i]
+        c_onset, c_vowel, _c_coda = _split_kr_syllable_parts(cand)
+        if not c_vowel or c_vowel != t_vowel:
+            continue
+        score = 100 - (abs(i - e) * 16)
+        if t_onset and c_onset:
+            if t_onset == c_onset:
+                score += 18
+            elif t_onset[:1] == c_onset[:1]:
+                score += 8
+            else:
+                score -= 10
+        elif t_onset != c_onset:
+            score -= 4
+        if score > best_score:
+            best_score = score
+            best_idx = i
+    return best_idx
 
 
 def _prepare_cv_bounds_from_syllable(syllables_info, current_w_idx):
@@ -3217,6 +3271,7 @@ def generate_oto(
             
             cv_targets = _extract_cv_targets_from_lines(lines, custom_map)
             syllables_info = []
+            used_words_based = False
             if wd_intervals:
                 for w in wd_intervals:
                     w_start = w.minTime
@@ -3237,6 +3292,7 @@ def generate_oto(
                         'end_time': w_end,
                         'phones': s_phones
                     })
+                used_words_based = len(syllables_info) > 0
 
             alias_based = _build_kr_syllables_from_phone_nuclei(ph_intervals, cv_targets) if cv_targets else None
             if not syllables_info and alias_based:
@@ -3246,13 +3302,21 @@ def generate_oto(
                 base_score = _score_kr_syllable_mapping(syllables_info, cv_targets)
                 alt_score = _score_kr_syllable_mapping(alias_based, cv_targets)
                 # TextGrid(words) 결과를 우선 사용하되, alias/filename 기준과 심하게 어긋난 경우만 보정.
-                if base_score < 66.0 and alt_score >= 70.0 and alt_score >= (base_score + 8.0):
+                allow_alias_override = True
+                if used_words_based and base_score >= 58.0:
+                    allow_alias_override = False
+                if allow_alias_override and base_score < 66.0 and alt_score >= 70.0 and alt_score >= (base_score + 8.0):
                     syllables_info = alias_based
                     log(
                         f"🧭 {fname}: 매핑 이탈 보정 적용 "
                         f"(base={base_score:.1f}, corrected={alt_score:.1f})"
                     )
                 else:
+                    if (not allow_alias_override) and alt_score >= (base_score + 8.0):
+                        log(
+                            f"🧭 {fname}: words 매핑 신뢰도 높음 → alias 보정 생략 "
+                            f"(base={base_score:.1f}, corrected={alt_score:.1f})"
+                        )
                     log(
                         f"🧭 {fname}: TextGrid(words) 매핑 유지 "
                         f"(base={base_score:.1f}, corrected={alt_score:.1f})"
@@ -3552,9 +3616,25 @@ def generate_oto(
                 
 
                 if not is_vc:
+                    expected_cv_idx = cv_seq_idx
                     current_w_idx, cv_seq_idx = _resolve_cv_syllable_index(
                         target_clean, romaji_syllables, cv_seq_idx, current_w_idx
                     )
+                    target_onset, target_vowel, _target_coda = _split_kr_syllable_parts(target_clean)
+                    if target_vowel and 0 <= current_w_idx < len(romaji_syllables):
+                        _curr_onset, curr_vowel, _curr_coda = _split_kr_syllable_parts(romaji_syllables[current_w_idx])
+                        if curr_vowel and curr_vowel != target_vowel:
+                            fixed_idx = _find_kr_cv_vowel_match_index(
+                                target_clean, romaji_syllables, expected_cv_idx, search_back=1, search_fwd=2
+                            )
+                            if fixed_idx is not None and fixed_idx >= expected_cv_idx:
+                                if fixed_idx != current_w_idx and abs(fixed_idx - expected_cv_idx) <= 2:
+                                    log(
+                                        f"🧭 {fname}: CV 모음 불일치 보정 "
+                                        f"{expected_cv_idx + 1}->{fixed_idx + 1} ({alias})"
+                                    )
+                                current_w_idx = fixed_idx
+                                cv_seq_idx = current_w_idx + 1
                     current_w_idx, curr_phones, c_start, c_end, n_start, n_end = _prepare_cv_bounds_from_syllable(
                         syllables_info, current_w_idx
                     )
