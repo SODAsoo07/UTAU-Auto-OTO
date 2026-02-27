@@ -183,7 +183,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(row2b, text="", width=120).pack(side="left")
         self.no_base_oto_checkbox = ctk.CTkCheckBox(
             row2b,
-            text="'베이스 OTO 없음' (CVVC/VCV OpenUtau 호환 에일리어스 자동 생성)",
+            text="'템플릿 OTO 없음' (CVVC/VCV OpenUtau 호환 에일리어스 자동 생성)",
             variable=self.no_base_oto_var,
             command=self._on_no_base_oto_toggle,
             text_color="#A5D6A7",
