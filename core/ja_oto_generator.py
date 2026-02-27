@@ -943,6 +943,56 @@ def _ja_onset_class(onset):
     return "other"
 
 
+def _ja_cv_onset_class(alias_text, c_hint="", alias_type="cv"):
+    onset = _ja_extract_onset_for_timing(alias_text, alias_type=alias_type)
+    if not onset:
+        hint = re.sub(r"[^a-z]", "", (c_hint or "").lower())
+        onset = hint
+    return _ja_onset_class(onset), onset
+
+
+def _ja_cv_offset_and_pre(c_start, c_end, alias_text, c_hint="", alias_type="cv"):
+    """
+    JA CV/CV_HEAD의 과도한 선행 리드를 줄이기 위해 onset 계열별 offset/pre를 계산합니다.
+    """
+    cls, onset = _ja_cv_onset_class(alias_text, c_hint=c_hint, alias_type=alias_type)
+    is_head = alias_type == "cv_head"
+
+    lead = 30.0
+    if cls == "nasal":
+        lead = 18.0
+    elif cls == "voiced":
+        lead = 24.0
+    elif cls == "voiceless":
+        lead = 34.0
+    if onset in JA_SIBILANT_ONSETS or onset in JA_FRICATIVE_ONSETS:
+        lead += 6.0
+    if onset in {"m", "n", "ny", "r", "l", "ry"}:
+        lead -= 4.0
+    if is_head:
+        lead -= 4.0
+    lead = _clamp_range(lead, 12.0, 50.0)
+
+    offset = max(float(c_start) - lead, 0.0)
+    pre = float(c_end) - offset if c_end > c_start else (28.0 if is_head else 24.0)
+
+    if c_end > c_start:
+        c_len = max(float(c_end) - float(c_start), 8.0)
+        min_pre = max(20.0, c_len + 8.0)
+        if cls in {"nasal", "voiced"}:
+            max_pre = c_len + 64.0
+        elif cls == "voiceless":
+            max_pre = c_len + 54.0
+        else:
+            max_pre = c_len + 58.0
+        if is_head:
+            max_pre += 10.0
+        pre = _clamp_range(pre, min_pre, max_pre)
+        offset = max(float(c_end) - pre, 0.0)
+
+    return offset, pre
+
+
 def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type="cv"):
     if not syllables_info:
         return 0
@@ -985,8 +1035,40 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
 
     if best_score >= 54:
         # Diphthong/glide rows can over-jump; keep expected index when nearly tied.
-        hold_margin = 6 if target_cls in {"nasal", "voiced"} else 9
+        hold_margin = 14 if target_cls in {"nasal", "voiced"} else 16
+        best_gain = best_score - expected_score
+        expected_tok = _syllable_info_token(syllables_info[e])
+        best_tok = _syllable_info_token(syllables_info[best_idx])
+        _to, target_vowel = split_ja_romaji_syllable(target)
+        _eo, expected_vowel = split_ja_romaji_syllable(expected_tok)
+        _bo, best_vowel = split_ja_romaji_syllable(best_tok)
+        expected_onset = _extract_ja_onset_token(expected_tok)
+        best_onset = _extract_ja_onset_token(best_tok)
+        same_vowel_expected = bool(target_vowel and expected_vowel and target_vowel == expected_vowel)
+        best_vowel_match = bool(target_vowel and best_vowel and target_vowel == best_vowel)
+        same_onset_expected = bool(
+            target_onset and expected_onset and (target_onset == expected_onset or target_onset[:1] == expected_onset[:1])
+        )
+        best_onset_match = bool(
+            target_onset and best_onset and (target_onset == best_onset or target_onset[:1] == best_onset[:1])
+        )
+
         if best_idx > e and expected_score >= max(50, best_score - hold_margin):
+            return e
+        # 한 음절 점프는 충분한 점수 이득이 없으면 유지(일/한 공통 안전장치).
+        if abs(best_idx - e) == 1:
+            min_gain = 22
+            if target_cls in {"nasal", "voiced"}:
+                min_gain = 20
+            if same_vowel_expected:
+                min_gain = min(min_gain, 18)
+            if best_gain < min_gain:
+                return e
+            if same_vowel_expected and (not best_vowel_match) and best_gain < 20:
+                return e
+            if same_onset_expected and (not best_onset_match) and best_gain < 24:
+                return e
+        if best_idx < e and best_gain < 24:
             return e
         return best_idx
     return e
@@ -2468,6 +2550,8 @@ def generate_ja_oto(
                     if prev_end_ms is not None and next_start_ms is not None:
                         if alias_type in ('vc', 'vv'):
                             target = max(prev_end_ms + 4.0, next_start_ms - 6.0)
+                        elif alias_type in ('cv', 'cv_head'):
+                            target = max(prev_end_ms + 3.0, next_start_ms - 4.0)
                         else:
                             target = prev_end_ms
                     if abs(target - pre_abs) >= 2.0:
@@ -2706,9 +2790,12 @@ def generate_ja_oto(
                     n_end = curr_phones[0].maxTime * 1000
 
                 c_hint = curr_phones[0].mark if curr_phones else ""
+                anchor_alias = syl.get('roman_cv') or syl.get('roman') or syl.get('word') or ""
                 cv_vowel_len = max(n_end - n_start, 20.0)
-                offset = max(c_start - 50.0, 0.0)
-                pre = max(c_end - offset, 10.0)
+                offset, pre = _ja_cv_offset_and_pre(
+                    c_start, c_end, anchor_alias, c_hint=c_hint, alias_type="cv"
+                )
+                pre = max(pre, 10.0)
                 ovl = _adaptive_ja_overlap(pre, c_hint, mode="cv")
                 v_ref = max(cv_vowel_len, 120.0)
                 added_cons = min(max(v_ref * 0.45, 70.0), 180.0)
@@ -3019,9 +3106,10 @@ def generate_ja_oto(
                         n_start = c_start
                         n_end = curr_phones[0].maxTime * 1000
                         
-                    offset = max(c_start - 50, 0)
-                    pre = c_end - offset if c_end > c_start else 30
                     c_hint = curr_phones[0].mark if curr_phones else ""
+                    offset, pre = _ja_cv_offset_and_pre(
+                        c_start, c_end, alias, c_hint=c_hint, alias_type="cv_head"
+                    )
                     onset_hint_local = c_hint
                     ovl = _adaptive_ja_overlap(pre, c_hint, mode="cv_head")
                     
@@ -3097,16 +3185,12 @@ def generate_ja_oto(
                         n_end = curr_phones[0].maxTime * 1000
 
                     cv_vowel_len = n_end - n_start
-                    c_len = c_end - c_start
-                    boundary = c_end
 
-                    offset = c_start - 50
-                    if offset < 0:
-                        offset = 0
-
-                    pre = boundary - offset
-                    if pre < 10: pre = 10
                     c_hint = curr_phones[0].mark if curr_phones else ""
+                    offset, pre = _ja_cv_offset_and_pre(
+                        c_start, c_end, alias, c_hint=c_hint, alias_type="cv"
+                    )
+                    if pre < 10: pre = 10
                     onset_hint_local = c_hint
                     ovl = _adaptive_ja_overlap(pre, c_hint, mode="cv")
 

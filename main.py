@@ -9,6 +9,36 @@ import datetime
 import logging
 import traceback
 
+
+def _suppress_windows_loader_popup():
+    """
+    DLL 누락/로드 실패 시 Windows 시스템 팝업(오류 대화상자)을 억제합니다.
+    실행 자체는 계속되며, 오류는 로그/예외로 처리됩니다.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        SEM_FAILCRITICALERRORS = 0x0001
+        SEM_NOOPENFILEERRORBOX = 0x8000
+        SEM_NOGPFAULTERRORBOX = 0x0002
+        flags = SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX | SEM_NOGPFAULTERRORBOX
+        prev = kernel32.SetErrorMode(flags)
+        try:
+            # 지원되는 환경에서는 기존 모드와 병합해 현재 스레드에도 동일 모드 적용
+            set_thread_error_mode = kernel32.SetThreadErrorMode
+            old_mode = ctypes.c_uint(0)
+            set_thread_error_mode(ctypes.c_uint(prev | flags), ctypes.byref(old_mode))
+        except Exception:
+            # 구형 환경에서는 SetErrorMode만으로 충분
+            pass
+    except Exception:
+        pass
+
+
+_suppress_windows_loader_popup()
+
 try:
     import customtkinter as ctk
 except ImportError:

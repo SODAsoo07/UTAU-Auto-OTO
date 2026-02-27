@@ -417,21 +417,29 @@ def _compute_kr_cv_timing(c_start, c_end, cv_vowel_len, c_hint, alias_onset, is_
         return offset, consonant, cutoff, pre, ovl
 
     if is_tense_cv:
-        offset = max(c_start - 48.0, 0.0)
+        lead = 34.0
+        pre_target = _clamp(max(c_end - c_start, 8.0) + lead, 54.0, 176.0)
+        offset = max(boundary - pre_target, 0.0)
         pre = boundary - offset
         ovl = adaptive_overlap(pre, c_hint, mode='cv')
         ovl = min(ovl, max(pre * 0.32, 9.0))
     elif is_sonorant_cv:
-        offset = max(c_start - 72.0, 0.0)
+        lead = 44.0
+        pre_target = _clamp(max(c_end - c_start, 8.0) + lead, 66.0, 216.0)
+        offset = max(boundary - pre_target, 0.0)
         pre = boundary - offset
         ovl = adaptive_overlap(pre, c_hint, mode='cv')
         ovl = max(ovl, min(pre * 0.50, max(pre - 8.0, 0.0)))
     elif is_plosive:
-        offset = max(c_start - 44.0, 0.0)
+        lead = 32.0
+        pre_target = _clamp(max(c_end - c_start, 8.0) + lead, 50.0, 164.0)
+        offset = max(boundary - pre_target, 0.0)
         pre = boundary - offset
         ovl = adaptive_overlap(pre, c_hint, mode='cv')
     else:
-        offset = max(c_start - 62.0, 0.0)
+        lead = 40.0
+        pre_target = _clamp(max(c_end - c_start, 8.0) + lead, 58.0, 192.0)
+        offset = max(boundary - pre_target, 0.0)
         pre = boundary - offset
         ovl = adaptive_overlap(pre, c_hint, mode='cv')
 
@@ -665,11 +673,14 @@ def _prepare_cv_head_syllable_timing(syllables_info, current_w_idx, cv_seq_idx, 
     is_sonorant_cv = _is_sonorant_consonant(c_hint, alias_onset)
 
     if is_tense_cv:
-        offset = max(c_start - 46, 0)
+        pre_target = _clamp(max(c_end - c_start, 8.0) + 34.0, 50.0, 170.0)
+        offset = max(c_end - pre_target, 0.0)
     elif is_sonorant_cv:
-        offset = max(c_start - 72, 0)
+        pre_target = _clamp(max(c_end - c_start, 8.0) + 42.0, 62.0, 205.0)
+        offset = max(c_end - pre_target, 0.0)
     else:
-        offset = max(c_start - 44, 0)
+        pre_target = _clamp(max(c_end - c_start, 8.0) + 32.0, 48.0, 162.0)
+        offset = max(c_end - pre_target, 0.0)
 
     pre = c_end - offset if c_end > c_start else 30
     ovl = adaptive_overlap(pre, c_hint, mode='cv_head')
@@ -738,11 +749,38 @@ def _resolve_cv_syllable_index(target_clean, romaji_syllables, cv_seq_idx, curre
 
     if name_match_idx is not None and best_score >= 62:
         chosen_idx = name_match_idx
+        best_gain = best_score - expected_score
+        target_onset, target_vowel, _target_coda = _split_kr_syllable_parts(target_clean)
+        expected_tok = romaji_syllables[cv_seq_idx] if 0 <= cv_seq_idx < len(romaji_syllables) else ""
+        best_tok = romaji_syllables[name_match_idx] if 0 <= name_match_idx < len(romaji_syllables) else ""
+        exp_onset, exp_vowel, _exp_coda = _split_kr_syllable_parts(expected_tok)
+        best_onset, best_vowel, _best_coda = _split_kr_syllable_parts(best_tok)
+        same_vowel_expected = bool(target_vowel and exp_vowel and target_vowel == exp_vowel)
+        best_vowel_match = bool(target_vowel and best_vowel and target_vowel == best_vowel)
+        same_onset_expected = bool(
+            target_onset and exp_onset and (target_onset == exp_onset or target_onset[:1] == exp_onset[:1])
+        )
         # 이중모음/종성 포함 토큰에서 발생하는 과도한 앞 점프를 억제한다.
         if (
             name_match_idx > cv_seq_idx
-            and expected_score >= max(58, best_score - 10)
+            and expected_score >= max(50, best_score - 20)
         ):
+            chosen_idx = cv_seq_idx
+        # 한 음절 점프는 충분히 큰 이득이 없으면 보수적으로 유지합니다.
+        if abs(name_match_idx - cv_seq_idx) == 1:
+            min_gain = 22
+            if same_vowel_expected:
+                min_gain = 18
+            elif same_onset_expected:
+                min_gain = 20
+            if best_gain < min_gain:
+                chosen_idx = cv_seq_idx
+            if same_vowel_expected and (not best_vowel_match) and best_gain < 22:
+                chosen_idx = cv_seq_idx
+            if same_onset_expected and (not (target_onset and best_onset and target_onset[:1] == best_onset[:1])) and best_gain < 24:
+                chosen_idx = cv_seq_idx
+        # 뒤로 가는 선택도 점수 이득이 충분하지 않으면 방지합니다.
+        if name_match_idx < cv_seq_idx and best_gain < 24:
             chosen_idx = cv_seq_idx
         current_w_idx = chosen_idx
     else:
