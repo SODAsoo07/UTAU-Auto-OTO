@@ -1,4 +1,4 @@
-"""
+﻿"""
 MFA (Montreal Forced Aligner) 실행 모듈
 - 로컬 또는 포터블 Conda 환경에서 MFA 실행
 - 실시간 로그 스트리밍
@@ -194,57 +194,104 @@ def check_mfa_model(mfa_path, language='korean'):
 
 def ensure_korean_support(mfa_path, callback=None):
     """
-    MFA 실행 전, 한국어 처리에 필요한 eunjeon, jamo 모듈이 설치되어 있는지 확인하고
-    설치되어 있지 않다면 즉시 설치한 후 MFA 소스코드를 패치합니다.
+    Ensure Korean MFA tokenizer dependencies are available:
+    - eunjeon
+    - jamo
     """
     def log(msg):
         logger.info(msg)
         if callback:
             callback(msg)
-
-    if not mfa_path or 'Scripts' not in mfa_path:
+    if not mfa_path:
+        return False
+    if 'Scripts' not in mfa_path:
+        # System MFA path; skip env-local auto install here.
         return True
-
     env_dir = os.path.dirname(os.path.dirname(mfa_path))
     python_exe = os.path.join(env_dir, 'python.exe')
-    
+    pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
     if not os.path.exists(python_exe):
-        return True
-
-    # Check if eunjeon and jamo are installed
+        return False
     check_cmd = [python_exe, '-c', 'import eunjeon; import jamo']
     try:
-        result = subprocess.run(check_cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            # Already installed, but ensure patch is applied just in case
+        env = _get_conda_env(mfa_path)
+
+        def _looks_like_pyexpat_dll_issue(msg):
+            s = (msg or '').lower()
+            return ('pyexpat' in s and 'dll load failed' in s) or ('libexpat' in s and 'not found' in s)
+
+        def _try_repair_pyexpat():
+            conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
+            cmds = []
+            if os.path.exists(conda_exe):
+                cmds.append([conda_exe, 'install', '-y', '-p', env_dir, 'libexpat'])
+            system_conda = shutil.which('conda')
+            if system_conda:
+                cmds.append([system_conda, 'install', '-y', '-p', env_dir, 'libexpat'])
+            for cmd in cmds:
+                log(f"   -> repair cmd: {' '.join(cmd)}")
+                res = subprocess.run(cmd, capture_output=True, text=True, env=env)
+                if res.returncode == 0:
+                    return True
+            return False
+
+        def _check_imports():
+            res = subprocess.run(check_cmd, capture_output=True, text=True, env=env)
+            if res.returncode == 0:
+                return True, ''
+            detail = (res.stderr or res.stdout or '').strip()
+            return False, detail
+        ok, detail = _check_imports()
+        if (not ok) and _looks_like_pyexpat_dll_issue(detail):
+            log('[MFA] Detected pyexpat/libexpat DLL issue; trying repair...')
+            if _try_repair_pyexpat():
+                ok, detail = _check_imports()
+        if ok:
             patch_mfa_korean_support(mfa_path, callback)
             return True
-            
-        log("📦 MFA 한국어 구문 분석용 필수 라이브러리(eunjeon, jamo) 설치/확인 중...")
-        pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
-        
-        # Determine if we should use conda run or pip directly
-        install_cmd = None
+        log('[MFA] Installing Korean tokenizer deps: eunjeon, jamo')
+        install_cmds = [
+            [python_exe, '-m', 'pip', 'install', '--upgrade', 'eunjeon', 'jamo'],
+        ]
+        if os.path.exists(pip_exe):
+            install_cmds.append([pip_exe, 'install', '--upgrade', 'eunjeon', 'jamo'])
         system_conda = shutil.which('conda')
         if system_conda:
-            install_cmd = [system_conda, 'run', '-p', env_dir, 'pip', 'install', 'eunjeon', 'jamo']
-        elif os.path.exists(pip_exe):
-            install_cmd = [pip_exe, 'install', 'eunjeon', 'jamo']
-            
-        if install_cmd:
-            log(f"   -> 실행 명령어: {' '.join(install_cmd)}")
-            result = subprocess.run(install_cmd, capture_output=True, text=True)
+            install_cmds.append([
+                system_conda, 'run', '-p', env_dir, 'python', '-m', 'pip', 'install',
+                '--upgrade', 'eunjeon', 'jamo'
+            ])
+        last_err = detail
+        for install_cmd in install_cmds:
+            log(f"   -> cmd: {' '.join(install_cmd)}")
+            result = subprocess.run(install_cmd, capture_output=True, text=True, env=env)
             if result.returncode != 0:
-                 log(f"   ⚠️ 설치 중 에러: {result.stderr}")
-                 if _stderr_has_msvc_requirement(result.stderr):
+                err_txt = (result.stderr or result.stdout or '').strip()
+                if err_txt:
+                    log(f"   [warn] install failed: {err_txt[:500]}")
+                if _stderr_has_msvc_requirement(result.stderr):
                     _emit_msvc_required_notice(callback, log)
-            log("✅ 설치 시도 완료! MFA 한국어 연동 패치를 진행합니다...")
-            patch_mfa_korean_support(mfa_path, callback)
-        return True
-    except Exception as e:
-        log(f"⚠️ 의존성 자동 확인/설치 중 오류 발생: {e}")
+                last_err = err_txt or last_err
+                continue
+            ok, detail = _check_imports()
+            if (not ok) and _looks_like_pyexpat_dll_issue(detail):
+                log('[MFA] Detected pyexpat/libexpat DLL issue after install; trying repair...')
+                if _try_repair_pyexpat():
+                    ok, detail = _check_imports()
+            if ok:
+                log('[MFA] Korean tokenizer deps are ready')
+                patch_mfa_korean_support(mfa_path, callback)
+                return True
+            if detail:
+                log(f"   [warn] import check failed after install: {detail[:500]}")
+                last_err = detail
+        log('[MFA] Failed to prepare Korean tokenizer deps (eunjeon, jamo)')
+        if last_err:
+            log(f"   last error: {last_err[:500]}")
         return False
-
+    except Exception as e:
+        log(f"[MFA] Korean dependency setup error: {e}")
+        return False
 
 def ensure_japanese_support(mfa_path, callback=None):
     """
@@ -333,107 +380,83 @@ def ensure_japanese_support(mfa_path, callback=None):
 
 
 def download_mfa_model(mfa_path, language='korean', callback=None):
-    """한국어/일본어 MFA 음향 모델을 다운로드합니다."""
+    """Download MFA acoustic model for selected language."""
     def log(msg):
         logger.info(msg)
         if callback:
             callback(msg)
-
     if not mfa_path:
-        log("❌ MFA 실행 파일을 찾을 수 없습니다.")
+        log('MFA executable not found.')
         return False
-
     model_name = 'japanese_mfa' if language == 'japanese' else 'korean_mfa'
-    lang_label = '일본어' if language == 'japanese' else '한국어'
-
-    # 한국어 전용 패치 (일본어는 불필요)
+    lang_label = 'Japanese' if language == 'japanese' else 'Korean'
     if language == 'korean':
-        ensure_korean_support(mfa_path, callback)
-
-    log(f"📥 {lang_label} MFA 모델 다운로드 중... (최초 1회만 필요)")
+        if not ensure_korean_support(mfa_path, callback):
+            log('Failed to prepare Korean dependencies (eunjeon, jamo).')
+            return False
+    log(f'Downloading {lang_label} MFA model...')
     try:
         env = _get_conda_env(mfa_path)
         process = subprocess.Popen(
             [mfa_path, 'model', 'download', 'acoustic', model_name, '--ignore_cache'],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding='utf-8', errors='replace', env=env
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            env=env,
         )
         if process.stdout:
             for line in process.stdout:
-                log(line.strip())
+                line = line.strip()
+                if line:
+                    log(line)
         process.wait()
         if process.returncode == 0:
-            log(f"✅ {lang_label} MFA 모델 다운로드 완료!")
+            log(f'{lang_label} MFA model download completed.')
             return True
-        else:
-            log(f"❌ 모델 다운로드 실패 (코드: {process.returncode})")
-            return False
-    except Exception as e:
-        log(f"❌ 모델 다운로드 에러: {e}")
+        log(f'Model download failed (code: {process.returncode})')
         return False
-
-
+    except Exception as e:
+        log(f'Model download error: {e}')
+        return False
 def run_mfa_align(mfa_path, wav_folder, dict_path, output_folder, language='korean', callback=None):
-    """
-    MFA 음성-텍스트 강제 정렬을 실행합니다.
-    
-    Args:
-        mfa_path: MFA 실행 파일 경로
-        wav_folder: WAV + Lab 파일이 있는 폴더
-        dict_path: 사전 파일 경로
-        output_folder: TextGrid 출력 폴더
-        language: 'korean' 또는 'japanese'
-        callback: 실시간 로그 콜백 함수
-    
-    Returns:
-        (성공 여부: bool, 에러 메시지: str)
-    """
+    """Run MFA forced alignment."""
     def log(msg):
         logger.info(msg)
         if callback:
             callback(msg)
-
     if not mfa_path:
-        return False, "MFA 실행 파일을 찾을 수 없습니다."
-
+        return False, 'MFA executable not found.'
     if not os.path.exists(wav_folder):
-        return False, f"WAV 폴더를 찾을 수 없습니다: {wav_folder}"
-
+        return False, f'WAV folder not found: {wav_folder}'
     if not os.path.exists(dict_path):
-        return False, f"사전 파일을 찾을 수 없습니다: {dict_path}"
-
+        return False, f'Dictionary not found: {dict_path}'
     model_name = 'japanese_mfa' if language == 'japanese' else 'korean_mfa'
-    lang_label = '일본어' if language == 'japanese' else '한국어'
-
-    log(f"🔍 MFA 정렬 전제 조건 확인 중... ({lang_label})")
+    lang_label = 'Japanese' if language == 'japanese' else 'Korean'
+    log(f'Checking MFA prerequisites... ({lang_label})')
     if language == 'korean':
         if not ensure_korean_support(mfa_path, callback):
-            log("⚠️ 한국어 지원 라이브러리 확인 중 문제가 발생했습니다. 계속 시도합니다.")
+            err = 'Missing Korean tokenizer dependencies (eunjeon, jamo).'
+            log(err)
+            return False, err
     elif language == 'japanese':
         if not ensure_japanese_support(mfa_path, callback):
-            log("⚠️ 일본어 지원 라이브러리 확인 중 문제가 발생했습니다. 정렬은 계속 시도합니다.")
-
+            err = 'Missing Japanese tokenizer dependencies.'
+            log(err)
+            return False, err
     os.makedirs(output_folder, exist_ok=True)
-    log(f"📂 출력 폴더 생성/확인: {output_folder}")
     ok, preflight_err = _preflight_compute_mfcc(mfa_path, callback=callback)
     if not ok:
         return False, preflight_err
-
     cmd = [
         mfa_path, 'align',
         wav_folder, dict_path, model_name, output_folder,
         '--clean', '--fine_tune', '--textgrid_cleanup',
         '--beam', '1000', '--retry_beam', '4000',
-        '--num_jobs', '1'
+        '--num_jobs', '1',
     ]
-
-    log(f"🚀 MFA 정렬 시작...")
-    log(f"   WAV 폴더: {wav_folder}")
-    log(f"   사전 파일: {dict_path}")
-    log(f"   출력 폴더: {output_folder}")
-    log("   정밀 정렬 모드: fine_tune + textgrid_cleanup + 확장 beam")
-    log(f"   ⏳ PC 사양에 따라 5~15분 정도 소요될 수 있습니다...")
-
+    log('Starting MFA alignment...')
     try:
         env = _get_conda_env(mfa_path)
         process = subprocess.Popen(
@@ -443,31 +466,42 @@ def run_mfa_align(mfa_path, wav_folder, dict_path, output_folder, language='kore
             text=True,
             encoding='utf-8',
             errors='replace',
-            env=env
+            env=env,
         )
-
+        tail_lines = []
         if process.stdout:
             for line in process.stdout:
                 stripped = line.strip()
                 if stripped:
                     log(stripped)
+                    tail_lines.append(stripped)
+                    if len(tail_lines) > 120:
+                        tail_lines.pop(0)
         process.wait()
-
         if process.returncode == 0:
-            log("✅ MFA 정렬이 성공적으로 완료되었습니다!")
-            return True, ""
-        else:
-            err = f"MFA 정렬 실패 (종료 코드: {process.returncode})"
-            log(f"❌ {err}")
+            log('MFA alignment completed successfully.')
+            return True, ''
+        joined_tail = '\n'.join(tail_lines[-40:])
+        lowered_tail = joined_tail.lower()
+        if (
+            'please install korean support' in lowered_tail
+            or ('importerror' in lowered_tail and 'eunjeon' in lowered_tail and 'jamo' in lowered_tail)
+        ):
+            err = 'Korean dependencies (eunjeon, jamo) are missing in MFA env.'
+            log(err)
             return False, err
-
+        err = f'MFA alignment failed (code: {process.returncode})'
+        if tail_lines:
+            err += f' | tail: {tail_lines[-1][:180]}'
+        log(err)
+        return False, err
     except FileNotFoundError:
-        err = "MFA 실행 파일을 찾을 수 없습니다. MFA가 올바르게 설치되어 있는지 확인해 주세요."
-        log(f"❌ {err}")
+        err = 'MFA executable not found. Check MFA installation.'
+        log(err)
         return False, err
     except Exception as e:
-        err = f"MFA 실행 중 예기치 않은 에러 발생: {e}"
-        log(f"❌ {err}")
+        err = f'Unexpected MFA error: {e}'
+        log(err)
         return False, err
 
 def patch_mfa_korean_support(mfa_path, callback=None):
@@ -562,4 +596,8 @@ class EunjeonWrapper:
     except Exception as e:
         log(f"⚠️ MFA 한국어 패치 중 오류 발생: {e}")
         return False
+
+
+
+
 
