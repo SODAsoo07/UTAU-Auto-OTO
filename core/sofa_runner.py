@@ -13,6 +13,8 @@ import subprocess
 import json
 import zipfile
 import urllib.request
+import re
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,7 @@ SOFA_RELEASE_LINKS = {
     "japanese": "https://github.com/ariikamusic/SOFA_Models/releases/tag/akm_ja_v001",
     "korean": "https://github.com/colstone/SOFA_Models/releases/tag/KOR-V0.01b",
 }
+FFMPEG_RELEASE_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
 
 def _subprocess_ui_kwargs():
@@ -55,11 +58,83 @@ def _runtime_base_dir():
     return getattr(sys, "_MEIPASS", _app_dir())
 
 
-def _get_bundled_ffmpeg_bin_dirs():
+def _sofa_tool_dir():
+    return os.path.join(_app_dir(), ".sofa", "tools")
+
+
+def _runtime_ffmpeg_bin_dir():
+    return os.path.join(_sofa_tool_dir(), "ffmpeg", "bin")
+
+
+def _ensure_runtime_ffmpeg_bin(callback=None):
+    """
+    DLL 누락 팝업을 피하기 위해 SOFA 전용 ffmpeg를 로컬에 준비합니다.
+    """
+    if sys.platform != "win32":
+        return ""
+
+    ffmpeg_bin = _runtime_ffmpeg_bin_dir()
+    ffmpeg_exe = os.path.join(ffmpeg_bin, "ffmpeg.exe")
+    ffprobe_exe = os.path.join(ffmpeg_bin, "ffprobe.exe")
+    if os.path.exists(ffmpeg_exe) and os.path.exists(ffprobe_exe):
+        return ffmpeg_bin
+
+    tool_dir = _sofa_tool_dir()
+    os.makedirs(tool_dir, exist_ok=True)
+    tmp_zip = os.path.join(tool_dir, "ffmpeg_release_essentials.zip")
+    tmp_extract = tempfile.mkdtemp(prefix="ffmpeg_extract_", dir=tool_dir)
+    target_root = os.path.join(tool_dir, "ffmpeg")
+
+    try:
+        if callback:
+            callback("SOFA용 FFmpeg 다운로드 중...")
+        with urllib.request.urlopen(FFMPEG_RELEASE_ZIP_URL, timeout=180) as resp:
+            with open(tmp_zip, "wb") as f:
+                f.write(resp.read())
+
+        if callback:
+            callback("SOFA용 FFmpeg 압축 해제 중...")
+        with zipfile.ZipFile(tmp_zip, "r") as zf:
+            zf.extractall(tmp_extract)
+
+        source_bin = ""
+        for root, dirs, _ in os.walk(tmp_extract):
+            if "bin" in dirs and os.path.exists(os.path.join(root, "bin", "ffmpeg.exe")):
+                source_bin = os.path.join(root, "bin")
+                break
+
+        if not source_bin:
+            raise RuntimeError("ffmpeg.exe를 찾지 못했습니다.")
+
+        if os.path.exists(target_root):
+            shutil.rmtree(target_root, ignore_errors=True)
+        os.makedirs(target_root, exist_ok=True)
+        shutil.copytree(source_bin, ffmpeg_bin)
+
+        if callback:
+            callback(f"SOFA용 FFmpeg 준비 완료: {ffmpeg_bin}")
+        return ffmpeg_bin
+    except Exception as e:
+        if callback:
+            callback(f"SOFA용 FFmpeg 준비 실패: {e}")
+        return ""
+    finally:
+        if os.path.exists(tmp_zip):
+            try:
+                os.remove(tmp_zip)
+            except OSError:
+                pass
+        shutil.rmtree(tmp_extract, ignore_errors=True)
+
+
+def _get_bundled_ffmpeg_bin_dirs(extra_dirs=None):
     dirs = []
-    candidates = [
+    extra = [d for d in (extra_dirs or []) if d]
+    candidates = extra + [
         os.path.join(_runtime_base_dir(), "ffmpeg", "bin"),
         os.path.join(_app_dir(), "ffmpeg", "bin"),
+        # 개발 실행(소스 트리)에서는 build_assets의 정적 ffmpeg를 우선 활용
+        os.path.join(_app_dir(), "build_assets", "ffmpeg", "bin"),
     ]
     for d in candidates:
         if os.path.exists(os.path.join(d, "ffmpeg.exe")):
@@ -68,22 +143,31 @@ def _get_bundled_ffmpeg_bin_dirs():
     seen = set()
     unique = []
     for d in dirs:
-        if d not in seen:
+        key = os.path.normcase(os.path.normpath(d))
+        if key not in seen:
             unique.append(d)
-            seen.add(d)
+            seen.add(key)
     return unique
 
 
-def _prepend_ffmpeg_to_env_path(env, callback=None):
-    ffmpeg_bins = _get_bundled_ffmpeg_bin_dirs()
+def _prepend_ffmpeg_to_env_path(env, callback=None, extra_dirs=None):
+    ffmpeg_bins = _get_bundled_ffmpeg_bin_dirs(extra_dirs=extra_dirs)
     if not ffmpeg_bins:
         return env
     old_path = env.get("PATH", "")
     parts = [p for p in old_path.split(os.pathsep) if p]
+    part_keys = {os.path.normcase(os.path.normpath(p)) for p in parts}
     for d in reversed(ffmpeg_bins):
-        if d not in parts:
+        key = os.path.normcase(os.path.normpath(d))
+        if key not in part_keys:
             parts.insert(0, d)
+            part_keys.add(key)
     env["PATH"] = os.pathsep.join(parts)
+    ffmpeg_exe = os.path.join(ffmpeg_bins[0], "ffmpeg.exe")
+    # 일부 라이브러리는 PATH 대신 명시적 ffmpeg 경로 환경변수를 참조합니다.
+    env["IMAGEIO_FFMPEG_EXE"] = ffmpeg_exe
+    env["FFMPEG_BINARY"] = ffmpeg_exe
+    env["FFMPEG_EXE"] = ffmpeg_exe
     if callback:
         callback(f"ℹ FFmpeg 경로 적용: {ffmpeg_bins[0]}")
     return env
@@ -401,6 +485,82 @@ def _download_file(url, out_path, callback=None):
         callback(f"✅ 저장: {out_path}")
 
 
+def _load_dictionary_keys(dict_path):
+    keys = set()
+    if not dict_path or not os.path.exists(dict_path):
+        return keys
+    with open(dict_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or "\t" not in line:
+                continue
+            key = line.split("\t", 1)[0].strip()
+            if key:
+                keys.add(key)
+    return keys
+
+
+def _read_text_auto(path):
+    for enc in ("utf-8", "utf-8-sig", "cp949", "utf-16"):
+        try:
+            with open(path, "r", encoding=enc) as f:
+                return f.read()
+        except Exception:
+            continue
+    return ""
+
+
+def _greedy_split_by_dictionary(text, dict_keys):
+    if not text or not dict_keys:
+        return None
+    vocab = [k for k in dict_keys if k and " " not in k]
+    if not vocab:
+        return None
+    vocab_set = set(vocab)
+    max_len = max(len(k) for k in vocab)
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        match = None
+        span = min(max_len, n - i)
+        while span > 0:
+            cand = text[i : i + span]
+            if cand in vocab_set:
+                match = cand
+                break
+            span -= 1
+        if not match:
+            return None
+        out.append(match)
+        i += len(match)
+    return out
+
+
+def _normalize_lab_for_sofa(text, dict_keys):
+    # SOFA DictionaryG2P는 공백 구분 토큰을 dictionary key로 조회한다.
+    # 공백/인코딩이 불안정한 lab를 dictionary 기준으로 재토큰화한다.
+    if not text:
+        return ""
+    normalized_ws = re.sub(r"\s+", " ", text).strip()
+    if not normalized_ws:
+        return ""
+
+    tokens = [t for t in normalized_ws.split(" ") if t]
+    if tokens and all(t in dict_keys for t in tokens):
+        return " ".join(tokens)
+
+    compact = "".join(tokens)
+    if compact in dict_keys:
+        return compact
+
+    split_tokens = _greedy_split_by_dictionary(compact, dict_keys)
+    if split_tokens:
+        return " ".join(split_tokens)
+
+    return " ".join(tokens)
+
+
 def find_sofa_ckpt(language, search_root=None):
     """
     사용자 모델 폴더에서 언어별 SOFA ckpt를 탐색합니다.
@@ -545,7 +705,7 @@ def ensure_sofa_support(mfa_path="", sofa_python="", callback=None):
     return True, ""
 
 
-def _prepare_sofa_segments(wav_folder, callback=None):
+def _prepare_sofa_segments(wav_folder, dictionary_path, callback=None):
     """
     SOFA 입력 포맷(segments/singer/*.wav, *.lab)에 맞춰 작업 폴더를 구성합니다.
     """
@@ -556,8 +716,10 @@ def _prepare_sofa_segments(wav_folder, callback=None):
     os.makedirs(singer_dir, exist_ok=True)
 
     wavs = sorted(glob.glob(os.path.join(wav_folder, "*.wav")))
+    dict_keys = _load_dictionary_keys(dictionary_path)
     copied = 0
     skipped = 0
+    normalized_count = 0
     for w in wavs:
         base = os.path.splitext(os.path.basename(w))[0]
         lab = os.path.join(wav_folder, base + ".lab")
@@ -565,11 +727,20 @@ def _prepare_sofa_segments(wav_folder, callback=None):
             skipped += 1
             continue
         shutil.copy2(w, os.path.join(singer_dir, os.path.basename(w)))
-        shutil.copy2(lab, os.path.join(singer_dir, base + ".lab"))
+        dst_lab = os.path.join(singer_dir, base + ".lab")
+        raw = _read_text_auto(lab)
+        norm = _normalize_lab_for_sofa(raw, dict_keys)
+        with open(dst_lab, "w", encoding="utf-8") as f:
+            f.write(norm)
+        if norm != raw.strip():
+            normalized_count += 1
         copied += 1
 
     if callback:
-        callback(f"📁 SOFA 입력 세그먼트 준비: {copied}개 (lab 없음 스킵 {skipped}개)")
+        callback(
+            f"📁 SOFA 입력 세그먼트 준비: {copied}개 "
+            f"(lab 없음 스킵 {skipped}개, lab 정규화 {normalized_count}개)"
+        )
     return seg_root, copied
 
 
@@ -627,7 +798,11 @@ def run_sofa_align(
     if not os.path.exists(infer_py):
         return False, "SOFA infer.py를 찾을 수 없습니다."
 
-    seg_root, count = _prepare_sofa_segments(wav_folder, callback=callback)
+    seg_root, count = _prepare_sofa_segments(
+        wav_folder,
+        dictionary_path=dictionary_path,
+        callback=callback,
+    )
     if count == 0:
         return False, "SOFA 입력용 wav/lab 쌍이 없습니다. 먼저 Lab 생성 단계를 실행해 주세요."
 
@@ -636,7 +811,9 @@ def run_sofa_align(
     run_env = os.environ.copy()
     run_env["PYTHONUTF8"] = "1"
     run_env["PYTHONIOENCODING"] = "utf-8"
-    run_env = _prepend_ffmpeg_to_env_path(run_env, callback=callback)
+    runtime_ffmpeg_bin = _ensure_runtime_ffmpeg_bin(callback=callback)
+    extra_bins = [runtime_ffmpeg_bin] if runtime_ffmpeg_bin else []
+    run_env = _prepend_ffmpeg_to_env_path(run_env, callback=callback, extra_dirs=extra_bins)
     cmd = [
         py, "-X", "utf8", infer_py,
         "--ckpt", ckpt_path,

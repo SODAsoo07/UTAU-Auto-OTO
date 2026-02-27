@@ -140,6 +140,8 @@ def is_glide(phone_mark):
 IPA_VOWELS = {
     'a', 'e', 'i', 'o', 'u', 'y',
     'eo', 'eu', 'ae', 'oe', 'wa', 'we', 'wi', 'wo', 'ui',
+    # IPA vowel symbols frequently found in MFA phone tiers
+    'ɯ', 'ʌ', 'ɛ', 'ə', 'æ', 'ɑ', 'ɐ', 'ɔ', 'ɪ', 'ʊ', 'ø', 'œ',
 }
 
 IPA_PLOSIVES = {
@@ -365,6 +367,13 @@ KR_BATCHIM_MARKERS = {'N', 'L', 'M', 'NG', 'K', 'T', 'P', 'H'}
 
 GLOTTAL_MARKS = {"'", "’", ".", "ʔ"}
 
+KR_CODA_PLOSIVE_MAP = {
+    "g": "k", "gg": "k", "k": "k", "kk": "k",
+    "d": "t", "dd": "t", "t": "t", "tt": "t",
+    "s": "t", "ss": "t", "j": "t", "jj": "t", "ch": "t", "h": "t", "c": "t", "q": "t",
+    "b": "p", "bb": "p", "p": "p", "pp": "p",
+}
+
 
 def _detect_glottal_kind(alias):
     """에일리어스의 성문 파열 표식 위치(head/tail)를 판별합니다."""
@@ -392,14 +401,98 @@ def is_breath(alias):
 
 
 def _extract_vowel_consonant(text):
-    """로마자 음절에서 모음부와 자음부를 분리해 반환합니다."""
-    text = text.lower().strip()
-
-    for v in sorted(KR_VOWELS, key=len, reverse=True):
-        if text.endswith(v):
-            remainder = text[:-len(v)] if len(text) > len(v) else ""
-            return v, remainder
+    """로마자 음절에서 모음부와 초성부를 분리해 반환합니다."""
+    onset, vowel, _ = _split_kr_syllable_parts(text)
+    if vowel:
+        return vowel, onset
+    text = re.sub(r"[^a-z]", "", (text or "").lower())
     return None, text
+
+
+def _split_kr_syllable_parts(text):
+    """
+    한국어 로마자 음절을 (초성, 중성, 종성)으로 분해합니다.
+    예: nyeong -> (n, yeo, ng), ryeo -> (r, yeo, "")
+    """
+    t = _normalize_cv_match_token(text)
+    if not t:
+        return "", "", ""
+
+    vowels = sorted(KR_VOWELS, key=len, reverse=True)
+    v_idx = -1
+    v_val = ""
+    for i in range(len(t)):
+        matched = None
+        for v in vowels:
+            if t.startswith(v, i):
+                matched = v
+                break
+        if matched:
+            v_idx = i
+            v_val = matched
+            break
+
+    if v_idx < 0:
+        return "", "", t
+
+    onset = t[:v_idx]
+    coda = t[v_idx + len(v_val):]
+    return onset, v_val, coda
+
+
+def _kr_cv_kernel(text):
+    """비교용 CV 핵심 문자열(onset+vowel)을 반환합니다."""
+    onset, vowel, _ = _split_kr_syllable_parts(text)
+    if vowel:
+        return f"{onset}{vowel}"
+    return _normalize_cv_match_token(text)
+
+
+def _extract_vc_right_token(alias):
+    """VC 에일리어스에서 우측 자음(받침 후보)을 추출합니다."""
+    a = (alias or "").strip()
+    if not a:
+        return ""
+
+    if " " in a:
+        parts = [p for p in a.split() if p]
+        if len(parts) >= 2:
+            return parts[1].strip().rstrip("-")
+        return ""
+
+    m = re.match(
+        r'^([aoueiwy]+|eo|eu|ae|oe|wa|wo|we|ye|ya|yo|yu|wae|weo|eui|ui)([gknmdrlbsjtph]+|ng|kk|ss|pp|tt|jj|ch|c|q|h)$',
+        a.lower()
+    )
+    if m:
+        return m.group(2)
+    return ""
+
+
+def _canonicalize_kr_coda(token):
+    """받침 자음 표기를 K/T/P 계열 기준으로 정규화합니다."""
+    t = re.sub(r"[^A-Za-z]", "", (token or "")).strip()
+    if not t:
+        return ""
+
+    t_upper = t.upper()
+    if t_upper == "K":
+        return "k"
+    if t_upper in {"T", "H"}:
+        return "t"
+    if t_upper == "P":
+        return "p"
+
+    return KR_CODA_PLOSIVE_MAP.get(t.lower(), t.lower())
+
+
+def _is_kr_plosive_coda_alias(alias):
+    """VC 에일리어스가 파열음 받침(K/T/P 계열)인지 판별합니다."""
+    right = _extract_vc_right_token(alias)
+    if not right:
+        return False
+    canon = _canonicalize_kr_coda(right)
+    return canon in {"k", "t", "p"}
 
 
 def _normalize_cv_match_token(token):
@@ -423,20 +516,39 @@ def _cv_match_score(alias_token, syllable_token):
     if a == s:
         return 100
 
-    av, ac = _extract_vowel_consonant(a)
-    sv, sc = _extract_vowel_consonant(s)
+    ao, av, _ = _split_kr_syllable_parts(a)
+    so, sv, scoda = _split_kr_syllable_parts(s)
     score = 0
 
-    if av and sv and av == sv:
-        score += 65
-    if ac and sc:
-        if ac == sc:
-            score += 30
-        elif {ac, sc} <= {"r", "l"}:
-            score += 26
+    if av and sv:
+        if av == sv:
+            score += 70
+        elif av.startswith(sv) or sv.startswith(av):
+            score += 44
+
+    if ao and so:
+        if ao == so:
+            score += 24
+        elif {ao, so} <= {"r", "l"}:
+            score += 20
+        elif ao.startswith(so) or so.startswith(ao):
+            score += 12
+        else:
+            score -= 16
+    elif not ao and not so:
+        score += 12
+    else:
+        score -= 8
+
+    # syllable의 종성이 붙어도 CV 핵심(onset+vowel)이 일치하면 높은 점수 유지
+    if av and sv and (ao + av) == (so + sv):
+        score += 16
+    if scoda and av and (so + sv) and a == (so + sv):
+        score += 6
+
     if a in s or s in a:
         score += 10
-    return score
+    return max(0, min(score, 100))
 
 
 def classify_alias(alias, custom_map=None):
@@ -568,6 +680,156 @@ def detect_alias_format(alias_list, custom_map=None):
     return 'cvc'
 
 
+def _alias_to_cv_target(alias, alias_type):
+    a = (alias or "").strip()
+    if not a:
+        return ""
+
+    if alias_type == "cv":
+        tok = re.sub(r"[^a-z]", "", a.lower())
+        return _kr_cv_kernel(tok)
+    if alias_type == "cv_head":
+        parts = a.split()
+        if len(parts) >= 2 and parts[0] == "-":
+            tok = re.sub(r"[^a-z]", "", parts[1].lower())
+            return _kr_cv_kernel(tok)
+        tok = re.sub(r"[^a-z]", "", a.lower().lstrip("-"))
+        return _kr_cv_kernel(tok)
+    if alias_type == "vcv":
+        parts = a.split()
+        if len(parts) >= 2:
+            tok = re.sub(r"[^a-z]", "", parts[1].lower())
+            return _kr_cv_kernel(tok)
+    if alias_type == "mono":
+        tok = re.sub(r"[^a-z]", "", a.lower())
+        if tok in KR_VOWELS:
+            return tok
+    return ""
+
+
+def _extract_cv_targets_from_lines(lines, custom_map=None):
+    targets = []
+    for line in lines or []:
+        if "=" not in line:
+            continue
+        alias = line.split("=", 1)[1].split(",", 1)[0].strip()
+        if not alias:
+            continue
+        a_type = classify_alias(alias, custom_map)
+        tok = _alias_to_cv_target(alias, a_type)
+        if tok:
+            targets.append(tok)
+    if not targets:
+        return []
+
+    collapsed = []
+    for t in targets:
+        if not collapsed or collapsed[-1] != t:
+            collapsed.append(t)
+    return collapsed
+
+
+def _is_kr_nucleus_phone_mark(mark):
+    m = normalize_ipa_mark(mark)
+    if not m:
+        return False
+    if m in IPA_VOWELS:
+        return True
+    return m in {"ɯ", "ʌ", "ɛ", "ə", "æ", "ɑ", "ɐ", "ɔ", "ɪ", "ʊ", "ø", "œ"}
+
+
+def _build_kr_syllables_from_phone_nuclei(ph_intervals, cv_targets):
+    if not ph_intervals or not cv_targets:
+        return None
+
+    target_n = len(cv_targets)
+    nuclei = [
+        i for i, p in enumerate(ph_intervals)
+        if _is_kr_nucleus_phone_mark(p.mark) and not is_glide(p.mark)
+    ]
+    if len(nuclei) < target_n:
+        return None
+
+    if target_n == 1:
+        selected = [nuclei[0]]
+    elif len(nuclei) == target_n:
+        selected = list(nuclei)
+    else:
+        n_count = len(nuclei)
+        selected_pos = []
+        for i in range(target_n):
+            ideal = int(round(i * (n_count - 1) / float(target_n - 1)))
+            lo = i
+            hi = n_count - (target_n - i)
+            pos = max(lo, min(hi, ideal))
+            selected_pos.append(pos)
+        selected = [nuclei[pos] for pos in selected_pos]
+
+    out = []
+    global_start = float(ph_intervals[0].minTime)
+    global_end = float(ph_intervals[-1].maxTime)
+    for i, nuc_idx in enumerate(selected):
+        if i == 0:
+            s_t = global_start
+        else:
+            prev_n = selected[i - 1]
+            s_t = (float(ph_intervals[prev_n].maxTime) + float(ph_intervals[nuc_idx].minTime)) * 0.5
+
+        if i + 1 < len(selected):
+            next_n = selected[i + 1]
+            e_t = (float(ph_intervals[nuc_idx].maxTime) + float(ph_intervals[next_n].minTime)) * 0.5
+        else:
+            e_t = global_end
+
+        phones = [
+            p for p in ph_intervals
+            if float(p.minTime) >= s_t - 1e-6 and float(p.maxTime) <= e_t + 1e-6
+        ]
+        if not phones:
+            phones = [ph_intervals[nuc_idx]]
+
+        tok = cv_targets[i] if i < len(cv_targets) else ""
+        out.append({
+            "word": tok,
+            "roman": tok,
+            "roman_cv": tok,
+            "start_time": s_t,
+            "end_time": e_t,
+            "phones": phones,
+        })
+
+    return out
+
+
+def _score_kr_syllable_mapping(candidate_infos, cv_targets):
+    """candidate 음절열이 alias 기반 cv_targets와 얼마나 일치하는지 점수화."""
+    if not candidate_infos or not cv_targets:
+        return -1.0
+
+    cand = []
+    for s in candidate_infos:
+        tok = s.get("roman_cv") or s.get("roman") or s.get("word") or ""
+        tok = _kr_cv_kernel(tok)
+        if tok:
+            cand.append(tok)
+    if not cand:
+        return -1.0
+
+    def _avg_with_shift(shift):
+        vals = []
+        for i, tgt in enumerate(cv_targets):
+            j = i + shift
+            if 0 <= j < len(cand):
+                vals.append(_cv_match_score(tgt, cand[j]))
+        if not vals:
+            return -1.0
+        coverage = len(vals) / float(max(len(cv_targets), 1))
+        length_penalty = abs(len(cand) - len(cv_targets)) * 4.0
+        return (sum(vals) / float(len(vals))) * coverage - length_penalty
+
+    return max(_avg_with_shift(0), _avg_with_shift(1), _avg_with_shift(-1))
+
+
 def validate_oto_params(offset, consonant, cutoff, pre, ovl):
     """UTAU OTO 파라미터를 유효 범위로 보정합니다."""
     if offset < 0:
@@ -594,6 +856,85 @@ def validate_oto_params(offset, consonant, cutoff, pre, ovl):
     cutoff = -cutoff_abs
     
     return offset, consonant, cutoff, pre, ovl
+
+
+def _nearest_phone_edge_ms(anchor_ms, ph_intervals):
+    """anchor_ms에 가장 가까운 phone 경계(ms)를 반환합니다."""
+    nearest = None
+    nearest_dist = float("inf")
+    for ph in ph_intervals or []:
+        s = float(ph.minTime) * 1000.0
+        e = float(ph.maxTime) * 1000.0
+        if s <= anchor_ms <= e:
+            return anchor_ms, 0.0
+        ds = abs(anchor_ms - s)
+        de = abs(anchor_ms - e)
+        if ds < nearest_dist:
+            nearest_dist = ds
+            nearest = s
+        if de < nearest_dist:
+            nearest_dist = de
+            nearest = e
+    if nearest is None:
+        return anchor_ms, 0.0
+    return nearest, nearest_dist
+
+
+def _surrounding_phone_gap(anchor_ms, ph_intervals):
+    """
+    anchor_ms가 phone 사이 gap에 있을 때 (prev_end, next_start, gap_len_ms) 반환.
+    gap 내부가 아니면 (None, None, 0.0).
+    """
+    prev_end = None
+    next_start = None
+    for ph in ph_intervals or []:
+        s = float(ph.minTime) * 1000.0
+        e = float(ph.maxTime) * 1000.0
+        if s <= anchor_ms <= e:
+            return None, None, 0.0
+        if e < anchor_ms:
+            prev_end = e
+        elif s > anchor_ms and next_start is None:
+            next_start = s
+            break
+    if prev_end is None or next_start is None or next_start <= prev_end:
+        return None, None, 0.0
+    return prev_end, next_start, (next_start - prev_end)
+
+
+def _stabilize_params_to_phone_activity(offset, consonant, cutoff, pre, ovl, ph_intervals, alias_type="cv"):
+    """
+    선행발성 기준점(pre 절대위치)이 무음 gap에 걸리면
+    가장 가까운 유효 phone 경계로 스냅해 빈 공간 정렬을 완화합니다.
+    """
+    if not ph_intervals:
+        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+
+    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    pre_abs = float(offset) + float(pre)
+    nearest_edge, nearest_dist = _nearest_phone_edge_ms(pre_abs, ph_intervals)
+    prev_end, next_start, gap_len = _surrounding_phone_gap(pre_abs, ph_intervals)
+
+    # 충분히 넓은 gap 내부이거나 phone과 멀리 떨어진 경우만 보정
+    if gap_len < 55.0 and nearest_dist <= 34.0:
+        return offset, consonant, cutoff, pre, ovl
+
+    target = nearest_edge
+    if prev_end is not None and next_start is not None:
+        if alias_type in {"vc", "vv"}:
+            # VC/VV는 다음 음절 입구를 겨냥하되, 경계보다 약간 앞에서 잡는다.
+            target = next_start - 6.0
+            target = max(target, prev_end + 4.0)
+        else:
+            # CV/VCV 등은 이전 음절 끝 경계 근처로 당겨서 공백 정렬을 방지한다.
+            target = prev_end
+
+    delta = target - pre_abs
+    if abs(delta) < 2.0:
+        return offset, consonant, cutoff, pre, ovl
+
+    offset = max(float(offset) + delta, 0.0)
+    return validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
 
 def generate_openutau_aliases(base_alias):
@@ -1469,14 +1810,31 @@ def generate_oto(
                         # CV / Mono
                         lines.append(f"{real_name}={roman.capitalize() if roman not in KR_VOWELS else roman},0,0,0,0,0")
                 else:
+                    coda_alias_map = {
+                        "ng": "NG",
+                        "n": "N",
+                        "l": "L",
+                        "r": "L",
+                        "m": "M",
+                        "k": "K",
+                        "g": "K",
+                        "t": "T",
+                        "d": "T",
+                        "s": "T",
+                        "ss": "T",
+                        "j": "T",
+                        "jj": "T",
+                        "ch": "T",
+                        "h": "H",
+                        "p": "P",
+                        "b": "P",
+                    }
 
                     for idx, w in enumerate(wd_intervals):
                         roman_parts = []
                         for ch in w.mark:
                             roman_parts.extend(decompose_hangul_to_roman(ch))
                         roman = "".join(roman_parts).lower()
-                        
-                        vowel_part, const_part = _extract_vowel_consonant(roman)
                         
                         if auto_gen_format == 'vcv':
                             if idx == 0:
@@ -1487,12 +1845,13 @@ def generate_oto(
                                 for ch in prev_w.mark:
                                     prev_parts.extend(decompose_hangul_to_roman(ch))
                                 prev_roman = "".join(prev_parts).lower()
-                                prev_vowel, prev_cons = _extract_vowel_consonant(prev_roman)
+                                _, prev_vowel, prev_coda = _split_kr_syllable_parts(prev_roman)
+                                prev_coda_alias = coda_alias_map.get((prev_coda or "").lower(), "")
                                 
-                                if prev_cons in KR_BATCHIM_MARKERS.union([c.lower() for c in KR_BATCHIM_MARKERS]):
-                                    lines.append(f"{real_name}={prev_cons.upper()} {roman},0,0,0,0,0")
+                                if prev_coda_alias:
+                                    lines.append(f"{real_name}={prev_coda_alias} {roman},0,0,0,0,0")
                                 else:
-                                    lines.append(f"{real_name}={prev_vowel} {roman},0,0,0,0,0")
+                                    lines.append(f"{real_name}={(prev_vowel or 'a')} {roman},0,0,0,0,0")
                                 
                         elif auto_gen_format == 'cvvc':
 
@@ -1505,7 +1864,8 @@ def generate_oto(
                                 for ch in prev_w.mark:
                                     prev_parts.extend(decompose_hangul_to_roman(ch))
                                 prev_roman = "".join(prev_parts).lower()
-                                prev_vowel, _ = _extract_vowel_consonant(prev_roman)
+                                _, prev_vowel, _ = _split_kr_syllable_parts(prev_roman)
+                                prev_vowel = prev_vowel or "a"
                                 
 
                                 cur_start_cons = ""
@@ -1519,8 +1879,8 @@ def generate_oto(
                                     lines.append(f"{real_name}={prev_vowel} {cur_start_cons},0,0,0,0,0")
                                 else:
 
-                                    cur_vowel, _ = _extract_vowel_consonant(roman)
-                                    lines.append(f"{real_name}={prev_vowel} {cur_vowel},0,0,0,0,0")
+                                    _, cur_vowel, _ = _split_kr_syllable_parts(roman)
+                                    lines.append(f"{real_name}={prev_vowel} {(cur_vowel or 'a')},0,0,0,0,0")
                 
                 if lines:
                     file_groups[real_name] = lines
@@ -1555,8 +1915,8 @@ def generate_oto(
                     elif t.name == 'words':
                         word_tier = t
 
-            if not phone_tier or not word_tier:
-                log(f"경고: {fname}: phones 또는 words tier가 없어 원본 라인을 유지합니다.")
+            if not phone_tier:
+                log(f"경고: {fname}: phones tier가 없어 원본 라인을 유지합니다.")
                 _record_unset_lines("tier_missing", fname, lines)
                 final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
                 processed += 1
@@ -1565,10 +1925,10 @@ def generate_oto(
 
             ph_intervals_all = [i for i in phone_tier if i.mark.strip() not in ['', 'spn', 'pau']]
             ph_intervals = [i for i in ph_intervals_all if i.mark.strip() not in ['sil']]
-            wd_intervals = [i for i in word_tier if i.mark.strip() not in ['', 'sil', 'spn', 'pau']]
+            wd_intervals = [i for i in word_tier if i.mark.strip() not in ['', 'sil', 'spn', 'pau']] if word_tier else []
 
-            if len(ph_intervals) == 0 or len(wd_intervals) == 0:
-                log(f"경고: {fname}: 유효한 음소/단어 구간이 없어 원본 라인을 유지합니다.")
+            if len(ph_intervals) == 0:
+                log(f"경고: {fname}: 유효한 음소 구간이 없어 원본 라인을 유지합니다.")
                 _record_unset_lines("empty_intervals", fname, lines)
                 final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
                 processed += 1
@@ -1635,37 +1995,216 @@ def generate_oto(
             try:
                 from core.lab_generator import decompose_hangul_to_roman
             except ImportError:
-                pass
+                def decompose_hangul_to_roman(ch):
+                    return [ch]
             
+            cv_targets = _extract_cv_targets_from_lines(lines, custom_map)
             syllables_info = []
-            for w in wd_intervals:
-                w_start = w.minTime
-                w_end = w.maxTime
+            if wd_intervals:
+                for w in wd_intervals:
+                    w_start = w.minTime
+                    w_end = w.maxTime
 
-                s_phones = [p for p in ph_intervals if p.minTime >= w_start - 0.01 and p.maxTime <= w_end + 0.01]
-                roman_parts = []
-                for ch in w.mark:
-                    roman_parts.extend(decompose_hangul_to_roman(ch))
-                
-                syllables_info.append({
-                    'word': w.mark,
-                    'roman': "".join(roman_parts).lower(),
-                    'start_time': w_start,
-                    'end_time': w_end,
-                    'phones': s_phones
-                })
-                
+                    s_phones = [p for p in ph_intervals if p.minTime >= w_start - 0.01 and p.maxTime <= w_end + 0.01]
+                    roman_parts = []
+                    for ch in w.mark:
+                        roman_parts.extend(decompose_hangul_to_roman(ch))
+                    roman_raw = "".join(roman_parts).lower()
+                    roman_cv = _kr_cv_kernel(roman_raw)
+                    
+                    syllables_info.append({
+                        'word': w.mark,
+                        'roman': roman_raw,
+                        'roman_cv': roman_cv,
+                        'start_time': w_start,
+                        'end_time': w_end,
+                        'phones': s_phones
+                    })
 
-            if any(len(s['phones']) == 0 for s in syllables_info):
+            alias_based = _build_kr_syllables_from_phone_nuclei(ph_intervals, cv_targets) if cv_targets else None
+            if not syllables_info and alias_based:
+                syllables_info = alias_based
+                log(f"🧭 {fname}: words 티어 없음/실패 → phones 핵 기반 음절 매핑 사용")
+            elif syllables_info and alias_based and cv_targets:
+                base_score = _score_kr_syllable_mapping(syllables_info, cv_targets)
+                alt_score = _score_kr_syllable_mapping(alias_based, cv_targets)
+                # TextGrid(words) 결과를 우선 사용하되, alias/filename 기준과 심하게 어긋난 경우만 보정.
+                if base_score < 54.0 and alt_score >= (base_score + 12.0):
+                    syllables_info = alias_based
+                    log(
+                        f"🧭 {fname}: 매핑 이탈 보정 적용 "
+                        f"(base={base_score:.1f}, corrected={alt_score:.1f})"
+                    )
+                else:
+                    log(
+                        f"🧭 {fname}: TextGrid(words) 매핑 유지 "
+                        f"(base={base_score:.1f}, corrected={alt_score:.1f})"
+                    )
+
+            if (not syllables_info) or any(len(s['phones']) == 0 for s in syllables_info):
                 log(f"경고: {fname}: 음절-음소 매핑 실패로 원본 라인을 유지합니다.")
                 _record_unset_lines("mapping_failed", fname, lines)
                 final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
                 processed += 1
                 continue
                 
-            romaji_syllables = [s['roman'] for s in syllables_info]
+            romaji_syllables = [s.get('roman_cv') or s.get('roman', '') for s in syllables_info]
             current_w_idx = 0
             cv_seq_idx = 0
+
+            def _estimate_cv_anchor(idx):
+                if idx < 0 or idx >= len(syllables_info):
+                    return None
+                syl = syllables_info[idx]
+                curr_phones = syl.get('phones') or []
+                if not curr_phones:
+                    return None
+
+                roman_tok = (syl.get('roman_cv') or syl.get('roman') or "")
+                if len(curr_phones) >= 2:
+                    v_idx, v_phone = find_vowel_phone(curr_phones)
+                    c_start = curr_phones[0].minTime * 1000
+                    c_end = v_phone.minTime * 1000
+                    n_start = v_phone.minTime * 1000
+                    n_end = v_phone.maxTime * 1000
+                else:
+                    c_start = curr_phones[0].minTime * 1000
+                    c_end = c_start
+                    n_start = c_start
+                    n_end = curr_phones[0].maxTime * 1000
+
+                c_hint = curr_phones[0].mark if curr_phones else ""
+                alias_onset = _extract_alias_onset(roman_tok)
+                is_tense_cv = _is_tense_consonant(c_hint, alias_onset)
+                is_sonorant_cv = _is_sonorant_consonant(c_hint, alias_onset)
+                is_diph_syl = is_diphthong(roman_tok)
+                cv_vowel_len = max(n_end - n_start, 20.0)
+                boundary = c_end
+
+                if is_diph_syl:
+                    c_len = max(c_end - c_start, 10.0)
+                    target_pre = max(72.0, min(148.0, c_len + 18.0))
+                    if is_tense_cv:
+                        target_pre = max(60.0, target_pre - 10.0)
+                    elif is_sonorant_cv:
+                        target_pre = min(164.0, target_pre + 12.0)
+                    offset = max(boundary - target_pre, 0.0)
+                    pre = boundary - offset
+                    ovl = adaptive_overlap(pre, c_hint, mode='cv')
+                    if is_tense_cv:
+                        ovl = min(ovl, max(pre * 0.34, 10.0))
+                    elif is_sonorant_cv:
+                        ovl = max(ovl, min(pre * 0.50, max(pre - 8.0, 0.0)))
+
+                    v_ref = max(cv_vowel_len, 140.0)
+                    if is_tense_cv:
+                        added_cons = min(max(v_ref * 0.48, 82.0), 190.0)
+                    elif is_sonorant_cv:
+                        added_cons = min(max(v_ref * 0.62, 98.0), 240.0)
+                    else:
+                        added_cons = min(max(v_ref * 0.55, 90.0), 230.0)
+                    consonant = pre + added_cons
+                    cutoff = -(consonant + max(cv_vowel_len * 0.2, 45.0))
+                else:
+                    first_phone_plosive = len(curr_phones) >= 2 and is_plosive_ipa(curr_phones[0].mark)
+                    is_plosive = first_phone_plosive or is_plosive_roman(alias_onset) if alias_onset else first_phone_plosive
+
+                    if is_tense_cv:
+                        offset = max(c_start - 40.0, 0.0)
+                        pre = boundary - offset
+                        ovl = adaptive_overlap(pre, c_hint, mode='cv')
+                        ovl = min(ovl, max(pre * 0.34, 10.0))
+                    elif is_sonorant_cv:
+                        offset = max(c_start - 92.0, 0.0)
+                        pre = boundary - offset
+                        ovl = adaptive_overlap(pre, c_hint, mode='cv')
+                        ovl = max(ovl, min(pre * 0.50, max(pre - 8.0, 0.0)))
+                    elif is_plosive:
+                        offset = max(c_start - 50.0, 0.0)
+                        pre = boundary - offset
+                        ovl = adaptive_overlap(pre, c_hint, mode='cv')
+                    else:
+                        offset = max(c_start - 80.0, 0.0)
+                        pre = boundary - offset
+                        ovl = adaptive_overlap(pre, c_hint, mode='cv')
+
+                    v_ref = max(cv_vowel_len, 130.0)
+                    if is_tense_cv:
+                        added_cons = min(max(v_ref * 0.38, 62.0), 150.0)
+                    elif is_sonorant_cv:
+                        added_cons = min(max(v_ref * 0.52, 86.0), 210.0)
+                    else:
+                        added_cons = min(max(v_ref * 0.45, 70.0), 180.0)
+                    consonant = pre + added_cons
+                    cutoff = -(consonant + max(cv_vowel_len * 0.25, 45.0))
+
+                offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+                offset, consonant, cutoff, pre, ovl = _stabilize_params_to_phone_activity(
+                    offset, consonant, cutoff, pre, ovl, ph_intervals, alias_type="cv"
+                )
+                offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+                return {
+                    "offset": offset,
+                    "pre": pre,
+                    "ovl": ovl,
+                    "cons": consonant,
+                    "cutoff": cutoff,
+                    "pre_abs": offset + pre,
+                    "cons_abs": offset + consonant,
+                    "onset_abs": c_start,
+                    "vowel_end_abs": n_end,
+                    "vowel_len": cv_vowel_len,
+                    "cons_gap": max(consonant - pre, 10.0),
+                    "cut_gap": max(abs(cutoff) - consonant, 16.0),
+                }
+
+            def _compute_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, c_char, is_plosive_sibilant):
+                if not prev_cv or not next_cv:
+                    return None
+
+                boundary_abs = next_cv["onset_abs"] if alias_type == "vc" else next_cv["pre_abs"]
+                pre_target = _clamp(_blend(prev_cv["pre"], next_cv["pre"], 0.35), 45.0, 220.0)
+                offset = max(boundary_abs - pre_target, 0.0)
+                pre = boundary_abs - offset
+                if pre <= 0:
+                    return None
+
+                ovl_tail = _clamp(prev_cv["vowel_len"] * 0.10, 4.0, 22.0)
+                target_ovl_abs = prev_cv["vowel_end_abs"] - ovl_tail
+                ovl = target_ovl_abs - offset
+                if is_plosive_sibilant:
+                    ovl = _clamp(ovl, pre * 0.24, max(pre - 12.0, 0.0))
+                else:
+                    ovl = _clamp(ovl, pre * 0.34, max(pre - 10.0, 0.0))
+
+                cons_gap = _clamp(_blend(prev_cv["cons_gap"], next_cv["cons_gap"], 0.45), 16.0, 120.0)
+                consonant = pre + cons_gap
+                next_onset_rel = max(next_cv["onset_abs"] - offset, pre + 10.0)
+                next_pre_rel = max(next_cv["pre_abs"] - offset, pre + 16.0)
+                next_cons_rel = max(next_cv["cons_abs"] - offset, next_pre_rel + 10.0)
+
+                if alias_type == "vc":
+                    if is_plosive_sibilant:
+                        consonant = min(consonant, next_onset_rel - 6.0)
+                        consonant = max(consonant, pre + 12.0)
+                        cutoff_abs = max(consonant + 10.0, next_onset_rel - 2.0)
+                        cutoff_abs = min(cutoff_abs, next_onset_rel + 8.0)
+                    else:
+                        consonant = min(consonant, next_onset_rel + 24.0)
+                        consonant = max(consonant, pre + 16.0)
+                        cutoff_abs = max(consonant + 12.0, min(next_cons_rel + 24.0, next_pre_rel + 42.0))
+                else:
+                    consonant = min(max(consonant, pre + 24.0), next_pre_rel + 48.0)
+                    cutoff_abs = max(consonant + 20.0, next_pre_rel + 10.0)
+                    cutoff_abs = min(cutoff_abs, next_cons_rel + 60.0)
+
+                cutoff = -cutoff_abs
+                return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+
+            cv_anchor_by_idx = {
+                i: _estimate_cv_anchor(i)
+                for i in range(len(syllables_info))
+            }
             
             for line_num, line in enumerate(lines):
                 parts = line.split('=', 1)
@@ -1972,9 +2511,19 @@ def generate_oto(
                             if score >= 98:
                                 break
                         
-                        if name_match_idx is not None and best_score >= 62:
+                        expected_score = -1
+                        if 0 <= cv_seq_idx < len(romaji_syllables):
+                            expected_score = _cv_match_score(target_clean, romaji_syllables[cv_seq_idx])
 
-                            current_w_idx = name_match_idx
+                        if name_match_idx is not None and best_score >= 62:
+                            chosen_idx = name_match_idx
+                            # 이중모음/종성 포함 토큰에서 발생하는 과도한 앞 점프를 억제한다.
+                            if (
+                                name_match_idx > cv_seq_idx
+                                and expected_score >= max(58, best_score - 10)
+                            ):
+                                chosen_idx = cv_seq_idx
+                            current_w_idx = chosen_idx
                         else:
 
 
@@ -2030,46 +2579,109 @@ def generate_oto(
                         n_end = v_end + 100
                         
                 cv_vowel_len = n_end - n_start
+                is_vc_plosive_coda = False
                 if is_vc:
+                    c_char = _extract_vc_right_token(alias)
+                    is_vc_plosive_coda = (
+                        alias_type == 'vc'
+                        and file_format in {'cvc', 'cvvc', 'vc_only'}
+                        and _is_kr_plosive_coda_alias(alias)
+                    )
 
-                    # VC should attach to the next consonant onset.
-                    # Consonant-end anchoring often causes awkward late VC timing.
-                    vc_target = n_start if alias_type == 'vc' else n_end
-                    boundary = min(vc_target, c_end + 260)
-                    v_len = c_end - c_start
-                    n_len = n_end - n_start
-                    
-                    offset_padding = 180
-                    if v_len < offset_padding:
-                        offset_padding = max(v_len * 0.8, 50)
-                        
-                    offset = boundary - offset_padding
-                    pre = boundary - offset
-                    
+                    if is_vc_plosive_coda:
+                        # 종성 파열음은 받침 구간을 먹지 않도록 모음 끝 직전에 pre를 고정합니다.
+                        v_idx = None
+                        v_phone = None
+                        if curr_phones:
+                            v_idx, v_phone = find_vowel_phone(curr_phones)
 
-                    c_char = ""
-                    if ' ' in alias:
-                        parts = alias.split()
-                        if len(parts) >= 2: c_char = parts[1]
-                    else:
-                        m = re.match(r'^([aoueiwy]+|eo|eu|ae|oe|wa|wo|we|ye|ya|yo|yu|wae|weo|eui|ui)([gknmdrlbsjtph]+|ng|kk|ss|pp|tt|jj|ch)$', alias.lower())
-                        if m: c_char = m.group(2)
-                    
-                    is_plosive_sibilant = c_char in ['g','k','kk','gg','d','t','tt','dd','b','p','bb','pp','s','ss','h','j','jj','ch']
-                    ovl = adaptive_overlap(pre, c_char, mode='vv' if alias_type == 'vv' else 'vc')
-                    
-                    if is_plosive_sibilant:
+                        vowel_start = (v_phone.minTime * 1000) if v_phone else c_start
+                        vowel_end = (v_phone.maxTime * 1000) if v_phone else c_end
 
-                        n_ref = max(n_len, 100)
-                        added_cons = min(max(n_ref * 0.35, 45), 95)
+                        coda_start = None
+                        if v_phone is not None and v_idx is not None and (v_idx + 1) < len(curr_phones):
+                            coda_start = curr_phones[v_idx + 1].minTime * 1000
+                        elif current_w_idx + 1 < len(syllables_info):
+                            next_syl = syllables_info[current_w_idx + 1]
+                            if next_syl.get('phones'):
+                                coda_start = next_syl['phones'][0].minTime * 1000
+
+                        boundary = max(vowel_start + 16.0, vowel_end - 10.0)
+                        if coda_start is not None:
+                            boundary = min(boundary, coda_start - 8.0)
+                            boundary = max(boundary, vowel_start + 14.0)
+
+                        pre_target = _clamp(boundary - vowel_start, 45.0, 145.0)
+                        offset = max(boundary - pre_target, 0.0)
+                        pre = boundary - offset
+                        ovl = adaptive_overlap(pre, c_char, mode='vc')
+                        ovl = min(ovl, max(pre - 12.0, 0.0))
+
+                        if coda_start is not None:
+                            tail_room = max(coda_start - boundary, 14.0)
+                        else:
+                            tail_room = max(n_start - boundary, 14.0)
+
+                        added_cons = _clamp(tail_room * 0.65, 16.0, 42.0)
                         consonant = pre + added_cons
-                        cutoff = -(consonant + max(n_len * 0.35, 45))
+                        cut_gap = _clamp(tail_room * 0.95, 50.0, 90.0)
+                        cutoff = -(consonant + cut_gap)
                     else:
+                        vc_anchor_params = None
+                        if current_w_idx + 1 < len(syllables_info):
+                            prev_cv_anchor = cv_anchor_by_idx.get(current_w_idx)
+                            next_cv_anchor = cv_anchor_by_idx.get(current_w_idx + 1)
+                            is_plosive_sibilant = c_char in ['g','k','kk','gg','d','t','tt','dd','b','p','bb','pp','s','ss','h','j','jj','ch']
+                            vc_anchor_params = _compute_vc_from_adjacent_cv(
+                                prev_cv_anchor, next_cv_anchor, alias_type, c_char, is_plosive_sibilant
+                            )
 
-                        n_ref = max(n_len, 80)
-                        added_cons = min(max(n_ref * 0.55, 55), 160)
-                        consonant = pre + added_cons
-                        cutoff = -(consonant + max(n_len * 0.45, 50))
+                        if vc_anchor_params is not None:
+                            offset, consonant, cutoff, pre, ovl = vc_anchor_params
+                        else:
+                        # VC should attach to the next consonant onset.
+                        # Consonant-end anchoring often causes awkward late VC timing.
+                            vc_target = n_start if alias_type == 'vc' else n_end
+                            boundary = min(vc_target, c_end + 260)
+                            v_len = c_end - c_start
+                            n_len = n_end - n_start
+
+                            offset_padding = 180
+                            if v_len < offset_padding:
+                                offset_padding = max(v_len * 0.8, 50)
+
+                            offset = boundary - offset_padding
+                            pre = boundary - offset
+
+                            is_plosive_sibilant = c_char in ['g','k','kk','gg','d','t','tt','dd','b','p','bb','pp','s','ss','h','j','jj','ch']
+                            ovl = adaptive_overlap(pre, c_char, mode='vv' if alias_type == 'vv' else 'vc')
+
+                            if is_plosive_sibilant:
+                                n_ref = max(n_len, 100)
+                                added_cons = min(max(n_ref * 0.35, 45), 95)
+                                consonant = pre + added_cons
+                                cutoff = -(consonant + max(n_len * 0.35, 45))
+                            else:
+                                n_ref = max(n_len, 80)
+                                added_cons = min(max(n_ref * 0.55, 55), 160)
+                                consonant = pre + added_cons
+                                cutoff = -(consonant + max(n_len * 0.45, 50))
+
+                            if alias_type == 'vc':
+                                # CVVC 원리: VC는 다음 자음 onset 주변에서 정리해 CV와의 중복 자음을 줄인다.
+                                next_c_onset_rel = max(n_start - offset, pre + 10.0)
+                                if is_plosive_sibilant:
+                                    consonant = min(consonant, next_c_onset_rel - 6.0)
+                                    consonant = max(consonant, pre + 12.0)
+                                    cutoff_abs = max(consonant + 10.0, next_c_onset_rel - 2.0)
+                                    cutoff_abs = min(cutoff_abs, next_c_onset_rel + 8.0)
+                                    cutoff = -cutoff_abs
+                                else:
+                                    consonant = min(consonant, next_c_onset_rel + 26.0)
+                                    consonant = max(consonant, pre + 16.0)
+                                    cutoff_abs = min(abs(cutoff), next_c_onset_rel + 30.0)
+                                    cutoff_abs = max(cutoff_abs, consonant + 12.0)
+                                    cutoff = -cutoff_abs
 
                 else:
                     cv_vowel_len = n_end - n_start
@@ -2180,8 +2792,12 @@ def generate_oto(
                         consonant = pre + added_cons
                         cutoff = -(consonant + max(cv_vowel_len * 0.25, 45))
 
-                offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
-                    offset, consonant, cutoff, pre, ovl, base_shape, alias_type=alias_type
+                if not is_vc_plosive_coda:
+                    offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
+                        offset, consonant, cutoff, pre, ovl, base_shape, alias_type=alias_type
+                    )
+                offset, consonant, cutoff, pre, ovl = _stabilize_params_to_phone_activity(
+                    offset, consonant, cutoff, pre, ovl, ph_intervals, alias_type=alias_type
                 )
                 offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
 

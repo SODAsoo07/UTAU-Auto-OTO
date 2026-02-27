@@ -594,7 +594,143 @@ def _is_nucleus_phone(mark):
     음절 핵(모음/모라 비음)으로 볼 수 있는 phone인지 판별.
     """
     m = _clean_phone_mark(mark)
-    return m in {'a', 'i', 'ɯ', 'u', 'e', 'o', 'ɴ', 'n'}
+    return m in {'a', 'i', 'ɯ', 'u', 'e', 'o', 'ɴ', 'n', 'ə', 'ɪ', 'ʊ', 'æ', 'ɑ', 'ɔ', 'ɐ'}
+
+
+def _alias_to_ja_cv_target(alias, alias_type):
+    a = (alias or "").strip()
+    if not a:
+        return ""
+
+    if alias_type in {"cv", "mono"}:
+        return _normalize_ja_syllable_token(a)
+    if alias_type == "cv_head":
+        parts = a.split()
+        if len(parts) >= 2 and parts[0] == "-":
+            return _normalize_ja_syllable_token(parts[1])
+        return _normalize_ja_syllable_token(a.lstrip("-"))
+    if alias_type == "vcv":
+        parts = a.split()
+        if len(parts) >= 2:
+            return _normalize_ja_syllable_token(parts[1])
+        return _normalize_ja_syllable_token(a)
+    if alias_type == "vv":
+        parts = a.split()
+        if len(parts) >= 2:
+            return _normalize_ja_syllable_token(parts[1])
+    return ""
+
+
+def _extract_ja_cv_targets_from_lines(lines, custom_map=None):
+    targets = []
+    for line in lines or []:
+        if "=" not in line:
+            continue
+        alias = line.split("=", 1)[1].split(",", 1)[0].strip()
+        if not alias:
+            continue
+        a_type = classify_ja_alias(alias, custom_map)
+        tok = _alias_to_ja_cv_target(alias, a_type)
+        if tok:
+            targets.append(tok)
+    if not targets:
+        return []
+    collapsed = []
+    for t in targets:
+        if not collapsed or collapsed[-1] != t:
+            collapsed.append(t)
+    return collapsed
+
+
+def _build_ja_syllables_from_phone_nuclei(ph_intervals, cv_targets):
+    if not ph_intervals or not cv_targets:
+        return None
+
+    target_n = len(cv_targets)
+    nuclei = [i for i, p in enumerate(ph_intervals) if _is_nucleus_phone(getattr(p, "mark", ""))]
+    if len(nuclei) < target_n:
+        return None
+
+    if target_n == 1:
+        selected = [nuclei[0]]
+    elif len(nuclei) == target_n:
+        selected = list(nuclei)
+    else:
+        n_count = len(nuclei)
+        selected_pos = []
+        for i in range(target_n):
+            ideal = int(round(i * (n_count - 1) / float(target_n - 1)))
+            lo = i
+            hi = n_count - (target_n - i)
+            pos = max(lo, min(hi, ideal))
+            selected_pos.append(pos)
+        selected = [nuclei[pos] for pos in selected_pos]
+
+    infos = []
+    global_start = float(ph_intervals[0].minTime)
+    global_end = float(ph_intervals[-1].maxTime)
+    for i, n_idx in enumerate(selected):
+        if i == 0:
+            s_t = global_start
+        else:
+            prev_n = selected[i - 1]
+            s_t = (float(ph_intervals[prev_n].maxTime) + float(ph_intervals[n_idx].minTime)) * 0.5
+
+        if i + 1 < len(selected):
+            next_n = selected[i + 1]
+            e_t = (float(ph_intervals[n_idx].maxTime) + float(ph_intervals[next_n].minTime)) * 0.5
+        else:
+            e_t = global_end
+
+        phones = [
+            p for p in ph_intervals
+            if float(p.minTime) >= s_t - 1e-6 and float(p.maxTime) <= e_t + 1e-6
+        ]
+        if not phones:
+            phones = [ph_intervals[n_idx]]
+
+        tok = cv_targets[i] if i < len(cv_targets) else ""
+        infos.append({
+            'word': tok,
+            'roman': tok,
+            'start_time': s_t,
+            'end_time': e_t,
+            'phones': list(phones),
+        })
+
+    return infos if infos else None
+
+
+def _score_ja_syllable_mapping(candidate_infos, cv_targets):
+    """candidate 음절열이 alias 기반 cv_targets와 얼마나 일치하는지 점수화."""
+    if not candidate_infos or not cv_targets:
+        return -1.0
+
+    cand = []
+    for s in candidate_infos:
+        tok = _syllable_info_token(s)
+        if tok:
+            cand.append(tok)
+    if not cand:
+        return -1.0
+
+    targets = [_normalize_ja_syllable_token(t) for t in cv_targets if t]
+    if not targets:
+        return -1.0
+
+    def _avg_with_shift(shift):
+        vals = []
+        for i, tgt in enumerate(targets):
+            j = i + shift
+            if 0 <= j < len(cand):
+                vals.append(_vcv_syllable_match_score(tgt, cand[j]))
+        if not vals:
+            return -1.0
+        coverage = len(vals) / float(max(len(targets), 1))
+        length_penalty = abs(len(cand) - len(targets)) * 4.0
+        return (sum(vals) / float(len(vals))) * coverage - length_penalty
+
+    return max(_avg_with_shift(0), _avg_with_shift(1), _avg_with_shift(-1))
 
 
 def _build_syllables_from_filename(ph_intervals, filename_syllables):
@@ -1063,6 +1199,129 @@ def _apply_base_shape_blend(offset, consonant, cutoff, pre, ovl, base_shape, ali
     ovl_new = max(0.0, pre_new * _clamp_range(ovl_ratio_new, 0.04, 0.86))
 
     return validate_oto_params(offset, cons_new, cutoff_new, pre_new, ovl_new)
+
+
+def _is_reliable_base_profile(profile):
+    if not profile:
+        return False
+    pre = max(float(profile.get("pre", 0.0)), 0.0)
+    cons = max(float(profile.get("cons", 0.0)), 0.0)
+    cut_abs = abs(float(profile.get("cutoff", 0.0)))
+    ovl = max(float(profile.get("ovl", 0.0)), 0.0)
+    if pre < 6.0 and cons < 6.0 and cut_abs < 6.0 and ovl < 6.0:
+        return False
+    if cut_abs <= cons + 2.0:
+        return False
+    if cons + 6.0 < pre:
+        return False
+    return True
+
+
+def _compute_vc_params_from_vcv_anchor(
+    source_profile,
+    prev_v_start,
+    prev_v_end,
+    next_c_start,
+    next_c_end,
+    bridge_profile,
+):
+    """
+    vcv2cvvc의 p1/p2 상대 이동 원리를 TextGrid 앵커와 결합한 VC 파라미터 계산.
+    - source_profile: 원본 VCV OTO 한 줄(또는 그에 준하는 베이스 라인)
+    - p1 성격: VCV pre 기준점에서 VC pre 절대 위치를 앞당기는 이동량
+    - p2 성격: VC pre 이후 cutoff까지 확보할 길이
+    """
+    if not _is_reliable_base_profile(source_profile):
+        return None
+    if not bridge_profile:
+        return None
+
+    src_offset = max(float(source_profile.get("offset", 0.0)), 0.0)
+    src_pre = _clamp_range(float(source_profile.get("pre", 0.0)), 12.0, 420.0)
+    src_cons = max(float(source_profile.get("cons", 0.0)), src_pre)
+    src_cut_abs = max(abs(float(source_profile.get("cutoff", 0.0))), src_cons + 12.0)
+    src_ovl = max(float(source_profile.get("ovl", 0.0)), 0.0)
+
+    prev_v_start = float(prev_v_start)
+    prev_v_end = float(prev_v_end)
+    next_c_start = float(next_c_start)
+    next_c_end = float(next_c_end)
+    v_len = max(prev_v_end - prev_v_start, 40.0)
+    c_len = max(next_c_end - next_c_start, 60.0)
+
+    # p1: VCV pre 절대 위치에서 VC pre 절대 위치를 얼마나 당길지 결정
+    p1_base = bridge_profile.get("offset_pad", 86.0)
+    p1_dyn = p1_base + max(v_len - 140.0, 0.0) * bridge_profile.get("offset_len_mul", 0.08)
+    p1_lo = bridge_profile.get("offset_pad_min", 42.0)
+    p1_hi = min(240.0, max(v_len * 0.92, p1_base + 36.0))
+    p1 = _clamp_range(p1_dyn, p1_lo, p1_hi)
+    if v_len < p1:
+        p1 = max(v_len * 0.78, bridge_profile.get("offset_pad_floor", 36.0))
+
+    src_pre_abs = src_offset + src_pre
+    target_pre_abs = src_pre_abs - p1
+    pre_abs_min = prev_v_start + max(v_len * 0.28, 10.0)
+    pre_abs_max = min(next_c_start - 4.0, prev_v_end + 16.0)
+    if pre_abs_max <= pre_abs_min:
+        pre_abs_max = pre_abs_min + 2.0
+    target_pre_abs = _clamp_range(target_pre_abs, pre_abs_min, pre_abs_max)
+
+    dyn_pre = _clamp_range(next_c_start - target_pre_abs, 16.0, 260.0)
+    pre = _clamp_range(_blend(dyn_pre, src_pre, 0.74), 16.0, 420.0)
+    offset = max(target_pre_abs - pre, 0.0)
+
+    # overlap은 원본 pre-ovl 간격을 최대한 유지하면서, 앞 모음 tail 앵커에도 맞춘다.
+    tail_margin = bridge_profile.get("tail_margin_base", 10.0) + v_len * bridge_profile.get("tail_margin_mul", 0.05)
+    tail_margin = _clamp_range(tail_margin, 4.0, 24.0)
+    target_ovl_abs = prev_v_end - tail_margin
+    ovl_pre_margin = bridge_profile.get("ovl_pre_margin", 6.0)
+    ovl_min_ratio = bridge_profile.get("ovl_min_ratio", 0.40)
+    ovl_ratio = bridge_profile.get("ovl_ratio", 0.50)
+    upper_ovl = max(pre - ovl_pre_margin, 0.0)
+    lower_ovl = min(pre * ovl_min_ratio, upper_ovl)
+    src_pre_ovl_gap = max(src_pre - src_ovl, 4.0)
+    ovl_from_src = pre - src_pre_ovl_gap
+    ovl_from_anchor = target_ovl_abs - offset
+    ovl = _blend(ovl_from_src, ovl_from_anchor, 0.58)
+    ovl = _blend(ovl, pre * ovl_ratio, 0.20)
+    ovl = min(upper_ovl, max(lower_ovl, ovl))
+
+    # consonant/cutoff는 source gap + 자음군 규칙을 혼합해 안정화
+    src_cons_gap = max(src_cons - src_pre, 8.0)
+    dyn_cons_gap = bridge_profile.get("cons_add_base", 36.0) + max(c_len - 70.0, 0.0) * bridge_profile.get("cons_add_mul", 0.12)
+    dyn_cons_gap = _clamp_range(
+        dyn_cons_gap,
+        bridge_profile.get("cons_add_min", 20.0),
+        bridge_profile.get("cons_add_max", 68.0),
+    )
+    cons_gap = _blend(dyn_cons_gap, src_cons_gap, 0.36)
+    cons_gap = max(cons_gap, bridge_profile.get("cons_floor", 18.0))
+    consonant = pre + cons_gap
+
+    next_cv_pre_rel = max(next_c_end - offset, pre + 20.0)
+    next_cv_pre_rel = min(next_cv_pre_rel, pre + 280.0)
+    consonant = min(consonant, next_cv_pre_rel - bridge_profile.get("cons_to_next_margin", 8.0))
+    consonant = max(consonant, pre + bridge_profile.get("cons_floor", 18.0))
+
+    # p2에 해당하는 cutoff 여유 길이
+    src_cut_gap = max(src_cut_abs - src_cons, 16.0)
+    dyn_cut_gap = bridge_profile.get("cut_add_base", 58.0) + max(c_len - 70.0, 0.0) * bridge_profile.get("cut_add_mul", 0.20)
+    dyn_cut_gap = _clamp_range(
+        dyn_cut_gap,
+        bridge_profile.get("cut_add_min", 34.0),
+        bridge_profile.get("cut_add_max", 120.0),
+    )
+    cut_gap = _blend(dyn_cut_gap, src_cut_gap, 0.34)
+    cutoff_abs = max(
+        consonant + bridge_profile.get("cut_min_gap", 16.0),
+        pre + cut_gap,
+    )
+    cutoff_abs = min(cutoff_abs, next_cv_pre_rel + bridge_profile.get("cut_to_next_allow", 22.0))
+    if cutoff_abs <= consonant + 8.0:
+        cutoff_abs = consonant + 10.0
+    cutoff = -cutoff_abs
+
+    return validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
 
 def _normalize_alias_for_profile(alias):
@@ -1863,16 +2122,60 @@ def generate_ja_oto(
                     boundary_points_ms.add(float(w.minTime * 1000.0))
                     boundary_points_ms.add(float(w.maxTime * 1000.0))
             boundary_points_ms = sorted(boundary_points_ms)
+            phone_spans_ms = [
+                (float(p.minTime * 1000.0), float(p.maxTime * 1000.0))
+                for p in ph_intervals
+            ]
+
+            def _nearest_phone_edge_ms(anchor_ms):
+                nearest = None
+                nearest_dist = float("inf")
+                for s_ms, e_ms in phone_spans_ms:
+                    if s_ms <= anchor_ms <= e_ms:
+                        return anchor_ms, 0.0
+                    ds = abs(anchor_ms - s_ms)
+                    de = abs(anchor_ms - e_ms)
+                    if ds < nearest_dist:
+                        nearest_dist = ds
+                        nearest = s_ms
+                    if de < nearest_dist:
+                        nearest_dist = de
+                        nearest = e_ms
+                if nearest is None:
+                    return anchor_ms, 0.0
+                return nearest, nearest_dist
+
+            def _surrounding_gap_ms(anchor_ms):
+                prev_end = None
+                next_start = None
+                for s_ms, e_ms in phone_spans_ms:
+                    if s_ms <= anchor_ms <= e_ms:
+                        return None, None, 0.0
+                    if e_ms < anchor_ms:
+                        prev_end = e_ms
+                    elif s_ms > anchor_ms and next_start is None:
+                        next_start = s_ms
+                        break
+                if prev_end is None or next_start is None or next_start <= prev_end:
+                    return None, None, 0.0
+                return prev_end, next_start, (next_start - prev_end)
 
             def _post_adjust_params(offset, consonant, cutoff, pre, ovl, alias_type='cv', alias_text=''):
                 offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
                 pre_abs = offset + pre
-                if boundary_points_ms:
-                    nearest = min(boundary_points_ms, key=lambda x: abs(x - pre_abs))
-                    snap_limit = 320.0 if alias_type in ('vc', 'vv', 'vcv') else 260.0
-                    if abs(pre_abs - nearest) > snap_limit:
-                        pre_abs = nearest
+                nearest_edge, nearest_dist = _nearest_phone_edge_ms(pre_abs)
+                prev_end_ms, next_start_ms, gap_len_ms = _surrounding_gap_ms(pre_abs)
+                # 정렬 오차로 pre가 무음 gap에 걸리면 alias 타입별로 안전한 경계로 스냅한다.
+                if gap_len_ms >= 55.0 or nearest_dist > 34.0:
+                    target = nearest_edge
+                    if prev_end_ms is not None and next_start_ms is not None:
+                        if alias_type in ('vc', 'vv'):
+                            target = max(prev_end_ms + 4.0, next_start_ms - 6.0)
+                        else:
+                            target = prev_end_ms
+                    if abs(target - pre_abs) >= 2.0:
+                        pre_abs = target
 
                 min_pre_abs = max(timeline_start_ms - (20.0 if alias_type in ('vc', 'vv', 'vcv') else 10.0), 0.0)
                 max_pre_abs = effective_end_ms + (30.0 if alias_type in ('vc', 'vv', 'vcv') else 80.0)
@@ -1983,10 +2286,15 @@ def generate_ja_oto(
             sparse_phone_mode = bool(
                 filename_syllables and len(ph_intervals) < max(4, len(filename_syllables) // 2)
             )
+            cv_targets = _extract_ja_cv_targets_from_lines(lines, custom_map)
             filename_based = _build_syllables_from_filename(ph_intervals, filename_syllables)
+            alias_based = _build_ja_syllables_from_phone_nuclei(ph_intervals, cv_targets) if cv_targets else None
             if filename_based and len(filename_based) >= 1:
                 syllables_info = filename_based
                 log(f"🧭 {fname}: 파일명 우선 음절 매핑 사용 ({len(filename_syllables)}음절)")
+            elif alias_based:
+                syllables_info = alias_based
+                log(f"🧭 {fname}: 파일명 매핑 실패 → alias/phone 기반 음절 매핑 사용 ({len(cv_targets)}음절)")
             elif wd_intervals and sparse_phone_mode:
                 log(f"🧭 {fname}: phones 희소 감지({len(ph_intervals)}개) → words 기반 합성 phone 매핑 사용")
                 for w in wd_intervals:
@@ -2045,6 +2353,22 @@ def generate_ja_oto(
                         'phones': list(current_phones)
                     })
 
+            if syllables_info and alias_based and cv_targets:
+                base_score = _score_ja_syllable_mapping(syllables_info, cv_targets)
+                alt_score = _score_ja_syllable_mapping(alias_based, cv_targets)
+                # TextGrid 정렬 결과를 우선하되, alias/filename 기준과 크게 어긋난 경우에만 보정한다.
+                if base_score < 54.0 and alt_score >= (base_score + 12.0):
+                    syllables_info = alias_based
+                    log(
+                        f"🧭 {fname}: 매핑 이탈 보정 적용 "
+                        f"(base={base_score:.1f}, corrected={alt_score:.1f})"
+                    )
+                else:
+                    log(
+                        f"🧭 {fname}: TextGrid 매핑 유지 "
+                        f"(base={base_score:.1f}, corrected={alt_score:.1f})"
+                    )
+
             if not syllables_info or any(len(s['phones']) == 0 for s in syllables_info):
                 log(f"⚠️ {fname}: 음소-음절 매핑 실패 → 원본 유지")
                 _record_unset_lines("mapping_failed", fname, lines)
@@ -2066,6 +2390,101 @@ def generate_ja_oto(
                         f"bridge {expand_stats.get('added_bridge', 0)}개)"
                     )
 
+            def _estimate_ja_cv_anchor(idx):
+                if idx < 0 or idx >= len(syllables_info):
+                    return None
+                syl = syllables_info[idx]
+                curr_phones = syl.get('phones') or []
+                if not curr_phones:
+                    return None
+
+                if len(curr_phones) >= 2:
+                    c_start = curr_phones[0].minTime * 1000
+                    c_end = curr_phones[-1].minTime * 1000
+                    n_start = curr_phones[-1].minTime * 1000
+                    n_end = curr_phones[-1].maxTime * 1000
+                else:
+                    c_start = curr_phones[0].minTime * 1000
+                    c_end = c_start
+                    n_start = c_start
+                    n_end = curr_phones[0].maxTime * 1000
+
+                c_hint = curr_phones[0].mark if curr_phones else ""
+                cv_vowel_len = max(n_end - n_start, 20.0)
+                offset = max(c_start - 50.0, 0.0)
+                pre = max(c_end - offset, 10.0)
+                ovl = _adaptive_ja_overlap(pre, c_hint, mode="cv")
+                v_ref = max(cv_vowel_len, 120.0)
+                added_cons = min(max(v_ref * 0.45, 70.0), 180.0)
+                consonant = pre + added_cons
+                cutoff = -(consonant + max(cv_vowel_len * 0.25, 45.0))
+
+                offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+                return {
+                    "offset": offset,
+                    "pre": pre,
+                    "ovl": ovl,
+                    "cons": consonant,
+                    "cutoff": cutoff,
+                    "pre_abs": offset + pre,
+                    "cons_abs": offset + consonant,
+                    "onset_abs": c_start,
+                    "vowel_end_abs": n_end,
+                    "vowel_len": cv_vowel_len,
+                    "cons_gap": max(consonant - pre, 10.0),
+                    "cut_gap": max(abs(cutoff) - consonant, 16.0),
+                }
+
+            def _compute_ja_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, c_char, bridge_profile):
+                if not prev_cv or not next_cv:
+                    return None
+
+                profile = bridge_profile or JA_CVVC_BRIDGE_TIMING.get("default", {})
+                boundary_abs = next_cv["onset_abs"] if alias_type == "vc" else next_cv["pre_abs"]
+                pre_target = _clamp_range(_blend(prev_cv["pre"], next_cv["pre"], 0.34), 40.0, 220.0)
+                offset = max(boundary_abs - pre_target, 0.0)
+                pre = boundary_abs - offset
+                if pre <= 0:
+                    return None
+
+                tail_margin = profile.get("tail_margin_base", 10.0) + prev_cv["vowel_len"] * profile.get("tail_margin_mul", 0.05)
+                tail_margin = _clamp_range(tail_margin, 4.0, 24.0)
+                target_ovl_abs = prev_cv["vowel_end_abs"] - tail_margin
+                upper_ovl = max(pre - profile.get("ovl_pre_margin", 6.0), 0.0)
+                lower_ovl = min(pre * profile.get("ovl_min_ratio", 0.40), upper_ovl)
+                ovl = min(upper_ovl, max(lower_ovl, target_ovl_abs - offset))
+                ovl = _blend(ovl, pre * profile.get("ovl_ratio", 0.50), 0.20)
+                ovl = min(upper_ovl, max(lower_ovl, ovl))
+
+                cons_gap = _clamp_range(_blend(prev_cv["cons_gap"], next_cv["cons_gap"], 0.45), 14.0, 120.0)
+                consonant = pre + cons_gap
+                next_onset_rel = max(next_cv["onset_abs"] - offset, pre + 10.0)
+                next_pre_rel = max(next_cv["pre_abs"] - offset, pre + 16.0)
+                next_cons_rel = max(next_cv["cons_abs"] - offset, next_pre_rel + 10.0)
+
+                if alias_type == "vc":
+                    if c_char in JA_PLOSIVE_CONSONANTS:
+                        consonant = min(consonant, next_onset_rel - 6.0)
+                        consonant = max(consonant, pre + 12.0)
+                        cutoff_abs = max(consonant + 10.0, next_onset_rel - 2.0)
+                        cutoff_abs = min(cutoff_abs, next_onset_rel + 6.0)
+                    else:
+                        consonant = min(consonant, next_onset_rel + 24.0)
+                        consonant = max(consonant, pre + 16.0)
+                        cutoff_abs = max(consonant + 12.0, min(next_cons_rel + 24.0, next_pre_rel + 40.0))
+                else:
+                    consonant = min(max(consonant, pre + 22.0), next_pre_rel + 44.0)
+                    cutoff_abs = max(consonant + 20.0, next_pre_rel + 10.0)
+                    cutoff_abs = min(cutoff_abs, next_cons_rel + 54.0)
+
+                cutoff = -cutoff_abs
+                return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+
+            cv_anchor_by_idx = {
+                i: _estimate_ja_cv_anchor(i)
+                for i in range(len(syllables_info))
+            }
+
             # CV 순서 카운터로 리스트 순서 우선 매핑
             current_w_idx = 0
             cv_seq_idx = 0
@@ -2085,6 +2504,7 @@ def generate_ja_oto(
                     final_lines.append(apply_suffix_to_oto_line(preserved, alias_suffix))
                     continue
                 base_shape = _extract_base_timing_shape(line)
+                source_profile = _parse_oto_line_profile(line)
 
                 alias_type = classify_ja_alias(alias, custom_map)
 
@@ -2144,6 +2564,7 @@ def generate_ja_oto(
                 is_vc = alias_type in ('vc', 'vv')
                 is_vcv = alias_type == 'vcv'
                 is_cv_head = alias_type == 'cv_head'
+                c_char = ""
 
                 if tail_breath:
                     if current_w_idx >= len(syllables_info):
@@ -2406,60 +2827,106 @@ def generate_ja_oto(
                     next_cv_pre_rel = max(n_end - offset, pre + 20)
                     # 음소 경계 이상치(긴 무음/정렬 흔들림)로 인한 과도 확장 방지
                     next_cv_pre_rel = min(next_cv_pre_rel, pre + 260)
+                    # 다음 자음 onset 기준점(VC 파열음 보호용)
+                    next_c_onset_rel = max(n_start - offset, pre + 12)
+                    next_c_onset_rel = min(next_c_onset_rel, pre + 220)
 
-                    if alias_type == 'vc' and bridge_profile:
-                        n_ref = max(n_len, 60.0)
-                        cons_add = bridge_profile.get('cons_add_base', 36.0) + max(n_ref - 70.0, 0.0) * bridge_profile.get('cons_add_mul', 0.12)
-                        cons_add = _clamp_range(
-                            cons_add,
-                            bridge_profile.get('cons_add_min', 20.0),
-                            bridge_profile.get('cons_add_max', 68.0),
-                        )
-                        consonant = min(pre + cons_add, next_cv_pre_rel - bridge_profile.get('cons_to_next_margin', 8.0))
-                        consonant = max(consonant, pre + bridge_profile.get('cons_floor', 18.0))
+                    use_vcv_anchor = (
+                        alias_type == 'vc'
+                        and bridge_profile is not None
+                        and format_type in ('cvvc', 'cvc')
+                        and detected_format == 'vcv'
+                        and _is_reliable_base_profile(source_profile)
+                    )
 
-                        cut_add = bridge_profile.get('cut_add_base', 58.0) + max(n_ref - 70.0, 0.0) * bridge_profile.get('cut_add_mul', 0.20)
-                        cut_add = _clamp_range(
-                            cut_add,
-                            bridge_profile.get('cut_add_min', 34.0),
-                            bridge_profile.get('cut_add_max', 120.0),
+                    if use_vcv_anchor:
+                        anchored = _compute_vc_params_from_vcv_anchor(
+                            source_profile=source_profile,
+                            prev_v_start=c_start,
+                            prev_v_end=c_end,
+                            next_c_start=n_start,
+                            next_c_end=n_end,
+                            bridge_profile=bridge_profile,
                         )
-                        cutoff_abs = max(
-                            consonant + bridge_profile.get('cut_min_gap', 16.0),
-                            pre + cut_add,
+                        if anchored is not None:
+                            offset, consonant, cutoff, pre, ovl = anchored
+                        else:
+                            use_vcv_anchor = False
+
+                    use_cv_anchor_bridge = False
+                    if (not use_vcv_anchor) and alias_type in ('vc', 'vv') and (current_w_idx + 1) < len(syllables_info):
+                        prev_cv_anchor = cv_anchor_by_idx.get(current_w_idx)
+                        next_cv_anchor = cv_anchor_by_idx.get(current_w_idx + 1)
+                        anchor_params = _compute_ja_vc_from_adjacent_cv(
+                            prev_cv_anchor, next_cv_anchor, alias_type, c_char, bridge_profile
                         )
-                        cutoff_abs = min(cutoff_abs, next_cv_pre_rel + bridge_profile.get('cut_to_next_allow', 22.0))
-                        if cutoff_abs <= consonant + 8:
-                            cutoff_abs = consonant + 10
-                        cutoff = -cutoff_abs
-                    elif is_plosive:
-                        # 파열/파찰음은 VC 쪽에서 자음을 과감히 절단해 중복 파열을 방지
-                        n_ref = max(n_len, 60)
-                        added_cons = min(max(n_ref * 0.25, 18), 40)
-                        consonant = pre + added_cons
-                        cutoff_abs = pre + min(max(n_ref * 0.40, 28), 62)
-                        if cutoff_abs <= consonant + 10:
-                            cutoff_abs = consonant + 14
-                        cutoff = -cutoff_abs
-                    elif alias_type == 'vv':
-                        # 모음-모음 전환은 뒤 모음의 입구를 넉넉히 유지
-                        n_ref = max(n_len, 80)
-                        added_cons = min(max(n_ref * 0.55, 55), 160)
-                        consonant = min(pre + added_cons, next_cv_pre_rel - 10)
-                        if consonant < pre + 25:
-                            consonant = pre + 25
-                        cutoff_abs = max(consonant + 24, next_cv_pre_rel - 6)
-                        cutoff_abs = min(cutoff_abs, consonant + 140)
-                        cutoff = -cutoff_abs
-                    else:
-                        # 비음/유음/마찰음은 연결 자음을 유지하되 다음 CV 직전에 컷
-                        n_ref = max(n_len, 80)
-                        added_cons = min(max(n_ref * 0.50, 42), 120)
-                        consonant = min(pre + added_cons, next_cv_pre_rel - 10)
-                        if consonant < pre + 25:
-                            consonant = pre + 25
-                        cutoff_abs = max(consonant + 20, next_cv_pre_rel - 8)
-                        cutoff_abs = min(cutoff_abs, consonant + 95)
+                        if anchor_params is not None:
+                            offset, consonant, cutoff, pre, ovl = anchor_params
+                            use_cv_anchor_bridge = True
+
+                    if not use_cv_anchor_bridge:
+                        if alias_type == 'vc' and bridge_profile and not use_vcv_anchor:
+                            n_ref = max(n_len, 60.0)
+                            cons_add = bridge_profile.get('cons_add_base', 36.0) + max(n_ref - 70.0, 0.0) * bridge_profile.get('cons_add_mul', 0.12)
+                            cons_add = _clamp_range(
+                                cons_add,
+                                bridge_profile.get('cons_add_min', 20.0),
+                                bridge_profile.get('cons_add_max', 68.0),
+                            )
+                            consonant = min(pre + cons_add, next_cv_pre_rel - bridge_profile.get('cons_to_next_margin', 8.0))
+                            consonant = max(consonant, pre + bridge_profile.get('cons_floor', 18.0))
+
+                            cut_add = bridge_profile.get('cut_add_base', 58.0) + max(n_ref - 70.0, 0.0) * bridge_profile.get('cut_add_mul', 0.20)
+                            cut_add = _clamp_range(
+                                cut_add,
+                                bridge_profile.get('cut_add_min', 34.0),
+                                bridge_profile.get('cut_add_max', 120.0),
+                            )
+                            cutoff_abs = max(
+                                consonant + bridge_profile.get('cut_min_gap', 16.0),
+                                pre + cut_add,
+                            )
+                            cutoff_abs = min(cutoff_abs, next_cv_pre_rel + bridge_profile.get('cut_to_next_allow', 22.0))
+                            if cutoff_abs <= consonant + 8:
+                                cutoff_abs = consonant + 10
+                            cutoff = -cutoff_abs
+                        elif is_plosive:
+                            # 파열/파찰음은 VC 쪽에서 자음을 과감히 절단해 중복 파열을 방지
+                            n_ref = max(n_len, 60)
+                            added_cons = min(max(n_ref * 0.25, 18), 40)
+                            consonant = pre + added_cons
+                            cutoff_abs = pre + min(max(n_ref * 0.40, 28), 62)
+                            if cutoff_abs <= consonant + 10:
+                                cutoff_abs = consonant + 14
+                            cutoff = -cutoff_abs
+                        elif alias_type == 'vv':
+                            # 모음-모음 전환은 뒤 모음의 입구를 넉넉히 유지
+                            n_ref = max(n_len, 80)
+                            added_cons = min(max(n_ref * 0.55, 55), 160)
+                            consonant = min(pre + added_cons, next_cv_pre_rel - 10)
+                            if consonant < pre + 25:
+                                consonant = pre + 25
+                            cutoff_abs = max(consonant + 24, next_cv_pre_rel - 6)
+                            cutoff_abs = min(cutoff_abs, consonant + 140)
+                            cutoff = -cutoff_abs
+                        else:
+                            # 비음/유음/마찰음은 연결 자음을 유지하되 다음 CV 직전에 컷
+                            n_ref = max(n_len, 80)
+                            added_cons = min(max(n_ref * 0.50, 42), 120)
+                            consonant = min(pre + added_cons, next_cv_pre_rel - 10)
+                            if consonant < pre + 25:
+                                consonant = pre + 25
+                            cutoff_abs = max(consonant + 20, next_cv_pre_rel - 8)
+                            cutoff_abs = min(cutoff_abs, consonant + 95)
+                            cutoff = -cutoff_abs
+
+                    # CVVC 원리: VC 파열/파찰음은 다음 자음 onset 직전에서 정리해 중복 파열을 줄인다.
+                    if alias_type == 'vc' and c_char in JA_PLOSIVE_CONSONANTS:
+                        onset_guard = max(next_c_onset_rel, pre + 14.0)
+                        consonant = min(consonant, onset_guard - 6.0)
+                        consonant = max(consonant, pre + 12.0)
+                        cutoff_abs = max(consonant + 10.0, onset_guard - 2.0)
+                        cutoff_abs = min(cutoff_abs, onset_guard + 6.0)
                         cutoff = -cutoff_abs
 
                 offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
