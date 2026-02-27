@@ -1,0 +1,3 @@
+customtkinter>=5.0.0
+textgrid>=1.5
+numpy>=1.24
