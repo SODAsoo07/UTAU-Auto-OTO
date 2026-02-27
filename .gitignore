@@ -213,6 +213,7 @@ logs/
 assets/profiles/kr_oto_reference_profile.json
 
 # Local run/test outputs
+config.json
 error_report_*.txt
 test_wavs/*.ini
 test_wavs/*.validation.txt

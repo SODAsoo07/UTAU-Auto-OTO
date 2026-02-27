@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import unicodedata
 import wave
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -206,6 +207,126 @@ def _parse_oto_line(line: str):
     }
 
 
+def _norm_name(name: str) -> str:
+    s = (name or "").strip().lower()
+    return unicodedata.normalize("NFKC", s)
+
+
+def _build_wav_name_index(wav_dir: str) -> Dict[str, str]:
+    idx: Dict[str, str] = {}
+    try:
+        names = [f for f in os.listdir(wav_dir) if f.lower().endswith(".wav")]
+    except Exception:
+        return idx
+    for n in names:
+        p = os.path.join(wav_dir, n)
+        keys = set()
+        n0 = n.strip().lower()
+        keys.add(n0)
+        keys.add(_norm_name(n0))
+        if n0.startswith("_"):
+            k = n0[1:]
+            keys.add(k)
+            keys.add(_norm_name(k))
+        else:
+            k = "_" + n0
+            keys.add(k)
+            keys.add(_norm_name(k))
+        for k in keys:
+            if k and k not in idx:
+                idx[k] = p
+    return idx
+
+
+def _resolve_wav_path(wav_name: str, wav_dir: str, wav_idx: Dict[str, str]) -> Optional[str]:
+    direct = os.path.join(wav_dir, wav_name)
+    if os.path.exists(direct):
+        return direct
+
+    q = (wav_name or "").strip().lower()
+    candidates = [
+        q,
+        _norm_name(q),
+        q[1:] if q.startswith("_") else "_" + q,
+        _norm_name(q[1:] if q.startswith("_") else "_" + q),
+    ]
+    for k in candidates:
+        if k in wav_idx and os.path.exists(wav_idx[k]):
+            return wav_idx[k]
+    return None
+
+
+def _score_wav_dir_match(wav_names: List[str], cand_dir: str) -> Tuple[int, int]:
+    try:
+        cand_files = [f for f in os.listdir(cand_dir) if f.lower().endswith(".wav")]
+    except Exception:
+        return 0, 0
+    if not cand_files:
+        return 0, 0
+
+    cand_set = set()
+    for n in cand_files:
+        n0 = n.strip().lower()
+        cand_set.add(n0)
+        cand_set.add(_norm_name(n0))
+        if n0.startswith("_"):
+            cand_set.add(n0[1:])
+            cand_set.add(_norm_name(n0[1:]))
+    m = 0
+    for w in wav_names:
+        w0 = (w or "").strip().lower()
+        if (
+            w0 in cand_set
+            or _norm_name(w0) in cand_set
+            or ("_" + w0) in cand_set
+            or _norm_name("_" + w0) in cand_set
+        ):
+            m += 1
+    return m, len(cand_files)
+
+
+def _iter_dirs_limited(root: str, max_depth: int = 2, max_dirs: int = 500):
+    root = os.path.abspath(root)
+    if not os.path.isdir(root):
+        return
+    stack = [(root, 0)]
+    seen = set()
+    yielded = 0
+    while stack and yielded < max_dirs:
+        cur, depth = stack.pop()
+        cur_n = os.path.normcase(cur)
+        if cur_n in seen:
+            continue
+        seen.add(cur_n)
+        yield cur
+        yielded += 1
+        if depth >= max_depth:
+            continue
+        try:
+            with os.scandir(cur) as it:
+                for ent in it:
+                    if ent.is_dir(follow_symlinks=False):
+                        stack.append((ent.path, depth + 1))
+        except Exception:
+            continue
+
+
+def _find_best_wav_dir_hint(target_wavs: List[str], roots: List[str]) -> Optional[Tuple[str, int, int]]:
+    best = None
+    best_score = 0
+    checked = 0
+    for r in roots:
+        for d in _iter_dirs_limited(r, max_depth=2, max_dirs=450):
+            checked += 1
+            m, total = _score_wav_dir_match(target_wavs, d)
+            if m <= 0:
+                continue
+            if m > best_score:
+                best_score = m
+                best = (d, m, total)
+    return best
+
+
 def _load_recording_list_map(wav_dir: str) -> Dict[str, List[str]]:
     result = {}
     try:
@@ -346,6 +467,8 @@ def validate_oto_timing(
 
     list_map = _load_recording_list_map(wav_dir)
     issues = []
+    missing_wavs: List[str] = []
+    wav_idx = _build_wav_name_index(wav_dir)
     is_japanese = (language == "japanese")
     # Japanese multi-syllable files naturally have later offsets on subsequent aliases.
     # Keep strict checks for parameter ordering, but relax global-time heuristics.
@@ -356,9 +479,10 @@ def validate_oto_timing(
     boundary_dist_warn_ms = 260.0 if is_japanese else 180.0
 
     for wav_name, rows in by_wav.items():
-        wav_path = os.path.join(wav_dir, wav_name)
-        if not os.path.exists(wav_path):
+        wav_path = _resolve_wav_path(wav_name, wav_dir, wav_idx)
+        if not wav_path:
             issues.append(("error", wav_name, "", "WAV file missing"))
+            missing_wavs.append(wav_name)
             continue
 
         audio, sr, wav_err = _read_wav_mono(wav_path)
@@ -461,6 +585,53 @@ def validate_oto_timing(
     err_count = sum(1 for x in issues if x[0] == "error")
     summary["warnings"] = warn_count
     summary["errors"] = err_count
+
+    # If very few/no files could be checked, this is usually a dataset/path mismatch
+    # rather than timing quality regression.
+    total_wavs = len(by_wav)
+    low_match = summary["checked_files"] <= max(3, int(total_wavs * 0.10))
+    if low_match and by_wav:
+        if summary["checked_files"] == 0:
+            msg = (
+                "checked_files=0: OTO의 WAV 파일명과 검증 WAV 폴더가 맞지 않습니다. "
+                "타이밍 검증이 수행되지 않았습니다."
+            )
+        else:
+            msg = (
+                f"WAV 매칭률이 매우 낮습니다 ({summary['checked_files']}/{total_wavs}). "
+                "검증 결과가 실제 품질을 반영하지 않을 수 있습니다."
+            )
+        summary["message"] = msg
+        log(f"⚠ {msg}")
+        if missing_wavs:
+            log(f"   예시 누락 파일: {missing_wavs[0]}")
+
+        roots = []
+        for p in [
+            wav_dir,
+            os.path.dirname(wav_dir),
+            tg_folder,
+            os.path.dirname(tg_folder),
+            os.path.dirname(oto_path),
+            os.path.dirname(os.path.dirname(oto_path)),
+        ]:
+            if p and os.path.isdir(p):
+                roots.append(os.path.abspath(p))
+        # unique while preserving order
+        uniq_roots = []
+        seen_roots = set()
+        for r in roots:
+            rn = os.path.normcase(r)
+            if rn in seen_roots:
+                continue
+            seen_roots.add(rn)
+            uniq_roots.append(r)
+
+        hint = _find_best_wav_dir_hint(list(by_wav.keys()), uniq_roots)
+        if hint:
+            h_dir, h_match, h_total = hint
+            log(f"💡 후보 WAV 폴더: {h_dir} (matched {h_match}/{total_wavs}, wavs={h_total})")
+            issues.append(("warn", "(validation)", "", f"Suggested WAV folder: {h_dir} ({h_match}/{total_wavs} match)"))
 
     report_path = oto_path + ".validation.txt"
     summary["report_path"] = report_path

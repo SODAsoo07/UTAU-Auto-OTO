@@ -97,6 +97,7 @@ class App(ctk.CTk):
         # OpenUtau 호환 에일리어스 생성 여부
         self.openutau_var = ctk.BooleanVar(value=False)
         self.gen_missing_vowels_var = ctk.BooleanVar(value=True)
+        self.no_base_oto_var = ctk.BooleanVar(value=False)
         
         # 언어 선택
         self.language_var = ctk.StringVar(value=LANGUAGE_OPTIONS[0])
@@ -169,7 +170,25 @@ class App(ctk.CTk):
         ctk.CTkLabel(row2, text="템플릿 OTO:", width=120, anchor="w").pack(side="left")
         self.tpl_entry = ctk.CTkEntry(row2, placeholder_text="선택 사항 (없을 시 자동 생성 포맷으로 파일명/라벨 기반 생성)")
         self.tpl_entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
-        ctk.CTkButton(row2, text="찾아보기", width=90, command=lambda: self._browse_file(self.tpl_entry, [("OTO 파일", "*.ini")])).pack(side="right")
+        self.tpl_browse_btn = ctk.CTkButton(
+            row2,
+            text="찾아보기",
+            width=90,
+            command=lambda: self._browse_file(self.tpl_entry, [("OTO 파일", "*.ini")])
+        )
+        self.tpl_browse_btn.pack(side="right")
+
+        row2b = ctk.CTkFrame(path_frame, fg_color="transparent")
+        row2b.pack(fill="x", padx=10, pady=(0, 3))
+        ctk.CTkLabel(row2b, text="", width=120).pack(side="left")
+        self.no_base_oto_checkbox = ctk.CTkCheckBox(
+            row2b,
+            text="'베이스 OTO 없음' (CVVC/VCV OpenUtau 호환 에일리어스 자동 생성)",
+            variable=self.no_base_oto_var,
+            command=self._on_no_base_oto_toggle,
+            text_color="#A5D6A7",
+        )
+        self.no_base_oto_checkbox.pack(side="left", padx=(5, 0))
 
         # 형식 지정 (템플릿 유무와 무관하게 선택 가능, 자동 감지 선택 시 판별)
         row_format = ctk.CTkFrame(path_frame, fg_color="transparent")
@@ -458,6 +477,18 @@ class App(ctk.CTk):
         else:
             self.lang_info_label.configure(text="일본어 음소(a, k, ka 등) 자동 파싱 및 생성")
             self.gen_missing_vowels_checkbox.configure(state="normal")
+        self._save_config()
+
+    def _on_no_base_oto_toggle(self):
+        no_base = bool(self.no_base_oto_var.get())
+        if no_base:
+            self.tpl_entry.configure(state="disabled")
+            if hasattr(self, "tpl_browse_btn"):
+                self.tpl_browse_btn.configure(state="disabled")
+        else:
+            self.tpl_entry.configure(state="normal")
+            if hasattr(self, "tpl_browse_btn"):
+                self.tpl_browse_btn.configure(state="normal")
         self._save_config()
 
     def _append_log(self, msg):
@@ -798,7 +829,7 @@ class App(ctk.CTk):
             self._set_status("4️⃣ OTO.ini 생성 중...")
             try:
                 wav_dir = self.wav_entry.get()
-                tpl_path = self.tpl_entry.get()
+                tpl_path = "" if self.no_base_oto_var.get() else self.tpl_entry.get()
                 out_path = self.out_entry.get()
 
                 if not wav_dir:
@@ -820,6 +851,8 @@ class App(ctk.CTk):
                 auto_format = self.auto_format_var.get()
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
                 alias_suffix = self.alias_suffix_var.get().strip()
+                if self.no_base_oto_var.get():
+                    self._append_log("ℹ '베이스 OTO 없음' 선택: 템플릿 없이 OpenUtau 호환 자동 에일리어스 생성 모드로 실행합니다.")
 
                 lang = self._get_language()
                 if lang == 'japanese':
@@ -975,7 +1008,7 @@ class App(ctk.CTk):
 
                 # Step 4: OTO
                 self._set_status("4/4 - OTO.ini 생성 중...")
-                tpl_path = self.tpl_entry.get()
+                tpl_path = "" if self.no_base_oto_var.get() else self.tpl_entry.get()
                 out_path = self.out_entry.get()
                 if out_path: # tpl_path는 이제 필수가 아님
                     tg_folder = os.path.join(wav_dir, "textgrids")
@@ -985,6 +1018,8 @@ class App(ctk.CTk):
                     auto_format = self.auto_format_var.get()
                     custom_phonemes_path = self.custom_phoneme_var.get().strip()
                     alias_suffix = self.alias_suffix_var.get().strip()
+                    if self.no_base_oto_var.get():
+                        self._append_log("ℹ '베이스 OTO 없음' 선택: 템플릿 없이 OpenUtau 호환 자동 에일리어스 생성 모드로 실행합니다.")
 
                     if lang == 'japanese':
                         generate_ja_oto(
@@ -1051,6 +1086,7 @@ class App(ctk.CTk):
                 f.write(f"\n--- 사용자 설정 ---\n")
                 f.write(f"WAV 폴더: {self.wav_entry.get()}\n")
                 f.write(f"템플릿 OTO: {self.tpl_entry.get()}\n")
+                f.write(f"베이스 OTO 없음: {self.no_base_oto_var.get()}\n")
                 f.write(f"출력 경로: {self.out_entry.get()}\n")
                 f.write(f"\n--- 파라미터 ---\n")
                 for key, var in self.param_vars.items():
@@ -1092,6 +1128,7 @@ class App(ctk.CTk):
             "alias_suffix": self.alias_suffix_var.get(),
             "openutau_compatible": self.openutau_var.get(),
             "gen_missing_vowels": self.gen_missing_vowels_var.get(),
+            "no_base_oto": self.no_base_oto_var.get(),
             "language": self.lang_var.get(),
             "auto_format": self.auto_format_var.get(),
             "tune_auto_oto": self.tune_auto_oto_var.get() if hasattr(self, "tune_auto_oto_var") else "",
@@ -1146,6 +1183,8 @@ class App(ctk.CTk):
                 self.openutau_var.set(config["openutau_compatible"])
             if "gen_missing_vowels" in config:
                 self.gen_missing_vowels_var.set(config["gen_missing_vowels"])
+            if "no_base_oto" in config:
+                self.no_base_oto_var.set(config["no_base_oto"])
             if "language" in config:
                 self.lang_var.set(config["language"]) # Changed from self.language_var
             if "auto_format" in config:
@@ -1169,6 +1208,7 @@ class App(ctk.CTk):
                 self.tune_apply_target_var.set(config.get("tune_apply_target", ""))
             
             self._on_language_change(self.lang_var.get()) # Changed from self.language_var
+            self._on_no_base_oto_toggle()
             
             if 'params' in config:
                 params = config['params']

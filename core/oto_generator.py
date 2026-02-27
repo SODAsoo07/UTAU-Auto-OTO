@@ -1160,6 +1160,16 @@ def generate_oto(
         elif af.startswith('vcv'):
             fallback_format = 'vcv'
 
+    auto_gen_format = (fallback_format or "cvvc").strip().lower()
+    if auto_gen_format not in {"cvvc", "vcv"}:
+        msg = (
+            f"⚠ 자동 에일리어스 생성은 현재 CVVC/VCV만 지원합니다. "
+            f"{auto_gen_format.upper()} -> CVVC로 전환합니다."
+        )
+        if callback:
+            callback(msg)
+        auto_gen_format = "cvvc"
+
     def log(msg):
         logger.info(msg)
         if callback:
@@ -1238,9 +1248,9 @@ def generate_oto(
         log(f"[KR-Profile] 프로파일 로드 실패: {e}")
 
     if tpl_path and not os.path.exists(tpl_path):
-        msg = f"템플릿 파일을 찾을 수 없습니다: {tpl_path}"
-        log(msg)
-        return 0, 0, [msg]
+        log(f"⚠ 템플릿 파일을 찾을 수 없습니다: {tpl_path}")
+        log(f"⚡ OpenUtau 호환 {auto_gen_format.upper()} 자동 에일리어스 생성으로 전환합니다.")
+        tpl_path = ""
 
 
     VC_CONSONANT_RATIO = params.get('VC_CONSONANT_RATIO', 0.5) if params else 0.5
@@ -1264,7 +1274,8 @@ def generate_oto(
         )
         if err:
             log(err)
-            return 0, 0, [err]
+            log(f"⚡ 템플릿 로드 실패로 OpenUtau 호환 {auto_gen_format.upper()} 자동 에일리어스 생성으로 전환합니다.")
+            lines = []
         if warning:
             log(warning)
         template_lines = lines or []
@@ -1308,13 +1319,40 @@ def generate_oto(
             return None
         return None
 
+    def _template_match_stats(lines):
+        file_names = set()
+        for line in (lines or []):
+            if "=" not in line:
+                continue
+            file_names.add(line.split("=", 1)[0].strip())
+        total = len(file_names)
+        if total == 0:
+            return 0, 0, 0.0
+        matched = 0
+        for fname in file_names:
+            if _resolve_tg_info(fname):
+                matched += 1
+        return matched, total, (matched / float(total))
+
     final_lines = []
 
 
     custom_map = load_custom_phonemes(custom_phonemes_path)
 
 
-    if template_lines:
+    use_template = bool(template_lines)
+    if use_template:
+        t_match, t_total, t_ratio = _template_match_stats(template_lines)
+        if t_total == 0 or t_match == 0 or t_ratio < 0.25:
+            log(
+                f"⚠ 템플릿-TextGrid 매칭률 낮음 ({t_match}/{t_total}, {t_ratio:.1%}) "
+                f"-> OpenUtau 호환 {auto_gen_format.upper()} 자동 에일리어스 생성으로 전환"
+            )
+            use_template = False
+        else:
+            log(f"📌 템플릿 베이스 OTO 사용 ({t_match}/{t_total}, {t_ratio:.1%})")
+
+    if use_template:
         file_groups = {}
         for line in template_lines:
             fname = line.split('=')[0]
@@ -1323,7 +1361,7 @@ def generate_oto(
             file_groups[fname].append(line)
     else:
 
-        log(f"템플릿이 없어 {fallback_format.upper()} 형식으로 에일리어스를 자동 생성합니다.")
+        log(f"⚡ 템플릿 없음/미적합 -> OpenUtau 호환 {auto_gen_format.upper()} 형식으로 에일리어스를 자동 생성합니다.")
         file_groups = {}
         try:
             from core.lab_generator import decompose_hangul_to_roman
@@ -1373,7 +1411,7 @@ def generate_oto(
                         
                         vowel_part, const_part = _extract_vowel_consonant(roman)
                         
-                        if fallback_format == 'vcv':
+                        if auto_gen_format == 'vcv':
                             if idx == 0:
                                 lines.append(f"{real_name}=- {roman},0,0,0,0,0")
                             else:
@@ -1389,11 +1427,11 @@ def generate_oto(
                                 else:
                                     lines.append(f"{real_name}={prev_vowel} {roman},0,0,0,0,0")
                                 
-                        elif fallback_format == 'cvc' or fallback_format == 'cvvc':
+                        elif auto_gen_format == 'cvvc':
 
                             lines.append(f"{real_name}={roman},0,0,0,0,0")
                             
-                            if idx > 0 and fallback_format == 'cvvc':
+                            if idx > 0:
 
                                 prev_w = wd_intervals[idx-1]
                                 prev_parts = []

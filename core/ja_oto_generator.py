@@ -394,6 +394,108 @@ def _is_vowel_chain_syllables(syllables):
     return True
 
 
+def _normalize_ja_syllable_token(token):
+    t_raw = (token or "").strip()
+    if not t_raw:
+        return ""
+    t = t_raw.lower()
+    if re.search(r'[\u3041-\u3096\u30A1-\u30FA\u30FC]', t_raw):
+        syls = parse_ja_filename(t_raw)
+        if syls:
+            t = syls[0].lower()
+    t = t.replace("'", "").strip("-_ ")
+    if not t:
+        return ""
+    if t in {"n", "nn", "xn", "m"}:
+        return "n"
+    onset, vowel = split_ja_romaji_syllable(t)
+    if vowel in JA_VOWELS:
+        return f"{onset}{vowel}" if onset else vowel
+    return t
+
+
+def _extract_vcv_target_syllable(alias):
+    parts = (alias or "").strip().split()
+    if len(parts) >= 2:
+        return _normalize_ja_syllable_token(parts[1])
+    return _normalize_ja_syllable_token(alias)
+
+
+def _syllable_info_token(syl_info):
+    if not isinstance(syl_info, dict):
+        return ""
+    for k in ("roman", "word"):
+        if k in syl_info:
+            tok = _normalize_ja_syllable_token(syl_info.get(k, ""))
+            if tok:
+                return tok
+    phones = syl_info.get("phones") or []
+    marks = [_clean_phone_mark(getattr(p, "mark", "")) for p in phones]
+    marks = [m for m in marks if m and m not in {"sil", "sp", "spn", "pau"}]
+    if not marks:
+        return ""
+    onset = ""
+    vowel = ""
+    for m in marks:
+        if m in {"a", "i", "u", "ɯ", "e", "o", "ɴ", "n"}:
+            vowel = "u" if m == "ɯ" else ("n" if m in {"ɴ", "n"} else m)
+            break
+        if not onset:
+            onset = m
+    if vowel:
+        return f"{onset}{vowel}" if onset and vowel != "n" else vowel
+    return onset
+
+
+def _vcv_syllable_match_score(target, candidate):
+    t = _normalize_ja_syllable_token(target)
+    c = _normalize_ja_syllable_token(candidate)
+    if not t or not c:
+        return 0
+    if t == c:
+        return 100
+
+    to, tv = split_ja_romaji_syllable(t)
+    co, cv = split_ja_romaji_syllable(c)
+    score = 0
+    if tv and cv and tv == cv:
+        score += 60
+    if to and co:
+        if to == co:
+            score += 35
+        elif to.startswith(co) or co.startswith(to):
+            score += 22
+        elif to[0] == co[0]:
+            score += 10
+    if t in c or c in t:
+        score += 8
+    return score
+
+
+def _select_vcv_syllable_index(alias, expected_idx, syllables_info):
+    if not syllables_info:
+        return 0
+    n = len(syllables_info)
+    e = max(0, min(int(expected_idx), n - 1))
+    target = _extract_vcv_target_syllable(alias)
+    if not target:
+        return e
+
+    start = max(0, e - 2)
+    end = min(n, e + 4)
+    best_idx = e
+    best_score = -10**9
+    for i in range(start, end):
+        cand = _syllable_info_token(syllables_info[i])
+        score = _vcv_syllable_match_score(target, cand) - abs(i - e) * 7
+        if score > best_score:
+            best_score = score
+            best_idx = i
+    if best_score >= 56:
+        return best_idx
+    return e
+
+
 def _mk_phone(start_t: float, end_t: float, mark: str):
     return SimpleNamespace(minTime=float(start_t), maxTime=float(end_t), mark=str(mark))
 
@@ -928,6 +1030,16 @@ def generate_ja_oto(
             forced_format = 'vcv'
             fallback_format = 'vcv'
 
+    auto_gen_format = (fallback_format or "cvvc").strip().lower()
+    if auto_gen_format not in {"cvvc", "vcv"}:
+        log_msg = (
+            f"⚠️ 자동 에일리어스 생성은 현재 CVVC/VCV만 지원합니다. "
+            f"{auto_gen_format.upper()} -> CVVC로 전환합니다."
+        )
+        if callback:
+            callback(log_msg)
+        auto_gen_format = "cvvc"
+
     def log(msg):
         logger.info(msg)
         if callback:
@@ -991,9 +1103,9 @@ def generate_ja_oto(
         log("[JA-Profile] 추상 프리셋 적용 비활성화(환경변수 설정)")
 
     if tpl_path and not os.path.exists(tpl_path):
-        msg = f"❌ 템플릿 파일을 찾을 수 없습니다: {tpl_path}"
-        log(msg)
-        return 0, 0, [msg]
+        log(f"⚠️ 템플릿 파일을 찾을 수 없습니다: {tpl_path}")
+        log(f"⚡ OpenUtau 호환 {auto_gen_format.upper()} 자동 에일리어스 생성으로 전환합니다.")
+        tpl_path = ""
 
     # 템플릿 읽기
     template_lines = []
@@ -1004,8 +1116,9 @@ def generate_ja_oto(
             mode_label="일본어 모드",
         )
         if err:
-            log(err)
-            return 0, 0, [err]
+            log(f"{err}")
+            log(f"⚡ 템플릿 로드 실패로 OpenUtau 호환 {auto_gen_format.upper()} 자동 에일리어스 생성으로 전환합니다.")
+            lines = []
         if warning:
             log(warning)
         template_lines = lines or []
@@ -1051,13 +1164,40 @@ def generate_ja_oto(
             return None
         return None
 
+    def _template_match_stats(lines):
+        file_names = set()
+        for line in (lines or []):
+            if "=" not in line:
+                continue
+            file_names.add(line.split("=", 1)[0].strip())
+        total = len(file_names)
+        if total == 0:
+            return 0, 0, 0.0
+        matched = 0
+        for fname in file_names:
+            if _resolve_tg_info(fname):
+                matched += 1
+        return matched, total, (matched / float(total))
+
     final_lines = []
 
     # 커스텀 맵 로드
     custom_map = load_custom_phonemes(custom_phonemes_path)
 
     # 템플릿 사용 (일반 모드)
-    if template_lines:
+    use_template = bool(template_lines)
+    if use_template:
+        t_match, t_total, t_ratio = _template_match_stats(template_lines)
+        if t_total == 0 or t_match == 0 or t_ratio < 0.25:
+            log(
+                f"⚠️ 템플릿-TextGrid 매칭률 낮음 ({t_match}/{t_total}, {t_ratio:.1%}) "
+                f"→ OpenUtau 호환 {auto_gen_format.upper()} 자동 에일리어스 생성으로 전환"
+            )
+            use_template = False
+        else:
+            log(f"📌 템플릿 베이스 OTO 사용 ({t_match}/{t_total}, {t_ratio:.1%})")
+
+    if use_template:
         file_groups = {}
         for line in template_lines:
             fname = line.split('=')[0]
@@ -1066,7 +1206,7 @@ def generate_ja_oto(
             file_groups[fname].append(line)
     else:
         # 템플릿 없는 자동 생성 모드 (Auto-Generation)
-        log(f"⚡ 템플릿 없음 → {fallback_format.upper()} 포맷으로 자동 에일리어스 생성 시작")
+        log(f"⚡ 템플릿 없음/미적합 → OpenUtau 호환 {auto_gen_format.upper()} 포맷 자동 에일리어스 생성 시작")
         file_groups = {}
 
         def _resolve_vowel_onset(syl):
@@ -1092,7 +1232,7 @@ def generate_ja_oto(
                     
                 lines = []
                 is_long = base_name.lower().endswith('long') or len(syllables) == 1
-                local_format = fallback_format
+                local_format = auto_gen_format
                 if _is_vowel_chain_syllables(syllables):
                     local_format = 'vcv'
                     log(f"🧭 {real_name}: 모음 연속음 파일 감지 → 자동 생성 포맷 VCV 적용")
@@ -1522,8 +1662,14 @@ def generate_ja_oto(
                 # === VCV 연속음 처리 ===
                 if is_vcv:
                     if cv_seq_idx < len(syllables_info):
-                        current_w_idx = cv_seq_idx
-                        cv_seq_idx = current_w_idx + 1
+                        expected_idx = cv_seq_idx
+                    else:
+                        expected_idx = len(syllables_info) - 1
+                    mapped_idx = _select_vcv_syllable_index(alias, expected_idx, syllables_info)
+                    if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
+                        log(f"🧭 {fname}: VCV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
+                    current_w_idx = mapped_idx
+                    cv_seq_idx = current_w_idx + 1
                     if current_w_idx >= len(syllables_info):
                         current_w_idx = len(syllables_info) - 1
                         
