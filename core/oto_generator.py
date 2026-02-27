@@ -447,6 +447,558 @@ def _compute_kr_cv_timing(c_start, c_end, cv_vowel_len, c_hint, alias_onset, is_
     return offset, consonant, cutoff, pre, ovl
 
 
+def _estimate_cv_anchor_from_syllable(syl, ph_intervals):
+    """음절 정보 1개에서 CV anchor(상대 타이밍 shape)를 추정합니다."""
+    curr_phones = (syl or {}).get('phones') or []
+    if not curr_phones:
+        return None
+
+    roman_tok = (syl.get('roman_cv') or syl.get('roman') or "")
+    if len(curr_phones) >= 2:
+        _v_idx, v_phone = find_vowel_phone(curr_phones)
+        c_start = curr_phones[0].minTime * 1000
+        c_end = v_phone.minTime * 1000
+        n_start = v_phone.minTime * 1000
+        n_end = v_phone.maxTime * 1000
+    else:
+        c_start = curr_phones[0].minTime * 1000
+        c_end = c_start
+        n_start = c_start
+        n_end = curr_phones[0].maxTime * 1000
+
+    c_hint = curr_phones[0].mark if curr_phones else ""
+    alias_onset = _extract_alias_onset(roman_tok)
+    is_diph_syl = is_diphthong(roman_tok)
+    cv_vowel_len = max(n_end - n_start, 20.0)
+    first_phone_plosive = len(curr_phones) >= 2 and is_plosive_ipa(curr_phones[0].mark)
+    is_plosive = (first_phone_plosive or is_plosive_roman(alias_onset)) if alias_onset else first_phone_plosive
+    offset, consonant, cutoff, pre, ovl = _compute_kr_cv_timing(
+        c_start,
+        c_end,
+        cv_vowel_len,
+        c_hint,
+        alias_onset,
+        is_diph_syl,
+        is_plosive,
+    )
+
+    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    offset, consonant, cutoff, pre, ovl = _stabilize_params_to_phone_activity(
+        offset, consonant, cutoff, pre, ovl, ph_intervals, alias_type="cv"
+    )
+    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    return {
+        "offset": offset,
+        "pre": pre,
+        "ovl": ovl,
+        "cons": consonant,
+        "cutoff": cutoff,
+        "pre_abs": offset + pre,
+        "cons_abs": offset + consonant,
+        "onset_abs": c_start,
+        "vowel_end_abs": n_end,
+        "vowel_len": cv_vowel_len,
+        "cons_gap": max(consonant - pre, 10.0),
+        "cut_gap": max(abs(cutoff) - consonant, 16.0),
+    }
+
+
+def _compute_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, is_plosive_sibilant):
+    """인접 CV anchor를 이용해 VC/VV 파라미터를 계산합니다."""
+    if not prev_cv or not next_cv:
+        return None
+
+    boundary_abs = next_cv["onset_abs"] if alias_type == "vc" else next_cv["pre_abs"]
+    pre_target = _clamp(_blend(prev_cv["pre"], next_cv["pre"], 0.35), 45.0, 220.0)
+    offset = max(boundary_abs - pre_target, 0.0)
+    pre = boundary_abs - offset
+    if pre <= 0:
+        return None
+
+    ovl_tail = _clamp(prev_cv["vowel_len"] * 0.10, 4.0, 22.0)
+    target_ovl_abs = prev_cv["vowel_end_abs"] - ovl_tail
+    ovl = target_ovl_abs - offset
+    if is_plosive_sibilant:
+        ovl = _clamp(ovl, pre * 0.24, max(pre - 12.0, 0.0))
+    else:
+        ovl = _clamp(ovl, pre * 0.34, max(pre - 10.0, 0.0))
+
+    cons_gap = _clamp(_blend(prev_cv["cons_gap"], next_cv["cons_gap"], 0.45), 16.0, 120.0)
+    consonant = pre + cons_gap
+    next_onset_rel = max(next_cv["onset_abs"] - offset, pre + 10.0)
+    next_pre_rel = max(next_cv["pre_abs"] - offset, pre + 16.0)
+    next_cons_rel = max(next_cv["cons_abs"] - offset, next_pre_rel + 10.0)
+
+    if alias_type == "vc":
+        if is_plosive_sibilant:
+            consonant = min(consonant, next_onset_rel - 6.0)
+            consonant = max(consonant, pre + 12.0)
+            cutoff_abs = max(consonant + 10.0, next_onset_rel - 2.0)
+            cutoff_abs = min(cutoff_abs, next_onset_rel + 8.0)
+        else:
+            consonant = min(consonant, next_onset_rel + 24.0)
+            consonant = max(consonant, pre + 16.0)
+            cutoff_abs = max(consonant + 12.0, min(next_cons_rel + 24.0, next_pre_rel + 42.0))
+    else:
+        consonant = min(max(consonant, pre + 24.0), next_pre_rel + 48.0)
+        cutoff_abs = max(consonant + 20.0, next_pre_rel + 10.0)
+        cutoff_abs = min(cutoff_abs, next_cons_rel + 60.0)
+
+    cutoff = -cutoff_abs
+    return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+
+
+def _guard_cv_cutoff_to_next_onset(offset, consonant, cutoff, pre, syll_idx, syllables_info):
+    """CV/CV_HEAD cutoff이 다음 음절 onset을 침범하지 않도록 상한을 건다."""
+    if syll_idx is None or syll_idx < 0:
+        return offset, consonant, cutoff, pre, 0.0
+    if (syll_idx + 1) >= len(syllables_info):
+        return offset, consonant, cutoff, pre, 0.0
+
+    next_syl = syllables_info[syll_idx + 1]
+    next_phones = next_syl.get("phones") or []
+    if not next_phones:
+        return offset, consonant, cutoff, pre, 0.0
+
+    next_mark = (next_phones[0].mark or "").strip().lower()
+    hard_next = is_plosive_ipa(next_mark) or next_mark in {
+        "s", "ss", "sh", "ch", "j", "jj", "c", "ts", "h"
+    }
+    safety = 16.0 if hard_next else 10.0
+    next_onset_rel = (next_phones[0].minTime * 1000.0) - offset
+    max_cutoff_abs = next_onset_rel - safety
+    if max_cutoff_abs <= (pre + 18.0):
+        return offset, consonant, cutoff, pre, 0.0
+
+    original_cutoff_abs = abs(cutoff)
+    consonant = min(consonant, max_cutoff_abs - 14.0)
+    consonant = max(consonant, pre + 10.0)
+
+    cutoff_abs = min(original_cutoff_abs, max_cutoff_abs)
+    if cutoff_abs <= (consonant + 8.0):
+        cutoff_abs = min(max_cutoff_abs, consonant + 10.0)
+        if cutoff_abs <= (consonant + 6.0):
+            consonant = max(pre + 8.0, cutoff_abs - 10.0)
+    cutoff = -cutoff_abs
+
+    offset, consonant, cutoff, pre, _ovl = validate_oto_params(
+        offset, consonant, cutoff, pre, 0.0
+    )
+    reduction = max(0.0, original_cutoff_abs - abs(cutoff))
+    return offset, consonant, cutoff, pre, reduction
+
+
+def _prepare_vcv_syllable_timing(syllables_info, current_w_idx, cv_seq_idx, diphthong_cv_consonant_ratio):
+    """VCV 계산에 필요한 음절 인덱스 갱신과 기본 타이밍을 산출합니다."""
+    if cv_seq_idx < len(syllables_info):
+        current_w_idx = cv_seq_idx
+        cv_seq_idx = current_w_idx + 1
+    if current_w_idx >= len(syllables_info):
+        current_w_idx = len(syllables_info) - 1
+
+    curr_syl = syllables_info[current_w_idx]
+    curr_phones = curr_syl['phones']
+
+    if current_w_idx > 0:
+        prev_syl = syllables_info[current_w_idx - 1]
+        prev_phones = prev_syl['phones']
+        prev_v_start = prev_phones[-1].minTime * 1000
+        prev_v_end = prev_phones[-1].maxTime * 1000
+    else:
+        prev_v_start = curr_phones[0].minTime * 1000 - 100
+        prev_v_end = curr_phones[0].minTime * 1000
+
+    if len(curr_phones) >= 2:
+        c_boundary = curr_phones[-1].minTime * 1000
+        n_end = curr_phones[-1].maxTime * 1000
+    else:
+        c_boundary = curr_phones[0].minTime * 1000
+        n_end = curr_phones[0].maxTime * 1000
+
+    prev_v_len = prev_v_end - prev_v_start
+    offset_padding = min(prev_v_len * 0.6, 200)
+    if offset_padding < 80:
+        offset_padding = max(prev_v_len * 0.5, 50)
+
+    offset = prev_v_end - offset_padding
+    if offset < 0:
+        offset = 0
+
+    pre = c_boundary - offset
+    c_hint = curr_phones[0].mark if curr_phones else ""
+    ovl = adaptive_overlap(pre, c_hint, mode='vcv')
+
+    vowel_len = n_end - c_boundary
+    added_cons = min(vowel_len * diphthong_cv_consonant_ratio, 150)
+    if added_cons < 50:
+        added_cons = 50
+    consonant = pre + added_cons
+    cutoff = -(consonant + vowel_len * 0.25)
+    return current_w_idx, cv_seq_idx, offset, consonant, cutoff, pre, ovl
+
+
+def _prepare_cv_head_syllable_timing(syllables_info, current_w_idx, cv_seq_idx, alias):
+    """CV_HEAD 계산에 필요한 음절 인덱스 갱신과 기본 타이밍을 산출합니다."""
+    if cv_seq_idx < len(syllables_info):
+        current_w_idx = cv_seq_idx
+        cv_seq_idx = current_w_idx + 1
+    if current_w_idx >= len(syllables_info):
+        current_w_idx = len(syllables_info) - 1
+
+    curr_syl = syllables_info[current_w_idx]
+    curr_phones = curr_syl['phones']
+
+    if len(curr_phones) >= 2:
+        c_start = curr_phones[0].minTime * 1000
+        c_end = curr_phones[-1].minTime * 1000
+        n_start = c_end
+        n_end = curr_phones[-1].maxTime * 1000
+    else:
+        c_start = curr_phones[0].minTime * 1000
+        c_end = c_start
+        n_start = c_start
+        n_end = curr_phones[0].maxTime * 1000
+
+    c_hint = curr_phones[0].mark if curr_phones else ""
+    alias_onset = _extract_alias_onset(alias)
+    is_tense_cv = _is_tense_consonant(c_hint, alias_onset)
+    is_sonorant_cv = _is_sonorant_consonant(c_hint, alias_onset)
+
+    if is_tense_cv:
+        offset = max(c_start - 46, 0)
+    elif is_sonorant_cv:
+        offset = max(c_start - 72, 0)
+    else:
+        offset = max(c_start - 44, 0)
+
+    pre = c_end - offset if c_end > c_start else 30
+    ovl = adaptive_overlap(pre, c_hint, mode='cv_head')
+    if is_tense_cv:
+        ovl = min(ovl, max(pre * 0.32, 9.0))
+    elif is_sonorant_cv:
+        ovl = max(ovl, min(pre * 0.48, max(pre - 10.0, 0.0)))
+
+    cv_vowel_len = n_end - n_start
+    if is_tense_cv:
+        added_cons = min(max(cv_vowel_len * 0.46, 72), 156)
+    elif is_sonorant_cv:
+        added_cons = min(max(cv_vowel_len * 0.58, 88), 190)
+    else:
+        added_cons = min(cv_vowel_len * 0.5, 150)
+        if added_cons < 80:
+            added_cons = 80
+
+    consonant = pre + added_cons
+    cutoff = -(consonant + cv_vowel_len * 0.25)
+    return current_w_idx, cv_seq_idx, offset, consonant, cutoff, pre, ovl
+
+
+def _append_alias_rows(
+    final_lines,
+    real_wav_name,
+    alias,
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    ovl,
+    generate_openutau=False,
+    alias_suffix="",
+):
+    """에일리어스(및 OpenUtau 변형)를 OTO 라인으로 누적합니다."""
+    aliases_to_write = generate_openutau_aliases(alias) if generate_openutau else [alias]
+    for a in aliases_to_write:
+        a2 = apply_alias_suffix(a, alias_suffix)
+        new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
+        final_lines.append(new_line)
+
+
+def _resolve_cv_syllable_index(target_clean, romaji_syllables, cv_seq_idx, current_w_idx):
+    """CV 계열 alias를 words/roman 음절 인덱스에 매핑합니다."""
+    if cv_seq_idx >= len(romaji_syllables):
+        return current_w_idx, cv_seq_idx
+
+    name_match_idx = None
+    best_score = -1
+    # diphthong/r-l 혼용 케이스를 위해 탐색 범위를 넓혀 안정적으로 음절 정렬
+    scan_start = max(cv_seq_idx - 1, 0)
+    scan_end = min(cv_seq_idx + 5, len(romaji_syllables))
+    for i in range(scan_start, scan_end):
+        score = _cv_match_score(target_clean, romaji_syllables[i])
+        score -= abs(i - cv_seq_idx) * 4
+        if score > best_score:
+            best_score = score
+            name_match_idx = i
+        if score >= 98:
+            break
+
+    expected_score = -1
+    if 0 <= cv_seq_idx < len(romaji_syllables):
+        expected_score = _cv_match_score(target_clean, romaji_syllables[cv_seq_idx])
+
+    if name_match_idx is not None and best_score >= 62:
+        chosen_idx = name_match_idx
+        # 이중모음/종성 포함 토큰에서 발생하는 과도한 앞 점프를 억제한다.
+        if (
+            name_match_idx > cv_seq_idx
+            and expected_score >= max(58, best_score - 10)
+        ):
+            chosen_idx = cv_seq_idx
+        current_w_idx = chosen_idx
+    else:
+        current_w_idx = cv_seq_idx
+
+    cv_seq_idx = current_w_idx + 1
+    return current_w_idx, cv_seq_idx
+
+
+def _prepare_cv_bounds_from_syllable(syllables_info, current_w_idx):
+    """CV 계산에 필요한 (curr_phones, c_start/c_end/n_start/n_end)를 구성합니다."""
+    if current_w_idx >= len(syllables_info):
+        current_w_idx = len(syllables_info) - 1
+
+    curr_syl = syllables_info[current_w_idx]
+    curr_phones = curr_syl['phones']
+
+    if len(curr_phones) >= 2:
+        _v_idx, v_phone = find_vowel_phone(curr_phones)
+        c_start = curr_phones[0].minTime * 1000
+        c_end = v_phone.minTime * 1000
+        n_start = v_phone.minTime * 1000
+        n_end = v_phone.maxTime * 1000
+    else:
+        c_start = curr_phones[0].minTime * 1000
+        c_end = c_start
+        n_start = c_start
+        n_end = curr_phones[0].maxTime * 1000
+
+    return current_w_idx, curr_phones, c_start, c_end, n_start, n_end
+
+
+def _prepare_vc_bounds_from_context(syllables_info, current_w_idx):
+    """VC 계산에 필요한 (curr_phones, c_start/c_end/n_start/n_end)를 구성합니다."""
+    if current_w_idx >= len(syllables_info):
+        current_w_idx = len(syllables_info) - 1
+
+    curr_syl = syllables_info[current_w_idx]
+    curr_phones = curr_syl['phones']
+
+    v_start = curr_phones[-1].minTime * 1000
+    v_end = curr_phones[-1].maxTime * 1000
+    c_start = v_start
+    c_end = v_end
+
+    if current_w_idx + 1 < len(syllables_info):
+        next_syl = syllables_info[current_w_idx + 1]
+        n_start = next_syl['phones'][0].minTime * 1000
+        n_end = next_syl['phones'][0].maxTime * 1000
+    else:
+        n_start = v_end
+        n_end = v_end + 100
+
+    return current_w_idx, curr_phones, c_start, c_end, n_start, n_end
+
+
+def _compute_kr_vc_timing(
+    alias,
+    alias_type,
+    file_format,
+    curr_phones,
+    current_w_idx,
+    syllables_info,
+    c_start,
+    c_end,
+    n_start,
+    n_end,
+    cv_anchor_by_idx,
+):
+    """한국어 VC/VV 타이밍 계산 핵심 로직입니다."""
+    c_char = _extract_vc_right_token(alias)
+    is_vc_plosive_coda = (
+        alias_type == 'vc'
+        and file_format in {'cvc', 'cvvc', 'vc_only'}
+        and _is_kr_plosive_coda_alias(alias)
+    )
+
+    if is_vc_plosive_coda:
+        # 종성 파열음은 받침 구간을 먹지 않도록 모음 끝 직전에 pre를 고정합니다.
+        coda_canon = _canonicalize_kr_coda(c_char)
+        is_hard_stop_coda = coda_canon in {"t", "p"}
+        v_idx = None
+        v_phone = None
+        if curr_phones:
+            v_idx, v_phone = find_vowel_phone(curr_phones)
+
+        vowel_start = (v_phone.minTime * 1000) if v_phone else c_start
+        vowel_end = (v_phone.maxTime * 1000) if v_phone else c_end
+
+        coda_start = None
+        if v_phone is not None and v_idx is not None and (v_idx + 1) < len(curr_phones):
+            coda_start = curr_phones[v_idx + 1].minTime * 1000
+        elif current_w_idx + 1 < len(syllables_info):
+            next_syl = syllables_info[current_w_idx + 1]
+            if next_syl.get('phones'):
+                coda_start = next_syl['phones'][0].minTime * 1000
+
+        boundary = max(vowel_start + 16.0, vowel_end - (14.0 if is_hard_stop_coda else 11.0))
+        if coda_start is not None:
+            coda_margin = 12.0 if is_hard_stop_coda else 9.0
+            boundary = min(boundary, coda_start - coda_margin)
+            boundary = max(boundary, vowel_start + (12.0 if is_hard_stop_coda else 14.0))
+
+        pre_target = _clamp(
+            boundary - vowel_start,
+            42.0 if is_hard_stop_coda else 45.0,
+            132.0 if is_hard_stop_coda else 145.0,
+        )
+        offset = max(boundary - pre_target, 0.0)
+        pre = boundary - offset
+        ovl = adaptive_overlap(pre, c_char, mode='vc')
+        ovl = min(ovl, max(pre - 12.0, 0.0))
+
+        tail_floor = 10.0 if is_hard_stop_coda else 12.0
+        if coda_start is not None:
+            tail_room = max(coda_start - boundary, tail_floor)
+        else:
+            tail_room = max(n_start - boundary, tail_floor)
+
+        cons_mul = 0.54 if is_hard_stop_coda else 0.62
+        cons_min = 10.0 if is_hard_stop_coda else 12.0
+        cons_max = 30.0 if is_hard_stop_coda else 38.0
+        added_cons = _clamp(tail_room * cons_mul, cons_min, cons_max)
+        consonant = pre + added_cons
+        cut_mul = 0.56 if is_hard_stop_coda else 0.70
+        cut_min = 20.0 if is_hard_stop_coda else 24.0
+        cut_max = 52.0 if is_hard_stop_coda else 64.0
+        cut_gap = _clamp(tail_room * cut_mul, cut_min, cut_max)
+
+        cutoff_abs = consonant + cut_gap
+        next_onset_rel = max(n_start - offset, pre + 12.0)
+        cutoff_soft_cap = next_onset_rel + (4.0 if is_hard_stop_coda else 8.0)
+        cutoff_min_abs = consonant + (8.0 if is_hard_stop_coda else 10.0)
+        if cutoff_soft_cap <= cutoff_min_abs:
+            consonant = min(consonant, max(next_onset_rel - 6.0, pre + 8.0))
+            cutoff_min_abs = consonant + (6.0 if is_hard_stop_coda else 8.0)
+            cutoff_soft_cap = max(cutoff_soft_cap, cutoff_min_abs)
+        cutoff_abs = _clamp(cutoff_abs, cutoff_min_abs, cutoff_soft_cap)
+        cutoff = -cutoff_abs
+        return offset, consonant, cutoff, pre, ovl, True
+
+    vc_anchor_params = None
+    if current_w_idx + 1 < len(syllables_info):
+        prev_cv_anchor = cv_anchor_by_idx.get(current_w_idx)
+        next_cv_anchor = cv_anchor_by_idx.get(current_w_idx + 1)
+        is_plosive_sibilant = c_char in ['g', 'k', 'kk', 'gg', 'd', 't', 'tt', 'dd', 'b', 'p', 'bb', 'pp', 's', 'ss', 'h', 'j', 'jj', 'ch']
+        vc_anchor_params = _compute_vc_from_adjacent_cv(
+            prev_cv_anchor, next_cv_anchor, alias_type, is_plosive_sibilant
+        )
+
+    if vc_anchor_params is not None:
+        offset, consonant, cutoff, pre, ovl = vc_anchor_params
+        return offset, consonant, cutoff, pre, ovl, False
+
+    # VC should attach to the next consonant onset.
+    # Consonant-end anchoring often causes awkward late VC timing.
+    vc_target = n_start if alias_type == 'vc' else n_end
+    boundary = min(vc_target, c_end + 260)
+    v_len = c_end - c_start
+    n_len = n_end - n_start
+
+    offset_padding = 180
+    if v_len < offset_padding:
+        offset_padding = max(v_len * 0.8, 50)
+
+    offset = boundary - offset_padding
+    pre = boundary - offset
+
+    is_plosive_sibilant = c_char in ['g', 'k', 'kk', 'gg', 'd', 't', 'tt', 'dd', 'b', 'p', 'bb', 'pp', 's', 'ss', 'h', 'j', 'jj', 'ch']
+    ovl = adaptive_overlap(pre, c_char, mode='vv' if alias_type == 'vv' else 'vc')
+
+    if is_plosive_sibilant:
+        n_ref = max(n_len, 100)
+        added_cons = min(max(n_ref * 0.35, 45), 95)
+        consonant = pre + added_cons
+        cutoff = -(consonant + max(n_len * 0.35, 45))
+    else:
+        n_ref = max(n_len, 80)
+        added_cons = min(max(n_ref * 0.55, 55), 160)
+        consonant = pre + added_cons
+        cutoff = -(consonant + max(n_len * 0.45, 50))
+
+    if alias_type == 'vc':
+        # CVVC 원리: VC는 다음 자음 onset 주변에서 정리해 CV와의 중복 자음을 줄인다.
+        next_c_onset_rel = max(n_start - offset, pre + 10.0)
+        if is_plosive_sibilant:
+            consonant = min(consonant, next_c_onset_rel - 6.0)
+            consonant = max(consonant, pre + 12.0)
+            cutoff_abs = max(consonant + 10.0, next_c_onset_rel - 2.0)
+            cutoff_abs = min(cutoff_abs, next_c_onset_rel + 8.0)
+            cutoff = -cutoff_abs
+        else:
+            consonant = min(consonant, next_c_onset_rel + 26.0)
+            consonant = max(consonant, pre + 16.0)
+            cutoff_abs = min(abs(cutoff), next_c_onset_rel + 30.0)
+            cutoff_abs = max(cutoff_abs, consonant + 12.0)
+            cutoff = -cutoff_abs
+
+    return offset, consonant, cutoff, pre, ovl, False
+
+
+def _apply_post_timing_pipeline(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    ovl,
+    alias_type,
+    mel_ctx_for_file,
+    base_shape,
+    ph_intervals,
+    current_w_idx,
+    syllables_info,
+    is_vc_plosive_coda=False,
+    enable_stabilize=True,
+    enable_cutoff_guard=True,
+):
+    """후처리 가드(soft mel/base shape/stabilize/cutoff)를 일관 적용합니다."""
+    soft_off_shift = 0.0
+    soft_cut_shift = 0.0
+    cutoff_reduced = 0.0
+
+    if alias_type in {"cv", "cv_head", "vcv"}:
+        offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
+            offset, consonant, cutoff, pre, ovl, alias_type, mel_ctx_for_file
+        )
+
+    if not is_vc_plosive_coda:
+        offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
+            offset, consonant, cutoff, pre, ovl, base_shape, alias_type=alias_type
+        )
+
+    if enable_stabilize:
+        offset, consonant, cutoff, pre, ovl = _stabilize_params_to_phone_activity(
+            offset, consonant, cutoff, pre, ovl, ph_intervals, alias_type=alias_type
+        )
+
+    if enable_cutoff_guard and alias_type in {"cv", "cv_head"}:
+        offset, consonant, cutoff, pre, cutoff_reduced = _guard_cv_cutoff_to_next_onset(
+            offset, consonant, cutoff, pre, current_w_idx, syllables_info
+        )
+
+    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    return offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift, cutoff_reduced
+
+
+def _log_post_timing_events(log_fn, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced):
+    """후처리 가드에서 발생한 유의미한 이동량을 로그로 기록합니다."""
+    if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
+        log_fn(
+            f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
+        )
+    if cutoff_reduced > 0.5:
+        log_fn(f"🛡️ {fname}: CV 컷오프 과연장 보정(-{cutoff_reduced:.1f}ms) [{alias}]")
+
+
 # ==============================================================================
 # 에일리어스 분류용 상수
 # ==============================================================================
@@ -2583,11 +3135,18 @@ def generate_oto(
                     
                     offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
                     
-                    aliases_to_write = generate_openutau_aliases(alias) if generate_openutau else [alias]
-                    for a in aliases_to_write:
-                        a2 = apply_alias_suffix(a, alias_suffix)
-                        new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
-                        final_lines.append(new_line)
+                    _append_alias_rows(
+                        final_lines,
+                        real_wav_name,
+                        alias,
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                        generate_openutau=generate_openutau,
+                        alias_suffix=alias_suffix,
+                    )
                 processed += 1
                 continue
 
@@ -2672,149 +3231,10 @@ def generate_oto(
             current_w_idx = 0
             cv_seq_idx = 0
 
-            def _estimate_cv_anchor(idx):
-                if idx < 0 or idx >= len(syllables_info):
-                    return None
-                syl = syllables_info[idx]
-                curr_phones = syl.get('phones') or []
-                if not curr_phones:
-                    return None
-
-                roman_tok = (syl.get('roman_cv') or syl.get('roman') or "")
-                if len(curr_phones) >= 2:
-                    v_idx, v_phone = find_vowel_phone(curr_phones)
-                    c_start = curr_phones[0].minTime * 1000
-                    c_end = v_phone.minTime * 1000
-                    n_start = v_phone.minTime * 1000
-                    n_end = v_phone.maxTime * 1000
-                else:
-                    c_start = curr_phones[0].minTime * 1000
-                    c_end = c_start
-                    n_start = c_start
-                    n_end = curr_phones[0].maxTime * 1000
-
-                c_hint = curr_phones[0].mark if curr_phones else ""
-                alias_onset = _extract_alias_onset(roman_tok)
-                is_diph_syl = is_diphthong(roman_tok)
-                cv_vowel_len = max(n_end - n_start, 20.0)
-                first_phone_plosive = len(curr_phones) >= 2 and is_plosive_ipa(curr_phones[0].mark)
-                is_plosive = (first_phone_plosive or is_plosive_roman(alias_onset)) if alias_onset else first_phone_plosive
-                offset, consonant, cutoff, pre, ovl = _compute_kr_cv_timing(
-                    c_start,
-                    c_end,
-                    cv_vowel_len,
-                    c_hint,
-                    alias_onset,
-                    is_diph_syl,
-                    is_plosive,
-                )
-
-                offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
-                offset, consonant, cutoff, pre, ovl = _stabilize_params_to_phone_activity(
-                    offset, consonant, cutoff, pre, ovl, ph_intervals, alias_type="cv"
-                )
-                offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
-                return {
-                    "offset": offset,
-                    "pre": pre,
-                    "ovl": ovl,
-                    "cons": consonant,
-                    "cutoff": cutoff,
-                    "pre_abs": offset + pre,
-                    "cons_abs": offset + consonant,
-                    "onset_abs": c_start,
-                    "vowel_end_abs": n_end,
-                    "vowel_len": cv_vowel_len,
-                    "cons_gap": max(consonant - pre, 10.0),
-                    "cut_gap": max(abs(cutoff) - consonant, 16.0),
-                }
-
-            def _compute_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, c_char, is_plosive_sibilant):
-                if not prev_cv or not next_cv:
-                    return None
-
-                boundary_abs = next_cv["onset_abs"] if alias_type == "vc" else next_cv["pre_abs"]
-                pre_target = _clamp(_blend(prev_cv["pre"], next_cv["pre"], 0.35), 45.0, 220.0)
-                offset = max(boundary_abs - pre_target, 0.0)
-                pre = boundary_abs - offset
-                if pre <= 0:
-                    return None
-
-                ovl_tail = _clamp(prev_cv["vowel_len"] * 0.10, 4.0, 22.0)
-                target_ovl_abs = prev_cv["vowel_end_abs"] - ovl_tail
-                ovl = target_ovl_abs - offset
-                if is_plosive_sibilant:
-                    ovl = _clamp(ovl, pre * 0.24, max(pre - 12.0, 0.0))
-                else:
-                    ovl = _clamp(ovl, pre * 0.34, max(pre - 10.0, 0.0))
-
-                cons_gap = _clamp(_blend(prev_cv["cons_gap"], next_cv["cons_gap"], 0.45), 16.0, 120.0)
-                consonant = pre + cons_gap
-                next_onset_rel = max(next_cv["onset_abs"] - offset, pre + 10.0)
-                next_pre_rel = max(next_cv["pre_abs"] - offset, pre + 16.0)
-                next_cons_rel = max(next_cv["cons_abs"] - offset, next_pre_rel + 10.0)
-
-                if alias_type == "vc":
-                    if is_plosive_sibilant:
-                        consonant = min(consonant, next_onset_rel - 6.0)
-                        consonant = max(consonant, pre + 12.0)
-                        cutoff_abs = max(consonant + 10.0, next_onset_rel - 2.0)
-                        cutoff_abs = min(cutoff_abs, next_onset_rel + 8.0)
-                    else:
-                        consonant = min(consonant, next_onset_rel + 24.0)
-                        consonant = max(consonant, pre + 16.0)
-                        cutoff_abs = max(consonant + 12.0, min(next_cons_rel + 24.0, next_pre_rel + 42.0))
-                else:
-                    consonant = min(max(consonant, pre + 24.0), next_pre_rel + 48.0)
-                    cutoff_abs = max(consonant + 20.0, next_pre_rel + 10.0)
-                    cutoff_abs = min(cutoff_abs, next_cons_rel + 60.0)
-
-                cutoff = -cutoff_abs
-                return validate_oto_params(offset, consonant, cutoff, pre, ovl)
-
             cv_anchor_by_idx = {
-                i: _estimate_cv_anchor(i)
+                i: _estimate_cv_anchor_from_syllable(syllables_info[i], ph_intervals)
                 for i in range(len(syllables_info))
             }
-
-            def _guard_cv_cutoff_to_next_onset(offset, consonant, cutoff, pre, syll_idx):
-                """CV/CV_HEAD cutoff이 다음 음절 onset을 침범하지 않도록 상한을 건다."""
-                if syll_idx is None or syll_idx < 0:
-                    return offset, consonant, cutoff, pre, 0.0
-                if (syll_idx + 1) >= len(syllables_info):
-                    return offset, consonant, cutoff, pre, 0.0
-
-                next_syl = syllables_info[syll_idx + 1]
-                next_phones = next_syl.get("phones") or []
-                if not next_phones:
-                    return offset, consonant, cutoff, pre, 0.0
-
-                next_mark = (next_phones[0].mark or "").strip().lower()
-                hard_next = is_plosive_ipa(next_mark) or next_mark in {
-                    "s", "ss", "sh", "ch", "j", "jj", "c", "ts", "h"
-                }
-                safety = 16.0 if hard_next else 10.0
-                next_onset_rel = (next_phones[0].minTime * 1000.0) - offset
-                max_cutoff_abs = next_onset_rel - safety
-                if max_cutoff_abs <= (pre + 18.0):
-                    return offset, consonant, cutoff, pre, 0.0
-
-                original_cutoff_abs = abs(cutoff)
-                consonant = min(consonant, max_cutoff_abs - 14.0)
-                consonant = max(consonant, pre + 10.0)
-
-                cutoff_abs = min(original_cutoff_abs, max_cutoff_abs)
-                if cutoff_abs <= (consonant + 8.0):
-                    cutoff_abs = min(max_cutoff_abs, consonant + 10.0)
-                    if cutoff_abs <= (consonant + 6.0):
-                        consonant = max(pre + 8.0, cutoff_abs - 10.0)
-                cutoff = -cutoff_abs
-
-                offset, consonant, cutoff, pre, _ovl = validate_oto_params(
-                    offset, consonant, cutoff, pre, 0.0
-                )
-                reduction = max(0.0, original_cutoff_abs - abs(cutoff))
-                return offset, consonant, cutoff, pre, reduction
             
             for line_num, line in enumerate(lines):
                 parts = line.split('=', 1)
@@ -2852,11 +3272,18 @@ def generate_oto(
                     cutoff = -(br_len * 0.85)
                     offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
                     
-                    aliases_to_write = generate_openutau_aliases(alias) if generate_openutau else [alias]
-                    for a in aliases_to_write:
-                        a2 = apply_alias_suffix(a, alias_suffix)
-                        new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
-                        final_lines.append(new_line)
+                    _append_alias_rows(
+                        final_lines,
+                        real_wav_name,
+                        alias,
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                        generate_openutau=generate_openutau,
+                        alias_suffix=alias_suffix,
+                    )
                     continue
                 
 
@@ -2973,368 +3400,153 @@ def generate_oto(
 
 
                 if is_vcv:
-
-                    if cv_seq_idx < len(syllables_info):
-                        current_w_idx = cv_seq_idx
-                        cv_seq_idx = current_w_idx + 1
-                    if current_w_idx >= len(syllables_info):
-                        current_w_idx = len(syllables_info) - 1
-                    
-                    curr_syl = syllables_info[current_w_idx]
-                    curr_phones = curr_syl['phones']
-                    
-
-                    if current_w_idx > 0:
-                        prev_syl = syllables_info[current_w_idx - 1]
-                        prev_phones = prev_syl['phones']
-                        prev_v_start = prev_phones[-1].minTime * 1000
-                        prev_v_end = prev_phones[-1].maxTime * 1000
-                    else:
-
-                        prev_v_start = curr_phones[0].minTime * 1000 - 100
-                        prev_v_end = curr_phones[0].minTime * 1000
-                    
-
-                    if len(curr_phones) >= 2:
-                        c_boundary = curr_phones[-1].minTime * 1000
-                        n_end = curr_phones[-1].maxTime * 1000
-                    else:
-                        c_boundary = curr_phones[0].minTime * 1000
-                        n_end = curr_phones[0].maxTime * 1000
-                    
-
-                    prev_v_len = prev_v_end - prev_v_start
-                    offset_padding = min(prev_v_len * 0.6, 200)
-                    if offset_padding < 80:
-                        offset_padding = max(prev_v_len * 0.5, 50)
-                    
-                    offset = prev_v_end - offset_padding
-                    if offset < 0: offset = 0
-                    
-
-                    pre = c_boundary - offset
-                    c_hint = curr_phones[0].mark if curr_phones else ""
-                    ovl = adaptive_overlap(pre, c_hint, mode='vcv')
-                    
-
-                    vowel_len = n_end - c_boundary
-                    added_cons = min(vowel_len * DIPHTHONG_CV_CONSONANT_RATIO, 150)
-                    if added_cons < 50: added_cons = 50
-                    consonant = pre + added_cons
-                    cutoff = -(consonant + vowel_len * 0.25)
-                    offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
-                        offset, consonant, cutoff, pre, ovl, "vcv", mel_ctx_for_file
+                    (
+                        current_w_idx,
+                        cv_seq_idx,
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                    ) = _prepare_vcv_syllable_timing(
+                        syllables_info,
+                        current_w_idx,
+                        cv_seq_idx,
+                        DIPHTHONG_CV_CONSONANT_RATIO,
                     )
-                    if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
-                        log(
-                            f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
-                        )
-
-                    offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
-                        offset, consonant, cutoff, pre, ovl, base_shape, alias_type="vcv"
+                    (
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                        soft_off_shift,
+                        soft_cut_shift,
+                        cutoff_reduced,
+                    ) = _apply_post_timing_pipeline(
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                        alias_type="vcv",
+                        mel_ctx_for_file=mel_ctx_for_file,
+                        base_shape=base_shape,
+                        ph_intervals=ph_intervals,
+                        current_w_idx=current_w_idx,
+                        syllables_info=syllables_info,
+                        is_vc_plosive_coda=False,
+                        enable_stabilize=False,
+                        enable_cutoff_guard=False,
                     )
-                    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+                    _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
                     
-                    aliases_to_write = generate_openutau_aliases(alias) if generate_openutau else [alias]
-                    for a in aliases_to_write:
-                        a2 = apply_alias_suffix(a, alias_suffix)
-                        new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
-                        final_lines.append(new_line)
+                    _append_alias_rows(
+                        final_lines,
+                        real_wav_name,
+                        alias,
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                        generate_openutau=generate_openutau,
+                        alias_suffix=alias_suffix,
+                    )
                     continue
                 
 
                 if is_cv_head:
-
-                    if cv_seq_idx < len(syllables_info):
-                        current_w_idx = cv_seq_idx
-                        cv_seq_idx = current_w_idx + 1
-                    if current_w_idx >= len(syllables_info):
-                        current_w_idx = len(syllables_info) - 1
-                    
-                    curr_syl = syllables_info[current_w_idx]
-                    curr_phones = curr_syl['phones']
-                    
-                    if len(curr_phones) >= 2:
-                        c_start = curr_phones[0].minTime * 1000
-                        c_end = curr_phones[-1].minTime * 1000
-                        n_start = c_end
-                        n_end = curr_phones[-1].maxTime * 1000
-                    else:
-                        c_start = curr_phones[0].minTime * 1000
-                        c_end = c_start
-                        n_start = c_start
-                        n_end = curr_phones[0].maxTime * 1000
-                    
-
-                    c_hint = curr_phones[0].mark if curr_phones else ""
-                    alias_onset = _extract_alias_onset(alias)
-                    is_tense_cv = _is_tense_consonant(c_hint, alias_onset)
-                    is_sonorant_cv = _is_sonorant_consonant(c_hint, alias_onset)
-
-                    if is_tense_cv:
-                        offset = max(c_start - 46, 0)
-                    elif is_sonorant_cv:
-                        offset = max(c_start - 72, 0)
-                    else:
-                        offset = max(c_start - 44, 0)
-
-                    pre = c_end - offset if c_end > c_start else 30
-                    ovl = adaptive_overlap(pre, c_hint, mode='cv_head')
-                    if is_tense_cv:
-                        ovl = min(ovl, max(pre * 0.32, 9.0))
-                    elif is_sonorant_cv:
-                        ovl = max(ovl, min(pre * 0.48, max(pre - 10.0, 0.0)))
-                    
-                    cv_vowel_len = n_end - n_start
-                    if is_tense_cv:
-                        added_cons = min(max(cv_vowel_len * 0.46, 72), 156)
-                    elif is_sonorant_cv:
-                        added_cons = min(max(cv_vowel_len * 0.58, 88), 190)
-                    else:
-                        added_cons = min(cv_vowel_len * 0.5, 150)
-                        if added_cons < 80:
-                            added_cons = 80
-                    consonant = pre + added_cons
-                    cutoff = -(consonant + cv_vowel_len * 0.25)
-                    offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
-                        offset, consonant, cutoff, pre, ovl, "cv_head", mel_ctx_for_file
+                    (
+                        current_w_idx,
+                        cv_seq_idx,
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                    ) = _prepare_cv_head_syllable_timing(
+                        syllables_info,
+                        current_w_idx,
+                        cv_seq_idx,
+                        alias,
                     )
-                    if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
-                        log(
-                            f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
-                        )
-
-                    offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
-                        offset, consonant, cutoff, pre, ovl, base_shape, alias_type="cv_head"
+                    (
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                        soft_off_shift,
+                        soft_cut_shift,
+                        cutoff_reduced,
+                    ) = _apply_post_timing_pipeline(
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                        alias_type="cv_head",
+                        mel_ctx_for_file=mel_ctx_for_file,
+                        base_shape=base_shape,
+                        ph_intervals=ph_intervals,
+                        current_w_idx=current_w_idx,
+                        syllables_info=syllables_info,
+                        is_vc_plosive_coda=False,
+                        enable_stabilize=False,
+                        enable_cutoff_guard=True,
                     )
-                    offset, consonant, cutoff, pre, cutoff_reduced = _guard_cv_cutoff_to_next_onset(
-                        offset, consonant, cutoff, pre, current_w_idx
-                    )
-                    if cutoff_reduced > 0.5:
-                        log(f"🛡️ {fname}: CV 컷오프 과연장 보정(-{cutoff_reduced:.1f}ms) [{alias}]")
-                    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+                    _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
                     
-                    aliases_to_write = generate_openutau_aliases(alias) if generate_openutau else [alias]
-                    for a in aliases_to_write:
-                        a2 = apply_alias_suffix(a, alias_suffix)
-                        new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
-                        final_lines.append(new_line)
+                    _append_alias_rows(
+                        final_lines,
+                        real_wav_name,
+                        alias,
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                        generate_openutau=generate_openutau,
+                        alias_suffix=alias_suffix,
+                    )
                     continue
                 
 
                 if not is_vc:
-
-                    if cv_seq_idx < len(syllables_info):
-
-                        name_match_idx = None
-                        best_score = -1
-                        # diphthong/r-l 혼용 케이스를 위해 탐색 범위를 넓혀 안정적으로 음절 정렬
-                        scan_start = max(cv_seq_idx - 1, 0)
-                        scan_end = min(cv_seq_idx + 5, len(romaji_syllables))
-                        for i in range(scan_start, scan_end):
-                            score = _cv_match_score(target_clean, romaji_syllables[i])
-                            score -= abs(i - cv_seq_idx) * 4
-                            if score > best_score:
-                                best_score = score
-                                name_match_idx = i
-                            if score >= 98:
-                                break
-                        
-                        expected_score = -1
-                        if 0 <= cv_seq_idx < len(romaji_syllables):
-                            expected_score = _cv_match_score(target_clean, romaji_syllables[cv_seq_idx])
-
-                        if name_match_idx is not None and best_score >= 62:
-                            chosen_idx = name_match_idx
-                            # 이중모음/종성 포함 토큰에서 발생하는 과도한 앞 점프를 억제한다.
-                            if (
-                                name_match_idx > cv_seq_idx
-                                and expected_score >= max(58, best_score - 10)
-                            ):
-                                chosen_idx = cv_seq_idx
-                            current_w_idx = chosen_idx
-                        else:
-
-
-                            current_w_idx = cv_seq_idx
-                        
-                        cv_seq_idx = current_w_idx + 1
-
-                            
-
-                    if current_w_idx >= len(syllables_info):
-                        current_w_idx = len(syllables_info) - 1
-                    
-                    curr_syl = syllables_info[current_w_idx]
-                    curr_phones = curr_syl['phones']
-                    
-
-                    if len(curr_phones) >= 2:
-                        v_idx, v_phone = find_vowel_phone(curr_phones)
-                        c_start = curr_phones[0].minTime * 1000
-                        c_end = v_phone.minTime * 1000
-                        n_start = v_phone.minTime * 1000
-                        n_end = v_phone.maxTime * 1000
-                    else:
-                        c_start = curr_phones[0].minTime * 1000
-                        c_end = c_start
-                        n_start = c_start
-                        n_end = curr_phones[0].maxTime * 1000
-                        
+                    current_w_idx, cv_seq_idx = _resolve_cv_syllable_index(
+                        target_clean, romaji_syllables, cv_seq_idx, current_w_idx
+                    )
+                    current_w_idx, curr_phones, c_start, c_end, n_start, n_end = _prepare_cv_bounds_from_syllable(
+                        syllables_info, current_w_idx
+                    )
                 else:
-
-
-                    
-
-                    if current_w_idx >= len(syllables_info):
-                        current_w_idx = len(syllables_info) - 1
-                            
-                    curr_syl = syllables_info[current_w_idx]
-                    curr_phones = curr_syl['phones']
-                    
-
-                    v_start = curr_phones[-1].minTime * 1000
-                    v_end = curr_phones[-1].maxTime * 1000
-                    c_start = v_start
-                    c_end = v_end
-                    
-                    if current_w_idx + 1 < len(syllables_info):
-                        next_syl = syllables_info[current_w_idx + 1]
-                        n_start = next_syl['phones'][0].minTime * 1000
-                        n_end = next_syl['phones'][0].maxTime * 1000
-                    else:
-
-                        n_start = v_end
-                        n_end = v_end + 100
-                        
+                    current_w_idx, curr_phones, c_start, c_end, n_start, n_end = _prepare_vc_bounds_from_context(
+                        syllables_info, current_w_idx
+                    )
                 cv_vowel_len = n_end - n_start
                 is_vc_plosive_coda = False
                 if is_vc:
-                    c_char = _extract_vc_right_token(alias)
-                    is_vc_plosive_coda = (
-                        alias_type == 'vc'
-                        and file_format in {'cvc', 'cvvc', 'vc_only'}
-                        and _is_kr_plosive_coda_alias(alias)
+                    (
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                        is_vc_plosive_coda,
+                    ) = _compute_kr_vc_timing(
+                        alias,
+                        alias_type,
+                        file_format,
+                        curr_phones,
+                        current_w_idx,
+                        syllables_info,
+                        c_start,
+                        c_end,
+                        n_start,
+                        n_end,
+                        cv_anchor_by_idx,
                     )
-
-                    if is_vc_plosive_coda:
-                        # 종성 파열음은 받침 구간을 먹지 않도록 모음 끝 직전에 pre를 고정합니다.
-                        coda_canon = _canonicalize_kr_coda(c_char)
-                        is_hard_stop_coda = coda_canon in {"t", "p"}
-                        v_idx = None
-                        v_phone = None
-                        if curr_phones:
-                            v_idx, v_phone = find_vowel_phone(curr_phones)
-
-                        vowel_start = (v_phone.minTime * 1000) if v_phone else c_start
-                        vowel_end = (v_phone.maxTime * 1000) if v_phone else c_end
-
-                        coda_start = None
-                        if v_phone is not None and v_idx is not None and (v_idx + 1) < len(curr_phones):
-                            coda_start = curr_phones[v_idx + 1].minTime * 1000
-                        elif current_w_idx + 1 < len(syllables_info):
-                            next_syl = syllables_info[current_w_idx + 1]
-                            if next_syl.get('phones'):
-                                coda_start = next_syl['phones'][0].minTime * 1000
-
-                        boundary = max(vowel_start + 16.0, vowel_end - (14.0 if is_hard_stop_coda else 11.0))
-                        if coda_start is not None:
-                            coda_margin = 12.0 if is_hard_stop_coda else 9.0
-                            boundary = min(boundary, coda_start - coda_margin)
-                            boundary = max(boundary, vowel_start + (12.0 if is_hard_stop_coda else 14.0))
-
-                        pre_target = _clamp(
-                            boundary - vowel_start,
-                            42.0 if is_hard_stop_coda else 45.0,
-                            132.0 if is_hard_stop_coda else 145.0,
-                        )
-                        offset = max(boundary - pre_target, 0.0)
-                        pre = boundary - offset
-                        ovl = adaptive_overlap(pre, c_char, mode='vc')
-                        ovl = min(ovl, max(pre - 12.0, 0.0))
-
-                        tail_floor = 10.0 if is_hard_stop_coda else 12.0
-                        if coda_start is not None:
-                            tail_room = max(coda_start - boundary, tail_floor)
-                        else:
-                            tail_room = max(n_start - boundary, tail_floor)
-
-                        cons_mul = 0.54 if is_hard_stop_coda else 0.62
-                        cons_min = 10.0 if is_hard_stop_coda else 12.0
-                        cons_max = 30.0 if is_hard_stop_coda else 38.0
-                        added_cons = _clamp(tail_room * cons_mul, cons_min, cons_max)
-                        consonant = pre + added_cons
-                        cut_mul = 0.56 if is_hard_stop_coda else 0.70
-                        cut_min = 20.0 if is_hard_stop_coda else 24.0
-                        cut_max = 52.0 if is_hard_stop_coda else 64.0
-                        cut_gap = _clamp(tail_room * cut_mul, cut_min, cut_max)
-
-                        cutoff_abs = consonant + cut_gap
-                        next_onset_rel = max(n_start - offset, pre + 12.0)
-                        cutoff_soft_cap = next_onset_rel + (4.0 if is_hard_stop_coda else 8.0)
-                        cutoff_min_abs = consonant + (8.0 if is_hard_stop_coda else 10.0)
-                        if cutoff_soft_cap <= cutoff_min_abs:
-                            consonant = min(consonant, max(next_onset_rel - 6.0, pre + 8.0))
-                            cutoff_min_abs = consonant + (6.0 if is_hard_stop_coda else 8.0)
-                            cutoff_soft_cap = max(cutoff_soft_cap, cutoff_min_abs)
-                        cutoff_abs = _clamp(cutoff_abs, cutoff_min_abs, cutoff_soft_cap)
-                        cutoff = -cutoff_abs
-                    else:
-                        vc_anchor_params = None
-                        if current_w_idx + 1 < len(syllables_info):
-                            prev_cv_anchor = cv_anchor_by_idx.get(current_w_idx)
-                            next_cv_anchor = cv_anchor_by_idx.get(current_w_idx + 1)
-                            is_plosive_sibilant = c_char in ['g','k','kk','gg','d','t','tt','dd','b','p','bb','pp','s','ss','h','j','jj','ch']
-                            vc_anchor_params = _compute_vc_from_adjacent_cv(
-                                prev_cv_anchor, next_cv_anchor, alias_type, c_char, is_plosive_sibilant
-                            )
-
-                        if vc_anchor_params is not None:
-                            offset, consonant, cutoff, pre, ovl = vc_anchor_params
-                        else:
-                        # VC should attach to the next consonant onset.
-                        # Consonant-end anchoring often causes awkward late VC timing.
-                            vc_target = n_start if alias_type == 'vc' else n_end
-                            boundary = min(vc_target, c_end + 260)
-                            v_len = c_end - c_start
-                            n_len = n_end - n_start
-
-                            offset_padding = 180
-                            if v_len < offset_padding:
-                                offset_padding = max(v_len * 0.8, 50)
-
-                            offset = boundary - offset_padding
-                            pre = boundary - offset
-
-                            is_plosive_sibilant = c_char in ['g','k','kk','gg','d','t','tt','dd','b','p','bb','pp','s','ss','h','j','jj','ch']
-                            ovl = adaptive_overlap(pre, c_char, mode='vv' if alias_type == 'vv' else 'vc')
-
-                            if is_plosive_sibilant:
-                                n_ref = max(n_len, 100)
-                                added_cons = min(max(n_ref * 0.35, 45), 95)
-                                consonant = pre + added_cons
-                                cutoff = -(consonant + max(n_len * 0.35, 45))
-                            else:
-                                n_ref = max(n_len, 80)
-                                added_cons = min(max(n_ref * 0.55, 55), 160)
-                                consonant = pre + added_cons
-                                cutoff = -(consonant + max(n_len * 0.45, 50))
-
-                            if alias_type == 'vc':
-                                # CVVC 원리: VC는 다음 자음 onset 주변에서 정리해 CV와의 중복 자음을 줄인다.
-                                next_c_onset_rel = max(n_start - offset, pre + 10.0)
-                                if is_plosive_sibilant:
-                                    consonant = min(consonant, next_c_onset_rel - 6.0)
-                                    consonant = max(consonant, pre + 12.0)
-                                    cutoff_abs = max(consonant + 10.0, next_c_onset_rel - 2.0)
-                                    cutoff_abs = min(cutoff_abs, next_c_onset_rel + 8.0)
-                                    cutoff = -cutoff_abs
-                                else:
-                                    consonant = min(consonant, next_c_onset_rel + 26.0)
-                                    consonant = max(consonant, pre + 16.0)
-                                    cutoff_abs = min(abs(cutoff), next_c_onset_rel + 30.0)
-                                    cutoff_abs = max(cutoff_abs, consonant + 12.0)
-                                    cutoff = -cutoff_abs
 
                 else:
                     cv_vowel_len = n_end - n_start
@@ -3388,34 +3600,45 @@ def generate_oto(
                             is_plosive,
                         )
 
-                if alias_type in {"cv", "cv_head", "vcv"}:
-                    offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
-                        offset, consonant, cutoff, pre, ovl, alias_type, mel_ctx_for_file
-                    )
-                    if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
-                        log(
-                            f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
-                        )
-                if not is_vc_plosive_coda:
-                    offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
-                        offset, consonant, cutoff, pre, ovl, base_shape, alias_type=alias_type
-                    )
-                offset, consonant, cutoff, pre, ovl = _stabilize_params_to_phone_activity(
-                    offset, consonant, cutoff, pre, ovl, ph_intervals, alias_type=alias_type
+                (
+                    offset,
+                    consonant,
+                    cutoff,
+                    pre,
+                    ovl,
+                    soft_off_shift,
+                    soft_cut_shift,
+                    cutoff_reduced,
+                ) = _apply_post_timing_pipeline(
+                    offset,
+                    consonant,
+                    cutoff,
+                    pre,
+                    ovl,
+                    alias_type=alias_type,
+                    mel_ctx_for_file=mel_ctx_for_file,
+                    base_shape=base_shape,
+                    ph_intervals=ph_intervals,
+                    current_w_idx=current_w_idx,
+                    syllables_info=syllables_info,
+                    is_vc_plosive_coda=is_vc_plosive_coda,
+                    enable_stabilize=True,
+                    enable_cutoff_guard=True,
                 )
-                if alias_type in {"cv", "cv_head"}:
-                    offset, consonant, cutoff, pre, cutoff_reduced = _guard_cv_cutoff_to_next_onset(
-                        offset, consonant, cutoff, pre, current_w_idx
-                    )
-                    if cutoff_reduced > 0.5:
-                        log(f"🛡️ {fname}: CV 컷오프 과연장 보정(-{cutoff_reduced:.1f}ms) [{alias}]")
-                offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+                _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
 
-                aliases_to_write = generate_openutau_aliases(alias) if generate_openutau else [alias]
-                for a in aliases_to_write:
-                    a2 = apply_alias_suffix(a, alias_suffix)
-                    new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
-                    final_lines.append(new_line)
+                _append_alias_rows(
+                    final_lines,
+                    real_wav_name,
+                    alias,
+                    offset,
+                    consonant,
+                    cutoff,
+                    pre,
+                    ovl,
+                    generate_openutau=generate_openutau,
+                    alias_suffix=alias_suffix,
+                )
 
             processed += 1
 
@@ -3494,11 +3717,18 @@ def generate_oto(
                             
                             offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
                             
-                            aliases_to_write = generate_openutau_aliases(alias) if generate_openutau else [alias]
-                            for a in aliases_to_write:
-                                a2 = apply_alias_suffix(a, alias_suffix)
-                                new_line = f"{tg_info['real_name']}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
-                                final_lines.append(new_line)
+                            _append_alias_rows(
+                                final_lines,
+                                tg_info['real_name'],
+                                alias,
+                                offset,
+                                consonant,
+                                cutoff,
+                                pre,
+                                ovl,
+                                generate_openutau=generate_openutau,
+                                alias_suffix=alias_suffix,
+                            )
                 except:
                     continue
 
