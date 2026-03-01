@@ -25,6 +25,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+/dataset
+/ml_workspace
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -224,3 +226,12 @@ custom_test_wavs/*_dict.txt
 /.env_sofa
 /.tmp_ext
 /.sofa
+
+# AI/ML workspace and model training artifacts
+/ml_workspace/
+/assets/models/oto_ml/**/tmp/
+/assets/models/oto_ml/**/checkpoints/
+/assets/models/oto_ml/**/train_cache/
+/assets/models/oto_ml/**/*.csv
+/assets/models/oto_ml/**/*.parquet
+/assets/models/oto_ml/**/*.jsonl

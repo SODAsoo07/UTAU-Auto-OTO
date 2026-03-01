@@ -371,6 +371,103 @@ def adaptive_overlap(pre, consonant_hint="", mode="cv"):
     return max(0.0, min(ovl, p))
 
 
+def _kr_precenter_gap_targets(alias_type, alias_text=""):
+    alias_type = str(alias_type or "cv").strip().lower()
+    if alias_type == "vv":
+        return {
+            "ovl_gap": (4.0, 10.0, 7.0),
+            "cons_gap": (48.0, 132.0, 80.0),
+            "cut_gap": (24.0, 96.0, 48.0),
+        }
+
+    if alias_type in {"vc", "vv"}:
+        coda = _canonicalize_kr_coda(_extract_vc_right_token(alias_text))
+        if coda in {"k", "t", "p", "h"}:
+            return {
+                "ovl_gap": (10.0, 20.0, 14.0),
+                "cons_gap": (18.0, 58.0, 32.0),
+                "cut_gap": (12.0, 44.0, 24.0),
+            }
+        if coda in {"n", "m", "ng", "l"}:
+            return {
+                "ovl_gap": (6.0, 14.0, 9.0),
+                "cons_gap": (28.0, 92.0, 50.0),
+                "cut_gap": (18.0, 72.0, 40.0),
+            }
+        return {
+            "ovl_gap": (7.0, 15.0, 10.0),
+            "cons_gap": (24.0, 80.0, 42.0),
+            "cut_gap": (16.0, 64.0, 34.0),
+        }
+
+    traits = _get_kr_timing_traits_from_alias(alias_text)
+    onset = traits["onset"]
+    manner = traits["manner"]
+    is_tense = onset in KR_TENSE_CONSONANTS
+    is_sonorant = onset in KR_SONORANT_CONSONANTS
+
+    if is_sonorant:
+        return {
+            "ovl_gap": (12.0, 28.0, 18.0),
+            "cons_gap": (80.0, 210.0, 124.0),
+            "cut_gap": (48.0, 130.0, 78.0),
+        }
+    if manner == "sibilant":
+        return {
+            "ovl_gap": (16.0, 34.0, 24.0),
+            "cons_gap": (72.0, 178.0, 110.0),
+            "cut_gap": (42.0, 112.0, 64.0),
+        }
+    if manner == "plosive" or is_tense:
+        return {
+            "ovl_gap": (22.0, 42.0, 31.0 if is_tense else 29.0),
+            "cons_gap": (56.0, 152.0, 90.0),
+            "cut_gap": (34.0, 96.0, 54.0),
+        }
+    return {
+        "ovl_gap": (18.0, 36.0, 26.0),
+        "cons_gap": (64.0, 164.0, 100.0),
+        "cut_gap": (40.0, 110.0, 62.0),
+    }
+
+
+def _recenter_kr_params_around_pre(offset, consonant, cutoff, pre, ovl, alias_type="cv", alias_text=""):
+    targets = _kr_precenter_gap_targets(alias_type, alias_text)
+    pre_v = max(float(pre), 0.0)
+    if pre_v <= 0.0:
+        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+
+    alias_type = str(alias_type or "cv").strip().lower()
+    if alias_type == "vv":
+        ovl_w, cons_w, cut_w = 0.48, 0.26, 0.22
+    elif alias_type in {"vc", "vcv"}:
+        ovl_w, cons_w, cut_w = 0.42, 0.28, 0.24
+    else:
+        ovl_w, cons_w, cut_w = 0.22, 0.20, 0.18
+
+    ovl_gap_now = max(pre_v - max(float(ovl), 0.0), 0.0)
+    cons_gap_now = max(float(consonant) - pre_v, 8.0)
+    cut_gap_now = max(abs(float(cutoff)) - float(consonant), 12.0)
+
+    og_lo, og_hi, og_t = targets["ovl_gap"]
+    cg_lo, cg_hi, cg_t = targets["cons_gap"]
+    tg_lo, tg_hi, tg_t = targets["cut_gap"]
+
+    ovl_gap_new = max(og_lo, min(og_hi, ovl_gap_now))
+    ovl_gap_new = _blend(ovl_gap_new, og_t, ovl_w)
+
+    cons_gap_new = max(cg_lo, min(cg_hi, cons_gap_now))
+    cons_gap_new = _blend(cons_gap_new, cg_t, cons_w)
+
+    cut_gap_new = max(tg_lo, min(tg_hi, cut_gap_now))
+    cut_gap_new = _blend(cut_gap_new, tg_t, cut_w)
+
+    ovl_new = max(0.0, pre_v - ovl_gap_new)
+    cons_new = pre_v + cons_gap_new
+    cutoff_new = -(cons_new + cut_gap_new)
+    return validate_oto_params(offset, cons_new, cutoff_new, pre_v, ovl_new)
+
+
 def _looks_like_vv_alias(alias):
     """공백 없는 단순 VV 에일리어스 형태인지 판별합니다."""
     if not alias:
@@ -1125,6 +1222,7 @@ def _apply_post_timing_pipeline(
     pre,
     ovl,
     alias_type,
+    alias_text,
     mel_ctx_for_file,
     base_shape,
     ph_intervals,
@@ -1153,6 +1251,10 @@ def _apply_post_timing_pipeline(
         offset, consonant, cutoff, pre, ovl = _stabilize_params_to_phone_activity(
             offset, consonant, cutoff, pre, ovl, ph_intervals, alias_type=alias_type
         )
+
+    offset, consonant, cutoff, pre, ovl = _recenter_kr_params_around_pre(
+        offset, consonant, cutoff, pre, ovl, alias_type=alias_type, alias_text=alias_text
+    )
 
     if enable_cutoff_guard and alias_type in {"cv", "cv_head"}:
         offset, consonant, cutoff, pre, cutoff_reduced = _guard_cv_cutoff_to_next_onset(
@@ -3687,6 +3789,7 @@ def generate_oto(
                         pre,
                         ovl,
                         alias_type="vcv",
+                        alias_text=alias,
                         mel_ctx_for_file=mel_ctx_for_file,
                         base_shape=base_shape,
                         ph_intervals=ph_intervals,
@@ -3746,6 +3849,7 @@ def generate_oto(
                         pre,
                         ovl,
                         alias_type="cv_head",
+                        alias_text=alias,
                         mel_ctx_for_file=mel_ctx_for_file,
                         base_shape=base_shape,
                         ph_intervals=ph_intervals,
@@ -3923,6 +4027,7 @@ def generate_oto(
                     pre,
                     ovl,
                     alias_type=alias_type,
+                    alias_text=alias,
                     mel_ctx_for_file=mel_ctx_for_file,
                     base_shape=base_shape,
                     ph_intervals=ph_intervals,
@@ -4052,6 +4157,21 @@ def generate_oto(
             )
             if changed > 0:
                 log(f"[KR-Profile] 기준 프로파일 보정 적용: {changed} lines")
+        try:
+            from core.oto_ml_refiner import apply_oto_ml_to_oto_file
+
+            ml_changed = apply_oto_ml_to_oto_file(
+                "korean",
+                out_path,
+                tg_dir=tg_folder,
+                wav_dir=wav_dir_for_profile,
+                custom_phonemes_path=custom_phonemes_path,
+                callback=log,
+            )
+            if ml_changed > 0:
+                log(f"[OTO-ML] 한국어 수치 보정 적용: {ml_changed} lines")
+        except Exception as ml_e:
+            log(f"[OTO-ML] 한국어 보정 스킵: {ml_e}")
         mel_changed = _apply_kr_mel_refine_to_oto_file(
             out_path, wav_dir_for_profile, custom_map=custom_map
         )

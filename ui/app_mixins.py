@@ -286,7 +286,7 @@ class AppRuntimeMixin:
 
 
 class ConfigMixin:
-    def _save_config(self):
+    def _save_config(self, *_args):
         params = self._get_params()
         config = {
             "wav_dir": self.wav_entry.get(),

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "required_fields": [
+    "backend",
+    "language",
+    "format_type",
+    "feature_version",
+    "feature_names",
+    "categorical_features",
+    "targets",
+    "delta_clip_limits"
+  ],
+  "optional_fields": [
+    "created_at",
+    "train_rows",
+    "voicebank_count",
+    "baseline_metrics",
+    "holdout_metrics",
+    "model_version"
+  ]
+}

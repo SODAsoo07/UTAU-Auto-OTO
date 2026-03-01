@@ -1,0 +1,31 @@
+{
+  "targets": {
+    "delta_offset": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\general\\v1\\model_offset.txt",
+    "delta_cons": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\general\\v1\\model_cons.txt",
+    "delta_cutoff": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\general\\v1\\model_cutoff.txt",
+    "delta_pre": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\general\\v1\\model_pre.txt",
+    "delta_ovl": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\general\\v1\\model_ovl.txt"
+  },
+  "metrics": {
+    "delta_offset": {
+      "baseline_mae": 136.26741816519356,
+      "model_mae": 108.0948441320082
+    },
+    "delta_cons": {
+      "baseline_mae": 116.74163273392259,
+      "model_mae": 39.79837330185409
+    },
+    "delta_cutoff": {
+      "baseline_mae": 197.81854327948795,
+      "model_mae": 49.79345308333917
+    },
+    "delta_pre": {
+      "baseline_mae": 86.41065269734837,
+      "model_mae": 38.78235673790504
+    },
+    "delta_ovl": {
+      "baseline_mae": 19.706763334349287,
+      "model_mae": 15.208666902805144
+    }
+  }
+}

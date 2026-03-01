@@ -1,0 +1,54 @@
+{
+  "bundle_slug": "japanese_cvvc_v1",
+  "source_dir": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\v1",
+  "export_dir": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\ml_workspace\\exports\\model_bundles\\japanese_cvvc_v1",
+  "language": "japanese",
+  "format_type": "cvvc",
+  "backend": "lightgbm",
+  "model_version": "v1",
+  "feature_version": "v2",
+  "train_rows": 1902,
+  "voicebank_count": 2,
+  "files": [
+    {
+      "name": "feature_schema.json",
+      "size": 1915,
+      "sha256": "c0f6eef700fe82ed427017c68bd0cb24bdaba53dc7f2726bf55fd8461eda8ed2"
+    },
+    {
+      "name": "model_meta.json",
+      "size": 2983,
+      "sha256": "fea70e7967a4781b08f6b0d205412b3ff1db51a5ef1c694be661ad94d96afc52"
+    },
+    {
+      "name": "eval_summary.json",
+      "size": 1314,
+      "sha256": "bb48825511f14b2d486c3d7ed2d1a5293b840bcb78d6337eaefb11a9b73c15cf"
+    },
+    {
+      "name": "model_offset.txt",
+      "size": 125913,
+      "sha256": "be2007705527e2c3a5f93b2a9ea7513de31c644f3af4b15bed9f3dfedee5a6b0"
+    },
+    {
+      "name": "model_cons.txt",
+      "size": 5735,
+      "sha256": "566e4a71fdabff98971c6b86fe5d40e7f961b71c72ce5e92313dbb4bc73b80a7"
+    },
+    {
+      "name": "model_cutoff.txt",
+      "size": 312230,
+      "sha256": "0e1f37ea639993d595a305d6656ab35e7f8049ae29ce7c75e7980d951f2b0cf5"
+    },
+    {
+      "name": "model_pre.txt",
+      "size": 6525,
+      "sha256": "3cef8b91ac675485b65b05b0c458e1aea7f774411290aab2069b4e371eff63fd"
+    },
+    {
+      "name": "model_ovl.txt",
+      "size": 5837,
+      "sha256": "79dac90ab4c3a085312a4e78f31b0177ec4c0c9f3413e37c0425c43210abbaa9"
+    }
+  ]
+}

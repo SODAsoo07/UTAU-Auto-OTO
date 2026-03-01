@@ -1,0 +1,45 @@
+import os
+import sys
+import tempfile
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from core.oto_ml_bundle_install import install_exported_bundle
+from core.oto_ml_export import export_model_bundle
+
+
+class BundleInstallTests(unittest.TestCase):
+    def _make_bundle(self, root: str) -> str:
+        model_dir = os.path.join(root, "assets", "models", "oto_ml", "japanese", "cvvc", "v1")
+        os.makedirs(model_dir, exist_ok=True)
+        files = {
+            "feature_schema.json": "{}",
+            "eval_summary.json": "{}",
+            "model_offset.txt": "x",
+            "model_cons.txt": "x",
+            "model_cutoff.txt": "x",
+            "model_pre.txt": "x",
+            "model_ovl.txt": "x",
+        }
+        for name, content in files.items():
+            with open(os.path.join(model_dir, name), "w", encoding="utf-8") as f:
+                f.write(content)
+        with open(os.path.join(model_dir, "model_meta.json"), "w", encoding="utf-8") as f:
+            f.write('{"language":"japanese","format_type":"cvvc","backend":"lightgbm","model_version":"v1","feature_version":"v1"}')
+        return model_dir
+
+    def test_install_exported_zip_bundle(self):
+        with tempfile.TemporaryDirectory() as td:
+            model_dir = self._make_bundle(td)
+            export_root = os.path.join(td, "exports")
+            manifest = export_model_bundle(model_dir, export_root, create_zip=True)
+            result = install_exported_bundle(manifest["zip_path"], install_root=os.path.join(td, "installed"))
+            self.assertTrue(os.path.isdir(result["installed_dir"]))
+            self.assertTrue(os.path.isfile(os.path.join(result["installed_dir"], "model_meta.json")))
+
+
+if __name__ == "__main__":
+    unittest.main()

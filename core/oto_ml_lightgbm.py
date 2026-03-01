@@ -1,0 +1,217 @@
+﻿"""
+LightGBM backend for OTO ML correction.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime
+from typing import Any, Dict, Optional
+
+try:
+    import lightgbm as lgb
+except Exception as _lgb_exc:  # pragma: no cover
+    lgb = None
+    LIGHTGBM_IMPORT_ERROR = _lgb_exc
+else:
+    LIGHTGBM_IMPORT_ERROR = None
+
+try:
+    import pandas as pd
+except Exception as _pd_exc:  # pragma: no cover
+    pd = None
+    PANDAS_IMPORT_ERROR = _pd_exc
+else:
+    PANDAS_IMPORT_ERROR = None
+
+try:
+    from sklearn.metrics import mean_absolute_error
+    from sklearn.model_selection import GroupShuffleSplit
+except Exception as _sk_exc:  # pragma: no cover
+    mean_absolute_error = None
+    GroupShuffleSplit = None
+    SKLEARN_IMPORT_ERROR = _sk_exc
+else:
+    SKLEARN_IMPORT_ERROR = None
+
+from core.oto_ml_features import CATEGORICAL_FEATURES, FEATURE_NAMES, TARGET_NAMES, canonicalize_feature_row, get_delta_clip_limits, get_feature_schema, write_feature_schema
+
+DEFAULT_LGB_PARAMS = {
+    "objective": "regression_l1",
+    "boosting_type": "gbdt",
+    "num_leaves": 31,
+    "learning_rate": 0.05,
+    "feature_fraction": 0.85,
+    "bagging_fraction": 0.85,
+    "bagging_freq": 1,
+    "min_data_in_leaf": 40,
+    "verbosity": -1,
+}
+
+
+def _require_training_stack():
+    if lgb is None:
+        raise RuntimeError(f"lightgbm is required: {LIGHTGBM_IMPORT_ERROR}")
+    if pd is None:
+        raise RuntimeError(f"pandas is required: {PANDAS_IMPORT_ERROR}")
+    if GroupShuffleSplit is None or mean_absolute_error is None:
+        raise RuntimeError(f"scikit-learn is required: {SKLEARN_IMPORT_ERROR}")
+
+
+def _prepare_frame(df, feature_names, categorical_features):
+    frame = df.copy()
+    for col in feature_names:
+        if col not in frame.columns:
+            frame[col] = "" if col in categorical_features else 0.0
+    frame = frame[feature_names].copy()
+    for col in feature_names:
+        if col in categorical_features:
+            frame[col] = frame[col].fillna("").astype("string").astype("category")
+        else:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce").fillna(0.0)
+    return frame
+
+
+def _split_train_valid(df, group_column: str):
+    if len(df) < 8:
+        raise RuntimeError("Not enough rows to train OTO ML bundle (need >= 8 rows).")
+    if group_column in df.columns and df[group_column].nunique() >= 2:
+        splitter = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+        train_idx, valid_idx = next(splitter.split(df, groups=df[group_column]))
+    else:
+        split_at = max(1, int(len(df) * 0.8))
+        train_idx = list(range(split_at))
+        valid_idx = list(range(split_at, len(df))) or list(range(max(0, split_at - 1), len(df)))
+    return train_idx, valid_idx
+
+
+def _clip_target_series(language: str, target: str, series):
+    clip = get_delta_clip_limits(language).get(target)
+    if not clip:
+        return series
+    lo, hi = float(clip[0]), float(clip[1])
+    return series.clip(lower=lo, upper=hi)
+
+
+def train_lightgbm_bundle(language: str, format_type: str, dataset_csv: str, out_dir: str, group_column: str = "voicebank_id", num_boost_round: int = 500, early_stopping_rounds: int = 50) -> Dict[str, Any]:
+    _require_training_stack()
+    if not dataset_csv or not os.path.exists(dataset_csv):
+        raise FileNotFoundError(dataset_csv)
+
+    df = pd.read_csv(dataset_csv)
+    language = str(language).strip().lower()
+    format_type = str(format_type).strip().lower()
+    if "language" in df.columns:
+        df = df[df["language"].astype(str).str.lower() == language]
+    if format_type and format_type != "general" and "format_type" in df.columns:
+        df = df[df["format_type"].astype(str).str.lower() == format_type]
+    if len(df) < 8:
+        raise RuntimeError("Filtered dataset is too small for training.")
+
+    feature_schema = get_feature_schema()
+    feature_names = list(feature_schema["feature_names"])
+    categorical_features = [c for c in CATEGORICAL_FEATURES if c in feature_names]
+    frame = _prepare_frame(df, feature_names, categorical_features)
+    train_idx, valid_idx = _split_train_valid(df, group_column)
+    X_train = frame.iloc[train_idx]
+    X_valid = frame.iloc[valid_idx]
+
+    out_metrics = {}
+    os.makedirs(out_dir, exist_ok=True)
+    targets = {}
+    for target in TARGET_NAMES:
+        y_train = pd.to_numeric(df.iloc[train_idx][target], errors="coerce").fillna(0.0)
+        y_valid = pd.to_numeric(df.iloc[valid_idx][target], errors="coerce").fillna(0.0)
+        y_train = _clip_target_series(language, target, y_train)
+        y_valid = _clip_target_series(language, target, y_valid)
+        dtrain = lgb.Dataset(X_train, label=y_train, categorical_feature=categorical_features, free_raw_data=False)
+        dvalid = lgb.Dataset(X_valid, label=y_valid, categorical_feature=categorical_features, free_raw_data=False)
+        booster = lgb.train(
+            dict(DEFAULT_LGB_PARAMS),
+            dtrain,
+            num_boost_round=num_boost_round,
+            valid_sets=[dvalid],
+            callbacks=[lgb.early_stopping(early_stopping_rounds, verbose=False)],
+        )
+        model_path = os.path.join(out_dir, f"model_{target.replace('delta_', '')}.txt")
+        booster.save_model(model_path)
+        pred = booster.predict(X_valid)
+        out_metrics[target] = {
+            "baseline_mae": float(mean_absolute_error(y_valid, [0.0] * len(y_valid))),
+            "model_mae": float(mean_absolute_error(y_valid, pred)),
+        }
+        targets[target] = model_path
+
+    write_feature_schema(os.path.join(out_dir, "feature_schema.json"))
+    meta = {
+        "backend": "lightgbm",
+        "language": language,
+        "format_type": format_type,
+        "model_version": "v1",
+        "feature_version": feature_schema["feature_version"],
+        "feature_names": feature_names,
+        "categorical_features": categorical_features,
+        "targets": list(TARGET_NAMES),
+        "delta_clip_limits": get_delta_clip_limits(language),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "train_rows": int(len(df)),
+        "voicebank_count": int(df[group_column].nunique()) if group_column in df.columns else 1,
+        "holdout_metrics": out_metrics,
+    }
+    with open(os.path.join(out_dir, "model_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    with open(os.path.join(out_dir, "eval_summary.json"), "w", encoding="utf-8") as f:
+        json.dump({"targets": targets, "metrics": out_metrics}, f, ensure_ascii=False, indent=2)
+    return meta
+
+
+def load_lightgbm_bundle(model_dir: str, meta: Optional[Dict[str, Any]] = None, schema: Optional[Dict[str, Any]] = None):
+    if lgb is None:
+        raise RuntimeError(f"lightgbm is required for runtime inference: {LIGHTGBM_IMPORT_ERROR}")
+    models = {}
+    for target in TARGET_NAMES:
+        model_name = f"model_{target.replace('delta_', '')}.txt"
+        model_path = os.path.join(model_dir, model_name)
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(model_path)
+        models[target] = lgb.Booster(model_file=model_path)
+    return {"models": models, "meta": meta or {}, "schema": schema or get_feature_schema()}
+
+
+def predict_lightgbm_deltas(payload, feature_row: Dict[str, Any], meta: Optional[Dict[str, Any]] = None, schema: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+    if pd is None:
+        raise RuntimeError(f"pandas is required for runtime inference: {PANDAS_IMPORT_ERROR}")
+    meta = meta or payload.get("meta") or {}
+    schema = schema or payload.get("schema") or get_feature_schema()
+    feature_names = list(schema.get("feature_names") or FEATURE_NAMES)
+    frame = pd.DataFrame([canonicalize_feature_row(feature_row, feature_names=feature_names)])
+    frame = _prepare_frame(frame, feature_names, list(meta.get("categorical_features") or CATEGORICAL_FEATURES))
+    deltas = {}
+    for target, model in payload["models"].items():
+        deltas[target] = float(model.predict(frame)[0])
+    return deltas
+
+
+def evaluate_lightgbm_bundle(model_dir: str, dataset_csv: str, language: str = "", format_type: str = "") -> Dict[str, Any]:
+    _require_training_stack()
+    bundle = load_lightgbm_bundle(model_dir)
+    meta = bundle["meta"]
+    schema = bundle["schema"]
+    df = pd.read_csv(dataset_csv)
+    if language:
+        df = df[df["language"].astype(str).str.lower() == str(language).strip().lower()]
+    if format_type and format_type != "general":
+        df = df[df["format_type"].astype(str).str.lower() == str(format_type).strip().lower()]
+    frame = _prepare_frame(df, list(schema.get("feature_names") or FEATURE_NAMES), list(meta.get("categorical_features") or CATEGORICAL_FEATURES))
+    summary = {"rows": int(len(df)), "targets": {}}
+    for target in TARGET_NAMES:
+        truth = pd.to_numeric(df[target], errors="coerce").fillna(0.0)
+        lang_for_clip = language or meta.get("language", "")
+        truth = _clip_target_series(lang_for_clip, target, truth)
+        pred = bundle["models"][target].predict(frame)
+        summary["targets"][target] = {
+            "baseline_mae": float(mean_absolute_error(truth, [0.0] * len(truth))),
+            "model_mae": float(mean_absolute_error(truth, pred)),
+        }
+    return summary

@@ -10,6 +10,9 @@ import subprocess
 import re
 import logging
 import shutil
+import hashlib
+import tempfile
+import locale
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +20,92 @@ ALERT_MSVC_REQUIRED = "__ALERT__MSVC_REQUIRED__"
 ALERT_MFA_PERMISSION_DENIED = "__ALERT__MFA_PERMISSION_DENIED__"
 MSVC_REQUIRED_TEXT = "microsoft visual c++ 14.0 or greater is required"
 _MFA_SINGLE_SPEAKER_FLAG_CACHE = {}
+
+
+def _preferred_subprocess_encoding():
+    try:
+        return locale.getpreferredencoding(False) or "utf-8"
+    except Exception:
+        return "utf-8"
+
+
+def _contains_non_ascii(text):
+    try:
+        return any(ord(ch) > 127 for ch in str(text or ""))
+    except Exception:
+        return False
+
+
+def _default_mfa_root_dir(mfa_path=""):
+    if getattr(sys, 'frozen', False):
+        app_dir = os.path.dirname(sys.executable)
+    elif mfa_path:
+        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(mfa_path)))
+    else:
+        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = os.path.join(app_dir, ".mfa_root_ascii")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _link_or_copy(src, dst):
+    os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+    if os.path.exists(dst):
+        return
+    try:
+        os.link(src, dst)
+    except Exception:
+        shutil.copy2(src, dst)
+
+
+def _prepare_ascii_safe_alignment_workspace(wav_folder, dict_path, output_folder):
+    token_src = "|".join([
+        os.path.abspath(wav_folder or ""),
+        os.path.abspath(dict_path or ""),
+        os.path.abspath(output_folder or ""),
+    ])
+    token = hashlib.sha1(token_src.encode("utf-8", errors="replace")).hexdigest()[:12]
+    base = os.path.join(tempfile.gettempdir(), "utoa_mfa_ascii", token)
+    if os.path.isdir(base):
+        shutil.rmtree(base, ignore_errors=True)
+    corpus_dir = os.path.join(base, "corpus")
+    dict_dir = os.path.join(base, "dict")
+    out_dir = os.path.join(base, "out")
+    os.makedirs(corpus_dir, exist_ok=True)
+    os.makedirs(dict_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
+
+    for fn in os.listdir(wav_folder):
+        low = fn.lower()
+        if low.endswith(".wav") or low.endswith(".lab") or low.endswith(".txt"):
+            src = os.path.join(wav_folder, fn)
+            if os.path.isfile(src):
+                _link_or_copy(src, os.path.join(corpus_dir, fn))
+
+    ext = os.path.splitext(dict_path)[1] or ".txt"
+    safe_dict_path = os.path.join(dict_dir, f"dictionary{ext}")
+    shutil.copy2(dict_path, safe_dict_path)
+    return {
+        "base": base,
+        "corpus_dir": corpus_dir,
+        "dict_path": safe_dict_path,
+        "output_dir": out_dir,
+    }
+
+
+def _copy_back_textgrids(safe_output_dir, output_folder):
+    os.makedirs(output_folder, exist_ok=True)
+    copied = 0
+    for dp, dns, fns in os.walk(safe_output_dir):
+        rel = os.path.relpath(dp, safe_output_dir)
+        dst_dir = output_folder if rel == "." else os.path.join(output_folder, rel)
+        os.makedirs(dst_dir, exist_ok=True)
+        for fn in fns:
+            if not fn.lower().endswith(".textgrid"):
+                continue
+            shutil.copy2(os.path.join(dp, fn), os.path.join(dst_dir, fn))
+            copied += 1
+    return copied
 
 
 def _stderr_has_msvc_requirement(text):
@@ -110,6 +199,7 @@ def _get_conda_env(mfa_path):
         current_path = env.get('PATH', '')
         env['PATH'] = os.pathsep.join(new_paths) + os.pathsep + current_path
         env['CONDA_PREFIX'] = env_dir
+    env.setdefault('MFA_ROOT_DIR', _default_mfa_root_dir(mfa_path))
     return env
 
 
@@ -435,7 +525,7 @@ def download_mfa_model(mfa_path, language='korean', callback=None):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            encoding='utf-8',
+            encoding=_preferred_subprocess_encoding(),
             errors='replace',
             env=env,
         )
@@ -483,10 +573,25 @@ def run_mfa_align(mfa_path, wav_folder, dict_path, output_folder, language='kore
     ok, preflight_err = _preflight_compute_mfcc(mfa_path, callback=callback)
     if not ok:
         return False, preflight_err
+    work_wav_folder = wav_folder
+    work_dict_path = dict_path
+    work_output_folder = output_folder
+    safe_workspace = None
+    if any(_contains_non_ascii(p) for p in (wav_folder, dict_path, output_folder)):
+        try:
+            safe_workspace = _prepare_ascii_safe_alignment_workspace(wav_folder, dict_path, output_folder)
+            work_wav_folder = safe_workspace["corpus_dir"]
+            work_dict_path = safe_workspace["dict_path"]
+            work_output_folder = safe_workspace["output_dir"]
+            log(f"[MFA] Non-ASCII path detected, using ASCII-safe workspace: {safe_workspace['base']}")
+        except Exception as e:
+            err = f"Failed to prepare ASCII-safe MFA workspace: {e}"
+            log(err)
+            return False, err
     single_speaker_flag = _resolve_single_speaker_flag(mfa_path, env=env)
     cmd = [
         mfa_path, 'align',
-        wav_folder, dict_path, model_name, output_folder,
+        work_wav_folder, work_dict_path, model_name, work_output_folder,
         single_speaker_flag,
         '--clean', '--fine_tune', '--textgrid_cleanup',
         '--beam', '1000', '--retry_beam', '4000',
@@ -499,7 +604,7 @@ def run_mfa_align(mfa_path, wav_folder, dict_path, output_folder, language='kore
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            encoding='utf-8',
+            encoding=_preferred_subprocess_encoding(),
             errors='replace',
             env=env,
         )
@@ -514,6 +619,9 @@ def run_mfa_align(mfa_path, wav_folder, dict_path, output_folder, language='kore
                         tail_lines.pop(0)
         process.wait()
         if process.returncode == 0:
+            if safe_workspace is not None:
+                copied = _copy_back_textgrids(work_output_folder, output_folder)
+                log(f"[MFA] Copied back {copied} TextGrid files from ASCII-safe workspace.")
             log('MFA alignment completed successfully.')
             return True, ''
         joined_tail = '\n'.join(tail_lines[-40:])

@@ -163,7 +163,7 @@ JA_PROFILE_PRESET_CVVC_V1 = {
 def get_ja_profile_preset(format_type="cvvc"):
     """
     Return a mutable copy of Japanese preset profile by alias format.
-    Accepted examples: cvvc/cvc/vcv.
+    Accepted examples: cv/cvvc/vcv.
     """
     ft = (format_type or "").strip().lower()
     if ft.startswith("vcv"):
