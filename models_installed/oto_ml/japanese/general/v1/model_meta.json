@@ -3,11 +3,12 @@
   "language": "japanese",
   "format_type": "general",
   "model_version": "v1",
-  "feature_version": "v2",
+  "feature_version": "v3",
   "feature_names": [
     "language",
     "format_type",
     "alias_type",
+    "alias_group",
     "row_index_in_wav",
     "row_ratio_in_wav",
     "is_head_row",
@@ -72,6 +73,7 @@
     "language",
     "format_type",
     "alias_type",
+    "alias_group",
     "onset_class",
     "voicing_class",
     "coda_type",
@@ -110,29 +112,34 @@
       160.0
     ]
   },
-  "created_at": "2026-03-01T15:23:41",
-  "train_rows": 27211,
+  "created_at": "2026-03-02T15:24:50",
+  "train_rows": 33938,
   "voicebank_count": 7,
   "holdout_metrics": {
     "delta_offset": {
-      "baseline_mae": 136.26741816519356,
-      "model_mae": 108.0948441320082
+      "baseline_mae": 72.76721883572081,
+      "model_mae": 70.41022283235603
     },
     "delta_cons": {
-      "baseline_mae": 116.74163273392259,
-      "model_mae": 39.79837330185409
+      "baseline_mae": 28.24728329777507,
+      "model_mae": 36.594030216530776
     },
     "delta_cutoff": {
-      "baseline_mae": 197.81854327948795,
-      "model_mae": 49.79345308333917
+      "baseline_mae": 99.17679579396527,
+      "model_mae": 64.96631084749893
     },
     "delta_pre": {
-      "baseline_mae": 86.41065269734837,
-      "model_mae": 38.78235673790504
+      "baseline_mae": 20.602801889667784,
+      "model_mae": 22.41359003697997
     },
     "delta_ovl": {
-      "baseline_mae": 19.706763334349287,
-      "model_mae": 15.208666902805144
+      "baseline_mae": 30.924624199939046,
+      "model_mae": 9.963109763698855
     }
+  },
+  "filters": {
+    "alias_types": [],
+    "alias_groups": [],
+    "require_train_keep": false
   }
 }

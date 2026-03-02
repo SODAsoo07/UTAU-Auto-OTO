@@ -1,31 +1,31 @@
 {
   "targets": {
-    "delta_offset": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\vcv\\v1\\model_offset.txt",
-    "delta_cons": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\vcv\\v1\\model_cons.txt",
-    "delta_cutoff": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\vcv\\v1\\model_cutoff.txt",
-    "delta_pre": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\vcv\\v1\\model_pre.txt",
-    "delta_ovl": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\vcv\\v1\\model_ovl.txt"
+    "delta_offset": "assets\\models\\oto_ml\\japanese\\vcv\\profile_run_new\\model_offset.txt",
+    "delta_cons": "assets\\models\\oto_ml\\japanese\\vcv\\profile_run_new\\model_cons.txt",
+    "delta_cutoff": "assets\\models\\oto_ml\\japanese\\vcv\\profile_run_new\\model_cutoff.txt",
+    "delta_pre": "assets\\models\\oto_ml\\japanese\\vcv\\profile_run_new\\model_pre.txt",
+    "delta_ovl": "assets\\models\\oto_ml\\japanese\\vcv\\profile_run_new\\model_ovl.txt"
   },
   "metrics": {
     "delta_offset": {
-      "baseline_mae": 188.71727753303963,
-      "model_mae": 88.76742072578774
+      "baseline_mae": 141.38636629955946,
+      "model_mae": 104.75459003447338
     },
     "delta_cons": {
-      "baseline_mae": 132.18957643171805,
-      "model_mae": 23.466743929270017
+      "baseline_mae": 72.31281453744494,
+      "model_mae": 42.62676792862105
     },
     "delta_cutoff": {
-      "baseline_mae": 179.69512312775328,
-      "model_mae": 72.25910354941193
+      "baseline_mae": 186.30180594713653,
+      "model_mae": 107.5730706587407
     },
     "delta_pre": {
-      "baseline_mae": 108.84648281938325,
-      "model_mae": 25.43013837297423
+      "baseline_mae": 49.348194052863434,
+      "model_mae": 28.225517345543427
     },
     "delta_ovl": {
-      "baseline_mae": 25.40228502202643,
-      "model_mae": 10.901644057551328
+      "baseline_mae": 34.146214977973564,
+      "model_mae": 8.637852634169734
     }
   }
 }

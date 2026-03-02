@@ -16,27 +16,44 @@ from core.oto_torch_trainer import train_torch_bundle
 
 DEFAULT_TASK_ORDER = [
     "korean_bridge_cvvc_vv",
-    "korean_bridge_cvvc_vc_sonorant",
-    "korean_bridge_cvvc_vc_stop",
-    "korean_bridge_cvc_vc_sonorant",
-    "korean_bridge_cvc_vc_stop",
+    "korean_bridge_cvvc_vc",
+    "korean_bridge_cvc_vc",
 ]
 
+# Small-sample tasks are unstable for PyTorch and should be skipped by default
+# unless explicitly overridden.
+TASK_MIN_ROWS: Dict[str, int] = {
+    "korean_bridge_cvvc_vv": 300,
+    "korean_bridge_cvvc_vc": 120,
+    "korean_bridge_cvc_vc": 80,
+    "korean_bridge_cvvc_vc_sonorant": 120,
+    "korean_bridge_cvvc_vc_stop": 120,
+    "korean_bridge_cvc_vc_sonorant": 80,
+    "korean_bridge_cvc_vc_stop": 80,
+    "japanese_bridge_vcv_vv": 600,
+    "japanese_bridge_vcv_vc": 600,
+    "japanese_bridge_vcv_vcv": 1500,
+    "japanese_bridge_vcv_cv_head": 300,
+    "japanese_bridge_cvvc_vv": 120,
+    "japanese_bridge_cvvc_vc": 120,
+    "japanese_bridge_cvvc_cv_head": 60,
+}
+
 TASK_DEFAULTS: Dict[str, Dict[str, object]] = {
-    "korean_bridge_cvvc_vv": {"epochs": 20, "batch_size": 32, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 50},
-    "korean_bridge_cvvc_vc": {"epochs": 20, "batch_size": 32, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 50},
-    "korean_bridge_cvvc_vc_sonorant": {"epochs": 20, "batch_size": 32, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 50},
-    "korean_bridge_cvvc_vc_stop": {"epochs": 24, "batch_size": 24, "learning_rate": 7.5e-4, "weight_decay": 1.5e-4, "log_every_steps": 50},
-    "korean_bridge_cvc_vc": {"epochs": 28, "batch_size": 16, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 20},
-    "korean_bridge_cvc_vc_sonorant": {"epochs": 28, "batch_size": 16, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 20},
-    "korean_bridge_cvc_vc_stop": {"epochs": 32, "batch_size": 12, "learning_rate": 7.5e-4, "weight_decay": 1.5e-4, "log_every_steps": 20},
-    "japanese_bridge_vcv_vv": {"epochs": 16, "batch_size": 32, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 100},
-    "japanese_bridge_vcv_vc": {"epochs": 16, "batch_size": 32, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 100},
-    "japanese_bridge_vcv_vcv": {"epochs": 16, "batch_size": 32, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 100},
-    "japanese_bridge_vcv_cv_head": {"epochs": 16, "batch_size": 32, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 100},
-    "japanese_bridge_cvvc_vv": {"epochs": 20, "batch_size": 32, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 100},
-    "japanese_bridge_cvvc_vc": {"epochs": 20, "batch_size": 32, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 100},
-    "japanese_bridge_cvvc_cv_head": {"epochs": 20, "batch_size": 32, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 100},
+    "korean_bridge_cvvc_vv": {"epochs": 20, "batch_size": 32, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 50, "early_stopping_patience": 2, "early_stopping_min_delta": 0.5, "lr_reduce_factor": 0.5, "lr_reduce_patience": 1, "lr_reduce_min_lr": 1e-5, "lr_reduce_threshold": 0.5},
+    "korean_bridge_cvvc_vc": {"epochs": 20, "batch_size": 32, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 50, "early_stopping_patience": 2, "early_stopping_min_delta": 0.5, "lr_reduce_factor": 0.5, "lr_reduce_patience": 1, "lr_reduce_min_lr": 1e-5, "lr_reduce_threshold": 0.5},
+    "korean_bridge_cvvc_vc_sonorant": {"epochs": 20, "batch_size": 32, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 50, "early_stopping_patience": 2, "early_stopping_min_delta": 0.5, "lr_reduce_factor": 0.5, "lr_reduce_patience": 1, "lr_reduce_min_lr": 1e-5, "lr_reduce_threshold": 0.5},
+    "korean_bridge_cvvc_vc_stop": {"epochs": 24, "batch_size": 24, "learning_rate": 7.5e-4, "weight_decay": 1.5e-4, "log_every_steps": 50, "early_stopping_patience": 2, "early_stopping_min_delta": 0.5, "lr_reduce_factor": 0.5, "lr_reduce_patience": 1, "lr_reduce_min_lr": 1e-5, "lr_reduce_threshold": 0.5},
+    "korean_bridge_cvc_vc": {"epochs": 28, "batch_size": 16, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 20, "early_stopping_patience": 2, "early_stopping_min_delta": 0.5, "lr_reduce_factor": 0.5, "lr_reduce_patience": 1, "lr_reduce_min_lr": 1e-5, "lr_reduce_threshold": 0.5},
+    "korean_bridge_cvc_vc_sonorant": {"epochs": 28, "batch_size": 16, "learning_rate": 1e-3, "weight_decay": 1e-4, "log_every_steps": 20, "early_stopping_patience": 2, "early_stopping_min_delta": 0.5, "lr_reduce_factor": 0.5, "lr_reduce_patience": 1, "lr_reduce_min_lr": 1e-5, "lr_reduce_threshold": 0.5},
+    "korean_bridge_cvc_vc_stop": {"epochs": 32, "batch_size": 12, "learning_rate": 7.5e-4, "weight_decay": 1.5e-4, "log_every_steps": 20, "early_stopping_patience": 2, "early_stopping_min_delta": 0.5, "lr_reduce_factor": 0.5, "lr_reduce_patience": 1, "lr_reduce_min_lr": 1e-5, "lr_reduce_threshold": 0.5},
+    "japanese_bridge_vcv_vv": {"epochs": 8, "batch_size": 32, "learning_rate": 5e-4, "weight_decay": 2e-4, "log_every_steps": 100, "early_stopping_patience": 2, "early_stopping_min_delta": 0.5, "lr_reduce_factor": 0.5, "lr_reduce_patience": 1, "lr_reduce_min_lr": 1e-5, "lr_reduce_threshold": 0.5},
+    "japanese_bridge_vcv_vc": {"epochs": 10, "batch_size": 32, "learning_rate": 5e-4, "weight_decay": 2e-4, "log_every_steps": 100, "early_stopping_patience": 2, "early_stopping_min_delta": 0.5, "lr_reduce_factor": 0.5, "lr_reduce_patience": 1, "lr_reduce_min_lr": 1e-5, "lr_reduce_threshold": 0.5},
+    "japanese_bridge_vcv_vcv": {"epochs": 10, "batch_size": 32, "learning_rate": 5e-4, "weight_decay": 2e-4, "log_every_steps": 100, "early_stopping_patience": 2, "early_stopping_min_delta": 0.5, "lr_reduce_factor": 0.5, "lr_reduce_patience": 1, "lr_reduce_min_lr": 1e-5, "lr_reduce_threshold": 0.5},
+    "japanese_bridge_vcv_cv_head": {"epochs": 10, "batch_size": 32, "learning_rate": 5e-4, "weight_decay": 2e-4, "log_every_steps": 100, "early_stopping_patience": 2, "early_stopping_min_delta": 0.5, "lr_reduce_factor": 0.5, "lr_reduce_patience": 1, "lr_reduce_min_lr": 1e-5, "lr_reduce_threshold": 0.5},
+    "japanese_bridge_cvvc_vv": {"epochs": 12, "batch_size": 32, "learning_rate": 5e-4, "weight_decay": 2e-4, "log_every_steps": 100, "early_stopping_patience": 2, "early_stopping_min_delta": 0.5, "lr_reduce_factor": 0.5, "lr_reduce_patience": 1, "lr_reduce_min_lr": 1e-5, "lr_reduce_threshold": 0.5},
+    "japanese_bridge_cvvc_vc": {"epochs": 12, "batch_size": 32, "learning_rate": 5e-4, "weight_decay": 2e-4, "log_every_steps": 100, "early_stopping_patience": 2, "early_stopping_min_delta": 0.5, "lr_reduce_factor": 0.5, "lr_reduce_patience": 1, "lr_reduce_min_lr": 1e-5, "lr_reduce_threshold": 0.5},
+    "japanese_bridge_cvvc_cv_head": {"epochs": 12, "batch_size": 32, "learning_rate": 5e-4, "weight_decay": 2e-4, "log_every_steps": 100, "early_stopping_patience": 2, "early_stopping_min_delta": 0.5, "lr_reduce_factor": 0.5, "lr_reduce_patience": 1, "lr_reduce_min_lr": 1e-5, "lr_reduce_threshold": 0.5},
 }
 
 
@@ -102,6 +119,14 @@ def main():
     ap.add_argument("--learning-rate", type=float, default=0.0, help="Override all task learning rates when > 0")
     ap.add_argument("--weight-decay", type=float, default=0.0, help="Override all task weight decay when > 0")
     ap.add_argument("--log-every-steps", type=int, default=0, help="Override all task log step interval when > 0")
+    ap.add_argument("--early-stopping-patience", type=int, default=-1, help="Override all task early-stopping patience when >= 0")
+    ap.add_argument("--early-stopping-min-delta", type=float, default=-1.0, help="Override all task early-stopping min delta when >= 0")
+    ap.add_argument("--lr-reduce-factor", type=float, default=-1.0, help="Override all task LR reduce factor when > 0")
+    ap.add_argument("--lr-reduce-patience", type=int, default=-1, help="Override all task LR reduce patience when >= 0")
+    ap.add_argument("--lr-reduce-min-lr", type=float, default=-1.0, help="Override all task LR reduce min_lr when >= 0")
+    ap.add_argument("--lr-reduce-threshold", type=float, default=-1.0, help="Override all task LR reduce threshold when >= 0")
+    ap.add_argument("--min-rows", type=int, default=0, help="Global minimum rows to start training (0 = task defaults)")
+    ap.add_argument("--allow-tiny", action="store_true", help="Allow training even if dataset rows are below minimum")
     args = ap.parse_args()
 
     tasks = _resolve_tasks(args.tasks)
@@ -119,6 +144,12 @@ def main():
         learning_rate = float(args.learning_rate) if float(args.learning_rate) > 0 else float(defaults.get("learning_rate", 1e-3))
         weight_decay = float(args.weight_decay) if float(args.weight_decay) > 0 else float(defaults.get("weight_decay", 1e-4))
         log_every_steps = int(args.log_every_steps) if int(args.log_every_steps) > 0 else int(defaults.get("log_every_steps", 100))
+        early_stopping_patience = int(args.early_stopping_patience) if int(args.early_stopping_patience) >= 0 else int(defaults.get("early_stopping_patience", 2))
+        early_stopping_min_delta = float(args.early_stopping_min_delta) if float(args.early_stopping_min_delta) >= 0 else float(defaults.get("early_stopping_min_delta", 0.5))
+        lr_reduce_factor = float(args.lr_reduce_factor) if float(args.lr_reduce_factor) > 0 else float(defaults.get("lr_reduce_factor", 0.5))
+        lr_reduce_patience = int(args.lr_reduce_patience) if int(args.lr_reduce_patience) >= 0 else int(defaults.get("lr_reduce_patience", 1))
+        lr_reduce_min_lr = float(args.lr_reduce_min_lr) if float(args.lr_reduce_min_lr) >= 0 else float(defaults.get("lr_reduce_min_lr", 1e-5))
+        lr_reduce_threshold = float(args.lr_reduce_threshold) if float(args.lr_reduce_threshold) >= 0 else float(defaults.get("lr_reduce_threshold", 0.5))
 
         print(f"[TorchBatch] build task={task_name} dataset_csv={dataset_csv}")
         build_summary = build_torch_dataset(
@@ -134,6 +165,25 @@ def main():
             f"[TorchBatch] build_done task={task_name} "
             f"rows={build_summary.row_count} shards={build_summary.shard_count} skipped={build_summary.skipped_rows}"
         )
+
+        min_rows = int(args.min_rows) if int(args.min_rows) > 0 else int(TASK_MIN_ROWS.get(task_name, 0))
+        if not args.allow_tiny and min_rows > 0 and int(build_summary.row_count) < min_rows:
+            print(
+                f"[TorchBatch] skip_train task={task_name} "
+                f"rows={build_summary.row_count} < min_rows={min_rows}"
+            )
+            results.append(
+                {
+                    "task": task_name,
+                    "language": language,
+                    "dataset_rows": build_summary.row_count,
+                    "min_rows": min_rows,
+                    "skipped": True,
+                    "reason": "too_few_rows",
+                    "out_dir": out_dir,
+                }
+            )
+            continue
 
         print(
             f"[TorchBatch] train task={task_name} lang={language} "
@@ -151,14 +201,28 @@ def main():
             use_amp=not args.no_amp,
             device_override=args.device,
             log_every_steps=log_every_steps,
+            early_stopping_patience=early_stopping_patience,
+            early_stopping_min_delta=early_stopping_min_delta,
+            lr_reduce_factor=lr_reduce_factor,
+            lr_reduce_patience=lr_reduce_patience,
+            lr_reduce_min_lr=lr_reduce_min_lr,
+            lr_reduce_threshold=lr_reduce_threshold,
         )
         results.append(
             {
                 "task": task_name,
                 "language": language,
                 "dataset_rows": build_summary.row_count,
+                "min_rows": min_rows,
                 "best_epoch": meta.get("best_epoch"),
                 "train_rows": meta.get("train_rows"),
+                "early_stopping_patience": early_stopping_patience,
+                "early_stopping_min_delta": early_stopping_min_delta,
+                "lr_reduce_factor": lr_reduce_factor,
+                "lr_reduce_patience": lr_reduce_patience,
+                "lr_reduce_min_lr": lr_reduce_min_lr,
+                "lr_reduce_threshold": lr_reduce_threshold,
+                "skipped": False,
                 "out_dir": out_dir,
             }
         )

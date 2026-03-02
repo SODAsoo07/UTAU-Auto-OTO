@@ -3,7 +3,7 @@
   "language": "korean",
   "format_type": "cvvc",
   "model_version": "v1",
-  "feature_version": "v3",
+  "feature_version": "v4",
   "feature_names": [
     "language",
     "format_type",
@@ -67,7 +67,17 @@
     "prev_base_offset",
     "next_base_offset",
     "prev_base_cutoff_abs",
-    "next_base_cutoff_abs"
+    "next_base_cutoff_abs",
+    "mapping_confidence",
+    "used_alias_occurrence_mapping",
+    "used_exact_vowel_fix",
+    "used_nuclei_fallback",
+    "used_alias_based_syllables",
+    "words_vs_alias_score_margin",
+    "local_peak_db",
+    "local_valley_db",
+    "mel_window_energy_mean",
+    "mel_window_silence_ratio"
   ],
   "categorical_features": [
     "language",
@@ -112,38 +122,34 @@
       140.0
     ]
   },
-  "created_at": "2026-03-02T04:12:34",
-  "train_rows": 530,
-  "voicebank_count": 3,
+  "created_at": "2026-03-03T03:04:48",
+  "train_rows": 11604,
+  "voicebank_count": 6,
   "holdout_metrics": {
     "delta_offset": {
-      "baseline_mae": 207.87781249999998,
-      "model_mae": 126.1382500204148
+      "baseline_mae": 163.45880553261765,
+      "model_mae": 129.77880346162982
     },
     "delta_cons": {
-      "baseline_mae": 113.82326250000001,
-      "model_mae": 58.296726295237455
+      "baseline_mae": 63.56905078447564,
+      "model_mae": 46.876542424512905
     },
     "delta_cutoff": {
-      "baseline_mae": 245.7977125,
-      "model_mae": 110.63032448836262
+      "baseline_mae": 211.60194591246906,
+      "model_mae": 205.18674505350262
     },
     "delta_pre": {
-      "baseline_mae": 96.6270125,
-      "model_mae": 56.415274671994304
+      "baseline_mae": 49.66372295623452,
+      "model_mae": 37.40824992709525
     },
     "delta_ovl": {
-      "baseline_mae": 38.5112625,
-      "model_mae": 21.68922383843259
+      "baseline_mae": 38.03329810074319,
+      "model_mae": 24.878186413886286
     }
   },
   "filters": {
     "alias_types": [],
-    "alias_groups": [
-      "vv",
-      "vc_stop",
-      "vc_sonorant"
-    ],
+    "alias_groups": [],
     "require_train_keep": false
   }
 }

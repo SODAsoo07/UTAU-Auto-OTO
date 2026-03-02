@@ -3,11 +3,12 @@
   "language": "japanese",
   "format_type": "vcv",
   "model_version": "v1",
-  "feature_version": "v2",
+  "feature_version": "v4",
   "feature_names": [
     "language",
     "format_type",
     "alias_type",
+    "alias_group",
     "row_index_in_wav",
     "row_ratio_in_wav",
     "is_head_row",
@@ -66,12 +67,23 @@
     "prev_base_offset",
     "next_base_offset",
     "prev_base_cutoff_abs",
-    "next_base_cutoff_abs"
+    "next_base_cutoff_abs",
+    "mapping_confidence",
+    "used_alias_occurrence_mapping",
+    "used_exact_vowel_fix",
+    "used_nuclei_fallback",
+    "used_alias_based_syllables",
+    "words_vs_alias_score_margin",
+    "local_peak_db",
+    "local_valley_db",
+    "mel_window_energy_mean",
+    "mel_window_silence_ratio"
   ],
   "categorical_features": [
     "language",
     "format_type",
     "alias_type",
+    "alias_group",
     "onset_class",
     "voicing_class",
     "coda_type",
@@ -110,29 +122,34 @@
       160.0
     ]
   },
-  "created_at": "2026-03-01T15:23:39",
+  "created_at": "2026-03-03T03:04:42",
   "train_rows": 32030,
   "voicebank_count": 5,
   "holdout_metrics": {
     "delta_offset": {
-      "baseline_mae": 188.71727753303963,
-      "model_mae": 88.76742072578774
+      "baseline_mae": 141.38636629955946,
+      "model_mae": 104.75459003447338
     },
     "delta_cons": {
-      "baseline_mae": 132.18957643171805,
-      "model_mae": 23.466743929270017
+      "baseline_mae": 72.31281453744494,
+      "model_mae": 42.62676792862105
     },
     "delta_cutoff": {
-      "baseline_mae": 179.69512312775328,
-      "model_mae": 72.25910354941193
+      "baseline_mae": 186.30180594713653,
+      "model_mae": 107.5730706587407
     },
     "delta_pre": {
-      "baseline_mae": 108.84648281938325,
-      "model_mae": 25.43013837297423
+      "baseline_mae": 49.348194052863434,
+      "model_mae": 28.225517345543427
     },
     "delta_ovl": {
-      "baseline_mae": 25.40228502202643,
-      "model_mae": 10.901644057551328
+      "baseline_mae": 34.146214977973564,
+      "model_mae": 8.637852634169734
     }
+  },
+  "filters": {
+    "alias_types": [],
+    "alias_groups": [],
+    "require_train_keep": false
   }
 }

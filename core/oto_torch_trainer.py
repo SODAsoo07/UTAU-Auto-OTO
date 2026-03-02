@@ -293,6 +293,12 @@ def train_torch_bundle(
     use_amp: bool = True,
     device_override: str = "",
     log_every_steps: int = 100,
+    early_stopping_patience: int = 2,
+    early_stopping_min_delta: float = 0.5,
+    lr_reduce_factor: float = 0.5,
+    lr_reduce_patience: int = 1,
+    lr_reduce_min_lr: float = 1e-5,
+    lr_reduce_threshold: float = 0.5,
 ) -> Dict[str, object]:
     index = load_torch_dataset_index(os.path.join(dataset_dir, "index.json"))
     shards = list(index.get("shards") or [])
@@ -324,6 +330,15 @@ def train_torch_bundle(
         window_frames=int(index.get("window_frames", 160)),
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=float(lr_reduce_factor),
+        patience=int(lr_reduce_patience),
+        threshold=float(lr_reduce_threshold),
+        threshold_mode="abs",
+        min_lr=float(lr_reduce_min_lr),
+    )
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled) if device.type == "cuda" else None
     loss_profile = _task_loss_profile(task_name)
     target_weights = torch.tensor(loss_profile["target_weights"], dtype=torch.float32)
@@ -333,6 +348,7 @@ def train_torch_bundle(
     best_state = None
     best_valid = float("inf")
     best_epoch = -1
+    no_improve_epochs = 0
     history = []
     global_step = 0
     os.makedirs(out_dir, exist_ok=True)
@@ -341,7 +357,10 @@ def train_torch_bundle(
     print(
         f"[TorchTrain] start task={task_name} lang={language} device={device.type} "
         f"epochs={int(epochs)} batch={int(batch_size)} amp={'ON' if amp_enabled else 'OFF'} "
-        f"loss_weights={loss_profile['target_weights']} constraint_w={constraint_weight} rhythm_w={rhythm_weight}"
+        f"loss_weights={loss_profile['target_weights']} constraint_w={constraint_weight} rhythm_w={rhythm_weight} "
+        f"early_stop_patience={int(early_stopping_patience)} early_stop_min_delta={float(early_stopping_min_delta)} "
+        f"lr_reduce_factor={float(lr_reduce_factor)} lr_reduce_patience={int(lr_reduce_patience)} "
+        f"lr_reduce_min_lr={float(lr_reduce_min_lr)} lr_reduce_threshold={float(lr_reduce_threshold)}"
     )
 
     for epoch in range(int(epochs)):
@@ -377,24 +396,44 @@ def train_torch_bundle(
 
         valid_summary = _evaluate(model, valid_loader, device, numeric_names)
         valid_loss = sum(metric["model_mae"] for metric in valid_summary["metrics"].values())
+        prev_lr = float(optimizer.param_groups[0]["lr"])
+        scheduler.step(valid_loss)
+        new_lr = float(optimizer.param_groups[0]["lr"])
         epoch_train_loss = epoch_loss / max(step_count, 1)
         print(
             f"[TorchTrain] epoch_end epoch={epoch + 1}/{int(epochs)} "
-            f"train_loss={epoch_train_loss:.6f} valid_score={valid_loss:.6f}"
+            f"train_loss={epoch_train_loss:.6f} valid_score={valid_loss:.6f} lr={new_lr:.8f}"
         )
+        if new_lr < prev_lr:
+            print(
+                f"[TorchTrain] lr_reduced epoch={epoch + 1} "
+                f"prev_lr={prev_lr:.8f} new_lr={new_lr:.8f}"
+            )
         history.append({
             "epoch": epoch + 1,
             "train_loss": epoch_train_loss,
             "valid_score": valid_loss,
+            "lr": new_lr,
         })
-        if valid_loss < best_valid:
+        improved = (best_valid - valid_loss) > float(early_stopping_min_delta)
+        if improved:
             best_valid = valid_loss
             best_epoch = epoch + 1
             best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+            no_improve_epochs = 0
             print(
                 f"[TorchTrain] checkpoint_saved epoch={best_epoch} "
                 f"global_step={global_step} valid_score={best_valid:.6f}"
             )
+        else:
+            no_improve_epochs += 1
+            if int(early_stopping_patience) > 0 and no_improve_epochs >= int(early_stopping_patience):
+                print(
+                    f"[TorchTrain] early_stop epoch={epoch + 1} "
+                    f"best_epoch={best_epoch} best_valid={best_valid:.6f} "
+                    f"no_improve_epochs={no_improve_epochs}"
+                )
+                break
 
     if best_state is None:
         raise RuntimeError("Training failed to produce a checkpoint")
@@ -415,6 +454,15 @@ def train_torch_bundle(
         "learning_rate": float(learning_rate),
         "weight_decay": float(weight_decay),
         "amp_enabled": bool(amp_enabled),
+        "early_stopping_patience": int(early_stopping_patience),
+        "early_stopping_min_delta": float(early_stopping_min_delta),
+        "lr_scheduler": {
+            "name": "ReduceLROnPlateau",
+            "factor": float(lr_reduce_factor),
+            "patience": int(lr_reduce_patience),
+            "min_lr": float(lr_reduce_min_lr),
+            "threshold": float(lr_reduce_threshold),
+        },
         "loss_profile": {
             "target_weights": list(loss_profile["target_weights"]),
             "constraint_weight": constraint_weight,
@@ -451,7 +499,20 @@ def train_torch_bundle(
         "holdout_metrics": final_eval["metrics"],
         "holdout_alias_group_metrics": final_eval["alias_group_metrics"],
         "best_epoch": int(best_epoch),
+        "best_valid_score": float(best_valid),
         "history": history,
+        "early_stopping": {
+            "patience": int(early_stopping_patience),
+            "min_delta": float(early_stopping_min_delta),
+            "stopped_early": bool(int(early_stopping_patience) > 0 and no_improve_epochs >= int(early_stopping_patience)),
+        },
+        "lr_scheduler": {
+            "name": "ReduceLROnPlateau",
+            "factor": float(lr_reduce_factor),
+            "patience": int(lr_reduce_patience),
+            "min_lr": float(lr_reduce_min_lr),
+            "threshold": float(lr_reduce_threshold),
+        },
         "loss_profile": {
             "target_weights": list(loss_profile["target_weights"]),
             "constraint_weight": constraint_weight,

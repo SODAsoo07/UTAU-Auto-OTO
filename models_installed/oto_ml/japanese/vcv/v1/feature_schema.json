@@ -1,10 +1,11 @@
 {
   "version": 1,
-  "feature_version": "v2",
+  "feature_version": "v4",
   "feature_names": [
     "language",
     "format_type",
     "alias_type",
+    "alias_group",
     "row_index_in_wav",
     "row_ratio_in_wav",
     "is_head_row",
@@ -63,12 +64,23 @@
     "prev_base_offset",
     "next_base_offset",
     "prev_base_cutoff_abs",
-    "next_base_cutoff_abs"
+    "next_base_cutoff_abs",
+    "mapping_confidence",
+    "used_alias_occurrence_mapping",
+    "used_exact_vowel_fix",
+    "used_nuclei_fallback",
+    "used_alias_based_syllables",
+    "words_vs_alias_score_margin",
+    "local_peak_db",
+    "local_valley_db",
+    "mel_window_energy_mean",
+    "mel_window_silence_ratio"
   ],
   "categorical_features": [
     "language",
     "format_type",
     "alias_type",
+    "alias_group",
     "onset_class",
     "voicing_class",
     "coda_type",

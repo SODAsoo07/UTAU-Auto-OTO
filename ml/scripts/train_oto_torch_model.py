@@ -23,6 +23,12 @@ def main():
     ap.add_argument("--learning-rate", type=float, default=1e-3)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
     ap.add_argument("--log-every-steps", type=int, default=100)
+    ap.add_argument("--early-stopping-patience", type=int, default=2)
+    ap.add_argument("--early-stopping-min-delta", type=float, default=0.5)
+    ap.add_argument("--lr-reduce-factor", type=float, default=0.5)
+    ap.add_argument("--lr-reduce-patience", type=int, default=1)
+    ap.add_argument("--lr-reduce-min-lr", type=float, default=1e-5)
+    ap.add_argument("--lr-reduce-threshold", type=float, default=0.5)
     ap.add_argument("--no-amp", action="store_true")
     ap.add_argument("--device", default="", help="Optional device override, e.g. cpu or cuda")
     args = ap.parse_args()
@@ -39,6 +45,12 @@ def main():
         use_amp=not args.no_amp,
         device_override=args.device,
         log_every_steps=args.log_every_steps,
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_min_delta=args.early_stopping_min_delta,
+        lr_reduce_factor=args.lr_reduce_factor,
+        lr_reduce_patience=args.lr_reduce_patience,
+        lr_reduce_min_lr=args.lr_reduce_min_lr,
+        lr_reduce_threshold=args.lr_reduce_threshold,
     )
     print(json.dumps({
         "backend": meta.get("backend"),

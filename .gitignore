@@ -236,3 +236,6 @@ custom_test_wavs/*_dict.txt
 /assets/models/oto_ml/**/*.parquet
 /assets/models/oto_ml/**/*.jsonl
 /assets/models
+/models_installed
+/models_installed
+/models_installed

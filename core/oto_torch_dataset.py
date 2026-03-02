@@ -196,6 +196,8 @@ TORCH_TASKS: Dict[str, Dict[str, object]] = {
     },
 }
 
+_ALL_WAV_DIRS_KEY = "__all_wav_dirs__"
+
 
 @dataclass
 class TorchDatasetSummary:
@@ -293,22 +295,45 @@ def _load_build_manifest(path: str) -> List[Dict[str, object]]:
 
 def _build_wav_dir_map(build_manifest: List[Dict[str, object]]) -> Dict[Tuple[str, str, str], List[str]]:
     out: Dict[Tuple[str, str, str], List[str]] = defaultdict(list)
+
+    def _add_key(vb_id: str, language: str, format_type: str, wav_dir: str) -> None:
+        key = (vb_id, language, format_type)
+        if wav_dir not in out[key]:
+            out[key].append(wav_dir)
+
     for item in build_manifest or []:
         if str(item.get("status", "")) != "built":
             continue
-        key = (
-            str(item.get("voicebank_id", "") or "").strip(),
-            str(item.get("language", "") or "").strip().lower(),
-            str(item.get("format_type", "") or "").strip().lower(),
-        )
+        voicebank_id = str(item.get("voicebank_id", "") or "").strip()
+        voicebank_norm = normalize_key(voicebank_id)
+        language = str(item.get("language", "") or "").strip().lower()
+        format_type = str(item.get("format_type", "") or "").strip().lower()
         wav_dir = str(item.get("wav_dir", "") or "").strip()
-        if wav_dir and os.path.isdir(wav_dir) and wav_dir not in out[key]:
-            out[key].append(wav_dir)
+        if wav_dir and os.path.isdir(wav_dir):
+            _add_key(voicebank_id, language, format_type, wav_dir)
+            if voicebank_norm and voicebank_norm != voicebank_id:
+                _add_key(voicebank_norm, language, format_type, wav_dir)
     return out
 
 
 def _scan_dataset_voicebanks(dataset_root: str) -> Dict[str, List[str]]:
     voicebanks: Dict[str, List[str]] = defaultdict(list)
+
+    def _register_key(key: str, wav_root: str) -> None:
+        if not key:
+            return
+        if wav_root not in voicebanks[key]:
+            voicebanks[key].append(wav_root)
+
+    def _register_key_variants(raw_key: str, wav_root: str) -> None:
+        key = str(raw_key or "").strip()
+        if not key:
+            return
+        _register_key(key, wav_root)
+        norm = normalize_key(key)
+        if norm and norm != key:
+            _register_key(norm, wav_root)
+
     if not dataset_root or not os.path.isdir(dataset_root):
         return voicebanks
     for language in os.listdir(dataset_root):
@@ -322,21 +347,43 @@ def _scan_dataset_voicebanks(dataset_root: str) -> Dict[str, List[str]]:
             for root, dirs, files in os.walk(fmt_dir):
                 wav_files = [fn for fn in files if fn.lower().endswith('.wav')]
                 if wav_files:
-                    vb = os.path.basename(root)
-                    if root not in voicebanks[vb]:
-                        voicebanks[vb].append(root)
+                    _register_key(_ALL_WAV_DIRS_KEY, root)
+
+                    # Register both this wav folder and parent folders as candidate voicebank keys.
+                    current = root
+                    while True:
+                        if os.path.normcase(current) == os.path.normcase(fmt_dir):
+                            break
+                        base = os.path.basename(current)
+                        _register_key_variants(base, root)
+                        parent = os.path.dirname(current)
+                        if parent == current:
+                            break
+                        current = parent
     return voicebanks
 
 
 def _resolve_wav_path(row: Dict[str, str], wav_dir_map: Dict[Tuple[str, str, str], List[str]], dataset_voicebanks: Dict[str, List[str]], wav_cache: Dict[str, Dict[str, str]]) -> str:
     voicebank_id = str(row.get("voicebank_id", "") or "").strip()
+    voicebank_norm = normalize_key(voicebank_id)
     language = str(row.get("language", "") or "").strip().lower()
     format_type = str(row.get("format_type", "") or "").strip().lower()
     wav_name = str(row.get("wav", "") or "").strip()
     wav_norm = normalize_key(wav_name)
 
-    candidate_dirs = list(wav_dir_map.get((voicebank_id, language, format_type), []))
-    for path in dataset_voicebanks.get(voicebank_id, []):
+    candidate_dirs: List[str] = []
+    for vb_key in (voicebank_id, voicebank_norm):
+        if not vb_key:
+            continue
+        for path in wav_dir_map.get((vb_key, language, format_type), []):
+            if path not in candidate_dirs:
+                candidate_dirs.append(path)
+        for path in dataset_voicebanks.get(vb_key, []):
+            if path not in candidate_dirs:
+                candidate_dirs.append(path)
+
+    # Last-resort fallback: search all staged wav folders in this dataset.
+    for path in dataset_voicebanks.get(_ALL_WAV_DIRS_KEY, []):
         if path not in candidate_dirs:
             candidate_dirs.append(path)
 

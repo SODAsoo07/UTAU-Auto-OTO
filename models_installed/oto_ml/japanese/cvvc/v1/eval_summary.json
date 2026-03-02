@@ -1,31 +1,31 @@
 {
   "targets": {
-    "delta_offset": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\profile_run\\model_offset.txt",
-    "delta_cons": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\profile_run\\model_cons.txt",
-    "delta_cutoff": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\profile_run\\model_cutoff.txt",
-    "delta_pre": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\profile_run\\model_pre.txt",
-    "delta_ovl": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\profile_run\\model_ovl.txt"
+    "delta_offset": "assets\\models\\oto_ml\\japanese\\cvvc\\profile_run_new\\model_offset.txt",
+    "delta_cons": "assets\\models\\oto_ml\\japanese\\cvvc\\profile_run_new\\model_cons.txt",
+    "delta_cutoff": "assets\\models\\oto_ml\\japanese\\cvvc\\profile_run_new\\model_cutoff.txt",
+    "delta_pre": "assets\\models\\oto_ml\\japanese\\cvvc\\profile_run_new\\model_pre.txt",
+    "delta_ovl": "assets\\models\\oto_ml\\japanese\\cvvc\\profile_run_new\\model_ovl.txt"
   },
   "metrics": {
     "delta_offset": {
-      "baseline_mae": 162.05373324824507,
-      "model_mae": 157.48191415206657
+      "baseline_mae": 47.157462686567165,
+      "model_mae": 49.42445883946632
     },
     "delta_cons": {
-      "baseline_mae": 91.66624122527122,
-      "model_mae": 91.98406412948981
+      "baseline_mae": 52.83074626865672,
+      "model_mae": 54.82156808570387
     },
     "delta_cutoff": {
-      "baseline_mae": 137.60169112954694,
-      "model_mae": 139.7022409362884
+      "baseline_mae": 49.20626865671641,
+      "model_mae": 48.819558638293735
     },
     "delta_pre": {
-      "baseline_mae": 72.88148053605616,
-      "model_mae": 73.10056637204828
+      "baseline_mae": 30.8744776119403,
+      "model_mae": 31.800276110367992
     },
     "delta_ovl": {
-      "baseline_mae": 24.118334396936824,
-      "model_mae": 24.15514789386918
+      "baseline_mae": 14.529552238805968,
+      "model_mae": 14.135169012231763
     }
   }
 }

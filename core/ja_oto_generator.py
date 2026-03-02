@@ -626,7 +626,6 @@ def _is_vowel_chain_syllables(syllables):
     return True
 
 
-@lru_cache(maxsize=65536)
 def _find_ja_cv_vowel_match_index(target_tok, expected_idx, syllables_info, search_back=1, search_fwd=2):
     """
     target CV와 모음이 일치하는 음절을 기대 인덱스 근처에서 재탐색합니다.

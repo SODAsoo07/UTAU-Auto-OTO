@@ -3,29 +3,27 @@ version=v4
 num_class=1
 num_tree_per_iteration=1
 label_index=0
-max_feature_idx=61
+max_feature_idx=72
 objective=regression_l1
-feature_names=language format_type alias_type row_index_in_wav row_ratio_in_wav is_head_row is_tail_row wav_duration_ms base_offset base_cons base_cutoff_abs base_pre base_ovl base_cons_gap base_cut_gap base_ovl_ratio curr_phone_start_ms curr_phone_end_ms curr_phone_len_ms curr_vowel_start_ms curr_vowel_end_ms curr_vowel_len_ms syllable_start_ms syllable_end_ms syllable_len_ms prev_phone_gap_ms next_phone_gap_ms expected_anchor_ms base_offset_to_expected_ms base_pre_to_expected_ms base_cutoff_to_next_anchor_ms energy_mean energy_min energy_max energy_slope_pre energy_slope_post valley_energy valley_dist_from_cutoff_ms db_mean db_min db_silence_ratio f0_voicing_mean f0_voicing_near_pre zcr_mean spectral_flux_mean onset_class voicing_class is_tense is_diphthong coda_type vowel_class mora_position bridge_type is_nasal_or_sonorant prev_alias_type next_alias_type prev_base_pre next_base_pre prev_base_offset next_base_offset prev_base_cutoff_abs next_base_cutoff_abs
-feature_infos=none none -1:2:0:3:1 [0:11] [0:1] none none [3108.5714285714284:5932.6984126984125] [109.79000000000001:5113.0100000000002] [72.469999999999999:525] [237.28999999999999:5378.9700000000003] [21.219999999999999:480] [0:191.15000000000001] [32.389999999999986:228.36000000000001] [7.9699999999999989:1000.97] [0:0.80992330833439263] [0:4990] [30:5250] [10:2760] [0:4990] [30:5250] [10:2840] [0:4930] [30:5250] [10:2870] none [0:570] [0:4990] [-322.40000000000009:2338.1999999999998] [-142.91000000000008:2631.2600000000002] [-3182.96:2616.1500000000001] [6.0553514865489039e-07:1] [0:1] [4.4350259068365912e-06:1] [-0.63426180610236615:0.82531741226515354] [-0.6288700540846025:0.99717597657388379] [0:1] [0.14528344671180091:1163.6468027210883] [-94.707630842914185:-19.329392585202708] [-96.830754711273556:-20.667504587183657] [0:1] [0:1] [0:1] [0.0167280975333144:0.31698327190246661] [0:0.074072309532618494] -1:2:3:1:0 -1:1:2:0 none none none -1:0:5:1:2:6:3:4 -1:1:0:2 -1:1:0:2 [0:1] -1:3:1:4:0:2 none [0:480] [0:480] [0:5113.0100000000002] [0:5113.0100000000002] [0:5378.9700000000003] [0:5378.9700000000003]
-tree_sizes=569
+feature_names=language format_type alias_type alias_group row_index_in_wav row_ratio_in_wav is_head_row is_tail_row wav_duration_ms base_offset base_cons base_cutoff_abs base_pre base_ovl base_cons_gap base_cut_gap base_ovl_ratio curr_phone_start_ms curr_phone_end_ms curr_phone_len_ms curr_vowel_start_ms curr_vowel_end_ms curr_vowel_len_ms syllable_start_ms syllable_end_ms syllable_len_ms prev_phone_gap_ms next_phone_gap_ms expected_anchor_ms base_offset_to_expected_ms base_pre_to_expected_ms base_cutoff_to_next_anchor_ms energy_mean energy_min energy_max energy_slope_pre energy_slope_post valley_energy valley_dist_from_cutoff_ms db_mean db_min db_silence_ratio f0_voicing_mean f0_voicing_near_pre zcr_mean spectral_flux_mean onset_class voicing_class is_tense is_diphthong coda_type vowel_class mora_position bridge_type is_nasal_or_sonorant prev_alias_type next_alias_type prev_base_pre next_base_pre prev_base_offset next_base_offset prev_base_cutoff_abs next_base_cutoff_abs mapping_confidence used_alias_occurrence_mapping used_exact_vowel_fix used_nuclei_fallback used_alias_based_syllables words_vs_alias_score_margin local_peak_db local_valley_db mel_window_energy_mean mel_window_silence_ratio
+feature_infos=none none -1:0:2:1 -1:6:10:8:11:0:7:5:9:1:4:2:12 [0:11] [0:1] none none [5749.8412698412694:5968.5714285714284] [721.44000000000005:5113.0100000000002] [74.099999999999994:464.37] [910.86000000000001:5378.9700000000003] [21.219999999999999:342.57999999999998] [1.97:191.15000000000001] [32.389999999999986:228.36000000000001] [16.159999999999997:342.42000000000002] [0.045971274884933098:0.80992330833439263] [770:4990] [800:5250] [10:2750] [0:4990] [0:5250] [0:2840] [710:4930] [800:5250] [30:2870] none [0:500] [770:4990] [-332.40000000000009:2338.1999999999998] [-142.91000000000008:2631.2600000000002] [-3182.96:2616.1500000000001] [0.0064197866106063001:1] [0:1] [0.039429661714028098:1] [-0.63426180610236615:0.95031268352641995] [-0.6288700540846025:0.99717597657388379] [0:1] [0.14528344671180091:491.32310657596349] [-82.659677497445557:-19.611479055131881] [-96.644413219463857:-20.672876547803] [0:0.87931034482758619] [0.1236867853159111:1] [0:1] [0.019279841224836902:0.31698327190246661] [0:0.074072309532618494] -1:2:0:3:1 -1:1:2:0 none none none -1:0:1:5:2:6:3:4 -1:1:0:2 -1:0:1 [0:1] -1:3:1:0:2 none [0:342.57999999999998] [0:342.57999999999998] [0:5113.0100000000002] [0:5113.0100000000002] [0:5378.9700000000003] [0:5378.9700000000003] [0.15079147874295579:1] none none none none [-183.81999999999999:2736.8200000000002] [-82.659677497445557:-19.611479055131881] [-96.644413219463857:-20.672876547803] [0.0064197866106063001:1] [0:0.87931034482758619]
+tree_sizes=462
 
 Tree=0
-num_leaves=5
-num_cat=1
-split_feature=2 20 7 32
-split_gain=64.2852 11.1829 7.53783 2.63824
-threshold=0 2350.0000000000005 5851.4285714285725 0.39576836979940427
-decision_type=1 2 2 2
-left_child=2 -2 -1 -4
-right_child=1 -3 3 -5
-leaf_value=-2.3475000619888307 -2.9605000615119934 -3.2660000443458559 -2.546000063419342 -2.6505000591278076
-leaf_weight=42 55 69 41 40
-leaf_count=42 55 69 41 40
-internal_value=-2.67858 -2.70313 -2.65406 -2.66086
-internal_weight=247 124 123 81
-internal_count=247 124 123 81
-cat_boundaries=0 1
-cat_threshold=9
+num_leaves=4
+num_cat=0
+split_feature=15 12 70
+split_gain=69.7838 19.065 13.8922
+threshold=154.44 42.955000000000005 -48.49386916229674
+decision_type=2 2 2
+left_child=2 -2 -1
+right_child=1 -3 -4
+leaf_value=-2.5434999883174898 -2.5099999904632568 -2.0194999814033507 -3.1869999527931214
+leaf_weight=40 41 77 73
+leaf_count=40 41 77 73
+internal_value=-2.50935 -2.48246 -2.53743
+internal_weight=231 118 113
+internal_count=231 118 113
 is_linear=0
 shrinkage=1
 
@@ -33,10 +31,9 @@ shrinkage=1
 end of trees
 
 feature_importances:
-alias_type=1
-wav_duration_ms=1
-curr_vowel_end_ms=1
-energy_min=1
+base_pre=1
+base_cut_gap=1
+local_valley_db=1
 
 parameters:
 [boosting: gbdt]
@@ -128,7 +125,7 @@ parameters:
 [weight_column: ]
 [group_column: ]
 [ignore_column: ]
-[categorical_feature: 0,1,2,45,46,49,50,51,52,54,55]
+[categorical_feature: 0,1,2,3,46,47,50,51,52,53,55,56]
 [forcedbins_filename: ]
 [precise_float_parser: 0]
 [parser_config_file: ]
@@ -162,4 +159,4 @@ parameters:
 
 end of parameters
 
-pandas_categorical:[["japanese"], ["cvvc"], ["cv", "cv_head", "vc", "vv"], ["fricative", "other", "plosive", "sonorant"], ["unknown", "voiced", "voiceless"], ["none"], ["", "a", "e", "i", "n", "o", "u"], ["head", "mid", "tail"], ["", "vc", "vv"], ["", "cv", "cv_head", "vc", "vv"], [""]]
+pandas_categorical:[["japanese"], ["cvvc"], ["cv", "cv_head", "vc", "vv"], ["cv_fricative", "cv_head_fricative", "cv_head_other", "cv_head_plosive", "cv_head_sonorant", "cv_other", "cv_plosive", "cv_sonorant", "vc_fricative", "vc_other", "vc_plosive", "vc_sonorant", "vv"], ["fricative", "other", "plosive", "sonorant"], ["unknown", "voiced", "voiceless"], ["none"], ["", "a", "e", "i", "n", "o", "u"], ["head", "mid", "tail"], ["", "vc", "vv"], ["", "cv", "cv_head", "vc", "vv"], [""]]

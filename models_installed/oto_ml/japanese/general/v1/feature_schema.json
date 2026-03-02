@@ -1,10 +1,11 @@
 {
   "version": 1,
-  "feature_version": "v2",
+  "feature_version": "v3",
   "feature_names": [
     "language",
     "format_type",
     "alias_type",
+    "alias_group",
     "row_index_in_wav",
     "row_ratio_in_wav",
     "is_head_row",
@@ -69,6 +70,7 @@
     "language",
     "format_type",
     "alias_type",
+    "alias_group",
     "onset_class",
     "voicing_class",
     "coda_type",

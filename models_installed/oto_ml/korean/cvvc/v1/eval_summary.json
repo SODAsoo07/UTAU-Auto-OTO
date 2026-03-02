@@ -1,31 +1,31 @@
 {
   "targets": {
-    "delta_offset": "Auto_OTO\\assets\\models\\oto_ml\\korean\\cvvc\\profile_run_v3\\model_offset.txt",
-    "delta_cons": "Auto_OTO\\assets\\models\\oto_ml\\korean\\cvvc\\profile_run_v3\\model_cons.txt",
-    "delta_cutoff": "Auto_OTO\\assets\\models\\oto_ml\\korean\\cvvc\\profile_run_v3\\model_cutoff.txt",
-    "delta_pre": "Auto_OTO\\assets\\models\\oto_ml\\korean\\cvvc\\profile_run_v3\\model_pre.txt",
-    "delta_ovl": "Auto_OTO\\assets\\models\\oto_ml\\korean\\cvvc\\profile_run_v3\\model_ovl.txt"
+    "delta_offset": "assets\\models\\oto_ml\\korean\\cvvc\\profile_run_new\\model_offset.txt",
+    "delta_cons": "assets\\models\\oto_ml\\korean\\cvvc\\profile_run_new\\model_cons.txt",
+    "delta_cutoff": "assets\\models\\oto_ml\\korean\\cvvc\\profile_run_new\\model_cutoff.txt",
+    "delta_pre": "assets\\models\\oto_ml\\korean\\cvvc\\profile_run_new\\model_pre.txt",
+    "delta_ovl": "assets\\models\\oto_ml\\korean\\cvvc\\profile_run_new\\model_ovl.txt"
   },
   "metrics": {
     "delta_offset": {
-      "baseline_mae": 207.87781249999998,
-      "model_mae": 126.1382500204148
+      "baseline_mae": 163.45880553261765,
+      "model_mae": 129.77880346162982
     },
     "delta_cons": {
-      "baseline_mae": 113.82326250000001,
-      "model_mae": 58.296726295237455
+      "baseline_mae": 63.56905078447564,
+      "model_mae": 46.876542424512905
     },
     "delta_cutoff": {
-      "baseline_mae": 245.7977125,
-      "model_mae": 110.63032448836262
+      "baseline_mae": 211.60194591246906,
+      "model_mae": 205.18674505350262
     },
     "delta_pre": {
-      "baseline_mae": 96.6270125,
-      "model_mae": 56.415274671994304
+      "baseline_mae": 49.66372295623452,
+      "model_mae": 37.40824992709525
     },
     "delta_ovl": {
-      "baseline_mae": 38.5112625,
-      "model_mae": 21.68922383843259
+      "baseline_mae": 38.03329810074319,
+      "model_mae": 24.878186413886286
     }
   }
 }
