@@ -94,7 +94,18 @@ def _clip_target_series(language: str, target: str, series):
     return series.clip(lower=lo, upper=hi)
 
 
-def train_lightgbm_bundle(language: str, format_type: str, dataset_csv: str, out_dir: str, group_column: str = "voicebank_id", num_boost_round: int = 500, early_stopping_rounds: int = 50) -> Dict[str, Any]:
+def train_lightgbm_bundle(
+    language: str,
+    format_type: str,
+    dataset_csv: str,
+    out_dir: str,
+    group_column: str = "voicebank_id",
+    num_boost_round: int = 500,
+    early_stopping_rounds: int = 50,
+    alias_types: Optional[list[str]] = None,
+    alias_groups: Optional[list[str]] = None,
+    require_train_keep: bool = False,
+) -> Dict[str, Any]:
     _require_training_stack()
     if not dataset_csv or not os.path.exists(dataset_csv):
         raise FileNotFoundError(dataset_csv)
@@ -106,6 +117,16 @@ def train_lightgbm_bundle(language: str, format_type: str, dataset_csv: str, out
         df = df[df["language"].astype(str).str.lower() == language]
     if format_type and format_type != "general" and "format_type" in df.columns:
         df = df[df["format_type"].astype(str).str.lower() == format_type]
+    if alias_types and "alias_type" in df.columns:
+        alias_types = [str(v).strip().lower() for v in alias_types if str(v).strip()]
+        if alias_types:
+            df = df[df["alias_type"].astype(str).str.lower().isin(alias_types)]
+    if alias_groups and "alias_group" in df.columns:
+        alias_groups = [str(v).strip().lower() for v in alias_groups if str(v).strip()]
+        if alias_groups:
+            df = df[df["alias_group"].astype(str).str.lower().isin(alias_groups)]
+    if require_train_keep and "train_keep_default" in df.columns:
+        df = df[pd.to_numeric(df["train_keep_default"], errors="coerce").fillna(0).astype(int) > 0]
     if len(df) < 8:
         raise RuntimeError("Filtered dataset is too small for training.")
 
@@ -158,6 +179,11 @@ def train_lightgbm_bundle(language: str, format_type: str, dataset_csv: str, out
         "train_rows": int(len(df)),
         "voicebank_count": int(df[group_column].nunique()) if group_column in df.columns else 1,
         "holdout_metrics": out_metrics,
+        "filters": {
+            "alias_types": list(alias_types or []),
+            "alias_groups": list(alias_groups or []),
+            "require_train_keep": bool(require_train_keep),
+        },
     }
     with open(os.path.join(out_dir, "model_meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)

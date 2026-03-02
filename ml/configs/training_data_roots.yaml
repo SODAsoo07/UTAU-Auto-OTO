@@ -14,9 +14,13 @@ korean:
     - "C:\\Users\\oyh57\\SODAsoo1\\VocalSynth\\OpenUtau\\Singer\\レウィ_KO ver1"
     - "C:\\Users\\oyh57\\SODAsoo1\\VocalSynth\\OpenUtau\\Singer\\Taiga Iwata Korean CVVC soft"
     - "C:\\Users\\oyh57\\SODAsoo1\\Devs\\Colab\\Ex\\Yeonu_KR_CVVC"
+    - "C:\\Users\\oyh57\\SODAsoo1\\Devs\\VBs\\SONG_CMYK_CVVC"
+    - "C:\\Users\\oyh57\\SODAsoo1\\Devs\\VBs\\Dam_Kor_CVVC"
+    - "C:\\Users\\oyh57\\SODAsoo1\\Devs\\VBs\\Achu_CVVC"
   cvc:
     - "C:\\Users\\oyh57\\SODAsoo1\\Devs\\Colab\\Ex\\SoYoon_KR_CVC"
     - "C:\\Users\\oyh57\\SODAsoo1\\Devs\\Colab\\Ex\\Kei Stellaria KO Light"
+    - "C:\\Users\\oyh57\\SODAsoo1\\Devs\\VBs\\Betako_CVC"
 
 notes:
   recursive_oto_search: true

@@ -1,54 +1,54 @@
 {
-  "bundle_slug": "korean_cvvc_v1",
-  "source_dir": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\korean\\cvvc\\v1",
-  "export_dir": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\ml_workspace\\exports\\model_bundles\\korean_cvvc_v1",
+  "bundle_slug": "korean_cvvc_profile_run_v3",
+  "source_dir": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\korean\\cvvc\\profile_run_v3",
+  "export_dir": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\ml_workspace\\exports\\model_bundles_v3\\korean_cvvc_profile_run_v3",
   "language": "korean",
   "format_type": "cvvc",
   "backend": "lightgbm",
   "model_version": "v1",
-  "feature_version": "v2",
-  "train_rows": 5604,
+  "feature_version": "v3",
+  "train_rows": 530,
   "voicebank_count": 3,
   "files": [
     {
       "name": "feature_schema.json",
-      "size": 1915,
-      "sha256": "c0f6eef700fe82ed427017c68bd0cb24bdaba53dc7f2726bf55fd8461eda8ed2"
+      "size": 1955,
+      "sha256": "386462f9a02529776d99404875f1abb92bd5a79e913d211bf5e7b183c00da40b"
     },
     {
       "name": "model_meta.json",
-      "size": 2984,
-      "sha256": "f0032c97436cccadcdfddaba0f742eb518dfe7c73d21f9c2738b36d17ddd4a21"
+      "size": 3164,
+      "sha256": "bfcedb19d57467459b80a1d273e197231a7f2bbf4e2384ecfc1488a5a742fb1b"
     },
     {
       "name": "eval_summary.json",
-      "size": 1307,
-      "sha256": "309e46f77c494844c6616cff98d112976a88cf1823b08f2fa13e47c3d101ed73"
+      "size": 1086,
+      "sha256": "b9a37f476abe5d7a3f4943e929c967c6cc422cc6268cc2d279798611218d9a96"
     },
     {
       "name": "model_offset.txt",
-      "size": 627739,
-      "sha256": "99ed77023652d35c39199f976f127dac3b830b7e18c7500e2164ae2c936d6064"
+      "size": 143678,
+      "sha256": "eb8345a35a786ee5f98b6b73ffe0d2dfdfa0aac2093514a14bf0640cbad58604"
     },
     {
       "name": "model_cons.txt",
-      "size": 74777,
-      "sha256": "92827b36ff58920de72d81323755e46f02c0f362f9c8323296d286882d60be6f"
+      "size": 11035,
+      "sha256": "755ba9e449af67ddc46e6b066f875eee0167d1864967fa0ba6e4dd1fd37d2b50"
     },
     {
       "name": "model_cutoff.txt",
-      "size": 1070028,
-      "sha256": "c42a6c1b79942c5cb0eb780410c99488606ec7caf16a6a8b651476ac15f3470b"
+      "size": 141791,
+      "sha256": "edbfca38b3ddd0e01567fbf8d9bd46032d50196cf26f969691863970ba4881df"
     },
     {
       "name": "model_pre.txt",
-      "size": 1413081,
-      "sha256": "c31a17a9294d5a1d72a9fc94ceaa018ab49fc1f4db2852c898102d1bf2c715b4"
+      "size": 8387,
+      "sha256": "f56a2892370f18ca1d30d0c54fb72cb987171b019897f76885c49b3a0a8418ba"
     },
     {
       "name": "model_ovl.txt",
-      "size": 48862,
-      "sha256": "a0290f2b6c955381054b5675dd65cb978d9ed965934a27bb8432f65edc1a6c7b"
+      "size": 27103,
+      "sha256": "46b2b0bd4b434c98f46dec4f27e08103b16aa007ea25d2f7817a88a34f8cfee6"
     }
   ]
 }

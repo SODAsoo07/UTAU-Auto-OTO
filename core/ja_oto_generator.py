@@ -408,6 +408,175 @@ def validate_oto_params(offset, consonant, cutoff, pre, ovl):
     return offset, consonant, cutoff, pre, ovl
 
 
+def sanitize_ja_oto_for_wav_duration(offset, consonant, cutoff, pre, ovl, wav_duration_ms, alias_type="cv"):
+    """
+    wav 길이 기준으로 최종 OTO 값을 안전한 영역 안에 다시 넣습니다.
+    OpenUtau의 cutoff는 파일 끝 기준이므로, 단순히 cutoff_abs > consonant만으로는
+    `cutoff before offset` 오류를 막을 수 없습니다.
+    """
+    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    try:
+        dur_ms = float(wav_duration_ms or 0.0)
+    except Exception:
+        dur_ms = 0.0
+    if dur_ms <= 0.0:
+        return offset, consonant, cutoff, pre, ovl
+
+    min_room_after_offset = 16.0 if alias_type in {"vc", "vv", "vcv"} else 22.0
+    offset = max(0.0, min(float(offset), max(dur_ms - min_room_after_offset, 0.0)))
+
+    cutoff_abs = abs(float(cutoff))
+    max_cutoff_abs = max(dur_ms - offset - 6.0, 0.0)
+    cutoff_abs = min(cutoff_abs, max_cutoff_abs)
+
+    active_len = max(dur_ms - offset - cutoff_abs, 0.0)
+    if active_len < 10.0:
+        target_active_len = min(max(12.0, active_len), max(dur_ms - offset - 2.0, 0.0))
+        cutoff_abs = max(0.0, dur_ms - offset - target_active_len)
+        active_len = max(dur_ms - offset - cutoff_abs, 0.0)
+
+    max_cons = max(active_len - 6.0, 0.0)
+    consonant = min(float(consonant), max_cons)
+    if consonant < 8.0 and active_len >= 10.0:
+        consonant = min(max(active_len * 0.72, 8.0), max_cons)
+
+    pre = min(float(pre), max(consonant - 6.0, 0.0))
+    if pre < 0.0:
+        pre = 0.0
+    ovl = min(float(ovl), pre * 0.82 if pre > 0.0 else 0.0)
+    if ovl < 0.0:
+        ovl = 0.0
+
+    if consonant <= pre + 4.0:
+        if max_cons >= pre + 6.0:
+            consonant = pre + 6.0
+        else:
+            consonant = max_cons
+            pre = max(0.0, consonant - 6.0)
+            ovl = min(ovl, pre * 0.82 if pre > 0.0 else 0.0)
+
+    if dur_ms - offset - cutoff_abs <= 2.0:
+        cutoff_abs = max(0.0, dur_ms - offset - 4.0)
+        active_len = max(dur_ms - offset - cutoff_abs, 0.0)
+        max_cons = max(active_len - 4.0, 0.0)
+        consonant = min(consonant, max_cons)
+        pre = min(pre, max(consonant - 4.0, 0.0))
+        ovl = min(ovl, pre * 0.82 if pre > 0.0 else 0.0)
+
+    cutoff = -max(cutoff_abs, 0.0)
+    return offset, consonant, cutoff, pre, ovl
+
+
+def _sanitize_ja_internal_params_for_wav_duration(offset, consonant, cutoff, pre, ovl, wav_duration_ms, alias_type="cv"):
+    """
+    일본어 생성기 내부 좌표계 기준으로 파라미터를 안전한 범위로 다시 넣습니다.
+    여기서 cutoff는 OTO 파일의 right blank가 아니라, offset 이후 active length로 취급합니다.
+    """
+    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    try:
+        dur_ms = float(wav_duration_ms or 0.0)
+    except Exception:
+        dur_ms = 0.0
+    if dur_ms <= 0.0:
+        return offset, consonant, cutoff, pre, ovl
+
+    min_room_after_offset = 16.0 if alias_type in {"vc", "vv", "vcv"} else 22.0
+    offset = max(0.0, min(float(offset), max(dur_ms - min_room_after_offset, 0.0)))
+
+    max_active_len = max(dur_ms - offset - 6.0, 0.0)
+    active_len = max(min(abs(float(cutoff)), max_active_len), 0.0)
+    if active_len < 10.0:
+        active_len = min(max(12.0, active_len), max(dur_ms - offset - 2.0, 0.0))
+
+    max_cons = max(active_len - 6.0, 0.0)
+    consonant = min(float(consonant), max_cons)
+    if consonant < 8.0 and active_len >= 10.0:
+        consonant = min(max(active_len * 0.72, 8.0), max_cons)
+
+    pre = min(float(pre), max(consonant - 6.0, 0.0))
+    pre = max(pre, 0.0)
+    ovl = min(float(ovl), pre * 0.82 if pre > 0.0 else 0.0)
+    ovl = max(ovl, 0.0)
+
+    if consonant <= pre + 4.0:
+        if max_cons >= pre + 6.0:
+            consonant = pre + 6.0
+        else:
+            consonant = max_cons
+            pre = max(0.0, consonant - 6.0)
+            ovl = min(ovl, pre * 0.82 if pre > 0.0 else 0.0)
+
+    if active_len <= 6.0:
+        active_len = min(max(dur_ms - offset - 2.0, 0.0), 8.0)
+        consonant = min(consonant, max(active_len - 2.0, 0.0))
+        pre = min(pre, max(consonant - 2.0, 0.0))
+        ovl = min(ovl, pre * 0.80 if pre > 0.0 else 0.0)
+
+    cutoff = -max(active_len, 0.0)
+    return offset, consonant, cutoff, pre, ovl
+
+
+def _convert_ja_internal_cutoff_to_oto_field(oto_path, wav_dir):
+    """
+    일본어 OTO 최종 저장 단계 안전화.
+
+    과거에는 내부 cutoff를 별도 좌표계로 보고 OTO cutoff 필드로 재변환했지만,
+    실제 생성 결과를 비교해 보니 1차 생성본 cutoff 값이 이미 OTO 파일 의미론과
+    호환되는 상태였다. 추가 변환을 적용하면 같은 파일 안 alias들의 cutoff가
+    파일 끝 근처 공통 위치로 붕괴한다.
+
+    현재는 좌표계 변환을 하지 않고, 최종 OTO 파일 의미론 기준 sanitize만 수행한다.
+    """
+    if not oto_path or not os.path.exists(oto_path) or not os.path.isdir(wav_dir):
+        return 0
+
+    from core.oto_generator import _wav_duration_ms, _find_wav_path_for_name
+
+    with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.read().splitlines()
+
+    wav_index = {}
+    try:
+        for fn in os.listdir(wav_dir):
+            if fn.lower().endswith(".wav"):
+                wav_index[normalize_key(fn)] = os.path.join(wav_dir, fn)
+    except Exception:
+        return 0
+
+    out_lines = []
+    changed = 0
+    for line in lines:
+        row = _parse_oto_line_profile(line)
+        if not row:
+            out_lines.append(line)
+            continue
+
+        wav_path = _find_wav_path_for_name(row["wav"], wav_dir, wav_index)
+        dur_ms = _wav_duration_ms(wav_path) if wav_path else 0.0
+        alias_type = classify_ja_alias(row["alias"])
+        if dur_ms <= 0.0:
+            out_lines.append(line)
+            continue
+
+        offset, consonant, cutoff_field, pre, ovl = sanitize_ja_oto_for_wav_duration(
+            row["offset"], row["cons"], row["cutoff"], row["pre"], row["ovl"], dur_ms, alias_type=alias_type
+        )
+
+        new_line = (
+            f"{row['wav']}={row['alias']},"
+            f"{offset:.2f},{consonant:.2f},{cutoff_field:.2f},{pre:.2f},{ovl:.2f}"
+        )
+        if new_line != line:
+            changed += 1
+        out_lines.append(new_line)
+
+    if changed > 0:
+        with open(oto_path, "w", encoding="utf-8", newline="\n") as f:
+            for line in out_lines:
+                f.write(line + "\n")
+    return changed
+
+
 def normalize_key(name):
     """파일명을 정규화된 키로 변환"""
     base = os.path.splitext(name)[0]
@@ -1120,6 +1289,23 @@ def _extract_vcv_target_syllable(alias):
     return _normalize_ja_syllable_token(alias)
 
 
+@lru_cache(maxsize=65536)
+def _ja_left_bridge_token(alias_text):
+    parts = (alias_text or "").strip().split()
+    if len(parts) >= 2:
+        return _normalize_ja_syllable_token(parts[0])
+    return ""
+
+
+@lru_cache(maxsize=65536)
+def _ja_is_n_bridge_alias(alias_text, alias_type="vc"):
+    alias_type = str(alias_type or "").strip().lower()
+    if alias_type not in {"vc", "vcv"}:
+        return False
+    left = _ja_left_bridge_token(alias_text)
+    return left in {"n", "nn", "xn", "m"}
+
+
 def _syllable_info_token(syl_info):
     if not isinstance(syl_info, dict):
         return ""
@@ -1181,14 +1367,44 @@ def _select_vcv_syllable_index(alias, expected_idx, syllables_info):
     if not target:
         return e
 
-    start = max(0, e - 2)
-    end = min(n, e + 4)
+    # VCV는 한 번 뒤로 되감기 시작하면 이후 alias가 연쇄적으로 틀어지므로
+    # 기대 인덱스 기준 유지 또는 제한적인 +1 보정만 허용한다.
+    start = e
+    end = min(n, e + 3)
     best_idx = e
     best_score = -10**9
     best_key = (-10**9, -10**9, -10**9, -10**9)
+    target_onset = _extract_ja_onset_token(target)
+    _to, target_vowel = split_ja_romaji_syllable(target)
+    target_tail = _ja_syllable_tail(target)
+    target_cls = _ja_onset_class(target_onset)
+    dist_penalty = 8 if target_cls in {"nasal", "voiced"} else 7
+
+    def _score_idx(i):
+        cand = _syllable_info_token(syllables_info[i])
+        cand_onset = _extract_ja_onset_token(cand)
+        _co, cand_vowel = split_ja_romaji_syllable(cand)
+        cand_tail = _ja_syllable_tail(cand)
+        score = _vcv_syllable_match_score(target, cand) - abs(i - e) * dist_penalty
+        if target_vowel and cand_vowel and target_vowel != cand_vowel:
+            score -= 26
+        if target_onset and cand_onset:
+            if target_onset == cand_onset:
+                score += 8
+            elif target_onset[:1] == cand_onset[:1]:
+                score += 3
+            else:
+                score -= 12
+        if target_tail and cand_tail and target_tail != cand_tail:
+            score -= 10
+        elif (not target_tail) and cand_tail:
+            score -= 10
+        return score
+
+    expected_score = _score_idx(e)
     for i in range(start, end):
         cand = _syllable_info_token(syllables_info[i])
-        score = _vcv_syllable_match_score(target, cand) - abs(i - e) * 7
+        score = _score_idx(i)
         cand_norm = _normalize_ja_syllable_token(cand)
         key = (
             score,
@@ -1200,9 +1416,16 @@ def _select_vcv_syllable_index(alias, expected_idx, syllables_info):
             best_key = key
             best_score = score
             best_idx = i
-    if best_score >= 56:
-        return best_idx
-    return e
+    if best_score < 58:
+        return e
+    if best_idx <= e:
+        return e
+    if best_idx > (e + 1):
+        return e
+    best_gain = best_score - expected_score
+    if best_gain < 20:
+        return e
+    return best_idx
 
 
 @lru_cache(maxsize=131072)
@@ -1689,13 +1912,23 @@ def _compute_vcv_params_from_virtual_split(alias, prev_v_start, prev_v_end, c_bo
     onset, _ = split_ja_romaji_syllable(target)
     onset = (onset or "").strip().lower()
     profile = _get_ja_cvvc_bridge_profile(onset)
+    n_bridge = _ja_is_n_bridge_alias(alias, "vcv")
+    onset_cls = _ja_onset_class(onset)
 
     pre_lead = _clamp_range(
         transition_gap * profile.get("pre_lead_mul", 0.35),
         profile.get("pre_lead_min", 8.0),
         profile.get("pre_lead_max", 30.0),
     )
+    if n_bridge:
+        pre_lead = _clamp_range(
+            transition_gap * (0.16 if onset_cls in {"voiced", "nasal"} else 0.20),
+            4.0,
+            14.0 if onset_cls in {"voiced", "nasal"} else 18.0,
+        )
     boundary = max(float(prev_v_end) + 6.0, float(c_boundary) - pre_lead)
+    if n_bridge:
+        boundary = max(float(prev_v_end) + 2.0, float(c_boundary) - pre_lead)
 
     base_pad = profile.get("offset_pad", 86.0)
     dyn_pad = base_pad + max(prev_v_len - 120.0, 0.0) * profile.get("offset_len_mul", 0.08)
@@ -1704,6 +1937,9 @@ def _compute_vcv_params_from_virtual_split(alias, prev_v_start, prev_v_end, c_bo
     offset_padding = _clamp_range(dyn_pad, pad_lo, pad_hi)
     if prev_v_len < offset_padding:
         offset_padding = max(prev_v_len * 0.76, profile.get("offset_pad_floor", 36.0))
+    if n_bridge:
+        pad_cap = 70.0 if onset_cls in {"voiced", "nasal"} else 82.0
+        offset_padding = min(offset_padding, max(prev_v_len * 0.60, pad_cap))
 
     offset = max(boundary - offset_padding, 0.0)
     pre = max(boundary - offset, 8.0)
@@ -2661,6 +2897,7 @@ def generate_ja_oto(
     params=None,
     generate_openutau=False,
     gen_missing_vowels=False,
+    enable_ml_correction=True,
     fallback_format='cvvc',
     custom_phonemes_path='',
     alias_suffix='',
@@ -3020,12 +3257,22 @@ def generate_ja_oto(
         real_wav_name = tg_info['real_name']
         wav_path_for_signal = _find_wav_path_for_name(real_wav_name, wav_root_for_signal, wav_index_for_signal)
         mel_ctx_for_file = None
+        wav_duration_ms = 0.0
         if wav_path_for_signal:
             mel_ctx_for_file = mel_cache_for_signal.get(wav_path_for_signal)
             if mel_ctx_for_file is None:
                 audio_sig, sr_sig = _read_wav_mono_np(wav_path_for_signal)
                 mel_ctx_for_file = _mel_envelope(audio_sig, sr_sig)
                 mel_cache_for_signal[wav_path_for_signal] = mel_ctx_for_file
+                if sr_sig:
+                    wav_duration_ms = (len(audio_sig) / float(sr_sig)) * 1000.0
+            else:
+                try:
+                    audio_sig, sr_sig = _read_wav_mono_np(wav_path_for_signal)
+                    if sr_sig:
+                        wav_duration_ms = (len(audio_sig) / float(sr_sig)) * 1000.0
+                except Exception:
+                    wav_duration_ms = 0.0
         
         try:
             tg = textgrid.TextGrid.fromFile(tg_path)
@@ -3132,7 +3379,17 @@ def generate_ja_oto(
                     return None, None, 0.0
                 return prev_end, next_start, (next_start - prev_end)
 
-            def _post_adjust_params(offset, consonant, cutoff, pre, ovl, alias_type='cv', alias_text=''):
+            def _post_adjust_params(
+                offset,
+                consonant,
+                cutoff,
+                pre,
+                ovl,
+                alias_type='cv',
+                alias_text='',
+                local_end_ms=None,
+                local_cut_allow_ms=None,
+            ):
                 offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
                 pre_abs = offset + pre
@@ -3170,9 +3427,12 @@ def generate_ja_oto(
                 if consonant < pre + 25.0:
                     consonant = pre + 25.0
 
-                max_cons_abs = max((effective_end_ms + 80.0) - offset, pre + 40.0)
+                cut_anchor_ms = effective_end_ms if local_end_ms is None else float(local_end_ms)
+                cut_allow_ms = 120.0 if local_cut_allow_ms is None else float(local_cut_allow_ms)
+                cons_allow_ms = max(40.0, cut_allow_ms - 40.0)
+                max_cons_abs = max((cut_anchor_ms + cons_allow_ms) - offset, pre + 40.0)
                 consonant = min(consonant, max_cons_abs)
-                max_cut_abs = max((effective_end_ms + 120.0) - offset, consonant + 35.0)
+                max_cut_abs = max((cut_anchor_ms + cut_allow_ms) - offset, consonant + 35.0)
                 cutoff = -min(abs(cutoff), max_cut_abs)
                 offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
                 if ja_style_enabled and ja_style_profile and not autotune_profile:
@@ -3657,6 +3917,7 @@ def generate_ja_oto(
                         br_len = br_end - br_start
                     else:
                         br_start = 0
+                        br_end = 500
                         br_len = 500
                     offset = max(br_start - 30, 0)
                     pre = 0
@@ -3664,7 +3925,9 @@ def generate_ja_oto(
                     consonant = min(br_len * 0.3, 100)
                     cutoff = -(br_len * 0.85)
                     offset, consonant, cutoff, pre, ovl = _post_adjust_params(
-                        offset, consonant, cutoff, pre, ovl, alias_type='vc', alias_text=alias
+                        offset, consonant, cutoff, pre, ovl,
+                        alias_type='vc', alias_text=alias,
+                        local_end_ms=br_end, local_cut_allow_ms=40.0
                     )
                     
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
@@ -3698,7 +3961,9 @@ def generate_ja_oto(
                     cutoff = -(consonant + 38)
 
                     offset, consonant, cutoff, pre, ovl = _post_adjust_params(
-                        offset, consonant, cutoff, pre, ovl, alias_type='mono', alias_text=alias
+                        offset, consonant, cutoff, pre, ovl,
+                        alias_type='mono', alias_text=alias,
+                        local_end_ms=v_end, local_cut_allow_ms=36.0
                     )
 
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
@@ -3715,6 +3980,10 @@ def generate_ja_oto(
                     else:
                         expected_idx = len(syllables_info) - 1
                     mapped_idx = _select_vcv_syllable_index(alias, expected_idx, syllables_info)
+                    if mapped_idx < expected_idx:
+                        mapped_idx = expected_idx
+                    if mapped_idx > (expected_idx + 1):
+                        mapped_idx = expected_idx
                     if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
                         log(f"🧭 {fname}: VCV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
                     current_w_idx = mapped_idx
@@ -3751,7 +4020,9 @@ def generate_ja_oto(
                         )
                     
                     offset, consonant, cutoff, pre, ovl = _post_adjust_params(
-                        offset, consonant, cutoff, pre, ovl, alias_type='vcv', alias_text=alias
+                        offset, consonant, cutoff, pre, ovl,
+                        alias_type='vcv', alias_text=alias,
+                        local_end_ms=n_end, local_cut_allow_ms=26.0
                     )
                     
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
@@ -3835,7 +4106,9 @@ def generate_ja_oto(
                     )
                     
                     offset, consonant, cutoff, pre, ovl = _post_adjust_params(
-                        offset, consonant, cutoff, pre, ovl, alias_type='cv_head', alias_text=alias
+                        offset, consonant, cutoff, pre, ovl,
+                        alias_type='cv_head', alias_text=alias,
+                        local_end_ms=n_end, local_cut_allow_ms=28.0
                     )
                     offset, consonant, cutoff, pre, offset_reduced = _guard_ja_cv_head_offset_to_onset(
                         offset, consonant, cutoff, pre, current_w_idx, alias_text=alias
@@ -3967,14 +4240,20 @@ def generate_ja_oto(
                     transition_gap = max(n_start - c_end, 0.0)
                     c_char = get_vc_consonant(alias)
                     bridge_profile = _get_ja_cvvc_bridge_profile(c_char) if alias_type == 'vc' else None
+                    n_bridge = _ja_is_n_bridge_alias(alias, alias_type)
+                    onset_cls = _ja_onset_class(c_char)
 
                     # VC는 pre 기준점을 약간 앞당겨(다음 자음 시작 직전) 박자 밀림을 완화한다.
                     if alias_type == 'vc':
                         pre_lead_mul = bridge_profile.get('pre_lead_mul', 0.35) if bridge_profile else 0.35
                         pre_lead_min = bridge_profile.get('pre_lead_min', 8.0) if bridge_profile else 8.0
                         pre_lead_max = bridge_profile.get('pre_lead_max', 32.0) if bridge_profile else 32.0
+                        if n_bridge:
+                            pre_lead_mul = 0.16 if onset_cls in {"voiced", "nasal"} else 0.20
+                            pre_lead_min = 4.0
+                            pre_lead_max = 14.0 if onset_cls in {"voiced", "nasal"} else 18.0
                         pre_lead = min(max(transition_gap * pre_lead_mul, pre_lead_min), pre_lead_max)
-                        boundary = max(c_end + 8.0, boundary - pre_lead)
+                        boundary = max(c_end + (2.0 if n_bridge else 8.0), boundary - pre_lead)
 
                     if alias_type == 'vc' and bridge_profile:
                         base_pad = bridge_profile.get('offset_pad', 86.0)
@@ -3984,6 +4263,9 @@ def generate_ja_oto(
                         offset_padding = _clamp_range(dyn_pad, pad_lo, pad_hi)
                         if v_len < offset_padding:
                             offset_padding = max(v_len * 0.78, bridge_profile.get('offset_pad_floor', 36.0))
+                        if n_bridge:
+                            pad_cap = 70.0 if onset_cls in {"voiced", "nasal"} else 82.0
+                            offset_padding = min(offset_padding, max(v_len * 0.60, pad_cap))
                     else:
                         offset_padding = 180
                         if v_len < offset_padding:
@@ -4144,7 +4426,10 @@ def generate_ja_oto(
                     offset, consonant, cutoff, pre, ovl, base_shape, alias_type=alias_type
                 )
                 offset, consonant, cutoff, pre, ovl = _post_adjust_params(
-                    offset, consonant, cutoff, pre, ovl, alias_type=alias_type, alias_text=alias
+                    offset, consonant, cutoff, pre, ovl,
+                    alias_type=alias_type, alias_text=alias,
+                    local_end_ms=n_end,
+                    local_cut_allow_ms=(22.0 if alias_type == 'vc' else 28.0 if alias_type == 'vv' else 34.0),
                 )
                 if alias_type in {"cv", "cv_head"}:
                     offset, consonant, cutoff, pre, cutoff_reduced = _guard_ja_cv_cutoff_to_next_onset(
@@ -4276,6 +4561,8 @@ def generate_ja_oto(
                 wav_dir=wav_dir_for_mel,
                 custom_phonemes_path=custom_phonemes_path,
                 callback=log,
+                enabled=enable_ml_correction,
+                format_override=(forced_format or fallback_format or "cvvc"),
             )
             if ml_changed > 0:
                 log(f"[OTO-ML] 일본어 수치 보정 적용: {ml_changed} lines")
@@ -4288,6 +4575,14 @@ def generate_ja_oto(
             log(f"[JA-Mel] 멜 에너지 기반 cutoff 보정 적용: {mel_changed} lines")
     except Exception as e:
         log(f"[JA-Mel] 보정 스킵: {e}")
+
+    try:
+        wav_dir_for_export = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
+        final_changed = _convert_ja_internal_cutoff_to_oto_field(out_path, wav_dir_for_export)
+        if final_changed > 0:
+            log(f"[JA-Finalize] cutoff 좌표계 변환 적용: {final_changed} lines")
+    except Exception as e:
+        log(f"[JA-Finalize] cutoff 변환 스킵: {e}")
 
     _log_unset_summary()
     return processed, total, errors

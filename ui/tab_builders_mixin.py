@@ -97,6 +97,15 @@ class TabBuildersMixin:
                 )
                 self.gen_missing_vowels_checkbox.pack(anchor="w", pady=(5, 0))
 
+                self.enable_ml_correction_checkbox = ctk.CTkCheckBox(
+                    opt_frame,
+                    text="OTO ML 수치 보정 적용 (끄면 규칙 기반 결과만 생성)",
+                    text_color="#FFD54F",
+                    variable=self.enable_ml_correction_var,
+                    command=self._save_config,
+                )
+                self.enable_ml_correction_checkbox.pack(anchor="w", pady=(5, 0))
+
             ctk.CTkButton(frame, text="실행", width=80, command=cmd).pack(side="right", padx=10)
 
     def _build_params_tab(self):
@@ -237,4 +246,3 @@ class TabBuildersMixin:
             font=("", 14, "bold"),
             command=self._run_profile_finetune,
         ).pack(side="right")
-

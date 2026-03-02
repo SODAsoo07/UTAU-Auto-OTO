@@ -24,6 +24,9 @@ class DatasetMatchingTests(unittest.TestCase):
             self.assertEqual(stats["matched_rows"], 1)
             self.assertEqual(len(rows), 1)
             self.assertAlmostEqual(rows[0]["delta_offset"], 10.0)
+            self.assertEqual(rows[0]["alias_group"], "cv")
+            self.assertEqual(rows[0]["train_keep_default"], 1)
+            self.assertEqual(rows[0]["train_skip_reason"], "")
 
 
 if __name__ == "__main__":

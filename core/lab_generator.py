@@ -1,9 +1,9 @@
-"""
-Lab/사전(Dictionary) 파일 자동 생성 모듈
-- 로마자 -> 한글 변환
-- 로마자 -> IPA 변환
-- Lab 파일 생성
-- MFA용 사전 파일 생성
+﻿"""
+Lab/・ｬ・・Dictionary) 甯護攵 ・尖徐 ・晧┳ ・ｨ・・
+- ・罹ｧ溢梵 -> 﨑懋ｸ ・嶹・
+- ・罹ｧ溢梵 -> IPA ・嶹・
+- Lab 甯護攵 ・晧┳
+- MFA・ｩ ・ｬ・・甯護攵 ・晧┳
 """
 
 import os
@@ -12,9 +12,10 @@ import unicodedata
 import logging
 
 logger = logging.getLogger(__name__)
+_KR_FILENAME_SPLIT_RE = re.compile(r"[^0-9A-Za-z가-힣]+")
 
 # ==============================================================================
-# 로마자 <-> 한글 자모 매핑 테이블
+# ・罹ｧ溢梵 <-> 﨑懋ｸ ・尖ｪｨ ・､﨑・奛護擽・・
 # ==============================================================================
 
 CHOSUNG_LIST_KR = ['ㄱ','ㄲ','ㄴ','ㄷ','ㄸ','ㄹ','ㅁ','ㅂ','ㅃ','ㅅ','ㅆ','ㅇ','ㅈ','ㅉ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ']
@@ -43,7 +44,7 @@ FINAL_MAP = {
     'm': 16, 'b': 17, 'p': 17, 'bs': 18, 's': 19, 'ss': 20, 'ng': 21, 'j': 22, 'ch': 23,
 }
 
-# 로마자 -> IPA
+# ・罹ｧ溢梵 -> IPA
 KO_IPA_MAP = {
     'g': 'k', 'n': 'n', 'd': 't', 'r': 'ɾ', 'l': 'ɭ', 'm': 'm', 'b': 'p', 's': 's',
     'j': 'tɕ', 'h': 'h',
@@ -57,14 +58,14 @@ KO_IPA_MAP = {
     'yeo': 'j ʌ', 'wae': 'w ɛ', 'oe': 'w e', 'vi': 'v i'
 }
 
-# 한글 자모 -> 로마자
+# 﨑懋ｸ ・尖ｪｨ -> ・罹ｧ溢梵
 CHOSUNG_LIST_ROMAN = ['g','kk','n','d','tt','r','m','b','pp','s','ss','','j','jj','ch','k','t','p','h']
 JUNGSUNG_LIST_ROMAN = ['a','ae','ya','yae','eo','e','yeo','ye','o','wa','wae','oe','yo','u','wo','we','wi','yu','eu','ui','i']
 JONGSUNG_LIST_ROMAN = ['','k','kk','gs','n','nj','nh','d','l','lg','lm','lb','ls','lt','lp','lh','m','b','bs','s','ss','ng','j','ch','k','t','p','h']
 
 
 def compose_hangul(initial, vowel, final=''):
-    """초/중/종성 로마자로 한글 유니코드 문자 생성"""
+    """초성/중성/종성 로마자 조합을 한글 음절로 합성합니다."""
     try:
         cho = INITIAL_MAP.get(initial.lower(), -1)
         jung = VOWEL_MAP.get(vowel.lower(), -1)
@@ -78,11 +79,11 @@ def compose_hangul(initial, vowel, final=''):
 
 
 def parse_romaji_syllable(text):
-    """로마자 음절 하나를 초/중/종성으로 분리하여 한글 변환"""
-    # 0. 'Long' 접미사 제거
+    """로마자 음절 토큰을 가능한 경우 한글 음절로 변환합니다."""
+    # 0. 'Long' ・瀧ｯｸ・ｬ ・懋ｱｰ
     clean_text = re.sub(r'long$', '', text, flags=re.IGNORECASE)
     
-    # 1. 중성(Vowel) 찾기 (긴 순서대로 매칭하여 욕심쟁이 매칭 방지)
+    # 1. ・卓┳(Vowel) ・ｾ・ｰ (・ｴ ・懍・・・・・､・ｭ﨑們流 ・菩峡・・擽 ・､・ｭ ・ｩ・)
     vowels = sorted(VOWEL_MAP.keys(), key=len, reverse=True)
     vowel = ""
     v_idx = -1
@@ -101,8 +102,50 @@ def parse_romaji_syllable(text):
     return compose_hangul(initial, vowel, final)
 
 
+def _split_kr_filename_tokens(name_or_base):
+    """한국어 파일명 문자열을 음절 토큰 단위로 정규화합니다."""
+    base = unicodedata.normalize('NFC', os.path.splitext(str(name_or_base or ''))[0])
+    base = re.sub(r'\d+$', '', base).strip()
+    if not base:
+        return []
+
+    raw_parts = [p for p in _KR_FILENAME_SPLIT_RE.split(base) if p and p != '~']
+    parts = []
+    for token in raw_parts:
+        if token in {"R", "H"} and parts:
+            prev = parts[-1]
+            # _l'R, _ng'R 같은 파일명은 종성/호흡 표식 1토큰으로 취급한다.
+            if not re.search(r"[aeiouywAEIOUYW]", prev):
+                parts[-1] = prev + token
+                continue
+        parts.append(token)
+    if re.search(r'[가-힣]', base):
+        if len(parts) <= 1:
+            return [ch for ch in base if re.match(r'[가-힣]', ch)]
+        return parts
+    return parts
+
+
+def _split_kr_lab_content_tokens(content):
+    """한국어 .lab 내용을 파일명과 같은 음절 토큰 단위로 정규화합니다."""
+    normalized = unicodedata.normalize('NFC', str(content or '').strip())
+    if not normalized:
+        return []
+
+    ws_tokens = [t for t in re.split(r'\s+', normalized) if t and t != '~']
+    if not ws_tokens:
+        return []
+
+    joined = "".join(ws_tokens)
+    if re.fullmatch(r"[A-Za-z0-9'`窶兩-]+", joined):
+        return _split_kr_filename_tokens(joined)
+    if len(ws_tokens) == 1 and re.fullmatch(r'[가-힣]+', ws_tokens[0]):
+        return list(ws_tokens[0])
+    return ws_tokens
+
+
 def decompose_hangul_to_roman(char):
-    """한글 글자를 로마자 토큰으로 분해 (예: '가' -> ['g', 'a'])"""
+    """한글 한 글자를 로마자 토큰 리스트로 분해합니다."""
     if not (0xAC00 <= ord(char) <= 0xD7A3):
         return [char]
     code = ord(char) - 0xAC00
@@ -119,7 +162,7 @@ def decompose_hangul_to_roman(char):
 
 
 def get_ipa_from_roman(token):
-    """로마자 토큰을 IPA 음소 리스트로 변환"""
+    """로마자 토큰을 MFA용 IPA 시퀀스로 변환합니다."""
     token = token.lower()
     token = re.sub(r'[0-9]+', '', token)
     token = token.replace('long', '')
@@ -177,13 +220,13 @@ def get_ipa_from_roman(token):
 
 
 # ==============================================================================
-# 커스텀 폰 파싱 유틸리티
+# ・､・､奛 尞ｰ 甯護恭 ・寀ｸ・ｬ寀ｰ
 # ==============================================================================
 
 def load_custom_phonemes(file_path):
     """
-    커스텀 음소 매핑 파일을 읽어서 딕셔너리로 반환합니다.
-    형식: 원어=변환어 (예: 엣지=ed)
+    ・､・､奛 ・護・ ・､﨑・甯護攵・・・ｽ・ｴ・・・菩・・壱ｦｬ・・・倆劍﨑ｩ・壱共.
+    嶸菩享: ・川牟=・嶹們牟 (・・ ・｣・=ed)
     """
     custom_map = {}
     if not file_path or not os.path.exists(file_path):
@@ -199,29 +242,29 @@ def load_custom_phonemes(file_path):
                     k, v = line.split('=', 1)
                     custom_map[k.strip()] = v.strip()
     except Exception as e:
-        logger.error(f"커스텀 음소 파일 로드 실패: {file_path}, 에러: {e}")
+        logger.error(f"커스텀 음소 파일을 읽는 중 오류가 발생했습니다: {file_path}, 오류: {e}")
         
     return custom_map
 
 def apply_custom_phonemes(text_list, custom_map):
     """
-    텍스트 리스트에 커스텀 음소 매핑을 적용합니다.
+    奛作侃孖ｸ ・ｬ・､孖ｸ・・・､・､奛 ・護・ ・､﨑卓揆 ・・圸﨑ｩ・壱共.
     """
     if not custom_map:
         return text_list
         
     result = []
     for token in text_list:
-        # 단어 전체가 매칭되는 경우 우선 치환
+        # ・ｨ・ｴ ・・ｲｴ・ ・､・ｭ・俯株 ・ｽ・ｰ ・ｰ・ ・倆劍
         if token in custom_map:
             result.append(custom_map[token])
         else:
-            # 부분 문자열 매칭 시도 (가장 긴 것부터)
-            # 한국어 "아엣지" 같은 붙어있는 문자열 해결을 위함
+            # ・・・・ｸ・川龍 ・､・ｭ ・罹巡 (・・･ ・ｴ ・・ｶ奓ｰ)
+            # 﨑懋ｵｭ・ｴ "・・離・" ・呷捩 ・呷牟・壱株 ・ｸ・川龍 﨑ｴ・ｰ・・・・物
             mod_token = token
             for k in sorted(custom_map.keys(), key=len, reverse=True):
                 if k in mod_token:
-                    # 임시 구분자 삽입하여 분리되게 함
+                    # ・・亨 ・ｬ・・梵 ・ｽ・・葺・ｬ ・・ｦｬ・俾ｲ・﨑ｨ
                     mod_token = mod_token.replace(k, f" {custom_map[k]} ")
             
             if mod_token != token:
@@ -233,21 +276,21 @@ def apply_custom_phonemes(text_list, custom_map):
 
 
 # ==============================================================================
-# Lab 파일 생성
+# Lab 甯護攵 ・晧┳
 # ==============================================================================
 
 def generate_labs(wav_dir, reclist_file='', convert_to_hangul=True, custom_phonemes_path='', callback=None):
     """
-    WAV 파일이 있는 폴더를 기반으로 Lab 파일을 생성합니다.
+    WAV 甯護攵・ｴ ・壱株 尞ｴ・罷･ｼ ・ｰ・們愍・・Lab 甯護攵・・・晧┳﨑ｩ・壱共.
     
     Args:
-        wav_dir: WAV 파일이 있는 폴더 경로
-        reclist_file: 녹음 리스트 파일 경로 (비어있으면 WAV 파일명 사용)
-        convert_to_hangul: 로마자를 한글로 변환할지 여부
-        callback: 진행 상황 콜백 함수 (message: str) -> None
+        wav_dir: WAV 甯護攵・ｴ ・壱株 尞ｴ・・・ｽ・・
+        reclist_file: ・ｹ・・・ｬ・､孖ｸ 甯護攵 ・ｽ・・(・・牟・溢愍・ｴ WAV 甯護攵・・・ｬ・ｩ)
+        convert_to_hangul: ・罹ｧ溢梵・ｼ 﨑懋ｸ・・・嶹倆腹・ ・ｬ・
+        callback: ・・哩 ・・勦 ・罹ｰｱ 﨑ｨ・・(message: str) -> None
     
     Returns:
-        (성공 개수, 전체 개수, 에러 목록)
+        (・ｱ・ｵ ・懍・, ・・ｲｴ ・懍・, ・尖洳 ・ｩ・・
     """
     def log(msg):
         logger.info(msg)
@@ -258,18 +301,18 @@ def generate_labs(wav_dir, reclist_file='', convert_to_hangul=True, custom_phone
     targets = []
 
     if reclist_file and os.path.exists(reclist_file):
-        log(f"📄 리스트 파일 읽는 중: {reclist_file}")
+        log(f"리클리스트 파일을 읽는 중: {reclist_file}")
         with open(reclist_file, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if line:
                     targets.append(line)
     elif os.path.exists(wav_dir):
-        log(f"📂 WAV 폴더 스캔 중: {wav_dir}")
+        log(f"WAV 폴더를 스캔하는 중: {wav_dir}")
         files = [f for f in os.listdir(wav_dir) if f.lower().endswith('.wav')]
         targets = files
     else:
-        msg = f"❌ 오류: WAV 폴더를 찾을 수 없습니다: {wav_dir}"
+        msg = f"WAV 폴더를 찾을 수 없습니다: {wav_dir}"
         log(msg)
         return 0, 0, [msg]
 
@@ -277,7 +320,7 @@ def generate_labs(wav_dir, reclist_file='', convert_to_hangul=True, custom_phone
     total = len(targets)
     custom_map = load_custom_phonemes(custom_phonemes_path)
     if custom_map:
-        log(f"🔧 커스텀 음소 매핑 사용됨: {len(custom_map)}개 항목")
+        log(f"커스텀 음소 매핑 로드: {len(custom_map)}개")
 
     for i, filename in enumerate(targets):
         filename = os.path.basename(filename)
@@ -300,46 +343,38 @@ def generate_labs(wav_dir, reclist_file='', convert_to_hangul=True, custom_phone
             errors.append(err)
 
         if callback and ((i + 1) % 10 == 0 or (i + 1) == total):
-            callback(f"진행 중... ({i + 1}/{total})")
+            callback(f"Lab 생성 진행 중... ({i + 1}/{total})")
 
-    log(f"✅ 완료! 총 {count}/{total}개의 Lab 파일 생성됨")
+    log(f"Lab 생성 완료: {count}/{total}개")
     return count, total, errors
 
 
 def _parse_filename(filename, convert_to_hangul):
-    """파일명에서 음소 리스트 추출"""
-    base = os.path.splitext(filename)[0]
-    base = re.sub(r'\d+$', '', base)
+    """파일명에서 한국어 음절/토큰 목록을 추출합니다."""
+    parts = _split_kr_filename_tokens(filename)
+    base = os.path.splitext(str(filename or ''))[0]
 
     if re.search(r'[가-힣]', base):
-        if '_' in base or ' ' in base:
-            parts = re.split(r'[_\s]+', base)
-            return [p for p in parts if p]
-        else:
-            return list(base)
-    else:
-        parts = re.split(r'[_\s]+', base)
-        parts = [p for p in parts if p]
-        if convert_to_hangul:
-            return [parse_romaji_syllable(t) for t in parts]
         return parts
-
+    if convert_to_hangul:
+        return [parse_romaji_syllable(t) for t in parts]
+    return parts
 
 # ==============================================================================
-# 사전(Dictionary) 생성
+# ・ｬ・・Dictionary) ・晧┳
 # ==============================================================================
 
 def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', callback=None):
     """
-    Lab 파일로부터 MFA용 사전 파일을 자동 생성합니다.
+    Lab 甯護攵・罹ｶ奓ｰ MFA・ｩ ・ｬ・・甯護攵・・・尖徐 ・晧┳﨑ｩ・壱共.
     
     Args:
-        target_folder: Lab 파일이 있는 폴더
-        dict_save_path: 사전 파일 저장 경로
-        callback: 진행 상황 콜백 함수
+        target_folder: Lab 甯護攵・ｴ ・壱株 尞ｴ・・
+        dict_save_path: ・ｬ・・甯護攵 ・・･ ・ｽ・・
+        callback: ・・哩 ・・勦 ・罹ｰｱ 﨑ｨ・・
     
     Returns:
-        (성공 파일 수, 등록 항목 수, 에러 목록)
+        (・ｱ・ｵ 甯護攵 ・・ ・ｱ・・﨑ｭ・ｩ ・・ ・尖洳 ・ｩ・・
     """
     def log(msg):
         logger.info(msg)
@@ -349,7 +384,7 @@ def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', 
     errors = []
 
     if not os.path.exists(target_folder):
-        msg = f"❌ 폴더를 찾을 수 없습니다: {target_folder}"
+        msg = f"Lab 폴더를 찾을 수 없습니다: {target_folder}"
         log(msg)
         return 0, 0, [msg]
 
@@ -359,7 +394,7 @@ def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', 
     
     custom_map = load_custom_phonemes(custom_phonemes_path)
 
-    log(f"📄 총 {len(lab_files)}개의 Lab 파일 처리 시작")
+    log(f"사전 생성 시작: Lab 파일 {len(lab_files)}개")
 
     for idx, lab_file in enumerate(lab_files):
         full_path = os.path.join(target_folder, lab_file)
@@ -367,22 +402,13 @@ def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', 
             clean_filename_str = unicodedata.normalize('NFC', lab_file)
             base_name = os.path.splitext(clean_filename_str)[0]
 
-            raw_tokens = re.split(r"[_'\s]+", base_name)
-            expanded_tokens = []
-            for t in raw_tokens:
-                if not t or t == '~':
-                    continue
-                if re.match(r'^[가-힣]+$', t):
-                    expanded_tokens.extend(list(t))
-                else:
-                    expanded_tokens.append(t)
-            final_tokens = expanded_tokens
+            final_tokens = _split_kr_filename_tokens(base_name)
 
             with open(full_path, 'r', encoding='utf-8') as f:
                 content_raw = f.read().strip()
                 content_normalized = unicodedata.normalize('NFC', content_raw)
 
-            chars_only = list(re.sub(r"[\s_]+", "", content_normalized))
+            chars_only = _split_kr_lab_content_tokens(content_normalized)
             new_content = " ".join(chars_only)
             if content_raw != new_content:
                 with open(full_path, 'w', encoding='utf-8') as f:
@@ -408,12 +434,12 @@ def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', 
                     dictionary_entries[char] = ipa_str
                     full_sentence_ipa.append(ipa_str)
 
-            # 커스텀 맵에 있는 기호들도 렉시콘에 등록 (MFA가 인식할 수 있도록 강제)
+            # ・､・､奛 ・ｵ・・・壱株 ・ｰ嶸ｸ・､・・・餓亨・們乱 ・ｱ・・(MFA・ ・ｸ・晨腹 ・・・壱巡・・・菩・
             for raw_char, mapped_pho in custom_map.items():
                 if raw_char not in dictionary_entries:
-                    # 매핑된 음소(mapped_pho)가 한국어 로마자라면 ipa로 변환, 아니면 그대로 사용
+                    # ・､﨑瀧頗 ・護・(mapped_pho)・ 﨑懋ｵｭ・ｴ ・罹ｧ溢梵・ｼ・ｴ ipa・・・嶹・ ・・笈・ｴ ・ｸ・・・・ｬ・ｩ
                     c_ipa = " ".join(get_ipa_from_roman(mapped_pho))
-                    # 변환 결과가 없거나 sil이면 매핑어 원본을 그대로 음소로 (영어 등 대응)
+                    # ・嶹・・ｰ・ｼ・ ・・ｱｰ・・sil・ｴ・ｴ ・､﨑卓牟 ・尖ｳｸ・・・ｸ・・・・護・・・(・・牟 ・ｱ ・・・
                     if not c_ipa or c_ipa == 'sil':
                         c_ipa = mapped_pho
                     dictionary_entries[raw_char] = c_ipa
@@ -425,20 +451,20 @@ def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', 
                 count_files += 1
 
         except Exception as e:
-            err = f"사전 생성 에러 ({lab_file}): {e}"
+            err = f"사전 생성 중 오류 ({lab_file}): {e}"
             logger.error(err)
             errors.append(err)
 
         if callback and ((idx + 1) % 10 == 0 or (idx + 1) == len(lab_files)):
-            callback(f"사전 생성 중... ({idx + 1}/{len(lab_files)})")
+            callback(f"사전 생성 진행 중... ({idx + 1}/{len(lab_files)})")
 
     try:
         with open(dict_save_path, 'w', encoding='utf-8') as f:
             for key, ipa in sorted(dictionary_entries.items()):
                 f.write(f"{key}\t{ipa}\n")
-        log(f"📘 사전 파일 생성 완료: {dict_save_path} ({len(dictionary_entries)}개 항목)")
+        log(f"사전 생성 완료: {dict_save_path} ({len(dictionary_entries)}개 항목)")
     except Exception as e:
-        err = f"❌ 사전 저장 실패: {e}"
+        err = f"사전 파일 저장 실패: {e}"
         logger.error(err)
         errors.append(err)
 
@@ -446,7 +472,7 @@ def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', 
 
 
 def verify_dict_lab_match(dict_path, lab_folder, callback=None):
-    """사전과 Lab 파일 간의 매칭 검사"""
+    """사전과 Lab 파일의 토큰 대응을 검증합니다."""
     def log(msg):
         logger.info(msg)
         if callback:
@@ -472,8 +498,9 @@ def verify_dict_lab_match(dict_path, lab_folder, callback=None):
                 mismatches.append((lab_file, w))
 
     if not mismatches:
-        log("✅ 완벽합니다! 모든 Lab 파일의 내용이 사전에 등록되어 있습니다.")
+        log("사전-라벨 검증 완료: 모든 Lab 토큰이 사전에 존재합니다.")
     else:
-        log(f"❌ 총 {len(mismatches)}개의 불일치가 발견되었습니다.")
+        log(f"사전-라벨 불일치 {len(mismatches)}건을 발견했습니다.")
 
     return mismatches
+

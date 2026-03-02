@@ -31,11 +31,11 @@ from core.lab_generator import load_custom_phonemes
 
 logger = logging.getLogger(__name__)
 
-FEATURE_VERSION = "v2"
+FEATURE_VERSION = "v3"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
 
 FEATURE_NAMES = [
-    "language", "format_type", "alias_type", "row_index_in_wav", "row_ratio_in_wav",
+    "language", "format_type", "alias_type", "alias_group", "row_index_in_wav", "row_ratio_in_wav",
     "is_head_row", "is_tail_row", "wav_duration_ms", "base_offset", "base_cons",
     "base_cutoff_abs", "base_pre", "base_ovl", "base_cons_gap", "base_cut_gap",
     "base_ovl_ratio", "curr_phone_start_ms", "curr_phone_end_ms", "curr_phone_len_ms",
@@ -53,7 +53,7 @@ FEATURE_NAMES = [
 ]
 
 CATEGORICAL_FEATURES = [
-    "language", "format_type", "alias_type", "onset_class", "voicing_class",
+    "language", "format_type", "alias_type", "alias_group", "onset_class", "voicing_class",
     "coda_type", "vowel_class", "mora_position", "bridge_type", "prev_alias_type",
     "next_alias_type",
 ]
@@ -740,6 +740,45 @@ def _extract_structure_features(language: str, alias: str, alias_type: str, row_
     return out
 
 
+def _derive_alias_group(language: str, feat: Dict[str, object]) -> str:
+    lang = str(language or "").strip().lower()
+    alias_type = str(feat.get("alias_type", "") or "").strip().lower()
+    coda_type = str(feat.get("coda_type", "") or "").strip().lower()
+    is_diph = float(feat.get("is_diphthong", 0.0) or 0.0) >= 0.5
+    onset_class = str(feat.get("onset_class", "") or "").strip().lower()
+
+    if lang == "korean":
+        if alias_type == "cv":
+            return "cv_glide" if is_diph else "cv"
+        if alias_type == "cv_head":
+            return "cv_head_glide" if is_diph else "cv_head"
+        if alias_type == "vc":
+            if coda_type == "stop":
+                return "vc_stop"
+            if coda_type in {"nasal", "liquid"}:
+                return "vc_sonorant"
+            return "vc_other"
+        if alias_type == "vv":
+            return "vv"
+        if alias_type == "vcv":
+            return "vcv"
+        if alias_type == "mono":
+            return "mono"
+        if alias_type == "br":
+            return "br"
+        return alias_type or "other"
+
+    if alias_type == "vc":
+        return f"vc_{onset_class or 'other'}"
+    if alias_type == "cv":
+        return f"cv_{onset_class or 'other'}"
+    if alias_type == "cv_head":
+        return f"cv_head_{onset_class or 'other'}"
+    if alias_type in {"vv", "vcv", "mono", "br"}:
+        return alias_type
+    return alias_type or "other"
+
+
 def _feature_row_from_context(language: str, format_type: str, row: Dict[str, object], row_index: int, total_rows: int, alias_type: str, phones: List[object], words: List[object], mel_ctx, audio, sr: int, prev_row: Optional[Dict[str, object]], next_row: Optional[Dict[str, object]]) -> Dict[str, object]:
     feat = dict(FEATURE_DEFAULTS)
     feat["language"] = language
@@ -816,6 +855,7 @@ def _feature_row_from_context(language: str, format_type: str, row: Dict[str, ob
 
     feat.update(_compute_segment_stats(mel_ctx, offset, pre_abs, cut_abs, audio, sr))
     feat.update(_extract_structure_features(language, str(row.get("alias", "")), alias_type, row_index, total_rows))
+    feat["alias_group"] = _derive_alias_group(language, feat)
 
     if prev_row is not None:
         feat["prev_alias_type"] = str(prev_row.get("alias_type", ""))
@@ -903,6 +943,68 @@ def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str
     return out_rows
 
 
+def _evaluate_training_row_quality(language: str, row: Dict[str, object]) -> Tuple[int, str, float]:
+    lang = str(language or "").strip().lower()
+    alias_type = str(row.get("alias_type", "") or "").strip().lower()
+    alias_group = str(row.get("alias_group", "") or "").strip().lower()
+    coda_type = str(row.get("coda_type", "") or "").strip().lower()
+    is_diph = float(row.get("is_diphthong", 0.0) or 0.0) >= 0.5
+
+    d_off = abs(float(row.get("delta_offset", 0.0) or 0.0))
+    d_cons = abs(float(row.get("delta_cons", 0.0) or 0.0))
+    d_cut = abs(float(row.get("delta_cutoff", 0.0) or 0.0))
+    d_pre = abs(float(row.get("delta_pre", 0.0) or 0.0))
+    d_ovl = abs(float(row.get("delta_ovl", 0.0) or 0.0))
+    base_off_to_exp = abs(float(row.get("base_offset_to_expected_ms", 0.0) or 0.0))
+
+    reasons: List[str] = []
+    if lang == "korean":
+        if alias_type in {"cv", "cv_head"}:
+            off_lim = 110.0 if is_diph or "glide" in alias_group else 135.0
+            pre_lim = 110.0 if is_diph or "glide" in alias_group else 125.0
+            cons_lim = 170.0
+            if d_off > off_lim:
+                reasons.append("cv_offset_outlier")
+            if d_pre > pre_lim:
+                reasons.append("cv_pre_outlier")
+            if d_cons > cons_lim:
+                reasons.append("cv_cons_outlier")
+            if base_off_to_exp > 320.0:
+                reasons.append("cv_base_anchor_far")
+        elif alias_type == "vv":
+            if d_off > 125.0:
+                reasons.append("vv_offset_outlier")
+            if d_pre > 105.0:
+                reasons.append("vv_pre_outlier")
+            if d_cut > 150.0:
+                reasons.append("vv_cutoff_outlier")
+        elif alias_type == "vc":
+            cut_lim = 120.0 if coda_type == "stop" else 155.0
+            pre_lim = 100.0 if coda_type == "stop" else 125.0
+            ovl_lim = 75.0 if coda_type == "stop" else 90.0
+            if d_cut > cut_lim:
+                reasons.append("vc_cutoff_outlier")
+            if d_pre > pre_lim:
+                reasons.append("vc_pre_outlier")
+            if d_ovl > ovl_lim:
+                reasons.append("vc_ovl_outlier")
+        elif alias_type == "vcv":
+            if d_off > 150.0:
+                reasons.append("vcv_offset_outlier")
+            if d_pre > 120.0:
+                reasons.append("vcv_pre_outlier")
+
+        if max(d_off, d_cons, d_cut, d_pre, d_ovl) > 235.0:
+            reasons.append("gross_outlier")
+    else:
+        if max(d_off, d_cons, d_cut, d_pre, d_ovl) > 300.0:
+            reasons.append("gross_outlier")
+
+    keep = 0 if reasons else 1
+    score = max(0.0, 100.0 - (18.0 * len(reasons)) - min(max(d_off, d_pre) / 20.0, 20.0))
+    return keep, ";".join(reasons), float(score)
+
+
 def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str, tg_dir: str, wav_dir: str, custom_phonemes_path: str = "", voicebank_id: str = "", format_type_override: str = "") -> Tuple[List[Dict[str, object]], Dict[str, int]]:
     fmt_tag = str(format_type_override or "").strip().lower()
     cache_path = _training_row_cache_path(
@@ -950,6 +1052,10 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
         row["delta_cutoff"] = row["manual_cutoff_abs"] - row["base_cutoff_abs"]
         row["delta_pre"] = row["manual_pre"] - row["base_pre"]
         row["delta_ovl"] = row["manual_ovl"] - row["base_ovl"]
+        keep_default, skip_reason, quality_score = _evaluate_training_row_quality(language, row)
+        row["train_keep_default"] = int(keep_default)
+        row["train_skip_reason"] = skip_reason
+        row["train_quality_score"] = float(quality_score)
         row["skipped_reason"] = ""
         matched_rows.append(row)
 
@@ -968,7 +1074,7 @@ def dataset_fieldnames() -> List[str]:
         "voicebank_id", "wav", "alias", "wav_norm", "alias_norm", "occurrence_index", "line_index",
         *FEATURE_NAMES,
         "manual_offset", "manual_cons", "manual_cutoff", "manual_pre", "manual_ovl",
-        *TARGET_NAMES, "skipped_reason",
+        *TARGET_NAMES, "train_keep_default", "train_skip_reason", "train_quality_score", "skipped_reason",
     ]
 
 

@@ -30,6 +30,7 @@ class OtoActionsMixin:
                 params = self._get_params()
                 gen_ou = self.openutau_var.get()
                 gen_missing = self.gen_missing_vowels_var.get()
+                enable_ml_correction = self.enable_ml_correction_var.get()
                 auto_format = self.auto_format_var.get()
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
                 alias_suffix = self.alias_suffix_var.get().strip()
@@ -45,6 +46,7 @@ class OtoActionsMixin:
                         params=None,
                         generate_openutau=gen_ou,
                         gen_missing_vowels=gen_missing,
+                        enable_ml_correction=enable_ml_correction,
                         alias_style=ja_alias_style,
                         auto_format=auto_format,
                         custom_phonemes_path=custom_phonemes_path,
@@ -57,6 +59,7 @@ class OtoActionsMixin:
                         params,
                         gen_ou,
                         gen_missing,
+                        enable_ml_correction=enable_ml_correction,
                         auto_format=auto_format,
                         custom_phonemes_path=custom_phonemes_path,
                         alias_suffix=alias_suffix,

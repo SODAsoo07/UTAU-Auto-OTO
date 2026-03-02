@@ -132,6 +132,7 @@ class App(
         self.openutau_var = ctk.BooleanVar(value=False)
         self.gen_missing_vowels_var = ctk.BooleanVar(value=True)
         self.no_base_oto_var = ctk.BooleanVar(value=False)
+        self.enable_ml_correction_var = ctk.BooleanVar(value=True)
         self.advanced_options_expanded = False
         
         # 언어 선택

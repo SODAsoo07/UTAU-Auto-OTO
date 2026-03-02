@@ -297,6 +297,7 @@ class ConfigMixin:
             "openutau_compatible": self.openutau_var.get(),
             "gen_missing_vowels": self.gen_missing_vowels_var.get(),
             "no_base_oto": self.no_base_oto_var.get(),
+            "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
             "language": self.lang_var.get(),
             "auto_format": self.auto_format_var.get(),
             "ja_alias_style": self.ja_alias_style_var.get(),
@@ -359,6 +360,8 @@ class ConfigMixin:
                 self.gen_missing_vowels_var.set(config["gen_missing_vowels"])
             if "no_base_oto" in config:
                 self.no_base_oto_var.set(config["no_base_oto"])
+            if "enable_ml_correction" in config and hasattr(self, "enable_ml_correction_var"):
+                self.enable_ml_correction_var.set(config["enable_ml_correction"])
             if "language" in config:
                 self.lang_var.set(config["language"])
             if "auto_format" in config:

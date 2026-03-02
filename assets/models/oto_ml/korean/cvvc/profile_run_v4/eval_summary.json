@@ -1,0 +1,31 @@
+{
+  "targets": {
+    "delta_offset": "Auto_OTO\\assets\\models\\oto_ml\\korean\\cvvc\\profile_run_v4\\model_offset.txt",
+    "delta_cons": "Auto_OTO\\assets\\models\\oto_ml\\korean\\cvvc\\profile_run_v4\\model_cons.txt",
+    "delta_cutoff": "Auto_OTO\\assets\\models\\oto_ml\\korean\\cvvc\\profile_run_v4\\model_cutoff.txt",
+    "delta_pre": "Auto_OTO\\assets\\models\\oto_ml\\korean\\cvvc\\profile_run_v4\\model_pre.txt",
+    "delta_ovl": "Auto_OTO\\assets\\models\\oto_ml\\korean\\cvvc\\profile_run_v4\\model_ovl.txt"
+  },
+  "metrics": {
+    "delta_offset": {
+      "baseline_mae": 181.50520646067417,
+      "model_mae": 132.00022016007708
+    },
+    "delta_cons": {
+      "baseline_mae": 39.748814606741576,
+      "model_mae": 42.438885343789266
+    },
+    "delta_cutoff": {
+      "baseline_mae": 235.34052528089887,
+      "model_mae": 246.7409655860971
+    },
+    "delta_pre": {
+      "baseline_mae": 30.388275280898878,
+      "model_mae": 28.321270207668547
+    },
+    "delta_ovl": {
+      "baseline_mae": 26.976535112359553,
+      "model_mae": 23.288501580237003
+    }
+  }
+}
