@@ -106,6 +106,15 @@ class TabBuildersMixin:
                 )
                 self.enable_ml_correction_checkbox.pack(anchor="w", pady=(5, 0))
 
+                self.enable_pytorch_bridge_checkbox = ctk.CTkCheckBox(
+                    opt_frame,
+                    text="PyTorch 브리지 보정 사용 (실험용)",
+                    text_color="#FFAB91",
+                    variable=self.enable_pytorch_bridge_var,
+                    command=self._save_config,
+                )
+                self.enable_pytorch_bridge_checkbox.pack(anchor="w", pady=(5, 0))
+
             ctk.CTkButton(frame, text="실행", width=80, command=cmd).pack(side="right", padx=10)
 
     def _build_params_tab(self):

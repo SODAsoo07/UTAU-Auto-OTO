@@ -28,10 +28,11 @@ except Exception:  # pragma: no cover
     np = None
 
 from core.lab_generator import load_custom_phonemes
+from core.oto_ml_mapping_quality import augment_mapping_quality_features
 
 logger = logging.getLogger(__name__)
 
-FEATURE_VERSION = "v3"
+FEATURE_VERSION = "v4"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
 
 FEATURE_NAMES = [
@@ -50,6 +51,9 @@ FEATURE_NAMES = [
     "is_nasal_or_sonorant", "prev_alias_type", "next_alias_type", "prev_base_pre",
     "next_base_pre", "prev_base_offset", "next_base_offset", "prev_base_cutoff_abs",
     "next_base_cutoff_abs",
+    "mapping_confidence", "used_alias_occurrence_mapping", "used_exact_vowel_fix",
+    "used_nuclei_fallback", "used_alias_based_syllables", "words_vs_alias_score_margin",
+    "local_peak_db", "local_valley_db", "mel_window_energy_mean", "mel_window_silence_ratio",
 ]
 
 CATEGORICAL_FEATURES = [
@@ -437,7 +441,7 @@ def load_custom_map(custom_phonemes_path: str = "") -> Dict[str, str]:
 def classify_alias_type(language: str, alias: str, custom_map: Optional[Dict[str, str]] = None) -> str:
     lang = str(language).strip().lower()
     if lang == "japanese":
-        from core.ja_oto_generator import classify_ja_alias
+        from core.ja_oto_mapping import classify_ja_alias
         return str(classify_ja_alias(alias, custom_map))
     from core.oto_generator import classify_alias
     return str(classify_alias(alias, custom_map))
@@ -446,7 +450,7 @@ def classify_alias_type(language: str, alias: str, custom_map: Optional[Dict[str
 def detect_format_type(language: str, aliases: List[str], custom_map: Optional[Dict[str, str]] = None) -> str:
     lang = str(language).strip().lower()
     if lang == "japanese":
-        from core.ja_oto_generator import detect_ja_alias_format
+        from core.ja_oto_mapping import detect_ja_alias_format
         return str(detect_ja_alias_format(aliases, custom_map=custom_map))
     from core.oto_generator import detect_alias_format
     return str(detect_alias_format(aliases, custom_map=custom_map))
@@ -684,7 +688,7 @@ def _extract_kr_structure(alias: str, alias_type: str) -> Dict[str, object]:
 
 
 def _extract_ja_structure(alias: str, alias_type: str) -> Dict[str, object]:
-    from core.ja_oto_generator import (
+    from core.ja_oto_mapping import (
         _extract_ja_cv_target_syllable, _extract_ja_onset_token,
         _extract_vcv_target_syllable, split_ja_romaji_syllable,
     )
@@ -856,6 +860,7 @@ def _feature_row_from_context(language: str, format_type: str, row: Dict[str, ob
     feat.update(_compute_segment_stats(mel_ctx, offset, pre_abs, cut_abs, audio, sr))
     feat.update(_extract_structure_features(language, str(row.get("alias", "")), alias_type, row_index, total_rows))
     feat["alias_group"] = _derive_alias_group(language, feat)
+    feat = augment_mapping_quality_features(language, format_type, alias_type, feat)
 
     if prev_row is not None:
         feat["prev_alias_type"] = str(prev_row.get("alias_type", ""))

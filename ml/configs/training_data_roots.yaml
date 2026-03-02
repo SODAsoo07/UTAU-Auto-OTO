@@ -1,33 +1,51 @@
-japanese:
+﻿japanese:
   vcv:
-    - "C:\\Users\\oyh57\\SODAsoo1\\VocalSynth\\OpenUtau\\Singer\\Meary JP VCV 1.0"
-    - "C:\\Users\\oyh57\\SODAsoo1\\VocalSynth\\OpenUtau\\Singer\\HARU"
-    - "C:\\Users\\oyh57\\SODAsoo1\\VocalSynth\\OpenUtau\\Singer\\Number Bronze・norn"
-    - "C:\\Users\\oyh57\\SODAsoo1\\VocalSynth\\OpenUtau\\Singer\\Number Bronze・quasar"
-    - "C:\\Users\\oyh57\\SODAsoo1\\VocalSynth\\OpenUtau\\Singer\\PiER -Allegro-"
+    - 'C:\Users\oyh57\SODAsoo1\VocalSynth\OpenUtau\Singer\Meary JP VCV 1.0'
+    - 'C:\Users\oyh57\SODAsoo1\VocalSynth\OpenUtau\Singer\HARU'
+    - 'C:\Users\oyh57\SODAsoo1\VocalSynth\OpenUtau\Singer\Number Bronze・norn'
+    - 'C:\Users\oyh57\SODAsoo1\VocalSynth\OpenUtau\Singer\Number Bronze・quasar'
+    - 'C:\Users\oyh57\SODAsoo1\VocalSynth\OpenUtau\Singer\PiER -Allegro-'
+    - 'C:\Users\oyh57\SODAsoo1\VocalSynth\OpenUtau\Singer\Beryl'
+    - 'C:\Users\oyh57\SODAsoo1\VocalSynth\OpenUtau\Singer\カゼヒキ'
+    - 'C:\Users\oyh57\SODAsoo1\VocalSynth\OpenUtau\Singer\崩音空虚ver2.0_B\Normal'
+    - 'C:\Users\oyh57\SODAsoo1\VocalSynth\OpenUtau\Singer\崩音空虚ver2.0_B\SOFT_150bpm'
+    - 'C:\Users\oyh57\SODAsoo1\VocalSynth\OpenUtau\Singer\歌幡メイジ‐Fantasy‐'
   cvvc:
-    - "C:\\Users\\oyh57\\SODAsoo1\\VocalSynth\\OpenUtau\\Singer\\Dabi_Test"
-    - "C:\\Users\\oyh57\\SODAsoo1\\VocalSynth\\OpenUtau\\Singer\\波音リツEve"
+    - 'C:\Users\oyh57\SODAsoo1\VocalSynth\OpenUtau\Singer\Dabi_Test'
+    - 'C:\Users\oyh57\SODAsoo1\VocalSynth\OpenUtau\Singer\波音リツEve'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\カゼヒキ_トローチ_CVVC'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\名前シレズ_CVVC'
 
 korean:
   cvvc:
-    - "C:\\Users\\oyh57\\SODAsoo1\\VocalSynth\\OpenUtau\\Singer\\レウィ_KO ver1"
-    - "C:\\Users\\oyh57\\SODAsoo1\\VocalSynth\\OpenUtau\\Singer\\Taiga Iwata Korean CVVC soft"
-    - "C:\\Users\\oyh57\\SODAsoo1\\Devs\\Colab\\Ex\\Yeonu_KR_CVVC"
-    - "C:\\Users\\oyh57\\SODAsoo1\\Devs\\VBs\\SONG_CMYK_CVVC"
-    - "C:\\Users\\oyh57\\SODAsoo1\\Devs\\VBs\\Dam_Kor_CVVC"
-    - "C:\\Users\\oyh57\\SODAsoo1\\Devs\\VBs\\Achu_CVVC"
+    - 'C:\Users\oyh57\SODAsoo1\VocalSynth\OpenUtau\Singer\レウィ_KO ver1'
+    - 'C:\Users\oyh57\SODAsoo1\VocalSynth\OpenUtau\Singer\Taiga Iwata Korean CVVC soft'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\Colab\Ex\Yeonu_KR_CVVC'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\SONG_CMYK_CVVC'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\Dam_Kor_CVVC'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\Achu_CVVC'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\So Yoon Spindrift_CVVC'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\KII_kor_CVVC'
+
   cvc:
-    - "C:\\Users\\oyh57\\SODAsoo1\\Devs\\Colab\\Ex\\SoYoon_KR_CVC"
-    - "C:\\Users\\oyh57\\SODAsoo1\\Devs\\Colab\\Ex\\Kei Stellaria KO Light"
-    - "C:\\Users\\oyh57\\SODAsoo1\\Devs\\VBs\\Betako_CVC"
+    - 'C:\Users\oyh57\SODAsoo1\Devs\Colab\Ex\SoYoon_KR_CVC'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\Colab\Ex\Kei Stellaria KO Light'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\Betako_CVC'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\Aqua Planet ACT 4_CVC'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\Misty_CVC'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\Song-SoRi_QLED_CVC'
 
 notes:
   recursive_oto_search: true
   recursive_wav_search: true
   strip_pitch_suffix_for_matching: true
   strip_pitch_suffix_examples:
-    - "_C4"
-    - "_D4"
-    - "-A4"
-    - " F4"
+    - '_C4'
+    - '_D4'
+    - '-A4'
+    - ' F4'
+    - '_G4強'
+    - '強'
+    - '弱'
+    - '#'
+

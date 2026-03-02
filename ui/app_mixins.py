@@ -87,7 +87,54 @@ class AppRuntimeMixin:
             if killer is not None:
                 self._force_exit_now()
 
-    def _append_log(self, msg):
+    def _log_to_file(self, msg, level=logging.INFO):
+        try:
+            logger = getattr(self, "logger", logging.getLogger(__name__))
+            logger.log(level, str(msg))
+        except Exception:
+            pass
+
+    def _should_show_ui_log(self, msg):
+        if msg in (ALERT_MSVC_REQUIRED, ALERT_MFA_PERMISSION_DENIED):
+            return True
+        text = str(msg or "").strip()
+        if not text:
+            return False
+        lowered = text.lower()
+
+        if text.startswith("[OTO-ML] 런타임 옵션"):
+            return True
+        if text.startswith("[Prepare]"):
+            return True
+
+        error_tokens = (
+            "❌", "⚠", "오류", "실패", "예외", "error", "failed", "warning",
+            "mapping_failed", "skip", "skipped",
+        )
+        if any(token in text or token in lowered for token in error_tokens):
+            return True
+
+        progress_prefixes = (
+            "🧪", "🔍", "📦", "🚀", "🔀", "ℹ", "📝", "🎉", "📘", "🔧", "⬇", "✅",
+            "처리:", "OTO 생성 중", "Lab 생성", "사전 생성", "정렬 시작", "정렬 엔진",
+        )
+        if text.startswith(progress_prefixes):
+            return True
+
+        progress_phrases = (
+            "완료", "시작", "종료", "진행 중", "저장 경로", "검증 결과",
+            "검증 리포트", "자동 설정 제외 항목", "기존 결과 재사용",
+        )
+        if any(token in text for token in progress_phrases):
+            return True
+
+        if text.startswith("["):
+            return False
+        return False
+
+    def _append_log(self, msg, log_to_file=True):
+        if log_to_file:
+            self._log_to_file(msg)
         if msg == ALERT_MSVC_REQUIRED:
             self._after_safe(
                 lambda: self._show_copyable_alert(
@@ -121,8 +168,11 @@ class AppRuntimeMixin:
             )
             return
 
+        if not self._should_show_ui_log(msg):
+            return
+
         def _do():
-            self.log_text.insert("end", msg + "\n")
+            self.log_text.insert("end", str(msg) + "\n")
             self.log_text.see("end")
 
         self._after_safe(_do)
@@ -195,7 +245,7 @@ class AppRuntimeMixin:
             tg_folder=tg_folder,
             oto_path=out_path,
             language=self._get_language(),
-            callback=self._append_log,
+            callback=lambda msg: self._append_log(msg, log_to_file=True),
         )
         err_count = summary.get("errors", 0)
         warn_count = summary.get("warnings", 0)
@@ -298,6 +348,7 @@ class ConfigMixin:
             "gen_missing_vowels": self.gen_missing_vowels_var.get(),
             "no_base_oto": self.no_base_oto_var.get(),
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
+            "enable_pytorch_bridge": self.enable_pytorch_bridge_var.get() if hasattr(self, "enable_pytorch_bridge_var") else False,
             "language": self.lang_var.get(),
             "auto_format": self.auto_format_var.get(),
             "ja_alias_style": self.ja_alias_style_var.get(),
@@ -362,6 +413,8 @@ class ConfigMixin:
                 self.no_base_oto_var.set(config["no_base_oto"])
             if "enable_ml_correction" in config and hasattr(self, "enable_ml_correction_var"):
                 self.enable_ml_correction_var.set(config["enable_ml_correction"])
+            if "enable_pytorch_bridge" in config and hasattr(self, "enable_pytorch_bridge_var"):
+                self.enable_pytorch_bridge_var.set(config["enable_pytorch_bridge"])
             if "language" in config:
                 self.lang_var.set(config["language"])
             if "auto_format" in config:

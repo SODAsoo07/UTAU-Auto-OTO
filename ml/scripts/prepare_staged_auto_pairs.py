@@ -24,7 +24,12 @@ def main():
     args = ap.parse_args()
 
     dataset_root = os.path.abspath(args.dataset_root)
-    result = prepare_staged_auto_pairs(dataset_root, dry_run=args.dry_run, limit=args.limit)
+    result = prepare_staged_auto_pairs(
+        dataset_root,
+        dry_run=args.dry_run,
+        limit=args.limit,
+        progress_callback=print,
+    )
     report_path = os.path.join(dataset_root, "_manifest", "prepared_auto_pairs.json")
     write_prepare_report(report_path, result)
     print(json.dumps({

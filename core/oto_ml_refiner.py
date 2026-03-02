@@ -39,7 +39,19 @@ def _installed_model_root_for_language(language: str) -> str:
     return os.path.join(base_dir, "models_installed", "oto_ml", lang)
 
 
-def _resolve_model_dir(language: str, format_type: str) -> Optional[str]:
+def _pytorch_model_root_for_language(language: str) -> str:
+    lang = str(language).strip().lower()
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_dir, "assets", "models", "oto_ml_pytorch", lang)
+
+
+def _installed_pytorch_model_root_for_language(language: str) -> str:
+    lang = str(language).strip().lower()
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_dir, "models_installed", "oto_ml_pytorch", lang)
+
+
+def _resolve_lightgbm_model_dir(language: str, format_type: str) -> Optional[str]:
     fmt = str(format_type or "").strip().lower() or "general"
     candidates = []
     for root in (_installed_model_root_for_language(language), _model_root_for_language(language)):
@@ -53,6 +65,46 @@ def _resolve_model_dir(language: str, format_type: str) -> Optional[str]:
         if os.path.isfile(os.path.join(candidate, "model_meta.json")):
             return candidate
     return None
+
+
+def _torch_task_name(language: str, format_type: str) -> Optional[str]:
+    lang = str(language or "").strip().lower()
+    fmt = str(format_type or "").strip().lower()
+    if lang == "japanese":
+        if fmt == "vcv":
+            return "bridge_vcv"
+        if fmt == "cvvc":
+            return "bridge_cvvc"
+    if lang == "korean":
+        if fmt == "cvvc":
+            return "bridge_cvvc"
+        if fmt == "cvc":
+            return "bridge_cvc"
+    return None
+
+
+def _resolve_pytorch_model_dir(language: str, format_type: str) -> Optional[str]:
+    task_name = _torch_task_name(language, format_type)
+    if not task_name:
+        return None
+    candidate_roots = (
+        _installed_pytorch_model_root_for_language(language),
+        _pytorch_model_root_for_language(language),
+    )
+    suffixes = ("v1", "smoke_v1")
+    for root in candidate_roots:
+        for suffix in suffixes:
+            candidate = os.path.join(root, task_name, suffix)
+            if os.path.isfile(os.path.join(candidate, "model_meta.json")):
+                return candidate
+    return None
+
+
+def _resolve_model_dir(language: str, format_type: str, backend_preference: str = "") -> Optional[str]:
+    backend = str(backend_preference or "").strip().lower()
+    if backend == "pytorch":
+        return _resolve_pytorch_model_dir(language, format_type) or _resolve_lightgbm_model_dir(language, format_type)
+    return _resolve_lightgbm_model_dir(language, format_type)
 
 
 def _route_format_for_feature(language: str, feature_row: Dict[str, object], format_override: Optional[str] = None) -> Optional[str]:
@@ -170,10 +222,10 @@ def _apply_japanese_delta_policy(row_context: Dict[str, object], deltas: Dict[st
     # ML은 세부 정리만 맡기고 위치 축(offset/pre)은 거의 못 움직이게 제한한다.
     if format_type == "vcv" and alias_type in {"vc", "vcv"}:
         if _ja_is_n_bridge_alias(alias_text, alias_type) and onset in JA_VOICED_ONSETS:
-            deltas["delta_offset"] *= 0.15
-            deltas["delta_pre"] *= 0.20
+            deltas["delta_offset"] *= 0.10
+            deltas["delta_pre"] *= 0.18
             deltas["delta_cons"] *= 0.35
-            deltas["delta_cutoff"] *= 0.50
+            deltas["delta_cutoff"] *= 0.45
             deltas["delta_ovl"] *= 0.50
             return deltas
 
@@ -188,8 +240,8 @@ def _apply_japanese_delta_policy(row_context: Dict[str, object], deltas: Dict[st
                 deltas["delta_offset"] = 0.0
             else:
                 deltas["delta_offset"] = _scale_signed(deltas.get("delta_offset", 0.0), neg_scale=0.25, pos_scale=0.65)
-            deltas["delta_pre"] = _scale_signed(deltas.get("delta_pre", 0.0), neg_scale=0.20, pos_scale=0.80)
-            deltas["delta_cutoff"] = _scale_signed(deltas.get("delta_cutoff", 0.0), neg_scale=0.85, pos_scale=0.20)
+            deltas["delta_pre"] = _scale_signed(deltas.get("delta_pre", 0.0), neg_scale=0.18, pos_scale=0.80)
+            deltas["delta_cutoff"] = _scale_signed(deltas.get("delta_cutoff", 0.0), neg_scale=0.85, pos_scale=0.18)
             deltas["delta_cons"] = _scale_signed(deltas.get("delta_cons", 0.0), neg_scale=0.60, pos_scale=0.85)
             deltas["delta_ovl"] = _scale_signed(deltas.get("delta_ovl", 0.0), neg_scale=0.60, pos_scale=0.85)
             return deltas
@@ -230,6 +282,7 @@ def apply_oto_ml_to_oto_file(
     custom_phonemes_path: str = "",
     callback=None,
     enabled: bool = True,
+    backend_preference: str = "",
     format_override: Optional[str] = None,
 ) -> int:
     if not enabled:
@@ -259,13 +312,15 @@ def apply_oto_ml_to_oto_file(
         format_type = _route_format_for_feature(language, feat, format_override=format_override)
         if not format_type:
             continue
-        if format_type not in bundle_cache:
-            model_dir = _resolve_model_dir(language, format_type)
-            bundle_cache[format_type] = load_oto_model_bundle(model_dir) if model_dir else None
-            if model_dir and model_dir not in model_notice and callback:
-                _emit(callback, f"[OTO-ML] 모델 로드: {model_dir}")
+        cache_key = f"{backend_preference or 'default'}::{format_type}"
+        if cache_key not in bundle_cache:
+            model_dir = _resolve_model_dir(language, format_type, backend_preference=backend_preference)
+            bundle_cache[cache_key] = load_oto_model_bundle(model_dir) if model_dir else None
+            bundle = bundle_cache[cache_key]
+            if bundle and model_dir and model_dir not in model_notice and callback:
+                _emit(callback, f"[OTO-ML] 모델 로드 ({bundle.backend}): {model_dir}")
                 model_notice.add(model_dir)
-        bundle = bundle_cache.get(format_type)
+        bundle = bundle_cache.get(cache_key)
         if not bundle:
             continue
         line_index = int(feat.get("line_index", -1))

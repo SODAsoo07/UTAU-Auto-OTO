@@ -133,6 +133,7 @@ class App(
         self.gen_missing_vowels_var = ctk.BooleanVar(value=True)
         self.no_base_oto_var = ctk.BooleanVar(value=False)
         self.enable_ml_correction_var = ctk.BooleanVar(value=True)
+        self.enable_pytorch_bridge_var = ctk.BooleanVar(value=False)
         self.advanced_options_expanded = False
         
         # 언어 선택
@@ -195,4 +196,3 @@ if __name__ == "__main__":
         except Exception:
             pass
         raise
-

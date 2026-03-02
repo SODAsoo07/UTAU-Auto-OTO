@@ -1,0 +1,302 @@
+from __future__ import annotations
+
+import os
+import re
+
+from core.kr_oto_rules import (
+    KR_VOWELS,
+    _cv_match_score,
+    _extract_kr_cv_alias_token,
+    _kr_cv_kernel,
+    _normalize_cv_match_token,
+    _split_kr_syllable_parts,
+    classify_alias,
+)
+
+
+def _alias_to_cv_target(alias, alias_type):
+    a = (alias or "").strip()
+    if not a:
+        return ""
+
+    if alias_type == "cv":
+        tok = re.sub(r"[^a-z]", "", a.lower())
+        return _kr_cv_kernel(tok)
+    if alias_type == "cv_head":
+        parts = a.split()
+        if len(parts) >= 2 and parts[0] == "-":
+            tok = re.sub(r"[^a-z]", "", parts[1].lower())
+            return _kr_cv_kernel(tok)
+        tok = re.sub(r"[^a-z]", "", a.lower().lstrip("-"))
+        return _kr_cv_kernel(tok)
+    if alias_type == "vcv":
+        parts = a.split()
+        if len(parts) >= 2:
+            tok = re.sub(r"[^a-z]", "", parts[1].lower())
+            return _kr_cv_kernel(tok)
+    if alias_type == "mono":
+        tok = re.sub(r"[^a-z]", "", a.lower())
+        if tok in KR_VOWELS:
+            return tok
+    return ""
+
+
+def _extract_cv_targets_from_lines(lines, custom_map=None):
+    targets = []
+    type_cache = {}
+    for line in lines or []:
+        if "=" not in line:
+            continue
+        alias = line.split("=", 1)[1].split(",", 1)[0].strip()
+        if not alias:
+            continue
+        a_type = type_cache.get(alias)
+        if a_type is None:
+            a_type = classify_alias(alias, custom_map)
+            type_cache[alias] = a_type
+        tok = _alias_to_cv_target(alias, a_type)
+        if tok:
+            targets.append(tok)
+    if not targets:
+        return []
+
+    collapsed = []
+    for tok in targets:
+        if not collapsed or collapsed[-1] != tok:
+            collapsed.append(tok)
+    return collapsed
+
+
+def _extract_kr_cv_targets_from_filename(filename):
+    """파일명에서 한국어 CV 계열 음절 토큰을 추출합니다."""
+    try:
+        from core.lab_generator import _parse_filename
+    except Exception:
+        return []
+
+    try:
+        tokens = _parse_filename(os.path.basename(filename or ""), convert_to_hangul=False)
+    except Exception:
+        return []
+
+    out = []
+    for tok in tokens or []:
+        norm = _normalize_cv_match_token(tok)
+        onset, vowel, coda = _split_kr_syllable_parts(norm)
+        if vowel:
+            out.append(norm)
+    return out
+
+
+def _iter_kr_cvvc_tokens(token_source):
+    if not token_source:
+        return []
+    if isinstance(token_source, list) and token_source and isinstance(token_source[0], dict):
+        out = []
+        for syl in token_source:
+            tok = _normalize_cv_match_token(
+                syl.get("roman") or syl.get("roman_cv") or syl.get("word") or ""
+            )
+            if tok:
+                out.append(tok)
+        return out
+    out = []
+    for tok in token_source:
+        norm = _normalize_cv_match_token(tok)
+        if norm:
+            out.append(norm)
+    return out
+
+
+def _build_kr_cvvc_occurrence_map(token_source):
+    """CVVC 파일의 filename 기반 음절 순서에서 CV/CV_HEAD occurrence map을 만듭니다."""
+    occ = {}
+    for idx, tok in enumerate(_iter_kr_cvvc_tokens(token_source)):
+        onset, vowel, coda = _split_kr_syllable_parts(tok)
+        if not vowel or coda:
+            continue
+        occ.setdefault(tok, []).append(idx)
+    return occ
+
+
+def _resolve_kr_cvvc_occurrence_index(alias, alias_type, occurrence_map, occurrence_state):
+    """한국어 CVVC에서 같은 CV 토큰의 등장 순서대로 CV/CV_HEAD를 직접 매핑합니다."""
+    if alias_type not in {"cv", "cv_head"}:
+        return None
+    tok = _extract_kr_cv_alias_token(alias)
+    if not tok:
+        return None
+    idxs = occurrence_map.get(tok) or []
+    if not idxs:
+        return None
+    used = int(occurrence_state.get(tok, 0))
+    if used >= len(idxs):
+        used = len(idxs) - 1
+    occurrence_state[tok] = used + 1
+    return idxs[used]
+
+
+def _extract_kr_vv_pair_key(alias):
+    """한국어 VV alias를 filename pair occurrence 매핑용 키로 변환합니다."""
+    parts = [p for p in re.split(r"\s+", (alias or "").strip().lower()) if p]
+    if len(parts) != 2:
+        return ""
+    left = _normalize_cv_match_token(parts[0])
+    right = _normalize_cv_match_token(parts[1])
+    lo, lv, lc = _split_kr_syllable_parts(left)
+    ro, rv, rc = _split_kr_syllable_parts(right)
+    if not lv or not rv:
+        return ""
+    if lo or ro or lc or rc:
+        return ""
+    return f"{left} {right}"
+
+
+def _build_kr_cvvc_vv_occurrence_map(token_source):
+    """CVVC 파일의 순수 모음-모음 연결(VV) 등장 순서를 맵으로 만듭니다."""
+    occ = {}
+    infos = _iter_kr_cvvc_tokens(token_source)
+    for idx in range(1, len(infos)):
+        prev_tok = infos[idx - 1]
+        curr_tok = infos[idx]
+        po, pv, pc = _split_kr_syllable_parts(prev_tok)
+        co, cv, cc = _split_kr_syllable_parts(curr_tok)
+        if not pv or not cv:
+            continue
+        if po or co or pc or cc:
+            continue
+        occ.setdefault(f"{prev_tok} {curr_tok}", []).append(idx)
+    return occ
+
+
+def _resolve_kr_cvvc_vv_index(alias, occurrence_map, occurrence_state):
+    """한국어 CVVC의 VV alias를 filename pair occurrence 기준으로 매핑합니다."""
+    key = _extract_kr_vv_pair_key(alias)
+    if not key:
+        return None
+    idxs = occurrence_map.get(key) or []
+    if not idxs:
+        return None
+    used = int(occurrence_state.get(key, 0))
+    if used >= len(idxs):
+        used = len(idxs) - 1
+    occurrence_state[key] = used + 1
+    return idxs[used]
+
+
+def _find_kr_cv_vowel_match_index(target_clean, romaji_syllables, expected_idx, search_back=1, search_fwd=2):
+    """
+    CV 목표 모음과 일치하는 음절을 기대 인덱스 근방에서 재탐색합니다.
+    한 음절 밀림(특히 이중모음/반모음) 보정용 안전장치입니다.
+    """
+    if not target_clean or not romaji_syllables:
+        return None
+    n = len(romaji_syllables)
+    if n <= 0:
+        return None
+    e = max(0, min(int(expected_idx), n - 1))
+
+    t_onset, t_vowel, _t_coda = _split_kr_syllable_parts(target_clean)
+    if not t_vowel:
+        return None
+
+    lo = max(0, e - max(0, int(search_back)))
+    hi = min(n - 1, e + max(0, int(search_fwd)))
+    best_idx = None
+    best_score = -10**9
+    for i in range(lo, hi + 1):
+        cand = romaji_syllables[i]
+        c_onset, c_vowel, _c_coda = _split_kr_syllable_parts(cand)
+        if not c_vowel or c_vowel != t_vowel:
+            continue
+        score = 100 - (abs(i - e) * 16)
+        if t_onset and c_onset:
+            if t_onset == c_onset:
+                score += 18
+            elif t_onset[:1] == c_onset[:1]:
+                score += 8
+            else:
+                score -= 10
+        elif t_onset != c_onset:
+            score -= 4
+        if score > best_score:
+            best_score = score
+            best_idx = i
+    return best_idx
+
+
+def _should_allow_kr_exact_vowel_fix(file_format, forced_selected_idx):
+    """
+    한국어 CVVC에서 filename occurrence로 이미 강제 매핑된 CV/CV_HEAD는
+    뒤의 모음 재탐색이 다시 덮어쓰지 않도록 막습니다.
+    """
+    fmt = str(file_format or "").strip().lower()
+    if fmt == "cvvc" and forced_selected_idx is not None:
+        return False
+    return True
+
+
+def _score_kr_syllable_mapping(candidate_infos, cv_targets):
+    """candidate 음절열이 alias 기반 cv_targets와 얼마나 일치하는지 점수화."""
+    if not candidate_infos or not cv_targets:
+        return -1.0
+
+    cand = []
+    for s in candidate_infos:
+        tok = s.get("roman_cv") or s.get("roman") or s.get("word") or ""
+        tok = _kr_cv_kernel(tok)
+        if tok:
+            cand.append(tok)
+    if not cand:
+        return -1.0
+
+    def _avg_with_shift(shift):
+        vals = []
+        for i, tgt in enumerate(cv_targets):
+            j = i + shift
+            if 0 <= j < len(cand):
+                vals.append(_cv_match_score(tgt, cand[j]))
+        if not vals:
+            return -1.0
+        coverage = len(vals) / float(max(len(cv_targets), 1))
+        length_penalty = abs(len(cand) - len(cv_targets)) * 4.0
+        return (sum(vals) / float(len(vals))) * coverage - length_penalty
+
+    return max(_avg_with_shift(0), _avg_with_shift(1), _avg_with_shift(-1))
+
+
+def _should_prefer_alias_based_syllables(file_format, used_words_based, base_score, alt_score):
+    """한국어 음절열 후보 중 alias 기반 결과를 채택할지 결정합니다."""
+    fmt = str(file_format or "").strip().lower()
+    base_score = float(base_score)
+    alt_score = float(alt_score)
+
+    if not used_words_based:
+        return alt_score >= base_score
+
+    if fmt == "cvvc":
+        # 한국어 CVVC는 words tier보다 alias/filename 순서가 더 안정적인 경우가 많다.
+        # alias 기반이 완전히 붕괴한 경우만 제외하고 기본적으로 alias 순서를 우선한다.
+        return alt_score >= 40.0
+
+    allow_alias_override = True
+    if used_words_based and base_score >= 58.0:
+        allow_alias_override = False
+    return allow_alias_override and base_score < 66.0 and alt_score >= 70.0 and alt_score >= (base_score + 8.0)
+
+
+__all__ = [
+    "_alias_to_cv_target",
+    "_build_kr_cvvc_occurrence_map",
+    "_build_kr_cvvc_vv_occurrence_map",
+    "_extract_cv_targets_from_lines",
+    "_extract_kr_cv_targets_from_filename",
+    "_extract_kr_vv_pair_key",
+    "_find_kr_cv_vowel_match_index",
+    "_iter_kr_cvvc_tokens",
+    "_resolve_kr_cvvc_occurrence_index",
+    "_resolve_kr_cvvc_vv_index",
+    "_score_kr_syllable_mapping",
+    "_should_allow_kr_exact_vowel_fix",
+    "_should_prefer_alias_based_syllables",
+]

@@ -235,3 +235,4 @@ custom_test_wavs/*_dict.txt
 /assets/models/oto_ml/**/*.csv
 /assets/models/oto_ml/**/*.parquet
 /assets/models/oto_ml/**/*.jsonl
+/assets/models

@@ -22,6 +22,17 @@ from core.ja_lab_generator import (
     KANA_COMBO_ROMAJI,
     KANA_SINGLE_ROMAJI,
 )
+from core.ja_oto_finalize import (
+    _convert_ja_internal_cutoff_to_oto_field,
+    _sanitize_ja_internal_params_for_wav_duration,
+    sanitize_ja_oto_for_wav_duration,
+)
+from core.ja_oto_postprocess import (
+    ensure_ja_cv_head_min_vowel_coverage,
+    guard_ja_cv_cutoff_to_next_onset,
+    guard_ja_cv_head_offset_to_onset,
+    post_adjust_params,
+)
 from core.textio_utils import load_template_oto_lines
 from core.oto_profile_presets import get_ja_profile_preset
 
@@ -253,6 +264,42 @@ JA_VOICELESS_ONSETS = {
 
 JA_NASAL_ONSETS = {'m', 'n', 'ny', 'ng', 'ngy'}
 JA_LIQUID_ONSETS = {'r', 'ry', 'l'}
+
+from core.ja_oto_mapping import (
+    classify_ja_alias,
+    detect_ja_alias_format,
+    get_vc_consonant,
+    _build_ja_syllables_from_phone_nuclei,
+    _build_syllables_from_filename,
+    _extract_ja_cv_target_syllable,
+    _extract_ja_cv_targets_from_lines,
+    _extract_ja_onset_token,
+    _extract_vcv_target_syllable,
+    _ja_is_n_bridge_alias,
+    _ja_left_bridge_token,
+    _ja_syllable_tail,
+    _normalize_ja_syllable_token,
+    _score_ja_syllable_mapping,
+    _select_ja_cv_syllable_index,
+    _select_vcv_syllable_index,
+    _syllable_info_token,
+    _vcv_syllable_match_score,
+)
+from core.ja_oto_bridge import (
+    _adaptive_ja_overlap,
+    _clamp_ja_bridge_overlap,
+    _ja_bridge_overlap_window,
+    _ja_cv_offset_and_pre,
+    _ja_cv_onset_class,
+    _ja_extract_cv_bounds,
+    _ja_mark_to_vowel,
+    _ja_overlap_consonant_hint,
+    _ja_onset_class,
+    _ja_pick_vowel_phone,
+    _ja_precenter_gap_targets,
+    _ja_target_vowel_from_alias,
+    _recenter_ja_params_around_pre,
+)
 JA_GLIDE_ONSETS = {'y', 'w'}
 JA_FRICATIVE_ONSETS = {'h', 'f', 'v', 'hy', 's', 'z', 'sh'}
 
@@ -408,173 +455,6 @@ def validate_oto_params(offset, consonant, cutoff, pre, ovl):
     return offset, consonant, cutoff, pre, ovl
 
 
-def sanitize_ja_oto_for_wav_duration(offset, consonant, cutoff, pre, ovl, wav_duration_ms, alias_type="cv"):
-    """
-    wav 길이 기준으로 최종 OTO 값을 안전한 영역 안에 다시 넣습니다.
-    OpenUtau의 cutoff는 파일 끝 기준이므로, 단순히 cutoff_abs > consonant만으로는
-    `cutoff before offset` 오류를 막을 수 없습니다.
-    """
-    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
-    try:
-        dur_ms = float(wav_duration_ms or 0.0)
-    except Exception:
-        dur_ms = 0.0
-    if dur_ms <= 0.0:
-        return offset, consonant, cutoff, pre, ovl
-
-    min_room_after_offset = 16.0 if alias_type in {"vc", "vv", "vcv"} else 22.0
-    offset = max(0.0, min(float(offset), max(dur_ms - min_room_after_offset, 0.0)))
-
-    cutoff_abs = abs(float(cutoff))
-    max_cutoff_abs = max(dur_ms - offset - 6.0, 0.0)
-    cutoff_abs = min(cutoff_abs, max_cutoff_abs)
-
-    active_len = max(dur_ms - offset - cutoff_abs, 0.0)
-    if active_len < 10.0:
-        target_active_len = min(max(12.0, active_len), max(dur_ms - offset - 2.0, 0.0))
-        cutoff_abs = max(0.0, dur_ms - offset - target_active_len)
-        active_len = max(dur_ms - offset - cutoff_abs, 0.0)
-
-    max_cons = max(active_len - 6.0, 0.0)
-    consonant = min(float(consonant), max_cons)
-    if consonant < 8.0 and active_len >= 10.0:
-        consonant = min(max(active_len * 0.72, 8.0), max_cons)
-
-    pre = min(float(pre), max(consonant - 6.0, 0.0))
-    if pre < 0.0:
-        pre = 0.0
-    ovl = min(float(ovl), pre * 0.82 if pre > 0.0 else 0.0)
-    if ovl < 0.0:
-        ovl = 0.0
-
-    if consonant <= pre + 4.0:
-        if max_cons >= pre + 6.0:
-            consonant = pre + 6.0
-        else:
-            consonant = max_cons
-            pre = max(0.0, consonant - 6.0)
-            ovl = min(ovl, pre * 0.82 if pre > 0.0 else 0.0)
-
-    if dur_ms - offset - cutoff_abs <= 2.0:
-        cutoff_abs = max(0.0, dur_ms - offset - 4.0)
-        active_len = max(dur_ms - offset - cutoff_abs, 0.0)
-        max_cons = max(active_len - 4.0, 0.0)
-        consonant = min(consonant, max_cons)
-        pre = min(pre, max(consonant - 4.0, 0.0))
-        ovl = min(ovl, pre * 0.82 if pre > 0.0 else 0.0)
-
-    cutoff = -max(cutoff_abs, 0.0)
-    return offset, consonant, cutoff, pre, ovl
-
-
-def _sanitize_ja_internal_params_for_wav_duration(offset, consonant, cutoff, pre, ovl, wav_duration_ms, alias_type="cv"):
-    """
-    일본어 생성기 내부 좌표계 기준으로 파라미터를 안전한 범위로 다시 넣습니다.
-    여기서 cutoff는 OTO 파일의 right blank가 아니라, offset 이후 active length로 취급합니다.
-    """
-    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
-    try:
-        dur_ms = float(wav_duration_ms or 0.0)
-    except Exception:
-        dur_ms = 0.0
-    if dur_ms <= 0.0:
-        return offset, consonant, cutoff, pre, ovl
-
-    min_room_after_offset = 16.0 if alias_type in {"vc", "vv", "vcv"} else 22.0
-    offset = max(0.0, min(float(offset), max(dur_ms - min_room_after_offset, 0.0)))
-
-    max_active_len = max(dur_ms - offset - 6.0, 0.0)
-    active_len = max(min(abs(float(cutoff)), max_active_len), 0.0)
-    if active_len < 10.0:
-        active_len = min(max(12.0, active_len), max(dur_ms - offset - 2.0, 0.0))
-
-    max_cons = max(active_len - 6.0, 0.0)
-    consonant = min(float(consonant), max_cons)
-    if consonant < 8.0 and active_len >= 10.0:
-        consonant = min(max(active_len * 0.72, 8.0), max_cons)
-
-    pre = min(float(pre), max(consonant - 6.0, 0.0))
-    pre = max(pre, 0.0)
-    ovl = min(float(ovl), pre * 0.82 if pre > 0.0 else 0.0)
-    ovl = max(ovl, 0.0)
-
-    if consonant <= pre + 4.0:
-        if max_cons >= pre + 6.0:
-            consonant = pre + 6.0
-        else:
-            consonant = max_cons
-            pre = max(0.0, consonant - 6.0)
-            ovl = min(ovl, pre * 0.82 if pre > 0.0 else 0.0)
-
-    if active_len <= 6.0:
-        active_len = min(max(dur_ms - offset - 2.0, 0.0), 8.0)
-        consonant = min(consonant, max(active_len - 2.0, 0.0))
-        pre = min(pre, max(consonant - 2.0, 0.0))
-        ovl = min(ovl, pre * 0.80 if pre > 0.0 else 0.0)
-
-    cutoff = -max(active_len, 0.0)
-    return offset, consonant, cutoff, pre, ovl
-
-
-def _convert_ja_internal_cutoff_to_oto_field(oto_path, wav_dir):
-    """
-    일본어 OTO 최종 저장 단계 안전화.
-
-    과거에는 내부 cutoff를 별도 좌표계로 보고 OTO cutoff 필드로 재변환했지만,
-    실제 생성 결과를 비교해 보니 1차 생성본 cutoff 값이 이미 OTO 파일 의미론과
-    호환되는 상태였다. 추가 변환을 적용하면 같은 파일 안 alias들의 cutoff가
-    파일 끝 근처 공통 위치로 붕괴한다.
-
-    현재는 좌표계 변환을 하지 않고, 최종 OTO 파일 의미론 기준 sanitize만 수행한다.
-    """
-    if not oto_path or not os.path.exists(oto_path) or not os.path.isdir(wav_dir):
-        return 0
-
-    from core.oto_generator import _wav_duration_ms, _find_wav_path_for_name
-
-    with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
-        lines = f.read().splitlines()
-
-    wav_index = {}
-    try:
-        for fn in os.listdir(wav_dir):
-            if fn.lower().endswith(".wav"):
-                wav_index[normalize_key(fn)] = os.path.join(wav_dir, fn)
-    except Exception:
-        return 0
-
-    out_lines = []
-    changed = 0
-    for line in lines:
-        row = _parse_oto_line_profile(line)
-        if not row:
-            out_lines.append(line)
-            continue
-
-        wav_path = _find_wav_path_for_name(row["wav"], wav_dir, wav_index)
-        dur_ms = _wav_duration_ms(wav_path) if wav_path else 0.0
-        alias_type = classify_ja_alias(row["alias"])
-        if dur_ms <= 0.0:
-            out_lines.append(line)
-            continue
-
-        offset, consonant, cutoff_field, pre, ovl = sanitize_ja_oto_for_wav_duration(
-            row["offset"], row["cons"], row["cutoff"], row["pre"], row["ovl"], dur_ms, alias_type=alias_type
-        )
-
-        new_line = (
-            f"{row['wav']}={row['alias']},"
-            f"{offset:.2f},{consonant:.2f},{cutoff_field:.2f},{pre:.2f},{ovl:.2f}"
-        )
-        if new_line != line:
-            changed += 1
-        out_lines.append(new_line)
-
-    if changed > 0:
-        with open(oto_path, "w", encoding="utf-8", newline="\n") as f:
-            for line in out_lines:
-                f.write(line + "\n")
-    return changed
 
 
 def normalize_key(name):
@@ -602,341 +482,8 @@ def _is_ja_vowel_token(token):
     onset, vowel = split_ja_romaji_syllable(t)
     return (not onset) and (vowel in JA_VOWELS)
 
-def classify_ja_alias(alias, custom_map=None):
-    """
-    일본어 에일리어스 유형을 분류합니다.
-    
-    Returns:
-        'br'   - 숨소리 (br)
-        'cv_head' - 어두 CV (- か)
-        'vcv'  - VCV 연속음 (a か)
-        'vc'   - VC 연단음 (a k)
-        'vv'   - VV 모음전환 (a i)
-        'cv'   - CV 단독음 (か)
-        'mono' - 단모음 (あ)
-    """
-    clean = alias.strip()
-    
-    # 숨소리
-    if is_breath(clean):
-        return 'br'
-        
-    # 커스텀 맵 강제 검사 (특수발음 단독)
-    if custom_map and clean in custom_map:
-        mapped_val = custom_map[clean].lower()
-        if mapped_val in ['r', 'h', 'sil', 'br', 'pau', 'sp']:
-            return 'br'
-        
-        # 로마자 변환 후 모음 여부 체크
-        ipa = romaji_to_ipa(mapped_val)
-        if ipa and (ipa in ['a', 'i', '?', 'e', 'o'] or _is_ja_vowel_token(mapped_val)):
-            return 'mono'
-        return 'cv'
-    
-    # 띄어쓰기 있는 경우 (2토큰)
-    if ' ' in clean:
-        parts = clean.split()
-        left = parts[0]
-        right = ' '.join(parts[1:])
-        
-        # 어두 CV
-        if left == '-':
-            return 'cv_head'
-            
-        # VCV 판별 로직
-        left_is_vowel = _is_ja_vowel_token(left)
-        
-        if left_is_vowel:
-            # "o -" 같은 종결형은 VCV가 아니라 VV 성격으로 처리
-            if right.strip() == '-':
-                return 'vv'
-            if re.fullmatch(r"^[^0-9A-Za-z\u3040-\u30ff\u31f0-\u31ff]+$", right.strip()):
-                return 'vc'
-            # 오른쪽이 알파벳 자음만 있는 경우 -> VC
-            if right.lower() in JA_CONSONANTS:
-                return 'vc'
-            # 오른쪽이 로마자 모음이거나 히라가나 모음인 경우 -> VV
-            right_norm = _normalize_ja_syllable_token(right)
-            if _is_ja_vowel_token(right) or _is_ja_vowel_token(right_norm):
-                return 'vv'
-            _, right_vowel = split_ja_romaji_syllable(right_norm.lower())
-            if right_vowel not in JA_VOWELS:
-                return 'vc'
-            # 그 외 (명확한 CV 음절) -> VCV
-            return 'vcv'
-            
-        return 'vc'
-        
-    # 단모음 판별
-    if _is_ja_vowel_token(clean) or clean == '-':
-        return 'mono'
-
-    clean_lower = clean.lower()
-    for v in JA_VOWELS:
-        if clean_lower.startswith(v) and len(clean_lower) > len(v):
-            tail = clean_lower[len(v):]
-            if tail in JA_CONSONANTS:
-                return 'vc'
-            if _is_ja_vowel_token(tail):
-                return 'vv'
-
-    onset, vowel = split_ja_romaji_syllable(clean_lower)
-    if vowel in JA_VOWELS:
-        return 'mono' if not onset else 'cv'
-    return 'cv'
-
-
-def detect_ja_alias_format(alias_list, custom_map=None):
-    """
-    템플릿 에일리어스 목록으로 파일의 녹음 포맷을 판별합니다.
-    """
-    if not alias_list:
-        return 'cv'
-
-    type_cache = {}
-    types = []
-    for a in alias_list:
-        t = type_cache.get(a)
-        if t is None:
-            t = classify_ja_alias(a, custom_map)
-            type_cache[a] = t
-        types.append(t)
-    type_set = set(types)
-    
-    if type_set == {'br'}: return 'br'
-    if type_set <= {'mono', 'cv_head', 'cv'}: return 'cv'
-    if 'vcv' in type_set: return 'vcv'
-
-    if 'vc' in type_set or 'vv' in type_set:
-        return 'cvvc'
-
-    non_br = type_set - {'br'}
-    if non_br <= {'vc', 'vv'}:
-        return 'vc_only'
-
-    return 'cv'
-
-def get_vc_consonant(alias):
-    """VC 에일리어스에서 자음 파트를 추출합니다."""
-    parts = alias.strip().split()
-    right = parts[1].lower() if len(parts) >= 2 else alias.strip().lower()
-    if not right:
-        return ''
-    if right in JA_CONSONANTS:
-        return right
-    onset, _ = split_ja_romaji_syllable(right)
-    if onset:
-        return onset
-    return '' if _is_ja_vowel_token(right) else right
-
-
 def _clean_phone_mark(mark):
     return re.sub(r"[0-9]", "", (mark or "").strip().lower())
-
-
-def _ja_bridge_overlap_window(pre, consonant_hint="", mode="vc"):
-    """
-    브리지 계열(VC/VV/VCV) alias에서 pre와 overlap 사이 간격을
-    너무 크게 벌리지 않도록 모드/자음군별 목표 구간을 반환합니다.
-    반환값: (gap_min, gap_max, gap_target)
-    """
-    p = max(float(pre), 0.0)
-    c = _clean_phone_mark(consonant_hint)
-    hard = {"k", "g", "t", "d", "p", "b", "q", "c", "ch", "ts", "dz", "ky", "gy", "ty", "dy", "py", "by"}
-    fric = {"s", "z", "sh", "h", "f", "v", "hy"}
-    sonorant = {"m", "n", "ny", "r", "l", "ry", "w", "y"}
-
-    mode = str(mode or "vc").strip().lower()
-    if mode == "vv":
-        gap_min, gap_max, gap_target = 4.0, 10.0, 7.0
-    elif c in hard or c in fric:
-        if mode == "vcv":
-            gap_min, gap_max, gap_target = 8.0, 16.0, 11.0
-        else:
-            gap_min, gap_max, gap_target = 10.0, 20.0, 14.0
-    elif c in sonorant:
-        if mode == "vcv":
-            gap_min, gap_max, gap_target = 5.0, 12.0, 8.0
-        else:
-            gap_min, gap_max, gap_target = 6.0, 14.0, 9.0
-    else:
-        if mode == "vcv":
-            gap_min, gap_max, gap_target = 6.0, 13.0, 9.0
-        else:
-            gap_min, gap_max, gap_target = 7.0, 15.0, 10.0
-
-    gap_target = _clamp_range(gap_target, gap_min, gap_max)
-    if p <= 0:
-        return gap_min, gap_max, gap_target
-    # pre가 짧아도 최소한 gap 윈도우의 형태는 유지하되, 물리적으로 불가능한 값은 줄여준다.
-    gap_max = min(gap_max, max(p - 1.0, gap_min))
-    gap_min = min(gap_min, gap_max)
-    gap_target = _clamp_range(gap_target, gap_min, gap_max)
-    return gap_min, gap_max, gap_target
-
-
-def _clamp_ja_bridge_overlap(pre, ovl, consonant_hint="", mode="vc"):
-    """
-    브리지 계열 overlap이 pre보다 지나치게 멀리 앞서지 않도록 제한합니다.
-    """
-    p = max(float(pre), 0.0)
-    if p <= 0:
-        return 0.0
-    gap_min, gap_max, gap_target = _ja_bridge_overlap_window(p, consonant_hint, mode=mode)
-    lower = max(p - gap_max, 0.0)
-    upper = max(p - gap_min, 0.0)
-    if upper < lower:
-        upper = lower
-    base = float(ovl) if ovl is not None else (p - gap_target)
-    return max(0.0, min(p, min(upper, max(lower, base))))
-
-
-def _ja_overlap_consonant_hint(alias_text, alias_type="vc"):
-    alias_type = str(alias_type or "").strip().lower()
-    if alias_type == "vc":
-        return get_vc_consonant(alias_text)
-    if alias_type == "vcv":
-        target = _extract_vcv_target_syllable(alias_text)
-        onset, _v = split_ja_romaji_syllable(target)
-        return (onset or "").strip().lower()
-    return ""
-
-
-def _ja_precenter_gap_targets(alias_type, alias_text=""):
-    alias_type = str(alias_type or "cv").strip().lower()
-    if alias_type in {"vc", "vv", "vcv"}:
-        if alias_type == "vv":
-            return {
-                "ovl_gap": (4.0, 10.0, 7.0),
-                "cons_gap": (48.0, 132.0, 80.0),
-                "cut_gap": (24.0, 96.0, 48.0),
-            }
-
-        hint = _ja_overlap_consonant_hint(alias_text, alias_type=alias_type)
-        og_lo, og_hi, og_t = _ja_bridge_overlap_window(120.0, hint, mode=("vcv" if alias_type == "vcv" else "vc"))
-        if hint in JA_PLOSIVE_ONSETS or hint in JA_SIBILANT_ONSETS or hint in JA_FRICATIVE_ONSETS:
-            cons_gap = (20.0, 60.0, 34.0) if alias_type == "vc" else (58.0, 150.0, 92.0)
-            cut_gap = (12.0, 46.0, 25.0) if alias_type == "vc" else (34.0, 92.0, 54.0)
-        elif hint in JA_NASAL_ONSETS or hint in JA_LIQUID_ONSETS or hint in JA_GLIDE_ONSETS:
-            cons_gap = (28.0, 96.0, 52.0) if alias_type == "vc" else (74.0, 180.0, 116.0)
-            cut_gap = (18.0, 74.0, 40.0) if alias_type == "vc" else (42.0, 122.0, 70.0)
-        else:
-            cons_gap = (24.0, 82.0, 44.0) if alias_type == "vc" else (66.0, 164.0, 102.0)
-            cut_gap = (16.0, 64.0, 34.0) if alias_type == "vc" else (38.0, 108.0, 62.0)
-        return {
-            "ovl_gap": (og_lo, og_hi, og_t),
-            "cons_gap": cons_gap,
-            "cut_gap": cut_gap,
-        }
-
-    if alias_type in {"cv", "cv_head"}:
-        target = _extract_ja_cv_target_syllable(alias_text, alias_type=alias_type)
-        onset, _vowel = split_ja_romaji_syllable(target)
-        onset = (onset or "").strip().lower()
-        if onset in JA_NASAL_ONSETS or onset in JA_LIQUID_ONSETS or onset in JA_GLIDE_ONSETS:
-            return {
-                "ovl_gap": (12.0, 28.0, 18.0),
-                "cons_gap": (82.0, 192.0, 124.0),
-                "cut_gap": (48.0, 128.0, 78.0),
-            }
-        if onset in JA_PLOSIVE_ONSETS:
-            return {
-                "ovl_gap": (22.0, 40.0, 29.0),
-                "cons_gap": (56.0, 148.0, 88.0),
-                "cut_gap": (34.0, 94.0, 54.0),
-            }
-        if onset in JA_SIBILANT_ONSETS or onset in JA_FRICATIVE_ONSETS:
-            return {
-                "ovl_gap": (16.0, 34.0, 24.0),
-                "cons_gap": (72.0, 176.0, 110.0),
-                "cut_gap": (42.0, 110.0, 64.0),
-            }
-        return {
-            "ovl_gap": (18.0, 36.0, 26.0),
-            "cons_gap": (64.0, 160.0, 98.0),
-            "cut_gap": (40.0, 108.0, 62.0),
-        }
-
-    return {
-        "ovl_gap": (18.0, 34.0, 24.0),
-        "cons_gap": (48.0, 132.0, 80.0),
-        "cut_gap": (28.0, 88.0, 48.0),
-    }
-
-
-def _recenter_ja_params_around_pre(offset, consonant, cutoff, pre, ovl, alias_type="cv", alias_text=""):
-    targets = _ja_precenter_gap_targets(alias_type, alias_text)
-    pre_v = max(float(pre), 0.0)
-    if pre_v <= 0.0:
-        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
-
-    alias_type = str(alias_type or "cv").strip().lower()
-    if alias_type == "vv":
-        ovl_w, cons_w, cut_w = 0.50, 0.26, 0.22
-    elif alias_type in {"vc", "vcv"}:
-        ovl_w, cons_w, cut_w = 0.42, 0.28, 0.24
-    else:
-        ovl_w, cons_w, cut_w = 0.22, 0.20, 0.18
-
-    ovl_gap_now = max(pre_v - max(float(ovl), 0.0), 0.0)
-    cons_gap_now = max(float(consonant) - pre_v, 8.0)
-    cut_gap_now = max(abs(float(cutoff)) - float(consonant), 12.0)
-
-    og_lo, og_hi, og_t = targets["ovl_gap"]
-    cg_lo, cg_hi, cg_t = targets["cons_gap"]
-    tg_lo, tg_hi, tg_t = targets["cut_gap"]
-
-    ovl_gap_new = _clamp_range(ovl_gap_now, og_lo, og_hi)
-    ovl_gap_new = _blend(ovl_gap_new, og_t, ovl_w)
-
-    cons_gap_new = _clamp_range(cons_gap_now, cg_lo, cg_hi)
-    cons_gap_new = _blend(cons_gap_new, cg_t, cons_w)
-
-    cut_gap_new = _clamp_range(cut_gap_now, tg_lo, tg_hi)
-    cut_gap_new = _blend(cut_gap_new, tg_t, cut_w)
-
-    ovl_new = max(0.0, pre_v - ovl_gap_new)
-    cons_new = pre_v + cons_gap_new
-    cutoff_new = -(cons_new + cut_gap_new)
-    return validate_oto_params(offset, cons_new, cutoff_new, pre_v, ovl_new)
-
-
-def _adaptive_ja_overlap(pre, consonant_hint="", mode="cv"):
-    """
-    子音タイプとエイリアスタイプに応じて overlap を動的調整する.
-    """
-    p = max(float(pre), 0.0)
-    if p <= 0:
-        return 0.0
-
-    c = _clean_phone_mark(consonant_hint)
-    hard = {"k", "g", "t", "d", "p", "b", "q", "c", "ch", "ts", "dz", "ky", "gy", "ty", "dy", "py", "by"}
-    fric = {"s", "z", "sh", "h", "f", "v", "hy"}
-    sonorant = {"m", "n", "ny", "r", "l", "ry", "w", "y"}
-
-    base_by_mode = {
-        "cv": 0.46,
-        "cv_head": 0.40,
-        "vcv": 0.50,
-        "vc": 0.44,
-        "vv": 0.55,
-    }
-    ratio = base_by_mode.get(mode, 0.46)
-
-    if c in hard:
-        ratio -= 0.16
-    elif c in fric:
-        ratio += 0.05
-    elif c in sonorant:
-        ratio += 0.08
-
-    if mode in ("vc", "vv", "vcv"):
-        _gap_min, _gap_max, gap_target = _ja_bridge_overlap_window(p, c, mode=mode)
-        return _clamp_ja_bridge_overlap(p, p - gap_target, c, mode=mode)
-
-    ratio = max(0.20, min(0.72, ratio))
-    ovl = p * ratio
-    return max(0.0, min(ovl, p))
 
 
 def _is_nucleus_phone(mark):
@@ -969,122 +516,6 @@ def _alias_to_ja_cv_target(alias, alias_type):
         if len(parts) >= 2:
             return _normalize_ja_syllable_token(parts[1])
     return ""
-
-
-def _extract_ja_cv_targets_from_lines(lines, custom_map=None):
-    targets = []
-    type_cache = {}
-    for line in lines or []:
-        if "=" not in line:
-            continue
-        alias = line.split("=", 1)[1].split(",", 1)[0].strip()
-        if not alias:
-            continue
-        a_type = type_cache.get(alias)
-        if a_type is None:
-            a_type = classify_ja_alias(alias, custom_map)
-            type_cache[alias] = a_type
-        tok = _alias_to_ja_cv_target(alias, a_type)
-        if tok:
-            targets.append(tok)
-    if not targets:
-        return []
-    collapsed = []
-    for t in targets:
-        if not collapsed or collapsed[-1] != t:
-            collapsed.append(t)
-    return collapsed
-
-
-def _build_ja_syllables_from_phone_nuclei(ph_intervals, cv_targets):
-    if not ph_intervals or not cv_targets:
-        return None
-
-    target_n = len(cv_targets)
-    nuclei = [i for i, p in enumerate(ph_intervals) if _is_nucleus_phone(getattr(p, "mark", ""))]
-    if len(nuclei) < target_n:
-        return None
-
-    if target_n == 1:
-        selected = [nuclei[0]]
-    elif len(nuclei) == target_n:
-        selected = list(nuclei)
-    else:
-        n_count = len(nuclei)
-        selected_pos = []
-        for i in range(target_n):
-            ideal = int(round(i * (n_count - 1) / float(target_n - 1)))
-            lo = i
-            hi = n_count - (target_n - i)
-            pos = max(lo, min(hi, ideal))
-            selected_pos.append(pos)
-        selected = [nuclei[pos] for pos in selected_pos]
-
-    infos = []
-    global_start = float(ph_intervals[0].minTime)
-    global_end = float(ph_intervals[-1].maxTime)
-    for i, n_idx in enumerate(selected):
-        if i == 0:
-            s_t = global_start
-        else:
-            prev_n = selected[i - 1]
-            s_t = (float(ph_intervals[prev_n].maxTime) + float(ph_intervals[n_idx].minTime)) * 0.5
-
-        if i + 1 < len(selected):
-            next_n = selected[i + 1]
-            e_t = (float(ph_intervals[n_idx].maxTime) + float(ph_intervals[next_n].minTime)) * 0.5
-        else:
-            e_t = global_end
-
-        phones = [
-            p for p in ph_intervals
-            if float(p.minTime) >= s_t - 1e-6 and float(p.maxTime) <= e_t + 1e-6
-        ]
-        if not phones:
-            phones = [ph_intervals[n_idx]]
-
-        tok = cv_targets[i] if i < len(cv_targets) else ""
-        infos.append({
-            'word': tok,
-            'roman': tok,
-            'start_time': s_t,
-            'end_time': e_t,
-            'phones': list(phones),
-        })
-
-    return infos if infos else None
-
-
-def _score_ja_syllable_mapping(candidate_infos, cv_targets):
-    """candidate 음절열이 alias 기반 cv_targets와 얼마나 일치하는지 점수화."""
-    if not candidate_infos or not cv_targets:
-        return -1.0
-
-    cand = []
-    for s in candidate_infos:
-        tok = _syllable_info_token(s)
-        if tok:
-            cand.append(tok)
-    if not cand:
-        return -1.0
-
-    targets = [_normalize_ja_syllable_token(t) for t in cv_targets if t]
-    if not targets:
-        return -1.0
-
-    def _avg_with_shift(shift):
-        vals = []
-        for i, tgt in enumerate(targets):
-            j = i + shift
-            if 0 <= j < len(cand):
-                vals.append(_vcv_syllable_match_score(tgt, cand[j]))
-        if not vals:
-            return -1.0
-        coverage = len(vals) / float(max(len(targets), 1))
-        length_penalty = abs(len(cand) - len(targets)) * 4.0
-        return (sum(vals) / float(len(vals))) * coverage - length_penalty
-
-    return max(_avg_with_shift(0), _avg_with_shift(1), _avg_with_shift(-1))
 
 
 def _target_vowel_from_filename_syllable(syl):
@@ -1182,68 +613,6 @@ def _align_nuclei_positions_to_targets(nuclei, nucleus_vowels, target_vowels):
     return [nuclei[p] for p in pos]
 
 
-def _build_syllables_from_filename(ph_intervals, filename_syllables):
-    """
-    파일명 음절 순서를 기준으로 phones를 음절 단위로 재분할합니다.
-    List/filename-first 매핑의 핵심.
-    """
-    if not ph_intervals or not filename_syllables:
-        return None
-
-    target_n = len(filename_syllables)
-    nuclei = [i for i, p in enumerate(ph_intervals) if _is_nucleus_phone(p.mark)]
-    if len(nuclei) < target_n:
-        return None
-
-    target_vowels = [_target_vowel_from_filename_syllable(s) for s in filename_syllables]
-    nucleus_vowels = [_ja_mark_to_vowel(getattr(ph_intervals[i], "mark", "")) for i in nuclei]
-    aligned = _align_nuclei_positions_to_targets(nuclei, nucleus_vowels, target_vowels)
-
-    if aligned and len(aligned) == target_n:
-        selected = aligned
-    elif target_n == 1:
-        selected = [nuclei[0]]
-    elif len(nuclei) == target_n:
-        selected = list(nuclei)
-    else:
-        # nucleus가 더 많을 때는 파일명 음절 수에 맞춰 단조 증가 샘플링
-        selected = []
-        prev = -1
-        last_idx = len(nuclei) - 1
-        for i in range(target_n):
-            pos = round(i * last_idx / (target_n - 1))
-            cand = nuclei[pos]
-            if cand <= prev:
-                cand = prev + 1
-            if cand >= len(ph_intervals):
-                cand = len(ph_intervals) - 1
-            selected.append(cand)
-            prev = cand
-
-    infos = []
-    start_idx = 0
-    for i, n_idx in enumerate(selected):
-        if n_idx < start_idx:
-            return None
-        phones = ph_intervals[start_idx:n_idx + 1]
-        if not phones:
-            return None
-        infos.append({
-            'word': filename_syllables[i],
-            'start_time': phones[0].minTime,
-            'end_time': phones[-1].maxTime,
-            'phones': list(phones),
-        })
-        start_idx = n_idx + 1
-
-    # 남은 phone 꼬리는 마지막 음절에 합침
-    if infos and start_idx < len(ph_intervals):
-        infos[-1]['phones'].extend(ph_intervals[start_idx:])
-        infos[-1]['end_time'] = infos[-1]['phones'][-1].maxTime
-
-    return infos if infos else None
-
-
 def _is_vowel_chain_syllables(syllables):
     """
     파일명이 순수 모음 연속음(예: a a i a u e a)인지 판별.
@@ -1261,525 +630,6 @@ def _is_vowel_chain_syllables(syllables):
 
 
 @lru_cache(maxsize=65536)
-def _normalize_ja_syllable_token(token):
-    t_raw = (token or "").strip()
-    if not t_raw:
-        return ""
-    t = t_raw.lower()
-    if re.search(r'[\u3041-\u3096\u30A1-\u30FA\u30FC]', t_raw):
-        syls = parse_ja_filename(t_raw)
-        if syls:
-            t = syls[0].lower()
-    t = t.replace("'", "").strip("-_ ")
-    if not t:
-        return ""
-    if t in {"n", "nn", "xn", "m"}:
-        return "n"
-    onset, vowel = split_ja_romaji_syllable(t)
-    if vowel in JA_VOWELS:
-        return f"{onset}{vowel}" if onset else vowel
-    return t
-
-
-@lru_cache(maxsize=65536)
-def _extract_vcv_target_syllable(alias):
-    parts = (alias or "").strip().split()
-    if len(parts) >= 2:
-        return _normalize_ja_syllable_token(parts[1])
-    return _normalize_ja_syllable_token(alias)
-
-
-@lru_cache(maxsize=65536)
-def _ja_left_bridge_token(alias_text):
-    parts = (alias_text or "").strip().split()
-    if len(parts) >= 2:
-        return _normalize_ja_syllable_token(parts[0])
-    return ""
-
-
-@lru_cache(maxsize=65536)
-def _ja_is_n_bridge_alias(alias_text, alias_type="vc"):
-    alias_type = str(alias_type or "").strip().lower()
-    if alias_type not in {"vc", "vcv"}:
-        return False
-    left = _ja_left_bridge_token(alias_text)
-    return left in {"n", "nn", "xn", "m"}
-
-
-def _syllable_info_token(syl_info):
-    if not isinstance(syl_info, dict):
-        return ""
-    for k in ("roman", "word"):
-        if k in syl_info:
-            tok = _normalize_ja_syllable_token(syl_info.get(k, ""))
-            if tok:
-                return tok
-    phones = syl_info.get("phones") or []
-    marks = [_clean_phone_mark(getattr(p, "mark", "")) for p in phones]
-    marks = [m for m in marks if m and m not in {"sil", "sp", "spn", "pau"}]
-    if not marks:
-        return ""
-    onset = ""
-    vowel = ""
-    for m in marks:
-        if m in {"a", "i", "u", "ɯ", "e", "o", "ɴ", "n"}:
-            vowel = "u" if m == "ɯ" else ("n" if m in {"ɴ", "n"} else m)
-            break
-        if not onset:
-            onset = m
-    if vowel:
-        return f"{onset}{vowel}" if onset and vowel != "n" else vowel
-    return onset
-
-
-@lru_cache(maxsize=131072)
-def _vcv_syllable_match_score(target, candidate):
-    t = _normalize_ja_syllable_token(target)
-    c = _normalize_ja_syllable_token(candidate)
-    if not t or not c:
-        return 0
-    if t == c:
-        return 100
-
-    to, tv = split_ja_romaji_syllable(t)
-    co, cv = split_ja_romaji_syllable(c)
-    score = 0
-    if tv and cv and tv == cv:
-        score += 60
-    if to and co:
-        if to == co:
-            score += 35
-        elif to.startswith(co) or co.startswith(to):
-            score += 22
-        elif to[0] == co[0]:
-            score += 10
-    if t in c or c in t:
-        score += 8
-    return score
-
-
-def _select_vcv_syllable_index(alias, expected_idx, syllables_info):
-    if not syllables_info:
-        return 0
-    n = len(syllables_info)
-    e = max(0, min(int(expected_idx), n - 1))
-    target = _extract_vcv_target_syllable(alias)
-    if not target:
-        return e
-
-    # VCV는 한 번 뒤로 되감기 시작하면 이후 alias가 연쇄적으로 틀어지므로
-    # 기대 인덱스 기준 유지 또는 제한적인 +1 보정만 허용한다.
-    start = e
-    end = min(n, e + 3)
-    best_idx = e
-    best_score = -10**9
-    best_key = (-10**9, -10**9, -10**9, -10**9)
-    target_onset = _extract_ja_onset_token(target)
-    _to, target_vowel = split_ja_romaji_syllable(target)
-    target_tail = _ja_syllable_tail(target)
-    target_cls = _ja_onset_class(target_onset)
-    dist_penalty = 8 if target_cls in {"nasal", "voiced"} else 7
-
-    def _score_idx(i):
-        cand = _syllable_info_token(syllables_info[i])
-        cand_onset = _extract_ja_onset_token(cand)
-        _co, cand_vowel = split_ja_romaji_syllable(cand)
-        cand_tail = _ja_syllable_tail(cand)
-        score = _vcv_syllable_match_score(target, cand) - abs(i - e) * dist_penalty
-        if target_vowel and cand_vowel and target_vowel != cand_vowel:
-            score -= 26
-        if target_onset and cand_onset:
-            if target_onset == cand_onset:
-                score += 8
-            elif target_onset[:1] == cand_onset[:1]:
-                score += 3
-            else:
-                score -= 12
-        if target_tail and cand_tail and target_tail != cand_tail:
-            score -= 10
-        elif (not target_tail) and cand_tail:
-            score -= 10
-        return score
-
-    expected_score = _score_idx(e)
-    for i in range(start, end):
-        cand = _syllable_info_token(syllables_info[i])
-        score = _score_idx(i)
-        cand_norm = _normalize_ja_syllable_token(cand)
-        key = (
-            score,
-            1 if cand_norm == target else 0,
-            -abs(i - e),
-            1 if i >= e else 0,
-        )
-        if key > best_key:
-            best_key = key
-            best_score = score
-            best_idx = i
-    if best_score < 58:
-        return e
-    if best_idx <= e:
-        return e
-    if best_idx > (e + 1):
-        return e
-    best_gain = best_score - expected_score
-    if best_gain < 20:
-        return e
-    return best_idx
-
-
-@lru_cache(maxsize=131072)
-def _extract_ja_cv_target_syllable(alias, alias_type="cv"):
-    parts = (alias or "").strip().split()
-    if not parts:
-        return ""
-    if alias_type in {"cv_head", "vcv"} and len(parts) >= 2:
-        return _normalize_ja_syllable_token(parts[1])
-    if len(parts) >= 2 and parts[0] == "-":
-        return _normalize_ja_syllable_token(parts[1])
-    return _normalize_ja_syllable_token(parts[-1])
-
-
-@lru_cache(maxsize=65536)
-def _extract_ja_onset_token(token):
-    t = _normalize_ja_syllable_token(token)
-    if not t:
-        return ""
-    onset, vowel = split_ja_romaji_syllable(t)
-    if vowel in JA_VOWELS:
-        return (onset or "").lower()
-    if t in JA_VOWELS:
-        return ""
-    return t
-
-
-@lru_cache(maxsize=65536)
-def _ja_syllable_tail(token):
-    t = _normalize_ja_syllable_token(token)
-    if not t:
-        return ""
-    onset, vowel = split_ja_romaji_syllable(t)
-    if vowel in JA_VOWELS:
-        core = f"{onset}{vowel}"
-        if t.startswith(core):
-            return t[len(core):]
-    return ""
-
-
-def _ja_onset_class(onset):
-    o = (onset or "").strip().lower()
-    if not o:
-        return "other"
-    if o in JA_NASAL_ONSETS or o.startswith("m"):
-        return "nasal"
-    if o in JA_VOICED_ONSETS:
-        return "voiced"
-    if o in JA_VOICELESS_ONSETS:
-        return "voiceless"
-    return "other"
-
-
-def _ja_cv_onset_class(alias_text, c_hint="", alias_type="cv"):
-    target_tok = _extract_ja_cv_target_syllable(alias_text, alias_type=alias_type)
-    onset = _extract_ja_onset_token(target_tok)
-    if not onset:
-        onset = _ja_extract_onset_for_timing(alias_text, alias_type=alias_type)
-    if not onset:
-        hint = re.sub(r"[^a-z]", "", (c_hint or "").lower())
-        onset = hint
-    return _ja_onset_class(onset), onset
-
-
-def _ja_cv_offset_and_pre(
-    c_start,
-    c_end,
-    alias_text,
-    c_hint="",
-    alias_type="cv",
-    vowel_start=None,
-    vowel_end=None,
-):
-    """
-    JA CV/CV_HEAD의 과도한 선행 리드를 줄이기 위해 onset 계열별 offset/pre를 계산합니다.
-    """
-    cls, onset = _ja_cv_onset_class(alias_text, c_hint=c_hint, alias_type=alias_type)
-    is_head = alias_type == "cv_head"
-
-    lead = 30.0
-    if cls == "nasal":
-        lead = 18.0
-    elif cls == "voiced":
-        lead = 24.0
-    elif cls == "voiceless":
-        lead = 34.0
-    if onset in JA_SIBILANT_ONSETS or onset in JA_FRICATIVE_ONSETS:
-        lead += 6.0
-    if onset in {"m", "n", "ny", "r", "l", "ry"}:
-        lead -= 4.0
-    if is_head:
-        lead -= 4.0
-    lead = _clamp_range(lead, 12.0, 50.0)
-
-    c_anchor = float(c_end)
-    late_shift = 0.0
-    if vowel_start is not None and vowel_end is not None:
-        v_s = float(vowel_start)
-        v_e = float(vowel_end)
-        v_len = max(v_e - v_s, 0.0)
-        c_len = max(float(c_end) - float(c_start), 0.0)
-        # MFA가 CV 경계를 과도하게 앞에 둘 때(짧은 C + 긴 V) pre 기준점을 모음 안정구간으로 이동.
-        if (
-            alias_type == "cv"
-            and v_len >= 620.0
-            and c_len <= 45.0
-            and onset in {"t", "d", "s", "z", "ts", "dz", "ch", "j"}
-        ):
-            stable = v_s + _clamp_range(v_len * 0.45, 120.0, 420.0)
-            late_shift = max(0.0, stable - c_anchor)
-
-    offset = max(float(c_start) - lead, 0.0)
-    pre = c_anchor - offset if c_anchor > c_start else (28.0 if is_head else 24.0)
-
-    if c_anchor > c_start:
-        c_len = max(c_anchor - float(c_start), 8.0)
-        min_pre = max(20.0, c_len + 8.0)
-        if cls in {"nasal", "voiced"}:
-            max_pre = c_len + 64.0
-        elif cls == "voiceless":
-            max_pre = c_len + 54.0
-        else:
-            max_pre = c_len + 58.0
-        if is_head:
-            max_pre += 10.0
-        pre = _clamp_range(pre, min_pre, max_pre)
-        offset = max(c_anchor - pre, 0.0)
-
-    if late_shift > 0.0:
-        # pre 길이는 유지하고 절대 위치만 늦춰, 앞 음절 유입을 줄인다.
-        offset = max(offset + late_shift, 0.0)
-
-    return offset, pre
-
-
-def _ja_mark_to_vowel(mark):
-    clean = re.sub(r"[0-9]", "", (mark or "").strip().lower())
-    if not clean:
-        return ""
-    if clean in {"a", "i", "e", "o"}:
-        return clean
-    if clean in {"u", "ɯ", "?"}:
-        return "u"
-    if _is_ja_vowel_token(clean):
-        onset, vowel = split_ja_romaji_syllable(clean)
-        if vowel in JA_VOWELS:
-            return vowel
-        if clean in JA_VOWELS:
-            return clean
-    return ""
-
-
-def _ja_target_vowel_from_alias(alias_text, alias_type="cv"):
-    tok = _extract_ja_cv_target_syllable(alias_text, alias_type=alias_type)
-    if not tok:
-        return ""
-    onset, vowel = split_ja_romaji_syllable(tok)
-    if vowel in JA_VOWELS:
-        return vowel
-    if tok in JA_VOWELS and not onset:
-        return tok
-    return ""
-
-
-def _ja_pick_vowel_phone(curr_phones, target_vowel=""):
-    candidates = []
-    for i, ph in enumerate(curr_phones or []):
-        v = _ja_mark_to_vowel(getattr(ph, "mark", ""))
-        if v:
-            candidates.append((i, ph, v))
-    if not candidates:
-        return None, -1
-    if target_vowel:
-        for i, ph, v in candidates:
-            if v == target_vowel:
-                return ph, i
-    i, ph, _v = candidates[0]
-    return ph, i
-
-
-def _ja_extract_cv_bounds(curr_phones, alias_text="", alias_type="cv"):
-    """
-    음절 블록이 길게 합쳐진 경우에도 target 모음(없으면 첫 모음) 기준으로 CV 경계를 추출합니다.
-    """
-    phones = curr_phones or []
-    if not phones:
-        return 0.0, 0.0, 0.0, 0.0
-
-    target_vowel = _ja_target_vowel_from_alias(alias_text, alias_type=alias_type)
-    v_phone, v_idx = _ja_pick_vowel_phone(phones, target_vowel=target_vowel)
-    c_start = float(phones[0].minTime) * 1000.0
-
-    if v_phone is not None:
-        c_end = float(v_phone.minTime) * 1000.0
-        n_start = c_end
-        n_end = float(v_phone.maxTime) * 1000.0
-        if v_idx > 0:
-            prev = phones[v_idx - 1]
-            prev_v = _ja_mark_to_vowel(getattr(prev, "mark", ""))
-            if not prev_v:
-                c_start = float(prev.minTime) * 1000.0
-            else:
-                c_start = c_end
-    else:
-        # 모음을 찾지 못하면 기존 방식으로 후퇴
-        c_start = float(phones[0].minTime) * 1000.0
-        c_end = float(phones[-1].minTime) * 1000.0
-        n_start = c_end
-        n_end = float(phones[-1].maxTime) * 1000.0
-
-    if c_end < c_start:
-        c_start = c_end
-    return c_start, c_end, n_start, n_end
-
-
-def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type="cv"):
-    if not syllables_info:
-        return 0
-    n = len(syllables_info)
-    e = max(0, min(int(expected_idx), n - 1))
-    target = _extract_ja_cv_target_syllable(alias, alias_type=alias_type)
-    if not target:
-        return e
-
-    start = max(0, e - 1)
-    end = min(n, e + 4)
-    best_idx = e
-    best_score = -10**9
-    target_onset = _extract_ja_onset_token(target)
-    _t_onset, target_vowel = split_ja_romaji_syllable(target)
-    target_tail = _ja_syllable_tail(target)
-    target_cls = _ja_onset_class(target_onset)
-    dist_penalty = 7 if target_cls in {"nasal", "voiced"} else 6
-
-    def _score_idx(i):
-        cand = _syllable_info_token(syllables_info[i])
-        cand_onset = _extract_ja_onset_token(cand)
-        _co, cand_vowel = split_ja_romaji_syllable(cand)
-        cand_tail = _ja_syllable_tail(cand)
-        cand_cls = _ja_onset_class(cand_onset)
-        score = _vcv_syllable_match_score(target, cand) - abs(i - e) * dist_penalty
-        # m/n/ny 계열은 한 음절 밀림이 체감이 커서 비호환 onset에 강한 페널티를 준다.
-        if target_cls == "nasal" and cand_cls != "nasal":
-            score -= 18
-        elif target_cls == "voiced" and cand_cls == "voiceless":
-            score -= 12
-        elif target_cls == "voiceless" and cand_cls == "voiced":
-            score -= 8
-        if target_onset and cand_onset and target_onset[:1] == cand_onset[:1]:
-            score += 4
-        elif target_onset and cand_onset:
-            score -= 9
-        # CV의 핵심인 모음 불일치에는 강한 페널티를 적용해 한 음절 밀림을 억제한다.
-        if target_vowel and cand_vowel and target_vowel != cand_vowel:
-            score -= 24
-        # plain CV(예: te)가 축약/이중모음 행(예: tei)으로 붙는 오매핑을 줄인다.
-        if not target_tail and cand_tail:
-            if cand_tail[0] in {"i", "u", "e", "o", "a", "y", "w"}:
-                score -= 20
-            else:
-                score -= 10
-        elif target_tail and not cand_tail:
-            score -= 8
-        elif target_tail and cand_tail and target_tail != cand_tail:
-            score -= 12
-        return score
-
-    expected_score = _score_idx(e)
-    best_key = (-10**9, -10**9, -10**9, -10**9)
-    for i in range(start, end):
-        score = _score_idx(i)
-        cand_norm = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[i]))
-        key = (
-            score,
-            1 if cand_norm == target else 0,
-            -abs(i - e),
-            1 if i >= e else 0,
-        )
-        if key > best_key:
-            best_key = key
-            best_score = score
-            best_idx = i
-
-    if best_score >= 54:
-        # Diphthong/glide rows can over-jump; keep expected index when nearly tied.
-        hold_margin = 14 if target_cls in {"nasal", "voiced"} else 16
-        best_gain = best_score - expected_score
-        expected_tok = _syllable_info_token(syllables_info[e])
-        best_tok = _syllable_info_token(syllables_info[best_idx])
-        _eo, expected_vowel = split_ja_romaji_syllable(expected_tok)
-        _bo, best_vowel = split_ja_romaji_syllable(best_tok)
-        expected_onset = _extract_ja_onset_token(expected_tok)
-        best_onset = _extract_ja_onset_token(best_tok)
-        expected_tail = _ja_syllable_tail(expected_tok)
-        best_tail = _ja_syllable_tail(best_tok)
-        same_vowel_expected = bool(target_vowel and expected_vowel and target_vowel == expected_vowel)
-        best_vowel_match = bool(target_vowel and best_vowel and target_vowel == best_vowel)
-        same_onset_expected = bool(
-            target_onset and expected_onset and (target_onset == expected_onset or target_onset[:1] == expected_onset[:1])
-        )
-        best_onset_match = bool(
-            target_onset and best_onset and (target_onset == best_onset or target_onset[:1] == best_onset[:1])
-        )
-
-        if best_idx > e and expected_score >= max(50, best_score - hold_margin):
-            return e
-        # target이 plain CV인데 expected가 축약형(예: tei)이고 다음이 plain CV면 +1 보정 허용.
-        if best_idx == e and (e + 1) < n:
-            next_tok = _syllable_info_token(syllables_info[e + 1])
-            next_tail = _ja_syllable_tail(next_tok)
-            next_score = _score_idx(e + 1)
-            if (
-                (not target_tail)
-                and bool(expected_tail)
-                and (not next_tail)
-                and next_score >= (expected_score + 10)
-            ):
-                return e + 1
-        # +2 이상 과점프는 매우 보수적으로 허용한다.
-        if best_idx > (e + 1):
-            if expected_score >= 46:
-                return e
-            if best_gain < 30:
-                return e
-            if same_vowel_expected and best_gain < 34:
-                return e
-        # 한 음절 점프는 충분한 점수 이득이 없으면 유지(일/한 공통 안전장치).
-        if abs(best_idx - e) == 1:
-            min_gain = 22
-            if target_cls in {"nasal", "voiced"}:
-                min_gain = 20
-            if same_vowel_expected:
-                min_gain = min(min_gain, 18)
-            if best_gain < min_gain:
-                return e
-            # expected 음절이 이미 target 모음을 만족하면, 다음 음절로의 전진 오점프를 강하게 차단한다.
-            if same_vowel_expected and (not best_vowel_match) and best_idx > e:
-                return e
-            if same_vowel_expected and (not best_vowel_match) and best_gain < 20:
-                return e
-            if same_onset_expected and (not best_onset_match) and best_gain < 24:
-                return e
-            if (not target_tail) and best_tail and best_gain < 26:
-                return e
-        # 역방향(이전 음절) 점프는 한 음절 오매핑의 주원인이라 거의 금지한다.
-        if best_idx < e:
-            if same_vowel_expected or expected_score >= 36:
-                return e
-            if best_gain < 32:
-                return e
-        return best_idx
-    return e
-
-
 def _find_ja_cv_vowel_match_index(target_tok, expected_idx, syllables_info, search_back=1, search_fwd=2):
     """
     target CV와 모음이 일치하는 음절을 기대 인덱스 근처에서 재탐색합니다.
@@ -2898,6 +1748,7 @@ def generate_ja_oto(
     generate_openutau=False,
     gen_missing_vowels=False,
     enable_ml_correction=True,
+    enable_pytorch_bridge=False,
     fallback_format='cvvc',
     custom_phonemes_path='',
     alias_suffix='',
@@ -3346,39 +2197,6 @@ def generate_ja_oto(
                 for p in ph_intervals
             ]
 
-            def _nearest_phone_edge_ms(anchor_ms):
-                nearest = None
-                nearest_dist = float("inf")
-                for s_ms, e_ms in phone_spans_ms:
-                    if s_ms <= anchor_ms <= e_ms:
-                        return anchor_ms, 0.0
-                    ds = abs(anchor_ms - s_ms)
-                    de = abs(anchor_ms - e_ms)
-                    if ds < nearest_dist:
-                        nearest_dist = ds
-                        nearest = s_ms
-                    if de < nearest_dist:
-                        nearest_dist = de
-                        nearest = e_ms
-                if nearest is None:
-                    return anchor_ms, 0.0
-                return nearest, nearest_dist
-
-            def _surrounding_gap_ms(anchor_ms):
-                prev_end = None
-                next_start = None
-                for s_ms, e_ms in phone_spans_ms:
-                    if s_ms <= anchor_ms <= e_ms:
-                        return None, None, 0.0
-                    if e_ms < anchor_ms:
-                        prev_end = e_ms
-                    elif s_ms > anchor_ms and next_start is None:
-                        next_start = s_ms
-                        break
-                if prev_end is None or next_start is None or next_start <= prev_end:
-                    return None, None, 0.0
-                return prev_end, next_start, (next_start - prev_end)
-
             def _post_adjust_params(
                 offset,
                 consonant,
@@ -3390,61 +2208,26 @@ def generate_ja_oto(
                 local_end_ms=None,
                 local_cut_allow_ms=None,
             ):
-                offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
-
-                pre_abs = offset + pre
-                nearest_edge, nearest_dist = _nearest_phone_edge_ms(pre_abs)
-                prev_end_ms, next_start_ms, gap_len_ms = _surrounding_gap_ms(pre_abs)
-                # 정렬 오차로 pre가 무음 gap에 걸리면 alias 타입별로 안전한 경계로 스냅한다.
-                if gap_len_ms >= 55.0 or nearest_dist > 34.0:
-                    target = nearest_edge
-                    if prev_end_ms is not None and next_start_ms is not None:
-                        if alias_type in ('vc', 'vv'):
-                            target = max(prev_end_ms + 4.0, next_start_ms - 6.0)
-                        elif alias_type in ('cv', 'cv_head'):
-                            target = max(prev_end_ms + 3.0, next_start_ms - 4.0)
-                        else:
-                            target = prev_end_ms
-                    if abs(target - pre_abs) >= 2.0:
-                        pre_abs = target
-
-                min_pre_abs = max(timeline_start_ms - (20.0 if alias_type in ('vc', 'vv', 'vcv') else 10.0), 0.0)
-                max_pre_abs = effective_end_ms + (30.0 if alias_type in ('vc', 'vv', 'vcv') else 80.0)
-                pre_abs = max(min_pre_abs, min(pre_abs, max_pre_abs))
-
-                offset_floor = max(timeline_start_ms - (70.0 if alias_type in ('vc', 'vv', 'vcv') else 40.0), 0.0)
-                if offset < offset_floor:
-                    offset = offset_floor
-
-                if pre_abs - offset > 340.0:
-                    offset = max(pre_abs - 340.0, 0.0)
-                if pre_abs < offset:
-                    pre_abs = offset + 10.0
-
-                pre = max(pre_abs - offset, 0.0)
-                if ovl > pre:
-                    ovl = pre * 0.72
-                if consonant < pre + 25.0:
-                    consonant = pre + 25.0
-
-                cut_anchor_ms = effective_end_ms if local_end_ms is None else float(local_end_ms)
-                cut_allow_ms = 120.0 if local_cut_allow_ms is None else float(local_cut_allow_ms)
-                cons_allow_ms = max(40.0, cut_allow_ms - 40.0)
-                max_cons_abs = max((cut_anchor_ms + cons_allow_ms) - offset, pre + 40.0)
-                consonant = min(consonant, max_cons_abs)
-                max_cut_abs = max((cut_anchor_ms + cut_allow_ms) - offset, consonant + 35.0)
-                cutoff = -min(abs(cutoff), max_cut_abs)
-                offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
-                if ja_style_enabled and ja_style_profile and not autotune_profile:
-                    offset, consonant, cutoff, pre, ovl = _apply_ja_style_profile(
-                        alias_type, offset, consonant, cutoff, pre, ovl, ja_style_profile, alias_text=alias_text
-                    )
-                if autotune_profile:
-                    offset, consonant, cutoff, pre, ovl = _apply_ja_autotune_profile(
-                        alias_type, offset, consonant, cutoff, pre, ovl, autotune_profile
-                    )
-                return _recenter_ja_params_around_pre(
-                    offset, consonant, cutoff, pre, ovl, alias_type=alias_type, alias_text=alias_text
+                return post_adjust_params(
+                    offset,
+                    consonant,
+                    cutoff,
+                    pre,
+                    ovl,
+                    alias_type=alias_type,
+                    alias_text=alias_text,
+                    local_end_ms=local_end_ms,
+                    local_cut_allow_ms=local_cut_allow_ms,
+                    phone_spans_ms=phone_spans_ms,
+                    timeline_start_ms=timeline_start_ms,
+                    effective_end_ms=effective_end_ms,
+                    validate_fn=validate_oto_params,
+                    recenter_fn=_recenter_ja_params_around_pre,
+                    ja_style_enabled=ja_style_enabled,
+                    ja_style_profile=ja_style_profile,
+                    autotune_profile=autotune_profile,
+                    style_apply_fn=_apply_ja_style_profile,
+                    autotune_apply_fn=_apply_ja_autotune_profile,
                 )
             
             base_name = os.path.splitext(real_wav_name)[0]
@@ -3710,25 +2493,6 @@ def generate_ja_oto(
                 for i in range(len(syllables_info))
             }
 
-            def _ja_cv_head_min_cutoff_abs(offset, consonant, pre, vowel_start_ms, vowel_end_ms):
-                """
-                CV_HEAD(-CV)가 최소한 유효한 모음 진입 이후 구간을 포함하도록
-                보장해야 하는 cutoff 절대 위치 하한을 계산합니다.
-                """
-                v_start = float(vowel_start_ms)
-                v_end = float(vowel_end_ms)
-                v_len = max(0.0, v_end - v_start)
-                if v_len < 40.0:
-                    return None
-                vowel_start_rel = max(v_start - float(offset), float(pre) + 8.0)
-                keep_v_ms = _clamp_range(v_len * 0.36, 85.0, 210.0)
-                min_from_pre = _clamp_range(v_len * 0.26, 95.0, 185.0)
-                return max(
-                    float(consonant) + 12.0,
-                    vowel_start_rel + keep_v_ms,
-                    float(pre) + min_from_pre,
-                )
-
             def _guard_ja_cv_cutoff_to_next_onset(
                 offset,
                 consonant,
@@ -3739,123 +2503,43 @@ def generate_ja_oto(
                 vowel_start_ms=None,
                 vowel_end_ms=None,
             ):
-                """CV/CV_HEAD cutoff이 다음 음절 onset을 지나치게 침범하지 않도록 제한."""
-                if syll_idx is None or syll_idx < 0:
-                    return offset, consonant, cutoff, pre, 0.0
-                if (syll_idx + 1) >= len(syllables_info):
-                    return offset, consonant, cutoff, pre, 0.0
-
-                next_syl = syllables_info[syll_idx + 1]
-                next_phones = next_syl.get("phones") or []
-                if not next_phones:
-                    return offset, consonant, cutoff, pre, 0.0
-
-                next_mark = _clean_phone_mark(getattr(next_phones[0], "mark", ""))
-                hard_next = (
-                    next_mark in JA_PLOSIVE_CONSONANTS
-                    or next_mark in JA_SIBILANT_ONSETS
-                    or next_mark in {"ts", "ch", "j", "sh", "s", "z", "h"}
+                return guard_ja_cv_cutoff_to_next_onset(
+                    offset,
+                    consonant,
+                    cutoff,
+                    pre,
+                    syll_idx,
+                    syllables_info,
+                    validate_oto_params,
+                    alias_type=alias_type,
+                    vowel_start_ms=vowel_start_ms,
+                    vowel_end_ms=vowel_end_ms,
                 )
-                is_cv_head = str(alias_type or "").strip().lower() == "cv_head"
-                safety = 10.0 if is_cv_head else (14.0 if hard_next else 9.0)
-                next_onset_rel = (next_phones[0].minTime * 1000.0) - offset
-                max_cutoff_abs = next_onset_rel - safety
-                if is_cv_head:
-                    # -CV는 다음 음절 onset 직전에서 너무 짧아지기 쉬워,
-                    # 약간의 tail 허용 폭을 둡니다.
-                    max_cutoff_abs = next_onset_rel + (10.0 if hard_next else 18.0)
-                if max_cutoff_abs <= (pre + 18.0):
-                    return offset, consonant, cutoff, pre, 0.0
-
-                original_cutoff_abs = abs(cutoff)
-                consonant = min(consonant, max_cutoff_abs - 14.0)
-                consonant = max(consonant, pre + 10.0)
-
-                cutoff_abs = min(original_cutoff_abs, max_cutoff_abs)
-                min_cutoff_abs = None
-                if is_cv_head and vowel_start_ms is not None and vowel_end_ms is not None:
-                    min_cutoff_abs = _ja_cv_head_min_cutoff_abs(
-                        offset, consonant, pre, vowel_start_ms, vowel_end_ms
-                    )
-                    if min_cutoff_abs is not None:
-                        cutoff_abs = max(cutoff_abs, min(min_cutoff_abs, max_cutoff_abs))
-                if cutoff_abs <= (consonant + 8.0):
-                    cutoff_abs = min(max_cutoff_abs, consonant + 10.0)
-                    if cutoff_abs <= (consonant + 6.0):
-                        consonant = max(pre + 8.0, cutoff_abs - 10.0)
-                cutoff = -cutoff_abs
-
-                offset, consonant, cutoff, pre, _ovl = validate_oto_params(
-                    offset, consonant, cutoff, pre, 0.0
-                )
-                reduction = max(0.0, original_cutoff_abs - abs(cutoff))
-                return offset, consonant, cutoff, pre, reduction
 
             def _guard_ja_cv_head_offset_to_onset(offset, consonant, cutoff, pre, syll_idx, alias_text=""):
-                """
-                CV_HEAD(- CV) offset이 현재 음절 onset보다 과도하게 앞서지 않도록 제한.
-                공백 영역 과포함을 줄이기 위한 가드.
-                """
-                if syll_idx is None or syll_idx < 0:
-                    return offset, consonant, cutoff, pre, 0.0
-                if syll_idx >= len(syllables_info):
-                    return offset, consonant, cutoff, pre, 0.0
-                curr_syl = syllables_info[syll_idx]
-                curr_phones = curr_syl.get("phones") or []
-                if not curr_phones:
-                    return offset, consonant, cutoff, pre, 0.0
-
-                c_hint = curr_phones[0].mark if curr_phones else ""
-                c_start, c_end, _n_start, _n_end = _ja_extract_cv_bounds(
-                    curr_phones, alias_text=alias_text, alias_type="cv_head"
+                return guard_ja_cv_head_offset_to_onset(
+                    offset,
+                    consonant,
+                    cutoff,
+                    pre,
+                    syll_idx,
+                    syllables_info,
+                    _ja_extract_cv_bounds,
+                    _ja_cv_onset_class,
+                    validate_oto_params,
+                    alias_text=alias_text,
                 )
-                cls, _onset = _ja_cv_onset_class(alias_text, c_hint=c_hint, alias_type="cv_head")
-                if cls == "voiceless":
-                    base_lead = 44.0
-                elif cls == "voiced":
-                    base_lead = 36.0
-                elif cls == "nasal":
-                    base_lead = 30.0
-                else:
-                    base_lead = 34.0
-                c_len = max(0.0, float(c_end) - float(c_start))
-                lead_cap = min(base_lead, max(20.0, c_len + 16.0))
-                offset_floor = max(0.0, float(c_start) - lead_cap)
-                if offset >= offset_floor:
-                    return offset, consonant, cutoff, pre, 0.0
-
-                new_offset = offset_floor
-                # 오프셋 보정 시 상대 길이가 짧아지지 않게 기존 상대 파라미터를 유지.
-                new_pre = max(float(pre), 8.0)
-                new_consonant = max(float(consonant), new_pre + 8.0)
-                new_cut_abs = max(abs(float(cutoff)), new_consonant + 12.0)
-                new_cutoff = -new_cut_abs
-                new_offset, new_consonant, new_cutoff, new_pre, _ovl = validate_oto_params(
-                    new_offset, new_consonant, new_cutoff, new_pre, 0.0
-                )
-                reduced_ms = max(0.0, new_offset - offset)
-                return new_offset, new_consonant, new_cutoff, new_pre, reduced_ms
 
             def _ensure_ja_cv_head_min_vowel_coverage(offset, consonant, cutoff, pre, vowel_start_ms, vowel_end_ms):
-                """
-                CV_HEAD(-CV)에서 컷오프가 너무 일러 모음이 거의 포함되지 않는 경우를 방지.
-                """
-                min_cut_abs = _ja_cv_head_min_cutoff_abs(
-                    offset, consonant, pre, vowel_start_ms, vowel_end_ms
+                return ensure_ja_cv_head_min_vowel_coverage(
+                    offset,
+                    consonant,
+                    cutoff,
+                    pre,
+                    vowel_start_ms,
+                    vowel_end_ms,
+                    validate_oto_params,
                 )
-                if min_cut_abs is None:
-                    return offset, consonant, cutoff, pre, 0.0
-
-                cut_abs = abs(float(cutoff))
-                if cut_abs >= min_cut_abs:
-                    return offset, consonant, cutoff, pre, 0.0
-
-                new_cutoff = -min_cut_abs
-                offset, consonant, new_cutoff, pre, _ovl = validate_oto_params(
-                    offset, consonant, new_cutoff, pre, 0.0
-                )
-                extended_ms = max(0.0, abs(new_cutoff) - cut_abs)
-                return offset, consonant, new_cutoff, pre, extended_ms
 
             # CV 순서 카운터로 리스트 순서 우선 매핑
             current_w_idx = 0
@@ -4520,7 +3204,7 @@ def generate_ja_oto(
         with open(out_path, 'w', encoding='utf-8') as f:
             for line in final_lines:
                 f.write(line + "\n")
-        log(f"✅ 일본어 CVVC OTO 1차 생성 완료! 저장 경로: {out_path}")
+        log(f"✅ 일본어 OTO 1차 생성 완료! 저장 경로: {out_path}")
     except Exception as e:
         err = f"❌ OTO 저장 실패: {e}"
         logger.error(err)
@@ -4562,6 +3246,7 @@ def generate_ja_oto(
                 custom_phonemes_path=custom_phonemes_path,
                 callback=log,
                 enabled=enable_ml_correction,
+                backend_preference="pytorch" if enable_pytorch_bridge else "",
                 format_override=(forced_format or fallback_format or "cvvc"),
             )
             if ml_changed > 0:

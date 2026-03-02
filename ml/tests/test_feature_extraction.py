@@ -44,6 +44,7 @@ from core.oto_generator import _guard_kr_vc_cutoff_to_next_segment
 from core.oto_generator import _resolve_kr_cvvc_occurrence_index
 from core.oto_generator import _resolve_kr_cvvc_vv_index
 from core.oto_generator import _select_kr_cv_onset_slice
+from core.oto_generator import _should_allow_kr_exact_vowel_fix
 from core.oto_generator import _should_prefer_alias_based_syllables
 from core.oto_generator import _uses_kr_vc_context
 from core.oto_generator import _cv_match_score
@@ -172,6 +173,14 @@ class FeatureExtractionTests(unittest.TestCase):
         self.assertEqual(_resolve_kr_cvvc_occurrence_index("- dyo", "cv_head", occ_map, state), 2)
         self.assertEqual(_resolve_kr_cvvc_occurrence_index("dyo", "cv", occ_map, state), 3)
         self.assertEqual(_resolve_kr_cvvc_occurrence_index("do", "cv", occ_map, state), 5)
+
+    def test_korean_cvvc_forced_occurrence_blocks_exact_vowel_fix(self):
+        self.assertFalse(_should_allow_kr_exact_vowel_fix("cvvc", 3))
+        self.assertFalse(_should_allow_kr_exact_vowel_fix("cvvc", 0))
+
+    def test_korean_nonforced_occurrence_allows_exact_vowel_fix(self):
+        self.assertTrue(_should_allow_kr_exact_vowel_fix("cvvc", None))
+        self.assertTrue(_should_allow_kr_exact_vowel_fix("cvc", 2))
 
     def test_korean_cvvc_vv_occurrence_mapping_uses_pair_order(self):
         syllables_info = [

@@ -31,10 +31,15 @@ class OtoActionsMixin:
                 gen_ou = self.openutau_var.get()
                 gen_missing = self.gen_missing_vowels_var.get()
                 enable_ml_correction = self.enable_ml_correction_var.get()
+                enable_pytorch_bridge = self.enable_pytorch_bridge_var.get()
                 auto_format = self.auto_format_var.get()
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
                 alias_suffix = self.alias_suffix_var.get().strip()
                 ja_alias_style = self._get_ja_alias_style_code()
+                self._append_log(
+                    f"[OTO-ML] 런타임 옵션: ml={'ON' if enable_ml_correction else 'OFF'}, "
+                    f"pytorch_bridge={'ON' if enable_pytorch_bridge else 'OFF'}"
+                )
                 if self.no_base_oto_var.get():
                     self._append_log("ℹ '베이스 OTO 없음' 선택: 템플릿 없이 OpenUtau 호환 자동 에일리어스 생성 모드로 실행합니다.")
 
@@ -45,9 +50,10 @@ class OtoActionsMixin:
                         tg_folder, tpl_path, out_path,
                         params=None,
                         generate_openutau=gen_ou,
-                        gen_missing_vowels=gen_missing,
-                        enable_ml_correction=enable_ml_correction,
-                        alias_style=ja_alias_style,
+                            gen_missing_vowels=gen_missing,
+                            enable_ml_correction=enable_ml_correction,
+                            enable_pytorch_bridge=enable_pytorch_bridge,
+                            alias_style=ja_alias_style,
                         auto_format=auto_format,
                         custom_phonemes_path=custom_phonemes_path,
                         alias_suffix=alias_suffix,
@@ -58,9 +64,10 @@ class OtoActionsMixin:
                         tg_folder, tpl_path, out_path,
                         params,
                         gen_ou,
-                        gen_missing,
-                        enable_ml_correction=enable_ml_correction,
-                        auto_format=auto_format,
+                            gen_missing,
+                            enable_ml_correction=enable_ml_correction,
+                            enable_pytorch_bridge=enable_pytorch_bridge,
+                            auto_format=auto_format,
                         custom_phonemes_path=custom_phonemes_path,
                         alias_suffix=alias_suffix,
                         callback=self._append_log

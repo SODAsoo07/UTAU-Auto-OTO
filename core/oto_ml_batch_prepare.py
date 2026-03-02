@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, asdict
-from typing import Dict, Iterable, List
+from typing import Callable, Dict, Iterable, List
 
 from core.ja_lab_generator import generate_ja_dictionary, generate_ja_labs
 from core.ja_oto_generator import generate_ja_oto
@@ -118,7 +118,12 @@ def _generate_auto_oto(item: PreparedAutoPair, logs: List[str]) -> None:
         )
 
 
-def prepare_staged_auto_pairs(dataset_root: str, dry_run: bool = False, limit: int = 0) -> Dict[str, object]:
+def prepare_staged_auto_pairs(
+    dataset_root: str,
+    dry_run: bool = False,
+    limit: int = 0,
+    progress_callback: Callable[[str], None] | None = None,
+) -> Dict[str, object]:
     items = _discover_work_items(dataset_root)
     if limit > 0:
         items = items[:limit]
@@ -133,7 +138,16 @@ def prepare_staged_auto_pairs(dataset_root: str, dry_run: bool = False, limit: i
         "mfa_path": mfa_path,
     }
 
-    for item in items:
+    def emit(message: str) -> None:
+        if progress_callback:
+            progress_callback(message)
+
+    emit(
+        f"[Prepare] 시작: total={len(items)} dry_run={bool(dry_run)} "
+        f"mfa={'OK' if mfa_path else 'MISSING'}"
+    )
+
+    for index, item in enumerate(items, start=1):
         key = os.path.relpath(item.work_dir, dataset_root)
         logs: List[str] = []
         logs_by_item[key] = logs
@@ -141,19 +155,26 @@ def prepare_staged_auto_pairs(dataset_root: str, dry_run: bool = False, limit: i
         item.tg_dir = os.path.join(item.work_dir, "textgrids_auto")
         item.auto_oto = os.path.join(item.work_dir, "oto_auto_ml.ini")
         item.dict_path = os.path.join(item.work_dir, "dictionary_auto.txt")
+        emit(
+            f"[Prepare] ({index}/{len(items)}) {item.language}/{item.format_type} "
+            f"{key} 처리 시작"
+        )
         if dry_run:
             item.status = "dry_run"
+            emit(f"[Prepare] ({index}/{len(items)}) {key} dry-run")
             results.append(item)
             continue
         if _has_textgrid_files(item.tg_dir) and _has_usable_oto_lines(item.auto_oto):
             item.status = "prepared_existing"
             summary["prepared"] += 1
+            emit(f"[Prepare] ({index}/{len(items)}) {key} 기존 결과 재사용")
             results.append(item)
             continue
         if not mfa_path:
             item.status = "skip"
             item.reason = "missing_mfa"
             summary["skipped"] += 1
+            emit(f"[Prepare] ({index}/{len(items)}) {key} 건너뜀: missing_mfa")
             results.append(item)
             continue
         try:
@@ -172,17 +193,28 @@ def prepare_staged_auto_pairs(dataset_root: str, dry_run: bool = False, limit: i
                 item.status = "skip"
                 item.reason = f"align_failed:{err}"
                 summary["skipped"] += 1
+                emit(
+                    f"[Prepare] ({index}/{len(items)}) {key} 건너뜀: "
+                    f"align_failed:{err}"
+                )
                 results.append(item)
                 continue
             _generate_auto_oto(item, logs)
             item.status = "prepared"
             summary["prepared"] += 1
+            emit(f"[Prepare] ({index}/{len(items)}) {key} 완료")
             results.append(item)
         except Exception as exc:
             item.status = "skip"
             item.reason = f"exception:{exc}"
             summary["skipped"] += 1
+            emit(f"[Prepare] ({index}/{len(items)}) {key} 예외: {exc}")
             results.append(item)
+
+    emit(
+        f"[Prepare] 종료: prepared={summary['prepared']} skipped={summary['skipped']} "
+        f"total={summary['total_items']}"
+    )
 
     return {
         "summary": summary,
