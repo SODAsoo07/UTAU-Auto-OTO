@@ -26,6 +26,12 @@ from core.oto_ml_collection import (
 from core.oto_ml_lightgbm import evaluate_lightgbm_bundle, train_lightgbm_bundle
 from core.mfa_runner import find_mfa_executable, run_mfa_align
 
+DEPRECATION_MESSAGE = (
+    "[Deprecated] profile_oto_ml_pipeline.py is a one-off profiling helper. "
+    "For normal workflow, use stage_training_sources.py -> prepare_staged_auto_pairs.py "
+    "-> collect_oto_ml_training_data.py -> train/evaluate scripts."
+)
+
 
 def _safe_print_json(obj: Dict[str, Any]) -> None:
     text = json.dumps(obj, ensure_ascii=False, indent=2)
@@ -144,6 +150,7 @@ def _profile_training(dataset_csv: str, out_dir: str, language: str, format_type
 
 
 def main():
+    print(DEPRECATION_MESSAGE)
     ap = argparse.ArgumentParser(description="Profile OTO ML pipeline bottlenecks.")
     ap.add_argument(
         "--config",

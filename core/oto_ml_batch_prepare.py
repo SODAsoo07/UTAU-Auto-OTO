@@ -1,4 +1,4 @@
-"""Batch preparation of auto OTO/TextGrid assets for staged training sources."""
+﻿"""Batch preparation of auto OTO/TextGrid assets for staged training sources."""
 
 from __future__ import annotations
 
@@ -58,17 +58,20 @@ def prepare_staged_auto_pairs(
             f"[Prepare] ({index}/{len(items)}) {item.language}/{item.format_type} "
             f"{key} 처리 시작"
         )
+
         if dry_run:
             item.status = "dry_run"
             emit(f"[Prepare] ({index}/{len(items)}) {key} dry-run")
             results.append(item)
             continue
+
         if _has_textgrid_files(item.tg_dir) and _has_usable_oto_lines(item.auto_oto):
             item.status = "prepared_existing"
             summary["prepared"] += 1
             emit(f"[Prepare] ({index}/{len(items)}) {key} 기존 결과 재사용")
             results.append(item)
             continue
+
         if not mfa_path:
             item.status = "skip"
             item.reason = "missing_mfa"
@@ -76,6 +79,7 @@ def prepare_staged_auto_pairs(
             emit(f"[Prepare] ({index}/{len(items)}) {key} 건너뜀: missing_mfa")
             results.append(item)
             continue
+
         try:
             _prepare_lab_and_dict(item, logs)
             item.tg_dir = os.path.join(item.work_dir, "textgrids_auto")
@@ -98,6 +102,7 @@ def prepare_staged_auto_pairs(
                 )
                 results.append(item)
                 continue
+
             _generate_auto_oto(item, logs)
             item.status = "prepared"
             summary["prepared"] += 1

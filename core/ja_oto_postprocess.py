@@ -7,6 +7,7 @@ main generator loop so they can be adjusted independently.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional, Sequence, Tuple
 
 from core.ja_oto_mapping import _clean_phone_mark
@@ -18,6 +19,135 @@ JA_PLOSIVE_CONSONANTS = {
     'ky', 'gy', 'ty', 'dy', 'by', 'py',
 }
 JA_SIBILANT_ONSETS = {'s', 'z', 'sh', 'j', 'ts', 'dz', 'ch'}
+
+
+@dataclass
+class JaPostprocessContext:
+    phone_spans_ms: Sequence[Tuple[float, float]]
+    timeline_start_ms: float
+    effective_end_ms: float
+    validate_fn: Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]]
+    recenter_fn: Callable[..., Tuple[float, float, float, float, float]]
+    extract_cv_bounds_fn: Callable[..., Tuple[float, float, float, float]]
+    cv_onset_class_fn: Callable[..., Tuple[str, str]]
+    syllables_info: Sequence[dict] = field(default_factory=list)
+    ja_style_enabled: bool = False
+    ja_style_profile: object = None
+    autotune_profile: object = None
+    style_apply_fn: Optional[Callable[..., Tuple[float, float, float, float, float]]] = None
+    autotune_apply_fn: Optional[Callable[..., Tuple[float, float, float, float, float]]] = None
+
+    def post_adjust(
+        self,
+        offset: float,
+        consonant: float,
+        cutoff: float,
+        pre: float,
+        ovl: float,
+        *,
+        alias_type: str = "cv",
+        alias_text: str = "",
+        local_end_ms: Optional[float] = None,
+        local_cut_allow_ms: Optional[float] = None,
+    ) -> Tuple[float, float, float, float, float]:
+        return post_adjust_params(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            alias_type=alias_type,
+            alias_text=alias_text,
+            local_end_ms=local_end_ms,
+            local_cut_allow_ms=local_cut_allow_ms,
+            phone_spans_ms=self.phone_spans_ms,
+            timeline_start_ms=self.timeline_start_ms,
+            effective_end_ms=self.effective_end_ms,
+            validate_fn=self.validate_fn,
+            recenter_fn=self.recenter_fn,
+            ja_style_enabled=self.ja_style_enabled,
+            ja_style_profile=self.ja_style_profile,
+            autotune_profile=self.autotune_profile,
+            style_apply_fn=self.style_apply_fn,
+            autotune_apply_fn=self.autotune_apply_fn,
+        )
+
+    def guard_cv_cutoff_to_next_onset(
+        self,
+        offset: float,
+        consonant: float,
+        cutoff: float,
+        pre: float,
+        syll_idx: Optional[int],
+        *,
+        alias_type: str = "cv",
+        vowel_start_ms: Optional[float] = None,
+        vowel_end_ms: Optional[float] = None,
+    ) -> Tuple[float, float, float, float, float]:
+        return guard_ja_cv_cutoff_to_next_onset(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            syll_idx,
+            self.syllables_info,
+            self.validate_fn,
+            alias_type=alias_type,
+            vowel_start_ms=vowel_start_ms,
+            vowel_end_ms=vowel_end_ms,
+        )
+
+    def guard_cv_head_offset_to_onset(
+        self,
+        offset: float,
+        consonant: float,
+        cutoff: float,
+        pre: float,
+        syll_idx: Optional[int],
+        *,
+        alias_text: str = "",
+    ) -> Tuple[float, float, float, float, float]:
+        return guard_ja_cv_head_offset_to_onset(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            syll_idx,
+            self.syllables_info,
+            self.extract_cv_bounds_fn,
+            self.cv_onset_class_fn,
+            self.validate_fn,
+            alias_text=alias_text,
+        )
+
+    def ensure_cv_head_min_vowel_coverage(
+        self,
+        offset: float,
+        consonant: float,
+        cutoff: float,
+        pre: float,
+        vowel_start_ms: float,
+        vowel_end_ms: float,
+    ) -> Tuple[float, float, float, float, float]:
+        return ensure_ja_cv_head_min_vowel_coverage(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            vowel_start_ms,
+            vowel_end_ms,
+            self.validate_fn,
+        )
+
+    def cv_head_min_cutoff(
+        self,
+        offset: float,
+        consonant: float,
+        pre: float,
+        vowel_start_ms: float,
+        vowel_end_ms: float,
+    ) -> Optional[float]:
+        return ja_cv_head_min_cutoff_abs(offset, consonant, pre, vowel_start_ms, vowel_end_ms)
 
 
 def _nearest_phone_edge_ms(phone_spans_ms: Sequence[Tuple[float, float]], anchor_ms: float) -> Tuple[float, float]:
@@ -144,6 +274,19 @@ def ja_cv_head_min_cutoff_abs(offset: float, consonant: float, pre: float, vowel
     keep_v_ms = min(210.0, max(85.0, v_len * 0.36))
     min_from_pre = min(185.0, max(95.0, v_len * 0.26))
     return max(float(consonant) + 12.0, vowel_start_rel + keep_v_ms, float(pre) + min_from_pre)
+
+
+def _ja_cv_head_min_cutoff_abs(
+    offset: float,
+    consonant: float,
+    pre: float,
+    vowel_start_ms: float,
+    vowel_end_ms: float,
+) -> Optional[float]:
+    """
+    Backward-compatible alias kept for in-flight refactor safety.
+    """
+    return ja_cv_head_min_cutoff_abs(offset, consonant, pre, vowel_start_ms, vowel_end_ms)
 
 
 def guard_ja_cv_cutoff_to_next_onset(

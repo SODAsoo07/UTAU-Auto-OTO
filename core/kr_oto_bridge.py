@@ -287,7 +287,23 @@ def _compute_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, is_plosive_sibila
     return _validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
 
-def _compute_kr_cvvc_vc_timing_direct(alias, c_start, c_end, n_start, n_end):
+def _compute_kr_cvvc_vc_timing_direct(alias, *args):
+    """
+    CVVC VC direct timing helper.
+
+    Backward-compatible call forms:
+    - _compute_kr_cvvc_vc_timing_direct(alias, c_start, c_end, n_start, n_end)
+    - _compute_kr_cvvc_vc_timing_direct(alias, alias_type, c_start, c_end, n_start, n_end)
+    """
+    if len(args) == 4:
+        c_start, c_end, n_start, n_end = args
+    elif len(args) == 5:
+        _alias_type, c_start, c_end, n_start, n_end = args
+    else:
+        raise TypeError(
+            "_compute_kr_cvvc_vc_timing_direct() expects 5 or 6 total positional arguments"
+        )
+
     if not alias:
         return None
 

@@ -28,10 +28,7 @@ from core.ja_oto_finalize import (
     sanitize_ja_oto_for_wav_duration,
 )
 from core.ja_oto_postprocess import (
-    ensure_ja_cv_head_min_vowel_coverage,
-    guard_ja_cv_cutoff_to_next_onset,
-    guard_ja_cv_head_offset_to_onset,
-    post_adjust_params,
+    JaPostprocessContext,
 )
 from core.textio_utils import load_template_oto_lines
 from core.oto_profile_presets import get_ja_profile_preset
@@ -2197,38 +2194,21 @@ def generate_ja_oto(
                 for p in ph_intervals
             ]
 
-            def _post_adjust_params(
-                offset,
-                consonant,
-                cutoff,
-                pre,
-                ovl,
-                alias_type='cv',
-                alias_text='',
-                local_end_ms=None,
-                local_cut_allow_ms=None,
-            ):
-                return post_adjust_params(
-                    offset,
-                    consonant,
-                    cutoff,
-                    pre,
-                    ovl,
-                    alias_type=alias_type,
-                    alias_text=alias_text,
-                    local_end_ms=local_end_ms,
-                    local_cut_allow_ms=local_cut_allow_ms,
-                    phone_spans_ms=phone_spans_ms,
-                    timeline_start_ms=timeline_start_ms,
-                    effective_end_ms=effective_end_ms,
-                    validate_fn=validate_oto_params,
-                    recenter_fn=_recenter_ja_params_around_pre,
-                    ja_style_enabled=ja_style_enabled,
-                    ja_style_profile=ja_style_profile,
-                    autotune_profile=autotune_profile,
-                    style_apply_fn=_apply_ja_style_profile,
-                    autotune_apply_fn=_apply_ja_autotune_profile,
-                )
+            post_ctx = JaPostprocessContext(
+                phone_spans_ms=phone_spans_ms,
+                timeline_start_ms=timeline_start_ms,
+                effective_end_ms=effective_end_ms,
+                validate_fn=validate_oto_params,
+                recenter_fn=_recenter_ja_params_around_pre,
+                extract_cv_bounds_fn=_ja_extract_cv_bounds,
+                cv_onset_class_fn=_ja_cv_onset_class,
+                syllables_info=[],
+                ja_style_enabled=ja_style_enabled,
+                ja_style_profile=ja_style_profile,
+                autotune_profile=autotune_profile,
+                style_apply_fn=_apply_ja_style_profile,
+                autotune_apply_fn=_apply_ja_autotune_profile,
+            )
             
             base_name = os.path.splitext(real_wav_name)[0]
             filename_syllables = parse_ja_filename(base_name)
@@ -2246,6 +2226,7 @@ def generate_ja_oto(
                 log(f"🎵 {fname}: 포맷 수동 지정 → {format_type.upper()} (자동 감지: {detected_format.upper()})")
             else:
                 log(f"🎵 {fname}: 포맷 감지 → {format_type.upper()}")
+            post_ctx.ja_style_profile = ja_style_profile
             
             # === 단모음 처리 (음소 1개) ===
             if len(ph_intervals) == 1:
@@ -2272,7 +2253,7 @@ def generate_ja_oto(
                     consonant = min(v_len * 0.25, 120)
                     cutoff = -(v_len * 0.8)
 
-                    offset, consonant, cutoff, pre, ovl = _post_adjust_params(
+                    offset, consonant, cutoff, pre, ovl = post_ctx.post_adjust(
                         offset, consonant, cutoff, pre, ovl, alias_type='br', alias_text=alias
                     )
 
@@ -2493,53 +2474,7 @@ def generate_ja_oto(
                 for i in range(len(syllables_info))
             }
 
-            def _guard_ja_cv_cutoff_to_next_onset(
-                offset,
-                consonant,
-                cutoff,
-                pre,
-                syll_idx,
-                alias_type="cv",
-                vowel_start_ms=None,
-                vowel_end_ms=None,
-            ):
-                return guard_ja_cv_cutoff_to_next_onset(
-                    offset,
-                    consonant,
-                    cutoff,
-                    pre,
-                    syll_idx,
-                    syllables_info,
-                    validate_oto_params,
-                    alias_type=alias_type,
-                    vowel_start_ms=vowel_start_ms,
-                    vowel_end_ms=vowel_end_ms,
-                )
-
-            def _guard_ja_cv_head_offset_to_onset(offset, consonant, cutoff, pre, syll_idx, alias_text=""):
-                return guard_ja_cv_head_offset_to_onset(
-                    offset,
-                    consonant,
-                    cutoff,
-                    pre,
-                    syll_idx,
-                    syllables_info,
-                    _ja_extract_cv_bounds,
-                    _ja_cv_onset_class,
-                    validate_oto_params,
-                    alias_text=alias_text,
-                )
-
-            def _ensure_ja_cv_head_min_vowel_coverage(offset, consonant, cutoff, pre, vowel_start_ms, vowel_end_ms):
-                return ensure_ja_cv_head_min_vowel_coverage(
-                    offset,
-                    consonant,
-                    cutoff,
-                    pre,
-                    vowel_start_ms,
-                    vowel_end_ms,
-                    validate_oto_params,
-                )
+            post_ctx.syllables_info = syllables_info
 
             # CV 순서 카운터로 리스트 순서 우선 매핑
             current_w_idx = 0
@@ -2608,7 +2543,7 @@ def generate_ja_oto(
                     ovl = 0
                     consonant = min(br_len * 0.3, 100)
                     cutoff = -(br_len * 0.85)
-                    offset, consonant, cutoff, pre, ovl = _post_adjust_params(
+                    offset, consonant, cutoff, pre, ovl = post_ctx.post_adjust(
                         offset, consonant, cutoff, pre, ovl,
                         alias_type='vc', alias_text=alias,
                         local_end_ms=br_end, local_cut_allow_ms=40.0
@@ -2644,7 +2579,7 @@ def generate_ja_oto(
                     consonant = pre + min(max(v_len * 0.2, 22), 55)
                     cutoff = -(consonant + 38)
 
-                    offset, consonant, cutoff, pre, ovl = _post_adjust_params(
+                    offset, consonant, cutoff, pre, ovl = post_ctx.post_adjust(
                         offset, consonant, cutoff, pre, ovl,
                         alias_type='mono', alias_text=alias,
                         local_end_ms=v_end, local_cut_allow_ms=36.0
@@ -2703,7 +2638,7 @@ def generate_ja_oto(
                             f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
                         )
                     
-                    offset, consonant, cutoff, pre, ovl = _post_adjust_params(
+                    offset, consonant, cutoff, pre, ovl = post_ctx.post_adjust(
                         offset, consonant, cutoff, pre, ovl,
                         alias_type='vcv', alias_text=alias,
                         local_end_ms=n_end, local_cut_allow_ms=26.0
@@ -2769,7 +2704,7 @@ def generate_ja_oto(
                     added_cons = min(cv_vowel_len * 0.5, 150)
                     if added_cons < 80: added_cons = 80
                     consonant = pre + added_cons
-                    min_cut_abs = _ja_cv_head_min_cutoff_abs(
+                    min_cut_abs = post_ctx.cv_head_min_cutoff(
                         offset, consonant, pre, n_start, n_end
                     )
                     if min_cut_abs is None:
@@ -2789,12 +2724,12 @@ def generate_ja_oto(
                         offset, consonant, cutoff, pre, ovl, base_shape, alias_type="cv_head"
                     )
                     
-                    offset, consonant, cutoff, pre, ovl = _post_adjust_params(
+                    offset, consonant, cutoff, pre, ovl = post_ctx.post_adjust(
                         offset, consonant, cutoff, pre, ovl,
                         alias_type='cv_head', alias_text=alias,
                         local_end_ms=n_end, local_cut_allow_ms=28.0
                     )
-                    offset, consonant, cutoff, pre, offset_reduced = _guard_ja_cv_head_offset_to_onset(
+                    offset, consonant, cutoff, pre, offset_reduced = post_ctx.guard_cv_head_offset_to_onset(
                         offset, consonant, cutoff, pre, current_w_idx, alias_text=alias
                     )
                     v_cov_start = n_start
@@ -2807,14 +2742,14 @@ def generate_ja_oto(
                             v_cov_end = float(v_phone.maxTime) * 1000.0
                     except Exception:
                         pass
-                    offset, consonant, cutoff, pre, cutoff_extended = _ensure_ja_cv_head_min_vowel_coverage(
+                    offset, consonant, cutoff, pre, cutoff_extended = post_ctx.ensure_cv_head_min_vowel_coverage(
                         offset, consonant, cutoff, pre, v_cov_start, v_cov_end
                     )
                     if offset_reduced > 1.0:
                         log(f"🛡️ {fname}: CV_HEAD 오프셋 과선행 보정(+{offset_reduced:.1f}ms) [{alias}]")
                     if cutoff_extended > 1.0:
                         log(f"🛡️ {fname}: CV_HEAD 모음 길이 보정(+{cutoff_extended:.1f}ms) [{alias}]")
-                    offset, consonant, cutoff, pre, cutoff_reduced = _guard_ja_cv_cutoff_to_next_onset(
+                    offset, consonant, cutoff, pre, cutoff_reduced = post_ctx.guard_cv_cutoff_to_next_onset(
                         offset, consonant, cutoff, pre, current_w_idx,
                         alias_type="cv_head",
                         vowel_start_ms=v_cov_start,
@@ -3109,14 +3044,14 @@ def generate_ja_oto(
                 offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
                     offset, consonant, cutoff, pre, ovl, base_shape, alias_type=alias_type
                 )
-                offset, consonant, cutoff, pre, ovl = _post_adjust_params(
+                offset, consonant, cutoff, pre, ovl = post_ctx.post_adjust(
                     offset, consonant, cutoff, pre, ovl,
                     alias_type=alias_type, alias_text=alias,
                     local_end_ms=n_end,
                     local_cut_allow_ms=(22.0 if alias_type == 'vc' else 28.0 if alias_type == 'vv' else 34.0),
                 )
                 if alias_type in {"cv", "cv_head"}:
-                    offset, consonant, cutoff, pre, cutoff_reduced = _guard_ja_cv_cutoff_to_next_onset(
+                    offset, consonant, cutoff, pre, cutoff_reduced = post_ctx.guard_cv_cutoff_to_next_onset(
                         offset, consonant, cutoff, pre, current_w_idx
                     )
                     if cutoff_reduced > 0.5:
@@ -3271,3 +3206,4 @@ def generate_ja_oto(
 
     _log_unset_summary()
     return processed, total, errors
+

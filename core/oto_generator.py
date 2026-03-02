@@ -90,6 +90,11 @@ from core.kr_oto_vc import (
     _uses_kr_vc_context,
 )
 from core.kr_oto_vv import _compute_kr_cvvc_vv_timing_direct
+from core.kr_oto_postprocess import (
+    KrPostprocessContext,
+    guard_kr_vc_cutoff_to_next_segment as _guard_kr_vc_cutoff_to_next_segment_core,
+    log_post_timing_events as _log_post_timing_events_core,
+)
 from core.textio_utils import load_template_oto_lines
 from core.oto_profile_presets import get_kr_profile_preset
 
@@ -271,48 +276,18 @@ def _guard_cv_cutoff_to_next_onset(offset, consonant, cutoff, pre, syll_idx, syl
 
 
 def _guard_kr_vc_cutoff_to_next_segment(offset, consonant, cutoff, pre, ovl, syll_idx, syllables_info, alias_text=""):
-    """한국어 CVVC의 VC cutoff가 다음 자음/모음 쪽으로 과도하게 길어지지 않도록 제한합니다."""
-    if syll_idx is None or syll_idx < 0:
-        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
-    if not syllables_info or (syll_idx + 1) >= len(syllables_info):
-        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
-
-    next_syl = syllables_info[syll_idx + 1]
-    next_phones = next_syl.get("phones") or []
-    if not next_phones:
-        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
-
-    next_onset_rel = max((float(next_phones[0].minTime) * 1000.0) - float(offset), float(pre) + 10.0)
-    next_seg_end_rel = max((float(next_phones[0].maxTime) * 1000.0) - float(offset), next_onset_rel + 6.0)
-
-    coda = _canonicalize_kr_coda(_extract_vc_right_token(alias_text))
-    if coda in {"k", "t", "p", "h"}:
-        onset_margin = 4.0
-        tail_keep = 8.0
-        min_cons_gap = 12.0
-    elif coda in {"n", "m", "ng"}:
-        onset_margin = 10.0
-        tail_keep = 10.0
-        min_cons_gap = 16.0
-    elif coda in {"l", "r"}:
-        onset_margin = 14.0
-        tail_keep = 12.0
-        min_cons_gap = 20.0
-    else:
-        onset_margin = 10.0
-        tail_keep = 10.0
-        min_cons_gap = 14.0
-
-    cutoff_cap = min(next_onset_rel + onset_margin, next_seg_end_rel - tail_keep)
-    consonant = min(float(consonant), cutoff_cap - tail_keep)
-    consonant = max(float(consonant), float(pre) + min_cons_gap)
-
-    if cutoff_cap <= consonant + tail_keep:
-        consonant = max(float(pre) + min_cons_gap, cutoff_cap - tail_keep)
-    cutoff_abs = min(abs(float(cutoff)), max(consonant + tail_keep, cutoff_cap))
-    cutoff_abs = min(cutoff_abs, cutoff_cap)
-    cutoff = -cutoff_abs
-    return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    """한국어 VC cutoff 가드(호환 래퍼)."""
+    return _guard_kr_vc_cutoff_to_next_segment_core(
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        syll_idx,
+        syllables_info,
+        validate_oto_params,
+        alias_text=alias_text,
+    )
 
 
 def _guard_cv_head_offset_to_current_onset(offset, consonant, cutoff, pre, syll_idx, syllables_info):
@@ -559,53 +534,40 @@ def _apply_post_timing_pipeline(
     is_vc_plosive_coda=False,
     enable_stabilize=True,
     enable_cutoff_guard=True,
+    post_ctx=None,
 ):
     """후처리 가드(soft mel/base shape/stabilize/cutoff)를 일관 적용합니다."""
-    soft_off_shift = 0.0
-    soft_cut_shift = 0.0
-    cutoff_reduced = 0.0
-
-    if alias_type in {"cv", "cv_head", "vcv"}:
-        offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
-            offset, consonant, cutoff, pre, ovl, alias_type, mel_ctx_for_file, file_format=file_format
-        )
-
-    if not is_vc_plosive_coda:
-        offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
-            offset, consonant, cutoff, pre, ovl, base_shape, alias_type=alias_type
-        )
-
-    if enable_stabilize:
-        offset, consonant, cutoff, pre, ovl = _stabilize_params_to_phone_activity(
-            offset, consonant, cutoff, pre, ovl, ph_intervals, alias_type=alias_type
-        )
-
-    offset, consonant, cutoff, pre, ovl = _recenter_kr_params_around_pre(
-        offset, consonant, cutoff, pre, ovl, alias_type=alias_type, alias_text=alias_text
+    ctx = post_ctx or KrPostprocessContext(
+        file_format=file_format,
+        mel_ctx_for_file=mel_ctx_for_file,
+        ph_intervals=ph_intervals,
+        syllables_info=syllables_info,
+        validate_fn=validate_oto_params,
+        soft_mel_guard_fn=_apply_soft_mel_offset_cutoff_guard,
+        base_shape_blend_fn=_apply_base_shape_blend,
+        stabilize_fn=_stabilize_params_to_phone_activity,
+        recenter_fn=_recenter_kr_params_around_pre,
+        cv_cutoff_guard_fn=_guard_cv_cutoff_to_next_onset,
     )
-
-    if alias_type == "vc":
-        offset, consonant, cutoff, pre, ovl = _guard_kr_vc_cutoff_to_next_segment(
-            offset, consonant, cutoff, pre, ovl, current_w_idx, syllables_info, alias_text=alias_text
-        )
-
-    if enable_cutoff_guard and alias_type in {"cv", "cv_head"}:
-        offset, consonant, cutoff, pre, cutoff_reduced = _guard_cv_cutoff_to_next_onset(
-            offset, consonant, cutoff, pre, current_w_idx, syllables_info
-        )
-
-    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
-    return offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift, cutoff_reduced
+    return ctx.apply(
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        alias_type=alias_type,
+        alias_text=alias_text,
+        base_shape=base_shape,
+        current_w_idx=current_w_idx,
+        is_vc_plosive_coda=is_vc_plosive_coda,
+        enable_stabilize=enable_stabilize,
+        enable_cutoff_guard=enable_cutoff_guard,
+    )
 
 
 def _log_post_timing_events(log_fn, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced):
-    """후처리 가드에서 발생한 유의미한 이동량을 로그로 기록합니다."""
-    if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
-        log_fn(
-            f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
-        )
-    if cutoff_reduced > 0.5:
-        log_fn(f"🛡️ {fname}: CV 컷오프 과연장 보정(-{cutoff_reduced:.1f}ms) [{alias}]")
+    """후처리 가드 로그(호환 래퍼)."""
+    _log_post_timing_events_core(log_fn, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
 
 
 def _is_kr_nucleus_phone_mark(mark):
@@ -2639,6 +2601,18 @@ def generate_oto(
                 i: _estimate_cv_anchor_from_syllable(syllables_info[i], ph_intervals)
                 for i in range(len(syllables_info))
             }
+            kr_post_ctx = KrPostprocessContext(
+                file_format=file_format,
+                mel_ctx_for_file=mel_ctx_for_file,
+                ph_intervals=ph_intervals,
+                syllables_info=syllables_info,
+                validate_fn=validate_oto_params,
+                soft_mel_guard_fn=_apply_soft_mel_offset_cutoff_guard,
+                base_shape_blend_fn=_apply_base_shape_blend,
+                stabilize_fn=_stabilize_params_to_phone_activity,
+                recenter_fn=_recenter_kr_params_around_pre,
+                cv_cutoff_guard_fn=_guard_cv_cutoff_to_next_onset,
+            )
             
             for line_num, line in enumerate(lines):
                 parts = line.split('=', 1)
@@ -2844,6 +2818,7 @@ def generate_oto(
                         is_vc_plosive_coda=False,
                         enable_stabilize=False,
                         enable_cutoff_guard=False,
+                        post_ctx=kr_post_ctx,
                     )
                     _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
                     
@@ -3134,6 +3109,7 @@ def generate_oto(
                     is_vc_plosive_coda=is_vc_plosive_coda,
                     enable_stabilize=True,
                     enable_cutoff_guard=True,
+                    post_ctx=kr_post_ctx,
                 )
                 _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
 

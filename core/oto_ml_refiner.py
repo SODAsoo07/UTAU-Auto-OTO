@@ -9,12 +9,20 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from core.oto_ml_features import extract_feature_rows, get_delta_clip_limits, parse_oto_rows
 from core.oto_ml_runtime import load_oto_model_bundle, predict_oto_deltas
 
 logger = logging.getLogger(__name__)
+
+PYTORCH_REASSIGN_MAX_MOVE_RATIO_DEFAULT = 0.08
+PYTORCH_REASSIGN_MAX_MOVE_RATIO_BY_LANGUAGE = {
+    "korean": 0.07,
+    "japanese": 0.08,
+}
+PYTORCH_REASSIGN_MAX_LINE_HOPS = 2
+PYTORCH_REASSIGN_MIN_CONF_GAIN = 0.12
 
 
 def _has_explicit_model_override(language: str) -> bool:
@@ -257,6 +265,131 @@ def _apply_language_specific_delta_policy(language: str, row_context: Dict[str, 
     return adjusted
 
 
+def _to_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _to_int(value: object, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return int(default)
+
+
+def _is_truthy_num(value: object) -> bool:
+    return _to_float(value, 0.0) >= 0.5
+
+
+def _base_pre_abs(row: Dict[str, object]) -> float:
+    return _to_float(row.get("base_offset"), 0.0) + _to_float(row.get("base_pre"), 0.0)
+
+
+def _relative_move_limit_ms(row: Dict[str, object]) -> float:
+    # 이동 제한은 WAV 전체 길이에 대한 상대값으로 계산한다.
+    lang = str(row.get("language", "") or "").strip().lower()
+    ratio = float(PYTORCH_REASSIGN_MAX_MOVE_RATIO_BY_LANGUAGE.get(lang, PYTORCH_REASSIGN_MAX_MOVE_RATIO_DEFAULT))
+    wav_ms = max(1.0, _to_float(row.get("wav_duration_ms"), 0.0))
+    return wav_ms * ratio
+
+
+def _can_try_pytorch_reassign(row: Dict[str, object]) -> bool:
+    alias_type = str(row.get("alias_type", "") or "").strip().lower()
+    if alias_type not in {"cv", "cv_head", "vc", "vv", "vcv"}:
+        return False
+    conf = _to_float(row.get("mapping_confidence"), 1.0)
+    margin = _to_float(row.get("words_vs_alias_score_margin"), 0.0)
+    return (
+        conf < 0.72
+        or _is_truthy_num(row.get("used_nuclei_fallback"))
+        or margin < -0.05
+    )
+
+
+def _candidate_structurally_compatible(src: Dict[str, object], cand: Dict[str, object]) -> bool:
+    if str(src.get("alias_type", "") or "").strip().lower() != str(cand.get("alias_type", "") or "").strip().lower():
+        return False
+    src_group = str(src.get("alias_group", "") or "").strip().lower()
+    cand_group = str(cand.get("alias_group", "") or "").strip().lower()
+    if src_group and cand_group and src_group != cand_group:
+        return False
+    src_onset = str(src.get("onset_class", "") or "").strip().lower()
+    cand_onset = str(cand.get("onset_class", "") or "").strip().lower()
+    if src_onset and cand_onset and src_onset != cand_onset:
+        return False
+    src_coda = str(src.get("coda_type", "") or "").strip().lower()
+    cand_coda = str(cand.get("coda_type", "") or "").strip().lower()
+    if src_coda and cand_coda and src_coda != cand_coda:
+        return False
+    return True
+
+
+def _select_pytorch_reassign_candidate(row: Dict[str, object], same_wav_rows: List[Dict[str, object]]) -> Optional[Dict[str, object]]:
+    if not _can_try_pytorch_reassign(row):
+        return None
+    if not same_wav_rows:
+        return None
+
+    src_line = _to_int(row.get("line_index"), -1)
+    src_pre_abs = _base_pre_abs(row)
+    src_conf = _to_float(row.get("mapping_confidence"), 0.0)
+    src_margin = _to_float(row.get("words_vs_alias_score_margin"), 0.0)
+    max_move_ms = _relative_move_limit_ms(row)
+
+    best = None
+    best_score = float("-inf")
+
+    for cand in same_wav_rows:
+        cand_line = _to_int(cand.get("line_index"), -1)
+        if cand_line < 0 or cand_line == src_line:
+            continue
+        if abs(cand_line - src_line) > int(PYTORCH_REASSIGN_MAX_LINE_HOPS):
+            continue
+        if not _candidate_structurally_compatible(row, cand):
+            continue
+
+        cand_pre_abs = _base_pre_abs(cand)
+        move_ms = abs(cand_pre_abs - src_pre_abs)
+        if move_ms > max_move_ms:
+            continue
+
+        cand_conf = _to_float(cand.get("mapping_confidence"), 0.0)
+        conf_gain = cand_conf - src_conf
+        if conf_gain < float(PYTORCH_REASSIGN_MIN_CONF_GAIN):
+            continue
+
+        cand_margin = _to_float(cand.get("words_vs_alias_score_margin"), 0.0)
+        score = (conf_gain * 2.0) + ((cand_margin - src_margin) * 0.45) - (move_ms / max(1e-6, max_move_ms))
+        if _is_truthy_num(cand.get("used_nuclei_fallback")):
+            score -= 0.4
+        if _is_truthy_num(cand.get("used_alias_based_syllables")):
+            score -= 0.2
+
+        if score > best_score:
+            best_score = score
+            best = cand
+
+    if best_score < 0.15:
+        return None
+    return best
+
+
+def _passes_reassign_post_guard(src: Dict[str, object], offset: float, pre: float, cutoff: float) -> bool:
+    max_move_ms = _relative_move_limit_ms(src)
+    src_pre_abs = _base_pre_abs(src)
+    new_pre_abs = float(offset) + float(pre)
+    if abs(new_pre_abs - src_pre_abs) > max_move_ms:
+        return False
+    wav_ms = _to_float(src.get("wav_duration_ms"), 0.0)
+    if wav_ms > 0:
+        cutoff_abs = float(offset) + abs(float(cutoff))
+        if cutoff_abs > (wav_ms + 1.0):
+            return False
+    return True
+
+
 def apply_oto_ml_delta(language: str, row_context: Dict[str, object], bundle) -> Tuple[float, float, float, float, float]:
     validate_oto_params = _get_validate_func(language)
     pred = predict_oto_deltas(bundle, row_context)
@@ -284,6 +417,7 @@ def apply_oto_ml_to_oto_file(
     enabled: bool = True,
     backend_preference: str = "",
     format_override: Optional[str] = None,
+    enable_pytorch_reassign: bool = True,
 ) -> int:
     if not enabled:
         return 0
@@ -302,11 +436,17 @@ def apply_oto_ml_to_oto_file(
     bundle_cache: Dict[str, Optional[object]] = {}
     model_notice = set()
     changed = 0
+    remapped = 0
+    remap_examples: List[str] = []
     raw_lines = []
     with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
         raw_lines = [line.rstrip("\n") for line in f]
 
     rows_by_index = {int(row["line_index"]): row for row in rows}
+    features_by_wav: Dict[str, List[Dict[str, object]]] = {}
+    for feat in feature_rows:
+        wav_key = str(feat.get("wav_norm", "") or feat.get("wav", "") or "").strip().lower()
+        features_by_wav.setdefault(wav_key, []).append(feat)
 
     for feat in feature_rows:
         format_type = _route_format_for_feature(language, feat, format_override=format_override)
@@ -327,11 +467,26 @@ def apply_oto_ml_to_oto_file(
         row = rows_by_index.get(line_index)
         if row is None:
             continue
+        infer_feat = feat
+        if enable_pytorch_reassign and getattr(bundle, "backend", "") == "pytorch":
+            wav_key = str(feat.get("wav_norm", "") or feat.get("wav", "") or "").strip().lower()
+            candidate = _select_pytorch_reassign_candidate(feat, features_by_wav.get(wav_key, []))
+            if candidate is not None:
+                infer_feat = candidate
         try:
-            o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(language, feat, bundle)
+            o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(language, infer_feat, bundle)
+            if infer_feat is not feat and not _passes_reassign_post_guard(feat, o2, p2, ct2):
+                infer_feat = feat
+                o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(language, infer_feat, bundle)
         except Exception as e:
             logger.warning("OTO ML inference skipped for line %s: %s", line_index, e)
             continue
+        if infer_feat is not feat:
+            remapped += 1
+            if len(remap_examples) < 3:
+                remap_examples.append(
+                    f"line {line_index}: {feat.get('alias','')} -> line {int(infer_feat.get('line_index', -1))}"
+                )
         if (
             abs(o2 - float(row["offset"])) > 1e-6
             or abs(c2 - float(row["cons"])) > 1e-6
@@ -347,4 +502,8 @@ def apply_oto_ml_to_oto_file(
             for line in raw_lines:
                 f.write(line + "\n")
         _emit(callback, f"[OTO-ML] 수치 보정 적용: {changed} lines")
+        if remapped > 0:
+            _emit(callback, f"[OTO-ML] 제한 재매핑 적용: {remapped} lines (WAV 상대 이동 제한)")
+            if remap_examples:
+                _emit(callback, f"[OTO-ML] 재매핑 예시: {' | '.join(remap_examples)}")
     return changed
