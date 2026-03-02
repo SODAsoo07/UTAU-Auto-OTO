@@ -287,13 +287,12 @@ def _compute_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, is_plosive_sibila
     return _validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
 
-def _compute_kr_cvvc_vc_timing_direct(alias, alias_type, c_start, c_end, n_start, n_end):
-    if alias_type not in {"vc", "vv"}:
+def _compute_kr_cvvc_vc_timing_direct(alias, c_start, c_end, n_start, n_end):
+    if not alias:
         return None
 
     prev_vowel_len = max(float(c_end) - float(c_start), 24.0)
     next_seg_len = max(float(n_end) - float(n_start), 18.0)
-    bridge_abs = float(n_start) if alias_type == "vc" else float(n_end)
     transition_gap = max(float(n_start) - float(c_end), 10.0)
 
     right_tok = _extract_vc_right_token(alias)
@@ -305,59 +304,52 @@ def _compute_kr_cvvc_vc_timing_direct(alias, alias_type, c_start, c_end, n_start
         "s", "ss", "h", "j", "jj", "ch",
     }
 
-    if alias_type == "vc":
-        if is_hard:
-            tail_keep = _clamp(prev_vowel_len * 0.42, 56.0, 118.0)
-            ovl_gap = _clamp(prev_vowel_len * 0.52, 78.0, 122.0)
-            cons_gap = _clamp(next_seg_len * 0.44, 34.0, 74.0)
-            cut_gap = _clamp(next_seg_len * 0.58, 30.0, 64.0)
-            cutoff_margin = 16.0
-        elif is_nasal:
-            tail_keep = _clamp(prev_vowel_len * 0.54, 82.0, 142.0)
-            ovl_gap = _clamp(prev_vowel_len * 0.58, 92.0, 138.0)
-            cons_gap = _clamp(next_seg_len * 0.52, 42.0, 88.0)
-            cut_gap = _clamp(next_seg_len * 0.72, 38.0, 86.0)
-            cutoff_margin = 26.0
-        elif is_liquid:
-            tail_keep = _clamp(prev_vowel_len * 0.62, 96.0, 166.0)
-            ovl_gap = _clamp(prev_vowel_len * 0.64, 104.0, 152.0)
-            cons_gap = _clamp(next_seg_len * 0.96, 82.0, 158.0)
-            cut_gap = _clamp(next_seg_len * 0.88, 52.0, 118.0)
-            cutoff_margin = 42.0
-        else:
-            tail_keep = _clamp(prev_vowel_len * 0.50, 72.0, 136.0)
-            ovl_gap = _clamp(prev_vowel_len * 0.56, 88.0, 132.0)
-            cons_gap = _clamp(next_seg_len * 0.58, 40.0, 96.0)
-            cut_gap = _clamp(next_seg_len * 0.74, 36.0, 92.0)
-            cutoff_margin = 28.0
-        offset = max(float(c_end) - tail_keep, 0.0)
-        pre_floor = 112.0 if is_hard else (168.0 if is_liquid else 138.0 if is_nasal else 128.0)
-        pre_ceil = 214.0 if is_hard else (286.0 if is_liquid else 248.0 if is_nasal else 232.0)
-        pre_target = _clamp(transition_gap + tail_keep, pre_floor, pre_ceil)
-        pre = max(bridge_abs - offset, pre_target)
-        ovl = max(0.0, pre - ovl_gap)
-        consonant = pre + cons_gap
-        cutoff_abs = consonant + cut_gap
-        next_onset_rel = max(float(n_start) - offset, pre + 12.0)
-        next_seg_end_rel = max(float(n_end) - offset, next_onset_rel + 8.0)
-        consonant = min(consonant, next_onset_rel + (8.0 if is_hard else 22.0 if is_nasal else 42.0 if is_liquid else 28.0))
-        min_cons_gap = 28.0 if is_liquid else 18.0 if is_nasal else 16.0
-        consonant = max(consonant, pre + min_cons_gap)
-        cutoff_cap = min(
-            next_onset_rel + cutoff_margin,
-            next_seg_end_rel - (8.0 if is_hard else 10.0 if is_nasal else 14.0 if is_liquid else 12.0),
-        )
-        min_cut_tail = 8.0 if is_hard else 10.0 if is_nasal else 14.0 if is_liquid else 12.0
-        if cutoff_cap <= consonant + min_cut_tail:
-            consonant = max(pre + min_cons_gap, cutoff_cap - min_cut_tail)
-        cutoff_abs = min(max(cutoff_abs, consonant + min_cut_tail), cutoff_cap)
+    bridge_abs = float(n_start)
+    if is_hard:
+        tail_keep = _clamp(prev_vowel_len * 0.42, 56.0, 118.0)
+        ovl_gap = _clamp(prev_vowel_len * 0.52, 78.0, 122.0)
+        cons_gap = _clamp(next_seg_len * 0.44, 34.0, 74.0)
+        cut_gap = _clamp(next_seg_len * 0.58, 30.0, 64.0)
+        cutoff_margin = 16.0
+    elif is_nasal:
+        tail_keep = _clamp(prev_vowel_len * 0.54, 82.0, 142.0)
+        ovl_gap = _clamp(prev_vowel_len * 0.58, 92.0, 138.0)
+        cons_gap = _clamp(next_seg_len * 0.52, 42.0, 88.0)
+        cut_gap = _clamp(next_seg_len * 0.72, 38.0, 86.0)
+        cutoff_margin = 26.0
+    elif is_liquid:
+        tail_keep = _clamp(prev_vowel_len * 0.62, 96.0, 166.0)
+        ovl_gap = _clamp(prev_vowel_len * 0.64, 104.0, 152.0)
+        cons_gap = _clamp(next_seg_len * 0.96, 82.0, 158.0)
+        cut_gap = _clamp(next_seg_len * 0.88, 52.0, 118.0)
+        cutoff_margin = 42.0
     else:
-        tail_keep = _clamp(prev_vowel_len * 0.26, 28.0, 96.0)
-        offset = max(float(c_end) - tail_keep, 0.0)
-        pre = max(bridge_abs - offset, 54.0)
-        ovl = max(0.0, pre - 6.0)
-        consonant = pre + _clamp(next_seg_len * 0.42, 22.0, 82.0)
-        cutoff_abs = consonant + _clamp(next_seg_len * 0.68, 26.0, 110.0)
+        tail_keep = _clamp(prev_vowel_len * 0.50, 72.0, 136.0)
+        ovl_gap = _clamp(prev_vowel_len * 0.56, 88.0, 132.0)
+        cons_gap = _clamp(next_seg_len * 0.58, 40.0, 96.0)
+        cut_gap = _clamp(next_seg_len * 0.74, 36.0, 92.0)
+        cutoff_margin = 28.0
+    offset = max(float(c_end) - tail_keep, 0.0)
+    pre_floor = 112.0 if is_hard else (168.0 if is_liquid else 138.0 if is_nasal else 128.0)
+    pre_ceil = 214.0 if is_hard else (286.0 if is_liquid else 248.0 if is_nasal else 232.0)
+    pre_target = _clamp(transition_gap + tail_keep, pre_floor, pre_ceil)
+    pre = max(bridge_abs - offset, pre_target)
+    ovl = max(0.0, pre - ovl_gap)
+    consonant = pre + cons_gap
+    cutoff_abs = consonant + cut_gap
+    next_onset_rel = max(float(n_start) - offset, pre + 12.0)
+    next_seg_end_rel = max(float(n_end) - offset, next_onset_rel + 8.0)
+    consonant = min(consonant, next_onset_rel + (8.0 if is_hard else 22.0 if is_nasal else 42.0 if is_liquid else 28.0))
+    min_cons_gap = 28.0 if is_liquid else 18.0 if is_nasal else 16.0
+    consonant = max(consonant, pre + min_cons_gap)
+    cutoff_cap = min(
+        next_onset_rel + cutoff_margin,
+        next_seg_end_rel - (8.0 if is_hard else 10.0 if is_nasal else 14.0 if is_liquid else 12.0),
+    )
+    min_cut_tail = 8.0 if is_hard else 10.0 if is_nasal else 14.0 if is_liquid else 12.0
+    if cutoff_cap <= consonant + min_cut_tail:
+        consonant = max(pre + min_cons_gap, cutoff_cap - min_cut_tail)
+    cutoff_abs = min(max(cutoff_abs, consonant + min_cut_tail), cutoff_cap)
 
     cutoff = -cutoff_abs
     return _validate_oto_params(offset, consonant, cutoff, pre, ovl)

@@ -78,6 +78,8 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 log_filename = datetime.datetime.now().strftime('log_%Y%m%d_%H%M%S.txt')
 LOG_PATH = os.path.join(LOG_DIR, log_filename)
+event_log_filename = datetime.datetime.now().strftime('events_%Y%m%d_%H%M%S.jsonl')
+EVENT_LOG_PATH = os.path.join(LOG_DIR, event_log_filename)
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -155,6 +157,7 @@ class App(
 
         self.app_dir = APP_DIR
         self.log_path = LOG_PATH
+        self.event_log_path = EVENT_LOG_PATH
         self.logger = logger
         self.app_version = APP_VERSION
         self._build_ui()
@@ -162,6 +165,7 @@ class App(
         self.protocol("WM_DELETE_WINDOW", self._on_close_request)
 
         logger.info(f"{APP_NAME} v{APP_VERSION} 시작")
+        logger.info(f"구조화 이벤트 로그: {EVENT_LOG_PATH}")
         if self.mfa_path:
             logger.info(f"MFA 경로: {self.mfa_path}")
         else:

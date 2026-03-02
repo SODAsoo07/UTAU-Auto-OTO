@@ -1,121 +1,20 @@
-"""
-Batch preparation of auto OTO/TextGrid assets for staged training sources.
-"""
+"""Batch preparation of auto OTO/TextGrid assets for staged training sources."""
 
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, asdict
-from typing import Callable, Dict, Iterable, List
+from dataclasses import asdict
+from typing import Callable, Dict, List
 
-from core.ja_lab_generator import generate_ja_dictionary, generate_ja_labs
-from core.ja_oto_generator import generate_ja_oto
-from core.lab_generator import generate_dictionary, generate_labs
 from core.mfa_runner import find_mfa_executable, run_mfa_align
-from core.oto_generator import generate_oto
-
-
-@dataclass
-class PreparedAutoPair:
-    language: str
-    format_type: str
-    stage_root: str
-    work_dir: str
-    manual_oto: str
-    auto_oto: str = ""
-    tg_dir: str = ""
-    dict_path: str = ""
-    mfa_path: str = ""
-    status: str = "pending"
-    reason: str = ""
-
-
-def _has_usable_oto_lines(path: str) -> bool:
-    if not path or not os.path.isfile(path):
-        return False
-    try:
-        if os.path.getsize(path) <= 0:
-            return False
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for _ in range(64):
-                line = f.readline()
-                if not line:
-                    break
-                if "=" in line and "," in line:
-                    return True
-    except Exception:
-        return False
-    return False
-
-
-def _discover_work_items(dataset_root: str) -> List[PreparedAutoPair]:
-    items: List[PreparedAutoPair] = []
-    for language in ("korean", "japanese"):
-        lang_root = os.path.join(dataset_root, language)
-        if not os.path.isdir(lang_root):
-            continue
-        for format_type in os.listdir(lang_root):
-            fmt_root = os.path.join(lang_root, format_type)
-            if not os.path.isdir(fmt_root):
-                continue
-            for voicebank in os.listdir(fmt_root):
-                vb_root = os.path.join(fmt_root, voicebank)
-                if not os.path.isdir(vb_root):
-                    continue
-                for dp, dns, fns in os.walk(vb_root):
-                    lower = {fn.lower(): fn for fn in fns}
-                    manual = ""
-                    candidates = []
-                    if "oto.ini" in lower:
-                        candidates.append(os.path.join(dp, lower["oto.ini"]))
-                    base_candidates = [os.path.join(dp, fn) for fn in fns if fn.lower().endswith(".ini") and ("oto" in fn.lower() or "base" in fn.lower())]
-                    candidates.extend(sorted(base_candidates))
-                    for candidate in candidates:
-                        if _has_usable_oto_lines(candidate):
-                            manual = candidate
-                            break
-                    wavs = [fn for fn in fns if fn.lower().endswith(".wav")]
-                    if manual and wavs:
-                        items.append(PreparedAutoPair(language=language, format_type=format_type, stage_root=vb_root, work_dir=dp, manual_oto=manual))
-    return items
-
-
-def _has_textgrid_files(path: str) -> bool:
-    return bool(path) and os.path.isdir(path) and any(fn.lower().endswith(".textgrid") for fn in os.listdir(path))
-
-
-def _prepare_lab_and_dict(item: PreparedAutoPair, logs: List[str]) -> None:
-    if item.language == "japanese":
-        generate_ja_labs(item.work_dir, callback=logs.append)
-        item.dict_path = os.path.join(item.work_dir, "dictionary_auto.txt")
-        generate_ja_dictionary(item.work_dir, item.dict_path, callback=logs.append)
-    else:
-        generate_labs(item.work_dir, callback=logs.append)
-        item.dict_path = os.path.join(item.work_dir, "dictionary_auto.txt")
-        generate_dictionary(item.work_dir, item.dict_path, callback=logs.append)
-
-
-def _generate_auto_oto(item: PreparedAutoPair, logs: List[str]) -> None:
-    item.auto_oto = os.path.join(item.work_dir, "oto_auto_ml.ini")
-    if item.language == "japanese":
-        generate_ja_oto(
-            tg_folder=item.tg_dir,
-            tpl_path=item.manual_oto,
-            out_path=item.auto_oto,
-            fallback_format=item.format_type,
-            auto_format=item.format_type,
-            callback=logs.append,
-        )
-    else:
-        generate_oto(
-            tg_folder=item.tg_dir,
-            tpl_path=item.manual_oto,
-            out_path=item.auto_oto,
-            fallback_format=item.format_type,
-            auto_format=item.format_type,
-            callback=logs.append,
-        )
+from core.oto_ml_prepare_discovery import (
+    _discover_work_items,
+    _has_textgrid_files,
+    _has_usable_oto_lines,
+)
+from core.oto_ml_prepare_steps import _generate_auto_oto, _prepare_lab_and_dict
+from core.oto_ml_prepare_types import PreparedAutoPair
 
 
 def prepare_staged_auto_pairs(

@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from core.log_events import classify_log_message, log_with_event
 from core.mfa_runner import ALERT_MFA_PERMISSION_DENIED, ALERT_MSVC_REQUIRED
 from core.oto_validator import validate_oto_timing
 from core.sofa_runner import get_sofa_env_python
@@ -90,47 +91,15 @@ class AppRuntimeMixin:
     def _log_to_file(self, msg, level=logging.INFO):
         try:
             logger = getattr(self, "logger", logging.getLogger(__name__))
-            logger.log(level, str(msg))
+            event_log_path = getattr(self, "event_log_path", "")
+            log_with_event(logger, event_log_path, str(msg), level=level)
         except Exception:
             pass
 
     def _should_show_ui_log(self, msg):
         if msg in (ALERT_MSVC_REQUIRED, ALERT_MFA_PERMISSION_DENIED):
             return True
-        text = str(msg or "").strip()
-        if not text:
-            return False
-        lowered = text.lower()
-
-        if text.startswith("[OTO-ML] 런타임 옵션"):
-            return True
-        if text.startswith("[Prepare]"):
-            return True
-
-        error_tokens = (
-            "❌", "⚠", "오류", "실패", "예외", "error", "failed", "warning",
-            "mapping_failed", "skip", "skipped",
-        )
-        if any(token in text or token in lowered for token in error_tokens):
-            return True
-
-        progress_prefixes = (
-            "🧪", "🔍", "📦", "🚀", "🔀", "ℹ", "📝", "🎉", "📘", "🔧", "⬇", "✅",
-            "처리:", "OTO 생성 중", "Lab 생성", "사전 생성", "정렬 시작", "정렬 엔진",
-        )
-        if text.startswith(progress_prefixes):
-            return True
-
-        progress_phrases = (
-            "완료", "시작", "종료", "진행 중", "저장 경로", "검증 결과",
-            "검증 리포트", "자동 설정 제외 항목", "기존 결과 재사용",
-        )
-        if any(token in text for token in progress_phrases):
-            return True
-
-        if text.startswith("["):
-            return False
-        return False
+        return bool(classify_log_message(str(msg or "")).get("ui_visible"))
 
     def _append_log(self, msg, log_to_file=True):
         if log_to_file:
@@ -168,11 +137,12 @@ class AppRuntimeMixin:
             )
             return
 
-        if not self._should_show_ui_log(msg):
+        record = classify_log_message(str(msg or ""))
+        if not record.get("ui_visible"):
             return
 
         def _do():
-            self.log_text.insert("end", str(msg) + "\n")
+            self.log_text.insert("end", record["message"] + "\n")
             self.log_text.see("end")
 
         self._after_safe(_do)
@@ -303,6 +273,7 @@ class AppRuntimeMixin:
                 f.write(f"MFA 경로: {self.mfa_path or '미설치'}\n")
                 f.write(f"정렬 엔진: {self.aligner_var.get()}\n")
                 f.write(f"SOFA Python: {self.sofa_python_var.get()}\n")
+                f.write(f"구조화 이벤트 로그: {getattr(self, 'event_log_path', '')}\n")
                 f.write("\n--- 사용자 설정 ---\n")
                 f.write(f"WAV 폴더: {self.wav_entry.get()}\n")
                 f.write(f"템플릿 OTO: {self.tpl_entry.get()}\n")
@@ -320,6 +291,11 @@ class AppRuntimeMixin:
                     f.write(f"\n--- 상세 로그 파일 ({self.log_path}) ---\n")
                     with open(self.log_path, "r", encoding="utf-8") as lf:
                         f.write(lf.read())
+                event_log_path = getattr(self, "event_log_path", "")
+                if event_log_path and os.path.exists(event_log_path):
+                    f.write(f"\n--- 구조화 이벤트 로그 ({event_log_path}) ---\n")
+                    with open(event_log_path, "r", encoding="utf-8") as ef:
+                        f.write(ef.read())
 
             if sys.platform == "win32":
                 os.startfile(os.path.dirname(report_path))

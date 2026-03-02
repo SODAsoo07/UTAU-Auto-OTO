@@ -1,0 +1,46 @@
+from __future__ import annotations
+
+import os
+from typing import List
+
+from core.ja_lab_generator import generate_ja_dictionary, generate_ja_labs
+from core.ja_oto_generator import generate_ja_oto
+from core.lab_generator import generate_dictionary, generate_labs
+from core.oto_generator import generate_oto
+from core.oto_ml_prepare_types import PreparedAutoPair
+
+
+def _prepare_lab_and_dict(item: PreparedAutoPair, logs: List[str]) -> None:
+    if item.language == "japanese":
+        generate_ja_labs(item.work_dir, callback=logs.append)
+        item.dict_path = os.path.join(item.work_dir, "dictionary_auto.txt")
+        generate_ja_dictionary(item.work_dir, item.dict_path, callback=logs.append)
+    else:
+        generate_labs(item.work_dir, callback=logs.append)
+        item.dict_path = os.path.join(item.work_dir, "dictionary_auto.txt")
+        generate_dictionary(item.work_dir, item.dict_path, callback=logs.append)
+
+
+def _generate_auto_oto(item: PreparedAutoPair, logs: List[str]) -> None:
+    item.auto_oto = os.path.join(item.work_dir, "oto_auto_ml.ini")
+    if item.language == "japanese":
+        generate_ja_oto(
+            tg_folder=item.tg_dir,
+            tpl_path=item.manual_oto,
+            out_path=item.auto_oto,
+            fallback_format=item.format_type,
+            auto_format=item.format_type,
+            callback=logs.append,
+        )
+    else:
+        generate_oto(
+            tg_folder=item.tg_dir,
+            tpl_path=item.manual_oto,
+            out_path=item.auto_oto,
+            fallback_format=item.format_type,
+            auto_format=item.format_type,
+            callback=logs.append,
+        )
+
+
+__all__ = ["_generate_auto_oto", "_prepare_lab_and_dict"]
