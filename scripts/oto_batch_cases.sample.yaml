@@ -1,6 +1,7 @@
 defaults:
   enabled: true
   no_base_oto: false
+  base_oto: ""
   output_name_template: "oto.{run_tag}.ini"
   generate_openutau: false
   gen_missing_vowels: false
