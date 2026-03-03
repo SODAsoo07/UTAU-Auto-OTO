@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 import customtkinter as ctk
 
@@ -7,7 +7,7 @@ from core.oto_generator import DEFAULT_PARAMS
 
 class TabBuildersMixin:
     def _build_pipeline_tab(self):
-        tab = self.tabview.add("🚀 파이프라인")
+        tab = self.tabview.add("파이프라인")
         content = ctk.CTkScrollableFrame(tab)
         content.pack(fill="both", expand=True, padx=5, pady=5)
 
@@ -63,10 +63,10 @@ class TabBuildersMixin:
         self.sofa_install_btn.pack(side="right", padx=(0, 8))
 
         steps = [
-            ("1️⃣ Lab 파일 생성", "WAV 파일명을 기반으로 Lab 파일을 자동으로 생성합니다.", self._run_lab_gen),
-            ("2️⃣ 사전(Dictionary) 생성", "Lab 파일로부터 정렬용 음소 사전 파일을 만듭니다.", self._run_dict_gen),
-            ("3️⃣ 음성 정렬 (MFA/SOFA)", "선택한 정렬 엔진(MFA 또는 SOFA)으로 TextGrid를 생성합니다.", self._run_mfa),
-            ("4️⃣ OTO.ini 자동 생성", "TextGrid와 튜닝 파라미터로 최종 OTO를 계산합니다.", self._run_oto_gen),
+            ("1. Lab 생성", "WAV 파일에서 라벨(Lab) 파일을 생성합니다.", self._run_lab_gen),
+            ("2. 사전(Dictionary) 생성", "Lab 기반으로 발음 사전 파일을 생성합니다.", self._run_dict_gen),
+            ("3. 음성 정렬 (MFA/SOFA)", "선택한 정렬 엔진으로 TextGrid를 생성합니다.", self._run_mfa),
+            ("4. OTO.ini 생성", "TextGrid 기반으로 OTO 파라미터를 계산해 저장합니다.", self._run_oto_gen),
         ]
 
         for title, desc, cmd in steps:
@@ -82,7 +82,7 @@ class TabBuildersMixin:
                 opt_frame.pack(fill="x", pady=(5, 0))
                 ctk.CTkCheckBox(
                     opt_frame,
-                    text="OpenUtau Phonemizer 호환 에일리어스 동시 생성 (k, t, p 종성 규칙 및 - CV 연음 등 복제 추가)",
+                    text="OpenUtau 호환 별도 에일리어스 자동 생성",
                     text_color="#90CAF9",
                     variable=self.openutau_var,
                     command=self._save_config,
@@ -90,7 +90,7 @@ class TabBuildersMixin:
 
                 self.gen_missing_vowels_checkbox = ctk.CTkCheckBox(
                     opt_frame,
-                    text="템플릿에 없더라도 기본 단모음(a, e, i, o, u...) 에일리어스 자동 생성",
+                    text="누락된 모음/모음열(VV) 에일리어스 보완 생성",
                     text_color="#A5D6A7",
                     variable=self.gen_missing_vowels_var,
                     command=self._save_config,
@@ -99,7 +99,7 @@ class TabBuildersMixin:
 
                 self.enable_ml_correction_checkbox = ctk.CTkCheckBox(
                     opt_frame,
-                    text="OTO ML 수치 보정 적용 (끄면 규칙 기반 결과만 생성)",
+                    text="LightGBM 보정 적용",
                     text_color="#FFD54F",
                     variable=self.enable_ml_correction_var,
                     command=self._save_config,
@@ -108,7 +108,7 @@ class TabBuildersMixin:
 
                 self.enable_pytorch_bridge_checkbox = ctk.CTkCheckBox(
                     opt_frame,
-                    text="PyTorch 브리지 보정 사용 (실험용)",
+                    text="PyTorch 브리지 보정 적용",
                     text_color="#FFAB91",
                     variable=self.enable_pytorch_bridge_var,
                     command=self._save_config,
@@ -118,33 +118,33 @@ class TabBuildersMixin:
             ctk.CTkButton(frame, text="실행", width=80, command=cmd).pack(side="right", padx=10)
 
     def _build_params_tab(self):
-        tab = self.tabview.add("🎛️ 튜닝 파라미터")
+        tab = self.tabview.add("파라미터")
         scroll = ctk.CTkScrollableFrame(tab)
         scroll.pack(fill="both", expand=True, padx=5, pady=5)
 
         self.param_vars = {}
         param_groups = [
             (
-                "일반 VC 파라미터",
+                "기본 VC 파라미터",
                 [
-                    ("VC_CONSONANT_RATIO", "VC 자음 사용 비율", 0.1, 1.0, 0.05),
-                    ("VC_VOWEL_START", "VC 모음 시작 위치", 0.1, 1.0, 0.05),
-                    ("VC_PRE_OFFSET", "VC 선행발성 오프셋 (ms)", 0, 50, 1),
+                    ("VC_CONSONANT_RATIO", "VC 자음 구간 비율", 0.1, 1.0, 0.05),
+                    ("VC_VOWEL_START", "VC 모음 시작 비율", 0.1, 1.0, 0.05),
+                    ("VC_PRE_OFFSET", "VC 선행발음 오프셋 (ms)", 0, 50, 1),
                     ("VC_OVL_RATIO", "VC 오버랩 비율", 0.1, 1.0, 0.05),
                 ],
             ),
             (
-                "일반 CV 파라미터",
+                "기본 CV 파라미터",
                 [
-                    ("CV_PRE_RATIO", "CV 선행발성 비율", 0.1, 1.0, 0.05),
+                    ("CV_PRE_RATIO", "CV 선행발음 비율", 0.1, 1.0, 0.05),
                     ("CV_OVL_RATIO", "CV 오버랩 비율", 0.1, 1.0, 0.05),
                 ],
             ),
             (
                 "이중모음 CV 파라미터",
                 [
-                    ("DIPHTHONG_CV_PRE_RATIO", "이중모음 CV 선행발성 비율", 0.1, 1.0, 0.05),
-                    ("DIPHTHONG_CV_CONSONANT_RATIO", "이중모음 CV 고정 비율", 0.1, 1.0, 0.05),
+                    ("DIPHTHONG_CV_PRE_RATIO", "이중모음 CV 선행발음 비율", 0.1, 1.0, 0.05),
+                    ("DIPHTHONG_CV_CONSONANT_RATIO", "이중모음 CV 자음 비율", 0.1, 1.0, 0.05),
                 ],
             ),
             (
@@ -178,7 +178,7 @@ class TabBuildersMixin:
                 slider.pack(side="right", fill="x", expand=True, padx=5)
 
     def _build_log_tab(self):
-        tab = self.tabview.add("📋 로그")
+        tab = self.tabview.add("로그")
         self.log_text = ctk.CTkTextbox(tab, font=("Consolas", 12), state="normal")
         self.log_text.pack(fill="both", expand=True, padx=5, pady=5)
 
@@ -193,7 +193,7 @@ class TabBuildersMixin:
         ).pack(side="left", padx=5)
 
     def _build_profile_tune_tab(self):
-        tab = self.tabview.add("🧩 프로파일 미세조정")
+        tab = self.tabview.add("🎯 프로파일 미세 조정")
         self.tune_auto_oto_var = ctk.StringVar(value="")
         self.tune_manual_oto_var = ctk.StringVar(value="")
         self.tune_profile_out_var = ctk.StringVar(value="")
@@ -202,7 +202,7 @@ class TabBuildersMixin:
         container = ctk.CTkScrollableFrame(tab)
         container.pack(fill="both", expand=True, padx=10, pady=10)
 
-        desc = "자동 생성 OTO와 수동 보정 OTO(일부만 있어도 가능)를 매칭해 델타 프로파일을 학습한 뒤, 선택한 OTO에 미세조정을 적용합니다."
+        desc = "자동 생성 OTO와 수동 OTO를 비교해 보정 프로파일을 만들고, 다른 OTO에 적용할 수 있습니다."
         ctk.CTkLabel(container, text=desc, text_color="gray", wraplength=760, justify="left").pack(
             fill="x", padx=10, pady=(8, 12)
         )
@@ -213,18 +213,18 @@ class TabBuildersMixin:
             ctk.CTkLabel(row, text=label, width=170, anchor="w").pack(side="left")
             ent = ctk.CTkEntry(row, textvariable=var)
             ent.pack(side="left", fill="x", expand=True, padx=(5, 5))
-            ctk.CTkButton(row, text="찾기", width=90, command=browse_cmd).pack(side="right")
+            ctk.CTkButton(row, text="찾아보기", width=90, command=browse_cmd).pack(side="right")
             return ent
 
         _row(
             container,
-            "자동 OTO (입력):",
+            "자동 OTO (.ini):",
             self.tune_auto_oto_var,
             lambda: self._browse_file_by_var(self.tune_auto_oto_var, [("OTO 파일", "*.ini"), ("All", "*.*")]),
         )
         _row(
             container,
-            "수동 OTO (참조):",
+            "수동 OTO (.ini):",
             self.tune_manual_oto_var,
             lambda: self._browse_file_by_var(self.tune_manual_oto_var, [("OTO 파일", "*.ini"), ("All", "*.*")]),
         )
@@ -241,7 +241,7 @@ class TabBuildersMixin:
             lambda: self._browse_file_by_var(self.tune_apply_target_var, [("OTO 파일", "*.ini"), ("All", "*.*")]),
         )
 
-        tip = "팁: 적용 대상 OTO를 비워두면 자동 OTO 입력 파일에 바로 적용합니다. 프로파일 경로를 비우면 자동 OTO와 같은 폴더에 저장합니다."
+        tip = "프로파일 생성만 할 경우 적용 대상 OTO는 비워도 됩니다. 적용 대상을 지정하면 바로 보정 적용까지 수행합니다."
         ctk.CTkLabel(container, text=tip, text_color="#9E9E9E", wraplength=760, justify="left").pack(
             fill="x", padx=10, pady=(8, 12)
         )
@@ -250,7 +250,7 @@ class TabBuildersMixin:
         btn_row.pack(fill="x", padx=10, pady=(2, 8))
         ctk.CTkButton(
             btn_row,
-            text="프로파일 학습 + 적용",
+            text="프로파일 생성 + 적용",
             height=38,
             font=("", 14, "bold"),
             command=self._run_profile_finetune,

@@ -105,6 +105,8 @@ def train_lightgbm_bundle(
     alias_types: Optional[list[str]] = None,
     alias_groups: Optional[list[str]] = None,
     require_train_keep: bool = False,
+    min_mapping_confidence: float = 0.0,
+    exclude_nuclei_fallback: bool = False,
 ) -> Dict[str, Any]:
     _require_training_stack()
     if not dataset_csv or not os.path.exists(dataset_csv):
@@ -127,6 +129,10 @@ def train_lightgbm_bundle(
             df = df[df["alias_group"].astype(str).str.lower().isin(alias_groups)]
     if require_train_keep and "train_keep_default" in df.columns:
         df = df[pd.to_numeric(df["train_keep_default"], errors="coerce").fillna(0).astype(int) > 0]
+    if float(min_mapping_confidence) > 0.0 and "mapping_confidence" in df.columns:
+        df = df[pd.to_numeric(df["mapping_confidence"], errors="coerce").fillna(0.0) >= float(min_mapping_confidence)]
+    if exclude_nuclei_fallback and "used_nuclei_fallback" in df.columns:
+        df = df[pd.to_numeric(df["used_nuclei_fallback"], errors="coerce").fillna(0).astype(int) <= 0]
     if len(df) < 8:
         raise RuntimeError("Filtered dataset is too small for training.")
 
@@ -183,6 +189,8 @@ def train_lightgbm_bundle(
             "alias_types": list(alias_types or []),
             "alias_groups": list(alias_groups or []),
             "require_train_keep": bool(require_train_keep),
+            "min_mapping_confidence": float(min_mapping_confidence),
+            "exclude_nuclei_fallback": bool(exclude_nuclei_fallback),
         },
     }
     with open(os.path.join(out_dir, "model_meta.json"), "w", encoding="utf-8") as f:

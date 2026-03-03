@@ -2070,9 +2070,10 @@ def generate_oto(
         auto_gen_format = "cvvc"
 
     def log(msg):
-        logger.info(msg)
         if callback:
             callback(msg)
+        else:
+            logger.info(msg)
 
     errors = []
     skipped_entries = []

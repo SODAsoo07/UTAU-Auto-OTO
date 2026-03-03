@@ -33,6 +33,7 @@ from core.oto_ml_mapping_quality import augment_mapping_quality_features
 logger = logging.getLogger(__name__)
 
 FEATURE_VERSION = "v4"
+TRAIN_ROW_MATCH_VERSION = "v4"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
 
 FEATURE_NAMES = [
@@ -189,6 +190,7 @@ def _feature_cache_path(language: str, oto_path: str, tg_dir: str, wav_dir: str,
 def _training_row_cache_path(language: str, auto_oto_path: str, manual_oto_path: str, tg_dir: str, wav_dir: str, custom_phonemes_path: str = "", voicebank_id: str = "") -> str:
     key_obj = {
         "feature_version": FEATURE_VERSION,
+        "row_match_version": TRAIN_ROW_MATCH_VERSION,
         "language": str(language).strip().lower(),
         "auto_oto": _path_signature(auto_oto_path),
         "manual_oto": _path_signature(manual_oto_path),
@@ -1010,6 +1012,134 @@ def _evaluate_training_row_quality(language: str, row: Dict[str, object]) -> Tup
     return keep, ";".join(reasons), float(score)
 
 
+def _mapping_max_shift_ms(feature_row: Dict[str, object]) -> float:
+    wav_ms = float(feature_row.get("wav_duration_ms", 0.0) or 0.0)
+    if wav_ms > 0.0:
+        return max(500.0, min(3500.0, wav_ms * 0.30))
+    return 1800.0
+
+
+def _group_manual_rows_for_match(manual_rows: List[Dict[str, object]]) -> Dict[Tuple[str, str], List[Dict[str, object]]]:
+    grouped: Dict[Tuple[str, str], List[Dict[str, object]]] = {}
+    for row in manual_rows:
+        key = (str(row.get("wav_norm", "")), str(row.get("alias_norm", "")))
+        grouped.setdefault(key, []).append(row)
+    for key in list(grouped.keys()):
+        grouped[key].sort(key=lambda r: (float(r.get("offset", 0.0)), int(r.get("line_index", 0))))
+    return grouped
+
+
+def _group_auto_indices_for_match(auto_feats: List[Dict[str, object]]) -> Dict[Tuple[str, str], List[int]]:
+    grouped: Dict[Tuple[str, str], List[int]] = {}
+    for idx, feat in enumerate(auto_feats):
+        key = (str(feat.get("wav_norm", "")), str(feat.get("alias_norm", "")))
+        grouped.setdefault(key, []).append(idx)
+    for key in list(grouped.keys()):
+        grouped[key].sort(key=lambda i: (float(auto_feats[i].get("base_offset", 0.0)), int(auto_feats[i].get("line_index", 0))))
+    return grouped
+
+
+def _build_manual_matches_by_time(
+    auto_feats: List[Dict[str, object]],
+    manual_rows: List[Dict[str, object]],
+) -> Tuple[Dict[int, Dict[str, object]], Dict[str, int]]:
+    manual_groups = _group_manual_rows_for_match(manual_rows)
+    auto_groups = _group_auto_indices_for_match(auto_feats)
+    matches: Dict[int, Dict[str, object]] = {}
+    stats = {
+        "single_direct": 0,
+        "time_nearest": 0,
+        "skip_far": 0,
+        "skip_unmatched": 0,
+    }
+
+    for key, auto_indices in auto_groups.items():
+        manual_group = manual_groups.get(key) or []
+        if not manual_group:
+            stats["skip_unmatched"] += len(auto_indices)
+            continue
+
+        if len(auto_indices) == 1 and len(manual_group) == 1:
+            auto_idx = auto_indices[0]
+            diff = abs(float(manual_group[0].get("offset", 0.0)) - float(auto_feats[auto_idx].get("base_offset", 0.0)))
+            if diff > _mapping_max_shift_ms(auto_feats[auto_idx]):
+                stats["skip_far"] += 1
+            else:
+                matches[auto_idx] = manual_group[0]
+                stats["single_direct"] += 1
+            continue
+
+        used_manual = set()
+        for auto_idx in auto_indices:
+            auto_off = float(auto_feats[auto_idx].get("base_offset", 0.0))
+            best_j = -1
+            best_diff = None
+            for j, manual_row in enumerate(manual_group):
+                if j in used_manual:
+                    continue
+                diff = abs(float(manual_row.get("offset", 0.0)) - auto_off)
+                if best_diff is None or diff < best_diff:
+                    best_diff = diff
+                    best_j = j
+            if best_j < 0:
+                stats["skip_unmatched"] += 1
+                continue
+            if float(best_diff or 0.0) > _mapping_max_shift_ms(auto_feats[auto_idx]):
+                stats["skip_far"] += 1
+                continue
+            used_manual.add(best_j)
+            matches[auto_idx] = manual_group[best_j]
+            stats["time_nearest"] += 1
+
+    return matches, stats
+
+
+def _resolve_manual_cutoff_abs(
+    feature_row: Dict[str, object],
+    manual_offset: float,
+    manual_cutoff: float,
+) -> Tuple[Optional[float], str]:
+    # Standard negative cutoff: relative tail distance from offset.
+    if manual_cutoff < 0.0:
+        return float(manual_offset + abs(manual_cutoff)), "negative_relative"
+
+    base_cut_abs = float(feature_row.get("base_cutoff_abs", 0.0) or 0.0)
+    wav_ms = float(feature_row.get("wav_duration_ms", 0.0) or 0.0)
+    cutoff_abs_raw = abs(float(manual_cutoff))
+
+    # Positive cutoff appears in mixed styles:
+    # 1) relative-from-offset: offset + cutoff
+    # 2) absolute-in-file: cutoff itself
+    candidates = [
+        ("positive_relative", float(manual_offset + cutoff_abs_raw)),
+        ("positive_absolute", float(cutoff_abs_raw)),
+    ]
+    if wav_ms > 0.0:
+        # Some legacy banks store large positive values near wav end.
+        # This branch interprets cutoff as "end-referenced positive style".
+        candidates.append(
+            ("positive_from_wav_end", float(manual_offset + max(wav_ms - cutoff_abs_raw, 0.0)))
+        )
+
+    scored: List[Tuple[float, str, float]] = []
+    for mode, cand in candidates:
+        score = abs(cand - base_cut_abs)
+        if wav_ms > 0.0:
+            if cand > (wav_ms + 80.0):
+                score += 2000.0 + (cand - wav_ms)
+            if cand < (manual_offset + 4.0):
+                score += 800.0 + ((manual_offset + 4.0) - cand)
+        scored.append((score, mode, cand))
+    scored.sort(key=lambda x: x[0])
+
+    chosen_mode, chosen_abs = scored[0][1], float(scored[0][2])
+    if wav_ms > 0.0:
+        chosen_abs = min(chosen_abs, max(0.0, wav_ms - 2.0))
+    if chosen_abs <= (manual_offset + 2.0):
+        return None, "invalid_cutoff"
+    return chosen_abs, chosen_mode
+
+
 def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str, tg_dir: str, wav_dir: str, custom_phonemes_path: str = "", voicebank_id: str = "", format_type_override: str = "") -> Tuple[List[Dict[str, object]], Dict[str, int]]:
     fmt_tag = str(format_type_override or "").strip().lower()
     cache_path = _training_row_cache_path(
@@ -1034,24 +1164,33 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
         format_type_override=fmt_tag,
     )
     manual_rows = parse_oto_rows(manual_oto_path, language=language, custom_map=load_custom_map(custom_phonemes_path))
-    manual_map = build_occurrence_map(manual_rows)
+    manual_matches, match_stats = _build_manual_matches_by_time(auto_feats, manual_rows)
     matched_rows: List[Dict[str, object]] = []
     skipped = 0
+    skipped_cutoff = 0
 
-    for feat in auto_feats:
-        key = (str(feat["wav_norm"]), str(feat["alias_norm"]), int(feat["occurrence_index"]))
-        manual_row = manual_map.get(key)
+    for feat_idx, feat in enumerate(auto_feats):
+        manual_row = manual_matches.get(feat_idx)
         if not manual_row:
             skipped += 1
             continue
-        base_cutoff = -(float(feat["base_cutoff_abs"]) - float(feat["base_offset"]))
         row = dict(feat)
         row["manual_offset"] = float(manual_row["offset"])
         row["manual_cons"] = float(manual_row["cons"])
         row["manual_cutoff"] = float(manual_row["cutoff"])
         row["manual_pre"] = float(manual_row["pre"])
         row["manual_ovl"] = float(manual_row["ovl"])
-        row["manual_cutoff_abs"] = row["manual_offset"] + abs(row["manual_cutoff"])
+        resolved_cutoff_abs, cutoff_mode = _resolve_manual_cutoff_abs(
+            feature_row=feat,
+            manual_offset=float(row["manual_offset"]),
+            manual_cutoff=float(row["manual_cutoff"]),
+        )
+        if resolved_cutoff_abs is None:
+            skipped += 1
+            skipped_cutoff += 1
+            continue
+        row["manual_cutoff_abs"] = float(resolved_cutoff_abs)
+        row["manual_cutoff_mode"] = cutoff_mode
         row["delta_offset"] = row["manual_offset"] - row["base_offset"]
         row["delta_cons"] = row["manual_cons"] - row["base_cons"]
         row["delta_cutoff"] = row["manual_cutoff_abs"] - row["base_cutoff_abs"]
@@ -1069,6 +1208,11 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
         "manual_rows": len(manual_rows),
         "matched_rows": len(matched_rows),
         "skipped_rows": skipped,
+        "skipped_cutoff_rows": skipped_cutoff,
+        "matched_single_direct": int(match_stats.get("single_direct", 0)),
+        "matched_time_nearest": int(match_stats.get("time_nearest", 0)),
+        "skip_mapping_far": int(match_stats.get("skip_far", 0)),
+        "skip_mapping_unmatched": int(match_stats.get("skip_unmatched", 0)),
     }
     _save_training_row_cache(cache_path, matched_rows, stats)
     return matched_rows, stats

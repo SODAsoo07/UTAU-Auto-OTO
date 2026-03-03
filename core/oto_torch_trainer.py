@@ -292,6 +292,7 @@ def train_torch_bundle(
     weight_decay: float = 1e-4,
     use_amp: bool = True,
     device_override: str = "",
+    require_cuda: bool = False,
     log_every_steps: int = 100,
     early_stopping_patience: int = 2,
     early_stopping_min_delta: float = 0.5,
@@ -315,7 +316,21 @@ def train_torch_bundle(
     train_ds = TorchShardDataset(train_shards, numeric_names, categorical_names, target_names, vocab, normalizer)
     valid_ds = TorchShardDataset(valid_shards, numeric_names, categorical_names, target_names, vocab, normalizer)
 
-    device = torch.device(device_override or ("cuda" if torch.cuda.is_available() else "cpu"))
+    wanted = str(device_override or "").strip().lower()
+    if wanted:
+        device = torch.device(wanted)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if bool(require_cuda) and device.type != "cuda":
+        raise RuntimeError(
+            "CUDA is required for this training run, but CUDA is not available. "
+            "Install a CUDA-enabled PyTorch build or pass --no-require-cuda."
+        )
+    if device.type == "cuda":
+        try:
+            torch.backends.cudnn.benchmark = True
+        except Exception:
+            pass
     amp_enabled = bool(use_amp and device.type == "cuda")
     loader_kwargs = {"num_workers": 0, "pin_memory": device.type == "cuda", "collate_fn": _collate}
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, **loader_kwargs)
@@ -354,8 +369,18 @@ def train_torch_bundle(
     os.makedirs(out_dir, exist_ok=True)
 
     log_every = max(0, int(log_every_steps))
+    gpu_desc = ""
+    if device.type == "cuda":
+        try:
+            gpu_desc = f" gpu={torch.cuda.get_device_name(device)}"
+        except Exception:
+            gpu_desc = " gpu=cuda"
+    else:
+        gpu_desc = " gpu=cpu"
+
     print(
         f"[TorchTrain] start task={task_name} lang={language} device={device.type} "
+        f"{gpu_desc}"
         f"epochs={int(epochs)} batch={int(batch_size)} amp={'ON' if amp_enabled else 'OFF'} "
         f"loss_weights={loss_profile['target_weights']} constraint_w={constraint_weight} rhythm_w={rhythm_weight} "
         f"early_stop_patience={int(early_stopping_patience)} early_stop_min_delta={float(early_stopping_min_delta)} "

@@ -2,9 +2,11 @@ import datetime
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import traceback
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
@@ -47,6 +49,41 @@ class FileDialogMixin:
 
 
 class AppRuntimeMixin:
+    def _normalize_ui_message(self, msg: str) -> str:
+        text = str(msg or "")
+        if not text:
+            return text
+
+        replacements = {
+            "笨・": "✅ ",
+            "笶・": "❌ ",
+            "笞": "⚠ ",
+            "邃ｹ": "ℹ ",
+            "脂": "✅ ",
+            "剥": "ℹ ",
+            "噫": "🔄 ",
+            "搭": "📝 ",
+            "寺": "⚙ ",
+            "肌": "🔧 ",
+            "逃": "⏳ ",
+            "踏": "⬇ ",
+            "甯護攵": "파일",
+            "・晧┳": "생성",
+            "・簿ｬ": "정렬",
+            "・ｬ・・": "사전",
+            "・ｨ・ｸ": "모델",
+            "・・｣・": "완료",
+            "・､甯ｨ": "실패",
+            "・懍梠": "시작",
+        }
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+
+        # 깨진 문자 블록은 공백으로 정리하고 연속 공백을 축약
+        text = re.sub(r"[・ｧｨｩｪｫｬｭｮｱｲｳｴｵﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾗﾘ﨑夋懍罹嶹晧擽攵甯尞辿簿誤岬溢菩]", " ", text)
+        text = re.sub(r"\s{2,}", " ", text).strip()
+        return text
+
     def _after_safe(self, callback, delay_ms=0):
         if self._is_closing:
             return
@@ -102,6 +139,17 @@ class AppRuntimeMixin:
         return bool(classify_log_message(str(msg or "")).get("ui_visible"))
 
     def _append_log(self, msg, log_to_file=True):
+        msg = self._normalize_ui_message(str(msg))
+        now = time.monotonic()
+        last_msg = getattr(self, "_last_log_msg", "")
+        last_ts = float(getattr(self, "_last_log_ts", 0.0) or 0.0)
+        # 여러 계층(callback + logger + task print)에서 동일 메시지가 짧은 시간 내
+        # 중복 유입되는 경우 1회만 기록한다.
+        if msg == last_msg and (now - last_ts) < 0.35:
+            return
+        self._last_log_msg = msg
+        self._last_log_ts = now
+
         if log_to_file:
             self._log_to_file(msg)
         if msg == ALERT_MSVC_REQUIRED:
@@ -186,6 +234,7 @@ class AppRuntimeMixin:
         ctk.CTkButton(btns, text="닫기", width=90, command=win.destroy).pack(side="right", padx=(0, 8))
 
     def _set_status(self, msg):
+        msg = self._normalize_ui_message(str(msg))
         color = self._status_color_for_message(msg)
 
         def _do():
@@ -243,7 +292,22 @@ class AppRuntimeMixin:
         if self.is_running:
             messagebox.showwarning("실행 중", "이미 작업이 진행 중입니다. 완료 후 다시 시도해 주세요.")
             return
-        self.tabview.set("📋 로그")
+        # 탭 이름이 변경되어도 로그 탭으로 안전하게 이동
+        switched = False
+        for tab_name in ("로그", "📋 로그", "📝 로그"):
+            try:
+                self.tabview.set(tab_name)
+                switched = True
+                break
+            except Exception:
+                continue
+        if not switched:
+            try:
+                tab_dict = getattr(self.tabview, "_tab_dict", {})
+                if tab_dict:
+                    self.tabview.set(next(iter(tab_dict.keys())))
+            except Exception:
+                pass
         thread = threading.Thread(target=func, daemon=True)
         thread.start()
 

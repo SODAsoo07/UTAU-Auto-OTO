@@ -207,6 +207,7 @@ def post_adjust_params(
     style_apply_fn: Optional[Callable[..., Tuple[float, float, float, float, float]]] = None,
     autotune_apply_fn: Optional[Callable[..., Tuple[float, float, float, float, float]]] = None,
 ) -> Tuple[float, float, float, float, float]:
+    alias_type = str(alias_type or "cv").strip().lower()
     offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
 
     pre_abs = offset + pre
@@ -238,18 +239,40 @@ def post_adjust_params(
         pre_abs = offset + 10.0
 
     pre = max(pre_abs - offset, 0.0)
+    if alias_type == "vcv":
+        # VCV는 pre가 너무 짧아지면 뒤 CV가 묻히기 쉬우므로 최소 길이를 보장한다.
+        vcv_pre_floor = 46.0
+        if pre < vcv_pre_floor:
+            expand_offset = max(pre_abs - vcv_pre_floor, offset_floor)
+            if expand_offset < offset:
+                offset = expand_offset
+                pre = max(pre_abs - offset, 0.0)
+        if pre < vcv_pre_floor:
+            pre_abs = offset + vcv_pre_floor
+            pre = vcv_pre_floor
     if ovl > pre:
         ovl = pre * 0.72
     if consonant < pre + 25.0:
         consonant = pre + 25.0
+    if alias_type == "vcv" and consonant < pre + 76.0:
+        consonant = pre + 76.0
 
     cut_anchor_ms = effective_end_ms if local_end_ms is None else float(local_end_ms)
     cut_allow_ms = 120.0 if local_cut_allow_ms is None else float(local_cut_allow_ms)
-    cons_allow_ms = max(40.0, cut_allow_ms - 40.0)
+    if alias_type == "vcv":
+        # VCV는 고정영역/컷오프를 조금 더 길게 허용해 후행 CV 청감 손실을 줄인다.
+        cut_allow_ms = max(cut_allow_ms, 88.0)
+        cons_allow_ms = max(72.0, cut_allow_ms - 12.0)
+    else:
+        cons_allow_ms = max(40.0, cut_allow_ms - 40.0)
     max_cons_abs = max((cut_anchor_ms + cons_allow_ms) - offset, pre + 40.0)
     consonant = min(consonant, max_cons_abs)
     max_cut_abs = max((cut_anchor_ms + cut_allow_ms) - offset, consonant + 35.0)
     cutoff = -min(abs(cutoff), max_cut_abs)
+    if alias_type == "vcv":
+        min_cut_abs = consonant + 48.0
+        if abs(cutoff) < min_cut_abs:
+            cutoff = -min(min_cut_abs, max_cut_abs)
     offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
 
     if ja_style_enabled and ja_style_profile and not autotune_profile and style_apply_fn:

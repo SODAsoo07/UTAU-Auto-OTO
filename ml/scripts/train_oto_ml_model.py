@@ -20,11 +20,31 @@ def main():
     ap.add_argument("--group-column", default="voicebank_id")
     ap.add_argument("--alias-types", default="", help="Comma-separated alias_type filter")
     ap.add_argument("--alias-groups", default="", help="Comma-separated alias_group filter")
-    ap.add_argument("--require-train-keep", action="store_true", help="Keep only rows marked train_keep_default=1")
+    ap.add_argument(
+        "--require-train-keep",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep only rows marked train_keep_default=1 (default: enabled)",
+    )
+    ap.add_argument(
+        "--min-mapping-confidence",
+        type=float,
+        default=-1.0,
+        help="Minimum mapping_confidence. <0 means auto by language (korean=0.45, japanese=0.20).",
+    )
+    ap.add_argument(
+        "--exclude-nuclei-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Exclude rows that used nuclei fallback (default: enabled)",
+    )
     args = ap.parse_args()
 
     alias_types = [v.strip() for v in str(args.alias_types).split(",") if v.strip()]
     alias_groups = [v.strip() for v in str(args.alias_groups).split(",") if v.strip()]
+    min_conf = float(args.min_mapping_confidence)
+    if min_conf < 0.0:
+        min_conf = 0.45 if args.lang == "korean" else 0.20
 
     meta = train_lightgbm_bundle(
         language=args.lang,
@@ -35,11 +55,14 @@ def main():
         alias_types=alias_types,
         alias_groups=alias_groups,
         require_train_keep=args.require_train_keep,
+        min_mapping_confidence=min_conf,
+        exclude_nuclei_fallback=args.exclude_nuclei_fallback,
     )
     print(f"backend={meta.get('backend')}")
     print(f"language={meta.get('language')}")
     print(f"format_type={meta.get('format_type')}")
     print(f"train_rows={meta.get('train_rows')}")
+    print(f"filters={meta.get('filters')}")
 
 
 if __name__ == "__main__":

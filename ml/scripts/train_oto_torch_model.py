@@ -31,6 +31,12 @@ def main():
     ap.add_argument("--lr-reduce-threshold", type=float, default=0.5)
     ap.add_argument("--no-amp", action="store_true")
     ap.add_argument("--device", default="", help="Optional device override, e.g. cpu or cuda")
+    ap.add_argument(
+        "--require-cuda",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Require CUDA GPU for training (default: enabled). Use --no-require-cuda to allow CPU fallback.",
+    )
     args = ap.parse_args()
 
     meta = train_torch_bundle(
@@ -44,6 +50,7 @@ def main():
         weight_decay=args.weight_decay,
         use_amp=not args.no_amp,
         device_override=args.device,
+        require_cuda=args.require_cuda,
         log_every_steps=args.log_every_steps,
         early_stopping_patience=args.early_stopping_patience,
         early_stopping_min_delta=args.early_stopping_min_delta,

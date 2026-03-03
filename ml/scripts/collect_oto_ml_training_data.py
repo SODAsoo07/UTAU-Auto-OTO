@@ -42,8 +42,13 @@ def main():
     )
     ap.add_argument(
         "--dataset-root",
-        default="",
-        help="Optional staged dataset root to scan directly instead of config roots",
+        default=os.path.join(ROOT, "dataset"),
+        help="Staged dataset root to scan directly (default: Auto_OTO/dataset)",
+    )
+    ap.add_argument(
+        "--use-config-roots",
+        action="store_true",
+        help="Use training_data_roots.yaml direct roots instead of staged dataset",
     )
     args = ap.parse_args()
 
@@ -51,8 +56,12 @@ def main():
     manifest_json = args.manifest_json or os.path.join(workspace_root, "reports", "training_candidates.json")
     manifest_csv = args.manifest_csv or os.path.join(workspace_root, "reports", "training_candidates.csv")
 
-    if args.dataset_root:
-        candidates = discover_training_candidates_from_dataset_root(os.path.abspath(args.dataset_root))
+    dataset_root = os.path.abspath(args.dataset_root)
+    if (not args.use_config_roots) and os.path.isdir(dataset_root):
+        candidates = discover_training_candidates_from_dataset_root(dataset_root)
+        # Fallback for empty staged trees.
+        if not candidates:
+            candidates = discover_training_candidates(args.config)
     else:
         candidates = discover_training_candidates(args.config)
     write_candidate_manifest(manifest_json, candidates)

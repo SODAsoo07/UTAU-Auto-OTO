@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from core.oto_ml_features import CATEGORICAL_FEATURES, TARGET_NAMES, normalize_key
+from core.oto_ml_features import CATEGORICAL_FEATURES, TARGET_NAMES, get_delta_clip_limits, normalize_key
 from core.oto_torch_features import (
     DEFAULT_MEL_BINS,
     DEFAULT_WINDOW_FRAMES,
@@ -411,6 +411,19 @@ def _target_center_ms(row: Dict[str, str]) -> float:
     return max(center, 0.0)
 
 
+def _clipped_target_array(row: Dict[str, str], language: str) -> np.ndarray:
+    clip_limits = get_delta_clip_limits(language)
+    vals: List[float] = []
+    for name in TARGET_NAMES:
+        v = _to_float(row, name, 0.0)
+        lo_hi = clip_limits.get(name)
+        if lo_hi and len(lo_hi) == 2:
+            lo, hi = float(lo_hi[0]), float(lo_hi[1])
+            v = max(lo, min(hi, v))
+        vals.append(float(v))
+    return np.array(vals, dtype=np.float32)
+
+
 def build_torch_dataset(
     task_name: str,
     dataset_csv: str,
@@ -480,7 +493,7 @@ def build_torch_dataset(
             merged = dict(row)
             merged.update(audio_stats)
             numeric, categorical = build_tabular_parts(merged, categorical_features=categorical_names)
-            target = np.array([_to_float(row, name, 0.0) for name in TARGET_NAMES], dtype=np.float32)
+            target = _clipped_target_array(row, language=str(row.get("language", "") or ""))
 
             mel_buf.append(mel_window.astype(np.float16))
             numeric_buf.append(numeric.astype(np.float32))

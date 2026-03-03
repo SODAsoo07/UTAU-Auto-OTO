@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 from core.mfa_runner import check_mfa_model, download_mfa_model, run_mfa_align
 from core.sofa_runner import run_sofa_align
@@ -12,7 +12,7 @@ class AlignActionsMixin:
             try:
                 wav_dir = self.wav_entry.get()
                 lang = self._get_language()
-                dict_filename = "japanese_dict.txt" if lang == 'japanese' else "korean_dict.txt"
+                dict_filename = "japanese_dict.txt" if lang == "japanese" else "korean_dict.txt"
                 dict_path = os.path.join(wav_dir, dict_filename)
                 output_dir = os.path.join(wav_dir, "textgrids")
 
@@ -26,6 +26,7 @@ class AlignActionsMixin:
                         self._append_log("❌ SOFA 사용 시 체크포인트(.ckpt)와 사전(dict.txt) 경로가 필요합니다.")
                         self._set_status("❌ SOFA 설정 누락")
                         return
+
                     self._append_log("🔀 정렬 엔진: SOFA")
                     self._append_log(f"ℹ SOFA 전용 Python: {self.sofa_python_var.get().strip()}")
                     success, err = run_sofa_align(
@@ -43,7 +44,7 @@ class AlignActionsMixin:
                         self._append_log(f"❌ SOFA 실패: {err}")
                         self._set_status("❌ SOFA 실패")
                 else:
-                    self._append_log("🔀 정렬 엔진: MFA(추천)")
+                    self._append_log("🔀 정렬 엔진: MFA(권장)")
                     if not self.mfa_path:
                         self._append_log("❌ MFA 실행 파일을 찾을 수 없습니다!")
                         self._append_log("   💡 MFA를 설치하거나, 프로그램 폴더에 .env/ 포터블 환경을 배치해 주세요.")
@@ -55,7 +56,14 @@ class AlignActionsMixin:
                     if not has_model:
                         download_mfa_model(self.mfa_path, language=lang, callback=self._append_log)
 
-                    success, err = run_mfa_align(self.mfa_path, wav_dir, dict_path, output_dir, language=lang, callback=self._append_log)
+                    success, err = run_mfa_align(
+                        self.mfa_path,
+                        wav_dir,
+                        dict_path,
+                        output_dir,
+                        language=lang,
+                        callback=self._append_log,
+                    )
                     if success:
                         self._set_status("✅ MFA 정렬 완료")
                     else:
@@ -63,8 +71,8 @@ class AlignActionsMixin:
                         self._notify_mfa_failure_suggest_sofa(lang, err)
                         self._set_status("❌ MFA 실패")
             except Exception as e:
-                self._handle_error("MFA 정렬", e)
+                self._handle_error("음성 정렬", e)
             finally:
                 self._set_running(False)
-        self._run_in_thread(task)
 
+        self._run_in_thread(task)

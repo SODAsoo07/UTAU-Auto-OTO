@@ -1,0 +1,50 @@
+defaults:
+  enabled: true
+  no_base_oto: false
+  output_name_template: "oto.{run_tag}.ini"
+  generate_openutau: false
+  gen_missing_vowels: false
+  enable_ml_correction: true
+  enable_pytorch_bridge: false
+  validation: true
+  alias_suffix: ""
+  custom_phonemes_path: ""
+  alias_style: "original"
+
+cases:
+  - name: "ja_vcv_sample"
+    enabled: false
+    language: "japanese"
+    voicebank_dir: "C:/path/to/ja_vcv_voicebank"
+    textgrid_dir: "textgrids"
+    auto_format: "vcv"
+    base_oto: "oto.ini"
+    output_name_template: "oto.test.{run_tag}.ini"
+    validation: true
+
+  - name: "ja_cvvc_sample"
+    enabled: false
+    language: "japanese"
+    voicebank_dir: "C:/path/to/ja_cvvc_voicebank"
+    textgrid_dir: "textgrids"
+    auto_format: "cvvc"
+    no_base_oto: true
+    output_name_template: "oto.test.{run_tag}.ini"
+
+  - name: "kr_cvvc_sample"
+    enabled: false
+    language: "korean"
+    voicebank_dir: "C:/path/to/kr_cvvc_voicebank"
+    textgrid_dir: "textgrids"
+    auto_format: "cvvc"
+    base_oto: "base_oto.ini"
+    output_name_template: "oto.test.{run_tag}.ini"
+
+  - name: "kr_cvc_sample"
+    enabled: false
+    language: "korean"
+    voicebank_dir: "C:/path/to/kr_cvc_voicebank"
+    textgrid_dir: "textgrids"
+    auto_format: "cvc"
+    no_base_oto: true
+    output_name_template: "oto.test.{run_tag}.ini"

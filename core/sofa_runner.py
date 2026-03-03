@@ -840,3 +840,4 @@ def run_sofa_align(
         return False, "SOFA 정렬은 완료됐지만 TextGrid 결과를 찾지 못했습니다."
     return True, ""
 
+

@@ -788,7 +788,8 @@ def _compute_vcv_params_from_virtual_split(alias, prev_v_start, prev_v_end, c_bo
         offset_padding = min(offset_padding, max(prev_v_len * 0.60, pad_cap))
 
     offset = max(boundary - offset_padding, 0.0)
-    pre = max(boundary - offset, 8.0)
+    # VCV는 pre가 지나치게 짧으면 후행 CV 체감이 약해져 기본 하한을 둔다.
+    pre = max(boundary - offset, 36.0)
 
     tail_margin = profile.get("tail_margin_base", 10.0) + prev_v_len * profile.get("tail_margin_mul", 0.05)
     tail_margin = _clamp_range(tail_margin, 4.0, 24.0)
@@ -828,6 +829,44 @@ def _compute_vcv_params_from_virtual_split(alias, prev_v_start, prev_v_end, c_bo
 
     offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
     return _apply_base_shape_blend(offset, consonant, cutoff, pre, ovl, base_shape, alias_type="vcv")
+
+
+def _enforce_vcv_cv_entry_guard(offset, consonant, cutoff, pre, ovl, c_boundary, n_end):
+    """
+    VCV(V-CV) 청감 보장 가드.
+    - pre(abs)는 다음 C 끝 근처에 위치
+    - consonant는 다음 V 진입부를 포함
+    """
+    offset = float(max(offset, 0.0))
+    consonant = float(max(consonant, 0.0))
+    pre = float(max(pre, 0.0))
+    ovl = float(max(ovl, 0.0))
+    c_boundary = float(c_boundary)
+    n_end = float(max(n_end, c_boundary))
+
+    pre_abs = offset + pre
+    pre_abs = _clamp_range(pre_abs, max(c_boundary - 14.0, 0.0), c_boundary + 6.0)
+    pre_floor = 44.0
+    if (pre_abs - offset) < pre_floor:
+        offset = max(pre_abs - pre_floor, 0.0)
+    pre = max(pre_abs - offset, 0.0)
+
+    vowel_start_rel = max(c_boundary - offset, pre + 8.0)
+    vowel_len = max(n_end - c_boundary, 40.0)
+    min_vowel_keep = _clamp_range(vowel_len * 0.22, 24.0, 76.0)
+    min_cons_rel = max(pre + 64.0, vowel_start_rel + min_vowel_keep)
+    max_cons_rel = max(vowel_start_rel + min_vowel_keep + 70.0, pre + 110.0)
+    consonant = _clamp_range(consonant, min_cons_rel, max_cons_rel)
+
+    cutoff_abs = abs(float(cutoff))
+    min_cut_abs = consonant + 28.0
+    max_cut_abs = max((n_end - offset) + 86.0, consonant + 36.0)
+    cutoff_abs = _clamp_range(cutoff_abs, min_cut_abs, max_cut_abs)
+    cutoff = -cutoff_abs
+
+    if ovl > pre:
+        ovl = pre * 0.72
+    return validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
 
 def _mk_phone(start_t: float, end_t: float, mark: str):
@@ -1824,9 +1863,10 @@ def generate_ja_oto(
         auto_gen_format = "cvvc"
 
     def log(msg):
-        logger.info(msg)
         if callback:
             callback(msg)
+        else:
+            logger.info(msg)
 
     def _alias_out(a):
         a_conv = convert_ja_alias_style(a, alias_style=alias_style)
@@ -2641,6 +2681,10 @@ def generate_ja_oto(
                         offset, consonant, cutoff, pre, ovl,
                         alias_type='vcv', alias_text=alias,
                         local_end_ms=n_end, local_cut_allow_ms=26.0
+                    )
+                    offset, consonant, cutoff, pre, ovl = _enforce_vcv_cv_entry_guard(
+                        offset, consonant, cutoff, pre, ovl,
+                        c_boundary=c_boundary, n_end=n_end
                     )
                     
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
