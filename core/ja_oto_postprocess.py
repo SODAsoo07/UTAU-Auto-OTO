@@ -252,10 +252,17 @@ def post_adjust_params(
             pre = vcv_pre_floor
     if ovl > pre:
         ovl = pre * 0.72
-    if consonant < pre + 25.0:
-        consonant = pre + 25.0
-    if alias_type == "vcv" and consonant < pre + 76.0:
-        consonant = pre + 76.0
+    min_cons_gap = 25.0
+    if alias_type in {"cv", "cv_head"}:
+        min_cons_gap = 64.0
+    elif alias_type == "vc":
+        min_cons_gap = 30.0
+    elif alias_type == "vv":
+        min_cons_gap = 34.0
+    elif alias_type == "vcv":
+        min_cons_gap = 76.0
+    if consonant < pre + min_cons_gap:
+        consonant = pre + min_cons_gap
 
     cut_anchor_ms = effective_end_ms if local_end_ms is None else float(local_end_ms)
     cut_allow_ms = 120.0 if local_cut_allow_ms is None else float(local_cut_allow_ms)
@@ -263,6 +270,13 @@ def post_adjust_params(
         # VCV는 고정영역/컷오프를 조금 더 길게 허용해 후행 CV 청감 손실을 줄인다.
         cut_allow_ms = max(cut_allow_ms, 88.0)
         cons_allow_ms = max(72.0, cut_allow_ms - 12.0)
+    elif alias_type in {"cv", "cv_head"}:
+        # CV 계열이 과도하게 짧아지는 회귀를 방지한다.
+        cut_allow_ms = max(cut_allow_ms, 72.0)
+        cons_allow_ms = max(74.0, cut_allow_ms + 10.0)
+    elif alias_type == "vc":
+        cut_allow_ms = max(cut_allow_ms, 44.0)
+        cons_allow_ms = max(52.0, cut_allow_ms + 4.0)
     else:
         cons_allow_ms = max(40.0, cut_allow_ms - 40.0)
     max_cons_abs = max((cut_anchor_ms + cons_allow_ms) - offset, pre + 40.0)
@@ -271,6 +285,14 @@ def post_adjust_params(
     cutoff = -min(abs(cutoff), max_cut_abs)
     if alias_type == "vcv":
         min_cut_abs = consonant + 48.0
+        if abs(cutoff) < min_cut_abs:
+            cutoff = -min(min_cut_abs, max_cut_abs)
+    elif alias_type in {"cv", "cv_head"}:
+        min_cut_abs = consonant + 52.0
+        if abs(cutoff) < min_cut_abs:
+            cutoff = -min(min_cut_abs, max_cut_abs)
+    elif alias_type == "vc":
+        min_cut_abs = consonant + 20.0
         if abs(cutoff) < min_cut_abs:
             cutoff = -min(min_cut_abs, max_cut_abs)
     offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)

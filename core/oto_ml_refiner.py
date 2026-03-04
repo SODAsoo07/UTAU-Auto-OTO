@@ -13,6 +13,8 @@ from typing import Dict, List, Optional, Tuple
 
 from core.oto_ml_features import extract_feature_rows, get_delta_clip_limits, parse_oto_rows
 from core.oto_ml_runtime import load_oto_model_bundle, predict_oto_deltas
+from core.timing_anchor_profiles import get_anchor_profile, is_anchor_lock_enabled
+from core.timing_anchor_runtime import AnchorTimingContext, apply_anchor_lock
 
 logger = logging.getLogger(__name__)
 
@@ -120,11 +122,20 @@ def _route_format_for_feature(language: str, feature_row: Dict[str, object], for
     base_format = str(format_override or feature_row.get("format_type", "general") or "general").strip().lower()
     alias_type = str(feature_row.get("alias_type", "") or "").strip().lower()
     coda_type = str(feature_row.get("coda_type", "") or "").strip().lower()
+    mapping_conf = _to_float(feature_row.get("mapping_confidence"), 1.0)
+    pre_expected_gap = abs(_to_float(feature_row.get("base_pre_to_expected_ms"), 0.0))
 
     if lang == "japanese" and base_format == "vcv" and not _has_explicit_model_override(lang):
         # 일본어 VCV는 현재 VV/VC에서 ML 이득이 크고, -CV도 보조 보정 가치가 있다.
         # 다만 일반 CV까지 전부 열면 과보정 위험이 있으므로 cv_head만 재개방한다.
-        if alias_type in {"vc", "vv", "vcv", "cv_head"}:
+        # 1차 매핑이 흔들리는 행은 ML을 태우지 않는다(오류 증폭 방지).
+        if alias_type in {"vc", "vv"}:
+            if mapping_conf < 0.62 or pre_expected_gap > 160.0:
+                return None
+            return "vcv"
+        if alias_type in {"vcv", "cv_head"}:
+            if mapping_conf < 0.78 or pre_expected_gap > 90.0:
+                return None
             return "vcv"
         return None
 
@@ -390,7 +401,85 @@ def _passes_reassign_post_guard(src: Dict[str, object], offset: float, pre: floa
     return True
 
 
-def apply_oto_ml_delta(language: str, row_context: Dict[str, object], bundle) -> Tuple[float, float, float, float, float]:
+def _anchor_key_for_row(language: str, row_context: Dict[str, object]) -> str:
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    lang = str(language or "").strip().lower()
+    fmt = str(row_context.get("format_type", "") or "").strip().lower()
+    if lang == "japanese" and fmt == "vcv" and alias_type == "vcv":
+        try:
+            from core.ja_oto_generator import _extract_vcv_target_syllable
+            from core.ja_lab_generator import split_ja_romaji_syllable
+
+            token = _extract_vcv_target_syllable(str(row_context.get("alias", "") or ""))
+            onset, _vowel = split_ja_romaji_syllable(token)
+            if not (onset or "").strip():
+                return "vcv_vv_like"
+        except Exception:
+            pass
+    return alias_type
+
+
+def _apply_anchor_lock_lite_after_ml(
+    language: str,
+    row_context: Dict[str, object],
+    params: Tuple[float, float, float, float, float],
+    validate_fn,
+):
+    lang = str(language or "").strip().lower()
+    fmt = str(row_context.get("format_type", "") or "").strip().lower()
+    if not is_anchor_lock_enabled(lang, fmt):
+        return params, ()
+
+    alias_key = _anchor_key_for_row(language, row_context)
+    profile = get_anchor_profile(lang, fmt, alias_key, mode="rhythm_stable")
+    if profile is None:
+        return params, ()
+
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    expected_anchor = _to_float(row_context.get("expected_anchor_ms"), 0.0)
+    curr_start = _to_float(row_context.get("curr_phone_start_ms"), 0.0)
+    curr_end = _to_float(row_context.get("curr_phone_end_ms"), 0.0)
+    curr_vowel_start = _to_float(row_context.get("curr_vowel_start_ms"), 0.0)
+    curr_vowel_end = _to_float(row_context.get("curr_vowel_end_ms"), 0.0)
+    next_gap = _to_float(row_context.get("next_phone_gap_ms"), 0.0)
+
+    anchor_abs = expected_anchor if expected_anchor > 0.0 else (curr_end if curr_end > 0.0 else curr_start)
+    if alias_type in {"vc", "vv"} and curr_end > 0.0:
+        anchor_abs = curr_end
+    if alias_type in {"cv", "cv_head"} and curr_vowel_start > 0.0:
+        anchor_abs = curr_vowel_start
+
+    next_onset = None
+    if curr_end > 0.0 and next_gap > 0.0:
+        next_onset = curr_end + next_gap
+
+    next_vowel = None
+    if curr_vowel_end > 0.0 and next_gap > 0.0:
+        next_vowel = curr_vowel_end + next_gap
+
+    ctx = AnchorTimingContext(
+        file_duration_ms=_to_float(row_context.get("wav_duration_ms"), 0.0),
+        timeline_start_ms=0.0,
+        timeline_end_ms=_to_float(row_context.get("wav_duration_ms"), 0.0),
+        anchor_abs_ms=anchor_abs if anchor_abs > 0.0 else None,
+        next_onset_abs_ms=next_onset,
+        next_vowel_abs_ms=next_vowel,
+        alias_type=alias_type,
+        language=lang,
+        format_type=fmt,
+        mapping_confidence=_to_float(row_context.get("mapping_confidence"), 1.0),
+    )
+    result = apply_anchor_lock(params, ctx, profile, validate_fn=validate_fn, lite=True)
+    return (result.offset, result.consonant, result.cutoff, result.pre, result.ovl), tuple(result.applied_rules or ())
+
+
+def apply_oto_ml_delta(
+    language: str,
+    row_context: Dict[str, object],
+    bundle,
+    *,
+    anchor_stats: Optional[Dict[str, int]] = None,
+) -> Tuple[float, float, float, float, float]:
     validate_oto_params = _get_validate_func(language)
     pred = predict_oto_deltas(bundle, row_context)
     deltas = {
@@ -404,7 +493,15 @@ def apply_oto_ml_delta(language: str, row_context: Dict[str, object], bundle) ->
     cutoff = -(cutoff_abs - offset)
     pre = float(row_context.get("base_pre", 0.0)) + deltas.get("delta_pre", 0.0)
     ovl = float(row_context.get("base_ovl", 0.0)) + deltas.get("delta_ovl", 0.0)
-    return validate_oto_params(offset, cons, cutoff, pre, ovl)
+    out = validate_oto_params(offset, cons, cutoff, pre, ovl)
+    out, applied_rules = _apply_anchor_lock_lite_after_ml(language, row_context, out, validate_oto_params)
+    if anchor_stats is not None and applied_rules:
+        anchor_stats["anchor_locked_count"] = int(anchor_stats.get("anchor_locked_count", 0)) + 1
+        if "cutoff_next_onset_clamp" in applied_rules or "cutoff_next_vowel_clamp" in applied_rules:
+            anchor_stats["cutoff_clamped_count"] = int(anchor_stats.get("cutoff_clamped_count", 0)) + 1
+            if str(row_context.get("alias_type", "") or "").strip().lower() == "vc":
+                anchor_stats["vc_cutoff_leak_guard_count"] = int(anchor_stats.get("vc_cutoff_leak_guard_count", 0)) + 1
+    return out
 
 
 def apply_oto_ml_to_oto_file(
@@ -436,6 +533,11 @@ def apply_oto_ml_to_oto_file(
     bundle_cache: Dict[str, Optional[object]] = {}
     model_notice = set()
     changed = 0
+    anchor_stats = {
+        "anchor_locked_count": 0,
+        "cutoff_clamped_count": 0,
+        "vc_cutoff_leak_guard_count": 0,
+    }
     remapped = 0
     remap_examples: List[str] = []
     raw_lines = []
@@ -474,10 +576,20 @@ def apply_oto_ml_to_oto_file(
             if candidate is not None:
                 infer_feat = candidate
         try:
-            o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(language, infer_feat, bundle)
+            o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(
+                language,
+                infer_feat,
+                bundle,
+                anchor_stats=anchor_stats,
+            )
             if infer_feat is not feat and not _passes_reassign_post_guard(feat, o2, p2, ct2):
                 infer_feat = feat
-                o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(language, infer_feat, bundle)
+                o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(
+                    language,
+                    infer_feat,
+                    bundle,
+                    anchor_stats=anchor_stats,
+                )
         except Exception as e:
             logger.warning("OTO ML inference skipped for line %s: %s", line_index, e)
             continue
@@ -506,4 +618,12 @@ def apply_oto_ml_to_oto_file(
             _emit(callback, f"[OTO-ML] 제한 재매핑 적용: {remapped} lines (WAV 상대 이동 제한)")
             if remap_examples:
                 _emit(callback, f"[OTO-ML] 재매핑 예시: {' | '.join(remap_examples)}")
+    if int(anchor_stats.get("anchor_locked_count", 0)) > 0:
+        _emit(
+            callback,
+            "[AnchorLock-Lite] 요약: "
+            f"anchor_locked_count={int(anchor_stats.get('anchor_locked_count', 0))}, "
+            f"cutoff_clamped_count={int(anchor_stats.get('cutoff_clamped_count', 0))}, "
+            f"vc_cutoff_leak_guard_count={int(anchor_stats.get('vc_cutoff_leak_guard_count', 0))}",
+        )
     return changed

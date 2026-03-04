@@ -10,6 +10,7 @@ import re
 import json
 import datetime
 import logging
+from dataclasses import replace
 from functools import lru_cache
 import textgrid
 import copy
@@ -29,6 +30,15 @@ from core.ja_oto_finalize import (
 )
 from core.ja_oto_postprocess import (
     JaPostprocessContext,
+)
+from core.timing_anchor_profiles import (
+    get_anchor_profile,
+    is_anchor_lock_enabled,
+)
+from core.timing_anchor_runtime import (
+    AnchorTimingContext,
+    apply_anchor_lock,
+    append_timing_anchor_log,
 )
 from core.textio_utils import load_template_oto_lines
 from core.oto_profile_presets import get_ja_profile_preset
@@ -677,6 +687,41 @@ def _find_ja_cv_vowel_match_index(target_tok, expected_idx, syllables_info, sear
     return best_idx
 
 
+def _find_ja_exact_target_index(target_tok, expected_idx, syllables_info, search_back=3, search_fwd=1):
+    """
+    expected 인덱스 주변에서 target 토큰 exact match를 찾는다.
+    목적: 연속 처리 중 누적 드리프트가 생겼을 때 제한적으로 역방향 재동기화.
+    """
+    if not target_tok or not syllables_info:
+        return None
+    n = len(syllables_info)
+    if n <= 0:
+        return None
+    e = max(0, min(int(expected_idx), n - 1))
+    tgt_norm = _normalize_ja_syllable_token(target_tok)
+    if not tgt_norm:
+        return None
+    exp_norm = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[e]))
+    # expected가 이미 exact면 재동기화 불필요
+    if exp_norm == tgt_norm:
+        return None
+
+    lo = max(0, e - max(0, int(search_back)))
+    hi = min(n - 1, e + max(0, int(search_fwd)))
+    best_idx = None
+    best_key = None
+    for i in range(lo, hi + 1):
+        cand_norm = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[i]))
+        if cand_norm != tgt_norm:
+            continue
+        # 거리 우선, 동점이면 역방향(i<e) 우선: 누적 선행 드리프트 복구 목적
+        key = (abs(i - e), 0 if i < e else 1, i)
+        if best_key is None or key < best_key:
+            best_key = key
+            best_idx = i
+    return best_idx
+
+
 def _expand_vcv_lines_for_cvvc(lines, custom_map=None, include_bridge=True):
     """
     VCV alias를 CVVC 처리용으로 전개합니다.
@@ -831,7 +876,7 @@ def _compute_vcv_params_from_virtual_split(alias, prev_v_start, prev_v_end, c_bo
     return _apply_base_shape_blend(offset, consonant, cutoff, pre, ovl, base_shape, alias_type="vcv")
 
 
-def _enforce_vcv_cv_entry_guard(offset, consonant, cutoff, pre, ovl, c_boundary, n_end):
+def _enforce_vcv_cv_entry_guard(offset, consonant, cutoff, pre, ovl, c_boundary, n_end, alias_text=""):
     """
     VCV(V-CV) 청감 보장 가드.
     - pre(abs)는 다음 C 끝 근처에 위치
@@ -844,18 +889,33 @@ def _enforce_vcv_cv_entry_guard(offset, consonant, cutoff, pre, ovl, c_boundary,
     c_boundary = float(c_boundary)
     n_end = float(max(n_end, c_boundary))
 
+    vv_like = False
+    tok = _extract_vcv_target_syllable(alias_text)
+    onset, _vowel = split_ja_romaji_syllable(tok)
+    if not (onset or "").strip():
+        vv_like = True
+
     pre_abs = offset + pre
-    pre_abs = _clamp_range(pre_abs, max(c_boundary - 14.0, 0.0), c_boundary + 6.0)
-    pre_floor = 44.0
+    if vv_like:
+        pre_abs = _clamp_range(pre_abs, max(c_boundary - 4.0, 0.0), c_boundary + 10.0)
+        pre_floor = 52.0
+    else:
+        pre_abs = _clamp_range(pre_abs, max(c_boundary - 8.0, 0.0), c_boundary + 5.0)
+        pre_floor = 44.0
     if (pre_abs - offset) < pre_floor:
         offset = max(pre_abs - pre_floor, 0.0)
     pre = max(pre_abs - offset, 0.0)
 
     vowel_start_rel = max(c_boundary - offset, pre + 8.0)
     vowel_len = max(n_end - c_boundary, 40.0)
-    min_vowel_keep = _clamp_range(vowel_len * 0.22, 24.0, 76.0)
-    min_cons_rel = max(pre + 64.0, vowel_start_rel + min_vowel_keep)
-    max_cons_rel = max(vowel_start_rel + min_vowel_keep + 70.0, pre + 110.0)
+    if vv_like:
+        min_vowel_keep = _clamp_range(vowel_len * 0.30, 34.0, 88.0)
+        min_cons_rel = max(pre + 72.0, vowel_start_rel + min_vowel_keep)
+        max_cons_rel = max(vowel_start_rel + min_vowel_keep + 86.0, pre + 142.0)
+    else:
+        min_vowel_keep = _clamp_range(vowel_len * 0.22, 24.0, 76.0)
+        min_cons_rel = max(pre + 64.0, vowel_start_rel + min_vowel_keep)
+        max_cons_rel = max(vowel_start_rel + min_vowel_keep + 70.0, pre + 110.0)
     consonant = _clamp_range(consonant, min_cons_rel, max_cons_rel)
 
     cutoff_abs = abs(float(cutoff))
@@ -863,6 +923,36 @@ def _enforce_vcv_cv_entry_guard(offset, consonant, cutoff, pre, ovl, c_boundary,
     max_cut_abs = max((n_end - offset) + 86.0, consonant + 36.0)
     cutoff_abs = _clamp_range(cutoff_abs, min_cut_abs, max_cut_abs)
     cutoff = -cutoff_abs
+
+    if vv_like:
+        vv_gap_target = _clamp_range(vowel_len * 0.06, 5.0, 10.0)
+        ovl = max(ovl, pre - vv_gap_target)
+        ovl = min(ovl, max(pre - 2.0, 0.0))
+    if ovl > pre:
+        ovl = pre * 0.72
+    return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+
+
+def _enforce_cv_pre_anchor_guard(offset, consonant, cutoff, pre, ovl, c_end_abs, alias_type="cv"):
+    """
+    CV/CV_HEAD의 pre(abs)를 자음 끝(c_end) 근처로 제한해 박자 앵커 흔들림을 줄인다.
+    """
+    offset = float(max(offset, 0.0))
+    pre = float(max(pre, 0.0))
+    consonant = float(max(consonant, 0.0))
+    ovl = float(max(ovl, 0.0))
+    c_end_abs = float(max(c_end_abs, 0.0))
+
+    pre_abs = offset + pre
+    win = 10.0 if alias_type == "cv_head" else 7.0
+    target_abs = _clamp_range(pre_abs, max(c_end_abs - win, 0.0), c_end_abs + win)
+    if abs(target_abs - pre_abs) > 2.0:
+        new_offset = target_abs - pre
+        if new_offset < 0.0:
+            offset = 0.0
+            pre = target_abs
+        else:
+            offset = new_offset
 
     if ovl > pre:
         ovl = pre * 0.72
@@ -1883,6 +1973,106 @@ def generate_ja_oto(
 
     errors = []
     skipped_entries = []
+    anchor_stats = {
+        "anchor_locked_count": 0,
+        "cutoff_clamped_count": 0,
+        "vc_cutoff_leak_guard_count": 0,
+    }
+    _core_dir = os.path.dirname(os.path.abspath(__file__))
+    _project_dir = os.path.dirname(_core_dir)
+    _anchor_log_dir = os.path.join(_project_dir, "logs")
+    _anchor_log_name = f"timing_anchor_ja_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+    anchor_log_path = os.path.join(_anchor_log_dir, _anchor_log_name)
+
+    def _apply_ja_anchor_lock(
+        *,
+        fname: str,
+        alias_text: str,
+        format_type: str,
+        alias_type: str,
+        offset: float,
+        consonant: float,
+        cutoff: float,
+        pre: float,
+        ovl: float,
+        anchor_abs_ms: float,
+        next_onset_abs_ms: float | None = None,
+        next_vowel_abs_ms: float | None = None,
+        profile_alias_type: str | None = None,
+        lite: bool = False,
+    ):
+        fmt = str(format_type or "").strip().lower()
+        if not is_anchor_lock_enabled("japanese", fmt):
+            return offset, consonant, cutoff, pre, ovl
+        alias_key = str(profile_alias_type or alias_type or "").strip().lower()
+        profile = get_anchor_profile("japanese", fmt, alias_key, mode="rhythm_stable")
+        if profile is None:
+            return offset, consonant, cutoff, pre, ovl
+        # VCV의 CV/CV_HEAD/VCV 본체에서는 cutoff 강클램프가 과개입되기 쉬워
+        # 리듬 앵커(pre) 중심으로만 고정하고 cutoff 상한은 원 계산/가드에 맡긴다.
+        if fmt == "vcv" and alias_key in {"vcv", "vcv_vv_like", "cv", "cv_head"}:
+            profile = replace(
+                profile,
+                cut_to_next_onset_allow_ms=None,
+                cut_to_next_vowel_allow_ms=None,
+            )
+
+        before = (float(offset), float(consonant), float(cutoff), float(pre), float(ovl))
+        ctx = AnchorTimingContext(
+            file_duration_ms=float(wav_duration_ms or 0.0),
+            timeline_start_ms=float(timeline_start_ms),
+            timeline_end_ms=float(effective_end_ms),
+            anchor_abs_ms=float(anchor_abs_ms) if anchor_abs_ms is not None else None,
+            next_onset_abs_ms=float(next_onset_abs_ms) if next_onset_abs_ms is not None else None,
+            next_vowel_abs_ms=float(next_vowel_abs_ms) if next_vowel_abs_ms is not None else None,
+            alias_type=str(alias_type or ""),
+            language="japanese",
+            format_type=fmt,
+            mapping_confidence=1.0,
+        )
+        result = apply_anchor_lock(
+            before,
+            ctx,
+            profile,
+            validate_fn=validate_oto_params,
+            lite=bool(lite),
+        )
+        rules = set(result.applied_rules or [])
+        if rules:
+            anchor_stats["anchor_locked_count"] += 1
+            if "cutoff_next_onset_clamp" in rules or "cutoff_next_vowel_clamp" in rules:
+                anchor_stats["cutoff_clamped_count"] += 1
+                if str(alias_type or "").strip().lower() == "vc":
+                    anchor_stats["vc_cutoff_leak_guard_count"] += 1
+            append_timing_anchor_log(
+                anchor_log_path,
+                {
+                    "event": "anchor_lock",
+                    "language": "japanese",
+                    "format_type": fmt,
+                    "alias_type": alias_type,
+                    "file": fname,
+                    "alias": alias_text,
+                    "lite": bool(lite),
+                    "before": {
+                        "offset": before[0],
+                        "consonant": before[1],
+                        "cutoff": before[2],
+                        "pre": before[3],
+                        "ovl": before[4],
+                    },
+                    "after": {
+                        "offset": float(result.offset),
+                        "consonant": float(result.consonant),
+                        "cutoff": float(result.cutoff),
+                        "pre": float(result.pre),
+                        "ovl": float(result.ovl),
+                    },
+                    "anchor_shift_ms": float(result.anchor_shift_ms),
+                    "rules": sorted(rules),
+                },
+            )
+        return result.offset, result.consonant, result.cutoff, result.pre, result.ovl
 
     def _record_unset(reason, fname, line):
         raw = (line or "").rstrip("\n")
@@ -2638,8 +2828,30 @@ def generate_ja_oto(
                     else:
                         expected_idx = len(syllables_info) - 1
                     mapped_idx = _select_vcv_syllable_index(alias, expected_idx, syllables_info)
+                    target_tok_vcv_raw = _extract_vcv_target_syllable(alias)
+                    resync_idx_vcv = _find_ja_exact_target_index(
+                        target_tok_vcv_raw,
+                        expected_idx,
+                        syllables_info,
+                        search_back=3,
+                        search_fwd=1,
+                    )
+                    if resync_idx_vcv is not None and resync_idx_vcv != mapped_idx:
+                        log(
+                            f"🧭 {fname}: VCV 순서 드리프트 복구 "
+                            f"{expected_idx + 1}->{resync_idx_vcv + 1} ({alias})"
+                        )
+                        mapped_idx = resync_idx_vcv
+                    if mapped_idx > expected_idx:
+                        target_tok_vcv = _normalize_ja_syllable_token(target_tok_vcv_raw)
+                        exp_tok_vcv = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[expected_idx]))
+                        mapped_tok_vcv = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[mapped_idx]))
+                        if mapped_tok_vcv != target_tok_vcv or exp_tok_vcv == target_tok_vcv:
+                            mapped_idx = expected_idx
                     if mapped_idx < expected_idx:
-                        mapped_idx = expected_idx
+                        # VCV에서는 누적 선행 드리프트 복구를 위해 제한적 역방향 이동 허용
+                        if (expected_idx - mapped_idx) > 3:
+                            mapped_idx = expected_idx
                     if mapped_idx > (expected_idx + 1):
                         mapped_idx = expected_idx
                     if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
@@ -2661,7 +2873,7 @@ def generate_ja_oto(
                         prev_v_start = curr_phones[0].minTime * 1000 - 100
                         prev_v_end = curr_phones[0].minTime * 1000
                         
-                    _c_start, c_boundary, _n_start, n_end = _ja_extract_cv_bounds(
+                    _c_start, c_boundary, n_start, n_end = _ja_extract_cv_bounds(
                         curr_phones, alias_text=alias, alias_type="vcv"
                     )
 
@@ -2684,7 +2896,25 @@ def generate_ja_oto(
                     )
                     offset, consonant, cutoff, pre, ovl = _enforce_vcv_cv_entry_guard(
                         offset, consonant, cutoff, pre, ovl,
-                        c_boundary=c_boundary, n_end=n_end
+                        c_boundary=c_boundary, n_end=n_end, alias_text=alias
+                    )
+                    vcv_tok_for_profile = _extract_vcv_target_syllable(alias)
+                    vcv_onset_for_profile, _vcv_vowel_for_profile = split_ja_romaji_syllable(vcv_tok_for_profile)
+                    vv_like_profile_key = "vcv_vv_like" if not (vcv_onset_for_profile or "").strip() else "vcv"
+                    offset, consonant, cutoff, pre, ovl = _apply_ja_anchor_lock(
+                        fname=fname,
+                        alias_text=alias,
+                        format_type="vcv",
+                        alias_type="vcv",
+                        profile_alias_type=vv_like_profile_key,
+                        offset=offset,
+                        consonant=consonant,
+                        cutoff=cutoff,
+                        pre=pre,
+                        ovl=ovl,
+                        anchor_abs_ms=c_boundary,
+                        next_onset_abs_ms=n_start,
+                        next_vowel_abs_ms=n_end,
                     )
                     
                     aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
@@ -2714,7 +2944,28 @@ def generate_ja_oto(
                             )
                             if fixed_idx is not None:
                                 mapped_idx = fixed_idx
+                        if format_type == 'vcv':
+                            resync_idx = _find_ja_exact_target_index(
+                                target_tok,
+                                expected_idx,
+                                syllables_info,
+                                search_back=3,
+                                search_fwd=1,
+                            )
+                            if resync_idx is not None and resync_idx != mapped_idx:
+                                log(
+                                    f"🧭 {fname}: CV_HEAD 순서 드리프트 복구 "
+                                    f"{expected_idx + 1}->{resync_idx + 1} ({alias})"
+                                )
+                                mapped_idx = resync_idx
                     if mapped_idx < expected_idx:
+                        if format_type != 'vcv' or (expected_idx - mapped_idx) > 3:
+                            mapped_idx = expected_idx
+                    if format_type == 'vcv' and mapped_idx > (expected_idx + 1):
+                        log(
+                            f"🛡️ {fname}: CV_HEAD 과도 점프 차단 "
+                            f"({expected_idx + 1}->{mapped_idx + 1}, {alias})"
+                        )
                         mapped_idx = expected_idx
                     if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
                         log(f"🧭 {fname}: CV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
@@ -2771,6 +3022,20 @@ def generate_ja_oto(
                         offset, consonant, cutoff, pre, ovl,
                         alias_type='cv_head', alias_text=alias,
                         local_end_ms=n_end, local_cut_allow_ms=28.0
+                    )
+                    offset, consonant, cutoff, pre, ovl = _apply_ja_anchor_lock(
+                        fname=fname,
+                        alias_text=alias,
+                        format_type=format_type,
+                        alias_type="cv_head",
+                        offset=offset,
+                        consonant=consonant,
+                        cutoff=cutoff,
+                        pre=pre,
+                        ovl=ovl,
+                        anchor_abs_ms=c_end,
+                        next_onset_abs_ms=n_start,
+                        next_vowel_abs_ms=n_end,
                     )
                     offset, consonant, cutoff, pre, offset_reduced = post_ctx.guard_cv_head_offset_to_onset(
                         offset, consonant, cutoff, pre, current_w_idx, alias_text=alias
@@ -2832,7 +3097,28 @@ def generate_ja_oto(
                             )
                             if fixed_idx is not None:
                                 mapped_idx = fixed_idx
+                        if format_type == 'vcv':
+                            resync_idx = _find_ja_exact_target_index(
+                                target_tok,
+                                expected_idx,
+                                syllables_info,
+                                search_back=3,
+                                search_fwd=1,
+                            )
+                            if resync_idx is not None and resync_idx != mapped_idx:
+                                log(
+                                    f"🧭 {fname}: CV 순서 드리프트 복구 "
+                                    f"{expected_idx + 1}->{resync_idx + 1} ({alias})"
+                                )
+                                mapped_idx = resync_idx
                     if mapped_idx < expected_idx:
+                        if format_type != 'vcv' or (expected_idx - mapped_idx) > 3:
+                            mapped_idx = expected_idx
+                    if format_type == 'vcv' and mapped_idx > (expected_idx + 1):
+                        log(
+                            f"🛡️ {fname}: CV 과도 점프 차단 "
+                            f"({expected_idx + 1}->{mapped_idx + 1}, {alias})"
+                        )
                         mapped_idx = expected_idx
                     if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
                         log(f"🧭 {fname}: CV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
@@ -3091,8 +3377,38 @@ def generate_ja_oto(
                     offset, consonant, cutoff, pre, ovl,
                     alias_type=alias_type, alias_text=alias,
                     local_end_ms=n_end,
-                    local_cut_allow_ms=(22.0 if alias_type == 'vc' else 28.0 if alias_type == 'vv' else 34.0),
+                    local_cut_allow_ms=(44.0 if alias_type == 'vc' else 40.0 if alias_type == 'vv' else 54.0),
                 )
+                anchor_abs = c_end
+                next_onset_abs = n_start
+                next_vowel_abs = n_end
+                if alias_type == "vc":
+                    anchor_abs = n_start
+                    next_onset_abs = n_start
+                    next_vowel_abs = n_end
+                elif alias_type == "vv":
+                    anchor_abs = c_end
+                    next_onset_abs = n_start
+                    next_vowel_abs = n_end
+                offset, consonant, cutoff, pre, ovl = _apply_ja_anchor_lock(
+                    fname=fname,
+                    alias_text=alias,
+                    format_type=format_type,
+                    alias_type=alias_type,
+                    offset=offset,
+                    consonant=consonant,
+                    cutoff=cutoff,
+                    pre=pre,
+                    ovl=ovl,
+                    anchor_abs_ms=anchor_abs,
+                    next_onset_abs_ms=next_onset_abs,
+                    next_vowel_abs_ms=next_vowel_abs,
+                )
+                if alias_type in {"cv", "cv_head"} and not is_anchor_lock_enabled("japanese", format_type):
+                    offset, consonant, cutoff, pre, ovl = _enforce_cv_pre_anchor_guard(
+                        offset, consonant, cutoff, pre, ovl,
+                        c_end_abs=c_end, alias_type=alias_type
+                    )
                 if alias_type in {"cv", "cv_head"}:
                     offset, consonant, cutoff, pre, cutoff_reduced = post_ctx.guard_cv_cutoff_to_next_onset(
                         offset, consonant, cutoff, pre, current_w_idx
@@ -3246,6 +3562,15 @@ def generate_ja_oto(
             log(f"[JA-Finalize] cutoff 좌표계 변환 적용: {final_changed} lines")
     except Exception as e:
         log(f"[JA-Finalize] cutoff 변환 스킵: {e}")
+
+    if anchor_stats["anchor_locked_count"] > 0:
+        log(
+            "[AnchorLock] 요약: "
+            f"anchor_locked_count={anchor_stats['anchor_locked_count']}, "
+            f"cutoff_clamped_count={anchor_stats['cutoff_clamped_count']}, "
+            f"vc_cutoff_leak_guard_count={anchor_stats['vc_cutoff_leak_guard_count']}"
+        )
+        log(f"[AnchorLock] 상세 로그: {anchor_log_path}")
 
     _log_unset_summary()
     return processed, total, errors

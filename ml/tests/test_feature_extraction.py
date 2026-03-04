@@ -21,6 +21,7 @@ from core.ja_oto_generator import (
     _clamp_ja_bridge_overlap,
     _compute_vcv_params_from_virtual_split,
     _convert_ja_internal_cutoff_to_oto_field,
+    _find_ja_exact_target_index,
     _ja_is_n_bridge_alias,
     _sanitize_ja_internal_params_for_wav_duration,
     _recenter_ja_params_around_pre,
@@ -253,6 +254,11 @@ class FeatureExtractionTests(unittest.TestCase):
         syllables = [{"word": s} for s in ["je", "je", "jo", "je", "n", "je", "ja"]]
         self.assertEqual(_select_vcv_syllable_index("a じぇ", 2, syllables), 3)
 
+    def test_japanese_vcv_selector_does_not_advance_without_exact_target(self):
+        syllables = [{"word": s} for s in ["te", "tye", "to"]]
+        # expected=0 에서 다음 칸이 유사 발음이어도 exact target("te")가 아니면 전진하지 않는다.
+        self.assertEqual(_select_vcv_syllable_index("a て", 0, syllables), 0)
+
     def test_japanese_vcv_selector_does_not_remap_backward(self):
         syllables = [{"word": s} for s in ["ja", "jo", "ja"]]
         self.assertEqual(_select_vcv_syllable_index("a じょ", 2, syllables), 2)
@@ -260,6 +266,11 @@ class FeatureExtractionTests(unittest.TestCase):
     def test_japanese_vcv_selector_does_not_overjump_more_than_one(self):
         syllables = [{"word": s} for s in ["ja", "ka", "ku", "kyo", "sa"]]
         self.assertEqual(_select_vcv_syllable_index("a きょ", 1, syllables), 1)
+
+    def test_japanese_exact_target_resync_prefers_backward_match(self):
+        syllables = [{"word": s} for s in ["ma", "mi", "mu", "me", "mo"]]
+        # expected(3=me)가 앞서간 상황에서 target=mu를 정확히 찾으면 역방향 복구한다.
+        self.assertEqual(_find_ja_exact_target_index("mu", 3, syllables, search_back=3, search_fwd=1), 2)
 
     def test_japanese_n_bridge_alias_detection(self):
         self.assertTrue(_ja_is_n_bridge_alias("n じょ", "vcv"))

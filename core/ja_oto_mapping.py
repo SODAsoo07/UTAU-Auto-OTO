@@ -618,6 +618,17 @@ def _select_vcv_syllable_index(alias, expected_idx, syllables_info):
     best_gain = best_score - expected_score
     if best_gain < 20:
         return e
+    # VCV는 한 칸 전진을 매우 보수적으로 허용한다.
+    # 다음 칸이 "정확히 target 토큰"이고 현재 expected가 target이 아닐 때만 전진.
+    cand_tok = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[best_idx]))
+    exp_tok = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[e]))
+    tgt_tok = _normalize_ja_syllable_token(target)
+    if cand_tok != tgt_tok:
+        return e
+    if exp_tok == tgt_tok:
+        return e
+    if best_gain < 28:
+        return e
     return best_idx
 
 

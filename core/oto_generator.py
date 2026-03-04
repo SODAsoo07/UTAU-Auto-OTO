@@ -95,6 +95,15 @@ from core.kr_oto_postprocess import (
     guard_kr_vc_cutoff_to_next_segment as _guard_kr_vc_cutoff_to_next_segment_core,
     log_post_timing_events as _log_post_timing_events_core,
 )
+from core.timing_anchor_profiles import (
+    get_anchor_profile,
+    is_anchor_lock_enabled,
+)
+from core.timing_anchor_runtime import (
+    AnchorTimingContext,
+    apply_anchor_lock,
+    append_timing_anchor_log,
+)
 from core.textio_utils import load_template_oto_lines
 from core.oto_profile_presets import get_kr_profile_preset
 
@@ -251,21 +260,21 @@ def _guard_cv_cutoff_to_next_onset(offset, consonant, cutoff, pre, syll_idx, syl
     hard_next = is_plosive_ipa(next_mark) or next_mark in {
         "s", "ss", "sh", "ch", "j", "jj", "c", "ts", "h"
     }
-    safety = 16.0 if hard_next else 10.0
+    safety = 12.0 if hard_next else 7.0
     next_onset_rel = (next_phones[0].minTime * 1000.0) - offset
     max_cutoff_abs = next_onset_rel - safety
-    if max_cutoff_abs <= (pre + 18.0):
+    if max_cutoff_abs <= (pre + 26.0):
         return offset, consonant, cutoff, pre, 0.0
 
     original_cutoff_abs = abs(cutoff)
     consonant = min(consonant, max_cutoff_abs - 14.0)
-    consonant = max(consonant, pre + 10.0)
+    consonant = max(consonant, pre + 16.0)
 
     cutoff_abs = min(original_cutoff_abs, max_cutoff_abs)
     if cutoff_abs <= (consonant + 8.0):
-        cutoff_abs = min(max_cutoff_abs, consonant + 10.0)
+        cutoff_abs = min(max_cutoff_abs, consonant + 14.0)
         if cutoff_abs <= (consonant + 6.0):
-            consonant = max(pre + 8.0, cutoff_abs - 10.0)
+            consonant = max(pre + 12.0, cutoff_abs - 12.0)
     cutoff = -cutoff_abs
 
     offset, consonant, cutoff, pre, _ovl = validate_oto_params(
@@ -1050,7 +1059,7 @@ def _apply_base_shape_blend(offset, consonant, cutoff, pre, ovl, base_shape, ali
             return validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
     if alias_type == "vc":
-        w = 0.10
+        w = 0.16
     elif alias_type == "vv":
         w = 0.16
     elif alias_type == "vcv":
@@ -2077,6 +2086,16 @@ def generate_oto(
 
     errors = []
     skipped_entries = []
+    anchor_stats = {
+        "anchor_locked_count": 0,
+        "cutoff_clamped_count": 0,
+        "vc_cutoff_leak_guard_count": 0,
+    }
+    _core_dir = os.path.dirname(os.path.abspath(__file__))
+    _project_dir = os.path.dirname(_core_dir)
+    _anchor_log_dir = os.path.join(_project_dir, "logs")
+    _anchor_log_name = f"timing_anchor_kr_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+    anchor_log_path = os.path.join(_anchor_log_dir, _anchor_log_name)
 
     def _record_unset(reason, fname, line):
         raw = (line or "").rstrip("\n")
@@ -2113,6 +2132,91 @@ def generate_oto(
                 alias_txt = it["alias"] if it["alias"] else "<empty>"
                 log(f"    예시: {it['file']} | alias={alias_txt}")
                 break
+
+    def _apply_kr_anchor_lock(
+        *,
+        fname: str,
+        alias_text: str,
+        format_type: str,
+        alias_type: str,
+        offset: float,
+        consonant: float,
+        cutoff: float,
+        pre: float,
+        ovl: float,
+        timeline_start_ms: float,
+        timeline_end_ms: float,
+        file_duration_ms: float,
+        anchor_abs_ms: float,
+        next_onset_abs_ms: float | None = None,
+        next_vowel_abs_ms: float | None = None,
+        mapping_confidence: float = 1.0,
+        lite: bool = False,
+    ):
+        fmt = str(format_type or "").strip().lower()
+        if not is_anchor_lock_enabled("korean", fmt):
+            return offset, consonant, cutoff, pre, ovl
+
+        profile = get_anchor_profile("korean", fmt, alias_type, mode="rhythm_stable")
+        if profile is None:
+            return offset, consonant, cutoff, pre, ovl
+
+        before = (float(offset), float(consonant), float(cutoff), float(pre), float(ovl))
+        ctx = AnchorTimingContext(
+            file_duration_ms=float(file_duration_ms or 0.0),
+            timeline_start_ms=float(timeline_start_ms or 0.0),
+            timeline_end_ms=float(timeline_end_ms or 0.0),
+            anchor_abs_ms=float(anchor_abs_ms) if anchor_abs_ms is not None else None,
+            next_onset_abs_ms=float(next_onset_abs_ms) if next_onset_abs_ms is not None else None,
+            next_vowel_abs_ms=float(next_vowel_abs_ms) if next_vowel_abs_ms is not None else None,
+            alias_type=str(alias_type or ""),
+            language="korean",
+            format_type=fmt,
+            mapping_confidence=float(mapping_confidence or 1.0),
+        )
+        result = apply_anchor_lock(
+            before,
+            ctx,
+            profile,
+            validate_fn=validate_oto_params,
+            lite=bool(lite),
+        )
+        rules = set(result.applied_rules or [])
+        if rules:
+            anchor_stats["anchor_locked_count"] += 1
+            if "cutoff_next_onset_clamp" in rules or "cutoff_next_vowel_clamp" in rules:
+                anchor_stats["cutoff_clamped_count"] += 1
+                if str(alias_type or "").strip().lower() == "vc":
+                    anchor_stats["vc_cutoff_leak_guard_count"] += 1
+            append_timing_anchor_log(
+                anchor_log_path,
+                {
+                    "event": "anchor_lock",
+                    "language": "korean",
+                    "format_type": fmt,
+                    "alias_type": alias_type,
+                    "file": fname,
+                    "alias": alias_text,
+                    "lite": bool(lite),
+                    "before": {
+                        "offset": before[0],
+                        "consonant": before[1],
+                        "cutoff": before[2],
+                        "pre": before[3],
+                        "ovl": before[4],
+                    },
+                    "after": {
+                        "offset": float(result.offset),
+                        "consonant": float(result.consonant),
+                        "cutoff": float(result.cutoff),
+                        "pre": float(result.pre),
+                        "ovl": float(result.ovl),
+                    },
+                    "anchor_shift_ms": float(result.anchor_shift_ms),
+                    "rules": sorted(rules),
+                },
+            )
+        return result.offset, result.consonant, result.cutoff, result.pre, result.ovl
 
     kr_profile = None
     profile_path = _default_kr_profile_cache_path()
@@ -2415,12 +2519,17 @@ def generate_oto(
         real_wav_name = tg_info['real_name']
         wav_path_for_signal = _find_wav_path_for_name(real_wav_name, wav_root_for_signal, wav_index_for_signal)
         mel_ctx_for_file = None
+        wav_duration_ms = 0.0
         if wav_path_for_signal:
             mel_ctx_for_file = mel_cache_for_signal.get(wav_path_for_signal)
             if mel_ctx_for_file is None:
                 audio_sig, sr_sig = _read_wav_mono_np(wav_path_for_signal)
                 mel_ctx_for_file = _mel_envelope(audio_sig, sr_sig)
                 mel_cache_for_signal[wav_path_for_signal] = mel_ctx_for_file
+                if sr_sig:
+                    wav_duration_ms = (len(audio_sig) / float(sr_sig)) * 1000.0
+            else:
+                wav_duration_ms = _wav_duration_ms(wav_path_for_signal)
 
         try:
             tg = textgrid.TextGrid.fromFile(tg_path)
@@ -2451,6 +2560,14 @@ def generate_oto(
                 final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
                 processed += 1
                 continue
+
+            timeline_start_ms = float(ph_intervals[0].minTime * 1000.0)
+            timeline_end_ms = float(ph_intervals[-1].maxTime * 1000.0)
+            if wd_intervals:
+                timeline_start_ms = min(timeline_start_ms, float(wd_intervals[0].minTime * 1000.0))
+                timeline_end_ms = max(timeline_end_ms, float(wd_intervals[-1].maxTime * 1000.0))
+            if wav_duration_ms <= 0.0:
+                wav_duration_ms = timeline_end_ms
 
 
             if len(ph_intervals) == 1 and len(wd_intervals) == 1:
@@ -2821,6 +2938,37 @@ def generate_oto(
                         enable_cutoff_guard=False,
                         post_ctx=kr_post_ctx,
                     )
+                    vcv_anchor = None
+                    vcv_next_onset = None
+                    vcv_next_vowel = None
+                    if 0 <= current_w_idx < len(syllables_info):
+                        vcv_curr = syllables_info[current_w_idx]
+                        vcv_phones = vcv_curr.get("phones") or []
+                        if vcv_phones:
+                            if len(vcv_phones) >= 2:
+                                vcv_anchor = float(vcv_phones[-1].minTime) * 1000.0
+                                vcv_next_onset = vcv_anchor
+                                vcv_next_vowel = float(vcv_phones[-1].maxTime) * 1000.0
+                            else:
+                                vcv_anchor = float(vcv_phones[0].maxTime) * 1000.0
+                    if vcv_anchor is not None:
+                        offset, consonant, cutoff, pre, ovl = _apply_kr_anchor_lock(
+                            fname=fname,
+                            alias_text=alias,
+                            format_type=file_format,
+                            alias_type="vcv",
+                            offset=offset,
+                            consonant=consonant,
+                            cutoff=cutoff,
+                            pre=pre,
+                            ovl=ovl,
+                            timeline_start_ms=timeline_start_ms,
+                            timeline_end_ms=timeline_end_ms,
+                            file_duration_ms=wav_duration_ms,
+                            anchor_abs_ms=vcv_anchor,
+                            next_onset_abs_ms=vcv_next_onset,
+                            next_vowel_abs_ms=vcv_next_vowel,
+                        )
                     _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
                     
                     _append_alias_rows(
@@ -2918,6 +3066,32 @@ def generate_oto(
                         offset, consonant, cutoff, pre, selected_w_idx, syllables_info
                     )
                     cutoff_reduced += cutoff_reduced_after_offset
+                    cvh_anchor = None
+                    try:
+                        _sw_idx, _sw_phones, _sw_c_start, _sw_c_end, _sw_n_start, _sw_n_end = _prepare_cv_bounds_from_syllable(
+                            syllables_info, selected_w_idx
+                        )
+                        cvh_anchor = _sw_c_end
+                    except Exception:
+                        cvh_anchor = n_start if n_start is not None else cvh_anchor
+                    if cvh_anchor is not None:
+                        offset, consonant, cutoff, pre, ovl = _apply_kr_anchor_lock(
+                            fname=fname,
+                            alias_text=alias,
+                            format_type=file_format,
+                            alias_type="cv_head",
+                            offset=offset,
+                            consonant=consonant,
+                            cutoff=cutoff,
+                            pre=pre,
+                            ovl=ovl,
+                            timeline_start_ms=timeline_start_ms,
+                            timeline_end_ms=timeline_end_ms,
+                            file_duration_ms=wav_duration_ms,
+                            anchor_abs_ms=cvh_anchor,
+                            next_onset_abs_ms=n_start,
+                            next_vowel_abs_ms=n_end,
+                        )
                     _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
                     if offset_reduced > 1.0:
                         log(f"🛡️ {fname}: CV_HEAD 오프셋 과선행 보정(+{offset_reduced:.1f}ms) [{alias}]")
@@ -3112,6 +3286,34 @@ def generate_oto(
                     enable_cutoff_guard=True,
                     post_ctx=kr_post_ctx,
                 )
+                anchor_abs = c_end
+                next_onset_abs = n_start
+                next_vowel_abs = n_end
+                if alias_type == "vc":
+                    anchor_abs = n_start
+                    next_onset_abs = n_start
+                    next_vowel_abs = n_end
+                elif alias_type == "vv":
+                    anchor_abs = c_end
+                    next_onset_abs = n_start
+                    next_vowel_abs = n_end
+                offset, consonant, cutoff, pre, ovl = _apply_kr_anchor_lock(
+                    fname=fname,
+                    alias_text=alias,
+                    format_type=file_format,
+                    alias_type=alias_type,
+                    offset=offset,
+                    consonant=consonant,
+                    cutoff=cutoff,
+                    pre=pre,
+                    ovl=ovl,
+                    timeline_start_ms=timeline_start_ms,
+                    timeline_end_ms=timeline_end_ms,
+                    file_duration_ms=wav_duration_ms,
+                    anchor_abs_ms=anchor_abs,
+                    next_onset_abs_ms=next_onset_abs,
+                    next_vowel_abs_ms=next_vowel_abs,
+                )
                 _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
 
                 _append_alias_rows(
@@ -3259,6 +3461,15 @@ def generate_oto(
         err = f"OTO 파일 저장 실패: {e}"
         logger.error(err)
         errors.append(err)
+
+    if anchor_stats["anchor_locked_count"] > 0:
+        log(
+            "[AnchorLock] 요약: "
+            f"anchor_locked_count={anchor_stats['anchor_locked_count']}, "
+            f"cutoff_clamped_count={anchor_stats['cutoff_clamped_count']}, "
+            f"vc_cutoff_leak_guard_count={anchor_stats['vc_cutoff_leak_guard_count']}"
+        )
+        log(f"[AnchorLock] 상세 로그: {anchor_log_path}")
 
     _log_unset_summary()
     return processed, total, errors
