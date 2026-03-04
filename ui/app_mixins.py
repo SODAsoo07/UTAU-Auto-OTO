@@ -50,14 +50,19 @@ class FileDialogMixin:
 
 class AppRuntimeMixin:
     def _normalize_ui_message(self, msg: str) -> str:
-        text = str(msg or "")
+        original = str(msg or "")
+        text = original
+        mojibake_markers = ("笨", "笶", "笞", "邃", "﨑", "繝", "", "・ｨ", "・､", "・懍")
         if not text:
             return text
 
         replacements = {
             "笨・": "✅ ",
+            "笨": "✅ ",
             "笶・": "❌ ",
+            "笶": "❌ ",
             "笞": "⚠ ",
+            "笞": "⚠ ",
             "邃ｹ": "ℹ ",
             "脂": "✅ ",
             "剥": "ℹ ",
@@ -75,13 +80,31 @@ class AppRuntimeMixin:
             "・・｣・": "완료",
             "・､甯ｨ": "실패",
             "・懍梠": "시작",
+            "尖徐": "작업",
         }
         for old, new in replacements.items():
             text = text.replace(old, new)
 
-        # 깨진 문자 블록은 공백으로 정리하고 연속 공백을 축약
-        text = re.sub(r"[・ｧｨｩｪｫｬｭｮｱｲｳｴｵﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾗﾘ﨑夋懍罹嶹晧擽攵甯尞辿簿誤岬溢菩]", " ", text)
+        # 반각 카타카나/손상 블록 정리
+        text = re.sub(r"[\uF8F0-\uF8FF]", " ", text)
+        text = re.sub(r"[\uFF61-\uFF9F]", " ", text)
+        text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text)
+        text = re.sub(r"[・﨑夋懍罹嶹晧擽攵甯尞辿簿誤岬溢菩筮邃彧孖劍魂罷圸俾餓增壱共墲護囈]", " ", text)
+        text = text.replace("・", " ")
         text = re.sub(r"\s{2,}", " ", text).strip()
+
+        # 손상 치환 후 의미가 사라진 경우 토큰 기반 기본 문구로 복구
+        if len(text) <= 2 or (any(m in original for m in mojibake_markers) and len(text) <= 8):
+            if "MFA" in original:
+                return "MFA 작업 진행 중..."
+            if "SOFA" in original:
+                return "SOFA 작업 진행 중..."
+            if "OTO" in original:
+                return "OTO 작업 진행 중..."
+            if "Lab" in original or "lab" in original:
+                return "Lab 작업 진행 중..."
+            if "dict" in original.lower() or "사전" in original:
+                return "사전 작업 진행 중..."
         return text
 
     def _after_safe(self, callback, delay_ms=0):

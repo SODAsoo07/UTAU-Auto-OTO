@@ -1,4 +1,5 @@
 ﻿import os
+import locale
 import subprocess as sp
 
 from core.ja_lab_generator import generate_ja_dictionary, generate_ja_labs
@@ -52,6 +53,11 @@ class PipelineActionsMixin:
         if text in {"0", "false", "no", "off", "n"}:
             return False
         return default
+
+    def _preferred_subprocess_encoding(self):
+        # Windows 배포 환경에서 utf-8 고정 디코딩 시 콘솔 로그가 깨지는 경우가 있어,
+        # 시스템 기본 인코딩을 우선 사용하고 실패 시 utf-8로 폴백한다.
+        return locale.getpreferredencoding(False) or "utf-8"
 
     def _get_sofa_repo_dir_for_language(self, language):
         override = self._read_runtime_var("sofa_repo_dir_var", "") or ""
@@ -151,13 +157,13 @@ class PipelineActionsMixin:
         release_link = get_sofa_release_link(language)
         model_root = get_default_sofa_model_root()
         self._after_safe(lambda: self._show_copyable_alert(
-            title="SOFA ・ｨ・ｸ ・・・・､甯ｨ",
+            title="SOFA 모델 다운로드 실패",
             message=(
-                f"SOFA ・ｨ・ｸ ・尖徐 ・､・ｴ・罹糖・・・､甯ｨ嵂溢慣・壱共.\n\n"
-                f"・ｸ・ｴ: {'・ｼ・ｸ・ｴ' if language == 'japanese' else '﨑懋ｵｭ・ｴ'}\n"
-                f"・護棗 ・・･ 尞ｴ・・\n{model_root}\n\n"
-                f"・俯徐 ・､・ｴ・罹糖 ・・〓:\n{release_link}\n\n"
-                f"・､・ｴ・罹糖 弡・.ckpt 甯護攵 ・ｽ・罹･ｼ SOFA ・ｴ增ｬ尞ｬ・ｸ孖ｸ・・・・倣紛 ・ｼ・ｸ・・\n\n"
+                f"SOFA 모델 자동 다운로드에 실패했습니다.\n\n"
+                f"언어: {'일본어' if language == 'japanese' else '한국어'}\n"
+                f"기본 모델 폴더:\n{model_root}\n\n"
+                f"수동 다운로드 링크:\n{release_link}\n\n"
+                f"다운로드한 `.ckpt` 파일을 모델 폴더에 넣은 뒤 다시 시도해 주세요.\n\n"
                 f"오류 요약:\n{err or '알 수 없는 오류'}"
             ),
             alert_key=f"sofa_model_download_fail_{language}",
@@ -168,18 +174,18 @@ class PipelineActionsMixin:
         """MFA ・､甯ｨ ・・SOFA ・・ｴ ・､嵂餓揆 ・壱ざ﨑ｩ・壱共."""
         model_root = get_default_sofa_model_root()
         release_link = get_sofa_release_link(language)
-        self._append_log("笞 MFA ・簿ｬ・・・､甯ｨ嵂溢慣・壱共. SOFA ・簿ｬ ・肥ｧ・愍・・・ｬ・罹巡﨑ｴ ・ｴ・ｸ・・")
-        self._append_log(f"   SOFA ・ｨ・ｸ ・尖徐 ・､・ｴ・罹糖 ・・ｹ・ {model_root}")
-        self._append_log(f"   ・ｨ・ｸ ・ｴ・ｬ・・ {release_link}")
+        self._append_log("⚠ MFA 정렬에 실패했습니다. SOFA 정렬로 전환할 수 있습니다.")
+        self._append_log(f"   SOFA 기본 모델 폴더: {model_root}")
+        self._append_log(f"   SOFA 모델 다운로드 링크: {release_link}")
         self._after_safe(lambda: self._show_copyable_alert(
-            title="MFA ・､甯ｨ - SOFA ・ｬ・罹巡 ・壱ざ",
+            title="MFA 실패 - SOFA 전환 안내",
             message=(
-                "MFA ・簿ｬ・ｴ ・､甯ｨ嵂溢慣・壱共.\n\n"
-                "・・溢愍・・・簿ｬ ・肥ｧ・揆 SOFA・・・緋ｿ・・､・・・､嵂駕腹 ・・・溢慣・壱共.\n"
-                "SOFA ・ｨ・ｸ・ ・ｴ增ｬ尞ｬ・ｸ孖ｸ・ ・・牟 ・溢愍・ｴ ・尖徐 ・､・ｴ・罹糖・ｼ ・罹巡﨑ｩ・壱共.\n\n"
-                f"・ｨ・ｸ ・・･ 尞ｴ・・・ｰ・ｸ):\n{model_root}\n"
-                f"・ｨ・ｸ ・ｴ・ｬ・・・・〓:\n{release_link}\n\n"
-                f"MFA ・､・・\n{err_msg or '(・・搆)'}"
+                "MFA 정렬이 실패했습니다.\n\n"
+                "대안으로 SOFA 정렬을 사용할 수 있습니다.\n"
+                "먼저 SOFA 모델(.ckpt)을 준비해 주세요.\n\n"
+                f"SOFA 모델 폴더(기본):\n{model_root}\n\n"
+                f"SOFA 모델 다운로드 링크:\n{release_link}\n\n"
+                f"MFA 오류:\n{err_msg or '(없음)'}"
             ),
             alert_key=f"mfa_fail_sofa_hint_{language}",
         ))
@@ -218,7 +224,14 @@ class PipelineActionsMixin:
                     self._append_log("[1/2] 肌 MFA ・・圸 ・懍ｻｬ 嶹俾ｲｽ ・晧┳ ・・・､・・・・.. (5~10・・ ・ｩ・餓擽 增ｽ・壱共)")
                     
                     cmd = [system_conda, 'create', '-y', '-p', env_dir, '-c', 'conda-forge', '--override-channels', 'montreal-forced-aligner', 'colorama']
-                    process = sp.Popen(cmd, stdout=sp.PIPE, stderr=sp.STDOUT, text=True, encoding='utf-8', errors='replace')
+                    process = sp.Popen(
+                        cmd,
+                        stdout=sp.PIPE,
+                        stderr=sp.STDOUT,
+                        text=True,
+                        encoding=self._preferred_subprocess_encoding(),
+                        errors='replace',
+                    )
                     for line in process.stdout:
                         stripped = line.strip()
                         if stripped:
@@ -308,7 +321,11 @@ class PipelineActionsMixin:
                     # HTTP 000 ・尖洳・ｼ ・賀ｸｰ ・・紛 --override-channels ・・conda-forge ・・・菩・・ｬ・ｩ
                     process = sp.Popen(
                         [conda_exe, 'install', '-y', '-c', 'conda-forge', '--override-channels', 'montreal-forced-aligner', 'colorama'],
-                        stdout=sp.PIPE, stderr=sp.STDOUT, text=True, encoding='utf-8', errors='replace'
+                        stdout=sp.PIPE,
+                        stderr=sp.STDOUT,
+                        text=True,
+                        encoding=self._preferred_subprocess_encoding(),
+                        errors='replace'
                     )
                     for line in process.stdout:
                         stripped = line.strip()
@@ -331,7 +348,11 @@ class PipelineActionsMixin:
                 self._append_log("[・溢ｧ・云 倹 﨑懋ｵｭ・ｴ ・醐箕 ・ｨ・ｸ ・､・ｴ・罹糖 ・・.. (1~2・・")
                 process = sp.Popen(
                     [mfa_exe, 'model', 'download', 'acoustic', 'korean_mfa', '--ignore_cache'],
-                    stdout=sp.PIPE, stderr=sp.STDOUT, text=True, encoding='utf-8', errors='replace'
+                    stdout=sp.PIPE,
+                    stderr=sp.STDOUT,
+                    text=True,
+                    encoding=self._preferred_subprocess_encoding(),
+                    errors='replace'
                 )
                 for line in process.stdout:
                     stripped = line.strip()
@@ -404,7 +425,7 @@ class PipelineActionsMixin:
         """MFA ・・・ UI・ｼ ・・魂・ｴ孖ｸ﨑ｩ・壱共."""
         def _do():
             if installed:
-                self.mfa_status_label.configure(text="笨・MFA ・､・俯勢", text_color="#66BB6A")
+                self.mfa_status_label.configure(text="✅ MFA 설치됨", text_color="#66BB6A")
                 self.mfa_install_btn.configure(text="✅ 설치 완료", state="disabled", fg_color="#388E3C")
             else:
                 self.mfa_status_label.configure(text="❌ MFA 미설치", text_color="#FF6B6B")
@@ -415,7 +436,7 @@ class PipelineActionsMixin:
         def _do():
             if hasattr(self, "sofa_status_label"):
                 if installed:
-                    self.sofa_status_label.configure(text="笨・SOFA ・､・俯勢", text_color="#66BB6A")
+                    self.sofa_status_label.configure(text="✅ SOFA 설치됨", text_color="#66BB6A")
                 else:
                     self.sofa_status_label.configure(text="❌ SOFA 미설치", text_color="#FF6B6B")
             if not hasattr(self, "sofa_install_btn"):
@@ -660,7 +681,10 @@ class PipelineActionsMixin:
                     gen_ou = self.openutau_var.get()
                     gen_missing = self.gen_missing_vowels_var.get()
                     enable_ml_correction = self.enable_ml_correction_var.get()
-                    enable_pytorch_bridge = self.enable_pytorch_bridge_var.get()
+                    enable_pytorch_bridge = (
+                        self.enable_pytorch_bridge_var.get()
+                        and getattr(self, "pytorch_runtime_available", True)
+                    )
                     auto_format = self.auto_format_var.get()
                     custom_phonemes_path = self.custom_phoneme_var.get().strip()
                     alias_suffix = self.alias_suffix_var.get().strip()

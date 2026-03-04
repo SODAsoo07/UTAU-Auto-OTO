@@ -4,7 +4,7 @@ import argparse
 import os
 import statistics
 import sys
-from typing import Dict, List
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -101,9 +101,48 @@ def _build_entry(pre_vals: List[float], cons_gap_vals: List[float], cut_gap_vals
     return out
 
 
-def build_profile_from_oto(oto_path: str) -> Dict[str, object]:
-    rows = parse_oto_rows(oto_path, language="korean")
-    agg: Dict[str, Dict[str, List[float]]] = {}
+def _iter_training_roots(roots_yaml: str, language: str, format_type: str) -> List[str]:
+    with open(roots_yaml, "r", encoding="utf-8") as f:
+        payload = yaml.safe_load(f) or {}
+    raw = payload.get(str(language).strip().lower(), {}).get(str(format_type).strip().lower(), []) or []
+    roots = []
+    for item in raw:
+        path = os.path.abspath(os.path.expanduser(os.path.expandvars(str(item).strip())))
+        if path and os.path.isdir(path):
+            roots.append(path)
+    return roots
+
+
+def _discover_oto_files(roots: Sequence[str], min_rows: int = 8) -> List[str]:
+    """
+    Recursively discover usable OTOs.
+    - include: oto.ini / boto.ini
+    - exclude: empty top-level placeholder oto.ini (rows < min_rows)
+    """
+    candidates: List[Tuple[str, int, int]] = []
+    name_priority = {"boto.ini": 0, "oto.ini": 1}
+    for root in roots:
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for filename in filenames:
+                lowered = filename.lower()
+                if lowered not in {"oto.ini", "boto.ini"}:
+                    continue
+                path = os.path.join(dirpath, filename)
+                try:
+                    rows = parse_oto_rows(path, language="korean")
+                    row_count = len(rows)
+                except Exception:
+                    continue
+                if row_count < int(min_rows):
+                    continue
+                depth = len(os.path.relpath(path, root).split(os.sep))
+                candidates.append((path, name_priority.get(lowered, 9), depth))
+    # Prefer boto.ini first; otherwise stable by path depth then name.
+    candidates.sort(key=lambda x: (x[1], x[2], x[0].lower()))
+    return [p for p, _prio, _depth in candidates]
+
+
+def _accumulate_rows(rows: Iterable[Dict[str, object]], agg: Dict[str, Dict[str, List[float]]]) -> None:
     for row in rows:
         alias = str(row.get("alias") or "")
         alias_type = str(classify_alias(alias, {})).strip().lower()
@@ -123,6 +162,23 @@ def build_profile_from_oto(oto_path: str) -> Dict[str, object]:
         bucket["cut_gap"].append(cut_gap)
         bucket["ovl_gap"].append(ovl_gap)
 
+
+def build_profile_from_otos(oto_paths: Sequence[str]) -> Dict[str, object]:
+    agg: Dict[str, Dict[str, List[float]]] = {}
+    source_otos: List[str] = []
+    skipped_otos: List[str] = []
+    for oto_path in oto_paths:
+        try:
+            rows = parse_oto_rows(oto_path, language="korean")
+        except Exception:
+            skipped_otos.append(os.path.abspath(oto_path))
+            continue
+        if not rows:
+            skipped_otos.append(os.path.abspath(oto_path))
+            continue
+        _accumulate_rows(rows, agg)
+        source_otos.append(os.path.abspath(oto_path))
+
     profile_entries = {}
     for alias_type in ("cv", "cv_head", "vc", "vv", "vcv"):
         vals = agg.get(alias_type, {})
@@ -138,7 +194,10 @@ def build_profile_from_oto(oto_path: str) -> Dict[str, object]:
     return {
         "version": 1,
         "mode": "rhythm_stable",
-        "source_oto": os.path.abspath(oto_path),
+        "source_otos": source_otos,
+        "source_count": len(source_otos),
+        "skipped_otos": skipped_otos,
+        "skipped_count": len(skipped_otos),
         "sample_counts": sample_counts,
         "korean": {"vcv": profile_entries},
     }
@@ -146,7 +205,15 @@ def build_profile_from_oto(oto_path: str) -> Dict[str, object]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build KR VCV anchor profile YAML from reference OTO.")
-    ap.add_argument("--oto", required=True, help="Reference OTO path")
+    ap.add_argument("--oto", action="append", default=[], help="Reference OTO path (repeatable)")
+    ap.add_argument(
+        "--roots-yaml",
+        default="",
+        help="Training roots YAML path. When set, auto-discovers oto.ini/boto.ini under language/format roots.",
+    )
+    ap.add_argument("--lang", default="korean", help="Language key for roots-yaml discovery (default: korean)")
+    ap.add_argument("--format", default="vcv", help="Format key for roots-yaml discovery (default: vcv)")
+    ap.add_argument("--min-rows", type=int, default=8, help="Minimum OTO rows to keep discovered files (default: 8)")
     ap.add_argument(
         "--out",
         default=os.path.join(ROOT, "ml", "configs", "kr_vcv_anchor_profile.yaml"),
@@ -154,7 +221,26 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    payload = build_profile_from_oto(args.oto)
+    oto_inputs: List[str] = [os.path.abspath(p) for p in (args.oto or []) if str(p).strip()]
+    if args.roots_yaml:
+        roots = _iter_training_roots(args.roots_yaml, args.lang, args.format)
+        discovered = _discover_oto_files(roots, min_rows=int(args.min_rows))
+        oto_inputs.extend(discovered)
+
+    # Deduplicate while preserving order.
+    deduped: List[str] = []
+    seen = set()
+    for p in oto_inputs:
+        key = os.path.normcase(os.path.abspath(p))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(os.path.abspath(p))
+
+    if not deduped:
+        raise RuntimeError("No OTO inputs found. Use --oto or --roots-yaml.")
+
+    payload = build_profile_from_otos(deduped)
     out_path = os.path.abspath(args.out)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
@@ -162,6 +248,8 @@ def main() -> None:
 
     counts = payload.get("sample_counts", {})
     print("saved:", out_path)
+    print("source_count:", payload.get("source_count", 0))
+    print("skipped_count:", payload.get("skipped_count", 0))
     print("sample_counts:", counts)
     if counts:
         print("median_samples:", statistics.median(counts.values()))

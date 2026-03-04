@@ -29,7 +29,10 @@ class OtoActionsMixin:
                 gen_ou = self.openutau_var.get()
                 gen_missing = self.gen_missing_vowels_var.get()
                 enable_ml_correction = self.enable_ml_correction_var.get()
-                enable_pytorch_bridge = self.enable_pytorch_bridge_var.get()
+                enable_pytorch_bridge = (
+                    self.enable_pytorch_bridge_var.get()
+                    and getattr(self, "pytorch_runtime_available", True)
+                )
                 auto_format = self.auto_format_var.get()
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
                 alias_suffix = self.alias_suffix_var.get().strip()

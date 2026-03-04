@@ -1,4 +1,5 @@
-﻿import os
+﻿import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -12,6 +13,19 @@ BUILD_ASSET_DIR = os.path.join(APP_DIR, "build_assets")
 FFMPEG_DIR = os.path.join(BUILD_ASSET_DIR, "ffmpeg")
 FFMPEG_BIN_DIR = os.path.join(FFMPEG_DIR, "bin")
 FFMPEG_RELEASE_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+DEFAULT_APP_NAME = "UTAU_Auto_OTO"
+LITE_EXCLUDES = [
+    "torch",
+    "torchaudio",
+    "torchvision",
+    "core.oto_ml_pytorch",
+    "core.oto_torch_model",
+    "core.oto_torch_features",
+    "core.oto_torch_dataset",
+    "core.oto_torch_trainer",
+    "core.oto_torch_export",
+    "ml",
+]
 
 
 def _ensure_ffmpeg_bin():
@@ -57,7 +71,69 @@ def _ensure_ffmpeg_bin():
         shutil.rmtree(tmp_extract, ignore_errors=True)
 
 
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Build UTAU Auto OTO distributables.")
+    parser.add_argument("--onefile", action="store_true", help="Build onefile executable (slower startup).")
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Include full ML runtime (PyTorch/training stack). Default is lite distribution.",
+    )
+    parser.add_argument("--name", default=DEFAULT_APP_NAME, help="PyInstaller app name.")
+    return parser.parse_args()
+
+
+def _build_pyinstaller_args(app_name, ffmpeg_bin, onefile=False, full=False):
+    import customtkinter
+
+    ctk_path = os.path.dirname(customtkinter.__file__)
+    args = [
+        "main.py",
+        f"--name={app_name}",
+        "--windowed",
+        "--noconfirm",
+        "--clean",
+        "--onefile" if onefile else "--onedir",
+        f"--add-data={ctk_path};customtkinter/",
+        f"--add-data={ffmpeg_bin};ffmpeg/bin",
+        "--hidden-import=textgrid",
+        "--hidden-import=customtkinter",
+    ]
+    if not full:
+        for module_name in LITE_EXCLUDES:
+            args.append(f"--exclude-module={module_name}")
+    return args
+
+
+def _copy_release_outputs(app_name, onefile=False):
+    release_dir = os.path.join(APP_DIR, "UTAU_Auto_OTO_Release")
+    if os.path.exists(release_dir):
+        shutil.rmtree(release_dir)
+    os.makedirs(release_dir, exist_ok=True)
+
+    if onefile:
+        exe_path = os.path.join(APP_DIR, "dist", f"{app_name}.exe")
+        if not os.path.exists(exe_path):
+            raise FileNotFoundError(f"빌드 결과 exe를 찾지 못했습니다: {exe_path}")
+        shutil.copy(exe_path, release_dir)
+        print(f"   -> 복사 완료: {exe_path}")
+    else:
+        dist_dir = os.path.join(APP_DIR, "dist", app_name)
+        if not os.path.isdir(dist_dir):
+            raise FileNotFoundError(f"빌드 결과 폴더를 찾지 못했습니다: {dist_dir}")
+        target_dir = os.path.join(release_dir, app_name)
+        shutil.copytree(dist_dir, target_dir)
+        print(f"   -> 폴더 복사 완료: {dist_dir}")
+
+    setup_path = os.path.join(APP_DIR, "setup_mfa.bat")
+    if os.path.exists(setup_path):
+        shutil.copy(setup_path, release_dir)
+        print("   -> 복사 완료: setup_mfa.bat")
+    return release_dir
+
+
 def main():
+    args = _parse_args()
     os.chdir(APP_DIR)
     print("🚀 [1/5] 빌드 의존성 설치 중...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller", "customtkinter", "textgrid", "numpy"])
@@ -67,43 +143,28 @@ def main():
 
     print("🚀 [3/5] PyInstaller 모듈 로딩 중...")
     import PyInstaller.__main__
-    import customtkinter
 
-    ctk_path = os.path.dirname(customtkinter.__file__)
-    print("🚀 [4/5] UTAU_Auto_OTO.exe 빌드 중...")
-    PyInstaller.__main__.run([
-        "main.py",
-        "--name=UTAU_Auto_OTO",
-        "--windowed",
-        "--onefile",
-        "--noconfirm",
-        "--clean",
-        f"--add-data={ctk_path};customtkinter/",
-        f"--add-data={ffmpeg_bin};ffmpeg/bin",
-        "--hidden-import=textgrid",
-        "--hidden-import=customtkinter",
-    ])
+    mode_text = "onefile" if args.onefile else "onedir"
+    variant_text = "full" if args.full else "lite"
+    print(f"🚀 [4/5] {args.name} 빌드 중... (mode={mode_text}, variant={variant_text})")
+    pyinstaller_args = _build_pyinstaller_args(
+        app_name=args.name,
+        ffmpeg_bin=ffmpeg_bin,
+        onefile=args.onefile,
+        full=args.full,
+    )
+    PyInstaller.__main__.run(pyinstaller_args)
 
     print("🚀 [5/5] 배포 폴더 구성 중...")
-    release_dir = os.path.join(APP_DIR, "UTAU_Auto_OTO_Release")
-    if os.path.exists(release_dir):
-        shutil.rmtree(release_dir)
-    os.makedirs(release_dir, exist_ok=True)
-
-    exe_path = os.path.join(APP_DIR, "dist", "UTAU_Auto_OTO.exe")
-    if os.path.exists(exe_path):
-        shutil.copy(exe_path, release_dir)
-        print(f"   -> 복사 완료: {exe_path}")
-    else:
-        raise FileNotFoundError("빌드 결과 exe를 찾지 못했습니다.")
-
-    setup_path = os.path.join(APP_DIR, "setup_mfa.bat")
-    if os.path.exists(setup_path):
-        shutil.copy(setup_path, release_dir)
-        print("   -> 복사 완료: setup_mfa.bat")
+    release_dir = _copy_release_outputs(args.name, onefile=args.onefile)
 
     print(f"\n✅ 빌드 완료: {release_dir}")
-    print("ℹ FFmpeg는 exe 내부에 포함되어 별도 설치 없이 배포 가능합니다.")
+    if args.onefile:
+        print("ℹ onefile 배포는 실행 시 압축 해제로 시작 지연이 발생할 수 있습니다.")
+    else:
+        print("ℹ onedir 배포는 시작 속도가 빠르며, 사용자용 배포에 권장됩니다.")
+    if not args.full:
+        print("ℹ lite 빌드: PyTorch/학습 스택이 제외되었습니다.")
 
 
 if __name__ == "__main__":

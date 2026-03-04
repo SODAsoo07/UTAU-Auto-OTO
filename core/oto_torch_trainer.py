@@ -5,7 +5,7 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -17,7 +17,7 @@ try:
 except Exception:
     GroupShuffleSplit = None
 
-from core.oto_ml_features import TARGET_NAMES, get_delta_clip_limits, write_feature_schema
+from core.oto_ml_features import CATEGORICAL_FEATURES, FEATURE_NAMES, TARGET_NAMES, get_delta_clip_limits, get_feature_schema, write_feature_schema
 from core.oto_torch_dataset import load_torch_dataset_index
 from core.oto_torch_model import OtoTorchRegressor
 
@@ -53,13 +53,23 @@ def _task_loss_profile(task_name: str) -> Dict[str, object]:
 
 
 class TorchShardDataset(Dataset):
-    def __init__(self, shard_entries, numeric_names, categorical_names, target_names, categorical_vocabs, normalizer):
+    def __init__(
+        self,
+        shard_entries,
+        numeric_names,
+        categorical_names,
+        target_names,
+        categorical_vocabs,
+        normalizer,
+        target_override_by_path: Optional[Dict[str, np.ndarray]] = None,
+    ):
         self.shard_entries = list(shard_entries)
         self.numeric_names = list(numeric_names)
         self.categorical_names = list(categorical_names)
         self.target_names = list(target_names)
         self.categorical_vocabs = dict(categorical_vocabs)
         self.normalizer = dict(normalizer)
+        self.target_override_by_path = dict(target_override_by_path or {})
         self._offsets = []
         total = 0
         for entry in self.shard_entries:
@@ -90,6 +100,7 @@ class TorchShardDataset(Dataset):
     def __getitem__(self, idx: int):
         shard_idx, local_idx = self._locate(int(idx))
         data = self._load_shard(shard_idx)
+        shard_path = str(self.shard_entries[shard_idx]["path"])
         mel = data["mel_windows"][local_idx].astype(np.float32)
         numeric = data["numeric_features"][local_idx].astype(np.float32)
         raw_numeric = numeric.copy()
@@ -103,7 +114,11 @@ class TorchShardDataset(Dataset):
             token = str(categorical_raw[i])
             cats[name] = np.int64(vocab.get(token, 0))
         cats["voicebank_id"] = np.int64(self.categorical_vocabs["voicebank_id"].get(str(data["voicebank_id"][local_idx]), 0))
-        target = data["targets"][local_idx].astype(np.float32)
+        target_override = self.target_override_by_path.get(shard_path)
+        if target_override is not None and local_idx < len(target_override):
+            target = target_override[local_idx].astype(np.float32)
+        else:
+            target = data["targets"][local_idx].astype(np.float32)
         metadata = {
             "alias_group": str(data["alias_group"][local_idx]),
             "alias_type": str(data["alias_type"][local_idx]),
@@ -152,6 +167,81 @@ def _group_split(shards: List[Dict[str, object]], test_size: float = 0.2):
         return train_shards, valid_shards
     split_at = max(1, int(len(shards) * (1.0 - test_size)))
     return shards[:split_at], shards[split_at:]
+
+
+def _read_json(path: str) -> Dict[str, object]:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _build_residual_targets_by_shard(
+    shards: List[Dict[str, object]],
+    numeric_names: List[str],
+    categorical_names: List[str],
+    target_names: List[str],
+    residual_base_model_dir: str,
+) -> Dict[str, np.ndarray]:
+    from core.oto_ml_lightgbm import _prepare_frame, load_lightgbm_bundle, pd
+
+    if pd is None:
+        raise RuntimeError("pandas is required for residual target building")
+
+    base_model_dir = os.path.abspath(str(residual_base_model_dir or "").strip())
+    if not base_model_dir or not os.path.isdir(base_model_dir):
+        raise FileNotFoundError(f"Invalid residual base model dir: {residual_base_model_dir}")
+
+    meta_path = os.path.join(base_model_dir, "model_meta.json")
+    if not os.path.isfile(meta_path):
+        raise FileNotFoundError(meta_path)
+    base_meta = _read_json(meta_path)
+    schema_path = os.path.join(base_model_dir, "feature_schema.json")
+    base_schema = _read_json(schema_path) if os.path.isfile(schema_path) else get_feature_schema()
+    base_payload = load_lightgbm_bundle(base_model_dir, meta=base_meta, schema=base_schema)
+
+    feature_names = list(base_schema.get("feature_names") or FEATURE_NAMES)
+    categorical_features = list(base_meta.get("categorical_features") or CATEGORICAL_FEATURES)
+    numeric_idx = {name: i for i, name in enumerate(numeric_names)}
+    categorical_idx = {name: i for i, name in enumerate(categorical_names)}
+    target_idx = {name: i for i, name in enumerate(target_names)}
+    total_rows = int(sum(int(entry.get("rows", 0)) for entry in shards))
+    done_rows = 0
+    overrides: Dict[str, np.ndarray] = {}
+
+    print(
+        f"[TorchTrain] residual_target_build start base={base_model_dir} "
+        f"rows={total_rows} shards={len(shards)}"
+    )
+    for entry in shards:
+        shard_path = str(entry.get("path", "") or "")
+        data = np.load(shard_path, allow_pickle=False)
+        numeric = data["numeric_features"].astype(np.float32)
+        categorical = data["categorical_features"]
+        truth = data["targets"].astype(np.float32)
+        row_count = int(numeric.shape[0])
+        frame_payload: Dict[str, object] = {}
+        for name in feature_names:
+            if name in numeric_idx:
+                frame_payload[name] = numeric[:, numeric_idx[name]]
+            elif name in categorical_idx:
+                frame_payload[name] = categorical[:, categorical_idx[name]].astype(str)
+            elif name in categorical_features:
+                frame_payload[name] = [""] * row_count
+            else:
+                frame_payload[name] = np.zeros((row_count,), dtype=np.float32)
+
+        frame = pd.DataFrame(frame_payload)
+        frame = _prepare_frame(frame, feature_names, categorical_features)
+        base_pred = np.zeros((row_count, len(target_names)), dtype=np.float32)
+        for target_name, model in base_payload["models"].items():
+            idx = target_idx.get(str(target_name))
+            if idx is None:
+                continue
+            base_pred[:, idx] = np.asarray(model.predict(frame), dtype=np.float32)
+        overrides[shard_path] = (truth - base_pred).astype(np.float32)
+        done_rows += row_count
+        if done_rows % 2000 == 0 or done_rows >= total_rows:
+            print(f"[TorchTrain] residual_target_build progress={done_rows}/{total_rows}")
+    return overrides
 
 
 def _scan_train_stats(shards: List[Dict[str, object]], categorical_names: List[str]):
@@ -300,6 +390,8 @@ def train_torch_bundle(
     lr_reduce_patience: int = 1,
     lr_reduce_min_lr: float = 1e-5,
     lr_reduce_threshold: float = 0.5,
+    residual_mode: bool = False,
+    residual_base_model_dir: str = "",
 ) -> Dict[str, object]:
     index = load_torch_dataset_index(os.path.join(dataset_dir, "index.json"))
     shards = list(index.get("shards") or [])
@@ -312,9 +404,47 @@ def train_torch_bundle(
     if not valid_shards:
         valid_shards = train_shards[-1:]
     normalizer, vocab = _scan_train_stats(train_shards, categorical_names)
+    target_override_by_path: Dict[str, np.ndarray] = {}
+    target_mode = "absolute_delta"
+    residual_base_dir_abs = ""
+    if bool(residual_mode):
+        residual_base_dir_abs = os.path.abspath(str(residual_base_model_dir or "").strip())
+        if not residual_base_dir_abs:
+            raise RuntimeError("residual_mode is enabled but residual_base_model_dir is empty")
+        all_shards = list(train_shards)
+        seen_paths = {str(entry.get("path", "") or "") for entry in train_shards}
+        for entry in valid_shards:
+            entry_path = str(entry.get("path", "") or "")
+            if entry_path in seen_paths:
+                continue
+            all_shards.append(entry)
+        target_override_by_path = _build_residual_targets_by_shard(
+            all_shards,
+            numeric_names=numeric_names,
+            categorical_names=categorical_names,
+            target_names=target_names,
+            residual_base_model_dir=residual_base_dir_abs,
+        )
+        target_mode = "residual_over_lightgbm"
 
-    train_ds = TorchShardDataset(train_shards, numeric_names, categorical_names, target_names, vocab, normalizer)
-    valid_ds = TorchShardDataset(valid_shards, numeric_names, categorical_names, target_names, vocab, normalizer)
+    train_ds = TorchShardDataset(
+        train_shards,
+        numeric_names,
+        categorical_names,
+        target_names,
+        vocab,
+        normalizer,
+        target_override_by_path=target_override_by_path,
+    )
+    valid_ds = TorchShardDataset(
+        valid_shards,
+        numeric_names,
+        categorical_names,
+        target_names,
+        vocab,
+        normalizer,
+        target_override_by_path=target_override_by_path,
+    )
 
     wanted = str(device_override or "").strip().lower()
     if wanted:
@@ -382,11 +512,14 @@ def train_torch_bundle(
         f"[TorchTrain] start task={task_name} lang={language} device={device.type} "
         f"{gpu_desc}"
         f"epochs={int(epochs)} batch={int(batch_size)} amp={'ON' if amp_enabled else 'OFF'} "
+        f"target_mode={target_mode} "
         f"loss_weights={loss_profile['target_weights']} constraint_w={constraint_weight} rhythm_w={rhythm_weight} "
         f"early_stop_patience={int(early_stopping_patience)} early_stop_min_delta={float(early_stopping_min_delta)} "
         f"lr_reduce_factor={float(lr_reduce_factor)} lr_reduce_patience={int(lr_reduce_patience)} "
         f"lr_reduce_min_lr={float(lr_reduce_min_lr)} lr_reduce_threshold={float(lr_reduce_threshold)}"
     )
+    if target_mode == "residual_over_lightgbm":
+        print(f"[TorchTrain] residual_base_model={residual_base_dir_abs}")
 
     for epoch in range(int(epochs)):
         model.train()
@@ -493,6 +626,8 @@ def train_torch_bundle(
             "constraint_weight": constraint_weight,
             "rhythm_weight": rhythm_weight,
         },
+        "target_mode": target_mode,
+        "residual_base_model_dir": residual_base_dir_abs,
     }
     with open(os.path.join(out_dir, "torch_config.json"), "w", encoding="utf-8") as f:
         json.dump(torch_config, f, ensure_ascii=False, indent=2)
@@ -511,7 +646,7 @@ def train_torch_bundle(
         "format_type": str(index.get("formats", [""])[0] if index.get("formats") else "general"),
         "task_name": task_name,
         "model_version": "v1",
-        "feature_version": "v4",
+        "feature_version": str(get_feature_schema().get("feature_version", "")),
         "audio_window_frames": int(index.get("window_frames", 160)),
         "mel_bins": int(index.get("mel_bins", 80)),
         "feature_names": numeric_names + categorical_names,
@@ -543,6 +678,9 @@ def train_torch_bundle(
             "constraint_weight": constraint_weight,
             "rhythm_weight": rhythm_weight,
         },
+        "target_mode": target_mode,
+        "residual_base_backend": "lightgbm" if target_mode == "residual_over_lightgbm" else "",
+        "residual_base_model_dir": residual_base_dir_abs,
     }
     with open(os.path.join(out_dir, "model_meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)

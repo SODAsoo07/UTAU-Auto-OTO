@@ -35,6 +35,13 @@ korean:
     - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\Misty_CVC'
     - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\Song-SoRi_QLED_CVC'
 
+  vcv:
+   - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\JAEYOON_KR_VCV'
+   - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\MentheKR_VCV'
+   - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\JaneDoeKR_VCV'
+   - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\JangHyeun_VCV'
+   - 'C:\Users\oyh57\SODAsoo1\Devs\VBs\Darling_KRkire_VCV'
+
 notes:
   recursive_oto_search: true
   recursive_wav_search: true

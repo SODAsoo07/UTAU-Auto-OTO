@@ -106,14 +106,21 @@ class TabBuildersMixin:
                 )
                 self.enable_ml_correction_checkbox.pack(anchor="w", pady=(5, 0))
 
-                self.enable_pytorch_bridge_checkbox = ctk.CTkCheckBox(
-                    opt_frame,
-                    text="PyTorch 브리지 보정 적용",
-                    text_color="#FFAB91",
-                    variable=self.enable_pytorch_bridge_var,
-                    command=self._save_config,
-                )
-                self.enable_pytorch_bridge_checkbox.pack(anchor="w", pady=(5, 0))
+                if getattr(self, "pytorch_runtime_available", True):
+                    self.enable_pytorch_bridge_checkbox = ctk.CTkCheckBox(
+                        opt_frame,
+                        text="PyTorch 브리지 보정 적용",
+                        text_color="#FFAB91",
+                        variable=self.enable_pytorch_bridge_var,
+                        command=self._save_config,
+                    )
+                    self.enable_pytorch_bridge_checkbox.pack(anchor="w", pady=(5, 0))
+                else:
+                    ctk.CTkLabel(
+                        opt_frame,
+                        text="PyTorch 브리지 보정: 배포판에서 비활성화됨",
+                        text_color="#9E9E9E",
+                    ).pack(anchor="w", pady=(5, 0))
 
             ctk.CTkButton(frame, text="실행", width=80, command=cmd).pack(side="right", padx=10)
 

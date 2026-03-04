@@ -8,6 +8,7 @@ import sys
 import datetime
 import logging
 import traceback
+import importlib.util
 
 
 def _suppress_windows_loader_popup():
@@ -106,6 +107,14 @@ LANGUAGE_OPTIONS = [
 ]
 
 
+def _is_pytorch_runtime_available() -> bool:
+    """PyTorch 런타임 사용 가능 여부를 확인합니다."""
+    try:
+        return importlib.util.find_spec("torch") is not None
+    except Exception:
+        return False
+
+
 class App(
     LayoutMixin,
     FileDialogMixin,
@@ -136,6 +145,9 @@ class App(
         self.no_base_oto_var = ctk.BooleanVar(value=False)
         self.enable_ml_correction_var = ctk.BooleanVar(value=True)
         self.enable_pytorch_bridge_var = ctk.BooleanVar(value=False)
+        self.pytorch_runtime_available = _is_pytorch_runtime_available()
+        if not self.pytorch_runtime_available:
+            self.enable_pytorch_bridge_var.set(False)
         self.ja_mapping_words_fallback_enabled_var = ctk.BooleanVar(value=True)
         self.ja_mapping_spn_ratio_threshold_var = ctk.DoubleVar(value=0.35)
         self.ja_mapping_min_vowel_phone_ratio_var = ctk.DoubleVar(value=0.5)
@@ -187,6 +199,8 @@ class App(
         self.app_version = APP_VERSION
         self._build_ui()
         self._load_config()
+        if not self.pytorch_runtime_available:
+            self.enable_pytorch_bridge_var.set(False)
         self.protocol("WM_DELETE_WINDOW", self._on_close_request)
 
         logger.info(f"{APP_NAME} v{APP_VERSION} 시작")
