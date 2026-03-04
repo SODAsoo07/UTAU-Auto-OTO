@@ -43,6 +43,11 @@ def _model_root_for_language(language: str) -> str:
     return os.path.join(base_dir, "assets", "models", "oto_ml", lang)
 
 
+def _ml_same_language_borrow_only() -> bool:
+    raw = str(os.environ.get("UTOA_ML_SAME_LANGUAGE_BORROW_ONLY", "1")).strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
 def _installed_model_root_for_language(language: str) -> str:
     lang = str(language).strip().lower()
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -63,6 +68,7 @@ def _installed_pytorch_model_root_for_language(language: str) -> str:
 
 def _resolve_lightgbm_model_dir(language: str, format_type: str) -> Optional[str]:
     fmt = str(format_type or "").strip().lower() or "general"
+    lang = str(language or "").strip().lower()
     candidates = []
     for root in (_installed_model_root_for_language(language), _model_root_for_language(language)):
         if os.path.isfile(os.path.join(root, "model_meta.json")):
@@ -74,6 +80,19 @@ def _resolve_lightgbm_model_dir(language: str, format_type: str) -> Optional[str
     for candidate in candidates:
         if os.path.isfile(os.path.join(candidate, "model_meta.json")):
             return candidate
+    if _ml_same_language_borrow_only():
+        return None
+    # Optional cross-language fallback for local experiments only.
+    for alt_lang in ("korean", "japanese"):
+        if alt_lang == lang:
+            continue
+        alt_root = _model_root_for_language(alt_lang)
+        for candidate in (
+            os.path.join(alt_root, fmt, "v1"),
+            os.path.join(alt_root, "general", "v1"),
+        ):
+            if os.path.isfile(os.path.join(candidate, "model_meta.json")):
+                return candidate
     return None
 
 
@@ -141,16 +160,12 @@ def _route_format_for_feature(language: str, feature_row: Dict[str, object], for
 
     if lang != "korean" or base_format != "vcv":
         if lang == "korean" and base_format == "cvvc":
-            # Korean CVVC는 현재 CV/-CV에 ML을 열면 timing이 쉽게 무너진다.
-            # 연결 성격이 분명한 VV/VC만 제한적으로 허용한다.
             if alias_type == "vv":
                 return "cvvc"
             if alias_type == "vc" and coda_type in {"stop", "nasal", "liquid"}:
                 return "cvvc"
             return None
         if lang == "korean" and base_format == "cvc":
-            # Korean CVC는 현재 ML이 CV/-CV를 과도하게 망가뜨리는 사례가 있어,
-            # 종성 성격의 VC에만 제한적으로 적용한다.
             if alias_type == "vc" and coda_type in {"stop", "nasal", "liquid"}:
                 return "cvc"
             return None
@@ -164,8 +179,8 @@ def _route_format_for_feature(language: str, feature_row: Dict[str, object], for
     # VCV 내에서도 실제 받침 성격의 VC만 CVC 편향을 재사용한다.
     if alias_type == "vc" and coda_type in {"stop", "nasal", "liquid"}:
         return "cvc"
-
-    return "general"
+    # KR VCV의 비브리지 alias는 vcv 전용 모델을 우선 시도하고, 없으면 general로 fallback한다.
+    return "vcv"
 
 
 def _get_validate_func(language: str):
@@ -268,11 +283,124 @@ def _apply_japanese_delta_policy(row_context: Dict[str, object], deltas: Dict[st
     return deltas
 
 
+def _apply_korean_delta_policy(row_context: Dict[str, object], deltas: Dict[str, float]) -> Dict[str, float]:
+    format_type = str(row_context.get("format_type", "") or "").strip().lower()
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    coda_type = str(row_context.get("coda_type", "") or "").strip().lower()
+    mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
+
+    if alias_type not in {"vc", "vv"}:
+        return deltas
+
+    if alias_type == "vc":
+        # VC는 연결 안정성을 위해 offset/pre 이동을 기본적으로 억제한다.
+        deltas["delta_offset"] = _scale_signed(deltas.get("delta_offset", 0.0), neg_scale=0.35, pos_scale=0.46)
+        if coda_type == "stop":
+            deltas["delta_pre"] = _scale_signed(deltas.get("delta_pre", 0.0), neg_scale=0.44, pos_scale=0.62)
+            deltas["delta_cons"] = _scale_signed(deltas.get("delta_cons", 0.0), neg_scale=0.58, pos_scale=0.84)
+            deltas["delta_cutoff"] = _scale_signed(deltas.get("delta_cutoff", 0.0), neg_scale=0.78, pos_scale=0.30)
+            deltas["delta_ovl"] = _scale_signed(deltas.get("delta_ovl", 0.0), neg_scale=0.82, pos_scale=0.82)
+        elif coda_type in {"nasal", "liquid"}:
+            deltas["delta_pre"] = _scale_signed(deltas.get("delta_pre", 0.0), neg_scale=0.52, pos_scale=0.74)
+            deltas["delta_cons"] = _scale_signed(deltas.get("delta_cons", 0.0), neg_scale=0.66, pos_scale=0.88)
+            deltas["delta_cutoff"] = _scale_signed(deltas.get("delta_cutoff", 0.0), neg_scale=0.82, pos_scale=0.46)
+            deltas["delta_ovl"] = _scale_signed(deltas.get("delta_ovl", 0.0), neg_scale=0.90, pos_scale=0.90)
+        else:
+            deltas["delta_pre"] = _scale_signed(deltas.get("delta_pre", 0.0), neg_scale=0.50, pos_scale=0.70)
+            deltas["delta_cons"] = _scale_signed(deltas.get("delta_cons", 0.0), neg_scale=0.62, pos_scale=0.86)
+            deltas["delta_cutoff"] = _scale_signed(deltas.get("delta_cutoff", 0.0), neg_scale=0.80, pos_scale=0.42)
+            deltas["delta_ovl"] = _scale_signed(deltas.get("delta_ovl", 0.0), neg_scale=0.86, pos_scale=0.86)
+    else:
+        # VV는 pre-ovl 간격(리듬)을 보존하도록 ovl/offset을 강하게 제한한다.
+        deltas["delta_offset"] = _scale_signed(deltas.get("delta_offset", 0.0), neg_scale=0.44, pos_scale=0.54)
+        deltas["delta_pre"] = _scale_signed(deltas.get("delta_pre", 0.0), neg_scale=0.56, pos_scale=0.78)
+        deltas["delta_cons"] = _scale_signed(deltas.get("delta_cons", 0.0), neg_scale=0.72, pos_scale=0.92)
+        deltas["delta_cutoff"] = _scale_signed(deltas.get("delta_cutoff", 0.0), neg_scale=0.80, pos_scale=0.58)
+        deltas["delta_ovl"] = _scale_signed(deltas.get("delta_ovl", 0.0), neg_scale=0.62, pos_scale=0.62)
+
+    if mapping_conf < 0.72:
+        for key in list(deltas.keys()):
+            deltas[key] = float(deltas[key]) * 0.72
+    elif mapping_conf < 0.80:
+        for key in list(deltas.keys()):
+            deltas[key] = float(deltas[key]) * 0.86
+
+    if format_type == "cvc":
+        for key in list(deltas.keys()):
+            deltas[key] = float(deltas[key]) * 0.90
+
+    return deltas
+
+
+def _apply_korean_bridge_post_guard(
+    row_context: Dict[str, object],
+    params: Tuple[float, float, float, float, float],
+    validate_fn,
+) -> Tuple[float, float, float, float, float]:
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    coda_type = str(row_context.get("coda_type", "") or "").strip().lower()
+    if alias_type not in {"vc", "vv"}:
+        return params
+
+    offset, cons, cutoff, pre, ovl = validate_fn(*params)
+    pre = float(pre)
+    cons = float(cons)
+    ovl = float(ovl)
+    cutoff_abs = abs(float(cutoff))
+
+    if alias_type == "vc":
+        if coda_type == "stop":
+            gap_lo, gap_hi, gap_t = 10.0, 24.0, 16.0
+            cons_lo, cons_hi, cons_t = 14.0, 56.0, 32.0
+            cut_lo, cut_hi, cut_t = 8.0, 24.0, 14.0
+            next_allow = 7.0
+        elif coda_type in {"nasal", "liquid"}:
+            gap_lo, gap_hi, gap_t = 7.0, 20.0, 13.0
+            cons_lo, cons_hi, cons_t = 26.0, 86.0, 48.0
+            cut_lo, cut_hi, cut_t = 12.0, 36.0, 22.0
+            next_allow = 22.0
+        else:
+            gap_lo, gap_hi, gap_t = 8.0, 22.0, 14.0
+            cons_lo, cons_hi, cons_t = 20.0, 72.0, 40.0
+            cut_lo, cut_hi, cut_t = 10.0, 30.0, 18.0
+            next_allow = 16.0
+    else:
+        gap_lo, gap_hi, gap_t = 4.0, 12.0, 8.0
+        cons_lo, cons_hi, cons_t = 58.0, 156.0, 98.0
+        cut_lo, cut_hi, cut_t = 18.0, 98.0, 52.0
+        next_allow = 34.0
+
+    gap_now = max(pre - ovl, 0.0)
+    cons_gap_now = max(cons - pre, 8.0)
+    cut_gap_now = max(cutoff_abs - cons, 10.0)
+
+    gap_new = max(gap_lo, min(gap_hi, gap_now))
+    gap_new = ((gap_new * 0.72) + (gap_t * 0.28))
+    cons_gap_new = max(cons_lo, min(cons_hi, cons_gap_now))
+    cons_gap_new = ((cons_gap_new * 0.70) + (cons_t * 0.30))
+    cut_gap_new = max(cut_lo, min(cut_hi, cut_gap_now))
+    cut_gap_new = ((cut_gap_new * 0.70) + (cut_t * 0.30))
+
+    ovl = max(0.0, pre - gap_new)
+    cons = pre + cons_gap_new
+    cutoff_abs = cons + cut_gap_new
+
+    curr_end = _to_float(row_context.get("curr_phone_end_ms"), 0.0)
+    next_gap = _to_float(row_context.get("next_phone_gap_ms"), 0.0)
+    if curr_end > 0.0 and next_gap > 0.0:
+        next_onset_rel = max((curr_end + next_gap) - float(offset), pre + 10.0)
+        cutoff_abs = min(cutoff_abs, max(cons + cut_lo, next_onset_rel + next_allow))
+
+    return validate_fn(float(offset), float(cons), -float(cutoff_abs), float(pre), float(ovl))
+
+
 def _apply_language_specific_delta_policy(language: str, row_context: Dict[str, object], deltas: Dict[str, float]) -> Dict[str, float]:
     lang = str(language or "").strip().lower()
     adjusted = dict(deltas)
     if lang == "japanese":
         return _apply_japanese_delta_policy(row_context, adjusted)
+    if lang == "korean":
+        return _apply_korean_delta_policy(row_context, adjusted)
     return adjusted
 
 
@@ -494,6 +622,8 @@ def apply_oto_ml_delta(
     pre = float(row_context.get("base_pre", 0.0)) + deltas.get("delta_pre", 0.0)
     ovl = float(row_context.get("base_ovl", 0.0)) + deltas.get("delta_ovl", 0.0)
     out = validate_oto_params(offset, cons, cutoff, pre, ovl)
+    if str(language or "").strip().lower() == "korean":
+        out = _apply_korean_bridge_post_guard(row_context, out, validate_oto_params)
     out, applied_rules = _apply_anchor_lock_lite_after_ml(language, row_context, out, validate_oto_params)
     if anchor_stats is not None and applied_rules:
         anchor_stats["anchor_locked_count"] = int(anchor_stats.get("anchor_locked_count", 0)) + 1

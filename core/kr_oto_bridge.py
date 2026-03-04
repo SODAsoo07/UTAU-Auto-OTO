@@ -287,6 +287,107 @@ def _compute_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, is_plosive_sibila
     return _validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
 
+def _refine_kr_bridge_with_adjacent_cv(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    ovl,
+    *,
+    alias_type,
+    alias_text="",
+    prev_cv=None,
+    next_cv=None,
+):
+    """
+    VC/VV를 인접 CV 앵커 기준으로 2차 보정합니다.
+    - 기존 계산을 유지하되 인접 CV 기반 후보와 블렌딩해서 연결감을 안정화
+    - 다음 onset을 넘는 cutoff 과연장을 억제
+    """
+    a_type = str(alias_type or "").strip().lower()
+    if a_type not in {"vc", "vv"}:
+        return _validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    if not prev_cv or not next_cv:
+        return _validate_oto_params(offset, consonant, cutoff, pre, ovl)
+
+    coda = _canonicalize_kr_coda(_extract_vc_right_token(alias_text))
+    is_stop = coda in {"k", "t", "p", "h"}
+    is_sonorant = coda in {"n", "m", "ng", "l", "r"}
+
+    is_plosive_sibilant = is_stop
+    cand = _compute_vc_from_adjacent_cv(prev_cv, next_cv, a_type, is_plosive_sibilant)
+    if cand is None:
+        return _validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    c_off, c_cons, c_cut, c_pre, c_ovl = cand
+
+    if a_type == "vc":
+        if is_stop:
+            w_anchor, w_shape = 0.64, 0.60
+            pre_lo, pre_hi = 32.0, 154.0
+            ovl_gap_lo, ovl_gap_hi = 10.0, 24.0
+            cons_gap_lo, cons_gap_hi = 14.0, 56.0
+            cut_gap_lo, cut_gap_hi = 8.0, 24.0
+            cut_allow_ms = 7.0
+        elif is_sonorant:
+            w_anchor, w_shape = 0.52, 0.48
+            pre_lo, pre_hi = 46.0, 196.0
+            ovl_gap_lo, ovl_gap_hi = 7.0, 20.0
+            cons_gap_lo, cons_gap_hi = 26.0, 86.0
+            cut_gap_lo, cut_gap_hi = 12.0, 36.0
+            cut_allow_ms = 22.0
+        else:
+            w_anchor, w_shape = 0.56, 0.52
+            pre_lo, pre_hi = 38.0, 176.0
+            ovl_gap_lo, ovl_gap_hi = 8.0, 22.0
+            cons_gap_lo, cons_gap_hi = 20.0, 72.0
+            cut_gap_lo, cut_gap_hi = 10.0, 30.0
+            cut_allow_ms = 16.0
+    else:
+        w_anchor, w_shape = 0.46, 0.40
+        pre_lo, pre_hi = 30.0, 186.0
+        ovl_gap_lo, ovl_gap_hi = 4.0, 12.0
+        cons_gap_lo, cons_gap_hi = 58.0, 156.0
+        cut_gap_lo, cut_gap_hi = 18.0, 98.0
+        cut_allow_ms = 34.0
+
+    curr_pre_abs = float(offset) + float(pre)
+    cand_pre_abs = float(c_off) + float(c_pre)
+    pre_abs_new = _blend(curr_pre_abs, cand_pre_abs, w_anchor)
+
+    pre_new = _blend(float(pre), float(c_pre), w_shape)
+    pre_new = _clamp(pre_new, pre_lo, pre_hi)
+    offset_new = max(pre_abs_new - pre_new, 0.0)
+
+    curr_ovl_gap = max(float(pre) - float(ovl), 0.0)
+    cand_ovl_gap = max(float(c_pre) - float(c_ovl), 0.0)
+    ovl_gap_new = _blend(curr_ovl_gap, cand_ovl_gap, w_shape)
+    ovl_gap_new = _clamp(ovl_gap_new, ovl_gap_lo, ovl_gap_hi)
+    ovl_new = max(0.0, pre_new - ovl_gap_new)
+
+    curr_cons_gap = max(float(consonant) - float(pre), 8.0)
+    cand_cons_gap = max(float(c_cons) - float(c_pre), 8.0)
+    cons_gap_new = _blend(curr_cons_gap, cand_cons_gap, w_shape)
+    cons_gap_new = _clamp(cons_gap_new, cons_gap_lo, cons_gap_hi)
+    cons_new = pre_new + cons_gap_new
+
+    curr_cut_gap = max(abs(float(cutoff)) - float(consonant), 10.0)
+    cand_cut_gap = max(abs(float(c_cut)) - float(c_cons), 10.0)
+    cut_gap_new = _blend(curr_cut_gap, cand_cut_gap, w_shape)
+    cut_gap_new = _clamp(cut_gap_new, cut_gap_lo, cut_gap_hi)
+    cutoff_abs_new = cons_new + cut_gap_new
+
+    next_onset_abs = float(next_cv.get("onset_abs", 0.0) or 0.0)
+    next_pre_abs = float(next_cv.get("pre_abs", next_onset_abs) or next_onset_abs)
+    if next_onset_abs > 0.0:
+        next_onset_rel = max(next_onset_abs - offset_new, pre_new + 10.0)
+        next_pre_rel = max(next_pre_abs - offset_new, next_onset_rel)
+        cap = min(next_onset_rel + cut_allow_ms, next_pre_rel + max(8.0, cut_allow_ms * 0.75))
+        cutoff_abs_new = min(cutoff_abs_new, max(cons_new + cut_gap_lo, cap))
+
+    cutoff_new = -cutoff_abs_new
+    return _validate_oto_params(offset_new, cons_new, cutoff_new, pre_new, ovl_new)
+
+
 def _compute_kr_cvvc_vc_timing_direct(alias, *args):
     """
     CVVC VC direct timing helper.
@@ -375,5 +476,6 @@ __all__ = [
     "_apply_kr_consonant_timing_shaping",
     "_compute_kr_cvvc_vc_timing_direct",
     "_compute_vc_from_adjacent_cv",
+    "_refine_kr_bridge_with_adjacent_cv",
     "_recenter_kr_params_around_pre",
 ]

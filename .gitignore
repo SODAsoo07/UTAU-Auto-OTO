@@ -225,6 +225,14 @@ custom_test_wavs/*_dict.txt
 /.env_sofa
 /.tmp_ext
 /.sofa
+/sofa_utau_kr/data/**
+/sofa_utau_kr/ckpt/**
+/sofa_utau_kr/reports/**
+/sofa_utau_kr/ab_tests/**
+!/sofa_utau_kr/data/.gitkeep
+!/sofa_utau_kr/ckpt/.gitkeep
+!/sofa_utau_kr/reports/.gitkeep
+!/sofa_utau_kr/ab_tests/.gitkeep
 
 # AI/ML workspace and model training artifacts
 /ml_workspace/
@@ -237,3 +245,4 @@ custom_test_wavs/*_dict.txt
 /assets/models/oto_ml/**/*.jsonl
 /assets/models/oto_ml_pytorch/
 /models_installed/
+/sofa_utau_kr

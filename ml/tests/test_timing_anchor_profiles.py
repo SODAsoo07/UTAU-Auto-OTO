@@ -20,12 +20,17 @@ class TimingAnchorProfileTests(unittest.TestCase):
         profile = get_anchor_profile("japanese", "vcv", "unknown_alias")
         self.assertIsNone(profile)
 
+    def test_get_anchor_profile_korean_vcv_exists(self):
+        profile = get_anchor_profile("korean", "vcv", "vcv")
+        self.assertIsNotNone(profile)
+        self.assertGreater(profile.cut_gap_target_ms, 0.0)
+
     def test_enable_gate_returns_boolean(self):
         self.assertIsInstance(is_anchor_lock_enabled("japanese", "vcv"), bool)
         self.assertIsInstance(is_anchor_lock_enabled("japanese", "cvvc"), bool)
         self.assertIsInstance(is_anchor_lock_enabled("korean", "cvvc"), bool)
+        self.assertIsInstance(is_anchor_lock_enabled("korean", "vcv"), bool)
 
 
 if __name__ == "__main__":
     unittest.main()
-

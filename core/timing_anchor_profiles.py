@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
+
+try:
+    import yaml
+except Exception:  # pragma: no cover - optional dependency fallback
+    yaml = None
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -19,7 +25,7 @@ def _env_flag(name: str, default: bool) -> bool:
 # Staged rollout flags
 ENABLE_ANCHOR_LOCK_JA_VCV = _env_flag("UTOA_ENABLE_ANCHOR_LOCK_JA_VCV", True)
 ENABLE_ANCHOR_LOCK_JA_CVVC = _env_flag("UTOA_ENABLE_ANCHOR_LOCK_JA_CVVC", False)
-ENABLE_ANCHOR_LOCK_KR = _env_flag("UTOA_ENABLE_ANCHOR_LOCK_KR", False)
+ENABLE_ANCHOR_LOCK_KR = _env_flag("UTOA_ENABLE_ANCHOR_LOCK_KR", True)
 
 
 @dataclass(frozen=True)
@@ -209,6 +215,25 @@ def _kr_vv_profile() -> AnchorTimingProfile:
     )
 
 
+def _kr_vcv_profile() -> AnchorTimingProfile:
+    return AnchorTimingProfile(
+        pre_window_before_ms=8.0,
+        pre_window_after_ms=6.0,
+        pre_floor_ms=46.0,
+        ovl_gap_min_ms=12.0,
+        ovl_gap_max_ms=28.0,
+        ovl_gap_target_ms=19.0,
+        cons_gap_min_ms=72.0,
+        cons_gap_max_ms=168.0,
+        cons_gap_target_ms=108.0,
+        cut_gap_min_ms=36.0,
+        cut_gap_max_ms=132.0,
+        cut_gap_target_ms=78.0,
+        cut_to_next_onset_allow_ms=8.0,
+        cut_to_next_vowel_allow_ms=2.0,
+    )
+
+
 _PROFILE_TABLE: Dict[Tuple[str, str, str], AnchorTimingProfile] = {
     ("japanese", "vcv", "vcv"): _ja_vcv_profile(),
     ("japanese", "vcv", "vcv_vv_like"): _ja_vcv_vv_like_profile(),
@@ -225,7 +250,124 @@ _PROFILE_TABLE: Dict[Tuple[str, str, str], AnchorTimingProfile] = {
     ("korean", "cvc", "cv"): _kr_cv_profile(),
     ("korean", "cvc", "cv_head"): _kr_cv_head_profile(),
     ("korean", "cvc", "vc"): _kr_vc_profile(),
+    ("korean", "cvc", "vv"): _kr_vv_profile(),
+    ("korean", "vcv", "cv"): _kr_cv_profile(),
+    ("korean", "vcv", "cv_head"): _kr_cv_head_profile(),
+    ("korean", "vcv", "vc"): _kr_vc_profile(),
+    ("korean", "vcv", "vv"): _kr_vv_profile(),
+    ("korean", "vcv", "vcv"): _kr_vcv_profile(),
 }
+
+
+def _default_kr_anchor_profile_path() -> str:
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(project_root, "ml", "configs", "kr_vcv_anchor_profile.yaml")
+
+
+def _resolve_kr_anchor_profile_path() -> str:
+    env_path = os.environ.get("UTOA_KR_ANCHOR_PROFILE_PATH", "").strip()
+    if env_path:
+        return os.path.abspath(env_path)
+    return _default_kr_anchor_profile_path()
+
+
+_EXTERNAL_CACHE = {
+    "path": "",
+    "mtime_ns": -1,
+    "table": None,
+}
+
+
+def _to_float(v: object, default: float) -> float:
+    try:
+        return float(v)
+    except Exception:
+        return float(default)
+
+
+def _profile_from_dict(raw: Dict[str, object], base: AnchorTimingProfile) -> AnchorTimingProfile:
+    if not isinstance(raw, dict):
+        return base
+    return AnchorTimingProfile(
+        pre_window_before_ms=_to_float(raw.get("pre_window_before_ms"), base.pre_window_before_ms),
+        pre_window_after_ms=_to_float(raw.get("pre_window_after_ms"), base.pre_window_after_ms),
+        pre_floor_ms=_to_float(raw.get("pre_floor_ms"), base.pre_floor_ms),
+        ovl_gap_min_ms=_to_float(raw.get("ovl_gap_min_ms"), base.ovl_gap_min_ms),
+        ovl_gap_max_ms=_to_float(raw.get("ovl_gap_max_ms"), base.ovl_gap_max_ms),
+        ovl_gap_target_ms=_to_float(raw.get("ovl_gap_target_ms"), base.ovl_gap_target_ms),
+        cons_gap_min_ms=_to_float(raw.get("cons_gap_min_ms"), base.cons_gap_min_ms),
+        cons_gap_max_ms=_to_float(raw.get("cons_gap_max_ms"), base.cons_gap_max_ms),
+        cons_gap_target_ms=_to_float(raw.get("cons_gap_target_ms"), base.cons_gap_target_ms),
+        cut_gap_min_ms=_to_float(raw.get("cut_gap_min_ms"), base.cut_gap_min_ms),
+        cut_gap_max_ms=_to_float(raw.get("cut_gap_max_ms"), base.cut_gap_max_ms),
+        cut_gap_target_ms=_to_float(raw.get("cut_gap_target_ms"), base.cut_gap_target_ms),
+        max_anchor_shift_ratio=_to_float(raw.get("max_anchor_shift_ratio"), base.max_anchor_shift_ratio),
+        max_anchor_shift_min_ms=_to_float(raw.get("max_anchor_shift_min_ms"), base.max_anchor_shift_min_ms),
+        max_anchor_shift_max_ms=_to_float(raw.get("max_anchor_shift_max_ms"), base.max_anchor_shift_max_ms),
+        cut_to_next_onset_allow_ms=(
+            None
+            if raw.get("cut_to_next_onset_allow_ms") is None
+            else _to_float(raw.get("cut_to_next_onset_allow_ms"), 0.0)
+        ),
+        cut_to_next_vowel_allow_ms=(
+            None
+            if raw.get("cut_to_next_vowel_allow_ms") is None
+            else _to_float(raw.get("cut_to_next_vowel_allow_ms"), 0.0)
+        ),
+        blend_weight=_to_float(raw.get("blend_weight"), base.blend_weight),
+        lite_blend_weight=_to_float(raw.get("lite_blend_weight"), base.lite_blend_weight),
+        lite_shift_scale=_to_float(raw.get("lite_shift_scale"), base.lite_shift_scale),
+    )
+
+
+def _load_external_profile_table() -> Dict[Tuple[str, str, str], AnchorTimingProfile]:
+    path = _resolve_kr_anchor_profile_path()
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        st = os.stat(path)
+        mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+    except OSError:
+        return {}
+    if (
+        _EXTERNAL_CACHE.get("table") is not None
+        and _EXTERNAL_CACHE.get("path") == path
+        and int(_EXTERNAL_CACHE.get("mtime_ns", -1)) == mtime_ns
+    ):
+        return dict(_EXTERNAL_CACHE.get("table") or {})
+
+    payload = None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        if yaml is not None:
+            payload = yaml.safe_load(text)
+        else:
+            payload = json.loads(text)
+    except Exception:
+        payload = None
+
+    out: Dict[Tuple[str, str, str], AnchorTimingProfile] = {}
+    if isinstance(payload, dict):
+        raw_profiles = payload.get("korean", {}).get("vcv", {})
+        if isinstance(raw_profiles, dict):
+            for alias_type, raw_entry in raw_profiles.items():
+                key = ("korean", "vcv", str(alias_type or "").strip().lower())
+                base = _PROFILE_TABLE.get(key)
+                if base is None:
+                    continue
+                out[key] = _profile_from_dict(raw_entry, base)
+
+    _EXTERNAL_CACHE["path"] = path
+    _EXTERNAL_CACHE["mtime_ns"] = mtime_ns
+    _EXTERNAL_CACHE["table"] = dict(out)
+    return out
+
+
+def _merged_profile_table() -> Dict[Tuple[str, str, str], AnchorTimingProfile]:
+    table = dict(_PROFILE_TABLE)
+    table.update(_load_external_profile_table())
+    return table
 
 
 def is_anchor_lock_enabled(language: str, format_type: str) -> bool:
@@ -255,7 +397,7 @@ def get_anchor_profile(
     lang = str(language or "").strip().lower()
     fmt = str(format_type or "").strip().lower()
     alias = str(alias_type or "").strip().lower()
-    return _PROFILE_TABLE.get((lang, fmt, alias))
+    return _merged_profile_table().get((lang, fmt, alias))
 
 
 __all__ = [
@@ -266,4 +408,3 @@ __all__ = [
     "get_anchor_profile",
     "is_anchor_lock_enabled",
 ]
-

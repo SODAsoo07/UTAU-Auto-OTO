@@ -389,6 +389,18 @@ class ConfigMixin:
             "no_base_oto": self.no_base_oto_var.get(),
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
             "enable_pytorch_bridge": self.enable_pytorch_bridge_var.get() if hasattr(self, "enable_pytorch_bridge_var") else False,
+            "ja_mapping_words_fallback_enabled": self.ja_mapping_words_fallback_enabled_var.get() if hasattr(self, "ja_mapping_words_fallback_enabled_var") else True,
+            "ja_mapping_spn_ratio_threshold": self.ja_mapping_spn_ratio_threshold_var.get() if hasattr(self, "ja_mapping_spn_ratio_threshold_var") else 0.35,
+            "ja_mapping_min_vowel_phone_ratio": self.ja_mapping_min_vowel_phone_ratio_var.get() if hasattr(self, "ja_mapping_min_vowel_phone_ratio_var") else 0.5,
+            "ja_mapping_debug_reason_logging": self.ja_mapping_debug_reason_logging_var.get() if hasattr(self, "ja_mapping_debug_reason_logging_var") else True,
+            "kr_anchor_profile_path": self.kr_anchor_profile_path_var.get() if hasattr(self, "kr_anchor_profile_path_var") else "",
+            "kr_mapping_confidence_threshold": self.kr_mapping_confidence_threshold_var.get() if hasattr(self, "kr_mapping_confidence_threshold_var") else 0.60,
+            "kr_mapping_max_index_jump_default": self.kr_mapping_max_index_jump_default_var.get() if hasattr(self, "kr_mapping_max_index_jump_default_var") else 1,
+            "kr_mapping_max_index_jump_high_conf": self.kr_mapping_max_index_jump_high_conf_var.get() if hasattr(self, "kr_mapping_max_index_jump_high_conf_var") else 2,
+            "ml_same_language_borrow_only": self.ml_same_language_borrow_only_var.get() if hasattr(self, "ml_same_language_borrow_only_var") else True,
+            "ml_use_pseudo_labels": self.ml_use_pseudo_labels_var.get() if hasattr(self, "ml_use_pseudo_labels_var") else True,
+            "ml_pseudo_weight_high": self.ml_pseudo_weight_high_var.get() if hasattr(self, "ml_pseudo_weight_high_var") else 0.7,
+            "ml_pseudo_weight_mid": self.ml_pseudo_weight_mid_var.get() if hasattr(self, "ml_pseudo_weight_mid_var") else 0.4,
             "language": self.lang_var.get(),
             "auto_format": self.auto_format_var.get(),
             "ja_alias_style": self.ja_alias_style_var.get(),
@@ -396,6 +408,18 @@ class ConfigMixin:
             "sofa_ckpt": self.sofa_ckpt_var.get(),
             "sofa_dict": self.sofa_dict_var.get(),
             "sofa_python": self.sofa_python_var.get(),
+            "sofa_repo_dir": self.sofa_repo_dir_var.get() if hasattr(self, "sofa_repo_dir_var") else "",
+            "sofa_mode": self.sofa_mode_var.get() if hasattr(self, "sofa_mode_var") else "force",
+            "sofa_g2p": self.sofa_g2p_var.get() if hasattr(self, "sofa_g2p_var") else "Dictionary",
+            "sofa_ap_detector": self.sofa_ap_detector_var.get() if hasattr(self, "sofa_ap_detector_var") else "LoudnessSpectralcentroidAPDetector",
+            "sofa_ap_detector_config": self.sofa_ap_detector_config_var.get() if hasattr(self, "sofa_ap_detector_config_var") else "",
+            "sofa_save_confidence": self.sofa_save_confidence_var.get() if hasattr(self, "sofa_save_confidence_var") else True,
+            "sofa_out_formats": self.sofa_out_formats_var.get() if hasattr(self, "sofa_out_formats_var") else "TextGrid",
+            "sofa_extra_infer_args": self.sofa_extra_infer_args_var.get() if hasattr(self, "sofa_extra_infer_args_var") else "",
+            "sofa_two_pass_retry": self.sofa_two_pass_retry_var.get() if hasattr(self, "sofa_two_pass_retry_var") else True,
+            "sofa_two_pass_retry_mode": self.sofa_two_pass_retry_mode_var.get() if hasattr(self, "sofa_two_pass_retry_mode_var") else "match",
+            "sofa_confidence_threshold": self.sofa_confidence_threshold_var.get() if hasattr(self, "sofa_confidence_threshold_var") else 0.55,
+            "sofa_low_confidence_max_files": self.sofa_low_confidence_max_files_var.get() if hasattr(self, "sofa_low_confidence_max_files_var") else 0,
             "tune_auto_oto": self.tune_auto_oto_var.get() if hasattr(self, "tune_auto_oto_var") else "",
             "tune_manual_oto": self.tune_manual_oto_var.get() if hasattr(self, "tune_manual_oto_var") else "",
             "tune_profile_out": self.tune_profile_out_var.get() if hasattr(self, "tune_profile_out_var") else "",
@@ -455,6 +479,51 @@ class ConfigMixin:
                 self.enable_ml_correction_var.set(config["enable_ml_correction"])
             if "enable_pytorch_bridge" in config and hasattr(self, "enable_pytorch_bridge_var"):
                 self.enable_pytorch_bridge_var.set(config["enable_pytorch_bridge"])
+            if "ja_mapping_words_fallback_enabled" in config and hasattr(self, "ja_mapping_words_fallback_enabled_var"):
+                self.ja_mapping_words_fallback_enabled_var.set(bool(config["ja_mapping_words_fallback_enabled"]))
+            if "ja_mapping_spn_ratio_threshold" in config and hasattr(self, "ja_mapping_spn_ratio_threshold_var"):
+                try:
+                    self.ja_mapping_spn_ratio_threshold_var.set(float(config["ja_mapping_spn_ratio_threshold"]))
+                except Exception:
+                    pass
+            if "ja_mapping_min_vowel_phone_ratio" in config and hasattr(self, "ja_mapping_min_vowel_phone_ratio_var"):
+                try:
+                    self.ja_mapping_min_vowel_phone_ratio_var.set(float(config["ja_mapping_min_vowel_phone_ratio"]))
+                except Exception:
+                    pass
+            if "ja_mapping_debug_reason_logging" in config and hasattr(self, "ja_mapping_debug_reason_logging_var"):
+                self.ja_mapping_debug_reason_logging_var.set(bool(config["ja_mapping_debug_reason_logging"]))
+            if "kr_anchor_profile_path" in config and hasattr(self, "kr_anchor_profile_path_var"):
+                self.kr_anchor_profile_path_var.set(str(config.get("kr_anchor_profile_path", "") or ""))
+            if "kr_mapping_confidence_threshold" in config and hasattr(self, "kr_mapping_confidence_threshold_var"):
+                try:
+                    self.kr_mapping_confidence_threshold_var.set(float(config["kr_mapping_confidence_threshold"]))
+                except Exception:
+                    pass
+            if "kr_mapping_max_index_jump_default" in config and hasattr(self, "kr_mapping_max_index_jump_default_var"):
+                try:
+                    self.kr_mapping_max_index_jump_default_var.set(int(float(config["kr_mapping_max_index_jump_default"])))
+                except Exception:
+                    pass
+            if "kr_mapping_max_index_jump_high_conf" in config and hasattr(self, "kr_mapping_max_index_jump_high_conf_var"):
+                try:
+                    self.kr_mapping_max_index_jump_high_conf_var.set(int(float(config["kr_mapping_max_index_jump_high_conf"])))
+                except Exception:
+                    pass
+            if "ml_same_language_borrow_only" in config and hasattr(self, "ml_same_language_borrow_only_var"):
+                self.ml_same_language_borrow_only_var.set(bool(config["ml_same_language_borrow_only"]))
+            if "ml_use_pseudo_labels" in config and hasattr(self, "ml_use_pseudo_labels_var"):
+                self.ml_use_pseudo_labels_var.set(bool(config["ml_use_pseudo_labels"]))
+            if "ml_pseudo_weight_high" in config and hasattr(self, "ml_pseudo_weight_high_var"):
+                try:
+                    self.ml_pseudo_weight_high_var.set(float(config["ml_pseudo_weight_high"]))
+                except Exception:
+                    pass
+            if "ml_pseudo_weight_mid" in config and hasattr(self, "ml_pseudo_weight_mid_var"):
+                try:
+                    self.ml_pseudo_weight_mid_var.set(float(config["ml_pseudo_weight_mid"]))
+                except Exception:
+                    pass
             if "language" in config:
                 self.lang_var.set(config["language"])
             if "auto_format" in config:
@@ -482,6 +551,32 @@ class ConfigMixin:
                 self.sofa_dict_var.set(config.get("sofa_dict", ""))
             if "sofa_python" in config:
                 self.sofa_python_var.set(config.get("sofa_python", get_sofa_env_python()))
+            if "sofa_repo_dir" in config and hasattr(self, "sofa_repo_dir_var"):
+                self.sofa_repo_dir_var.set(config.get("sofa_repo_dir", ""))
+            if "sofa_mode" in config and hasattr(self, "sofa_mode_var"):
+                self.sofa_mode_var.set(config.get("sofa_mode", "force"))
+            if "sofa_g2p" in config and hasattr(self, "sofa_g2p_var"):
+                self.sofa_g2p_var.set(config.get("sofa_g2p", "Dictionary"))
+            if "sofa_ap_detector" in config and hasattr(self, "sofa_ap_detector_var"):
+                self.sofa_ap_detector_var.set(
+                    config.get("sofa_ap_detector", "LoudnessSpectralcentroidAPDetector")
+                )
+            if "sofa_ap_detector_config" in config and hasattr(self, "sofa_ap_detector_config_var"):
+                self.sofa_ap_detector_config_var.set(config.get("sofa_ap_detector_config", ""))
+            if "sofa_save_confidence" in config and hasattr(self, "sofa_save_confidence_var"):
+                self.sofa_save_confidence_var.set(config.get("sofa_save_confidence", True))
+            if "sofa_out_formats" in config and hasattr(self, "sofa_out_formats_var"):
+                self.sofa_out_formats_var.set(config.get("sofa_out_formats", "TextGrid"))
+            if "sofa_extra_infer_args" in config and hasattr(self, "sofa_extra_infer_args_var"):
+                self.sofa_extra_infer_args_var.set(config.get("sofa_extra_infer_args", ""))
+            if "sofa_two_pass_retry" in config and hasattr(self, "sofa_two_pass_retry_var"):
+                self.sofa_two_pass_retry_var.set(config.get("sofa_two_pass_retry", True))
+            if "sofa_two_pass_retry_mode" in config and hasattr(self, "sofa_two_pass_retry_mode_var"):
+                self.sofa_two_pass_retry_mode_var.set(config.get("sofa_two_pass_retry_mode", "match"))
+            if "sofa_confidence_threshold" in config and hasattr(self, "sofa_confidence_threshold_var"):
+                self.sofa_confidence_threshold_var.set(config.get("sofa_confidence_threshold", 0.55))
+            if "sofa_low_confidence_max_files" in config and hasattr(self, "sofa_low_confidence_max_files_var"):
+                self.sofa_low_confidence_max_files_var.set(config.get("sofa_low_confidence_max_files", 0))
 
             if hasattr(self, "tune_auto_oto_var"):
                 self.tune_auto_oto_var.set(config.get("tune_auto_oto", ""))

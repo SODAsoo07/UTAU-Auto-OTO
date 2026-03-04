@@ -38,6 +38,24 @@ def main():
         default=True,
         help="Exclude rows that used nuclei fallback (default: enabled)",
     )
+    ap.add_argument(
+        "--use-pseudo-labels",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use pseudo-labeled rows with sample weights when present (default: enabled)",
+    )
+    ap.add_argument(
+        "--pseudo-weight-high",
+        type=float,
+        default=0.7,
+        help="Sample weight for pseudo_high rows (default: 0.7)",
+    )
+    ap.add_argument(
+        "--pseudo-weight-mid",
+        type=float,
+        default=0.4,
+        help="Sample weight for pseudo_mid rows (default: 0.4)",
+    )
     args = ap.parse_args()
 
     alias_types = [v.strip() for v in str(args.alias_types).split(",") if v.strip()]
@@ -57,6 +75,9 @@ def main():
         require_train_keep=args.require_train_keep,
         min_mapping_confidence=min_conf,
         exclude_nuclei_fallback=args.exclude_nuclei_fallback,
+        use_pseudo_labels=args.use_pseudo_labels,
+        pseudo_weight_high=float(args.pseudo_weight_high),
+        pseudo_weight_mid=float(args.pseudo_weight_mid),
     )
     print(f"backend={meta.get('backend')}")
     print(f"language={meta.get('language')}")

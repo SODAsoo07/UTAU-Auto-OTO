@@ -278,13 +278,10 @@ def _extract_ja_cv_targets_from_lines(lines, custom_map=None):
         tok = _alias_to_ja_cv_target(alias, a_type)
         if tok:
             targets.append(tok)
-    if not targets:
-        return []
-    collapsed = []
-    for t in targets:
-        if not collapsed or collapsed[-1] != t:
-            collapsed.append(t)
-    return collapsed
+    # IMPORTANT:
+    # VCV/CVVC에서는 연속 중복 음절(예: ma ma mi..., ra ra ri...) 자체가
+    # 실제 매핑 순서를 결정하므로, 여기서 중복을 제거하면 1칸 밀림이 발생한다.
+    return targets if targets else []
 
 
 def _is_nucleus_phone(mark):

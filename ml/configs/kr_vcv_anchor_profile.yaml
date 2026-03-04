@@ -1,0 +1,76 @@
+version: 1
+mode: rhythm_stable
+korean:
+  vcv:
+    cv:
+      pre_window_before_ms: 7.0
+      pre_window_after_ms: 7.0
+      pre_floor_ms: 40.0
+      ovl_gap_min_ms: 14.0
+      ovl_gap_max_ms: 30.0
+      ovl_gap_target_ms: 21.0
+      cons_gap_min_ms: 58.0
+      cons_gap_max_ms: 148.0
+      cons_gap_target_ms: 96.0
+      cut_gap_min_ms: 34.0
+      cut_gap_max_ms: 120.0
+      cut_gap_target_ms: 72.0
+      cut_to_next_onset_allow_ms: 7.0
+    cv_head:
+      pre_window_before_ms: 7.0
+      pre_window_after_ms: 7.0
+      pre_floor_ms: 40.0
+      ovl_gap_min_ms: 12.0
+      ovl_gap_max_ms: 28.0
+      ovl_gap_target_ms: 19.0
+      cons_gap_min_ms: 60.0
+      cons_gap_max_ms: 154.0
+      cons_gap_target_ms: 98.0
+      cut_gap_min_ms: 36.0
+      cut_gap_max_ms: 128.0
+      cut_gap_target_ms: 76.0
+      cut_to_next_onset_allow_ms: 6.0
+    vc:
+      pre_window_before_ms: 10.0
+      pre_window_after_ms: 6.0
+      pre_floor_ms: 24.0
+      ovl_gap_min_ms: 8.0
+      ovl_gap_max_ms: 20.0
+      ovl_gap_target_ms: 13.0
+      cons_gap_min_ms: 20.0
+      cons_gap_max_ms: 64.0
+      cons_gap_target_ms: 38.0
+      cut_gap_min_ms: 10.0
+      cut_gap_max_ms: 50.0
+      cut_gap_target_ms: 28.0
+      cut_to_next_onset_allow_ms: 4.0
+      cut_to_next_vowel_allow_ms: -2.0
+    vv:
+      pre_window_before_ms: 8.0
+      pre_window_after_ms: 8.0
+      pre_floor_ms: 32.0
+      ovl_gap_min_ms: 5.0
+      ovl_gap_max_ms: 12.0
+      ovl_gap_target_ms: 8.0
+      cons_gap_min_ms: 58.0
+      cons_gap_max_ms: 146.0
+      cons_gap_target_ms: 98.0
+      cut_gap_min_ms: 20.0
+      cut_gap_max_ms: 92.0
+      cut_gap_target_ms: 52.0
+      cut_to_next_onset_allow_ms: 6.0
+    vcv:
+      pre_window_before_ms: 8.0
+      pre_window_after_ms: 6.0
+      pre_floor_ms: 46.0
+      ovl_gap_min_ms: 12.0
+      ovl_gap_max_ms: 28.0
+      ovl_gap_target_ms: 19.0
+      cons_gap_min_ms: 72.0
+      cons_gap_max_ms: 168.0
+      cons_gap_target_ms: 108.0
+      cut_gap_min_ms: 36.0
+      cut_gap_max_ms: 132.0
+      cut_gap_target_ms: 78.0
+      cut_to_next_onset_allow_ms: 8.0
+      cut_to_next_vowel_allow_ms: 2.0

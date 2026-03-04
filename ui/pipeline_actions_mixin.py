@@ -19,6 +19,7 @@ from core.oto_generator import (
 from core.sofa_runner import (
     download_default_sofa_model,
     ensure_sofa_support,
+    get_default_sofa_repo_dir,
     find_sofa_ckpt,
     get_default_sofa_model_root,
     get_sofa_env_python,
@@ -29,6 +30,74 @@ from core.sofa_runner import (
 
 
 class PipelineActionsMixin:
+    def _read_runtime_var(self, var_name, default=None):
+        var = getattr(self, var_name, None)
+        if var is None:
+            return default
+        try:
+            return var.get()
+        except Exception:
+            return default
+
+    def _to_bool(self, value, default=False):
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on", "y"}:
+            return True
+        if text in {"0", "false", "no", "off", "n"}:
+            return False
+        return default
+
+    def _get_sofa_repo_dir_for_language(self, language):
+        override = self._read_runtime_var("sofa_repo_dir_var", "") or ""
+        override = str(override).strip()
+        if override:
+            return override
+        if (language or "").lower() == "korean":
+            return get_default_sofa_repo_dir("utau_kr_v1")
+        return get_default_sofa_repo_dir()
+
+    def _get_sofa_runtime_kwargs(self, language):
+        lang = (language or "").lower()
+        out_formats = self._read_runtime_var("sofa_out_formats_var", "TextGrid")
+        save_conf_default = lang == "korean"
+        two_pass_default = lang == "korean"
+        return {
+            "sofa_repo_dir": self._get_sofa_repo_dir_for_language(lang),
+            "mode": str(self._read_runtime_var("sofa_mode_var", "force") or "force"),
+            "g2p": str(self._read_runtime_var("sofa_g2p_var", "Dictionary") or "Dictionary"),
+            "ap_detector": str(
+                self._read_runtime_var(
+                    "sofa_ap_detector_var",
+                    "LoudnessSpectralcentroidAPDetector",
+                )
+                or "LoudnessSpectralcentroidAPDetector"
+            ),
+            "ap_detector_config": str(
+                self._read_runtime_var("sofa_ap_detector_config_var", "") or ""
+            ),
+            "save_confidence": self._to_bool(
+                self._read_runtime_var("sofa_save_confidence_var", save_conf_default),
+                default=save_conf_default,
+            ),
+            "out_formats": out_formats,
+            "extra_infer_args": self._read_runtime_var("sofa_extra_infer_args_var", ""),
+            "two_pass_retry": self._to_bool(
+                self._read_runtime_var("sofa_two_pass_retry_var", two_pass_default),
+                default=two_pass_default,
+            ),
+            "two_pass_retry_mode": str(
+                self._read_runtime_var("sofa_two_pass_retry_mode_var", "match") or "match"
+            ),
+            "confidence_threshold": self._read_runtime_var("sofa_confidence_threshold_var", 0.55),
+            "low_confidence_max_files": self._read_runtime_var("sofa_low_confidence_max_files_var", 0),
+        }
+
     def _download_sofa_model_for_current_language(self):
         """嶸・椪 ・ｸ・ｴ ・ｰ・ SOFA ・ｨ・ｸ・・GitHub ・ｴ・ｬ・溢乱・・・尖徐 ・､・ｴ・罹糖﨑ｩ・壱共."""
         def task():
@@ -288,9 +357,12 @@ class PipelineActionsMixin:
         self._run_in_thread(task)
 
     def _is_sofa_installed(self):
+        lang = self._get_language()
+        repo_dir = self._get_sofa_repo_dir_for_language(lang)
         ok, _ = is_sofa_ready(
             sofa_python=self.sofa_python_var.get().strip(),
             mfa_path=self.mfa_path or "",
+            sofa_repo_dir=repo_dir,
         )
         return ok
 
@@ -300,10 +372,14 @@ class PipelineActionsMixin:
             self._set_running(True)
             self._set_status("筮・SOFA ・尖徐 ・､・・・・.. (・・・・・護囈)")
             try:
+                lang = self._get_language()
+                repo_dir = self._get_sofa_repo_dir_for_language(lang)
                 self._append_log("肌 SOFA ・尖徐 ・､・俯･ｼ ・懍梠﨑ｩ・壱共.")
+                self._append_log(f"ℹ SOFA repo 경로: {repo_dir}")
                 ok, err = ensure_sofa_support(
                     mfa_path=self.mfa_path or "",
                     sofa_python=self.sofa_python_var.get().strip(),
+                    sofa_repo_dir=repo_dir,
                     callback=self._append_log,
                 )
                 if ok:
@@ -523,6 +599,15 @@ class PipelineActionsMixin:
                 if align_engine == "SOFA":
                     self._set_status("3/4 - SOFA 음성 정렬 중...")
                     self._append_log(f"ℹ SOFA 전용 Python: {self.sofa_python_var.get().strip()}")
+                    sofa_kwargs = self._get_sofa_runtime_kwargs(lang)
+                    self._append_log(
+                        "ℹ SOFA 실행 옵션: "
+                        f"repo={sofa_kwargs.get('sofa_repo_dir')}, "
+                        f"mode={sofa_kwargs.get('mode')}, "
+                        f"g2p={sofa_kwargs.get('g2p')}, "
+                        f"ap={sofa_kwargs.get('ap_detector')}, "
+                        f"2-pass={'ON' if sofa_kwargs.get('two_pass_retry') else 'OFF'}"
+                    )
                     ckpt = self._ensure_sofa_model_ready(lang)
                     sdic = self.sofa_dict_var.get().strip() or dict_path
                     if not self.sofa_dict_var.get().strip():
@@ -540,6 +625,7 @@ class PipelineActionsMixin:
                             mfa_path=self.mfa_path or "",
                             sofa_python=self.sofa_python_var.get().strip(),
                             callback=self._append_log,
+                            **sofa_kwargs,
                         )
                 else:
                     if self.mfa_path:
@@ -579,6 +665,10 @@ class PipelineActionsMixin:
                     custom_phonemes_path = self.custom_phoneme_var.get().strip()
                     alias_suffix = self.alias_suffix_var.get().strip()
                     ja_alias_style = self._get_ja_alias_style_code()
+                    ja_words_fallback = self.ja_mapping_words_fallback_enabled_var.get() if hasattr(self, "ja_mapping_words_fallback_enabled_var") else True
+                    ja_spn_threshold = self.ja_mapping_spn_ratio_threshold_var.get() if hasattr(self, "ja_mapping_spn_ratio_threshold_var") else 0.35
+                    ja_min_vowel_ratio = self.ja_mapping_min_vowel_phone_ratio_var.get() if hasattr(self, "ja_mapping_min_vowel_phone_ratio_var") else 0.5
+                    ja_debug_reason = self.ja_mapping_debug_reason_logging_var.get() if hasattr(self, "ja_mapping_debug_reason_logging_var") else True
                     self._append_log(
                         f"[OTO-ML] ・ｰ夋・・・ｵ・・ ml={'ON' if enable_ml_correction else 'OFF'}, "
                         f"pytorch_bridge={'ON' if enable_pytorch_bridge else 'OFF'}"
@@ -596,6 +686,10 @@ class PipelineActionsMixin:
                             enable_ml_correction=enable_ml_correction,
                             enable_pytorch_bridge=enable_pytorch_bridge,
                             alias_style=ja_alias_style,
+                            ja_mapping_words_fallback_enabled=bool(ja_words_fallback),
+                            ja_mapping_spn_ratio_threshold=float(ja_spn_threshold),
+                            ja_mapping_min_vowel_phone_ratio=float(ja_min_vowel_ratio),
+                            ja_mapping_debug_reason_logging=bool(ja_debug_reason),
                             auto_format=auto_format,
                             custom_phonemes_path=custom_phonemes_path,
                             alias_suffix=alias_suffix,
