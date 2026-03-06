@@ -164,6 +164,15 @@ def _copy_release_outputs(app_name, onefile=False):
 
 def main():
     _configure_console_encoding()
+    args = _parse_args()
+    if args.onefile and not args.allow_unsafe_onefile:
+        raise SystemExit(
+            "onefile 빌드는 기본 비활성화되어 있습니다. "
+            "SOFA/모델 캐시 경로 이슈를 이해한 경우에만 --allow-unsafe-onefile을 함께 사용하세요."
+        )
+    if args.allow_unsafe_onefile and not args.onefile:
+        print("ℹ --allow-unsafe-onefile 은 --onefile 미사용 시 무시됩니다.")
+
     os.chdir(APP_DIR)
     print("🚀 [1/5] 빌드 의존성 설치 중...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller", "customtkinter", "textgrid", "numpy"])
