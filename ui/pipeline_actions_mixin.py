@@ -197,7 +197,8 @@ class PipelineActionsMixin:
             self._set_status("⬇ MFA 자동 설치 중... (10~20분 소요)")
             try:
                 import shutil
-                portable_env_dir = os.path.join(APP_DIR, '.env')
+                app_dir = getattr(self, "app_dir", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                portable_env_dir = os.path.join(app_dir, '.env')
                 public_root = os.environ.get('PUBLIC', r'C:\Users\Public')
                 fallback_env_dir = os.path.join(public_root, 'UTAU_Auto_OTO_v3', '.env')
                 env_dir = portable_env_dir
@@ -206,7 +207,7 @@ class PipelineActionsMixin:
                     self._append_log("⚠ 앱 경로에 비ASCII 문자가 있어 MFA 환경을 공용 폴더에 설치합니다.")
                     self._append_log(f"   대체 설치 경로: {env_dir}")
                 mfa_exe = os.path.join(env_dir, 'Scripts', 'mfa.exe')
-                installer = os.path.join(APP_DIR, 'Miniconda3-latest-Windows-x86_64.exe')
+                installer = os.path.join(app_dir, 'Miniconda3-latest-Windows-x86_64.exe')
 
                 # 이미 설치 확인
                 if os.path.exists(mfa_exe):

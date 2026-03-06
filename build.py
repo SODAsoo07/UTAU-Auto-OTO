@@ -163,6 +163,19 @@ def _copy_release_outputs(app_name, onefile=False):
     return release_dir
 
 
+def _install_build_dependencies():
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
+
+    req_candidates = [
+        os.path.join(APP_DIR, "requirements.txt"),
+        os.path.join(APP_DIR, "requirements-ml.txt"),
+    ]
+    for req_path in req_candidates:
+        if os.path.exists(req_path):
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_path])
+
+
 def main():
     _configure_console_encoding()
     global args
@@ -179,7 +192,7 @@ def main():
 
     os.chdir(APP_DIR)
     print("🚀 [1/5] 빌드 의존성 설치 중...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller", "customtkinter", "textgrid", "numpy"])
+    _install_build_dependencies()
 
     print("🚀 [2/5] FFmpeg 바이너리 준비 중...")
     ffmpeg_bin = _ensure_ffmpeg_bin()
