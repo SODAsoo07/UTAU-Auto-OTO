@@ -227,6 +227,30 @@ JA_DEFAULT_PARAMS = {
     'CV_CUTOFF_RATIO': 0.25,     # CV에서 cutoff 비율
 }
 
+# 일본어 매핑 신뢰도 임계치 기본값(포맷별).
+# - CV/CVVC: 음절 1칸 밀림 방지를 위해 보수적으로 운용
+# - VCV: 기존 호환성을 유지
+JA_MAPPING_CONF_THRESHOLD_BY_FORMAT = {
+    "cv": 0.68,
+    "cvvc": 0.68,
+    "vcv": 0.60,
+    "default": 0.62,
+}
+
+
+def _resolve_ja_mapping_conf_threshold(format_type, override_threshold=None):
+    if override_threshold is not None:
+        try:
+            return float(override_threshold)
+        except Exception:
+            pass
+    fmt = str(format_type or "").strip().lower()
+    base = JA_MAPPING_CONF_THRESHOLD_BY_FORMAT.get(
+        fmt,
+        JA_MAPPING_CONF_THRESHOLD_BY_FORMAT["default"],
+    )
+    return float(base)
+
 def is_glide(phone_mark):
     clean = re.sub(r"[0-9]", "", phone_mark).lower()
     return clean in ['j', 'w', 'ɰ']
@@ -741,6 +765,180 @@ def _collect_phone_tier_quality(ph_tier, expected_syllables, min_vowel_phone_rat
     }
 
 
+def _clamp01(v):
+    try:
+        x = float(v)
+    except Exception:
+        return 0.0
+    return max(0.0, min(1.0, x))
+
+
+def _time_to_ms(v):
+    try:
+        x = float(v)
+    except Exception:
+        return None
+    return x * 1000.0 if abs(x) < 60.0 else x
+
+
+def _estimate_words_tier_confidence(wd_intervals, expected_syllables):
+    if not wd_intervals:
+        return 0.0
+    total = len(wd_intervals)
+    if total <= 0:
+        return 0.0
+    expected = max(1, int(expected_syllables or total))
+    ratio = float(total) / float(expected)
+    ratio_pen = min(abs(1.0 - ratio) * 0.68, 0.68)
+    unknown_count = 0
+    for w in wd_intervals:
+        mark = str(getattr(w, "mark", "") or "").strip().lower()
+        if mark in {"", "<unk>", "unk", "spn", "sil", "pau", "sp"}:
+            unknown_count += 1
+    unknown_ratio = float(unknown_count) / float(max(1, total))
+    conf = 1.0 - ratio_pen - (unknown_ratio * 0.52)
+    if total < 2:
+        conf -= 0.10
+    return _clamp01(conf)
+
+
+def _score_words_boundary_alignment(candidate_infos, wd_intervals):
+    if not candidate_infos or not wd_intervals:
+        return 50.0
+    cand_bounds = []
+    for s in (candidate_infos[:-1] if len(candidate_infos) >= 2 else []):
+        if not isinstance(s, dict):
+            continue
+        end_ms = _time_to_ms(s.get("end_time"))
+        if end_ms is not None:
+            cand_bounds.append(end_ms)
+    word_bounds = [float(w.maxTime) * 1000.0 for w in (wd_intervals[:-1] if len(wd_intervals) >= 2 else [])]
+    if not cand_bounds or not word_bounds:
+        return 50.0
+    diffs = []
+    for wb in word_bounds:
+        nearest = min(cand_bounds, key=lambda cb: abs(cb - wb))
+        diffs.append(abs(nearest - wb))
+    mean_diff = sum(diffs) / float(max(1, len(diffs)))
+    size_gap = abs(len(cand_bounds) - len(word_bounds))
+    # 0ms -> 100점, 180ms -> 약 0점에 근접.
+    score = 100.0 - (mean_diff / 1.8) - (size_gap * 6.0)
+    return max(0.0, min(100.0, score))
+
+
+def _estimate_ja_syllable_confidences(candidate_infos, cv_targets):
+    if not candidate_infos:
+        return []
+
+    targets = [_normalize_ja_syllable_token(t) for t in (cv_targets or []) if t]
+    infos = list(candidate_infos)
+    n = len(infos)
+    confs = [0.55] * n
+
+    target_n = len(targets)
+    if target_n > 0:
+        m = min(n, target_n)
+        for i in range(m):
+            cand_tok = _normalize_ja_syllable_token(_syllable_info_token(infos[i]))
+            tgt_tok = targets[i]
+            match_score = float(_vcv_syllable_match_score(tgt_tok, cand_tok))
+            conf = _clamp01(match_score / 100.0)
+
+            t_on, t_vow = split_ja_romaji_syllable(tgt_tok)
+            c_on, c_vow = split_ja_romaji_syllable(cand_tok)
+            if t_vow in JA_VOWELS and c_vow and c_vow != t_vow:
+                conf -= 0.34
+            if t_on and c_on and t_on != c_on:
+                conf -= 0.14
+            t_tail = _ja_syllable_tail(tgt_tok)
+            c_tail = _ja_syllable_tail(cand_tok)
+            if t_tail != c_tail:
+                conf -= 0.08
+
+            # 현재 위치보다 인접 위치가 더 잘 맞으면 1음절 밀림 가능성으로 감점.
+            if i > 0:
+                prev_tok = _normalize_ja_syllable_token(_syllable_info_token(infos[i - 1]))
+                if _vcv_syllable_match_score(tgt_tok, prev_tok) - match_score > 12.0:
+                    conf -= 0.12
+            if (i + 1) < n:
+                next_tok = _normalize_ja_syllable_token(_syllable_info_token(infos[i + 1]))
+                if _vcv_syllable_match_score(tgt_tok, next_tok) - match_score > 12.0:
+                    conf -= 0.12
+            confs[i] = _clamp01(conf)
+
+        if n != target_n:
+            mismatch_pen = min(0.14, abs(n - target_n) * 0.03)
+            confs = [_clamp01(c - mismatch_pen) for c in confs]
+
+    # 시간 순서 이상치(역행/비정상 급점프)를 음절 단위로 감점.
+    centers = []
+    for s in infos:
+        if not isinstance(s, dict):
+            centers.append(None)
+            continue
+        st = _time_to_ms(s.get("start_time"))
+        et = _time_to_ms(s.get("end_time"))
+        if st is None and et is None:
+            centers.append(None)
+        elif st is None:
+            centers.append(et)
+        elif et is None:
+            centers.append(st)
+        else:
+            centers.append((st + et) * 0.5)
+    prev_t = None
+    for i, t in enumerate(centers):
+        if t is None:
+            continue
+        if prev_t is not None:
+            delta = t - prev_t
+            if delta <= 0.0:
+                confs[i] = _clamp01(confs[i] - 0.32)
+                confs[max(0, i - 1)] = _clamp01(confs[max(0, i - 1)] - 0.18)
+            elif delta < 24.0:
+                confs[i] = _clamp01(confs[i] - 0.10)
+            elif delta > 1500.0:
+                confs[i] = _clamp01(confs[i] - 0.08)
+        prev_t = t
+    return confs
+
+
+def _summarize_ja_syllable_confidences(syllable_confidences, low_cut=0.58):
+    vals = [float(c) for c in (syllable_confidences or [])]
+    if not vals:
+        return 0.5, 0.5, 0.0
+    mean_conf = sum(vals) / float(len(vals))
+    min_conf = min(vals)
+    low_ratio = sum(1 for c in vals if c < float(low_cut)) / float(len(vals))
+    return float(mean_conf), float(min_conf), float(low_ratio)
+
+
+def _evaluate_ja_mapping_candidate(candidate_infos, cv_targets, wd_intervals=None, words_tier_confidence=0.0):
+    if not candidate_infos:
+        return None
+    score = float(_score_ja_syllable_mapping(candidate_infos, cv_targets)) if cv_targets else 0.0
+    syllable_conf = _estimate_ja_syllable_confidences(candidate_infos, cv_targets)
+    mean_conf, min_conf, low_ratio = _summarize_ja_syllable_confidences(syllable_conf)
+    words_align_score = _score_words_boundary_alignment(candidate_infos, wd_intervals)
+
+    # words 경계 점수는 하드 제약이 아니라 soft weight로만 반영한다.
+    words_conf = _clamp01(words_tier_confidence)
+    words_weight = 4.0 + (18.0 * (words_conf ** 1.35))
+    words_bonus = ((words_align_score - 70.0) / 30.0) * words_weight
+
+    objective = score + (mean_conf * 17.0) - (low_ratio * 14.0) + words_bonus
+    return {
+        "score": float(score),
+        "objective": float(objective),
+        "syllable_confidences": syllable_conf,
+        "mean_syll_conf": float(mean_conf),
+        "min_syll_conf": float(min_conf),
+        "low_syll_ratio": float(low_ratio),
+        "words_align_score": float(words_align_score),
+        "words_weight": float(words_weight),
+    }
+
+
 def _estimate_ja_mapping_confidence(
     phone_quality,
     words_score=0.0,
@@ -748,6 +946,9 @@ def _estimate_ja_mapping_confidence(
     used_filename_based=False,
     used_alias_based=False,
     forced_words_mapping=False,
+    syllable_confidences=None,
+    words_align_score=None,
+    words_tier_confidence=0.0,
 ):
     """
     일본어 음절 매핑 신뢰도를 0~1로 추정합니다.
@@ -778,6 +979,21 @@ def _estimate_ja_mapping_confidence(
     if forced_words_mapping:
         conf -= 0.03
     conf += max(-0.12, min(0.12, margin / 100.0))
+
+    mean_syll_conf, min_syll_conf, low_syll_ratio = _summarize_ja_syllable_confidences(
+        syllable_confidences,
+        low_cut=0.58,
+    )
+    conf += (mean_syll_conf - 0.62) * 0.30
+    conf += (min_syll_conf - 0.50) * 0.14
+    conf -= low_syll_ratio * 0.26
+
+    if words_align_score is not None:
+        words_conf = _clamp01(words_tier_confidence)
+        # words 신뢰도가 높을수록 경계 점수를 더 크게 반영하되, soft하게만 반영.
+        align_norm = _clamp01((float(words_align_score) - 55.0) / 45.0)
+        conf += (align_norm - 0.5) * (0.18 * words_conf)
+
     if "insufficient_phones" in low_reasons:
         conf -= 0.14
     if "insufficient_vowel_phones" in low_reasons:
@@ -2228,7 +2444,7 @@ def generate_ja_oto(
     ja_mapping_spn_ratio_threshold=0.35,
     ja_mapping_min_vowel_phone_ratio=0.5,
     ja_mapping_debug_reason_logging=True,
-    ja_mapping_confidence_threshold=0.60,
+    ja_mapping_confidence_threshold=None,
     cleanup_timing_jsonl=True,
     auto_format=None,
     callback=None
@@ -2966,7 +3182,7 @@ def generate_ja_oto(
                 processed += 1
                 continue
 
-            # === 다중 음절 처리: 파일명/리스트 우선 매핑 ===
+            # === 다중 음절 처리: 1단계(순서 보존 후보) -> 2단계(세부 후보 보정) ===
             syllables_info = []
             used_filename_based = False
             used_alias_based = False
@@ -2977,85 +3193,134 @@ def generate_ja_oto(
             mapping_confidence_base = 1.0
             mapping_margin = 0.0
             mapping_tier = "high"
+            syllable_confidence_by_idx = []
+            linear_fallback_used = False
+            conf_th = _resolve_ja_mapping_conf_threshold(
+                format_type,
+                override_threshold=ja_mapping_confidence_threshold,
+            )
+
             sparse_phone_mode = bool(
                 filename_syllables and len(ph_intervals) < max(4, len(filename_syllables) // 2)
             )
+            words_tier_confidence = _estimate_words_tier_confidence(
+                wd_intervals,
+                expected_syllables=max(len(filename_syllables), len(cv_targets), len(wd_intervals)),
+            )
+
             filename_based = _build_syllables_from_filename(ph_intervals, filename_syllables)
             alias_based = _build_ja_syllables_from_phone_nuclei(ph_intervals, cv_targets) if cv_targets else None
             linear_filename_based = None
-            linear_fallback_used = False
             if (not filename_based) and filename_syllables:
                 linear_filename_based = _build_ja_linear_syllables_from_phones(ph_intervals, filename_syllables)
-            if forced_words_mapping and filename_based and len(filename_based) >= 1:
-                syllables_info = filename_based
-                used_filename_based = True
-                filename_order_locked = bool(format_type in {"cvvc", "cv"})
-                mapping_reason_code = "filename_words_lock"
-                log(
-                    f"🧭 {fname}: words 합성 phone 기반 매핑 고정 "
-                    f"({len(filename_syllables)}음절, spn_ratio={spn_ratio:.2f})"
-                )
-            elif forced_words_mapping and alias_based:
-                syllables_info = alias_based
-                used_alias_based = True
-                mapping_reason_code = "alias_words_fallback"
-                log(
-                    f"🧭 {fname}: words 합성 phone 기반 filename 실패 → alias/phone 매핑 사용 "
-                    f"({len(cv_targets)}음절)"
-                )
-            elif filename_based and len(filename_based) >= 1:
-                syllables_info = filename_based
-                used_filename_based = True
-                filename_order_locked = bool(format_type in {"cvvc", "cv"})
-                mapping_reason_code = "filename_token"
-                log(f"🧭 {fname}: 파일명 우선 음절 매핑 사용 ({len(filename_syllables)}음절)")
-            elif linear_filename_based and format_type in {"cvvc", "cv"}:
-                syllables_info = linear_filename_based
-                used_filename_based = True
-                filename_order_locked = True
-                linear_fallback_used = True
-                mapping_reason_code = "filename_linear_fallback"
-                log(f"🧭 {fname}: 파일명 선형 fallback 음절 매핑 사용 ({len(filename_syllables)}음절)")
-            elif alias_based:
-                syllables_info = alias_based
-                used_alias_based = True
-                mapping_reason_code = "alias_phone_fallback"
-                log(f"🧭 {fname}: 파일명 매핑 실패 → alias/phone 기반 음절 매핑 사용 ({len(cv_targets)}음절)")
-            elif wd_intervals and sparse_phone_mode:
-                mapping_reason_code = "words_sparse_synth"
-                log(f"🧭 {fname}: phones 희소 감지({len(ph_intervals)}개) → words 기반 합성 phone 매핑 사용")
+
+            words_sparse_based = None
+            words_tier_based = None
+            if wd_intervals and sparse_phone_mode:
+                words_sparse_based = []
                 for w in wd_intervals:
                     w_start = float(w.minTime)
                     w_end = float(w.maxTime)
                     s_phones = _synthesize_word_phones(w.mark.strip(), w_start, w_end)
-                    syllables_info.append({
+                    words_sparse_based.append({
                         'word': w.mark.strip().lower(),
                         'start_time': w_start,
                         'end_time': w_end,
                         'phones': s_phones
                     })
             elif wd_intervals:
-                mapping_reason_code = "words_tier"
+                words_tier_based = []
                 for w in wd_intervals:
-                    w_start = w.minTime
-                    w_end = w.maxTime
-                    s_phones = [p for p in ph_intervals if p.minTime >= w_start - 0.01 and p.maxTime <= w_end + 0.01]
-                    syllables_info.append({
+                    w_start = float(w.minTime)
+                    w_end = float(w.maxTime)
+                    s_phones = [p for p in ph_intervals if p.minTime >= (w_start - 0.01) and p.maxTime <= (w_end + 0.01)]
+                    words_tier_based.append({
                         'word': w.mark.strip().lower(),
                         'start_time': w_start,
                         'end_time': w_end,
                         'phones': s_phones
                     })
-            else:
+
+            mapping_candidates = []
+
+            def _append_candidate(
+                name,
+                infos,
+                *,
+                use_filename=False,
+                use_alias=False,
+                lock_order=False,
+                linear=False,
+                order_preserving=False,
+            ):
+                if not infos:
+                    return
+                eval_info = _evaluate_ja_mapping_candidate(
+                    infos,
+                    cv_targets,
+                    wd_intervals=wd_intervals,
+                    words_tier_confidence=words_tier_confidence,
+                )
+                if eval_info is None:
+                    return
+                mapping_candidates.append({
+                    "name": name,
+                    "infos": infos,
+                    "use_filename": bool(use_filename),
+                    "use_alias": bool(use_alias),
+                    "lock_order": bool(lock_order),
+                    "linear_fallback": bool(linear),
+                    "order_preserving": bool(order_preserving),
+                    **eval_info,
+                })
+
+            _append_candidate(
+                "filename_token",
+                filename_based,
+                use_filename=True,
+                lock_order=bool(format_type in {"cvvc", "cv"}),
+                order_preserving=True,
+            )
+            _append_candidate(
+                "filename_linear_fallback",
+                linear_filename_based if format_type in {"cvvc", "cv"} else None,
+                use_filename=True,
+                lock_order=bool(format_type in {"cvvc", "cv"}),
+                linear=True,
+                order_preserving=True,
+            )
+            _append_candidate(
+                "alias_phone_fallback",
+                alias_based,
+                use_alias=True,
+                lock_order=False,
+                order_preserving=False,
+            )
+            _append_candidate(
+                "words_sparse_synth",
+                words_sparse_based,
+                use_filename=False,
+                lock_order=False,
+                order_preserving=False,
+            )
+            _append_candidate(
+                "words_tier",
+                words_tier_based,
+                use_filename=False,
+                lock_order=False,
+                order_preserving=False,
+            )
+
+            if not mapping_candidates:
                 # words 티어가 없고 파일명 기반 분할도 실패한 경우 fallback
-                mapping_reason_code = "phones_split_fallback"
+                phones_split_based = []
                 current_phones = []
                 for p in ph_intervals:
                     mark = p.mark.strip().lower()
                     if current_phones and mark in ['a', 'i', 'ɯ', 'e', 'o', 'ɴ', 'cl']:
                         if mark in ['ɴ', 'cl'] and len(current_phones) > 0:
                             current_phones.append(p)
-                            syllables_info.append({
+                            phones_split_based.append({
                                 'word': ''.join(cp.mark.strip() for cp in current_phones),
                                 'start_time': current_phones[0].minTime,
                                 'end_time': current_phones[-1].maxTime,
@@ -3064,7 +3329,7 @@ def generate_ja_oto(
                             current_phones = []
                             continue
                         if current_phones:
-                            syllables_info.append({
+                            phones_split_based.append({
                                 'word': ''.join(cp.mark.strip() for cp in current_phones),
                                 'start_time': current_phones[0].minTime,
                                 'end_time': current_phones[-1].maxTime,
@@ -3073,23 +3338,104 @@ def generate_ja_oto(
                         current_phones = [p]
                     else:
                         current_phones.append(p)
-
                 if current_phones:
-                    syllables_info.append({
+                    phones_split_based.append({
                         'word': ''.join(cp.mark.strip() for cp in current_phones),
                         'start_time': current_phones[0].minTime,
                         'end_time': current_phones[-1].maxTime,
                         'phones': list(current_phones)
                     })
+                _append_candidate(
+                    "phones_split_fallback",
+                    phones_split_based,
+                    use_filename=False,
+                    lock_order=False,
+                    order_preserving=False,
+                )
 
-            if cv_targets:
-                if syllables_info:
-                    base_score = float(_score_ja_syllable_mapping(syllables_info, cv_targets))
-                if alias_based:
-                    alt_score = float(_score_ja_syllable_mapping(alias_based, cv_targets))
+            candidate_by_name = {c["name"]: c for c in mapping_candidates}
+            alias_candidate = candidate_by_name.get("alias_phone_fallback")
+            selected_candidate = None
+
+            # 1단계: 순서 보존 후보를 우선 필터링.
+            if mapping_candidates:
+                if forced_words_mapping:
+                    if candidate_by_name.get("filename_token"):
+                        selected_candidate = candidate_by_name["filename_token"]
+                        mapping_reason_code = "filename_words_lock"
+                    elif candidate_by_name.get("filename_linear_fallback"):
+                        selected_candidate = candidate_by_name["filename_linear_fallback"]
+                        mapping_reason_code = "filename_words_linear_lock"
+                    elif alias_candidate:
+                        selected_candidate = alias_candidate
+                        mapping_reason_code = "alias_words_fallback"
+                    else:
+                        selected_candidate = max(mapping_candidates, key=lambda c: c.get("objective", -10**9))
+                        mapping_reason_code = selected_candidate["name"]
+                else:
+                    stage1_pool = list(mapping_candidates)
+                    if format_type in {"cvvc", "cv"}:
+                        order_pool = [c for c in mapping_candidates if c.get("order_preserving")]
+                        if order_pool:
+                            stage1_pool = order_pool
+                    selected_candidate = max(
+                        stage1_pool,
+                        key=lambda c: (
+                            c.get("objective", -10**9)
+                            + (3.0 if (format_type in {"cvvc", "cv"} and c.get("order_preserving")) else 0.0)
+                        ),
+                    )
+                    mapping_reason_code = selected_candidate["name"]
+
+            # 2단계: 세부 후보 보정(alias 전환)은 고신뢰 상황에서만 허용.
+            if selected_candidate:
+                provisional_conf, _ = _estimate_ja_mapping_confidence(
+                    phone_quality,
+                    words_score=selected_candidate.get("score", 0.0),
+                    alias_score=(alias_candidate.get("score", -1.0) if alias_candidate else -1.0),
+                    used_filename_based=selected_candidate.get("use_filename", False),
+                    used_alias_based=selected_candidate.get("use_alias", False),
+                    forced_words_mapping=forced_words_mapping,
+                    syllable_confidences=selected_candidate.get("syllable_confidences", []),
+                    words_align_score=selected_candidate.get("words_align_score"),
+                    words_tier_confidence=words_tier_confidence,
+                )
+                if (
+                    alias_candidate
+                    and alias_candidate is not selected_candidate
+                    and not (format_type in {"cvvc", "cv"} and selected_candidate.get("lock_order"))
+                    and provisional_conf >= conf_th
+                ):
+                    objective_gain = alias_candidate.get("objective", -10**9) - selected_candidate.get("objective", -10**9)
+                    score_gain = alias_candidate.get("score", -10**9) - selected_candidate.get("score", -10**9)
+                    conf_gain = alias_candidate.get("mean_syll_conf", 0.0) - selected_candidate.get("mean_syll_conf", 0.0)
+                    gain_th = 7.0 if format_type in {"cvvc", "cv"} else 5.0
+                    if (
+                        alias_candidate.get("score", 0.0) >= 70.0
+                        and objective_gain >= gain_th
+                        and (score_gain >= 5.0 or conf_gain >= 0.06)
+                    ):
+                        selected_candidate = alias_candidate
+                        mapping_reason_code = "alias_recover"
+
+            if selected_candidate:
+                syllables_info = list(selected_candidate.get("infos") or [])
+                used_filename_based = bool(selected_candidate.get("use_filename"))
+                used_alias_based = bool(selected_candidate.get("use_alias"))
+                filename_order_locked = bool(
+                    selected_candidate.get("lock_order") and format_type in {"cvvc", "cv"}
+                )
+                linear_fallback_used = bool(selected_candidate.get("linear_fallback"))
+                base_score = float(selected_candidate.get("score", -1.0))
+                syllable_confidence_by_idx = list(selected_candidate.get("syllable_confidences", []) or [])
             else:
+                syllables_info = []
+                base_score = -1.0
+                syllable_confidence_by_idx = []
+
+            alt_score = float(alias_candidate.get("score", -1.0)) if alias_candidate else (-1.0 if cv_targets else 0.0)
+            if not cv_targets and base_score < 0.0:
                 base_score = 0.0
-                alt_score = 0.0
 
             mapping_confidence_base, mapping_margin = _estimate_ja_mapping_confidence(
                 phone_quality,
@@ -3098,8 +3444,10 @@ def generate_ja_oto(
                 used_filename_based=used_filename_based,
                 used_alias_based=used_alias_based,
                 forced_words_mapping=forced_words_mapping,
+                syllable_confidences=syllable_confidence_by_idx,
+                words_align_score=(selected_candidate.get("words_align_score") if selected_candidate else None),
+                words_tier_confidence=words_tier_confidence,
             )
-            conf_th = float(ja_mapping_confidence_threshold)
             if mapping_confidence_base >= (conf_th + 0.12):
                 mapping_tier = "high"
             elif mapping_confidence_base >= conf_th:
@@ -3107,17 +3455,23 @@ def generate_ja_oto(
             else:
                 mapping_tier = "low"
 
-            # 일본어 CVVC/CV는 파일명 순서를 기준 축으로 고정한다.
+            # 일본어 CVVC/CV는 저신뢰일 때 파일명 순서를 기준 축으로 고정.
             if format_type in {"cvvc", "cv"} and mapping_tier == "low" and (not filename_order_locked):
-                if linear_filename_based:
-                    syllables_info = linear_filename_based
-                    used_filename_based = True
-                    used_alias_based = False
+                fallback_candidate = candidate_by_name.get("filename_linear_fallback") or candidate_by_name.get("filename_token")
+                if fallback_candidate is not None and fallback_candidate is not selected_candidate:
+                    selected_candidate = fallback_candidate
+                    syllables_info = list(selected_candidate.get("infos") or [])
+                    used_filename_based = bool(selected_candidate.get("use_filename"))
+                    used_alias_based = bool(selected_candidate.get("use_alias"))
                     filename_order_locked = True
-                    linear_fallback_used = True
-                    mapping_reason_code = "filename_linear_low_conf"
-                    if cv_targets:
-                        base_score = float(_score_ja_syllable_mapping(syllables_info, cv_targets))
+                    linear_fallback_used = bool(selected_candidate.get("linear_fallback"))
+                    base_score = float(selected_candidate.get("score", base_score))
+                    syllable_confidence_by_idx = list(selected_candidate.get("syllable_confidences", []) or [])
+                    mapping_reason_code = (
+                        "filename_linear_low_conf"
+                        if selected_candidate.get("name") == "filename_linear_fallback"
+                        else "filename_low_conf"
+                    )
                     mapping_confidence_base, mapping_margin = _estimate_ja_mapping_confidence(
                         phone_quality,
                         words_score=base_score,
@@ -3125,6 +3479,9 @@ def generate_ja_oto(
                         used_filename_based=used_filename_based,
                         used_alias_based=used_alias_based,
                         forced_words_mapping=forced_words_mapping,
+                        syllable_confidences=syllable_confidence_by_idx,
+                        words_align_score=selected_candidate.get("words_align_score"),
+                        words_tier_confidence=words_tier_confidence,
                     )
                     if mapping_confidence_base >= (conf_th + 0.12):
                         mapping_tier = "high"
@@ -3134,34 +3491,36 @@ def generate_ja_oto(
                         mapping_tier = "low"
                     log(
                         f"🧭 {fname}: 일본어 매핑 저신뢰(conf={mapping_confidence_base:.2f}) "
-                        f"→ 파일명 선형 fallback 고정"
+                        f"→ 파일명 기준 매핑 고정"
                     )
-                elif filename_based:
-                    syllables_info = filename_based
-                    used_filename_based = True
-                    used_alias_based = False
-                    filename_order_locked = True
-                    linear_fallback_used = False
-                    mapping_reason_code = "filename_low_conf"
-                    if cv_targets:
-                        base_score = float(_score_ja_syllable_mapping(syllables_info, cv_targets))
-                    mapping_confidence_base, mapping_margin = _estimate_ja_mapping_confidence(
-                        phone_quality,
-                        words_score=base_score,
-                        alias_score=alt_score,
-                        used_filename_based=used_filename_based,
-                        used_alias_based=used_alias_based,
-                        forced_words_mapping=forced_words_mapping,
-                    )
-                    if mapping_confidence_base >= (conf_th + 0.12):
-                        mapping_tier = "high"
-                    elif mapping_confidence_base >= conf_th:
-                        mapping_tier = "mid"
-                    else:
-                        mapping_tier = "low"
+
+            if selected_candidate:
+                if mapping_reason_code in {"filename_words_lock", "filename_words_linear_lock"}:
                     log(
-                        f"🧭 {fname}: 일본어 매핑 저신뢰(conf={mapping_confidence_base:.2f}) "
-                        f"→ 파일명 음절 매핑 고정"
+                        f"🧭 {fname}: words 합성 phone 기반 매핑 고정 "
+                        f"({len(filename_syllables)}음절, spn_ratio={spn_ratio:.2f})"
+                    )
+                elif mapping_reason_code == "alias_words_fallback":
+                    log(
+                        f"🧭 {fname}: words 합성 phone 기반 filename 실패 → alias/phone 매핑 사용 "
+                        f"({len(cv_targets)}음절)"
+                    )
+                elif mapping_reason_code == "filename_token":
+                    log(f"🧭 {fname}: 파일명 우선 음절 매핑 사용 ({len(filename_syllables)}음절)")
+                elif mapping_reason_code == "filename_linear_fallback":
+                    log(f"🧭 {fname}: 파일명 선형 fallback 음절 매핑 사용 ({len(filename_syllables)}음절)")
+                elif mapping_reason_code == "alias_phone_fallback":
+                    log(f"🧭 {fname}: 파일명 매핑 실패 → alias/phone 기반 음절 매핑 사용 ({len(cv_targets)}음절)")
+                elif mapping_reason_code == "words_sparse_synth":
+                    log(f"🧭 {fname}: phones 희소 감지({len(ph_intervals)}개) → words 기반 합성 phone 매핑 사용")
+                elif mapping_reason_code == "words_tier":
+                    log(f"🧭 {fname}: words 티어 기반 음절 매핑 사용 ({len(wd_intervals)}구간)")
+                elif mapping_reason_code == "phones_split_fallback":
+                    log(f"🧭 {fname}: phones split fallback 음절 매핑 사용")
+                elif mapping_reason_code == "alias_recover":
+                    log(
+                        f"🧭 {fname}: 매핑 이탈 보정 적용 "
+                        f"(base={base_score:.1f}, corrected={alt_score:.1f})"
                     )
 
             if ja_mapping_debug_reason_logging and mapping_confidence_base < conf_th:
@@ -3170,46 +3529,17 @@ def generate_ja_oto(
                     f"tier={mapping_tier}, margin={mapping_margin:+.1f}, reason={mapping_reason_code})"
                 )
 
-            if syllables_info and alias_based and cv_targets:
-                # CVVC/CV에서 filename 순서 잠금이 걸리면 alias 보정으로 순서를 바꾸지 않는다.
+            if syllables_info and alias_candidate and cv_targets:
                 if format_type in {"cvvc", "cv"} and filename_order_locked:
                     log(
                         f"🧭 {fname}: 파일명 순서 잠금 유지 "
                         f"(base={base_score:.1f}, corrected={alt_score:.1f}, tier={mapping_tier})"
                     )
-                else:
-                    # TextGrid 정렬 결과를 우선하되, alias 기준과 크게 어긋난 경우에만 보정한다.
-                    prefer_alias = False
-                    if format_type in {"cvvc", "cv"}:
-                        if (
-                            mapping_confidence_base >= conf_th
-                            and alt_score >= 70.0
-                            and (base_score < 74.0 or alt_score >= (base_score + 6.0))
-                        ):
-                            prefer_alias = True
-                    else:
-                        if (
-                            mapping_confidence_base >= conf_th
-                            and base_score < 66.0
-                            and alt_score >= 70.0
-                            and alt_score >= (base_score + 8.0)
-                        ):
-                            prefer_alias = True
-                    if prefer_alias:
-                        syllables_info = alias_based
-                        used_alias_based = True
-                        used_filename_based = False
-                        filename_order_locked = False
-                        mapping_reason_code = "alias_recover"
-                        log(
-                            f"🧭 {fname}: 매핑 이탈 보정 적용 "
-                            f"(base={base_score:.1f}, corrected={alt_score:.1f})"
-                        )
-                    else:
-                        log(
-                            f"🧭 {fname}: TextGrid 매핑 유지 "
-                            f"(base={base_score:.1f}, corrected={alt_score:.1f})"
-                        )
+                elif mapping_reason_code not in {"alias_recover"}:
+                    log(
+                        f"🧭 {fname}: TextGrid 매핑 유지 "
+                        f"(base={base_score:.1f}, corrected={alt_score:.1f})"
+                    )
 
             if not syllables_info or any(len(s['phones']) == 0 for s in syllables_info):
                 fail_reason = "mapping_failed"
@@ -3358,6 +3688,9 @@ def generate_ja_oto(
             realized_cv_anchor_by_idx = {}
 
             post_ctx.syllables_info = syllables_info
+
+            local_conf_lock_threshold = max(0.46, min(conf_th - 0.08, 0.62))
+            local_low_conf_lock_logged = set()
 
             # CV 순서 카운터로 리스트 순서 우선 매핑
             current_w_idx = 0
@@ -3697,15 +4030,64 @@ def generate_ja_oto(
                         expected_idx = expected_seq_idx
                     else:
                         expected_idx = len(syllables_info) - 1
-                    skip_cv_align = bool(filename_order_locked and format_type in {"cvvc", "cv"})
+                    cvvc_order_soft_align = bool(
+                        filename_order_locked
+                        and format_type in {"cvvc", "cv"}
+                        and mapping_tier != "low"
+                    )
+                    skip_cv_align = bool(
+                        filename_order_locked
+                        and format_type in {"cvvc", "cv"}
+                        and mapping_tier == "low"
+                    )
+                    if (not skip_cv_align) and format_type in {"cvvc", "cv"} and syllable_confidence_by_idx:
+                        conf_idx = max(0, min(expected_idx, len(syllable_confidence_by_idx) - 1))
+                        local_conf = float(syllable_confidence_by_idx[conf_idx])
+                        if local_conf < local_conf_lock_threshold:
+                            skip_cv_align = True
+                            if (
+                                ja_mapping_debug_reason_logging
+                                and conf_idx not in local_low_conf_lock_logged
+                            ):
+                                local_low_conf_lock_logged.add(conf_idx)
+                                log(
+                                    f"🧭 {fname}: CV_HEAD 음절 저신뢰(conf={local_conf:.2f}) "
+                                    f"→ 순서 잠금({conf_idx + 1}번)"
+                                )
+                    target_tok = _extract_ja_cv_target_syllable(alias, alias_type="cv_head")
                     resynced_cv_head_exact = False
                     if skip_cv_align:
                         mapped_idx = expected_idx
+                        # CVVC/CV 파일명 순서 잠금에서도 요음/삽입 모음으로 인한 1칸 밀림은 보정.
+                        if cvvc_order_soft_align and target_tok:
+                            resync_idx = _find_ja_exact_target_index(
+                                target_tok,
+                                expected_idx,
+                                syllables_info,
+                                search_back=0,
+                                search_fwd=2,
+                            )
+                            if resync_idx is None:
+                                resync_idx = _find_ja_cv_vowel_match_index(
+                                    target_tok,
+                                    expected_idx,
+                                    syllables_info,
+                                    search_back=0,
+                                    search_fwd=1,
+                                )
+                            if (
+                                resync_idx is not None
+                                and expected_idx < resync_idx <= (expected_idx + 1)
+                            ):
+                                mapped_idx = resync_idx
+                                log(
+                                    f"🧭 {fname}: CV_HEAD 순서 잠금 미세 보정 "
+                                    f"{expected_idx + 1}->{mapped_idx + 1} ({alias})"
+                                )
                     else:
                         mapped_idx = _select_ja_cv_syllable_index(
                             alias, expected_idx, syllables_info, alias_type="cv_head"
                         )
-                        target_tok = _extract_ja_cv_target_syllable(alias, alias_type="cv_head")
                         if target_tok:
                             mapped_tok = _syllable_info_token(syllables_info[mapped_idx])
                             _mo, mapped_vowel = split_ja_romaji_syllable(mapped_tok)
@@ -3753,6 +4135,11 @@ def generate_ja_oto(
                                 syllables_info,
                                 max_delta=1,
                             )
+                        if format_type in {"cvvc", "cv"} and filename_order_locked:
+                            if mapped_idx < expected_idx:
+                                mapped_idx = expected_idx
+                            elif mapped_idx > (expected_idx + 1):
+                                mapped_idx = expected_idx + 1
                         if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
                             log(f"🧭 {fname}: CV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
                     current_w_idx = mapped_idx
@@ -3890,15 +4277,64 @@ def generate_ja_oto(
                         expected_idx = expected_seq_idx
                     else:
                         expected_idx = len(syllables_info) - 1
-                    skip_cv_align = bool(filename_order_locked and format_type in {"cvvc", "cv"})
+                    cvvc_order_soft_align = bool(
+                        filename_order_locked
+                        and format_type in {"cvvc", "cv"}
+                        and mapping_tier != "low"
+                    )
+                    skip_cv_align = bool(
+                        filename_order_locked
+                        and format_type in {"cvvc", "cv"}
+                        and mapping_tier == "low"
+                    )
+                    if (not skip_cv_align) and format_type in {"cvvc", "cv"} and syllable_confidence_by_idx:
+                        conf_idx = max(0, min(expected_idx, len(syllable_confidence_by_idx) - 1))
+                        local_conf = float(syllable_confidence_by_idx[conf_idx])
+                        if local_conf < local_conf_lock_threshold:
+                            skip_cv_align = True
+                            if (
+                                ja_mapping_debug_reason_logging
+                                and conf_idx not in local_low_conf_lock_logged
+                            ):
+                                local_low_conf_lock_logged.add(conf_idx)
+                                log(
+                                    f"🧭 {fname}: CV 음절 저신뢰(conf={local_conf:.2f}) "
+                                    f"→ 순서 잠금({conf_idx + 1}번)"
+                                )
+                    target_tok = _extract_ja_cv_target_syllable(alias, alias_type="cv")
                     resynced_cv_exact = False
                     if skip_cv_align:
                         mapped_idx = expected_idx
+                        # CVVC/CV 파일명 순서 잠금에서도 요음/삽입 모음으로 인한 1칸 밀림은 보정.
+                        if cvvc_order_soft_align and target_tok:
+                            resync_idx = _find_ja_exact_target_index(
+                                target_tok,
+                                expected_idx,
+                                syllables_info,
+                                search_back=0,
+                                search_fwd=2,
+                            )
+                            if resync_idx is None:
+                                resync_idx = _find_ja_cv_vowel_match_index(
+                                    target_tok,
+                                    expected_idx,
+                                    syllables_info,
+                                    search_back=0,
+                                    search_fwd=1,
+                                )
+                            if (
+                                resync_idx is not None
+                                and expected_idx < resync_idx <= (expected_idx + 1)
+                            ):
+                                mapped_idx = resync_idx
+                                log(
+                                    f"🧭 {fname}: CV 순서 잠금 미세 보정 "
+                                    f"{expected_idx + 1}->{mapped_idx + 1} ({alias})"
+                                )
                     else:
                         mapped_idx = _select_ja_cv_syllable_index(
                             alias, expected_idx, syllables_info, alias_type="cv"
                         )
-                        target_tok = _extract_ja_cv_target_syllable(alias, alias_type="cv")
                         if target_tok:
                             mapped_tok = _syllable_info_token(syllables_info[mapped_idx])
                             _mo, mapped_vowel = split_ja_romaji_syllable(mapped_tok)
@@ -3946,6 +4382,11 @@ def generate_ja_oto(
                                 syllables_info,
                                 max_delta=1,
                             )
+                        if format_type in {"cvvc", "cv"} and filename_order_locked:
+                            if mapped_idx < expected_idx:
+                                mapped_idx = expected_idx
+                            elif mapped_idx > (expected_idx + 1):
+                                mapped_idx = expected_idx + 1
                         if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
                             log(f"🧭 {fname}: CV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
                     current_w_idx = mapped_idx

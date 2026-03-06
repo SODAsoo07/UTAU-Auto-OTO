@@ -168,6 +168,36 @@ DEFAULT_PARAMS = {
     'DIPHTHONG_VC_PRE_EXTEND': 1.2,
 }
 
+# 한국어 매핑 신뢰도 임계치 기본값(포맷별)
+# - CVVC: 현재 안정성 기준값 유지
+# - VCV: 점프 허용 전 신뢰도를 조금 더 엄격하게 본다
+# - CVC/CV_SIMPLE: 정보량이 상대적으로 단순해 과도한 저신뢰 판정을 완화
+# - VC_ONLY/VV_ONLY: CV 정렬 점프 로직 영향이 거의 없어 완화값 사용
+KR_MAPPING_CONF_THRESHOLD_BY_FORMAT = {
+    "cvvc": 0.60,
+    "vcv": 0.62,
+    "cvc": 0.58,
+    "cv_simple": 0.58,
+    "mono": 0.58,
+    "vc_only": 0.56,
+    "vv_only": 0.56,
+    "default": 0.60,
+}
+
+
+def _resolve_kr_mapping_conf_threshold(file_format, override_threshold=None):
+    if override_threshold is not None:
+        try:
+            return float(override_threshold)
+        except Exception:
+            pass
+    fmt = str(file_format or "").strip().lower()
+    base = KR_MAPPING_CONF_THRESHOLD_BY_FORMAT.get(
+        fmt,
+        KR_MAPPING_CONF_THRESHOLD_BY_FORMAT["default"],
+    )
+    return float(base)
+
 
 def normalize_key(name):
     base = os.path.splitext(name)[0]
@@ -2248,7 +2278,7 @@ def generate_oto(
     kr_mapping_min_vowel_phone_ratio=0.5,
     kr_mapping_debug_reason_logging=True,
     kr_anchor_profile_path="",
-    kr_mapping_confidence_threshold=0.60,
+    kr_mapping_confidence_threshold=None,
     kr_mapping_max_index_jump_default=1,
     kr_mapping_max_index_jump_high_conf=2,
     cleanup_timing_jsonl=True,
@@ -2921,6 +2951,10 @@ def generate_oto(
                 continue
             file_format = detect_alias_format(alias_names, custom_map=custom_map)
             log(f"처리: {fname}: 형식 감지 -> {file_format.upper()}")
+            file_mapping_conf_th = _resolve_kr_mapping_conf_threshold(
+                file_format,
+                override_threshold=kr_mapping_confidence_threshold,
+            )
             
             is_vc_only = (file_format == 'vc_only')
             is_vcv_file = (file_format == 'vcv')
@@ -3045,7 +3079,7 @@ def generate_oto(
                 used_words_based=used_words_based,
                 used_alias_based=used_alias_based,
             )
-            if kr_mapping_debug_reason_logging and mapping_confidence_base < float(kr_mapping_confidence_threshold):
+            if kr_mapping_debug_reason_logging and mapping_confidence_base < float(file_mapping_conf_th):
                 log(
                     f"🧭 {fname}: KR 매핑 신뢰도 낮음(conf={mapping_confidence_base:.2f}, "
                     f"margin={mapping_margin:+.1f}, reason={mapping_reason_code})"
@@ -3547,7 +3581,7 @@ def generate_oto(
                             mapping_confidence=row_mapping_confidence,
                             max_jump_default=kr_mapping_max_index_jump_default,
                             max_jump_high_conf=kr_mapping_max_index_jump_high_conf,
-                            high_conf_threshold=max(float(kr_mapping_confidence_threshold), 0.50),
+                            high_conf_threshold=max(float(file_mapping_conf_th), 0.50),
                             return_meta=True,
                         )
                         row_jump_blocked = int(resolve_meta.get("jump_blocked", 0) or 0)
@@ -3563,7 +3597,7 @@ def generate_oto(
                     target_onset, target_vowel, _target_coda = _split_kr_syllable_parts(target_clean)
                     allow_exact_vowel_fix = (
                         _should_allow_kr_exact_vowel_fix(file_format, forced_selected_idx)
-                        and float(row_mapping_confidence) >= float(kr_mapping_confidence_threshold)
+                        and float(row_mapping_confidence) >= float(file_mapping_conf_th)
                     )
                     if target_vowel and 0 <= selected_w_idx < len(romaji_syllables) and allow_exact_vowel_fix:
                         _curr_onset, curr_vowel, _curr_coda = _split_kr_syllable_parts(romaji_syllables[selected_w_idx])
@@ -3587,7 +3621,7 @@ def generate_oto(
                             if fixed_idx is not None and fixed_idx >= expected_cv_idx:
                                 max_forward = int(max(0, kr_mapping_max_index_jump_default))
                                 if (
-                                    float(row_mapping_confidence) >= max(float(kr_mapping_confidence_threshold), 0.50)
+                                    float(row_mapping_confidence) >= max(float(file_mapping_conf_th), 0.50)
                                     and float(resolve_meta.get("best_score", 0.0) or 0.0) >= 84.0
                                 ):
                                     max_forward = int(max(max_forward, kr_mapping_max_index_jump_high_conf))
