@@ -65,7 +65,7 @@ class TabBuildersMixin:
         steps = [
             ("1. Lab 생성", "WAV 파일에서 라벨(Lab) 파일을 생성합니다.", self._run_lab_gen),
             ("2. 사전(Dictionary) 생성", "Lab 기반으로 발음 사전 파일을 생성합니다.", self._run_dict_gen),
-            ("3. 음성 정렬 (MFA/SOFA)", "선택한 정렬 엔진으로 TextGrid를 생성합니다.", self._run_mfa),
+            ("3. 음성 정렬 (MFA/SOFA/WhisperX)", "선택한 정렬 엔진으로 TextGrid를 생성합니다.", self._run_mfa),
             ("4. OTO.ini 생성", "TextGrid 기반으로 OTO 파라미터를 계산해 저장합니다.", self._run_oto_gen),
         ]
 
@@ -105,22 +105,6 @@ class TabBuildersMixin:
                     command=self._save_config,
                 )
                 self.enable_ml_correction_checkbox.pack(anchor="w", pady=(5, 0))
-
-                if getattr(self, "pytorch_runtime_available", True):
-                    self.enable_pytorch_bridge_checkbox = ctk.CTkCheckBox(
-                        opt_frame,
-                        text="PyTorch 브리지 보정 적용",
-                        text_color="#FFAB91",
-                        variable=self.enable_pytorch_bridge_var,
-                        command=self._save_config,
-                    )
-                    self.enable_pytorch_bridge_checkbox.pack(anchor="w", pady=(5, 0))
-                else:
-                    ctk.CTkLabel(
-                        opt_frame,
-                        text="PyTorch 브리지 보정: 배포판에서 비활성화됨",
-                        text_color="#9E9E9E",
-                    ).pack(anchor="w", pady=(5, 0))
 
             ctk.CTkButton(frame, text="실행", width=80, command=cmd).pack(side="right", padx=10)
 

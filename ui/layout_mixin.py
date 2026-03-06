@@ -123,7 +123,7 @@ class LayoutMixin:
         ctk.CTkLabel(row_aligner, text="정렬 엔진:", width=120, anchor="w").pack(side="left")
         self.aligner_menu = ctk.CTkOptionMenu(
             row_aligner,
-            values=["MFA", "SOFA"],
+            values=["MFA", "SOFA", "WhisperX"],
             variable=self.aligner_var,
             width=200,
             command=lambda _v: self._save_config(),
@@ -131,7 +131,7 @@ class LayoutMixin:
         self.aligner_menu.pack(side="left", padx=(5, 5))
         ctk.CTkLabel(
             row_aligner,
-            text="(SOFA 선택 시 필요한 모듈들이 없다면 자동 설치됩니다.)",
+            text="(MFA/SOFA/WhisperX 중 하나를 선택해 TextGrid를 생성합니다.)",
             text_color="gray",
         ).pack(side="left", padx=10)
 

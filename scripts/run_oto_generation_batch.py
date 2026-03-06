@@ -173,7 +173,6 @@ def _run_one_case(
     generate_openutau = _to_bool(case.get("generate_openutau", defaults.get("generate_openutau", False)), False)
     gen_missing_vowels = _to_bool(case.get("gen_missing_vowels", defaults.get("gen_missing_vowels", False)), False)
     enable_ml_correction = _to_bool(case.get("enable_ml_correction", defaults.get("enable_ml_correction", True)), True)
-    enable_pytorch_bridge = _to_bool(case.get("enable_pytorch_bridge", defaults.get("enable_pytorch_bridge", False)), False)
     custom_phonemes_path = _resolve_path(config_dir, str(case.get("custom_phonemes_path", defaults.get("custom_phonemes_path", ""))).strip())
     alias_suffix = str(case.get("alias_suffix", defaults.get("alias_suffix", ""))).strip()
     alias_style = str(case.get("alias_style", defaults.get("alias_style", "original"))).strip().lower()
@@ -212,7 +211,6 @@ def _run_one_case(
                 generate_openutau=generate_openutau,
                 gen_missing_vowels=gen_missing_vowels,
                 enable_ml_correction=enable_ml_correction,
-                enable_pytorch_bridge=enable_pytorch_bridge,
                 fallback_format=auto_format or "cvvc",
                 custom_phonemes_path=custom_phonemes_path,
                 alias_suffix=alias_suffix,
@@ -229,7 +227,6 @@ def _run_one_case(
                 generate_openutau=generate_openutau,
                 gen_missing_vowels=gen_missing_vowels,
                 enable_ml_correction=enable_ml_correction,
-                enable_pytorch_bridge=enable_pytorch_bridge,
                 fallback_format=auto_format or "cvvc",
                 custom_phonemes_path=custom_phonemes_path,
                 alias_suffix=alias_suffix,

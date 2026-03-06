@@ -2269,7 +2269,6 @@ def generate_oto(
     generate_openutau=False,
     gen_missing_vowels=False,
     enable_ml_correction=True,
-    enable_pytorch_bridge=False,
     fallback_format='cvvc',
     custom_phonemes_path='',
     alias_suffix='',
@@ -3972,7 +3971,6 @@ def generate_oto(
                 custom_phonemes_path=custom_phonemes_path,
                 callback=log,
                 enabled=enable_ml_correction,
-                backend_preference="pytorch" if enable_pytorch_bridge else "",
                 format_override=auto_gen_format,
             )
             if ml_changed > 0:

@@ -8,7 +8,6 @@ import sys
 import datetime
 import logging
 import traceback
-import importlib.util
 
 
 def _suppress_windows_loader_popup():
@@ -107,14 +106,6 @@ LANGUAGE_OPTIONS = [
 ]
 
 
-def _is_pytorch_runtime_available() -> bool:
-    """PyTorch 런타임 사용 가능 여부를 확인합니다."""
-    try:
-        return importlib.util.find_spec("torch") is not None
-    except Exception:
-        return False
-
-
 class App(
     LayoutMixin,
     FileDialogMixin,
@@ -144,10 +135,6 @@ class App(
         self.gen_missing_vowels_var = ctk.BooleanVar(value=True)
         self.no_base_oto_var = ctk.BooleanVar(value=False)
         self.enable_ml_correction_var = ctk.BooleanVar(value=True)
-        self.enable_pytorch_bridge_var = ctk.BooleanVar(value=False)
-        self.pytorch_runtime_available = _is_pytorch_runtime_available()
-        if not self.pytorch_runtime_available:
-            self.enable_pytorch_bridge_var.set(False)
         self.ja_mapping_words_fallback_enabled_var = ctk.BooleanVar(value=True)
         self.ja_mapping_spn_ratio_threshold_var = ctk.DoubleVar(value=0.35)
         self.ja_mapping_min_vowel_phone_ratio_var = ctk.DoubleVar(value=0.5)
@@ -179,6 +166,14 @@ class App(
         self.sofa_ckpt_var = ctk.StringVar(value="")
         self.sofa_dict_var = ctk.StringVar(value="")
         self.sofa_python_var = ctk.StringVar(value=get_sofa_env_python())
+        # WhisperX 런타임 옵션(고급): UI에서 직접 노출하지 않아도 config.json으로 제어 가능
+        self.whisperx_profile_var = ctk.StringVar(value="balanced")
+        self.whisperx_device_var = ctk.StringVar(value="auto")
+        self.whisperx_compute_type_var = ctk.StringVar(value="int8")
+        self.whisperx_batch_size_var = ctk.IntVar(value=8)
+        self.whisperx_align_model_var = ctk.StringVar(value="")
+        self.whisperx_cleanup_intermediate_var = ctk.BooleanVar(value=True)
+        self.whisperx_save_debug_json_var = ctk.BooleanVar(value=False)
         # SOFA 런타임 옵션(고급): UI에서 직접 노출하지 않아도 config.json으로 제어 가능
         self.sofa_repo_dir_var = ctk.StringVar(value="")
         self.sofa_mode_var = ctk.StringVar(value="force")
@@ -200,8 +195,6 @@ class App(
         self.app_version = APP_VERSION
         self._build_ui()
         self._load_config()
-        if not self.pytorch_runtime_available:
-            self.enable_pytorch_bridge_var.set(False)
         self.protocol("WM_DELETE_WINDOW", self._on_close_request)
 
         logger.info(f"{APP_NAME} v{APP_VERSION} 시작")

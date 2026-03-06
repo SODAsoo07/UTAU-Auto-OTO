@@ -9,7 +9,7 @@ APP_DIR = os.path.abspath(os.path.dirname(__file__))
 FFMPEG_BIN = os.path.join(APP_DIR, "build_assets", "ffmpeg", "bin")
 RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "profiles"), "assets/profiles"),
-    (os.path.join(APP_DIR, "assets", "models"), "assets/models"),
+    (os.path.join(APP_DIR, "assets", "models", "oto_ml"), "assets/models/oto_ml"),
     (os.path.join(APP_DIR, "ml", "configs"), "ml/configs"),
     (os.path.join(APP_DIR, "config.json"), "."),
 ]
@@ -34,7 +34,18 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "torch",
+        "torchaudio",
+        "torchvision",
+        "core.oto_ml_pytorch",
+        "core.oto_torch_model",
+        "core.oto_torch_features",
+        "core.oto_torch_dataset",
+        "core.oto_torch_trainer",
+        "core.oto_torch_export",
+        "ml",
+    ],
     noarchive=False,
     optimize=0,
 )

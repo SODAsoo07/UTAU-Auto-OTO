@@ -6,7 +6,6 @@ defaults:
   generate_openutau: false
   gen_missing_vowels: false
   enable_ml_correction: true
-  enable_pytorch_bridge: false
   validation: true
   alias_suffix: ""
   custom_phonemes_path: ""

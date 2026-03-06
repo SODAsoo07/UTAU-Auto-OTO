@@ -18,14 +18,6 @@ from core.timing_anchor_runtime import AnchorTimingContext, apply_anchor_lock
 
 logger = logging.getLogger(__name__)
 
-PYTORCH_REASSIGN_MAX_MOVE_RATIO_DEFAULT = 0.08
-PYTORCH_REASSIGN_MAX_MOVE_RATIO_BY_LANGUAGE = {
-    "korean": 0.07,
-    "japanese": 0.08,
-}
-PYTORCH_REASSIGN_MAX_LINE_HOPS = 2
-PYTORCH_REASSIGN_MIN_CONF_GAIN = 0.12
-
 
 def _has_explicit_model_override(language: str) -> bool:
     lang = str(language).strip().lower()
@@ -52,18 +44,6 @@ def _installed_model_root_for_language(language: str) -> str:
     lang = str(language).strip().lower()
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_dir, "models_installed", "oto_ml", lang)
-
-
-def _pytorch_model_root_for_language(language: str) -> str:
-    lang = str(language).strip().lower()
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_dir, "assets", "models", "oto_ml_pytorch", lang)
-
-
-def _installed_pytorch_model_root_for_language(language: str) -> str:
-    lang = str(language).strip().lower()
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_dir, "models_installed", "oto_ml_pytorch", lang)
 
 
 def _resolve_lightgbm_model_dir(language: str, format_type: str) -> Optional[str]:
@@ -96,43 +76,7 @@ def _resolve_lightgbm_model_dir(language: str, format_type: str) -> Optional[str
     return None
 
 
-def _torch_task_name(language: str, format_type: str) -> Optional[str]:
-    lang = str(language or "").strip().lower()
-    fmt = str(format_type or "").strip().lower()
-    if lang == "japanese":
-        if fmt == "vcv":
-            return "bridge_vcv"
-        if fmt == "cvvc":
-            return "bridge_cvvc"
-    if lang == "korean":
-        if fmt == "cvvc":
-            return "bridge_cvvc"
-        if fmt == "cvc":
-            return "bridge_cvc"
-    return None
-
-
-def _resolve_pytorch_model_dir(language: str, format_type: str) -> Optional[str]:
-    task_name = _torch_task_name(language, format_type)
-    if not task_name:
-        return None
-    candidate_roots = (
-        _installed_pytorch_model_root_for_language(language),
-        _pytorch_model_root_for_language(language),
-    )
-    suffixes = ("v1", "smoke_v1")
-    for root in candidate_roots:
-        for suffix in suffixes:
-            candidate = os.path.join(root, task_name, suffix)
-            if os.path.isfile(os.path.join(candidate, "model_meta.json")):
-                return candidate
-    return None
-
-
-def _resolve_model_dir(language: str, format_type: str, backend_preference: str = "") -> Optional[str]:
-    backend = str(backend_preference or "").strip().lower()
-    if backend == "pytorch":
-        return _resolve_pytorch_model_dir(language, format_type) or _resolve_lightgbm_model_dir(language, format_type)
+def _resolve_model_dir(language: str, format_type: str) -> Optional[str]:
     return _resolve_lightgbm_model_dir(language, format_type)
 
 
@@ -411,124 +355,6 @@ def _to_float(value: object, default: float = 0.0) -> float:
         return float(default)
 
 
-def _to_int(value: object, default: int = 0) -> int:
-    try:
-        return int(float(value))
-    except Exception:
-        return int(default)
-
-
-def _is_truthy_num(value: object) -> bool:
-    return _to_float(value, 0.0) >= 0.5
-
-
-def _base_pre_abs(row: Dict[str, object]) -> float:
-    return _to_float(row.get("base_offset"), 0.0) + _to_float(row.get("base_pre"), 0.0)
-
-
-def _relative_move_limit_ms(row: Dict[str, object]) -> float:
-    # 이동 제한은 WAV 전체 길이에 대한 상대값으로 계산한다.
-    lang = str(row.get("language", "") or "").strip().lower()
-    ratio = float(PYTORCH_REASSIGN_MAX_MOVE_RATIO_BY_LANGUAGE.get(lang, PYTORCH_REASSIGN_MAX_MOVE_RATIO_DEFAULT))
-    wav_ms = max(1.0, _to_float(row.get("wav_duration_ms"), 0.0))
-    return wav_ms * ratio
-
-
-def _can_try_pytorch_reassign(row: Dict[str, object]) -> bool:
-    alias_type = str(row.get("alias_type", "") or "").strip().lower()
-    if alias_type not in {"cv", "cv_head", "vc", "vv", "vcv"}:
-        return False
-    conf = _to_float(row.get("mapping_confidence"), 1.0)
-    margin = _to_float(row.get("words_vs_alias_score_margin"), 0.0)
-    return (
-        conf < 0.72
-        or _is_truthy_num(row.get("used_nuclei_fallback"))
-        or margin < -0.05
-    )
-
-
-def _candidate_structurally_compatible(src: Dict[str, object], cand: Dict[str, object]) -> bool:
-    if str(src.get("alias_type", "") or "").strip().lower() != str(cand.get("alias_type", "") or "").strip().lower():
-        return False
-    src_group = str(src.get("alias_group", "") or "").strip().lower()
-    cand_group = str(cand.get("alias_group", "") or "").strip().lower()
-    if src_group and cand_group and src_group != cand_group:
-        return False
-    src_onset = str(src.get("onset_class", "") or "").strip().lower()
-    cand_onset = str(cand.get("onset_class", "") or "").strip().lower()
-    if src_onset and cand_onset and src_onset != cand_onset:
-        return False
-    src_coda = str(src.get("coda_type", "") or "").strip().lower()
-    cand_coda = str(cand.get("coda_type", "") or "").strip().lower()
-    if src_coda and cand_coda and src_coda != cand_coda:
-        return False
-    return True
-
-
-def _select_pytorch_reassign_candidate(row: Dict[str, object], same_wav_rows: List[Dict[str, object]]) -> Optional[Dict[str, object]]:
-    if not _can_try_pytorch_reassign(row):
-        return None
-    if not same_wav_rows:
-        return None
-
-    src_line = _to_int(row.get("line_index"), -1)
-    src_pre_abs = _base_pre_abs(row)
-    src_conf = _to_float(row.get("mapping_confidence"), 0.0)
-    src_margin = _to_float(row.get("words_vs_alias_score_margin"), 0.0)
-    max_move_ms = _relative_move_limit_ms(row)
-
-    best = None
-    best_score = float("-inf")
-
-    for cand in same_wav_rows:
-        cand_line = _to_int(cand.get("line_index"), -1)
-        if cand_line < 0 or cand_line == src_line:
-            continue
-        if abs(cand_line - src_line) > int(PYTORCH_REASSIGN_MAX_LINE_HOPS):
-            continue
-        if not _candidate_structurally_compatible(row, cand):
-            continue
-
-        cand_pre_abs = _base_pre_abs(cand)
-        move_ms = abs(cand_pre_abs - src_pre_abs)
-        if move_ms > max_move_ms:
-            continue
-
-        cand_conf = _to_float(cand.get("mapping_confidence"), 0.0)
-        conf_gain = cand_conf - src_conf
-        if conf_gain < float(PYTORCH_REASSIGN_MIN_CONF_GAIN):
-            continue
-
-        cand_margin = _to_float(cand.get("words_vs_alias_score_margin"), 0.0)
-        score = (conf_gain * 2.0) + ((cand_margin - src_margin) * 0.45) - (move_ms / max(1e-6, max_move_ms))
-        if _is_truthy_num(cand.get("used_nuclei_fallback")):
-            score -= 0.4
-        if _is_truthy_num(cand.get("used_alias_based_syllables")):
-            score -= 0.2
-
-        if score > best_score:
-            best_score = score
-            best = cand
-
-    if best_score < 0.15:
-        return None
-    return best
-
-
-def _passes_reassign_post_guard(src: Dict[str, object], offset: float, pre: float, cutoff: float) -> bool:
-    max_move_ms = _relative_move_limit_ms(src)
-    src_pre_abs = _base_pre_abs(src)
-    new_pre_abs = float(offset) + float(pre)
-    if abs(new_pre_abs - src_pre_abs) > max_move_ms:
-        return False
-    wav_ms = _to_float(src.get("wav_duration_ms"), 0.0)
-    if wav_ms > 0:
-        cutoff_abs = float(offset) + abs(float(cutoff))
-        if cutoff_abs > (wav_ms + 1.0):
-            return False
-    return True
-
-
 def _anchor_key_for_row(language: str, row_context: Dict[str, object]) -> str:
     alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
     lang = str(language or "").strip().lower()
@@ -642,9 +468,7 @@ def apply_oto_ml_to_oto_file(
     custom_phonemes_path: str = "",
     callback=None,
     enabled: bool = True,
-    backend_preference: str = "",
     format_override: Optional[str] = None,
-    enable_pytorch_reassign: bool = True,
 ) -> int:
     if not enabled:
         return 0
@@ -668,25 +492,19 @@ def apply_oto_ml_to_oto_file(
         "cutoff_clamped_count": 0,
         "vc_cutoff_leak_guard_count": 0,
     }
-    remapped = 0
-    remap_examples: List[str] = []
     raw_lines = []
     with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
         raw_lines = [line.rstrip("\n") for line in f]
 
     rows_by_index = {int(row["line_index"]): row for row in rows}
-    features_by_wav: Dict[str, List[Dict[str, object]]] = {}
-    for feat in feature_rows:
-        wav_key = str(feat.get("wav_norm", "") or feat.get("wav", "") or "").strip().lower()
-        features_by_wav.setdefault(wav_key, []).append(feat)
 
     for feat in feature_rows:
         format_type = _route_format_for_feature(language, feat, format_override=format_override)
         if not format_type:
             continue
-        cache_key = f"{backend_preference or 'default'}::{format_type}"
+        cache_key = format_type
         if cache_key not in bundle_cache:
-            model_dir = _resolve_model_dir(language, format_type, backend_preference=backend_preference)
+            model_dir = _resolve_model_dir(language, format_type)
             bundle_cache[cache_key] = load_oto_model_bundle(model_dir) if model_dir else None
             bundle = bundle_cache[cache_key]
             if bundle and model_dir and model_dir not in model_notice and callback:
@@ -699,36 +517,16 @@ def apply_oto_ml_to_oto_file(
         row = rows_by_index.get(line_index)
         if row is None:
             continue
-        infer_feat = feat
-        if enable_pytorch_reassign and getattr(bundle, "backend", "") == "pytorch":
-            wav_key = str(feat.get("wav_norm", "") or feat.get("wav", "") or "").strip().lower()
-            candidate = _select_pytorch_reassign_candidate(feat, features_by_wav.get(wav_key, []))
-            if candidate is not None:
-                infer_feat = candidate
         try:
             o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(
                 language,
-                infer_feat,
+                feat,
                 bundle,
                 anchor_stats=anchor_stats,
             )
-            if infer_feat is not feat and not _passes_reassign_post_guard(feat, o2, p2, ct2):
-                infer_feat = feat
-                o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(
-                    language,
-                    infer_feat,
-                    bundle,
-                    anchor_stats=anchor_stats,
-                )
         except Exception as e:
             logger.warning("OTO ML inference skipped for line %s: %s", line_index, e)
             continue
-        if infer_feat is not feat:
-            remapped += 1
-            if len(remap_examples) < 3:
-                remap_examples.append(
-                    f"line {line_index}: {feat.get('alias','')} -> line {int(infer_feat.get('line_index', -1))}"
-                )
         if (
             abs(o2 - float(row["offset"])) > 1e-6
             or abs(c2 - float(row["cons"])) > 1e-6
@@ -744,10 +542,6 @@ def apply_oto_ml_to_oto_file(
             for line in raw_lines:
                 f.write(line + "\n")
         _emit(callback, f"[OTO-ML] 수치 보정 적용: {changed} lines")
-        if remapped > 0:
-            _emit(callback, f"[OTO-ML] 제한 재매핑 적용: {remapped} lines (WAV 상대 이동 제한)")
-            if remap_examples:
-                _emit(callback, f"[OTO-ML] 재매핑 예시: {' | '.join(remap_examples)}")
     if int(anchor_stats.get("anchor_locked_count", 0)) > 0:
         _emit(
             callback,

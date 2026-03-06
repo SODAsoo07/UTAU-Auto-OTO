@@ -14,7 +14,7 @@ FFMPEG_DIR = os.path.join(BUILD_ASSET_DIR, "ffmpeg")
 FFMPEG_BIN_DIR = os.path.join(FFMPEG_DIR, "bin")
 FFMPEG_RELEASE_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 DEFAULT_APP_NAME = "UTAU_Auto_OTO"
-LITE_EXCLUDES = [
+EXCLUDED_MODULES = [
     "torch",
     "torchaudio",
     "torchvision",
@@ -28,7 +28,7 @@ LITE_EXCLUDES = [
 ]
 RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "profiles"), "assets/profiles"),
-    (os.path.join(APP_DIR, "assets", "models"), "assets/models"),
+    (os.path.join(APP_DIR, "assets", "models", "oto_ml"), "assets/models/oto_ml"),
     (os.path.join(APP_DIR, "ml", "configs"), "ml/configs"),
     (os.path.join(APP_DIR, "config.json"), "."),
 ]
@@ -86,11 +86,10 @@ def _parse_args():
         help="Acknowledge onefile runtime risks and allow --onefile build.",
     )
     parser.add_argument(
-        "--full",
-        action="store_true",
-        help="Include full ML runtime (PyTorch/training stack). Default is lite distribution.",
+        "--name",
+        default=DEFAULT_APP_NAME,
+        help="PyInstaller app name.",
     )
-    parser.add_argument("--name", default=DEFAULT_APP_NAME, help="PyInstaller app name.")
     return parser.parse_args()
 
 
@@ -104,7 +103,7 @@ def _iter_runtime_data_entries():
     return entries
 
 
-def _build_pyinstaller_args(app_name, ffmpeg_bin, onefile=False, full=False):
+def _build_pyinstaller_args(app_name, ffmpeg_bin, onefile=False):
     import customtkinter
 
     ctk_path = os.path.dirname(customtkinter.__file__)
@@ -122,9 +121,8 @@ def _build_pyinstaller_args(app_name, ffmpeg_bin, onefile=False, full=False):
     ]
     for src, dst in _iter_runtime_data_entries():
         args.append(f"--add-data={src};{dst}")
-    if not full:
-        for module_name in LITE_EXCLUDES:
-            args.append(f"--exclude-module={module_name}")
+    for module_name in EXCLUDED_MODULES:
+        args.append(f"--exclude-module={module_name}")
     return args
 
 
@@ -176,13 +174,11 @@ def main():
     import PyInstaller.__main__
 
     mode_text = "onefile" if args.onefile else "onedir"
-    variant_text = "full" if args.full else "lite"
-    print(f"🚀 [4/5] {args.name} 빌드 중... (mode={mode_text}, variant={variant_text})")
+    print(f"🚀 [4/5] {args.name} 빌드 중... (mode={mode_text}, variant=lightgbm-only)")
     pyinstaller_args = _build_pyinstaller_args(
         app_name=args.name,
         ffmpeg_bin=ffmpeg_bin,
         onefile=args.onefile,
-        full=args.full,
     )
     PyInstaller.__main__.run(pyinstaller_args)
 
@@ -194,8 +190,7 @@ def main():
         print("⚠ onefile 배포: 실행 경로/캐시 특성상 SOFA/모델 설치가 불안정할 수 있습니다.")
     else:
         print("ℹ onedir 배포는 시작 속도가 빠르며, 사용자용 배포에 권장됩니다.")
-    if not args.full:
-        print("ℹ lite 빌드: PyTorch/학습 스택이 제외되었습니다.")
+    print("ℹ 이 브랜치 빌드는 LightGBM-only이며 PyTorch 기능은 제외됩니다.")
 
 
 if __name__ == "__main__":

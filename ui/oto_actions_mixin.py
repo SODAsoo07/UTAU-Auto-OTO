@@ -29,10 +29,6 @@ class OtoActionsMixin:
                 gen_ou = self.openutau_var.get()
                 gen_missing = self.gen_missing_vowels_var.get()
                 enable_ml_correction = self.enable_ml_correction_var.get()
-                enable_pytorch_bridge = (
-                    self.enable_pytorch_bridge_var.get()
-                    and getattr(self, "pytorch_runtime_available", True)
-                )
                 auto_format = self.auto_format_var.get()
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
                 alias_suffix = self.alias_suffix_var.get().strip()
@@ -112,8 +108,7 @@ class OtoActionsMixin:
                     os.environ.pop("UTOA_KR_ANCHOR_PROFILE_PATH", None)
 
                 self._append_log(
-                    f"[OTO-ML] 실행 옵션: ml={'ON' if enable_ml_correction else 'OFF'}, "
-                    f"pytorch_bridge={'ON' if enable_pytorch_bridge else 'OFF'}"
+                    f"[OTO-ML] 실행 옵션: ml={'ON' if enable_ml_correction else 'OFF'}"
                 )
                 if self.no_base_oto_var.get():
                     self._append_log("설정: '기본 OTO 없이 생성' 사용 중입니다.")
@@ -129,7 +124,6 @@ class OtoActionsMixin:
                         generate_openutau=gen_ou,
                         gen_missing_vowels=gen_missing,
                         enable_ml_correction=enable_ml_correction,
-                        enable_pytorch_bridge=enable_pytorch_bridge,
                         alias_style=ja_alias_style,
                         ja_mapping_words_fallback_enabled=bool(ja_words_fallback),
                         ja_mapping_spn_ratio_threshold=float(ja_spn_threshold),
@@ -149,7 +143,6 @@ class OtoActionsMixin:
                         gen_ou,
                         gen_missing,
                         enable_ml_correction=enable_ml_correction,
-                        enable_pytorch_bridge=enable_pytorch_bridge,
                         auto_format=auto_format,
                         custom_phonemes_path=custom_phonemes_path,
                         alias_suffix=alias_suffix,

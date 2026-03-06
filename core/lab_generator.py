@@ -1,9 +1,9 @@
 ﻿"""
-Lab/・ｬ・・Dictionary) 甯護攵 ・尖徐 ・晧┳ ・ｨ・・
-- ・罹ｧ溢梵 -> 﨑懋ｸ ・嶹・
-- ・罹ｧ溢梵 -> IPA ・嶹・
-- Lab 甯護攵 ・晧┳
-- MFA・ｩ ・ｬ・・甯護攵 ・晧┳
+Lab/사전(Dictionary) 파일 자동 생성 모듈.
+- 로마자 -> 한글 변환
+- 로마자 -> IPA 변환
+- Lab 파일 생성
+- MFA용 사전 파일 생성
 """
 
 import os
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 _KR_FILENAME_SPLIT_RE = re.compile(r"[^0-9A-Za-z가-힣]+")
 
 # ==============================================================================
-# ・罹ｧ溢梵 <-> 﨑懋ｸ ・尖ｪｨ ・､﨑・奛護擽・・
+# 로마자 <-> 한글 자모 매핑 테이블
 # ==============================================================================
 
 CHOSUNG_LIST_KR = ['ㄱ','ㄲ','ㄴ','ㄷ','ㄸ','ㄹ','ㅁ','ㅂ','ㅃ','ㅅ','ㅆ','ㅇ','ㅈ','ㅉ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ']
@@ -44,7 +44,7 @@ FINAL_MAP = {
     'm': 16, 'b': 17, 'p': 17, 'bs': 18, 's': 19, 'ss': 20, 'ng': 21, 'j': 22, 'ch': 23,
 }
 
-# ・罹ｧ溢梵 -> IPA
+# 로마자 -> IPA
 KO_IPA_MAP = {
     'g': 'k', 'n': 'n', 'd': 't', 'r': 'ɾ', 'l': 'ɭ', 'm': 'm', 'b': 'p', 's': 's',
     'j': 'tɕ', 'h': 'h',
@@ -58,7 +58,7 @@ KO_IPA_MAP = {
     'yeo': 'j ʌ', 'wae': 'w ɛ', 'oe': 'w e', 'vi': 'v i'
 }
 
-# 﨑懋ｸ ・尖ｪｨ -> ・罹ｧ溢梵
+# 한글 자모 -> 로마자
 CHOSUNG_LIST_ROMAN = ['g','kk','n','d','tt','r','m','b','pp','s','ss','','j','jj','ch','k','t','p','h']
 JUNGSUNG_LIST_ROMAN = ['a','ae','ya','yae','eo','e','yeo','ye','o','wa','wae','oe','yo','u','wo','we','wi','yu','eu','ui','i']
 JONGSUNG_LIST_ROMAN = ['','k','kk','gs','n','nj','nh','d','l','lg','lm','lb','ls','lt','lp','lh','m','b','bs','s','ss','ng','j','ch','k','t','p','h']
@@ -80,10 +80,10 @@ def compose_hangul(initial, vowel, final=''):
 
 def parse_romaji_syllable(text):
     """로마자 음절 토큰을 가능한 경우 한글 음절로 변환합니다."""
-    # 0. 'Long' ・瀧ｯｸ・ｬ ・懋ｱｰ
+    # 0. 'Long' 접미사 제거
     clean_text = re.sub(r'long$', '', text, flags=re.IGNORECASE)
     
-    # 1. ・卓┳(Vowel) ・ｾ・ｰ (・ｴ ・懍・・・・・､・ｭ﨑們流 ・菩峡・・擽 ・､・ｭ ・ｩ・)
+    # 1. 중성(Vowel) 찾기 (긴 토큰 우선 매칭)
     vowels = sorted(VOWEL_MAP.keys(), key=len, reverse=True)
     vowel = ""
     v_idx = -1
@@ -137,7 +137,7 @@ def _split_kr_lab_content_tokens(content):
         return []
 
     joined = "".join(ws_tokens)
-    if re.fullmatch(r"[A-Za-z0-9'`窶兩-]+", joined):
+    if re.fullmatch(r"[A-Za-z0-9'`~-]+", joined):
         return _split_kr_filename_tokens(joined)
     if len(ws_tokens) == 1 and re.fullmatch(r'[가-힣]+', ws_tokens[0]):
         return list(ws_tokens[0])
@@ -220,13 +220,13 @@ def get_ipa_from_roman(token):
 
 
 # ==============================================================================
-# ・､・､奛 尞ｰ 甯護恭 ・寀ｸ・ｬ寀ｰ
+# 커스텀 음소 매핑 유틸리티
 # ==============================================================================
 
 def load_custom_phonemes(file_path):
     """
-    ・､・､奛 ・護・ ・､﨑・甯護攵・・・ｽ・ｴ・・・菩・・壱ｦｬ・・・倆劍﨑ｩ・壱共.
-    嶸菩享: ・川牟=・嶹們牟 (・・ ・｣・=ed)
+    커스텀 음소 매핑 파일을 읽어서 딕셔너리로 반환합니다.
+    형식: 원어=변환어 (예: 엣지=ed)
     """
     custom_map = {}
     if not file_path or not os.path.exists(file_path):
@@ -248,23 +248,23 @@ def load_custom_phonemes(file_path):
 
 def apply_custom_phonemes(text_list, custom_map):
     """
-    奛作侃孖ｸ ・ｬ・､孖ｸ・・・､・､奛 ・護・ ・､﨑卓揆 ・・圸﨑ｩ・壱共.
+    텍스트 토큰 리스트에 커스텀 음소 매핑을 적용합니다.
     """
     if not custom_map:
         return text_list
         
     result = []
     for token in text_list:
-        # ・ｨ・ｴ ・・ｲｴ・ ・､・ｭ・俯株 ・ｽ・ｰ ・ｰ・ ・倆劍
+        # 단어 전체가 정확히 매칭될 때 우선 치환
         if token in custom_map:
             result.append(custom_map[token])
         else:
-            # ・・・・ｸ・川龍 ・､・ｭ ・罹巡 (・・･ ・ｴ ・・ｶ奓ｰ)
-            # 﨑懋ｵｭ・ｴ "・・離・" ・呷捩 ・呷牟・壱株 ・ｸ・川龍 﨑ｴ・ｰ・・・・物
+            # 부분 문자열 매칭 (긴 키 우선)
+            # 한국어 붙임 표기(예: 아엣지)도 치환되도록 처리
             mod_token = token
             for k in sorted(custom_map.keys(), key=len, reverse=True):
                 if k in mod_token:
-                    # ・・亨 ・ｬ・・梵 ・ｽ・・葺・ｬ ・・ｦｬ・俾ｲ・﨑ｨ
+                    # 임시 공백을 넣어 분리 가능한 형태로 변환
                     mod_token = mod_token.replace(k, f" {custom_map[k]} ")
             
             if mod_token != token:
@@ -276,21 +276,21 @@ def apply_custom_phonemes(text_list, custom_map):
 
 
 # ==============================================================================
-# Lab 甯護攵 ・晧┳
+# Lab 파일 생성
 # ==============================================================================
 
 def generate_labs(wav_dir, reclist_file='', convert_to_hangul=True, custom_phonemes_path='', callback=None):
     """
-    WAV 甯護攵・ｴ ・壱株 尞ｴ・罷･ｼ ・ｰ・們愍・・Lab 甯護攵・・・晧┳﨑ｩ・壱共.
+    WAV 파일 목록을 기반으로 Lab 파일을 생성합니다.
     
     Args:
-        wav_dir: WAV 甯護攵・ｴ ・壱株 尞ｴ・・・ｽ・・
-        reclist_file: ・ｹ・・・ｬ・､孖ｸ 甯護攵 ・ｽ・・(・・牟・溢愍・ｴ WAV 甯護攵・・・ｬ・ｩ)
-        convert_to_hangul: ・罹ｧ溢梵・ｼ 﨑懋ｸ・・・嶹倆腹・ ・ｬ・
-        callback: ・・哩 ・・勦 ・罹ｰｱ 﨑ｨ・・(message: str) -> None
+        wav_dir: WAV 파일이 있는 폴더 경로
+        reclist_file: 리클리스트 파일 경로(없으면 wav_dir 스캔)
+        convert_to_hangul: 로마자 토큰을 한글 음절로 변환할지 여부
+        callback: 진행 로그 콜백 함수(message: str) -> None
     
     Returns:
-        (・ｱ・ｵ ・懍・, ・・ｲｴ ・懍・, ・尖洳 ・ｩ・・
+        (생성 성공 개수, 전체 개수, 오류 리스트)
     """
     def log(msg):
         logger.info(msg)
@@ -361,20 +361,20 @@ def _parse_filename(filename, convert_to_hangul):
     return parts
 
 # ==============================================================================
-# ・ｬ・・Dictionary) ・晧┳
+# 사전(Dictionary) 생성
 # ==============================================================================
 
 def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', callback=None):
     """
-    Lab 甯護攵・罹ｶ奓ｰ MFA・ｩ ・ｬ・・甯護攵・・・尖徐 ・晧┳﨑ｩ・壱共.
+    Lab 파일을 바탕으로 MFA용 사전 파일을 생성합니다.
     
     Args:
-        target_folder: Lab 甯護攵・ｴ ・壱株 尞ｴ・・
-        dict_save_path: ・ｬ・・甯護攵 ・・･ ・ｽ・・
-        callback: ・・哩 ・・勦 ・罹ｰｱ 﨑ｨ・・
+        target_folder: Lab 파일 폴더 경로
+        dict_save_path: 사전 파일 저장 경로
+        callback: 진행 로그 콜백 함수
     
     Returns:
-        (・ｱ・ｵ 甯護攵 ・・ ・ｱ・・﨑ｭ・ｩ ・・ ・尖洳 ・ｩ・・
+        (처리된 Lab 파일 수, 생성된 사전 항목 수, 오류 리스트)
     """
     def log(msg):
         logger.info(msg)
@@ -434,12 +434,12 @@ def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', 
                     dictionary_entries[char] = ipa_str
                     full_sentence_ipa.append(ipa_str)
 
-            # ・､・､奛 ・ｵ・・・壱株 ・ｰ嶸ｸ・､・・・餓亨・們乱 ・ｱ・・(MFA・ ・ｸ・晨腹 ・・・壱巡・・・菩・
+            # 커스텀 매핑으로 지정된 항목을 사전에 보강한다.
             for raw_char, mapped_pho in custom_map.items():
                 if raw_char not in dictionary_entries:
-                    # ・､﨑瀧頗 ・護・(mapped_pho)・ 﨑懋ｵｭ・ｴ ・罹ｧ溢梵・ｼ・ｴ ipa・・・嶹・ ・・笈・ｴ ・ｸ・・・・ｬ・ｩ
+                    # 매핑값(mapped_pho)을 로마자 발음으로 간주해 IPA를 추정한다.
                     c_ipa = " ".join(get_ipa_from_roman(mapped_pho))
-                    # ・嶹・・ｰ・ｼ・ ・・ｱｰ・・sil・ｴ・ｴ ・､﨑卓牟 ・尖ｳｸ・・・ｸ・・・・護・・・(・・牟 ・ｱ ・・・
+                    # 변환 실패 또는 sil만 나오는 경우 원문을 그대로 사용한다.
                     if not c_ipa or c_ipa == 'sil':
                         c_ipa = mapped_pho
                     dictionary_entries[raw_char] = c_ipa

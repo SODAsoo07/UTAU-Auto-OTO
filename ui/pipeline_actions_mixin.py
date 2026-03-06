@@ -28,6 +28,7 @@ from core.sofa_runner import (
     is_sofa_ready,
     run_sofa_align,
 )
+from core.whisperx_runner import get_default_whisperx_align_model, run_whisperx_align
 
 
 class PipelineActionsMixin:
@@ -104,14 +105,51 @@ class PipelineActionsMixin:
             "low_confidence_max_files": self._read_runtime_var("sofa_low_confidence_max_files_var", 0),
         }
 
+    def _get_whisperx_runtime_kwargs(self, language):
+        lang = (language or "").lower()
+        profile = str(self._read_runtime_var("whisperx_profile_var", "balanced") or "balanced").strip().lower()
+        if profile not in {"low_load", "balanced", "high_accuracy"}:
+            profile = "balanced"
+
+        align_model_name = str(self._read_runtime_var("whisperx_align_model_var", "") or "").strip()
+        if not align_model_name:
+            align_model_name = get_default_whisperx_align_model(lang, profile)
+
+        device = str(self._read_runtime_var("whisperx_device_var", "auto") or "auto").strip().lower()
+        if device not in {"auto", "cpu", "cuda"}:
+            device = "auto"
+
+        compute_type = str(self._read_runtime_var("whisperx_compute_type_var", "int8") or "int8").strip()
+        try:
+            batch_size = int(self._read_runtime_var("whisperx_batch_size_var", 8))
+        except Exception:
+            batch_size = 8
+        batch_size = max(1, batch_size)
+
+        return {
+            "profile": profile,
+            "align_model_name": align_model_name,
+            "device": device,
+            "compute_type": compute_type,
+            "batch_size": batch_size,
+            "cleanup_intermediate": self._to_bool(
+                self._read_runtime_var("whisperx_cleanup_intermediate_var", True),
+                default=True,
+            ),
+            "save_debug_json": self._to_bool(
+                self._read_runtime_var("whisperx_save_debug_json_var", False),
+                default=False,
+            ),
+        }
+
     def _download_sofa_model_for_current_language(self):
-        """嶸・椪 ・ｸ・ｴ ・ｰ・ SOFA ・ｨ・ｸ・・GitHub ・ｴ・ｬ・溢乱・・・尖徐 ・､・ｴ・罹糖﨑ｩ・壱共."""
+        """현재 언어 기준 SOFA 모델을 GitHub 릴리즈에서 자동 다운로드합니다."""
         def task():
             self._set_running(True)
             try:
                 lang = self._get_language()
-                self._set_status("SOFA ・ｨ・ｸ ・､・ｴ・罹糖 ・・..")
-                self._append_log(f"筮・SOFA ・ｨ・ｸ ・尖徐 ・､・ｴ・罹糖 ・懍梠 ({'・ｼ・ｸ・ｴ' if lang == 'japanese' else '﨑懋ｵｭ・ｴ'})")
+                self._set_status("SOFA 모델 다운로드 중...")
+                self._append_log(f"⬇ SOFA 모델 자동 다운로드 시작 ({'일본어' if lang == 'japanese' else '한국어'})")
                 ok, model_path, err = download_default_sofa_model(
                     language=lang,
                     target_root=get_default_sofa_model_root(),
@@ -119,31 +157,31 @@ class PipelineActionsMixin:
                 )
                 if ok and model_path:
                     self._after_safe(lambda p=model_path: self.sofa_ckpt_var.set(p))
-                    self._append_log(f"笨・SOFA ・ｨ・ｸ ・､・ｴ・罹糖 ・・｣・ {model_path}")
+                    self._append_log(f"✅ SOFA 모델 다운로드 완료: {model_path}")
                     self._set_status("✅ SOFA 모델 다운로드 완료")
                 else:
-                    self._append_log(f"笶・SOFA ・ｨ・ｸ ・､・ｴ・罹糖 ・､甯ｨ: {err}")
-                    self._set_status("笶・SOFA ・ｨ・ｸ ・､・ｴ・罹糖 ・､甯ｨ")
+                    self._append_log(f"❌ SOFA 모델 다운로드 실패: {err}")
+                    self._set_status("❌ SOFA 모델 다운로드 실패")
             except Exception as e:
-                self._append_log(f"笶・SOFA ・ｨ・ｸ ・尖徐 ・､・ｴ・罹糖 ・・・溢匣: {e}")
-                self._set_status("笶・SOFA ・ｨ・ｸ ・､・ｴ・罹糖 ・､甯ｨ")
+                self._append_log(f"❌ SOFA 모델 자동 다운로드 중 예외: {e}")
+                self._set_status("❌ SOFA 모델 다운로드 실패")
             finally:
                 self._set_running(False)
         self._run_in_thread(task)
 
     def _ensure_sofa_model_ready(self, language):
-        """SOFA ckpt ・ｽ・罹･ｼ 嶹簿ｳｴ﨑ｩ・壱共. ・・愍・ｴ ・ｬ・ｩ・・尞ｴ・・夋川ラ 弡・・尖徐 ・､・ｴ・罹糖・ｼ ・罹巡﨑ｩ・壱共."""
+        """SOFA ckpt 경로를 확보합니다. 없으면 사용자 폴더 탐색 후 자동 다운로드를 시도합니다."""
         ckpt = (self.sofa_ckpt_var.get() or "").strip()
         if ckpt and os.path.exists(ckpt):
             return ckpt
 
         found = find_sofa_ckpt(language, search_root=get_default_sofa_model_root())
         if found and os.path.exists(found):
-            self._append_log(f"邃ｹ ・ｬ・ｩ・・尞ｴ・肥乱・・SOFA ・ｨ・ｸ ・尖徐 ・川ｧ: {found}")
+            self._append_log(f"ℹ 사용자 폴더에서 SOFA 모델 자동 감지: {found}")
             self._after_safe(lambda p=found: self.sofa_ckpt_var.set(p))
             return found
 
-        self._append_log("邃ｹ SOFA ・ｨ・ｸ・ｴ ・・簿据・ ・喜符 ・尖徐 ・､・ｴ・罹糖・ｼ ・罹巡﨑ｩ・壱共...")
+        self._append_log("ℹ SOFA 모델이 지정되지 않아 자동 다운로드를 시도합니다...")
         ok, model_path, err = download_default_sofa_model(
             language=language,
             target_root=get_default_sofa_model_root(),
@@ -151,7 +189,7 @@ class PipelineActionsMixin:
         )
         if ok and model_path and os.path.exists(model_path):
             self._after_safe(lambda p=model_path: self.sofa_ckpt_var.set(p))
-            self._append_log(f"笨・SOFA ・ｨ・ｸ ・尖徐 ・・・・・｣・ {model_path}")
+            self._append_log(f"✅ SOFA 모델 자동 준비 완료: {model_path}")
             return model_path
 
         release_link = get_sofa_release_link(language)
@@ -171,7 +209,7 @@ class PipelineActionsMixin:
         return ""
 
     def _notify_mfa_failure_suggest_sofa(self, language, err_msg=""):
-        """MFA ・､甯ｨ ・・SOFA ・・ｴ ・､嵂餓揆 ・壱ざ﨑ｩ・壱共."""
+        """MFA 실패 시 SOFA 정렬로 전환하는 방법을 안내합니다."""
         model_root = get_default_sofa_model_root()
         release_link = get_sofa_release_link(language)
         self._append_log("⚠ MFA 정렬에 실패했습니다. SOFA 정렬로 전환할 수 있습니다.")
@@ -191,10 +229,10 @@ class PipelineActionsMixin:
         ))
 
     def _run_mfa_setup(self):
-        """GUI ・溢乱・・MFA 尞ｬ奓ｰ・・嶹俾ｲｽ・・・尖徐 ・､・倆鮒・壱共."""
+        """GUI 안에서 MFA 포터블 환경을 자동 설치합니다."""
         def task():
             self._set_running(True)
-            self._set_status("筮・MFA ・尖徐 ・､・・・・.. (10~20・・・護囈)")
+            self._set_status("⬇ MFA 자동 설치 중... (10~20분 소요)")
             try:
                 import shutil
                 portable_env_dir = os.path.join(APP_DIR, '.env')
@@ -203,14 +241,14 @@ class PipelineActionsMixin:
                 env_dir = portable_env_dir
                 if any(ord(ch) > 127 for ch in portable_env_dir):
                     env_dir = fallback_env_dir
-                    self._append_log("笞 ・ｱ ・ｽ・懍乱 ・БSCII ・ｸ・専ｰ ・溢牟 MFA 嶹俾ｲｽ・・・ｵ・ｩ 尞ｴ・肥乱 ・､・倆鮒・壱共.")
-                    self._append_log(f"   ・・ｴ ・､・・・ｽ・・ {env_dir}")
+                    self._append_log("⚠ 앱 경로에 비ASCII 문자가 있어 MFA 환경을 공용 폴더에 설치합니다.")
+                    self._append_log(f"   대체 설치 경로: {env_dir}")
                 mfa_exe = os.path.join(env_dir, 'Scripts', 'mfa.exe')
                 installer = os.path.join(APP_DIR, 'Miniconda3-latest-Windows-x86_64.exe')
 
-                # ・ｴ・ｸ ・､・・嶹菩攤
+                # 이미 설치 확인
                 if os.path.exists(mfa_exe):
-                    self._append_log("笨・MFA・ ・ｴ・ｸ ・､・俯据・ｴ ・溢慣・壱共!")
+                    self._append_log("✅ MFA가 이미 설치되어 있습니다!")
                     self.mfa_path = mfa_exe
                     self._update_mfa_status(True)
                     self._set_status("✅ MFA 준비 완료")
@@ -219,9 +257,9 @@ class PipelineActionsMixin:
                 system_conda = shutil.which('conda')
 
                 if system_conda:
-                    self._append_log(f"剥 ・懍侃奛懍乱 ・､・俯頗 Conda ・懋ｲｬ: {system_conda}")
-                    self._append_log("   Miniconda ・､・ｴ・罹糖・ｼ ・ｴ・壱峅・ ・ｰ・ｴ Conda・ｼ 嶹懍圸﨑們流 嶹俾ｲｽ・・・ｬ・ｱ﨑ｩ・壱共.")
-                    self._append_log("[1/2] 肌 MFA ・・圸 ・懍ｻｬ 嶹俾ｲｽ ・晧┳ ・・・､・・・・.. (5~10・・ ・ｩ・餓擽 增ｽ・壱共)")
+                    self._append_log(f"🔍 시스템에 설치된 Conda 발견: {system_conda}")
+                    self._append_log("   Miniconda 다운로드를 건너뛰고 기존 Conda를 활용해 환경을 구성합니다.")
+                    self._append_log("[1/2] 🔧 MFA 전용 로컬 환경 생성 및 설치 중... (5~10분)")
                     
                     cmd = [system_conda, 'create', '-y', '-p', env_dir, '-c', 'conda-forge', '--override-channels', 'montreal-forced-aligner', 'colorama']
                     process = sp.Popen(
@@ -239,25 +277,25 @@ class PipelineActionsMixin:
                     process.wait()
                     
                     if process.returncode != 0:
-                        self._append_log("笶・MFA ・､・・・､甯ｨ")
+                        self._append_log("❌ MFA 설치 실패")
                         return
 
-                    self._append_log("[2/2] 逃 ・緋ｰ ・們｡ｴ・ｱ ・ｨ・・・､・・・・..")
-                    # conda run・・・ｬ・ｩ﨑們流 﨑ｴ・ｹ 嶹俾ｲｽ ・ｴ・川・ pip ・､嵂・・ｴ・･
+                    self._append_log("[2/2] 📦 추가 의존성 모듈 설치 중...")
+                    # conda run으로 해당 환경 내에서 pip 실행을 보장한다.
                     sp.run([system_conda, 'run', '-p', env_dir, 'pip', 'install', 'eunjeon', 'jamo', 'textgrid'], capture_output=True)
 
-                    self._append_log("[Patch] ・壱巡・ｰ・ｩ 﨑懋ｵｭ・ｴ 甯護・(eunjeon) ・ｰ・・・俯ｦｬ ・・..")
+                    self._append_log("[Patch] 윈도우용 한국어 파서(eunjeon) 연동 처리 중...")
                     patch_mfa_korean_support(mfa_exe, callback=self._append_log)
 
-                    self._append_log("笨・MFA ・懍侃奛・・ｬ・ｱ ・・｣・")
+                    self._append_log("✅ MFA 시스템 구성 완료!")
                 
                 else:
-                    self._append_log("剥 ・懍侃奛・Conda・ｼ ・ｾ・・・・・・慣・壱共. ・川ｲｴ Miniconda 尞ｬ奓ｰ・・嶹俾ｲｽ・・・ｬ・倣鮒・壱共.")
+                    self._append_log("🔍 시스템 Conda를 찾지 못했습니다. Miniconda 포터블 환경을 구축합니다.")
                     conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
-                    # Step 1: Miniconda ・､・ｴ・罹糖
+                    # Step 1: Miniconda 다운로드
                     if not os.path.exists(conda_exe):
                         if not os.path.exists(installer):
-                            self._append_log("[1/3] 踏 Miniconda ・､・ｴ・罹糖 ・・.. (・ｽ 80MB)")
+                            self._append_log("[1/3] ⬇ Miniconda 다운로드 중... (약 80MB)")
                             url = 'https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe'
                             ps_cmd = (
                                 f'[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; '
@@ -265,22 +303,22 @@ class PipelineActionsMixin:
                             )
                             result = sp.run(['powershell', '-Command', ps_cmd], capture_output=True, text=True)
                             if result.returncode != 0:
-                                self._append_log(f"笶・・､・ｴ・罹糖 ・､甯ｨ: {result.stderr}")
+                                self._append_log(f"❌ 다운로드 실패: {result.stderr}")
                                 return
-                        self._append_log("笨・Miniconda ・､・ｴ・罹糖 ・・｣・")
+                        self._append_log("✅ Miniconda 다운로드 완료!")
 
-                        # Step 2: 尞ｬ奓ｰ・・・､・・
-                        self._append_log("[2/3] 逃 Miniconda 尞ｬ奓ｰ・・・､・・・・.. (2~5・・")
-                        self._append_log(f"   ・､・・・ｽ・・ {env_dir}")
-                        # Miniconda(NSIS)・・/D= ・ｽ・罹･ｼ raw command-line・川・ 甯護恭﨑罹共.
-                        # subprocess(list)・・・ｵ・ｱ ・ｽ・罹･ｼ ・尖徐 ・ｸ・ｩ﨑俯ｩｴ・・/D・ ・ｴ・罹摺 ・・・溢牟,
-                        # ・・・command-line ・ｸ・川龍・・・､嵂駕復・､.
+                        # Step 2: 포터블 설치
+                        self._append_log("[2/3] 📦 Miniconda 포터블 설치 중... (2~5분)")
+                        self._append_log(f"   설치 경로: {env_dir}")
+                        # Miniconda(NSIS)는 /D= 경로를 raw command-line에서 파싱한다.
+                        # subprocess(list)는 공백 경로를 자동 인용하면서 /D가 무시될 수 있어,
+                        # 직접 command-line 문자열로 실행한다.
                         if os.path.isdir(env_dir) and not os.path.exists(conda_exe):
                             try:
                                 shutil.rmtree(env_dir)
-                                self._append_log("   ・ｴ・・・､甯ｨ 彧肥・.env 尞ｴ・・・・・簿ｦｬ﨑俾ｳ ・ｬ・罹巡﨑ｩ・壱共.")
+                                self._append_log("   이전 실패 흔적(.env 폴더)을 정리하고 재시도합니다.")
                             except Exception as cleanup_error:
-                                self._append_log(f"笶・・ｰ・ｴ .env 尞ｴ・・・簿ｦｬ ・､甯ｨ: {cleanup_error}")
+                                self._append_log(f"❌ 기존 .env 폴더 정리 실패: {cleanup_error}")
                                 return
 
                         install_cmd = (
@@ -292,7 +330,7 @@ class PipelineActionsMixin:
                             capture_output=True, text=True, timeout=1200
                         )
                         if result.returncode != 0 or not os.path.exists(conda_exe):
-                            # /D ・ｽ・懋ｰ ・ｴ・罹頗 ・ｽ・ｰ ・ｰ・ｸ ・ｽ・懍乱 ・､・俯据・壱株・ ・ｴ・・夋川ｧ
+                            # /D 경로가 무시된 경우 기본 경로 설치를 보정 탐지한다.
                             user_home = os.path.expanduser('~')
                             fallback_conda_candidates = [
                                 os.path.join(user_home, 'miniconda3', 'Scripts', 'conda.exe'),
@@ -305,20 +343,20 @@ class PipelineActionsMixin:
                                 conda_exe = detected_conda
                                 env_dir = os.path.dirname(os.path.dirname(conda_exe))
                                 mfa_exe = os.path.join(env_dir, 'Scripts', 'mfa.exe')
-                                self._append_log("笞 ・・・・ｽ・懍乱・・Conda・ｼ ・ｾ・ ・ｻ嵂溢ｧ・・・ｰ・ｸ ・､・・・ｽ・罹･ｼ ・川ｧ嵂溢慣・壱共.")
-                                self._append_log(f"   ・川ｧ・・Conda: {conda_exe}")
+                                self._append_log("⚠ 지정 경로에서 Conda를 찾지 못했지만 기본 설치 경로를 감지했습니다.")
+                                self._append_log(f"   감지된 Conda: {conda_exe}")
                             else:
-                                self._append_log(f"笶・Miniconda ・､・・・､甯ｨ (code={result.returncode})")
+                                self._append_log(f"❌ Miniconda 설치 실패 (code={result.returncode})")
                                 if result.stdout and result.stdout.strip():
                                     self._append_log(f"   stdout: {result.stdout.strip()[:500]}")
                                 if result.stderr and result.stderr.strip():
                                     self._append_log(f"   stderr: {result.stderr.strip()[:500]}")
                                 return
-                        self._append_log("笨・Miniconda ・､・・・・｣・")
+                        self._append_log("✅ Miniconda 설치 완료!")
 
-                    # Step 3: MFA ・､・・
-                    self._append_log("[3/3] 肌 MFA ・､・・・・.. (5~10・・ ・ｩ・餓擽 增ｽ・壱共)")
-                    # HTTP 000 ・尖洳・ｼ ・賀ｸｰ ・・紛 --override-channels ・・conda-forge ・・・菩・・ｬ・ｩ
+                    # Step 3: MFA 설치
+                    self._append_log("[3/3] 🔧 MFA 설치 중... (5~10분)")
+                    # HTTP 000 에러를 줄이기 위해 conda-forge 채널만 강제로 사용한다.
                     process = sp.Popen(
                         [conda_exe, 'install', '-y', '-c', 'conda-forge', '--override-channels', 'montreal-forced-aligner', 'colorama'],
                         stdout=sp.PIPE,
@@ -333,19 +371,19 @@ class PipelineActionsMixin:
                             self._append_log(stripped)
                     process.wait()
                     if process.returncode != 0:
-                        self._append_log("笶・MFA ・､・・・､甯ｨ")
+                        self._append_log("❌ MFA 설치 실패")
                         return
 
-                    self._append_log("笨・Conda 甯ｨ墲､・ ・､・・・・｣・")
+                    self._append_log("✅ Conda 패키지 설치 완료!")
                     
-                    self._append_log("[3.5/4] 逃 ・緋ｰ ・們｡ｴ・ｱ ・ｨ・・・､・・・・..")
+                    self._append_log("[3.5/4] 📦 추가 의존성 모듈 설치 중...")
                     sp.run([conda_exe, 'run', '-p', env_dir, 'pip', 'install', 'eunjeon', 'jamo', 'textgrid'], capture_output=True)
 
-                    self._append_log("[Patch] ・壱巡・ｰ・ｩ 﨑懋ｵｭ・ｴ 甯護・(eunjeon) ・ｰ・・・俯ｦｬ ・・..")
+                    self._append_log("[Patch] 윈도우용 한국어 파서(eunjeon) 연동 처리 중...")
                     patch_mfa_korean_support(mfa_exe, callback=self._append_log)
 
-                # Step 4: 﨑懋ｵｭ・ｴ ・ｨ・ｸ
-                self._append_log("[・溢ｧ・云 倹 﨑懋ｵｭ・ｴ ・醐箕 ・ｨ・ｸ ・､・ｴ・罹糖 ・・.. (1~2・・")
+                # Step 4: 한국어 모델 다운로드
+                self._append_log("[추가 단계] ⬇ 한국어 음향 모델 다운로드 중... (1~2분)")
                 process = sp.Popen(
                     [mfa_exe, 'model', 'download', 'acoustic', 'korean_mfa', '--ignore_cache'],
                     stdout=sp.PIPE,
@@ -360,16 +398,16 @@ class PipelineActionsMixin:
                         self._append_log(stripped)
                 process.wait()
 
-                # ・､・倆血・ｼ ・簿ｦｬ
+                # 임시 설치 파일 정리
                 if os.path.exists(installer):
                     os.remove(installer)
 
                 self.mfa_path = mfa_exe
                 self._update_mfa_status(True)
                 self._append_log("")
-                self._append_log("脂 MFA ・､・俾ｰ ・ｨ・・・・｣誤据・溢慣・壱共!")
-                self._append_log("   ・ｴ・・'3・鞘Ε MFA ・護┳ ・簿ｬ' ・・款・・・ｬ・ｩ﨑 ・・・溢慣・壱共.")
-                self._set_status("笨・MFA ・､・・・・｣・")
+                self._append_log("✅ MFA 설치가 완료되었습니다!")
+                self._append_log("   이제 '3단계 MFA 음성 정렬' 버튼으로 정렬을 진행할 수 있습니다.")
+                self._set_status("✅ MFA 설치 완료")
 
             except Exception as e:
                 self._handle_error("MFA 설치", e)
@@ -388,14 +426,14 @@ class PipelineActionsMixin:
         return ok
 
     def _run_sofa_setup(self):
-        """SOFA ・・圸 ・・・劍・ｽ・ｼ ・們｡ｴ・ｱ・・・尖徐 ・､・倆鮒・壱共."""
+        """SOFA 지원 환경을 자동 설치/점검합니다."""
         def task():
             self._set_running(True)
-            self._set_status("筮・SOFA ・尖徐 ・､・・・・.. (・・・・・護囈)")
+            self._set_status("⬇ SOFA 설치 준비 중... (수 분 소요)")
             try:
                 lang = self._get_language()
                 repo_dir = self._get_sofa_repo_dir_for_language(lang)
-                self._append_log("肌 SOFA ・尖徐 ・､・俯･ｼ ・懍梠﨑ｩ・壱共.")
+                self._append_log("🔧 SOFA 지원 환경 점검을 시작합니다.")
                 self._append_log(f"ℹ SOFA repo 경로: {repo_dir}")
                 ok, err = ensure_sofa_support(
                     mfa_path=self.mfa_path or "",
@@ -410,19 +448,19 @@ class PipelineActionsMixin:
                     self._append_log("✅ SOFA 설치 완료")
                     self._set_status("✅ SOFA 준비 완료")
                 else:
-                    self._append_log(f"笶・SOFA ・､・・・､甯ｨ: {err}")
+                    self._append_log(f"❌ SOFA 설치 실패: {err}")
                     self._update_sofa_status(False)
-                    self._set_status("笶・SOFA ・､・・・､甯ｨ")
+                    self._set_status("❌ SOFA 설치 실패")
             except Exception as e:
-                self._append_log(f"笶・SOFA ・､・・・・・､・・ {e}")
+                self._append_log(f"❌ SOFA 설치 중 예외: {e}")
                 self._update_sofa_status(False)
-                self._set_status("笶・SOFA ・､・・・､甯ｨ")
+                self._set_status("❌ SOFA 설치 실패")
             finally:
                 self._set_running(False)
         self._run_in_thread(task)
 
     def _update_mfa_status(self, installed):
-        """MFA ・・・ UI・ｼ ・・魂・ｴ孖ｸ﨑ｩ・壱共."""
+        """MFA 설치 상태를 UI에 반영합니다."""
         def _do():
             if installed:
                 self.mfa_status_label.configure(text="✅ MFA 설치됨", text_color="#66BB6A")
@@ -447,16 +485,16 @@ class PipelineActionsMixin:
                 self.sofa_install_btn.configure(text="⬇ SOFA 자동 설치", state="normal", fg_color="#42A5F5")
         self._after_safe(_do)
 
-    # 笏笏 ・罹ｳ・・､嵂・笏笏
+    # --------------------------------------------------------------------------
 
     def _run_lab_gen(self):
         def task():
             self._set_running(True)
-            self._set_status("1・鞘Ε Lab 甯護攵 ・晧┳ ・・..")
+            self._set_status("1단계 - Lab 파일 생성 중...")
             try:
                 wav_dir = self.wav_entry.get()
                 if not wav_dir:
-                    self._append_log("笶・WAV 尞ｴ・・・ｽ・罹･ｼ ・・･﨑ｴ ・ｼ・ｸ・・")
+                    self._append_log("❌ WAV 경로를 먼저 지정해 주세요.")
                     return
 
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
@@ -467,10 +505,10 @@ class PipelineActionsMixin:
                     count, total, errors = generate_labs(wav_dir, custom_phonemes_path=custom_phonemes_path, callback=self._append_log)
                 if errors:
                     for e in errors:
-                        self._append_log(f"  笞・・{e}")
-                self._set_status(f"笨・Lab ・晧┳ ・・｣・({count}/{total})")
+                        self._append_log(f"  ⚠ {e}")
+                self._set_status(f"✅ Lab 생성 완료 ({count}/{total})")
             except Exception as e:
-                self._handle_error("Lab ・晧┳", e)
+                self._handle_error("Lab 생성", e)
             finally:
                 self._set_running(False)
         self._run_in_thread(task)
@@ -478,11 +516,11 @@ class PipelineActionsMixin:
     def _run_dict_gen(self):
         def task():
             self._set_running(True)
-            self._set_status("2・鞘Ε ・ｬ・・甯護攵 ・晧┳ ・・..")
+            self._set_status("2단계 - 사전 파일 생성 중...")
             try:
                 wav_dir = self.wav_entry.get()
                 if not wav_dir:
-                    self._append_log("笶・WAV 尞ｴ・・・ｽ・罹･ｼ ・・･﨑ｴ ・ｼ・ｸ・・")
+                    self._append_log("❌ WAV 경로를 먼저 지정해 주세요.")
                     return
 
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
@@ -500,11 +538,11 @@ class PipelineActionsMixin:
                     count, entries, errors = generate_dictionary(wav_dir, dict_path, custom_phonemes_path=custom_phonemes_path, callback=self._append_log)
                 if errors:
                     for e in errors:
-                        self._append_log(f"  笞・・{e}")
-                self._append_log(f"祷 ・ｬ・・・・･ ・ｽ・・ {dict_path}")
-                self._set_status(f"笨・・ｬ・・・晧┳ ・・｣・({entries}・・﨑ｭ・ｩ)")
+                        self._append_log(f"  ⚠ {e}")
+                self._append_log(f"📝 사전 저장 경로: {dict_path}")
+                self._set_status(f"✅ 사전 생성 완료 ({entries}개 항목)")
             except Exception as e:
-                self._handle_error("・ｬ・・・晧┳", e)
+                self._handle_error("사전 생성", e)
             finally:
                 self._set_running(False)
         self._run_in_thread(task)
@@ -512,7 +550,7 @@ class PipelineActionsMixin:
     def _run_profile_finetune(self):
         def task():
             self._set_running(True)
-            self._set_status("ｧｩ 嵓・｡懦血・ｼ ・ｸ・ｸ・ｰ・・・・哩 ・・..")
+            self._set_status("⚙ 프로파일 미세 조정 중...")
             try:
                 auto_oto = self.tune_auto_oto_var.get().strip()
                 manual_oto = self.tune_manual_oto_var.get().strip()
@@ -521,10 +559,10 @@ class PipelineActionsMixin:
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
 
                 if not auto_oto or not os.path.exists(auto_oto):
-                    self._append_log("笶・・尖徐 OTO ・・･ 甯護攵 ・ｽ・懋ｰ ・・牟・一ｱｰ・・甯護攵・ｴ ・・慣・壱共.")
+                    self._append_log("❌ 자동 생성 OTO 파일 경로가 올바르지 않습니다.")
                     return
                 if not manual_oto or not os.path.exists(manual_oto):
-                    self._append_log("笶・・俯徐 OTO ・ｸ・ｰ 甯護攵 ・ｽ・懋ｰ ・・牟・一ｱｰ・・甯護攵・ｴ ・・慣・壱共.")
+                    self._append_log("❌ 수동 보정 OTO 파일 경로가 올바르지 않습니다.")
                     return
 
                 if not profile_out:
@@ -539,21 +577,21 @@ class PipelineActionsMixin:
                     apply_target = auto_oto
                     self.tune_apply_target_var.set(apply_target)
                 if not os.path.exists(apply_target):
-                    self._append_log(f"笶・・・圸 ・・・OTO 甯護攵・・・ｾ・・・・・・慣・壱共: {apply_target}")
+                    self._append_log(f"❌ 적용 대상 OTO 파일이 존재하지 않습니다: {apply_target}")
                     return
 
                 lang = self._get_language()
-                self._append_log(f"ｧｪ ・ｸ・ｸ・ｰ・・﨑呷慣 ・懍梠 ({'・ｼ・ｸ・ｴ' if lang == 'japanese' else '﨑懋ｵｭ・ｴ'})")
-                self._append_log(f"   ・尖徐 OTO: {auto_oto}")
-                self._append_log(f"   ・俯徐 OTO: {manual_oto}")
+                self._append_log(f"📝 프로파일 학습 시작 ({'일본어' if lang == 'japanese' else '한국어'})")
+                self._append_log(f"   자동 OTO: {auto_oto}")
+                self._append_log(f"   수동 OTO: {manual_oto}")
 
                 if lang == "japanese":
                     profile = train_ja_autotune_profile(auto_oto, manual_oto, custom_phonemes_path=custom_phonemes_path)
                     if not profile:
-                        self._append_log("笞・・﨑呷慣 ・・･﨑・・､・ｭ ・倆伯・ｴ ・・ｱ﨑ｩ・壱共. (・懍・ 8・・・ｴ・・・護棗)")
+                        self._append_log("⚠ 학습 가능한 매칭 데이터가 부족합니다. (최소 8개 이상 권장)")
                         return
                     if not save_ja_autotune_profile(profile_out, profile):
-                        self._append_log(f"笶・嵓・｡懦血・ｼ ・・･ ・､甯ｨ: {profile_out}")
+                        self._append_log(f"❌ 프로파일 저장 실패: {profile_out}")
                         return
                     changed = apply_ja_autotune_profile_to_oto(
                         apply_target, profile, custom_phonemes_path=custom_phonemes_path
@@ -561,10 +599,10 @@ class PipelineActionsMixin:
                 else:
                     profile = train_kr_autotune_profile(auto_oto, manual_oto, custom_phonemes_path=custom_phonemes_path)
                     if not profile:
-                        self._append_log("笞・・﨑呷慣 ・・･﨑・・､・ｭ ・倆伯・ｴ ・・ｱ﨑ｩ・壱共. (・懍・ 8・・・ｴ・・・護棗)")
+                        self._append_log("⚠ 학습 가능한 매칭 데이터가 부족합니다. (최소 8개 이상 권장)")
                         return
                     if not save_kr_autotune_profile(profile_out, profile):
-                        self._append_log(f"笶・嵓・｡懦血・ｼ ・・･ ・､甯ｨ: {profile_out}")
+                        self._append_log(f"❌ 프로파일 저장 실패: {profile_out}")
                         return
                     changed = apply_kr_autotune_profile_to_oto(
                         apply_target, profile, custom_phonemes_path=custom_phonemes_path
@@ -572,10 +610,10 @@ class PipelineActionsMixin:
 
                 pairs = int(profile.get("matched_pairs", 0))
                 buckets = len((profile.get("buckets") or {}))
-                self._append_log(f"笨・嵓・｡懦血・ｼ ・・･ ・・｣・ {profile_out}")
-                self._append_log(f"笨・﨑呷慣 ・ｰ・ｼ: matched_pairs={pairs}, buckets={buckets}")
-                self._append_log(f"笨・・・圸 ・・｣・ {changed} lines adjusted ({apply_target})")
-                self._set_status(f"笨・・ｸ・ｸ・ｰ・・・・｣・({changed} lines)")
+                self._append_log(f"✅ 프로파일 저장 완료: {profile_out}")
+                self._append_log(f"✅ 학습 통계: matched_pairs={pairs}, buckets={buckets}")
+                self._append_log(f"✅ 적용 완료: {changed} lines adjusted ({apply_target})")
+                self._set_status(f"✅ 미세 조정 완료 ({changed} lines)")
             except Exception as e:
                 self._handle_error("프로파일 기반 미세 조정", e)
             finally:
@@ -588,10 +626,10 @@ class PipelineActionsMixin:
             self._set_running(True)
             try:
                 # Step 1: Lab
-                self._set_status("1/4 - Lab 甯護攵 ・晧┳ ・・..")
+                self._set_status("1/4 - Lab 파일 생성 중...")
                 wav_dir = self.wav_entry.get()
                 if not wav_dir:
-                    self._append_log("笶・WAV 尞ｴ・・・ｽ・罹･ｼ ・・･﨑ｴ ・ｼ・ｸ・・")
+                    self._append_log("❌ WAV 경로를 먼저 지정해 주세요.")
                     return
 
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
@@ -603,7 +641,7 @@ class PipelineActionsMixin:
                     generate_labs(wav_dir, custom_phonemes_path=custom_phonemes_path, callback=self._append_log)
 
                 # Step 2: Dictionary
-                self._set_status("2/4 - ・ｬ・・甯護攵 ・晧┳ ・・..")
+                self._set_status("2/4 - 사전 파일 생성 중...")
                 dict_filename = "japanese_dict.txt" if lang == 'japanese' else "korean_dict.txt"
                 dict_path = os.path.join(wav_dir, dict_filename)
                 if lang == 'japanese':
@@ -648,6 +686,23 @@ class PipelineActionsMixin:
                             callback=self._append_log,
                             **sofa_kwargs,
                         )
+                elif align_engine == "WhisperX":
+                    self._set_status("3/4 - WhisperX 음성 정렬 중...")
+                    whisperx_kwargs = self._get_whisperx_runtime_kwargs(lang)
+                    whisperx_kwargs["dictionary_path"] = dict_path
+                    self._append_log(
+                        "ℹ WhisperX 실행 옵션: "
+                        f"profile={whisperx_kwargs.get('profile')}, "
+                        f"device={whisperx_kwargs.get('device')}, "
+                        f"align_model={whisperx_kwargs.get('align_model_name') or 'auto'}"
+                    )
+                    align_ok, align_err = run_whisperx_align(
+                        wav_folder=wav_dir,
+                        output_folder=output_dir,
+                        language=lang,
+                        callback=self._append_log,
+                        **whisperx_kwargs,
+                    )
                 else:
                     if self.mfa_path:
                         self._set_status("3/4 - MFA 음성 정렬 중...")
@@ -679,19 +734,15 @@ class PipelineActionsMixin:
                     self._append_log("⚠ 정렬 실패 상태로 다음 단계를 진행합니다.")
 
                 # Step 4: OTO
-                self._set_status("4/4 - OTO.ini ・晧┳ ・・..")
+                self._set_status("4/4 - OTO.ini 생성 중...")
                 tpl_path = "" if self.no_base_oto_var.get() else self.tpl_entry.get()
                 out_path = self.out_entry.get()
-                if out_path: # tpl_path・・・ｴ・・﨑・・・ ・・鋸
+                if out_path:
                     tg_folder = os.path.join(wav_dir, "textgrids")
                     params = self._get_params()
                     gen_ou = self.openutau_var.get()
                     gen_missing = self.gen_missing_vowels_var.get()
                     enable_ml_correction = self.enable_ml_correction_var.get()
-                    enable_pytorch_bridge = (
-                        self.enable_pytorch_bridge_var.get()
-                        and getattr(self, "pytorch_runtime_available", True)
-                    )
                     auto_format = self.auto_format_var.get()
                     custom_phonemes_path = self.custom_phoneme_var.get().strip()
                     alias_suffix = self.alias_suffix_var.get().strip()
@@ -701,21 +752,19 @@ class PipelineActionsMixin:
                     ja_min_vowel_ratio = self.ja_mapping_min_vowel_phone_ratio_var.get() if hasattr(self, "ja_mapping_min_vowel_phone_ratio_var") else 0.5
                     ja_debug_reason = self.ja_mapping_debug_reason_logging_var.get() if hasattr(self, "ja_mapping_debug_reason_logging_var") else True
                     self._append_log(
-                        f"[OTO-ML] ・ｰ夋・・・ｵ・・ ml={'ON' if enable_ml_correction else 'OFF'}, "
-                        f"pytorch_bridge={'ON' if enable_pytorch_bridge else 'OFF'}"
+                        f"[OTO-ML] 설정: ml={'ON' if enable_ml_correction else 'OFF'}"
                     )
                     if self.no_base_oto_var.get():
-                        self._append_log("邃ｹ '・・ｴ・､ OTO ・・搆' ・夋・ 奛懦伯・ｿ ・・擽 OpenUtau 嶸ｸ嶹・・尖徐 ・川攵・ｬ・ｴ・､ ・晧┳ ・ｨ・罹｡・・､嵂駕鮒・壱共.")
+                        self._append_log("ℹ '베이스 OTO 없이 생성'이 활성화되어 OpenUtau 스타일로 생성합니다.")
 
                     if lang == 'japanese':
-                        self._append_log(f"邃ｹ ・ｼ・ｸ・ｴ ・川攵・ｬ・ｴ・､ 嶸菩享: {self.ja_alias_style_var.get()}")
+                        self._append_log(f"ℹ 일본어 별칭 스타일: {self.ja_alias_style_var.get()}")
                         generate_ja_oto(
                             tg_folder, tpl_path, out_path,
                             params=None,
                             generate_openutau=gen_ou,
                             gen_missing_vowels=gen_missing,
                             enable_ml_correction=enable_ml_correction,
-                            enable_pytorch_bridge=enable_pytorch_bridge,
                             alias_style=ja_alias_style,
                             ja_mapping_words_fallback_enabled=bool(ja_words_fallback),
                             ja_mapping_spn_ratio_threshold=float(ja_spn_threshold),
@@ -733,7 +782,6 @@ class PipelineActionsMixin:
                             gen_ou,
                             gen_missing,
                             enable_ml_correction=enable_ml_correction,
-                            enable_pytorch_bridge=enable_pytorch_bridge,
                             auto_format=auto_format,
                             custom_phonemes_path=custom_phonemes_path,
                             alias_suffix=alias_suffix,
@@ -741,15 +789,15 @@ class PipelineActionsMixin:
                         )
                     self._run_auto_validation(wav_dir, tg_folder, out_path)
                 else:
-                    self._append_log("笞・・・罹･ ・ｽ・懋ｰ ・・牟・溢牟 OTO ・晧┳・・・ｴ・壱怐・壱共.")
+                    self._append_log("⚠ 출력 경로가 없어 OTO 생성을 건너뜁니다.")
 
-                self._set_status("脂 ・・ｲｴ 甯護擽嵓・攵・ｸ ・・｣・")
+                self._set_status("✅ 전체 파이프라인 완료")
                 self._append_log("\n" + "=" * 50)
-                self._append_log("脂 ・ｨ・ ・卓羅・ｴ ・・｣誤据・溢慣・壱共!")
+                self._append_log("✅ 모든 작업이 정상적으로 완료되었습니다!")
                 self._append_log("=" * 50)
 
             except Exception as e:
-                self._handle_error("・・ｲｴ 甯護擽嵓・攵・ｸ", e)
+                self._handle_error("전체 파이프라인", e)
             finally:
                 self._set_running(False)
         self._run_in_thread(task)
