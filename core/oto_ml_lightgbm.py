@@ -107,6 +107,9 @@ def train_lightgbm_bundle(
     require_train_keep: bool = False,
     min_mapping_confidence: float = 0.0,
     exclude_nuclei_fallback: bool = False,
+    use_pseudo_labels: bool = True,
+    pseudo_weight_high: float = 0.7,
+    pseudo_weight_mid: float = 0.4,
 ) -> Dict[str, Any]:
     _require_training_stack()
     if not dataset_csv or not os.path.exists(dataset_csv):
@@ -133,6 +136,29 @@ def train_lightgbm_bundle(
         df = df[pd.to_numeric(df["mapping_confidence"], errors="coerce").fillna(0.0) >= float(min_mapping_confidence)]
     if exclude_nuclei_fallback and "used_nuclei_fallback" in df.columns:
         df = df[pd.to_numeric(df["used_nuclei_fallback"], errors="coerce").fillna(0).astype(int) <= 0]
+
+    # Pseudo label handling: keep compatibility when columns are absent.
+    if "label_source" in df.columns:
+        label_series = df["label_source"].astype(str).str.strip().str.lower()
+    else:
+        label_series = pd.Series(["manual"] * len(df), index=df.index, dtype="string")
+
+    if "sample_weight" in df.columns:
+        sample_weight = pd.to_numeric(df["sample_weight"], errors="coerce").fillna(1.0).astype(float)
+    else:
+        sample_weight = pd.Series([1.0] * len(df), index=df.index, dtype=float)
+
+    if use_pseudo_labels:
+        sample_weight.loc[label_series == "pseudo_high"] = float(pseudo_weight_high)
+        sample_weight.loc[label_series == "pseudo_mid"] = float(pseudo_weight_mid)
+        sample_weight.loc[label_series == "pseudo_low"] = 0.0
+    else:
+        sample_weight.loc[label_series.str.startswith("pseudo")] = 0.0
+
+    df = df.copy()
+    df["_train_sample_weight"] = sample_weight
+    df = df[pd.to_numeric(df["_train_sample_weight"], errors="coerce").fillna(0.0) > 0.0]
+
     if len(df) < 8:
         raise RuntimeError("Filtered dataset is too small for training.")
 
@@ -143,6 +169,8 @@ def train_lightgbm_bundle(
     train_idx, valid_idx = _split_train_valid(df, group_column)
     X_train = frame.iloc[train_idx]
     X_valid = frame.iloc[valid_idx]
+    w_train = pd.to_numeric(df.iloc[train_idx]["_train_sample_weight"], errors="coerce").fillna(1.0)
+    w_valid = pd.to_numeric(df.iloc[valid_idx]["_train_sample_weight"], errors="coerce").fillna(1.0)
 
     out_metrics = {}
     os.makedirs(out_dir, exist_ok=True)
@@ -152,8 +180,20 @@ def train_lightgbm_bundle(
         y_valid = pd.to_numeric(df.iloc[valid_idx][target], errors="coerce").fillna(0.0)
         y_train = _clip_target_series(language, target, y_train)
         y_valid = _clip_target_series(language, target, y_valid)
-        dtrain = lgb.Dataset(X_train, label=y_train, categorical_feature=categorical_features, free_raw_data=False)
-        dvalid = lgb.Dataset(X_valid, label=y_valid, categorical_feature=categorical_features, free_raw_data=False)
+        dtrain = lgb.Dataset(
+            X_train,
+            label=y_train,
+            weight=w_train,
+            categorical_feature=categorical_features,
+            free_raw_data=False,
+        )
+        dvalid = lgb.Dataset(
+            X_valid,
+            label=y_valid,
+            weight=w_valid,
+            categorical_feature=categorical_features,
+            free_raw_data=False,
+        )
         booster = lgb.train(
             dict(DEFAULT_LGB_PARAMS),
             dtrain,
@@ -191,6 +231,15 @@ def train_lightgbm_bundle(
             "require_train_keep": bool(require_train_keep),
             "min_mapping_confidence": float(min_mapping_confidence),
             "exclude_nuclei_fallback": bool(exclude_nuclei_fallback),
+            "use_pseudo_labels": bool(use_pseudo_labels),
+            "pseudo_weight_high": float(pseudo_weight_high),
+            "pseudo_weight_mid": float(pseudo_weight_mid),
+        },
+        "weight_summary": {
+            "min": float(pd.to_numeric(df["_train_sample_weight"], errors="coerce").fillna(0.0).min()) if len(df) else 0.0,
+            "max": float(pd.to_numeric(df["_train_sample_weight"], errors="coerce").fillna(0.0).max()) if len(df) else 0.0,
+            "mean": float(pd.to_numeric(df["_train_sample_weight"], errors="coerce").fillna(0.0).mean()) if len(df) else 0.0,
+            "pseudo_rows": int(label_series.loc[df.index].str.startswith("pseudo").sum()) if len(df) else 0,
         },
     }
     with open(os.path.join(out_dir, "model_meta.json"), "w", encoding="utf-8") as f:

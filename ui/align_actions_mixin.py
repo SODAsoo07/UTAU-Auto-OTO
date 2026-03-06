@@ -1,7 +1,8 @@
 ﻿import os
 
 from core.mfa_runner import check_mfa_model, download_mfa_model, run_mfa_align
-from core.sofa_runner import run_sofa_align
+from core.sofa_runner import get_default_sofa_repo_dir, run_sofa_align
+from core.whisperx_runner import run_whisperx_align
 
 
 class AlignActionsMixin:
@@ -19,6 +20,28 @@ class AlignActionsMixin:
                 if self.aligner_var.get() == "SOFA":
                     ckpt = self._ensure_sofa_model_ready(lang)
                     sdic = self.sofa_dict_var.get().strip() or dict_path
+                    runtime_getter = getattr(self, "_get_sofa_runtime_kwargs", None)
+                    if callable(runtime_getter):
+                        sofa_kwargs = runtime_getter(lang)
+                    else:
+                        sofa_kwargs = {
+                            "sofa_repo_dir": (
+                                get_default_sofa_repo_dir("utau_kr_v1")
+                                if lang == "korean"
+                                else get_default_sofa_repo_dir()
+                            ),
+                            "mode": "force",
+                            "g2p": "Dictionary",
+                            "ap_detector": "LoudnessSpectralcentroidAPDetector",
+                            "ap_detector_config": "",
+                            "save_confidence": lang == "korean",
+                            "out_formats": "TextGrid",
+                            "extra_infer_args": "",
+                            "two_pass_retry": lang == "korean",
+                            "two_pass_retry_mode": "match",
+                            "confidence_threshold": 0.55,
+                            "low_confidence_max_files": 0,
+                        }
                     if not self.sofa_dict_var.get().strip():
                         self._after_safe(lambda p=sdic: self.sofa_dict_var.set(p))
                         self._append_log(f"ℹ SOFA 사전이 비어 있어 현재 생성 사전을 사용합니다: {sdic}")
@@ -29,6 +52,12 @@ class AlignActionsMixin:
 
                     self._append_log("🔀 정렬 엔진: SOFA")
                     self._append_log(f"ℹ SOFA 전용 Python: {self.sofa_python_var.get().strip()}")
+                    self._append_log(
+                        "ℹ SOFA 실행 옵션: "
+                        f"repo={sofa_kwargs.get('sofa_repo_dir')}, "
+                        f"mode={sofa_kwargs.get('mode')}, "
+                        f"2-pass={'ON' if sofa_kwargs.get('two_pass_retry') else 'OFF'}"
+                    )
                     success, err = run_sofa_align(
                         wav_folder=wav_dir,
                         output_folder=output_dir,
@@ -37,12 +66,47 @@ class AlignActionsMixin:
                         mfa_path=self.mfa_path or "",
                         sofa_python=self.sofa_python_var.get().strip(),
                         callback=self._append_log,
+                        **sofa_kwargs,
                     )
                     if success:
                         self._set_status("✅ SOFA 정렬 완료")
                     else:
                         self._append_log(f"❌ SOFA 실패: {err}")
                         self._set_status("❌ SOFA 실패")
+                elif self.aligner_var.get() == "WhisperX":
+                    runtime_getter = getattr(self, "_get_whisperx_runtime_kwargs", None)
+                    if callable(runtime_getter):
+                        whisperx_kwargs = runtime_getter(lang)
+                    else:
+                        whisperx_kwargs = {
+                            "profile": "balanced",
+                            "align_model_name": "",
+                            "device": "auto",
+                            "compute_type": "int8",
+                            "batch_size": 8,
+                            "cleanup_intermediate": True,
+                            "save_debug_json": False,
+                        }
+                    whisperx_kwargs["dictionary_path"] = dict_path
+                    self._append_log("🔀 정렬 엔진: WhisperX")
+                    self._append_log(
+                        "ℹ WhisperX 실행 옵션: "
+                        f"profile={whisperx_kwargs.get('profile')}, "
+                        f"device={whisperx_kwargs.get('device')}, "
+                        f"align_model={whisperx_kwargs.get('align_model_name') or 'auto'}"
+                    )
+                    success, err = run_whisperx_align(
+                        wav_folder=wav_dir,
+                        output_folder=output_dir,
+                        language=lang,
+                        callback=self._append_log,
+                        **whisperx_kwargs,
+                    )
+                    if success:
+                        self._set_status("✅ WhisperX 정렬 완료")
+                    else:
+                        self._append_log(f"❌ WhisperX 실패: {err}")
+                        self._set_status("❌ WhisperX 실패")
                 else:
                     self._append_log("🔀 정렬 엔진: MFA(권장)")
                     if not self.mfa_path:
@@ -56,6 +120,12 @@ class AlignActionsMixin:
                     if not has_model:
                         download_mfa_model(self.mfa_path, language=lang, callback=self._append_log)
 
+                    mfa_profile = (
+                        self._get_mfa_align_profile_code()
+                        if hasattr(self, "_get_mfa_align_profile_code")
+                        else "accurate"
+                    )
+                    self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
                     success, err = run_mfa_align(
                         self.mfa_path,
                         wav_dir,
@@ -63,6 +133,7 @@ class AlignActionsMixin:
                         output_dir,
                         language=lang,
                         callback=self._append_log,
+                        align_profile=mfa_profile,
                     )
                     if success:
                         self._set_status("✅ MFA 정렬 완료")

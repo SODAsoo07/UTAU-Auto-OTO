@@ -68,10 +68,6 @@ def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
             from core.oto_ml_lightgbm import load_lightgbm_bundle
 
             payload = load_lightgbm_bundle(model_dir, meta=meta, schema=schema)
-        elif backend == "pytorch":
-            from core.oto_ml_pytorch import load_pytorch_bundle
-
-            payload = load_pytorch_bundle(model_dir, meta=meta, schema=schema)
         else:
             logger.warning("Unsupported OTO ML backend: %s", backend)
             return None
@@ -94,10 +90,6 @@ def predict_oto_deltas(bundle: OtoModelBundle, feature_row: Dict[str, Any]) -> O
         from core.oto_ml_lightgbm import predict_lightgbm_deltas
 
         deltas = predict_lightgbm_deltas(bundle.payload, feature_row, meta=bundle.meta, schema=bundle.feature_schema)
-    elif bundle.backend == "pytorch":
-        from core.oto_ml_pytorch import predict_pytorch_deltas
-
-        deltas = predict_pytorch_deltas(bundle.payload, feature_row, meta=bundle.meta, schema=bundle.feature_schema)
     else:
         raise RuntimeError(f"Unsupported OTO ML backend: {bundle.backend}")
     return OtoDeltaResult(

@@ -1,16 +1,51 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+
+import customtkinter
+
+
+APP_DIR = os.path.abspath(os.path.dirname(__file__))
+FFMPEG_BIN = os.path.join(APP_DIR, "build_assets", "ffmpeg", "bin")
+RUNTIME_DATA_PATHS = [
+    (os.path.join(APP_DIR, "assets", "profiles"), "assets/profiles"),
+    (os.path.join(APP_DIR, "assets", "models", "oto_ml"), "assets/models/oto_ml"),
+    (os.path.join(APP_DIR, "ml", "configs"), "ml/configs"),
+    (os.path.join(APP_DIR, "config.json"), "."),
+]
+
+datas = [
+    (os.path.dirname(customtkinter.__file__), "customtkinter/"),
+]
+if os.path.isdir(FFMPEG_BIN):
+    datas.append((FFMPEG_BIN, "ffmpeg/bin"))
+
+for src, dst in RUNTIME_DATA_PATHS:
+    if os.path.exists(src):
+        datas.append((src, dst))
+
 
 a = Analysis(
-    ['main.py'],
-    pathex=[],
+    ["main.py"],
+    pathex=[APP_DIR],
     binaries=[],
-    datas=[('C:\\Users\\oyh57\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\customtkinter', 'customtkinter/'), ('C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\build_assets\\ffmpeg\\bin', 'ffmpeg/bin')],
-    hiddenimports=['textgrid', 'customtkinter'],
+    datas=datas,
+    hiddenimports=["textgrid", "customtkinter"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "torch",
+        "torchaudio",
+        "torchvision",
+        "core.oto_ml_pytorch",
+        "core.oto_torch_model",
+        "core.oto_torch_features",
+        "core.oto_torch_dataset",
+        "core.oto_torch_trainer",
+        "core.oto_torch_export",
+        "ml",
+    ],
     noarchive=False,
     optimize=0,
 )
@@ -19,10 +54,9 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
-    name='UTAU_Auto_OTO',
+    exclude_binaries=True,
+    name="UTAU_Auto_OTO",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -35,4 +69,14 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name="UTAU_Auto_OTO",
 )

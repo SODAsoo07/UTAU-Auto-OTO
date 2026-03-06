@@ -50,12 +50,45 @@ def _to_bool(v, default=False):
     return default
 
 
+def _safe_console_print(text: str):
+    s = str(text)
+    try:
+        print(s)
+        return
+    except UnicodeEncodeError:
+        pass
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        safe = s.encode(enc, errors="replace").decode(enc, errors="replace")
+    except Exception:
+        safe = s.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+    print(safe)
+
+
 def _resolve_path(config_dir: str, raw_path: str) -> str:
     if not raw_path:
         return ""
     p = os.path.expandvars(os.path.expanduser(str(raw_path).strip()))
     if os.path.isabs(p):
         return os.path.normpath(p)
+    return os.path.normpath(os.path.join(config_dir, p))
+
+
+def _resolve_case_path(config_dir: str, voicebank_dir: str, raw_path: str) -> str:
+    """
+    Case path resolver:
+    1) absolute path 그대로 사용
+    2) relative path는 voicebank_dir 기준 우선
+    3) 없으면 config_dir 기준으로 fallback
+    """
+    if not raw_path:
+        return ""
+    p = os.path.expandvars(os.path.expanduser(str(raw_path).strip()))
+    if os.path.isabs(p):
+        return os.path.normpath(p)
+    vb_candidate = os.path.normpath(os.path.join(voicebank_dir, p))
+    if os.path.exists(vb_candidate):
+        return vb_candidate
     return os.path.normpath(os.path.join(config_dir, p))
 
 
@@ -113,7 +146,7 @@ def _run_one_case(
         return {"name": name, "status": "error", "reason": f"voicebank_dir not found: {voicebank_dir}"}
 
     tg_folder_raw = str(case.get("textgrid_dir", case.get("tg_folder", "textgrids"))).strip()
-    tg_folder = _resolve_path(voicebank_dir, tg_folder_raw) if not os.path.isabs(tg_folder_raw) else _resolve_path(config_dir, tg_folder_raw)
+    tg_folder = _resolve_case_path(config_dir, voicebank_dir, tg_folder_raw)
     if not os.path.isdir(tg_folder):
         return {"name": name, "status": "error", "reason": f"textgrid_dir not found: {tg_folder}"}
 
@@ -131,7 +164,7 @@ def _run_one_case(
     else:
         base_oto_raw = str(case.get("base_oto", defaults.get("base_oto", ""))).strip()
         if base_oto_raw:
-            tpl_path = _resolve_path(config_dir, base_oto_raw)
+            tpl_path = _resolve_case_path(config_dir, voicebank_dir, base_oto_raw)
         else:
             cand = os.path.join(voicebank_dir, "oto.ini")
             tpl_path = cand if os.path.exists(cand) else ""
@@ -140,7 +173,6 @@ def _run_one_case(
     generate_openutau = _to_bool(case.get("generate_openutau", defaults.get("generate_openutau", False)), False)
     gen_missing_vowels = _to_bool(case.get("gen_missing_vowels", defaults.get("gen_missing_vowels", False)), False)
     enable_ml_correction = _to_bool(case.get("enable_ml_correction", defaults.get("enable_ml_correction", True)), True)
-    enable_pytorch_bridge = _to_bool(case.get("enable_pytorch_bridge", defaults.get("enable_pytorch_bridge", False)), False)
     custom_phonemes_path = _resolve_path(config_dir, str(case.get("custom_phonemes_path", defaults.get("custom_phonemes_path", ""))).strip())
     alias_suffix = str(case.get("alias_suffix", defaults.get("alias_suffix", ""))).strip()
     alias_style = str(case.get("alias_style", defaults.get("alias_style", "original"))).strip().lower()
@@ -154,7 +186,7 @@ def _run_one_case(
     def log(msg: str):
         ts = dt.datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"
-        print(line)
+        _safe_console_print(line)
         case_logs.append(line)
 
     log(f"START name={name} lang={language} format={auto_format or 'auto'}")
@@ -179,7 +211,6 @@ def _run_one_case(
                 generate_openutau=generate_openutau,
                 gen_missing_vowels=gen_missing_vowels,
                 enable_ml_correction=enable_ml_correction,
-                enable_pytorch_bridge=enable_pytorch_bridge,
                 fallback_format=auto_format or "cvvc",
                 custom_phonemes_path=custom_phonemes_path,
                 alias_suffix=alias_suffix,
@@ -196,7 +227,6 @@ def _run_one_case(
                 generate_openutau=generate_openutau,
                 gen_missing_vowels=gen_missing_vowels,
                 enable_ml_correction=enable_ml_correction,
-                enable_pytorch_bridge=enable_pytorch_bridge,
                 fallback_format=auto_format or "cvvc",
                 custom_phonemes_path=custom_phonemes_path,
                 alias_suffix=alias_suffix,
@@ -278,10 +308,10 @@ def main():
     run_dir = os.path.join("logs", "oto_batch", run_tag)
     os.makedirs(run_dir, exist_ok=True)
 
-    print(f"[BatchOTO] config={config_path}")
-    print(f"[BatchOTO] run_tag={run_tag}")
-    print(f"[BatchOTO] cases={len(cases)}")
-    print(f"[BatchOTO] run_dir={os.path.abspath(run_dir)}")
+    _safe_console_print(f"[BatchOTO] config={config_path}")
+    _safe_console_print(f"[BatchOTO] run_tag={run_tag}")
+    _safe_console_print(f"[BatchOTO] cases={len(cases)}")
+    _safe_console_print(f"[BatchOTO] run_dir={os.path.abspath(run_dir)}")
 
     results = []
     for idx, case in enumerate(cases, start=1):
@@ -296,9 +326,9 @@ def main():
             force_no_validation=args.skip_validation,
         )
         results.append(res)
-        print(f"[BatchOTO] done {idx}/{len(cases)} name={res.get('name')} status={res.get('status')}")
+        _safe_console_print(f"[BatchOTO] done {idx}/{len(cases)} name={res.get('name')} status={res.get('status')}")
         if args.stop_on_error and res.get("status") == "error":
-            print("[BatchOTO] stop_on_error triggered.")
+            _safe_console_print("[BatchOTO] stop_on_error triggered.")
             break
 
     summary = {
@@ -314,7 +344,7 @@ def main():
     summary_path = os.path.join(run_dir, "summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
-    print(f"[BatchOTO] summary={os.path.abspath(summary_path)}")
+    _safe_console_print(f"[BatchOTO] summary={os.path.abspath(summary_path)}")
 
 
 if __name__ == "__main__":

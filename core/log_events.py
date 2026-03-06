@@ -35,15 +35,15 @@ def classify_log_message(message: str) -> Dict[str, object]:
     elif text.startswith("[") and "]" in text:
         category = "internal"
         severity = "debug"
-    elif text.startswith(("❌", "笶・")) or any(token in lowered for token in ("error", "failed", "exception", "traceback")):
+    elif text.startswith(("❌", "[ERROR]", "ERROR:")) or any(token in lowered for token in ("error", "failed", "exception", "traceback")):
         severity = "error"
         category = "error"
         ui_visible = True
-    elif text.startswith(("⚠", "笞")) or "warning" in lowered or "skipped" in lowered or "skip" in lowered:
+    elif text.startswith(("⚠", "[WARN]", "WARNING:")) or "warning" in lowered or "skipped" in lowered or "skip" in lowered:
         severity = "warning"
         category = "warning"
         ui_visible = True
-    elif text.startswith(("✅", "笨・")) or "완료" in text or "성공" in text:
+    elif text.startswith(("✅", "[OK]", "SUCCESS:")) or "완료" in text or "성공" in text:
         severity = "success"
         category = "success"
         ui_visible = True
