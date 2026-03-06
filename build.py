@@ -26,6 +26,12 @@ LITE_EXCLUDES = [
     "core.oto_torch_export",
     "ml",
 ]
+RUNTIME_DATA_PATHS = [
+    (os.path.join(APP_DIR, "assets", "profiles"), "assets/profiles"),
+    (os.path.join(APP_DIR, "assets", "models"), "assets/models"),
+    (os.path.join(APP_DIR, "ml", "configs"), "ml/configs"),
+    (os.path.join(APP_DIR, "config.json"), "."),
+]
 
 
 def _ensure_ffmpeg_bin():
@@ -73,7 +79,12 @@ def _ensure_ffmpeg_bin():
 
 def _parse_args():
     parser = argparse.ArgumentParser(description="Build UTAU Auto OTO distributables.")
-    parser.add_argument("--onefile", action="store_true", help="Build onefile executable (slower startup).")
+    parser.add_argument("--onefile", action="store_true", help="Build onefile executable (unsafe/experimental).")
+    parser.add_argument(
+        "--allow-unsafe-onefile",
+        action="store_true",
+        help="Acknowledge onefile runtime risks and allow --onefile build.",
+    )
     parser.add_argument(
         "--full",
         action="store_true",
@@ -81,6 +92,16 @@ def _parse_args():
     )
     parser.add_argument("--name", default=DEFAULT_APP_NAME, help="PyInstaller app name.")
     return parser.parse_args()
+
+
+def _iter_runtime_data_entries():
+    entries = []
+    for src, dst in RUNTIME_DATA_PATHS:
+        if os.path.exists(src):
+            entries.append((src, dst))
+        else:
+            print(f"⚠ 런타임 데이터 누락(건너뜀): {src}")
+    return entries
 
 
 def _build_pyinstaller_args(app_name, ffmpeg_bin, onefile=False, full=False):
@@ -99,6 +120,8 @@ def _build_pyinstaller_args(app_name, ffmpeg_bin, onefile=False, full=False):
         "--hidden-import=textgrid",
         "--hidden-import=customtkinter",
     ]
+    for src, dst in _iter_runtime_data_entries():
+        args.append(f"--add-data={src};{dst}")
     if not full:
         for module_name in LITE_EXCLUDES:
             args.append(f"--exclude-module={module_name}")
@@ -134,6 +157,14 @@ def _copy_release_outputs(app_name, onefile=False):
 
 def main():
     args = _parse_args()
+    if args.onefile and not args.allow_unsafe_onefile:
+        raise SystemExit(
+            "onefile 빌드는 기본 비활성화되어 있습니다. "
+            "SOFA/모델 캐시 경로 이슈를 이해한 경우에만 --allow-unsafe-onefile을 함께 사용하세요."
+        )
+    if args.allow_unsafe_onefile and not args.onefile:
+        print("ℹ --allow-unsafe-onefile 은 --onefile 미사용 시 무시됩니다.")
+
     os.chdir(APP_DIR)
     print("🚀 [1/5] 빌드 의존성 설치 중...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller", "customtkinter", "textgrid", "numpy"])
@@ -160,7 +191,7 @@ def main():
 
     print(f"\n✅ 빌드 완료: {release_dir}")
     if args.onefile:
-        print("ℹ onefile 배포는 실행 시 압축 해제로 시작 지연이 발생할 수 있습니다.")
+        print("⚠ onefile 배포: 실행 경로/캐시 특성상 SOFA/모델 설치가 불안정할 수 있습니다.")
     else:
         print("ℹ onedir 배포는 시작 속도가 빠르며, 사용자용 배포에 권장됩니다.")
     if not args.full:
