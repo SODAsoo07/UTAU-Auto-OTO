@@ -14,6 +14,15 @@ FFMPEG_BIN_DIR = os.path.join(FFMPEG_DIR, "bin")
 FFMPEG_RELEASE_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
 
+def _configure_console_encoding():
+    # GitHub Actions Windows(cp1252) 환경에서 이모지/한글 로그 출력 시 인코딩 오류 방지
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def _ensure_ffmpeg_bin():
     ffmpeg_exe = os.path.join(FFMPEG_BIN_DIR, "ffmpeg.exe")
     ffprobe_exe = os.path.join(FFMPEG_BIN_DIR, "ffprobe.exe")
@@ -58,6 +67,7 @@ def _ensure_ffmpeg_bin():
 
 
 def main():
+    _configure_console_encoding()
     os.chdir(APP_DIR)
     print("🚀 [1/5] 빌드 의존성 설치 중...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller", "customtkinter", "textgrid", "numpy"])
