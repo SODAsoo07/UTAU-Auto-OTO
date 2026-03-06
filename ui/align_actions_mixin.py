@@ -85,6 +85,12 @@ class AlignActionsMixin:
                     if not has_model:
                         download_mfa_model(self.mfa_path, language=lang, callback=self._append_log)
 
+                    mfa_profile = (
+                        self._get_mfa_align_profile_code()
+                        if hasattr(self, "_get_mfa_align_profile_code")
+                        else "accurate"
+                    )
+                    self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
                     success, err = run_mfa_align(
                         self.mfa_path,
                         wav_dir,
@@ -92,6 +98,7 @@ class AlignActionsMixin:
                         output_dir,
                         language=lang,
                         callback=self._append_log,
+                        align_profile=mfa_profile,
                     )
                     if success:
                         self._set_status("✅ MFA 정렬 완료")

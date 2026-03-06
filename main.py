@@ -175,6 +175,7 @@ class App(
         self.alias_suffix_var = ctk.StringVar(value="")    # 에일리어스 접미사 (예: C4)
         self.ja_alias_style_var = ctk.StringVar(value="원본 그대로")
         self.aligner_var = ctk.StringVar(value="MFA")
+        self.mfa_align_profile_var = ctk.StringVar(value="정확도 우선 (기본)")
         self.sofa_ckpt_var = ctk.StringVar(value="")
         self.sofa_dict_var = ctk.StringVar(value="")
         self.sofa_python_var = ctk.StringVar(value=get_sofa_env_python())

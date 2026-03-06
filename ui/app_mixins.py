@@ -359,6 +359,8 @@ class AppRuntimeMixin:
                 f.write(f"Python: {sys.version}\n")
                 f.write(f"MFA 경로: {self.mfa_path or '미설치'}\n")
                 f.write(f"정렬 엔진: {self.aligner_var.get()}\n")
+                if hasattr(self, "mfa_align_profile_var"):
+                    f.write(f"MFA 정렬 프로필: {self.mfa_align_profile_var.get()}\n")
                 f.write(f"SOFA Python: {self.sofa_python_var.get()}\n")
                 f.write(f"구조화 이벤트 로그: {getattr(self, 'event_log_path', '')}\n")
                 f.write("\n--- 사용자 설정 ---\n")
@@ -428,6 +430,7 @@ class ConfigMixin:
             "auto_format": self.auto_format_var.get(),
             "ja_alias_style": self.ja_alias_style_var.get(),
             "aligner": self.aligner_var.get(),
+            "mfa_align_profile": self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "정확도 우선 (기본)",
             "sofa_ckpt": self.sofa_ckpt_var.get(),
             "sofa_dict": self.sofa_dict_var.get(),
             "sofa_python": self.sofa_python_var.get(),
@@ -568,6 +571,14 @@ class ConfigMixin:
                 saved_aligner = config.get("aligner", "MFA")
                 if saved_aligner in {"MFA", "SOFA"}:
                     self.aligner_var.set(saved_aligner)
+            if "mfa_align_profile" in config and hasattr(self, "mfa_align_profile_var"):
+                saved_profile = str(config.get("mfa_align_profile", "정확도 우선 (기본)") or "").strip()
+                if saved_profile in {"정확도 우선 (기본)", "빠름 (저사양 추천)", "accurate", "fast"}:
+                    if saved_profile == "fast":
+                        saved_profile = "빠름 (저사양 추천)"
+                    elif saved_profile == "accurate":
+                        saved_profile = "정확도 우선 (기본)"
+                    self.mfa_align_profile_var.set(saved_profile)
             if "sofa_ckpt" in config:
                 self.sofa_ckpt_var.set(config.get("sofa_ckpt", ""))
             if "sofa_dict" in config:

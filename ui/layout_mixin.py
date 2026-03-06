@@ -135,6 +135,23 @@ class LayoutMixin:
             text_color="gray",
         ).pack(side="left", padx=10)
 
+        row_mfa_profile = ctk.CTkFrame(path_frame, fg_color="transparent")
+        row_mfa_profile.pack(fill="x", padx=10, pady=3)
+        ctk.CTkLabel(row_mfa_profile, text="MFA 정렬 프로필", width=120, anchor="w").pack(side="left")
+        self.mfa_align_profile_menu = ctk.CTkOptionMenu(
+            row_mfa_profile,
+            values=["정확도 우선 (기본)", "빠름 (저사양 추천)"],
+            variable=self.mfa_align_profile_var,
+            width=200,
+            command=lambda _v: self._save_config(),
+        )
+        self.mfa_align_profile_menu.pack(side="left", padx=(5, 5))
+        ctk.CTkLabel(
+            row_mfa_profile,
+            text="(기본은 기존 설정 유지, 느린 환경에서는 빠름 권장)",
+            text_color="gray",
+        ).pack(side="left", padx=10)
+
         row_sofa_ckpt = ctk.CTkFrame(path_frame, fg_color="transparent")
         row_sofa_ckpt.pack(fill="x", padx=10, pady=3)
         ctk.CTkLabel(row_sofa_ckpt, text="SOFA 체크포인트:", width=120, anchor="w").pack(side="left")
@@ -237,6 +254,12 @@ class LayoutMixin:
         if style == "로마자":
             return "romaji"
         return "original"
+
+    def _get_mfa_align_profile_code(self):
+        profile = str(self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "").strip()
+        if profile in {"빠름 (저사양 추천)", "fast"}:
+            return "fast"
+        return "accurate"
 
     def _on_no_base_oto_toggle(self):
         no_base = bool(self.no_base_oto_var.get())

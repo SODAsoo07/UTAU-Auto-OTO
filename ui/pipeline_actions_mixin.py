@@ -654,6 +654,12 @@ class PipelineActionsMixin:
                         has_model, _ = check_mfa_model(self.mfa_path, language=lang)
                         if not has_model:
                             download_mfa_model(self.mfa_path, language=lang, callback=self._append_log)
+                        mfa_profile = (
+                            self._get_mfa_align_profile_code()
+                            if hasattr(self, "_get_mfa_align_profile_code")
+                            else "accurate"
+                        )
+                        self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
                         align_ok, align_err = run_mfa_align(
                             self.mfa_path,
                             wav_dir,
@@ -661,6 +667,7 @@ class PipelineActionsMixin:
                             output_dir,
                             language=lang,
                             callback=self._append_log,
+                            align_profile=mfa_profile,
                         )
                     else:
                         align_err = "MFA 실행 파일이 없어 정렬을 건너뜁니다."
