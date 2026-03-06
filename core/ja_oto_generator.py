@@ -659,6 +659,40 @@ def _build_words_synth_phones(wd_intervals, filename_syllables=None):
     return synth_phones
 
 
+def _build_ja_linear_syllables_from_phones(ph_intervals, filename_syllables):
+    """
+    파일명 음절 수는 확실하지만 phone 기반 정밀 정렬이 실패한 경우,
+    순서만 보장하는 선형 분할 fallback을 만든다.
+    """
+    if not ph_intervals or not filename_syllables:
+        return None
+    total = len(ph_intervals)
+    n = len(filename_syllables)
+    if total <= 0 or n <= 0:
+        return None
+    infos = []
+    for i, syl in enumerate(filename_syllables):
+        start_idx = int(round(i * total / float(n)))
+        end_idx = int(round((i + 1) * total / float(n)))
+        if end_idx <= start_idx:
+            end_idx = min(start_idx + 1, total)
+        start_idx = min(max(start_idx, 0), total - 1)
+        end_idx = min(max(end_idx, start_idx + 1), total)
+        phones = ph_intervals[start_idx:end_idx]
+        if not phones:
+            phones = [ph_intervals[start_idx]]
+        s_t = float(phones[0].minTime)
+        e_t = float(phones[-1].maxTime)
+        infos.append({
+            'word': syl,
+            'roman': syl,
+            'start_time': s_t,
+            'end_time': e_t,
+            'phones': list(phones),
+        })
+    return infos if infos else None
+
+
 def _collect_phone_tier_quality(ph_tier, expected_syllables, min_vowel_phone_ratio=0.5):
     """
     phones tier 품질 지표를 계산합니다.
@@ -921,7 +955,10 @@ def _compute_vcv_params_from_virtual_split(alias, prev_v_start, prev_v_end, c_bo
         )
     boundary = max(float(prev_v_end) + 6.0, float(c_boundary) - pre_lead)
     if n_bridge:
+        # n+CV 브리지는 n 구간에만 박히지 않게 기준점을 조금 늦춰 다음 CV 진입을 더 포함한다.
         boundary = max(float(prev_v_end) + 2.0, float(c_boundary) - pre_lead)
+        late_shift = _clamp_range(curr_v_len * 0.18, 8.0, 24.0)
+        boundary = min(float(n_end) - 8.0, boundary + late_shift)
 
     base_pad = profile.get("offset_pad", 86.0)
     dyn_pad = base_pad + max(prev_v_len - 120.0, 0.0) * profile.get("offset_len_mul", 0.08)
@@ -936,7 +973,8 @@ def _compute_vcv_params_from_virtual_split(alias, prev_v_start, prev_v_end, c_bo
 
     offset = max(boundary - offset_padding, 0.0)
     # VCV는 pre가 지나치게 짧으면 후행 CV 체감이 약해져 기본 하한을 둔다.
-    pre = max(boundary - offset, 36.0)
+    pre_floor = 44.0 if n_bridge else 36.0
+    pre = max(boundary - offset, pre_floor)
 
     tail_margin = profile.get("tail_margin_base", 10.0) + prev_v_len * profile.get("tail_margin_mul", 0.05)
     tail_margin = _clamp_range(tail_margin, 4.0, 24.0)
@@ -947,13 +985,15 @@ def _compute_vcv_params_from_virtual_split(alias, prev_v_start, prev_v_end, c_bo
     ovl = _blend(ovl_anchored, pre * profile.get("ovl_ratio", 0.50), 0.34)
     ovl = min(upper_ovl, max(lower_ovl, ovl))
 
-    n_ref = max(curr_v_len, 60.0)
+    n_ref = max(curr_v_len, 70.0 if n_bridge else 60.0)
     cons_add = profile.get("cons_add_base", 36.0) + max(n_ref - 70.0, 0.0) * profile.get("cons_add_mul", 0.12)
     cons_add = _clamp_range(
         cons_add,
         profile.get("cons_add_min", 20.0),
         profile.get("cons_add_max", 68.0),
     )
+    if n_bridge:
+        cons_add = min(cons_add + 14.0, profile.get("cons_add_max", 68.0) + 18.0)
     consonant = pre + cons_add
     consonant = max(consonant, pre + profile.get("cons_floor", 18.0))
     consonant = min(consonant, pre + max(curr_v_len * 0.72, 96.0))
@@ -964,6 +1004,8 @@ def _compute_vcv_params_from_virtual_split(alias, prev_v_start, prev_v_end, c_bo
         profile.get("cut_add_min", 34.0),
         profile.get("cut_add_max", 120.0),
     )
+    if n_bridge:
+        cut_add = min(cut_add + 20.0, profile.get("cut_add_max", 120.0) + 28.0)
     cutoff_abs = max(
         consonant + profile.get("cut_min_gap", 16.0),
         pre + cut_add,
@@ -992,6 +1034,7 @@ def _enforce_vcv_cv_entry_guard(offset, consonant, cutoff, pre, ovl, c_boundary,
     n_end = float(max(n_end, c_boundary))
 
     vv_like = False
+    n_bridge = _ja_is_n_bridge_alias(alias_text, "vcv")
     tok = _extract_vcv_target_syllable(alias_text)
     onset, _vowel = split_ja_romaji_syllable(tok)
     if not (onset or "").strip():
@@ -1001,6 +1044,10 @@ def _enforce_vcv_cv_entry_guard(offset, consonant, cutoff, pre, ovl, c_boundary,
     if vv_like:
         pre_abs = _clamp_range(pre_abs, max(c_boundary - 4.0, 0.0), c_boundary + 10.0)
         pre_floor = 52.0
+    elif n_bridge:
+        # n+CV는 pre를 조금 늦춰 다음 CV 자음/모음 진입이 체감되도록 고정한다.
+        pre_abs = _clamp_range(pre_abs, max(c_boundary - 2.0, 0.0), c_boundary + 14.0)
+        pre_floor = 50.0
     else:
         pre_abs = _clamp_range(pre_abs, max(c_boundary - 8.0, 0.0), c_boundary + 5.0)
         pre_floor = 44.0
@@ -1014,6 +1061,10 @@ def _enforce_vcv_cv_entry_guard(offset, consonant, cutoff, pre, ovl, c_boundary,
         min_vowel_keep = _clamp_range(vowel_len * 0.30, 34.0, 88.0)
         min_cons_rel = max(pre + 72.0, vowel_start_rel + min_vowel_keep)
         max_cons_rel = max(vowel_start_rel + min_vowel_keep + 86.0, pre + 142.0)
+    elif n_bridge:
+        min_vowel_keep = _clamp_range(vowel_len * 0.30, 34.0, 96.0)
+        min_cons_rel = max(pre + 76.0, vowel_start_rel + min_vowel_keep)
+        max_cons_rel = max(vowel_start_rel + min_vowel_keep + 96.0, pre + 156.0)
     else:
         min_vowel_keep = _clamp_range(vowel_len * 0.22, 24.0, 76.0)
         min_cons_rel = max(pre + 64.0, vowel_start_rel + min_vowel_keep)
@@ -1021,7 +1072,7 @@ def _enforce_vcv_cv_entry_guard(offset, consonant, cutoff, pre, ovl, c_boundary,
     consonant = _clamp_range(consonant, min_cons_rel, max_cons_rel)
 
     cutoff_abs = abs(float(cutoff))
-    min_cut_abs = consonant + 28.0
+    min_cut_abs = consonant + (34.0 if n_bridge else 28.0)
     max_cut_abs = max((n_end - offset) + 86.0, consonant + 36.0)
     cutoff_abs = _clamp_range(cutoff_abs, min_cut_abs, max_cut_abs)
     cutoff = -cutoff_abs
@@ -2265,7 +2316,7 @@ def generate_ja_oto(
             return offset, consonant, cutoff, pre, ovl
         # VCV의 CV/CV_HEAD/VCV 본체에서는 cutoff 강클램프가 과개입되기 쉬워
         # 리듬 앵커(pre) 중심으로만 고정하고 cutoff 상한은 원 계산/가드에 맡긴다.
-        if fmt == "vcv" and alias_key in {"vcv", "vcv_vv_like", "cv", "cv_head"}:
+        if fmt == "vcv" and alias_key in {"vcv", "vcv_vv_like", "vcv_n_bridge", "cv", "cv_head"}:
             profile = replace(
                 profile,
                 cut_to_next_onset_allow_ms=None,
@@ -2842,6 +2893,10 @@ def generate_ja_oto(
             )
             filename_based = _build_syllables_from_filename(ph_intervals, filename_syllables)
             alias_based = _build_ja_syllables_from_phone_nuclei(ph_intervals, cv_targets) if cv_targets else None
+            linear_filename_based = None
+            linear_fallback_used = False
+            if (not filename_based) and filename_syllables:
+                linear_filename_based = _build_ja_linear_syllables_from_phones(ph_intervals, filename_syllables)
             if forced_words_mapping and filename_based and len(filename_based) >= 1:
                 syllables_info = filename_based
                 used_filename_based = True
@@ -2862,6 +2917,11 @@ def generate_ja_oto(
             elif alias_based:
                 syllables_info = alias_based
                 log(f"🧭 {fname}: 파일명 매핑 실패 → alias/phone 기반 음절 매핑 사용 ({len(cv_targets)}음절)")
+            elif linear_filename_based and format_type in {"cvvc", "cv"}:
+                syllables_info = linear_filename_based
+                used_filename_based = True
+                linear_fallback_used = True
+                log(f"🧭 {fname}: 파일명 선형 fallback 음절 매핑 사용 ({len(filename_syllables)}음절)")
             elif wd_intervals and sparse_phone_mode:
                 log(f"🧭 {fname}: phones 희소 감지({len(ph_intervals)}개) → words 기반 합성 phone 매핑 사용")
                 for w in wd_intervals:
@@ -2924,7 +2984,14 @@ def generate_ja_oto(
                 base_score = _score_ja_syllable_mapping(syllables_info, cv_targets)
                 alt_score = _score_ja_syllable_mapping(alias_based, cv_targets)
                 # TextGrid 정렬 결과를 우선하되, alias/filename 기준과 크게 어긋난 경우에만 보정한다.
-                if base_score < 66.0 and alt_score >= 70.0 and alt_score >= (base_score + 8.0):
+                prefer_alias = False
+                if format_type in {"cvvc", "cv"}:
+                    if alt_score >= 70.0 and (base_score < 74.0 or alt_score >= (base_score + 6.0)):
+                        prefer_alias = True
+                else:
+                    if base_score < 66.0 and alt_score >= 70.0 and alt_score >= (base_score + 8.0):
+                        prefer_alias = True
+                if prefer_alias:
                     syllables_info = alias_based
                     log(
                         f"🧭 {fname}: 매핑 이탈 보정 적용 "
@@ -3382,7 +3449,10 @@ def generate_ja_oto(
                     )
                     vcv_tok_for_profile = _extract_vcv_target_syllable(alias)
                     vcv_onset_for_profile, _vcv_vowel_for_profile = split_ja_romaji_syllable(vcv_tok_for_profile)
+                    n_bridge_vcv = _ja_is_n_bridge_alias(alias, "vcv")
                     vv_like_profile_key = "vcv_vv_like" if not (vcv_onset_for_profile or "").strip() else "vcv"
+                    if n_bridge_vcv and vv_like_profile_key == "vcv":
+                        vv_like_profile_key = "vcv_n_bridge"
                     offset, consonant, cutoff, pre, ovl = _apply_ja_anchor_lock(
                         fname=fname,
                         alias_text=alias,
@@ -3413,60 +3483,64 @@ def generate_ja_oto(
                         expected_idx = expected_seq_idx
                     else:
                         expected_idx = len(syllables_info) - 1
-                    mapped_idx = _select_ja_cv_syllable_index(
-                        alias, expected_idx, syllables_info, alias_type="cv_head"
-                    )
-                    target_tok = _extract_ja_cv_target_syllable(alias, alias_type="cv_head")
+                    skip_cv_align = bool(linear_fallback_used and format_type in {"cvvc", "cv"})
                     resynced_cv_head_exact = False
-                    if target_tok:
-                        mapped_tok = _syllable_info_token(syllables_info[mapped_idx])
-                        _mo, mapped_vowel = split_ja_romaji_syllable(mapped_tok)
-                        _to, target_vowel = split_ja_romaji_syllable(target_tok)
-                        if target_vowel in JA_VOWELS and mapped_vowel and mapped_vowel != target_vowel:
-                            fixed_idx = _find_ja_cv_vowel_match_index(
-                                target_tok,
-                                expected_idx,
-                                syllables_info,
-                                search_back=(2 if format_type == 'vcv' else 1),
-                                search_fwd=(3 if format_type == 'vcv' else 2),
-                            )
-                            if fixed_idx is not None:
-                                mapped_idx = fixed_idx
-                        if format_type == 'vcv':
-                            resync_idx = _find_ja_exact_target_index(
-                                target_tok,
-                                expected_idx,
-                                syllables_info,
-                                search_back=(0 if format_type == "vcv" else 3),
-                                search_fwd=2,
-                            )
-                            if resync_idx is not None and resync_idx != mapped_idx:
-                                log(
-                                    f"🧭 {fname}: CV_HEAD 순서 드리프트 복구 "
-                                    f"{expected_idx + 1}->{resync_idx + 1} ({alias})"
-                                )
-                                mapped_idx = resync_idx
-                                resynced_cv_head_exact = True
-                    if mapped_idx < expected_idx:
-                        if format_type != 'vcv' or (expected_idx - mapped_idx) > 3:
-                            mapped_idx = expected_idx
-                    if format_type == 'vcv' and mapped_idx > (expected_idx + 1):
-                        if not (resynced_cv_head_exact and mapped_idx <= (expected_idx + 2)):
-                            log(
-                                f"🛡️ {fname}: CV_HEAD 과도 점프 차단 "
-                                f"({expected_idx + 1}->{mapped_idx + 1}, {alias})"
-                            )
-                            mapped_idx = expected_idx
-                    if format_type == "vcv":
-                        mapped_idx = _prefer_vcv_candidate_index(
-                            expected_idx,
-                            mapped_idx,
-                            target_tok,
-                            syllables_info,
-                            max_delta=1,
+                    if skip_cv_align:
+                        mapped_idx = expected_idx
+                    else:
+                        mapped_idx = _select_ja_cv_syllable_index(
+                            alias, expected_idx, syllables_info, alias_type="cv_head"
                         )
-                    if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
-                        log(f"🧭 {fname}: CV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
+                        target_tok = _extract_ja_cv_target_syllable(alias, alias_type="cv_head")
+                        if target_tok:
+                            mapped_tok = _syllable_info_token(syllables_info[mapped_idx])
+                            _mo, mapped_vowel = split_ja_romaji_syllable(mapped_tok)
+                            _to, target_vowel = split_ja_romaji_syllable(target_tok)
+                            if target_vowel in JA_VOWELS and mapped_vowel and mapped_vowel != target_vowel:
+                                fixed_idx = _find_ja_cv_vowel_match_index(
+                                    target_tok,
+                                    expected_idx,
+                                    syllables_info,
+                                    search_back=(2 if format_type == 'vcv' else 1),
+                                    search_fwd=(3 if format_type == 'vcv' else 2),
+                                )
+                                if fixed_idx is not None:
+                                    mapped_idx = fixed_idx
+                            if format_type == 'vcv':
+                                resync_idx = _find_ja_exact_target_index(
+                                    target_tok,
+                                    expected_idx,
+                                    syllables_info,
+                                    search_back=(0 if format_type == "vcv" else 3),
+                                    search_fwd=2,
+                                )
+                                if resync_idx is not None and resync_idx != mapped_idx:
+                                    log(
+                                        f"🧭 {fname}: CV_HEAD 순서 드리프트 복구 "
+                                        f"{expected_idx + 1}->{resync_idx + 1} ({alias})"
+                                    )
+                                    mapped_idx = resync_idx
+                                    resynced_cv_head_exact = True
+                        if mapped_idx < expected_idx:
+                            if format_type != 'vcv' or (expected_idx - mapped_idx) > 3:
+                                mapped_idx = expected_idx
+                        if format_type == 'vcv' and mapped_idx > (expected_idx + 1):
+                            if not (resynced_cv_head_exact and mapped_idx <= (expected_idx + 2)):
+                                log(
+                                    f"🛡️ {fname}: CV_HEAD 과도 점프 차단 "
+                                    f"({expected_idx + 1}->{mapped_idx + 1}, {alias})"
+                                )
+                                mapped_idx = expected_idx
+                        if format_type == "vcv":
+                            mapped_idx = _prefer_vcv_candidate_index(
+                                expected_idx,
+                                mapped_idx,
+                                target_tok,
+                                syllables_info,
+                                max_delta=1,
+                            )
+                        if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
+                            log(f"🧭 {fname}: CV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
                     current_w_idx = mapped_idx
                     if format_type == "vcv":
                         stable_vcv_seq_idx = min(stable_vcv_seq_idx + 1, max(len(syllables_info) - 1, 0))
@@ -3602,60 +3676,64 @@ def generate_ja_oto(
                         expected_idx = expected_seq_idx
                     else:
                         expected_idx = len(syllables_info) - 1
-                    mapped_idx = _select_ja_cv_syllable_index(
-                        alias, expected_idx, syllables_info, alias_type="cv"
-                    )
-                    target_tok = _extract_ja_cv_target_syllable(alias, alias_type="cv")
+                    skip_cv_align = bool(linear_fallback_used and format_type in {"cvvc", "cv"})
                     resynced_cv_exact = False
-                    if target_tok:
-                        mapped_tok = _syllable_info_token(syllables_info[mapped_idx])
-                        _mo, mapped_vowel = split_ja_romaji_syllable(mapped_tok)
-                        _to, target_vowel = split_ja_romaji_syllable(target_tok)
-                        if target_vowel in JA_VOWELS and mapped_vowel and mapped_vowel != target_vowel:
-                            fixed_idx = _find_ja_cv_vowel_match_index(
-                                target_tok,
-                                expected_idx,
-                                syllables_info,
-                                search_back=(2 if format_type == 'vcv' else 1),
-                                search_fwd=(3 if format_type == 'vcv' else 2),
-                            )
-                            if fixed_idx is not None:
-                                mapped_idx = fixed_idx
-                        if format_type == 'vcv':
-                            resync_idx = _find_ja_exact_target_index(
-                                target_tok,
-                                expected_idx,
-                                syllables_info,
-                                search_back=(0 if format_type == "vcv" else 3),
-                                search_fwd=2,
-                            )
-                            if resync_idx is not None and resync_idx != mapped_idx:
-                                log(
-                                    f"🧭 {fname}: CV 순서 드리프트 복구 "
-                                    f"{expected_idx + 1}->{resync_idx + 1} ({alias})"
-                                )
-                                mapped_idx = resync_idx
-                                resynced_cv_exact = True
-                    if mapped_idx < expected_idx:
-                        if format_type != 'vcv' or (expected_idx - mapped_idx) > 3:
-                            mapped_idx = expected_idx
-                    if format_type == 'vcv' and mapped_idx > (expected_idx + 1):
-                        if not (resynced_cv_exact and mapped_idx <= (expected_idx + 2)):
-                            log(
-                                f"🛡️ {fname}: CV 과도 점프 차단 "
-                                f"({expected_idx + 1}->{mapped_idx + 1}, {alias})"
-                            )
-                            mapped_idx = expected_idx
-                    if format_type == "vcv":
-                        mapped_idx = _prefer_vcv_candidate_index(
-                            expected_idx,
-                            mapped_idx,
-                            target_tok,
-                            syllables_info,
-                            max_delta=1,
+                    if skip_cv_align:
+                        mapped_idx = expected_idx
+                    else:
+                        mapped_idx = _select_ja_cv_syllable_index(
+                            alias, expected_idx, syllables_info, alias_type="cv"
                         )
-                    if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
-                        log(f"🧭 {fname}: CV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
+                        target_tok = _extract_ja_cv_target_syllable(alias, alias_type="cv")
+                        if target_tok:
+                            mapped_tok = _syllable_info_token(syllables_info[mapped_idx])
+                            _mo, mapped_vowel = split_ja_romaji_syllable(mapped_tok)
+                            _to, target_vowel = split_ja_romaji_syllable(target_tok)
+                            if target_vowel in JA_VOWELS and mapped_vowel and mapped_vowel != target_vowel:
+                                fixed_idx = _find_ja_cv_vowel_match_index(
+                                    target_tok,
+                                    expected_idx,
+                                    syllables_info,
+                                    search_back=(2 if format_type == 'vcv' else 1),
+                                    search_fwd=(3 if format_type == 'vcv' else 2),
+                                )
+                                if fixed_idx is not None:
+                                    mapped_idx = fixed_idx
+                            if format_type == 'vcv':
+                                resync_idx = _find_ja_exact_target_index(
+                                    target_tok,
+                                    expected_idx,
+                                    syllables_info,
+                                    search_back=(0 if format_type == "vcv" else 3),
+                                    search_fwd=2,
+                                )
+                                if resync_idx is not None and resync_idx != mapped_idx:
+                                    log(
+                                        f"🧭 {fname}: CV 순서 드리프트 복구 "
+                                        f"{expected_idx + 1}->{resync_idx + 1} ({alias})"
+                                    )
+                                    mapped_idx = resync_idx
+                                    resynced_cv_exact = True
+                        if mapped_idx < expected_idx:
+                            if format_type != 'vcv' or (expected_idx - mapped_idx) > 3:
+                                mapped_idx = expected_idx
+                        if format_type == 'vcv' and mapped_idx > (expected_idx + 1):
+                            if not (resynced_cv_exact and mapped_idx <= (expected_idx + 2)):
+                                log(
+                                    f"🛡️ {fname}: CV 과도 점프 차단 "
+                                    f"({expected_idx + 1}->{mapped_idx + 1}, {alias})"
+                                )
+                                mapped_idx = expected_idx
+                        if format_type == "vcv":
+                            mapped_idx = _prefer_vcv_candidate_index(
+                                expected_idx,
+                                mapped_idx,
+                                target_tok,
+                                syllables_info,
+                                max_delta=1,
+                            )
+                        if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
+                            log(f"🧭 {fname}: CV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
                     current_w_idx = mapped_idx
                     if format_type == "vcv":
                         stable_vcv_seq_idx = min(stable_vcv_seq_idx + 1, max(len(syllables_info) - 1, 0))

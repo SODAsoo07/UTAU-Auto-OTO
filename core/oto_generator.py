@@ -2903,6 +2903,8 @@ def generate_oto(
             targets_for_build = cv_targets
             if file_format == "cvvc" and filename_cv_targets:
                 targets_for_build = filename_cv_targets
+            elif (not targets_for_build) and filename_cv_targets:
+                targets_for_build = filename_cv_targets
             expected_syllables = max(len(wd_intervals), len(cv_targets), len(filename_cv_targets))
             phone_quality = _collect_kr_phone_tier_quality(
                 phone_tier,
@@ -2959,7 +2961,13 @@ def generate_oto(
                 used_words_based = len(syllables_info) > 0
 
             alias_based = _build_kr_syllables_from_phone_nuclei(ph_intervals, targets_for_build) if targets_for_build else None
-            if not syllables_info and alias_based:
+            if syllables_info and any(len(s.get('phones') or []) == 0 for s in syllables_info) and alias_based:
+                syllables_info = alias_based
+                used_alias_based = True
+                used_words_based = False
+                mapping_reason_code = "alias_based_empty_words"
+                log(f"🧭 {fname}: words 매핑에 빈 phone 구간 존재 → alias/phone 기반 음절 매핑 사용")
+            elif not syllables_info and alias_based:
                 syllables_info = alias_based
                 used_alias_based = True
                 used_words_based = False

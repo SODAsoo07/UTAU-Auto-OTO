@@ -70,6 +70,25 @@ def _ja_vcv_profile() -> AnchorTimingProfile:
     )
 
 
+def _ja_vcv_n_bridge_profile() -> AnchorTimingProfile:
+    # n+CV 브리지: pre를 약간 늦추고 cons/cut을 늘려 다음 CV 진입 체감을 확보.
+    return AnchorTimingProfile(
+        pre_window_before_ms=2.0,
+        pre_window_after_ms=14.0,
+        pre_floor_ms=50.0,
+        ovl_gap_min_ms=10.0,
+        ovl_gap_max_ms=24.0,
+        ovl_gap_target_ms=15.0,
+        cons_gap_min_ms=96.0,
+        cons_gap_max_ms=186.0,
+        cons_gap_target_ms=132.0,
+        cut_gap_min_ms=50.0,
+        cut_gap_max_ms=136.0,
+        cut_gap_target_ms=90.0,
+        cut_to_next_onset_allow_ms=10.0,
+    )
+
+
 def _ja_vcv_vv_like_profile() -> AnchorTimingProfile:
     return AnchorTimingProfile(
         pre_window_before_ms=3.0,
@@ -236,6 +255,7 @@ def _kr_vcv_profile() -> AnchorTimingProfile:
 
 _PROFILE_TABLE: Dict[Tuple[str, str, str], AnchorTimingProfile] = {
     ("japanese", "vcv", "vcv"): _ja_vcv_profile(),
+    ("japanese", "vcv", "vcv_n_bridge"): _ja_vcv_n_bridge_profile(),
     ("japanese", "vcv", "vcv_vv_like"): _ja_vcv_vv_like_profile(),
     ("japanese", "vcv", "cv"): _ja_cv_head_profile(),
     ("japanese", "vcv", "cv_head"): _ja_cv_head_profile(),
