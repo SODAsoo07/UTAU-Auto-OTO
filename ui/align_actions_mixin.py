@@ -2,7 +2,6 @@
 
 from core.mfa_runner import check_mfa_model, download_mfa_model, run_mfa_align
 from core.sofa_runner import get_default_sofa_repo_dir, run_sofa_align
-from core.whisperx_runner import run_whisperx_align
 
 
 class AlignActionsMixin:
@@ -73,40 +72,6 @@ class AlignActionsMixin:
                     else:
                         self._append_log(f"❌ SOFA 실패: {err}")
                         self._set_status("❌ SOFA 실패")
-                elif self.aligner_var.get() == "WhisperX":
-                    runtime_getter = getattr(self, "_get_whisperx_runtime_kwargs", None)
-                    if callable(runtime_getter):
-                        whisperx_kwargs = runtime_getter(lang)
-                    else:
-                        whisperx_kwargs = {
-                            "profile": "balanced",
-                            "align_model_name": "",
-                            "device": "auto",
-                            "compute_type": "int8",
-                            "batch_size": 8,
-                            "cleanup_intermediate": True,
-                            "save_debug_json": False,
-                        }
-                    whisperx_kwargs["dictionary_path"] = dict_path
-                    self._append_log("🔀 정렬 엔진: WhisperX")
-                    self._append_log(
-                        "ℹ WhisperX 실행 옵션: "
-                        f"profile={whisperx_kwargs.get('profile')}, "
-                        f"device={whisperx_kwargs.get('device')}, "
-                        f"align_model={whisperx_kwargs.get('align_model_name') or 'auto'}"
-                    )
-                    success, err = run_whisperx_align(
-                        wav_folder=wav_dir,
-                        output_folder=output_dir,
-                        language=lang,
-                        callback=self._append_log,
-                        **whisperx_kwargs,
-                    )
-                    if success:
-                        self._set_status("✅ WhisperX 정렬 완료")
-                    else:
-                        self._append_log(f"❌ WhisperX 실패: {err}")
-                        self._set_status("❌ WhisperX 실패")
                 else:
                     self._append_log("🔀 정렬 엔진: MFA(권장)")
                     if not self.mfa_path:

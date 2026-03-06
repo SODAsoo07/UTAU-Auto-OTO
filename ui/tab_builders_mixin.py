@@ -65,7 +65,7 @@ class TabBuildersMixin:
         steps = [
             ("1. Lab 생성", "WAV 파일에서 라벨(Lab) 파일을 생성합니다.", self._run_lab_gen),
             ("2. 사전(Dictionary) 생성", "Lab 기반으로 발음 사전 파일을 생성합니다.", self._run_dict_gen),
-            ("3. 음성 정렬 (MFA/SOFA/WhisperX)", "선택한 정렬 엔진으로 TextGrid를 생성합니다.", self._run_mfa),
+            ("3. 음성 정렬 (MFA/SOFA)", "선택한 정렬 엔진으로 TextGrid를 생성합니다.", self._run_mfa),
             ("4. OTO.ini 생성", "TextGrid 기반으로 OTO 파라미터를 계산해 저장합니다.", self._run_oto_gen),
         ]
 

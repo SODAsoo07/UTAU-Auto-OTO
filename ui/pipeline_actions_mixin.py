@@ -28,7 +28,6 @@ from core.sofa_runner import (
     is_sofa_ready,
     run_sofa_align,
 )
-from core.whisperx_runner import get_default_whisperx_align_model, run_whisperx_align
 
 
 class PipelineActionsMixin:
@@ -103,43 +102,6 @@ class PipelineActionsMixin:
             ),
             "confidence_threshold": self._read_runtime_var("sofa_confidence_threshold_var", 0.55),
             "low_confidence_max_files": self._read_runtime_var("sofa_low_confidence_max_files_var", 0),
-        }
-
-    def _get_whisperx_runtime_kwargs(self, language):
-        lang = (language or "").lower()
-        profile = str(self._read_runtime_var("whisperx_profile_var", "balanced") or "balanced").strip().lower()
-        if profile not in {"low_load", "balanced", "high_accuracy"}:
-            profile = "balanced"
-
-        align_model_name = str(self._read_runtime_var("whisperx_align_model_var", "") or "").strip()
-        if not align_model_name:
-            align_model_name = get_default_whisperx_align_model(lang, profile)
-
-        device = str(self._read_runtime_var("whisperx_device_var", "auto") or "auto").strip().lower()
-        if device not in {"auto", "cpu", "cuda"}:
-            device = "auto"
-
-        compute_type = str(self._read_runtime_var("whisperx_compute_type_var", "int8") or "int8").strip()
-        try:
-            batch_size = int(self._read_runtime_var("whisperx_batch_size_var", 8))
-        except Exception:
-            batch_size = 8
-        batch_size = max(1, batch_size)
-
-        return {
-            "profile": profile,
-            "align_model_name": align_model_name,
-            "device": device,
-            "compute_type": compute_type,
-            "batch_size": batch_size,
-            "cleanup_intermediate": self._to_bool(
-                self._read_runtime_var("whisperx_cleanup_intermediate_var", True),
-                default=True,
-            ),
-            "save_debug_json": self._to_bool(
-                self._read_runtime_var("whisperx_save_debug_json_var", False),
-                default=False,
-            ),
         }
 
     def _download_sofa_model_for_current_language(self):
@@ -686,23 +648,6 @@ class PipelineActionsMixin:
                             callback=self._append_log,
                             **sofa_kwargs,
                         )
-                elif align_engine == "WhisperX":
-                    self._set_status("3/4 - WhisperX 음성 정렬 중...")
-                    whisperx_kwargs = self._get_whisperx_runtime_kwargs(lang)
-                    whisperx_kwargs["dictionary_path"] = dict_path
-                    self._append_log(
-                        "ℹ WhisperX 실행 옵션: "
-                        f"profile={whisperx_kwargs.get('profile')}, "
-                        f"device={whisperx_kwargs.get('device')}, "
-                        f"align_model={whisperx_kwargs.get('align_model_name') or 'auto'}"
-                    )
-                    align_ok, align_err = run_whisperx_align(
-                        wav_folder=wav_dir,
-                        output_folder=output_dir,
-                        language=lang,
-                        callback=self._append_log,
-                        **whisperx_kwargs,
-                    )
                 else:
                     if self.mfa_path:
                         self._set_status("3/4 - MFA 음성 정렬 중...")

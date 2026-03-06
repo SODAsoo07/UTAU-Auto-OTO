@@ -542,7 +542,7 @@ class ConfigMixin:
                     self.ja_alias_style_var.set(saved_style)
             if "aligner" in config:
                 saved_aligner = config.get("aligner", "MFA")
-                if saved_aligner in {"MFA", "SOFA", "WhisperX"}:
+                if saved_aligner in {"MFA", "SOFA"}:
                     self.aligner_var.set(saved_aligner)
             if "mfa_align_profile" in config and hasattr(self, "mfa_align_profile_var"):
                 saved_profile = str(config.get("mfa_align_profile", "정확도 우선 (기본)") or "").strip()
