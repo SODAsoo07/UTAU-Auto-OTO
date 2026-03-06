@@ -914,6 +914,27 @@ def _estimate_kr_mapping_confidence(
     return float(conf), float(margin)
 
 
+def _cleanup_timing_anchor_jsonl_files(log_dir, prefix):
+    if not log_dir or not os.path.isdir(log_dir):
+        return 0, 0
+    removed = 0
+    failed = 0
+    try:
+        names = os.listdir(log_dir)
+    except Exception:
+        return 0, 1
+    for name in names:
+        if not name.startswith(prefix) or not name.endswith(".jsonl"):
+            continue
+        path = os.path.join(log_dir, name)
+        try:
+            os.remove(path)
+            removed += 1
+        except Exception:
+            failed += 1
+    return removed, failed
+
+
 def _synthesize_kr_word_phones(word, w_start, w_end, decompose_hangul_to_roman):
     """
     words 구간에 대응하는 phones가 비어 있을 때 최소 합성 phone을 생성합니다.
@@ -2230,6 +2251,7 @@ def generate_oto(
     kr_mapping_confidence_threshold=0.60,
     kr_mapping_max_index_jump_default=1,
     kr_mapping_max_index_jump_high_conf=2,
+    cleanup_timing_jsonl=True,
     auto_format=None,
     callback=None
 ):
@@ -2310,6 +2332,11 @@ def generate_oto(
             kr_mapping_max_index_jump_high_conf = int(float(env_jump_hi))
         except Exception:
             pass
+    env_cleanup_jsonl = str(os.environ.get("UTOA_CLEANUP_TIMING_JSONL", "")).strip().lower()
+    if env_cleanup_jsonl in {"0", "false", "off", "no"}:
+        cleanup_timing_jsonl = False
+    elif env_cleanup_jsonl in {"1", "true", "on", "yes"}:
+        cleanup_timing_jsonl = True
 
     def log(msg):
         if callback:
@@ -3936,6 +3963,16 @@ def generate_oto(
             f"vc_cutoff_leak_guard_count={anchor_stats['vc_cutoff_leak_guard_count']}"
         )
         log(f"[AnchorLock] 상세 로그: {anchor_log_path}")
+
+    if cleanup_timing_jsonl:
+        removed_count, failed_count = _cleanup_timing_anchor_jsonl_files(
+            _anchor_log_dir,
+            "timing_anchor_kr_",
+        )
+        if removed_count > 0:
+            log(f"[AnchorLock] timing jsonl 자동 정리: {removed_count} files")
+        if failed_count > 0:
+            log(f"[AnchorLock] timing jsonl 정리 실패: {failed_count} files")
 
     _log_unset_summary()
     return processed, total, errors
