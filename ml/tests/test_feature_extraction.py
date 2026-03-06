@@ -1,5 +1,6 @@
 ﻿import os
 import sys
+import json
 import tempfile
 import unittest
 import wave
@@ -13,48 +14,65 @@ from core.oto_ml_features import (
     FEATURE_NAMES,
     _normalize_alias_for_match,
     canonicalize_feature_row,
+    dataset_fieldnames,
     extract_feature_rows,
     get_feature_schema,
 )
 from core.ja_oto_generator import (
     _adaptive_ja_overlap,
+    _collect_phone_tier_quality,
     _clamp_ja_bridge_overlap,
     _compute_vcv_params_from_virtual_split,
     _convert_ja_internal_cutoff_to_oto_field,
+    _find_ja_cv_vowel_match_index,
+    _find_ja_exact_target_index,
     _ja_is_n_bridge_alias,
+    _prefer_vcv_candidate_index,
+    _refine_ja_vc_with_adjacent_cv,
     _sanitize_ja_internal_params_for_wav_duration,
     _recenter_ja_params_around_pre,
     sanitize_ja_oto_for_wav_duration,
     _select_ja_cv_syllable_index,
     _select_vcv_syllable_index,
     detect_ja_alias_format,
+    normalize_key as normalize_ja_key,
 )
 from core.ja_lab_generator import parse_ja_filename
+from core.ja_oto_mapping import _extract_ja_cv_targets_from_lines
 from core.lab_generator import _parse_filename, _split_kr_lab_content_tokens
 from core.oto_generator import _apply_soft_mel_offset_cutoff_guard
 from core.oto_generator import _recenter_kr_params_around_pre
 from core.oto_generator import _compute_vc_from_adjacent_cv
 from core.oto_generator import _compute_kr_cvvc_vc_timing_direct
 from core.oto_generator import _compute_kr_cvvc_vv_timing_direct
+from core.oto_generator import _collect_kr_phone_tier_quality
 from core.oto_generator import _build_kr_cvvc_occurrence_map
 from core.oto_generator import _build_kr_cvvc_vv_occurrence_map
 from core.oto_generator import _build_kr_syllables_from_phone_nuclei
 from core.oto_generator import _extract_kr_cv_targets_from_filename
+from core.oto_generator import _refine_kr_bridge_with_adjacent_cv
 from core.oto_generator import _guard_kr_vc_cutoff_to_next_segment
 from core.oto_generator import _resolve_kr_cvvc_occurrence_index
 from core.oto_generator import _resolve_kr_cvvc_vv_index
 from core.oto_generator import _select_kr_cv_onset_slice
 from core.oto_generator import _should_allow_kr_exact_vowel_fix
 from core.oto_generator import _should_prefer_alias_based_syllables
+from core.oto_generator import _synthesize_kr_word_phones
 from core.oto_generator import _uses_kr_vc_context
 from core.oto_generator import _cv_match_score
 from core.oto_generator import classify_alias, detect_alias_format
+from scripts.analyze_oto_diff import analyze as analyze_oto_diff
 
 
 class FeatureExtractionTests(unittest.TestCase):
     def test_schema_contains_feature_names(self):
         schema = get_feature_schema()
         self.assertEqual(schema["feature_names"], FEATURE_NAMES)
+
+    def test_dataset_fieldnames_include_label_source_and_weight(self):
+        fields = dataset_fieldnames()
+        self.assertIn("label_source", fields)
+        self.assertIn("sample_weight", fields)
 
     def test_canonicalize_feature_row_defaults(self):
         row = canonicalize_feature_row({"language": "korean", "base_offset": 123.4})
@@ -100,6 +118,70 @@ class FeatureExtractionTests(unittest.TestCase):
             ["je", "je", "jo", "je", "n", "je", "ja"],
         )
 
+    def test_ja_normalize_key_keeps_kana(self):
+        self.assertEqual(normalize_ja_key("ききくきけきこ.wav"), "ききくきけきこ")
+        self.assertEqual(normalize_ja_key("_ききく-きけ_きこ.TextGrid"), "ききくきけきこ")
+
+    def test_ja_normalize_key_unifies_katakana_hiragana(self):
+        self.assertEqual(normalize_ja_key("ヴぃヴぃヴ.wav"), normalize_ja_key("ゔぃゔぃゔ.wav"))
+
+    def test_ja_phone_quality_flags_spn_heavy_and_insufficient_phones(self):
+        phones = [
+            SimpleNamespace(mark="spn"),
+            SimpleNamespace(mark="spn"),
+            SimpleNamespace(mark="a"),
+            SimpleNamespace(mark="sil"),
+        ]
+        q = _collect_phone_tier_quality(phones, expected_syllables=5, min_vowel_phone_ratio=0.5)
+        self.assertGreaterEqual(q["spn_ratio_in_phone_tier"], 0.5)
+        self.assertIn("insufficient_phones", q["low_confidence_reasons"])
+
+    def test_ja_phone_quality_counts_known_vowels(self):
+        phones = [
+            SimpleNamespace(mark="k"),
+            SimpleNamespace(mark="a"),
+            SimpleNamespace(mark="i"),
+            SimpleNamespace(mark="u"),
+            SimpleNamespace(mark="sil"),
+        ]
+        q = _collect_phone_tier_quality(phones, expected_syllables=3, min_vowel_phone_ratio=0.5)
+        self.assertEqual(q["known_vowel_phone_count"], 3)
+        self.assertGreaterEqual(q["phones_vs_expected_syllables_ratio"], 1.0)
+
+    def test_analyze_oto_diff_handles_partial_key_overlap(self):
+        with tempfile.TemporaryDirectory() as td:
+            base_path = os.path.join(td, "base.ini")
+            auto_path = os.path.join(td, "auto.ini")
+            report_path = os.path.join(td, "report.json")
+            with open(base_path, "w", encoding="utf-8") as f:
+                f.write("a.wav=- か,100,200,-300,120,40\n")
+                f.write("a.wav=a か,300,220,-360,130,45\n")
+            with open(auto_path, "w", encoding="utf-8") as f:
+                f.write("a.wav=- か,110,210,-320,125,43\n")
+                f.write("b.wav=a き,320,210,-340,120,40\n")
+            report = analyze_oto_diff(base_path, auto_path, language="japanese", topn=5)
+            self.assertEqual(report["counts"]["shared_rows"], 1)
+            self.assertEqual(report["counts"]["base_only"], 1)
+            self.assertEqual(report["counts"]["auto_only"], 1)
+            with open(report_path, "w", encoding="utf-8") as rf:
+                json.dump(report, rf, ensure_ascii=False, indent=2)
+            self.assertTrue(os.path.exists(report_path))
+
+    def test_ja_cv_targets_preserve_consecutive_duplicates_for_vcv(self):
+        lines = [
+            "x.wav=- ま,0,0,0,0,0",
+            "x.wav=a ま,0,0,0,0,0",
+            "x.wav=a み,0,0,0,0,0",
+            "x.wav=i ま,0,0,0,0,0",
+            "x.wav=a む,0,0,0,0,0",
+            "x.wav=u ま,0,0,0,0,0",
+            "x.wav=a め,0,0,0,0,0",
+        ]
+        self.assertEqual(
+            _extract_ja_cv_targets_from_lines(lines),
+            ["ma", "ma", "mi", "ma", "mu", "ma", "me"],
+        )
+
     def test_parse_korean_filename_ignores_apostrophe_as_phoneme(self):
         self.assertEqual(
             _parse_filename("_yu'ye'yu'yo'yu'yeo'yu'i'yu.wav", convert_to_hangul=False),
@@ -115,6 +197,26 @@ class FeatureExtractionTests(unittest.TestCase):
     def test_parse_korean_filename_merges_coda_tail_marker(self):
         self.assertEqual(_parse_filename("_l'R.wav", convert_to_hangul=False), ["lR"])
         self.assertEqual(_parse_filename("_ng'H.wav", convert_to_hangul=False), ["ngH"])
+
+    def test_kr_phone_quality_flags_insufficient_vowels(self):
+        phones = [
+            SimpleNamespace(mark="spn"),
+            SimpleNamespace(mark="k"),
+            SimpleNamespace(mark="spn"),
+            SimpleNamespace(mark="sil"),
+        ]
+        q = _collect_kr_phone_tier_quality(phones, expected_syllables=4, min_vowel_phone_ratio=0.5)
+        self.assertIn("insufficient_phones", q["low_confidence_reasons"])
+        self.assertIn("insufficient_vowel_phones", q["low_confidence_reasons"])
+        self.assertGreater(q["spn_ratio_in_phone_tier"], 0.5)
+
+    def test_kr_synthesize_word_phones_generates_minimum_nucleus(self):
+        def _dec(ch):
+            return [ch]
+        phones = _synthesize_kr_word_phones("가", 0.0, 0.2, _dec)
+        self.assertGreaterEqual(len(phones), 1)
+        # 마지막 phone은 모음핵 계열이 되도록 설계됨
+        self.assertGreater(float(phones[-1].maxTime), float(phones[-1].minTime))
 
     def test_korean_cvvc_prefers_alias_based_syllables_even_when_words_not_far_behind(self):
         self.assertTrue(_should_prefer_alias_based_syllables("cvvc", True, 72.0, 68.0))
@@ -253,6 +355,11 @@ class FeatureExtractionTests(unittest.TestCase):
         syllables = [{"word": s} for s in ["je", "je", "jo", "je", "n", "je", "ja"]]
         self.assertEqual(_select_vcv_syllable_index("a じぇ", 2, syllables), 3)
 
+    def test_japanese_vcv_selector_does_not_advance_without_exact_target(self):
+        syllables = [{"word": s} for s in ["te", "tye", "to"]]
+        # expected=0 에서 다음 칸이 유사 발음이어도 exact target("te")가 아니면 전진하지 않는다.
+        self.assertEqual(_select_vcv_syllable_index("a て", 0, syllables), 0)
+
     def test_japanese_vcv_selector_does_not_remap_backward(self):
         syllables = [{"word": s} for s in ["ja", "jo", "ja"]]
         self.assertEqual(_select_vcv_syllable_index("a じょ", 2, syllables), 2)
@@ -260,6 +367,76 @@ class FeatureExtractionTests(unittest.TestCase):
     def test_japanese_vcv_selector_does_not_overjump_more_than_one(self):
         syllables = [{"word": s} for s in ["ja", "ka", "ku", "kyo", "sa"]]
         self.assertEqual(_select_vcv_syllable_index("a きょ", 1, syllables), 1)
+
+    def test_japanese_exact_target_resync_prefers_backward_match(self):
+        syllables = [{"word": s} for s in ["ma", "mi", "mu", "me", "mo"]]
+        # expected(3=me)가 앞서간 상황에서 target=mu를 정확히 찾으면 역방향 복구한다.
+        self.assertEqual(_find_ja_exact_target_index("mu", 3, syllables, search_back=3, search_fwd=1), 2)
+
+    def test_japanese_exact_target_resync_allows_forward_two_when_exact(self):
+        syllables = [{"word": s} for s in ["zi", "zi", "zu", "zi", "ze", "zi", "zo"]]
+        # expected(0)이 뒤처진 상황에서 target=zu exact가 +2에만 있으면 그 위치로 복구한다.
+        self.assertEqual(_find_ja_exact_target_index("zu", 0, syllables, search_back=3, search_fwd=2), 2)
+
+    def test_japanese_vowel_mismatch_recovery_for_ri_vs_ra(self):
+        syllables = [{"word": s} for s in ["ra", "ri", "ru", "re"]]
+        self.assertEqual(_find_ja_cv_vowel_match_index("ri", 0, syllables, search_back=2, search_fwd=3), 1)
+
+    def test_prefer_vcv_candidate_index_allows_one_step_exact_fix(self):
+        syllables = [{"word": s} for s in ["ra", "ri", "ru"]]
+        # expected=ra, mapped=ri, target=ri -> 1칸 보정 허용
+        self.assertEqual(_prefer_vcv_candidate_index(0, 1, "ri", syllables, max_delta=1), 1)
+
+    def test_prefer_vcv_candidate_index_blocks_ambiguous_repeat_shift(self):
+        syllables = [{"word": s} for s in ["ma", "ma", "mi"]]
+        # expected/mapped 모두 target=ma 가능한 반복 구간 -> 순서 안정 우선(expected 유지)
+        self.assertEqual(_prefer_vcv_candidate_index(0, 1, "ma", syllables, max_delta=1), 0)
+
+    def test_refine_ja_vc_with_adjacent_cv_clamps_cutoff_before_next_vowel(self):
+        prev_cv = {
+            "vowel_end_abs": 1200.0,
+            "pre": 112.0,
+        }
+        next_cv = {
+            "onset_abs": 1260.0,
+            "vowel_start_abs": 1310.0,
+            "pre": 96.0,
+        }
+        o, c, ct, p, ov = _refine_ja_vc_with_adjacent_cv(
+            1060.0, 190.0, -340.0, 150.0, 70.0,
+            c_char="k",
+            prev_cv_anchor=prev_cv,
+            next_cv_anchor=next_cv,
+            prev_v_end_abs=1200.0,
+            next_c_start_abs=1260.0,
+            next_c_end_abs=1310.0,
+        )
+        cut_abs = o + abs(ct)
+        self.assertLessEqual(cut_abs, 1308.0)  # next vowel(1310) 직전
+        self.assertGreaterEqual(c, p + 8.0)
+
+    def test_refine_ja_vc_with_adjacent_cv_keeps_overlap_near_prev_vowel_tail(self):
+        prev_cv = {
+            "vowel_end_abs": 980.0,
+            "pre": 90.0,
+        }
+        next_cv = {
+            "onset_abs": 1035.0,
+            "vowel_start_abs": 1088.0,
+            "pre": 84.0,
+        }
+        o, c, ct, p, ov = _refine_ja_vc_with_adjacent_cv(
+            860.0, 160.0, -280.0, 128.0, 52.0,
+            c_char="m",
+            prev_cv_anchor=prev_cv,
+            next_cv_anchor=next_cv,
+            prev_v_end_abs=980.0,
+            next_c_start_abs=1035.0,
+            next_c_end_abs=1088.0,
+        )
+        ovl_abs = o + ov
+        self.assertGreaterEqual(ovl_abs, 960.0)
+        self.assertLessEqual(ovl_abs, 1010.0)
 
     def test_japanese_n_bridge_alias_detection(self):
         self.assertTrue(_ja_is_n_bridge_alias("n じょ", "vcv"))
@@ -405,6 +582,66 @@ class FeatureExtractionTests(unittest.TestCase):
         self.assertLessEqual(pre - ovl, 18.0)
         self.assertLessEqual(cons - pre, 76.0)
         self.assertLessEqual(abs(cut) - cons, 42.0)
+
+    def test_korean_refine_bridge_vc_uses_adjacent_cv_anchor(self):
+        prev_cv = {
+            "pre": 102.0,
+            "vowel_end_abs": 860.0,
+            "vowel_len": 190.0,
+            "cons_gap": 86.0,
+        }
+        next_cv = {
+            "pre": 96.0,
+            "onset_abs": 940.0,
+            "pre_abs": 940.0,
+            "cons_abs": 1034.0,
+            "cons_gap": 88.0,
+        }
+        off, cons, cut, pre, ovl = _refine_kr_bridge_with_adjacent_cv(
+            770.0,
+            222.0,
+            -410.0,
+            160.0,
+            52.0,
+            alias_type="vc",
+            alias_text="a t",
+            prev_cv=prev_cv,
+            next_cv=next_cv,
+        )
+        pre_abs = off + pre
+        self.assertLessEqual(abs(pre_abs - 940.0), 24.0)
+        self.assertLessEqual(pre - ovl, 24.0)
+        self.assertLessEqual(abs(cut), 184.0)
+
+    def test_korean_refine_bridge_vv_keeps_pre_ovl_gap_stable(self):
+        prev_cv = {
+            "pre": 104.0,
+            "vowel_end_abs": 1220.0,
+            "vowel_len": 220.0,
+            "cons_gap": 92.0,
+        }
+        next_cv = {
+            "pre": 98.0,
+            "onset_abs": 1285.0,
+            "pre_abs": 1285.0,
+            "cons_abs": 1380.0,
+            "cons_gap": 90.0,
+        }
+        off, cons, cut, pre, ovl = _refine_kr_bridge_with_adjacent_cv(
+            1130.0,
+            250.0,
+            -390.0,
+            150.0,
+            28.0,
+            alias_type="vv",
+            alias_text="a i",
+            prev_cv=prev_cv,
+            next_cv=next_cv,
+        )
+        self.assertGreaterEqual(pre - ovl, 4.0)
+        self.assertLessEqual(pre - ovl, 14.0)
+        self.assertGreaterEqual(cons - pre, 56.0)
+        self.assertGreater(abs(cut), cons)
 
     def test_korean_cvvc_vc_direct_timing_starts_near_previous_vowel_tail(self):
         off, cons, cut, pre, ovl = _compute_kr_cvvc_vc_timing_direct(

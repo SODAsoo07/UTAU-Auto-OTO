@@ -144,6 +144,36 @@ def _convert_ja_internal_cutoff_to_oto_field(oto_path, wav_dir):
     except Exception:
         return 0
 
+    def _needs_finalize_sanitize(row, dur_ms):
+        try:
+            offset = float(row["offset"])
+            consonant = float(row["cons"])
+            cutoff = float(row["cutoff"])
+            pre = float(row["pre"])
+            ovl = float(row["ovl"])
+            dur = float(dur_ms or 0.0)
+        except Exception:
+            return True
+        if dur <= 0.0:
+            return False
+        cutoff_abs = abs(cutoff)
+        active_len = dur - offset - cutoff_abs
+        if cutoff >= 0.0:
+            return True
+        if offset < 0.0 or pre < 0.0 or ovl < 0.0:
+            return True
+        if pre > consonant + 1.0:
+            return True
+        if ovl > pre + 1.0:
+            return True
+        if cutoff_abs <= consonant + 1.0:
+            return True
+        if active_len <= 3.0:
+            return True
+        if active_len <= consonant + 4.0:
+            return True
+        return False
+
     out_lines = []
     changed = 0
     for line in lines:
@@ -156,6 +186,9 @@ def _convert_ja_internal_cutoff_to_oto_field(oto_path, wav_dir):
         dur_ms = _wav_duration_ms(wav_path) if wav_path else 0.0
         alias_type = classify_ja_alias(row["alias"])
         if dur_ms <= 0.0:
+            out_lines.append(line)
+            continue
+        if not _needs_finalize_sanitize(row, dur_ms):
             out_lines.append(line)
             continue
 

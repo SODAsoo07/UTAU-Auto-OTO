@@ -29,6 +29,17 @@ def main():
     ap.add_argument("--lr-reduce-patience", type=int, default=1)
     ap.add_argument("--lr-reduce-min-lr", type=float, default=1e-5)
     ap.add_argument("--lr-reduce-threshold", type=float, default=0.5)
+    ap.add_argument(
+        "--residual-mode",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Train PyTorch on residual targets over a LightGBM bundle.",
+    )
+    ap.add_argument(
+        "--residual-base-model-dir",
+        default="",
+        help="LightGBM model directory used as residual base (required when --residual-mode).",
+    )
     ap.add_argument("--no-amp", action="store_true")
     ap.add_argument("--device", default="", help="Optional device override, e.g. cpu or cuda")
     ap.add_argument(
@@ -58,6 +69,8 @@ def main():
         lr_reduce_patience=args.lr_reduce_patience,
         lr_reduce_min_lr=args.lr_reduce_min_lr,
         lr_reduce_threshold=args.lr_reduce_threshold,
+        residual_mode=args.residual_mode,
+        residual_base_model_dir=args.residual_base_model_dir,
     )
     print(json.dumps({
         "backend": meta.get("backend"),
@@ -65,6 +78,8 @@ def main():
         "task_name": meta.get("task_name"),
         "train_rows": meta.get("train_rows"),
         "best_epoch": meta.get("best_epoch"),
+        "target_mode": meta.get("target_mode"),
+        "residual_base_model_dir": meta.get("residual_base_model_dir"),
     }, ensure_ascii=False, indent=2))
 
 

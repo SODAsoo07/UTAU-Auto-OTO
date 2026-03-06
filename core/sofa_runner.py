@@ -7,6 +7,7 @@ SOFA (Singing-Oriented Forced Aligner) 연동 모듈
 import os
 import sys
 import glob
+import csv
 import shutil
 import logging
 import subprocess
@@ -15,10 +16,14 @@ import zipfile
 import urllib.request
 import re
 import tempfile
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
 SOFA_REPO_URL = "https://github.com/qiuqiao/SOFA.git"
+DEFAULT_SOFA_REPO_NAME = "SOFA"
+DEFAULT_UTAU_KR_SOFA_REPO_NAME = "SOFA_UTAU_KR_v1"
 SOFA_MODEL_RELEASES = {
     "japanese": ("ariikamusic", "SOFA_Models", "akm_ja_v001"),
     "korean": ("colstone", "SOFA_Models", "KOR-V0.01b"),
@@ -51,6 +56,95 @@ def get_default_sofa_model_root():
 
 def _app_dir():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def get_default_sofa_repo_dir(profile="default"):
+    profile_key = (profile or "default").strip().lower()
+    if profile_key in {"utau_kr_v1", "kr_utau_v1", "korean_utau_v1"}:
+        repo_name = DEFAULT_UTAU_KR_SOFA_REPO_NAME
+    else:
+        repo_name = DEFAULT_SOFA_REPO_NAME
+    return os.path.join(_app_dir(), ".sofa", repo_name)
+
+
+def _resolve_sofa_repo_dir(sofa_repo_dir=""):
+    if sofa_repo_dir:
+        path = os.path.expandvars(os.path.expanduser(sofa_repo_dir))
+        if not os.path.isabs(path):
+            path = os.path.abspath(os.path.join(_app_dir(), path))
+        return path
+    return get_default_sofa_repo_dir()
+
+
+@dataclass
+class SofaAlignOptions:
+    repo_dir: str = ""
+    ckpt_path: str = ""
+    dictionary_path: str = ""
+    mode: str = "force"
+    g2p: str = "Dictionary"
+    ap_detector: str = "LoudnessSpectralcentroidAPDetector"
+    ap_detector_config: str = ""
+    save_confidence: bool = False
+    out_formats: Tuple[str, ...] = field(default_factory=lambda: ("TextGrid",))
+    extra_infer_args: Tuple[str, ...] = field(default_factory=tuple)
+
+    def to_dict(self):
+        return {
+            "repo_dir": self.repo_dir,
+            "ckpt_path": self.ckpt_path,
+            "dictionary_path": self.dictionary_path,
+            "mode": self.mode,
+            "g2p": self.g2p,
+            "ap_detector": self.ap_detector,
+            "ap_detector_config": self.ap_detector_config,
+            "save_confidence": bool(self.save_confidence),
+            "out_formats": list(self.out_formats),
+            "extra_infer_args": list(self.extra_infer_args),
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        data = dict(data or {})
+        out_formats = data.get("out_formats")
+        if isinstance(out_formats, str):
+            out_formats = tuple(
+                token.strip()
+                for token in out_formats.split(",")
+                if token and token.strip()
+            )
+        elif isinstance(out_formats, (list, tuple)):
+            out_formats = tuple(str(v).strip() for v in out_formats if str(v).strip())
+        else:
+            out_formats = ("TextGrid",)
+
+        extra_args = data.get("extra_infer_args")
+        if isinstance(extra_args, str):
+            extra_args = tuple(
+                token.strip()
+                for token in extra_args.split(" ")
+                if token and token.strip()
+            )
+        elif isinstance(extra_args, (list, tuple)):
+            extra_args = tuple(str(v) for v in extra_args if str(v).strip())
+        else:
+            extra_args = tuple()
+
+        return cls(
+            repo_dir=str(data.get("repo_dir", "")),
+            ckpt_path=str(data.get("ckpt_path", "")),
+            dictionary_path=str(data.get("dictionary_path", "")),
+            mode=str(data.get("mode", "force") or "force"),
+            g2p=str(data.get("g2p", "Dictionary") or "Dictionary"),
+            ap_detector=str(
+                data.get("ap_detector", "LoudnessSpectralcentroidAPDetector")
+                or "LoudnessSpectralcentroidAPDetector"
+            ),
+            ap_detector_config=str(data.get("ap_detector_config", "")),
+            save_confidence=bool(data.get("save_confidence", False)),
+            out_formats=out_formats or ("TextGrid",),
+            extra_infer_args=extra_args,
+        )
 
 
 def _runtime_base_dir():
@@ -391,14 +485,14 @@ def _get_torch_pair_versions(py):
     return lines[0], lines[1]
 
 
-def is_sofa_ready(sofa_python="", mfa_path=""):
+def is_sofa_ready(sofa_python="", mfa_path="", sofa_repo_dir=""):
     """
     SOFA 실행 준비 완료 여부를 판별합니다.
     - SOFA 코드(infer.py) 존재
     - 핵심 런타임 의존성 import 가능
     """
     py = _resolve_python_exe(sofa_python=sofa_python, mfa_path=mfa_path)
-    infer_py = os.path.join(_app_dir(), ".sofa", "SOFA", "infer.py")
+    infer_py = os.path.join(_resolve_sofa_repo_dir(sofa_repo_dir), "infer.py")
     if not os.path.exists(py) or not os.path.exists(infer_py):
         return False, "python 또는 infer.py가 없습니다."
 
@@ -658,11 +752,11 @@ def download_default_sofa_model(language, target_root=None, callback=None):
     return True, out_asset, ""
 
 
-def ensure_sofa_support(mfa_path="", sofa_python="", callback=None):
+def ensure_sofa_support(mfa_path="", sofa_python="", sofa_repo_dir="", callback=None):
     """
     SOFA 실행에 필요한 코드/의존성을 현재 환경에 준비합니다.
     """
-    sofa_root = os.path.join(_app_dir(), ".sofa", "SOFA")
+    sofa_root = _resolve_sofa_repo_dir(sofa_repo_dir)
     os.makedirs(os.path.dirname(sofa_root), exist_ok=True)
 
     ok_env, py, env_err = ensure_sofa_env(callback=callback)
@@ -705,26 +799,55 @@ def ensure_sofa_support(mfa_path="", sofa_python="", callback=None):
     return True, ""
 
 
-def _prepare_sofa_segments(wav_folder, dictionary_path, callback=None):
+def _prepare_sofa_segments(
+    wav_folder,
+    dictionary_path,
+    include_basenames=None,
+    seg_root="",
+    callback=None,
+):
     """
     SOFA 입력 포맷(segments/singer/*.wav, *.lab)에 맞춰 작업 폴더를 구성합니다.
+    include_basenames가 주어지면 해당 basename만 선택해 세그먼트를 구성합니다.
     """
-    seg_root = os.path.join(wav_folder, "_sofa_segments")
+    seg_root = seg_root or os.path.join(wav_folder, "_sofa_segments")
     singer_dir = os.path.join(seg_root, "singer1")
     if os.path.exists(seg_root):
         shutil.rmtree(seg_root, ignore_errors=True)
     os.makedirs(singer_dir, exist_ok=True)
+
+    include_set = None
+    if include_basenames:
+        include_set = {
+            str(name).strip()
+            for name in include_basenames
+            if str(name).strip()
+        }
 
     wavs = sorted(glob.glob(os.path.join(wav_folder, "*.wav")))
     dict_keys = _load_dictionary_keys(dictionary_path)
     copied = 0
     skipped = 0
     normalized_count = 0
+    report_rows = []
     for w in wavs:
         base = os.path.splitext(os.path.basename(w))[0]
+        if include_set is not None and base not in include_set:
+            continue
+
+        row = {
+            "name": base,
+            "wav": w,
+            "status": "",
+            "raw_lab": "",
+            "normalized_lab": "",
+            "normalized_changed": False,
+        }
         lab = os.path.join(wav_folder, base + ".lab")
         if not os.path.exists(lab):
             skipped += 1
+            row["status"] = "missing_lab"
+            report_rows.append(row)
             continue
         shutil.copy2(w, os.path.join(singer_dir, os.path.basename(w)))
         dst_lab = os.path.join(singer_dir, base + ".lab")
@@ -732,95 +855,170 @@ def _prepare_sofa_segments(wav_folder, dictionary_path, callback=None):
         norm = _normalize_lab_for_sofa(raw, dict_keys)
         with open(dst_lab, "w", encoding="utf-8") as f:
             f.write(norm)
-        if norm != raw.strip():
+        changed = norm != raw.strip()
+        if changed:
             normalized_count += 1
         copied += 1
+        row["status"] = "copied"
+        row["raw_lab"] = raw.strip()
+        row["normalized_lab"] = norm
+        row["normalized_changed"] = bool(changed)
+        report_rows.append(row)
 
     if callback:
         callback(
             f"📁 SOFA 입력 세그먼트 준비: {copied}개 "
             f"(lab 없음 스킵 {skipped}개, lab 정규화 {normalized_count}개)"
         )
-    return seg_root, copied
+    return seg_root, copied, report_rows
 
 
-def _collect_textgrids(seg_root, output_folder, callback=None):
-    os.makedirs(output_folder, exist_ok=True)
+def _write_rows_as_csv_json(rows, csv_path, json_path):
+    rows = list(rows or [])
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    os.makedirs(os.path.dirname(json_path), exist_ok=True)
+
+    with open(json_path, "w", encoding="utf-8") as jf:
+        json.dump(rows, jf, indent=2, ensure_ascii=False)
+
+    fieldnames = sorted({k for row in rows for k in row.keys()})
+    with open(csv_path, "w", encoding="utf-8", newline="") as cf:
+        if fieldnames:
+            writer = csv.DictWriter(cf, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+        else:
+            cf.write("")
+
+
+def _collect_textgrid_map(seg_root):
     patterns = [
         os.path.join(seg_root, "**", "TextGrid", "*.TextGrid"),
         os.path.join(seg_root, "**", "textgrid", "*.TextGrid"),
     ]
     tg_files = []
-    for p in patterns:
-        tg_files.extend(glob.glob(p, recursive=True))
+    for pattern in patterns:
+        tg_files.extend(glob.glob(pattern, recursive=True))
     tg_files = sorted(set(tg_files))
 
-    copied = 0
+    result = {}
     for tg in tg_files:
-        dst = os.path.join(output_folder, os.path.basename(tg))
-        shutil.copy2(tg, dst)
+        name = os.path.splitext(os.path.basename(tg))[0]
+        result[name] = tg
+    return result
+
+
+def _copy_textgrids_from_map(textgrid_map, output_folder, names=None, callback=None, tag=""):
+    os.makedirs(output_folder, exist_ok=True)
+    selected = list(names) if names is not None else sorted(textgrid_map.keys())
+    copied = 0
+    for name in selected:
+        source = textgrid_map.get(name)
+        if not source:
+            continue
+        target = os.path.join(output_folder, os.path.basename(source))
+        shutil.copy2(source, target)
         copied += 1
     if callback:
-        callback(f"📂 SOFA TextGrid 수집 완료: {copied}개 -> {output_folder}")
+        prefix = f"{tag} " if tag else ""
+        callback(f"📂 {prefix}SOFA TextGrid 수집 완료: {copied}개 -> {output_folder}")
     return copied
 
 
-def run_sofa_align(
-    wav_folder,
-    output_folder,
+def _collect_textgrids(seg_root, output_folder, callback=None):
+    # 기존 내부 API 호환용
+    tg_map = _collect_textgrid_map(seg_root)
+    return _copy_textgrids_from_map(tg_map, output_folder, callback=callback)
+
+
+def _normalize_out_formats(out_formats):
+    if isinstance(out_formats, str):
+        tokens = [token.strip() for token in out_formats.split(",") if token.strip()]
+    elif isinstance(out_formats, (list, tuple)):
+        tokens = [str(token).strip() for token in out_formats if str(token).strip()]
+    else:
+        tokens = []
+    if not tokens:
+        tokens = ["TextGrid"]
+
+    deduped = []
+    seen = set()
+    for token in tokens:
+        key = token.lower()
+        if key in seen:
+            continue
+        deduped.append(token)
+        seen.add(key)
+    return deduped
+
+
+def _normalize_extra_infer_args(extra_infer_args):
+    if not extra_infer_args:
+        return []
+    if isinstance(extra_infer_args, str):
+        return [token for token in extra_infer_args.split(" ") if token]
+    if isinstance(extra_infer_args, (list, tuple)):
+        return [str(token) for token in extra_infer_args if str(token).strip()]
+    return []
+
+
+def _normalize_infer_mode(mode, fallback="force"):
+    mode = str(mode or "").strip().lower()
+    if mode in {"force", "match"}:
+        return mode
+    return fallback
+
+
+def _resolve_infer_entry(sofa_root):
+    wrapper_infer = os.path.join(_app_dir(), "sofa_utau_kr", "scripts", "infer_utau_kr.py")
+    repo_name = os.path.basename(os.path.normpath(sofa_root)).lower()
+    if (
+        repo_name == DEFAULT_UTAU_KR_SOFA_REPO_NAME.lower()
+        and os.path.exists(wrapper_infer)
+    ):
+        return wrapper_infer, True
+    return os.path.join(sofa_root, "infer.py"), False
+
+
+def _run_sofa_infer(
+    py,
+    infer_py,
+    infer_is_wrapper,
     ckpt_path,
+    seg_root,
     dictionary_path,
-    mfa_path="",
-    sofa_python="",
+    out_formats,
+    mode,
+    g2p,
+    ap_detector,
+    ap_detector_config,
+    save_confidence,
+    extra_infer_args,
+    sofa_root,
+    run_env,
     callback=None,
 ):
-    """
-    SOFA 정렬 실행 후 TextGrid를 output_folder로 모읍니다.
-    """
-    if not os.path.exists(wav_folder):
-        return False, f"WAV 폴더를 찾을 수 없습니다: {wav_folder}"
-    if not ckpt_path or not os.path.exists(ckpt_path):
-        return False, f"SOFA 체크포인트(.ckpt) 파일을 찾을 수 없습니다: {ckpt_path}"
-    if not dictionary_path or not os.path.exists(dictionary_path):
-        return False, f"SOFA 사전 파일을 찾을 수 없습니다: {dictionary_path}"
-
-    ok, err = ensure_sofa_support(
-        mfa_path=mfa_path,
-        sofa_python=sofa_python,
-        callback=callback,
+    cmd = [py, "-X", "utf8", infer_py]
+    if infer_is_wrapper:
+        cmd.extend(["--sofa_repo_dir", sofa_root])
+    cmd.extend(
+        [
+            "--ckpt", ckpt_path,
+            "--folder", seg_root,
+            "--dictionary", dictionary_path,
+            "--mode", _normalize_infer_mode(mode, fallback="force"),
+            "--g2p", str(g2p or "Dictionary"),
+            "--ap_detector", str(ap_detector or "LoudnessSpectralcentroidAPDetector"),
+            "--out_formats", ",".join(_normalize_out_formats(out_formats)),
+        ]
     )
-    if not ok:
-        return False, err
+    if infer_is_wrapper and ap_detector_config:
+        cmd.extend(["--ap_config", ap_detector_config])
+    if save_confidence:
+        cmd.append("--save_confidence")
+    cmd.extend(_normalize_extra_infer_args(extra_infer_args))
 
-    py = _resolve_python_exe(sofa_python=sofa_python, mfa_path=mfa_path)
-    sofa_root = os.path.join(_app_dir(), ".sofa", "SOFA")
-    infer_py = os.path.join(sofa_root, "infer.py")
-    if not os.path.exists(infer_py):
-        return False, "SOFA infer.py를 찾을 수 없습니다."
-
-    seg_root, count = _prepare_sofa_segments(
-        wav_folder,
-        dictionary_path=dictionary_path,
-        callback=callback,
-    )
-    if count == 0:
-        return False, "SOFA 입력용 wav/lab 쌍이 없습니다. 먼저 Lab 생성 단계를 실행해 주세요."
-
-    if callback:
-        callback("🚀 SOFA 정렬 시작...")
-    run_env = os.environ.copy()
-    run_env["PYTHONUTF8"] = "1"
-    run_env["PYTHONIOENCODING"] = "utf-8"
-    runtime_ffmpeg_bin = _ensure_runtime_ffmpeg_bin(callback=callback)
-    extra_bins = [runtime_ffmpeg_bin] if runtime_ffmpeg_bin else []
-    run_env = _prepend_ffmpeg_to_env_path(run_env, callback=callback, extra_dirs=extra_bins)
-    cmd = [
-        py, "-X", "utf8", infer_py,
-        "--ckpt", ckpt_path,
-        "--folder", seg_root,
-        "--dictionary", dictionary_path,
-        "--out_formats", "TextGrid",
-    ]
     rc, out = _run(cmd, callback=callback, cwd=sofa_root, env=run_env)
     if rc != 0 and (
         "TorchCodec is required for load_with_torchcodec" in (out or "")
@@ -834,10 +1032,314 @@ def run_sofa_align(
         rc, out = _run(cmd, callback=callback, cwd=sofa_root, env=run_env)
     if rc != 0:
         return False, f"SOFA 정렬 실패 (코드: {rc})\n{out[-1000:] if out else ''}"
+    return True, ""
 
-    copied = _collect_textgrids(seg_root, output_folder, callback=callback)
+
+def _load_confidence_map(seg_root):
+    conf_files = glob.glob(
+        os.path.join(seg_root, "**", "confidence", "confidence.csv"),
+        recursive=True,
+    )
+    confidence_map = {}
+    rows = []
+    for conf_file in sorted(set(conf_files)):
+        try:
+            with open(conf_file, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    name = str(row.get("name", "")).strip()
+                    if not name:
+                        continue
+                    raw_conf = row.get("confidence", "")
+                    try:
+                        conf = float(raw_conf)
+                    except (TypeError, ValueError):
+                        continue
+                    # 동일 name이 여러 번 나타날 수 있어 마지막 값(최신 파일 순서)으로 덮어씀
+                    confidence_map[name] = conf
+                    rows.append(
+                        {
+                            "name": name,
+                            "confidence": conf,
+                            "source": conf_file,
+                        }
+                    )
+        except OSError:
+            continue
+    return confidence_map, rows
+
+
+def run_sofa_align(
+    wav_folder,
+    output_folder,
+    ckpt_path,
+    dictionary_path,
+    mfa_path="",
+    sofa_python="",
+    callback=None,
+    sofa_repo_dir="",
+    mode="force",
+    g2p="Dictionary",
+    ap_detector="LoudnessSpectralcentroidAPDetector",
+    ap_detector_config="",
+    save_confidence=False,
+    out_formats=None,
+    extra_infer_args=None,
+    two_pass_retry=False,
+    two_pass_retry_mode="match",
+    confidence_threshold=0.55,
+    low_confidence_max_files=0,
+):
+    """
+    SOFA 정렬 실행 후 TextGrid를 output_folder로 모읍니다.
+    - runtime 옵션(mode/g2p/ap_detector/out_formats/save_confidence) 지원
+    - optional 2-pass(force->match) 저신뢰 재시도 지원
+    """
+    if not os.path.exists(wav_folder):
+        return False, f"WAV 폴더를 찾을 수 없습니다: {wav_folder}"
+    if not ckpt_path or not os.path.exists(ckpt_path):
+        return False, f"SOFA 체크포인트(.ckpt) 파일을 찾을 수 없습니다: {ckpt_path}"
+    if not dictionary_path or not os.path.exists(dictionary_path):
+        return False, f"SOFA 사전 파일을 찾을 수 없습니다: {dictionary_path}"
+
+    sofa_root = _resolve_sofa_repo_dir(sofa_repo_dir)
+    ok, err = ensure_sofa_support(
+        mfa_path=mfa_path,
+        sofa_python=sofa_python,
+        sofa_repo_dir=sofa_root,
+        callback=callback,
+    )
+    if not ok:
+        return False, err
+
+    py = _resolve_python_exe(sofa_python=sofa_python, mfa_path=mfa_path)
+    infer_py, infer_is_wrapper = _resolve_infer_entry(sofa_root)
+    if not os.path.exists(infer_py):
+        return False, f"SOFA infer.py를 찾을 수 없습니다: {infer_py}"
+
+    seg_root, count, norm_rows = _prepare_sofa_segments(
+        wav_folder,
+        dictionary_path=dictionary_path,
+        callback=callback,
+    )
+    if count == 0:
+        return False, "SOFA 입력용 wav/lab 쌍이 없습니다. 먼저 Lab 생성 단계를 실행해 주세요."
+
+    os.makedirs(output_folder, exist_ok=True)
+    try:
+        _write_rows_as_csv_json(
+            norm_rows,
+            os.path.join(output_folder, "sofa_normalization_report.csv"),
+            os.path.join(output_folder, "sofa_normalization_report.json"),
+        )
+    except OSError:
+        pass
+
+    if callback:
+        callback("🚀 SOFA 정렬 시작...")
+        callback(f"ℹ SOFA repo 경로: {sofa_root}")
+        if infer_is_wrapper:
+            callback(f"ℹ UTAU KR infer 래퍼 사용: {infer_py}")
+
+    run_env = os.environ.copy()
+    run_env["PYTHONUTF8"] = "1"
+    run_env["PYTHONIOENCODING"] = "utf-8"
+    runtime_ffmpeg_bin = _ensure_runtime_ffmpeg_bin(callback=callback)
+    extra_bins = [runtime_ffmpeg_bin] if runtime_ffmpeg_bin else []
+    run_env = _prepend_ffmpeg_to_env_path(run_env, callback=callback, extra_dirs=extra_bins)
+
+    pass1_mode = _normalize_infer_mode(mode, fallback="force")
+    pass2_mode = _normalize_infer_mode(two_pass_retry_mode, fallback="match")
+    if isinstance(two_pass_retry, str):
+        run_two_pass = two_pass_retry.strip().lower() in {"1", "true", "yes", "on", "y"}
+    else:
+        run_two_pass = bool(two_pass_retry)
+    try:
+        confidence_threshold = float(confidence_threshold)
+    except (TypeError, ValueError):
+        confidence_threshold = 0.55
+    try:
+        low_confidence_max_files = int(low_confidence_max_files or 0)
+    except (TypeError, ValueError):
+        low_confidence_max_files = 0
+
+    effective_out_formats = _normalize_out_formats(out_formats)
+    if isinstance(save_confidence, str):
+        save_conf = save_confidence.strip().lower() in {"1", "true", "yes", "on", "y"}
+    else:
+        save_conf = bool(save_confidence)
+    effective_save_confidence = bool(save_conf or run_two_pass)
+
+    ok_infer, infer_err = _run_sofa_infer(
+        py=py,
+        infer_py=infer_py,
+        infer_is_wrapper=infer_is_wrapper,
+        ckpt_path=ckpt_path,
+        seg_root=seg_root,
+        dictionary_path=dictionary_path,
+        out_formats=effective_out_formats,
+        mode=pass1_mode,
+        g2p=g2p,
+        ap_detector=ap_detector,
+        ap_detector_config=ap_detector_config,
+        save_confidence=effective_save_confidence,
+        extra_infer_args=extra_infer_args,
+        sofa_root=sofa_root,
+        run_env=run_env,
+        callback=callback,
+    )
+    if not ok_infer:
+        return False, infer_err
+
+    tg_map_pass1 = _collect_textgrid_map(seg_root)
+    copied = _copy_textgrids_from_map(
+        tg_map_pass1,
+        output_folder,
+        callback=callback,
+        tag="1차",
+    )
     if copied <= 0:
         return False, "SOFA 정렬은 완료됐지만 TextGrid 결과를 찾지 못했습니다."
+
+    pass1_conf_map, pass1_conf_rows = _load_confidence_map(seg_root)
+    if pass1_conf_rows:
+        try:
+            _write_rows_as_csv_json(
+                pass1_conf_rows,
+                os.path.join(output_folder, "sofa_confidence_pass1.csv"),
+                os.path.join(output_folder, "sofa_confidence_pass1.json"),
+            )
+        except OSError:
+            pass
+
+    pass2_conf_map = {}
+    pass2_conf_rows = []
+    selected_pass = {name: "pass1" for name in tg_map_pass1.keys()}
+
+    if run_two_pass and pass1_mode == "force":
+        low_conf_names = [
+            name
+            for name, conf in pass1_conf_map.items()
+            if conf < confidence_threshold
+        ]
+        low_conf_names = sorted(set(low_conf_names))
+        if low_confidence_max_files > 0:
+            low_conf_names = low_conf_names[:low_confidence_max_files]
+
+        if callback:
+            callback(
+                f"ℹ 저신뢰 샘플 탐지: {len(low_conf_names)}개 "
+                f"(threshold={confidence_threshold:.3f}, mode={pass1_mode}->{pass2_mode})"
+            )
+
+        if low_conf_names:
+            retry_seg_root = os.path.join(wav_folder, "_sofa_segments_retry")
+            _, retry_count, retry_norm_rows = _prepare_sofa_segments(
+                wav_folder,
+                dictionary_path=dictionary_path,
+                include_basenames=low_conf_names,
+                seg_root=retry_seg_root,
+                callback=callback,
+            )
+            if retry_count > 0:
+                try:
+                    _write_rows_as_csv_json(
+                        retry_norm_rows,
+                        os.path.join(output_folder, "sofa_normalization_report_retry.csv"),
+                        os.path.join(output_folder, "sofa_normalization_report_retry.json"),
+                    )
+                except OSError:
+                    pass
+
+                ok_retry, retry_err = _run_sofa_infer(
+                    py=py,
+                    infer_py=infer_py,
+                    infer_is_wrapper=infer_is_wrapper,
+                    ckpt_path=ckpt_path,
+                    seg_root=retry_seg_root,
+                    dictionary_path=dictionary_path,
+                    out_formats=effective_out_formats,
+                    mode=pass2_mode,
+                    g2p=g2p,
+                    ap_detector=ap_detector,
+                    ap_detector_config=ap_detector_config,
+                    save_confidence=True,
+                    extra_infer_args=extra_infer_args,
+                    sofa_root=sofa_root,
+                    run_env=run_env,
+                    callback=callback,
+                )
+                if not ok_retry and callback:
+                    callback(f"⚠ 2-pass 재시도 실패: {retry_err}")
+                if ok_retry:
+                    tg_map_pass2 = _collect_textgrid_map(retry_seg_root)
+                    pass2_conf_map, pass2_conf_rows = _load_confidence_map(retry_seg_root)
+                    if pass2_conf_rows:
+                        try:
+                            _write_rows_as_csv_json(
+                                pass2_conf_rows,
+                                os.path.join(output_folder, "sofa_confidence_pass2.csv"),
+                                os.path.join(output_folder, "sofa_confidence_pass2.json"),
+                            )
+                        except OSError:
+                            pass
+
+                    better_names = []
+                    for name in low_conf_names:
+                        if name not in tg_map_pass2:
+                            continue
+                        conf1 = pass1_conf_map.get(name)
+                        conf2 = pass2_conf_map.get(name)
+                        if conf2 is None:
+                            continue
+                        if conf1 is None or conf2 > conf1:
+                            better_names.append(name)
+                    better_names = sorted(set(better_names))
+                    if better_names:
+                        _copy_textgrids_from_map(
+                            tg_map_pass2,
+                            output_folder,
+                            names=better_names,
+                            callback=callback,
+                            tag="2차 채택",
+                        )
+                        for name in better_names:
+                            selected_pass[name] = "pass2"
+                    if callback:
+                        callback(
+                            f"ℹ 2-pass 채택: {len(better_names)}개 / 재시도 {len(low_conf_names)}개"
+                        )
+
+    summary_rows = []
+    all_names = sorted(set(list(tg_map_pass1.keys()) + list(pass2_conf_map.keys())))
+    for name in all_names:
+        conf1 = pass1_conf_map.get(name)
+        conf2 = pass2_conf_map.get(name)
+        selected = selected_pass.get(name, "pass1")
+        if selected == "pass2" and conf2 is not None:
+            final_conf = conf2
+        else:
+            final_conf = conf1
+        summary_rows.append(
+            {
+                "name": name,
+                "pass1_confidence": conf1,
+                "pass2_confidence": conf2,
+                "selected_pass": selected,
+                "final_confidence": final_conf,
+                "low_confidence": bool(conf1 is not None and conf1 < confidence_threshold),
+            }
+        )
+    if summary_rows:
+        try:
+            _write_rows_as_csv_json(
+                summary_rows,
+                os.path.join(output_folder, "sofa_confidence_summary.csv"),
+                os.path.join(output_folder, "sofa_confidence_summary.json"),
+            )
+        except OSError:
+            pass
+
     return True, ""
 
 

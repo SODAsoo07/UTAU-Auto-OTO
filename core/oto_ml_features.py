@@ -32,8 +32,8 @@ from core.oto_ml_mapping_quality import augment_mapping_quality_features
 
 logger = logging.getLogger(__name__)
 
-FEATURE_VERSION = "v4"
-TRAIN_ROW_MATCH_VERSION = "v4"
+FEATURE_VERSION = "v5"
+TRAIN_ROW_MATCH_VERSION = "v5"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
 
 FEATURE_NAMES = [
@@ -54,18 +54,82 @@ FEATURE_NAMES = [
     "next_base_cutoff_abs",
     "mapping_confidence", "used_alias_occurrence_mapping", "used_exact_vowel_fix",
     "used_nuclei_fallback", "used_alias_based_syllables", "words_vs_alias_score_margin",
+    "jump_blocked_flag", "mapping_reason_code",
     "local_peak_db", "local_valley_db", "mel_window_energy_mean", "mel_window_silence_ratio",
 ]
 
 CATEGORICAL_FEATURES = [
     "language", "format_type", "alias_type", "alias_group", "onset_class", "voicing_class",
     "coda_type", "vowel_class", "mora_position", "bridge_type", "prev_alias_type",
-    "next_alias_type",
+    "next_alias_type", "mapping_reason_code",
 ]
 
 FEATURE_DEFAULTS = {name: 0.0 for name in FEATURE_NAMES}
 for _name in CATEGORICAL_FEATURES:
     FEATURE_DEFAULTS[_name] = ""
+
+_PSEUDO_PATH_HINTS = ("pseudo", "autotest", "auto", "generated", "output", "out", "tuned")
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = str(os.environ.get(name, "")).strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in {"1", "true", "yes", "on", "y"}:
+        return True
+    if raw in {"0", "false", "no", "off", "n"}:
+        return False
+    return bool(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except Exception:
+        return float(default)
+
+
+def _looks_like_pseudo_path(path: str) -> bool:
+    low = str(path or "").replace("\\", "/").strip().lower()
+    if not low:
+        return False
+    return any(hint in low for hint in _PSEUDO_PATH_HINTS)
+
+
+def _compute_row_weight(
+    *,
+    label_source: str,
+    mapping_confidence: float,
+    keep_default: int,
+    jump_blocked_flag: int,
+) -> float:
+    source = str(label_source or "").strip().lower()
+    if not source.startswith("pseudo"):
+        return 1.0
+
+    if keep_default <= 0:
+        return 0.0
+    if int(jump_blocked_flag) > 0:
+        return 0.0
+
+    conf = float(mapping_confidence)
+    high = _env_float("UTOA_ML_PSEUDO_WEIGHT_HIGH", 0.7)
+    mid = _env_float("UTOA_ML_PSEUDO_WEIGHT_MID", 0.4)
+    use_pseudo = _env_flag("UTOA_ML_USE_PSEUDO_LABELS", True)
+    if not use_pseudo:
+        return 0.0
+    if source == "pseudo_high":
+        return max(0.0, min(1.0, high))
+    if source == "pseudo_mid":
+        return max(0.0, min(1.0, mid))
+    if source == "pseudo_low":
+        return 0.0
+    # Generic pseudo source without bucket.
+    if conf >= 0.80:
+        return max(0.0, min(1.0, high))
+    if conf >= 0.60:
+        return max(0.0, min(1.0, mid))
+    return 0.0
 
 KR_DELTA_CLIP_LIMITS = {
     "delta_offset": [-220.0, 220.0],
@@ -936,6 +1000,20 @@ def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str
                 wav_rows[idx - 1] if idx > 0 else None,
                 wav_rows[idx + 1] if idx + 1 < len(wav_rows) else None,
             )
+            if "mapping_confidence" in row:
+                try:
+                    feat["mapping_confidence"] = float(row.get("mapping_confidence", feat.get("mapping_confidence", 0.0)))
+                except Exception:
+                    pass
+            if "mapping_reason_code" in row and str(row.get("mapping_reason_code", "")).strip():
+                feat["mapping_reason_code"] = str(row.get("mapping_reason_code", "")).strip()
+            if "jump_blocked_flag" in row:
+                try:
+                    feat["jump_blocked_flag"] = 1.0 if float(row.get("jump_blocked_flag", 0.0) or 0.0) > 0.0 else 0.0
+                except Exception:
+                    feat["jump_blocked_flag"] = 0.0
+            if not str(feat.get("mapping_reason_code", "")).strip():
+                feat["mapping_reason_code"] = "unknown"
             feat["voicebank_id"] = vb_id
             feat["wav"] = row["wav"]
             feat["wav_norm"] = row["wav_norm"]
@@ -1168,6 +1246,14 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
     matched_rows: List[Dict[str, object]] = []
     skipped = 0
     skipped_cutoff = 0
+    label_counts = {
+        "manual": 0,
+        "pseudo_high": 0,
+        "pseudo_mid": 0,
+        "pseudo_low": 0,
+    }
+
+    manual_like_pseudo = _looks_like_pseudo_path(manual_oto_path)
 
     for feat_idx, feat in enumerate(auto_feats):
         manual_row = manual_matches.get(feat_idx)
@@ -1175,6 +1261,13 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
             skipped += 1
             continue
         row = dict(feat)
+        if not str(row.get("mapping_reason_code", "")).strip():
+            row["mapping_reason_code"] = "unknown"
+        try:
+            row["jump_blocked_flag"] = 1.0 if float(row.get("jump_blocked_flag", 0.0) or 0.0) > 0.0 else 0.0
+        except Exception:
+            row["jump_blocked_flag"] = 0.0
+
         row["manual_offset"] = float(manual_row["offset"])
         row["manual_cons"] = float(manual_row["cons"])
         row["manual_cutoff"] = float(manual_row["cutoff"])
@@ -1200,6 +1293,28 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
         row["train_keep_default"] = int(keep_default)
         row["train_skip_reason"] = skip_reason
         row["train_quality_score"] = float(quality_score)
+        mapping_conf = float(row.get("mapping_confidence", 0.0) or 0.0)
+        jump_blocked = int(float(row.get("jump_blocked_flag", 0.0) or 0.0) > 0.0)
+        if manual_like_pseudo:
+            if keep_default > 0 and (mapping_conf >= 0.80) and not jump_blocked:
+                label_source = "pseudo_high"
+            elif keep_default > 0 and (mapping_conf >= 0.60) and not jump_blocked:
+                label_source = "pseudo_mid"
+            else:
+                label_source = "pseudo_low"
+        else:
+            label_source = "manual"
+        row["label_source"] = label_source
+        row["sample_weight"] = float(
+            _compute_row_weight(
+                label_source=label_source,
+                mapping_confidence=mapping_conf,
+                keep_default=int(keep_default),
+                jump_blocked_flag=jump_blocked,
+            )
+        )
+        if label_source in label_counts:
+            label_counts[label_source] += 1
         row["skipped_reason"] = ""
         matched_rows.append(row)
 
@@ -1213,6 +1328,10 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
         "matched_time_nearest": int(match_stats.get("time_nearest", 0)),
         "skip_mapping_far": int(match_stats.get("skip_far", 0)),
         "skip_mapping_unmatched": int(match_stats.get("skip_unmatched", 0)),
+        "label_manual": int(label_counts["manual"]),
+        "label_pseudo_high": int(label_counts["pseudo_high"]),
+        "label_pseudo_mid": int(label_counts["pseudo_mid"]),
+        "label_pseudo_low": int(label_counts["pseudo_low"]),
     }
     _save_training_row_cache(cache_path, matched_rows, stats)
     return matched_rows, stats
@@ -1223,7 +1342,9 @@ def dataset_fieldnames() -> List[str]:
         "voicebank_id", "wav", "alias", "wav_norm", "alias_norm", "occurrence_index", "line_index",
         *FEATURE_NAMES,
         "manual_offset", "manual_cons", "manual_cutoff", "manual_pre", "manual_ovl",
-        *TARGET_NAMES, "train_keep_default", "train_skip_reason", "train_quality_score", "skipped_reason",
+        *TARGET_NAMES,
+        "label_source", "sample_weight",
+        "train_keep_default", "train_skip_reason", "train_quality_score", "skipped_reason",
     ]
 
 

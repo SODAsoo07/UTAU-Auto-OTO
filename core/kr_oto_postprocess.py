@@ -149,6 +149,15 @@ class KrPostprocessContext:
                 offset, consonant, cutoff, pre, current_w_idx, self.syllables_info
             )
 
+        # 회귀 방지: CV/VC의 pre-con/cut 길이가 지나치게 짧아지지 않도록 최소 폭을 보장.
+        if alias_type in {"cv", "cv_head"}:
+            consonant = max(float(consonant), float(pre) + 58.0)
+            cutoff_abs = max(abs(float(cutoff)), float(consonant) + 44.0)
+            cutoff = -cutoff_abs
+        elif alias_type == "vc":
+            consonant = max(float(consonant), float(pre) + 24.0)
+            cutoff_abs = max(abs(float(cutoff)), float(consonant) + 16.0)
+            cutoff = -cutoff_abs
+
         offset, consonant, cutoff, pre, ovl = self.validate_fn(offset, consonant, cutoff, pre, ovl)
         return offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift, cutoff_reduced
-

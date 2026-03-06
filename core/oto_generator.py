@@ -11,6 +11,7 @@ import wave
 import datetime
 import logging
 from functools import lru_cache
+from types import SimpleNamespace
 import textgrid
 import copy
 
@@ -75,6 +76,7 @@ from core.kr_oto_bridge import (
     _apply_kr_consonant_timing_shaping,
     _compute_kr_cvvc_vc_timing_direct,
     _compute_vc_from_adjacent_cv,
+    _refine_kr_bridge_with_adjacent_cv,
     _recenter_kr_params_around_pre,
 )
 from core.kr_oto_cv import (
@@ -94,6 +96,15 @@ from core.kr_oto_postprocess import (
     KrPostprocessContext,
     guard_kr_vc_cutoff_to_next_segment as _guard_kr_vc_cutoff_to_next_segment_core,
     log_post_timing_events as _log_post_timing_events_core,
+)
+from core.timing_anchor_profiles import (
+    get_anchor_profile,
+    is_anchor_lock_enabled,
+)
+from core.timing_anchor_runtime import (
+    AnchorTimingContext,
+    apply_anchor_lock,
+    append_timing_anchor_log,
 )
 from core.textio_utils import load_template_oto_lines
 from core.oto_profile_presets import get_kr_profile_preset
@@ -156,6 +167,36 @@ DEFAULT_PARAMS = {
     'DIPHTHONG_VC_CONSONANT': 0.5,
     'DIPHTHONG_VC_PRE_EXTEND': 1.2,
 }
+
+# 한국어 매핑 신뢰도 임계치 기본값(포맷별)
+# - CVVC: 현재 안정성 기준값 유지
+# - VCV: 점프 허용 전 신뢰도를 조금 더 엄격하게 본다
+# - CVC/CV_SIMPLE: 정보량이 상대적으로 단순해 과도한 저신뢰 판정을 완화
+# - VC_ONLY/VV_ONLY: CV 정렬 점프 로직 영향이 거의 없어 완화값 사용
+KR_MAPPING_CONF_THRESHOLD_BY_FORMAT = {
+    "cvvc": 0.60,
+    "vcv": 0.62,
+    "cvc": 0.58,
+    "cv_simple": 0.58,
+    "mono": 0.58,
+    "vc_only": 0.56,
+    "vv_only": 0.56,
+    "default": 0.60,
+}
+
+
+def _resolve_kr_mapping_conf_threshold(file_format, override_threshold=None):
+    if override_threshold is not None:
+        try:
+            return float(override_threshold)
+        except Exception:
+            pass
+    fmt = str(file_format or "").strip().lower()
+    base = KR_MAPPING_CONF_THRESHOLD_BY_FORMAT.get(
+        fmt,
+        KR_MAPPING_CONF_THRESHOLD_BY_FORMAT["default"],
+    )
+    return float(base)
 
 
 def normalize_key(name):
@@ -251,21 +292,21 @@ def _guard_cv_cutoff_to_next_onset(offset, consonant, cutoff, pre, syll_idx, syl
     hard_next = is_plosive_ipa(next_mark) or next_mark in {
         "s", "ss", "sh", "ch", "j", "jj", "c", "ts", "h"
     }
-    safety = 16.0 if hard_next else 10.0
+    safety = 12.0 if hard_next else 7.0
     next_onset_rel = (next_phones[0].minTime * 1000.0) - offset
     max_cutoff_abs = next_onset_rel - safety
-    if max_cutoff_abs <= (pre + 18.0):
+    if max_cutoff_abs <= (pre + 26.0):
         return offset, consonant, cutoff, pre, 0.0
 
     original_cutoff_abs = abs(cutoff)
     consonant = min(consonant, max_cutoff_abs - 14.0)
-    consonant = max(consonant, pre + 10.0)
+    consonant = max(consonant, pre + 16.0)
 
     cutoff_abs = min(original_cutoff_abs, max_cutoff_abs)
     if cutoff_abs <= (consonant + 8.0):
-        cutoff_abs = min(max_cutoff_abs, consonant + 10.0)
+        cutoff_abs = min(max_cutoff_abs, consonant + 14.0)
         if cutoff_abs <= (consonant + 6.0):
-            consonant = max(pre + 8.0, cutoff_abs - 10.0)
+            consonant = max(pre + 12.0, cutoff_abs - 12.0)
     cutoff = -cutoff_abs
 
     offset, consonant, cutoff, pre, _ovl = validate_oto_params(
@@ -438,9 +479,31 @@ def _append_alias_rows(
         final_lines.append(new_line)
 
 
-def _resolve_cv_syllable_index(target_clean, romaji_syllables, cv_seq_idx, current_w_idx):
+def _resolve_cv_syllable_index(
+    target_clean,
+    romaji_syllables,
+    cv_seq_idx,
+    current_w_idx,
+    *,
+    mapping_confidence=1.0,
+    max_jump_default=1,
+    max_jump_high_conf=2,
+    high_conf_threshold=0.82,
+    return_meta=False,
+):
     """CV 계열 alias를 words/roman 음절 인덱스에 매핑합니다."""
+    meta = {
+        "jump_blocked": 0,
+        "raw_chosen_idx": int(cv_seq_idx),
+        "chosen_idx": int(cv_seq_idx),
+        "max_forward_jump": int(max_jump_default),
+        "best_score": -1.0,
+        "expected_score": -1.0,
+        "mapping_confidence": float(mapping_confidence or 0.0),
+    }
     if cv_seq_idx >= len(romaji_syllables):
+        if return_meta:
+            return current_w_idx, cv_seq_idx, meta
         return current_w_idx, cv_seq_idx
 
     name_match_idx = None
@@ -460,6 +523,8 @@ def _resolve_cv_syllable_index(target_clean, romaji_syllables, cv_seq_idx, curre
     expected_score = -1
     if 0 <= cv_seq_idx < len(romaji_syllables):
         expected_score = _cv_match_score(target_clean, romaji_syllables[cv_seq_idx])
+    meta["best_score"] = float(best_score)
+    meta["expected_score"] = float(expected_score)
 
     if name_match_idx is not None and best_score >= 62:
         chosen_idx = name_match_idx
@@ -507,6 +572,19 @@ def _resolve_cv_syllable_index(target_clean, romaji_syllables, cv_seq_idx, curre
         if name_match_idx < cv_seq_idx:
             if same_vowel_expected or expected_score >= 38 or best_gain < 32:
                 chosen_idx = cv_seq_idx
+        # 신뢰도 기반 전진 점프 제한.
+        max_forward_jump = int(max(0, max_jump_default))
+        conf = float(mapping_confidence or 0.0)
+        if conf >= float(high_conf_threshold):
+            if best_score >= 84 and best_gain >= 24:
+                max_forward_jump = int(max(max_forward_jump, max_jump_high_conf))
+        meta["max_forward_jump"] = int(max_forward_jump)
+        raw_chosen_idx = int(chosen_idx)
+        if chosen_idx > (cv_seq_idx + max_forward_jump):
+            chosen_idx = cv_seq_idx + max_forward_jump
+            meta["jump_blocked"] = 1
+        meta["raw_chosen_idx"] = int(raw_chosen_idx)
+        meta["chosen_idx"] = int(chosen_idx)
         if chosen_idx < cv_seq_idx:
             chosen_idx = cv_seq_idx
         current_w_idx = chosen_idx
@@ -514,6 +592,8 @@ def _resolve_cv_syllable_index(target_clean, romaji_syllables, cv_seq_idx, curre
         current_w_idx = cv_seq_idx
 
     cv_seq_idx = current_w_idx + 1
+    if return_meta:
+        return current_w_idx, cv_seq_idx, meta
     return current_w_idx, cv_seq_idx
 
 
@@ -771,6 +851,167 @@ def _build_kr_syllables_from_phone_nuclei(ph_intervals, cv_targets):
         })
 
     return out
+
+
+def _collect_kr_phone_tier_quality(phone_tier, expected_syllables, min_vowel_phone_ratio=0.5):
+    """
+    phones tier 품질을 계산합니다.
+    - 비침묵 phone 수
+    - spn 비율
+    - 핵 모음 phone 수
+    - 기대 음절 대비 phone 수 비율
+    """
+    silence_marks = {"", "sil", "pau", "sp"}
+    phone_count_non_sil = 0
+    spn_count = 0
+    known_vowel_phone_count = 0
+    for p in phone_tier or []:
+        mark = str(getattr(p, "mark", "") or "").strip().lower()
+        if mark in silence_marks:
+            continue
+        phone_count_non_sil += 1
+        if mark == "spn":
+            spn_count += 1
+            continue
+        if _is_kr_nucleus_phone_mark(mark):
+            known_vowel_phone_count += 1
+
+    expected = max(0, int(expected_syllables or 0))
+    spn_ratio = float(spn_count) / float(max(1, phone_count_non_sil))
+    phones_vs_expected = (
+        float(phone_count_non_sil) / float(max(1, expected))
+        if expected > 0 else 0.0
+    )
+    min_vowel_needed = max(2, int(round(expected * max(0.1, float(min_vowel_phone_ratio or 0.5)))))
+    reasons = []
+    if expected > 0 and phone_count_non_sil < expected:
+        reasons.append("insufficient_phones")
+    if expected > 0 and known_vowel_phone_count < min_vowel_needed:
+        reasons.append("insufficient_vowel_phones")
+
+    return {
+        "phone_count_non_sil": int(phone_count_non_sil),
+        "spn_count": int(spn_count),
+        "spn_ratio_in_phone_tier": float(spn_ratio),
+        "known_vowel_phone_count": int(known_vowel_phone_count),
+        "phones_vs_expected_syllables_ratio": float(phones_vs_expected),
+        "expected_syllables": int(expected),
+        "low_confidence_reasons": reasons,
+    }
+
+
+def _estimate_kr_mapping_confidence(
+    phone_quality,
+    words_score=0.0,
+    alias_score=0.0,
+    used_words_based=True,
+    used_alias_based=False,
+):
+    """
+    한국어 음절 매핑 신뢰도를 0~1로 추정합니다.
+    - phones/words 품질
+    - words vs alias 점수 마진
+    - 적용된 매핑 경로
+    """
+    pq = phone_quality or {}
+    spn_ratio = float(pq.get("spn_ratio_in_phone_tier", 0.0) or 0.0)
+    ratio_vs_expected = float(pq.get("phones_vs_expected_syllables_ratio", 0.0) or 0.0)
+    known_vowel_count = float(pq.get("known_vowel_phone_count", 0.0) or 0.0)
+    expected = float(max(1, int(pq.get("expected_syllables", 0) or 0)))
+    low_reasons = set(pq.get("low_confidence_reasons", []) or [])
+
+    score_words = float(words_score or 0.0)
+    score_alias = float(alias_score or 0.0)
+    margin = score_words - score_alias
+
+    conf = 1.0
+    conf -= min(spn_ratio * 0.55, 0.45)
+    conf -= min(abs(1.0 - ratio_vs_expected) * 0.28, 0.28)
+    conf += min((known_vowel_count / expected) * 0.18, 0.18)
+    conf += min(max(score_words, score_alias) / 100.0 * 0.14, 0.14)
+    if used_words_based and not used_alias_based:
+        conf += 0.05
+    if used_alias_based and not used_words_based:
+        conf -= 0.04
+    conf += max(-0.12, min(0.12, margin / 100.0))
+    if "insufficient_phones" in low_reasons:
+        conf -= 0.14
+    if "insufficient_vowel_phones" in low_reasons:
+        conf -= 0.10
+    if "spn_heavy" in low_reasons:
+        conf -= 0.20
+    conf = max(0.0, min(1.0, conf))
+    return float(conf), float(margin)
+
+
+def _cleanup_timing_anchor_jsonl_files(log_dir, prefix):
+    if not log_dir or not os.path.isdir(log_dir):
+        return 0, 0
+    removed = 0
+    failed = 0
+    try:
+        names = os.listdir(log_dir)
+    except Exception:
+        return 0, 1
+    for name in names:
+        if not name.startswith(prefix) or not name.endswith(".jsonl"):
+            continue
+        path = os.path.join(log_dir, name)
+        try:
+            os.remove(path)
+            removed += 1
+        except Exception:
+            failed += 1
+    return removed, failed
+
+
+def _synthesize_kr_word_phones(word, w_start, w_end, decompose_hangul_to_roman):
+    """
+    words 구간에 대응하는 phones가 비어 있을 때 최소 합성 phone을 생성합니다.
+    """
+    start = float(w_start)
+    end = float(w_end)
+    if end <= start:
+        end = start + 0.03
+    duration = max(0.03, end - start)
+
+    roman_parts = []
+    for ch in str(word or ""):
+        roman_parts.extend(decompose_hangul_to_roman(ch))
+    roman_raw = "".join(roman_parts).lower()
+    token = _kr_cv_kernel(roman_raw) if roman_raw else ""
+    onset, vowel, coda = _split_kr_syllable_parts(token)
+
+    if not vowel and token in KR_VOWELS:
+        vowel = token
+    if not vowel:
+        vowel = "a"
+    vowel_ipa = {
+        "a": "a",
+        "i": "i",
+        "u": "u",
+        "e": "e",
+        "o": "o",
+        "eo": "ʌ",
+        "eu": "ɯ",
+        "ae": "ɛ",
+        "oe": "ø",
+        "wi": "wi",
+        "wo": "wo",
+        "wa": "wa",
+        "we": "we",
+        "weo": "wʌ",
+    }.get(vowel, vowel)
+
+    phones = []
+    onset_end = start + duration * 0.35
+    vowel_end = end - (duration * 0.2 if coda else 0.0)
+    if onset:
+        phones.append(SimpleNamespace(minTime=start, maxTime=max(start + 0.01, onset_end), mark=onset))
+    phones.append(SimpleNamespace(minTime=max(start + 0.005, onset_end if onset else start), maxTime=max(start + 0.02, vowel_end), mark=vowel_ipa))
+    if coda:
+        phones.append(SimpleNamespace(minTime=max(start + 0.02, vowel_end), maxTime=end, mark=coda))
+    return phones
 
 
 def validate_oto_params(offset, consonant, cutoff, pre, ovl):
@@ -1050,7 +1291,7 @@ def _apply_base_shape_blend(offset, consonant, cutoff, pre, ovl, base_shape, ali
             return validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
     if alias_type == "vc":
-        w = 0.10
+        w = 0.16
     elif alias_type == "vv":
         w = 0.16
     elif alias_type == "vcv":
@@ -2028,10 +2269,18 @@ def generate_oto(
     generate_openutau=False,
     gen_missing_vowels=False,
     enable_ml_correction=True,
-    enable_pytorch_bridge=False,
     fallback_format='cvvc',
     custom_phonemes_path='',
     alias_suffix='',
+    kr_mapping_words_fallback_enabled=True,
+    kr_mapping_spn_ratio_threshold=0.35,
+    kr_mapping_min_vowel_phone_ratio=0.5,
+    kr_mapping_debug_reason_logging=True,
+    kr_anchor_profile_path="",
+    kr_mapping_confidence_threshold=None,
+    kr_mapping_max_index_jump_default=1,
+    kr_mapping_max_index_jump_high_conf=2,
+    cleanup_timing_jsonl=True,
     auto_format=None,
     callback=None
 ):
@@ -2069,6 +2318,55 @@ def generate_oto(
             callback(msg)
         auto_gen_format = "cvvc"
 
+    env_words_fallback = str(os.environ.get("UTOA_KR_MAPPING_WORDS_FALLBACK", "")).strip().lower()
+    if env_words_fallback in {"0", "false", "off", "no"}:
+        kr_mapping_words_fallback_enabled = False
+    elif env_words_fallback in {"1", "true", "on", "yes"}:
+        kr_mapping_words_fallback_enabled = True
+    env_spn_th = str(os.environ.get("UTOA_KR_MAPPING_SPN_RATIO_THRESHOLD", "")).strip()
+    if env_spn_th:
+        try:
+            kr_mapping_spn_ratio_threshold = float(env_spn_th)
+        except Exception:
+            pass
+    env_vowel_ratio = str(os.environ.get("UTOA_KR_MAPPING_MIN_VOWEL_PHONE_RATIO", "")).strip()
+    if env_vowel_ratio:
+        try:
+            kr_mapping_min_vowel_phone_ratio = float(env_vowel_ratio)
+        except Exception:
+            pass
+    env_debug_reason = str(os.environ.get("UTOA_KR_MAPPING_DEBUG_REASON", "")).strip().lower()
+    if env_debug_reason in {"0", "false", "off", "no"}:
+        kr_mapping_debug_reason_logging = False
+    elif env_debug_reason in {"1", "true", "on", "yes"}:
+        kr_mapping_debug_reason_logging = True
+    env_anchor_profile = str(os.environ.get("UTOA_KR_ANCHOR_PROFILE_PATH", "")).strip()
+    if env_anchor_profile:
+        kr_anchor_profile_path = env_anchor_profile
+    env_conf_th = str(os.environ.get("UTOA_KR_MAPPING_CONF_THRESHOLD", "")).strip()
+    if env_conf_th:
+        try:
+            kr_mapping_confidence_threshold = float(env_conf_th)
+        except Exception:
+            pass
+    env_jump_default = str(os.environ.get("UTOA_KR_MAPPING_MAX_INDEX_JUMP_DEFAULT", "")).strip()
+    if env_jump_default:
+        try:
+            kr_mapping_max_index_jump_default = int(float(env_jump_default))
+        except Exception:
+            pass
+    env_jump_hi = str(os.environ.get("UTOA_KR_MAPPING_MAX_INDEX_JUMP_HIGH_CONF", "")).strip()
+    if env_jump_hi:
+        try:
+            kr_mapping_max_index_jump_high_conf = int(float(env_jump_hi))
+        except Exception:
+            pass
+    env_cleanup_jsonl = str(os.environ.get("UTOA_CLEANUP_TIMING_JSONL", "")).strip().lower()
+    if env_cleanup_jsonl in {"0", "false", "off", "no"}:
+        cleanup_timing_jsonl = False
+    elif env_cleanup_jsonl in {"1", "true", "on", "yes"}:
+        cleanup_timing_jsonl = True
+
     def log(msg):
         if callback:
             callback(msg)
@@ -2077,8 +2375,18 @@ def generate_oto(
 
     errors = []
     skipped_entries = []
+    anchor_stats = {
+        "anchor_locked_count": 0,
+        "cutoff_clamped_count": 0,
+        "vc_cutoff_leak_guard_count": 0,
+    }
+    _core_dir = os.path.dirname(os.path.abspath(__file__))
+    _project_dir = os.path.dirname(_core_dir)
+    _anchor_log_dir = os.path.join(_project_dir, "logs")
+    _anchor_log_name = f"timing_anchor_kr_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+    anchor_log_path = os.path.join(_anchor_log_dir, _anchor_log_name)
 
-    def _record_unset(reason, fname, line):
+    def _record_unset(reason, fname, line, meta=None):
         raw = (line or "").rstrip("\n")
         alias = ""
         if "=" in raw:
@@ -2089,11 +2397,12 @@ def generate_oto(
             "file": fname or "",
             "alias": alias,
             "line": raw,
+            "meta": meta or {},
         })
 
-    def _record_unset_lines(reason, fname, src_lines):
+    def _record_unset_lines(reason, fname, src_lines, meta=None):
         for raw in (src_lines or []):
-            _record_unset(reason, fname, raw)
+            _record_unset(reason, fname, raw, meta=meta)
 
     def _log_unset_summary():
         total_unset = len(skipped_entries)
@@ -2107,12 +2416,102 @@ def generate_oto(
         log(f"[Auto-OTO] 자동 설정 제외 항목: {total_unset}건")
         for reason, count in sorted(by_reason.items(), key=lambda x: (-x[1], x[0])):
             log(f"  - {reason}: {count}")
+            shown = 0
             for it in skipped_entries:
                 if it["reason"] != reason:
                     continue
                 alias_txt = it["alias"] if it["alias"] else "<empty>"
-                log(f"    예시: {it['file']} | alias={alias_txt}")
-                break
+                meta = it.get("meta") or {}
+                extra = f" | {meta.get('diag_hint')}" if meta.get("diag_hint") else ""
+                log(f"    예시: {it['file']} | alias={alias_txt}{extra}")
+                shown += 1
+                if shown >= 5:
+                    break
+
+    def _apply_kr_anchor_lock(
+        *,
+        fname: str,
+        alias_text: str,
+        format_type: str,
+        alias_type: str,
+        offset: float,
+        consonant: float,
+        cutoff: float,
+        pre: float,
+        ovl: float,
+        timeline_start_ms: float,
+        timeline_end_ms: float,
+        file_duration_ms: float,
+        anchor_abs_ms: float,
+        next_onset_abs_ms: float | None = None,
+        next_vowel_abs_ms: float | None = None,
+        mapping_confidence: float = 1.0,
+        lite: bool = False,
+    ):
+        fmt = str(format_type or "").strip().lower()
+        if not is_anchor_lock_enabled("korean", fmt):
+            return offset, consonant, cutoff, pre, ovl
+
+        profile = get_anchor_profile("korean", fmt, alias_type, mode="rhythm_stable")
+        if profile is None:
+            return offset, consonant, cutoff, pre, ovl
+
+        before = (float(offset), float(consonant), float(cutoff), float(pre), float(ovl))
+        ctx = AnchorTimingContext(
+            file_duration_ms=float(file_duration_ms or 0.0),
+            timeline_start_ms=float(timeline_start_ms or 0.0),
+            timeline_end_ms=float(timeline_end_ms or 0.0),
+            anchor_abs_ms=float(anchor_abs_ms) if anchor_abs_ms is not None else None,
+            next_onset_abs_ms=float(next_onset_abs_ms) if next_onset_abs_ms is not None else None,
+            next_vowel_abs_ms=float(next_vowel_abs_ms) if next_vowel_abs_ms is not None else None,
+            alias_type=str(alias_type or ""),
+            language="korean",
+            format_type=fmt,
+            mapping_confidence=float(mapping_confidence or 1.0),
+        )
+        result = apply_anchor_lock(
+            before,
+            ctx,
+            profile,
+            validate_fn=validate_oto_params,
+            lite=bool(lite),
+        )
+        rules = set(result.applied_rules or [])
+        if rules:
+            anchor_stats["anchor_locked_count"] += 1
+            if "cutoff_next_onset_clamp" in rules or "cutoff_next_vowel_clamp" in rules:
+                anchor_stats["cutoff_clamped_count"] += 1
+                if str(alias_type or "").strip().lower() == "vc":
+                    anchor_stats["vc_cutoff_leak_guard_count"] += 1
+            append_timing_anchor_log(
+                anchor_log_path,
+                {
+                    "event": "anchor_lock",
+                    "language": "korean",
+                    "format_type": fmt,
+                    "alias_type": alias_type,
+                    "file": fname,
+                    "alias": alias_text,
+                    "lite": bool(lite),
+                    "before": {
+                        "offset": before[0],
+                        "consonant": before[1],
+                        "cutoff": before[2],
+                        "pre": before[3],
+                        "ovl": before[4],
+                    },
+                    "after": {
+                        "offset": float(result.offset),
+                        "consonant": float(result.consonant),
+                        "cutoff": float(result.cutoff),
+                        "pre": float(result.pre),
+                        "ovl": float(result.ovl),
+                    },
+                    "anchor_shift_ms": float(result.anchor_shift_ms),
+                    "rules": sorted(rules),
+                },
+            )
+        return result.offset, result.consonant, result.cutoff, result.pre, result.ovl
 
     kr_profile = None
     profile_path = _default_kr_profile_cache_path()
@@ -2122,6 +2521,10 @@ def generate_oto(
             kr_profile = _load_kr_reference_profile(env_profile)
             if kr_profile:
                 log(f"[KR-Profile] 외부 프로파일 로드: {env_profile}")
+
+        if kr_anchor_profile_path:
+            os.environ["UTOA_KR_ANCHOR_PROFILE_PATH"] = str(kr_anchor_profile_path)
+            log(f"[KR-Anchor] 외부 앵커 프로파일 사용: {kr_anchor_profile_path}")
 
         if not kr_profile:
             kr_profile = _load_kr_reference_profile(profile_path)
@@ -2415,12 +2818,17 @@ def generate_oto(
         real_wav_name = tg_info['real_name']
         wav_path_for_signal = _find_wav_path_for_name(real_wav_name, wav_root_for_signal, wav_index_for_signal)
         mel_ctx_for_file = None
+        wav_duration_ms = 0.0
         if wav_path_for_signal:
             mel_ctx_for_file = mel_cache_for_signal.get(wav_path_for_signal)
             if mel_ctx_for_file is None:
                 audio_sig, sr_sig = _read_wav_mono_np(wav_path_for_signal)
                 mel_ctx_for_file = _mel_envelope(audio_sig, sr_sig)
                 mel_cache_for_signal[wav_path_for_signal] = mel_ctx_for_file
+                if sr_sig:
+                    wav_duration_ms = (len(audio_sig) / float(sr_sig)) * 1000.0
+            else:
+                wav_duration_ms = _wav_duration_ms(wav_path_for_signal)
 
         try:
             tg = textgrid.TextGrid.fromFile(tg_path)
@@ -2440,17 +2848,47 @@ def generate_oto(
                 processed += 1
                 continue
 
+            try:
+                from core.lab_generator import decompose_hangul_to_roman
+            except ImportError:
+                def decompose_hangul_to_roman(ch):
+                    return [ch]
 
-            ph_intervals_all = [i for i in phone_tier if i.mark.strip() not in ['', 'spn', 'pau']]
-            ph_intervals = [i for i in ph_intervals_all if i.mark.strip() not in ['sil']]
+
+            phone_silence_marks = {'', 'sil', 'pau', 'sp'}
+            ph_intervals_raw = [i for i in phone_tier if i.mark.strip().lower() not in phone_silence_marks]
+            ph_intervals_all = [i for i in ph_intervals_raw if i.mark.strip().lower() not in {'spn'}]
+            ph_intervals = [i for i in ph_intervals_all if i.mark.strip().lower() not in {'sil'}]
             wd_intervals = [i for i in word_tier if i.mark.strip() not in ['', 'sil', 'spn', 'pau']] if word_tier else []
 
             if len(ph_intervals) == 0:
-                log(f"경고: {fname}: 유효한 음소 구간이 없어 원본 라인을 유지합니다.")
-                _record_unset_lines("empty_intervals", fname, lines)
-                final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
-                processed += 1
-                continue
+                if kr_mapping_words_fallback_enabled and wd_intervals:
+                    fallback_phones = []
+                    for w in wd_intervals:
+                        fallback_phones.extend(
+                            _synthesize_kr_word_phones(
+                                w.mark,
+                                float(w.minTime),
+                                float(w.maxTime),
+                                decompose_hangul_to_roman,
+                            )
+                        )
+                    ph_intervals = fallback_phones
+                    ph_intervals_all = fallback_phones
+                if len(ph_intervals) == 0:
+                    log(f"경고: {fname}: 유효한 음소 구간이 없어 원본 라인을 유지합니다.")
+                    _record_unset_lines("mapping_failed_empty_intervals", fname, lines)
+                    final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
+                    processed += 1
+                    continue
+
+            timeline_start_ms = float(ph_intervals[0].minTime * 1000.0)
+            timeline_end_ms = float(ph_intervals[-1].maxTime * 1000.0)
+            if wd_intervals:
+                timeline_start_ms = min(timeline_start_ms, float(wd_intervals[0].minTime * 1000.0))
+                timeline_end_ms = max(timeline_end_ms, float(wd_intervals[-1].maxTime * 1000.0))
+            if wav_duration_ms <= 0.0:
+                wav_duration_ms = timeline_end_ms
 
 
             if len(ph_intervals) == 1 and len(wd_intervals) == 1:
@@ -2512,30 +2950,60 @@ def generate_oto(
                 continue
             file_format = detect_alias_format(alias_names, custom_map=custom_map)
             log(f"처리: {fname}: 형식 감지 -> {file_format.upper()}")
+            file_mapping_conf_th = _resolve_kr_mapping_conf_threshold(
+                file_format,
+                override_threshold=kr_mapping_confidence_threshold,
+            )
             
             is_vc_only = (file_format == 'vc_only')
             is_vcv_file = (file_format == 'vcv')
 
-
-            try:
-                from core.lab_generator import decompose_hangul_to_roman
-            except ImportError:
-                def decompose_hangul_to_roman(ch):
-                    return [ch]
-            
             cv_targets = _extract_cv_targets_from_lines(lines, custom_map)
             filename_cv_targets = _extract_kr_cv_targets_from_filename(real_wav_name)
             targets_for_build = cv_targets
             if file_format == "cvvc" and filename_cv_targets:
                 targets_for_build = filename_cv_targets
+            elif (not targets_for_build) and filename_cv_targets:
+                targets_for_build = filename_cv_targets
+            expected_syllables = max(len(wd_intervals), len(cv_targets), len(filename_cv_targets))
+            phone_quality = _collect_kr_phone_tier_quality(
+                phone_tier,
+                expected_syllables=expected_syllables,
+                min_vowel_phone_ratio=kr_mapping_min_vowel_phone_ratio,
+            )
+            low_quality_reasons = list(phone_quality.get("low_confidence_reasons", []))
+            spn_ratio = float(phone_quality.get("spn_ratio_in_phone_tier", 0.0))
+            if spn_ratio >= float(kr_mapping_spn_ratio_threshold):
+                low_quality_reasons.append("spn_heavy")
+            low_quality_reasons = sorted(set(low_quality_reasons))
+            low_phone_quality = bool(low_quality_reasons)
+            force_words_phone_fill = bool(
+                kr_mapping_words_fallback_enabled and low_phone_quality and wd_intervals
+            )
+            if force_words_phone_fill and kr_mapping_debug_reason_logging:
+                log(
+                    f"🧭 {fname}: phones 신뢰도 낮음({','.join(low_quality_reasons)}) "
+                    f"→ words 구간 보강 매핑 사용"
+                )
             syllables_info = []
             used_words_based = False
+            used_alias_based = False
+            base_score = 0.0
+            alt_score = 0.0
+            mapping_reason_code = "filename_token"
             if wd_intervals:
                 for w in wd_intervals:
                     w_start = w.minTime
                     w_end = w.maxTime
 
                     s_phones = [p for p in ph_intervals if p.minTime >= w_start - 0.01 and p.maxTime <= w_end + 0.01]
+                    if force_words_phone_fill and not s_phones:
+                        s_phones = _synthesize_kr_word_phones(
+                            w.mark,
+                            float(w_start),
+                            float(w_end),
+                            decompose_hangul_to_roman,
+                        )
                     roman_parts = []
                     for ch in w.mark:
                         roman_parts.extend(decompose_hangul_to_roman(ch))
@@ -2553,38 +3021,90 @@ def generate_oto(
                 used_words_based = len(syllables_info) > 0
 
             alias_based = _build_kr_syllables_from_phone_nuclei(ph_intervals, targets_for_build) if targets_for_build else None
-            if not syllables_info and alias_based:
+            if syllables_info and any(len(s.get('phones') or []) == 0 for s in syllables_info) and alias_based:
                 syllables_info = alias_based
+                used_alias_based = True
+                used_words_based = False
+                mapping_reason_code = "alias_based_empty_words"
+                log(f"🧭 {fname}: words 매핑에 빈 phone 구간 존재 → alias/phone 기반 음절 매핑 사용")
+            elif not syllables_info and alias_based:
+                syllables_info = alias_based
+                used_alias_based = True
+                used_words_based = False
+                mapping_reason_code = "alias_phone_minimal"
                 log(f"🧭 {fname}: words 티어 없음/실패 → phones 핵 기반 음절 매핑 사용")
             elif syllables_info and alias_based and targets_for_build:
-                base_score = _score_kr_syllable_mapping(syllables_info, targets_for_build)
-                alt_score = _score_kr_syllable_mapping(alias_based, targets_for_build)
-                if _should_prefer_alias_based_syllables(file_format, used_words_based, base_score, alt_score):
+                base_score = float(_score_kr_syllable_mapping(syllables_info, targets_for_build))
+                alt_score = float(_score_kr_syllable_mapping(alias_based, targets_for_build))
+                if low_phone_quality and used_words_based:
+                    mapping_reason_code = "words_low_phone_quality"
+                    log(
+                        f"🧭 {fname}: phones 저신뢰({','.join(low_quality_reasons)}) → words 매핑 고정 "
+                        f"(words={base_score:.1f}, alias={alt_score:.1f})"
+                    )
+                elif _should_prefer_alias_based_syllables(file_format, used_words_based, base_score, alt_score):
                     syllables_info = alias_based
+                    used_alias_based = True
                     if file_format == "cvvc":
+                        mapping_reason_code = "alias_based_cvvc"
                         log(
                             f"🧭 {fname}: CVVC는 alias 기반 음절 매핑 우선 "
                             f"(words={base_score:.1f}, alias={alt_score:.1f})"
                         )
                     else:
+                        mapping_reason_code = "alias_based_recover"
                         log(
                             f"🧭 {fname}: 매핑 이탈 보정 적용 "
                             f"(base={base_score:.1f}, corrected={alt_score:.1f})"
                         )
                 else:
                     if file_format != "cvvc" and used_words_based and base_score >= 58.0 and alt_score >= (base_score + 8.0):
+                        mapping_reason_code = "words_keep_high_conf"
                         log(
                             f"🧭 {fname}: words 매핑 신뢰도 높음 → alias 보정 생략 "
                             f"(base={base_score:.1f}, corrected={alt_score:.1f})"
                         )
+                    else:
+                        mapping_reason_code = "words_keep"
                     log(
                         f"🧭 {fname}: TextGrid(words) 매핑 유지 "
                         f"(base={base_score:.1f}, corrected={alt_score:.1f})"
                     )
 
+            mapping_confidence_base, mapping_margin = _estimate_kr_mapping_confidence(
+                phone_quality,
+                words_score=base_score,
+                alias_score=alt_score,
+                used_words_based=used_words_based,
+                used_alias_based=used_alias_based,
+            )
+            if kr_mapping_debug_reason_logging and mapping_confidence_base < float(file_mapping_conf_th):
+                log(
+                    f"🧭 {fname}: KR 매핑 신뢰도 낮음(conf={mapping_confidence_base:.2f}, "
+                    f"margin={mapping_margin:+.1f}, reason={mapping_reason_code})"
+                )
+
             if (not syllables_info) or any(len(s['phones']) == 0 for s in syllables_info):
                 log(f"경고: {fname}: 음절-음소 매핑 실패로 원본 라인을 유지합니다.")
-                _record_unset_lines("mapping_failed", fname, lines)
+                fail_reason = "mapping_failed"
+                if "spn_heavy" in low_quality_reasons:
+                    fail_reason = "mapping_failed_spn_heavy"
+                elif "insufficient_phones" in low_quality_reasons or "insufficient_vowel_phones" in low_quality_reasons:
+                    fail_reason = "mapping_failed_insufficient_phones"
+                elif low_phone_quality and not wd_intervals:
+                    fail_reason = "mapping_failed_no_words_support"
+                _record_unset_lines(
+                    fail_reason,
+                    fname,
+                    lines,
+                    meta={
+                        "diag_hint": f"spn_ratio={spn_ratio:.2f}; conf={mapping_confidence_base:.2f}",
+                        "phone_quality": phone_quality,
+                        "force_words_phone_fill": force_words_phone_fill,
+                        "mapping_confidence": mapping_confidence_base,
+                        "mapping_reason_code": mapping_reason_code,
+                    },
+                )
                 final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
                 processed += 1
                 continue
@@ -2602,6 +3122,7 @@ def generate_oto(
                 i: _estimate_cv_anchor_from_syllable(syllables_info[i], ph_intervals)
                 for i in range(len(syllables_info))
             }
+            realized_cv_anchor_by_idx = {}
             kr_post_ctx = KrPostprocessContext(
                 file_format=file_format,
                 mel_ctx_for_file=mel_ctx_for_file,
@@ -2628,6 +3149,9 @@ def generate_oto(
                     final_lines.append(apply_suffix_to_oto_line(preserved, alias_suffix))
                     continue
                 base_shape = _extract_base_timing_shape(line)
+                row_mapping_confidence = float(mapping_confidence_base)
+                row_mapping_reason_code = str(mapping_reason_code or "")
+                row_jump_blocked = 0
                 
 
                 alias_type = _classify_alias_cached(alias)
@@ -2821,6 +3345,38 @@ def generate_oto(
                         enable_cutoff_guard=False,
                         post_ctx=kr_post_ctx,
                     )
+                    vcv_anchor = None
+                    vcv_next_onset = None
+                    vcv_next_vowel = None
+                    if 0 <= current_w_idx < len(syllables_info):
+                        vcv_curr = syllables_info[current_w_idx]
+                        vcv_phones = vcv_curr.get("phones") or []
+                        if vcv_phones:
+                            if len(vcv_phones) >= 2:
+                                vcv_anchor = float(vcv_phones[-1].minTime) * 1000.0
+                                vcv_next_onset = vcv_anchor
+                                vcv_next_vowel = float(vcv_phones[-1].maxTime) * 1000.0
+                            else:
+                                vcv_anchor = float(vcv_phones[0].maxTime) * 1000.0
+                    if vcv_anchor is not None:
+                        offset, consonant, cutoff, pre, ovl = _apply_kr_anchor_lock(
+                            fname=fname,
+                            alias_text=alias,
+                            format_type=file_format,
+                            alias_type="vcv",
+                            offset=offset,
+                            consonant=consonant,
+                            cutoff=cutoff,
+                            pre=pre,
+                            ovl=ovl,
+                            timeline_start_ms=timeline_start_ms,
+                            timeline_end_ms=timeline_end_ms,
+                            file_duration_ms=wav_duration_ms,
+                            anchor_abs_ms=vcv_anchor,
+                            next_onset_abs_ms=vcv_next_onset,
+                            next_vowel_abs_ms=vcv_next_vowel,
+                            mapping_confidence=row_mapping_confidence,
+                        )
                     _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
                     
                     _append_alias_rows(
@@ -2918,6 +3474,60 @@ def generate_oto(
                         offset, consonant, cutoff, pre, selected_w_idx, syllables_info
                     )
                     cutoff_reduced += cutoff_reduced_after_offset
+                    cvh_anchor = None
+                    _sw_c_start = None
+                    _sw_c_end = None
+                    _sw_n_start = None
+                    _sw_n_end = None
+                    try:
+                        _sw_idx, _sw_phones, _sw_c_start, _sw_c_end, _sw_n_start, _sw_n_end = _prepare_cv_bounds_from_syllable(
+                            syllables_info, selected_w_idx
+                        )
+                        cvh_anchor = _sw_c_end
+                    except Exception:
+                        cvh_anchor = n_start if n_start is not None else cvh_anchor
+                    if cvh_anchor is not None:
+                        offset, consonant, cutoff, pre, ovl = _apply_kr_anchor_lock(
+                            fname=fname,
+                            alias_text=alias,
+                            format_type=file_format,
+                            alias_type="cv_head",
+                            offset=offset,
+                            consonant=consonant,
+                            cutoff=cutoff,
+                            pre=pre,
+                            ovl=ovl,
+                            timeline_start_ms=timeline_start_ms,
+                            timeline_end_ms=timeline_end_ms,
+                            file_duration_ms=wav_duration_ms,
+                            anchor_abs_ms=cvh_anchor,
+                            next_onset_abs_ms=n_start,
+                            next_vowel_abs_ms=n_end,
+                            mapping_confidence=row_mapping_confidence,
+                        )
+                    if (
+                        selected_w_idx is not None
+                        and _sw_c_start is not None
+                        and _sw_c_end is not None
+                    ):
+                        realized_cv_anchor_by_idx[selected_w_idx] = {
+                            "offset": float(offset),
+                            "pre": float(pre),
+                            "ovl": float(ovl),
+                            "cons": float(consonant),
+                            "cutoff": float(cutoff),
+                            "pre_abs": float(offset + pre),
+                            "cons_abs": float(offset + consonant),
+                            "onset_abs": float(_sw_c_start),
+                            "vowel_start_abs": float(_sw_n_start if _sw_n_start is not None else n_start),
+                            "vowel_end_abs": float(_sw_n_end if _sw_n_end is not None else n_end),
+                            "vowel_len": max(
+                                12.0,
+                                float((_sw_n_end if _sw_n_end is not None else n_end) - (_sw_n_start if _sw_n_start is not None else n_start)),
+                            ),
+                            "cons_gap": max(float(consonant - pre), 10.0),
+                            "cut_gap": max(float(abs(cutoff) - consonant), 16.0),
+                        }
                     _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
                     if offset_reduced > 1.0:
                         log(f"🛡️ {fname}: CV_HEAD 오프셋 과선행 보정(+{offset_reduced:.1f}ms) [{alias}]")
@@ -2955,16 +3565,39 @@ def generate_oto(
                     )
                     expected_cv_idx = cv_seq_idx
                     selected_w_idx = None
+                    resolve_meta = {}
                     forced_selected_idx = forced_vv_idx if forced_vv_idx is not None else forced_cvvc_idx
                     if forced_selected_idx is not None:
                         selected_w_idx = forced_selected_idx
                         cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
+                        row_mapping_reason_code = "forced_occurrence_index"
                     else:
-                        selected_w_idx, cv_seq_idx = _resolve_cv_syllable_index(
-                            target_clean, romaji_syllables, cv_seq_idx, current_w_idx
+                        selected_w_idx, cv_seq_idx, resolve_meta = _resolve_cv_syllable_index(
+                            target_clean,
+                            romaji_syllables,
+                            cv_seq_idx,
+                            current_w_idx,
+                            mapping_confidence=row_mapping_confidence,
+                            max_jump_default=kr_mapping_max_index_jump_default,
+                            max_jump_high_conf=kr_mapping_max_index_jump_high_conf,
+                            high_conf_threshold=max(float(file_mapping_conf_th), 0.50),
+                            return_meta=True,
                         )
+                        row_jump_blocked = int(resolve_meta.get("jump_blocked", 0) or 0)
+                        if row_jump_blocked and kr_mapping_debug_reason_logging:
+                            log(
+                                f"🛡️ {fname}: KR 매핑 전진 점프 차단 "
+                                f"({int(resolve_meta.get('raw_chosen_idx', selected_w_idx)) + 1}"
+                                f"->{int(resolve_meta.get('chosen_idx', selected_w_idx)) + 1}, {alias})"
+                            )
+                        if row_jump_blocked:
+                            row_mapping_confidence = max(0.0, row_mapping_confidence - 0.18)
+                            row_mapping_reason_code = "jump_blocked"
                     target_onset, target_vowel, _target_coda = _split_kr_syllable_parts(target_clean)
-                    allow_exact_vowel_fix = _should_allow_kr_exact_vowel_fix(file_format, forced_selected_idx)
+                    allow_exact_vowel_fix = (
+                        _should_allow_kr_exact_vowel_fix(file_format, forced_selected_idx)
+                        and float(row_mapping_confidence) >= float(file_mapping_conf_th)
+                    )
                     if target_vowel and 0 <= selected_w_idx < len(romaji_syllables) and allow_exact_vowel_fix:
                         _curr_onset, curr_vowel, _curr_coda = _split_kr_syllable_parts(romaji_syllables[selected_w_idx])
                         need_exact_vowel_fix = bool(curr_vowel and curr_vowel != target_vowel)
@@ -2985,6 +3618,24 @@ def generate_oto(
                                 search_fwd=4 if file_format == "cvvc" else 2,
                             )
                             if fixed_idx is not None and fixed_idx >= expected_cv_idx:
+                                max_forward = int(max(0, kr_mapping_max_index_jump_default))
+                                if (
+                                    float(row_mapping_confidence) >= max(float(file_mapping_conf_th), 0.50)
+                                    and float(resolve_meta.get("best_score", 0.0) or 0.0) >= 84.0
+                                ):
+                                    max_forward = int(max(max_forward, kr_mapping_max_index_jump_high_conf))
+                                raw_fixed_idx = int(fixed_idx)
+                                max_allowed_idx = int(expected_cv_idx + max_forward)
+                                if fixed_idx > max_allowed_idx:
+                                    fixed_idx = max_allowed_idx
+                                    row_jump_blocked = 1
+                                    row_mapping_confidence = max(0.0, row_mapping_confidence - 0.14)
+                                    row_mapping_reason_code = "exact_vowel_fix_jump_blocked"
+                                    if kr_mapping_debug_reason_logging:
+                                        log(
+                                            f"🛡️ {fname}: KR 모음 보정 점프 차단 "
+                                            f"({raw_fixed_idx + 1}->{fixed_idx + 1}, {alias})"
+                                        )
                                 if fixed_idx != selected_w_idx and abs(fixed_idx - expected_cv_idx) <= 2:
                                     log(
                                         f"🧭 {fname}: CV 모음 불일치 보정 "
@@ -3112,7 +3763,84 @@ def generate_oto(
                     enable_cutoff_guard=True,
                     post_ctx=kr_post_ctx,
                 )
+                bridge_shift = 0.0
+                if alias_type in {"vc", "vv"}:
+                    prev_idx = None
+                    next_idx = None
+                    if alias_type == "vc":
+                        prev_idx = current_w_idx
+                        next_idx = current_w_idx + 1
+                    elif selected_w_idx is not None and selected_w_idx >= 1:
+                        prev_idx = selected_w_idx - 1
+                        next_idx = selected_w_idx
+                    prev_anchor = None
+                    next_anchor = None
+                    if prev_idx is not None:
+                        prev_anchor = realized_cv_anchor_by_idx.get(prev_idx) or cv_anchor_by_idx.get(prev_idx)
+                    if next_idx is not None:
+                        next_anchor = realized_cv_anchor_by_idx.get(next_idx) or cv_anchor_by_idx.get(next_idx)
+                    if prev_anchor is not None and next_anchor is not None:
+                        pre_abs_before = float(offset + pre)
+                        offset, consonant, cutoff, pre, ovl = _refine_kr_bridge_with_adjacent_cv(
+                            offset,
+                            consonant,
+                            cutoff,
+                            pre,
+                            ovl,
+                            alias_type=alias_type,
+                            alias_text=alias,
+                            prev_cv=prev_anchor,
+                            next_cv=next_anchor,
+                        )
+                        bridge_shift = float((offset + pre) - pre_abs_before)
+                anchor_abs = c_end
+                next_onset_abs = n_start
+                next_vowel_abs = n_end
+                if alias_type == "vc":
+                    anchor_abs = n_start
+                    next_onset_abs = n_start
+                    next_vowel_abs = n_end
+                elif alias_type == "vv":
+                    anchor_abs = c_end
+                    next_onset_abs = n_start
+                    next_vowel_abs = n_end
+                offset, consonant, cutoff, pre, ovl = _apply_kr_anchor_lock(
+                    fname=fname,
+                    alias_text=alias,
+                    format_type=file_format,
+                    alias_type=alias_type,
+                    offset=offset,
+                    consonant=consonant,
+                    cutoff=cutoff,
+                    pre=pre,
+                    ovl=ovl,
+                    timeline_start_ms=timeline_start_ms,
+                    timeline_end_ms=timeline_end_ms,
+                    file_duration_ms=wav_duration_ms,
+                    anchor_abs_ms=anchor_abs,
+                    next_onset_abs_ms=next_onset_abs,
+                    next_vowel_abs_ms=next_vowel_abs,
+                    mapping_confidence=row_mapping_confidence,
+                )
+                if alias_type == "cv" and selected_w_idx is not None:
+                    realized_cv_anchor_by_idx[selected_w_idx] = {
+                        "offset": float(offset),
+                        "pre": float(pre),
+                        "ovl": float(ovl),
+                        "cons": float(consonant),
+                        "cutoff": float(cutoff),
+                        "pre_abs": float(offset + pre),
+                        "cons_abs": float(offset + consonant),
+                        "onset_abs": float(c_start),
+                        "vowel_start_abs": float(n_start),
+                        "vowel_end_abs": float(n_end),
+                        "vowel_len": max(12.0, float(n_end - n_start)),
+                        "cons_gap": max(float(consonant - pre), 10.0),
+                        "cut_gap": max(float(abs(cutoff) - consonant), 16.0),
+                    }
                 _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
+                if alias_type in {"vc", "vv"} and abs(bridge_shift) > 6.0:
+                    log(f"🧭 {fname}: KR 브리지 앵커 미세보정 ({bridge_shift:+.1f}ms) [{alias}]")
 
                 _append_alias_rows(
                     final_lines,
@@ -3243,7 +3971,6 @@ def generate_oto(
                 custom_phonemes_path=custom_phonemes_path,
                 callback=log,
                 enabled=enable_ml_correction,
-                backend_preference="pytorch" if enable_pytorch_bridge else "",
                 format_override=auto_gen_format,
             )
             if ml_changed > 0:
@@ -3259,6 +3986,25 @@ def generate_oto(
         err = f"OTO 파일 저장 실패: {e}"
         logger.error(err)
         errors.append(err)
+
+    if anchor_stats["anchor_locked_count"] > 0:
+        log(
+            "[AnchorLock] 요약: "
+            f"anchor_locked_count={anchor_stats['anchor_locked_count']}, "
+            f"cutoff_clamped_count={anchor_stats['cutoff_clamped_count']}, "
+            f"vc_cutoff_leak_guard_count={anchor_stats['vc_cutoff_leak_guard_count']}"
+        )
+        log(f"[AnchorLock] 상세 로그: {anchor_log_path}")
+
+    if cleanup_timing_jsonl:
+        removed_count, failed_count = _cleanup_timing_anchor_jsonl_files(
+            _anchor_log_dir,
+            "timing_anchor_kr_",
+        )
+        if removed_count > 0:
+            log(f"[AnchorLock] timing jsonl 자동 정리: {removed_count} files")
+        if failed_count > 0:
+            log(f"[AnchorLock] timing jsonl 정리 실패: {failed_count} files")
 
     _log_unset_summary()
     return processed, total, errors

@@ -12,6 +12,17 @@ if ROOT not in sys.path:
 from core.oto_ml_batch_prepare import prepare_staged_auto_pairs, write_prepare_report
 
 
+def _safe_print(message: str) -> None:
+    text = str(message)
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        data = text.encode(enc, errors="replace")
+        sys.stdout.buffer.write(data + b"\n")
+        sys.stdout.flush()
+
+
 def main():
     ap = argparse.ArgumentParser(description="Generate lab/dict/TextGrid/auto-oto for staged dataset copies.")
     ap.add_argument(
@@ -28,7 +39,7 @@ def main():
         dataset_root,
         dry_run=args.dry_run,
         limit=args.limit,
-        progress_callback=print,
+        progress_callback=_safe_print,
     )
     report_path = os.path.join(dataset_root, "_manifest", "prepared_auto_pairs.json")
     write_prepare_report(report_path, result)

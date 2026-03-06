@@ -135,7 +135,18 @@ class App(
         self.gen_missing_vowels_var = ctk.BooleanVar(value=True)
         self.no_base_oto_var = ctk.BooleanVar(value=False)
         self.enable_ml_correction_var = ctk.BooleanVar(value=True)
-        self.enable_pytorch_bridge_var = ctk.BooleanVar(value=False)
+        self.ja_mapping_words_fallback_enabled_var = ctk.BooleanVar(value=True)
+        self.ja_mapping_spn_ratio_threshold_var = ctk.DoubleVar(value=0.35)
+        self.ja_mapping_min_vowel_phone_ratio_var = ctk.DoubleVar(value=0.5)
+        self.ja_mapping_debug_reason_logging_var = ctk.BooleanVar(value=True)
+        self.kr_anchor_profile_path_var = ctk.StringVar(value="")
+        self.kr_mapping_confidence_threshold_var = ctk.DoubleVar(value=0.60)
+        self.kr_mapping_max_index_jump_default_var = ctk.IntVar(value=1)
+        self.kr_mapping_max_index_jump_high_conf_var = ctk.IntVar(value=2)
+        self.ml_same_language_borrow_only_var = ctk.BooleanVar(value=True)
+        self.ml_use_pseudo_labels_var = ctk.BooleanVar(value=True)
+        self.ml_pseudo_weight_high_var = ctk.DoubleVar(value=0.7)
+        self.ml_pseudo_weight_mid_var = ctk.DoubleVar(value=0.4)
         self.advanced_options_expanded = False
         
         # 언어 선택
@@ -151,9 +162,31 @@ class App(
         self.alias_suffix_var = ctk.StringVar(value="")    # 에일리어스 접미사 (예: C4)
         self.ja_alias_style_var = ctk.StringVar(value="원본 그대로")
         self.aligner_var = ctk.StringVar(value="MFA")
+        self.mfa_align_profile_var = ctk.StringVar(value="정확도 우선 (기본)")
         self.sofa_ckpt_var = ctk.StringVar(value="")
         self.sofa_dict_var = ctk.StringVar(value="")
         self.sofa_python_var = ctk.StringVar(value=get_sofa_env_python())
+        # WhisperX 런타임 옵션(고급): UI에서 직접 노출하지 않아도 config.json으로 제어 가능
+        self.whisperx_profile_var = ctk.StringVar(value="balanced")
+        self.whisperx_device_var = ctk.StringVar(value="auto")
+        self.whisperx_compute_type_var = ctk.StringVar(value="int8")
+        self.whisperx_batch_size_var = ctk.IntVar(value=8)
+        self.whisperx_align_model_var = ctk.StringVar(value="")
+        self.whisperx_cleanup_intermediate_var = ctk.BooleanVar(value=True)
+        self.whisperx_save_debug_json_var = ctk.BooleanVar(value=False)
+        # SOFA 런타임 옵션(고급): UI에서 직접 노출하지 않아도 config.json으로 제어 가능
+        self.sofa_repo_dir_var = ctk.StringVar(value="")
+        self.sofa_mode_var = ctk.StringVar(value="force")
+        self.sofa_g2p_var = ctk.StringVar(value="Dictionary")
+        self.sofa_ap_detector_var = ctk.StringVar(value="LoudnessSpectralcentroidAPDetector")
+        self.sofa_ap_detector_config_var = ctk.StringVar(value="")
+        self.sofa_save_confidence_var = ctk.BooleanVar(value=True)
+        self.sofa_out_formats_var = ctk.StringVar(value="TextGrid")
+        self.sofa_extra_infer_args_var = ctk.StringVar(value="")
+        self.sofa_two_pass_retry_var = ctk.BooleanVar(value=True)
+        self.sofa_two_pass_retry_mode_var = ctk.StringVar(value="match")
+        self.sofa_confidence_threshold_var = ctk.DoubleVar(value=0.55)
+        self.sofa_low_confidence_max_files_var = ctk.IntVar(value=0)
 
         self.app_dir = APP_DIR
         self.log_path = LOG_PATH

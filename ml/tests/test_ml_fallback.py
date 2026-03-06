@@ -8,6 +8,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.oto_ml_refiner import (
+    _apply_korean_bridge_post_guard,
     _apply_language_specific_delta_policy,
     _route_format_for_feature,
     apply_oto_ml_to_oto_file,
@@ -71,7 +72,7 @@ class MlFallbackTests(unittest.TestCase):
         )
         self.assertEqual(routed, "cvc")
 
-    def test_korean_vcv_routes_other_aliases_to_general(self):
+    def test_korean_vcv_routes_non_bridge_aliases_to_vcv(self):
         routed_cv = _route_format_for_feature(
             "korean",
             {"format_type": "vcv", "alias_type": "cv", "coda_type": "none"},
@@ -80,8 +81,8 @@ class MlFallbackTests(unittest.TestCase):
             "korean",
             {"format_type": "vcv", "alias_type": "vc", "coda_type": "none"},
         )
-        self.assertEqual(routed_cv, "general")
-        self.assertEqual(routed_vc_other, "general")
+        self.assertEqual(routed_cv, "vcv")
+        self.assertEqual(routed_vc_other, "vcv")
 
     def test_korean_format_override_keeps_cvvc_route(self):
         routed = _route_format_for_feature(
@@ -159,6 +160,56 @@ class MlFallbackTests(unittest.TestCase):
         )
         self.assertEqual(adjusted["delta_offset"], 0.0)
         self.assertLess(adjusted["delta_cutoff"], 12.0)
+
+    def test_korean_cvvc_vc_stop_damps_aggressive_deltas(self):
+        adjusted = _apply_language_specific_delta_policy(
+            "korean",
+            {"format_type": "cvvc", "alias_type": "vc", "coda_type": "stop", "mapping_confidence": 0.9},
+            {
+                "delta_offset": -40.0,
+                "delta_pre": -30.0,
+                "delta_cons": 20.0,
+                "delta_cutoff": 50.0,
+                "delta_ovl": -10.0,
+            },
+        )
+        self.assertGreater(adjusted["delta_offset"], -20.0)
+        self.assertGreater(adjusted["delta_pre"], -18.0)
+        self.assertLess(adjusted["delta_cutoff"], 20.0)
+
+    def test_korean_vv_damps_offset_and_overlap_shift(self):
+        adjusted = _apply_language_specific_delta_policy(
+            "korean",
+            {"format_type": "cvvc", "alias_type": "vv", "mapping_confidence": 0.95},
+            {
+                "delta_offset": -25.0,
+                "delta_pre": 20.0,
+                "delta_cons": 16.0,
+                "delta_cutoff": 36.0,
+                "delta_ovl": 18.0,
+            },
+        )
+        self.assertGreater(adjusted["delta_offset"], -16.0)
+        self.assertLess(adjusted["delta_ovl"], 12.0)
+
+    def test_korean_vc_post_guard_limits_cutoff_extension(self):
+        def _validate(offset, consonant, cutoff, pre, ovl):
+            return float(offset), float(consonant), float(cutoff), float(pre), float(ovl)
+
+        out = _apply_korean_bridge_post_guard(
+            {
+                "alias_type": "vc",
+                "coda_type": "stop",
+                "curr_phone_end_ms": 1000.0,
+                "next_phone_gap_ms": 120.0,
+            },
+            (840.0, 220.0, -420.0, 160.0, 40.0),
+            _validate,
+        )
+        _off, cons, cutoff, pre, ovl = out
+        self.assertLessEqual(abs(cutoff), 287.0)
+        self.assertGreaterEqual(pre - ovl, 9.0)
+        self.assertGreaterEqual(cons - pre, 13.0)
 
     def test_korean_cvc_routes_only_coda_vc(self):
         routed_vc = _route_format_for_feature(

@@ -21,6 +21,27 @@ ALERT_MFA_PERMISSION_DENIED = "__ALERT__MFA_PERMISSION_DENIED__"
 MSVC_REQUIRED_TEXT = "microsoft visual c++ 14.0 or greater is required"
 _MFA_SINGLE_SPEAKER_FLAG_CACHE = {}
 
+MFA_ALIGN_PROFILE_PRESETS = {
+    # Current default behavior (accuracy-first).
+    "accurate": {
+        "clean": True,
+        "fine_tune": True,
+        "textgrid_cleanup": True,
+        "beam": 1000,
+        "retry_beam": 4000,
+        "num_jobs": 1,
+    },
+    # Low-load profile for slower hardware.
+    "fast": {
+        "clean": True,
+        "fine_tune": False,
+        "textgrid_cleanup": True,
+        "beam": 320,
+        "retry_beam": 960,
+        "num_jobs": 1,
+    },
+}
+
 
 def _preferred_subprocess_encoding():
     try:
@@ -233,6 +254,29 @@ def _resolve_single_speaker_flag(mfa_path, env=None):
     # 기본값은 요청에 맞춰 하이픈 표기 우선
     _MFA_SINGLE_SPEAKER_FLAG_CACHE[key] = "--single-speaker"
     return "--single-speaker"
+
+
+def _normalize_mfa_align_profile(profile):
+    p = str(profile or "").strip().lower()
+    if p in {"fast", "quick", "lite", "speed"}:
+        return "fast"
+    return "accurate"
+
+
+def _resolve_mfa_align_options(align_profile):
+    profile = _normalize_mfa_align_profile(align_profile)
+    opts = dict(MFA_ALIGN_PROFILE_PRESETS.get(profile, MFA_ALIGN_PROFILE_PRESETS["accurate"]))
+
+    # Optional env override for advanced users.
+    env_jobs = str(os.environ.get("UTOA_MFA_NUM_JOBS", "")).strip()
+    if env_jobs:
+        try:
+            j = int(float(env_jobs))
+            if j >= 1:
+                opts["num_jobs"] = j
+        except Exception:
+            pass
+    return profile, opts
 
 
 def find_mfa_executable():
@@ -543,7 +587,15 @@ def download_mfa_model(mfa_path, language='korean', callback=None):
     except Exception as e:
         log(f'Model download error: {e}')
         return False
-def run_mfa_align(mfa_path, wav_folder, dict_path, output_folder, language='korean', callback=None):
+def run_mfa_align(
+    mfa_path,
+    wav_folder,
+    dict_path,
+    output_folder,
+    language='korean',
+    callback=None,
+    align_profile='accurate',
+):
     """Run MFA forced alignment."""
     def log(msg):
         logger.info(msg)
@@ -589,15 +641,30 @@ def run_mfa_align(mfa_path, wav_folder, dict_path, output_folder, language='kore
             log(err)
             return False, err
     single_speaker_flag = _resolve_single_speaker_flag(mfa_path, env=env)
+    resolved_profile, align_opts = _resolve_mfa_align_options(align_profile)
     cmd = [
         mfa_path, 'align',
         work_wav_folder, work_dict_path, model_name, work_output_folder,
         single_speaker_flag,
-        '--clean', '--fine_tune', '--textgrid_cleanup',
-        '--beam', '1000', '--retry_beam', '4000',
-        '--num_jobs', '1',
     ]
-    log(f'Starting MFA alignment... ({single_speaker_flag})')
+    if align_opts.get("clean", True):
+        cmd.append("--clean")
+    if align_opts.get("fine_tune", False):
+        cmd.append("--fine_tune")
+    if align_opts.get("textgrid_cleanup", True):
+        cmd.append("--textgrid_cleanup")
+    cmd.extend([
+        "--beam", str(int(align_opts.get("beam", 1000))),
+        "--retry_beam", str(int(align_opts.get("retry_beam", 4000))),
+        "--num_jobs", str(int(align_opts.get("num_jobs", 1))),
+    ])
+    log(
+        "Starting MFA alignment... "
+        f"({single_speaker_flag}, profile={resolved_profile}, "
+        f"fine_tune={'on' if align_opts.get('fine_tune') else 'off'}, "
+        f"beam={align_opts.get('beam')}, retry_beam={align_opts.get('retry_beam')}, "
+        f"num_jobs={align_opts.get('num_jobs')})"
+    )
     try:
         process = subprocess.Popen(
             cmd,

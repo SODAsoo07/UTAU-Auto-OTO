@@ -123,7 +123,7 @@ class LayoutMixin:
         ctk.CTkLabel(row_aligner, text="정렬 엔진:", width=120, anchor="w").pack(side="left")
         self.aligner_menu = ctk.CTkOptionMenu(
             row_aligner,
-            values=["MFA", "SOFA"],
+            values=["MFA", "SOFA", "WhisperX"],
             variable=self.aligner_var,
             width=200,
             command=lambda _v: self._save_config(),
@@ -131,7 +131,24 @@ class LayoutMixin:
         self.aligner_menu.pack(side="left", padx=(5, 5))
         ctk.CTkLabel(
             row_aligner,
-            text="(SOFA 선택 시 필요한 모듈들이 없다면 자동 설치됩니다.)",
+            text="(MFA/SOFA/WhisperX 중 하나를 선택해 TextGrid를 생성합니다.)",
+            text_color="gray",
+        ).pack(side="left", padx=10)
+
+        row_mfa_profile = ctk.CTkFrame(path_frame, fg_color="transparent")
+        row_mfa_profile.pack(fill="x", padx=10, pady=3)
+        ctk.CTkLabel(row_mfa_profile, text="MFA 정렬 프로필", width=120, anchor="w").pack(side="left")
+        self.mfa_align_profile_menu = ctk.CTkOptionMenu(
+            row_mfa_profile,
+            values=["정확도 우선 (기본)", "빠름 (저사양 추천)"],
+            variable=self.mfa_align_profile_var,
+            width=200,
+            command=lambda _v: self._save_config(),
+        )
+        self.mfa_align_profile_menu.pack(side="left", padx=(5, 5))
+        ctk.CTkLabel(
+            row_mfa_profile,
+            text="(기본은 기존 설정 유지, 느린 환경에서는 빠름 권장)",
             text_color="gray",
         ).pack(side="left", padx=10)
 
@@ -237,6 +254,12 @@ class LayoutMixin:
         if style == "로마자":
             return "romaji"
         return "original"
+
+    def _get_mfa_align_profile_code(self):
+        profile = str(self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "").strip()
+        if profile in {"빠름 (저사양 추천)", "fast"}:
+            return "fast"
+        return "accurate"
 
     def _on_no_base_oto_toggle(self):
         no_base = bool(self.no_base_oto_var.get())

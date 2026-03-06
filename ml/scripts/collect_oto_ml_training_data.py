@@ -55,8 +55,10 @@ def main():
     workspace_root = os.path.abspath(args.workspace_root)
     manifest_json = args.manifest_json or os.path.join(workspace_root, "reports", "training_candidates.json")
     manifest_csv = args.manifest_csv or os.path.join(workspace_root, "reports", "training_candidates.csv")
+    total_steps = 4
 
     dataset_root = os.path.abspath(args.dataset_root)
+    print(f"[1/{total_steps}] Discovering training candidates...", flush=True)
     if (not args.use_config_roots) and os.path.isdir(dataset_root):
         candidates = discover_training_candidates_from_dataset_root(dataset_root)
         # Fallback for empty staged trees.
@@ -64,11 +66,16 @@ def main():
             candidates = discover_training_candidates(args.config)
     else:
         candidates = discover_training_candidates(args.config)
+
+    print(f"[2/{total_steps}] Writing candidate manifests... (count={len(candidates)})", flush=True)
     write_candidate_manifest(manifest_json, candidates)
     write_candidate_csv(manifest_csv, candidates)
+
+    print(f"[3/{total_steps}] Building datasets from candidates...", flush=True)
     result = build_datasets_from_candidates(candidates, workspace_root=workspace_root)
 
     final_json = os.path.join(workspace_root, "reports", "training_build_results.json")
+    print(f"[4/{total_steps}] Writing build results...", flush=True)
     write_candidate_manifest(final_json, result["candidates"])
 
     print(json.dumps({

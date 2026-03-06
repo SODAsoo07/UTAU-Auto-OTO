@@ -278,13 +278,10 @@ def _extract_ja_cv_targets_from_lines(lines, custom_map=None):
         tok = _alias_to_ja_cv_target(alias, a_type)
         if tok:
             targets.append(tok)
-    if not targets:
-        return []
-    collapsed = []
-    for t in targets:
-        if not collapsed or collapsed[-1] != t:
-            collapsed.append(t)
-    return collapsed
+    # IMPORTANT:
+    # VCV/CVVC에서는 연속 중복 음절(예: ma ma mi..., ra ra ri...) 자체가
+    # 실제 매핑 순서를 결정하므로, 여기서 중복을 제거하면 1칸 밀림이 발생한다.
+    return targets if targets else []
 
 
 def _is_nucleus_phone(mark):
@@ -299,7 +296,12 @@ def _build_ja_syllables_from_phone_nuclei(ph_intervals, cv_targets):
     nuclei = [i for i, p in enumerate(ph_intervals) if _is_nucleus_phone(getattr(p, 'mark', ''))]
     if len(nuclei) < target_n:
         return None
-    if target_n == 1:
+    target_vowels = [_target_vowel_from_filename_syllable(s) for s in cv_targets]
+    nucleus_vowels = [_ja_mark_to_vowel(getattr(ph_intervals[i], 'mark', '')) for i in nuclei]
+    aligned = _align_nuclei_positions_to_targets(nuclei, nucleus_vowels, target_vowels)
+    if aligned and len(aligned) == target_n:
+        selected = aligned
+    elif target_n == 1:
         selected = [nuclei[0]]
     elif len(nuclei) == target_n:
         selected = list(nuclei)
@@ -348,17 +350,77 @@ def _score_ja_syllable_mapping(candidate_infos, cv_targets):
     targets = [_normalize_ja_syllable_token(t) for t in cv_targets if t]
     if not targets:
         return -1.0
+
+    def _to_ms(v):
+        try:
+            x = float(v)
+        except Exception:
+            return None
+        # TextGrid sec 기반이면 ms로 변환
+        return x * 1000.0 if abs(x) < 60.0 else x
+
+    anchor_ms = []
+    for s in candidate_infos:
+        st = _to_ms(s.get('start_time')) if isinstance(s, dict) else None
+        et = _to_ms(s.get('end_time')) if isinstance(s, dict) else None
+        if st is None and et is None:
+            anchor_ms.append(None)
+        elif st is None:
+            anchor_ms.append(et)
+        elif et is None:
+            anchor_ms.append(st)
+        else:
+            anchor_ms.append((st + et) * 0.5)
+
     def _avg_with_shift(shift):
         vals = []
+        idxs = []
+        local_drift_pen = 0.0
         for i, tgt in enumerate(targets):
             j = i + shift
             if 0 <= j < len(cand):
-                vals.append(_vcv_syllable_match_score(tgt, cand[j]))
+                cur = _vcv_syllable_match_score(tgt, cand[j])
+                vals.append(cur)
+                idxs.append(j)
+                # 이웃보다 현재 점수가 많이 낮으면 한 칸 밀림 가능성이 높다.
+                neighbor_best = cur
+                if j > 0:
+                    neighbor_best = max(neighbor_best, _vcv_syllable_match_score(tgt, cand[j - 1]))
+                if (j + 1) < len(cand):
+                    neighbor_best = max(neighbor_best, _vcv_syllable_match_score(tgt, cand[j + 1]))
+                drift_gain = neighbor_best - cur
+                if drift_gain > 10.0:
+                    local_drift_pen += min((drift_gain - 10.0) * 0.35, 12.0)
         if not vals:
             return -1.0
         coverage = len(vals) / float(max(len(targets), 1))
         length_penalty = abs(len(cand) - len(targets)) * 4.0
-        return (sum(vals) / float(len(vals))) * coverage - length_penalty
+        shift_penalty = abs(int(shift)) * 7.0
+
+        # 순서 일관성 패널티: 시간축 역행/급점프를 감점.
+        order_penalty = 0.0
+        if idxs:
+            prev_t = None
+            for j in idxs:
+                t = anchor_ms[j] if 0 <= j < len(anchor_ms) else None
+                if t is None:
+                    continue
+                if prev_t is not None:
+                    delta = t - prev_t
+                    if delta <= 0.0:
+                        order_penalty += 22.0
+                    elif delta < 24.0:
+                        order_penalty += 4.5
+                    elif delta > 1500.0:
+                        order_penalty += 6.0
+                prev_t = t
+        return (
+            (sum(vals) / float(len(vals))) * coverage
+            - length_penalty
+            - shift_penalty
+            - order_penalty
+            - local_drift_pen
+        )
     return max(_avg_with_shift(0), _avg_with_shift(1), _avg_with_shift(-1))
 
 
@@ -452,6 +514,8 @@ def _ja_mark_to_vowel(mark):
     clean = re.sub(r"[0-9]", "", (mark or "").strip().lower())
     if not clean:
         return ""
+    if clean in {"n", "ɴ", "m", "nn", "xn", "ng", "ngy"}:
+        return "n"
     if clean in {"a", "i", "e", "o"}:
         return clean
     if clean in {"u", "?", "?"}:
@@ -617,6 +681,17 @@ def _select_vcv_syllable_index(alias, expected_idx, syllables_info):
         return e
     best_gain = best_score - expected_score
     if best_gain < 20:
+        return e
+    # VCV는 한 칸 전진을 매우 보수적으로 허용한다.
+    # 다음 칸이 "정확히 target 토큰"이고 현재 expected가 target이 아닐 때만 전진.
+    cand_tok = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[best_idx]))
+    exp_tok = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[e]))
+    tgt_tok = _normalize_ja_syllable_token(target)
+    if cand_tok != tgt_tok:
+        return e
+    if exp_tok == tgt_tok:
+        return e
+    if best_gain < 28:
         return e
     return best_idx
 
