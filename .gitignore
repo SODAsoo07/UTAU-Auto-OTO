@@ -236,13 +236,5 @@ custom_test_wavs/*_dict.txt
 
 # AI/ML workspace and model training artifacts
 /ml_workspace/
-/assets/models/oto_ml/**/tmp/
-/assets/models/oto_ml/**/checkpoints/
-/assets/models/oto_ml/**/train_cache/
-/assets/models/oto_ml/**/profile_run*/
-/assets/models/oto_ml/**/*.csv
-/assets/models/oto_ml/**/*.parquet
-/assets/models/oto_ml/**/*.jsonl
 /assets/models/oto_ml_pytorch/
-/models_installed/
 /sofa_utau_kr
