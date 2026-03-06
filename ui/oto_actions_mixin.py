@@ -21,6 +21,7 @@ class OtoActionsMixin:
                     self._append_log("오류: 출력 경로를 입력해 주세요.")
                     return
 
+                cleanup_snapshot = self._snapshot_output_tree_for_cleanup(out_path)
                 tg_folder = os.path.join(wav_dir, "textgrids")
                 if not os.path.exists(tg_folder):
                     self._append_log("경고: textgrids 폴더가 없습니다. 3단계 정렬/라벨 생성을 먼저 실행하세요.")
@@ -154,6 +155,8 @@ class OtoActionsMixin:
                     )
 
                 self._run_auto_validation(wav_dir, tg_folder, out_path)
+                if not errors:
+                    self._cleanup_generated_output_artifacts(out_path, snapshot=cleanup_snapshot)
                 if errors:
                     for e in errors:
                         self._append_log(f"  - {e}")

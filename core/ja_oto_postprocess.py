@@ -81,6 +81,7 @@ class JaPostprocessContext:
         syll_idx: Optional[int],
         *,
         alias_type: str = "cv",
+        format_type: str = "",
         vowel_start_ms: Optional[float] = None,
         vowel_end_ms: Optional[float] = None,
     ) -> Tuple[float, float, float, float, float]:
@@ -93,6 +94,7 @@ class JaPostprocessContext:
             self.syllables_info,
             self.validate_fn,
             alias_type=alias_type,
+            format_type=format_type,
             vowel_start_ms=vowel_start_ms,
             vowel_end_ms=vowel_end_ms,
         )
@@ -344,6 +346,7 @@ def guard_ja_cv_cutoff_to_next_onset(
     validate_fn: Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]],
     *,
     alias_type: str = "cv",
+    format_type: str = "",
     vowel_start_ms: Optional[float] = None,
     vowel_end_ms: Optional[float] = None,
 ) -> Tuple[float, float, float, float, float]:
@@ -357,7 +360,10 @@ def guard_ja_cv_cutoff_to_next_onset(
     next_mark = _clean_phone_mark(getattr(next_phones[0], "mark", ""))
     hard_next = next_mark in JA_PLOSIVE_CONSONANTS or next_mark in JA_SIBILANT_ONSETS or next_mark in {"ts", "ch", "j", "sh", "s", "z", "h"}
     is_cv_head = str(alias_type or "").strip().lower() == "cv_head"
-    safety = 10.0 if is_cv_head else (14.0 if hard_next else 9.0)
+    fmt = str(format_type or "").strip().lower()
+    safety = 10.0 if is_cv_head else (18.0 if hard_next else 12.0)
+    if not is_cv_head and fmt == "cvvc":
+        safety += 4.0
     next_onset_rel = (next_phones[0].minTime * 1000.0) - offset
     max_cutoff_abs = next_onset_rel - safety
     if is_cv_head:

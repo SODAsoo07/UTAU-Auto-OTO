@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import threading
 import traceback
@@ -264,6 +265,107 @@ class AppRuntimeMixin:
             self._append_log(f"⚠ 자동 검증 결과: error {err_count}, warning {warn_count}")
         else:
             self._append_log(f"✅ 자동 검증 결과: warning {warn_count} (error 0)")
+
+    def _path_is_within(self, path, parent):
+        try:
+            abs_path = os.path.normcase(os.path.abspath(path or ""))
+            abs_parent = os.path.normcase(os.path.abspath(parent or ""))
+            if not abs_path or not abs_parent:
+                return False
+            return os.path.commonpath([abs_path, abs_parent]) == abs_parent
+        except Exception:
+            return False
+
+    def _snapshot_output_tree_for_cleanup(self, out_path):
+        out_file = os.path.abspath(str(out_path or "").strip())
+        if not out_file:
+            return None
+        out_dir = os.path.dirname(out_file) or os.getcwd()
+        snapshot = {"root": os.path.normcase(out_dir), "files": set(), "dirs": set()}
+        if not os.path.isdir(out_dir):
+            return snapshot
+        for cur_root, _dir_names, file_names in os.walk(out_dir):
+            cur_abs = os.path.normcase(os.path.abspath(cur_root))
+            snapshot["dirs"].add(cur_abs)
+            for name in file_names:
+                fpath = os.path.normcase(os.path.abspath(os.path.join(cur_root, name)))
+                snapshot["files"].add(fpath)
+        return snapshot
+
+    def _cleanup_generated_output_artifacts(self, out_path, snapshot=None):
+        out_file = os.path.abspath(str(out_path or "").strip())
+        if not out_file:
+            return {"removed_files": 0, "removed_dirs": 0, "failed": 0}
+        out_dir = os.path.dirname(out_file) or os.getcwd()
+        if not os.path.isdir(out_dir):
+            return {"removed_files": 0, "removed_dirs": 0, "failed": 0}
+
+        keep_file = os.path.normcase(out_file)
+        snapshot_files = set()
+        snapshot_dirs = set()
+        if isinstance(snapshot, dict):
+            snapshot_files = set(snapshot.get("files") or [])
+            snapshot_dirs = set(snapshot.get("dirs") or [])
+
+        known_names = {
+            ".ja_oto_autotune_profile.json",
+            "japanese_dict.txt",
+            "korean_dict.txt",
+        }
+        removed_files = 0
+        removed_dirs = 0
+        failed = 0
+
+        for cur_root, _dir_names, file_names in os.walk(out_dir):
+            for name in file_names:
+                fpath = os.path.abspath(os.path.join(cur_root, name))
+                norm = os.path.normcase(fpath)
+                if norm == keep_file:
+                    continue
+                low = name.lower()
+                is_known_intermediate = (
+                    low.endswith(".lab")
+                    or low.endswith(".textgrid")
+                    or low in known_names
+                )
+                is_new_in_run = bool(snapshot_files) and norm not in snapshot_files
+                if not is_known_intermediate and not is_new_in_run:
+                    continue
+                try:
+                    os.remove(fpath)
+                    removed_files += 1
+                except Exception:
+                    failed += 1
+
+        textgrids_dir = os.path.abspath(os.path.join(out_dir, "textgrids"))
+        if os.path.isdir(textgrids_dir) and not self._path_is_within(out_file, textgrids_dir):
+            try:
+                shutil.rmtree(textgrids_dir)
+                removed_dirs += 1
+            except Exception:
+                failed += 1
+
+        for cur_root, dir_names, _file_names in os.walk(out_dir, topdown=False):
+            for name in dir_names:
+                dpath = os.path.abspath(os.path.join(cur_root, name))
+                dnorm = os.path.normcase(dpath)
+                if snapshot_dirs and dnorm in snapshot_dirs:
+                    continue
+                if self._path_is_within(out_file, dpath):
+                    continue
+                try:
+                    os.rmdir(dpath)
+                    removed_dirs += 1
+                except OSError:
+                    continue
+                except Exception:
+                    failed += 1
+
+        if removed_files > 0 or removed_dirs > 0:
+            self._append_log(f"🧹 자동 정리 완료: files={removed_files}, dirs={removed_dirs}")
+        if failed > 0:
+            self._append_log(f"⚠ 자동 정리 실패 항목: {failed}")
+        return {"removed_files": removed_files, "removed_dirs": removed_dirs, "failed": failed}
 
     def _clear_log(self):
         self.log_text.delete("1.0", "end")

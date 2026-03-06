@@ -27,6 +27,7 @@ from core.ja_oto_generator import (
     _find_ja_cv_vowel_match_index,
     _find_ja_exact_target_index,
     _ja_is_n_bridge_alias,
+    _limit_pre_anchor_shift,
     _prefer_vcv_candidate_index,
     _refine_ja_vc_with_adjacent_cv,
     _sanitize_ja_internal_params_for_wav_duration,
@@ -39,6 +40,7 @@ from core.ja_oto_generator import (
 )
 from core.ja_lab_generator import parse_ja_filename
 from core.ja_oto_mapping import _extract_ja_cv_targets_from_lines
+from core.ja_oto_postprocess import guard_ja_cv_cutoff_to_next_onset
 from core.lab_generator import _parse_filename, _split_kr_lab_content_tokens
 from core.oto_generator import _apply_soft_mel_offset_cutoff_guard
 from core.oto_generator import _recenter_kr_params_around_pre
@@ -437,6 +439,59 @@ class FeatureExtractionTests(unittest.TestCase):
         ovl_abs = o + ov
         self.assertGreaterEqual(ovl_abs, 960.0)
         self.assertLessEqual(ovl_abs, 1010.0)
+
+    def test_limit_pre_anchor_shift_leaves_small_delta_unchanged(self):
+        vals = _limit_pre_anchor_shift(
+            860.0,
+            160.0,
+            -280.0,
+            128.0,
+            52.0,
+            pre_abs_before=980.0,
+            max_shift_ms=26.0,
+        )
+        o, c, ct, p, ov, pre_abs_after, clamped = vals
+        self.assertFalse(clamped)
+        self.assertAlmostEqual(pre_abs_after, o + p, delta=1e-6)
+        self.assertAlmostEqual(pre_abs_after, 988.0, delta=1e-6)
+        self.assertGreaterEqual(c, p)
+
+    def test_limit_pre_anchor_shift_caps_large_delta(self):
+        vals = _limit_pre_anchor_shift(
+            860.0,
+            160.0,
+            -280.0,
+            128.0,
+            52.0,
+            pre_abs_before=930.0,
+            max_shift_ms=22.0,
+        )
+        o, c, ct, p, ov, pre_abs_after, clamped = vals
+        self.assertTrue(clamped)
+        self.assertAlmostEqual(pre_abs_after - 930.0, 22.0, delta=1e-6)
+        self.assertAlmostEqual(pre_abs_after, o + p, delta=1e-6)
+        self.assertGreaterEqual(c, p)
+        self.assertGreaterEqual(abs(ct), c)
+
+    def test_guard_ja_cv_cutoff_to_next_onset_uses_stricter_margin_for_cvvc(self):
+        def _validate(offset, consonant, cutoff, pre, ovl):
+            return float(offset), float(consonant), float(cutoff), float(pre), float(ovl)
+
+        syllables = [
+            {"phones": [SimpleNamespace(mark="a", minTime=0.10, maxTime=0.22)]},
+            {"phones": [SimpleNamespace(mark="k", minTime=0.50, maxTime=0.62)]},
+        ]
+        out_vcv = guard_ja_cv_cutoff_to_next_onset(
+            100.0, 190.0, -420.0, 130.0, 0, syllables, _validate, alias_type="cv", format_type="vcv"
+        )
+        out_cvvc = guard_ja_cv_cutoff_to_next_onset(
+            100.0, 190.0, -420.0, 130.0, 0, syllables, _validate, alias_type="cv", format_type="cvvc"
+        )
+        cut_abs_vcv = abs(out_vcv[2])
+        cut_abs_cvvc = abs(out_cvvc[2])
+        self.assertLessEqual(cut_abs_vcv, 382.0 + 1e-6)
+        self.assertLessEqual(cut_abs_cvvc, 378.0 + 1e-6)
+        self.assertLessEqual(cut_abs_cvvc, cut_abs_vcv - 3.0)
 
     def test_japanese_n_bridge_alias_detection(self):
         self.assertTrue(_ja_is_n_bridge_alias("n じょ", "vcv"))

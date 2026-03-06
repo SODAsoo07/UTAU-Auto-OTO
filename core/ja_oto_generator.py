@@ -1812,6 +1812,34 @@ def _refine_ja_vc_with_adjacent_cv(
     return validate_oto_params(offset_new, consonant_new, cutoff_new, pre_new, ovl_abs_new - offset_new)
 
 
+def _limit_pre_anchor_shift(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    ovl,
+    *,
+    pre_abs_before,
+    max_shift_ms,
+):
+    """
+    pre 절대 위치 이동량을 제한해 브리지 앵커 과보정을 방지한다.
+    반환: (offset, consonant, cutoff, pre, ovl, pre_abs_after, clamped)
+    """
+    pre_abs_after = float(offset) + float(pre)
+    delta = float(pre_abs_after - pre_abs_before)
+    limit = max(0.0, float(max_shift_ms))
+    if abs(delta) <= limit:
+        out = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+        return (*out, float(out[0] + out[3]), False)
+
+    limited_pre_abs = float(pre_abs_before) + (limit if delta > 0.0 else -limit)
+    abs_shift = pre_abs_after - limited_pre_abs
+    offset = float(offset) - float(abs_shift)
+    out = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    return (*out, float(out[0] + out[3]), True)
+
+
 def _normalize_alias_for_profile(alias):
     a = re.sub(r"\s+", " ", (alias or "").strip().lower())
     # treat trailing suffix like _C4 as metadata
@@ -4137,6 +4165,30 @@ def generate_ja_oto(
                         if format_type in {"cvvc", "cv"} and filename_order_locked:
                             if mapped_idx < expected_idx:
                                 mapped_idx = expected_idx
+                            elif format_type == "cvvc" and mapped_idx > expected_idx:
+                                # CVVC는 순서 안정성을 우선한다.
+                                # 1칸 전진은 target token과 exact match일 때만 허용한다.
+                                allow_forward = False
+                                if (
+                                    mapped_idx == (expected_idx + 1)
+                                    and target_tok
+                                    and expected_idx >= 0
+                                    and mapped_idx < len(syllables_info)
+                                ):
+                                    target_norm = _normalize_ja_syllable_token(target_tok)
+                                    mapped_tok_norm = _normalize_ja_syllable_token(
+                                        _syllable_info_token(syllables_info[mapped_idx])
+                                    )
+                                    expected_tok_norm = _normalize_ja_syllable_token(
+                                        _syllable_info_token(syllables_info[expected_idx])
+                                    )
+                                    allow_forward = bool(
+                                        target_norm
+                                        and mapped_tok_norm == target_norm
+                                        and expected_tok_norm != target_norm
+                                    )
+                                if not allow_forward:
+                                    mapped_idx = expected_idx
                             elif mapped_idx > (expected_idx + 1):
                                 mapped_idx = expected_idx + 1
                         if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
@@ -4236,6 +4288,7 @@ def generate_ja_oto(
                     offset, consonant, cutoff, pre, cutoff_reduced = post_ctx.guard_cv_cutoff_to_next_onset(
                         offset, consonant, cutoff, pre, current_w_idx,
                         alias_type="cv_head",
+                        format_type=format_type,
                         vowel_start_ms=v_cov_start,
                         vowel_end_ms=v_cov_end,
                     )
@@ -4384,6 +4437,30 @@ def generate_ja_oto(
                         if format_type in {"cvvc", "cv"} and filename_order_locked:
                             if mapped_idx < expected_idx:
                                 mapped_idx = expected_idx
+                            elif format_type == "cvvc" and mapped_idx > expected_idx:
+                                # CVVC는 순서 안정성을 우선한다.
+                                # 1칸 전진은 target token과 exact match일 때만 허용한다.
+                                allow_forward = False
+                                if (
+                                    mapped_idx == (expected_idx + 1)
+                                    and target_tok
+                                    and expected_idx >= 0
+                                    and mapped_idx < len(syllables_info)
+                                ):
+                                    target_norm = _normalize_ja_syllable_token(target_tok)
+                                    mapped_tok_norm = _normalize_ja_syllable_token(
+                                        _syllable_info_token(syllables_info[mapped_idx])
+                                    )
+                                    expected_tok_norm = _normalize_ja_syllable_token(
+                                        _syllable_info_token(syllables_info[expected_idx])
+                                    )
+                                    allow_forward = bool(
+                                        target_norm
+                                        and mapped_tok_norm == target_norm
+                                        and expected_tok_norm != target_norm
+                                    )
+                                if not allow_forward:
+                                    mapped_idx = expected_idx
                             elif mapped_idx > (expected_idx + 1):
                                 mapped_idx = expected_idx + 1
                         if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
@@ -4673,6 +4750,39 @@ def generate_ja_oto(
                         next_c_end_abs=n_end,
                     )
                     pre_abs_after = offset + pre
+                    # CVVC에서 CV 앵커 드리프트가 있을 때 VC까지 과보정되는 것을 막기 위해
+                    # pre 절대 이동량을 보수적으로 제한한다.
+                    if format_type in {"cvvc", "cv"}:
+                        max_shift = 26.0
+                        if mapping_tier == "high":
+                            max_shift = 34.0
+                        onset_cls = _ja_onset_class(c_char)
+                        if onset_cls in {"voiced", "nasal"}:
+                            max_shift += 4.0
+                        if _ja_is_n_bridge_alias(alias, "vc"):
+                            max_shift = min(max_shift, 22.0)
+                        (
+                            offset,
+                            consonant,
+                            cutoff,
+                            pre,
+                            ovl,
+                            pre_abs_after,
+                            clamped_shift,
+                        ) = _limit_pre_anchor_shift(
+                            offset,
+                            consonant,
+                            cutoff,
+                            pre,
+                            ovl,
+                            pre_abs_before=pre_abs_before,
+                            max_shift_ms=max_shift,
+                        )
+                        if clamped_shift:
+                            log(
+                                f"🛡️ {fname}: VC-CV 앵커 이동 제한 "
+                                f"({pre_abs_before:.1f}->{pre_abs_after:.1f}ms, {alias})"
+                            )
                     if abs(pre_abs_after - pre_abs_before) >= 6.0:
                         log(
                             f"🧭 {fname}: VC-CV 앵커 재정렬 "
@@ -4710,7 +4820,15 @@ def generate_ja_oto(
                     )
                 if alias_type in {"cv", "cv_head"}:
                     offset, consonant, cutoff, pre, cutoff_reduced = post_ctx.guard_cv_cutoff_to_next_onset(
-                        offset, consonant, cutoff, pre, current_w_idx
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        current_w_idx,
+                        alias_type=alias_type,
+                        format_type=format_type,
+                        vowel_start_ms=(n_start if alias_type == "cv_head" else None),
+                        vowel_end_ms=(n_end if alias_type == "cv_head" else None),
                     )
                     if cutoff_reduced > 0.5:
                         log(f"🛡️ {fname}: CV 컷오프 과연장 보정(-{cutoff_reduced:.1f}ms) [{alias}]")

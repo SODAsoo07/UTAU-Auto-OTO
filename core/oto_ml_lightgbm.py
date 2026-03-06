@@ -4,8 +4,11 @@ LightGBM backend for OTO ML correction.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import os
+import tempfile
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -37,6 +40,8 @@ else:
 
 from core.oto_ml_features import CATEGORICAL_FEATURES, FEATURE_NAMES, TARGET_NAMES, canonicalize_feature_row, get_delta_clip_limits, get_feature_schema, write_feature_schema
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_LGB_PARAMS = {
     "objective": "regression_l1",
     "boosting_type": "gbdt",
@@ -48,6 +53,47 @@ DEFAULT_LGB_PARAMS = {
     "min_data_in_leaf": 40,
     "verbosity": -1,
 }
+
+
+def _runtime_model_cache_dir() -> str:
+    configured = str(os.environ.get("UTOA_LGB_MODEL_CACHE_DIR", "") or "").strip()
+    if configured:
+        os.makedirs(configured, exist_ok=True)
+        return configured
+    path = os.path.join(tempfile.gettempdir(), "utoa_lgb_models")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _normalize_model_file_for_runtime(model_path: str) -> str:
+    """
+    일부 LightGBM 런타임에서 CRLF 모델 텍스트 파싱 중 치명 오류가 발생할 수 있어
+    로딩 전에 LF 전용 임시 사본으로 정규화한다.
+    """
+    try:
+        with open(model_path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return model_path
+    if b"\r" not in raw:
+        return model_path
+
+    try:
+        st = os.stat(model_path)
+        mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+        sig = f"{os.path.abspath(model_path)}|{int(st.st_size)}|{mtime_ns}"
+        digest = hashlib.sha1(sig.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        base = os.path.splitext(os.path.basename(model_path))[0]
+        normalized_path = os.path.join(_runtime_model_cache_dir(), f"{base}_{digest}.txt")
+        if os.path.exists(normalized_path):
+            return normalized_path
+        normalized = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        with open(normalized_path, "wb") as f:
+            f.write(normalized)
+        return normalized_path
+    except Exception as e:
+        logger.warning("Failed to normalize LightGBM model file (%s): %s", model_path, e)
+        return model_path
 
 
 def _require_training_stack():
@@ -258,7 +304,8 @@ def load_lightgbm_bundle(model_dir: str, meta: Optional[Dict[str, Any]] = None, 
         model_path = os.path.join(model_dir, model_name)
         if not os.path.exists(model_path):
             raise FileNotFoundError(model_path)
-        models[target] = lgb.Booster(model_file=model_path)
+        runtime_model_path = _normalize_model_file_for_runtime(model_path)
+        models[target] = lgb.Booster(model_file=runtime_model_path)
     return {"models": models, "meta": meta or {}, "schema": schema or get_feature_schema()}
 
 

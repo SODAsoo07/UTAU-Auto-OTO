@@ -222,7 +222,16 @@ def _apply_japanese_delta_policy(row_context: Dict[str, object], deltas: Dict[st
             deltas["delta_cutoff"] = _scale_signed(deltas.get("delta_cutoff", 0.0), neg_scale=0.85, pos_scale=0.18)
             deltas["delta_cons"] = _scale_signed(deltas.get("delta_cons", 0.0), neg_scale=0.60, pos_scale=0.85)
             deltas["delta_ovl"] = _scale_signed(deltas.get("delta_ovl", 0.0), neg_scale=0.60, pos_scale=0.85)
+            if alias_type in {"cv", "cv_head"}:
+                deltas["delta_cutoff"] = min(deltas.get("delta_cutoff", 0.0), 0.0)
             return deltas
+        if alias_type in {"cv", "cv_head"}:
+            # CV 계열은 컷오프 연장이 다음 음절 초입 누수를 만들기 쉬우므로
+            # ML이 컷오프를 늘리는 방향(+)은 사실상 차단한다.
+            deltas["delta_cutoff"] = min(
+                _scale_signed(deltas.get("delta_cutoff", 0.0), neg_scale=0.90, pos_scale=0.0),
+                0.0,
+            )
 
     return deltas
 

@@ -161,6 +161,20 @@ class MlFallbackTests(unittest.TestCase):
         self.assertEqual(adjusted["delta_offset"], 0.0)
         self.assertLess(adjusted["delta_cutoff"], 12.0)
 
+    def test_japanese_cvvc_cv_blocks_positive_cutoff_extension_even_for_non_sensitive_onset(self):
+        adjusted = _apply_language_specific_delta_policy(
+            "japanese",
+            {"format_type": "cvvc", "alias_type": "cv", "alias_text": "あ"},
+            {
+                "delta_offset": 6.0,
+                "delta_pre": 4.0,
+                "delta_cons": 8.0,
+                "delta_cutoff": 24.0,
+                "delta_ovl": 3.0,
+            },
+        )
+        self.assertLessEqual(adjusted["delta_cutoff"], 0.0)
+
     def test_korean_cvvc_vc_stop_damps_aggressive_deltas(self):
         adjusted = _apply_language_specific_delta_policy(
             "korean",

@@ -459,6 +459,8 @@ class PipelineActionsMixin:
                 if not wav_dir:
                     self._append_log("❌ WAV 경로를 먼저 지정해 주세요.")
                     return
+                out_path = self.out_entry.get().strip()
+                cleanup_snapshot = self._snapshot_output_tree_for_cleanup(out_path) if out_path else None
 
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
                 
@@ -682,7 +684,6 @@ class PipelineActionsMixin:
                 # Step 4: OTO
                 self._set_status("4/4 - OTO.ini 생성 중...")
                 tpl_path = "" if self.no_base_oto_var.get() else self.tpl_entry.get()
-                out_path = self.out_entry.get()
                 if out_path:
                     tg_folder = os.path.join(wav_dir, "textgrids")
                     params = self._get_params()
@@ -703,9 +704,10 @@ class PipelineActionsMixin:
                     if self.no_base_oto_var.get():
                         self._append_log("ℹ '베이스 OTO 없이 생성'이 활성화되어 OpenUtau 스타일로 생성합니다.")
 
+                    oto_errors = []
                     if lang == 'japanese':
                         self._append_log(f"ℹ 일본어 별칭 스타일: {self.ja_alias_style_var.get()}")
-                        generate_ja_oto(
+                        _processed, _total, oto_errors = generate_ja_oto(
                             tg_folder, tpl_path, out_path,
                             params=None,
                             generate_openutau=gen_ou,
@@ -722,7 +724,7 @@ class PipelineActionsMixin:
                             callback=self._append_log
                         )
                     else:
-                        generate_oto(
+                        _processed, _total, oto_errors = generate_oto(
                             tg_folder, tpl_path, out_path,
                             params,
                             gen_ou,
@@ -734,6 +736,10 @@ class PipelineActionsMixin:
                             callback=self._append_log
                         )
                     self._run_auto_validation(wav_dir, tg_folder, out_path)
+                    if oto_errors:
+                        self._append_log(f"⚠ OTO 생성 중 오류가 있어 자동 정리를 건너뜁니다. ({len(oto_errors)}건)")
+                    else:
+                        self._cleanup_generated_output_artifacts(out_path, snapshot=cleanup_snapshot)
                 else:
                     self._append_log("⚠ 출력 경로가 없어 OTO 생성을 건너뜁니다.")
 
