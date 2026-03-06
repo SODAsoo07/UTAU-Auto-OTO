@@ -32,6 +32,7 @@ RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "ml", "configs"), "ml/configs"),
     (os.path.join(APP_DIR, "config.json"), "."),
 ]
+args = argparse.Namespace(onefile=False, allow_unsafe_onefile=False, name=DEFAULT_APP_NAME)
 
 
 def _configure_console_encoding():
@@ -164,7 +165,10 @@ def _copy_release_outputs(app_name, onefile=False):
 
 def main():
     _configure_console_encoding()
-    args = _parse_args()
+    global args
+    parsed_args = _parse_args()
+    if parsed_args is not None:
+        args = parsed_args
     if args.onefile and not args.allow_unsafe_onefile:
         raise SystemExit(
             "onefile 빌드는 기본 비활성화되어 있습니다. "
