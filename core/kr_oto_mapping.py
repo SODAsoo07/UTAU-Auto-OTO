@@ -228,13 +228,25 @@ def _find_kr_cv_vowel_match_index(target_clean, romaji_syllables, expected_idx, 
     return best_idx
 
 
-def _should_allow_kr_exact_vowel_fix(file_format, forced_selected_idx):
+def _should_allow_kr_exact_vowel_fix(
+    file_format,
+    forced_selected_idx,
+    *,
+    alias_type=None,
+    severe_vowel_mismatch=False,
+):
     """
     한국어 CVVC에서 filename occurrence로 이미 강제 매핑된 CV/CV_HEAD는
     뒤의 모음 재탐색이 다시 덮어쓰지 않도록 막습니다.
+
+    단, CV_HEAD에서 강제 매핑 결과가 목표 모음과 크게 어긋난 경우에는
+    1칸 내 재탐색 보정을 허용합니다.
     """
     fmt = str(file_format or "").strip().lower()
     if fmt == "cvvc" and forced_selected_idx is not None:
+        a_type = str(alias_type or "").strip().lower()
+        if a_type == "cv_head" and bool(severe_vowel_mismatch):
+            return True
         return False
     return True
 

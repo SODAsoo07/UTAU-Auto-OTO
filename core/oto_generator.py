@@ -9,6 +9,7 @@ import re
 import json
 import wave
 import datetime
+from dataclasses import replace
 import logging
 from functools import lru_cache
 from types import SimpleNamespace
@@ -595,6 +596,51 @@ def _resolve_cv_syllable_index(
     if return_meta:
         return current_w_idx, cv_seq_idx, meta
     return current_w_idx, cv_seq_idx
+
+
+def _extract_kr_anchor_target_token(alias_text, alias_type):
+    a_type = str(alias_type or "").strip().lower()
+    a = str(alias_text or "").strip().lower()
+    if not a:
+        return ""
+    if a_type == "cv":
+        return _normalize_cv_match_token(a)
+    if a_type == "cv_head":
+        parts = [p for p in re.split(r"\s+", a) if p]
+        if len(parts) >= 2 and parts[0] == "-":
+            return _normalize_cv_match_token(parts[1])
+        return _normalize_cv_match_token(a.lstrip("-"))
+    if a_type == "vcv":
+        parts = [p for p in re.split(r"\s+", a) if p]
+        if len(parts) >= 2:
+            return _normalize_cv_match_token(parts[1])
+    return ""
+
+
+def _kr_alias_contains_coda(alias_text, alias_type):
+    tok = _extract_kr_anchor_target_token(alias_text, alias_type)
+    if not tok:
+        return False
+    _onset, vowel, coda = _split_kr_syllable_parts(tok)
+    return bool(vowel and coda)
+
+
+def _retune_kr_vcv_anchor_profile(profile, alias_text, alias_type):
+    if profile is None:
+        return profile
+    if str(alias_type or "").strip().lower() not in {"vcv", "cv", "cv_head"}:
+        return profile
+    if not _kr_alias_contains_coda(alias_text, alias_type):
+        return profile
+    return replace(
+        profile,
+        pre_window_before_ms=max(1.0, float(profile.pre_window_before_ms) - 2.0),
+        pre_window_after_ms=float(profile.pre_window_after_ms) + 4.0,
+        pre_floor_ms=float(profile.pre_floor_ms) + 4.0,
+        cons_gap_target_ms=min(float(profile.cons_gap_max_ms), float(profile.cons_gap_target_ms) + 8.0),
+        cut_gap_target_ms=min(float(profile.cut_gap_max_ms), float(profile.cut_gap_target_ms) + 10.0),
+        blend_weight=min(0.72, float(profile.blend_weight) + 0.06),
+    )
 
 
 def _apply_post_timing_pipeline(
@@ -2455,6 +2501,8 @@ def generate_oto(
         profile = get_anchor_profile("korean", fmt, alias_type, mode="rhythm_stable")
         if profile is None:
             return offset, consonant, cutoff, pre, ovl
+        if fmt == "vcv":
+            profile = _retune_kr_vcv_anchor_profile(profile, alias_text, alias_type)
 
         before = (float(offset), float(consonant), float(cutoff), float(pre), float(ovl))
         ctx = AnchorTimingContext(
@@ -3084,6 +3132,11 @@ def generate_oto(
                     f"margin={mapping_margin:+.1f}, reason={mapping_reason_code})"
                 )
 
+            file_mapping_low_conf = bool(
+                float(mapping_confidence_base) < max(float(file_mapping_conf_th), 0.58)
+                or (float(base_score) < 48.0 and float(alt_score) < 48.0)
+            )
+
             if (not syllables_info) or any(len(s['phones']) == 0 for s in syllables_info):
                 log(f"경고: {fname}: 음절-음소 매핑 실패로 원본 라인을 유지합니다.")
                 fail_reason = "mapping_failed"
@@ -3155,7 +3208,14 @@ def generate_oto(
                 
 
                 alias_type = _classify_alias_cached(alias)
-                
+                row_jump_default = int(max(0, kr_mapping_max_index_jump_default))
+                row_jump_high_conf = int(max(row_jump_default, kr_mapping_max_index_jump_high_conf))
+                if alias_type == "cv_head":
+                    row_jump_default = int(max(0, row_jump_default - 1))
+                    row_jump_high_conf = int(max(row_jump_default, row_jump_high_conf - 1))
+                elif alias_type == "vv":
+                    row_jump_default = int(max(row_jump_default, kr_mapping_max_index_jump_default + 1))
+                    row_jump_high_conf = int(max(row_jump_high_conf, row_jump_default + 1))
 
                 if alias_type == 'br':
 
@@ -3567,19 +3627,45 @@ def generate_oto(
                     selected_w_idx = None
                     resolve_meta = {}
                     forced_selected_idx = forced_vv_idx if forced_vv_idx is not None else forced_cvvc_idx
+                    forced_gate_rejected = False
                     if forced_selected_idx is not None:
-                        selected_w_idx = forced_selected_idx
-                        cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
-                        row_mapping_reason_code = "forced_occurrence_index"
-                    else:
+                        forced_score = -1.0
+                        expected_score_forced = -1.0
+                        forced_vowel_mismatch = False
+                        if target_clean and 0 <= forced_selected_idx < len(romaji_syllables):
+                            forced_score = float(_cv_match_score(target_clean, romaji_syllables[forced_selected_idx]))
+                            if 0 <= expected_cv_idx < len(romaji_syllables):
+                                expected_score_forced = float(_cv_match_score(target_clean, romaji_syllables[expected_cv_idx]))
+                            _t_on, _t_v, _t_c = _split_kr_syllable_parts(target_clean)
+                            _f_on, _f_v, _f_c = _split_kr_syllable_parts(romaji_syllables[forced_selected_idx])
+                            forced_vowel_mismatch = bool(_t_v and _f_v and _t_v != _f_v)
+                        min_forced_score = 64.0 if alias_type == "cv_head" else 60.0
+                        if file_mapping_low_conf:
+                            min_forced_score += 6.0
+                        keep_forced = True
+                        if forced_score >= 0.0 and forced_score < min_forced_score:
+                            keep_forced = False
+                        if forced_vowel_mismatch and file_mapping_low_conf:
+                            keep_forced = False
+                        if expected_score_forced >= 0.0 and forced_score >= 0.0 and (forced_score + 14.0) < expected_score_forced:
+                            keep_forced = False
+                        if keep_forced:
+                            selected_w_idx = forced_selected_idx
+                            cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
+                            row_mapping_reason_code = "forced_occurrence_index"
+                        else:
+                            forced_gate_rejected = True
+                            row_mapping_confidence = max(0.0, row_mapping_confidence - 0.08)
+                            row_mapping_reason_code = "forced_occurrence_low_score"
+                    if forced_selected_idx is None or forced_gate_rejected:
                         selected_w_idx, cv_seq_idx, resolve_meta = _resolve_cv_syllable_index(
                             target_clean,
                             romaji_syllables,
                             cv_seq_idx,
                             current_w_idx,
                             mapping_confidence=row_mapping_confidence,
-                            max_jump_default=kr_mapping_max_index_jump_default,
-                            max_jump_high_conf=kr_mapping_max_index_jump_high_conf,
+                            max_jump_default=row_jump_default,
+                            max_jump_high_conf=row_jump_high_conf,
                             high_conf_threshold=max(float(file_mapping_conf_th), 0.50),
                             return_meta=True,
                         )
@@ -3594,8 +3680,22 @@ def generate_oto(
                             row_mapping_confidence = max(0.0, row_mapping_confidence - 0.18)
                             row_mapping_reason_code = "jump_blocked"
                     target_onset, target_vowel, _target_coda = _split_kr_syllable_parts(target_clean)
+                    forced_cv_head_severe_mismatch = False
+                    if (
+                        forced_selected_idx is not None
+                        and alias_type == "cv_head"
+                        and target_vowel
+                        and 0 <= selected_w_idx < len(romaji_syllables)
+                    ):
+                        _fc_on, forced_curr_vowel, _fc_coda = _split_kr_syllable_parts(romaji_syllables[selected_w_idx])
+                        forced_cv_head_severe_mismatch = bool(forced_curr_vowel and forced_curr_vowel != target_vowel)
                     allow_exact_vowel_fix = (
-                        _should_allow_kr_exact_vowel_fix(file_format, forced_selected_idx)
+                        _should_allow_kr_exact_vowel_fix(
+                            file_format,
+                            forced_selected_idx,
+                            alias_type=alias_type,
+                            severe_vowel_mismatch=forced_cv_head_severe_mismatch,
+                        )
                         and float(row_mapping_confidence) >= float(file_mapping_conf_th)
                     )
                     if target_vowel and 0 <= selected_w_idx < len(romaji_syllables) and allow_exact_vowel_fix:
@@ -3610,20 +3710,23 @@ def generate_oto(
                                 if probe_vowel == target_vowel:
                                     need_exact_vowel_fix = True
                         if need_exact_vowel_fix:
+                            fixed_search_fwd = 4 if file_format == "cvvc" else 2
+                            if file_format == "cvvc" and forced_selected_idx is not None and alias_type == "cv_head":
+                                fixed_search_fwd = 1
                             fixed_idx = _find_kr_cv_vowel_match_index(
                                 target_clean,
                                 romaji_syllables,
                                 expected_cv_idx,
                                 search_back=1,
-                                search_fwd=4 if file_format == "cvvc" else 2,
+                                search_fwd=fixed_search_fwd,
                             )
                             if fixed_idx is not None and fixed_idx >= expected_cv_idx:
-                                max_forward = int(max(0, kr_mapping_max_index_jump_default))
+                                max_forward = int(max(0, row_jump_default))
                                 if (
                                     float(row_mapping_confidence) >= max(float(file_mapping_conf_th), 0.50)
                                     and float(resolve_meta.get("best_score", 0.0) or 0.0) >= 84.0
                                 ):
-                                    max_forward = int(max(max_forward, kr_mapping_max_index_jump_high_conf))
+                                    max_forward = int(max(max_forward, row_jump_high_conf))
                                 raw_fixed_idx = int(fixed_idx)
                                 max_allowed_idx = int(expected_cv_idx + max_forward)
                                 if fixed_idx > max_allowed_idx:

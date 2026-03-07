@@ -54,6 +54,7 @@ from core.oto_generator import _build_kr_syllables_from_phone_nuclei
 from core.oto_generator import _extract_kr_cv_targets_from_filename
 from core.oto_generator import _refine_kr_bridge_with_adjacent_cv
 from core.oto_generator import _guard_kr_vc_cutoff_to_next_segment
+from core.oto_generator import _kr_alias_contains_coda
 from core.oto_generator import _resolve_kr_cvvc_occurrence_index
 from core.oto_generator import _resolve_kr_cvvc_vv_index
 from core.oto_generator import _select_kr_cv_onset_slice
@@ -273,10 +274,10 @@ class FeatureExtractionTests(unittest.TestCase):
         occ_map = _build_kr_cvvc_occurrence_map(syllables_info)
         state = {}
         self.assertEqual(_resolve_kr_cvvc_occurrence_index("- do", "cv_head", occ_map, state), 0)
-        self.assertEqual(_resolve_kr_cvvc_occurrence_index("do", "cv", occ_map, state), 1)
+        self.assertEqual(_resolve_kr_cvvc_occurrence_index("do", "cv", occ_map, state), 0)
         self.assertEqual(_resolve_kr_cvvc_occurrence_index("- dyo", "cv_head", occ_map, state), 2)
-        self.assertEqual(_resolve_kr_cvvc_occurrence_index("dyo", "cv", occ_map, state), 3)
-        self.assertEqual(_resolve_kr_cvvc_occurrence_index("do", "cv", occ_map, state), 5)
+        self.assertEqual(_resolve_kr_cvvc_occurrence_index("dyo", "cv", occ_map, state), 2)
+        self.assertEqual(_resolve_kr_cvvc_occurrence_index("do", "cv", occ_map, state), 1)
 
     def test_korean_cvvc_forced_occurrence_blocks_exact_vowel_fix(self):
         self.assertFalse(_should_allow_kr_exact_vowel_fix("cvvc", 3))
@@ -285,6 +286,30 @@ class FeatureExtractionTests(unittest.TestCase):
     def test_korean_nonforced_occurrence_allows_exact_vowel_fix(self):
         self.assertTrue(_should_allow_kr_exact_vowel_fix("cvvc", None))
         self.assertTrue(_should_allow_kr_exact_vowel_fix("cvc", 2))
+
+    def test_korean_cv_head_severe_mismatch_allows_exact_vowel_fix(self):
+        self.assertTrue(
+            _should_allow_kr_exact_vowel_fix(
+                "cvvc",
+                1,
+                alias_type="cv_head",
+                severe_vowel_mismatch=True,
+            )
+        )
+        self.assertFalse(
+            _should_allow_kr_exact_vowel_fix(
+                "cvvc",
+                1,
+                alias_type="cv",
+                severe_vowel_mismatch=True,
+            )
+        )
+
+    def test_korean_anchor_target_detects_coda_for_vcv_and_cv_head(self):
+        self.assertTrue(_kr_alias_contains_coda("a gak", "vcv"))
+        self.assertFalse(_kr_alias_contains_coda("a ga", "vcv"))
+        self.assertTrue(_kr_alias_contains_coda("- gak", "cv_head"))
+        self.assertFalse(_kr_alias_contains_coda("- ga", "cv_head"))
 
     def test_korean_cvvc_vv_occurrence_mapping_uses_pair_order(self):
         syllables_info = [

@@ -2638,6 +2638,14 @@ def generate_ja_oto(
         profile = get_anchor_profile("japanese", fmt, alias_key, mode="rhythm_stable")
         if profile is None:
             return offset, consonant, cutoff, pre, ovl
+        if fmt == "vcv" and alias_key in {"vcv", "vcv_n_bridge", "cv", "cv_head"}:
+            profile = replace(
+                profile,
+                pre_window_before_ms=max(2.0, float(profile.pre_window_before_ms) - 1.0),
+                pre_window_after_ms=float(profile.pre_window_after_ms) + 2.0,
+                pre_floor_ms=float(profile.pre_floor_ms) + 2.0,
+                blend_weight=min(0.66, float(profile.blend_weight) + 0.04),
+            )
         # VCV의 CV/CV_HEAD/VCV 본체에서는 cutoff 강클램프가 과개입되기 쉬워
         # 리듬 앵커(pre) 중심으로만 고정하고 cutoff 상한은 원 계산/가드에 맡긴다.
         if fmt == "vcv" and alias_key in {"vcv", "vcv_vv_like", "vcv_n_bridge", "cv", "cv_head"}:
