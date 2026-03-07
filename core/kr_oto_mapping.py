@@ -129,10 +129,13 @@ def _resolve_kr_cvvc_occurrence_index(alias, alias_type, occurrence_map, occurre
     idxs = occurrence_map.get(tok) or []
     if not idxs:
         return None
-    used = int(occurrence_state.get(tok, 0))
+    # CV와 CV_HEAD는 보통 같은 음절 인덱스를 함께 참조하므로,
+    # 카운터를 분리하지 않으면 한쪽이 다른 쪽의 매핑 순서를 밀어버릴 수 있습니다.
+    state_key = (str(alias_type), tok)
+    used = int(occurrence_state.get(state_key, 0))
     if used >= len(idxs):
         used = len(idxs) - 1
-    occurrence_state[tok] = used + 1
+    occurrence_state[state_key] = used + 1
     return idxs[used]
 
 
