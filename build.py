@@ -18,12 +18,6 @@ EXCLUDED_MODULES = [
     "torch",
     "torchaudio",
     "torchvision",
-    "core.oto_ml_pytorch",
-    "core.oto_torch_model",
-    "core.oto_torch_features",
-    "core.oto_torch_dataset",
-    "core.oto_torch_trainer",
-    "core.oto_torch_export",
     "ml",
 ]
 RUNTIME_DATA_PATHS = [
@@ -217,7 +211,7 @@ def main():
         print("⚠ onefile 배포: 실행 경로/캐시 특성상 SOFA/모델 설치가 불안정할 수 있습니다.")
     else:
         print("ℹ onedir 배포는 시작 속도가 빠르며, 사용자용 배포에 권장됩니다.")
-    print("ℹ 이 브랜치 빌드는 LightGBM-only이며 PyTorch 기능은 제외됩니다.")
+    print("ℹ 이 브랜치 빌드는 LightGBM 전용입니다.")
 
 
 if __name__ == "__main__":

@@ -236,5 +236,4 @@ custom_test_wavs/*_dict.txt
 
 # AI/ML workspace and model training artifacts
 /ml_workspace/
-/assets/models/oto_ml_pytorch/
 /sofa_utau_kr
