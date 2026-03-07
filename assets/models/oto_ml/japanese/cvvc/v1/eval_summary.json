@@ -1,10 +1,10 @@
 {
   "targets": {
-    "delta_offset": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\v1\\model_offset.txt",
-    "delta_cons": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\v1\\model_cons.txt",
-    "delta_cutoff": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\v1\\model_cutoff.txt",
-    "delta_pre": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\v1\\model_pre.txt",
-    "delta_ovl": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\v1\\model_ovl.txt"
+    "delta_offset": "model_offset.txt",
+    "delta_cons": "model_cons.txt",
+    "delta_cutoff": "model_cutoff.txt",
+    "delta_pre": "model_pre.txt",
+    "delta_ovl": "model_ovl.txt"
   },
   "metrics": {
     "delta_offset": {

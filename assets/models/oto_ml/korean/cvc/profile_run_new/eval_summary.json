@@ -1,10 +1,10 @@
 {
   "targets": {
-    "delta_offset": "assets\\models\\oto_ml\\korean\\cvc\\profile_run_new\\model_offset.txt",
-    "delta_cons": "assets\\models\\oto_ml\\korean\\cvc\\profile_run_new\\model_cons.txt",
-    "delta_cutoff": "assets\\models\\oto_ml\\korean\\cvc\\profile_run_new\\model_cutoff.txt",
-    "delta_pre": "assets\\models\\oto_ml\\korean\\cvc\\profile_run_new\\model_pre.txt",
-    "delta_ovl": "assets\\models\\oto_ml\\korean\\cvc\\profile_run_new\\model_ovl.txt"
+    "delta_offset": "model_offset.txt",
+    "delta_cons": "model_cons.txt",
+    "delta_cutoff": "model_cutoff.txt",
+    "delta_pre": "model_pre.txt",
+    "delta_ovl": "model_ovl.txt"
   },
   "metrics": {
     "delta_offset": {

@@ -1,7 +1,7 @@
 {
   "bundle_slug": "japanese_cvvc_v1",
-  "source_dir": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\v1",
-  "export_dir": "c:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\ml_workspace\\exports\\model_bundles\\japanese_cvvc_v1",
+  "source_dir": "assets/models/oto_ml/japanese/cvvc/v1",
+  "export_dir": "models_installed/oto_ml/japanese/cvvc/v1_backup_20260301",
   "language": "japanese",
   "format_type": "cvvc",
   "backend": "lightgbm",

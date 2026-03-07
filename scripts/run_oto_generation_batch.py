@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import traceback
+from typing import Dict, List
 
 try:
     import yaml
@@ -87,9 +88,12 @@ def _resolve_case_path(config_dir: str, voicebank_dir: str, raw_path: str) -> st
     if os.path.isabs(p):
         return os.path.normpath(p)
     vb_candidate = os.path.normpath(os.path.join(voicebank_dir, p))
+    config_candidate = os.path.normpath(os.path.join(config_dir, p))
     if os.path.exists(vb_candidate):
         return vb_candidate
-    return os.path.normpath(os.path.join(config_dir, p))
+    if os.path.exists(config_candidate):
+        return config_candidate
+    return vb_candidate
 
 
 def _build_case_output_name(case: dict, defaults: dict, run_tag: str, index: int) -> str:
@@ -122,6 +126,200 @@ def _load_config(path: str):
     return defaults, cases
 
 
+def _render_exception_text(exc: Exception) -> str:
+    text = str(exc).strip()
+    if text:
+        return text
+    return exc.__class__.__name__
+
+
+def _resolve_case_settings(
+    case: dict,
+    defaults: dict,
+    config_dir: str,
+    run_tag: str,
+    case_index: int,
+    force_replace: bool = False,
+    force_no_validation: bool = False,
+) -> Dict[str, object]:
+    name = str(case.get("name", f"case_{case_index:03d}")).strip() or f"case_{case_index:03d}"
+    enabled = _to_bool(case.get("enabled", defaults.get("enabled", True)), True)
+    language = str(case.get("language", defaults.get("language", "japanese"))).strip().lower()
+    voicebank_dir = _resolve_path(
+        config_dir,
+        str(case.get("voicebank_dir", case.get("wav_dir", defaults.get("voicebank_dir", "")))).strip(),
+    )
+    tg_folder = _resolve_case_path(
+        config_dir,
+        voicebank_dir,
+        str(case.get("textgrid_dir", case.get("tg_folder", defaults.get("textgrid_dir", "textgrids")))).strip(),
+    )
+    out_dir = _resolve_path(config_dir, str(case.get("out_dir", defaults.get("out_dir", voicebank_dir))).strip())
+    if not out_dir:
+        out_dir = voicebank_dir
+    output_name = _build_case_output_name(case, defaults, run_tag, case_index)
+    out_path = _resolve_path(out_dir, output_name) if not os.path.isabs(output_name) else _resolve_path(config_dir, output_name)
+    no_base_oto = _to_bool(case.get("no_base_oto", defaults.get("no_base_oto", False)), False)
+    base_oto_raw = str(case.get("base_oto", defaults.get("base_oto", ""))).strip()
+    if no_base_oto:
+        tpl_path = ""
+    elif base_oto_raw:
+        tpl_path = _resolve_case_path(config_dir, voicebank_dir, base_oto_raw)
+    else:
+        cand = os.path.join(voicebank_dir, "oto.ini")
+        tpl_path = cand if os.path.exists(cand) else ""
+
+    custom_phonemes_path = _resolve_path(
+        config_dir,
+        str(case.get("custom_phonemes_path", defaults.get("custom_phonemes_path", ""))).strip(),
+    )
+    replace_oto_ini = force_replace or _to_bool(case.get("replace_oto_ini", defaults.get("replace_oto_ini", False)), False)
+    return {
+        "name": name,
+        "enabled": enabled,
+        "language": language,
+        "voicebank_dir": voicebank_dir,
+        "textgrid_dir": tg_folder,
+        "out_dir": out_dir,
+        "output_oto": out_path,
+        "tpl_path": tpl_path,
+        "auto_format": str(case.get("auto_format", defaults.get("auto_format", ""))).strip(),
+        "generate_openutau": _to_bool(case.get("generate_openutau", defaults.get("generate_openutau", False)), False),
+        "gen_missing_vowels": _to_bool(case.get("gen_missing_vowels", defaults.get("gen_missing_vowels", False)), False),
+        "enable_ml_correction": _to_bool(case.get("enable_ml_correction", defaults.get("enable_ml_correction", True)), True),
+        "custom_phonemes_path": custom_phonemes_path,
+        "alias_suffix": str(case.get("alias_suffix", defaults.get("alias_suffix", ""))).strip(),
+        "alias_style": str(case.get("alias_style", defaults.get("alias_style", "original"))).strip().lower(),
+        "do_validation": _to_bool(case.get("validation", defaults.get("validation", True)), True) and (not force_no_validation),
+        "replace_oto_ini": replace_oto_ini,
+        "replace_target_oto": os.path.join(voicebank_dir, "oto.ini") if voicebank_dir else "",
+    }
+
+
+def _validate_case_settings(case_info: Dict[str, object]) -> List[str]:
+    issues: List[str] = []
+    if not bool(case_info.get("enabled", True)):
+        return issues
+
+    name = str(case_info.get("name", "") or "").strip() or "case"
+    language = str(case_info.get("language", "") or "").strip().lower()
+    voicebank_dir = str(case_info.get("voicebank_dir", "") or "").strip()
+    textgrid_dir = str(case_info.get("textgrid_dir", "") or "").strip()
+    tpl_path = str(case_info.get("tpl_path", "") or "").strip()
+    custom_phonemes_path = str(case_info.get("custom_phonemes_path", "") or "").strip()
+    out_path = str(case_info.get("output_oto", "") or "").strip()
+    replace_target_oto = str(case_info.get("replace_target_oto", "") or "").strip()
+
+    if language not in {"japanese", "korean"}:
+        issues.append(f"case={name}: unsupported language: {language}")
+    if not voicebank_dir or not os.path.isdir(voicebank_dir):
+        issues.append(f"case={name}: voicebank_dir not found: {voicebank_dir}")
+    if not textgrid_dir or not os.path.isdir(textgrid_dir):
+        issues.append(f"case={name}: textgrid_dir not found: {textgrid_dir}")
+    if tpl_path and not os.path.exists(tpl_path):
+        issues.append(f"case={name}: base_oto not found: {tpl_path}")
+    if custom_phonemes_path and not os.path.exists(custom_phonemes_path):
+        issues.append(f"case={name}: custom_phonemes_path not found: {custom_phonemes_path}")
+    if not out_path:
+        issues.append(f"case={name}: output path could not be resolved")
+    if bool(case_info.get("replace_oto_ini", False)) and not replace_target_oto:
+        issues.append(f"case={name}: replace target oto.ini path could not be resolved")
+    return issues
+
+
+def _collect_preflight_issues(case_infos: List[Dict[str, object]]) -> Dict[str, List[str]]:
+    errors: List[str] = []
+    warnings: List[str] = []
+    seen_names = set()
+    seen_output_paths: Dict[str, str] = {}
+    seen_replace_targets: Dict[str, str] = {}
+
+    for case_info in case_infos:
+        name = str(case_info.get("name", "") or "").strip() or "case"
+        if name in seen_names:
+            errors.append(f"duplicate case name: {name}")
+        else:
+            seen_names.add(name)
+
+        errors.extend(_validate_case_settings(case_info))
+        if not bool(case_info.get("enabled", True)):
+            continue
+
+        out_path = str(case_info.get("output_oto", "") or "").strip()
+        if out_path:
+            prev_name = seen_output_paths.get(out_path)
+            if prev_name and prev_name != name:
+                errors.append(f"output collision: {name} and {prev_name} -> {out_path}")
+            else:
+                seen_output_paths[out_path] = name
+
+        if bool(case_info.get("replace_oto_ini", False)):
+            replace_target = str(case_info.get("replace_target_oto", "") or "").strip()
+            if replace_target:
+                prev_name = seen_replace_targets.get(replace_target)
+                if prev_name and prev_name != name:
+                    errors.append(f"replace collision: {name} and {prev_name} -> {replace_target}")
+                else:
+                    seen_replace_targets[replace_target] = name
+
+    return {"errors": errors, "warnings": warnings}
+
+
+def _write_preflight_report(run_dir: str, config_path: str, case_infos: List[Dict[str, object]], issues: Dict[str, List[str]]) -> str:
+    report = {
+        "config": os.path.abspath(config_path),
+        "created_at": dt.datetime.now().isoformat(),
+        "error_count": len(issues.get("errors") or []),
+        "warning_count": len(issues.get("warnings") or []),
+        "errors": list(issues.get("errors") or []),
+        "warnings": list(issues.get("warnings") or []),
+        "cases": case_infos,
+    }
+    out_path = os.path.join(run_dir, "preflight.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    return out_path
+
+
+def _write_summary_text(summary_path: str, summary: Dict[str, object]) -> str:
+    out_path = os.path.splitext(summary_path)[0] + ".txt"
+    lines = [
+        f"config={summary.get('config', '')}",
+        f"run_tag={summary.get('run_tag', '')}",
+        f"run_dir={summary.get('run_dir', '')}",
+        f"total_cases={summary.get('total_cases', 0)}",
+        f"ok_cases={summary.get('ok_cases', 0)}",
+        f"error_cases={summary.get('error_cases', 0)}",
+        f"skipped_cases={summary.get('skipped_cases', 0)}",
+        "",
+    ]
+    for row in summary.get("results", []) or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name", "") or "")
+        status = str(row.get("status", "") or "")
+        reason = str(row.get("reason", "") or "")
+        lines.append(f"[{status}] {name}")
+        if reason:
+            lines.append(f"reason={reason}")
+        validation = row.get("validation") or {}
+        if isinstance(validation, dict) and validation:
+            lines.append(
+                "validation="
+                f"checked_files={int(validation.get('checked_files', 0) or 0)} "
+                f"warnings={int(validation.get('warnings', 0) or 0)} "
+                f"errors={int(validation.get('errors', 0) or 0)}"
+            )
+        output_oto = str(row.get("output_oto", "") or "").strip()
+        if output_oto:
+            lines.append(f"output_oto={output_oto}")
+        lines.append("")
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines).rstrip() + "\n")
+    return out_path
+
+
 def _run_one_case(
     case: dict,
     defaults: dict,
@@ -132,52 +330,48 @@ def _run_one_case(
     force_replace: bool = False,
     force_no_validation: bool = False,
 ):
-    name = str(case.get("name", f"case_{case_index:03d}")).strip() or f"case_{case_index:03d}"
-    enabled = _to_bool(case.get("enabled", defaults.get("enabled", True)), True)
+    case_info = _resolve_case_settings(
+        case=case,
+        defaults=defaults,
+        config_dir=config_dir,
+        run_tag=run_tag,
+        case_index=case_index,
+        force_replace=force_replace,
+        force_no_validation=force_no_validation,
+    )
+    name = str(case_info["name"])
+    enabled = bool(case_info["enabled"])
     if not enabled:
         return {"name": name, "status": "skipped", "reason": "disabled"}
 
-    language = str(case.get("language", defaults.get("language", "japanese"))).strip().lower()
+    language = str(case_info["language"]).strip().lower()
     if language not in {"japanese", "korean"}:
         return {"name": name, "status": "error", "reason": f"unsupported language: {language}"}
 
-    voicebank_dir = _resolve_path(config_dir, str(case.get("voicebank_dir", case.get("wav_dir", ""))).strip())
+    voicebank_dir = str(case_info["voicebank_dir"])
     if not voicebank_dir or not os.path.isdir(voicebank_dir):
         return {"name": name, "status": "error", "reason": f"voicebank_dir not found: {voicebank_dir}"}
 
-    tg_folder_raw = str(case.get("textgrid_dir", case.get("tg_folder", "textgrids"))).strip()
-    tg_folder = _resolve_case_path(config_dir, voicebank_dir, tg_folder_raw)
+    tg_folder = str(case_info["textgrid_dir"])
     if not os.path.isdir(tg_folder):
         return {"name": name, "status": "error", "reason": f"textgrid_dir not found: {tg_folder}"}
 
-    out_dir = _resolve_path(config_dir, str(case.get("out_dir", defaults.get("out_dir", voicebank_dir))).strip())
+    out_dir = str(case_info["out_dir"])
     if not out_dir:
         out_dir = voicebank_dir
     os.makedirs(out_dir, exist_ok=True)
 
-    output_name = _build_case_output_name(case, defaults, run_tag, case_index)
-    out_path = _resolve_path(out_dir, output_name) if not os.path.isabs(output_name) else _resolve_path(config_dir, output_name)
-
-    no_base_oto = _to_bool(case.get("no_base_oto", defaults.get("no_base_oto", False)), False)
-    if no_base_oto:
-        tpl_path = ""
-    else:
-        base_oto_raw = str(case.get("base_oto", defaults.get("base_oto", ""))).strip()
-        if base_oto_raw:
-            tpl_path = _resolve_case_path(config_dir, voicebank_dir, base_oto_raw)
-        else:
-            cand = os.path.join(voicebank_dir, "oto.ini")
-            tpl_path = cand if os.path.exists(cand) else ""
-
-    auto_format = str(case.get("auto_format", defaults.get("auto_format", ""))).strip()
-    generate_openutau = _to_bool(case.get("generate_openutau", defaults.get("generate_openutau", False)), False)
-    gen_missing_vowels = _to_bool(case.get("gen_missing_vowels", defaults.get("gen_missing_vowels", False)), False)
-    enable_ml_correction = _to_bool(case.get("enable_ml_correction", defaults.get("enable_ml_correction", True)), True)
-    custom_phonemes_path = _resolve_path(config_dir, str(case.get("custom_phonemes_path", defaults.get("custom_phonemes_path", ""))).strip())
-    alias_suffix = str(case.get("alias_suffix", defaults.get("alias_suffix", ""))).strip()
-    alias_style = str(case.get("alias_style", defaults.get("alias_style", "original"))).strip().lower()
-    do_validation = _to_bool(case.get("validation", defaults.get("validation", True)), True) and (not force_no_validation)
-    replace_oto_ini = force_replace or _to_bool(case.get("replace_oto_ini", defaults.get("replace_oto_ini", False)), False)
+    out_path = str(case_info["output_oto"])
+    tpl_path = str(case_info["tpl_path"])
+    auto_format = str(case_info["auto_format"])
+    generate_openutau = bool(case_info["generate_openutau"])
+    gen_missing_vowels = bool(case_info["gen_missing_vowels"])
+    enable_ml_correction = bool(case_info["enable_ml_correction"])
+    custom_phonemes_path = str(case_info["custom_phonemes_path"])
+    alias_suffix = str(case_info["alias_suffix"])
+    alias_style = str(case_info["alias_style"])
+    do_validation = bool(case_info["do_validation"])
+    replace_oto_ini = bool(case_info["replace_oto_ini"])
 
     case_log_name = f"{case_index:03d}_{_safe_name(name)}.log"
     case_log_path = os.path.join(run_dir, case_log_name)
@@ -185,14 +379,14 @@ def _run_one_case(
 
     def log(msg: str):
         ts = dt.datetime.now().strftime("%H:%M:%S")
-        line = f"[{ts}] {msg}"
+        line = f"[{ts}][{name}] {msg}"
         _safe_console_print(line)
         case_logs.append(line)
 
-    log(f"START name={name} lang={language} format={auto_format or 'auto'}")
+    log(f"start lang={language} format={auto_format or 'auto'}")
     log(f"voicebank={voicebank_dir}")
-    log(f"textgrids={tg_folder}")
-    log(f"output={out_path}")
+    log(f"textgrid_dir={tg_folder}")
+    log(f"output_oto={out_path}")
 
     processed = 0
     total = 0
@@ -237,7 +431,7 @@ def _run_one_case(
         if errors:
             status = "error"
             reason = f"generator_errors={len(errors)}"
-            log(f"ERROR generator_errors={len(errors)}")
+            log(f"generator_errors={len(errors)}")
 
         if do_validation and os.path.exists(out_path):
             validation = validate_oto_timing(
@@ -253,14 +447,14 @@ def _run_one_case(
             backup_oto = os.path.join(voicebank_dir, f"oto.backup.{run_tag}.ini")
             if os.path.exists(target_oto):
                 shutil.copyfile(target_oto, backup_oto)
-                log(f"BACKUP {backup_oto}")
+                log(f"backup_oto={backup_oto}")
             shutil.copyfile(out_path, target_oto)
-            log(f"REPLACED {target_oto}")
+            log(f"replaced_oto={target_oto}")
 
     except Exception as e:
         status = "error"
-        reason = str(e)
-        log(f"EXCEPTION {e}")
+        reason = _render_exception_text(e)
+        log(f"exception={reason}")
         case_logs.append(traceback.format_exc())
 
     with open(case_log_path, "w", encoding="utf-8") as f:
@@ -308,10 +502,40 @@ def main():
     run_dir = os.path.join("logs", "oto_batch", run_tag)
     os.makedirs(run_dir, exist_ok=True)
 
+    case_infos = [
+        _resolve_case_settings(
+            case=case if isinstance(case, dict) else {},
+            defaults=defaults,
+            config_dir=config_dir,
+            run_tag=run_tag,
+            case_index=idx,
+            force_replace=args.replace,
+            force_no_validation=args.skip_validation,
+        )
+        for idx, case in enumerate(cases, start=1)
+    ]
+    preflight_issues = _collect_preflight_issues(case_infos)
+    preflight_path = _write_preflight_report(
+        run_dir=run_dir,
+        config_path=config_path,
+        case_infos=case_infos,
+        issues=preflight_issues,
+    )
+
     _safe_console_print(f"[BatchOTO] config={config_path}")
     _safe_console_print(f"[BatchOTO] run_tag={run_tag}")
     _safe_console_print(f"[BatchOTO] cases={len(cases)}")
     _safe_console_print(f"[BatchOTO] run_dir={os.path.abspath(run_dir)}")
+    _safe_console_print(f"[BatchOTO] preflight={os.path.abspath(preflight_path)}")
+    if preflight_issues["warnings"]:
+        _safe_console_print(f"[BatchOTO][Preflight] warnings={len(preflight_issues['warnings'])}")
+        for msg in preflight_issues["warnings"][:20]:
+            _safe_console_print(f"[BatchOTO][Preflight][WARN] {msg}")
+    if preflight_issues["errors"]:
+        _safe_console_print(f"[BatchOTO][Preflight] errors={len(preflight_issues['errors'])}")
+        for msg in preflight_issues["errors"][:20]:
+            _safe_console_print(f"[BatchOTO][Preflight][ERROR] {msg}")
+        raise ValueError(f"Preflight failed with {len(preflight_issues['errors'])} error(s).")
 
     results = []
     for idx, case in enumerate(cases, start=1):
@@ -344,7 +568,9 @@ def main():
     summary_path = os.path.join(run_dir, "summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
+    summary_txt_path = _write_summary_text(summary_path, summary)
     _safe_console_print(f"[BatchOTO] summary={os.path.abspath(summary_path)}")
+    _safe_console_print(f"[BatchOTO] summary_txt={os.path.abspath(summary_txt_path)}")
 
 
 if __name__ == "__main__":

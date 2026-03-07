@@ -95,6 +95,33 @@ def _mean(values):
     return sum(values) / float(len(values)) if values else 0.0
 
 
+def _quantile(values, q):
+    if not values:
+        return 0.0
+    vals = sorted(float(v) for v in values)
+    if len(vals) == 1:
+        return vals[0]
+    q = min(max(float(q), 0.0), 1.0)
+    pos = (len(vals) - 1) * q
+    lo = int(pos)
+    hi = min(lo + 1, len(vals) - 1)
+    frac = pos - lo
+    return vals[lo] * (1.0 - frac) + vals[hi] * frac
+
+
+def _alias_quality_weight(alias_type):
+    t = str(alias_type or "").strip().lower()
+    if t == "cv_head":
+        return 2.25
+    if t == "cv":
+        return 1.75
+    return 1.0
+
+
+def _is_cv_like(alias_type):
+    return str(alias_type or "").strip().lower() in {"cv", "cv_head"}
+
+
 def analyze(base_oto, auto_oto, language="auto", topn=30):
     base_rows, base_meta = _parse_oto(base_oto, language)
     auto_rows, auto_meta = _parse_oto(auto_oto, language)
@@ -107,6 +134,15 @@ def analyze(base_oto, auto_oto, language="auto", topn=30):
     field_abs = {f: [] for f in fields}
     by_type = defaultdict(lambda: {f: [] for f in fields})
     suspicious = []
+    weighted_pre_abs_sum = 0.0
+    weighted_offset_sum = 0.0
+    weighted_row_sum = 0.0
+    cv_like_rows = 0
+    cv_like_suspicious_rows = 0
+    cv_like_order_jump_rows = 0
+    cv_like_order_jump_excess_sum = 0.0
+    cv_like_pre_abs = []
+    cv_like_offset = []
 
     for k in shared:
         b = base_rows[k]
@@ -118,7 +154,21 @@ def analyze(base_oto, auto_oto, language="auto", topn=30):
             field_abs[f].append(d)
             by_type[alias_type][f].append(d)
             diffs[f] = d
+        row_weight = _alias_quality_weight(alias_type)
+        weighted_pre_abs_sum += diffs["pre_abs"] * row_weight
+        weighted_offset_sum += diffs["offset"] * row_weight
+        weighted_row_sum += row_weight
         jump_score = max(diffs["pre_abs"], diffs["offset"], diffs["cons_abs"])
+        if _is_cv_like(alias_type):
+            cv_like_rows += 1
+            cv_like_pre_abs.append(diffs["pre_abs"])
+            cv_like_offset.append(diffs["offset"])
+            if jump_score >= 120.0:
+                cv_like_suspicious_rows += 1
+            order_jump_score = max(diffs["pre_abs"], diffs["offset"])
+            if order_jump_score >= 80.0:
+                cv_like_order_jump_rows += 1
+                cv_like_order_jump_excess_sum += (order_jump_score - 80.0)
         if jump_score >= 120.0:
             suspicious.append({
                 "wav": a["wav"],
@@ -155,6 +205,20 @@ def analyze(base_oto, auto_oto, language="auto", topn=30):
             "auto": auto_meta,
         },
         "mae": {f"mae_{f}": _mean(vals) for f, vals in field_abs.items()},
+        "quality": {
+            "weighted_mae_pre_abs": float(weighted_pre_abs_sum) / float(weighted_row_sum or 1.0),
+            "weighted_mae_offset": float(weighted_offset_sum) / float(weighted_row_sum or 1.0),
+            "p90_pre_abs": _quantile(field_abs["pre_abs"], 0.90),
+            "p90_offset": _quantile(field_abs["offset"], 0.90),
+            "cv_like_rows": int(cv_like_rows),
+            "cv_like_suspicious_rows": int(cv_like_suspicious_rows),
+            "cv_like_suspicious_ratio": float(cv_like_suspicious_rows) / float(max(cv_like_rows, 1)),
+            "cv_like_order_jump_rows": int(cv_like_order_jump_rows),
+            "cv_like_order_jump_ratio": float(cv_like_order_jump_rows) / float(max(cv_like_rows, 1)),
+            "cv_like_order_jump_severity": float(cv_like_order_jump_excess_sum) / float(max(cv_like_rows, 1)),
+            "cv_like_p90_pre_abs": _quantile(cv_like_pre_abs, 0.90),
+            "cv_like_p90_offset": _quantile(cv_like_offset, 0.90),
+        },
         "alias_type_mae": by_type_summary,
         "suspicious_top": suspicious[: max(1, int(topn))],
     }

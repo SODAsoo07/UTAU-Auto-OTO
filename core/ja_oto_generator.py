@@ -310,6 +310,7 @@ from core.ja_oto_mapping import (
     _extract_vcv_target_syllable,
     _ja_is_n_bridge_alias,
     _ja_left_bridge_token,
+    _ja_soft_cv_match_level,
     _ja_syllable_tail,
     _normalize_ja_syllable_token,
     _score_ja_syllable_mapping,
@@ -1025,6 +1026,67 @@ def _cleanup_timing_anchor_jsonl_files(log_dir, prefix):
     return removed, failed
 
 
+def _should_allow_ja_soft_forward_shift(target_tok, expected_tok, mapped_tok):
+    target_norm = _normalize_ja_syllable_token(target_tok)
+    expected_norm = _normalize_ja_syllable_token(expected_tok)
+    mapped_norm = _normalize_ja_syllable_token(mapped_tok)
+    if not target_norm or not mapped_norm:
+        return False
+    mapped_level = int(_ja_soft_cv_match_level(target_norm, mapped_norm) or 0)
+    expected_level = int(_ja_soft_cv_match_level(target_norm, expected_norm) or 0)
+    if mapped_level >= 3 and expected_level < 3:
+        return True
+    if mapped_level >= 2 and expected_level <= 1:
+        return True
+    return False
+
+
+def _build_ja_mapping_trace_record(
+    *,
+    fname,
+    alias,
+    alias_type,
+    format_type,
+    target_tok,
+    expected_idx,
+    mapped_idx,
+    expected_tok,
+    mapped_tok,
+    mapping_tier,
+    mapping_reason_code,
+    mapping_confidence,
+    filename_order_locked,
+    local_conf=None,
+    note="",
+):
+    expected_norm = _normalize_ja_syllable_token(expected_tok)
+    mapped_norm = _normalize_ja_syllable_token(mapped_tok)
+    target_norm = _normalize_ja_syllable_token(target_tok)
+    expected_match_level = int(_ja_soft_cv_match_level(target_norm, expected_norm) or 0) if target_norm else 0
+    mapped_match_level = int(_ja_soft_cv_match_level(target_norm, mapped_norm) or 0) if target_norm else 0
+    return {
+        "event": "ja_mapping_decision",
+        "file": str(fname or ""),
+        "alias": str(alias or ""),
+        "alias_type": str(alias_type or ""),
+        "format_type": str(format_type or ""),
+        "target_token": target_norm,
+        "expected_index": int(expected_idx),
+        "mapped_index": int(mapped_idx),
+        "delta": int(mapped_idx) - int(expected_idx),
+        "expected_token": expected_norm,
+        "mapped_token": mapped_norm,
+        "expected_match_level": expected_match_level,
+        "mapped_match_level": mapped_match_level,
+        "mapping_tier": str(mapping_tier or ""),
+        "mapping_reason_code": str(mapping_reason_code or ""),
+        "mapping_confidence": float(mapping_confidence or 0.0),
+        "filename_order_locked": bool(filename_order_locked),
+        "local_confidence": None if local_conf is None else float(local_conf),
+        "note": str(note or ""),
+    }
+
+
 def _find_ja_cv_vowel_match_index(target_tok, expected_idx, syllables_info, search_back=1, search_fwd=2):
     """
     target CV와 모음이 일치하는 음절을 기대 인덱스 근처에서 재탐색합니다.
@@ -1042,6 +1104,10 @@ def _find_ja_cv_vowel_match_index(target_tok, expected_idx, syllables_info, sear
     if t_vowel not in JA_VOWELS:
         return None
     t_tail = _ja_syllable_tail(target_tok)
+    expected_soft_match = _ja_soft_cv_match_level(
+        target_tok,
+        _syllable_info_token(syllables_info[e]),
+    )
 
     lo = max(0, e - max(0, int(search_back)))
     hi = min(n - 1, e + max(0, int(search_fwd)))
@@ -1055,6 +1121,7 @@ def _find_ja_cv_vowel_match_index(target_tok, expected_idx, syllables_info, sear
         _co, c_vowel = split_ja_romaji_syllable(cand)
         if c_vowel != t_vowel:
             continue
+        soft_match = _ja_soft_cv_match_level(target_tok, cand)
 
         score = 100 - (abs(i - e) * 18)
         if t_onset and c_onset:
@@ -1064,6 +1131,12 @@ def _find_ja_cv_vowel_match_index(target_tok, expected_idx, syllables_info, sear
                 score += 8
             else:
                 score -= 12
+        if soft_match >= 2:
+            score += 24
+        elif soft_match == 1:
+            score += 8
+        if soft_match > expected_soft_match:
+            score += 10
         c_tail = _ja_syllable_tail(cand)
         if t_tail == c_tail:
             score += 6
@@ -2570,6 +2643,12 @@ def generate_ja_oto(
         ja_mapping_debug_reason_logging = False
     elif env_debug_reason in {"1", "true", "on", "yes"}:
         ja_mapping_debug_reason_logging = True
+    ja_mapping_trace_logging = True
+    env_mapping_trace = str(os.environ.get("UTOA_JA_MAPPING_TRACE", "")).strip().lower()
+    if env_mapping_trace in {"0", "false", "off", "no"}:
+        ja_mapping_trace_logging = False
+    elif env_mapping_trace in {"1", "true", "on", "yes"}:
+        ja_mapping_trace_logging = True
     env_conf_th = str(os.environ.get("UTOA_JA_MAPPING_CONF_THRESHOLD", "")).strip()
     if env_conf_th:
         try:
@@ -2613,6 +2692,9 @@ def generate_ja_oto(
     _anchor_log_dir = os.path.join(_project_dir, "logs")
     _anchor_log_name = f"timing_anchor_ja_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
     anchor_log_path = os.path.join(_anchor_log_dir, _anchor_log_name)
+    mapping_trace_name = f"ja_mapping_trace_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+    mapping_trace_path = os.path.join(_anchor_log_dir, mapping_trace_name)
+    mapping_trace_records = []
 
     def _apply_ja_anchor_lock(
         *,
@@ -2711,6 +2793,13 @@ def generate_ja_oto(
                 },
             )
         return result.offset, result.consonant, result.cutoff, result.pre, result.ovl
+
+    def _append_mapping_trace(record):
+        if not ja_mapping_trace_logging:
+            return
+        if not isinstance(record, dict):
+            return
+        mapping_trace_records.append(record)
 
     def _record_unset(reason, fname, line, meta=None):
         raw = (line or "").rstrip("\n")
@@ -3576,6 +3665,35 @@ def generate_ja_oto(
                         f"(base={base_score:.1f}, corrected={alt_score:.1f})"
                     )
 
+            if selected_candidate:
+                candidate_rows = []
+                for cand in sorted(mapping_candidates, key=lambda c: c.get("objective", -10**9), reverse=True)[:5]:
+                    candidate_rows.append({
+                        "name": str(cand.get("name", "")),
+                        "score": float(cand.get("score", 0.0) or 0.0),
+                        "objective": float(cand.get("objective", 0.0) or 0.0),
+                        "order_preserving": bool(cand.get("order_preserving")),
+                        "lock_order": bool(cand.get("lock_order")),
+                        "mean_syll_conf": float(cand.get("mean_syll_conf", 0.0) or 0.0),
+                    })
+                _append_mapping_trace(
+                    {
+                        "event": "ja_mapping_candidate",
+                        "file": str(fname or ""),
+                        "format_type": str(format_type or ""),
+                        "mapping_reason_code": str(mapping_reason_code or ""),
+                        "mapping_tier": str(mapping_tier or ""),
+                        "mapping_confidence": float(mapping_confidence_base or 0.0),
+                        "mapping_margin": float(mapping_margin or 0.0),
+                        "filename_order_locked": bool(filename_order_locked),
+                        "forced_words_mapping": bool(forced_words_mapping),
+                        "selected_candidate": str(selected_candidate.get("name", "")),
+                        "filename_syllables": list(filename_syllables or []),
+                        "cv_targets": list(cv_targets or []),
+                        "candidate_rows": candidate_rows,
+                    }
+                )
+
             if not syllables_info or any(len(s['phones']) == 0 for s in syllables_info):
                 fail_reason = "mapping_failed"
                 if "spn_heavy" in low_quality_reasons:
@@ -3982,6 +4100,35 @@ def generate_ja_oto(
                         )
                     if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
                         log(f"🧭 {fname}: VCV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
+                    expected_tok_trace = _syllable_info_token(syllables_info[expected_idx])
+                    mapped_tok_trace = _syllable_info_token(syllables_info[mapped_idx])
+                    local_trace_conf = None
+                    if syllable_confidence_by_idx:
+                        conf_idx = max(0, min(expected_idx, len(syllable_confidence_by_idx) - 1))
+                        local_trace_conf = float(syllable_confidence_by_idx[conf_idx])
+                    if (
+                        mapping_tier == "low"
+                        or mapped_idx != expected_idx
+                        or _normalize_ja_syllable_token(mapped_tok_trace) != _normalize_ja_syllable_token(target_tok_vcv_norm)
+                    ):
+                        _append_mapping_trace(
+                            _build_ja_mapping_trace_record(
+                                fname=fname,
+                                alias=alias,
+                                alias_type="vcv",
+                                format_type=format_type,
+                                target_tok=target_tok_vcv_norm,
+                                expected_idx=expected_idx,
+                                mapped_idx=mapped_idx,
+                                expected_tok=expected_tok_trace,
+                                mapped_tok=mapped_tok_trace,
+                                mapping_tier=mapping_tier,
+                                mapping_reason_code=mapping_reason_code,
+                                mapping_confidence=mapping_confidence_base,
+                                filename_order_locked=filename_order_locked,
+                                local_conf=local_trace_conf,
+                            )
+                        )
                     current_w_idx = mapped_idx
                     if format_type == "vcv":
                         stable_vcv_seq_idx = min(stable_vcv_seq_idx + 1, max(len(syllables_info) - 1, 0))
@@ -4114,11 +4261,14 @@ def generate_ja_oto(
                                 resync_idx is not None
                                 and expected_idx < resync_idx <= (expected_idx + 1)
                             ):
-                                mapped_idx = resync_idx
-                                log(
-                                    f"🧭 {fname}: CV_HEAD 순서 잠금 미세 보정 "
-                                    f"{expected_idx + 1}->{mapped_idx + 1} ({alias})"
-                                )
+                                expected_tok_trace = _syllable_info_token(syllables_info[expected_idx])
+                                mapped_tok_trace = _syllable_info_token(syllables_info[resync_idx])
+                                if _should_allow_ja_soft_forward_shift(target_tok, expected_tok_trace, mapped_tok_trace):
+                                    mapped_idx = resync_idx
+                                    log(
+                                        f"🧭 {fname}: CV_HEAD 순서 잠금 미세 보정 "
+                                        f"{expected_idx + 1}->{mapped_idx + 1} ({alias})"
+                                    )
                     else:
                         mapped_idx = _select_ja_cv_syllable_index(
                             alias, expected_idx, syllables_info, alias_type="cv_head"
@@ -4190,10 +4340,10 @@ def generate_ja_oto(
                                     expected_tok_norm = _normalize_ja_syllable_token(
                                         _syllable_info_token(syllables_info[expected_idx])
                                     )
-                                    allow_forward = bool(
-                                        target_norm
-                                        and mapped_tok_norm == target_norm
-                                        and expected_tok_norm != target_norm
+                                    allow_forward = _should_allow_ja_soft_forward_shift(
+                                        target_norm,
+                                        expected_tok_norm,
+                                        mapped_tok_norm,
                                     )
                                 if not allow_forward:
                                     mapped_idx = expected_idx
@@ -4201,6 +4351,35 @@ def generate_ja_oto(
                                 mapped_idx = expected_idx + 1
                         if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
                             log(f"🧭 {fname}: CV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
+                    expected_tok_trace = _syllable_info_token(syllables_info[expected_idx])
+                    mapped_tok_trace = _syllable_info_token(syllables_info[mapped_idx])
+                    local_trace_conf = None
+                    if syllable_confidence_by_idx:
+                        conf_idx = max(0, min(expected_idx, len(syllable_confidence_by_idx) - 1))
+                        local_trace_conf = float(syllable_confidence_by_idx[conf_idx])
+                    if (
+                        mapping_tier == "low"
+                        or mapped_idx != expected_idx
+                        or _normalize_ja_syllable_token(mapped_tok_trace) != _normalize_ja_syllable_token(target_tok)
+                    ):
+                        _append_mapping_trace(
+                            _build_ja_mapping_trace_record(
+                                fname=fname,
+                                alias=alias,
+                                alias_type="cv_head",
+                                format_type=format_type,
+                                target_tok=target_tok,
+                                expected_idx=expected_idx,
+                                mapped_idx=mapped_idx,
+                                expected_tok=expected_tok_trace,
+                                mapped_tok=mapped_tok_trace,
+                                mapping_tier=mapping_tier,
+                                mapping_reason_code=mapping_reason_code,
+                                mapping_confidence=mapping_confidence_base,
+                                filename_order_locked=filename_order_locked,
+                                local_conf=local_trace_conf,
+                            )
+                        )
                     current_w_idx = mapped_idx
                     if format_type == "vcv":
                         stable_vcv_seq_idx = min(stable_vcv_seq_idx + 1, max(len(syllables_info) - 1, 0))
@@ -4386,11 +4565,14 @@ def generate_ja_oto(
                                 resync_idx is not None
                                 and expected_idx < resync_idx <= (expected_idx + 1)
                             ):
-                                mapped_idx = resync_idx
-                                log(
-                                    f"🧭 {fname}: CV 순서 잠금 미세 보정 "
-                                    f"{expected_idx + 1}->{mapped_idx + 1} ({alias})"
-                                )
+                                expected_tok_trace = _syllable_info_token(syllables_info[expected_idx])
+                                mapped_tok_trace = _syllable_info_token(syllables_info[resync_idx])
+                                if _should_allow_ja_soft_forward_shift(target_tok, expected_tok_trace, mapped_tok_trace):
+                                    mapped_idx = resync_idx
+                                    log(
+                                        f"🧭 {fname}: CV 순서 잠금 미세 보정 "
+                                        f"{expected_idx + 1}->{mapped_idx + 1} ({alias})"
+                                    )
                     else:
                         mapped_idx = _select_ja_cv_syllable_index(
                             alias, expected_idx, syllables_info, alias_type="cv"
@@ -4462,10 +4644,10 @@ def generate_ja_oto(
                                     expected_tok_norm = _normalize_ja_syllable_token(
                                         _syllable_info_token(syllables_info[expected_idx])
                                     )
-                                    allow_forward = bool(
-                                        target_norm
-                                        and mapped_tok_norm == target_norm
-                                        and expected_tok_norm != target_norm
+                                    allow_forward = _should_allow_ja_soft_forward_shift(
+                                        target_norm,
+                                        expected_tok_norm,
+                                        mapped_tok_norm,
                                     )
                                 if not allow_forward:
                                     mapped_idx = expected_idx
@@ -4473,6 +4655,35 @@ def generate_ja_oto(
                                 mapped_idx = expected_idx + 1
                         if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
                             log(f"🧭 {fname}: CV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
+                    expected_tok_trace = _syllable_info_token(syllables_info[expected_idx])
+                    mapped_tok_trace = _syllable_info_token(syllables_info[mapped_idx])
+                    local_trace_conf = None
+                    if syllable_confidence_by_idx:
+                        conf_idx = max(0, min(expected_idx, len(syllable_confidence_by_idx) - 1))
+                        local_trace_conf = float(syllable_confidence_by_idx[conf_idx])
+                    if (
+                        mapping_tier == "low"
+                        or mapped_idx != expected_idx
+                        or _normalize_ja_syllable_token(mapped_tok_trace) != _normalize_ja_syllable_token(target_tok)
+                    ):
+                        _append_mapping_trace(
+                            _build_ja_mapping_trace_record(
+                                fname=fname,
+                                alias=alias,
+                                alias_type="cv",
+                                format_type=format_type,
+                                target_tok=target_tok,
+                                expected_idx=expected_idx,
+                                mapped_idx=mapped_idx,
+                                expected_tok=expected_tok_trace,
+                                mapped_tok=mapped_tok_trace,
+                                mapping_tier=mapping_tier,
+                                mapping_reason_code=mapping_reason_code,
+                                mapping_confidence=mapping_confidence_base,
+                                filename_order_locked=filename_order_locked,
+                                local_conf=local_trace_conf,
+                            )
+                        )
                     current_w_idx = mapped_idx
                     if format_type == "vcv":
                         stable_vcv_seq_idx = min(stable_vcv_seq_idx + 1, max(len(syllables_info) - 1, 0))
@@ -5011,6 +5222,17 @@ def generate_ja_oto(
             f"vc_cutoff_leak_guard_count={anchor_stats['vc_cutoff_leak_guard_count']}"
         )
         log(f"[AnchorLock] 상세 로그: {anchor_log_path}")
+
+    if ja_mapping_trace_logging and mapping_trace_records:
+        try:
+            os.makedirs(_anchor_log_dir, exist_ok=True)
+            with open(mapping_trace_path, "w", encoding="utf-8") as f:
+                for row in mapping_trace_records:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            log(f"[JA-Mapping] trace 로그: {mapping_trace_path}")
+            log(f"[JA-Mapping] trace 건수: {len(mapping_trace_records)}")
+        except Exception as e:
+            log(f"[JA-Mapping] trace 저장 스킵: {e}")
 
     if cleanup_timing_jsonl:
         removed_count, failed_count = _cleanup_timing_anchor_jsonl_files(

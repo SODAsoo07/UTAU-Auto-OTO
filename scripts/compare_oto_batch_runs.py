@@ -13,17 +13,38 @@ def _load_summary(path: str) -> Dict[str, object]:
     return data
 
 
-def _case_map(summary: Dict[str, object]) -> Dict[str, Dict[str, object]]:
+def _normalize_output_key(path: str) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    return os.path.normcase(os.path.normpath(raw))
+
+
+def _case_map(summary: Dict[str, object], summary_label: str = "summary") -> Dict[str, Dict[str, object]]:
     results = summary.get("results") or []
     out: Dict[str, Dict[str, object]] = {}
+    seen_outputs: Dict[str, str] = {}
     if not isinstance(results, list):
         return out
-    for row in results:
+    for idx, row in enumerate(results, start=1):
         if not isinstance(row, dict):
             continue
         name = str(row.get("name", "")).strip()
         if not name:
             continue
+        if name in out:
+            raise ValueError(f"{summary_label}: duplicate case name: {name}")
+        output_key = _normalize_output_key(str(row.get("output_oto", "") or ""))
+        if output_key:
+            prev_name = seen_outputs.get(output_key)
+            if prev_name and prev_name != name:
+                raise ValueError(
+                    f"{summary_label}: duplicate output_oto path: {row.get('output_oto', '')} "
+                    f"({prev_name}, {name})"
+                )
+            seen_outputs[output_key] = name
+        row = dict(row)
+        row["_summary_index"] = idx
         out[name] = row
     return out
 
@@ -128,8 +149,8 @@ def _write_csv(path: str, case_diffs: Dict[str, Dict[str, object]]) -> None:
 def compare_runs(base_summary: str, new_summary: str) -> Dict[str, object]:
     base_data = _load_summary(base_summary)
     new_data = _load_summary(new_summary)
-    base_cases = _case_map(base_data)
-    new_cases = _case_map(new_data)
+    base_cases = _case_map(base_data, summary_label=os.path.basename(base_summary))
+    new_cases = _case_map(new_data, summary_label=os.path.basename(new_summary))
 
     all_names = sorted(set(base_cases.keys()) | set(new_cases.keys()))
     case_diffs: Dict[str, Dict[str, object]] = {}
@@ -174,6 +195,7 @@ def main():
 
     report = compare_runs(base_summary=base_summary, new_summary=new_summary)
     os.makedirs(os.path.dirname(out_json), exist_ok=True)
+    os.makedirs(os.path.dirname(out_csv), exist_ok=True)
     with open(out_json, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
     _write_csv(out_csv, report["case_diffs"])

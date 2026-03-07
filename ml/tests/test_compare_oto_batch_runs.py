@@ -89,6 +89,50 @@ class CompareBatchRunsTests(unittest.TestCase):
             self.assertTrue(case["status_changed"])
             self.assertIn("only_in_base", report["aggregate"]["regression_cases"])
 
+    def test_compare_rejects_duplicate_case_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = os.path.join(td, "base_summary.json")
+            new = os.path.join(td, "new_summary.json")
+
+            _write_summary(
+                base,
+                [
+                    {"name": "dup", "status": "ok", "validation": {"warnings": 0, "errors": 0}},
+                    {"name": "dup", "status": "ok", "validation": {"warnings": 0, "errors": 0}},
+                ],
+            )
+            _write_summary(new, [])
+
+            with self.assertRaisesRegex(ValueError, "duplicate case name"):
+                compare_runs(base_summary=base, new_summary=new)
+
+    def test_compare_rejects_duplicate_output_oto(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = os.path.join(td, "base_summary.json")
+            new = os.path.join(td, "new_summary.json")
+
+            _write_summary(
+                base,
+                [
+                    {
+                        "name": "case_a",
+                        "status": "ok",
+                        "output_oto": os.path.join(td, "same.ini"),
+                        "validation": {"warnings": 0, "errors": 0},
+                    },
+                    {
+                        "name": "case_b",
+                        "status": "ok",
+                        "output_oto": os.path.join(td, "same.ini"),
+                        "validation": {"warnings": 0, "errors": 0},
+                    },
+                ],
+            )
+            _write_summary(new, [])
+
+            with self.assertRaisesRegex(ValueError, "duplicate output_oto path"):
+                compare_runs(base_summary=base, new_summary=new)
+
 
 if __name__ == "__main__":
     unittest.main()

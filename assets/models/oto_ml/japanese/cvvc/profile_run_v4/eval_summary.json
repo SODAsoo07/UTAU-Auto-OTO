@@ -1,10 +1,10 @@
 {
   "targets": {
-    "delta_offset": "Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\profile_run_v4\\model_offset.txt",
-    "delta_cons": "Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\profile_run_v4\\model_cons.txt",
-    "delta_cutoff": "Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\profile_run_v4\\model_cutoff.txt",
-    "delta_pre": "Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\profile_run_v4\\model_pre.txt",
-    "delta_ovl": "Auto_OTO\\assets\\models\\oto_ml\\japanese\\cvvc\\profile_run_v4\\model_ovl.txt"
+    "delta_offset": "model_offset.txt",
+    "delta_cons": "model_cons.txt",
+    "delta_cutoff": "model_cutoff.txt",
+    "delta_pre": "model_pre.txt",
+    "delta_ovl": "model_ovl.txt"
   },
   "metrics": {
     "delta_offset": {

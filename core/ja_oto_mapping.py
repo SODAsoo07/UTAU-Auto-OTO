@@ -612,6 +612,55 @@ def _ja_syllable_tail(token):
     return ''
 
 
+@lru_cache(maxsize=65536)
+def _ja_onset_signature(onset):
+    o = (onset or '').strip().lower()
+    if not o:
+        return ''
+    out = []
+    for idx, ch in enumerate(o):
+        if ch in JA_VOWELS:
+            continue
+        if idx > 0 and ch in {'y', 'w'}:
+            continue
+        if out and out[-1] == ch:
+            continue
+        out.append(ch)
+    return ''.join(out)
+
+
+@lru_cache(maxsize=131072)
+def _ja_soft_cv_match_level(target_token, candidate_token):
+    t = _normalize_ja_syllable_token(target_token)
+    c = _normalize_ja_syllable_token(candidate_token)
+    if not t or not c:
+        return 0
+    if t == c:
+        return 3
+
+    to, tv = split_ja_romaji_syllable(t)
+    co, cv = split_ja_romaji_syllable(c)
+    if tv not in JA_VOWELS or cv != tv:
+        return 0
+
+    t_sig = _ja_onset_signature(to)
+    c_sig = _ja_onset_signature(co)
+    if t_sig and c_sig and t_sig == c_sig:
+        t_has_glide = len(to) > 1 and any(ch in {'y', 'w'} for ch in to[1:])
+        c_has_glide = len(co) > 1 and any(ch in {'y', 'w'} for ch in co[1:])
+        t_tail = _ja_syllable_tail(t)
+        c_tail = _ja_syllable_tail(c)
+        if t_has_glide != c_has_glide:
+            return 1
+        if t_tail == c_tail:
+            return 2
+        if (not t_tail) or (not c_tail):
+            return 1
+    if to and co and to[:1] == co[:1]:
+        return 1
+    return 0
+
+
 def _ja_onset_class(onset):
     o = (onset or '').strip().lower()
     if not o:
@@ -648,6 +697,7 @@ def _select_vcv_syllable_index(alias, expected_idx, syllables_info):
         cand_onset = _extract_ja_onset_token(cand)
         _co, cand_vowel = split_ja_romaji_syllable(cand)
         cand_tail = _ja_syllable_tail(cand)
+        soft_match = _ja_soft_cv_match_level(target, cand)
         score = _vcv_syllable_match_score(target, cand) - abs(i - e) * dist_penalty
         if target_vowel and cand_vowel and target_vowel != cand_vowel:
             score -= 26
@@ -658,6 +708,10 @@ def _select_vcv_syllable_index(alias, expected_idx, syllables_info):
                 score += 3
             else:
                 score -= 12
+        if soft_match >= 2:
+            score += 8
+        elif soft_match == 1:
+            score += 3
         if target_tail and cand_tail and target_tail != cand_tail:
             score -= 10
         elif (not target_tail) and cand_tail:
@@ -713,12 +767,14 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
     target_tail = _ja_syllable_tail(target)
     target_cls = _ja_onset_class(target_onset)
     dist_penalty = 7 if target_cls in {'nasal', 'voiced'} else 6
+    expected_soft_match = _ja_soft_cv_match_level(target, _syllable_info_token(syllables_info[e]))
     def _score_idx(i):
         cand = _syllable_info_token(syllables_info[i])
         cand_onset = _extract_ja_onset_token(cand)
         _co, cand_vowel = split_ja_romaji_syllable(cand)
         cand_tail = _ja_syllable_tail(cand)
         cand_cls = _ja_onset_class(cand_onset)
+        soft_match = _ja_soft_cv_match_level(target, cand)
         score = _vcv_syllable_match_score(target, cand) - abs(i - e) * dist_penalty
         if target_cls == 'nasal' and cand_cls != 'nasal':
             score -= 18
@@ -732,6 +788,12 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
             score -= 9
         if target_vowel and cand_vowel and target_vowel != cand_vowel:
             score -= 24
+        if soft_match >= 2:
+            score += 18
+        elif soft_match == 1:
+            score += 6
+        if soft_match > expected_soft_match:
+            score += 10
         if not target_tail and cand_tail:
             if cand_tail[0] in {'i', 'u', 'e', 'o', 'a', 'y', 'w'}:
                 score -= 20
@@ -763,12 +825,16 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
         best_onset = _extract_ja_onset_token(best_tok)
         expected_tail = _ja_syllable_tail(expected_tok)
         best_tail = _ja_syllable_tail(best_tok)
+        expected_soft = _ja_soft_cv_match_level(target, expected_tok)
+        best_soft = _ja_soft_cv_match_level(target, best_tok)
         if best_idx > e and best_gain < hold_margin:
-            return e
+            if not (best_idx == (e + 1) and best_soft >= 2 and best_soft > expected_soft):
+                return e
         if target_vowel and best_vowel != target_vowel and expected_vowel == target_vowel:
             return e
         if target_onset and best_onset != target_onset and expected_onset == target_onset and best_gain < 24:
-            return e
+            if best_soft < 2:
+                return e
         if (not target_tail) and best_tail and not expected_tail and best_gain < 22:
             return e
         return best_idx

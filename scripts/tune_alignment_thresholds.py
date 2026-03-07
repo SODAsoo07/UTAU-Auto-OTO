@@ -12,6 +12,12 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+try:
+    import yaml
+except Exception:  # pragma: no cover
+    yaml = None
+
+from scripts.analyze_oto_diff import analyze as analyze_oto_diff
 from scripts.compare_oto_batch_runs import compare_runs
 
 
@@ -25,6 +31,56 @@ ENV_KEYS = (
 
 def _now_tag() -> str:
     return dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _safe_name(text: str) -> str:
+    s = str(text or "").strip()
+    if not s:
+        return "case"
+    out = []
+    for ch in s:
+        if ch.isalnum() or ch in {"-", "_", "."}:
+            out.append(ch)
+        else:
+            out.append("_")
+    return "".join(out).strip("_") or "case"
+
+
+def _to_bool(v, default: bool = False) -> bool:
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in {"1", "true", "yes", "y", "on"}:
+        return True
+    if s in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _resolve_path(config_dir: str, raw_path: str) -> str:
+    if not raw_path:
+        return ""
+    p = os.path.expandvars(os.path.expanduser(str(raw_path).strip()))
+    if os.path.isabs(p):
+        return os.path.normpath(p)
+    return os.path.normpath(os.path.join(config_dir, p))
+
+
+def _resolve_case_path(config_dir: str, voicebank_dir: str, raw_path: str) -> str:
+    if not raw_path:
+        return ""
+    p = os.path.expandvars(os.path.expanduser(str(raw_path).strip()))
+    if os.path.isabs(p):
+        return os.path.normpath(p)
+    vb_candidate = os.path.normpath(os.path.join(voicebank_dir, p))
+    config_candidate = os.path.normpath(os.path.join(config_dir, p))
+    if os.path.exists(vb_candidate):
+        return vb_candidate
+    if os.path.exists(config_candidate):
+        return config_candidate
+    return vb_candidate
 
 
 def _parse_float_grid(raw: str) -> List[Optional[float]]:
@@ -81,6 +137,274 @@ def _format_env_suffix(env_overrides: Dict[str, str]) -> str:
     return "__".join(parts)
 
 
+def _build_runtime_batch_config(
+    config_path: str,
+    runtime_dir: str,
+    run_tag: str,
+) -> Dict[str, object]:
+    if yaml is None:
+        raise RuntimeError("PyYAML is required to build runtime tuning configs.")
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"invalid batch config: {config_path}")
+
+    defaults = data.get("defaults") or {}
+    cases = data.get("cases") or []
+    if not isinstance(defaults, dict):
+        raise ValueError("defaults must be a mapping.")
+    if not isinstance(cases, list):
+        raise ValueError("cases must be a list.")
+
+    config_dir = os.path.dirname(os.path.abspath(config_path))
+    generated_root = os.path.join(runtime_dir, "generated_oto")
+    os.makedirs(generated_root, exist_ok=True)
+
+    runtime_defaults = dict(defaults)
+    runtime_defaults["replace_oto_ini"] = False
+    runtime_defaults["out_dir"] = generated_root
+    runtime_defaults["output_name_template"] = "oto.{run_tag}.{name}.ini"
+    runtime_defaults["base_oto"] = ""
+    runtime_defaults["custom_phonemes_path"] = ""
+
+    runtime_cases = []
+    case_meta: Dict[str, Dict[str, object]] = {}
+    seen_case_names = set()
+    seen_safe_case_names: Dict[str, str] = {}
+
+    for idx, raw_case in enumerate(cases, start=1):
+        case = dict(raw_case) if isinstance(raw_case, dict) else {}
+        name = str(case.get("name", f"case_{idx:03d}")).strip() or f"case_{idx:03d}"
+        if name in seen_case_names:
+            raise ValueError(f"duplicate case name in batch config: {name}")
+        seen_case_names.add(name)
+        safe_case_name = _safe_name(name)
+        prev_safe_name = seen_safe_case_names.get(safe_case_name)
+        if prev_safe_name and prev_safe_name != name:
+            raise ValueError(
+                f"generated output collision after sanitizing case names: "
+                f"{prev_safe_name} vs {name} -> {safe_case_name}"
+            )
+        seen_safe_case_names[safe_case_name] = name
+        language = str(case.get("language", defaults.get("language", "japanese"))).strip().lower()
+        voicebank_dir = _resolve_path(
+            config_dir,
+            str(case.get("voicebank_dir", case.get("wav_dir", defaults.get("voicebank_dir", "")))).strip(),
+        )
+        textgrid_dir = _resolve_case_path(
+            config_dir,
+            voicebank_dir,
+            str(case.get("textgrid_dir", case.get("tg_folder", defaults.get("textgrid_dir", "textgrids")))).strip(),
+        )
+        no_base_oto = _to_bool(case.get("no_base_oto", defaults.get("no_base_oto", False)), False)
+        base_oto_raw = str(case.get("base_oto", defaults.get("base_oto", ""))).strip()
+        base_oto_path = ""
+        if (not no_base_oto) and base_oto_raw:
+            base_oto_path = _resolve_case_path(config_dir, voicebank_dir, base_oto_raw)
+
+        custom_phonemes_raw = str(
+            case.get("custom_phonemes_path", defaults.get("custom_phonemes_path", ""))
+        ).strip()
+        custom_phonemes_path = _resolve_path(config_dir, custom_phonemes_raw) if custom_phonemes_raw else ""
+
+        runtime_case = dict(case)
+        runtime_case["voicebank_dir"] = voicebank_dir
+        runtime_case["textgrid_dir"] = textgrid_dir
+        runtime_case["replace_oto_ini"] = False
+        runtime_case["out_dir"] = os.path.join(generated_root, safe_case_name)
+        runtime_case["output_name"] = f"oto.{run_tag}.{safe_case_name}.ini"
+        runtime_case.pop("output_name_template", None)
+        if base_oto_path:
+            runtime_case["base_oto"] = base_oto_path
+        elif "base_oto" in runtime_case and not base_oto_raw:
+            runtime_case["base_oto"] = ""
+        if custom_phonemes_path:
+            runtime_case["custom_phonemes_path"] = custom_phonemes_path
+
+        runtime_cases.append(runtime_case)
+        case_meta[name] = {
+            "language": language,
+            "base_oto": base_oto_path,
+            "no_base_oto": bool(no_base_oto),
+            "generated_out_dir": runtime_case["out_dir"],
+            "generated_output_name": runtime_case["output_name"],
+        }
+
+    runtime_config = {
+        "defaults": runtime_defaults,
+        "cases": runtime_cases,
+    }
+    return {
+        "config": runtime_config,
+        "case_meta": case_meta,
+    }
+
+
+def _write_runtime_batch_config(
+    config_path: str,
+    runtime_dir: str,
+    run_tag: str,
+) -> Dict[str, object]:
+    payload = _build_runtime_batch_config(config_path=config_path, runtime_dir=runtime_dir, run_tag=run_tag)
+    config_doc = payload["config"]
+    runtime_config_dir = os.path.join(runtime_dir, "runtime_configs")
+    os.makedirs(runtime_config_dir, exist_ok=True)
+    runtime_config_path = os.path.join(runtime_config_dir, f"{run_tag}.yaml")
+    with open(runtime_config_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(config_doc, f, allow_unicode=True, sort_keys=False)
+    return {
+        "runtime_config_path": runtime_config_path,
+        "case_meta": payload["case_meta"],
+    }
+
+
+def _compute_quality_metrics(
+    summary_path: str,
+    case_meta: Dict[str, Dict[str, object]],
+) -> Dict[str, object]:
+    total_case_count = 0
+    quality_case_count = 0
+    compared_case_count = 0
+    shared_rows_total = 0
+    suspicious_rows_total = 0
+    weighted_mae_pre_abs = 0.0
+    weighted_mae_offset = 0.0
+    weighted_alias_mae_pre_abs = 0.0
+    weighted_alias_mae_offset = 0.0
+    weighted_p90_pre_abs = 0.0
+    weighted_p90_offset = 0.0
+    cv_like_rows_total = 0
+    cv_like_suspicious_rows_total = 0
+    cv_like_order_jump_rows_total = 0
+    cv_like_order_jump_severity = 0.0
+    cv_like_p90_pre_abs = 0.0
+    cv_like_p90_offset = 0.0
+
+    with open(summary_path, "r", encoding="utf-8") as f:
+        summary = json.load(f) or {}
+    results = summary.get("results") or []
+    if not isinstance(results, list):
+        results = []
+    total_case_count = len(results)
+
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name", "")).strip()
+        if not name:
+            continue
+        meta = case_meta.get(name) or {}
+        base_oto = str(meta.get("base_oto", "") or "").strip()
+        if not base_oto:
+            continue
+        compared_case_count += 1
+        auto_oto = str(row.get("output_oto", "") or "").strip()
+        if not auto_oto or not os.path.exists(auto_oto) or not os.path.exists(base_oto):
+            continue
+        try:
+            diff = analyze_oto_diff(
+                base_oto,
+                auto_oto,
+                language=str(meta.get("language", "auto") or "auto"),
+                topn=10,
+            )
+        except Exception:
+            continue
+
+        counts = diff.get("counts") or {}
+        maes = diff.get("mae") or {}
+        quality = diff.get("quality") or {}
+        shared_rows = int(counts.get("shared_rows", 0) or 0)
+        suspicious_rows = int(counts.get("suspicious_rows", 0) or 0)
+        weight = max(shared_rows, 1)
+        cv_like_rows = int(quality.get("cv_like_rows", 0) or 0)
+        quality_case_count += 1
+        shared_rows_total += shared_rows
+        suspicious_rows_total += suspicious_rows
+        weighted_mae_pre_abs += float(maes.get("mae_pre_abs", 0.0) or 0.0) * float(weight)
+        weighted_mae_offset += float(maes.get("mae_offset", 0.0) or 0.0) * float(weight)
+        weighted_alias_mae_pre_abs += float(quality.get("weighted_mae_pre_abs", maes.get("mae_pre_abs", 0.0)) or 0.0) * float(weight)
+        weighted_alias_mae_offset += float(quality.get("weighted_mae_offset", maes.get("mae_offset", 0.0)) or 0.0) * float(weight)
+        weighted_p90_pre_abs += float(quality.get("p90_pre_abs", 0.0) or 0.0) * float(weight)
+        weighted_p90_offset += float(quality.get("p90_offset", 0.0) or 0.0) * float(weight)
+        if cv_like_rows > 0:
+            cv_like_rows_total += cv_like_rows
+            cv_like_suspicious_rows_total += int(quality.get("cv_like_suspicious_rows", 0) or 0)
+            cv_like_order_jump_rows_total += int(quality.get("cv_like_order_jump_rows", 0) or 0)
+            cv_like_order_jump_severity += float(quality.get("cv_like_order_jump_severity", 0.0) or 0.0) * float(cv_like_rows)
+            cv_like_p90_pre_abs += float(quality.get("cv_like_p90_pre_abs", 0.0) or 0.0) * float(cv_like_rows)
+            cv_like_p90_offset += float(quality.get("cv_like_p90_offset", 0.0) or 0.0) * float(cv_like_rows)
+
+    if quality_case_count <= 0:
+        return {
+            "quality_total_case_count": int(total_case_count),
+            "quality_case_count": 0,
+            "quality_compared_case_count": compared_case_count,
+            "quality_reference_ratio": 0.0,
+            "quality_success_ratio": 0.0,
+            "quality_shared_rows": 0,
+            "quality_suspicious_rows": 0,
+            "quality_suspicious_ratio": 1.0,
+            "quality_mae_pre_abs": 1.0e9,
+            "quality_mae_offset": 1.0e9,
+            "quality_weighted_mae_pre_abs": 1.0e9,
+            "quality_weighted_mae_offset": 1.0e9,
+            "quality_p90_pre_abs": 1.0e9,
+            "quality_p90_offset": 1.0e9,
+            "quality_cv_like_rows": 0,
+            "quality_cv_like_suspicious_rows": 0,
+            "quality_cv_like_suspicious_ratio": 1.0,
+            "quality_cv_like_order_jump_rows": 0,
+            "quality_cv_like_order_jump_ratio": 1.0,
+            "quality_cv_like_order_jump_severity": 1.0e9,
+            "quality_cv_like_p90_pre_abs": 1.0e9,
+            "quality_cv_like_p90_offset": 1.0e9,
+        }
+
+    denom = float(max(shared_rows_total, 1))
+    mae_weight = float(max(shared_rows_total, quality_case_count))
+    cv_like_denom = float(max(cv_like_rows_total, 1))
+    total_case_denom = float(max(total_case_count, 1))
+    fallback_cv_ratio = float(suspicious_rows_total) / denom
+    fallback_cv_p90_pre_abs = float(weighted_p90_pre_abs) / mae_weight
+    fallback_cv_p90_offset = float(weighted_p90_offset) / mae_weight
+    return {
+        "quality_total_case_count": int(total_case_count),
+        "quality_case_count": quality_case_count,
+        "quality_compared_case_count": compared_case_count,
+        "quality_reference_ratio": float(compared_case_count) / total_case_denom,
+        "quality_success_ratio": float(quality_case_count) / total_case_denom,
+        "quality_shared_rows": int(shared_rows_total),
+        "quality_suspicious_rows": int(suspicious_rows_total),
+        "quality_suspicious_ratio": float(suspicious_rows_total) / denom,
+        "quality_mae_pre_abs": float(weighted_mae_pre_abs) / mae_weight,
+        "quality_mae_offset": float(weighted_mae_offset) / mae_weight,
+        "quality_weighted_mae_pre_abs": float(weighted_alias_mae_pre_abs) / mae_weight,
+        "quality_weighted_mae_offset": float(weighted_alias_mae_offset) / mae_weight,
+        "quality_p90_pre_abs": float(weighted_p90_pre_abs) / mae_weight,
+        "quality_p90_offset": float(weighted_p90_offset) / mae_weight,
+        "quality_cv_like_rows": int(cv_like_rows_total),
+        "quality_cv_like_suspicious_rows": int(cv_like_suspicious_rows_total),
+        "quality_cv_like_suspicious_ratio": (
+            float(cv_like_suspicious_rows_total) / cv_like_denom if cv_like_rows_total > 0 else fallback_cv_ratio
+        ),
+        "quality_cv_like_order_jump_rows": int(cv_like_order_jump_rows_total),
+        "quality_cv_like_order_jump_ratio": (
+            float(cv_like_order_jump_rows_total) / cv_like_denom if cv_like_rows_total > 0 else fallback_cv_ratio
+        ),
+        "quality_cv_like_order_jump_severity": (
+            float(cv_like_order_jump_severity) / cv_like_denom if cv_like_rows_total > 0 else fallback_cv_p90_pre_abs
+        ),
+        "quality_cv_like_p90_pre_abs": (
+            float(cv_like_p90_pre_abs) / cv_like_denom if cv_like_rows_total > 0 else fallback_cv_p90_pre_abs
+        ),
+        "quality_cv_like_p90_offset": (
+            float(cv_like_p90_offset) / cv_like_denom if cv_like_rows_total > 0 else fallback_cv_p90_offset
+        ),
+    }
+
+
 def _run_batch_once(
     python_exe: str,
     batch_script: str,
@@ -90,6 +414,13 @@ def _run_batch_once(
     stop_on_error: bool,
     log_path: str,
 ) -> Dict[str, object]:
+    runtime_root = os.path.dirname(log_path)
+    runtime_info = _write_runtime_batch_config(
+        config_path=config_path,
+        runtime_dir=runtime_root,
+        run_tag=run_tag,
+    )
+    runtime_config_path = str(runtime_info["runtime_config_path"])
     env = os.environ.copy()
     for key in ENV_KEYS:
         env.pop(key, None)
@@ -99,7 +430,7 @@ def _run_batch_once(
         python_exe,
         batch_script,
         "--config",
-        config_path,
+        runtime_config_path,
         "--run-tag",
         run_tag,
     ]
@@ -118,6 +449,7 @@ def _run_batch_once(
 
     with open(log_path, "w", encoding="utf-8") as f:
         f.write(f"$ {' '.join(cmd)}\n")
+        f.write(f"runtime_config={runtime_config_path}\n")
         if env_overrides:
             f.write(f"env_overrides={json.dumps(env_overrides, ensure_ascii=False)}\n")
         else:
@@ -132,18 +464,52 @@ def _run_batch_once(
         "returncode": int(proc.returncode),
         "summary_path": os.path.abspath(summary_path),
         "command": cmd,
+        "runtime_config_path": runtime_config_path,
+        "case_meta": runtime_info["case_meta"],
     }
 
 
 def _rank_key(row: Dict[str, object]):
     if bool(row.get("run_failed", False)):
-        return (1, 10**9, 10**9, 10**9, 10**9)
+        return (1, 10**9, 10**9, 10**9, 10**9, 10**9, 10**9, 10**9, 10**9, 10**9, 10**9, 10**9, 10**9, 10**9, 10**9)
     regression_count = int(row.get("regression_count", 0))
     errors_delta_sum = int(row.get("errors_delta_sum", 0))
-    warnings_delta_sum = int(row.get("warnings_delta_sum", 0))
+    quality_missing = 0 if int(row.get("quality_case_count", 0) or 0) > 0 else 1
+    quality_total_case_count = int(row.get("quality_total_case_count", 0) or 0)
+    quality_case_count = int(row.get("quality_case_count", 0) or 0)
+    quality_compared_case_count = int(row.get("quality_compared_case_count", 0) or 0)
+    quality_case_gap = max(quality_total_case_count - quality_case_count, 0)
+    quality_reference_gap = max(quality_total_case_count - quality_compared_case_count, 0)
+    cv_like_order_jump_ratio = float(row.get("quality_cv_like_order_jump_ratio", 1.0e9) or 1.0e9)
+    cv_like_order_jump_severity = float(row.get("quality_cv_like_order_jump_severity", 1.0e9) or 1.0e9)
+    cv_like_suspicious_ratio = float(row.get("quality_cv_like_suspicious_ratio", 1.0e9) or 1.0e9)
+    suspicious_ratio = float(row.get("quality_suspicious_ratio", 1.0e9) or 1.0e9)
+    weighted_mae_pre_abs = float(row.get("quality_weighted_mae_pre_abs", row.get("quality_mae_pre_abs", 1.0e9)) or 1.0e9)
+    p90_pre_abs = float(row.get("quality_p90_pre_abs", 1.0e9) or 1.0e9)
+    weighted_mae_offset = float(row.get("quality_weighted_mae_offset", row.get("quality_mae_offset", 1.0e9)) or 1.0e9)
+    p90_offset = float(row.get("quality_p90_offset", 1.0e9) or 1.0e9)
+    warnings_delta_sum = int(row.get("warnings_delta_sum", 0) or 0)
     improvement_count = int(row.get("improvement_count", 0))
     status_changed_cases = int(row.get("status_changed_cases", 0))
-    return (0, regression_count, errors_delta_sum, warnings_delta_sum, -improvement_count, status_changed_cases)
+    return (
+        0,
+        regression_count,
+        errors_delta_sum,
+        quality_missing,
+        quality_case_gap,
+        quality_reference_gap,
+        cv_like_order_jump_ratio,
+        cv_like_order_jump_severity,
+        cv_like_suspicious_ratio,
+        suspicious_ratio,
+        weighted_mae_pre_abs,
+        p90_pre_abs,
+        weighted_mae_offset,
+        p90_offset,
+        warnings_delta_sum,
+        -improvement_count,
+        status_changed_cases,
+    )
 
 
 def _write_csv(path: str, rows: List[Dict[str, object]]) -> None:
@@ -160,13 +526,37 @@ def _write_csv(path: str, rows: List[Dict[str, object]]) -> None:
         "status_changed_cases",
         "summary_path",
         "log_path",
+        "runtime_config_path",
         "UTOA_JA_MAPPING_CONF_THRESHOLD",
         "UTOA_JA_MAPPING_SPN_RATIO_THRESHOLD",
         "UTOA_KR_MAPPING_CONF_THRESHOLD",
         "UTOA_KR_MAPPING_SPN_RATIO_THRESHOLD",
+        "quality_total_case_count",
+        "quality_case_count",
+        "quality_compared_case_count",
+        "quality_reference_ratio",
+        "quality_success_ratio",
+        "quality_shared_rows",
+        "quality_suspicious_rows",
+        "quality_suspicious_ratio",
+        "quality_mae_pre_abs",
+        "quality_mae_offset",
+        "quality_weighted_mae_pre_abs",
+        "quality_weighted_mae_offset",
+        "quality_p90_pre_abs",
+        "quality_p90_offset",
+        "quality_cv_like_rows",
+        "quality_cv_like_suspicious_rows",
+        "quality_cv_like_suspicious_ratio",
+        "quality_cv_like_order_jump_rows",
+        "quality_cv_like_order_jump_ratio",
+        "quality_cv_like_order_jump_severity",
+        "quality_cv_like_p90_pre_abs",
+        "quality_cv_like_p90_offset",
+        "compare_path",
     ]
     with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
@@ -289,10 +679,34 @@ def main():
             "status_changed_cases": 999999 if run_failed else 0,
             "summary_path": summary_path,
             "log_path": run_log,
+            "runtime_config_path": str(run_info.get("runtime_config_path", "") or ""),
             "UTOA_JA_MAPPING_CONF_THRESHOLD": env_overrides.get("UTOA_JA_MAPPING_CONF_THRESHOLD", ""),
             "UTOA_JA_MAPPING_SPN_RATIO_THRESHOLD": env_overrides.get("UTOA_JA_MAPPING_SPN_RATIO_THRESHOLD", ""),
             "UTOA_KR_MAPPING_CONF_THRESHOLD": env_overrides.get("UTOA_KR_MAPPING_CONF_THRESHOLD", ""),
             "UTOA_KR_MAPPING_SPN_RATIO_THRESHOLD": env_overrides.get("UTOA_KR_MAPPING_SPN_RATIO_THRESHOLD", ""),
+            "quality_total_case_count": 0,
+            "quality_case_count": 0,
+            "quality_compared_case_count": 0,
+            "quality_reference_ratio": 0.0,
+            "quality_success_ratio": 0.0,
+            "quality_shared_rows": 0,
+            "quality_suspicious_rows": 0,
+            "quality_suspicious_ratio": 1.0,
+            "quality_mae_pre_abs": 1.0e9,
+            "quality_mae_offset": 1.0e9,
+            "quality_weighted_mae_pre_abs": 1.0e9,
+            "quality_weighted_mae_offset": 1.0e9,
+            "quality_p90_pre_abs": 1.0e9,
+            "quality_p90_offset": 1.0e9,
+            "quality_cv_like_rows": 0,
+            "quality_cv_like_suspicious_rows": 0,
+            "quality_cv_like_suspicious_ratio": 1.0,
+            "quality_cv_like_order_jump_rows": 0,
+            "quality_cv_like_order_jump_ratio": 1.0,
+            "quality_cv_like_order_jump_severity": 1.0e9,
+            "quality_cv_like_p90_pre_abs": 1.0e9,
+            "quality_cv_like_p90_offset": 1.0e9,
+            "compare_path": "",
         }
 
         if not run_failed:
@@ -307,6 +721,12 @@ def main():
             with open(comp_path, "w", encoding="utf-8") as f:
                 json.dump(comp, f, ensure_ascii=False, indent=2)
             row["compare_path"] = comp_path
+            row.update(
+                _compute_quality_metrics(
+                    summary_path=summary_path,
+                    case_meta=dict(run_info.get("case_meta") or {}),
+                )
+            )
 
         rows.append(row)
         print(
@@ -314,6 +734,10 @@ def main():
             f"{idx}/{len(deduped_candidates)} "
             f"failed={row['run_failed']} "
             f"reg={row['regression_count']} "
+            f"cv_jump={float(row['quality_cv_like_order_jump_ratio']):.4f} "
+            f"susp_ratio={float(row['quality_suspicious_ratio']):.4f} "
+            f"p90_pre={float(row['quality_p90_pre_abs']):.2f} "
+            f"mae_pre={float(row['quality_weighted_mae_pre_abs']):.2f} "
             f"imp={row['improvement_count']} "
             f"err_delta={row['errors_delta_sum']} "
             f"{env_suffix}"
@@ -345,6 +769,10 @@ def main():
             f"rank={best['rank']} "
             f"failed={best['run_failed']} "
             f"reg={best['regression_count']} "
+            f"cv_jump={float(best['quality_cv_like_order_jump_ratio']):.4f} "
+            f"susp_ratio={float(best['quality_suspicious_ratio']):.4f} "
+            f"p90_pre={float(best['quality_p90_pre_abs']):.2f} "
+            f"mae_pre={float(best['quality_weighted_mae_pre_abs']):.2f} "
             f"imp={best['improvement_count']} "
             f"err_delta={best['errors_delta_sum']} "
             f"env={best['env_suffix']}"
