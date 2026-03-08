@@ -24,14 +24,48 @@ from core.ja_lab_generator import (
     KANA_COMBO_ROMAJI,
     KANA_SINGLE_ROMAJI,
 )
+from core.ja_auto_alias_setup import build_ja_auto_file_groups
+from core.ja_alias_family_stage import (
+    build_ja_alias_family_state,
+    try_handle_ja_br_alias,
+    try_handle_ja_tail_breath_alias,
+)
+from core.ja_file_stage import build_ja_postprocess_context, try_handle_ja_single_vowel_file
+from core.ja_loop_prep import prepare_ja_loop_state
 from core.ja_oto_finalize import (
     _convert_ja_internal_cutoff_to_oto_field,
     _sanitize_ja_internal_params_for_wav_duration,
     sanitize_ja_oto_for_wav_duration,
 )
-from core.ja_oto_postprocess import (
-    JaPostprocessContext,
+from core.ja_generator_setup import (
+    build_ja_trace_preparation,
+    prepare_ja_generation_setup,
 )
+from core.ja_oto_file_finalize import JaPostFilePipelineContext, run_ja_post_file_pipeline
+from core.ja_oto_autotune import (
+    JaAutotuneRefreshContext,
+    _apply_profile_to_oto_file,
+    _profile_path_for_out,
+    _train_ja_autotune_profile,
+    apply_ja_autotune_delta as _apply_ja_autotune_profile_impl,
+    load_ja_autotune_profile as _load_ja_autotune_profile,
+    save_ja_autotune_profile as _save_ja_autotune_profile,
+    refresh_ja_autotune_profile_after_generation,
+)
+from core.oto_file_utils import (
+    build_occurrence_map as _build_occurrence_map_common,
+    extract_base_timing_shape as _extract_base_timing_shape_common,
+    parse_oto_line as _parse_oto_line_common,
+    read_oto_rows_for_profile as _read_oto_rows_for_profile_common,
+    read_text_with_fallback as _read_text_with_fallback_common,
+)
+from core.generator_finish import (
+    GeneratorFinishContext,
+    finalize_generator_finish,
+    write_jsonl_records,
+    write_oto_lines,
+)
+from core.file_prepare import load_named_tiers, prepare_file_context
 from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
 from core.timing_anchor_profiles import (
     get_anchor_profile,
@@ -995,27 +1029,6 @@ def _estimate_ja_mapping_confidence(
     return float(conf), float(margin)
 
 
-def _cleanup_timing_anchor_jsonl_files(log_dir, prefix):
-    if not log_dir or not os.path.isdir(log_dir):
-        return 0, 0
-    removed = 0
-    failed = 0
-    try:
-        names = os.listdir(log_dir)
-    except Exception:
-        return 0, 1
-    for name in names:
-        if not name.startswith(prefix) or not name.endswith(".jsonl"):
-            continue
-        path = os.path.join(log_dir, name)
-        try:
-            os.remove(path)
-            removed += 1
-        except Exception:
-            failed += 1
-    return removed, failed
-
-
 def _should_allow_ja_soft_forward_shift(target_tok, expected_tok, mapped_tok):
     target_norm = _normalize_ja_syllable_token(target_tok)
     expected_norm = _normalize_ja_syllable_token(expected_tok)
@@ -1530,60 +1543,11 @@ def generate_ja_openutau_aliases(base_alias):
 
 
 def _parse_oto_line_profile(line):
-    s = (line or "").strip()
-    if not s or "=" not in s:
-        return None
-    wav, rest = s.split("=", 1)
-    parts = rest.split(",")
-    if len(parts) < 6:
-        return None
-    try:
-        offset = float(parts[1].strip())
-        consonant = float(parts[2].strip())
-        cutoff = float(parts[3].strip())
-        pre = float(parts[4].strip())
-        ovl = float(parts[5].strip())
-    except ValueError:
-        return None
-    return {
-        "wav": wav.strip(),
-        "alias": parts[0].strip(),
-        "offset": offset,
-        "cons": consonant,
-        "cutoff": cutoff,
-        "pre": pre,
-        "ovl": ovl,
-    }
+    return _parse_oto_line_common(line)
 
 
 def _extract_base_timing_shape(line):
-    """
-    base oto 한 줄에서 상대 타이밍 shape를 추출합니다.
-    절대값(offset)은 직접 복사하지 않고, gap/ratio 중심으로 사용합니다.
-    """
-    p = _parse_oto_line_profile(line)
-    if not p:
-        return None
-    pre = max(float(p["pre"]), 0.0)
-    cons = max(float(p["cons"]), 0.0)
-    cut_abs = abs(float(p["cutoff"]))
-    ovl = max(float(p["ovl"]), 0.0)
-    off = max(float(p["offset"]), 0.0)
-
-    # auto-generated 0줄(템플릿 없음 fallback)은 shape로 쓰지 않는다.
-    if pre < 1.0 and cons < 1.0 and cut_abs < 1.0 and ovl < 1.0:
-        return None
-
-    cons_gap = max(cons - pre, 8.0)
-    cut_gap = max(cut_abs - cons, 16.0)
-    ovl_ratio = (ovl / pre) if pre > 1e-6 else 0.30
-    return {
-        "offset": off,
-        "pre": pre,
-        "cons_gap": cons_gap,
-        "cut_gap": cut_gap,
-        "ovl_ratio": _clamp_range(ovl_ratio, 0.04, 0.86),
-    }
+    return _extract_base_timing_shape_common(line)
 
 
 def _apply_base_shape_blend(offset, consonant, cutoff, pre, ovl, base_shape, alias_type="cv"):
@@ -1908,44 +1872,19 @@ def _normalize_alias_for_profile(alias):
 
 
 def _read_text_with_fallback(path):
-    try:
-        raw = open(path, "rb").read()
-    except Exception:
-        return ""
-    for enc in ("utf-8-sig", "cp932", "utf-8", "euc-kr", "latin-1"):
-        try:
-            text = raw.decode(enc)
-            if "=" in text:
-                return text
-        except Exception:
-            continue
-    return raw.decode("utf-8", errors="replace")
+    return _read_text_with_fallback_common(path)
 
 
 def _read_oto_rows_for_profile(path):
-    rows = []
-    if not path or not os.path.exists(path):
-        return rows
-    text = _read_text_with_fallback(path)
-    for raw in text.splitlines():
-        p = _parse_oto_line_profile(raw)
-        if not p:
-            continue
-        p["wav_norm"] = normalize_wav_key(p["wav"])
-        p["alias_norm"] = _normalize_alias_for_profile(p["alias"])
-        rows.append(p)
-    return rows
+    return _read_oto_rows_for_profile_common(
+        path,
+        wav_normalizer=normalize_wav_key,
+        alias_normalizer=_normalize_alias_for_profile,
+    )
 
 
 def _occurrence_map(rows):
-    m = {}
-    counters = {}
-    for row in rows:
-        base_key = (row["wav_norm"], row["alias_norm"])
-        idx = counters.get(base_key, 0)
-        counters[base_key] = idx + 1
-        m[(base_key[0], base_key[1], idx)] = row
-    return m
+    return _build_occurrence_map_common(rows)
 
 
 def _median(vals):
@@ -1972,145 +1911,17 @@ def _blend(a, b, w):
     return (1.0 - ww) * float(a) + ww * float(b)
 
 
-def _profile_path_for_out(out_path):
-    out_dir = os.path.dirname(os.path.abspath(out_path or "")) or os.getcwd()
-    return os.path.join(out_dir, ".ja_oto_autotune_profile.json")
-
-
-def _find_reference_oto(out_path):
-    env_ref = os.environ.get("UTOA_JA_REF_OTO", "").strip()
-    if env_ref and os.path.exists(env_ref):
-        if os.path.abspath(env_ref) != os.path.abspath(out_path):
-            return env_ref
-
-    out_dir = os.path.dirname(os.path.abspath(out_path or "")) or os.getcwd()
-    candidates = [
-        "base_oto.ini",
-        "oto.base.ini",
-        "oto.manual.ini",
-        "oto.correct.ini",
-        "oto.reference.ini",
-        "oto.gold.ini",
-        "oto.human.ini",
-        "oto_old.ini",
-    ]
-    for name in candidates:
-        p = os.path.join(out_dir, name)
-        if os.path.exists(p) and os.path.abspath(p) != os.path.abspath(out_path):
-            return p
-    return ""
-
-
-def _train_ja_autotune_profile(auto_oto_path, ref_oto_path, custom_map=None):
-    auto_rows = _read_oto_rows_for_profile(auto_oto_path)
-    ref_rows = _read_oto_rows_for_profile(ref_oto_path)
-    if not auto_rows or not ref_rows:
-        return None
-
-    auto_map = _occurrence_map(auto_rows)
-    ref_map = _occurrence_map(ref_rows)
-
-    fields = ["offset", "cons", "cutoff", "pre", "ovl"]
-    buckets = {}
-    matched = 0
-    alias_type_cache = {}
-
-    def _classify_cached(alias_text):
-        t = alias_type_cache.get(alias_text)
-        if t is None:
-            t = classify_ja_alias(alias_text, custom_map)
-            alias_type_cache[alias_text] = t
-        return t
-
-    for k, a_row in auto_map.items():
-        r_row = ref_map.get(k)
-        if not r_row:
-            continue
-        alias_for_cls = _normalize_alias_for_profile(a_row["alias"])
-        alias_type = _classify_cached(alias_for_cls)
-        b = buckets.setdefault(alias_type, {f: [] for f in fields})
-        for f in fields:
-            b[f].append(r_row[f] - a_row[f])
-        matched += 1
-
-    if matched < 8:
-        return None
-
-    profile = {
-        "version": 1,
-        "language": "japanese",
-        "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
-        "matched_pairs": matched,
-        "source_auto_name": os.path.basename(auto_oto_path),
-        "source_ref_name": os.path.basename(ref_oto_path),
-        "buckets": {},
-    }
-    for alias_type, vals in buckets.items():
-        n = len(vals["offset"])
-        if n < 3:
-            continue
-        profile["buckets"][alias_type] = {
-            "n": n,
-            "offset": _median(vals["offset"]),
-            "cons": _median(vals["cons"]),
-            "cutoff": _median(vals["cutoff"]),
-            "pre": _median(vals["pre"]),
-            "ovl": _median(vals["ovl"]),
-        }
-
-    if not profile["buckets"]:
-        return None
-    return profile
-
-
-def _load_ja_autotune_profile(path):
-    if not path or not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict) or "buckets" not in data:
-            return None
-        return data
-    except Exception:
-        return None
-
-
-def _save_ja_autotune_profile(path, profile):
-    if not path or not profile:
-        return False
-    try:
-        data = dict(profile)
-        # Remove direct path fields if present from legacy profile objects.
-        data.pop("source_auto", None)
-        data.pop("source_ref", None)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception:
-        return False
-
-
 def _apply_ja_autotune_profile(alias_type, offset, consonant, cutoff, pre, ovl, profile):
-    if not profile:
-        return offset, consonant, cutoff, pre, ovl
-    buckets = profile.get("buckets") or {}
-    if not isinstance(buckets, dict):
-        return offset, consonant, cutoff, pre, ovl
-    stat = buckets.get(alias_type)
-    if not stat:
-        return offset, consonant, cutoff, pre, ovl
-    n = float(stat.get("n", 0))
-    if n < 3:
-        return offset, consonant, cutoff, pre, ovl
-    # Gradually trust buckets as examples accumulate.
-    w = min(1.0, max(0.25, n / 24.0))
-    offset += _clamp(stat.get("offset", 0.0), 140.0) * w
-    consonant += _clamp(stat.get("cons", 0.0), 160.0) * w
-    cutoff += _clamp(stat.get("cutoff", 0.0), 180.0) * w
-    pre += _clamp(stat.get("pre", 0.0), 140.0) * w
-    ovl += _clamp(stat.get("ovl", 0.0), 100.0) * w
-    return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    return _apply_ja_autotune_profile_impl(
+        alias_type,
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        profile,
+        validate_fn=validate_oto_params,
+    )
 
 
 def _ja_extract_onset_for_timing(alias_text, alias_type):
@@ -2273,222 +2084,6 @@ def _apply_ja_style_profile(alias_type, offset, consonant, cutoff, pre, ovl, pro
     return validate_oto_params(offset, cons_new, cutoff_new, pre_new, ovl_new)
 
 
-def _apply_profile_to_oto_file(oto_path, profile, custom_map=None):
-    if not oto_path or not os.path.exists(oto_path):
-        return 0
-    changed = 0
-    out_lines = []
-    alias_type_cache = {}
-
-    def _classify_cached(alias_text):
-        t = alias_type_cache.get(alias_text)
-        if t is None:
-            t = classify_ja_alias(alias_text, custom_map)
-            alias_type_cache[alias_text] = t
-        return t
-
-    for raw in _read_text_with_fallback(oto_path).splitlines():
-            p = _parse_oto_line_profile(raw)
-            if not p:
-                out_lines.append(raw.rstrip("\n"))
-                continue
-            alias_for_cls = _normalize_alias_for_profile(p["alias"])
-            alias_type = _classify_cached(alias_for_cls)
-            o2, c2, ct2, pr2, ov2 = _apply_ja_autotune_profile(
-                alias_type, p["offset"], p["cons"], p["cutoff"], p["pre"], p["ovl"], profile
-            )
-            if (
-                abs(o2 - p["offset"]) > 1e-6
-                or abs(c2 - p["cons"]) > 1e-6
-                or abs(ct2 - p["cutoff"]) > 1e-6
-                or abs(pr2 - p["pre"]) > 1e-6
-                or abs(ov2 - p["ovl"]) > 1e-6
-            ):
-                changed += 1
-            out_lines.append(f"{p['wav']}={p['alias']},{o2:.2f},{c2:.2f},{ct2:.2f},{pr2:.2f},{ov2:.2f}")
-    with open(oto_path, "w", encoding="utf-8") as f:
-        for line in out_lines:
-            f.write(line + "\n")
-    return changed
-
-
-def _apply_ja_mel_refine_to_oto_file(oto_path, wav_dir, custom_map=None):
-    """
-    멜 에너지 골짜기 기준으로 일본어 CV 계열 cutoff 과연장을 후처리 보정합니다.
-    """
-    if os.environ.get("UTOA_DISABLE_MEL_REFINER", "").strip().lower() in {"1", "true", "yes", "on"}:
-        return 0
-    if not oto_path or not os.path.exists(oto_path) or not os.path.isdir(wav_dir):
-        return 0
-    try:
-        import numpy as np
-    except Exception:
-        return 0
-
-    # Reuse tested mel helpers from KR generator to keep behavior aligned.
-    from core.oto_generator import _read_wav_mono_np, _mel_envelope, _find_wav_path_for_name
-
-    raw_lines = []
-    parsed = []
-    for idx, raw in enumerate(_read_text_with_fallback(oto_path).splitlines()):
-        line = raw.rstrip("\n")
-        raw_lines.append(line)
-        row = _parse_oto_line_profile(line)
-        if row:
-            parsed.append((idx, row))
-    if not parsed:
-        return 0
-
-    wav_index = {}
-    try:
-        for fn in os.listdir(wav_dir):
-            if fn.lower().endswith(".wav"):
-                nkey = normalize_key(fn)
-                if nkey:
-                    wav_index[nkey] = os.path.join(wav_dir, fn)
-    except Exception:
-        pass
-
-    by_wav = {}
-    for line_idx, row in parsed:
-        by_wav.setdefault(row["wav"], []).append((line_idx, row))
-    alias_type_cache = {}
-
-    def _classify_cached(alias_text):
-        t = alias_type_cache.get(alias_text)
-        if t is None:
-            t = classify_ja_alias(alias_text, custom_map)
-            alias_type_cache[alias_text] = t
-        return t
-
-    mel_cache = {}
-    changed = 0
-    for wav_name, rows in by_wav.items():
-        wav_path = _find_wav_path_for_name(wav_name, wav_dir, wav_index)
-        if not wav_path:
-            continue
-        mel_ctx = mel_cache.get(wav_path)
-        if mel_ctx is None:
-            audio, sr = _read_wav_mono_np(wav_path)
-            mel_ctx = _mel_envelope(audio, sr)
-            mel_cache[wav_path] = mel_ctx
-        if not mel_ctx:
-            continue
-
-        t_ms = mel_ctx["times_ms"]
-        en = mel_ctx["energy"]
-        db_arr = mel_ctx.get("db_db")
-        f0v_arr = mel_ctx.get("f0_voicing")
-        db_sil_th = float(mel_ctx.get("db_silence_th", -42.0))
-        if db_arr is None or len(db_arr) != len(en):
-            db_arr = np.zeros_like(en, dtype=np.float64)
-        if f0v_arr is None or len(f0v_arr) != len(en):
-            f0v_arr = np.zeros_like(en, dtype=np.float64)
-        if len(t_ms) < 8:
-            continue
-
-        for i, (_line_idx, row) in enumerate(rows):
-            alias = row["alias"]
-            alias_type = _classify_cached(alias)
-            if alias_type not in {"cv", "cv_head", "vcv"}:
-                continue
-
-            off = float(row["offset"])
-            pre_abs = off + float(row["pre"])
-            cons_abs = off + float(row["cons"])
-            cut_abs = off + abs(float(row["cutoff"]))
-            if cut_abs <= pre_abs + 24.0:
-                continue
-
-            next_anchor = None
-            for j in range(i + 1, len(rows)):
-                a2 = rows[j][1]["alias"]
-                t2 = _classify_cached(a2)
-                if t2 in {"cv", "cv_head", "vcv", "mono"}:
-                    next_anchor = float(rows[j][1]["offset"]) + float(rows[j][1]["pre"])
-                    break
-
-            search_start = pre_abs + 14.0
-            search_end = cut_abs - 8.0
-            if next_anchor is not None:
-                search_end = min(search_end, next_anchor - 8.0)
-            if search_end <= search_start + 25.0:
-                continue
-
-            mask = np.where((t_ms >= search_start) & (t_ms <= search_end))[0]
-            if len(mask) < 5:
-                continue
-
-            local_e = en[mask]
-            local_db = db_arr[mask]
-            local_f0v = f0v_arr[mask]
-            silence_flags = local_db <= db_sil_th
-            candidate_mask = mask[silence_flags] if np.any(silence_flags) else mask
-
-            # dB+mel 기반 선택을 우선, F0는 낮은 비중으로만 반영.
-            best_idx = int(candidate_mask[0])
-            best_score = -1e9
-            for ci in candidate_mask:
-                e_v = float(en[ci])
-                db_v = float(db_arr[ci])
-                f0_v = float(f0v_arr[ci])
-                silence_bonus = 0.28 if db_v <= db_sil_th else 0.0
-                score = (1.0 - e_v) + silence_bonus - (0.08 * f0_v)
-                if score > best_score:
-                    best_score = score
-                    best_idx = int(ci)
-
-            valley_t = float(t_ms[best_idx])
-            valley_e = float(en[best_idx])
-            valley_db = float(db_arr[best_idx])
-            valley_f0v = float(f0v_arr[best_idx])
-            cut_idx = int(np.argmin(np.abs(t_ms - cut_abs)))
-            cut_e = float(en[cut_idx])
-            cut_db = float(db_arr[cut_idx])
-            contrast = cut_e - valley_e
-            db_drop = cut_db - valley_db
-
-            if contrast < 0.11 and db_drop < 2.2:
-                continue
-            if valley_e > 0.40 and valley_db > (db_sil_th + 6.0):
-                continue
-            if valley_f0v > 0.72 and contrast < 0.16:
-                continue
-            if valley_t >= cut_abs - 12.0:
-                continue
-
-            target_cut_abs = valley_t + 2.0
-            min_cut_abs = pre_abs + 20.0
-            if target_cut_abs <= min_cut_abs:
-                continue
-
-            new_cons_abs = min(cons_abs, target_cut_abs - 12.0)
-            new_cons_abs = max(new_cons_abs, pre_abs + 8.0)
-            row["cons"] = max(new_cons_abs - off, 0.0)
-            row["cutoff"] = -(target_cut_abs - off)
-            changed += 1
-
-    if changed <= 0:
-        return 0
-
-    replace_map = {line_idx: row for line_idx, row in parsed}
-    out_lines = []
-    for i, line in enumerate(raw_lines):
-        row = replace_map.get(i)
-        if not row:
-            out_lines.append(line)
-            continue
-        o, c, ct, p, ov = validate_oto_params(
-            row["offset"], row["cons"], row["cutoff"], row["pre"], row["ovl"]
-        )
-        out_lines.append(f"{row['wav']}={row['alias']},{o:.2f},{c:.2f},{ct:.2f},{p:.2f},{ov:.2f}")
-
-    with open(oto_path, "w", encoding="utf-8") as f:
-        for line in out_lines:
-            f.write(line + "\n")
-    return changed
-
-
 def train_ja_autotune_profile(auto_oto_path, manual_oto_path, custom_phonemes_path=""):
     """부분 수동 OTO와 자동 OTO를 매칭해 일본어 델타 기반 프로파일을 학습합니다."""
     custom_map = load_custom_phonemes(custom_phonemes_path)
@@ -2510,7 +2105,12 @@ def apply_ja_autotune_profile_to_oto(oto_path, profile, custom_phonemes_path="")
     if not profile:
         return 0
     custom_map = load_custom_phonemes(custom_phonemes_path)
-    return _apply_profile_to_oto_file(oto_path, profile, custom_map=custom_map)
+    return _apply_profile_to_oto_file(
+        oto_path,
+        profile,
+        custom_map=custom_map,
+        validate_fn=validate_oto_params,
+    )
 
 
 def generate_ja_oto(
@@ -2573,6 +2173,7 @@ def generate_ja_oto(
         _read_wav_mono_np,
         _mel_envelope,
         _find_wav_path_for_name,
+        _wav_duration_ms,
         _apply_soft_mel_offset_cutoff_guard,
     )
 
@@ -2667,11 +2268,10 @@ def generate_ja_oto(
     }
     _core_dir = os.path.dirname(os.path.abspath(__file__))
     _project_dir = os.path.dirname(_core_dir)
-    _anchor_log_dir = os.path.join(_project_dir, "logs")
-    _anchor_log_name = f"timing_anchor_ja_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
-    anchor_log_path = os.path.join(_anchor_log_dir, _anchor_log_name)
-    mapping_trace_name = f"ja_mapping_trace_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
-    mapping_trace_path = os.path.join(_anchor_log_dir, mapping_trace_name)
+    trace_setup = build_ja_trace_preparation(_project_dir)
+    _anchor_log_dir = trace_setup.anchor_log_dir
+    anchor_log_path = trace_setup.anchor_log_path
+    mapping_trace_path = trace_setup.mapping_trace_path
     mapping_trace_records = []
 
     def _apply_ja_anchor_lock(
@@ -2841,207 +2441,43 @@ def generate_ja_oto(
     elif ja_style_profile and not ja_style_enabled:
         log("[JA-Profile] 추상 프리셋 적용 비활성화(환경변수 설정)")
 
-    if tpl_path and not os.path.exists(tpl_path):
-        log(f"⚠️ 템플릿 파일을 찾을 수 없습니다: {tpl_path}")
-        log(f"⚡ OpenUtau 호환 {auto_gen_format.upper()} 자동 에일리어스 생성으로 전환합니다.")
-        tpl_path = ""
-
-    # 템플릿 읽기
-    template_lines = []
-    if tpl_path:
-        lines, detected_enc, warning, err = load_template_oto_lines(
-            tpl_path,
+    ja_setup = prepare_ja_generation_setup(
+        tg_folder=tg_folder,
+        tpl_path=tpl_path,
+        auto_gen_format=auto_gen_format,
+        custom_phonemes_path=custom_phonemes_path,
+        log_fn=log,
+        normalize_key_fn=normalize_key,
+        load_template_lines_fn=lambda path: load_template_oto_lines(
+            path,
             require_utf8=False,
             mode_label="일본어 모드",
-        )
-        if err:
-            log(f"{err}")
-            log(f"⚡ 템플릿 로드 실패로 OpenUtau 호환 {auto_gen_format.upper()} 자동 에일리어스 생성으로 전환합니다.")
-            lines = []
-        if warning:
-            log(warning)
-        template_lines = lines or []
-
-    # TextGrid 맵핑 (정확 매칭 + 정규화 후보 매칭)
-    tg_entries = []
-    tg_exact_map = {}
-    tg_norm_map = {}
-    if os.path.exists(tg_folder):
-        for f_name in os.listdir(tg_folder):
-            if not f_name.lower().endswith('.textgrid'):
-                continue
-            base = os.path.splitext(f_name)[0]
-            info = {
-                'path': os.path.join(tg_folder, f_name),
-                'real_name': base + '.wav',
-                'base_lower': base.lower(),
-                'norm_key': normalize_key(f_name),
-            }
-            tg_entries.append(info)
-            if info['base_lower'] not in tg_exact_map:
-                tg_exact_map[info['base_lower']] = info
-            if info['norm_key']:
-                tg_norm_map.setdefault(info['norm_key'], []).append(info)
+        ),
+    )
+    final_lines = []
+    custom_map = ja_setup.custom_map
+    tg_entries = ja_setup.tg_index.tg_entries
+    file_groups = dict(ja_setup.file_groups)
+    use_template = bool(ja_setup.use_template)
 
     def _resolve_tg_info(fname):
-        """템플릿의 wav 파일명을 TextGrid 엔트리에 안정적으로 매핑합니다."""
-        wav_name = os.path.basename((fname or '').strip())
-        base_lower = os.path.splitext(wav_name)[0].lower()
-        if base_lower in tg_exact_map:
-            return tg_exact_map[base_lower]
-
-        norm_name = normalize_key(wav_name)
-        if not norm_name:
-            return None
-        candidates = tg_norm_map.get(norm_name, [])
-        if len(candidates) == 1:
-            return candidates[0]
-
-        if len(candidates) > 1:
-            exact_name = wav_name.lower()
-            same_name = [c for c in candidates if c['real_name'].lower() == exact_name]
-            if len(same_name) == 1:
-                return same_name[0]
-            log(f"⚠️ 파일명 매핑 충돌: {wav_name} (정규화 키 {norm_name}, 후보 {len(candidates)}개) → 원본 파일명 유지")
-            return None
-        return None
+        return ja_setup.tg_index.resolve_tg_info(fname, log_fn=log)
 
     def _textgrid_missing_diagnostics(fname):
-        wav_name = os.path.basename((fname or "").strip())
-        base = os.path.splitext(wav_name)[0]
-        norm = normalize_key(wav_name)
-        base_candidates = {base}
-        if base.startswith("_"):
-            base_candidates.add(base[1:])
-        else:
-            base_candidates.add("_" + base)
-        candidate_paths = [os.path.join(tg_folder, c + ".TextGrid") for c in sorted(base_candidates)]
-        norm_candidates = [c.get("path", "") for c in (tg_norm_map.get(norm, []) or [])][:5]
-        return {
-            "wav_basename": wav_name,
-            "lookup_base": base,
-            "lookup_norm": norm,
-            "candidate_paths": candidate_paths,
-            "norm_candidates": norm_candidates,
-            "diag_hint": f"norm={norm}, candidates={len(norm_candidates)}",
-        }
+        return ja_setup.tg_index.textgrid_missing_diagnostics(fname)
 
-    def _template_match_stats(lines):
-        file_names = set()
-        for line in (lines or []):
-            if "=" not in line:
-                continue
-            file_names.add(line.split("=", 1)[0].strip())
-        total = len(file_names)
-        if total == 0:
-            return 0, 0, 0.0
-        matched = 0
-        for fname in file_names:
-            if _resolve_tg_info(fname):
-                matched += 1
-        return matched, total, (matched / float(total))
-
-    final_lines = []
-
-    # 커스텀 맵 로드
-    custom_map = load_custom_phonemes(custom_phonemes_path)
-
-    # 템플릿 사용 (일반 모드)
-    use_template = bool(template_lines)
-    if use_template:
-        t_match, t_total, t_ratio = _template_match_stats(template_lines)
-        if t_total == 0 or t_match == 0 or t_ratio < 0.25:
-            log(
-                f"⚠️ 템플릿-TextGrid 매칭률 낮음 ({t_match}/{t_total}, {t_ratio:.1%}) "
-                f"→ OpenUtau 호환 {auto_gen_format.upper()} 자동 에일리어스 생성으로 전환"
-            )
-            use_template = False
-        else:
-            log(f"📌 템플릿 베이스 OTO 사용 ({t_match}/{t_total}, {t_ratio:.1%})")
-
-    if use_template:
-        file_groups = {}
-        for line in template_lines:
-            fname = line.split('=')[0]
-            if fname not in file_groups:
-                file_groups[fname] = []
-            file_groups[fname].append(line)
-    else:
+    if not use_template:
         # 템플릿 없는 자동 생성 모드 (Auto-Generation)
         log(f"⚡ 템플릿 없음/미적합 → OpenUtau 호환 {auto_gen_format.upper()} 포맷 자동 에일리어스 생성 시작")
-        file_groups = {}
-
-        def _resolve_vowel_onset(syl):
-            onset, vowel = split_ja_romaji_syllable(syl)
-            if vowel in JA_VOWELS:
-                return vowel, onset
-            if syl in ['n', 'nn', 'xn', 'm']:
-                return 'n', ''
-            return 'a', onset
-        
-        for tg_info in tg_entries:
-            tg_path = tg_info['path']
-            real_name = tg_info['real_name']
-            
-            try:
-                tg = textgrid.TextGrid.fromFile(tg_path)
-                # 단모음/연단음 포맷 확인 (filename 기반)
-                base_name = os.path.splitext(real_name)[0]
-                syllables = parse_ja_filename(base_name)
-                
-                if not syllables:
-                    continue
-                    
-                lines = []
-                is_long = base_name.lower().endswith('long') or len(syllables) == 1
-                local_format = auto_gen_format
-                if _is_vowel_chain_syllables(syllables):
-                    local_format = 'vcv'
-                    log(f"🧭 {real_name}: 모음 연속음 파일 감지 → 자동 생성 포맷 VCV 적용")
-                
-                if is_long:
-                    # 단모음/연단음 포맷
-                    for syl in syllables:
-                        lines.append(f"{real_name}={syl},0,0,0,0,0")
-                else:
-                    # 다중 음절
-                    for idx, syl in enumerate(syllables):
-                        # 자음 모음 분리 (단순 휴리스틱)
-                        vowel, onset = _resolve_vowel_onset(syl)
-                            
-                        
-                        if local_format == 'vcv':
-                            if idx == 0:
-                                lines.append(f"{real_name}=- {syl},0,0,0,0,0")
-                            else:
-                                prev_syl = syllables[idx-1]
-                                prev_vowel, _ = _resolve_vowel_onset(prev_syl)
-                                    
-                                lines.append(f"{real_name}={prev_vowel} {syl},0,0,0,0,0")
-                                
-                        elif local_format in {'cv', 'cvc', 'cvvc'}:
-                            # CVVC / CVC 공통: 기본 CV
-                            lines.append(f"{real_name}={syl},0,0,0,0,0")
-                            
-                            if idx > 0 and local_format == 'cvvc':
-                                # 이전 모음 -> 현재 자음 VC 브릿지
-                                prev_syl = syllables[idx-1]
-                                prev_vowel, _ = _resolve_vowel_onset(prev_syl)
-                                
-                                # 현재 초성 자음 추출
-                                cur_start_cons = onset
-                                
-                                if cur_start_cons:
-                                    lines.append(f"{real_name}={prev_vowel} {cur_start_cons},0,0,0,0,0")
-                                else:
-                                    # 앞 음절 모음 -> 뒤 음절 모음 (VV)
-                                    lines.append(f"{real_name}={prev_vowel} {vowel},0,0,0,0,0")
-                
-                if lines:
-                    file_groups[real_name] = lines
-
-            except Exception as e:
-                log(f"⚠️ {real_name}: 자동 템플릿 생성 실패 ({e})")
+        file_groups = build_ja_auto_file_groups(
+            tg_entries=tg_entries,
+            auto_gen_format=auto_gen_format,
+            log_fn=log,
+            load_textgrid_fn=textgrid.TextGrid.fromFile,
+            parse_filename_fn=parse_ja_filename,
+            split_syllable_fn=split_ja_romaji_syllable,
+            is_vowel_chain_fn=_is_vowel_chain_syllables,
+        )
 
     processed = 0
     total = len(file_groups)
@@ -3059,10 +2495,22 @@ def generate_ja_oto(
     mel_cache_for_signal = {}
 
     for fname, lines in file_groups.items():
-        tg_info = _resolve_tg_info(fname)
+        file_ctx = prepare_file_context(
+            fname=fname,
+            lines=lines,
+            resolve_tg_info_fn=_resolve_tg_info,
+            missing_diagnostics_fn=_textgrid_missing_diagnostics,
+            wav_root_for_signal=wav_root_for_signal,
+            wav_index_for_signal=wav_index_for_signal,
+            mel_cache_for_signal=mel_cache_for_signal,
+            find_wav_path_fn=_find_wav_path_for_name,
+            read_wav_fn=_read_wav_mono_np,
+            mel_envelope_fn=_mel_envelope,
+            wav_duration_fn=_wav_duration_ms,
+        )
 
-        if not tg_info:
-            miss_diag = _textgrid_missing_diagnostics(fname)
+        if file_ctx.status == "textgrid_missing":
+            miss_diag = file_ctx.diagnostics
             log(
                 f"📝 {fname}: TextGrid 없음 → 원본 유지 "
                 f"(norm={miss_diag['lookup_norm']}, 후보={len(miss_diag['norm_candidates'])})"
@@ -3074,39 +2522,35 @@ def generate_ja_oto(
             final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
             processed += 1
             continue
-            
-        tg_path = tg_info['path']
-        real_wav_name = tg_info['real_name']
-        wav_path_for_signal = _find_wav_path_for_name(real_wav_name, wav_root_for_signal, wav_index_for_signal)
-        mel_ctx_for_file = None
-        wav_duration_ms = 0.0
-        if wav_path_for_signal:
-            mel_ctx_for_file = mel_cache_for_signal.get(wav_path_for_signal)
-            if mel_ctx_for_file is None:
-                audio_sig, sr_sig = _read_wav_mono_np(wav_path_for_signal)
-                mel_ctx_for_file = _mel_envelope(audio_sig, sr_sig)
-                mel_cache_for_signal[wav_path_for_signal] = mel_ctx_for_file
-                if sr_sig:
-                    wav_duration_ms = (len(audio_sig) / float(sr_sig)) * 1000.0
-            else:
-                try:
-                    audio_sig, sr_sig = _read_wav_mono_np(wav_path_for_signal)
-                    if sr_sig:
-                        wav_duration_ms = (len(audio_sig) / float(sr_sig)) * 1000.0
-                except Exception:
-                    wav_duration_ms = 0.0
-        
+
+        file_ctx = load_named_tiers(
+            file_ctx,
+            load_textgrid_fn=textgrid.TextGrid.fromFile,
+            tier_predicate=lambda _tier: True,
+        )
+        if file_ctx.status == "textgrid_load_failed":
+            log(f"⚠️ {fname}: TextGrid 로드 실패 → 원본 유지 ({file_ctx.error_message})")
+            _record_unset_lines("textgrid_load_failed", fname, lines)
+            final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
+            processed += 1
+            continue
+        if file_ctx.status == "tier_missing":
+            log(f"⚠️ {fname}: phones 티어 없음 → 원본 유지")
+            _record_unset_lines("tier_missing", fname, lines)
+            final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
+            processed += 1
+            continue
+
+        tg_path = file_ctx.tg_path
+        real_wav_name = file_ctx.real_wav_name
+        wav_path_for_signal = file_ctx.wav_path_for_signal
+        mel_ctx_for_file = file_ctx.mel_ctx_for_file
+        wav_duration_ms = float(file_ctx.wav_duration_ms or 0.0)
+        tg = file_ctx.tg
+        ph_tier = file_ctx.phone_tier
+        word_tier = file_ctx.word_tier
+
         try:
-            tg = textgrid.TextGrid.fromFile(tg_path)
-            
-            ph_tier = None
-            word_tier = None
-            for t in tg:
-                if hasattr(t, 'name') and t.name == 'phones':
-                    ph_tier = t
-                elif hasattr(t, 'name') and t.name == 'words':
-                    word_tier = t
-            
             if not ph_tier:
                 log(f"⚠️ {fname}: phones 티어 없음 → 원본 유지")
                 _record_unset_lines("tier_missing", fname, lines)
@@ -3114,124 +2558,71 @@ def generate_ja_oto(
                 processed += 1
                 continue
             
-            silence_marks = {'', 'sil', 'spn', 'pau', 'sp'}
-            phone_silence_marks = {'', 'sil', 'pau', 'sp'}
-            wd_intervals = []
-            if word_tier:
-                wd_intervals = [i for i in word_tier if i.mark.strip().lower() not in silence_marks]
-
-            ph_intervals_raw = [i for i in ph_tier if i.mark.strip().lower() not in phone_silence_marks]
-            ph_intervals = [i for i in ph_intervals_raw if i.mark.strip().lower() != 'spn']
-            words_synth_phones = []
-
-            base_name = os.path.splitext(real_wav_name)[0]
-            filename_syllables = parse_ja_filename(base_name)
-            is_vowel_chain = _is_vowel_chain_syllables(filename_syllables)
-            cv_targets = _extract_ja_cv_targets_from_lines(lines, custom_map)
-
-            detected_format = detect_ja_alias_format([l.split('=')[1].split(',')[0].strip() for l in lines], custom_map)
-            format_type = forced_format or detected_format
-            ja_style_profile = get_ja_profile_preset(format_type)
-            if is_vowel_chain:
-                prev_format = format_type
-                format_type = 'vcv'
-                ja_style_profile = get_ja_profile_preset(format_type)
-                log(f"🎵 {fname}: 모음 연속음 파일 감지 → VCV 강제 적용 (기존: {prev_format.upper()})")
-            elif forced_format:
-                log(f"🎵 {fname}: 포맷 수동 지정 → {format_type.upper()} (자동 감지: {detected_format.upper()})")
-            else:
-                log(f"🎵 {fname}: 포맷 감지 → {format_type.upper()}")
-
-            expected_syllables = max(len(filename_syllables), len(cv_targets), len(wd_intervals))
-            phone_quality = _collect_phone_tier_quality(
-                ph_tier,
-                expected_syllables=expected_syllables,
-                min_vowel_phone_ratio=ja_mapping_min_vowel_phone_ratio,
+            loop_prep = prepare_ja_loop_state(
+                fname=fname,
+                lines=lines,
+                real_wav_name=real_wav_name,
+                ph_tier=ph_tier,
+                word_tier=word_tier,
+                custom_map=custom_map,
+                forced_format=forced_format,
+                ja_mapping_words_fallback_enabled=ja_mapping_words_fallback_enabled,
+                ja_mapping_spn_ratio_threshold=ja_mapping_spn_ratio_threshold,
+                ja_mapping_min_vowel_phone_ratio=ja_mapping_min_vowel_phone_ratio,
+                ja_mapping_confidence_threshold=ja_mapping_confidence_threshold,
+                debug_reason_logging=ja_mapping_debug_reason_logging,
+                log_fn=log,
+                parse_filename_fn=parse_ja_filename,
+                is_vowel_chain_fn=_is_vowel_chain_syllables,
+                extract_cv_targets_fn=_extract_ja_cv_targets_from_lines,
+                detect_alias_format_fn=detect_ja_alias_format,
+                get_profile_fn=get_ja_profile_preset,
+                collect_phone_quality_fn=_collect_phone_tier_quality,
+                build_words_synth_phones_fn=_build_words_synth_phones,
+                resolve_conf_threshold_fn=_resolve_ja_mapping_conf_threshold,
             )
-            low_quality_reasons = list(phone_quality.get("low_confidence_reasons", []))
-            spn_ratio = float(phone_quality.get("spn_ratio_in_phone_tier", 0.0))
-            if spn_ratio >= float(ja_mapping_spn_ratio_threshold):
-                low_quality_reasons.append("spn_heavy")
-            low_quality_reasons = sorted(set(low_quality_reasons))
-            low_phone_quality = bool(low_quality_reasons)
-
-            forced_words_mapping = False
-            if (
-                format_type in {"vcv", "cvvc", "cv"}
-                and ja_mapping_words_fallback_enabled
-                and low_phone_quality
-            ):
-                if wd_intervals:
-                    words_synth_phones = _build_words_synth_phones(wd_intervals, filename_syllables)
-                    if words_synth_phones:
-                        ph_intervals = words_synth_phones
-                        forced_words_mapping = True
-                        if ja_mapping_debug_reason_logging:
-                            log(
-                                f"🧭 {fname}: phones 신뢰도 낮음({','.join(low_quality_reasons)}) "
-                                f"→ words 기반 합성 phone 우선 사용"
-                            )
-                elif ja_mapping_debug_reason_logging:
-                    log(f"⚠️ {fname}: phones 신뢰도 낮음({','.join(low_quality_reasons)}), words 티어 없음")
-
-            if not ph_intervals and wd_intervals:
-                words_synth_phones = _build_words_synth_phones(wd_intervals, filename_syllables)
-                if words_synth_phones:
-                    ph_intervals = words_synth_phones
-
-            if not ph_intervals:
+            if loop_prep.status == "no_valid_alias":
+                log(f"⚠️ {fname}: 유효한 에일리어스가 없어 원본 유지")
+                _record_unset_lines("no_valid_alias", fname, lines)
+                final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
+                processed += 1
+                continue
+            if loop_prep.status == "empty_intervals":
+                low_quality_reasons = list(loop_prep.low_quality_reasons)
                 reason = "mapping_failed_empty_intervals"
-                if low_phone_quality and "spn_heavy" in low_quality_reasons:
+                if loop_prep.low_phone_quality and "spn_heavy" in low_quality_reasons:
                     reason = "mapping_failed_spn_heavy"
-                elif low_phone_quality and any(r in {"insufficient_phones", "insufficient_vowel_phones"} for r in low_quality_reasons):
+                elif loop_prep.low_phone_quality and any(r in {"insufficient_phones", "insufficient_vowel_phones"} for r in low_quality_reasons):
                     reason = "mapping_failed_insufficient_phones"
-                if low_phone_quality and not wd_intervals:
+                if loop_prep.low_phone_quality and not loop_prep.wd_intervals:
                     reason = "mapping_failed_no_words_support"
                 log(f"⚠️ {fname}: 음소 정보 없음 → 원본 유지")
-                _record_unset_lines(
-                    reason,
-                    fname,
-                    lines,
-                    meta={
-                        "diag_hint": f"spn_ratio={spn_ratio:.2f}",
-                        "phone_quality": phone_quality,
-                        "forced_words_mapping": forced_words_mapping,
-                    },
-                )
+                _record_unset_lines(reason, fname, lines, meta=loop_prep.meta)
                 final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
                 processed += 1
                 continue
 
-            timeline_start_ms = float(ph_intervals[0].minTime * 1000.0)
-            timeline_end_ms = float(ph_intervals[-1].maxTime * 1000.0)
-            if wd_intervals:
-                timeline_start_ms = min(timeline_start_ms, float(wd_intervals[0].minTime * 1000.0))
-                timeline_end_ms = max(timeline_end_ms, float(wd_intervals[-1].maxTime * 1000.0))
+            wd_intervals = loop_prep.wd_intervals
+            ph_intervals_raw = loop_prep.ph_intervals_raw
+            ph_intervals = loop_prep.ph_intervals
+            words_synth_phones = loop_prep.words_synth_phones
+            filename_syllables = loop_prep.filename_syllables
+            is_vowel_chain = loop_prep.is_vowel_chain
+            cv_targets = loop_prep.cv_targets
+            format_type = loop_prep.format_type
+            ja_style_profile = loop_prep.ja_style_profile
+            phone_quality = loop_prep.phone_quality
+            low_quality_reasons = loop_prep.low_quality_reasons
+            low_phone_quality = loop_prep.low_phone_quality
+            forced_words_mapping = loop_prep.forced_words_mapping
+            timeline_start_ms = loop_prep.timeline_start_ms
+            timeline_end_ms = loop_prep.timeline_end_ms
+            effective_end_ms = loop_prep.effective_end_ms
+            boundary_points_ms = loop_prep.boundary_points_ms
+            phone_spans_ms = loop_prep.phone_spans_ms
+            conf_th = loop_prep.conf_th
 
-            effective_end_ms = timeline_end_ms
-            if len(ph_intervals) >= 2:
-                prev_p = ph_intervals[-2]
-                last_p = ph_intervals[-1]
-                gap_ms = float((last_p.minTime - prev_p.maxTime) * 1000.0)
-                last_len_ms = float((last_p.maxTime - last_p.minTime) * 1000.0)
-                if gap_ms > 450.0 and last_len_ms < 100.0:
-                    effective_end_ms = float(prev_p.maxTime * 1000.0)
-
-            boundary_points_ms = set()
-            for p in ph_intervals:
-                boundary_points_ms.add(float(p.minTime * 1000.0))
-                boundary_points_ms.add(float(p.maxTime * 1000.0))
-            if len(boundary_points_ms) < 4 and wd_intervals:
-                for w in wd_intervals:
-                    boundary_points_ms.add(float(w.minTime * 1000.0))
-                    boundary_points_ms.add(float(w.maxTime * 1000.0))
-            boundary_points_ms = sorted(boundary_points_ms)
-            phone_spans_ms = [
-                (float(p.minTime * 1000.0), float(p.maxTime * 1000.0))
-                for p in ph_intervals
-            ]
-
-            post_ctx = JaPostprocessContext(
+            post_ctx = build_ja_postprocess_context(
                 phone_spans_ms=phone_spans_ms,
                 timeline_start_ms=timeline_start_ms,
                 effective_end_ms=effective_end_ms,
@@ -3246,41 +2637,22 @@ def generate_ja_oto(
                 style_apply_fn=_apply_ja_style_profile,
                 autotune_apply_fn=_apply_ja_autotune_profile,
             )
-            
-            # === 단모음 처리 (음소 1개) ===
-            if len(ph_intervals) == 1:
-                log(f"🎵 {fname}: 단모음 파일")
-                vowel = ph_intervals[0]
-                v_start = vowel.minTime * 1000
-                v_end = vowel.maxTime * 1000
-                v_len = v_end - v_start
-                for line in lines:
-                    parts = line.split('=', 1)
-                    if len(parts) < 2:
-                        _record_unset("malformed_line", fname, line)
-                        final_lines.append(apply_suffix_to_oto_line(line, alias_suffix))
-                        continue
-                    alias = parts[1].split(',')[0].strip()
-                    if not alias:
-                        _record_unset("empty_alias", fname, line)
-                        preserved = f"{real_wav_name}={parts[1]}"
-                        final_lines.append(apply_suffix_to_oto_line(preserved, alias_suffix))
-                        continue
-                    offset = v_start
-                    pre = 0
-                    ovl = 0
-                    consonant = min(v_len * 0.25, 120)
-                    cutoff = -(v_len * 0.8)
 
-                    offset, consonant, cutoff, pre, ovl = post_ctx.post_adjust(
-                        offset, consonant, cutoff, pre, ovl, alias_type='br', alias_text=alias
-                    )
-
-                    aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
-                    for a in aliases_to_write:
-                        a2 = _alias_out(a)
-                        new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
-                        final_lines.append(new_line)
+            if try_handle_ja_single_vowel_file(
+                fname=fname,
+                lines=lines,
+                real_wav_name=real_wav_name,
+                ph_intervals=ph_intervals,
+                final_lines=final_lines,
+                log_fn=log,
+                record_unset_fn=_record_unset,
+                post_ctx=post_ctx,
+                alias_out_fn=_alias_out,
+                apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
+                generate_openutau=generate_openutau,
+                generate_openutau_aliases_fn=generate_ja_openutau_aliases,
+                alias_suffix=alias_suffix,
+            ):
                 processed += 1
                 continue
 
@@ -3297,10 +2669,6 @@ def generate_ja_oto(
             mapping_tier = "high"
             syllable_confidence_by_idx = []
             linear_fallback_used = False
-            conf_th = _resolve_ja_mapping_conf_threshold(
-                format_type,
-                override_threshold=ja_mapping_confidence_threshold,
-            )
 
             sparse_phone_mode = bool(
                 filename_syllables and len(ph_intervals) < max(4, len(filename_syllables) // 2)
@@ -3849,98 +3217,47 @@ def generate_ja_oto(
                 alias_type = _classify_alias_cached(alias)
                 onset_hint_local = ""
 
-                # 포맷 강제 시 VCV 오인식을 보정
-                if format_type in ('cvvc', 'cv') and alias_type == 'vcv':
-                    parts = alias.strip().split()
-                    if len(parts) >= 2 and _is_ja_vowel_token(parts[0]):
-                        right = parts[1].strip().lower()
-                        if _is_ja_vowel_token(right):
-                            alias_type = 'vv'
-                        else:
-                            alias_type = 'vc'
-                    else:
-                        alias_type = 'cv'
-                elif format_type == 'vcv' and alias_type in ('vc', 'vv'):
-                    parts = alias.strip().split()
-                    if alias_type == 'vv':
-                        alias_type = 'vcv'
-                    elif len(parts) >= 2 and _is_ja_vowel_token(parts[0]):
-                        right = parts[1].strip().lower()
-                        if right not in JA_CONSONANTS and not _is_ja_vowel_token(right):
-                            alias_type = 'vcv'
-
-                # VC 꼬리 호흡(R/H) 전용 처리: 과도한 컷오프 확장을 방지
-                tail_breath = None
-                a_parts = alias.strip().split()
-                if len(a_parts) >= 2 and _is_ja_vowel_token(a_parts[0]) and a_parts[1].upper() in {'R', 'H'}:
-                    tail_breath = a_parts[1].upper()
-                
-                # === 숨소리(br) 처리 ===
-                if alias_type == 'br':
-                    first_ph = ph_intervals[0] if ph_intervals else None
-                    last_ph = ph_intervals[-1] if ph_intervals else None
-                    if first_ph and last_ph:
-                        br_start = first_ph.minTime * 1000
-                        br_end = last_ph.maxTime * 1000
-                        br_len = br_end - br_start
-                    else:
-                        br_start = 0
-                        br_end = 500
-                        br_len = 500
-                    offset = max(br_start - 30, 0)
-                    pre = 0
-                    ovl = 0
-                    consonant = min(br_len * 0.3, 100)
-                    cutoff = -(br_len * 0.85)
-                    offset, consonant, cutoff, pre, ovl = post_ctx.post_adjust(
-                        offset, consonant, cutoff, pre, ovl,
-                        alias_type='vc', alias_text=alias,
-                        local_end_ms=br_end, local_cut_allow_ms=40.0
-                    )
-                    
-                    aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
-                    for a in aliases_to_write:
-                        a2 = _alias_out(a)
-                        new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
-                        final_lines.append(new_line)
-                    continue
-
-                is_vc = alias_type in ('vc', 'vv')
-                is_vcv = alias_type == 'vcv'
-                is_cv_head = alias_type == 'cv_head'
+                family_state = build_ja_alias_family_state(
+                    alias=alias,
+                    alias_type=alias_type,
+                    format_type=format_type,
+                    is_vowel_token_fn=_is_ja_vowel_token,
+                    ja_consonants=JA_CONSONANTS,
+                )
+                alias_type = family_state.alias_type
+                is_vc = family_state.is_vc
+                is_vcv = family_state.is_vcv
+                is_cv_head = family_state.is_cv_head
                 c_char = ""
                 vc_prev_anchor = None
                 vc_next_anchor = None
 
-                if tail_breath:
-                    if current_w_idx >= len(syllables_info):
-                        current_w_idx = len(syllables_info) - 1
+                if try_handle_ja_br_alias(
+                    alias=alias,
+                    alias_type=alias_type,
+                    ph_intervals=ph_intervals,
+                    real_wav_name=real_wav_name,
+                    final_lines=final_lines,
+                    post_ctx=post_ctx,
+                    alias_out_fn=_alias_out,
+                    generate_openutau=generate_openutau,
+                    generate_openutau_aliases_fn=generate_ja_openutau_aliases,
+                ):
+                    continue
 
-                    curr_syl = syllables_info[current_w_idx]
-                    curr_phones = curr_syl['phones']
-                    onset_hint_local = curr_phones[0].mark if curr_phones else ""
-                    v_phone = curr_phones[-1]
-                    v_end = v_phone.maxTime * 1000
-                    v_start = v_phone.minTime * 1000
-                    v_len = max(v_end - v_start, 80)
-
-                    offset = max(v_end - min(max(v_len * 0.8, 120), 260), 0)
-                    pre = max(v_end - offset, 40)
-                    ovl = min(pre * 0.3, max(pre - 16, 0))
-                    consonant = pre + min(max(v_len * 0.2, 22), 55)
-                    cutoff = -(consonant + 38)
-
-                    offset, consonant, cutoff, pre, ovl = post_ctx.post_adjust(
-                        offset, consonant, cutoff, pre, ovl,
-                        alias_type='mono', alias_text=alias,
-                        local_end_ms=v_end, local_cut_allow_ms=36.0
-                    )
-
-                    aliases_to_write = generate_ja_openutau_aliases(alias) if generate_openutau else [alias]
-                    for a in aliases_to_write:
-                        a2 = _alias_out(a)
-                        new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
-                        final_lines.append(new_line)
+                handled_tail_breath, current_w_idx = try_handle_ja_tail_breath_alias(
+                    alias=alias,
+                    state=family_state,
+                    current_w_idx=current_w_idx,
+                    syllables_info=syllables_info,
+                    real_wav_name=real_wav_name,
+                    final_lines=final_lines,
+                    post_ctx=post_ctx,
+                    alias_out_fn=_alias_out,
+                    generate_openutau=generate_openutau,
+                    generate_openutau_aliases_fn=generate_ja_openutau_aliases,
+                )
+                if handled_tail_breath:
                     continue
 
                 # === VCV 연속음 처리 ===
@@ -5123,88 +4440,54 @@ def generate_ja_oto(
                 except:
                     continue
 
+    finish_context = GeneratorFinishContext(
+        log_fn=log,
+        anchor_stats=anchor_stats,
+        anchor_log_path=anchor_log_path,
+        anchor_log_dir=_anchor_log_dir,
+        cleanup_timing_jsonl=cleanup_timing_jsonl,
+        timing_jsonl_prefix="timing_anchor_ja_",
+    )
+
     # 저장
     try:
-        with open(out_path, 'w', encoding='utf-8') as f:
-            for line in final_lines:
-                f.write(line + "\n")
+        write_oto_lines(out_path, final_lines)
         log(f"✅ 일본어 OTO 1차 생성 완료! 저장 경로: {out_path}")
     except Exception as e:
         err = f"❌ OTO 저장 실패: {e}"
         logger.error(err)
         errors.append(err)
 
-    # Hidden auto-calibration path:
-    # if a manually aligned reference oto exists, keep learning internally
-    # while maintaining the same user workflow.
     try:
-        ref_oto = _find_reference_oto(out_path)
-        if ref_oto:
-            trained = _train_ja_autotune_profile(out_path, ref_oto, custom_map=custom_map)
-            if trained and _save_ja_autotune_profile(profile_path, trained):
-                b_count = len((trained.get("buckets") or {}))
-                pair_count = int(trained.get("matched_pairs", 0))
-                log(f"[AutoTune] 내부 튜닝 프로파일 갱신 완료: pairs={pair_count}, buckets={b_count}")
-                log(f"[AutoTune] 프로파일 저장: {profile_path}")
-                # Bootstrapping pass on first profile creation.
-                if not had_profile_on_start:
-                    changed = _apply_profile_to_oto_file(out_path, trained, custom_map=custom_map)
-                    if changed > 0:
-                        log(f"[AutoTune] 프로파일 1차 적용 완료: {changed} lines adjusted")
-            else:
-                log("[AutoTune] 참고 OTO를 찾았지만 프로파일 학습용 매칭 샘플이 충분하지 않습니다.")
+        refresh_ja_autotune_profile_after_generation(
+            JaAutotuneRefreshContext(
+                out_path=out_path,
+                profile_path=profile_path,
+                had_profile_on_start=had_profile_on_start,
+                custom_map=custom_map,
+                log_fn=log,
+                validate_fn=validate_oto_params,
+            )
+        )
     except Exception as e:
         log(f"[AutoTune] 내부 튜닝 프로파일 갱신 실패: {e}")
 
-    # Default runtime path: apply mel-based refinement for end users as well.
-    try:
-        wav_dir_for_mel = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
-        try:
-            from core.oto_ml_refiner import apply_oto_ml_to_oto_file
-
-            ml_report = {}
-            ml_changed = apply_oto_ml_to_oto_file(
-                "japanese",
-                out_path,
-                tg_dir=tg_folder,
-                wav_dir=wav_dir_for_mel,
-                custom_phonemes_path=custom_phonemes_path,
-                callback=log,
-                enabled=enable_ml_correction,
-                format_override=(forced_format or fallback_format or "cvvc"),
-                policy=ml_policy,
-                report=ml_report,
-            )
-            if isinstance(runtime_report, dict):
-                runtime_report["ml"] = dict(ml_report)
-            if ml_changed > 0:
-                log(f"[OTO-ML] 일본어 수치 보정 적용: {ml_changed} lines")
-        except Exception as ml_e:
-            log(f"[OTO-ML] 일본어 보정 스킵: {ml_e}")
-            if isinstance(runtime_report, dict):
-                runtime_report["ml"] = {
-                    "stage": "ml",
-                    "code": "ML_INFER_FAILED",
-                    "message": str(ml_e),
-                    "status": "fallback",
-                    "fallback_used": True,
-                    "policy": str(ml_policy or ""),
-                }
-        mel_changed = _apply_ja_mel_refine_to_oto_file(
-            out_path, wav_dir_for_mel, custom_map=custom_map
+    run_ja_post_file_pipeline(
+        JaPostFilePipelineContext(
+            out_path=out_path,
+            tg_folder=tg_folder,
+            custom_map=custom_map,
+            custom_phonemes_path=custom_phonemes_path,
+            enable_ml_correction=enable_ml_correction,
+            forced_format=forced_format,
+            fallback_format=fallback_format,
+            ml_policy=ml_policy,
+            runtime_report=runtime_report,
+            log_fn=log,
+            validate_fn=validate_oto_params,
+            classify_alias_fn=classify_ja_alias,
         )
-        if mel_changed > 0:
-            log(f"[JA-Mel] 멜 에너지 기반 cutoff 보정 적용: {mel_changed} lines")
-    except Exception as e:
-        log(f"[JA-Mel] 보정 스킵: {e}")
-
-    try:
-        wav_dir_for_export = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
-        final_changed = _convert_ja_internal_cutoff_to_oto_field(out_path, wav_dir_for_export)
-        if final_changed > 0:
-            log(f"[JA-Finalize] cutoff 좌표계 변환 적용: {final_changed} lines")
-    except Exception as e:
-        log(f"[JA-Finalize] cutoff 변환 스킵: {e}")
+    )
 
     if anchor_stats["anchor_locked_count"] > 0:
         log(
@@ -5217,24 +4500,13 @@ def generate_ja_oto(
 
     if ja_mapping_trace_logging and mapping_trace_records:
         try:
-            os.makedirs(_anchor_log_dir, exist_ok=True)
-            with open(mapping_trace_path, "w", encoding="utf-8") as f:
-                for row in mapping_trace_records:
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            trace_count = write_jsonl_records(mapping_trace_path, mapping_trace_records)
             log(f"[JA-Mapping] trace 로그: {mapping_trace_path}")
-            log(f"[JA-Mapping] trace 건수: {len(mapping_trace_records)}")
+            log(f"[JA-Mapping] trace 건수: {trace_count}")
         except Exception as e:
             log(f"[JA-Mapping] trace 저장 스킵: {e}")
 
-    if cleanup_timing_jsonl:
-        removed_count, failed_count = _cleanup_timing_anchor_jsonl_files(
-            _anchor_log_dir,
-            "timing_anchor_ja_",
-        )
-        if removed_count > 0:
-            log(f"[AnchorLock] timing jsonl 자동 정리: {removed_count} files")
-        if failed_count > 0:
-            log(f"[AnchorLock] timing jsonl 정리 실패: {failed_count} files")
+    finalize_generator_finish(finish_context)
 
     _log_unset_summary()
     return processed, total, errors

@@ -53,7 +53,9 @@ from core.oto_generator import _build_kr_cvvc_occurrence_map
 from core.oto_generator import _build_kr_cvvc_vv_occurrence_map
 from core.oto_generator import _build_kr_syllables_from_phone_nuclei
 from core.oto_generator import _extract_kr_cv_targets_from_filename
+from core.oto_generator import _apply_kr_bridge_coherence_to_oto_file
 from core.oto_generator import _refine_kr_bridge_with_adjacent_cv
+from core.oto_generator import _retarget_kr_bridge_to_next_cv
 from core.oto_generator import _guard_kr_vc_cutoff_to_next_segment
 from core.oto_generator import _kr_alias_contains_coda
 from core.oto_generator import _resolve_kr_cvvc_occurrence_index
@@ -831,6 +833,52 @@ class FeatureExtractionTests(unittest.TestCase):
         self.assertLessEqual(abs(cut), 270.0)
         self.assertLessEqual(abs(cut), 280.0)
         self.assertLessEqual(cons, abs(cut) - 10.0)
+
+    def test_korean_bridge_coherence_targets_next_cv_preutterance(self):
+        next_row = {
+            "offset": 520.0,
+            "pre": 106.0,
+            "cons": 176.0,
+            "cutoff": -248.0,
+            "ovl": 42.0,
+        }
+        off, cons, cut, pre, ovl = _retarget_kr_bridge_to_next_cv(
+            200.0,
+            360.0,
+            -520.0,
+            180.0,
+            24.0,
+            alias_type="vc",
+            alias_text="a k",
+            next_row=next_row,
+        )
+        next_pre_abs = next_row["offset"] + next_row["pre"]
+        next_cons_abs = next_row["offset"] + next_row["cons"]
+        self.assertAlmostEqual(off + pre, next_pre_abs, delta=0.5)
+        self.assertLessEqual(off + abs(cut), next_cons_abs + 14.0)
+        self.assertGreaterEqual(cons - pre, 18.0)
+        self.assertLessEqual(pre - ovl, 22.0)
+
+    def test_korean_bridge_coherence_file_pass_repairs_vc_cv_gap(self):
+        with tempfile.TemporaryDirectory() as td:
+            oto_path = os.path.join(td, "oto.ini")
+            with open(oto_path, "w", encoding="utf-8") as f:
+                f.write("sample.wav=a k,200.00,360.00,-520.00,180.00,24.00\n")
+                f.write("sample.wav=ka,520.00,176.00,-248.00,106.00,42.00\n")
+            changed = _apply_kr_bridge_coherence_to_oto_file(oto_path)
+            self.assertEqual(changed, 1)
+            rows = parse_oto_rows(oto_path)
+            self.assertEqual(len(rows), 2)
+            vc_row, cv_row = rows
+            self.assertAlmostEqual(
+                float(vc_row["offset"]) + float(vc_row["pre"]),
+                float(cv_row["offset"]) + float(cv_row["pre"]),
+                delta=0.5,
+            )
+            self.assertLessEqual(
+                float(vc_row["offset"]) + abs(float(vc_row["cutoff"])),
+                float(cv_row["offset"]) + float(cv_row["cons"]) + 14.0,
+            )
 
     def test_korean_cvvc_vv_direct_timing_stays_near_previous_vowel_tail(self):
         syllables_info = [

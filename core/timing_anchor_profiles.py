@@ -253,6 +253,97 @@ def _kr_vcv_profile() -> AnchorTimingProfile:
     )
 
 
+def _kr_cvc_cv_profile() -> AnchorTimingProfile:
+    return AnchorTimingProfile(
+        pre_window_before_ms=7.0,
+        pre_window_after_ms=7.0,
+        pre_floor_ms=38.0,
+        ovl_gap_min_ms=14.0,
+        ovl_gap_max_ms=30.0,
+        ovl_gap_target_ms=21.0,
+        cons_gap_min_ms=54.0,
+        cons_gap_max_ms=144.0,
+        cons_gap_target_ms=90.0,
+        cut_gap_min_ms=38.0,
+        cut_gap_max_ms=132.0,
+        cut_gap_target_ms=84.0,
+        cut_to_next_onset_allow_ms=7.0,
+    )
+
+
+def _kr_cvc_cv_head_profile() -> AnchorTimingProfile:
+    return AnchorTimingProfile(
+        pre_window_before_ms=7.0,
+        pre_window_after_ms=7.0,
+        pre_floor_ms=40.0,
+        ovl_gap_min_ms=12.0,
+        ovl_gap_max_ms=28.0,
+        ovl_gap_target_ms=19.0,
+        cons_gap_min_ms=58.0,
+        cons_gap_max_ms=150.0,
+        cons_gap_target_ms=92.0,
+        cut_gap_min_ms=42.0,
+        cut_gap_max_ms=140.0,
+        cut_gap_target_ms=88.0,
+        cut_to_next_onset_allow_ms=6.0,
+    )
+
+
+def _kr_cvc_vc_profile() -> AnchorTimingProfile:
+    return AnchorTimingProfile(
+        pre_window_before_ms=10.0,
+        pre_window_after_ms=6.0,
+        pre_floor_ms=26.0,
+        ovl_gap_min_ms=8.0,
+        ovl_gap_max_ms=22.0,
+        ovl_gap_target_ms=13.0,
+        cons_gap_min_ms=24.0,
+        cons_gap_max_ms=82.0,
+        cons_gap_target_ms=48.0,
+        cut_gap_min_ms=12.0,
+        cut_gap_max_ms=62.0,
+        cut_gap_target_ms=34.0,
+        cut_to_next_onset_allow_ms=5.0,
+    )
+
+
+def _kr_cvc_vv_profile() -> AnchorTimingProfile:
+    return AnchorTimingProfile(
+        pre_window_before_ms=8.0,
+        pre_window_after_ms=8.0,
+        pre_floor_ms=34.0,
+        ovl_gap_min_ms=5.0,
+        ovl_gap_max_ms=14.0,
+        ovl_gap_target_ms=9.0,
+        cons_gap_min_ms=54.0,
+        cons_gap_max_ms=138.0,
+        cons_gap_target_ms=90.0,
+        cut_gap_min_ms=24.0,
+        cut_gap_max_ms=108.0,
+        cut_gap_target_ms=60.0,
+        cut_to_next_onset_allow_ms=6.0,
+    )
+
+
+def _kr_cvc_vcv_profile() -> AnchorTimingProfile:
+    return AnchorTimingProfile(
+        pre_window_before_ms=8.0,
+        pre_window_after_ms=6.0,
+        pre_floor_ms=44.0,
+        ovl_gap_min_ms=12.0,
+        ovl_gap_max_ms=28.0,
+        ovl_gap_target_ms=19.0,
+        cons_gap_min_ms=66.0,
+        cons_gap_max_ms=156.0,
+        cons_gap_target_ms=92.0,
+        cut_gap_min_ms=34.0,
+        cut_gap_max_ms=118.0,
+        cut_gap_target_ms=68.0,
+        cut_to_next_onset_allow_ms=8.0,
+        cut_to_next_vowel_allow_ms=2.0,
+    )
+
+
 _PROFILE_TABLE: Dict[Tuple[str, str, str], AnchorTimingProfile] = {
     ("japanese", "vcv", "vcv"): _ja_vcv_profile(),
     ("japanese", "vcv", "vcv_n_bridge"): _ja_vcv_n_bridge_profile(),
@@ -273,10 +364,11 @@ _PROFILE_TABLE: Dict[Tuple[str, str, str], AnchorTimingProfile] = {
     ("korean", "cvvc", "cv_head"): _kr_cv_head_profile(),
     ("korean", "cvvc", "vc"): _kr_vc_profile(),
     ("korean", "cvvc", "vv"): _kr_vv_profile(),
-    ("korean", "cvc", "cv"): _kr_cv_profile(),
-    ("korean", "cvc", "cv_head"): _kr_cv_head_profile(),
-    ("korean", "cvc", "vc"): _kr_vc_profile(),
-    ("korean", "cvc", "vv"): _kr_vv_profile(),
+    ("korean", "cvc", "cv"): _kr_cvc_cv_profile(),
+    ("korean", "cvc", "cv_head"): _kr_cvc_cv_head_profile(),
+    ("korean", "cvc", "vc"): _kr_cvc_vc_profile(),
+    ("korean", "cvc", "vv"): _kr_cvc_vv_profile(),
+    ("korean", "cvc", "vcv"): _kr_cvc_vcv_profile(),
     ("korean", "vcv", "cv"): _kr_cv_profile(),
     ("korean", "vcv", "cv_head"): _kr_cv_head_profile(),
     ("korean", "vcv", "vc"): _kr_vc_profile(),

@@ -1,0 +1,48 @@
+{
+  "version": 3,
+  "language": "korean",
+  "preset_name": "kr_cvc_reference_v3",
+  "format_type": "cvc",
+  "buckets": {
+    "cv_head": {
+      "n": 1620,
+      "pre": 89.57,
+      "cons_gap": 88.43,
+      "cut_gap": 185.09,
+      "ovl_ratio": 0.3417048,
+      "head_off_ratio": 0.1828282
+    },
+    "cv": {
+      "n": 9700,
+      "pre": 80.1695,
+      "cons_gap": 85.26,
+      "cut_gap": 140.59,
+      "ovl_ratio": 0.4062845,
+      "head_off_ratio": 0.1655118
+    },
+    "vcv": {
+      "n": 1583,
+      "pre": 126.98,
+      "cons_gap": 83.45,
+      "cut_gap": 60.77,
+      "ovl_ratio": 0.4933263,
+      "head_off_ratio": 0.2315166
+    },
+    "vc": {
+      "n": 2011,
+      "pre": 114.51,
+      "cons_gap": 54.42,
+      "cut_gap": 36.28,
+      "ovl_ratio": 0.4919,
+      "head_off_ratio": null
+    },
+    "vv": {
+      "n": 375,
+      "pre": 164.17,
+      "cons_gap": 75.28,
+      "cut_gap": 169.62,
+      "ovl_ratio": 0.6448491,
+      "head_off_ratio": 0.2529097
+    }
+  }
+}

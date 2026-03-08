@@ -81,6 +81,14 @@ from core.kr_oto_bridge import (
     _refine_kr_bridge_with_adjacent_cv,
     _recenter_kr_params_around_pre,
 )
+from core.kr_auto_alias_setup import build_kr_auto_file_groups
+from core.kr_alias_family_stage import (
+    build_kr_alias_family_state,
+    try_handle_kr_breath_tail_alias,
+    try_handle_kr_glottal_alias,
+)
+from core.kr_file_stage import build_kr_postprocess_context, try_handle_kr_single_vowel_file
+from core.kr_loop_prep import prepare_kr_loop_state
 from core.kr_oto_cv import (
     _compute_kr_cv_timing,
     _estimate_cv_anchor_from_syllable,
@@ -99,6 +107,27 @@ from core.kr_oto_postprocess import (
     guard_kr_vc_cutoff_to_next_segment as _guard_kr_vc_cutoff_to_next_segment_core,
     log_post_timing_events as _log_post_timing_events_core,
 )
+from core.kr_oto_file_ops import (
+    _apply_kr_bridge_coherence_to_oto_file,
+    _apply_kr_profile_to_oto_file,
+    _extract_base_timing_shape,
+    _parse_oto_line_profile,
+    _read_text_with_fallback,
+    _resolve_kr_reference_dirs,
+    _retarget_kr_bridge_to_next_cv,
+    apply_kr_autotune_profile_to_oto,
+    load_kr_autotune_profile,
+    save_kr_autotune_profile,
+    train_kr_autotune_profile,
+)
+from core.kr_oto_file_finalize import KrPostFilePipelineContext, run_kr_post_file_pipeline
+from core.kr_generator_setup import prepare_kr_profile_setup
+from core.generator_finish import (
+    GeneratorFinishContext,
+    finalize_generator_finish,
+    write_oto_lines,
+)
+from core.file_prepare import load_named_tiers, prepare_file_context
 from core.timing_anchor_profiles import (
     get_anchor_profile,
     is_anchor_lock_enabled,
@@ -111,6 +140,7 @@ from core.timing_anchor_runtime import (
 from core.textio_utils import load_template_oto_lines
 from core.oto_profile_presets import get_kr_profile_preset
 from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
+from core.format_type_utils import normalize_format_type
 
 logger = logging.getLogger(__name__)
 
@@ -991,27 +1021,6 @@ def _estimate_kr_mapping_confidence(
     return float(conf), float(margin)
 
 
-def _cleanup_timing_anchor_jsonl_files(log_dir, prefix):
-    if not log_dir or not os.path.isdir(log_dir):
-        return 0, 0
-    removed = 0
-    failed = 0
-    try:
-        names = os.listdir(log_dir)
-    except Exception:
-        return 0, 1
-    for name in names:
-        if not name.startswith(prefix) or not name.endswith(".jsonl"):
-            continue
-        path = os.path.join(log_dir, name)
-        try:
-            os.remove(path)
-            removed += 1
-        except Exception:
-            failed += 1
-    return removed, failed
-
-
 def _synthesize_kr_word_phones(word, w_start, w_end, decompose_hangul_to_roman):
     """
     words 구간에 대응하는 phones가 비어 있을 때 최소 합성 phone을 생성합니다.
@@ -1265,66 +1274,6 @@ def generate_openutau_aliases(base_alias):
             aliases.add(cv.replace('eui', 'eu i'))
 
     return list(aliases)
-
-
-def _parse_oto_line_profile(line):
-    s = (line or "").strip()
-    if not s or "=" not in s:
-        return None
-    wav_name, rest = s.split("=", 1)
-    parts = rest.split(",")
-    if len(parts) < 6:
-        return None
-    try:
-        offset = float(parts[1].strip())
-        cons = float(parts[2].strip())
-        cutoff = float(parts[3].strip())
-        pre = float(parts[4].strip())
-        ovl = float(parts[5].strip())
-    except ValueError:
-        return None
-    alias = parts[0].strip()
-    if should_ignore_korean_alias(alias):
-        return None
-    return {
-        "wav": wav_name.strip(),
-        "alias": alias,
-        "offset": offset,
-        "cons": cons,
-        "cutoff": cutoff,
-        "pre": pre,
-        "ovl": ovl,
-    }
-
-
-def _extract_base_timing_shape(line):
-    """
-    base oto 한 줄에서 상대 타이밍 shape를 추출합니다.
-    절대 시각 복사보다 pre/cons_gap/cut_gap/ovl_ratio 블렌딩에 사용.
-    """
-    p = _parse_oto_line_profile(line)
-    if not p:
-        return None
-    pre = max(float(p["pre"]), 0.0)
-    cons = max(float(p["cons"]), 0.0)
-    cut_abs = abs(float(p["cutoff"]))
-    ovl = max(float(p["ovl"]), 0.0)
-    off = max(float(p["offset"]), 0.0)
-
-    # 템플릿 없는 자동 생성(0,0,0,0,0) 라인은 shape로 사용하지 않음.
-    if pre < 1.0 and cons < 1.0 and cut_abs < 1.0 and ovl < 1.0:
-        return None
-
-    cons_gap = max(cons - pre, 8.0)
-    cut_gap = max(cut_abs - cons, 16.0)
-    ovl_ratio = (ovl / pre) if pre > 1e-6 else 0.30
-    return {
-        "offset": off,
-        "pre": pre,
-        "cons_gap": cons_gap,
-        "cut_gap": cut_gap,
-        "ovl_ratio": _clamp(ovl_ratio, 0.04, 0.86),
-    }
 
 
 def _apply_base_shape_blend(offset, consonant, cutoff, pre, ovl, base_shape, alias_type="cv"):
@@ -1698,174 +1647,6 @@ def _apply_soft_mel_offset_cutoff_guard(
     return offset, consonant, cutoff, pre, ovl, offset_shift_ms, cutoff_shift_ms
 
 
-def _apply_kr_mel_refine_to_oto_file(oto_path, wav_dir, custom_map=None):
-    """
-    멜 스펙트로그램 에너지 골짜기를 이용해 CV 계열 cutoff 과연장을 후처리 보정합니다.
-    """
-    if os.environ.get("UTOA_DISABLE_MEL_REFINER", "").strip().lower() in {"1", "true", "yes", "on"}:
-        return 0
-    if np is None or not oto_path or not os.path.exists(oto_path) or not os.path.isdir(wav_dir):
-        return 0
-
-    raw_lines = []
-    parsed = []
-    for idx, raw in enumerate(_read_text_with_fallback(oto_path).splitlines()):
-        line = raw.rstrip("\n")
-        raw_lines.append(line)
-        row = _parse_oto_line_profile(line)
-        if row:
-            parsed.append((idx, row))
-    if not parsed:
-        return 0
-
-    wav_index = {}
-    try:
-        for fn in os.listdir(wav_dir):
-            if fn.lower().endswith(".wav"):
-                wav_index[normalize_key(fn)] = os.path.join(wav_dir, fn)
-    except Exception:
-        pass
-
-    by_wav = {}
-    for line_idx, row in parsed:
-        by_wav.setdefault(row["wav"], []).append((line_idx, row))
-    alias_type_cache = {}
-
-    def _classify_cached(alias_text):
-        t = alias_type_cache.get(alias_text)
-        if t is None:
-            t = classify_alias(alias_text, custom_map)
-            alias_type_cache[alias_text] = t
-        return t
-
-    mel_cache = {}
-    changed = 0
-    for wav_name, rows in by_wav.items():
-        wav_path = _find_wav_path_for_name(wav_name, wav_dir, wav_index)
-        if not wav_path:
-            continue
-        mel_ctx = mel_cache.get(wav_path)
-        if mel_ctx is None:
-            audio, sr = _read_wav_mono_np(wav_path)
-            mel_ctx = _mel_envelope(audio, sr)
-            mel_cache[wav_path] = mel_ctx
-        if not mel_ctx:
-            continue
-
-        t_ms = mel_ctx["times_ms"]
-        en = mel_ctx["energy"]
-        db_arr = mel_ctx.get("db_db")
-        f0v_arr = mel_ctx.get("f0_voicing")
-        db_sil_th = float(mel_ctx.get("db_silence_th", -42.0))
-        if db_arr is None or len(db_arr) != len(en):
-            db_arr = np.zeros_like(en, dtype=np.float64)
-        if f0v_arr is None or len(f0v_arr) != len(en):
-            f0v_arr = np.zeros_like(en, dtype=np.float64)
-        if len(t_ms) < 8:
-            continue
-
-        for i, (_line_idx, row) in enumerate(rows):
-            alias = row["alias"]
-            alias_type = _classify_cached(alias)
-            if alias_type not in {"cv", "cv_head"}:
-                continue
-
-            off = float(row["offset"])
-            pre_abs = off + float(row["pre"])
-            cons_abs = off + float(row["cons"])
-            cut_abs = off + abs(float(row["cutoff"]))
-            if cut_abs <= pre_abs + 24.0:
-                continue
-
-            next_anchor = None
-            for j in range(i + 1, len(rows)):
-                a2 = rows[j][1]["alias"]
-                t2 = _classify_cached(a2)
-                if t2 in {"cv", "cv_head", "vcv", "mono"}:
-                    next_anchor = float(rows[j][1]["offset"]) + float(rows[j][1]["pre"])
-                    break
-
-            search_start = pre_abs + 14.0
-            search_end = cut_abs - 8.0
-            if next_anchor is not None:
-                search_end = min(search_end, next_anchor - 8.0)
-            if search_end <= search_start + 25.0:
-                continue
-
-            mask = np.where((t_ms >= search_start) & (t_ms <= search_end))[0]
-            if len(mask) < 5:
-                continue
-
-            local_e = en[mask]
-            local_db = db_arr[mask]
-            local_f0v = f0v_arr[mask]
-            silence_flags = local_db <= db_sil_th
-            candidate_mask = mask[silence_flags] if np.any(silence_flags) else mask
-
-            # dB+mel을 주축으로 골짜기 선택, F0는 낮은 가중치(보조)로만 반영.
-            best_idx = int(candidate_mask[0])
-            best_score = -1e9
-            for ci in candidate_mask:
-                e_v = float(en[ci])
-                db_v = float(db_arr[ci])
-                f0_v = float(f0v_arr[ci])
-                silence_bonus = 0.28 if db_v <= db_sil_th else 0.0
-                score = (1.0 - e_v) + silence_bonus - (0.08 * f0_v)
-                if score > best_score:
-                    best_score = score
-                    best_idx = int(ci)
-
-            valley_t = float(t_ms[best_idx])
-            valley_e = float(en[best_idx])
-            valley_db = float(db_arr[best_idx])
-            valley_f0v = float(f0v_arr[best_idx])
-            cut_idx = int(np.argmin(np.abs(t_ms - cut_abs)))
-            cut_e = float(en[cut_idx])
-            cut_db = float(db_arr[cut_idx])
-            contrast = cut_e - valley_e
-            db_drop = cut_db - valley_db
-
-            if contrast < 0.12 and db_drop < 2.5:
-                continue
-            if valley_e > 0.38 and valley_db > (db_sil_th + 6.0):
-                continue
-            if valley_f0v > 0.70 and contrast < 0.18:
-                continue
-            if valley_t >= cut_abs - 12.0:
-                continue
-
-            target_cut_abs = valley_t + 2.0
-            min_cut_abs = pre_abs + 20.0
-            if target_cut_abs <= min_cut_abs:
-                continue
-
-            new_cons_abs = min(cons_abs, target_cut_abs - 12.0)
-            new_cons_abs = max(new_cons_abs, pre_abs + 8.0)
-            row["cons"] = max(new_cons_abs - off, 0.0)
-            row["cutoff"] = -(target_cut_abs - off)
-            changed += 1
-
-    if changed <= 0:
-        return 0
-
-    replace_map = {line_idx: row for line_idx, row in parsed}
-    out_lines = []
-    for i, line in enumerate(raw_lines):
-        row = replace_map.get(i)
-        if not row:
-            out_lines.append(line)
-            continue
-        o, c, ct, p, ov = validate_oto_params(
-            row["offset"], row["cons"], row["cutoff"], row["pre"], row["ovl"]
-        )
-        out_lines.append(f"{row['wav']}={row['alias']},{o:.2f},{c:.2f},{ct:.2f},{p:.2f},{ov:.2f}")
-
-    with open(oto_path, "w", encoding="utf-8") as f:
-        for line in out_lines:
-            f.write(line + "\n")
-    return changed
-
-
 def _median(vals):
     if not vals:
         return 0.0
@@ -1892,11 +1673,12 @@ def _clamp(v, lo, hi):
     return max(float(lo), min(float(hi), float(v)))
 
 
-def _default_kr_profile_cache_path():
+def _default_kr_profile_cache_path(format_type="general"):
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     profile_dir = os.path.join(base_dir, "assets", "profiles")
     os.makedirs(profile_dir, exist_ok=True)
-    return os.path.join(profile_dir, "kr_oto_reference_profile.json")
+    fmt = normalize_format_type("korean", format_type) or "general"
+    return os.path.join(profile_dir, f"kr_oto_reference_profile_{fmt}.json")
 
 
 def _build_kr_reference_profile_from_dirs(ref_dirs, custom_map=None):
@@ -2021,296 +1803,6 @@ def _save_kr_reference_profile(path, profile):
 
 def _normalize_alias_for_profile(alias):
     return canonicalize_alias_for_matching("korean", alias)
-
-
-def _read_text_with_fallback(path):
-    try:
-        raw = open(path, "rb").read()
-    except Exception:
-        return ""
-    for enc in ("utf-8-sig", "cp932", "utf-8", "euc-kr", "latin-1"):
-        try:
-            text = raw.decode(enc)
-            if "=" in text:
-                return text
-        except Exception:
-            continue
-    return raw.decode("utf-8", errors="replace")
-
-
-def _read_kr_oto_rows_for_profile(path):
-    rows = []
-    if not path or not os.path.exists(path):
-        return rows
-    text = _read_text_with_fallback(path)
-    for raw in text.splitlines():
-        row = _parse_oto_line_profile(raw)
-        if not row:
-            continue
-        row["wav_norm"] = normalize_wav_key(row["wav"])
-        row["alias_norm"] = _normalize_alias_for_profile(row["alias"])
-        rows.append(row)
-    return rows
-
-
-def _occurrence_map(rows):
-    m = {}
-    counters = {}
-    for row in rows:
-        base_key = (row["wav_norm"], row["alias_norm"])
-        idx = counters.get(base_key, 0)
-        counters[base_key] = idx + 1
-        m[(base_key[0], base_key[1], idx)] = row
-    return m
-
-
-def train_kr_autotune_profile(auto_oto_path, manual_oto_path, custom_phonemes_path=""):
-    """부분 수동 OTO와 자동 OTO를 매칭해 한국어 델타 기반 프로파일을 학습합니다."""
-    auto_rows = _read_kr_oto_rows_for_profile(auto_oto_path)
-    manual_rows = _read_kr_oto_rows_for_profile(manual_oto_path)
-    if not auto_rows or not manual_rows:
-        return None
-
-    custom_map = load_custom_phonemes(custom_phonemes_path)
-    alias_type_cache = {}
-
-    def _classify_alias_cached(alias_text):
-        t = alias_type_cache.get(alias_text)
-        if t is None:
-            t = classify_alias(alias_text, custom_map)
-            alias_type_cache[alias_text] = t
-        return t
-    auto_map = _occurrence_map(auto_rows)
-    manual_map = _occurrence_map(manual_rows)
-
-    fields = ["offset", "cons", "cutoff", "pre", "ovl"]
-    buckets = {}
-    matched = 0
-    for key, a_row in auto_map.items():
-        m_row = manual_map.get(key)
-        if not m_row:
-            continue
-        alias_for_cls = _normalize_alias_for_profile(a_row["alias"])
-        alias_type = _classify_alias_cached(alias_for_cls)
-        b = buckets.setdefault(alias_type, {f: [] for f in fields})
-        for f in fields:
-            b[f].append(float(m_row[f]) - float(a_row[f]))
-        matched += 1
-
-    if matched < 8:
-        return None
-
-    profile = {
-        "version": 1,
-        "language": "korean",
-        "mode": "delta",
-        "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
-        "matched_pairs": matched,
-        "source_auto_name": os.path.basename(auto_oto_path),
-        "source_manual_name": os.path.basename(manual_oto_path),
-        "buckets": {},
-    }
-    for alias_type, vals in buckets.items():
-        n = len(vals["offset"])
-        if n < 3:
-            continue
-        profile["buckets"][alias_type] = {
-            "n": n,
-            "offset": _median(vals["offset"]),
-            "cons": _median(vals["cons"]),
-            "cutoff": _median(vals["cutoff"]),
-            "pre": _median(vals["pre"]),
-            "ovl": _median(vals["ovl"]),
-        }
-    if not profile["buckets"]:
-        return None
-    return profile
-
-
-def save_kr_autotune_profile(path, profile):
-    if not path or not profile:
-        return False
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(profile, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception:
-        return False
-
-
-def load_kr_autotune_profile(path):
-    if not path or not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            obj = json.load(f)
-        if not isinstance(obj, dict) or "buckets" not in obj:
-            return None
-        return obj
-    except Exception:
-        return None
-
-
-def apply_kr_autotune_profile_to_oto(oto_path, profile, custom_phonemes_path=""):
-    """학습된 델타 프로파일을 OTO에 적용합니다. 반환값은 변경 라인 수."""
-    if not oto_path or not os.path.exists(oto_path):
-        return 0
-    if isinstance(profile, str):
-        profile = load_kr_autotune_profile(profile)
-    if not profile:
-        return 0
-    buckets = profile.get("buckets") or {}
-    if not isinstance(buckets, dict) or not buckets:
-        return 0
-
-    custom_map = load_custom_phonemes(custom_phonemes_path)
-    changed = 0
-    out_lines = []
-    alias_type_cache = {}
-
-    def _classify_cached(alias_text):
-        t = alias_type_cache.get(alias_text)
-        if t is None:
-            t = classify_alias(alias_text, custom_map)
-            alias_type_cache[alias_text] = t
-        return t
-
-    for raw in _read_text_with_fallback(oto_path).splitlines():
-            row = _parse_oto_line_profile(raw)
-            if not row:
-                out_lines.append(raw.rstrip("\n"))
-                continue
-
-            alias_for_cls = _normalize_alias_for_profile(row["alias"])
-            alias_type = _classify_cached(alias_for_cls)
-            stat = buckets.get(alias_type)
-            if not stat:
-                out_lines.append(raw.rstrip("\n"))
-                continue
-
-            n = float(stat.get("n", 0))
-            if n < 3:
-                out_lines.append(raw.rstrip("\n"))
-                continue
-
-            w = min(1.0, max(0.25, n / 24.0))
-            offset = row["offset"] + _clamp(stat.get("offset", 0.0), -140.0, 140.0) * w
-            cons = row["cons"] + _clamp(stat.get("cons", 0.0), -160.0, 160.0) * w
-            cutoff = row["cutoff"] + _clamp(stat.get("cutoff", 0.0), -180.0, 180.0) * w
-            pre = row["pre"] + _clamp(stat.get("pre", 0.0), -140.0, 140.0) * w
-            ovl = row["ovl"] + _clamp(stat.get("ovl", 0.0), -120.0, 120.0) * w
-            offset, cons, cutoff, pre, ovl = validate_oto_params(offset, cons, cutoff, pre, ovl)
-
-            if (
-                abs(offset - row["offset"]) > 1e-6
-                or abs(cons - row["cons"]) > 1e-6
-                or abs(cutoff - row["cutoff"]) > 1e-6
-                or abs(pre - row["pre"]) > 1e-6
-                or abs(ovl - row["ovl"]) > 1e-6
-            ):
-                changed += 1
-            out_lines.append(
-                f"{row['wav']}={row['alias']},{offset:.2f},{cons:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
-            )
-
-    with open(oto_path, "w", encoding="utf-8") as f:
-        for line in out_lines:
-            f.write(line + "\n")
-    return changed
-
-
-def _resolve_kr_reference_dirs():
-    raw = os.environ.get("UTOA_KR_PROFILE_DIRS", "").strip()
-    if not raw:
-        return []
-    return [x.strip() for x in raw.split(";") if x.strip()]
-
-
-def _profile_weight(n):
-    # Keep this conservative; profile should nudge, not overwrite.
-    return max(0.12, min(0.38, float(n) / 220.0))
-
-
-def _apply_kr_profile_to_oto_file(oto_path, wav_dir, profile, custom_map=None):
-    if not profile or not oto_path or not os.path.exists(oto_path):
-        return 0
-    buckets = profile.get("buckets") or {}
-    if not isinstance(buckets, dict) or not buckets:
-        return 0
-
-    rows_by_wav = {}
-    for raw in _read_text_with_fallback(oto_path).splitlines():
-            row = _parse_oto_line_profile(raw)
-            if not row:
-                continue
-            rows_by_wav.setdefault(row["wav"], []).append(row)
-
-    out_lines = []
-    changed = 0
-    alias_type_cache = {}
-
-    def _classify_cached(alias_text):
-        t = alias_type_cache.get(alias_text)
-        if t is None:
-            t = classify_alias(alias_text, custom_map)
-            alias_type_cache[alias_text] = t
-        return t
-
-    for wav_name, rows in rows_by_wav.items():
-        dur_ms = _wav_duration_ms(os.path.join(wav_dir, wav_name))
-        for idx, row in enumerate(rows):
-            alias_type = _classify_cached(row["alias"])
-            stat = buckets.get(alias_type)
-            if not stat:
-                out_lines.append(
-                    f"{row['wav']}={row['alias']},{row['offset']:.2f},{row['cons']:.2f},{row['cutoff']:.2f},{row['pre']:.2f},{row['ovl']:.2f}"
-                )
-                continue
-
-            n = float(stat.get("n", 0))
-            w = _profile_weight(n)
-            offset = row["offset"]
-            pre_t = _clamp(stat.get("pre", row["pre"]), 0.0, 360.0)
-            pre = _blend(row["pre"], pre_t, w)
-            cons_gap_now = max(row["cons"] - row["pre"], 10.0)
-            cons_gap_t = _clamp(stat.get("cons_gap", cons_gap_now), 10.0, 220.0)
-            cons_gap = _blend(cons_gap_now, cons_gap_t, w)
-            cons = pre + cons_gap
-            cut_gap_now = max(abs(row["cutoff"]) - row["cons"], 20.0)
-            cut_gap_t = _clamp(stat.get("cut_gap", cut_gap_now), 20.0, 180.0)
-            cut_w = min(0.12, w * 0.35)
-            cut_gap = _blend(cut_gap_now, cut_gap_t, cut_w)
-            cutoff = -(cons + cut_gap)
-            ovl_ratio_now = _safe_ratio(row["ovl"], row["pre"], fallback=0.0)
-            ovl_ratio_t = _clamp(stat.get("ovl_ratio", ovl_ratio_now), 0.05, 0.78)
-            ovl_ratio = _blend(ovl_ratio_now, ovl_ratio_t, w)
-            ovl = max(0.0, pre * max(0.10, min(0.80, ovl_ratio)))
-            pre, cons, cutoff, ovl = _apply_kr_consonant_timing_shaping(
-                row.get("alias", ""), pre, cons, cutoff, ovl
-            )
-
-            if idx == 0 and dur_ms > 0 and stat.get("head_off_ratio") is not None:
-                target_ratio = _clamp(stat["head_off_ratio"], 0.0, 0.35)
-                target_off = max(0.0, min(dur_ms * 0.7, dur_ms * target_ratio))
-                offset = _blend(offset, target_off, min(0.30, w))
-
-            offset, cons, cutoff, pre, ovl = validate_oto_params(offset, cons, cutoff, pre, ovl)
-            if (
-                abs(offset - row["offset"]) > 1e-6
-                or abs(cons - row["cons"]) > 1e-6
-                or abs(cutoff - row["cutoff"]) > 1e-6
-                or abs(pre - row["pre"]) > 1e-6
-                or abs(ovl - row["ovl"]) > 1e-6
-            ):
-                changed += 1
-            out_lines.append(
-                f"{row['wav']}={row['alias']},{offset:.2f},{cons:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
-            )
-
-    with open(oto_path, "w", encoding="utf-8") as f:
-        for line in out_lines:
-            f.write(line + "\n")
-    return changed
 
 
 def generate_oto(
@@ -2573,42 +2065,19 @@ def generate_oto(
             )
         return result.offset, result.consonant, result.cutoff, result.pre, result.ovl
 
-    kr_profile = None
-    profile_path = _default_kr_profile_cache_path()
-    try:
-        env_profile = os.environ.get("UTOA_KR_PROFILE_JSON", "").strip()
-        if env_profile:
-            kr_profile = _load_kr_reference_profile(env_profile)
-            if kr_profile:
-                log(f"[KR-Profile] 외부 프로파일 로드: {env_profile}")
-
-        if kr_anchor_profile_path:
-            os.environ["UTOA_KR_ANCHOR_PROFILE_PATH"] = str(kr_anchor_profile_path)
-            log(f"[KR-Anchor] 외부 앵커 프로파일 사용: {kr_anchor_profile_path}")
-
-        if not kr_profile:
-            kr_profile = _load_kr_reference_profile(profile_path)
-
-        # Optional rebuild path for local experiments only (env-driven).
-        if not kr_profile:
-            ref_dirs = _resolve_kr_reference_dirs()
-            if ref_dirs:
-                trained = _build_kr_reference_profile_from_dirs(ref_dirs, custom_map=None)
-                if trained and _save_kr_reference_profile(profile_path, trained):
-                    kr_profile = trained
-                    log(f"[KR-Profile] 로컬 샘플 기반 프로파일 생성: {profile_path} (rows={trained.get('rows', 0)})")
-
-        # Default path: use abstract preset from python module.
-        if not kr_profile:
-            kr_profile = get_kr_profile_preset()
-            _save_kr_reference_profile(profile_path, kr_profile)
-            log(f"[KR-Profile] 추상화 프리셋 로드: {profile_path}")
-
-        if kr_profile:
-            b_count = len((kr_profile.get("buckets") or {}))
-            log(f"[KR-Profile] 기준 프로파일 적용 준비: buckets={b_count}")
-    except Exception as e:
-        log(f"[KR-Profile] 프로파일 로드 실패: {e}")
+    kr_profile_setup = prepare_kr_profile_setup(
+        fallback_format=fallback_format,
+        auto_gen_format=auto_gen_format,
+        kr_anchor_profile_path=kr_anchor_profile_path,
+        log_fn=log,
+        default_cache_path_fn=_default_kr_profile_cache_path,
+        load_profile_fn=_load_kr_reference_profile,
+        resolve_reference_dirs_fn=_resolve_kr_reference_dirs,
+        build_profile_fn=lambda ref_dirs: _build_kr_reference_profile_from_dirs(ref_dirs, custom_map=None),
+        save_profile_fn=_save_kr_reference_profile,
+        get_preset_fn=get_kr_profile_preset,
+    )
+    kr_profile = kr_profile_setup.profile
 
     if tpl_path and not os.path.exists(tpl_path):
         log(f"⚠ 템플릿 파일을 찾을 수 없습니다: {tpl_path}")
@@ -2733,123 +2202,21 @@ def generate_oto(
     else:
 
         log(f"⚡ 템플릿 없음/미적합 -> OpenUtau 호환 {auto_gen_format.upper()} 형식으로 에일리어스를 자동 생성합니다.")
-        file_groups = {}
         try:
             from core.lab_generator import decompose_hangul_to_roman
         except ImportError:
-            pass # fallback
-        
-        for tg_info in tg_entries:
-            tg_path = tg_info['path']
-            real_name = tg_info['real_name']
-            
+            decompose_hangul_to_roman = lambda ch: [ch]
 
-            try:
-                tg = textgrid.TextGrid.fromFile(tg_path)
-                w_tier = None
-                for t in tg:
-                    if hasattr(t, 'name') and t.name == 'words':
-                        w_tier = t
-                        break
-                if not w_tier:
-                    continue
-                    
-                wd_intervals = [i for i in w_tier if i.mark.strip() not in ['', 'sil', 'spn', 'pau']]
-                if not wd_intervals:
-                    continue
-                    
-                lines = []
-
-                base_name = os.path.splitext(real_name)[0].lower()
-                is_long = base_name.endswith('long') or len(wd_intervals) == 1
-                
-                if is_long:
-
-                    for w in wd_intervals:
-                        roman_parts = []
-                        for ch in w.mark:
-                            roman_parts.extend(decompose_hangul_to_roman(ch))
-                        roman = "".join(roman_parts).lower()
-                        # CV / Mono
-                        lines.append(f"{real_name}={roman.capitalize() if roman not in KR_VOWELS else roman},0,0,0,0,0")
-                else:
-                    coda_alias_map = {
-                        "ng": "NG",
-                        "n": "N",
-                        "l": "L",
-                        "r": "L",
-                        "m": "M",
-                        "k": "K",
-                        "g": "K",
-                        "t": "T",
-                        "d": "T",
-                        "s": "T",
-                        "ss": "T",
-                        "j": "T",
-                        "jj": "T",
-                        "ch": "T",
-                        "h": "H",
-                        "p": "P",
-                        "b": "P",
-                    }
-
-                    for idx, w in enumerate(wd_intervals):
-                        roman_parts = []
-                        for ch in w.mark:
-                            roman_parts.extend(decompose_hangul_to_roman(ch))
-                        roman = "".join(roman_parts).lower()
-                        
-                        if auto_gen_format == 'vcv':
-                            if idx == 0:
-                                lines.append(f"{real_name}=- {roman},0,0,0,0,0")
-                            else:
-                                prev_w = wd_intervals[idx-1]
-                                prev_parts = []
-                                for ch in prev_w.mark:
-                                    prev_parts.extend(decompose_hangul_to_roman(ch))
-                                prev_roman = "".join(prev_parts).lower()
-                                _, prev_vowel, prev_coda = _split_kr_syllable_parts(prev_roman)
-                                prev_coda_alias = coda_alias_map.get((prev_coda or "").lower(), "")
-                                
-                                if prev_coda_alias:
-                                    lines.append(f"{real_name}={prev_coda_alias} {roman},0,0,0,0,0")
-                                else:
-                                    lines.append(f"{real_name}={(prev_vowel or 'a')} {roman},0,0,0,0,0")
-                                
-                        elif auto_gen_format in {'cv', 'cvc', 'cvvc'}:
-
-                            lines.append(f"{real_name}={roman},0,0,0,0,0")
-                            
-                            if idx > 0 and auto_gen_format == 'cvvc':
-
-                                prev_w = wd_intervals[idx-1]
-                                prev_parts = []
-                                for ch in prev_w.mark:
-                                    prev_parts.extend(decompose_hangul_to_roman(ch))
-                                prev_roman = "".join(prev_parts).lower()
-                                _, prev_vowel, _ = _split_kr_syllable_parts(prev_roman)
-                                prev_vowel = prev_vowel or "a"
-                                
-
-                                cur_start_cons = ""
-                                for char in roman:
-                                    if char in KR_CONSONANTS:
-                                        cur_start_cons += char
-                                    else:
-                                        break
-                                
-                                if cur_start_cons:
-                                    lines.append(f"{real_name}={prev_vowel} {cur_start_cons},0,0,0,0,0")
-                                else:
-
-                                    _, cur_vowel, _ = _split_kr_syllable_parts(roman)
-                                    lines.append(f"{real_name}={prev_vowel} {(cur_vowel or 'a')},0,0,0,0,0")
-                
-                if lines:
-                    file_groups[real_name] = lines
-
-            except Exception as e:
-                log(f"경고: {real_name} 자동 템플릿 생성 실패 ({e})")
+        file_groups = build_kr_auto_file_groups(
+            tg_entries=tg_entries,
+            auto_gen_format=auto_gen_format,
+            log_fn=log,
+            load_textgrid_fn=textgrid.TextGrid.fromFile,
+            decompose_hangul_to_roman_fn=decompose_hangul_to_roman,
+            split_syllable_parts_fn=_split_kr_syllable_parts,
+            kr_vowels=set(KR_VOWELS),
+            kr_consonants=set(KR_CONSONANTS),
+        )
                 
     processed = 0
     total = len(file_groups)
@@ -2865,42 +2232,54 @@ def generate_oto(
     mel_cache_for_signal = {}
 
     for fname, lines in file_groups.items():
-        tg_info = _resolve_tg_info(fname)
+        file_ctx = prepare_file_context(
+            fname=fname,
+            lines=lines,
+            resolve_tg_info_fn=_resolve_tg_info,
+            wav_root_for_signal=wav_root_for_signal,
+            wav_index_for_signal=wav_index_for_signal,
+            mel_cache_for_signal=mel_cache_for_signal,
+            find_wav_path_fn=_find_wav_path_for_name,
+            read_wav_fn=_read_wav_mono_np,
+            mel_envelope_fn=_mel_envelope,
+            wav_duration_fn=_wav_duration_ms,
+        )
 
-        if not tg_info:
+        if file_ctx.status == "textgrid_missing":
             log(f"경고: {fname}: TextGrid를 찾을 수 없어 원본 라인을 유지합니다.")
             _record_unset_lines("textgrid_missing", fname, lines)
             final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
             processed += 1
             continue
-            
-        tg_path = tg_info['path']
-        real_wav_name = tg_info['real_name']
-        wav_path_for_signal = _find_wav_path_for_name(real_wav_name, wav_root_for_signal, wav_index_for_signal)
-        mel_ctx_for_file = None
-        wav_duration_ms = 0.0
-        if wav_path_for_signal:
-            mel_ctx_for_file = mel_cache_for_signal.get(wav_path_for_signal)
-            if mel_ctx_for_file is None:
-                audio_sig, sr_sig = _read_wav_mono_np(wav_path_for_signal)
-                mel_ctx_for_file = _mel_envelope(audio_sig, sr_sig)
-                mel_cache_for_signal[wav_path_for_signal] = mel_ctx_for_file
-                if sr_sig:
-                    wav_duration_ms = (len(audio_sig) / float(sr_sig)) * 1000.0
-            else:
-                wav_duration_ms = _wav_duration_ms(wav_path_for_signal)
+
+        file_ctx = load_named_tiers(
+            file_ctx,
+            load_textgrid_fn=textgrid.TextGrid.fromFile,
+            tier_predicate=lambda tier: isinstance(tier, textgrid.IntervalTier),
+        )
+        if file_ctx.status == "textgrid_load_failed":
+            log(f"경고: {fname}: TextGrid 로드 실패로 원본 라인을 유지합니다. ({file_ctx.error_message})")
+            _record_unset_lines("textgrid_load_failed", fname, lines)
+            final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
+            processed += 1
+            continue
+        if file_ctx.status == "tier_missing":
+            log(f"경고: {fname}: phones tier가 없어 원본 라인을 유지합니다.")
+            _record_unset_lines("tier_missing", fname, lines)
+            final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
+            processed += 1
+            continue
+
+        tg_path = file_ctx.tg_path
+        real_wav_name = file_ctx.real_wav_name
+        wav_path_for_signal = file_ctx.wav_path_for_signal
+        mel_ctx_for_file = file_ctx.mel_ctx_for_file
+        wav_duration_ms = float(file_ctx.wav_duration_ms or 0.0)
+        tg = file_ctx.tg
+        phone_tier = file_ctx.phone_tier
+        word_tier = file_ctx.word_tier
 
         try:
-            tg = textgrid.TextGrid.fromFile(tg_path)
-            phone_tier = None
-            word_tier = None
-            for t in tg:
-                if isinstance(t, textgrid.IntervalTier):
-                    if t.name == 'phones':
-                        phone_tier = t
-                    elif t.name == 'words':
-                        word_tier = t
-
             if not phone_tier:
                 log(f"경고: {fname}: phones tier가 없어 원본 라인을 유지합니다.")
                 _record_unset_lines("tier_missing", fname, lines)
@@ -2913,138 +2292,77 @@ def generate_oto(
             except ImportError:
                 def decompose_hangul_to_roman(ch):
                     return [ch]
-
-
-            phone_silence_marks = {'', 'sil', 'pau', 'sp'}
-            ph_intervals_raw = [i for i in phone_tier if i.mark.strip().lower() not in phone_silence_marks]
-            ph_intervals_all = [i for i in ph_intervals_raw if i.mark.strip().lower() not in {'spn'}]
-            ph_intervals = [i for i in ph_intervals_all if i.mark.strip().lower() not in {'sil'}]
-            wd_intervals = [i for i in word_tier if i.mark.strip() not in ['', 'sil', 'spn', 'pau']] if word_tier else []
-
-            if len(ph_intervals) == 0:
-                if kr_mapping_words_fallback_enabled and wd_intervals:
-                    fallback_phones = []
-                    for w in wd_intervals:
-                        fallback_phones.extend(
-                            _synthesize_kr_word_phones(
-                                w.mark,
-                                float(w.minTime),
-                                float(w.maxTime),
-                                decompose_hangul_to_roman,
-                            )
-                        )
-                    ph_intervals = fallback_phones
-                    ph_intervals_all = fallback_phones
-                if len(ph_intervals) == 0:
-                    log(f"경고: {fname}: 유효한 음소 구간이 없어 원본 라인을 유지합니다.")
-                    _record_unset_lines("mapping_failed_empty_intervals", fname, lines)
-                    final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
-                    processed += 1
-                    continue
-
-            timeline_start_ms = float(ph_intervals[0].minTime * 1000.0)
-            timeline_end_ms = float(ph_intervals[-1].maxTime * 1000.0)
-            if wd_intervals:
-                timeline_start_ms = min(timeline_start_ms, float(wd_intervals[0].minTime * 1000.0))
-                timeline_end_ms = max(timeline_end_ms, float(wd_intervals[-1].maxTime * 1000.0))
-            if wav_duration_ms <= 0.0:
-                wav_duration_ms = timeline_end_ms
-
-
-            if len(ph_intervals) == 1 and len(wd_intervals) == 1:
-                log(f"처리: {fname}: 단모음 파일")
-                vowel = ph_intervals[0]
-                v_start = vowel.minTime * 1000
-                v_end = vowel.maxTime * 1000
-                v_len = v_end - v_start
-                for line in lines:
-                    parts = line.split('=', 1)
-                    if len(parts) < 2:
-                        _record_unset("malformed_line", fname, line)
-                        final_lines.append(apply_suffix_to_oto_line(line, alias_suffix))
-                        continue
-                    alias = parts[1].split(',')[0].strip()
-                    if not alias:
-                        _record_unset("empty_alias", fname, line)
-                        preserved = f"{real_wav_name}={parts[1]}"
-                        final_lines.append(apply_suffix_to_oto_line(preserved, alias_suffix))
-                        continue
-
-
-                    offset = v_start
-                    pre = 0
-                    ovl = 0
-                    consonant = min(v_len * 0.25, 120)
-                    cutoff = -(v_len * 0.8)
-                    
-                    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
-                    
-                    _append_alias_rows(
-                        final_lines,
-                        real_wav_name,
-                        alias,
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        ovl,
-                        generate_openutau=generate_openutau,
-                        alias_suffix=alias_suffix,
-                    )
+            loop_prep = prepare_kr_loop_state(
+                lines=lines,
+                real_wav_name=real_wav_name,
+                phone_tier=phone_tier,
+                word_tier=word_tier,
+                wav_duration_ms=wav_duration_ms,
+                custom_map=custom_map,
+                kr_mapping_words_fallback_enabled=kr_mapping_words_fallback_enabled,
+                kr_mapping_spn_ratio_threshold=kr_mapping_spn_ratio_threshold,
+                kr_mapping_min_vowel_phone_ratio=kr_mapping_min_vowel_phone_ratio,
+                kr_mapping_confidence_threshold=kr_mapping_confidence_threshold,
+                debug_log_fn=log,
+                debug_reason_logging=kr_mapping_debug_reason_logging,
+                decompose_hangul_to_roman_fn=decompose_hangul_to_roman,
+                synthesize_word_phones_fn=_synthesize_kr_word_phones,
+                detect_alias_format_fn=detect_alias_format,
+                extract_cv_targets_from_lines_fn=_extract_cv_targets_from_lines,
+                extract_cv_targets_from_filename_fn=_extract_kr_cv_targets_from_filename,
+                collect_phone_quality_fn=_collect_kr_phone_tier_quality,
+                resolve_mapping_conf_threshold_fn=_resolve_kr_mapping_conf_threshold,
+            )
+            if loop_prep.status == "empty_intervals":
+                log(f"경고: {fname}: 유효한 음소 구간이 없어 원본 라인을 유지합니다.")
+                _record_unset_lines("mapping_failed_empty_intervals", fname, lines)
+                final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
                 processed += 1
                 continue
-
-
-            alias_names = []
-            for l in lines:
-                if "=" not in l:
-                    continue
-                a = l.split("=", 1)[1].split(",", 1)[0].strip()
-                if a:
-                    alias_names.append(a)
-            if not alias_names:
+            if loop_prep.status == "no_valid_alias":
                 log(f"경고: {fname}: 유효한 에일리어스가 없어 원본 라인을 유지합니다.")
                 _record_unset_lines("no_valid_alias", fname, lines)
                 final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
                 processed += 1
                 continue
-            file_format = detect_alias_format(alias_names, custom_map=custom_map)
-            log(f"처리: {fname}: 형식 감지 -> {file_format.upper()}")
-            file_mapping_conf_th = _resolve_kr_mapping_conf_threshold(
-                file_format,
-                override_threshold=kr_mapping_confidence_threshold,
-            )
-            
-            is_vc_only = (file_format == 'vc_only')
-            is_vcv_file = (file_format == 'vcv')
 
-            cv_targets = _extract_cv_targets_from_lines(lines, custom_map)
-            filename_cv_targets = _extract_kr_cv_targets_from_filename(real_wav_name)
-            targets_for_build = cv_targets
-            if file_format == "cvvc" and filename_cv_targets:
-                targets_for_build = filename_cv_targets
-            elif (not targets_for_build) and filename_cv_targets:
-                targets_for_build = filename_cv_targets
-            expected_syllables = max(len(wd_intervals), len(cv_targets), len(filename_cv_targets))
-            phone_quality = _collect_kr_phone_tier_quality(
-                phone_tier,
-                expected_syllables=expected_syllables,
-                min_vowel_phone_ratio=kr_mapping_min_vowel_phone_ratio,
-            )
-            low_quality_reasons = list(phone_quality.get("low_confidence_reasons", []))
+            ph_intervals_raw = loop_prep.ph_intervals_raw
+            ph_intervals_all = loop_prep.ph_intervals_all
+            ph_intervals = loop_prep.ph_intervals
+            wd_intervals = loop_prep.wd_intervals
+            wav_duration_ms = loop_prep.wav_duration_ms
+            timeline_start_ms = loop_prep.timeline_start_ms
+            timeline_end_ms = loop_prep.timeline_end_ms
+            file_format = loop_prep.file_format
+            file_mapping_conf_th = loop_prep.file_mapping_conf_th
+            is_vc_only = loop_prep.is_vc_only
+            is_vcv_file = loop_prep.is_vcv_file
+            cv_targets = loop_prep.cv_targets
+            filename_cv_targets = loop_prep.filename_cv_targets
+            targets_for_build = loop_prep.targets_for_build
+            phone_quality = loop_prep.phone_quality
+            low_quality_reasons = loop_prep.low_quality_reasons
+            low_phone_quality = loop_prep.low_phone_quality
+            force_words_phone_fill = loop_prep.force_words_phone_fill
             spn_ratio = float(phone_quality.get("spn_ratio_in_phone_tier", 0.0))
-            if spn_ratio >= float(kr_mapping_spn_ratio_threshold):
-                low_quality_reasons.append("spn_heavy")
-            low_quality_reasons = sorted(set(low_quality_reasons))
-            low_phone_quality = bool(low_quality_reasons)
-            force_words_phone_fill = bool(
-                kr_mapping_words_fallback_enabled and low_phone_quality and wd_intervals
-            )
-            if force_words_phone_fill and kr_mapping_debug_reason_logging:
-                log(
-                    f"🧭 {fname}: phones 신뢰도 낮음({','.join(low_quality_reasons)}) "
-                    f"→ words 구간 보강 매핑 사용"
-                )
+
+            if try_handle_kr_single_vowel_file(
+                fname=fname,
+                lines=lines,
+                real_wav_name=real_wav_name,
+                ph_intervals=ph_intervals,
+                wd_intervals=wd_intervals,
+                final_lines=final_lines,
+                log_fn=log,
+                record_unset_fn=_record_unset,
+                validate_fn=validate_oto_params,
+                append_alias_rows_fn=_append_alias_rows,
+                apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
+                generate_openutau=generate_openutau,
+                alias_suffix=alias_suffix,
+            ):
+                processed += 1
+                continue
             syllables_info = []
             used_words_based = False
             used_alias_based = False
@@ -3188,7 +2506,7 @@ def generate_oto(
                 for i in range(len(syllables_info))
             }
             realized_cv_anchor_by_idx = {}
-            kr_post_ctx = KrPostprocessContext(
+            kr_post_ctx = build_kr_postprocess_context(
                 file_format=file_format,
                 mel_ctx_for_file=mel_ctx_for_file,
                 ph_intervals=ph_intervals,
@@ -3261,115 +2579,52 @@ def generate_oto(
                     )
                     continue
                 
+                family_state = build_kr_alias_family_state(
+                    alias=alias,
+                    alias_type=alias_type,
+                    uses_vc_context_fn=_uses_kr_vc_context,
+                    is_diphthong_fn=is_diphthong,
+                    extract_cv_alias_token_fn=_extract_kr_cv_alias_token,
+                    detect_glottal_kind_fn=_detect_glottal_kind,
+                    kr_vowels=KR_VOWELS,
+                )
+                is_vc = family_state.is_vc
+                is_vcv = family_state.is_vcv
+                is_cv_head = family_state.is_cv_head
+                is_diph = family_state.is_diph
+                target_clean = family_state.target_clean
 
-                is_vc = _uses_kr_vc_context(alias_type)
-                is_vcv = alias_type == 'vcv'
-                is_cv_head = alias_type == 'cv_head'
-                is_diph = is_diphthong(alias)
-                
-                target_clean = _extract_kr_cv_alias_token(alias)
-
-
-
-
-                glottal_kind = _detect_glottal_kind(alias)
-                if glottal_kind in ('head', 'tail'):
-
-                    if glottal_kind == 'head':
-                        if cv_seq_idx < len(syllables_info):
-                            current_w_idx = cv_seq_idx
-                            cv_seq_idx = current_w_idx + 1
-
-                    if current_w_idx >= len(syllables_info):
-                        current_w_idx = len(syllables_info) - 1
-
-                    curr_syl = syllables_info[current_w_idx]
-                    curr_phones = curr_syl['phones']
-                    _, v_phone = find_vowel_phone(curr_phones)
-                    vowel_start = v_phone.minTime * 1000
-                    vowel_end = v_phone.maxTime * 1000
-
-
-                    g_idx = None
-                    for i, p in enumerate(ph_intervals):
-                        if abs(p.minTime - v_phone.minTime) < 1e-6 and abs(p.maxTime - v_phone.maxTime) < 1e-6:
-                            g_idx = i
-                            break
-
-                    if glottal_kind == 'tail':
-                        next_ph = ph_intervals[g_idx + 1] if g_idx is not None and g_idx + 1 < len(ph_intervals) else None
-                        boundary_end = (next_ph.maxTime * 1000) if next_ph else (curr_syl['end_time'] * 1000)
-                        glottal_len = max(boundary_end - vowel_end, 60)
-
-                        offset_padding = min(max(glottal_len, 60), 220)
-                        offset = max(boundary_end - offset_padding, 0)
-                        pre = boundary_end - offset
-                        ovl = pre * 0.2
-                        consonant = pre + min(glottal_len * 0.3, 30)
-                        cutoff = -(consonant + 30)
-
-                    else:
-                        prev_ph = ph_intervals[g_idx - 1] if g_idx is not None and g_idx - 1 >= 0 else None
-                        glottal_start = (prev_ph.minTime * 1000) if prev_ph else max(vowel_start - 80, 0)
-                        boundary = (prev_ph.maxTime * 1000) if prev_ph else vowel_start
-
-                        offset = max(glottal_start - 30, 0)
-                        pre = boundary - offset
-                        ovl = pre * 0.3
-                        vowel_len = max(vowel_end - vowel_start, 80)
-                        added_cons = min(max(vowel_len * 0.5, 80), 150)
-                        consonant = pre + added_cons
-                        cutoff = -(consonant + vowel_len * 0.25)
-
-                    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
-
-                    a2 = apply_alias_suffix(alias, alias_suffix)
-                    new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
-                    final_lines.append(new_line)
+                handled_glottal, current_w_idx, cv_seq_idx = try_handle_kr_glottal_alias(
+                    alias=alias,
+                    state=family_state,
+                    current_w_idx=current_w_idx,
+                    cv_seq_idx=cv_seq_idx,
+                    syllables_info=syllables_info,
+                    ph_intervals=ph_intervals,
+                    real_wav_name=real_wav_name,
+                    alias_suffix=alias_suffix,
+                    final_lines=final_lines,
+                    validate_fn=validate_oto_params,
+                    apply_alias_suffix_fn=apply_alias_suffix,
+                    find_vowel_phone_fn=find_vowel_phone,
+                )
+                if handled_glottal:
                     continue
 
-
-
-
-                breath_tail = None
-                a_parts = alias.split()
-                if len(a_parts) >= 2 and a_parts[0].lower() in KR_VOWELS and a_parts[1].upper() in {'R', 'H'}:
-                    breath_tail = a_parts[1].upper()
-                elif alias and alias[-1].upper() in {'R', 'H'} and alias[:-1].lower() in KR_VOWELS:
-                    breath_tail = alias[-1].upper()
-
-                if breath_tail:
-                    if current_w_idx >= len(syllables_info):
-                        current_w_idx = len(syllables_info) - 1
-                    curr_syl = syllables_info[current_w_idx]
-                    curr_phones = curr_syl['phones']
-                    _, v_phone = find_vowel_phone(curr_phones)
-                    vowel_start = v_phone.minTime * 1000
-                    vowel_end = v_phone.maxTime * 1000
-                    vowel_len = max(vowel_end - vowel_start, 80)
-
-                    last_end = (ph_intervals_all[-1].maxTime * 1000) if ph_intervals_all else (curr_syl['end_time'] * 1000)
-
-
-                    offset_padding = min(max(vowel_len * 0.7, 180), 320)
-                    offset = max(vowel_end - offset_padding, 0)
-
-
-                    pre_abs = max(vowel_end - 20, offset)
-                    pre = pre_abs - offset
-                    ovl = pre * 0.85
-
-
-                    consonant = max(vowel_end - offset, pre + 10)
-
-
-                    cutoff = -(max(last_end - offset, consonant + 80))
-
-                    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
-
-                    a2 = apply_alias_suffix(alias, alias_suffix)
-                    new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
-                    final_lines.append(new_line)
+                handled_breath_tail, current_w_idx = try_handle_kr_breath_tail_alias(
+                    alias=alias,
+                    state=family_state,
+                    current_w_idx=current_w_idx,
+                    syllables_info=syllables_info,
+                    ph_intervals_all=ph_intervals_all,
+                    real_wav_name=real_wav_name,
+                    alias_suffix=alias_suffix,
+                    final_lines=final_lines,
+                    validate_fn=validate_oto_params,
+                    apply_alias_suffix_fn=apply_alias_suffix,
+                    find_vowel_phone_fn=find_vowel_phone,
+                )
+                if handled_breath_tail:
                     continue
                 
 
@@ -4062,78 +3317,40 @@ def generate_oto(
                 except:
                     continue
 
+    finish_context = GeneratorFinishContext(
+        log_fn=log,
+        anchor_stats=anchor_stats,
+        anchor_log_path=anchor_log_path,
+        anchor_log_dir=_anchor_log_dir,
+        cleanup_timing_jsonl=cleanup_timing_jsonl,
+        timing_jsonl_prefix="timing_anchor_kr_",
+    )
 
     try:
-        with open(out_path, 'w', encoding='utf-8') as f:
-            for line in final_lines:
-                f.write(line + "\n")
+        write_oto_lines(out_path, final_lines)
         log(f"1차 생성 완료: OTO 파일 저장 -> {out_path}")
-        wav_dir_for_profile = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
-        if kr_profile:
-            changed = _apply_kr_profile_to_oto_file(
-                out_path, wav_dir_for_profile, kr_profile, custom_map=custom_map
-            )
-            if changed > 0:
-                log(f"[KR-Profile] 기준 프로파일 보정 적용: {changed} lines")
-        try:
-            from core.oto_ml_refiner import apply_oto_ml_to_oto_file
-
-            ml_report = {}
-            ml_changed = apply_oto_ml_to_oto_file(
-                "korean",
-                out_path,
-                tg_dir=tg_folder,
-                wav_dir=wav_dir_for_profile,
+        run_kr_post_file_pipeline(
+            KrPostFilePipelineContext(
+                out_path=out_path,
+                tg_folder=tg_folder,
+                kr_profile=kr_profile,
+                custom_map=custom_map,
                 custom_phonemes_path=custom_phonemes_path,
-                callback=log,
-                enabled=enable_ml_correction,
-                format_override=auto_gen_format,
-                policy=ml_policy,
-                report=ml_report,
+                enable_ml_correction=enable_ml_correction,
+                auto_gen_format=auto_gen_format,
+                ml_policy=ml_policy,
+                runtime_report=runtime_report,
+                log_fn=log,
+                validate_fn=validate_oto_params,
+                normalize_key_fn=normalize_key,
             )
-            if isinstance(runtime_report, dict):
-                runtime_report["ml"] = dict(ml_report)
-            if ml_changed > 0:
-                log(f"[OTO-ML] 한국어 수치 보정 적용: {ml_changed} lines")
-        except Exception as ml_e:
-            log(f"[OTO-ML] 한국어 보정 스킵: {ml_e}")
-            if isinstance(runtime_report, dict):
-                runtime_report["ml"] = {
-                    "stage": "ml",
-                    "code": "ML_INFER_FAILED",
-                    "message": str(ml_e),
-                    "status": "fallback",
-                    "fallback_used": True,
-                    "policy": str(ml_policy or ""),
-                }
-        mel_changed = _apply_kr_mel_refine_to_oto_file(
-            out_path, wav_dir_for_profile, custom_map=custom_map
         )
-        if mel_changed > 0:
-            log(f"[KR-Mel] 멜 에너지 기반 cutoff 보정 적용: {mel_changed} lines")
     except Exception as e:
         err = f"OTO 파일 저장 실패: {e}"
         logger.error(err)
         errors.append(err)
 
-    if anchor_stats["anchor_locked_count"] > 0:
-        log(
-            "[AnchorLock] 요약: "
-            f"anchor_locked_count={anchor_stats['anchor_locked_count']}, "
-            f"cutoff_clamped_count={anchor_stats['cutoff_clamped_count']}, "
-            f"vc_cutoff_leak_guard_count={anchor_stats['vc_cutoff_leak_guard_count']}"
-        )
-        log(f"[AnchorLock] 상세 로그: {anchor_log_path}")
-
-    if cleanup_timing_jsonl:
-        removed_count, failed_count = _cleanup_timing_anchor_jsonl_files(
-            _anchor_log_dir,
-            "timing_anchor_kr_",
-        )
-        if removed_count > 0:
-            log(f"[AnchorLock] timing jsonl 자동 정리: {removed_count} files")
-        if failed_count > 0:
-            log(f"[AnchorLock] timing jsonl 정리 실패: {failed_count} files")
+    finalize_generator_finish(finish_context)
 
     _log_unset_summary()
     return processed, total, errors

@@ -25,6 +25,12 @@ class TimingAnchorProfileTests(unittest.TestCase):
         self.assertIsNotNone(profile)
         self.assertGreater(profile.cut_gap_target_ms, 0.0)
 
+    def test_get_anchor_profile_korean_cvc_uses_cvc_specific_bridge_profile(self):
+        profile = get_anchor_profile("korean", "cvc", "vc")
+        self.assertIsNotNone(profile)
+        self.assertGreater(profile.cons_gap_target_ms, 40.0)
+        self.assertGreater(profile.cut_gap_target_ms, 30.0)
+
     def test_enable_gate_returns_boolean(self):
         self.assertIsInstance(is_anchor_lock_enabled("japanese", "vcv"), bool)
         self.assertIsInstance(is_anchor_lock_enabled("japanese", "cvvc"), bool)

@@ -20,10 +20,11 @@ VOICE_STYLE_LABELS_KR = {
 
 # Derived from Korean reference voices and reduced to anonymized bucket stats.
 # Keys map to alias type from `classify_alias`.
-KR_PROFILE_PRESET_V1 = {
+KR_PROFILE_PRESET_GENERAL_V1 = {
     "version": 2,
     "language": "korean",
     "preset_name": "kr_reference_v2",
+    "format_type": "general",
     "buckets": {
         "cv_head": {
             "n": 5856,
@@ -69,9 +70,62 @@ KR_PROFILE_PRESET_V1 = {
 }
 
 
-def get_kr_profile_preset():
-    """Return a mutable copy of Korean preset profile."""
-    return copy.deepcopy(KR_PROFILE_PRESET_V1)
+KR_PROFILE_PRESET_CVC_V1 = {
+    "version": 3,
+    "language": "korean",
+    "preset_name": "kr_cvc_reference_v3",
+    "format_type": "cvc",
+    "buckets": {
+        "cv_head": {
+            "n": 1620,
+            "pre": 89.5700,
+            "cons_gap": 88.4300,
+            "cut_gap": 185.0900,
+            "ovl_ratio": 0.3417048,
+            "head_off_ratio": 0.1828282,
+        },
+        "cv": {
+            "n": 9700,
+            "pre": 80.1695,
+            "cons_gap": 85.2600,
+            "cut_gap": 140.5900,
+            "ovl_ratio": 0.4062845,
+            "head_off_ratio": 0.1655118,
+        },
+        "vcv": {
+            "n": 1583,
+            "pre": 126.9800,
+            "cons_gap": 83.4500,
+            "cut_gap": 60.7700,
+            "ovl_ratio": 0.4933263,
+            "head_off_ratio": 0.2315166,
+        },
+        "vc": {
+            "n": 2011,
+            "pre": 114.5100,
+            "cons_gap": 54.4200,
+            "cut_gap": 36.2800,
+            "ovl_ratio": 0.4919000,
+            "head_off_ratio": None,
+        },
+        "vv": {
+            "n": 375,
+            "pre": 164.1700,
+            "cons_gap": 75.2800,
+            "cut_gap": 169.6200,
+            "ovl_ratio": 0.6448491,
+            "head_off_ratio": 0.2529097,
+        },
+    },
+}
+
+
+def get_kr_profile_preset(format_type="general"):
+    """Return a mutable copy of Korean preset profile by format."""
+    ft = (format_type or "").strip().lower()
+    if ft.startswith("cvc"):
+        return copy.deepcopy(KR_PROFILE_PRESET_CVC_V1)
+    return copy.deepcopy(KR_PROFILE_PRESET_GENERAL_V1)
 
 
 # Derived from multiple Japanese reference banks (VCV-oriented set),
