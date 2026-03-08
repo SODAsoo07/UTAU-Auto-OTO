@@ -237,3 +237,4 @@ custom_test_wavs/*_dict.txt
 # AI/ML workspace and model training artifacts
 /ml_workspace/
 /sofa_utau_kr
+/Voice_Datas
