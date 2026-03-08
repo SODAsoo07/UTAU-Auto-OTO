@@ -582,6 +582,7 @@ def ensure_korean_support(mfa_path, callback=None):
     pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
     if not os.path.exists(python_exe):
         return False
+    pkg_check_cmd = [python_exe, '-c', 'import pkg_resources']
     check_cmd = [python_exe, '-c', 'import eunjeon; import jamo']
     try:
         env = _get_conda_env(mfa_path)
@@ -611,6 +612,37 @@ def ensure_korean_support(mfa_path, callback=None):
                 return True, ''
             detail = (res.stderr or res.stdout or '').strip()
             return False, detail
+
+        def _ensure_pkg_resources():
+            res = _run_subprocess_text(pkg_check_cmd, env=env)
+            if res.returncode == 0:
+                return True
+            log('[MFA] pkg_resources is missing; repairing setuptools first')
+            install_cmds = [
+                [python_exe, '-m', 'pip', 'install', '--upgrade', 'setuptools<81'],
+            ]
+            if os.path.exists(pip_exe):
+                install_cmds.append([pip_exe, 'install', '--upgrade', 'setuptools<81'])
+            conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
+            if os.path.exists(conda_exe):
+                install_cmds.append([conda_exe, 'install', '-y', '--solver', 'classic', '-p', env_dir, 'setuptools'])
+            system_conda = shutil.which('conda')
+            if system_conda:
+                install_cmds.append([system_conda, 'install', '-y', '--solver', 'classic', '-p', env_dir, 'setuptools'])
+            for install_cmd in install_cmds:
+                log(f"   -> repair cmd: {' '.join(install_cmd)}")
+                result = _run_subprocess_text(install_cmd, env=env)
+                if result.returncode != 0:
+                    continue
+                verify = _run_subprocess_text(pkg_check_cmd, env=env)
+                if verify.returncode == 0:
+                    return True
+            return False
+
+        if not _ensure_pkg_resources():
+            log('[MFA] Failed to restore pkg_resources/setuptools')
+            return False
+
         ok, detail = _check_imports()
         if (not ok) and _looks_like_pyexpat_dll_issue(detail):
             log('[MFA] Detected pyexpat/libexpat DLL issue; trying repair...')
@@ -642,6 +674,9 @@ def ensure_korean_support(mfa_path, callback=None):
                 if _stderr_has_msvc_requirement(result.stderr):
                     _emit_msvc_required_notice(callback, log)
                 last_err = err_txt or last_err
+                continue
+            if not _ensure_pkg_resources():
+                last_err = 'pkg_resources/setuptools repair failed after install'
                 continue
             ok, detail = _check_imports()
             if (not ok) and _looks_like_pyexpat_dll_issue(detail):
