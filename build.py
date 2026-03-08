@@ -26,6 +26,10 @@ RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "ml", "configs"), "ml/configs"),
     (os.path.join(APP_DIR, "config.json"), "."),
 ]
+RELEASE_AUX_FILES = [
+    os.path.join(APP_DIR, "setup_mfa.bat"),
+    os.path.join(APP_DIR, "release_assets", "먼저 실행.txt"),
+]
 args = argparse.Namespace(onefile=False, allow_unsafe_onefile=False, name=DEFAULT_APP_NAME)
 
 
@@ -150,10 +154,10 @@ def _copy_release_outputs(app_name, onefile=False):
         shutil.copytree(dist_dir, target_dir)
         print(f"   -> 폴더 복사 완료: {dist_dir}")
 
-    setup_path = os.path.join(APP_DIR, "setup_mfa.bat")
-    if os.path.exists(setup_path):
-        shutil.copy(setup_path, release_dir)
-        print("   -> 복사 완료: setup_mfa.bat")
+    for extra_path in RELEASE_AUX_FILES:
+        if os.path.exists(extra_path):
+            shutil.copy(extra_path, release_dir)
+            print(f"   -> 복사 완료: {os.path.basename(extra_path)}")
     return release_dir
 
 

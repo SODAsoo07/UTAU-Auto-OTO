@@ -11,7 +11,13 @@ from core.ja_oto_generator import (
     train_ja_autotune_profile,
 )
 from core.lab_generator import generate_dictionary, generate_labs
-from core.mfa_runner import check_mfa_model, download_mfa_model, patch_mfa_korean_support, run_mfa_align
+from core.mfa_runner import (
+    check_mfa_model,
+    download_mfa_model,
+    ensure_korean_support,
+    patch_mfa_korean_support,
+    run_mfa_align,
+)
 from core.oto_generator import (
     apply_kr_autotune_profile_to_oto,
     generate_oto,
@@ -191,187 +197,182 @@ class PipelineActionsMixin:
             alert_key=f"mfa_fail_sofa_hint_{language}",
         ))
 
-    def _run_mfa_setup(self):
-        """GUI 안에서 MFA 포터블 환경을 자동 설치합니다."""
-        def task():
-            self._set_running(True)
-            self._set_status("⬇ MFA 자동 설치 중... (10~20분 소요)")
-            try:
-                import shutil
-                app_dir = getattr(self, "app_dir", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-                portable_env_dir = os.path.join(app_dir, '.env')
-                public_root = os.environ.get('PUBLIC', r'C:\Users\Public')
-                fallback_env_dir = os.path.join(public_root, 'UTAU_Auto_OTO_v3', '.env')
-                env_dir = portable_env_dir
-                if any(ord(ch) > 127 for ch in portable_env_dir):
-                    env_dir = fallback_env_dir
-                    self._append_log("⚠ 앱 경로에 비ASCII 문자가 있어 MFA 환경을 공용 폴더에 설치합니다.")
-                    self._append_log(f"   대체 설치 경로: {env_dir}")
-                mfa_exe = os.path.join(env_dir, 'Scripts', 'mfa.exe')
-                installer = os.path.join(app_dir, 'Miniconda3-latest-Windows-x86_64.exe')
+    def _install_mfa_runtime(self, language="korean"):
+        import shutil
 
-                # 이미 설치 확인
-                if os.path.exists(mfa_exe):
-                    self._append_log("✅ MFA가 이미 설치되어 있습니다!")
-                    self.mfa_path = mfa_exe
-                    self._update_mfa_status(True)
-                    self._set_status("✅ MFA 준비 완료")
-                    return
+        lang = str(language or "korean").strip().lower()
+        app_dir = getattr(self, "app_dir", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        portable_env_dir = os.path.join(app_dir, '.env')
+        public_root = os.environ.get('PUBLIC', r'C:\Users\Public')
+        fallback_env_dir = os.path.join(public_root, 'UTAU_Auto_OTO_v3', '.env')
+        env_dir = portable_env_dir
+        if any(ord(ch) > 127 for ch in portable_env_dir):
+            env_dir = fallback_env_dir
+            self._append_log("⚠ 앱 경로에 비ASCII 문자가 있어 MFA 환경을 공용 폴더에 설치합니다.")
+            self._append_log(f"   대체 설치 경로: {env_dir}")
+        mfa_exe = os.path.join(env_dir, 'Scripts', 'mfa.exe')
+        installer = os.path.join(app_dir, 'Miniconda3-latest-Windows-x86_64.exe')
 
-                system_conda = shutil.which('conda')
-
-                if system_conda:
-                    self._append_log(f"🔍 시스템에 설치된 Conda 발견: {system_conda}")
-                    self._append_log("   Miniconda 다운로드를 건너뛰고 기존 Conda를 활용해 환경을 구성합니다.")
-                    self._append_log("[1/2] 🔧 MFA 전용 로컬 환경 생성 및 설치 중... (5~10분)")
-                    
-                    cmd = [system_conda, 'create', '-y', '-p', env_dir, '-c', 'conda-forge', '--override-channels', 'montreal-forced-aligner', 'colorama']
-                    process = sp.Popen(
-                        cmd,
-                        stdout=sp.PIPE,
-                        stderr=sp.STDOUT,
-                        text=True,
-                        encoding=self._preferred_subprocess_encoding(),
-                        errors='replace',
-                    )
-                    for line in process.stdout:
-                        stripped = line.strip()
-                        if stripped:
-                            self._append_log(stripped)
-                    process.wait()
-                    
-                    if process.returncode != 0:
-                        self._append_log("❌ MFA 설치 실패")
-                        return
-
-                    self._append_log("[2/2] 📦 추가 의존성 모듈 설치 중...")
-                    # conda run으로 해당 환경 내에서 pip 실행을 보장한다.
-                    sp.run([system_conda, 'run', '-p', env_dir, 'pip', 'install', 'eunjeon', 'jamo', 'textgrid'], capture_output=True)
-
-                    self._append_log("[Patch] 윈도우용 한국어 파서(eunjeon) 연동 처리 중...")
-                    patch_mfa_korean_support(mfa_exe, callback=self._append_log)
-
-                    self._append_log("✅ MFA 시스템 구성 완료!")
-                
-                else:
-                    self._append_log("🔍 시스템 Conda를 찾지 못했습니다. Miniconda 포터블 환경을 구축합니다.")
-                    conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
-                    # Step 1: Miniconda 다운로드
-                    if not os.path.exists(conda_exe):
-                        if not os.path.exists(installer):
-                            self._append_log("[1/3] ⬇ Miniconda 다운로드 중... (약 80MB)")
-                            url = 'https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe'
-                            ps_cmd = (
-                                f'[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; '
-                                f"Invoke-WebRequest -Uri '{url}' -OutFile '{installer}'"
-                            )
-                            result = sp.run(['powershell', '-Command', ps_cmd], capture_output=True, text=True)
-                            if result.returncode != 0:
-                                self._append_log(f"❌ 다운로드 실패: {result.stderr}")
-                                return
-                        self._append_log("✅ Miniconda 다운로드 완료!")
-
-                        # Step 2: 포터블 설치
-                        self._append_log("[2/3] 📦 Miniconda 포터블 설치 중... (2~5분)")
-                        self._append_log(f"   설치 경로: {env_dir}")
-                        # Miniconda(NSIS)는 /D= 경로를 raw command-line에서 파싱한다.
-                        # subprocess(list)는 공백 경로를 자동 인용하면서 /D가 무시될 수 있어,
-                        # 직접 command-line 문자열로 실행한다.
-                        if os.path.isdir(env_dir) and not os.path.exists(conda_exe):
-                            try:
-                                shutil.rmtree(env_dir)
-                                self._append_log("   이전 실패 흔적(.env 폴더)을 정리하고 재시도합니다.")
-                            except Exception as cleanup_error:
-                                self._append_log(f"❌ 기존 .env 폴더 정리 실패: {cleanup_error}")
-                                return
-
-                        install_cmd = (
-                            f'"{installer}" /InstallationType=JustMe /RegisterPython=0 '
-                            f'/AddToPath=0 /S /D={env_dir}'
-                        )
-                        result = sp.run(
-                            install_cmd,
-                            capture_output=True, text=True, timeout=1200
-                        )
-                        if result.returncode != 0 or not os.path.exists(conda_exe):
-                            # /D 경로가 무시된 경우 기본 경로 설치를 보정 탐지한다.
-                            user_home = os.path.expanduser('~')
-                            fallback_conda_candidates = [
-                                os.path.join(user_home, 'miniconda3', 'Scripts', 'conda.exe'),
-                                os.path.join(user_home, 'Miniconda3', 'Scripts', 'conda.exe'),
-                                os.path.join(os.environ.get('LOCALAPPDATA', ''), 'miniconda3', 'Scripts', 'conda.exe'),
-                                os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Miniconda3', 'Scripts', 'conda.exe'),
-                            ]
-                            detected_conda = next((p for p in fallback_conda_candidates if p and os.path.exists(p)), None)
-                            if detected_conda:
-                                conda_exe = detected_conda
-                                env_dir = os.path.dirname(os.path.dirname(conda_exe))
-                                mfa_exe = os.path.join(env_dir, 'Scripts', 'mfa.exe')
-                                self._append_log("⚠ 지정 경로에서 Conda를 찾지 못했지만 기본 설치 경로를 감지했습니다.")
-                                self._append_log(f"   감지된 Conda: {conda_exe}")
-                            else:
-                                self._append_log(f"❌ Miniconda 설치 실패 (code={result.returncode})")
-                                if result.stdout and result.stdout.strip():
-                                    self._append_log(f"   stdout: {result.stdout.strip()[:500]}")
-                                if result.stderr and result.stderr.strip():
-                                    self._append_log(f"   stderr: {result.stderr.strip()[:500]}")
-                                return
-                        self._append_log("✅ Miniconda 설치 완료!")
-
-                    # Step 3: MFA 설치
-                    self._append_log("[3/3] 🔧 MFA 설치 중... (5~10분)")
-                    # HTTP 000 에러를 줄이기 위해 conda-forge 채널만 강제로 사용한다.
-                    process = sp.Popen(
-                        [conda_exe, 'install', '-y', '-c', 'conda-forge', '--override-channels', 'montreal-forced-aligner', 'colorama'],
-                        stdout=sp.PIPE,
-                        stderr=sp.STDOUT,
-                        text=True,
-                        encoding=self._preferred_subprocess_encoding(),
-                        errors='replace'
-                    )
-                    for line in process.stdout:
-                        stripped = line.strip()
-                        if stripped:
-                            self._append_log(stripped)
-                    process.wait()
-                    if process.returncode != 0:
-                        self._append_log("❌ MFA 설치 실패")
-                        return
-
-                    self._append_log("✅ Conda 패키지 설치 완료!")
-                    
-                    self._append_log("[3.5/4] 📦 추가 의존성 모듈 설치 중...")
-                    sp.run([conda_exe, 'run', '-p', env_dir, 'pip', 'install', 'eunjeon', 'jamo', 'textgrid'], capture_output=True)
-
-                    self._append_log("[Patch] 윈도우용 한국어 파서(eunjeon) 연동 처리 중...")
-                    patch_mfa_korean_support(mfa_exe, callback=self._append_log)
-
-                # Step 4: 한국어 모델 다운로드
-                self._append_log("[추가 단계] ⬇ 한국어 음향 모델 다운로드 중... (1~2분)")
+        if os.path.exists(mfa_exe):
+            self._append_log("✅ MFA 실행 환경이 이미 있습니다.")
+            self.mfa_path = mfa_exe
+        else:
+            system_conda = shutil.which('conda')
+            if system_conda:
+                self._append_log(f"🔍 시스템에 설치된 Conda 발견: {system_conda}")
+                self._append_log("   Miniconda 다운로드를 건너뛰고 기존 Conda를 활용해 환경을 구성합니다.")
+                self._append_log("[1/2] 🔧 MFA 전용 로컬 환경 생성 및 설치 중... (5~10분)")
                 process = sp.Popen(
-                    [mfa_exe, 'model', 'download', 'acoustic', 'korean_mfa', '--ignore_cache'],
+                    [system_conda, 'create', '-y', '-p', env_dir, '-c', 'conda-forge', '--override-channels', 'montreal-forced-aligner', 'colorama'],
                     stdout=sp.PIPE,
                     stderr=sp.STDOUT,
                     text=True,
                     encoding=self._preferred_subprocess_encoding(),
-                    errors='replace'
+                    errors='replace',
                 )
                 for line in process.stdout:
                     stripped = line.strip()
                     if stripped:
                         self._append_log(stripped)
                 process.wait()
-
-                # 임시 설치 파일 정리
-                if os.path.exists(installer):
-                    os.remove(installer)
-
+                if process.returncode != 0:
+                    self._append_log("❌ MFA 설치 실패")
+                    return False
+                self._append_log("[2/2] 📦 추가 의존성 모듈 설치 중...")
+                sp.run([system_conda, 'run', '-p', env_dir, 'pip', 'install', 'eunjeon', 'jamo', 'textgrid'], capture_output=True)
                 self.mfa_path = mfa_exe
-                self._update_mfa_status(True)
-                self._append_log("")
-                self._append_log("✅ MFA 설치가 완료되었습니다!")
-                self._append_log("   이제 '3단계 MFA 음성 정렬' 버튼으로 정렬을 진행할 수 있습니다.")
-                self._set_status("✅ MFA 설치 완료")
+            else:
+                self._append_log("🔍 시스템 Conda를 찾지 못했습니다. Miniconda 포터블 환경을 구축합니다.")
+                conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
+                if not os.path.exists(conda_exe):
+                    if not os.path.exists(installer):
+                        self._append_log("[1/3] ⬇ Miniconda 다운로드 중... (약 80MB)")
+                        url = 'https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe'
+                        ps_cmd = (
+                            f'[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; '
+                            f"Invoke-WebRequest -Uri '{url}' -OutFile '{installer}'"
+                        )
+                        result = sp.run(['powershell', '-Command', ps_cmd], capture_output=True, text=True)
+                        if result.returncode != 0:
+                            self._append_log(f"❌ 다운로드 실패: {result.stderr}")
+                            return False
+                    self._append_log("✅ Miniconda 다운로드 완료!")
+                    self._append_log("[2/3] 📦 Miniconda 포터블 설치 중... (2~5분)")
+                    self._append_log(f"   설치 경로: {env_dir}")
+                    if os.path.isdir(env_dir) and not os.path.exists(conda_exe):
+                        try:
+                            shutil.rmtree(env_dir)
+                            self._append_log("   이전 실패 흔적(.env 폴더)을 정리하고 재시도합니다.")
+                        except Exception as cleanup_error:
+                            self._append_log(f"❌ 기존 .env 폴더 정리 실패: {cleanup_error}")
+                            return False
+                    install_cmd = (
+                        f'"{installer}" /InstallationType=JustMe /RegisterPython=0 '
+                        f'/AddToPath=0 /S /D={env_dir}'
+                    )
+                    result = sp.run(install_cmd, capture_output=True, text=True, timeout=1200)
+                    if result.returncode != 0 or not os.path.exists(conda_exe):
+                        user_home = os.path.expanduser('~')
+                        fallback_conda_candidates = [
+                            os.path.join(user_home, 'miniconda3', 'Scripts', 'conda.exe'),
+                            os.path.join(user_home, 'Miniconda3', 'Scripts', 'conda.exe'),
+                            os.path.join(os.environ.get('LOCALAPPDATA', ''), 'miniconda3', 'Scripts', 'conda.exe'),
+                            os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Miniconda3', 'Scripts', 'conda.exe'),
+                        ]
+                        detected_conda = next((p for p in fallback_conda_candidates if p and os.path.exists(p)), None)
+                        if detected_conda:
+                            conda_exe = detected_conda
+                            env_dir = os.path.dirname(os.path.dirname(conda_exe))
+                            mfa_exe = os.path.join(env_dir, 'Scripts', 'mfa.exe')
+                            self._append_log("⚠ 지정 경로에서 Conda를 찾지 못했지만 기본 설치 경로를 감지했습니다.")
+                            self._append_log(f"   감지된 Conda: {conda_exe}")
+                        else:
+                            self._append_log(f"❌ Miniconda 설치 실패 (code={result.returncode})")
+                            if result.stdout and result.stdout.strip():
+                                self._append_log(f"   stdout: {result.stdout.strip()[:500]}")
+                            if result.stderr and result.stderr.strip():
+                                self._append_log(f"   stderr: {result.stderr.strip()[:500]}")
+                            return False
+                    self._append_log("✅ Miniconda 설치 완료!")
+
+                self._append_log("[3/3] 🔧 MFA 설치 중... (5~10분)")
+                process = sp.Popen(
+                    [conda_exe, 'install', '-y', '-c', 'conda-forge', '--override-channels', 'montreal-forced-aligner', 'colorama'],
+                    stdout=sp.PIPE,
+                    stderr=sp.STDOUT,
+                    text=True,
+                    encoding=self._preferred_subprocess_encoding(),
+                    errors='replace',
+                )
+                for line in process.stdout:
+                    stripped = line.strip()
+                    if stripped:
+                        self._append_log(stripped)
+                process.wait()
+                if process.returncode != 0:
+                    self._append_log("❌ MFA 설치 실패")
+                    return False
+                self._append_log("✅ Conda 패키지 설치 완료!")
+                self._append_log("[3.5/4] 📦 추가 의존성 모듈 설치 중...")
+                sp.run([conda_exe, 'run', '-p', env_dir, 'pip', 'install', 'eunjeon', 'jamo', 'textgrid'], capture_output=True)
+                self.mfa_path = mfa_exe
+
+        if lang == "korean":
+            self._append_log("[Patch] 윈도우용 한국어 파서(eunjeon) 연동 처리 중...")
+            patch_mfa_korean_support(self.mfa_path, callback=self._append_log)
+            if not ensure_korean_support(self.mfa_path, callback=self._append_log):
+                self._append_log("❌ 한국어 MFA 의존성 준비 실패")
+                return False
+
+        has_model, msg = check_mfa_model(self.mfa_path, language=lang)
+        if msg:
+            self._append_log(msg)
+        if not has_model:
+            self._append_log("[추가 단계] ⬇ 현재 언어용 MFA 음향 모델 다운로드 중...")
+            if not download_mfa_model(self.mfa_path, language=lang, callback=self._append_log):
+                self._append_log("❌ MFA 모델 다운로드 실패")
+                return False
+
+        if os.path.exists(installer):
+            try:
+                os.remove(installer)
+            except OSError:
+                pass
+
+        self._update_mfa_status(True)
+        self._append_log("")
+        self._append_log("✅ MFA 설치가 완료되었습니다!")
+        self._append_log("   이제 정렬을 바로 계속 진행합니다.")
+        return True
+
+    def _ensure_mfa_ready_for_language(self, language="korean"):
+        lang = str(language or "korean").strip().lower()
+        if not self.mfa_path or not os.path.exists(self.mfa_path):
+            self._append_log("ℹ MFA가 없어 지금 자동 설치를 시작합니다.")
+            return self._install_mfa_runtime(language=lang)
+        if lang == "korean" and not ensure_korean_support(self.mfa_path, callback=self._append_log):
+            self._append_log("❌ 한국어 MFA 의존성 준비 실패")
+            return False
+        has_model, msg = check_mfa_model(self.mfa_path, language=lang)
+        if msg:
+            self._append_log(msg)
+        if not has_model:
+            self._append_log("ℹ 현재 언어용 MFA 모델이 없어 지금 자동 다운로드를 시작합니다.")
+            if not download_mfa_model(self.mfa_path, language=lang, callback=self._append_log):
+                self._append_log("❌ MFA 모델 다운로드 실패")
+                return False
+        return True
+
+    def _run_mfa_setup(self):
+        """GUI 안에서 MFA 포터블 환경을 자동 설치합니다."""
+        def task():
+            self._set_running(True)
+            self._set_status("⬇ MFA 자동 설치 중... (10~20분 소요)")
+            try:
+                if self._install_mfa_runtime(language=self._get_language()):
+                    self._set_status("✅ MFA 설치 완료")
+                else:
+                    self._set_status("❌ MFA 설치 실패")
 
             except Exception as e:
                 self._handle_error("MFA 설치", e)
@@ -431,7 +432,7 @@ class PipelineActionsMixin:
                 self.mfa_install_btn.configure(text="✅ 설치 완료", state="disabled", fg_color="#388E3C")
             else:
                 self.mfa_status_label.configure(text="❌ MFA 미설치", text_color="#FF6B6B")
-                self.mfa_install_btn.configure(text="⬇ MFA 자동 설치", state="normal", fg_color="#FFA726")
+                self.mfa_install_btn.configure(text="⬇ MFA 원클릭 설치", state="normal", fg_color="#FFA726")
         self._after_safe(_do)
 
     def _update_sofa_status(self, installed):
@@ -621,10 +622,13 @@ class PipelineActionsMixin:
                 align_err = ""
                 align_engine = self.aligner_var.get()
                 primary_engine = "sofa" if align_engine == "SOFA" else "mfa"
-                fallback_engine = "mfa" if primary_engine == "sofa" else "sofa"
-                sofa_kwargs = self._get_sofa_runtime_kwargs(lang)
-                ckpt = self.sofa_ckpt_var.get().strip()
+                fallback_engine = "mfa" if primary_engine == "sofa" else ""
+                sofa_kwargs = {}
+                ckpt = ""
+                sdic = dict_path
                 if primary_engine == "sofa":
+                    sofa_kwargs = self._get_sofa_runtime_kwargs(lang)
+                    ckpt = self.sofa_ckpt_var.get().strip()
                     self._set_status("3/4 - SOFA ?? ?? ?...")
                     self._append_log(f"? SOFA ?? Python: {self.sofa_python_var.get().strip()}")
                     self._append_log(
@@ -636,23 +640,22 @@ class PipelineActionsMixin:
                         f"2-pass={'ON' if sofa_kwargs.get('two_pass_retry') else 'OFF'}"
                     )
                     ckpt = self._ensure_sofa_model_ready(lang)
+                    sdic = self.sofa_dict_var.get().strip() or dict_path
+                    if not self.sofa_dict_var.get().strip():
+                        self._after_safe(lambda p=sdic: self.sofa_dict_var.set(p))
+                        self._append_log(f"ℹ SOFA 사전이 비어 있어 현재 생성 사전을 사용합니다: {sdic}")
                 else:
                     self._set_status("3/4 - MFA ?? ?? ?...")
-                    if self.mfa_path:
-                        has_model, _ = check_mfa_model(self.mfa_path, language=lang)
-                        if not has_model:
-                            download_mfa_model(self.mfa_path, language=lang, callback=self._append_log)
+                    if not self._ensure_mfa_ready_for_language(lang):
+                        self._append_log("❌ MFA 설치/모델 준비 실패")
+                        self._set_status("❌ MFA 설치/모델 준비 실패")
+                        return
                     mfa_profile = (
                         self._get_mfa_align_profile_code()
                         if hasattr(self, "_get_mfa_align_profile_code")
                         else "accurate"
                     )
                     self._append_log(f"? MFA ?? ???: {mfa_profile}")
-
-                sdic = self.sofa_dict_var.get().strip() or dict_path
-                if not self.sofa_dict_var.get().strip():
-                    self._after_safe(lambda p=sdic: self.sofa_dict_var.set(p))
-                    self._append_log(f"? SOFA ??? ?? ?? ?? ?? ??? ?????: {sdic}")
 
                 align_result = run_alignment_with_fallback(
                     language=lang,
@@ -681,7 +684,8 @@ class PipelineActionsMixin:
                     self._append_log(f"? ?? fallback ??: {align_result.get('fallback_path', '')}")
 
                 if not align_ok:
-                    if align_engine == "MFA" and align_err:
+                    show_advanced = bool(self.show_advanced_aligner_var.get()) if hasattr(self, "show_advanced_aligner_var") else False
+                    if align_engine == "MFA" and align_err and show_advanced:
                         self._notify_mfa_failure_suggest_sofa(lang, align_err)
                     self._append_log("⚠ 정렬 실패 상태로 다음 단계를 진행합니다.")
 

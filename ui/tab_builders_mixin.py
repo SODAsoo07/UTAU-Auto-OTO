@@ -38,7 +38,7 @@ class TabBuildersMixin:
 
         self.mfa_install_btn = ctk.CTkButton(
             mfa_inner,
-            text="⬇ MFA 자동 설치",
+            text="⬇ MFA 원클릭 설치",
             width=150,
             fg_color="#FFA726",
             hover_color="#FB8C00",
@@ -65,7 +65,7 @@ class TabBuildersMixin:
         steps = [
             ("1. Lab 생성", "WAV 파일에서 라벨(Lab) 파일을 생성합니다.", self._run_lab_gen),
             ("2. 사전(Dictionary) 생성", "Lab 기반으로 발음 사전 파일을 생성합니다.", self._run_dict_gen),
-            ("3. 음성 정렬 (MFA/SOFA)", "선택한 정렬 엔진으로 TextGrid를 생성합니다.", self._run_mfa),
+            ("3. 음성 정렬 (MFA)", "MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.", self._run_mfa),
             ("4. OTO.ini 생성", "TextGrid 기반으로 OTO 파라미터를 계산해 저장합니다.", self._run_oto_gen),
         ]
 
@@ -74,8 +74,13 @@ class TabBuildersMixin:
             frame.pack(fill="x", padx=10, pady=5)
             left = ctk.CTkFrame(frame, fg_color="transparent")
             left.pack(side="left", fill="x", expand=True, padx=10, pady=8)
-            ctk.CTkLabel(left, text=title, font=("", 14, "bold"), anchor="w").pack(anchor="w")
-            ctk.CTkLabel(left, text=desc, text_color="gray", anchor="w", wraplength=500).pack(anchor="w")
+            title_label = ctk.CTkLabel(left, text=title, font=("", 14, "bold"), anchor="w")
+            title_label.pack(anchor="w")
+            desc_label = ctk.CTkLabel(left, text=desc, text_color="gray", anchor="w", wraplength=500)
+            desc_label.pack(anchor="w")
+            if title.startswith("3. 음성 정렬"):
+                self.align_step_title_label = title_label
+                self.align_step_desc_label = desc_label
 
             if "OTO" in title:
                 opt_frame = ctk.CTkFrame(left, fg_color="transparent")
@@ -107,6 +112,8 @@ class TabBuildersMixin:
                 self.enable_ml_correction_checkbox.pack(anchor="w", pady=(5, 0))
 
             ctk.CTkButton(frame, text="실행", width=80, command=cmd).pack(side="right", padx=10)
+        if hasattr(self, "_sync_aligner_ui"):
+            self._sync_aligner_ui()
 
     def _build_params_tab(self):
         tab = self.tabview.add("파라미터")
@@ -182,6 +189,42 @@ class TabBuildersMixin:
             width=120,
             command=lambda: os.startfile(self.log_path) if os.path.exists(self.log_path) else None,
         ).pack(side="left", padx=5)
+
+    def _build_advanced_settings_tab(self):
+        tab = self.tabview.add("고급 설정")
+        container = ctk.CTkScrollableFrame(tab)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ctk.CTkLabel(
+            container,
+            text="고급 설정은 기본 사용에 필요하지 않습니다. 초보자는 MFA만 사용하는 것을 권장합니다.",
+            text_color="gray",
+            wraplength=760,
+            justify="left",
+        ).pack(fill="x", padx=10, pady=(8, 12))
+
+        aligner_frame = ctk.CTkFrame(container)
+        aligner_frame.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(
+            aligner_frame,
+            text="고급 정렬 엔진",
+            font=("", 14, "bold"),
+            anchor="w",
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+        ctk.CTkCheckBox(
+            aligner_frame,
+            text="SOFA 관련 옵션 표시",
+            variable=self.show_advanced_aligner_var,
+            command=self._on_advanced_aligner_toggle,
+            text_color="#90CAF9",
+        ).pack(anchor="w", padx=12, pady=(0, 6))
+        ctk.CTkLabel(
+            aligner_frame,
+            text="켜면 SOFA 설치 버튼, 선택 메뉴, 체크포인트/사전 입력창이 표시됩니다.",
+            text_color="gray",
+            wraplength=740,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(0, 10))
 
     def _build_profile_tune_tab(self):
         tab = self.tabview.add("🎯 프로파일 미세 조정")

@@ -9,6 +9,7 @@ import threading
 import traceback
 import time
 import tkinter as tk
+import webbrowser
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
@@ -50,6 +51,8 @@ class FileDialogMixin:
 
 
 class AppRuntimeMixin:
+    _MSVC_BUILD_TOOLS_URL = "https://visualstudio.microsoft.com/visual-cpp-build-tools/"
+
     def _normalize_ui_message(self, msg: str) -> str:
         original = str(msg or "")
         text = original
@@ -145,21 +148,9 @@ class AppRuntimeMixin:
 
         if log_to_file:
             self._log_to_file(msg)
-        if msg == ALERT_MSVC_REQUIRED:
+        if msg == ALERT_MSVC_REQUIRED or self._looks_like_msvc_requirement_message(msg):
             self._after_safe(
-                lambda: self._show_copyable_alert(
-                    title="MFA 의존성 설치 안내",
-                    message=(
-                        "MFA 한국어 의존성 설치 중 Microsoft Visual C++ 14.0+가 필요합니다.\n\n"
-                        "설치 링크:\n"
-                        "https://visualstudio.microsoft.com/visual-cpp-build-tools/\n\n"
-                        "권장:\n"
-                        "1) C++ Build Tools 설치\n"
-                        "2) 터미널 재시작\n"
-                        "3) MFA 설치/정렬 재시도"
-                    ),
-                    alert_key="msvc_required",
-                )
+                self._show_msvc_required_alert
             )
             return
         if msg == ALERT_MFA_PERMISSION_DENIED:
@@ -188,7 +179,32 @@ class AppRuntimeMixin:
 
         self._after_safe(_do)
 
-    def _show_copyable_alert(self, title, message, alert_key=None):
+    def _looks_like_msvc_requirement_message(self, msg):
+        text = str(msg or "")
+        lowered = text.lower()
+        return (
+            ("microsoft visual c++ 14.0" in lowered or "c++ build tools" in lowered)
+            and ("필요" in text or "required" in lowered)
+        )
+
+    def _show_msvc_required_alert(self):
+        self._show_copyable_alert(
+            title="MFA 의존성 설치 안내",
+            message=(
+                "MFA 한국어 의존성 설치 중 Microsoft Visual C++ 14.0+가 필요합니다.\n\n"
+                "설치 링크:\n"
+                f"{self._MSVC_BUILD_TOOLS_URL}\n\n"
+                "권장:\n"
+                "1) C++ Build Tools 설치\n"
+                "2) 터미널 재시작\n"
+                "3) MFA 설치/정렬 재시도"
+            ),
+            alert_key="msvc_required",
+            link_url=self._MSVC_BUILD_TOOLS_URL,
+            link_label="설치 링크 열기",
+        )
+
+    def _show_copyable_alert(self, title, message, alert_key=None, link_url="", link_label="링크 열기"):
         if self._is_closing:
             return
         if alert_key and alert_key in self._shown_alert_keys:
@@ -223,7 +239,28 @@ class AppRuntimeMixin:
             win.clipboard_append(message)
             win.update()
 
+        def _copy_link():
+            if not link_url:
+                return
+            win.clipboard_clear()
+            win.clipboard_append(link_url)
+            win.update()
+
+        def _open_link():
+            if not link_url:
+                return
+            try:
+                webbrowser.open(link_url)
+            except Exception:
+                try:
+                    os.startfile(link_url)
+                except Exception:
+                    pass
+
         ctk.CTkButton(btns, text="복사", width=90, command=_copy_text).pack(side="right")
+        if link_url:
+            ctk.CTkButton(btns, text="링크 복사", width=100, command=_copy_link).pack(side="right", padx=(0, 8))
+            ctk.CTkButton(btns, text=link_label, width=120, command=_open_link).pack(side="right", padx=(0, 8))
         ctk.CTkButton(btns, text="닫기", width=90, command=win.destroy).pack(side="right", padx=(0, 8))
 
     def _set_status(self, msg):
@@ -499,6 +536,7 @@ class ConfigMixin:
             "language": self.lang_var.get(),
             "auto_format": self.auto_format_var.get(),
             "ja_alias_style": self.ja_alias_style_var.get(),
+            "show_advanced_aligner": self.show_advanced_aligner_var.get() if hasattr(self, "show_advanced_aligner_var") else False,
             "aligner": self.aligner_var.get(),
             "mfa_align_profile": self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "정확도 우선 (기본)",
             "sofa_ckpt": self.sofa_ckpt_var.get(),
@@ -574,6 +612,8 @@ class ConfigMixin:
                 saved_aligner = config.get("aligner", "MFA")
                 if saved_aligner in {"MFA", "SOFA"}:
                     self.aligner_var.set(saved_aligner)
+            if hasattr(self, "show_advanced_aligner_var"):
+                self.show_advanced_aligner_var.set(False)
             if "mfa_align_profile" in config and hasattr(self, "mfa_align_profile_var"):
                 saved_profile = str(config.get("mfa_align_profile", "정확도 우선 (기본)") or "").strip()
                 if saved_profile in {"정확도 우선 (기본)", "빠름 (저사양 추천)", "accurate", "fast"}:
@@ -647,6 +687,8 @@ class ConfigMixin:
 
             self._on_language_change(self.lang_var.get())
             self._on_no_base_oto_toggle()
+            if hasattr(self, "_sync_aligner_ui"):
+                self._sync_aligner_ui()
 
             if "params" in config:
                 params = config["params"]

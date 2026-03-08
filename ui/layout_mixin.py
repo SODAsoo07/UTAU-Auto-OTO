@@ -118,28 +118,38 @@ class LayoutMixin:
             text_color="gray",
         ).pack(side="left", padx=10)
 
-        row_aligner = ctk.CTkFrame(path_frame, fg_color="transparent")
-        row_aligner.pack(fill="x", padx=10, pady=3)
-        ctk.CTkLabel(row_aligner, text="정렬 엔진:", width=120, anchor="w").pack(side="left")
+        self.row_aligner = ctk.CTkFrame(path_frame, fg_color="transparent")
+        self.row_aligner.pack(fill="x", padx=10, pady=3)
+        ctk.CTkLabel(self.row_aligner, text="정렬 엔진:", width=120, anchor="w").pack(side="left")
         self.aligner_menu = ctk.CTkOptionMenu(
-            row_aligner,
-            values=["MFA", "SOFA"],
+            self.row_aligner,
+            values=["MFA"],
             variable=self.aligner_var,
             width=200,
-            command=lambda _v: self._save_config(),
+            command=self._on_aligner_change,
         )
         self.aligner_menu.pack(side="left", padx=(5, 5))
-        ctk.CTkLabel(
-            row_aligner,
-            text="(MFA/SOFA 중 하나를 선택해 TextGrid를 생성합니다.)",
+        self.aligner_help_label = ctk.CTkLabel(
+            self.row_aligner,
+            text="(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)",
             text_color="gray",
-        ).pack(side="left", padx=10)
+        )
+        self.aligner_help_label.pack(side="left", padx=10)
 
-        row_mfa_profile = ctk.CTkFrame(path_frame, fg_color="transparent")
-        row_mfa_profile.pack(fill="x", padx=10, pady=3)
-        ctk.CTkLabel(row_mfa_profile, text="MFA 정렬 프로필", width=120, anchor="w").pack(side="left")
+        self.row_aligner_advanced = ctk.CTkFrame(path_frame, fg_color="transparent")
+        self.row_aligner_advanced.pack(fill="x", padx=10, pady=(0, 3))
+        ctk.CTkLabel(self.row_aligner_advanced, text="", width=120).pack(side="left")
+        ctk.CTkLabel(
+            self.row_aligner_advanced,
+            text="고급 정렬 옵션은 '고급 설정' 탭에서 켤 수 있습니다.",
+            text_color="gray",
+        ).pack(side="left", padx=(5, 0))
+
+        self.row_mfa_profile = ctk.CTkFrame(path_frame, fg_color="transparent")
+        self.row_mfa_profile.pack(fill="x", padx=10, pady=3)
+        ctk.CTkLabel(self.row_mfa_profile, text="MFA 정렬 프로필", width=120, anchor="w").pack(side="left")
         self.mfa_align_profile_menu = ctk.CTkOptionMenu(
-            row_mfa_profile,
+            self.row_mfa_profile,
             values=["정확도 우선 (기본)", "빠름 (저사양 추천)"],
             variable=self.mfa_align_profile_var,
             width=200,
@@ -147,28 +157,28 @@ class LayoutMixin:
         )
         self.mfa_align_profile_menu.pack(side="left", padx=(5, 5))
         ctk.CTkLabel(
-            row_mfa_profile,
+            self.row_mfa_profile,
             text="(기본은 기존 설정 유지, 느린 환경에서는 빠름 권장)",
             text_color="gray",
         ).pack(side="left", padx=10)
 
-        row_sofa_ckpt = ctk.CTkFrame(path_frame, fg_color="transparent")
-        row_sofa_ckpt.pack(fill="x", padx=10, pady=3)
-        ctk.CTkLabel(row_sofa_ckpt, text="SOFA 체크포인트:", width=120, anchor="w").pack(side="left")
+        self.row_sofa_ckpt = ctk.CTkFrame(path_frame, fg_color="transparent")
+        self.row_sofa_ckpt.pack(fill="x", padx=10, pady=3)
+        ctk.CTkLabel(self.row_sofa_ckpt, text="SOFA 체크포인트:", width=120, anchor="w").pack(side="left")
         self.sofa_ckpt_entry = ctk.CTkEntry(
-            row_sofa_ckpt,
+            self.row_sofa_ckpt,
             placeholder_text="SOFA 모델 체크포인트 파일 (.ckpt)",
             textvariable=self.sofa_ckpt_var,
         )
         self.sofa_ckpt_entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
         ctk.CTkButton(
-            row_sofa_ckpt,
+            self.row_sofa_ckpt,
             text="자동 다운로드",
             width=110,
             command=self._download_sofa_model_for_current_language,
         ).pack(side="right", padx=(0, 5))
         ctk.CTkButton(
-            row_sofa_ckpt,
+            self.row_sofa_ckpt,
             text="찾아보기",
             width=90,
             command=lambda: self._browse_file_by_var(
@@ -176,17 +186,17 @@ class LayoutMixin:
             ),
         ).pack(side="right")
 
-        row_sofa_dict = ctk.CTkFrame(path_frame, fg_color="transparent")
-        row_sofa_dict.pack(fill="x", padx=10, pady=3)
-        ctk.CTkLabel(row_sofa_dict, text="SOFA 사전(dict.txt):", width=120, anchor="w").pack(side="left")
+        self.row_sofa_dict = ctk.CTkFrame(path_frame, fg_color="transparent")
+        self.row_sofa_dict.pack(fill="x", padx=10, pady=3)
+        ctk.CTkLabel(self.row_sofa_dict, text="SOFA 사전(dict.txt):", width=120, anchor="w").pack(side="left")
         self.sofa_dict_entry = ctk.CTkEntry(
-            row_sofa_dict,
+            self.row_sofa_dict,
             placeholder_text="SOFA dictionary 파일 경로",
             textvariable=self.sofa_dict_var,
         )
         self.sofa_dict_entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
         ctk.CTkButton(
-            row_sofa_dict,
+            self.row_sofa_dict,
             text="찾아보기",
             width=90,
             command=lambda: self._browse_file_by_var(
@@ -209,6 +219,7 @@ class LayoutMixin:
         self._build_pipeline_tab()
         self._build_params_tab()
         self._build_profile_tune_tab()
+        self._build_advanced_settings_tab()
         self._build_log_tab()
 
         # ── 하단: 상태 바 & 버튼 ──
@@ -226,6 +237,7 @@ class LayoutMixin:
                                          fg_color="#FF6B6B", hover_color="#EE5A5A",
                                          command=self._export_error_report)
         self.report_btn.pack(side="right", padx=5)
+        self._sync_aligner_ui()
 
     def _get_language(self):
         """현재 선택된 언어를 'korean' 또는 'japanese'로 반환"""
@@ -260,6 +272,59 @@ class LayoutMixin:
         if profile in {"빠름 (저사양 추천)", "fast"}:
             return "fast"
         return "accurate"
+
+    def _on_aligner_change(self, _value=None):
+        self._sync_aligner_ui()
+        self._save_config()
+
+    def _on_advanced_aligner_toggle(self):
+        self._sync_aligner_ui()
+        self._save_config()
+
+    def _sync_aligner_ui(self):
+        show_advanced = bool(self.show_advanced_aligner_var.get()) if hasattr(self, "show_advanced_aligner_var") else False
+        current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA").strip() or "MFA"
+        valid_values = ["MFA", "SOFA"] if show_advanced else ["MFA"]
+        if current not in valid_values:
+            current = "MFA"
+            if hasattr(self, "aligner_var"):
+                self.aligner_var.set(current)
+        if hasattr(self, "aligner_menu"):
+            self.aligner_menu.configure(values=valid_values)
+            try:
+                self.aligner_menu.set(current)
+            except Exception:
+                pass
+        using_sofa = show_advanced and current == "SOFA"
+        if hasattr(self, "aligner_help_label"):
+            if show_advanced:
+                self.aligner_help_label.configure(text="(기본은 MFA입니다. SOFA는 고급 사용자용입니다.)")
+            else:
+                self.aligner_help_label.configure(text="(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)")
+        if hasattr(self, "row_sofa_ckpt"):
+            if using_sofa:
+                self.row_sofa_ckpt.pack(fill="x", padx=10, pady=3)
+                self.row_sofa_dict.pack(fill="x", padx=10, pady=3)
+            else:
+                self.row_sofa_ckpt.pack_forget()
+                self.row_sofa_dict.pack_forget()
+        if hasattr(self, "sofa_install_btn"):
+            if show_advanced:
+                self.sofa_install_btn.pack(side="right", padx=(0, 8))
+            else:
+                self.sofa_install_btn.pack_forget()
+        if hasattr(self, "sofa_status_label"):
+            if show_advanced:
+                self.sofa_status_label.pack(side="left")
+            else:
+                self.sofa_status_label.pack_forget()
+        if hasattr(self, "align_step_title_label") and hasattr(self, "align_step_desc_label"):
+            if show_advanced:
+                self.align_step_title_label.configure(text="3. 음성 정렬 (MFA/SOFA)")
+                self.align_step_desc_label.configure(text="선택한 정렬 엔진으로 TextGrid를 생성합니다. 초보자는 MFA를 권장합니다.")
+            else:
+                self.align_step_title_label.configure(text="3. 음성 정렬 (MFA)")
+                self.align_step_desc_label.configure(text="MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.")
 
     def _on_no_base_oto_toggle(self):
         no_base = bool(self.no_base_oto_var.get())

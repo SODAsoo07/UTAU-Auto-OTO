@@ -208,7 +208,10 @@ echo.
 
 echo ====================================================
 echo   Setup complete!
-echo   You can now run main.py or double-click run.bat.
+echo   Next step:
+echo   1) Launch UTAU_Auto_OTO.exe ^(배포본 사용 시^)
+echo   2) Or run run.bat ^(소스 폴더 실행 시^)
+echo   3) Then click "3. 음성 정렬" to continue
 echo ====================================================
 echo.
 pause
