@@ -9,6 +9,7 @@ if ROOT not in sys.path:
 
 from core.mfa_runner import (
     _contains_non_ascii,
+    _decode_subprocess_output,
     _prepare_ascii_safe_alignment_workspace,
 )
 
@@ -40,6 +41,12 @@ class MfaRunnerTests(unittest.TestCase):
             self.assertFalse(_contains_non_ascii(ws["corpus_dir"]))
             self.assertFalse(_contains_non_ascii(ws["dict_path"]))
             self.assertFalse(_contains_non_ascii(ws["output_dir"]))
+
+    def test_decode_subprocess_output_falls_back_from_utf8_mode(self):
+        expected = [0xD55C, 0xAE00, 0x20, 0xACBD, 0xB85C, 0x20, 0xCD9C, 0xB825]
+        text = "".join(chr(v) for v in expected)
+        raw = text.encode("cp949")
+        self.assertEqual([ord(ch) for ch in _decode_subprocess_output(raw)], expected)
 
 
 if __name__ == "__main__":

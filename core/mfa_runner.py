@@ -13,6 +13,7 @@ import shutil
 import hashlib
 import tempfile
 import locale
+from typing import Sequence
 
 from core.pipeline_status import (
     ALIGN_EXEC_MISSING,
@@ -55,6 +56,72 @@ def _preferred_subprocess_encoding():
         return locale.getpreferredencoding(False) or "utf-8"
     except Exception:
         return "utf-8"
+
+
+def _subprocess_decode_candidates() -> list[str]:
+    candidates: list[str] = []
+    for enc in (
+        "utf-8",
+        "cp949",
+        "cp932",
+        "mbcs",
+        _preferred_subprocess_encoding(),
+        getattr(locale, "getencoding", lambda: "")() or "",
+    ):
+        enc = str(enc or "").strip()
+        if enc and enc not in candidates:
+            candidates.append(enc)
+    return candidates
+
+
+def _score_decoded_subprocess_text(text: str) -> int:
+    score = 0
+    for ch in str(text or ""):
+        code = ord(ch)
+        if ch == "\ufffd":
+            score -= 20
+        elif 0x20 <= code <= 0x7E or ch in "\r\n\t":
+            score += 1
+        elif 0xAC00 <= code <= 0xD7A3:  # Hangul syllables
+            score += 4
+        elif 0x3040 <= code <= 0x30FF or 0x4E00 <= code <= 0x9FFF:  # Kana/CJK
+            score += 3
+        elif 0xFF61 <= code <= 0xFF9F:  # Halfwidth katakana mojibake hotspot
+            score -= 6
+        elif code < 0x20:
+            score -= 10
+        else:
+            score += 0
+    return score
+
+
+def _decode_subprocess_output(data) -> str:
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+    raw = bytes(data)
+    best_text = ""
+    best_score = None
+    for enc in _subprocess_decode_candidates():
+        try:
+            decoded = raw.decode(enc)
+        except (LookupError, UnicodeDecodeError):
+            continue
+        score = _score_decoded_subprocess_text(decoded)
+        if best_score is None or score > best_score:
+            best_text = decoded
+            best_score = score
+    if best_score is not None:
+        return best_text
+    return raw.decode("utf-8", errors="replace")
+
+
+def _run_subprocess_text(args: Sequence[str], **kwargs):
+    completed = subprocess.run(args, capture_output=True, text=False, **kwargs)
+    completed.stdout = _decode_subprocess_output(getattr(completed, "stdout", b""))
+    completed.stderr = _decode_subprocess_output(getattr(completed, "stderr", b""))
+    return completed
 
 
 def _contains_non_ascii(text):
@@ -179,7 +246,7 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
             subprocess.run(
                 [candidate, '--help'],
                 capture_output=True,
-                text=True,
+                text=False,
                 timeout=15,
                 env=env,
             )
@@ -246,11 +313,14 @@ def _resolve_single_speaker_flag(mfa_path, env=None):
         res = subprocess.run(
             [mfa_path, "align", "--help"],
             capture_output=True,
-            text=True,
+            text=False,
             timeout=20,
             env=env,
         )
-        help_text = f"{res.stdout or ''}\n{res.stderr or ''}".lower()
+        help_text = (
+            f"{_decode_subprocess_output(res.stdout)}\n"
+            f"{_decode_subprocess_output(res.stderr)}"
+        ).lower()
         for flag in candidates:
             if flag in help_text:
                 _MFA_SINGLE_SPEAKER_FLAG_CACHE[key] = flag
@@ -356,9 +426,10 @@ def check_mfa_model(mfa_path, language='korean'):
         env = _get_conda_env(mfa_path)
         result = subprocess.run(
             [mfa_path, 'model', 'list', 'acoustic'],
-            capture_output=True, text=True, timeout=30, env=env
+            capture_output=True, text=False, timeout=30, env=env
         )
-        if model_name in result.stdout:
+        stdout_text = _decode_subprocess_output(result.stdout)
+        if model_name in stdout_text:
             return True, f"{lang_label} MFA 모델이 설치되어 있습니다."
         else:
             return False, f"{lang_label} MFA 모델이 설치되어 있지 않습니다. 다운로드가 필요합니다."
@@ -440,13 +511,13 @@ def ensure_korean_support(mfa_path, callback=None):
                 cmds.append([system_conda, 'install', '-y', '--solver', 'classic', '-p', env_dir, 'libexpat'])
             for cmd in cmds:
                 log(f"   -> repair cmd: {' '.join(cmd)}")
-                res = subprocess.run(cmd, capture_output=True, text=True, env=env)
+                res = _run_subprocess_text(cmd, env=env)
                 if res.returncode == 0:
                     return True
             return False
 
         def _check_imports():
-            res = subprocess.run(check_cmd, capture_output=True, text=True, env=env)
+            res = _run_subprocess_text(check_cmd, env=env)
             if res.returncode == 0:
                 return True, ''
             detail = (res.stderr or res.stdout or '').strip()
@@ -474,7 +545,7 @@ def ensure_korean_support(mfa_path, callback=None):
         last_err = detail
         for install_cmd in install_cmds:
             log(f"   -> cmd: {' '.join(install_cmd)}")
-            result = subprocess.run(install_cmd, capture_output=True, text=True, env=env)
+            result = _run_subprocess_text(install_cmd, env=env)
             if result.returncode != 0:
                 err_txt = (result.stderr or result.stdout or '').strip()
                 if err_txt:
@@ -527,7 +598,7 @@ def ensure_japanese_support(mfa_path, callback=None):
     check_cmd = [python_exe, '-c', 'import spacy; import sudachipy; import sudachidict_core']
     try:
         env = _get_conda_env(mfa_path)
-        result = subprocess.run(check_cmd, capture_output=True, text=True, env=env)
+        result = _run_subprocess_text(check_cmd, env=env)
         if result.returncode == 0:
             return True
 
@@ -556,7 +627,7 @@ def ensure_japanese_support(mfa_path, callback=None):
             return False
 
         log(f"   -> 실행 명령어: {' '.join(install_cmd)}")
-        install_result = subprocess.run(install_cmd, capture_output=True, text=True, env=env)
+        install_result = _run_subprocess_text(install_cmd, env=env)
         if install_result.returncode != 0:
             if install_result.stderr:
                 log(f"   ⚠️ 설치 stderr: {install_result.stderr[:500]}")
@@ -565,7 +636,7 @@ def ensure_japanese_support(mfa_path, callback=None):
             if os.path.exists(pip_exe):
                 pip_cmd = [pip_exe, 'install', 'spacy', 'sudachipy', 'sudachidict-core']
                 log(f"   -> 대체 설치 명령어(pip): {' '.join(pip_cmd)}")
-                pip_result = subprocess.run(pip_cmd, capture_output=True, text=True, env=env)
+                pip_result = _run_subprocess_text(pip_cmd, env=env)
                 if pip_result.returncode != 0:
                     if pip_result.stderr:
                         log(f"   ⚠️ pip stderr: {pip_result.stderr[:500]}")
@@ -575,7 +646,7 @@ def ensure_japanese_support(mfa_path, callback=None):
             else:
                 return False
 
-        verify = subprocess.run(check_cmd, capture_output=True, text=True, env=env)
+        verify = _run_subprocess_text(check_cmd, env=env)
         if verify.returncode == 0:
             log("✅ 일본어 토크나이저 의존성 설치 확인 완료")
             return True
@@ -611,14 +682,12 @@ def download_mfa_model(mfa_path, language='korean', callback=None):
             [mfa_path, 'model', 'download', 'acoustic', model_name, '--ignore_cache'],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding=_preferred_subprocess_encoding(),
-            errors='replace',
+            text=False,
             env=env,
         )
         if process.stdout:
-            for line in process.stdout:
-                line = line.strip()
+            for raw_line in iter(process.stdout.readline, b""):
+                line = _decode_subprocess_output(raw_line).strip()
                 if line:
                     log(line)
         process.wait()
@@ -713,15 +782,13 @@ def run_mfa_align(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding=_preferred_subprocess_encoding(),
-            errors='replace',
+            text=False,
             env=env,
         )
         tail_lines = []
         if process.stdout:
-            for line in process.stdout:
-                stripped = line.strip()
+            for raw_line in iter(process.stdout.readline, b""):
+                stripped = _decode_subprocess_output(raw_line).strip()
                 if stripped:
                     log(stripped)
                     tail_lines.append(stripped)

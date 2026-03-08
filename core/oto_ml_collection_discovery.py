@@ -118,6 +118,20 @@ def _find_wav_dir(base: str, prefer_dir: str = "") -> str:
     return max(counts.items(), key=lambda item: item[1])[0]
 
 
+def _derive_dataset_voicebank_id(language: str, format_type: str, vb_root: str, work_dir: str) -> str:
+    base_name = os.path.basename(os.path.abspath(vb_root))
+    rel = os.path.relpath(work_dir, vb_root)
+    if not rel or rel == ".":
+        return base_name
+    # Staged dataset can contain an extra container folder such as .../korean/cvc/CVC/<voicebank>/...
+    # In that case use the first child folder as the logical voicebank id.
+    if normalize_format_type(language, base_name) == format_type:
+        first = rel.split(os.sep, 1)[0].strip()
+        if first:
+            return first
+    return base_name
+
+
 def _score_manual_name(path: str) -> Tuple[int, int]:
     name = _norm_name(path)
     if name in MANUAL_NAME_PRIORITY:
@@ -313,7 +327,7 @@ def discover_training_candidates_from_dataset_root(dataset_root: str) -> List[Tr
                             tg_dir=tg_dir,
                             wav_dir=wav_dir,
                             custom_phonemes=_find_custom_phoneme_map_chain(dp, vb_root),
-                            voicebank_id=os.path.basename(vb_root),
+                            voicebank_id=_derive_dataset_voicebank_id(language, fmt, vb_root, dp),
                         )
                     )
     return candidates
