@@ -66,7 +66,24 @@ def _app_dir():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _shared_sofa_root():
+    local_root = os.environ.get("LOCALAPPDATA", "")
+    if local_root:
+        return os.path.join(local_root, "UTAU_Auto_OTO_v3")
+    public_root = os.environ.get("PUBLIC", r"C:\Users\Public")
+    return os.path.join(public_root, "UTAU_Auto_OTO_v3")
+
+
 def get_default_sofa_repo_dir(profile="default"):
+    profile_key = (profile or "default").strip().lower()
+    if profile_key in {"utau_kr_v1", "kr_utau_v1", "korean_utau_v1"}:
+        repo_name = DEFAULT_UTAU_KR_SOFA_REPO_NAME
+    else:
+        repo_name = DEFAULT_SOFA_REPO_NAME
+    return os.path.join(_shared_sofa_root(), ".sofa", repo_name)
+
+
+def _legacy_default_sofa_repo_dir(profile="default"):
     profile_key = (profile or "default").strip().lower()
     if profile_key in {"utau_kr_v1", "kr_utau_v1", "korean_utau_v1"}:
         repo_name = DEFAULT_UTAU_KR_SOFA_REPO_NAME
@@ -81,7 +98,13 @@ def _resolve_sofa_repo_dir(sofa_repo_dir=""):
         if not os.path.isabs(path):
             path = os.path.abspath(os.path.join(_app_dir(), path))
         return path
-    return get_default_sofa_repo_dir()
+    default_path = get_default_sofa_repo_dir()
+    legacy_path = _legacy_default_sofa_repo_dir()
+    if os.path.exists(os.path.join(default_path, "infer.py")):
+        return default_path
+    if os.path.exists(os.path.join(legacy_path, "infer.py")):
+        return legacy_path
+    return default_path
 
 
 @dataclass
@@ -161,7 +184,7 @@ def _runtime_base_dir():
 
 
 def _sofa_tool_dir():
-    return os.path.join(_app_dir(), ".sofa", "tools")
+    return os.path.join(_shared_sofa_root(), ".sofa", "tools")
 
 
 def _runtime_ffmpeg_bin_dir():
@@ -276,13 +299,33 @@ def _prepend_ffmpeg_to_env_path(env, callback=None, extra_dirs=None):
 
 
 def get_sofa_env_dir():
+    return os.path.join(_shared_sofa_root(), ".env_sofa")
+
+
+def _legacy_sofa_env_dir():
     return os.path.join(_app_dir(), ".env_sofa")
 
 
+def _find_existing_sofa_env_python():
+    candidates = []
+    for env_dir in (get_sofa_env_dir(), _legacy_sofa_env_dir()):
+        if sys.platform == "win32":
+            candidates.append(os.path.join(env_dir, "Scripts", "python.exe"))
+        else:
+            candidates.append(os.path.join(env_dir, "bin", "python"))
+    seen = set()
+    for path in candidates:
+        key = os.path.normcase(os.path.normpath(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        if os.path.exists(path):
+            return path
+    return candidates[0]
+
+
 def get_sofa_env_python():
-    if sys.platform == "win32":
-        return os.path.join(get_sofa_env_dir(), "Scripts", "python.exe")
-    return os.path.join(get_sofa_env_dir(), "bin", "python")
+    return _find_existing_sofa_env_python()
 
 
 def _resolve_venv_builder_cmd():

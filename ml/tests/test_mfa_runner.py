@@ -11,6 +11,7 @@ from core.mfa_runner import (
     _contains_non_ascii,
     _decode_subprocess_output,
     _prepare_ascii_safe_alignment_workspace,
+    mfa_python_version_requires_downgrade,
 )
 
 
@@ -47,6 +48,15 @@ class MfaRunnerTests(unittest.TestCase):
         text = "".join(chr(v) for v in expected)
         raw = text.encode("cp949")
         self.assertEqual([ord(ch) for ch in _decode_subprocess_output(raw)], expected)
+
+    def test_python_313_requires_downgrade(self):
+        self.assertTrue(mfa_python_version_requires_downgrade("3.13.0"))
+        self.assertTrue(mfa_python_version_requires_downgrade("3.14"))
+
+    def test_python_312_or_lower_does_not_require_downgrade(self):
+        self.assertFalse(mfa_python_version_requires_downgrade("3.12.9"))
+        self.assertFalse(mfa_python_version_requires_downgrade("3.10.11"))
+        self.assertFalse(mfa_python_version_requires_downgrade(""))
 
 
 if __name__ == "__main__":

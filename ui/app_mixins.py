@@ -627,7 +627,11 @@ class ConfigMixin:
             if "sofa_dict" in config:
                 self.sofa_dict_var.set(config.get("sofa_dict", ""))
             if "sofa_python" in config:
-                self.sofa_python_var.set(config.get("sofa_python", get_sofa_env_python()))
+                saved_sofa_python = str(config.get("sofa_python", "") or "").strip()
+                if saved_sofa_python and os.path.exists(saved_sofa_python):
+                    self.sofa_python_var.set(saved_sofa_python)
+                else:
+                    self.sofa_python_var.set(get_sofa_env_python())
             if "sofa_repo_dir" in config and hasattr(self, "sofa_repo_dir_var"):
                 self.sofa_repo_dir_var.set(config.get("sofa_repo_dir", ""))
             if "sofa_mode" in config and hasattr(self, "sofa_mode_var"):

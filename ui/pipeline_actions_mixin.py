@@ -12,9 +12,14 @@ from core.ja_oto_generator import (
 )
 from core.lab_generator import generate_dictionary, generate_labs
 from core.mfa_runner import (
+    MFA_PORTABLE_PYTHON_VERSION,
     check_mfa_model,
     download_mfa_model,
+    ensure_japanese_support,
     ensure_korean_support,
+    get_default_mfa_env_dir,
+    get_mfa_env_python_version,
+    mfa_env_requires_python_downgrade,
     patch_mfa_korean_support,
     run_mfa_align,
 )
@@ -38,6 +43,33 @@ from core.sofa_runner import (
 
 
 class PipelineActionsMixin:
+    def _notify_long_install_time(self, target="MFA"):
+        target_text = str(target or "MFA").upper()
+        if target_text == "SOFA":
+            title = "SOFA 초기 설치 안내"
+            message = (
+                "처음 SOFA를 설치할 때는 저장소 다운로드와 Python 패키지 설치 때문에 시간이 꽤 걸릴 수 있습니다.\n\n"
+                "환경과 네트워크 속도에 따라 보통 수 분에서 10분 이상 걸릴 수 있습니다.\n"
+                "설치 중에는 프로그램을 종료하지 말고 기다려 주세요."
+            )
+            alert_key = "install_time_sofa"
+        else:
+            title = "MFA 초기 설치 안내"
+            message = (
+                "처음 MFA를 설치할 때는 Miniconda/MFA 설치와 언어 모델 다운로드 때문에 시간이 오래 걸릴 수 있습니다.\n\n"
+                "환경과 네트워크 속도에 따라 보통 10~20분, 경우에 따라 그 이상 걸릴 수 있습니다.\n"
+                "설치 중에는 프로그램을 종료하지 말고 기다려 주세요."
+            )
+            alert_key = "install_time_mfa"
+        self._append_log(f"ℹ {title}: 설치에 시간이 오래 걸릴 수 있습니다.")
+        self._after_safe(
+            lambda: self._show_copyable_alert(
+                title=title,
+                message=message,
+                alert_key=alert_key,
+            )
+        )
+
     def _read_runtime_var(self, var_name, default=None):
         var = getattr(self, var_name, None)
         if var is None:
@@ -202,28 +234,60 @@ class PipelineActionsMixin:
 
         lang = str(language or "korean").strip().lower()
         app_dir = getattr(self, "app_dir", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        portable_env_dir = os.path.join(app_dir, '.env')
-        public_root = os.environ.get('PUBLIC', r'C:\Users\Public')
-        fallback_env_dir = os.path.join(public_root, 'UTAU_Auto_OTO_v3', '.env')
-        env_dir = portable_env_dir
-        if any(ord(ch) > 127 for ch in portable_env_dir):
-            env_dir = fallback_env_dir
-            self._append_log("⚠ 앱 경로에 비ASCII 문자가 있어 MFA 환경을 공용 폴더에 설치합니다.")
-            self._append_log(f"   대체 설치 경로: {env_dir}")
+        env_dir = get_default_mfa_env_dir()
+        if any(ord(ch) > 127 for ch in app_dir):
+            self._append_log("⚠ 앱 경로에 비ASCII 문자가 있어도 MFA 환경은 공용 폴더를 사용합니다.")
+        self._append_log(f"ℹ MFA 공용 환경 경로: {env_dir}")
         mfa_exe = os.path.join(env_dir, 'Scripts', 'mfa.exe')
         installer = os.path.join(app_dir, 'Miniconda3-latest-Windows-x86_64.exe')
 
+        def _remove_env_dir():
+            if not os.path.isdir(env_dir):
+                return True
+            self._append_log(f"🧹 기존 MFA 환경 정리 중: {env_dir}")
+            try:
+                shutil.rmtree(env_dir)
+                return True
+            except Exception as e:
+                self._append_log(f"❌ 기존 MFA 환경 정리 실패: {e}")
+                return False
+
         if os.path.exists(mfa_exe):
-            self._append_log("✅ MFA 실행 환경이 이미 있습니다.")
-            self.mfa_path = mfa_exe
-        else:
+            py_ver = get_mfa_env_python_version(mfa_exe)
+            if mfa_env_requires_python_downgrade(mfa_exe):
+                self._append_log(
+                    f"⚠ 현재 MFA 환경 Python {py_ver or '(unknown)'} 은/는 "
+                    f"Windows MFA 의존성과 호환되지 않아 Python {MFA_PORTABLE_PYTHON_VERSION} 기준으로 다시 구성합니다."
+                )
+                if not _remove_env_dir():
+                    return False
+                self.mfa_path = ""
+            else:
+                self._append_log("✅ MFA 실행 환경이 이미 있습니다.")
+                if py_ver:
+                    self._append_log(f"ℹ MFA Python 버전: {py_ver}")
+                self.mfa_path = mfa_exe
+
+        if not os.path.exists(mfa_exe):
             system_conda = shutil.which('conda')
             if system_conda:
                 self._append_log(f"🔍 시스템에 설치된 Conda 발견: {system_conda}")
                 self._append_log("   Miniconda 다운로드를 건너뛰고 기존 Conda를 활용해 환경을 구성합니다.")
                 self._append_log("[1/2] 🔧 MFA 전용 로컬 환경 생성 및 설치 중... (5~10분)")
                 process = sp.Popen(
-                    [system_conda, 'create', '-y', '-p', env_dir, '-c', 'conda-forge', '--override-channels', 'montreal-forced-aligner', 'colorama'],
+                    [
+                        system_conda,
+                        'create',
+                        '-y',
+                        '-p',
+                        env_dir,
+                        '-c',
+                        'conda-forge',
+                        '--override-channels',
+                        f'python={MFA_PORTABLE_PYTHON_VERSION}',
+                        'montreal-forced-aligner',
+                        'colorama',
+                    ],
                     stdout=sp.PIPE,
                     stderr=sp.STDOUT,
                     text=True,
@@ -238,8 +302,6 @@ class PipelineActionsMixin:
                 if process.returncode != 0:
                     self._append_log("❌ MFA 설치 실패")
                     return False
-                self._append_log("[2/2] 📦 추가 의존성 모듈 설치 중...")
-                sp.run([system_conda, 'run', '-p', env_dir, 'pip', 'install', 'eunjeon', 'jamo', 'textgrid'], capture_output=True)
                 self.mfa_path = mfa_exe
             else:
                 self._append_log("🔍 시스템 Conda를 찾지 못했습니다. Miniconda 포터블 환경을 구축합니다.")
@@ -297,7 +359,19 @@ class PipelineActionsMixin:
 
                 self._append_log("[3/3] 🔧 MFA 설치 중... (5~10분)")
                 process = sp.Popen(
-                    [conda_exe, 'install', '-y', '-c', 'conda-forge', '--override-channels', 'montreal-forced-aligner', 'colorama'],
+                    [
+                        conda_exe,
+                        'install',
+                        '-y',
+                        '-p',
+                        env_dir,
+                        '-c',
+                        'conda-forge',
+                        '--override-channels',
+                        f'python={MFA_PORTABLE_PYTHON_VERSION}',
+                        'montreal-forced-aligner',
+                        'colorama',
+                    ],
                     stdout=sp.PIPE,
                     stderr=sp.STDOUT,
                     text=True,
@@ -313,8 +387,6 @@ class PipelineActionsMixin:
                     self._append_log("❌ MFA 설치 실패")
                     return False
                 self._append_log("✅ Conda 패키지 설치 완료!")
-                self._append_log("[3.5/4] 📦 추가 의존성 모듈 설치 중...")
-                sp.run([conda_exe, 'run', '-p', env_dir, 'pip', 'install', 'eunjeon', 'jamo', 'textgrid'], capture_output=True)
                 self.mfa_path = mfa_exe
 
         if lang == "korean":
@@ -322,6 +394,10 @@ class PipelineActionsMixin:
             patch_mfa_korean_support(self.mfa_path, callback=self._append_log)
             if not ensure_korean_support(self.mfa_path, callback=self._append_log):
                 self._append_log("❌ 한국어 MFA 의존성 준비 실패")
+                return False
+        elif lang == "japanese":
+            if not ensure_japanese_support(self.mfa_path, callback=self._append_log):
+                self._append_log("❌ 일본어 MFA 의존성 준비 실패")
                 return False
 
         has_model, msg = check_mfa_model(self.mfa_path, language=lang)
@@ -348,11 +424,25 @@ class PipelineActionsMixin:
     def _ensure_mfa_ready_for_language(self, language="korean"):
         lang = str(language or "korean").strip().lower()
         if not self.mfa_path or not os.path.exists(self.mfa_path):
+            self._notify_long_install_time("MFA")
             self._append_log("ℹ MFA가 없어 지금 자동 설치를 시작합니다.")
             return self._install_mfa_runtime(language=lang)
-        if lang == "korean" and not ensure_korean_support(self.mfa_path, callback=self._append_log):
-            self._append_log("❌ 한국어 MFA 의존성 준비 실패")
-            return False
+        if mfa_env_requires_python_downgrade(self.mfa_path):
+            py_ver = get_mfa_env_python_version(self.mfa_path)
+            self._append_log(
+                f"⚠ 현재 MFA 환경 Python {py_ver or '(unknown)'} 은/는 "
+                f"Windows MFA 의존성과 호환되지 않아 Python {MFA_PORTABLE_PYTHON_VERSION} 기준으로 다시 구성합니다."
+            )
+            self.mfa_path = ""
+            return self._install_mfa_runtime(language=lang)
+        if lang == "korean":
+            if not ensure_korean_support(self.mfa_path, callback=self._append_log):
+                self._append_log("❌ 한국어 MFA 의존성 준비 실패")
+                return False
+        elif lang == "japanese":
+            if not ensure_japanese_support(self.mfa_path, callback=self._append_log):
+                self._append_log("❌ 일본어 MFA 의존성 준비 실패")
+                return False
         has_model, msg = check_mfa_model(self.mfa_path, language=lang)
         if msg:
             self._append_log(msg)
@@ -365,6 +455,7 @@ class PipelineActionsMixin:
 
     def _run_mfa_setup(self):
         """GUI 안에서 MFA 포터블 환경을 자동 설치합니다."""
+        self._notify_long_install_time("MFA")
         def task():
             self._set_running(True)
             self._set_status("⬇ MFA 자동 설치 중... (10~20분 소요)")
@@ -392,6 +483,7 @@ class PipelineActionsMixin:
 
     def _run_sofa_setup(self):
         """SOFA 지원 환경을 자동 설치/점검합니다."""
+        self._notify_long_install_time("SOFA")
         def task():
             self._set_running(True)
             self._set_status("⬇ SOFA 설치 준비 중... (수 분 소요)")

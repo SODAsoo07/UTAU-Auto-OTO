@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 ALERT_MSVC_REQUIRED = "__ALERT__MSVC_REQUIRED__"
 ALERT_MFA_PERMISSION_DENIED = "__ALERT__MFA_PERMISSION_DENIED__"
 MSVC_REQUIRED_TEXT = "microsoft visual c++ 14.0 or greater is required"
+MFA_PORTABLE_PYTHON_VERSION = "3.10"
 _MFA_SINGLE_SPEAKER_FLAG_CACHE = {}
 
 MFA_ALIGN_PROFILE_PRESETS = {
@@ -143,6 +144,35 @@ def _default_mfa_root_dir(mfa_path=""):
     return root
 
 
+def get_default_mfa_env_dir():
+    public_root = os.environ.get("PUBLIC", r"C:\Users\Public")
+    return os.path.join(public_root, "UTAU_Auto_OTO_v3", ".env")
+
+
+def _candidate_mfa_executable_paths():
+    if getattr(sys, 'frozen', False):
+        app_dir = os.path.dirname(sys.executable)
+    else:
+        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    shared_env_dir = get_default_mfa_env_dir()
+    candidates = [
+        os.path.join(shared_env_dir, 'Scripts', 'mfa.exe'),
+        os.path.join(shared_env_dir, 'bin', 'mfa'),
+        os.path.join(app_dir, '.env', 'Scripts', 'mfa.exe'),
+        os.path.join(app_dir, '.env', 'bin', 'mfa'),
+        os.path.join(app_dir, 'env', 'Scripts', 'mfa.exe'),
+    ]
+    seen = set()
+    unique = []
+    for path in candidates:
+        key = os.path.normcase(os.path.normpath(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
 def _link_or_copy(src, dst):
     os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
     if os.path.exists(dst):
@@ -219,6 +249,51 @@ def _emit_msvc_required_notice(callback, log_fn):
         callback(ALERT_MSVC_REQUIRED)
     log_fn("⚠ Microsoft Visual C++ 14.0+ (C++ Build Tools)가 필요합니다.")
     log_fn("   설치 링크: https://visualstudio.microsoft.com/visual-cpp-build-tools/")
+
+
+def mfa_python_version_requires_downgrade(version_text: str) -> bool:
+    text = str(version_text or "").strip()
+    if not text:
+        return False
+    match = re.match(r"^\s*(\d+)\.(\d+)", text)
+    if not match:
+        return False
+    major = int(match.group(1))
+    minor = int(match.group(2))
+    return major > 3 or (major == 3 and minor >= 13)
+
+
+def get_mfa_env_python_version(mfa_path: str) -> str:
+    if not mfa_path:
+        return ""
+    env_dir = os.path.dirname(os.path.dirname(os.path.abspath(mfa_path)))
+    candidates = [
+        os.path.join(env_dir, "python.exe"),
+        os.path.join(env_dir, "bin", "python"),
+    ]
+    python_exe = next((p for p in candidates if os.path.exists(p)), "")
+    if not python_exe:
+        return ""
+    try:
+        env = _get_conda_env(mfa_path)
+        result = _run_subprocess_text(
+            [
+                python_exe,
+                "-c",
+                "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')",
+            ],
+            env=env,
+            timeout=20,
+        )
+        if result.returncode != 0:
+            return ""
+        return str(result.stdout or "").strip().splitlines()[-1].strip()
+    except Exception:
+        return ""
+
+
+def mfa_env_requires_python_downgrade(mfa_path: str) -> bool:
+    return mfa_python_version_requires_downgrade(get_mfa_env_python_version(mfa_path))
 
 
 def _preflight_compute_mfcc(mfa_path, callback=None):
@@ -364,23 +439,8 @@ def find_mfa_executable():
     Returns:
         MFA 실행 파일 경로 또는 None
     """
-    # 1. 포터블 환경 (프로그램 폴더 내 .env/)
-    if getattr(sys, 'frozen', False):
-        app_dir = os.path.dirname(sys.executable)
-    else:
-        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        
-    portable_paths = [
-        os.path.join(app_dir, '.env', 'Scripts', 'mfa.exe'),
-        os.path.join(app_dir, '.env', 'bin', 'mfa'),
-        os.path.join(app_dir, 'env', 'Scripts', 'mfa.exe'),
-    ]
-    public_root = os.environ.get('PUBLIC', r'C:\Users\Public')
-    portable_paths.extend([
-        os.path.join(public_root, 'UTAU_Auto_OTO_v3', '.env', 'Scripts', 'mfa.exe'),
-        os.path.join(public_root, 'UTAU_Auto_OTO_v3', '.env', 'bin', 'mfa'),
-    ])
-    for p in portable_paths:
+    # 1. 공유/레거시 포터블 환경
+    for p in _candidate_mfa_executable_paths():
         if os.path.exists(p):
             logger.info(f"포터블 MFA 발견: {p}")
             return p
@@ -674,6 +734,10 @@ def download_mfa_model(mfa_path, language='korean', callback=None):
     if language == 'korean':
         if not ensure_korean_support(mfa_path, callback):
             log('Failed to prepare Korean dependencies (eunjeon, jamo).')
+            return False
+    elif language == 'japanese':
+        if not ensure_japanese_support(mfa_path, callback):
+            log('Failed to prepare Japanese dependencies (spacy, sudachipy, sudachidict-core).')
             return False
     log(f'Downloading {lang_label} MFA model...')
     try:
