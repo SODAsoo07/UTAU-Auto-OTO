@@ -13,6 +13,8 @@ from typing import Dict, List, Optional, Tuple
 
 from core.oto_ml_features import extract_feature_rows, get_delta_clip_limits, parse_oto_rows
 from core.oto_ml_runtime import load_oto_model_bundle, predict_oto_deltas
+from core.oto_ml_lightgbm import load_lightgbm_selector_bundle, predict_lightgbm_selector_score
+from core.oto_ml_selector import select_best_candidate
 from core.format_type_utils import normalize_format_type
 from core.pipeline_status import (
     ML_APPLIED,
@@ -533,6 +535,7 @@ def apply_oto_ml_delta(
     bundle,
     *,
     anchor_stats: Optional[Dict[str, int]] = None,
+    base_params_override: Optional[Tuple[float, float, float, float, float]] = None,
 ) -> Tuple[float, float, float, float, float]:
     validate_oto_params = _get_validate_func(language)
     pred = predict_oto_deltas(bundle, row_context)
@@ -541,12 +544,20 @@ def apply_oto_ml_delta(
         for key, val in pred.deltas.items()
     }
     deltas = _apply_language_specific_delta_policy(language, row_context, deltas)
-    offset = float(row_context.get("base_offset", 0.0)) + deltas.get("delta_offset", 0.0)
-    cons = float(row_context.get("base_cons", 0.0)) + deltas.get("delta_cons", 0.0)
-    cutoff_abs = float(row_context.get("base_cutoff_abs", 0.0)) + deltas.get("delta_cutoff", 0.0)
+    if base_params_override is not None:
+        base_offset, base_cons, base_cutoff_abs, base_pre, base_ovl = base_params_override
+    else:
+        base_offset = float(row_context.get("base_offset", 0.0))
+        base_cons = float(row_context.get("base_cons", 0.0))
+        base_cutoff_abs = float(row_context.get("base_cutoff_abs", 0.0))
+        base_pre = float(row_context.get("base_pre", 0.0))
+        base_ovl = float(row_context.get("base_ovl", 0.0))
+    offset = float(base_offset) + deltas.get("delta_offset", 0.0)
+    cons = float(base_cons) + deltas.get("delta_cons", 0.0)
+    cutoff_abs = float(base_cutoff_abs) + deltas.get("delta_cutoff", 0.0)
     cutoff = -(cutoff_abs - offset)
-    pre = float(row_context.get("base_pre", 0.0)) + deltas.get("delta_pre", 0.0)
-    ovl = float(row_context.get("base_ovl", 0.0)) + deltas.get("delta_ovl", 0.0)
+    pre = float(base_pre) + deltas.get("delta_pre", 0.0)
+    ovl = float(base_ovl) + deltas.get("delta_ovl", 0.0)
     out = validate_oto_params(offset, cons, cutoff, pre, ovl)
     if str(language or "").strip().lower() == "korean":
         out = _apply_korean_bridge_post_guard(row_context, out, validate_oto_params)
@@ -589,6 +600,9 @@ def apply_oto_ml_to_oto_file(
         changed_lines=0,
         infer_failures=[],
         anchor_stats={},
+        selector_rows=0,
+        selector_model_routes=[],
+        selector_mode_counts={},
     )
     ml_report["policy"] = policy_name
 
@@ -629,6 +643,7 @@ def apply_oto_ml_to_oto_file(
         return 0
 
     bundle_cache: Dict[str, Optional[object]] = {}
+    selector_cache: Dict[str, Optional[object]] = {}
     route_status: Dict[str, str] = {}
     route_model_dir: Dict[str, str] = {}
     model_notice = set()
@@ -668,14 +683,39 @@ def apply_oto_ml_to_oto_file(
                 bundle_cache[cache_key] = None
             else:
                 bundle_cache[cache_key] = load_oto_model_bundle(route_model_dir[cache_key])
+                selector_cache[cache_key] = load_lightgbm_selector_bundle(route_model_dir[cache_key]) if route_model_dir[cache_key] else None
                 bundle = bundle_cache[cache_key]
                 if bundle and route_model_dir[cache_key] and route_model_dir[cache_key] not in model_notice:
                     _emit(callback, f"[OTO-ML] 모델 로드 ({bundle.backend}): {route_model_dir[cache_key]}")
                     ml_report["loaded_models"].append(route_model_dir[cache_key])
                     model_notice.add(route_model_dir[cache_key])
+                if selector_cache.get(cache_key) is not None and route_model_dir[cache_key] not in ml_report["selector_model_routes"]:
+                    ml_report["selector_model_routes"].append(route_model_dir[cache_key])
         bundle = bundle_cache.get(cache_key)
         if not bundle:
             continue
+        selected_base_override = None
+        selector_bundle = selector_cache.get(cache_key)
+        if selector_bundle is not None:
+            selected = select_best_candidate(
+                language,
+                feat,
+                lambda candidate_row, payload=selector_bundle: predict_lightgbm_selector_score(payload, candidate_row),
+            )
+            if selected and selected.get("candidate"):
+                candidate = selected["candidate"]
+                selected_base_override = (
+                    float(candidate.get("offset", 0.0)),
+                    float(candidate.get("cons", 0.0)),
+                    float(candidate.get("cutoff_abs", 0.0)),
+                    float(candidate.get("pre", 0.0)),
+                    float(candidate.get("ovl", 0.0)),
+                )
+                ml_report["selector_rows"] = int(ml_report.get("selector_rows", 0)) + 1
+                mode = str(candidate.get("candidate_mode", "base") or "base")
+                selector_mode_counts = ml_report.get("selector_mode_counts", {})
+                selector_mode_counts[mode] = int(selector_mode_counts.get(mode, 0)) + 1
+                ml_report["selector_mode_counts"] = selector_mode_counts
         line_index = int(feat.get("line_index", -1))
         row = rows_by_index.get(line_index)
         if row is None:
@@ -686,6 +726,7 @@ def apply_oto_ml_to_oto_file(
                 feat,
                 bundle,
                 anchor_stats=anchor_stats,
+                base_params_override=selected_base_override,
             )
         except Exception as e:
             logger.warning("OTO ML inference skipped for line %s: %s", line_index, e)

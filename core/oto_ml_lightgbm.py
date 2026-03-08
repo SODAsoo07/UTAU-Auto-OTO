@@ -40,6 +40,13 @@ else:
 
 from core.format_type_utils import normalize_format_type
 from core.oto_ml_features import CATEGORICAL_FEATURES, FEATURE_NAMES, TARGET_NAMES, canonicalize_feature_row, get_delta_clip_limits, get_feature_schema, write_feature_schema
+from core.oto_ml_selector import (
+    SELECTOR_CATEGORICAL_FEATURES,
+    SELECTOR_FEATURE_NAMES,
+    canonicalize_selector_feature_row,
+    get_selector_feature_schema,
+    write_selector_feature_schema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +125,51 @@ def _prepare_frame(df, feature_names, categorical_features):
         else:
             frame[col] = pd.to_numeric(frame[col], errors="coerce").fillna(0.0)
     return frame
+
+
+def _group_sizes_from_series(series):
+    groups = []
+    current = None
+    count = 0
+    for value in series.astype(str).tolist():
+        if current is None:
+            current = value
+            count = 1
+            continue
+        if value == current:
+            count += 1
+            continue
+        groups.append(count)
+        current = value
+        count = 1
+    if count > 0:
+        groups.append(count)
+    return groups
+
+
+def _selector_top1_hit_rate(df, pred):
+    if "selector_group_id" not in df.columns or "selector_is_best" not in df.columns or len(df) == 0:
+        return 0.0
+    tmp = df.copy()
+    tmp["_pred"] = pred
+    picked = tmp.sort_values(["selector_group_id", "_pred"], ascending=[True, False]).groupby("selector_group_id", as_index=False).head(1)
+    if len(picked) == 0:
+        return 0.0
+    return float(pd.to_numeric(picked["selector_is_best"], errors="coerce").fillna(0).mean())
+
+
+def _selector_baseline_top1_hit_rate(df):
+    if "selector_group_id" not in df.columns or "selector_is_best" not in df.columns or len(df) == 0:
+        return 0.0
+    tmp = df.copy()
+    if "candidate_mode" in tmp.columns:
+        tmp["_base_pref"] = (tmp["candidate_mode"].astype(str).str.lower() == "base").astype(int)
+    else:
+        tmp["_base_pref"] = 0
+    picked = tmp.sort_values(["selector_group_id", "_base_pref"], ascending=[True, False]).groupby("selector_group_id", as_index=False).head(1)
+    if len(picked) == 0:
+        return 0.0
+    return float(pd.to_numeric(picked["selector_is_best"], errors="coerce").fillna(0).mean())
 
 
 def _split_train_valid(df, group_column: str):
@@ -296,6 +348,202 @@ def train_lightgbm_bundle(
     with open(os.path.join(out_dir, "eval_summary.json"), "w", encoding="utf-8") as f:
         json.dump({"targets": targets, "metrics": out_metrics}, f, ensure_ascii=False, indent=2)
     return meta
+
+
+def train_lightgbm_selector_bundle(
+    language: str,
+    format_type: str,
+    selector_dataset_csv: str,
+    out_dir: str,
+    group_column: str = "voicebank_id",
+    objective: str = "pointwise",
+    num_boost_round: int = 400,
+    early_stopping_rounds: int = 40,
+) -> Dict[str, Any]:
+    _require_training_stack()
+    if not selector_dataset_csv or not os.path.exists(selector_dataset_csv):
+        raise FileNotFoundError(selector_dataset_csv)
+
+    df = pd.read_csv(selector_dataset_csv)
+    language = str(language).strip().lower()
+    format_type = normalize_format_type(language, format_type)
+    objective = str(objective or "pointwise").strip().lower()
+    if objective not in {"pointwise", "ranking"}:
+        raise ValueError(f"Unsupported selector objective: {objective}")
+
+    if "language" in df.columns:
+        df = df[df["language"].astype(str).str.lower() == language]
+    if format_type and format_type != "general" and "format_type" in df.columns:
+        df = df[
+            df["format_type"].astype(str).str.lower().map(lambda v: normalize_format_type(language, v)) == format_type
+        ]
+    if len(df) < 16:
+        raise RuntimeError("Selector dataset is too small for training.")
+
+    feature_schema = get_selector_feature_schema()
+    feature_names = list(feature_schema["feature_names"])
+    categorical_features = [c for c in SELECTOR_CATEGORICAL_FEATURES if c in feature_names]
+    frame = _prepare_frame(df, feature_names, categorical_features)
+    train_idx, valid_idx = _split_train_valid(df, group_column)
+    train_df = df.iloc[train_idx].copy()
+    valid_df = df.iloc[valid_idx].copy()
+    X_train = frame.iloc[train_idx].copy()
+    X_valid = frame.iloc[valid_idx].copy()
+
+    params = dict(DEFAULT_LGB_PARAMS)
+    if objective == "ranking":
+        params.update({
+            "objective": "lambdarank",
+            "metric": "ndcg",
+            "label_gain": [0, 1, 3, 7, 15, 31],
+        })
+        train_order = train_df.sort_values(["selector_group_id", "candidate_index"]).index
+        valid_order = valid_df.sort_values(["selector_group_id", "candidate_index"]).index
+        train_df = train_df.loc[train_order]
+        valid_df = valid_df.loc[valid_order]
+        X_train = X_train.loc[train_order]
+        X_valid = X_valid.loc[valid_order]
+        y_train = pd.to_numeric(train_df["selector_rank_label"], errors="coerce").fillna(0).astype(int)
+        y_valid = pd.to_numeric(valid_df["selector_rank_label"], errors="coerce").fillna(0).astype(int)
+        dtrain = lgb.Dataset(
+            X_train,
+            label=y_train,
+            group=_group_sizes_from_series(train_df["selector_group_id"]),
+            categorical_feature=categorical_features,
+            free_raw_data=False,
+        )
+        dvalid = lgb.Dataset(
+            X_valid,
+            label=y_valid,
+            group=_group_sizes_from_series(valid_df["selector_group_id"]),
+            categorical_feature=categorical_features,
+            free_raw_data=False,
+        )
+    else:
+        params.update({"objective": "regression_l2", "metric": "l2"})
+        y_train = pd.to_numeric(train_df["selector_quality_score"], errors="coerce").fillna(0.0)
+        y_valid = pd.to_numeric(valid_df["selector_quality_score"], errors="coerce").fillna(0.0)
+        dtrain = lgb.Dataset(
+            X_train,
+            label=y_train,
+            categorical_feature=categorical_features,
+            free_raw_data=False,
+        )
+        dvalid = lgb.Dataset(
+            X_valid,
+            label=y_valid,
+            categorical_feature=categorical_features,
+            free_raw_data=False,
+        )
+
+    booster = lgb.train(
+        params,
+        dtrain,
+        num_boost_round=num_boost_round,
+        valid_sets=[dvalid],
+        callbacks=[lgb.early_stopping(early_stopping_rounds, verbose=False)],
+    )
+    os.makedirs(out_dir, exist_ok=True)
+    model_path = os.path.join(out_dir, "selector_model.txt")
+    booster.save_model(model_path)
+    write_selector_feature_schema(os.path.join(out_dir, "selector_feature_schema.json"))
+    pred = booster.predict(X_valid)
+    selector_summary = {
+        "objective": objective,
+        "rows": int(len(df)),
+        "groups": int(df["selector_group_id"].nunique()) if "selector_group_id" in df.columns else 0,
+        "top1_baseline": float(_selector_baseline_top1_hit_rate(valid_df)),
+        "top1_model": float(_selector_top1_hit_rate(valid_df, pred)),
+    }
+    if objective == "pointwise":
+        selector_summary["score_mae"] = float(
+            mean_absolute_error(
+                pd.to_numeric(valid_df["selector_quality_score"], errors="coerce").fillna(0.0),
+                pred,
+            )
+        )
+
+    meta = {
+        "backend": "lightgbm",
+        "language": language,
+        "format_type": format_type,
+        "model_version": "v1",
+        "feature_version": feature_schema["feature_version"],
+        "feature_names": feature_names,
+        "categorical_features": categorical_features,
+        "selector_objective": objective,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "train_rows": int(len(df)),
+        "voicebank_count": int(df[group_column].nunique()) if group_column in df.columns else 1,
+        "metrics": selector_summary,
+    }
+    with open(os.path.join(out_dir, "selector_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    return meta
+
+
+def load_lightgbm_selector_bundle(model_dir: str):
+    if lgb is None:
+        raise RuntimeError(f"lightgbm is required for runtime inference: {LIGHTGBM_IMPORT_ERROR}")
+    meta_path = os.path.join(model_dir, "selector_meta.json")
+    schema_path = os.path.join(model_dir, "selector_feature_schema.json")
+    model_path = os.path.join(model_dir, "selector_model.txt")
+    if not (os.path.exists(meta_path) and os.path.exists(schema_path) and os.path.exists(model_path)):
+        return None
+    with open(meta_path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+    with open(schema_path, "r", encoding="utf-8") as f:
+        schema = json.load(f)
+    runtime_model_path = _normalize_model_file_for_runtime(model_path)
+    model = lgb.Booster(model_file=runtime_model_path)
+    return {"model": model, "meta": meta, "schema": schema}
+
+
+def predict_lightgbm_selector_score(payload, feature_row: Dict[str, Any]) -> float:
+    if pd is None:
+        raise RuntimeError(f"pandas is required for runtime inference: {PANDAS_IMPORT_ERROR}")
+    meta = payload.get("meta") or {}
+    schema = payload.get("schema") or get_selector_feature_schema()
+    feature_names = list(schema.get("feature_names") or SELECTOR_FEATURE_NAMES)
+    frame = pd.DataFrame([canonicalize_selector_feature_row(feature_row, feature_names=feature_names)])
+    frame = _prepare_frame(frame, feature_names, list(meta.get("categorical_features") or SELECTOR_CATEGORICAL_FEATURES))
+    return float(payload["model"].predict(frame)[0])
+
+
+def evaluate_lightgbm_selector_bundle(model_dir: str, selector_dataset_csv: str, language: str = "", format_type: str = "") -> Dict[str, Any]:
+    _require_training_stack()
+    payload = load_lightgbm_selector_bundle(model_dir)
+    if not payload:
+        raise FileNotFoundError(f"Selector bundle not found: {model_dir}")
+    meta = payload.get("meta") or {}
+    schema = payload.get("schema") or get_selector_feature_schema()
+    df = pd.read_csv(selector_dataset_csv)
+    if language:
+        df = df[df["language"].astype(str).str.lower() == str(language).strip().lower()]
+    format_type = normalize_format_type(language or meta.get("language", ""), format_type)
+    if format_type and format_type != "general":
+        df = df[
+            df["format_type"].astype(str).str.lower().map(lambda v: normalize_format_type(language or meta.get("language", ""), v)) == format_type
+        ]
+    feature_names = list(schema.get("feature_names") or SELECTOR_FEATURE_NAMES)
+    frame = _prepare_frame(df, feature_names, list(meta.get("categorical_features") or SELECTOR_CATEGORICAL_FEATURES))
+    pred = payload["model"].predict(frame)
+    summary = {
+        "rows": int(len(df)),
+        "groups": int(df["selector_group_id"].nunique()) if "selector_group_id" in df.columns else 0,
+        "objective": str(meta.get("selector_objective", "") or ""),
+        "top1_baseline": float(_selector_baseline_top1_hit_rate(df)),
+        "top1_model": float(_selector_top1_hit_rate(df, pred)),
+    }
+    if "selector_quality_score" in df.columns:
+        truth = pd.to_numeric(df["selector_quality_score"], errors="coerce").fillna(0.0)
+        summary["score_mae"] = float(mean_absolute_error(truth, pred))
+    if "candidate_mode" in df.columns and len(df) > 0:
+        summary["candidate_mode_counts"] = {
+            str(k): int(v)
+            for k, v in df["candidate_mode"].astype(str).value_counts().to_dict().items()
+        }
+    return summary
 
 
 def load_lightgbm_bundle(model_dir: str, meta: Optional[Dict[str, Any]] = None, schema: Optional[Dict[str, Any]] = None):

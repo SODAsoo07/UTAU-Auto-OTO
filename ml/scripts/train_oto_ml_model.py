@@ -8,7 +8,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from core.oto_ml_lightgbm import train_lightgbm_bundle
+from core.oto_ml_lightgbm import train_lightgbm_bundle, train_lightgbm_selector_bundle
+from core.oto_ml_selector import build_selector_dataset_csv_from_delta_dataset
 
 
 def main():
@@ -56,6 +57,23 @@ def main():
         default=0.4,
         help="Sample weight for pseudo_mid rows (default: 0.4)",
     )
+    ap.add_argument(
+        "--include-selector",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Also train candidate selector bundle in the same output directory",
+    )
+    ap.add_argument(
+        "--selector-objective",
+        choices=["pointwise", "ranking"],
+        default="pointwise",
+        help="Candidate selector objective (default: pointwise)",
+    )
+    ap.add_argument(
+        "--selector-dataset-out",
+        default="",
+        help="Optional path to save expanded selector training dataset CSV",
+    )
     args = ap.parse_args()
 
     alias_types = [v.strip() for v in str(args.alias_types).split(",") if v.strip()]
@@ -84,6 +102,27 @@ def main():
     print(f"format_type={meta.get('format_type')}")
     print(f"train_rows={meta.get('train_rows')}")
     print(f"filters={meta.get('filters')}")
+
+    if args.include_selector:
+        selector_dataset = args.selector_dataset_out.strip() or os.path.join(args.out_dir, "selector_dataset.csv")
+        selector_build = build_selector_dataset_csv_from_delta_dataset(
+            args.dataset,
+            selector_dataset,
+            language=args.lang,
+            format_type=args.format,
+        )
+        selector_meta = train_lightgbm_selector_bundle(
+            language=args.lang,
+            format_type=args.format,
+            selector_dataset_csv=selector_dataset,
+            out_dir=args.out_dir,
+            group_column=args.group_column,
+            objective=args.selector_objective,
+        )
+        print(f"selector_dataset_rows={selector_build.get('rows')}")
+        print(f"selector_dataset_groups={selector_build.get('groups')}")
+        print(f"selector_objective={selector_meta.get('selector_objective')}")
+        print(f"selector_metrics={selector_meta.get('metrics')}")
 
 
 if __name__ == "__main__":
