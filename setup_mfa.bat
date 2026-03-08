@@ -5,12 +5,12 @@ title UTAU Auto OTO - MFA Setup
 
 if /i "%~1"=="--help" (
     echo Usage: setup_mfa.bat
-    echo Installs a shared MFA environment in C:\Users\Public\UTAU_Auto_OTO_v3\.env.
+    echo Installs a shared MFA environment in C:\Users\Public\UTAU_Auto_OTO_v3\.env using Micromamba.
     exit /b 0
 )
 
 echo ====================================================
-echo   UTAU Auto OTO - MFA Portable Environment Setup
+echo   UTAU Auto OTO - MFA Lightweight Environment Setup
 echo   This script only needs to run once.
 echo ====================================================
 echo.
@@ -24,27 +24,17 @@ set "APP_DIR=%APP_DIR:~0,-1%"
 set "PUBLIC_ROOT=%PUBLIC%"
 if not defined PUBLIC_ROOT set "PUBLIC_ROOT=C:\Users\Public"
 set "ENV_DIR=%PUBLIC_ROOT%\UTAU_Auto_OTO_v3\.env"
-set "INSTALLER=%APP_DIR%\Miniconda3-latest-Windows-x86_64.exe"
+set "MICROMAMBA_ROOT=%PUBLIC_ROOT%\UTAU_Auto_OTO_v3\micromamba"
+set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\Library\bin\micromamba.exe"
+set "MICROMAMBA_ARCHIVE=%APP_DIR%\micromamba-win-64-latest.tar.bz2"
 set "MFA_EXE=%ENV_DIR%\Scripts\mfa.exe"
 set "MFA_PYTHON_VERSION=3.10"
 
-set "APP_DIR_NONASCII=0"
-for /f %%i in ('powershell -NoProfile -Command "$p=$env:APP_DIR; if($p -match '[^\x00-\x7F]'){'1'} else {'0'}"') do set "APP_DIR_NONASCII=%%i"
 if not exist "%PUBLIC_ROOT%\UTAU_Auto_OTO_v3" mkdir "%PUBLIC_ROOT%\UTAU_Auto_OTO_v3" >nul 2>nul
 echo [INFO] MFA environment path: %ENV_DIR%
-if "!APP_DIR_NONASCII!"=="1" (
-    echo [INFO] App path contains non-ASCII characters. Shared MFA env will still be used.
-)
+echo [INFO] MFA Micromamba path: %MICROMAMBA_ROOT%
 
-set "SYSTEM_CONDA="
-where conda >nul 2>nul
-if %errorlevel% equ 0 (
-    for /f "delims=" %%i in ('where conda') do (
-        set "SYSTEM_CONDA=%%i"
-        goto :found_conda
-    )
-)
-:found_conda
+if not exist "%MFA_EXE%" if exist "%ENV_DIR%\Scripts\mfa.bat" set "MFA_EXE=%ENV_DIR%\Scripts\mfa.bat"
 
 if exist "%MFA_EXE%" (
     call :get_env_python_version "%ENV_DIR%" MFA_ENV_PYTHON
@@ -61,8 +51,7 @@ if exist "%MFA_EXE%" (
 )
 
 if exist "%MFA_EXE%" goto :existing_env_ready
-if defined SYSTEM_CONDA goto :install_with_system_conda
-goto :install_portable_miniconda
+goto :install_micromamba
 
 :existing_env_ready
 echo [OK] MFA is already installed.
@@ -72,36 +61,21 @@ call :install_japanese_support
 if errorlevel 1 exit /b 1
 echo.
 echo Checking Korean acoustic model...
-"%MFA_EXE%" model download acoustic korean_mfa --ignore_cache
+call :download_acoustic_model korean_mfa
+if errorlevel 1 exit /b 1
 echo.
 echo Done. You can now launch UTAU_Auto_OTO.exe.
 pause
 exit /b 0
 
-:install_with_system_conda
-echo [INFO] Existing Conda found: %SYSTEM_CONDA%
-echo        Skipping Miniconda download.
+:install_micromamba
+echo [INFO] Using Micromamba bootstrap to reduce installation cost.
 echo.
-echo [1/3] Creating local MFA environment... ^(5-10 min^)
-"%SYSTEM_CONDA%" create -y -p "%ENV_DIR%" -c conda-forge --override-channels python=%MFA_PYTHON_VERSION% montreal-forced-aligner colorama
-if errorlevel 1 (
-    echo [FAILED] MFA install failed.
-    pause
-    exit /b 1
-)
-echo [2/3] Installing Japanese tokenizer dependencies...
-call :install_japanese_support
-if errorlevel 1 exit /b 1
-goto :install_done
-
-:install_portable_miniconda
-echo [INFO] Conda not found. Proceeding with portable Miniconda install.
-echo.
-echo [1/4] Downloading Miniconda... ^(about 80MB^)
-if not exist "%INSTALLER%" (
-    powershell -NoProfile -Command "& {[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe' -OutFile '%INSTALLER%'}"
+echo [1/4] Downloading Micromamba... ^(about 15MB^)
+if not exist "%MICROMAMBA_ARCHIVE%" (
+    powershell -NoProfile -Command "& {[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://micro.mamba.pm/api/micromamba/win-64/latest' -OutFile '%MICROMAMBA_ARCHIVE%'}"
     if errorlevel 1 (
-        echo [FAILED] Miniconda download failed.
+        echo [FAILED] Micromamba download failed.
         pause
         exit /b 1
     )
@@ -110,50 +84,59 @@ if not exist "%INSTALLER%" (
 )
 echo [OK] Download complete.
 echo.
-echo [2/4] Installing Miniconda as portable env... ^(2-5 min^)
-if not exist "%ENV_DIR%\Scripts\conda.exe" (
-    start /wait "" "%INSTALLER%" /InstallationType=JustMe /RegisterPython=0 /AddToPath=0 /S /D=%ENV_DIR%
-)
-if not exist "%ENV_DIR%\Scripts\conda.exe" (
-    echo [WARN] Conda was not found at the requested path. Checking default locations...
-    set "FOUND_CONDA="
-    for %%p in ("%USERPROFILE%\miniconda3\Scripts\conda.exe" "%USERPROFILE%\Miniconda3\Scripts\conda.exe" "%LOCALAPPDATA%\miniconda3\Scripts\conda.exe" "%LOCALAPPDATA%\Miniconda3\Scripts\conda.exe") do (
-        if not defined FOUND_CONDA if exist "%%~p" set "FOUND_CONDA=%%~p"
+
+echo [2/4] Extracting Micromamba...
+if not exist "%MICROMAMBA_EXE%" (
+    if exist "%MICROMAMBA_ROOT%" (
+        echo [INFO] Removing previous Micromamba root...
+        rmdir /s /q "%MICROMAMBA_ROOT%" >nul 2>nul
     )
-    if defined FOUND_CONDA (
-        for %%d in ("!FOUND_CONDA!\..\..") do set "ENV_DIR=%%~fd"
-        set "MFA_EXE=%ENV_DIR%\Scripts\mfa.exe"
-        echo [INFO] Using detected Conda path: !FOUND_CONDA!
-    ) else (
-        echo [FAILED] Miniconda install failed.
+    mkdir "%MICROMAMBA_ROOT%" >nul 2>nul
+    tar -xjf "%MICROMAMBA_ARCHIVE%" -C "%MICROMAMBA_ROOT%"
+    if errorlevel 1 (
+        echo [FAILED] Micromamba extraction failed.
         pause
         exit /b 1
     )
+    if not exist "%MICROMAMBA_EXE%" if exist "%MICROMAMBA_ROOT%\bin\micromamba.exe" (
+        set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\bin\micromamba.exe"
+    )
+    if not exist "%MICROMAMBA_EXE%" if exist "%MICROMAMBA_ROOT%\micromamba.exe" (
+        set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\micromamba.exe"
+    )
 )
-echo [OK] Miniconda installed.
+if not exist "%MICROMAMBA_EXE%" (
+    echo [FAILED] Micromamba executable was not found after extraction.
+    pause
+    exit /b 1
+)
+echo [OK] Micromamba ready.
 echo.
-echo [3/4] Installing Montreal Forced Aligner...
-"%ENV_DIR%\Scripts\conda.exe" install -y -p "%ENV_DIR%" -c conda-forge --override-channels python=%MFA_PYTHON_VERSION% montreal-forced-aligner colorama
+
+echo [3/4] Installing Montreal Forced Aligner... ^(3-10 min^)
+if exist "%ENV_DIR%" if not exist "%MFA_EXE%" call :remove_env_dir
+set "MAMBA_ROOT_PREFIX=%MICROMAMBA_ROOT%"
+"%MICROMAMBA_EXE%" create -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge python=%MFA_PYTHON_VERSION% montreal-forced-aligner colorama
 if errorlevel 1 (
     echo [FAILED] MFA install failed.
     pause
     exit /b 1
 )
+call :ensure_mfa_entrypoint
+if errorlevel 1 exit /b 1
+
 echo [4/4] Installing Japanese tokenizer dependencies...
 call :install_japanese_support
 if errorlevel 1 exit /b 1
-echo Cleaning up installer...
-if exist "%INSTALLER%" del "%INSTALLER%" >nul 2>nul
 
-:install_done
+echo Cleaning up installer cache...
+if exist "%MICROMAMBA_ARCHIVE%" del "%MICROMAMBA_ARCHIVE%" >nul 2>nul
+
 echo [OK] MFA installed successfully.
 echo.
 echo [Final] Downloading Korean acoustic model... ^(1-2 min^)
-if exist "%MFA_EXE%" (
-    "%MFA_EXE%" model download acoustic korean_mfa --ignore_cache
-) else (
-    echo [WARNING] mfa.exe not found at %MFA_EXE%. Model download skipped.
-)
+call :download_acoustic_model korean_mfa
+if errorlevel 1 exit /b 1
 echo.
 echo ====================================================
 echo   Setup complete.
@@ -168,8 +151,11 @@ exit /b 0
 
 :install_japanese_support
 echo Checking Japanese tokenizer dependencies...
-if exist "%ENV_DIR%\Scripts\conda.exe" (
-    "%ENV_DIR%\Scripts\conda.exe" install -y -p "%ENV_DIR%" -c conda-forge --override-channels spacy sudachipy sudachidict-core
+set "MAMBA_ROOT_PREFIX=%MICROMAMBA_ROOT%"
+call :ensure_mfa_entrypoint
+if errorlevel 1 exit /b 1
+if exist "%MICROMAMBA_EXE%" (
+    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge spacy sudachipy sudachidict-core
     if errorlevel 1 (
         echo [FAILED] Japanese tokenizer dependency install failed.
         pause
@@ -177,17 +163,53 @@ if exist "%ENV_DIR%\Scripts\conda.exe" (
     )
     goto :eof
 )
-if defined SYSTEM_CONDA (
-    "%SYSTEM_CONDA%" install -y -p "%ENV_DIR%" -c conda-forge --override-channels spacy sudachipy sudachidict-core
-    if errorlevel 1 (
-        echo [FAILED] Japanese tokenizer dependency install failed.
-        pause
-        exit /b 1
-    )
-    goto :eof
-)
-echo [WARN] Conda command was not found. Skipping Japanese tokenizer dependency install.
+echo [WARN] Micromamba command was not found. Skipping Japanese tokenizer dependency install.
 goto :eof
+
+:ensure_mfa_entrypoint
+if exist "%MFA_EXE%" goto :eof
+if exist "%ENV_DIR%\Scripts\mfa.bat" (
+    set "MFA_EXE=%ENV_DIR%\Scripts\mfa.bat"
+    goto :eof
+)
+if exist "%ENV_DIR%\Scripts\mfa.cmd" (
+    set "MFA_EXE=%ENV_DIR%\Scripts\mfa.cmd"
+    goto :eof
+)
+if exist "%MICROMAMBA_EXE%" (
+    if not exist "%ENV_DIR%\Scripts" mkdir "%ENV_DIR%\Scripts" >nul 2>nul
+    >"%ENV_DIR%\Scripts\mfa.bat" echo @echo off
+    >>"%ENV_DIR%\Scripts\mfa.bat" echo set "CONDA_PREFIX=%ENV_DIR%"
+    >>"%ENV_DIR%\Scripts\mfa.bat" echo set "PATH=%ENV_DIR%;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\bin;%ENV_DIR%\Scripts;%ENV_DIR%\bin;%%PATH%%"
+    >>"%ENV_DIR%\Scripts\mfa.bat" echo "%ENV_DIR%\python.exe" -m montreal_forced_aligner.command_line.mfa %%*
+    set "MFA_EXE=%ENV_DIR%\Scripts\mfa.bat"
+    goto :eof
+)
+echo [FAILED] MFA executable was not found after environment creation.
+pause
+exit /b 1
+
+:download_acoustic_model
+set "MODEL_NAME=%~1"
+if not defined MODEL_NAME (
+    echo [FAILED] Acoustic model name is missing.
+    pause
+    exit /b 1
+)
+if exist "%ENV_DIR%\python.exe" (
+    set "CONDA_PREFIX=%ENV_DIR%"
+    set "PATH=%ENV_DIR%;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\bin;%ENV_DIR%\Scripts;%ENV_DIR%\bin;%PATH%"
+    "%ENV_DIR%\python.exe" -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME% --ignore_cache
+    exit /b %errorlevel%
+)
+if exist "%MICROMAMBA_EXE%" (
+    set "MAMBA_ROOT_PREFIX=%MICROMAMBA_ROOT%"
+    "%MICROMAMBA_EXE%" run -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" python -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME% --ignore_cache
+    exit /b %errorlevel%
+)
+echo [FAILED] No runnable MFA environment was found for model download.
+pause
+exit /b 1
 
 :remove_env_dir
 if not exist "%ENV_DIR%" goto :eof

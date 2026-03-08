@@ -17,8 +17,12 @@ from core.mfa_runner import (
     download_mfa_model,
     ensure_japanese_support,
     ensure_korean_support,
+    get_default_mfa_conda_root,
     get_default_mfa_env_dir,
+    get_default_mfa_micromamba_exe,
+    get_default_mfa_micromamba_root,
     get_mfa_env_python_version,
+    find_mfa_executable,
     mfa_env_requires_python_downgrade,
     patch_mfa_korean_support,
 )
@@ -233,11 +237,15 @@ class PipelineActionsMixin:
         lang = str(language or "korean").strip().lower()
         app_dir = getattr(self, "app_dir", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         env_dir = get_default_mfa_env_dir()
+        legacy_conda_root = get_default_mfa_conda_root()
+        micromamba_root = get_default_mfa_micromamba_root()
+        micromamba_exe = get_default_mfa_micromamba_exe()
         if any(ord(ch) > 127 for ch in app_dir):
             self._append_log("⚠ 앱 경로에 비ASCII 문자가 있어도 MFA 환경은 공용 폴더를 사용합니다.")
         self._append_log(f"ℹ MFA 공용 환경 경로: {env_dir}")
+        self._append_log(f"ℹ MFA Micromamba 경로: {micromamba_root}")
         mfa_exe = os.path.join(env_dir, 'Scripts', 'mfa.exe')
-        installer = os.path.join(app_dir, 'Miniconda3-latest-Windows-x86_64.exe')
+        micromamba_archive = os.path.join(app_dir, 'micromamba-win-64-latest.tar.bz2')
 
         def _remove_env_dir():
             if not os.path.isdir(env_dir):
@@ -249,6 +257,140 @@ class PipelineActionsMixin:
             except Exception as e:
                 self._append_log(f"❌ 기존 MFA 환경 정리 실패: {e}")
                 return False
+
+        def _remove_legacy_conda_root():
+            if not os.path.isdir(legacy_conda_root):
+                return True
+            try:
+                shutil.rmtree(legacy_conda_root)
+                self._append_log(f"🧹 기존 Miniconda 흔적 정리: {legacy_conda_root}")
+                return True
+            except Exception as e:
+                self._append_log(f"⚠ 기존 Miniconda 폴더 정리 실패: {e}")
+                return False
+
+        def _download_micromamba():
+            if os.path.exists(micromamba_archive):
+                self._append_log("ℹ Micromamba 아카이브가 이미 있어 재사용합니다.")
+                return True
+            self._append_log("[1/3] ⬇ Micromamba 다운로드 중... (약 15MB)")
+            url = 'https://micro.mamba.pm/api/micromamba/win-64/latest'
+            ps_cmd = (
+                f'[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; '
+                f"Invoke-WebRequest -Uri '{url}' -OutFile '{micromamba_archive}'"
+            )
+            result = sp.run(['powershell', '-Command', ps_cmd], capture_output=True, text=True)
+            if result.returncode != 0:
+                self._append_log(f"❌ Micromamba 다운로드 실패: {result.stderr or result.stdout}")
+                return False
+            return True
+
+        def _extract_micromamba():
+            if os.path.exists(micromamba_exe):
+                self._append_log("✅ Micromamba 실행 파일이 이미 있습니다.")
+                return True
+            self._append_log("[2/3] 📦 Micromamba 압축 해제 중...")
+            try:
+                if os.path.isdir(micromamba_root):
+                    shutil.rmtree(micromamba_root)
+                os.makedirs(micromamba_root, exist_ok=True)
+                result = sp.run(
+                    ['tar', '-xjf', micromamba_archive, '-C', micromamba_root],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                if result.returncode != 0:
+                    self._append_log(f"❌ Micromamba 압축 해제 실패: {result.stderr or result.stdout}")
+                    return False
+                resolved = get_default_mfa_micromamba_exe()
+                if not os.path.exists(resolved):
+                    self._append_log("❌ Micromamba 실행 파일을 찾지 못했습니다.")
+                    return False
+                return True
+            except Exception as e:
+                self._append_log(f"❌ Micromamba 준비 실패: {e}")
+                return False
+
+        def _run_micromamba(cmd, step_label):
+            env = os.environ.copy()
+            env["MAMBA_ROOT_PREFIX"] = micromamba_root
+            process = sp.Popen(
+                [micromamba_exe, *cmd],
+                stdout=sp.PIPE,
+                stderr=sp.STDOUT,
+                text=True,
+                encoding=self._preferred_subprocess_encoding(),
+                errors='replace',
+                env=env,
+            )
+            self._append_log(step_label)
+            for line in process.stdout:
+                stripped = line.strip()
+                if stripped:
+                    self._append_log(stripped)
+            process.wait()
+            return process.returncode == 0
+
+        def _refresh_mfa_path():
+            nonlocal mfa_exe
+            resolved = find_mfa_executable()
+            if resolved and os.path.exists(resolved):
+                mfa_exe = resolved
+                self.mfa_path = resolved
+                self._append_log(f"ℹ 감지된 MFA 실행 파일: {resolved}")
+                return True
+            fallback_candidates = [
+                os.path.join(env_dir, 'python.exe'),
+            ]
+            python_exe = fallback_candidates[0]
+            if os.path.exists(micromamba_exe):
+                wrapper_path = os.path.join(env_dir, 'Scripts', 'mfa.bat')
+                try:
+                    os.makedirs(os.path.dirname(wrapper_path), exist_ok=True)
+                    with open(wrapper_path, 'w', encoding='utf-8') as wf:
+                        wf.write('@echo off\r\n')
+                        wf.write(f'set "CONDA_PREFIX={env_dir}"\r\n')
+                        wf.write(
+                            f'set "PATH={env_dir};{env_dir}\\Library\\mingw-w64\\bin;'
+                            f'{env_dir}\\Library\\usr\\bin;{env_dir}\\Library\\bin;'
+                            f'{env_dir}\\Scripts;{env_dir}\\bin;%PATH%"\r\n'
+                        )
+                        wf.write(f'"{env_dir}\\python.exe" -m montreal_forced_aligner.command_line.mfa %*\r\n')
+                    mfa_exe = wrapper_path
+                    self.mfa_path = wrapper_path
+                    self._append_log(f"ℹ MFA 배치 래퍼를 생성했습니다: {wrapper_path}")
+                    return True
+                except Exception as e:
+                    self._append_log(f"❌ MFA 배치 래퍼 생성 실패: {e}")
+            if os.path.exists(python_exe):
+                probe = sp.run(
+                    [
+                        python_exe,
+                        '-c',
+                        "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('montreal_forced_aligner.command_line.mfa') else 1)",
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                if probe.returncode != 0:
+                    return False
+                wrapper_path = os.path.join(env_dir, 'Scripts', 'mfa.bat')
+                try:
+                    os.makedirs(os.path.dirname(wrapper_path), exist_ok=True)
+                    with open(wrapper_path, 'w', encoding='utf-8') as wf:
+                        wf.write('@echo off\r\n')
+                        wf.write(f'"{python_exe}" -m montreal_forced_aligner.command_line.mfa %*\r\n')
+                    mfa_exe = wrapper_path
+                    self.mfa_path = wrapper_path
+                    self._append_log(f"ℹ MFA 배치 래퍼를 생성했습니다: {wrapper_path}")
+                    return True
+                except Exception as e:
+                    self._append_log(f"❌ MFA 래퍼 생성 실패: {e}")
+            return False
+
+        if not os.path.exists(mfa_exe):
+            _refresh_mfa_path()
 
         if os.path.exists(mfa_exe):
             py_ver = get_mfa_env_python_version(mfa_exe)
@@ -267,125 +409,37 @@ class PipelineActionsMixin:
                 self.mfa_path = mfa_exe
 
         if not os.path.exists(mfa_exe):
-            system_conda = shutil.which('conda')
-            if system_conda:
-                self._append_log(f"🔍 시스템에 설치된 Conda 발견: {system_conda}")
-                self._append_log("   Miniconda 다운로드를 건너뛰고 기존 Conda를 활용해 환경을 구성합니다.")
-                self._append_log("[1/2] 🔧 MFA 전용 로컬 환경 생성 및 설치 중... (5~10분)")
-                process = sp.Popen(
-                    [
-                        system_conda,
-                        'create',
-                        '-y',
-                        '-p',
-                        env_dir,
-                        '-c',
-                        'conda-forge',
-                        '--override-channels',
-                        f'python={MFA_PORTABLE_PYTHON_VERSION}',
-                        'montreal-forced-aligner',
-                        'colorama',
-                    ],
-                    stdout=sp.PIPE,
-                    stderr=sp.STDOUT,
-                    text=True,
-                    encoding=self._preferred_subprocess_encoding(),
-                    errors='replace',
-                )
-                for line in process.stdout:
-                    stripped = line.strip()
-                    if stripped:
-                        self._append_log(stripped)
-                process.wait()
-                if process.returncode != 0:
-                    self._append_log("❌ MFA 설치 실패")
+            self._append_log("🔍 경량 Micromamba 기반으로 MFA 환경을 준비합니다.")
+            _remove_legacy_conda_root()
+            if not _download_micromamba():
+                return False
+            if not _extract_micromamba():
+                return False
+            if os.path.isdir(env_dir) and not os.path.exists(mfa_exe):
+                if not _remove_env_dir():
                     return False
-                self.mfa_path = mfa_exe
-            else:
-                self._append_log("🔍 시스템 Conda를 찾지 못했습니다. Miniconda 포터블 환경을 구축합니다.")
-                conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
-                if not os.path.exists(conda_exe):
-                    if not os.path.exists(installer):
-                        self._append_log("[1/3] ⬇ Miniconda 다운로드 중... (약 80MB)")
-                        url = 'https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe'
-                        ps_cmd = (
-                            f'[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; '
-                            f"Invoke-WebRequest -Uri '{url}' -OutFile '{installer}'"
-                        )
-                        result = sp.run(['powershell', '-Command', ps_cmd], capture_output=True, text=True)
-                        if result.returncode != 0:
-                            self._append_log(f"❌ 다운로드 실패: {result.stderr}")
-                            return False
-                    self._append_log("✅ Miniconda 다운로드 완료!")
-                    self._append_log("[2/3] 📦 Miniconda 포터블 설치 중... (2~5분)")
-                    self._append_log(f"   설치 경로: {env_dir}")
-                    if os.path.isdir(env_dir) and not os.path.exists(conda_exe):
-                        try:
-                            shutil.rmtree(env_dir)
-                            self._append_log("   이전 실패 흔적(.env 폴더)을 정리하고 재시도합니다.")
-                        except Exception as cleanup_error:
-                            self._append_log(f"❌ 기존 .env 폴더 정리 실패: {cleanup_error}")
-                            return False
-                    install_cmd = (
-                        f'"{installer}" /InstallationType=JustMe /RegisterPython=0 '
-                        f'/AddToPath=0 /S /D={env_dir}'
-                    )
-                    result = sp.run(install_cmd, capture_output=True, text=True, timeout=1200)
-                    if result.returncode != 0 or not os.path.exists(conda_exe):
-                        user_home = os.path.expanduser('~')
-                        fallback_conda_candidates = [
-                            os.path.join(user_home, 'miniconda3', 'Scripts', 'conda.exe'),
-                            os.path.join(user_home, 'Miniconda3', 'Scripts', 'conda.exe'),
-                            os.path.join(os.environ.get('LOCALAPPDATA', ''), 'miniconda3', 'Scripts', 'conda.exe'),
-                            os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Miniconda3', 'Scripts', 'conda.exe'),
-                        ]
-                        detected_conda = next((p for p in fallback_conda_candidates if p and os.path.exists(p)), None)
-                        if detected_conda:
-                            conda_exe = detected_conda
-                            env_dir = os.path.dirname(os.path.dirname(conda_exe))
-                            mfa_exe = os.path.join(env_dir, 'Scripts', 'mfa.exe')
-                            self._append_log("⚠ 지정 경로에서 Conda를 찾지 못했지만 기본 설치 경로를 감지했습니다.")
-                            self._append_log(f"   감지된 Conda: {conda_exe}")
-                        else:
-                            self._append_log(f"❌ Miniconda 설치 실패 (code={result.returncode})")
-                            if result.stdout and result.stdout.strip():
-                                self._append_log(f"   stdout: {result.stdout.strip()[:500]}")
-                            if result.stderr and result.stderr.strip():
-                                self._append_log(f"   stderr: {result.stderr.strip()[:500]}")
-                            return False
-                    self._append_log("✅ Miniconda 설치 완료!")
-
-                self._append_log("[3/3] 🔧 MFA 설치 중... (5~10분)")
-                process = sp.Popen(
-                    [
-                        conda_exe,
-                        'install',
-                        '-y',
-                        '-p',
-                        env_dir,
-                        '-c',
-                        'conda-forge',
-                        '--override-channels',
-                        f'python={MFA_PORTABLE_PYTHON_VERSION}',
-                        'montreal-forced-aligner',
-                        'colorama',
-                    ],
-                    stdout=sp.PIPE,
-                    stderr=sp.STDOUT,
-                    text=True,
-                    encoding=self._preferred_subprocess_encoding(),
-                    errors='replace',
-                )
-                for line in process.stdout:
-                    stripped = line.strip()
-                    if stripped:
-                        self._append_log(stripped)
-                process.wait()
-                if process.returncode != 0:
-                    self._append_log("❌ MFA 설치 실패")
-                    return False
-                self._append_log("✅ Conda 패키지 설치 완료!")
-                self.mfa_path = mfa_exe
+            if not _run_micromamba(
+                [
+                    'create',
+                    '-y',
+                    '-r',
+                    micromamba_root,
+                    '-p',
+                    env_dir,
+                    '-c',
+                    'conda-forge',
+                    f'python={MFA_PORTABLE_PYTHON_VERSION}',
+                    'montreal-forced-aligner',
+                    'colorama',
+                ],
+                "[3/3] 🔧 MFA 설치 중... (3~10분)",
+            ):
+                self._append_log("❌ MFA 설치 실패")
+                return False
+            self._append_log("✅ Micromamba 기반 MFA 설치 완료!")
+            if not _refresh_mfa_path():
+                self._append_log("❌ MFA 실행 파일을 찾지 못했습니다.")
+                return False
 
         if lang == "korean":
             self._append_log("[Patch] 윈도우용 한국어 파서(eunjeon) 연동 처리 중...")
@@ -407,9 +461,9 @@ class PipelineActionsMixin:
                 self._append_log("❌ MFA 모델 다운로드 실패")
                 return False
 
-        if os.path.exists(installer):
+        if os.path.exists(micromamba_archive):
             try:
-                os.remove(installer)
+                os.remove(micromamba_archive)
             except OSError:
                 pass
 

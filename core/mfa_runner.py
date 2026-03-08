@@ -149,6 +149,29 @@ def get_default_mfa_env_dir():
     return os.path.join(public_root, "UTAU_Auto_OTO_v3", ".env")
 
 
+def get_default_mfa_conda_root():
+    public_root = os.environ.get("PUBLIC", r"C:\Users\Public")
+    return os.path.join(public_root, "UTAU_Auto_OTO_v3", "miniconda")
+
+
+def get_default_mfa_micromamba_root():
+    public_root = os.environ.get("PUBLIC", r"C:\Users\Public")
+    return os.path.join(public_root, "UTAU_Auto_OTO_v3", "micromamba")
+
+
+def get_default_mfa_micromamba_exe():
+    root = get_default_mfa_micromamba_root()
+    candidates = [
+        os.path.join(root, "Library", "bin", "micromamba.exe"),
+        os.path.join(root, "bin", "micromamba.exe"),
+        os.path.join(root, "micromamba.exe"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]
+
+
 def _candidate_mfa_executable_paths():
     if getattr(sys, 'frozen', False):
         app_dir = os.path.dirname(sys.executable)
@@ -157,10 +180,16 @@ def _candidate_mfa_executable_paths():
     shared_env_dir = get_default_mfa_env_dir()
     candidates = [
         os.path.join(shared_env_dir, 'Scripts', 'mfa.exe'),
+        os.path.join(shared_env_dir, 'Scripts', 'mfa.bat'),
+        os.path.join(shared_env_dir, 'Scripts', 'mfa.cmd'),
         os.path.join(shared_env_dir, 'bin', 'mfa'),
         os.path.join(app_dir, '.env', 'Scripts', 'mfa.exe'),
+        os.path.join(app_dir, '.env', 'Scripts', 'mfa.bat'),
+        os.path.join(app_dir, '.env', 'Scripts', 'mfa.cmd'),
         os.path.join(app_dir, '.env', 'bin', 'mfa'),
         os.path.join(app_dir, 'env', 'Scripts', 'mfa.exe'),
+        os.path.join(app_dir, 'env', 'Scripts', 'mfa.bat'),
+        os.path.join(app_dir, 'env', 'Scripts', 'mfa.cmd'),
     ]
     seen = set()
     unique = []
