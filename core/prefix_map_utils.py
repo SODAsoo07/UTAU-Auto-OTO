@@ -5,7 +5,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 from core.textio_utils import read_text_auto
 

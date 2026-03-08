@@ -581,7 +581,7 @@ def validate_oto_timing(
         # filename-based hint for Japanese vowel chains
         if language == "japanese":
             s = parse_ja_filename(base)
-            if len(s) >= 4 and all((split_ja := re.match(r"^[aiueo]$", x)) for x in s):
+            if len(s) >= 4 and all(re.match(r"^[aiueo]$", x) for x in s):
                 spread = max(pre_abs_seq) - min(pre_abs_seq) if pre_abs_seq else 0
                 if spread < 80:
                     issues.append(("warn", wav_name, "", "Vowel-chain file has too little timing spread"))

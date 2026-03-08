@@ -17,7 +17,7 @@ import urllib.request
 import re
 import tempfile
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Tuple
 
 from core.pipeline_status import (
     ALIGN_DICT_MISSING,

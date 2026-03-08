@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from core.oto_ml_features import extract_feature_rows, get_delta_clip_limits, parse_oto_rows
 from core.oto_ml_runtime import load_oto_model_bundle, predict_oto_deltas

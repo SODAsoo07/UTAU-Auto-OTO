@@ -61,7 +61,6 @@ def _build_entry(pre_vals: List[float], cons_gap_vals: List[float], cut_gap_vals
         return out
 
     pre_q25 = _quantile(pre_vals, 0.25)
-    pre_q50 = _quantile(pre_vals, 0.50)
     cons_q25 = _quantile(cons_gap_vals, 0.25)
     cons_q50 = _quantile(cons_gap_vals, 0.50)
     cons_q75 = _quantile(cons_gap_vals, 0.75)

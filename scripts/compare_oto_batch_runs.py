@@ -2,7 +2,7 @@ import argparse
 import csv
 import json
 import os
-from typing import Dict, List
+from typing import Dict
 
 
 def _load_summary(path: str) -> Dict[str, object]:

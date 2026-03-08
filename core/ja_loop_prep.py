@@ -16,6 +16,7 @@ class JaLoopPrepResult:
     filename_syllables: list[str] = field(default_factory=list)
     is_vowel_chain: bool = False
     cv_targets: list = field(default_factory=list)
+    detected_format: str = ""
     format_type: str = ""
     ja_style_profile: dict | None = None
     expected_syllables: int = 0
@@ -80,6 +81,7 @@ def prepare_ja_loop_state(
         return result
 
     detected_format = detect_alias_format_fn(alias_names, custom_map)
+    result.detected_format = detected_format
     result.format_type = forced_format or detected_format
     result.ja_style_profile = get_profile_fn(result.format_type)
     if result.is_vowel_chain:

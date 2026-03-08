@@ -9,7 +9,7 @@ import json
 import os
 import shutil
 import zipfile
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 REQUIRED_BUNDLE_FILES = [

@@ -7,18 +7,13 @@
 
 import os
 import re
-import json
 import math
-import datetime
 import logging
 from dataclasses import replace
-from functools import lru_cache
 import textgrid
-import copy
 from types import SimpleNamespace
 from core.lab_generator import load_custom_phonemes
 from core.ja_lab_generator import (
-    romaji_to_ipa,
     parse_ja_filename,
     split_ja_romaji_syllable,
     KANA_COMBO_ROMAJI,
@@ -80,6 +75,17 @@ from core.textio_utils import load_template_oto_lines
 from core.oto_profile_presets import get_ja_profile_preset
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "generate_ja_oto",
+    "train_ja_autotune_profile",
+    "save_ja_autotune_profile",
+    "load_ja_autotune_profile",
+    "apply_ja_autotune_profile_to_oto",
+    "_convert_ja_internal_cutoff_to_oto_field",
+    "_sanitize_ja_internal_params_for_wav_duration",
+    "sanitize_ja_oto_for_wav_duration",
+]
 
 # ==============================================================================
 # 에일리어스 접미사 유틸
@@ -343,7 +349,6 @@ from core.ja_oto_mapping import (
     _extract_ja_onset_token,
     _extract_vcv_target_syllable,
     _ja_is_n_bridge_alias,
-    _ja_left_bridge_token,
     _ja_soft_cv_match_level,
     _ja_syllable_tail,
     _normalize_ja_syllable_token,
@@ -356,15 +361,11 @@ from core.ja_oto_mapping import (
 from core.ja_oto_bridge import (
     _adaptive_ja_overlap,
     _clamp_ja_bridge_overlap,
-    _ja_bridge_overlap_window,
     _ja_cv_offset_and_pre,
     _ja_cv_onset_class,
     _ja_extract_cv_bounds,
-    _ja_mark_to_vowel,
-    _ja_overlap_consonant_hint,
     _ja_onset_class,
     _ja_pick_vowel_phone,
-    _ja_precenter_gap_targets,
     _ja_target_vowel_from_alias,
     _recenter_ja_params_around_pre,
 )
@@ -1739,7 +1740,6 @@ def _refine_ja_vc_with_adjacent_cv(
     if next_cv_anchor is None and next_c_start_abs is None:
         return validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
-    cls = _ja_onset_class(c_char)
     hard_cls = (c_char in JA_PLOSIVE_CONSONANTS) or (c_char in JA_SIBILANT_ONSETS) or (c_char in JA_FRICATIVE_ONSETS)
     son_cls = (c_char in JA_NASAL_ONSETS) or (c_char in JA_LIQUID_ONSETS) or (c_char in JA_GLIDE_ONSETS)
 
@@ -1763,7 +1763,6 @@ def _refine_ja_vc_with_adjacent_cv(
     )
 
     cur_pre_abs = float(offset) + float(pre)
-    cur_ovl_abs = float(offset) + float(ovl)
     cur_cons_abs = float(offset) + float(consonant)
     cur_cut_abs = float(offset) + abs(float(cutoff))
 
@@ -2541,9 +2540,7 @@ def generate_ja_oto(
             processed += 1
             continue
 
-        tg_path = file_ctx.tg_path
         real_wav_name = file_ctx.real_wav_name
-        wav_path_for_signal = file_ctx.wav_path_for_signal
         mel_ctx_for_file = file_ctx.mel_ctx_for_file
         wav_duration_ms = float(file_ctx.wav_duration_ms or 0.0)
         tg = file_ctx.tg
@@ -2603,12 +2600,10 @@ def generate_ja_oto(
                 continue
 
             wd_intervals = loop_prep.wd_intervals
-            ph_intervals_raw = loop_prep.ph_intervals_raw
             ph_intervals = loop_prep.ph_intervals
-            words_synth_phones = loop_prep.words_synth_phones
             filename_syllables = loop_prep.filename_syllables
-            is_vowel_chain = loop_prep.is_vowel_chain
             cv_targets = loop_prep.cv_targets
+            detected_format = loop_prep.detected_format
             format_type = loop_prep.format_type
             ja_style_profile = loop_prep.ja_style_profile
             phone_quality = loop_prep.phone_quality
@@ -2616,11 +2611,10 @@ def generate_ja_oto(
             low_phone_quality = loop_prep.low_phone_quality
             forced_words_mapping = loop_prep.forced_words_mapping
             timeline_start_ms = loop_prep.timeline_start_ms
-            timeline_end_ms = loop_prep.timeline_end_ms
             effective_end_ms = loop_prep.effective_end_ms
-            boundary_points_ms = loop_prep.boundary_points_ms
             phone_spans_ms = loop_prep.phone_spans_ms
             conf_th = loop_prep.conf_th
+            spn_ratio = float(phone_quality.get("spn_ratio_in_phone_tier", 0.0) or 0.0)
 
             post_ctx = build_ja_postprocess_context(
                 phone_spans_ms=phone_spans_ms,
@@ -2668,7 +2662,6 @@ def generate_ja_oto(
             mapping_margin = 0.0
             mapping_tier = "high"
             syllable_confidence_by_idx = []
-            linear_fallback_used = False
 
             sparse_phone_mode = bool(
                 filename_syllables and len(ph_intervals) < max(4, len(filename_syllables) // 2)
@@ -2895,7 +2888,6 @@ def generate_ja_oto(
                 filename_order_locked = bool(
                     selected_candidate.get("lock_order") and format_type in {"cvvc", "cv"}
                 )
-                linear_fallback_used = bool(selected_candidate.get("linear_fallback"))
                 base_score = float(selected_candidate.get("score", -1.0))
                 syllable_confidence_by_idx = list(selected_candidate.get("syllable_confidences", []) or [])
             else:
@@ -2934,7 +2926,6 @@ def generate_ja_oto(
                     used_filename_based = bool(selected_candidate.get("use_filename"))
                     used_alias_based = bool(selected_candidate.get("use_alias"))
                     filename_order_locked = True
-                    linear_fallback_used = bool(selected_candidate.get("linear_fallback"))
                     base_score = float(selected_candidate.get("score", base_score))
                     syllable_confidence_by_idx = list(selected_candidate.get("syllable_confidences", []) or [])
                     mapping_reason_code = (

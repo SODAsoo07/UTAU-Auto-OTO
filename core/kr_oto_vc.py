@@ -57,7 +57,6 @@ def _compute_kr_vc_timing(
 
     if is_vc_plosive_coda:
         from core.kr_oto_rules import find_vowel_phone
-        from core.oto_generator import validate_oto_params
 
         coda_canon = _canonicalize_kr_coda(c_char)
         is_hard_stop_coda = coda_canon in {"t", "p"}

@@ -4,7 +4,7 @@ import datetime as _dt
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterable, Optional, Sequence, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple
 
 from core.timing_anchor_profiles import AnchorTimingProfile
 

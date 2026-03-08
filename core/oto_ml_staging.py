@@ -9,7 +9,7 @@ import json
 import os
 import shutil
 from dataclasses import dataclass, asdict
-from typing import Dict, Iterable, List
+from typing import Iterable, List
 
 from core.oto_ml_collection import load_training_roots
 

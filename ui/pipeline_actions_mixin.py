@@ -21,7 +21,6 @@ from core.mfa_runner import (
     get_mfa_env_python_version,
     mfa_env_requires_python_downgrade,
     patch_mfa_korean_support,
-    run_mfa_align,
 )
 from core.oto_generator import (
     apply_kr_autotune_profile_to_oto,
@@ -38,7 +37,6 @@ from core.sofa_runner import (
     get_sofa_env_python,
     get_sofa_release_link,
     is_sofa_ready,
-    run_sofa_align,
 )
 
 
@@ -553,8 +551,6 @@ class PipelineActionsMixin:
                 if not wav_dir:
                     self._append_log("❌ WAV 경로를 먼저 지정해 주세요.")
                     return
-                out_path = self.out_entry.get().strip()
-                cleanup_snapshot = self._snapshot_output_tree_for_cleanup(out_path) if out_path else None
 
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
                 
@@ -690,6 +686,8 @@ class PipelineActionsMixin:
                 if not wav_dir:
                     self._append_log("❌ WAV 경로를 먼저 지정해 주세요.")
                     return
+                out_path = self.out_entry.get().strip()
+                cleanup_snapshot = self._snapshot_output_tree_for_cleanup(out_path) if out_path else None
 
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
                 

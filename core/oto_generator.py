@@ -13,8 +13,6 @@ from dataclasses import replace
 import logging
 from functools import lru_cache
 from types import SimpleNamespace
-import textgrid
-import copy
 
 try:
     import numpy as np
@@ -22,10 +20,7 @@ except Exception:  # pragma: no cover
     np = None
 from core.lab_generator import load_custom_phonemes
 from core.kr_oto_rules import (
-    GLOTTAL_MARKS,
-    IPA_PLOSIVES,
     IPA_VOWELS,
-    KR_BATCHIM_MARKERS,
     KR_CONSONANTS,
     KR_PLOSIVE_ONSETS,
     KR_SIBILANT_ONSETS,
@@ -34,18 +29,10 @@ from core.kr_oto_rules import (
     KR_VOICED_ONSETS,
     KR_VOICELESS_ONSETS,
     KR_VOWELS,
-    _canonicalize_kr_coda,
     _cv_match_score,
     _detect_glottal_kind,
     _extract_alias_onset,
     _extract_kr_cv_alias_token,
-    _extract_vc_right_token,
-    _extract_vowel_consonant,
-    _is_kr_closure_token,
-    _is_kr_glide_vowel,
-    _is_kr_plosive_coda_alias,
-    _is_sonorant_consonant,
-    _is_tense_consonant,
     _kr_cv_kernel,
     _looks_like_vv_alias,
     _normalize_cv_match_token,
@@ -53,21 +40,17 @@ from core.kr_oto_rules import (
     classify_alias,
     detect_alias_format,
     find_vowel_phone,
-    is_breath,
     is_glide,
     is_plosive_ipa,
     is_plosive_roman,
     normalize_ipa_mark,
-    should_ignore_korean_alias,
 )
 from core.kr_oto_mapping import (
-    _alias_to_cv_target,
     _build_kr_cvvc_occurrence_map,
     _build_kr_cvvc_vv_occurrence_map,
     _extract_cv_targets_from_lines,
     _extract_kr_cv_targets_from_filename,
     _find_kr_cv_vowel_match_index,
-    _iter_kr_cvvc_tokens,
     _resolve_kr_cvvc_occurrence_index,
     _resolve_kr_cvvc_vv_index,
     _score_kr_syllable_mapping,
@@ -75,7 +58,6 @@ from core.kr_oto_mapping import (
     _should_prefer_alias_based_syllables,
 )
 from core.kr_oto_bridge import (
-    _apply_kr_consonant_timing_shaping,
     _compute_kr_cvvc_vc_timing_direct,
     _compute_vc_from_adjacent_cv,
     _refine_kr_bridge_with_adjacent_cv,
@@ -143,6 +125,27 @@ from core.oto_normalization import canonicalize_alias_for_matching, normalize_wa
 from core.format_type_utils import normalize_format_type
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "generate_oto",
+    "validate_oto_params",
+    "KR_PLOSIVE_ONSETS",
+    "KR_SIBILANT_ONSETS",
+    "KR_SONORANT_CONSONANTS",
+    "KR_TENSE_CONSONANTS",
+    "KR_VOICED_ONSETS",
+    "KR_VOICELESS_ONSETS",
+    "_compute_kr_cvvc_vc_timing_direct",
+    "_compute_vc_from_adjacent_cv",
+    "_select_kr_cv_onset_slice",
+    "_apply_kr_bridge_coherence_to_oto_file",
+    "_apply_kr_profile_to_oto_file",
+    "_retarget_kr_bridge_to_next_cv",
+    "apply_kr_autotune_profile_to_oto",
+    "load_kr_autotune_profile",
+    "save_kr_autotune_profile",
+    "train_kr_autotune_profile",
+]
 
 # ==============================================================================
 # 접미사 처리 유틸리티
@@ -2084,17 +2087,7 @@ def generate_oto(
         log(f"⚡ OpenUtau 호환 {auto_gen_format.upper()} 자동 에일리어스 생성으로 전환합니다.")
         tpl_path = ""
 
-
-    VC_CONSONANT_RATIO = params.get('VC_CONSONANT_RATIO', 0.5) if params else 0.5
-    VC_VOWEL_START = params.get('VC_VOWEL_START', 0.3) if params else 0.3
-    VC_PRE_OFFSET = params.get('VC_PRE_OFFSET', 25) if params else 25
-    VC_OVL_RATIO = params.get('VC_OVL_RATIO', 0.3) if params else 0.3
-    CV_PRE_RATIO = params.get('CV_PRE_RATIO', 1.0) if params else 1.0
-    CV_OVL_RATIO = params.get('CV_OVL_RATIO', 0.4) if params else 0.4
-    DIPHTHONG_CV_PRE_RATIO = params.get('DIPHTHONG_CV_PRE_RATIO', 0.35) if params else 0.35
     DIPHTHONG_CV_CONSONANT_RATIO = params.get('DIPHTHONG_CV_CONSONANT_RATIO', 0.6) if params else 0.6
-    DIPHTHONG_VC_VOWEL_START = params.get('DIPHTHONG_VC_VOWEL_START', 0.3) if params else 0.3
-    DIPHTHONG_VC_CONSONANT = params.get('DIPHTHONG_VC_CONSONANT', 0.5) if params else 0.5
 
 
     template_lines = []
@@ -2270,9 +2263,7 @@ def generate_oto(
             processed += 1
             continue
 
-        tg_path = file_ctx.tg_path
         real_wav_name = file_ctx.real_wav_name
-        wav_path_for_signal = file_ctx.wav_path_for_signal
         mel_ctx_for_file = file_ctx.mel_ctx_for_file
         wav_duration_ms = float(file_ctx.wav_duration_ms or 0.0)
         tg = file_ctx.tg
@@ -2326,7 +2317,6 @@ def generate_oto(
                 processed += 1
                 continue
 
-            ph_intervals_raw = loop_prep.ph_intervals_raw
             ph_intervals_all = loop_prep.ph_intervals_all
             ph_intervals = loop_prep.ph_intervals
             wd_intervals = loop_prep.wd_intervals
@@ -2335,9 +2325,6 @@ def generate_oto(
             timeline_end_ms = loop_prep.timeline_end_ms
             file_format = loop_prep.file_format
             file_mapping_conf_th = loop_prep.file_mapping_conf_th
-            is_vc_only = loop_prep.is_vc_only
-            is_vcv_file = loop_prep.is_vcv_file
-            cv_targets = loop_prep.cv_targets
             filename_cv_targets = loop_prep.filename_cv_targets
             targets_for_build = loop_prep.targets_for_build
             phone_quality = loop_prep.phone_quality
@@ -2533,7 +2520,6 @@ def generate_oto(
                     continue
                 base_shape = _extract_base_timing_shape(line)
                 row_mapping_confidence = float(mapping_confidence_base)
-                row_mapping_reason_code = str(mapping_reason_code or "")
                 row_jump_blocked = 0
                 
 
@@ -2919,11 +2905,9 @@ def generate_oto(
                         if keep_forced:
                             selected_w_idx = forced_selected_idx
                             cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
-                            row_mapping_reason_code = "forced_occurrence_index"
                         else:
                             forced_gate_rejected = True
                             row_mapping_confidence = max(0.0, row_mapping_confidence - 0.08)
-                            row_mapping_reason_code = "forced_occurrence_low_score"
                     if forced_selected_idx is None or forced_gate_rejected:
                         selected_w_idx, cv_seq_idx, resolve_meta = _resolve_cv_syllable_index(
                             target_clean,
@@ -2945,7 +2929,6 @@ def generate_oto(
                             )
                         if row_jump_blocked:
                             row_mapping_confidence = max(0.0, row_mapping_confidence - 0.18)
-                            row_mapping_reason_code = "jump_blocked"
                     target_onset, target_vowel, _target_coda = _split_kr_syllable_parts(target_clean)
                     forced_cv_head_severe_mismatch = False
                     if (
@@ -3000,7 +2983,6 @@ def generate_oto(
                                     fixed_idx = max_allowed_idx
                                     row_jump_blocked = 1
                                     row_mapping_confidence = max(0.0, row_mapping_confidence - 0.14)
-                                    row_mapping_reason_code = "exact_vowel_fix_jump_blocked"
                                     if kr_mapping_debug_reason_logging:
                                         log(
                                             f"🛡️ {fname}: KR 모음 보정 점프 차단 "
@@ -3275,12 +3257,6 @@ def generate_oto(
             if detected_vowel:
                 try:
                     tg = textgrid.TextGrid.fromFile(tg_info['path'])
-                    w_tier = None
-                    for t in tg:
-                        if hasattr(t, 'name') and t.name == 'words':
-                            w_tier = t
-                            break
-
                     phone_tier = next((t for t in tg if isinstance(t, textgrid.IntervalTier) and t.name == 'phones'), None)
                     if not phone_tier: continue
                     intervals = [i for i in phone_tier if i.mark.strip() not in ['', 'sil', 'spn', 'pau']]

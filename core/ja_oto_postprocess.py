@@ -8,7 +8,7 @@ main generator loop so they can be adjusted independently.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Optional, Sequence, Tuple
+from typing import Callable, Optional, Sequence, Tuple
 
 from core.ja_oto_mapping import _clean_phone_mark
 
