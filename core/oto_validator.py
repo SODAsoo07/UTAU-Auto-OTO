@@ -22,6 +22,8 @@ except Exception:  # pragma: no cover
 
 from core.textio_utils import read_text_auto
 from core.ja_lab_generator import parse_ja_filename
+from core.kr_oto_rules import should_ignore_korean_alias
+from core.oto_normalization import normalize_wav_key
 
 
 SIL_MARKS = {"", "sil", "sp", "spn", "pau"}
@@ -208,6 +210,9 @@ def _parse_oto_line(line: str):
 
 
 def _norm_name(name: str) -> str:
+    normalized = normalize_wav_key(name)
+    if normalized:
+        return normalized
     s = (name or "").strip().lower()
     return unicodedata.normalize("NFKC", s)
 
@@ -449,7 +454,7 @@ def validate_oto_timing(
             if not s:
                 continue
             p = _parse_oto_line(s)
-            if p:
+            if p and not (language == "korean" and should_ignore_korean_alias(p.get("alias", ""))):
                 parsed_lines.append(p)
     summary["total_lines"] = len(parsed_lines)
     if not parsed_lines:

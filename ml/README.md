@@ -1,33 +1,31 @@
-# OTO ML 작업 폴더
+# OTO ML
 
-`Auto_OTO`의 OTO 수치 보정 AI 관련 코드와 설정을 관리하는 폴더다.
+`Auto_OTO`의 OTO 자동 생성 후 보정용 ML 자산과 학습 보조 문서를 둡니다.
 
-구성:
+## 현재 구성
 - `schemas/`: feature schema, model meta schema
-- `configs/`: 학습 기본 설정, 학습 데이터 루트 목록
-- `scripts/`: 데이터셋 생성, 재귀 수집, 학습, 평가 CLI
-- `tests/`: feature/dataset/runtime 회귀 테스트
+- `configs/`: 학습/수집 관련 설정
+- `scripts/`: 데이터 수집, 학습, 평가, 번들 export/install CLI
+- `tests/`: ML 관련 테스트
 
-현재 원칙:
-- 1차 모델은 `LightGBM` 기반 delta 회귀를 사용한다.
-- 런타임 구조는 나중에 `PyTorch` backend를 추가할 수 있게 분리되어 있다.
-- 실제 대용량 데이터셋, 실험 로그, 임시 산출물은 저장소 바깥 `../ml_workspace`에 둔다.
+## 현재 런타임 정책
+- OTO 자동 생성 보정 런타임은 `LightGBM`만 사용합니다.
+- 과거의 `PyTorch` OTO 보정 파이프라인은 제거되었습니다.
+- 대용량 학습 산출물은 기본적으로 `../ml_workspace` 아래를 사용합니다.
 
-일본어 형식 규칙:
-- `VC` 또는 `VV` 연결이 있으면 `CVVC`
-- `VCV` alias가 있으면 `VCV`
-- 그 외는 `CV`
-- 기존 `CVC` 표기는 일본어에서는 내부적으로 `CVVC` 또는 `CV`로 흡수한다.
+## 지원 형식
+- 한국어: `CV`, `CVC`, `CVVC`, `general`
+- 일본어: `CV`, `VCV`, `CVVC`, `general`
 
-에일리어스 매칭 규칙:
-- 학습 데이터셋 생성 시 alias 끝의 음계 접미사(`_C4`, `_D4`, `-A4`, ` F4` 등)는 제거하고 비교한다.
-- 음계 접미사 외에도, alias 코어의 `alias_type`을 유지한 채 뒤에 붙은 비음운 suffix(음색/스타일 문자, 한자, 한글, 가나, 영문 꼬리 등)는 반복적으로 제거한다.
-- 단, `a か` 같은 실제 `VCV`/`VC` 구조를 깨뜨리는 제거는 허용하지 않는다.
-- 매칭 키는 `wav_norm + alias_norm + occurrence_index`를 사용한다.
+## 현재 표준 흐름
+1. `stage_training_sources.py`
+2. `prepare_staged_auto_pairs.py`
+3. `collect_oto_ml_training_data.py`
+4. `train_oto_ml_model.py`
+5. `evaluate_oto_ml_model.py`
+6. `export_oto_ml_bundle.py`
+7. `install_oto_ml_bundle.py`
 
-권장 작업 순서:
-1. `build_oto_ml_dataset.py`로 자동 OTO / 수동 OTO / TextGrid / WAV를 묶어 CSV 생성
-2. 여러 루트를 한꺼번에 훑으려면 `collect_oto_ml_training_data.py`로 후보 manifest와 형식별 CSV를 자동 생성
-3. `train_oto_ml_model.py`로 언어/형식별 모델 학습
-4. `evaluate_oto_ml_model.py`로 baseline 대비 보정 성능 비교
-5. 충분히 검증된 모델만 `assets/models/oto_ml/...`에 배치
+## 참고
+- 재학습 절차: `ml/학습_재빌드_절차.md`
+- 런타임 번들 위치: `assets/models/oto_ml`, `models_installed/oto_ml`

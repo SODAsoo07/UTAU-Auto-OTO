@@ -13,6 +13,21 @@ from typing import Dict, List, Optional, Tuple
 
 from core.oto_ml_features import extract_feature_rows, get_delta_clip_limits, parse_oto_rows
 from core.oto_ml_runtime import load_oto_model_bundle, predict_oto_deltas
+from core.format_type_utils import normalize_format_type
+from core.pipeline_status import (
+    ML_APPLIED,
+    ML_BUNDLE_INVALID,
+    ML_DISABLED_ENV,
+    ML_INFER_FAILED,
+    ML_INPUT_MISSING,
+    ML_MODEL_MISSING,
+    ML_NO_FEATURES,
+    ML_POLICY_OFF,
+    ML_ROUTE_UNAVAILABLE,
+    OK,
+    make_runtime_report,
+    normalize_ml_policy,
+)
 from core.timing_anchor_profiles import get_anchor_profile, is_anchor_lock_enabled
 from core.timing_anchor_runtime import AnchorTimingContext, apply_anchor_lock
 
@@ -47,7 +62,7 @@ def _installed_model_root_for_language(language: str) -> str:
 
 
 def _resolve_lightgbm_model_dir(language: str, format_type: str) -> Optional[str]:
-    fmt = str(format_type or "").strip().lower() or "general"
+    fmt = normalize_format_type(language, format_type) or "general"
     lang = str(language or "").strip().lower()
     candidates = []
     for root in (_installed_model_root_for_language(language), _model_root_for_language(language)):
@@ -55,6 +70,8 @@ def _resolve_lightgbm_model_dir(language: str, format_type: str) -> Optional[str
             candidates.append(root)
         else:
             candidates.append(os.path.join(root, fmt, "v1"))
+            if fmt == "cvc":
+                candidates.append(os.path.join(root, "cv", "v1"))
             if fmt != "general":
                 candidates.append(os.path.join(root, "general", "v1"))
     for candidate in candidates:
@@ -80,13 +97,77 @@ def _resolve_model_dir(language: str, format_type: str) -> Optional[str]:
     return _resolve_lightgbm_model_dir(language, format_type)
 
 
+def _bundle_meta_exists(model_dir: str) -> bool:
+    return bool(model_dir and os.path.isfile(os.path.join(model_dir, "model_meta.json")))
+
+
+def _ensure_report(report: Optional[Dict[str, object]], **defaults) -> Dict[str, object]:
+    if report is None:
+        report = {}
+    for key, value in defaults.items():
+        report.setdefault(key, value)
+    return report
+
+
+def check_oto_ml_ready(language: str, format_type: str) -> Dict[str, object]:
+    routed_format = normalize_format_type(language, format_type) or "general"
+    model_dir = _resolve_model_dir(language, routed_format)
+    if not model_dir:
+        return make_runtime_report(
+            "ml",
+            ML_MODEL_MISSING,
+            "OTO ML 모델을 찾을 수 없습니다.",
+            language=str(language or "").strip().lower(),
+            format_type=routed_format,
+            model_dir="",
+            ready=False,
+        )
+    if not _bundle_meta_exists(model_dir):
+        return make_runtime_report(
+            "ml",
+            ML_MODEL_MISSING,
+            f"OTO ML model_meta.json이 없습니다: {model_dir}",
+            language=str(language or "").strip().lower(),
+            format_type=routed_format,
+            model_dir=str(model_dir),
+            ready=False,
+        )
+    bundle = load_oto_model_bundle(model_dir)
+    if not bundle:
+        return make_runtime_report(
+            "ml",
+            ML_BUNDLE_INVALID,
+            f"OTO ML 번들을 읽지 못했습니다: {model_dir}",
+            language=str(language or "").strip().lower(),
+            format_type=routed_format,
+            model_dir=str(model_dir),
+            ready=False,
+        )
+    return make_runtime_report(
+        "ml",
+        OK,
+        "OTO ML 준비 완료",
+        language=str(language or "").strip().lower(),
+        format_type=routed_format,
+        model_dir=str(model_dir),
+        ready=True,
+    )
+
+
 def _route_format_for_feature(language: str, feature_row: Dict[str, object], format_override: Optional[str] = None) -> Optional[str]:
     lang = str(language or "").strip().lower()
-    base_format = str(format_override or feature_row.get("format_type", "general") or "general").strip().lower()
+    base_format = normalize_format_type(lang, (format_override or feature_row.get("format_type", "general") or "general")) or "general"
     alias_type = str(feature_row.get("alias_type", "") or "").strip().lower()
     coda_type = str(feature_row.get("coda_type", "") or "").strip().lower()
     mapping_conf = _to_float(feature_row.get("mapping_confidence"), 1.0)
     pre_expected_gap = abs(_to_float(feature_row.get("base_pre_to_expected_ms"), 0.0))
+
+    if lang == "japanese" and base_format == "cv":
+        if alias_type in {"cv", "cv_head", "mono"}:
+            if mapping_conf < 0.35 or pre_expected_gap > 140.0:
+                return None
+            return "cv"
+        return None
 
     if lang == "japanese" and base_format == "vcv" and not _has_explicit_model_override(lang):
         # 일본어 VCV는 현재 VV/VC에서 ML 이득이 크고, -CV도 보조 보정 가치가 있다.
@@ -109,7 +190,17 @@ def _route_format_for_feature(language: str, feature_row: Dict[str, object], for
             if alias_type == "vc" and coda_type in {"stop", "nasal", "liquid"}:
                 return "cvvc"
             return None
+        if lang == "korean" and base_format == "cv":
+            if alias_type in {"cv", "cv_head", "mono"}:
+                return "cv"
+            if alias_type == "vc" and coda_type in {"stop", "nasal", "liquid"}:
+                return "cv"
+            if alias_type == "vv":
+                return "cv"
+            return None
         if lang == "korean" and base_format == "cvc":
+            if alias_type in {"cv", "cv_head", "mono", "vv"}:
+                return "cvc"
             if alias_type == "vc" and coda_type in {"stop", "nasal", "liquid"}:
                 return "cvc"
             return None
@@ -122,7 +213,7 @@ def _route_format_for_feature(language: str, feature_row: Dict[str, object], for
 
     # VCV 내에서도 실제 받침 성격의 VC만 CVC 편향을 재사용한다.
     if alias_type == "vc" and coda_type in {"stop", "nasal", "liquid"}:
-        return "cvc"
+        return "cv"
     # KR VCV의 비브리지 alias는 vcv 전용 모델을 우선 시도하고, 없으면 general로 fallback한다.
     return "vcv"
 
@@ -165,7 +256,7 @@ def _scale_signed(value: float, neg_scale: float = 1.0, pos_scale: float = 1.0) 
 
 
 def _apply_japanese_delta_policy(row_context: Dict[str, object], deltas: Dict[str, float]) -> Dict[str, float]:
-    format_type = str(row_context.get("format_type", "") or "").strip().lower()
+    format_type = normalize_format_type("japanese", row_context.get("format_type", ""))
     alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
     alias_text = str(row_context.get("alias_text", "") or row_context.get("alias", "") or "").strip()
 
@@ -209,7 +300,7 @@ def _apply_japanese_delta_policy(row_context: Dict[str, object], deltas: Dict[st
 
     # 일본어 CVVC의 유성음/치찰음은 ML이 pre/cutoff를 과하게 앞으로 당기는 경향이 있다.
     # "앞당기는" 방향 delta만 더 강하게 줄인다.
-    if format_type == "cvvc" and alias_type in {"cv", "cv_head", "vc"}:
+    if format_type in {"cvvc", "cv"} and alias_type in {"cv", "cv_head", "vc"}:
         is_sensitive = onset in JA_VOICED_ONSETS or onset in JA_SIBILANT_ONSETS or onset in JA_FRICATIVE_ONSETS or onset in JA_PLOSIVE_ONSETS
         if is_sensitive:
             if alias_type in {"cv", "cv_head"} and (
@@ -237,7 +328,7 @@ def _apply_japanese_delta_policy(row_context: Dict[str, object], deltas: Dict[st
 
 
 def _apply_korean_delta_policy(row_context: Dict[str, object], deltas: Dict[str, float]) -> Dict[str, float]:
-    format_type = str(row_context.get("format_type", "") or "").strip().lower()
+    format_type = normalize_format_type("korean", row_context.get("format_type", ""))
     alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
     coda_type = str(row_context.get("coda_type", "") or "").strip().lower()
     mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
@@ -278,7 +369,7 @@ def _apply_korean_delta_policy(row_context: Dict[str, object], deltas: Dict[str,
         for key in list(deltas.keys()):
             deltas[key] = float(deltas[key]) * 0.86
 
-    if format_type == "cvc":
+    if format_type in {"cvc", "cv"}:
         for key in list(deltas.keys()):
             deltas[key] = float(deltas[key]) * 0.90
 
@@ -478,22 +569,68 @@ def apply_oto_ml_to_oto_file(
     callback=None,
     enabled: bool = True,
     format_override: Optional[str] = None,
+    policy: Optional[str] = None,
+    report: Optional[Dict[str, object]] = None,
 ) -> int:
-    if not enabled:
+    policy_name = normalize_ml_policy(policy, enabled_default=enabled)
+    required_policy = policy_name == "on"
+    ml_report = _ensure_report(
+        report,
+        stage="ml",
+        policy=policy_name,
+        status="skipped",
+        code=OK,
+        message="",
+        fallback_used=False,
+        attempted_routes=[],
+        missing_routes=[],
+        invalid_routes=[],
+        loaded_models=[],
+        changed_lines=0,
+        infer_failures=[],
+        anchor_stats={},
+    )
+    ml_report["policy"] = policy_name
+
+    if policy_name == "off":
+        ml_report.update(make_runtime_report("ml", ML_POLICY_OFF, "ML 정책이 off로 설정되었습니다."))
+        ml_report["status"] = "skipped"
         return 0
+
     if os.environ.get("UTOA_DISABLE_OTO_ML", "").strip().lower() in {"1", "true", "yes", "on"}:
+        ml_report.update(make_runtime_report("ml", ML_DISABLED_ENV, "환경변수로 OTO ML이 비활성화되었습니다."))
+        ml_report["status"] = "skipped"
         return 0
+
     if not oto_path or not os.path.exists(oto_path):
+        ml_report.update(make_runtime_report("ml", ML_INPUT_MISSING, f"OTO 파일이 없습니다: {oto_path}"))
+        ml_report["status"] = "fallback" if required_policy else "skipped"
+        ml_report["fallback_used"] = required_policy
         return 0
 
     rows = parse_oto_rows(oto_path)
     if not rows:
+        ml_report.update(make_runtime_report("ml", ML_INPUT_MISSING, "OTO 행을 읽지 못했습니다."))
+        ml_report["status"] = "fallback" if required_policy else "skipped"
+        ml_report["fallback_used"] = required_policy
         return 0
-    feature_rows = extract_feature_rows(language, oto_path, tg_dir=tg_dir, wav_dir=wav_dir, custom_phonemes_path=custom_phonemes_path)
+
+    feature_rows = extract_feature_rows(
+        language,
+        oto_path,
+        tg_dir=tg_dir,
+        wav_dir=wav_dir,
+        custom_phonemes_path=custom_phonemes_path,
+    )
     if not feature_rows:
+        ml_report.update(make_runtime_report("ml", ML_NO_FEATURES, "ML feature를 추출하지 못했습니다."))
+        ml_report["status"] = "fallback" if required_policy else "skipped"
+        ml_report["fallback_used"] = required_policy
         return 0
 
     bundle_cache: Dict[str, Optional[object]] = {}
+    route_status: Dict[str, str] = {}
+    route_model_dir: Dict[str, str] = {}
     model_notice = set()
     changed = 0
     anchor_stats = {
@@ -501,24 +638,41 @@ def apply_oto_ml_to_oto_file(
         "cutoff_clamped_count": 0,
         "vc_cutoff_leak_guard_count": 0,
     }
-    raw_lines = []
     with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
         raw_lines = [line.rstrip("\n") for line in f]
 
     rows_by_index = {int(row["line_index"]): row for row in rows}
+    routed_features = 0
 
     for feat in feature_rows:
         format_type = _route_format_for_feature(language, feat, format_override=format_override)
         if not format_type:
             continue
+        routed_features += 1
+        if format_type not in ml_report["attempted_routes"]:
+            ml_report["attempted_routes"].append(format_type)
         cache_key = format_type
         if cache_key not in bundle_cache:
-            model_dir = _resolve_model_dir(language, format_type)
-            bundle_cache[cache_key] = load_oto_model_bundle(model_dir) if model_dir else None
-            bundle = bundle_cache[cache_key]
-            if bundle and model_dir and model_dir not in model_notice and callback:
-                _emit(callback, f"[OTO-ML] 모델 로드 ({bundle.backend}): {model_dir}")
-                model_notice.add(model_dir)
+            ready = check_oto_ml_ready(language, format_type)
+            route_status[cache_key] = str(ready.get("code", OK) or OK)
+            route_model_dir[cache_key] = str(ready.get("model_dir", "") or "")
+            if ready.get("code") == ML_MODEL_MISSING:
+                ml_report["missing_routes"].append(
+                    {"format_type": cache_key, "code": ML_MODEL_MISSING, "model_dir": route_model_dir[cache_key]}
+                )
+                bundle_cache[cache_key] = None
+            elif ready.get("code") == ML_BUNDLE_INVALID:
+                ml_report["invalid_routes"].append(
+                    {"format_type": cache_key, "code": ML_BUNDLE_INVALID, "model_dir": route_model_dir[cache_key]}
+                )
+                bundle_cache[cache_key] = None
+            else:
+                bundle_cache[cache_key] = load_oto_model_bundle(route_model_dir[cache_key])
+                bundle = bundle_cache[cache_key]
+                if bundle and route_model_dir[cache_key] and route_model_dir[cache_key] not in model_notice:
+                    _emit(callback, f"[OTO-ML] 모델 로드 ({bundle.backend}): {route_model_dir[cache_key]}")
+                    ml_report["loaded_models"].append(route_model_dir[cache_key])
+                    model_notice.add(route_model_dir[cache_key])
         bundle = bundle_cache.get(cache_key)
         if not bundle:
             continue
@@ -535,6 +689,7 @@ def apply_oto_ml_to_oto_file(
             )
         except Exception as e:
             logger.warning("OTO ML inference skipped for line %s: %s", line_index, e)
+            ml_report["infer_failures"].append({"line_index": line_index, "message": str(e)})
             continue
         if (
             abs(o2 - float(row["offset"])) > 1e-6
@@ -551,6 +706,7 @@ def apply_oto_ml_to_oto_file(
             for line in raw_lines:
                 f.write(line + "\n")
         _emit(callback, f"[OTO-ML] 수치 보정 적용: {changed} lines")
+
     if int(anchor_stats.get("anchor_locked_count", 0)) > 0:
         _emit(
             callback,
@@ -559,4 +715,52 @@ def apply_oto_ml_to_oto_file(
             f"cutoff_clamped_count={int(anchor_stats.get('cutoff_clamped_count', 0))}, "
             f"vc_cutoff_leak_guard_count={int(anchor_stats.get('vc_cutoff_leak_guard_count', 0))}",
         )
-    return changed
+
+    ml_report["anchor_stats"] = dict(anchor_stats)
+    ml_report["changed_lines"] = int(changed)
+    ml_report["attempted_routes"] = list(dict.fromkeys(ml_report["attempted_routes"]))
+    ml_report["missing_routes"] = list(ml_report["missing_routes"])
+    ml_report["invalid_routes"] = list(ml_report["invalid_routes"])
+    ml_report["loaded_models"] = list(dict.fromkeys(ml_report["loaded_models"]))
+
+    if routed_features == 0:
+        ml_report.update(make_runtime_report("ml", ML_ROUTE_UNAVAILABLE, "ML 대상 alias가 없습니다."))
+        ml_report["status"] = "skipped"
+        return 0
+
+    if changed > 0:
+        ml_report.update(make_runtime_report("ml", ML_APPLIED, f"{changed} lines adjusted"))
+        ml_report["status"] = "applied"
+        return changed
+
+    if ml_report["loaded_models"]:
+        if ml_report["infer_failures"]:
+            ml_report.update(make_runtime_report("ml", ML_INFER_FAILED, "ML 추론 중 일부 행이 실패해 기본 계산으로 유지했습니다."))
+            ml_report["status"] = "fallback"
+            ml_report["fallback_used"] = True
+        else:
+            ml_report.update(make_runtime_report("ml", ML_APPLIED, "변경이 필요하지 않았습니다."))
+            ml_report["status"] = "no_change"
+        return changed
+
+    if ml_report["invalid_routes"]:
+        ml_report.update(make_runtime_report("ml", ML_BUNDLE_INVALID, "OTO ML 번들을 읽지 못해 기본 계산으로 유지했습니다."))
+        ml_report["status"] = "fallback" if required_policy else "skipped"
+        ml_report["fallback_used"] = required_policy
+        return 0
+
+    if ml_report["missing_routes"]:
+        ml_report.update(make_runtime_report("ml", ML_MODEL_MISSING, "OTO ML 모델이 없어 기본 계산으로 유지했습니다."))
+        ml_report["status"] = "fallback" if required_policy else "skipped"
+        ml_report["fallback_used"] = required_policy
+        return 0
+
+    if ml_report["infer_failures"]:
+        ml_report.update(make_runtime_report("ml", ML_INFER_FAILED, "ML 추론 실패로 기본 계산으로 유지했습니다."))
+        ml_report["status"] = "fallback"
+        ml_report["fallback_used"] = True
+        return 0
+
+    ml_report.update(make_runtime_report("ml", ML_ROUTE_UNAVAILABLE, "사용 가능한 ML route가 없습니다."))
+    ml_report["status"] = "skipped"
+    return 0

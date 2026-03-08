@@ -51,7 +51,7 @@ def prepare_staged_auto_pairs(
         logs: List[str] = []
         logs_by_item[key] = logs
         item.mfa_path = mfa_path
-        item.tg_dir = os.path.join(item.work_dir, "textgrids_auto")
+        item.tg_dir = item.work_dir
         item.auto_oto = os.path.join(item.work_dir, "oto_auto_ml.ini")
         item.dict_path = os.path.join(item.work_dir, "dictionary_auto.txt")
         emit(
@@ -82,7 +82,7 @@ def prepare_staged_auto_pairs(
 
         try:
             _prepare_lab_and_dict(item, logs)
-            item.tg_dir = os.path.join(item.work_dir, "textgrids_auto")
+            item.tg_dir = item.work_dir
             os.makedirs(item.tg_dir, exist_ok=True)
             ok, err = run_mfa_align(
                 mfa_path=mfa_path,

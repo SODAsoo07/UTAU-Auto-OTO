@@ -8,6 +8,7 @@ and filename/phone-nuclei based syllable mapping from the main generator.
 from __future__ import annotations
 
 import re
+import unicodedata
 from functools import lru_cache
 
 from core.ja_lab_generator import parse_ja_filename, romaji_to_ipa, split_ja_romaji_syllable
@@ -29,6 +30,35 @@ JA_VOICELESS_ONSETS = {
     'k', 's', 't', 'p', 'h', 'f', 'sh', 'ch', 'ts',
     'q', 'c', 'ky', 'ty', 'py', 'hy', 'ss', 'kk', 'tt', 'pp',
 }
+
+
+def _normalize_custom_alias_lookup(alias):
+    text = unicodedata.normalize("NFKC", str(alias or "")).strip()
+    text = re.sub(r"\s+", " ", text)
+    if not text:
+        return []
+    variants = [text, text.lower()]
+    stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:#|b)?[0-8])$", "", text, flags=re.IGNORECASE)
+    stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:sharp|flat)?[0-8])$", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"\s*[\(\[\{（【].*?[\)\]\}）】]\s*$", "", stripped).strip()
+    if stripped:
+        variants.extend([stripped, stripped.lower()])
+    out = []
+    seen = set()
+    for item in variants:
+        if item not in seen:
+            out.append(item)
+            seen.add(item)
+    return out
+
+
+def _lookup_custom_alias_value(custom_map, alias):
+    if not custom_map:
+        return None
+    for candidate in _normalize_custom_alias_lookup(alias):
+        if candidate in custom_map:
+            return custom_map[candidate]
+    return None
 
 
 def _clean_phone_mark(mark):
@@ -54,11 +84,12 @@ def _is_ja_vowel_token(token):
 
 
 def classify_ja_alias(alias, custom_map=None):
-    clean = alias.strip()
+    clean = unicodedata.normalize("NFKC", str(alias or "")).strip()
     if is_breath(clean):
         return 'br'
-    if custom_map and clean in custom_map:
-        mapped_val = custom_map[clean].lower()
+    mapped_val = _lookup_custom_alias_value(custom_map, clean)
+    if mapped_val is not None:
+        mapped_val = str(mapped_val).lower()
         if mapped_val in ['r', 'h', 'sil', 'br', 'pau', 'sp']:
             return 'br'
         ipa = romaji_to_ipa(mapped_val)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Dict
 
+from core.format_type_utils import normalize_format_type
+
 
 def augment_mapping_quality_features(language: str, format_type: str, alias_type: str, feat: Dict[str, object]) -> Dict[str, object]:
     """
@@ -13,7 +15,7 @@ def augment_mapping_quality_features(language: str, format_type: str, alias_type
     feat["mel_window_silence_ratio"] = float(feat.get("db_silence_ratio", 0.0) or 0.0)
 
     lang = str(language or "").strip().lower()
-    fmt = str(format_type or "").strip().lower()
+    fmt = normalize_format_type(lang, format_type)
     alias_type = str(alias_type or "").strip().lower()
 
     used_alias_occ = 0.0
@@ -22,11 +24,11 @@ def augment_mapping_quality_features(language: str, format_type: str, alias_type
     used_alias_based_syllables = 0.0
 
     if lang == "korean":
-        if fmt == "cvvc" and alias_type in {"cv", "cv_head", "vv"}:
+        if fmt in {"cvvc", "cv", "cvc"} and alias_type in {"cv", "cv_head", "mono", "vv"}:
             used_alias_occ = 1.0
-        if fmt == "cvvc":
+        if fmt in {"cvvc", "cv", "cvc"}:
             used_alias_based_syllables = 1.0
-        if alias_type in {"cv", "cv_head", "vv"} and (
+        if alias_type in {"cv", "cv_head", "mono", "vv"} and (
             float(feat.get("is_diphthong", 0.0) or 0.0) >= 0.5
             or "glide" in str(feat.get("alias_group", "") or "")
         ):
@@ -34,10 +36,13 @@ def augment_mapping_quality_features(language: str, format_type: str, alias_type
     else:
         if fmt == "vcv" and alias_type in {"vv", "vcv", "cv_head"}:
             used_alias_occ = 1.0
-        if alias_type in {"cv_head", "vcv", "vv"}:
+        if fmt == "cv" and alias_type in {"cv", "cv_head", "mono"}:
+            used_alias_occ = 1.0
+            used_alias_based_syllables = 1.0
+        if alias_type in {"cv", "cv_head", "vcv", "vv", "mono"}:
             used_exact_vowel_fix = 1.0
 
-    if float(feat.get("curr_vowel_len_ms", 0.0) or 0.0) < 20.0 and alias_type in {"cv", "cv_head", "vv"}:
+    if float(feat.get("curr_vowel_len_ms", 0.0) or 0.0) < 20.0 and alias_type in {"cv", "cv_head", "vv", "mono"}:
         used_nuclei_fallback = 1.0
 
     off_err = abs(float(feat.get("base_offset_to_expected_ms", 0.0) or 0.0))

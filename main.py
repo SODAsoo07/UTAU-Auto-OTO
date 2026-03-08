@@ -101,8 +101,8 @@ WINDOW_WIDTH = 900
 WINDOW_HEIGHT = 750
 
 LANGUAGE_OPTIONS = [
-    "한국어 (CVC/CVVC/연속음/연단음 자동 매핑)",
-    "日本語 (CVVC/연속음/연단음 자동 매핑)"
+    "한국어 (CV/연단음/CVVC/연속음 자동 매핑)",
+    "日本語 (CV/연단음/CVVC/연속음 자동 매핑)"
 ]
 
 

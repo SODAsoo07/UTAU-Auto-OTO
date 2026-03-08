@@ -38,6 +38,7 @@ except Exception as _sk_exc:  # pragma: no cover
 else:
     SKLEARN_IMPORT_ERROR = None
 
+from core.format_type_utils import normalize_format_type
 from core.oto_ml_features import CATEGORICAL_FEATURES, FEATURE_NAMES, TARGET_NAMES, canonicalize_feature_row, get_delta_clip_limits, get_feature_schema, write_feature_schema
 
 logger = logging.getLogger(__name__)
@@ -163,11 +164,13 @@ def train_lightgbm_bundle(
 
     df = pd.read_csv(dataset_csv)
     language = str(language).strip().lower()
-    format_type = str(format_type).strip().lower()
+    format_type = normalize_format_type(language, format_type)
     if "language" in df.columns:
         df = df[df["language"].astype(str).str.lower() == language]
     if format_type and format_type != "general" and "format_type" in df.columns:
-        df = df[df["format_type"].astype(str).str.lower() == format_type]
+        df = df[
+            df["format_type"].astype(str).str.lower().map(lambda v: normalize_format_type(language, v)) == format_type
+        ]
     if alias_types and "alias_type" in df.columns:
         alias_types = [str(v).strip().lower() for v in alias_types if str(v).strip()]
         if alias_types:
@@ -331,8 +334,11 @@ def evaluate_lightgbm_bundle(model_dir: str, dataset_csv: str, language: str = "
     df = pd.read_csv(dataset_csv)
     if language:
         df = df[df["language"].astype(str).str.lower() == str(language).strip().lower()]
+    format_type = normalize_format_type(language or meta.get("language", ""), format_type)
     if format_type and format_type != "general":
-        df = df[df["format_type"].astype(str).str.lower() == str(format_type).strip().lower()]
+        df = df[
+            df["format_type"].astype(str).str.lower().map(lambda v: normalize_format_type(language or meta.get("language", ""), v)) == format_type
+        ]
     frame = _prepare_frame(df, list(schema.get("feature_names") or FEATURE_NAMES), list(meta.get("categorical_features") or CATEGORICAL_FEATURES))
     summary = {"rows": int(len(df)), "targets": {}}
     for target in TARGET_NAMES:

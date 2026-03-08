@@ -14,6 +14,13 @@ import hashlib
 import tempfile
 import locale
 
+from core.pipeline_status import (
+    ALIGN_EXEC_MISSING,
+    ALIGN_MODEL_MISSING,
+    OK,
+    make_runtime_report,
+)
+
 logger = logging.getLogger(__name__)
 
 ALERT_MSVC_REQUIRED = "__ALERT__MSVC_REQUIRED__"
@@ -357,6 +364,42 @@ def check_mfa_model(mfa_path, language='korean'):
             return False, f"{lang_label} MFA 모델이 설치되어 있지 않습니다. 다운로드가 필요합니다."
     except Exception as e:
         return False, f"MFA 모델 확인 실패: {e}"
+
+
+def check_mfa_ready(language='korean', mfa_path=''):
+    resolved_mfa = mfa_path or find_mfa_executable()
+    if not resolved_mfa or not os.path.exists(resolved_mfa):
+        return make_runtime_report(
+            "align",
+            ALIGN_EXEC_MISSING,
+            "MFA 실행 파일을 찾을 수 없습니다.",
+            engine="mfa",
+            language=str(language or "korean").strip().lower(),
+            mfa_path=str(resolved_mfa or ""),
+            ready=False,
+        )
+
+    has_model, msg = check_mfa_model(resolved_mfa, language=language)
+    if not has_model:
+        return make_runtime_report(
+            "align",
+            ALIGN_MODEL_MISSING,
+            msg or "MFA 모델을 찾을 수 없습니다.",
+            engine="mfa",
+            language=str(language or "korean").strip().lower(),
+            mfa_path=str(resolved_mfa or ""),
+            ready=False,
+        )
+
+    return make_runtime_report(
+        "align",
+        OK,
+        "MFA 정렬 준비 완료",
+        engine="mfa",
+        language=str(language or "korean").strip().lower(),
+        mfa_path=str(resolved_mfa or ""),
+        ready=True,
+    )
 
 
 def ensure_korean_support(mfa_path, callback=None):

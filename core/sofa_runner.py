@@ -19,6 +19,14 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from core.pipeline_status import (
+    ALIGN_DICT_MISSING,
+    ALIGN_EXEC_MISSING,
+    ALIGN_MODEL_MISSING,
+    OK,
+    make_runtime_report,
+)
+
 logger = logging.getLogger(__name__)
 
 SOFA_REPO_URL = "https://github.com/qiuqiao/SOFA.git"
@@ -501,6 +509,56 @@ def is_sofa_ready(sofa_python="", mfa_path="", sofa_repo_dir=""):
     if not ok:
         return False, err
     return True, ""
+
+
+def check_sofa_ready_for_alignment(
+    ckpt_path="",
+    dictionary_path="",
+    *,
+    mfa_path="",
+    sofa_python="",
+    sofa_repo_dir="",
+):
+    if not ckpt_path or not os.path.exists(ckpt_path):
+        return make_runtime_report(
+            "align",
+            ALIGN_MODEL_MISSING,
+            f"SOFA 체크포인트(.ckpt) 파일을 찾을 수 없습니다: {ckpt_path}",
+            engine="sofa",
+            ckpt_path=str(ckpt_path or ""),
+            dictionary_path=str(dictionary_path or ""),
+            ready=False,
+        )
+    if not dictionary_path or not os.path.exists(dictionary_path):
+        return make_runtime_report(
+            "align",
+            ALIGN_DICT_MISSING,
+            f"SOFA 사전 파일을 찾을 수 없습니다: {dictionary_path}",
+            engine="sofa",
+            ckpt_path=str(ckpt_path or ""),
+            dictionary_path=str(dictionary_path or ""),
+            ready=False,
+        )
+    ok, err = is_sofa_ready(sofa_python=sofa_python, mfa_path=mfa_path, sofa_repo_dir=sofa_repo_dir)
+    if not ok:
+        return make_runtime_report(
+            "align",
+            ALIGN_EXEC_MISSING,
+            err or "SOFA 실행 환경을 찾을 수 없습니다.",
+            engine="sofa",
+            ckpt_path=str(ckpt_path or ""),
+            dictionary_path=str(dictionary_path or ""),
+            ready=False,
+        )
+    return make_runtime_report(
+        "align",
+        OK,
+        "SOFA 정렬 준비 완료",
+        engine="sofa",
+        ckpt_path=str(ckpt_path or ""),
+        dictionary_path=str(dictionary_path or ""),
+        ready=True,
+    )
 
 
 def _ensure_sofa_runtime_deps(py, callback=None):

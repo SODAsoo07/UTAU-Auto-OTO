@@ -2,6 +2,7 @@
 import locale
 import subprocess as sp
 
+from core.alignment_pipeline import run_alignment_with_fallback
 from core.ja_lab_generator import generate_ja_dictionary, generate_ja_labs
 from core.ja_oto_generator import (
     apply_ja_autotune_profile_to_oto,
@@ -619,13 +620,15 @@ class PipelineActionsMixin:
                 align_ok = False
                 align_err = ""
                 align_engine = self.aligner_var.get()
-
-                if align_engine == "SOFA":
-                    self._set_status("3/4 - SOFA 음성 정렬 중...")
-                    self._append_log(f"ℹ SOFA 전용 Python: {self.sofa_python_var.get().strip()}")
-                    sofa_kwargs = self._get_sofa_runtime_kwargs(lang)
+                primary_engine = "sofa" if align_engine == "SOFA" else "mfa"
+                fallback_engine = "mfa" if primary_engine == "sofa" else "sofa"
+                sofa_kwargs = self._get_sofa_runtime_kwargs(lang)
+                ckpt = self.sofa_ckpt_var.get().strip()
+                if primary_engine == "sofa":
+                    self._set_status("3/4 - SOFA ?? ?? ?...")
+                    self._append_log(f"? SOFA ?? Python: {self.sofa_python_var.get().strip()}")
                     self._append_log(
-                        "ℹ SOFA 실행 옵션: "
+                        "? SOFA ?? ??: "
                         f"repo={sofa_kwargs.get('sofa_repo_dir')}, "
                         f"mode={sofa_kwargs.get('mode')}, "
                         f"g2p={sofa_kwargs.get('g2p')}, "
@@ -633,48 +636,49 @@ class PipelineActionsMixin:
                         f"2-pass={'ON' if sofa_kwargs.get('two_pass_retry') else 'OFF'}"
                     )
                     ckpt = self._ensure_sofa_model_ready(lang)
-                    sdic = self.sofa_dict_var.get().strip() or dict_path
-                    if not self.sofa_dict_var.get().strip():
-                        self._after_safe(lambda p=sdic: self.sofa_dict_var.set(p))
-                        self._append_log(f"ℹ SOFA 사전이 비어 있어 현재 생성 사전을 사용합니다: {sdic}")
-                    if not ckpt or not sdic:
-                        align_err = "SOFA 체크포인트 또는 사전 경로 누락"
-                        self._append_log(f"❌ {align_err}")
-                    else:
-                        align_ok, align_err = run_sofa_align(
-                            wav_folder=wav_dir,
-                            output_folder=output_dir,
-                            ckpt_path=ckpt,
-                            dictionary_path=sdic,
-                            mfa_path=self.mfa_path or "",
-                            sofa_python=self.sofa_python_var.get().strip(),
-                            callback=self._append_log,
-                            **sofa_kwargs,
-                        )
                 else:
+                    self._set_status("3/4 - MFA ?? ?? ?...")
                     if self.mfa_path:
-                        self._set_status("3/4 - MFA 음성 정렬 중...")
                         has_model, _ = check_mfa_model(self.mfa_path, language=lang)
                         if not has_model:
                             download_mfa_model(self.mfa_path, language=lang, callback=self._append_log)
-                        mfa_profile = (
-                            self._get_mfa_align_profile_code()
-                            if hasattr(self, "_get_mfa_align_profile_code")
-                            else "accurate"
-                        )
-                        self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
-                        align_ok, align_err = run_mfa_align(
-                            self.mfa_path,
-                            wav_dir,
-                            dict_path,
-                            output_dir,
-                            language=lang,
-                            callback=self._append_log,
-                            align_profile=mfa_profile,
-                        )
-                    else:
-                        align_err = "MFA 실행 파일이 없어 정렬을 건너뜁니다."
-                        self._append_log(f"⚠ {align_err}")
+                    mfa_profile = (
+                        self._get_mfa_align_profile_code()
+                        if hasattr(self, "_get_mfa_align_profile_code")
+                        else "accurate"
+                    )
+                    self._append_log(f"? MFA ?? ???: {mfa_profile}")
+
+                sdic = self.sofa_dict_var.get().strip() or dict_path
+                if not self.sofa_dict_var.get().strip():
+                    self._after_safe(lambda p=sdic: self.sofa_dict_var.set(p))
+                    self._append_log(f"? SOFA ??? ?? ?? ?? ?? ??? ?????: {sdic}")
+
+                align_result = run_alignment_with_fallback(
+                    language=lang,
+                    wav_folder=wav_dir,
+                    dictionary_path=dict_path,
+                    output_folder=output_dir,
+                    primary_aligner=primary_engine,
+                    fallback_aligner=fallback_engine,
+                    mfa_path=self.mfa_path or "",
+                    mfa_align_profile=(
+                        self._get_mfa_align_profile_code()
+                        if hasattr(self, "_get_mfa_align_profile_code")
+                        else "accurate"
+                    ),
+                    sofa_kwargs={
+                        **sofa_kwargs,
+                        "ckpt_path": ckpt,
+                        "dictionary_path": sdic,
+                        "sofa_python": self.sofa_python_var.get().strip(),
+                    },
+                    callback=self._append_log,
+                )
+                align_ok = bool(align_result.get("ok", False))
+                align_err = str(align_result.get("message", "") or "")
+                if align_result.get("fallback_used"):
+                    self._append_log(f"? ?? fallback ??: {align_result.get('fallback_path', '')}")
 
                 if not align_ok:
                     if align_engine == "MFA" and align_err:

@@ -552,92 +552,20 @@ class ConfigMixin:
             self.out_entry.delete(0, "end")
             self.out_entry.insert(0, config.get("out_path", ""))
 
-            saved_auto = config.get("auto_format", "자동 감지 (권장)")
+            saved_auto = config.get("auto_format", "?? ?? (??)")
             auto_map = {
-                "CVC (단독음)": "CVC/연단음",
-                "CVC (연단음)": "CVC/연단음",
-                "CVVC (기본)": "CVVC",
-                "VCV (연속음)": "VCV (연속음)",
+                "CV (???)": "CV/???",
+                "CV/???": "CV/???",
+                "CVC (???)": "CV/???",
+                "CVC (???)": "CV/???",
+                "CVC/???": "CV/???",
+                "CVVC (??)": "CVVC",
+                "VCV (???)": "VCV (???)",
             }
             saved_auto = auto_map.get(saved_auto, saved_auto)
-            valid_auto_formats = {"자동 감지 (권장)", "CVC/연단음", "CVVC", "VCV (연속음)"}
+            valid_auto_formats = {"?? ?? (??)", "CV/???", "CVVC", "VCV (???)"}
             if saved_auto in valid_auto_formats:
                 self.auto_format_var.set(saved_auto)
-
-            if "custom_phonemes" in config:
-                self.custom_phoneme_var.set(config.get("custom_phonemes", ""))
-                self.custom_entry.delete(0, "end")
-                self.custom_entry.insert(0, self.custom_phoneme_var.get())
-            if "alias_suffix" in config:
-                self.alias_suffix_var.set(config.get("alias_suffix", ""))
-                self.suffix_entry.delete(0, "end")
-                self.suffix_entry.insert(0, self.alias_suffix_var.get())
-            if "openutau_compatible" in config:
-                self.openutau_var.set(config["openutau_compatible"])
-            if "gen_missing_vowels" in config:
-                self.gen_missing_vowels_var.set(config["gen_missing_vowels"])
-            if "no_base_oto" in config:
-                self.no_base_oto_var.set(config["no_base_oto"])
-            if "enable_ml_correction" in config and hasattr(self, "enable_ml_correction_var"):
-                self.enable_ml_correction_var.set(config["enable_ml_correction"])
-            if "ja_mapping_words_fallback_enabled" in config and hasattr(self, "ja_mapping_words_fallback_enabled_var"):
-                self.ja_mapping_words_fallback_enabled_var.set(bool(config["ja_mapping_words_fallback_enabled"]))
-            if "ja_mapping_spn_ratio_threshold" in config and hasattr(self, "ja_mapping_spn_ratio_threshold_var"):
-                try:
-                    self.ja_mapping_spn_ratio_threshold_var.set(float(config["ja_mapping_spn_ratio_threshold"]))
-                except Exception:
-                    pass
-            if "ja_mapping_min_vowel_phone_ratio" in config and hasattr(self, "ja_mapping_min_vowel_phone_ratio_var"):
-                try:
-                    self.ja_mapping_min_vowel_phone_ratio_var.set(float(config["ja_mapping_min_vowel_phone_ratio"]))
-                except Exception:
-                    pass
-            if "ja_mapping_debug_reason_logging" in config and hasattr(self, "ja_mapping_debug_reason_logging_var"):
-                self.ja_mapping_debug_reason_logging_var.set(bool(config["ja_mapping_debug_reason_logging"]))
-            if "kr_anchor_profile_path" in config and hasattr(self, "kr_anchor_profile_path_var"):
-                self.kr_anchor_profile_path_var.set(str(config.get("kr_anchor_profile_path", "") or ""))
-            if "kr_mapping_confidence_threshold" in config and hasattr(self, "kr_mapping_confidence_threshold_var"):
-                try:
-                    self.kr_mapping_confidence_threshold_var.set(float(config["kr_mapping_confidence_threshold"]))
-                except Exception:
-                    pass
-            if "kr_mapping_max_index_jump_default" in config and hasattr(self, "kr_mapping_max_index_jump_default_var"):
-                try:
-                    self.kr_mapping_max_index_jump_default_var.set(int(float(config["kr_mapping_max_index_jump_default"])))
-                except Exception:
-                    pass
-            if "kr_mapping_max_index_jump_high_conf" in config and hasattr(self, "kr_mapping_max_index_jump_high_conf_var"):
-                try:
-                    self.kr_mapping_max_index_jump_high_conf_var.set(int(float(config["kr_mapping_max_index_jump_high_conf"])))
-                except Exception:
-                    pass
-            if "ml_same_language_borrow_only" in config and hasattr(self, "ml_same_language_borrow_only_var"):
-                self.ml_same_language_borrow_only_var.set(bool(config["ml_same_language_borrow_only"]))
-            if "ml_use_pseudo_labels" in config and hasattr(self, "ml_use_pseudo_labels_var"):
-                self.ml_use_pseudo_labels_var.set(bool(config["ml_use_pseudo_labels"]))
-            if "ml_pseudo_weight_high" in config and hasattr(self, "ml_pseudo_weight_high_var"):
-                try:
-                    self.ml_pseudo_weight_high_var.set(float(config["ml_pseudo_weight_high"]))
-                except Exception:
-                    pass
-            if "ml_pseudo_weight_mid" in config and hasattr(self, "ml_pseudo_weight_mid_var"):
-                try:
-                    self.ml_pseudo_weight_mid_var.set(float(config["ml_pseudo_weight_mid"]))
-                except Exception:
-                    pass
-            if "language" in config:
-                self.lang_var.set(config["language"])
-            if "auto_format" in config:
-                saved_auto = config["auto_format"]
-                auto_map = {
-                    "CVC (단독음)": "CVC/연단음",
-                    "CVC (연단음)": "CVC/연단음",
-                    "CVVC (기본)": "CVVC",
-                    "VCV (연속음)": "VCV (연속음)",
-                }
-                saved_auto = auto_map.get(saved_auto, saved_auto)
-                if saved_auto in {"자동 감지 (권장)", "CVC/연단음", "CVVC", "VCV (연속음)"}:
-                    self.auto_format_var.set(saved_auto)
             if "ja_alias_style" in config:
                 saved_style = config.get("ja_alias_style", "원본 그대로")
                 if saved_style in {"원본 그대로", "히라가나", "로마자"}:

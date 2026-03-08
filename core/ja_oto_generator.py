@@ -11,7 +11,6 @@ import json
 import math
 import datetime
 import logging
-import unicodedata
 from dataclasses import replace
 from functools import lru_cache
 import textgrid
@@ -33,6 +32,7 @@ from core.ja_oto_finalize import (
 from core.ja_oto_postprocess import (
     JaPostprocessContext,
 )
+from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
 from core.timing_anchor_profiles import (
     get_anchor_profile,
     is_anchor_lock_enabled,
@@ -493,17 +493,7 @@ def validate_oto_params(offset, consonant, cutoff, pre, ovl):
 
 def normalize_key(name):
     """파일명을 정규화된 키로 변환 (일본어/한국어/영문 공용)."""
-    base = os.path.splitext(os.path.basename(str(name or "")))[0]
-    if not base:
-        return ""
-    txt = unicodedata.normalize("NFKC", base).strip().lower()
-    txt = _katakana_to_hiragana(txt)
-    # 구분자/문장부호 제거: 동일 발음 파일명의 표기 차이를 흡수
-    txt = re.sub(r"[\s_\-]+", "", txt)
-    txt = re.sub(r"[`~!@#$%^&*()+={}\[\]|\\:;\"'<>,.?/・｡､。、「」『』（）［］｛｝]", "", txt)
-    # 라틴/숫자/일본어/한글 이외 문자는 제거
-    txt = re.sub(r"[^0-9a-z\u3041-\u3096\u30fc\u31f0-\u31ff\u3400-\u9fff\uac00-\ud7a3]+", "", txt)
-    return txt
+    return normalize_wav_key(name)
 
 
 def is_breath(alias):
@@ -1914,10 +1904,7 @@ def _limit_pre_anchor_shift(
 
 
 def _normalize_alias_for_profile(alias):
-    a = re.sub(r"\s+", " ", (alias or "").strip().lower())
-    # treat trailing suffix like _C4 as metadata
-    a = re.sub(r"_[a-z0-9]{1,8}$", "", a)
-    return a
+    return canonicalize_alias_for_matching("japanese", alias)
 
 
 def _read_text_with_fallback(path):
@@ -1944,7 +1931,7 @@ def _read_oto_rows_for_profile(path):
         p = _parse_oto_line_profile(raw)
         if not p:
             continue
-        p["wav_norm"] = p["wav"].strip().lower()
+        p["wav_norm"] = normalize_wav_key(p["wav"])
         p["alias_norm"] = _normalize_alias_for_profile(p["alias"])
         rows.append(p)
     return rows
@@ -2039,7 +2026,7 @@ def _train_ja_autotune_profile(auto_oto_path, ref_oto_path, custom_map=None):
         r_row = ref_map.get(k)
         if not r_row:
             continue
-        alias_for_cls = re.sub(r"_[A-Za-z0-9]{1,8}$", "", a_row["alias"])
+        alias_for_cls = _normalize_alias_for_profile(a_row["alias"])
         alias_type = _classify_cached(alias_for_cls)
         b = buckets.setdefault(alias_type, {f: [] for f in fields})
         for f in fields:
@@ -2300,13 +2287,12 @@ def _apply_profile_to_oto_file(oto_path, profile, custom_map=None):
             alias_type_cache[alias_text] = t
         return t
 
-    with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
-        for raw in f:
+    for raw in _read_text_with_fallback(oto_path).splitlines():
             p = _parse_oto_line_profile(raw)
             if not p:
                 out_lines.append(raw.rstrip("\n"))
                 continue
-            alias_for_cls = re.sub(r"_[A-Za-z0-9]{1,8}$", "", p["alias"])
+            alias_for_cls = _normalize_alias_for_profile(p["alias"])
             alias_type = _classify_cached(alias_for_cls)
             o2, c2, ct2, pr2, ov2 = _apply_ja_autotune_profile(
                 alias_type, p["offset"], p["cons"], p["cutoff"], p["pre"], p["ovl"], profile
@@ -2344,13 +2330,12 @@ def _apply_ja_mel_refine_to_oto_file(oto_path, wav_dir, custom_map=None):
 
     raw_lines = []
     parsed = []
-    with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
-        for idx, raw in enumerate(f):
-            line = raw.rstrip("\n")
-            raw_lines.append(line)
-            row = _parse_oto_line_profile(line)
-            if row:
-                parsed.append((idx, row))
+    for idx, raw in enumerate(_read_text_with_fallback(oto_path).splitlines()):
+        line = raw.rstrip("\n")
+        raw_lines.append(line)
+        row = _parse_oto_line_profile(line)
+        if row:
+            parsed.append((idx, row))
     if not parsed:
         return 0
 
@@ -2547,7 +2532,9 @@ def generate_ja_oto(
     ja_mapping_confidence_threshold=None,
     cleanup_timing_jsonl=True,
     auto_format=None,
-    callback=None
+    callback=None,
+    ml_policy="",
+    runtime_report=None,
 ):
     """
     TextGrid 기반 일본어 CVVC OTO.ini 자동 생성.
@@ -2594,19 +2581,12 @@ def generate_ja_oto(
     # - 값이 지정되면 템플릿이 있어도 해당 형식을 우선 적용
     forced_format = None
     if auto_format:
-        af = str(auto_format).strip().lower()
-        if af.startswith('cvc'):
-            forced_format = 'cvvc'
-            fallback_format = 'cvvc'
-        elif af == 'cv' or af.startswith('cv '):
-            forced_format = 'cv'
-            fallback_format = 'cv'
-        elif af.startswith('cvvc'):
-            forced_format = 'cvvc'
-            fallback_format = 'cvvc'
-        elif af.startswith('vcv'):
-            forced_format = 'vcv'
-            fallback_format = 'vcv'
+        from core.format_type_utils import normalize_auto_format_value
+
+        normalized_auto_format = normalize_auto_format_value("japanese", auto_format)
+        if normalized_auto_format:
+            forced_format = normalized_auto_format
+            fallback_format = normalized_auto_format
 
     auto_gen_format = (fallback_format or "cvvc").strip().lower()
     if auto_gen_format not in {"cv", "cvvc", "vcv"}:
@@ -2616,8 +2596,6 @@ def generate_ja_oto(
         )
         if callback:
             callback(log_msg)
-        auto_gen_format = "cvvc"
-    elif auto_gen_format == "cv":
         auto_gen_format = "cvvc"
 
     # 매핑 옵션: 함수 인자 + 환경변수 병행 지원
@@ -3041,7 +3019,7 @@ def generate_ja_oto(
                                     
                                 lines.append(f"{real_name}={prev_vowel} {syl},0,0,0,0,0")
                                 
-                        elif local_format == 'cvc' or local_format == 'cvvc':
+                        elif local_format in {'cv', 'cvc', 'cvvc'}:
                             # CVVC / CVC 공통: 기본 CV
                             lines.append(f"{real_name}={syl},0,0,0,0,0")
                             
@@ -5184,6 +5162,7 @@ def generate_ja_oto(
         try:
             from core.oto_ml_refiner import apply_oto_ml_to_oto_file
 
+            ml_report = {}
             ml_changed = apply_oto_ml_to_oto_file(
                 "japanese",
                 out_path,
@@ -5193,11 +5172,24 @@ def generate_ja_oto(
                 callback=log,
                 enabled=enable_ml_correction,
                 format_override=(forced_format or fallback_format or "cvvc"),
+                policy=ml_policy,
+                report=ml_report,
             )
+            if isinstance(runtime_report, dict):
+                runtime_report["ml"] = dict(ml_report)
             if ml_changed > 0:
                 log(f"[OTO-ML] 일본어 수치 보정 적용: {ml_changed} lines")
         except Exception as ml_e:
             log(f"[OTO-ML] 일본어 보정 스킵: {ml_e}")
+            if isinstance(runtime_report, dict):
+                runtime_report["ml"] = {
+                    "stage": "ml",
+                    "code": "ML_INFER_FAILED",
+                    "message": str(ml_e),
+                    "status": "fallback",
+                    "fallback_used": True,
+                    "policy": str(ml_policy or ""),
+                }
         mel_changed = _apply_ja_mel_refine_to_oto_file(
             out_path, wav_dir_for_mel, custom_map=custom_map
         )

@@ -10,6 +10,7 @@ if ROOT not in sys.path:
 
 from core.oto_ml_collection import (
     build_datasets_from_candidates,
+    discover_training_candidates,
     discover_training_candidates_from_dataset_root,
     load_training_roots,
 )
@@ -36,10 +37,52 @@ class CollectionTests(unittest.TestCase):
             self.assertIn("korean", data)
             self.assertNotIn("notes", data)
 
+    def test_load_training_roots_normalizes_cv_aliases(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = os.path.join(td, "roots.yaml")
+            with open(cfg, "w", encoding="utf-8") as f:
+                f.write(
+                    "japanese:\n"
+                    "  mono:\n"
+                    "    - C:\\\\jp_mono\n"
+                    "  cv:\n"
+                    "    - C:\\\\jp_cv\n"
+                    "korean:\n"
+                    "  cv_simple:\n"
+                    "    - C:\\\\kr_simple\n"
+                    "  cvc:\n"
+                    "    - C:\\\\kr_cvc\n"
+                    "  cv:\n"
+                    "    - C:\\\\kr_cv\n"
+                )
+            data = load_training_roots(cfg)
+            self.assertEqual(sorted(data["japanese"]["cv"]), [r"C:\\jp_cv", r"C:\\jp_mono"])
+            self.assertEqual(sorted(data["korean"]["cv"]), [r"C:\\kr_cv", r"C:\\kr_simple"])
+            self.assertEqual(sorted(data["korean"]["cvc"]), [r"C:\\kr_cvc"])
+
     def test_discover_training_candidates_from_dataset_root(self):
         with tempfile.TemporaryDirectory() as td:
             work = os.path.join(td, "dataset", "japanese", "cvvc", "VoiceA", "C4")
-            tg = os.path.join(work, "textgrids_auto")
+            os.makedirs(work, exist_ok=True)
+            with open(os.path.join(work, "oto.ini"), "w", encoding="utf-8") as f:
+                f.write("a.wav=ga,0,1,-2,0,0\n")
+            with open(os.path.join(work, "oto_auto_ml.ini"), "w", encoding="utf-8") as f:
+                f.write("a.wav=ga,0,1,-2,0,0\n")
+            with open(os.path.join(work, "a.wav"), "wb") as f:
+                f.write(b"RIFF")
+            with open(os.path.join(work, "a.TextGrid"), "w", encoding="utf-8") as f:
+                f.write("dummy")
+
+            candidates = discover_training_candidates_from_dataset_root(os.path.join(td, "dataset"))
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0].status, "ready")
+            self.assertEqual(candidates[0].voicebank_id, "VoiceA")
+            self.assertEqual(candidates[0].tg_dir, work)
+
+    def test_discover_training_candidates_from_dataset_root_accepts_jp_kr_and_format_alias_dirs(self):
+        with tempfile.TemporaryDirectory() as td:
+            work = os.path.join(td, "dataset", "Jp", "CV_and_Rentan", "VoiceB", "C4")
+            tg = os.path.join(work, "textgrids")
             os.makedirs(tg, exist_ok=True)
             with open(os.path.join(work, "oto.ini"), "w", encoding="utf-8") as f:
                 f.write("a.wav=ga,0,1,-2,0,0\n")
@@ -52,8 +95,9 @@ class CollectionTests(unittest.TestCase):
 
             candidates = discover_training_candidates_from_dataset_root(os.path.join(td, "dataset"))
             self.assertEqual(len(candidates), 1)
-            self.assertEqual(candidates[0].status, "ready")
-            self.assertEqual(candidates[0].voicebank_id, "VoiceA")
+            self.assertEqual(candidates[0].language, "japanese")
+            self.assertEqual(candidates[0].format_type, "cv")
+            self.assertEqual(candidates[0].voicebank_id, "VoiceB")
 
     def test_build_datasets_from_candidates_appends_same_output(self):
         with tempfile.TemporaryDirectory() as td:
@@ -99,6 +143,35 @@ class CollectionTests(unittest.TestCase):
             self.assertFalse(fn.call_args_list[0].kwargs["append"])
             self.assertTrue(fn.call_args_list[1].kwargs["append"])
             self.assertEqual(result["summary"]["saved_rows"], 5)
+
+    def test_discover_training_candidates_expands_voicebanks_under_format_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            format_root = os.path.join(td, "Voice_Datas", "Jp", "CVVC")
+            for voice_name in ("VoiceA", "VoiceB"):
+                work = os.path.join(format_root, voice_name)
+                tg = os.path.join(work, "textgrids")
+                os.makedirs(tg, exist_ok=True)
+                with open(os.path.join(work, "oto.ini"), "w", encoding="utf-8") as f:
+                    f.write("a.wav=ga,0,1,-2,0,0\n")
+                with open(os.path.join(work, "oto_auto_ml.ini"), "w", encoding="utf-8") as f:
+                    f.write("a.wav=ga,0,1,-2,0,0\n")
+                with open(os.path.join(work, "a.wav"), "wb") as f:
+                    f.write(b"RIFF")
+                with open(os.path.join(tg, "a.TextGrid"), "w", encoding="utf-8") as f:
+                    f.write("dummy")
+
+            cfg = os.path.join(td, "roots.yaml")
+            with open(cfg, "w", encoding="utf-8") as f:
+                f.write(
+                    "japanese:\n"
+                    f"  cvvc:\n"
+                    f"    - '{format_root}'\n"
+                )
+
+            candidates = discover_training_candidates(cfg)
+            self.assertEqual(len(candidates), 2)
+            self.assertEqual({c.voicebank_id for c in candidates}, {"VoiceA", "VoiceB"})
+            self.assertTrue(all(c.status == "ready" for c in candidates))
 
 
 if __name__ == "__main__":

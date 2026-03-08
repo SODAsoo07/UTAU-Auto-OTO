@@ -72,9 +72,47 @@ KR_CODA_PLOSIVE_MAP = {
     "b": "p", "bb": "p", "p": "p", "pp": "p",
 }
 
+HIRAGANA_RE = re.compile(r"[\u3041-\u3096\u309d-\u309f]")
+
 
 def clean_phone_mark(mark):
     return re.sub(r"[0-9]", "", mark).lower()
+
+
+def should_ignore_korean_alias(alias):
+    """
+    한국어 OTO에서 히라가나 alias는 잘못 섞인 일본어 데이터로 간주하고 무시한다.
+    """
+    return bool(HIRAGANA_RE.search(str(alias or "")))
+
+
+def _normalize_custom_alias_lookup(alias):
+    text = unicodedata.normalize("NFKC", str(alias or "")).strip()
+    text = re.sub(r"\s+", " ", text)
+    if not text:
+        return []
+    variants = [text, text.lower()]
+    stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:#|b)?[0-8])$", "", text, flags=re.IGNORECASE)
+    stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:sharp|flat)?[0-8])$", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"\s*[\(\[\{（【].*?[\)\]\}）】]\s*$", "", stripped).strip()
+    if stripped:
+        variants.extend([stripped, stripped.lower()])
+    out = []
+    seen = set()
+    for item in variants:
+        if item not in seen:
+            out.append(item)
+            seen.add(item)
+    return out
+
+
+def _lookup_custom_alias_value(custom_map, alias):
+    if not custom_map:
+        return None
+    for candidate in _normalize_custom_alias_lookup(alias):
+        if candidate in custom_map:
+            return custom_map[candidate]
+    return None
 
 
 def normalize_ipa_mark(mark):
@@ -350,13 +388,14 @@ def _extract_kr_cv_alias_token(alias):
 
 def classify_alias(alias, custom_map=None):
     """에일리어스 문자열을 br/cv/cv_head/vc/vv/vcv/mono 타입으로 분류합니다."""
-    clean = alias.strip()
+    clean = unicodedata.normalize("NFKC", str(alias or "")).strip()
 
     if is_breath(clean):
         return "br"
 
-    if custom_map and clean in custom_map:
-        mapped_val = custom_map[clean].lower()
+    mapped_val = _lookup_custom_alias_value(custom_map, clean)
+    if mapped_val is not None:
+        mapped_val = str(mapped_val).lower()
         if mapped_val in ["r", "h", "sil", "br"]:
             return "br"
         if mapped_val in KR_VOWELS:
@@ -410,8 +449,9 @@ def classify_alias(alias, custom_map=None):
     if gk == "tail":
         return "vc"
 
-    if custom_map and clean_lower in custom_map:
-        mapped_val = custom_map[clean_lower].lower()
+    mapped_val = _lookup_custom_alias_value(custom_map, clean_lower)
+    if mapped_val is not None:
+        mapped_val = str(mapped_val).lower()
         if mapped_val in ["sil", "br", "r", "h"]:
             return "br"
         if mapped_val in KR_VOWELS:
@@ -434,7 +474,7 @@ def classify_alias(alias, custom_map=None):
 def detect_alias_format(alias_list, custom_map=None):
     """파일 단위 에일리어스 목록의 전체 포맷(CVC/CVVC/VCV 등)을 추정합니다."""
     if not alias_list:
-        return "cvc"
+        return "cv"
 
     type_cache = {}
     types = []
@@ -449,7 +489,7 @@ def detect_alias_format(alias_list, custom_map=None):
     if type_set == {"br"}:
         return "br"
     if type_set <= {"mono", "cv_head", "cv"}:
-        return "mono"
+        return "cv"
     if "vcv" in type_set:
         return "vcv"
     if {"cv_head", "cv", "vc"} <= type_set:
@@ -461,7 +501,7 @@ def detect_alias_format(alias_list, custom_map=None):
     if non_br <= {"vc", "vv"}:
         return "vc_only"
     if non_br <= {"cv", "mono", "cv_head"}:
-        return "cv_simple"
+        return "cv"
     if "vv" in type_set or ("cv_head" in non_br and "vc" in non_br):
         return "cvvc"
     return "cvc"

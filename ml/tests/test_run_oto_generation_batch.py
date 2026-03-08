@@ -76,6 +76,29 @@ class RunOtoGenerationBatchTests(unittest.TestCase):
             )
             self.assertEqual(info["textgrid_dir"], os.path.join(voicebank_dir, "textgrids"))
 
+    def test_collect_preflight_issues_allows_missing_textgrid_when_runtime_alignment_enabled(self):
+        with tempfile.TemporaryDirectory() as td:
+            voicebank_dir = os.path.join(td, "voicebank")
+            os.makedirs(voicebank_dir, exist_ok=True)
+            case_infos = [
+                {
+                    "name": "a",
+                    "enabled": True,
+                    "language": "japanese",
+                    "voicebank_dir": voicebank_dir,
+                    "textgrid_dir": os.path.join(voicebank_dir, "textgrids"),
+                    "tpl_path": "",
+                    "custom_phonemes_path": "",
+                    "output_oto": os.path.join(voicebank_dir, "oto.test.ini"),
+                    "replace_oto_ini": False,
+                    "replace_target_oto": "",
+                    "align_if_missing": True,
+                }
+            ]
+            issues = _collect_preflight_issues(case_infos)
+            self.assertFalse(issues["errors"])
+            self.assertTrue(any("align_if_missing=true" in msg for msg in issues["warnings"]))
+
     def test_write_preflight_report_and_summary_text(self):
         with tempfile.TemporaryDirectory() as td:
             run_dir = os.path.join(td, "run")
@@ -105,7 +128,11 @@ class RunOtoGenerationBatchTests(unittest.TestCase):
                             "name": "sample",
                             "status": "ok",
                             "reason": "",
+                            "failure_code": "OK",
                             "output_oto": "oto.ini",
+                            "alignment": {"code": "OK", "used_engine": "sofa", "fallback_used": True},
+                            "ml": {"code": "ML_MODEL_MISSING", "status": "fallback", "fallback_used": True},
+                            "fallback_path": ["align:mfa->sofa", "ml:on->base"],
                             "validation": {"checked_files": 3, "warnings": 1, "errors": 0},
                         }
                     ],
@@ -115,6 +142,10 @@ class RunOtoGenerationBatchTests(unittest.TestCase):
                 text = f.read()
             self.assertIn("[ok] sample", text)
             self.assertIn("output_oto=oto.ini", text)
+            self.assertIn("failure_code=OK", text)
+            self.assertIn("alignment=code=OK used_engine=sofa fallback_used=True", text)
+            self.assertIn("ml=code=ML_MODEL_MISSING status=fallback fallback_used=True", text)
+            self.assertIn("fallback_path=align:mfa->sofa,ml:on->base", text)
 
 
 if __name__ == "__main__":

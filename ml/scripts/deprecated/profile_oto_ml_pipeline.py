@@ -62,7 +62,7 @@ def _summarize_candidate_status(candidates) -> Dict[str, int]:
 
 def _pick_first_unprepared_item(dataset_root: str):
     for item in _discover_work_items(dataset_root):
-        tg_dir = os.path.join(item.work_dir, "textgrids_auto")
+        tg_dir = item.work_dir
         auto_oto = os.path.join(item.work_dir, "oto_auto_ml.ini")
         if _has_textgrid_files(tg_dir) and _has_usable_oto_lines(auto_oto):
             continue

@@ -12,6 +12,8 @@ if ROOT not in sys.path:
 
 from core.ja_oto_mapping import classify_ja_alias
 from core.oto_generator import classify_alias
+from core.kr_oto_rules import should_ignore_korean_alias
+from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
 
 
 def _read_text(path):
@@ -60,6 +62,8 @@ def _parse_oto(path, language):
             malformed += 1
             continue
         alias = parts[0]
+        if (language or "").strip().lower() == "korean" and should_ignore_korean_alias(alias):
+            continue
         try:
             offset = float(parts[1])
             cons = float(parts[2])
@@ -70,7 +74,10 @@ def _parse_oto(path, language):
             malformed += 1
             continue
 
-        key_base = (_norm(wav), _norm(alias))
+        key_base = (
+            normalize_wav_key(wav) or _norm(wav),
+            canonicalize_alias_for_matching(language or "korean", alias) or _norm(alias),
+        )
         key_idx = occ[key_base]
         occ[key_base] += 1
         key = (key_base[0], key_base[1], key_idx)

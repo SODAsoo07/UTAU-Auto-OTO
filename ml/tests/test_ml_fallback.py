@@ -65,12 +65,12 @@ class MlFallbackTests(unittest.TestCase):
         )
         self.assertEqual(routed, "cvvc")
 
-    def test_korean_vcv_routes_coda_vc_to_cvc(self):
+    def test_korean_vcv_routes_coda_vc_to_cv_family(self):
         routed = _route_format_for_feature(
             "korean",
             {"format_type": "vcv", "alias_type": "vc", "coda_type": "stop"},
         )
-        self.assertEqual(routed, "cvc")
+        self.assertEqual(routed, "cv")
 
     def test_korean_vcv_routes_non_bridge_aliases_to_vcv(self):
         routed_cv = _route_format_for_feature(
@@ -91,6 +91,40 @@ class MlFallbackTests(unittest.TestCase):
             format_override="cvvc",
         )
         self.assertEqual(routed, "cvvc")
+
+    def test_japanese_cv_routes_only_cv_like_aliases(self):
+        routed_cv = _route_format_for_feature(
+            "japanese",
+            {"format_type": "cv", "alias_type": "cv", "mapping_confidence": 0.9},
+        )
+        routed_mono = _route_format_for_feature(
+            "japanese",
+            {"format_type": "cv", "alias_type": "mono", "mapping_confidence": 0.9},
+        )
+        routed_vc = _route_format_for_feature(
+            "japanese",
+            {"format_type": "cv", "alias_type": "vc", "mapping_confidence": 0.9},
+        )
+        self.assertEqual(routed_cv, "cv")
+        self.assertEqual(routed_mono, "cv")
+        self.assertIsNone(routed_vc)
+
+    def test_korean_cv_routes_only_cv_like_aliases(self):
+        routed_cv = _route_format_for_feature(
+            "korean",
+            {"format_type": "cv", "alias_type": "cv", "mapping_confidence": 0.9},
+        )
+        routed_mono = _route_format_for_feature(
+            "korean",
+            {"format_type": "cv", "alias_type": "mono", "mapping_confidence": 0.9},
+        )
+        routed_vc = _route_format_for_feature(
+            "korean",
+            {"format_type": "cv", "alias_type": "vc", "mapping_confidence": 0.9, "coda_type": "stop"},
+        )
+        self.assertEqual(routed_cv, "cv")
+        self.assertEqual(routed_mono, "cv")
+        self.assertEqual(routed_vc, "cv")
 
     def test_korean_cvvc_routes_only_bridge_aliases(self):
         routed_vv = _route_format_for_feature(
@@ -225,7 +259,7 @@ class MlFallbackTests(unittest.TestCase):
         self.assertGreaterEqual(pre - ovl, 9.0)
         self.assertGreaterEqual(cons - pre, 13.0)
 
-    def test_korean_cvc_routes_only_coda_vc(self):
+    def test_korean_cvc_routes_to_cvc_family(self):
         routed_vc = _route_format_for_feature(
             "korean",
             {"format_type": "cvc", "alias_type": "vc", "coda_type": "stop"},
@@ -239,8 +273,8 @@ class MlFallbackTests(unittest.TestCase):
             {"format_type": "cvc", "alias_type": "cv_head", "coda_type": "none"},
         )
         self.assertEqual(routed_vc, "cvc")
-        self.assertIsNone(routed_cv)
-        self.assertIsNone(routed_head)
+        self.assertEqual(routed_cv, "cvc")
+        self.assertEqual(routed_head, "cvc")
 
     def test_refiner_skips_when_model_missing(self):
         with tempfile.TemporaryDirectory() as td:
@@ -267,6 +301,25 @@ class MlFallbackTests(unittest.TestCase):
             self.assertEqual(changed, 0)
             with open(oto_path, "r", encoding="utf-8") as f:
                 self.assertEqual(f.read(), original)
+
+    def test_refiner_policy_off_reports_standard_code(self):
+        with tempfile.TemporaryDirectory() as td:
+            oto_path = os.path.join(td, "oto.ini")
+            original = "test.wav=ga,100.0,200.0,-300.0,120.0,40.0\n"
+            with open(oto_path, "w", encoding="utf-8") as f:
+                f.write(original)
+            report = {}
+            changed = apply_oto_ml_to_oto_file(
+                "korean",
+                oto_path,
+                tg_dir=td,
+                wav_dir=td,
+                policy="off",
+                report=report,
+            )
+            self.assertEqual(changed, 0)
+            self.assertEqual(report["code"], "ML_POLICY_OFF")
+            self.assertEqual(report["status"], "skipped")
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from core.oto_ml_features import (
     dataset_fieldnames,
     extract_feature_rows,
     get_feature_schema,
+    parse_oto_rows,
 )
 from core.ja_oto_generator import (
     _adaptive_ja_overlap,
@@ -38,7 +39,7 @@ from core.ja_oto_generator import (
     detect_ja_alias_format,
     normalize_key as normalize_ja_key,
 )
-from core.ja_lab_generator import parse_ja_filename
+from core.ja_lab_generator import parse_ja_filename, repair_japanese_mojibake_text
 from core.ja_oto_mapping import _extract_ja_cv_targets_from_lines
 from core.ja_oto_postprocess import guard_ja_cv_cutoff_to_next_onset
 from core.lab_generator import _parse_filename, _split_kr_lab_content_tokens
@@ -64,6 +65,8 @@ from core.oto_generator import _synthesize_kr_word_phones
 from core.oto_generator import _uses_kr_vc_context
 from core.oto_generator import _cv_match_score
 from core.oto_generator import classify_alias, detect_alias_format
+from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
+from core.prefix_map_utils import find_prefix_map_path, strip_prefix_map_affixes
 from scripts.analyze_oto_diff import analyze as analyze_oto_diff
 
 
@@ -101,7 +104,7 @@ class FeatureExtractionTests(unittest.TestCase):
 
     def test_alias_match_normalization_strips_style_suffix(self):
         self.assertEqual(_normalize_alias_for_match("ga_soft", language="japanese"), "ga")
-        self.assertEqual(_normalize_alias_for_match("a か連", language="japanese"), "a か")
+        self.assertEqual(_normalize_alias_for_match("a か連", language="japanese"), "a ka")
         self.assertEqual(_normalize_alias_for_match("lyeo부드러움", language="korean"), "lyeo")
 
     def test_japanese_format_prefers_cvvc_or_cv(self):
@@ -120,6 +123,22 @@ class FeatureExtractionTests(unittest.TestCase):
             parse_ja_filename("じぇじぇじょじぇんじぇじゃ.wav"),
             ["je", "je", "jo", "je", "n", "je", "ja"],
         )
+
+    def test_japanese_mojibake_filename_is_repaired_before_parsing(self):
+        bad = "\u3042\u3044".encode("cp932").decode("cp949")
+        self.assertEqual(repair_japanese_mojibake_text(bad), "あい")
+        self.assertEqual(parse_ja_filename(bad + ".wav"), ["a", "i"])
+
+    def test_ja_normalize_key_repairs_cp949_decoded_shift_jis_filename(self):
+        bad = "\u304b\u304d".encode("cp932").decode("cp949")
+        self.assertEqual(normalize_ja_key(bad + ".wav"), normalize_ja_key("かき.wav"))
+        self.assertEqual(normalize_wav_key("_" + bad + ".wav"), normalize_wav_key("_かき.wav"))
+
+    def test_japanese_alias_canonicalization_unifies_romaji_and_kana(self):
+        self.assertEqual(canonicalize_alias_for_matching("japanese", "か"), "ka")
+        self.assertEqual(canonicalize_alias_for_matching("japanese", "カ"), "ka")
+        self.assertEqual(canonicalize_alias_for_matching("japanese", "a か"), "a ka")
+        self.assertEqual(canonicalize_alias_for_matching("japanese", "a ka_C4"), "a ka")
 
     def test_ja_normalize_key_keeps_kana(self):
         self.assertEqual(normalize_ja_key("ききくきけきこ.wav"), "ききくきけきこ")
@@ -250,6 +269,55 @@ class FeatureExtractionTests(unittest.TestCase):
             detect_alias_format(["ng eui"]),
             "vv_only",
         )
+
+    def test_korean_cv_only_format_is_detected_as_cv(self):
+        self.assertEqual(
+            detect_alias_format(["- ga", "ga", "gya"]),
+            "cv",
+        )
+
+    def test_parse_oto_rows_ignores_hiragana_aliases_for_korean(self):
+        with tempfile.TemporaryDirectory() as td:
+            oto_path = os.path.join(td, "oto.ini")
+            with open(oto_path, "w", encoding="utf-8") as f:
+                f.write("a.wav=あ,0,10,-20,5,2\n")
+                f.write("a.wav=ga,0,10,-20,5,2\n")
+            rows = parse_oto_rows(oto_path, language="korean")
+            self.assertEqual([row["alias"] for row in rows], ["ga"])
+
+    def test_prefix_map_in_parent_folder_is_found_for_subfolder_oto(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = os.path.join(td, "Voice")
+            sub = os.path.join(root, "C4")
+            os.makedirs(sub, exist_ok=True)
+            prefix_map = os.path.join(root, "prefix.map")
+            with open(prefix_map, "w", encoding="utf-8") as f:
+                f.write("C4\t\t_C4\n")
+            oto_path = os.path.join(sub, "oto.ini")
+            with open(oto_path, "w", encoding="utf-8") as f:
+                f.write("a_C4.wav=ga_C4,0,10,-20,5,2\n")
+            found = find_prefix_map_path(oto_path)
+            self.assertEqual(os.path.abspath(found), os.path.abspath(prefix_map))
+            rows = parse_oto_rows(
+                oto_path,
+                language="korean",
+                prefix_map_path=found,
+                prefix_context_paths=[oto_path, sub],
+            )
+            self.assertEqual(rows[0]["alias"], "ga")
+
+    def test_prefix_map_prefix_and_suffix_are_stripped_for_training_alias(self):
+        with tempfile.TemporaryDirectory() as td:
+            prefix_map = os.path.join(td, "prefix.map")
+            with open(prefix_map, "w", encoding="utf-8") as f:
+                f.write("C4\tPRE_\t_SUF\n")
+            stripped = strip_prefix_map_affixes(
+                "PRE_ga_SUF",
+                prefix_map_path=prefix_map,
+                wav_name="a_C4.wav",
+                context_paths=[os.path.join(td, "C4")],
+            )
+            self.assertEqual(stripped, "ga")
 
     def test_korean_cv_match_score_penalizes_simple_vs_glide_vowel_confusion(self):
         self.assertLess(_cv_match_score("do", "dyo"), 10)

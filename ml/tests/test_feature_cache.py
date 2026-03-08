@@ -8,7 +8,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from core.oto_ml_features import build_training_rows, extract_feature_rows
+from core.oto_ml_features import _build_tg_index, build_training_rows, extract_feature_rows
 
 
 class FeatureCacheTests(unittest.TestCase):
@@ -60,6 +60,17 @@ class FeatureCacheTests(unittest.TestCase):
             self.assertEqual(stats, payload["stats"])
             extract_rows.assert_not_called()
             parse_rows.assert_not_called()
+
+    def test_build_tg_index_walks_nested_textgrid_paths(self):
+        with tempfile.TemporaryDirectory() as td:
+            sub = os.path.join(td, "C4")
+            os.makedirs(sub, exist_ok=True)
+            tg_path = os.path.join(sub, "a.TextGrid")
+            with open(tg_path, "w", encoding="utf-8") as f:
+                f.write("dummy")
+
+            index = _build_tg_index(td)
+            self.assertEqual(index.get("a"), tg_path)
 
 
 if __name__ == "__main__":

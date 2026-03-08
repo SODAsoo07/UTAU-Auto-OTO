@@ -10,10 +10,14 @@
 import os
 import re
 import logging
+import unicodedata
 from core.lab_generator import load_custom_phonemes, apply_custom_phonemes
 from core.textio_utils import read_text_auto
 
 logger = logging.getLogger(__name__)
+
+_JA_KANA_RE = re.compile(r"[\u3041-\u3096\u30A1-\u30FA\u30FC]")
+_HANGUL_RE = re.compile(r"[\uAC00-\uD7A3]")
 
 # ==============================================================================
 # 일본어 로마자 → IPA 매핑 (MFA japanese_mfa 음향 모델 기준)
@@ -202,6 +206,41 @@ def _katakana_to_hiragana(text):
     return ''.join(out)
 
 
+def _jp_char_score(text):
+    s = str(text or "")
+    kana = len(_JA_KANA_RE.findall(s))
+    hangul = len(_HANGUL_RE.findall(s))
+    ascii_word = len(re.findall(r"[0-9A-Za-z]", s))
+    return (kana * 12) + ascii_word - (hangul * 8)
+
+
+def repair_japanese_mojibake_text(text):
+    """
+    Shift-JIS(cp932) 기반 일본어 파일명이 cp949/UHC로 잘못 풀린 경우를 복구한다.
+    예: "あい" -> cp932 bytes -> cp949 decode -> "궇궋"
+    """
+    src = unicodedata.normalize("NFKC", str(text or ""))
+    if not src or not _HANGUL_RE.search(src):
+        return src
+
+    best = src
+    best_score = _jp_char_score(src)
+    for source_enc in ("cp949", "uhc"):
+        for target_dec in ("cp932", "shift_jis"):
+            try:
+                cand = src.encode(source_enc).decode(target_dec)
+            except Exception:
+                continue
+            cand = unicodedata.normalize("NFKC", cand)
+            if not _JA_KANA_RE.search(cand):
+                continue
+            cand_score = _jp_char_score(cand)
+            if cand_score > best_score:
+                best = cand
+                best_score = cand_score
+    return best
+
+
 def _apply_sokuon(romaji):
     if not romaji:
         return romaji
@@ -343,7 +382,8 @@ def parse_ja_filename(filename):
     예: 'ka_ki_ku_ke_ko.wav' → ['ka', 'ki', 'ku', 'ke', 'ko']
     예: "a'ka'sa'ta'na.wav" → ['a', 'ka', 'sa', 'ta', 'na']
     """
-    base = os.path.splitext(filename)[0]
+    repaired = repair_japanese_mojibake_text(os.path.basename(filename or ""))
+    base = os.path.splitext(repaired)[0]
     # 음역/피치 태그 제거 (예: C4_, _D#3)
     base = re.sub(r'(^|[_\-\s])([A-Ga-g][#b]?\d+)($|[_\-\s])', ' ', base)
     tokens = [t for t in re.split(r"[_'\-\s]+", base) if t.strip()]

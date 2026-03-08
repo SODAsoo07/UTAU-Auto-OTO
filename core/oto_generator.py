@@ -58,6 +58,7 @@ from core.kr_oto_rules import (
     is_plosive_ipa,
     is_plosive_roman,
     normalize_ipa_mark,
+    should_ignore_korean_alias,
 )
 from core.kr_oto_mapping import (
     _alias_to_cv_target,
@@ -109,6 +110,7 @@ from core.timing_anchor_runtime import (
 )
 from core.textio_utils import load_template_oto_lines
 from core.oto_profile_presets import get_kr_profile_preset
+from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
 
 logger = logging.getLogger(__name__)
 
@@ -172,9 +174,10 @@ DEFAULT_PARAMS = {
 # 한국어 매핑 신뢰도 임계치 기본값(포맷별)
 # - CVVC: 현재 안정성 기준값 유지
 # - VCV: 점프 허용 전 신뢰도를 조금 더 엄격하게 본다
-# - CVC/CV_SIMPLE: 정보량이 상대적으로 단순해 과도한 저신뢰 판정을 완화
+# - CV/CVC: 정보량이 상대적으로 단순해 과도한 저신뢰 판정을 완화
 # - VC_ONLY/VV_ONLY: CV 정렬 점프 로직 영향이 거의 없어 완화값 사용
 KR_MAPPING_CONF_THRESHOLD_BY_FORMAT = {
+    "cv": 0.58,
     "cvvc": 0.60,
     "vcv": 0.62,
     "cvc": 0.58,
@@ -201,9 +204,7 @@ def _resolve_kr_mapping_conf_threshold(file_format, override_threshold=None):
 
 
 def normalize_key(name):
-    base = os.path.splitext(name)[0]
-    clean = re.sub(r"[^a-zA-Z0-9가-힣]", "", base)
-    return clean.lower()
+    return normalize_wav_key(name)
 
 
 def is_diphthong_file(filename):
@@ -1282,9 +1283,12 @@ def _parse_oto_line_profile(line):
         ovl = float(parts[5].strip())
     except ValueError:
         return None
+    alias = parts[0].strip()
+    if should_ignore_korean_alias(alias):
+        return None
     return {
         "wav": wav_name.strip(),
-        "alias": parts[0].strip(),
+        "alias": alias,
         "offset": offset,
         "cons": cons,
         "cutoff": cutoff,
@@ -1705,13 +1709,12 @@ def _apply_kr_mel_refine_to_oto_file(oto_path, wav_dir, custom_map=None):
 
     raw_lines = []
     parsed = []
-    with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
-        for idx, raw in enumerate(f):
-            line = raw.rstrip("\n")
-            raw_lines.append(line)
-            row = _parse_oto_line_profile(line)
-            if row:
-                parsed.append((idx, row))
+    for idx, raw in enumerate(_read_text_with_fallback(oto_path).splitlines()):
+        line = raw.rstrip("\n")
+        raw_lines.append(line)
+        row = _parse_oto_line_profile(line)
+        if row:
+            parsed.append((idx, row))
     if not parsed:
         return 0
 
@@ -1916,16 +1919,24 @@ def _build_kr_reference_profile_from_dirs(ref_dirs, custom_map=None):
         if not os.path.exists(oto_path):
             continue
 
+        wav_index = {}
+        try:
+            for dirpath, _dirnames, filenames in os.walk(ref_dir):
+                for fn in filenames:
+                    if fn.lower().endswith(".wav"):
+                        wav_index[normalize_key(fn)] = os.path.join(dirpath, fn)
+        except Exception:
+            wav_index = {}
+
         rows_by_wav = {}
-        with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
-            for raw in f:
-                row = _parse_oto_line_profile(raw)
-                if not row:
-                    continue
-                rows_by_wav.setdefault(row["wav"], []).append(row)
+        for raw in _read_text_with_fallback(oto_path).splitlines():
+            row = _parse_oto_line_profile(raw)
+            if not row:
+                continue
+            rows_by_wav.setdefault(row["wav"], []).append(row)
 
         for wav_name, rows in rows_by_wav.items():
-            wav_path = os.path.join(ref_dir, wav_name)
+            wav_path = _find_wav_path_for_name(wav_name, ref_dir, wav_index)
             dur_ms = _wav_duration_ms(wav_path)
             if dur_ms <= 0:
                 continue
@@ -2009,10 +2020,7 @@ def _save_kr_reference_profile(path, profile):
 
 
 def _normalize_alias_for_profile(alias):
-    a = re.sub(r"\s+", " ", (alias or "").strip().lower())
-    # Treat trailing suffix like _C4 as metadata.
-    a = re.sub(r"_[a-z0-9]{1,8}$", "", a)
-    return a
+    return canonicalize_alias_for_matching("korean", alias)
 
 
 def _read_text_with_fallback(path):
@@ -2039,7 +2047,7 @@ def _read_kr_oto_rows_for_profile(path):
         row = _parse_oto_line_profile(raw)
         if not row:
             continue
-        row["wav_norm"] = row["wav"].strip().lower()
+        row["wav_norm"] = normalize_wav_key(row["wav"])
         row["alias_norm"] = _normalize_alias_for_profile(row["alias"])
         rows.append(row)
     return rows
@@ -2082,7 +2090,7 @@ def train_kr_autotune_profile(auto_oto_path, manual_oto_path, custom_phonemes_pa
         m_row = manual_map.get(key)
         if not m_row:
             continue
-        alias_for_cls = re.sub(r"_[A-Za-z0-9]{1,8}$", "", a_row["alias"])
+        alias_for_cls = _normalize_alias_for_profile(a_row["alias"])
         alias_type = _classify_alias_cached(alias_for_cls)
         b = buckets.setdefault(alias_type, {f: [] for f in fields})
         for f in fields:
@@ -2167,14 +2175,13 @@ def apply_kr_autotune_profile_to_oto(oto_path, profile, custom_phonemes_path="")
             alias_type_cache[alias_text] = t
         return t
 
-    with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
-        for raw in f:
+    for raw in _read_text_with_fallback(oto_path).splitlines():
             row = _parse_oto_line_profile(raw)
             if not row:
                 out_lines.append(raw.rstrip("\n"))
                 continue
 
-            alias_for_cls = re.sub(r"_[A-Za-z0-9]{1,8}$", "", row["alias"])
+            alias_for_cls = _normalize_alias_for_profile(row["alias"])
             alias_type = _classify_cached(alias_for_cls)
             stat = buckets.get(alias_type)
             if not stat:
@@ -2232,8 +2239,7 @@ def _apply_kr_profile_to_oto_file(oto_path, wav_dir, profile, custom_map=None):
         return 0
 
     rows_by_wav = {}
-    with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
-        for raw in f:
+    for raw in _read_text_with_fallback(oto_path).splitlines():
             row = _parse_oto_line_profile(raw)
             if not row:
                 continue
@@ -2328,7 +2334,9 @@ def generate_oto(
     kr_mapping_max_index_jump_high_conf=2,
     cleanup_timing_jsonl=True,
     auto_format=None,
-    callback=None
+    callback=None,
+    ml_policy="",
+    runtime_report=None,
 ):
     """TextGrid와 템플릿/자동 포맷 정보를 사용해 최종 OTO를 생성합니다."""
 
@@ -2346,18 +2354,22 @@ def generate_oto(
 
 
     if auto_format:
-        af = str(auto_format).strip().lower()
-        if af.startswith('cvc'):
-            fallback_format = 'cvc'
-        elif af.startswith('cvvc'):
-            fallback_format = 'cvvc'
-        elif af.startswith('vcv'):
-            fallback_format = 'vcv'
+        from core.format_type_utils import normalize_auto_format_value
 
-    auto_gen_format = (fallback_format or "cvvc").strip().lower()
-    if auto_gen_format not in {"cvvc", "vcv"}:
+        normalized_auto_format = normalize_auto_format_value("korean", auto_format)
+        if normalized_auto_format:
+            fallback_format = normalized_auto_format
+
+    try:
+        from core.format_type_utils import normalize_format_type
+
+        auto_gen_format = normalize_format_type("korean", fallback_format or "cvvc") or "cvvc"
+    except Exception:
+        auto_gen_format = (fallback_format or "cvvc").strip().lower()
+
+    if auto_gen_format not in {"cv", "cvc", "cvvc", "vcv"}:
         msg = (
-            f"⚠ 자동 에일리어스 생성은 현재 CVVC/VCV만 지원합니다. "
+            f"⚠ 자동 에일리어스 생성은 현재 CV/연단음, CVC, CVVC, VCV만 지원합니다. "
             f"{auto_gen_format.upper()} -> CVVC로 전환합니다."
         )
         if callback:
@@ -2804,11 +2816,11 @@ def generate_oto(
                                 else:
                                     lines.append(f"{real_name}={(prev_vowel or 'a')} {roman},0,0,0,0,0")
                                 
-                        elif auto_gen_format == 'cvvc':
+                        elif auto_gen_format in {'cv', 'cvc', 'cvvc'}:
 
                             lines.append(f"{real_name}={roman},0,0,0,0,0")
                             
-                            if idx > 0:
+                            if idx > 0 and auto_gen_format == 'cvvc':
 
                                 prev_w = wd_intervals[idx-1]
                                 prev_parts = []
@@ -4066,6 +4078,7 @@ def generate_oto(
         try:
             from core.oto_ml_refiner import apply_oto_ml_to_oto_file
 
+            ml_report = {}
             ml_changed = apply_oto_ml_to_oto_file(
                 "korean",
                 out_path,
@@ -4075,11 +4088,24 @@ def generate_oto(
                 callback=log,
                 enabled=enable_ml_correction,
                 format_override=auto_gen_format,
+                policy=ml_policy,
+                report=ml_report,
             )
+            if isinstance(runtime_report, dict):
+                runtime_report["ml"] = dict(ml_report)
             if ml_changed > 0:
                 log(f"[OTO-ML] 한국어 수치 보정 적용: {ml_changed} lines")
         except Exception as ml_e:
             log(f"[OTO-ML] 한국어 보정 스킵: {ml_e}")
+            if isinstance(runtime_report, dict):
+                runtime_report["ml"] = {
+                    "stage": "ml",
+                    "code": "ML_INFER_FAILED",
+                    "message": str(ml_e),
+                    "status": "fallback",
+                    "fallback_used": True,
+                    "policy": str(ml_policy or ""),
+                }
         mel_changed = _apply_kr_mel_refine_to_oto_file(
             out_path, wav_dir_for_profile, custom_map=custom_map
         )

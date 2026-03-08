@@ -17,7 +17,23 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from core.ja_oto_generator import generate_ja_oto
+from core.ja_lab_generator import generate_ja_dictionary, generate_ja_labs
+from core.alignment_pipeline import run_alignment_with_fallback
 from core.oto_generator import generate_oto
+from core.lab_generator import generate_dictionary, generate_labs
+from core.pipeline_status import (
+    ALIGN_SKIPPED,
+    EXCEPTION,
+    GENERATOR_ERROR,
+    OK,
+    TEXTGRID_MISSING,
+    UNSUPPORTED_LANGUAGE,
+    VOICEBANK_MISSING,
+    has_textgrid_files,
+    make_runtime_report,
+    normalize_aligner_name,
+    normalize_ml_policy,
+)
 from core.oto_validator import validate_oto_timing
 
 
@@ -174,6 +190,19 @@ def _resolve_case_settings(
         str(case.get("custom_phonemes_path", defaults.get("custom_phonemes_path", ""))).strip(),
     )
     replace_oto_ini = force_replace or _to_bool(case.get("replace_oto_ini", defaults.get("replace_oto_ini", False)), False)
+    align_if_missing = _to_bool(case.get("align_if_missing", defaults.get("align_if_missing", False)), False)
+    ml_policy = normalize_ml_policy(
+        case.get("ml_policy", defaults.get("ml_policy", "")),
+        enabled_default=_to_bool(case.get("enable_ml_correction", defaults.get("enable_ml_correction", True)), True),
+    )
+    primary_aligner = normalize_aligner_name(case.get("primary_aligner", case.get("aligner", defaults.get("primary_aligner", defaults.get("aligner", "mfa")))), default="mfa")
+    fallback_aligner = normalize_aligner_name(case.get("fallback_aligner", defaults.get("fallback_aligner", "")), default="")
+    mfa_path = _resolve_path(config_dir, str(case.get("mfa_path", defaults.get("mfa_path", ""))).strip())
+    mfa_align_profile = str(case.get("mfa_align_profile", defaults.get("mfa_align_profile", "accurate"))).strip() or "accurate"
+    sofa_ckpt = _resolve_case_path(config_dir, voicebank_dir, str(case.get("sofa_ckpt", defaults.get("sofa_ckpt", ""))).strip())
+    sofa_dict = _resolve_case_path(config_dir, voicebank_dir, str(case.get("sofa_dict", defaults.get("sofa_dict", ""))).strip())
+    sofa_python = _resolve_path(config_dir, str(case.get("sofa_python", defaults.get("sofa_python", ""))).strip())
+    sofa_repo_dir = _resolve_path(config_dir, str(case.get("sofa_repo_dir", defaults.get("sofa_repo_dir", ""))).strip())
     return {
         "name": name,
         "enabled": enabled,
@@ -187,6 +216,27 @@ def _resolve_case_settings(
         "generate_openutau": _to_bool(case.get("generate_openutau", defaults.get("generate_openutau", False)), False),
         "gen_missing_vowels": _to_bool(case.get("gen_missing_vowels", defaults.get("gen_missing_vowels", False)), False),
         "enable_ml_correction": _to_bool(case.get("enable_ml_correction", defaults.get("enable_ml_correction", True)), True),
+        "ml_policy": ml_policy,
+        "align_if_missing": align_if_missing,
+        "primary_aligner": primary_aligner,
+        "fallback_aligner": fallback_aligner,
+        "mfa_path": mfa_path,
+        "mfa_align_profile": mfa_align_profile,
+        "sofa_ckpt": sofa_ckpt,
+        "sofa_dict": sofa_dict,
+        "sofa_python": sofa_python,
+        "sofa_repo_dir": sofa_repo_dir,
+        "sofa_mode": str(case.get("sofa_mode", defaults.get("sofa_mode", "force"))).strip() or "force",
+        "sofa_g2p": str(case.get("sofa_g2p", defaults.get("sofa_g2p", "Dictionary"))).strip() or "Dictionary",
+        "sofa_ap_detector": str(case.get("sofa_ap_detector", defaults.get("sofa_ap_detector", "LoudnessSpectralcentroidAPDetector"))).strip() or "LoudnessSpectralcentroidAPDetector",
+        "sofa_ap_detector_config": str(case.get("sofa_ap_detector_config", defaults.get("sofa_ap_detector_config", ""))).strip(),
+        "sofa_save_confidence": case.get("sofa_save_confidence", defaults.get("sofa_save_confidence", False)),
+        "sofa_out_formats": case.get("sofa_out_formats", defaults.get("sofa_out_formats", "TextGrid")),
+        "sofa_extra_infer_args": case.get("sofa_extra_infer_args", defaults.get("sofa_extra_infer_args", "")),
+        "sofa_two_pass_retry": case.get("sofa_two_pass_retry", defaults.get("sofa_two_pass_retry", False)),
+        "sofa_two_pass_retry_mode": str(case.get("sofa_two_pass_retry_mode", defaults.get("sofa_two_pass_retry_mode", "match"))).strip() or "match",
+        "sofa_confidence_threshold": case.get("sofa_confidence_threshold", defaults.get("sofa_confidence_threshold", 0.55)),
+        "sofa_low_confidence_max_files": case.get("sofa_low_confidence_max_files", defaults.get("sofa_low_confidence_max_files", 0)),
         "custom_phonemes_path": custom_phonemes_path,
         "alias_suffix": str(case.get("alias_suffix", defaults.get("alias_suffix", ""))).strip(),
         "alias_style": str(case.get("alias_style", defaults.get("alias_style", "original"))).strip().lower(),
@@ -214,7 +264,8 @@ def _validate_case_settings(case_info: Dict[str, object]) -> List[str]:
         issues.append(f"case={name}: unsupported language: {language}")
     if not voicebank_dir or not os.path.isdir(voicebank_dir):
         issues.append(f"case={name}: voicebank_dir not found: {voicebank_dir}")
-    if not textgrid_dir or not os.path.isdir(textgrid_dir):
+    align_if_missing = bool(case_info.get("align_if_missing", False))
+    if (not textgrid_dir or not os.path.isdir(textgrid_dir)) and not align_if_missing:
         issues.append(f"case={name}: textgrid_dir not found: {textgrid_dir}")
     if tpl_path and not os.path.exists(tpl_path):
         issues.append(f"case={name}: base_oto not found: {tpl_path}")
@@ -242,6 +293,10 @@ def _collect_preflight_issues(case_infos: List[Dict[str, object]]) -> Dict[str, 
             seen_names.add(name)
 
         errors.extend(_validate_case_settings(case_info))
+        if bool(case_info.get("enabled", True)) and bool(case_info.get("align_if_missing", False)):
+            textgrid_dir = str(case_info.get("textgrid_dir", "") or "").strip()
+            if not textgrid_dir or not os.path.isdir(textgrid_dir):
+                warnings.append(f"case={name}: textgrid_dir missing, align_if_missing=true -> runtime alignment will run")
         if not bool(case_info.get("enabled", True)):
             continue
 
@@ -281,6 +336,29 @@ def _write_preflight_report(run_dir: str, config_path: str, case_infos: List[Dic
     return out_path
 
 
+def _prepare_alignment_inputs(language: str, voicebank_dir: str, custom_phonemes_path: str, callback=None) -> str:
+    lang = str(language or "").strip().lower()
+    if lang == "japanese":
+        generate_ja_labs(voicebank_dir, custom_phonemes_path=custom_phonemes_path, callback=callback)
+        dict_path = os.path.join(voicebank_dir, "japanese_dict.txt")
+        generate_ja_dictionary(
+            voicebank_dir,
+            dict_path,
+            custom_phonemes_path=custom_phonemes_path,
+            callback=callback,
+        )
+        return dict_path
+    generate_labs(voicebank_dir, custom_phonemes_path=custom_phonemes_path, callback=callback)
+    dict_path = os.path.join(voicebank_dir, "korean_dict.txt")
+    generate_dictionary(
+        voicebank_dir,
+        dict_path,
+        custom_phonemes_path=custom_phonemes_path,
+        callback=callback,
+    )
+    return dict_path
+
+
 def _write_summary_text(summary_path: str, summary: Dict[str, object]) -> str:
     out_path = os.path.splitext(summary_path)[0] + ".txt"
     lines = [
@@ -299,9 +377,34 @@ def _write_summary_text(summary_path: str, summary: Dict[str, object]) -> str:
         name = str(row.get("name", "") or "")
         status = str(row.get("status", "") or "")
         reason = str(row.get("reason", "") or "")
+        failure_code = str(row.get("failure_code", "") or "")
+        failure_stage = str(row.get("failure_stage", "") or "")
         lines.append(f"[{status}] {name}")
         if reason:
             lines.append(f"reason={reason}")
+        if failure_code:
+            lines.append(f"failure_code={failure_code}")
+        if failure_stage:
+            lines.append(f"failure_stage={failure_stage}")
+        alignment = row.get("alignment") or {}
+        if isinstance(alignment, dict) and alignment:
+            lines.append(
+                "alignment="
+                f"code={alignment.get('code', '')} "
+                f"used_engine={alignment.get('used_engine', '')} "
+                f"fallback_used={bool(alignment.get('fallback_used', False))}"
+            )
+        ml = row.get("ml") or {}
+        if isinstance(ml, dict) and ml:
+            lines.append(
+                "ml="
+                f"code={ml.get('code', '')} "
+                f"status={ml.get('status', '')} "
+                f"fallback_used={bool(ml.get('fallback_used', False))}"
+            )
+        fallback_path = row.get("fallback_path") or []
+        if fallback_path:
+            lines.append(f"fallback_path={','.join(str(x) for x in fallback_path)}")
         validation = row.get("validation") or {}
         if isinstance(validation, dict) and validation:
             lines.append(
@@ -342,36 +445,36 @@ def _run_one_case(
     name = str(case_info["name"])
     enabled = bool(case_info["enabled"])
     if not enabled:
-        return {"name": name, "status": "skipped", "reason": "disabled"}
+        return {
+            "name": name,
+            "status": "skipped",
+            "reason": "disabled",
+            "failure_code": ALIGN_SKIPPED,
+            "failure_stage": "case",
+            "alignment": make_runtime_report("align", ALIGN_SKIPPED, "disabled"),
+            "ml": {},
+            "fallback_path": [],
+        }
 
     language = str(case_info["language"]).strip().lower()
-    if language not in {"japanese", "korean"}:
-        return {"name": name, "status": "error", "reason": f"unsupported language: {language}"}
-
     voicebank_dir = str(case_info["voicebank_dir"])
-    if not voicebank_dir or not os.path.isdir(voicebank_dir):
-        return {"name": name, "status": "error", "reason": f"voicebank_dir not found: {voicebank_dir}"}
-
     tg_folder = str(case_info["textgrid_dir"])
-    if not os.path.isdir(tg_folder):
-        return {"name": name, "status": "error", "reason": f"textgrid_dir not found: {tg_folder}"}
-
-    out_dir = str(case_info["out_dir"])
-    if not out_dir:
-        out_dir = voicebank_dir
-    os.makedirs(out_dir, exist_ok=True)
-
+    out_dir = str(case_info["out_dir"]) or voicebank_dir
     out_path = str(case_info["output_oto"])
     tpl_path = str(case_info["tpl_path"])
     auto_format = str(case_info["auto_format"])
     generate_openutau = bool(case_info["generate_openutau"])
     gen_missing_vowels = bool(case_info["gen_missing_vowels"])
     enable_ml_correction = bool(case_info["enable_ml_correction"])
+    ml_policy = str(case_info.get("ml_policy", "") or "")
     custom_phonemes_path = str(case_info["custom_phonemes_path"])
     alias_suffix = str(case_info["alias_suffix"])
     alias_style = str(case_info["alias_style"])
     do_validation = bool(case_info["do_validation"])
     replace_oto_ini = bool(case_info["replace_oto_ini"])
+    align_if_missing = bool(case_info.get("align_if_missing", False))
+    primary_aligner = str(case_info.get("primary_aligner", "mfa") or "mfa")
+    fallback_aligner = str(case_info.get("fallback_aligner", "") or "")
 
     case_log_name = f"{case_index:03d}_{_safe_name(name)}.log"
     case_log_path = os.path.join(run_dir, case_log_name)
@@ -383,19 +486,148 @@ def _run_one_case(
         _safe_console_print(line)
         case_logs.append(line)
 
+    def build_result(
+        *,
+        status: str,
+        reason: str,
+        failure_code: str = OK,
+        failure_stage: str = "",
+        processed: int = 0,
+        total: int = 0,
+        generator_errors=None,
+        validation=None,
+        alignment=None,
+        ml=None,
+        fallback_path=None,
+    ):
+        return {
+            "name": name,
+            "status": status,
+            "reason": reason,
+            "failure_code": failure_code,
+            "failure_stage": failure_stage,
+            "language": language,
+            "voicebank_dir": voicebank_dir,
+            "textgrid_dir": tg_folder,
+            "output_oto": out_path,
+            "processed_files": int(processed),
+            "total_files": int(total),
+            "generator_errors": list(generator_errors or []),
+            "validation": validation or {},
+            "alignment": alignment or {},
+            "ml": ml or {},
+            "fallback_path": list(fallback_path or []),
+            "log_path": case_log_path,
+        }
+
     log(f"start lang={language} format={auto_format or 'auto'}")
     log(f"voicebank={voicebank_dir}")
     log(f"textgrid_dir={tg_folder}")
     log(f"output_oto={out_path}")
+    log(f"ml_policy={ml_policy}")
+    log(f"align_if_missing={align_if_missing} primary={primary_aligner} fallback={fallback_aligner or '-'}")
 
     processed = 0
     total = 0
     errors = []
     validation = None
-    status = "ok"
-    reason = ""
+    runtime_report: Dict[str, object] = {}
+    alignment_report = make_runtime_report("align", ALIGN_SKIPPED, "not_attempted", used_engine="", fallback_used=False)
+    fallback_path: List[str] = []
 
     try:
+        if language not in {"japanese", "korean"}:
+            log(f"failure_code={UNSUPPORTED_LANGUAGE}")
+            return build_result(
+                status="error",
+                reason=f"unsupported language: {language}",
+                failure_code=UNSUPPORTED_LANGUAGE,
+                failure_stage="input",
+                alignment=alignment_report,
+            )
+
+        if not voicebank_dir or not os.path.isdir(voicebank_dir):
+            log(f"failure_code={VOICEBANK_MISSING}")
+            return build_result(
+                status="error",
+                reason=f"voicebank_dir not found: {voicebank_dir}",
+                failure_code=VOICEBANK_MISSING,
+                failure_stage="input",
+                alignment=alignment_report,
+            )
+
+        os.makedirs(out_dir, exist_ok=True)
+
+        if not has_textgrid_files(tg_folder):
+            if align_if_missing:
+                os.makedirs(tg_folder, exist_ok=True)
+                dict_path = _prepare_alignment_inputs(language, voicebank_dir, custom_phonemes_path, callback=log)
+                sofa_dictionary_path = str(case_info.get("sofa_dict", "") or dict_path or "")
+                alignment_report = run_alignment_with_fallback(
+                    language=language,
+                    wav_folder=voicebank_dir,
+                    dictionary_path=dict_path,
+                    output_folder=tg_folder,
+                    primary_aligner=primary_aligner,
+                    fallback_aligner=fallback_aligner,
+                    mfa_path=str(case_info.get("mfa_path", "") or ""),
+                    mfa_align_profile=str(case_info.get("mfa_align_profile", "accurate") or "accurate"),
+                    sofa_kwargs={
+                        "ckpt_path": str(case_info.get("sofa_ckpt", "") or ""),
+                        "dictionary_path": sofa_dictionary_path,
+                        "sofa_python": str(case_info.get("sofa_python", "") or ""),
+                        "sofa_repo_dir": str(case_info.get("sofa_repo_dir", "") or ""),
+                        "mode": case_info.get("sofa_mode", "force"),
+                        "g2p": case_info.get("sofa_g2p", "Dictionary"),
+                        "ap_detector": case_info.get("sofa_ap_detector", "LoudnessSpectralcentroidAPDetector"),
+                        "ap_detector_config": case_info.get("sofa_ap_detector_config", ""),
+                        "save_confidence": case_info.get("sofa_save_confidence", False),
+                        "out_formats": case_info.get("sofa_out_formats", "TextGrid"),
+                        "extra_infer_args": case_info.get("sofa_extra_infer_args", ""),
+                        "two_pass_retry": case_info.get("sofa_two_pass_retry", False),
+                        "two_pass_retry_mode": case_info.get("sofa_two_pass_retry_mode", "match"),
+                        "confidence_threshold": case_info.get("sofa_confidence_threshold", 0.55),
+                        "low_confidence_max_files": case_info.get("sofa_low_confidence_max_files", 0),
+                    },
+                    callback=log,
+                )
+                if alignment_report.get("fallback_path"):
+                    fallback_path.append(str(alignment_report.get("fallback_path")))
+                log(
+                    "alignment="
+                    f"code={alignment_report.get('code', '')} "
+                    f"used_engine={alignment_report.get('used_engine', '')} "
+                    f"fallback_used={bool(alignment_report.get('fallback_used', False))}"
+                )
+                if not bool(alignment_report.get("ok", False)) and not has_textgrid_files(tg_folder):
+                    return build_result(
+                        status="error",
+                        reason=str(alignment_report.get("message", "") or "alignment failed"),
+                        failure_code=str(alignment_report.get("code", TEXTGRID_MISSING) or TEXTGRID_MISSING),
+                        failure_stage="align",
+                        alignment=alignment_report,
+                        fallback_path=fallback_path,
+                    )
+            else:
+                reason = f"textgrid_dir not found or empty: {tg_folder}"
+                log(f"failure_code={TEXTGRID_MISSING}")
+                return build_result(
+                    status="error",
+                    reason=reason,
+                    failure_code=TEXTGRID_MISSING,
+                    failure_stage="input",
+                    alignment=alignment_report,
+                )
+        else:
+            alignment_report = make_runtime_report(
+                "align",
+                OK,
+                "기존 TextGrid 사용",
+                ok=True,
+                used_engine="existing",
+                fallback_used=False,
+            )
+
         if language == "japanese":
             processed, total, errors = generate_ja_oto(
                 tg_folder=tg_folder,
@@ -411,6 +643,8 @@ def _run_one_case(
                 alias_style=alias_style,
                 auto_format=auto_format or None,
                 callback=log,
+                ml_policy=ml_policy,
+                runtime_report=runtime_report,
             )
         else:
             processed, total, errors = generate_oto(
@@ -426,12 +660,35 @@ def _run_one_case(
                 alias_suffix=alias_suffix,
                 auto_format=auto_format or None,
                 callback=log,
+                ml_policy=ml_policy,
+                runtime_report=runtime_report,
+            )
+
+        ml_report = runtime_report.get("ml") if isinstance(runtime_report, dict) else {}
+        if isinstance(ml_report, dict) and ml_report.get("fallback_used"):
+            fallback_path.append(f"ml:{ml_policy or 'auto'}->base")
+        if isinstance(ml_report, dict) and ml_report:
+            log(
+                "ml="
+                f"code={ml_report.get('code', '')} "
+                f"status={ml_report.get('status', '')} "
+                f"fallback_used={bool(ml_report.get('fallback_used', False))}"
             )
 
         if errors:
-            status = "error"
-            reason = f"generator_errors={len(errors)}"
             log(f"generator_errors={len(errors)}")
+            return build_result(
+                status="error",
+                reason=f"generator_errors={len(errors)}",
+                failure_code=GENERATOR_ERROR,
+                failure_stage="generate",
+                processed=processed,
+                total=total,
+                generator_errors=errors,
+                alignment=alignment_report,
+                ml=ml_report,
+                fallback_path=fallback_path,
+            )
 
         if do_validation and os.path.exists(out_path):
             validation = validate_oto_timing(
@@ -451,31 +708,40 @@ def _run_one_case(
             shutil.copyfile(out_path, target_oto)
             log(f"replaced_oto={target_oto}")
 
+        return build_result(
+            status="ok",
+            reason="",
+            failure_code=OK,
+            processed=processed,
+            total=total,
+            generator_errors=errors,
+            validation=validation,
+            alignment=alignment_report,
+            ml=runtime_report.get("ml") if isinstance(runtime_report, dict) else {},
+            fallback_path=fallback_path,
+        )
+
     except Exception as e:
-        status = "error"
         reason = _render_exception_text(e)
         log(f"exception={reason}")
         case_logs.append(traceback.format_exc())
-
-    with open(case_log_path, "w", encoding="utf-8") as f:
-        for line in case_logs:
-            f.write(line + "\n")
-
-    result = {
-        "name": name,
-        "status": status,
-        "reason": reason,
-        "language": language,
-        "voicebank_dir": voicebank_dir,
-        "textgrid_dir": tg_folder,
-        "output_oto": out_path,
-        "processed_files": int(processed),
-        "total_files": int(total),
-        "generator_errors": errors,
-        "validation": validation or {},
-        "log_path": case_log_path,
-    }
-    return result
+        return build_result(
+            status="error",
+            reason=reason,
+            failure_code=EXCEPTION,
+            failure_stage="runtime",
+            processed=processed,
+            total=total,
+            generator_errors=errors,
+            validation=validation,
+            alignment=alignment_report,
+            ml=runtime_report.get("ml") if isinstance(runtime_report, dict) else {},
+            fallback_path=fallback_path,
+        )
+    finally:
+        with open(case_log_path, "w", encoding="utf-8") as f:
+            for line in case_logs:
+                f.write(line + "\n")
 
 
 def main():

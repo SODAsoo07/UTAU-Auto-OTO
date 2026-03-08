@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Tuple
 
 import yaml
 
+from core.format_type_utils import normalize_format_type, normalize_language_name
 from core.oto_ml_collection_types import TrainingCandidate
 
 
@@ -54,7 +55,8 @@ def load_training_roots(config_path: str) -> Dict[str, Dict[str, List[str]]]:
     out: Dict[str, Dict[str, List[str]]] = {}
     allowed_languages = {"korean", "japanese"}
     for language, groups in raw.items():
-        if str(language) not in allowed_languages:
+        lang = normalize_language_name(str(language))
+        if lang not in allowed_languages:
             continue
         if not isinstance(groups, dict):
             continue
@@ -62,9 +64,12 @@ def load_training_roots(config_path: str) -> Dict[str, Dict[str, List[str]]]:
         for format_type, roots in groups.items():
             if not isinstance(roots, list):
                 continue
-            lang_groups[str(format_type)] = [str(root) for root in roots if str(root).strip()]
+            fmt = normalize_format_type(lang, str(format_type))
+            if not fmt:
+                continue
+            lang_groups.setdefault(fmt, []).extend(str(root) for root in roots if str(root).strip())
         if lang_groups:
-            out[str(language)] = lang_groups
+            out[lang] = lang_groups
     return out
 
 
@@ -147,6 +152,20 @@ def _discover_oto_files(base: str) -> List[str]:
     return found
 
 
+def _iter_candidate_roots(root: str) -> List[str]:
+    if not root or not os.path.isdir(root):
+        return []
+    child_dirs = [
+        os.path.join(root, name)
+        for name in sorted(os.listdir(root))
+        if os.path.isdir(os.path.join(root, name))
+    ]
+    child_hits = [child for child in child_dirs if _discover_oto_files(child)]
+    if child_hits:
+        return child_hits
+    return [root]
+
+
 def _pick_pair(oto_files: List[str]) -> Tuple[str, str]:
     if not oto_files:
         return "", ""
@@ -214,39 +233,54 @@ def discover_training_candidates(config_path: str) -> List[TrainingCandidate]:
                 if not os.path.isdir(root):
                     candidates.append(TrainingCandidate(language, format_type, root, root, status="skip", reason="missing_root"))
                     continue
-                oto_files = _discover_oto_files(root)
-                if not oto_files:
+                candidate_roots = _iter_candidate_roots(root)
+                if not candidate_roots:
                     candidates.append(TrainingCandidate(language, format_type, root, root, status="skip", reason="missing_oto"))
                     continue
-                manual, auto = _pick_pair(oto_files)
-                tg_dir = _find_textgrid_dir(root)
-                wav_dir = _find_wav_dir(root, prefer_dir=os.path.dirname(manual) if manual else "")
-                candidates.append(
-                    _build_candidate(
-                        language=language,
-                        format_type=format_type,
-                        root=root,
-                        folder=root,
-                        manual=manual,
-                        auto=auto,
-                        tg_dir=tg_dir,
-                        wav_dir=wav_dir,
-                        custom_phonemes=_find_custom_phoneme_map(root),
-                        voicebank_id=os.path.basename(os.path.abspath(root)),
+                for candidate_root in candidate_roots:
+                    oto_files = _discover_oto_files(candidate_root)
+                    if not oto_files:
+                        candidates.append(TrainingCandidate(language, format_type, root, candidate_root, status="skip", reason="missing_oto"))
+                        continue
+                    manual, auto = _pick_pair(oto_files)
+                    tg_dir = _find_textgrid_dir(candidate_root)
+                    wav_dir = _find_wav_dir(candidate_root, prefer_dir=os.path.dirname(manual) if manual else "")
+                    candidates.append(
+                        _build_candidate(
+                            language=language,
+                            format_type=format_type,
+                            root=root,
+                            folder=candidate_root,
+                            manual=manual,
+                            auto=auto,
+                            tg_dir=tg_dir,
+                            wav_dir=wav_dir,
+                            custom_phonemes=_find_custom_phoneme_map_chain(candidate_root, root),
+                            voicebank_id=os.path.basename(os.path.abspath(candidate_root)),
+                        )
                     )
-                )
     return candidates
 
 
 def discover_training_candidates_from_dataset_root(dataset_root: str) -> List[TrainingCandidate]:
     candidates: List[TrainingCandidate] = []
-    for language in ("korean", "japanese"):
-        lang_root = os.path.join(dataset_root, language)
+    try:
+        language_dirs = sorted(os.listdir(dataset_root))
+    except Exception:
+        return candidates
+    for raw_language in language_dirs:
+        language = normalize_language_name(raw_language)
+        if language not in {"korean", "japanese"}:
+            continue
+        lang_root = os.path.join(dataset_root, raw_language)
         if not os.path.isdir(lang_root):
             continue
         for format_type in sorted(os.listdir(lang_root)):
             fmt_root = os.path.join(lang_root, format_type)
             if not os.path.isdir(fmt_root):
+                continue
+            fmt = normalize_format_type(language, format_type)
+            if not fmt:
                 continue
             for voicebank in sorted(os.listdir(fmt_root)):
                 vb_root = os.path.join(fmt_root, voicebank)
@@ -271,7 +305,7 @@ def discover_training_candidates_from_dataset_root(dataset_root: str) -> List[Tr
                     candidates.append(
                         _build_candidate(
                             language=language,
-                            format_type=format_type,
+                            format_type=fmt,
                             root=vb_root,
                             folder=dp,
                             manual=manual,

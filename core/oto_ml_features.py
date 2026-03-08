@@ -28,7 +28,11 @@ except Exception:  # pragma: no cover
     np = None
 
 from core.lab_generator import load_custom_phonemes
+from core.kr_oto_rules import should_ignore_korean_alias
 from core.oto_ml_mapping_quality import augment_mapping_quality_features
+from core.format_type_utils import normalize_format_type
+from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
+from core.prefix_map_utils import find_prefix_map_path, strip_prefix_map_affixes
 
 logger = logging.getLogger(__name__)
 
@@ -153,9 +157,7 @@ _GENERIC_VOWELS = {
 
 
 def normalize_key(name: str) -> str:
-    base = os.path.splitext(os.path.basename(name or ""))[0]
-    clean = re.sub(r"[^0-9A-Za-z가-힣ぁ-んァ-ヶー一-龯]", "", base)
-    return clean.lower()
+    return normalize_wav_key(name)
 
 
 def get_delta_clip_limits(language: str) -> Dict[str, List[float]]:
@@ -236,7 +238,7 @@ def _path_signature(path: str) -> Dict[str, object]:
     return {"path": abs_path, "exists": False}
 
 
-def _feature_cache_path(language: str, oto_path: str, tg_dir: str, wav_dir: str, custom_phonemes_path: str = "", voicebank_id: str = "") -> str:
+def _feature_cache_path(language: str, oto_path: str, tg_dir: str, wav_dir: str, custom_phonemes_path: str = "", voicebank_id: str = "", prefix_map_path: str = "") -> str:
     key_obj = {
         "feature_version": FEATURE_VERSION,
         "language": str(language).strip().lower(),
@@ -244,6 +246,7 @@ def _feature_cache_path(language: str, oto_path: str, tg_dir: str, wav_dir: str,
         "tg_dir": _path_signature(tg_dir),
         "wav_dir": _path_signature(wav_dir),
         "custom_phonemes": _path_signature(custom_phonemes_path),
+        "prefix_map": _path_signature(prefix_map_path),
         "voicebank_id": str(voicebank_id or ""),
     }
     raw = json.dumps(key_obj, ensure_ascii=False, sort_keys=True)
@@ -251,7 +254,7 @@ def _feature_cache_path(language: str, oto_path: str, tg_dir: str, wav_dir: str,
     return os.path.join(_default_feature_cache_dir(), f"{digest}.json")
 
 
-def _training_row_cache_path(language: str, auto_oto_path: str, manual_oto_path: str, tg_dir: str, wav_dir: str, custom_phonemes_path: str = "", voicebank_id: str = "") -> str:
+def _training_row_cache_path(language: str, auto_oto_path: str, manual_oto_path: str, tg_dir: str, wav_dir: str, custom_phonemes_path: str = "", voicebank_id: str = "", auto_prefix_map_path: str = "", manual_prefix_map_path: str = "") -> str:
     key_obj = {
         "feature_version": FEATURE_VERSION,
         "row_match_version": TRAIN_ROW_MATCH_VERSION,
@@ -261,6 +264,8 @@ def _training_row_cache_path(language: str, auto_oto_path: str, manual_oto_path:
         "tg_dir": _path_signature(tg_dir),
         "wav_dir": _path_signature(wav_dir),
         "custom_phonemes": _path_signature(custom_phonemes_path),
+        "auto_prefix_map": _path_signature(auto_prefix_map_path),
+        "manual_prefix_map": _path_signature(manual_prefix_map_path),
         "voicebank_id": str(voicebank_id or ""),
     }
     raw = json.dumps(key_obj, ensure_ascii=False, sort_keys=True)
@@ -417,26 +422,15 @@ def _try_strip_attached_suffix(text: str, language: str, custom_map: Optional[Di
 
 
 def _normalize_alias_for_match(alias: str, language: str = "", custom_map: Optional[Dict[str, str]] = None) -> str:
-    a = re.sub(r"\s+", " ", (alias or "").strip().lower())
-    if not a:
-        return ""
-    base_type = _classify_for_match(language or "korean", a, custom_map=custom_map)
-    while True:
-        prev = a
-        a = _strip_known_pitch_suffix(a)
-        a = _strip_bracket_suffix(a)
-        a = _try_strip_trailing_separator_suffix(a, language or "korean", custom_map, base_type)
-        a = _try_strip_attached_suffix(a, language or "korean", custom_map, base_type)
-        if a == prev:
-            break
-    return a
+    return canonicalize_alias_for_matching(language or "korean", alias, custom_map=custom_map)
 
 
-def parse_oto_rows(path: str, language: str = "", custom_map: Optional[Dict[str, str]] = None) -> List[Dict[str, object]]:
+def parse_oto_rows(path: str, language: str = "", custom_map: Optional[Dict[str, str]] = None, prefix_map_path: str = "", prefix_context_paths: Optional[List[str]] = None) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     if not path or not os.path.exists(path):
         return rows
     text = _read_text_with_fallback(path)
+    context_paths = list(prefix_context_paths or [])
     for line_index, raw in enumerate(text.splitlines()):
         line = raw.strip()
         if not line or "=" not in line or "," not in line:
@@ -445,12 +439,22 @@ def parse_oto_rows(path: str, language: str = "", custom_map: Optional[Dict[str,
         parts = [p.strip() for p in right.split(",")]
         if len(parts) < 6:
             continue
+        alias_raw = parts[0]
+        alias = strip_prefix_map_affixes(
+            alias_raw,
+            prefix_map_path=prefix_map_path,
+            wav_name=left.strip(),
+            context_paths=context_paths,
+        )
+        if str(language or "").strip().lower() == "korean" and should_ignore_korean_alias(alias):
+            continue
         try:
             row = {
                 "line_index": line_index,
                 "raw_line": raw,
                 "wav": left.strip(),
-                "alias": parts[0],
+                "alias_raw": alias_raw,
+                "alias": alias,
                 "offset": float(parts[1]),
                 "cons": float(parts[2]),
                 "cutoff": float(parts[3]),
@@ -517,9 +521,9 @@ def detect_format_type(language: str, aliases: List[str], custom_map: Optional[D
     lang = str(language).strip().lower()
     if lang == "japanese":
         from core.ja_oto_mapping import detect_ja_alias_format
-        return str(detect_ja_alias_format(aliases, custom_map=custom_map))
+        return normalize_format_type(lang, str(detect_ja_alias_format(aliases, custom_map=custom_map)))
     from core.oto_generator import detect_alias_format
-    return str(detect_alias_format(aliases, custom_map=custom_map))
+    return normalize_format_type(lang, str(detect_alias_format(aliases, custom_map=custom_map)))
 
 
 def _clean_mark(mark: str) -> str:
@@ -539,9 +543,10 @@ def _build_tg_index(tg_dir: str) -> Dict[str, str]:
     index: Dict[str, str] = {}
     if not tg_dir or not os.path.isdir(tg_dir):
         return index
-    for fn in os.listdir(tg_dir):
-        if fn.lower().endswith(".textgrid"):
-            index[normalize_key(fn)] = os.path.join(tg_dir, fn)
+    for dp, _dns, fns in os.walk(tg_dir):
+        for fn in fns:
+            if fn.lower().endswith(".textgrid"):
+                index[normalize_key(fn)] = os.path.join(dp, fn)
     return index
 
 
@@ -945,12 +950,27 @@ def _feature_row_from_context(language: str, format_type: str, row: Dict[str, ob
 def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str, custom_phonemes_path: str = "", voicebank_id: str = "", format_type_override: str = "") -> List[Dict[str, object]]:
     lang = str(language).strip().lower()
     custom_map = load_custom_map(custom_phonemes_path)
-    fmt_tag = str(format_type_override or "").strip().lower()
-    cache_path = _feature_cache_path(lang, oto_path, tg_dir, wav_dir, custom_phonemes_path, f"{voicebank_id}|fmt={fmt_tag}")
+    fmt_tag = normalize_format_type(lang, str(format_type_override or "").strip().lower())
+    prefix_map_path = find_prefix_map_path(oto_path, wav_dir, tg_dir)
+    cache_path = _feature_cache_path(
+        lang,
+        oto_path,
+        tg_dir,
+        wav_dir,
+        custom_phonemes_path,
+        f"{voicebank_id}|fmt={fmt_tag}",
+        prefix_map_path,
+    )
     cached_rows = _load_feature_cache(cache_path)
     if cached_rows is not None:
         return cached_rows
-    rows = parse_oto_rows(oto_path, language=lang, custom_map=custom_map)
+    rows = parse_oto_rows(
+        oto_path,
+        language=lang,
+        custom_map=custom_map,
+        prefix_map_path=prefix_map_path,
+        prefix_context_paths=[oto_path, wav_dir, tg_dir],
+    )
     if not rows:
         return []
 
@@ -1220,6 +1240,8 @@ def _resolve_manual_cutoff_abs(
 
 def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str, tg_dir: str, wav_dir: str, custom_phonemes_path: str = "", voicebank_id: str = "", format_type_override: str = "") -> Tuple[List[Dict[str, object]], Dict[str, int]]:
     fmt_tag = str(format_type_override or "").strip().lower()
+    auto_prefix_map_path = find_prefix_map_path(auto_oto_path, wav_dir, tg_dir)
+    manual_prefix_map_path = find_prefix_map_path(manual_oto_path, wav_dir, tg_dir)
     cache_path = _training_row_cache_path(
         language=language,
         auto_oto_path=auto_oto_path,
@@ -1227,6 +1249,8 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
         tg_dir=tg_dir,
         wav_dir=wav_dir,
         custom_phonemes_path=custom_phonemes_path,
+        auto_prefix_map_path=auto_prefix_map_path,
+        manual_prefix_map_path=manual_prefix_map_path,
         voicebank_id=f"{voicebank_id}|fmt={fmt_tag}",
     )
     cached = _load_training_row_cache(cache_path)
@@ -1241,7 +1265,13 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
         voicebank_id=voicebank_id,
         format_type_override=fmt_tag,
     )
-    manual_rows = parse_oto_rows(manual_oto_path, language=language, custom_map=load_custom_map(custom_phonemes_path))
+    manual_rows = parse_oto_rows(
+        manual_oto_path,
+        language=language,
+        custom_map=load_custom_map(custom_phonemes_path),
+        prefix_map_path=manual_prefix_map_path,
+        prefix_context_paths=[manual_oto_path, wav_dir, tg_dir],
+    )
     manual_matches, match_stats = _build_manual_matches_by_time(auto_feats, manual_rows)
     matched_rows: List[Dict[str, object]] = []
     skipped = 0

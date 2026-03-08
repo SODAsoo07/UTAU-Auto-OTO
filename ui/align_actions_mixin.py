@@ -1,7 +1,8 @@
-﻿import os
+import os
 
-from core.mfa_runner import check_mfa_model, download_mfa_model, run_mfa_align
-from core.sofa_runner import get_default_sofa_repo_dir, run_sofa_align
+from core.alignment_pipeline import run_alignment_with_fallback
+from core.mfa_runner import check_mfa_model, download_mfa_model
+from core.sofa_runner import get_default_sofa_repo_dir
 
 
 class AlignActionsMixin:
@@ -15,41 +16,54 @@ class AlignActionsMixin:
                 dict_filename = "japanese_dict.txt" if lang == "japanese" else "korean_dict.txt"
                 dict_path = os.path.join(wav_dir, dict_filename)
                 output_dir = os.path.join(wav_dir, "textgrids")
+                primary = "sofa" if self.aligner_var.get() == "SOFA" else "mfa"
+                fallback = "mfa" if primary == "sofa" else "sofa"
 
-                if self.aligner_var.get() == "SOFA":
+                runtime_getter = getattr(self, "_get_sofa_runtime_kwargs", None)
+                if callable(runtime_getter):
+                    sofa_kwargs = runtime_getter(lang)
+                else:
+                    sofa_kwargs = {
+                        "sofa_repo_dir": (
+                            get_default_sofa_repo_dir("utau_kr_v1")
+                            if lang == "korean"
+                            else get_default_sofa_repo_dir()
+                        ),
+                        "mode": "force",
+                        "g2p": "Dictionary",
+                        "ap_detector": "LoudnessSpectralcentroidAPDetector",
+                        "ap_detector_config": "",
+                        "save_confidence": lang == "korean",
+                        "out_formats": "TextGrid",
+                        "extra_infer_args": "",
+                        "two_pass_retry": lang == "korean",
+                        "two_pass_retry_mode": "match",
+                        "confidence_threshold": 0.55,
+                        "low_confidence_max_files": 0,
+                    }
+
+                ckpt = self.sofa_ckpt_var.get().strip()
+                if primary == "sofa":
                     ckpt = self._ensure_sofa_model_ready(lang)
-                    sdic = self.sofa_dict_var.get().strip() or dict_path
-                    runtime_getter = getattr(self, "_get_sofa_runtime_kwargs", None)
-                    if callable(runtime_getter):
-                        sofa_kwargs = runtime_getter(lang)
-                    else:
-                        sofa_kwargs = {
-                            "sofa_repo_dir": (
-                                get_default_sofa_repo_dir("utau_kr_v1")
-                                if lang == "korean"
-                                else get_default_sofa_repo_dir()
-                            ),
-                            "mode": "force",
-                            "g2p": "Dictionary",
-                            "ap_detector": "LoudnessSpectralcentroidAPDetector",
-                            "ap_detector_config": "",
-                            "save_confidence": lang == "korean",
-                            "out_formats": "TextGrid",
-                            "extra_infer_args": "",
-                            "two_pass_retry": lang == "korean",
-                            "two_pass_retry_mode": "match",
-                            "confidence_threshold": 0.55,
-                            "low_confidence_max_files": 0,
-                        }
-                    if not self.sofa_dict_var.get().strip():
-                        self._after_safe(lambda p=sdic: self.sofa_dict_var.set(p))
-                        self._append_log(f"ℹ SOFA 사전이 비어 있어 현재 생성 사전을 사용합니다: {sdic}")
-                    if not ckpt or not sdic:
-                        self._append_log("❌ SOFA 사용 시 체크포인트(.ckpt)와 사전(dict.txt) 경로가 필요합니다.")
-                        self._set_status("❌ SOFA 설정 누락")
-                        return
+                sdic = self.sofa_dict_var.get().strip() or dict_path
+                if not self.sofa_dict_var.get().strip():
+                    self._after_safe(lambda p=sdic: self.sofa_dict_var.set(p))
+                    self._append_log(f"ℹ SOFA 사전이 비어 있어 현재 생성 사전을 사용합니다: {sdic}")
 
-                    self._append_log("🔀 정렬 엔진: SOFA")
+                if self.mfa_path:
+                    has_model, msg = check_mfa_model(self.mfa_path, language=lang)
+                    self._append_log(msg)
+                    if not has_model and primary == "mfa":
+                        download_mfa_model(self.mfa_path, language=lang, callback=self._append_log)
+
+                if primary == "mfa":
+                    mfa_profile = (
+                        self._get_mfa_align_profile_code()
+                        if hasattr(self, "_get_mfa_align_profile_code")
+                        else "accurate"
+                    )
+                    self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
+                else:
                     self._append_log(f"ℹ SOFA 전용 Python: {self.sofa_python_var.get().strip()}")
                     self._append_log(
                         "ℹ SOFA 실행 옵션: "
@@ -57,55 +71,40 @@ class AlignActionsMixin:
                         f"mode={sofa_kwargs.get('mode')}, "
                         f"2-pass={'ON' if sofa_kwargs.get('two_pass_retry') else 'OFF'}"
                     )
-                    success, err = run_sofa_align(
-                        wav_folder=wav_dir,
-                        output_folder=output_dir,
-                        ckpt_path=ckpt,
-                        dictionary_path=sdic,
-                        mfa_path=self.mfa_path or "",
-                        sofa_python=self.sofa_python_var.get().strip(),
-                        callback=self._append_log,
-                        **sofa_kwargs,
-                    )
-                    if success:
-                        self._set_status("✅ SOFA 정렬 완료")
-                    else:
-                        self._append_log(f"❌ SOFA 실패: {err}")
-                        self._set_status("❌ SOFA 실패")
-                else:
-                    self._append_log("🔀 정렬 엔진: MFA(권장)")
-                    if not self.mfa_path:
-                        self._append_log("❌ MFA 실행 파일을 찾을 수 없습니다!")
-                        self._append_log("   💡 MFA를 설치하거나, 프로그램 폴더에 .env/ 포터블 환경을 배치해 주세요.")
-                        self._set_status("❌ MFA 미설치")
-                        return
 
-                    has_model, msg = check_mfa_model(self.mfa_path, language=lang)
-                    self._append_log(msg)
-                    if not has_model:
-                        download_mfa_model(self.mfa_path, language=lang, callback=self._append_log)
-
-                    mfa_profile = (
+                result = run_alignment_with_fallback(
+                    language=lang,
+                    wav_folder=wav_dir,
+                    dictionary_path=dict_path,
+                    output_folder=output_dir,
+                    primary_aligner=primary,
+                    fallback_aligner=fallback,
+                    mfa_path=self.mfa_path or "",
+                    mfa_align_profile=(
                         self._get_mfa_align_profile_code()
                         if hasattr(self, "_get_mfa_align_profile_code")
                         else "accurate"
-                    )
-                    self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
-                    success, err = run_mfa_align(
-                        self.mfa_path,
-                        wav_dir,
-                        dict_path,
-                        output_dir,
-                        language=lang,
-                        callback=self._append_log,
-                        align_profile=mfa_profile,
-                    )
-                    if success:
-                        self._set_status("✅ MFA 정렬 완료")
-                    else:
-                        self._append_log(f"❌ MFA 실패: {err}")
+                    ),
+                    sofa_kwargs={
+                        **sofa_kwargs,
+                        "ckpt_path": ckpt,
+                        "dictionary_path": sdic,
+                        "sofa_python": self.sofa_python_var.get().strip(),
+                    },
+                    callback=self._append_log,
+                )
+                if bool(result.get("ok", False)):
+                    used_engine = str(result.get("used_engine", "") or primary).upper()
+                    if result.get("fallback_used"):
+                        self._append_log(f"ℹ 정렬 fallback 적용: {result.get('fallback_path', '')}")
+                    self._set_status(f"✅ {used_engine} 정렬 완료")
+                else:
+                    err = str(result.get("message", "") or "정렬 실패")
+                    code = str(result.get("code", "") or "")
+                    self._append_log(f"❌ 정렬 실패: {err} ({code})")
+                    if primary == "mfa":
                         self._notify_mfa_failure_suggest_sofa(lang, err)
-                        self._set_status("❌ MFA 실패")
+                    self._set_status("❌ 정렬 실패")
             except Exception as e:
                 self._handle_error("음성 정렬", e)
             finally:

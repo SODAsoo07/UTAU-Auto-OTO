@@ -93,7 +93,7 @@ class LayoutMixin:
         ctk.CTkLabel(row_format, text="형식 지정:", width=120, anchor="w").pack(side="left")
         
         self.auto_format_var = ctk.StringVar(value="자동 감지 (권장)")
-        FORMAT_OPTIONS = ["자동 감지 (권장)", "CVC/연단음", "CVVC", "VCV (연속음)"]
+        FORMAT_OPTIONS = ["자동 감지 (권장)", "CV/연단음", "CVVC", "VCV (연속음)"]
         self.format_dropdown = ctk.CTkOptionMenu(
             row_format, values=FORMAT_OPTIONS, variable=self.auto_format_var,
             width=200, command=self._save_config

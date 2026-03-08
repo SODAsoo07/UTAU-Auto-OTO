@@ -259,10 +259,16 @@ _PROFILE_TABLE: Dict[Tuple[str, str, str], AnchorTimingProfile] = {
     ("japanese", "vcv", "vcv_vv_like"): _ja_vcv_vv_like_profile(),
     ("japanese", "vcv", "cv"): _ja_cv_head_profile(),
     ("japanese", "vcv", "cv_head"): _ja_cv_head_profile(),
+    ("japanese", "cv", "cv"): _ja_cv_head_profile(),
+    ("japanese", "cv", "cv_head"): _ja_cv_head_profile(),
     ("japanese", "cvvc", "vc"): _ja_cvvc_vc_profile(),
     ("japanese", "cvvc", "vv"): _ja_cvvc_vv_profile(),
     ("japanese", "cvvc", "cv_head"): _ja_cv_head_profile(),
     ("japanese", "cvvc", "cv"): _ja_cv_head_profile(),
+    ("korean", "cv", "cv"): _kr_cv_profile(),
+    ("korean", "cv", "cv_head"): _kr_cv_head_profile(),
+    ("korean", "cv", "vc"): _kr_vc_profile(),
+    ("korean", "cv", "vv"): _kr_vv_profile(),
     ("korean", "cvvc", "cv"): _kr_cv_profile(),
     ("korean", "cvvc", "cv_head"): _kr_cv_head_profile(),
     ("korean", "cvvc", "vc"): _kr_vc_profile(),
@@ -400,7 +406,7 @@ def is_anchor_lock_enabled(language: str, format_type: str) -> bool:
             return ENABLE_ANCHOR_LOCK_JA_CVVC
         return False
     if lang == "korean":
-        if fmt in {"cvvc", "cvc", "vcv"}:
+        if fmt in {"cv", "cvvc", "cvc", "vcv"}:
             return ENABLE_ANCHOR_LOCK_KR
         return False
     return False

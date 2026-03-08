@@ -25,9 +25,12 @@ def _has_usable_oto_lines(path: str) -> bool:
 
 
 def _has_textgrid_files(path: str) -> bool:
-    return bool(path) and os.path.isdir(path) and any(
-        fn.lower().endswith(".textgrid") for fn in os.listdir(path)
-    )
+    if not path or not os.path.isdir(path):
+        return False
+    for _dp, _dns, fns in os.walk(path):
+        if any(fn.lower().endswith(".textgrid") for fn in fns):
+            return True
+    return False
 
 
 def _discover_work_items(dataset_root: str) -> List[PreparedAutoPair]:
