@@ -402,6 +402,151 @@ def _get_conda_env(mfa_path):
     return env
 
 
+def _check_env_imports(python_exe: str, env: dict, import_expr: str):
+    res = _run_subprocess_text([python_exe, '-c', import_expr], env=env)
+    if res.returncode == 0:
+        return True, ''
+    detail = (res.stderr or res.stdout or '').strip()
+    return False, detail
+
+
+def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
+    """
+    Ensure pip/setuptools/pkg_resources/wheel are available inside the MFA env.
+    This is a prerequisite for language-specific dependency repair on native Windows.
+    """
+    def log(msg):
+        logger.info(msg)
+        if callback:
+            callback(msg)
+
+    if not mfa_path or 'Scripts' not in mfa_path:
+        return True
+
+    env_dir = os.path.dirname(os.path.dirname(mfa_path))
+    python_exe = os.path.join(env_dir, 'python.exe')
+    pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
+    conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
+    if not os.path.exists(python_exe):
+        return False
+
+    env = _get_conda_env(mfa_path)
+    ok, _detail = _check_env_imports(python_exe, env, 'import pip; import pkg_resources; import wheel')
+    if ok:
+        return True
+
+    log('[MFA] Python 패키지 도구(pip/setuptools/wheel) 복구 중...')
+    repair_cmds = [
+        [python_exe, '-m', 'ensurepip', '--upgrade'],
+        [python_exe, '-m', 'pip', 'install', '--upgrade', 'setuptools<81', 'wheel'],
+    ]
+    if os.path.exists(pip_exe):
+        repair_cmds.append([pip_exe, 'install', '--upgrade', 'setuptools<81', 'wheel'])
+    if os.path.exists(conda_exe):
+        repair_cmds.append([
+            conda_exe, 'install', '-y', '--solver', 'classic', '-p', env_dir,
+            'pip', 'setuptools', 'wheel'
+        ])
+    system_conda = shutil.which('conda')
+    if system_conda:
+        repair_cmds.append([
+            system_conda, 'install', '-y', '--solver', 'classic', '-p', env_dir,
+            'pip', 'setuptools', 'wheel'
+        ])
+
+    for repair_cmd in repair_cmds:
+        log(f"   -> repair cmd: {' '.join(repair_cmd)}")
+        result = _run_subprocess_text(repair_cmd, env=env)
+        if result.returncode != 0:
+            continue
+        ok, _detail = _check_env_imports(python_exe, env, 'import pip; import pkg_resources; import wheel')
+        if ok:
+            return True
+
+    log('[MFA] Failed to restore pip/setuptools/pkg_resources/wheel')
+    return False
+
+
+def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
+    """
+    Read-only runtime diagnosis for the current MFA environment.
+    Returns a dict that the UI or smoke scripts can summarize.
+    """
+    def log(msg):
+        logger.info(msg)
+        if callback:
+            callback(msg)
+
+    lang = str(language or 'korean').strip().lower()
+    resolved = mfa_path or find_mfa_executable() or ""
+    report = {
+        "language": lang,
+        "mfa_path": resolved,
+        "env_dir": "",
+        "ready": False,
+        "issues": [],
+        "checks": {
+            "mfa_executable": False,
+            "python_exe": False,
+            "pip_exe": False,
+            "python_version": "",
+            "python_rebuild_required": False,
+            "packaging_stack": None,
+            "language_support": None,
+            "model_ready": False,
+        },
+    }
+
+    if not resolved or not os.path.exists(resolved):
+        report["issues"].append("mfa_missing")
+        log("[MFA] 진단: MFA 실행 파일을 찾지 못했습니다.")
+        return report
+
+    report["checks"]["mfa_executable"] = True
+    if 'Scripts' in resolved:
+        env_dir = os.path.dirname(os.path.dirname(resolved))
+        python_exe = os.path.join(env_dir, 'python.exe')
+        pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
+        report["env_dir"] = env_dir
+        report["checks"]["python_exe"] = os.path.exists(python_exe)
+        report["checks"]["pip_exe"] = os.path.exists(pip_exe)
+        py_ver = get_mfa_env_python_version(resolved)
+        report["checks"]["python_version"] = py_ver
+        rebuild = mfa_python_version_requires_downgrade(py_ver)
+        report["checks"]["python_rebuild_required"] = rebuild
+        if rebuild:
+            report["issues"].append("python_rebuild_required")
+        if report["checks"]["python_exe"]:
+            env = _get_conda_env(resolved)
+            ok, _detail = _check_env_imports(python_exe, env, 'import pip; import pkg_resources; import wheel')
+            report["checks"]["packaging_stack"] = ok
+            if not ok:
+                report["issues"].append("packaging_stack_missing")
+            import_expr = (
+                'import eunjeon; import jamo'
+                if lang == 'korean'
+                else 'import spacy; import sudachipy; import sudachidict_core'
+            )
+            lang_ok, _detail = _check_env_imports(python_exe, env, import_expr)
+            report["checks"]["language_support"] = lang_ok
+            if not lang_ok:
+                report["issues"].append(f"{lang}_deps_missing")
+
+    has_model, _msg = check_mfa_model(resolved, language=lang)
+    report["checks"]["model_ready"] = bool(has_model)
+    if not has_model:
+        report["issues"].append("model_missing")
+
+    report["ready"] = (
+        report["checks"]["mfa_executable"]
+        and report["checks"]["python_rebuild_required"] is False
+        and report["checks"]["packaging_stack"] in {True, None}
+        and report["checks"]["language_support"] in {True, None}
+        and report["checks"]["model_ready"]
+    )
+    return report
+
+
 def _resolve_single_speaker_flag(mfa_path, env=None):
     """
     MFA 버전에 따라 단일 화자 옵션 표기가 다를 수 있어(--single-speaker / --single_speaker)
@@ -582,6 +727,9 @@ def ensure_korean_support(mfa_path, callback=None):
     pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
     if not os.path.exists(python_exe):
         return False
+    if not ensure_mfa_python_packaging_stack(mfa_path, callback=callback):
+        log('[MFA] Failed to prepare base Python packaging tools before Korean dependency install')
+        return False
     pkg_check_cmd = [python_exe, '-c', 'import pkg_resources']
     check_cmd = [python_exe, '-c', 'import eunjeon; import jamo']
     try:
@@ -718,6 +866,9 @@ def ensure_japanese_support(mfa_path, callback=None):
 
     if not os.path.exists(python_exe):
         return True
+    if not ensure_mfa_python_packaging_stack(mfa_path, callback=callback):
+        log("⚠️ MFA Python 패키지 도구 복구에 실패해 일본어 의존성 설치를 계속할 수 없습니다.")
+        return False
 
     check_cmd = [python_exe, '-c', 'import spacy; import sudachipy; import sudachidict_core']
     try:

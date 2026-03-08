@@ -11,7 +11,9 @@ from core.mfa_runner import (
     _contains_non_ascii,
     _decode_subprocess_output,
     _prepare_ascii_safe_alignment_workspace,
+    diagnose_mfa_runtime,
     ensure_korean_support,
+    ensure_mfa_python_packaging_stack,
     mfa_python_version_requires_downgrade,
 )
 
@@ -121,6 +123,107 @@ class MfaRunnerTests(unittest.TestCase):
         self.assertIn("import pkg_resources", joined)
         self.assertIn("install --upgrade setuptools<81", joined)
         self.assertIn("import eunjeon; import jamo", joined)
+
+    def test_ensure_mfa_python_packaging_stack_repairs_missing_tooling(self):
+        import core.mfa_runner as mfa_runner
+
+        calls = []
+
+        class Result:
+            def __init__(self, returncode=0, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        with tempfile.TemporaryDirectory() as td:
+            env_dir = os.path.join(td, ".env")
+            scripts_dir = os.path.join(env_dir, "Scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            python_exe = os.path.join(env_dir, "python.exe")
+            pip_exe = os.path.join(scripts_dir, "pip.exe")
+            mfa_exe = os.path.join(scripts_dir, "mfa.exe")
+            for p in (python_exe, pip_exe, mfa_exe):
+                with open(p, "wb") as f:
+                    f.write(b"")
+
+            real_run = mfa_runner._run_subprocess_text
+            real_get_env = mfa_runner._get_conda_env
+            real_which = mfa_runner.shutil.which
+
+            state = {"tooling_ok": False}
+
+            def fake_run(cmd, **kwargs):
+                calls.append(cmd)
+                cmd_str = " ".join(cmd)
+                if "import pip; import pkg_resources; import wheel" in cmd_str:
+                    return Result(0 if state["tooling_ok"] else 1, stderr="missing packaging stack")
+                if "ensurepip --upgrade" in cmd_str:
+                    return Result(0)
+                if "install --upgrade setuptools<81 wheel" in cmd_str:
+                    state["tooling_ok"] = True
+                    return Result(0)
+                return Result(0)
+
+            try:
+                mfa_runner._run_subprocess_text = fake_run
+                mfa_runner._get_conda_env = lambda _: {}
+                mfa_runner.shutil.which = lambda _: None
+                self.assertTrue(ensure_mfa_python_packaging_stack(mfa_exe))
+            finally:
+                mfa_runner._run_subprocess_text = real_run
+                mfa_runner._get_conda_env = real_get_env
+                mfa_runner.shutil.which = real_which
+
+        joined = "\n".join(" ".join(cmd) for cmd in calls)
+        self.assertIn("ensurepip --upgrade", joined)
+        self.assertIn("install --upgrade setuptools<81 wheel", joined)
+
+    def test_diagnose_mfa_runtime_reports_missing_model_and_rebuild(self):
+        import core.mfa_runner as mfa_runner
+
+        with tempfile.TemporaryDirectory() as td:
+            env_dir = os.path.join(td, ".env")
+            scripts_dir = os.path.join(env_dir, "Scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            mfa_exe = os.path.join(scripts_dir, "mfa.exe")
+            python_exe = os.path.join(env_dir, "python.exe")
+            pip_exe = os.path.join(scripts_dir, "pip.exe")
+            for p in (mfa_exe, python_exe, pip_exe):
+                with open(p, "wb") as f:
+                    f.write(b"")
+
+            real_run = mfa_runner._run_subprocess_text
+            real_get_ver = mfa_runner.get_mfa_env_python_version
+            real_check_model = mfa_runner.check_mfa_model
+
+            def fake_run(cmd, **kwargs):
+                if "import pip; import pkg_resources; import wheel" in " ".join(cmd):
+                    class Result:
+                        returncode = 0
+                        stdout = ""
+                        stderr = ""
+                    return Result()
+                if "import eunjeon; import jamo" in " ".join(cmd):
+                    class Result:
+                        returncode = 0
+                        stdout = ""
+                        stderr = ""
+                    return Result()
+                raise AssertionError(f"Unexpected command: {cmd}")
+
+            try:
+                mfa_runner._run_subprocess_text = fake_run
+                mfa_runner.get_mfa_env_python_version = lambda _: "3.13.1"
+                mfa_runner.check_mfa_model = lambda *_args, **_kwargs: (False, "missing")
+                report = diagnose_mfa_runtime(mfa_exe, language="korean")
+            finally:
+                mfa_runner._run_subprocess_text = real_run
+                mfa_runner.get_mfa_env_python_version = real_get_ver
+                mfa_runner.check_mfa_model = real_check_model
+
+        self.assertFalse(report["ready"])
+        self.assertIn("python_rebuild_required", report["issues"])
+        self.assertIn("model_missing", report["issues"])
 
 
 if __name__ == "__main__":

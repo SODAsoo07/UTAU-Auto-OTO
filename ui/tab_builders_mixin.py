@@ -49,6 +49,17 @@ class TabBuildersMixin:
             self.mfa_install_btn.configure(text="✅ 설치 완료", state="disabled", fg_color="#388E3C")
         self.mfa_install_btn.pack(side="right")
 
+        self.mfa_repair_btn = ctk.CTkButton(
+            mfa_inner,
+            text="🔍 MFA 진단/복구",
+            width=150,
+            fg_color="#B0BEC5",
+            hover_color="#90A4AE",
+            text_color="black",
+            command=self._run_mfa_diagnose_repair,
+        )
+        self.mfa_repair_btn.pack(side="right", padx=(0, 8))
+
         self.sofa_install_btn = ctk.CTkButton(
             mfa_inner,
             text="⬇ SOFA 자동 설치",
@@ -61,6 +72,17 @@ class TabBuildersMixin:
         if self._is_sofa_installed():
             self.sofa_install_btn.configure(text="✅ 설치 완료", state="disabled", fg_color="#388E3C")
         self.sofa_install_btn.pack(side="right", padx=(0, 8))
+
+        ctk.CTkLabel(
+            content,
+            text=(
+                "처음 설치나 'MFA 진단/복구'는 환경 구성과 현재 언어 모델 다운로드 때문에 10~20분 이상 걸릴 수 있습니다.\n"
+                "문제가 생기면 먼저 'MFA 진단/복구'를 눌러 자동 복구를 시도한 뒤 정렬을 다시 실행하세요."
+            ),
+            text_color="gray",
+            wraplength=760,
+            justify="left",
+        ).pack(fill="x", padx=20, pady=(0, 8))
 
         steps = [
             ("1. Lab 생성", "WAV 파일에서 라벨(Lab) 파일을 생성합니다.", self._run_lab_gen),

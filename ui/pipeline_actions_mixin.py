@@ -14,7 +14,9 @@ from core.lab_generator import generate_dictionary, generate_labs
 from core.mfa_runner import (
     MFA_PORTABLE_PYTHON_VERSION,
     check_mfa_model,
+    diagnose_mfa_runtime,
     download_mfa_model,
+    ensure_mfa_python_packaging_stack,
     ensure_japanese_support,
     ensure_korean_support,
     get_default_mfa_conda_root,
@@ -58,9 +60,13 @@ class PipelineActionsMixin:
         else:
             title = "MFA 초기 설치 안내"
             message = (
-                "처음 MFA를 설치할 때는 Miniconda/MFA 설치와 언어 모델 다운로드 때문에 시간이 오래 걸릴 수 있습니다.\n\n"
+                "처음 MFA를 설치하거나 진단/복구를 실행할 때는 환경 구성, Python 패키지 복구, 현재 언어 모델 다운로드 때문에 시간이 오래 걸릴 수 있습니다.\n\n"
                 "환경과 네트워크 속도에 따라 보통 10~20분, 경우에 따라 그 이상 걸릴 수 있습니다.\n"
-                "설치 중에는 프로그램을 종료하지 말고 기다려 주세요."
+                "설치 중에는 프로그램을 종료하지 말고 기다려 주세요.\n\n"
+                "권장 순서:\n"
+                "1) 'MFA 진단/복구' 버튼으로 현재 상태 점검\n"
+                "2) 필요한 복구와 모델 다운로드 자동 진행\n"
+                "3) 완료 후 정렬 다시 시도"
             )
             alert_key = "install_time_mfa"
         self._append_log(f"ℹ {title}: 설치에 시간이 오래 걸릴 수 있습니다.")
@@ -273,6 +279,7 @@ class PipelineActionsMixin:
             if os.path.exists(micromamba_archive):
                 self._append_log("ℹ Micromamba 아카이브가 이미 있어 재사용합니다.")
                 return True
+            self._set_status("⬇ Micromamba 다운로드 중...")
             self._append_log("[1/3] ⬇ Micromamba 다운로드 중... (약 15MB)")
             url = 'https://micro.mamba.pm/api/micromamba/win-64/latest'
             ps_cmd = (
@@ -289,6 +296,7 @@ class PipelineActionsMixin:
             if os.path.exists(micromamba_exe):
                 self._append_log("✅ Micromamba 실행 파일이 이미 있습니다.")
                 return True
+            self._set_status("📦 Micromamba 압축 해제 중...")
             self._append_log("[2/3] 📦 Micromamba 압축 해제 중...")
             try:
                 if os.path.isdir(micromamba_root):
@@ -418,6 +426,7 @@ class PipelineActionsMixin:
             if os.path.isdir(env_dir) and not os.path.exists(mfa_exe):
                 if not _remove_env_dir():
                     return False
+            self._set_status("🔧 MFA 환경 설치 중...")
             if not _run_micromamba(
                 [
                     'create',
@@ -441,17 +450,25 @@ class PipelineActionsMixin:
                 self._append_log("❌ MFA 실행 파일을 찾지 못했습니다.")
                 return False
 
+        self._set_status("🔧 MFA Python 도구 점검 중...")
+        if not ensure_mfa_python_packaging_stack(self.mfa_path or mfa_exe, callback=self._append_log):
+            self._append_log("❌ MFA Python 패키지 도구 준비 실패")
+            return False
+
         if lang == "korean":
+            self._set_status("🔧 한국어 MFA 의존성 점검 중...")
             self._append_log("[Patch] 윈도우용 한국어 파서(eunjeon) 연동 처리 중...")
             patch_mfa_korean_support(self.mfa_path, callback=self._append_log)
             if not ensure_korean_support(self.mfa_path, callback=self._append_log):
                 self._append_log("❌ 한국어 MFA 의존성 준비 실패")
                 return False
         elif lang == "japanese":
+            self._set_status("🔧 일본어 MFA 의존성 점검 중...")
             if not ensure_japanese_support(self.mfa_path, callback=self._append_log):
                 self._append_log("❌ 일본어 MFA 의존성 준비 실패")
                 return False
 
+        self._set_status("⬇ MFA 모델 다운로드 중...")
         has_model, msg = check_mfa_model(self.mfa_path, language=lang)
         if msg:
             self._append_log(msg)
@@ -473,6 +490,59 @@ class PipelineActionsMixin:
         self._append_log("   이제 정렬을 바로 계속 진행합니다.")
         return True
 
+    def _format_mfa_diagnosis_summary(self, report):
+        checks = dict((report or {}).get("checks", {}) or {})
+        issues = list((report or {}).get("issues", []) or [])
+        lang = "일본어" if str((report or {}).get("language", "")).lower() == "japanese" else "한국어"
+        return "\n".join([
+            f"언어: {lang}",
+            f"MFA 실행 파일: {'OK' if checks.get('mfa_executable') else '없음'}",
+            f"Python 실행 파일: {'OK' if checks.get('python_exe') else '없음'}",
+            f"pip 실행 파일: {'OK' if checks.get('pip_exe') else '없음'}",
+            f"Python 버전: {checks.get('python_version') or '(확인 불가)'}",
+            f"재구성 필요: {'예' if checks.get('python_rebuild_required') else '아니오'}",
+            f"패키지 도구(pip/setuptools/wheel): {('OK' if checks.get('packaging_stack') else '복구 필요') if checks.get('packaging_stack') is not None else '미확인'}",
+            f"{lang} 의존성: {('OK' if checks.get('language_support') else '복구 필요') if checks.get('language_support') is not None else '미확인'}",
+            f"{lang} MFA 모델: {'OK' if checks.get('model_ready') else '다운로드 필요'}",
+            f"이슈 코드: {', '.join(issues) if issues else '(없음)'}",
+            f"최종 준비 상태: {'준비 완료' if (report or {}).get('ready') else '추가 복구 필요'}",
+        ])
+
+    def _repair_existing_mfa_runtime(self, language="korean"):
+        lang = str(language or "korean").strip().lower()
+        resolved = self.mfa_path or find_mfa_executable() or ""
+        if not resolved or not os.path.exists(resolved):
+            self._append_log("❌ 복구할 MFA 환경을 찾지 못했습니다.")
+            return False
+        self.mfa_path = resolved
+
+        self._set_status("🔧 MFA Python 도구 점검 중...")
+        if not ensure_mfa_python_packaging_stack(self.mfa_path, callback=self._append_log):
+            self._append_log("❌ MFA Python 패키지 도구 복구 실패")
+            return False
+
+        if lang == "korean":
+            self._set_status("🔧 한국어 MFA 의존성 점검 중...")
+            if not ensure_korean_support(self.mfa_path, callback=self._append_log):
+                self._append_log("❌ 한국어 MFA 의존성 준비 실패")
+                return False
+        elif lang == "japanese":
+            self._set_status("🔧 일본어 MFA 의존성 점검 중...")
+            if not ensure_japanese_support(self.mfa_path, callback=self._append_log):
+                self._append_log("❌ 일본어 MFA 의존성 준비 실패")
+                return False
+
+        self._set_status("🔧 MFA 모델 점검 중...")
+        has_model, msg = check_mfa_model(self.mfa_path, language=lang)
+        if msg:
+            self._append_log(msg)
+        if not has_model:
+            self._append_log("ℹ 현재 언어용 MFA 모델이 없어 자동 다운로드를 시작합니다.")
+            if not download_mfa_model(self.mfa_path, language=lang, callback=self._append_log):
+                self._append_log("❌ MFA 모델 다운로드 실패")
+                return False
+        return True
+
     def _ensure_mfa_ready_for_language(self, language="korean"):
         lang = str(language or "korean").strip().lower()
         if not self.mfa_path or not os.path.exists(self.mfa_path):
@@ -487,23 +557,54 @@ class PipelineActionsMixin:
             )
             self.mfa_path = ""
             return self._install_mfa_runtime(language=lang)
-        if lang == "korean":
-            if not ensure_korean_support(self.mfa_path, callback=self._append_log):
-                self._append_log("❌ 한국어 MFA 의존성 준비 실패")
-                return False
-        elif lang == "japanese":
-            if not ensure_japanese_support(self.mfa_path, callback=self._append_log):
-                self._append_log("❌ 일본어 MFA 의존성 준비 실패")
-                return False
-        has_model, msg = check_mfa_model(self.mfa_path, language=lang)
-        if msg:
-            self._append_log(msg)
-        if not has_model:
-            self._append_log("ℹ 현재 언어용 MFA 모델이 없어 지금 자동 다운로드를 시작합니다.")
-            if not download_mfa_model(self.mfa_path, language=lang, callback=self._append_log):
-                self._append_log("❌ MFA 모델 다운로드 실패")
-                return False
-        return True
+        return self._repair_existing_mfa_runtime(language=lang)
+
+    def _run_mfa_diagnose_repair(self):
+        self._notify_long_install_time("MFA")
+
+        def task():
+            self._set_running(True)
+            lang = self._get_language()
+            lang_label = "일본어" if lang == "japanese" else "한국어"
+            self._set_status("🔍 MFA 진단/복구 중... (시간이 걸릴 수 있습니다)")
+            try:
+                resolved = self.mfa_path or find_mfa_executable() or ""
+                if resolved and os.path.exists(resolved):
+                    self.mfa_path = resolved
+                before = diagnose_mfa_runtime(self.mfa_path or "", language=lang)
+                self._append_log("🔎 MFA 진단 시작")
+                self._append_log(self._format_mfa_diagnosis_summary(before))
+
+                ok = False
+                if not before.get("checks", {}).get("mfa_executable") or before.get("checks", {}).get("python_rebuild_required"):
+                    self._append_log("ℹ MFA 환경이 없거나 재구성이 필요해 새로 설치합니다.")
+                    ok = self._install_mfa_runtime(language=lang)
+                else:
+                    ok = self._repair_existing_mfa_runtime(language=lang)
+
+                after = diagnose_mfa_runtime(self.mfa_path or "", language=lang)
+                summary = (
+                    "[진단 전]\n"
+                    f"{self._format_mfa_diagnosis_summary(before)}\n\n"
+                    "[진단 후]\n"
+                    f"{self._format_mfa_diagnosis_summary(after)}"
+                )
+                self._after_safe(lambda s=summary, ready=after.get("ready", False), ll=lang_label: self._show_copyable_alert(
+                    title=f"MFA 진단/복구 결과 ({ll})",
+                    message=s,
+                    alert_key=f"mfa_diag_repair_{lang}_{'ok' if ready else 'needs_attention'}",
+                ))
+                if ok and after.get("ready"):
+                    self._update_mfa_status(True)
+                    self._set_status("✅ MFA 진단/복구 완료")
+                else:
+                    self._set_status("❌ MFA 진단/복구 미완료")
+            except Exception as e:
+                self._handle_error("MFA 진단/복구", e)
+            finally:
+                self._set_running(False)
+
+        self._run_in_thread(task)
 
     def _run_mfa_setup(self):
         """GUI 안에서 MFA 포터블 환경을 자동 설치합니다."""

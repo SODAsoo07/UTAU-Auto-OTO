@@ -14,9 +14,10 @@ echo   UTAU Auto OTO - MFA Lightweight Environment Setup
 echo   This script only needs to run once.
 echo ====================================================
 echo.
-echo [INFO] Initial setup can take a long time.
-echo        Depending on network speed and PC performance, it may take 10-20 minutes or longer.
-echo        Please do not close the installer while it is working.
+echo [안내] 처음 설치 또는 복구에는 시간이 오래 걸릴 수 있습니다.
+echo        네트워크 속도와 PC 성능에 따라 10-20분, 경우에 따라 그 이상 걸릴 수 있습니다.
+echo        설치 중에는 창을 닫지 말고 기다려 주세요.
+echo        설치 후에는 현재 언어용 MFA 모델 다운로드가 이어질 수 있습니다.
 echo.
 
 set "APP_DIR=%~dp0"
@@ -57,6 +58,8 @@ goto :install_micromamba
 echo [OK] MFA is already installed.
 echo      Path: %MFA_EXE%
 echo.
+call :bootstrap_python_tools
+if errorlevel 1 exit /b 1
 call :install_japanese_support
 if errorlevel 1 exit /b 1
 echo.
@@ -124,6 +127,8 @@ if errorlevel 1 (
 )
 call :ensure_mfa_entrypoint
 if errorlevel 1 exit /b 1
+call :bootstrap_python_tools
+if errorlevel 1 exit /b 1
 
 echo [4/4] Installing Japanese tokenizer dependencies...
 call :install_japanese_support
@@ -148,6 +153,42 @@ echo ====================================================
 echo.
 pause
 exit /b 0
+
+:bootstrap_python_tools
+echo Checking MFA Python package tools...
+if not exist "%ENV_DIR%\python.exe" (
+    echo [FAILED] MFA Python runtime was not found.
+    pause
+    exit /b 1
+)
+"%ENV_DIR%\python.exe" -c "import pip, pkg_resources, wheel" >nul 2>nul
+if not errorlevel 1 (
+    echo [OK] pip/setuptools/wheel are ready.
+    goto :eof
+)
+echo [INFO] Repairing pip/setuptools/wheel...
+"%ENV_DIR%\python.exe" -m ensurepip --upgrade
+if errorlevel 1 (
+    echo [WARN] ensurepip did not complete cleanly. Trying pip repair anyway...
+)
+if exist "%ENV_DIR%\Scripts\pip.exe" (
+    "%ENV_DIR%\Scripts\pip.exe" install --upgrade "setuptools<81" wheel
+) else (
+    "%ENV_DIR%\python.exe" -m pip install --upgrade "setuptools<81" wheel
+)
+if errorlevel 1 (
+    echo [FAILED] pip/setuptools/wheel repair failed.
+    pause
+    exit /b 1
+)
+"%ENV_DIR%\python.exe" -c "import pip, pkg_resources, wheel" >nul 2>nul
+if errorlevel 1 (
+    echo [FAILED] Python package tools are still unavailable after repair.
+    pause
+    exit /b 1
+)
+echo [OK] pip/setuptools/wheel repair complete.
+goto :eof
 
 :install_japanese_support
 echo Checking Japanese tokenizer dependencies...
