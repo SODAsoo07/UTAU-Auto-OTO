@@ -52,6 +52,7 @@ from core.oto_generator import _collect_kr_phone_tier_quality
 from core.oto_generator import _build_kr_cvvc_occurrence_map
 from core.oto_generator import _build_kr_cvvc_vv_occurrence_map
 from core.oto_generator import _build_kr_syllables_from_phone_nuclei
+from core.oto_generator import _clamp_kr_cv_index_to_order
 from core.oto_generator import _extract_kr_cv_targets_from_filename
 from core.oto_generator import _apply_kr_bridge_coherence_to_oto_file
 from core.oto_generator import _refine_kr_bridge_with_adjacent_cv
@@ -355,7 +356,23 @@ class FeatureExtractionTests(unittest.TestCase):
 
     def test_korean_nonforced_occurrence_allows_exact_vowel_fix(self):
         self.assertTrue(_should_allow_kr_exact_vowel_fix("cvvc", None))
-        self.assertTrue(_should_allow_kr_exact_vowel_fix("cvc", 2))
+        self.assertFalse(_should_allow_kr_exact_vowel_fix("cvc", 2))
+
+    def test_korean_cvc_clamps_forward_cv_jump_to_expected_order(self):
+        self.assertEqual(
+            _clamp_kr_cv_index_to_order("cvc", "ga", ["ga", "ga", "gya"], 1, 2),
+            1,
+        )
+
+    def test_korean_cvvc_rejects_soft_forward_cv_fix(self):
+        self.assertEqual(
+            _clamp_kr_cv_index_to_order("cvvc", "kya", ["ka", "kiya"], 0, 1),
+            0,
+        )
+        self.assertEqual(
+            _clamp_kr_cv_index_to_order("cvvc", "ka", ["ka", "kya"], 0, 1),
+            0,
+        )
 
     def test_korean_cv_head_severe_mismatch_allows_exact_vowel_fix(self):
         self.assertTrue(

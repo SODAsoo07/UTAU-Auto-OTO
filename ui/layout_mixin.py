@@ -1,5 +1,7 @@
 import customtkinter as ctk
 
+from core.format_type_utils import normalize_auto_format_value
+
 
 class LayoutMixin:
     def _build_ui(self):
@@ -93,7 +95,7 @@ class LayoutMixin:
         ctk.CTkLabel(row_format, text="형식 지정:", width=120, anchor="w").pack(side="left")
         
         self.auto_format_var = ctk.StringVar(value="자동 감지 (권장)")
-        FORMAT_OPTIONS = ["자동 감지 (권장)", "CV/연단음", "CVVC", "VCV (연속음)"]
+        FORMAT_OPTIONS = self._get_auto_format_options("korean")
         self.format_dropdown = ctk.CTkOptionMenu(
             row_format, values=FORMAT_OPTIONS, variable=self.auto_format_var,
             width=200, command=self._save_config
@@ -246,17 +248,42 @@ class LayoutMixin:
             return 'japanese'
         return 'korean'
 
+    def _get_auto_format_options(self, language=None):
+        lang = language or self._get_language()
+        if lang == "korean":
+            return ["자동 감지 (권장)", "CV/연단음", "CVC", "CVVC", "VCV (연속음)"]
+        return ["자동 감지 (권장)", "CV/연단음", "CVVC", "VCV (연속음)"]
+
+    def _set_auto_format_from_code(self, format_code, language=None):
+        lang = language or self._get_language()
+        values = self._get_auto_format_options(lang)
+        if hasattr(self, "format_dropdown"):
+            self.format_dropdown.configure(values=values)
+        label_map = {
+            "": "자동 감지 (권장)",
+            "cv": "CV/연단음",
+            "cvc": "CVC",
+            "cvvc": "CVVC",
+            "vcv": "VCV (연속음)",
+        }
+        label = label_map.get(str(format_code or "").strip().lower(), "자동 감지 (권장)")
+        if label not in values:
+            label = "CV/연단음" if label == "CVC" and lang != "korean" else "자동 감지 (권장)"
+        self.auto_format_var.set(label)
+
     def _on_language_change(self, value):
         if "Korean" in value:
-            self.lang_info_label.configure(text="한국어 음소(a, k, ga 등) 자동 파싱 및 생성")
+            self.lang_info_label.configure(text="한국어 단위(a, k, ga 등) 에일리어스를 기준으로 생성합니다.")
             self.gen_missing_vowels_checkbox.configure(state="normal")
             if hasattr(self, "ja_alias_style_menu"):
                 self.ja_alias_style_menu.configure(state="disabled")
         else:
-            self.lang_info_label.configure(text="일본어 음소(a, k, ka 등) 자동 파싱 및 생성")
+            self.lang_info_label.configure(text="일본어 단위(a, k, ka 등) 에일리어스를 기준으로 생성합니다.")
             self.gen_missing_vowels_checkbox.configure(state="normal")
             if hasattr(self, "ja_alias_style_menu"):
                 self.ja_alias_style_menu.configure(state="normal")
+        current_code = normalize_auto_format_value(self._get_language(), self.auto_format_var.get())
+        self._set_auto_format_from_code(current_code, self._get_language())
         self._save_config()
 
     def _get_ja_alias_style_code(self):

@@ -30,9 +30,9 @@ def normalize_format_type(language: str, format_type: str) -> str:
     if lang == "korean":
         if fmt.startswith("cvc"):
             return "cvc"
-        if "연단음" in raw or "rentan" in fmt:
+        if "rentan" in fmt or "연단음" in raw:
             return "cv"
-        if fmt in {"mono", "cvsimple", "cv_simple", "cv"}:
+        if "단독음" in raw or fmt in {"mono", "cvsimple", "cv_simple", "cv"}:
             return "cv"
         if fmt.startswith("cvvc"):
             return "cvvc"
@@ -41,7 +41,7 @@ def normalize_format_type(language: str, format_type: str) -> str:
         return fmt
 
     if lang == "japanese":
-        if "rentan" in fmt:
+        if "rentan" in fmt or "연단음" in raw:
             return "cv"
         if fmt in {"mono", "cv", "cvc"}:
             return "cv"
@@ -57,23 +57,27 @@ def normalize_format_type(language: str, format_type: str) -> str:
 def normalize_auto_format_value(language: str, auto_format: str) -> str:
     lang = normalize_language_name(language)
     raw = str(auto_format or "").strip()
-    text = raw.lower()
-    if not text:
+    if not raw:
         return ""
 
     normalized = _normalize_token(raw)
-    if normalized.startswith("auto") or "자동" in raw:
+    if normalized.startswith("auto") or "자동감지" in raw:
         return ""
     if normalized.startswith("cvvc"):
         return "cvvc"
     if normalized.startswith("vcv"):
         return "vcv"
 
-    # GUI/legacy labels keep Korean CV and rentan in one bucket.
-    if normalized.startswith("cvc/") or normalized.startswith("cvc("):
-        return "cv"
-    if normalized.startswith("cv/") or normalized == "cv" or normalized.startswith("cv("):
-        return "cv"
+    if lang == "korean":
+        if normalized == "cvc" or normalized.startswith("cvc/") or normalized.startswith("cvc("):
+            return "cvc"
+        if normalized.startswith("cv/") or normalized == "cv" or normalized.startswith("cv("):
+            return "cv"
+    else:
+        if normalized.startswith("cvc/") or normalized.startswith("cvc(") or normalized == "cvc":
+            return "cv"
+        if normalized.startswith("cv/") or normalized == "cv" or normalized.startswith("cv("):
+            return "cv"
 
     return normalize_format_type(lang, raw)
 

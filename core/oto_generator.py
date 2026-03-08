@@ -48,9 +48,11 @@ from core.kr_oto_rules import (
 from core.kr_oto_mapping import (
     _build_kr_cvvc_occurrence_map,
     _build_kr_cvvc_vv_occurrence_map,
+    _clamp_kr_cv_index_to_order,
     _extract_cv_targets_from_lines,
     _extract_kr_cv_targets_from_filename,
     _find_kr_cv_vowel_match_index,
+    _is_kr_order_locked_cv_format,
     _resolve_kr_cvvc_occurrence_index,
     _resolve_kr_cvvc_vv_index,
     _score_kr_syllable_mapping,
@@ -1602,7 +1604,7 @@ def _apply_soft_mel_offset_cutoff_guard(
     # 멜 offset soft guard가 추가로 들어가면 단모음/활음 구분이 약한 파일에서
     # offset이 공백 쪽으로 과하게 끌리는 경향이 커진다.
     skip_offset_soft_guard = (alias_type == "cv_head") or (
-        str(file_format).strip().lower() == "cvvc" and alias_type in {"cv", "cv_head"}
+        _is_kr_order_locked_cv_format(file_format) and alias_type in {"cv", "cv_head"}
     )
     if not skip_offset_soft_guard and not low_energy_voiced:
         off_silent = bool(silence_mask[off_idx])
@@ -2482,8 +2484,9 @@ def generate_oto(
             romaji_syllables = [s.get('roman_cv') or s.get('roman', '') for s in syllables_info]
             current_w_idx = 0
             cv_seq_idx = 0
-            kr_cvvc_occurrence_source = filename_cv_targets if (file_format == "cvvc" and filename_cv_targets) else syllables_info
-            kr_cvvc_occurrence_map = _build_kr_cvvc_occurrence_map(kr_cvvc_occurrence_source) if file_format == "cvvc" else None
+            kr_order_locked_format = _is_kr_order_locked_cv_format(file_format)
+            kr_cvvc_occurrence_source = filename_cv_targets if (kr_order_locked_format and filename_cv_targets) else syllables_info
+            kr_cvvc_occurrence_map = _build_kr_cvvc_occurrence_map(kr_cvvc_occurrence_source) if kr_order_locked_format else None
             kr_cvvc_occurrence_state = {}
             kr_cvvc_vv_occurrence_map = _build_kr_cvvc_vv_occurrence_map(kr_cvvc_occurrence_source) if file_format == "cvvc" else None
             kr_cvvc_vv_occurrence_state = {}
@@ -2995,6 +2998,23 @@ def generate_oto(
                                     )
                                 selected_w_idx = fixed_idx
                                 cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
+                    ordered_idx = _clamp_kr_cv_index_to_order(
+                        file_format,
+                        target_clean,
+                        romaji_syllables,
+                        expected_cv_idx,
+                        selected_w_idx,
+                    )
+                    if ordered_idx != selected_w_idx:
+                        if kr_mapping_debug_reason_logging:
+                            log(
+                                f"🛡️ {fname}: KR CV 순서 고정 "
+                                f"({selected_w_idx + 1}->{ordered_idx + 1}, {alias})"
+                            )
+                        row_jump_blocked = 1
+                        row_mapping_confidence = max(0.0, row_mapping_confidence - 0.12)
+                        selected_w_idx = ordered_idx
+                        cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
                     current_w_idx = max(current_w_idx, selected_w_idx)
                     selected_w_idx, curr_phones, c_start, c_end, n_start, n_end = _prepare_cv_bounds_from_syllable(
                         syllables_info, selected_w_idx

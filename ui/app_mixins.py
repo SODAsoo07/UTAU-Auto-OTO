@@ -14,6 +14,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from core.format_type_utils import normalize_auto_format_value
 from core.log_events import classify_log_message, log_with_event
 from core.mfa_runner import ALERT_MFA_PERMISSION_DENIED, ALERT_MSVC_REQUIRED
 from core.oto_validator import validate_oto_timing
@@ -590,20 +591,18 @@ class ConfigMixin:
             self.out_entry.delete(0, "end")
             self.out_entry.insert(0, config.get("out_path", ""))
 
-            saved_auto = config.get("auto_format", "?? ?? (??)")
-            auto_map = {
-                "CV (???)": "CV/???",
-                "CV/???": "CV/???",
-                "CVC (???)": "CV/???",
-                "CVC (???)": "CV/???",
-                "CVC/???": "CV/???",
-                "CVVC (??)": "CVVC",
-                "VCV (???)": "VCV (???)",
-            }
-            saved_auto = auto_map.get(saved_auto, saved_auto)
-            valid_auto_formats = {"?? ?? (??)", "CV/???", "CVVC", "VCV (???)"}
-            if saved_auto in valid_auto_formats:
-                self.auto_format_var.set(saved_auto)
+            if "language" in config and hasattr(self, "lang_var"):
+                saved_language = str(config.get("language", "") or "").strip()
+                if "Japanese" in saved_language:
+                    self.lang_var.set("Japanese (日本語)")
+                elif "Korean" in saved_language:
+                    self.lang_var.set("Korean (한국어)")
+
+            lang = self._get_language() if hasattr(self, "_get_language") else "korean"
+            saved_auto = config.get("auto_format", "자동 감지 (권장)")
+            saved_auto_code = normalize_auto_format_value(lang, saved_auto)
+            if hasattr(self, "_set_auto_format_from_code"):
+                self._set_auto_format_from_code(saved_auto_code, lang)
             if "ja_alias_style" in config:
                 saved_style = config.get("ja_alias_style", "원본 그대로")
                 if saved_style in {"원본 그대로", "히라가나", "로마자"}:

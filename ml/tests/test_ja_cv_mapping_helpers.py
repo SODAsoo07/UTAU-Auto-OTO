@@ -8,6 +8,7 @@ if ROOT not in sys.path:
 
 from core.ja_oto_generator import (
     _build_ja_mapping_trace_record,
+    _clamp_ja_cv_index_to_order,
     _find_ja_cv_vowel_match_index,
     _should_allow_ja_soft_forward_shift,
 )
@@ -64,6 +65,42 @@ class JaCvMappingHelpersTests(unittest.TestCase):
         self.assertEqual(row["delta"], 1)
         self.assertEqual(row["expected_match_level"], 1)
         self.assertGreaterEqual(row["mapped_match_level"], 2)
+
+    def test_cvvc_clamp_blocks_wrong_forward_shift(self):
+        syllables_info = [
+            {"roman": "ka", "phones": [1]},
+            {"roman": "kya", "phones": [1]},
+        ]
+        self.assertEqual(
+            _clamp_ja_cv_index_to_order(
+                "ka",
+                0,
+                1,
+                syllables_info,
+                format_type="cvvc",
+                filename_order_locked=False,
+                mapping_tier="high",
+            ),
+            0,
+        )
+
+    def test_cvvc_clamp_keeps_inserted_vowel_forward_fix(self):
+        syllables_info = [
+            {"roman": "ka", "phones": [1]},
+            {"roman": "kiya", "phones": [1]},
+        ]
+        self.assertEqual(
+            _clamp_ja_cv_index_to_order(
+                "kya",
+                0,
+                1,
+                syllables_info,
+                format_type="cvvc",
+                filename_order_locked=True,
+                mapping_tier="mid",
+            ),
+            1,
+        )
 
 
 if __name__ == "__main__":

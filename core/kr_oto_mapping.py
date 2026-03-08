@@ -119,6 +119,11 @@ def _build_kr_cvvc_occurrence_map(token_source):
     return occ
 
 
+def _is_kr_order_locked_cv_format(file_format):
+    fmt = str(file_format or "").strip().lower()
+    return fmt in {"cvvc", "cvc"}
+
+
 def _resolve_kr_cvvc_occurrence_index(alias, alias_type, occurrence_map, occurrence_state):
     """한국어 CVVC에서 같은 CV 토큰의 등장 순서대로 CV/CV_HEAD를 직접 매핑합니다."""
     if alias_type not in {"cv", "cv_head"}:
@@ -243,7 +248,7 @@ def _should_allow_kr_exact_vowel_fix(
     1칸 내 재탐색 보정을 허용합니다.
     """
     fmt = str(file_format or "").strip().lower()
-    if fmt == "cvvc" and forced_selected_idx is not None:
+    if _is_kr_order_locked_cv_format(fmt) and forced_selected_idx is not None:
         a_type = str(alias_type or "").strip().lower()
         if a_type == "cv_head" and bool(severe_vowel_mismatch):
             return True
@@ -281,7 +286,7 @@ def _score_kr_syllable_mapping(candidate_infos, cv_targets):
 
 
 def _should_prefer_alias_based_syllables(file_format, used_words_based, base_score, alt_score):
-    """한국어 음절열 후보 중 alias 기반 결과를 채택할지 결정합니다."""
+    """한국어 음절열 후보 중 alias/filename 기반 결과를 채택할지 결정합니다."""
     fmt = str(file_format or "").strip().lower()
     base_score = float(base_score)
     alt_score = float(alt_score)
@@ -290,9 +295,10 @@ def _should_prefer_alias_based_syllables(file_format, used_words_based, base_sco
         return alt_score >= base_score
 
     if fmt == "cvvc":
-        # 한국어 CVVC는 words tier보다 alias/filename 순서가 더 안정적인 경우가 많다.
-        # alias 기반이 완전히 붕괴한 경우만 제외하고 기본적으로 alias 순서를 우선한다.
         return alt_score >= 40.0
+
+    if fmt == "cvc":
+        return alt_score >= 60.0 and alt_score >= (base_score - 2.0)
 
     allow_alias_override = True
     if used_words_based and base_score >= 58.0:
@@ -300,14 +306,52 @@ def _should_prefer_alias_based_syllables(file_format, used_words_based, base_sco
     return allow_alias_override and base_score < 66.0 and alt_score >= 70.0 and alt_score >= (base_score + 8.0)
 
 
+def _clamp_kr_cv_index_to_order(
+    file_format,
+    target_clean,
+    romaji_syllables,
+    expected_idx,
+    mapped_idx,
+):
+    fmt = str(file_format or "").strip().lower()
+    if not _is_kr_order_locked_cv_format(fmt):
+        return int(mapped_idx)
+    if not romaji_syllables:
+        return int(expected_idx)
+
+    e = max(0, min(int(expected_idx), len(romaji_syllables) - 1))
+    m = max(0, min(int(mapped_idx), len(romaji_syllables) - 1))
+    if m <= e:
+        return e
+
+    target_norm = _normalize_cv_match_token(target_clean)
+    expected_tok = _normalize_cv_match_token(romaji_syllables[e])
+    mapped_tok = _normalize_cv_match_token(romaji_syllables[m])
+    expected_score = float(_cv_match_score(target_norm, expected_tok))
+    mapped_score = float(_cv_match_score(target_norm, mapped_tok))
+
+    if fmt == "cvc":
+        return e
+
+    if m > (e + 1):
+        return e
+    if mapped_tok == target_norm and expected_tok != target_norm:
+        return m
+    if mapped_score >= max(expected_score + 18.0, 92.0):
+        return m
+    return e
+
+
 __all__ = [
     "_alias_to_cv_target",
     "_build_kr_cvvc_occurrence_map",
     "_build_kr_cvvc_vv_occurrence_map",
+    "_clamp_kr_cv_index_to_order",
     "_extract_cv_targets_from_lines",
     "_extract_kr_cv_targets_from_filename",
     "_extract_kr_vv_pair_key",
     "_find_kr_cv_vowel_match_index",
+    "_is_kr_order_locked_cv_format",
     "_iter_kr_cvvc_tokens",
     "_resolve_kr_cvvc_occurrence_index",
     "_resolve_kr_cvvc_vv_index",

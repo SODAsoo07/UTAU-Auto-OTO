@@ -1045,6 +1045,55 @@ def _should_allow_ja_soft_forward_shift(target_tok, expected_tok, mapped_tok):
     return False
 
 
+def _clamp_ja_cv_index_to_order(
+    target_tok,
+    expected_idx,
+    mapped_idx,
+    syllables_info,
+    *,
+    format_type,
+    filename_order_locked,
+    mapping_tier,
+):
+    if not syllables_info:
+        return int(expected_idx)
+    fmt = str(format_type or "").strip().lower()
+    if fmt not in {"cvvc", "cv"}:
+        return int(mapped_idx)
+
+    e = max(0, min(int(expected_idx), len(syllables_info) - 1))
+    m = max(0, min(int(mapped_idx), len(syllables_info) - 1))
+    if m <= e:
+        return e if m < e else m
+
+    target_norm = _normalize_ja_syllable_token(target_tok)
+    expected_norm = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[e]))
+    mapped_norm = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[m]))
+    expected_level = int(_ja_soft_cv_match_level(target_norm, expected_norm) or 0) if target_norm else 0
+    mapped_level = int(_ja_soft_cv_match_level(target_norm, mapped_norm) or 0) if target_norm else 0
+
+    if fmt == "cv":
+        return min(m, e + 1)
+
+    if m > (e + 1):
+        return e
+    if not target_norm:
+        return e
+
+    allow_forward = bool(
+        m == (e + 1)
+        and _should_allow_ja_soft_forward_shift(target_norm, expected_norm, mapped_norm)
+    )
+    if allow_forward:
+        if mapped_norm == target_norm and expected_norm != target_norm:
+            return m
+        if mapped_level >= 2 and expected_level <= 1:
+            return m
+        if not filename_order_locked and str(mapping_tier or "").strip().lower() == "high" and mapped_level >= 3:
+            return m
+    return e
+
+
 def _build_ja_mapping_trace_record(
     *,
     fname,
@@ -3635,6 +3684,21 @@ def generate_ja_oto(
                                     mapped_idx = expected_idx
                             elif mapped_idx > (expected_idx + 1):
                                 mapped_idx = expected_idx + 1
+                        ordered_idx = _clamp_ja_cv_index_to_order(
+                            target_tok,
+                            expected_idx,
+                            mapped_idx,
+                            syllables_info,
+                            format_type=format_type,
+                            filename_order_locked=filename_order_locked,
+                            mapping_tier=mapping_tier,
+                        )
+                        if ordered_idx != mapped_idx:
+                            log(
+                                f"🛡️ {fname}: CV_HEAD 순서 고정 "
+                                f"({mapped_idx + 1}->{ordered_idx + 1}, {alias})"
+                            )
+                            mapped_idx = ordered_idx
                         if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
                             log(f"🧭 {fname}: CV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
                     expected_tok_trace = _syllable_info_token(syllables_info[expected_idx])
@@ -3939,6 +4003,21 @@ def generate_ja_oto(
                                     mapped_idx = expected_idx
                             elif mapped_idx > (expected_idx + 1):
                                 mapped_idx = expected_idx + 1
+                        ordered_idx = _clamp_ja_cv_index_to_order(
+                            target_tok,
+                            expected_idx,
+                            mapped_idx,
+                            syllables_info,
+                            format_type=format_type,
+                            filename_order_locked=filename_order_locked,
+                            mapping_tier=mapping_tier,
+                        )
+                        if ordered_idx != mapped_idx:
+                            log(
+                                f"🛡️ {fname}: CV 순서 고정 "
+                                f"({mapped_idx + 1}->{ordered_idx + 1}, {alias})"
+                            )
+                            mapped_idx = ordered_idx
                         if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
                             log(f"🧭 {fname}: CV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
                     expected_tok_trace = _syllable_info_token(syllables_info[expected_idx])

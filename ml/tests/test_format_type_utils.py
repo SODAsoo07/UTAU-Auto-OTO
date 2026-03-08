@@ -29,13 +29,15 @@ class FormatTypeUtilsTests(unittest.TestCase):
         self.assertEqual(normalize_format_type("japanese", "cvc"), "cv")
         self.assertEqual(normalize_format_type("japanese", "CV_and_Rentan"), "cv")
 
-    def test_normalize_auto_format_value_keeps_gui_cv_bucket(self):
+    def test_normalize_auto_format_value_keeps_korean_cvc_bucket(self):
         self.assertEqual(normalize_auto_format_value("korean", "cvc"), "cvc")
         self.assertEqual(normalize_auto_format_value("korean", "CV (단독음)"), "cv")
         self.assertEqual(normalize_auto_format_value("korean", "CV/연단음"), "cv")
-        self.assertEqual(normalize_auto_format_value("korean", "CVC/연단음"), "cv")
+        self.assertEqual(normalize_auto_format_value("korean", "CVC"), "cvc")
+        self.assertEqual(normalize_auto_format_value("korean", "CVC/연단음"), "cvc")
         self.assertEqual(normalize_auto_format_value("japanese", "CV (단독음)"), "cv")
         self.assertEqual(normalize_auto_format_value("japanese", "CV/연단음"), "cv")
+        self.assertEqual(normalize_auto_format_value("japanese", "CVC"), "cv")
         self.assertEqual(normalize_auto_format_value("japanese", "CVC/연단음"), "cv")
 
 
