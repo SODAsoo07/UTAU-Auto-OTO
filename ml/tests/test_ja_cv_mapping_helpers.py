@@ -26,6 +26,7 @@ class JaCvMappingHelpersTests(unittest.TestCase):
     def test_should_allow_soft_forward_shift_only_when_mapped_is_better(self):
         self.assertTrue(_should_allow_ja_soft_forward_shift("kya", "ka", "kiya"))
         self.assertFalse(_should_allow_ja_soft_forward_shift("ka", "ka", "kya"))
+        self.assertFalse(_should_allow_ja_soft_forward_shift("n", "na", "n"))
 
     def test_find_cv_vowel_match_index_prefers_inserted_vowel_candidate(self):
         syllables_info = [

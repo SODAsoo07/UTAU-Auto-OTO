@@ -705,6 +705,28 @@ def _ja_onset_class(onset):
     return 'other'
 
 
+@lru_cache(maxsize=65536)
+def _ja_special_mora_class(token):
+    raw = str(token or "").strip().lower()
+    norm = _normalize_ja_syllable_token(token)
+    if not raw and not norm:
+        return "plain"
+    if norm in {"n", "nn", "xn", "m"} or raw in {"n", "nn", "xn", "m"}:
+        return "nasal"
+    if raw in {"q", "cl", "xtu", "xtsu", "ltsu", "ltu"} or norm in {"q", "cl", "xtu", "xtsu", "ltsu", "ltu"}:
+        return "geminate"
+    if raw in {"-", "ー", "long"}:
+        return "long"
+    onset, vowel = split_ja_romaji_syllable(norm)
+    if onset and any(ch in {"y", "w"} for ch in onset[1:]):
+        return "youon"
+    if norm != raw and _ja_soft_cv_match_level(norm, raw) >= 2:
+        return "inserted"
+    if (not onset) and vowel in JA_VOWELS and raw.endswith(vowel * 2):
+        return "long"
+    return "plain"
+
+
 def _select_vcv_syllable_index(alias, expected_idx, syllables_info):
     if not syllables_info:
         return 0
@@ -797,6 +819,7 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
     _t_onset, target_vowel = split_ja_romaji_syllable(target)
     target_tail = _ja_syllable_tail(target)
     target_cls = _ja_onset_class(target_onset)
+    target_special = _ja_special_mora_class(target)
     dist_penalty = 7 if target_cls in {'nasal', 'voiced'} else 6
     expected_soft_match = _ja_soft_cv_match_level(target, _syllable_info_token(syllables_info[e]))
     def _score_idx(i):
@@ -805,6 +828,7 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
         _co, cand_vowel = split_ja_romaji_syllable(cand)
         cand_tail = _ja_syllable_tail(cand)
         cand_cls = _ja_onset_class(cand_onset)
+        cand_special = _ja_special_mora_class(cand)
         soft_match = _ja_soft_cv_match_level(target, cand)
         score = _vcv_syllable_match_score(target, cand) - abs(i - e) * dist_penalty
         if target_cls == 'nasal' and cand_cls != 'nasal':
@@ -834,6 +858,15 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
             score -= 8
         elif target_tail and cand_tail and target_tail != cand_tail:
             score -= 12
+        if target_special in {"nasal", "geminate", "long"} and cand_special != target_special:
+            score -= 28
+        elif target_special == "plain" and cand_special in {"nasal", "geminate", "long"}:
+            score -= 18
+        elif target_special in {"youon", "inserted"}:
+            if cand_special in {"youon", "inserted"}:
+                score += 8
+            elif soft_match < 2:
+                score -= 16
         return score
     expected_score = _score_idx(e)
     best_key = (-10**9, -10**9, -10**9, -10**9)
@@ -858,6 +891,8 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
         best_tail = _ja_syllable_tail(best_tok)
         expected_soft = _ja_soft_cv_match_level(target, expected_tok)
         best_soft = _ja_soft_cv_match_level(target, best_tok)
+        expected_special = _ja_special_mora_class(expected_tok)
+        best_special = _ja_special_mora_class(best_tok)
         if best_idx > e and best_gain < hold_margin:
             if not (best_idx == (e + 1) and best_soft >= 2 and best_soft > expected_soft):
                 return e
@@ -868,5 +903,13 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
                 return e
         if (not target_tail) and best_tail and not expected_tail and best_gain < 22:
             return e
+        if target_special in {"nasal", "geminate", "long"}:
+            if best_special != target_special:
+                return e
+        elif target_special == "plain" and best_special in {"nasal", "geminate", "long"}:
+            return e
+        elif target_special in {"youon", "inserted"}:
+            if expected_special in {"youon", "inserted"} and best_special not in {"youon", "inserted"}:
+                return e
         return best_idx
     return e

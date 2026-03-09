@@ -349,6 +349,7 @@ from core.ja_oto_mapping import (
     _extract_ja_onset_token,
     _extract_vcv_target_syllable,
     _ja_is_n_bridge_alias,
+    _ja_special_mora_class,
     _ja_soft_cv_match_level,
     _ja_syllable_tail,
     _normalize_ja_syllable_token,
@@ -1036,8 +1037,20 @@ def _should_allow_ja_soft_forward_shift(target_tok, expected_tok, mapped_tok):
     mapped_norm = _normalize_ja_syllable_token(mapped_tok)
     if not target_norm or not mapped_norm:
         return False
+    target_special = _ja_special_mora_class(target_tok)
+    expected_special = _ja_special_mora_class(expected_tok)
+    mapped_special = _ja_special_mora_class(mapped_tok)
+    if target_special in {"nasal", "geminate", "long"}:
+        return False
+    if target_special == "plain" and mapped_special in {"nasal", "geminate", "long"}:
+        return False
     mapped_level = int(_ja_soft_cv_match_level(target_norm, mapped_norm) or 0)
     expected_level = int(_ja_soft_cv_match_level(target_norm, expected_norm) or 0)
+    if target_special in {"youon", "inserted"}:
+        if mapped_special not in {"youon", "inserted"} and mapped_level < 3:
+            return False
+        if expected_special in {"youon", "inserted"} and mapped_special not in {"youon", "inserted"}:
+            return False
     if mapped_level >= 3 and expected_level < 3:
         return True
     if mapped_level >= 2 and expected_level <= 1:
@@ -2663,6 +2676,9 @@ def generate_ja_oto(
             effective_end_ms = loop_prep.effective_end_ms
             phone_spans_ms = loop_prep.phone_spans_ms
             conf_th = loop_prep.conf_th
+            textgrid_trust_score = float(loop_prep.textgrid_trust_score or 0.0)
+            textgrid_trust_tier = str(loop_prep.textgrid_trust_tier or "low")
+            prefer_filename_sequence = bool(loop_prep.prefer_filename_sequence)
             spn_ratio = float(phone_quality.get("spn_ratio_in_phone_tier", 0.0) or 0.0)
 
             post_ctx = build_ja_postprocess_context(
@@ -2959,6 +2975,10 @@ def generate_ja_oto(
                 words_align_score=(selected_candidate.get("words_align_score") if selected_candidate else None),
                 words_tier_confidence=words_tier_confidence,
             )
+            if prefer_filename_sequence:
+                mapping_confidence_base = min(float(mapping_confidence_base), max(0.0, min(1.0, textgrid_trust_score + 0.04)))
+            else:
+                mapping_confidence_base = min(float(mapping_confidence_base), max(0.0, min(1.0, textgrid_trust_score + 0.10)))
             if mapping_confidence_base >= (conf_th + 0.12):
                 mapping_tier = "high"
             elif mapping_confidence_base >= conf_th:
@@ -2967,7 +2987,11 @@ def generate_ja_oto(
                 mapping_tier = "low"
 
             # 일본어 CVVC/CV는 저신뢰일 때 파일명 순서를 기준 축으로 고정.
-            if format_type in {"cvvc", "cv"} and mapping_tier == "low" and (not filename_order_locked):
+            if (
+                format_type in {"cvvc", "cv"}
+                and (mapping_tier == "low" or prefer_filename_sequence)
+                and (not filename_order_locked)
+            ):
                 fallback_candidate = candidate_by_name.get("filename_linear_fallback") or candidate_by_name.get("filename_token")
                 if fallback_candidate is not None and fallback_candidate is not selected_candidate:
                     selected_candidate = fallback_candidate
@@ -2993,6 +3017,10 @@ def generate_ja_oto(
                         words_align_score=selected_candidate.get("words_align_score"),
                         words_tier_confidence=words_tier_confidence,
                     )
+                    mapping_confidence_base = min(
+                        float(mapping_confidence_base),
+                        max(0.0, min(1.0, textgrid_trust_score + 0.04)),
+                    )
                     if mapping_confidence_base >= (conf_th + 0.12):
                         mapping_tier = "high"
                     elif mapping_confidence_base >= conf_th:
@@ -3000,7 +3028,8 @@ def generate_ja_oto(
                     else:
                         mapping_tier = "low"
                     log(
-                        f"🧭 {fname}: 일본어 매핑 저신뢰(conf={mapping_confidence_base:.2f}) "
+                        f"🧭 {fname}: 일본어 TextGrid 신뢰도 {textgrid_trust_tier.upper()} "
+                        f"(conf={mapping_confidence_base:.2f}, trust={textgrid_trust_score:.2f}) "
                         f"→ 파일명 기준 매핑 고정"
                     )
 

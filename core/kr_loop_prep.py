@@ -13,6 +13,7 @@ class KrLoopPrepResult:
     ph_intervals: list = field(default_factory=list)
     wd_intervals: list = field(default_factory=list)
     alias_names: list[str] = field(default_factory=list)
+    detected_format: str = ""
     file_format: str = ""
     file_mapping_conf_th: float = 0.0
     is_vc_only: bool = False
@@ -25,9 +26,62 @@ class KrLoopPrepResult:
     low_quality_reasons: list[str] = field(default_factory=list)
     low_phone_quality: bool = False
     force_words_phone_fill: bool = False
+    textgrid_trust_score: float = 0.0
+    textgrid_trust_tier: str = "low"
+    prefer_filename_sequence: bool = False
     timeline_start_ms: float = 0.0
     timeline_end_ms: float = 0.0
     wav_duration_ms: float = 0.0
+
+
+def _estimate_kr_textgrid_trust(
+    *,
+    phone_quality: dict[str, object],
+    filename_cv_targets: Sequence[str],
+    cv_targets: Sequence[str],
+    wd_intervals: Sequence,
+    file_format: str,
+) -> tuple[float, str]:
+    pq = phone_quality or {}
+    expected = int(max(1, pq.get("expected_syllables", 0) or 0))
+    spn_ratio = float(pq.get("spn_ratio_in_phone_tier", 0.0) or 0.0)
+    ratio_vs_expected = float(pq.get("phones_vs_expected_syllables_ratio", 0.0) or 0.0)
+    known_vowel_count = float(pq.get("known_vowel_phone_count", 0.0) or 0.0)
+    low_reasons = set(pq.get("low_confidence_reasons", []) or [])
+
+    conf = 1.0
+    conf -= min(spn_ratio * 0.60, 0.50)
+    conf -= min(abs(1.0 - ratio_vs_expected) * 0.30, 0.30)
+    conf += min((known_vowel_count / float(expected)) * 0.16, 0.16)
+
+    filename_count = len(filename_cv_targets or [])
+    alias_count = len(cv_targets or [])
+    words_count = len(wd_intervals or [])
+    if filename_count:
+        if words_count:
+            conf -= min(abs(words_count - filename_count) / float(max(filename_count, 1)) * 0.18, 0.18)
+        if alias_count:
+            conf -= min(abs(alias_count - filename_count) / float(max(filename_count, 1)) * 0.14, 0.14)
+        if file_format in {"cvc", "cvvc"}:
+            conf += 0.05
+    elif max(alias_count, words_count) >= 2:
+        conf -= 0.08
+
+    if "insufficient_phones" in low_reasons:
+        conf -= 0.16
+    if "insufficient_vowel_phones" in low_reasons:
+        conf -= 0.12
+    if "spn_heavy" in low_reasons:
+        conf -= 0.22
+
+    conf = max(0.0, min(1.0, conf))
+    if conf >= 0.76:
+        tier = "high"
+    elif conf >= 0.58:
+        tier = "mid"
+    else:
+        tier = "low"
+    return float(conf), tier
 
 
 def prepare_kr_loop_state(
@@ -51,6 +105,7 @@ def prepare_kr_loop_state(
     extract_cv_targets_from_filename_fn: Callable[[str], list],
     collect_phone_quality_fn: Callable[..., dict],
     resolve_mapping_conf_threshold_fn: Callable[..., float],
+    preferred_format: str | None = None,
 ) -> KrLoopPrepResult:
     result = KrLoopPrepResult(wav_duration_ms=float(wav_duration_ms or 0.0))
 
@@ -97,7 +152,11 @@ def prepare_kr_loop_state(
         result.status = "no_valid_alias"
         return result
 
-    result.file_format = detect_alias_format_fn(result.alias_names, custom_map)
+    result.detected_format = detect_alias_format_fn(result.alias_names, custom_map)
+    result.file_format = result.detected_format
+    pref = str(preferred_format or "").strip().lower()
+    if pref in {"cvc", "cvvc"} and result.detected_format == "cv":
+        result.file_format = pref
     debug_log_fn(f"처리: {real_wav_name}: 형식 감지 -> {result.file_format.upper()}")
     result.file_mapping_conf_th = float(
         resolve_mapping_conf_threshold_fn(
@@ -129,6 +188,23 @@ def prepare_kr_loop_state(
         result.low_quality_reasons.append("spn_heavy")
     result.low_quality_reasons = sorted(set(result.low_quality_reasons))
     result.low_phone_quality = bool(result.low_quality_reasons)
+    result.textgrid_trust_score, result.textgrid_trust_tier = _estimate_kr_textgrid_trust(
+        phone_quality=result.phone_quality,
+        filename_cv_targets=result.filename_cv_targets,
+        cv_targets=result.cv_targets,
+        wd_intervals=result.wd_intervals,
+        file_format=result.file_format,
+    )
+    result.prefer_filename_sequence = bool(
+        result.file_format in {"cvc", "cvvc"}
+        and result.filename_cv_targets
+        and (
+            result.textgrid_trust_tier == "low"
+            or (result.textgrid_trust_tier == "mid" and result.low_phone_quality)
+        )
+    )
+    if result.prefer_filename_sequence:
+        result.targets_for_build = list(result.filename_cv_targets)
     result.force_words_phone_fill = bool(
         kr_mapping_words_fallback_enabled and result.low_phone_quality and result.wd_intervals
     )

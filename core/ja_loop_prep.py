@@ -30,6 +30,59 @@ class JaLoopPrepResult:
     boundary_points_ms: list[float] = field(default_factory=list)
     phone_spans_ms: list[tuple[float, float]] = field(default_factory=list)
     conf_th: float = 0.0
+    textgrid_trust_score: float = 0.0
+    textgrid_trust_tier: str = "low"
+    prefer_filename_sequence: bool = False
+
+
+def _estimate_ja_textgrid_trust(
+    *,
+    phone_quality: dict[str, object],
+    filename_syllables: Sequence[str],
+    cv_targets: Sequence[str],
+    wd_intervals: Sequence,
+    format_type: str,
+) -> tuple[float, str]:
+    pq = phone_quality or {}
+    expected = int(max(1, pq.get("expected_syllables", 0) or 0))
+    spn_ratio = float(pq.get("spn_ratio_in_phone_tier", 0.0) or 0.0)
+    ratio_vs_expected = float(pq.get("phones_vs_expected_syllables_ratio", 0.0) or 0.0)
+    known_vowel_count = float(pq.get("known_vowel_phone_count", 0.0) or 0.0)
+    low_reasons = set(pq.get("low_confidence_reasons", []) or [])
+
+    conf = 1.0
+    conf -= min(spn_ratio * 0.58, 0.46)
+    conf -= min(abs(1.0 - ratio_vs_expected) * 0.28, 0.28)
+    conf += min((known_vowel_count / float(expected)) * 0.18, 0.18)
+
+    filename_count = len(filename_syllables or [])
+    alias_count = len(cv_targets or [])
+    words_count = len(wd_intervals or [])
+    if filename_count:
+        if words_count:
+            conf -= min(abs(words_count - filename_count) / float(max(filename_count, 1)) * 0.18, 0.18)
+        if alias_count:
+            conf -= min(abs(alias_count - filename_count) / float(max(filename_count, 1)) * 0.12, 0.12)
+        if str(format_type or "").strip().lower() in {"cvvc", "cv"}:
+            conf += 0.06
+    elif max(alias_count, words_count) >= 2:
+        conf -= 0.08
+
+    if "insufficient_phones" in low_reasons:
+        conf -= 0.14
+    if "insufficient_vowel_phones" in low_reasons:
+        conf -= 0.10
+    if "spn_heavy" in low_reasons:
+        conf -= 0.22
+
+    conf = max(0.0, min(1.0, conf))
+    if conf >= 0.76:
+        tier = "high"
+    elif conf >= 0.58:
+        tier = "mid"
+    else:
+        tier = "low"
+    return float(conf), tier
 
 
 def prepare_ja_loop_state(
@@ -109,6 +162,21 @@ def prepare_ja_loop_state(
         result.low_quality_reasons.append("spn_heavy")
     result.low_quality_reasons = sorted(set(result.low_quality_reasons))
     result.low_phone_quality = bool(result.low_quality_reasons)
+    result.textgrid_trust_score, result.textgrid_trust_tier = _estimate_ja_textgrid_trust(
+        phone_quality=result.phone_quality,
+        filename_syllables=result.filename_syllables,
+        cv_targets=result.cv_targets,
+        wd_intervals=result.wd_intervals,
+        format_type=result.format_type,
+    )
+    result.prefer_filename_sequence = bool(
+        result.format_type in {"cvvc", "cv"}
+        and result.filename_syllables
+        and (
+            result.textgrid_trust_tier == "low"
+            or (result.textgrid_trust_tier == "mid" and result.low_phone_quality)
+        )
+    )
 
     if (
         result.format_type in {"vcv", "cvvc", "cv"}

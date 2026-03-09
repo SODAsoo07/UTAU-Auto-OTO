@@ -2305,6 +2305,7 @@ def generate_oto(
                 extract_cv_targets_from_filename_fn=_extract_kr_cv_targets_from_filename,
                 collect_phone_quality_fn=_collect_kr_phone_tier_quality,
                 resolve_mapping_conf_threshold_fn=_resolve_kr_mapping_conf_threshold,
+                preferred_format=auto_gen_format,
             )
             if loop_prep.status == "empty_intervals":
                 log(f"경고: {fname}: 유효한 음소 구간이 없어 원본 라인을 유지합니다.")
@@ -2333,6 +2334,9 @@ def generate_oto(
             low_quality_reasons = loop_prep.low_quality_reasons
             low_phone_quality = loop_prep.low_phone_quality
             force_words_phone_fill = loop_prep.force_words_phone_fill
+            textgrid_trust_score = float(loop_prep.textgrid_trust_score or 0.0)
+            textgrid_trust_tier = str(loop_prep.textgrid_trust_tier or "low")
+            prefer_filename_sequence = bool(loop_prep.prefer_filename_sequence)
             spn_ratio = float(phone_quality.get("spn_ratio_in_phone_tier", 0.0))
 
             if try_handle_kr_single_vowel_file(
@@ -2388,7 +2392,16 @@ def generate_oto(
                 used_words_based = len(syllables_info) > 0
 
             alias_based = _build_kr_syllables_from_phone_nuclei(ph_intervals, targets_for_build) if targets_for_build else None
-            if syllables_info and any(len(s.get('phones') or []) == 0 for s in syllables_info) and alias_based:
+            if prefer_filename_sequence and alias_based:
+                syllables_info = alias_based
+                used_alias_based = True
+                used_words_based = False
+                mapping_reason_code = "filename_sequence_lock"
+                log(
+                    f"🧭 {fname}: TextGrid 신뢰도 {textgrid_trust_tier.upper()} "
+                    f"(trust={textgrid_trust_score:.2f}) → 파일명 순서 기반 매핑 고정"
+                )
+            elif syllables_info and any(len(s.get('phones') or []) == 0 for s in syllables_info) and alias_based:
                 syllables_info = alias_based
                 used_alias_based = True
                 used_words_based = False
@@ -2445,6 +2458,10 @@ def generate_oto(
                 used_words_based=used_words_based,
                 used_alias_based=used_alias_based,
             )
+            if prefer_filename_sequence:
+                mapping_confidence_base = min(float(mapping_confidence_base), max(0.0, min(1.0, textgrid_trust_score + 0.04)))
+            else:
+                mapping_confidence_base = min(float(mapping_confidence_base), max(0.0, min(1.0, textgrid_trust_score + 0.10)))
             if kr_mapping_debug_reason_logging and mapping_confidence_base < float(file_mapping_conf_th):
                 log(
                     f"🧭 {fname}: KR 매핑 신뢰도 낮음(conf={mapping_confidence_base:.2f}, "
@@ -2454,6 +2471,7 @@ def generate_oto(
             file_mapping_low_conf = bool(
                 float(mapping_confidence_base) < max(float(file_mapping_conf_th), 0.58)
                 or (float(base_score) < 48.0 and float(alt_score) < 48.0)
+                or textgrid_trust_tier == "low"
             )
 
             if (not syllables_info) or any(len(s['phones']) == 0 for s in syllables_info):
@@ -2529,6 +2547,11 @@ def generate_oto(
                 alias_type = _classify_alias_cached(alias)
                 row_jump_default = int(max(0, kr_mapping_max_index_jump_default))
                 row_jump_high_conf = int(max(row_jump_default, kr_mapping_max_index_jump_high_conf))
+                if kr_order_locked_format and textgrid_trust_tier == "low":
+                    row_jump_default = 0
+                    row_jump_high_conf = max(0, min(row_jump_high_conf, 1))
+                elif kr_order_locked_format and textgrid_trust_tier == "mid":
+                    row_jump_high_conf = max(row_jump_default, min(row_jump_high_conf, 1))
                 if alias_type == "cv_head":
                     row_jump_default = int(max(0, row_jump_default - 1))
                     row_jump_high_conf = int(max(row_jump_default, row_jump_high_conf - 1))
