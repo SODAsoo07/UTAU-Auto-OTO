@@ -349,8 +349,8 @@ def _get_validate_func(language: str):
     return validate_oto_params
 
 
-def _clip_delta(language: str, target: str, value: float) -> float:
-    clip = get_delta_clip_limits(language).get(target)
+def _clip_delta(language: str, target: str, value: float, alias_type: str = "") -> float:
+    clip = get_delta_clip_limits(language, alias_type=alias_type).get(target)
     if not clip:
         return float(value)
     lo, hi = clip
@@ -849,8 +849,9 @@ def apply_oto_ml_delta(
 ) -> Tuple[float, float, float, float, float]:
     validate_oto_params = _get_validate_func(language)
     pred = predict_oto_deltas(bundle, row_context)
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
     deltas = {
-        key: _clip_delta(language, key, val)
+        key: _clip_delta(language, key, val, alias_type=alias_type)
         for key, val in pred.deltas.items()
     }
     deltas = _apply_language_specific_delta_policy(language, row_context, deltas)

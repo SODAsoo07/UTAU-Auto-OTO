@@ -9,6 +9,7 @@ from core.kr_oto_file_ops import (
 )
 from core.kr_oto_rules import classify_alias
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
+from core.kr_oto_file_consistency import apply_file_consistency_to_oto_file
 from core.post_file_pipeline import (
     log_changed_lines,
     resolve_wav_dir_from_tg_folder,
@@ -245,6 +246,19 @@ def run_kr_post_file_pipeline(context: KrPostFilePipelineContext):
         custom_map=context.custom_map,
     )
     log_changed_lines(context.log_fn, "[KR-Bridge]", bridge_changed, "VC/CV coherence changed")
+
+    # 파일 단위 일관성 후처리 (인접 연속성, 급변 스무딩, 순서 강제)
+    consistency_stats = apply_file_consistency_to_oto_file(
+        context.out_path,
+        custom_map=context.custom_map,
+        validate_fn=context.validate_fn,
+        log_fn=context.log_fn,
+    )
+    log_changed_lines(
+        context.log_fn, "[KR-Consistency]",
+        consistency_stats.get("total_changed", 0),
+        "file consistency changed",
+    )
 
 
 __all__ = [

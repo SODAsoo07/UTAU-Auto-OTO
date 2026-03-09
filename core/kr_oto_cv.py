@@ -9,6 +9,23 @@ from core.kr_oto_rules import (
     is_plosive_roman,
 )
 
+# 마찰음 (onset 소음이 길다)
+KR_FRICATIVE_ONSETS = {"s", "ss", "sh", "h", "f"}
+# 격음 (기식이 길다)
+KR_ASPIRATE_ONSETS = {"k", "t", "p", "ch"}
+
+
+def _is_fricative_consonant(ipa_hint="", roman_hint=""):
+    h = (ipa_hint or "").strip().lower()
+    r = (roman_hint or "").strip().lower()
+    return h in KR_FRICATIVE_ONSETS or r in KR_FRICATIVE_ONSETS
+
+
+def _is_aspirate_consonant(ipa_hint="", roman_hint=""):
+    h = (ipa_hint or "").strip().lower()
+    r = (roman_hint or "").strip().lower()
+    return h in KR_ASPIRATE_ONSETS or r in KR_ASPIRATE_ONSETS
+
 
 def _clamp(v, lo, hi):
     return max(float(lo), min(float(hi), float(v)))
@@ -52,6 +69,9 @@ def _compute_kr_cv_timing(c_start, c_end, cv_vowel_len, c_hint, alias_onset, is_
         cutoff = -(consonant + max(cv_vowel_len * 0.2, 45.0))
         return offset, consonant, cutoff, pre, ovl
 
+    is_fricative_cv = _is_fricative_consonant(c_hint, alias_onset)
+    is_aspirate_cv = _is_aspirate_consonant(c_hint, alias_onset)
+
     if is_tense_cv:
         lead = 34.0
         pre_target = _clamp(max(c_end - c_start, 8.0) + lead, 54.0, 176.0)
@@ -59,6 +79,22 @@ def _compute_kr_cv_timing(c_start, c_end, cv_vowel_len, c_hint, alias_onset, is_
         pre = boundary - offset
         ovl = adaptive_overlap(pre, c_hint, mode="cv")
         ovl = min(ovl, max(pre * 0.32, 9.0))
+    elif is_fricative_cv:
+        # 마찰음: onset 소음이 길어 pre를 넓게, overlap도 약간 넓게
+        lead = 46.0
+        pre_target = _clamp(max(c_end - c_start, 8.0) + lead, 62.0, 208.0)
+        offset = max(boundary - pre_target, 0.0)
+        pre = boundary - offset
+        ovl = adaptive_overlap(pre, c_hint, mode="cv")
+        ovl = max(ovl, min(pre * 0.42, max(pre - 10.0, 0.0)))
+    elif is_aspirate_cv:
+        # 격음: 기식이 길어 pre를 넓게, overlap 약간 넓게
+        lead = 42.0
+        pre_target = _clamp(max(c_end - c_start, 8.0) + lead, 58.0, 198.0)
+        offset = max(boundary - pre_target, 0.0)
+        pre = boundary - offset
+        ovl = adaptive_overlap(pre, c_hint, mode="cv")
+        ovl = max(ovl, min(pre * 0.38, max(pre - 10.0, 0.0)))
     elif is_sonorant_cv:
         lead = 44.0
         pre_target = _clamp(max(c_end - c_start, 8.0) + lead, 66.0, 216.0)
@@ -82,6 +118,12 @@ def _compute_kr_cv_timing(c_start, c_end, cv_vowel_len, c_hint, alias_onset, is_
     v_ref = max(cv_vowel_len, 130.0)
     if is_tense_cv:
         added_cons = min(max(v_ref * 0.42, 68.0), 162.0)
+    elif is_fricative_cv:
+        # 마찰음: 소음 구간이 길어 cons를 넓게
+        added_cons = min(max(v_ref * 0.50, 82.0), 200.0)
+    elif is_aspirate_cv:
+        # 격음: 기식 구간 반영
+        added_cons = min(max(v_ref * 0.48, 78.0), 195.0)
     elif is_sonorant_cv:
         added_cons = min(max(v_ref * 0.52, 86.0), 210.0)
     else:

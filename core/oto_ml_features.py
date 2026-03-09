@@ -162,6 +162,45 @@ KR_DELTA_CLIP_LIMITS = {
     "delta_ovl": [-140.0, 140.0],
 }
 
+# alias_type별 세분화된 delta 클리핑 범위
+KR_DELTA_CLIP_LIMITS_BY_TYPE = {
+    "cv": {
+        "delta_offset": [-160.0, 160.0],
+        "delta_cons": [-180.0, 180.0],
+        "delta_cutoff": [-220.0, 220.0],
+        "delta_pre": [-140.0, 140.0],
+        "delta_ovl": [-100.0, 100.0],
+    },
+    "cv_head": {
+        "delta_offset": [-200.0, 200.0],
+        "delta_cons": [-180.0, 180.0],
+        "delta_cutoff": [-220.0, 220.0],
+        "delta_pre": [-140.0, 140.0],
+        "delta_ovl": [-100.0, 100.0],
+    },
+    "vc": {
+        "delta_offset": [-200.0, 200.0],
+        "delta_cons": [-180.0, 180.0],
+        "delta_cutoff": [-240.0, 240.0],
+        "delta_pre": [-160.0, 160.0],
+        "delta_ovl": [-120.0, 120.0],
+    },
+    "vv": {
+        "delta_offset": [-220.0, 220.0],
+        "delta_cons": [-200.0, 200.0],
+        "delta_cutoff": [-260.0, 260.0],
+        "delta_pre": [-120.0, 120.0],
+        "delta_ovl": [-110.0, 110.0],
+    },
+    "vcv": {
+        "delta_offset": [-200.0, 200.0],
+        "delta_cons": [-200.0, 200.0],
+        "delta_cutoff": [-260.0, 260.0],
+        "delta_pre": [-180.0, 180.0],
+        "delta_ovl": [-140.0, 140.0],
+    },
+}
+
 JA_DELTA_CLIP_LIMITS = {
     "delta_offset": [-260.0, 260.0],
     "delta_cons": [-220.0, 220.0],
@@ -179,9 +218,13 @@ def normalize_key(name: str) -> str:
     return normalize_wav_key(name)
 
 
-def get_delta_clip_limits(language: str) -> Dict[str, List[float]]:
+def get_delta_clip_limits(language: str, alias_type: str = "") -> Dict[str, List[float]]:
     if str(language).strip().lower().startswith("ja") or str(language).strip().lower() == "japanese":
         return dict(JA_DELTA_CLIP_LIMITS)
+    # alias_type별 세분화된 범위 사용
+    a_type = str(alias_type or "").strip().lower()
+    if a_type and a_type in KR_DELTA_CLIP_LIMITS_BY_TYPE:
+        return dict(KR_DELTA_CLIP_LIMITS_BY_TYPE[a_type])
     return dict(KR_DELTA_CLIP_LIMITS)
 
 

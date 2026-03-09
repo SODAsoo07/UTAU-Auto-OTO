@@ -29,24 +29,10 @@ def _blend(a, b, w):
     return (1.0 - w2) * float(a) + w2 * float(b)
 
 
-def _validate_oto_params(offset, consonant, cutoff, pre, ovl):
-    if offset < 0:
-        offset = 0
-    if pre < 0:
-        pre = 0
-    if ovl < 0:
-        ovl = 0
-    if consonant < 0:
-        consonant = 0
-    if ovl > pre:
-        ovl = pre * 0.75
-    if consonant < pre:
-        consonant = pre + 30
-    cutoff_abs = abs(cutoff)
-    if cutoff_abs <= consonant:
-        cutoff_abs = consonant + 50
-    cutoff = -cutoff_abs
-    return offset, consonant, cutoff, pre, ovl
+def _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=""):
+    """kr_oto_bridge 내부 검증 - 메인 validate_oto_params와 동기화."""
+    from core.oto_generator import validate_oto_params
+    return validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=alias_type)
 
 
 def _get_kr_timing_traits_from_alias(alias):

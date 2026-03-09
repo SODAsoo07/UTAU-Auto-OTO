@@ -228,7 +228,13 @@ KR_MAPPING_CONF_THRESHOLD_BY_FORMAT = {
 }
 
 
-def _resolve_kr_mapping_conf_threshold(file_format, override_threshold=None):
+def _resolve_kr_mapping_conf_threshold(file_format, override_threshold=None, phone_quality_score=None):
+    """포맷별 기본 매핑 신뢰도 임계값을 반환합니다.
+
+    phone_quality_score가 제공되면 phone tier 품질에 따라 동적으로 조정합니다:
+    - 품질 < 0.4 -> 임계값을 0.05 낮춤 (과도한 저신뢰 판정 완화)
+    - 품질 > 0.8 -> 임계값을 0.03 올림 (고품질 데이터에서 더 엄격)
+    """
     if override_threshold is not None:
         try:
             return float(override_threshold)
@@ -239,7 +245,20 @@ def _resolve_kr_mapping_conf_threshold(file_format, override_threshold=None):
         fmt,
         KR_MAPPING_CONF_THRESHOLD_BY_FORMAT["default"],
     )
-    return float(base)
+    threshold = float(base)
+
+    # phone tier 품질에 따른 동적 조정
+    if phone_quality_score is not None:
+        try:
+            pq = float(phone_quality_score)
+            if pq < 0.4:
+                threshold = max(0.40, threshold - 0.05)
+            elif pq > 0.8:
+                threshold = min(0.85, threshold + 0.03)
+        except (TypeError, ValueError):
+            pass
+
+    return threshold
 
 
 def normalize_key(name):
@@ -290,7 +309,9 @@ def adaptive_overlap(pre, consonant_hint="", mode="cv"):
         return 0.0
 
     hint = normalize_ipa_mark(consonant_hint or "")
-    hard = {'k', 'g', 't', 'd', 'p', 'b', 'c', 'ch', 'j', 'kk', 'tt', 'pp', 'gg', 'dd', 'bb'}
+    hard = {'g', 'd', 'b', 'c', 'j'}
+    tense = {'kk', 'tt', 'pp', 'gg', 'dd', 'bb', 'ss', 'jj'}  # 경음: VOT 짧음
+    aspirate = {'k', 't', 'p', 'ch'}  # 격음: 기식 길음
     fric = {'s', 'ss', 'sh', 'h', 'f', 'z'}
     sonorant = {'m', 'n', 'ng', 'r', 'l', 'y', 'w'}
 
@@ -303,8 +324,12 @@ def adaptive_overlap(pre, consonant_hint="", mode="cv"):
     }
     ratio = base_by_mode.get(mode, 0.46)
 
-    if hint in hard:
-        ratio -= 0.16
+    if hint in tense:
+        ratio -= 0.20  # 경음: VOT가 짧아 overlap을 더 줄임
+    elif hint in hard:
+        ratio -= 0.14
+    elif hint in aspirate:
+        ratio += 0.02  # 격음: 기식이 길어 overlap을 약간 넓힘
     elif hint in fric:
         ratio += 0.05
     elif hint in sonorant:
@@ -1087,8 +1112,35 @@ def _synthesize_kr_word_phones(word, w_start, w_end, decompose_hangul_to_roman):
     return phones
 
 
-def validate_oto_params(offset, consonant, cutoff, pre, ovl):
-    """UTAU OTO 파라미터를 유효 범위로 보정합니다."""
+def validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=""):
+    """UTAU OTO 파라미터를 유효 범위로 보정합니다.
+
+    UTAU 필수 순서 제약: ovl < pre <= consonant < |cutoff|
+    alias_type에 따라 파라미터 간 최소 간격을 차등 적용합니다.
+
+    Args:
+        offset: 파일 앞부분부터의 시작 위치 (ms, >= 0)
+        consonant: 고정자음부 (오프셋 기준 상대, 스트레치 불가 구간)
+        cutoff: 컷오프 (음수, 오프셋 기준 상대, 이후 소리 잘림)
+        pre: 선행발음 (오프셋 기준 상대, 자음->모음 전이점)
+        ovl: 오버랩 (오프셋 기준 상대, 앞 노트와 블렌딩)
+        alias_type: 에일리어스 타입 (cv, cv_head, vc, vv, vcv 등, 선택적)
+    """
+    a_type = str(alias_type or "").strip().lower()
+
+    # --- alias_type별 최소 간격 테이블 ---
+    _MIN_CONS_GAP = {
+        "cv": 20.0, "cv_head": 20.0, "vc": 10.0,
+        "vv": 16.0, "vcv": 18.0, "mono": 12.0, "br": 8.0,
+    }
+    _MIN_CUT_GAP = {
+        "cv": 14.0, "cv_head": 14.0, "vc": 8.0,
+        "vv": 12.0, "vcv": 12.0, "mono": 10.0, "br": 6.0,
+    }
+    min_cons_gap = _MIN_CONS_GAP.get(a_type, 14.0) if a_type else 30.0
+    min_cut_gap = _MIN_CUT_GAP.get(a_type, 12.0) if a_type else 50.0
+
+    # --- 기본 하한 ---
     if offset < 0:
         offset = 0
     if pre < 0:
@@ -1097,21 +1149,31 @@ def validate_oto_params(offset, consonant, cutoff, pre, ovl):
         ovl = 0
     if consonant < 0:
         consonant = 0
-    
 
+    # --- ovl < pre 강제 ---
     if ovl > pre:
         ovl = pre * 0.75
-    
 
+    # --- pre <= consonant 강제 (alias_type별 최소 간격) ---
+    if consonant < pre + min_cons_gap:
+        consonant = pre + min_cons_gap
+
+    # --- consonant < |cutoff| 강제 (alias_type별 최소 간격) ---
+    cutoff_abs = abs(cutoff)
+    if cutoff_abs <= consonant + min_cut_gap:
+        cutoff_abs = consonant + min_cut_gap
+    cutoff = -cutoff_abs
+
+    # --- 최종 순서 검증 (안전망) ---
+    if ovl >= pre:
+        ovl = max(0.0, pre - 2.0)
     if consonant < pre:
-        consonant = pre + 30
-    
-
+        consonant = pre + min_cons_gap
     cutoff_abs = abs(cutoff)
     if cutoff_abs <= consonant:
-        cutoff_abs = consonant + 50
+        cutoff_abs = consonant + min_cut_gap
     cutoff = -cutoff_abs
-    
+
     return offset, consonant, cutoff, pre, ovl
 
 
@@ -1195,7 +1257,13 @@ def _stabilize_params_to_phone_activity(offset, consonant, cutoff, pre, ovl, ph_
     if abs(delta) < 2.0:
         return offset, consonant, cutoff, pre, ovl
 
-    offset = max(float(offset) + delta, 0.0)
+    target_offset = max(float(offset) + delta, 0.0)
+    if abs(delta) > 30.0:
+        # 큰 거리 snap은 과교정을 유발할 수 있어 블렌딩으로 완화한다.
+        offset = _blend(float(offset), target_offset, 0.45)
+    else:
+        # 짧은 거리 보정은 기존처럼 즉시 snap한다.
+        offset = target_offset
     return validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
 
@@ -1206,7 +1274,7 @@ def generate_openutau_aliases(base_alias):
 
     if len(parts) == 2:
         v, c = parts[0], parts[1]
-        
+
 
 
         batchim_map = {
@@ -1234,11 +1302,11 @@ def generate_openutau_aliases(base_alias):
             'jj': ['jj', 'j', 'ch'],
             'ch': ['ch', 'j', 'jj'],
         }
-        
+
 
         aliases.add(f"{v} {c}")
         aliases.add(f"{v}{c}")
-        
+
 
         if c in ['a','e','i','o','u','eo','eu','ae','oe','wi','ya','yeo','yo','yu','ye','wa','wo','we','weo','eui','ui']:
             aliases.add(f"{v} {c}")
@@ -1255,7 +1323,7 @@ def generate_openutau_aliases(base_alias):
                 aliases.add(f"{v}{mapped_c}")
                 aliases.add(f"{v} {mapped_c.upper()}")
                 aliases.add(f"{v}{mapped_c.upper()}")
-                
+
 
                 aliases.add(f"{v} {mapped_c}-")
                 aliases.add(f"{v}{mapped_c}-")
@@ -1278,11 +1346,11 @@ def generate_openutau_aliases(base_alias):
 
         aliases.add(f"- {cv}")
         aliases.add(f"-{cv}")
-        
+
 
         aliases.add(f"{cv}-")
         aliases.add(f"{cv} -")
-        
+
 
         if cv == 'eui':
             aliases.add('eu i')
@@ -1578,6 +1646,14 @@ def _apply_soft_mel_offset_cutoff_guard(
 
     sound_mask = (db_arr > (db_sil_th + 1.5)) & (en > 0.14)
     silence_mask = (db_arr <= db_sil_th) | (en <= 0.10)
+    # onset 보조 탐지: 에너지 이동평균 + 1차 기울기로 유효 onset 후보를 만든다.
+    if len(en) >= 5:
+        kernel = np.ones(5, dtype=np.float64) / 5.0
+        en_ma = np.convolve(en, kernel, mode="same")
+    else:
+        en_ma = np.asarray(en, dtype=np.float64)
+    en_slope = np.diff(en_ma, prepend=float(en_ma[0]) if len(en_ma) else 0.0)
+    onset_mask = (en_slope > 0.015) & (en_ma > 0.12) & (db_arr > (db_sil_th - 2.0))
 
     off_idx = _nearest_time_index(t_ms, offset)
     pre_idx = _nearest_time_index(t_ms, pre_abs)
@@ -1623,10 +1699,18 @@ def _apply_soft_mel_offset_cutoff_guard(
         pre_sound = bool(sound_mask[pre_idx] or (en[pre_idx] > 0.20))
         if off_silent and pre_sound:
             lo = max(0, pre_idx - 120)
-            seg = sound_mask[lo:pre_idx + 1]
-            if np.any(seg):
-                rel = int(np.where(seg)[0][0])
+            sound_start_idx = None
+            onset_seg = onset_mask[lo:pre_idx + 1]
+            if np.any(onset_seg):
+                # onset 후보가 있으면 기존 sound 시작점보다 우선 사용한다.
+                rel = int(np.where(onset_seg)[0][0])
                 sound_start_idx = lo + rel
+            else:
+                seg = sound_mask[lo:pre_idx + 1]
+                if np.any(seg):
+                    rel = int(np.where(seg)[0][0])
+                    sound_start_idx = lo + rel
+            if sound_start_idx is not None:
                 target_offset = float(t_ms[sound_start_idx]) - 12.0
                 target_offset = max(0.0, min(pre_abs - 18.0, target_offset))
                 new_offset = _blend(offset, target_offset, 0.36)
@@ -2224,7 +2308,7 @@ def generate_oto(
             kr_vowels=set(KR_VOWELS),
             kr_consonants=set(KR_CONSONANTS),
         )
-                
+
     processed = 0
     total = len(file_groups)
     wav_root_for_signal = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
@@ -2392,7 +2476,7 @@ def generate_oto(
                         roman_parts.extend(decompose_hangul_to_roman(ch))
                     roman_raw = "".join(roman_parts).lower()
                     roman_cv = _kr_cv_kernel(roman_raw)
-                    
+
                     syllables_info.append({
                         'word': w.mark,
                         'roman': roman_raw,
@@ -2510,7 +2594,7 @@ def generate_oto(
                 final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
                 processed += 1
                 continue
-                
+
             romaji_syllables = [s.get('roman_cv') or s.get('roman', '') for s in syllables_info]
             current_w_idx = 0
             cv_seq_idx = 0
@@ -2538,7 +2622,7 @@ def generate_oto(
                 recenter_fn=_recenter_kr_params_around_pre,
                 cv_cutoff_guard_fn=_guard_cv_cutoff_to_next_onset,
             )
-            
+
             for line_num, line in enumerate(lines):
                 parts = line.split('=', 1)
                 if len(parts) < 2:
@@ -2554,7 +2638,7 @@ def generate_oto(
                 base_shape = _extract_base_timing_shape(line)
                 row_mapping_confidence = float(mapping_confidence_base)
                 row_jump_blocked = 0
-                
+
 
                 alias_type = _classify_alias_cached(alias)
                 row_jump_default = int(max(0, kr_mapping_max_index_jump_default))
@@ -2588,7 +2672,7 @@ def generate_oto(
                     consonant = min(br_len * 0.3, 100)
                     cutoff = -(br_len * 0.85)
                     offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
-                    
+
                     _append_alias_rows(
                         final_lines,
                         real_wav_name,
@@ -2602,7 +2686,7 @@ def generate_oto(
                         alias_suffix=alias_suffix,
                     )
                     continue
-                
+
                 family_state = build_kr_alias_family_state(
                     alias=alias,
                     alias_type=alias_type,
@@ -2650,7 +2734,7 @@ def generate_oto(
                 )
                 if handled_breath_tail:
                     continue
-                
+
 
 
                 if is_vcv:
@@ -2729,7 +2813,7 @@ def generate_oto(
                             mapping_confidence=row_mapping_confidence,
                         )
                     _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
-                    
+
                     _append_alias_rows(
                         final_lines,
                         real_wav_name,
@@ -2743,7 +2827,7 @@ def generate_oto(
                         alias_suffix=alias_suffix,
                     )
                     continue
-                
+
 
                 if is_cv_head:
                     forced_cvvc_idx = _resolve_kr_cvvc_occurrence_index(
@@ -2884,7 +2968,7 @@ def generate_oto(
                         log(f"🛡️ {fname}: CV_HEAD 오프셋 과선행 보정(+{offset_reduced:.1f}ms) [{alias}]")
                     if cutoff_extended > 1.0:
                         log(f"🛡️ {fname}: CV_HEAD 모음 길이 보정(+{cutoff_extended:.1f}ms) [{alias}]")
-                    
+
                     _append_alias_rows(
                         final_lines,
                         real_wav_name,
@@ -2898,7 +2982,7 @@ def generate_oto(
                         alias_suffix=alias_suffix,
                     )
                     continue
-                
+
 
                 if not is_vc:
                     forced_vv_idx = None
@@ -3084,7 +3168,7 @@ def generate_oto(
 
                 else:
                     cv_vowel_len = n_end - n_start
-                    
+
                     if is_diph:
                         c_hint = curr_phones[0].mark if curr_phones else ""
                         alias_onset = _extract_alias_onset(alias)
@@ -3097,7 +3181,7 @@ def generate_oto(
                             True,
                             False,
                         )
-                        
+
                     elif _looks_like_vv_alias(alias):
                         vv_direct = None
                         if file_format == "cvvc":
@@ -3120,7 +3204,7 @@ def generate_oto(
                             offset, consonant, cutoff, pre, ovl = _compute_kr_noninitial_vowel_timing(
                                 n_start, n_end
                             )
-                        
+
                     else:
 
 
@@ -3288,13 +3372,13 @@ def generate_oto(
         for tg_info in tg_entries:
 
             base_filename = os.path.splitext(tg_info['real_name'])[0].lower()
-            
+
 
             base_filename = re.sub(r'long$', '', base_filename)
             norm_key_clean = re.sub(r'long$', '', tg_info['norm_key'])
-            
+
             detected_vowel = None
-            
+
 
             tokens = re.split(r'[-_ ]+', base_filename)
             for token in reversed(tokens):
@@ -3302,33 +3386,33 @@ def generate_oto(
                 if clean_token in vowels_list:
                     detected_vowel = clean_token
                     break
-            
+
 
             if not detected_vowel and norm_key_clean in vowels_list:
                 detected_vowel = norm_key_clean
-                
+
             if detected_vowel:
                 try:
                     tg = textgrid.TextGrid.fromFile(tg_info['path'])
                     phone_tier = next((t for t in tg if isinstance(t, textgrid.IntervalTier) and t.name == 'phones'), None)
                     if not phone_tier: continue
                     intervals = [i for i in phone_tier if i.mark.strip() not in ['', 'sil', 'spn', 'pau']]
-                    
+
                     if len(intervals) == 1:
                         vowel = intervals[0]
                         v_start = vowel.minTime * 1000
                         v_end = vowel.maxTime * 1000
                         v_len = v_end - v_start
-                        
+
                         alias = detected_vowel
                         if alias not in template_aliases:
                             log(f"추가: 단모음 에일리어스 생성 -> {tg_info['real_name']} [{alias}]")
                             offset, consonant, cutoff, pre, ovl = _compute_kr_noninitial_vowel_timing(
                                 v_start, v_end
                             )
-                            
+
                             offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
-                            
+
                             _append_alias_rows(
                                 final_lines,
                                 tg_info['real_name'],
