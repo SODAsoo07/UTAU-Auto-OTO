@@ -7,7 +7,7 @@ from core.kr_oto_rules import (
 )
 
 
-def _prepare_vc_bounds_from_context(syllables_info, current_w_idx):
+def _prepare_vc_bounds_from_context(syllables_info, current_w_idx, next_w_idx=None):
     """VC 계산에 필요한 (curr_phones, c_start/c_end/n_start/n_end)를 구성합니다."""
     if current_w_idx >= len(syllables_info):
         current_w_idx = len(syllables_info) - 1
@@ -20,8 +20,11 @@ def _prepare_vc_bounds_from_context(syllables_info, current_w_idx):
     c_start = v_start
     c_end = v_end
 
-    if current_w_idx + 1 < len(syllables_info):
-        next_syl = syllables_info[current_w_idx + 1]
+    if next_w_idx is None:
+        next_w_idx = current_w_idx + 1
+
+    if next_w_idx < len(syllables_info):
+        next_syl = syllables_info[next_w_idx]
         n_start = next_syl["phones"][0].minTime * 1000
         n_end = next_syl["phones"][0].maxTime * 1000
     else:
@@ -43,6 +46,9 @@ def _compute_kr_vc_timing(
     n_start,
     n_end,
     cv_anchor_by_idx,
+    next_w_idx=None,
+    prev_cv_anchor=None,
+    next_cv_anchor=None,
 ):
     """한국어 VC 타이밍 계산 핵심 로직입니다."""
     from core.kr_oto_bridge import _compute_vc_from_adjacent_cv, _compute_kr_cvvc_vc_timing_direct
@@ -71,8 +77,8 @@ def _compute_kr_vc_timing(
         coda_start = None
         if v_phone is not None and v_idx is not None and (v_idx + 1) < len(curr_phones):
             coda_start = curr_phones[v_idx + 1].minTime * 1000
-        elif current_w_idx + 1 < len(syllables_info):
-            next_syl = syllables_info[current_w_idx + 1]
+        elif (next_w_idx if next_w_idx is not None else (current_w_idx + 1)) < len(syllables_info):
+            next_syl = syllables_info[next_w_idx if next_w_idx is not None else (current_w_idx + 1)]
             if next_syl.get("phones"):
                 coda_start = next_syl["phones"][0].minTime * 1000
 
@@ -127,9 +133,10 @@ def _compute_kr_vc_timing(
             return offset, consonant, cutoff, pre, ovl, False
 
     vc_anchor_params = None
-    if current_w_idx + 1 < len(syllables_info):
-        prev_cv_anchor = cv_anchor_by_idx.get(current_w_idx)
-        next_cv_anchor = cv_anchor_by_idx.get(current_w_idx + 1)
+    resolved_next_w_idx = next_w_idx if next_w_idx is not None else (current_w_idx + 1)
+    if resolved_next_w_idx < len(syllables_info):
+        prev_cv_anchor = prev_cv_anchor or cv_anchor_by_idx.get(current_w_idx)
+        next_cv_anchor = next_cv_anchor or cv_anchor_by_idx.get(resolved_next_w_idx)
         is_plosive_sibilant = c_char in ["g", "k", "kk", "gg", "d", "t", "tt", "dd", "b", "p", "bb", "pp", "s", "ss", "h", "j", "jj", "ch"]
         vc_anchor_params = _compute_vc_from_adjacent_cv(
             prev_cv_anchor, next_cv_anchor, alias_type, is_plosive_sibilant
