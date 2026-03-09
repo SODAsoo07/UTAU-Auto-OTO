@@ -28,6 +28,16 @@ class OtoMlPolicyTests(unittest.TestCase):
         self.assertFalse(kr_cv["use_pseudo_labels"])
         self.assertFalse(jp_cvvc["use_pseudo_labels"])
 
+    def test_bridge_family_filters_drop_train_keep_for_cvc_and_cvvc(self):
+        kr_cvc_bridge = default_training_filters("korean", "cvc", "bridge")
+        kr_cvvc_bridge = default_training_filters("korean", "cvvc", "bridge")
+        jp_cvvc_bridge = default_training_filters("japanese", "cvvc", "bridge")
+        kr_cv_bridge = default_training_filters("korean", "cv", "bridge")
+        self.assertFalse(kr_cvc_bridge["require_train_keep"])
+        self.assertFalse(kr_cvvc_bridge["require_train_keep"])
+        self.assertFalse(jp_cvvc_bridge["require_train_keep"])
+        self.assertTrue(kr_cv_bridge["require_train_keep"])
+
     def test_alias_family_mapping(self):
         self.assertEqual(alias_family_to_alias_types("cv"), ["cv", "cv_head"])
         self.assertEqual(alias_family_to_alias_types("vowel"), ["mono"])
@@ -43,10 +53,11 @@ class OtoMlPolicyTests(unittest.TestCase):
         self.assertTrue(selector_enabled_by_default("korean", "cv", "vowel"))
         self.assertTrue(selector_enabled_by_default("korean", "cvc", "cv"))
         self.assertTrue(selector_enabled_by_default("korean", "cvc", "bridge"))
+        self.assertTrue(selector_enabled_by_default("japanese", "cvvc", "cv"))
+        self.assertTrue(selector_enabled_by_default("japanese", "cvvc", "bridge"))
         self.assertFalse(selector_enabled_by_default("korean", "cvvc", "cv"))
         self.assertFalse(selector_enabled_by_default("korean", "vcv", "bridge"))
         self.assertFalse(selector_enabled_by_default("japanese", "cv", "cv"))
-        self.assertFalse(selector_enabled_by_default("japanese", "cvvc", "cv"))
         self.assertFalse(selector_enabled_by_default("japanese", "vcv", "bridge"))
 
 

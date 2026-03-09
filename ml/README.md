@@ -12,6 +12,7 @@
 - OTO 자동 생성 보정 런타임은 `LightGBM`만 사용합니다.
 - 과거의 `PyTorch` OTO 보정 파이프라인은 제거되었습니다.
 - 대용량 학습 산출물은 기본적으로 `../ml_workspace` 아래를 사용합니다.
+- 기본 분리 정책: `CV`는 공용 유지, `korean/cvc`, `korean/cvvc`, `japanese/cvvc`만 `cv`/`bridge` family 분리를 권장합니다.
 
 ## 지원 형식
 - 한국어: `CV`, `CVC`, `CVVC`, `general`
@@ -33,6 +34,8 @@
 ## 추가 문서
 - 오매핑 데이터 수집 가이드: `C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\ml\오매핑_데이터_수집_가이드.md`
 - 모델 학습 명령어 가이드: `C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\ml\모델_학습_명령어_가이드.md`
+- 권장 재학습 배치: `C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\ml\scripts\train_recommended_ml_models.ps1`
+- family 분리 기본 정책은 `C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\core\oto_ml_policy.py`의 `recommended_alias_family_splits()`에도 반영되어 있습니다.
 
 `?? ???? ????.
 

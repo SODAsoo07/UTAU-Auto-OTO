@@ -35,6 +35,13 @@ _SELECTOR_DEFAULTS = {
     ("korean", "cvc", "cv"): True,
     ("korean", "cvc", "vowel"): True,
     ("korean", "cvc", "bridge"): True,
+    # Japanese CVVC stays guarded at runtime:
+    # - cv family delta is disabled by default
+    # - selector-only application is allowed
+    # - post-guard clamps overly early timing
+    ("japanese", "cvvc", ""): True,
+    ("japanese", "cvvc", "cv"): True,
+    ("japanese", "cvvc", "bridge"): True,
 }
 
 _DELTA_DEFAULTS = {
@@ -94,12 +101,17 @@ def default_training_filters(language: str, format_type: str, alias_family: str 
     fmt = normalize_format_type(lang, format_type) or "general"
     family = normalize_alias_family(alias_family)
     min_conf = float(_TRAINING_MIN_CONF.get((lang, fmt), 0.50))
+    require_train_keep = True
     if family == "bridge":
         min_conf = min(0.90, min_conf + 0.04)
+        if fmt in {"cvc", "cvvc"}:
+            # Bridge rows often fail the generic train_keep heuristic even when
+            # the manual timing itself is valid enough for supervised learning.
+            require_train_keep = False
     elif family == "vowel":
         min_conf = max(0.35, min_conf - 0.05)
     return {
-        "require_train_keep": True,
+        "require_train_keep": bool(require_train_keep),
         "min_mapping_confidence": float(min_conf),
         "exclude_nuclei_fallback": True,
         "use_pseudo_labels": False,

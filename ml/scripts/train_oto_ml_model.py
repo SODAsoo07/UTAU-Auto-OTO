@@ -31,8 +31,8 @@ def main():
     ap.add_argument(
         "--require-train-keep",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Keep only rows marked train_keep_default=1 (default: enabled)",
+        default=None,
+        help="Keep only rows marked train_keep_default=1 (default: policy-controlled)",
     )
     ap.add_argument(
         "--min-mapping-confidence",
@@ -43,14 +43,14 @@ def main():
     ap.add_argument(
         "--exclude-nuclei-fallback",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Exclude rows that used nuclei fallback (default: enabled)",
+        default=None,
+        help="Exclude rows that used nuclei fallback (default: policy-controlled)",
     )
     ap.add_argument(
         "--use-pseudo-labels",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Use pseudo-labeled rows with sample weights when present (default: disabled)",
+        default=None,
+        help="Use pseudo-labeled rows with sample weights when present (default: policy-controlled)",
     )
     ap.add_argument(
         "--pseudo-weight-high",
@@ -93,6 +93,13 @@ def main():
     min_conf = float(args.min_mapping_confidence)
     if min_conf < 0.0:
         min_conf = float(defaults["min_mapping_confidence"])
+    require_train_keep = defaults["require_train_keep"] if args.require_train_keep is None else bool(args.require_train_keep)
+    exclude_nuclei_fallback = (
+        defaults["exclude_nuclei_fallback"]
+        if args.exclude_nuclei_fallback is None
+        else bool(args.exclude_nuclei_fallback)
+    )
+    use_pseudo_labels = defaults["use_pseudo_labels"] if args.use_pseudo_labels is None else bool(args.use_pseudo_labels)
 
     meta = train_lightgbm_bundle(
         language=args.lang,
@@ -103,10 +110,10 @@ def main():
         alias_types=alias_types,
         alias_groups=alias_groups,
         alias_family=alias_family,
-        require_train_keep=bool(args.require_train_keep),
+        require_train_keep=bool(require_train_keep),
         min_mapping_confidence=min_conf,
-        exclude_nuclei_fallback=bool(args.exclude_nuclei_fallback),
-        use_pseudo_labels=bool(args.use_pseudo_labels),
+        exclude_nuclei_fallback=bool(exclude_nuclei_fallback),
+        use_pseudo_labels=bool(use_pseudo_labels),
         pseudo_weight_high=float(args.pseudo_weight_high),
         pseudo_weight_mid=float(args.pseudo_weight_mid),
     )
@@ -125,10 +132,10 @@ def main():
             format_type=args.format,
             alias_types=alias_types,
             alias_groups=alias_groups,
-            require_train_keep=bool(args.require_train_keep),
+            require_train_keep=bool(require_train_keep),
             min_mapping_confidence=min_conf,
-            exclude_nuclei_fallback=bool(args.exclude_nuclei_fallback),
-            use_pseudo_labels=bool(args.use_pseudo_labels),
+            exclude_nuclei_fallback=bool(exclude_nuclei_fallback),
+            use_pseudo_labels=bool(use_pseudo_labels),
         )
         selector_meta = train_lightgbm_selector_bundle(
             language=args.lang,
