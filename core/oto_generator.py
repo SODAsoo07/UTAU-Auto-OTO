@@ -153,6 +153,9 @@ from core.kr_row_runtime_v2 import (
     prepare_kr_cv_head_anchor_context as _prepare_kr_cv_head_anchor_context_v2,
 )
 from core.kr_row_finalize_v2 import finalize_kr_row as _finalize_kr_row_v2
+from core.kr_cv_head_row_v2 import run_kr_cv_head_row as _run_kr_cv_head_row_v2
+from core.kr_vcv_row_v2 import run_kr_vcv_row as _run_kr_vcv_row_v2
+from core.kr_general_row_v2 import run_kr_general_row as _run_kr_general_row_v2
 from core.oto_row_output_v2 import prepare_oto_alias_rows as _prepare_oto_alias_rows_v2
 from core.oto_anchor_graph import build_adjacent_anchor_graph, resolve_bridge_anchor_pair
 from core.oto_mapping_policy import resolve_plan_policy
@@ -3036,93 +3039,36 @@ def generate_oto(
                                         vcv_selected_w_idx = fixed_idx
                                         cv_seq_idx = max(cv_seq_idx, vcv_selected_w_idx + 1)
                     current_w_idx = max(current_w_idx, vcv_selected_w_idx)
-                    (
-                        current_w_idx,
-                        cv_seq_idx,
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        ovl,
-                    ) = _prepare_vcv_syllable_timing(
-                        syllables_info,
-                        current_w_idx,
-                        cv_seq_idx,
-                        DIPHTHONG_CV_CONSONANT_RATIO,
+                    current_w_idx, cv_seq_idx = _run_kr_vcv_row_v2(
+                        syllables_info=syllables_info,
+                        current_w_idx=current_w_idx,
+                        cv_seq_idx=cv_seq_idx,
                         forced_w_idx=vcv_selected_w_idx,
-                    )
-                    (
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        ovl,
-                        soft_off_shift,
-                        soft_cut_shift,
-                        cutoff_reduced,
-                    ) = _apply_post_timing_pipeline(
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        ovl,
-                        alias_type="vcv",
-                        alias_text=alias,
+                        diphthong_cv_consonant_ratio=DIPHTHONG_CV_CONSONANT_RATIO,
+                        alias=alias,
                         file_format=file_format,
+                        real_wav_name=real_wav_name,
+                        final_lines=final_lines,
+                        generate_openutau=generate_openutau,
+                        alias_suffix=alias_suffix,
+                        wav_duration_ms=wav_duration_ms,
+                        timeline_start_ms=timeline_start_ms,
+                        timeline_end_ms=timeline_end_ms,
+                        row_mapping_confidence=row_mapping_confidence,
                         mel_ctx_for_file=mel_ctx_for_file,
                         base_shape=base_shape,
                         ph_intervals=ph_intervals,
-                        current_w_idx=current_w_idx,
-                        syllables_info=syllables_info,
-                        is_vc_plosive_coda=False,
-                        enable_stabilize=False,
-                        enable_cutoff_guard=False,
-                        post_ctx=kr_post_ctx,
-                    )
-                    vcv_anchor, vcv_next_onset, vcv_next_vowel = _extract_vcv_anchor_points_v2(
-                        syllables_info,
-                        current_w_idx,
-                    )
-                    if vcv_anchor is not None:
-                        offset, consonant, cutoff, pre, ovl = _apply_kr_anchor_lock(
-                            fname=fname,
-                            alias_text=alias,
-                            format_type=file_format,
-                            alias_type="vcv",
-                            offset=offset,
-                            consonant=consonant,
-                            cutoff=cutoff,
-                            pre=pre,
-                            ovl=ovl,
-                            timeline_start_ms=timeline_start_ms,
-                            timeline_end_ms=timeline_end_ms,
-                            file_duration_ms=wav_duration_ms,
-                            anchor_abs_ms=vcv_anchor,
-                            next_onset_abs_ms=vcv_next_onset,
-                            next_vowel_abs_ms=vcv_next_vowel,
-                            mapping_confidence=row_mapping_confidence,
-                        )
-                    _finalize_kr_row_v2(
-                        final_lines=final_lines,
-                        row_builder_fn=_build_alias_rows,
-                        real_wav_name=real_wav_name,
-                        alias=alias,
-                        offset=offset,
-                        consonant=consonant,
-                        cutoff=cutoff,
-                        pre=pre,
-                        ovl=ovl,
-                        generate_openutau=generate_openutau,
-                        alias_suffix=alias_suffix,
-                        alias_type="vcv",
-                        wav_duration_ms=wav_duration_ms,
-                        validate_fn=validate_oto_params,
-                        log_post_timing_events_fn=_log_post_timing_events,
-                        log_fn=log,
+                        kr_post_ctx=kr_post_ctx,
                         fname=fname,
-                        soft_off_shift=soft_off_shift,
-                        soft_cut_shift=soft_cut_shift,
-                        cutoff_reduced=cutoff_reduced,
+                        log_fn=log,
+                        validate_fn=validate_oto_params,
+                        prepare_vcv_syllable_timing_fn=_prepare_vcv_syllable_timing,
+                        apply_post_timing_pipeline_fn=_apply_post_timing_pipeline,
+                        extract_vcv_anchor_points_fn=_extract_vcv_anchor_points_v2,
+                        apply_anchor_lock_fn=_apply_kr_anchor_lock,
+                        finalize_row_fn=_finalize_kr_row_v2,
+                        row_builder_fn=_build_alias_rows,
+                        log_post_timing_events_fn=_log_post_timing_events,
                     )
                     continue
 
@@ -3168,155 +3114,45 @@ def generate_oto(
                                     f"(idx={forced_cvvc_idx + 1}, {alias})"
                                 )
                             forced_cvvc_idx = None
-                    (
-                        selected_w_idx,
-                        cv_seq_idx,
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        ovl,
-                        n_start,
-                        n_end,
-                    ) = _prepare_cv_head_syllable_timing(
-                        syllables_info,
-                        current_w_idx,
-                        cv_seq_idx,
-                        alias,
+                    current_w_idx, cv_seq_idx = _run_kr_cv_head_row_v2(
+                        syllables_info=syllables_info,
+                        current_w_idx=current_w_idx,
+                        cv_seq_idx=cv_seq_idx,
+                        alias=alias,
                         forced_w_idx=forced_cvvc_idx,
-                    )
-                    current_w_idx = max(current_w_idx, selected_w_idx)
-                    (
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        ovl,
-                        soft_off_shift,
-                        soft_cut_shift,
-                        cutoff_reduced,
-                    ) = _apply_post_timing_pipeline(
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        ovl,
-                        alias_type="cv_head",
-                        alias_text=alias,
                         file_format=file_format,
+                        real_wav_name=real_wav_name,
+                        final_lines=final_lines,
+                        generate_openutau=generate_openutau,
+                        alias_suffix=alias_suffix,
+                        wav_duration_ms=wav_duration_ms,
+                        timeline_start_ms=timeline_start_ms,
+                        timeline_end_ms=timeline_end_ms,
+                        row_mapping_confidence=row_mapping_confidence,
                         mel_ctx_for_file=mel_ctx_for_file,
                         base_shape=base_shape,
                         ph_intervals=ph_intervals,
-                        current_w_idx=selected_w_idx,
-                        syllables_info=syllables_info,
-                        is_vc_plosive_coda=False,
-                        enable_stabilize=False,
-                        enable_cutoff_guard=False,
-                    )
-                    (
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        offset_reduced,
-                    ) = _guard_cv_head_offset_to_current_onset(
-                        offset, consonant, cutoff, pre, selected_w_idx, syllables_info
-                    )
-                    (
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        cutoff_extended,
-                    ) = _ensure_cv_head_min_vowel_coverage(
-                        offset, consonant, cutoff, pre, n_start, n_end
-                    )
-                    (
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        cutoff_reduced_after_offset,
-                    ) = _guard_cv_cutoff_to_next_onset(
-                        offset, consonant, cutoff, pre, selected_w_idx, syllables_info
-                    )
-                    cutoff_reduced += cutoff_reduced_after_offset
-                    cv_head_anchor_ctx = _prepare_kr_cv_head_anchor_context_v2(
-                        syllables_info,
-                        selected_w_idx,
-                        fallback_anchor_abs=n_start,
-                        prepare_cv_bounds_fn=_prepare_cv_bounds_from_syllable,
-                    )
-                    cvh_anchor = cv_head_anchor_ctx["anchor_abs"]
-                    if cvh_anchor is not None:
-                        offset, consonant, cutoff, pre, ovl = _apply_kr_anchor_lock(
-                            fname=fname,
-                            alias_text=alias,
-                            format_type=file_format,
-                            alias_type="cv_head",
-                            offset=offset,
-                            consonant=consonant,
-                            cutoff=cutoff,
-                            pre=pre,
-                            ovl=ovl,
-                            timeline_start_ms=timeline_start_ms,
-                            timeline_end_ms=timeline_end_ms,
-                            file_duration_ms=wav_duration_ms,
-                            anchor_abs_ms=cvh_anchor,
-                            next_onset_abs_ms=n_start,
-                            next_vowel_abs_ms=n_end,
-                            mapping_confidence=row_mapping_confidence,
-                        )
-                    anchor_record = _maybe_build_kr_realized_cv_anchor_record_v2(
-                        selected_w_idx,
-                        offset=offset,
-                        consonant=consonant,
-                        cutoff=cutoff,
-                        pre=pre,
-                        ovl=ovl,
-                        onset_abs=cv_head_anchor_ctx["onset_abs"],
-                        vowel_start_abs=(
-                            cv_head_anchor_ctx["vowel_start_abs"]
-                            if cv_head_anchor_ctx["vowel_start_abs"] is not None
-                            else n_start
-                        ),
-                        vowel_end_abs=(
-                            cv_head_anchor_ctx["vowel_end_abs"]
-                            if cv_head_anchor_ctx["vowel_end_abs"] is not None
-                            else n_end
-                        ),
-                        c_end_abs=cv_head_anchor_ctx["c_end_abs"],
-                        build_anchor_fn=_build_realized_kr_cv_anchor_v2,
-                    )
-                    _finalize_kr_row_v2(
-                        final_lines=final_lines,
-                        row_builder_fn=_build_alias_rows,
-                        real_wav_name=real_wav_name,
-                        alias=alias,
-                        offset=offset,
-                        consonant=consonant,
-                        cutoff=cutoff,
-                        pre=pre,
-                        ovl=ovl,
-                        generate_openutau=generate_openutau,
-                        alias_suffix=alias_suffix,
-                        alias_type="cv_head",
-                        wav_duration_ms=wav_duration_ms,
-                        validate_fn=validate_oto_params,
-                        log_post_timing_events_fn=_log_post_timing_events,
-                        log_fn=log,
                         fname=fname,
-                        soft_off_shift=soft_off_shift,
-                        soft_cut_shift=soft_cut_shift,
-                        cutoff_reduced=cutoff_reduced,
-                        anchor_store=realized_cv_anchor_by_idx,
-                        anchor_record=anchor_record,
-                        messages=_build_kr_cv_head_guard_messages_v2(
-                            fname,
-                            alias,
-                            offset_reduced=offset_reduced,
-                            cutoff_extended=cutoff_extended,
+                        log_fn=log,
+                        validate_fn=validate_oto_params,
+                        prepare_cv_head_syllable_timing_fn=_prepare_cv_head_syllable_timing,
+                        apply_post_timing_pipeline_fn=_apply_post_timing_pipeline,
+                        guard_cv_head_offset_to_current_onset_fn=_guard_cv_head_offset_to_current_onset,
+                        ensure_cv_head_min_vowel_coverage_fn=_ensure_cv_head_min_vowel_coverage,
+                        guard_cv_cutoff_to_next_onset_fn=_guard_cv_cutoff_to_next_onset,
+                        prepare_cv_head_anchor_context_fn=_prepare_kr_cv_head_anchor_context_v2,
+                        prepare_cv_bounds_fn=_prepare_cv_bounds_from_syllable,
+                        apply_anchor_lock_fn=_apply_kr_anchor_lock,
+                        build_anchor_record_fn=lambda selected_w_idx, **kwargs: _maybe_build_kr_realized_cv_anchor_record_v2(
+                            selected_w_idx,
+                            build_anchor_fn=_build_realized_kr_cv_anchor_v2,
+                            **kwargs,
                         ),
+                        finalize_row_fn=_finalize_kr_row_v2,
+                        row_builder_fn=_build_alias_rows,
+                        build_guard_messages_fn=_build_kr_cv_head_guard_messages_v2,
+                        log_post_timing_events_fn=_log_post_timing_events,
+                        anchor_store=realized_cv_anchor_by_idx,
                     )
                     continue
 
@@ -3672,106 +3508,50 @@ def generate_oto(
                     enable_cutoff_guard=True,
                     post_ctx=kr_post_ctx,
                 )
-                bridge_shift = 0.0
-                if alias_type in {"vc", "vv"}:
-                    prev_idx = bridge_pair.get("prev_idx")
-                    next_idx = bridge_pair.get("next_idx")
-                    if prev_idx is None or next_idx is None:
-                        if alias_type == "vc":
-                            prev_idx = current_w_idx
-                            next_idx = current_w_idx + 1
-                        elif selected_w_idx is not None and selected_w_idx >= 1:
-                            prev_idx = selected_w_idx - 1
-                            next_idx = selected_w_idx
-                    prev_anchor = bridge_pair.get("prev_anchor")
-                    next_anchor = bridge_pair.get("next_anchor")
-                    if prev_anchor is None and prev_idx is not None:
-                        prev_anchor = realized_cv_anchor_by_idx.get(prev_idx) or cv_anchor_by_idx.get(prev_idx)
-                    if next_anchor is None and next_idx is not None:
-                        next_anchor = realized_cv_anchor_by_idx.get(next_idx) or cv_anchor_by_idx.get(next_idx)
-                    if prev_anchor is not None and next_anchor is not None:
-                        pre_abs_before = float(offset + pre)
-                        offset, consonant, cutoff, pre, ovl = _refine_kr_bridge_with_adjacent_cv(
-                            offset,
-                            consonant,
-                            cutoff,
-                            pre,
-                            ovl,
-                            alias_type=alias_type,
-                            alias_text=alias,
-                            prev_cv=prev_anchor,
-                            next_cv=next_anchor,
-                        )
-                        bridge_shift = float((offset + pre) - pre_abs_before)
-                anchor_abs, next_onset_abs, next_vowel_abs = _resolve_kr_anchor_targets_v2(
-                    alias_type,
-                    c_end,
-                    n_start,
-                    n_end,
-                )
-                offset, consonant, cutoff, pre, ovl = _apply_kr_anchor_lock(
-                    fname=fname,
-                    alias_text=alias,
-                    format_type=file_format,
-                    alias_type=alias_type,
-                    offset=offset,
-                    consonant=consonant,
-                    cutoff=cutoff,
-                    pre=pre,
-                    ovl=ovl,
-                    timeline_start_ms=timeline_start_ms,
-                    timeline_end_ms=timeline_end_ms,
-                    file_duration_ms=wav_duration_ms,
-                    anchor_abs_ms=anchor_abs,
-                    next_onset_abs_ms=next_onset_abs,
-                    next_vowel_abs_ms=next_vowel_abs,
-                    mapping_confidence=row_mapping_confidence,
-                )
-                anchor_record = None
-                if alias_type == "cv" and selected_w_idx is not None:
-                    anchor_record = _maybe_build_kr_realized_cv_anchor_record_v2(
-                        selected_w_idx,
-                        offset=offset,
-                        consonant=consonant,
-                        cutoff=cutoff,
-                        pre=pre,
-                        ovl=ovl,
-                        onset_abs=c_start,
-                        vowel_start_abs=n_start,
-                        vowel_end_abs=n_end,
-                        c_end_abs=c_end,
-                        build_anchor_fn=_build_realized_kr_cv_anchor_v2,
-                    )
-                bridge_msg = _build_kr_bridge_adjust_message_v2(
-                    fname,
-                    alias,
-                    alias_type,
-                    bridge_shift,
-                )
-                _finalize_kr_row_v2(
+                _run_kr_general_row_v2(
                     final_lines=final_lines,
-                    row_builder_fn=_build_alias_rows,
                     real_wav_name=real_wav_name,
                     alias=alias,
+                    alias_type=alias_type,
+                    file_format=file_format,
                     offset=offset,
                     consonant=consonant,
                     cutoff=cutoff,
                     pre=pre,
                     ovl=ovl,
-                    generate_openutau=generate_openutau,
-                    alias_suffix=alias_suffix,
-                    alias_type=alias_type,
-                    wav_duration_ms=wav_duration_ms,
-                    validate_fn=validate_oto_params,
-                    log_post_timing_events_fn=_log_post_timing_events,
-                    log_fn=log,
-                    fname=fname,
                     soft_off_shift=soft_off_shift,
                     soft_cut_shift=soft_cut_shift,
                     cutoff_reduced=cutoff_reduced,
-                    anchor_store=realized_cv_anchor_by_idx,
-                    anchor_record=anchor_record if alias_type == "cv" and selected_w_idx is not None else None,
-                    messages=([bridge_msg] if bridge_msg is not None else []),
+                    selected_w_idx=selected_w_idx,
+                    current_w_idx=current_w_idx,
+                    c_end=c_end,
+                    n_start=n_start,
+                    n_end=n_end,
+                    c_start=c_start,
+                    row_mapping_confidence=row_mapping_confidence,
+                    timeline_start_ms=timeline_start_ms,
+                    timeline_end_ms=timeline_end_ms,
+                    wav_duration_ms=wav_duration_ms,
+                    generate_openutau=generate_openutau,
+                    alias_suffix=alias_suffix,
+                    fname=fname,
+                    log_fn=log,
+                    validate_fn=validate_oto_params,
+                    bridge_pair=bridge_pair,
+                    realized_cv_anchor_by_idx=realized_cv_anchor_by_idx,
+                    cv_anchor_by_idx=cv_anchor_by_idx,
+                    refine_bridge_fn=_refine_kr_bridge_with_adjacent_cv,
+                    resolve_anchor_targets_fn=_resolve_kr_anchor_targets_v2,
+                    apply_anchor_lock_fn=_apply_kr_anchor_lock,
+                    build_anchor_record_fn=lambda selected_idx, **kwargs: _maybe_build_kr_realized_cv_anchor_record_v2(
+                        selected_idx,
+                        build_anchor_fn=_build_realized_kr_cv_anchor_v2,
+                        **kwargs,
+                    ),
+                    build_bridge_message_fn=_build_kr_bridge_adjust_message_v2,
+                    finalize_row_fn=_finalize_kr_row_v2,
+                    row_builder_fn=_build_alias_rows,
+                    log_post_timing_events_fn=_log_post_timing_events,
                 )
 
             processed += 1

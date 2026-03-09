@@ -95,6 +95,8 @@ from core.ja_row_runtime_v2 import (
     maybe_build_ja_realized_cv_anchor_record as _maybe_build_ja_realized_cv_anchor_record_v2,
 )
 from core.ja_row_finalize_v2 import finalize_ja_row as _finalize_ja_row_v2
+from core.ja_cv_head_row_v2 import run_ja_cv_head_row as _run_ja_cv_head_row_v2
+from core.ja_vcv_row_v2 import run_ja_vcv_row as _run_ja_vcv_row_v2
 from core.ja_anchor_lock_v2 import (
     build_ja_anchor_lock_log_record as _build_ja_anchor_lock_log_record_v2,
     build_ja_anchor_lock_stats_delta as _build_ja_anchor_lock_stats_delta_v2,
@@ -3559,86 +3561,37 @@ def generate_ja_oto(
                         )
                         continue
 
-                    current_w_idx = mapped_idx
-                    if format_type == "vcv":
-                        stable_vcv_seq_idx = min(stable_vcv_seq_idx + 1, max(len(syllables_info) - 1, 0))
-                        cv_seq_idx = stable_vcv_seq_idx
-                    else:
-                        cv_seq_idx = current_w_idx + 1
-                    if current_w_idx >= len(syllables_info):
-                        current_w_idx = len(syllables_info) - 1
-                    last_vcv_mapped_idx = current_w_idx
-                        
-                    curr_syl = syllables_info[current_w_idx]
-                    curr_phones = curr_syl['phones']
-                    
-                    if current_w_idx > 0:
-                        prev_syl = syllables_info[current_w_idx - 1]
-                        prev_phones = prev_syl['phones']
-                        prev_v_start = prev_phones[-1].minTime * 1000
-                        prev_v_end = prev_phones[-1].maxTime * 1000
-                    else:
-                        prev_v_start = curr_phones[0].minTime * 1000 - 100
-                        prev_v_end = curr_phones[0].minTime * 1000
-                        
-                    _c_start, c_boundary, n_start, n_end = _ja_extract_cv_bounds(
-                        curr_phones, alias_text=alias, alias_type="vcv"
-                    )
-
-                    offset, consonant, cutoff, pre, ovl = _compute_vcv_params_from_virtual_split(
-                        alias, prev_v_start, prev_v_end, c_boundary, n_end, base_shape=base_shape
-                    )
-                    offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
-                        offset, consonant, cutoff, pre, ovl, "vcv", mel_ctx_for_file,
-                        onset_hint=onset_hint_local, alias_text=alias
-                    )
-                    if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
-                        log(
-                            f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
-                        )
-                    
-                    offset, consonant, cutoff, pre, ovl = post_ctx.post_adjust(
-                        offset, consonant, cutoff, pre, ovl,
-                        alias_type='vcv', alias_text=alias,
-                        local_end_ms=n_end, local_cut_allow_ms=26.0
-                    )
-                    offset, consonant, cutoff, pre, ovl = _enforce_vcv_cv_entry_guard(
-                        offset, consonant, cutoff, pre, ovl,
-                        c_boundary=c_boundary, n_end=n_end, alias_text=alias
-                    )
-                    vcv_tok_for_profile = _extract_vcv_target_syllable(alias)
-                    vcv_onset_for_profile, _vcv_vowel_for_profile = split_ja_romaji_syllable(vcv_tok_for_profile)
-                    n_bridge_vcv = _ja_is_n_bridge_alias(alias, "vcv")
-                    vv_like_profile_key = "vcv_vv_like" if not (vcv_onset_for_profile or "").strip() else "vcv"
-                    if n_bridge_vcv and vv_like_profile_key == "vcv":
-                        vv_like_profile_key = "vcv_n_bridge"
-                    offset, consonant, cutoff, pre, ovl = _apply_ja_anchor_lock(
-                        fname=fname,
-                        alias_text=alias,
-                        format_type="vcv",
-                        alias_type="vcv",
-                        profile_alias_type=vv_like_profile_key,
-                        offset=offset,
-                        consonant=consonant,
-                        cutoff=cutoff,
-                        pre=pre,
-                        ovl=ovl,
-                        anchor_abs_ms=c_boundary,
-                        next_onset_abs_ms=n_start,
-                        next_vowel_abs_ms=n_end,
-                    )
-                    
-                    _finalize_ja_row_v2(
-                        final_lines=final_lines,
-                        row_builder_fn=_build_ja_alias_output_rows_v2,
-                        real_wav_name=real_wav_name,
+                    (
+                        current_w_idx,
+                        cv_seq_idx,
+                        stable_vcv_seq_idx,
+                        last_vcv_mapped_idx,
+                    ) = _run_ja_vcv_row_v2(
+                        syllables_info=syllables_info,
+                        current_w_idx=current_w_idx,
+                        stable_vcv_seq_idx=stable_vcv_seq_idx,
+                        cv_seq_idx=cv_seq_idx,
+                        mapped_idx=mapped_idx,
                         alias=alias,
-                        offset=offset,
-                        consonant=consonant,
-                        cutoff=cutoff,
-                        pre=pre,
-                        ovl=ovl,
+                        base_shape=base_shape,
+                        mel_ctx_for_file=mel_ctx_for_file,
+                        onset_hint_local=onset_hint_local,
+                        post_ctx=post_ctx,
+                        real_wav_name=real_wav_name,
+                        final_lines=final_lines,
                         generate_openutau=generate_openutau,
+                        fname=fname,
+                        log_fn=log,
+                        prepare_cv_bounds_fn=_ja_extract_cv_bounds,
+                        compute_vcv_params_fn=_compute_vcv_params_from_virtual_split,
+                        soft_guard_fn=_apply_soft_mel_offset_cutoff_guard,
+                        enforce_vcv_cv_entry_guard_fn=_enforce_vcv_cv_entry_guard,
+                        extract_target_syllable_fn=_extract_vcv_target_syllable,
+                        split_syllable_fn=split_ja_romaji_syllable,
+                        is_n_bridge_fn=_ja_is_n_bridge_alias,
+                        apply_anchor_lock_fn=_apply_ja_anchor_lock,
+                        finalize_row_fn=_finalize_ja_row_v2,
+                        row_builder_fn=_build_ja_alias_output_rows_v2,
                         generate_openutau_aliases_fn=generate_ja_openutau_aliases,
                         alias_out_fn=_alias_out,
                     )
@@ -3937,128 +3890,39 @@ def generate_ja_oto(
                             )
                         continue
                     
-                    c_start, c_end, n_start, n_end = _ja_extract_cv_bounds(
-                        curr_phones, alias_text=alias, alias_type="cv_head"
-                    )
-                        
-                    c_hint = curr_phones[0].mark if curr_phones else ""
-                    offset, pre = _ja_cv_offset_and_pre(
-                        c_start,
-                        c_end,
-                        alias,
-                        c_hint=c_hint,
-                        alias_type="cv_head",
-                        vowel_start=n_start,
-                        vowel_end=n_end,
-                    )
-                    onset_hint_local = c_hint
-                    ovl = _adaptive_ja_overlap(pre, c_hint, mode="cv_head")
-                    
-                    cv_vowel_len = n_end - n_start
-                    added_cons = min(cv_vowel_len * 0.5, 150)
-                    if added_cons < 80: added_cons = 80
-                    consonant = pre + added_cons
-                    min_cut_abs = post_ctx.cv_head_min_cutoff(
-                        offset, consonant, pre, n_start, n_end
-                    )
-                    if min_cut_abs is None:
-                        cutoff = -(consonant + cv_vowel_len * 0.25)
-                    else:
-                        cutoff = -max(consonant + 14.0, min_cut_abs)
-                    offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
-                        offset, consonant, cutoff, pre, ovl, "cv_head", mel_ctx_for_file,
-                        onset_hint=onset_hint_local, alias_text=alias
-                    )
-                    if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
-                        log(
-                            f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
-                        )
-
-                    offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
-                        offset, consonant, cutoff, pre, ovl, base_shape, alias_type="cv_head"
-                    )
-                    
-                    offset, consonant, cutoff, pre, ovl = post_ctx.post_adjust(
-                        offset, consonant, cutoff, pre, ovl,
-                        alias_type='cv_head', alias_text=alias,
-                        local_end_ms=n_end, local_cut_allow_ms=28.0
-                    )
-                    offset, consonant, cutoff, pre, ovl = _apply_ja_anchor_lock(
-                        fname=fname,
-                        alias_text=alias,
-                        format_type=format_type,
-                        alias_type="cv_head",
-                        offset=offset,
-                        consonant=consonant,
-                        cutoff=cutoff,
-                        pre=pre,
-                        ovl=ovl,
-                        anchor_abs_ms=c_end,
-                        next_onset_abs_ms=n_start,
-                        next_vowel_abs_ms=n_end,
-                    )
-                    offset, consonant, cutoff, pre, offset_reduced = post_ctx.guard_cv_head_offset_to_onset(
-                        offset, consonant, cutoff, pre, current_w_idx, alias_text=alias
-                    )
-                    v_cov_start = n_start
-                    v_cov_end = n_end
-                    try:
-                        v_target = _ja_target_vowel_from_alias(alias, alias_type="cv_head")
-                        v_phone, _v_idx = _ja_pick_vowel_phone(curr_phones, target_vowel=v_target)
-                        if v_phone is not None:
-                            v_cov_start = float(v_phone.minTime) * 1000.0
-                            v_cov_end = float(v_phone.maxTime) * 1000.0
-                    except Exception:
-                        pass
-                    offset, consonant, cutoff, pre, cutoff_extended = post_ctx.ensure_cv_head_min_vowel_coverage(
-                        offset, consonant, cutoff, pre, v_cov_start, v_cov_end
-                    )
-                    offset, consonant, cutoff, pre, cutoff_reduced = post_ctx.guard_cv_cutoff_to_next_onset(
-                        offset, consonant, cutoff, pre, current_w_idx,
-                        alias_type="cv_head",
-                        format_type=format_type,
-                        vowel_start_ms=v_cov_start,
-                        vowel_end_ms=v_cov_end,
-                    )
-                    offset, consonant, cutoff, pre, ovl = validate_oto_params(
-                        offset, consonant, cutoff, pre, ovl
-                    )
-                    anchor_record = _maybe_build_ja_realized_cv_anchor_record_v2(
-                        current_w_idx,
-                        offset=offset,
-                        consonant=consonant,
-                        cutoff=cutoff,
-                        pre=pre,
-                        ovl=ovl,
-                        onset_abs=c_start,
-                        vowel_start_abs=n_start,
-                        c_end_abs=c_end,
-                        vowel_end_abs=n_end,
-                        build_anchor_fn=_build_realized_cv_anchor_v2,
-                    )
-                    _finalize_ja_row_v2(
-                        final_lines=final_lines,
-                        row_builder_fn=_build_ja_alias_output_rows_v2,
-                        real_wav_name=real_wav_name,
+                    _run_ja_cv_head_row_v2(
+                        curr_phones=curr_phones,
+                        current_w_idx=current_w_idx,
                         alias=alias,
-                        offset=offset,
-                        consonant=consonant,
-                        cutoff=cutoff,
-                        pre=pre,
-                        ovl=ovl,
+                        format_type=format_type,
+                        base_shape=base_shape,
+                        mel_ctx_for_file=mel_ctx_for_file,
+                        post_ctx=post_ctx,
+                        real_wav_name=real_wav_name,
+                        final_lines=final_lines,
                         generate_openutau=generate_openutau,
+                        fname=fname,
+                        log_fn=log,
+                        validate_fn=validate_oto_params,
+                        extract_cv_bounds_fn=_ja_extract_cv_bounds,
+                        cv_offset_and_pre_fn=_ja_cv_offset_and_pre,
+                        adaptive_overlap_fn=_adaptive_ja_overlap,
+                        soft_guard_fn=_apply_soft_mel_offset_cutoff_guard,
+                        apply_base_shape_blend_fn=_apply_base_shape_blend,
+                        apply_anchor_lock_fn=_apply_ja_anchor_lock,
+                        target_vowel_from_alias_fn=_ja_target_vowel_from_alias,
+                        pick_vowel_phone_fn=_ja_pick_vowel_phone,
+                        build_anchor_record_fn=lambda current_idx, **kwargs: _maybe_build_ja_realized_cv_anchor_record_v2(
+                            current_idx,
+                            build_anchor_fn=_build_realized_cv_anchor_v2,
+                            **kwargs,
+                        ),
+                        finalize_row_fn=_finalize_ja_row_v2,
+                        row_builder_fn=_build_ja_alias_output_rows_v2,
                         generate_openutau_aliases_fn=generate_ja_openutau_aliases,
                         alias_out_fn=_alias_out,
+                        build_guard_messages_fn=_build_ja_cv_guard_messages_v2,
                         anchor_store=realized_cv_anchor_by_idx,
-                        anchor_record=anchor_record,
-                        log_fn=log,
-                        messages=_build_ja_cv_guard_messages_v2(
-                            fname,
-                            alias,
-                            cutoff_reduced=cutoff_reduced,
-                            offset_reduced=offset_reduced,
-                            cutoff_extended=cutoff_extended,
-                        ),
                     )
                     continue
 
