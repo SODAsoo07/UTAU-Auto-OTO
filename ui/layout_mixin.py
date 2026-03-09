@@ -155,13 +155,13 @@ class LayoutMixin:
         self.aligner_help_label.pack(side="left", fill="x", expand=True)
 
         self.row_mfa_profile = ctk.CTkFrame(row_align, fg_color="transparent")
-        self.row_mfa_profile.pack(side="left", fill="x", expand=True)
+        self.row_mfa_profile.pack(side="left", fill="x", expand=True, padx=(8, 0))
         build_left_label(self.row_mfa_profile, "MFA 정렬 프로필:").pack(side="left")
         self.mfa_align_profile_menu = ctk.CTkOptionMenu(
             self.row_mfa_profile,
             values=["정확도 우선 (기본)", "빠름 (저사양 추천)"],
             variable=self.mfa_align_profile_var,
-            width=190,
+            width=250,
             command=lambda _v: self._save_config(),
         )
         self.mfa_align_profile_menu.pack(side="left", padx=(6, 8))
@@ -257,12 +257,23 @@ class LayoutMixin:
         self._build_log_tab()
 
         bottom = ctk.CTkFrame(self)
-        bottom.pack(fill="x", padx=15, pady=(5, 15))
+        bottom.pack(side="bottom", fill="x", padx=15, pady=(5, 15))
 
-        self.status_label = ctk.CTkLabel(bottom, text="대기 중", anchor="w", text_color="gray")
-        self.status_label.pack(side="left", padx=10)
+        status_group = ctk.CTkFrame(bottom, fg_color="transparent")
+        status_group.pack(side="left", fill="x", expand=True, padx=(10, 6))
 
-        self.run_btn = ctk.CTkButton(bottom, text="▶ 전\ccb4 실행", font=("", 14, "bold"), width=150, height=40, command=self._run_full_pipeline)
+        self.status_label = ctk.CTkLabel(status_group, text="대기 중", anchor="w", text_color="gray")
+        self.status_label.pack(fill="x")
+
+        progress_row = ctk.CTkFrame(status_group, fg_color="transparent")
+        progress_row.pack(fill="x", pady=(4, 0))
+        self.progress_bar = ctk.CTkProgressBar(progress_row, height=12)
+        self.progress_bar.set(0.0)
+        self.progress_bar.pack(side="left", fill="x", expand=True)
+        self.progress_label = ctk.CTkLabel(progress_row, text="0%", width=42, anchor="e", text_color="gray")
+        self.progress_label.pack(side="left", padx=(8, 0))
+
+        self.run_btn = ctk.CTkButton(bottom, text="▶ 전체 실행", font=("", 14, "bold"), width=150, height=40, command=self._run_full_pipeline)
         self.run_btn.pack(side="right", padx=10)
 
         self.report_btn = ctk.CTkButton(bottom, text="🐛 오류 제보", width=120, height=40, fg_color="#FF6B6B", hover_color="#EE5A5A", command=self._export_error_report)

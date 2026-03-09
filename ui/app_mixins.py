@@ -299,8 +299,41 @@ class AppRuntimeMixin:
 
         def _do():
             self.status_label.configure(text=msg, text_color=color)
+            ratio = self._parse_progress_ratio_from_status(msg)
+            if ratio is None:
+                if msg.strip().startswith("✅") or ("완료" in msg and not self.is_running):
+                    ratio = 1.0
+                elif msg.strip().startswith("❌") and not self.is_running:
+                    ratio = 0.0
+            if ratio is not None:
+                self._set_progress(ratio)
 
         self._after_safe(_do)
+
+    def _parse_progress_ratio_from_status(self, msg):
+        text = str(msg or "")
+        pair = re.search(r"(?<!\d)(\d+)\s*/\s*(\d+)(?!\d)", text)
+        if pair:
+            cur = int(pair.group(1))
+            total = int(pair.group(2))
+            if total > 0:
+                return max(0.0, min(1.0, float(cur) / float(total)))
+        pct = re.search(r"(?<!\d)(\d{1,3})\s*%", text)
+        if pct:
+            val = int(pct.group(1))
+            return max(0.0, min(1.0, float(val) / 100.0))
+        return None
+
+    def _set_progress(self, ratio):
+        if not hasattr(self, "progress_bar"):
+            return
+        try:
+            value = max(0.0, min(1.0, float(ratio)))
+        except Exception:
+            return
+        self.progress_bar.set(value)
+        if hasattr(self, "progress_label"):
+            self.progress_label.configure(text=f"{int(round(value * 100.0))}%")
 
     def _status_color_for_message(self, msg):
         text = str(msg or "")
@@ -440,6 +473,17 @@ class AppRuntimeMixin:
             if hasattr(self, "status_label"):
                 current_text = self.status_label.cget("text")
                 self.status_label.configure(text_color=self._status_color_for_message(current_text))
+                if running:
+                    self._set_progress(0.0)
+                else:
+                    ratio = self._parse_progress_ratio_from_status(current_text)
+                    if ratio is None:
+                        if str(current_text).strip().startswith("✅") or "완료" in str(current_text):
+                            ratio = 1.0
+                        elif str(current_text).strip().startswith("❌"):
+                            ratio = 0.0
+                    if ratio is not None:
+                        self._set_progress(ratio)
 
         self._after_safe(_do)
 
