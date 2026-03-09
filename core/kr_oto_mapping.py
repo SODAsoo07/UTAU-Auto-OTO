@@ -285,6 +285,46 @@ def _score_kr_syllable_mapping(candidate_infos, cv_targets):
     return max(_avg_with_shift(0), _avg_with_shift(1), _avg_with_shift(-1))
 
 
+def _is_kr_glide_vowel(vowel):
+    v = str(vowel or "").strip().lower()
+    return v in {"ya", "ye", "yeo", "yo", "yu", "wa", "wae", "we", "weo", "wi", "wo"}
+
+
+def _compute_kr_glide_mismatch_ratio(candidate_infos, cv_targets):
+    """candidate 토큰과 target 토큰의 활음(이중모음) 불일치 비율을 반환합니다."""
+    if not candidate_infos or not cv_targets:
+        return 0.0
+
+    cand = []
+    for s in candidate_infos:
+        tok = s.get("roman_cv") or s.get("roman") or s.get("word") or ""
+        tok = _kr_cv_kernel(tok)
+        if tok:
+            cand.append(tok)
+
+    if not cand:
+        return 0.0
+
+    n = min(len(cand), len(cv_targets))
+    if n <= 0:
+        return 0.0
+
+    compared = 0
+    mismatch = 0
+    for i in range(n):
+        _co, cv, _cc = _split_kr_syllable_parts(cand[i])
+        _to, tv, _tc = _split_kr_syllable_parts(cv_targets[i])
+        if not cv or not tv:
+            continue
+        compared += 1
+        if _is_kr_glide_vowel(cv) != _is_kr_glide_vowel(tv):
+            mismatch += 1
+
+    if compared <= 0:
+        return 0.0
+    return float(mismatch) / float(compared)
+
+
 def _should_prefer_alias_based_syllables(file_format, used_words_based, base_score, alt_score):
     """한국어 음절열 후보 중 alias/filename 기반 결과를 채택할지 결정합니다."""
     fmt = str(file_format or "").strip().lower()
@@ -299,6 +339,13 @@ def _should_prefer_alias_based_syllables(file_format, used_words_based, base_sco
 
     if fmt == "cvc":
         return alt_score >= 60.0 and alt_score >= (base_score - 2.0)
+
+    if fmt == "vcv":
+        # VCV는 음절 경계가 한 칸만 밀려도 체감 오류가 커서,
+        # alias 기반 점수가 words 기반보다 확실히 우세하면 더 적극적으로 전환한다.
+        if alt_score >= max(base_score + 4.0, 62.0):
+            return True
+        return base_score < 48.0 and alt_score >= 56.0
 
     allow_alias_override = True
     if used_words_based and base_score >= 58.0:
@@ -347,6 +394,7 @@ __all__ = [
     "_build_kr_cvvc_occurrence_map",
     "_build_kr_cvvc_vv_occurrence_map",
     "_clamp_kr_cv_index_to_order",
+    "_compute_kr_glide_mismatch_ratio",
     "_extract_cv_targets_from_lines",
     "_extract_kr_cv_targets_from_filename",
     "_extract_kr_vv_pair_key",

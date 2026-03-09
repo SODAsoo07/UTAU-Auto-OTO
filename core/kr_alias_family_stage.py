@@ -60,6 +60,8 @@ def try_handle_kr_glottal_alias(
     validate_fn,
     apply_alias_suffix_fn,
     find_vowel_phone_fn,
+    fit_to_wav_fn=None,
+    wav_duration_ms: float = 0.0,
 ) -> tuple[bool, int, int]:
     if state.glottal_kind not in {"head", "tail"}:
         return False, current_w_idx, cv_seq_idx
@@ -108,7 +110,23 @@ def try_handle_kr_glottal_alias(
         consonant = pre + added_cons
         cutoff = -(consonant + vowel_len * 0.25)
 
-    offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
+    try:
+        offset, consonant, cutoff, pre, ovl = validate_fn(
+            offset, consonant, cutoff, pre, ovl, alias_type=state.alias_type
+        )
+    except TypeError:
+        offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
+    if callable(fit_to_wav_fn):
+        offset, consonant, cutoff, pre, ovl, _ = fit_to_wav_fn(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            wav_duration_ms,
+            alias_type=state.alias_type,
+            validate_fn=validate_fn,
+        )
     alias_out = apply_alias_suffix_fn(alias, alias_suffix)
     final_lines.append(
         f"{real_wav_name}={alias_out},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
@@ -129,6 +147,8 @@ def try_handle_kr_breath_tail_alias(
     validate_fn,
     apply_alias_suffix_fn,
     find_vowel_phone_fn,
+    fit_to_wav_fn=None,
+    wav_duration_ms: float = 0.0,
 ) -> tuple[bool, int]:
     if not state.breath_tail:
         return False, current_w_idx
@@ -150,7 +170,23 @@ def try_handle_kr_breath_tail_alias(
     ovl = pre * 0.85
     consonant = max(vowel_end - offset, pre + 10)
     cutoff = -(max(last_end - offset, consonant + 80))
-    offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
+    try:
+        offset, consonant, cutoff, pre, ovl = validate_fn(
+            offset, consonant, cutoff, pre, ovl, alias_type=state.alias_type
+        )
+    except TypeError:
+        offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
+    if callable(fit_to_wav_fn):
+        offset, consonant, cutoff, pre, ovl, _ = fit_to_wav_fn(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            wav_duration_ms,
+            alias_type=state.alias_type,
+            validate_fn=validate_fn,
+        )
     alias_out = apply_alias_suffix_fn(alias, alias_suffix)
     final_lines.append(
         f"{real_wav_name}={alias_out},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
