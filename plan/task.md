@@ -1,32 +1,67 @@
-# OTO 품질 향상: 파라미터 강제 순서, 파일 일관성, 타이밍 세분화
+# Mapping Core v2 Task Status
 
-## Phase 1: 파라미터 순서 강제 로직 (최우선)
-- [x] `validate_oto_params` 강화 — alias type별 최소 간격, 순서 제약 강제
-- [x] `kr_oto_bridge._validate_oto_params` 동기화
+기준일: 2026-03-10
 
-## Phase 2: 파일 단위 일관성 후처리 (8-1, 구조적 핵심)
-- [x] 새 모듈 `core/kr_oto_file_consistency.py` 생성
-  - [x] 인접 에일리어스 간 cutoff↔offset 연속성 보정
-  - [x] 같은 WAV 내 파라미터 급변 감지 및 스무딩
-  - [x] 파일 전체 일관성 검증 + 순서 강제 재적용
-- [x] `run_kr_post_file_pipeline`에 일관성 단계 통합
+이 문서는 예전 계획 초안이 아니라 현재 코드 기준 상태를 반영한다.
+`[x]`는 코드 반영 완료, `[/]`는 일부 완료 또는 후속 작업 남음, `[ ]`는 미착수다.
 
-## Phase 3: CV 자음 분기 세분화 (영역 3)
-- [x] `kr_oto_cv._compute_kr_cv_timing` — 마찰음(ㅅ,ㅆ,ㅎ) 전용 분기 추가
-- [x] `adaptive_overlap` — 경음/격음 세분화
-- [x] 이중모음 glide 구간 길이 직접 반영
+## Core Rewrite
 
-## Phase 4: 후처리 가드 개선 (영역 4)
-- [x] `_stabilize_params_to_phone_activity` — alias type별 snap 방향 차등
-- [x] `_apply_soft_mel_offset_cutoff_guard` — onset detection 기반 강화
+- [x] 파일 단위 전역 매핑 planner 도입
+- [x] alignment ingest 계층 분리
+- [x] candidate selection / candidate filtering 계층 분리
+- [x] runtime confidence / low-trust policy 공통화
+- [x] row-level abstain 정책 공통화
+- [x] diagnostics / trace / unset collector 공통화
+- [x] anchor graph 도입 및 VC/VV 브리지에 연결
+- [x] JA/KR anchor lock adapter 공통화
 
-## Phase 5: ML 리파이너 개선 (영역 5)
-- [x] `KR_DELTA_CLIP_LIMITS` alias type별 분리
+## Row Execution Split
 
-## Phase 6: 음절 매핑 정확도 (영역 2)
-- [x] 동적 매핑 신뢰도 임계값
-- [x] 매핑 점프 순서 일관성 검증
+- [x] Japanese `VCV` row executor 분리
+- [x] Japanese `CV_HEAD` row executor 분리
+- [x] Japanese general row executor 분리
+- [x] Korean `VCV` row executor 분리
+- [x] Korean `CV_HEAD` row executor 분리
+- [x] Korean general row executor 분리
+- [x] row finalize / row output helper 공통화
 
-## 검증
-- [/] 기존 테스트 통과 확인
-- [x] 새 유닛 테스트 작성 (validate, file consistency)
+## Mapping Selection Split
+
+- [x] Korean `VCV` 선택 로직 helper 분리
+- [x] Korean `CV_HEAD` forced index helper 분리
+- [x] Japanese `CV/CV_HEAD` forced index helper 분리
+- [x] Japanese `VCV` 선택 로직 helper 분리
+- [/] generator 내부의 언어별 세부 scoring 함수 완전 분리
+설명: 핵심 선택 분기는 빠졌지만, 일부 언어별 scoring 유틸은 아직 generator 안에 남아 있다.
+
+## Timing / Guard / Postprocess
+
+- [x] Japanese timing helper 분리
+- [x] Korean timing helper 분리
+- [x] `_stabilize_params_to_phone_activity` 블렌딩 가드 반영
+- [x] `_apply_soft_mel_offset_cutoff_guard` onset 보조 탐지 반영
+- [x] 파일 일관성 후처리 강화
+- [x] alias-type aware ML delta clipping 반영
+
+## Diagnostics / Verification
+
+- [x] v2 공통 모듈 대상 단위 테스트 추가
+- [x] JA/KR 매핑 선택 회귀 테스트 추가
+- [x] row/finalize/output 계층 테스트 추가
+- [x] 타깃 pytest 회귀 통과
+현재 기준: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest ...` -> `90 passed`
+
+## Legacy / Cleanup
+
+- [x] 사용 중단된 분석 스크립트 일부를 `scripts/legacy_mapping_v1/`로 이동
+- [x] SOFA를 핵심 정렬 경로에서 제외하는 방향으로 설계 정리
+- [/] generator 내부 잔여 wrapper / scoring 유틸 정리
+설명: 동작상 불필요한 얇은 wrapper는 대부분 줄였지만, 설명용/호환용 로컬 함수가 일부 남아 있다.
+
+## Remaining High-Value Work
+
+- [ ] generator 밖으로 남은 scoring 유틸 완전 이관
+- [ ] 배치 평가 재실행 후 수치 문서화
+- [ ] 실제 샘플 oto 생성 및 청감 검증 기록화
+- [ ] `mapping_core_v2_design` 문서와 구현 결과의 최종 동기화

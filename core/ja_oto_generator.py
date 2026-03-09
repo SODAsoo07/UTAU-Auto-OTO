@@ -97,6 +97,11 @@ from core.ja_row_runtime_v2 import (
 from core.ja_row_finalize_v2 import finalize_ja_row as _finalize_ja_row_v2
 from core.ja_cv_head_row_v2 import run_ja_cv_head_row as _run_ja_cv_head_row_v2
 from core.ja_vcv_row_v2 import run_ja_vcv_row as _run_ja_vcv_row_v2
+from core.ja_general_row_v2 import run_ja_general_row as _run_ja_general_row_v2
+from core.ja_mapping_select_v2 import (
+    resolve_ja_forced_cv_index as _resolve_ja_forced_cv_index_v2,
+    select_ja_vcv_mapping as _select_ja_vcv_mapping_v2,
+)
 from core.ja_anchor_lock_v2 import (
     build_ja_anchor_lock_log_record as _build_ja_anchor_lock_log_record_v2,
     build_ja_anchor_lock_stats_delta as _build_ja_anchor_lock_stats_delta_v2,
@@ -3356,197 +3361,41 @@ def generate_ja_oto(
 
                 # === VCV 연속음 처리 ===
                 if is_vcv:
-                    expected_seq_idx = stable_vcv_seq_idx if format_type == "vcv" else cv_seq_idx
-                    if expected_seq_idx < len(syllables_info):
-                        expected_idx = expected_seq_idx
-                    else:
-                        expected_idx = len(syllables_info) - 1
-                    target_tok_vcv_raw = _extract_vcv_target_syllable(alias)
-                    planned_idx_vcv = _resolve_ja_planned_cv_index(
-                        ja_planned_cv_indices,
-                        expected_seq_idx,
-                        target_tok_vcv_raw,
-                        syllables_info,
-                        alias_type="vcv",
-                    )
-                    if planned_idx_vcv is not None:
-                        mapped_idx = int(planned_idx_vcv)
-                        if ja_mapping_debug_reason_logging and mapped_idx != expected_idx:
-                            log(
-                                f"🧭 {fname}: VCV 전역 anchor plan 적용 "
-                                f"{expected_idx + 1}->{mapped_idx + 1} ({alias})"
-                            )
-                    else:
-                        mapped_idx = _select_vcv_syllable_index(alias, expected_idx, syllables_info)
-                    resynced_vcv_exact = False
-                    resync_idx_vcv = _find_ja_exact_target_index(
-                        target_tok_vcv_raw,
-                        expected_idx,
-                        syllables_info,
-                        search_back=(0 if format_type == "vcv" else 3),
-                        search_fwd=3,
-                    )
-                    target_tok_vcv_norm_for_resync = _normalize_ja_syllable_token(target_tok_vcv_raw)
-                    exp_tok_vcv_for_resync = _normalize_ja_syllable_token(
-                        _syllable_info_token(syllables_info[expected_idx])
-                    )
-                    # 역방향 exact 재동기화는 매우 보수적으로 허용:
-                    # expected가 이미 target이면 앞 음절로 되돌아가면 안 된다.
-                    if (
-                        resync_idx_vcv is not None
-                        and resync_idx_vcv < expected_idx
-                        and exp_tok_vcv_for_resync == target_tok_vcv_norm_for_resync
-                    ):
-                        resync_idx_vcv = None
-                    if resync_idx_vcv is not None and resync_idx_vcv != mapped_idx:
-                        log(
-                            f"🧭 {fname}: VCV 순서 드리프트 복구 "
-                            f"{expected_idx + 1}->{resync_idx_vcv + 1} ({alias})"
-                        )
-                        mapped_idx = resync_idx_vcv
-                        resynced_vcv_exact = True
-                    # 모음 불일치(예: ri -> ra) 시는 강제로 재탐색/되돌림
-                    target_tok_vcv_norm = _normalize_ja_syllable_token(target_tok_vcv_raw)
-                    mapped_tok_vcv_now = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[mapped_idx]))
-                    exp_tok_vcv_now = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[expected_idx]))
-                    _t_on, target_vowel_vcv = split_ja_romaji_syllable(target_tok_vcv_norm)
-                    _m_on, mapped_vowel_vcv = split_ja_romaji_syllable(mapped_tok_vcv_now)
-                    _e_on, expected_vowel_vcv = split_ja_romaji_syllable(exp_tok_vcv_now)
-                    if target_vowel_vcv in JA_VOWELS and mapped_vowel_vcv and mapped_vowel_vcv != target_vowel_vcv:
-                        fixed_idx_vcv = _find_ja_cv_vowel_match_index(
-                            target_tok_vcv_norm,
-                            expected_idx,
-                            syllables_info,
-                            search_back=2,
-                            search_fwd=3,
-                        )
-                        if fixed_idx_vcv is not None and fixed_idx_vcv != mapped_idx:
-                            log(
-                                f"🧭 {fname}: VCV 모음 불일치 보정 "
-                                f"{mapped_idx + 1}->{fixed_idx_vcv + 1} ({alias})"
-                            )
-                            mapped_idx = fixed_idx_vcv
-                        elif expected_vowel_vcv == target_vowel_vcv:
-                            log(
-                                f"🛡️ {fname}: VCV 모음 불일치 차단 "
-                                f"({mapped_idx + 1}->{expected_idx + 1}, {alias})"
-                            )
-                            mapped_idx = expected_idx
-                    if mapped_idx > expected_idx:
-                        target_tok_vcv = _normalize_ja_syllable_token(target_tok_vcv_raw)
-                        exp_tok_vcv = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[expected_idx]))
-                        mapped_tok_vcv = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[mapped_idx]))
-                        if mapped_tok_vcv != target_tok_vcv or exp_tok_vcv == target_tok_vcv:
-                            mapped_idx = expected_idx
-                    if mapped_idx < expected_idx:
-                        # VCV에서는 누적 선행 드리프트 복구를 위해 제한적 역방향 이동 허용
-                        if (expected_idx - mapped_idx) > 3:
-                            mapped_idx = expected_idx
-                    if mapped_idx > (expected_idx + 1):
-                        # exact 토큰 재동기화로 확인된 경우에만 +2까지 허용
-                        if not (resynced_vcv_exact and mapped_idx <= (expected_idx + 2)):
-                            mapped_idx = expected_idx
-                    # 과도 점프/역행 가드: 한 줄에서 여러 음절을 건너뛰지 않도록 제한
-                    if last_vcv_mapped_idx >= 0:
-                        if mapped_idx < last_vcv_mapped_idx:
-                            log(
-                                f"🛡️ {fname}: VCV 역행 점프 차단 "
-                                f"{mapped_idx + 1}->{last_vcv_mapped_idx + 1} ({alias})"
-                            )
-                            mapped_idx = last_vcv_mapped_idx
-                        elif mapped_idx > (last_vcv_mapped_idx + 2):
-                            clamped_idx = last_vcv_mapped_idx + 1
-                            log(
-                                f"🛡️ {fname}: VCV 과도 점프 차단 "
-                                f"{mapped_idx + 1}->{clamped_idx + 1} ({alias})"
-                            )
-                            mapped_idx = clamped_idx
-                    # 최종 안전장치: 목표 토큰과 매핑 토큰이 다르면 모음 기준 재탐색 후 되돌림
-                    mapped_tok_final = _normalize_ja_syllable_token(
-                        _syllable_info_token(syllables_info[mapped_idx])
-                    )
-                    if target_tok_vcv_norm and mapped_tok_final != target_tok_vcv_norm:
-                        retry_idx_vcv = _find_ja_cv_vowel_match_index(
-                            target_tok_vcv_norm,
-                            expected_idx,
-                            syllables_info,
-                            search_back=4,
-                            search_fwd=4,
-                        )
-                        if (
-                            retry_idx_vcv is not None
-                            and retry_idx_vcv != mapped_idx
-                            and abs(retry_idx_vcv - expected_idx) <= 2
-                        ):
-                            log(
-                                f"🧭 {fname}: VCV 최종 재탐색 "
-                                f"{mapped_idx + 1}->{retry_idx_vcv + 1} ({alias})"
-                            )
-                            mapped_idx = retry_idx_vcv
-                            mapped_tok_final = _normalize_ja_syllable_token(
-                                _syllable_info_token(syllables_info[mapped_idx])
-                            )
-                        if mapped_tok_final != target_tok_vcv_norm:
-                            log(
-                                f"🛡️ {fname}: VCV 토큰 불일치 되돌림 "
-                                f"({mapped_idx + 1}->{expected_idx + 1}, {alias})"
-                            )
-                            mapped_idx = expected_idx
-                    # VCV는 MFA/phone 순서를 기본으로 유지하되,
-                    # target exact match가 명확한 1칸 보정만 제한 허용한다.
-                    if format_type == "vcv":
-                        mapped_idx = _prefer_vcv_candidate_index(
-                            expected_idx,
-                            mapped_idx,
-                            target_tok_vcv_norm,
-                            syllables_info,
-                            max_delta=1,
-                        )
-                    if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
-                        log(f"🧭 {fname}: VCV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
-                    expected_tok_trace = _syllable_info_token(syllables_info[expected_idx])
-                    mapped_tok_trace = _syllable_info_token(syllables_info[mapped_idx])
-                    local_trace_conf = None
-                    if syllable_confidence_by_idx:
-                        conf_idx = max(0, min(expected_idx, len(syllable_confidence_by_idx) - 1))
-                        local_trace_conf = float(syllable_confidence_by_idx[conf_idx])
-                    if should_trace_mapping_decision(
-                        mapping_tier=mapping_tier,
-                        expected_idx=expected_idx,
-                        mapped_idx=mapped_idx,
-                        target_token=_normalize_ja_syllable_token(target_tok_vcv_norm),
-                        mapped_token=_normalize_ja_syllable_token(mapped_tok_trace),
-                    ):
-                        _append_mapping_trace(
-                            _build_ja_mapping_trace_record(
-                                fname=fname,
-                                alias=alias,
-                                alias_type="vcv",
-                                format_type=format_type,
-                                target_tok=target_tok_vcv_norm,
-                                expected_idx=expected_idx,
-                                mapped_idx=mapped_idx,
-                                expected_tok=expected_tok_trace,
-                                mapped_tok=mapped_tok_trace,
-                                mapping_tier=mapping_tier,
-                                mapping_reason_code=mapping_reason_code,
-                                mapping_confidence=mapping_confidence_base,
-                                filename_order_locked=filename_order_locked,
-                                local_conf=local_trace_conf,
-                            )
-                        )
-                    row_abstain = decide_cv_row_abstain(
-                        alias_type="cv",
+                    vcv_mapping = _select_ja_vcv_mapping_v2(
+                        alias=alias,
+                        fname=fname,
                         format_type=format_type,
-                        candidate_idx=mapped_idx,
-                        candidate_count=len(syllables_info),
-                        candidate_active=(
-                            _is_ja_cv_syllable_active(syllables_info[mapped_idx], require_vowel=True)
-                            if 0 <= mapped_idx < len(syllables_info)
-                            else False
-                        ),
-                        active_only_formats={"cvvc", "cv"},
+                        stable_vcv_seq_idx=stable_vcv_seq_idx,
+                        cv_seq_idx=cv_seq_idx,
+                        syllables_info=syllables_info,
+                        ja_planned_cv_indices=ja_planned_cv_indices,
+                        last_vcv_mapped_idx=last_vcv_mapped_idx,
+                        mapping_tier=mapping_tier,
+                        mapping_reason_code=mapping_reason_code,
+                        mapping_confidence_base=mapping_confidence_base,
+                        filename_order_locked=filename_order_locked,
+                        syllable_confidence_by_idx=syllable_confidence_by_idx,
+                        log_fn=log,
+                        debug_logging=ja_mapping_debug_reason_logging,
+                        resolve_planned_cv_index_fn=_resolve_ja_planned_cv_index,
+                        select_vcv_syllable_index_fn=_select_vcv_syllable_index,
+                        extract_target_syllable_fn=_extract_vcv_target_syllable,
+                        find_exact_target_index_fn=_find_ja_exact_target_index,
+                        normalize_syllable_token_fn=_normalize_ja_syllable_token,
+                        syllable_info_token_fn=_syllable_info_token,
+                        split_syllable_fn=split_ja_romaji_syllable,
+                        ja_vowels=JA_VOWELS,
+                        find_vowel_match_index_fn=_find_ja_cv_vowel_match_index,
+                        prefer_vcv_candidate_index_fn=_prefer_vcv_candidate_index,
+                        should_trace_mapping_decision_fn=should_trace_mapping_decision,
+                        build_mapping_trace_record_fn=_build_ja_mapping_trace_record,
+                        append_mapping_trace_fn=_append_mapping_trace,
+                        decide_cv_row_abstain_fn=decide_cv_row_abstain,
+                        is_cv_syllable_active_fn=_is_ja_cv_syllable_active,
                     )
+                    expected_idx = int(vcv_mapping["expected_idx"])
+                    mapped_idx = int(vcv_mapping["mapped_idx"])
+                    row_abstain = dict(vcv_mapping["row_abstain"])
                     if row_abstain.get("should_skip"):
                         if ja_mapping_debug_reason_logging:
                             log(
@@ -3630,42 +3479,23 @@ def generate_ja_oto(
                                 )
                     target_tok = _extract_ja_cv_target_syllable(alias, alias_type="cv_head")
                     resynced_cv_head_exact = False
-                    planned_idx_cv_head = _resolve_ja_planned_cv_index(
-                        ja_planned_cv_indices,
-                        expected_seq_idx,
-                        target_tok,
-                        syllables_info,
+                    forced_cvvc_idx = _resolve_ja_forced_cv_index_v2(
+                        alias=alias,
                         alias_type="cv_head",
+                        target_tok=target_tok,
+                        expected_seq_idx=expected_seq_idx,
+                        expected_idx=expected_idx,
+                        syllables_info=syllables_info,
+                        planned_indices=ja_planned_cv_indices,
+                        occurrence_map=ja_cvvc_occurrence_map or {},
+                        occurrence_state=ja_cvvc_occurrence_state,
+                        resolve_planned_cv_index_fn=_resolve_ja_planned_cv_index,
+                        resolve_cvvc_occurrence_index_fn=_resolve_ja_cvvc_occurrence_index,
+                        remap_forced_cv_index_fn=_remap_ja_forced_cv_index,
+                        log_fn=log,
+                        debug_logging=ja_mapping_debug_reason_logging,
+                        fname=fname,
                     )
-                    forced_cvvc_idx = planned_idx_cv_head
-                    if forced_cvvc_idx is None:
-                        forced_cvvc_idx = _resolve_ja_cvvc_occurrence_index(
-                            alias,
-                            "cv_head",
-                            ja_cvvc_occurrence_map or {},
-                            ja_cvvc_occurrence_state,
-                        )
-                    elif ja_mapping_debug_reason_logging and forced_cvvc_idx != expected_idx:
-                        log(
-                            f"🧭 {fname}: CV_HEAD 전역 anchor plan 적용 "
-                            f"{expected_idx + 1}->{int(forced_cvvc_idx) + 1} ({alias})"
-                        )
-                    if forced_cvvc_idx is not None and not (0 <= int(forced_cvvc_idx) < len(syllables_info)):
-                        remapped_idx = _remap_ja_forced_cv_index(target_tok, expected_idx, syllables_info)
-                        if remapped_idx is not None:
-                            if ja_mapping_debug_reason_logging:
-                                log(
-                                    f"🧭 {fname}: CV_HEAD occurrence 범위 보정 "
-                                    f"({int(forced_cvvc_idx) + 1}->{int(remapped_idx) + 1}, {alias})"
-                                )
-                            forced_cvvc_idx = int(remapped_idx)
-                        else:
-                            if ja_mapping_debug_reason_logging:
-                                log(
-                                    f"🛡️ {fname}: CV_HEAD occurrence 무효화 "
-                                    f"(idx={int(forced_cvvc_idx) + 1}, {alias})"
-                                )
-                            forced_cvvc_idx = None
                     if forced_cvvc_idx is not None:
                         mapped_idx = max(0, min(int(forced_cvvc_idx), len(syllables_info) - 1))
                         if ja_mapping_debug_reason_logging and mapped_idx != expected_idx:
@@ -3960,42 +3790,23 @@ def generate_ja_oto(
                                 )
                     target_tok = _extract_ja_cv_target_syllable(alias, alias_type="cv")
                     resynced_cv_exact = False
-                    planned_idx_cv = _resolve_ja_planned_cv_index(
-                        ja_planned_cv_indices,
-                        expected_seq_idx,
-                        target_tok,
-                        syllables_info,
+                    forced_cvvc_idx = _resolve_ja_forced_cv_index_v2(
+                        alias=alias,
                         alias_type="cv",
+                        target_tok=target_tok,
+                        expected_seq_idx=expected_seq_idx,
+                        expected_idx=expected_idx,
+                        syllables_info=syllables_info,
+                        planned_indices=ja_planned_cv_indices,
+                        occurrence_map=ja_cvvc_occurrence_map or {},
+                        occurrence_state=ja_cvvc_occurrence_state,
+                        resolve_planned_cv_index_fn=_resolve_ja_planned_cv_index,
+                        resolve_cvvc_occurrence_index_fn=_resolve_ja_cvvc_occurrence_index,
+                        remap_forced_cv_index_fn=_remap_ja_forced_cv_index,
+                        log_fn=log,
+                        debug_logging=ja_mapping_debug_reason_logging,
+                        fname=fname,
                     )
-                    forced_cvvc_idx = planned_idx_cv
-                    if forced_cvvc_idx is None:
-                        forced_cvvc_idx = _resolve_ja_cvvc_occurrence_index(
-                            alias,
-                            "cv",
-                            ja_cvvc_occurrence_map or {},
-                            ja_cvvc_occurrence_state,
-                        )
-                    elif ja_mapping_debug_reason_logging and forced_cvvc_idx != expected_idx:
-                        log(
-                            f"🧭 {fname}: CV 전역 anchor plan 적용 "
-                            f"{expected_idx + 1}->{int(forced_cvvc_idx) + 1} ({alias})"
-                        )
-                    if forced_cvvc_idx is not None and not (0 <= int(forced_cvvc_idx) < len(syllables_info)):
-                        remapped_idx = _remap_ja_forced_cv_index(target_tok, expected_idx, syllables_info)
-                        if remapped_idx is not None:
-                            if ja_mapping_debug_reason_logging:
-                                log(
-                                    f"🧭 {fname}: CV occurrence 범위 보정 "
-                                    f"({int(forced_cvvc_idx) + 1}->{int(remapped_idx) + 1}, {alias})"
-                                )
-                            forced_cvvc_idx = int(remapped_idx)
-                        else:
-                            if ja_mapping_debug_reason_logging:
-                                log(
-                                    f"🛡️ {fname}: CV occurrence 무효화 "
-                                    f"(idx={int(forced_cvvc_idx) + 1}, {alias})"
-                                )
-                            forced_cvvc_idx = None
                     if forced_cvvc_idx is not None:
                         mapped_idx = max(0, min(int(forced_cvvc_idx), len(syllables_info) - 1))
                         if ja_mapping_debug_reason_logging and mapped_idx != expected_idx:
@@ -4446,178 +4257,55 @@ def generate_ja_oto(
                         if vc_next_anchor is None:
                             vc_next_anchor = realized_cv_anchor_by_idx.get(current_w_idx + 1) or cv_anchor_by_idx.get(current_w_idx + 1)
 
-                if alias_type in {"cv", "cv_head", "vcv"}:
-                    offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = _apply_soft_mel_offset_cutoff_guard(
-                        offset, consonant, cutoff, pre, ovl, alias_type, mel_ctx_for_file,
-                        onset_hint=onset_hint_local, alias_text=alias
-                    )
-                    if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
-                        log(
-                            f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
-                        )
-
-                offset, consonant, cutoff, pre, ovl = _apply_base_shape_blend(
-                    offset, consonant, cutoff, pre, ovl, base_shape, alias_type=alias_type
-                )
-                offset, consonant, cutoff, pre, ovl = post_ctx.post_adjust(
-                    offset, consonant, cutoff, pre, ovl,
-                    alias_type=alias_type, alias_text=alias,
-                    local_end_ms=n_end,
-                    local_cut_allow_ms=(44.0 if alias_type == 'vc' else 40.0 if alias_type == 'vv' else 54.0),
-                )
-                if alias_type == "vc":
-                    pre_abs_before = offset + pre
-                    offset, consonant, cutoff, pre, ovl = _refine_ja_vc_with_adjacent_cv(
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        ovl,
-                        c_char=c_char,
-                        prev_cv_anchor=vc_prev_anchor,
-                        next_cv_anchor=vc_next_anchor,
-                        prev_v_end_abs=c_end,
-                        next_c_start_abs=n_start,
-                        next_c_end_abs=n_end,
-                    )
-                    pre_abs_after = offset + pre
-                    # CVVC에서 CV 앵커 드리프트가 있을 때 VC까지 과보정되는 것을 막기 위해
-                    # pre 절대 이동량을 보수적으로 제한한다.
-                    if format_type in {"cvvc", "cv"}:
-                        max_shift = 26.0
-                        if mapping_tier == "high":
-                            max_shift = 34.0
-                        onset_cls = _ja_onset_class(c_char)
-                        if onset_cls in {"voiced", "nasal"}:
-                            max_shift += 4.0
-                        if _ja_is_n_bridge_alias(alias, "vc"):
-                            max_shift = min(max_shift, 22.0)
-                        (
-                            offset,
-                            consonant,
-                            cutoff,
-                            pre,
-                            ovl,
-                            pre_abs_after,
-                            clamped_shift,
-                        ) = _limit_pre_anchor_shift(
-                            offset,
-                            consonant,
-                            cutoff,
-                            pre,
-                            ovl,
-                            pre_abs_before=pre_abs_before,
-                            max_shift_ms=max_shift,
-                        )
-                        if clamped_shift:
-                            log(
-                                f"🛡️ {fname}: VC-CV 앵커 이동 제한 "
-                                f"({pre_abs_before:.1f}->{pre_abs_after:.1f}ms, {alias})"
-                            )
-                    if abs(pre_abs_after - pre_abs_before) >= 6.0:
-                        log(
-                            f"🧭 {fname}: VC-CV 앵커 재정렬 "
-                            f"({pre_abs_before:.1f}->{pre_abs_after:.1f}ms, {alias})"
-                        )
-                anchor_abs = c_end
-                next_onset_abs = n_start
-                next_vowel_abs = n_end
-                if alias_type == "vc":
-                    anchor_abs = n_start
-                    next_onset_abs = n_start
-                    next_vowel_abs = n_end
-                elif alias_type == "vv":
-                    anchor_abs = c_end
-                    next_onset_abs = n_start
-                    next_vowel_abs = n_end
-                offset, consonant, cutoff, pre, ovl = _apply_ja_anchor_lock(
-                    fname=fname,
-                    alias_text=alias,
-                    format_type=format_type,
+                _run_ja_general_row_v2(
+                    final_lines=final_lines,
+                    real_wav_name=real_wav_name,
+                    alias=alias,
                     alias_type=alias_type,
+                    format_type=format_type,
                     offset=offset,
                     consonant=consonant,
                     cutoff=cutoff,
                     pre=pre,
                     ovl=ovl,
-                    anchor_abs_ms=anchor_abs,
-                    next_onset_abs_ms=next_onset_abs,
-                    next_vowel_abs_ms=next_vowel_abs,
-                )
-                if alias_type in {"cv", "cv_head"} and not is_anchor_lock_enabled("japanese", format_type):
-                    offset, consonant, cutoff, pre, ovl = _enforce_cv_pre_anchor_guard(
-                        offset, consonant, cutoff, pre, ovl,
-                        c_end_abs=c_end, alias_type=alias_type
-                    )
-                if alias_type in {"cv", "cv_head"}:
-                    offset, consonant, cutoff, pre, cutoff_reduced = post_ctx.guard_cv_cutoff_to_next_onset(
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        current_w_idx,
-                        alias_type=alias_type,
-                        format_type=format_type,
-                        vowel_start_ms=(n_start if alias_type == "cv_head" else None),
-                        vowel_end_ms=(n_end if alias_type == "cv_head" else None),
-                    )
-                    offset, consonant, cutoff, pre, ovl = validate_oto_params(
-                        offset, consonant, cutoff, pre, ovl
-                    )
-                    anchor_record = _maybe_build_ja_realized_cv_anchor_record_v2(
-                        current_w_idx,
-                        offset=offset,
-                        consonant=consonant,
-                        cutoff=cutoff,
-                        pre=pre,
-                        ovl=ovl,
-                        onset_abs=c_start,
-                        vowel_start_abs=n_start,
-                        c_end_abs=c_end,
-                        vowel_end_abs=n_end,
+                    c_end=c_end,
+                    n_start=n_start,
+                    n_end=n_end,
+                    c_start=c_start,
+                    current_w_idx=current_w_idx,
+                    generate_openutau=generate_openutau,
+                    fname=fname,
+                    log_fn=log,
+                    base_shape=base_shape,
+                    mel_ctx_for_file=mel_ctx_for_file,
+                    onset_hint_local=onset_hint_local,
+                    mapping_tier=mapping_tier,
+                    c_char=c_char,
+                    vc_prev_anchor=vc_prev_anchor,
+                    vc_next_anchor=vc_next_anchor,
+                    post_ctx=post_ctx,
+                    validate_fn=validate_oto_params,
+                    soft_guard_fn=_apply_soft_mel_offset_cutoff_guard,
+                    base_shape_blend_fn=_apply_base_shape_blend,
+                    refine_ja_vc_fn=_refine_ja_vc_with_adjacent_cv,
+                    onset_class_fn=_ja_onset_class,
+                    is_n_bridge_fn=_ja_is_n_bridge_alias,
+                    limit_pre_anchor_shift_fn=_limit_pre_anchor_shift,
+                    apply_anchor_lock_fn=_apply_ja_anchor_lock,
+                    anchor_lock_enabled_fn=is_anchor_lock_enabled,
+                    enforce_cv_pre_anchor_guard_fn=_enforce_cv_pre_anchor_guard,
+                    build_anchor_record_fn=lambda current_idx, **kwargs: _maybe_build_ja_realized_cv_anchor_record_v2(
+                        current_idx,
                         build_anchor_fn=_build_realized_cv_anchor_v2,
-                    )
-                    _finalize_ja_row_v2(
-                        final_lines=final_lines,
-                        row_builder_fn=_build_ja_alias_output_rows_v2,
-                        real_wav_name=real_wav_name,
-                        alias=alias,
-                        offset=offset,
-                        consonant=consonant,
-                        cutoff=cutoff,
-                        pre=pre,
-                        ovl=ovl,
-                        generate_openutau=generate_openutau,
-                        generate_openutau_aliases_fn=generate_ja_openutau_aliases,
-                        alias_out_fn=_alias_out,
-                        anchor_store=realized_cv_anchor_by_idx,
-                        anchor_record=anchor_record,
-                        log_fn=log,
-                        messages=_build_ja_cv_guard_messages_v2(
-                            fname,
-                            alias,
-                            cutoff_reduced=cutoff_reduced,
-                        ),
-                    )
-                else:
-                    _finalize_ja_row_v2(
-                        final_lines=final_lines,
-                        row_builder_fn=_build_ja_alias_output_rows_v2,
-                        real_wav_name=real_wav_name,
-                        alias=alias,
-                        offset=offset,
-                        consonant=consonant,
-                        cutoff=cutoff,
-                        pre=pre,
-                        ovl=ovl,
-                        generate_openutau=generate_openutau,
-                        generate_openutau_aliases_fn=generate_ja_openutau_aliases,
-                        alias_out_fn=_alias_out,
-                        anchor_store=None,
-                        anchor_record=None,
-                        log_fn=None,
-                        messages=None,
-                    )
+                        **kwargs,
+                    ),
+                    finalize_row_fn=_finalize_ja_row_v2,
+                    row_builder_fn=_build_ja_alias_output_rows_v2,
+                    generate_openutau_aliases_fn=generate_ja_openutau_aliases,
+                    alias_out_fn=_alias_out,
+                    build_guard_messages_fn=_build_ja_cv_guard_messages_v2,
+                    anchor_store=realized_cv_anchor_by_idx,
+                )
 
             processed += 1
 
