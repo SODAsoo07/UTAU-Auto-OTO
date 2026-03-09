@@ -71,6 +71,8 @@ def normalize_auto_format_value(language: str, auto_format: str) -> str:
     if lang == "korean":
         if normalized == "cvc" or normalized.startswith("cvc/") or normalized.startswith("cvc("):
             return "cvc"
+        if normalized.startswith("cvc(한국어전용)") or raw.strip() == "CVC (한국어 전용)":
+            return "cvc"
         if normalized.startswith("cv/") or normalized == "cv" or normalized.startswith("cv("):
             return "cv"
     else:

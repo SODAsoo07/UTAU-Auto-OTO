@@ -31,6 +31,7 @@ class FormatTypeUtilsTests(unittest.TestCase):
 
     def test_normalize_auto_format_value_keeps_korean_cvc_bucket(self):
         self.assertEqual(normalize_auto_format_value("korean", "cvc"), "cvc")
+        self.assertEqual(normalize_auto_format_value("korean", "CVC (한국어 전용)"), "cvc")
         self.assertEqual(normalize_auto_format_value("korean", "CV (단독음)"), "cv")
         self.assertEqual(normalize_auto_format_value("korean", "CV/연단음"), "cv")
         self.assertEqual(normalize_auto_format_value("korean", "CVC"), "cvc")

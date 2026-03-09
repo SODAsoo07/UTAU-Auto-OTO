@@ -7,10 +7,15 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from core.oto_ml_lightgbm import _normalize_model_file_for_runtime
+from core.oto_ml_lightgbm import _make_label_gain, _normalize_model_file_for_runtime
 
 
 class LightGBMRuntimeLoaderTests(unittest.TestCase):
+    def test_make_label_gain_expands_to_required_max_label(self):
+        self.assertEqual(_make_label_gain(0), [0])
+        self.assertEqual(_make_label_gain(3), [0, 1, 3, 7])
+        self.assertEqual(len(_make_label_gain(7)), 8)
+
     def test_normalize_model_file_keeps_lf_file_as_is(self):
         with tempfile.TemporaryDirectory() as td:
             model_path = os.path.join(td, "model_lf.txt")

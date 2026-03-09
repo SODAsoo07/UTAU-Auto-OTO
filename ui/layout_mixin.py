@@ -292,7 +292,7 @@ class LayoutMixin:
     def _get_auto_format_options(self, language=None):
         lang = language or self._get_language()
         if lang == "korean":
-            return ["자동 감지 (권장)", "CV/연단음", "CVC", "CVVC", "VCV (연속음)"]
+            return ["자동 감지 (권장)", "CV/연단음", "CVC (한국어 전용)", "CVVC", "VCV (연속음)"]
         return ["자동 감지 (권장)", "CV/연단음", "CVVC", "VCV (연속음)"]
 
     def _set_auto_format_from_code(self, format_code, language=None):
@@ -303,13 +303,13 @@ class LayoutMixin:
         label_map = {
             "": "자동 감지 (권장)",
             "cv": "CV/연단음",
-            "cvc": "CVC",
+            "cvc": "CVC (한국어 전용)",
             "cvvc": "CVVC",
             "vcv": "VCV (연속음)",
         }
         label = label_map.get(str(format_code or "").strip().lower(), "자동 감지 (권장)")
         if label not in values:
-            label = "CV/연단음" if label == "CVC" and lang != "korean" else "자동 감지 (권장)"
+            label = "CV/연단음" if label == "CVC (한국어 전용)" and lang != "korean" else "자동 감지 (권장)"
         self.auto_format_var.set(label)
 
     def _on_language_change(self, value):

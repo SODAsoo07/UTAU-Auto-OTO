@@ -64,6 +64,14 @@ DEFAULT_LGB_PARAMS = {
 }
 
 
+def _make_label_gain(max_label: int) -> list[int]:
+    max_value = max(0, int(max_label))
+    gains = [0]
+    for idx in range(1, max_value + 1):
+        gains.append((1 << idx) - 1)
+    return gains
+
+
 def _runtime_model_cache_dir() -> str:
     configured = str(os.environ.get("UTOA_LGB_MODEL_CACHE_DIR", "") or "").strip()
     if configured:
@@ -372,7 +380,7 @@ def train_lightgbm_selector_bundle(
     if not selector_dataset_csv or not os.path.exists(selector_dataset_csv):
         raise FileNotFoundError(selector_dataset_csv)
 
-    df = pd.read_csv(selector_dataset_csv)
+    df = pd.read_csv(selector_dataset_csv, low_memory=False)
     language = str(language).strip().lower()
     format_type = normalize_format_type(language, format_type)
     alias_family = normalize_alias_family(alias_family)
@@ -401,10 +409,13 @@ def train_lightgbm_selector_bundle(
 
     params = dict(DEFAULT_LGB_PARAMS)
     if objective == "ranking":
+        y_train = pd.to_numeric(train_df["selector_rank_label"], errors="coerce").fillna(0).astype(int)
+        y_valid = pd.to_numeric(valid_df["selector_rank_label"], errors="coerce").fillna(0).astype(int)
+        max_label = int(max(y_train.max() if len(y_train) else 0, y_valid.max() if len(y_valid) else 0, 0))
         params.update({
             "objective": "lambdarank",
             "metric": "ndcg",
-            "label_gain": [0, 1, 3, 7, 15, 31],
+            "label_gain": _make_label_gain(max_label),
         })
         train_order = train_df.sort_values(["selector_group_id", "candidate_index"]).index
         valid_order = valid_df.sort_values(["selector_group_id", "candidate_index"]).index
@@ -412,8 +423,6 @@ def train_lightgbm_selector_bundle(
         valid_df = valid_df.loc[valid_order]
         X_train = X_train.loc[train_order]
         X_valid = X_valid.loc[valid_order]
-        y_train = pd.to_numeric(train_df["selector_rank_label"], errors="coerce").fillna(0).astype(int)
-        y_valid = pd.to_numeric(valid_df["selector_rank_label"], errors="coerce").fillna(0).astype(int)
         dtrain = lgb.Dataset(
             X_train,
             label=y_train,

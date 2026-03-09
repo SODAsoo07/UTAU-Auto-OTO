@@ -58,6 +58,27 @@ def _model_root_for_language(language: str) -> str:
     return os.path.join(base_dir, "assets", "models", "oto_ml", lang)
 
 
+def _workspace_model_root_for_language(language: str) -> str:
+    lang = str(language).strip().lower()
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    workspace_root = os.environ.get("UTOA_OTO_ML_WORKSPACE_ROOT", "").strip()
+    if workspace_root:
+        return os.path.join(workspace_root, lang)
+    return os.path.join(base_dir, "logs", "ml_workspace", "models", lang)
+
+
+def _export_model_root() -> str:
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    configured = os.environ.get("UTOA_OTO_ML_EXPORT_ROOT", "").strip()
+    if configured:
+        return configured
+    return os.path.join(base_dir, "ML_models")
+
+
+def _structured_export_model_root_for_language(language: str) -> str:
+    return os.path.join(_export_model_root(), str(language).strip().lower())
+
+
 def _ml_same_language_borrow_only() -> bool:
     raw = str(os.environ.get("UTOA_ML_SAME_LANGUAGE_BORROW_ONLY", "1")).strip().lower()
     return raw not in {"0", "false", "off", "no"}
@@ -74,7 +95,12 @@ def _resolve_lightgbm_model_dir(language: str, format_type: str, alias_family: s
     family = normalize_alias_family(alias_family)
     lang = str(language or "").strip().lower()
     candidates = []
-    for root in (_installed_model_root_for_language(language), _model_root_for_language(language)):
+    for root in (
+        _structured_export_model_root_for_language(language),
+        _workspace_model_root_for_language(language),
+        _installed_model_root_for_language(language),
+        _model_root_for_language(language),
+    ):
         if os.path.isfile(os.path.join(root, "model_meta.json")):
             candidates.append(root)
         else:
@@ -92,6 +118,40 @@ def _resolve_lightgbm_model_dir(language: str, format_type: str, alias_family: s
                     candidates.append(os.path.join(root, "general", "families", family, "v1"))
                     candidates.append(os.path.join(root, f"general_{family}", "v1"))
                 candidates.append(os.path.join(root, "general", "v1"))
+    export_root = _export_model_root()
+    legacy_export_candidates = []
+    if family:
+        legacy_export_candidates.extend(
+            [
+                os.path.join(export_root, f"{lang}_{fmt}_{family}_v1"),
+                os.path.join(export_root, f"{lang}_{fmt}_{family}"),
+            ]
+        )
+    legacy_export_candidates.extend(
+        [
+            os.path.join(export_root, f"{lang}_{fmt}_v1"),
+            os.path.join(export_root, f"{lang}_{fmt}"),
+            os.path.join(export_root, f"{lang}_{fmt}_profile_run_new"),
+            os.path.join(export_root, f"{lang}_{fmt}_profile_run_v4"),
+            os.path.join(export_root, f"{lang}_{fmt}_profile_run_v3"),
+            os.path.join(export_root, f"{lang}_{fmt}_profile_run"),
+        ]
+    )
+    if fmt == "cvc":
+        if family:
+            legacy_export_candidates.extend(
+                [
+                    os.path.join(export_root, f"{lang}_cv_{family}_v1"),
+                    os.path.join(export_root, f"{lang}_cv_{family}"),
+                ]
+            )
+        legacy_export_candidates.extend(
+            [
+                os.path.join(export_root, f"{lang}_cv_v1"),
+                os.path.join(export_root, f"{lang}_cv"),
+            ]
+        )
+    candidates.extend(legacy_export_candidates)
     for candidate in candidates:
         if os.path.isfile(os.path.join(candidate, "model_meta.json")):
             return candidate
@@ -451,13 +511,99 @@ def _apply_korean_bridge_post_guard(
     cons = pre + cons_gap_new
     cutoff_abs = cons + cut_gap_new
 
-    curr_end = _to_float(row_context.get("curr_phone_end_ms"), 0.0)
-    next_gap = _to_float(row_context.get("next_phone_gap_ms"), 0.0)
-    if curr_end > 0.0 and next_gap > 0.0:
-        next_onset_rel = max((curr_end + next_gap) - float(offset), pre + 10.0)
-        cutoff_abs = min(cutoff_abs, max(cons + cut_lo, next_onset_rel + next_allow))
+    cutoff_abs = _clamp_bridge_cutoff_to_next_onset(
+        row_context,
+        float(offset),
+        float(cons),
+        float(pre),
+        float(cutoff_abs),
+        min_cut_gap=float(cut_lo),
+        next_allow=float(next_allow),
+        pre_floor=10.0,
+    )
 
     return validate_fn(float(offset), float(cons), -float(cutoff_abs), float(pre), float(ovl))
+
+
+def _clamp_bridge_cutoff_to_next_onset(
+    row_context: Dict[str, object],
+    offset: float,
+    cons: float,
+    pre: float,
+    cutoff_abs: float,
+    *,
+    min_cut_gap: float,
+    next_allow: float,
+    pre_floor: float,
+) -> float:
+    curr_end = _to_float(row_context.get("curr_phone_end_ms"), 0.0)
+    next_gap = _to_float(row_context.get("next_phone_gap_ms"), 0.0)
+    if curr_end <= 0.0 or next_gap <= 0.0:
+        return float(cutoff_abs)
+    next_onset_rel = max((curr_end + next_gap) - float(offset), float(pre) + float(pre_floor))
+    return min(float(cutoff_abs), max(float(cons) + float(min_cut_gap), next_onset_rel + float(next_allow)))
+
+
+def _apply_japanese_bridge_post_guard(
+    row_context: Dict[str, object],
+    params: Tuple[float, float, float, float, float],
+    validate_fn,
+) -> Tuple[float, float, float, float, float]:
+    format_type = normalize_format_type("japanese", row_context.get("format_type", ""))
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    if format_type not in {"cvvc", "vcv"} or alias_type not in {"vc", "vv"}:
+        return params
+
+    offset, cons, cutoff, pre, ovl = validate_fn(*params)
+    offset = float(offset)
+    cons = float(cons)
+    pre = float(pre)
+    ovl = float(ovl)
+    cutoff_abs = abs(float(cutoff))
+    mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
+
+    if alias_type == "vc":
+        gap_lo, gap_hi, gap_t = 8.0, 22.0, 13.0
+        cons_lo, cons_hi, cons_t = 18.0, 72.0, 38.0
+        cut_lo, cut_hi, cut_t = 10.0, 34.0, 18.0
+        next_allow = 12.0
+    else:
+        gap_lo, gap_hi, gap_t = 4.0, 12.0, 7.0
+        cons_lo, cons_hi, cons_t = 52.0, 144.0, 90.0
+        cut_lo, cut_hi, cut_t = 18.0, 88.0, 44.0
+        next_allow = 8.0
+
+    if mapping_conf < 0.70:
+        next_allow *= 0.85
+    elif mapping_conf > 0.88:
+        next_allow *= 1.08
+
+    gap_now = max(pre - ovl, 0.0)
+    cons_gap_now = max(cons - pre, 6.0)
+    cut_gap_now = max(cutoff_abs - cons, 8.0)
+
+    gap_new = max(gap_lo, min(gap_hi, gap_now))
+    gap_new = (gap_new * 0.72) + (gap_t * 0.28)
+    cons_gap_new = max(cons_lo, min(cons_hi, cons_gap_now))
+    cons_gap_new = (cons_gap_new * 0.70) + (cons_t * 0.30)
+    cut_gap_new = max(cut_lo, min(cut_hi, cut_gap_now))
+    cut_gap_new = (cut_gap_new * 0.68) + (cut_t * 0.32)
+
+    ovl = max(0.0, pre - gap_new)
+    cons = pre + cons_gap_new
+    cutoff_abs = cons + cut_gap_new
+    cutoff_abs = _clamp_bridge_cutoff_to_next_onset(
+        row_context,
+        offset,
+        cons,
+        pre,
+        cutoff_abs,
+        min_cut_gap=float(cut_lo),
+        next_allow=float(next_allow),
+        pre_floor=8.0 if alias_type == "vc" else 6.0,
+    )
+
+    return validate_fn(offset, cons, -cutoff_abs, pre, ovl)
 
 
 def _apply_japanese_cvvc_cv_post_guard(
@@ -521,6 +667,7 @@ def _apply_language_specific_post_guard(
     if lang == "korean":
         out = _apply_korean_bridge_post_guard(row_context, out, validate_fn)
     elif lang == "japanese":
+        out = _apply_japanese_bridge_post_guard(row_context, out, validate_fn)
         out = _apply_japanese_cvvc_cv_post_guard(row_context, out, validate_fn)
     return out
 

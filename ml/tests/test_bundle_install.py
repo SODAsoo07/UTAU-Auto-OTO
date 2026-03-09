@@ -40,6 +40,33 @@ class BundleInstallTests(unittest.TestCase):
             self.assertTrue(os.path.isdir(result["installed_dir"]))
             self.assertTrue(os.path.isfile(os.path.join(result["installed_dir"], "model_meta.json")))
 
+    def test_install_family_bundle_preserves_family_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            model_dir = os.path.join(td, "assets", "models", "oto_ml", "japanese", "cvvc", "families", "bridge", "v1")
+            os.makedirs(model_dir, exist_ok=True)
+            files = {
+                "feature_schema.json": "{}",
+                "eval_summary.json": "{}",
+                "model_offset.txt": "x",
+                "model_cons.txt": "x",
+                "model_cutoff.txt": "x",
+                "model_pre.txt": "x",
+                "model_ovl.txt": "x",
+            }
+            for name, content in files.items():
+                with open(os.path.join(model_dir, name), "w", encoding="utf-8") as f:
+                    f.write(content)
+            with open(os.path.join(model_dir, "model_meta.json"), "w", encoding="utf-8") as f:
+                f.write(
+                    '{"language":"japanese","format_type":"cvvc","backend":"lightgbm","model_version":"v1","feature_version":"v1","filters":{"alias_family":"bridge"}}'
+                )
+            export_root = os.path.join(td, "exports")
+            manifest = export_model_bundle(model_dir, export_root)
+            result = install_exported_bundle(manifest["export_dir"], install_root=os.path.join(td, "installed"))
+            self.assertTrue(result["installed_dir"].endswith(os.path.join("japanese", "cvvc", "families", "bridge", "v1")))
+            self.assertEqual(result["alias_family"], "bridge")
+            self.assertTrue(os.path.isfile(os.path.join(result["installed_dir"], "model_meta.json")))
+
 
 if __name__ == "__main__":
     unittest.main()

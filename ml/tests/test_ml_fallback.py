@@ -8,6 +8,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.oto_ml_refiner import (
+    _apply_japanese_bridge_post_guard,
     _apply_japanese_cvvc_cv_post_guard,
     _apply_korean_bridge_post_guard,
     _apply_language_specific_delta_policy,
@@ -298,6 +299,46 @@ class MlFallbackTests(unittest.TestCase):
         self.assertLessEqual(abs(cutoff), 287.0)
         self.assertGreaterEqual(pre - ovl, 9.0)
         self.assertGreaterEqual(cons - pre, 13.0)
+
+    def test_japanese_vc_post_guard_limits_cutoff_extension(self):
+        def _validate(offset, consonant, cutoff, pre, ovl):
+            return float(offset), float(consonant), float(cutoff), float(pre), float(ovl)
+
+        out = _apply_japanese_bridge_post_guard(
+            {
+                "format_type": "cvvc",
+                "alias_type": "vc",
+                "curr_phone_end_ms": 1000.0,
+                "next_phone_gap_ms": 120.0,
+                "mapping_confidence": 0.92,
+            },
+            (850.0, 210.0, -420.0, 150.0, 30.0),
+            _validate,
+        )
+        _off, cons, cutoff, pre, ovl = out
+        self.assertLessEqual(abs(cutoff), 300.0)
+        self.assertGreaterEqual(pre - ovl, 7.0)
+        self.assertGreaterEqual(cons - pre, 17.0)
+
+    def test_japanese_vv_post_guard_preserves_gap_and_clamps_next_onset_leak(self):
+        def _validate(offset, consonant, cutoff, pre, ovl):
+            return float(offset), float(consonant), float(cutoff), float(pre), float(ovl)
+
+        out = _apply_japanese_bridge_post_guard(
+            {
+                "format_type": "cvvc",
+                "alias_type": "vv",
+                "curr_phone_end_ms": 900.0,
+                "next_phone_gap_ms": 110.0,
+                "mapping_confidence": 0.80,
+            },
+            (760.0, 260.0, -480.0, 170.0, 20.0),
+            _validate,
+        )
+        _off, cons, cutoff, pre, ovl = out
+        self.assertLessEqual(abs(cutoff), 278.0)
+        self.assertGreaterEqual(pre - ovl, 4.0)
+        self.assertGreaterEqual(cons - pre, 50.0)
 
     def test_korean_cvc_routes_to_cvc_family(self):
         routed_vc = _route_format_for_feature(

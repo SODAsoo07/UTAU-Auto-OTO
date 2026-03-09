@@ -11,6 +11,8 @@ import shutil
 import zipfile
 from typing import Dict, List
 
+from core.oto_ml_policy import normalize_alias_family
+
 
 REQUIRED_BUNDLE_FILES = [
     "feature_schema.json",
@@ -51,11 +53,34 @@ def resolve_bundle_dir(asset_root: str, bundle_spec: str) -> str:
     return os.path.abspath(os.path.join(asset_root, cleaned))
 
 
-def _default_bundle_slug(model_dir: str, meta: Dict[str, object]) -> str:
+def _bundle_routing_meta(model_dir: str, meta: Dict[str, object]) -> Dict[str, str]:
     language = str(meta.get("language", "")).strip().lower() or "unknown"
     format_type = str(meta.get("format_type", "")).strip().lower() or "unknown"
-    version = os.path.basename(os.path.abspath(model_dir)) or "v1"
-    return f"{language}_{format_type}_{version}"
+    alias_family = normalize_alias_family(
+        meta.get("alias_family", "") or (meta.get("filters") or {}).get("alias_family", "")
+    )
+    model_version = str(meta.get("model_version", "")).strip() or (os.path.basename(os.path.abspath(model_dir)) or "v1")
+    return {
+        "language": language,
+        "format_type": format_type,
+        "alias_family": alias_family,
+        "model_version": model_version,
+    }
+
+
+def bundle_install_subdir(model_dir: str, meta: Dict[str, object]) -> str:
+    route = _bundle_routing_meta(model_dir, meta)
+    parts = [route["language"], route["format_type"]]
+    if route["alias_family"]:
+        parts.extend(["families", route["alias_family"]])
+    parts.append(route["model_version"])
+    return os.path.join(*parts)
+
+
+def _default_bundle_slug(model_dir: str, meta: Dict[str, object]) -> str:
+    route = _bundle_routing_meta(model_dir, meta)
+    family_part = f"_{route['alias_family']}" if route["alias_family"] else ""
+    return f"{route['language']}_{route['format_type']}{family_part}_{route['model_version']}"
 
 
 def export_model_bundle(
@@ -74,6 +99,7 @@ def export_model_bundle(
         raise FileNotFoundError(f"Missing required bundle files in {model_dir}: {', '.join(missing)}")
 
     meta = read_bundle_meta(model_dir)
+    route = _bundle_routing_meta(model_dir, meta)
     slug = bundle_slug.strip() or _default_bundle_slug(model_dir, meta)
     out_dir = os.path.join(export_root, slug)
     if os.path.isdir(out_dir):
@@ -95,13 +121,15 @@ def export_model_bundle(
         "bundle_slug": slug,
         "source_dir": model_dir,
         "export_dir": out_dir,
-        "language": meta.get("language", ""),
-        "format_type": meta.get("format_type", ""),
+        "language": route["language"],
+        "format_type": route["format_type"],
+        "alias_family": route["alias_family"],
         "backend": meta.get("backend", ""),
-        "model_version": meta.get("model_version", ""),
+        "model_version": route["model_version"],
         "feature_version": meta.get("feature_version", ""),
         "train_rows": meta.get("train_rows", 0),
         "voicebank_count": meta.get("voicebank_count", 0),
+        "install_subdir": bundle_install_subdir(model_dir, meta).replace("\\", "/"),
         "files": files,
     }
     manifest_path = os.path.join(out_dir, "bundle_manifest.json")
