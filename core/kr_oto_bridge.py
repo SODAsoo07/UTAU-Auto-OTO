@@ -11,6 +11,7 @@ from core.kr_oto_rules import (
     _extract_alias_onset,
     _extract_vc_right_token,
 )
+from core.kr_oto_vv import _compute_kr_vowel_stable_anchor
 
 
 def _clamp(v, lo, hi):
@@ -237,7 +238,13 @@ def _compute_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, is_plosive_sibila
     if not prev_cv or not next_cv:
         return None
 
-    boundary_abs = next_cv["onset_abs"] if alias_type == "vc" else next_cv["pre_abs"]
+    if alias_type == "vc":
+        boundary_abs = next_cv["onset_abs"]
+    else:
+        boundary_abs = _compute_kr_vowel_stable_anchor(
+            next_cv.get("vowel_start_abs", next_cv.get("pre_abs", 0.0)),
+            next_cv.get("vowel_end_abs", next_cv.get("pre_abs", 0.0)),
+        )
     transition_len = max(boundary_abs - prev_cv["vowel_end_abs"], 14.0)
     if alias_type == "vc":
         if is_plosive_sibilant:
@@ -254,7 +261,11 @@ def _compute_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, is_plosive_sibila
     if pre <= 0:
         return None
 
-    ovl_tail = _clamp(prev_cv["vowel_len"] * (0.07 if alias_type == "vc" else 0.10), 3.0, 18.0 if alias_type == "vc" else 22.0)
+    ovl_tail = _clamp(
+        prev_cv["vowel_len"] * (0.05 if alias_type == "vc" else 0.08),
+        2.0 if alias_type == "vc" else 4.0,
+        14.0 if alias_type == "vc" else 18.0,
+    )
     target_ovl_abs = prev_cv["vowel_end_abs"] - ovl_tail
     ovl = target_ovl_abs - offset
     if is_plosive_sibilant:
@@ -322,33 +333,33 @@ def _refine_kr_bridge_with_adjacent_cv(
 
     if a_type == "vc":
         if is_stop:
-            w_anchor, w_shape = 0.64, 0.60
+            w_anchor, w_shape = 0.68, 0.64
             pre_lo, pre_hi = 32.0, 154.0
-            ovl_gap_lo, ovl_gap_hi = 10.0, 24.0
+            ovl_gap_lo, ovl_gap_hi = 8.0, 20.0
             cons_gap_lo, cons_gap_hi = 14.0, 56.0
-            cut_gap_lo, cut_gap_hi = 8.0, 24.0
-            cut_allow_ms = 7.0
+            cut_gap_lo, cut_gap_hi = 10.0, 26.0
+            cut_allow_ms = 10.0
         elif is_sonorant:
-            w_anchor, w_shape = 0.52, 0.48
+            w_anchor, w_shape = 0.58, 0.54
             pre_lo, pre_hi = 46.0, 196.0
-            ovl_gap_lo, ovl_gap_hi = 7.0, 20.0
-            cons_gap_lo, cons_gap_hi = 26.0, 86.0
-            cut_gap_lo, cut_gap_hi = 12.0, 36.0
-            cut_allow_ms = 22.0
+            ovl_gap_lo, ovl_gap_hi = 5.0, 16.0
+            cons_gap_lo, cons_gap_hi = 24.0, 84.0
+            cut_gap_lo, cut_gap_hi = 14.0, 40.0
+            cut_allow_ms = 28.0
         else:
-            w_anchor, w_shape = 0.56, 0.52
+            w_anchor, w_shape = 0.60, 0.56
             pre_lo, pre_hi = 38.0, 176.0
-            ovl_gap_lo, ovl_gap_hi = 8.0, 22.0
-            cons_gap_lo, cons_gap_hi = 20.0, 72.0
-            cut_gap_lo, cut_gap_hi = 10.0, 30.0
-            cut_allow_ms = 16.0
+            ovl_gap_lo, ovl_gap_hi = 6.0, 18.0
+            cons_gap_lo, cons_gap_hi = 18.0, 70.0
+            cut_gap_lo, cut_gap_hi = 12.0, 34.0
+            cut_allow_ms = 20.0
     else:
-        w_anchor, w_shape = 0.46, 0.40
-        pre_lo, pre_hi = 30.0, 186.0
-        ovl_gap_lo, ovl_gap_hi = 4.0, 12.0
-        cons_gap_lo, cons_gap_hi = 58.0, 156.0
-        cut_gap_lo, cut_gap_hi = 18.0, 98.0
-        cut_allow_ms = 34.0
+        w_anchor, w_shape = 0.56, 0.48
+        pre_lo, pre_hi = 34.0, 196.0
+        ovl_gap_lo, ovl_gap_hi = 3.0, 10.0
+        cons_gap_lo, cons_gap_hi = 52.0, 148.0
+        cut_gap_lo, cut_gap_hi = 16.0, 88.0
+        cut_allow_ms = 28.0
 
     curr_pre_abs = float(offset) + float(pre)
     cand_pre_abs = float(c_off) + float(c_pre)

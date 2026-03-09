@@ -85,7 +85,11 @@ from core.kr_oto_vc import (
     _prepare_vc_bounds_from_context,
     _uses_kr_vc_context,
 )
-from core.kr_oto_vv import _compute_kr_cvvc_vv_timing_direct
+from core.kr_oto_vv import (
+    _compute_kr_cvvc_vv_timing_direct,
+    _compute_kr_noninitial_vowel_timing,
+    _compute_kr_vv_timing_from_vowel_bounds,
+)
 from core.kr_oto_postprocess import (
     KrPostprocessContext,
     guard_kr_vc_cutoff_to_next_segment as _guard_kr_vc_cutoff_to_next_segment_core,
@@ -3092,24 +3096,22 @@ def generate_oto(
                             vv_direct = _compute_kr_cvvc_vv_timing_direct(
                                 selected_w_idx, syllables_info, n_start, n_end
                             )
+                        elif selected_w_idx is not None and selected_w_idx >= 1 and selected_w_idx < len(syllables_info):
+                            prev_syl = syllables_info[selected_w_idx - 1]
+                            prev_phones = prev_syl.get("phones") or []
+                            if prev_phones:
+                                _pv_idx, prev_v_phone = find_vowel_phone(prev_phones)
+                                prev_v_start = float(prev_v_phone.minTime) * 1000.0
+                                prev_v_end = float(prev_v_phone.maxTime) * 1000.0
+                                vv_direct = _compute_kr_vv_timing_from_vowel_bounds(
+                                    prev_v_start, prev_v_end, n_start, n_end
+                                )
                         if vv_direct is not None:
                             offset, consonant, cutoff, pre, ovl = vv_direct
                         else:
-                            boundary = c_end
-                            v1_len = c_end - c_start
-                            
-                            offset_padding = 100
-                            if v1_len < offset_padding:
-                                offset_padding = max(v1_len * 0.8, 50)
-                                
-                            offset = boundary - offset_padding
-                            pre = boundary - offset
-                            ovl = adaptive_overlap(pre, "", mode='vv')
-                            
-                            added_cons = cv_vowel_len * 0.4
-                            if added_cons < 60: added_cons = 60
-                            consonant = pre + added_cons
-                            cutoff = -(consonant + cv_vowel_len * 0.4)
+                            offset, consonant, cutoff, pre, ovl = _compute_kr_noninitial_vowel_timing(
+                                n_start, n_end
+                            )
                         
                     else:
 
@@ -3313,11 +3315,9 @@ def generate_oto(
                         alias = detected_vowel
                         if alias not in template_aliases:
                             log(f"추가: 단모음 에일리어스 생성 -> {tg_info['real_name']} [{alias}]")
-                            offset = v_start
-                            pre = 0
-                            ovl = 0
-                            consonant = min(v_len * 0.25, 120)
-                            cutoff = -(v_len * 0.8)
+                            offset, consonant, cutoff, pre, ovl = _compute_kr_noninitial_vowel_timing(
+                                v_start, v_end
+                            )
                             
                             offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
                             

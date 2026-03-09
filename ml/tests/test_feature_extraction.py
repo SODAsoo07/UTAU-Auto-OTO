@@ -49,6 +49,8 @@ from core.oto_generator import _recenter_kr_params_around_pre
 from core.oto_generator import _compute_vc_from_adjacent_cv
 from core.oto_generator import _compute_kr_cvvc_vc_timing_direct
 from core.oto_generator import _compute_kr_cvvc_vv_timing_direct
+from core.oto_generator import _compute_kr_noninitial_vowel_timing
+from core.oto_generator import _compute_kr_vv_timing_from_vowel_bounds
 from core.oto_generator import _collect_kr_phone_tier_quality
 from core.oto_generator import _build_kr_cvvc_occurrence_map
 from core.oto_generator import _build_kr_cvvc_vv_occurrence_map
@@ -804,7 +806,7 @@ class FeatureExtractionTests(unittest.TestCase):
         )
         pre_abs = off + pre
         self.assertLessEqual(abs(pre_abs - 940.0), 24.0)
-        self.assertLessEqual(pre - ovl, 24.0)
+        self.assertLessEqual(pre - ovl, 20.0)
         self.assertLessEqual(abs(cut), 184.0)
 
     def test_korean_refine_bridge_vv_keeps_pre_ovl_gap_stable(self):
@@ -942,8 +944,27 @@ class FeatureExtractionTests(unittest.TestCase):
         off, cons, cut, pre, ovl = vals
         self.assertGreaterEqual(off, 24.0)
         self.assertLessEqual(off, 100.0)
-        self.assertGreater(pre, 18.0)
+        self.assertGreater((off + pre), 150.0)
+        self.assertLessEqual((off + pre), 220.0)
         self.assertLessEqual(ovl, pre)
+        self.assertLessEqual(pre - ovl, 16.0)
+        self.assertGreater(abs(cut), cons)
+
+    def test_korean_noninitial_vowel_timing_uses_stable_middle_with_overlap(self):
+        off, cons, cut, pre, ovl = _compute_kr_noninitial_vowel_timing(120.0, 280.0)
+        self.assertLess(off, 120.0)
+        self.assertGreater(off + pre, 160.0)
+        self.assertLessEqual(off + pre, 240.0)
+        self.assertGreater(ovl, 0.0)
+        self.assertLessEqual(pre - ovl, 16.0)
+        self.assertGreater(abs(cut), cons)
+
+    def test_korean_vv_bridge_timing_targets_current_vowel_stable_region(self):
+        off, cons, cut, pre, ovl = _compute_kr_vv_timing_from_vowel_bounds(0.0, 100.0, 120.0, 260.0)
+        self.assertGreater(off + pre, 150.0)
+        self.assertLessEqual(off + pre, 220.0)
+        self.assertGreater(ovl, 0.0)
+        self.assertLessEqual(pre - ovl, 16.0)
         self.assertGreater(abs(cut), cons)
 
     def test_korean_cv_onset_slice_skips_previous_coda_and_keeps_onset_glide_cluster(self):

@@ -21,7 +21,7 @@ class FileStageTests(unittest.TestCase):
 
         handled = try_handle_kr_single_vowel_file(
             fname="a.wav",
-            lines=["a.wav=ga,0,0,0,0,0"],
+            lines=["a.wav=a,0,0,0,0,0"],
             real_wav_name="a.wav",
             ph_intervals=[SimpleNamespace(minTime=0.1, maxTime=0.3)],
             wd_intervals=[SimpleNamespace(minTime=0.1, maxTime=0.3)],
@@ -36,7 +36,19 @@ class FileStageTests(unittest.TestCase):
         )
         self.assertTrue(handled)
         self.assertEqual(recorded, [])
-        self.assertEqual(final_lines, ["a.wav=ga,100.0,50.0,-160.0,0.0,0.0"])
+        self.assertEqual(len(final_lines), 1)
+        self.assertTrue(final_lines[0].startswith("a.wav=a,"))
+        parts = final_lines[0].split("=", 1)[1].split(",")
+        offset = float(parts[1])
+        consonant = float(parts[2])
+        cutoff = float(parts[3])
+        pre = float(parts[4])
+        ovl = float(parts[5])
+        self.assertLess(offset, 100.0)
+        self.assertGreater(pre, 0.0)
+        self.assertGreater(ovl, 0.0)
+        self.assertLess(ovl, pre)
+        self.assertGreater(abs(cutoff), consonant)
 
     def test_try_handle_ja_single_vowel_file_appends_rows(self):
         final_lines = []

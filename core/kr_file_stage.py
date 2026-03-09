@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from core.kr_oto_postprocess import KrPostprocessContext
+from core.kr_oto_rules import classify_alias
+from core.kr_oto_vv import _compute_kr_noninitial_vowel_timing
 
 
 def build_kr_postprocess_context(
@@ -67,11 +69,15 @@ def try_handle_kr_single_vowel_file(
             final_lines.append(apply_suffix_to_oto_line_fn(preserved, alias_suffix))
             continue
 
-        offset = v_start
-        pre = 0
-        ovl = 0
-        consonant = min(v_len * 0.25, 120)
-        cutoff = -(v_len * 0.8)
+        alias_type = classify_alias(alias)
+        if alias_type == "mono":
+            offset, consonant, cutoff, pre, ovl = _compute_kr_noninitial_vowel_timing(v_start, v_end)
+        else:
+            offset = v_start
+            pre = 0
+            ovl = 0
+            consonant = min(v_len * 0.25, 120)
+            cutoff = -(v_len * 0.8)
         offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
         append_alias_rows_fn(
             final_lines,
