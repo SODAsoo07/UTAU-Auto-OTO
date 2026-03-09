@@ -1,3 +1,0 @@
-﻿# Install torch separately if you need a specific CUDA build.
-# The current development environment uses torch 2.7.x.
-torch>=2.7

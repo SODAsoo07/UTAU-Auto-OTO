@@ -874,10 +874,10 @@ class PipelineActionsMixin:
                 if primary_engine == "sofa":
                     sofa_kwargs = self._get_sofa_runtime_kwargs(lang)
                     ckpt = self.sofa_ckpt_var.get().strip()
-                    self._set_status("3/4 - SOFA ?? ?? ?...")
-                    self._append_log(f"? SOFA ?? Python: {self.sofa_python_var.get().strip()}")
+                    self._set_status("3/4 - SOFA 정렬 준비 중...")
+                    self._append_log(f"ℹ SOFA 실행 Python: {self.sofa_python_var.get().strip()}")
                     self._append_log(
-                        "? SOFA ?? ??: "
+                        "ℹ SOFA 실행 설정: "
                         f"repo={sofa_kwargs.get('sofa_repo_dir')}, "
                         f"mode={sofa_kwargs.get('mode')}, "
                         f"g2p={sofa_kwargs.get('g2p')}, "
@@ -890,7 +890,7 @@ class PipelineActionsMixin:
                         self._after_safe(lambda p=sdic: self.sofa_dict_var.set(p))
                         self._append_log(f"ℹ SOFA 사전이 비어 있어 현재 생성 사전을 사용합니다: {sdic}")
                 else:
-                    self._set_status("3/4 - MFA ?? ?? ?...")
+                    self._set_status("3/4 - MFA 정렬 준비 중...")
                     if not self._ensure_mfa_ready_for_language(lang):
                         self._append_log("❌ MFA 설치/모델 준비 실패")
                         self._set_status("❌ MFA 설치/모델 준비 실패")
@@ -900,7 +900,7 @@ class PipelineActionsMixin:
                         if hasattr(self, "_get_mfa_align_profile_code")
                         else "accurate"
                     )
-                    self._append_log(f"? MFA ?? ???: {mfa_profile}")
+                    self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
 
                 align_result = run_alignment_with_fallback(
                     language=lang,
@@ -926,7 +926,7 @@ class PipelineActionsMixin:
                 align_ok = bool(align_result.get("ok", False))
                 align_err = str(align_result.get("message", "") or "")
                 if align_result.get("fallback_used"):
-                    self._append_log(f"? ?? fallback ??: {align_result.get('fallback_path', '')}")
+                    self._append_log(f"ℹ 정렬 fallback 경로: {align_result.get('fallback_path', '')}")
 
                 if not align_ok:
                     show_advanced = bool(self.show_advanced_aligner_var.get()) if hasattr(self, "show_advanced_aligner_var") else False

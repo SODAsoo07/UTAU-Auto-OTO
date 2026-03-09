@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -11,6 +12,9 @@ from ui.app_mixins import AppRuntimeMixin
 
 class _DummyRuntime(AppRuntimeMixin):
     _is_closing = False
+
+    def _append_log(self, _msg):
+        pass
 
 
 class UiMlSelectorModeTests(unittest.TestCase):
@@ -38,6 +42,26 @@ class UiMlSelectorModeTests(unittest.TestCase):
         self.assertEqual(self.runtime._apply_ml_selector_runtime_mode("델타+셀렉터"), "selector")
         self.assertEqual(os.environ.get("UTOA_FORCE_OTO_SELECTOR"), "1")
         self.assertNotIn("UTOA_DISABLE_OTO_SELECTOR", os.environ)
+
+    def test_cleanup_keeps_lab_and_textgrid_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            out_path = os.path.join(td, "oto.ini")
+            lab_path = os.path.join(td, "sample.lab")
+            tg_path = os.path.join(td, "sample.TextGrid")
+            tg_dir = os.path.join(td, "textgrids")
+            os.makedirs(tg_dir, exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write("oto")
+            with open(lab_path, "w", encoding="utf-8") as f:
+                f.write("a")
+            with open(tg_path, "w", encoding="utf-8") as f:
+                f.write("tg")
+            with open(os.path.join(tg_dir, "inner.TextGrid"), "w", encoding="utf-8") as f:
+                f.write("inner")
+            self.runtime._cleanup_generated_output_artifacts(out_path, snapshot=None)
+            self.assertTrue(os.path.exists(lab_path))
+            self.assertTrue(os.path.exists(tg_path))
+            self.assertTrue(os.path.isdir(tg_dir))
 
 
 if __name__ == "__main__":

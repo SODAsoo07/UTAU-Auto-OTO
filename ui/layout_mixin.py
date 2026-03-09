@@ -19,13 +19,31 @@ class LayoutMixin:
         ctk.CTkLabel(lang_frame, text=f"Auto OTO {self.app_version}", font=("", 16, "bold"), text_color="#64B5F6").pack(side="left")
         
         self.lang_var = ctk.StringVar(value="Korean (한국어)") # Changed from self.language_var to self.lang_var
+        ctk.CTkLabel(
+            lang_frame,
+            text="언어",
+            text_color="#FFCC80",
+            font=("", 15, "bold"),
+        ).pack(side="left", padx=(18, 4))
         self.lang_dropdown = ctk.CTkOptionMenu(
             lang_frame, values=["Korean (한국어)", "Japanese (日本語)"], variable=self.lang_var,
-            command=self._on_language_change, width=150 # Changed command to _on_language_change
+            command=self._on_language_change, width=200 # Changed command to _on_language_change
         )
         self.lang_dropdown.pack(side="left", padx=10)
         self.lang_info_label = ctk.CTkLabel(lang_frame, text="", text_color="gray")
         self.lang_info_label.pack(side="left", padx=10)
+        self.lang_notice_label = ctk.CTkLabel(
+            path_frame,
+            text="",
+            corner_radius=8,
+            fg_color="#4E342E",
+            text_color="#FFE0B2",
+            anchor="w",
+            justify="left",
+            padx=10,
+            pady=6,
+        )
+        self.lang_notice_label.pack(fill="x", padx=10, pady=(0, 6))
 
         # 고급 옵션(특수 발음/접미사) - 기본 접힘
         self.advanced_toggle_btn = ctk.CTkButton(
@@ -242,11 +260,24 @@ class LayoutMixin:
         self._sync_aligner_ui()
 
     def _get_language(self):
-        """현재 선택된 언어를 'korean' 또는 'japanese'로 반환"""
-        sel = self.lang_var.get() # Changed from self.language_var to self.lang_var
-        if 'Japanese' in sel:
-            return 'japanese'
-        return 'korean'
+        """UI 언어 선택값을 내부 코드('korean'/'japanese')로 정규화합니다."""
+        sel = str(self.lang_var.get() or "")
+        low = sel.strip().lower()
+        if (
+            "japanese" in low
+            or "日本" in sel
+            or "にほん" in sel
+            or low in {"ja", "jp"}
+        ):
+            return "japanese"
+        if (
+            "korean" in low
+            or "한국" in sel
+            or "조선" in sel
+            or low in {"ko", "kr"}
+        ):
+            return "korean"
+        return "korean"
 
     def _get_auto_format_options(self, language=None):
         lang = language or self._get_language()
@@ -272,20 +303,38 @@ class LayoutMixin:
         self.auto_format_var.set(label)
 
     def _on_language_change(self, value):
-        if "Korean" in value:
+        lang = self._get_language()
+        if lang == "korean":
             self.lang_info_label.configure(text="한국어 단위(a, k, ga 등) 에일리어스를 기준으로 생성합니다.")
+            self.lang_notice_label.configure(
+                text="현재 언어: 한국어\nLab 생성, 사전 생성, 정렬, OTO 계산이 모두 한국어 규칙으로 진행됩니다.",
+                fg_color="#2E4A3F",
+                text_color="#C8E6C9",
+            )
+            try:
+                self.lang_dropdown.configure(fg_color="#2E7D32", button_color="#1B5E20", button_hover_color="#145A18")
+            except Exception:
+                pass
             self.gen_missing_vowels_checkbox.configure(state="normal")
             if hasattr(self, "ja_alias_style_menu"):
                 self.ja_alias_style_menu.configure(state="disabled")
         else:
             self.lang_info_label.configure(text="일본어 단위(a, k, ka 등) 에일리어스를 기준으로 생성합니다.")
+            self.lang_notice_label.configure(
+                text="현재 언어: 일본어\n특수 발음 기호가 섞인 파일은 Lab 생성 전에 언어 선택을 다시 확인하세요.",
+                fg_color="#4E342E",
+                text_color="#FFE0B2",
+            )
+            try:
+                self.lang_dropdown.configure(fg_color="#EF6C00", button_color="#E65100", button_hover_color="#BF360C")
+            except Exception:
+                pass
             self.gen_missing_vowels_checkbox.configure(state="normal")
             if hasattr(self, "ja_alias_style_menu"):
                 self.ja_alias_style_menu.configure(state="normal")
         current_code = normalize_auto_format_value(self._get_language(), self.auto_format_var.get())
         self._set_auto_format_from_code(current_code, self._get_language())
         self._save_config()
-
     def _get_ja_alias_style_code(self):
         style = self.ja_alias_style_var.get().strip()
         if style == "히라가나":

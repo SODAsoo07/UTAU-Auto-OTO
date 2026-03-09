@@ -391,9 +391,7 @@ class AppRuntimeMixin:
                     continue
                 low = name.lower()
                 is_known_intermediate = (
-                    low.endswith(".lab")
-                    or low.endswith(".textgrid")
-                    or low in known_names
+                    low in known_names
                 )
                 is_new_in_run = bool(snapshot_files) and norm not in snapshot_files
                 if not is_known_intermediate and not is_new_in_run:
@@ -405,12 +403,8 @@ class AppRuntimeMixin:
                     failed += 1
 
         textgrids_dir = os.path.abspath(os.path.join(out_dir, "textgrids"))
-        if os.path.isdir(textgrids_dir) and not self._path_is_within(out_file, textgrids_dir):
-            try:
-                shutil.rmtree(textgrids_dir)
-                removed_dirs += 1
-            except Exception:
-                failed += 1
+        # Keep generated TextGrid files for inspection/reuse.
+        _ = textgrids_dir
 
         for cur_root, dir_names, _file_names in os.walk(out_dir, topdown=False):
             for name in dir_names:
