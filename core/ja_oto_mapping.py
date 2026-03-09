@@ -617,6 +617,48 @@ def _extract_ja_cv_target_syllable(alias, alias_type='cv'):
     return _normalize_ja_syllable_token(parts[-1])
 
 
+def _build_ja_cvvc_occurrence_map(token_source):
+    """
+    Japanese CV/CV_HEAD aliases in CV/CVVC formats are mapped by token occurrence.
+
+    This keeps repeated mora tokens (e.g. `do ... da ... do ... da`) stable even
+    when nearby candidates have similar vowel/onset scores.
+    """
+    occ = {}
+    for idx, raw in enumerate(token_source or []):
+        tok = _normalize_ja_syllable_token(raw)
+        if not tok:
+            continue
+        onset, vowel = split_ja_romaji_syllable(tok)
+        if vowel not in JA_VOWELS and tok not in {"n", "nn", "xn", "m"}:
+            continue
+        occ.setdefault(tok, []).append(idx)
+    return occ
+
+
+def _resolve_ja_cvvc_occurrence_index(alias, alias_type, occurrence_map, occurrence_state):
+    """
+    Resolve deterministic CV/CV_HEAD index by token occurrence for Japanese CV/CVVC.
+    """
+    if alias_type not in {"cv", "cv_head"}:
+        return None
+    tok = _extract_ja_cv_target_syllable(alias, alias_type=alias_type)
+    if not tok:
+        return None
+    idxs = (occurrence_map or {}).get(tok) or []
+    if not idxs:
+        return None
+    if occurrence_state is None:
+        return idxs[0]
+
+    state_key = (str(alias_type), tok)
+    used = int(occurrence_state.get(state_key, 0))
+    if used >= len(idxs):
+        used = len(idxs) - 1
+    occurrence_state[state_key] = used + 1
+    return idxs[used]
+
+
 @lru_cache(maxsize=65536)
 def _extract_ja_onset_token(token):
     t = _normalize_ja_syllable_token(token)

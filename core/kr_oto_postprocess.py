@@ -104,6 +104,8 @@ class KrPostprocessContext:
         soft_off_shift = 0.0
         soft_cut_shift = 0.0
         cutoff_reduced = 0.0
+        # Enforce timeline order from the first postprocess step.
+        offset, consonant, cutoff, pre, ovl = self.validate_fn(offset, consonant, cutoff, pre, ovl)
 
         if alias_type in {"cv", "cv_head", "vcv"}:
             offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = self.soft_mel_guard_fn(

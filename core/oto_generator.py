@@ -453,32 +453,39 @@ def _ensure_cv_head_min_vowel_coverage(offset, consonant, cutoff, pre, vowel_sta
 
 def _prepare_vcv_syllable_timing(syllables_info, current_w_idx, cv_seq_idx, diphthong_cv_consonant_ratio):
     """VCV 계산에 필요한 음절 인덱스 갱신과 기본 타이밍을 산출합니다."""
+    if not syllables_info:
+        return current_w_idx, cv_seq_idx, 0.0, 50.0, -100.0, 20.0, 12.0
+
     if cv_seq_idx < len(syllables_info):
         current_w_idx = cv_seq_idx
         cv_seq_idx = current_w_idx + 1
     if current_w_idx >= len(syllables_info):
         current_w_idx = len(syllables_info) - 1
 
-    curr_syl = syllables_info[current_w_idx]
-    curr_phones = curr_syl['phones']
+    (
+        current_w_idx,
+        curr_phones,
+        c_start,
+        c_end,
+        n_start,
+        n_end,
+    ) = _prepare_cv_bounds_from_syllable(syllables_info, current_w_idx)
 
     if current_w_idx > 0:
-        prev_syl = syllables_info[current_w_idx - 1]
-        prev_phones = prev_syl['phones']
-        prev_v_start = prev_phones[-1].minTime * 1000
-        prev_v_end = prev_phones[-1].maxTime * 1000
+        (
+            _prev_idx,
+            _prev_phones,
+            _prev_c_start,
+            _prev_c_end,
+            prev_v_start,
+            prev_v_end,
+        ) = _prepare_cv_bounds_from_syllable(syllables_info, current_w_idx - 1)
     else:
-        prev_v_start = curr_phones[0].minTime * 1000 - 100
-        prev_v_end = curr_phones[0].minTime * 1000
+        prev_v_end = max(c_start, n_start)
+        prev_v_start = max(0.0, prev_v_end - 100.0)
 
-    if len(curr_phones) >= 2:
-        c_boundary = curr_phones[-1].minTime * 1000
-        n_end = curr_phones[-1].maxTime * 1000
-    else:
-        c_boundary = curr_phones[0].minTime * 1000
-        n_end = curr_phones[0].maxTime * 1000
-
-    prev_v_len = prev_v_end - prev_v_start
+    c_boundary = c_end
+    prev_v_len = max(prev_v_end - prev_v_start, 40.0)
     offset_padding = min(prev_v_len * 0.6, 200)
     if offset_padding < 80:
         offset_padding = max(prev_v_len * 0.5, 50)
@@ -491,12 +498,13 @@ def _prepare_vcv_syllable_timing(syllables_info, current_w_idx, cv_seq_idx, diph
     c_hint = curr_phones[0].mark if curr_phones else ""
     ovl = adaptive_overlap(pre, c_hint, mode='vcv')
 
-    vowel_len = n_end - c_boundary
+    vowel_len = max(n_end - c_boundary, 20.0)
     added_cons = min(vowel_len * diphthong_cv_consonant_ratio, 150)
     if added_cons < 50:
         added_cons = 50
     consonant = pre + added_cons
     cutoff = -(consonant + vowel_len * 0.25)
+    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
     return current_w_idx, cv_seq_idx, offset, consonant, cutoff, pre, ovl
 
 

@@ -189,6 +189,46 @@ def _ensure_report(report: Optional[Dict[str, object]], **defaults) -> Dict[str,
     return report
 
 
+def _selector_runtime_guard_enabled() -> bool:
+    raw = str(os.environ.get("UTOA_DISABLE_SELECTOR_RUNTIME_GUARD", "")).strip().lower()
+    return raw not in {"1", "true", "yes", "on"}
+
+
+def _selector_top1_min_gain() -> float:
+    try:
+        return float(os.environ.get("UTOA_SELECTOR_TOP1_MIN_GAIN", "0.0"))
+    except Exception:
+        return 0.0
+
+
+def _selector_passes_runtime_guard(selector_payload: Optional[Dict[str, object]]) -> Tuple[bool, str]:
+    if selector_payload is None:
+        return False, "selector_missing"
+    if not _selector_runtime_guard_enabled():
+        return True, "selector_guard_disabled_env"
+
+    meta = selector_payload.get("meta") or {}
+    metrics = meta.get("metrics") if isinstance(meta, dict) else None
+    if not isinstance(metrics, dict):
+        return True, "selector_metrics_missing"
+
+    if "top1_baseline" not in metrics or "top1_model" not in metrics:
+        return True, "selector_top1_missing"
+    try:
+        top1_baseline = float(metrics.get("top1_baseline", 0.0))
+        top1_model = float(metrics.get("top1_model", 0.0))
+    except Exception:
+        return True, "selector_top1_parse_failed"
+
+    min_gain = _selector_top1_min_gain()
+    if top1_model <= (top1_baseline + min_gain):
+        return False, (
+            f"selector_top1_guard(model={top1_model:.4f}, "
+            f"baseline={top1_baseline:.4f}, min_gain={min_gain:.4f})"
+        )
+    return True, "selector_top1_guard_passed"
+
+
 def check_oto_ml_ready(language: str, format_type: str, alias_family: str = "") -> Dict[str, object]:
     routed_format = normalize_format_type(language, format_type) or "general"
     family = normalize_alias_family(alias_family)
@@ -869,6 +909,7 @@ def apply_oto_ml_to_oto_file(
         selector_rows=0,
         selector_model_routes=[],
         selector_mode_counts={},
+        selector_guarded_routes=[],
     )
     ml_report["policy"] = policy_name
 
@@ -958,7 +999,20 @@ def apply_oto_ml_to_oto_file(
                     and selector_enabled_by_default(language, format_type, alias_family=alias_family)
                 )
                 bundle_cache[cache_key] = load_oto_model_bundle(route_model_dir[cache_key]) if delta_allowed else None
-                selector_cache[cache_key] = load_lightgbm_selector_bundle(route_model_dir[cache_key]) if selector_allowed else None
+                selector_payload = load_lightgbm_selector_bundle(route_model_dir[cache_key]) if selector_allowed else None
+                if selector_payload is not None:
+                    selector_ok, selector_reason = _selector_passes_runtime_guard(selector_payload)
+                    if not selector_ok:
+                        selector_payload = None
+                        ml_report["selector_guarded_routes"].append(
+                            {
+                                "format_type": format_type,
+                                "alias_family": alias_family,
+                                "model_dir": route_model_dir[cache_key],
+                                "reason": selector_reason,
+                            }
+                        )
+                selector_cache[cache_key] = selector_payload
                 bundle = bundle_cache[cache_key]
                 if bundle and route_model_dir[cache_key] and route_model_dir[cache_key] not in model_notice:
                     _emit(callback, f"[OTO-ML] ?? ?? ({bundle.backend}): {route_model_dir[cache_key]}")

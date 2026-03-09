@@ -37,7 +37,7 @@ from core.prefix_map_utils import find_prefix_map_path, strip_prefix_map_affixes
 logger = logging.getLogger(__name__)
 
 FEATURE_VERSION = "v6"
-TRAIN_ROW_MATCH_VERSION = "v7"
+TRAIN_ROW_MATCH_VERSION = "v8"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
 
 FEATURE_NAMES = [
@@ -1170,6 +1170,7 @@ def _build_manual_matches_by_time(
     matches: Dict[int, Dict[str, object]] = {}
     stats = {
         "single_direct": 0,
+        "occurrence_direct": 0,
         "time_nearest": 0,
         "skip_far": 0,
         "skip_unmatched": 0,
@@ -1192,7 +1193,38 @@ def _build_manual_matches_by_time(
             continue
 
         used_manual = set()
+        manual_occ_idx: Dict[int, int] = {}
+        for j, manual_row in enumerate(manual_group):
+            try:
+                occ = int(manual_row.get("occurrence_index", -1))
+            except Exception:
+                occ = -1
+            if occ >= 0 and occ not in manual_occ_idx:
+                manual_occ_idx[occ] = j
+
+        # Repeated aliases are best aligned by occurrence index first.
+        # If the occurrence candidate is too far, fall back to time-nearest.
         for auto_idx in auto_indices:
+            try:
+                auto_occ = int(auto_feats[auto_idx].get("occurrence_index", -1))
+            except Exception:
+                auto_occ = -1
+            if auto_occ < 0:
+                continue
+            manual_j = manual_occ_idx.get(auto_occ, -1)
+            if manual_j < 0 or manual_j in used_manual:
+                continue
+            manual_row = manual_group[manual_j]
+            diff = abs(float(manual_row.get("offset", 0.0)) - float(auto_feats[auto_idx].get("base_offset", 0.0)))
+            if diff > _mapping_max_shift_ms(auto_feats[auto_idx]):
+                continue
+            used_manual.add(manual_j)
+            matches[auto_idx] = manual_row
+            stats["occurrence_direct"] += 1
+
+        for auto_idx in auto_indices:
+            if auto_idx in matches:
+                continue
             auto_off = float(auto_feats[auto_idx].get("base_offset", 0.0))
             best_j = -1
             best_diff = None
@@ -1379,6 +1411,7 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
         "skipped_rows": skipped,
         "skipped_cutoff_rows": skipped_cutoff,
         "matched_single_direct": int(match_stats.get("single_direct", 0)),
+        "matched_occurrence_direct": int(match_stats.get("occurrence_direct", 0)),
         "matched_time_nearest": int(match_stats.get("time_nearest", 0)),
         "skip_mapping_far": int(match_stats.get("skip_far", 0)),
         "skip_mapping_unmatched": int(match_stats.get("skip_unmatched", 0)),

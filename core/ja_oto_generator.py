@@ -339,6 +339,7 @@ JA_NASAL_ONSETS = {'m', 'n', 'ny', 'ng', 'ngy'}
 JA_LIQUID_ONSETS = {'r', 'ry', 'l'}
 
 from core.ja_oto_mapping import (
+    _build_ja_cvvc_occurrence_map,
     classify_ja_alias,
     detect_ja_alias_format,
     get_vc_consonant,
@@ -356,6 +357,7 @@ from core.ja_oto_mapping import (
     _score_ja_syllable_mapping,
     _select_ja_cv_syllable_index,
     _select_vcv_syllable_index,
+    _resolve_ja_cvvc_occurrence_index,
     _syllable_info_token,
     _vcv_syllable_match_score,
 )
@@ -3266,6 +3268,18 @@ def generate_ja_oto(
             vc_seq_idx = 0
             last_vcv_mapped_idx = -1
             stable_vcv_seq_idx = 0
+            ja_order_locked_format = format_type in {"cvvc", "cv"}
+            ja_cvvc_occurrence_source = (
+                filename_syllables
+                if (ja_order_locked_format and filename_syllables)
+                else [_syllable_info_token(s) for s in (syllables_info or [])]
+            )
+            ja_cvvc_occurrence_map = (
+                _build_ja_cvvc_occurrence_map(ja_cvvc_occurrence_source)
+                if ja_order_locked_format
+                else None
+            )
+            ja_cvvc_occurrence_state = {}
 
             for line_num, line in enumerate(lines_for_mapping):
                 parts = line.split('=', 1)
@@ -3602,7 +3616,20 @@ def generate_ja_oto(
                                 )
                     target_tok = _extract_ja_cv_target_syllable(alias, alias_type="cv_head")
                     resynced_cv_head_exact = False
-                    if skip_cv_align:
+                    forced_cvvc_idx = _resolve_ja_cvvc_occurrence_index(
+                        alias,
+                        "cv_head",
+                        ja_cvvc_occurrence_map or {},
+                        ja_cvvc_occurrence_state,
+                    )
+                    if forced_cvvc_idx is not None:
+                        mapped_idx = max(0, min(int(forced_cvvc_idx), len(syllables_info) - 1))
+                        if ja_mapping_debug_reason_logging and mapped_idx != expected_idx:
+                            log(
+                                f"🧭 {fname}: CV_HEAD occurrence 고정 "
+                                f"{expected_idx + 1}->{mapped_idx + 1} ({alias})"
+                            )
+                    elif skip_cv_align:
                         mapped_idx = expected_idx
                         # CVVC/CV 파일명 순서 잠금에서도 요음/삽입 모음으로 인한 1칸 밀림은 보정.
                         if cvvc_order_soft_align and target_tok:
@@ -3921,7 +3948,20 @@ def generate_ja_oto(
                                 )
                     target_tok = _extract_ja_cv_target_syllable(alias, alias_type="cv")
                     resynced_cv_exact = False
-                    if skip_cv_align:
+                    forced_cvvc_idx = _resolve_ja_cvvc_occurrence_index(
+                        alias,
+                        "cv",
+                        ja_cvvc_occurrence_map or {},
+                        ja_cvvc_occurrence_state,
+                    )
+                    if forced_cvvc_idx is not None:
+                        mapped_idx = max(0, min(int(forced_cvvc_idx), len(syllables_info) - 1))
+                        if ja_mapping_debug_reason_logging and mapped_idx != expected_idx:
+                            log(
+                                f"🧭 {fname}: CV occurrence 고정 "
+                                f"{expected_idx + 1}->{mapped_idx + 1} ({alias})"
+                            )
+                    elif skip_cv_align:
                         mapped_idx = expected_idx
                         # CVVC/CV 파일명 순서 잠금에서도 요음/삽입 모음으로 인한 1칸 밀림은 보정.
                         if cvvc_order_soft_align and target_tok:
