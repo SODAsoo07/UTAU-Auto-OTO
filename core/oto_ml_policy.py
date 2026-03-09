@@ -24,6 +24,20 @@ _ALIAS_FAMILY_TYPES = {
 }
 
 
+# Selector defaults are intentionally conservative.
+# Only formats that showed stable gains after the latest retraining are enabled
+# by default. Conditional candidates stay OFF until manual A/B verification.
+_SELECTOR_DEFAULTS = {
+    ("korean", "cv", ""): True,
+    ("korean", "cv", "cv"): True,
+    ("korean", "cv", "vowel"): True,
+    ("korean", "cvc", ""): True,
+    ("korean", "cvc", "cv"): True,
+    ("korean", "cvc", "vowel"): True,
+    ("korean", "cvc", "bridge"): True,
+}
+
+
 def normalize_alias_family(alias_family: str) -> str:
     value = str(alias_family or "").strip().lower()
     if value in {"", "all", "general", "any"}:
@@ -79,9 +93,10 @@ def selector_enabled_by_default(language: str, format_type: str, alias_family: s
     lang = str(language or "").strip().lower()
     fmt = normalize_format_type(lang, format_type) or "general"
     family = normalize_alias_family(alias_family)
-    if lang == "korean" and fmt == "cv":
-        return family in {"", "cv", "vowel"}
-    return False
+    return bool(
+        _SELECTOR_DEFAULTS.get((lang, fmt, family))
+        or (_SELECTOR_DEFAULTS.get((lang, fmt, "")) if family else False)
+    )
 
 
 __all__ = [

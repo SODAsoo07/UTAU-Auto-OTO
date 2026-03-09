@@ -133,6 +133,21 @@ class TabBuildersMixin:
                 )
                 self.enable_ml_correction_checkbox.pack(anchor="w", pady=(5, 0))
 
+                selector_mode_row = ctk.CTkFrame(opt_frame, fg_color="transparent")
+                selector_mode_row.pack(anchor="w", pady=(6, 0), fill="x")
+                ctk.CTkLabel(
+                    selector_mode_row,
+                    text="ML 보정 모드",
+                    text_color="#B0BEC5",
+                ).pack(side="left")
+                self.ml_selector_mode_segment = ctk.CTkSegmentedButton(
+                    selector_mode_row,
+                    values=["기본 정책", "델타만", "델타+셀렉터"],
+                    variable=self.ml_selector_mode_var,
+                    command=lambda _value: self._save_config(),
+                )
+                self.ml_selector_mode_segment.pack(side="left", padx=(10, 0))
+
             ctk.CTkButton(frame, text="실행", width=80, command=cmd).pack(side="right", padx=10)
         if hasattr(self, "_sync_aligner_ui"):
             self._sync_aligner_ui()

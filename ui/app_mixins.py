@@ -81,6 +81,35 @@ class AppRuntimeMixin:
                 return "사전 작업 진행 중..."
         return text
 
+    def _normalize_ml_selector_mode(self, value: str) -> str:
+        mode = str(value or "").strip().lower()
+        if mode in {"delta", "delta_only", "delta only", "델타만"}:
+            return "delta"
+        if mode in {"selector", "delta+selector", "delta + selector", "델타+셀렉터"}:
+            return "selector"
+        return "policy"
+
+    def _describe_ml_selector_mode(self, value: str) -> str:
+        mode = self._normalize_ml_selector_mode(value)
+        if mode == "delta":
+            return "델타만"
+        if mode == "selector":
+            return "델타+셀렉터"
+        return "기본 정책"
+
+    def _apply_ml_selector_runtime_mode(self, value: str) -> str:
+        mode = self._normalize_ml_selector_mode(value)
+        if mode == "delta":
+            os.environ["UTOA_DISABLE_OTO_SELECTOR"] = "1"
+            os.environ.pop("UTOA_FORCE_OTO_SELECTOR", None)
+        elif mode == "selector":
+            os.environ["UTOA_FORCE_OTO_SELECTOR"] = "1"
+            os.environ.pop("UTOA_DISABLE_OTO_SELECTOR", None)
+        else:
+            os.environ.pop("UTOA_FORCE_OTO_SELECTOR", None)
+            os.environ.pop("UTOA_DISABLE_OTO_SELECTOR", None)
+        return mode
+
     def _after_safe(self, callback, delay_ms=0):
         if self._is_closing:
             return
@@ -522,6 +551,7 @@ class ConfigMixin:
             "gen_missing_vowels": self.gen_missing_vowels_var.get(),
             "no_base_oto": self.no_base_oto_var.get(),
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
+            "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "기본 정책",
             "ja_mapping_words_fallback_enabled": self.ja_mapping_words_fallback_enabled_var.get() if hasattr(self, "ja_mapping_words_fallback_enabled_var") else True,
             "ja_mapping_spn_ratio_threshold": self.ja_mapping_spn_ratio_threshold_var.get() if hasattr(self, "ja_mapping_spn_ratio_threshold_var") else 0.35,
             "ja_mapping_min_vowel_phone_ratio": self.ja_mapping_min_vowel_phone_ratio_var.get() if hasattr(self, "ja_mapping_min_vowel_phone_ratio_var") else 0.5,
@@ -678,6 +708,10 @@ class ConfigMixin:
                 self.whisperx_cleanup_intermediate_var.set(bool(config.get("whisperx_cleanup_intermediate", True)))
             if "whisperx_save_debug_json" in config and hasattr(self, "whisperx_save_debug_json_var"):
                 self.whisperx_save_debug_json_var.set(bool(config.get("whisperx_save_debug_json", False)))
+            if "ml_selector_mode" in config and hasattr(self, "ml_selector_mode_var"):
+                saved_selector_mode = str(config.get("ml_selector_mode", "기본 정책") or "").strip()
+                if saved_selector_mode in {"기본 정책", "델타만", "델타+셀렉터"}:
+                    self.ml_selector_mode_var.set(saved_selector_mode)
 
             if hasattr(self, "tune_auto_oto_var"):
                 self.tune_auto_oto_var.set(config.get("tune_auto_oto", ""))

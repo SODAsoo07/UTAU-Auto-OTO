@@ -37,7 +37,7 @@ from core.prefix_map_utils import find_prefix_map_path, strip_prefix_map_affixes
 logger = logging.getLogger(__name__)
 
 FEATURE_VERSION = "v6"
-TRAIN_ROW_MATCH_VERSION = "v6"
+TRAIN_ROW_MATCH_VERSION = "v7"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
 
 FEATURE_NAMES = [
@@ -94,10 +94,23 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _looks_like_pseudo_path(path: str) -> bool:
-    low = str(path or "").replace("\\", "/").strip().lower()
-    if not low:
+    raw = str(path or "").strip()
+    if not raw:
         return False
-    return any(hint in low for hint in _PSEUDO_PATH_HINTS)
+    norm = raw.replace("\\", "/").strip().lower()
+    parts = [part for part in norm.split("/") if part]
+    if not parts:
+        return False
+
+    # Only inspect the file name and the nearest parent folders.
+    # Absolute workspace roots such as "UTAU_Auto_OTO_v3" would otherwise
+    # falsely mark every staged manual oto as pseudo.
+    local_parts = parts[-3:]
+    for part in local_parts:
+        tokens = [tok for tok in re.split(r"[^a-z0-9]+", part) if tok]
+        if any(hint in tokens for hint in _PSEUDO_PATH_HINTS):
+            return True
+    return False
 
 
 def _stable_source_oto_id(path: str) -> str:

@@ -38,8 +38,12 @@ class OtoMlPolicyTests(unittest.TestCase):
     def test_selector_default_policy(self):
         self.assertTrue(selector_enabled_by_default("korean", "cv", "cv"))
         self.assertTrue(selector_enabled_by_default("korean", "cv", "vowel"))
+        self.assertTrue(selector_enabled_by_default("korean", "cvc", "cv"))
+        self.assertTrue(selector_enabled_by_default("korean", "cvc", "bridge"))
         self.assertFalse(selector_enabled_by_default("korean", "cvvc", "cv"))
-        self.assertFalse(selector_enabled_by_default("korean", "cvc", "cv"))
+        self.assertFalse(selector_enabled_by_default("korean", "vcv", "bridge"))
+        self.assertFalse(selector_enabled_by_default("japanese", "cv", "cv"))
+        self.assertFalse(selector_enabled_by_default("japanese", "cvvc", "cv"))
         self.assertFalse(selector_enabled_by_default("japanese", "vcv", "bridge"))
 
 

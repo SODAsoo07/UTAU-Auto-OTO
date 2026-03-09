@@ -943,6 +943,7 @@ class PipelineActionsMixin:
                     gen_ou = self.openutau_var.get()
                     gen_missing = self.gen_missing_vowels_var.get()
                     enable_ml_correction = self.enable_ml_correction_var.get()
+                    ml_selector_mode = self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "기본 정책"
                     auto_format = self.auto_format_var.get()
                     custom_phonemes_path = self.custom_phoneme_var.get().strip()
                     alias_suffix = self.alias_suffix_var.get().strip()
@@ -951,8 +952,9 @@ class PipelineActionsMixin:
                     ja_spn_threshold = self.ja_mapping_spn_ratio_threshold_var.get() if hasattr(self, "ja_mapping_spn_ratio_threshold_var") else 0.35
                     ja_min_vowel_ratio = self.ja_mapping_min_vowel_phone_ratio_var.get() if hasattr(self, "ja_mapping_min_vowel_phone_ratio_var") else 0.5
                     ja_debug_reason = self.ja_mapping_debug_reason_logging_var.get() if hasattr(self, "ja_mapping_debug_reason_logging_var") else True
+                    selector_mode_code = self._apply_ml_selector_runtime_mode(ml_selector_mode)
                     self._append_log(
-                        f"[OTO-ML] 설정: ml={'ON' if enable_ml_correction else 'OFF'}"
+                        f"[OTO-ML] 설정: ml={'ON' if enable_ml_correction else 'OFF'}, selector={self._describe_ml_selector_mode(selector_mode_code)}"
                     )
                     if self.no_base_oto_var.get():
                         self._append_log("ℹ '베이스 OTO 없이 생성'이 활성화되어 OpenUtau 스타일로 생성합니다.")

@@ -95,11 +95,17 @@ class OtoActionsMixin:
                     if hasattr(self, "ml_pseudo_weight_mid_var")
                     else 0.4
                 )
+                ml_selector_mode = (
+                    self.ml_selector_mode_var.get()
+                    if hasattr(self, "ml_selector_mode_var")
+                    else "기본 정책"
+                )
 
                 os.environ["UTOA_ML_SAME_LANGUAGE_BORROW_ONLY"] = "1" if ml_same_lang_only else "0"
                 os.environ["UTOA_ML_USE_PSEUDO_LABELS"] = "1" if ml_use_pseudo_labels else "0"
                 os.environ["UTOA_ML_PSEUDO_WEIGHT_HIGH"] = str(float(ml_pseudo_weight_high))
                 os.environ["UTOA_ML_PSEUDO_WEIGHT_MID"] = str(float(ml_pseudo_weight_mid))
+                selector_mode_code = self._apply_ml_selector_runtime_mode(ml_selector_mode)
                 os.environ["UTOA_KR_MAPPING_CONF_THRESHOLD"] = str(float(kr_conf_threshold))
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_DEFAULT"] = str(int(kr_jump_default))
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_HIGH_CONF"] = str(int(kr_jump_hi))
@@ -109,7 +115,7 @@ class OtoActionsMixin:
                     os.environ.pop("UTOA_KR_ANCHOR_PROFILE_PATH", None)
 
                 self._append_log(
-                    f"[OTO-ML] 실행 옵션: ml={'ON' if enable_ml_correction else 'OFF'}"
+                    f"[OTO-ML] 실행 옵션: ml={'ON' if enable_ml_correction else 'OFF'}, selector={self._describe_ml_selector_mode(selector_mode_code)}"
                 )
                 if self.no_base_oto_var.get():
                     self._append_log("설정: '기본 OTO 없이 생성' 사용 중입니다.")

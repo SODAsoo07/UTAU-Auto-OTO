@@ -12,6 +12,7 @@ if ROOT not in sys.path:
 
 from core.oto_ml_features import (
     FEATURE_NAMES,
+    _looks_like_pseudo_path,
     _normalize_alias_for_match,
     canonicalize_feature_row,
     dataset_fieldnames,
@@ -74,6 +75,20 @@ from scripts.analyze_oto_diff import analyze as analyze_oto_diff
 
 
 class FeatureExtractionTests(unittest.TestCase):
+    def test_pseudo_path_detection_ignores_workspace_auto_segment(self):
+        self.assertFalse(
+            _looks_like_pseudo_path(
+                r"C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\dataset_stage\korean\cvvc\CVVC\Achu_CVVC\oto.ini"
+            )
+        )
+
+    def test_pseudo_path_detection_still_flags_local_auto_output(self):
+        self.assertTrue(
+            _looks_like_pseudo_path(
+                r"C:\voicebanks\BankA\generated_output\oto_auto_ml.ini"
+            )
+        )
+
     def test_schema_contains_feature_names(self):
         schema = get_feature_schema()
         self.assertEqual(schema["feature_names"], FEATURE_NAMES)

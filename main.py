@@ -135,6 +135,7 @@ class App(
         self.gen_missing_vowels_var = ctk.BooleanVar(value=True)
         self.no_base_oto_var = ctk.BooleanVar(value=False)
         self.enable_ml_correction_var = ctk.BooleanVar(value=True)
+        self.ml_selector_mode_var = ctk.StringVar(value="기본 정책")
         self.ja_mapping_words_fallback_enabled_var = ctk.BooleanVar(value=True)
         self.ja_mapping_spn_ratio_threshold_var = ctk.DoubleVar(value=0.35)
         self.ja_mapping_min_vowel_phone_ratio_var = ctk.DoubleVar(value=0.5)
