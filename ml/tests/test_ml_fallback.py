@@ -8,9 +8,11 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.oto_ml_refiner import (
+    _apply_japanese_cvvc_cv_post_guard,
     _apply_korean_bridge_post_guard,
     _apply_language_specific_delta_policy,
     _route_format_for_feature,
+    apply_oto_ml_selector_candidate,
     apply_oto_ml_to_oto_file,
 )
 
@@ -239,6 +241,44 @@ class MlFallbackTests(unittest.TestCase):
         )
         self.assertGreater(adjusted["delta_offset"], -16.0)
         self.assertLess(adjusted["delta_ovl"], 12.0)
+
+    def test_japanese_cvvc_cv_post_guard_blocks_too_early_preutterance(self):
+        def _validate(offset, consonant, cutoff, pre, ovl):
+            return float(offset), float(consonant), float(cutoff), float(pre), float(ovl)
+
+        out = _apply_japanese_cvvc_cv_post_guard(
+            {
+                "format_type": "cvvc",
+                "alias_type": "cv",
+                "curr_phone_start_ms": 120.0,
+                "curr_phone_len_ms": 90.0,
+                "curr_vowel_start_ms": 170.0,
+                "expected_anchor_ms": 170.0,
+                "base_offset": 140.0,
+            },
+            (90.0, 115.0, -160.0, 25.0, 10.0),
+            _validate,
+        )
+        offset, _cons, _cutoff, pre, _ovl = out
+        self.assertGreaterEqual(offset + pre, 146.0)
+        self.assertGreaterEqual(offset, 112.0)
+
+    def test_selector_only_path_for_japanese_cvvc_cv_uses_candidate_without_delta_pull(self):
+        out = apply_oto_ml_selector_candidate(
+            "japanese",
+            {
+                "format_type": "cvvc",
+                "alias_type": "cv",
+                "curr_phone_start_ms": 120.0,
+                "curr_phone_len_ms": 90.0,
+                "curr_vowel_start_ms": 170.0,
+                "expected_anchor_ms": 170.0,
+                "base_offset": 140.0,
+            },
+            (100.0, 118.0, 165.0, 30.0, 12.0),
+        )
+        offset, _cons, _cutoff, pre, _ovl = out
+        self.assertGreaterEqual(offset + pre, 146.0)
 
     def test_korean_vc_post_guard_limits_cutoff_extension(self):
         def _validate(offset, consonant, cutoff, pre, ovl):

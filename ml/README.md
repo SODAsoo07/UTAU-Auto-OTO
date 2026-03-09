@@ -33,3 +33,14 @@
 ## 추가 문서
 - 오매핑 데이터 수집 가이드: `C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\ml\오매핑_데이터_수집_가이드.md`
 - 모델 학습 명령어 가이드: `C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\ml\모델_학습_명령어_가이드.md`
+
+`?? ???? ????.
+
+## 권장 분리 정책
+- `CV`: 한국어/일본어 모두 공용 모델 유지
+- `korean/cvc`: `cv`, `bridge` 분리 권장
+- `korean/cvvc`: `cv`, `bridge` 분리 권장
+- `japanese/cvvc`: `cv`, `bridge` 분리 권장
+- `vcv`: 현재 공용 유지
+
+- family 분리 기본 정책은 `core/oto_ml_policy.py`의 `recommended_alias_family_splits()`에도 반영되어 있습니다.

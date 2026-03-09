@@ -9,8 +9,11 @@ if ROOT not in sys.path:
 from core.oto_ml_policy import (
     alias_family_to_alias_types,
     default_training_filters,
+    delta_enabled_by_default,
     infer_alias_family,
+    recommended_alias_family_splits,
     selector_enabled_by_default,
+    should_split_alias_families,
 )
 
 
@@ -46,6 +49,19 @@ class OtoMlPolicyTests(unittest.TestCase):
         self.assertFalse(selector_enabled_by_default("japanese", "cvvc", "cv"))
         self.assertFalse(selector_enabled_by_default("japanese", "vcv", "bridge"))
 
+
+    def test_recommended_family_split_policy(self):
+        self.assertFalse(should_split_alias_families("korean", "cv"))
+        self.assertFalse(should_split_alias_families("japanese", "cv"))
+        self.assertEqual(recommended_alias_family_splits("korean", "cvc"), ["cv", "bridge"])
+        self.assertEqual(recommended_alias_family_splits("korean", "cvvc"), ["cv", "bridge"])
+        self.assertEqual(recommended_alias_family_splits("japanese", "cvvc"), ["cv", "bridge"])
+
+    def test_delta_default_policy(self):
+        self.assertTrue(delta_enabled_by_default("korean", "cv", "cv"))
+        self.assertTrue(delta_enabled_by_default("korean", "cvc", "bridge"))
+        self.assertFalse(delta_enabled_by_default("japanese", "cvvc", "cv"))
+        self.assertTrue(delta_enabled_by_default("japanese", "cvvc", "bridge"))
 
 if __name__ == "__main__":
     unittest.main()

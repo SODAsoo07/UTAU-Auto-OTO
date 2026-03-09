@@ -14,7 +14,12 @@ from typing import Dict, Optional, Tuple
 from core.oto_ml_features import extract_feature_rows, get_delta_clip_limits, parse_oto_rows
 from core.oto_ml_runtime import load_oto_model_bundle, predict_oto_deltas
 from core.oto_ml_lightgbm import load_lightgbm_selector_bundle, predict_lightgbm_selector_score
-from core.oto_ml_policy import infer_alias_family, normalize_alias_family, selector_enabled_by_default
+from core.oto_ml_policy import (
+    delta_enabled_by_default,
+    infer_alias_family,
+    normalize_alias_family,
+    selector_enabled_by_default,
+)
 from core.oto_ml_selector import select_best_candidate
 from core.format_type_utils import normalize_format_type
 from core.pipeline_status import (
@@ -455,6 +460,109 @@ def _apply_korean_bridge_post_guard(
     return validate_fn(float(offset), float(cons), -float(cutoff_abs), float(pre), float(ovl))
 
 
+def _apply_japanese_cvvc_cv_post_guard(
+    row_context: Dict[str, object],
+    params: Tuple[float, float, float, float, float],
+    validate_fn,
+) -> Tuple[float, float, float, float, float]:
+    format_type = normalize_format_type("japanese", row_context.get("format_type", ""))
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    if format_type != "cvvc" or alias_type not in {"cv", "cv_head"}:
+        return params
+
+    offset, cons, cutoff, pre, ovl = validate_fn(*params)
+    offset = float(offset)
+    cons = float(cons)
+    pre = float(pre)
+    ovl = float(ovl)
+    cutoff_abs = abs(float(cutoff))
+
+    curr_phone_start = _to_float(row_context.get("curr_phone_start_ms"), 0.0)
+    curr_phone_len = max(_to_float(row_context.get("curr_phone_len_ms"), 0.0), 0.0)
+    curr_vowel_start = _to_float(row_context.get("curr_vowel_start_ms"), 0.0)
+    expected_anchor = _to_float(row_context.get("expected_anchor_ms"), 0.0)
+    base_offset = _to_float(row_context.get("base_offset"), offset)
+
+    if curr_vowel_start > 0.0:
+        expected_anchor = curr_vowel_start
+    if expected_anchor <= 0.0:
+        return offset, cons, -cutoff_abs, pre, ovl
+
+    pre_abs = offset + pre
+    pre_lead_cap = 18.0 if alias_type == "cv_head" else 24.0
+    min_pre_abs = expected_anchor - pre_lead_cap
+    if curr_phone_start > 0.0:
+        phone_guard = curr_phone_start + min(12.0, max(curr_phone_len * 0.10, 6.0))
+        min_pre_abs = max(min_pre_abs, phone_guard)
+
+    min_offset = base_offset - 12.0
+    if curr_phone_start > 0.0:
+        min_offset = max(min_offset, curr_phone_start - 8.0)
+
+    if offset < min_offset:
+        offset = min_offset
+    if pre_abs < min_pre_abs:
+        pre_abs = min_pre_abs
+
+    pre = max(pre_abs - offset, 0.0)
+    cons = max(cons, pre + 6.0)
+    cutoff_abs = max(cutoff_abs, cons + 8.0)
+    return validate_fn(offset, cons, -cutoff_abs, pre, ovl)
+
+
+def _apply_language_specific_post_guard(
+    language: str,
+    row_context: Dict[str, object],
+    params: Tuple[float, float, float, float, float],
+    validate_fn,
+) -> Tuple[float, float, float, float, float]:
+    lang = str(language or "").strip().lower()
+    out = params
+    if lang == "korean":
+        out = _apply_korean_bridge_post_guard(row_context, out, validate_fn)
+    elif lang == "japanese":
+        out = _apply_japanese_cvvc_cv_post_guard(row_context, out, validate_fn)
+    return out
+
+
+def _finalize_ml_params(
+    language: str,
+    row_context: Dict[str, object],
+    params: Tuple[float, float, float, float, float],
+    validate_fn,
+    anchor_stats: Optional[Dict[str, int]] = None,
+) -> Tuple[float, float, float, float, float]:
+    out = validate_fn(*params)
+    out = _apply_language_specific_post_guard(language, row_context, out, validate_fn)
+    out, applied_rules = _apply_anchor_lock_lite_after_ml(language, row_context, out, validate_fn)
+    if anchor_stats is not None and applied_rules:
+        anchor_stats["anchor_locked_count"] = int(anchor_stats.get("anchor_locked_count", 0)) + 1
+        if "cutoff_next_onset_clamp" in applied_rules or "cutoff_next_vowel_clamp" in applied_rules:
+            anchor_stats["cutoff_clamped_count"] = int(anchor_stats.get("cutoff_clamped_count", 0)) + 1
+            if str(row_context.get("alias_type", "") or "").strip().lower() == "vc":
+                anchor_stats["vc_cutoff_leak_guard_count"] = int(anchor_stats.get("vc_cutoff_leak_guard_count", 0)) + 1
+    return out
+
+
+def apply_oto_ml_selector_candidate(
+    language: str,
+    row_context: Dict[str, object],
+    base_params_override: Tuple[float, float, float, float, float],
+    *,
+    anchor_stats: Optional[Dict[str, int]] = None,
+) -> Tuple[float, float, float, float, float]:
+    validate_oto_params = _get_validate_func(language)
+    base_offset, base_cons, base_cutoff_abs, base_pre, base_ovl = base_params_override
+    params = (
+        float(base_offset),
+        float(base_cons),
+        -(float(base_cutoff_abs) - float(base_offset)),
+        float(base_pre),
+        float(base_ovl),
+    )
+    return _finalize_ml_params(language, row_context, params, validate_oto_params, anchor_stats=anchor_stats)
+
+
 def _apply_language_specific_delta_policy(language: str, row_context: Dict[str, object], deltas: Dict[str, float]) -> Dict[str, float]:
     lang = str(language or "").strip().lower()
     adjusted = dict(deltas)
@@ -573,17 +681,13 @@ def apply_oto_ml_delta(
     cutoff = -(cutoff_abs - offset)
     pre = float(base_pre) + deltas.get("delta_pre", 0.0)
     ovl = float(base_ovl) + deltas.get("delta_ovl", 0.0)
-    out = validate_oto_params(offset, cons, cutoff, pre, ovl)
-    if str(language or "").strip().lower() == "korean":
-        out = _apply_korean_bridge_post_guard(row_context, out, validate_oto_params)
-    out, applied_rules = _apply_anchor_lock_lite_after_ml(language, row_context, out, validate_oto_params)
-    if anchor_stats is not None and applied_rules:
-        anchor_stats["anchor_locked_count"] = int(anchor_stats.get("anchor_locked_count", 0)) + 1
-        if "cutoff_next_onset_clamp" in applied_rules or "cutoff_next_vowel_clamp" in applied_rules:
-            anchor_stats["cutoff_clamped_count"] = int(anchor_stats.get("cutoff_clamped_count", 0)) + 1
-            if str(row_context.get("alias_type", "") or "").strip().lower() == "vc":
-                anchor_stats["vc_cutoff_leak_guard_count"] = int(anchor_stats.get("vc_cutoff_leak_guard_count", 0)) + 1
-    return out
+    return _finalize_ml_params(
+        language,
+        row_context,
+        (offset, cons, cutoff, pre, ovl),
+        validate_oto_params,
+        anchor_stats=anchor_stats,
+    )
 
 
 def apply_oto_ml_to_oto_file(
@@ -693,30 +797,34 @@ def apply_oto_ml_to_oto_file(
                     {"format_type": format_type, "alias_family": alias_family, "code": ML_MODEL_MISSING, "model_dir": route_model_dir[cache_key]}
                 )
                 bundle_cache[cache_key] = None
+                selector_cache[cache_key] = None
             elif ready.get("code") == ML_BUNDLE_INVALID:
                 ml_report["invalid_routes"].append(
                     {"format_type": format_type, "alias_family": alias_family, "code": ML_BUNDLE_INVALID, "model_dir": route_model_dir[cache_key]}
                 )
                 bundle_cache[cache_key] = None
+                selector_cache[cache_key] = None
             else:
-                bundle_cache[cache_key] = load_oto_model_bundle(route_model_dir[cache_key])
+                delta_allowed = bool(delta_enabled_by_default(language, format_type, alias_family=alias_family))
                 selector_allowed = bool(
                     route_model_dir[cache_key]
                     and selector_enabled_by_default(language, format_type, alias_family=alias_family)
                 )
+                bundle_cache[cache_key] = load_oto_model_bundle(route_model_dir[cache_key]) if delta_allowed else None
                 selector_cache[cache_key] = load_lightgbm_selector_bundle(route_model_dir[cache_key]) if selector_allowed else None
                 bundle = bundle_cache[cache_key]
                 if bundle and route_model_dir[cache_key] and route_model_dir[cache_key] not in model_notice:
-                    _emit(callback, f"[OTO-ML] 모델 로드 ({bundle.backend}): {route_model_dir[cache_key]}")
+                    _emit(callback, f"[OTO-ML] ?? ?? ({bundle.backend}): {route_model_dir[cache_key]}")
                     ml_report["loaded_models"].append(route_model_dir[cache_key])
                     model_notice.add(route_model_dir[cache_key])
                 if selector_cache.get(cache_key) is not None and route_model_dir[cache_key] not in ml_report["selector_model_routes"]:
                     ml_report["selector_model_routes"].append(route_model_dir[cache_key])
         bundle = bundle_cache.get(cache_key)
-        if not bundle:
-            continue
-        selected_base_override = None
         selector_bundle = selector_cache.get(cache_key)
+        if not bundle and selector_bundle is None:
+            continue
+
+        selected_base_override = None
         if selector_bundle is not None:
             selected = select_best_candidate(
                 language,
@@ -737,18 +845,29 @@ def apply_oto_ml_to_oto_file(
                 selector_mode_counts = ml_report.get("selector_mode_counts", {})
                 selector_mode_counts[mode] = int(selector_mode_counts.get(mode, 0)) + 1
                 ml_report["selector_mode_counts"] = selector_mode_counts
+
         line_index = int(feat.get("line_index", -1))
         row = rows_by_index.get(line_index)
         if row is None:
             continue
         try:
-            o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(
-                language,
-                feat,
-                bundle,
-                anchor_stats=anchor_stats,
-                base_params_override=selected_base_override,
-            )
+            if bundle is not None:
+                o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(
+                    language,
+                    feat,
+                    bundle,
+                    anchor_stats=anchor_stats,
+                    base_params_override=selected_base_override,
+                )
+            elif selected_base_override is not None:
+                o2, c2, ct2, p2, ov2 = apply_oto_ml_selector_candidate(
+                    language,
+                    feat,
+                    selected_base_override,
+                    anchor_stats=anchor_stats,
+                )
+            else:
+                continue
         except Exception as e:
             logger.warning("OTO ML inference skipped for line %s: %s", line_index, e)
             ml_report["infer_failures"].append({"line_index": line_index, "message": str(e)})

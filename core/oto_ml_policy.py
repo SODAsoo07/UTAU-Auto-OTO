@@ -37,6 +37,17 @@ _SELECTOR_DEFAULTS = {
     ("korean", "cvc", "bridge"): True,
 }
 
+_DELTA_DEFAULTS = {
+    ("japanese", "cvvc", "cv"): False,
+}
+
+
+_FAMILY_SPLIT_DEFAULTS = {
+    ("korean", "cvc"): ["cv", "bridge"],
+    ("korean", "cvvc"): ["cv", "bridge"],
+    ("japanese", "cvvc"): ["cv", "bridge"],
+}
+
 
 def normalize_alias_family(alias_family: str) -> str:
     value = str(alias_family or "").strip().lower()
@@ -68,6 +79,16 @@ def infer_alias_family(language: str, row_context: Dict[str, object]) -> str:
     return ""
 
 
+def recommended_alias_family_splits(language: str, format_type: str) -> List[str]:
+    lang = str(language or "").strip().lower()
+    fmt = normalize_format_type(lang, format_type) or "general"
+    return list(_FAMILY_SPLIT_DEFAULTS.get((lang, fmt), []))
+
+
+def should_split_alias_families(language: str, format_type: str) -> bool:
+    return bool(recommended_alias_family_splits(language, format_type))
+
+
 def default_training_filters(language: str, format_type: str, alias_family: str = "") -> Dict[str, object]:
     lang = str(language or "").strip().lower()
     fmt = normalize_format_type(lang, format_type) or "general"
@@ -83,6 +104,21 @@ def default_training_filters(language: str, format_type: str, alias_family: str 
         "exclude_nuclei_fallback": True,
         "use_pseudo_labels": False,
     }
+
+
+def delta_enabled_by_default(language: str, format_type: str, alias_family: str = "") -> bool:
+    if str(os.environ.get("UTOA_DISABLE_OTO_DELTA", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    if str(os.environ.get("UTOA_FORCE_OTO_DELTA", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    lang = str(language or "").strip().lower()
+    fmt = normalize_format_type(lang, format_type) or "general"
+    family = normalize_alias_family(alias_family)
+    if (lang, fmt, family) in _DELTA_DEFAULTS:
+        return bool(_DELTA_DEFAULTS[(lang, fmt, family)])
+    if family and (lang, fmt, "") in _DELTA_DEFAULTS:
+        return bool(_DELTA_DEFAULTS[(lang, fmt, "")])
+    return True
 
 
 def selector_enabled_by_default(language: str, format_type: str, alias_family: str = "") -> bool:
@@ -102,7 +138,10 @@ def selector_enabled_by_default(language: str, format_type: str, alias_family: s
 __all__ = [
     "alias_family_to_alias_types",
     "default_training_filters",
+    "delta_enabled_by_default",
     "infer_alias_family",
     "normalize_alias_family",
+    "recommended_alias_family_splits",
+    "should_split_alias_families",
     "selector_enabled_by_default",
 ]
