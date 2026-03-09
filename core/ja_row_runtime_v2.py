@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from core.oto_row_output_v2 import prepare_oto_alias_rows
+
 
 def maybe_build_ja_realized_cv_anchor_record(
     current_w_idx,
@@ -64,11 +66,18 @@ def build_ja_alias_output_rows(
     generate_openutau_aliases_fn,
     alias_out_fn,
 ):
-    aliases_to_write = generate_openutau_aliases_fn(alias) if generate_openutau else [alias]
-    rows = []
-    for a in aliases_to_write:
-        a2 = alias_out_fn(a)
-        rows.append(f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}")
+    _params, rows = prepare_oto_alias_rows(
+        real_wav_name,
+        alias,
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        generate_openutau=generate_openutau,
+        generate_aliases_fn=generate_openutau_aliases_fn,
+        alias_transform_fn=alias_out_fn,
+    )
     return rows
 
 

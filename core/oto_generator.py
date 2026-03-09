@@ -152,6 +152,8 @@ from core.kr_row_runtime_v2 import (
     maybe_build_kr_realized_cv_anchor_record as _maybe_build_kr_realized_cv_anchor_record_v2,
     prepare_kr_cv_head_anchor_context as _prepare_kr_cv_head_anchor_context_v2,
 )
+from core.kr_row_finalize_v2 import finalize_kr_row as _finalize_kr_row_v2
+from core.oto_row_output_v2 import prepare_oto_alias_rows as _prepare_oto_alias_rows_v2
 from core.oto_anchor_graph import build_adjacent_anchor_graph, resolve_bridge_anchor_pair
 from core.oto_mapping_policy import resolve_plan_policy
 from core.oto_row_abstain import decide_cv_row_abstain
@@ -610,6 +612,46 @@ def _fit_oto_to_wav_duration(
     return offset, consonant, cutoff, pre, ovl, changed
 
 
+def _build_alias_rows(
+    real_wav_name,
+    alias,
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    ovl,
+    generate_openutau=False,
+    alias_suffix="",
+    alias_type="",
+    wav_duration_ms=0.0,
+    validate_fn=None,
+):
+    """에일리어스(및 OpenUtau 변형)를 OTO 라인 문자열로 변환합니다."""
+    _params, rows = _prepare_oto_alias_rows_v2(
+        real_wav_name,
+        alias,
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        generate_openutau=generate_openutau,
+        generate_aliases_fn=generate_openutau_aliases,
+        alias_transform_fn=lambda alias_item: apply_alias_suffix(alias_item, alias_suffix),
+        pre_write_adjust_fn=lambda off, cons, cut, preu, ov: _fit_oto_to_wav_duration(
+            off,
+            cons,
+            cut,
+            preu,
+            ov,
+            wav_duration_ms,
+            alias_type=alias_type,
+            validate_fn=validate_fn,
+        )[:5],
+    )
+    return rows
+
+
 def _append_alias_rows(
     final_lines,
     real_wav_name,
@@ -626,21 +668,22 @@ def _append_alias_rows(
     validate_fn=None,
 ):
     """에일리어스(및 OpenUtau 변형)를 OTO 라인으로 누적합니다."""
-    offset, consonant, cutoff, pre, ovl, _changed = _fit_oto_to_wav_duration(
-        offset,
-        consonant,
-        cutoff,
-        pre,
-        ovl,
-        wav_duration_ms,
-        alias_type=alias_type,
-        validate_fn=validate_fn,
+    final_lines.extend(
+        _build_alias_rows(
+            real_wav_name,
+            alias,
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            generate_openutau=generate_openutau,
+            alias_suffix=alias_suffix,
+            alias_type=alias_type,
+            wav_duration_ms=wav_duration_ms,
+            validate_fn=validate_fn,
+        )
     )
-    aliases_to_write = generate_openutau_aliases(alias) if generate_openutau else [alias]
-    for a in aliases_to_write:
-        a2 = apply_alias_suffix(a, alias_suffix)
-        new_line = f"{real_wav_name}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
-        final_lines.append(new_line)
 
 
 def _resolve_cv_syllable_index(
@@ -3059,22 +3102,27 @@ def generate_oto(
                             next_vowel_abs_ms=vcv_next_vowel,
                             mapping_confidence=row_mapping_confidence,
                         )
-                    _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
-
-                    _append_alias_rows(
-                        final_lines,
-                        real_wav_name,
-                        alias,
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        ovl,
+                    _finalize_kr_row_v2(
+                        final_lines=final_lines,
+                        row_builder_fn=_build_alias_rows,
+                        real_wav_name=real_wav_name,
+                        alias=alias,
+                        offset=offset,
+                        consonant=consonant,
+                        cutoff=cutoff,
+                        pre=pre,
+                        ovl=ovl,
                         generate_openutau=generate_openutau,
                         alias_suffix=alias_suffix,
                         alias_type="vcv",
                         wav_duration_ms=wav_duration_ms,
                         validate_fn=validate_oto_params,
+                        log_post_timing_events_fn=_log_post_timing_events,
+                        log_fn=log,
+                        fname=fname,
+                        soft_off_shift=soft_off_shift,
+                        soft_cut_shift=soft_cut_shift,
+                        cutoff_reduced=cutoff_reduced,
                     )
                     continue
 
@@ -3240,32 +3288,35 @@ def generate_oto(
                         c_end_abs=cv_head_anchor_ctx["c_end_abs"],
                         build_anchor_fn=_build_realized_kr_cv_anchor_v2,
                     )
-                    if anchor_record is not None:
-                        anchor_idx, anchor_payload = anchor_record
-                        realized_cv_anchor_by_idx[anchor_idx] = anchor_payload
-                    _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
-                    for msg in _build_kr_cv_head_guard_messages_v2(
-                        fname,
-                        alias,
-                        offset_reduced=offset_reduced,
-                        cutoff_extended=cutoff_extended,
-                    ):
-                        log(msg)
-
-                    _append_alias_rows(
-                        final_lines,
-                        real_wav_name,
-                        alias,
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        ovl,
+                    _finalize_kr_row_v2(
+                        final_lines=final_lines,
+                        row_builder_fn=_build_alias_rows,
+                        real_wav_name=real_wav_name,
+                        alias=alias,
+                        offset=offset,
+                        consonant=consonant,
+                        cutoff=cutoff,
+                        pre=pre,
+                        ovl=ovl,
                         generate_openutau=generate_openutau,
                         alias_suffix=alias_suffix,
                         alias_type="cv_head",
                         wav_duration_ms=wav_duration_ms,
                         validate_fn=validate_oto_params,
+                        log_post_timing_events_fn=_log_post_timing_events,
+                        log_fn=log,
+                        fname=fname,
+                        soft_off_shift=soft_off_shift,
+                        soft_cut_shift=soft_cut_shift,
+                        cutoff_reduced=cutoff_reduced,
+                        anchor_store=realized_cv_anchor_by_idx,
+                        anchor_record=anchor_record,
+                        messages=_build_kr_cv_head_guard_messages_v2(
+                            fname,
+                            alias,
+                            offset_reduced=offset_reduced,
+                            cutoff_extended=cutoff_extended,
+                        ),
                     )
                     continue
 
@@ -3676,6 +3727,7 @@ def generate_oto(
                     next_vowel_abs_ms=next_vowel_abs,
                     mapping_confidence=row_mapping_confidence,
                 )
+                anchor_record = None
                 if alias_type == "cv" and selected_w_idx is not None:
                     anchor_record = _maybe_build_kr_realized_cv_anchor_record_v2(
                         selected_w_idx,
@@ -3690,33 +3742,36 @@ def generate_oto(
                         c_end_abs=c_end,
                         build_anchor_fn=_build_realized_kr_cv_anchor_v2,
                     )
-                    if anchor_record is not None:
-                        anchor_idx, anchor_payload = anchor_record
-                        realized_cv_anchor_by_idx[anchor_idx] = anchor_payload
-                _log_post_timing_events(log, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
                 bridge_msg = _build_kr_bridge_adjust_message_v2(
                     fname,
                     alias,
                     alias_type,
                     bridge_shift,
                 )
-                if bridge_msg is not None:
-                    log(bridge_msg)
-
-                _append_alias_rows(
-                    final_lines,
-                    real_wav_name,
-                    alias,
-                    offset,
-                    consonant,
-                    cutoff,
-                    pre,
-                    ovl,
+                _finalize_kr_row_v2(
+                    final_lines=final_lines,
+                    row_builder_fn=_build_alias_rows,
+                    real_wav_name=real_wav_name,
+                    alias=alias,
+                    offset=offset,
+                    consonant=consonant,
+                    cutoff=cutoff,
+                    pre=pre,
+                    ovl=ovl,
                     generate_openutau=generate_openutau,
                     alias_suffix=alias_suffix,
                     alias_type=alias_type,
                     wav_duration_ms=wav_duration_ms,
                     validate_fn=validate_oto_params,
+                    log_post_timing_events_fn=_log_post_timing_events,
+                    log_fn=log,
+                    fname=fname,
+                    soft_off_shift=soft_off_shift,
+                    soft_cut_shift=soft_cut_shift,
+                    cutoff_reduced=cutoff_reduced,
+                    anchor_store=realized_cv_anchor_by_idx,
+                    anchor_record=anchor_record if alias_type == "cv" and selected_w_idx is not None else None,
+                    messages=([bridge_msg] if bridge_msg is not None else []),
                 )
 
             processed += 1

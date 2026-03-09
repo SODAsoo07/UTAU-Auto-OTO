@@ -94,6 +94,7 @@ from core.ja_row_runtime_v2 import (
     build_ja_cv_guard_messages as _build_ja_cv_guard_messages_v2,
     maybe_build_ja_realized_cv_anchor_record as _maybe_build_ja_realized_cv_anchor_record_v2,
 )
+from core.ja_row_finalize_v2 import finalize_ja_row as _finalize_ja_row_v2
 from core.ja_anchor_lock_v2 import (
     build_ja_anchor_lock_log_record as _build_ja_anchor_lock_log_record_v2,
     build_ja_anchor_lock_stats_delta as _build_ja_anchor_lock_stats_delta_v2,
@@ -3627,19 +3628,19 @@ def generate_ja_oto(
                         next_vowel_abs_ms=n_end,
                     )
                     
-                    final_lines.extend(
-                        _build_ja_alias_output_rows_v2(
-                            real_wav_name,
-                            alias,
-                            offset,
-                            consonant,
-                            cutoff,
-                            pre,
-                            ovl,
-                            generate_openutau=generate_openutau,
-                            generate_openutau_aliases_fn=generate_ja_openutau_aliases,
-                            alias_out_fn=_alias_out,
-                        )
+                    _finalize_ja_row_v2(
+                        final_lines=final_lines,
+                        row_builder_fn=_build_ja_alias_output_rows_v2,
+                        real_wav_name=real_wav_name,
+                        alias=alias,
+                        offset=offset,
+                        consonant=consonant,
+                        cutoff=cutoff,
+                        pre=pre,
+                        ovl=ovl,
+                        generate_openutau=generate_openutau,
+                        generate_openutau_aliases_fn=generate_ja_openutau_aliases,
+                        alias_out_fn=_alias_out,
                     )
                     continue
 
@@ -4035,31 +4036,29 @@ def generate_ja_oto(
                         vowel_end_abs=n_end,
                         build_anchor_fn=_build_realized_cv_anchor_v2,
                     )
-                    if anchor_record is not None:
-                        anchor_idx, anchor_payload = anchor_record
-                        realized_cv_anchor_by_idx[anchor_idx] = anchor_payload
-                    for msg in _build_ja_cv_guard_messages_v2(
-                        fname,
-                        alias,
-                        cutoff_reduced=cutoff_reduced,
-                        offset_reduced=offset_reduced,
-                        cutoff_extended=cutoff_extended,
-                    ):
-                        log(msg)
-
-                    final_lines.extend(
-                        _build_ja_alias_output_rows_v2(
-                            real_wav_name,
+                    _finalize_ja_row_v2(
+                        final_lines=final_lines,
+                        row_builder_fn=_build_ja_alias_output_rows_v2,
+                        real_wav_name=real_wav_name,
+                        alias=alias,
+                        offset=offset,
+                        consonant=consonant,
+                        cutoff=cutoff,
+                        pre=pre,
+                        ovl=ovl,
+                        generate_openutau=generate_openutau,
+                        generate_openutau_aliases_fn=generate_ja_openutau_aliases,
+                        alias_out_fn=_alias_out,
+                        anchor_store=realized_cv_anchor_by_idx,
+                        anchor_record=anchor_record,
+                        log_fn=log,
+                        messages=_build_ja_cv_guard_messages_v2(
+                            fname,
                             alias,
-                            offset,
-                            consonant,
-                            cutoff,
-                            pre,
-                            ovl,
-                            generate_openutau=generate_openutau,
-                            generate_openutau_aliases_fn=generate_ja_openutau_aliases,
-                            alias_out_fn=_alias_out,
-                        )
+                            cutoff_reduced=cutoff_reduced,
+                            offset_reduced=offset_reduced,
+                            cutoff_extended=cutoff_extended,
+                        ),
                     )
                     continue
 
@@ -4714,30 +4713,47 @@ def generate_ja_oto(
                         vowel_end_abs=n_end,
                         build_anchor_fn=_build_realized_cv_anchor_v2,
                     )
-                    if anchor_record is not None:
-                        anchor_idx, anchor_payload = anchor_record
-                        realized_cv_anchor_by_idx[anchor_idx] = anchor_payload
-                    for msg in _build_ja_cv_guard_messages_v2(
-                        fname,
-                        alias,
-                        cutoff_reduced=cutoff_reduced,
-                    ):
-                        log(msg)
-
-                final_lines.extend(
-                    _build_ja_alias_output_rows_v2(
-                        real_wav_name,
-                        alias,
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        ovl,
+                    _finalize_ja_row_v2(
+                        final_lines=final_lines,
+                        row_builder_fn=_build_ja_alias_output_rows_v2,
+                        real_wav_name=real_wav_name,
+                        alias=alias,
+                        offset=offset,
+                        consonant=consonant,
+                        cutoff=cutoff,
+                        pre=pre,
+                        ovl=ovl,
                         generate_openutau=generate_openutau,
                         generate_openutau_aliases_fn=generate_ja_openutau_aliases,
                         alias_out_fn=_alias_out,
+                        anchor_store=realized_cv_anchor_by_idx,
+                        anchor_record=anchor_record,
+                        log_fn=log,
+                        messages=_build_ja_cv_guard_messages_v2(
+                            fname,
+                            alias,
+                            cutoff_reduced=cutoff_reduced,
+                        ),
                     )
-                )
+                else:
+                    _finalize_ja_row_v2(
+                        final_lines=final_lines,
+                        row_builder_fn=_build_ja_alias_output_rows_v2,
+                        real_wav_name=real_wav_name,
+                        alias=alias,
+                        offset=offset,
+                        consonant=consonant,
+                        cutoff=cutoff,
+                        pre=pre,
+                        ovl=ovl,
+                        generate_openutau=generate_openutau,
+                        generate_openutau_aliases_fn=generate_ja_openutau_aliases,
+                        alias_out_fn=_alias_out,
+                        anchor_store=None,
+                        anchor_record=None,
+                        log_fn=None,
+                        messages=None,
+                    )
 
             processed += 1
 
