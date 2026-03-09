@@ -288,6 +288,18 @@ class FeatureExtractionTests(unittest.TestCase):
             rows = parse_oto_rows(oto_path, language="korean")
             self.assertEqual([row["alias"] for row in rows], ["ga"])
 
+    def test_parse_oto_rows_adds_source_ids(self):
+        with tempfile.TemporaryDirectory() as td:
+            oto_path = os.path.join(td, "oto.ini")
+            with open(oto_path, "w", encoding="utf-8") as f:
+                f.write("a.wav=ga,0,10,-20,5,2\n")
+                f.write("a.wav=gi,1,10,-20,5,2\n")
+            rows = parse_oto_rows(oto_path, language="korean")
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(rows[0]["source_oto_id"])
+            self.assertEqual(rows[0]["source_oto_id"], rows[1]["source_oto_id"])
+            self.assertNotEqual(rows[0]["source_row_id"], rows[1]["source_row_id"])
+
     def test_prefix_map_in_parent_folder_is_found_for_subfolder_oto(self):
         with tempfile.TemporaryDirectory() as td:
             root = os.path.join(td, "Voice")

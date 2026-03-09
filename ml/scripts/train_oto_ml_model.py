@@ -9,6 +9,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.oto_ml_lightgbm import train_lightgbm_bundle, train_lightgbm_selector_bundle
+from core.oto_ml_policy import alias_family_to_alias_types, default_training_filters, normalize_alias_family
 from core.oto_ml_selector import build_selector_dataset_csv_from_delta_dataset
 
 
@@ -19,6 +20,12 @@ def main():
     ap.add_argument("--dataset", required=True, help="Input dataset CSV")
     ap.add_argument("--out-dir", required=True, help="Output model directory")
     ap.add_argument("--group-column", default="voicebank_id")
+    ap.add_argument(
+        "--alias-family",
+        default="all",
+        choices=["all", "cv", "vowel", "bridge"],
+        help="Train a family-scoped model instead of mixing all alias families",
+    )
     ap.add_argument("--alias-types", default="", help="Comma-separated alias_type filter")
     ap.add_argument("--alias-groups", default="", help="Comma-separated alias_group filter")
     ap.add_argument(
@@ -31,7 +38,7 @@ def main():
         "--min-mapping-confidence",
         type=float,
         default=-1.0,
-        help="Minimum mapping_confidence. <0 means auto by language (korean=0.45, japanese=0.20).",
+        help="Minimum mapping_confidence. <0 means conservative auto default by language/format.",
     )
     ap.add_argument(
         "--exclude-nuclei-fallback",
@@ -42,8 +49,8 @@ def main():
     ap.add_argument(
         "--use-pseudo-labels",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use pseudo-labeled rows with sample weights when present (default: enabled)",
+        default=False,
+        help="Use pseudo-labeled rows with sample weights when present (default: disabled)",
     )
     ap.add_argument(
         "--pseudo-weight-high",
@@ -78,9 +85,14 @@ def main():
 
     alias_types = [v.strip() for v in str(args.alias_types).split(",") if v.strip()]
     alias_groups = [v.strip() for v in str(args.alias_groups).split(",") if v.strip()]
+    alias_family = normalize_alias_family(args.alias_family)
+    if alias_family and not alias_types:
+        alias_types = alias_family_to_alias_types(alias_family)
+
+    defaults = default_training_filters(args.lang, args.format, alias_family=alias_family)
     min_conf = float(args.min_mapping_confidence)
     if min_conf < 0.0:
-        min_conf = 0.45 if args.lang == "korean" else 0.20
+        min_conf = float(defaults["min_mapping_confidence"])
 
     meta = train_lightgbm_bundle(
         language=args.lang,
@@ -90,10 +102,11 @@ def main():
         group_column=args.group_column,
         alias_types=alias_types,
         alias_groups=alias_groups,
-        require_train_keep=args.require_train_keep,
+        alias_family=alias_family,
+        require_train_keep=bool(args.require_train_keep),
         min_mapping_confidence=min_conf,
-        exclude_nuclei_fallback=args.exclude_nuclei_fallback,
-        use_pseudo_labels=args.use_pseudo_labels,
+        exclude_nuclei_fallback=bool(args.exclude_nuclei_fallback),
+        use_pseudo_labels=bool(args.use_pseudo_labels),
         pseudo_weight_high=float(args.pseudo_weight_high),
         pseudo_weight_mid=float(args.pseudo_weight_mid),
     )
@@ -110,6 +123,12 @@ def main():
             selector_dataset,
             language=args.lang,
             format_type=args.format,
+            alias_types=alias_types,
+            alias_groups=alias_groups,
+            require_train_keep=bool(args.require_train_keep),
+            min_mapping_confidence=min_conf,
+            exclude_nuclei_fallback=bool(args.exclude_nuclei_fallback),
+            use_pseudo_labels=bool(args.use_pseudo_labels),
         )
         selector_meta = train_lightgbm_selector_bundle(
             language=args.lang,
@@ -118,6 +137,7 @@ def main():
             out_dir=args.out_dir,
             group_column=args.group_column,
             objective=args.selector_objective,
+            alias_family=alias_family,
         )
         print(f"selector_dataset_rows={selector_build.get('rows')}")
         print(f"selector_dataset_groups={selector_build.get('groups')}")

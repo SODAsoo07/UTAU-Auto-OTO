@@ -29,3 +29,7 @@
 ## 참고
 - 재학습 절차: `ml/학습_재빌드_절차.md`
 - 런타임 번들 위치: `assets/models/oto_ml`, `models_installed/oto_ml`
+
+## 추가 문서
+- 오매핑 데이터 수집 가이드: `C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\ml\오매핑_데이터_수집_가이드.md`
+- 모델 학습 명령어 가이드: `C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\ml\모델_학습_명령어_가이드.md`

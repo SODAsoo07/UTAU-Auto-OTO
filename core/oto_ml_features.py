@@ -36,8 +36,8 @@ from core.prefix_map_utils import find_prefix_map_path, strip_prefix_map_affixes
 
 logger = logging.getLogger(__name__)
 
-FEATURE_VERSION = "v5"
-TRAIN_ROW_MATCH_VERSION = "v5"
+FEATURE_VERSION = "v6"
+TRAIN_ROW_MATCH_VERSION = "v6"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
 
 FEATURE_NAMES = [
@@ -98,6 +98,12 @@ def _looks_like_pseudo_path(path: str) -> bool:
     if not low:
         return False
     return any(hint in low for hint in _PSEUDO_PATH_HINTS)
+
+
+def _stable_source_oto_id(path: str) -> str:
+    abs_path = os.path.abspath(path or "")
+    digest = hashlib.sha1(abs_path.encode("utf-8", errors="replace")).hexdigest()
+    return digest[:16]
 
 
 def _compute_row_weight(
@@ -431,6 +437,7 @@ def parse_oto_rows(path: str, language: str = "", custom_map: Optional[Dict[str,
         return rows
     text = _read_text_with_fallback(path)
     context_paths = list(prefix_context_paths or [])
+    source_oto_id = _stable_source_oto_id(path)
     for line_index, raw in enumerate(text.splitlines()):
         line = raw.strip()
         if not line or "=" not in line or "," not in line:
@@ -451,6 +458,8 @@ def parse_oto_rows(path: str, language: str = "", custom_map: Optional[Dict[str,
         try:
             row = {
                 "line_index": line_index,
+                "source_oto_id": source_oto_id,
+                "source_row_id": f"{source_oto_id}:{line_index}",
                 "raw_line": raw,
                 "wav": left.strip(),
                 "alias_raw": alias_raw,
@@ -1041,6 +1050,8 @@ def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str
             feat["alias_norm"] = row["alias_norm"]
             feat["occurrence_index"] = int(row["occurrence_index"])
             feat["line_index"] = int(row["line_index"])
+            feat["source_oto_id"] = str(row.get("source_oto_id", "") or "")
+            feat["source_row_id"] = str(row.get("source_row_id", "") or "")
             feat["raw_line"] = row["raw_line"]
             out_rows.append(feat)
 
@@ -1369,7 +1380,7 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
 
 def dataset_fieldnames() -> List[str]:
     return [
-        "voicebank_id", "wav", "alias", "wav_norm", "alias_norm", "occurrence_index", "line_index",
+        "voicebank_id", "wav", "alias", "wav_norm", "alias_norm", "occurrence_index", "line_index", "source_oto_id", "source_row_id",
         *FEATURE_NAMES,
         "manual_offset", "manual_cons", "manual_cutoff", "manual_pre", "manual_ovl",
         *TARGET_NAMES,

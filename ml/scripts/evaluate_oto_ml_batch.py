@@ -17,6 +17,7 @@ from core.oto_ml_lightgbm import (
     evaluate_lightgbm_bundle,
     evaluate_lightgbm_selector_bundle,
 )
+from core.oto_ml_policy import default_training_filters
 from core.oto_ml_selector import build_selector_dataset_csv_from_delta_dataset
 
 
@@ -190,11 +191,16 @@ def run_batch_evaluation(
 
         if evaluate_selector and _has_selector_bundle(model_dir):
             if build_selector_if_missing and not os.path.exists(selector_dataset):
+                defaults = default_training_filters(language, format_type)
                 build_selector_dataset_csv_from_delta_dataset(
                     delta_dataset_csv=dataset,
                     out_csv=selector_dataset,
                     language=language,
                     format_type=format_type,
+                    require_train_keep=bool(defaults["require_train_keep"]),
+                    min_mapping_confidence=float(defaults["min_mapping_confidence"]),
+                    exclude_nuclei_fallback=bool(defaults["exclude_nuclei_fallback"]),
+                    use_pseudo_labels=bool(defaults["use_pseudo_labels"]),
                 )
             if os.path.exists(selector_dataset):
                 selector_summary = evaluate_lightgbm_selector_bundle(

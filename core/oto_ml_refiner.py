@@ -14,6 +14,7 @@ from typing import Dict, Optional, Tuple
 from core.oto_ml_features import extract_feature_rows, get_delta_clip_limits, parse_oto_rows
 from core.oto_ml_runtime import load_oto_model_bundle, predict_oto_deltas
 from core.oto_ml_lightgbm import load_lightgbm_selector_bundle, predict_lightgbm_selector_score
+from core.oto_ml_policy import infer_alias_family, normalize_alias_family, selector_enabled_by_default
 from core.oto_ml_selector import select_best_candidate
 from core.format_type_utils import normalize_format_type
 from core.pipeline_status import (
@@ -63,18 +64,28 @@ def _installed_model_root_for_language(language: str) -> str:
     return os.path.join(base_dir, "models_installed", "oto_ml", lang)
 
 
-def _resolve_lightgbm_model_dir(language: str, format_type: str) -> Optional[str]:
+def _resolve_lightgbm_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
     fmt = normalize_format_type(language, format_type) or "general"
+    family = normalize_alias_family(alias_family)
     lang = str(language or "").strip().lower()
     candidates = []
     for root in (_installed_model_root_for_language(language), _model_root_for_language(language)):
         if os.path.isfile(os.path.join(root, "model_meta.json")):
             candidates.append(root)
         else:
+            if family:
+                candidates.append(os.path.join(root, fmt, "families", family, "v1"))
+                candidates.append(os.path.join(root, f"{fmt}_{family}", "v1"))
             candidates.append(os.path.join(root, fmt, "v1"))
             if fmt == "cvc":
+                if family:
+                    candidates.append(os.path.join(root, "cv", "families", family, "v1"))
+                    candidates.append(os.path.join(root, f"cv_{family}", "v1"))
                 candidates.append(os.path.join(root, "cv", "v1"))
             if fmt != "general":
+                if family:
+                    candidates.append(os.path.join(root, "general", "families", family, "v1"))
+                    candidates.append(os.path.join(root, f"general_{family}", "v1"))
                 candidates.append(os.path.join(root, "general", "v1"))
     for candidate in candidates:
         if os.path.isfile(os.path.join(candidate, "model_meta.json")):
@@ -87,16 +98,18 @@ def _resolve_lightgbm_model_dir(language: str, format_type: str) -> Optional[str
             continue
         alt_root = _model_root_for_language(alt_lang)
         for candidate in (
+            os.path.join(alt_root, fmt, "families", family, "v1") if family else "",
+            os.path.join(alt_root, f"{fmt}_{family}", "v1") if family else "",
             os.path.join(alt_root, fmt, "v1"),
             os.path.join(alt_root, "general", "v1"),
         ):
-            if os.path.isfile(os.path.join(candidate, "model_meta.json")):
+            if candidate and os.path.isfile(os.path.join(candidate, "model_meta.json")):
                 return candidate
     return None
 
 
-def _resolve_model_dir(language: str, format_type: str) -> Optional[str]:
-    return _resolve_lightgbm_model_dir(language, format_type)
+def _resolve_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
+    return _resolve_lightgbm_model_dir(language, format_type, alias_family=alias_family)
 
 
 def _bundle_meta_exists(model_dir: str) -> bool:
@@ -111,9 +124,10 @@ def _ensure_report(report: Optional[Dict[str, object]], **defaults) -> Dict[str,
     return report
 
 
-def check_oto_ml_ready(language: str, format_type: str) -> Dict[str, object]:
+def check_oto_ml_ready(language: str, format_type: str, alias_family: str = "") -> Dict[str, object]:
     routed_format = normalize_format_type(language, format_type) or "general"
-    model_dir = _resolve_model_dir(language, routed_format)
+    family = normalize_alias_family(alias_family)
+    model_dir = _resolve_model_dir(language, routed_format, alias_family=family)
     if not model_dir:
         return make_runtime_report(
             "ml",
@@ -148,12 +162,13 @@ def check_oto_ml_ready(language: str, format_type: str) -> Dict[str, object]:
     return make_runtime_report(
         "ml",
         OK,
-        "OTO ML 준비 완료",
-        language=str(language or "").strip().lower(),
-        format_type=routed_format,
-        model_dir=str(model_dir),
-        ready=True,
-    )
+            "OTO ML 준비 완료",
+            language=str(language or "").strip().lower(),
+            format_type=routed_format,
+            alias_family=family,
+            model_dir=str(model_dir),
+            ready=True,
+        )
 
 
 def _route_format_for_feature(language: str, feature_row: Dict[str, object], format_override: Optional[str] = None) -> Optional[str]:
@@ -663,27 +678,33 @@ def apply_oto_ml_to_oto_file(
         format_type = _route_format_for_feature(language, feat, format_override=format_override)
         if not format_type:
             continue
+        alias_family = infer_alias_family(language, feat)
         routed_features += 1
-        if format_type not in ml_report["attempted_routes"]:
-            ml_report["attempted_routes"].append(format_type)
-        cache_key = format_type
+        route_label = format_type if not alias_family else f"{format_type}:{alias_family}"
+        if route_label not in ml_report["attempted_routes"]:
+            ml_report["attempted_routes"].append(route_label)
+        cache_key = route_label
         if cache_key not in bundle_cache:
-            ready = check_oto_ml_ready(language, format_type)
+            ready = check_oto_ml_ready(language, format_type, alias_family=alias_family)
             route_status[cache_key] = str(ready.get("code", OK) or OK)
             route_model_dir[cache_key] = str(ready.get("model_dir", "") or "")
             if ready.get("code") == ML_MODEL_MISSING:
                 ml_report["missing_routes"].append(
-                    {"format_type": cache_key, "code": ML_MODEL_MISSING, "model_dir": route_model_dir[cache_key]}
+                    {"format_type": format_type, "alias_family": alias_family, "code": ML_MODEL_MISSING, "model_dir": route_model_dir[cache_key]}
                 )
                 bundle_cache[cache_key] = None
             elif ready.get("code") == ML_BUNDLE_INVALID:
                 ml_report["invalid_routes"].append(
-                    {"format_type": cache_key, "code": ML_BUNDLE_INVALID, "model_dir": route_model_dir[cache_key]}
+                    {"format_type": format_type, "alias_family": alias_family, "code": ML_BUNDLE_INVALID, "model_dir": route_model_dir[cache_key]}
                 )
                 bundle_cache[cache_key] = None
             else:
                 bundle_cache[cache_key] = load_oto_model_bundle(route_model_dir[cache_key])
-                selector_cache[cache_key] = load_lightgbm_selector_bundle(route_model_dir[cache_key]) if route_model_dir[cache_key] else None
+                selector_allowed = bool(
+                    route_model_dir[cache_key]
+                    and selector_enabled_by_default(language, format_type, alias_family=alias_family)
+                )
+                selector_cache[cache_key] = load_lightgbm_selector_bundle(route_model_dir[cache_key]) if selector_allowed else None
                 bundle = bundle_cache[cache_key]
                 if bundle and route_model_dir[cache_key] and route_model_dir[cache_key] not in model_notice:
                     _emit(callback, f"[OTO-ML] 모델 로드 ({bundle.backend}): {route_model_dir[cache_key]}")

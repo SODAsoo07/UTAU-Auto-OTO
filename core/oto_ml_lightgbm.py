@@ -39,6 +39,7 @@ else:
     SKLEARN_IMPORT_ERROR = None
 
 from core.format_type_utils import normalize_format_type
+from core.oto_ml_policy import default_training_filters, normalize_alias_family, selector_enabled_by_default
 from core.oto_ml_features import CATEGORICAL_FEATURES, FEATURE_NAMES, TARGET_NAMES, canonicalize_feature_row, get_delta_clip_limits, get_feature_schema, write_feature_schema
 from core.oto_ml_selector import (
     SELECTOR_CATEGORICAL_FEATURES,
@@ -203,10 +204,11 @@ def train_lightgbm_bundle(
     early_stopping_rounds: int = 50,
     alias_types: Optional[list[str]] = None,
     alias_groups: Optional[list[str]] = None,
+    alias_family: str = "",
     require_train_keep: bool = False,
     min_mapping_confidence: float = 0.0,
     exclude_nuclei_fallback: bool = False,
-    use_pseudo_labels: bool = True,
+    use_pseudo_labels: bool = False,
     pseudo_weight_high: float = 0.7,
     pseudo_weight_mid: float = 0.4,
 ) -> Dict[str, Any]:
@@ -217,6 +219,8 @@ def train_lightgbm_bundle(
     df = pd.read_csv(dataset_csv)
     language = str(language).strip().lower()
     format_type = normalize_format_type(language, format_type)
+    alias_family = normalize_alias_family(alias_family)
+    default_policy = default_training_filters(language, format_type, alias_family=alias_family)
     if "language" in df.columns:
         df = df[df["language"].astype(str).str.lower() == language]
     if format_type and format_type != "general" and "format_type" in df.columns:
@@ -329,6 +333,7 @@ def train_lightgbm_bundle(
         "filters": {
             "alias_types": list(alias_types or []),
             "alias_groups": list(alias_groups or []),
+            "alias_family": alias_family,
             "require_train_keep": bool(require_train_keep),
             "min_mapping_confidence": float(min_mapping_confidence),
             "exclude_nuclei_fallback": bool(exclude_nuclei_fallback),
@@ -336,6 +341,8 @@ def train_lightgbm_bundle(
             "pseudo_weight_high": float(pseudo_weight_high),
             "pseudo_weight_mid": float(pseudo_weight_mid),
         },
+        "default_policy": default_policy,
+        "selector_default_enabled": bool(selector_enabled_by_default(language, format_type, alias_family=alias_family)),
         "weight_summary": {
             "min": float(pd.to_numeric(df["_train_sample_weight"], errors="coerce").fillna(0.0).min()) if len(df) else 0.0,
             "max": float(pd.to_numeric(df["_train_sample_weight"], errors="coerce").fillna(0.0).max()) if len(df) else 0.0,
@@ -359,6 +366,7 @@ def train_lightgbm_selector_bundle(
     objective: str = "pointwise",
     num_boost_round: int = 400,
     early_stopping_rounds: int = 40,
+    alias_family: str = "",
 ) -> Dict[str, Any]:
     _require_training_stack()
     if not selector_dataset_csv or not os.path.exists(selector_dataset_csv):
@@ -367,6 +375,7 @@ def train_lightgbm_selector_bundle(
     df = pd.read_csv(selector_dataset_csv)
     language = str(language).strip().lower()
     format_type = normalize_format_type(language, format_type)
+    alias_family = normalize_alias_family(alias_family)
     objective = str(objective or "pointwise").strip().lower()
     if objective not in {"pointwise", "ranking"}:
         raise ValueError(f"Unsupported selector objective: {objective}")
@@ -472,6 +481,8 @@ def train_lightgbm_selector_bundle(
         "feature_names": feature_names,
         "categorical_features": categorical_features,
         "selector_objective": objective,
+        "alias_family": alias_family,
+        "selector_default_enabled": bool(selector_enabled_by_default(language, format_type, alias_family=alias_family)),
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "train_rows": int(len(df)),
         "voicebank_count": int(df[group_column].nunique()) if group_column in df.columns else 1,

@@ -11,7 +11,12 @@ if ROOT not in sys.path:
 
 from core.oto_ml_lightgbm import evaluate_lightgbm_selector_bundle
 from core.oto_ml_refiner import apply_oto_ml_to_oto_file
-from core.oto_ml_selector import build_selector_candidates, build_selector_training_rows_from_delta_rows, select_best_candidate
+from core.oto_ml_selector import (
+    build_selector_candidates,
+    build_selector_dataset_csv_from_delta_dataset,
+    build_selector_training_rows_from_delta_rows,
+    select_best_candidate,
+)
 
 
 class OtoMlSelectorTests(unittest.TestCase):
@@ -74,6 +79,63 @@ class OtoMlSelectorTests(unittest.TestCase):
         self.assertEqual(len(best), 1)
         self.assertIn("selector_rank_label", best[0])
         self.assertIn("candidate_mode", best[0])
+
+    def test_selector_group_id_uses_source_row_id_when_present(self):
+        row1 = self._base_row()
+        row2 = self._base_row()
+        row1["source_oto_id"] = "oto_a"
+        row1["source_row_id"] = "oto_a:0"
+        row2["source_oto_id"] = "oto_b"
+        row2["source_row_id"] = "oto_b:0"
+        rows = build_selector_training_rows_from_delta_rows([row1, row2])
+        groups = {str(row.get("selector_group_id", "")) for row in rows}
+        self.assertEqual(len(groups), 2)
+
+    def test_selector_group_id_fallback_keeps_alias_occurrence_separate(self):
+        row1 = self._base_row()
+        row2 = self._base_row()
+        row2["alias"] = "gaS"
+        row2["alias_norm"] = "gas"
+        rows = build_selector_training_rows_from_delta_rows([row1, row2])
+        groups = {str(row.get("selector_group_id", "")) for row in rows}
+        self.assertEqual(len(groups), 2)
+
+    def test_selector_dataset_builder_applies_conservative_filters(self):
+        with tempfile.TemporaryDirectory() as td:
+            delta_csv = os.path.join(td, "delta.csv")
+            selector_csv = os.path.join(td, "selector.csv")
+            row1 = self._base_row()
+            row1["label_source"] = "manual"
+            row1["train_keep_default"] = 1
+            row1["used_nuclei_fallback"] = 0
+            row1["source_row_id"] = "oto_a:0"
+            row1["source_oto_id"] = "oto_a"
+            row1["mapping_confidence"] = 0.9
+            row2 = dict(row1)
+            row2["source_row_id"] = "oto_a:1"
+            row2["line_index"] = 1
+            row2["label_source"] = "pseudo_high"
+            with open(delta_csv, "w", encoding="utf-8", newline="") as f:
+                import csv
+                writer = csv.DictWriter(f, fieldnames=sorted(set(row1) | set(row2)))
+                writer.writeheader()
+                writer.writerow(row1)
+                writer.writerow(row2)
+            summary = build_selector_dataset_csv_from_delta_dataset(
+                delta_csv,
+                selector_csv,
+                language="korean",
+                format_type="cv",
+                require_train_keep=True,
+                min_mapping_confidence=0.5,
+                exclude_nuclei_fallback=True,
+                use_pseudo_labels=False,
+            )
+            self.assertGreater(summary["rows"], 0)
+            with open(selector_csv, "r", encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("oto_a:0", text)
+            self.assertNotIn("oto_a:1", text)
 
     def test_selector_candidates_cover_supported_language_formats(self):
         cases = [
@@ -166,6 +228,58 @@ class OtoMlSelectorTests(unittest.TestCase):
             with open(oto_path, "r", encoding="utf-8") as f:
                 text = f.read()
             self.assertNotIn(",80.00,140.00,-220.00,60.00,35.00", text)
+
+    def test_apply_oto_ml_to_oto_file_skips_selector_for_japanese_cvvc_by_default(self):
+        with tempfile.TemporaryDirectory() as td:
+            oto_path = os.path.join(td, "oto.ini")
+            with open(oto_path, "w", encoding="utf-8") as f:
+                f.write("a.wav=ka,80.00,140.00,-220.00,60.00,35.00\n")
+
+            rows = [
+                {
+                    "line_index": 0,
+                    "wav": "a.wav",
+                    "alias": "ka",
+                    "offset": 80.0,
+                    "cons": 140.0,
+                    "cutoff": -220.0,
+                    "pre": 60.0,
+                    "ovl": 35.0,
+                }
+            ]
+            feat = self._base_row()
+            feat["language"] = "japanese"
+            feat["format_type"] = "cvvc"
+            feat["alias"] = "ka"
+            feat["alias_norm"] = "ka"
+            feat["alias_type"] = "cv"
+            feat["alias_group"] = "cv_plosive"
+            feat["mapping_confidence"] = 0.92
+            with mock.patch("core.oto_ml_refiner.parse_oto_rows", return_value=rows), mock.patch(
+                "core.oto_ml_refiner.extract_feature_rows", return_value=[feat]
+            ), mock.patch(
+                "core.oto_ml_refiner.check_oto_ml_ready",
+                return_value={"code": "OK", "model_dir": td},
+            ), mock.patch(
+                "core.oto_ml_refiner._resolve_model_dir", return_value=td
+            ), mock.patch(
+                "core.oto_ml_refiner.load_oto_model_bundle", return_value=SimpleNamespace(backend="lightgbm")
+            ), mock.patch(
+                "core.oto_ml_refiner.load_lightgbm_selector_bundle"
+            ) as selector_loader, mock.patch(
+                "core.oto_ml_refiner.predict_oto_deltas",
+                return_value=SimpleNamespace(
+                    deltas={
+                        "delta_offset": 0.0,
+                        "delta_cons": 0.0,
+                        "delta_cutoff": 0.0,
+                        "delta_pre": 0.0,
+                        "delta_ovl": 0.0,
+                    }
+                ),
+            ):
+                apply_oto_ml_to_oto_file("japanese", oto_path, tg_dir=td, wav_dir=td)
+            selector_loader.assert_not_called()
 
     def test_evaluate_lightgbm_selector_bundle_reports_top1_metrics(self):
         with tempfile.TemporaryDirectory() as td:

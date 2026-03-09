@@ -772,6 +772,8 @@ def selector_dataset_fieldnames() -> List[str]:
         "alias_norm",
         "occurrence_index",
         "line_index",
+        "source_oto_id",
+        "source_row_id",
         "selector_group_id",
         "selector_rank_label",
         "selector_is_best",
@@ -786,17 +788,34 @@ def selector_dataset_fieldnames() -> List[str]:
     ]
 
 
+def _build_selector_group_id(base_row: Dict[str, object]) -> str:
+    source_row_id = str(base_row.get("source_row_id", "") or "").strip()
+    if source_row_id:
+        return f"{base_row.get('voicebank_id', '')}|{source_row_id}"
+    source_oto_id = str(base_row.get("source_oto_id", "") or "").strip()
+    if source_oto_id:
+        return (
+            f"{base_row.get('voicebank_id', '')}|{source_oto_id}|"
+            f"{int(_to_float(base_row.get('line_index'), 0.0))}|"
+            f"{base_row.get('alias_norm', '')}|"
+            f"{int(_to_float(base_row.get('occurrence_index'), 0.0))}"
+        )
+    return (
+        f"{base_row.get('voicebank_id', '')}|"
+        f"{base_row.get('wav_norm', base_row.get('wav', ''))}|"
+        f"{base_row.get('alias_norm', '')}|"
+        f"{int(_to_float(base_row.get('occurrence_index'), 0.0))}|"
+        f"{int(_to_float(base_row.get('line_index'), 0.0))}"
+    )
+
+
 def build_selector_training_rows_from_delta_rows(rows: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
     out: List[Dict[str, object]] = []
     for raw_row in rows:
         base_row = dict(raw_row)
         candidates = build_selector_candidates(str(base_row.get("language", "") or ""), base_row)
         selector_rows: List[Dict[str, object]] = []
-        group_id = (
-            f"{base_row.get('voicebank_id', '')}|"
-            f"{base_row.get('wav_norm', base_row.get('wav', ''))}|"
-            f"{int(_to_float(base_row.get('line_index'), 0.0))}"
-        )
+        group_id = _build_selector_group_id(base_row)
         for candidate in candidates:
             feature_row = build_selector_feature_row(str(base_row.get("language", "") or ""), base_row, candidate)
             quality_score, err = _quality_against_manual(base_row, candidate)
@@ -808,6 +827,8 @@ def build_selector_training_rows_from_delta_rows(rows: Sequence[Dict[str, object
                 "alias_norm": base_row.get("alias_norm", ""),
                 "occurrence_index": int(_to_float(base_row.get("occurrence_index"), 0.0)),
                 "line_index": int(_to_float(base_row.get("line_index"), 0.0)),
+                "source_oto_id": str(base_row.get("source_oto_id", "") or ""),
+                "source_row_id": str(base_row.get("source_row_id", "") or ""),
                 "selector_group_id": group_id,
                 "selector_quality_score": float(quality_score),
                 **err,
@@ -846,15 +867,47 @@ def build_selector_dataset_csv_from_delta_dataset(
     *,
     language: str = "",
     format_type: str = "",
+    alias_types: Sequence[str] | None = None,
+    alias_groups: Sequence[str] | None = None,
+    require_train_keep: bool = False,
+    min_mapping_confidence: float = 0.0,
+    exclude_nuclei_fallback: bool = False,
+    use_pseudo_labels: bool = True,
 ) -> Dict[str, object]:
     rows = read_delta_dataset_rows(delta_dataset_csv)
     lang = str(language or "").strip().lower()
     fmt = str(format_type or "").strip().lower()
+    alias_type_set = {str(v).strip().lower() for v in (alias_types or []) if str(v).strip()}
+    alias_group_set = {str(v).strip().lower() for v in (alias_groups or []) if str(v).strip()}
     filtered = []
     for row in rows:
         if lang and str(row.get("language", "") or "").strip().lower() != lang:
             continue
         if fmt and str(row.get("format_type", "") or "").strip().lower() != fmt:
+            continue
+        if alias_type_set and str(row.get("alias_type", "") or "").strip().lower() not in alias_type_set:
+            continue
+        if alias_group_set and str(row.get("alias_group", "") or "").strip().lower() not in alias_group_set:
+            continue
+        if require_train_keep:
+            try:
+                if int(float(row.get("train_keep_default", 0) or 0)) <= 0:
+                    continue
+            except Exception:
+                continue
+        if float(min_mapping_confidence) > 0.0:
+            try:
+                if float(row.get("mapping_confidence", 0.0) or 0.0) < float(min_mapping_confidence):
+                    continue
+            except Exception:
+                continue
+        if exclude_nuclei_fallback:
+            try:
+                if int(float(row.get("used_nuclei_fallback", 0) or 0)) > 0:
+                    continue
+            except Exception:
+                continue
+        if not use_pseudo_labels and str(row.get("label_source", "") or "").strip().lower().startswith("pseudo"):
             continue
         filtered.append(row)
     selector_rows = build_selector_training_rows_from_delta_rows(filtered)
