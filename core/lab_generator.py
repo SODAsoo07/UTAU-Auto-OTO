@@ -65,6 +65,7 @@ KO_ROMAJI_IPA_TABLE = {}
 KO_HANGUL_ALIAS_DIRECT = {}
 KO_ALIAS_VARIANT_NORMALIZATION = {}
 KO_AMBIGUOUS_ALIAS_PRIORITY = {}
+_KO_KNOWN_PHONE_SET = set()
 
 
 def _pick_preferred_roman_alias(value: Any) -> str:
@@ -91,6 +92,15 @@ def _apply_external_korean_conversion_table():
     KO_HANGUL_ALIAS_DIRECT = dict(table.get("hangul_to_alias_direct", {}) or {})
     KO_ALIAS_VARIANT_NORMALIZATION = dict(table.get("alias_variant_normalization", {}) or {})
 
+    # Case-insensitive variant fallback (e.g. eunr -> eunR, br1 -> BR1)
+    for k in list(KO_ROMAJI_IPA_TABLE.keys()):
+        key = str(k or "").strip()
+        if not key:
+            continue
+        lower = key.lower()
+        if lower != key and lower not in KO_ALIAS_VARIANT_NORMALIZATION:
+            KO_ALIAS_VARIANT_NORMALIZATION[lower] = key
+
     priority = {}
     dm_priority = dict(table.get("direct_mapping_priority", {}) or {})
     for key, val in dict(dm_priority.get("ambiguous_key_priority", {}) or {}).items():
@@ -101,6 +111,35 @@ def _apply_external_korean_conversion_table():
 
 
 _apply_external_korean_conversion_table()
+
+
+def _rebuild_ko_known_phone_set():
+    phones = {"sil", "spn", "pau", "cl"}
+    for mapping in (KO_IPA_MAP, KO_ROMAJI_IPA_TABLE):
+        for val in mapping.values():
+            text = str(val or "").strip()
+            if not text:
+                continue
+            for part in text.split():
+                part = part.strip()
+                if part:
+                    phones.add(part)
+    return phones
+
+
+def _is_supported_ko_ipa_sequence(ipa_text):
+    text = str(ipa_text or "").strip()
+    if not text:
+        return False
+    if not _KO_KNOWN_PHONE_SET:
+        _KO_KNOWN_PHONE_SET.update(_rebuild_ko_known_phone_set())
+    parts = [p for p in text.split() if p]
+    if not parts:
+        return False
+    return all(p in _KO_KNOWN_PHONE_SET for p in parts)
+
+
+_KO_KNOWN_PHONE_SET.update(_rebuild_ko_known_phone_set())
 
 # 한글 자모 -> 로마자
 CHOSUNG_LIST_ROMAN = ['g','kk','n','d','tt','r','m','b','pp','s','ss','','j','jj','ch','k','t','p','h']
@@ -244,14 +283,22 @@ def get_ipa_from_roman(token):
     if raw in KO_ROMAJI_IPA_TABLE:
         return _ipa_value_to_list(KO_ROMAJI_IPA_TABLE[raw])
 
+    # Uppercase coda markers can collide with reserved sil/r/h lower tokens
+    # (e.g. siL -> sil). In that case, prefer phonetic parsing over silence.
+    prefer_phonetic_reserved = (
+        bool(raw)
+        and raw not in KO_ROMAJI_IPA_TABLE
+        and any(ch.isupper() for ch in raw)
+    )
+
     token = raw.lower()
     token = re.sub(r'[0-9]+', '', token)
     token = token.replace('long', '')
     token = KO_ALIAS_VARIANT_NORMALIZATION.get(token, token)
-    if token in KO_ROMAJI_IPA_TABLE:
+    if token in KO_ROMAJI_IPA_TABLE and not (prefer_phonetic_reserved and token in {'sil', 'r', 'h'}):
         return _ipa_value_to_list(KO_ROMAJI_IPA_TABLE[token])
 
-    if not token or token in ['br', 'pau', 'sil', 'r', 'h', 'bre']:
+    if not token or token in ['br', 'pau', 'r', 'h', 'bre'] or (token == 'sil' and not prefer_phonetic_reserved):
         return ['sil']
     phonemes = []
     remainder = token
@@ -264,6 +311,9 @@ def get_ipa_from_roman(token):
             if len(remainder) < length:
                 continue
             chunk = remainder[:length]
+            if prefer_phonetic_reserved and chunk == 'sil':
+                # e.g. siL should be parsed as s+i+l, not as silence token.
+                continue
             if chunk in KO_IPA_MAP:
                 val = KO_IPA_MAP[chunk]
                 is_coda = False
@@ -499,11 +549,16 @@ def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', 
                 with open(full_path, 'w', encoding='utf-8') as f:
                     f.write(new_content)
 
+            token_pairs = []
             if len(final_tokens) != len(chars_only):
                 log(f"⚠️ 개수 불일치 ({lab_file}): 파일명 {len(final_tokens)} vs 내용 {len(chars_only)}")
+                log("⚠️ 불일치 보정: 파일명 토큰 대신 Lab 토큰 기준으로 사전을 생성합니다.")
+                token_pairs = [(c, c) for c in chars_only]
+            else:
+                token_pairs = list(zip(final_tokens, chars_only))
 
             full_sentence_ipa = []
-            for token, char in zip(final_tokens, chars_only):
+            for token, char in token_pairs:
                 ipa_list = []
                 if re.search(r'[가-힣]', token):
                     roman_parts = _romanize_hangul_token(token)
@@ -513,6 +568,10 @@ def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', 
                     ipa_list = get_ipa_from_roman(token)
 
                 ipa_str = " ".join(ipa_list)
+                if ipa_str and not _is_supported_ko_ipa_sequence(ipa_str):
+                    log(f"⚠️ IPA 검증 실패 ({lab_file}): '{token}' -> '{ipa_str}', sil로 대체")
+                    ipa_str = "sil"
+
                 if ipa_str and ipa_str != 'sil':
                     dictionary_entries[char] = ipa_str
                     full_sentence_ipa.append(ipa_str)
@@ -522,9 +581,10 @@ def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', 
                 if raw_char not in dictionary_entries:
                     # 매핑값(mapped_pho)을 로마자 발음으로 간주해 IPA를 추정한다.
                     c_ipa = " ".join(get_ipa_from_roman(mapped_pho))
-                    # 변환 실패 또는 sil만 나오는 경우 원문을 그대로 사용한다.
-                    if not c_ipa or c_ipa == 'sil':
-                        c_ipa = mapped_pho
+                    # 변환 실패/비정상 값은 그대로 주입하지 않고 sil로 안전 처리한다.
+                    if not c_ipa or not _is_supported_ko_ipa_sequence(c_ipa):
+                        log(f"⚠️ 커스텀 음소 '{raw_char}={mapped_pho}' 검증 실패, sil로 대체")
+                        c_ipa = "sil"
                     dictionary_entries[raw_char] = c_ipa
 
             if full_sentence_ipa:
