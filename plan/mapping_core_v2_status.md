@@ -112,6 +112,8 @@ v2의 의도는 다음과 같다.
 - low-trust 정렬 결과에서 과도한 자유 탐색 억제
 - low-margin row를 보수적으로 skip해서 잘못된 `CV/CV_HEAD` 생성 억제
 - 사용자가 제공한 sinsy 음절 라벨을 opt-in anchor source로 사용 가능
+- plain/glide/youon 오매핑을 줄이기 위한 forward jump/모음 보정 가드 강화
+- `VV`를 vowel pair 기준으로 재평가해 마지막 모음만 보고 매핑하는 문제를 완화
 - `VC/VV/V-CV`는 기존 ML/후처리 장점을 유지
 
 특히 일본어 `CVVC`와 한국어 `CVVC/VCV`에서 문제였던
@@ -126,10 +128,6 @@ v2의 의도는 다음과 같다.
 
 - generator 내부에 남은 언어별 scoring 유틸 완전 이관
 - 한국어 `VCV` 주변의 잔여 보조 scoring / drift repair 유틸 정리
-- JA/KR plain-glide / youon reject 강화
-- `VV` vowel pair scoring 도입
-- low-trust 시 forced index / free search 추가 축소
-- sinsy vs MFA 충돌 경고/진단 추가
 - batch evaluation 재실행 후 v2 전/후 수치 문서화
 - 실제 oto 생성 샘플 청감 검증 정리
 - 필요 시 `mapping_core_v2_design` 문서를 현재 구현 기준으로 재서술

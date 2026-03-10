@@ -17,7 +17,7 @@ from core.ja_mapping_scoring_v2 import (
 
 class JaMappingScoringV2Tests(unittest.TestCase):
     def test_soft_forward_shift_requires_better_match(self):
-        self.assertTrue(should_allow_ja_soft_forward_shift("kya", "ka", "kiya"))
+        self.assertFalse(should_allow_ja_soft_forward_shift("kya", "ka", "kiya"))
         self.assertFalse(should_allow_ja_soft_forward_shift("ka", "ka", "kya"))
         self.assertFalse(should_allow_ja_soft_forward_shift("n", "na", "n"))
 
@@ -26,9 +26,8 @@ class JaMappingScoringV2Tests(unittest.TestCase):
             {"roman": "ka", "phones": [1]},
             {"roman": "kiya", "phones": [1]},
         ]
-        self.assertEqual(
-            find_ja_cv_vowel_match_index("kya", 0, syllables_info, search_back=0, search_fwd=1),
-            1,
+        self.assertIsNone(
+            find_ja_cv_vowel_match_index("kya", 0, syllables_info, search_back=0, search_fwd=1)
         )
 
     def test_find_ja_exact_target_index_prefers_nearest_forward_match(self):

@@ -29,13 +29,6 @@ class TabBuildersMixin:
             )
         self.mfa_status_label.pack(side="left")
 
-        self.sofa_status_label = ctk.CTkLabel(status_group, text="  |  ", text_color="gray")
-        self.sofa_status_label.pack(side="left")
-        if self._is_sofa_installed():
-            self.sofa_status_label.configure(text="✅ SOFA 설치됨", text_color="#66BB6A")
-        else:
-            self.sofa_status_label.configure(text="❌ SOFA 미설치", text_color="#FF6B6B")
-
         self.mfa_install_btn = ctk.CTkButton(
             mfa_inner,
             text="⬇ MFA 원클릭 설치",
@@ -59,19 +52,6 @@ class TabBuildersMixin:
             command=self._run_mfa_diagnose_repair,
         )
         self.mfa_repair_btn.pack(side="right", padx=(0, 8))
-
-        self.sofa_install_btn = ctk.CTkButton(
-            mfa_inner,
-            text="⬇ SOFA 자동 설치",
-            width=150,
-            fg_color="#42A5F5",
-            hover_color="#1E88E5",
-            text_color="black",
-            command=self._run_sofa_setup,
-        )
-        if self._is_sofa_installed():
-            self.sofa_install_btn.configure(text="✅ 설치 완료", state="disabled", fg_color="#388E3C")
-        self.sofa_install_btn.pack(side="right", padx=(0, 8))
 
         ctk.CTkLabel(
             content,
@@ -244,24 +224,11 @@ class TabBuildersMixin:
         aligner_frame.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(
             aligner_frame,
-            text="고급 정렬 엔진",
-            font=("", 14, "bold"),
-            anchor="w",
-        ).pack(anchor="w", padx=12, pady=(10, 4))
-        ctk.CTkCheckBox(
-            aligner_frame,
-            text="SOFA 관련 옵션 표시",
-            variable=self.show_advanced_aligner_var,
-            command=self._on_advanced_aligner_toggle,
-            text_color="#90CAF9",
-        ).pack(anchor="w", padx=12, pady=(0, 6))
-        ctk.CTkLabel(
-            aligner_frame,
-            text="켜면 SOFA 설치 버튼, 선택 메뉴, 체크포인트/사전 입력창이 표시됩니다.",
+            text="고급 정렬 엔진 옵션은 현재 제공하지 않습니다.",
             text_color="gray",
             wraplength=740,
             justify="left",
-        ).pack(anchor="w", padx=12, pady=(0, 10))
+        ).pack(anchor="w", padx=12, pady=(10, 10))
 
     def _build_profile_tune_tab(self):
         tab = self.tabview.add("🎯 프로파일 미세 조정")

@@ -1,21 +1,7 @@
-import csv
-import os
-import sys
-import tempfile
 import unittest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
 
-from scripts.tune_alignment_thresholds import (
-    _build_runtime_batch_config,
-    _build_env_overrides,
-    _format_env_suffix,
-    _parse_float_grid,
-    _rank_key,
-    _write_csv,
-)
+raise unittest.SkipTest("legacy script dependency removed: scripts.tune_alignment_thresholds")
 
 
 class TuneAlignmentThresholdsTests(unittest.TestCase):

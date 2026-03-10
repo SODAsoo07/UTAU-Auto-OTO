@@ -34,10 +34,10 @@
 
 ### A-1. KR/JA plain-glide/youon reject 강화
 
-- [ ] 일본어 `CV/CV_HEAD/VCV`에서 plain mora와 youon/inserted mora 불일치 패널티 강화
-- [ ] 한국어 `CV/CV_HEAD/VCV`에서 plain vowel과 glide vowel 불일치 패널티 강화
-- [ ] `exact match`가 아니면 `+1 forward jump` 허용 조건 축소
-- [ ] 반복 음절 구간에서 forward fix는 `exact + vowel match + small delta` 동시 충족 시에만 허용
+- [x] 일본어 `CV/CV_HEAD/VCV`에서 plain mora와 youon/inserted mora 불일치 패널티 강화
+- [x] 한국어 `CV/CV_HEAD/VCV`에서 plain vowel과 glide vowel 불일치 패널티 강화
+- [x] `exact match`가 아니면 `+1 forward jump` 허용 조건 축소
+- [x] 반복 음절 구간에서 forward fix는 `exact + vowel match + small delta` 동시 충족 시에만 허용
 
 후보 파일:
 
@@ -60,9 +60,9 @@
 
 ### A-2. VV를 vowel pair 기준으로 재평가
 
-- [ ] 한국어 `VV`에 `pair scoring` 추가
-- [ ] 일본어 `VV`도 필요 시 `pair scoring` 추가
-- [ ] `last vowel only` 성격의 느슨한 fallback 사용 축소
+- [x] 한국어 `VV`에 `pair scoring` 추가
+- [x] 일본어 `VV`도 `pair scoring` 추가
+- [x] `last vowel only` 성격의 느슨한 fallback 사용 축소
 
 후보 파일:
 
@@ -84,7 +84,7 @@
 
 - [x] planner score margin 또는 local confidence margin 계산 추가
 - [x] margin이 낮은 `CV/CV_HEAD`는 `row abstain` 빈도 증가
-- [ ] low-trust 파일에서는 `forced index`와 `free search` 허용폭 축소
+- [x] low-trust 파일에서는 `forced index`와 `free search` 허용폭 축소
 
 후보 파일:
 
@@ -106,7 +106,7 @@
 - [x] sinsy 음절 라벨 ingest 추가
 - [x] sinsy 라벨이 있으면 planner input anchor로 우선 사용
 - [/] MFA phone tier는 내부 자음/모음 경계 추정용 보조로만 사용
-- [ ] sinsy와 MFA가 크게 충돌하면 low-trust 경고 기록
+- [x] sinsy와 MFA가 크게 충돌하면 low-trust 경고 기록
 
 정책:
 

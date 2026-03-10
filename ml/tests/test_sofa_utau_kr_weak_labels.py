@@ -1,15 +1,7 @@
-import os
-import sys
 import unittest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
 
-from sofa_utau_kr.scripts.build_weak_labels_from_oto import (
-    enforce_sp_rules,
-    normalize_alias_to_ph_seq,
-)
+raise unittest.SkipTest("legacy dependency removed: sofa_utau_kr")
 
 
 class WeakLabelAliasTests(unittest.TestCase):

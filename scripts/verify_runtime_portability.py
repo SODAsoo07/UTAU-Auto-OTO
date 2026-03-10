@@ -10,7 +10,6 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.mfa_runner import diagnose_mfa_runtime, find_mfa_executable, get_default_mfa_env_dir
-from core.sofa_runner import _resolve_sofa_repo_dir, get_sofa_env_python
 
 
 def _norm(path):
@@ -25,12 +24,6 @@ def probe_runtime_portability(fake_exe_path: str, language: str = "korean"):
         mfa_path = find_mfa_executable() or ""
         mfa_diag = diagnose_mfa_runtime(mfa_path, language=language)
 
-    with mock.patch("core.sofa_runner.sys.frozen", True, create=True), mock.patch(
-        "core.sofa_runner.sys.executable", fake_exe_path, create=True
-    ):
-        sofa_python = get_sofa_env_python() or ""
-        sofa_repo = _resolve_sofa_repo_dir("")
-
     shared_mfa_root = os.path.dirname(os.path.dirname(get_default_mfa_env_dir()))
     return {
         "fake_exe_path": fake_exe_path,
@@ -39,16 +32,12 @@ def probe_runtime_portability(fake_exe_path: str, language: str = "korean"):
         "mfa_ready": bool(mfa_diag.get("ready")),
         "mfa_issues": list(mfa_diag.get("issues", []) or []),
         "mfa_uses_shared_root": bool(mfa_path) and _norm(mfa_path).startswith(_norm(shared_mfa_root)),
-        "sofa_python": sofa_python,
-        "sofa_repo": sofa_repo,
-        "sofa_python_exists": bool(sofa_python and os.path.exists(sofa_python)),
-        "sofa_repo_exists": bool(sofa_repo and os.path.exists(os.path.join(sofa_repo, "infer.py"))),
     }
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Probe whether shared MFA/SOFA runtime paths still resolve after moving the built EXE."
+        description="Probe whether shared MFA runtime paths still resolve after moving the built EXE."
     )
     parser.add_argument("--language", default="korean", choices=["korean", "japanese"])
     parser.add_argument("--fake-exe-path", default="")

@@ -130,9 +130,9 @@ class RunOtoGenerationBatchTests(unittest.TestCase):
                             "reason": "",
                             "failure_code": "OK",
                             "output_oto": "oto.ini",
-                            "alignment": {"code": "OK", "used_engine": "sofa", "fallback_used": True},
+                            "alignment": {"code": "OK", "used_engine": "mfa", "fallback_used": False},
                             "ml": {"code": "ML_MODEL_MISSING", "status": "fallback", "fallback_used": True},
-                            "fallback_path": ["align:mfa->sofa", "ml:on->base"],
+                            "fallback_path": ["ml:on->base"],
                             "validation": {"checked_files": 3, "warnings": 1, "errors": 0},
                         }
                     ],
@@ -143,9 +143,9 @@ class RunOtoGenerationBatchTests(unittest.TestCase):
             self.assertIn("[ok] sample", text)
             self.assertIn("output_oto=oto.ini", text)
             self.assertIn("failure_code=OK", text)
-            self.assertIn("alignment=code=OK used_engine=sofa fallback_used=True", text)
+            self.assertIn("alignment=code=OK used_engine=mfa fallback_used=False", text)
             self.assertIn("ml=code=ML_MODEL_MISSING status=fallback fallback_used=True", text)
-            self.assertIn("fallback_path=align:mfa->sofa,ml:on->base", text)
+            self.assertIn("fallback_path=ml:on->base", text)
 
 
 if __name__ == "__main__":

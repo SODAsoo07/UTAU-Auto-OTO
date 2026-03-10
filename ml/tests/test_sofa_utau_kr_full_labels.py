@@ -1,14 +1,7 @@
-import os
-import sys
 import unittest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
 
-from sofa_utau_kr.scripts.build_full_labels_from_textgrid import (
-    normalize_durations_to_wav_length,
-)
+raise unittest.SkipTest("legacy dependency removed: sofa_utau_kr")
 
 
 class FullLabelDurationTests(unittest.TestCase):

@@ -2679,6 +2679,21 @@ def generate_oto(
                 sequence_lock_formats={"cvvc", "cvc"},
                 abstain_formats={"cvvc", "vcv", "cvc", "cv"},
             )
+            if sinsy_label_entries:
+                plan_source = str(kr_cv_plan.get("source") or "")
+                if plan_source != "sinsy_labels":
+                    log(
+                        f"🛡️ {fname}: sinsy 라벨이 있지만 planner에 적용되지 않음 "
+                        f"(source={plan_source or 'fallback'})"
+                    )
+                else:
+                    plan_margin = float((kr_cv_plan.get("meta") or {}).get("margin", 0.0) or 0.0)
+                    row_margin_floor = float(runtime_policy.get("row_margin_floor", 6.0))
+                    if plan_margin < row_margin_floor:
+                        log(
+                            f"🛡️ {fname}: sinsy planner margin 낮음 "
+                            f"(margin={plan_margin:.1f} < {row_margin_floor:.1f})"
+                        )
             mapping_confidence_base = float(runtime_policy.get("mapping_confidence", mapping_confidence_base))
             if kr_mapping_debug_reason_logging and mapping_confidence_base < float(file_mapping_conf_th):
                 log(
@@ -2786,6 +2801,12 @@ def generate_oto(
                     row_jump_high_conf = max(0, min(row_jump_high_conf, 1))
                 elif kr_order_locked_format and textgrid_trust_tier == "mid":
                     row_jump_high_conf = max(row_jump_default, min(row_jump_high_conf, 1))
+                if file_mapping_low_conf:
+                    row_jump_high_conf = int(max(0, min(row_jump_high_conf, row_jump_default)))
+                    if kr_order_locked_format:
+                        row_jump_default = 0
+                    else:
+                        row_jump_default = int(max(0, row_jump_default - 1))
                 if alias_type == "cv_head":
                     row_jump_default = int(max(0, row_jump_default - 1))
                     row_jump_high_conf = int(max(row_jump_default, row_jump_high_conf - 1))

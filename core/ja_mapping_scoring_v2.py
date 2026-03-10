@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from core.ja_lab_generator import split_ja_romaji_syllable
 from core.ja_oto_mapping import (
     _extract_ja_onset_token,
@@ -11,6 +13,28 @@ from core.ja_oto_mapping import (
 )
 
 JA_VOWELS = {"a", "i", "u", "e", "o"}
+_JA_KANA_RE = re.compile(r"[ぁ-ゖァ-ヺー]")
+
+
+def _normalize_ja_syllable_token_strict(token):
+    raw = str(token or "").strip()
+    if not raw:
+        return ""
+    return raw.lower().replace("'", "").strip("-_ ")
+
+
+def _is_kana_token(token):
+    return bool(_JA_KANA_RE.search(str(token or "")))
+
+
+def _syllable_info_raw_token(syl_info):
+    if not isinstance(syl_info, dict):
+        return ""
+    for k in ("roman", "word", "kana"):
+        raw = syl_info.get(k, "")
+        if raw:
+            return str(raw).strip()
+    return ""
 
 
 def should_allow_ja_soft_forward_shift(target_tok, expected_tok, mapped_tok):
@@ -19,9 +43,15 @@ def should_allow_ja_soft_forward_shift(target_tok, expected_tok, mapped_tok):
     mapped_norm = _normalize_ja_syllable_token(mapped_tok)
     if not target_norm or not mapped_norm:
         return False
+    target_strict = _normalize_ja_syllable_token_strict(target_tok)
+    mapped_strict = _normalize_ja_syllable_token_strict(mapped_tok)
     target_special = _ja_special_mora_class(target_tok)
     expected_special = _ja_special_mora_class(expected_tok)
     mapped_special = _ja_special_mora_class(mapped_tok)
+    if target_special in {"plain", "youon", "inserted"} and mapped_special != target_special:
+        return False
+    if expected_special in {"plain", "youon", "inserted"} and mapped_special != expected_special:
+        return False
     if target_special in {"nasal", "geminate", "long"}:
         return False
     if target_special == "plain" and mapped_special in {"nasal", "geminate", "long"}:
@@ -29,6 +59,13 @@ def should_allow_ja_soft_forward_shift(target_tok, expected_tok, mapped_tok):
     mapped_level = int(_ja_soft_cv_match_level(target_norm, mapped_norm) or 0)
     expected_level = int(_ja_soft_cv_match_level(target_norm, expected_norm) or 0)
     if target_special in {"youon", "inserted"}:
+        if (
+            target_strict
+            and mapped_strict
+            and target_strict != mapped_strict
+            and not (_is_kana_token(target_tok) or _is_kana_token(mapped_tok))
+        ):
+            return False
         if mapped_special not in {"youon", "inserted"} and mapped_level < 3:
             return False
         if expected_special in {"youon", "inserted"} and mapped_special not in {"youon", "inserted"}:
@@ -62,6 +99,8 @@ def clamp_ja_cv_index_to_order(
         return e if m < e else m
 
     target_norm = _normalize_ja_syllable_token(target_tok)
+    expected_raw = _syllable_info_raw_token(syllables_info[e])
+    mapped_raw = _syllable_info_raw_token(syllables_info[m])
     expected_norm = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[e]))
     mapped_norm = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[m]))
     expected_level = int(_ja_soft_cv_match_level(target_norm, expected_norm) or 0) if target_norm else 0
@@ -77,7 +116,11 @@ def clamp_ja_cv_index_to_order(
 
     allow_forward = bool(
         m == (e + 1)
-        and should_allow_ja_soft_forward_shift(target_norm, expected_norm, mapped_norm)
+        and should_allow_ja_soft_forward_shift(
+            target_tok,
+            expected_raw or expected_norm,
+            mapped_raw or mapped_norm,
+        )
     )
     if allow_forward:
         if mapped_norm == target_norm and expected_norm != target_norm:
@@ -102,6 +145,8 @@ def find_ja_cv_vowel_match_index(target_tok, expected_idx, syllables_info, searc
     if t_vowel not in JA_VOWELS:
         return None
     t_tail = _ja_syllable_tail(target_tok)
+    target_special = _ja_special_mora_class(target_tok)
+    target_strict = _normalize_ja_syllable_token_strict(target_tok)
     expected_soft_match = _ja_soft_cv_match_level(
         target_tok,
         _syllable_info_token(syllables_info[e]),
@@ -112,9 +157,23 @@ def find_ja_cv_vowel_match_index(target_tok, expected_idx, syllables_info, searc
     best_idx = None
     best_score = -10**9
     for i in range(lo, hi + 1):
+        cand_raw = _syllable_info_raw_token(syllables_info[i])
         cand = _syllable_info_token(syllables_info[i])
         if not cand:
             continue
+        cand_strict = _normalize_ja_syllable_token_strict(cand_raw) if cand_raw else ""
+        if target_special in {"plain", "youon", "inserted"}:
+            cand_special = _ja_special_mora_class(cand)
+            if cand_special != target_special:
+                continue
+            if (
+                target_special in {"youon", "inserted"}
+                and target_strict
+                and cand_strict
+                and target_strict != cand_strict
+                and not (_is_kana_token(target_tok) or _is_kana_token(cand_raw))
+            ):
+                continue
         c_onset = _extract_ja_onset_token(cand)
         _co, c_vowel = split_ja_romaji_syllable(cand)
         if c_vowel != t_vowel:

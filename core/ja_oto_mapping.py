@@ -30,6 +30,7 @@ JA_VOICELESS_ONSETS = {
     'k', 's', 't', 'p', 'h', 'f', 'sh', 'ch', 'ts',
     'q', 'c', 'ky', 'ty', 'py', 'hy', 'ss', 'kk', 'tt', 'pp',
 }
+_JA_KANA_RE = re.compile(r"[\u3041-\u3096\u30A1-\u30FA\u30FC]")
 
 
 def _normalize_custom_alias_lookup(alias):
@@ -195,6 +196,18 @@ def _normalize_ja_syllable_token(token):
 
 
 @lru_cache(maxsize=65536)
+def _normalize_ja_syllable_token_strict(token):
+    raw = str(token or "").strip()
+    if not raw:
+        return ""
+    return raw.lower().replace("'", "").strip("-_ ")
+
+
+def _is_kana_token(token):
+    return bool(_JA_KANA_RE.search(str(token or "")))
+
+
+@lru_cache(maxsize=65536)
 def _extract_vcv_target_syllable(alias):
     parts = (alias or '').strip().split()
     if len(parts) >= 2:
@@ -243,6 +256,16 @@ def _syllable_info_token(syl_info):
     if vowel:
         return f"{onset}{vowel}" if onset and vowel != 'n' else vowel
     return onset
+
+
+def _syllable_info_raw_token(syl_info):
+    if not isinstance(syl_info, dict):
+        return ""
+    for k in ("roman", "word", "kana"):
+        raw = syl_info.get(k, "")
+        if raw:
+            return str(raw).strip()
+    return ""
 
 
 @lru_cache(maxsize=131072)
@@ -617,6 +640,19 @@ def _extract_ja_cv_target_syllable(alias, alias_type='cv'):
     return _normalize_ja_syllable_token(parts[-1])
 
 
+@lru_cache(maxsize=131072)
+def _extract_ja_cv_target_raw(alias, alias_type="cv"):
+    alias_type = str(alias_type or "").strip().lower()
+    parts = (alias or "").strip().split()
+    if not parts:
+        return ""
+    if alias_type in {"cv_head", "vcv"} and len(parts) >= 2:
+        return parts[1]
+    if len(parts) >= 2 and parts[0] == "-":
+        return parts[1]
+    return parts[-1]
+
+
 def _build_ja_cvvc_occurrence_map(token_source):
     """
     Japanese CV/CV_HEAD aliases in CV/CVVC formats are mapped by token occurrence.
@@ -851,6 +887,7 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
     n = len(syllables_info)
     e = max(0, min(int(expected_idx), n - 1))
     target = _extract_ja_cv_target_syllable(alias, alias_type=alias_type)
+    target_raw = _extract_ja_cv_target_raw(alias, alias_type=alias_type)
     if not target:
         return e
     start = max(0, e - 1)
@@ -952,6 +989,20 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
             return e
         elif target_special in {"youon", "inserted"}:
             if expected_special in {"youon", "inserted"} and best_special not in {"youon", "inserted"}:
+                return e
+            target_strict = _normalize_ja_syllable_token_strict(target_raw or target)
+            best_raw = _syllable_info_raw_token(syllables_info[best_idx]) or best_tok
+            best_strict = _normalize_ja_syllable_token_strict(best_raw or best_tok)
+            expected_raw = _syllable_info_raw_token(syllables_info[e]) or expected_tok
+            expected_strict = _normalize_ja_syllable_token_strict(expected_raw or expected_tok)
+            if (
+                target_strict
+                and best_strict
+                and target_strict != best_strict
+                and not (_is_kana_token(target_raw) or _is_kana_token(best_raw))
+            ):
+                return e
+            if expected_strict == target_strict and best_strict != target_strict:
                 return e
         return best_idx
     return e

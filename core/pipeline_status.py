@@ -52,8 +52,6 @@ def normalize_aligner_name(value, default: str = "mfa") -> str:
         return default
     if text in {"mfa", "montreal"}:
         return "mfa"
-    if text in {"sofa"}:
-        return "sofa"
     return default
 
 

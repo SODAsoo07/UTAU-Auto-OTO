@@ -179,46 +179,6 @@ class LayoutMixin:
             anchor="w",
         ).pack(side="left", padx=(121, 0))
 
-        self.row_sofa_ckpt = build_form_row(form_body)
-        build_left_label(self.row_sofa_ckpt, "SOFA 체크포인트:").pack(side="left")
-        self.sofa_ckpt_entry = ctk.CTkEntry(
-            self.row_sofa_ckpt,
-            placeholder_text="SOFA 모델 체크포인트 파일 (.ckpt)",
-            textvariable=self.sofa_ckpt_var,
-        )
-        self.sofa_ckpt_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
-        ctk.CTkButton(
-            self.row_sofa_ckpt,
-            text="자동 다운로드",
-            width=110,
-            command=self._download_sofa_model_for_current_language,
-        ).pack(side="right", padx=(0, 5))
-        ctk.CTkButton(
-            self.row_sofa_ckpt,
-            text="찾아보기",
-            width=90,
-            command=lambda: self._browse_file_by_var(
-                self.sofa_ckpt_var, [("Checkpoint", "*.ckpt"), ("All", "*.*")]
-            ),
-        ).pack(side="right")
-
-        self.row_sofa_dict = build_form_row(form_body)
-        build_left_label(self.row_sofa_dict, "SOFA 사전(dict.txt):").pack(side="left")
-        self.sofa_dict_entry = ctk.CTkEntry(
-            self.row_sofa_dict,
-            placeholder_text="SOFA dictionary 파일 경로",
-            textvariable=self.sofa_dict_var,
-        )
-        self.sofa_dict_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
-        ctk.CTkButton(
-            self.row_sofa_dict,
-            text="찾아보기",
-            width=90,
-            command=lambda: self._browse_file_by_var(
-                self.sofa_dict_var, [("Dictionary", "*.txt"), ("All", "*.*")]
-            ),
-        ).pack(side="right")
-
         advanced_row = build_form_row(path_frame)
         self.advanced_toggle_btn = ctk.CTkButton(
             advanced_row,
@@ -379,49 +339,20 @@ class LayoutMixin:
         self._save_config()
 
     def _sync_aligner_ui(self):
-        show_advanced = bool(self.show_advanced_aligner_var.get()) if hasattr(self, "show_advanced_aligner_var") else False
-        current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA").strip() or "MFA"
-        valid_values = ["MFA", "SOFA"] if show_advanced else ["MFA"]
-        if current not in valid_values:
-            current = "MFA"
-            if hasattr(self, "aligner_var"):
-                self.aligner_var.set(current)
+        current = "MFA"
+        if hasattr(self, "aligner_var"):
+            self.aligner_var.set(current)
         if hasattr(self, "aligner_menu"):
-            self.aligner_menu.configure(values=valid_values)
+            self.aligner_menu.configure(values=["MFA"])
             try:
                 self.aligner_menu.set(current)
             except Exception:
                 pass
-        using_sofa = show_advanced and current == "SOFA"
         if hasattr(self, "aligner_help_label"):
-            if show_advanced:
-                self.aligner_help_label.configure(text="(기본은 MFA입니다. SOFA는 고급 사용자용입니다.)")
-            else:
-                self.aligner_help_label.configure(text="(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)")
-        if hasattr(self, "row_sofa_ckpt"):
-            if using_sofa:
-                self.row_sofa_ckpt.pack(fill="x", padx=10, pady=3)
-                self.row_sofa_dict.pack(fill="x", padx=10, pady=3)
-            else:
-                self.row_sofa_ckpt.pack_forget()
-                self.row_sofa_dict.pack_forget()
-        if hasattr(self, "sofa_install_btn"):
-            if show_advanced:
-                self.sofa_install_btn.pack(side="right", padx=(0, 8))
-            else:
-                self.sofa_install_btn.pack_forget()
-        if hasattr(self, "sofa_status_label"):
-            if show_advanced:
-                self.sofa_status_label.pack(side="left")
-            else:
-                self.sofa_status_label.pack_forget()
+            self.aligner_help_label.configure(text="(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)")
         if hasattr(self, "align_step_title_label") and hasattr(self, "align_step_desc_label"):
-            if show_advanced:
-                self.align_step_title_label.configure(text="3. 음성 정렬 (MFA/SOFA)")
-                self.align_step_desc_label.configure(text="선택한 정렬 엔진으로 TextGrid를 생성합니다. 초보자는 MFA를 권장합니다.")
-            else:
-                self.align_step_title_label.configure(text="3. 음성 정렬 (MFA)")
-                self.align_step_desc_label.configure(text="MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.")
+            self.align_step_title_label.configure(text="3. 음성 정렬 (MFA)")
+            self.align_step_desc_label.configure(text="MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.")
 
     def _on_no_base_oto_toggle(self):
         no_base = bool(self.no_base_oto_var.get())

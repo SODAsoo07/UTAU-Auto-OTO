@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.kr_oto_rules import _cv_match_score, _split_kr_syllable_parts
+from core.kr_oto_rules import _cv_match_score, _is_kr_glide_vowel, _split_kr_syllable_parts
 
 
 def resolve_cv_syllable_index(
@@ -59,6 +59,9 @@ def resolve_cv_syllable_index(
         best_onset, best_vowel, _best_coda = _split_kr_syllable_parts(best_tok)
         same_vowel_expected = bool(target_vowel and exp_vowel and target_vowel == exp_vowel)
         best_vowel_match = bool(target_vowel and best_vowel and target_vowel == best_vowel)
+        target_glide = _is_kr_glide_vowel(target_vowel)
+        expected_glide = _is_kr_glide_vowel(exp_vowel)
+        best_glide = _is_kr_glide_vowel(best_vowel)
         same_onset_expected = bool(
             target_onset and exp_onset and (target_onset == exp_onset or target_onset[:1] == exp_onset[:1])
         )
@@ -71,17 +74,23 @@ def resolve_cv_syllable_index(
                 chosen_idx = cv_seq_idx
             elif same_vowel_expected and best_gain < 34:
                 chosen_idx = cv_seq_idx
+            elif best_glide != target_glide and best_gain < 40:
+                chosen_idx = cv_seq_idx
         if abs(name_match_idx - cv_seq_idx) == 1:
             min_gain = 22
             if same_vowel_expected:
                 min_gain = 18
             elif same_onset_expected:
                 min_gain = 20
+            if best_glide != target_glide:
+                min_gain = max(min_gain, 28)
             if best_gain < min_gain:
                 chosen_idx = cv_seq_idx
             if same_vowel_expected and (not best_vowel_match) and name_match_idx > cv_seq_idx:
                 chosen_idx = cv_seq_idx
             if same_vowel_expected and (not best_vowel_match) and best_gain < 22:
+                chosen_idx = cv_seq_idx
+            if same_vowel_expected and best_glide != target_glide:
                 chosen_idx = cv_seq_idx
             if (
                 same_onset_expected
@@ -91,6 +100,8 @@ def resolve_cv_syllable_index(
                 chosen_idx = cv_seq_idx
         if name_match_idx < cv_seq_idx:
             if same_vowel_expected or expected_score >= 38 or best_gain < 32:
+                chosen_idx = cv_seq_idx
+            if same_vowel_expected and expected_glide == target_glide and best_glide != target_glide:
                 chosen_idx = cv_seq_idx
         max_forward_jump = int(max(0, max_jump_default))
         conf = float(mapping_confidence or 0.0)

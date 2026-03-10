@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from Auto_OTO.core.log_events import append_structured_log, classify_log_message
+from core.log_events import append_structured_log, classify_log_message
 
 
 class LogEventsTests(unittest.TestCase):

@@ -1352,6 +1352,28 @@ def _remap_ja_cvvc_inactive_cv_index(
     return int(best_idx) if best_idx is not None else m
 
 
+def _find_ja_vv_pair_prev_index(alias, expected_prev_idx, syllables_info, search_back=2, search_fwd=3):
+    parts = [p for p in (alias or "").strip().split() if p]
+    if len(parts) < 2:
+        return None
+    left = _normalize_ja_syllable_token(parts[0])
+    right = _normalize_ja_syllable_token(parts[1])
+    if not left or not right or not syllables_info:
+        return None
+    n = len(syllables_info)
+    if n < 2:
+        return None
+    e = max(0, min(int(expected_prev_idx), n - 2))
+    lo = max(0, e - max(0, int(search_back)))
+    hi = min(n - 2, e + max(0, int(search_fwd)))
+    for i in range(lo, hi + 1):
+        prev_tok = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[i]))
+        next_tok = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[i + 1]))
+        if prev_tok == left and next_tok == right:
+            return i
+    return None
+
+
 def _build_ja_planned_cv_indices(expected_tokens, syllables_info):
     plan = _build_ja_cv_anchor_plan_v2(expected_tokens, syllables_info)
     return plan.get("indices")
@@ -2920,6 +2942,21 @@ def generate_ja_oto(
                 sequence_lock_formats={"cvvc", "cv"},
                 abstain_formats={"cvvc", "vcv", "cv"},
             )
+            if sinsy_label_entries:
+                plan_source = str(ja_cv_plan.get("source") or "")
+                if plan_source != "sinsy_labels":
+                    log(
+                        f"🛡️ {fname}: sinsy 라벨이 있지만 planner에 적용되지 않음 "
+                        f"(source={plan_source or 'fallback'})"
+                    )
+                else:
+                    plan_margin = float((ja_cv_plan.get("meta") or {}).get("margin", 0.0) or 0.0)
+                    row_margin_floor = float(runtime_policy.get("row_margin_floor", 6.0))
+                    if plan_margin < row_margin_floor:
+                        log(
+                            f"🛡️ {fname}: sinsy planner margin 낮음 "
+                            f"(margin={plan_margin:.1f} < {row_margin_floor:.1f})"
+                        )
             mapping_confidence_base = float(runtime_policy.get("mapping_confidence", mapping_confidence_base))
             mapping_tier = str(runtime_policy.get("mapping_tier", "low"))
 
@@ -3961,6 +3998,23 @@ def generate_ja_oto(
                         if bridge_pair.get("next_idx") is not None
                         else local_bridge_next_idx
                     )
+                    if alias_type == "vv":
+                        vv_back = 1 if str(mapping_tier or "").strip().lower() == "low" else 2
+                        vv_fwd = 1 if str(mapping_tier or "").strip().lower() == "low" else 3
+                        pair_prev_idx = _find_ja_vv_pair_prev_index(
+                            alias,
+                            bridge_prev_idx,
+                            syllables_info,
+                            search_back=vv_back,
+                            search_fwd=vv_fwd,
+                        )
+                        if pair_prev_idx is not None and pair_prev_idx != bridge_prev_idx:
+                            log(
+                                f"🛡️ {fname}: VV pair 매칭 보정 "
+                                f"{bridge_prev_idx + 1}->{pair_prev_idx + 1} ({alias})"
+                            )
+                            bridge_prev_idx = int(pair_prev_idx)
+                            bridge_next_idx = int(pair_prev_idx + 1)
                     current_w_idx = bridge_prev_idx
                     if vc_seq_idx < len(syllables_info) - 1:
                         vc_seq_idx += 1

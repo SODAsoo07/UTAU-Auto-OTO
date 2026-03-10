@@ -34,41 +34,22 @@ from core.oto_generator import (
     save_kr_autotune_profile,
     train_kr_autotune_profile,
 )
-from core.sofa_runner import (
-    download_default_sofa_model,
-    ensure_sofa_support,
-    get_default_sofa_repo_dir,
-    find_sofa_ckpt,
-    get_default_sofa_model_root,
-    get_sofa_env_python,
-    get_sofa_release_link,
-    is_sofa_ready,
-)
+
 
 
 class PipelineActionsMixin:
     def _notify_long_install_time(self, target="MFA"):
-        target_text = str(target or "MFA").upper()
-        if target_text == "SOFA":
-            title = "SOFA 초기 설치 안내"
-            message = (
-                "처음 SOFA를 설치할 때는 저장소 다운로드와 Python 패키지 설치 때문에 시간이 꽤 걸릴 수 있습니다.\n\n"
-                "환경과 네트워크 속도에 따라 보통 수 분에서 10분 이상 걸릴 수 있습니다.\n"
-                "설치 중에는 프로그램을 종료하지 말고 기다려 주세요."
-            )
-            alert_key = "install_time_sofa"
-        else:
-            title = "MFA 초기 설치 안내"
-            message = (
-                "처음 MFA를 설치하거나 진단/복구를 실행할 때는 환경 구성, Python 패키지 복구, 현재 언어 모델 다운로드 때문에 시간이 오래 걸릴 수 있습니다.\n\n"
-                "환경과 네트워크 속도에 따라 보통 10~20분, 경우에 따라 그 이상 걸릴 수 있습니다.\n"
-                "설치 중에는 프로그램을 종료하지 말고 기다려 주세요.\n\n"
-                "권장 순서:\n"
-                "1) 'MFA 진단/복구' 버튼으로 현재 상태 점검\n"
-                "2) 필요한 복구와 모델 다운로드 자동 진행\n"
-                "3) 완료 후 정렬 다시 시도"
-            )
-            alert_key = "install_time_mfa"
+        title = "MFA 초기 설치 안내"
+        message = (
+            "처음 MFA를 설치하거나 진단/복구를 실행할 때는 환경 구성, Python 패키지 복구, 현재 언어 모델 다운로드 때문에 시간이 오래 걸릴 수 있습니다.\n\n"
+            "환경과 네트워크 속도에 따라 보통 10~20분, 경우에 따라 그 이상 걸릴 수 있습니다.\n"
+            "설치 중에는 프로그램을 종료하지 말고 기다려 주세요.\n\n"
+            "권장 순서:\n"
+            "1) 'MFA 진단/복구' 버튼으로 현재 상태 점검\n"
+            "2) 필요한 복구와 모델 다운로드 자동 진행\n"
+            "3) 완료 후 정렬 다시 시도"
+        )
+        alert_key = "install_time_mfa"
         self._append_log(f"ℹ {title}: 설치에 시간이 오래 걸릴 수 있습니다.")
         self._after_safe(
             lambda: self._show_copyable_alert(
@@ -105,137 +86,6 @@ class PipelineActionsMixin:
         # Windows 배포 환경에서 utf-8 고정 디코딩 시 콘솔 로그가 깨지는 경우가 있어,
         # 시스템 기본 인코딩을 우선 사용하고 실패 시 utf-8로 폴백한다.
         return locale.getpreferredencoding(False) or "utf-8"
-
-    def _get_sofa_repo_dir_for_language(self, language):
-        override = self._read_runtime_var("sofa_repo_dir_var", "") or ""
-        override = str(override).strip()
-        if override:
-            return override
-        if (language or "").lower() == "korean":
-            return get_default_sofa_repo_dir("utau_kr_v1")
-        return get_default_sofa_repo_dir()
-
-    def _get_sofa_runtime_kwargs(self, language):
-        lang = (language or "").lower()
-        out_formats = self._read_runtime_var("sofa_out_formats_var", "TextGrid")
-        save_conf_default = lang == "korean"
-        two_pass_default = lang == "korean"
-        return {
-            "sofa_repo_dir": self._get_sofa_repo_dir_for_language(lang),
-            "mode": str(self._read_runtime_var("sofa_mode_var", "force") or "force"),
-            "g2p": str(self._read_runtime_var("sofa_g2p_var", "Dictionary") or "Dictionary"),
-            "ap_detector": str(
-                self._read_runtime_var(
-                    "sofa_ap_detector_var",
-                    "LoudnessSpectralcentroidAPDetector",
-                )
-                or "LoudnessSpectralcentroidAPDetector"
-            ),
-            "ap_detector_config": str(
-                self._read_runtime_var("sofa_ap_detector_config_var", "") or ""
-            ),
-            "save_confidence": self._to_bool(
-                self._read_runtime_var("sofa_save_confidence_var", save_conf_default),
-                default=save_conf_default,
-            ),
-            "out_formats": out_formats,
-            "extra_infer_args": self._read_runtime_var("sofa_extra_infer_args_var", ""),
-            "two_pass_retry": self._to_bool(
-                self._read_runtime_var("sofa_two_pass_retry_var", two_pass_default),
-                default=two_pass_default,
-            ),
-            "two_pass_retry_mode": str(
-                self._read_runtime_var("sofa_two_pass_retry_mode_var", "match") or "match"
-            ),
-            "confidence_threshold": self._read_runtime_var("sofa_confidence_threshold_var", 0.55),
-            "low_confidence_max_files": self._read_runtime_var("sofa_low_confidence_max_files_var", 0),
-        }
-
-    def _download_sofa_model_for_current_language(self):
-        """현재 언어 기준 SOFA 모델을 GitHub 릴리즈에서 자동 다운로드합니다."""
-        def task():
-            self._set_running(True)
-            try:
-                lang = self._get_language()
-                self._set_status("SOFA 모델 다운로드 중...")
-                self._append_log(f"⬇ SOFA 모델 자동 다운로드 시작 ({'일본어' if lang == 'japanese' else '한국어'})")
-                ok, model_path, err = download_default_sofa_model(
-                    language=lang,
-                    target_root=get_default_sofa_model_root(),
-                    callback=self._append_log,
-                )
-                if ok and model_path:
-                    self._after_safe(lambda p=model_path: self.sofa_ckpt_var.set(p))
-                    self._append_log(f"✅ SOFA 모델 다운로드 완료: {model_path}")
-                    self._set_status("✅ SOFA 모델 다운로드 완료")
-                else:
-                    self._append_log(f"❌ SOFA 모델 다운로드 실패: {err}")
-                    self._set_status("❌ SOFA 모델 다운로드 실패")
-            except Exception as e:
-                self._append_log(f"❌ SOFA 모델 자동 다운로드 중 예외: {e}")
-                self._set_status("❌ SOFA 모델 다운로드 실패")
-            finally:
-                self._set_running(False)
-        self._run_in_thread(task)
-
-    def _ensure_sofa_model_ready(self, language):
-        """SOFA ckpt 경로를 확보합니다. 없으면 사용자 폴더 탐색 후 자동 다운로드를 시도합니다."""
-        ckpt = (self.sofa_ckpt_var.get() or "").strip()
-        if ckpt and os.path.exists(ckpt):
-            return ckpt
-
-        found = find_sofa_ckpt(language, search_root=get_default_sofa_model_root())
-        if found and os.path.exists(found):
-            self._append_log(f"ℹ 사용자 폴더에서 SOFA 모델 자동 감지: {found}")
-            self._after_safe(lambda p=found: self.sofa_ckpt_var.set(p))
-            return found
-
-        self._append_log("ℹ SOFA 모델이 지정되지 않아 자동 다운로드를 시도합니다...")
-        ok, model_path, err = download_default_sofa_model(
-            language=language,
-            target_root=get_default_sofa_model_root(),
-            callback=self._append_log,
-        )
-        if ok and model_path and os.path.exists(model_path):
-            self._after_safe(lambda p=model_path: self.sofa_ckpt_var.set(p))
-            self._append_log(f"✅ SOFA 모델 자동 준비 완료: {model_path}")
-            return model_path
-
-        release_link = get_sofa_release_link(language)
-        model_root = get_default_sofa_model_root()
-        self._after_safe(lambda: self._show_copyable_alert(
-            title="SOFA 모델 다운로드 실패",
-            message=(
-                f"SOFA 모델 자동 다운로드에 실패했습니다.\n\n"
-                f"언어: {'일본어' if language == 'japanese' else '한국어'}\n"
-                f"기본 모델 폴더:\n{model_root}\n\n"
-                f"수동 다운로드 링크:\n{release_link}\n\n"
-                f"다운로드한 `.ckpt` 파일을 모델 폴더에 넣은 뒤 다시 시도해 주세요.\n\n"
-                f"오류 요약:\n{err or '알 수 없는 오류'}"
-            ),
-            alert_key=f"sofa_model_download_fail_{language}",
-        ))
-        return ""
-
-    def _notify_mfa_failure_suggest_sofa(self, language, err_msg=""):
-        """MFA 실패 시 SOFA 정렬로 전환하는 방법을 안내합니다."""
-        model_root = get_default_sofa_model_root()
-        release_link = get_sofa_release_link(language)
-        self._append_log("⚠ MFA 정렬에 실패했습니다. SOFA 정렬로 전환할 수 있습니다.")
-        self._append_log(f"   SOFA 기본 모델 폴더: {model_root}")
-        self._append_log(f"   SOFA 모델 다운로드 링크: {release_link}")
-        self._after_safe(lambda: self._show_copyable_alert(
-            title="MFA 실패 - SOFA 전환 안내",
-            message=(
-                "MFA 정렬이 실패했습니다.\n\n"
-                "대안으로 SOFA 정렬을 사용할 수 있습니다.\n"
-                "먼저 SOFA 모델(.ckpt)을 준비해 주세요.\n\n"
-                f"SOFA 모델 폴더(기본):\n{model_root}\n\n"
-                f"SOFA 모델 다운로드 링크:\n{release_link}\n\n"
-                f"MFA 오류:\n{err_msg or '(없음)'}"
-            ),
-            alert_key=f"mfa_fail_sofa_hint_{language}",
-        ))
 
     def _install_mfa_runtime(self, language="korean"):
         import shutil
@@ -624,51 +474,6 @@ class PipelineActionsMixin:
                 self._set_running(False)
         self._run_in_thread(task)
 
-    def _is_sofa_installed(self):
-        lang = self._get_language()
-        repo_dir = self._get_sofa_repo_dir_for_language(lang)
-        ok, _ = is_sofa_ready(
-            sofa_python=self.sofa_python_var.get().strip(),
-            mfa_path=self.mfa_path or "",
-            sofa_repo_dir=repo_dir,
-        )
-        return ok
-
-    def _run_sofa_setup(self):
-        """SOFA 지원 환경을 자동 설치/점검합니다."""
-        self._notify_long_install_time("SOFA")
-        def task():
-            self._set_running(True)
-            self._set_status("⬇ SOFA 설치 준비 중... (수 분 소요)")
-            try:
-                lang = self._get_language()
-                repo_dir = self._get_sofa_repo_dir_for_language(lang)
-                self._append_log("🔧 SOFA 지원 환경 점검을 시작합니다.")
-                self._append_log(f"ℹ SOFA repo 경로: {repo_dir}")
-                ok, err = ensure_sofa_support(
-                    mfa_path=self.mfa_path or "",
-                    sofa_python=self.sofa_python_var.get().strip(),
-                    sofa_repo_dir=repo_dir,
-                    callback=self._append_log,
-                )
-                if ok:
-                    if not self.sofa_python_var.get().strip():
-                        self.sofa_python_var.set(get_sofa_env_python())
-                    self._update_sofa_status(True)
-                    self._append_log("✅ SOFA 설치 완료")
-                    self._set_status("✅ SOFA 준비 완료")
-                else:
-                    self._append_log(f"❌ SOFA 설치 실패: {err}")
-                    self._update_sofa_status(False)
-                    self._set_status("❌ SOFA 설치 실패")
-            except Exception as e:
-                self._append_log(f"❌ SOFA 설치 중 예외: {e}")
-                self._update_sofa_status(False)
-                self._set_status("❌ SOFA 설치 실패")
-            finally:
-                self._set_running(False)
-        self._run_in_thread(task)
-
     def _update_mfa_status(self, installed):
         """MFA 설치 상태를 UI에 반영합니다."""
         def _do():
@@ -678,21 +483,6 @@ class PipelineActionsMixin:
             else:
                 self.mfa_status_label.configure(text="❌ MFA 미설치", text_color="#FF6B6B")
                 self.mfa_install_btn.configure(text="⬇ MFA 원클릭 설치", state="normal", fg_color="#FFA726")
-        self._after_safe(_do)
-
-    def _update_sofa_status(self, installed):
-        def _do():
-            if hasattr(self, "sofa_status_label"):
-                if installed:
-                    self.sofa_status_label.configure(text="✅ SOFA 설치됨", text_color="#66BB6A")
-                else:
-                    self.sofa_status_label.configure(text="❌ SOFA 미설치", text_color="#FF6B6B")
-            if not hasattr(self, "sofa_install_btn"):
-                return
-            if installed:
-                self.sofa_install_btn.configure(text="✅ 설치 완료", state="disabled", fg_color="#388E3C")
-            else:
-                self.sofa_install_btn.configure(text="⬇ SOFA 자동 설치", state="normal", fg_color="#42A5F5")
         self._after_safe(_do)
 
     # --------------------------------------------------------------------------
@@ -866,41 +656,19 @@ class PipelineActionsMixin:
                 align_ok = False
                 align_err = ""
                 align_engine = self.aligner_var.get()
-                primary_engine = "sofa" if align_engine == "SOFA" else "mfa"
-                fallback_engine = "mfa" if primary_engine == "sofa" else ""
-                sofa_kwargs = {}
-                ckpt = ""
-                sdic = dict_path
-                if primary_engine == "sofa":
-                    sofa_kwargs = self._get_sofa_runtime_kwargs(lang)
-                    ckpt = self.sofa_ckpt_var.get().strip()
-                    self._set_status("3/4 - SOFA 정렬 준비 중...")
-                    self._append_log(f"ℹ SOFA 실행 Python: {self.sofa_python_var.get().strip()}")
-                    self._append_log(
-                        "ℹ SOFA 실행 설정: "
-                        f"repo={sofa_kwargs.get('sofa_repo_dir')}, "
-                        f"mode={sofa_kwargs.get('mode')}, "
-                        f"g2p={sofa_kwargs.get('g2p')}, "
-                        f"ap={sofa_kwargs.get('ap_detector')}, "
-                        f"2-pass={'ON' if sofa_kwargs.get('two_pass_retry') else 'OFF'}"
-                    )
-                    ckpt = self._ensure_sofa_model_ready(lang)
-                    sdic = self.sofa_dict_var.get().strip() or dict_path
-                    if not self.sofa_dict_var.get().strip():
-                        self._after_safe(lambda p=sdic: self.sofa_dict_var.set(p))
-                        self._append_log(f"ℹ SOFA 사전이 비어 있어 현재 생성 사전을 사용합니다: {sdic}")
-                else:
-                    self._set_status("3/4 - MFA 정렬 준비 중...")
-                    if not self._ensure_mfa_ready_for_language(lang):
-                        self._append_log("❌ MFA 설치/모델 준비 실패")
-                        self._set_status("❌ MFA 설치/모델 준비 실패")
-                        return
-                    mfa_profile = (
-                        self._get_mfa_align_profile_code()
-                        if hasattr(self, "_get_mfa_align_profile_code")
-                        else "accurate"
-                    )
-                    self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
+                primary_engine = "mfa"
+                fallback_engine = ""
+                self._set_status("3/4 - MFA 정렬 준비 중...")
+                if not self._ensure_mfa_ready_for_language(lang):
+                    self._append_log("❌ MFA 설치/모델 준비 실패")
+                    self._set_status("❌ MFA 설치/모델 준비 실패")
+                    return
+                mfa_profile = (
+                    self._get_mfa_align_profile_code()
+                    if hasattr(self, "_get_mfa_align_profile_code")
+                    else "accurate"
+                )
+                self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
 
                 align_result = run_alignment_with_fallback(
                     language=lang,
@@ -915,12 +683,6 @@ class PipelineActionsMixin:
                         if hasattr(self, "_get_mfa_align_profile_code")
                         else "accurate"
                     ),
-                    sofa_kwargs={
-                        **sofa_kwargs,
-                        "ckpt_path": ckpt,
-                        "dictionary_path": sdic,
-                        "sofa_python": self.sofa_python_var.get().strip(),
-                    },
                     callback=self._append_log,
                 )
                 align_ok = bool(align_result.get("ok", False))
@@ -929,9 +691,6 @@ class PipelineActionsMixin:
                     self._append_log(f"ℹ 정렬 fallback 경로: {align_result.get('fallback_path', '')}")
 
                 if not align_ok:
-                    show_advanced = bool(self.show_advanced_aligner_var.get()) if hasattr(self, "show_advanced_aligner_var") else False
-                    if align_engine == "MFA" and align_err and show_advanced:
-                        self._notify_mfa_failure_suggest_sofa(lang, align_err)
                     self._append_log("⚠ 정렬 실패 상태로 다음 단계를 진행합니다.")
 
                 # Step 4: OTO

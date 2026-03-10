@@ -63,8 +63,8 @@ def select_ja_vcv_mapping(
         target_tok_vcv_raw,
         expected_idx,
         syllables_info,
-        search_back=(0 if str(format_type or "").strip().lower() == "vcv" else 3),
-        search_fwd=3,
+        search_back=(0 if str(format_type or "").strip().lower() == "vcv" else (1 if mapping_tier == "low" else 3)),
+        search_fwd=(1 if mapping_tier == "low" else 3),
     )
     target_tok_vcv_norm_for_resync = normalize_syllable_token_fn(target_tok_vcv_raw)
     exp_tok_vcv_for_resync = normalize_syllable_token_fn(
@@ -95,8 +95,8 @@ def select_ja_vcv_mapping(
             target_tok_vcv_norm,
             expected_idx,
             syllables_info,
-            search_back=2,
-            search_fwd=3,
+            search_back=(1 if mapping_tier == "low" else 2),
+            search_fwd=(2 if mapping_tier == "low" else 3),
         )
         if fixed_idx_vcv is not None and fixed_idx_vcv != mapped_idx:
             log_fn(
@@ -146,8 +146,8 @@ def select_ja_vcv_mapping(
             target_tok_vcv_norm,
             expected_idx,
             syllables_info,
-            search_back=4,
-            search_fwd=4,
+            search_back=(2 if mapping_tier == "low" else 4),
+            search_fwd=(2 if mapping_tier == "low" else 4),
         )
         if (
             retry_idx_vcv is not None

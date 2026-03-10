@@ -199,10 +199,6 @@ def _resolve_case_settings(
     fallback_aligner = normalize_aligner_name(case.get("fallback_aligner", defaults.get("fallback_aligner", "")), default="")
     mfa_path = _resolve_path(config_dir, str(case.get("mfa_path", defaults.get("mfa_path", ""))).strip())
     mfa_align_profile = str(case.get("mfa_align_profile", defaults.get("mfa_align_profile", "accurate"))).strip() or "accurate"
-    sofa_ckpt = _resolve_case_path(config_dir, voicebank_dir, str(case.get("sofa_ckpt", defaults.get("sofa_ckpt", ""))).strip())
-    sofa_dict = _resolve_case_path(config_dir, voicebank_dir, str(case.get("sofa_dict", defaults.get("sofa_dict", ""))).strip())
-    sofa_python = _resolve_path(config_dir, str(case.get("sofa_python", defaults.get("sofa_python", ""))).strip())
-    sofa_repo_dir = _resolve_path(config_dir, str(case.get("sofa_repo_dir", defaults.get("sofa_repo_dir", ""))).strip())
     return {
         "name": name,
         "enabled": enabled,
@@ -222,21 +218,6 @@ def _resolve_case_settings(
         "fallback_aligner": fallback_aligner,
         "mfa_path": mfa_path,
         "mfa_align_profile": mfa_align_profile,
-        "sofa_ckpt": sofa_ckpt,
-        "sofa_dict": sofa_dict,
-        "sofa_python": sofa_python,
-        "sofa_repo_dir": sofa_repo_dir,
-        "sofa_mode": str(case.get("sofa_mode", defaults.get("sofa_mode", "force"))).strip() or "force",
-        "sofa_g2p": str(case.get("sofa_g2p", defaults.get("sofa_g2p", "Dictionary"))).strip() or "Dictionary",
-        "sofa_ap_detector": str(case.get("sofa_ap_detector", defaults.get("sofa_ap_detector", "LoudnessSpectralcentroidAPDetector"))).strip() or "LoudnessSpectralcentroidAPDetector",
-        "sofa_ap_detector_config": str(case.get("sofa_ap_detector_config", defaults.get("sofa_ap_detector_config", ""))).strip(),
-        "sofa_save_confidence": case.get("sofa_save_confidence", defaults.get("sofa_save_confidence", False)),
-        "sofa_out_formats": case.get("sofa_out_formats", defaults.get("sofa_out_formats", "TextGrid")),
-        "sofa_extra_infer_args": case.get("sofa_extra_infer_args", defaults.get("sofa_extra_infer_args", "")),
-        "sofa_two_pass_retry": case.get("sofa_two_pass_retry", defaults.get("sofa_two_pass_retry", False)),
-        "sofa_two_pass_retry_mode": str(case.get("sofa_two_pass_retry_mode", defaults.get("sofa_two_pass_retry_mode", "match"))).strip() or "match",
-        "sofa_confidence_threshold": case.get("sofa_confidence_threshold", defaults.get("sofa_confidence_threshold", 0.55)),
-        "sofa_low_confidence_max_files": case.get("sofa_low_confidence_max_files", defaults.get("sofa_low_confidence_max_files", 0)),
         "custom_phonemes_path": custom_phonemes_path,
         "alias_suffix": str(case.get("alias_suffix", defaults.get("alias_suffix", ""))).strip(),
         "alias_style": str(case.get("alias_style", defaults.get("alias_style", "original"))).strip().lower(),
@@ -562,7 +543,6 @@ def _run_one_case(
             if align_if_missing:
                 os.makedirs(tg_folder, exist_ok=True)
                 dict_path = _prepare_alignment_inputs(language, voicebank_dir, custom_phonemes_path, callback=log)
-                sofa_dictionary_path = str(case_info.get("sofa_dict", "") or dict_path or "")
                 alignment_report = run_alignment_with_fallback(
                     language=language,
                     wav_folder=voicebank_dir,
@@ -572,23 +552,6 @@ def _run_one_case(
                     fallback_aligner=fallback_aligner,
                     mfa_path=str(case_info.get("mfa_path", "") or ""),
                     mfa_align_profile=str(case_info.get("mfa_align_profile", "accurate") or "accurate"),
-                    sofa_kwargs={
-                        "ckpt_path": str(case_info.get("sofa_ckpt", "") or ""),
-                        "dictionary_path": sofa_dictionary_path,
-                        "sofa_python": str(case_info.get("sofa_python", "") or ""),
-                        "sofa_repo_dir": str(case_info.get("sofa_repo_dir", "") or ""),
-                        "mode": case_info.get("sofa_mode", "force"),
-                        "g2p": case_info.get("sofa_g2p", "Dictionary"),
-                        "ap_detector": case_info.get("sofa_ap_detector", "LoudnessSpectralcentroidAPDetector"),
-                        "ap_detector_config": case_info.get("sofa_ap_detector_config", ""),
-                        "save_confidence": case_info.get("sofa_save_confidence", False),
-                        "out_formats": case_info.get("sofa_out_formats", "TextGrid"),
-                        "extra_infer_args": case_info.get("sofa_extra_infer_args", ""),
-                        "two_pass_retry": case_info.get("sofa_two_pass_retry", False),
-                        "two_pass_retry_mode": case_info.get("sofa_two_pass_retry_mode", "match"),
-                        "confidence_threshold": case_info.get("sofa_confidence_threshold", 0.55),
-                        "low_confidence_max_files": case_info.get("sofa_low_confidence_max_files", 0),
-                    },
                     callback=log,
                 )
                 if alignment_report.get("fallback_path"):

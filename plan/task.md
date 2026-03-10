@@ -63,10 +63,10 @@
 설명: `mapping_margin`을 runtime policy에 연결했고, low-margin `CV/CV_HEAD` 행은 skip할 수 있게 했다.
 - [/] optional sinsy syllable label ingest / planner anchor 반영
 설명: `USE_SINSY_LABELS`, `SINSY_LABEL_PATH`, 환경 변수 override, `core/sinsy_label_ingest.py`를 추가했고 JA/KR planner가 opt-in으로 sinsy 라벨을 우선 사용할 수 있다.
-- [ ] JA/KR plain-glide/youon reject 강화
-- [ ] VV pair scoring 도입
-- [ ] low-trust 시 forced index / free search 추가 축소
-- [ ] sinsy vs MFA 충돌 경고/진단 추가
+- [x] JA/KR plain-glide/youon reject 강화
+- [x] VV pair scoring 도입
+- [x] low-trust 시 forced index / free search 추가 축소
+- [x] sinsy vs MFA 충돌 경고/진단 추가
 
 ## Legacy / Cleanup
 
@@ -79,9 +79,6 @@
 ## Remaining High-Value Work
 
 - [ ] generator 밖으로 남은 scoring 유틸 완전 이관
-- [ ] JA/KR plain-glide/youon reject 강화
-- [ ] VV pair scoring 도입
-- [ ] low-trust 시 forced index / free search 추가 축소
 - [ ] 배치 평가 재실행 후 수치 문서화
 - [ ] 실제 샘플 oto 생성 및 청감 검증 기록화
 - [ ] `mapping_core_v2_design` 문서와 구현 결과의 최종 동기화

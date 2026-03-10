@@ -112,7 +112,7 @@ def try_handle_kr_glottal_alias(
 
     try:
         offset, consonant, cutoff, pre, ovl = validate_fn(
-            offset, consonant, cutoff, pre, ovl, alias_type=state.alias_type
+            offset, consonant, cutoff, pre, ovl, alias_type=getattr(state, "alias_type", "cv")
         )
     except TypeError:
         offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
@@ -124,7 +124,7 @@ def try_handle_kr_glottal_alias(
             pre,
             ovl,
             wav_duration_ms,
-            alias_type=state.alias_type,
+            alias_type=getattr(state, "alias_type", "cv"),
             validate_fn=validate_fn,
         )
     alias_out = apply_alias_suffix_fn(alias, alias_suffix)

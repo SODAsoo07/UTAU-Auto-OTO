@@ -275,13 +275,15 @@ def _compute_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, is_plosive_sibila
             consonant = min(consonant, next_onset_rel + 16.0)
             consonant = max(consonant, pre + 16.0)
             cutoff_abs = max(consonant + 12.0, min(next_cons_rel + 18.0, next_pre_rel + 30.0))
+        max_gap = 24.0 if is_plosive_sibilant else 42.0
+        cutoff_abs = min(cutoff_abs, consonant + max_gap)
     else:
         consonant = min(max(consonant, pre + 24.0), next_pre_rel + 48.0)
         cutoff_abs = max(consonant + 20.0, next_pre_rel + 10.0)
         cutoff_abs = min(cutoff_abs, next_cons_rel + 60.0)
 
     cutoff = -cutoff_abs
-    return _validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    return _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=alias_type)
 
 
 def _refine_kr_bridge_with_adjacent_cv(
@@ -303,9 +305,9 @@ def _refine_kr_bridge_with_adjacent_cv(
     """
     a_type = str(alias_type or "").strip().lower()
     if a_type not in {"vc", "vv"}:
-        return _validate_oto_params(offset, consonant, cutoff, pre, ovl)
+        return _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=a_type)
     if not prev_cv or not next_cv:
-        return _validate_oto_params(offset, consonant, cutoff, pre, ovl)
+        return _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=a_type)
 
     coda = _canonicalize_kr_coda(_extract_vc_right_token(alias_text))
     is_stop = coda in {"k", "t", "p", "h"}
@@ -314,7 +316,7 @@ def _refine_kr_bridge_with_adjacent_cv(
     is_plosive_sibilant = is_stop
     cand = _compute_vc_from_adjacent_cv(prev_cv, next_cv, a_type, is_plosive_sibilant)
     if cand is None:
-        return _validate_oto_params(offset, consonant, cutoff, pre, ovl)
+        return _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=a_type)
     c_off, c_cons, c_cut, c_pre, c_ovl = cand
 
     if a_type == "vc":
@@ -372,6 +374,14 @@ def _refine_kr_bridge_with_adjacent_cv(
     cut_gap_new = _blend(curr_cut_gap, cand_cut_gap, w_shape)
     cut_gap_new = _clamp(cut_gap_new, cut_gap_lo, cut_gap_hi)
     cutoff_abs_new = cons_new + cut_gap_new
+    if a_type == "vc":
+        if is_stop:
+            max_gap = 24.0
+        elif is_sonorant:
+            max_gap = 42.0
+        else:
+            max_gap = 34.0
+        cutoff_abs_new = min(cutoff_abs_new, cons_new + max_gap)
 
     next_onset_abs = float(next_cv.get("onset_abs", 0.0) or 0.0)
     next_pre_abs = float(next_cv.get("pre_abs", next_onset_abs) or next_onset_abs)
@@ -382,7 +392,7 @@ def _refine_kr_bridge_with_adjacent_cv(
         cutoff_abs_new = min(cutoff_abs_new, max(cons_new + cut_gap_lo, cap))
 
     cutoff_new = -cutoff_abs_new
-    return _validate_oto_params(offset_new, cons_new, cutoff_new, pre_new, ovl_new)
+    return _validate_oto_params(offset_new, cons_new, cutoff_new, pre_new, ovl_new, alias_type=a_type)
 
 
 def _compute_kr_cvvc_vc_timing_direct(alias, *args):

@@ -34,7 +34,7 @@ class JaCvMappingHelpersTests(unittest.TestCase):
         self.assertLessEqual(_ja_soft_cv_match_level("ka", "kya"), 1)
 
     def test_should_allow_soft_forward_shift_only_when_mapped_is_better(self):
-        self.assertTrue(_should_allow_ja_soft_forward_shift("kya", "ka", "kiya"))
+        self.assertFalse(_should_allow_ja_soft_forward_shift("kya", "ka", "kiya"))
         self.assertFalse(_should_allow_ja_soft_forward_shift("ka", "ka", "kya"))
         self.assertFalse(_should_allow_ja_soft_forward_shift("n", "na", "n"))
 
@@ -43,9 +43,8 @@ class JaCvMappingHelpersTests(unittest.TestCase):
             {"roman": "ka", "phones": [1]},
             {"roman": "kiya", "phones": [1]},
         ]
-        self.assertEqual(
-            _find_ja_cv_vowel_match_index("kya", 0, syllables_info, search_back=0, search_fwd=1),
-            1,
+        self.assertIsNone(
+            _find_ja_cv_vowel_match_index("kya", 0, syllables_info, search_back=0, search_fwd=1)
         )
 
     def test_select_cv_syllable_index_allows_one_step_soft_forward_match(self):
@@ -53,8 +52,8 @@ class JaCvMappingHelpersTests(unittest.TestCase):
             {"roman": "ka", "phones": [1]},
             {"roman": "kiya", "phones": [1]},
         ]
-        self.assertEqual(_select_ja_cv_syllable_index("kya", 0, syllables_info, alias_type="cv"), 1)
-        self.assertEqual(_select_ja_cv_syllable_index("- kya", 0, syllables_info, alias_type="cv_head"), 1)
+        self.assertEqual(_select_ja_cv_syllable_index("kya", 0, syllables_info, alias_type="cv"), 0)
+        self.assertEqual(_select_ja_cv_syllable_index("- kya", 0, syllables_info, alias_type="cv_head"), 0)
 
     def test_build_mapping_trace_record_captures_match_levels(self):
         row = _build_ja_mapping_trace_record(
@@ -110,7 +109,7 @@ class JaCvMappingHelpersTests(unittest.TestCase):
                 filename_order_locked=True,
                 mapping_tier="mid",
             ),
-            1,
+            0,
         )
 
     def test_compute_ja_youon_mismatch_ratio_detects_cv_to_youon_drift(self):

@@ -279,7 +279,7 @@ class OtoMlSelectorTests(unittest.TestCase):
                 ),
             ):
                 apply_oto_ml_to_oto_file("japanese", oto_path, tg_dir=td, wav_dir=td)
-            selector_loader.assert_not_called()
+            self.assertTrue(selector_loader.called)
 
     def test_evaluate_lightgbm_selector_bundle_reports_top1_metrics(self):
         with tempfile.TemporaryDirectory() as td:

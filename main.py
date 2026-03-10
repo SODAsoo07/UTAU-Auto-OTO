@@ -57,7 +57,6 @@ except ImportError:
     import customtkinter as ctk
 
 from core.mfa_runner import find_mfa_executable
-from core.sofa_runner import get_sofa_env_python
 from ui.app_mixins import AppRuntimeMixin, ConfigMixin, FileDialogMixin
 from ui.align_actions_mixin import AlignActionsMixin
 from ui.oto_actions_mixin import OtoActionsMixin
@@ -162,12 +161,8 @@ class App(
         self.custom_phoneme_var = ctk.StringVar(value="")  # 커스텀 매핑 파일 경로
         self.alias_suffix_var = ctk.StringVar(value="")    # 에일리어스 접미사 (예: C4)
         self.ja_alias_style_var = ctk.StringVar(value="원본 그대로")
-        self.show_advanced_aligner_var = ctk.BooleanVar(value=False)
         self.aligner_var = ctk.StringVar(value="MFA")
         self.mfa_align_profile_var = ctk.StringVar(value="정확도 우선 (기본)")
-        self.sofa_ckpt_var = ctk.StringVar(value="")
-        self.sofa_dict_var = ctk.StringVar(value="")
-        self.sofa_python_var = ctk.StringVar(value=get_sofa_env_python())
         # WhisperX 런타임 옵션(고급): UI에서 직접 노출하지 않아도 config.json으로 제어 가능
         self.whisperx_profile_var = ctk.StringVar(value="balanced")
         self.whisperx_device_var = ctk.StringVar(value="auto")
@@ -176,19 +171,6 @@ class App(
         self.whisperx_align_model_var = ctk.StringVar(value="")
         self.whisperx_cleanup_intermediate_var = ctk.BooleanVar(value=True)
         self.whisperx_save_debug_json_var = ctk.BooleanVar(value=False)
-        # SOFA 런타임 옵션(고급): UI에서 직접 노출하지 않아도 config.json으로 제어 가능
-        self.sofa_repo_dir_var = ctk.StringVar(value="")
-        self.sofa_mode_var = ctk.StringVar(value="force")
-        self.sofa_g2p_var = ctk.StringVar(value="Dictionary")
-        self.sofa_ap_detector_var = ctk.StringVar(value="LoudnessSpectralcentroidAPDetector")
-        self.sofa_ap_detector_config_var = ctk.StringVar(value="")
-        self.sofa_save_confidence_var = ctk.BooleanVar(value=True)
-        self.sofa_out_formats_var = ctk.StringVar(value="TextGrid")
-        self.sofa_extra_infer_args_var = ctk.StringVar(value="")
-        self.sofa_two_pass_retry_var = ctk.BooleanVar(value=True)
-        self.sofa_two_pass_retry_mode_var = ctk.StringVar(value="match")
-        self.sofa_confidence_threshold_var = ctk.DoubleVar(value=0.55)
-        self.sofa_low_confidence_max_files_var = ctk.IntVar(value=0)
 
         self.app_dir = APP_DIR
         self.log_path = LOG_PATH

@@ -18,7 +18,6 @@ from core.format_type_utils import normalize_auto_format_value
 from core.log_events import classify_log_message, log_with_event
 from core.mfa_runner import ALERT_MFA_PERMISSION_DENIED, ALERT_MSVC_REQUIRED
 from core.oto_validator import validate_oto_timing
-from core.sofa_runner import get_sofa_env_python
 
 
 class FileDialogMixin:
@@ -69,8 +68,6 @@ class AppRuntimeMixin:
         if len(text) <= 2:
             if "MFA" in original:
                 return "MFA 작업 진행 중..."
-            if "SOFA" in original:
-                return "SOFA 작업 진행 중..."
             if "WhisperX" in original or "whisperx" in original:
                 return "WhisperX 작업 진행 중..."
             if "OTO" in original:
@@ -537,13 +534,10 @@ class AppRuntimeMixin:
                 f.write(f"정렬 엔진: {self.aligner_var.get()}\n")
                 if hasattr(self, "mfa_align_profile_var"):
                     f.write(f"MFA 정렬 프로필: {self.mfa_align_profile_var.get()}\n")
-                f.write(f"SOFA Python: {self.sofa_python_var.get()}\n")
                 f.write(f"구조화 이벤트 로그: {getattr(self, 'event_log_path', '')}\n")
                 f.write("\n--- 사용자 설정 ---\n")
                 f.write(f"WAV 폴더: {self.wav_entry.get()}\n")
                 f.write(f"템플릿 OTO: {self.tpl_entry.get()}\n")
-                f.write(f"SOFA 체크포인트: {self.sofa_ckpt_var.get()}\n")
-                f.write(f"SOFA 사전: {self.sofa_dict_var.get()}\n")
                 f.write(f"베이스 OTO 없음: {self.no_base_oto_var.get()}\n")
                 f.write(f"출력 경로: {self.out_entry.get()}\n")
                 f.write("\n--- 파라미터 ---\n")
@@ -608,21 +602,6 @@ class ConfigMixin:
             "show_advanced_aligner": self.show_advanced_aligner_var.get() if hasattr(self, "show_advanced_aligner_var") else False,
             "aligner": self.aligner_var.get(),
             "mfa_align_profile": self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "정확도 우선 (기본)",
-            "sofa_ckpt": self.sofa_ckpt_var.get(),
-            "sofa_dict": self.sofa_dict_var.get(),
-            "sofa_python": self.sofa_python_var.get(),
-            "sofa_repo_dir": self.sofa_repo_dir_var.get() if hasattr(self, "sofa_repo_dir_var") else "",
-            "sofa_mode": self.sofa_mode_var.get() if hasattr(self, "sofa_mode_var") else "force",
-            "sofa_g2p": self.sofa_g2p_var.get() if hasattr(self, "sofa_g2p_var") else "Dictionary",
-            "sofa_ap_detector": self.sofa_ap_detector_var.get() if hasattr(self, "sofa_ap_detector_var") else "LoudnessSpectralcentroidAPDetector",
-            "sofa_ap_detector_config": self.sofa_ap_detector_config_var.get() if hasattr(self, "sofa_ap_detector_config_var") else "",
-            "sofa_save_confidence": self.sofa_save_confidence_var.get() if hasattr(self, "sofa_save_confidence_var") else True,
-            "sofa_out_formats": self.sofa_out_formats_var.get() if hasattr(self, "sofa_out_formats_var") else "TextGrid",
-            "sofa_extra_infer_args": self.sofa_extra_infer_args_var.get() if hasattr(self, "sofa_extra_infer_args_var") else "",
-            "sofa_two_pass_retry": self.sofa_two_pass_retry_var.get() if hasattr(self, "sofa_two_pass_retry_var") else True,
-            "sofa_two_pass_retry_mode": self.sofa_two_pass_retry_mode_var.get() if hasattr(self, "sofa_two_pass_retry_mode_var") else "match",
-            "sofa_confidence_threshold": self.sofa_confidence_threshold_var.get() if hasattr(self, "sofa_confidence_threshold_var") else 0.55,
-            "sofa_low_confidence_max_files": self.sofa_low_confidence_max_files_var.get() if hasattr(self, "sofa_low_confidence_max_files_var") else 0,
             "whisperx_profile": self.whisperx_profile_var.get() if hasattr(self, "whisperx_profile_var") else "balanced",
             "whisperx_device": self.whisperx_device_var.get() if hasattr(self, "whisperx_device_var") else "auto",
             "whisperx_compute_type": self.whisperx_compute_type_var.get() if hasattr(self, "whisperx_compute_type_var") else "int8",
@@ -675,10 +654,8 @@ class ConfigMixin:
                 saved_style = config.get("ja_alias_style", "원본 그대로")
                 if saved_style in {"원본 그대로", "히라가나", "로마자"}:
                     self.ja_alias_style_var.set(saved_style)
-            if "aligner" in config:
-                saved_aligner = config.get("aligner", "MFA")
-                if saved_aligner in {"MFA", "SOFA"}:
-                    self.aligner_var.set(saved_aligner)
+            if "aligner" in config and hasattr(self, "aligner_var"):
+                self.aligner_var.set("MFA")
             if hasattr(self, "show_advanced_aligner_var"):
                 self.show_advanced_aligner_var.set(False)
             if "mfa_align_profile" in config and hasattr(self, "mfa_align_profile_var"):
@@ -689,42 +666,6 @@ class ConfigMixin:
                     elif saved_profile == "accurate":
                         saved_profile = "정확도 우선 (기본)"
                     self.mfa_align_profile_var.set(saved_profile)
-            if "sofa_ckpt" in config:
-                self.sofa_ckpt_var.set(config.get("sofa_ckpt", ""))
-            if "sofa_dict" in config:
-                self.sofa_dict_var.set(config.get("sofa_dict", ""))
-            if "sofa_python" in config:
-                saved_sofa_python = str(config.get("sofa_python", "") or "").strip()
-                if saved_sofa_python and os.path.exists(saved_sofa_python):
-                    self.sofa_python_var.set(saved_sofa_python)
-                else:
-                    self.sofa_python_var.set(get_sofa_env_python())
-            if "sofa_repo_dir" in config and hasattr(self, "sofa_repo_dir_var"):
-                self.sofa_repo_dir_var.set(config.get("sofa_repo_dir", ""))
-            if "sofa_mode" in config and hasattr(self, "sofa_mode_var"):
-                self.sofa_mode_var.set(config.get("sofa_mode", "force"))
-            if "sofa_g2p" in config and hasattr(self, "sofa_g2p_var"):
-                self.sofa_g2p_var.set(config.get("sofa_g2p", "Dictionary"))
-            if "sofa_ap_detector" in config and hasattr(self, "sofa_ap_detector_var"):
-                self.sofa_ap_detector_var.set(
-                    config.get("sofa_ap_detector", "LoudnessSpectralcentroidAPDetector")
-                )
-            if "sofa_ap_detector_config" in config and hasattr(self, "sofa_ap_detector_config_var"):
-                self.sofa_ap_detector_config_var.set(config.get("sofa_ap_detector_config", ""))
-            if "sofa_save_confidence" in config and hasattr(self, "sofa_save_confidence_var"):
-                self.sofa_save_confidence_var.set(config.get("sofa_save_confidence", True))
-            if "sofa_out_formats" in config and hasattr(self, "sofa_out_formats_var"):
-                self.sofa_out_formats_var.set(config.get("sofa_out_formats", "TextGrid"))
-            if "sofa_extra_infer_args" in config and hasattr(self, "sofa_extra_infer_args_var"):
-                self.sofa_extra_infer_args_var.set(config.get("sofa_extra_infer_args", ""))
-            if "sofa_two_pass_retry" in config and hasattr(self, "sofa_two_pass_retry_var"):
-                self.sofa_two_pass_retry_var.set(config.get("sofa_two_pass_retry", True))
-            if "sofa_two_pass_retry_mode" in config and hasattr(self, "sofa_two_pass_retry_mode_var"):
-                self.sofa_two_pass_retry_mode_var.set(config.get("sofa_two_pass_retry_mode", "match"))
-            if "sofa_confidence_threshold" in config and hasattr(self, "sofa_confidence_threshold_var"):
-                self.sofa_confidence_threshold_var.set(config.get("sofa_confidence_threshold", 0.55))
-            if "sofa_low_confidence_max_files" in config and hasattr(self, "sofa_low_confidence_max_files_var"):
-                self.sofa_low_confidence_max_files_var.set(config.get("sofa_low_confidence_max_files", 0))
             if "whisperx_profile" in config and hasattr(self, "whisperx_profile_var"):
                 profile = str(config.get("whisperx_profile", "balanced") or "balanced").strip().lower()
                 if profile in {"low_load", "balanced", "high_accuracy"}:

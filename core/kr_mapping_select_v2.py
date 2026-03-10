@@ -1,5 +1,36 @@
 from __future__ import annotations
 
+import re
+
+from core.kr_oto_rules import _is_kr_glide_vowel
+
+
+def _extract_vv_pair_tokens(alias, split_syllable_parts_fn):
+    parts = [p for p in re.split(r"\s+", (alias or "").strip().lower()) if p]
+    if len(parts) != 2:
+        return "", ""
+    left = re.sub(r"[^a-z]", "", parts[0])
+    right = re.sub(r"[^a-z]", "", parts[1])
+    lo, lv, lc = split_syllable_parts_fn(left)
+    ro, rv, rc = split_syllable_parts_fn(right)
+    if not lv or not rv:
+        return "", ""
+    if lo or ro or lc or rc:
+        return "", ""
+    return lv, rv
+
+
+def _vv_pair_matches(idx, romaji_syllables, split_syllable_parts_fn, left_vowel, right_vowel):
+    if idx is None or not romaji_syllables:
+        return False
+    if idx <= 0 or idx >= len(romaji_syllables):
+        return False
+    lo, lv, lc = split_syllable_parts_fn(romaji_syllables[idx - 1])
+    ro, rv, rc = split_syllable_parts_fn(romaji_syllables[idx])
+    if lo or ro or lc or rc:
+        return False
+    return bool(lv and rv and lv == left_vowel and rv == right_vowel)
+
 
 def select_kr_vcv_index(
     *,
@@ -115,6 +146,17 @@ def select_kr_vcv_index(
                             )
                         vcv_selected_w_idx = fixed_idx
                         cv_seq_idx = max(cv_seq_idx, vcv_selected_w_idx + 1)
+            elif c_vowel and _is_kr_glide_vowel(c_vowel) != _is_kr_glide_vowel(t_vowel):
+                if expected_vcv_idx < len(romaji_syllables):
+                    _e_on, e_vowel, _e_coda = split_syllable_parts_fn(romaji_syllables[expected_vcv_idx])
+                    if e_vowel == t_vowel and _is_kr_glide_vowel(e_vowel) == _is_kr_glide_vowel(t_vowel):
+                        if debug_logging:
+                            log_fn(
+                                f"🛡️ {fname}: KR VCV 활음 불일치 차단 "
+                                f"{vcv_selected_w_idx + 1}->{expected_vcv_idx + 1} ({alias})"
+                            )
+                        vcv_selected_w_idx = expected_vcv_idx
+                        cv_seq_idx = max(cv_seq_idx, vcv_selected_w_idx + 1)
     return vcv_selected_w_idx, cv_seq_idx, row_mapping_confidence
 
 
@@ -163,6 +205,9 @@ def select_kr_general_cv_index(
         )
     )
     forced_gate_rejected = False
+    vv_left, vv_right = ("", "")
+    if alias_type == "vv":
+        vv_left, vv_right = _extract_vv_pair_tokens(alias, split_syllable_parts_fn)
     if forced_selected_idx is not None and not (0 <= forced_selected_idx < len(romaji_syllables)):
         remapped_idx = remap_forced_cv_index_fn(
             target_clean,
@@ -204,6 +249,10 @@ def select_kr_general_cv_index(
         if forced_vowel_mismatch and file_mapping_low_conf:
             keep_forced = False
         if expected_score_forced >= 0.0 and forced_score >= 0.0 and (forced_score + 14.0) < expected_score_forced:
+            keep_forced = False
+        if alias_type == "vv" and vv_left and vv_right and not _vv_pair_matches(
+            forced_selected_idx, romaji_syllables, split_syllable_parts_fn, vv_left, vv_right
+        ):
             keep_forced = False
         if keep_forced:
             selected_w_idx = int(forced_selected_idx)
@@ -302,6 +351,27 @@ def select_kr_general_cv_index(
                         f"{expected_cv_idx + 1}->{fixed_idx + 1} ({alias})"
                     )
                 selected_w_idx = int(fixed_idx)
+                cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
+    if alias_type == "vv" and vv_left and vv_right:
+        if selected_w_idx is None or not _vv_pair_matches(
+            selected_w_idx, romaji_syllables, split_syllable_parts_fn, vv_left, vv_right
+        ):
+            candidate_idx = None
+            if planned_vv_idx is not None and _vv_pair_matches(
+                planned_vv_idx, romaji_syllables, split_syllable_parts_fn, vv_left, vv_right
+            ):
+                candidate_idx = planned_vv_idx
+            elif _vv_pair_matches(
+                expected_cv_idx, romaji_syllables, split_syllable_parts_fn, vv_left, vv_right
+            ):
+                candidate_idx = expected_cv_idx
+            if candidate_idx is not None and candidate_idx != selected_w_idx:
+                if debug_logging:
+                    log_fn(
+                        f"🛡️ {fname}: VV pair 매칭 보정 "
+                        f"{(selected_w_idx + 1) if selected_w_idx is not None else '?'}->{candidate_idx + 1} ({alias})"
+                    )
+                selected_w_idx = int(candidate_idx)
                 cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
     ordered_idx = clamp_cv_index_to_order_fn(
         file_format,

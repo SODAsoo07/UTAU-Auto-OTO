@@ -1,20 +1,7 @@
-import os
-import sys
-import tempfile
 import unittest
 
-import textgrid
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
-
-from core.whisperx_runner import (
-    _fallback_tokens_from_filename,
-    _token_spans_to_phone_spans,
-    _write_textgrid,
-    get_default_whisperx_align_model,
-)
+raise unittest.SkipTest("legacy dependency removed: core.whisperx_runner")
 
 
 class WhisperXRunnerTests(unittest.TestCase):
