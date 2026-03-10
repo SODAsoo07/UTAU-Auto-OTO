@@ -13,7 +13,7 @@
 ```powershell
 powershell -ExecutionPolicy Bypass -File "$root\ml\scripts\run_coupled_mel_oto_training.ps1" `
   -Lang korean `
-  -Format cvvc `
+  -Format cv `
   -DatasetRoot "$root\dataset" `
   -Device cuda
 ```
@@ -38,7 +38,7 @@ powershell -ExecutionPolicy Bypass -File "$root\ml\scripts\run_coupled_mel_oto_t
   -Format cvvc `
   -StageSources `
   -PrepareAuto `
-  -Device cpu `
+  -Device cuda `
   -ExportBundle `
   -InstallBundle
 ```
@@ -230,7 +230,7 @@ python ml\scripts\export_oto_ml_bundle.py `
   --zip
 
 python ml\scripts\install_oto_ml_bundle.py `
-  --bundle "$root\ml_workspace\exports\model_bundles\korean_cvvc_v1_coupled.zip" `
+  --bundle "$root\ml_workspace\exports\model_bundles\korean_cv_v1.zip" `
   --install-root "$root\models_installed\oto_ml"
 ```
 

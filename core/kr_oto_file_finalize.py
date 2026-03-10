@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import os
+import wave
 from dataclasses import dataclass
 
 from core.kr_oto_file_ops import (
@@ -35,6 +36,92 @@ def _env_float(name, default):
         return float(raw)
     except Exception:
         return float(default)
+
+
+def _call_validate(validate_fn, offset, consonant, cutoff, pre, ovl, *, alias_type=""):
+    try:
+        return validate_fn(offset, consonant, cutoff, pre, ovl, alias_type=alias_type)
+    except TypeError:
+        return validate_fn(offset, consonant, cutoff, pre, ovl)
+
+
+def sanitize_kr_oto_for_wav_duration(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    ovl,
+    wav_duration_ms,
+    *,
+    alias_type="",
+    validate_fn,
+):
+    """Clamp one KR OTO row to the real wav timeline to avoid render-time geometry errors."""
+    offset, consonant, cutoff, pre, ovl = _call_validate(
+        validate_fn,
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        alias_type=alias_type,
+    )
+    try:
+        dur_ms = float(wav_duration_ms or 0.0)
+    except Exception:
+        dur_ms = 0.0
+    if dur_ms <= 0.0:
+        return offset, consonant, cutoff, pre, ovl
+
+    a_type = str(alias_type or "").strip().lower()
+    min_room_after_offset = 16.0 if a_type in {"vc", "vv", "vcv"} else 22.0
+    offset = max(0.0, min(float(offset), max(dur_ms - min_room_after_offset, 0.0)))
+
+    cutoff_abs = abs(float(cutoff))
+    max_cutoff_abs = max(dur_ms - offset - 6.0, 0.0)
+    cutoff_abs = min(cutoff_abs, max_cutoff_abs)
+
+    active_len = max(dur_ms - offset - cutoff_abs, 0.0)
+    if active_len < 10.0:
+        target_active_len = min(max(12.0, active_len), max(dur_ms - offset - 2.0, 0.0))
+        cutoff_abs = max(0.0, dur_ms - offset - target_active_len)
+        active_len = max(dur_ms - offset - cutoff_abs, 0.0)
+
+    max_cons = max(active_len - 6.0, 0.0)
+    consonant = min(float(consonant), max_cons)
+    if consonant < 8.0 and active_len >= 10.0:
+        consonant = min(max(active_len * 0.72, 8.0), max_cons)
+
+    pre = min(max(float(pre), 0.0), max(consonant - 6.0, 0.0))
+    ovl_cap = pre * 0.82 if pre > 0.0 else 0.0
+    ovl = min(max(float(ovl), 0.0), ovl_cap)
+
+    if consonant <= pre + 4.0:
+        if max_cons >= pre + 6.0:
+            consonant = pre + 6.0
+        else:
+            consonant = max_cons
+            pre = max(0.0, consonant - 6.0)
+            ovl = min(ovl, pre * 0.82 if pre > 0.0 else 0.0)
+
+    if dur_ms - offset - cutoff_abs <= 2.0:
+        cutoff_abs = max(0.0, dur_ms - offset - 4.0)
+        active_len = max(dur_ms - offset - cutoff_abs, 0.0)
+        max_cons = max(active_len - 4.0, 0.0)
+        consonant = min(consonant, max_cons)
+        pre = min(pre, max(consonant - 4.0, 0.0))
+        ovl = min(ovl, pre * 0.82 if pre > 0.0 else 0.0)
+
+    cutoff = -max(cutoff_abs, 0.0)
+    return float(offset), float(consonant), float(cutoff), float(pre), float(ovl)
+
+
+def _wav_duration_ms(wav_path: str) -> float:
+    try:
+        with wave.open(wav_path, "rb") as wf:
+            return (wf.getnframes() * 1000.0) / float(wf.getframerate())
+    except Exception:
+        return 0.0
 
 
 @dataclass(frozen=True)
@@ -256,6 +343,110 @@ def apply_kr_mel_refine_to_oto_file(
     return changed
 
 
+def apply_kr_wav_duration_safety_to_oto_file(
+    oto_path: str,
+    wav_dir: str,
+    *,
+    custom_map=None,
+    validate_fn,
+    normalize_key_fn,
+) -> int:
+    if not oto_path or not os.path.exists(oto_path) or not os.path.isdir(wav_dir):
+        return 0
+
+    lines = read_text_with_fallback(oto_path).splitlines()
+    if not lines:
+        return 0
+
+    wav_index = {}
+    try:
+        for fn in os.listdir(wav_dir):
+            if fn.lower().endswith(".wav"):
+                key = normalize_key_fn(fn) if callable(normalize_key_fn) else fn.lower()
+                wav_index[str(key)] = os.path.join(wav_dir, fn)
+    except Exception:
+        return 0
+
+    dur_cache = {}
+    out_lines = []
+    changed = 0
+    alias_type_cache = {}
+
+    def _classify_cached(alias_text: str) -> str:
+        key = str(alias_text or "")
+        out = alias_type_cache.get(key)
+        if out is None:
+            out = classify_alias(key, custom_map)
+            alias_type_cache[key] = out
+        return out
+
+    def _resolve_wav(row_wav: str) -> str:
+        candidates = [str(row_wav or "")]
+        base_name = os.path.basename(str(row_wav or ""))
+        if base_name and base_name not in candidates:
+            candidates.append(base_name)
+        for cand in candidates:
+            if not cand:
+                continue
+            key = normalize_key_fn(cand) if callable(normalize_key_fn) else cand.lower()
+            path = wav_index.get(str(key))
+            if path:
+                return path
+        return ""
+
+    for line in lines:
+        row = parse_oto_line(line)
+        if not row:
+            out_lines.append(line)
+            continue
+
+        wav_path = _resolve_wav(str(row.get("wav", "")))
+        if not wav_path:
+            out_lines.append(line)
+            continue
+
+        dur_ms = dur_cache.get(wav_path)
+        if dur_ms is None:
+            dur_ms = _wav_duration_ms(wav_path)
+            dur_cache[wav_path] = dur_ms
+        if dur_ms <= 0.0:
+            out_lines.append(line)
+            continue
+
+        alias_type = _classify_cached(str(row.get("alias", "")))
+        o2, c2, ct2, p2, ov2 = sanitize_kr_oto_for_wav_duration(
+            row["offset"],
+            row["cons"],
+            row["cutoff"],
+            row["pre"],
+            row["ovl"],
+            dur_ms,
+            alias_type=alias_type,
+            validate_fn=validate_fn,
+        )
+        if (
+            abs(o2 - float(row["offset"])) > 1e-6
+            or abs(c2 - float(row["cons"])) > 1e-6
+            or abs(ct2 - float(row["cutoff"])) > 1e-6
+            or abs(p2 - float(row["pre"])) > 1e-6
+            or abs(ov2 - float(row["ovl"])) > 1e-6
+        ):
+            changed += 1
+            out_lines.append(
+                f"{row['wav']}={row['alias']},{o2:.2f},{c2:.2f},{ct2:.2f},{p2:.2f},{ov2:.2f}"
+            )
+        else:
+            out_lines.append(line)
+
+    if changed <= 0:
+        return 0
+
+    with open(oto_path, "w", encoding="utf-8") as f:
+        for line in out_lines:
+            f.write(line.rstrip("\n") + "\n")
+    return changed
+
+
 def run_kr_post_file_pipeline(context: KrPostFilePipelineContext):
     wav_dir = resolve_wav_dir_from_tg_folder(context.tg_folder)
 
@@ -308,9 +499,25 @@ def run_kr_post_file_pipeline(context: KrPostFilePipelineContext):
         "file consistency changed",
     )
 
+    safety_changed = apply_kr_wav_duration_safety_to_oto_file(
+        context.out_path,
+        wav_dir,
+        custom_map=context.custom_map,
+        validate_fn=context.validate_fn,
+        normalize_key_fn=context.normalize_key_fn,
+    )
+    log_changed_lines(
+        context.log_fn,
+        "[KR-Safety]",
+        safety_changed,
+        "wav-duration safety changed",
+    )
+
 
 __all__ = [
     "KrPostFilePipelineContext",
     "apply_kr_mel_refine_to_oto_file",
+    "apply_kr_wav_duration_safety_to_oto_file",
     "run_kr_post_file_pipeline",
+    "sanitize_kr_oto_for_wav_duration",
 ]

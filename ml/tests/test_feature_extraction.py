@@ -410,6 +410,15 @@ class FeatureExtractionTests(unittest.TestCase):
         self.assertEqual(_resolve_kr_cvvc_occurrence_index("dyo", "cv", occ_map, state), 2)
         self.assertEqual(_resolve_kr_cvvc_occurrence_index("do", "cv", occ_map, state), 1)
 
+    def test_korean_cvvc_occurrence_mapping_includes_coda_syllables_in_cv_slots(self):
+        cv_occ = _build_kr_cvvc_occurrence_map(["ga", "gak", "ga", "gan", "ga"])
+        self.assertEqual(cv_occ["ga"], [0, 1, 2, 3, 4])
+
+    def test_korean_cvvc_vv_occurrence_mapping_keeps_raw_token_adjacency(self):
+        vv_occ = _build_kr_cvvc_vv_occurrence_map(["a", "br", "i", "a"])
+        self.assertNotIn("a i", vv_occ)
+        self.assertEqual(vv_occ["i a"], [2])
+
     def test_korean_cvvc_forced_occurrence_blocks_exact_vowel_fix(self):
         self.assertFalse(_should_allow_kr_exact_vowel_fix("cvvc", 3))
         self.assertFalse(_should_allow_kr_exact_vowel_fix("cvvc", 0))

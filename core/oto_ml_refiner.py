@@ -871,6 +871,62 @@ def _apply_language_specific_post_guard(
     return out
 
 
+def _apply_wav_duration_hard_guard(
+    row_context: Dict[str, object],
+    params: Tuple[float, float, float, float, float],
+) -> Tuple[float, float, float, float, float]:
+    """
+    Final hard guard against invalid OTO geometry on the real wav timeline.
+    This prevents cases like offset > wav_duration or cutoff before offset.
+    """
+    offset, consonant, cutoff, pre, ovl = [float(v) for v in params]
+    dur_ms = _to_float(row_context.get("wav_duration_ms"), 0.0)
+    if dur_ms <= 0.0:
+        return offset, consonant, cutoff, pre, ovl
+
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    min_room_after_offset = 16.0 if alias_type in {"vc", "vv", "vcv"} else 22.0
+    offset = max(0.0, min(offset, max(dur_ms - min_room_after_offset, 0.0)))
+
+    cutoff_abs = abs(cutoff)
+    max_cutoff_abs = max(dur_ms - offset - 6.0, 0.0)
+    cutoff_abs = min(cutoff_abs, max_cutoff_abs)
+
+    active_len = max(dur_ms - offset - cutoff_abs, 0.0)
+    if active_len < 10.0:
+        target_active_len = min(max(12.0, active_len), max(dur_ms - offset - 2.0, 0.0))
+        cutoff_abs = max(0.0, dur_ms - offset - target_active_len)
+        active_len = max(dur_ms - offset - cutoff_abs, 0.0)
+
+    max_cons = max(active_len - 6.0, 0.0)
+    consonant = min(consonant, max_cons)
+    if consonant < 8.0 and active_len >= 10.0:
+        consonant = min(max(active_len * 0.72, 8.0), max_cons)
+
+    pre = min(max(pre, 0.0), max(consonant - 6.0, 0.0))
+    ovl_cap = pre * 0.82 if pre > 0.0 else 0.0
+    ovl = min(max(ovl, 0.0), ovl_cap)
+
+    if consonant <= pre + 4.0:
+        if max_cons >= pre + 6.0:
+            consonant = pre + 6.0
+        else:
+            consonant = max_cons
+            pre = max(0.0, consonant - 6.0)
+            ovl = min(ovl, pre * 0.82 if pre > 0.0 else 0.0)
+
+    if dur_ms - offset - cutoff_abs <= 2.0:
+        cutoff_abs = max(0.0, dur_ms - offset - 4.0)
+        active_len = max(dur_ms - offset - cutoff_abs, 0.0)
+        max_cons = max(active_len - 4.0, 0.0)
+        consonant = min(consonant, max_cons)
+        pre = min(pre, max(consonant - 4.0, 0.0))
+        ovl = min(ovl, pre * 0.82 if pre > 0.0 else 0.0)
+
+    cutoff = -max(cutoff_abs, 0.0)
+    return offset, consonant, cutoff, pre, ovl
+
+
 def _solve_joint_constraints(
     params: Tuple[float, float, float, float, float],
     *,
@@ -924,6 +980,7 @@ def _finalize_ml_params(
     out, applied_rules = _apply_anchor_lock_lite_after_ml(language, row_context, out, validate_row)
     out, adjust_count = _solve_joint_constraints(out, strict=bool(strict_constraint))
     out = validate_row(*out)
+    out = _apply_wav_duration_hard_guard(row_context, out)
     if anchor_stats is not None and applied_rules:
         anchor_stats["anchor_locked_count"] = int(anchor_stats.get("anchor_locked_count", 0)) + 1
         if "cutoff_next_onset_clamp" in applied_rules or "cutoff_next_vowel_clamp" in applied_rules:

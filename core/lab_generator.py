@@ -56,7 +56,10 @@ KO_IPA_MAP = {
     'ng': 'ŋ',
     'a': 'ɐ', 'i': 'i', 'u': 'u', 'e': 'e', 'o': 'o', 'eu': 'ɨ', 'eo': 'ʌ', 'ae': 'ɛ',
     'y': 'j', 'w': 'w',
-    'R': 'sil', 'H': 'sil', 'br': 'sil', 'pau': 'sil', 'sil': 'sil', 'bre': 'sil',
+    # MFA 3.x(Kaldi)에서는 비침묵 단어를 sil로 발음시키면
+    # compile_train_graphs 단계에서 AccessViolation(0xC0000005)이 발생할 수 있다.
+    # R/H/br 표식은 숨소리 계열 비침묵 phone(h)로 정규화해 크래시를 방지한다.
+    'R': 'h', 'H': 'h', 'br': 'h', 'pau': 'sil', 'sil': 'sil', 'bre': 'h',
     'ui': 'ɰ i', 'wa': 'w ɐ', 'wo': 'w o', 'wi': 'w i', 'we': 'w e',
     'yeo': 'j ʌ', 'wae': 'w ɛ', 'oe': 'w e', 'vi': 'v i'
 }
@@ -111,7 +114,7 @@ def _apply_external_korean_conversion_table():
             priority[str(key)] = chosen
     KO_AMBIGUOUS_ALIAS_PRIORITY = priority
 
-    silence_tokens = {"sil", "pau", "br", "bre", "r", "h", "breath"}
+    silence_tokens = {"sil", "pau", "breath"}
     for mapping in (KO_IPA_MAP, KO_ROMAJI_IPA_TABLE):
         for key, val in mapping.items():
             ipa = str(val or "").strip().lower()
@@ -180,6 +183,27 @@ def _is_supported_ko_ipa_sequence(ipa_text):
 
 
 _KO_KNOWN_PHONE_SET.update(_rebuild_ko_known_phone_set())
+
+
+def _normalize_mfa_sensitive_marker_ipa(token, ipa_text):
+    """
+    MFA 3.x에서 비침묵 토큰(R/H/br/bre)을 sil로 두면 그래프 컴파일이 크래시할 수 있어
+    숨소리 계열 최소 비침묵 IPA(h)로 강제 보정한다.
+    """
+    tok = str(token or "").strip()
+    ipa = str(ipa_text or "").strip().lower()
+    if not tok:
+        return ipa_text
+    if ipa != "sil":
+        return ipa_text
+    low = tok.lower()
+    if tok == "R":
+        return "h"
+    if low in {"br", "bre", "h"} or tok == "H":
+        return "h"
+    if low == "r":
+        return "ɾ"
+    return ipa_text
 
 # 한글 자모 -> 로마자
 CHOSUNG_LIST_ROMAN = ['g','kk','n','d','tt','r','m','b','pp','s','ss','','j','jj','ch','k','t','p','h']
@@ -611,6 +635,7 @@ def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', 
                     ipa_list = get_ipa_from_roman(token)
 
                 ipa_str = " ".join(ipa_list)
+                ipa_str = _normalize_mfa_sensitive_marker_ipa(token, ipa_str)
                 if ipa_str and not _is_supported_ko_ipa_sequence(ipa_str):
                     log(f"⚠️ IPA 검증 실패 ({lab_file}): '{token}' -> '{ipa_str}', sil로 대체")
                     ipa_str = "sil"

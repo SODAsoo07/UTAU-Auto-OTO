@@ -956,7 +956,33 @@ def _extract_structure_features(language: str, alias: str, alias_type: str, row_
     return out
 
 
-def _derive_alias_group(language: str, feat: Dict[str, object]) -> str:
+def _classify_kr_breath_alias_kind(alias: str, alias_type: str = "") -> str:
+    """
+    한국어 숨소리 계열을 분리한다.
+    - tail_breath: 어미 끝숨 (예: "a R", "oH")
+    - standalone_breath: 독립 숨소리 (예: "br", "bre")
+    """
+    text = str(alias or "").strip()
+    if not text:
+        return ""
+
+    parts = [p for p in re.split(r"\s+", text) if p]
+    if len(parts) >= 2 and parts[0].lower() in _GENERIC_VOWELS and parts[-1] in {"R", "H"}:
+        return "tail_breath"
+
+    compact = re.sub(r"[\s_\-]+", "", text)
+    if len(compact) >= 2 and compact[-1] in {"R", "H"} and compact[:-1].lower() in _GENERIC_VOWELS:
+        return "tail_breath"
+
+    low = text.lower()
+    if re.fullmatch(r"br\d*", low) or low in {"br", "bre", "breath"}:
+        return "standalone_breath"
+    if str(alias_type or "").strip().lower() == "br":
+        return "standalone_breath"
+    return ""
+
+
+def _derive_alias_group(language: str, feat: Dict[str, object], alias: str = "") -> str:
     lang = str(language or "").strip().lower()
     alias_type = str(feat.get("alias_type", "") or "").strip().lower()
     coda_type = str(feat.get("coda_type", "") or "").strip().lower()
@@ -969,6 +995,9 @@ def _derive_alias_group(language: str, feat: Dict[str, object]) -> str:
         if alias_type == "cv_head":
             return "cv_head_glide" if is_diph else "cv_head"
         if alias_type == "vc":
+            breath_kind = _classify_kr_breath_alias_kind(alias, alias_type=alias_type)
+            if breath_kind == "tail_breath":
+                return "vc_tail_breath"
             if coda_type == "stop":
                 return "vc_stop"
             if coda_type in {"nasal", "liquid"}:
@@ -981,7 +1010,7 @@ def _derive_alias_group(language: str, feat: Dict[str, object]) -> str:
         if alias_type == "mono":
             return "mono"
         if alias_type == "br":
-            return "br"
+            return "br_standalone"
         return alias_type or "other"
 
     if alias_type == "vc":
@@ -1071,7 +1100,11 @@ def _feature_row_from_context(language: str, format_type: str, row: Dict[str, ob
 
     feat.update(_compute_segment_stats(mel_ctx, offset, pre_abs, cut_abs, audio, sr))
     feat.update(_extract_structure_features(language, str(row.get("alias", "")), alias_type, row_index, total_rows))
-    feat["alias_group"] = _derive_alias_group(language, feat)
+    feat["alias_group"] = _derive_alias_group(
+        language,
+        feat,
+        alias=str(row.get("alias", "") or ""),
+    )
     feat = augment_mapping_quality_features(language, format_type, alias_type, feat)
 
     if prev_row is not None:
@@ -1227,22 +1260,36 @@ def _evaluate_training_row_quality(language: str, row: Dict[str, object]) -> Tup
             if d_cut > 150.0:
                 reasons.append("vv_cutoff_outlier")
         elif alias_type == "vc":
-            cut_lim = 120.0 if coda_type == "stop" else 155.0
-            pre_lim = 100.0 if coda_type == "stop" else 125.0
-            ovl_lim = 75.0 if coda_type == "stop" else 90.0
-            if d_cut > cut_lim:
-                reasons.append("vc_cutoff_outlier")
-            if d_pre > pre_lim:
-                reasons.append("vc_pre_outlier")
-            if d_ovl > ovl_lim:
-                reasons.append("vc_ovl_outlier")
+            if alias_group == "vc_tail_breath":
+                if d_cut > 360.0:
+                    reasons.append("vc_tail_breath_cutoff_outlier")
+                if d_pre > 210.0:
+                    reasons.append("vc_tail_breath_pre_outlier")
+                if d_ovl > 160.0:
+                    reasons.append("vc_tail_breath_ovl_outlier")
+            else:
+                cut_lim = 120.0 if coda_type == "stop" else 155.0
+                pre_lim = 100.0 if coda_type == "stop" else 125.0
+                ovl_lim = 75.0 if coda_type == "stop" else 90.0
+                if d_cut > cut_lim:
+                    reasons.append("vc_cutoff_outlier")
+                if d_pre > pre_lim:
+                    reasons.append("vc_pre_outlier")
+                if d_ovl > ovl_lim:
+                    reasons.append("vc_ovl_outlier")
         elif alias_type == "vcv":
             if d_off > 150.0:
                 reasons.append("vcv_offset_outlier")
             if d_pre > 120.0:
                 reasons.append("vcv_pre_outlier")
+        elif alias_type == "br" or alias_group == "br_standalone":
+            if d_cut > 420.0:
+                reasons.append("br_cutoff_outlier")
+            if d_pre > 240.0:
+                reasons.append("br_pre_outlier")
 
-        if max(d_off, d_cons, d_cut, d_pre, d_ovl) > 235.0:
+        gross_limit = 420.0 if alias_group in {"vc_tail_breath", "br_standalone"} else 235.0
+        if max(d_off, d_cons, d_cut, d_pre, d_ovl) > gross_limit:
             reasons.append("gross_outlier")
     else:
         if max(d_off, d_cons, d_cut, d_pre, d_ovl) > 300.0:

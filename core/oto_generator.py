@@ -184,6 +184,17 @@ def _env_float(name, default):
     except Exception:
         return float(default)
 
+
+def _env_bool(name, default=False):
+    raw = str(os.environ.get(name, "")).strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in {"1", "true", "yes", "on", "y"}:
+        return True
+    if raw in {"0", "false", "no", "off", "n"}:
+        return False
+    return bool(default)
+
 __all__ = [
     "generate_oto",
     "validate_oto_params",
@@ -2427,6 +2438,7 @@ def generate_oto(
         cleanup_timing_jsonl = False
     elif env_cleanup_jsonl in {"1", "true", "on", "yes"}:
         cleanup_timing_jsonl = True
+    kr_disable_cvvc_order_lock = _env_bool("UTOA_KR_DISABLE_CVVC_ORDER_LOCK", False)
 
     def log(msg):
         if callback:
@@ -3092,6 +3104,10 @@ def generate_oto(
             cv_seq_idx = 0
             bridge_seq_idx = 0
             kr_order_locked_format = _is_kr_order_locked_cv_format(file_format)
+            if kr_order_locked_format and kr_disable_cvvc_order_lock:
+                kr_order_locked_format = False
+                if kr_mapping_debug_reason_logging:
+                    log(f"🧭 {fname}: KR CVVC/CVC filename order lock 비활성화(UTOA_KR_DISABLE_CVVC_ORDER_LOCK=1)")
             kr_cvvc_occurrence_source = filename_cv_targets if (kr_order_locked_format and filename_cv_targets) else syllables_info
             kr_cvvc_occurrence_map = _build_kr_cvvc_occurrence_map(kr_cvvc_occurrence_source) if kr_order_locked_format else None
             kr_cvvc_occurrence_state = {}
@@ -3379,6 +3395,7 @@ def generate_oto(
 
 
                 if not is_vc:
+                    selected_w_idx = current_w_idx
                     forced_vv_idx = None
                     planned_vv_idx = None
                     if file_format == "cvvc" and alias_type == "vv":
@@ -3485,6 +3502,7 @@ def generate_oto(
                         syllables_info, selected_w_idx
                     )
                 else:
+                    selected_w_idx = current_w_idx
                     bridge_next_idx = (
                         int(bridge_pair["next_idx"])
                         if bridge_pair.get("next_idx") is not None
