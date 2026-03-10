@@ -16,9 +16,11 @@ from core.oto_ml_collection import (
     write_candidate_csv,
     write_candidate_manifest,
 )
+from core.runtime_encoding import bootstrap_utf8_runtime
 
 
 def main():
+    bootstrap_utf8_runtime()
     ap = argparse.ArgumentParser(description="Discover recursive OTO ML training candidates and build datasets.")
     ap.add_argument(
         "--config",

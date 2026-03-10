@@ -58,6 +58,8 @@ def augment_mapping_quality_features(language: str, format_type: str, alias_type
         confidence += min(vowel_len / 300.0, 0.15)
     confidence -= min(db_silence * 0.30, 0.20)
     confidence += min(max(energy_mean, 0.0) * 0.10, 0.10)
+    blank_conf = float(feat.get("blank_span_confidence", 0.0) or 0.0)
+    confidence -= min(blank_conf * 0.35, 0.24)
     confidence = max(0.0, min(1.0, confidence))
 
     feat["mapping_confidence"] = confidence
@@ -66,6 +68,7 @@ def augment_mapping_quality_features(language: str, format_type: str, alias_type
     feat["used_nuclei_fallback"] = used_nuclei_fallback
     feat["used_alias_based_syllables"] = used_alias_based_syllables
     feat["words_vs_alias_score_margin"] = max(0.0, (float(feat.get("syllable_len_ms", 0.0) or 0.0) - vowel_len)) - (off_err * 0.1)
+    feat["jump_blocked_flag"] = 1.0 if blank_conf >= 0.70 else float(feat.get("jump_blocked_flag", 0.0) or 0.0)
     return feat
 
 

@@ -19,6 +19,7 @@ from core.oto_ml_lightgbm import (
 )
 from core.oto_ml_policy import default_training_filters
 from core.oto_ml_selector import build_selector_dataset_csv_from_delta_dataset
+from core.runtime_encoding import bootstrap_utf8_runtime
 
 
 SUPPORTED_TARGETS = [
@@ -232,6 +233,7 @@ def _write_csv_summary(path: str, rows: List[Dict[str, Any]], columns: List[str]
 
 
 def main() -> None:
+    bootstrap_utf8_runtime()
     ap = argparse.ArgumentParser(description="Batch-evaluate OTO ML bundles and print summary tables.")
     ap.add_argument("--workspace-root", required=True, help="Workspace root containing datasets/, models/, reports/")
     ap.add_argument("--reports-root", default="", help="Output directory for per-model evaluation reports")

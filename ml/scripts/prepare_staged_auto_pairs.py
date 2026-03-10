@@ -10,6 +10,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.oto_ml_batch_prepare import prepare_staged_auto_pairs, write_prepare_report
+from core.runtime_encoding import bootstrap_utf8_runtime
 
 
 def _safe_print(message: str) -> None:
@@ -24,6 +25,7 @@ def _safe_print(message: str) -> None:
 
 
 def main():
+    bootstrap_utf8_runtime()
     ap = argparse.ArgumentParser(description="Generate lab/dict/TextGrid/auto-oto for staged dataset copies.")
     ap.add_argument(
         "--dataset-root",

@@ -9,20 +9,27 @@ import json
 import os
 import shutil
 import zipfile
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from core.oto_ml_policy import normalize_alias_family
 
 
-REQUIRED_BUNDLE_FILES = [
+COMMON_BUNDLE_FILES = [
     "feature_schema.json",
     "model_meta.json",
     "eval_summary.json",
+]
+
+LIGHTGBM_BUNDLE_FILES = [
     "model_offset.txt",
     "model_cons.txt",
     "model_cutoff.txt",
     "model_pre.txt",
     "model_ovl.txt",
+]
+
+COUPLED_BUNDLE_FILES = [
+    "coupled_model.pt",
 ]
 
 
@@ -40,9 +47,22 @@ def read_bundle_meta(model_dir: str) -> Dict[str, object]:
         return json.load(f)
 
 
-def validate_bundle_dir(model_dir: str) -> List[str]:
+def required_bundle_files_for_backend(backend: str) -> List[str]:
+    backend_norm = str(backend or "").strip().lower()
+    if backend_norm == "coupled_nn_v1":
+        return list(COMMON_BUNDLE_FILES) + list(COUPLED_BUNDLE_FILES)
+    return list(COMMON_BUNDLE_FILES) + list(LIGHTGBM_BUNDLE_FILES)
+
+
+def validate_bundle_dir(model_dir: str, meta: Optional[Dict[str, object]] = None) -> List[str]:
+    if meta is None:
+        try:
+            meta = read_bundle_meta(model_dir)
+        except Exception:
+            meta = {}
+    required_files = required_bundle_files_for_backend((meta or {}).get("backend", ""))
     missing = []
-    for name in REQUIRED_BUNDLE_FILES:
+    for name in required_files:
         if not os.path.isfile(os.path.join(model_dir, name)):
             missing.append(name)
     return missing
@@ -94,11 +114,12 @@ def export_model_bundle(
     if not os.path.isdir(model_dir):
         raise FileNotFoundError(model_dir)
 
-    missing = validate_bundle_dir(model_dir)
+    meta = read_bundle_meta(model_dir)
+    required_files = required_bundle_files_for_backend(meta.get("backend", ""))
+    missing = validate_bundle_dir(model_dir, meta=meta)
     if missing:
         raise FileNotFoundError(f"Missing required bundle files in {model_dir}: {', '.join(missing)}")
 
-    meta = read_bundle_meta(model_dir)
     route = _bundle_routing_meta(model_dir, meta)
     slug = bundle_slug.strip() or _default_bundle_slug(model_dir, meta)
     out_dir = os.path.join(export_root, slug)
@@ -107,7 +128,7 @@ def export_model_bundle(
     os.makedirs(out_dir, exist_ok=True)
 
     files: List[Dict[str, object]] = []
-    for name in REQUIRED_BUNDLE_FILES:
+    for name in required_files:
         src = os.path.join(model_dir, name)
         dst = os.path.join(out_dir, name)
         shutil.copy2(src, dst)
@@ -129,6 +150,7 @@ def export_model_bundle(
         "feature_version": meta.get("feature_version", ""),
         "train_rows": meta.get("train_rows", 0),
         "voicebank_count": meta.get("voicebank_count", 0),
+        "required_files": required_files,
         "install_subdir": bundle_install_subdir(model_dir, meta).replace("\\", "/"),
         "files": files,
     }
@@ -142,7 +164,7 @@ def export_model_bundle(
         if os.path.exists(zip_path):
             os.remove(zip_path)
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for fn in REQUIRED_BUNDLE_FILES + ["bundle_manifest.json"]:
+            for fn in required_files + ["bundle_manifest.json"]:
                 abs_path = os.path.join(out_dir, fn)
                 zf.write(abs_path, arcname=os.path.join(slug, fn))
         manifest["zip_path"] = zip_path

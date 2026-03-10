@@ -10,9 +10,11 @@ if ROOT not in sys.path:
 
 from core.oto_ml_lightgbm import train_lightgbm_selector_bundle
 from core.oto_ml_policy import normalize_alias_family
+from core.runtime_encoding import bootstrap_utf8_runtime
 
 
 def main():
+    bootstrap_utf8_runtime()
     ap = argparse.ArgumentParser(description="Train LightGBM selector bundle for OTO ML candidate routing.")
     ap.add_argument("--lang", required=True, choices=["korean", "japanese"])
     ap.add_argument("--format", required=True, help="Format type (cv/cvc/cvvc/vcv/general)")

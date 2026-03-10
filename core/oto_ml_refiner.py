@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from core.oto_ml_features import extract_feature_rows, get_delta_clip_limits, parse_oto_rows
 from core.oto_ml_runtime import load_oto_model_bundle, predict_oto_deltas
@@ -42,6 +42,53 @@ from core.timing_anchor_runtime import AnchorTimingContext, apply_anchor_lock
 from core.selector_hard_negative import log_selector_hard_negative
 
 logger = logging.getLogger(__name__)
+
+
+class CoupledLowConfidenceError(RuntimeError):
+    def __init__(self, confidence: float, threshold: float):
+        super().__init__(f"coupled_low_confidence(conf={confidence:.4f}, min={threshold:.4f})")
+        self.confidence = float(confidence)
+        self.threshold = float(threshold)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = str(os.environ.get(name, "")).strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in {"1", "true", "yes", "on", "y"}:
+        return True
+    if raw in {"0", "false", "no", "off", "n"}:
+        return False
+    return bool(default)
+
+
+def _coupled_enabled() -> bool:
+    return _env_flag("UTOA_ML_COUPLED_ENABLE", True)
+
+
+def _coupled_min_confidence() -> float:
+    try:
+        return max(0.0, min(float(os.environ.get("UTOA_ML_COUPLED_MIN_CONF", "0.55")), 1.0))
+    except Exception:
+        return 0.55
+
+
+def _coupled_strict_constraint() -> bool:
+    return _env_flag("UTOA_ML_COUPLED_STRICT_CONSTRAINT", False)
+
+
+def _read_bundle_backend(model_dir: str) -> str:
+    try:
+        import json
+
+        meta_path = os.path.join(model_dir, "model_meta.json")
+        if not os.path.isfile(meta_path):
+            return ""
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f) or {}
+        return str(meta.get("backend", "") or "").strip().lower()
+    except Exception:
+        return ""
 
 
 def _has_explicit_model_override(language: str) -> bool:
@@ -92,11 +139,11 @@ def _installed_model_root_for_language(language: str) -> str:
     return os.path.join(base_dir, "models_installed", "oto_ml", lang)
 
 
-def _resolve_lightgbm_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
+def _collect_model_dir_candidates(language: str, format_type: str, alias_family: str = "") -> List[str]:
     fmt = normalize_format_type(language, format_type) or "general"
     family = normalize_alias_family(alias_family)
     lang = str(language or "").strip().lower()
-    candidates = []
+    candidates: List[str] = []
     for root in (
         _structured_export_model_root_for_language(language),
         _workspace_model_root_for_language(language),
@@ -154,29 +201,69 @@ def _resolve_lightgbm_model_dir(language: str, format_type: str, alias_family: s
             ]
         )
     candidates.extend(legacy_export_candidates)
-    for candidate in candidates:
-        if os.path.isfile(os.path.join(candidate, "model_meta.json")):
-            return candidate
-    if _ml_same_language_borrow_only():
-        return None
-    # Optional cross-language fallback for local experiments only.
-    for alt_lang in ("korean", "japanese"):
-        if alt_lang == lang:
+    if not _ml_same_language_borrow_only():
+        # Optional cross-language fallback for local experiments only.
+        for alt_lang in ("korean", "japanese"):
+            if alt_lang == lang:
+                continue
+            alt_root = _model_root_for_language(alt_lang)
+            for candidate in (
+                os.path.join(alt_root, fmt, "families", family, "v1") if family else "",
+                os.path.join(alt_root, f"{fmt}_{family}", "v1") if family else "",
+                os.path.join(alt_root, fmt, "v1"),
+                os.path.join(alt_root, "general", "v1"),
+            ):
+                if candidate and os.path.isfile(os.path.join(candidate, "model_meta.json")):
+                    candidates.append(candidate)
+    # Preserve order while removing duplicates.
+    seen = set()
+    ordered = []
+    for path in candidates:
+        if not path:
             continue
-        alt_root = _model_root_for_language(alt_lang)
-        for candidate in (
-            os.path.join(alt_root, fmt, "families", family, "v1") if family else "",
-            os.path.join(alt_root, f"{fmt}_{family}", "v1") if family else "",
-            os.path.join(alt_root, fmt, "v1"),
-            os.path.join(alt_root, "general", "v1"),
-        ):
-            if candidate and os.path.isfile(os.path.join(candidate, "model_meta.json")):
-                return candidate
+        key = os.path.abspath(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(path)
+    return ordered
+
+
+def _resolve_backend_model_dir(
+    language: str,
+    format_type: str,
+    alias_family: str = "",
+    backend: str = "",
+) -> Optional[str]:
+    backend_norm = str(backend or "").strip().lower()
+    for candidate in _collect_model_dir_candidates(language, format_type, alias_family=alias_family):
+        meta_path = os.path.join(candidate, "model_meta.json")
+        if not os.path.isfile(meta_path):
+            continue
+        if not backend_norm:
+            return candidate
+        detected_backend = _read_bundle_backend(candidate)
+        if detected_backend == backend_norm:
+            return candidate
+        if backend_norm == "lightgbm" and not detected_backend:
+            return candidate
     return None
 
 
+def _resolve_lightgbm_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
+    return _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="lightgbm")
+
+
+def _resolve_coupled_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
+    return _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="coupled_nn_v1")
+
+
 def _resolve_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
-    return _resolve_lightgbm_model_dir(language, format_type, alias_family=alias_family)
+    coupled_dir = _resolve_coupled_model_dir(language, format_type, alias_family=alias_family)
+    lightgbm_dir = _resolve_lightgbm_model_dir(language, format_type, alias_family=alias_family)
+    if _coupled_enabled():
+        return coupled_dir or lightgbm_dir
+    return lightgbm_dir or coupled_dir
 
 
 def _bundle_meta_exists(model_dir: str) -> bool:
@@ -299,6 +386,22 @@ def check_oto_ml_ready(language: str, format_type: str, alias_family: str = "") 
         )
     bundle = load_oto_model_bundle(model_dir)
     if not bundle:
+        primary_backend = _read_bundle_backend(model_dir)
+        if primary_backend == "coupled_nn_v1":
+            fallback_dir = _resolve_lightgbm_model_dir(language, routed_format, alias_family=family)
+            if fallback_dir and _bundle_meta_exists(fallback_dir):
+                fallback_bundle = load_oto_model_bundle(fallback_dir)
+                if fallback_bundle:
+                    return make_runtime_report(
+                        "ml",
+                        OK,
+                        "OTO ML 준비 완료 (coupled fallback: lightgbm)",
+                        language=str(language or "").strip().lower(),
+                        format_type=routed_format,
+                        alias_family=family,
+                        model_dir=str(fallback_dir),
+                        ready=True,
+                    )
         return make_runtime_report(
             "ml",
             ML_BUNDLE_INVALID,
@@ -379,7 +482,7 @@ def _route_format_for_feature(language: str, feature_row: Dict[str, object], for
 
     # VCV 내에서도 실제 받침 성격의 VC만 CVC 편향을 재사용한다.
     if alias_type == "vc" and coda_type in {"stop", "nasal", "liquid"}:
-        return "cv"
+        return "cvc"
     # KR VCV의 비브리지 alias는 vcv 전용 모델을 우선 시도하고, 없으면 general로 fallback한다.
     return "vcv"
 
@@ -768,23 +871,67 @@ def _apply_language_specific_post_guard(
     return out
 
 
+def _solve_joint_constraints(
+    params: Tuple[float, float, float, float, float],
+    *,
+    strict: bool = False,
+) -> Tuple[Tuple[float, float, float, float, float], int]:
+    offset, consonant, cutoff, pre, ovl = [float(v) for v in params]
+    adjust = 0
+
+    if offset < 0.0:
+        offset = 0.0
+        adjust += 1
+    if pre < 0.0:
+        pre = 0.0
+        adjust += 1
+    if ovl < 0.0:
+        ovl = 0.0
+        adjust += 1
+    if ovl > pre:
+        ovl = pre
+        adjust += 1
+
+    cons_margin = 16.0 if strict else 10.0
+    cut_margin = 14.0 if strict else 10.0
+    min_cons = pre + cons_margin
+    if consonant < min_cons:
+        consonant = min_cons
+        adjust += 1
+
+    cut_abs = abs(cutoff)
+    min_cut_abs = consonant + cut_margin
+    if cut_abs < min_cut_abs:
+        cut_abs = min_cut_abs
+        adjust += 1
+    cutoff = -cut_abs
+    return (offset, consonant, cutoff, pre, ovl), int(adjust)
+
+
 def _finalize_ml_params(
     language: str,
     row_context: Dict[str, object],
     params: Tuple[float, float, float, float, float],
     validate_fn,
     anchor_stats: Optional[Dict[str, int]] = None,
+    *,
+    strict_constraint: bool = False,
+    constraint_stats: Optional[Dict[str, int]] = None,
 ) -> Tuple[float, float, float, float, float]:
     validate_row = _build_alias_aware_validator(validate_fn, row_context)
     out = validate_row(*params)
     out = _apply_language_specific_post_guard(language, row_context, out, validate_row)
     out, applied_rules = _apply_anchor_lock_lite_after_ml(language, row_context, out, validate_row)
+    out, adjust_count = _solve_joint_constraints(out, strict=bool(strict_constraint))
+    out = validate_row(*out)
     if anchor_stats is not None and applied_rules:
         anchor_stats["anchor_locked_count"] = int(anchor_stats.get("anchor_locked_count", 0)) + 1
         if "cutoff_next_onset_clamp" in applied_rules or "cutoff_next_vowel_clamp" in applied_rules:
             anchor_stats["cutoff_clamped_count"] = int(anchor_stats.get("cutoff_clamped_count", 0)) + 1
             if str(row_context.get("alias_type", "") or "").strip().lower() == "vc":
                 anchor_stats["vc_cutoff_leak_guard_count"] = int(anchor_stats.get("vc_cutoff_leak_guard_count", 0)) + 1
+    if constraint_stats is not None and adjust_count > 0:
+        constraint_stats["constraint_adjust_count"] = int(constraint_stats.get("constraint_adjust_count", 0)) + int(adjust_count)
     return out
 
 
@@ -794,6 +941,8 @@ def apply_oto_ml_selector_candidate(
     base_params_override: Tuple[float, float, float, float, float],
     *,
     anchor_stats: Optional[Dict[str, int]] = None,
+    strict_constraint: bool = False,
+    constraint_stats: Optional[Dict[str, int]] = None,
 ) -> Tuple[float, float, float, float, float]:
     validate_oto_params = _get_validate_func(language)
     base_offset, base_cons, base_cutoff_abs, base_pre, base_ovl = base_params_override
@@ -804,7 +953,15 @@ def apply_oto_ml_selector_candidate(
         float(base_pre),
         float(base_ovl),
     )
-    return _finalize_ml_params(language, row_context, params, validate_oto_params, anchor_stats=anchor_stats)
+    return _finalize_ml_params(
+        language,
+        row_context,
+        params,
+        validate_oto_params,
+        anchor_stats=anchor_stats,
+        strict_constraint=strict_constraint,
+        constraint_stats=constraint_stats,
+    )
 
 
 def _apply_language_specific_delta_policy(language: str, row_context: Dict[str, object], deltas: Dict[str, float]) -> Dict[str, float]:
@@ -915,9 +1072,18 @@ def apply_oto_ml_delta(
     *,
     anchor_stats: Optional[Dict[str, int]] = None,
     base_params_override: Optional[Tuple[float, float, float, float, float]] = None,
+    min_confidence: float = 0.0,
+    strict_constraint: bool = False,
+    constraint_stats: Optional[Dict[str, int]] = None,
+    pred_result=None,
 ) -> Tuple[float, float, float, float, float]:
     validate_oto_params = _get_validate_func(language)
-    pred = predict_oto_deltas(bundle, row_context)
+    pred = pred_result if pred_result is not None else predict_oto_deltas(bundle, row_context)
+    if str(bundle.backend).strip().lower() == "coupled_nn_v1":
+        pred_conf = float(getattr(pred, "confidence", 0.0) or 0.0)
+        min_conf = max(0.0, float(min_confidence or 0.0))
+        if min_conf > 0.0 and pred_conf < min_conf:
+            raise CoupledLowConfidenceError(pred_conf, min_conf)
     alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
     deltas = {
         key: _clip_delta(language, key, val, alias_type=alias_type)
@@ -944,6 +1110,8 @@ def apply_oto_ml_delta(
         (offset, cons, cutoff, pre, ovl),
         validate_oto_params,
         anchor_stats=anchor_stats,
+        strict_constraint=strict_constraint,
+        constraint_stats=constraint_stats,
     )
 
 
@@ -983,6 +1151,11 @@ def apply_oto_ml_to_oto_file(
         selector_abstain_rows=0,
         selector_abstain_reasons=[],
         selector_hard_negative_rows=0,
+        route="",
+        model_confidence=0.0,
+        fallback_reason="",
+        blank_confidence=0.0,
+        constraint_adjust_count=0,
     )
     ml_report["policy"] = policy_name
 
@@ -1023,16 +1196,26 @@ def apply_oto_ml_to_oto_file(
         return 0
 
     bundle_cache: Dict[str, Optional[object]] = {}
+    fallback_bundle_cache: Dict[str, Optional[object]] = {}
     selector_cache: Dict[str, Optional[object]] = {}
     route_status: Dict[str, str] = {}
     route_model_dir: Dict[str, str] = {}
+    route_fallback_model_dir: Dict[str, str] = {}
+    route_primary_backend: Dict[str, str] = {}
     model_notice = set()
     changed = 0
+    route_counts: Dict[str, int] = {}
+    confidence_values: List[float] = []
+    fallback_reasons: List[str] = []
+    blank_conf_values: List[float] = []
+    strict_constraint = _coupled_strict_constraint()
+    coupled_min_conf = _coupled_min_confidence()
     anchor_stats = {
         "anchor_locked_count": 0,
         "cutoff_clamped_count": 0,
         "vc_cutoff_leak_guard_count": 0,
     }
+    constraint_stats = {"constraint_adjust_count": 0}
     with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
         raw_lines = [line.rstrip("\n") for line in f]
 
@@ -1050,29 +1233,61 @@ def apply_oto_ml_to_oto_file(
             ml_report["attempted_routes"].append(route_label)
         cache_key = route_label
         if cache_key not in bundle_cache:
-            ready = check_oto_ml_ready(language, format_type, alias_family=alias_family)
-            route_status[cache_key] = str(ready.get("code", OK) or OK)
-            route_model_dir[cache_key] = str(ready.get("model_dir", "") or "")
-            if ready.get("code") == ML_MODEL_MISSING:
+            coupled_dir = _resolve_coupled_model_dir(language, format_type, alias_family=alias_family) if _coupled_enabled() else None
+            lightgbm_dir = _resolve_lightgbm_model_dir(language, format_type, alias_family=alias_family)
+            primary_dir = coupled_dir or lightgbm_dir
+            fallback_dir = ""
+            primary_backend = _read_bundle_backend(primary_dir) if primary_dir else ""
+            route_primary_backend[cache_key] = str(primary_backend or "lightgbm")
+            if primary_dir and primary_backend == "coupled_nn_v1" and lightgbm_dir and lightgbm_dir != primary_dir:
+                fallback_dir = lightgbm_dir
+
+            if not primary_dir:
+                route_status[cache_key] = ML_MODEL_MISSING
+                route_model_dir[cache_key] = ""
+                route_fallback_model_dir[cache_key] = ""
+                route_primary_backend[cache_key] = ""
                 ml_report["missing_routes"].append(
-                    {"format_type": format_type, "alias_family": alias_family, "code": ML_MODEL_MISSING, "model_dir": route_model_dir[cache_key]}
+                    {"format_type": format_type, "alias_family": alias_family, "code": ML_MODEL_MISSING, "model_dir": ""}
                 )
                 bundle_cache[cache_key] = None
-                selector_cache[cache_key] = None
-            elif ready.get("code") == ML_BUNDLE_INVALID:
-                ml_report["invalid_routes"].append(
-                    {"format_type": format_type, "alias_family": alias_family, "code": ML_BUNDLE_INVALID, "model_dir": route_model_dir[cache_key]}
-                )
-                bundle_cache[cache_key] = None
+                fallback_bundle_cache[cache_key] = None
                 selector_cache[cache_key] = None
             else:
+                route_status[cache_key] = OK
+                route_model_dir[cache_key] = str(primary_dir)
+                route_fallback_model_dir[cache_key] = str(fallback_dir or "")
                 delta_allowed = bool(delta_enabled_by_default(language, format_type, alias_family=alias_family))
-                selector_allowed = bool(
-                    route_model_dir[cache_key]
-                    and selector_enabled_by_default(language, format_type, alias_family=alias_family)
-                )
-                bundle_cache[cache_key] = load_oto_model_bundle(route_model_dir[cache_key]) if delta_allowed else None
-                selector_payload = load_lightgbm_selector_bundle(route_model_dir[cache_key]) if selector_allowed else None
+                selector_allowed = bool(selector_enabled_by_default(language, format_type, alias_family=alias_family))
+
+                primary_bundle = None
+                fallback_bundle = None
+                try:
+                    primary_bundle = load_oto_model_bundle(primary_dir) if delta_allowed else None
+                except Exception:
+                    primary_bundle = None
+                if delta_allowed and fallback_dir:
+                    try:
+                        fallback_bundle = load_oto_model_bundle(fallback_dir)
+                    except Exception:
+                        fallback_bundle = None
+
+                if delta_allowed and primary_bundle is None and fallback_bundle is None:
+                    route_status[cache_key] = ML_BUNDLE_INVALID
+                    ml_report["invalid_routes"].append(
+                        {
+                            "format_type": format_type,
+                            "alias_family": alias_family,
+                            "code": ML_BUNDLE_INVALID,
+                            "model_dir": route_model_dir[cache_key],
+                        }
+                    )
+
+                bundle_cache[cache_key] = primary_bundle
+                fallback_bundle_cache[cache_key] = fallback_bundle
+
+                selector_dir = lightgbm_dir or (primary_dir if _read_bundle_backend(primary_dir) == "lightgbm" else "")
+                selector_payload = load_lightgbm_selector_bundle(selector_dir) if (selector_allowed and selector_dir) else None
                 if selector_payload is not None:
                     selector_ok, selector_reason = _selector_passes_runtime_guard(selector_payload)
                     if not selector_ok:
@@ -1081,7 +1296,7 @@ def apply_oto_ml_to_oto_file(
                             {
                                 "format_type": format_type,
                                 "alias_family": alias_family,
-                                "model_dir": route_model_dir[cache_key],
+                                "model_dir": str(selector_dir),
                                 "reason": selector_reason,
                             }
                         )
@@ -1091,11 +1306,17 @@ def apply_oto_ml_to_oto_file(
                     _emit(callback, f"[OTO-ML] 모델 로드 ({bundle.backend}): {route_model_dir[cache_key]}")
                     ml_report["loaded_models"].append(route_model_dir[cache_key])
                     model_notice.add(route_model_dir[cache_key])
-                if selector_cache.get(cache_key) is not None and route_model_dir[cache_key] not in ml_report["selector_model_routes"]:
-                    ml_report["selector_model_routes"].append(route_model_dir[cache_key])
+                fb = fallback_bundle_cache.get(cache_key)
+                if fb and route_fallback_model_dir.get(cache_key) and route_fallback_model_dir.get(cache_key) not in model_notice:
+                    _emit(callback, f"[OTO-ML] fallback 모델 로드 ({fb.backend}): {route_fallback_model_dir[cache_key]}")
+                    ml_report["loaded_models"].append(route_fallback_model_dir[cache_key])
+                    model_notice.add(route_fallback_model_dir[cache_key])
+                if selector_cache.get(cache_key) is not None and selector_dir and selector_dir not in ml_report["selector_model_routes"]:
+                    ml_report["selector_model_routes"].append(selector_dir)
         bundle = bundle_cache.get(cache_key)
+        fallback_bundle = fallback_bundle_cache.get(cache_key)
         selector_bundle = selector_cache.get(cache_key)
-        if not bundle and selector_bundle is None:
+        if not bundle and not fallback_bundle and selector_bundle is None:
             continue
 
         selected_base_override = None
@@ -1151,32 +1372,104 @@ def apply_oto_ml_to_oto_file(
                 ):
                     ml_report["selector_hard_negative_rows"] = int(ml_report.get("selector_hard_negative_rows", 0)) + 1
 
+        blank_conf_values.append(_to_float(feat.get("blank_span_confidence"), 0.0))
         line_index = int(feat.get("line_index", -1))
         row = rows_by_index.get(line_index)
         if row is None:
             continue
         try:
-            if bundle is not None:
+            applied_bundle = bundle
+            primary_backend = str(route_primary_backend.get(cache_key, "") or "")
+            if applied_bundle is None and fallback_bundle is not None:
+                applied_bundle = fallback_bundle
+                if primary_backend == "coupled_nn_v1":
+                    fallback_reasons.append("coupled_load_failed")
+                else:
+                    fallback_reasons.append("primary_load_failed")
+            pred_preview = None
+            applied_conf = None
+            route_name = ""
+            if applied_bundle is not None and str(applied_bundle.backend).strip().lower() == "coupled_nn_v1":
+                pred_preview = predict_oto_deltas(applied_bundle, feat)
+                applied_conf = float(getattr(pred_preview, "confidence", 0.0) or 0.0)
+                if applied_conf < coupled_min_conf:
+                    raise CoupledLowConfidenceError(applied_conf, coupled_min_conf)
+
+            if applied_bundle is not None:
                 o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(
                     language,
                     feat,
-                    bundle,
+                    applied_bundle,
                     anchor_stats=anchor_stats,
                     base_params_override=selected_base_override,
+                    min_confidence=coupled_min_conf if str(applied_bundle.backend).strip().lower() == "coupled_nn_v1" else 0.0,
+                    strict_constraint=strict_constraint,
+                    constraint_stats=constraint_stats,
+                    pred_result=pred_preview,
                 )
+                route_name = str(applied_bundle.backend)
+                if bundle is None and fallback_bundle is not None and primary_backend == "coupled_nn_v1":
+                    route_name = "coupled_nn_v1->lightgbm_load_fallback"
+                if applied_conf is not None:
+                    confidence_values.append(float(applied_conf))
             elif selected_base_override is not None:
                 o2, c2, ct2, p2, ov2 = apply_oto_ml_selector_candidate(
                     language,
                     feat,
                     selected_base_override,
                     anchor_stats=anchor_stats,
+                    strict_constraint=strict_constraint,
+                    constraint_stats=constraint_stats,
                 )
+                route_name = "selector_only"
             else:
+                continue
+            route_counts[route_name] = int(route_counts.get(route_name, 0)) + 1
+        except CoupledLowConfidenceError as e:
+            if fallback_bundle is not None:
+                fallback_reasons.append(str(e))
+                try:
+                    o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(
+                        language,
+                        feat,
+                        fallback_bundle,
+                        anchor_stats=anchor_stats,
+                        base_params_override=selected_base_override,
+                        strict_constraint=strict_constraint,
+                        constraint_stats=constraint_stats,
+                    )
+                    route_counts["coupled_nn_v1->lightgbm"] = int(route_counts.get("coupled_nn_v1->lightgbm", 0)) + 1
+                except Exception as fallback_exc:
+                    logger.warning("OTO ML fallback inference skipped for line %s: %s", line_index, fallback_exc)
+                    ml_report["infer_failures"].append({"line_index": line_index, "message": str(fallback_exc)})
+                    continue
+            else:
+                logger.warning("OTO ML coupled confidence rejected line %s: %s", line_index, e)
+                ml_report["infer_failures"].append({"line_index": line_index, "message": str(e)})
+                fallback_reasons.append(str(e))
                 continue
         except Exception as e:
             logger.warning("OTO ML inference skipped for line %s: %s", line_index, e)
             ml_report["infer_failures"].append({"line_index": line_index, "message": str(e)})
-            continue
+            if bundle is not None and str(bundle.backend).strip().lower() == "coupled_nn_v1" and fallback_bundle is not None:
+                try:
+                    o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(
+                        language,
+                        feat,
+                        fallback_bundle,
+                        anchor_stats=anchor_stats,
+                        base_params_override=selected_base_override,
+                        strict_constraint=strict_constraint,
+                        constraint_stats=constraint_stats,
+                    )
+                    route_counts["coupled_nn_v1->lightgbm_exception"] = int(
+                        route_counts.get("coupled_nn_v1->lightgbm_exception", 0)
+                    ) + 1
+                    fallback_reasons.append(f"coupled_infer_exception:{e}")
+                except Exception:
+                    continue
+            else:
+                continue
         if (
             abs(o2 - float(row["offset"])) > 1e-6
             or abs(c2 - float(row["cons"])) > 1e-6
@@ -1208,6 +1501,23 @@ def apply_oto_ml_to_oto_file(
     ml_report["missing_routes"] = list(ml_report["missing_routes"])
     ml_report["invalid_routes"] = list(ml_report["invalid_routes"])
     ml_report["loaded_models"] = list(dict.fromkeys(ml_report["loaded_models"]))
+    ml_report["constraint_adjust_count"] = int(constraint_stats.get("constraint_adjust_count", 0))
+    if blank_conf_values:
+        ml_report["blank_confidence"] = float(sum(blank_conf_values) / float(len(blank_conf_values)))
+    if confidence_values:
+        ml_report["model_confidence"] = float(sum(confidence_values) / float(len(confidence_values)))
+    if fallback_reasons:
+        uniq_reasons = list(dict.fromkeys(str(r) for r in fallback_reasons if str(r).strip()))
+        ml_report["fallback_reason"] = "; ".join(uniq_reasons[:5])
+    if route_counts:
+        route_sorted = sorted(route_counts.items(), key=lambda item: item[1], reverse=True)
+        ml_report["route"] = str(route_sorted[0][0])
+    fallback_used_runtime = bool(
+        fallback_reasons
+        or any(str(name).startswith("coupled_nn_v1->") for name in route_counts.keys())
+    )
+    if fallback_used_runtime:
+        ml_report["fallback_used"] = True
 
     if routed_features == 0:
         ml_report.update(make_runtime_report("ml", ML_ROUTE_UNAVAILABLE, "ML 대상 alias가 없습니다."))

@@ -9,9 +9,11 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.oto_ml_dataset import build_and_save_oto_ml_dataset
+from core.runtime_encoding import bootstrap_utf8_runtime
 
 
 def main():
+    bootstrap_utf8_runtime()
     ap = argparse.ArgumentParser(description="Build OTO ML training dataset CSV.")
     ap.add_argument("--lang", required=True, choices=["korean", "japanese"])
     ap.add_argument("--auto", required=True, help="Auto-generated oto.ini path")

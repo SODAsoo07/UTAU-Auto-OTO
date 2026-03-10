@@ -1739,6 +1739,38 @@ def _mel_envelope(audio, sr):
 
     db_p20 = float(np.percentile(db_arr, 20)) if len(db_arr) else -60.0
     db_sil_th = max(-58.0, min(-28.0, db_p20 + 6.0))
+
+    # Frame-level coarse class signals used for blank/span confidence and
+    # mapping guards.
+    f2_strong_th = max(0.05, min(0.25, (0.7 * 0.115) + (0.3 * f2_p60)))
+    f3_strong_th = max(0.04, min(0.22, (0.7 * 0.082) + (0.3 * f3_p60)))
+    high_noise_th = max(0.10, min(0.35, (0.7 * 0.20) + (0.3 * high_p65)))
+    spec_noise_th = max(0.06, min(0.32, (0.7 * 0.14) + (0.3 * spec_p40)))
+
+    voiced_formant = (
+        ((f2_arr > f2_strong_th) & (f3_arr > f3_strong_th) & (db_arr > (db_sil_th + 1.2)))
+        | ((f2_arr > max(0.08, f2_p60 * 0.85)) & (f0v_arr > 0.38) & (db_arr > (db_sil_th - 1.0)))
+    )
+    silence_sparse = (
+        (db_arr <= (db_sil_th - 1.5))
+        & (en <= 0.12)
+        & (spec_presence_arr <= max(0.10, spec_p40 * 0.92))
+    )
+    unvoiced_diffuse = (
+        (high_arr >= max(0.12, high_noise_th * 0.88))
+        & (spec_presence_arr >= max(0.08, spec_noise_th * 0.86))
+        & (db_arr > (db_sil_th - 2.0))
+        & (f2_arr < max(0.05, f2_strong_th * 0.92))
+        & (f3_arr < max(0.04, f3_strong_th * 0.92))
+        & ~voiced_formant
+    )
+    breath_like = (
+        (en <= 0.24)
+        & (db_arr <= (db_sil_th + 5.5))
+        & (high_arr >= max(0.08, high_p65 * 0.72))
+        & (spec_presence_arr >= max(0.05, spec_p40 * 0.62))
+        & ~voiced_formant
+    )
     return {
         "times_ms": np.array(times, dtype=np.float64),
         "energy": en,
@@ -1755,6 +1787,10 @@ def _mel_envelope(audio, sr):
         "f3_p60": f3_p60,
         "high_p65": high_p65,
         "spec_p40": spec_p40,
+        "cls_voiced_formant": np.asarray(voiced_formant, dtype=np.float64),
+        "cls_silence_sparse": np.asarray(silence_sparse, dtype=np.float64),
+        "cls_unvoiced_diffuse": np.asarray(unvoiced_diffuse, dtype=np.float64),
+        "cls_breath_like": np.asarray(breath_like, dtype=np.float64),
     }
 
 
@@ -1782,6 +1818,58 @@ def _nearest_time_index(times_ms, t_ms):
     if abs(float(times_ms[idx]) - t_ms) < abs(float(times_ms[prev_i]) - t_ms):
         return idx
     return prev_i
+
+
+def _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms):
+    if np is None or not mel_ctx:
+        return 0.0
+    times_ms = mel_ctx.get("times_ms")
+    if times_ms is None or len(times_ms) == 0:
+        return 0.0
+    idx = _nearest_time_index(times_ms, float(t_ms))
+    if idx < 0:
+        return 0.0
+
+    cls_sil = mel_ctx.get("cls_silence_sparse")
+    cls_voiced = mel_ctx.get("cls_voiced_formant")
+    cls_unvoiced = mel_ctx.get("cls_unvoiced_diffuse")
+    cls_breath = mel_ctx.get("cls_breath_like")
+    db_arr = mel_ctx.get("db_db")
+    db_sil_th = float(mel_ctx.get("db_silence_th", -42.0))
+
+    sil = float(cls_sil[idx]) if cls_sil is not None and len(cls_sil) == len(times_ms) else 0.0
+    voiced = float(cls_voiced[idx]) if cls_voiced is not None and len(cls_voiced) == len(times_ms) else 0.0
+    unvoiced = float(cls_unvoiced[idx]) if cls_unvoiced is not None and len(cls_unvoiced) == len(times_ms) else 0.0
+    breath = float(cls_breath[idx]) if cls_breath is not None and len(cls_breath) == len(times_ms) else 0.0
+    db_sparse = 0.0
+    if db_arr is not None and len(db_arr) == len(times_ms):
+        db_sparse = 1.0 if float(db_arr[idx]) <= (db_sil_th - 1.0) else 0.0
+
+    blank = (
+        (0.58 * sil)
+        + (0.20 * breath)
+        + (0.22 * db_sparse)
+        - (0.46 * voiced)
+        - (0.12 * unvoiced)
+    )
+    return max(0.0, min(1.0, float(blank)))
+
+
+def _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx):
+    if not syllables_info:
+        return syllables_info
+    for syl in syllables_info:
+        start_s = float(syl.get("start_time", 0.0) or 0.0)
+        phones = syl.get("phones") or []
+        if start_s <= 0.0 and phones:
+            try:
+                start_s = float(phones[0].minTime)
+            except Exception:
+                start_s = 0.0
+        if start_s < 0.0:
+            start_s = 0.0
+        syl["blank_confidence"] = _estimate_kr_blank_confidence_at_time(mel_ctx, start_s * 1000.0)
+    return syllables_info
 
 
 def _apply_soft_mel_offset_cutoff_guard(
@@ -1864,24 +1952,35 @@ def _apply_soft_mel_offset_cutoff_guard(
     # Spectral cues:
     # - voiced_formant_mask: strong F2/F3 (+ optional F0) -> likely vowel/voiced region
     # - noisy_unvoiced_mask: high-frequency energy with weak formant -> fricative/plosive noise
-    voiced_f2_f0_th = _env_float("UTOA_MEL_VOICED_F2_MIN", 0.09)
-    voiced_f0_th = _env_float("UTOA_MEL_VOICED_F0_MIN", 0.42)
-    voiced_formant_mask = (
-        ((f2_arr > f2_strong_th) & (f3_arr > f3_strong_th))
-        | ((f2_arr > voiced_f2_f0_th) & (f0v_arr > voiced_f0_th))
-    )
-    noisy_unvoiced_mask = (
-        (high_arr > high_noise_th)
-        & (spec_presence_arr > spec_noise_th)
-        & (db_arr > (db_sil_th + noise_db_margin))
-        & (en > 0.08)
-        & ~voiced_formant_mask
-    )
+    cls_voiced = mel_ctx.get("cls_voiced_formant")
+    cls_unvoiced = mel_ctx.get("cls_unvoiced_diffuse")
+    cls_silence = mel_ctx.get("cls_silence_sparse")
+    if cls_voiced is not None and len(cls_voiced) == len(en):
+        voiced_formant_mask = np.asarray(cls_voiced, dtype=np.float64) >= 0.5
+    else:
+        voiced_f2_f0_th = _env_float("UTOA_MEL_VOICED_F2_MIN", 0.09)
+        voiced_f0_th = _env_float("UTOA_MEL_VOICED_F0_MIN", 0.42)
+        voiced_formant_mask = (
+            ((f2_arr > f2_strong_th) & (f3_arr > f3_strong_th))
+            | ((f2_arr > voiced_f2_f0_th) & (f0v_arr > voiced_f0_th))
+        )
+    if cls_unvoiced is not None and len(cls_unvoiced) == len(en):
+        noisy_unvoiced_mask = np.asarray(cls_unvoiced, dtype=np.float64) >= 0.5
+    else:
+        noisy_unvoiced_mask = (
+            (high_arr > high_noise_th)
+            & (spec_presence_arr > spec_noise_th)
+            & (db_arr > (db_sil_th + noise_db_margin))
+            & (en > 0.08)
+            & ~voiced_formant_mask
+        )
 
     sound_mask = ((db_arr > (db_sil_th + base_sound_db_margin)) & (en > base_sound_energy)) | voiced_formant_mask | noisy_unvoiced_mask
     weak_spec_mask = (f2_arr < base_weak_f2) & (f3_arr < base_weak_f3) & (high_arr < base_weak_high)
     hard_silence_mask = (db_arr <= (db_sil_th + hard_sil_db_margin)) | (en <= hard_sil_energy)
     silence_mask = hard_silence_mask | (((db_arr <= db_sil_th) | (en <= soft_sil_energy)) & weak_spec_mask)
+    if cls_silence is not None and len(cls_silence) == len(en):
+        silence_mask = silence_mask | (np.asarray(cls_silence, dtype=np.float64) >= 0.5)
     # onset 보조 탐지: 에너지 이동평균 + 1차 기울기로 유효 onset 후보를 만든다.
     if len(en) >= 5:
         kernel = np.ones(5, dtype=np.float64) / 5.0
@@ -2790,6 +2889,9 @@ def generate_oto(
                 used_words_based = len(syllables_info) > 0
 
             alias_based = _build_kr_syllables_from_phone_nuclei(ph_intervals, targets_for_build) if targets_for_build else None
+            if mel_ctx_for_file:
+                _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx_for_file)
+                _annotate_kr_syllable_blank_confidence(alias_based, mel_ctx_for_file)
             kr_source_pick = select_kr_syllable_source(
                 file_format=file_format,
                 prefer_filename_sequence=prefer_filename_sequence,
@@ -2804,6 +2906,12 @@ def generate_oto(
                 is_order_locked_format_fn=_is_kr_order_locked_cv_format,
             )
             syllables_info = list(kr_source_pick.get("syllables_info") or [])
+            if mel_ctx_for_file:
+                _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx_for_file)
+            syllable_blank_confidences = [
+                float((s or {}).get("blank_confidence", 0.0) or 0.0)
+                for s in (syllables_info or [])
+            ]
             used_words_based = bool(kr_source_pick.get("used_words_based"))
             used_alias_based = bool(kr_source_pick.get("used_alias_based"))
             mapping_reason_code = str(kr_source_pick.get("mapping_reason_code") or mapping_reason_code)
@@ -2918,6 +3026,14 @@ def generate_oto(
                             f"(margin={plan_margin:.1f} < {row_margin_floor:.1f})"
                         )
             mapping_confidence_base = float(runtime_policy.get("mapping_confidence", mapping_confidence_base))
+            blank_conf_mean = 0.0
+            if syllable_blank_confidences:
+                blank_conf_mean = float(sum(syllable_blank_confidences) / float(len(syllable_blank_confidences)))
+                if blank_conf_mean >= 0.55:
+                    mapping_confidence_base = max(
+                        0.0,
+                        mapping_confidence_base - min(0.22, (blank_conf_mean - 0.55) * 0.45 + 0.04),
+                    )
             if kr_mapping_debug_reason_logging and mapping_confidence_base < float(file_mapping_conf_th):
                 log(
                     f"🧭 {fname}: KR 매핑 신뢰도 낮음(conf={mapping_confidence_base:.2f}, "
@@ -3160,6 +3276,7 @@ def generate_oto(
                         find_cv_vowel_match_index_fn=_find_kr_cv_vowel_match_index,
                         cv_match_score_fn=_cv_match_score,
                         apply_row_confidence_penalty_fn=apply_row_confidence_penalty,
+                        syllable_blank_confidences=syllable_blank_confidences,
                         log_fn=log,
                         debug_logging=kr_mapping_debug_reason_logging,
                         fname=fname,
@@ -3319,6 +3436,7 @@ def generate_oto(
                         should_allow_exact_vowel_fix_fn=_should_allow_kr_exact_vowel_fix,
                         find_cv_vowel_match_index_fn=_find_kr_cv_vowel_match_index,
                         clamp_cv_index_to_order_fn=_clamp_kr_cv_index_to_order,
+                        syllable_blank_confidences=syllable_blank_confidences,
                         log_fn=log,
                         debug_logging=kr_mapping_debug_reason_logging,
                     )

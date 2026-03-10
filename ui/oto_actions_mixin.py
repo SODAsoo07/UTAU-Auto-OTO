@@ -100,15 +100,41 @@ class OtoActionsMixin:
                     if hasattr(self, "ml_selector_mode_var")
                     else "기본 정책"
                 )
+                ml_coupled_enable = (
+                    self.ml_coupled_enable_var.get()
+                    if hasattr(self, "ml_coupled_enable_var")
+                    else True
+                )
+                ml_coupled_min_conf = (
+                    self.ml_coupled_min_conf_var.get()
+                    if hasattr(self, "ml_coupled_min_conf_var")
+                    else 0.55
+                )
+                ml_coupled_device = (
+                    str(self.ml_coupled_device_var.get()).strip().lower()
+                    if hasattr(self, "ml_coupled_device_var")
+                    else "auto"
+                )
+                ml_coupled_strict_constraint = (
+                    self.ml_coupled_strict_constraint_var.get()
+                    if hasattr(self, "ml_coupled_strict_constraint_var")
+                    else False
+                )
 
                 os.environ["UTOA_ML_SAME_LANGUAGE_BORROW_ONLY"] = "1" if ml_same_lang_only else "0"
                 os.environ["UTOA_ML_USE_PSEUDO_LABELS"] = "1" if ml_use_pseudo_labels else "0"
                 os.environ["UTOA_ML_PSEUDO_WEIGHT_HIGH"] = str(float(ml_pseudo_weight_high))
                 os.environ["UTOA_ML_PSEUDO_WEIGHT_MID"] = str(float(ml_pseudo_weight_mid))
                 selector_mode_code = self._apply_ml_selector_runtime_mode(ml_selector_mode)
+                if ml_coupled_device not in {"auto", "cpu", "cuda"}:
+                    ml_coupled_device = "auto"
                 os.environ["UTOA_KR_MAPPING_CONF_THRESHOLD"] = str(float(kr_conf_threshold))
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_DEFAULT"] = str(int(kr_jump_default))
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_HIGH_CONF"] = str(int(kr_jump_hi))
+                os.environ["UTOA_ML_COUPLED_ENABLE"] = "1" if ml_coupled_enable else "0"
+                os.environ["UTOA_ML_COUPLED_MIN_CONF"] = str(float(ml_coupled_min_conf))
+                os.environ["UTOA_ML_COUPLED_DEVICE"] = str(ml_coupled_device)
+                os.environ["UTOA_ML_COUPLED_STRICT_CONSTRAINT"] = "1" if ml_coupled_strict_constraint else "0"
                 if kr_anchor_profile_path:
                     os.environ["UTOA_KR_ANCHOR_PROFILE_PATH"] = kr_anchor_profile_path
                 else:
@@ -116,6 +142,9 @@ class OtoActionsMixin:
 
                 self._append_log(
                     f"[OTO-ML] 실행 옵션: ml={'ON' if enable_ml_correction else 'OFF'}, selector={self._describe_ml_selector_mode(selector_mode_code)}"
+                )
+                self._append_log(
+                    f"[OTO-ML] coupled={'ON' if ml_coupled_enable else 'OFF'}, min_conf={float(ml_coupled_min_conf):.2f}, device={ml_coupled_device}, strict={'ON' if ml_coupled_strict_constraint else 'OFF'}"
                 )
                 if self.no_base_oto_var.get():
                     self._append_log("설정: '기본 OTO 없이 생성' 사용 중입니다.")

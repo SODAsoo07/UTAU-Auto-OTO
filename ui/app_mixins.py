@@ -601,6 +601,10 @@ class ConfigMixin:
             "no_base_oto": self.no_base_oto_var.get(),
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
             "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "기본 정책",
+            "ml_coupled_enable": self.ml_coupled_enable_var.get() if hasattr(self, "ml_coupled_enable_var") else True,
+            "ml_coupled_min_conf": self.ml_coupled_min_conf_var.get() if hasattr(self, "ml_coupled_min_conf_var") else 0.55,
+            "ml_coupled_device": self.ml_coupled_device_var.get() if hasattr(self, "ml_coupled_device_var") else "auto",
+            "ml_coupled_strict_constraint": self.ml_coupled_strict_constraint_var.get() if hasattr(self, "ml_coupled_strict_constraint_var") else False,
             "ja_mapping_words_fallback_enabled": self.ja_mapping_words_fallback_enabled_var.get() if hasattr(self, "ja_mapping_words_fallback_enabled_var") else True,
             "ja_mapping_spn_ratio_threshold": self.ja_mapping_spn_ratio_threshold_var.get() if hasattr(self, "ja_mapping_spn_ratio_threshold_var") else 0.35,
             "ja_mapping_min_vowel_phone_ratio": self.ja_mapping_min_vowel_phone_ratio_var.get() if hasattr(self, "ja_mapping_min_vowel_phone_ratio_var") else 0.5,
@@ -713,6 +717,20 @@ class ConfigMixin:
                 saved_selector_mode = str(config.get("ml_selector_mode", "기본 정책") or "").strip()
                 if saved_selector_mode in {"기본 정책", "델타만", "델타+셀렉터"}:
                     self.ml_selector_mode_var.set(saved_selector_mode)
+            if "ml_coupled_enable" in config and hasattr(self, "ml_coupled_enable_var"):
+                self.ml_coupled_enable_var.set(bool(config.get("ml_coupled_enable", True)))
+            if "ml_coupled_min_conf" in config and hasattr(self, "ml_coupled_min_conf_var"):
+                try:
+                    conf = float(config.get("ml_coupled_min_conf", 0.55))
+                    self.ml_coupled_min_conf_var.set(max(0.0, min(1.0, conf)))
+                except Exception:
+                    pass
+            if "ml_coupled_device" in config and hasattr(self, "ml_coupled_device_var"):
+                device = str(config.get("ml_coupled_device", "auto") or "auto").strip().lower()
+                if device in {"auto", "cpu", "cuda"}:
+                    self.ml_coupled_device_var.set(device)
+            if "ml_coupled_strict_constraint" in config and hasattr(self, "ml_coupled_strict_constraint_var"):
+                self.ml_coupled_strict_constraint_var.set(bool(config.get("ml_coupled_strict_constraint", False)))
 
             if hasattr(self, "tune_auto_oto_var"):
                 self.tune_auto_oto_var.set(config.get("tune_auto_oto", ""))

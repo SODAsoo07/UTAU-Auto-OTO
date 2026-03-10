@@ -8,6 +8,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.oto_ml_refiner import (
+    _solve_joint_constraints,
     _apply_japanese_bridge_post_guard,
     _apply_japanese_cvvc_cv_post_guard,
     _apply_korean_bridge_post_guard,
@@ -19,6 +20,15 @@ from core.oto_ml_refiner import (
 
 
 class MlFallbackTests(unittest.TestCase):
+    def test_solve_joint_constraints_enforces_oto_relationships(self):
+        out, adjust = _solve_joint_constraints((-12.0, 24.0, -20.0, 30.0, 44.0), strict=True)
+        offset, cons, cutoff, pre, ovl = out
+        self.assertGreaterEqual(offset, 0.0)
+        self.assertLessEqual(ovl, pre)
+        self.assertGreaterEqual(cons, pre + 16.0)
+        self.assertGreaterEqual(abs(cutoff), cons + 14.0)
+        self.assertGreater(adjust, 0)
+
     def test_japanese_vcv_routes_bridge_and_head_aliases(self):
         routed_vc = _route_format_for_feature(
             "japanese",
@@ -68,12 +78,12 @@ class MlFallbackTests(unittest.TestCase):
         )
         self.assertEqual(routed, "cvvc")
 
-    def test_korean_vcv_routes_coda_vc_to_cv_family(self):
+    def test_korean_vcv_routes_coda_vc_to_cvc_family(self):
         routed = _route_format_for_feature(
             "korean",
             {"format_type": "vcv", "alias_type": "vc", "coda_type": "stop"},
         )
-        self.assertEqual(routed, "cv")
+        self.assertEqual(routed, "cvc")
 
     def test_korean_vcv_routes_non_bridge_aliases_to_vcv(self):
         routed_cv = _route_format_for_feature(

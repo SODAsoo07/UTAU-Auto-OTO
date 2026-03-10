@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 from core.ja_oto_postprocess import JaPostprocessContext
+
+logger = logging.getLogger(__name__)
+_JA_FILE_FORMAT_WARNED = False
 
 
 def build_ja_postprocess_context(
@@ -20,11 +25,18 @@ def build_ja_postprocess_context(
     style_apply_fn,
     autotune_apply_fn,
 ):
+    global _JA_FILE_FORMAT_WARNED
+    safe_file_format = str(file_format or "").strip()
+    if not safe_file_format and not _JA_FILE_FORMAT_WARNED:
+        logger.warning(
+            "JaPostprocessContext.file_format missing; defaulting to empty format."
+        )
+        _JA_FILE_FORMAT_WARNED = True
     return JaPostprocessContext(
         phone_spans_ms=phone_spans_ms,
         timeline_start_ms=timeline_start_ms,
         effective_end_ms=effective_end_ms,
-        file_format=file_format,
+        file_format=safe_file_format,
         validate_fn=validate_fn,
         recenter_fn=recenter_fn,
         extract_cv_bounds_fn=extract_cv_bounds_fn,

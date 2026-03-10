@@ -32,6 +32,40 @@ def _vv_pair_matches(idx, romaji_syllables, split_syllable_parts_fn, left_vowel,
     return bool(lv and rv and lv == left_vowel and rv == right_vowel)
 
 
+def _blank_conf_at(syllable_blank_confidences, idx):
+    if syllable_blank_confidences is None or idx is None:
+        return 0.0
+    try:
+        if idx < 0 or idx >= len(syllable_blank_confidences):
+            return 0.0
+        return max(0.0, min(1.0, float(syllable_blank_confidences[idx] or 0.0)))
+    except Exception:
+        return 0.0
+
+
+def _effective_jump_limits(row_jump_default, row_jump_high_conf, expected_blank_conf):
+    jump_default = int(max(0, row_jump_default))
+    jump_high_conf = int(max(jump_default, row_jump_high_conf))
+    blank = max(0.0, min(1.0, float(expected_blank_conf)))
+    if blank >= 0.70:
+        return 0, 0
+    if blank >= 0.45:
+        return min(jump_default, 1), min(jump_high_conf, 1)
+    return jump_default, jump_high_conf
+
+
+def _blank_guard_idx(expected_idx, selected_idx, syllable_blank_confidences):
+    if selected_idx is None:
+        return selected_idx, False
+    sel_blank = _blank_conf_at(syllable_blank_confidences, selected_idx)
+    exp_blank = _blank_conf_at(syllable_blank_confidences, expected_idx)
+    if selected_idx > expected_idx and sel_blank >= 0.60 and (exp_blank + 0.10) < sel_blank:
+        return expected_idx, True
+    if sel_blank >= 0.78 and exp_blank <= 0.62:
+        return expected_idx, True
+    return selected_idx, False
+
+
 def select_kr_vcv_index(
     *,
     target_clean,
@@ -56,10 +90,17 @@ def select_kr_vcv_index(
     debug_logging,
     fname,
     alias,
+    syllable_blank_confidences=None,
 ):
     vcv_selected_w_idx = current_w_idx
     if target_clean and cv_seq_idx < len(romaji_syllables):
         expected_vcv_idx = cv_seq_idx
+        expected_blank_conf = _blank_conf_at(syllable_blank_confidences, expected_vcv_idx)
+        eff_jump_default, eff_jump_high_conf = _effective_jump_limits(
+            row_jump_default,
+            row_jump_high_conf,
+            expected_blank_conf,
+        )
         planned_vcv_idx = resolve_planned_cv_index_fn(
             kr_planned_cv_indices,
             expected_vcv_idx,
@@ -91,8 +132,8 @@ def select_kr_vcv_index(
                 cv_seq_idx,
                 current_w_idx,
                 mapping_confidence=row_mapping_confidence,
-                max_jump_default=row_jump_default,
-                max_jump_high_conf=row_jump_high_conf,
+                max_jump_default=eff_jump_default,
+                max_jump_high_conf=eff_jump_high_conf,
                 high_conf_threshold=max(float(file_mapping_conf_th), 0.50),
                 return_meta=True,
             )
@@ -134,7 +175,7 @@ def select_kr_vcv_index(
                     search_fwd=2,
                 )
                 if fixed_idx is not None and fixed_idx >= expected_vcv_idx:
-                    max_forward = int(max(0, row_jump_default))
+                    max_forward = int(max(0, eff_jump_default))
                     max_allowed = int(expected_vcv_idx + max_forward)
                     if fixed_idx > max_allowed:
                         fixed_idx = max_allowed
@@ -157,6 +198,20 @@ def select_kr_vcv_index(
                             )
                         vcv_selected_w_idx = expected_vcv_idx
                         cv_seq_idx = max(cv_seq_idx, vcv_selected_w_idx + 1)
+        guarded_idx, guarded = _blank_guard_idx(
+            expected_vcv_idx,
+            vcv_selected_w_idx,
+            syllable_blank_confidences,
+        )
+        if guarded and guarded_idx != vcv_selected_w_idx:
+            if debug_logging:
+                log_fn(
+                    f"🛡️ {fname}: KR VCV blank guard 적용 "
+                    f"({vcv_selected_w_idx + 1}->{guarded_idx + 1}, {alias})"
+                )
+            vcv_selected_w_idx = int(guarded_idx)
+            cv_seq_idx = max(cv_seq_idx, vcv_selected_w_idx + 1)
+            row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.10)
     return vcv_selected_w_idx, cv_seq_idx, row_mapping_confidence
 
 
@@ -189,8 +244,15 @@ def select_kr_general_cv_index(
     clamp_cv_index_to_order_fn,
     log_fn,
     debug_logging,
+    syllable_blank_confidences=None,
 ):
     expected_cv_idx = int(cv_seq_idx)
+    expected_blank_conf = _blank_conf_at(syllable_blank_confidences, expected_cv_idx)
+    eff_jump_default, eff_jump_high_conf = _effective_jump_limits(
+        row_jump_default,
+        row_jump_high_conf,
+        expected_blank_conf,
+    )
     selected_w_idx = None
     resolve_meta = {}
     row_jump_blocked = 0
@@ -254,6 +316,9 @@ def select_kr_general_cv_index(
             forced_selected_idx, romaji_syllables, split_syllable_parts_fn, vv_left, vv_right
         ):
             keep_forced = False
+        forced_blank_conf = _blank_conf_at(syllable_blank_confidences, forced_selected_idx)
+        if forced_blank_conf >= 0.66 and (expected_blank_conf + 0.08) < forced_blank_conf:
+            keep_forced = False
         if keep_forced:
             selected_w_idx = int(forced_selected_idx)
             cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
@@ -267,8 +332,8 @@ def select_kr_general_cv_index(
             cv_seq_idx,
             current_w_idx,
             mapping_confidence=row_mapping_confidence,
-            max_jump_default=row_jump_default,
-            max_jump_high_conf=row_jump_high_conf,
+            max_jump_default=eff_jump_default,
+            max_jump_high_conf=eff_jump_high_conf,
             high_conf_threshold=max(float(file_mapping_conf_th), 0.50),
             return_meta=True,
         )
@@ -328,12 +393,12 @@ def select_kr_general_cv_index(
                 search_fwd=fixed_search_fwd,
             )
             if fixed_idx is not None and fixed_idx >= expected_cv_idx:
-                max_forward = int(max(0, row_jump_default))
+                max_forward = int(max(0, eff_jump_default))
                 if (
                     float(row_mapping_confidence) >= max(float(file_mapping_conf_th), 0.50)
                     and float(resolve_meta.get("best_score", 0.0) or 0.0) >= 84.0
                 ):
-                    max_forward = int(max(max_forward, row_jump_high_conf))
+                    max_forward = int(max(max_forward, eff_jump_high_conf))
                 raw_fixed_idx = int(fixed_idx)
                 max_allowed_idx = int(expected_cv_idx + max_forward)
                 if fixed_idx > max_allowed_idx:
@@ -389,6 +454,21 @@ def select_kr_general_cv_index(
         row_jump_blocked = 1
         row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.12)
         selected_w_idx = int(ordered_idx)
+        cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
+    guarded_idx, guarded = _blank_guard_idx(
+        expected_cv_idx,
+        selected_w_idx,
+        syllable_blank_confidences,
+    )
+    if guarded and guarded_idx != selected_w_idx:
+        if debug_logging:
+            log_fn(
+                f"🛡️ {fname}: KR blank guard 적용 "
+                f"({selected_w_idx + 1}->{guarded_idx + 1}, {alias})"
+            )
+        row_jump_blocked = 1
+        row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.10)
+        selected_w_idx = int(guarded_idx)
         cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
     return {
         "expected_cv_idx": int(expected_cv_idx),

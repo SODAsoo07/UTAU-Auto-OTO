@@ -270,12 +270,27 @@ def _score_kr_syllable_mapping(candidate_infos, cv_targets):
     if not cand:
         return -1.0
 
+    try:
+        blank_penalty_scale = float(os.environ.get("UTOA_KR_BLANK_SCORE_PENALTY", "26.0"))
+    except Exception:
+        blank_penalty_scale = 26.0
+    blank_penalty_scale = max(0.0, min(blank_penalty_scale, 80.0))
+
     def _avg_with_shift(shift):
         vals = []
         for i, tgt in enumerate(cv_targets):
             j = i + shift
             if 0 <= j < len(cand):
-                vals.append(_cv_match_score(tgt, cand[j]))
+                score = float(_cv_match_score(tgt, cand[j]))
+                try:
+                    blank_conf = float((candidate_infos[j] or {}).get("blank_confidence", 0.0) or 0.0)
+                except Exception:
+                    blank_conf = 0.0
+                blank_conf = max(0.0, min(blank_conf, 1.0))
+                score -= blank_conf * blank_penalty_scale
+                if blank_conf >= 0.75:
+                    score -= 8.0
+                vals.append(score)
         if not vals:
             return -1.0
         coverage = len(vals) / float(max(len(cv_targets), 1))

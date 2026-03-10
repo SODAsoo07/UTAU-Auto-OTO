@@ -32,7 +32,8 @@ def run_ja_vcv_row(
     alias_out_fn,
 ):
     current_w_idx = int(mapped_idx)
-    if str(post_ctx.file_format or "").strip().lower() == "vcv":
+    post_file_format = str(getattr(post_ctx, "file_format", "") or "").strip().lower()
+    if post_file_format == "vcv":
         stable_vcv_seq_idx = min(stable_vcv_seq_idx + 1, max(len(syllables_info) - 1, 0))
         cv_seq_idx = stable_vcv_seq_idx
     else:

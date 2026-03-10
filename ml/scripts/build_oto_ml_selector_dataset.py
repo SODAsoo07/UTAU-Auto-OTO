@@ -11,9 +11,11 @@ if ROOT not in sys.path:
 
 from core.oto_ml_policy import alias_family_to_alias_types, default_training_filters, normalize_alias_family
 from core.oto_ml_selector import build_selector_dataset_csv_from_delta_dataset
+from core.runtime_encoding import bootstrap_utf8_runtime
 
 
 def main():
+    bootstrap_utf8_runtime()
     ap = argparse.ArgumentParser(description="Build selector training dataset from delta OTO ML dataset.")
     ap.add_argument("--dataset", required=True, help="Input delta dataset CSV")
     ap.add_argument("--out", required=True, help="Output selector dataset CSV")

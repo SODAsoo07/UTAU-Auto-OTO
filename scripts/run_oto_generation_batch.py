@@ -21,6 +21,7 @@ from core.ja_lab_generator import generate_ja_dictionary, generate_ja_labs
 from core.alignment_pipeline import run_alignment_with_fallback
 from core.oto_generator import generate_oto
 from core.lab_generator import generate_dictionary, generate_labs
+from core.runtime_encoding import bootstrap_utf8_runtime
 from core.pipeline_status import (
     ALIGN_SKIPPED,
     EXCEPTION,
@@ -38,23 +39,8 @@ from core.oto_validator import validate_oto_timing
 
 
 def _configure_utf8_stdio():
-    """Normalize console encoding to UTF-8 for stable Korean/Japanese logs."""
-    # Force UTF-8 even when parent shell exported a legacy encoding.
-    os.environ["PYTHONUTF8"] = "1"
-    os.environ["PYTHONIOENCODING"] = "utf-8"
-    for stream in (sys.stdin, sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-    if os.name == "nt":
-        try:
-            import ctypes
-
-            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
-            ctypes.windll.kernel32.SetConsoleCP(65001)
-        except Exception:
-            pass
+    """Backward-compatible wrapper around shared UTF-8 bootstrap."""
+    bootstrap_utf8_runtime()
 
 
 def _now_tag():

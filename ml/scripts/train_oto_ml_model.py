@@ -11,9 +11,11 @@ if ROOT not in sys.path:
 from core.oto_ml_lightgbm import train_lightgbm_bundle, train_lightgbm_selector_bundle
 from core.oto_ml_policy import alias_family_to_alias_types, default_training_filters, normalize_alias_family
 from core.oto_ml_selector import build_selector_dataset_csv_from_delta_dataset
+from core.runtime_encoding import bootstrap_utf8_runtime
 
 
 def main():
+    bootstrap_utf8_runtime()
     ap = argparse.ArgumentParser(description="Train LightGBM OTO ML bundle.")
     ap.add_argument("--lang", required=True, choices=["korean", "japanese"])
     ap.add_argument("--format", required=True, help="Format type (cv/cvc/cvvc/vcv/general)")

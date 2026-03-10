@@ -36,7 +36,7 @@ from core.prefix_map_utils import find_prefix_map_path, strip_prefix_map_affixes
 
 logger = logging.getLogger(__name__)
 
-FEATURE_VERSION = "v6"
+FEATURE_VERSION = "v7"
 TRAIN_ROW_MATCH_VERSION = "v8"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
 
@@ -60,6 +60,10 @@ FEATURE_NAMES = [
     "used_nuclei_fallback", "used_alias_based_syllables", "words_vs_alias_score_margin",
     "jump_blocked_flag", "mapping_reason_code",
     "local_peak_db", "local_valley_db", "mel_window_energy_mean", "mel_window_silence_ratio",
+    "mel_voiced_formant_ratio", "mel_silence_sparse_ratio", "mel_unvoiced_diffuse_ratio",
+    "mel_breath_like_ratio", "blank_span_confidence", "mel_offset_candidate_ms",
+    "mel_cutoff_candidate_ms", "onset_patch_energy_mean", "onset_patch_voiced_ratio",
+    "onset_patch_unvoiced_ratio", "tail_patch_energy_mean", "tail_patch_silence_ratio",
 ]
 
 CATEGORICAL_FEATURES = [
@@ -712,6 +716,18 @@ def _compute_segment_stats(mel_ctx, offset_ms: float, pre_abs: float, cut_abs: f
         "energy_slope_post": 0.0, "valley_energy": 0.0, "valley_dist_from_cutoff_ms": 0.0,
         "db_mean": 0.0, "db_min": 0.0, "db_silence_ratio": 0.0, "f0_voicing_mean": 0.0,
         "f0_voicing_near_pre": 0.0, "zcr_mean": 0.0, "spectral_flux_mean": 0.0,
+        "mel_voiced_formant_ratio": 0.0,
+        "mel_silence_sparse_ratio": 0.0,
+        "mel_unvoiced_diffuse_ratio": 0.0,
+        "mel_breath_like_ratio": 0.0,
+        "blank_span_confidence": 0.0,
+        "mel_offset_candidate_ms": float(max(0.0, offset_ms)),
+        "mel_cutoff_candidate_ms": float(max(cut_abs, pre_abs + 12.0)),
+        "onset_patch_energy_mean": 0.0,
+        "onset_patch_voiced_ratio": 0.0,
+        "onset_patch_unvoiced_ratio": 0.0,
+        "tail_patch_energy_mean": 0.0,
+        "tail_patch_silence_ratio": 0.0,
     }
     if np is None or not mel_ctx:
         return stats
@@ -719,8 +735,17 @@ def _compute_segment_stats(mel_ctx, offset_ms: float, pre_abs: float, cut_abs: f
     en = mel_ctx.get("energy")
     db_arr = mel_ctx.get("db_db")
     f0_arr = mel_ctx.get("f0_voicing")
+    cls_voiced = mel_ctx.get("cls_voiced_formant")
+    cls_silence = mel_ctx.get("cls_silence_sparse")
+    cls_unvoiced = mel_ctx.get("cls_unvoiced_diffuse")
+    cls_breath = mel_ctx.get("cls_breath_like")
     if times_ms is None or en is None or len(times_ms) == 0:
         return stats
+
+    def _ratio(arr, idxs):
+        if arr is None or len(arr) != len(en) or len(idxs) <= 0:
+            return 0.0
+        return float(np.mean(np.clip(np.asarray(arr)[idxs], 0.0, 1.0)))
 
     seg_mask = _select_mask(times_ms, max(offset_ms, pre_abs - 40.0), max(pre_abs + 40.0, cut_abs))
     if len(seg_mask) > 0:
@@ -739,6 +764,10 @@ def _compute_segment_stats(mel_ctx, offset_ms: float, pre_abs: float, cut_abs: f
             stats["db_silence_ratio"] = float(np.mean(local_db <= silence_th))
         if f0_arr is not None and len(f0_arr) == len(en):
             stats["f0_voicing_mean"] = _window_mean(f0_arr[seg_mask])
+        stats["mel_voiced_formant_ratio"] = _ratio(cls_voiced, seg_mask)
+        stats["mel_silence_sparse_ratio"] = _ratio(cls_silence, seg_mask)
+        stats["mel_unvoiced_diffuse_ratio"] = _ratio(cls_unvoiced, seg_mask)
+        stats["mel_breath_like_ratio"] = _ratio(cls_breath, seg_mask)
 
     pre_mask = _select_mask(times_ms, pre_abs - 30.0, pre_abs + 10.0)
     post_mask = _select_mask(times_ms, pre_abs + 10.0, pre_abs + 60.0)
@@ -750,6 +779,53 @@ def _compute_segment_stats(mel_ctx, offset_ms: float, pre_abs: float, cut_abs: f
         stats["f0_voicing_near_pre"] = _window_mean(f0_arr[pre_mask])
     if len(seg_mask) >= 2:
         stats["spectral_flux_mean"] = float(np.mean(np.abs(np.diff(en[seg_mask]))))
+
+    onset_mask = _select_mask(times_ms, pre_abs - 60.0, pre_abs + 40.0)
+    if len(onset_mask) > 0:
+        stats["onset_patch_energy_mean"] = _window_mean(en[onset_mask])
+        stats["onset_patch_voiced_ratio"] = _ratio(cls_voiced, onset_mask)
+        stats["onset_patch_unvoiced_ratio"] = _ratio(cls_unvoiced, onset_mask)
+
+    tail_mask = _select_mask(times_ms, cut_abs - 80.0, cut_abs + 40.0)
+    if len(tail_mask) > 0:
+        stats["tail_patch_energy_mean"] = _window_mean(en[tail_mask])
+        stats["tail_patch_silence_ratio"] = _ratio(cls_silence, tail_mask)
+
+    blank_conf = (
+        (0.65 * float(stats["mel_silence_sparse_ratio"]))
+        + (0.20 * float(stats["mel_breath_like_ratio"]))
+        + max(0.0, float(stats["db_silence_ratio"]) - float(stats["mel_unvoiced_diffuse_ratio"])) * 0.20
+        - (0.45 * float(stats["mel_voiced_formant_ratio"]))
+    )
+    stats["blank_span_confidence"] = max(0.0, min(1.0, float(blank_conf)))
+
+    # Candidate boundaries inferred from class transitions.
+    # offset candidate: first strong non-silence frame near pre region
+    # cutoff candidate: last silence-sparse frame before current cutoff
+    onset_probe_mask = _select_mask(times_ms, max(0.0, offset_ms - 80.0), pre_abs + 40.0)
+    if len(onset_probe_mask) > 0:
+        onset_idx = None
+        for idx in onset_probe_mask:
+            voiced_v = float(cls_voiced[idx]) if cls_voiced is not None and len(cls_voiced) == len(en) else 0.0
+            unvoiced_v = float(cls_unvoiced[idx]) if cls_unvoiced is not None and len(cls_unvoiced) == len(en) else 0.0
+            silence_v = float(cls_silence[idx]) if cls_silence is not None and len(cls_silence) == len(en) else 0.0
+            if (voiced_v >= 0.5 or unvoiced_v >= 0.5) and silence_v < 0.5:
+                onset_idx = int(idx)
+                break
+        if onset_idx is not None:
+            cand = float(times_ms[onset_idx]) - 12.0
+            stats["mel_offset_candidate_ms"] = max(0.0, min(pre_abs - 8.0, cand))
+
+    cutoff_probe_mask = _select_mask(times_ms, pre_abs + 20.0, cut_abs + 120.0)
+    if len(cutoff_probe_mask) > 0:
+        last_sil_idx = None
+        for idx in cutoff_probe_mask:
+            silence_v = float(cls_silence[idx]) if cls_silence is not None and len(cls_silence) == len(en) else 0.0
+            if silence_v >= 0.5:
+                last_sil_idx = int(idx)
+        if last_sil_idx is not None:
+            cand_cut = float(times_ms[last_sil_idx]) + 4.0
+            stats["mel_cutoff_candidate_ms"] = max(pre_abs + 12.0, min(cut_abs, cand_cut))
 
     if audio is not None and sr and sr > 0:
         start_s = int(max(offset_ms, pre_abs - 20.0) * sr / 1000.0)
