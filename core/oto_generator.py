@@ -174,6 +174,16 @@ from core.oto_runtime_policy import resolve_runtime_mapping_policy
 
 logger = logging.getLogger(__name__)
 
+
+def _env_float(name, default):
+    raw = str(os.environ.get(name, "")).strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
 __all__ = [
     "generate_oto",
     "validate_oto_params",
@@ -1630,9 +1640,21 @@ def _mel_envelope(audio, sr):
         for j in range(center, right):
             fb[i - 1, j] = (right - j) / float(right - center)
 
+    # 40-band filterbank center frequency (Hz), used for coarse spectral-region cues.
+    band_centers_hz = np.asarray(hz_points[1:-1], dtype=np.float64)
+    f2_idx = np.where((band_centers_hz >= 900.0) & (band_centers_hz <= 2500.0))[0]
+    f3_idx = np.where((band_centers_hz >= 2000.0) & (band_centers_hz <= 3800.0))[0]
+    high_idx = np.where((band_centers_hz >= 3500.0) & (band_centers_hz <= min(9000.0, f_max)))[0]
+    low_idx = np.where((band_centers_hz >= 80.0) & (band_centers_hz <= 700.0))[0]
+
     frames = []
     db_vals = []
     f0_voicing = []
+    f2_ratio_vals = []
+    f3_ratio_vals = []
+    high_ratio_vals = []
+    low_ratio_vals = []
+    spec_presence_vals = []
     times = []
     last_voicing = 0.0
     frame_idx = 0
@@ -1656,6 +1678,26 @@ def _mel_envelope(audio, sr):
         power = (spec.real ** 2 + spec.imag ** 2)
         mel = fb @ power
         frames.append(np.log1p(np.maximum(mel, 0.0)).mean())
+
+        mel_nonneg = np.maximum(mel, 0.0)
+        mel_total = float(np.sum(mel_nonneg) + 1e-12)
+        if len(f2_idx):
+            f2_ratio_vals.append(float(np.sum(mel_nonneg[f2_idx]) / mel_total))
+        else:
+            f2_ratio_vals.append(0.0)
+        if len(f3_idx):
+            f3_ratio_vals.append(float(np.sum(mel_nonneg[f3_idx]) / mel_total))
+        else:
+            f3_ratio_vals.append(0.0)
+        if len(high_idx):
+            high_ratio_vals.append(float(np.sum(mel_nonneg[high_idx]) / mel_total))
+        else:
+            high_ratio_vals.append(0.0)
+        if len(low_idx):
+            low_ratio_vals.append(float(np.sum(mel_nonneg[low_idx]) / mel_total))
+        else:
+            low_ratio_vals.append(0.0)
+        spec_presence_vals.append(float(np.log1p(mel_total)))
         times.append(st * 1000.0 / sr)
         frame_idx += 1
 
@@ -1674,6 +1716,27 @@ def _mel_envelope(audio, sr):
         f0v_arr = np.convolve(f0v_arr, np.array([0.2, 0.6, 0.2], dtype=np.float64), mode="same")
     f0v_arr = np.clip(f0v_arr, 0.0, 1.0)
 
+    def _normalize01(vals):
+        arr = np.asarray(vals, dtype=np.float64) if vals else np.zeros_like(en)
+        if len(arr) != len(en):
+            arr = np.resize(arr, len(en))
+        lo = float(np.percentile(arr, 10)) if len(arr) else 0.0
+        hi = float(np.percentile(arr, 90)) if len(arr) else 1.0
+        span_local = max(hi - lo, 1e-9)
+        out = (arr - lo) / span_local
+        return np.clip(out, 0.0, 1.0)
+
+    f2_arr = np.clip(np.asarray(f2_ratio_vals, dtype=np.float64), 0.0, 1.0) if f2_ratio_vals else np.zeros_like(en)
+    f3_arr = np.clip(np.asarray(f3_ratio_vals, dtype=np.float64), 0.0, 1.0) if f3_ratio_vals else np.zeros_like(en)
+    high_arr = np.clip(np.asarray(high_ratio_vals, dtype=np.float64), 0.0, 1.0) if high_ratio_vals else np.zeros_like(en)
+    low_arr = np.clip(np.asarray(low_ratio_vals, dtype=np.float64), 0.0, 1.0) if low_ratio_vals else np.zeros_like(en)
+    spec_presence_arr = _normalize01(spec_presence_vals)
+
+    f2_p60 = float(np.percentile(f2_arr, 60)) if len(f2_arr) else 0.0
+    f3_p60 = float(np.percentile(f3_arr, 60)) if len(f3_arr) else 0.0
+    high_p65 = float(np.percentile(high_arr, 65)) if len(high_arr) else 0.0
+    spec_p40 = float(np.percentile(spec_presence_arr, 40)) if len(spec_presence_arr) else 0.0
+
     db_p20 = float(np.percentile(db_arr, 20)) if len(db_arr) else -60.0
     db_sil_th = max(-58.0, min(-28.0, db_p20 + 6.0))
     return {
@@ -1683,6 +1746,15 @@ def _mel_envelope(audio, sr):
         "db_db": db_arr,
         "db_silence_th": float(db_sil_th),
         "f0_voicing": f0v_arr,
+        "f2_ratio": f2_arr,
+        "f3_ratio": f3_arr,
+        "high_ratio": high_arr,
+        "low_ratio": low_arr,
+        "spec_presence": spec_presence_arr,
+        "f2_p60": f2_p60,
+        "f3_p60": f3_p60,
+        "high_p65": high_p65,
+        "spec_p40": spec_p40,
     }
 
 
@@ -1738,6 +1810,10 @@ def _apply_soft_mel_offset_cutoff_guard(
     en = mel_ctx.get("energy")
     db_arr = mel_ctx.get("db_db")
     f0v_arr = mel_ctx.get("f0_voicing")
+    f2_arr = mel_ctx.get("f2_ratio")
+    f3_arr = mel_ctx.get("f3_ratio")
+    high_arr = mel_ctx.get("high_ratio")
+    spec_presence_arr = mel_ctx.get("spec_presence")
     db_sil_th = float(mel_ctx.get("db_silence_th", -42.0))
     if t_ms is None or en is None or len(t_ms) < 8 or len(en) != len(t_ms):
         return offset, consonant, cutoff, pre, ovl, 0.0, 0.0
@@ -1745,6 +1821,39 @@ def _apply_soft_mel_offset_cutoff_guard(
         db_arr = np.zeros_like(en, dtype=np.float64)
     if f0v_arr is None or len(f0v_arr) != len(en):
         f0v_arr = np.zeros_like(en, dtype=np.float64)
+    if f2_arr is None or len(f2_arr) != len(en):
+        f2_arr = np.zeros_like(en, dtype=np.float64)
+    if f3_arr is None or len(f3_arr) != len(en):
+        f3_arr = np.zeros_like(en, dtype=np.float64)
+    if high_arr is None or len(high_arr) != len(en):
+        high_arr = np.zeros_like(en, dtype=np.float64)
+    if spec_presence_arr is None or len(spec_presence_arr) != len(en):
+        spec_presence_arr = np.asarray(en, dtype=np.float64)
+
+    f2_p60 = float(mel_ctx.get("f2_p60", np.percentile(f2_arr, 60) if len(f2_arr) else 0.0))
+    f3_p60 = float(mel_ctx.get("f3_p60", np.percentile(f3_arr, 60) if len(f3_arr) else 0.0))
+    high_p65 = float(mel_ctx.get("high_p65", np.percentile(high_arr, 65) if len(high_arr) else 0.0))
+    spec_p40 = float(mel_ctx.get("spec_p40", np.percentile(spec_presence_arr, 40) if len(spec_presence_arr) else 0.0))
+
+    base_f2_strong = _env_float("UTOA_MEL_F2_STRONG_MIN", 0.115)
+    base_f3_strong = _env_float("UTOA_MEL_F3_STRONG_MIN", 0.082)
+    base_high_noise = _env_float("UTOA_MEL_HIGH_NOISE_MIN", 0.20)
+    base_spec_noise = _env_float("UTOA_MEL_SPEC_NOISE_MIN", 0.14)
+    base_sound_db_margin = _env_float("UTOA_MEL_SOUND_DB_MARGIN", 1.4)
+    base_sound_energy = _env_float("UTOA_MEL_SOUND_ENERGY_MIN", 0.13)
+    base_weak_f2 = _env_float("UTOA_MEL_WEAK_F2_MAX", 0.05)
+    base_weak_f3 = _env_float("UTOA_MEL_WEAK_F3_MAX", 0.05)
+    base_weak_high = _env_float("UTOA_MEL_WEAK_HIGH_MAX", 0.10)
+    hard_sil_db_margin = _env_float("UTOA_MEL_HARD_SILENCE_DB_MARGIN", -3.0)
+    hard_sil_energy = _env_float("UTOA_MEL_HARD_SILENCE_ENERGY_MAX", 0.08)
+    soft_sil_energy = _env_float("UTOA_MEL_SOFT_SILENCE_ENERGY_MAX", 0.10)
+    noise_db_margin = _env_float("UTOA_MEL_NOISE_DB_MARGIN", 1.0)
+
+    # Adapt thresholds slightly to per-file spectral distribution.
+    f2_strong_th = max(0.05, min(0.25, (0.7 * base_f2_strong) + (0.3 * f2_p60)))
+    f3_strong_th = max(0.04, min(0.22, (0.7 * base_f3_strong) + (0.3 * f3_p60)))
+    high_noise_th = max(0.10, min(0.35, (0.7 * base_high_noise) + (0.3 * high_p65)))
+    spec_noise_th = max(0.06, min(0.32, (0.7 * base_spec_noise) + (0.3 * spec_p40)))
 
     pre_abs = float(offset) + float(pre)
     cons_abs = float(offset) + float(consonant)
@@ -1752,8 +1861,27 @@ def _apply_soft_mel_offset_cutoff_guard(
     if cut_abs <= pre_abs + 18.0:
         return offset, consonant, cutoff, pre, ovl, 0.0, 0.0
 
-    sound_mask = (db_arr > (db_sil_th + 1.5)) & (en > 0.14)
-    silence_mask = (db_arr <= db_sil_th) | (en <= 0.10)
+    # Spectral cues:
+    # - voiced_formant_mask: strong F2/F3 (+ optional F0) -> likely vowel/voiced region
+    # - noisy_unvoiced_mask: high-frequency energy with weak formant -> fricative/plosive noise
+    voiced_f2_f0_th = _env_float("UTOA_MEL_VOICED_F2_MIN", 0.09)
+    voiced_f0_th = _env_float("UTOA_MEL_VOICED_F0_MIN", 0.42)
+    voiced_formant_mask = (
+        ((f2_arr > f2_strong_th) & (f3_arr > f3_strong_th))
+        | ((f2_arr > voiced_f2_f0_th) & (f0v_arr > voiced_f0_th))
+    )
+    noisy_unvoiced_mask = (
+        (high_arr > high_noise_th)
+        & (spec_presence_arr > spec_noise_th)
+        & (db_arr > (db_sil_th + noise_db_margin))
+        & (en > 0.08)
+        & ~voiced_formant_mask
+    )
+
+    sound_mask = ((db_arr > (db_sil_th + base_sound_db_margin)) & (en > base_sound_energy)) | voiced_formant_mask | noisy_unvoiced_mask
+    weak_spec_mask = (f2_arr < base_weak_f2) & (f3_arr < base_weak_f3) & (high_arr < base_weak_high)
+    hard_silence_mask = (db_arr <= (db_sil_th + hard_sil_db_margin)) | (en <= hard_sil_energy)
+    silence_mask = hard_silence_mask | (((db_arr <= db_sil_th) | (en <= soft_sil_energy)) & weak_spec_mask)
     # onset 보조 탐지: 에너지 이동평균 + 1차 기울기로 유효 onset 후보를 만든다.
     if len(en) >= 5:
         kernel = np.ones(5, dtype=np.float64) / 5.0
@@ -1761,7 +1889,6 @@ def _apply_soft_mel_offset_cutoff_guard(
     else:
         en_ma = np.asarray(en, dtype=np.float64)
     en_slope = np.diff(en_ma, prepend=float(en_ma[0]) if len(en_ma) else 0.0)
-    onset_mask = (en_slope > 0.015) & (en_ma > 0.12) & (db_arr > (db_sil_th - 2.0))
 
     off_idx = _nearest_time_index(t_ms, offset)
     pre_idx = _nearest_time_index(t_ms, pre_abs)
@@ -1787,6 +1914,15 @@ def _apply_soft_mel_offset_cutoff_guard(
             m = re.match(r"^([bcdfghjklmnpqrstvwxyz]+)", token)
             if m:
                 hint = m.group(1)
+    hint = re.sub(r"[^a-z]", "", hint or "")
+    if len(hint) >= 2 and hint[:2] in (KR_PLOSIVE_ONSETS | KR_SIBILANT_ONSETS):
+        hint = hint[:2]
+    elif len(hint) >= 1:
+        hint = hint[:1] if hint[:1] in (KR_PLOSIVE_ONSETS | KR_SIBILANT_ONSETS) else hint
+
+    is_plosive_like = bool(hint) and (is_plosive_roman(hint) or is_plosive_ipa(hint) or hint in KR_PLOSIVE_ONSETS)
+    is_sibilant_like = hint in KR_SIBILANT_ONSETS or hint in {"sh", "ch", "ts", "z", "dz", "j", "jj", "c"}
+    is_fricative_like = is_sibilant_like or hint in {"h", "f", "v", "x"}
     # 유성/비음 계열(m,n,r,l,w,y...)은 멜 저역 에너지가 약해
     # offset guard가 모음 시작으로 과도 이동할 수 있어 보수적으로 처리한다.
     low_energy_voiced = hint in {
@@ -1794,6 +1930,32 @@ def _apply_soft_mel_offset_cutoff_guard(
         "g", "d", "b", "z", "dz", "v", "gy", "dy", "by",
         "ɴ", "ŋ", "ɲ", "ɾ", "ɹ",
     } or hint.startswith("m")
+
+    # Onset-class aware onset mask tuning:
+    # - sibilant/fricative: flatter slope before vowel, so lower slope threshold
+    # - plosive: sharper attack, so keep stricter slope threshold
+    onset_slope_th = _env_float("UTOA_MEL_ONSET_SLOPE_BASE", 0.015)
+    onset_energy_th = _env_float("UTOA_MEL_ONSET_ENERGY_BASE", 0.12)
+    onset_db_margin = _env_float("UTOA_MEL_ONSET_DB_MARGIN_BASE", -2.0)
+    if is_sibilant_like:
+        onset_slope_th = _env_float("UTOA_MEL_ONSET_SLOPE_SIBILANT", 0.010)
+        onset_energy_th = _env_float("UTOA_MEL_ONSET_ENERGY_SIBILANT", 0.10)
+        onset_db_margin = _env_float("UTOA_MEL_ONSET_DB_MARGIN_SIBILANT", -4.0)
+    elif is_plosive_like:
+        onset_slope_th = _env_float("UTOA_MEL_ONSET_SLOPE_PLOSIVE", 0.018)
+        onset_energy_th = _env_float("UTOA_MEL_ONSET_ENERGY_PLOSIVE", 0.13)
+        onset_db_margin = _env_float("UTOA_MEL_ONSET_DB_MARGIN_PLOSIVE", -1.5)
+    onset_mask = (en_slope > onset_slope_th) & (en_ma > onset_energy_th) & (db_arr > (db_sil_th + onset_db_margin))
+    if is_sibilant_like or is_plosive_like:
+        f0_slope_th = _env_float("UTOA_MEL_ONSET_F0_SLOPE_MIN", 0.03)
+        onset_energy_relax = _env_float("UTOA_MEL_ONSET_ENERGY_RELAX", 0.02)
+        onset_f0_db_margin = _env_float("UTOA_MEL_ONSET_F0_DB_MARGIN", -3.0)
+        f0_slope = np.diff(f0v_arr, prepend=float(f0v_arr[0]) if len(f0v_arr) else 0.0)
+        onset_mask = onset_mask | (
+            (f0_slope > f0_slope_th)
+            & (en_ma > max(0.09, onset_energy_th - onset_energy_relax))
+            & (db_arr > (db_sil_th + onset_f0_db_margin))
+        )
 
     # ---- soft offset guard ----
     # 한국어 CVVC의 CV/CV_HEAD는 onset anchor와 후단 guard만으로도 충분한 경우가 많다.
@@ -1808,19 +1970,35 @@ def _apply_soft_mel_offset_cutoff_guard(
         if off_silent and pre_sound:
             lo = max(0, pre_idx - 120)
             sound_start_idx = None
-            onset_seg = onset_mask[lo:pre_idx + 1]
-            if np.any(onset_seg):
-                # onset 후보가 있으면 기존 sound 시작점보다 우선 사용한다.
-                rel = int(np.where(onset_seg)[0][0])
-                sound_start_idx = lo + rel
-            else:
-                seg = sound_mask[lo:pre_idx + 1]
-                if np.any(seg):
-                    rel = int(np.where(seg)[0][0])
+            if is_sibilant_like or is_plosive_like:
+                # For fricative/plosive-leading syllables, prioritize the first strong formant region
+                # (vowel body) to separate C-noise from V more reliably.
+                vf_seg = voiced_formant_mask[lo:pre_idx + 1]
+                if np.any(vf_seg):
+                    rel = int(np.where(vf_seg)[0][0])
                     sound_start_idx = lo + rel
+            if sound_start_idx is None:
+                onset_seg = onset_mask[lo:pre_idx + 1]
+                if np.any(onset_seg):
+                    # onset 후보가 있으면 기존 sound 시작점보다 우선 사용한다.
+                    rel = int(np.where(onset_seg)[0][0])
+                    sound_start_idx = lo + rel
+                else:
+                    seg = sound_mask[lo:pre_idx + 1]
+                    if np.any(seg):
+                        rel = int(np.where(seg)[0][0])
+                        sound_start_idx = lo + rel
             if sound_start_idx is not None:
-                target_offset = float(t_ms[sound_start_idx]) - 12.0
-                target_offset = max(0.0, min(pre_abs - 18.0, target_offset))
+                offset_lead_ms = _env_float("UTOA_MEL_OFFSET_LEAD_BASE_MS", 12.0)
+                pre_guard_ms = _env_float("UTOA_MEL_OFFSET_PRE_GUARD_BASE_MS", 18.0)
+                if is_sibilant_like or is_fricative_like:
+                    offset_lead_ms = _env_float("UTOA_MEL_OFFSET_LEAD_SIBILANT_MS", 15.0)
+                    pre_guard_ms = _env_float("UTOA_MEL_OFFSET_PRE_GUARD_SIBILANT_MS", 20.0)
+                elif is_plosive_like:
+                    offset_lead_ms = _env_float("UTOA_MEL_OFFSET_LEAD_PLOSIVE_MS", 18.0)
+                    pre_guard_ms = _env_float("UTOA_MEL_OFFSET_PRE_GUARD_PLOSIVE_MS", 22.0)
+                target_offset = float(t_ms[sound_start_idx]) - offset_lead_ms
+                target_offset = max(0.0, min(pre_abs - pre_guard_ms, target_offset))
                 new_offset = _blend(offset, target_offset, 0.36)
                 offset_shift_ms = float(new_offset - offset)
                 offset = new_offset
@@ -1838,13 +2016,28 @@ def _apply_soft_mel_offset_cutoff_guard(
             seg = np.where(silence_mask[start_idx:cut_idx + 1])[0]
             if len(seg) > 0:
                 last_sil_idx = int(start_idx + seg[-1])
-                target_cut_abs = float(t_ms[last_sil_idx]) + 4.0
-                target_cut_abs = max(pre_abs + 20.0, min(target_cut_abs, cut_abs))
-                if target_cut_abs < cut_abs - 8.0:
+                cut_shift_base = _env_float("UTOA_MEL_CUTOFF_TARGET_SHIFT_MS", 4.0)
+                min_cut_abs_margin = _env_float("UTOA_MEL_CUTOFF_MIN_FROM_PRE_MS", 20.0)
+                target_cut_abs = float(t_ms[last_sil_idx]) + cut_shift_base
+                target_cut_abs = max(pre_abs + min_cut_abs_margin, min(target_cut_abs, cut_abs))
+                min_cut_reduction = _env_float("UTOA_MEL_MIN_CUT_REDUCTION_BASE_MS", 8.0)
+                if is_sibilant_like:
+                    min_cut_reduction = _env_float("UTOA_MEL_MIN_CUT_REDUCTION_SIBILANT_MS", 12.0)
+                elif is_plosive_like:
+                    min_cut_reduction = _env_float("UTOA_MEL_MIN_CUT_REDUCTION_PLOSIVE_MS", 10.0)
+                if target_cut_abs < cut_abs - min_cut_reduction:
                     # F0 유성도는 보조(저가중치)로만 반영
                     f0v = float(f0v_arr[last_sil_idx])
-                    blend_w = 0.42 - (0.08 * f0v)
-                    blend_w = max(0.26, min(0.44, blend_w))
+                    blend_base = _env_float("UTOA_MEL_CUTOFF_BLEND_BASE", 0.42)
+                    blend_f0_scale = _env_float("UTOA_MEL_CUTOFF_BLEND_F0_SCALE", 0.08)
+                    blend_w = blend_base - (blend_f0_scale * f0v)
+                    if is_sibilant_like:
+                        blend_w -= _env_float("UTOA_MEL_CUTOFF_BLEND_SIBILANT_DELTA", 0.08)
+                    elif is_plosive_like:
+                        blend_w -= _env_float("UTOA_MEL_CUTOFF_BLEND_PLOSIVE_DELTA", 0.04)
+                    blend_min = _env_float("UTOA_MEL_CUTOFF_BLEND_MIN", 0.26)
+                    blend_max = _env_float("UTOA_MEL_CUTOFF_BLEND_MAX", 0.44)
+                    blend_w = max(blend_min, min(blend_max, blend_w))
                     new_cut_abs = _blend(cut_abs, target_cut_abs, blend_w)
                     cutoff_shift_ms = float(cut_abs - new_cut_abs)
                     cut_abs = new_cut_abs
@@ -3163,6 +3356,9 @@ def generate_oto(
                             line,
                             meta={"diag_hint": row_abstain.get("diag_hint", "")},
                         )
+                        if use_template:
+                            # 템플릿 모드에서는 매핑이 불확실한 행이라도 기존 alias를 보존한다.
+                            final_lines.append(apply_suffix_to_oto_line(line, alias_suffix))
                         continue
                     current_w_idx = max(current_w_idx, selected_w_idx)
                     selected_w_idx, curr_phones, c_start, c_end, n_start, n_end = _prepare_cv_bounds_from_syllable(

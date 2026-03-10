@@ -389,6 +389,26 @@ class AppRuntimeMixin:
                 snapshot["files"].add(fpath)
         return snapshot
 
+    def _is_generated_oto_artifact_file(self, file_name, file_path_norm, keep_file_norm, snapshot_files, snapshot_provided):
+        low = str(file_name or "").strip().lower()
+        if not low:
+            return False
+        if file_path_norm == keep_file_norm:
+            return False
+        if not snapshot_provided:
+            # 안전을 위해 스냅샷이 없으면 자동 삭제를 수행하지 않는다.
+            return False
+        # out_dir가 새로 생성된 경우(snapshot_files가 비어 있음)에도 새 파일로 간주한다.
+        is_new_in_run = (not snapshot_files) or (file_path_norm not in snapshot_files)
+        if not is_new_in_run:
+            return False
+        # 자동 생성 부산물 OTO 계열만 정리한다.
+        return (
+            low == "oto.ini"
+            or (low.startswith("oto.") and low.endswith(".ini"))
+            or (low.startswith("oto_") and low.endswith(".ini"))
+        )
+
     def _cleanup_generated_output_artifacts(self, out_path, snapshot=None):
         out_file = os.path.abspath(str(out_path or "").strip())
         if not out_file:
@@ -400,15 +420,11 @@ class AppRuntimeMixin:
         keep_file = os.path.normcase(out_file)
         snapshot_files = set()
         snapshot_dirs = set()
-        if isinstance(snapshot, dict):
+        snapshot_provided = isinstance(snapshot, dict)
+        if snapshot_provided:
             snapshot_files = set(snapshot.get("files") or [])
             snapshot_dirs = set(snapshot.get("dirs") or [])
 
-        known_names = {
-            ".ja_oto_autotune_profile.json",
-            "japanese_dict.txt",
-            "korean_dict.txt",
-        }
         removed_files = 0
         removed_dirs = 0
         failed = 0
@@ -419,12 +435,13 @@ class AppRuntimeMixin:
                 norm = os.path.normcase(fpath)
                 if norm == keep_file:
                     continue
-                low = name.lower()
-                is_known_intermediate = (
-                    low in known_names
-                )
-                is_new_in_run = bool(snapshot_files) and norm not in snapshot_files
-                if not is_known_intermediate and not is_new_in_run:
+                if not self._is_generated_oto_artifact_file(
+                    name,
+                    norm,
+                    keep_file,
+                    snapshot_files,
+                    snapshot_provided,
+                ):
                     continue
                 try:
                     os.remove(fpath)

@@ -107,6 +107,16 @@ class KrPostprocessContext:
         # Enforce timeline order from the first postprocess step.
         offset, consonant, cutoff, pre, ovl = self.validate_fn(offset, consonant, cutoff, pre, ovl)
 
+        onset_hint = ""
+        try:
+            if current_w_idx is not None and 0 <= int(current_w_idx) < len(self.syllables_info):
+                curr_syl = self.syllables_info[int(current_w_idx)] or {}
+                curr_phones = curr_syl.get("phones") or []
+                if curr_phones:
+                    onset_hint = str(getattr(curr_phones[0], "mark", "") or "").strip()
+        except Exception:
+            onset_hint = ""
+
         if alias_type in {"cv", "cv_head", "vcv"}:
             offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = self.soft_mel_guard_fn(
                 offset,
@@ -116,6 +126,8 @@ class KrPostprocessContext:
                 ovl,
                 alias_type,
                 self.mel_ctx_for_file,
+                onset_hint=onset_hint,
+                alias_text=alias_text,
                 file_format=self.file_format,
             )
 

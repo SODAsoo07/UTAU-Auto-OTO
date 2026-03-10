@@ -65,6 +65,7 @@ KO_ROMAJI_IPA_TABLE = {}
 KO_HANGUL_ALIAS_DIRECT = {}
 KO_ALIAS_VARIANT_NORMALIZATION = {}
 KO_AMBIGUOUS_ALIAS_PRIORITY = {}
+KO_SILENCE_TOKEN_SET = set()
 _KO_KNOWN_PHONE_SET = set()
 
 
@@ -86,6 +87,7 @@ def _apply_external_korean_conversion_table():
     global KO_HANGUL_ALIAS_DIRECT
     global KO_ALIAS_VARIANT_NORMALIZATION
     global KO_AMBIGUOUS_ALIAS_PRIORITY
+    global KO_SILENCE_TOKEN_SET
 
     table = load_korean_conversion_table() or {}
     KO_ROMAJI_IPA_TABLE = dict(table.get("romaji_to_ipa", {}) or {})
@@ -109,12 +111,50 @@ def _apply_external_korean_conversion_table():
             priority[str(key)] = chosen
     KO_AMBIGUOUS_ALIAS_PRIORITY = priority
 
+    silence_tokens = {"sil", "pau", "br", "bre", "r", "h", "breath"}
+    for mapping in (KO_IPA_MAP, KO_ROMAJI_IPA_TABLE):
+        for key, val in mapping.items():
+            ipa = str(val or "").strip().lower()
+            if ipa not in {"sil", "spn", "pau", "cl"}:
+                continue
+            tok = str(key or "").strip()
+            if tok:
+                silence_tokens.add(tok)
+                silence_tokens.add(tok.lower())
+
+    special_tokens = dict(table.get("special_tokens", {}) or {})
+    for rule_key in ("breath_standalone", "end_breath"):
+        rule = dict(special_tokens.get(rule_key, {}) or {})
+        candidates = []
+        candidates.extend(rule.get("inputs", []) or [])
+        aliases = rule.get("aliases", []) or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        candidates.extend(aliases)
+        alias_single = str(rule.get("alias", "") or "").strip()
+        if alias_single:
+            candidates.append(alias_single)
+        for item in candidates:
+            tok = str(item or "").strip()
+            if tok:
+                silence_tokens.add(tok)
+                silence_tokens.add(tok.lower())
+    KO_SILENCE_TOKEN_SET = silence_tokens
+
+
+def _is_ko_silence_token(token):
+    text = str(token or "").strip()
+    if not text:
+        return True
+    return text in KO_SILENCE_TOKEN_SET or text.lower() in KO_SILENCE_TOKEN_SET
+
 
 _apply_external_korean_conversion_table()
 
 
 def _rebuild_ko_known_phone_set():
     phones = {"sil", "spn", "pau", "cl"}
+    phones.update({"k̚", "p̚", "t̚"})
     for mapping in (KO_IPA_MAP, KO_ROMAJI_IPA_TABLE):
         for val in mapping.values():
             text = str(val or "").strip()
@@ -298,8 +338,11 @@ def get_ipa_from_roman(token):
     if token in KO_ROMAJI_IPA_TABLE and not (prefer_phonetic_reserved and token in {'sil', 'r', 'h'}):
         return _ipa_value_to_list(KO_ROMAJI_IPA_TABLE[token])
 
-    if not token or token in ['br', 'pau', 'r', 'h', 'bre'] or (token == 'sil' and not prefer_phonetic_reserved):
+    if not token:
         return ['sil']
+    if _is_ko_silence_token(token):
+        if not (token == 'sil' and prefer_phonetic_reserved):
+            return ['sil']
     phonemes = []
     remainder = token
     limit = 50
@@ -572,9 +615,12 @@ def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', 
                     log(f"⚠️ IPA 검증 실패 ({lab_file}): '{token}' -> '{ipa_str}', sil로 대체")
                     ipa_str = "sil"
 
-                if ipa_str and ipa_str != 'sil':
-                    dictionary_entries[char] = ipa_str
-                    full_sentence_ipa.append(ipa_str)
+                if ipa_str:
+                    current_entry = dictionary_entries.get(char, "")
+                    if ipa_str != 'sil' or not current_entry:
+                        dictionary_entries[char] = ipa_str
+                    if ipa_str != 'sil':
+                        full_sentence_ipa.append(ipa_str)
 
             # 커스텀 매핑으로 지정된 항목을 사전에 보강한다.
             for raw_char, mapped_pho in custom_map.items():

@@ -7,7 +7,12 @@ from core.kr_oto_file_ops import (
     _apply_kr_bridge_coherence_to_oto_file,
     _apply_kr_profile_to_oto_file,
 )
-from core.kr_oto_rules import classify_alias
+from core.kr_oto_rules import (
+    KR_PLOSIVE_ONSETS,
+    KR_SIBILANT_ONSETS,
+    _extract_alias_onset,
+    classify_alias,
+)
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 from core.kr_oto_file_consistency import apply_file_consistency_to_oto_file
 from core.post_file_pipeline import (
@@ -20,6 +25,16 @@ try:
     import numpy as np
 except Exception:  # pragma: no cover
     np = None
+
+
+def _env_float(name, default):
+    raw = str(os.environ.get(name, "")).strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
 
 
 @dataclass(frozen=True)
@@ -103,11 +118,20 @@ def apply_kr_mel_refine_to_oto_file(
         en = mel_ctx["energy"]
         db_arr = mel_ctx.get("db_db")
         f0v_arr = mel_ctx.get("f0_voicing")
+        high_arr = mel_ctx.get("high_ratio")
+        f2_arr = mel_ctx.get("f2_ratio")
+        f3_arr = mel_ctx.get("f3_ratio")
         db_sil_th = float(mel_ctx.get("db_silence_th", -42.0))
         if db_arr is None or len(db_arr) != len(en):
             db_arr = np.zeros_like(en, dtype=np.float64)
         if f0v_arr is None or len(f0v_arr) != len(en):
             f0v_arr = np.zeros_like(en, dtype=np.float64)
+        if high_arr is None or len(high_arr) != len(en):
+            high_arr = np.zeros_like(en, dtype=np.float64)
+        if f2_arr is None or len(f2_arr) != len(en):
+            f2_arr = np.zeros_like(en, dtype=np.float64)
+        if f3_arr is None or len(f3_arr) != len(en):
+            f3_arr = np.zeros_like(en, dtype=np.float64)
         if len(t_ms) < 8:
             continue
 
@@ -115,6 +139,9 @@ def apply_kr_mel_refine_to_oto_file(
             alias_type = _classify_cached(row["alias"])
             if alias_type not in {"cv", "cv_head"}:
                 continue
+            onset = str(_extract_alias_onset(row["alias"]) or "").strip().lower()
+            is_sibilant = onset in KR_SIBILANT_ONSETS
+            is_plosive = onset in KR_PLOSIVE_ONSETS
 
             off = float(row["offset"])
             pre_abs = off + float(row["pre"])
@@ -130,11 +157,11 @@ def apply_kr_mel_refine_to_oto_file(
                     next_anchor = float(rows[j][1]["offset"]) + float(rows[j][1]["pre"])
                     break
 
-            search_start = pre_abs + 14.0
-            search_end = cut_abs - 8.0
+            search_start = pre_abs + _env_float("UTOA_KR_MEL_REFINE_SEARCH_START_FROM_PRE_MS", 14.0)
+            search_end = cut_abs - _env_float("UTOA_KR_MEL_REFINE_SEARCH_END_FROM_CUT_MS", 8.0)
             if next_anchor is not None:
-                search_end = min(search_end, next_anchor - 8.0)
-            if search_end <= search_start + 25.0:
+                search_end = min(search_end, next_anchor - _env_float("UTOA_KR_MEL_REFINE_NEXT_ANCHOR_MARGIN_MS", 8.0))
+            if search_end <= search_start + _env_float("UTOA_KR_MEL_REFINE_MIN_SEARCH_SPAN_MS", 25.0):
                 continue
 
             mask = np.where((t_ms >= search_start) & (t_ms <= search_end))[0]
@@ -151,8 +178,10 @@ def apply_kr_mel_refine_to_oto_file(
                 e_v = float(en[ci])
                 db_v = float(db_arr[ci])
                 f0_v = float(f0v_arr[ci])
+                h_v = float(high_arr[ci])
+                fm_v = float(f2_arr[ci] + f3_arr[ci])
                 silence_bonus = 0.28 if db_v <= db_sil_th else 0.0
-                score = (1.0 - e_v) + silence_bonus - (0.08 * f0_v)
+                score = (1.0 - e_v) + silence_bonus - (0.08 * f0_v) - (0.10 * h_v) - (0.06 * fm_v)
                 if score > best_score:
                     best_score = score
                     best_idx = int(ci)
@@ -167,17 +196,36 @@ def apply_kr_mel_refine_to_oto_file(
             contrast = cut_e - valley_e
             db_drop = cut_db - valley_db
 
-            if contrast < 0.12 and db_drop < 2.5:
+            contrast_min = _env_float("UTOA_KR_MEL_REFINE_CONTRAST_MIN", 0.11)
+            db_drop_min = _env_float("UTOA_KR_MEL_REFINE_DB_DROP_MIN", 2.3)
+            if is_sibilant:
+                contrast_min += _env_float("UTOA_KR_MEL_REFINE_SIBILANT_CONTRAST_BONUS", 0.03)
+                db_drop_min += _env_float("UTOA_KR_MEL_REFINE_SIBILANT_DB_DROP_BONUS", 0.4)
+            elif is_plosive:
+                contrast_min += _env_float("UTOA_KR_MEL_REFINE_PLOSIVE_CONTRAST_BONUS", 0.01)
+                db_drop_min += _env_float("UTOA_KR_MEL_REFINE_PLOSIVE_DB_DROP_BONUS", 0.2)
+
+            if contrast < contrast_min and db_drop < db_drop_min:
                 continue
-            if valley_e > 0.38 and valley_db > (db_sil_th + 6.0):
+            valley_energy_cap = _env_float("UTOA_KR_MEL_REFINE_VALLEY_ENERGY_MAX", 0.36)
+            valley_db_cap = _env_float("UTOA_KR_MEL_REFINE_VALLEY_DB_MARGIN", 6.0)
+            if is_sibilant:
+                valley_energy_cap += _env_float("UTOA_KR_MEL_REFINE_SIBILANT_VALLEY_E_DELTA", 0.02)
+            if valley_e > valley_energy_cap and valley_db > (db_sil_th + valley_db_cap):
                 continue
-            if valley_f0v > 0.70 and contrast < 0.18:
+            valley_f0_cap = _env_float("UTOA_KR_MEL_REFINE_VALLEY_F0_MAX", 0.70)
+            f0_contrast_guard = _env_float("UTOA_KR_MEL_REFINE_F0_CONTRAST_MIN", 0.17)
+            if valley_f0v > valley_f0_cap and contrast < f0_contrast_guard:
                 continue
-            if valley_t >= cut_abs - 12.0:
+            tail_guard_ms = _env_float("UTOA_KR_MEL_REFINE_TAIL_GUARD_MS", 12.0)
+            if is_sibilant:
+                tail_guard_ms += _env_float("UTOA_KR_MEL_REFINE_SIBILANT_TAIL_GUARD_ADD_MS", 2.0)
+            if valley_t >= cut_abs - tail_guard_ms:
                 continue
 
-            target_cut_abs = valley_t + 2.0
-            min_cut_abs = pre_abs + 20.0
+            cut_shift_ms = _env_float("UTOA_KR_MEL_REFINE_TARGET_SHIFT_MS", 2.0)
+            target_cut_abs = valley_t + cut_shift_ms
+            min_cut_abs = pre_abs + _env_float("UTOA_KR_MEL_REFINE_MIN_CUT_FROM_PRE_MS", 20.0)
             if target_cut_abs <= min_cut_abs:
                 continue
 

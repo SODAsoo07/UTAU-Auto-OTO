@@ -374,18 +374,21 @@ def _apply_sokuon(romaji):
     return romaji[0] + romaji
 
 
-def _drop_c_after_end_breath(tokens):
+def _drop_trailing_noise_after_end_breath(tokens):
     """
-    R(어미 끝숨) 바로 뒤에 붙는 연결 자음 c는 노이즈 표기로 간주해 제거합니다.
+    R(어미 끝숨) 바로 뒤에 붙는 꼬리 노이즈 토큰은 제거합니다.
     예: ['a', 'R', 'c'] -> ['a', 'R']
+        ['a', 'R', 'x'] -> ['a', 'R']
+        ['a', 'R', 'q'] -> ['a', 'R']
     """
+    noise_after_r = {"c", "x", "q", "cl", "xtu", "xtsu", "ltu", "ltsu"}
     out = []
     prev = ""
     for tok in tokens or []:
         t = str(tok or "").strip()
         if not t:
             continue
-        if t.lower() == "c" and prev == "R":
+        if t.lower() in noise_after_r and prev == "R":
             continue
         out.append(t)
         prev = t
@@ -429,7 +432,7 @@ def split_romaji_token_to_syllables(token):
             out.extend(tail_syllables)
         else:
             out.append(tail.lower())
-        return _drop_c_after_end_breath(out)
+        return _drop_trailing_noise_after_end_breath(out)
     # lowercased fallback: ar/ir/ur/er/or/nr
     m_end_breath_lower = re.fullmatch(r"([aiueon])r", s)
     if m_end_breath_lower:
@@ -485,7 +488,7 @@ def split_romaji_token_to_syllables(token):
     if not result and re.fullmatch(r"[a-z]{1,3}", s or "") and s in JA_CONSONANT_IPA:
         return [s]
 
-    return _drop_c_after_end_breath(result)
+    return _drop_trailing_noise_after_end_breath(result)
 
 
 def kana_to_romaji_syllables(text):
@@ -607,7 +610,7 @@ def parse_ja_filename(filename):
             else:
                 syllables.extend(kana_to_romaji_syllables(part))
 
-    return _drop_c_after_end_breath([s for s in syllables if s])
+    return _drop_trailing_noise_after_end_breath([s for s in syllables if s])
 
 
 def generate_ja_labs(wav_dir, custom_phonemes_path='', callback=None):
@@ -743,7 +746,7 @@ def generate_ja_dictionary(target_folder, dict_save_path, custom_phonemes_path='
                 else:
                     # 혼합 토큰도 음절 단위로 최대한 복구
                     line_tokens.extend(parse_ja_filename(wr))
-            word_set.update(_drop_c_after_end_breath(line_tokens))
+            word_set.update(_drop_trailing_noise_after_end_breath(line_tokens))
             success += 1
         except Exception as e:
             errors.append(f"Lab 읽기 실패 ({lf}): {e}")
