@@ -53,6 +53,7 @@ v2의 의도는 다음과 같다.
 - mapping helper
   - [core/ja_mapping_v2.py](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/core/ja_mapping_v2.py)
   - [core/ja_mapping_select_v2.py](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/core/ja_mapping_select_v2.py)
+  - [core/ja_mapping_scoring_v2.py](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/core/ja_mapping_scoring_v2.py)
 - timing helper
   - [core/ja_timing_v2.py](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/core/ja_timing_v2.py)
 - row runtime / finalize
@@ -69,6 +70,7 @@ v2의 의도는 다음과 같다.
 - mapping helper
   - [core/kr_mapping_v2.py](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/core/kr_mapping_v2.py)
   - [core/kr_mapping_select_v2.py](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/core/kr_mapping_select_v2.py)
+  - [core/kr_mapping_scoring_v2.py](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/core/kr_mapping_scoring_v2.py)
   - [core/kr_candidate_selection_v2.py](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/core/kr_candidate_selection_v2.py)
 - timing helper
   - [core/kr_timing_v2.py](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/core/kr_timing_v2.py)
@@ -119,6 +121,7 @@ v2의 의도는 다음과 같다.
 남은 고가치 작업은 다음과 같다.
 
 - generator 내부에 남은 언어별 scoring 유틸 완전 이관
+- 한국어 `VCV` 주변의 잔여 보조 scoring / drift repair 유틸 정리
 - batch evaluation 재실행 후 v2 전/후 수치 문서화
 - 실제 oto 생성 샘플 청감 검증 정리
 - 필요 시 `mapping_core_v2_design` 문서를 현재 구현 기준으로 재서술
@@ -146,6 +149,7 @@ v2의 의도는 다음과 같다.
 더 이상 핵심 흐름에서 쓰지 않는 일부 분석 스크립트는 다음 폴더로 이동했다.
 
 - [scripts/legacy_mapping_v1/README.md](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/scripts/legacy_mapping_v1/README.md)
+- [scripts/legacy_misc_tools/README.md](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/scripts/legacy_misc_tools/README.md)
 
 이 폴더는 참고/회귀용 보관 영역이며, 새 기능 개발의 기본 경로는 아니다.
 

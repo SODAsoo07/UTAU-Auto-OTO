@@ -76,6 +76,13 @@ from core.ja_mapping_v2 import (
     is_ja_cv_syllable_active as _is_ja_cv_syllable_active_v2,
     resolve_ja_planned_cv_index as _resolve_ja_planned_cv_index_v2,
 )
+from core.ja_mapping_scoring_v2 import (
+    clamp_ja_cv_index_to_order as _clamp_ja_cv_index_to_order_v2,
+    find_ja_cv_vowel_match_index as _find_ja_cv_vowel_match_index_v2,
+    find_ja_exact_target_index as _find_ja_exact_target_index_v2,
+    prefer_vcv_candidate_index as _prefer_vcv_candidate_index_v2,
+    should_allow_ja_soft_forward_shift as _should_allow_ja_soft_forward_shift_v2,
+)
 from core.ja_timing_v2 import (
     build_realized_cv_anchor as _build_realized_cv_anchor_v2,
     compute_ja_vc_from_adjacent_cv as _compute_ja_vc_from_adjacent_cv_v2,
@@ -1068,30 +1075,7 @@ def _estimate_ja_mapping_confidence(
 
 
 def _should_allow_ja_soft_forward_shift(target_tok, expected_tok, mapped_tok):
-    target_norm = _normalize_ja_syllable_token(target_tok)
-    expected_norm = _normalize_ja_syllable_token(expected_tok)
-    mapped_norm = _normalize_ja_syllable_token(mapped_tok)
-    if not target_norm or not mapped_norm:
-        return False
-    target_special = _ja_special_mora_class(target_tok)
-    expected_special = _ja_special_mora_class(expected_tok)
-    mapped_special = _ja_special_mora_class(mapped_tok)
-    if target_special in {"nasal", "geminate", "long"}:
-        return False
-    if target_special == "plain" and mapped_special in {"nasal", "geminate", "long"}:
-        return False
-    mapped_level = int(_ja_soft_cv_match_level(target_norm, mapped_norm) or 0)
-    expected_level = int(_ja_soft_cv_match_level(target_norm, expected_norm) or 0)
-    if target_special in {"youon", "inserted"}:
-        if mapped_special not in {"youon", "inserted"} and mapped_level < 3:
-            return False
-        if expected_special in {"youon", "inserted"} and mapped_special not in {"youon", "inserted"}:
-            return False
-    if mapped_level >= 3 and expected_level < 3:
-        return True
-    if mapped_level >= 2 and expected_level <= 1:
-        return True
-    return False
+    return _should_allow_ja_soft_forward_shift_v2(target_tok, expected_tok, mapped_tok)
 
 
 def _clamp_ja_cv_index_to_order(
@@ -1104,43 +1088,15 @@ def _clamp_ja_cv_index_to_order(
     filename_order_locked,
     mapping_tier,
 ):
-    if not syllables_info:
-        return int(expected_idx)
-    fmt = str(format_type or "").strip().lower()
-    if fmt not in {"cvvc", "cv"}:
-        return int(mapped_idx)
-
-    e = max(0, min(int(expected_idx), len(syllables_info) - 1))
-    m = max(0, min(int(mapped_idx), len(syllables_info) - 1))
-    if m <= e:
-        return e if m < e else m
-
-    target_norm = _normalize_ja_syllable_token(target_tok)
-    expected_norm = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[e]))
-    mapped_norm = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[m]))
-    expected_level = int(_ja_soft_cv_match_level(target_norm, expected_norm) or 0) if target_norm else 0
-    mapped_level = int(_ja_soft_cv_match_level(target_norm, mapped_norm) or 0) if target_norm else 0
-
-    if fmt == "cv":
-        return min(m, e + 1)
-
-    if m > (e + 1):
-        return e
-    if not target_norm:
-        return e
-
-    allow_forward = bool(
-        m == (e + 1)
-        and _should_allow_ja_soft_forward_shift(target_norm, expected_norm, mapped_norm)
+    return _clamp_ja_cv_index_to_order_v2(
+        target_tok,
+        expected_idx,
+        mapped_idx,
+        syllables_info,
+        format_type=format_type,
+        filename_order_locked=filename_order_locked,
+        mapping_tier=mapping_tier,
     )
-    if allow_forward:
-        if mapped_norm == target_norm and expected_norm != target_norm:
-            return m
-        if mapped_level >= 2 and expected_level <= 1:
-            return m
-        if not filename_order_locked and str(mapping_tier or "").strip().lower() == "high" and mapped_level >= 3:
-            return m
-    return e
 
 
 def _build_ja_mapping_trace_record(
@@ -1191,101 +1147,23 @@ def _build_ja_mapping_trace_record(
 
 
 def _find_ja_cv_vowel_match_index(target_tok, expected_idx, syllables_info, search_back=1, search_fwd=2):
-    """
-    target CV와 모음이 일치하는 음절을 기대 인덱스 근처에서 재탐색합니다.
-    CV 한 칸 밀림(예: よ -> や) 보정용 안전장치.
-    """
-    if not target_tok or not syllables_info:
-        return None
-    n = len(syllables_info)
-    if n <= 0:
-        return None
-    e = max(0, min(int(expected_idx), n - 1))
-
-    t_onset = _extract_ja_onset_token(target_tok)
-    _to, t_vowel = split_ja_romaji_syllable(target_tok)
-    if t_vowel not in JA_VOWELS:
-        return None
-    t_tail = _ja_syllable_tail(target_tok)
-    expected_soft_match = _ja_soft_cv_match_level(
+    return _find_ja_cv_vowel_match_index_v2(
         target_tok,
-        _syllable_info_token(syllables_info[e]),
+        expected_idx,
+        syllables_info,
+        search_back=search_back,
+        search_fwd=search_fwd,
     )
-
-    lo = max(0, e - max(0, int(search_back)))
-    hi = min(n - 1, e + max(0, int(search_fwd)))
-    best_idx = None
-    best_score = -10**9
-    for i in range(lo, hi + 1):
-        cand = _syllable_info_token(syllables_info[i])
-        if not cand:
-            continue
-        c_onset = _extract_ja_onset_token(cand)
-        _co, c_vowel = split_ja_romaji_syllable(cand)
-        if c_vowel != t_vowel:
-            continue
-        soft_match = _ja_soft_cv_match_level(target_tok, cand)
-
-        score = 100 - (abs(i - e) * 18)
-        if t_onset and c_onset:
-            if c_onset == t_onset:
-                score += 20
-            elif c_onset[:1] == t_onset[:1]:
-                score += 8
-            else:
-                score -= 12
-        if soft_match >= 2:
-            score += 24
-        elif soft_match == 1:
-            score += 8
-        if soft_match > expected_soft_match:
-            score += 10
-        c_tail = _ja_syllable_tail(cand)
-        if t_tail == c_tail:
-            score += 6
-        elif t_tail and c_tail and t_tail != c_tail:
-            score -= 4
-
-        if score > best_score:
-            best_score = score
-            best_idx = i
-    return best_idx
 
 
 def _find_ja_exact_target_index(target_tok, expected_idx, syllables_info, search_back=3, search_fwd=3):
-    """
-    expected 인덱스 주변에서 target 토큰 exact match를 찾는다.
-    목적: 연속 처리 중 누적 드리프트가 생겼을 때 제한적으로 역방향 재동기화.
-    """
-    if not target_tok or not syllables_info:
-        return None
-    n = len(syllables_info)
-    if n <= 0:
-        return None
-    e = max(0, min(int(expected_idx), n - 1))
-    tgt_norm = _normalize_ja_syllable_token(target_tok)
-    if not tgt_norm:
-        return None
-    exp_norm = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[e]))
-    # expected가 이미 exact면 재동기화 불필요
-    if exp_norm == tgt_norm:
-        return None
-
-    lo = max(0, e - max(0, int(search_back)))
-    hi = min(n - 1, e + max(0, int(search_fwd)))
-    best_idx = None
-    best_key = None
-    for i in range(lo, hi + 1):
-        cand_norm = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[i]))
-        if cand_norm != tgt_norm:
-            continue
-        # 거리 우선, 동점이면 순방향(i>e) 우선:
-        # 반복 음절(ma ma ...)에서 앞 음절로 잘못 되돌아가는 현상을 줄인다.
-        key = (abs(i - e), 0 if i > e else 1, i)
-        if best_key is None or key < best_key:
-            best_key = key
-            best_idx = i
-    return best_idx
+    return _find_ja_exact_target_index_v2(
+        target_tok,
+        expected_idx,
+        syllables_info,
+        search_back=search_back,
+        search_fwd=search_fwd,
+    )
 
 
 def _compute_ja_youon_mismatch_ratio(candidate_infos, target_tokens):
@@ -1489,33 +1367,13 @@ def _resolve_ja_planned_cv_index(planned_indices, expected_seq_idx, target_tok, 
 
 
 def _prefer_vcv_candidate_index(expected_idx, mapped_idx, target_tok, syllables_info, max_delta=1):
-    """
-    VCV에서 expected 인덱스를 기본으로 유지하되, 아래 경우에만 제한적으로 보정 인덱스를 채택.
-    - 보정 인덱스가 expected와 최대 1칸 이내
-    - 보정 토큰은 target과 exact 일치
-    - expected 토큰은 target과 불일치 (즉, 실제 보정 필요가 명확)
-    """
-    if not syllables_info:
-        return expected_idx
-    n = len(syllables_info)
-    e = max(0, min(int(expected_idx), n - 1))
-    m = max(0, min(int(mapped_idx), n - 1))
-    if m == e:
-        return e
-    if abs(m - e) > max(0, int(max_delta)):
-        return e
-
-    tgt = _normalize_ja_syllable_token(target_tok)
-    if not tgt:
-        return e
-    exp_tok = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[e]))
-    map_tok = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[m]))
-    if map_tok != tgt:
-        return e
-    if exp_tok == tgt:
-        # 동일 토큰 반복 구간에서는 순서 안정 우선
-        return e
-    return m
+    return _prefer_vcv_candidate_index_v2(
+        expected_idx,
+        mapped_idx,
+        target_tok,
+        syllables_info,
+        max_delta=max_delta,
+    )
 
 
 def _expand_vcv_lines_for_cvvc(lines, custom_map=None, include_bridge=True):

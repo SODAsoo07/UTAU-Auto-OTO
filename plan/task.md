@@ -32,8 +32,11 @@
 - [x] Korean `CV_HEAD` forced index helper 분리
 - [x] Japanese `CV/CV_HEAD` forced index helper 분리
 - [x] Japanese `VCV` 선택 로직 helper 분리
+- [x] Japanese exact/vowel/forward-shift scoring 유틸 분리
+- [x] Korean `CV` 음절 선택 scoring 유틸 분리
+- [x] Korean 일반 `CV/VV` 선택 게이트/모음 보정 helper 분리
 - [/] generator 내부의 언어별 세부 scoring 함수 완전 분리
-설명: 핵심 선택 분기는 빠졌지만, 일부 언어별 scoring 유틸은 아직 generator 안에 남아 있다.
+설명: 일본어 핵심 scoring 유틸과 한국어 `CV/VCV` 핵심 선택 보조는 v2 모듈로 이동했다. 일부 보조 scoring 유틸은 아직 generator 안에 남아 있다.
 
 ## Timing / Guard / Postprocess
 
@@ -55,6 +58,7 @@
 ## Legacy / Cleanup
 
 - [x] 사용 중단된 분석 스크립트 일부를 `scripts/legacy_mapping_v1/`로 이동
+- [x] 수동 점검용 레거시 스크립트를 `scripts/legacy_misc_tools/`로 이동
 - [x] SOFA를 핵심 정렬 경로에서 제외하는 방향으로 설계 정리
 - [/] generator 내부 잔여 wrapper / scoring 유틸 정리
 설명: 동작상 불필요한 얇은 wrapper는 대부분 줄였지만, 설명용/호환용 로컬 함수가 일부 남아 있다.

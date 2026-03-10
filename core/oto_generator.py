@@ -134,6 +134,7 @@ from core.kr_mapping_v2 import (
     is_kr_cv_syllable_active as _is_kr_cv_syllable_active_v2,
     resolve_kr_planned_cv_index as _resolve_kr_planned_cv_index_v2,
 )
+from core.kr_mapping_scoring_v2 import resolve_cv_syllable_index as _resolve_cv_syllable_index_v2
 from core.kr_timing_v2 import (
     build_realized_cv_anchor as _build_realized_kr_cv_anchor_v2,
     extract_vcv_anchor_points as _extract_vcv_anchor_points_v2,
@@ -158,6 +159,7 @@ from core.kr_vcv_row_v2 import run_kr_vcv_row as _run_kr_vcv_row_v2
 from core.kr_general_row_v2 import run_kr_general_row as _run_kr_general_row_v2
 from core.kr_mapping_select_v2 import (
     resolve_kr_cv_head_forced_index as _resolve_kr_cv_head_forced_index_v2,
+    select_kr_general_cv_index as _select_kr_general_cv_index_v2,
     select_kr_vcv_index as _select_kr_vcv_index_v2,
 )
 from core.oto_row_output_v2 import prepare_oto_alias_rows as _prepare_oto_alias_rows_v2
@@ -705,110 +707,17 @@ def _resolve_cv_syllable_index(
     high_conf_threshold=0.82,
     return_meta=False,
 ):
-    """CV 계열 alias를 words/roman 음절 인덱스에 매핑합니다."""
-    meta = {
-        "jump_blocked": 0,
-        "raw_chosen_idx": int(cv_seq_idx),
-        "chosen_idx": int(cv_seq_idx),
-        "max_forward_jump": int(max_jump_default),
-        "best_score": -1.0,
-        "expected_score": -1.0,
-        "mapping_confidence": float(mapping_confidence or 0.0),
-    }
-    if cv_seq_idx >= len(romaji_syllables):
-        if return_meta:
-            return current_w_idx, cv_seq_idx, meta
-        return current_w_idx, cv_seq_idx
-
-    name_match_idx = None
-    best_score = -1
-    # diphthong/r-l 혼용 케이스를 위해 탐색 범위를 넓혀 안정적으로 음절 정렬
-    scan_start = max(cv_seq_idx - 1, 0)
-    scan_end = min(cv_seq_idx + 4, len(romaji_syllables))
-    for i in range(scan_start, scan_end):
-        score = _cv_match_score(target_clean, romaji_syllables[i])
-        score -= abs(i - cv_seq_idx) * 4
-        if score > best_score:
-            best_score = score
-            name_match_idx = i
-        if score >= 98:
-            break
-
-    expected_score = -1
-    if 0 <= cv_seq_idx < len(romaji_syllables):
-        expected_score = _cv_match_score(target_clean, romaji_syllables[cv_seq_idx])
-    meta["best_score"] = float(best_score)
-    meta["expected_score"] = float(expected_score)
-
-    if name_match_idx is not None and best_score >= 62:
-        chosen_idx = name_match_idx
-        best_gain = best_score - expected_score
-        target_onset, target_vowel, _target_coda = _split_kr_syllable_parts(target_clean)
-        expected_tok = romaji_syllables[cv_seq_idx] if 0 <= cv_seq_idx < len(romaji_syllables) else ""
-        best_tok = romaji_syllables[name_match_idx] if 0 <= name_match_idx < len(romaji_syllables) else ""
-        exp_onset, exp_vowel, _exp_coda = _split_kr_syllable_parts(expected_tok)
-        best_onset, best_vowel, _best_coda = _split_kr_syllable_parts(best_tok)
-        same_vowel_expected = bool(target_vowel and exp_vowel and target_vowel == exp_vowel)
-        best_vowel_match = bool(target_vowel and best_vowel and target_vowel == best_vowel)
-        same_onset_expected = bool(
-            target_onset and exp_onset and (target_onset == exp_onset or target_onset[:1] == exp_onset[:1])
-        )
-        # 이중모음/종성 포함 토큰에서 발생하는 과도한 앞 점프를 억제한다.
-        if (
-            name_match_idx > cv_seq_idx
-            and expected_score >= max(50, best_score - 20)
-        ):
-            chosen_idx = cv_seq_idx
-        if name_match_idx > (cv_seq_idx + 1):
-            if expected_score >= 46:
-                chosen_idx = cv_seq_idx
-            elif best_gain < 30:
-                chosen_idx = cv_seq_idx
-            elif same_vowel_expected and best_gain < 34:
-                chosen_idx = cv_seq_idx
-        # 한 음절 점프는 충분히 큰 이득이 없으면 보수적으로 유지합니다.
-        if abs(name_match_idx - cv_seq_idx) == 1:
-            min_gain = 22
-            if same_vowel_expected:
-                min_gain = 18
-            elif same_onset_expected:
-                min_gain = 20
-            if best_gain < min_gain:
-                chosen_idx = cv_seq_idx
-            # 기대 음절이 이미 target 모음을 만족하면, 모음 불일치 전진 점프를 차단한다.
-            if same_vowel_expected and (not best_vowel_match) and name_match_idx > cv_seq_idx:
-                chosen_idx = cv_seq_idx
-            if same_vowel_expected and (not best_vowel_match) and best_gain < 22:
-                chosen_idx = cv_seq_idx
-            if same_onset_expected and (not (target_onset and best_onset and target_onset[:1] == best_onset[:1])) and best_gain < 24:
-                chosen_idx = cv_seq_idx
-        # 뒤로 가는 선택도 점수 이득이 충분하지 않으면 방지합니다.
-        if name_match_idx < cv_seq_idx:
-            if same_vowel_expected or expected_score >= 38 or best_gain < 32:
-                chosen_idx = cv_seq_idx
-        # 신뢰도 기반 전진 점프 제한.
-        max_forward_jump = int(max(0, max_jump_default))
-        conf = float(mapping_confidence or 0.0)
-        if conf >= float(high_conf_threshold):
-            if best_score >= 84 and best_gain >= 24:
-                max_forward_jump = int(max(max_forward_jump, max_jump_high_conf))
-        meta["max_forward_jump"] = int(max_forward_jump)
-        raw_chosen_idx = int(chosen_idx)
-        if chosen_idx > (cv_seq_idx + max_forward_jump):
-            chosen_idx = cv_seq_idx + max_forward_jump
-            meta["jump_blocked"] = 1
-        meta["raw_chosen_idx"] = int(raw_chosen_idx)
-        meta["chosen_idx"] = int(chosen_idx)
-        if chosen_idx < cv_seq_idx:
-            chosen_idx = cv_seq_idx
-        current_w_idx = chosen_idx
-    else:
-        current_w_idx = cv_seq_idx
-
-    cv_seq_idx = current_w_idx + 1
-    if return_meta:
-        return current_w_idx, cv_seq_idx, meta
-    return current_w_idx, cv_seq_idx
+    return _resolve_cv_syllable_index_v2(
+        target_clean,
+        romaji_syllables,
+        cv_seq_idx,
+        current_w_idx,
+        mapping_confidence=mapping_confidence,
+        max_jump_default=max_jump_default,
+        max_jump_high_conf=max_jump_high_conf,
+        high_conf_threshold=high_conf_threshold,
+        return_meta=return_meta,
+    )
 
 
 def _remap_kr_forced_cv_index(target_clean, romaji_syllables, expected_idx):
@@ -3088,8 +2997,6 @@ def generate_oto(
                         kr_cvvc_occurrence_state,
                     )
                     expected_cv_idx = cv_seq_idx
-                    selected_w_idx = None
-                    resolve_meta = {}
                     planned_cv_idx = None
                     if alias_type == "cv":
                         planned_cv_idx = _resolve_kr_planned_cv_index(
@@ -3104,168 +3011,42 @@ def generate_oto(
                                 f"🧭 {fname}: KR CV 전역 anchor plan 적용 "
                                 f"({expected_cv_idx + 1}->{planned_cv_idx + 1}, {alias})"
                             )
-                    forced_selected_idx = (
-                        forced_vv_idx
-                        if forced_vv_idx is not None
-                        else (
-                            planned_vv_idx
-                            if planned_vv_idx is not None
-                            else (planned_cv_idx if planned_cv_idx is not None else forced_cvvc_idx)
-                        )
+                    general_cv_selection = _select_kr_general_cv_index_v2(
+                        alias=alias,
+                        alias_type=alias_type,
+                        fname=fname,
+                        file_format=file_format,
+                        target_clean=target_clean,
+                        current_w_idx=current_w_idx,
+                        cv_seq_idx=cv_seq_idx,
+                        row_mapping_confidence=row_mapping_confidence,
+                        row_jump_default=row_jump_default,
+                        row_jump_high_conf=row_jump_high_conf,
+                        file_mapping_conf_th=file_mapping_conf_th,
+                        file_mapping_low_conf=file_mapping_low_conf,
+                        romaji_syllables=romaji_syllables,
+                        forced_vv_idx=forced_vv_idx,
+                        planned_vv_idx=planned_vv_idx,
+                        planned_cv_idx=planned_cv_idx,
+                        forced_cvvc_idx=forced_cvvc_idx,
+                        remap_forced_cv_index_fn=_remap_kr_forced_cv_index,
+                        cv_match_score_fn=_cv_match_score,
+                        split_syllable_parts_fn=_split_kr_syllable_parts,
+                        apply_row_confidence_penalty_fn=apply_row_confidence_penalty,
+                        resolve_cv_syllable_index_fn=_resolve_cv_syllable_index,
+                        should_allow_exact_vowel_fix_fn=_should_allow_kr_exact_vowel_fix,
+                        find_cv_vowel_match_index_fn=_find_kr_cv_vowel_match_index,
+                        clamp_cv_index_to_order_fn=_clamp_kr_cv_index_to_order,
+                        log_fn=log,
+                        debug_logging=kr_mapping_debug_reason_logging,
                     )
-                    forced_gate_rejected = False
-                    if forced_selected_idx is not None and not (0 <= forced_selected_idx < len(romaji_syllables)):
-                        remapped_idx = _remap_kr_forced_cv_index(
-                            target_clean,
-                            romaji_syllables,
-                            expected_cv_idx,
-                        )
-                        if remapped_idx is not None:
-                            if kr_mapping_debug_reason_logging:
-                                log(
-                                    f"🧭 {fname}: KR 강제 인덱스 범위 보정 "
-                                    f"({forced_selected_idx + 1}->{remapped_idx + 1}, {alias})"
-                                )
-                            forced_selected_idx = remapped_idx
-                        else:
-                            if kr_mapping_debug_reason_logging:
-                                log(
-                                    f"🛡️ {fname}: KR 강제 인덱스 무효화 "
-                                    f"(idx={forced_selected_idx + 1}, {alias})"
-                                )
-                            forced_selected_idx = None
-                            row_mapping_confidence = apply_row_confidence_penalty(row_mapping_confidence, 0.12)
-                    if forced_selected_idx is not None:
-                        forced_score = -1.0
-                        expected_score_forced = -1.0
-                        forced_vowel_mismatch = False
-                        if target_clean and 0 <= forced_selected_idx < len(romaji_syllables):
-                            forced_score = float(_cv_match_score(target_clean, romaji_syllables[forced_selected_idx]))
-                            if 0 <= expected_cv_idx < len(romaji_syllables):
-                                expected_score_forced = float(_cv_match_score(target_clean, romaji_syllables[expected_cv_idx]))
-                            _t_on, _t_v, _t_c = _split_kr_syllable_parts(target_clean)
-                            _f_on, _f_v, _f_c = _split_kr_syllable_parts(romaji_syllables[forced_selected_idx])
-                            forced_vowel_mismatch = bool(_t_v and _f_v and _t_v != _f_v)
-                        min_forced_score = 64.0 if alias_type == "cv_head" else 60.0
-                        if file_mapping_low_conf:
-                            min_forced_score += 6.0
-                        keep_forced = True
-                        if forced_score >= 0.0 and forced_score < min_forced_score:
-                            keep_forced = False
-                        if forced_vowel_mismatch and file_mapping_low_conf:
-                            keep_forced = False
-                        if expected_score_forced >= 0.0 and forced_score >= 0.0 and (forced_score + 14.0) < expected_score_forced:
-                            keep_forced = False
-                        if keep_forced:
-                            selected_w_idx = forced_selected_idx
-                            cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
-                        else:
-                            forced_gate_rejected = True
-                            row_mapping_confidence = apply_row_confidence_penalty(row_mapping_confidence, 0.08)
-                    if forced_selected_idx is None or forced_gate_rejected:
-                        selected_w_idx, cv_seq_idx, resolve_meta = _resolve_cv_syllable_index(
-                            target_clean,
-                            romaji_syllables,
-                            cv_seq_idx,
-                            current_w_idx,
-                            mapping_confidence=row_mapping_confidence,
-                            max_jump_default=row_jump_default,
-                            max_jump_high_conf=row_jump_high_conf,
-                            high_conf_threshold=max(float(file_mapping_conf_th), 0.50),
-                            return_meta=True,
-                        )
-                        row_jump_blocked = int(resolve_meta.get("jump_blocked", 0) or 0)
-                        if row_jump_blocked and kr_mapping_debug_reason_logging:
-                            log(
-                                f"🛡️ {fname}: KR 매핑 전진 점프 차단 "
-                                f"({int(resolve_meta.get('raw_chosen_idx', selected_w_idx)) + 1}"
-                                f"->{int(resolve_meta.get('chosen_idx', selected_w_idx)) + 1}, {alias})"
-                            )
-                        if row_jump_blocked:
-                            row_mapping_confidence = apply_row_confidence_penalty(row_mapping_confidence, 0.18)
-                    target_onset, target_vowel, _target_coda = _split_kr_syllable_parts(target_clean)
-                    forced_cv_head_severe_mismatch = False
-                    if (
-                        forced_selected_idx is not None
-                        and alias_type == "cv_head"
-                        and target_vowel
-                        and 0 <= selected_w_idx < len(romaji_syllables)
-                    ):
-                        _fc_on, forced_curr_vowel, _fc_coda = _split_kr_syllable_parts(romaji_syllables[selected_w_idx])
-                        forced_cv_head_severe_mismatch = bool(forced_curr_vowel and forced_curr_vowel != target_vowel)
-                    allow_exact_vowel_fix = (
-                        _should_allow_kr_exact_vowel_fix(
-                            file_format,
-                            forced_selected_idx,
-                            alias_type=alias_type,
-                            severe_vowel_mismatch=forced_cv_head_severe_mismatch,
-                        )
-                        and float(row_mapping_confidence) >= float(file_mapping_conf_th)
-                    )
-                    if target_vowel and 0 <= selected_w_idx < len(romaji_syllables) and allow_exact_vowel_fix:
-                        _curr_onset, curr_vowel, _curr_coda = _split_kr_syllable_parts(romaji_syllables[selected_w_idx])
-                        need_exact_vowel_fix = bool(curr_vowel and curr_vowel != target_vowel)
-                        if file_format == "cvvc" and forced_selected_idx is None and not need_exact_vowel_fix:
-                            fixed_probe = _find_kr_cv_vowel_match_index(
-                                target_clean, romaji_syllables, expected_cv_idx, search_back=1, search_fwd=4
-                            )
-                            if fixed_probe is not None and fixed_probe != selected_w_idx:
-                                _probe_onset, probe_vowel, _probe_coda = _split_kr_syllable_parts(romaji_syllables[fixed_probe])
-                                if probe_vowel == target_vowel:
-                                    need_exact_vowel_fix = True
-                        if need_exact_vowel_fix:
-                            fixed_search_fwd = 4 if file_format == "cvvc" else 2
-                            if file_format == "cvvc" and forced_selected_idx is not None and alias_type == "cv_head":
-                                fixed_search_fwd = 1
-                            fixed_idx = _find_kr_cv_vowel_match_index(
-                                target_clean,
-                                romaji_syllables,
-                                expected_cv_idx,
-                                search_back=1,
-                                search_fwd=fixed_search_fwd,
-                            )
-                            if fixed_idx is not None and fixed_idx >= expected_cv_idx:
-                                max_forward = int(max(0, row_jump_default))
-                                if (
-                                    float(row_mapping_confidence) >= max(float(file_mapping_conf_th), 0.50)
-                                    and float(resolve_meta.get("best_score", 0.0) or 0.0) >= 84.0
-                                ):
-                                    max_forward = int(max(max_forward, row_jump_high_conf))
-                                raw_fixed_idx = int(fixed_idx)
-                                max_allowed_idx = int(expected_cv_idx + max_forward)
-                                if fixed_idx > max_allowed_idx:
-                                    fixed_idx = max_allowed_idx
-                                    row_jump_blocked = 1
-                                    row_mapping_confidence = apply_row_confidence_penalty(row_mapping_confidence, 0.14)
-                                    if kr_mapping_debug_reason_logging:
-                                        log(
-                                            f"🛡️ {fname}: KR 모음 보정 점프 차단 "
-                                            f"({raw_fixed_idx + 1}->{fixed_idx + 1}, {alias})"
-                                        )
-                                if fixed_idx != selected_w_idx and abs(fixed_idx - expected_cv_idx) <= 2:
-                                    log(
-                                        f"🧭 {fname}: CV 모음 불일치 보정 "
-                                        f"{expected_cv_idx + 1}->{fixed_idx + 1} ({alias})"
-                                    )
-                                selected_w_idx = fixed_idx
-                                cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
-                    ordered_idx = _clamp_kr_cv_index_to_order(
-                        file_format,
-                        target_clean,
-                        romaji_syllables,
-                        expected_cv_idx,
-                        selected_w_idx,
-                    )
-                    if ordered_idx != selected_w_idx:
-                        if kr_mapping_debug_reason_logging:
-                            log(
-                                f"🛡️ {fname}: KR CV 순서 고정 "
-                                f"({selected_w_idx + 1}->{ordered_idx + 1}, {alias})"
-                            )
-                        row_jump_blocked = 1
-                        row_mapping_confidence = apply_row_confidence_penalty(row_mapping_confidence, 0.12)
-                        selected_w_idx = ordered_idx
-                        cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
+                    expected_cv_idx = int(general_cv_selection["expected_cv_idx"])
+                    selected_w_idx = int(general_cv_selection["selected_w_idx"])
+                    cv_seq_idx = int(general_cv_selection["cv_seq_idx"])
+                    row_mapping_confidence = float(general_cv_selection["row_mapping_confidence"])
+                    resolve_meta = dict(general_cv_selection["resolve_meta"])
+                    row_jump_blocked = int(general_cv_selection["row_jump_blocked"])
+                    forced_selected_idx = general_cv_selection["forced_selected_idx"]
                     row_abstain = decide_cv_row_abstain(
                         alias_type=alias_type,
                         format_type=file_format,
