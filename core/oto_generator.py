@@ -1866,6 +1866,37 @@ def _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms):
     return max(0.0, min(1.0, float(blank)))
 
 
+def _estimate_kr_mel_class_scores_at_time(mel_ctx, t_ms):
+    out = {
+        "mel_voiced_formant_conf": 0.0,
+        "mel_silence_sparse_conf": 0.0,
+        "mel_unvoiced_diffuse_conf": 0.0,
+        "mel_breath_like_conf": 0.0,
+    }
+    if np is None or not mel_ctx:
+        return out
+    times_ms = mel_ctx.get("times_ms")
+    if times_ms is None or len(times_ms) == 0:
+        return out
+    idx = _nearest_time_index(times_ms, float(t_ms))
+    if idx < 0:
+        return out
+    key_map = {
+        "mel_voiced_formant_conf": "cls_voiced_formant",
+        "mel_silence_sparse_conf": "cls_silence_sparse",
+        "mel_unvoiced_diffuse_conf": "cls_unvoiced_diffuse",
+        "mel_breath_like_conf": "cls_breath_like",
+    }
+    for out_key, src_key in key_map.items():
+        arr = mel_ctx.get(src_key)
+        if arr is not None and len(arr) == len(times_ms):
+            try:
+                out[out_key] = max(0.0, min(1.0, float(arr[idx])))
+            except Exception:
+                out[out_key] = 0.0
+    return out
+
+
 def _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx):
     if not syllables_info:
         return syllables_info
@@ -1879,7 +1910,10 @@ def _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx):
                 start_s = 0.0
         if start_s < 0.0:
             start_s = 0.0
-        syl["blank_confidence"] = _estimate_kr_blank_confidence_at_time(mel_ctx, start_s * 1000.0)
+        t_ms = start_s * 1000.0
+        syl["blank_confidence"] = _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms)
+        mel_scores = _estimate_kr_mel_class_scores_at_time(mel_ctx, t_ms)
+        syl.update(mel_scores)
     return syllables_info
 
 
@@ -3454,6 +3488,7 @@ def generate_oto(
                         find_cv_vowel_match_index_fn=_find_kr_cv_vowel_match_index,
                         clamp_cv_index_to_order_fn=_clamp_kr_cv_index_to_order,
                         syllable_blank_confidences=syllable_blank_confidences,
+                        syllables_info=syllables_info,
                         log_fn=log,
                         debug_logging=kr_mapping_debug_reason_logging,
                     )
