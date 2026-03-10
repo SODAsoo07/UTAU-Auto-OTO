@@ -254,17 +254,23 @@ def _apply_external_japanese_conversion_table():
         elif len(k) == 1:
             KANA_SINGLE_ROMAJI[k] = alias
 
+    # MFA japanese_mfa에서는 breath/end-breath를 sil 대신 spn으로 두는 편이 안정적이다.
+    # (sil 매핑 시 그래프 컴파일 단계에서 비정상 종료가 관측됨)
     # 특수 토큰(br/R)이 테이블에 있는 경우 IPA로 안전하게 고정한다.
     special_tokens = dict(table.get("special_tokens", {}) or {})
     breath = dict(special_tokens.get("breath_standalone", {}) or {})
     breath_alias = str(breath.get("alias", "") or "").strip()
     if breath_alias:
-        JA_ROMAJI_IPA_TABLE.setdefault(breath_alias, "sil")
+        current = str(JA_ROMAJI_IPA_TABLE.get(breath_alias, "") or "").strip().lower()
+        if current in {"", "sil"}:
+            JA_ROMAJI_IPA_TABLE[breath_alias] = "spn"
     end_breath = dict(special_tokens.get("end_breath", {}) or {})
     for token in end_breath.get("inputs", []) or []:
         t = str(token or "").strip()
         if t:
-            JA_ROMAJI_IPA_TABLE.setdefault(t, "sil")
+            current = str(JA_ROMAJI_IPA_TABLE.get(t, "") or "").strip().lower()
+            if current in {"", "sil"}:
+                JA_ROMAJI_IPA_TABLE[t] = "spn"
 
 
 _apply_external_japanese_conversion_table()
@@ -342,6 +348,15 @@ def split_romaji_token_to_syllables(token):
     s = raw.lower()
     if s in ROMAJI_META_TOKENS:
         return []
+
+    # End-breath compact forms: aR, iR, uR, eR, oR, NR...
+    m_end_breath = re.fullmatch(r"([A-Za-z]+)R", raw)
+    if m_end_breath:
+        head = m_end_breath.group(1)
+        head_syllables = split_romaji_token_to_syllables(head)
+        if head_syllables:
+            return [*head_syllables, "R"]
+        return [head.lower(), "R"]
 
     if raw in JA_ROMAJI_IPA_TABLE:
         return [raw]
@@ -476,6 +491,21 @@ def parse_ja_filename(filename):
     for token in tokens:
         t = token.strip()
         if not t:
+            continue
+
+        # Breath tokens: 息 (standalone) / <token>息 (end-breath).
+        if t == "息":
+            syllables.append("br")
+            continue
+        m_end_breath_romaji = re.fullmatch(r"([A-Za-z]+)息", t)
+        if m_end_breath_romaji:
+            syllables.extend(split_romaji_token_to_syllables(m_end_breath_romaji.group(1)))
+            syllables.append("R")
+            continue
+        m_end_breath_kana = re.fullmatch(r"([\u3041-\u3096\u30A1-\u30FA\u30FC]+)息", t)
+        if m_end_breath_kana:
+            syllables.extend(kana_to_romaji_syllables(m_end_breath_kana.group(1)))
+            syllables.append("R")
             continue
 
         # 순수 로마자 토큰
@@ -622,7 +652,11 @@ def generate_ja_dictionary(target_folder, dict_save_path, custom_phonemes_path='
                 if re.search(r'[\u3041-\u3096\u30A1-\u30FA\u30FC]', wr):
                     word_set.update(kana_to_romaji_syllables(wr))
                 elif re.fullmatch(r'[A-Za-z]+', wr):
-                    word_set.add(wl)
+                    split_words = split_romaji_token_to_syllables(wr)
+                    if split_words:
+                        word_set.update(split_words)
+                    else:
+                        word_set.add(wl)
                 else:
                     # 혼합 토큰도 음절 단위로 최대한 복구
                     word_set.update(parse_ja_filename(wr))

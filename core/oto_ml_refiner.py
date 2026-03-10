@@ -1088,7 +1088,7 @@ def apply_oto_ml_to_oto_file(
                 selector_cache[cache_key] = selector_payload
                 bundle = bundle_cache[cache_key]
                 if bundle and route_model_dir[cache_key] and route_model_dir[cache_key] not in model_notice:
-                    _emit(callback, f"[OTO-ML] ?? ?? ({bundle.backend}): {route_model_dir[cache_key]}")
+                    _emit(callback, f"[OTO-ML] 모델 로드 ({bundle.backend}): {route_model_dir[cache_key]}")
                     ml_report["loaded_models"].append(route_model_dir[cache_key])
                     model_notice.add(route_model_dir[cache_key])
                 if selector_cache.get(cache_key) is not None and route_model_dir[cache_key] not in ml_report["selector_model_routes"]:

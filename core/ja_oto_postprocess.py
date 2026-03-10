@@ -30,6 +30,7 @@ class JaPostprocessContext:
     recenter_fn: Callable[..., Tuple[float, float, float, float, float]]
     extract_cv_bounds_fn: Callable[..., Tuple[float, float, float, float]]
     cv_onset_class_fn: Callable[..., Tuple[str, str]]
+    file_format: str = ""
     syllables_info: Sequence[dict] = field(default_factory=list)
     ja_style_enabled: bool = False
     ja_style_profile: object = None

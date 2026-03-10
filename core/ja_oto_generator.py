@@ -2694,6 +2694,7 @@ def generate_ja_oto(
                 phone_spans_ms=phone_spans_ms,
                 timeline_start_ms=timeline_start_ms,
                 effective_end_ms=effective_end_ms,
+                file_format=format_type,
                 validate_fn=validate_oto_params,
                 recenter_fn=_recenter_ja_params_around_pre,
                 extract_cv_bounds_fn=_ja_extract_cv_bounds,

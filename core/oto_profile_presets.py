@@ -1,4 +1,4 @@
-"""
+﻿"""
 Abstract OTO profile presets.
 
 This module intentionally stores only aggregated timing statistics.

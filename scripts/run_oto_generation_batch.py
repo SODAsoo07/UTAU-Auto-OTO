@@ -37,6 +37,26 @@ from core.pipeline_status import (
 from core.oto_validator import validate_oto_timing
 
 
+def _configure_utf8_stdio():
+    """Normalize console encoding to UTF-8 for stable Korean/Japanese logs."""
+    # Force UTF-8 even when parent shell exported a legacy encoding.
+    os.environ["PYTHONUTF8"] = "1"
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+        except Exception:
+            pass
+
+
 def _now_tag():
     return dt.datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -74,6 +94,14 @@ def _safe_console_print(text: str):
         return
     except UnicodeEncodeError:
         pass
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        try:
+            buffer.write((s + "\n").encode("utf-8", errors="replace"))
+            buffer.flush()
+            return
+        except Exception:
+            pass
     enc = getattr(sys.stdout, "encoding", None) or "utf-8"
     try:
         safe = s.encode(enc, errors="replace").decode(enc, errors="replace")
@@ -94,9 +122,9 @@ def _resolve_path(config_dir: str, raw_path: str) -> str:
 def _resolve_case_path(config_dir: str, voicebank_dir: str, raw_path: str) -> str:
     """
     Case path resolver:
-    1) absolute path 그대로 사용
-    2) relative path는 voicebank_dir 기준 우선
-    3) 없으면 config_dir 기준으로 fallback
+    1) Keep absolute paths as-is
+    2) Resolve relative paths against voicebank_dir first
+    3) Fallback to config_dir if needed
     """
     if not raw_path:
         return ""
@@ -708,6 +736,8 @@ def _run_one_case(
 
 
 def main():
+    _configure_utf8_stdio()
+
     parser = argparse.ArgumentParser(
         description="Batch OTO generation for listening tests (per language/format/voicebank)."
     )
@@ -804,3 +834,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
