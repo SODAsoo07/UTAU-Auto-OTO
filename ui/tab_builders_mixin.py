@@ -3,6 +3,19 @@
 import customtkinter as ctk
 
 from core.oto_generator import DEFAULT_PARAMS
+from ui.theme_tokens import PALETTE
+
+
+def _style_blue_menu(widget):
+    widget.configure(
+        fg_color=PALETTE.menu_bg,
+        button_color=PALETTE.menu_button,
+        button_hover_color=PALETTE.menu_button_hover,
+        dropdown_fg_color=PALETTE.menu_dropdown_bg,
+        dropdown_hover_color=PALETTE.menu_dropdown_hover,
+        dropdown_text_color=PALETTE.menu_text,
+        text_color=PALETTE.menu_text,
+    )
 
 
 class TabBuildersMixin:
