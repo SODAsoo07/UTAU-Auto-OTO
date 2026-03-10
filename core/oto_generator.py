@@ -32,7 +32,9 @@ from core.kr_oto_rules import (
     _cv_match_score,
     _detect_glottal_kind,
     _extract_alias_onset,
+    _extract_vc_right_token,
     _extract_kr_cv_alias_token,
+    _canonicalize_kr_coda,
     _kr_cv_kernel,
     _looks_like_vv_alias,
     _normalize_cv_match_token,
@@ -2202,7 +2204,7 @@ def generate_oto(
                 result=result,
             )
 
-        return apply_language_anchor_lock(
+        out = apply_language_anchor_lock(
             language="korean",
             format_type=format_type,
             alias_type=alias_type,
@@ -2214,7 +2216,14 @@ def generate_oto(
             next_onset_abs_ms=next_onset_abs_ms,
             next_vowel_abs_ms=next_vowel_abs_ms,
             mapping_confidence=mapping_confidence,
-            validate_fn=validate_oto_params,
+            validate_fn=lambda o, c, cut, p, v, _atype=alias_type: validate_oto_params(
+                o,
+                c,
+                cut,
+                p,
+                v,
+                alias_type=_atype,
+            ),
             lite=bool(lite),
             is_enabled_fn=is_anchor_lock_enabled,
             get_profile_fn=_get_profile,
@@ -2228,6 +2237,27 @@ def generate_oto(
             append_log_fn=append_timing_anchor_log,
             log_path=anchor_log_path,
         )
+        if str(alias_type or "").strip().lower() == "vc" and next_onset_abs_ms is not None:
+            coda = _canonicalize_kr_coda(_extract_vc_right_token(alias_text))
+            is_stoplike = coda in {"k", "t", "p", "h"}
+            if is_stoplike:
+                o, c, cut, p, v = [float(x) for x in out]
+                next_onset_rel = max(float(next_onset_abs_ms) - o, p + 10.0)
+                c_cap = next_onset_rel - 7.0
+                c = min(c, c_cap)
+                c = max(c, p + 8.0)
+                cut_abs = abs(cut)
+                cut_cap = next_onset_rel - 1.0
+                cut_floor = c + 6.0
+                if cut_floor > cut_cap:
+                    c = max(p + 8.0, cut_cap - 6.0)
+                    cut_floor = c + 6.0
+                if cut_floor > cut_cap:
+                    cut_cap = cut_floor + 0.8
+                cut_abs = min(cut_abs, cut_cap)
+                cut_abs = max(cut_abs, cut_floor)
+                out = validate_oto_params(o, c, -cut_abs, p, v, alias_type="vc")
+        return out
 
     kr_profile_setup = prepare_kr_profile_setup(
         fallback_format=fallback_format,

@@ -121,7 +121,7 @@ class App(
 
         self.title(f"{APP_NAME} v{APP_VERSION}")
         self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
-        self.minsize(800, 680)
+        self.minsize(860, 700)
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")

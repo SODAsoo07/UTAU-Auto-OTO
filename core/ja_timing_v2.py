@@ -10,6 +10,40 @@ def _blend(a, b, weight):
     return (float(a) * (1.0 - w)) + (float(b) * w)
 
 
+def _enforce_stoplike_vc_before_next_onset(
+    pre,
+    consonant,
+    cutoff_abs,
+    next_onset_rel,
+    *,
+    cons_margin=6.0,
+    cut_margin=1.0,
+    min_cons_gap=6.0,
+    min_cut_gap=4.0,
+):
+    pre = float(max(pre, 0.0))
+    consonant = float(max(consonant, pre + float(min_cons_gap)))
+    cutoff_abs = float(max(cutoff_abs, consonant + float(min_cut_gap)))
+    next_onset_rel = float(max(next_onset_rel, pre + 2.0))
+
+    hard_cons_cap = float(next_onset_rel) - float(cons_margin)
+    if consonant > hard_cons_cap:
+        consonant = hard_cons_cap
+    consonant = max(consonant, pre + float(min_cons_gap))
+
+    hard_cut_cap = float(next_onset_rel) - float(cut_margin)
+    min_cut_abs = consonant + float(min_cut_gap)
+    if min_cut_abs > hard_cut_cap:
+        consonant = max(pre + float(min_cons_gap), hard_cut_cap - float(min_cut_gap))
+        min_cut_abs = consonant + float(min_cut_gap)
+    if min_cut_abs > hard_cut_cap:
+        hard_cut_cap = min_cut_abs + 0.8
+
+    cutoff_abs = min(float(cutoff_abs), float(hard_cut_cap))
+    cutoff_abs = max(float(cutoff_abs), float(min_cut_abs))
+    return float(consonant), float(cutoff_abs)
+
+
 def build_realized_cv_anchor(
     offset,
     consonant,
@@ -221,7 +255,17 @@ def compute_ja_vc_from_adjacent_cv(
         return None
 
     profile = dict(bridge_profile or {})
-    boundary_abs = next_cv["onset_abs"] if str(alias_type or "").strip().lower() == "vc" else next_cv["pre_abs"]
+    a_type = str(alias_type or "").strip().lower()
+    is_hard_stoplike = a_type == "vc" and str(c_char or "") in set(plosive_consonants or [])
+    if a_type == "vc":
+        next_onset_abs = float(next_cv["onset_abs"])
+        boundary_abs = next_onset_abs
+        if is_hard_stoplike:
+            raw_transition = max(next_onset_abs - float(prev_cv["vowel_end_abs"]), 12.0)
+            onset_lead = _clamp_range(raw_transition * 0.26, 8.0, 20.0)
+            boundary_abs = max(float(prev_cv["vowel_end_abs"]) + 4.0, next_onset_abs - onset_lead)
+    else:
+        boundary_abs = next_cv["pre_abs"]
     pre_target = _clamp_range(_blend(prev_cv["pre"], next_cv["pre"], 0.34), 40.0, 220.0)
     offset = max(float(boundary_abs) - pre_target, 0.0)
     pre = float(boundary_abs) - offset
@@ -243,12 +287,21 @@ def compute_ja_vc_from_adjacent_cv(
     next_pre_rel = max(float(next_cv["pre_abs"]) - offset, pre + 16.0)
     next_cons_rel = max(float(next_cv["cons_abs"]) - offset, next_pre_rel + 10.0)
 
-    if str(alias_type or "").strip().lower() == "vc":
-        if str(c_char or "") in set(plosive_consonants or []):
-            consonant = min(consonant, next_onset_rel - 6.0)
-            consonant = max(consonant, pre + 12.0)
-            cutoff_abs = max(consonant + 10.0, next_onset_rel - 2.0)
-            cutoff_abs = min(cutoff_abs, next_onset_rel + 6.0)
+    if a_type == "vc":
+        if is_hard_stoplike:
+            consonant = min(consonant, next_onset_rel - 7.0)
+            consonant = max(consonant, pre + 6.0)
+            cutoff_abs = max(consonant + 6.0, next_onset_rel - 1.2)
+            consonant, cutoff_abs = _enforce_stoplike_vc_before_next_onset(
+                pre,
+                consonant,
+                cutoff_abs,
+                next_onset_rel,
+                cons_margin=7.0,
+                cut_margin=1.2,
+                min_cons_gap=6.0,
+                min_cut_gap=4.0,
+            )
         else:
             consonant = min(consonant, next_onset_rel + 24.0)
             consonant = max(consonant, pre + 16.0)

@@ -44,3 +44,9 @@ The files `LICENSE` and `MODEL_LICENSE.md` are project drafts intended to define
 the distribution policy of this repository. Review and adjust them before public
 release if you want tighter wording for contributor, data, or jurisdiction-
 specific issues.
+
+## UI Design Workflow (Pencil MCP)
+
+- Integration workflow draft: `plan/pencil_integration_workflow.md`
+- Design asset folder: `design/`
+- Shared UI token module: `ui/theme_tokens.py`

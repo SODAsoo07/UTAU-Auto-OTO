@@ -116,12 +116,13 @@ def _compute_kr_vc_timing(
 
         cutoff_abs = consonant + cut_gap
         next_onset_rel = max(n_start - offset, pre + 12.0)
-        cutoff_soft_cap = next_onset_rel + (4.0 if is_hard_stop_coda else 8.0)
+        cutoff_soft_cap = next_onset_rel - (1.2 if is_hard_stop_coda else 0.8)
         cutoff_min_abs = consonant + (8.0 if is_hard_stop_coda else 10.0)
         if cutoff_soft_cap <= cutoff_min_abs:
-            consonant = min(consonant, max(next_onset_rel - 6.0, pre + 8.0))
+            consonant = min(consonant, max(next_onset_rel - 8.0, pre + 6.0))
             cutoff_min_abs = consonant + (6.0 if is_hard_stop_coda else 8.0)
-            cutoff_soft_cap = max(cutoff_soft_cap, cutoff_min_abs)
+            if cutoff_soft_cap <= cutoff_min_abs:
+                cutoff_soft_cap = cutoff_min_abs + 0.8
         cutoff_abs = _clamp(cutoff_abs, cutoff_min_abs, cutoff_soft_cap)
         cutoff = -cutoff_abs
         return offset, consonant, cutoff, pre, ovl, True
@@ -174,10 +175,18 @@ def _compute_kr_vc_timing(
 
     next_c_onset_rel = max(n_start - offset, pre + 10.0)
     if is_plosive_sibilant:
-        consonant = min(consonant, next_c_onset_rel - 6.0)
-        consonant = max(consonant, pre + 12.0)
-        cutoff_abs = max(consonant + 10.0, next_c_onset_rel - 2.0)
-        cutoff_abs = min(cutoff_abs, next_c_onset_rel + 8.0)
+        consonant = min(consonant, next_c_onset_rel - 7.0)
+        consonant = max(consonant, pre + 10.0)
+        cutoff_abs = max(consonant + 8.0, next_c_onset_rel - 1.2)
+        cutoff_cap = next_c_onset_rel - 1.0
+        cutoff_floor = consonant + 8.0
+        if cutoff_floor > cutoff_cap:
+            consonant = max(pre + 8.0, cutoff_cap - 8.0)
+            cutoff_floor = consonant + 8.0
+        if cutoff_floor > cutoff_cap:
+            cutoff_cap = cutoff_floor + 0.8
+        cutoff_abs = min(cutoff_abs, cutoff_cap)
+        cutoff_abs = max(cutoff_abs, cutoff_floor)
         cutoff = -cutoff_abs
     else:
         consonant = min(consonant, next_c_onset_rel + 26.0)

@@ -29,6 +29,41 @@ def _blend(a, b, w):
     return (1.0 - w2) * float(a) + w2 * float(b)
 
 
+def _enforce_stoplike_vc_before_next_onset(
+    pre,
+    consonant,
+    cutoff_abs,
+    next_onset_rel,
+    *,
+    cons_margin=7.0,
+    cut_margin=1.0,
+    min_cons_gap=10.0,
+    min_cut_gap=8.0,
+):
+    pre = float(max(pre, 0.0))
+    consonant = float(max(consonant, pre + float(min_cons_gap)))
+    cutoff_abs = float(max(cutoff_abs, consonant + float(min_cut_gap)))
+    next_onset_rel = float(max(next_onset_rel, pre + 2.0))
+
+    hard_cons_cap = float(next_onset_rel) - float(cons_margin)
+    if consonant > hard_cons_cap:
+        consonant = hard_cons_cap
+    consonant = max(consonant, pre + float(min_cons_gap))
+
+    hard_cut_cap = float(next_onset_rel) - float(cut_margin)
+    min_cut_abs = consonant + float(min_cut_gap)
+    if min_cut_abs > hard_cut_cap:
+        consonant = max(pre + float(min_cons_gap), hard_cut_cap - float(min_cut_gap))
+        min_cut_abs = consonant + float(min_cut_gap)
+    if min_cut_abs > hard_cut_cap:
+        # 초단 전이에서는 최소한의 초과만 허용(안정성 우선).
+        hard_cut_cap = min_cut_abs + 0.8
+
+    cutoff_abs = min(float(cutoff_abs), float(hard_cut_cap))
+    cutoff_abs = max(float(cutoff_abs), float(min_cut_abs))
+    return float(consonant), float(cutoff_abs)
+
+
 def _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=""):
     """kr_oto_bridge 내부 검증 - 메인 validate_oto_params와 동기화."""
     from core.oto_generator import validate_oto_params
@@ -225,7 +260,12 @@ def _compute_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, is_plosive_sibila
         return None
 
     if alias_type == "vc":
-        boundary_abs = next_cv["onset_abs"]
+        next_onset_abs = float(next_cv["onset_abs"])
+        boundary_abs = next_onset_abs
+        if is_plosive_sibilant:
+            raw_transition = max(next_onset_abs - float(prev_cv["vowel_end_abs"]), 12.0)
+            onset_lead = _clamp(raw_transition * 0.28, 8.0, 20.0)
+            boundary_abs = max(float(prev_cv["vowel_end_abs"]) + 4.0, next_onset_abs - onset_lead)
     else:
         boundary_abs = _compute_kr_vowel_stable_anchor(
             next_cv.get("vowel_start_abs", next_cv.get("pre_abs", 0.0)),
@@ -267,15 +307,24 @@ def _compute_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, is_plosive_sibila
 
     if alias_type == "vc":
         if is_plosive_sibilant:
-            consonant = min(consonant, next_onset_rel - 6.0)
-            consonant = max(consonant, pre + 12.0)
-            cutoff_abs = max(consonant + 10.0, next_onset_rel - 2.0)
-            cutoff_abs = min(cutoff_abs, next_onset_rel + 8.0)
+            consonant = min(consonant, next_onset_rel - 7.0)
+            consonant = max(consonant, pre + 10.0)
+            cutoff_abs = max(consonant + 8.0, next_onset_rel - 1.2)
+            consonant, cutoff_abs = _enforce_stoplike_vc_before_next_onset(
+                pre,
+                consonant,
+                cutoff_abs,
+                next_onset_rel,
+                cons_margin=7.0,
+                cut_margin=1.2,
+                min_cons_gap=10.0,
+                min_cut_gap=8.0,
+            )
         else:
             consonant = min(consonant, next_onset_rel + 16.0)
             consonant = max(consonant, pre + 16.0)
             cutoff_abs = max(consonant + 12.0, min(next_cons_rel + 18.0, next_pre_rel + 30.0))
-        max_gap = 24.0 if is_plosive_sibilant else 42.0
+        max_gap = 16.0 if is_plosive_sibilant else 42.0
         cutoff_abs = min(cutoff_abs, consonant + max_gap)
     else:
         consonant = min(max(consonant, pre + 24.0), next_pre_rel + 48.0)
@@ -388,8 +437,20 @@ def _refine_kr_bridge_with_adjacent_cv(
     if next_onset_abs > 0.0:
         next_onset_rel = max(next_onset_abs - offset_new, pre_new + 10.0)
         next_pre_rel = max(next_pre_abs - offset_new, next_onset_rel)
-        cap = min(next_onset_rel + cut_allow_ms, next_pre_rel + max(8.0, cut_allow_ms * 0.75))
-        cutoff_abs_new = min(cutoff_abs_new, max(cons_new + cut_gap_lo, cap))
+        if a_type == "vc" and is_stop:
+            cons_new, cutoff_abs_new = _enforce_stoplike_vc_before_next_onset(
+                pre_new,
+                cons_new,
+                cutoff_abs_new,
+                next_onset_rel,
+                cons_margin=7.0,
+                cut_margin=1.0,
+                min_cons_gap=10.0,
+                min_cut_gap=max(6.0, float(cut_gap_lo)),
+            )
+        else:
+            cap = min(next_onset_rel + cut_allow_ms, next_pre_rel + max(8.0, cut_allow_ms * 0.75))
+            cutoff_abs_new = min(cutoff_abs_new, max(cons_new + cut_gap_lo, cap))
 
     cutoff_new = -cutoff_abs_new
     return _validate_oto_params(offset_new, cons_new, cutoff_new, pre_new, ovl_new, alias_type=a_type)
@@ -471,9 +532,21 @@ def _compute_kr_cvvc_vc_timing_direct(alias, *args):
         next_seg_end_rel - (8.0 if is_hard else 10.0 if is_nasal else 14.0 if is_liquid else 12.0),
     )
     min_cut_tail = 8.0 if is_hard else 10.0 if is_nasal else 14.0 if is_liquid else 12.0
-    if cutoff_cap <= consonant + min_cut_tail:
-        consonant = max(pre + min_cons_gap, cutoff_cap - min_cut_tail)
-    cutoff_abs = min(max(cutoff_abs, consonant + min_cut_tail), cutoff_cap)
+    if is_hard:
+        consonant, cutoff_abs = _enforce_stoplike_vc_before_next_onset(
+            pre,
+            consonant,
+            cutoff_abs,
+            next_onset_rel,
+            cons_margin=6.0,
+            cut_margin=1.0,
+            min_cons_gap=max(8.0, float(min_cons_gap)),
+            min_cut_gap=max(6.0, float(min_cut_tail)),
+        )
+    else:
+        if cutoff_cap <= consonant + min_cut_tail:
+            consonant = max(pre + min_cons_gap, cutoff_cap - min_cut_tail)
+        cutoff_abs = min(max(cutoff_abs, consonant + min_cut_tail), cutoff_cap)
 
     cutoff = -cutoff_abs
     return _validate_oto_params(offset, consonant, cutoff, pre, ovl)

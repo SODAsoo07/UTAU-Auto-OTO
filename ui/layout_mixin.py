@@ -1,30 +1,55 @@
 import customtkinter as ctk
 
 from core.format_type_utils import normalize_auto_format_value
+from ui.theme_tokens import LANGUAGE_DROPDOWN_THEME, LANGUAGE_NOTICE_THEME, PALETTE
 
 
 class LayoutMixin:
     def _build_ui(self):
         self.auto_format_var = ctk.StringVar(value="자동 감지 (권장)")
 
-        path_frame = ctk.CTkFrame(self)
+        path_frame = ctk.CTkFrame(
+            self,
+            fg_color=PALETTE.panel_bg,
+            border_width=1,
+            border_color=PALETTE.panel_border,
+            corner_radius=8,
+        )
         path_frame.pack(fill="x", padx=15, pady=(10, 8))
 
+        def _style_primary_button(widget):
+            widget.configure(
+                fg_color=PALETTE.primary_button_bg,
+                hover_color=PALETTE.primary_button_hover,
+                text_color=PALETTE.primary_button_text,
+            )
+
+        def _style_blue_menu(widget):
+            widget.configure(
+                fg_color=PALETTE.menu_bg,
+                button_color=PALETTE.menu_button,
+                button_hover_color=PALETTE.menu_button_hover,
+                dropdown_fg_color=PALETTE.menu_dropdown_bg,
+                dropdown_hover_color=PALETTE.menu_dropdown_hover,
+                dropdown_text_color=PALETTE.menu_text,
+                text_color=PALETTE.menu_text,
+            )
+
         header_row = ctk.CTkFrame(path_frame, fg_color="transparent")
-        header_row.pack(fill="x", padx=12, pady=(10, 4))
+        header_row.pack(fill="x", padx=12, pady=(10, 6))
         ctk.CTkLabel(
             header_row,
             text=f"Auto OTO {self.app_version}",
             font=("", 16, "bold"),
-            text_color="#64B5F6",
+            text_color=PALETTE.header_accent,
         ).pack(side="left")
 
         self.lang_notice_label = ctk.CTkLabel(
             path_frame,
             text="",
             corner_radius=8,
-            fg_color="#4E342E",
-            text_color="#FFE0B2",
+            fg_color=LANGUAGE_NOTICE_THEME["japanese"]["fg_color"],
+            text_color=LANGUAGE_NOTICE_THEME["japanese"]["text_color"],
             anchor="w",
             justify="left",
             padx=12,
@@ -61,19 +86,32 @@ class LayoutMixin:
             command=self._on_language_change,
             width=200,
         )
+        self.lang_dropdown.configure(
+            fg_color=PALETTE.lang_dropdown_default_bg,
+            button_color=PALETTE.lang_dropdown_default_button,
+            button_hover_color=PALETTE.lang_dropdown_default_hover,
+            dropdown_fg_color=PALETTE.lang_dropdown_dropdown_bg,
+            dropdown_hover_color=PALETTE.lang_dropdown_dropdown_hover,
+            dropdown_text_color=PALETTE.menu_text,
+            text_color=PALETTE.lang_dropdown_text,
+        )
         self.lang_dropdown.pack(side="left", padx=(6, 12))
-        self.lang_info_label = ctk.CTkLabel(lang_row, text="", text_color="gray")
+        self.lang_info_label = ctk.CTkLabel(lang_row, text="", text_color=PALETTE.neutral_text)
         self.lang_info_label.pack(side="left", fill="x", expand=True)
 
         row1 = build_form_row(form_body)
         build_left_label(row1, "WAV 폴더:").pack(side="left")
         self.wav_entry = ctk.CTkEntry(row1, placeholder_text="WAV 파일이 있는 폴더 경로")
+        self.wav_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.wav_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
-        ctk.CTkButton(row1, text="찾아보기", width=90, command=lambda: self._browse_folder(self.wav_entry)).pack(side="right")
+        wav_browse_btn = ctk.CTkButton(row1, text="찾아보기", width=90, command=lambda: self._browse_folder(self.wav_entry))
+        _style_primary_button(wav_browse_btn)
+        wav_browse_btn.pack(side="right")
 
         row2 = build_form_row(form_body)
         build_left_label(row2, "템플릿 OTO:").pack(side="left")
         self.tpl_entry = ctk.CTkEntry(row2, placeholder_text="선택 사항 (없을 시 파일명/라벨 기반 자동 생성)")
+        self.tpl_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.tpl_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
         self.tpl_browse_btn = ctk.CTkButton(
             row2,
@@ -81,6 +119,7 @@ class LayoutMixin:
             width=90,
             command=lambda: self._browse_file(self.tpl_entry, [("OTO 파일", "*.ini")]),
         )
+        _style_primary_button(self.tpl_browse_btn)
         self.tpl_browse_btn.pack(side="right")
 
         row2b = build_form_row(form_body)
@@ -90,20 +129,23 @@ class LayoutMixin:
             text="템플릿 OTO 없음 (OpenUtau 호환 에일리어스 자동 생성)",
             variable=self.no_base_oto_var,
             command=self._on_no_base_oto_toggle,
-            text_color="#A5D6A7",
+            text_color=PALETTE.success_text,
         )
         self.no_base_oto_checkbox.pack(side="left", padx=(6, 0))
 
         row3 = build_form_row(form_body)
         build_left_label(row3, "출력 경로:").pack(side="left")
         self.out_entry = ctk.CTkEntry(row3, placeholder_text="생성된 oto.ini 저장 경로")
+        self.out_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.out_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
-        ctk.CTkButton(
+        out_save_btn = ctk.CTkButton(
             row3,
             text="저장",
             width=90,
             command=lambda: self._browser_save(self.out_entry, [("OTO 파일", "*.ini")]),
-        ).pack(side="right")
+        )
+        _style_primary_button(out_save_btn)
+        out_save_btn.pack(side="right")
 
         _, left_format, right_format = build_split_row(form_body)
 
@@ -116,11 +158,12 @@ class LayoutMixin:
             width=190,
             command=self._save_config,
         )
+        _style_blue_menu(self.format_dropdown)
         self.format_dropdown.pack(side="left", padx=(6, 8))
         ctk.CTkLabel(
             left_format,
             text="(템플릿 유무와 무관하게 우선 적용)",
-            text_color="gray",
+            text_color=PALETTE.neutral_text,
         ).pack(side="left", fill="x", expand=True)
 
         build_left_label(right_format, "JP 에일리어스:").pack(side="left")
@@ -131,8 +174,9 @@ class LayoutMixin:
             width=190,
             command=lambda _v: self._save_config(),
         )
+        _style_blue_menu(self.ja_alias_style_menu)
         self.ja_alias_style_menu.pack(side="left", padx=(6, 8))
-        ctk.CTkLabel(right_format, text="(일본어 OTO 생성 시 적용)", text_color="gray").pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(right_format, text="(일본어 OTO 생성 시 적용)", text_color=PALETTE.neutral_text).pack(side="left", fill="x", expand=True)
 
         row_align = build_form_row(form_body)
 
@@ -146,11 +190,12 @@ class LayoutMixin:
             width=190,
             command=self._on_aligner_change,
         )
+        _style_blue_menu(self.aligner_menu)
         self.aligner_menu.pack(side="left", padx=(6, 8))
         self.aligner_help_label = ctk.CTkLabel(
             self.row_aligner,
             text="(기본은 MFA입니다. 필요 시 자동 설치됩니다.)",
-            text_color="gray",
+            text_color=PALETTE.neutral_text,
         )
         self.aligner_help_label.pack(side="left", fill="x", expand=True)
 
@@ -161,21 +206,22 @@ class LayoutMixin:
             self.row_mfa_profile,
             values=["정확도 우선 (기본)", "빠름 (저사양 추천)"],
             variable=self.mfa_align_profile_var,
-            width=250,
+            width=280,
             command=lambda _v: self._save_config(),
         )
+        _style_blue_menu(self.mfa_align_profile_menu)
         self.mfa_align_profile_menu.pack(side="left", padx=(6, 8))
         ctk.CTkLabel(
             self.row_mfa_profile,
             text="(기본 유지, 느린 환경에서는 빠름 권장)",
-            text_color="gray",
+            text_color=PALETTE.neutral_text,
         ).pack(side="left", fill="x", expand=True)
 
         self.row_aligner_advanced = build_form_row(form_body)
         ctk.CTkLabel(
             self.row_aligner_advanced,
             text="고급 정렬 옵션은 '고급 설정' 탭에서 켤 수 있습니다.",
-            text_color="gray",
+            text_color=PALETTE.neutral_text,
             anchor="w",
         ).pack(side="left", padx=(121, 0))
 
@@ -184,11 +230,21 @@ class LayoutMixin:
             advanced_row,
             text="▶ 고급 옵션 (특수 발음/접미사)",
             width=260,
-            fg_color="transparent",
+            fg_color=PALETTE.advanced_toggle_bg,
+            hover_color=PALETTE.advanced_toggle_hover,
+            text_color=PALETTE.advanced_toggle_text,
             border_width=1,
+            border_color=PALETTE.advanced_toggle_border,
             command=self._toggle_advanced_options,
         )
         self.advanced_toggle_btn.pack(side="right", padx=(0, 12), pady=(0, 4))
+        self.advanced_hint_label = ctk.CTkLabel(
+            path_frame,
+            text="고급 설정 탭은 고급 설정 탭에서 볼 수 있습니다.",
+            text_color=PALETTE.hint_text,
+            anchor="e",
+        )
+        self.advanced_hint_label.pack(fill="x", padx=12, pady=(0, 6))
 
         self.advanced_options_frame = ctk.CTkFrame(path_frame, fg_color="transparent")
 
@@ -196,13 +252,17 @@ class LayoutMixin:
         row0.pack(fill="x", padx=0, pady=3)
         ctk.CTkLabel(row0, text="특수 발음 (선택):", width=120, anchor="w").pack(side="left")
         self.custom_entry = ctk.CTkEntry(row0, placeholder_text="커스텀 매핑 규칙 파일 (.txt)", textvariable=self.custom_phoneme_var)
+        self.custom_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.custom_entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
-        ctk.CTkButton(row0, text="찾아보기", width=90, command=lambda: self._browse_file(self.custom_entry, [("Text 파일", "*.txt")])).pack(side="right")
+        custom_browse_btn = ctk.CTkButton(row0, text="찾아보기", width=90, command=lambda: self._browse_file(self.custom_entry, [("Text 파일", "*.txt")]))
+        _style_primary_button(custom_browse_btn)
+        custom_browse_btn.pack(side="right")
 
         row0b = ctk.CTkFrame(self.advanced_options_frame, fg_color="transparent")
         row0b.pack(fill="x", padx=0, pady=3)
         ctk.CTkLabel(row0b, text="접미사 (선택):", width=120, anchor="w").pack(side="left")
         self.suffix_entry = ctk.CTkEntry(row0b, placeholder_text="예: C4 (모든 에일리어스 끝에 _C4 형태로 부여)", textvariable=self.alias_suffix_var)
+        self.suffix_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.suffix_entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
 
         self._toggle_advanced_options(force=False)
@@ -215,6 +275,7 @@ class LayoutMixin:
         self._build_profile_tune_tab()
         self._build_advanced_settings_tab()
         self._build_log_tab()
+        self.tabview.set("로그")
 
         bottom = ctk.CTkFrame(self)
         bottom.pack(side="bottom", fill="x", padx=15, pady=(5, 15))
@@ -222,7 +283,7 @@ class LayoutMixin:
         status_group = ctk.CTkFrame(bottom, fg_color="transparent")
         status_group.pack(side="left", fill="x", expand=True, padx=(10, 6))
 
-        self.status_label = ctk.CTkLabel(status_group, text="대기 중", anchor="w", text_color="gray")
+        self.status_label = ctk.CTkLabel(status_group, text="대기 중", anchor="w", text_color=PALETTE.neutral_text)
         self.status_label.pack(fill="x")
 
         progress_row = ctk.CTkFrame(status_group, fg_color="transparent")
@@ -230,13 +291,21 @@ class LayoutMixin:
         self.progress_bar = ctk.CTkProgressBar(progress_row, height=12)
         self.progress_bar.set(0.0)
         self.progress_bar.pack(side="left", fill="x", expand=True)
-        self.progress_label = ctk.CTkLabel(progress_row, text="0%", width=42, anchor="e", text_color="gray")
+        self.progress_label = ctk.CTkLabel(progress_row, text="0%", width=42, anchor="e", text_color=PALETTE.neutral_text)
         self.progress_label.pack(side="left", padx=(8, 0))
 
         self.run_btn = ctk.CTkButton(bottom, text="▶ 전체 실행", font=("", 14, "bold"), width=150, height=40, command=self._run_full_pipeline)
         self.run_btn.pack(side="right", padx=10)
 
-        self.report_btn = ctk.CTkButton(bottom, text="🐛 오류 제보", width=120, height=40, fg_color="#FF6B6B", hover_color="#EE5A5A", command=self._export_error_report)
+        self.report_btn = ctk.CTkButton(
+            bottom,
+            text="🐛 오류 제보",
+            width=120,
+            height=40,
+            fg_color=PALETTE.danger_button_bg,
+            hover_color=PALETTE.danger_button_hover,
+            command=self._export_error_report,
+        )
         self.report_btn.pack(side="right", padx=5)
         self._sync_aligner_ui()
 
@@ -289,11 +358,15 @@ class LayoutMixin:
             self.lang_info_label.configure(text="한국어 단위(a, k, ga 등) 에일리어스를 기준으로 생성합니다.")
             self.lang_notice_label.configure(
                 text="현재 언어: 한국어\nLab 생성, 사전 생성, 정렬, OTO 계산이 모두 한국어 규칙으로 진행됩니다.",
-                fg_color="#2E4A3F",
-                text_color="#C8E6C9",
+                fg_color=LANGUAGE_NOTICE_THEME["korean"]["fg_color"],
+                text_color=LANGUAGE_NOTICE_THEME["korean"]["text_color"],
             )
             try:
-                self.lang_dropdown.configure(fg_color="#2E7D32", button_color="#1B5E20", button_hover_color="#145A18")
+                self.lang_dropdown.configure(
+                    fg_color=LANGUAGE_DROPDOWN_THEME["korean"]["fg_color"],
+                    button_color=LANGUAGE_DROPDOWN_THEME["korean"]["button_color"],
+                    button_hover_color=LANGUAGE_DROPDOWN_THEME["korean"]["button_hover_color"],
+                )
             except Exception:
                 pass
             self.gen_missing_vowels_checkbox.configure(state="normal")
@@ -303,11 +376,15 @@ class LayoutMixin:
             self.lang_info_label.configure(text="일본어 단위(a, k, ka 등) 에일리어스를 기준으로 생성합니다.")
             self.lang_notice_label.configure(
                 text="현재 언어: 일본어\n특수 발음 기호가 섞인 파일은 Lab 생성 전에 언어 선택을 다시 확인하세요.",
-                fg_color="#4E342E",
-                text_color="#FFE0B2",
+                fg_color=LANGUAGE_NOTICE_THEME["japanese"]["fg_color"],
+                text_color=LANGUAGE_NOTICE_THEME["japanese"]["text_color"],
             )
             try:
-                self.lang_dropdown.configure(fg_color="#EF6C00", button_color="#E65100", button_hover_color="#BF360C")
+                self.lang_dropdown.configure(
+                    fg_color=LANGUAGE_DROPDOWN_THEME["japanese"]["fg_color"],
+                    button_color=LANGUAGE_DROPDOWN_THEME["japanese"]["button_color"],
+                    button_hover_color=LANGUAGE_DROPDOWN_THEME["japanese"]["button_hover_color"],
+                )
             except Exception:
                 pass
             self.gen_missing_vowels_checkbox.configure(state="normal")

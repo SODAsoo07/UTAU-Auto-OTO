@@ -546,11 +546,33 @@ JA_CVVC_BRIDGE_TIMING = {
 }
 
 
-def validate_oto_params(offset, consonant, cutoff, pre, ovl):
+def validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=""):
     """
     UTAU OTO 파라미터 순서 제약을 강제합니다.
     올바른 순서: offset → overlap → preutterance → consonant → cutoff
     """
+    a_type = str(alias_type or "").strip().lower()
+    min_cons_gap_by_type = {
+        "cv": 20.0,
+        "cv_head": 20.0,
+        "vc": 6.0,
+        "vv": 14.0,
+        "vcv": 16.0,
+        "mono": 12.0,
+        "br": 8.0,
+    }
+    min_cut_gap_by_type = {
+        "cv": 14.0,
+        "cv_head": 14.0,
+        "vc": 4.0,
+        "vv": 10.0,
+        "vcv": 12.0,
+        "mono": 10.0,
+        "br": 6.0,
+    }
+    min_cons_gap = min_cons_gap_by_type.get(a_type, 30.0 if not a_type else 14.0)
+    min_cut_gap = min_cut_gap_by_type.get(a_type, 50.0 if not a_type else 12.0)
+
     if offset < 0: offset = 0
     if pre < 0: pre = 0
     if ovl < 0: ovl = 0
@@ -558,12 +580,12 @@ def validate_oto_params(offset, consonant, cutoff, pre, ovl):
     
     if ovl > pre:
         ovl = pre * 0.75
-    if consonant < pre:
-        consonant = pre + 30
+    if consonant < pre + min_cons_gap:
+        consonant = pre + min_cons_gap
     
     cutoff_abs = abs(cutoff)
-    if cutoff_abs <= consonant:
-        cutoff_abs = consonant + 50
+    if cutoff_abs <= consonant + min_cut_gap:
+        cutoff_abs = consonant + min_cut_gap
     cutoff = -cutoff_abs
     
     return offset, consonant, cutoff, pre, ovl
@@ -1596,16 +1618,16 @@ def _extract_base_timing_shape(line):
 
 def _apply_base_shape_blend(offset, consonant, cutoff, pre, ovl, base_shape, alias_type="cv"):
     if os.environ.get("UTOA_DISABLE_BASE_SHAPE_BLEND", "").strip().lower() in {"1", "true", "yes", "on"}:
-        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+        return validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=alias_type)
     if not base_shape:
-        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+        return validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=alias_type)
     if alias_type == "cv_head":
         # 템플릿의 비정상 head 라인(cut_gap 과소/선행발음 과대)을 그대로 따라가면
         # 어두 CV 길이가 과도하게 짧아질 수 있어 블렌딩을 생략한다.
         src_cut_gap = float(base_shape.get("cut_gap", max(abs(cutoff) - consonant, 20.0)))
         src_pre = float(base_shape.get("pre", pre))
         if src_cut_gap < 90.0 or src_pre > 280.0:
-            return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+            return validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=alias_type)
 
     if alias_type in {"vc", "vv"}:
         w = 0.30
@@ -1634,7 +1656,7 @@ def _apply_base_shape_blend(offset, consonant, cutoff, pre, ovl, base_shape, ali
     ovl_ratio_new = _blend(ovl_ratio_now, ovl_ratio_t, min(0.38, w + 0.04))
     ovl_new = max(0.0, pre_new * _clamp_range(ovl_ratio_new, 0.04, 0.86))
 
-    return validate_oto_params(offset, cons_new, cutoff_new, pre_new, ovl_new)
+    return validate_oto_params(offset, cons_new, cutoff_new, pre_new, ovl_new, alias_type=alias_type)
 
 
 def _is_reliable_base_profile(profile):
@@ -1757,7 +1779,7 @@ def _compute_vc_params_from_vcv_anchor(
         cutoff_abs = consonant + 10.0
     cutoff = -cutoff_abs
 
-    return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    return validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type="vc")
 
 
 def _refine_ja_vc_with_adjacent_cv(
@@ -1781,7 +1803,7 @@ def _refine_ja_vc_with_adjacent_cv(
     - cutoff(abs): 다음 CV 모음 진입 전/근처에서 종료
     """
     if next_cv_anchor is None and next_c_start_abs is None:
-        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+        return validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type="vc")
 
     hard_cls = (c_char in JA_PLOSIVE_CONSONANTS) or (c_char in JA_SIBILANT_ONSETS) or (c_char in JA_FRICATIVE_ONSETS)
     son_cls = (c_char in JA_NASAL_ONSETS) or (c_char in JA_LIQUID_ONSETS) or (c_char in JA_GLIDE_ONSETS)
@@ -1843,11 +1865,11 @@ def _refine_ja_vc_with_adjacent_cv(
 
     # 3) consonant/cutoff: 다음 CV 진입 기준으로 제한
     if hard_cls:
-        cons_abs_target = onset_abs - 4.0
-        cons_allow_after_onset = 6.0
-        cut_gap_target = 12.0
-        cut_allow_after_vowel = -2.0
-        cut_allow_after_onset = 8.0
+        cons_abs_target = onset_abs - 8.0
+        cons_allow_after_onset = -2.0
+        cut_gap_target = 8.0
+        cut_allow_after_vowel = -8.0
+        cut_allow_after_onset = -1.0
     elif son_cls:
         cons_abs_target = onset_abs + 6.0
         cons_allow_after_onset = 14.0
@@ -1876,9 +1898,27 @@ def _refine_ja_vc_with_adjacent_cv(
         cut_abs_upper = cut_abs_min + 2.0
     cut_abs_new = _blend(cur_cut_abs, cut_abs_target, 0.72)
     cut_abs_new = _clamp_range(cut_abs_new, cut_abs_min, cut_abs_upper)
+
+    if hard_cls:
+        onset_rel = max(onset_abs - offset_new, pre_new + 8.0)
+        cons_floor = pre_new + 6.0
+        cons_cap = onset_rel - 6.0
+        consonant_new = min(consonant_new, cons_cap)
+        consonant_new = max(consonant_new, cons_floor)
+
+        cut_cap = onset_rel - 1.0
+        cut_floor = consonant_new + 4.0
+        if cut_floor > cut_cap:
+            consonant_new = max(cons_floor, cut_cap - 4.0)
+            cut_floor = consonant_new + 4.0
+        if cut_floor > cut_cap:
+            cut_cap = cut_floor + 0.8
+        cut_abs_new = min(cut_abs_new, cut_cap)
+        cut_abs_new = max(cut_abs_new, cut_floor)
+
     cutoff_new = -(cut_abs_new - offset_new)
 
-    return validate_oto_params(offset_new, consonant_new, cutoff_new, pre_new, ovl_abs_new - offset_new)
+    return validate_oto_params(offset_new, consonant_new, cutoff_new, pre_new, ovl_abs_new - offset_new, alias_type="vc")
 
 
 def _limit_pre_anchor_shift(
@@ -1890,6 +1930,7 @@ def _limit_pre_anchor_shift(
     *,
     pre_abs_before,
     max_shift_ms,
+    alias_type="",
 ):
     """
     pre 절대 위치 이동량을 제한해 브리지 앵커 과보정을 방지한다.
@@ -1899,13 +1940,13 @@ def _limit_pre_anchor_shift(
     delta = float(pre_abs_after - pre_abs_before)
     limit = max(0.0, float(max_shift_ms))
     if abs(delta) <= limit:
-        out = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+        out = validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=alias_type)
         return (*out, float(out[0] + out[3]), False)
 
     limited_pre_abs = float(pre_abs_before) + (limit if delta > 0.0 else -limit)
     abs_shift = pre_abs_after - limited_pre_abs
     offset = float(offset) - float(abs_shift)
-    out = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    out = validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=alias_type)
     return (*out, float(out[0] + out[3]), True)
 
 
@@ -2075,7 +2116,7 @@ def _apply_ja_consonant_timing_shaping(alias_text, alias_type, pre, consonant, c
     cut_gap_new = _clamp_range(cut_gap_now * cut_gap_mul, 16.0, 240.0)
     cutoff_new = -(cons_new + cut_gap_new)
     _, cons_new, cutoff_new, pre_new, ovl_new = validate_oto_params(
-        0.0, cons_new, cutoff_new, pre_new, ovl_new
+        0.0, cons_new, cutoff_new, pre_new, ovl_new, alias_type=alias_type
     )
     return pre_new, cons_new, cutoff_new, ovl_new
 
@@ -2123,7 +2164,7 @@ def _apply_ja_style_profile(alias_type, offset, consonant, cutoff, pre, ovl, pro
         if offset <= 1400.0 and abs(offset - head_off_t) <= 260.0:
             offset = _blend(offset, head_off_t, min(0.10, w * 0.35))
 
-    return validate_oto_params(offset, cons_new, cutoff_new, pre_new, ovl_new)
+    return validate_oto_params(offset, cons_new, cutoff_new, pre_new, ovl_new, alias_type=alias_type)
 
 
 def train_ja_autotune_profile(auto_oto_path, manual_oto_path, custom_phonemes_path=""):
@@ -2372,7 +2413,7 @@ def generate_ja_oto(
                 result=result,
             )
 
-        return apply_language_anchor_lock(
+        out = apply_language_anchor_lock(
             language="japanese",
             format_type=format_type,
             alias_type=alias_type,
@@ -2384,7 +2425,14 @@ def generate_ja_oto(
             next_onset_abs_ms=next_onset_abs_ms,
             next_vowel_abs_ms=next_vowel_abs_ms,
             mapping_confidence=1.0,
-            validate_fn=validate_oto_params,
+            validate_fn=lambda o, c, cut, p, v, _atype=alias_type: validate_oto_params(
+                o,
+                c,
+                cut,
+                p,
+                v,
+                alias_type=_atype,
+            ),
             lite=bool(lite),
             is_enabled_fn=is_anchor_lock_enabled,
             get_profile_fn=lambda lang, fmt, alias_kind: _get_profile(lang, fmt, alias_key),
@@ -2398,6 +2446,31 @@ def generate_ja_oto(
             append_log_fn=append_timing_anchor_log,
             log_path=anchor_log_path,
         )
+        if str(alias_type or "").strip().lower() == "vc" and next_onset_abs_ms is not None:
+            c_hint = get_vc_consonant(alias_text)
+            is_hard_vc = (
+                c_hint in JA_PLOSIVE_CONSONANTS
+                or c_hint in JA_SIBILANT_ONSETS
+                or c_hint in JA_FRICATIVE_ONSETS
+            )
+            if is_hard_vc:
+                o, c, cut, p, v = [float(x) for x in out]
+                next_onset_rel = max(float(next_onset_abs_ms) - o, p + 8.0)
+                c_cap = next_onset_rel - 6.0
+                c = min(c, c_cap)
+                c = max(c, p + 6.0)
+                cut_abs = abs(cut)
+                cut_cap = next_onset_rel - 1.0
+                cut_floor = c + 4.0
+                if cut_floor > cut_cap:
+                    c = max(p + 6.0, cut_cap - 4.0)
+                    cut_floor = c + 4.0
+                if cut_floor > cut_cap:
+                    cut_cap = cut_floor + 0.8
+                cut_abs = min(cut_abs, cut_cap)
+                cut_abs = max(cut_abs, cut_floor)
+                out = validate_oto_params(o, c, -cut_abs, p, v, alias_type="vc")
+        return out
 
     _append_mapping_trace = diagnostics.append_mapping_trace
     _record_unset = diagnostics.record_unset
@@ -3199,7 +3272,14 @@ def generate_ja_oto(
                     extract_cv_bounds_fn=_ja_extract_cv_bounds,
                     cv_offset_and_pre_fn=_ja_cv_offset_and_pre,
                     adaptive_overlap_fn=_adaptive_ja_overlap,
-                    validate_fn=validate_oto_params,
+                    validate_fn=lambda o, c, cut, p, v: validate_oto_params(
+                        o,
+                        c,
+                        cut,
+                        p,
+                        v,
+                        alias_type="cv",
+                    ),
                 )
 
             def _compute_ja_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, c_char, bridge_profile):
@@ -3210,7 +3290,14 @@ def generate_ja_oto(
                     c_char=c_char,
                     bridge_profile=(bridge_profile or JA_CVVC_BRIDGE_TIMING.get("default", {})),
                     plosive_consonants=JA_PLOSIVE_CONSONANTS,
-                    validate_fn=validate_oto_params,
+                    validate_fn=lambda o, c, cut, p, v: validate_oto_params(
+                        o,
+                        c,
+                        cut,
+                        p,
+                        v,
+                        alias_type=alias_type,
+                    ),
                 )
 
             cv_anchor_by_idx = {
@@ -4207,13 +4294,25 @@ def generate_ja_oto(
                             cutoff_abs = min(cutoff_abs, consonant + 95)
                             cutoff = -cutoff_abs
 
-                    # CVVC 원리: VC 파열/파찰음은 다음 자음 onset 직전에서 정리해 중복 파열을 줄인다.
-                    if alias_type == 'vc' and c_char in JA_PLOSIVE_CONSONANTS:
+                    # CVVC 원리: VC 파열/파찰/치찰음은 다음 자음 onset 직전에서 정리해 중복 자음을 줄인다.
+                    if alias_type == 'vc' and (
+                        c_char in JA_PLOSIVE_CONSONANTS
+                        or c_char in JA_SIBILANT_ONSETS
+                        or c_char in JA_FRICATIVE_ONSETS
+                    ):
                         onset_guard = max(next_c_onset_rel, pre + 14.0)
-                        consonant = min(consonant, onset_guard - 6.0)
-                        consonant = max(consonant, pre + 12.0)
-                        cutoff_abs = max(consonant + 10.0, onset_guard - 2.0)
-                        cutoff_abs = min(cutoff_abs, onset_guard + 6.0)
+                        consonant = min(consonant, onset_guard - 7.0)
+                        consonant = max(consonant, pre + 6.0)
+                        cutoff_abs = max(consonant + 4.0, onset_guard - 1.0)
+                        cutoff_cap = onset_guard - 0.8
+                        cutoff_floor = consonant + 4.0
+                        if cutoff_floor > cutoff_cap:
+                            consonant = max(pre + 6.0, cutoff_cap - 4.0)
+                            cutoff_floor = consonant + 4.0
+                        if cutoff_floor > cutoff_cap:
+                            cutoff_cap = cutoff_floor + 0.8
+                        cutoff_abs = min(cutoff_abs, cutoff_cap)
+                        cutoff_abs = max(cutoff_abs, cutoff_floor)
                         cutoff = -cutoff_abs
 
                     if alias_type == 'vc':
@@ -4249,7 +4348,14 @@ def generate_ja_oto(
                     vc_prev_anchor=vc_prev_anchor,
                     vc_next_anchor=vc_next_anchor,
                     post_ctx=post_ctx,
-                    validate_fn=validate_oto_params,
+                    validate_fn=lambda o, c, cut, p, v, _atype=alias_type: validate_oto_params(
+                        o,
+                        c,
+                        cut,
+                        p,
+                        v,
+                        alias_type=_atype,
+                    ),
                     soft_guard_fn=_apply_soft_mel_offset_cutoff_guard,
                     base_shape_blend_fn=_apply_base_shape_blend,
                     refine_ja_vc_fn=_refine_ja_vc_with_adjacent_cv,

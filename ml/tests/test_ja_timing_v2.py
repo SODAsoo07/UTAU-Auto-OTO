@@ -74,6 +74,35 @@ class JaTimingV2Tests(unittest.TestCase):
         self.assertGreater(consonant, pre)
         self.assertLess(cutoff, 0.0)
 
+    def test_compute_ja_vc_from_adjacent_cv_hard_stop_cuts_before_next_onset(self):
+        prev_cv = {
+            "pre": 88.0,
+            "cons_gap": 56.0,
+            "vowel_len": 120.0,
+            "vowel_end_abs": 480.0,
+        }
+        next_cv = {
+            "pre": 92.0,
+            "pre_abs": 650.0,
+            "cons_abs": 720.0,
+            "onset_abs": 620.0,
+            "cons_gap": 74.0,
+        }
+        offset, consonant, cutoff, pre, _ovl = compute_ja_vc_from_adjacent_cv(
+            prev_cv,
+            next_cv,
+            alias_type="vc",
+            c_char="k",
+            bridge_profile={},
+            plosive_consonants={"k", "t", "p", "ch", "ts"},
+            validate_fn=_validate,
+        )
+        next_onset_rel = float(next_cv["onset_abs"]) - float(offset)
+        self.assertLessEqual(consonant, next_onset_rel - 5.0)
+        self.assertLessEqual(abs(cutoff), next_onset_rel + 0.9)
+        self.assertGreaterEqual(abs(cutoff), consonant + 4.0)
+        self.assertGreaterEqual(consonant, pre + 6.0)
+
     def test_compute_vcv_params_from_virtual_split_preserves_param_order(self):
         result = compute_vcv_params_from_virtual_split(
             "a ka",

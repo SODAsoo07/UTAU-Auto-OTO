@@ -130,6 +130,7 @@ def run_ja_general_row(
                 ovl,
                 pre_abs_before=pre_abs_before,
                 max_shift_ms=max_shift,
+                alias_type=alias_type,
             )
             if clamped_shift:
                 log_fn(

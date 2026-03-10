@@ -561,9 +561,9 @@ def _apply_korean_bridge_post_guard(
     if alias_type == "vc":
         if coda_type == "stop":
             gap_lo, gap_hi, gap_t = 10.0, 24.0, 16.0
-            cons_lo, cons_hi, cons_t = 14.0, 56.0, 32.0
-            cut_lo, cut_hi, cut_t = 8.0, 24.0, 14.0
-            next_allow = 7.0
+            cons_lo, cons_hi, cons_t = 10.0, 44.0, 24.0
+            cut_lo, cut_hi, cut_t = 6.0, 18.0, 10.0
+            next_allow = -1.0
         elif coda_type in {"nasal", "liquid"}:
             gap_lo, gap_hi, gap_t = 7.0, 20.0, 13.0
             cons_lo, cons_hi, cons_t = 26.0, 86.0, 48.0
@@ -645,12 +645,24 @@ def _apply_japanese_bridge_post_guard(
     ovl = float(ovl)
     cutoff_abs = abs(float(cutoff))
     mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
+    coda_type = str(row_context.get("coda_type", "") or "").strip().lower()
 
     if alias_type == "vc":
-        gap_lo, gap_hi, gap_t = 8.0, 22.0, 13.0
-        cons_lo, cons_hi, cons_t = 18.0, 72.0, 38.0
-        cut_lo, cut_hi, cut_t = 10.0, 34.0, 18.0
-        next_allow = 12.0
+        if coda_type == "stop":
+            gap_lo, gap_hi, gap_t = 8.0, 20.0, 12.0
+            cons_lo, cons_hi, cons_t = 10.0, 42.0, 24.0
+            cut_lo, cut_hi, cut_t = 4.0, 16.0, 8.0
+            next_allow = -1.0
+        elif coda_type in {"nasal", "liquid"}:
+            gap_lo, gap_hi, gap_t = 8.0, 22.0, 13.0
+            cons_lo, cons_hi, cons_t = 20.0, 74.0, 40.0
+            cut_lo, cut_hi, cut_t = 10.0, 32.0, 18.0
+            next_allow = 10.0
+        else:
+            gap_lo, gap_hi, gap_t = 8.0, 22.0, 13.0
+            cons_lo, cons_hi, cons_t = 16.0, 62.0, 34.0
+            cut_lo, cut_hi, cut_t = 8.0, 26.0, 14.0
+            next_allow = 4.0
     else:
         gap_lo, gap_hi, gap_t = 4.0, 12.0, 7.0
         cons_lo, cons_hi, cons_t = 52.0, 144.0, 90.0
@@ -763,9 +775,10 @@ def _finalize_ml_params(
     validate_fn,
     anchor_stats: Optional[Dict[str, int]] = None,
 ) -> Tuple[float, float, float, float, float]:
-    out = validate_fn(*params)
-    out = _apply_language_specific_post_guard(language, row_context, out, validate_fn)
-    out, applied_rules = _apply_anchor_lock_lite_after_ml(language, row_context, out, validate_fn)
+    validate_row = _build_alias_aware_validator(validate_fn, row_context)
+    out = validate_row(*params)
+    out = _apply_language_specific_post_guard(language, row_context, out, validate_row)
+    out, applied_rules = _apply_anchor_lock_lite_after_ml(language, row_context, out, validate_row)
     if anchor_stats is not None and applied_rules:
         anchor_stats["anchor_locked_count"] = int(anchor_stats.get("anchor_locked_count", 0)) + 1
         if "cutoff_next_onset_clamp" in applied_rules or "cutoff_next_vowel_clamp" in applied_rules:
@@ -809,6 +822,18 @@ def _to_float(value: object, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return float(default)
+
+
+def _build_alias_aware_validator(validate_fn, row_context: Dict[str, object]):
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+
+    def _validate(offset, consonant, cutoff, pre, ovl):
+        try:
+            return validate_fn(offset, consonant, cutoff, pre, ovl, alias_type=alias_type)
+        except TypeError:
+            return validate_fn(offset, consonant, cutoff, pre, ovl)
+
+    return _validate
 
 
 def _anchor_key_for_row(language: str, row_context: Dict[str, object]) -> str:
