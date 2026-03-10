@@ -198,7 +198,7 @@ def _resolve_case_settings(
     primary_aligner = normalize_aligner_name(case.get("primary_aligner", case.get("aligner", defaults.get("primary_aligner", defaults.get("aligner", "mfa")))), default="mfa")
     fallback_aligner = normalize_aligner_name(case.get("fallback_aligner", defaults.get("fallback_aligner", "")), default="")
     mfa_path = _resolve_path(config_dir, str(case.get("mfa_path", defaults.get("mfa_path", ""))).strip())
-    mfa_align_profile = str(case.get("mfa_align_profile", defaults.get("mfa_align_profile", "accurate"))).strip() or "accurate"
+    mfa_align_profile = str(case.get("mfa_align_profile", defaults.get("mfa_align_profile", "default"))).strip() or "default"
     return {
         "name": name,
         "enabled": enabled,
@@ -551,7 +551,7 @@ def _run_one_case(
                     primary_aligner=primary_aligner,
                     fallback_aligner=fallback_aligner,
                     mfa_path=str(case_info.get("mfa_path", "") or ""),
-                    mfa_align_profile=str(case_info.get("mfa_align_profile", "accurate") or "accurate"),
+                    mfa_align_profile=str(case_info.get("mfa_align_profile", "default") or "default"),
                     callback=log,
                 )
                 if alignment_report.get("fallback_path"):

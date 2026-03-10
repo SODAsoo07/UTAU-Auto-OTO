@@ -204,7 +204,7 @@ class LayoutMixin:
         build_left_label(self.row_mfa_profile, "MFA 정렬 프로필:").pack(side="left")
         self.mfa_align_profile_menu = ctk.CTkOptionMenu(
             self.row_mfa_profile,
-            values=["정확도 우선 (기본)", "빠름 (저사양 추천)"],
+            values=["기본", "정확도 우선", "빠름 (저사양 추천)"],
             variable=self.mfa_align_profile_var,
             width=280,
             command=lambda _v: self._save_config(),
@@ -213,7 +213,7 @@ class LayoutMixin:
         self.mfa_align_profile_menu.pack(side="left", padx=(6, 8))
         ctk.CTkLabel(
             self.row_mfa_profile,
-            text="(기본 유지, 느린 환경에서는 빠름 권장)",
+            text="(기본=안정, 정확도 우선=화자 적응, 저사양은 빠름 권장)",
             text_color=PALETTE.neutral_text,
         ).pack(side="left", fill="x", expand=True)
 
@@ -405,7 +405,11 @@ class LayoutMixin:
         profile = str(self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "").strip()
         if profile in {"빠름 (저사양 추천)", "fast"}:
             return "fast"
-        return "accurate"
+        if profile in {"정확도 우선", "accurate", "accurate_adapted", "speaker_adapted"}:
+            return "accurate"
+        if profile in {"기본", "default", "정확도 우선 (기본)"}:
+            return "default"
+        return "default"
 
     def _on_aligner_change(self, _value=None):
         self._sync_aligner_ui()

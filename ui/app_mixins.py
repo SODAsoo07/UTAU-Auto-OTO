@@ -601,7 +601,7 @@ class ConfigMixin:
             "ja_alias_style": self.ja_alias_style_var.get(),
             "show_advanced_aligner": self.show_advanced_aligner_var.get() if hasattr(self, "show_advanced_aligner_var") else False,
             "aligner": self.aligner_var.get(),
-            "mfa_align_profile": self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "정확도 우선 (기본)",
+            "mfa_align_profile": self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "기본",
             "whisperx_profile": self.whisperx_profile_var.get() if hasattr(self, "whisperx_profile_var") else "balanced",
             "whisperx_device": self.whisperx_device_var.get() if hasattr(self, "whisperx_device_var") else "auto",
             "whisperx_compute_type": self.whisperx_compute_type_var.get() if hasattr(self, "whisperx_compute_type_var") else "int8",
@@ -659,12 +659,17 @@ class ConfigMixin:
             if hasattr(self, "show_advanced_aligner_var"):
                 self.show_advanced_aligner_var.set(False)
             if "mfa_align_profile" in config and hasattr(self, "mfa_align_profile_var"):
-                saved_profile = str(config.get("mfa_align_profile", "정확도 우선 (기본)") or "").strip()
-                if saved_profile in {"정확도 우선 (기본)", "빠름 (저사양 추천)", "accurate", "fast"}:
-                    if saved_profile == "fast":
-                        saved_profile = "빠름 (저사양 추천)"
-                    elif saved_profile == "accurate":
-                        saved_profile = "정확도 우선 (기본)"
+                saved_profile = str(config.get("mfa_align_profile", "기본") or "").strip()
+                legacy_to_current = {
+                    "정확도 우선 (기본)": "기본",
+                    "default": "기본",
+                    "accurate": "정확도 우선",
+                    "accurate_adapted": "정확도 우선",
+                    "speaker_adapted": "정확도 우선",
+                    "fast": "빠름 (저사양 추천)",
+                }
+                saved_profile = legacy_to_current.get(saved_profile, saved_profile)
+                if saved_profile in {"기본", "정확도 우선", "빠름 (저사양 추천)"}:
                     self.mfa_align_profile_var.set(saved_profile)
             if "whisperx_profile" in config and hasattr(self, "whisperx_profile_var"):
                 profile = str(config.get("whisperx_profile", "balanced") or "balanced").strip().lower()
