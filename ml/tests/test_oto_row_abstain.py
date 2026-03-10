@@ -45,6 +45,21 @@ class OtoRowAbstainTests(unittest.TestCase):
         )
         self.assertFalse(result["should_skip"])
 
+    def test_row_abstain_skips_low_margin_candidate(self):
+        result = decide_cv_row_abstain(
+            alias_type="cv",
+            format_type="cvvc",
+            candidate_idx=1,
+            candidate_count=3,
+            candidate_active=True,
+            confidence_margin=2.5,
+            min_confidence_margin=6.0,
+            active_only_formats={"cvvc", "cv"},
+            margin_formats={"cvvc", "cv"},
+        )
+        self.assertTrue(result["should_skip"])
+        self.assertEqual(result["reason"], "row_low_margin_candidate")
+
 
 if __name__ == "__main__":
     unittest.main()

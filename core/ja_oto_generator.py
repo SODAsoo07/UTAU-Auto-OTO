@@ -76,6 +76,7 @@ from core.ja_mapping_v2 import (
     is_ja_cv_syllable_active as _is_ja_cv_syllable_active_v2,
     resolve_ja_planned_cv_index as _resolve_ja_planned_cv_index_v2,
 )
+from core.sinsy_label_ingest import build_sinsy_guided_anchor_plan, load_sinsy_label_entries
 from core.ja_mapping_scoring_v2 import (
     clamp_ja_cv_index_to_order as _clamp_ja_cv_index_to_order_v2,
     find_ja_cv_vowel_match_index as _find_ja_cv_vowel_match_index_v2,
@@ -2187,6 +2188,8 @@ def generate_ja_oto(
 
     if params is None:
         params = JA_DEFAULT_PARAMS.copy()
+    use_sinsy_labels = bool(params.get("USE_SINSY_LABELS", False)) if params else False
+    sinsy_label_path = str(params.get("SINSY_LABEL_PATH", "") or "").strip() if params else ""
     # KR 생성기와 동일한 신호 분석 헬퍼를 재사용해 멜 기반 가드 동작을 맞춘다.
     from core.oto_generator import (
         _read_wav_mono_np,
@@ -2224,6 +2227,14 @@ def generate_ja_oto(
         ja_mapping_words_fallback_enabled = False
     elif env_words_fallback in {"1", "true", "on", "yes"}:
         ja_mapping_words_fallback_enabled = True
+    env_use_sinsy = str(os.environ.get("UTOA_USE_SINSY_LABELS", "")).strip().lower()
+    if env_use_sinsy in {"0", "false", "off", "no"}:
+        use_sinsy_labels = False
+    elif env_use_sinsy in {"1", "true", "on", "yes"}:
+        use_sinsy_labels = True
+    env_sinsy_path = str(os.environ.get("UTOA_SINSY_LABEL_PATH", "")).strip()
+    if env_sinsy_path:
+        sinsy_label_path = env_sinsy_path
     env_spn_th = str(os.environ.get("UTOA_JA_MAPPING_SPN_RATIO_THRESHOLD", "")).strip()
     if env_spn_th:
         try:
@@ -2456,6 +2467,20 @@ def generate_ja_oto(
             mel_envelope_fn=_mel_envelope,
             wav_duration_fn=_wav_duration_ms,
         )
+        file_ctx.sinsy_label_entries = []
+        file_ctx.sinsy_label_path = ""
+        if use_sinsy_labels:
+            try:
+                file_ctx.sinsy_label_entries = load_sinsy_label_entries(
+                    tg_path=file_ctx.tg_path,
+                    real_wav_name=file_ctx.real_wav_name,
+                    explicit_path=sinsy_label_path,
+                )
+                if file_ctx.sinsy_label_entries:
+                    file_ctx.sinsy_label_path = sinsy_label_path or ""
+            except Exception:
+                file_ctx.sinsy_label_entries = []
+                file_ctx.sinsy_label_path = ""
 
         if file_ctx.status == "textgrid_missing":
             miss_diag = file_ctx.diagnostics
@@ -2553,6 +2578,7 @@ def generate_ja_oto(
             ph_intervals = alignment_ingest.phones
             filename_syllables = list(alignment_ingest.extra.get("filename_syllables") or [])
             cv_targets = list(alignment_ingest.extra.get("cv_targets") or [])
+            sinsy_label_entries = list(alignment_ingest.extra.get("sinsy_label_entries") or [])
             detected_format = str(alignment_ingest.extra.get("detected_format") or "")
             format_type = str(alignment_ingest.extra.get("format_type") or "")
             ja_style_profile = alignment_ingest.extra.get("ja_style_profile")
@@ -2841,10 +2867,21 @@ def generate_ja_oto(
                 syllable_confidence_by_idx = []
 
             planned_cv_source = list(filename_syllables or cv_targets or [])
-            ja_cv_plan = _build_ja_cv_anchor_plan_v2(
-                planned_cv_source,
-                syllables_info,
-            ) if planned_cv_source else {"indices": None, "meta": {}}
+            ja_cv_plan = {"indices": None, "meta": {}, "source": ""}
+            if planned_cv_source and sinsy_label_entries:
+                ja_cv_plan = build_sinsy_guided_anchor_plan(
+                    expected_tokens=planned_cv_source,
+                    syllables_info=syllables_info,
+                    label_entries=sinsy_label_entries,
+                    normalize_expected_fn=_normalize_ja_syllable_token,
+                    normalize_label_fn=_normalize_ja_syllable_token,
+                    label_match_score_fn=lambda target, label: float(int(_ja_soft_cv_match_level(target, label) or 0) * 42.0),
+                )
+            if not ja_cv_plan.get("indices"):
+                ja_cv_plan = _build_ja_cv_anchor_plan_v2(
+                    planned_cv_source,
+                    syllables_info,
+                ) if planned_cv_source else {"indices": None, "meta": {}}
             ja_planned_cv_indices = ja_cv_plan.get("indices")
             ja_anchor_graph = build_adjacent_anchor_graph(ja_planned_cv_indices)
             ja_plan_policy = resolve_plan_policy(
@@ -2875,6 +2912,7 @@ def generate_ja_oto(
                 ingest_snapshot=alignment_ingest,
                 plan_policy=ja_plan_policy,
                 mapping_confidence=mapping_confidence_base,
+                mapping_margin=mapping_margin,
                 conf_threshold=conf_th,
                 format_type=format_type,
                 score_a=base_score,
@@ -2915,10 +2953,21 @@ def generate_ja_oto(
                         words_align_score=selected_candidate.get("words_align_score"),
                         words_tier_confidence=words_tier_confidence,
                     )
-                    ja_cv_plan = _build_ja_cv_anchor_plan_v2(
-                        planned_cv_source,
-                        syllables_info,
-                    ) if planned_cv_source else {"indices": None, "meta": {}}
+                    ja_cv_plan = {"indices": None, "meta": {}, "source": ""}
+                    if planned_cv_source and sinsy_label_entries:
+                        ja_cv_plan = build_sinsy_guided_anchor_plan(
+                            expected_tokens=planned_cv_source,
+                            syllables_info=syllables_info,
+                            label_entries=sinsy_label_entries,
+                            normalize_expected_fn=_normalize_ja_syllable_token,
+                            normalize_label_fn=_normalize_ja_syllable_token,
+                            label_match_score_fn=lambda target, label: float(int(_ja_soft_cv_match_level(target, label) or 0) * 42.0),
+                        )
+                    if not ja_cv_plan.get("indices"):
+                        ja_cv_plan = _build_ja_cv_anchor_plan_v2(
+                            planned_cv_source,
+                            syllables_info,
+                        ) if planned_cv_source else {"indices": None, "meta": {}}
                     ja_planned_cv_indices = ja_cv_plan.get("indices")
                     ja_anchor_graph = build_adjacent_anchor_graph(ja_planned_cv_indices)
                     ja_plan_policy = resolve_plan_policy(
@@ -2933,6 +2982,7 @@ def generate_ja_oto(
                         ingest_snapshot=alignment_ingest,
                         plan_policy=ja_plan_policy,
                         mapping_confidence=mapping_confidence_base,
+                        mapping_margin=mapping_margin,
                         conf_threshold=conf_th,
                         format_type=format_type,
                         score_a=base_score,
@@ -3539,12 +3589,15 @@ def generate_ja_oto(
                         format_type=format_type,
                         candidate_idx=mapped_idx,
                         candidate_count=len(syllables_info),
+                        confidence_margin=mapping_margin,
+                        min_confidence_margin=runtime_policy.get("row_margin_floor"),
                         candidate_active=(
                             _is_ja_cv_syllable_active(syllables_info[mapped_idx], require_vowel=True)
                             if 0 <= mapped_idx < len(syllables_info)
                             else False
                         ),
                         active_only_formats={"cvvc", "cv"},
+                        margin_formats={"cvvc", "cv"},
                     )
                     if row_abstain.get("should_skip"):
                         if ja_mapping_debug_reason_logging:

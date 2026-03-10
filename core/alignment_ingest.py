@@ -58,6 +58,8 @@ def build_ja_alignment_ingest(file_ctx, loop_prep):
         "ja_style_profile": getattr(loop_prep, "ja_style_profile", None),
         "forced_words_mapping": bool(getattr(loop_prep, "forced_words_mapping", False)),
         "conf_th": float(getattr(loop_prep, "conf_th", 0.0) or 0.0),
+        "sinsy_label_entries": list(getattr(file_ctx, "sinsy_label_entries", []) or []),
+        "sinsy_label_path": str(getattr(file_ctx, "sinsy_label_path", "") or ""),
     }
     return snapshot
 
@@ -77,6 +79,8 @@ def build_kr_alignment_ingest(file_ctx, loop_prep):
         "filename_cv_targets": list(getattr(loop_prep, "filename_cv_targets", []) or []),
         "targets_for_build": list(getattr(loop_prep, "targets_for_build", []) or []),
         "force_words_phone_fill": bool(getattr(loop_prep, "force_words_phone_fill", False)),
+        "sinsy_label_entries": list(getattr(file_ctx, "sinsy_label_entries", []) or []),
+        "sinsy_label_path": str(getattr(file_ctx, "sinsy_label_path", "") or ""),
     }
     return snapshot
 

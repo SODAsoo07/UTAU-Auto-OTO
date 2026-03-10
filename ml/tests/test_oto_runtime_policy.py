@@ -74,6 +74,29 @@ class OtoRuntimePolicyTests(unittest.TestCase):
         self.assertFalse(policy["should_abstain"])
         self.assertFalse(policy["is_low_conf"])
 
+    def test_runtime_policy_marks_low_margin_as_low_conf(self):
+        ingest = SimpleNamespace(
+            textgrid_trust_score=0.86,
+            textgrid_trust_tier="high",
+            prefer_filename_sequence=False,
+        )
+        policy = resolve_runtime_mapping_policy(
+            ingest_snapshot=ingest,
+            plan_policy={"tier": "high", "confidence_cap": 0.95, "allow_generation": True, "margin": 3.0},
+            mapping_confidence=0.89,
+            mapping_margin=3.0,
+            conf_threshold=0.70,
+            low_margin_floor=6.0,
+            format_type="cvvc",
+            score_a=81.0,
+            score_b=78.0,
+            sequence_lock_formats={"cvvc", "cv"},
+            abstain_formats={"cvvc", "vcv", "cv"},
+        )
+        self.assertTrue(policy["low_margin"])
+        self.assertTrue(policy["is_low_conf"])
+        self.assertEqual(policy["mapping_tier"], "mid")
+
 
 if __name__ == "__main__":
     unittest.main()

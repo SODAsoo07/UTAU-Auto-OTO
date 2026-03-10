@@ -135,6 +135,7 @@ from core.kr_mapping_v2 import (
     resolve_kr_planned_cv_index as _resolve_kr_planned_cv_index_v2,
 )
 from core.kr_mapping_scoring_v2 import resolve_cv_syllable_index as _resolve_cv_syllable_index_v2
+from core.sinsy_label_ingest import build_sinsy_guided_anchor_plan, load_sinsy_label_entries
 from core.kr_timing_v2 import (
     build_realized_cv_anchor as _build_realized_kr_cv_anchor_v2,
     extract_vcv_anchor_points as _extract_vcv_anchor_points_v2,
@@ -2049,6 +2050,8 @@ def generate_oto(
 
     if params is None:
         params = DEFAULT_PARAMS.copy()
+    use_sinsy_labels = bool(params.get("USE_SINSY_LABELS", False)) if params else False
+    sinsy_label_path = str(params.get("SINSY_LABEL_PATH", "") or "").strip() if params else ""
 
 
     if auto_format:
@@ -2096,6 +2099,14 @@ def generate_oto(
         kr_mapping_debug_reason_logging = False
     elif env_debug_reason in {"1", "true", "on", "yes"}:
         kr_mapping_debug_reason_logging = True
+    env_use_sinsy = str(os.environ.get("UTOA_USE_SINSY_LABELS", "")).strip().lower()
+    if env_use_sinsy in {"0", "false", "off", "no"}:
+        use_sinsy_labels = False
+    elif env_use_sinsy in {"1", "true", "on", "yes"}:
+        use_sinsy_labels = True
+    env_sinsy_path = str(os.environ.get("UTOA_SINSY_LABEL_PATH", "")).strip()
+    if env_sinsy_path:
+        sinsy_label_path = env_sinsy_path
     env_anchor_profile = str(os.environ.get("UTOA_KR_ANCHOR_PROFILE_PATH", "")).strip()
     if env_anchor_profile:
         kr_anchor_profile_path = env_anchor_profile
@@ -2387,6 +2398,20 @@ def generate_oto(
             mel_envelope_fn=_mel_envelope,
             wav_duration_fn=_wav_duration_ms,
         )
+        file_ctx.sinsy_label_entries = []
+        file_ctx.sinsy_label_path = ""
+        if use_sinsy_labels:
+            try:
+                file_ctx.sinsy_label_entries = load_sinsy_label_entries(
+                    tg_path=file_ctx.tg_path,
+                    real_wav_name=file_ctx.real_wav_name,
+                    explicit_path=sinsy_label_path,
+                )
+                if file_ctx.sinsy_label_entries:
+                    file_ctx.sinsy_label_path = sinsy_label_path or ""
+            except Exception:
+                file_ctx.sinsy_label_entries = []
+                file_ctx.sinsy_label_path = ""
 
         if file_ctx.status == "textgrid_missing":
             log(f"경고: {fname}: TextGrid를 찾을 수 없어 원본 라인을 유지합니다.")
@@ -2479,6 +2504,7 @@ def generate_oto(
             file_mapping_conf_th = float(alignment_ingest.extra.get("file_mapping_conf_th", 0.0) or 0.0)
             filename_cv_targets = list(alignment_ingest.extra.get("filename_cv_targets") or [])
             targets_for_build = list(alignment_ingest.extra.get("targets_for_build") or [])
+            sinsy_label_entries = list(alignment_ingest.extra.get("sinsy_label_entries") or [])
             phone_quality = alignment_ingest.phone_quality
             low_quality_reasons = alignment_ingest.low_quality_reasons
             low_phone_quality = alignment_ingest.low_phone_quality
@@ -2608,10 +2634,21 @@ def generate_oto(
                 or [s.get('roman_cv') or s.get('roman', '') for s in (syllables_info or [])]
                 or []
             )
-            kr_cv_plan = _build_kr_cv_anchor_plan_v2(
-                plan_candidate_source,
-                syllables_info,
-            ) if plan_candidate_source else {"indices": None, "meta": {}}
+            kr_cv_plan = {"indices": None, "meta": {}, "source": ""}
+            if plan_candidate_source and sinsy_label_entries:
+                kr_cv_plan = build_sinsy_guided_anchor_plan(
+                    expected_tokens=plan_candidate_source,
+                    syllables_info=syllables_info,
+                    label_entries=sinsy_label_entries,
+                    normalize_expected_fn=_normalize_cv_match_token,
+                    normalize_label_fn=_normalize_cv_match_token,
+                    label_match_score_fn=lambda target, label: float(_cv_match_score(target, label)),
+                )
+            if not kr_cv_plan.get("indices"):
+                kr_cv_plan = _build_kr_cv_anchor_plan_v2(
+                    plan_candidate_source,
+                    syllables_info,
+                ) if plan_candidate_source else {"indices": None, "meta": {}}
             kr_planned_cv_indices = kr_cv_plan.get("indices")
             kr_anchor_graph = build_adjacent_anchor_graph(kr_planned_cv_indices)
             kr_plan_policy = resolve_plan_policy(
@@ -2634,6 +2671,7 @@ def generate_oto(
                 ingest_snapshot=alignment_ingest,
                 plan_policy=kr_plan_policy,
                 mapping_confidence=mapping_confidence_base,
+                mapping_margin=mapping_margin,
                 conf_threshold=file_mapping_conf_th,
                 format_type=file_format,
                 score_a=base_score,
@@ -3057,7 +3095,10 @@ def generate_oto(
                             if selected_w_idx is not None and 0 <= selected_w_idx < len(syllables_info)
                             else False
                         ),
+                        confidence_margin=mapping_margin,
+                        min_confidence_margin=runtime_policy.get("row_margin_floor"),
                         active_only_formats={"cvvc", "cvc", "cv"},
+                        margin_formats={"cvvc", "cvc", "cv"},
                     )
                     if row_abstain.get("should_skip"):
                         if kr_mapping_debug_reason_logging:

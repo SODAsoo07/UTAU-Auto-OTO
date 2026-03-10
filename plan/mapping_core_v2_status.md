@@ -35,6 +35,8 @@ v2의 의도는 다음과 같다.
   - [core/oto_mapping_confidence.py](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/core/oto_mapping_confidence.py)
   - [core/oto_mapping_policy.py](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/core/oto_mapping_policy.py)
   - [core/oto_runtime_policy.py](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/core/oto_runtime_policy.py)
+- `optional sinsy syllable label ingest`
+  - [core/sinsy_label_ingest.py](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/core/sinsy_label_ingest.py)
 - `anchor graph`
   - [core/oto_anchor_graph.py](C:/Users/oyh57/SODAsoo1/Devs/UTAU_Auto_OTO_v3/Auto_OTO/core/oto_anchor_graph.py)
 - `row policy / abstain / diagnostics`
@@ -108,6 +110,8 @@ v2의 의도는 다음과 같다.
 - 반복 음절에서의 누적 드리프트 감소
 - 무음/저활성 구간 매핑 감소
 - low-trust 정렬 결과에서 과도한 자유 탐색 억제
+- low-margin row를 보수적으로 skip해서 잘못된 `CV/CV_HEAD` 생성 억제
+- 사용자가 제공한 sinsy 음절 라벨을 opt-in anchor source로 사용 가능
 - `VC/VV/V-CV`는 기존 ML/후처리 장점을 유지
 
 특히 일본어 `CVVC`와 한국어 `CVVC/VCV`에서 문제였던
@@ -122,6 +126,10 @@ v2의 의도는 다음과 같다.
 
 - generator 내부에 남은 언어별 scoring 유틸 완전 이관
 - 한국어 `VCV` 주변의 잔여 보조 scoring / drift repair 유틸 정리
+- JA/KR plain-glide / youon reject 강화
+- `VV` vowel pair scoring 도입
+- low-trust 시 forced index / free search 추가 축소
+- sinsy vs MFA 충돌 경고/진단 추가
 - batch evaluation 재실행 후 v2 전/후 수치 문서화
 - 실제 oto 생성 샘플 청감 검증 정리
 - 필요 시 `mapping_core_v2_design` 문서를 현재 구현 기준으로 재서술
@@ -132,17 +140,20 @@ v2의 의도는 다음과 같다.
 
 현재 타깃 테스트는 아래 기준으로 통과했다.
 
-- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest ...`
-- 결과: `90 passed`
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q ml/tests/test_sinsy_label_ingest.py ml/tests/test_oto_runtime_policy.py ml/tests/test_oto_row_abstain.py ...`
+- 결과: `52 passed`
 
 이번 v2 작업 중 추가된 테스트 범위는 다음을 포함한다.
 
 - planner / anchor graph
 - runtime policy / row policy / abstain
+- optional sinsy label ingest / guided anchor plan
 - diagnostics / output / finalize
 - JA/KR mapping selection
 - JA/KR row executor
 - JA/KR timing helper
+
+전체 `ml/tests`는 현재도 일부 레거시/외부 의존 테스트의 import 오류 때문에 수집 단계에서 중단된다.
 
 ## 7. 레거시 처리 방침
 
