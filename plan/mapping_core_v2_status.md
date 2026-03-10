@@ -116,6 +116,14 @@ v2의 의도는 다음과 같다.
 - `VV`를 vowel pair 기준으로 재평가해 마지막 모음만 보고 매핑하는 문제를 완화
 - `VC/VV/V-CV`는 기존 ML/후처리 장점을 유지
 
+### Selector improvements (2026-03-10)
+
+- auto objective: ranking when selector groups are sufficient
+- quality weights by format/alias family
+- runtime abstain using score margin + hard-negative logging (dynamic margin by row signals)
+- selector schema adds silence/jump risk features
+- selector retraining helper + hard-negative summary script
+
 특히 일본어 `CVVC`와 한국어 `CVVC/VCV`에서 문제였던
 `plain vowel -> glide/youon 오매핑`, `wrong occurrence`, `silence placement`
 방지 방향으로 구조가 바뀌었다.

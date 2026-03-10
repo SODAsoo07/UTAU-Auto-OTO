@@ -63,6 +63,27 @@ DEFAULT_LGB_PARAMS = {
     "verbosity": -1,
 }
 
+SELECTOR_RANKING_MIN_GROUPS_DEFAULT = 120
+
+
+def _resolve_selector_objective(objective: str, df) -> str:
+    obj = str(objective or "auto").strip().lower()
+    if obj == "auto":
+        try:
+            min_groups = int(
+                os.environ.get("UTOA_SELECTOR_RANKING_MIN_GROUPS", SELECTOR_RANKING_MIN_GROUPS_DEFAULT)
+            )
+        except Exception:
+            min_groups = SELECTOR_RANKING_MIN_GROUPS_DEFAULT
+        group_count = int(df["selector_group_id"].nunique()) if "selector_group_id" in df.columns else 0
+        if group_count >= max(2, min_groups) and "selector_rank_label" in df.columns:
+            return "ranking"
+        return "pointwise"
+    if obj == "ranking":
+        if "selector_group_id" not in df.columns or "selector_rank_label" not in df.columns:
+            return "pointwise"
+    return obj
+
 
 def _make_label_gain(max_label: int) -> list[int]:
     max_value = max(0, int(max_label))
@@ -371,7 +392,7 @@ def train_lightgbm_selector_bundle(
     selector_dataset_csv: str,
     out_dir: str,
     group_column: str = "voicebank_id",
-    objective: str = "pointwise",
+    objective: str = "auto",
     num_boost_round: int = 400,
     early_stopping_rounds: int = 40,
     alias_family: str = "",
@@ -384,7 +405,7 @@ def train_lightgbm_selector_bundle(
     language = str(language).strip().lower()
     format_type = normalize_format_type(language, format_type)
     alias_family = normalize_alias_family(alias_family)
-    objective = str(objective or "pointwise").strip().lower()
+    objective = _resolve_selector_objective(objective, df)
     if objective not in {"pointwise", "ranking"}:
         raise ValueError(f"Unsupported selector objective: {objective}")
 

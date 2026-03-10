@@ -18,6 +18,7 @@ from core.oto_ml_policy import (
     delta_enabled_by_default,
     infer_alias_family,
     normalize_alias_family,
+    selector_min_margin,
     selector_enabled_by_default,
 )
 from core.oto_ml_selector import select_best_candidate
@@ -38,6 +39,7 @@ from core.pipeline_status import (
 )
 from core.timing_anchor_profiles import get_anchor_profile, is_anchor_lock_enabled
 from core.timing_anchor_runtime import AnchorTimingContext, apply_anchor_lock
+from core.selector_hard_negative import log_selector_hard_negative
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +229,48 @@ def _selector_passes_runtime_guard(selector_payload: Optional[Dict[str, object]]
             f"baseline={top1_baseline:.4f}, min_gain={min_gain:.4f})"
         )
     return True, "selector_top1_guard_passed"
+
+
+def _selector_score_margin(selected: Optional[Dict[str, object]]) -> Optional[float]:
+    if not selected:
+        return None
+    scores = selected.get("scores")
+    if not isinstance(scores, list) or len(scores) < 2:
+        return None
+    try:
+        return float(scores[0].get("score", 0.0)) - float(scores[1].get("score", 0.0))
+    except Exception:
+        return None
+
+
+def _selector_dynamic_min_margin(feature_row: Dict[str, object], base_margin: float) -> float:
+    margin = float(base_margin)
+    try:
+        mapping_conf = float(feature_row.get("mapping_confidence", 0.0) or 0.0)
+        if mapping_conf < 0.55:
+            margin += 0.04
+    except Exception:
+        pass
+    try:
+        if int(float(feature_row.get("jump_blocked_flag", 0) or 0)) > 0:
+            margin += 0.05
+    except Exception:
+        pass
+    try:
+        if int(float(feature_row.get("used_nuclei_fallback", 0) or 0)) > 0:
+            margin += 0.05
+    except Exception:
+        pass
+    try:
+        silence_ratio = max(
+            float(feature_row.get("db_silence_ratio", 0.0) or 0.0),
+            float(feature_row.get("mel_window_silence_ratio", 0.0) or 0.0),
+        )
+        if silence_ratio >= 0.65:
+            margin += 0.06
+    except Exception:
+        pass
+    return max(0.0, min(margin, 0.25))
 
 
 def check_oto_ml_ready(language: str, format_type: str, alias_family: str = "") -> Dict[str, object]:
@@ -911,6 +955,9 @@ def apply_oto_ml_to_oto_file(
         selector_model_routes=[],
         selector_mode_counts={},
         selector_guarded_routes=[],
+        selector_abstain_rows=0,
+        selector_abstain_reasons=[],
+        selector_hard_negative_rows=0,
     )
     ml_report["policy"] = policy_name
 
@@ -1034,6 +1081,30 @@ def apply_oto_ml_to_oto_file(
                 lambda candidate_row, payload=selector_bundle: predict_lightgbm_selector_score(payload, candidate_row),
             )
             if selected and selected.get("candidate"):
+                margin = _selector_score_margin(selected)
+                base_margin = selector_min_margin(language, format_type, alias_family=alias_family)
+                min_margin = _selector_dynamic_min_margin(feat, base_margin)
+                if margin is not None and margin < min_margin:
+                    ml_report["selector_abstain_rows"] = int(ml_report.get("selector_abstain_rows", 0)) + 1
+                    ml_report["selector_abstain_reasons"].append(
+                        {
+                            "line_index": int(feat.get("line_index", -1)),
+                            "reason": "score_margin",
+                            "margin": float(margin),
+                            "min_margin": float(min_margin),
+                            "format_type": str(format_type),
+                            "alias_family": str(alias_family),
+                        }
+                    )
+                    if log_selector_hard_negative(
+                        feat,
+                        selected,
+                        reason="score_margin",
+                        margin=margin,
+                    ):
+                        ml_report["selector_hard_negative_rows"] = int(ml_report.get("selector_hard_negative_rows", 0)) + 1
+                    selected = None
+            if selected and selected.get("candidate"):
                 candidate = selected["candidate"]
                 selected_base_override = (
                     float(candidate.get("offset", 0.0)),
@@ -1047,6 +1118,13 @@ def apply_oto_ml_to_oto_file(
                 selector_mode_counts = ml_report.get("selector_mode_counts", {})
                 selector_mode_counts[mode] = int(selector_mode_counts.get(mode, 0)) + 1
                 ml_report["selector_mode_counts"] = selector_mode_counts
+                if log_selector_hard_negative(
+                    feat,
+                    selected,
+                    reason="risky_candidate",
+                    margin=_selector_score_margin(selected),
+                ):
+                    ml_report["selector_hard_negative_rows"] = int(ml_report.get("selector_hard_negative_rows", 0)) + 1
 
         line_index = int(feat.get("line_index", -1))
         row = rows_by_index.get(line_index)

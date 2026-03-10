@@ -6,9 +6,10 @@ import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from core.format_type_utils import normalize_format_type
+from core.oto_ml_policy import infer_alias_family, selector_error_weights
 from core.oto_ml_features import canonicalize_feature_row
 
-SELECTOR_FEATURE_VERSION = "v1"
+SELECTOR_FEATURE_VERSION = "v2"
 
 SELECTOR_FEATURE_NAMES = [
     "language",
@@ -61,6 +62,8 @@ SELECTOR_FEATURE_NAMES = [
     "cand_overlap_margin",
     "cand_pre_cons_margin",
     "cand_leak_risk",
+    "cand_silence_risk",
+    "cand_jump_risk",
 ]
 
 SELECTOR_CATEGORICAL_FEATURES = [
@@ -737,10 +740,22 @@ def build_selector_feature_row(language: str, base_row: Dict[str, object], candi
     out["cand_overlap_margin"] = cand_pre - cand_ovl
     out["cand_pre_cons_margin"] = cand_cons - cand_pre
     out["cand_leak_risk"] = max(0.0, -out["cand_cutoff_to_next_anchor_ms"])
+    silence_ratio = max(
+        _to_float(out.get("db_silence_ratio"), 0.0),
+        _to_float(out.get("mel_window_silence_ratio"), 0.0),
+    )
+    out["cand_silence_risk"] = 1.0 if silence_ratio >= 0.65 else 0.0
+    jump_blocked = _to_float(base_row.get("jump_blocked_flag"), 0.0) > 0.0
+    anchor_jump = abs(_to_float(out.get("cand_pre_to_expected_ms"), 0.0))
+    out["cand_jump_risk"] = 1.0 if jump_blocked or anchor_jump >= 28.0 else 0.0
     return canonicalize_selector_feature_row(out)
 
 
 def _quality_against_manual(base_row: Dict[str, object], candidate: Dict[str, object]) -> Tuple[float, Dict[str, float]]:
+    lang = str(base_row.get("language", "") or "").strip().lower()
+    fmt = normalize_format_type(lang, str(base_row.get("format_type", "") or ""))
+    family = infer_alias_family(lang, base_row)
+    weights = selector_error_weights(lang, fmt, alias_family=family)
     manual_offset = _to_float(base_row.get("manual_offset"), 0.0)
     manual_cons = _to_float(base_row.get("manual_cons"), 0.0)
     manual_cut_abs = _to_float(base_row.get("base_cutoff_abs"), 0.0) + _to_float(base_row.get("delta_cutoff"), 0.0)
@@ -752,7 +767,13 @@ def _quality_against_manual(base_row: Dict[str, object], candidate: Dict[str, ob
     err_cutoff = abs(_to_float(candidate.get("cutoff_abs"), 0.0) - manual_cut_abs)
     err_pre = abs(_to_float(candidate.get("pre"), 0.0) - manual_pre)
     err_ovl = abs(_to_float(candidate.get("ovl"), 0.0) - manual_ovl)
-    weighted = (1.25 * err_offset) + (0.85 * err_cons) + (0.95 * err_cutoff) + (1.10 * err_pre) + (0.45 * err_ovl)
+    weighted = (
+        float(weights.get("offset", 1.25)) * err_offset
+        + float(weights.get("cons", 0.85)) * err_cons
+        + float(weights.get("cutoff", 0.95)) * err_cutoff
+        + float(weights.get("pre", 1.10)) * err_pre
+        + float(weights.get("ovl", 0.45)) * err_ovl
+    )
     return -float(weighted), {
         "selector_error_weighted": float(weighted),
         "selector_error_offset": float(err_offset),

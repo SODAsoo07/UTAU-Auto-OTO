@@ -47,6 +47,15 @@
 - [x] 파일 일관성 후처리 강화
 - [x] alias-type aware ML delta clipping 반영
 
+## Selector Improvements
+
+- [x] selector objective auto (ranking with group threshold)
+- [x] selector quality weights by format/alias family
+- [x] selector score margin abstain + hard-negative logging
+- [x] selector risk features (silence/jump)
+- [x] selector retraining script
+- [x] hard-negative summary report script
+
 ## Diagnostics / Verification
 
 - [x] v2 공통 모듈 대상 단위 테스트 추가

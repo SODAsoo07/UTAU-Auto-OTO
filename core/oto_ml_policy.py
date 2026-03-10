@@ -44,6 +44,56 @@ _SELECTOR_DEFAULTS = {
     ("japanese", "cvvc", "bridge"): True,
 }
 
+
+_SELECTOR_MARGIN_DEFAULTS = {
+    ("korean", "cv", ""): 0.06,
+    ("korean", "cvc", ""): 0.06,
+    ("korean", "cvvc", ""): 0.10,
+    ("korean", "vcv", ""): 0.10,
+    ("japanese", "cv", ""): 0.06,
+    ("japanese", "cvvc", ""): 0.10,
+    ("japanese", "vcv", ""): 0.10,
+}
+
+
+_SELECTOR_ERROR_WEIGHTS = {
+    ("default", "general", ""): {
+        "offset": 1.25,
+        "cons": 0.85,
+        "cutoff": 0.95,
+        "pre": 1.10,
+        "ovl": 0.45,
+    },
+    ("korean", "cvvc", ""): {
+        "offset": 1.35,
+        "cons": 0.90,
+        "cutoff": 1.10,
+        "pre": 1.25,
+        "ovl": 0.35,
+    },
+    ("korean", "vcv", ""): {
+        "offset": 1.30,
+        "cons": 0.90,
+        "cutoff": 1.05,
+        "pre": 1.20,
+        "ovl": 0.35,
+    },
+    ("japanese", "cvvc", ""): {
+        "offset": 1.35,
+        "cons": 0.90,
+        "cutoff": 1.10,
+        "pre": 1.25,
+        "ovl": 0.35,
+    },
+    ("japanese", "vcv", ""): {
+        "offset": 1.30,
+        "cons": 0.90,
+        "cutoff": 1.05,
+        "pre": 1.20,
+        "ovl": 0.35,
+    },
+}
+
 _DELTA_DEFAULTS = {
     ("japanese", "cvvc", "cv"): False,
 }
@@ -147,6 +197,45 @@ def selector_enabled_by_default(language: str, format_type: str, alias_family: s
     )
 
 
+def selector_min_margin(language: str, format_type: str, alias_family: str = "") -> float:
+    override = str(os.environ.get("UTOA_SELECTOR_MIN_MARGIN", "")).strip()
+    if override:
+        try:
+            return max(0.0, float(override))
+        except Exception:
+            return 0.0
+    lang = str(language or "").strip().lower()
+    fmt = normalize_format_type(lang, format_type) or "general"
+    family = normalize_alias_family(alias_family)
+    for key in (
+        (lang, fmt, family),
+        (lang, fmt, ""),
+        ("default", fmt, family),
+        ("default", fmt, ""),
+        ("default", "general", ""),
+    ):
+        if key in _SELECTOR_MARGIN_DEFAULTS:
+            return float(_SELECTOR_MARGIN_DEFAULTS[key])
+    return 0.0
+
+
+def selector_error_weights(language: str, format_type: str, alias_family: str = "") -> Dict[str, float]:
+    lang = str(language or "").strip().lower()
+    fmt = normalize_format_type(lang, format_type) or "general"
+    family = normalize_alias_family(alias_family)
+    for key in (
+        (lang, fmt, family),
+        (lang, fmt, ""),
+        ("default", fmt, family),
+        ("default", fmt, ""),
+        ("default", "general", ""),
+    ):
+        weights = _SELECTOR_ERROR_WEIGHTS.get(key)
+        if weights:
+            return dict(weights)
+    return dict(_SELECTOR_ERROR_WEIGHTS[("default", "general", "")])
+
+
 __all__ = [
     "alias_family_to_alias_types",
     "default_training_filters",
@@ -156,4 +245,6 @@ __all__ = [
     "recommended_alias_family_splits",
     "should_split_alias_families",
     "selector_enabled_by_default",
+    "selector_error_weights",
+    "selector_min_margin",
 ]
