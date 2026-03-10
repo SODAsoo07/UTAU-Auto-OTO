@@ -3459,8 +3459,10 @@ def generate_oto(
                         ),
                         confidence_margin=mapping_margin,
                         min_confidence_margin=runtime_policy.get("row_margin_floor"),
-                        active_only_formats={"cvvc", "cvc", "cv"},
-                        margin_formats={"cvvc", "cvc", "cv"},
+                        # CVC는 파일/음절 특성상 margin 변동이 커 CV 계열이 과도 스킵될 수 있어
+                        # row-level abstain 게이트를 CV/CVVC에만 적용한다.
+                        active_only_formats={"cvvc", "cv"},
+                        margin_formats={"cvvc", "cv"},
                     )
                     if row_abstain.get("should_skip"):
                         if kr_mapping_debug_reason_logging:
