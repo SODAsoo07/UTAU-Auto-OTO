@@ -256,16 +256,54 @@ def _split_kr_filename_tokens(name_or_base):
     if not base:
         return []
 
-    raw_parts = [p for p in _KR_FILENAME_SPLIT_RE.split(base) if p and p != '~']
-    parts = []
-    for token in raw_parts:
-        if token in {"R", "H"} and parts:
-            prev = parts[-1]
-            # _l'R, _ng'R 같은 파일명은 종성/호흡 표식 1토큰으로 취급한다.
-            if not re.search(r"[aeiouywAEIOUYW]", prev):
-                parts[-1] = prev + token
-                continue
-        parts.append(token)
+    def _merge_kr_tail_markers(raw_parts):
+        parts = []
+        for token in raw_parts:
+            if token in {"R", "H"} and parts:
+                prev = parts[-1]
+                # _l'R, _ng'R 같은 파일명은 종성/호흡 표식 1토큰으로 취급한다.
+                if not re.search(r"[aeiouywAEIOUYW]", prev):
+                    parts[-1] = prev + token
+                    continue
+            parts.append(token)
+        return parts
+
+    def _detect_kr_filename_style(base_text):
+        txt = str(base_text or "")
+        apostrophes = txt.count("'") + txt.count("’") + txt.count("`")
+        if apostrophes >= 4 and (
+            "_'" in txt or "'_" in txt or "-'" in txt or "'-" in txt
+        ):
+            return "matcha_cvvc"
+        if apostrophes >= 3:
+            return "apostrophe_cvvc"
+        return "generic"
+
+    def _split_kr_filename_tokens_generic(base_text):
+        raw = [p for p in _KR_FILENAME_SPLIT_RE.split(base_text) if p and p != '~']
+        return _merge_kr_tail_markers(raw)
+
+    def _split_kr_filename_tokens_matcha_cvvc(base_text):
+        # 말차식 CVVC 파일명은 `_'`/`'_`/`-'` 구분자를 사용하므로,
+        # 구분자 변형을 apostrophe 기준으로 먼저 정규화한다.
+        text = str(base_text or "").replace("’", "'").replace("`", "'")
+        text = re.sub(r"_+", "_", text)
+        text = re.sub(r"-+", "-", text)
+        text = re.sub(r"_+'", "'", text)
+        text = re.sub(r"'_+", "'", text)
+        text = re.sub(r"-+'", "'", text)
+        text = re.sub(r"'-+", "'", text)
+        text = text.replace("-", "'")
+        raw = [p for p in _KR_FILENAME_SPLIT_RE.split(text) if p and p != '~']
+        return _merge_kr_tail_markers(raw)
+
+    style = _detect_kr_filename_style(base)
+    if style == "matcha_cvvc":
+        parts = _split_kr_filename_tokens_matcha_cvvc(base)
+    else:
+        parts = _split_kr_filename_tokens_generic(base)
+
+    parts = [token for token in parts if token]
     if re.search(r'[가-힣]', base):
         if len(parts) <= 1:
             return [ch for ch in base if re.match(r'[가-힣]', ch)]

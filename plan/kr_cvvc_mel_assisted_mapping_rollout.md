@@ -54,8 +54,8 @@
 
 ---
 
-### 단계 2. CVVC reclist 스타일별 토큰 규칙 분리 (다음)
-상태: 예정
+### 단계 2. CVVC reclist 스타일별 토큰 규칙 분리 (진행 중)
+상태: 1차 완료 (스타일 분기 + 말차식 구분자 정규화)
 
 목표:
 - 말차식 CVVC 등 스타일별 파일명 토큰화/슬롯 규칙을 분리해 초기 후보 자체를 안정화
@@ -65,14 +65,20 @@
 2. 스타일별 split 규칙/예외 규칙
 3. 기존 tokenizer 대비 A/B 로그
 
+1차 반영 내용:
+1. 파일명 스타일 감지 추가(`matcha_cvvc`/`apostrophe_cvvc`/`generic`)
+2. 말차식 구분자(`_'`, `'_`, `-'` 변형) 정규화 후 토큰 분리
+3. typographic apostrophe(’/`) 입력 허용
+4. 기존 coda tail marker 병합(`lR`, `ngH`) 회귀 유지
+
 검증 지표:
 - tokenization 실패율
 - occurrence map 누락율
 
 ---
 
-### 단계 3. 파일 단위 모노토닉 DP 매핑 (다음)
-상태: 예정
+### 단계 3. 파일 단위 모노토닉 DP 매핑 (진행 중)
+상태: 1차 완료 (mel score 포함 DP 플랜 적용)
 
 목표:
 - 행 단위 greedy를 보완해 파일 전체 경로 최적화
@@ -83,6 +89,11 @@
 3. 점수: text + mel + blank penalty + type compatibility
 4. 저신뢰 행만 DP 재평가(전체 비용 억제)
 
+1차 반영 내용:
+1. `build_kr_cv_anchor_plan`에 mel score 가중 반영(옵션)
+2. `cvvc` + 저신뢰 징후(텍스트그리드 낮음/blank 높음/phone quality 낮음)일 때 mel plan 활성화
+3. 기본 DP 플랜은 동일, mel 신호가 있을 때만 점수 보정
+
 검증 지표:
 - 음절 오매핑률
 - CVVC 행별 index jump 빈도
@@ -90,7 +101,7 @@
 ---
 
 ### 단계 4. 신뢰도 라우팅 강화 (다음)
-상태: 예정
+상태: 1차 완료
 
 목표:
 - 저신뢰 파일에서 공격적 보정 억제
@@ -99,6 +110,13 @@
 1. 파일 신뢰도/행 신뢰도 임계치 분리
 2. `cvvc` 전용 정책(강한 abstain, 제한적 remap)
 3. runtime report에 매핑 단계 근거 필드 추가
+
+1차 반영 내용:
+1. `resolve_runtime_mapping_policy`에 파일/행 신뢰도 임계치 분리(`file_conf_floor`, `row_conf_floor`, `row_margin_floor`) 적용
+2. `cvvc` strict 모드에서 row floor 상향(+conf,+margin) 및 low_conf reason 추적
+3. row abstain 로직에 `row_confidence`, `blank_confidence` 추가
+4. `cvvc` + blank_conf_mean 높을 때 row blank floor 적용 (`UTOA_KR_CVVC_ROW_BLANK_FLOOR`, 기본 0.68)
+5. runtime report에 `mapping` 요약 필드 추가(신뢰도/plan/mel 관련 근거 기록)
 
 ---
 

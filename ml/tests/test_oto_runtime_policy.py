@@ -97,6 +97,28 @@ class OtoRuntimePolicyTests(unittest.TestCase):
         self.assertTrue(policy["is_low_conf"])
         self.assertEqual(policy["mapping_tier"], "mid")
 
+    def test_runtime_policy_strict_mode_increases_row_floors(self):
+        ingest = SimpleNamespace(
+            textgrid_trust_score=0.70,
+            textgrid_trust_tier="mid",
+            prefer_filename_sequence=False,
+        )
+        policy = resolve_runtime_mapping_policy(
+            ingest_snapshot=ingest,
+            plan_policy={"tier": "mid", "confidence_cap": 0.8, "allow_generation": True},
+            mapping_confidence=0.66,
+            conf_threshold=0.58,
+            format_type="cvvc",
+            score_a=62.0,
+            score_b=61.0,
+            sequence_lock_formats={"cvvc", "cv"},
+            abstain_formats={"cvvc", "vcv", "cv"},
+            strict_formats={"cvvc"},
+        )
+        self.assertTrue(policy["strict_mode"])
+        self.assertGreater(policy["row_conf_floor"], policy["file_conf_floor"])
+        self.assertGreaterEqual(policy["row_margin_floor"], 8.0)
+
 
 if __name__ == "__main__":
     unittest.main()

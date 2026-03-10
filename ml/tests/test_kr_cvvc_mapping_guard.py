@@ -12,6 +12,7 @@ from core.oto_generator import (
     _is_kr_cv_syllable_active,
     _remap_kr_forced_cv_index,
 )
+from core.kr_mapping_v2 import build_kr_cv_anchor_plan
 
 
 class KrCvvcMappingGuardTests(unittest.TestCase):
@@ -59,6 +60,26 @@ class KrCvvcMappingGuardTests(unittest.TestCase):
         ]
         plan = _build_kr_planned_cv_indices(["go", "gyo"], syllables_info)
         self.assertEqual(plan, [1, 2])
+
+    def test_build_kr_cv_anchor_plan_can_use_mel_scores(self):
+        syllables_info = [
+            {
+                "roman_cv": "ga",
+                "phones": [self._p("g", 0.00, 0.03), self._p("a", 0.03, 0.12)],
+                "mel_voiced_formant_conf": 0.05,
+                "mel_silence_sparse_conf": 0.50,
+                "blank_confidence": 0.45,
+            },
+            {
+                "roman_cv": "ga",
+                "phones": [self._p("g", 0.12, 0.15), self._p("a", 0.15, 0.28)],
+                "mel_voiced_formant_conf": 0.95,
+                "mel_silence_sparse_conf": 0.05,
+                "blank_confidence": 0.05,
+            },
+        ]
+        plan = build_kr_cv_anchor_plan(["ga"], syllables_info, use_mel=True)
+        self.assertEqual(plan.get("indices"), [1])
 
 
 if __name__ == "__main__":

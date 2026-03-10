@@ -60,6 +60,33 @@ class OtoRowAbstainTests(unittest.TestCase):
         self.assertTrue(result["should_skip"])
         self.assertEqual(result["reason"], "row_low_margin_candidate")
 
+    def test_row_abstain_skips_low_confidence_candidate(self):
+        result = decide_cv_row_abstain(
+            alias_type="cv",
+            format_type="cvvc",
+            candidate_idx=1,
+            candidate_count=3,
+            candidate_active=True,
+            row_confidence=0.42,
+            min_row_confidence=0.60,
+        )
+        self.assertTrue(result["should_skip"])
+        self.assertEqual(result["reason"], "row_low_confidence")
+
+    def test_row_abstain_skips_high_blank_candidate(self):
+        result = decide_cv_row_abstain(
+            alias_type="cv",
+            format_type="cvvc",
+            candidate_idx=1,
+            candidate_count=3,
+            candidate_active=True,
+            blank_confidence=0.75,
+            max_blank_confidence=0.68,
+            blank_formats={"cvvc"},
+        )
+        self.assertTrue(result["should_skip"])
+        self.assertEqual(result["reason"], "row_high_blank_confidence")
+
     def test_row_abstain_keeps_cvc_cv_when_cvc_not_gated(self):
         result = decide_cv_row_abstain(
             alias_type="cv",

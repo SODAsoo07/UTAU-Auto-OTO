@@ -271,6 +271,18 @@ class FeatureExtractionTests(unittest.TestCase):
         self.assertEqual(_parse_filename("_l'R.wav", convert_to_hangul=False), ["lR"])
         self.assertEqual(_parse_filename("_ng'H.wav", convert_to_hangul=False), ["ngH"])
 
+    def test_parse_korean_matcha_filename_normalizes_mixed_group_separators(self):
+        self.assertEqual(
+            _parse_filename("_an'ban'bin'_-'am'bam'bim.wav", convert_to_hangul=False),
+            ["an", "ban", "bin", "am", "bam", "bim"],
+        )
+
+    def test_parse_korean_filename_accepts_typographic_apostrophe_in_cvvc(self):
+        self.assertEqual(
+            _parse_filename("_a’a’_’ya’ya.wav", convert_to_hangul=False),
+            ["a", "a", "ya", "ya"],
+        )
+
     def test_kr_phone_quality_flags_insufficient_vowels(self):
         phones = [
             SimpleNamespace(mark="spn"),

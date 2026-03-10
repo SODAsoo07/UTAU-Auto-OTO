@@ -1866,6 +1866,21 @@ def _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms):
     return max(0.0, min(1.0, float(blank)))
 
 
+def _blank_conf_at(values, idx):
+    try:
+        if values is None:
+            return 0.0
+        i = int(idx)
+    except Exception:
+        return 0.0
+    if i < 0 or i >= len(values):
+        return 0.0
+    try:
+        return float(values[i])
+    except Exception:
+        return 0.0
+
+
 def _estimate_kr_mel_class_scores_at_time(mel_ctx, t_ms):
     out = {
         "mel_voiced_formant_conf": 0.0,
@@ -2958,6 +2973,9 @@ def generate_oto(
                 float((s or {}).get("blank_confidence", 0.0) or 0.0)
                 for s in (syllables_info or [])
             ]
+            blank_conf_mean = 0.0
+            if syllable_blank_confidences:
+                blank_conf_mean = float(sum(syllable_blank_confidences) / float(len(syllable_blank_confidences)))
             used_words_based = bool(kr_source_pick.get("used_words_based"))
             used_alias_based = bool(kr_source_pick.get("used_alias_based"))
             mapping_reason_code = str(kr_source_pick.get("mapping_reason_code") or mapping_reason_code)
@@ -3022,9 +3040,18 @@ def generate_oto(
                     label_match_score_fn=lambda target, label: float(_cv_match_score(target, label)),
                 )
             if not kr_cv_plan.get("indices"):
+                use_mel_plan = False
+                if (
+                    str(file_format or "").strip().lower() == "cvvc"
+                    and mel_ctx_for_file
+                    and syllables_info
+                ):
+                    if textgrid_trust_tier != "high" or low_phone_quality or blank_conf_mean >= 0.55:
+                        use_mel_plan = _env_bool("UTOA_KR_CVVC_MEL_PLAN", True)
                 kr_cv_plan = _build_kr_cv_anchor_plan_v2(
                     plan_candidate_source,
                     syllables_info,
+                    use_mel=bool(use_mel_plan),
                 ) if plan_candidate_source else {"indices": None, "meta": {}}
             kr_planned_cv_indices = kr_cv_plan.get("indices")
             kr_anchor_graph = build_adjacent_anchor_graph(kr_planned_cv_indices)
@@ -3055,6 +3082,7 @@ def generate_oto(
                 score_b=alt_score,
                 sequence_lock_formats={"cvvc", "cvc"},
                 abstain_formats={"cvvc", "vcv", "cvc", "cv"},
+                strict_formats={"cvvc"},
             )
             if sinsy_label_entries:
                 plan_source = str(kr_cv_plan.get("source") or "")
@@ -3072,9 +3100,7 @@ def generate_oto(
                             f"(margin={plan_margin:.1f} < {row_margin_floor:.1f})"
                         )
             mapping_confidence_base = float(runtime_policy.get("mapping_confidence", mapping_confidence_base))
-            blank_conf_mean = 0.0
             if syllable_blank_confidences:
-                blank_conf_mean = float(sum(syllable_blank_confidences) / float(len(syllable_blank_confidences)))
                 if blank_conf_mean >= 0.55:
                     mapping_confidence_base = max(
                         0.0,
@@ -3087,6 +3113,39 @@ def generate_oto(
                 )
 
             file_mapping_low_conf = bool(runtime_policy.get("is_low_conf"))
+            file_conf_floor = float(runtime_policy.get("file_conf_floor", file_mapping_conf_th))
+            if mapping_confidence_base < file_conf_floor:
+                file_mapping_low_conf = True
+            row_conf_floor = float(runtime_policy.get("row_conf_floor", file_mapping_conf_th))
+            row_margin_floor = float(runtime_policy.get("row_margin_floor", 6.0))
+            row_blank_floor = None
+            if str(file_format or "").strip().lower() == "cvvc" and runtime_policy.get("strict_mode"):
+                if blank_conf_mean >= 0.55:
+                    row_blank_floor = _env_float("UTOA_KR_CVVC_ROW_BLANK_FLOOR", 0.68)
+            if isinstance(runtime_report, dict):
+                low_conf_reasons = list(runtime_policy.get("low_conf_reasons") or [])
+                if blank_conf_mean >= 0.55 and "blank_confidence_high" not in low_conf_reasons:
+                    low_conf_reasons.append("blank_confidence_high")
+                if mapping_confidence_base < file_conf_floor and "conf_below_floor" not in low_conf_reasons:
+                    low_conf_reasons.append("conf_below_floor")
+                runtime_report["mapping"] = {
+                    "format": str(file_format or ""),
+                    "mapping_confidence": float(mapping_confidence_base),
+                    "mapping_margin": float(mapping_margin),
+                    "mapping_tier": str(runtime_policy.get("mapping_tier") or ""),
+                    "trust_score": float(textgrid_trust_score),
+                    "trust_tier": str(textgrid_trust_tier or ""),
+                    "file_conf_floor": float(file_conf_floor),
+                    "row_conf_floor": float(row_conf_floor),
+                    "row_margin_floor": float(row_margin_floor),
+                    "file_low_conf": bool(file_mapping_low_conf),
+                    "low_conf_reasons": list(low_conf_reasons),
+                    "blank_confidence_mean": float(blank_conf_mean),
+                    "plan_source": str(kr_cv_plan.get("source") or ""),
+                    "plan_margin": float((kr_cv_plan.get("meta") or {}).get("margin", 0.0) or 0.0),
+                    "plan_coverage": float(kr_plan_policy.get("coverage", 0.0) or 0.0),
+                    "mapping_reason_code": str(mapping_reason_code or ""),
+                }
 
             if (not syllables_info) or any(len(s['phones']) == 0 for s in syllables_info):
                 log(f"경고: {fname}: 음절-음소 매핑 실패로 원본 라인을 유지합니다.")
@@ -3510,11 +3569,16 @@ def generate_oto(
                             else False
                         ),
                         confidence_margin=mapping_margin,
-                        min_confidence_margin=runtime_policy.get("row_margin_floor"),
+                        min_confidence_margin=row_margin_floor,
+                        row_confidence=row_mapping_confidence,
+                        min_row_confidence=row_conf_floor,
+                        blank_confidence=_blank_conf_at(syllable_blank_confidences, selected_w_idx),
+                        max_blank_confidence=row_blank_floor,
                         # CVC는 파일/음절 특성상 margin 변동이 커 CV 계열이 과도 스킵될 수 있어
                         # row-level abstain 게이트를 CV/CVVC에만 적용한다.
                         active_only_formats={"cvvc", "cv"},
                         margin_formats={"cvvc", "cv"},
+                        blank_formats={"cvvc"},
                     )
                     if row_abstain.get("should_skip"):
                         if kr_mapping_debug_reason_logging:
