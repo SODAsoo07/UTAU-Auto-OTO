@@ -939,7 +939,31 @@
         "end_breath_alias"
       ],
       "ambiguous_key_priority": {
-        "?": [
+        "아": [
+          "a",
+          "aLong"
+        ],
+        "이": [
+          "i",
+          "iLong"
+        ],
+        "우": [
+          "u",
+          "uLong"
+        ],
+        "어": [
+          "eo",
+          "eoLong"
+        ],
+        "오": [
+          "o",
+          "oLong"
+        ],
+        "으": [
+          "eu",
+          "euLong"
+        ],
+        "응": [
           "eung",
           "eungR"
         ]
@@ -955,6 +979,70 @@
           "tail_breath"
         ]
       }
+    },
+    "romaji_to_ipa": {
+      "H": "sil",
+      "R": "sil",
+      "a": "ɐ",
+      "aLong": "ɐ",
+      "ae": "ɛ",
+      "b": "p",
+      "bb": "p͈",
+      "br": "sil",
+      "br1": "sil",
+      "br2": "sil",
+      "br3": "sil",
+      "bre": "sil",
+      "ch": "tɕʰ",
+      "d": "t",
+      "dd": "t͈",
+      "e": "e",
+      "eLong": "e",
+      "eo": "ʌ",
+      "eoLong": "ʌ",
+      "eu": "ɨ",
+      "euLong": "ɨ",
+      "eulR": "sil",
+      "eumR": "sil",
+      "eunR": "sil",
+      "eungR": "sil",
+      "g": "k",
+      "gg": "k͈",
+      "h": "h",
+      "i": "i",
+      "iLong": "i",
+      "j": "tɕ",
+      "jj": "tɕ͈",
+      "k": "kʰ",
+      "kk": "k͈",
+      "l": "ɭ",
+      "m": "m",
+      "n": "n",
+      "ng": "ŋ",
+      "o": "o",
+      "oLong": "o",
+      "oe": "w e",
+      "p": "pʰ",
+      "pau": "sil",
+      "pp": "p͈",
+      "r": "ɾ",
+      "s": "s",
+      "sil": "sil",
+      "ss": "s͈",
+      "t": "tʰ",
+      "tt": "t͈",
+      "u": "u",
+      "uLong": "u",
+      "ui": "ɰ i",
+      "vi": "v i",
+      "w": "w",
+      "wa": "w ɐ",
+      "wae": "w ɛ",
+      "we": "w e",
+      "wi": "w i",
+      "wo": "w o",
+      "y": "j",
+      "yeo": "j ʌ"
     }
   }
 }

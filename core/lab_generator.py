@@ -10,6 +10,9 @@ import os
 import re
 import unicodedata
 import logging
+from typing import Any
+
+from core.conversion_tables import load_korean_conversion_table
 
 logger = logging.getLogger(__name__)
 _KR_FILENAME_SPLIT_RE = re.compile(r"[^0-9A-Za-z가-힣]+")
@@ -57,6 +60,47 @@ KO_IPA_MAP = {
     'ui': 'ɰ i', 'wa': 'w ɐ', 'wo': 'w o', 'wi': 'w i', 'we': 'w e',
     'yeo': 'j ʌ', 'wae': 'w ɛ', 'oe': 'w e', 'vi': 'v i'
 }
+
+KO_ROMAJI_IPA_TABLE = {}
+KO_HANGUL_ALIAS_DIRECT = {}
+KO_ALIAS_VARIANT_NORMALIZATION = {}
+KO_AMBIGUOUS_ALIAS_PRIORITY = {}
+
+
+def _pick_preferred_roman_alias(value: Any) -> str:
+    candidates = value if isinstance(value, list) else [value]
+    norm = []
+    for cand in candidates:
+        tok = str(cand or "").strip()
+        if tok:
+            norm.append(tok)
+    if not norm:
+        return ""
+    norm.sort(key=lambda t: (not re.fullmatch(r"[a-zA-Z]+", t), len(t), t))
+    return norm[0]
+
+
+def _apply_external_korean_conversion_table():
+    global KO_ROMAJI_IPA_TABLE
+    global KO_HANGUL_ALIAS_DIRECT
+    global KO_ALIAS_VARIANT_NORMALIZATION
+    global KO_AMBIGUOUS_ALIAS_PRIORITY
+
+    table = load_korean_conversion_table() or {}
+    KO_ROMAJI_IPA_TABLE = dict(table.get("romaji_to_ipa", {}) or {})
+    KO_HANGUL_ALIAS_DIRECT = dict(table.get("hangul_to_alias_direct", {}) or {})
+    KO_ALIAS_VARIANT_NORMALIZATION = dict(table.get("alias_variant_normalization", {}) or {})
+
+    priority = {}
+    dm_priority = dict(table.get("direct_mapping_priority", {}) or {})
+    for key, val in dict(dm_priority.get("ambiguous_key_priority", {}) or {}).items():
+        chosen = _pick_preferred_roman_alias(val)
+        if chosen:
+            priority[str(key)] = chosen
+    KO_AMBIGUOUS_ALIAS_PRIORITY = priority
+
+
+_apply_external_korean_conversion_table()
 
 # 한글 자모 -> 로마자
 CHOSUNG_LIST_ROMAN = ['g','kk','n','d','tt','r','m','b','pp','s','ss','','j','jj','ch','k','t','p','h']
@@ -144,6 +188,30 @@ def _split_kr_lab_content_tokens(content):
     return ws_tokens
 
 
+def _romanize_hangul_token(token):
+    """
+    한글 토큰을 프로젝트 변환 테이블 우선으로 로마자화한다.
+    direct table에 없으면 자모 분해 로직으로 폴백한다.
+    """
+    tok = unicodedata.normalize('NFC', str(token or '').strip())
+    if not tok:
+        return []
+
+    direct_val = KO_HANGUL_ALIAS_DIRECT.get(tok)
+    if direct_val is not None:
+        preferred = KO_AMBIGUOUS_ALIAS_PRIORITY.get(tok, "")
+        if preferred:
+            return [preferred]
+        chosen = _pick_preferred_roman_alias(direct_val)
+        if chosen:
+            return [chosen]
+
+    out = []
+    for ch in tok:
+        out.extend(decompose_hangul_to_roman(ch))
+    return out
+
+
 def decompose_hangul_to_roman(char):
     """한글 한 글자를 로마자 토큰 리스트로 분해합니다."""
     if not (0xAC00 <= ord(char) <= 0xD7A3):
@@ -161,11 +229,28 @@ def decompose_hangul_to_roman(char):
     return result
 
 
+def _ipa_value_to_list(value):
+    text = str(value or "").strip()
+    if not text:
+        return []
+    if text == "sil":
+        return ["sil"]
+    return [p for p in text.split() if p]
+
+
 def get_ipa_from_roman(token):
     """로마자 토큰을 MFA용 IPA 시퀀스로 변환합니다."""
-    token = token.lower()
+    raw = str(token or "").strip()
+    if raw in KO_ROMAJI_IPA_TABLE:
+        return _ipa_value_to_list(KO_ROMAJI_IPA_TABLE[raw])
+
+    token = raw.lower()
     token = re.sub(r'[0-9]+', '', token)
     token = token.replace('long', '')
+    token = KO_ALIAS_VARIANT_NORMALIZATION.get(token, token)
+    if token in KO_ROMAJI_IPA_TABLE:
+        return _ipa_value_to_list(KO_ROMAJI_IPA_TABLE[token])
+
     if not token or token in ['br', 'pau', 'sil', 'r', 'h', 'bre']:
         return ['sil']
     phonemes = []
@@ -421,9 +506,7 @@ def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', 
             for token, char in zip(final_tokens, chars_only):
                 ipa_list = []
                 if re.search(r'[가-힣]', token):
-                    roman_parts = []
-                    for ch in token:
-                        roman_parts.extend(decompose_hangul_to_roman(ch))
+                    roman_parts = _romanize_hangul_token(token)
                     for part in roman_parts:
                         ipa_list.extend(get_ipa_from_roman(part))
                 else:
