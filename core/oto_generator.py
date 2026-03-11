@@ -445,6 +445,48 @@ def _guard_cv_cutoff_to_next_onset(offset, consonant, cutoff, pre, syll_idx, syl
     return offset, consonant, cutoff, pre, reduction
 
 
+def _guard_cv_cutoff_to_next_onset_strict(offset, consonant, cutoff, pre, syll_idx, syllables_info):
+    """order-locked CV에서 다음 음절 onset 침범을 더 강하게 막는 가드."""
+    if syll_idx is None or syll_idx < 0:
+        return offset, consonant, cutoff, pre, 0.0
+    if (syll_idx + 1) >= len(syllables_info):
+        return offset, consonant, cutoff, pre, 0.0
+
+    next_syl = syllables_info[syll_idx + 1]
+    next_phones = next_syl.get("phones") or []
+    if not next_phones:
+        return offset, consonant, cutoff, pre, 0.0
+
+    next_mark = (next_phones[0].mark or "").strip().lower()
+    hard_next = is_plosive_ipa(next_mark) or next_mark in {
+        "s", "ss", "sh", "ch", "j", "jj", "c", "ts", "h"
+    }
+    safety_hard = _env_float("UTOA_KR_CV_ORDER_LOCK_ONSET_GUARD_HARD", 18.0)
+    safety_soft = _env_float("UTOA_KR_CV_ORDER_LOCK_ONSET_GUARD_SOFT", 12.0)
+    safety = float(safety_hard) if hard_next else float(safety_soft)
+    next_onset_rel = (next_phones[0].minTime * 1000.0) - offset
+    max_cutoff_abs = next_onset_rel - safety
+    if max_cutoff_abs <= (pre + 32.0):
+        return offset, consonant, cutoff, pre, 0.0
+
+    original_cutoff_abs = abs(cutoff)
+    consonant = min(consonant, max_cutoff_abs - 16.0)
+    consonant = max(consonant, pre + 18.0)
+
+    cutoff_abs = min(original_cutoff_abs, max_cutoff_abs)
+    if cutoff_abs <= (consonant + 10.0):
+        cutoff_abs = min(max_cutoff_abs, consonant + 18.0)
+        if cutoff_abs <= (consonant + 8.0):
+            consonant = max(pre + 14.0, cutoff_abs - 14.0)
+    cutoff = -cutoff_abs
+
+    offset, consonant, cutoff, pre, _ovl = validate_oto_params(
+        offset, consonant, cutoff, pre, 0.0
+    )
+    reduction = max(0.0, original_cutoff_abs - abs(cutoff))
+    return offset, consonant, cutoff, pre, reduction
+
+
 def _guard_kr_vc_cutoff_to_next_segment(offset, consonant, cutoff, pre, ovl, syll_idx, syllables_info, alias_text=""):
     """한국어 VC cutoff 가드(호환 래퍼)."""
     return _guard_kr_vc_cutoff_to_next_segment_core(
@@ -528,6 +570,55 @@ def _ensure_cv_head_min_vowel_coverage(offset, consonant, cutoff, pre, vowel_sta
     # pre 이후 너무 빨리 닫히는 케이스(자음만 남는 길이)를 방지.
     min_from_pre = min(max(v_len * 0.24, 90.0), 180.0)
     min_cut_abs = max(float(consonant) + 12.0, vowel_start_rel + keep_v_ms, float(pre) + min_from_pre)
+    if cut_abs >= min_cut_abs:
+        return offset, consonant, cutoff, pre, 0.0
+
+    new_cutoff = -min_cut_abs
+    offset, consonant, new_cutoff, pre, _ovl = validate_oto_params(
+        offset, consonant, new_cutoff, pre, 0.0
+    )
+    extended_ms = max(0.0, abs(new_cutoff) - cut_abs)
+    return offset, consonant, new_cutoff, pre, extended_ms
+
+
+def _is_sonorant_like_onset(onset, ipa_hint=""):
+    o = str(onset or "").strip().lower()
+    h = str(ipa_hint or "").strip().lower()
+    if o.startswith(("m", "n", "ng", "l", "r")):
+        return True
+    if h.startswith(("m", "n", "ŋ", "l", "r")):
+        return True
+    return False
+
+
+def _ensure_cv_min_vowel_coverage(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    vowel_start_ms,
+    vowel_end_ms,
+    *,
+    alias_onset="",
+    ipa_onset="",
+):
+    """
+    CV에서 컷오프가 너무 짧아 모음 시작이 거의 포함되지 않는 경우를 보정합니다.
+    특히 유성 자음(m/n/l/r)에서 보수적으로 적용합니다.
+    """
+    if not _is_sonorant_like_onset(alias_onset, ipa_onset):
+        return offset, consonant, cutoff, pre, 0.0
+    v_start = float(vowel_start_ms)
+    v_end = float(vowel_end_ms)
+    v_len = max(0.0, v_end - v_start)
+    if v_len < 50.0:
+        return offset, consonant, cutoff, pre, 0.0
+
+    cut_abs = abs(float(cutoff))
+    keep_v_ms = min(max(v_len * 0.22, 50.0), 150.0)
+    vowel_start_rel = max(v_start - float(offset), float(pre) + 8.0)
+    min_from_pre = min(max(v_len * 0.20, 70.0), 150.0)
+    min_cut_abs = max(float(consonant) + 10.0, vowel_start_rel + keep_v_ms, float(pre) + min_from_pre)
     if cut_abs >= min_cut_abs:
         return offset, consonant, cutoff, pre, 0.0
 
@@ -877,7 +968,16 @@ def _apply_post_timing_pipeline(
         recenter_fn=_recenter_kr_params_around_pre,
         cv_cutoff_guard_fn=_guard_cv_cutoff_to_next_onset,
     )
-    return ctx.apply(
+    (
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        soft_off_shift,
+        soft_cut_shift,
+        cutoff_reduced,
+    ) = ctx.apply(
         offset,
         consonant,
         cutoff,
@@ -890,6 +990,26 @@ def _apply_post_timing_pipeline(
         is_vc_plosive_coda=is_vc_plosive_coda,
         enable_stabilize=enable_stabilize,
         enable_cutoff_guard=enable_cutoff_guard,
+    )
+    if (
+        enable_cutoff_guard
+        and alias_type == "cv"
+        and _is_kr_order_locked_cv_format(file_format)
+        and _env_bool("UTOA_KR_CV_ORDER_LOCK_STRICT_ONSET_GUARD", True)
+    ):
+        offset, consonant, cutoff, pre, strict_reduced = _guard_cv_cutoff_to_next_onset_strict(
+            offset, consonant, cutoff, pre, current_w_idx, syllables_info
+        )
+        cutoff_reduced += float(strict_reduced or 0.0)
+    return (
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        soft_off_shift,
+        soft_cut_shift,
+        cutoff_reduced,
     )
 
 
@@ -2120,8 +2240,11 @@ def _apply_soft_mel_offset_cutoff_guard(
     # 한국어 CVVC의 CV/CV_HEAD는 onset anchor와 후단 guard만으로도 충분한 경우가 많다.
     # 멜 offset soft guard가 추가로 들어가면 단모음/활음 구분이 약한 파일에서
     # offset이 공백 쪽으로 과하게 끌리는 경향이 커진다.
+    allow_order_locked_cv = _env_bool("UTOA_KR_ALLOW_ORDER_LOCKED_CV_MEL_OFFSET", True)
     skip_offset_soft_guard = (alias_type == "cv_head") or (
-        _is_kr_order_locked_cv_format(file_format) and alias_type in {"cv", "cv_head"}
+        _is_kr_order_locked_cv_format(file_format)
+        and alias_type in {"cv", "cv_head"}
+        and not allow_order_locked_cv
     )
     if not skip_offset_soft_guard and not low_energy_voiced:
         off_silent = bool(silence_mask[off_idx])
@@ -3041,13 +3164,16 @@ def generate_oto(
                 )
             if not kr_cv_plan.get("indices"):
                 use_mel_plan = False
-                if (
-                    str(file_format or "").strip().lower() == "cvvc"
-                    and mel_ctx_for_file
-                    and syllables_info
-                ):
+                fmt = str(file_format or "").strip().lower()
+                mel_plan_env = {
+                    "cvvc": "UTOA_KR_CVVC_MEL_PLAN",
+                    "cvc": "UTOA_KR_CVC_MEL_PLAN",
+                    "vcv": "UTOA_KR_VCV_MEL_PLAN",
+                    "cv": "UTOA_KR_CV_MEL_PLAN",
+                }
+                if fmt in mel_plan_env and mel_ctx_for_file and syllables_info:
                     if textgrid_trust_tier != "high" or low_phone_quality or blank_conf_mean >= 0.55:
-                        use_mel_plan = _env_bool("UTOA_KR_CVVC_MEL_PLAN", True)
+                        use_mel_plan = _env_bool(mel_plan_env[fmt], True)
                 kr_cv_plan = _build_kr_cv_anchor_plan_v2(
                     plan_candidate_source,
                     syllables_info,
@@ -3727,6 +3853,23 @@ def generate_oto(
                     enable_cutoff_guard=True,
                     post_ctx=kr_post_ctx,
                 )
+                if (
+                    alias_type == "cv"
+                    and str(file_format or "").strip().lower() in {"cvvc", "cvc"}
+                    and _env_bool("UTOA_KR_CV_MIN_VOWEL_GUARD", True)
+                ):
+                    alias_onset = _extract_alias_onset(alias)
+                    ipa_onset = curr_phones[0].mark if curr_phones else ""
+                    offset, consonant, cutoff, pre, _cv_vowel_extended = _ensure_cv_min_vowel_coverage(
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        n_start,
+                        n_end,
+                        alias_onset=alias_onset,
+                        ipa_onset=ipa_onset,
+                    )
                 _run_kr_general_row_v2(
                     final_lines=final_lines,
                     real_wav_name=real_wav_name,

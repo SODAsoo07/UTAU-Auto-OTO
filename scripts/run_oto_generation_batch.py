@@ -38,6 +38,14 @@ from core.pipeline_status import (
 from core.oto_validator import validate_oto_timing
 
 
+def _ensure_default_ml_workspace_root():
+    if os.environ.get("UTOA_OTO_ML_WORKSPACE_ROOT", "").strip():
+        return
+    candidate = os.path.join(ROOT_DIR, "ml_workspace", "models")
+    if os.path.isdir(candidate):
+        os.environ["UTOA_OTO_ML_WORKSPACE_ROOT"] = candidate
+
+
 def _configure_utf8_stdio():
     """Backward-compatible wrapper around shared UTF-8 bootstrap."""
     bootstrap_utf8_runtime()
@@ -722,6 +730,7 @@ def _run_one_case(
 
 
 def main():
+    _ensure_default_ml_workspace_root()
     _configure_utf8_stdio()
 
     parser = argparse.ArgumentParser(

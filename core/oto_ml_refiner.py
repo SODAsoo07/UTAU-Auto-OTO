@@ -113,6 +113,11 @@ def _workspace_model_root_for_language(language: str) -> str:
     workspace_root = os.environ.get("UTOA_OTO_ML_WORKSPACE_ROOT", "").strip()
     if workspace_root:
         return os.path.join(workspace_root, lang)
+    # Prefer the repo-local ml_workspace if present (newer training output),
+    # otherwise fall back to logs/ml_workspace for legacy runs.
+    local_root = os.path.join(base_dir, "ml_workspace", "models")
+    if os.path.isdir(local_root):
+        return os.path.join(local_root, lang)
     return os.path.join(base_dir, "logs", "ml_workspace", "models", lang)
 
 
@@ -145,9 +150,9 @@ def _collect_model_dir_candidates(language: str, format_type: str, alias_family:
     lang = str(language or "").strip().lower()
     candidates: List[str] = []
     for root in (
-        _structured_export_model_root_for_language(language),
         _workspace_model_root_for_language(language),
         _installed_model_root_for_language(language),
+        _structured_export_model_root_for_language(language),
         _model_root_for_language(language),
     ):
         if os.path.isfile(os.path.join(root, "model_meta.json")):
@@ -457,6 +462,10 @@ def _route_format_for_feature(language: str, feature_row: Dict[str, object], for
             if alias_type == "vv":
                 return "cvvc"
             if alias_type == "vc" and coda_type in {"stop", "nasal", "liquid"}:
+                return "cvvc"
+            if alias_type in {"cv", "cv_head"}:
+                if mapping_conf < 0.60 or pre_expected_gap > 140.0:
+                    return None
                 return "cvvc"
             return None
         if lang == "korean" and base_format == "cv":

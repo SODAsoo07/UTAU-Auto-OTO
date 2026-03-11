@@ -35,6 +35,7 @@ _SELECTOR_DEFAULTS = {
     ("korean", "cvc", "cv"): True,
     ("korean", "cvc", "vowel"): True,
     ("korean", "cvc", "bridge"): True,
+    ("korean", "cvvc", "cv"): True,
     # Japanese CVVC stays guarded at runtime:
     # - cv family delta is disabled by default
     # - selector-only application is allowed

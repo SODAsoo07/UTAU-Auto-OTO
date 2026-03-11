@@ -102,11 +102,18 @@ def _mel_guided_cvvc_adjustment(
     cv_match_score_fn,
 ):
     """
-    In low-confidence CVVC rows, re-rank nearby candidates with mel class hints.
+    In low-confidence Korean CV-family rows, re-rank nearby candidates with mel class hints.
     This is a local correction only; global monotonic constraints remain unchanged.
     """
     fmt = str(file_format or "").strip().lower()
-    if fmt != "cvvc":
+    a_type = str(alias_type or "").strip().lower()
+    if fmt not in {"cv", "cvc", "cvvc", "vcv"}:
+        return selected_idx, False
+    if a_type not in {"cv", "cv_head", "vcv"}:
+        return selected_idx, False
+    if fmt == "vcv" and a_type != "vcv":
+        return selected_idx, False
+    if fmt in {"cv", "cvc"} and a_type == "vcv":
         return selected_idx, False
     if selected_idx is None or not romaji_syllables:
         return selected_idx, False
@@ -119,11 +126,57 @@ def _mel_guided_cvvc_adjustment(
     if expected_idx >= len(romaji_syllables):
         expected_idx = len(romaji_syllables) - 1
 
+    if fmt != "cvvc":
+        mel_hint = False
+        mel_keys = (
+            "mel_voiced_formant_conf",
+            "mel_unvoiced_diffuse_conf",
+            "mel_silence_sparse_conf",
+            "mel_breath_like_conf",
+        )
+        for check_idx in (selected_idx, expected_idx):
+            if check_idx is None:
+                continue
+            if check_idx < 0 or check_idx >= len(syllables_info):
+                continue
+            row = syllables_info[check_idx] or {}
+            for key in mel_keys:
+                try:
+                    val = float(row.get(key, 0.0) or 0.0)
+                except Exception:
+                    val = 0.0
+                if val > 0.0:
+                    mel_hint = True
+                    break
+            if mel_hint:
+                break
+        if not mel_hint:
+            if _blank_conf_at(syllable_blank_confidences, selected_idx) > 0.0:
+                mel_hint = True
+            elif _blank_conf_at(syllable_blank_confidences, expected_idx) > 0.0:
+                mel_hint = True
+        if not mel_hint:
+            return selected_idx, False
+
     conf = float(row_mapping_confidence or 0.0)
     conf_th = float(file_mapping_conf_th or 0.0)
     selected_blank = _blank_conf_at(syllable_blank_confidences, selected_idx)
     expected_blank = _blank_conf_at(syllable_blank_confidences, expected_idx)
-    should_try = bool(conf < max(conf_th + 0.08, 0.62) or selected_blank >= 0.58)
+    conf_floor_by_fmt = {
+        "cvvc": 0.62,
+        "vcv": 0.64,
+        "cvc": 0.60,
+        "cv": 0.60,
+    }
+    blank_gate_by_fmt = {
+        "cvvc": 0.58,
+        "vcv": 0.56,
+        "cvc": 0.60,
+        "cv": 0.60,
+    }
+    conf_floor = conf_floor_by_fmt.get(fmt, 0.62)
+    blank_gate = blank_gate_by_fmt.get(fmt, 0.58)
+    should_try = bool(conf < max(conf_th + 0.08, conf_floor) or selected_blank >= blank_gate)
     if not should_try:
         return selected_idx, False
 
@@ -135,7 +188,6 @@ def _mel_guided_cvvc_adjustment(
 
     t_onset, _t_vowel, _t_coda = split_syllable_parts_fn(target_clean)
     target_unvoiced = _is_unvoiced_like_onset(t_onset)
-    a_type = str(alias_type or "").strip().lower()
     voiced_weight = 10.0 if a_type in {"cv", "cv_head", "vcv"} else 7.0
     unvoiced_weight = 8.0 if target_unvoiced else 3.0
 

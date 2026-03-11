@@ -100,6 +100,74 @@ class KrMappingSelectV2Tests(unittest.TestCase):
         )
         self.assertEqual(out["selected_w_idx"], 1)
 
+    def test_general_cv_selection_uses_mel_guided_remap_for_cv_low_conf(self):
+        out = select_kr_general_cv_index(
+            alias="mya",
+            alias_type="cv",
+            fname="x.wav",
+            file_format="cv",
+            target_clean="mya",
+            current_w_idx=0,
+            cv_seq_idx=0,
+            row_mapping_confidence=0.42,
+            row_jump_default=1,
+            row_jump_high_conf=2,
+            file_mapping_conf_th=0.55,
+            file_mapping_low_conf=True,
+            romaji_syllables=self.romaji,
+            forced_vv_idx=None,
+            planned_vv_idx=None,
+            planned_cv_idx=None,
+            forced_cvvc_idx=None,
+            remap_forced_cv_index_fn=lambda *_a, **_k: None,
+            cv_match_score_fn=_cv_match_score,
+            split_syllable_parts_fn=_split_kr_syllable_parts,
+            apply_row_confidence_penalty_fn=_penalty,
+            resolve_cv_syllable_index_fn=_resolve_stub,
+            should_allow_exact_vowel_fix_fn=lambda *_a, **_k: False,
+            find_cv_vowel_match_index_fn=lambda *_a, **_k: None,
+            clamp_cv_index_to_order_fn=lambda _fmt, _t, _r, _e, m: m,
+            log_fn=_noop_log,
+            debug_logging=False,
+            syllable_blank_confidences=self.blank,
+            syllables_info=self.syllables,
+        )
+        self.assertEqual(out["selected_w_idx"], 1)
+
+    def test_general_cv_selection_uses_mel_guided_remap_for_cvc_low_conf(self):
+        out = select_kr_general_cv_index(
+            alias="mya",
+            alias_type="cv",
+            fname="x.wav",
+            file_format="cvc",
+            target_clean="mya",
+            current_w_idx=0,
+            cv_seq_idx=0,
+            row_mapping_confidence=0.42,
+            row_jump_default=1,
+            row_jump_high_conf=2,
+            file_mapping_conf_th=0.55,
+            file_mapping_low_conf=True,
+            romaji_syllables=self.romaji,
+            forced_vv_idx=None,
+            planned_vv_idx=None,
+            planned_cv_idx=None,
+            forced_cvvc_idx=None,
+            remap_forced_cv_index_fn=lambda *_a, **_k: None,
+            cv_match_score_fn=_cv_match_score,
+            split_syllable_parts_fn=_split_kr_syllable_parts,
+            apply_row_confidence_penalty_fn=_penalty,
+            resolve_cv_syllable_index_fn=_resolve_stub,
+            should_allow_exact_vowel_fix_fn=lambda *_a, **_k: False,
+            find_cv_vowel_match_index_fn=lambda *_a, **_k: None,
+            clamp_cv_index_to_order_fn=lambda _fmt, _t, _r, _e, m: m,
+            log_fn=_noop_log,
+            debug_logging=False,
+            syllable_blank_confidences=self.blank,
+            syllables_info=self.syllables,
+        )
+        self.assertEqual(out["selected_w_idx"], 1)
+
     def test_vcv_selection_uses_mel_guided_remap_for_cvvc_low_conf(self):
         idx, _seq, _conf = select_kr_vcv_index(
             target_clean="mya",
@@ -128,7 +196,34 @@ class KrMappingSelectV2Tests(unittest.TestCase):
         )
         self.assertEqual(idx, 1)
 
+    def test_vcv_selection_uses_mel_guided_remap_for_vcv_low_conf(self):
+        idx, _seq, _conf = select_kr_vcv_index(
+            target_clean="mya",
+            cv_seq_idx=0,
+            current_w_idx=0,
+            romaji_syllables=self.romaji,
+            syllables_info=self.syllables,
+            file_format="vcv",
+            row_mapping_confidence=0.45,
+            row_jump_default=1,
+            row_jump_high_conf=2,
+            file_mapping_conf_th=0.55,
+            kr_planned_cv_indices=None,
+            resolve_planned_cv_index_fn=lambda *_a, **_k: None,
+            resolve_cv_syllable_index_fn=_resolve_vcv_stub,
+            clamp_cv_index_to_order_fn=lambda _fmt, _t, _r, _e, m: m,
+            split_syllable_parts_fn=_split_kr_syllable_parts,
+            find_cv_vowel_match_index_fn=lambda *_a, **_k: None,
+            cv_match_score_fn=_cv_match_score,
+            apply_row_confidence_penalty_fn=_penalty,
+            log_fn=_noop_log,
+            debug_logging=False,
+            fname="x.wav",
+            alias="a mya",
+            syllable_blank_confidences=self.blank,
+        )
+        self.assertEqual(idx, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
-

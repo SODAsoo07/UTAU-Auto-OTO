@@ -108,6 +108,7 @@ from core.ja_vcv_row_v2 import run_ja_vcv_row as _run_ja_vcv_row_v2
 from core.ja_general_row_v2 import run_ja_general_row as _run_ja_general_row_v2
 from core.ja_mapping_select_v2 import (
     resolve_ja_forced_cv_index as _resolve_ja_forced_cv_index_v2,
+    _mel_guided_ja_cvvc_adjustment as _mel_guided_ja_cvvc_adjustment_v2,
     select_ja_vcv_mapping as _select_ja_vcv_mapping_v2,
 )
 from core.ja_anchor_lock_v2 import (
@@ -149,6 +150,15 @@ def apply_alias_suffix(alias, suffix):
     if not a:
         return alias
     return f"{a}_{suf}"
+
+
+def _env_bool(name, default=False):
+    raw = str(os.environ.get(name, "")).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
 
 
 def apply_suffix_to_oto_line(line, suffix):
@@ -1006,6 +1016,32 @@ def _summarize_ja_syllable_confidences(syllable_confidences, low_cut=0.58):
     return float(mean_conf), float(min_conf), float(low_ratio)
 
 
+def _annotate_ja_syllable_mel_confidence(syllables_info, mel_ctx):
+    if not syllables_info or not mel_ctx:
+        return syllables_info
+    from core.oto_generator import (
+        _estimate_kr_blank_confidence_at_time,
+        _estimate_kr_mel_class_scores_at_time,
+    )
+    for syl in syllables_info:
+        if not isinstance(syl, dict):
+            continue
+        start_s = float(syl.get("start_time", 0.0) or 0.0)
+        phones = syl.get("phones") or []
+        if start_s <= 0.0 and phones:
+            try:
+                start_s = float(phones[0].minTime)
+            except Exception:
+                start_s = 0.0
+        if start_s < 0.0:
+            start_s = 0.0
+        t_ms = start_s * 1000.0
+        syl["blank_confidence"] = _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms)
+        mel_scores = _estimate_kr_mel_class_scores_at_time(mel_ctx, t_ms)
+        syl.update(mel_scores)
+    return syllables_info
+
+
 def _evaluate_ja_mapping_candidate(candidate_infos, cv_targets, wd_intervals=None, words_tier_confidence=0.0):
     if not candidate_infos:
         return None
@@ -1396,8 +1432,8 @@ def _find_ja_vv_pair_prev_index(alias, expected_prev_idx, syllables_info, search
     return None
 
 
-def _build_ja_planned_cv_indices(expected_tokens, syllables_info):
-    plan = _build_ja_cv_anchor_plan_v2(expected_tokens, syllables_info)
+def _build_ja_planned_cv_indices(expected_tokens, syllables_info, *, use_mel=False):
+    plan = _build_ja_cv_anchor_plan_v2(expected_tokens, syllables_info, use_mel=bool(use_mel))
     return plan.get("indices")
 
 
@@ -2957,6 +2993,8 @@ def generate_ja_oto(
                 )
                 base_score = float(selected_candidate.get("score", -1.0))
                 syllable_confidence_by_idx = list(selected_candidate.get("syllable_confidences", []) or [])
+                if mel_ctx_for_file:
+                    _annotate_ja_syllable_mel_confidence(syllables_info, mel_ctx_for_file)
             else:
                 syllables_info = []
                 base_score = -1.0
@@ -2974,9 +3012,30 @@ def generate_ja_oto(
                     label_match_score_fn=lambda target, label: float(int(_ja_soft_cv_match_level(target, label) or 0) * 42.0),
                 )
             if not ja_cv_plan.get("indices"):
+                use_mel_plan = False
+                if (
+                    format_type == "cvvc"
+                    and mel_ctx_for_file
+                    and syllables_info
+                ):
+                    if textgrid_trust_tier != "high" or low_phone_quality:
+                        use_mel_plan = _env_bool("UTOA_JA_CVVC_MEL_PLAN", True)
+                    else:
+                        mean_conf, min_conf, low_ratio = _summarize_ja_syllable_confidences(
+                            syllable_confidence_by_idx
+                        )
+                        blank_vals = [
+                            float(s.get("blank_confidence", 0.0) or 0.0)
+                            for s in (syllables_info or [])
+                            if isinstance(s, dict)
+                        ]
+                        blank_mean = sum(blank_vals) / float(len(blank_vals)) if blank_vals else 0.0
+                        if min_conf < 0.54 or low_ratio > 0.30 or blank_mean >= 0.55:
+                            use_mel_plan = _env_bool("UTOA_JA_CVVC_MEL_PLAN", True)
                 ja_cv_plan = _build_ja_cv_anchor_plan_v2(
                     planned_cv_source,
                     syllables_info,
+                    use_mel=bool(use_mel_plan),
                 ) if planned_cv_source else {"indices": None, "meta": {}}
             ja_planned_cv_indices = ja_cv_plan.get("indices")
             ja_anchor_graph = build_adjacent_anchor_graph(ja_planned_cv_indices)
@@ -3048,6 +3107,8 @@ def generate_ja_oto(
                     filename_order_locked = True
                     base_score = float(selected_candidate.get("score", base_score))
                     syllable_confidence_by_idx = list(selected_candidate.get("syllable_confidences", []) or [])
+                    if mel_ctx_for_file:
+                        _annotate_ja_syllable_mel_confidence(syllables_info, mel_ctx_for_file)
                     mapping_reason_code = (
                         "filename_linear_low_conf"
                         if selected_candidate.get("name") == "filename_linear_fallback"
@@ -3075,9 +3136,30 @@ def generate_ja_oto(
                             label_match_score_fn=lambda target, label: float(int(_ja_soft_cv_match_level(target, label) or 0) * 42.0),
                         )
                     if not ja_cv_plan.get("indices"):
+                        use_mel_plan = False
+                        if (
+                            format_type == "cvvc"
+                            and mel_ctx_for_file
+                            and syllables_info
+                        ):
+                            if textgrid_trust_tier != "high" or low_phone_quality:
+                                use_mel_plan = _env_bool("UTOA_JA_CVVC_MEL_PLAN", True)
+                            else:
+                                mean_conf, min_conf, low_ratio = _summarize_ja_syllable_confidences(
+                                    syllable_confidence_by_idx
+                                )
+                                blank_vals = [
+                                    float(s.get("blank_confidence", 0.0) or 0.0)
+                                    for s in (syllables_info or [])
+                                    if isinstance(s, dict)
+                                ]
+                                blank_mean = sum(blank_vals) / float(len(blank_vals)) if blank_vals else 0.0
+                                if min_conf < 0.54 or low_ratio > 0.30 or blank_mean >= 0.55:
+                                    use_mel_plan = _env_bool("UTOA_JA_CVVC_MEL_PLAN", True)
                         ja_cv_plan = _build_ja_cv_anchor_plan_v2(
                             planned_cv_source,
                             syllables_info,
+                            use_mel=bool(use_mel_plan),
                         ) if planned_cv_source else {"indices": None, "meta": {}}
                     ja_planned_cv_indices = ja_cv_plan.get("indices")
                     ja_anchor_graph = build_adjacent_anchor_graph(ja_planned_cv_indices)
@@ -3406,6 +3488,7 @@ def generate_ja_oto(
                         mapping_tier=mapping_tier,
                         mapping_reason_code=mapping_reason_code,
                         mapping_confidence_base=mapping_confidence_base,
+                        mapping_conf_threshold=conf_th,
                         filename_order_locked=filename_order_locked,
                         syllable_confidence_by_idx=syllable_confidence_by_idx,
                         log_fn=log,
@@ -3425,6 +3508,7 @@ def generate_ja_oto(
                         append_mapping_trace_fn=_append_mapping_trace,
                         decide_cv_row_abstain_fn=decide_cv_row_abstain,
                         is_cv_syllable_active_fn=_is_ja_cv_syllable_active,
+                        mel_remap_enabled=_env_bool("UTOA_JA_CVVC_MEL_REMAP", True),
                     )
                     expected_idx = int(vcv_mapping["expected_idx"])
                     mapped_idx = int(vcv_mapping["mapped_idx"])
@@ -3664,6 +3748,30 @@ def generate_ja_oto(
                             mapped_idx = ordered_idx
                         if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
                             log(f"🧭 {fname}: CV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
+
+                        if format_type == "cvvc":
+                            mel_idx, mel_adjusted = _mel_guided_ja_cvvc_adjustment_v2(
+                                format_type=format_type,
+                                alias_type="cv",
+                                target_tok=target_tok,
+                                expected_idx=expected_idx,
+                                selected_idx=mapped_idx,
+                                mapping_confidence=mapping_confidence_base,
+                                mapping_conf_threshold=conf_th,
+                                max_search_fwd=(1 if filename_order_locked else 2),
+                                syllables_info=syllables_info,
+                                normalize_syllable_token_fn=_normalize_ja_syllable_token,
+                                syllable_info_token_fn=_syllable_info_token,
+                                syllable_confidence_by_idx=syllable_confidence_by_idx,
+                                order_locked=bool(filename_order_locked),
+                                mel_remap_enabled=_env_bool("UTOA_JA_CVVC_MEL_REMAP", True),
+                            )
+                            if mel_adjusted and mel_idx != mapped_idx:
+                                log(
+                                    f"🧭 {fname}: CV mel-guided remap "
+                                    f"({mapped_idx + 1}->{mel_idx + 1}, {alias})"
+                                )
+                                mapped_idx = int(mel_idx)
                     if format_type == "cvvc":
                         active_idx = _remap_ja_cvvc_inactive_cv_index(
                             target_tok,
