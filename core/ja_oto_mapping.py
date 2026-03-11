@@ -11,6 +11,7 @@ import re
 import unicodedata
 from functools import lru_cache
 
+from core.alias_annotation_utils import strip_alias_annotation_suffixes
 from core.ja_lab_generator import parse_ja_filename, romaji_to_ipa, split_ja_romaji_syllable
 
 JA_CONSONANTS = [
@@ -67,8 +68,17 @@ def _clean_phone_mark(mark):
 
 
 def is_breath(alias):
-    clean = alias.strip().lower()
-    return bool(re.match(r'^br\d*$', clean))
+    clean = unicodedata.normalize("NFKC", str(alias or "")).strip().lower()
+    if not clean:
+        return False
+    if re.match(r'^br\d*$', clean):
+        return True
+    if clean in {"bre", "breath", "息", "吸", "吐", "吸い", "吐き", "息継ぎ"}:
+        return True
+    # Some banks annotate inhale/exhale variants like 吸こ吐, 吸き吐.
+    if any(ch in clean for ch in ("吸", "吐", "息")):
+        return True
+    return False
 
 
 def _is_ja_vowel_token(token):
@@ -84,8 +94,7 @@ def _is_ja_vowel_token(token):
     return (not onset) and (vowel in JA_VOWELS)
 
 
-def classify_ja_alias(alias, custom_map=None):
-    clean = unicodedata.normalize("NFKC", str(alias or "")).strip()
+def _classify_ja_alias_core(clean, custom_map=None):
     if is_breath(clean):
         return 'br'
     mapped_val = _lookup_custom_alias_value(custom_map, clean)
@@ -133,6 +142,15 @@ def classify_ja_alias(alias, custom_map=None):
     if vowel in JA_VOWELS:
         return 'mono' if not onset else 'cv'
     return 'cv'
+
+
+def classify_ja_alias(alias, custom_map=None):
+    clean = unicodedata.normalize("NFKC", str(alias or "")).strip()
+    clean = strip_alias_annotation_suffixes(
+        clean,
+        classifier=lambda candidate: _classify_ja_alias_core(candidate, custom_map),
+    )
+    return _classify_ja_alias_core(clean, custom_map)
 
 
 def detect_ja_alias_format(alias_list, custom_map=None):

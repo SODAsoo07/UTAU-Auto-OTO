@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import re
@@ -45,6 +45,79 @@ def _iter_parent_dirs(path: str) -> Iterable[str]:
         current = parent
 
 
+def _iter_map_candidates(directory: str) -> Iterable[str]:
+    preferred = os.path.join(directory, "prefix.map")
+    if os.path.isfile(preferred):
+        yield preferred
+
+    try:
+        entries = sorted(os.listdir(directory), key=lambda s: s.lower())
+    except OSError:
+        return
+
+    for name in entries:
+        if name.lower() == "prefix.map":
+            continue
+        if not name.lower().endswith(".map"):
+            continue
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate):
+            yield candidate
+
+
+def _split_map_line(raw: str) -> List[str]:
+    line = raw.strip("\ufeff").rstrip()
+    if not line or line.startswith("#") or line.startswith(";"):
+        return []
+    if "\t" in line:
+        return [p.strip() for p in line.split("\t")]
+    parts = [p.strip() for p in re.split(r"\s{2,}", line)]
+    if len(parts) >= 3:
+        return parts
+    return [p.strip() for p in re.split(r"\s+", line, maxsplit=2)]
+
+
+def _is_pitch_affix(text: str) -> bool:
+    s = str(text or "")
+    if not s:
+        return False
+    if any(ch.isdigit() for ch in s):
+        return True
+    if re.search(r"[_\-\+\[\]\(\){}#]", s):
+        return True
+    if re.search(r"[A-Z]", s):
+        return True
+    if re.search(r"[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]", s):
+        return True
+    return len(s) >= 2
+
+
+def _looks_like_affix_value(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return True
+    if value == "-":
+        return True
+    return _is_pitch_affix(value)
+
+
+def _parse_prefix_map_rules(text: str) -> Tuple[PrefixMapRule, ...]:
+    rules: List[PrefixMapRule] = []
+    for raw in text.splitlines():
+        parts = _split_map_line(raw)
+        if not parts:
+            continue
+        note = normalize_note_name(parts[0])
+        if not note:
+            continue
+        prefix = parts[1] if len(parts) >= 2 else ""
+        suffix = parts[2] if len(parts) >= 3 else ""
+        if not (_looks_like_affix_value(prefix) and _looks_like_affix_value(suffix)):
+            continue
+        rules.append(PrefixMapRule(note=note, prefix=prefix, suffix=suffix))
+    return tuple(rules)
+
+
 def find_prefix_map_path(*paths: str) -> str:
     seen_dirs = set()
     for path in paths:
@@ -54,9 +127,11 @@ def find_prefix_map_path(*paths: str) -> str:
             if directory in seen_dirs:
                 continue
             seen_dirs.add(directory)
-            candidate = os.path.join(directory, "prefix.map")
-            if os.path.isfile(candidate):
-                return candidate
+            for candidate in _iter_map_candidates(directory):
+                if load_prefix_map(candidate):
+                    return candidate
+                if os.path.basename(candidate).lower() == "prefix.map":
+                    return candidate
     return ""
 
 
@@ -67,26 +142,7 @@ def load_prefix_map(path: str) -> Tuple[PrefixMapRule, ...]:
     text, _enc, err = read_text_auto(path)
     if err or text is None:
         return ()
-    rules: List[PrefixMapRule] = []
-    for raw in text.splitlines():
-        line = raw.strip("\ufeff").rstrip()
-        if not line or line.startswith("#") or line.startswith(";"):
-            continue
-        if "\t" in line:
-            parts = [p.strip() for p in line.split("\t")]
-        else:
-            parts = [p.strip() for p in re.split(r"\s{2,}", line)]
-            if len(parts) < 3:
-                parts = [p.strip() for p in re.split(r"\s+", line, maxsplit=2)]
-        if not parts:
-            continue
-        note = normalize_note_name(parts[0])
-        if not note:
-            continue
-        prefix = parts[1] if len(parts) >= 2 else ""
-        suffix = parts[2] if len(parts) >= 3 else ""
-        rules.append(PrefixMapRule(note=note, prefix=prefix, suffix=suffix))
-    return tuple(rules)
+    return _parse_prefix_map_rules(text)
 
 
 def _extract_context_notes(*values: str) -> List[str]:
@@ -105,21 +161,6 @@ def _extract_context_notes(*values: str) -> List[str]:
                 seen.add(note)
                 notes.append(note)
     return notes
-
-
-def _is_pitch_affix(text: str) -> bool:
-    s = str(text or "")
-    if not s:
-        return False
-    if any(ch.isdigit() for ch in s):
-        return True
-    if re.search(r"[_\-\+\[\]\(\){}#]", s):
-        return True
-    if re.search(r"[A-Z]", s):
-        return True
-    if re.search(r"[가-힣ぁ-んァ-ヶ一-龯]", s):
-        return True
-    return len(s) >= 2
 
 
 def _candidate_rules_for_context(rules: Sequence[PrefixMapRule], wav_name: str = "", context_paths: Sequence[str] = ()) -> List[PrefixMapRule]:

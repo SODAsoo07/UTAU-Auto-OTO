@@ -34,16 +34,29 @@ def main():
     )
     ap.add_argument("--dry-run", action="store_true", help="Discover planned jobs without running MFA/OTO generation")
     ap.add_argument("--limit", type=int, default=0, help="Optional max number of work items")
+    ap.add_argument(
+        "--resume",
+        action="store_true",
+        help="Reuse prepared_auto_pairs.json as a checkpoint and skip items already processed",
+    )
+    ap.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="When resuming, retry items previously recorded as skip/failed",
+    )
     args = ap.parse_args()
 
     dataset_root = os.path.abspath(args.dataset_root)
+    report_path = os.path.join(dataset_root, "_manifest", "prepared_auto_pairs.json")
     result = prepare_staged_auto_pairs(
         dataset_root,
         dry_run=args.dry_run,
         limit=args.limit,
         progress_callback=_safe_print,
+        report_path=report_path,
+        resume=args.resume,
+        retry_failed=args.retry_failed,
     )
-    report_path = os.path.join(dataset_root, "_manifest", "prepared_auto_pairs.json")
     write_prepare_report(report_path, result)
     print(json.dumps({
         "summary": result.get("summary", {}),

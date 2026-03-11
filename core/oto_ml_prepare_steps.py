@@ -16,7 +16,9 @@ def _prepare_lab_and_dict(item: PreparedAutoPair, logs: List[str]) -> None:
         item.dict_path = os.path.join(item.work_dir, "dictionary_auto.txt")
         generate_ja_dictionary(item.work_dir, item.dict_path, callback=logs.append)
     else:
-        generate_labs(item.work_dir, callback=logs.append)
+        # For MFA alignment stability on Windows, keep Korean lab tokens ASCII-safe.
+        # Hangul lab tokens can trigger graph-compilation failures on some banks.
+        generate_labs(item.work_dir, convert_to_hangul=False, callback=logs.append)
         item.dict_path = os.path.join(item.work_dir, "dictionary_auto.txt")
         generate_dictionary(item.work_dir, item.dict_path, callback=logs.append)
 

@@ -22,6 +22,8 @@ param(
     [double]$MinConfidence = 0.55,
     [switch]$StageSources,
     [switch]$PrepareAuto,
+    [switch]$ResumePrepare,
+    [switch]$RetryFailedPrepare,
     [switch]$BuildDatasetOnly,
     [switch]$TrainOnly,
     [switch]$EvaluateOnly,
@@ -65,39 +67,9 @@ $ExportScript = Join-Path $RepoRoot "ml\scripts\export_oto_ml_bundle.py"
 $InstallScript = Join-Path $RepoRoot "ml\scripts\install_oto_ml_bundle.py"
 $script:AutoPrepareAttempted = $false
 
-function Get-AutoItemCount {
-    param(
-        [string]$Root,
-        [string]$LangValue,
-        [string]$FormatValue
-    )
-    if (-not $Root) { return 0 }
-    $scanRoot = Join-Path (Join-Path $Root $LangValue) $FormatValue
-    if (-not (Test-Path $scanRoot)) { return 0 }
-    return @(
-        Get-ChildItem -Path $scanRoot -Recurse -File -Filter "oto_auto_ml.ini" -ErrorAction SilentlyContinue
-    ).Count
-}
-
 function Resolve-DefaultDatasetRoot {
-    $stageRoot = Join-Path $RepoRoot "dataset_stage"
     $mainRoot = Join-Path $RepoRoot "dataset"
-    $candidates = @($stageRoot, $mainRoot) | Where-Object { Test-Path $_ }
-    if (-not $candidates -or $candidates.Count -eq 0) {
-        return $mainRoot
-    }
-
-    $bestRoot = $null
-    $bestCount = -1
-    foreach ($candidate in $candidates) {
-        $cnt = Get-AutoItemCount -Root $candidate -LangValue $Lang -FormatValue $Format
-        if ($cnt -gt $bestCount) {
-            $bestCount = $cnt
-            $bestRoot = $candidate
-        }
-    }
-    if (-not $bestRoot) { return $candidates[0] }
-    return $bestRoot
+    return $mainRoot
 }
 
 if (-not $DatasetRoot) { $DatasetRoot = Resolve-DefaultDatasetRoot }
@@ -208,6 +180,21 @@ function Invoke-PythonScript {
     }
 }
 
+function Get-PrepareScriptArgs {
+    $args = @("--dataset-root", $DatasetRoot)
+    $useResume = $ResumePrepare.IsPresent -or (-not $StageSources)
+    if ($RetryFailedPrepare) {
+        $useResume = $true
+    }
+    if ($useResume) {
+        $args += "--resume"
+    }
+    if ($RetryFailedPrepare) {
+        $args += "--retry-failed"
+    }
+    return ,$args
+}
+
 function Build-DatasetFromSingleWorkDir {
     $work = (Resolve-Path $SingleWorkDir).Path
     $auto = Join-Path $work "oto_auto_ml.ini"
@@ -249,7 +236,7 @@ function Build-DatasetFromPreparedReport {
         $script:AutoPrepareAttempted = $true
         Write-Host "[build] prepared report missing -> running auto prepare once"
         try {
-            Invoke-PythonScript -ScriptPath $PrepareScript -ArgsList @("--dataset-root", $DatasetRoot)
+            Invoke-PythonScript -ScriptPath $PrepareScript -ArgsList (Get-PrepareScriptArgs)
         } catch {
             Write-Warning ("[build] auto prepare failed: {0}" -f $_.Exception.Message)
         }
@@ -268,7 +255,7 @@ function Build-DatasetFromPreparedReport {
         $script:AutoPrepareAttempted = $true
         Write-Host "[build] no prepared/scan items -> running auto prepare once"
         try {
-            Invoke-PythonScript -ScriptPath $PrepareScript -ArgsList @("--dataset-root", $DatasetRoot)
+            Invoke-PythonScript -ScriptPath $PrepareScript -ArgsList (Get-PrepareScriptArgs)
         } catch {
             Write-Warning ("[build] auto prepare failed: {0}" -f $_.Exception.Message)
         }
@@ -373,7 +360,7 @@ if ($StageSources) {
     Invoke-PythonScript -ScriptPath $StageScript -ArgsList @("--dataset-root", $DatasetRoot)
 }
 if ($PrepareAuto) {
-    Invoke-PythonScript -ScriptPath $PrepareScript -ArgsList @("--dataset-root", $DatasetRoot)
+    Invoke-PythonScript -ScriptPath $PrepareScript -ArgsList (Get-PrepareScriptArgs)
 }
 
 if ($runBuild) {

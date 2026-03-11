@@ -48,14 +48,7 @@ function Get-DatasetRootCandidates {
     if ($DatasetRoot) {
         return @($DatasetRoot)
     }
-    $candidates = @(
-        (Join-Path $RepoRoot "dataset_stage")
-        (Join-Path $RepoRoot "dataset")
-    ) | Where-Object { Test-Path $_ }
-    if (-not $candidates -or $candidates.Count -eq 0) {
-        return @(Join-Path $RepoRoot "dataset")
-    }
-    return @($candidates)
+    return @(Join-Path $RepoRoot "dataset")
 }
 
 function Resolve-DatasetRootForFormat {

@@ -42,8 +42,8 @@ from core.prefix_map_utils import find_prefix_map_path, strip_prefix_map_affixes
 
 logger = logging.getLogger(__name__)
 
-FEATURE_VERSION = "v9"
-TRAIN_ROW_MATCH_VERSION = "v9"
+FEATURE_VERSION = "v10"
+TRAIN_ROW_MATCH_VERSION = "v10"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
 AUX_TARGET_NAMES = ["aux_vowel_start_rel", "aux_vowel_end_rel", "aux_next_onset_rel"]
 

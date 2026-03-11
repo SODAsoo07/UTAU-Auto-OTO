@@ -54,6 +54,27 @@ class KoreanMfaDictionaryGuardTests(unittest.TestCase):
             lab_generator.KO_ROMAJI_IPA_TABLE.clear()
             lab_generator.KO_ROMAJI_IPA_TABLE.update(original_map)
 
+    def test_generate_dictionary_skips_multi_token_sentence_keys(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lab_path = os.path.join(tmpdir, "ga'gi'gu.lab")
+            with open(lab_path, "w", encoding="utf-8") as f:
+                f.write("가 기 구")
+
+            dict_path = os.path.join(tmpdir, "dictionary.txt")
+            count_files, entry_count, errors = lab_generator.generate_dictionary(tmpdir, dict_path)
+
+            self.assertEqual(errors, [])
+            self.assertEqual(count_files, 1)
+            self.assertGreaterEqual(entry_count, 3)
+
+            with open(dict_path, "r", encoding="utf-8") as f:
+                keys = [line.split("\t", 1)[0] for line in f if "\t" in line]
+
+            self.assertIn("가", keys)
+            self.assertIn("기", keys)
+            self.assertIn("구", keys)
+            self.assertNotIn("가 기 구", keys)
+
 
 if __name__ == "__main__":
     unittest.main()

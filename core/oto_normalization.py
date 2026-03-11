@@ -5,6 +5,7 @@ import re
 import unicodedata
 from typing import Dict, Optional
 
+from core.alias_annotation_utils import strip_alias_annotation_suffixes
 from core.ja_lab_generator import parse_ja_filename, repair_japanese_mojibake_text
 
 
@@ -43,58 +44,6 @@ def _classify_alias_for_normalization(language: str, alias: str, custom_map: Opt
     return str(classify_alias(alias, custom_map=custom_map) or "")
 
 
-def _strip_known_pitch_suffix(text: str) -> str:
-    stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:#|b)?[0-8])$", "", text, flags=re.IGNORECASE)
-    stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:sharp|flat)?[0-8])$", "", stripped, flags=re.IGNORECASE)
-    return stripped.strip()
-
-
-def _strip_bracket_suffix(text: str) -> str:
-    return re.sub(r"\s*[\(\[\{（【].*?[\)\]\}）】]\s*$", "", text).strip()
-
-
-def _try_strip_trailing_separator_suffix(text: str, language: str, custom_map: Optional[Dict[str, str]], base_type: str) -> str:
-    for sep in ("_", " "):
-        if sep not in text:
-            continue
-        parts = text.rsplit(sep, 1)
-        if len(parts) != 2:
-            continue
-        prefix, suffix = parts[0].strip(), parts[1].strip()
-        if not prefix or not suffix:
-            continue
-        prefix_type = _classify_alias_for_normalization(language, prefix, custom_map=custom_map)
-        if prefix_type == base_type and prefix_type:
-            return prefix
-    return text
-
-
-def _try_strip_attached_suffix(text: str, language: str, custom_map: Optional[Dict[str, str]], base_type: str) -> str:
-    match = re.search(r"([A-Za-z가-힣ぁ-んァ-ヶ一-龯]+)$", text)
-    if not match:
-        return text
-    suffix = match.group(1)
-    if not re.search(r"[가-힣ぁ-んァ-ヶ一-龯]", suffix):
-        return text
-    if len(suffix) <= 1 and not re.search(r"[一-龯]", suffix):
-        return text
-    run_start = len(text) - len(suffix)
-    first_suffix_idx = next(
-        (idx for idx, ch in enumerate(suffix) if re.match(r"[가-힣ぁ-んァ-ヶ一-龯]", ch)),
-        None,
-    )
-    if first_suffix_idx is None:
-        return text
-    for cut in range(run_start + first_suffix_idx, len(text)):
-        prefix = text[:cut].rstrip(" _-")
-        if not prefix:
-            continue
-        prefix_type = _classify_alias_for_normalization(language, prefix, custom_map=custom_map)
-        if prefix_type == base_type and prefix_type:
-            return prefix
-    return text
-
-
 def _normalize_ja_alias_token(token: str) -> str:
     raw = repair_japanese_mojibake_text(str(token or ""))
     text = _katakana_to_hiragana(unicodedata.normalize("NFKC", raw).strip())
@@ -119,21 +68,22 @@ def canonicalize_alias_for_matching(language: str, alias: str, custom_map: Optio
     text = unicodedata.normalize("NFKC", str(alias or "")).strip()
     if not text:
         return ""
+    raw_base_type = _classify_alias_for_normalization(lang, text, custom_map=custom_map)
+    if raw_base_type == "br":
+        return "br"
     if lang == "japanese":
         parts = [_normalize_ja_alias_token(part) for part in re.split(r"\s+", text) if part.strip()]
         text = " ".join(parts)
     text = re.sub(r"\s+", " ", text).strip().lower()
     if not text:
         return ""
+    text = strip_alias_annotation_suffixes(
+        text,
+        classifier=lambda candidate: _classify_alias_for_normalization(lang, candidate, custom_map=custom_map),
+    )
     base_type = _classify_alias_for_normalization(lang, text, custom_map=custom_map)
-    while True:
-        prev = text
-        text = _strip_known_pitch_suffix(text)
-        text = _strip_bracket_suffix(text)
-        text = _try_strip_trailing_separator_suffix(text, lang, custom_map, base_type)
-        text = _try_strip_attached_suffix(text, lang, custom_map, base_type)
-        if text == prev:
-            break
+    if base_type == "br":
+        return "br"
     return text
 
 

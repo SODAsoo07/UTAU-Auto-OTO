@@ -1,4 +1,4 @@
-# Byte-compiled / optimized / DLL files
+﻿# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
 *$py.class
@@ -240,9 +240,9 @@ custom_test_wavs/*_dict.txt
 /dataset
 /dataset_korean_cvc_stage
 /dataset_korean_cvc_stage/**
-oto 설정의 기본.txt
+oto ・､・菩攪 ・ｰ・ｸ.txt
 dataset_korean_cvc_stage/_manifest/staged_sources.csv
 dataset_korean_cvc_stage/_manifest/staged_sources.json
 dataset_korean_cvc_stage/korean/cvc/CVC/Anonymous VB - KO CVC/alignment_analysis.csv
-/dataset_stage
 --dataset-root
+

@@ -12,6 +12,8 @@ import re
 import unicodedata
 from functools import lru_cache
 
+from core.alias_annotation_utils import strip_alias_annotation_suffixes
+
 IPA_VOWELS = {
     "a", "e", "i", "o", "u", "y",
     "eo", "eu", "ae", "oe", "wa", "we", "wi", "wo", "ui",
@@ -210,8 +212,16 @@ def _detect_glottal_kind(alias):
 
 def is_breath(alias):
     """숨소리(br, br1...) 에일리어스인지 판별합니다."""
-    clean = alias.strip().lower()
-    return bool(re.match(r"^br\d*$", clean))
+    clean = unicodedata.normalize("NFKC", str(alias or "")).strip().lower()
+    if not clean:
+        return False
+    if re.match(r"^br\d*$", clean):
+        return True
+    if clean in {"bre", "breath", "息", "吸", "吐", "흡", "호", "숨"}:
+        return True
+    if any(ch in clean for ch in ("吸", "吐", "息")):
+        return True
+    return False
 
 
 def _extract_vowel_consonant(text):
@@ -469,6 +479,18 @@ def classify_alias(alias, custom_map=None):
         return "vc"
 
     return "cv"
+
+
+_CLASSIFY_ALIAS_RAW = classify_alias
+
+
+def classify_alias(alias, custom_map=None):
+    clean = unicodedata.normalize("NFKC", str(alias or "")).strip()
+    clean = strip_alias_annotation_suffixes(
+        clean,
+        classifier=lambda candidate: _CLASSIFY_ALIAS_RAW(candidate, custom_map),
+    )
+    return _CLASSIFY_ALIAS_RAW(clean, custom_map)
 
 
 def detect_alias_format(alias_list, custom_map=None):

@@ -696,10 +696,12 @@ def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', 
                         c_ipa = "sil"
                     dictionary_entries[raw_char] = c_ipa
 
+            # MFA dictionary keys must be single tokens without spaces.
+            # Multi-token sentence keys such as "가 기 구 ..." are parsed incorrectly
+            # as word="가", pronunciation="기 구 ..." and can poison graph compilation.
+            # For aligned lab workflows, per-token entries are sufficient, so we skip
+            # sentence-level dictionary entries here.
             if full_sentence_ipa:
-                full_key = new_content
-                full_value = " ".join(full_sentence_ipa)
-                dictionary_entries[full_key] = full_value
                 count_files += 1
 
         except Exception as e:
