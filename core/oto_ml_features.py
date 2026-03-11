@@ -36,12 +36,16 @@ from core.prefix_map_utils import find_prefix_map_path, strip_prefix_map_affixes
 
 logger = logging.getLogger(__name__)
 
-FEATURE_VERSION = "v7"
-TRAIN_ROW_MATCH_VERSION = "v8"
+FEATURE_VERSION = "v9"
+TRAIN_ROW_MATCH_VERSION = "v9"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
+AUX_TARGET_NAMES = ["aux_vowel_start_rel", "aux_vowel_end_rel", "aux_next_onset_rel"]
 
 FEATURE_NAMES = [
     "language", "format_type", "alias_type", "alias_group", "row_index_in_wav", "row_ratio_in_wav",
+    "file_row_count", "file_cv_count", "file_vc_count", "file_vv_count", "file_vcv_count",
+    "file_br_count", "file_mono_count", "file_cv_ratio", "file_vc_ratio",
+    "file_vc_cv_ratio", "file_cv_vc_balance",
     "is_head_row", "is_tail_row", "wav_duration_ms", "base_offset", "base_cons",
     "base_cutoff_abs", "base_pre", "base_ovl", "base_cons_gap", "base_cut_gap",
     "base_ovl_ratio", "curr_phone_start_ms", "curr_phone_end_ms", "curr_phone_len_ms",
@@ -64,6 +68,8 @@ FEATURE_NAMES = [
     "mel_breath_like_ratio", "blank_span_confidence", "mel_offset_candidate_ms",
     "mel_cutoff_candidate_ms", "onset_patch_energy_mean", "onset_patch_voiced_ratio",
     "onset_patch_unvoiced_ratio", "tail_patch_energy_mean", "tail_patch_silence_ratio",
+    "syllable_blank_confidence", "syllable_mel_voiced_conf", "syllable_mel_silence_conf",
+    "syllable_mel_unvoiced_conf", "syllable_mel_breath_conf",
 ]
 
 CATEGORICAL_FEATURES = [
@@ -239,6 +245,7 @@ def get_feature_schema() -> Dict[str, object]:
         "feature_names": list(FEATURE_NAMES),
         "categorical_features": list(CATEGORICAL_FEATURES),
         "target_names": list(TARGET_NAMES),
+        "aux_target_names": list(AUX_TARGET_NAMES),
     }
 
 
@@ -1024,13 +1031,25 @@ def _derive_alias_group(language: str, feat: Dict[str, object], alias: str = "")
     return alias_type or "other"
 
 
-def _feature_row_from_context(language: str, format_type: str, row: Dict[str, object], row_index: int, total_rows: int, alias_type: str, phones: List[object], words: List[object], mel_ctx, audio, sr: int, prev_row: Optional[Dict[str, object]], next_row: Optional[Dict[str, object]]) -> Dict[str, object]:
+def _feature_row_from_context(language: str, format_type: str, row: Dict[str, object], row_index: int, total_rows: int, alias_type: str, phones: List[object], words: List[object], mel_ctx, audio, sr: int, prev_row: Optional[Dict[str, object]], next_row: Optional[Dict[str, object]], file_stats: Optional[Dict[str, float]] = None) -> Dict[str, object]:
     feat = dict(FEATURE_DEFAULTS)
     feat["language"] = language
     feat["format_type"] = format_type
     feat["alias_type"] = alias_type
     feat["row_index_in_wav"] = float(row_index)
     feat["row_ratio_in_wav"] = _safe_ratio(row_index, max(total_rows - 1, 1))
+    if file_stats:
+        feat["file_row_count"] = float(file_stats.get("row_count", 0.0) or 0.0)
+        feat["file_cv_count"] = float(file_stats.get("cv_count", 0.0) or 0.0)
+        feat["file_vc_count"] = float(file_stats.get("vc_count", 0.0) or 0.0)
+        feat["file_vv_count"] = float(file_stats.get("vv_count", 0.0) or 0.0)
+        feat["file_vcv_count"] = float(file_stats.get("vcv_count", 0.0) or 0.0)
+        feat["file_br_count"] = float(file_stats.get("br_count", 0.0) or 0.0)
+        feat["file_mono_count"] = float(file_stats.get("mono_count", 0.0) or 0.0)
+        feat["file_cv_ratio"] = float(file_stats.get("cv_ratio", 0.0) or 0.0)
+        feat["file_vc_ratio"] = float(file_stats.get("vc_ratio", 0.0) or 0.0)
+        feat["file_vc_cv_ratio"] = float(file_stats.get("vc_cv_ratio", 0.0) or 0.0)
+        feat["file_cv_vc_balance"] = float(file_stats.get("cv_vc_balance", 0.0) or 0.0)
     feat["is_head_row"] = 1.0 if row_index == 0 else 0.0
     feat["is_tail_row"] = 1.0 if row_index == (total_rows - 1) else 0.0
     if audio is not None and sr and sr > 0:
@@ -1088,6 +1107,26 @@ def _feature_row_from_context(language: str, format_type: str, row: Dict[str, ob
         feat["syllable_end_ms"] = feat["curr_vowel_end_ms"]
         feat["syllable_len_ms"] = feat["curr_vowel_len_ms"]
 
+    if mel_ctx:
+        try:
+            from core.oto_generator import (
+                _estimate_kr_blank_confidence_at_time,
+                _estimate_kr_mel_class_scores_at_time,
+            )
+            t_ms = float(feat.get("syllable_start_ms", 0.0) or 0.0)
+            if t_ms <= 0.0:
+                t_ms = float(feat.get("expected_anchor_ms", 0.0) or 0.0)
+            if t_ms <= 0.0:
+                t_ms = float(pre_abs)
+            feat["syllable_blank_confidence"] = _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms)
+            mel_scores = _estimate_kr_mel_class_scores_at_time(mel_ctx, t_ms)
+            feat["syllable_mel_voiced_conf"] = float(mel_scores.get("mel_voiced_formant_conf", 0.0) or 0.0)
+            feat["syllable_mel_silence_conf"] = float(mel_scores.get("mel_silence_sparse_conf", 0.0) or 0.0)
+            feat["syllable_mel_unvoiced_conf"] = float(mel_scores.get("mel_unvoiced_diffuse_conf", 0.0) or 0.0)
+            feat["syllable_mel_breath_conf"] = float(mel_scores.get("mel_breath_like_conf", 0.0) or 0.0)
+        except Exception:
+            pass
+
     feat["base_offset_to_expected_ms"] = offset - feat["expected_anchor_ms"]
     feat["base_pre_to_expected_ms"] = pre_abs - feat["expected_anchor_ms"]
 
@@ -1119,6 +1158,43 @@ def _feature_row_from_context(language: str, format_type: str, row: Dict[str, ob
         feat["next_base_cutoff_abs"] = float(next_row.get("offset", 0.0)) + abs(float(next_row.get("cutoff", 0.0)))
 
     return feat
+
+
+def _compute_file_context_stats(alias_types: List[str]) -> Dict[str, float]:
+    total = len(alias_types)
+    cv_count = 0
+    vc_count = 0
+    vv_count = 0
+    vcv_count = 0
+    br_count = 0
+    mono_count = 0
+    for a_type in alias_types:
+        if a_type in {"cv", "cv_head"}:
+            cv_count += 1
+        elif a_type == "vc":
+            vc_count += 1
+        elif a_type == "vv":
+            vv_count += 1
+        elif a_type == "vcv":
+            vcv_count += 1
+        elif a_type == "br":
+            br_count += 1
+        elif a_type == "mono":
+            mono_count += 1
+    denom = max(total, 1)
+    return {
+        "row_count": float(total),
+        "cv_count": float(cv_count),
+        "vc_count": float(vc_count),
+        "vv_count": float(vv_count),
+        "vcv_count": float(vcv_count),
+        "br_count": float(br_count),
+        "mono_count": float(mono_count),
+        "cv_ratio": float(cv_count) / float(denom),
+        "vc_ratio": float(vc_count) / float(denom),
+        "vc_cv_ratio": _safe_ratio(vc_count + 1.0, cv_count + 1.0),
+        "cv_vc_balance": float(cv_count - vc_count) / float(denom),
+    }
 
 
 def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str, custom_phonemes_path: str = "", voicebank_id: str = "", format_type_override: str = "") -> List[Dict[str, object]]:
@@ -1184,15 +1260,22 @@ def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str
                 mel_cache[wav_path] = mel_envelope(audio, sr)
             mel_ctx = mel_cache[wav_path]
 
-        for idx, row in enumerate(wav_rows):
+        alias_types = []
+        for row in wav_rows:
             alias = str(row["alias"])
             alias_type = classify_alias_type(lang, alias, custom_map=custom_map)
             row["alias_type"] = alias_type
+            alias_types.append(alias_type)
+        file_stats = _compute_file_context_stats(alias_types)
+
+        for idx, row in enumerate(wav_rows):
+            alias_type = alias_types[idx]
             feat = _feature_row_from_context(
                 lang, format_type, row, idx, len(wav_rows), alias_type,
                 phones, words, mel_ctx, audio, sr,
                 wav_rows[idx - 1] if idx > 0 else None,
                 wav_rows[idx + 1] if idx + 1 < len(wav_rows) else None,
+                file_stats,
             )
             if "mapping_confidence" in row:
                 try:
@@ -1541,6 +1624,27 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
         row["delta_cutoff"] = row["manual_cutoff_abs"] - row["base_cutoff_abs"]
         row["delta_pre"] = row["manual_pre"] - row["base_pre"]
         row["delta_ovl"] = row["manual_ovl"] - row["base_ovl"]
+        try:
+            manual_offset = float(row.get("manual_offset", 0.0) or 0.0)
+        except Exception:
+            manual_offset = 0.0
+        try:
+            vowel_start = float(row.get("curr_vowel_start_ms", 0.0) or 0.0)
+        except Exception:
+            vowel_start = 0.0
+        try:
+            vowel_end = float(row.get("curr_vowel_end_ms", 0.0) or 0.0)
+        except Exception:
+            vowel_end = 0.0
+        try:
+            next_anchor_abs = float(row.get("base_cutoff_abs", 0.0) or 0.0) + float(
+                row.get("base_cutoff_to_next_anchor_ms", 0.0) or 0.0
+            )
+        except Exception:
+            next_anchor_abs = 0.0
+        row["aux_vowel_start_rel"] = (vowel_start - manual_offset) if vowel_start > 0.0 else 0.0
+        row["aux_vowel_end_rel"] = (vowel_end - manual_offset) if vowel_end > 0.0 else 0.0
+        row["aux_next_onset_rel"] = (next_anchor_abs - manual_offset) if next_anchor_abs > 0.0 else 0.0
         keep_default, skip_reason, quality_score = _evaluate_training_row_quality(language, row)
         row["train_keep_default"] = int(keep_default)
         row["train_skip_reason"] = skip_reason
@@ -1596,6 +1700,7 @@ def dataset_fieldnames() -> List[str]:
         *FEATURE_NAMES,
         "manual_offset", "manual_cons", "manual_cutoff", "manual_pre", "manual_ovl",
         *TARGET_NAMES,
+        *AUX_TARGET_NAMES,
         "label_source", "sample_weight",
         "train_keep_default", "train_skip_reason", "train_quality_score", "skipped_reason",
     ]

@@ -20,7 +20,7 @@ def main():
     ap.add_argument("--format", required=True, help="Format type (cv/cvc/cvvc/vcv/general)")
     ap.add_argument("--dataset", required=True, help="Input dataset CSV")
     ap.add_argument("--out-dir", required=True, help="Output model directory")
-    ap.add_argument("--group-column", default="voicebank_id")
+    ap.add_argument("--group-column", default="wav_norm")
     ap.add_argument("--alias-types", default="", help="Comma-separated alias_type filter")
     ap.add_argument("--min-mapping-confidence", type=float, default=0.0)
     ap.add_argument("--device", default="auto", help="auto/cpu/cuda")
