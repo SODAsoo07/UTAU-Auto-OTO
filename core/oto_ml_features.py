@@ -1,4 +1,4 @@
-﻿"""
+"""
 OTO ML feature extraction helpers.
 
 This module builds row-level structured features from:
@@ -8,6 +8,12 @@ This module builds row-level structured features from:
 - alias/format metadata
 
 The output is shared by dataset generation, model training, and runtime inference.
+
+.. note::
+    Schema, constants, and cache logic are now also available from
+    ``core.oto_ml.features.schema`` and ``core.oto_ml.features.caches``
+    for modular, fine-grained access. This file retains all definitions
+    for full backward compatibility.
 """
 
 from __future__ import annotations
