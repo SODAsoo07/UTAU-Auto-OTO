@@ -12,6 +12,7 @@ if ROOT not in sys.path:
 
 from core.oto_ml_features import (
     FEATURE_NAMES,
+    _compute_segment_stats,
     _looks_like_pseudo_path,
     _normalize_alias_for_match,
     canonicalize_feature_row,
@@ -20,6 +21,7 @@ from core.oto_ml_features import (
     get_feature_schema,
     parse_oto_rows,
 )
+import core.oto_ml_features as oto_ml_features_mod
 from core.ja_oto_generator import (
     _adaptive_ja_overlap,
     _collect_phone_tier_quality,
@@ -99,6 +101,35 @@ class FeatureExtractionTests(unittest.TestCase):
         fields = dataset_fieldnames()
         self.assertIn("label_source", fields)
         self.assertIn("sample_weight", fields)
+
+    def test_segment_stats_emits_blank_confidence_and_mel_candidates(self):
+        if getattr(oto_ml_features_mod, "np", None) is None:
+            self.skipTest("numpy is unavailable")
+        np = oto_ml_features_mod.np
+        mel_ctx = {
+            "times_ms": np.asarray([0.0, 40.0, 80.0, 120.0, 160.0, 200.0], dtype=np.float32),
+            "energy": np.asarray([0.1, 0.2, 0.45, 0.32, 0.12, 0.08], dtype=np.float32),
+            "db_db": np.asarray([-48.0, -45.0, -20.0, -26.0, -42.0, -50.0], dtype=np.float32),
+            "f0_voicing": np.asarray([0.0, 0.1, 0.85, 0.6, 0.2, 0.0], dtype=np.float32),
+            "db_silence_th": -42.0,
+            "cls_voiced_formant": np.asarray([0.0, 0.1, 0.92, 0.55, 0.2, 0.0], dtype=np.float32),
+            "cls_silence_sparse": np.asarray([0.9, 0.82, 0.05, 0.22, 0.66, 0.88], dtype=np.float32),
+            "cls_unvoiced_diffuse": np.asarray([0.1, 0.2, 0.2, 0.3, 0.5, 0.2], dtype=np.float32),
+            "cls_breath_like": np.asarray([0.4, 0.5, 0.2, 0.4, 0.7, 0.8], dtype=np.float32),
+        }
+        stats = _compute_segment_stats(
+            mel_ctx,
+            offset_ms=0.0,
+            pre_abs=88.0,
+            cut_abs=188.0,
+            audio=None,
+            sr=0,
+        )
+        self.assertIn("blank_span_confidence", stats)
+        self.assertGreaterEqual(stats["blank_span_confidence"], 0.0)
+        self.assertLessEqual(stats["blank_span_confidence"], 1.0)
+        self.assertGreaterEqual(stats["mel_offset_candidate_ms"], 0.0)
+        self.assertGreaterEqual(stats["mel_cutoff_candidate_ms"], 100.0)
 
     def test_canonicalize_feature_row_defaults(self):
         row = canonicalize_feature_row({"language": "korean", "base_offset": 123.4})
@@ -240,6 +271,18 @@ class FeatureExtractionTests(unittest.TestCase):
         self.assertEqual(_parse_filename("_l'R.wav", convert_to_hangul=False), ["lR"])
         self.assertEqual(_parse_filename("_ng'H.wav", convert_to_hangul=False), ["ngH"])
 
+    def test_parse_korean_matcha_filename_normalizes_mixed_group_separators(self):
+        self.assertEqual(
+            _parse_filename("_an'ban'bin'_-'am'bam'bim.wav", convert_to_hangul=False),
+            ["an", "ban", "bin", "am", "bam", "bim"],
+        )
+
+    def test_parse_korean_filename_accepts_typographic_apostrophe_in_cvvc(self):
+        self.assertEqual(
+            _parse_filename("_a’a’_’ya’ya.wav", convert_to_hangul=False),
+            ["a", "a", "ya", "ya"],
+        )
+
     def test_kr_phone_quality_flags_insufficient_vowels(self):
         phones = [
             SimpleNamespace(mark="spn"),
@@ -378,6 +421,15 @@ class FeatureExtractionTests(unittest.TestCase):
         self.assertEqual(_resolve_kr_cvvc_occurrence_index("- dyo", "cv_head", occ_map, state), 2)
         self.assertEqual(_resolve_kr_cvvc_occurrence_index("dyo", "cv", occ_map, state), 2)
         self.assertEqual(_resolve_kr_cvvc_occurrence_index("do", "cv", occ_map, state), 1)
+
+    def test_korean_cvvc_occurrence_mapping_includes_coda_syllables_in_cv_slots(self):
+        cv_occ = _build_kr_cvvc_occurrence_map(["ga", "gak", "ga", "gan", "ga"])
+        self.assertEqual(cv_occ["ga"], [0, 1, 2, 3, 4])
+
+    def test_korean_cvvc_vv_occurrence_mapping_keeps_raw_token_adjacency(self):
+        vv_occ = _build_kr_cvvc_vv_occurrence_map(["a", "br", "i", "a"])
+        self.assertNotIn("a i", vv_occ)
+        self.assertEqual(vv_occ["i a"], [2])
 
     def test_korean_cvvc_forced_occurrence_blocks_exact_vowel_fix(self):
         self.assertFalse(_should_allow_kr_exact_vowel_fix("cvvc", 3))

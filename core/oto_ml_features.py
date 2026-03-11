@@ -36,12 +36,16 @@ from core.prefix_map_utils import find_prefix_map_path, strip_prefix_map_affixes
 
 logger = logging.getLogger(__name__)
 
-FEATURE_VERSION = "v6"
-TRAIN_ROW_MATCH_VERSION = "v8"
+FEATURE_VERSION = "v9"
+TRAIN_ROW_MATCH_VERSION = "v9"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
+AUX_TARGET_NAMES = ["aux_vowel_start_rel", "aux_vowel_end_rel", "aux_next_onset_rel"]
 
 FEATURE_NAMES = [
     "language", "format_type", "alias_type", "alias_group", "row_index_in_wav", "row_ratio_in_wav",
+    "file_row_count", "file_cv_count", "file_vc_count", "file_vv_count", "file_vcv_count",
+    "file_br_count", "file_mono_count", "file_cv_ratio", "file_vc_ratio",
+    "file_vc_cv_ratio", "file_cv_vc_balance",
     "is_head_row", "is_tail_row", "wav_duration_ms", "base_offset", "base_cons",
     "base_cutoff_abs", "base_pre", "base_ovl", "base_cons_gap", "base_cut_gap",
     "base_ovl_ratio", "curr_phone_start_ms", "curr_phone_end_ms", "curr_phone_len_ms",
@@ -60,6 +64,12 @@ FEATURE_NAMES = [
     "used_nuclei_fallback", "used_alias_based_syllables", "words_vs_alias_score_margin",
     "jump_blocked_flag", "mapping_reason_code",
     "local_peak_db", "local_valley_db", "mel_window_energy_mean", "mel_window_silence_ratio",
+    "mel_voiced_formant_ratio", "mel_silence_sparse_ratio", "mel_unvoiced_diffuse_ratio",
+    "mel_breath_like_ratio", "blank_span_confidence", "mel_offset_candidate_ms",
+    "mel_cutoff_candidate_ms", "onset_patch_energy_mean", "onset_patch_voiced_ratio",
+    "onset_patch_unvoiced_ratio", "tail_patch_energy_mean", "tail_patch_silence_ratio",
+    "syllable_blank_confidence", "syllable_mel_voiced_conf", "syllable_mel_silence_conf",
+    "syllable_mel_unvoiced_conf", "syllable_mel_breath_conf",
 ]
 
 CATEGORICAL_FEATURES = [
@@ -235,6 +245,7 @@ def get_feature_schema() -> Dict[str, object]:
         "feature_names": list(FEATURE_NAMES),
         "categorical_features": list(CATEGORICAL_FEATURES),
         "target_names": list(TARGET_NAMES),
+        "aux_target_names": list(AUX_TARGET_NAMES),
     }
 
 
@@ -712,6 +723,18 @@ def _compute_segment_stats(mel_ctx, offset_ms: float, pre_abs: float, cut_abs: f
         "energy_slope_post": 0.0, "valley_energy": 0.0, "valley_dist_from_cutoff_ms": 0.0,
         "db_mean": 0.0, "db_min": 0.0, "db_silence_ratio": 0.0, "f0_voicing_mean": 0.0,
         "f0_voicing_near_pre": 0.0, "zcr_mean": 0.0, "spectral_flux_mean": 0.0,
+        "mel_voiced_formant_ratio": 0.0,
+        "mel_silence_sparse_ratio": 0.0,
+        "mel_unvoiced_diffuse_ratio": 0.0,
+        "mel_breath_like_ratio": 0.0,
+        "blank_span_confidence": 0.0,
+        "mel_offset_candidate_ms": float(max(0.0, offset_ms)),
+        "mel_cutoff_candidate_ms": float(max(cut_abs, pre_abs + 12.0)),
+        "onset_patch_energy_mean": 0.0,
+        "onset_patch_voiced_ratio": 0.0,
+        "onset_patch_unvoiced_ratio": 0.0,
+        "tail_patch_energy_mean": 0.0,
+        "tail_patch_silence_ratio": 0.0,
     }
     if np is None or not mel_ctx:
         return stats
@@ -719,8 +742,17 @@ def _compute_segment_stats(mel_ctx, offset_ms: float, pre_abs: float, cut_abs: f
     en = mel_ctx.get("energy")
     db_arr = mel_ctx.get("db_db")
     f0_arr = mel_ctx.get("f0_voicing")
+    cls_voiced = mel_ctx.get("cls_voiced_formant")
+    cls_silence = mel_ctx.get("cls_silence_sparse")
+    cls_unvoiced = mel_ctx.get("cls_unvoiced_diffuse")
+    cls_breath = mel_ctx.get("cls_breath_like")
     if times_ms is None or en is None or len(times_ms) == 0:
         return stats
+
+    def _ratio(arr, idxs):
+        if arr is None or len(arr) != len(en) or len(idxs) <= 0:
+            return 0.0
+        return float(np.mean(np.clip(np.asarray(arr)[idxs], 0.0, 1.0)))
 
     seg_mask = _select_mask(times_ms, max(offset_ms, pre_abs - 40.0), max(pre_abs + 40.0, cut_abs))
     if len(seg_mask) > 0:
@@ -739,6 +771,10 @@ def _compute_segment_stats(mel_ctx, offset_ms: float, pre_abs: float, cut_abs: f
             stats["db_silence_ratio"] = float(np.mean(local_db <= silence_th))
         if f0_arr is not None and len(f0_arr) == len(en):
             stats["f0_voicing_mean"] = _window_mean(f0_arr[seg_mask])
+        stats["mel_voiced_formant_ratio"] = _ratio(cls_voiced, seg_mask)
+        stats["mel_silence_sparse_ratio"] = _ratio(cls_silence, seg_mask)
+        stats["mel_unvoiced_diffuse_ratio"] = _ratio(cls_unvoiced, seg_mask)
+        stats["mel_breath_like_ratio"] = _ratio(cls_breath, seg_mask)
 
     pre_mask = _select_mask(times_ms, pre_abs - 30.0, pre_abs + 10.0)
     post_mask = _select_mask(times_ms, pre_abs + 10.0, pre_abs + 60.0)
@@ -750,6 +786,53 @@ def _compute_segment_stats(mel_ctx, offset_ms: float, pre_abs: float, cut_abs: f
         stats["f0_voicing_near_pre"] = _window_mean(f0_arr[pre_mask])
     if len(seg_mask) >= 2:
         stats["spectral_flux_mean"] = float(np.mean(np.abs(np.diff(en[seg_mask]))))
+
+    onset_mask = _select_mask(times_ms, pre_abs - 60.0, pre_abs + 40.0)
+    if len(onset_mask) > 0:
+        stats["onset_patch_energy_mean"] = _window_mean(en[onset_mask])
+        stats["onset_patch_voiced_ratio"] = _ratio(cls_voiced, onset_mask)
+        stats["onset_patch_unvoiced_ratio"] = _ratio(cls_unvoiced, onset_mask)
+
+    tail_mask = _select_mask(times_ms, cut_abs - 80.0, cut_abs + 40.0)
+    if len(tail_mask) > 0:
+        stats["tail_patch_energy_mean"] = _window_mean(en[tail_mask])
+        stats["tail_patch_silence_ratio"] = _ratio(cls_silence, tail_mask)
+
+    blank_conf = (
+        (0.65 * float(stats["mel_silence_sparse_ratio"]))
+        + (0.20 * float(stats["mel_breath_like_ratio"]))
+        + max(0.0, float(stats["db_silence_ratio"]) - float(stats["mel_unvoiced_diffuse_ratio"])) * 0.20
+        - (0.45 * float(stats["mel_voiced_formant_ratio"]))
+    )
+    stats["blank_span_confidence"] = max(0.0, min(1.0, float(blank_conf)))
+
+    # Candidate boundaries inferred from class transitions.
+    # offset candidate: first strong non-silence frame near pre region
+    # cutoff candidate: last silence-sparse frame before current cutoff
+    onset_probe_mask = _select_mask(times_ms, max(0.0, offset_ms - 80.0), pre_abs + 40.0)
+    if len(onset_probe_mask) > 0:
+        onset_idx = None
+        for idx in onset_probe_mask:
+            voiced_v = float(cls_voiced[idx]) if cls_voiced is not None and len(cls_voiced) == len(en) else 0.0
+            unvoiced_v = float(cls_unvoiced[idx]) if cls_unvoiced is not None and len(cls_unvoiced) == len(en) else 0.0
+            silence_v = float(cls_silence[idx]) if cls_silence is not None and len(cls_silence) == len(en) else 0.0
+            if (voiced_v >= 0.5 or unvoiced_v >= 0.5) and silence_v < 0.5:
+                onset_idx = int(idx)
+                break
+        if onset_idx is not None:
+            cand = float(times_ms[onset_idx]) - 12.0
+            stats["mel_offset_candidate_ms"] = max(0.0, min(pre_abs - 8.0, cand))
+
+    cutoff_probe_mask = _select_mask(times_ms, pre_abs + 20.0, cut_abs + 120.0)
+    if len(cutoff_probe_mask) > 0:
+        last_sil_idx = None
+        for idx in cutoff_probe_mask:
+            silence_v = float(cls_silence[idx]) if cls_silence is not None and len(cls_silence) == len(en) else 0.0
+            if silence_v >= 0.5:
+                last_sil_idx = int(idx)
+        if last_sil_idx is not None:
+            cand_cut = float(times_ms[last_sil_idx]) + 4.0
+            stats["mel_cutoff_candidate_ms"] = max(pre_abs + 12.0, min(cut_abs, cand_cut))
 
     if audio is not None and sr and sr > 0:
         start_s = int(max(offset_ms, pre_abs - 20.0) * sr / 1000.0)
@@ -880,7 +963,33 @@ def _extract_structure_features(language: str, alias: str, alias_type: str, row_
     return out
 
 
-def _derive_alias_group(language: str, feat: Dict[str, object]) -> str:
+def _classify_kr_breath_alias_kind(alias: str, alias_type: str = "") -> str:
+    """
+    한국어 숨소리 계열을 분리한다.
+    - tail_breath: 어미 끝숨 (예: "a R", "oH")
+    - standalone_breath: 독립 숨소리 (예: "br", "bre")
+    """
+    text = str(alias or "").strip()
+    if not text:
+        return ""
+
+    parts = [p for p in re.split(r"\s+", text) if p]
+    if len(parts) >= 2 and parts[0].lower() in _GENERIC_VOWELS and parts[-1] in {"R", "H"}:
+        return "tail_breath"
+
+    compact = re.sub(r"[\s_\-]+", "", text)
+    if len(compact) >= 2 and compact[-1] in {"R", "H"} and compact[:-1].lower() in _GENERIC_VOWELS:
+        return "tail_breath"
+
+    low = text.lower()
+    if re.fullmatch(r"br\d*", low) or low in {"br", "bre", "breath"}:
+        return "standalone_breath"
+    if str(alias_type or "").strip().lower() == "br":
+        return "standalone_breath"
+    return ""
+
+
+def _derive_alias_group(language: str, feat: Dict[str, object], alias: str = "") -> str:
     lang = str(language or "").strip().lower()
     alias_type = str(feat.get("alias_type", "") or "").strip().lower()
     coda_type = str(feat.get("coda_type", "") or "").strip().lower()
@@ -893,6 +1002,9 @@ def _derive_alias_group(language: str, feat: Dict[str, object]) -> str:
         if alias_type == "cv_head":
             return "cv_head_glide" if is_diph else "cv_head"
         if alias_type == "vc":
+            breath_kind = _classify_kr_breath_alias_kind(alias, alias_type=alias_type)
+            if breath_kind == "tail_breath":
+                return "vc_tail_breath"
             if coda_type == "stop":
                 return "vc_stop"
             if coda_type in {"nasal", "liquid"}:
@@ -905,7 +1017,7 @@ def _derive_alias_group(language: str, feat: Dict[str, object]) -> str:
         if alias_type == "mono":
             return "mono"
         if alias_type == "br":
-            return "br"
+            return "br_standalone"
         return alias_type or "other"
 
     if alias_type == "vc":
@@ -919,13 +1031,25 @@ def _derive_alias_group(language: str, feat: Dict[str, object]) -> str:
     return alias_type or "other"
 
 
-def _feature_row_from_context(language: str, format_type: str, row: Dict[str, object], row_index: int, total_rows: int, alias_type: str, phones: List[object], words: List[object], mel_ctx, audio, sr: int, prev_row: Optional[Dict[str, object]], next_row: Optional[Dict[str, object]]) -> Dict[str, object]:
+def _feature_row_from_context(language: str, format_type: str, row: Dict[str, object], row_index: int, total_rows: int, alias_type: str, phones: List[object], words: List[object], mel_ctx, audio, sr: int, prev_row: Optional[Dict[str, object]], next_row: Optional[Dict[str, object]], file_stats: Optional[Dict[str, float]] = None) -> Dict[str, object]:
     feat = dict(FEATURE_DEFAULTS)
     feat["language"] = language
     feat["format_type"] = format_type
     feat["alias_type"] = alias_type
     feat["row_index_in_wav"] = float(row_index)
     feat["row_ratio_in_wav"] = _safe_ratio(row_index, max(total_rows - 1, 1))
+    if file_stats:
+        feat["file_row_count"] = float(file_stats.get("row_count", 0.0) or 0.0)
+        feat["file_cv_count"] = float(file_stats.get("cv_count", 0.0) or 0.0)
+        feat["file_vc_count"] = float(file_stats.get("vc_count", 0.0) or 0.0)
+        feat["file_vv_count"] = float(file_stats.get("vv_count", 0.0) or 0.0)
+        feat["file_vcv_count"] = float(file_stats.get("vcv_count", 0.0) or 0.0)
+        feat["file_br_count"] = float(file_stats.get("br_count", 0.0) or 0.0)
+        feat["file_mono_count"] = float(file_stats.get("mono_count", 0.0) or 0.0)
+        feat["file_cv_ratio"] = float(file_stats.get("cv_ratio", 0.0) or 0.0)
+        feat["file_vc_ratio"] = float(file_stats.get("vc_ratio", 0.0) or 0.0)
+        feat["file_vc_cv_ratio"] = float(file_stats.get("vc_cv_ratio", 0.0) or 0.0)
+        feat["file_cv_vc_balance"] = float(file_stats.get("cv_vc_balance", 0.0) or 0.0)
     feat["is_head_row"] = 1.0 if row_index == 0 else 0.0
     feat["is_tail_row"] = 1.0 if row_index == (total_rows - 1) else 0.0
     if audio is not None and sr and sr > 0:
@@ -983,6 +1107,26 @@ def _feature_row_from_context(language: str, format_type: str, row: Dict[str, ob
         feat["syllable_end_ms"] = feat["curr_vowel_end_ms"]
         feat["syllable_len_ms"] = feat["curr_vowel_len_ms"]
 
+    if mel_ctx:
+        try:
+            from core.oto_generator import (
+                _estimate_kr_blank_confidence_at_time,
+                _estimate_kr_mel_class_scores_at_time,
+            )
+            t_ms = float(feat.get("syllable_start_ms", 0.0) or 0.0)
+            if t_ms <= 0.0:
+                t_ms = float(feat.get("expected_anchor_ms", 0.0) or 0.0)
+            if t_ms <= 0.0:
+                t_ms = float(pre_abs)
+            feat["syllable_blank_confidence"] = _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms)
+            mel_scores = _estimate_kr_mel_class_scores_at_time(mel_ctx, t_ms)
+            feat["syllable_mel_voiced_conf"] = float(mel_scores.get("mel_voiced_formant_conf", 0.0) or 0.0)
+            feat["syllable_mel_silence_conf"] = float(mel_scores.get("mel_silence_sparse_conf", 0.0) or 0.0)
+            feat["syllable_mel_unvoiced_conf"] = float(mel_scores.get("mel_unvoiced_diffuse_conf", 0.0) or 0.0)
+            feat["syllable_mel_breath_conf"] = float(mel_scores.get("mel_breath_like_conf", 0.0) or 0.0)
+        except Exception:
+            pass
+
     feat["base_offset_to_expected_ms"] = offset - feat["expected_anchor_ms"]
     feat["base_pre_to_expected_ms"] = pre_abs - feat["expected_anchor_ms"]
 
@@ -995,7 +1139,11 @@ def _feature_row_from_context(language: str, format_type: str, row: Dict[str, ob
 
     feat.update(_compute_segment_stats(mel_ctx, offset, pre_abs, cut_abs, audio, sr))
     feat.update(_extract_structure_features(language, str(row.get("alias", "")), alias_type, row_index, total_rows))
-    feat["alias_group"] = _derive_alias_group(language, feat)
+    feat["alias_group"] = _derive_alias_group(
+        language,
+        feat,
+        alias=str(row.get("alias", "") or ""),
+    )
     feat = augment_mapping_quality_features(language, format_type, alias_type, feat)
 
     if prev_row is not None:
@@ -1010,6 +1158,43 @@ def _feature_row_from_context(language: str, format_type: str, row: Dict[str, ob
         feat["next_base_cutoff_abs"] = float(next_row.get("offset", 0.0)) + abs(float(next_row.get("cutoff", 0.0)))
 
     return feat
+
+
+def _compute_file_context_stats(alias_types: List[str]) -> Dict[str, float]:
+    total = len(alias_types)
+    cv_count = 0
+    vc_count = 0
+    vv_count = 0
+    vcv_count = 0
+    br_count = 0
+    mono_count = 0
+    for a_type in alias_types:
+        if a_type in {"cv", "cv_head"}:
+            cv_count += 1
+        elif a_type == "vc":
+            vc_count += 1
+        elif a_type == "vv":
+            vv_count += 1
+        elif a_type == "vcv":
+            vcv_count += 1
+        elif a_type == "br":
+            br_count += 1
+        elif a_type == "mono":
+            mono_count += 1
+    denom = max(total, 1)
+    return {
+        "row_count": float(total),
+        "cv_count": float(cv_count),
+        "vc_count": float(vc_count),
+        "vv_count": float(vv_count),
+        "vcv_count": float(vcv_count),
+        "br_count": float(br_count),
+        "mono_count": float(mono_count),
+        "cv_ratio": float(cv_count) / float(denom),
+        "vc_ratio": float(vc_count) / float(denom),
+        "vc_cv_ratio": _safe_ratio(vc_count + 1.0, cv_count + 1.0),
+        "cv_vc_balance": float(cv_count - vc_count) / float(denom),
+    }
 
 
 def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str, custom_phonemes_path: str = "", voicebank_id: str = "", format_type_override: str = "") -> List[Dict[str, object]]:
@@ -1075,15 +1260,22 @@ def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str
                 mel_cache[wav_path] = mel_envelope(audio, sr)
             mel_ctx = mel_cache[wav_path]
 
-        for idx, row in enumerate(wav_rows):
+        alias_types = []
+        for row in wav_rows:
             alias = str(row["alias"])
             alias_type = classify_alias_type(lang, alias, custom_map=custom_map)
             row["alias_type"] = alias_type
+            alias_types.append(alias_type)
+        file_stats = _compute_file_context_stats(alias_types)
+
+        for idx, row in enumerate(wav_rows):
+            alias_type = alias_types[idx]
             feat = _feature_row_from_context(
                 lang, format_type, row, idx, len(wav_rows), alias_type,
                 phones, words, mel_ctx, audio, sr,
                 wav_rows[idx - 1] if idx > 0 else None,
                 wav_rows[idx + 1] if idx + 1 < len(wav_rows) else None,
+                file_stats,
             )
             if "mapping_confidence" in row:
                 try:
@@ -1151,22 +1343,36 @@ def _evaluate_training_row_quality(language: str, row: Dict[str, object]) -> Tup
             if d_cut > 150.0:
                 reasons.append("vv_cutoff_outlier")
         elif alias_type == "vc":
-            cut_lim = 120.0 if coda_type == "stop" else 155.0
-            pre_lim = 100.0 if coda_type == "stop" else 125.0
-            ovl_lim = 75.0 if coda_type == "stop" else 90.0
-            if d_cut > cut_lim:
-                reasons.append("vc_cutoff_outlier")
-            if d_pre > pre_lim:
-                reasons.append("vc_pre_outlier")
-            if d_ovl > ovl_lim:
-                reasons.append("vc_ovl_outlier")
+            if alias_group == "vc_tail_breath":
+                if d_cut > 360.0:
+                    reasons.append("vc_tail_breath_cutoff_outlier")
+                if d_pre > 210.0:
+                    reasons.append("vc_tail_breath_pre_outlier")
+                if d_ovl > 160.0:
+                    reasons.append("vc_tail_breath_ovl_outlier")
+            else:
+                cut_lim = 120.0 if coda_type == "stop" else 155.0
+                pre_lim = 100.0 if coda_type == "stop" else 125.0
+                ovl_lim = 75.0 if coda_type == "stop" else 90.0
+                if d_cut > cut_lim:
+                    reasons.append("vc_cutoff_outlier")
+                if d_pre > pre_lim:
+                    reasons.append("vc_pre_outlier")
+                if d_ovl > ovl_lim:
+                    reasons.append("vc_ovl_outlier")
         elif alias_type == "vcv":
             if d_off > 150.0:
                 reasons.append("vcv_offset_outlier")
             if d_pre > 120.0:
                 reasons.append("vcv_pre_outlier")
+        elif alias_type == "br" or alias_group == "br_standalone":
+            if d_cut > 420.0:
+                reasons.append("br_cutoff_outlier")
+            if d_pre > 240.0:
+                reasons.append("br_pre_outlier")
 
-        if max(d_off, d_cons, d_cut, d_pre, d_ovl) > 235.0:
+        gross_limit = 420.0 if alias_group in {"vc_tail_breath", "br_standalone"} else 235.0
+        if max(d_off, d_cons, d_cut, d_pre, d_ovl) > gross_limit:
             reasons.append("gross_outlier")
     else:
         if max(d_off, d_cons, d_cut, d_pre, d_ovl) > 300.0:
@@ -1418,6 +1624,27 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
         row["delta_cutoff"] = row["manual_cutoff_abs"] - row["base_cutoff_abs"]
         row["delta_pre"] = row["manual_pre"] - row["base_pre"]
         row["delta_ovl"] = row["manual_ovl"] - row["base_ovl"]
+        try:
+            manual_offset = float(row.get("manual_offset", 0.0) or 0.0)
+        except Exception:
+            manual_offset = 0.0
+        try:
+            vowel_start = float(row.get("curr_vowel_start_ms", 0.0) or 0.0)
+        except Exception:
+            vowel_start = 0.0
+        try:
+            vowel_end = float(row.get("curr_vowel_end_ms", 0.0) or 0.0)
+        except Exception:
+            vowel_end = 0.0
+        try:
+            next_anchor_abs = float(row.get("base_cutoff_abs", 0.0) or 0.0) + float(
+                row.get("base_cutoff_to_next_anchor_ms", 0.0) or 0.0
+            )
+        except Exception:
+            next_anchor_abs = 0.0
+        row["aux_vowel_start_rel"] = (vowel_start - manual_offset) if vowel_start > 0.0 else 0.0
+        row["aux_vowel_end_rel"] = (vowel_end - manual_offset) if vowel_end > 0.0 else 0.0
+        row["aux_next_onset_rel"] = (next_anchor_abs - manual_offset) if next_anchor_abs > 0.0 else 0.0
         keep_default, skip_reason, quality_score = _evaluate_training_row_quality(language, row)
         row["train_keep_default"] = int(keep_default)
         row["train_skip_reason"] = skip_reason
@@ -1473,6 +1700,7 @@ def dataset_fieldnames() -> List[str]:
         *FEATURE_NAMES,
         "manual_offset", "manual_cons", "manual_cutoff", "manual_pre", "manual_ovl",
         *TARGET_NAMES,
+        *AUX_TARGET_NAMES,
         "label_source", "sample_weight",
         "train_keep_default", "train_skip_reason", "train_quality_score", "skipped_reason",
     ]

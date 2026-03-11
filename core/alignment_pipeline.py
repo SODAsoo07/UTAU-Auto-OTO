@@ -33,7 +33,7 @@ def run_alignment_with_fallback(
     primary_aligner: str = "mfa",
     fallback_aligner: str = "",
     mfa_path: str = "",
-    mfa_align_profile: str = "accurate",
+    mfa_align_profile: str = "default",
     callback=None,
 ) -> Dict[str, object]:
     lang = str(language or "korean").strip().lower()

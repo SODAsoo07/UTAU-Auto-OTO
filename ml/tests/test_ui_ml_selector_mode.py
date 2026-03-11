@@ -63,6 +63,42 @@ class UiMlSelectorModeTests(unittest.TestCase):
             self.assertTrue(os.path.exists(tg_path))
             self.assertTrue(os.path.isdir(tg_dir))
 
+    def test_cleanup_removes_only_new_generated_oto_artifacts(self):
+        with tempfile.TemporaryDirectory() as td:
+            out_path = os.path.join(td, "oto_out.ini")
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write("main")
+
+            existing_sub = os.path.join(td, "C4")
+            os.makedirs(existing_sub, exist_ok=True)
+            existing_oto = os.path.join(existing_sub, "oto.ini")
+            with open(existing_oto, "w", encoding="utf-8") as f:
+                f.write("existing")
+
+            snapshot = self.runtime._snapshot_output_tree_for_cleanup(out_path)
+
+            byproduct_dir = os.path.join(td, "tmp_gen")
+            os.makedirs(byproduct_dir, exist_ok=True)
+            byproduct_oto = os.path.join(byproduct_dir, "oto.ini")
+            with open(byproduct_oto, "w", encoding="utf-8") as f:
+                f.write("tmp")
+
+            byproduct_ml = os.path.join(td, "oto_auto_ml.ini")
+            with open(byproduct_ml, "w", encoding="utf-8") as f:
+                f.write("tmp_ml")
+
+            non_oto_file = os.path.join(td, "new_file.txt")
+            with open(non_oto_file, "w", encoding="utf-8") as f:
+                f.write("keep")
+
+            self.runtime._cleanup_generated_output_artifacts(out_path, snapshot=snapshot)
+
+            self.assertTrue(os.path.exists(out_path))
+            self.assertTrue(os.path.exists(existing_oto))
+            self.assertFalse(os.path.exists(byproduct_oto))
+            self.assertFalse(os.path.exists(byproduct_ml))
+            self.assertTrue(os.path.exists(non_oto_file))
+
 
 if __name__ == "__main__":
     unittest.main()

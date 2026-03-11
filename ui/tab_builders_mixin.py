@@ -3,6 +3,19 @@
 import customtkinter as ctk
 
 from core.oto_generator import DEFAULT_PARAMS
+from ui.theme_tokens import PALETTE
+
+
+def _style_blue_menu(widget):
+    widget.configure(
+        fg_color=PALETTE.menu_bg,
+        button_color=PALETTE.menu_button,
+        button_hover_color=PALETTE.menu_button_hover,
+        dropdown_fg_color=PALETTE.menu_dropdown_bg,
+        dropdown_hover_color=PALETTE.menu_dropdown_hover,
+        dropdown_text_color=PALETTE.menu_text,
+        text_color=PALETTE.menu_text,
+    )
 
 
 class TabBuildersMixin:
@@ -127,6 +140,51 @@ class TabBuildersMixin:
                     command=lambda _value: self._save_config(),
                 )
                 self.ml_selector_mode_segment.pack(side="left", padx=(10, 0))
+
+                coupled_enable_checkbox = ctk.CTkCheckBox(
+                    opt_frame,
+                    text="Coupled mel+oto 보정 사용",
+                    text_color="#80CBC4",
+                    variable=self.ml_coupled_enable_var,
+                    command=self._save_config,
+                )
+                coupled_enable_checkbox.pack(anchor="w", pady=(6, 0))
+
+                coupled_row = ctk.CTkFrame(opt_frame, fg_color="transparent")
+                coupled_row.pack(anchor="w", pady=(6, 0), fill="x")
+                ctk.CTkLabel(
+                    coupled_row,
+                    text="Coupled 최소 신뢰도",
+                    text_color="#B0BEC5",
+                ).pack(side="left")
+                coupled_conf_entry = ctk.CTkEntry(
+                    coupled_row,
+                    width=70,
+                    textvariable=self.ml_coupled_min_conf_var,
+                )
+                coupled_conf_entry.pack(side="left", padx=(10, 8))
+                coupled_conf_entry.bind("<FocusOut>", lambda _e: self._save_config())
+                ctk.CTkLabel(
+                    coupled_row,
+                    text="device",
+                    text_color="#B0BEC5",
+                ).pack(side="left", padx=(6, 4))
+                coupled_device_menu = ctk.CTkOptionMenu(
+                    coupled_row,
+                    values=["auto", "cpu", "cuda"],
+                    variable=self.ml_coupled_device_var,
+                    width=90,
+                    command=lambda _v: self._save_config(),
+                )
+                _style_blue_menu(coupled_device_menu)
+                coupled_device_menu.pack(side="left", padx=(0, 8))
+                ctk.CTkCheckBox(
+                    coupled_row,
+                    text="Strict 제약",
+                    text_color="#B0BEC5",
+                    variable=self.ml_coupled_strict_constraint_var,
+                    command=self._save_config,
+                ).pack(side="left")
 
             ctk.CTkButton(frame, text="실행", width=80, command=cmd).pack(side="right", padx=10)
         if hasattr(self, "_sync_aligner_ui"):

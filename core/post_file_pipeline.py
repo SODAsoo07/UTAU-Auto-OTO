@@ -20,6 +20,40 @@ def log_changed_lines(
         log_fn(f"{tag} {description}: {changed} lines")
 
 
+def _safe_float(value, default=0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _log_ml_report_summary(log_fn: Optional[Callable[[str], None]], ml_report: object) -> None:
+    if not callable(log_fn) or not isinstance(ml_report, dict):
+        return
+    route = str(ml_report.get("route", "") or "").strip()
+    model_conf = _safe_float(ml_report.get("model_confidence", 0.0), 0.0)
+    blank_conf = _safe_float(ml_report.get("blank_confidence", 0.0), 0.0)
+    fallback_reason = str(ml_report.get("fallback_reason", "") or "").strip()
+    constraint_adjust_count = int(_safe_float(ml_report.get("constraint_adjust_count", 0), 0))
+    fallback_used = bool(ml_report.get("fallback_used", False))
+    status = str(ml_report.get("status", "") or "").strip()
+
+    details = []
+    if route:
+        details.append(f"route={route}")
+    details.append(f"model_conf={model_conf:.3f}")
+    details.append(f"blank_conf={blank_conf:.3f}")
+    details.append(f"constraint_adjust={constraint_adjust_count}")
+    if status:
+        details.append(f"status={status}")
+    if fallback_used:
+        details.append("fallback=1")
+    if fallback_reason:
+        details.append(f"reason={fallback_reason}")
+    if details:
+        log_fn("[OTO-ML] report " + ", ".join(details))
+
+
 def run_ml_post_stage(
     *,
     language: str,
@@ -52,6 +86,7 @@ def run_ml_post_stage(
         if isinstance(runtime_report, dict):
             runtime_report["ml"] = dict(ml_report)
         log_changed_lines(log_fn, "[OTO-ML]", ml_changed, "ML refine changed")
+        _log_ml_report_summary(log_fn, ml_report)
         return int(ml_changed or 0)
     except Exception as exc:
         if callable(log_fn):

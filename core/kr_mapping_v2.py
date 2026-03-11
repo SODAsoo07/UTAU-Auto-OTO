@@ -36,7 +36,7 @@ def is_kr_cv_syllable_active(syl_info, *, require_vowel=True, min_active_ms=16.0
     )
 
 
-def build_kr_cv_anchor_plan(expected_tokens, syllables_info):
+def build_kr_cv_anchor_plan(expected_tokens, syllables_info, *, use_mel=False):
     if not expected_tokens or not syllables_info:
         return {"indices": None, "score_rows": [], "meta": evaluate_index_plan([], [])}
 
@@ -46,6 +46,23 @@ def build_kr_cv_anchor_plan(expected_tokens, syllables_info):
 
     target_count = len(token_list)
     cand_count = len(syllables_info)
+    def _mel_score(syl):
+        if not use_mel:
+            return 0.0
+        if not isinstance(syl, dict):
+            return 0.0
+        voiced = float(syl.get("mel_voiced_formant_conf", 0.0) or 0.0)
+        unvoiced = float(syl.get("mel_unvoiced_diffuse_conf", 0.0) or 0.0)
+        silence = float(syl.get("mel_silence_sparse_conf", 0.0) or 0.0)
+        breath = float(syl.get("mel_breath_like_conf", 0.0) or 0.0)
+        blank = float(syl.get("blank_confidence", 0.0) or 0.0)
+        voiced = max(0.0, min(1.0, voiced))
+        unvoiced = max(0.0, min(1.0, unvoiced))
+        silence = max(0.0, min(1.0, silence))
+        breath = max(0.0, min(1.0, breath))
+        blank = max(0.0, min(1.0, blank))
+        return (22.0 * voiced) + (8.0 * unvoiced) - (26.0 * silence) - (28.0 * blank) - (10.0 * breath)
+
     score_rows = []
     for i, target_tok in enumerate(token_list):
         t_onset, t_vowel, t_coda = _split_kr_syllable_parts(target_tok)
@@ -74,6 +91,7 @@ def build_kr_cv_anchor_plan(expected_tokens, syllables_info):
                 score += min(vowel_ms, 100.0) * 0.07
             else:
                 score -= 180.0
+            score += _mel_score(syl)
             row.append(float(score))
         score_rows.append(row)
 

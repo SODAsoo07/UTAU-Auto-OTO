@@ -174,6 +174,27 @@ from core.oto_runtime_policy import resolve_runtime_mapping_policy
 
 logger = logging.getLogger(__name__)
 
+
+def _env_float(name, default):
+    raw = str(os.environ.get(name, "")).strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
+def _env_bool(name, default=False):
+    raw = str(os.environ.get(name, "")).strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in {"1", "true", "yes", "on", "y"}:
+        return True
+    if raw in {"0", "false", "no", "off", "n"}:
+        return False
+    return bool(default)
+
 __all__ = [
     "generate_oto",
     "validate_oto_params",
@@ -424,6 +445,48 @@ def _guard_cv_cutoff_to_next_onset(offset, consonant, cutoff, pre, syll_idx, syl
     return offset, consonant, cutoff, pre, reduction
 
 
+def _guard_cv_cutoff_to_next_onset_strict(offset, consonant, cutoff, pre, syll_idx, syllables_info):
+    """order-locked CV에서 다음 음절 onset 침범을 더 강하게 막는 가드."""
+    if syll_idx is None or syll_idx < 0:
+        return offset, consonant, cutoff, pre, 0.0
+    if (syll_idx + 1) >= len(syllables_info):
+        return offset, consonant, cutoff, pre, 0.0
+
+    next_syl = syllables_info[syll_idx + 1]
+    next_phones = next_syl.get("phones") or []
+    if not next_phones:
+        return offset, consonant, cutoff, pre, 0.0
+
+    next_mark = (next_phones[0].mark or "").strip().lower()
+    hard_next = is_plosive_ipa(next_mark) or next_mark in {
+        "s", "ss", "sh", "ch", "j", "jj", "c", "ts", "h"
+    }
+    safety_hard = _env_float("UTOA_KR_CV_ORDER_LOCK_ONSET_GUARD_HARD", 18.0)
+    safety_soft = _env_float("UTOA_KR_CV_ORDER_LOCK_ONSET_GUARD_SOFT", 12.0)
+    safety = float(safety_hard) if hard_next else float(safety_soft)
+    next_onset_rel = (next_phones[0].minTime * 1000.0) - offset
+    max_cutoff_abs = next_onset_rel - safety
+    if max_cutoff_abs <= (pre + 32.0):
+        return offset, consonant, cutoff, pre, 0.0
+
+    original_cutoff_abs = abs(cutoff)
+    consonant = min(consonant, max_cutoff_abs - 16.0)
+    consonant = max(consonant, pre + 18.0)
+
+    cutoff_abs = min(original_cutoff_abs, max_cutoff_abs)
+    if cutoff_abs <= (consonant + 10.0):
+        cutoff_abs = min(max_cutoff_abs, consonant + 18.0)
+        if cutoff_abs <= (consonant + 8.0):
+            consonant = max(pre + 14.0, cutoff_abs - 14.0)
+    cutoff = -cutoff_abs
+
+    offset, consonant, cutoff, pre, _ovl = validate_oto_params(
+        offset, consonant, cutoff, pre, 0.0
+    )
+    reduction = max(0.0, original_cutoff_abs - abs(cutoff))
+    return offset, consonant, cutoff, pre, reduction
+
+
 def _guard_kr_vc_cutoff_to_next_segment(offset, consonant, cutoff, pre, ovl, syll_idx, syllables_info, alias_text=""):
     """한국어 VC cutoff 가드(호환 래퍼)."""
     return _guard_kr_vc_cutoff_to_next_segment_core(
@@ -507,6 +570,55 @@ def _ensure_cv_head_min_vowel_coverage(offset, consonant, cutoff, pre, vowel_sta
     # pre 이후 너무 빨리 닫히는 케이스(자음만 남는 길이)를 방지.
     min_from_pre = min(max(v_len * 0.24, 90.0), 180.0)
     min_cut_abs = max(float(consonant) + 12.0, vowel_start_rel + keep_v_ms, float(pre) + min_from_pre)
+    if cut_abs >= min_cut_abs:
+        return offset, consonant, cutoff, pre, 0.0
+
+    new_cutoff = -min_cut_abs
+    offset, consonant, new_cutoff, pre, _ovl = validate_oto_params(
+        offset, consonant, new_cutoff, pre, 0.0
+    )
+    extended_ms = max(0.0, abs(new_cutoff) - cut_abs)
+    return offset, consonant, new_cutoff, pre, extended_ms
+
+
+def _is_sonorant_like_onset(onset, ipa_hint=""):
+    o = str(onset or "").strip().lower()
+    h = str(ipa_hint or "").strip().lower()
+    if o.startswith(("m", "n", "ng", "l", "r")):
+        return True
+    if h.startswith(("m", "n", "ŋ", "l", "r")):
+        return True
+    return False
+
+
+def _ensure_cv_min_vowel_coverage(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    vowel_start_ms,
+    vowel_end_ms,
+    *,
+    alias_onset="",
+    ipa_onset="",
+):
+    """
+    CV에서 컷오프가 너무 짧아 모음 시작이 거의 포함되지 않는 경우를 보정합니다.
+    특히 유성 자음(m/n/l/r)에서 보수적으로 적용합니다.
+    """
+    if not _is_sonorant_like_onset(alias_onset, ipa_onset):
+        return offset, consonant, cutoff, pre, 0.0
+    v_start = float(vowel_start_ms)
+    v_end = float(vowel_end_ms)
+    v_len = max(0.0, v_end - v_start)
+    if v_len < 50.0:
+        return offset, consonant, cutoff, pre, 0.0
+
+    cut_abs = abs(float(cutoff))
+    keep_v_ms = min(max(v_len * 0.22, 50.0), 150.0)
+    vowel_start_rel = max(v_start - float(offset), float(pre) + 8.0)
+    min_from_pre = min(max(v_len * 0.20, 70.0), 150.0)
+    min_cut_abs = max(float(consonant) + 10.0, vowel_start_rel + keep_v_ms, float(pre) + min_from_pre)
     if cut_abs >= min_cut_abs:
         return offset, consonant, cutoff, pre, 0.0
 
@@ -856,7 +968,16 @@ def _apply_post_timing_pipeline(
         recenter_fn=_recenter_kr_params_around_pre,
         cv_cutoff_guard_fn=_guard_cv_cutoff_to_next_onset,
     )
-    return ctx.apply(
+    (
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        soft_off_shift,
+        soft_cut_shift,
+        cutoff_reduced,
+    ) = ctx.apply(
         offset,
         consonant,
         cutoff,
@@ -869,6 +990,26 @@ def _apply_post_timing_pipeline(
         is_vc_plosive_coda=is_vc_plosive_coda,
         enable_stabilize=enable_stabilize,
         enable_cutoff_guard=enable_cutoff_guard,
+    )
+    if (
+        enable_cutoff_guard
+        and alias_type == "cv"
+        and _is_kr_order_locked_cv_format(file_format)
+        and _env_bool("UTOA_KR_CV_ORDER_LOCK_STRICT_ONSET_GUARD", True)
+    ):
+        offset, consonant, cutoff, pre, strict_reduced = _guard_cv_cutoff_to_next_onset_strict(
+            offset, consonant, cutoff, pre, current_w_idx, syllables_info
+        )
+        cutoff_reduced += float(strict_reduced or 0.0)
+    return (
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        soft_off_shift,
+        soft_cut_shift,
+        cutoff_reduced,
     )
 
 
@@ -1630,9 +1771,21 @@ def _mel_envelope(audio, sr):
         for j in range(center, right):
             fb[i - 1, j] = (right - j) / float(right - center)
 
+    # 40-band filterbank center frequency (Hz), used for coarse spectral-region cues.
+    band_centers_hz = np.asarray(hz_points[1:-1], dtype=np.float64)
+    f2_idx = np.where((band_centers_hz >= 900.0) & (band_centers_hz <= 2500.0))[0]
+    f3_idx = np.where((band_centers_hz >= 2000.0) & (band_centers_hz <= 3800.0))[0]
+    high_idx = np.where((band_centers_hz >= 3500.0) & (band_centers_hz <= min(9000.0, f_max)))[0]
+    low_idx = np.where((band_centers_hz >= 80.0) & (band_centers_hz <= 700.0))[0]
+
     frames = []
     db_vals = []
     f0_voicing = []
+    f2_ratio_vals = []
+    f3_ratio_vals = []
+    high_ratio_vals = []
+    low_ratio_vals = []
+    spec_presence_vals = []
     times = []
     last_voicing = 0.0
     frame_idx = 0
@@ -1656,6 +1809,26 @@ def _mel_envelope(audio, sr):
         power = (spec.real ** 2 + spec.imag ** 2)
         mel = fb @ power
         frames.append(np.log1p(np.maximum(mel, 0.0)).mean())
+
+        mel_nonneg = np.maximum(mel, 0.0)
+        mel_total = float(np.sum(mel_nonneg) + 1e-12)
+        if len(f2_idx):
+            f2_ratio_vals.append(float(np.sum(mel_nonneg[f2_idx]) / mel_total))
+        else:
+            f2_ratio_vals.append(0.0)
+        if len(f3_idx):
+            f3_ratio_vals.append(float(np.sum(mel_nonneg[f3_idx]) / mel_total))
+        else:
+            f3_ratio_vals.append(0.0)
+        if len(high_idx):
+            high_ratio_vals.append(float(np.sum(mel_nonneg[high_idx]) / mel_total))
+        else:
+            high_ratio_vals.append(0.0)
+        if len(low_idx):
+            low_ratio_vals.append(float(np.sum(mel_nonneg[low_idx]) / mel_total))
+        else:
+            low_ratio_vals.append(0.0)
+        spec_presence_vals.append(float(np.log1p(mel_total)))
         times.append(st * 1000.0 / sr)
         frame_idx += 1
 
@@ -1674,8 +1847,61 @@ def _mel_envelope(audio, sr):
         f0v_arr = np.convolve(f0v_arr, np.array([0.2, 0.6, 0.2], dtype=np.float64), mode="same")
     f0v_arr = np.clip(f0v_arr, 0.0, 1.0)
 
+    def _normalize01(vals):
+        arr = np.asarray(vals, dtype=np.float64) if vals else np.zeros_like(en)
+        if len(arr) != len(en):
+            arr = np.resize(arr, len(en))
+        lo = float(np.percentile(arr, 10)) if len(arr) else 0.0
+        hi = float(np.percentile(arr, 90)) if len(arr) else 1.0
+        span_local = max(hi - lo, 1e-9)
+        out = (arr - lo) / span_local
+        return np.clip(out, 0.0, 1.0)
+
+    f2_arr = np.clip(np.asarray(f2_ratio_vals, dtype=np.float64), 0.0, 1.0) if f2_ratio_vals else np.zeros_like(en)
+    f3_arr = np.clip(np.asarray(f3_ratio_vals, dtype=np.float64), 0.0, 1.0) if f3_ratio_vals else np.zeros_like(en)
+    high_arr = np.clip(np.asarray(high_ratio_vals, dtype=np.float64), 0.0, 1.0) if high_ratio_vals else np.zeros_like(en)
+    low_arr = np.clip(np.asarray(low_ratio_vals, dtype=np.float64), 0.0, 1.0) if low_ratio_vals else np.zeros_like(en)
+    spec_presence_arr = _normalize01(spec_presence_vals)
+
+    f2_p60 = float(np.percentile(f2_arr, 60)) if len(f2_arr) else 0.0
+    f3_p60 = float(np.percentile(f3_arr, 60)) if len(f3_arr) else 0.0
+    high_p65 = float(np.percentile(high_arr, 65)) if len(high_arr) else 0.0
+    spec_p40 = float(np.percentile(spec_presence_arr, 40)) if len(spec_presence_arr) else 0.0
+
     db_p20 = float(np.percentile(db_arr, 20)) if len(db_arr) else -60.0
     db_sil_th = max(-58.0, min(-28.0, db_p20 + 6.0))
+
+    # Frame-level coarse class signals used for blank/span confidence and
+    # mapping guards.
+    f2_strong_th = max(0.05, min(0.25, (0.7 * 0.115) + (0.3 * f2_p60)))
+    f3_strong_th = max(0.04, min(0.22, (0.7 * 0.082) + (0.3 * f3_p60)))
+    high_noise_th = max(0.10, min(0.35, (0.7 * 0.20) + (0.3 * high_p65)))
+    spec_noise_th = max(0.06, min(0.32, (0.7 * 0.14) + (0.3 * spec_p40)))
+
+    voiced_formant = (
+        ((f2_arr > f2_strong_th) & (f3_arr > f3_strong_th) & (db_arr > (db_sil_th + 1.2)))
+        | ((f2_arr > max(0.08, f2_p60 * 0.85)) & (f0v_arr > 0.38) & (db_arr > (db_sil_th - 1.0)))
+    )
+    silence_sparse = (
+        (db_arr <= (db_sil_th - 1.5))
+        & (en <= 0.12)
+        & (spec_presence_arr <= max(0.10, spec_p40 * 0.92))
+    )
+    unvoiced_diffuse = (
+        (high_arr >= max(0.12, high_noise_th * 0.88))
+        & (spec_presence_arr >= max(0.08, spec_noise_th * 0.86))
+        & (db_arr > (db_sil_th - 2.0))
+        & (f2_arr < max(0.05, f2_strong_th * 0.92))
+        & (f3_arr < max(0.04, f3_strong_th * 0.92))
+        & ~voiced_formant
+    )
+    breath_like = (
+        (en <= 0.24)
+        & (db_arr <= (db_sil_th + 5.5))
+        & (high_arr >= max(0.08, high_p65 * 0.72))
+        & (spec_presence_arr >= max(0.05, spec_p40 * 0.62))
+        & ~voiced_formant
+    )
     return {
         "times_ms": np.array(times, dtype=np.float64),
         "energy": en,
@@ -1683,6 +1909,19 @@ def _mel_envelope(audio, sr):
         "db_db": db_arr,
         "db_silence_th": float(db_sil_th),
         "f0_voicing": f0v_arr,
+        "f2_ratio": f2_arr,
+        "f3_ratio": f3_arr,
+        "high_ratio": high_arr,
+        "low_ratio": low_arr,
+        "spec_presence": spec_presence_arr,
+        "f2_p60": f2_p60,
+        "f3_p60": f3_p60,
+        "high_p65": high_p65,
+        "spec_p40": spec_p40,
+        "cls_voiced_formant": np.asarray(voiced_formant, dtype=np.float64),
+        "cls_silence_sparse": np.asarray(silence_sparse, dtype=np.float64),
+        "cls_unvoiced_diffuse": np.asarray(unvoiced_diffuse, dtype=np.float64),
+        "cls_breath_like": np.asarray(breath_like, dtype=np.float64),
     }
 
 
@@ -1712,6 +1951,107 @@ def _nearest_time_index(times_ms, t_ms):
     return prev_i
 
 
+def _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms):
+    if np is None or not mel_ctx:
+        return 0.0
+    times_ms = mel_ctx.get("times_ms")
+    if times_ms is None or len(times_ms) == 0:
+        return 0.0
+    idx = _nearest_time_index(times_ms, float(t_ms))
+    if idx < 0:
+        return 0.0
+
+    cls_sil = mel_ctx.get("cls_silence_sparse")
+    cls_voiced = mel_ctx.get("cls_voiced_formant")
+    cls_unvoiced = mel_ctx.get("cls_unvoiced_diffuse")
+    cls_breath = mel_ctx.get("cls_breath_like")
+    db_arr = mel_ctx.get("db_db")
+    db_sil_th = float(mel_ctx.get("db_silence_th", -42.0))
+
+    sil = float(cls_sil[idx]) if cls_sil is not None and len(cls_sil) == len(times_ms) else 0.0
+    voiced = float(cls_voiced[idx]) if cls_voiced is not None and len(cls_voiced) == len(times_ms) else 0.0
+    unvoiced = float(cls_unvoiced[idx]) if cls_unvoiced is not None and len(cls_unvoiced) == len(times_ms) else 0.0
+    breath = float(cls_breath[idx]) if cls_breath is not None and len(cls_breath) == len(times_ms) else 0.0
+    db_sparse = 0.0
+    if db_arr is not None and len(db_arr) == len(times_ms):
+        db_sparse = 1.0 if float(db_arr[idx]) <= (db_sil_th - 1.0) else 0.0
+
+    blank = (
+        (0.58 * sil)
+        + (0.20 * breath)
+        + (0.22 * db_sparse)
+        - (0.46 * voiced)
+        - (0.12 * unvoiced)
+    )
+    return max(0.0, min(1.0, float(blank)))
+
+
+def _blank_conf_at(values, idx):
+    try:
+        if values is None:
+            return 0.0
+        i = int(idx)
+    except Exception:
+        return 0.0
+    if i < 0 or i >= len(values):
+        return 0.0
+    try:
+        return float(values[i])
+    except Exception:
+        return 0.0
+
+
+def _estimate_kr_mel_class_scores_at_time(mel_ctx, t_ms):
+    out = {
+        "mel_voiced_formant_conf": 0.0,
+        "mel_silence_sparse_conf": 0.0,
+        "mel_unvoiced_diffuse_conf": 0.0,
+        "mel_breath_like_conf": 0.0,
+    }
+    if np is None or not mel_ctx:
+        return out
+    times_ms = mel_ctx.get("times_ms")
+    if times_ms is None or len(times_ms) == 0:
+        return out
+    idx = _nearest_time_index(times_ms, float(t_ms))
+    if idx < 0:
+        return out
+    key_map = {
+        "mel_voiced_formant_conf": "cls_voiced_formant",
+        "mel_silence_sparse_conf": "cls_silence_sparse",
+        "mel_unvoiced_diffuse_conf": "cls_unvoiced_diffuse",
+        "mel_breath_like_conf": "cls_breath_like",
+    }
+    for out_key, src_key in key_map.items():
+        arr = mel_ctx.get(src_key)
+        if arr is not None and len(arr) == len(times_ms):
+            try:
+                out[out_key] = max(0.0, min(1.0, float(arr[idx])))
+            except Exception:
+                out[out_key] = 0.0
+    return out
+
+
+def _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx):
+    if not syllables_info:
+        return syllables_info
+    for syl in syllables_info:
+        start_s = float(syl.get("start_time", 0.0) or 0.0)
+        phones = syl.get("phones") or []
+        if start_s <= 0.0 and phones:
+            try:
+                start_s = float(phones[0].minTime)
+            except Exception:
+                start_s = 0.0
+        if start_s < 0.0:
+            start_s = 0.0
+        t_ms = start_s * 1000.0
+        syl["blank_confidence"] = _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms)
+        mel_scores = _estimate_kr_mel_class_scores_at_time(mel_ctx, t_ms)
+        syl.update(mel_scores)
+    return syllables_info
+
+
 def _apply_soft_mel_offset_cutoff_guard(
     offset,
     consonant,
@@ -1738,6 +2078,10 @@ def _apply_soft_mel_offset_cutoff_guard(
     en = mel_ctx.get("energy")
     db_arr = mel_ctx.get("db_db")
     f0v_arr = mel_ctx.get("f0_voicing")
+    f2_arr = mel_ctx.get("f2_ratio")
+    f3_arr = mel_ctx.get("f3_ratio")
+    high_arr = mel_ctx.get("high_ratio")
+    spec_presence_arr = mel_ctx.get("spec_presence")
     db_sil_th = float(mel_ctx.get("db_silence_th", -42.0))
     if t_ms is None or en is None or len(t_ms) < 8 or len(en) != len(t_ms):
         return offset, consonant, cutoff, pre, ovl, 0.0, 0.0
@@ -1745,6 +2089,39 @@ def _apply_soft_mel_offset_cutoff_guard(
         db_arr = np.zeros_like(en, dtype=np.float64)
     if f0v_arr is None or len(f0v_arr) != len(en):
         f0v_arr = np.zeros_like(en, dtype=np.float64)
+    if f2_arr is None or len(f2_arr) != len(en):
+        f2_arr = np.zeros_like(en, dtype=np.float64)
+    if f3_arr is None or len(f3_arr) != len(en):
+        f3_arr = np.zeros_like(en, dtype=np.float64)
+    if high_arr is None or len(high_arr) != len(en):
+        high_arr = np.zeros_like(en, dtype=np.float64)
+    if spec_presence_arr is None or len(spec_presence_arr) != len(en):
+        spec_presence_arr = np.asarray(en, dtype=np.float64)
+
+    f2_p60 = float(mel_ctx.get("f2_p60", np.percentile(f2_arr, 60) if len(f2_arr) else 0.0))
+    f3_p60 = float(mel_ctx.get("f3_p60", np.percentile(f3_arr, 60) if len(f3_arr) else 0.0))
+    high_p65 = float(mel_ctx.get("high_p65", np.percentile(high_arr, 65) if len(high_arr) else 0.0))
+    spec_p40 = float(mel_ctx.get("spec_p40", np.percentile(spec_presence_arr, 40) if len(spec_presence_arr) else 0.0))
+
+    base_f2_strong = _env_float("UTOA_MEL_F2_STRONG_MIN", 0.115)
+    base_f3_strong = _env_float("UTOA_MEL_F3_STRONG_MIN", 0.082)
+    base_high_noise = _env_float("UTOA_MEL_HIGH_NOISE_MIN", 0.20)
+    base_spec_noise = _env_float("UTOA_MEL_SPEC_NOISE_MIN", 0.14)
+    base_sound_db_margin = _env_float("UTOA_MEL_SOUND_DB_MARGIN", 1.4)
+    base_sound_energy = _env_float("UTOA_MEL_SOUND_ENERGY_MIN", 0.13)
+    base_weak_f2 = _env_float("UTOA_MEL_WEAK_F2_MAX", 0.05)
+    base_weak_f3 = _env_float("UTOA_MEL_WEAK_F3_MAX", 0.05)
+    base_weak_high = _env_float("UTOA_MEL_WEAK_HIGH_MAX", 0.10)
+    hard_sil_db_margin = _env_float("UTOA_MEL_HARD_SILENCE_DB_MARGIN", -3.0)
+    hard_sil_energy = _env_float("UTOA_MEL_HARD_SILENCE_ENERGY_MAX", 0.08)
+    soft_sil_energy = _env_float("UTOA_MEL_SOFT_SILENCE_ENERGY_MAX", 0.10)
+    noise_db_margin = _env_float("UTOA_MEL_NOISE_DB_MARGIN", 1.0)
+
+    # Adapt thresholds slightly to per-file spectral distribution.
+    f2_strong_th = max(0.05, min(0.25, (0.7 * base_f2_strong) + (0.3 * f2_p60)))
+    f3_strong_th = max(0.04, min(0.22, (0.7 * base_f3_strong) + (0.3 * f3_p60)))
+    high_noise_th = max(0.10, min(0.35, (0.7 * base_high_noise) + (0.3 * high_p65)))
+    spec_noise_th = max(0.06, min(0.32, (0.7 * base_spec_noise) + (0.3 * spec_p40)))
 
     pre_abs = float(offset) + float(pre)
     cons_abs = float(offset) + float(consonant)
@@ -1752,8 +2129,38 @@ def _apply_soft_mel_offset_cutoff_guard(
     if cut_abs <= pre_abs + 18.0:
         return offset, consonant, cutoff, pre, ovl, 0.0, 0.0
 
-    sound_mask = (db_arr > (db_sil_th + 1.5)) & (en > 0.14)
-    silence_mask = (db_arr <= db_sil_th) | (en <= 0.10)
+    # Spectral cues:
+    # - voiced_formant_mask: strong F2/F3 (+ optional F0) -> likely vowel/voiced region
+    # - noisy_unvoiced_mask: high-frequency energy with weak formant -> fricative/plosive noise
+    cls_voiced = mel_ctx.get("cls_voiced_formant")
+    cls_unvoiced = mel_ctx.get("cls_unvoiced_diffuse")
+    cls_silence = mel_ctx.get("cls_silence_sparse")
+    if cls_voiced is not None and len(cls_voiced) == len(en):
+        voiced_formant_mask = np.asarray(cls_voiced, dtype=np.float64) >= 0.5
+    else:
+        voiced_f2_f0_th = _env_float("UTOA_MEL_VOICED_F2_MIN", 0.09)
+        voiced_f0_th = _env_float("UTOA_MEL_VOICED_F0_MIN", 0.42)
+        voiced_formant_mask = (
+            ((f2_arr > f2_strong_th) & (f3_arr > f3_strong_th))
+            | ((f2_arr > voiced_f2_f0_th) & (f0v_arr > voiced_f0_th))
+        )
+    if cls_unvoiced is not None and len(cls_unvoiced) == len(en):
+        noisy_unvoiced_mask = np.asarray(cls_unvoiced, dtype=np.float64) >= 0.5
+    else:
+        noisy_unvoiced_mask = (
+            (high_arr > high_noise_th)
+            & (spec_presence_arr > spec_noise_th)
+            & (db_arr > (db_sil_th + noise_db_margin))
+            & (en > 0.08)
+            & ~voiced_formant_mask
+        )
+
+    sound_mask = ((db_arr > (db_sil_th + base_sound_db_margin)) & (en > base_sound_energy)) | voiced_formant_mask | noisy_unvoiced_mask
+    weak_spec_mask = (f2_arr < base_weak_f2) & (f3_arr < base_weak_f3) & (high_arr < base_weak_high)
+    hard_silence_mask = (db_arr <= (db_sil_th + hard_sil_db_margin)) | (en <= hard_sil_energy)
+    silence_mask = hard_silence_mask | (((db_arr <= db_sil_th) | (en <= soft_sil_energy)) & weak_spec_mask)
+    if cls_silence is not None and len(cls_silence) == len(en):
+        silence_mask = silence_mask | (np.asarray(cls_silence, dtype=np.float64) >= 0.5)
     # onset 보조 탐지: 에너지 이동평균 + 1차 기울기로 유효 onset 후보를 만든다.
     if len(en) >= 5:
         kernel = np.ones(5, dtype=np.float64) / 5.0
@@ -1761,7 +2168,6 @@ def _apply_soft_mel_offset_cutoff_guard(
     else:
         en_ma = np.asarray(en, dtype=np.float64)
     en_slope = np.diff(en_ma, prepend=float(en_ma[0]) if len(en_ma) else 0.0)
-    onset_mask = (en_slope > 0.015) & (en_ma > 0.12) & (db_arr > (db_sil_th - 2.0))
 
     off_idx = _nearest_time_index(t_ms, offset)
     pre_idx = _nearest_time_index(t_ms, pre_abs)
@@ -1787,6 +2193,15 @@ def _apply_soft_mel_offset_cutoff_guard(
             m = re.match(r"^([bcdfghjklmnpqrstvwxyz]+)", token)
             if m:
                 hint = m.group(1)
+    hint = re.sub(r"[^a-z]", "", hint or "")
+    if len(hint) >= 2 and hint[:2] in (KR_PLOSIVE_ONSETS | KR_SIBILANT_ONSETS):
+        hint = hint[:2]
+    elif len(hint) >= 1:
+        hint = hint[:1] if hint[:1] in (KR_PLOSIVE_ONSETS | KR_SIBILANT_ONSETS) else hint
+
+    is_plosive_like = bool(hint) and (is_plosive_roman(hint) or is_plosive_ipa(hint) or hint in KR_PLOSIVE_ONSETS)
+    is_sibilant_like = hint in KR_SIBILANT_ONSETS or hint in {"sh", "ch", "ts", "z", "dz", "j", "jj", "c"}
+    is_fricative_like = is_sibilant_like or hint in {"h", "f", "v", "x"}
     # 유성/비음 계열(m,n,r,l,w,y...)은 멜 저역 에너지가 약해
     # offset guard가 모음 시작으로 과도 이동할 수 있어 보수적으로 처리한다.
     low_energy_voiced = hint in {
@@ -1795,12 +2210,41 @@ def _apply_soft_mel_offset_cutoff_guard(
         "ɴ", "ŋ", "ɲ", "ɾ", "ɹ",
     } or hint.startswith("m")
 
+    # Onset-class aware onset mask tuning:
+    # - sibilant/fricative: flatter slope before vowel, so lower slope threshold
+    # - plosive: sharper attack, so keep stricter slope threshold
+    onset_slope_th = _env_float("UTOA_MEL_ONSET_SLOPE_BASE", 0.015)
+    onset_energy_th = _env_float("UTOA_MEL_ONSET_ENERGY_BASE", 0.12)
+    onset_db_margin = _env_float("UTOA_MEL_ONSET_DB_MARGIN_BASE", -2.0)
+    if is_sibilant_like:
+        onset_slope_th = _env_float("UTOA_MEL_ONSET_SLOPE_SIBILANT", 0.010)
+        onset_energy_th = _env_float("UTOA_MEL_ONSET_ENERGY_SIBILANT", 0.10)
+        onset_db_margin = _env_float("UTOA_MEL_ONSET_DB_MARGIN_SIBILANT", -4.0)
+    elif is_plosive_like:
+        onset_slope_th = _env_float("UTOA_MEL_ONSET_SLOPE_PLOSIVE", 0.018)
+        onset_energy_th = _env_float("UTOA_MEL_ONSET_ENERGY_PLOSIVE", 0.13)
+        onset_db_margin = _env_float("UTOA_MEL_ONSET_DB_MARGIN_PLOSIVE", -1.5)
+    onset_mask = (en_slope > onset_slope_th) & (en_ma > onset_energy_th) & (db_arr > (db_sil_th + onset_db_margin))
+    if is_sibilant_like or is_plosive_like:
+        f0_slope_th = _env_float("UTOA_MEL_ONSET_F0_SLOPE_MIN", 0.03)
+        onset_energy_relax = _env_float("UTOA_MEL_ONSET_ENERGY_RELAX", 0.02)
+        onset_f0_db_margin = _env_float("UTOA_MEL_ONSET_F0_DB_MARGIN", -3.0)
+        f0_slope = np.diff(f0v_arr, prepend=float(f0v_arr[0]) if len(f0v_arr) else 0.0)
+        onset_mask = onset_mask | (
+            (f0_slope > f0_slope_th)
+            & (en_ma > max(0.09, onset_energy_th - onset_energy_relax))
+            & (db_arr > (db_sil_th + onset_f0_db_margin))
+        )
+
     # ---- soft offset guard ----
     # 한국어 CVVC의 CV/CV_HEAD는 onset anchor와 후단 guard만으로도 충분한 경우가 많다.
     # 멜 offset soft guard가 추가로 들어가면 단모음/활음 구분이 약한 파일에서
     # offset이 공백 쪽으로 과하게 끌리는 경향이 커진다.
+    allow_order_locked_cv = _env_bool("UTOA_KR_ALLOW_ORDER_LOCKED_CV_MEL_OFFSET", True)
     skip_offset_soft_guard = (alias_type == "cv_head") or (
-        _is_kr_order_locked_cv_format(file_format) and alias_type in {"cv", "cv_head"}
+        _is_kr_order_locked_cv_format(file_format)
+        and alias_type in {"cv", "cv_head"}
+        and not allow_order_locked_cv
     )
     if not skip_offset_soft_guard and not low_energy_voiced:
         off_silent = bool(silence_mask[off_idx])
@@ -1808,19 +2252,35 @@ def _apply_soft_mel_offset_cutoff_guard(
         if off_silent and pre_sound:
             lo = max(0, pre_idx - 120)
             sound_start_idx = None
-            onset_seg = onset_mask[lo:pre_idx + 1]
-            if np.any(onset_seg):
-                # onset 후보가 있으면 기존 sound 시작점보다 우선 사용한다.
-                rel = int(np.where(onset_seg)[0][0])
-                sound_start_idx = lo + rel
-            else:
-                seg = sound_mask[lo:pre_idx + 1]
-                if np.any(seg):
-                    rel = int(np.where(seg)[0][0])
+            if is_sibilant_like or is_plosive_like:
+                # For fricative/plosive-leading syllables, prioritize the first strong formant region
+                # (vowel body) to separate C-noise from V more reliably.
+                vf_seg = voiced_formant_mask[lo:pre_idx + 1]
+                if np.any(vf_seg):
+                    rel = int(np.where(vf_seg)[0][0])
                     sound_start_idx = lo + rel
+            if sound_start_idx is None:
+                onset_seg = onset_mask[lo:pre_idx + 1]
+                if np.any(onset_seg):
+                    # onset 후보가 있으면 기존 sound 시작점보다 우선 사용한다.
+                    rel = int(np.where(onset_seg)[0][0])
+                    sound_start_idx = lo + rel
+                else:
+                    seg = sound_mask[lo:pre_idx + 1]
+                    if np.any(seg):
+                        rel = int(np.where(seg)[0][0])
+                        sound_start_idx = lo + rel
             if sound_start_idx is not None:
-                target_offset = float(t_ms[sound_start_idx]) - 12.0
-                target_offset = max(0.0, min(pre_abs - 18.0, target_offset))
+                offset_lead_ms = _env_float("UTOA_MEL_OFFSET_LEAD_BASE_MS", 12.0)
+                pre_guard_ms = _env_float("UTOA_MEL_OFFSET_PRE_GUARD_BASE_MS", 18.0)
+                if is_sibilant_like or is_fricative_like:
+                    offset_lead_ms = _env_float("UTOA_MEL_OFFSET_LEAD_SIBILANT_MS", 15.0)
+                    pre_guard_ms = _env_float("UTOA_MEL_OFFSET_PRE_GUARD_SIBILANT_MS", 20.0)
+                elif is_plosive_like:
+                    offset_lead_ms = _env_float("UTOA_MEL_OFFSET_LEAD_PLOSIVE_MS", 18.0)
+                    pre_guard_ms = _env_float("UTOA_MEL_OFFSET_PRE_GUARD_PLOSIVE_MS", 22.0)
+                target_offset = float(t_ms[sound_start_idx]) - offset_lead_ms
+                target_offset = max(0.0, min(pre_abs - pre_guard_ms, target_offset))
                 new_offset = _blend(offset, target_offset, 0.36)
                 offset_shift_ms = float(new_offset - offset)
                 offset = new_offset
@@ -1838,13 +2298,28 @@ def _apply_soft_mel_offset_cutoff_guard(
             seg = np.where(silence_mask[start_idx:cut_idx + 1])[0]
             if len(seg) > 0:
                 last_sil_idx = int(start_idx + seg[-1])
-                target_cut_abs = float(t_ms[last_sil_idx]) + 4.0
-                target_cut_abs = max(pre_abs + 20.0, min(target_cut_abs, cut_abs))
-                if target_cut_abs < cut_abs - 8.0:
+                cut_shift_base = _env_float("UTOA_MEL_CUTOFF_TARGET_SHIFT_MS", 4.0)
+                min_cut_abs_margin = _env_float("UTOA_MEL_CUTOFF_MIN_FROM_PRE_MS", 20.0)
+                target_cut_abs = float(t_ms[last_sil_idx]) + cut_shift_base
+                target_cut_abs = max(pre_abs + min_cut_abs_margin, min(target_cut_abs, cut_abs))
+                min_cut_reduction = _env_float("UTOA_MEL_MIN_CUT_REDUCTION_BASE_MS", 8.0)
+                if is_sibilant_like:
+                    min_cut_reduction = _env_float("UTOA_MEL_MIN_CUT_REDUCTION_SIBILANT_MS", 12.0)
+                elif is_plosive_like:
+                    min_cut_reduction = _env_float("UTOA_MEL_MIN_CUT_REDUCTION_PLOSIVE_MS", 10.0)
+                if target_cut_abs < cut_abs - min_cut_reduction:
                     # F0 유성도는 보조(저가중치)로만 반영
                     f0v = float(f0v_arr[last_sil_idx])
-                    blend_w = 0.42 - (0.08 * f0v)
-                    blend_w = max(0.26, min(0.44, blend_w))
+                    blend_base = _env_float("UTOA_MEL_CUTOFF_BLEND_BASE", 0.42)
+                    blend_f0_scale = _env_float("UTOA_MEL_CUTOFF_BLEND_F0_SCALE", 0.08)
+                    blend_w = blend_base - (blend_f0_scale * f0v)
+                    if is_sibilant_like:
+                        blend_w -= _env_float("UTOA_MEL_CUTOFF_BLEND_SIBILANT_DELTA", 0.08)
+                    elif is_plosive_like:
+                        blend_w -= _env_float("UTOA_MEL_CUTOFF_BLEND_PLOSIVE_DELTA", 0.04)
+                    blend_min = _env_float("UTOA_MEL_CUTOFF_BLEND_MIN", 0.26)
+                    blend_max = _env_float("UTOA_MEL_CUTOFF_BLEND_MAX", 0.44)
+                    blend_w = max(blend_min, min(blend_max, blend_w))
                     new_cut_abs = _blend(cut_abs, target_cut_abs, blend_w)
                     cutoff_shift_ms = float(cut_abs - new_cut_abs)
                     cut_abs = new_cut_abs
@@ -2135,6 +2610,7 @@ def generate_oto(
         cleanup_timing_jsonl = False
     elif env_cleanup_jsonl in {"1", "true", "on", "yes"}:
         cleanup_timing_jsonl = True
+    kr_disable_cvvc_order_lock = _env_bool("UTOA_KR_DISABLE_CVVC_ORDER_LOCK", False)
 
     def log(msg):
         if callback:
@@ -2597,6 +3073,9 @@ def generate_oto(
                 used_words_based = len(syllables_info) > 0
 
             alias_based = _build_kr_syllables_from_phone_nuclei(ph_intervals, targets_for_build) if targets_for_build else None
+            if mel_ctx_for_file:
+                _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx_for_file)
+                _annotate_kr_syllable_blank_confidence(alias_based, mel_ctx_for_file)
             kr_source_pick = select_kr_syllable_source(
                 file_format=file_format,
                 prefer_filename_sequence=prefer_filename_sequence,
@@ -2611,6 +3090,15 @@ def generate_oto(
                 is_order_locked_format_fn=_is_kr_order_locked_cv_format,
             )
             syllables_info = list(kr_source_pick.get("syllables_info") or [])
+            if mel_ctx_for_file:
+                _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx_for_file)
+            syllable_blank_confidences = [
+                float((s or {}).get("blank_confidence", 0.0) or 0.0)
+                for s in (syllables_info or [])
+            ]
+            blank_conf_mean = 0.0
+            if syllable_blank_confidences:
+                blank_conf_mean = float(sum(syllable_blank_confidences) / float(len(syllable_blank_confidences)))
             used_words_based = bool(kr_source_pick.get("used_words_based"))
             used_alias_based = bool(kr_source_pick.get("used_alias_based"))
             mapping_reason_code = str(kr_source_pick.get("mapping_reason_code") or mapping_reason_code)
@@ -2675,9 +3163,21 @@ def generate_oto(
                     label_match_score_fn=lambda target, label: float(_cv_match_score(target, label)),
                 )
             if not kr_cv_plan.get("indices"):
+                use_mel_plan = False
+                fmt = str(file_format or "").strip().lower()
+                mel_plan_env = {
+                    "cvvc": "UTOA_KR_CVVC_MEL_PLAN",
+                    "cvc": "UTOA_KR_CVC_MEL_PLAN",
+                    "vcv": "UTOA_KR_VCV_MEL_PLAN",
+                    "cv": "UTOA_KR_CV_MEL_PLAN",
+                }
+                if fmt in mel_plan_env and mel_ctx_for_file and syllables_info:
+                    if textgrid_trust_tier != "high" or low_phone_quality or blank_conf_mean >= 0.55:
+                        use_mel_plan = _env_bool(mel_plan_env[fmt], True)
                 kr_cv_plan = _build_kr_cv_anchor_plan_v2(
                     plan_candidate_source,
                     syllables_info,
+                    use_mel=bool(use_mel_plan),
                 ) if plan_candidate_source else {"indices": None, "meta": {}}
             kr_planned_cv_indices = kr_cv_plan.get("indices")
             kr_anchor_graph = build_adjacent_anchor_graph(kr_planned_cv_indices)
@@ -2708,6 +3208,7 @@ def generate_oto(
                 score_b=alt_score,
                 sequence_lock_formats={"cvvc", "cvc"},
                 abstain_formats={"cvvc", "vcv", "cvc", "cv"},
+                strict_formats={"cvvc"},
             )
             if sinsy_label_entries:
                 plan_source = str(kr_cv_plan.get("source") or "")
@@ -2725,6 +3226,12 @@ def generate_oto(
                             f"(margin={plan_margin:.1f} < {row_margin_floor:.1f})"
                         )
             mapping_confidence_base = float(runtime_policy.get("mapping_confidence", mapping_confidence_base))
+            if syllable_blank_confidences:
+                if blank_conf_mean >= 0.55:
+                    mapping_confidence_base = max(
+                        0.0,
+                        mapping_confidence_base - min(0.22, (blank_conf_mean - 0.55) * 0.45 + 0.04),
+                    )
             if kr_mapping_debug_reason_logging and mapping_confidence_base < float(file_mapping_conf_th):
                 log(
                     f"🧭 {fname}: KR 매핑 신뢰도 낮음(conf={mapping_confidence_base:.2f}, "
@@ -2732,6 +3239,39 @@ def generate_oto(
                 )
 
             file_mapping_low_conf = bool(runtime_policy.get("is_low_conf"))
+            file_conf_floor = float(runtime_policy.get("file_conf_floor", file_mapping_conf_th))
+            if mapping_confidence_base < file_conf_floor:
+                file_mapping_low_conf = True
+            row_conf_floor = float(runtime_policy.get("row_conf_floor", file_mapping_conf_th))
+            row_margin_floor = float(runtime_policy.get("row_margin_floor", 6.0))
+            row_blank_floor = None
+            if str(file_format or "").strip().lower() == "cvvc" and runtime_policy.get("strict_mode"):
+                if blank_conf_mean >= 0.55:
+                    row_blank_floor = _env_float("UTOA_KR_CVVC_ROW_BLANK_FLOOR", 0.68)
+            if isinstance(runtime_report, dict):
+                low_conf_reasons = list(runtime_policy.get("low_conf_reasons") or [])
+                if blank_conf_mean >= 0.55 and "blank_confidence_high" not in low_conf_reasons:
+                    low_conf_reasons.append("blank_confidence_high")
+                if mapping_confidence_base < file_conf_floor and "conf_below_floor" not in low_conf_reasons:
+                    low_conf_reasons.append("conf_below_floor")
+                runtime_report["mapping"] = {
+                    "format": str(file_format or ""),
+                    "mapping_confidence": float(mapping_confidence_base),
+                    "mapping_margin": float(mapping_margin),
+                    "mapping_tier": str(runtime_policy.get("mapping_tier") or ""),
+                    "trust_score": float(textgrid_trust_score),
+                    "trust_tier": str(textgrid_trust_tier or ""),
+                    "file_conf_floor": float(file_conf_floor),
+                    "row_conf_floor": float(row_conf_floor),
+                    "row_margin_floor": float(row_margin_floor),
+                    "file_low_conf": bool(file_mapping_low_conf),
+                    "low_conf_reasons": list(low_conf_reasons),
+                    "blank_confidence_mean": float(blank_conf_mean),
+                    "plan_source": str(kr_cv_plan.get("source") or ""),
+                    "plan_margin": float((kr_cv_plan.get("meta") or {}).get("margin", 0.0) or 0.0),
+                    "plan_coverage": float(kr_plan_policy.get("coverage", 0.0) or 0.0),
+                    "mapping_reason_code": str(mapping_reason_code or ""),
+                }
 
             if (not syllables_info) or any(len(s['phones']) == 0 for s in syllables_info):
                 log(f"경고: {fname}: 음절-음소 매핑 실패로 원본 라인을 유지합니다.")
@@ -2783,6 +3323,10 @@ def generate_oto(
             cv_seq_idx = 0
             bridge_seq_idx = 0
             kr_order_locked_format = _is_kr_order_locked_cv_format(file_format)
+            if kr_order_locked_format and kr_disable_cvvc_order_lock:
+                kr_order_locked_format = False
+                if kr_mapping_debug_reason_logging:
+                    log(f"🧭 {fname}: KR CVVC/CVC filename order lock 비활성화(UTOA_KR_DISABLE_CVVC_ORDER_LOCK=1)")
             kr_cvvc_occurrence_source = filename_cv_targets if (kr_order_locked_format and filename_cv_targets) else syllables_info
             kr_cvvc_occurrence_map = _build_kr_cvvc_occurrence_map(kr_cvvc_occurrence_source) if kr_order_locked_format else None
             kr_cvvc_occurrence_state = {}
@@ -2967,6 +3511,7 @@ def generate_oto(
                         find_cv_vowel_match_index_fn=_find_kr_cv_vowel_match_index,
                         cv_match_score_fn=_cv_match_score,
                         apply_row_confidence_penalty_fn=apply_row_confidence_penalty,
+                        syllable_blank_confidences=syllable_blank_confidences,
                         log_fn=log,
                         debug_logging=kr_mapping_debug_reason_logging,
                         fname=fname,
@@ -3069,6 +3614,7 @@ def generate_oto(
 
 
                 if not is_vc:
+                    selected_w_idx = current_w_idx
                     forced_vv_idx = None
                     planned_vv_idx = None
                     if file_format == "cvvc" and alias_type == "vv":
@@ -3126,6 +3672,8 @@ def generate_oto(
                         should_allow_exact_vowel_fix_fn=_should_allow_kr_exact_vowel_fix,
                         find_cv_vowel_match_index_fn=_find_kr_cv_vowel_match_index,
                         clamp_cv_index_to_order_fn=_clamp_kr_cv_index_to_order,
+                        syllable_blank_confidences=syllable_blank_confidences,
+                        syllables_info=syllables_info,
                         log_fn=log,
                         debug_logging=kr_mapping_debug_reason_logging,
                     )
@@ -3147,9 +3695,16 @@ def generate_oto(
                             else False
                         ),
                         confidence_margin=mapping_margin,
-                        min_confidence_margin=runtime_policy.get("row_margin_floor"),
-                        active_only_formats={"cvvc", "cvc", "cv"},
-                        margin_formats={"cvvc", "cvc", "cv"},
+                        min_confidence_margin=row_margin_floor,
+                        row_confidence=row_mapping_confidence,
+                        min_row_confidence=row_conf_floor,
+                        blank_confidence=_blank_conf_at(syllable_blank_confidences, selected_w_idx),
+                        max_blank_confidence=row_blank_floor,
+                        # CVC는 파일/음절 특성상 margin 변동이 커 CV 계열이 과도 스킵될 수 있어
+                        # row-level abstain 게이트를 CV/CVVC에만 적용한다.
+                        active_only_formats={"cvvc", "cv"},
+                        margin_formats={"cvvc", "cv"},
+                        blank_formats={"cvvc"},
                     )
                     if row_abstain.get("should_skip"):
                         if kr_mapping_debug_reason_logging:
@@ -3163,12 +3718,16 @@ def generate_oto(
                             line,
                             meta={"diag_hint": row_abstain.get("diag_hint", "")},
                         )
+                        if use_template:
+                            # 템플릿 모드에서는 매핑이 불확실한 행이라도 기존 alias를 보존한다.
+                            final_lines.append(apply_suffix_to_oto_line(line, alias_suffix))
                         continue
                     current_w_idx = max(current_w_idx, selected_w_idx)
                     selected_w_idx, curr_phones, c_start, c_end, n_start, n_end = _prepare_cv_bounds_from_syllable(
                         syllables_info, selected_w_idx
                     )
                 else:
+                    selected_w_idx = current_w_idx
                     bridge_next_idx = (
                         int(bridge_pair["next_idx"])
                         if bridge_pair.get("next_idx") is not None
@@ -3294,6 +3853,23 @@ def generate_oto(
                     enable_cutoff_guard=True,
                     post_ctx=kr_post_ctx,
                 )
+                if (
+                    alias_type == "cv"
+                    and str(file_format or "").strip().lower() in {"cvvc", "cvc"}
+                    and _env_bool("UTOA_KR_CV_MIN_VOWEL_GUARD", True)
+                ):
+                    alias_onset = _extract_alias_onset(alias)
+                    ipa_onset = curr_phones[0].mark if curr_phones else ""
+                    offset, consonant, cutoff, pre, _cv_vowel_extended = _ensure_cv_min_vowel_coverage(
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        n_start,
+                        n_end,
+                        alias_onset=alias_onset,
+                        ipa_onset=ipa_onset,
+                    )
                 _run_kr_general_row_v2(
                     final_lines=final_lines,
                     real_wav_name=real_wav_name,

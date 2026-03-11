@@ -20,8 +20,11 @@ def resolve_runtime_mapping_policy(
     mapping_margin=None,
     low_conf_floor=0.58,
     low_margin_floor=6.0,
+    row_conf_floor=None,
+    row_margin_floor=None,
     sequence_lock_formats=None,
     abstain_formats=None,
+    strict_formats=None,
     prefer_sequence=None,
 ):
     snapshot = ingest_snapshot
@@ -29,6 +32,7 @@ def resolve_runtime_mapping_policy(
     fmt = str(format_type or "").strip().lower()
     sequence_lock_formats = {str(x).strip().lower() for x in (sequence_lock_formats or set())}
     abstain_formats = {str(x).strip().lower() for x in (abstain_formats or set())}
+    strict_formats = {str(x).strip().lower() for x in (strict_formats or set())}
 
     trust_score = _clamp01(getattr(snapshot, "textgrid_trust_score", 0.0))
     trust_tier = str(getattr(snapshot, "textgrid_trust_tier", "low") or "low").strip().lower()
@@ -36,7 +40,17 @@ def resolve_runtime_mapping_policy(
     trust_cap = max(0.0, min(1.0, trust_score + (0.04 if prefer_seq else 0.10)))
     confidence_cap = min(float(plan.get("confidence_cap", 1.0) or 1.0), trust_cap)
     capped_confidence = min(float(mapping_confidence or 0.0), float(confidence_cap))
-    margin_floor = float(low_margin_floor or 0.0)
+    file_conf_floor = float(low_conf_floor or 0.0)
+    file_margin_floor = float(low_margin_floor or 0.0)
+    row_conf_floor_value = float(row_conf_floor) if row_conf_floor is not None else file_conf_floor
+    row_margin_floor_value = float(row_margin_floor) if row_margin_floor is not None else file_margin_floor
+    strict_mode = bool(fmt in strict_formats)
+    if strict_mode:
+        file_conf_floor = max(file_conf_floor, float(low_conf_floor or 0.0) + 0.04)
+        row_conf_floor_value = max(row_conf_floor_value, file_conf_floor + 0.04)
+        row_margin_floor_value = max(row_margin_floor_value, float(low_margin_floor or 0.0) + 2.0)
+
+    margin_floor = float(file_margin_floor or 0.0)
     try:
         mapping_margin_value = None if mapping_margin is None else float(mapping_margin)
     except Exception:
@@ -81,13 +95,19 @@ def resolve_runtime_mapping_policy(
     score_a_ok = True if score_a is None else float(score_a) >= 48.0
     score_b_ok = True if score_b is None else float(score_b) >= 48.0
     low_margin = bool(effective_margin < margin_floor)
-    is_low_conf = bool(
-        capped_confidence < max(float(conf_threshold or 0.0), float(low_conf_floor))
-        or low_margin
-        or ((score_a is not None and score_b is not None) and (not score_a_ok) and (not score_b_ok))
-        or trust_tier == "low"
-        or str(plan.get("tier", "")).strip().lower() == "low"
-    )
+    low_conf_reasons = []
+    conf_floor = max(float(conf_threshold or 0.0), float(file_conf_floor))
+    if capped_confidence < conf_floor:
+        low_conf_reasons.append("conf_below_floor")
+    if low_margin:
+        low_conf_reasons.append("margin_below_floor")
+    if (score_a is not None and score_b is not None) and (not score_a_ok) and (not score_b_ok):
+        low_conf_reasons.append("score_low")
+    if trust_tier == "low":
+        low_conf_reasons.append("trust_tier_low")
+    if str(plan.get("tier", "")).strip().lower() == "low":
+        low_conf_reasons.append("plan_tier_low")
+    is_low_conf = bool(low_conf_reasons)
 
     return {
         "mapping_confidence": float(capped_confidence),
@@ -99,8 +119,12 @@ def resolve_runtime_mapping_policy(
         "should_abstain": bool(should_abstain),
         "is_low_conf": bool(is_low_conf),
         "low_margin": bool(low_margin),
-        "row_margin_floor": float(margin_floor),
+        "row_margin_floor": float(row_margin_floor_value),
+        "row_conf_floor": float(row_conf_floor_value),
+        "file_conf_floor": float(file_conf_floor),
         "prefer_sequence": bool(prefer_seq),
+        "strict_mode": bool(strict_mode),
+        "low_conf_reasons": list(low_conf_reasons),
     }
 
 

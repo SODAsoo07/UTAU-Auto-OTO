@@ -108,14 +108,31 @@ def _iter_kr_cvvc_tokens(token_source):
     return out
 
 
+def _iter_kr_cvvc_cv_slots(token_source):
+    """
+    CVVC token source에서 "CV occurrence 슬롯" 인덱스를 만듭니다.
+    - vowel이 있는 모든 음절을 슬롯으로 집계합니다.
+    - 받침(coda)이 있어도 CV kernel(onset+vowel)로 환원해 포함합니다.
+    """
+    out = []
+    cv_slot = 0
+    for raw_idx, tok in enumerate(_iter_kr_cvvc_tokens(token_source)):
+        onset, vowel, coda = _split_kr_syllable_parts(tok)
+        if not vowel:
+            continue
+        kernel = _kr_cv_kernel(tok)
+        if not kernel:
+            continue
+        out.append((raw_idx, cv_slot, tok, kernel, onset, vowel, coda))
+        cv_slot += 1
+    return out
+
+
 def _build_kr_cvvc_occurrence_map(token_source):
     """CVVC 파일의 filename 기반 음절 순서에서 CV/CV_HEAD occurrence map을 만듭니다."""
     occ = {}
-    for idx, tok in enumerate(_iter_kr_cvvc_tokens(token_source)):
-        onset, vowel, coda = _split_kr_syllable_parts(tok)
-        if not vowel or coda:
-            continue
-        occ.setdefault(tok, []).append(idx)
+    for _raw_idx, cv_slot, _tok, kernel, _onset, _vowel, _coda in _iter_kr_cvvc_cv_slots(token_source):
+        occ.setdefault(kernel, []).append(cv_slot)
     return occ
 
 
@@ -163,17 +180,26 @@ def _extract_kr_vv_pair_key(alias):
 def _build_kr_cvvc_vv_occurrence_map(token_source):
     """CVVC 파일의 순수 모음-모음 연결(VV) 등장 순서를 맵으로 만듭니다."""
     occ = {}
-    infos = _iter_kr_cvvc_tokens(token_source)
-    for idx in range(1, len(infos)):
-        prev_tok = infos[idx - 1]
-        curr_tok = infos[idx]
-        po, pv, pc = _split_kr_syllable_parts(prev_tok)
-        co, cv, cc = _split_kr_syllable_parts(curr_tok)
+    slot_by_raw = {}
+    for raw_idx, cv_slot, tok, _kernel, onset, vowel, coda in _iter_kr_cvvc_cv_slots(token_source):
+        slot_by_raw[raw_idx] = (cv_slot, tok, onset, vowel, coda)
+
+    if not slot_by_raw:
+        return occ
+
+    max_raw_idx = max(slot_by_raw.keys())
+    for raw_idx in range(1, max_raw_idx + 1):
+        prev_info = slot_by_raw.get(raw_idx - 1)
+        curr_info = slot_by_raw.get(raw_idx)
+        if not prev_info or not curr_info:
+            continue
+        _prev_slot, prev_tok, po, pv, pc = prev_info
+        curr_slot, curr_tok, co, cv, cc = curr_info
         if not pv or not cv:
             continue
         if po or co or pc or cc:
             continue
-        occ.setdefault(f"{prev_tok} {curr_tok}", []).append(idx)
+        occ.setdefault(f"{prev_tok} {curr_tok}", []).append(curr_slot)
     return occ
 
 
@@ -270,12 +296,27 @@ def _score_kr_syllable_mapping(candidate_infos, cv_targets):
     if not cand:
         return -1.0
 
+    try:
+        blank_penalty_scale = float(os.environ.get("UTOA_KR_BLANK_SCORE_PENALTY", "26.0"))
+    except Exception:
+        blank_penalty_scale = 26.0
+    blank_penalty_scale = max(0.0, min(blank_penalty_scale, 80.0))
+
     def _avg_with_shift(shift):
         vals = []
         for i, tgt in enumerate(cv_targets):
             j = i + shift
             if 0 <= j < len(cand):
-                vals.append(_cv_match_score(tgt, cand[j]))
+                score = float(_cv_match_score(tgt, cand[j]))
+                try:
+                    blank_conf = float((candidate_infos[j] or {}).get("blank_confidence", 0.0) or 0.0)
+                except Exception:
+                    blank_conf = 0.0
+                blank_conf = max(0.0, min(blank_conf, 1.0))
+                score -= blank_conf * blank_penalty_scale
+                if blank_conf >= 0.75:
+                    score -= 8.0
+                vals.append(score)
         if not vals:
             return -1.0
         coverage = len(vals) / float(max(len(cv_targets), 1))

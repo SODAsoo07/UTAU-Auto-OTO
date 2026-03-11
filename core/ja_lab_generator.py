@@ -11,8 +11,10 @@ import os
 import re
 import logging
 import unicodedata
+from typing import Any
 from core.lab_generator import load_custom_phonemes, apply_custom_phonemes
 from core.textio_utils import read_text_auto
+from core.conversion_tables import load_japanese_conversion_table
 
 logger = logging.getLogger(__name__)
 
@@ -100,9 +102,16 @@ def romaji_to_ipa(syllable):
     Returns:
         IPA 음소 문자열 (예: 'k a', 'ɕ i', 'ɴ')
     """
-    s = syllable.lower().strip()
+    raw = str(syllable or "").strip()
+    s = raw.lower()
     if not s:
         return ''
+
+    # 0차: 외부 변환 테이블 직접 매핑(대소문자 구분/무시 둘 다 지원)
+    if raw in JA_ROMAJI_IPA_TABLE:
+        return str(JA_ROMAJI_IPA_TABLE[raw] or "")
+    if s in JA_ROMAJI_IPA_TABLE:
+        return str(JA_ROMAJI_IPA_TABLE[s] or "")
 
     # 1차: 특수 음절 직접 매핑
     if s in JA_SPECIAL_SYLLABLE_IPA:
@@ -126,9 +135,13 @@ def romaji_to_ipa(syllable):
         if c_part in JA_CONSONANT_IPA and v_part in JA_VOWEL_IPA:
             return f"{JA_CONSONANT_IPA[c_part]} {JA_VOWEL_IPA[v_part]}"
 
+    # 3.5차: 단독 자음 토큰(CVVC 꼬리/연결용) 허용
+    if s in JA_CONSONANT_IPA:
+        return JA_CONSONANT_IPA[s]
+
     # 4차: 그대로 반환 (알 수 없는 음절)
-    logger.warning(f"알 수 없는 일본어 로마자: '{syllable}' → 그대로 사용")
-    return s
+    logger.warning(f"알 수 없는 일본어 로마자: '{syllable}' → spn으로 대체")
+    return "spn"
 
 
 JA_VOWELS_ROMAJI = {'a', 'i', 'u', 'e', 'o'}
@@ -184,15 +197,123 @@ ROMAJI_META_TOKENS = {
     'long', 'vcv', 'cvvc', 'cvc', 'mono', 'oto', 'wav'
 }
 
+JA_ROMAJI_IPA_TABLE = {}
+JA_ALIAS_TO_KANA_TABLE = {}
+JA_KANA_TO_ALIAS_TABLE = {}
+_JA_KNOWN_PHONE_SET = set()
+
+
+def _pick_preferred_romaji(value: Any) -> str:
+    candidates = value if isinstance(value, list) else [value]
+    norm = []
+    for cand in candidates:
+        tok = str(cand or "").strip()
+        if tok:
+            norm.append(tok)
+    if not norm:
+        return ""
+    norm.sort(key=lambda t: (not re.fullmatch(r"[a-z]+", t), len(t), t))
+    return norm[0]
+
+
+def _build_romaji_syllable_patterns():
+    tokens = set()
+    tokens.update({'a', 'i', 'u', 'e', 'o'})
+    tokens.update(c + v for c in JA_CONSONANT_IPA.keys() for v in JA_VOWEL_IPA.keys())
+    tokens.update(k for k in JA_SPECIAL_SYLLABLE_IPA.keys() if re.fullmatch(r'[a-z]+', k or ''))
+    for k in JA_ROMAJI_IPA_TABLE.keys():
+        key = str(k or "")
+        if re.fullmatch(r"[A-Za-z]+", key):
+            tokens.add(key.lower())
+    for k in JA_ALIAS_TO_KANA_TABLE.keys():
+        key = str(k or "")
+        if re.fullmatch(r"[A-Za-z]+", key):
+            tokens.add(key.lower())
+    return sorted(tokens, key=len, reverse=True)
+
+
+def _apply_external_japanese_conversion_table():
+    global JA_ROMAJI_IPA_TABLE
+    global JA_ALIAS_TO_KANA_TABLE
+    global JA_KANA_TO_ALIAS_TABLE
+
+    table = load_japanese_conversion_table() or {}
+    alias_to_kana = dict(table.get("alias_to_kana", {}) or {})
+    kana_to_alias = dict(table.get("kana_to_alias", {}) or {})
+    romaji_to_ipa = dict(table.get("romaji_to_ipa", {}) or {})
+
+    JA_ALIAS_TO_KANA_TABLE = alias_to_kana
+    JA_KANA_TO_ALIAS_TABLE = kana_to_alias
+    JA_ROMAJI_IPA_TABLE = romaji_to_ipa
+
+    # 테이블이 있으면 kana->romaji를 우선 갱신해 리클리스트와 동일한 표기를 따른다.
+    for kana, alias_value in kana_to_alias.items():
+        alias = _pick_preferred_romaji(alias_value)
+        if not alias:
+            continue
+        k = str(kana or "")
+        if not k:
+            continue
+        if len(k) == 2:
+            KANA_COMBO_ROMAJI[k] = alias
+        elif len(k) == 1:
+            KANA_SINGLE_ROMAJI[k] = alias
+
+    # MFA japanese_mfa에서는 breath/end-breath를 sil 대신 spn으로 두는 편이 안정적이다.
+    # (sil 매핑 시 그래프 컴파일 단계에서 비정상 종료가 관측됨)
+    # 특수 토큰(br/R)이 테이블에 있는 경우 IPA로 안전하게 고정한다.
+    special_tokens = dict(table.get("special_tokens", {}) or {})
+    breath = dict(special_tokens.get("breath_standalone", {}) or {})
+    breath_alias = str(breath.get("alias", "") or "").strip()
+    if breath_alias:
+        current = str(JA_ROMAJI_IPA_TABLE.get(breath_alias, "") or "").strip().lower()
+        if current in {"", "sil"}:
+            JA_ROMAJI_IPA_TABLE[breath_alias] = "spn"
+    end_breath = dict(special_tokens.get("end_breath", {}) or {})
+    for token in end_breath.get("inputs", []) or []:
+        t = str(token or "").strip()
+        if t:
+            current = str(JA_ROMAJI_IPA_TABLE.get(t, "") or "").strip().lower()
+            if current in {"", "sil"}:
+                JA_ROMAJI_IPA_TABLE[t] = "spn"
+
+
+_apply_external_japanese_conversion_table()
+
+
+def _rebuild_ja_known_phone_set():
+    phones = {"sil", "spn", "pau", "cl"}
+    phones.update(str(v) for v in JA_CONSONANT_IPA.values())
+    phones.update(str(v) for v in JA_VOWEL_IPA.values())
+
+    for mapping in (JA_SPECIAL_SYLLABLE_IPA, JA_ROMAJI_IPA_TABLE):
+        for val in mapping.values():
+            text = str(val or "").strip()
+            if not text:
+                continue
+            for part in text.split():
+                part = part.strip()
+                if part:
+                    phones.add(part)
+    return phones
+
+
+def _is_supported_ja_ipa_sequence(ipa_text):
+    text = str(ipa_text or "").strip()
+    if not text:
+        return False
+    if not _JA_KNOWN_PHONE_SET:
+        _JA_KNOWN_PHONE_SET.update(_rebuild_ja_known_phone_set())
+    parts = [p for p in text.split() if p]
+    if not parts:
+        return False
+    return all(p in _JA_KNOWN_PHONE_SET for p in parts)
+
+
+_JA_KNOWN_PHONE_SET.update(_rebuild_ja_known_phone_set())
+
 # 로마자 음절 분할 시 우선 매칭할 패턴(긴 패턴 우선)
-ROMAJI_SYLLABLE_PATTERNS = sorted({
-    # 기본 모음
-    'a', 'i', 'u', 'e', 'o',
-    # 기본 자음+모음
-    *[c + v for c in JA_CONSONANT_IPA.keys() for v in JA_VOWEL_IPA.keys()],
-    # 특수 음절 키(알파벳 계열만)
-    *[k for k in JA_SPECIAL_SYLLABLE_IPA.keys() if re.fullmatch(r'[a-z]+', k or '')],
-}, key=len, reverse=True)
+ROMAJI_SYLLABLE_PATTERNS = _build_romaji_syllable_patterns()
 
 
 def _katakana_to_hiragana(text):
@@ -253,16 +374,75 @@ def _apply_sokuon(romaji):
     return romaji[0] + romaji
 
 
+def _drop_trailing_noise_after_end_breath(tokens):
+    """
+    R(어미 끝숨) 바로 뒤에 붙는 꼬리 노이즈 토큰은 제거합니다.
+    예: ['a', 'R', 'c'] -> ['a', 'R']
+        ['a', 'R', 'x'] -> ['a', 'R']
+        ['a', 'R', 'q'] -> ['a', 'R']
+    """
+    noise_after_r = {"c", "x", "q", "cl", "xtu", "xtsu", "ltu", "ltsu"}
+    out = []
+    prev = ""
+    for tok in tokens or []:
+        t = str(tok or "").strip()
+        if not t:
+            continue
+        if t.lower() in noise_after_r and prev == "R":
+            continue
+        out.append(t)
+        prev = t
+    return out
+
+
 def split_romaji_token_to_syllables(token):
     """
     붙여쓴 로마자 토큰을 일본어 음절 단위로 분해합니다.
     예: gakkou -> ['ga', 'kko', 'u']
     """
-    s = (token or '').strip().lower()
-    if not s:
+    raw = str(token or '').strip()
+    if not raw:
         return []
+    s = raw.lower()
     if s in ROMAJI_META_TOKENS:
         return []
+
+    # End-breath compact forms: aR, iR, uR, eR, oR, NR...
+    m_end_breath = re.fullmatch(r"([A-Za-z]+)R", raw)
+    if m_end_breath:
+        head = m_end_breath.group(1)
+        head_syllables = split_romaji_token_to_syllables(head)
+        if head_syllables:
+            return [*head_syllables, "R"]
+        return [head.lower(), "R"]
+    # Connected end-breath + trailing onset/coda (e.g. aRb, eRc, NRb)
+    m_end_breath_connected = re.fullmatch(r"([A-Za-z]+)R([A-Za-z]+)", raw)
+    if m_end_breath_connected:
+        head = m_end_breath_connected.group(1)
+        tail = m_end_breath_connected.group(2)
+        head_syllables = split_romaji_token_to_syllables(head)
+        tail_syllables = split_romaji_token_to_syllables(tail)
+        out = []
+        if head_syllables:
+            out.extend(head_syllables)
+        else:
+            out.append(head.lower())
+        out.append("R")
+        if tail_syllables:
+            out.extend(tail_syllables)
+        else:
+            out.append(tail.lower())
+        return _drop_trailing_noise_after_end_breath(out)
+    # lowercased fallback: ar/ir/ur/er/or/nr
+    m_end_breath_lower = re.fullmatch(r"([aiueon])r", s)
+    if m_end_breath_lower:
+        head = m_end_breath_lower.group(1)
+        return [head, "R"]
+
+    if raw in JA_ROMAJI_IPA_TABLE:
+        return [raw]
+    if s in JA_ROMAJI_IPA_TABLE:
+        return [s]
 
     result = []
     i = 0
@@ -304,7 +484,11 @@ def split_romaji_token_to_syllables(token):
         # 불명 문자는 스킵(파일명 노이즈)
         i += 1
 
-    return result
+    # CVVC 연결 토큰처럼 단독 자음만 온 경우 그대로 보존
+    if not result and re.fullmatch(r"[a-z]{1,3}", s or "") and s in JA_CONSONANT_IPA:
+        return [s]
+
+    return _drop_trailing_noise_after_end_breath(result)
 
 
 def kana_to_romaji_syllables(text):
@@ -394,6 +578,21 @@ def parse_ja_filename(filename):
         if not t:
             continue
 
+        # Breath tokens: 息 (standalone) / <token>息 (end-breath).
+        if t == "息":
+            syllables.append("br")
+            continue
+        m_end_breath_romaji = re.fullmatch(r"([A-Za-z]+)息", t)
+        if m_end_breath_romaji:
+            syllables.extend(split_romaji_token_to_syllables(m_end_breath_romaji.group(1)))
+            syllables.append("R")
+            continue
+        m_end_breath_kana = re.fullmatch(r"([\u3041-\u3096\u30A1-\u30FA\u30FC]+)息", t)
+        if m_end_breath_kana:
+            syllables.extend(kana_to_romaji_syllables(m_end_breath_kana.group(1)))
+            syllables.append("R")
+            continue
+
         # 순수 로마자 토큰
         if re.fullmatch(r'[A-Za-z]+', t):
             syllables.extend(split_romaji_token_to_syllables(t))
@@ -411,7 +610,7 @@ def parse_ja_filename(filename):
             else:
                 syllables.extend(kana_to_romaji_syllables(part))
 
-    return [s for s in syllables if s]
+    return _drop_trailing_noise_after_end_breath([s for s in syllables if s])
 
 
 def generate_ja_labs(wav_dir, custom_phonemes_path='', callback=None):
@@ -524,17 +723,30 @@ def generate_ja_dictionary(target_folder, dict_save_path, custom_phonemes_path='
             content = (content or '').strip()
             
             words = content.split()
+            line_tokens = []
             for w in words:
-                wl = w.lower().strip()
-                if not wl:
+                wr = str(w or "").strip()
+                if not wr:
                     continue
-                if re.search(r'[\u3041-\u3096\u30A1-\u30FA\u30FC]', wl):
-                    word_set.update(kana_to_romaji_syllables(wl))
-                elif re.fullmatch(r'[a-z]+', wl):
-                    word_set.add(wl)
+                wl = wr.lower()
+
+                # 특수 토큰은 대소문자 의미를 보존한다. (예: R=end-breath)
+                if wr in JA_ROMAJI_IPA_TABLE:
+                    line_tokens.append(wr)
+                    continue
+
+                if re.search(r'[\u3041-\u3096\u30A1-\u30FA\u30FC]', wr):
+                    line_tokens.extend(kana_to_romaji_syllables(wr))
+                elif re.fullmatch(r'[A-Za-z]+', wr):
+                    split_words = split_romaji_token_to_syllables(wr)
+                    if split_words:
+                        line_tokens.extend(split_words)
+                    else:
+                        line_tokens.append(wl)
                 else:
                     # 혼합 토큰도 음절 단위로 최대한 복구
-                    word_set.update(parse_ja_filename(wl))
+                    line_tokens.extend(parse_ja_filename(wr))
+            word_set.update(_drop_trailing_noise_after_end_breath(line_tokens))
             success += 1
         except Exception as e:
             errors.append(f"Lab 읽기 실패 ({lf}): {e}")
@@ -549,6 +761,9 @@ def generate_ja_dictionary(target_folder, dict_save_path, custom_phonemes_path='
     for word in sorted(word_set):
         ipa = romaji_to_ipa(word)
         if ipa:
+            if not _is_supported_ja_ipa_sequence(ipa):
+                log(f"⚠ 사전 IPA 정규화: '{word}' -> '{ipa}' 는 모델 심볼셋 밖이라 spn으로 대체")
+                ipa = "spn"
             dict_entries[word] = ipa
             
     # 커스텀 맵 강제 등록
@@ -561,8 +776,9 @@ def generate_ja_dictionary(target_folder, dict_save_path, custom_phonemes_path='
             if key in dict_entries:
                 continue
             c_ipa = romaji_to_ipa(mapped_pho)
-            if not c_ipa or c_ipa == 'sil':
-                c_ipa = mapped_pho  # 변환 없으면 원본값
+            if not c_ipa or not _is_supported_ja_ipa_sequence(c_ipa):
+                log(f"⚠ 커스텀 음소 '{raw_char}={mapped_pho}' 는 IPA 검증 실패로 spn 처리")
+                c_ipa = "spn"
             dict_entries[key] = c_ipa
 
     # 사전 파일 저장

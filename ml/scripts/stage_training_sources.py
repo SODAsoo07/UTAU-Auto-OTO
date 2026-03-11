@@ -14,9 +14,11 @@ from core.oto_ml_staging import (
     write_stage_manifest_csv,
     write_stage_manifest_json,
 )
+from core.runtime_encoding import bootstrap_utf8_runtime
 
 
 def main():
+    bootstrap_utf8_runtime()
     ap = argparse.ArgumentParser(description="Copy training-source files into Auto_OTO/dataset.")
     ap.add_argument(
         "--config",

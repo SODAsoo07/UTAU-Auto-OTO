@@ -21,6 +21,7 @@ from core.ja_lab_generator import generate_ja_dictionary, generate_ja_labs
 from core.alignment_pipeline import run_alignment_with_fallback
 from core.oto_generator import generate_oto
 from core.lab_generator import generate_dictionary, generate_labs
+from core.runtime_encoding import bootstrap_utf8_runtime
 from core.pipeline_status import (
     ALIGN_SKIPPED,
     EXCEPTION,
@@ -35,6 +36,19 @@ from core.pipeline_status import (
     normalize_ml_policy,
 )
 from core.oto_validator import validate_oto_timing
+
+
+def _ensure_default_ml_workspace_root():
+    if os.environ.get("UTOA_OTO_ML_WORKSPACE_ROOT", "").strip():
+        return
+    candidate = os.path.join(ROOT_DIR, "ml_workspace", "models")
+    if os.path.isdir(candidate):
+        os.environ["UTOA_OTO_ML_WORKSPACE_ROOT"] = candidate
+
+
+def _configure_utf8_stdio():
+    """Backward-compatible wrapper around shared UTF-8 bootstrap."""
+    bootstrap_utf8_runtime()
 
 
 def _now_tag():
@@ -74,6 +88,14 @@ def _safe_console_print(text: str):
         return
     except UnicodeEncodeError:
         pass
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        try:
+            buffer.write((s + "\n").encode("utf-8", errors="replace"))
+            buffer.flush()
+            return
+        except Exception:
+            pass
     enc = getattr(sys.stdout, "encoding", None) or "utf-8"
     try:
         safe = s.encode(enc, errors="replace").decode(enc, errors="replace")
@@ -94,9 +116,9 @@ def _resolve_path(config_dir: str, raw_path: str) -> str:
 def _resolve_case_path(config_dir: str, voicebank_dir: str, raw_path: str) -> str:
     """
     Case path resolver:
-    1) absolute path 그대로 사용
-    2) relative path는 voicebank_dir 기준 우선
-    3) 없으면 config_dir 기준으로 fallback
+    1) Keep absolute paths as-is
+    2) Resolve relative paths against voicebank_dir first
+    3) Fallback to config_dir if needed
     """
     if not raw_path:
         return ""
@@ -198,7 +220,7 @@ def _resolve_case_settings(
     primary_aligner = normalize_aligner_name(case.get("primary_aligner", case.get("aligner", defaults.get("primary_aligner", defaults.get("aligner", "mfa")))), default="mfa")
     fallback_aligner = normalize_aligner_name(case.get("fallback_aligner", defaults.get("fallback_aligner", "")), default="")
     mfa_path = _resolve_path(config_dir, str(case.get("mfa_path", defaults.get("mfa_path", ""))).strip())
-    mfa_align_profile = str(case.get("mfa_align_profile", defaults.get("mfa_align_profile", "accurate"))).strip() or "accurate"
+    mfa_align_profile = str(case.get("mfa_align_profile", defaults.get("mfa_align_profile", "default"))).strip() or "default"
     return {
         "name": name,
         "enabled": enabled,
@@ -551,7 +573,7 @@ def _run_one_case(
                     primary_aligner=primary_aligner,
                     fallback_aligner=fallback_aligner,
                     mfa_path=str(case_info.get("mfa_path", "") or ""),
-                    mfa_align_profile=str(case_info.get("mfa_align_profile", "accurate") or "accurate"),
+                    mfa_align_profile=str(case_info.get("mfa_align_profile", "default") or "default"),
                     callback=log,
                 )
                 if alignment_report.get("fallback_path"):
@@ -708,6 +730,9 @@ def _run_one_case(
 
 
 def main():
+    _ensure_default_ml_workspace_root()
+    _configure_utf8_stdio()
+
     parser = argparse.ArgumentParser(
         description="Batch OTO generation for listening tests (per language/format/voicebank)."
     )
@@ -804,3 +829,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

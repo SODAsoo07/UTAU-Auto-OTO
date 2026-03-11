@@ -10,6 +10,9 @@ import os
 import re
 import unicodedata
 import logging
+from typing import Any
+
+from core.conversion_tables import load_korean_conversion_table
 
 logger = logging.getLogger(__name__)
 _KR_FILENAME_SPLIT_RE = re.compile(r"[^0-9A-Za-z가-힣]+")
@@ -53,10 +56,154 @@ KO_IPA_MAP = {
     'ng': 'ŋ',
     'a': 'ɐ', 'i': 'i', 'u': 'u', 'e': 'e', 'o': 'o', 'eu': 'ɨ', 'eo': 'ʌ', 'ae': 'ɛ',
     'y': 'j', 'w': 'w',
-    'R': 'sil', 'H': 'sil', 'br': 'sil', 'pau': 'sil', 'sil': 'sil', 'bre': 'sil',
+    # MFA 3.x(Kaldi)에서는 비침묵 단어를 sil로 발음시키면
+    # compile_train_graphs 단계에서 AccessViolation(0xC0000005)이 발생할 수 있다.
+    # R/H/br 표식은 숨소리 계열 비침묵 phone(h)로 정규화해 크래시를 방지한다.
+    'R': 'h', 'H': 'h', 'br': 'h', 'pau': 'sil', 'sil': 'sil', 'bre': 'h',
     'ui': 'ɰ i', 'wa': 'w ɐ', 'wo': 'w o', 'wi': 'w i', 'we': 'w e',
     'yeo': 'j ʌ', 'wae': 'w ɛ', 'oe': 'w e', 'vi': 'v i'
 }
+
+KO_ROMAJI_IPA_TABLE = {}
+KO_HANGUL_ALIAS_DIRECT = {}
+KO_ALIAS_VARIANT_NORMALIZATION = {}
+KO_AMBIGUOUS_ALIAS_PRIORITY = {}
+KO_SILENCE_TOKEN_SET = set()
+_KO_KNOWN_PHONE_SET = set()
+
+
+def _pick_preferred_roman_alias(value: Any) -> str:
+    candidates = value if isinstance(value, list) else [value]
+    norm = []
+    for cand in candidates:
+        tok = str(cand or "").strip()
+        if tok:
+            norm.append(tok)
+    if not norm:
+        return ""
+    norm.sort(key=lambda t: (not re.fullmatch(r"[a-zA-Z]+", t), len(t), t))
+    return norm[0]
+
+
+def _apply_external_korean_conversion_table():
+    global KO_ROMAJI_IPA_TABLE
+    global KO_HANGUL_ALIAS_DIRECT
+    global KO_ALIAS_VARIANT_NORMALIZATION
+    global KO_AMBIGUOUS_ALIAS_PRIORITY
+    global KO_SILENCE_TOKEN_SET
+
+    table = load_korean_conversion_table() or {}
+    KO_ROMAJI_IPA_TABLE = dict(table.get("romaji_to_ipa", {}) or {})
+    KO_HANGUL_ALIAS_DIRECT = dict(table.get("hangul_to_alias_direct", {}) or {})
+    KO_ALIAS_VARIANT_NORMALIZATION = dict(table.get("alias_variant_normalization", {}) or {})
+
+    # Case-insensitive variant fallback (e.g. eunr -> eunR, br1 -> BR1)
+    for k in list(KO_ROMAJI_IPA_TABLE.keys()):
+        key = str(k or "").strip()
+        if not key:
+            continue
+        lower = key.lower()
+        if lower != key and lower not in KO_ALIAS_VARIANT_NORMALIZATION:
+            KO_ALIAS_VARIANT_NORMALIZATION[lower] = key
+
+    priority = {}
+    dm_priority = dict(table.get("direct_mapping_priority", {}) or {})
+    for key, val in dict(dm_priority.get("ambiguous_key_priority", {}) or {}).items():
+        chosen = _pick_preferred_roman_alias(val)
+        if chosen:
+            priority[str(key)] = chosen
+    KO_AMBIGUOUS_ALIAS_PRIORITY = priority
+
+    silence_tokens = {"sil", "pau", "breath"}
+    for mapping in (KO_IPA_MAP, KO_ROMAJI_IPA_TABLE):
+        for key, val in mapping.items():
+            ipa = str(val or "").strip().lower()
+            if ipa not in {"sil", "spn", "pau", "cl"}:
+                continue
+            tok = str(key or "").strip()
+            if tok:
+                silence_tokens.add(tok)
+                silence_tokens.add(tok.lower())
+
+    special_tokens = dict(table.get("special_tokens", {}) or {})
+    for rule_key in ("breath_standalone", "end_breath"):
+        rule = dict(special_tokens.get(rule_key, {}) or {})
+        candidates = []
+        candidates.extend(rule.get("inputs", []) or [])
+        aliases = rule.get("aliases", []) or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        candidates.extend(aliases)
+        alias_single = str(rule.get("alias", "") or "").strip()
+        if alias_single:
+            candidates.append(alias_single)
+        for item in candidates:
+            tok = str(item or "").strip()
+            if tok:
+                silence_tokens.add(tok)
+                silence_tokens.add(tok.lower())
+    KO_SILENCE_TOKEN_SET = silence_tokens
+
+
+def _is_ko_silence_token(token):
+    text = str(token or "").strip()
+    if not text:
+        return True
+    return text in KO_SILENCE_TOKEN_SET or text.lower() in KO_SILENCE_TOKEN_SET
+
+
+_apply_external_korean_conversion_table()
+
+
+def _rebuild_ko_known_phone_set():
+    phones = {"sil", "spn", "pau", "cl"}
+    phones.update({"k̚", "p̚", "t̚"})
+    for mapping in (KO_IPA_MAP, KO_ROMAJI_IPA_TABLE):
+        for val in mapping.values():
+            text = str(val or "").strip()
+            if not text:
+                continue
+            for part in text.split():
+                part = part.strip()
+                if part:
+                    phones.add(part)
+    return phones
+
+
+def _is_supported_ko_ipa_sequence(ipa_text):
+    text = str(ipa_text or "").strip()
+    if not text:
+        return False
+    if not _KO_KNOWN_PHONE_SET:
+        _KO_KNOWN_PHONE_SET.update(_rebuild_ko_known_phone_set())
+    parts = [p for p in text.split() if p]
+    if not parts:
+        return False
+    return all(p in _KO_KNOWN_PHONE_SET for p in parts)
+
+
+_KO_KNOWN_PHONE_SET.update(_rebuild_ko_known_phone_set())
+
+
+def _normalize_mfa_sensitive_marker_ipa(token, ipa_text):
+    """
+    MFA 3.x에서 비침묵 토큰(R/H/br/bre)을 sil로 두면 그래프 컴파일이 크래시할 수 있어
+    숨소리 계열 최소 비침묵 IPA(h)로 강제 보정한다.
+    """
+    tok = str(token or "").strip()
+    ipa = str(ipa_text or "").strip().lower()
+    if not tok:
+        return ipa_text
+    if ipa != "sil":
+        return ipa_text
+    low = tok.lower()
+    if tok == "R":
+        return "h"
+    if low in {"br", "bre", "h"} or tok == "H":
+        return "h"
+    if low == "r":
+        return "ɾ"
+    return ipa_text
 
 # 한글 자모 -> 로마자
 CHOSUNG_LIST_ROMAN = ['g','kk','n','d','tt','r','m','b','pp','s','ss','','j','jj','ch','k','t','p','h']
@@ -109,16 +256,54 @@ def _split_kr_filename_tokens(name_or_base):
     if not base:
         return []
 
-    raw_parts = [p for p in _KR_FILENAME_SPLIT_RE.split(base) if p and p != '~']
-    parts = []
-    for token in raw_parts:
-        if token in {"R", "H"} and parts:
-            prev = parts[-1]
-            # _l'R, _ng'R 같은 파일명은 종성/호흡 표식 1토큰으로 취급한다.
-            if not re.search(r"[aeiouywAEIOUYW]", prev):
-                parts[-1] = prev + token
-                continue
-        parts.append(token)
+    def _merge_kr_tail_markers(raw_parts):
+        parts = []
+        for token in raw_parts:
+            if token in {"R", "H"} and parts:
+                prev = parts[-1]
+                # _l'R, _ng'R 같은 파일명은 종성/호흡 표식 1토큰으로 취급한다.
+                if not re.search(r"[aeiouywAEIOUYW]", prev):
+                    parts[-1] = prev + token
+                    continue
+            parts.append(token)
+        return parts
+
+    def _detect_kr_filename_style(base_text):
+        txt = str(base_text or "")
+        apostrophes = txt.count("'") + txt.count("’") + txt.count("`")
+        if apostrophes >= 4 and (
+            "_'" in txt or "'_" in txt or "-'" in txt or "'-" in txt
+        ):
+            return "matcha_cvvc"
+        if apostrophes >= 3:
+            return "apostrophe_cvvc"
+        return "generic"
+
+    def _split_kr_filename_tokens_generic(base_text):
+        raw = [p for p in _KR_FILENAME_SPLIT_RE.split(base_text) if p and p != '~']
+        return _merge_kr_tail_markers(raw)
+
+    def _split_kr_filename_tokens_matcha_cvvc(base_text):
+        # 말차식 CVVC 파일명은 `_'`/`'_`/`-'` 구분자를 사용하므로,
+        # 구분자 변형을 apostrophe 기준으로 먼저 정규화한다.
+        text = str(base_text or "").replace("’", "'").replace("`", "'")
+        text = re.sub(r"_+", "_", text)
+        text = re.sub(r"-+", "-", text)
+        text = re.sub(r"_+'", "'", text)
+        text = re.sub(r"'_+", "'", text)
+        text = re.sub(r"-+'", "'", text)
+        text = re.sub(r"'-+", "'", text)
+        text = text.replace("-", "'")
+        raw = [p for p in _KR_FILENAME_SPLIT_RE.split(text) if p and p != '~']
+        return _merge_kr_tail_markers(raw)
+
+    style = _detect_kr_filename_style(base)
+    if style == "matcha_cvvc":
+        parts = _split_kr_filename_tokens_matcha_cvvc(base)
+    else:
+        parts = _split_kr_filename_tokens_generic(base)
+
+    parts = [token for token in parts if token]
     if re.search(r'[가-힣]', base):
         if len(parts) <= 1:
             return [ch for ch in base if re.match(r'[가-힣]', ch)]
@@ -144,6 +329,30 @@ def _split_kr_lab_content_tokens(content):
     return ws_tokens
 
 
+def _romanize_hangul_token(token):
+    """
+    한글 토큰을 프로젝트 변환 테이블 우선으로 로마자화한다.
+    direct table에 없으면 자모 분해 로직으로 폴백한다.
+    """
+    tok = unicodedata.normalize('NFC', str(token or '').strip())
+    if not tok:
+        return []
+
+    direct_val = KO_HANGUL_ALIAS_DIRECT.get(tok)
+    if direct_val is not None:
+        preferred = KO_AMBIGUOUS_ALIAS_PRIORITY.get(tok, "")
+        if preferred:
+            return [preferred]
+        chosen = _pick_preferred_roman_alias(direct_val)
+        if chosen:
+            return [chosen]
+
+    out = []
+    for ch in tok:
+        out.extend(decompose_hangul_to_roman(ch))
+    return out
+
+
 def decompose_hangul_to_roman(char):
     """한글 한 글자를 로마자 토큰 리스트로 분해합니다."""
     if not (0xAC00 <= ord(char) <= 0xD7A3):
@@ -161,13 +370,41 @@ def decompose_hangul_to_roman(char):
     return result
 
 
+def _ipa_value_to_list(value):
+    text = str(value or "").strip()
+    if not text:
+        return []
+    if text == "sil":
+        return ["sil"]
+    return [p for p in text.split() if p]
+
+
 def get_ipa_from_roman(token):
     """로마자 토큰을 MFA용 IPA 시퀀스로 변환합니다."""
-    token = token.lower()
+    raw = str(token or "").strip()
+    if raw in KO_ROMAJI_IPA_TABLE:
+        return _ipa_value_to_list(KO_ROMAJI_IPA_TABLE[raw])
+
+    # Uppercase coda markers can collide with reserved sil/r/h lower tokens
+    # (e.g. siL -> sil). In that case, prefer phonetic parsing over silence.
+    prefer_phonetic_reserved = (
+        bool(raw)
+        and raw not in KO_ROMAJI_IPA_TABLE
+        and any(ch.isupper() for ch in raw)
+    )
+
+    token = raw.lower()
     token = re.sub(r'[0-9]+', '', token)
     token = token.replace('long', '')
-    if not token or token in ['br', 'pau', 'sil', 'r', 'h', 'bre']:
+    token = KO_ALIAS_VARIANT_NORMALIZATION.get(token, token)
+    if token in KO_ROMAJI_IPA_TABLE and not (prefer_phonetic_reserved and token in {'sil', 'r', 'h'}):
+        return _ipa_value_to_list(KO_ROMAJI_IPA_TABLE[token])
+
+    if not token:
         return ['sil']
+    if _is_ko_silence_token(token):
+        if not (token == 'sil' and prefer_phonetic_reserved):
+            return ['sil']
     phonemes = []
     remainder = token
     limit = 50
@@ -179,6 +416,9 @@ def get_ipa_from_roman(token):
             if len(remainder) < length:
                 continue
             chunk = remainder[:length]
+            if prefer_phonetic_reserved and chunk == 'sil':
+                # e.g. siL should be parsed as s+i+l, not as silence token.
+                continue
             if chunk in KO_IPA_MAP:
                 val = KO_IPA_MAP[chunk]
                 is_coda = False
@@ -414,34 +654,46 @@ def generate_dictionary(target_folder, dict_save_path, custom_phonemes_path='', 
                 with open(full_path, 'w', encoding='utf-8') as f:
                     f.write(new_content)
 
+            token_pairs = []
             if len(final_tokens) != len(chars_only):
                 log(f"⚠️ 개수 불일치 ({lab_file}): 파일명 {len(final_tokens)} vs 내용 {len(chars_only)}")
+                log("⚠️ 불일치 보정: 파일명 토큰 대신 Lab 토큰 기준으로 사전을 생성합니다.")
+                token_pairs = [(c, c) for c in chars_only]
+            else:
+                token_pairs = list(zip(final_tokens, chars_only))
 
             full_sentence_ipa = []
-            for token, char in zip(final_tokens, chars_only):
+            for token, char in token_pairs:
                 ipa_list = []
                 if re.search(r'[가-힣]', token):
-                    roman_parts = []
-                    for ch in token:
-                        roman_parts.extend(decompose_hangul_to_roman(ch))
+                    roman_parts = _romanize_hangul_token(token)
                     for part in roman_parts:
                         ipa_list.extend(get_ipa_from_roman(part))
                 else:
                     ipa_list = get_ipa_from_roman(token)
 
                 ipa_str = " ".join(ipa_list)
-                if ipa_str and ipa_str != 'sil':
-                    dictionary_entries[char] = ipa_str
-                    full_sentence_ipa.append(ipa_str)
+                ipa_str = _normalize_mfa_sensitive_marker_ipa(token, ipa_str)
+                if ipa_str and not _is_supported_ko_ipa_sequence(ipa_str):
+                    log(f"⚠️ IPA 검증 실패 ({lab_file}): '{token}' -> '{ipa_str}', sil로 대체")
+                    ipa_str = "sil"
+
+                if ipa_str:
+                    current_entry = dictionary_entries.get(char, "")
+                    if ipa_str != 'sil' or not current_entry:
+                        dictionary_entries[char] = ipa_str
+                    if ipa_str != 'sil':
+                        full_sentence_ipa.append(ipa_str)
 
             # 커스텀 매핑으로 지정된 항목을 사전에 보강한다.
             for raw_char, mapped_pho in custom_map.items():
                 if raw_char not in dictionary_entries:
                     # 매핑값(mapped_pho)을 로마자 발음으로 간주해 IPA를 추정한다.
                     c_ipa = " ".join(get_ipa_from_roman(mapped_pho))
-                    # 변환 실패 또는 sil만 나오는 경우 원문을 그대로 사용한다.
-                    if not c_ipa or c_ipa == 'sil':
-                        c_ipa = mapped_pho
+                    # 변환 실패/비정상 값은 그대로 주입하지 않고 sil로 안전 처리한다.
+                    if not c_ipa or not _is_supported_ko_ipa_sequence(c_ipa):
+                        log(f"⚠️ 커스텀 음소 '{raw_char}={mapped_pho}' 검증 실패, sil로 대체")
+                        c_ipa = "sil"
                     dictionary_entries[raw_char] = c_ipa
 
             if full_sentence_ipa:

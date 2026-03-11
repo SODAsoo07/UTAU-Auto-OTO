@@ -27,6 +27,7 @@ class OtoDeltaResult:
     deltas: Dict[str, float]
     backend: str
     applied_model: str
+    confidence: Optional[float] = None
 
 
 def _load_json(path: str) -> Optional[Dict[str, Any]]:
@@ -62,12 +63,22 @@ def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
         from core.oto_ml_features import get_feature_schema
 
         schema = get_feature_schema()
-    backend = str(meta.get("backend", "")).strip().lower()
+    backend = str(meta.get("backend", "")).strip().lower() or "lightgbm"
+    coupled_device = str(os.environ.get("UTOA_ML_COUPLED_DEVICE", "auto") or "auto").strip()
     try:
         if backend == "lightgbm":
             from core.oto_ml_lightgbm import load_lightgbm_bundle
 
             payload = load_lightgbm_bundle(model_dir, meta=meta, schema=schema)
+        elif backend == "coupled_nn_v1":
+            from core.oto_ml_coupled import load_coupled_bundle
+
+            payload = load_coupled_bundle(
+                model_dir,
+                meta=meta,
+                schema=schema,
+                device=coupled_device,
+            )
         else:
             logger.warning("Unsupported OTO ML backend: %s", backend)
             return None
@@ -86,14 +97,25 @@ def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
 
 
 def predict_oto_deltas(bundle: OtoModelBundle, feature_row: Dict[str, Any]) -> OtoDeltaResult:
+    confidence = None
     if bundle.backend == "lightgbm":
         from core.oto_ml_lightgbm import predict_lightgbm_deltas
 
         deltas = predict_lightgbm_deltas(bundle.payload, feature_row, meta=bundle.meta, schema=bundle.feature_schema)
+    elif bundle.backend == "coupled_nn_v1":
+        from core.oto_ml_coupled import predict_coupled_deltas
+
+        deltas, confidence = predict_coupled_deltas(
+            bundle.payload,
+            feature_row,
+            meta=bundle.meta,
+            schema=bundle.feature_schema,
+        )
     else:
         raise RuntimeError(f"Unsupported OTO ML backend: {bundle.backend}")
     return OtoDeltaResult(
         deltas=deltas,
         backend=bundle.backend,
         applied_model=bundle.model_dir,
+        confidence=confidence,
     )

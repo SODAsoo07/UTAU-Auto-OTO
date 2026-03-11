@@ -10,9 +10,11 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.oto_ml_lightgbm import evaluate_lightgbm_bundle
+from core.runtime_encoding import bootstrap_utf8_runtime
 
 
 def main():
+    bootstrap_utf8_runtime()
     ap = argparse.ArgumentParser(description="Evaluate LightGBM OTO ML bundle.")
     ap.add_argument("--lang", default="")
     ap.add_argument("--format", default="", help="Format type for filtering/evaluation (cv/cvc/cvvc/vcv/general)")

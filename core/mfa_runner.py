@@ -29,16 +29,28 @@ ALERT_MFA_PERMISSION_DENIED = "__ALERT__MFA_PERMISSION_DENIED__"
 MSVC_REQUIRED_TEXT = "microsoft visual c++ 14.0 or greater is required"
 MFA_PORTABLE_PYTHON_VERSION = "3.10"
 _MFA_SINGLE_SPEAKER_FLAG_CACHE = {}
+_MFA_SPEAKER_ADAPT_FLAG_CACHE = {}
 
 MFA_ALIGN_PROFILE_PRESETS = {
-    # Current default behavior (accuracy-first).
-    "accurate": {
+    # Stable default profile (legacy accurate behavior).
+    "default": {
         "clean": True,
         "fine_tune": True,
         "textgrid_cleanup": True,
         "beam": 1000,
         "retry_beam": 4000,
         "num_jobs": 1,
+        "speaker_adaptation": False,
+    },
+    # Accuracy-first profile with speaker adaptation when supported by MFA.
+    "accurate": {
+        "clean": True,
+        "fine_tune": True,
+        "textgrid_cleanup": True,
+        "beam": 1400,
+        "retry_beam": 5600,
+        "num_jobs": 1,
+        "speaker_adaptation": True,
     },
     # Low-load profile for slower hardware.
     "fast": {
@@ -48,6 +60,7 @@ MFA_ALIGN_PROFILE_PRESETS = {
         "beam": 320,
         "retry_beam": 960,
         "num_jobs": 1,
+        "speaker_adaptation": False,
     },
 }
 
@@ -582,16 +595,55 @@ def _resolve_single_speaker_flag(mfa_path, env=None):
     return "--single-speaker"
 
 
+def _resolve_speaker_adaptation_flag(mfa_path, env=None):
+    key = os.path.abspath(mfa_path or "")
+    cached = _MFA_SPEAKER_ADAPT_FLAG_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    candidates = [
+        "--uses_speaker_adaptation",
+        "--uses-speaker-adaptation",
+        "--speaker_adaptation",
+        "--speaker-adaptation",
+    ]
+    try:
+        res = subprocess.run(
+            [mfa_path, "align", "--help"],
+            capture_output=True,
+            text=False,
+            timeout=20,
+            env=env,
+        )
+        help_text = (
+            f"{_decode_subprocess_output(res.stdout)}\n"
+            f"{_decode_subprocess_output(res.stderr)}"
+        ).lower()
+        for flag in candidates:
+            if flag in help_text:
+                _MFA_SPEAKER_ADAPT_FLAG_CACHE[key] = flag
+                return flag
+    except Exception:
+        pass
+
+    _MFA_SPEAKER_ADAPT_FLAG_CACHE[key] = ""
+    return ""
+
+
 def _normalize_mfa_align_profile(profile):
     p = str(profile or "").strip().lower()
     if p in {"fast", "quick", "lite", "speed"}:
         return "fast"
-    return "accurate"
+    if p in {"accurate", "accuracy", "acc", "adapted", "speaker_adapted", "speaker_adaptation"}:
+        return "accurate"
+    if p in {"default", "basic", "base", "legacy", ""}:
+        return "default"
+    return "default"
 
 
 def _resolve_mfa_align_options(align_profile):
     profile = _normalize_mfa_align_profile(align_profile)
-    opts = dict(MFA_ALIGN_PROFILE_PRESETS.get(profile, MFA_ALIGN_PROFILE_PRESETS["accurate"]))
+    opts = dict(MFA_ALIGN_PROFILE_PRESETS.get(profile, MFA_ALIGN_PROFILE_PRESETS["default"]))
 
     # Optional env override for advanced users.
     env_jobs = str(os.environ.get("UTOA_MFA_NUM_JOBS", "")).strip()
@@ -1038,6 +1090,14 @@ def run_mfa_align(
         work_wav_folder, work_dict_path, model_name, work_output_folder,
         single_speaker_flag,
     ]
+    speaker_adapt_enabled = bool(align_opts.get("speaker_adaptation", False))
+    if speaker_adapt_enabled:
+        adapt_flag = _resolve_speaker_adaptation_flag(mfa_path, env=env)
+        if adapt_flag:
+            cmd.append(adapt_flag)
+        else:
+            speaker_adapt_enabled = False
+            log("[MFA] Speaker adaptation flag not supported by this MFA version; skipped.")
     if align_opts.get("clean", True):
         cmd.append("--clean")
     if align_opts.get("fine_tune", False):
@@ -1052,6 +1112,7 @@ def run_mfa_align(
     log(
         "Starting MFA alignment... "
         f"({single_speaker_flag}, profile={resolved_profile}, "
+        f"speaker_adapt={'on' if speaker_adapt_enabled else 'off'}, "
         f"fine_tune={'on' if align_opts.get('fine_tune') else 'off'}, "
         f"beam={align_opts.get('beam')}, retry_beam={align_opts.get('retry_beam')}, "
         f"num_jobs={align_opts.get('num_jobs')})"

@@ -389,6 +389,26 @@ class AppRuntimeMixin:
                 snapshot["files"].add(fpath)
         return snapshot
 
+    def _is_generated_oto_artifact_file(self, file_name, file_path_norm, keep_file_norm, snapshot_files, snapshot_provided):
+        low = str(file_name or "").strip().lower()
+        if not low:
+            return False
+        if file_path_norm == keep_file_norm:
+            return False
+        if not snapshot_provided:
+            # 안전을 위해 스냅샷이 없으면 자동 삭제를 수행하지 않는다.
+            return False
+        # out_dir가 새로 생성된 경우(snapshot_files가 비어 있음)에도 새 파일로 간주한다.
+        is_new_in_run = (not snapshot_files) or (file_path_norm not in snapshot_files)
+        if not is_new_in_run:
+            return False
+        # 자동 생성 부산물 OTO 계열만 정리한다.
+        return (
+            low == "oto.ini"
+            or (low.startswith("oto.") and low.endswith(".ini"))
+            or (low.startswith("oto_") and low.endswith(".ini"))
+        )
+
     def _cleanup_generated_output_artifacts(self, out_path, snapshot=None):
         out_file = os.path.abspath(str(out_path or "").strip())
         if not out_file:
@@ -400,15 +420,11 @@ class AppRuntimeMixin:
         keep_file = os.path.normcase(out_file)
         snapshot_files = set()
         snapshot_dirs = set()
-        if isinstance(snapshot, dict):
+        snapshot_provided = isinstance(snapshot, dict)
+        if snapshot_provided:
             snapshot_files = set(snapshot.get("files") or [])
             snapshot_dirs = set(snapshot.get("dirs") or [])
 
-        known_names = {
-            ".ja_oto_autotune_profile.json",
-            "japanese_dict.txt",
-            "korean_dict.txt",
-        }
         removed_files = 0
         removed_dirs = 0
         failed = 0
@@ -419,12 +435,13 @@ class AppRuntimeMixin:
                 norm = os.path.normcase(fpath)
                 if norm == keep_file:
                     continue
-                low = name.lower()
-                is_known_intermediate = (
-                    low in known_names
-                )
-                is_new_in_run = bool(snapshot_files) and norm not in snapshot_files
-                if not is_known_intermediate and not is_new_in_run:
+                if not self._is_generated_oto_artifact_file(
+                    name,
+                    norm,
+                    keep_file,
+                    snapshot_files,
+                    snapshot_provided,
+                ):
                     continue
                 try:
                     os.remove(fpath)
@@ -584,6 +601,10 @@ class ConfigMixin:
             "no_base_oto": self.no_base_oto_var.get(),
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
             "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "기본 정책",
+            "ml_coupled_enable": self.ml_coupled_enable_var.get() if hasattr(self, "ml_coupled_enable_var") else True,
+            "ml_coupled_min_conf": self.ml_coupled_min_conf_var.get() if hasattr(self, "ml_coupled_min_conf_var") else 0.55,
+            "ml_coupled_device": self.ml_coupled_device_var.get() if hasattr(self, "ml_coupled_device_var") else "auto",
+            "ml_coupled_strict_constraint": self.ml_coupled_strict_constraint_var.get() if hasattr(self, "ml_coupled_strict_constraint_var") else False,
             "ja_mapping_words_fallback_enabled": self.ja_mapping_words_fallback_enabled_var.get() if hasattr(self, "ja_mapping_words_fallback_enabled_var") else True,
             "ja_mapping_spn_ratio_threshold": self.ja_mapping_spn_ratio_threshold_var.get() if hasattr(self, "ja_mapping_spn_ratio_threshold_var") else 0.35,
             "ja_mapping_min_vowel_phone_ratio": self.ja_mapping_min_vowel_phone_ratio_var.get() if hasattr(self, "ja_mapping_min_vowel_phone_ratio_var") else 0.5,
@@ -601,7 +622,7 @@ class ConfigMixin:
             "ja_alias_style": self.ja_alias_style_var.get(),
             "show_advanced_aligner": self.show_advanced_aligner_var.get() if hasattr(self, "show_advanced_aligner_var") else False,
             "aligner": self.aligner_var.get(),
-            "mfa_align_profile": self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "정확도 우선 (기본)",
+            "mfa_align_profile": self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "기본",
             "whisperx_profile": self.whisperx_profile_var.get() if hasattr(self, "whisperx_profile_var") else "balanced",
             "whisperx_device": self.whisperx_device_var.get() if hasattr(self, "whisperx_device_var") else "auto",
             "whisperx_compute_type": self.whisperx_compute_type_var.get() if hasattr(self, "whisperx_compute_type_var") else "int8",
@@ -659,12 +680,17 @@ class ConfigMixin:
             if hasattr(self, "show_advanced_aligner_var"):
                 self.show_advanced_aligner_var.set(False)
             if "mfa_align_profile" in config and hasattr(self, "mfa_align_profile_var"):
-                saved_profile = str(config.get("mfa_align_profile", "정확도 우선 (기본)") or "").strip()
-                if saved_profile in {"정확도 우선 (기본)", "빠름 (저사양 추천)", "accurate", "fast"}:
-                    if saved_profile == "fast":
-                        saved_profile = "빠름 (저사양 추천)"
-                    elif saved_profile == "accurate":
-                        saved_profile = "정확도 우선 (기본)"
+                saved_profile = str(config.get("mfa_align_profile", "기본") or "").strip()
+                legacy_to_current = {
+                    "정확도 우선 (기본)": "기본",
+                    "default": "기본",
+                    "accurate": "정확도 우선",
+                    "accurate_adapted": "정확도 우선",
+                    "speaker_adapted": "정확도 우선",
+                    "fast": "빠름 (저사양 추천)",
+                }
+                saved_profile = legacy_to_current.get(saved_profile, saved_profile)
+                if saved_profile in {"기본", "정확도 우선", "빠름 (저사양 추천)"}:
                     self.mfa_align_profile_var.set(saved_profile)
             if "whisperx_profile" in config and hasattr(self, "whisperx_profile_var"):
                 profile = str(config.get("whisperx_profile", "balanced") or "balanced").strip().lower()
@@ -691,6 +717,20 @@ class ConfigMixin:
                 saved_selector_mode = str(config.get("ml_selector_mode", "기본 정책") or "").strip()
                 if saved_selector_mode in {"기본 정책", "델타만", "델타+셀렉터"}:
                     self.ml_selector_mode_var.set(saved_selector_mode)
+            if "ml_coupled_enable" in config and hasattr(self, "ml_coupled_enable_var"):
+                self.ml_coupled_enable_var.set(bool(config.get("ml_coupled_enable", True)))
+            if "ml_coupled_min_conf" in config and hasattr(self, "ml_coupled_min_conf_var"):
+                try:
+                    conf = float(config.get("ml_coupled_min_conf", 0.55))
+                    self.ml_coupled_min_conf_var.set(max(0.0, min(1.0, conf)))
+                except Exception:
+                    pass
+            if "ml_coupled_device" in config and hasattr(self, "ml_coupled_device_var"):
+                device = str(config.get("ml_coupled_device", "auto") or "auto").strip().lower()
+                if device in {"auto", "cpu", "cuda"}:
+                    self.ml_coupled_device_var.set(device)
+            if "ml_coupled_strict_constraint" in config and hasattr(self, "ml_coupled_strict_constraint_var"):
+                self.ml_coupled_strict_constraint_var.set(bool(config.get("ml_coupled_strict_constraint", False)))
 
             if hasattr(self, "tune_auto_oto_var"):
                 self.tune_auto_oto_var.set(config.get("tune_auto_oto", ""))
