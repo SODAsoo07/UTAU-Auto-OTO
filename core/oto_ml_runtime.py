@@ -70,7 +70,7 @@ def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
             from core.oto_ml_lightgbm import load_lightgbm_bundle
 
             payload = load_lightgbm_bundle(model_dir, meta=meta, schema=schema)
-        elif backend == "coupled_nn_v1":
+        elif backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
             from core.oto_ml_coupled import load_coupled_bundle
 
             payload = load_coupled_bundle(
@@ -102,7 +102,7 @@ def predict_oto_deltas(bundle: OtoModelBundle, feature_row: Dict[str, Any]) -> O
         from core.oto_ml_lightgbm import predict_lightgbm_deltas
 
         deltas = predict_lightgbm_deltas(bundle.payload, feature_row, meta=bundle.meta, schema=bundle.feature_schema)
-    elif bundle.backend == "coupled_nn_v1":
+    elif bundle.backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
         from core.oto_ml_coupled import predict_coupled_deltas
 
         deltas, confidence = predict_coupled_deltas(

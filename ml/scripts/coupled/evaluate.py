@@ -22,6 +22,7 @@ def main():
     ap.add_argument("--format", default="", help="Format type (cv/cvc/cvvc/vcv/general)")
     ap.add_argument("--device", default="auto", help="auto/cpu/cuda")
     ap.add_argument("--report", default="")
+    ap.add_argument("--rawmel-cache", default="", help="Raw mel patch cache (for coupled_nn_v2_rawmel)")
     args = ap.parse_args()
 
     summary = evaluate_coupled_bundle(
@@ -30,6 +31,7 @@ def main():
         language=args.lang,
         format_type=args.format,
         device=args.device,
+        rawmel_cache_dir=str(args.rawmel_cache or ""),
     )
     if args.report:
         os.makedirs(os.path.dirname(os.path.abspath(args.report)), exist_ok=True)

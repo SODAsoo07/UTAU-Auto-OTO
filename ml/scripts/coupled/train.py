@@ -9,7 +9,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.a
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from core.oto_ml_coupled import train_coupled_bundle
+from core.oto_ml_coupled import train_coupled_bundle, train_coupled_bundle_rawmel
 from core.runtime_encoding import bootstrap_utf8_runtime
 
 
@@ -28,23 +28,46 @@ def main():
     ap.add_argument("--batch-size", type=int, default=192)
     ap.add_argument("--learning-rate", type=float, default=1e-3)
     ap.add_argument("--min-confidence", type=float, default=0.55)
+    ap.add_argument("--backend", default="coupled_nn_v1", help="coupled_nn_v1 or coupled_nn_v2_rawmel")
+    ap.add_argument("--rawmel-cache", default="", help="Raw mel patch cache directory for coupled_nn_v2_rawmel")
     args = ap.parse_args()
 
     alias_types = [v.strip() for v in str(args.alias_types).split(",") if v.strip()]
-    meta = train_coupled_bundle(
-        language=args.lang,
-        format_type=args.format,
-        dataset_csv=args.dataset,
-        out_dir=args.out_dir,
-        group_column=args.group_column,
-        alias_types=alias_types,
-        min_mapping_confidence=float(args.min_mapping_confidence),
-        device=args.device,
-        epochs=int(args.epochs),
-        batch_size=int(args.batch_size),
-        learning_rate=float(args.learning_rate),
-        min_confidence=float(args.min_confidence),
-    )
+    backend = str(args.backend or "coupled_nn_v1").strip().lower()
+    rawmel_cache = str(args.rawmel_cache or "").strip()
+    if backend == "coupled_nn_v2_rawmel":
+        if not rawmel_cache:
+            raise SystemExit("--rawmel-cache is required for coupled_nn_v2_rawmel")
+        meta = train_coupled_bundle_rawmel(
+            language=args.lang,
+            format_type=args.format,
+            dataset_csv=args.dataset,
+            out_dir=args.out_dir,
+            rawmel_cache_dir=rawmel_cache,
+            group_column=args.group_column,
+            alias_types=alias_types,
+            min_mapping_confidence=float(args.min_mapping_confidence),
+            device=args.device,
+            epochs=int(args.epochs),
+            batch_size=int(args.batch_size),
+            learning_rate=float(args.learning_rate),
+            min_confidence=float(args.min_confidence),
+        )
+    else:
+        meta = train_coupled_bundle(
+            language=args.lang,
+            format_type=args.format,
+            dataset_csv=args.dataset,
+            out_dir=args.out_dir,
+            group_column=args.group_column,
+            alias_types=alias_types,
+            min_mapping_confidence=float(args.min_mapping_confidence),
+            device=args.device,
+            epochs=int(args.epochs),
+            batch_size=int(args.batch_size),
+            learning_rate=float(args.learning_rate),
+            min_confidence=float(args.min_confidence),
+        )
     print(json.dumps(meta, ensure_ascii=False, indent=2))
 
 

@@ -11,8 +11,8 @@ import json
 import os
 from typing import Dict, List, Optional
 
-FEATURE_VERSION = "v10"
-TRAIN_ROW_MATCH_VERSION = "v10"
+FEATURE_VERSION = "v11"
+TRAIN_ROW_MATCH_VERSION = "v11"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
 AUX_TARGET_NAMES = ["aux_vowel_start_rel", "aux_vowel_end_rel", "aux_next_onset_rel"]
 
@@ -162,6 +162,7 @@ def canonicalize_feature_row(row: Dict[str, object], feature_names: Optional[Lis
 def dataset_fieldnames() -> List[str]:
     return [
         "voicebank_id", "wav", "alias", "wav_norm", "alias_norm", "occurrence_index", "line_index", "source_oto_id", "source_row_id",
+        "mel_patch_key", "mel_patch_debug_key", "mel_onset_anchor_ms", "mel_tail_anchor_ms", "mel_patch_source",
         *FEATURE_NAMES,
         "manual_offset", "manual_cons", "manual_cutoff", "manual_pre", "manual_ovl",
         *TARGET_NAMES,

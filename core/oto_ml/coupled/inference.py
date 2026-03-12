@@ -17,6 +17,7 @@ from core.oto_ml.coupled.model import (
     PATCH_FEATURES,
     TARGET_NAMES,
     _build_model,
+    _build_model_rawmel,
     _import_torch,
     _require_numpy,
     _resolve_device,
@@ -46,14 +47,31 @@ def load_coupled_bundle(
     patch_features = list(payload.get("patch_features") or PATCH_FEATURES)
     aux_dim = int(payload.get("aux_dim", 0) or 0)
 
-    model = _build_model(
-        torch,
-        nn,
-        in_dim=int(payload.get("in_dim", len(feature_names))),
-        patch_dim=int(payload.get("patch_dim", len(patch_features))),
-        hidden_dim=int(payload.get("hidden_dim", 160)),
-        aux_dim=aux_dim,
-    )
+    rawmel_enabled = bool(payload.get("rawmel_enabled", False))
+    if rawmel_enabled:
+        mel_bins = int(payload.get("mel_bins", 80) or 80)
+        onset_frames = int(payload.get("onset_frames", 1) or 1)
+        tail_frames = int(payload.get("tail_frames", 1) or 1)
+        model = _build_model_rawmel(
+            torch,
+            nn,
+            in_dim=int(payload.get("in_dim", len(feature_names))),
+            patch_dim=int(payload.get("patch_dim", len(patch_features))),
+            mel_bins=mel_bins,
+            onset_frames=onset_frames,
+            tail_frames=tail_frames,
+            hidden_dim=int(payload.get("hidden_dim", 160)),
+            aux_dim=aux_dim,
+        )
+    else:
+        model = _build_model(
+            torch,
+            nn,
+            in_dim=int(payload.get("in_dim", len(feature_names))),
+            patch_dim=int(payload.get("patch_dim", len(patch_features))),
+            hidden_dim=int(payload.get("hidden_dim", 160)),
+            aux_dim=aux_dim,
+        )
     model.load_state_dict(payload["state_dict"])
     run_device = _resolve_device(torch, device)
     model = model.to(run_device)
@@ -65,6 +83,8 @@ def load_coupled_bundle(
         "feature_names": feature_names,
         "categorical_features": categorical_features,
         "patch_features": patch_features,
+        "rawmel_enabled": rawmel_enabled,
+        "mel_patch_spec": payload.get("mel_patch_spec") or {},
         "device": run_device,
     }
 
@@ -91,8 +111,21 @@ def predict_coupled_deltas(
     )
     x_t = torch.tensor(x_vec.reshape(1, -1), dtype=torch.float32, device=device)
     p_t = torch.tensor(patch_vec.reshape(1, -1), dtype=torch.float32, device=device)
-    with torch.no_grad():
-        out = model(x_t, p_t)
+    rawmel_enabled = bool(payload.get("rawmel_enabled", False))
+    if rawmel_enabled:
+        onset_patch = feature_row.get("mel_onset_patch")
+        tail_patch = feature_row.get("mel_tail_patch")
+        if onset_patch is None or tail_patch is None:
+            raise RuntimeError("raw mel patches are required for coupled v2 inference")
+        onset_np = np.asarray(onset_patch, dtype=np.float32)
+        tail_np = np.asarray(tail_patch, dtype=np.float32)
+        onset_t = torch.tensor(onset_np.reshape(1, 1, onset_np.shape[0], onset_np.shape[1]), dtype=torch.float32, device=device)
+        tail_t = torch.tensor(tail_np.reshape(1, 1, tail_np.shape[0], tail_np.shape[1]), dtype=torch.float32, device=device)
+        with torch.no_grad():
+            out = model(x_t, p_t, onset_t, tail_t)
+    else:
+        with torch.no_grad():
+            out = model(x_t, p_t)
         if isinstance(out, tuple) and len(out) == 3:
             deltas_t, conf_t, _aux_t = out
         else:

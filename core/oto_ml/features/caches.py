@@ -16,7 +16,7 @@ from core.oto_ml.features.schema import FEATURE_VERSION
 
 logger = logging.getLogger(__name__)
 
-TRAIN_ROW_MATCH_VERSION = "v9"
+TRAIN_ROW_MATCH_VERSION = "v11"
 
 
 # ── Cache directory helpers ──────────────────────────────────────────────────

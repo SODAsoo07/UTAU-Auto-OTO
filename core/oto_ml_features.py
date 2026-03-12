@@ -39,11 +39,16 @@ from core.oto_ml_mapping_quality import augment_mapping_quality_features
 from core.format_type_utils import normalize_format_type
 from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
 from core.prefix_map_utils import find_prefix_map_path, strip_prefix_map_affixes
+from core.oto_ml.features.mel_patches import (
+    make_mel_patch_debug_key,
+    make_mel_patch_key,
+    resolve_mel_patch_anchors,
+)
 
 logger = logging.getLogger(__name__)
 
-FEATURE_VERSION = "v10"
-TRAIN_ROW_MATCH_VERSION = "v10"
+FEATURE_VERSION = "v11"
+TRAIN_ROW_MATCH_VERSION = "v11"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
 AUX_TARGET_NAMES = ["aux_vowel_start_rel", "aux_vowel_end_rel", "aux_next_onset_rel"]
 
@@ -1309,6 +1314,27 @@ def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str
             feat["source_oto_id"] = str(row.get("source_oto_id", "") or "")
             feat["source_row_id"] = str(row.get("source_row_id", "") or "")
             feat["raw_line"] = row["raw_line"]
+            onset_anchor_ms, tail_anchor_ms, patch_source = resolve_mel_patch_anchors(feat)
+            feat["mel_onset_anchor_ms"] = float(onset_anchor_ms)
+            feat["mel_tail_anchor_ms"] = float(tail_anchor_ms)
+            feat["mel_patch_source"] = str(patch_source)
+            feat["mel_patch_key"] = make_mel_patch_key(
+                language=lang,
+                format_type=format_type,
+                voicebank_id=vb_id,
+                wav_norm=str(row["wav_norm"]),
+                alias_norm=str(row["alias_norm"]),
+                occurrence_index=int(row["occurrence_index"]),
+                row_index_in_wav=idx,
+            )
+            feat["mel_patch_debug_key"] = make_mel_patch_debug_key(
+                voicebank_id=vb_id,
+                wav=str(row["wav"]),
+                alias=str(row["alias"]),
+                alias_norm=str(row["alias_norm"]),
+                occurrence_index=int(row["occurrence_index"]),
+                row_index_in_wav=idx,
+            )
             out_rows.append(feat)
 
     _save_feature_cache(cache_path, out_rows)
@@ -1705,6 +1731,7 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
 def dataset_fieldnames() -> List[str]:
     return [
         "voicebank_id", "wav", "alias", "wav_norm", "alias_norm", "occurrence_index", "line_index", "source_oto_id", "source_row_id",
+        "mel_patch_key", "mel_patch_debug_key", "mel_onset_anchor_ms", "mel_tail_anchor_ms", "mel_patch_source",
         *FEATURE_NAMES,
         "manual_offset", "manual_cons", "manual_cutoff", "manual_pre", "manual_ovl",
         *TARGET_NAMES,

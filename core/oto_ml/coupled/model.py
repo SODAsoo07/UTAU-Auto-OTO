@@ -18,6 +18,7 @@ except Exception:  # pragma: no cover
 from core.oto_ml.features.schema import CATEGORICAL_FEATURES, FEATURE_NAMES, TARGET_NAMES
 
 COUPLED_BACKEND = "coupled_nn_v1"
+COUPLED_BACKEND_RAWMEL = "coupled_nn_v2_rawmel"
 COUPLED_MODEL_FILE = "coupled_model.pt"
 PATCH_FEATURES = [
     "onset_patch_energy_mean",
@@ -163,3 +164,87 @@ def _build_model(torch, nn, in_dim: int, patch_dim: int, hidden_dim: int = 160, 
             return deltas, conf
 
     return _CoupledModel()
+
+
+def _build_model_rawmel(
+    torch,
+    nn,
+    *,
+    in_dim: int,
+    patch_dim: int,
+    mel_bins: int,
+    onset_frames: int,
+    tail_frames: int,
+    hidden_dim: int = 160,
+    aux_dim: int = 0,
+):
+    class _RawMelEncoder(nn.Module):
+        def __init__(self, in_bins: int, in_frames: int):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Conv2d(1, 16, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(16, 32, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.AdaptiveAvgPool2d((1, 1)),
+            )
+            self.proj = nn.Sequential(
+                nn.Flatten(),
+                nn.Linear(32, 64),
+                nn.ReLU(),
+            )
+
+        def forward(self, x):
+            x = self.net(x)
+            return self.proj(x)
+
+    class _CoupledRawMel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.feature_net = nn.Sequential(
+                nn.Linear(in_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+            )
+            self.patch_net = nn.Sequential(
+                nn.Linear(patch_dim, 64),
+                nn.ReLU(),
+                nn.Linear(64, 64),
+                nn.ReLU(),
+            )
+            self.onset_encoder = _RawMelEncoder(mel_bins, onset_frames)
+            self.tail_encoder = _RawMelEncoder(mel_bins, tail_frames)
+            joint_in = hidden_dim + 64 + 64 + 64
+            self.joint = nn.Sequential(
+                nn.Linear(joint_in, hidden_dim + 32),
+                nn.ReLU(),
+                nn.Linear(hidden_dim + 32, hidden_dim // 2),
+                nn.ReLU(),
+            )
+            self.delta_head = nn.Linear(hidden_dim // 2, len(TARGET_NAMES))
+            self.conf_head = nn.Sequential(nn.Linear(hidden_dim // 2, 1), nn.Sigmoid())
+            self.aux_dim = int(aux_dim)
+            if self.aux_dim > 0:
+                self.aux_head = nn.Sequential(
+                    nn.Linear(hidden_dim // 2, hidden_dim // 2),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim // 2, self.aux_dim),
+                )
+            else:
+                self.aux_head = None
+
+        def forward(self, x, patch, onset, tail):
+            xf = self.feature_net(x)
+            xp = self.patch_net(patch)
+            xo = self.onset_encoder(onset)
+            xt = self.tail_encoder(tail)
+            z = self.joint(torch.cat([xf, xp, xo, xt], dim=1))
+            deltas = self.delta_head(z)
+            conf = self.conf_head(z)
+            if self.aux_head is not None:
+                aux = self.aux_head(z)
+                return deltas, conf, aux
+            return deltas, conf
+
+    return _CoupledRawMel()

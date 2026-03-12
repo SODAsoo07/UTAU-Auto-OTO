@@ -13,9 +13,11 @@ from __future__ import annotations
 # Constants & model utilities
 from core.oto_ml.coupled.model import (  # noqa: F401
     COUPLED_BACKEND,
+    COUPLED_BACKEND_RAWMEL,
     COUPLED_MODEL_FILE,
     PATCH_FEATURES,
     _build_model,
+    _build_model_rawmel,
     _env_int,
     _import_torch,
     _require_numpy,
@@ -38,6 +40,7 @@ from core.oto_ml.coupled.training import (  # noqa: F401
     build_and_save_coupled_dataset,
     evaluate_coupled_bundle,
     train_coupled_bundle,
+    train_coupled_bundle_rawmel,
 )
 
 # Pairing
@@ -60,6 +63,7 @@ from core.oto_ml.features.schema import (  # noqa: F401
 
 __all__ = [
     "COUPLED_BACKEND",
+    "COUPLED_BACKEND_RAWMEL",
     "COUPLED_MODEL_FILE",
     "PATCH_FEATURES",
     "build_and_save_coupled_dataset",
@@ -67,4 +71,5 @@ __all__ = [
     "load_coupled_bundle",
     "predict_coupled_deltas",
     "train_coupled_bundle",
+    "train_coupled_bundle_rawmel",
 ]
