@@ -670,17 +670,26 @@ def train_ensemble_bundle(
     folds = _build_group_folds(df, group_column, num_folds=max(2, int(num_folds)))
     cache_index = MelPatchCacheIndex.load(rawmel_cache_dir)
     oof_rows: List[Dict[str, Any]] = []
+    print(
+        f"[ENSEMBLE] start format={format_type} rows={int(len(df))} folds={int(len(folds))} "
+        f"group={group_column} rawmel_cache={rawmel_cache_dir}"
+    )
 
     for fold_idx, (train_idx, valid_idx) in enumerate(folds):
         train_df = df.iloc[train_idx].copy().reset_index(drop=True)
         valid_df = df.iloc[valid_idx].copy().reset_index(drop=True)
         if len(train_df) < 16 or len(valid_df) <= 0:
             continue
+        print(
+            f"[ENSEMBLE] fold {fold_idx + 1}/{len(folds)} train_rows={int(len(train_df))} "
+            f"valid_rows={int(len(valid_df))}"
+        )
         with tempfile.TemporaryDirectory(prefix=f"utoa_ens_fold_{fold_idx}_") as td:
             train_csv = os.path.join(td, "train.csv")
             train_df.to_csv(train_csv, index=False, encoding="utf-8")
             lightgbm_dir = os.path.join(td, "lightgbm")
             coupled_dir = os.path.join(td, "coupled")
+            print(f"[ENSEMBLE] fold {fold_idx + 1}/{len(folds)} train lightgbm")
             train_lightgbm_bundle(
                 language=language,
                 format_type=format_type,
@@ -692,6 +701,7 @@ def train_ensemble_bundle(
                 alias_types=alias_types,
                 min_mapping_confidence=float(min_mapping_confidence),
             )
+            print(f"[ENSEMBLE] fold {fold_idx + 1}/{len(folds)} train coupled_rawmel")
             train_coupled_bundle_rawmel(
                 language=language,
                 format_type=format_type,
@@ -741,6 +751,7 @@ def train_ensemble_bundle(
                 meta_row[group_column] = feature_row.get(group_column, "")
                 meta_row["_meta_sample_weight"] = _to_float(feature_row.get("sample_weight"), 1.0)
                 oof_rows.append(meta_row)
+        print(f"[ENSEMBLE] fold {fold_idx + 1}/{len(folds)} done oof_rows={int(len(oof_rows))}")
 
     if len(oof_rows) < 24:
         raise RuntimeError("OOF ensemble training rows are too small.")
@@ -752,6 +763,7 @@ def train_ensemble_bundle(
     meta_out = _bundle_dir(root_out, "meta")
     os.makedirs(root_out, exist_ok=True)
 
+    print("[ENSEMBLE] final train lightgbm")
     train_lightgbm_bundle(
         language=language,
         format_type=format_type,
@@ -763,6 +775,7 @@ def train_ensemble_bundle(
         alias_types=alias_types,
         min_mapping_confidence=float(min_mapping_confidence),
     )
+    print("[ENSEMBLE] final train coupled_rawmel")
     train_coupled_bundle_rawmel(
         language=language,
         format_type=format_type,
@@ -776,6 +789,7 @@ def train_ensemble_bundle(
         batch_size=int(coupled_batch_size),
         learning_rate=float(coupled_learning_rate),
     )
+    print("[ENSEMBLE] final train meta")
     meta_bundle_meta = _train_meta_bundle(meta_df, meta_out, language, format_type, group_column)
 
     write_feature_schema(os.path.join(root_out, "feature_schema.json"))
@@ -824,4 +838,5 @@ def train_ensemble_bundle(
             ensure_ascii=False,
             indent=2,
         )
+    print(f"[ENSEMBLE] done out_dir={root_out}")
     return root_meta

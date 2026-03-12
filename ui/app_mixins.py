@@ -1,4 +1,5 @@
 import datetime
+import glob
 import json
 import logging
 import os
@@ -44,8 +45,88 @@ class FileDialogMixin:
         if path:
             var.set(path)
 
-    def _browse_folder_by_var(self, var):
-        path = filedialog.askdirectory()
+    def _ml_model_repo_root(self):
+        base_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base_dir, "ML_models")
+
+    def _ml_model_language_root(self, language):
+        return os.path.join(self._ml_model_repo_root(), str(language or "").strip().lower())
+
+    def _ml_model_language_for_var(self, var):
+        if hasattr(self, "ml_model_root_ja_var") and var is self.ml_model_root_ja_var:
+            return "japanese"
+        return "korean"
+
+    def _preferred_ml_model_browse_dir(self, var):
+        language = self._ml_model_language_for_var(var)
+        current = str(var.get() or "").strip()
+        if os.path.isdir(current):
+            return current
+
+        format_code = ""
+        if hasattr(self, "_get_language") and hasattr(self, "auto_format_var") and self._get_language() == language:
+            try:
+                format_code = normalize_auto_format_value(language, self.auto_format_var.get()) or ""
+            except Exception:
+                format_code = ""
+
+        lang_root = self._ml_model_language_root(language)
+        fmt_root = os.path.join(lang_root, format_code) if format_code else ""
+        candidates = []
+        if fmt_root:
+            candidates.extend(
+                [
+                    os.path.join(fmt_root, "v1_ensemble"),
+                    fmt_root,
+                    os.path.join(fmt_root, "v1_coupled"),
+                    os.path.join(fmt_root, "v1"),
+                ]
+            )
+        candidates.extend([lang_root, self._ml_model_repo_root()])
+        for candidate in candidates:
+            if candidate and os.path.isdir(candidate):
+                return candidate
+        return current or lang_root or self._ml_model_repo_root()
+
+    def _recommended_ml_model_root(self, language):
+        lang_root = self._ml_model_language_root(language)
+        if os.path.isdir(lang_root):
+            return lang_root
+        repo_root = self._ml_model_repo_root()
+        if os.path.isdir(repo_root):
+            return repo_root
+        return ""
+
+    def _language_has_ensemble_bundle(self, language):
+        lang_root = self._ml_model_language_root(language)
+        if not os.path.isdir(lang_root):
+            return False
+        pattern = os.path.join(lang_root, "*", "v1_ensemble", "model_meta.json")
+        return any(os.path.isfile(path) for path in glob.glob(pattern))
+
+    def _apply_recommended_ml_model_defaults(self):
+        language = self._get_language() if hasattr(self, "_get_language") else "korean"
+        if language == "japanese" and hasattr(self, "ml_model_root_ja_var"):
+            target_var = self.ml_model_root_ja_var
+        elif hasattr(self, "ml_model_root_kr_var"):
+            target_var = self.ml_model_root_kr_var
+        else:
+            target_var = None
+
+        if target_var is not None:
+            current_root = str(target_var.get() or "").strip()
+            if not current_root or not os.path.isdir(current_root):
+                recommended_root = self._recommended_ml_model_root(language)
+                if recommended_root:
+                    target_var.set(recommended_root)
+
+        if hasattr(self, "ml_coupled_backend_var"):
+            backend = str(self.ml_coupled_backend_var.get() or "auto").strip().lower()
+            if backend in {"", "auto"} and self._language_has_ensemble_bundle(language):
+                self.ml_coupled_backend_var.set("ensemble")
+
+    def _browse_folder_by_var(self, var, initial_dir=""):
+        path = filedialog.askdirectory(initialdir=initial_dir or self._preferred_ml_model_browse_dir(var))
         if path:
             var.set(path)
 
@@ -654,6 +735,10 @@ class ConfigMixin:
     def _load_config(self):
         config_path = os.path.join(self.app_dir, "config.json")
         if not os.path.exists(config_path):
+            if hasattr(self, "_apply_recommended_ml_model_defaults"):
+                self._apply_recommended_ml_model_defaults()
+            if hasattr(self, "_refresh_ml_backend_status"):
+                self._refresh_ml_backend_status()
             return
 
         try:
@@ -767,7 +852,12 @@ class ConfigMixin:
                     self.ml_coupled_device_var.set(device)
             if "ml_coupled_backend" in config and hasattr(self, "ml_coupled_backend_var"):
                 backend = str(config.get("ml_coupled_backend", "auto") or "auto").strip().lower()
-                if backend in {"auto", "v1", "v2", "coupled_nn_v1", "coupled_nn_v2_rawmel"}:
+                backend = {
+                    "ensemble_v1": "ensemble",
+                    "coupled_nn_v1": "v1",
+                    "coupled_nn_v2_rawmel": "v2",
+                }.get(backend, backend)
+                if backend in {"auto", "ensemble", "v1", "v2"}:
                     self.ml_coupled_backend_var.set(backend)
             if "ml_coupled_strict_constraint" in config and hasattr(self, "ml_coupled_strict_constraint_var"):
                 self.ml_coupled_strict_constraint_var.set(bool(config.get("ml_coupled_strict_constraint", False)))
@@ -785,6 +875,8 @@ class ConfigMixin:
             if hasattr(self, "tune_apply_target_var"):
                 self.tune_apply_target_var.set(config.get("tune_apply_target", ""))
 
+            if hasattr(self, "_apply_recommended_ml_model_defaults"):
+                self._apply_recommended_ml_model_defaults()
             self._on_language_change(self.lang_var.get())
             self._on_no_base_oto_toggle()
             if hasattr(self, "_sync_aligner_ui"):

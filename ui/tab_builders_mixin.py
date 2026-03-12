@@ -359,7 +359,7 @@ class TabBuildersMixin:
         ).pack(side="left")
         backend_menu = ctk.CTkOptionMenu(
             backend_row,
-            values=["auto", "v1", "v2"],
+            values=["auto", "ensemble", "v1", "v2"],
             variable=self.ml_coupled_backend_var,
             width=90,
             command=lambda _v: self._on_ml_backend_change(),
@@ -368,7 +368,7 @@ class TabBuildersMixin:
         backend_menu.pack(side="left", padx=(10, 0))
         ctk.CTkLabel(
             backend_row,
-            text="(v2=mel raw encoder)",
+            text="(auto=ensemble->v2->v1, v2=mel raw encoder)",
             text_color="#9E9E9E",
         ).pack(side="left", padx=(8, 0))
 
@@ -398,7 +398,10 @@ class TabBuildersMixin:
                 btn_row,
                 text="찾아보기",
                 width=btn_width,
-                command=lambda v=var: (self._browse_folder_by_var(v), self._on_ml_model_root_change()),
+                command=lambda v=var: (
+                    self._browse_folder_by_var(v, initial_dir=self._preferred_ml_model_browse_dir(v)),
+                    self._on_ml_model_root_change(),
+                ),
             ).pack(side="right")
             ctk.CTkButton(
                 btn_row,

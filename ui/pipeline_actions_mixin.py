@@ -744,8 +744,14 @@ class PipelineActionsMixin:
                     selector_mode_code = self._apply_ml_selector_runtime_mode(ml_selector_mode)
                     if ml_coupled_device not in {"auto", "cpu", "cuda"}:
                         ml_coupled_device = "auto"
-                    if ml_coupled_backend not in {"auto", "v1", "v2", "coupled_nn_v1", "coupled_nn_v2_rawmel"}:
+                    ml_coupled_backend = {
+                        "ensemble_v1": "ensemble",
+                        "coupled_nn_v1": "v1",
+                        "coupled_nn_v2_rawmel": "v2",
+                    }.get(ml_coupled_backend, ml_coupled_backend)
+                    if ml_coupled_backend not in {"auto", "ensemble", "v1", "v2"}:
                         ml_coupled_backend = "auto"
+                    ensemble_enabled = ml_coupled_backend in {"auto", "ensemble"}
 
                     def _parse_optional_threshold(raw_value, lo=0.0, hi=1.0):
                         text = str(raw_value or "").strip()
@@ -759,12 +765,17 @@ class PipelineActionsMixin:
                     ml_coupled_min_conf = _parse_optional_threshold(ml_coupled_min_conf_raw, lo=0.0, hi=1.0)
 
                     os.environ["UTOA_ML_COUPLED_ENABLE"] = "1" if ml_coupled_enable else "0"
+                    os.environ["UTOA_ML_ENSEMBLE_ENABLE"] = "1" if ensemble_enabled else "0"
                     if ml_coupled_min_conf is None:
                         os.environ.pop("UTOA_ML_COUPLED_MIN_CONF", None)
                     else:
                         os.environ["UTOA_ML_COUPLED_MIN_CONF"] = str(float(ml_coupled_min_conf))
                     os.environ["UTOA_ML_COUPLED_DEVICE"] = str(ml_coupled_device)
-                    os.environ["UTOA_ML_COUPLED_BACKEND"] = str(ml_coupled_backend or "auto")
+                    coupled_backend_env = {"auto": "auto", "ensemble": "auto", "v1": "v1", "v2": "v2"}.get(
+                        ml_coupled_backend,
+                        "auto",
+                    )
+                    os.environ["UTOA_ML_COUPLED_BACKEND"] = str(coupled_backend_env)
                     os.environ["UTOA_ML_COUPLED_STRICT_CONSTRAINT"] = "1" if ml_coupled_strict_constraint else "0"
                     if lang == "japanese":
                         if ml_model_root:
@@ -781,7 +792,7 @@ class PipelineActionsMixin:
                     )
                     min_conf_display = f"{float(ml_coupled_min_conf):.2f}" if ml_coupled_min_conf is not None else "default(0.55)"
                     self._append_log(
-                        f"[OTO-ML] coupled={'ON' if ml_coupled_enable else 'OFF'}, backend={ml_coupled_backend}, min_conf={min_conf_display}, device={ml_coupled_device}, strict={'ON' if ml_coupled_strict_constraint else 'OFF'}"
+                        f"[OTO-ML] coupled={'ON' if ml_coupled_enable else 'OFF'}, backend={ml_coupled_backend}, ensemble={'ON' if ensemble_enabled else 'OFF'}, min_conf={min_conf_display}, device={ml_coupled_device}, strict={'ON' if ml_coupled_strict_constraint else 'OFF'}"
                     )
                     if self.no_base_oto_var.get():
                         self._append_log("ℹ '베이스 OTO 없이 생성'이 활성화되어 OpenUtau 스타일로 생성합니다.")

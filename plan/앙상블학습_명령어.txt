@@ -1,0 +1,50 @@
+한국어 CVVC
+Set-Location "C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO"
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
+
+python .\scripts\train_ensemble_bundle.py `
+  --language korean `
+  --format cvvc `
+  --dataset "C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\ml_workspace\datasets\korean\dataset_korean_cvvc_coupled.csv" `
+  --rawmel-cache-dir "C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\core\.cache\oto_ml_mel_patches\korean\cvvc\v1\27f01365" `
+  --out-dir "C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\ML_models\korean\cvvc\v1_ensemble" `
+  --group-column voicebank_id `
+  --min-mapping-confidence 0.40 `
+  --num-folds 5 `
+  --lightgbm-num-boost-round 500 `
+  --lightgbm-early-stopping-rounds 50 `
+  --coupled-epochs 70 `
+  --coupled-batch-size 192 `
+  --coupled-learning-rate 0.001 `
+  --alias-type cv `
+  --alias-type cv_head `
+  --alias-type vc `
+  --alias-type vv `
+  --alias-type vcv
+
+CVC
+Set-Location "C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO"
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
+
+python .\scripts\train_ensemble_bundle.py `
+  --language korean `
+  --format cvc `
+  --dataset "C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\ml_workspace\datasets\korean\dataset_korean_cvc_coupled.csv" `
+  --rawmel-cache-dir "C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\core\.cache\oto_ml_mel_patches\korean\cvc\v1\27f01365" `
+  --out-dir "C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\ML_models\korean\cvc\v1_ensemble" `
+  --group-column voicebank_id `
+  --min-mapping-confidence 0.40 `
+  --num-folds 5 `
+  --lightgbm-num-boost-round 500 `
+  --lightgbm-early-stopping-rounds 50 `
+  --coupled-epochs 70 `
+  --coupled-batch-size 192 `
+  --coupled-learning-rate 0.001 `
+  --alias-type cv `
+  --alias-type cv_head `
+  --alias-type vc `
+  --alias-type vv `
+  --alias-type vcv
+

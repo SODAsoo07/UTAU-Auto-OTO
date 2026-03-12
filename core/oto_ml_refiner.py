@@ -239,6 +239,18 @@ def _collect_model_dir_candidates(language: str, format_type: str, alias_family:
     family = normalize_alias_family(alias_family)
     lang = str(language or "").strip().lower()
     candidates: List[str] = []
+
+    def _append_version_dirs(base_path: str) -> None:
+        if not base_path:
+            return
+        candidates.extend(
+            [
+                os.path.join(base_path, "v1"),
+                os.path.join(base_path, "v1_ensemble"),
+                os.path.join(base_path, "v1_coupled"),
+            ]
+        )
+
     for root in (
         _workspace_model_root_for_language(language),
         _installed_model_root_for_language(language),
@@ -249,19 +261,19 @@ def _collect_model_dir_candidates(language: str, format_type: str, alias_family:
             candidates.append(root)
         else:
             if family:
-                candidates.append(os.path.join(root, fmt, "families", family, "v1"))
-                candidates.append(os.path.join(root, f"{fmt}_{family}", "v1"))
-            candidates.append(os.path.join(root, fmt, "v1"))
+                _append_version_dirs(os.path.join(root, fmt, "families", family))
+                _append_version_dirs(os.path.join(root, f"{fmt}_{family}"))
+            _append_version_dirs(os.path.join(root, fmt))
             if fmt == "cvc":
                 if family:
-                    candidates.append(os.path.join(root, "cv", "families", family, "v1"))
-                    candidates.append(os.path.join(root, f"cv_{family}", "v1"))
-                candidates.append(os.path.join(root, "cv", "v1"))
+                    _append_version_dirs(os.path.join(root, "cv", "families", family))
+                    _append_version_dirs(os.path.join(root, f"cv_{family}"))
+                _append_version_dirs(os.path.join(root, "cv"))
             if fmt != "general":
                 if family:
-                    candidates.append(os.path.join(root, "general", "families", family, "v1"))
-                    candidates.append(os.path.join(root, f"general_{family}", "v1"))
-                candidates.append(os.path.join(root, "general", "v1"))
+                    _append_version_dirs(os.path.join(root, "general", "families", family))
+                    _append_version_dirs(os.path.join(root, f"general_{family}"))
+                _append_version_dirs(os.path.join(root, "general"))
     export_root = _export_model_root()
     legacy_export_candidates = []
     if family:

@@ -10,6 +10,7 @@ import csv
 import json
 import logging
 import os
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -217,6 +218,50 @@ def _pair_weight_for_epoch(base_weight: float, epoch_idx: int, warmup_epochs: in
         return base
     progress = min(1.0, float(epoch_idx + 1) / float(warmup))
     return base * progress
+
+
+def _estimate_rawmel_patch_cache_mb(sample_count: int, onset_frames: int, tail_frames: int, mel_bins: int) -> float:
+    rows = max(0, int(sample_count))
+    frames = max(0, int(onset_frames)) + max(0, int(tail_frames))
+    bins = max(1, int(mel_bins))
+    total_bytes = rows * frames * bins * 4
+    return float(total_bytes) / float(1024 * 1024)
+
+
+def _resolve_rawmel_prefetch_mode(
+    rawmel_prefetch: str,
+    *,
+    run_device,
+    train_count: int,
+    valid_count: int,
+    onset_frames: int,
+    tail_frames: int,
+    mel_bins: int,
+) -> Dict[str, object]:
+    requested = str(rawmel_prefetch or "auto").strip().lower()
+    if requested not in {"none", "train", "gpu", "auto"}:
+        requested = "auto"
+    device_type = str(getattr(run_device, "type", run_device) or "").strip().lower()
+    est_patch_mb = _estimate_rawmel_patch_cache_mb(
+        int(train_count) + int(valid_count),
+        onset_frames=int(onset_frames),
+        tail_frames=int(tail_frames),
+        mel_bins=int(mel_bins),
+    )
+    if requested == "auto":
+        if device_type != "cuda":
+            return {"mode": "none", "reason": "cpu_device", "estimated_patch_mb": float(est_patch_mb)}
+        gpu_limit_mb = max(128, _env_int("UTOA_ML_RAWMEL_GPU_CACHE_MAX_MB", 1536))
+        if est_patch_mb <= float(gpu_limit_mb):
+            return {
+                "mode": "gpu",
+                "reason": f"auto_gpu_le_{gpu_limit_mb}mb",
+                "estimated_patch_mb": float(est_patch_mb),
+            }
+        return {"mode": "train", "reason": "auto_train_cache", "estimated_patch_mb": float(est_patch_mb)}
+    if requested == "gpu" and device_type != "cuda":
+        return {"mode": "none", "reason": "gpu_prefetch_requires_cuda", "estimated_patch_mb": float(est_patch_mb)}
+    return {"mode": requested, "reason": "explicit", "estimated_patch_mb": float(est_patch_mb)}
 
 
 def _boundary_consistency_row_loss(torch, aux_pred, aux_mask, offset_abs, cutoff_abs, *, next_onset_margin: float = 6.0):
@@ -877,6 +922,11 @@ def train_coupled_bundle(
             "strength": float(hard_example_strength),
             "mean_boost": float(np.mean(hard_boost)) if len(hard_boost) else 1.0,
         },
+        "rawmel_prefetch": {
+            "mode": str(prefetch_mode),
+            "estimated_patch_mb": float(prefetch_info.get("estimated_patch_mb", 0.0) or 0.0),
+            "reason": str(prefetch_info.get("reason", "") or ""),
+        },
         "sampler": {
             "mode": str(sampler_mode),
             "group_column": str(sampling_group_column),
@@ -915,6 +965,11 @@ def train_coupled_bundle(
                 "vc_cv_pair_weight": float(pair_weight_base),
                 "vc_cv_pairs_total": int(pair_total_count),
                 "vc_cv_pairs_valid": int(pair_valid_count),
+                "rawmel_prefetch": {
+                    "mode": str(prefetch_mode),
+                    "estimated_patch_mb": float(prefetch_info.get("estimated_patch_mb", 0.0) or 0.0),
+                    "reason": str(prefetch_info.get("reason", "") or ""),
+                },
             },
             f,
             ensure_ascii=False,
@@ -946,7 +1001,7 @@ def train_coupled_bundle_rawmel(
     learning_rate: float = 1e-3,
     min_confidence: float = 0.55,
     progress_every: int = 0,
-    rawmel_prefetch: str = "none",
+    rawmel_prefetch: str = "auto",
     rawmel_max_shard_cache: int = 2,
 ) -> Dict[str, Any]:
     _require_training_stack()
@@ -1261,18 +1316,6 @@ def train_coupled_bundle_rawmel(
     keys_train = [keys[i] for i in train_idx.tolist()]
     keys_valid = [keys[i] for i in valid_idx.tolist()]
 
-    prefetch_mode = str(rawmel_prefetch or "none").strip().lower()
-    if prefetch_mode not in ("none", "train"):
-        prefetch_mode = "none"
-    onset_train_cache = None
-    tail_train_cache = None
-    onset_valid_cache = None
-    tail_valid_cache = None
-    if prefetch_mode == "train":
-        print("[TRAIN] rawmel prefetch: train")
-        onset_train_cache, tail_train_cache = cache_index.get_batch(keys_train)
-        onset_valid_cache, tail_valid_cache = cache_index.get_batch(keys_valid)
-
     def _np_to_device(np_arr):
         arr = np.ascontiguousarray(np_arr, dtype=np.float32)
         t = torch.from_numpy(arr)
@@ -1281,6 +1324,51 @@ def train_coupled_bundle_rawmel(
         else:
             t = t.to(run_device)
         return t
+
+    prefetch_info = _resolve_rawmel_prefetch_mode(
+        rawmel_prefetch,
+        run_device=run_device,
+        train_count=len(keys_train),
+        valid_count=len(keys_valid),
+        onset_frames=int(onset_frames),
+        tail_frames=int(tail_frames),
+        mel_bins=int(mel_bins),
+    )
+    prefetch_mode = str(prefetch_info.get("mode", "none") or "none").strip().lower()
+    onset_train_cache = None
+    tail_train_cache = None
+    onset_valid_cache = None
+    tail_valid_cache = None
+    onset_train_cache_gpu = None
+    tail_train_cache_gpu = None
+    onset_valid_cache_gpu = None
+    tail_valid_cache_gpu = None
+    if prefetch_mode == "gpu":
+        print(
+            f"[TRAIN] rawmel prefetch: gpu estimated_patch_mb={float(prefetch_info.get('estimated_patch_mb', 0.0)):.1f} "
+            f"reason={prefetch_info.get('reason', 'explicit')}"
+        )
+        try:
+            onset_train_np, tail_train_np = cache_index.get_batch(keys_train)
+            onset_valid_np, tail_valid_np = cache_index.get_batch(keys_valid)
+            onset_train_cache_gpu = _np_to_device(onset_train_np).unsqueeze(1)
+            tail_train_cache_gpu = _np_to_device(tail_train_np).unsqueeze(1)
+            onset_valid_cache_gpu = _np_to_device(onset_valid_np).unsqueeze(1)
+            tail_valid_cache_gpu = _np_to_device(tail_valid_np).unsqueeze(1)
+        except RuntimeError as exc:
+            if run_device.type != "cuda":
+                raise
+            print(f"[TRAIN] rawmel gpu prefetch failed; fallback to train cache: {exc}")
+            if hasattr(torch.cuda, "empty_cache"):
+                torch.cuda.empty_cache()
+            prefetch_mode = "train"
+    if prefetch_mode == "train":
+        print(
+            f"[TRAIN] rawmel prefetch: train estimated_patch_mb={float(prefetch_info.get('estimated_patch_mb', 0.0)):.1f} "
+            f"reason={prefetch_info.get('reason', 'explicit')}"
+        )
+        onset_train_cache, tail_train_cache = cache_index.get_batch(keys_train)
+        onset_valid_cache, tail_valid_cache = cache_index.get_batch(keys_valid)
 
     target_weight_values = [
         _env_float("UTOA_ML_RAWMEL_TARGET_W_OFFSET", 1.12),
@@ -1319,13 +1407,14 @@ def train_coupled_bundle_rawmel(
     epochs_n = max(1, int(epochs))
     progress_every = int(progress_every)
     total_batches = max(1, int((train_n + batch_n - 1) / batch_n))
-    if progress_every > 0:
-        print(
-            f"[TRAIN] rows={train_n} batches={total_batches} epochs={epochs_n} device={run_device} "
-            f"rawmel={mel_bins}x(onset={onset_frames},tail={tail_frames}) sampler={sampler_mode}:{sampling_group_column}"
-        )
+    print(
+        f"[TRAIN] start rows={train_n} valid={int(X_valid.shape[0])} batches={total_batches} epochs={epochs_n} "
+        f"device={run_device} rawmel={mel_bins}x(onset={onset_frames},tail={tail_frames}) "
+        f"prefetch={prefetch_mode} sampler={sampler_mode}:{sampling_group_column}"
+    )
 
     for epoch in range(epochs_n):
+        epoch_started_at = time.perf_counter()
         model.train()
         epoch_pair_weight = _pair_weight_for_epoch(pair_weight_base, epoch, pair_warmup_epochs)
         rng = np.random.default_rng(42 + epoch)
@@ -1333,10 +1422,10 @@ def train_coupled_bundle_rawmel(
             perm_np = _sample_group_balanced_indices(sampling_group_values, train_sampling_weights, train_n, rng)
         else:
             perm_np = rng.permutation(train_n).astype(np.int64)
-        perm = torch.tensor(perm_np, dtype=torch.long, device=run_device)
         for batch_i, start in enumerate(range(0, train_n, batch_n), start=1):
-            batch_idx = perm[start:start + batch_n]
-            idx_list = [int(i) for i in batch_idx.detach().cpu().tolist()]
+            batch_idx_np = np.asarray(perm_np[start:start + batch_n], dtype=np.int64)
+            idx_list = [int(i) for i in batch_idx_np.tolist()]
+            batch_idx = torch.as_tensor(batch_idx_np, dtype=torch.long, device=run_device)
             xb = X_train[batch_idx]
             cb = C_train[batch_idx]
             pb = P_train[batch_idx]
@@ -1344,14 +1433,19 @@ def train_coupled_bundle_rawmel(
             bb = B_train[batch_idx]
             mb = M_train[batch_idx]
             wb = W_train[batch_idx]
-            if prefetch_mode == "train" and onset_train_cache is not None and tail_train_cache is not None:
-                onset_np = onset_train_cache[idx_list]
-                tail_np = tail_train_cache[idx_list]
+            if prefetch_mode == "gpu" and onset_train_cache_gpu is not None and tail_train_cache_gpu is not None:
+                onset_t = onset_train_cache_gpu[batch_idx]
+                tail_t = tail_train_cache_gpu[batch_idx]
+            elif prefetch_mode == "train" and onset_train_cache is not None and tail_train_cache is not None:
+                onset_np = onset_train_cache[batch_idx_np]
+                tail_np = tail_train_cache[batch_idx_np]
+                onset_t = _np_to_device(onset_np).unsqueeze(1)
+                tail_t = _np_to_device(tail_np).unsqueeze(1)
             else:
                 batch_keys = [keys_train[i] for i in idx_list]
                 onset_np, tail_np = cache_index.get_batch(batch_keys)
-            onset_t = _np_to_device(onset_np).unsqueeze(1)
-            tail_t = _np_to_device(tail_np).unsqueeze(1)
+                onset_t = _np_to_device(onset_np).unsqueeze(1)
+                tail_t = _np_to_device(tail_np).unsqueeze(1)
 
             out = model(xb, pb, onset_t, tail_t, cb)
             if use_aux:
@@ -1450,13 +1544,18 @@ def train_coupled_bundle_rawmel(
 
         model.eval()
         with torch.no_grad():
-            if prefetch_mode == "train" and onset_valid_cache is not None and tail_valid_cache is not None:
+            if prefetch_mode == "gpu" and onset_valid_cache_gpu is not None and tail_valid_cache_gpu is not None:
+                onset_valid_t = onset_valid_cache_gpu
+                tail_valid_t = tail_valid_cache_gpu
+            elif prefetch_mode == "train" and onset_valid_cache is not None and tail_valid_cache is not None:
                 onset_valid_np = onset_valid_cache
                 tail_valid_np = tail_valid_cache
+                onset_valid_t = _np_to_device(onset_valid_np).unsqueeze(1)
+                tail_valid_t = _np_to_device(tail_valid_np).unsqueeze(1)
             else:
                 onset_valid_np, tail_valid_np = cache_index.get_batch(keys_valid)
-            onset_valid_t = _np_to_device(onset_valid_np).unsqueeze(1)
-            tail_valid_t = _np_to_device(tail_valid_np).unsqueeze(1)
+                onset_valid_t = _np_to_device(onset_valid_np).unsqueeze(1)
+                tail_valid_t = _np_to_device(tail_valid_np).unsqueeze(1)
             out_val = model(X_valid, P_valid, onset_valid_t, tail_valid_t, C_valid)
             if use_aux:
                 pred_val, conf_val, aux_val = out_val
@@ -1545,25 +1644,31 @@ def train_coupled_bundle_rawmel(
             wait += 1
             if wait >= patience:
                 break
-        if progress_every > 0:
-            status = "best" if new_best else "wait"
-            lr_now = float(optimizer.param_groups[0].get("lr", learning_rate))
-            print(
-                f"[TRAIN] epoch={epoch + 1}/{epochs_n} val_loss={val_total:.4f} best={best_val:.4f} "
-                f"patience={wait}/{patience} status={status} lr={lr_now:.6g} pair_w={epoch_pair_weight:.4f}"
-            )
+        status = "best" if new_best else "wait"
+        lr_now = float(optimizer.param_groups[0].get("lr", learning_rate))
+        epoch_seconds = float(time.perf_counter() - epoch_started_at)
+        print(
+            f"[TRAIN] epoch={epoch + 1}/{epochs_n} ({int(round(((epoch + 1) / max(1, epochs_n)) * 100.0))}%) "
+            f"val_loss={val_total:.4f} best={best_val:.4f} patience={wait}/{patience} status={status} "
+            f"lr={lr_now:.6g} pair_w={epoch_pair_weight:.4f} sec={epoch_seconds:.1f}"
+        )
 
     if best_state is not None:
         model.load_state_dict(best_state)
     model.eval()
     with torch.no_grad():
-        if prefetch_mode == "train" and onset_valid_cache is not None and tail_valid_cache is not None:
+        if prefetch_mode == "gpu" and onset_valid_cache_gpu is not None and tail_valid_cache_gpu is not None:
+            onset_valid_t = onset_valid_cache_gpu
+            tail_valid_t = tail_valid_cache_gpu
+        elif prefetch_mode == "train" and onset_valid_cache is not None and tail_valid_cache is not None:
             onset_valid_np = onset_valid_cache
             tail_valid_np = tail_valid_cache
+            onset_valid_t = _np_to_device(onset_valid_np).unsqueeze(1)
+            tail_valid_t = _np_to_device(tail_valid_np).unsqueeze(1)
         else:
             onset_valid_np, tail_valid_np = cache_index.get_batch(keys_valid)
-        onset_valid_t = _np_to_device(onset_valid_np).unsqueeze(1)
-        tail_valid_t = _np_to_device(tail_valid_np).unsqueeze(1)
+            onset_valid_t = _np_to_device(onset_valid_np).unsqueeze(1)
+            tail_valid_t = _np_to_device(tail_valid_np).unsqueeze(1)
         out_valid = model(X_valid, P_valid, onset_valid_t, tail_valid_t, C_valid)
         if use_aux:
             pred_valid, conf_valid, aux_valid = out_valid

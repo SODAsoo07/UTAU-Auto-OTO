@@ -1,5 +1,7 @@
 import os
 import sys
+import json
+import tempfile
 import unittest
 from unittest import mock
 
@@ -8,7 +10,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.mfa_runner import find_mfa_executable, get_default_mfa_env_dir
-from core.oto_ml_refiner import _resolve_model_dir
+from core.oto_ml_refiner import _resolve_backend_model_dir, _resolve_model_dir
 from scripts.verify_runtime_portability import probe_runtime_portability
 
 
@@ -47,7 +49,10 @@ class RuntimeEnvPathTests(unittest.TestCase):
         self.assertTrue(report["mfa_uses_shared_root"])
 
     def test_oto_ml_resolve_prefers_workspace_models_before_installed_and_assets(self):
-        workspace_model = os.path.join(
+        local_workspace_model = os.path.join(
+            ROOT, "ml_workspace", "models", "korean", "cvvc", "families", "cv", "v1", "model_meta.json"
+        )
+        legacy_workspace_model = os.path.join(
             ROOT, "logs", "ml_workspace", "models", "korean", "cvvc", "families", "cv", "v1", "model_meta.json"
         )
         installed_model = os.path.join(
@@ -60,7 +65,8 @@ class RuntimeEnvPathTests(unittest.TestCase):
         def fake_isfile(path):
             normalized = os.path.normcase(os.path.normpath(path))
             return normalized in {
-                os.path.normcase(os.path.normpath(workspace_model)),
+                os.path.normcase(os.path.normpath(local_workspace_model)),
+                os.path.normcase(os.path.normpath(legacy_workspace_model)),
                 os.path.normcase(os.path.normpath(installed_model)),
                 os.path.normcase(os.path.normpath(asset_model)),
             }
@@ -70,7 +76,7 @@ class RuntimeEnvPathTests(unittest.TestCase):
 
         self.assertEqual(
             os.path.normcase(os.path.normpath(resolved)),
-            os.path.normcase(os.path.normpath(os.path.dirname(workspace_model))),
+            os.path.normcase(os.path.normpath(os.path.dirname(local_workspace_model))),
         )
 
     def test_oto_ml_resolve_supports_legacy_export_model_root(self):
@@ -86,6 +92,21 @@ class RuntimeEnvPathTests(unittest.TestCase):
         self.assertEqual(
             os.path.normcase(os.path.normpath(resolved)),
             os.path.normcase(os.path.normpath(os.path.dirname(export_model))),
+        )
+
+    def test_oto_ml_resolve_backend_finds_structured_ensemble_bundle(self):
+        with tempfile.TemporaryDirectory() as td:
+            ensemble_dir = os.path.join(td, "korean", "cvvc", "v1_ensemble")
+            os.makedirs(ensemble_dir, exist_ok=True)
+            with open(os.path.join(ensemble_dir, "model_meta.json"), "w", encoding="utf-8") as f:
+                json.dump({"backend": "ensemble_v1", "feature_version": "v11"}, f)
+
+            with mock.patch.dict(os.environ, {"UTOA_OTO_ML_EXPORT_ROOT": td}, clear=False):
+                resolved = _resolve_backend_model_dir("korean", "cvvc", backend="ensemble_v1")
+
+        self.assertEqual(
+            os.path.normcase(os.path.normpath(resolved)),
+            os.path.normcase(os.path.normpath(ensemble_dir)),
         )
 
 

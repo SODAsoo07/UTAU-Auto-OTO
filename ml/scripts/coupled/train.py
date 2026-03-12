@@ -58,7 +58,7 @@ def main():
     ap.add_argument("--progress-every", type=int, default=100, help="Print progress every N batches (0 disables).")
     ap.add_argument("--backend", default="coupled_nn_v1", help="coupled_nn_v1 or coupled_nn_v2_rawmel")
     ap.add_argument("--rawmel-cache", default="", help="Raw mel patch cache directory for coupled_nn_v2_rawmel")
-    ap.add_argument("--rawmel-prefetch", default="none", help="Raw mel cache prefetch: none|train")
+    ap.add_argument("--rawmel-prefetch", default="auto", help="Raw mel cache prefetch: auto|none|train|gpu")
     ap.add_argument("--rawmel-max-shard-cache", type=int, default=2, help="Max mel patch shards to keep in memory")
     ap.add_argument("--sampler", default="", help="Optional sampler override: group_balanced|shuffle")
     ap.add_argument("--hard-mining-strength", type=float, default=-1.0, help="Optional hard-example mining strength override")

@@ -151,8 +151,14 @@ class OtoActionsMixin:
                 selector_mode_code = self._apply_ml_selector_runtime_mode(ml_selector_mode)
                 if ml_coupled_device not in {"auto", "cpu", "cuda"}:
                     ml_coupled_device = "auto"
-                if ml_coupled_backend not in {"auto", "v1", "v2", "coupled_nn_v1", "coupled_nn_v2_rawmel"}:
+                ml_coupled_backend = {
+                    "ensemble_v1": "ensemble",
+                    "coupled_nn_v1": "v1",
+                    "coupled_nn_v2_rawmel": "v2",
+                }.get(ml_coupled_backend, ml_coupled_backend)
+                if ml_coupled_backend not in {"auto", "ensemble", "v1", "v2"}:
                     ml_coupled_backend = "auto"
+                ensemble_enabled = ml_coupled_backend in {"auto", "ensemble"}
                 if kr_conf_threshold is None:
                     os.environ.pop("UTOA_KR_MAPPING_CONF_THRESHOLD", None)
                 else:
@@ -160,12 +166,17 @@ class OtoActionsMixin:
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_DEFAULT"] = str(int(kr_jump_default))
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_HIGH_CONF"] = str(int(kr_jump_hi))
                 os.environ["UTOA_ML_COUPLED_ENABLE"] = "1" if ml_coupled_enable else "0"
+                os.environ["UTOA_ML_ENSEMBLE_ENABLE"] = "1" if ensemble_enabled else "0"
                 if ml_coupled_min_conf is None:
                     os.environ.pop("UTOA_ML_COUPLED_MIN_CONF", None)
                 else:
                     os.environ["UTOA_ML_COUPLED_MIN_CONF"] = str(float(ml_coupled_min_conf))
                 os.environ["UTOA_ML_COUPLED_DEVICE"] = str(ml_coupled_device)
-                os.environ["UTOA_ML_COUPLED_BACKEND"] = str(ml_coupled_backend or "auto")
+                coupled_backend_env = {"auto": "auto", "ensemble": "auto", "v1": "v1", "v2": "v2"}.get(
+                    ml_coupled_backend,
+                    "auto",
+                )
+                os.environ["UTOA_ML_COUPLED_BACKEND"] = str(coupled_backend_env)
                 os.environ["UTOA_ML_COUPLED_STRICT_CONSTRAINT"] = "1" if ml_coupled_strict_constraint else "0"
                 if lang == "japanese":
                     if ml_model_root:
@@ -187,7 +198,7 @@ class OtoActionsMixin:
                 )
                 min_conf_display = f"{float(ml_coupled_min_conf):.2f}" if ml_coupled_min_conf is not None else "default(0.55)"
                 self._append_log(
-                    f"[OTO-ML] coupled={'ON' if ml_coupled_enable else 'OFF'}, backend={ml_coupled_backend}, min_conf={min_conf_display}, device={ml_coupled_device}, strict={'ON' if ml_coupled_strict_constraint else 'OFF'}"
+                    f"[OTO-ML] coupled={'ON' if ml_coupled_enable else 'OFF'}, backend={ml_coupled_backend}, ensemble={'ON' if ensemble_enabled else 'OFF'}, min_conf={min_conf_display}, device={ml_coupled_device}, strict={'ON' if ml_coupled_strict_constraint else 'OFF'}"
                 )
                 kr_conf_display = f"{float(kr_conf_threshold):.2f}" if kr_conf_threshold is not None else "default(by format)"
                 self._append_log(f"[KR-MAP] confidence_threshold={kr_conf_display}")

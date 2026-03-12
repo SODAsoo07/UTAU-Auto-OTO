@@ -31,9 +31,9 @@ python .\ml\scripts\coupled\train.py `
 복붙용
 python .\ml\scripts\coupled\train.py `
   --lang korean `
-  --format vcv `
-  --dataset ".\ml_workspace\datasets\korean\dataset_korean_vcv_coupled.csv" `
-  --out-dir ".\ML_models\coupled_nn_v2_rawmel\korean\vcv" `
+  --format cvc `
+  --dataset ".\ml_workspace\datasets\korean\dataset_korean_cvc_coupled.csv" `
+  --out-dir ".\ML_models\coupled_nn_v2_rawmel\korean\cvc" `
   --backend coupled_nn_v2_rawmel `
   --rawmel-prefetch train
 

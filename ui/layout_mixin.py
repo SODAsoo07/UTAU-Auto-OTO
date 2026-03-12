@@ -441,6 +441,8 @@ class LayoutMixin:
                 self.ja_alias_style_menu.configure(state="normal")
         current_code = normalize_auto_format_value(self._get_language(), self.auto_format_var.get())
         self._set_auto_format_from_code(current_code, self._get_language())
+        if hasattr(self, "_apply_recommended_ml_model_defaults"):
+            self._apply_recommended_ml_model_defaults()
         self._save_config()
         self._refresh_ml_backend_status()
     def _get_ja_alias_style_code(self):
@@ -533,12 +535,14 @@ class LayoutMixin:
             override = str(self.ml_model_root_ja_var.get() or "").strip()
         if lang == "korean" and hasattr(self, "ml_model_root_kr_var"):
             override = str(self.ml_model_root_kr_var.get() or "").strip()
+
         prev_env = os.environ.get(env_key)
         try:
             if override:
                 os.environ[env_key] = override
             else:
                 os.environ.pop(env_key, None)
+            ensemble_dir = _resolve_backend_model_dir(lang, routed_fmt, backend="ensemble_v1")
             v2_dir = _resolve_backend_model_dir(lang, routed_fmt, backend="coupled_nn_v2_rawmel")
             v1_dir = _resolve_backend_model_dir(lang, routed_fmt, backend="coupled_nn_v1")
         finally:
@@ -546,16 +550,27 @@ class LayoutMixin:
                 os.environ.pop(env_key, None)
             else:
                 os.environ[env_key] = prev_env
-        v2_status = "✅" if v2_dir else "❌"
-        v1_status = "✅" if v1_dir else "❌"
+
+        def _status_icon(model_dir: str) -> str:
+            return "OK" if model_dir else "--"
+
         selected = ""
         if hasattr(self, "ml_coupled_backend_var"):
-            selected = str(self.ml_coupled_backend_var.get() or "auto")
-        text = f"현재 포맷: {fmt_display} | v2 {v2_status} / v1 {v1_status}"
+            selected = str(self.ml_coupled_backend_var.get() or "auto").strip().lower()
+        selected = {
+            "ensemble_v1": "ensemble",
+            "coupled_nn_v1": "v1",
+            "coupled_nn_v2_rawmel": "v2",
+        }.get(selected, selected or "auto")
+
+        text = (
+            f"현재 포맷: {fmt_display} | ensemble {_status_icon(ensemble_dir)} / "
+            f"v2 {_status_icon(v2_dir)} / v1 {_status_icon(v1_dir)}"
+        )
         if selected:
             text += f" | 선택: {selected}"
         if override:
-            text += " | 경로: 사용자 지정"
+            text += " | 사용자 경로 사용"
         self.ml_coupled_status_label.configure(text=text)
 
         if not hasattr(self, "ml_coupled_status_detail_label"):
@@ -582,22 +597,21 @@ class LayoutMixin:
             except Exception:
                 return {}
 
-        v2_meta = _read_meta(v2_dir) if v2_dir else {}
-        v1_meta = _read_meta(v1_dir) if v1_dir else {}
-
         def _fmt_line(label: str, model_dir: str, meta: dict) -> str:
             if not model_dir:
-                return f"{label}: (미설치)"
+                return f"{label}: (없음)"
             version = str(meta.get("model_version", "") or meta.get("version", "") or "unknown")
+            backend = str(meta.get("backend", "") or "unknown")
             created = str(meta.get("created_at", "") or "unknown")
-            return f"{label}: {model_dir} | version={version} | created_at={created}"
+            return f"{label}: {model_dir} | backend={backend} | version={version} | created_at={created}"
 
         detail_lines = []
         if override:
             detail_lines.append(f"custom_root: {override}")
         detail_lines += [
-            _fmt_line("v2", v2_dir or "", v2_meta),
-            _fmt_line("v1", v1_dir or "", v1_meta),
+            _fmt_line("ensemble", ensemble_dir or "", _read_meta(ensemble_dir) if ensemble_dir else {}),
+            _fmt_line("v2", v2_dir or "", _read_meta(v2_dir) if v2_dir else {}),
+            _fmt_line("v1", v1_dir or "", _read_meta(v1_dir) if v1_dir else {}),
         ]
         self.ml_coupled_status_detail_label.configure(text="\n".join(detail_lines))
 
