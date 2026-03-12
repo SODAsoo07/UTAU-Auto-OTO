@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
+import sys
 from typing import Dict, Tuple
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 from core.format_type_utils import normalize_format_type, normalize_language_name
 from core.oto_ml_collection_discovery import discover_training_candidates_from_dataset_root
@@ -74,6 +80,7 @@ def main():
     ap.add_argument("--tail-window-ms", default="", help="e.g. -160,80")
     ap.add_argument("--max-rows-per-shard", type=int, default=2000)
     ap.add_argument("--allow-missing", action="store_true")
+    ap.add_argument("--progress-every", type=int, default=1000)
     args = ap.parse_args()
 
     dataset_csv = os.path.abspath(args.dataset)
@@ -85,6 +92,7 @@ def main():
 
     candidate_map = _build_candidate_map(dataset_root)
     wav_index_cache: Dict[str, Dict[str, str]] = {}
+    global_wav_index = build_wav_index(dataset_root)
 
     rows = []
     with open(dataset_csv, "r", encoding="utf-8", errors="replace") as f:
@@ -112,6 +120,18 @@ def main():
     out_dir = args.out_dir.strip() or patch_cache_dir(lang, fmt, patch_spec)
     os.makedirs(out_dir, exist_ok=True)
 
+    total_rows = 0
+    for row in rows:
+        row_lang = normalize_language_name(row.get("language", "") or lang)
+        row_fmt = normalize_format_type(row_lang, row.get("format_type", "") or fmt) or fmt
+        if row_lang == lang and row_fmt == fmt:
+            total_rows += 1
+
+    progress_every = int(args.progress_every)
+    if progress_every < 1:
+        progress_every = 0
+    print(f"[CACHE] rows={total_rows} out={out_dir}")
+
     writer = MelPatchCacheWriter(
         out_dir,
         patch_spec,
@@ -121,7 +141,7 @@ def main():
     missing = []
     mel_cache = {}
     total = 0
-    for row in rows:
+    for _, row in enumerate(rows, start=1):
         row_lang = normalize_language_name(row.get("language", "") or lang)
         row_fmt = normalize_format_type(row_lang, row.get("format_type", "") or fmt) or fmt
         if row_lang != lang or row_fmt != fmt:
@@ -130,17 +150,21 @@ def main():
         key = (row_lang, row_fmt, voicebank_id)
         wav_dir = candidate_map.get(key, "")
         if not wav_dir:
-            missing.append({"reason": "wav_dir_missing", "voicebank_id": voicebank_id})
-            if not args.allow_missing:
-                continue
+            # Fallback: search within dataset_root if candidate map is incomplete.
+            wav_dir = ""
         wav_name = str(row.get("wav", "")).strip()
         if not wav_name:
             missing.append({"reason": "wav_name_missing", "voicebank_id": voicebank_id})
             if not args.allow_missing:
                 continue
-        if wav_dir not in wav_index_cache:
-            wav_index_cache[wav_dir] = build_wav_index(wav_dir)
-        wav_path = find_wav_path(wav_name, wav_dir, wav_index_cache.get(wav_dir))
+        wav_index = None
+        if wav_dir:
+            if wav_dir not in wav_index_cache:
+                wav_index_cache[wav_dir] = build_wav_index(wav_dir)
+            wav_index = wav_index_cache.get(wav_dir)
+        wav_path = find_wav_path(wav_name, wav_dir, wav_index)
+        if not wav_path:
+            wav_path = find_wav_path(wav_name, dataset_root, global_wav_index)
         if not wav_path:
             missing.append({"reason": "wav_not_found", "voicebank_id": voicebank_id, "wav": wav_name})
             if not args.allow_missing:
@@ -182,11 +206,21 @@ def main():
 
         writer.append(patch_key, onset_patch, tail_patch)
         total += 1
+        if progress_every and total % progress_every == 0:
+            print(f"[CACHE] processed={total}/{total_rows} missing={len(missing)}")
 
-    if missing and not args.allow_missing:
-        raise RuntimeError(f"Missing patches: {len(missing)} (first={missing[:3]})")
+    if missing:
+        missing_path = os.path.join(out_dir, "missing_patches.json")
+        with open(missing_path, "w", encoding="utf-8") as f:
+            json.dump(missing, f, ensure_ascii=False, indent=2)
+        if not args.allow_missing:
+            raise RuntimeError(
+                f"Missing patches: {len(missing)} (first={missing[:3]}). "
+                f"See {missing_path} or rerun with --allow-missing."
+            )
 
     manifest_path = writer.finalize(total_rows=total)
+    print(f"[CACHE] done rows={total} missing={len(missing)} manifest={manifest_path}")
     print(manifest_path)
 
 

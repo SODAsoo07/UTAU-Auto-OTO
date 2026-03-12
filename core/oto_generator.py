@@ -279,15 +279,15 @@ DEFAULT_PARAMS = {
 # - CV/CVC: 정보량이 상대적으로 단순해 과도한 저신뢰 판정을 완화
 # - VC_ONLY/VV_ONLY: CV 정렬 점프 로직 영향이 거의 없어 완화값 사용
 KR_MAPPING_CONF_THRESHOLD_BY_FORMAT = {
-    "cv": 0.58,
-    "cvvc": 0.60,
-    "vcv": 0.62,
-    "cvc": 0.58,
-    "cv_simple": 0.58,
-    "mono": 0.58,
-    "vc_only": 0.56,
-    "vv_only": 0.56,
-    "default": 0.60,
+    "cv": 0.60,
+    "cvvc": 0.64,
+    "vcv": 0.64,
+    "cvc": 0.60,
+    "cv_simple": 0.60,
+    "mono": 0.60,
+    "vc_only": 0.58,
+    "vv_only": 0.58,
+    "default": 0.62,
 }
 
 
@@ -1507,7 +1507,10 @@ def _stabilize_params_to_phone_activity(offset, consonant, cutoff, pre, ovl, ph_
         return offset, consonant, cutoff, pre, ovl
 
     target_offset = max(float(offset) + delta, 0.0)
-    if abs(delta) > 30.0:
+    force_snap_dist = _env_float("UTOA_KR_PRE_FORCE_SNAP_DIST", 140.0)
+    if nearest_dist >= force_snap_dist:
+        offset = target_offset
+    elif abs(delta) > 30.0:
         # 큰 거리 snap은 과교정을 유발할 수 있어 블렌딩으로 완화한다.
         offset = _blend(float(offset), target_offset, 0.45)
     else:
@@ -2507,7 +2510,7 @@ def generate_oto(
     kr_anchor_profile_path="",
     kr_mapping_confidence_threshold=None,
     kr_mapping_max_index_jump_default=1,
-    kr_mapping_max_index_jump_high_conf=2,
+    kr_mapping_max_index_jump_high_conf=1,
     cleanup_timing_jsonl=True,
     auto_format=None,
     callback=None,

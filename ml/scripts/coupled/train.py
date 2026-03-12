@@ -9,8 +9,35 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.a
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from core.format_type_utils import normalize_format_type
 from core.oto_ml_coupled import train_coupled_bundle, train_coupled_bundle_rawmel
+from core.oto_ml.features.mel_patches import MEL_PATCH_CACHE_VERSION, default_patch_cache_root
 from core.runtime_encoding import bootstrap_utf8_runtime
+
+
+def _auto_rawmel_cache_dir(language: str, format_type: str) -> str:
+    lang = str(language or "").strip().lower()
+    fmt = normalize_format_type(lang, format_type) or str(format_type or "").strip().lower()
+    root = default_patch_cache_root()
+    base = os.path.join(root, lang, fmt, str(MEL_PATCH_CACHE_VERSION))
+    if not os.path.isdir(base):
+        return ""
+    candidates = []
+    for name in os.listdir(base):
+        path = os.path.join(base, name)
+        if not os.path.isdir(path):
+            continue
+        manifest = os.path.join(path, "manifest.json")
+        if os.path.isfile(manifest):
+            try:
+                mtime = os.path.getmtime(manifest)
+            except Exception:
+                mtime = 0.0
+            candidates.append((mtime, path))
+    if not candidates:
+        return ""
+    candidates.sort(reverse=True, key=lambda v: v[0])
+    return candidates[0][1]
 
 
 def main():
@@ -28,16 +55,26 @@ def main():
     ap.add_argument("--batch-size", type=int, default=192)
     ap.add_argument("--learning-rate", type=float, default=1e-3)
     ap.add_argument("--min-confidence", type=float, default=0.55)
+    ap.add_argument("--progress-every", type=int, default=100, help="Print progress every N batches (0 disables).")
     ap.add_argument("--backend", default="coupled_nn_v1", help="coupled_nn_v1 or coupled_nn_v2_rawmel")
     ap.add_argument("--rawmel-cache", default="", help="Raw mel patch cache directory for coupled_nn_v2_rawmel")
+    ap.add_argument("--rawmel-prefetch", default="none", help="Raw mel cache prefetch: none|train")
+    ap.add_argument("--rawmel-max-shard-cache", type=int, default=2, help="Max mel patch shards to keep in memory")
     args = ap.parse_args()
 
     alias_types = [v.strip() for v in str(args.alias_types).split(",") if v.strip()]
     backend = str(args.backend or "coupled_nn_v1").strip().lower()
     rawmel_cache = str(args.rawmel_cache or "").strip()
     if backend == "coupled_nn_v2_rawmel":
+        if rawmel_cache and not os.path.isdir(rawmel_cache):
+            print(f"[TRAIN] rawmel_cache not found: {rawmel_cache}")
+            rawmel_cache = ""
         if not rawmel_cache:
-            raise SystemExit("--rawmel-cache is required for coupled_nn_v2_rawmel")
+            rawmel_cache = _auto_rawmel_cache_dir(args.lang, args.format)
+            if rawmel_cache:
+                print(f"[TRAIN] rawmel_cache auto-selected: {rawmel_cache}")
+        if not rawmel_cache:
+            raise SystemExit("--rawmel-cache is required for coupled_nn_v2_rawmel (no auto cache found)")
         meta = train_coupled_bundle_rawmel(
             language=args.lang,
             format_type=args.format,
@@ -52,6 +89,9 @@ def main():
             batch_size=int(args.batch_size),
             learning_rate=float(args.learning_rate),
             min_confidence=float(args.min_confidence),
+            progress_every=int(args.progress_every),
+            rawmel_prefetch=str(args.rawmel_prefetch),
+            rawmel_max_shard_cache=int(args.rawmel_max_shard_cache),
         )
     else:
         meta = train_coupled_bundle(
@@ -67,6 +107,7 @@ def main():
             batch_size=int(args.batch_size),
             learning_rate=float(args.learning_rate),
             min_confidence=float(args.min_confidence),
+            progress_every=int(args.progress_every),
         )
     print(json.dumps(meta, ensure_ascii=False, indent=2))
 

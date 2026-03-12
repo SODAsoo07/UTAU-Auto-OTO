@@ -604,6 +604,7 @@ class ConfigMixin:
             "ml_coupled_enable": self.ml_coupled_enable_var.get() if hasattr(self, "ml_coupled_enable_var") else True,
             "ml_coupled_min_conf": self.ml_coupled_min_conf_var.get() if hasattr(self, "ml_coupled_min_conf_var") else 0.55,
             "ml_coupled_device": self.ml_coupled_device_var.get() if hasattr(self, "ml_coupled_device_var") else "auto",
+            "ml_coupled_backend": self.ml_coupled_backend_var.get() if hasattr(self, "ml_coupled_backend_var") else "auto",
             "ml_coupled_strict_constraint": self.ml_coupled_strict_constraint_var.get() if hasattr(self, "ml_coupled_strict_constraint_var") else False,
             "ja_mapping_words_fallback_enabled": self.ja_mapping_words_fallback_enabled_var.get() if hasattr(self, "ja_mapping_words_fallback_enabled_var") else True,
             "ja_mapping_spn_ratio_threshold": self.ja_mapping_spn_ratio_threshold_var.get() if hasattr(self, "ja_mapping_spn_ratio_threshold_var") else 0.35,
@@ -729,6 +730,10 @@ class ConfigMixin:
                 device = str(config.get("ml_coupled_device", "auto") or "auto").strip().lower()
                 if device in {"auto", "cpu", "cuda"}:
                     self.ml_coupled_device_var.set(device)
+            if "ml_coupled_backend" in config and hasattr(self, "ml_coupled_backend_var"):
+                backend = str(config.get("ml_coupled_backend", "auto") or "auto").strip().lower()
+                if backend in {"auto", "v1", "v2", "coupled_nn_v1", "coupled_nn_v2_rawmel"}:
+                    self.ml_coupled_backend_var.set(backend)
             if "ml_coupled_strict_constraint" in config and hasattr(self, "ml_coupled_strict_constraint_var"):
                 self.ml_coupled_strict_constraint_var.set(bool(config.get("ml_coupled_strict_constraint", False)))
 

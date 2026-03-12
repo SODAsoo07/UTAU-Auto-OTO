@@ -117,74 +117,11 @@ class TabBuildersMixin:
                 )
                 self.gen_missing_vowels_checkbox.pack(anchor="w", pady=(5, 0))
 
-                self.enable_ml_correction_checkbox = ctk.CTkCheckBox(
+                ctk.CTkLabel(
                     opt_frame,
-                    text="LightGBM 보정 적용",
-                    text_color="#FFD54F",
-                    variable=self.enable_ml_correction_var,
-                    command=self._save_config,
-                )
-                self.enable_ml_correction_checkbox.pack(anchor="w", pady=(5, 0))
-
-                selector_mode_row = ctk.CTkFrame(opt_frame, fg_color="transparent")
-                selector_mode_row.pack(anchor="w", pady=(6, 0), fill="x")
-                ctk.CTkLabel(
-                    selector_mode_row,
-                    text="ML 보정 모드",
-                    text_color="#B0BEC5",
-                ).pack(side="left")
-                self.ml_selector_mode_segment = ctk.CTkSegmentedButton(
-                    selector_mode_row,
-                    values=["기본 정책", "델타만", "델타+셀렉터"],
-                    variable=self.ml_selector_mode_var,
-                    command=lambda _value: self._save_config(),
-                )
-                self.ml_selector_mode_segment.pack(side="left", padx=(10, 0))
-
-                coupled_enable_checkbox = ctk.CTkCheckBox(
-                    opt_frame,
-                    text="Coupled mel+oto 보정 사용",
-                    text_color="#80CBC4",
-                    variable=self.ml_coupled_enable_var,
-                    command=self._save_config,
-                )
-                coupled_enable_checkbox.pack(anchor="w", pady=(6, 0))
-
-                coupled_row = ctk.CTkFrame(opt_frame, fg_color="transparent")
-                coupled_row.pack(anchor="w", pady=(6, 0), fill="x")
-                ctk.CTkLabel(
-                    coupled_row,
-                    text="Coupled 최소 신뢰도",
-                    text_color="#B0BEC5",
-                ).pack(side="left")
-                coupled_conf_entry = ctk.CTkEntry(
-                    coupled_row,
-                    width=70,
-                    textvariable=self.ml_coupled_min_conf_var,
-                )
-                coupled_conf_entry.pack(side="left", padx=(10, 8))
-                coupled_conf_entry.bind("<FocusOut>", lambda _e: self._save_config())
-                ctk.CTkLabel(
-                    coupled_row,
-                    text="device",
-                    text_color="#B0BEC5",
-                ).pack(side="left", padx=(6, 4))
-                coupled_device_menu = ctk.CTkOptionMenu(
-                    coupled_row,
-                    values=["auto", "cpu", "cuda"],
-                    variable=self.ml_coupled_device_var,
-                    width=90,
-                    command=lambda _v: self._save_config(),
-                )
-                _style_blue_menu(coupled_device_menu)
-                coupled_device_menu.pack(side="left", padx=(0, 8))
-                ctk.CTkCheckBox(
-                    coupled_row,
-                    text="Strict 제약",
-                    text_color="#B0BEC5",
-                    variable=self.ml_coupled_strict_constraint_var,
-                    command=self._save_config,
-                ).pack(side="left")
+                    text="ML 보정 옵션은 '고급 설정' 탭에서 변경할 수 있습니다.",
+                    text_color="#9E9E9E",
+                ).pack(anchor="w", pady=(6, 0))
 
             ctk.CTkButton(frame, text="실행", width=80, command=cmd).pack(side="right", padx=10)
         if hasattr(self, "_sync_aligner_ui"):
@@ -277,6 +214,137 @@ class TabBuildersMixin:
             wraplength=760,
             justify="left",
         ).pack(fill="x", padx=10, pady=(8, 12))
+
+        ml_frame = ctk.CTkFrame(container)
+        ml_frame.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(
+            ml_frame,
+            text="ML 보정 옵션",
+            font=("", 14, "bold"),
+            text_color=PALETTE.header_accent,
+        ).pack(anchor="w", padx=12, pady=(10, 6))
+
+        self.enable_ml_correction_checkbox = ctk.CTkCheckBox(
+            ml_frame,
+            text="LightGBM 보정 적용",
+            text_color="#FFD54F",
+            variable=self.enable_ml_correction_var,
+            command=self._save_config,
+        )
+        self.enable_ml_correction_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
+
+        selector_mode_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        selector_mode_row.pack(anchor="w", padx=12, pady=(4, 0), fill="x")
+        ctk.CTkLabel(
+            selector_mode_row,
+            text="ML 보정 모드",
+            text_color="#B0BEC5",
+        ).pack(side="left")
+        self.ml_selector_mode_segment = ctk.CTkSegmentedButton(
+            selector_mode_row,
+            values=["기본 정책", "델타만", "델타+셀렉터"],
+            variable=self.ml_selector_mode_var,
+            command=lambda _value: self._save_config(),
+        )
+        self.ml_selector_mode_segment.pack(side="left", padx=(10, 0))
+
+        coupled_enable_checkbox = ctk.CTkCheckBox(
+            ml_frame,
+            text="Coupled mel+oto 보정 사용",
+            text_color="#80CBC4",
+            variable=self.ml_coupled_enable_var,
+            command=self._save_config,
+        )
+        coupled_enable_checkbox.pack(anchor="w", padx=12, pady=(8, 0))
+
+        coupled_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        coupled_row.pack(anchor="w", padx=12, pady=(6, 0), fill="x")
+        ctk.CTkLabel(
+            coupled_row,
+            text="Coupled 최소 신뢰도",
+            text_color="#B0BEC5",
+        ).pack(side="left")
+        coupled_conf_entry = ctk.CTkEntry(
+            coupled_row,
+            width=70,
+            textvariable=self.ml_coupled_min_conf_var,
+        )
+        coupled_conf_entry.pack(side="left", padx=(10, 8))
+        coupled_conf_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(
+            coupled_row,
+            text="device",
+            text_color="#B0BEC5",
+        ).pack(side="left", padx=(6, 4))
+        coupled_device_menu = ctk.CTkOptionMenu(
+            coupled_row,
+            values=["auto", "cpu", "cuda"],
+            variable=self.ml_coupled_device_var,
+            width=90,
+            command=lambda _v: self._save_config(),
+        )
+        _style_blue_menu(coupled_device_menu)
+        coupled_device_menu.pack(side="left", padx=(0, 8))
+        ctk.CTkCheckBox(
+            coupled_row,
+            text="Strict 제약",
+            text_color="#B0BEC5",
+            variable=self.ml_coupled_strict_constraint_var,
+            command=self._save_config,
+        ).pack(side="left")
+
+        backend_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        backend_row.pack(anchor="w", padx=12, pady=(6, 8), fill="x")
+        ctk.CTkLabel(
+            backend_row,
+            text="Coupled backend",
+            text_color="#B0BEC5",
+        ).pack(side="left")
+        backend_menu = ctk.CTkOptionMenu(
+            backend_row,
+            values=["auto", "v1", "v2"],
+            variable=self.ml_coupled_backend_var,
+            width=90,
+            command=lambda _v: self._on_ml_backend_change(),
+        )
+        _style_blue_menu(backend_menu)
+        backend_menu.pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(
+            backend_row,
+            text="(v2=mel raw encoder)",
+            text_color="#9E9E9E",
+        ).pack(side="left", padx=(8, 0))
+
+        detail_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        detail_row.pack(anchor="w", padx=12, pady=(2, 0), fill="x")
+        if not hasattr(self, "ml_coupled_status_detail_var"):
+            self.ml_coupled_status_detail_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            detail_row,
+            text="자세히 보기 (경로/버전/생성일)",
+            text_color="#B0BEC5",
+            variable=self.ml_coupled_status_detail_var,
+            command=lambda: self._on_ml_backend_detail_toggle(),
+        ).pack(side="left")
+
+        self.ml_coupled_status_label = ctk.CTkLabel(
+            ml_frame,
+            text="",
+            text_color="#9E9E9E",
+            wraplength=720,
+            justify="left",
+        )
+        self.ml_coupled_status_label.pack(anchor="w", padx=12, pady=(4, 8))
+        self.ml_coupled_status_detail_label = ctk.CTkLabel(
+            ml_frame,
+            text="",
+            text_color="#9E9E9E",
+            wraplength=760,
+            justify="left",
+        )
+        self.ml_coupled_status_detail_label.pack(anchor="w", padx=12, pady=(0, 8))
+        if hasattr(self, "_refresh_ml_backend_status"):
+            self._refresh_ml_backend_status()
 
         aligner_frame = ctk.CTkFrame(container)
         aligner_frame.pack(fill="x", padx=10, pady=5)

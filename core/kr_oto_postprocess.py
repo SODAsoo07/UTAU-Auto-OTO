@@ -62,6 +62,56 @@ def guard_kr_vc_cutoff_to_next_segment(
     return validate_fn(offset, consonant, cutoff, pre, ovl)
 
 
+def guard_kr_vv_cutoff_to_current_vowel(
+    offset: float,
+    consonant: float,
+    cutoff: float,
+    pre: float,
+    ovl: float,
+    syll_idx: Optional[int],
+    syllables_info: Sequence[dict],
+    validate_fn: Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]],
+) -> Tuple[float, float, float, float, float]:
+    if syll_idx is None or syll_idx < 0:
+        return validate_fn(offset, consonant, cutoff, pre, ovl)
+    if not syllables_info or syll_idx >= len(syllables_info):
+        return validate_fn(offset, consonant, cutoff, pre, ovl)
+
+    curr_syl = syllables_info[syll_idx] or {}
+    curr_phones = curr_syl.get("phones") or []
+    if not curr_phones:
+        return validate_fn(offset, consonant, cutoff, pre, ovl)
+
+    from core.kr_oto_rules import find_vowel_phone
+
+    _, v_phone = find_vowel_phone(curr_phones)
+    v_end_abs = float(getattr(v_phone, "maxTime", 0.0) or 0.0) * 1000.0
+
+    offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
+    cutoff_abs = abs(float(cutoff))
+
+    tail_keep = 12.0
+    min_cut_gap = 12.0
+    v_end_rel = max(v_end_abs - float(offset), float(consonant) + min_cut_gap)
+    cutoff_cap = v_end_rel + tail_keep
+
+    if (syll_idx + 1) < len(syllables_info):
+        next_syl = syllables_info[syll_idx + 1] or {}
+        next_phones = next_syl.get("phones") or []
+        if next_phones:
+            next_onset_abs = float(next_phones[0].minTime) * 1000.0
+            next_onset_rel = max(next_onset_abs - float(offset), float(pre) + 8.0)
+            cutoff_cap = min(cutoff_cap, next_onset_rel - 4.0)
+
+    min_cutoff = float(consonant) + min_cut_gap
+    if cutoff_cap < min_cutoff:
+        cutoff_cap = min_cutoff
+
+    cutoff_abs = min(cutoff_abs, cutoff_cap)
+    cutoff = -cutoff_abs
+    return validate_fn(offset, consonant, cutoff, pre, ovl)
+
+
 def log_post_timing_events(log_fn, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced):
     """후처리 가드의 의미있는 이동량만 간단히 기록합니다."""
     if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
@@ -156,6 +206,18 @@ class KrPostprocessContext:
                 self.syllables_info,
                 self.validate_fn,
                 alias_text=alias_text,
+            )
+
+        if alias_type == "vv":
+            offset, consonant, cutoff, pre, ovl = guard_kr_vv_cutoff_to_current_vowel(
+                offset,
+                consonant,
+                cutoff,
+                pre,
+                ovl,
+                current_w_idx,
+                self.syllables_info,
+                self.validate_fn,
             )
 
         if enable_cutoff_guard and alias_type in {"cv", "cv_head"}:

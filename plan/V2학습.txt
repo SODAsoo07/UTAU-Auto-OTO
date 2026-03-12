@@ -1,0 +1,43 @@
+Raw mel patch cache 생성
+$root = "C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO"
+Set-Location $root
+
+python .\ml\scripts\coupled\build_mel_patch_cache.py `
+  --dataset ".\ml_workspace\datasets\korean\dataset_korean_cvvc_coupled.csv" `
+  --dataset-root ".\dataset" `
+  --lang korean `
+  --format cvvc `
+  --allow-missing
+
+학습
+$root = "C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO"
+Set-Location $root
+
+$cache = ".\.cache\oto_ml_mel_patches\korean\cvvc\v1\<hash>"
+
+python .\ml\scripts\coupled\train.py `
+  --backend coupled_nn_v2_rawmel `
+  --rawmel-cache $cache `
+  --lang korean `
+  --format cvvc `
+  --dataset ".\ml_workspace\datasets\korean\dataset_korean_cvvc_coupled.csv" `
+  --out-dir ".\ML_models\korean\cvvc\v2_rawmel" `
+  --device cuda `
+  --epochs 70 `
+  --batch-size 192 `
+  --learning-rate 0.001 `
+  --min-confidence 0.55
+
+평가
+python .\ml\scripts\coupled\evaluate.py `
+  --model-dir ".\ML_models\korean\cvvc\v2_rawmel" `
+  --dataset ".\ml_workspace\datasets\korean\dataset_korean_cvvc_coupled.csv" `
+  --lang korean `
+  --format cvvc `
+  --device cuda `
+  --rawmel-cache $cache `
+  --report ".\logs\eval_korean_cvvc_v2_rawmel.json"
+
+런타임 사용 시
+$env:UTOA_ML_COUPLED_BACKEND = "coupled_nn_v2_rawmel"
+

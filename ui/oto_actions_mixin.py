@@ -115,6 +115,11 @@ class OtoActionsMixin:
                     if hasattr(self, "ml_coupled_device_var")
                     else "auto"
                 )
+                ml_coupled_backend = (
+                    str(self.ml_coupled_backend_var.get()).strip().lower()
+                    if hasattr(self, "ml_coupled_backend_var")
+                    else "auto"
+                )
                 ml_coupled_strict_constraint = (
                     self.ml_coupled_strict_constraint_var.get()
                     if hasattr(self, "ml_coupled_strict_constraint_var")
@@ -128,12 +133,15 @@ class OtoActionsMixin:
                 selector_mode_code = self._apply_ml_selector_runtime_mode(ml_selector_mode)
                 if ml_coupled_device not in {"auto", "cpu", "cuda"}:
                     ml_coupled_device = "auto"
+                if ml_coupled_backend not in {"auto", "v1", "v2", "coupled_nn_v1", "coupled_nn_v2_rawmel"}:
+                    ml_coupled_backend = "auto"
                 os.environ["UTOA_KR_MAPPING_CONF_THRESHOLD"] = str(float(kr_conf_threshold))
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_DEFAULT"] = str(int(kr_jump_default))
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_HIGH_CONF"] = str(int(kr_jump_hi))
                 os.environ["UTOA_ML_COUPLED_ENABLE"] = "1" if ml_coupled_enable else "0"
                 os.environ["UTOA_ML_COUPLED_MIN_CONF"] = str(float(ml_coupled_min_conf))
                 os.environ["UTOA_ML_COUPLED_DEVICE"] = str(ml_coupled_device)
+                os.environ["UTOA_ML_COUPLED_BACKEND"] = str(ml_coupled_backend or "auto")
                 os.environ["UTOA_ML_COUPLED_STRICT_CONSTRAINT"] = "1" if ml_coupled_strict_constraint else "0"
                 if kr_anchor_profile_path:
                     os.environ["UTOA_KR_ANCHOR_PROFILE_PATH"] = kr_anchor_profile_path
@@ -144,7 +152,7 @@ class OtoActionsMixin:
                     f"[OTO-ML] 실행 옵션: ml={'ON' if enable_ml_correction else 'OFF'}, selector={self._describe_ml_selector_mode(selector_mode_code)}"
                 )
                 self._append_log(
-                    f"[OTO-ML] coupled={'ON' if ml_coupled_enable else 'OFF'}, min_conf={float(ml_coupled_min_conf):.2f}, device={ml_coupled_device}, strict={'ON' if ml_coupled_strict_constraint else 'OFF'}"
+                    f"[OTO-ML] coupled={'ON' if ml_coupled_enable else 'OFF'}, backend={ml_coupled_backend}, min_conf={float(ml_coupled_min_conf):.2f}, device={ml_coupled_device}, strict={'ON' if ml_coupled_strict_constraint else 'OFF'}"
                 )
                 if self.no_base_oto_var.get():
                     self._append_log("설정: '기본 OTO 없이 생성' 사용 중입니다.")

@@ -6,6 +6,7 @@ Coupled mel+OTO training.
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import os
@@ -19,8 +20,13 @@ except Exception:  # pragma: no cover
 
 try:
     import pandas as pd
+    try:  # pragma: no cover
+        from pandas.errors import ParserError
+    except Exception:  # pragma: no cover
+        ParserError = Exception
 except Exception:  # pragma: no cover
     pd = None
+    ParserError = Exception
 
 try:
     from sklearn.metrics import mean_absolute_error
@@ -55,11 +61,41 @@ from core.oto_ml.features.schema import (
 )
 from core.oto_ml.features.mel_patches import (
     MelPatchCacheIndex,
+    make_mel_patch_key,
     patch_spec_hash,
 )
 from core.oto_ml.pairing.vc_cv_pairing import _batch_pair_positions, _build_vc_cv_pair_map
 
 logger = logging.getLogger(__name__)
+
+
+def _read_dataset_csv(path: str):
+    df = pd.read_csv(path, low_memory=False)
+    return df
+
+
+def _read_dataset_csv_resilient(path: str):
+    try:
+        return _read_dataset_csv(path)
+    except Exception as exc:
+        if isinstance(exc, ParserError):
+            msg = f"[TRAIN] CSV parse failed, retrying with python engine (bad lines may be skipped): {exc}"
+            print(msg)
+            logger.warning(msg)
+            try:
+                return pd.read_csv(path, engine="python", on_bad_lines="warn")
+            except Exception:
+                msg2 = "[TRAIN] CSV parse still failing; retrying with relaxed quoting (skipping bad lines)."
+                print(msg2)
+                logger.warning(msg2)
+                return pd.read_csv(
+                    path,
+                    engine="python",
+                    on_bad_lines="skip",
+                    quoting=csv.QUOTE_NONE,
+                    escapechar="\\",
+                )
+        raise
 
 
 def _prepare_training_frame(
@@ -132,13 +168,16 @@ def train_coupled_bundle(
     batch_size: int = 192,
     learning_rate: float = 1e-3,
     min_confidence: float = 0.55,
+    progress_every: int = 0,
 ) -> Dict[str, Any]:
     _require_training_stack()
     if not dataset_csv or not os.path.exists(dataset_csv):
         raise FileNotFoundError(dataset_csv)
 
     torch, nn, F = _import_torch()
-    df = pd.read_csv(dataset_csv, low_memory=False)
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+    df = _read_dataset_csv_resilient(dataset_csv)
     df = _prepare_training_frame(
         df,
         language=language,
@@ -259,6 +298,8 @@ def train_coupled_bundle(
     aux_dim = len(AUX_TARGET_NAMES) if use_aux else 0
     model = _build_model(torch, nn, in_dim=int(X.shape[1]), patch_dim=int(P.shape[1]), aux_dim=aux_dim)
     run_device = _resolve_device(torch, requested=device)
+    if isinstance(run_device, str):
+        run_device = torch.device(run_device)
     model = model.to(run_device)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(learning_rate))
 
@@ -298,11 +339,16 @@ def train_coupled_bundle(
 
     train_n = int(X_train.shape[0])
     batch_n = max(1, int(batch_size))
+    epochs_n = max(1, int(epochs))
+    progress_every = int(progress_every)
+    total_batches = max(1, int((train_n + batch_n - 1) / batch_n))
+    if progress_every > 0:
+        print(f"[TRAIN] rows={train_n} batches={total_batches} epochs={epochs_n} device={run_device}")
 
-    for _epoch in range(max(1, int(epochs))):
+    for epoch in range(epochs_n):
         model.train()
         perm = torch.randperm(train_n, device=run_device)
-        for start in range(0, train_n, batch_n):
+        for batch_i, start in enumerate(range(0, train_n, batch_n), start=1):
             batch_idx = perm[start:start + batch_n]
             xb = X_train[batch_idx]
             pb = P_train[batch_idx]
@@ -379,6 +425,9 @@ def train_coupled_bundle(
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
+            if progress_every > 0 and (batch_i % progress_every == 0 or batch_i == total_batches):
+                loss_val = float(total_loss.detach().cpu().item())
+                print(f"[TRAIN] epoch={epoch + 1}/{epochs_n} batch={batch_i}/{total_batches} loss={loss_val:.4f}")
 
         model.eval()
         with torch.no_grad():
@@ -439,14 +488,22 @@ def train_coupled_bundle(
                 ).item()
             )
 
+        new_best = False
         if val_total < best_val:
             best_val = val_total
             wait = 0
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            new_best = True
         else:
             wait += 1
             if wait >= patience:
                 break
+        if progress_every > 0:
+            status = "best" if new_best else "wait"
+            print(
+                f"[TRAIN] epoch={epoch + 1}/{epochs_n} val_loss={val_total:.4f} best={best_val:.4f} "
+                f"patience={wait}/{patience} status={status}"
+            )
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -572,6 +629,9 @@ def train_coupled_bundle_rawmel(
     batch_size: int = 192,
     learning_rate: float = 1e-3,
     min_confidence: float = 0.55,
+    progress_every: int = 0,
+    rawmel_prefetch: str = "none",
+    rawmel_max_shard_cache: int = 2,
 ) -> Dict[str, Any]:
     _require_training_stack()
     if not dataset_csv or not os.path.exists(dataset_csv):
@@ -580,7 +640,7 @@ def train_coupled_bundle_rawmel(
         raise FileNotFoundError(rawmel_cache_dir)
 
     torch, nn, F = _import_torch()
-    df = pd.read_csv(dataset_csv, low_memory=False)
+    df = _read_dataset_csv_resilient(dataset_csv)
     df = _prepare_training_frame(
         df,
         language=language,
@@ -592,10 +652,65 @@ def train_coupled_bundle_rawmel(
     if len(df) < 16:
         raise RuntimeError("Coupled dataset is too small (need >= 16 rows).")
 
+    required_key_cols = [
+        "language",
+        "format_type",
+        "voicebank_id",
+        "wav_norm",
+        "alias_norm",
+        "occurrence_index",
+        "row_index_in_wav",
+    ]
     if "mel_patch_key" not in df.columns:
-        raise RuntimeError("Dataset is missing mel_patch_key column (rebuild dataset CSV).")
+        missing = [c for c in required_key_cols if c not in df.columns]
+        if missing:
+            raise RuntimeError(
+                "Dataset is missing mel_patch_key and required columns: "
+                + ", ".join(missing)
+                + " (rebuild dataset CSV)."
+            )
+        print("[TRAIN] mel_patch_key missing; computing from columns.")
+        def _build_patch_key(row):
+            row_lang = str(row.get("language", "") or "").strip().lower()
+            row_fmt = normalize_format_type(row_lang, row.get("format_type", "")) or str(row.get("format_type", "") or "").strip().lower()
+            return make_mel_patch_key(
+                language=row_lang,
+                format_type=row_fmt,
+                voicebank_id=str(row.get("voicebank_id", "") or ""),
+                wav_norm=str(row.get("wav_norm", "") or ""),
+                alias_norm=str(row.get("alias_norm", "") or ""),
+                occurrence_index=int(float(row.get("occurrence_index", 0) or 0)),
+                row_index_in_wav=int(float(row.get("row_index_in_wav", 0) or 0)),
+            )
+        df["mel_patch_key"] = df.apply(_build_patch_key, axis=1)
+    else:
+        # Fill empty keys if present
+        key_series = df["mel_patch_key"].astype(str)
+        empty_mask = key_series.str.strip() == ""
+        if empty_mask.any():
+            missing = [c for c in required_key_cols if c not in df.columns]
+            if missing:
+                raise RuntimeError(
+                    "Dataset has empty mel_patch_key but missing required columns: "
+                    + ", ".join(missing)
+                    + " (rebuild dataset CSV)."
+                )
+            print(f"[TRAIN] mel_patch_key empty rows={int(empty_mask.sum())}; computing from columns.")
+            def _build_patch_key(row):
+                row_lang = str(row.get("language", "") or "").strip().lower()
+                row_fmt = normalize_format_type(row_lang, row.get("format_type", "")) or str(row.get("format_type", "") or "").strip().lower()
+                return make_mel_patch_key(
+                    language=row_lang,
+                    format_type=row_fmt,
+                    voicebank_id=str(row.get("voicebank_id", "") or ""),
+                    wav_norm=str(row.get("wav_norm", "") or ""),
+                    alias_norm=str(row.get("alias_norm", "") or ""),
+                    occurrence_index=int(float(row.get("occurrence_index", 0) or 0)),
+                    row_index_in_wav=int(float(row.get("row_index_in_wav", 0) or 0)),
+                )
+            df.loc[empty_mask, "mel_patch_key"] = df[empty_mask].apply(_build_patch_key, axis=1)
 
-    cache_index = MelPatchCacheIndex.load(rawmel_cache_dir)
+    cache_index = MelPatchCacheIndex.load(rawmel_cache_dir, max_shard_cache=int(rawmel_max_shard_cache))
     patch_spec = cache_index.patch_spec or {}
     hop_ms = float(patch_spec.get("frame_hop_ms", 5.0))
     mel_bins = int(patch_spec.get("mel_bins", 80))
@@ -725,6 +840,8 @@ def train_coupled_bundle_rawmel(
         aux_dim=aux_dim,
     )
     run_device = _resolve_device(torch, requested=device)
+    if isinstance(run_device, str):
+        run_device = torch.device(run_device)
     model = model.to(run_device)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(learning_rate))
 
@@ -755,6 +872,27 @@ def train_coupled_bundle_rawmel(
     keys_train = [keys[i] for i in train_idx.tolist()]
     keys_valid = [keys[i] for i in valid_idx.tolist()]
 
+    prefetch_mode = str(rawmel_prefetch or "none").strip().lower()
+    if prefetch_mode not in ("none", "train"):
+        prefetch_mode = "none"
+    onset_train_cache = None
+    tail_train_cache = None
+    onset_valid_cache = None
+    tail_valid_cache = None
+    if prefetch_mode == "train":
+        print("[TRAIN] rawmel prefetch: train")
+        onset_train_cache, tail_train_cache = cache_index.get_batch(keys_train)
+        onset_valid_cache, tail_valid_cache = cache_index.get_batch(keys_valid)
+
+    def _np_to_device(np_arr):
+        arr = np.ascontiguousarray(np_arr, dtype=np.float32)
+        t = torch.from_numpy(arr)
+        if run_device.type == "cuda":
+            t = t.pin_memory().to(run_device, non_blocking=True)
+        else:
+            t = t.to(run_device)
+        return t
+
     target_weights = torch.tensor([1.00, 0.90, 0.95, 1.00, 0.65], dtype=torch.float32, device=run_device).view(1, -1)
     cons_margin = 10.0
     cut_margin = 10.0
@@ -767,11 +905,19 @@ def train_coupled_bundle_rawmel(
 
     train_n = int(X_train.shape[0])
     batch_n = max(1, int(batch_size))
+    epochs_n = max(1, int(epochs))
+    progress_every = int(progress_every)
+    total_batches = max(1, int((train_n + batch_n - 1) / batch_n))
+    if progress_every > 0:
+        print(
+            f"[TRAIN] rows={train_n} batches={total_batches} epochs={epochs_n} device={run_device} "
+            f"rawmel={mel_bins}x(onset={onset_frames},tail={tail_frames})"
+        )
 
-    for _epoch in range(max(1, int(epochs))):
+    for epoch in range(epochs_n):
         model.train()
         perm = torch.randperm(train_n, device=run_device)
-        for start in range(0, train_n, batch_n):
+        for batch_i, start in enumerate(range(0, train_n, batch_n), start=1):
             batch_idx = perm[start:start + batch_n]
             idx_list = [int(i) for i in batch_idx.detach().cpu().tolist()]
             xb = X_train[batch_idx]
@@ -780,10 +926,14 @@ def train_coupled_bundle_rawmel(
             bb = B_train[batch_idx]
             mb = M_train[batch_idx]
             wb = W_train[batch_idx]
-            batch_keys = [keys_train[i] for i in idx_list]
-            onset_np, tail_np = cache_index.get_batch(batch_keys)
-            onset_t = torch.tensor(onset_np, dtype=torch.float32, device=run_device).unsqueeze(1)
-            tail_t = torch.tensor(tail_np, dtype=torch.float32, device=run_device).unsqueeze(1)
+            if prefetch_mode == "train" and onset_train_cache is not None and tail_train_cache is not None:
+                onset_np = onset_train_cache[idx_list]
+                tail_np = tail_train_cache[idx_list]
+            else:
+                batch_keys = [keys_train[i] for i in idx_list]
+                onset_np, tail_np = cache_index.get_batch(batch_keys)
+            onset_t = _np_to_device(onset_np).unsqueeze(1)
+            tail_t = _np_to_device(tail_np).unsqueeze(1)
 
             out = model(xb, pb, onset_t, tail_t)
             if use_aux:
@@ -852,12 +1002,19 @@ def train_coupled_bundle_rawmel(
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
+            if progress_every > 0 and (batch_i % progress_every == 0 or batch_i == total_batches):
+                loss_val = float(total_loss.detach().cpu().item())
+                print(f"[TRAIN] epoch={epoch + 1}/{epochs_n} batch={batch_i}/{total_batches} loss={loss_val:.4f}")
 
         model.eval()
         with torch.no_grad():
-            onset_valid_np, tail_valid_np = cache_index.get_batch(keys_valid)
-            onset_valid_t = torch.tensor(onset_valid_np, dtype=torch.float32, device=run_device).unsqueeze(1)
-            tail_valid_t = torch.tensor(tail_valid_np, dtype=torch.float32, device=run_device).unsqueeze(1)
+            if prefetch_mode == "train" and onset_valid_cache is not None and tail_valid_cache is not None:
+                onset_valid_np = onset_valid_cache
+                tail_valid_np = tail_valid_cache
+            else:
+                onset_valid_np, tail_valid_np = cache_index.get_batch(keys_valid)
+            onset_valid_t = _np_to_device(onset_valid_np).unsqueeze(1)
+            tail_valid_t = _np_to_device(tail_valid_np).unsqueeze(1)
             out_val = model(X_valid, P_valid, onset_valid_t, tail_valid_t)
             if use_aux:
                 pred_val, conf_val, aux_val = out_val
@@ -915,22 +1072,34 @@ def train_coupled_bundle_rawmel(
                 ).item()
             )
 
+        new_best = False
         if val_total < best_val:
             best_val = val_total
             wait = 0
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            new_best = True
         else:
             wait += 1
             if wait >= patience:
                 break
+        if progress_every > 0:
+            status = "best" if new_best else "wait"
+            print(
+                f"[TRAIN] epoch={epoch + 1}/{epochs_n} val_loss={val_total:.4f} best={best_val:.4f} "
+                f"patience={wait}/{patience} status={status}"
+            )
 
     if best_state is not None:
         model.load_state_dict(best_state)
     model.eval()
     with torch.no_grad():
-        onset_valid_np, tail_valid_np = cache_index.get_batch(keys_valid)
-        onset_valid_t = torch.tensor(onset_valid_np, dtype=torch.float32, device=run_device).unsqueeze(1)
-        tail_valid_t = torch.tensor(tail_valid_np, dtype=torch.float32, device=run_device).unsqueeze(1)
+        if prefetch_mode == "train" and onset_valid_cache is not None and tail_valid_cache is not None:
+            onset_valid_np = onset_valid_cache
+            tail_valid_np = tail_valid_cache
+        else:
+            onset_valid_np, tail_valid_np = cache_index.get_batch(keys_valid)
+        onset_valid_t = _np_to_device(onset_valid_np).unsqueeze(1)
+        tail_valid_t = _np_to_device(tail_valid_np).unsqueeze(1)
         out_valid = model(X_valid, P_valid, onset_valid_t, tail_valid_t)
         if use_aux:
             pred_valid, conf_valid, aux_valid = out_valid
@@ -1058,7 +1227,7 @@ def evaluate_coupled_bundle(
             payload_meta = json.load(f)
 
     bundle = load_coupled_bundle(model_dir, meta=payload_meta, schema=get_feature_schema(), device=device)
-    df = pd.read_csv(dataset_csv, low_memory=False)
+    df = _read_dataset_csv_resilient(dataset_csv)
     lang = str(language or payload_meta.get("language", "")).strip().lower()
     fmt = normalize_format_type(lang, format_type or payload_meta.get("format_type", "")) or "general"
     df = _prepare_training_frame(df, language=lang, format_type=fmt)

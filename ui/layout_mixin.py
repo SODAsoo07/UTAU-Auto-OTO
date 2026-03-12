@@ -1,3 +1,6 @@
+import json
+import os
+
 import customtkinter as ctk
 
 from core.format_type_utils import normalize_auto_format_value
@@ -156,7 +159,7 @@ class LayoutMixin:
             values=format_options,
             variable=self.auto_format_var,
             width=190,
-            command=self._save_config,
+            command=self._on_format_change,
         )
         _style_blue_menu(self.format_dropdown)
         self.format_dropdown.pack(side="left", padx=(6, 8))
@@ -393,6 +396,7 @@ class LayoutMixin:
         current_code = normalize_auto_format_value(self._get_language(), self.auto_format_var.get())
         self._set_auto_format_from_code(current_code, self._get_language())
         self._save_config()
+        self._refresh_ml_backend_status()
     def _get_ja_alias_style_code(self):
         style = self.ja_alias_style_var.get().strip()
         if style == "히라가나":
@@ -446,6 +450,84 @@ class LayoutMixin:
             if hasattr(self, "tpl_browse_btn"):
                 self.tpl_browse_btn.configure(state="normal")
         self._save_config()
+
+    def _on_format_change(self, _value=None):
+        self._save_config()
+        self._refresh_ml_backend_status()
+
+    def _on_ml_backend_change(self, _value=None):
+        self._save_config()
+        self._refresh_ml_backend_status()
+
+    def _on_ml_backend_detail_toggle(self):
+        self._refresh_ml_backend_status()
+
+    def _refresh_ml_backend_status(self):
+        if not hasattr(self, "ml_coupled_status_label"):
+            return
+        try:
+            from core.format_type_utils import normalize_auto_format_value
+            from core.oto_ml_refiner import _resolve_backend_model_dir
+        except Exception:
+            return
+
+        lang = self._get_language() if hasattr(self, "_get_language") else "korean"
+        fmt = ""
+        if hasattr(self, "auto_format_var"):
+            fmt = normalize_auto_format_value(lang, self.auto_format_var.get())
+        fmt_display = fmt or "auto"
+        routed_fmt = fmt or "general"
+        v2_dir = _resolve_backend_model_dir(lang, routed_fmt, backend="coupled_nn_v2_rawmel")
+        v1_dir = _resolve_backend_model_dir(lang, routed_fmt, backend="coupled_nn_v1")
+        v2_status = "✅" if v2_dir else "❌"
+        v1_status = "✅" if v1_dir else "❌"
+        selected = ""
+        if hasattr(self, "ml_coupled_backend_var"):
+            selected = str(self.ml_coupled_backend_var.get() or "auto")
+        text = f"현재 포맷: {fmt_display} | v2 {v2_status} / v1 {v1_status}"
+        if selected:
+            text += f" | 선택: {selected}"
+        self.ml_coupled_status_label.configure(text=text)
+
+        if not hasattr(self, "ml_coupled_status_detail_label"):
+            return
+        show_detail = False
+        if hasattr(self, "ml_coupled_status_detail_var"):
+            try:
+                show_detail = bool(self.ml_coupled_status_detail_var.get())
+            except Exception:
+                show_detail = False
+        if not show_detail:
+            self.ml_coupled_status_detail_label.configure(text="")
+            return
+
+        def _read_meta(model_dir: str) -> dict:
+            if not model_dir:
+                return {}
+            meta_path = os.path.join(model_dir, "model_meta.json")
+            if not os.path.isfile(meta_path):
+                return {}
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    return json.load(f) or {}
+            except Exception:
+                return {}
+
+        v2_meta = _read_meta(v2_dir) if v2_dir else {}
+        v1_meta = _read_meta(v1_dir) if v1_dir else {}
+
+        def _fmt_line(label: str, model_dir: str, meta: dict) -> str:
+            if not model_dir:
+                return f"{label}: (미설치)"
+            version = str(meta.get("model_version", "") or meta.get("version", "") or "unknown")
+            created = str(meta.get("created_at", "") or "unknown")
+            return f"{label}: {model_dir} | version={version} | created_at={created}"
+
+        detail_lines = [
+            _fmt_line("v2", v2_dir or "", v2_meta),
+            _fmt_line("v1", v1_dir or "", v1_meta),
+        ]
+        self.ml_coupled_status_detail_label.configure(text="\n".join(detail_lines))
 
     def _toggle_advanced_options(self, force=None):
         if force is None:

@@ -138,6 +138,7 @@ class App(
         self.ml_coupled_enable_var = ctk.BooleanVar(value=True)
         self.ml_coupled_min_conf_var = ctk.DoubleVar(value=0.55)
         self.ml_coupled_device_var = ctk.StringVar(value="auto")
+        self.ml_coupled_backend_var = ctk.StringVar(value="auto")
         self.ml_coupled_strict_constraint_var = ctk.BooleanVar(value=False)
         self.ja_mapping_words_fallback_enabled_var = ctk.BooleanVar(value=True)
         self.ja_mapping_spn_ratio_threshold_var = ctk.DoubleVar(value=0.35)
