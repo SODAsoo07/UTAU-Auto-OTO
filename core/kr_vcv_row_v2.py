@@ -112,6 +112,7 @@ def run_kr_vcv_row(
         generate_openutau=generate_openutau,
         alias_suffix=alias_suffix,
         alias_type="vcv",
+        file_format=file_format,
         wav_duration_ms=wav_duration_ms,
         validate_fn=validate_fn,
         log_post_timing_events_fn=log_post_timing_events_fn,

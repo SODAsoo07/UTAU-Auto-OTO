@@ -14,6 +14,7 @@ class PreparedFileContext:
     error_message: str = ""
     tg_path: str = ""
     real_wav_name: str = ""
+    output_wav_name: str = ""
     wav_path_for_signal: str = ""
     mel_ctx_for_file: object = None
     wav_duration_ms: float = 0.0
@@ -50,8 +51,9 @@ def prepare_file_context(
     context.tg_info = tg_info
     context.tg_path = str(tg_info.get("path", "") or "")
     context.real_wav_name = str(tg_info.get("real_name", "") or "")
+    context.output_wav_name = str(tg_info.get("output_name", context.real_wav_name) or context.real_wav_name)
     context.wav_path_for_signal = find_wav_path_fn(
-        context.real_wav_name,
+        context.output_wav_name or context.real_wav_name,
         wav_root_for_signal,
         wav_index_for_signal,
     )

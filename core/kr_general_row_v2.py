@@ -132,6 +132,7 @@ def run_kr_general_row(
         generate_openutau=generate_openutau,
         alias_suffix=alias_suffix,
         alias_type=alias_type,
+        file_format=file_format,
         wav_duration_ms=wav_duration_ms,
         validate_fn=validate_fn,
         log_post_timing_events_fn=log_post_timing_events_fn,
