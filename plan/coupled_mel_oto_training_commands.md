@@ -134,8 +134,8 @@ python .\ml\scripts\coupled\build_dataset.py `
   --tg-dir ".\dataset\korean\cvvc\BankA\work" `
   --wav-dir ".\dataset\korean\cvvc\BankA\work" `
   --out ".\ml_workspace\datasets\korean\dataset_korean_cvvc_coupled.csv" `
-  --voicebank-id "BankA" `
-  --format-override cvvc
+  --voicebank-id "BankA"   --format-override cvvc`
+
 ```
 
 참고:
@@ -239,6 +239,14 @@ powershell -ExecutionPolicy Bypass -File ".\ml\scripts\run_coupled_mel_oto_train
   -ResumePrepare `
   -RetryFailedPrepare
 ```
+
+학습만
+powershell -ExecutionPolicy Bypass -File ".\ml\scripts\run_coupled_mel_oto_training.ps1" `
+  -Lang korean `
+  -Format cvvc `
+  -Device cuda `
+  -ExportBundle `
+  -InstallBundle
 
 ## 단일 work 디렉터리 대상 실행 예시
 

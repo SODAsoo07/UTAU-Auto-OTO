@@ -63,6 +63,17 @@ def _normalize_ja_alias_token(token: str) -> str:
     return text.lower()
 
 
+def _strip_attached_pitch_suffix_token(token: str) -> str:
+    text = str(token or "").strip()
+    if not text:
+        return ""
+    stripped = re.sub(r"([A-G](?:#|b)?[0-8])$", "", text).strip()
+    stripped = stripped.rstrip("_- ").strip()
+    if stripped:
+        return stripped
+    return text
+
+
 def canonicalize_alias_for_matching(language: str, alias: str, custom_map: Optional[Dict[str, str]] = None) -> str:
     lang = str(language or "").strip().lower() or "korean"
     text = unicodedata.normalize("NFKC", str(alias or "")).strip()
@@ -74,13 +85,17 @@ def canonicalize_alias_for_matching(language: str, alias: str, custom_map: Optio
     if lang == "japanese":
         parts = [_normalize_ja_alias_token(part) for part in re.split(r"\s+", text) if part.strip()]
         text = " ".join(parts)
-    text = re.sub(r"\s+", " ", text).strip().lower()
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+    text = " ".join(_strip_attached_pitch_suffix_token(part) for part in text.split(" ") if part.strip()).strip()
     if not text:
         return ""
     text = strip_alias_annotation_suffixes(
         text,
         classifier=lambda candidate: _classify_alias_for_normalization(lang, candidate, custom_map=custom_map),
     )
+    text = re.sub(r"\s+", " ", text).strip().lower()
     base_type = _classify_alias_for_normalization(lang, text, custom_map=custom_map)
     if base_type == "br":
         return "br"

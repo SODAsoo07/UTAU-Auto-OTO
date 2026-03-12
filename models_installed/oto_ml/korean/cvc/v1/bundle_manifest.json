@@ -7,9 +7,9 @@
   "alias_family": "",
   "backend": "coupled_nn_v1",
   "model_version": "v1",
-  "feature_version": "v7",
-  "train_rows": 1531,
-  "voicebank_count": 6,
+  "feature_version": "v10",
+  "train_rows": 15331,
+  "voicebank_count": 323,
   "required_files": [
     "feature_schema.json",
     "model_meta.json",
@@ -20,23 +20,23 @@
   "files": [
     {
       "name": "feature_schema.json",
-      "size": 2730,
-      "sha256": "f47ec9564b927a35f19cf517aeee5e5cf87412eddb360a9ca938dddded9f71ac"
+      "size": 3265,
+      "sha256": "f0d76f64aece4fc42da9d267393ff6767168df295519283d83ad35613cfc45ed"
     },
     {
       "name": "model_meta.json",
-      "size": 3886,
-      "sha256": "148a2ad9cd85c3b5fe71a45f9da12097510c128c1ad820667ad1fb7babfc9398"
+      "size": 5058,
+      "sha256": "4ca1ecf95410adbda197a3b18d619f5eaa84a48811a76bc8b2e96ea6d8ea994b"
     },
     {
       "name": "eval_summary.json",
-      "size": 702,
-      "sha256": "03e6590085eca7bb9160a48974c8660c561fd7a120b7011ae998970767da0701"
+      "size": 1104,
+      "sha256": "e2b4808103429f88b8c56710873c169c08057be1fe136f8cd699c500cf4361ed"
     },
     {
       "name": "coupled_model.pt",
-      "size": 383927,
-      "sha256": "13048e82cbff3297218964e13120e58b35656a14d95e75e93e2dd0746df4671f"
+      "size": 424515,
+      "sha256": "668ed23939fba3c843891fea5f21d744e13bd7d683ededec792a1ead34f99732"
     }
   ]
 }

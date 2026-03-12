@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import re
 
+from core.kr_auto_alias_setup import expand_kr_filename_alias_tokens
 from core.kr_oto_rules import (
+    KR_CONSONANTS,
     KR_VOWELS,
     _cv_match_score,
     _extract_kr_cv_alias_token,
@@ -69,18 +71,13 @@ def _extract_cv_targets_from_lines(lines, custom_map=None):
 
 def _extract_kr_cv_targets_from_filename(filename):
     """파일명에서 한국어 CV 계열 음절 토큰을 추출합니다."""
-    try:
-        from core.lab_generator import _parse_filename
-    except Exception:
-        return []
-
-    try:
-        tokens = _parse_filename(os.path.basename(filename or ""), convert_to_hangul=False)
-    except Exception:
-        return []
-
     out = []
-    for tok in tokens or []:
+    for tok in expand_kr_filename_alias_tokens(
+        os.path.basename(filename or ""),
+        split_syllable_parts_fn=_split_kr_syllable_parts,
+        kr_vowels=KR_VOWELS,
+        kr_consonants=KR_CONSONANTS,
+    ):
         norm = _normalize_cv_match_token(tok)
         onset, vowel, coda = _split_kr_syllable_parts(norm)
         if vowel:

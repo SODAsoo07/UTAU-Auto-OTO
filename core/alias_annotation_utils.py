@@ -7,11 +7,30 @@ from typing import Callable
 
 _ATTACHED_SUFFIX_RE = re.compile(r"([A-Za-z가-힣ぁ-んァ-ヶ一-龯]+)$")
 _SUFFIX_SCRIPT_RE = re.compile(r"[가-힣ぁ-んァ-ヶ一-龯]")
+_TRAILING_DIGITS_RE = re.compile(r"^(.*?)(\d{1,3})$")
+_TRAILING_ROMAN_SUFFIX_RE = re.compile(r"^(.*?)([A-Z]{1,4}\d{1,3})$")
+_TRAILING_ROMAN_V_RE = re.compile(r"^(.*?)([A-Za-z]{1,8}?)(V\d{0,3})$")
+_DEGENERATE_ALIAS_MARKERS = {"-", "r", "h", "R", "H", "'", "."}
+
+
+def _accept_candidate_type(base_type: str, candidate_type: str, *, require_same_type: bool) -> bool:
+    ctype = str(candidate_type or "")
+    if not ctype:
+        return False
+    if not require_same_type:
+        return True
+    btype = str(base_type or "")
+    return bool(btype and ctype == btype)
+
+
+def _is_degenerate_alias_candidate(text: str) -> bool:
+    compact = str(text or "").strip()
+    return compact in _DEGENERATE_ALIAS_MARKERS
 
 
 def strip_known_pitch_suffix(text: str) -> str:
-    stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:#|b)?[0-8])$", "", text, flags=re.IGNORECASE)
-    stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:sharp|flat)?[0-8])$", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"(?:[_\-\s]+)(?:[A-G](?:#|b)?[0-8])$", "", text)
+    stripped = re.sub(r"(?:[_\-\s]+)(?:[A-G](?:sharp|flat)?[0-8])$", "", stripped)
     return stripped.strip()
 
 
@@ -34,9 +53,77 @@ def _try_strip_trailing_separator_suffix(
         suffix = parts[1].strip()
         if not prefix or not suffix:
             continue
+        if _is_degenerate_alias_candidate(prefix):
+            continue
         prefix_type = str(classifier(prefix) or "")
         if prefix_type == base_type and prefix_type:
             return prefix
+    return text
+
+
+def _try_strip_trailing_roman_numeric_suffix(
+    text: str,
+    classifier: Callable[[str], str],
+    base_type: str,
+) -> str:
+    def _check(candidate: str, *, require_same_type: bool) -> str:
+        cand = str(candidate or "").rstrip(" _-").strip()
+        if not cand or cand == text:
+            return ""
+        if _is_degenerate_alias_candidate(cand):
+            return ""
+        candidate_type = str(classifier(cand) or "")
+        if _accept_candidate_type(base_type, candidate_type, require_same_type=require_same_type):
+            return cand
+        return ""
+
+    if " " not in text and "_" not in text:
+        match = _TRAILING_ROMAN_V_RE.match(text)
+        if match:
+            stripped = _check(match.group(1) + match.group(2), require_same_type=False)
+            if stripped:
+                return stripped
+
+        match = _TRAILING_ROMAN_SUFFIX_RE.match(text)
+        if match:
+            stripped = _check(match.group(1), require_same_type=False)
+            if stripped:
+                return stripped
+
+        match = _TRAILING_DIGITS_RE.match(text)
+        if match:
+            stripped = _check(match.group(1), require_same_type=False)
+            if stripped:
+                return stripped
+
+    for sep in ("_", " "):
+        if sep not in text:
+            continue
+        prefix, suffix = text.rsplit(sep, 1)
+        prefix = prefix.strip()
+        suffix = suffix.strip()
+        if not prefix or not suffix:
+            continue
+
+        suffix_match = _TRAILING_ROMAN_V_RE.match(suffix)
+        if suffix_match:
+            candidate = prefix
+            core = (suffix_match.group(1) + suffix_match.group(2)).strip()
+            if core:
+                candidate = f"{prefix}{sep}{core}"
+            stripped = _check(candidate, require_same_type=False)
+            if stripped:
+                return stripped
+
+        if re.fullmatch(r"[A-Za-z]{1,8}\d{1,3}", suffix):
+            core = re.sub(r"\d{1,3}$", "", suffix).strip()
+            candidate = prefix
+            if core:
+                candidate = f"{prefix}{sep}{core}"
+            stripped = _check(candidate, require_same_type=False)
+            if stripped:
+                return stripped
+
     return text
 
 
@@ -64,6 +151,8 @@ def _try_strip_attached_suffix(
         prefix = text[:cut].rstrip(" _-")
         if not prefix:
             continue
+        if _is_degenerate_alias_candidate(prefix):
+            continue
         prefix_type = str(classifier(prefix) or "")
         if prefix_type == base_type and prefix_type:
             return prefix
@@ -79,6 +168,7 @@ def strip_alias_annotation_suffixes(text: str, classifier: Callable[[str], str])
         previous = current
         current = strip_known_pitch_suffix(current)
         current = strip_bracket_suffix(current)
+        current = _try_strip_trailing_roman_numeric_suffix(current, classifier, base_type)
         current = _try_strip_trailing_separator_suffix(current, classifier, base_type)
         current = _try_strip_attached_suffix(current, classifier, base_type)
         if current == previous:

@@ -1,6 +1,6 @@
 ﻿japanese:
   cv:
-    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\Voice_Datas\Jp\CV_and_Rentan'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\Voice_Datas\Jp\CV'
   vcv:
     - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\Voice_Datas\Jp\VCV'
   cvvc:
@@ -8,7 +8,7 @@
 
 korean:
   cv:
-    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\Voice_Datas\Kr\CV_and_연단음'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\Voice_Datas\Kr\CV'
   cvc:
     - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\Voice_Datas\Kr\CVC'
   cvvc:

@@ -3,7 +3,7 @@
   "language": "korean",
   "format_type": "cvvc",
   "model_version": "v1",
-  "feature_version": "v7",
+  "feature_version": "v10",
   "feature_names": [
     "language",
     "format_type",
@@ -11,6 +11,17 @@
     "alias_group",
     "row_index_in_wav",
     "row_ratio_in_wav",
+    "file_row_count",
+    "file_cv_count",
+    "file_vc_count",
+    "file_vv_count",
+    "file_vcv_count",
+    "file_br_count",
+    "file_mono_count",
+    "file_cv_ratio",
+    "file_vc_ratio",
+    "file_vc_cv_ratio",
+    "file_cv_vc_balance",
     "is_head_row",
     "is_tail_row",
     "wav_duration_ms",
@@ -91,7 +102,12 @@
     "onset_patch_voiced_ratio",
     "onset_patch_unvoiced_ratio",
     "tail_patch_energy_mean",
-    "tail_patch_silence_ratio"
+    "tail_patch_silence_ratio",
+    "syllable_blank_confidence",
+    "syllable_mel_voiced_conf",
+    "syllable_mel_silence_conf",
+    "syllable_mel_unvoiced_conf",
+    "syllable_mel_breath_conf"
   ],
   "categorical_features": [
     "language",
@@ -115,45 +131,74 @@
     "delta_pre",
     "delta_ovl"
   ],
+  "aux_targets": [
+    "aux_vowel_start_rel",
+    "aux_vowel_end_rel",
+    "aux_next_onset_rel"
+  ],
   "mel_patch_spec": [
     "onset_patch_energy_mean",
     "onset_patch_voiced_ratio",
     "onset_patch_unvoiced_ratio",
     "tail_patch_energy_mean",
     "tail_patch_silence_ratio",
-    "blank_span_confidence"
+    "blank_span_confidence",
+    "syllable_blank_confidence",
+    "syllable_mel_voiced_conf",
+    "syllable_mel_silence_conf",
+    "syllable_mel_unvoiced_conf",
+    "syllable_mel_breath_conf"
   ],
   "min_confidence": 0.55,
+  "vc_cv_pair_weight": 0.03,
+  "vc_cv_pair_max_gap": 5,
+  "vc_cv_pairs_total": 3354,
+  "vc_cv_pairs_train": 2703,
+  "vc_cv_pairs_valid": 651,
   "fallback_order": [
     "coupled_nn_v1",
     "lightgbm",
     "base"
   ],
-  "created_at": "2026-03-11T03:47:37",
-  "train_rows": 12326,
-  "voicebank_count": 8,
+  "created_at": "2026-03-12T19:33:51",
+  "train_rows": 8740,
+  "voicebank_count": 503,
   "holdout_metrics": {
     "delta_offset": {
-      "baseline_mae": 735.7151489257812,
-      "model_mae": 705.8040161132812
+      "baseline_mae": 668.2821655273438,
+      "model_mae": 410.08941650390625
     },
     "delta_cons": {
-      "baseline_mae": 102.11051177978516,
-      "model_mae": 100.15691375732422
+      "baseline_mae": 69.52800750732422,
+      "model_mae": 49.35126876831055
     },
     "delta_cutoff": {
-      "baseline_mae": 883.4863891601562,
-      "model_mae": 849.255859375
+      "baseline_mae": 751.4476318359375,
+      "model_mae": 543.8219604492188
     },
     "delta_pre": {
-      "baseline_mae": 75.39942169189453,
-      "model_mae": 71.78956604003906
+      "baseline_mae": 51.12062072753906,
+      "model_mae": 40.88697814941406
     },
     "delta_ovl": {
-      "baseline_mae": 52.66679763793945,
-      "model_mae": 39.167476654052734
+      "baseline_mae": 38.64795684814453,
+      "model_mae": 19.11489486694336
     }
   },
-  "holdout_confidence_mean": 0.20602670311927795,
+  "aux_holdout_metrics": {
+    "aux_vowel_start_rel": {
+      "rows": 1741,
+      "model_mae": 350.99432373046875
+    },
+    "aux_vowel_end_rel": {
+      "rows": 1741,
+      "model_mae": 367.5918884277344
+    },
+    "aux_next_onset_rel": {
+      "rows": 870,
+      "model_mae": 427.1593322753906
+    }
+  },
+  "holdout_confidence_mean": 0.3246636688709259,
   "device_used": "cuda"
 }

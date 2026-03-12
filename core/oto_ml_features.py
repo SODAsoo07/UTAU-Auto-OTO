@@ -520,6 +520,8 @@ def parse_oto_rows(path: str, language: str = "", custom_map: Optional[Dict[str,
         if len(parts) < 6:
             continue
         alias_raw = parts[0]
+        if not str(alias_raw or "").strip():
+            alias_raw = os.path.splitext(os.path.basename(left.strip()))[0]
         alias = strip_prefix_map_affixes(
             alias_raw,
             prefix_map_path=prefix_map_path,

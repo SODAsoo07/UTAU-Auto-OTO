@@ -153,6 +153,27 @@ class FeatureExtractionTests(unittest.TestCase):
         self.assertEqual(_normalize_alias_for_match("- ka-D4", language="japanese"), "- ka")
         self.assertEqual(_normalize_alias_for_match("ri F4", language="japanese"), "ri")
 
+    def test_alias_match_normalization_strips_attached_pitch_suffix(self):
+        self.assertEqual(canonicalize_alias_for_matching("korean", "- aC4"), "- a")
+        self.assertEqual(canonicalize_alias_for_matching("korean", "a byC4"), "a by")
+        self.assertEqual(canonicalize_alias_for_matching("korean", "n gC4"), "n g")
+
+    def test_alias_match_normalization_strips_roman_numeric_suffixes(self):
+        self.assertEqual(canonicalize_alias_for_matching("korean", "aV"), "a")
+        self.assertEqual(canonicalize_alias_for_matching("korean", "baV2"), "ba")
+        self.assertEqual(canonicalize_alias_for_matching("korean", "a RV"), "a r")
+        self.assertEqual(canonicalize_alias_for_matching("korean", "a bV"), "a b")
+        self.assertEqual(canonicalize_alias_for_matching("korean", "ga_soft2"), "ga")
+        self.assertEqual(canonicalize_alias_for_matching("korean", "- a4"), "- a")
+        self.assertEqual(canonicalize_alias_for_matching("korean", "- be4"), "- be")
+
+    def test_alias_classification_strips_roman_numeric_suffixes(self):
+        self.assertEqual(classify_alias("aV"), "mono")
+        self.assertEqual(classify_alias("baV"), "cv")
+        self.assertEqual(classify_alias("brV"), "br")
+        self.assertEqual(classify_alias("a RV"), "vc")
+        self.assertEqual(classify_alias("a bV"), "vc")
+
     def test_alias_match_normalization_strips_style_suffix(self):
         self.assertEqual(_normalize_alias_for_match("ga_soft", language="japanese"), "ga")
         self.assertEqual(_normalize_alias_for_match("a か連", language="japanese"), "a ka")
@@ -216,6 +237,15 @@ class FeatureExtractionTests(unittest.TestCase):
             rows = parse_oto_rows(oto_path, language="japanese")
             self.assertEqual([row["alias_norm"] for row in rows], ["ga", "ga"])
             self.assertEqual([row["occurrence_index"] for row in rows], [0, 1])
+
+    def test_parse_oto_rows_uses_wav_stem_when_alias_is_blank(self):
+        with tempfile.TemporaryDirectory() as td:
+            oto_path = os.path.join(td, "oto.ini")
+            with open(oto_path, "w", encoding="utf-8") as f:
+                f.write("ga_C4.wav=,0,10,-20,5,2\n")
+            rows = parse_oto_rows(oto_path, language="korean")
+            self.assertEqual(rows[0]["alias"], "ga_C4")
+            self.assertEqual(rows[0]["alias_norm"], "ga")
 
     def test_ja_normalize_key_keeps_kana(self):
         self.assertEqual(normalize_ja_key("ききくきけきこ.wav"), "ききくきけきこ")

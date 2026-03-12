@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "feature_version": "v7",
+  "feature_version": "v10",
   "feature_names": [
     "language",
     "format_type",
@@ -8,6 +8,17 @@
     "alias_group",
     "row_index_in_wav",
     "row_ratio_in_wav",
+    "file_row_count",
+    "file_cv_count",
+    "file_vc_count",
+    "file_vv_count",
+    "file_vcv_count",
+    "file_br_count",
+    "file_mono_count",
+    "file_cv_ratio",
+    "file_vc_ratio",
+    "file_vc_cv_ratio",
+    "file_cv_vc_balance",
     "is_head_row",
     "is_tail_row",
     "wav_duration_ms",
@@ -88,7 +99,12 @@
     "onset_patch_voiced_ratio",
     "onset_patch_unvoiced_ratio",
     "tail_patch_energy_mean",
-    "tail_patch_silence_ratio"
+    "tail_patch_silence_ratio",
+    "syllable_blank_confidence",
+    "syllable_mel_voiced_conf",
+    "syllable_mel_silence_conf",
+    "syllable_mel_unvoiced_conf",
+    "syllable_mel_breath_conf"
   ],
   "categorical_features": [
     "language",
@@ -111,5 +127,10 @@
     "delta_cutoff",
     "delta_pre",
     "delta_ovl"
+  ],
+  "aux_target_names": [
+    "aux_vowel_start_rel",
+    "aux_vowel_end_rel",
+    "aux_next_onset_rel"
   ]
 }
