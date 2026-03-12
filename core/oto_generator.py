@@ -328,6 +328,44 @@ def normalize_key(name):
     return normalize_wav_key(name)
 
 
+def _iter_textgrid_files(tg_folder):
+    if not tg_folder or not os.path.exists(tg_folder):
+        return
+    for dirpath, _dirnames, filenames in os.walk(tg_folder):
+        for f_name in filenames:
+            if f_name.lower().endswith(".textgrid"):
+                yield dirpath, f_name
+
+
+def _build_wav_index(wav_root):
+    wav_index = {}
+    if not wav_root or not os.path.isdir(wav_root):
+        return wav_index
+    try:
+        for dirpath, _dirnames, filenames in os.walk(wav_root):
+            for fn in filenames:
+                if fn.lower().endswith(".wav"):
+                    wav_index.setdefault(normalize_key(fn), os.path.join(dirpath, fn))
+    except Exception:
+        return {}
+    return wav_index
+
+
+def _resolve_real_wav_name_for_textgrid(textgrid_name, wav_root, wav_index):
+    base = os.path.splitext(os.path.basename(str(textgrid_name or "")))[0]
+    if not base:
+        return ""
+    inferred_name = base + ".wav"
+    wav_path = _find_wav_path_for_name(inferred_name, wav_root, wav_index)
+    if wav_path:
+        return os.path.basename(wav_path)
+    return inferred_name
+
+
+def _should_keep_template_alias_set_exact(*, use_template, generate_openutau, gen_missing_vowels):
+    return bool(use_template) and not bool(generate_openutau) and not bool(gen_missing_vowels)
+
+
 def is_diphthong_file(filename):
     """파일명에 이중모음 표식이 포함되는지 확인합니다."""
     clean = filename.lower().replace("'", "").replace(".wav", "")
@@ -956,6 +994,11 @@ def _apply_post_timing_pipeline(
     post_ctx=None,
 ):
     """후처리 가드(soft mel/base shape/stabilize/cutoff)를 일관 적용합니다."""
+    base_offset = float(offset)
+    base_consonant = float(consonant)
+    base_cutoff = float(cutoff)
+    base_pre = float(pre)
+    base_ovl = float(ovl)
     ctx = post_ctx or KrPostprocessContext(
         file_format=file_format,
         mel_ctx_for_file=mel_ctx_for_file,
@@ -1001,6 +1044,23 @@ def _apply_post_timing_pipeline(
             offset, consonant, cutoff, pre, current_w_idx, syllables_info
         )
         cutoff_reduced += float(strict_reduced or 0.0)
+    (
+        (offset, consonant, cutoff, pre, ovl),
+        _blank_guard_reverted,
+    ) = _guard_kr_blank_region_span(
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        base_offset=base_offset,
+        base_consonant=base_consonant,
+        base_cutoff=base_cutoff,
+        base_pre=base_pre,
+        base_ovl=base_ovl,
+        alias_type=alias_type,
+        mel_ctx=mel_ctx_for_file,
+    )
     return (
         offset,
         consonant,
@@ -1613,6 +1673,87 @@ def generate_openutau_aliases(base_alias):
     return list(aliases)
 
 
+def _dedupe_aliases_preserve_order(items):
+    out = []
+    seen = set()
+    for item in items or []:
+        alias = str(item or "").strip()
+        if not alias or alias in seen:
+            continue
+        seen.add(alias)
+        out.append(alias)
+    return out
+
+
+def _kr_batchim_upper_variant(token):
+    tok = str(token or "").strip()
+    if not tok:
+        return ""
+    return {
+        "g": "K",
+        "k": "K",
+        "d": "T",
+        "t": "T",
+        "s": "T",
+        "ss": "T",
+        "j": "T",
+        "jj": "T",
+        "ch": "T",
+        "h": "H",
+        "r": "L",
+        "l": "L",
+        "m": "M",
+        "b": "P",
+        "p": "P",
+        "ng": "NG",
+        "n": "N",
+    }.get(tok.lower(), "")
+
+
+def generate_korean_phonemizer_aliases(base_alias, *, alias_type="", format_type=""):
+    alias = str(base_alias or "").strip()
+    if not alias:
+        return []
+
+    a_type = str(alias_type or "").strip().lower()
+    fmt = str(format_type or "").strip().lower()
+    out = [alias]
+
+    if a_type in {"cv", "mono"}:
+        if fmt in {"cv", "cvc", "cvvc", "vcv"}:
+            out.extend([f"- {alias}", f"-{alias}"])
+
+    elif a_type == "cv_head":
+        if alias.startswith("- "):
+            core = alias[2:].strip()
+            if core:
+                out.append(f"-{core}")
+
+    elif a_type == "vc":
+        left = ""
+        right = ""
+        parts = [p for p in alias.split() if p]
+        if len(parts) >= 2:
+            left = parts[0]
+            right = parts[-1]
+        else:
+            onset, vowel, coda = _split_kr_syllable_parts(alias.lower().rstrip("-"))
+            if vowel and coda:
+                left = vowel
+                right = coda
+        if left and right:
+            out.extend([f"{left} {right}", f"{left}{right}"])
+            upper = _kr_batchim_upper_variant(right)
+            if upper:
+                out.extend([f"{left} {upper}", f"{left}{upper}"])
+                if fmt == "cv":
+                    out.append(upper)
+            if fmt == "cv":
+                out.append(right)
+
+    return _dedupe_aliases_preserve_order(out)
+
+
 def _apply_base_shape_blend(offset, consonant, cutoff, pre, ovl, base_shape, alias_type="cv"):
     if os.environ.get("UTOA_DISABLE_BASE_SHAPE_BLEND", "").strip().lower() in {"1", "true", "yes", "on"}:
         return validate_oto_params(offset, consonant, cutoff, pre, ovl)
@@ -2033,6 +2174,162 @@ def _estimate_kr_mel_class_scores_at_time(mel_ctx, t_ms):
             except Exception:
                 out[out_key] = 0.0
     return out
+
+
+def _collect_kr_blank_region_stats(mel_ctx, start_ms, end_ms):
+    stats = {
+        "frame_count": 0,
+        "blank_ratio": 0.0,
+        "voiced_ratio": 0.0,
+        "sound_ratio": 0.0,
+        "onset_blank_ratio": 0.0,
+        "onset_sound_ratio": 0.0,
+    }
+    if np is None or not mel_ctx:
+        return stats
+
+    times_ms = mel_ctx.get("times_ms")
+    en = mel_ctx.get("energy")
+    db_arr = mel_ctx.get("db_db")
+    cls_sil = mel_ctx.get("cls_silence_sparse")
+    cls_voiced = mel_ctx.get("cls_voiced_formant")
+    db_sil_th = float(mel_ctx.get("db_silence_th", -42.0))
+    if (
+        times_ms is None
+        or en is None
+        or db_arr is None
+        or len(times_ms) == 0
+        or len(en) != len(times_ms)
+        or len(db_arr) != len(times_ms)
+    ):
+        return stats
+
+    start = float(min(start_ms, end_ms))
+    end = float(max(start_ms, end_ms))
+    if end <= start:
+        return stats
+
+    mask = (times_ms >= start) & (times_ms <= end)
+    if not np.any(mask):
+        left = _nearest_time_index(times_ms, start)
+        right = _nearest_time_index(times_ms, end)
+        if min(left, right) < 0:
+            return stats
+        if right < left:
+            left, right = right, left
+        mask = np.zeros(len(times_ms), dtype=bool)
+        mask[left:right + 1] = True
+
+    idxs = np.where(mask)[0]
+    if idxs.size == 0:
+        return stats
+
+    en_sel = np.asarray(en[idxs], dtype=np.float64)
+    db_sel = np.asarray(db_arr[idxs], dtype=np.float64)
+    if cls_sil is not None and len(cls_sil) == len(times_ms):
+        sil_sel = np.asarray(cls_sil[idxs], dtype=np.float64)
+    else:
+        sil_sel = np.zeros_like(en_sel, dtype=np.float64)
+    if cls_voiced is not None and len(cls_voiced) == len(times_ms):
+        voiced_sel = np.asarray(cls_voiced[idxs], dtype=np.float64)
+    else:
+        voiced_sel = np.zeros_like(en_sel, dtype=np.float64)
+
+    sound_mask = (db_sel > (db_sil_th + 1.4)) & (en_sel > 0.10)
+    blank_mask = (sil_sel >= 0.50) | ((db_sel <= (db_sil_th - 1.2)) & (en_sel <= 0.10))
+    voiced_mask = voiced_sel >= 0.50
+
+    onset_end = min(end, start + 56.0)
+    onset_mask = (times_ms[idxs] >= start) & (times_ms[idxs] <= onset_end)
+    if not np.any(onset_mask):
+        onset_mask = np.ones(len(idxs), dtype=bool)
+
+    onset_blank_mask = blank_mask[onset_mask]
+    onset_sound_mask = sound_mask[onset_mask]
+
+    stats["frame_count"] = int(idxs.size)
+    stats["blank_ratio"] = float(np.mean(blank_mask))
+    stats["voiced_ratio"] = float(np.mean(voiced_mask))
+    stats["sound_ratio"] = float(np.mean(sound_mask))
+    stats["onset_blank_ratio"] = float(np.mean(onset_blank_mask)) if onset_blank_mask.size else 0.0
+    stats["onset_sound_ratio"] = float(np.mean(onset_sound_mask)) if onset_sound_mask.size else 0.0
+    return stats
+
+
+def _should_veto_kr_blank_region(alias_type, candidate_stats):
+    alias_key = str(alias_type or "").strip().lower()
+    blank_ratio = float(candidate_stats.get("blank_ratio", 0.0))
+    voiced_ratio = float(candidate_stats.get("voiced_ratio", 0.0))
+    sound_ratio = float(candidate_stats.get("sound_ratio", 0.0))
+    onset_blank_ratio = float(candidate_stats.get("onset_blank_ratio", 0.0))
+    onset_sound_ratio = float(candidate_stats.get("onset_sound_ratio", 0.0))
+    frame_count = int(candidate_stats.get("frame_count", 0) or 0)
+    if frame_count <= 0:
+        return False
+
+    full_blank = blank_ratio >= 0.94 and sound_ratio <= 0.08 and voiced_ratio <= 0.06
+    onset_blank = onset_blank_ratio >= 0.90 and onset_sound_ratio <= 0.08
+
+    if alias_key in {"cv", "cv_head"}:
+        return full_blank or onset_blank
+    if alias_key == "vv":
+        return full_blank or onset_blank or (blank_ratio >= 0.88 and voiced_ratio <= 0.10)
+    if alias_key == "vc":
+        return full_blank and blank_ratio >= 0.98
+    return full_blank
+
+
+def _guard_kr_blank_region_span(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    ovl,
+    *,
+    base_offset,
+    base_consonant,
+    base_cutoff,
+    base_pre,
+    base_ovl,
+    alias_type,
+    mel_ctx=None,
+):
+    if np is None or not mel_ctx:
+        return validate_oto_params(offset, consonant, cutoff, pre, ovl), False
+
+    alias_key = str(alias_type or "").strip().lower()
+    if alias_key not in {"cv", "cv_head", "vv", "vc"}:
+        return validate_oto_params(offset, consonant, cutoff, pre, ovl), False
+
+    cand = validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=alias_key)
+    base = validate_oto_params(base_offset, base_consonant, base_cutoff, base_pre, base_ovl, alias_type=alias_key)
+
+    cand_start = float(cand[0])
+    cand_end = float(cand[0]) + abs(float(cand[2]))
+    base_start = float(base[0])
+    base_end = float(base[0]) + abs(float(base[2]))
+
+    cand_stats = _collect_kr_blank_region_stats(mel_ctx, cand_start, cand_end)
+    if not _should_veto_kr_blank_region(alias_key, cand_stats):
+        return cand, False
+
+    base_stats = _collect_kr_blank_region_stats(mel_ctx, base_start, base_end)
+    base_bad = _should_veto_kr_blank_region(alias_key, base_stats)
+    if not base_bad:
+        return base, True
+
+    # If both spans are poor, prefer the one with more audible support.
+    cand_score = (
+        float(cand_stats.get("sound_ratio", 0.0))
+        + float(cand_stats.get("voiced_ratio", 0.0))
+        - float(cand_stats.get("blank_ratio", 0.0))
+    )
+    base_score = (
+        float(base_stats.get("sound_ratio", 0.0))
+        + float(base_stats.get("voiced_ratio", 0.0))
+        - float(base_stats.get("blank_ratio", 0.0))
+    )
+    return (base, True) if base_score >= cand_score else (cand, False)
 
 
 def _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx):
@@ -2776,23 +3073,31 @@ def generate_oto(
         template_lines = lines or []
 
 
+    wav_root_for_signal = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
+    wav_index_for_signal = _build_wav_index(wav_root_for_signal)
+
     tg_entries = []
     tg_exact_map = {}
     tg_norm_map = {}
     if os.path.exists(tg_folder):
-        for f_name in os.listdir(tg_folder):
-            if not f_name.lower().endswith('.textgrid'):
-                continue
+        for dirpath, f_name in _iter_textgrid_files(tg_folder):
             base = os.path.splitext(f_name)[0]
+            real_wav_name = _resolve_real_wav_name_for_textgrid(
+                f_name,
+                wav_root_for_signal,
+                wav_index_for_signal,
+            )
             info = {
-                'path': os.path.join(tg_folder, f_name),
-                'real_name': base + '.wav',
-                'base_lower': base.lower(),
+                'path': os.path.join(dirpath, f_name),
+                'real_name': real_wav_name,
+                'base_lower': os.path.splitext(real_wav_name)[0].lower(),
+                'textgrid_base_lower': base.lower(),
                 'norm_key': normalize_key(f_name),
             }
             tg_entries.append(info)
-            if info['base_lower'] not in tg_exact_map:
-                tg_exact_map[info['base_lower']] = info
+            for exact_key in {info['base_lower'], info['textgrid_base_lower']}:
+                if exact_key and exact_key not in tg_exact_map:
+                    tg_exact_map[exact_key] = info
             tg_norm_map.setdefault(info['norm_key'], []).append(info)
 
     def _resolve_tg_info(fname):
@@ -2854,6 +3159,12 @@ def generate_oto(
             use_template = False
         else:
             log(f"📌 템플릿 베이스 OTO 사용 ({t_match}/{t_total}, {t_ratio:.1%})")
+    if _should_keep_template_alias_set_exact(
+        use_template=use_template,
+        generate_openutau=generate_openutau,
+        gen_missing_vowels=gen_missing_vowels,
+    ):
+        log("📌 템플릿 모드: 추가 alias 생성 없이 베이스 OTO alias 집합을 그대로 유지")
 
     if use_template:
         file_groups = {}
@@ -2883,15 +3194,6 @@ def generate_oto(
 
     processed = 0
     total = len(file_groups)
-    wav_root_for_signal = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
-    wav_index_for_signal = {}
-    try:
-        if os.path.isdir(wav_root_for_signal):
-            for fn in os.listdir(wav_root_for_signal):
-                if fn.lower().endswith(".wav"):
-                    wav_index_for_signal[normalize_key(fn)] = os.path.join(wav_root_for_signal, fn)
-    except Exception:
-        pass
     mel_cache_for_signal = {}
 
     for fname, lines in file_groups.items():

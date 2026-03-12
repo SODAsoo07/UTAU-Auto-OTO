@@ -29,6 +29,22 @@ from core.oto_normalization import normalize_wav_key
 SIL_MARKS = {"", "sil", "sp", "spn", "pau"}
 
 
+def _build_textgrid_index(tg_folder: str) -> Dict[str, str]:
+    index: Dict[str, str] = {}
+    if not tg_folder or not os.path.exists(tg_folder):
+        return index
+    for dirpath, _dirnames, filenames in os.walk(tg_folder):
+        for f_name in filenames:
+            if not f_name.lower().endswith(".textgrid"):
+                continue
+            base = os.path.splitext(f_name)[0]
+            path = os.path.join(dirpath, f_name)
+            index.setdefault(base.lower(), path)
+            index.setdefault(normalize_wav_key(f_name), path)
+            index.setdefault(normalize_wav_key(base + ".wav"), path)
+    return index
+
+
 def _hz_to_mel(hz: float) -> float:
     return 2595.0 * math.log10(1.0 + hz / 700.0)
 
@@ -95,7 +111,14 @@ def _read_wav_mono(wav_path: str) -> Tuple[Optional[np.ndarray], Optional[int], 
 
 def _mel_activity(audio: np.ndarray, sr: int) -> Dict[str, float]:
     if len(audio) == 0:
-        return {"active_start_ms": 0.0, "active_end_ms": 0.0, "duration_ms": 0.0, "onset_ms": 0.0}
+        return {
+            "active_start_ms": 0.0,
+            "active_end_ms": 0.0,
+            "duration_ms": 0.0,
+            "onset_ms": 0.0,
+            "frame_times_ms": np.array([], dtype=np.float64),
+            "active_mask": np.array([], dtype=bool),
+        }
 
     n_fft = 1024
     hop = max(1, int(sr * 0.005))
@@ -119,7 +142,14 @@ def _mel_activity(audio: np.ndarray, sr: int) -> Dict[str, float]:
 
     if not frames:
         duration_ms = len(audio) * 1000.0 / sr
-        return {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms, "onset_ms": 0.0}
+        return {
+            "active_start_ms": 0.0,
+            "active_end_ms": duration_ms,
+            "duration_ms": duration_ms,
+            "onset_ms": 0.0,
+            "frame_times_ms": np.array([], dtype=np.float64),
+            "active_mask": np.array([], dtype=bool),
+        }
 
     mel_e = np.array(frames, dtype=np.float64).mean(axis=1)
     duration_ms = len(audio) * 1000.0 / sr
@@ -128,6 +158,7 @@ def _mel_activity(audio: np.ndarray, sr: int) -> Dict[str, float]:
     p95 = np.percentile(mel_e, 95)
     th = p20 + (p95 - p20) * 0.28
     act_idx = np.where(mel_e >= th)[0]
+    active_mask = mel_e >= th
 
     if len(act_idx) == 0:
         active_start = 0.0
@@ -139,13 +170,82 @@ def _mel_activity(audio: np.ndarray, sr: int) -> Dict[str, float]:
     flux = np.diff(mel_e, prepend=mel_e[0])
     onset_candidates = np.where(flux > np.percentile(flux, 85))[0]
     onset_ms = (onset_candidates[0] * hop * 1000.0 / sr) if len(onset_candidates) else active_start
+    frame_times_ms = (np.arange(len(mel_e), dtype=np.float64) * hop * 1000.0 / sr)
 
     return {
         "active_start_ms": float(active_start),
         "active_end_ms": float(active_end),
         "duration_ms": float(duration_ms),
         "onset_ms": float(onset_ms),
+        "frame_times_ms": frame_times_ms,
+        "active_mask": active_mask,
     }
+
+
+def _blank_span_activity_stats(mel_sig: Dict[str, object], start_ms: float, end_ms: float) -> Dict[str, float]:
+    stats = {
+        "frame_count": 0,
+        "blank_ratio": 0.0,
+        "active_ratio": 0.0,
+        "onset_blank_ratio": 0.0,
+    }
+    if np is None:
+        return stats
+
+    times = mel_sig.get("frame_times_ms")
+    active_mask = mel_sig.get("active_mask")
+    if times is None or active_mask is None or len(times) == 0 or len(active_mask) != len(times):
+        return stats
+
+    start = float(min(start_ms, end_ms))
+    end = float(max(start_ms, end_ms))
+    if end <= start:
+        return stats
+
+    mask = (times >= start) & (times <= end)
+    if not np.any(mask):
+        left = int(np.searchsorted(times, start))
+        right = int(np.searchsorted(times, end))
+        left = max(0, min(left, len(times) - 1))
+        right = max(0, min(right, len(times) - 1))
+        if right < left:
+            left, right = right, left
+        mask = np.zeros(len(times), dtype=bool)
+        mask[left:right + 1] = True
+
+    idxs = np.where(mask)[0]
+    if idxs.size == 0:
+        return stats
+
+    active_sel = np.asarray(active_mask[idxs], dtype=np.float64)
+    blank_sel = 1.0 - active_sel
+    onset_end = min(end, start + 56.0)
+    onset_mask = (times[idxs] >= start) & (times[idxs] <= onset_end)
+    if not np.any(onset_mask):
+        onset_mask = np.ones(len(idxs), dtype=bool)
+
+    stats["frame_count"] = int(idxs.size)
+    stats["active_ratio"] = float(np.mean(active_sel))
+    stats["blank_ratio"] = float(np.mean(blank_sel))
+    stats["onset_blank_ratio"] = float(np.mean(blank_sel[onset_mask])) if np.any(onset_mask) else 0.0
+    return stats
+
+
+def _should_warn_blank_only_span(alias_type: str, stats: Dict[str, float]) -> bool:
+    blank_ratio = float(stats.get("blank_ratio", 0.0))
+    active_ratio = float(stats.get("active_ratio", 0.0))
+    onset_blank_ratio = float(stats.get("onset_blank_ratio", 0.0))
+    if int(stats.get("frame_count", 0) or 0) <= 0:
+        return False
+    alias_key = str(alias_type or "").strip().lower()
+    if alias_key in ("cv", "cv_head", "vv"):
+        return (
+            (blank_ratio >= 0.94 and active_ratio <= 0.06)
+            or (onset_blank_ratio >= 0.92 and active_ratio <= 0.10)
+        )
+    if alias_key == "vc":
+        return blank_ratio >= 0.98 and active_ratio <= 0.03
+    return False
 
 
 def _load_phone_bounds_ms(tg_path: str) -> Tuple[List[float], List[float]]:
@@ -207,6 +307,31 @@ def _parse_oto_line(line: str):
         "pre": pre,
         "ovl": ovl,
     }
+
+
+def _should_skip_validation_row(row: Dict[str, float | str]) -> bool:
+    alias = str(row.get("alias", "") or "").strip()
+    if not alias:
+        return True
+
+    # Generated tail placeholders use a zeroed timing stub such as
+    # cons=6, cutoff=-4, pre=0, ovl=0. They are not meaningful timing targets
+    # and otherwise dominate validation error counts.
+    try:
+        cons = float(row.get("cons", 0.0) or 0.0)
+        cutoff_abs = abs(float(row.get("cutoff", 0.0) or 0.0))
+        pre = float(row.get("pre", 0.0) or 0.0)
+        ovl = float(row.get("ovl", 0.0) or 0.0)
+    except Exception:
+        return False
+
+    return (
+        pre <= 0.0
+        and ovl <= 0.0
+        and 0.0 < cons <= 8.0
+        and 0.0 < cutoff_abs <= 8.0
+        and cutoff_abs <= cons
+    )
 
 
 def _norm_name(name: str) -> str:
@@ -454,7 +579,13 @@ def validate_oto_timing(
             if not s:
                 continue
             p = _parse_oto_line(s)
-            if p and not (language == "korean" and should_ignore_korean_alias(p.get("alias", ""))):
+            if not p:
+                continue
+            if language == "korean" and should_ignore_korean_alias(p.get("alias", "")):
+                continue
+            if _should_skip_validation_row(p):
+                continue
+            if p:
                 parsed_lines.append(p)
     summary["total_lines"] = len(parsed_lines)
     if not parsed_lines:
@@ -474,6 +605,7 @@ def validate_oto_timing(
     issues = []
     missing_wavs: List[str] = []
     wav_idx = _build_wav_name_index(wav_dir)
+    tg_idx = _build_textgrid_index(tg_folder)
     is_japanese = (language == "japanese")
     # Japanese multi-syllable files naturally have later offsets on subsequent aliases.
     # Keep strict checks for parameter ordering, but relax global-time heuristics.
@@ -497,7 +629,7 @@ def validate_oto_timing(
 
         mel_sig = _mel_activity(audio, sr)
         base = os.path.splitext(wav_name)[0]
-        tg_path = os.path.join(tg_folder, base + ".TextGrid")
+        tg_path = tg_idx.get(base.lower()) or tg_idx.get(normalize_wav_key(wav_name)) or ""
         ph_starts, ph_ends = _load_phone_bounds_ms(tg_path) if os.path.exists(tg_path) else ([], [])
         boundary_check_enabled = bool(ph_starts)
         if is_japanese and ph_starts:
@@ -540,6 +672,16 @@ def validate_oto_timing(
                 issues.append(("warn", wav_name, alias, f"Preutterance out of active region ({pre:.1f}ms)"))
             if cut > mel_sig["active_end_ms"] + cutoff_after_margin_ms:
                 issues.append(("warn", wav_name, alias, f"Cutoff too long after active end ({cut:.1f}ms)"))
+            blank_stats = _blank_span_activity_stats(mel_sig, off, cut)
+            if _should_warn_blank_only_span(alias_type, blank_stats):
+                issues.append(
+                    (
+                        "warn",
+                        wav_name,
+                        alias,
+                        f"Offset-cutoff span is blank-heavy ({blank_stats['blank_ratio']:.2f})",
+                    )
+                )
 
             if boundary_check_enabled:
                 if alias_type in ("vc", "vv"):

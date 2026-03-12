@@ -167,6 +167,10 @@ def _coupled_strict_constraint() -> bool:
     return _env_flag("UTOA_ML_COUPLED_STRICT_CONSTRAINT", False)
 
 
+def _kr_cv_keep_base_location_enabled() -> bool:
+    return _env_flag("UTOA_ML_KR_CV_KEEP_BASE_LOCATION", True)
+
+
 def _read_bundle_backend(model_dir: str) -> str:
     try:
         import json
@@ -776,28 +780,40 @@ def _apply_korean_delta_policy(row_context: Dict[str, object], deltas: Dict[str,
     mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
 
     if alias_type in {"cv", "cv_head"}:
+        if format_type in {"cvvc", "cvc"} and _kr_cv_keep_base_location_enabled():
+            deltas["delta_offset"] = 0.0
+            deltas["delta_pre"] = 0.0
+
         blank_conf = _to_float(row_context.get("blank_span_confidence"), 0.0)
+        syll_blank_conf = _to_float(row_context.get("syllable_blank_confidence"), 0.0)
+        syll_sil_conf = _to_float(row_context.get("syllable_mel_silence_conf"), 0.0)
+        syll_voiced_conf = _to_float(row_context.get("syllable_mel_voiced_conf"), 0.0)
         silence_ratio = max(
             _to_float(row_context.get("db_silence_ratio"), 0.0),
             _to_float(row_context.get("mel_window_silence_ratio"), 0.0),
         )
-        risky = (mapping_conf < 0.70) or (blank_conf >= 0.55) or (silence_ratio >= 0.60)
-        severe = (blank_conf >= 0.72) or (silence_ratio >= 0.72)
+        blank_risk = max(blank_conf, syll_blank_conf, syll_sil_conf)
+        risky = (mapping_conf < 0.74) or (blank_risk >= 0.48) or (silence_ratio >= 0.56)
+        severe = (
+            (blank_risk >= 0.62)
+            or (silence_ratio >= 0.66)
+            or ((blank_risk - syll_voiced_conf) >= 0.22)
+        )
 
         if severe:
             # 공백 가능성이 높은 CV는 offset 전진을 금지하고 pre 이동도 크게 제한한다.
             deltas["delta_offset"] = 0.0
-            deltas["delta_pre"] = _scale_signed(deltas.get("delta_pre", 0.0), neg_scale=0.10, pos_scale=0.58)
+            deltas["delta_pre"] = _scale_signed(deltas.get("delta_pre", 0.0), neg_scale=0.06, pos_scale=0.42)
         else:
             deltas["delta_offset"] = _scale_signed(
                 deltas.get("delta_offset", 0.0),
-                neg_scale=0.22 if risky else 0.38,
+                neg_scale=0.12 if risky else 0.24,
                 pos_scale=0.72 if risky else 0.84,
             )
             deltas["delta_pre"] = _scale_signed(
                 deltas.get("delta_pre", 0.0),
-                neg_scale=0.26 if risky else 0.44,
-                pos_scale=0.80 if risky else 0.92,
+                neg_scale=0.14 if risky else 0.26,
+                pos_scale=0.62 if risky else 0.82,
             )
 
         deltas["delta_cons"] = _scale_signed(
@@ -885,12 +901,19 @@ def _apply_korean_cv_no_regression_guard(
     curr_vowel_start = _to_float(row_context.get("curr_vowel_start_ms"), 0.0)
     expected_anchor = _to_float(row_context.get("expected_anchor_ms"), 0.0)
     base_offset = _to_float(row_context.get("base_offset"), offset)
+    base_pre = _to_float(row_context.get("base_pre"), pre)
     mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
-    blank_conf = _to_float(row_context.get("blank_span_confidence"), 0.0)
+    blank_conf = max(
+        _to_float(row_context.get("blank_span_confidence"), 0.0),
+        _to_float(row_context.get("syllable_blank_confidence"), 0.0),
+        _to_float(row_context.get("syllable_mel_silence_conf"), 0.0),
+    )
     silence_ratio = max(
         _to_float(row_context.get("db_silence_ratio"), 0.0),
         _to_float(row_context.get("mel_window_silence_ratio"), 0.0),
     )
+    onset_candidate = _to_float(row_context.get("mel_offset_candidate_ms"), 0.0)
+    base_pre_abs = float(base_offset) + float(base_pre)
 
     if curr_vowel_start > 0.0:
         expected_anchor = curr_vowel_start
@@ -909,15 +932,125 @@ def _apply_korean_cv_no_regression_guard(
     if curr_phone_start > 0.0:
         phone_guard = curr_phone_start + min(14.0, max(curr_phone_len * 0.12, 7.0))
         min_pre_abs = max(min_pre_abs, phone_guard)
+    if onset_candidate > 0.0:
+        min_pre_abs = max(min_pre_abs, onset_candidate + (6.0 if alias_type == "cv_head" else 8.0))
+    early_pre_backoff = 4.0 if (blank_conf >= 0.62 or silence_ratio >= 0.66) else 10.0
+    min_pre_abs = max(min_pre_abs, base_pre_abs - early_pre_backoff)
 
-    min_offset = base_offset - 10.0
+    min_offset = base_offset - 6.0
     if curr_phone_start > 0.0:
-        min_offset = max(min_offset, curr_phone_start - 6.0)
-    if blank_conf >= 0.70 or silence_ratio >= 0.70:
-        min_offset = max(min_offset, base_offset - 4.0)
+        min_offset = max(min_offset, curr_phone_start - 3.0)
+    if onset_candidate > 0.0:
+        min_offset = max(min_offset, onset_candidate - (4.0 if alias_type == "cv_head" else 3.0))
+    if blank_conf >= 0.62 or silence_ratio >= 0.66:
+        min_offset = max(min_offset, base_offset - 1.5)
 
     if offset < min_offset:
         offset = min_offset
+    if pre_abs < min_pre_abs:
+        pre_abs = min_pre_abs
+
+    pre = max(pre_abs - offset, 0.0)
+    cons = max(cons, pre + 8.0)
+    cutoff_abs = max(cutoff_abs, cons + 10.0)
+    return validate_fn(offset, cons, -cutoff_abs, pre, ovl)
+
+
+def _apply_korean_cv_destination_guard(
+    row_context: Dict[str, object],
+    params: Tuple[float, float, float, float, float],
+    validate_fn,
+) -> Tuple[float, float, float, float, float]:
+    format_type = normalize_format_type("korean", row_context.get("format_type", ""))
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    if alias_type not in {"cv", "cv_head"}:
+        return params
+    if format_type not in {"cv", "cvvc", "cvc", "vcv"}:
+        return params
+
+    offset, cons, cutoff, pre, ovl = validate_fn(*params)
+    offset = float(offset)
+    cons = float(cons)
+    pre = float(pre)
+    ovl = float(ovl)
+    cutoff_abs = abs(float(cutoff))
+    pre_abs = offset + pre
+
+    base_offset = _to_float(row_context.get("base_offset"), offset)
+    base_cons = _to_float(row_context.get("base_cons"), cons)
+    base_cutoff_abs = _to_float(row_context.get("base_cutoff_abs"), cutoff_abs)
+    base_pre = _to_float(row_context.get("base_pre"), pre)
+    base_ovl = _to_float(row_context.get("base_ovl"), ovl)
+    base_params = validate_fn(
+        float(base_offset),
+        float(base_cons),
+        -(float(base_cutoff_abs) - float(base_offset)),
+        float(base_pre),
+        float(base_ovl),
+    )
+    base_pre_abs = float(base_offset) + float(base_pre)
+
+    if format_type in {"cvvc", "cvc"} and _kr_cv_keep_base_location_enabled():
+        locked_offset = float(base_offset)
+        locked_pre = float(base_pre)
+        locked_ovl = min(float(ovl), max(locked_pre - 1.0, 0.0))
+        locked_cons = max(float(cons), locked_pre + 8.0)
+        locked_cutoff_abs = max(float(cutoff_abs), locked_cons + 10.0)
+        return validate_fn(locked_offset, locked_cons, -(locked_cutoff_abs - locked_offset), locked_pre, locked_ovl)
+
+    mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
+    blank_conf = max(
+        _to_float(row_context.get("blank_span_confidence"), 0.0),
+        _to_float(row_context.get("syllable_blank_confidence"), 0.0),
+        _to_float(row_context.get("syllable_mel_silence_conf"), 0.0),
+    )
+    voiced_conf = _to_float(row_context.get("syllable_mel_voiced_conf"), 0.0)
+    silence_ratio = max(
+        _to_float(row_context.get("db_silence_ratio"), 0.0),
+        _to_float(row_context.get("mel_window_silence_ratio"), 0.0),
+    )
+    onset_candidate = _to_float(row_context.get("mel_offset_candidate_ms"), 0.0)
+    curr_vowel_start = _to_float(row_context.get("curr_vowel_start_ms"), 0.0)
+    expected_anchor = _to_float(row_context.get("expected_anchor_ms"), 0.0)
+    if curr_vowel_start > 0.0:
+        expected_anchor = curr_vowel_start
+
+    severe_blank = (
+        (blank_conf >= 0.58)
+        or (silence_ratio >= 0.62)
+        or ((blank_conf - voiced_conf) >= 0.18)
+    )
+    risky_blank = severe_blank or (blank_conf >= 0.48) or (silence_ratio >= 0.56) or (mapping_conf < 0.74)
+
+    early_offset_allow = 1.0 if severe_blank else (3.0 if risky_blank else 6.0)
+    early_pre_allow = 3.0 if severe_blank else (7.0 if risky_blank else 12.0)
+    onset_allow = 2.0 if severe_blank else (4.0 if risky_blank else 7.0)
+    anchor_lead_allow = 8.0 if severe_blank else (12.0 if risky_blank else 18.0)
+
+    violations = 0
+    if offset < (base_offset - early_offset_allow):
+        violations += 1
+    if pre_abs < (base_pre_abs - early_pre_allow):
+        violations += 1
+    if onset_candidate > 0.0 and offset < (onset_candidate - onset_allow):
+        violations += 1
+    if expected_anchor > 0.0 and pre_abs < (expected_anchor - anchor_lead_allow):
+        violations += 1
+
+    if severe_blank and violations >= 1:
+        return base_params
+    if risky_blank and violations >= 2:
+        return base_params
+
+    min_offset = base_offset - early_offset_allow
+    if onset_candidate > 0.0:
+        min_offset = max(min_offset, onset_candidate - onset_allow)
+    if offset < min_offset:
+        offset = min_offset
+
+    min_pre_abs = base_pre_abs - early_pre_allow
+    if expected_anchor > 0.0:
+        min_pre_abs = max(min_pre_abs, expected_anchor - anchor_lead_allow)
     if pre_abs < min_pre_abs:
         pre_abs = min_pre_abs
 
@@ -1154,6 +1287,19 @@ def _apply_language_specific_post_guard(
     return out
 
 
+def _apply_ml_destination_guard(
+    language: str,
+    row_context: Dict[str, object],
+    params: Tuple[float, float, float, float, float],
+    validate_fn,
+) -> Tuple[float, float, float, float, float]:
+    lang = str(language or "").strip().lower()
+    out = params
+    if lang == "korean":
+        out = _apply_korean_cv_destination_guard(row_context, out, validate_fn)
+    return out
+
+
 def _apply_wav_duration_hard_guard(
     row_context: Dict[str, object],
     params: Tuple[float, float, float, float, float],
@@ -1261,6 +1407,7 @@ def _finalize_ml_params(
     out = validate_row(*params)
     out = _apply_language_specific_post_guard(language, row_context, out, validate_row)
     out, applied_rules = _apply_anchor_lock_lite_after_ml(language, row_context, out, validate_row)
+    out = _apply_ml_destination_guard(language, row_context, out, validate_row)
     out, adjust_count = _solve_joint_constraints(out, strict=bool(strict_constraint))
     out = validate_row(*out)
     out = _apply_wav_duration_hard_guard(row_context, out)
