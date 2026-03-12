@@ -69,6 +69,13 @@ from core.oto_ml.pairing.vc_cv_pairing import _batch_pair_positions, _build_vc_c
 logger = logging.getLogger(__name__)
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except Exception:
+        return float(default)
+
+
 def _read_dataset_csv(path: str):
     df = pd.read_csv(path, low_memory=False)
     return df
@@ -778,6 +785,36 @@ def train_coupled_bundle_rawmel(
         W = pd.to_numeric(df["sample_weight"], errors="coerce").fillna(1.0).to_numpy(dtype=np.float32)
     else:
         W = np.ones((len(df),), dtype=np.float32)
+    if "alias_type" in df.columns:
+        alias_type_arr = df["alias_type"].astype(str).str.lower().to_numpy()
+        cv_family_mask_np = np.isin(alias_type_arr, ["cv", "cv_head"]).astype(np.float32)
+    else:
+        cv_family_mask_np = np.zeros((len(df),), dtype=np.float32)
+    blank_conf_np = (
+        pd.to_numeric(df["blank_span_confidence"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+        if "blank_span_confidence" in df.columns
+        else np.zeros((len(df),), dtype=np.float32)
+    )
+    jump_blocked_np = (
+        pd.to_numeric(df["jump_blocked_flag"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+        if "jump_blocked_flag" in df.columns
+        else np.zeros((len(df),), dtype=np.float32)
+    )
+    mapping_conf_np = (
+        pd.to_numeric(df["mapping_confidence"], errors="coerce").fillna(1.0).to_numpy(dtype=np.float32)
+        if "mapping_confidence" in df.columns
+        else np.ones((len(df),), dtype=np.float32)
+    )
+    risk_blank_th = _env_float("UTOA_ML_RAWMEL_RISK_BLANK_TH", 0.55)
+    risk_map_conf_th = _env_float("UTOA_ML_RAWMEL_RISK_MAP_CONF_TH", 0.64)
+    risk_boost_blank = max(1.0, _env_float("UTOA_ML_RAWMEL_RISK_BOOST_BLANK", 1.22))
+    risk_boost_jump = max(1.0, _env_float("UTOA_ML_RAWMEL_RISK_BOOST_JUMP", 1.15))
+    risk_boost_low_conf = max(1.0, _env_float("UTOA_ML_RAWMEL_RISK_BOOST_LOW_CONF", 1.08))
+    risk_boost = np.ones((len(df),), dtype=np.float32)
+    risk_boost *= np.where((cv_family_mask_np > 0.5) & (blank_conf_np >= float(risk_blank_th)), risk_boost_blank, 1.0)
+    risk_boost *= np.where((cv_family_mask_np > 0.5) & (jump_blocked_np > 0.5), risk_boost_jump, 1.0)
+    risk_boost *= np.where((cv_family_mask_np > 0.5) & (mapping_conf_np < float(risk_map_conf_th)), risk_boost_low_conf, 1.0)
+    W = np.clip((W * risk_boost).astype(np.float32), 0.20, 3.00)
 
     if group_column in df.columns and df[group_column].nunique() >= 2 and GroupShuffleSplit is not None:
         split = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
@@ -843,7 +880,25 @@ def train_coupled_bundle_rawmel(
     if isinstance(run_device, str):
         run_device = torch.device(run_device)
     model = model.to(run_device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=float(learning_rate))
+    rawmel_weight_decay = max(0.0, _env_float("UTOA_ML_RAWMEL_WEIGHT_DECAY", 1e-4))
+    optimizer_name = str(os.environ.get("UTOA_ML_RAWMEL_OPTIMIZER", "adamw") or "adamw").strip().lower()
+    if optimizer_name == "adam":
+        optimizer = torch.optim.Adam(model.parameters(), lr=float(learning_rate))
+        optimizer_name = "adam"
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=float(learning_rate), weight_decay=float(rawmel_weight_decay))
+        optimizer_name = "adamw"
+    scheduler_patience = max(1, int(os.environ.get("UTOA_ML_RAWMEL_LR_PATIENCE", 3) or 3))
+    scheduler_factor = max(0.20, min(0.90, _env_float("UTOA_ML_RAWMEL_LR_FACTOR", 0.60)))
+    scheduler_min_lr = max(1e-6, _env_float("UTOA_ML_RAWMEL_MIN_LR", 2e-5))
+    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=float(scheduler_factor),
+        patience=int(scheduler_patience),
+        min_lr=float(scheduler_min_lr),
+    )
+    grad_clip = max(0.0, _env_float("UTOA_ML_RAWMEL_GRAD_CLIP", 1.2))
 
     X_train = torch.tensor(X[train_idx], dtype=torch.float32, device=run_device)
     P_train = torch.tensor(P[train_idx], dtype=torch.float32, device=run_device)
@@ -893,7 +948,14 @@ def train_coupled_bundle_rawmel(
             t = t.to(run_device)
         return t
 
-    target_weights = torch.tensor([1.00, 0.90, 0.95, 1.00, 0.65], dtype=torch.float32, device=run_device).view(1, -1)
+    target_weight_values = [
+        _env_float("UTOA_ML_RAWMEL_TARGET_W_OFFSET", 1.12),
+        _env_float("UTOA_ML_RAWMEL_TARGET_W_CONS", 0.90),
+        _env_float("UTOA_ML_RAWMEL_TARGET_W_CUTOFF", 1.02),
+        _env_float("UTOA_ML_RAWMEL_TARGET_W_PRE", 1.08),
+        _env_float("UTOA_ML_RAWMEL_TARGET_W_OVL", 0.62),
+    ]
+    target_weights = torch.tensor(target_weight_values, dtype=torch.float32, device=run_device).view(1, -1)
     cons_margin = 10.0
     cut_margin = 10.0
     aux_weight = 0.08
@@ -901,7 +963,7 @@ def train_coupled_bundle_rawmel(
     best_state = None
     best_val = float("inf")
     wait = 0
-    patience = 10
+    patience = max(3, int(os.environ.get("UTOA_ML_RAWMEL_PATIENCE", 12) or 12))
 
     train_n = int(X_train.shape[0])
     batch_n = max(1, int(batch_size))
@@ -1001,6 +1063,8 @@ def train_coupled_bundle_rawmel(
             )
             optimizer.zero_grad()
             total_loss.backward()
+            if grad_clip > 0.0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
             optimizer.step()
             if progress_every > 0 and (batch_i % progress_every == 0 or batch_i == total_batches):
                 loss_val = float(total_loss.detach().cpu().item())
@@ -1071,6 +1135,7 @@ def train_coupled_bundle_rawmel(
                     + (pair_weight * val_pair)
                 ).item()
             )
+            lr_scheduler.step(val_total)
 
         new_best = False
         if val_total < best_val:
@@ -1084,9 +1149,10 @@ def train_coupled_bundle_rawmel(
                 break
         if progress_every > 0:
             status = "best" if new_best else "wait"
+            lr_now = float(optimizer.param_groups[0].get("lr", learning_rate))
             print(
                 f"[TRAIN] epoch={epoch + 1}/{epochs_n} val_loss={val_total:.4f} best={best_val:.4f} "
-                f"patience={wait}/{patience} status={status}"
+                f"patience={wait}/{patience} status={status} lr={lr_now:.6g}"
             )
 
     if best_state is not None:
@@ -1174,6 +1240,24 @@ def train_coupled_bundle_rawmel(
         "tail_frames": int(tail_frames),
         "min_confidence": float(min_confidence),
         "vc_cv_pair_weight": float(pair_weight),
+        "optimizer": str(optimizer_name),
+        "learning_rate": float(learning_rate),
+        "weight_decay": float(rawmel_weight_decay),
+        "target_weights": [float(v) for v in target_weight_values],
+        "grad_clip": float(grad_clip),
+        "lr_scheduler": {
+            "type": "ReduceLROnPlateau",
+            "factor": float(scheduler_factor),
+            "patience": int(scheduler_patience),
+            "min_lr": float(scheduler_min_lr),
+        },
+        "risk_weighting": {
+            "blank_threshold": float(risk_blank_th),
+            "mapping_conf_threshold": float(risk_map_conf_th),
+            "boost_blank": float(risk_boost_blank),
+            "boost_jump": float(risk_boost_jump),
+            "boost_low_conf": float(risk_boost_low_conf),
+        },
         "vc_cv_pair_max_gap": int(os.environ.get("UTOA_ML_VC_CV_MAX_GAP", 5) or 5),
         "vc_cv_pairs_total": int(pair_total_count),
         "vc_cv_pairs_train": int(pair_train_count),

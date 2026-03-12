@@ -126,10 +126,11 @@ def predict_coupled_deltas(
     else:
         with torch.no_grad():
             out = model(x_t, p_t)
-        if isinstance(out, tuple) and len(out) == 3:
-            deltas_t, conf_t, _aux_t = out
-        else:
-            deltas_t, conf_t = out
+
+    if isinstance(out, tuple) and len(out) == 3:
+        deltas_t, conf_t, _aux_t = out
+    else:
+        deltas_t, conf_t = out
     deltas_np = deltas_t.detach().cpu().numpy().reshape(-1)
     conf = float(conf_t.detach().cpu().numpy().reshape(-1)[0])
     out = {target: float(deltas_np[i]) for i, target in enumerate(TARGET_NAMES)}

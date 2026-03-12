@@ -138,6 +138,20 @@ def _coupled_min_confidence_for_alias(
         value = _read_bounded_conf_env(key)
         if value is not None:
             return float(value)
+    if lang_token == "KR":
+        # Korean CV 계열은 음절 오매핑 시 타이밍 붕괴가 커서 기본 게이트를 보수적으로 둔다.
+        kr_floor_by_alias = {
+            "cv": 0.66,
+            "cv_head": 0.68,
+            "vc": 0.56,
+            "vv": 0.58,
+            "vcv": 0.58,
+        }
+        floor = kr_floor_by_alias.get(alias)
+        if floor is not None:
+            if alias in {"cv", "cv_head"} and fmt in {"cvvc", "cvc"}:
+                floor += 0.02
+            return float(max(base, min(float(floor), 0.95)))
     return float(base)
 
 

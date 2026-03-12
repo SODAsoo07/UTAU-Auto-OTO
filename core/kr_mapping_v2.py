@@ -91,6 +91,12 @@ def build_kr_cv_anchor_plan(expected_tokens, syllables_info, *, use_mel=False):
                 score += min(vowel_ms, 100.0) * 0.07
             else:
                 score -= 180.0
+            # use_mel이 꺼져 있어도 blank prior는 약하게 반영해 공백 음절 고정을 줄인다.
+            try:
+                blank_prior = max(0.0, min(1.0, float((syl or {}).get("blank_confidence", 0.0) or 0.0)))
+            except Exception:
+                blank_prior = 0.0
+            score -= 18.0 * blank_prior
             score += _mel_score(syl)
             row.append(float(score))
         score_rows.append(row)

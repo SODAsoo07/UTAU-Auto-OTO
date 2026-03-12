@@ -186,11 +186,16 @@ def _build_model_rawmel(
                 nn.ReLU(),
                 nn.Conv2d(16, 32, kernel_size=3, padding=1),
                 nn.ReLU(),
-                nn.AdaptiveAvgPool2d((1, 1)),
+                # Keep a small temporal axis so onset/tail position cues are not fully averaged out.
+                nn.Conv2d(32, 32, kernel_size=(3, 1), padding=(1, 0)),
+                nn.ReLU(),
+                nn.AdaptiveAvgPool2d((4, 1)),
             )
             self.proj = nn.Sequential(
                 nn.Flatten(),
-                nn.Linear(32, 64),
+                nn.Linear(32 * 4, 96),
+                nn.ReLU(),
+                nn.Linear(96, 64),
                 nn.ReLU(),
             )
 

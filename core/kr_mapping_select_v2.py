@@ -66,6 +66,82 @@ def _blank_guard_idx(expected_idx, selected_idx, syllable_blank_confidences):
     return selected_idx, False
 
 
+def _global_plan_guard_idx(
+    *,
+    alias_type,
+    file_format,
+    target_clean,
+    expected_idx,
+    planned_idx,
+    selected_idx,
+    row_mapping_confidence,
+    file_mapping_conf_th,
+    file_mapping_low_conf,
+    romaji_syllables,
+    syllable_blank_confidences,
+    cv_match_score_fn,
+):
+    a_type = str(alias_type or "").strip().lower()
+    fmt = str(file_format or "").strip().lower()
+    if a_type not in {"cv", "cv_head", "vcv"}:
+        return selected_idx, False
+    if fmt not in {"cvvc", "cvc", "cv", "vcv"}:
+        return selected_idx, False
+    if planned_idx is None or selected_idx is None:
+        return selected_idx, False
+    if not romaji_syllables:
+        return selected_idx, False
+
+    n = len(romaji_syllables)
+    p_idx = int(max(0, min(int(planned_idx), n - 1)))
+    s_idx = int(max(0, min(int(selected_idx), n - 1)))
+    if s_idx == p_idx:
+        return s_idx, False
+
+    conf = float(row_mapping_confidence or 0.0)
+    conf_th = float(file_mapping_conf_th or 0.0)
+    selected_blank = _blank_conf_at(syllable_blank_confidences, s_idx)
+    planned_blank = _blank_conf_at(syllable_blank_confidences, p_idx)
+
+    selected_score = -1.0
+    planned_score = -1.0
+    if target_clean:
+        try:
+            selected_score = float(cv_match_score_fn(target_clean, romaji_syllables[s_idx]))
+        except Exception:
+            selected_score = -1.0
+        try:
+            planned_score = float(cv_match_score_fn(target_clean, romaji_syllables[p_idx]))
+        except Exception:
+            planned_score = -1.0
+
+    # 저신뢰/고공백 상황에서는 전역 monotonic planner를 사실상 고정점으로 사용한다.
+    strong_lock = bool(file_mapping_low_conf) or (selected_blank >= 0.58) or (planned_blank >= 0.58)
+    if conf < max(conf_th + 0.05, 0.66):
+        strong_lock = True
+
+    if strong_lock:
+        return p_idx, True
+
+    # 고신뢰에서도 planner 대비 과도한 전진 점프는 제한한다.
+    allowed_forward = 1 if (a_type != "cv_head" and conf >= max(conf_th + 0.16, 0.80)) else 0
+    max_idx = min(n - 1, p_idx + allowed_forward)
+    if s_idx > max_idx:
+        return max_idx, True
+    if s_idx < p_idx:
+        return p_idx, True
+
+    # planner와의 차이가 작으면 안정성을 우선한다.
+    score_gain = selected_score - planned_score
+    if (selected_blank >= (planned_blank + 0.08)) or (score_gain < 10.0):
+        return p_idx, True
+    if abs(s_idx - p_idx) >= 2:
+        return p_idx, True
+    if abs(s_idx - expected_idx) > abs(p_idx - expected_idx) and score_gain < 16.0:
+        return p_idx, True
+    return s_idx, False
+
+
 def _mel_conf_at(syllables_info, idx, key, fallback=0.0):
     if not syllables_info or idx is None:
         return float(fallback)
@@ -680,6 +756,31 @@ def select_kr_general_cv_index(
             )
         selected_w_idx = int(mel_idx)
         cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
+    if planned_cv_idx is not None:
+        guarded_plan_idx, plan_guarded = _global_plan_guard_idx(
+            alias_type=alias_type,
+            file_format=file_format,
+            target_clean=target_clean,
+            expected_idx=expected_cv_idx,
+            planned_idx=planned_cv_idx,
+            selected_idx=selected_w_idx,
+            row_mapping_confidence=row_mapping_confidence,
+            file_mapping_conf_th=file_mapping_conf_th,
+            file_mapping_low_conf=file_mapping_low_conf,
+            romaji_syllables=romaji_syllables,
+            syllable_blank_confidences=syllable_blank_confidences,
+            cv_match_score_fn=cv_match_score_fn,
+        )
+        if plan_guarded and guarded_plan_idx != selected_w_idx:
+            if debug_logging:
+                log_fn(
+                    f"孱・・{fname}: KR global-plan guard ・・圸 "
+                    f"({selected_w_idx + 1}->{guarded_plan_idx + 1}, {alias})"
+                )
+            row_jump_blocked = 1
+            row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.12)
+            selected_w_idx = int(guarded_plan_idx)
+            cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
     return {
         "expected_cv_idx": int(expected_cv_idx),
         "selected_w_idx": int(selected_w_idx) if selected_w_idx is not None else None,

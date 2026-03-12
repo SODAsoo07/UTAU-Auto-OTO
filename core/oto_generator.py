@@ -3248,9 +3248,28 @@ def generate_oto(
             row_conf_floor = float(runtime_policy.get("row_conf_floor", file_mapping_conf_th))
             row_margin_floor = float(runtime_policy.get("row_margin_floor", 6.0))
             row_blank_floor = None
-            if str(file_format or "").strip().lower() == "cvvc" and runtime_policy.get("strict_mode"):
-                if blank_conf_mean >= 0.55:
-                    row_blank_floor = _env_float("UTOA_KR_CVVC_ROW_BLANK_FLOOR", 0.68)
+            fmt_norm = str(file_format or "").strip().lower()
+            if fmt_norm in {"cvvc", "cvc", "cv"}:
+                # CV 계열은 blank 구간 오매핑이 발생하면 이후 ML 보정이 과보정될 수 있어
+                # 저신뢰 파일에서 row-level blank gate를 더 엄격하게 건다.
+                apply_blank_gate = bool(runtime_policy.get("strict_mode")) or bool(file_mapping_low_conf)
+                if blank_conf_mean >= 0.45 or file_mapping_low_conf:
+                    apply_blank_gate = True
+                if apply_blank_gate:
+                    env_key_by_fmt = {
+                        "cvvc": "UTOA_KR_CVVC_ROW_BLANK_FLOOR",
+                        "cvc": "UTOA_KR_CVC_ROW_BLANK_FLOOR",
+                        "cv": "UTOA_KR_CV_ROW_BLANK_FLOOR",
+                    }
+                    default_floor_by_fmt = {
+                        "cvvc": 0.64,
+                        "cvc": 0.62,
+                        "cv": 0.60,
+                    }
+                    row_blank_floor = _env_float(
+                        env_key_by_fmt.get(fmt_norm, "UTOA_KR_CVVC_ROW_BLANK_FLOOR"),
+                        default_floor_by_fmt.get(fmt_norm, 0.64),
+                    )
             if isinstance(runtime_report, dict):
                 low_conf_reasons = list(runtime_policy.get("low_conf_reasons") or [])
                 if blank_conf_mean >= 0.55 and "blank_confidence_high" not in low_conf_reasons:
@@ -3707,7 +3726,7 @@ def generate_oto(
                         # row-level abstain 게이트를 CV/CVVC에만 적용한다.
                         active_only_formats={"cvvc", "cv"},
                         margin_formats={"cvvc", "cv"},
-                        blank_formats={"cvvc"},
+                        blank_formats={"cvvc", "cvc", "cv"},
                     )
                     if row_abstain.get("should_skip"):
                         if kr_mapping_debug_reason_logging:
