@@ -28,6 +28,8 @@ class OtoDeltaResult:
     backend: str
     applied_model: str
     confidence: Optional[float] = None
+    route: str = ""
+    route_backend: str = ""
 
 
 def _load_json(path: str) -> Optional[Dict[str, Any]]:
@@ -70,6 +72,15 @@ def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
             from core.oto_ml_lightgbm import load_lightgbm_bundle
 
             payload = load_lightgbm_bundle(model_dir, meta=meta, schema=schema)
+        elif backend == "ensemble_v1":
+            from core.oto_ml_ensemble import load_ensemble_bundle
+
+            payload = load_ensemble_bundle(
+                model_dir,
+                meta=meta,
+                schema=schema,
+                device=coupled_device,
+            )
         elif backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
             from core.oto_ml_coupled import load_coupled_bundle
 
@@ -98,10 +109,25 @@ def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
 
 def predict_oto_deltas(bundle: OtoModelBundle, feature_row: Dict[str, Any]) -> OtoDeltaResult:
     confidence = None
+    route = str(bundle.backend)
+    route_backend = str(bundle.backend)
     if bundle.backend == "lightgbm":
         from core.oto_ml_lightgbm import predict_lightgbm_deltas
 
         deltas = predict_lightgbm_deltas(bundle.payload, feature_row, meta=bundle.meta, schema=bundle.feature_schema)
+    elif bundle.backend == "ensemble_v1":
+        from core.oto_ml_ensemble import predict_ensemble_deltas
+
+        result = predict_ensemble_deltas(
+            bundle.payload,
+            feature_row,
+            meta=bundle.meta,
+            schema=bundle.feature_schema,
+        )
+        deltas = dict(result.get("deltas") or {})
+        confidence = result.get("confidence")
+        route = str(result.get("route", route) or route)
+        route_backend = str(result.get("route_backend", route_backend) or route_backend)
     elif bundle.backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
         from core.oto_ml_coupled import predict_coupled_deltas
 
@@ -118,4 +144,6 @@ def predict_oto_deltas(bundle: OtoModelBundle, feature_row: Dict[str, Any]) -> O
         backend=bundle.backend,
         applied_model=bundle.model_dir,
         confidence=confidence,
+        route=route,
+        route_backend=route_backend,
     )

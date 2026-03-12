@@ -71,6 +71,77 @@ class ExportBundleTests(unittest.TestCase):
                     f.write("{}")
         return model_dir
 
+    def _make_ensemble_bundle(self, root: str) -> str:
+        model_dir = os.path.join(root, "korean", "cvc", "v1")
+        os.makedirs(model_dir, exist_ok=True)
+        with open(os.path.join(model_dir, "feature_schema.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        with open(os.path.join(model_dir, "eval_summary.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        with open(os.path.join(model_dir, "model_meta.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "language": "korean",
+                    "format_type": "cvc",
+                    "backend": "ensemble_v1",
+                    "model_version": "v1",
+                    "feature_version": "v11",
+                    "meta_enabled": True,
+                },
+                f,
+            )
+        for subdir, files in {
+            "lightgbm": [
+                "feature_schema.json",
+                "model_meta.json",
+                "eval_summary.json",
+                "model_offset.txt",
+                "model_cons.txt",
+                "model_cutoff.txt",
+                "model_pre.txt",
+                "model_ovl.txt",
+            ],
+            "coupled": [
+                "feature_schema.json",
+                "model_meta.json",
+                "eval_summary.json",
+                "coupled_model.pt",
+            ],
+            "meta": [
+                "feature_schema.json",
+                "model_meta.json",
+                "eval_summary.json",
+                "model_offset.txt",
+                "model_cons.txt",
+                "model_cutoff.txt",
+                "model_pre.txt",
+                "model_ovl.txt",
+            ],
+        }.items():
+            subdir_path = os.path.join(model_dir, subdir)
+            os.makedirs(subdir_path, exist_ok=True)
+            for name in files:
+                path = os.path.join(subdir_path, name)
+                if name == "model_meta.json":
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(
+                            {
+                                "language": "korean",
+                                "format_type": "cvc",
+                                "backend": "coupled_nn_v2_rawmel" if subdir == "coupled" else "lightgbm",
+                                "model_version": "v1",
+                                "feature_version": "v11",
+                            },
+                            f,
+                        )
+                elif name.endswith(".pt"):
+                    with open(path, "wb") as f:
+                        f.write(b"pt")
+                else:
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write("{}")
+        return model_dir
+
     def test_validate_bundle_dir(self):
         with tempfile.TemporaryDirectory() as td:
             model_dir = self._make_bundle(td)
@@ -131,6 +202,16 @@ class ExportBundleTests(unittest.TestCase):
             names = {entry["name"] for entry in manifest["files"]}
             self.assertIn("coupled_model.pt", names)
             self.assertNotIn("model_offset.txt", names)
+
+    def test_export_model_bundle_ensemble_keeps_nested_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            model_dir = self._make_ensemble_bundle(td)
+            manifest = export_model_bundle(model_dir, os.path.join(td, "exports"))
+            self.assertEqual(manifest["backend"], "ensemble_v1")
+            names = {entry["name"] for entry in manifest["files"]}
+            self.assertIn("lightgbm/model_offset.txt", names)
+            self.assertIn("coupled/coupled_model.pt", names)
+            self.assertIn("meta/model_offset.txt", names)
 
 
 if __name__ == "__main__":

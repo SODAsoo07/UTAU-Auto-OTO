@@ -18,7 +18,7 @@ from core.oto_ml.features.mel_patches import (
     find_wav_path,
     resolve_mel_patch_anchors,
 )
-from core.oto_ml_runtime import load_oto_model_bundle, predict_oto_deltas
+from core.oto_ml_runtime import OtoDeltaResult, load_oto_model_bundle, predict_oto_deltas
 from core.oto_ml_lightgbm import load_lightgbm_selector_bundle, predict_lightgbm_selector_score
 from core.oto_ml_policy import (
     delta_enabled_by_default,
@@ -70,6 +70,14 @@ def _env_flag(name: str, default: bool) -> bool:
 
 def _coupled_enabled() -> bool:
     return _env_flag("UTOA_ML_COUPLED_ENABLE", True)
+
+
+def _ensemble_enabled() -> bool:
+    return _env_flag("UTOA_ML_ENSEMBLE_ENABLE", True)
+
+
+def _gated_ensemble_enabled() -> bool:
+    return _env_flag("UTOA_ML_GATED_ENSEMBLE_ENABLE", True)
 
 
 def _preferred_coupled_backend() -> str:
@@ -341,6 +349,10 @@ def _resolve_lightgbm_model_dir(language: str, format_type: str, alias_family: s
     return _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="lightgbm")
 
 
+def _resolve_ensemble_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
+    return _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="ensemble_v1")
+
+
 def _resolve_coupled_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
     preferred = _preferred_coupled_backend()
     if preferred == "coupled_nn_v2_rawmel":
@@ -384,8 +396,11 @@ def _ensure_rawmel_patches(
 
 
 def _resolve_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
+    ensemble_dir = _resolve_ensemble_model_dir(language, format_type, alias_family=alias_family) if _ensemble_enabled() else None
     coupled_dir = _resolve_coupled_model_dir(language, format_type, alias_family=alias_family)
     lightgbm_dir = _resolve_lightgbm_model_dir(language, format_type, alias_family=alias_family)
+    if ensemble_dir:
+        return ensemble_dir
     if _coupled_enabled():
         return coupled_dir or lightgbm_dir
     return lightgbm_dir or coupled_dir
@@ -512,6 +527,23 @@ def check_oto_ml_ready(language: str, format_type: str, alias_family: str = "") 
     bundle = load_oto_model_bundle(model_dir)
     if not bundle:
         primary_backend = _read_bundle_backend(model_dir)
+        if primary_backend == "ensemble_v1":
+            fallback_dir = _resolve_coupled_model_dir(language, routed_format, alias_family=family) or _resolve_lightgbm_model_dir(
+                language, routed_format, alias_family=family
+            )
+            if fallback_dir and _bundle_meta_exists(fallback_dir):
+                fallback_bundle = load_oto_model_bundle(fallback_dir)
+                if fallback_bundle:
+                    return make_runtime_report(
+                        "ml",
+                        OK,
+                        "OTO ML 준비 완료 (ensemble fallback available)",
+                        language=str(language or "").strip().lower(),
+                        format_type=routed_format,
+                        alias_family=family,
+                        model_dir=str(fallback_dir),
+                        ready=True,
+                    )
         if primary_backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
             fallback_dir = _resolve_lightgbm_model_dir(language, routed_format, alias_family=family)
             if fallback_dir and _bundle_meta_exists(fallback_dir):
@@ -1375,7 +1407,8 @@ def apply_oto_ml_delta(
 ) -> Tuple[float, float, float, float, float]:
     validate_oto_params = _get_validate_func(language)
     pred = pred_result if pred_result is not None else predict_oto_deltas(bundle, row_context)
-    if str(bundle.backend).strip().lower() in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
+    pred_backend = str(getattr(pred, "route_backend", "") or getattr(pred, "backend", bundle.backend)).strip().lower()
+    if pred_backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
         pred_conf = float(getattr(pred, "confidence", 0.0) or 0.0)
         min_conf = max(0.0, float(min_confidence or 0.0))
         if min_conf > 0.0 and pred_conf < min_conf:
@@ -1536,13 +1569,19 @@ def apply_oto_ml_to_oto_file(
             ml_report["attempted_routes"].append(route_label)
         cache_key = route_label
         if cache_key not in bundle_cache:
+            ensemble_dir = _resolve_ensemble_model_dir(language, format_type, alias_family=alias_family) if _ensemble_enabled() else None
             coupled_dir = _resolve_coupled_model_dir(language, format_type, alias_family=alias_family) if _coupled_enabled() else None
             lightgbm_dir = _resolve_lightgbm_model_dir(language, format_type, alias_family=alias_family)
-            primary_dir = coupled_dir or lightgbm_dir
+            primary_dir = ensemble_dir or coupled_dir or lightgbm_dir
             fallback_dir = ""
             primary_backend = _read_bundle_backend(primary_dir) if primary_dir else ""
             route_primary_backend[cache_key] = str(primary_backend or "lightgbm")
-            if primary_dir and primary_backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"} and lightgbm_dir and lightgbm_dir != primary_dir:
+            if primary_dir and primary_backend == "ensemble_v1":
+                if coupled_dir and coupled_dir != primary_dir:
+                    fallback_dir = coupled_dir
+                elif lightgbm_dir and lightgbm_dir != primary_dir:
+                    fallback_dir = lightgbm_dir
+            elif primary_dir and primary_backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"} and lightgbm_dir and lightgbm_dir != primary_dir:
                 fallback_dir = lightgbm_dir
 
             if not primary_dir:
@@ -1685,16 +1724,26 @@ def apply_oto_ml_to_oto_file(
             primary_backend = str(route_primary_backend.get(cache_key, "") or "")
             if applied_bundle is None and fallback_bundle is not None:
                 applied_bundle = fallback_bundle
-                if primary_backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
+                if primary_backend == "ensemble_v1":
+                    fallback_reasons.append("ensemble_load_failed")
+                elif primary_backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
                     fallback_reasons.append("coupled_load_failed")
                 else:
                     fallback_reasons.append("primary_load_failed")
             pred_preview = None
             applied_conf = None
             route_name = ""
-            if applied_bundle is not None and str(applied_bundle.backend).strip().lower() in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
-                if str(applied_bundle.backend).strip().lower() == "coupled_nn_v2_rawmel":
+            if applied_bundle is not None:
+                bundle_backend_norm = str(applied_bundle.backend).strip().lower()
+                needs_rawmel = False
+                patch_spec = {}
+                if bundle_backend_norm == "coupled_nn_v2_rawmel":
+                    needs_rawmel = True
                     patch_spec = dict((applied_bundle.payload or {}).get("mel_patch_spec") or {})
+                elif bundle_backend_norm == "ensemble_v1":
+                    needs_rawmel = bool((applied_bundle.payload or {}).get("coupled_rawmel_enabled", False))
+                    patch_spec = dict((applied_bundle.payload or {}).get("coupled_patch_spec") or {})
+                if needs_rawmel:
                     _ensure_rawmel_patches(
                         feat,
                         wav_dir=wav_dir,
@@ -1702,26 +1751,66 @@ def apply_oto_ml_to_oto_file(
                         mel_cache=rawmel_cache,
                         patch_spec=patch_spec,
                     )
-                pred_preview = predict_oto_deltas(applied_bundle, feat)
-                applied_conf = float(getattr(pred_preview, "confidence", 0.0) or 0.0)
-                if applied_conf < coupled_min_conf:
-                    raise CoupledLowConfidenceError(applied_conf, coupled_min_conf)
+                if (
+                    bundle_backend_norm in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}
+                    and fallback_bundle is not None
+                    and str(fallback_bundle.backend).strip().lower() == "lightgbm"
+                    and _gated_ensemble_enabled()
+                ):
+                    from core.oto_ml_ensemble import predict_gated_ensemble_deltas
+
+                    pred_dict = predict_gated_ensemble_deltas(
+                        lightgbm_bundle={
+                            "backend": str(fallback_bundle.backend),
+                            "model_dir": str(fallback_bundle.model_dir),
+                            "payload": fallback_bundle.payload,
+                            "meta": fallback_bundle.meta,
+                            "schema": fallback_bundle.feature_schema,
+                        },
+                        coupled_bundle={
+                            "backend": str(applied_bundle.backend),
+                            "model_dir": str(applied_bundle.model_dir),
+                            "payload": applied_bundle.payload,
+                            "meta": applied_bundle.meta,
+                            "schema": applied_bundle.feature_schema,
+                        },
+                        feature_row=feat,
+                        min_coupled_confidence=coupled_min_conf,
+                    )
+                    pred_preview = OtoDeltaResult(
+                        deltas=dict(pred_dict.get("deltas") or {}),
+                        backend=str(pred_dict.get("route_backend", "ensemble_v1") or "ensemble_v1"),
+                        applied_model=str(applied_bundle.model_dir),
+                        confidence=pred_dict.get("confidence"),
+                        route=str(pred_dict.get("route", "")),
+                        route_backend=str(pred_dict.get("route_backend", "")),
+                    )
+                elif bundle_backend_norm in {"coupled_nn_v1", "coupled_nn_v2_rawmel", "ensemble_v1"}:
+                    pred_preview = predict_oto_deltas(applied_bundle, feat)
+                if pred_preview is not None:
+                    applied_conf = float(getattr(pred_preview, "confidence", 0.0) or 0.0)
+                    pred_backend = str(
+                        getattr(pred_preview, "route_backend", "") or getattr(pred_preview, "backend", bundle_backend_norm)
+                    ).strip().lower()
+                    if pred_backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"} and applied_conf < coupled_min_conf:
+                        raise CoupledLowConfidenceError(applied_conf, coupled_min_conf)
 
             if applied_bundle is not None:
+                apply_bundle_backend = str(applied_bundle.backend).strip().lower()
                 o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(
                     language,
                     feat,
                     applied_bundle,
                     anchor_stats=anchor_stats,
                     base_params_override=selected_base_override,
-                    min_confidence=coupled_min_conf if str(applied_bundle.backend).strip().lower() in {"coupled_nn_v1", "coupled_nn_v2_rawmel"} else 0.0,
+                    min_confidence=coupled_min_conf if apply_bundle_backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"} else 0.0,
                     strict_constraint=strict_constraint,
                     constraint_stats=constraint_stats,
                     pred_result=pred_preview,
                 )
-                route_name = str(applied_bundle.backend)
-                if bundle is None and fallback_bundle is not None and primary_backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
-                    route_name = f"{primary_backend}->lightgbm_load_fallback"
+                route_name = str(getattr(pred_preview, "route", "") or applied_bundle.backend)
+                if bundle is None and fallback_bundle is not None and primary_backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel", "ensemble_v1"}:
+                    route_name = f"{primary_backend}->{str(fallback_bundle.backend).strip().lower()}_load_fallback"
                 if applied_conf is not None:
                     confidence_values.append(float(applied_conf))
             elif selected_base_override is not None:
@@ -1750,7 +1839,10 @@ def apply_oto_ml_to_oto_file(
                         strict_constraint=strict_constraint,
                         constraint_stats=constraint_stats,
                     )
-                    route_counts[f"{primary_backend}->lightgbm"] = int(route_counts.get(f"{primary_backend}->lightgbm", 0)) + 1
+                    fallback_backend = str(fallback_bundle.backend).strip().lower() or "fallback"
+                    route_counts[f"{primary_backend}->{fallback_backend}"] = int(
+                        route_counts.get(f"{primary_backend}->{fallback_backend}", 0)
+                    ) + 1
                 except Exception as fallback_exc:
                     logger.warning("OTO ML fallback inference skipped for line %s: %s", line_index, fallback_exc)
                     ml_report["infer_failures"].append({"line_index": line_index, "message": str(fallback_exc)})
@@ -1763,7 +1855,7 @@ def apply_oto_ml_to_oto_file(
         except Exception as e:
             logger.warning("OTO ML inference skipped for line %s: %s", line_index, e)
             ml_report["infer_failures"].append({"line_index": line_index, "message": str(e)})
-            if bundle is not None and str(bundle.backend).strip().lower() in {"coupled_nn_v1", "coupled_nn_v2_rawmel"} and fallback_bundle is not None:
+            if bundle is not None and str(bundle.backend).strip().lower() in {"coupled_nn_v1", "coupled_nn_v2_rawmel", "ensemble_v1"} and fallback_bundle is not None:
                 try:
                     o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(
                         language,
@@ -1774,10 +1866,13 @@ def apply_oto_ml_to_oto_file(
                         strict_constraint=strict_constraint,
                         constraint_stats=constraint_stats,
                     )
-                    route_counts[f"{primary_backend}->lightgbm_exception"] = int(
-                        route_counts.get(f"{primary_backend}->lightgbm_exception", 0)
+                    route_counts[f"{primary_backend}->{str(fallback_bundle.backend).strip().lower()}_exception"] = int(
+                        route_counts.get(f"{primary_backend}->{str(fallback_bundle.backend).strip().lower()}_exception", 0)
                     ) + 1
-                    fallback_reasons.append(f"coupled_infer_exception:{e}")
+                    if primary_backend == "ensemble_v1":
+                        fallback_reasons.append(f"ensemble_infer_exception:{e}")
+                    else:
+                        fallback_reasons.append(f"coupled_infer_exception:{e}")
                 except Exception:
                     continue
             else:
@@ -1826,7 +1921,12 @@ def apply_oto_ml_to_oto_file(
         ml_report["route"] = str(route_sorted[0][0])
     fallback_used_runtime = bool(
         fallback_reasons
-        or any(str(name).startswith("coupled_nn_v1->") or str(name).startswith("coupled_nn_v2_rawmel->") for name in route_counts.keys())
+        or any(
+            str(name).startswith("coupled_nn_v1->")
+            or str(name).startswith("coupled_nn_v2_rawmel->")
+            or str(name).startswith("ensemble_v1->")
+            for name in route_counts.keys()
+        )
     )
     if fallback_used_runtime:
         ml_report["fallback_used"] = True

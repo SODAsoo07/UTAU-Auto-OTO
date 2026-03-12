@@ -173,6 +173,8 @@ class RuntimeFallbackTests(unittest.TestCase):
             ), mock.patch(
                 "core.oto_ml_refiner.apply_oto_ml_delta",
                 side_effect=lambda _lang, _feat, _bundle, **_kw: (102.0, 200.0, -300.0, 120.0, 40.0),
+            ), mock.patch(
+                "core.oto_ml_refiner._gated_ensemble_enabled", return_value=False
             ):
                 changed = apply_oto_ml_to_oto_file(
                     "korean",

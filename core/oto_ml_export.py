@@ -32,6 +32,12 @@ COUPLED_BUNDLE_FILES = [
     "coupled_model.pt",
 ]
 
+ENSEMBLE_SUBDIRS = {
+    "lightgbm": list(COMMON_BUNDLE_FILES) + list(LIGHTGBM_BUNDLE_FILES),
+    "coupled": list(COMMON_BUNDLE_FILES) + list(COUPLED_BUNDLE_FILES),
+    "meta": list(COMMON_BUNDLE_FILES) + list(LIGHTGBM_BUNDLE_FILES),
+}
+
 
 def _file_sha256(path: str) -> str:
     h = hashlib.sha256()
@@ -47,10 +53,18 @@ def read_bundle_meta(model_dir: str) -> Dict[str, object]:
         return json.load(f)
 
 
-def required_bundle_files_for_backend(backend: str) -> List[str]:
+def required_bundle_files_for_backend(backend: str, meta: Optional[Dict[str, object]] = None) -> List[str]:
     backend_norm = str(backend or "").strip().lower()
-    if backend_norm == "coupled_nn_v1":
+    if backend_norm in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
         return list(COMMON_BUNDLE_FILES) + list(COUPLED_BUNDLE_FILES)
+    if backend_norm == "ensemble_v1":
+        required = list(COMMON_BUNDLE_FILES)
+        for subdir in ("lightgbm", "coupled"):
+            required.extend([os.path.join(subdir, name) for name in ENSEMBLE_SUBDIRS[subdir]])
+        meta_enabled = bool((meta or {}).get("meta_enabled", False))
+        if meta_enabled:
+            required.extend([os.path.join("meta", name) for name in ENSEMBLE_SUBDIRS["meta"]])
+        return required
     return list(COMMON_BUNDLE_FILES) + list(LIGHTGBM_BUNDLE_FILES)
 
 
@@ -60,7 +74,7 @@ def validate_bundle_dir(model_dir: str, meta: Optional[Dict[str, object]] = None
             meta = read_bundle_meta(model_dir)
         except Exception:
             meta = {}
-    required_files = required_bundle_files_for_backend((meta or {}).get("backend", ""))
+    required_files = required_bundle_files_for_backend((meta or {}).get("backend", ""), meta=meta)
     missing = []
     for name in required_files:
         if not os.path.isfile(os.path.join(model_dir, name)):
@@ -115,7 +129,7 @@ def export_model_bundle(
         raise FileNotFoundError(model_dir)
 
     meta = read_bundle_meta(model_dir)
-    required_files = required_bundle_files_for_backend(meta.get("backend", ""))
+    required_files = required_bundle_files_for_backend(meta.get("backend", ""), meta=meta)
     missing = validate_bundle_dir(model_dir, meta=meta)
     if missing:
         raise FileNotFoundError(f"Missing required bundle files in {model_dir}: {', '.join(missing)}")
@@ -131,9 +145,10 @@ def export_model_bundle(
     for name in required_files:
         src = os.path.join(model_dir, name)
         dst = os.path.join(out_dir, name)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(src, dst)
         files.append({
-            "name": name,
+            "name": str(name).replace("\\", "/"),
             "size": int(os.path.getsize(dst)),
             "sha256": _file_sha256(dst),
         })
