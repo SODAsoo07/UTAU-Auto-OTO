@@ -186,18 +186,18 @@ KR_DELTA_CLIP_LIMITS = {
 # alias_type별 세분화된 delta 클리핑 범위
 KR_DELTA_CLIP_LIMITS_BY_TYPE = {
     "cv": {
-        "delta_offset": [-160.0, 160.0],
-        "delta_cons": [-180.0, 180.0],
-        "delta_cutoff": [-220.0, 220.0],
-        "delta_pre": [-140.0, 140.0],
-        "delta_ovl": [-100.0, 100.0],
+        "delta_offset": [-90.0, 90.0],
+        "delta_cons": [-140.0, 140.0],
+        "delta_cutoff": [-180.0, 180.0],
+        "delta_pre": [-70.0, 70.0],
+        "delta_ovl": [-80.0, 80.0],
     },
     "cv_head": {
-        "delta_offset": [-200.0, 200.0],
-        "delta_cons": [-180.0, 180.0],
-        "delta_cutoff": [-220.0, 220.0],
-        "delta_pre": [-140.0, 140.0],
-        "delta_ovl": [-100.0, 100.0],
+        "delta_offset": [-110.0, 110.0],
+        "delta_cons": [-150.0, 150.0],
+        "delta_cutoff": [-190.0, 190.0],
+        "delta_pre": [-80.0, 80.0],
+        "delta_ovl": [-90.0, 90.0],
     },
     "vc": {
         "delta_offset": [-200.0, 200.0],

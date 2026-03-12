@@ -92,6 +92,55 @@ def _coupled_min_confidence() -> float:
         return 0.55
 
 
+def _read_bounded_conf_env(name: str) -> Optional[float]:
+    raw = str(os.environ.get(name, "")).strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, min(float(raw), 1.0))
+    except Exception:
+        return None
+
+
+def _coupled_min_confidence_for_alias(
+    alias_type: str,
+    *,
+    language: str = "",
+    format_type: str = "",
+) -> float:
+    base = _coupled_min_confidence()
+    alias = str(alias_type or "").strip().lower()
+    if not alias:
+        return float(base)
+
+    lang = str(language or "").strip().lower()
+    if lang.startswith("ko") or lang == "korean":
+        lang_token = "KR"
+    elif lang.startswith("ja") or lang == "japanese":
+        lang_token = "JA"
+    else:
+        lang_token = "GEN"
+
+    fmt = normalize_format_type(lang, format_type) if format_type else ""
+    fmt_token = str(fmt or "GENERAL").strip().upper()
+    alias_token = str(alias).strip().upper()
+    keys = [
+        f"UTOA_ML_COUPLED_MIN_CONF_{lang_token}_{fmt_token}_{alias_token}",
+        f"UTOA_ML_COUPLED_MIN_CONF_{lang_token}_{alias_token}",
+        f"UTOA_ML_COUPLED_MIN_CONF_{alias_token}",
+    ]
+    if alias in {"cv", "cv_head"}:
+        keys.append("UTOA_ML_COUPLED_MIN_CONF_CV_FAMILY")
+    elif alias in {"vc", "vv", "vcv"}:
+        keys.append("UTOA_ML_COUPLED_MIN_CONF_BRIDGE_FAMILY")
+
+    for key in keys:
+        value = _read_bounded_conf_env(key)
+        if value is not None:
+            return float(value)
+    return float(base)
+
+
 def _coupled_strict_constraint() -> bool:
     return _env_flag("UTOA_ML_COUPLED_STRICT_CONSTRAINT", False)
 
@@ -668,10 +717,51 @@ def _apply_korean_delta_policy(row_context: Dict[str, object], deltas: Dict[str,
     coda_type = str(row_context.get("coda_type", "") or "").strip().lower()
     mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
 
-    if alias_type not in {"vc", "vv"}:
-        return deltas
+    if alias_type in {"cv", "cv_head"}:
+        blank_conf = _to_float(row_context.get("blank_span_confidence"), 0.0)
+        silence_ratio = max(
+            _to_float(row_context.get("db_silence_ratio"), 0.0),
+            _to_float(row_context.get("mel_window_silence_ratio"), 0.0),
+        )
+        risky = (mapping_conf < 0.70) or (blank_conf >= 0.55) or (silence_ratio >= 0.60)
+        severe = (blank_conf >= 0.72) or (silence_ratio >= 0.72)
 
-    if alias_type == "vc":
+        if severe:
+            # 공백 가능성이 높은 CV는 offset 전진을 금지하고 pre 이동도 크게 제한한다.
+            deltas["delta_offset"] = 0.0
+            deltas["delta_pre"] = _scale_signed(deltas.get("delta_pre", 0.0), neg_scale=0.10, pos_scale=0.58)
+        else:
+            deltas["delta_offset"] = _scale_signed(
+                deltas.get("delta_offset", 0.0),
+                neg_scale=0.22 if risky else 0.38,
+                pos_scale=0.72 if risky else 0.84,
+            )
+            deltas["delta_pre"] = _scale_signed(
+                deltas.get("delta_pre", 0.0),
+                neg_scale=0.26 if risky else 0.44,
+                pos_scale=0.80 if risky else 0.92,
+            )
+
+        deltas["delta_cons"] = _scale_signed(
+            deltas.get("delta_cons", 0.0),
+            neg_scale=0.58 if risky else 0.72,
+            pos_scale=0.82 if risky else 0.92,
+        )
+        deltas["delta_cutoff"] = min(
+            _scale_signed(
+                deltas.get("delta_cutoff", 0.0),
+                neg_scale=0.80 if risky else 0.90,
+                pos_scale=0.18 if risky else 0.28,
+            ),
+            12.0 if risky else 20.0,
+        )
+        deltas["delta_ovl"] = _scale_signed(
+            deltas.get("delta_ovl", 0.0),
+            neg_scale=0.68 if risky else 0.82,
+            pos_scale=0.78 if risky else 0.90,
+        )
+
+    elif alias_type == "vc":
         # VC는 연결 안정성을 위해 offset/pre 이동을 기본적으로 억제한다.
         deltas["delta_offset"] = _scale_signed(deltas.get("delta_offset", 0.0), neg_scale=0.35, pos_scale=0.46)
         if coda_type == "stop":
@@ -689,13 +779,15 @@ def _apply_korean_delta_policy(row_context: Dict[str, object], deltas: Dict[str,
             deltas["delta_cons"] = _scale_signed(deltas.get("delta_cons", 0.0), neg_scale=0.62, pos_scale=0.86)
             deltas["delta_cutoff"] = _scale_signed(deltas.get("delta_cutoff", 0.0), neg_scale=0.80, pos_scale=0.42)
             deltas["delta_ovl"] = _scale_signed(deltas.get("delta_ovl", 0.0), neg_scale=0.86, pos_scale=0.86)
-    else:
+    elif alias_type == "vv":
         # VV는 pre-ovl 간격(리듬)을 보존하도록 ovl/offset을 강하게 제한한다.
         deltas["delta_offset"] = _scale_signed(deltas.get("delta_offset", 0.0), neg_scale=0.44, pos_scale=0.54)
         deltas["delta_pre"] = _scale_signed(deltas.get("delta_pre", 0.0), neg_scale=0.56, pos_scale=0.78)
         deltas["delta_cons"] = _scale_signed(deltas.get("delta_cons", 0.0), neg_scale=0.72, pos_scale=0.92)
         deltas["delta_cutoff"] = _scale_signed(deltas.get("delta_cutoff", 0.0), neg_scale=0.80, pos_scale=0.58)
         deltas["delta_ovl"] = _scale_signed(deltas.get("delta_ovl", 0.0), neg_scale=0.62, pos_scale=0.62)
+    else:
+        return deltas
 
     if mapping_conf < 0.72:
         for key in list(deltas.keys()):
@@ -709,6 +801,72 @@ def _apply_korean_delta_policy(row_context: Dict[str, object], deltas: Dict[str,
             deltas[key] = float(deltas[key]) * 0.90
 
     return deltas
+
+
+def _apply_korean_cv_no_regression_guard(
+    row_context: Dict[str, object],
+    params: Tuple[float, float, float, float, float],
+    validate_fn,
+) -> Tuple[float, float, float, float, float]:
+    format_type = normalize_format_type("korean", row_context.get("format_type", ""))
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    if alias_type not in {"cv", "cv_head"}:
+        return params
+    if format_type not in {"cv", "cvvc", "cvc", "vcv"}:
+        return params
+
+    offset, cons, cutoff, pre, ovl = validate_fn(*params)
+    offset = float(offset)
+    cons = float(cons)
+    pre = float(pre)
+    ovl = float(ovl)
+    cutoff_abs = abs(float(cutoff))
+
+    curr_phone_start = _to_float(row_context.get("curr_phone_start_ms"), 0.0)
+    curr_phone_len = max(_to_float(row_context.get("curr_phone_len_ms"), 0.0), 0.0)
+    curr_vowel_start = _to_float(row_context.get("curr_vowel_start_ms"), 0.0)
+    expected_anchor = _to_float(row_context.get("expected_anchor_ms"), 0.0)
+    base_offset = _to_float(row_context.get("base_offset"), offset)
+    mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
+    blank_conf = _to_float(row_context.get("blank_span_confidence"), 0.0)
+    silence_ratio = max(
+        _to_float(row_context.get("db_silence_ratio"), 0.0),
+        _to_float(row_context.get("mel_window_silence_ratio"), 0.0),
+    )
+
+    if curr_vowel_start > 0.0:
+        expected_anchor = curr_vowel_start
+
+    pre_abs = offset + pre
+    pre_lead_cap = 18.0 if alias_type == "cv_head" else 24.0
+    if mapping_conf < 0.74:
+        pre_lead_cap -= 4.0
+    if blank_conf >= 0.58 or silence_ratio >= 0.62:
+        pre_lead_cap -= 6.0
+    pre_lead_cap = max(pre_lead_cap, 8.0)
+
+    min_pre_abs = pre_abs
+    if expected_anchor > 0.0:
+        min_pre_abs = expected_anchor - pre_lead_cap
+    if curr_phone_start > 0.0:
+        phone_guard = curr_phone_start + min(14.0, max(curr_phone_len * 0.12, 7.0))
+        min_pre_abs = max(min_pre_abs, phone_guard)
+
+    min_offset = base_offset - 10.0
+    if curr_phone_start > 0.0:
+        min_offset = max(min_offset, curr_phone_start - 6.0)
+    if blank_conf >= 0.70 or silence_ratio >= 0.70:
+        min_offset = max(min_offset, base_offset - 4.0)
+
+    if offset < min_offset:
+        offset = min_offset
+    if pre_abs < min_pre_abs:
+        pre_abs = min_pre_abs
+
+    pre = max(pre_abs - offset, 0.0)
+    cons = max(cons, pre + 8.0)
+    cutoff_abs = max(cutoff_abs, cons + 10.0)
+    return validate_fn(offset, cons, -cutoff_abs, pre, ovl)
 
 
 def _apply_korean_bridge_post_guard(
@@ -931,6 +1089,7 @@ def _apply_language_specific_post_guard(
     out = params
     if lang == "korean":
         out = _apply_korean_bridge_post_guard(row_context, out, validate_fn)
+        out = _apply_korean_cv_no_regression_guard(row_context, out, validate_fn)
     elif lang == "japanese":
         out = _apply_japanese_bridge_post_guard(row_context, out, validate_fn)
         out = _apply_japanese_cvvc_cv_post_guard(row_context, out, validate_fn)
@@ -1332,7 +1491,6 @@ def apply_oto_ml_to_oto_file(
     fallback_reasons: List[str] = []
     blank_conf_values: List[float] = []
     strict_constraint = _coupled_strict_constraint()
-    coupled_min_conf = _coupled_min_confidence()
     anchor_stats = {
         "anchor_locked_count": 0,
         "cutoff_clamped_count": 0,
@@ -1351,6 +1509,12 @@ def apply_oto_ml_to_oto_file(
         format_type = _route_format_for_feature(language, feat, format_override=format_override)
         if not format_type:
             continue
+        alias_type_for_row = str(feat.get("alias_type", "") or "").strip().lower()
+        coupled_min_conf = _coupled_min_confidence_for_alias(
+            alias_type_for_row,
+            language=language,
+            format_type=format_type,
+        )
         alias_family = infer_alias_family(language, feat)
         routed_features += 1
         route_label = format_type if not alias_family else f"{format_type}:{alias_family}"
