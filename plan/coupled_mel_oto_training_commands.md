@@ -248,6 +248,13 @@ powershell -ExecutionPolicy Bypass -File ".\ml\scripts\run_coupled_mel_oto_train
   -ExportBundle `
   -InstallBundle
 
+powershell -ExecutionPolicy Bypass -File ".\ml\scripts\run_coupled_mel_oto_training.ps1" `
+  -Lang korean `
+  -Format vcv `
+  -Device cuda `
+  -ExportBundle `
+  -InstallBundle
+
 ## 단일 work 디렉터리 대상 실행 예시
 
 ```powershell

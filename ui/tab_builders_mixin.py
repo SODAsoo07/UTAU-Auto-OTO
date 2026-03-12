@@ -1,4 +1,5 @@
-﻿import os
+# -*- coding: utf-8 -*-
+import os
 
 import customtkinter as ctk
 
@@ -21,8 +22,32 @@ def _style_blue_menu(widget):
 class TabBuildersMixin:
     def _build_pipeline_tab(self):
         tab = self.tabview.add("파이프라인")
-        content = ctk.CTkScrollableFrame(tab)
-        content.pack(fill="both", expand=True, padx=5, pady=5)
+        root = ctk.CTkFrame(tab)
+        root.pack(fill="both", expand=True, padx=5, pady=5)
+
+        content = ctk.CTkScrollableFrame(root)
+        content.pack(side="top", fill="both", expand=True, padx=0, pady=0)
+
+        action_parent = getattr(self, "pipeline_action_host", root)
+        if action_parent is root:
+            action_panel = ctk.CTkFrame(root)
+            action_panel.pack(side="bottom", fill="x", padx=0, pady=(4, 0))
+        else:
+            for child in action_parent.winfo_children():
+                child.destroy()
+            action_panel = ctk.CTkFrame(
+                action_parent,
+                fg_color="transparent",
+            )
+            action_panel.pack(fill="x", padx=10, pady=8)
+        action_panel.grid_columnconfigure(0, weight=1)
+        action_panel.grid_columnconfigure(1, weight=1)
+
+        left_actions = ctk.CTkFrame(action_panel, fg_color="transparent")
+        left_actions.grid(row=0, column=0, sticky="nsew", padx=(12, 6), pady=6)
+
+        right_actions = ctk.CTkFrame(action_panel, fg_color="transparent")
+        right_actions.grid(row=0, column=1, sticky="nsew", padx=(6, 12), pady=6)
 
         mfa_frame = ctk.CTkFrame(content, border_width=1, border_color="#444")
         mfa_frame.pack(fill="x", padx=10, pady=(5, 10))
@@ -42,30 +67,6 @@ class TabBuildersMixin:
             )
         self.mfa_status_label.pack(side="left")
 
-        self.mfa_install_btn = ctk.CTkButton(
-            mfa_inner,
-            text="⬇ MFA 원클릭 설치",
-            width=150,
-            fg_color="#FFA726",
-            hover_color="#FB8C00",
-            text_color="black",
-            command=self._run_mfa_setup,
-        )
-        if self.mfa_path:
-            self.mfa_install_btn.configure(text="✅ 설치 완료", state="disabled", fg_color="#388E3C")
-        self.mfa_install_btn.pack(side="right")
-
-        self.mfa_repair_btn = ctk.CTkButton(
-            mfa_inner,
-            text="🔍 MFA 진단/복구",
-            width=150,
-            fg_color="#B0BEC5",
-            hover_color="#90A4AE",
-            text_color="black",
-            command=self._run_mfa_diagnose_repair,
-        )
-        self.mfa_repair_btn.pack(side="right", padx=(0, 8))
-
         ctk.CTkLabel(
             content,
             text=(
@@ -83,6 +84,63 @@ class TabBuildersMixin:
             ("3. 음성 정렬 (MFA)", "MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.", self._run_mfa),
             ("4. OTO.ini 생성", "TextGrid 기반으로 OTO 파라미터를 계산해 저장합니다.", self._run_oto_gen),
         ]
+
+        ctk.CTkLabel(
+            left_actions,
+            text="실행",
+            font=("", 13, "bold"),
+            text_color=PALETTE.header_accent,
+        ).pack(anchor="w", pady=(0, 4))
+
+        mfa_btn_row = ctk.CTkFrame(left_actions, fg_color="transparent")
+        mfa_btn_row.pack(anchor="w")
+        mfa_btn_row.grid_columnconfigure(0, weight=1)
+        mfa_btn_row.grid_columnconfigure(1, weight=1)
+
+        self.mfa_repair_btn = ctk.CTkButton(
+            mfa_btn_row,
+            text="🔍 MFA 진단/복구",
+            width=160,
+            fg_color="#B0BEC5",
+            hover_color="#90A4AE",
+            text_color="black",
+            command=self._run_mfa_diagnose_repair,
+        )
+        self.mfa_repair_btn.grid(row=0, column=0, padx=(0, 6), pady=2, sticky="w")
+
+        self.mfa_install_btn = ctk.CTkButton(
+            mfa_btn_row,
+            text="⬇ MFA 원클릭 설치",
+            width=160,
+            fg_color="#FFA726",
+            hover_color="#FB8C00",
+            text_color="black",
+            command=self._run_mfa_setup,
+        )
+        if self.mfa_path:
+            self.mfa_install_btn.configure(text="✅ 설치 완료", state="disabled", fg_color="#388E3C")
+        self.mfa_install_btn.grid(row=0, column=1, padx=(6, 0), pady=2, sticky="w")
+
+        ctk.CTkLabel(
+            right_actions,
+            text="파이프라인 단계",
+            font=("", 13, "bold"),
+            text_color=PALETTE.neutral_text,
+        ).pack(anchor="w", pady=(0, 4))
+
+        steps_grid = ctk.CTkFrame(right_actions, fg_color="transparent")
+        steps_grid.pack(anchor="w")
+        steps_grid.grid_columnconfigure(0, weight=1)
+        steps_grid.grid_columnconfigure(1, weight=1)
+
+        for idx, (title, _desc, cmd) in enumerate(steps):
+            short = title.split(".", 1)[-1].strip()
+            ctk.CTkButton(
+                steps_grid,
+                text=short,
+                width=160,
+                command=cmd,
+            ).grid(row=idx // 2, column=idx % 2, padx=(0, 8), pady=2, sticky="w")
 
         for title, desc, cmd in steps:
             frame = ctk.CTkFrame(content)
@@ -122,8 +180,6 @@ class TabBuildersMixin:
                     text="ML 보정 옵션은 '고급 설정' 탭에서 변경할 수 있습니다.",
                     text_color="#9E9E9E",
                 ).pack(anchor="w", pady=(6, 0))
-
-            ctk.CTkButton(frame, text="실행", width=80, command=cmd).pack(side="right", padx=10)
         if hasattr(self, "_sync_aligner_ui"):
             self._sync_aligner_ui()
 
@@ -268,6 +324,7 @@ class TabBuildersMixin:
             coupled_row,
             width=70,
             textvariable=self.ml_coupled_min_conf_var,
+            placeholder_text="기본값",
         )
         coupled_conf_entry.pack(side="left", padx=(10, 8))
         coupled_conf_entry.bind("<FocusOut>", lambda _e: self._save_config())
@@ -326,6 +383,42 @@ class TabBuildersMixin:
             variable=self.ml_coupled_status_detail_var,
             command=lambda: self._on_ml_backend_detail_toggle(),
         ).pack(side="left")
+
+        def _model_root_row(label, var):
+            row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+            row.pack(fill="x", padx=12, pady=(6, 0))
+            ctk.CTkLabel(row, text=label, width=150, anchor="w", text_color="#B0BEC5").pack(side="left")
+            ent = ctk.CTkEntry(row, textvariable=var, width=360)
+            ent.pack(side="left", fill="x", expand=True, padx=(5, 6))
+            ent.bind("<FocusOut>", lambda _e: self._on_ml_model_root_change())
+            btn_row = ctk.CTkFrame(row, fg_color="transparent")
+            btn_row.pack(side="right", padx=(6, 0))
+            btn_width = 90
+            ctk.CTkButton(
+                btn_row,
+                text="찾아보기",
+                width=btn_width,
+                command=lambda v=var: (self._browse_folder_by_var(v), self._on_ml_model_root_change()),
+            ).pack(side="right")
+            ctk.CTkButton(
+                btn_row,
+                text="열기",
+                width=btn_width,
+                command=lambda v=var: os.startfile(str(v.get()).strip()) if os.path.isdir(str(v.get()).strip()) else None,
+            ).pack(side="right", padx=(0, 6))
+            return ent
+
+        if hasattr(self, "ml_model_root_kr_var"):
+            _model_root_row("모델 경로 (한국어)", self.ml_model_root_kr_var)
+        if hasattr(self, "ml_model_root_ja_var"):
+            _model_root_row("모델 경로 (일본어)", self.ml_model_root_ja_var)
+        ctk.CTkLabel(
+            ml_frame,
+            text="경로는 모델 폴더(내부에 model_meta.json) 또는 상위 루트를 지정할 수 있습니다.",
+            text_color="#9E9E9E",
+            wraplength=740,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(2, 6))
 
         self.ml_coupled_status_label = ctk.CTkLabel(
             ml_frame,

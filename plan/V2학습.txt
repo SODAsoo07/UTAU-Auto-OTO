@@ -9,24 +9,34 @@ python .\ml\scripts\coupled\build_mel_patch_cache.py `
   --format cvvc `
   --allow-missing
 
+python .\ml\scripts\coupled\build_mel_patch_cache.py `
+  --dataset ".\ml_workspace\datasets\korean\dataset_korean_vcv_coupled.csv" `
+  --dataset-root ".\dataset" `
+  --lang korean `
+  --format vcv `
+  --allow-missing
+
 학습
 $root = "C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO"
 Set-Location $root
 
-$cache = ".\.cache\oto_ml_mel_patches\korean\cvvc\v1\<hash>"
-
 python .\ml\scripts\coupled\train.py `
-  --backend coupled_nn_v2_rawmel `
-  --rawmel-cache $cache `
   --lang korean `
   --format cvvc `
   --dataset ".\ml_workspace\datasets\korean\dataset_korean_cvvc_coupled.csv" `
-  --out-dir ".\ML_models\korean\cvvc\v2_rawmel" `
-  --device cuda `
-  --epochs 70 `
-  --batch-size 192 `
-  --learning-rate 0.001 `
-  --min-confidence 0.55
+  --out-dir ".\ML_models\coupled_nn_v2_rawmel\korean\cvvc" `
+  --backend coupled_nn_v2_rawmel `
+  --rawmel-prefetch train
+
+복붙용
+python .\ml\scripts\coupled\train.py `
+  --lang korean `
+  --format vcv `
+  --dataset ".\ml_workspace\datasets\korean\dataset_korean_vcv_coupled.csv" `
+  --out-dir ".\ML_models\coupled_nn_v2_rawmel\korean\vcv" `
+  --backend coupled_nn_v2_rawmel `
+  --rawmel-prefetch train
+
 
 평가
 python .\ml\scripts\coupled\evaluate.py `

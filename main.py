@@ -96,8 +96,8 @@ logger = logging.getLogger(__name__)
 
 APP_NAME = "UTAU Auto OTO Generator"
 APP_VERSION = "2.0.0"
-WINDOW_WIDTH = 900
-WINDOW_HEIGHT = 750
+WINDOW_WIDTH = 1280
+WINDOW_HEIGHT = 760
 
 LANGUAGE_OPTIONS = [
     "한국어 (CV/연단음/CVVC/연속음 자동 매핑)",
@@ -136,16 +136,18 @@ class App(
         self.enable_ml_correction_var = ctk.BooleanVar(value=True)
         self.ml_selector_mode_var = ctk.StringVar(value="기본 정책")
         self.ml_coupled_enable_var = ctk.BooleanVar(value=True)
-        self.ml_coupled_min_conf_var = ctk.DoubleVar(value=0.55)
+        self.ml_coupled_min_conf_var = ctk.StringVar(value="")
         self.ml_coupled_device_var = ctk.StringVar(value="auto")
         self.ml_coupled_backend_var = ctk.StringVar(value="auto")
         self.ml_coupled_strict_constraint_var = ctk.BooleanVar(value=False)
+        self.ml_model_root_kr_var = ctk.StringVar(value="")
+        self.ml_model_root_ja_var = ctk.StringVar(value="")
         self.ja_mapping_words_fallback_enabled_var = ctk.BooleanVar(value=True)
         self.ja_mapping_spn_ratio_threshold_var = ctk.DoubleVar(value=0.35)
         self.ja_mapping_min_vowel_phone_ratio_var = ctk.DoubleVar(value=0.5)
         self.ja_mapping_debug_reason_logging_var = ctk.BooleanVar(value=True)
         self.kr_anchor_profile_path_var = ctk.StringVar(value="")
-        self.kr_mapping_confidence_threshold_var = ctk.DoubleVar(value=0.60)
+        self.kr_mapping_confidence_threshold_var = ctk.StringVar(value="")
         self.kr_mapping_max_index_jump_default_var = ctk.IntVar(value=1)
         self.kr_mapping_max_index_jump_high_conf_var = ctk.IntVar(value=2)
         self.ml_same_language_borrow_only_var = ctk.BooleanVar(value=True)

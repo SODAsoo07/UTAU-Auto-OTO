@@ -708,10 +708,10 @@ class PipelineActionsMixin:
                         if hasattr(self, "ml_coupled_enable_var")
                         else True
                     )
-                    ml_coupled_min_conf = (
+                    ml_coupled_min_conf_raw = (
                         self.ml_coupled_min_conf_var.get()
                         if hasattr(self, "ml_coupled_min_conf_var")
-                        else 0.55
+                        else ""
                     )
                     ml_coupled_device = (
                         str(self.ml_coupled_device_var.get()).strip().lower()
@@ -723,6 +723,11 @@ class PipelineActionsMixin:
                         if hasattr(self, "ml_coupled_backend_var")
                         else "auto"
                     )
+                    ml_model_root = ""
+                    if lang == "japanese" and hasattr(self, "ml_model_root_ja_var"):
+                        ml_model_root = str(self.ml_model_root_ja_var.get() or "").strip()
+                    if lang == "korean" and hasattr(self, "ml_model_root_kr_var"):
+                        ml_model_root = str(self.ml_model_root_kr_var.get() or "").strip()
                     ml_coupled_strict_constraint = (
                         self.ml_coupled_strict_constraint_var.get()
                         if hasattr(self, "ml_coupled_strict_constraint_var")
@@ -741,16 +746,42 @@ class PipelineActionsMixin:
                         ml_coupled_device = "auto"
                     if ml_coupled_backend not in {"auto", "v1", "v2", "coupled_nn_v1", "coupled_nn_v2_rawmel"}:
                         ml_coupled_backend = "auto"
+
+                    def _parse_optional_threshold(raw_value, lo=0.0, hi=1.0):
+                        text = str(raw_value or "").strip()
+                        if not text:
+                            return None
+                        try:
+                            return max(float(lo), min(float(hi), float(text)))
+                        except Exception:
+                            return None
+
+                    ml_coupled_min_conf = _parse_optional_threshold(ml_coupled_min_conf_raw, lo=0.0, hi=1.0)
+
                     os.environ["UTOA_ML_COUPLED_ENABLE"] = "1" if ml_coupled_enable else "0"
-                    os.environ["UTOA_ML_COUPLED_MIN_CONF"] = str(float(ml_coupled_min_conf))
+                    if ml_coupled_min_conf is None:
+                        os.environ.pop("UTOA_ML_COUPLED_MIN_CONF", None)
+                    else:
+                        os.environ["UTOA_ML_COUPLED_MIN_CONF"] = str(float(ml_coupled_min_conf))
                     os.environ["UTOA_ML_COUPLED_DEVICE"] = str(ml_coupled_device)
                     os.environ["UTOA_ML_COUPLED_BACKEND"] = str(ml_coupled_backend or "auto")
                     os.environ["UTOA_ML_COUPLED_STRICT_CONSTRAINT"] = "1" if ml_coupled_strict_constraint else "0"
+                    if lang == "japanese":
+                        if ml_model_root:
+                            os.environ["UTOA_JA_OTO_ML_DIR"] = ml_model_root
+                        else:
+                            os.environ.pop("UTOA_JA_OTO_ML_DIR", None)
+                    else:
+                        if ml_model_root:
+                            os.environ["UTOA_KR_OTO_ML_DIR"] = ml_model_root
+                        else:
+                            os.environ.pop("UTOA_KR_OTO_ML_DIR", None)
                     self._append_log(
                         f"[OTO-ML] 설정: ml={'ON' if enable_ml_correction else 'OFF'}, selector={self._describe_ml_selector_mode(selector_mode_code)}"
                     )
+                    min_conf_display = f"{float(ml_coupled_min_conf):.2f}" if ml_coupled_min_conf is not None else "default(0.55)"
                     self._append_log(
-                        f"[OTO-ML] coupled={'ON' if ml_coupled_enable else 'OFF'}, backend={ml_coupled_backend}, min_conf={float(ml_coupled_min_conf):.2f}, device={ml_coupled_device}, strict={'ON' if ml_coupled_strict_constraint else 'OFF'}"
+                        f"[OTO-ML] coupled={'ON' if ml_coupled_enable else 'OFF'}, backend={ml_coupled_backend}, min_conf={min_conf_display}, device={ml_coupled_device}, strict={'ON' if ml_coupled_strict_constraint else 'OFF'}"
                     )
                     if self.no_base_oto_var.get():
                         self._append_log("ℹ '베이스 OTO 없이 생성'이 활성화되어 OpenUtau 스타일로 생성합니다.")

@@ -44,6 +44,11 @@ class FileDialogMixin:
         if path:
             var.set(path)
 
+    def _browse_folder_by_var(self, var):
+        path = filedialog.askdirectory()
+        if path:
+            var.set(path)
+
     def _browse_save_by_var(self, var, filetypes, defext):
         path = filedialog.asksaveasfilename(filetypes=filetypes, defaultextension=defext)
         if path:
@@ -602,16 +607,18 @@ class ConfigMixin:
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
             "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "기본 정책",
             "ml_coupled_enable": self.ml_coupled_enable_var.get() if hasattr(self, "ml_coupled_enable_var") else True,
-            "ml_coupled_min_conf": self.ml_coupled_min_conf_var.get() if hasattr(self, "ml_coupled_min_conf_var") else 0.55,
+            "ml_coupled_min_conf": self.ml_coupled_min_conf_var.get() if hasattr(self, "ml_coupled_min_conf_var") else "",
             "ml_coupled_device": self.ml_coupled_device_var.get() if hasattr(self, "ml_coupled_device_var") else "auto",
             "ml_coupled_backend": self.ml_coupled_backend_var.get() if hasattr(self, "ml_coupled_backend_var") else "auto",
             "ml_coupled_strict_constraint": self.ml_coupled_strict_constraint_var.get() if hasattr(self, "ml_coupled_strict_constraint_var") else False,
+            "ml_model_root_kr": self.ml_model_root_kr_var.get() if hasattr(self, "ml_model_root_kr_var") else "",
+            "ml_model_root_ja": self.ml_model_root_ja_var.get() if hasattr(self, "ml_model_root_ja_var") else "",
             "ja_mapping_words_fallback_enabled": self.ja_mapping_words_fallback_enabled_var.get() if hasattr(self, "ja_mapping_words_fallback_enabled_var") else True,
             "ja_mapping_spn_ratio_threshold": self.ja_mapping_spn_ratio_threshold_var.get() if hasattr(self, "ja_mapping_spn_ratio_threshold_var") else 0.35,
             "ja_mapping_min_vowel_phone_ratio": self.ja_mapping_min_vowel_phone_ratio_var.get() if hasattr(self, "ja_mapping_min_vowel_phone_ratio_var") else 0.5,
             "ja_mapping_debug_reason_logging": self.ja_mapping_debug_reason_logging_var.get() if hasattr(self, "ja_mapping_debug_reason_logging_var") else True,
             "kr_anchor_profile_path": self.kr_anchor_profile_path_var.get() if hasattr(self, "kr_anchor_profile_path_var") else "",
-            "kr_mapping_confidence_threshold": self.kr_mapping_confidence_threshold_var.get() if hasattr(self, "kr_mapping_confidence_threshold_var") else 0.60,
+            "kr_mapping_confidence_threshold": self.kr_mapping_confidence_threshold_var.get() if hasattr(self, "kr_mapping_confidence_threshold_var") else "",
             "kr_mapping_max_index_jump_default": self.kr_mapping_max_index_jump_default_var.get() if hasattr(self, "kr_mapping_max_index_jump_default_var") else 1,
             "kr_mapping_max_index_jump_high_conf": self.kr_mapping_max_index_jump_high_conf_var.get() if hasattr(self, "kr_mapping_max_index_jump_high_conf_var") else 2,
             "ml_same_language_borrow_only": self.ml_same_language_borrow_only_var.get() if hasattr(self, "ml_same_language_borrow_only_var") else True,
@@ -721,11 +728,39 @@ class ConfigMixin:
             if "ml_coupled_enable" in config and hasattr(self, "ml_coupled_enable_var"):
                 self.ml_coupled_enable_var.set(bool(config.get("ml_coupled_enable", True)))
             if "ml_coupled_min_conf" in config and hasattr(self, "ml_coupled_min_conf_var"):
-                try:
-                    conf = float(config.get("ml_coupled_min_conf", 0.55))
-                    self.ml_coupled_min_conf_var.set(max(0.0, min(1.0, conf)))
-                except Exception:
-                    pass
+                raw_conf = config.get("ml_coupled_min_conf", "")
+                if raw_conf is None:
+                    self.ml_coupled_min_conf_var.set("")
+                else:
+                    txt = str(raw_conf).strip()
+                    if not txt:
+                        self.ml_coupled_min_conf_var.set("")
+                    else:
+                        try:
+                            conf = max(0.0, min(1.0, float(txt)))
+                            if abs(conf - 0.55) <= 1e-9:
+                                self.ml_coupled_min_conf_var.set("")
+                            else:
+                                self.ml_coupled_min_conf_var.set(f"{conf:.2f}".rstrip("0").rstrip("."))
+                        except Exception:
+                            self.ml_coupled_min_conf_var.set("")
+            if "kr_mapping_confidence_threshold" in config and hasattr(self, "kr_mapping_confidence_threshold_var"):
+                raw_conf = config.get("kr_mapping_confidence_threshold", "")
+                if raw_conf is None:
+                    self.kr_mapping_confidence_threshold_var.set("")
+                else:
+                    txt = str(raw_conf).strip()
+                    if not txt:
+                        self.kr_mapping_confidence_threshold_var.set("")
+                    else:
+                        try:
+                            conf = max(0.0, min(1.0, float(txt)))
+                            if abs(conf - 0.60) <= 1e-9:
+                                self.kr_mapping_confidence_threshold_var.set("")
+                            else:
+                                self.kr_mapping_confidence_threshold_var.set(f"{conf:.2f}".rstrip("0").rstrip("."))
+                        except Exception:
+                            self.kr_mapping_confidence_threshold_var.set("")
             if "ml_coupled_device" in config and hasattr(self, "ml_coupled_device_var"):
                 device = str(config.get("ml_coupled_device", "auto") or "auto").strip().lower()
                 if device in {"auto", "cpu", "cuda"}:
@@ -736,6 +771,10 @@ class ConfigMixin:
                     self.ml_coupled_backend_var.set(backend)
             if "ml_coupled_strict_constraint" in config and hasattr(self, "ml_coupled_strict_constraint_var"):
                 self.ml_coupled_strict_constraint_var.set(bool(config.get("ml_coupled_strict_constraint", False)))
+            if "ml_model_root_kr" in config and hasattr(self, "ml_model_root_kr_var"):
+                self.ml_model_root_kr_var.set(str(config.get("ml_model_root_kr", "") or ""))
+            if "ml_model_root_ja" in config and hasattr(self, "ml_model_root_ja_var"):
+                self.ml_model_root_ja_var.set(str(config.get("ml_model_root_ja", "") or ""))
 
             if hasattr(self, "tune_auto_oto_var"):
                 self.tune_auto_oto_var.set(config.get("tune_auto_oto", ""))

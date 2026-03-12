@@ -1,6 +1,8 @@
+# -*- coding: utf-8 -*-
 import json
 import os
 
+import tkinter as tk
 import customtkinter as ctk
 
 from core.format_type_utils import normalize_auto_format_value
@@ -11,14 +13,49 @@ class LayoutMixin:
     def _build_ui(self):
         self.auto_format_var = ctk.StringVar(value="자동 감지 (권장)")
 
-        path_frame = ctk.CTkFrame(
+        main_body = tk.PanedWindow(
             self,
+            orient="horizontal",
+            sashwidth=6,
+            background=PALETTE.panel_bg,
+            bd=0,
+            relief="flat",
+        )
+        main_body.pack(fill="both", expand=True)
+
+        left_wrap = ctk.CTkFrame(main_body, fg_color="transparent")
+        right_wrap = ctk.CTkFrame(main_body, fg_color="transparent")
+        left_panel = ctk.CTkFrame(left_wrap, fg_color="transparent")
+        right_panel = ctk.CTkFrame(right_wrap, fg_color="transparent")
+        left_panel.pack(fill="both", expand=True, padx=(15, 8), pady=(10, 5))
+        right_panel.pack(fill="both", expand=True, padx=(8, 15), pady=(10, 5))
+        main_body.add(left_wrap, minsize=520)
+        main_body.add(right_wrap, minsize=520)
+
+        def _place_sash():
+            try:
+                total = max(self.winfo_width(), 1200)
+                left_ratio = 1.5
+                right_ratio = 0.8
+                denom = left_ratio + right_ratio
+                left_width = max(520, int(total * (left_ratio / denom)))
+                right_width = max(520, total - left_width)
+                if left_width + right_width < total:
+                    left_width = total - right_width
+                main_body.sash_place(0, left_width, 0)
+            except Exception:
+                pass
+
+        self.after(50, _place_sash)
+
+        path_frame = ctk.CTkFrame(
+            left_panel,
             fg_color=PALETTE.panel_bg,
             border_width=1,
             border_color=PALETTE.panel_border,
             corner_radius=8,
         )
-        path_frame.pack(fill="x", padx=15, pady=(10, 8))
+        path_frame.pack(fill="x", padx=0, pady=(0, 8))
 
         def _style_primary_button(widget):
             widget.configure(
@@ -70,14 +107,6 @@ class LayoutMixin:
 
         def build_left_label(parent, text, width=115):
             return ctk.CTkLabel(parent, text=text, width=width, anchor="w")
-
-        def build_split_row(parent):
-            row = build_form_row(parent)
-            left = ctk.CTkFrame(row, fg_color="transparent")
-            left.pack(side="left", fill="x", expand=True, padx=(0, 10))
-            right = ctk.CTkFrame(row, fg_color="transparent")
-            right.pack(side="left", fill="x", expand=True)
-            return row, left, right
 
         lang_row = build_form_row(form_body)
         build_left_label(lang_row, "언어", width=115).pack(side="left")
@@ -150,12 +179,11 @@ class LayoutMixin:
         _style_primary_button(out_save_btn)
         out_save_btn.pack(side="right")
 
-        _, left_format, right_format = build_split_row(form_body)
-
-        build_left_label(left_format, "형식 지정:").pack(side="left")
+        row_format = build_form_row(form_body)
+        build_left_label(row_format, "형식 지정:").pack(side="left")
         format_options = self._get_auto_format_options("korean")
         self.format_dropdown = ctk.CTkOptionMenu(
-            left_format,
+            row_format,
             values=format_options,
             variable=self.auto_format_var,
             width=190,
@@ -164,14 +192,14 @@ class LayoutMixin:
         _style_blue_menu(self.format_dropdown)
         self.format_dropdown.pack(side="left", padx=(6, 8))
         ctk.CTkLabel(
-            left_format,
+            row_format,
             text="(템플릿 유무와 무관하게 우선 적용)",
             text_color=PALETTE.neutral_text,
         ).pack(side="left", fill="x", expand=True)
-
-        build_left_label(right_format, "JP 에일리어스:").pack(side="left")
+        row_format_extra = build_form_row(form_body)
+        build_left_label(row_format_extra, "JP 에일리어스:").pack(side="left")
         self.ja_alias_style_menu = ctk.CTkOptionMenu(
-            right_format,
+            row_format_extra,
             values=["원본 그대로", "히라가나", "로마자"],
             variable=self.ja_alias_style_var,
             width=190,
@@ -179,7 +207,14 @@ class LayoutMixin:
         )
         _style_blue_menu(self.ja_alias_style_menu)
         self.ja_alias_style_menu.pack(side="left", padx=(6, 8))
-        ctk.CTkLabel(right_format, text="(일본어 OTO 생성 시 적용)", text_color=PALETTE.neutral_text).pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            row_format_extra,
+            text="(일본어 OTO 적용)",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left", fill="x", expand=True)
+
+
+
 
         row_align = build_form_row(form_body)
 
@@ -201,24 +236,26 @@ class LayoutMixin:
             text_color=PALETTE.neutral_text,
         )
         self.aligner_help_label.pack(side="left", fill="x", expand=True)
-
-        self.row_mfa_profile = ctk.CTkFrame(row_align, fg_color="transparent")
-        self.row_mfa_profile.pack(side="left", fill="x", expand=True, padx=(8, 0))
-        build_left_label(self.row_mfa_profile, "MFA 정렬 프로필:").pack(side="left")
+        row_align_extra = build_form_row(form_body)
+        build_left_label(row_align_extra, "MFA 정렬 프로필:").pack(side="left")
         self.mfa_align_profile_menu = ctk.CTkOptionMenu(
-            self.row_mfa_profile,
-            values=["기본", "정확도 우선", "빠름 (저사양 추천)"],
+            row_align_extra,
+            values=["기본", "정밀", "빠름"],
             variable=self.mfa_align_profile_var,
-            width=280,
+            width=190,
             command=lambda _v: self._save_config(),
         )
         _style_blue_menu(self.mfa_align_profile_menu)
         self.mfa_align_profile_menu.pack(side="left", padx=(6, 8))
         ctk.CTkLabel(
-            self.row_mfa_profile,
-            text="(기본=안정, 정확도 우선=화자 적응, 저사양은 빠름 권장)",
+            row_align_extra,
+            text="(기본=정확도 균형)",
             text_color=PALETTE.neutral_text,
         ).pack(side="left", fill="x", expand=True)
+
+
+
+
 
         self.row_aligner_advanced = build_form_row(form_body)
         ctk.CTkLabel(
@@ -270,8 +307,17 @@ class LayoutMixin:
 
         self._toggle_advanced_options(force=False)
 
-        self.tabview = ctk.CTkTabview(self)
-        self.tabview.pack(fill="both", expand=True, padx=15, pady=5)
+        self.pipeline_action_host = ctk.CTkFrame(
+            left_panel,
+            fg_color=PALETTE.panel_bg,
+            border_width=1,
+            border_color=PALETTE.panel_border,
+            corner_radius=8,
+        )
+        self.pipeline_action_host.pack(side="bottom", fill="x", padx=0, pady=(8, 0))
+
+        self.tabview = ctk.CTkTabview(right_panel)
+        self.tabview.pack(fill="both", expand=True, padx=0, pady=0)
 
         self._build_pipeline_tab()
         self._build_params_tab()
@@ -462,6 +508,10 @@ class LayoutMixin:
     def _on_ml_backend_detail_toggle(self):
         self._refresh_ml_backend_status()
 
+    def _on_ml_model_root_change(self, _value=None):
+        self._save_config()
+        self._refresh_ml_backend_status()
+
     def _refresh_ml_backend_status(self):
         if not hasattr(self, "ml_coupled_status_label"):
             return
@@ -477,8 +527,25 @@ class LayoutMixin:
             fmt = normalize_auto_format_value(lang, self.auto_format_var.get())
         fmt_display = fmt or "auto"
         routed_fmt = fmt or "general"
-        v2_dir = _resolve_backend_model_dir(lang, routed_fmt, backend="coupled_nn_v2_rawmel")
-        v1_dir = _resolve_backend_model_dir(lang, routed_fmt, backend="coupled_nn_v1")
+        env_key = "UTOA_JA_OTO_ML_DIR" if lang == "japanese" else "UTOA_KR_OTO_ML_DIR"
+        override = ""
+        if lang == "japanese" and hasattr(self, "ml_model_root_ja_var"):
+            override = str(self.ml_model_root_ja_var.get() or "").strip()
+        if lang == "korean" and hasattr(self, "ml_model_root_kr_var"):
+            override = str(self.ml_model_root_kr_var.get() or "").strip()
+        prev_env = os.environ.get(env_key)
+        try:
+            if override:
+                os.environ[env_key] = override
+            else:
+                os.environ.pop(env_key, None)
+            v2_dir = _resolve_backend_model_dir(lang, routed_fmt, backend="coupled_nn_v2_rawmel")
+            v1_dir = _resolve_backend_model_dir(lang, routed_fmt, backend="coupled_nn_v1")
+        finally:
+            if prev_env is None:
+                os.environ.pop(env_key, None)
+            else:
+                os.environ[env_key] = prev_env
         v2_status = "✅" if v2_dir else "❌"
         v1_status = "✅" if v1_dir else "❌"
         selected = ""
@@ -487,6 +554,8 @@ class LayoutMixin:
         text = f"현재 포맷: {fmt_display} | v2 {v2_status} / v1 {v1_status}"
         if selected:
             text += f" | 선택: {selected}"
+        if override:
+            text += " | 경로: 사용자 지정"
         self.ml_coupled_status_label.configure(text=text)
 
         if not hasattr(self, "ml_coupled_status_detail_label"):
@@ -523,7 +592,10 @@ class LayoutMixin:
             created = str(meta.get("created_at", "") or "unknown")
             return f"{label}: {model_dir} | version={version} | created_at={created}"
 
-        detail_lines = [
+        detail_lines = []
+        if override:
+            detail_lines.append(f"custom_root: {override}")
+        detail_lines += [
             _fmt_line("v2", v2_dir or "", v2_meta),
             _fmt_line("v1", v1_dir or "", v1_meta),
         ]
@@ -547,4 +619,3 @@ class LayoutMixin:
         return {key: var.get() for key, var in self.param_vars.items()}
 
     # ── MFA 설치 (GUI 내장) ──
-
