@@ -60,10 +60,20 @@ def main():
     ap.add_argument("--rawmel-cache", default="", help="Raw mel patch cache directory for coupled_nn_v2_rawmel")
     ap.add_argument("--rawmel-prefetch", default="none", help="Raw mel cache prefetch: none|train")
     ap.add_argument("--rawmel-max-shard-cache", type=int, default=2, help="Max mel patch shards to keep in memory")
+    ap.add_argument("--sampler", default="", help="Optional sampler override: group_balanced|shuffle")
+    ap.add_argument("--hard-mining-strength", type=float, default=-1.0, help="Optional hard-example mining strength override")
+    ap.add_argument("--pair-warmup-epochs", type=int, default=-1, help="Optional VC/CV pair loss warmup epochs override")
     args = ap.parse_args()
 
     alias_types = [v.strip() for v in str(args.alias_types).split(",") if v.strip()]
     backend = str(args.backend or "coupled_nn_v1").strip().lower()
+    env_prefix = "UTOA_ML_RAWMEL_" if backend == "coupled_nn_v2_rawmel" else "UTOA_ML_COUPLED_"
+    if str(args.sampler or "").strip():
+        os.environ[f"{env_prefix}SAMPLER"] = str(args.sampler).strip()
+    if float(args.hard_mining_strength) >= 0.0:
+        os.environ[f"{env_prefix}HARD_MINING_STRENGTH"] = str(float(args.hard_mining_strength))
+    if int(args.pair_warmup_epochs) >= 0:
+        os.environ[f"{env_prefix}PAIR_WARMUP_EPOCHS"] = str(int(args.pair_warmup_epochs))
     rawmel_cache = str(args.rawmel_cache or "").strip()
     if backend == "coupled_nn_v2_rawmel":
         if rawmel_cache and not os.path.isdir(rawmel_cache):

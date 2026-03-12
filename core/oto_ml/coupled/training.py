@@ -46,10 +46,12 @@ from core.oto_ml.coupled.model import (
     TARGET_NAMES,
     _build_model,
     _build_model_rawmel,
+    _default_categorical_bucket_sizes,
     _env_int,
     _import_torch,
     _require_training_stack,
     _resolve_device,
+    _row_categorical_index_vector,
     _row_feature_vector,
     _row_patch_vector,
 )
@@ -74,6 +76,169 @@ def _env_float(name: str, default: float) -> float:
         return float(os.environ.get(name, default))
     except Exception:
         return float(default)
+
+
+def _env_str(name: str, default: str) -> str:
+    raw = os.environ.get(name)
+    if raw is None:
+        return str(default)
+    text = str(raw).strip()
+    return text or str(default)
+
+
+def _name_env_token(name: str) -> str:
+    token = str(name or "").strip().upper()
+    token = token.replace("DELTA_", "")
+    token = token.replace("AUX_", "")
+    token = token.replace("_REL", "")
+    return token
+
+
+def _huber_loss(torch, pred, truth, delta: float):
+    delta_v = max(1e-3, float(delta))
+    err = torch.abs(pred - truth)
+    quadratic = torch.clamp(err, max=delta_v)
+    linear = err - quadratic
+    return (0.5 * quadratic.pow(2) / delta_v) + linear
+
+
+def _loss_matrix(torch, pred, truth, loss_kinds: List[str], huber_deltas: List[float]):
+    cols = []
+    for idx in range(int(pred.shape[1])):
+        kind = str(loss_kinds[idx] if idx < len(loss_kinds) else "huber").strip().lower()
+        if kind in {"l1", "mae", "abs"}:
+            col = torch.abs(pred[:, idx] - truth[:, idx])
+        else:
+            col = _huber_loss(torch, pred[:, idx], truth[:, idx], huber_deltas[idx] if idx < len(huber_deltas) else 16.0)
+        cols.append(col.unsqueeze(1))
+    return torch.cat(cols, dim=1) if cols else pred[:, :0]
+
+
+def _resolve_loss_config(env_prefix: str, names: List[str], default_kinds: List[str], default_deltas: List[float]):
+    loss_kinds: List[str] = []
+    huber_deltas: List[float] = []
+    for idx, name in enumerate(names):
+        token = _name_env_token(name)
+        default_kind = str(default_kinds[idx] if idx < len(default_kinds) else "huber").strip().lower()
+        kind = _env_str(f"{env_prefix}LOSS_{token}", default_kind).strip().lower()
+        if kind not in {"huber", "smooth_l1", "l1", "mae", "abs"}:
+            kind = default_kind
+        delta = _env_float(
+            f"{env_prefix}HUBER_{token}",
+            float(default_deltas[idx] if idx < len(default_deltas) else 16.0),
+        )
+        loss_kinds.append(kind)
+        huber_deltas.append(max(1e-3, float(delta)))
+    return loss_kinds, huber_deltas
+
+
+def _compute_static_hard_example_boost(
+    df,
+    alias_type_arr,
+    mapping_conf_np,
+    blank_conf_np,
+    jump_blocked_np,
+    aux_mask,
+    *,
+    strength: float,
+):
+    strength_v = max(0.0, float(strength))
+    boost = np.ones((len(df),), dtype=np.float32)
+    if strength_v <= 0.0:
+        return boost
+    low_conf = np.clip(1.0 - mapping_conf_np, 0.0, 1.0)
+    boost *= 1.0 + (0.60 * strength_v * low_conf)
+    cv_mask = np.isin(alias_type_arr, ["cv", "cv_head"])
+    bridge_mask = np.isin(alias_type_arr, ["vc", "vv", "vcv"])
+    boost *= np.where(cv_mask & (blank_conf_np >= 0.55), 1.0 + (0.22 * strength_v), 1.0)
+    boost *= np.where(cv_mask & (jump_blocked_np > 0.5), 1.0 + (0.20 * strength_v), 1.0)
+    boost *= np.where(bridge_mask, 1.0 + (0.20 * strength_v), 1.0)
+    if aux_mask is not None and int(aux_mask.shape[1]) >= 3:
+        next_onset_mask = np.asarray(aux_mask[:, 2] > 0.5, dtype=bool)
+        boost *= np.where(next_onset_mask, 1.0 + (0.20 * strength_v), 1.0)
+    if "coda_type" in df.columns:
+        coda = df["coda_type"].astype(str).str.strip().str.lower().to_numpy()
+        closed_mask = ~np.isin(coda, ["", "none", "open", "vowel"])
+        boost *= np.where(closed_mask, 1.0 + (0.15 * strength_v), 1.0)
+    if "is_diphthong" in df.columns:
+        diph_mask = pd.to_numeric(df["is_diphthong"], errors="coerce").fillna(0.0).to_numpy() > 0.5
+        boost *= np.where(diph_mask, 1.0 + (0.12 * strength_v), 1.0)
+    if "used_alias_occurrence_mapping" in df.columns:
+        occurrence_mask = (
+            pd.to_numeric(df["used_alias_occurrence_mapping"], errors="coerce").fillna(0.0).to_numpy() > 0.5
+        )
+        boost *= np.where(occurrence_mask, 1.0 + (0.10 * strength_v), 1.0)
+    return np.clip(boost.astype(np.float32), 1.0, 3.0)
+
+
+def _resolve_sampling_group_values(df, train_idx, preferred_column: str = ""):
+    candidates = [preferred_column, "voicebank_id", "wav_norm"]
+    for name in candidates:
+        if name and name in df.columns:
+            return df.iloc[train_idx][name].astype(str).fillna("").to_numpy(), str(name)
+    fallback = np.asarray([str(v) for v in train_idx.tolist()], dtype=object)
+    return fallback, "__index__"
+
+
+def _sample_group_balanced_indices(group_values, sample_weights, sample_count: int, rng):
+    count = max(1, int(sample_count))
+    groups = np.asarray(group_values)
+    if groups.size <= 1:
+        return rng.permutation(count).astype(np.int64)
+    group_to_positions: Dict[str, List[int]] = {}
+    for pos, group in enumerate(groups.tolist()):
+        key = str(group or f"group_{pos}")
+        group_to_positions.setdefault(key, []).append(int(pos))
+    if len(group_to_positions) <= 1:
+        return rng.permutation(count).astype(np.int64)
+    keys = list(group_to_positions.keys())
+    group_choices = rng.integers(0, len(keys), size=count, endpoint=False)
+    out = np.empty((count,), dtype=np.int64)
+    weights = np.asarray(sample_weights, dtype=np.float64)
+    for key_idx, key in enumerate(keys):
+        take_positions = np.where(group_choices == key_idx)[0]
+        if take_positions.size <= 0:
+            continue
+        members = np.asarray(group_to_positions[key], dtype=np.int64)
+        probs = weights[members] if weights.size == groups.size else np.ones((len(members),), dtype=np.float64)
+        if (not np.all(np.isfinite(probs))) or float(np.sum(probs)) <= 0.0:
+            probs = None
+        else:
+            probs = probs / float(np.sum(probs))
+        out[take_positions] = rng.choice(members, size=int(take_positions.size), replace=True, p=probs)
+    rng.shuffle(out)
+    return out
+
+
+def _pair_weight_for_epoch(base_weight: float, epoch_idx: int, warmup_epochs: int) -> float:
+    base = max(0.0, float(base_weight))
+    warmup = max(0, int(warmup_epochs))
+    if base <= 0.0 or warmup <= 0:
+        return base
+    progress = min(1.0, float(epoch_idx + 1) / float(warmup))
+    return base * progress
+
+
+def _boundary_consistency_row_loss(torch, aux_pred, aux_mask, offset_abs, cutoff_abs, *, next_onset_margin: float = 6.0):
+    if aux_pred is None or aux_mask is None:
+        return None
+    mask = aux_mask.float()
+    vowel_start = aux_pred[:, 0]
+    vowel_end = aux_pred[:, 1]
+    next_onset = aux_pred[:, 2]
+    row_loss = torch.zeros_like(vowel_start)
+    row_loss = row_loss + (mask[:, 0] * mask[:, 1] * torch.relu(vowel_start - vowel_end))
+    row_loss = row_loss + (mask[:, 1] * mask[:, 2] * torch.relu(vowel_end - next_onset))
+    predicted_next_onset_abs = offset_abs + next_onset
+    row_loss = row_loss + (mask[:, 2] * torch.relu((cutoff_abs + float(next_onset_margin)) - predicted_next_onset_abs))
+    return row_loss
+
+
+def _confidence_target_from_errors(torch, delta_row_err, align_row_err, penalty_row, boundary_row_err=None):
+    score = (delta_row_err / 80.0) + (0.35 * (align_row_err / 120.0)) + (0.20 * (penalty_row / 40.0))
+    if boundary_row_err is not None:
+        score = score + (0.35 * (boundary_row_err / 140.0))
+    return torch.exp(-torch.clamp(score, min=0.0, max=8.0))
 
 
 def _read_dataset_csv(path: str):
@@ -199,14 +364,18 @@ def train_coupled_bundle(
     schema = get_feature_schema()
     feature_names = list(schema.get("feature_names") or FEATURE_NAMES)
     categorical_features = [c for c in CATEGORICAL_FEATURES if c in feature_names]
+    categorical_bucket_sizes = _default_categorical_bucket_sizes(categorical_features)
 
     x_rows = []
+    c_rows = []
     p_rows = []
     for _, row in df.iterrows():
         as_dict = row.to_dict()
         x_rows.append(_row_feature_vector(as_dict, feature_names, categorical_features))
+        c_rows.append(_row_categorical_index_vector(as_dict, categorical_features, categorical_bucket_sizes))
         p_rows.append(_row_patch_vector(as_dict))
     X = np.asarray(x_rows, dtype=np.float32)
+    C = np.asarray(c_rows, dtype=np.int64) if c_rows else np.zeros((len(df), 0), dtype=np.int64)
     P = np.asarray(p_rows, dtype=np.float32)
     Y = np.stack(
         [pd.to_numeric(df[target], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32) for target in TARGET_NAMES],
@@ -251,6 +420,37 @@ def train_coupled_bundle(
         W = pd.to_numeric(df["sample_weight"], errors="coerce").fillna(1.0).to_numpy(dtype=np.float32)
     else:
         W = np.ones((len(df),), dtype=np.float32)
+    if "alias_type" in df.columns:
+        alias_type_arr = df["alias_type"].astype(str).str.lower().to_numpy()
+    else:
+        alias_type_arr = np.full((len(df),), "", dtype=object)
+    blank_conf_np = (
+        pd.to_numeric(df["blank_span_confidence"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+        if "blank_span_confidence" in df.columns
+        else np.zeros((len(df),), dtype=np.float32)
+    )
+    jump_blocked_np = (
+        pd.to_numeric(df["jump_blocked_flag"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+        if "jump_blocked_flag" in df.columns
+        else np.zeros((len(df),), dtype=np.float32)
+    )
+    mapping_conf_np = (
+        pd.to_numeric(df["mapping_confidence"], errors="coerce").fillna(1.0).to_numpy(dtype=np.float32)
+        if "mapping_confidence" in df.columns
+        else np.ones((len(df),), dtype=np.float32)
+    )
+    hard_example_strength = max(0.0, _env_float("UTOA_ML_COUPLED_HARD_MINING_STRENGTH", 0.45))
+    hard_boost = _compute_static_hard_example_boost(
+        df,
+        alias_type_arr,
+        mapping_conf_np,
+        blank_conf_np,
+        jump_blocked_np,
+        aux_mask,
+        strength=hard_example_strength,
+    )
+    W = np.clip((W * np.sqrt(hard_boost)).astype(np.float32), 0.20, 3.00)
+    sampling_weights = np.clip((W * hard_boost).astype(np.float32), 0.20, 4.00)
 
     if group_column in df.columns and df[group_column].nunique() >= 2 and GroupShuffleSplit is not None:
         split = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
@@ -266,11 +466,6 @@ def train_coupled_bundle(
     valid_idx = np.asarray(valid_idx, dtype=np.int64)
 
     pair_map = _build_vc_cv_pair_map(df)
-    pair_weight = float(os.environ.get("UTOA_ML_VC_CV_PAIR_WEIGHT", 0.06) or 0.06)
-    if pair_weight < 0.0:
-        pair_weight = 0.0
-    # Bidirectional pairing doubles constraints; halve the weight to keep parity.
-    pair_weight = pair_weight * 0.5
     if pair_map:
         train_mask = np.zeros((len(df),), dtype=bool)
         valid_mask = np.zeros((len(df),), dtype=bool)
@@ -302,8 +497,21 @@ def train_coupled_bundle(
         val_src_pos = []
         val_dst_pos = []
 
+    pair_weight_base = float(os.environ.get("UTOA_ML_VC_CV_PAIR_WEIGHT", 0.06) or 0.06)
+    if pair_weight_base < 0.0:
+        pair_weight_base = 0.0
+    pair_weight_base = pair_weight_base * 0.5
+    pair_warmup_epochs = max(0, _env_int("UTOA_ML_COUPLED_PAIR_WARMUP_EPOCHS", 6))
+
     aux_dim = len(AUX_TARGET_NAMES) if use_aux else 0
-    model = _build_model(torch, nn, in_dim=int(X.shape[1]), patch_dim=int(P.shape[1]), aux_dim=aux_dim)
+    model = _build_model(
+        torch,
+        nn,
+        in_dim=int(X.shape[1]),
+        patch_dim=int(P.shape[1]),
+        aux_dim=aux_dim,
+        categorical_bucket_sizes=categorical_bucket_sizes,
+    )
     run_device = _resolve_device(torch, requested=device)
     if isinstance(run_device, str):
         run_device = torch.device(run_device)
@@ -311,6 +519,7 @@ def train_coupled_bundle(
     optimizer = torch.optim.Adam(model.parameters(), lr=float(learning_rate))
 
     X_train = torch.tensor(X[train_idx], dtype=torch.float32, device=run_device)
+    C_train = torch.tensor(C[train_idx], dtype=torch.long, device=run_device)
     P_train = torch.tensor(P[train_idx], dtype=torch.float32, device=run_device)
     Y_train = torch.tensor(Y[train_idx], dtype=torch.float32, device=run_device)
     B_train = torch.tensor(base[train_idx], dtype=torch.float32, device=run_device)
@@ -318,6 +527,7 @@ def train_coupled_bundle(
     W_train = torch.tensor(W[train_idx], dtype=torch.float32, device=run_device)
 
     X_valid = torch.tensor(X[valid_idx], dtype=torch.float32, device=run_device)
+    C_valid = torch.tensor(C[valid_idx], dtype=torch.long, device=run_device)
     P_valid = torch.tensor(P[valid_idx], dtype=torch.float32, device=run_device)
     Y_valid = torch.tensor(Y[valid_idx], dtype=torch.float32, device=run_device)
     B_valid = torch.tensor(base[valid_idx], dtype=torch.float32, device=run_device)
@@ -334,15 +544,37 @@ def train_coupled_bundle(
         A_valid = None
         AM_valid = None
 
-    target_weights = torch.tensor([1.00, 0.90, 0.95, 1.00, 0.65], dtype=torch.float32, device=run_device).view(1, -1)
+    train_sampling_weights = sampling_weights[train_idx]
+    sampling_group_values, sampling_group_column = _resolve_sampling_group_values(df, train_idx, preferred_column="voicebank_id")
+    sampler_mode = _env_str("UTOA_ML_COUPLED_SAMPLER", "group_balanced").strip().lower()
+    if sampler_mode not in {"group_balanced", "shuffle"}:
+        sampler_mode = "group_balanced"
+
+    target_weight_values = [1.00, 0.90, 0.95, 1.00, 0.65]
+    target_weights = torch.tensor(target_weight_values, dtype=torch.float32, device=run_device).view(1, -1)
+    target_loss_kinds, target_huber_deltas = _resolve_loss_config(
+        "UTOA_ML_COUPLED_",
+        TARGET_NAMES,
+        ["huber", "l1", "huber", "l1", "l1"],
+        [28.0, 18.0, 34.0, 14.0, 12.0],
+    )
+    aux_target_weight_values = [1.0, 1.0, 1.35]
+    aux_target_weights = torch.tensor(aux_target_weight_values, dtype=torch.float32, device=run_device).view(1, -1)
+    aux_loss_kinds, aux_huber_deltas = _resolve_loss_config(
+        "UTOA_ML_COUPLED_",
+        AUX_TARGET_NAMES,
+        ["huber", "huber", "huber"],
+        [18.0, 18.0, 24.0],
+    )
     cons_margin = 10.0
     cut_margin = 10.0
-    aux_weight = 0.08
+    boundary_aux_weight = _env_float("UTOA_ML_COUPLED_BOUNDARY_AUX_WEIGHT", 0.14)
+    boundary_consistency_weight = _env_float("UTOA_ML_COUPLED_BOUNDARY_CONSISTENCY_WEIGHT", 0.06)
 
     best_state = None
     best_val = float("inf")
     wait = 0
-    patience = 10
+    patience = max(3, _env_int("UTOA_ML_COUPLED_PATIENCE", 10))
 
     train_n = int(X_train.shape[0])
     batch_n = max(1, int(batch_size))
@@ -350,64 +582,91 @@ def train_coupled_bundle(
     progress_every = int(progress_every)
     total_batches = max(1, int((train_n + batch_n - 1) / batch_n))
     if progress_every > 0:
-        print(f"[TRAIN] rows={train_n} batches={total_batches} epochs={epochs_n} device={run_device}")
+        print(
+            f"[TRAIN] rows={train_n} batches={total_batches} epochs={epochs_n} device={run_device} "
+            f"sampler={sampler_mode}:{sampling_group_column}"
+        )
 
     for epoch in range(epochs_n):
         model.train()
-        perm = torch.randperm(train_n, device=run_device)
+        epoch_pair_weight = _pair_weight_for_epoch(pair_weight_base, epoch, pair_warmup_epochs)
+        rng = np.random.default_rng(42 + epoch)
+        if sampler_mode == "group_balanced":
+            perm_np = _sample_group_balanced_indices(sampling_group_values, train_sampling_weights, train_n, rng)
+        else:
+            perm_np = rng.permutation(train_n).astype(np.int64)
+        perm = torch.tensor(perm_np, dtype=torch.long, device=run_device)
         for batch_i, start in enumerate(range(0, train_n, batch_n), start=1):
             batch_idx = perm[start:start + batch_n]
             xb = X_train[batch_idx]
+            cb = C_train[batch_idx]
             pb = P_train[batch_idx]
             yb = Y_train[batch_idx]
             bb = B_train[batch_idx]
             mb = M_train[batch_idx]
             wb = W_train[batch_idx]
 
-            out = model(xb, pb)
+            out = model(xb, pb, cb)
             if use_aux:
                 pred, conf, aux_pred = out
             else:
                 pred, conf = out
                 aux_pred = None
-            base_loss = F.smooth_l1_loss(pred, yb, reduction="none")
-            base_loss = torch.mean(base_loss * target_weights, dim=1)
-            base_loss = torch.mean(base_loss * wb)
+            base_matrix = _loss_matrix(torch, pred, yb, target_loss_kinds, target_huber_deltas)
+            base_row = torch.mean(base_matrix * target_weights, dim=1)
+            base_loss = torch.mean(base_row * wb)
 
             offset = bb[:, 0] + pred[:, 0]
             consonant = bb[:, 1] + pred[:, 1]
             cutoff_abs = bb[:, 2] + pred[:, 2]
             pre = bb[:, 3] + pred[:, 3]
             ovl = bb[:, 4] + pred[:, 4]
-            penalty = (
+            penalty_row = (
                 torch.relu(ovl - pre)
                 + torch.relu((pre + cons_margin) - consonant)
                 + torch.relu((consonant + cut_margin) - cutoff_abs)
                 + torch.relu(-offset)
             )
-            penalty_loss = torch.mean(penalty * wb)
+            penalty_loss = torch.mean(penalty_row * wb)
 
-            align_loss = F.smooth_l1_loss(offset, mb[:, 0], reduction="none") + F.smooth_l1_loss(
-                cutoff_abs, mb[:, 1], reduction="none"
-            )
-            align_loss = torch.mean(align_loss * wb)
+            align_row = _huber_loss(torch, offset, mb[:, 0], 24.0) + _huber_loss(torch, cutoff_abs, mb[:, 1], 24.0)
+            align_loss = torch.mean(align_row * wb)
 
-            err = torch.mean(torch.abs(pred - yb), dim=1)
-            conf_target = torch.exp(-torch.clamp(err / 80.0, min=0.0, max=8.0))
-            conf_loss = F.binary_cross_entropy(conf.squeeze(1), conf_target.detach(), reduction="none")
-            conf_loss = torch.mean(conf_loss * wb)
-
-            aux_loss = 0.0
+            aux_loss = torch.tensor(0.0, dtype=torch.float32, device=run_device)
+            boundary_consistency_loss = torch.tensor(0.0, dtype=torch.float32, device=run_device)
+            boundary_row_err = None
             if use_aux and aux_pred is not None and A_train is not None and AM_train is not None:
                 ab = A_train[batch_idx]
                 am = AM_train[batch_idx]
-                aux_err = F.smooth_l1_loss(aux_pred, ab, reduction="none")
-                mask_sum = torch.clamp(torch.sum(am, dim=1), min=1.0)
-                aux_err = torch.sum(aux_err * am, dim=1) / mask_sum
-                aux_loss = torch.mean(aux_err * wb)
+                aux_matrix = _loss_matrix(torch, aux_pred, ab, aux_loss_kinds, aux_huber_deltas)
+                weighted_mask = am * aux_target_weights
+                mask_sum = torch.clamp(torch.sum(weighted_mask, dim=1), min=1.0)
+                boundary_row_err = torch.sum(aux_matrix * weighted_mask, dim=1) / mask_sum
+                aux_loss = torch.mean(boundary_row_err * wb)
+                boundary_consistency_row = _boundary_consistency_row_loss(
+                    torch,
+                    aux_pred,
+                    am,
+                    offset,
+                    cutoff_abs,
+                )
+                if boundary_consistency_row is not None:
+                    boundary_consistency_loss = torch.mean(boundary_consistency_row * wb)
+                    boundary_row_err = boundary_row_err + boundary_consistency_row
 
-            pair_loss = 0.0
-            if pair_weight > 0.0 and pair_map_train:
+            delta_row_err = torch.mean(torch.abs(pred - yb) * target_weights, dim=1)
+            conf_target = _confidence_target_from_errors(
+                torch,
+                delta_row_err.detach(),
+                align_row.detach(),
+                penalty_row.detach(),
+                boundary_row_err.detach() if boundary_row_err is not None else None,
+            )
+            conf_loss_row = F.binary_cross_entropy(conf.squeeze(1), conf_target, reduction="none")
+            conf_loss = torch.mean(conf_loss_row * wb)
+
+            pair_loss = torch.tensor(0.0, dtype=torch.float32, device=run_device)
+            if epoch_pair_weight > 0.0 and pair_map_train:
                 batch_indices = [int(i) for i in batch_idx.detach().cpu().tolist()]
                 src_pos, dst_pos = _batch_pair_positions(batch_indices, pair_map_train)
                 if src_pos:
@@ -417,7 +676,7 @@ def train_coupled_bundle(
                     true_offset = bb[:, 0] + yb[:, 0]
                     pred_gap = pred_offset[dst_t] - pred_offset[src_t]
                     true_gap = true_offset[dst_t] - true_offset[src_t]
-                    pair_err = F.smooth_l1_loss(pred_gap, true_gap, reduction="none")
+                    pair_err = _huber_loss(torch, pred_gap, true_gap, 20.0)
                     pair_w = 0.5 * (wb[src_t] + wb[dst_t])
                     pair_loss = torch.mean(pair_err * pair_w)
 
@@ -426,62 +685,85 @@ def train_coupled_bundle(
                 + (0.25 * penalty_loss)
                 + (0.12 * align_loss)
                 + (0.05 * conf_loss)
-                + (aux_weight * aux_loss)
-                + (pair_weight * pair_loss)
+                + (float(boundary_aux_weight) * aux_loss)
+                + (float(boundary_consistency_weight) * boundary_consistency_loss)
+                + (epoch_pair_weight * pair_loss)
             )
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
             if progress_every > 0 and (batch_i % progress_every == 0 or batch_i == total_batches):
                 loss_val = float(total_loss.detach().cpu().item())
-                print(f"[TRAIN] epoch={epoch + 1}/{epochs_n} batch={batch_i}/{total_batches} loss={loss_val:.4f}")
+                print(
+                    f"[TRAIN] epoch={epoch + 1}/{epochs_n} batch={batch_i}/{total_batches} "
+                    f"loss={loss_val:.4f} pair_w={epoch_pair_weight:.4f}"
+                )
 
         model.eval()
         with torch.no_grad():
-            out_val = model(X_valid, P_valid)
+            out_val = model(X_valid, P_valid, C_valid)
             if use_aux:
                 pred_val, conf_val, aux_val = out_val
             else:
                 pred_val, conf_val = out_val
                 aux_val = None
-            val_base = F.smooth_l1_loss(pred_val, Y_valid, reduction="none")
-            val_base = torch.mean(val_base * target_weights, dim=1)
-            val_base = torch.mean(val_base * W_valid)
+            val_base_matrix = _loss_matrix(torch, pred_val, Y_valid, target_loss_kinds, target_huber_deltas)
+            val_base = torch.mean(torch.mean(val_base_matrix * target_weights, dim=1) * W_valid)
             offset_v = B_valid[:, 0] + pred_val[:, 0]
             consonant_v = B_valid[:, 1] + pred_val[:, 1]
             cutoff_abs_v = B_valid[:, 2] + pred_val[:, 2]
             pre_v = B_valid[:, 3] + pred_val[:, 3]
             ovl_v = B_valid[:, 4] + pred_val[:, 4]
-            val_penalty = (
+            val_penalty_row = (
                 torch.relu(ovl_v - pre_v)
                 + torch.relu((pre_v + cons_margin) - consonant_v)
                 + torch.relu((consonant_v + cut_margin) - cutoff_abs_v)
                 + torch.relu(-offset_v)
             )
-            val_penalty = torch.mean(val_penalty * W_valid)
-            val_align = F.smooth_l1_loss(offset_v, M_valid[:, 0], reduction="none") + F.smooth_l1_loss(
-                cutoff_abs_v, M_valid[:, 1], reduction="none"
+            val_penalty = torch.mean(val_penalty_row * W_valid)
+            val_align_row = _huber_loss(torch, offset_v, M_valid[:, 0], 24.0) + _huber_loss(
+                torch, cutoff_abs_v, M_valid[:, 1], 24.0
             )
-            val_align = torch.mean(val_align * W_valid)
-            err_v = torch.mean(torch.abs(pred_val - Y_valid), dim=1)
-            conf_target_v = torch.exp(-torch.clamp(err_v / 80.0, min=0.0, max=8.0))
-            val_conf = F.binary_cross_entropy(conf_val.squeeze(1), conf_target_v.detach(), reduction="none")
-            val_conf = torch.mean(val_conf * W_valid)
-            val_aux = 0.0
+            val_align = torch.mean(val_align_row * W_valid)
+            val_boundary_row_err = None
+            val_aux = torch.tensor(0.0, dtype=torch.float32, device=run_device)
+            val_boundary_consistency = torch.tensor(0.0, dtype=torch.float32, device=run_device)
             if use_aux and aux_val is not None and A_valid is not None and AM_valid is not None:
-                aux_err_v = F.smooth_l1_loss(aux_val, A_valid, reduction="none")
-                mask_sum_v = torch.clamp(torch.sum(AM_valid, dim=1), min=1.0)
-                aux_err_v = torch.sum(aux_err_v * AM_valid, dim=1) / mask_sum_v
-                val_aux = torch.mean(aux_err_v * W_valid)
-            val_pair = 0.0
-            if pair_weight > 0.0 and val_src_pos:
+                val_aux_matrix = _loss_matrix(torch, aux_val, A_valid, aux_loss_kinds, aux_huber_deltas)
+                val_weighted_mask = AM_valid * aux_target_weights
+                val_mask_sum = torch.clamp(torch.sum(val_weighted_mask, dim=1), min=1.0)
+                val_boundary_row_err = torch.sum(val_aux_matrix * val_weighted_mask, dim=1) / val_mask_sum
+                val_aux = torch.mean(val_boundary_row_err * W_valid)
+                val_boundary_consistency_row = _boundary_consistency_row_loss(
+                    torch,
+                    aux_val,
+                    AM_valid,
+                    offset_v,
+                    cutoff_abs_v,
+                )
+                if val_boundary_consistency_row is not None:
+                    val_boundary_consistency = torch.mean(val_boundary_consistency_row * W_valid)
+                    val_boundary_row_err = val_boundary_row_err + val_boundary_consistency_row
+            delta_row_err_v = torch.mean(torch.abs(pred_val - Y_valid) * target_weights, dim=1)
+            conf_target_v = _confidence_target_from_errors(
+                torch,
+                delta_row_err_v.detach(),
+                val_align_row.detach(),
+                val_penalty_row.detach(),
+                val_boundary_row_err.detach() if val_boundary_row_err is not None else None,
+            )
+            val_conf = torch.mean(
+                F.binary_cross_entropy(conf_val.squeeze(1), conf_target_v, reduction="none") * W_valid
+            )
+            val_pair = torch.tensor(0.0, dtype=torch.float32, device=run_device)
+            if epoch_pair_weight > 0.0 and val_src_pos:
                 src_t = torch.tensor(val_src_pos, device=run_device, dtype=torch.long)
                 dst_t = torch.tensor(val_dst_pos, device=run_device, dtype=torch.long)
                 pred_offset_v = B_valid[:, 0] + pred_val[:, 0]
                 true_offset_v = B_valid[:, 0] + Y_valid[:, 0]
                 pred_gap_v = pred_offset_v[dst_t] - pred_offset_v[src_t]
                 true_gap_v = true_offset_v[dst_t] - true_offset_v[src_t]
-                pair_err_v = F.smooth_l1_loss(pred_gap_v, true_gap_v, reduction="none")
+                pair_err_v = _huber_loss(torch, pred_gap_v, true_gap_v, 20.0)
                 pair_w_v = 0.5 * (W_valid[src_t] + W_valid[dst_t])
                 val_pair = torch.mean(pair_err_v * pair_w_v)
             val_total = float(
@@ -490,8 +772,9 @@ def train_coupled_bundle(
                     + (0.25 * val_penalty)
                     + (0.12 * val_align)
                     + (0.05 * val_conf)
-                    + (aux_weight * val_aux)
-                    + (pair_weight * val_pair)
+                    + (float(boundary_aux_weight) * val_aux)
+                    + (float(boundary_consistency_weight) * val_boundary_consistency)
+                    + (epoch_pair_weight * val_pair)
                 ).item()
             )
 
@@ -509,14 +792,14 @@ def train_coupled_bundle(
             status = "best" if new_best else "wait"
             print(
                 f"[TRAIN] epoch={epoch + 1}/{epochs_n} val_loss={val_total:.4f} best={best_val:.4f} "
-                f"patience={wait}/{patience} status={status}"
+                f"patience={wait}/{patience} status={status} pair_w={epoch_pair_weight:.4f}"
             )
 
     if best_state is not None:
         model.load_state_dict(best_state)
     model.eval()
     with torch.no_grad():
-        out_valid = model(X_valid, P_valid)
+        out_valid = model(X_valid, P_valid, C_valid)
         if use_aux:
             pred_valid, conf_valid, aux_valid = out_valid
         else:
@@ -555,6 +838,7 @@ def train_coupled_bundle(
             "state_dict": model.state_dict(),
             "feature_names": feature_names,
             "categorical_features": categorical_features,
+            "categorical_bucket_sizes": [int(v) for v in categorical_bucket_sizes],
             "target_names": list(TARGET_NAMES),
             "patch_features": list(PATCH_FEATURES),
             "in_dim": int(X.shape[1]),
@@ -575,15 +859,40 @@ def train_coupled_bundle(
         "feature_version": schema.get("feature_version", ""),
         "feature_names": feature_names,
         "categorical_features": categorical_features,
+        "phoneme_aware_conditioning": {
+            "enabled": bool(categorical_features),
+            "categorical_bucket_sizes": [int(v) for v in categorical_bucket_sizes],
+        },
         "targets": list(TARGET_NAMES),
         "aux_targets": list(AUX_TARGET_NAMES) if use_aux else [],
         "mel_patch_spec": list(PATCH_FEATURES),
         "min_confidence": float(min_confidence),
-        "vc_cv_pair_weight": float(pair_weight),
+        "vc_cv_pair_weight": float(pair_weight_base),
+        "vc_cv_pair_warmup_epochs": int(pair_warmup_epochs),
         "vc_cv_pair_max_gap": int(os.environ.get("UTOA_ML_VC_CV_MAX_GAP", 5) or 5),
         "vc_cv_pairs_total": int(pair_total_count),
         "vc_cv_pairs_train": int(pair_train_count),
         "vc_cv_pairs_valid": int(pair_valid_count),
+        "hard_example_mining": {
+            "strength": float(hard_example_strength),
+            "mean_boost": float(np.mean(hard_boost)) if len(hard_boost) else 1.0,
+        },
+        "sampler": {
+            "mode": str(sampler_mode),
+            "group_column": str(sampling_group_column),
+        },
+        "target_loss": {
+            "kinds": list(target_loss_kinds),
+            "huber_deltas": [float(v) for v in target_huber_deltas],
+            "weights": [float(v) for v in target_weight_values],
+        },
+        "boundary_aux": {
+            "weight": float(boundary_aux_weight),
+            "consistency_weight": float(boundary_consistency_weight),
+            "target_weights": [float(v) for v in aux_target_weight_values],
+            "loss_kinds": list(aux_loss_kinds),
+            "huber_deltas": [float(v) for v in aux_huber_deltas],
+        },
         "fallback_order": [COUPLED_BACKEND, "lightgbm", "base"],
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "train_rows": int(len(df)),
@@ -603,7 +912,7 @@ def train_coupled_bundle(
                 "confidence_mean": float(np.mean(conf_valid_np)) if len(conf_valid_np) else 0.0,
                 "confidence_min": float(np.min(conf_valid_np)) if len(conf_valid_np) else 0.0,
                 "confidence_max": float(np.max(conf_valid_np)) if len(conf_valid_np) else 0.0,
-                "vc_cv_pair_weight": float(pair_weight),
+                "vc_cv_pair_weight": float(pair_weight_base),
                 "vc_cv_pairs_total": int(pair_total_count),
                 "vc_cv_pairs_valid": int(pair_valid_count),
             },
@@ -733,14 +1042,18 @@ def train_coupled_bundle_rawmel(
     schema = get_feature_schema()
     feature_names = list(schema.get("feature_names") or FEATURE_NAMES)
     categorical_features = [c for c in CATEGORICAL_FEATURES if c in feature_names]
+    categorical_bucket_sizes = _default_categorical_bucket_sizes(categorical_features)
 
     x_rows = []
+    c_rows = []
     p_rows = []
     for _, row in df.iterrows():
         as_dict = row.to_dict()
         x_rows.append(_row_feature_vector(as_dict, feature_names, categorical_features))
+        c_rows.append(_row_categorical_index_vector(as_dict, categorical_features, categorical_bucket_sizes))
         p_rows.append(_row_patch_vector(as_dict))
     X = np.asarray(x_rows, dtype=np.float32)
+    C = np.asarray(c_rows, dtype=np.int64) if c_rows else np.zeros((len(df), 0), dtype=np.int64)
     P = np.asarray(p_rows, dtype=np.float32)
     Y = np.stack(
         [pd.to_numeric(df[target], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32) for target in TARGET_NAMES],
@@ -814,7 +1127,18 @@ def train_coupled_bundle_rawmel(
     risk_boost *= np.where((cv_family_mask_np > 0.5) & (blank_conf_np >= float(risk_blank_th)), risk_boost_blank, 1.0)
     risk_boost *= np.where((cv_family_mask_np > 0.5) & (jump_blocked_np > 0.5), risk_boost_jump, 1.0)
     risk_boost *= np.where((cv_family_mask_np > 0.5) & (mapping_conf_np < float(risk_map_conf_th)), risk_boost_low_conf, 1.0)
-    W = np.clip((W * risk_boost).astype(np.float32), 0.20, 3.00)
+    hard_example_strength = max(0.0, _env_float("UTOA_ML_RAWMEL_HARD_MINING_STRENGTH", 0.55))
+    hard_boost = _compute_static_hard_example_boost(
+        df,
+        alias_type_arr if "alias_type" in df.columns else np.full((len(df),), "", dtype=object),
+        mapping_conf_np,
+        blank_conf_np,
+        jump_blocked_np,
+        aux_mask,
+        strength=hard_example_strength,
+    )
+    W = np.clip((W * risk_boost * np.sqrt(hard_boost)).astype(np.float32), 0.20, 3.00)
+    sampling_weights = np.clip((W * hard_boost).astype(np.float32), 0.20, 4.00)
 
     if group_column in df.columns and df[group_column].nunique() >= 2 and GroupShuffleSplit is not None:
         split = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
@@ -830,10 +1154,11 @@ def train_coupled_bundle_rawmel(
     valid_idx = np.asarray(valid_idx, dtype=np.int64)
 
     pair_map = _build_vc_cv_pair_map(df)
-    pair_weight = float(os.environ.get("UTOA_ML_VC_CV_PAIR_WEIGHT", 0.06) or 0.06)
-    if pair_weight < 0.0:
-        pair_weight = 0.0
-    pair_weight = pair_weight * 0.5
+    pair_weight_base = float(os.environ.get("UTOA_ML_VC_CV_PAIR_WEIGHT", 0.06) or 0.06)
+    if pair_weight_base < 0.0:
+        pair_weight_base = 0.0
+    pair_weight_base = pair_weight_base * 0.5
+    pair_warmup_epochs = max(0, _env_int("UTOA_ML_RAWMEL_PAIR_WARMUP_EPOCHS", 8))
     if pair_map:
         train_mask = np.zeros((len(df),), dtype=bool)
         valid_mask = np.zeros((len(df),), dtype=bool)
@@ -875,6 +1200,7 @@ def train_coupled_bundle_rawmel(
         onset_frames=int(onset_frames),
         tail_frames=int(tail_frames),
         aux_dim=aux_dim,
+        categorical_bucket_sizes=categorical_bucket_sizes,
     )
     run_device = _resolve_device(torch, requested=device)
     if isinstance(run_device, str):
@@ -901,6 +1227,7 @@ def train_coupled_bundle_rawmel(
     grad_clip = max(0.0, _env_float("UTOA_ML_RAWMEL_GRAD_CLIP", 1.2))
 
     X_train = torch.tensor(X[train_idx], dtype=torch.float32, device=run_device)
+    C_train = torch.tensor(C[train_idx], dtype=torch.long, device=run_device)
     P_train = torch.tensor(P[train_idx], dtype=torch.float32, device=run_device)
     Y_train = torch.tensor(Y[train_idx], dtype=torch.float32, device=run_device)
     B_train = torch.tensor(base[train_idx], dtype=torch.float32, device=run_device)
@@ -908,6 +1235,7 @@ def train_coupled_bundle_rawmel(
     W_train = torch.tensor(W[train_idx], dtype=torch.float32, device=run_device)
 
     X_valid = torch.tensor(X[valid_idx], dtype=torch.float32, device=run_device)
+    C_valid = torch.tensor(C[valid_idx], dtype=torch.long, device=run_device)
     P_valid = torch.tensor(P[valid_idx], dtype=torch.float32, device=run_device)
     Y_valid = torch.tensor(Y[valid_idx], dtype=torch.float32, device=run_device)
     B_valid = torch.tensor(base[valid_idx], dtype=torch.float32, device=run_device)
@@ -923,6 +1251,12 @@ def train_coupled_bundle_rawmel(
         AM_train = None
         A_valid = None
         AM_valid = None
+
+    train_sampling_weights = sampling_weights[train_idx]
+    sampling_group_values, sampling_group_column = _resolve_sampling_group_values(df, train_idx, preferred_column="voicebank_id")
+    sampler_mode = _env_str("UTOA_ML_RAWMEL_SAMPLER", "group_balanced").strip().lower()
+    if sampler_mode not in {"group_balanced", "shuffle"}:
+        sampler_mode = "group_balanced"
 
     keys_train = [keys[i] for i in train_idx.tolist()]
     keys_valid = [keys[i] for i in valid_idx.tolist()]
@@ -956,9 +1290,24 @@ def train_coupled_bundle_rawmel(
         _env_float("UTOA_ML_RAWMEL_TARGET_W_OVL", 0.62),
     ]
     target_weights = torch.tensor(target_weight_values, dtype=torch.float32, device=run_device).view(1, -1)
+    target_loss_kinds, target_huber_deltas = _resolve_loss_config(
+        "UTOA_ML_RAWMEL_",
+        TARGET_NAMES,
+        ["huber", "l1", "huber", "l1", "l1"],
+        [30.0, 18.0, 38.0, 14.0, 12.0],
+    )
+    aux_target_weight_values = [1.0, 1.0, 1.45]
+    aux_target_weights = torch.tensor(aux_target_weight_values, dtype=torch.float32, device=run_device).view(1, -1)
+    aux_loss_kinds, aux_huber_deltas = _resolve_loss_config(
+        "UTOA_ML_RAWMEL_",
+        AUX_TARGET_NAMES,
+        ["huber", "huber", "huber"],
+        [18.0, 18.0, 26.0],
+    )
     cons_margin = 10.0
     cut_margin = 10.0
-    aux_weight = 0.08
+    boundary_aux_weight = _env_float("UTOA_ML_RAWMEL_BOUNDARY_AUX_WEIGHT", 0.18)
+    boundary_consistency_weight = _env_float("UTOA_ML_RAWMEL_BOUNDARY_CONSISTENCY_WEIGHT", 0.08)
 
     best_state = None
     best_val = float("inf")
@@ -973,16 +1322,23 @@ def train_coupled_bundle_rawmel(
     if progress_every > 0:
         print(
             f"[TRAIN] rows={train_n} batches={total_batches} epochs={epochs_n} device={run_device} "
-            f"rawmel={mel_bins}x(onset={onset_frames},tail={tail_frames})"
+            f"rawmel={mel_bins}x(onset={onset_frames},tail={tail_frames}) sampler={sampler_mode}:{sampling_group_column}"
         )
 
     for epoch in range(epochs_n):
         model.train()
-        perm = torch.randperm(train_n, device=run_device)
+        epoch_pair_weight = _pair_weight_for_epoch(pair_weight_base, epoch, pair_warmup_epochs)
+        rng = np.random.default_rng(42 + epoch)
+        if sampler_mode == "group_balanced":
+            perm_np = _sample_group_balanced_indices(sampling_group_values, train_sampling_weights, train_n, rng)
+        else:
+            perm_np = rng.permutation(train_n).astype(np.int64)
+        perm = torch.tensor(perm_np, dtype=torch.long, device=run_device)
         for batch_i, start in enumerate(range(0, train_n, batch_n), start=1):
             batch_idx = perm[start:start + batch_n]
             idx_list = [int(i) for i in batch_idx.detach().cpu().tolist()]
             xb = X_train[batch_idx]
+            cb = C_train[batch_idx]
             pb = P_train[batch_idx]
             yb = Y_train[batch_idx]
             bb = B_train[batch_idx]
@@ -997,50 +1353,68 @@ def train_coupled_bundle_rawmel(
             onset_t = _np_to_device(onset_np).unsqueeze(1)
             tail_t = _np_to_device(tail_np).unsqueeze(1)
 
-            out = model(xb, pb, onset_t, tail_t)
+            out = model(xb, pb, onset_t, tail_t, cb)
             if use_aux:
                 pred, conf, aux_pred = out
             else:
                 pred, conf = out
                 aux_pred = None
-            base_loss = F.smooth_l1_loss(pred, yb, reduction="none")
-            base_loss = torch.mean(base_loss * target_weights, dim=1)
-            base_loss = torch.mean(base_loss * wb)
+            base_matrix = _loss_matrix(torch, pred, yb, target_loss_kinds, target_huber_deltas)
+            base_row = torch.mean(base_matrix * target_weights, dim=1)
+            base_loss = torch.mean(base_row * wb)
 
             offset = bb[:, 0] + pred[:, 0]
             consonant = bb[:, 1] + pred[:, 1]
             cutoff_abs = bb[:, 2] + pred[:, 2]
             pre = bb[:, 3] + pred[:, 3]
             ovl = bb[:, 4] + pred[:, 4]
-            penalty = (
+            penalty_row = (
                 torch.relu(ovl - pre)
                 + torch.relu((pre + cons_margin) - consonant)
                 + torch.relu((consonant + cut_margin) - cutoff_abs)
                 + torch.relu(-offset)
             )
-            penalty_loss = torch.mean(penalty * wb)
+            penalty_loss = torch.mean(penalty_row * wb)
 
-            align_loss = F.smooth_l1_loss(offset, mb[:, 0], reduction="none") + F.smooth_l1_loss(
-                cutoff_abs, mb[:, 1], reduction="none"
-            )
-            align_loss = torch.mean(align_loss * wb)
+            align_row = _huber_loss(torch, offset, mb[:, 0], 24.0) + _huber_loss(torch, cutoff_abs, mb[:, 1], 24.0)
+            align_loss = torch.mean(align_row * wb)
 
-            err = torch.mean(torch.abs(pred - yb), dim=1)
-            conf_target = torch.exp(-torch.clamp(err / 80.0, min=0.0, max=8.0))
-            conf_loss = F.binary_cross_entropy(conf.squeeze(1), conf_target.detach(), reduction="none")
-            conf_loss = torch.mean(conf_loss * wb)
-
-            aux_loss = 0.0
+            aux_loss = torch.tensor(0.0, dtype=torch.float32, device=run_device)
+            boundary_consistency_loss = torch.tensor(0.0, dtype=torch.float32, device=run_device)
+            boundary_row_err = None
             if use_aux and aux_pred is not None and A_train is not None and AM_train is not None:
                 ab = A_train[batch_idx]
                 am = AM_train[batch_idx]
-                aux_err = F.smooth_l1_loss(aux_pred, ab, reduction="none")
-                mask_sum = torch.clamp(torch.sum(am, dim=1), min=1.0)
-                aux_err = torch.sum(aux_err * am, dim=1) / mask_sum
-                aux_loss = torch.mean(aux_err * wb)
+                aux_matrix = _loss_matrix(torch, aux_pred, ab, aux_loss_kinds, aux_huber_deltas)
+                weighted_mask = am * aux_target_weights
+                mask_sum = torch.clamp(torch.sum(weighted_mask, dim=1), min=1.0)
+                boundary_row_err = torch.sum(aux_matrix * weighted_mask, dim=1) / mask_sum
+                aux_loss = torch.mean(boundary_row_err * wb)
+                boundary_consistency_row = _boundary_consistency_row_loss(
+                    torch,
+                    aux_pred,
+                    am,
+                    offset,
+                    cutoff_abs,
+                )
+                if boundary_consistency_row is not None:
+                    boundary_consistency_loss = torch.mean(boundary_consistency_row * wb)
+                    boundary_row_err = boundary_row_err + boundary_consistency_row
 
-            pair_loss = 0.0
-            if pair_weight > 0.0 and pair_map_train:
+            delta_row_err = torch.mean(torch.abs(pred - yb) * target_weights, dim=1)
+            conf_target = _confidence_target_from_errors(
+                torch,
+                delta_row_err.detach(),
+                align_row.detach(),
+                penalty_row.detach(),
+                boundary_row_err.detach() if boundary_row_err is not None else None,
+            )
+            conf_loss = torch.mean(
+                F.binary_cross_entropy(conf.squeeze(1), conf_target, reduction="none") * wb
+            )
+
+            pair_loss = torch.tensor(0.0, dtype=torch.float32, device=run_device)
+            if epoch_pair_weight > 0.0 and pair_map_train:
                 src_pos, dst_pos = _batch_pair_positions(idx_list, pair_map_train)
                 if src_pos:
                     src_t = torch.tensor(src_pos, device=run_device, dtype=torch.long)
@@ -1049,7 +1423,7 @@ def train_coupled_bundle_rawmel(
                     true_offset = bb[:, 0] + yb[:, 0]
                     pred_gap = pred_offset[dst_t] - pred_offset[src_t]
                     true_gap = true_offset[dst_t] - true_offset[src_t]
-                    pair_err = F.smooth_l1_loss(pred_gap, true_gap, reduction="none")
+                    pair_err = _huber_loss(torch, pred_gap, true_gap, 20.0)
                     pair_w = 0.5 * (wb[src_t] + wb[dst_t])
                     pair_loss = torch.mean(pair_err * pair_w)
 
@@ -1058,8 +1432,9 @@ def train_coupled_bundle_rawmel(
                 + (0.25 * penalty_loss)
                 + (0.12 * align_loss)
                 + (0.05 * conf_loss)
-                + (aux_weight * aux_loss)
-                + (pair_weight * pair_loss)
+                + (float(boundary_aux_weight) * aux_loss)
+                + (float(boundary_consistency_weight) * boundary_consistency_loss)
+                + (epoch_pair_weight * pair_loss)
             )
             optimizer.zero_grad()
             total_loss.backward()
@@ -1068,7 +1443,10 @@ def train_coupled_bundle_rawmel(
             optimizer.step()
             if progress_every > 0 and (batch_i % progress_every == 0 or batch_i == total_batches):
                 loss_val = float(total_loss.detach().cpu().item())
-                print(f"[TRAIN] epoch={epoch + 1}/{epochs_n} batch={batch_i}/{total_batches} loss={loss_val:.4f}")
+                print(
+                    f"[TRAIN] epoch={epoch + 1}/{epochs_n} batch={batch_i}/{total_batches} "
+                    f"loss={loss_val:.4f} pair_w={epoch_pair_weight:.4f}"
+                )
 
         model.eval()
         with torch.no_grad():
@@ -1079,50 +1457,69 @@ def train_coupled_bundle_rawmel(
                 onset_valid_np, tail_valid_np = cache_index.get_batch(keys_valid)
             onset_valid_t = _np_to_device(onset_valid_np).unsqueeze(1)
             tail_valid_t = _np_to_device(tail_valid_np).unsqueeze(1)
-            out_val = model(X_valid, P_valid, onset_valid_t, tail_valid_t)
+            out_val = model(X_valid, P_valid, onset_valid_t, tail_valid_t, C_valid)
             if use_aux:
                 pred_val, conf_val, aux_val = out_val
             else:
                 pred_val, conf_val = out_val
                 aux_val = None
-            val_base = F.smooth_l1_loss(pred_val, Y_valid, reduction="none")
-            val_base = torch.mean(val_base * target_weights, dim=1)
-            val_base = torch.mean(val_base * W_valid)
+            val_base_matrix = _loss_matrix(torch, pred_val, Y_valid, target_loss_kinds, target_huber_deltas)
+            val_base = torch.mean(torch.mean(val_base_matrix * target_weights, dim=1) * W_valid)
             offset_v = B_valid[:, 0] + pred_val[:, 0]
             consonant_v = B_valid[:, 1] + pred_val[:, 1]
             cutoff_abs_v = B_valid[:, 2] + pred_val[:, 2]
             pre_v = B_valid[:, 3] + pred_val[:, 3]
             ovl_v = B_valid[:, 4] + pred_val[:, 4]
-            val_penalty = (
+            val_penalty_row = (
                 torch.relu(ovl_v - pre_v)
                 + torch.relu((pre_v + cons_margin) - consonant_v)
                 + torch.relu((consonant_v + cut_margin) - cutoff_abs_v)
                 + torch.relu(-offset_v)
             )
-            val_penalty = torch.mean(val_penalty * W_valid)
-            val_align = F.smooth_l1_loss(offset_v, M_valid[:, 0], reduction="none") + F.smooth_l1_loss(
-                cutoff_abs_v, M_valid[:, 1], reduction="none"
+            val_penalty = torch.mean(val_penalty_row * W_valid)
+            val_align_row = _huber_loss(torch, offset_v, M_valid[:, 0], 24.0) + _huber_loss(
+                torch, cutoff_abs_v, M_valid[:, 1], 24.0
             )
-            val_align = torch.mean(val_align * W_valid)
-            err_v = torch.mean(torch.abs(pred_val - Y_valid), dim=1)
-            conf_target_v = torch.exp(-torch.clamp(err_v / 80.0, min=0.0, max=8.0))
-            val_conf = F.binary_cross_entropy(conf_val.squeeze(1), conf_target_v.detach(), reduction="none")
-            val_conf = torch.mean(val_conf * W_valid)
-            val_aux = 0.0
-            if use_aux and aux_val is not None and A is not None and AM_valid is not None:
-                aux_err_v = F.smooth_l1_loss(aux_val, A_valid, reduction="none")
-                mask_sum_v = torch.clamp(torch.sum(AM_valid, dim=1), min=1.0)
-                aux_err_v = torch.sum(aux_err_v * AM_valid, dim=1) / mask_sum_v
-                val_aux = torch.mean(aux_err_v * W_valid)
-            val_pair = 0.0
-            if pair_weight > 0.0 and val_src_pos:
+            val_align = torch.mean(val_align_row * W_valid)
+            val_aux = torch.tensor(0.0, dtype=torch.float32, device=run_device)
+            val_boundary_consistency = torch.tensor(0.0, dtype=torch.float32, device=run_device)
+            val_boundary_row_err = None
+            if use_aux and aux_val is not None and A_valid is not None and AM_valid is not None:
+                val_aux_matrix = _loss_matrix(torch, aux_val, A_valid, aux_loss_kinds, aux_huber_deltas)
+                val_weighted_mask = AM_valid * aux_target_weights
+                val_mask_sum_v = torch.clamp(torch.sum(val_weighted_mask, dim=1), min=1.0)
+                val_boundary_row_err = torch.sum(val_aux_matrix * val_weighted_mask, dim=1) / val_mask_sum_v
+                val_aux = torch.mean(val_boundary_row_err * W_valid)
+                val_boundary_consistency_row = _boundary_consistency_row_loss(
+                    torch,
+                    aux_val,
+                    AM_valid,
+                    offset_v,
+                    cutoff_abs_v,
+                )
+                if val_boundary_consistency_row is not None:
+                    val_boundary_consistency = torch.mean(val_boundary_consistency_row * W_valid)
+                    val_boundary_row_err = val_boundary_row_err + val_boundary_consistency_row
+            delta_row_err_v = torch.mean(torch.abs(pred_val - Y_valid) * target_weights, dim=1)
+            conf_target_v = _confidence_target_from_errors(
+                torch,
+                delta_row_err_v.detach(),
+                val_align_row.detach(),
+                val_penalty_row.detach(),
+                val_boundary_row_err.detach() if val_boundary_row_err is not None else None,
+            )
+            val_conf = torch.mean(
+                F.binary_cross_entropy(conf_val.squeeze(1), conf_target_v, reduction="none") * W_valid
+            )
+            val_pair = torch.tensor(0.0, dtype=torch.float32, device=run_device)
+            if epoch_pair_weight > 0.0 and val_src_pos:
                 src_t = torch.tensor(val_src_pos, device=run_device, dtype=torch.long)
                 dst_t = torch.tensor(val_dst_pos, device=run_device, dtype=torch.long)
                 pred_offset_v = B_valid[:, 0] + pred_val[:, 0]
                 true_offset_v = B_valid[:, 0] + Y_valid[:, 0]
                 pred_gap_v = pred_offset_v[dst_t] - pred_offset_v[src_t]
                 true_gap_v = true_offset_v[dst_t] - true_offset_v[src_t]
-                pair_err_v = F.smooth_l1_loss(pred_gap_v, true_gap_v, reduction="none")
+                pair_err_v = _huber_loss(torch, pred_gap_v, true_gap_v, 20.0)
                 pair_w_v = 0.5 * (W_valid[src_t] + W_valid[dst_t])
                 val_pair = torch.mean(pair_err_v * pair_w_v)
             val_total = float(
@@ -1131,8 +1528,9 @@ def train_coupled_bundle_rawmel(
                     + (0.25 * val_penalty)
                     + (0.12 * val_align)
                     + (0.05 * val_conf)
-                    + (aux_weight * val_aux)
-                    + (pair_weight * val_pair)
+                    + (float(boundary_aux_weight) * val_aux)
+                    + (float(boundary_consistency_weight) * val_boundary_consistency)
+                    + (epoch_pair_weight * val_pair)
                 ).item()
             )
             lr_scheduler.step(val_total)
@@ -1152,7 +1550,7 @@ def train_coupled_bundle_rawmel(
             lr_now = float(optimizer.param_groups[0].get("lr", learning_rate))
             print(
                 f"[TRAIN] epoch={epoch + 1}/{epochs_n} val_loss={val_total:.4f} best={best_val:.4f} "
-                f"patience={wait}/{patience} status={status} lr={lr_now:.6g}"
+                f"patience={wait}/{patience} status={status} lr={lr_now:.6g} pair_w={epoch_pair_weight:.4f}"
             )
 
     if best_state is not None:
@@ -1166,7 +1564,7 @@ def train_coupled_bundle_rawmel(
             onset_valid_np, tail_valid_np = cache_index.get_batch(keys_valid)
         onset_valid_t = _np_to_device(onset_valid_np).unsqueeze(1)
         tail_valid_t = _np_to_device(tail_valid_np).unsqueeze(1)
-        out_valid = model(X_valid, P_valid, onset_valid_t, tail_valid_t)
+        out_valid = model(X_valid, P_valid, onset_valid_t, tail_valid_t, C_valid)
         if use_aux:
             pred_valid, conf_valid, aux_valid = out_valid
         else:
@@ -1205,6 +1603,7 @@ def train_coupled_bundle_rawmel(
             "state_dict": model.state_dict(),
             "feature_names": feature_names,
             "categorical_features": categorical_features,
+            "categorical_bucket_sizes": [int(v) for v in categorical_bucket_sizes],
             "target_names": list(TARGET_NAMES),
             "patch_features": list(PATCH_FEATURES),
             "in_dim": int(X.shape[1]),
@@ -1231,6 +1630,10 @@ def train_coupled_bundle_rawmel(
         "feature_version": schema.get("feature_version", ""),
         "feature_names": feature_names,
         "categorical_features": categorical_features,
+        "phoneme_aware_conditioning": {
+            "enabled": bool(categorical_features),
+            "categorical_bucket_sizes": [int(v) for v in categorical_bucket_sizes],
+        },
         "targets": list(TARGET_NAMES),
         "aux_targets": list(AUX_TARGET_NAMES) if use_aux else [],
         "mel_patch_spec": dict(patch_spec),
@@ -1239,11 +1642,23 @@ def train_coupled_bundle_rawmel(
         "onset_frames": int(onset_frames),
         "tail_frames": int(tail_frames),
         "min_confidence": float(min_confidence),
-        "vc_cv_pair_weight": float(pair_weight),
+        "vc_cv_pair_weight": float(pair_weight_base),
+        "vc_cv_pair_warmup_epochs": int(pair_warmup_epochs),
         "optimizer": str(optimizer_name),
         "learning_rate": float(learning_rate),
         "weight_decay": float(rawmel_weight_decay),
         "target_weights": [float(v) for v in target_weight_values],
+        "target_loss": {
+            "kinds": list(target_loss_kinds),
+            "huber_deltas": [float(v) for v in target_huber_deltas],
+        },
+        "boundary_aux": {
+            "weight": float(boundary_aux_weight),
+            "consistency_weight": float(boundary_consistency_weight),
+            "target_weights": [float(v) for v in aux_target_weight_values],
+            "loss_kinds": list(aux_loss_kinds),
+            "huber_deltas": [float(v) for v in aux_huber_deltas],
+        },
         "grad_clip": float(grad_clip),
         "lr_scheduler": {
             "type": "ReduceLROnPlateau",
@@ -1257,6 +1672,14 @@ def train_coupled_bundle_rawmel(
             "boost_blank": float(risk_boost_blank),
             "boost_jump": float(risk_boost_jump),
             "boost_low_conf": float(risk_boost_low_conf),
+        },
+        "hard_example_mining": {
+            "strength": float(hard_example_strength),
+            "mean_boost": float(np.mean(hard_boost)) if len(hard_boost) else 1.0,
+        },
+        "sampler": {
+            "mode": str(sampler_mode),
+            "group_column": str(sampling_group_column),
         },
         "vc_cv_pair_max_gap": int(os.environ.get("UTOA_ML_VC_CV_MAX_GAP", 5) or 5),
         "vc_cv_pairs_total": int(pair_total_count),
@@ -1281,7 +1704,7 @@ def train_coupled_bundle_rawmel(
                 "confidence_mean": float(np.mean(conf_valid_np)) if len(conf_valid_np) else 0.0,
                 "confidence_min": float(np.min(conf_valid_np)) if len(conf_valid_np) else 0.0,
                 "confidence_max": float(np.max(conf_valid_np)) if len(conf_valid_np) else 0.0,
-                "vc_cv_pair_weight": float(pair_weight),
+                "vc_cv_pair_weight": float(pair_weight_base),
                 "vc_cv_pairs_total": int(pair_total_count),
                 "vc_cv_pairs_valid": int(pair_valid_count),
             },

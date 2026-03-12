@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 try:
     import numpy as np
@@ -74,6 +74,36 @@ def _stable_hash_to_unit(text: str) -> float:
     return float(value % 1_000_000) / 1_000_000.0
 
 
+def _stable_hash_to_index(text: str, buckets: int) -> int:
+    buckets_n = max(2, int(buckets or 0))
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        return 0
+    raw = raw_text.encode("utf-8", errors="replace")
+    digest = hashlib.sha1(raw).digest()
+    value = int.from_bytes(digest[:4], byteorder="big", signed=False)
+    return 1 + (value % (buckets_n - 1))
+
+
+def _default_categorical_bucket_sizes(categorical_features: List[str]) -> List[int]:
+    size_map = {
+        "language": 8,
+        "format_type": 16,
+        "alias_type": 16,
+        "alias_group": 24,
+        "onset_class": 32,
+        "voicing_class": 16,
+        "coda_type": 24,
+        "vowel_class": 32,
+        "mora_position": 16,
+        "bridge_type": 24,
+        "prev_alias_type": 16,
+        "next_alias_type": 16,
+        "mapping_reason_code": 32,
+    }
+    return [int(size_map.get(str(name or "").strip(), 16)) for name in categorical_features]
+
+
 def _row_feature_vector(feature_row: Dict[str, Any], feature_names: List[str], categorical_features: List[str]) -> "np.ndarray":
     from core.oto_ml.features.schema import canonicalize_feature_row
     canon = canonicalize_feature_row(feature_row, feature_names=feature_names)
@@ -88,6 +118,20 @@ def _row_feature_vector(feature_row: Dict[str, Any], feature_names: List[str], c
             except Exception:
                 out.append(0.0)
     return np.asarray(out, dtype=np.float32)
+
+
+def _row_categorical_index_vector(
+    feature_row: Dict[str, Any],
+    categorical_features: List[str],
+    categorical_bucket_sizes: Optional[List[int]] = None,
+) -> "np.ndarray":
+    bucket_sizes = list(categorical_bucket_sizes or _default_categorical_bucket_sizes(categorical_features))
+    if len(bucket_sizes) < len(categorical_features):
+        bucket_sizes.extend([16] * (len(categorical_features) - len(bucket_sizes)))
+    vals: List[int] = []
+    for idx, key in enumerate(categorical_features):
+        vals.append(_stable_hash_to_index(feature_row.get(key, ""), bucket_sizes[idx]))
+    return np.asarray(vals, dtype=np.int64)
 
 
 def _row_patch_vector(feature_row: Dict[str, Any]) -> "np.ndarray":
@@ -118,7 +162,20 @@ def _env_int(name: str, default: int) -> int:
 
 # ── Model architecture ───────────────────────────────────────────────────────
 
-def _build_model(torch, nn, in_dim: int, patch_dim: int, hidden_dim: int = 160, aux_dim: int = 0):
+def _embedding_dim_for_bucket_size(bucket_size: int) -> int:
+    size = max(2, int(bucket_size or 0))
+    return max(4, min(16, size // 4))
+
+
+def _build_model(
+    torch,
+    nn,
+    in_dim: int,
+    patch_dim: int,
+    hidden_dim: int = 160,
+    aux_dim: int = 0,
+    categorical_bucket_sizes: Optional[List[int]] = None,
+):
     class _CoupledModel(nn.Module):
         def __init__(self):
             super().__init__()
@@ -134,8 +191,13 @@ def _build_model(torch, nn, in_dim: int, patch_dim: int, hidden_dim: int = 160, 
                 nn.Linear(64, 64),
                 nn.ReLU(),
             )
+            self.categorical_bucket_sizes = [max(2, int(v or 0)) for v in (categorical_bucket_sizes or [])]
+            self.cat_embeddings = nn.ModuleList(
+                [nn.Embedding(size, _embedding_dim_for_bucket_size(size)) for size in self.categorical_bucket_sizes]
+            )
+            self.cat_cond_dim = int(sum(_embedding_dim_for_bucket_size(size) for size in self.categorical_bucket_sizes))
             self.joint = nn.Sequential(
-                nn.Linear(hidden_dim + 64, hidden_dim),
+                nn.Linear(hidden_dim + 64 + self.cat_cond_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim // 2),
                 nn.ReLU(),
@@ -152,10 +214,25 @@ def _build_model(torch, nn, in_dim: int, patch_dim: int, hidden_dim: int = 160, 
             else:
                 self.aux_head = None
 
-        def forward(self, x, patch):
+        def _cat_repr(self, x, cat_idx):
+            if not self.cat_embeddings:
+                return None
+            if cat_idx is None:
+                return torch.zeros((x.shape[0], self.cat_cond_dim), dtype=x.dtype, device=x.device)
+            parts = []
+            for i, embedding in enumerate(self.cat_embeddings):
+                idx = cat_idx[:, i].long().clamp(min=0, max=embedding.num_embeddings - 1)
+                parts.append(embedding(idx))
+            return torch.cat(parts, dim=1)
+
+        def forward(self, x, patch, cat_idx=None):
             xf = self.feature_net(x)
             xp = self.patch_net(patch)
-            z = self.joint(torch.cat([xf, xp], dim=1))
+            pieces = [xf, xp]
+            cat_repr = self._cat_repr(x, cat_idx)
+            if cat_repr is not None:
+                pieces.append(cat_repr)
+            z = self.joint(torch.cat(pieces, dim=1))
             deltas = self.delta_head(z)
             conf = self.conf_head(z)
             if self.aux_head is not None:
@@ -177,6 +254,7 @@ def _build_model_rawmel(
     tail_frames: int,
     hidden_dim: int = 160,
     aux_dim: int = 0,
+    categorical_bucket_sizes: Optional[List[int]] = None,
 ):
     class _RawMelEncoder(nn.Module):
         def __init__(self, in_bins: int, in_frames: int):
@@ -220,7 +298,12 @@ def _build_model_rawmel(
             )
             self.onset_encoder = _RawMelEncoder(mel_bins, onset_frames)
             self.tail_encoder = _RawMelEncoder(mel_bins, tail_frames)
-            joint_in = hidden_dim + 64 + 64 + 64
+            self.categorical_bucket_sizes = [max(2, int(v or 0)) for v in (categorical_bucket_sizes or [])]
+            self.cat_embeddings = nn.ModuleList(
+                [nn.Embedding(size, _embedding_dim_for_bucket_size(size)) for size in self.categorical_bucket_sizes]
+            )
+            self.cat_cond_dim = int(sum(_embedding_dim_for_bucket_size(size) for size in self.categorical_bucket_sizes))
+            joint_in = hidden_dim + 64 + 64 + 64 + self.cat_cond_dim
             self.joint = nn.Sequential(
                 nn.Linear(joint_in, hidden_dim + 32),
                 nn.ReLU(),
@@ -239,12 +322,27 @@ def _build_model_rawmel(
             else:
                 self.aux_head = None
 
-        def forward(self, x, patch, onset, tail):
+        def _cat_repr(self, x, cat_idx):
+            if not self.cat_embeddings:
+                return None
+            if cat_idx is None:
+                return torch.zeros((x.shape[0], self.cat_cond_dim), dtype=x.dtype, device=x.device)
+            parts = []
+            for i, embedding in enumerate(self.cat_embeddings):
+                idx = cat_idx[:, i].long().clamp(min=0, max=embedding.num_embeddings - 1)
+                parts.append(embedding(idx))
+            return torch.cat(parts, dim=1)
+
+        def forward(self, x, patch, onset, tail, cat_idx=None):
             xf = self.feature_net(x)
             xp = self.patch_net(patch)
             xo = self.onset_encoder(onset)
             xt = self.tail_encoder(tail)
-            z = self.joint(torch.cat([xf, xp, xo, xt], dim=1))
+            pieces = [xf, xp, xo, xt]
+            cat_repr = self._cat_repr(x, cat_idx)
+            if cat_repr is not None:
+                pieces.append(cat_repr)
+            z = self.joint(torch.cat(pieces, dim=1))
             deltas = self.delta_head(z)
             conf = self.conf_head(z)
             if self.aux_head is not None:

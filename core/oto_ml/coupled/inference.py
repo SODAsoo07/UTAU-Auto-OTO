@@ -21,6 +21,7 @@ from core.oto_ml.coupled.model import (
     _import_torch,
     _require_numpy,
     _resolve_device,
+    _row_categorical_index_vector,
     _row_feature_vector,
     _row_patch_vector,
     np,
@@ -44,6 +45,7 @@ def load_coupled_bundle(
     feature_schema = schema or get_feature_schema()
     feature_names = list(payload.get("feature_names") or feature_schema.get("feature_names") or FEATURE_NAMES)
     categorical_features = list(payload.get("categorical_features") or CATEGORICAL_FEATURES)
+    categorical_bucket_sizes = list(payload.get("categorical_bucket_sizes") or [])
     patch_features = list(payload.get("patch_features") or PATCH_FEATURES)
     aux_dim = int(payload.get("aux_dim", 0) or 0)
 
@@ -62,6 +64,7 @@ def load_coupled_bundle(
             tail_frames=tail_frames,
             hidden_dim=int(payload.get("hidden_dim", 160)),
             aux_dim=aux_dim,
+            categorical_bucket_sizes=categorical_bucket_sizes,
         )
     else:
         model = _build_model(
@@ -71,6 +74,7 @@ def load_coupled_bundle(
             patch_dim=int(payload.get("patch_dim", len(patch_features))),
             hidden_dim=int(payload.get("hidden_dim", 160)),
             aux_dim=aux_dim,
+            categorical_bucket_sizes=categorical_bucket_sizes,
         )
     model.load_state_dict(payload["state_dict"])
     run_device = _resolve_device(torch, device)
@@ -82,6 +86,7 @@ def load_coupled_bundle(
         "schema": feature_schema,
         "feature_names": feature_names,
         "categorical_features": categorical_features,
+        "categorical_bucket_sizes": categorical_bucket_sizes,
         "patch_features": patch_features,
         "rawmel_enabled": rawmel_enabled,
         "mel_patch_spec": payload.get("mel_patch_spec") or {},
@@ -100,16 +105,19 @@ def predict_coupled_deltas(
     torch, _nn, _F = _import_torch()
     feature_names = list(payload.get("feature_names") or (schema or {}).get("feature_names") or FEATURE_NAMES)
     categorical_features = list(payload.get("categorical_features") or CATEGORICAL_FEATURES)
+    categorical_bucket_sizes = list(payload.get("categorical_bucket_sizes") or [])
     patch_features = list(payload.get("patch_features") or PATCH_FEATURES)
     model = payload["model"]
     device = str(payload.get("device", "cpu"))
 
     x_vec = _row_feature_vector(feature_row, feature_names, categorical_features)
+    cat_vec = _row_categorical_index_vector(feature_row, categorical_features, categorical_bucket_sizes)
     patch_vec = np.asarray(
         [float(feature_row.get(name, 0.0) or 0.0) if name in feature_row else 0.0 for name in patch_features],
         dtype=np.float32,
     )
     x_t = torch.tensor(x_vec.reshape(1, -1), dtype=torch.float32, device=device)
+    cat_t = torch.tensor(cat_vec.reshape(1, -1), dtype=torch.long, device=device) if len(cat_vec) else None
     p_t = torch.tensor(patch_vec.reshape(1, -1), dtype=torch.float32, device=device)
     rawmel_enabled = bool(payload.get("rawmel_enabled", False))
     if rawmel_enabled:
@@ -122,10 +130,10 @@ def predict_coupled_deltas(
         onset_t = torch.tensor(onset_np.reshape(1, 1, onset_np.shape[0], onset_np.shape[1]), dtype=torch.float32, device=device)
         tail_t = torch.tensor(tail_np.reshape(1, 1, tail_np.shape[0], tail_np.shape[1]), dtype=torch.float32, device=device)
         with torch.no_grad():
-            out = model(x_t, p_t, onset_t, tail_t)
+            out = model(x_t, p_t, onset_t, tail_t, cat_t)
     else:
         with torch.no_grad():
-            out = model(x_t, p_t)
+            out = model(x_t, p_t, cat_t)
 
     if isinstance(out, tuple) and len(out) == 3:
         deltas_t, conf_t, _aux_t = out
