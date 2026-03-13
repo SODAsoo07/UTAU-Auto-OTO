@@ -193,6 +193,63 @@ def _recenter_ja_params_around_pre(offset, consonant, cutoff, pre, ovl, alias_ty
     return validate_oto_params(offset, cons_new, cutoff_new, pre_v, ovl_new)
 
 
+def _apply_vc_vv_mel_cutoff_cap(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    ovl,
+    *,
+    alias_type,
+    format_type="",
+    mel_cutoff_candidate_ms=None,
+    next_mel_voiced_onset_ms=None,
+):
+    a_type = str(alias_type or "").strip().lower()
+    if a_type not in {"vc", "vv"}:
+        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+
+    max_cut_allow = None
+    try:
+        from core.timing_anchor_profiles import get_anchor_profile
+
+        prof = get_anchor_profile("japanese", str(format_type or "").strip().lower(), a_type)
+        if prof is not None:
+            max_cut_allow = prof.max_cut_to_next_voiced_onset_ms
+    except Exception:
+        max_cut_allow = None
+    if max_cut_allow is None:
+        max_cut_allow = -6.0
+
+    max_cut_abs = None
+    if next_mel_voiced_onset_ms is not None:
+        try:
+            max_cut_abs = float(next_mel_voiced_onset_ms) + float(max_cut_allow)
+        except Exception:
+            max_cut_abs = None
+    if mel_cutoff_candidate_ms is not None:
+        try:
+            cand = float(mel_cutoff_candidate_ms)
+            max_cut_abs = cand if max_cut_abs is None else min(max_cut_abs, cand)
+        except Exception:
+            pass
+
+    if max_cut_abs is None:
+        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+
+    max_cut_rel = max_cut_abs - float(offset)
+    min_cut_rel = float(consonant) + 20.0
+    if max_cut_rel < min_cut_rel:
+        max_cut_rel = min_cut_rel
+    cut_abs = abs(float(cutoff))
+    if cut_abs > max_cut_rel:
+        cut_abs = max_cut_rel
+        cutoff = -cut_abs
+        if float(consonant) > cut_abs - 6.0:
+            consonant = max(float(pre) + 8.0, cut_abs - 6.0)
+    return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+
+
 def _adaptive_ja_overlap(pre, consonant_hint="", mode="cv"):
     p = max(float(pre), 0.0)
     if p <= 0:

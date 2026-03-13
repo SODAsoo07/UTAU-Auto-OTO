@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, Optional, Sequence, Tuple
 
 from core.timing_anchor_profiles import AnchorTimingProfile
@@ -17,6 +17,7 @@ class AnchorTimingContext:
     anchor_abs_ms: Optional[float]
     next_onset_abs_ms: Optional[float] = None
     next_vowel_abs_ms: Optional[float] = None
+    voiced_onset_ms: Optional[float] = None
     alias_type: str = "cv"
     language: str = ""
     format_type: str = ""
@@ -41,6 +42,59 @@ def _clamp(value: float, lo: float, hi: float) -> float:
 def _blend(current: float, target: float, w: float) -> float:
     ww = _clamp(w, 0.0, 1.0)
     return (float(current) * (1.0 - ww)) + (float(target) * ww)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "")).strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
+def adapt_profile_to_file(
+    profile: Optional[AnchorTimingProfile],
+    *,
+    file_mean_energy: float = 0.0,
+    file_voiced_ratio: float = 0.0,
+    file_mean_syllable_dur_ms: float = 0.0,
+    reference_energy: Optional[float] = None,
+    reference_syllable_dur_ms: Optional[float] = None,
+) -> Optional[AnchorTimingProfile]:
+    if profile is None:
+        return None
+    if str(os.environ.get("UTOA_DISABLE_ANCHOR_PROFILE_ADAPT", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        return profile
+
+    energy = float(file_mean_energy or 0.0)
+    syllable_ms = float(file_mean_syllable_dur_ms or 0.0)
+    if energy <= 0.0 and syllable_ms <= 0.0:
+        return profile
+
+    ref_energy = float(reference_energy) if reference_energy is not None else _env_float("UTOA_ANCHOR_REF_ENERGY", 0.45)
+    ref_syllable = float(reference_syllable_dur_ms) if reference_syllable_dur_ms is not None else _env_float(
+        "UTOA_ANCHOR_REF_SYLLABLE_DUR_MS", 180.0
+    )
+    energy_ratio = (energy / ref_energy) if ref_energy > 1e-6 else 1.0
+    speed_ratio = (ref_syllable / syllable_ms) if syllable_ms > 1e-6 else 1.0
+
+    pre_window_scale = _clamp(speed_ratio, 0.80, 1.20)
+    cons_gap_scale = _clamp(speed_ratio, 0.82, 1.18)
+    cut_gap_scale = _clamp((energy_ratio * 0.3) + (speed_ratio * 0.7), 0.80, 1.20)
+
+    return replace(
+        profile,
+        pre_window_before_ms=float(profile.pre_window_before_ms) * pre_window_scale,
+        pre_window_after_ms=float(profile.pre_window_after_ms) * pre_window_scale,
+        cons_gap_min_ms=float(profile.cons_gap_min_ms) * cons_gap_scale,
+        cons_gap_max_ms=float(profile.cons_gap_max_ms) * cons_gap_scale,
+        cons_gap_target_ms=float(profile.cons_gap_target_ms) * cons_gap_scale,
+        cut_gap_min_ms=float(profile.cut_gap_min_ms) * cut_gap_scale,
+        cut_gap_max_ms=float(profile.cut_gap_max_ms) * cut_gap_scale,
+        cut_gap_target_ms=float(profile.cut_gap_target_ms) * cut_gap_scale,
+    )
 
 
 def _default_validate(offset: float, consonant: float, cutoff: float, pre: float, ovl: float) -> Tuple[float, float, float, float, float]:
@@ -107,6 +161,23 @@ def apply_anchor_lock(
         applied.append("offset_floor")
     else:
         pre = max(pre_abs - offset, 0.0)
+
+    if ctx.voiced_onset_ms is not None and profile is not None:
+        voiced_abs = float(ctx.voiced_onset_ms)
+        if pre_abs < voiced_abs - 0.5:
+            target_pre_abs = _blend(pre_abs, voiced_abs, float(profile.voiced_onset_weight))
+            voiced_shift = float(target_pre_abs - pre_abs)
+            if abs(voiced_shift) > 0.01:
+                if abs(voiced_shift) > shift_limit:
+                    voiced_shift = _clamp(voiced_shift, -shift_limit, shift_limit)
+                offset = float(offset) + voiced_shift
+                if offset < 0.0:
+                    offset = 0.0
+                    pre = max(target_pre_abs, 0.0)
+                else:
+                    pre = max(target_pre_abs - offset, 0.0)
+                pre_abs = float(offset) + float(pre)
+                applied.append("voiced_onset_floor")
 
     if pre < float(profile.pre_floor_ms):
         desired_offset = pre_abs - float(profile.pre_floor_ms)
@@ -193,6 +264,7 @@ def append_timing_anchor_log(log_path: str, record: Dict[str, object]) -> None:
 __all__ = [
     "AnchorTimingContext",
     "AnchorTimingResult",
+    "adapt_profile_to_file",
     "apply_anchor_lock",
     "append_timing_anchor_log",
 ]

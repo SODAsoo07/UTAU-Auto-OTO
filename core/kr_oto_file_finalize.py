@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import wave
@@ -16,6 +16,7 @@ from core.kr_oto_rules import (
 )
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 from core.kr_oto_file_consistency import apply_file_consistency_to_oto_file
+from core.mel_safety_clamp import apply_mel_safety_clamp_to_oto_file
 from core.post_file_pipeline import (
     log_changed_lines,
     resolve_wav_dir_from_tg_folder,
@@ -468,6 +469,15 @@ def run_kr_post_file_pipeline(context: KrPostFilePipelineContext):
             custom_map=context.custom_map,
         )
         log_changed_lines(context.log_fn, "[KR-Profile]", changed, "reference profile changed")
+
+    safety_changed = apply_mel_safety_clamp_to_oto_file(
+        context.out_path,
+        wav_dir,
+        classify_alias_fn=lambda alias_text: classify_alias(alias_text, context.custom_map),
+        validate_fn=context.validate_fn,
+        normalize_key_fn=context.normalize_key_fn,
+    )
+    log_changed_lines(context.log_fn, "[KR-Mel-Safety]", safety_changed, "mel safety clamp changed")
 
     run_ml_post_stage(
         language="korean",

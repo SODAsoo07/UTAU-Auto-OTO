@@ -47,6 +47,8 @@ class AnchorTimingProfile:
     max_anchor_shift_max_ms: float = 140.0
     cut_to_next_onset_allow_ms: Optional[float] = None
     cut_to_next_vowel_allow_ms: Optional[float] = None
+    max_cut_to_next_voiced_onset_ms: Optional[float] = None
+    voiced_onset_weight: float = 0.4
     blend_weight: float = 0.58
     lite_blend_weight: float = 0.26
     lite_shift_scale: float = 0.40
@@ -141,6 +143,7 @@ def _ja_cvvc_vc_profile() -> AnchorTimingProfile:
         cut_gap_target_ms=26.0,
         cut_to_next_onset_allow_ms=4.0,
         cut_to_next_vowel_allow_ms=-2.0,
+        max_cut_to_next_voiced_onset_ms=-6.0,
     )
 
 
@@ -159,6 +162,7 @@ def _ja_cvvc_vv_profile() -> AnchorTimingProfile:
         cut_gap_max_ms=96.0,
         cut_gap_target_ms=54.0,
         cut_to_next_onset_allow_ms=6.0,
+        max_cut_to_next_voiced_onset_ms=-6.0,
     )
 
 
@@ -213,6 +217,7 @@ def _kr_vc_profile() -> AnchorTimingProfile:
         cut_gap_max_ms=50.0,
         cut_gap_target_ms=28.0,
         cut_to_next_onset_allow_ms=4.0,
+        max_cut_to_next_voiced_onset_ms=-6.0,
     )
 
 
@@ -231,6 +236,7 @@ def _kr_vv_profile() -> AnchorTimingProfile:
         cut_gap_max_ms=92.0,
         cut_gap_target_ms=52.0,
         cut_to_next_onset_allow_ms=6.0,
+        max_cut_to_next_voiced_onset_ms=-6.0,
     )
 
 
@@ -304,6 +310,7 @@ def _kr_cvc_vc_profile() -> AnchorTimingProfile:
         cut_gap_max_ms=62.0,
         cut_gap_target_ms=34.0,
         cut_to_next_onset_allow_ms=5.0,
+        max_cut_to_next_voiced_onset_ms=-6.0,
     )
 
 
@@ -322,6 +329,7 @@ def _kr_cvc_vv_profile() -> AnchorTimingProfile:
         cut_gap_max_ms=108.0,
         cut_gap_target_ms=60.0,
         cut_to_next_onset_allow_ms=6.0,
+        max_cut_to_next_voiced_onset_ms=-6.0,
     )
 
 
@@ -432,6 +440,12 @@ def _profile_from_dict(raw: Dict[str, object], base: AnchorTimingProfile) -> Anc
             if raw.get("cut_to_next_vowel_allow_ms") is None
             else _to_float(raw.get("cut_to_next_vowel_allow_ms"), 0.0)
         ),
+        max_cut_to_next_voiced_onset_ms=(
+            None
+            if raw.get("max_cut_to_next_voiced_onset_ms") is None
+            else _to_float(raw.get("max_cut_to_next_voiced_onset_ms"), 0.0)
+        ),
+        voiced_onset_weight=_to_float(raw.get("voiced_onset_weight"), base.voiced_onset_weight),
         blend_weight=_to_float(raw.get("blend_weight"), base.blend_weight),
         lite_blend_weight=_to_float(raw.get("lite_blend_weight"), base.lite_blend_weight),
         lite_shift_scale=_to_float(raw.get("lite_shift_scale"), base.lite_shift_scale),

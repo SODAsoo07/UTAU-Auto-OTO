@@ -11,8 +11,8 @@ import json
 import os
 from typing import Dict, List, Optional
 
-FEATURE_VERSION = "v11"
-TRAIN_ROW_MATCH_VERSION = "v11"
+FEATURE_VERSION = "v12"
+TRAIN_ROW_MATCH_VERSION = "v12"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
 ANCHOR_TARGET_NAMES = ["delta_offset", "delta_pre", "delta_cutoff"]
 DELTA_TARGET_NAMES = ["delta_cons", "delta_ovl"]
@@ -22,7 +22,8 @@ FEATURE_NAMES = [
     "language", "format_type", "alias_type", "alias_group", "row_index_in_wav", "row_ratio_in_wav",
     "file_row_count", "file_cv_count", "file_vc_count", "file_vv_count", "file_vcv_count",
     "file_br_count", "file_mono_count", "file_cv_ratio", "file_vc_ratio",
-    "file_vc_cv_ratio", "file_cv_vc_balance",
+    "file_vc_cv_ratio", "file_cv_vc_balance", "file_mean_energy", "file_voiced_ratio",
+    "file_mean_syllable_dur_ms",
     "is_head_row", "is_tail_row", "wav_duration_ms", "base_offset", "base_cons",
     "base_cutoff_abs", "base_pre", "base_ovl", "base_cons_gap", "base_cut_gap",
     "base_ovl_ratio", "curr_phone_start_ms", "curr_phone_end_ms", "curr_phone_len_ms",
@@ -43,7 +44,9 @@ FEATURE_NAMES = [
     "local_peak_db", "local_valley_db", "mel_window_energy_mean", "mel_window_silence_ratio",
     "mel_voiced_formant_ratio", "mel_silence_sparse_ratio", "mel_unvoiced_diffuse_ratio",
     "mel_breath_like_ratio", "blank_span_confidence", "mel_offset_candidate_ms",
-    "mel_cutoff_candidate_ms", "onset_patch_energy_mean", "onset_patch_voiced_ratio",
+    "mel_cutoff_candidate_ms", "mel_voiced_onset_ms", "mel_vowel_nucleus_start_ms",
+    "mel_vowel_nucleus_end_ms", "mel_voiced_onset_to_pre_ms", "mel_safety_clamped",
+    "onset_patch_energy_mean", "onset_patch_voiced_ratio",
     "onset_patch_unvoiced_ratio", "tail_patch_energy_mean", "tail_patch_silence_ratio",
     "syllable_blank_confidence", "syllable_mel_voiced_conf", "syllable_mel_silence_conf",
     "syllable_mel_unvoiced_conf", "syllable_mel_breath_conf",

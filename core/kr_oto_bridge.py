@@ -346,6 +346,9 @@ def _refine_kr_bridge_with_adjacent_cv(
     alias_text="",
     prev_cv=None,
     next_cv=None,
+    format_type="",
+    mel_cutoff_candidate_ms=None,
+    next_mel_voiced_onset_ms=None,
 ):
     """
     VC/VV를 인접 CV 앵커 기준으로 2차 보정합니다.
@@ -453,6 +456,18 @@ def _refine_kr_bridge_with_adjacent_cv(
             cutoff_abs_new = min(cutoff_abs_new, max(cons_new + cut_gap_lo, cap))
 
     cutoff_new = -cutoff_abs_new
+    if (mel_cutoff_candidate_ms is not None) or (next_mel_voiced_onset_ms is not None):
+        offset_new, cons_new, cutoff_new, pre_new, ovl_new = _apply_vc_vv_mel_cutoff_cap(
+            offset_new,
+            cons_new,
+            cutoff_new,
+            pre_new,
+            ovl_new,
+            alias_type=a_type,
+            format_type=format_type,
+            mel_cutoff_candidate_ms=mel_cutoff_candidate_ms,
+            next_mel_voiced_onset_ms=next_mel_voiced_onset_ms,
+        )
     return _validate_oto_params(offset_new, cons_new, cutoff_new, pre_new, ovl_new, alias_type=a_type)
 
 
@@ -550,6 +565,63 @@ def _compute_kr_cvvc_vc_timing_direct(alias, *args):
 
     cutoff = -cutoff_abs
     return _validate_oto_params(offset, consonant, cutoff, pre, ovl)
+
+
+def _apply_vc_vv_mel_cutoff_cap(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    ovl,
+    *,
+    alias_type,
+    format_type="",
+    mel_cutoff_candidate_ms=None,
+    next_mel_voiced_onset_ms=None,
+):
+    a_type = str(alias_type or "").strip().lower()
+    if a_type not in {"vc", "vv"}:
+        return _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=a_type)
+
+    max_cut_allow = None
+    try:
+        from core.timing_anchor_profiles import get_anchor_profile
+
+        prof = get_anchor_profile("korean", str(format_type or "").strip().lower(), a_type)
+        if prof is not None:
+            max_cut_allow = prof.max_cut_to_next_voiced_onset_ms
+    except Exception:
+        max_cut_allow = None
+    if max_cut_allow is None:
+        max_cut_allow = -6.0
+
+    max_cut_abs = None
+    if next_mel_voiced_onset_ms is not None:
+        try:
+            max_cut_abs = float(next_mel_voiced_onset_ms) + float(max_cut_allow)
+        except Exception:
+            max_cut_abs = None
+    if mel_cutoff_candidate_ms is not None:
+        try:
+            cand = float(mel_cutoff_candidate_ms)
+            max_cut_abs = cand if max_cut_abs is None else min(max_cut_abs, cand)
+        except Exception:
+            pass
+
+    if max_cut_abs is None:
+        return _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=a_type)
+
+    max_cut_rel = max_cut_abs - float(offset)
+    min_cut_rel = float(consonant) + 20.0
+    if max_cut_rel < min_cut_rel:
+        max_cut_rel = min_cut_rel
+    cut_abs = abs(float(cutoff))
+    if cut_abs > max_cut_rel:
+        cut_abs = max_cut_rel
+        cutoff = -cut_abs
+        if float(consonant) > cut_abs - 6.0:
+            consonant = max(float(pre) + 8.0, cut_abs - 6.0)
+    return _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=a_type)
 
 
 __all__ = [

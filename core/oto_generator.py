@@ -13,6 +13,7 @@ from dataclasses import replace
 import logging
 from functools import lru_cache
 from types import SimpleNamespace
+from typing import Optional, Dict
 
 try:
     import numpy as np
@@ -2046,6 +2047,10 @@ def _mel_envelope(audio, sr):
     if len(f0v_arr) >= 3:
         f0v_arr = np.convolve(f0v_arr, np.array([0.2, 0.6, 0.2], dtype=np.float64), mode="same")
     f0v_arr = np.clip(f0v_arr, 0.0, 1.0)
+    if len(en) >= 5:
+        en_ma = np.convolve(en, np.ones(5, dtype=np.float64) / 5.0, mode="same")
+    else:
+        en_ma = np.asarray(en, dtype=np.float64)
 
     def _normalize01(vals):
         arr = np.asarray(vals, dtype=np.float64) if vals else np.zeros_like(en)
@@ -2105,6 +2110,7 @@ def _mel_envelope(audio, sr):
     return {
         "times_ms": np.array(times, dtype=np.float64),
         "energy": en,
+        "energy_ma": en_ma,
         "span": span,
         "db_db": db_arr,
         "db_silence_th": float(db_sil_th),
@@ -2122,6 +2128,8 @@ def _mel_envelope(audio, sr):
         "cls_silence_sparse": np.asarray(silence_sparse, dtype=np.float64),
         "cls_unvoiced_diffuse": np.asarray(unvoiced_diffuse, dtype=np.float64),
         "cls_breath_like": np.asarray(breath_like, dtype=np.float64),
+        "voiced_mask": np.asarray(f0v_arr >= 0.5, dtype=np.float64),
+        "formant_mask": np.asarray(voiced_formant, dtype=np.float64),
     }
 
 
@@ -2149,6 +2157,228 @@ def _nearest_time_index(times_ms, t_ms):
     if abs(float(times_ms[idx]) - t_ms) < abs(float(times_ms[prev_i]) - t_ms):
         return idx
     return prev_i
+
+
+def _select_time_mask(times_ms, start_ms: float, end_ms: float):
+    if np is None or times_ms is None or len(times_ms) == 0:
+        return np.array([], dtype=np.int64) if np is not None else []
+    return np.where((times_ms >= float(start_ms)) & (times_ms <= float(end_ms)))[0]
+
+
+def _estimate_mel_voiced_onset(mel_ctx, anchor_ms: float, window_ms: float = 80.0) -> Optional[float]:
+    if np is None or not mel_ctx:
+        return None
+    times_ms = mel_ctx.get("times_ms")
+    en = mel_ctx.get("energy")
+    f0v = mel_ctx.get("f0_voicing")
+    cls_voiced = mel_ctx.get("cls_voiced_formant")
+    if times_ms is None or en is None or len(times_ms) == 0:
+        return None
+
+    mask = _select_time_mask(times_ms, float(anchor_ms) - float(window_ms), float(anchor_ms) + float(window_ms))
+    if len(mask) == 0:
+        return None
+
+    if f0v is None or len(f0v) != len(en):
+        f0v = np.zeros_like(en, dtype=np.float64)
+    if cls_voiced is None or len(cls_voiced) != len(en):
+        f2_arr = mel_ctx.get("f2_ratio")
+        f3_arr = mel_ctx.get("f3_ratio")
+        db_arr = mel_ctx.get("db_db")
+        db_sil_th = float(mel_ctx.get("db_silence_th", -42.0))
+        if f2_arr is None or len(f2_arr) != len(en):
+            f2_arr = np.zeros_like(en, dtype=np.float64)
+        if f3_arr is None or len(f3_arr) != len(en):
+            f3_arr = np.zeros_like(en, dtype=np.float64)
+        if db_arr is None or len(db_arr) != len(en):
+            db_arr = np.zeros_like(en, dtype=np.float64)
+        formant_mask = (f2_arr >= 0.08) & (f3_arr >= 0.06) & (db_arr > (db_sil_th + 1.0))
+    else:
+        formant_mask = np.asarray(cls_voiced, dtype=np.float64) >= 0.5
+
+    en_ma = mel_ctx.get("energy_ma")
+    if en_ma is None or len(en_ma) != len(en):
+        en_ma = np.asarray(en, dtype=np.float64)
+    voiced_mask = np.asarray(f0v, dtype=np.float64) >= 0.5
+    energy_mask = (en_ma >= 0.12) | (np.asarray(en, dtype=np.float64) >= 0.15)
+
+    cand_mask = voiced_mask & formant_mask & energy_mask
+    if not np.any(cand_mask[mask]):
+        cand_mask = voiced_mask & energy_mask
+    if not np.any(cand_mask[mask]):
+        return None
+
+    for idx in mask:
+        if cand_mask[idx]:
+            return float(times_ms[idx])
+    return None
+
+
+def _estimate_mel_vowel_nucleus(mel_ctx, onset_ms: Optional[float], search_after_ms: float = 220.0):
+    if np is None or not mel_ctx or onset_ms is None:
+        return None, None
+    times_ms = mel_ctx.get("times_ms")
+    en = mel_ctx.get("energy")
+    f0v = mel_ctx.get("f0_voicing")
+    cls_voiced = mel_ctx.get("cls_voiced_formant")
+    if times_ms is None or en is None or len(times_ms) == 0:
+        return None, None
+
+    if f0v is None or len(f0v) != len(en):
+        f0v = np.zeros_like(en, dtype=np.float64)
+    if cls_voiced is None or len(cls_voiced) != len(en):
+        cls_voiced = np.zeros_like(en, dtype=np.float64)
+
+    mask = _select_time_mask(times_ms, float(onset_ms), float(onset_ms) + float(search_after_ms))
+    if len(mask) == 0:
+        return None, None
+
+    voiced_formant = (np.asarray(cls_voiced, dtype=np.float64) >= 0.5) & (np.asarray(f0v, dtype=np.float64) >= 0.35)
+    if not np.any(voiced_formant[mask]):
+        voiced_formant = np.asarray(f0v, dtype=np.float64) >= 0.45
+    if not np.any(voiced_formant[mask]):
+        return None, None
+
+    peak_idx = None
+    peak_val = -1e9
+    for idx in mask:
+        if voiced_formant[idx]:
+            e_v = float(en[idx])
+            if e_v > peak_val:
+                peak_val = e_v
+                peak_idx = int(idx)
+    if peak_idx is None:
+        return None, None
+
+    peak_energy = max(float(en[peak_idx]), 0.0)
+    energy_floor = max(0.08, peak_energy * 0.70)
+    start_idx = peak_idx
+    end_idx = peak_idx
+    for idx in range(peak_idx, mask[0] - 1, -1):
+        if not voiced_formant[idx] or float(en[idx]) < energy_floor:
+            break
+        start_idx = idx
+    for idx in range(peak_idx, mask[-1] + 1):
+        if not voiced_formant[idx] or float(en[idx]) < energy_floor:
+            break
+        end_idx = idx
+
+    return float(times_ms[start_idx]), float(times_ms[end_idx])
+
+
+def _resolve_mel_onset_weight(alignment_weight: float, textgrid_trust_tier: str) -> float:
+    tier = str(textgrid_trust_tier or "").strip().lower()
+    w = float(alignment_weight or 0.0)
+    if tier == "high" and w >= 0.75:
+        return 0.0
+    if w < 0.45:
+        return 0.72
+    if w < 0.65:
+        return 0.58
+    return 0.36
+
+
+def _apply_mel_voiced_onset_pre_shift(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    ovl,
+    mel_onset_abs: Optional[float],
+    *,
+    weight: float,
+):
+    if mel_onset_abs is None or weight <= 0.0:
+        return offset, consonant, cutoff, pre, ovl, 0.0
+    pre_abs = float(offset) + float(pre)
+    delta = (float(mel_onset_abs) - pre_abs) * float(weight)
+    if abs(delta) < 0.8:
+        return offset, consonant, cutoff, pre, ovl, 0.0
+
+    offset_new = float(offset) + float(delta)
+    pre_new = float(pre)
+    if offset_new < 0.0:
+        offset_new = 0.0
+        pre_new = max(pre_abs + float(delta), 0.0)
+    delta_pre = pre_new - float(pre)
+    if abs(delta_pre) > 1e-6:
+        consonant = float(consonant) + delta_pre
+        ovl = float(ovl) + delta_pre
+    offset_new, consonant, cutoff, pre_new, ovl = validate_oto_params(
+        offset_new, consonant, cutoff, pre_new, ovl
+    )
+    return offset_new, consonant, cutoff, pre_new, ovl, float(delta)
+
+
+def _estimate_mel_cutoff_candidate(mel_ctx, pre_abs: float, cut_abs: float) -> Optional[float]:
+    if np is None or not mel_ctx:
+        return None
+    times_ms = mel_ctx.get("times_ms")
+    en = mel_ctx.get("energy")
+    cls_silence = mel_ctx.get("cls_silence_sparse")
+    if times_ms is None or en is None or len(times_ms) == 0:
+        return None
+    if cls_silence is None or len(cls_silence) != len(en):
+        return None
+
+    mask = _select_time_mask(times_ms, float(pre_abs) + 20.0, float(cut_abs) + 120.0)
+    if len(mask) == 0:
+        return None
+    last_sil_idx = None
+    for idx in mask:
+        if float(cls_silence[idx]) >= 0.5:
+            last_sil_idx = int(idx)
+    if last_sil_idx is None:
+        return None
+    cand_cut = float(times_ms[last_sil_idx]) + 4.0
+    return max(float(pre_abs) + 12.0, min(float(cut_abs), cand_cut))
+
+
+def _compute_file_anchor_adapt_stats(mel_ctx, syllables_info, ph_intervals):
+    if np is None and not syllables_info:
+        return None
+    stats = {}
+    if mel_ctx:
+        en = mel_ctx.get("energy")
+        f0v = mel_ctx.get("f0_voicing")
+        if en is not None and len(en):
+            stats["file_mean_energy"] = float(np.mean(np.asarray(en, dtype=np.float64)))
+        if f0v is not None and len(f0v):
+            stats["file_voiced_ratio"] = float(np.mean(np.asarray(f0v, dtype=np.float64) >= 0.5))
+
+    lengths = []
+    for syl in syllables_info or []:
+        try:
+            start_s = float(syl.get("start_time", 0.0) or 0.0)
+            end_s = float(syl.get("end_time", 0.0) or 0.0)
+            if end_s > start_s:
+                lengths.append((end_s - start_s) * 1000.0)
+                continue
+        except Exception:
+            pass
+        phones = syl.get("phones") or []
+        if phones:
+            try:
+                start_s = float(phones[0].minTime)
+                end_s = float(phones[-1].maxTime)
+                if end_s > start_s:
+                    lengths.append((end_s - start_s) * 1000.0)
+            except Exception:
+                pass
+
+    if not lengths and ph_intervals:
+        for ph in ph_intervals:
+            try:
+                if _is_kr_nucleus_phone_mark(getattr(ph, "mark", "")):
+                    lengths.append((float(ph.maxTime) - float(ph.minTime)) * 1000.0)
+            except Exception:
+                continue
+
+    if lengths:
+        stats["file_mean_syllable_dur_ms"] = float(sum(lengths) / max(len(lengths), 1))
+    if not stats:
+        return None
+    return stats
 
 
 def _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms):
@@ -2981,6 +3211,8 @@ def generate_oto(
         "cutoff_clamped_count": 0,
         "vc_cutoff_leak_guard_count": 0,
     }
+    file_anchor_adapt_stats = None
+    file_anchor_profile_cache: Dict[tuple, object] = {}
     _core_dir = os.path.dirname(os.path.abspath(__file__))
     _project_dir = os.path.dirname(_core_dir)
     _anchor_log_dir = os.path.join(_project_dir, "logs")
@@ -3011,13 +3243,24 @@ def generate_oto(
         anchor_abs_ms: float,
         next_onset_abs_ms: float | None = None,
         next_vowel_abs_ms: float | None = None,
+        voiced_onset_ms: float | None = None,
         mapping_confidence: float = 1.0,
         lite: bool = False,
     ):
         def _get_profile(lang, fmt, alias_kind):
             from core.timing_anchor_profiles import get_anchor_profile
 
-            return get_anchor_profile(lang, fmt, alias_kind, mode="rhythm_stable")
+            base = get_anchor_profile(lang, fmt, alias_kind, mode="rhythm_stable")
+            if base is None or not file_anchor_adapt_stats:
+                return base
+            key = (fmt, alias_kind)
+            cached = file_anchor_profile_cache.get(key)
+            if cached is None:
+                from core.timing_anchor_runtime import adapt_profile_to_file
+
+                cached = adapt_profile_to_file(base, **file_anchor_adapt_stats)
+                file_anchor_profile_cache[key] = cached
+            return cached
 
         def _apply_stats_delta(alias_kind, applied_rules):
             delta = _build_kr_anchor_lock_stats_delta_v2(alias_kind, applied_rules)
@@ -3047,6 +3290,7 @@ def generate_oto(
             anchor_abs_ms=anchor_abs_ms,
             next_onset_abs_ms=next_onset_abs_ms,
             next_vowel_abs_ms=next_vowel_abs_ms,
+            voiced_onset_ms=voiced_onset_ms,
             mapping_confidence=mapping_confidence,
             validate_fn=lambda o, c, cut, p, v, _atype=alias_type: validate_oto_params(
                 o,
@@ -3545,6 +3789,13 @@ def generate_oto(
                 f"blank_mean={blank_conf_mean:.2f}, anchor_lock_lite={anchor_lock_lite}"
             )
 
+            file_anchor_adapt_stats = _compute_file_anchor_adapt_stats(
+                mel_ctx_for_file,
+                syllables_info,
+                ph_intervals,
+            )
+            file_anchor_profile_cache = {}
+
             plan_candidate_source = list(
                 filename_cv_targets
                 or [s.get('roman_cv') or s.get('roman', '') for s in (syllables_info or [])]
@@ -3980,6 +4231,8 @@ def generate_oto(
                         row_builder_fn=_build_alias_rows,
                         log_post_timing_events_fn=_log_post_timing_events,
                         anchor_lock_lite=anchor_lock_lite,
+                        alignment_weight=alignment_weight,
+                        textgrid_trust_tier=textgrid_trust_tier,
                     )
                     continue
 
@@ -4042,6 +4295,8 @@ def generate_oto(
                         log_post_timing_events_fn=_log_post_timing_events,
                         anchor_store=realized_cv_anchor_by_idx,
                         anchor_lock_lite=anchor_lock_lite,
+                        alignment_weight=alignment_weight,
+                        textgrid_trust_tier=textgrid_trust_tier,
                     )
                     continue
 
@@ -4240,10 +4495,7 @@ def generate_oto(
                             offset, consonant, cutoff, pre, ovl = _compute_kr_noninitial_vowel_timing(
                                 n_start, n_end
                             )
-
                     else:
-
-
                         first_phone_plosive = len(curr_phones) >= 2 and is_plosive_ipa(curr_phones[0].mark)
                         alias_consonant = re.match(r'^([^aeiouyw]+)', alias.lower())
                         roman_plosive = alias_consonant and is_plosive_roman(alias_consonant.group(1)) if alias_consonant else False
@@ -4259,6 +4511,31 @@ def generate_oto(
                             False,
                             is_plosive,
                         )
+
+                row_mel_voiced_onset_ms = None
+                if mel_ctx_for_file and alias_type == "cv":
+                    pre_abs = float(offset) + float(pre)
+                    mel_weight = _resolve_mel_onset_weight(alignment_weight, textgrid_trust_tier)
+                    if mel_weight > 0.0:
+                        mel_onset = _estimate_mel_voiced_onset(mel_ctx_for_file, pre_abs)
+                        if mel_onset is not None and abs(float(mel_onset) - pre_abs) <= 120.0:
+                            (
+                                offset,
+                                consonant,
+                                cutoff,
+                                pre,
+                                ovl,
+                                _mel_shift,
+                            ) = _apply_mel_voiced_onset_pre_shift(
+                                offset,
+                                consonant,
+                                cutoff,
+                                pre,
+                                ovl,
+                                mel_onset,
+                                weight=mel_weight,
+                            )
+                            row_mel_voiced_onset_ms = float(mel_onset)
 
                 (
                     offset,
@@ -4350,6 +4627,10 @@ def generate_oto(
                     row_builder_fn=_build_alias_rows,
                     log_post_timing_events_fn=_log_post_timing_events,
                     anchor_lock_lite=anchor_lock_lite,
+                    voiced_onset_ms=row_mel_voiced_onset_ms,
+                    mel_ctx_for_file=mel_ctx_for_file,
+                    textgrid_trust_tier=textgrid_trust_tier,
+                    alignment_weight=alignment_weight,
                 )
 
             processed += 1

@@ -48,6 +48,7 @@ def maybe_build_kr_realized_cv_anchor_record(
     vowel_start_abs,
     vowel_end_abs,
     c_end_abs=None,
+    mel_voiced_onset_abs=None,
     build_anchor_fn,
 ):
     if selected_w_idx is None or onset_abs is None:
@@ -64,6 +65,7 @@ def maybe_build_kr_realized_cv_anchor_record(
             vowel_start_abs=vowel_start_abs,
             vowel_end_abs=vowel_end_abs,
             c_end_abs=c_end_abs,
+            mel_voiced_onset_abs=mel_voiced_onset_abs,
         ),
     )
 

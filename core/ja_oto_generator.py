@@ -11,6 +11,7 @@ import math
 import logging
 import textgrid
 from types import SimpleNamespace
+from typing import Dict
 from core.lab_generator import load_custom_phonemes
 from core.ja_lab_generator import (
     parse_ja_filename,
@@ -2405,6 +2406,8 @@ def generate_ja_oto(
         "cutoff_clamped_count": 0,
         "vc_cutoff_leak_guard_count": 0,
     }
+    file_anchor_adapt_stats = None
+    file_anchor_profile_cache: Dict[tuple, object] = {}
     _core_dir = os.path.dirname(os.path.abspath(__file__))
     _project_dir = os.path.dirname(_core_dir)
     trace_setup = build_ja_trace_preparation(_project_dir)
@@ -2432,6 +2435,7 @@ def generate_ja_oto(
         anchor_abs_ms: float,
         next_onset_abs_ms: float | None = None,
         next_vowel_abs_ms: float | None = None,
+        voiced_onset_ms: float | None = None,
         profile_alias_type: str | None = None,
         lite: bool = False,
     ):
@@ -2440,7 +2444,17 @@ def generate_ja_oto(
         def _get_profile(lang, fmt, alias_kind):
             from core.timing_anchor_profiles import get_anchor_profile
 
-            return get_anchor_profile(lang, fmt, alias_kind, mode="rhythm_stable")
+            base = get_anchor_profile(lang, fmt, alias_kind, mode="rhythm_stable")
+            if base is None or not file_anchor_adapt_stats:
+                return base
+            key = (fmt, alias_kind)
+            cached = file_anchor_profile_cache.get(key)
+            if cached is None:
+                from core.timing_anchor_runtime import adapt_profile_to_file
+
+                cached = adapt_profile_to_file(base, **file_anchor_adapt_stats)
+                file_anchor_profile_cache[key] = cached
+            return cached
 
         def _apply_stats_delta(alias_kind, applied_rules):
             delta = _build_ja_anchor_lock_stats_delta_v2(alias_kind, applied_rules)
@@ -2470,6 +2484,7 @@ def generate_ja_oto(
             anchor_abs_ms=anchor_abs_ms,
             next_onset_abs_ms=next_onset_abs_ms,
             next_vowel_abs_ms=next_vowel_abs_ms,
+            voiced_onset_ms=voiced_onset_ms,
             mapping_confidence=1.0,
             validate_fn=lambda o, c, cut, p, v, _atype=alias_type: validate_oto_params(
                 o,
@@ -3284,6 +3299,54 @@ def generate_ja_oto(
                 f"blank_mean={blank_conf_mean:.2f}, anchor_lock_lite={anchor_lock_lite}"
             )
 
+            file_anchor_adapt_stats = None
+            stats = {}
+            if mel_ctx_for_file:
+                en = mel_ctx_for_file.get("energy")
+                f0v = mel_ctx_for_file.get("f0_voicing")
+                if en is not None and len(en):
+                    try:
+                        stats["file_mean_energy"] = float(sum(float(x) for x in en) / max(len(en), 1))
+                    except Exception:
+                        pass
+                if f0v is not None and len(f0v):
+                    try:
+                        voiced_count = sum(1 for x in f0v if float(x) >= 0.5)
+                        stats["file_voiced_ratio"] = float(voiced_count) / float(max(len(f0v), 1))
+                    except Exception:
+                        pass
+            lengths = []
+            for syl in syllables_info or []:
+                try:
+                    start_s = float(syl.get("start_time", 0.0) or 0.0)
+                    end_s = float(syl.get("end_time", 0.0) or 0.0)
+                    if end_s > start_s:
+                        lengths.append((end_s - start_s) * 1000.0)
+                        continue
+                except Exception:
+                    pass
+                phones = syl.get("phones") or []
+                if phones:
+                    try:
+                        start_s = float(phones[0].minTime)
+                        end_s = float(phones[-1].maxTime)
+                        if end_s > start_s:
+                            lengths.append((end_s - start_s) * 1000.0)
+                    except Exception:
+                        pass
+            if not lengths and ph_intervals:
+                for ph in ph_intervals:
+                    try:
+                        if _ja_mark_to_vowel(getattr(ph, "mark", "")):
+                            lengths.append((float(ph.maxTime) - float(ph.minTime)) * 1000.0)
+                    except Exception:
+                        continue
+            if lengths:
+                stats["file_mean_syllable_dur_ms"] = float(sum(lengths) / max(len(lengths), 1))
+            if stats:
+                file_anchor_adapt_stats = stats
+            file_anchor_profile_cache = {}
+
             if ja_mapping_debug_reason_logging and mapping_confidence_base < conf_th:
                 log(
                     f"🧭 {fname}: JA 매핑 신뢰도 낮음(conf={mapping_confidence_base:.2f}, "
@@ -3619,6 +3682,8 @@ def generate_ja_oto(
                         generate_openutau_aliases_fn=generate_ja_openutau_aliases,
                         alias_out_fn=_alias_out,
                         anchor_lock_lite=anchor_lock_lite,
+                        alignment_weight=alignment_weight,
+                        textgrid_trust_tier=textgrid_trust_tier,
                     )
                     continue
 
@@ -3957,6 +4022,8 @@ def generate_ja_oto(
                         build_guard_messages_fn=_build_ja_cv_guard_messages_v2,
                         anchor_store=realized_cv_anchor_by_idx,
                         anchor_lock_lite=anchor_lock_lite,
+                        alignment_weight=alignment_weight,
+                        textgrid_trust_tier=textgrid_trust_tier,
                     )
                     continue
 
@@ -4546,6 +4613,8 @@ def generate_ja_oto(
                     build_guard_messages_fn=_build_ja_cv_guard_messages_v2,
                     anchor_store=realized_cv_anchor_by_idx,
                     anchor_lock_lite=anchor_lock_lite,
+                    alignment_weight=alignment_weight,
+                    textgrid_trust_tier=textgrid_trust_tier,
                 )
 
             processed += 1

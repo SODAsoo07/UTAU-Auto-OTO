@@ -55,6 +55,7 @@ def build_realized_cv_anchor(
     vowel_start_abs,
     c_end_abs,
     vowel_end_abs,
+    mel_voiced_onset_abs=None,
 ):
     vowel_len = max(float(vowel_end_abs) - float(vowel_start_abs), 20.0)
     return {
@@ -72,6 +73,7 @@ def build_realized_cv_anchor(
         "vowel_len": vowel_len,
         "cons_gap": max(float(consonant) - float(pre), 10.0),
         "cut_gap": max(abs(float(cutoff)) - float(consonant), 16.0),
+        "mel_voiced_onset_abs": None if mel_voiced_onset_abs is None else float(mel_voiced_onset_abs),
     }
 
 

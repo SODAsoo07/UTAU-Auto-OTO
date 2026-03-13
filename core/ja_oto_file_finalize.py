@@ -7,6 +7,7 @@ from typing import Callable
 from core.ja_oto_finalize import _convert_ja_internal_cutoff_to_oto_field
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 from core.oto_normalization import normalize_wav_key
+from core.mel_safety_clamp import apply_mel_safety_clamp_to_oto_file
 from core.post_file_pipeline import (
     log_changed_lines,
     resolve_wav_dir_from_tg_folder,
@@ -225,6 +226,15 @@ def apply_ja_mel_refine_to_oto_file(
 
 def run_ja_post_file_pipeline(context: JaPostFilePipelineContext):
     wav_dir_for_mel = resolve_wav_dir_from_tg_folder(context.tg_folder)
+
+    safety_changed = apply_mel_safety_clamp_to_oto_file(
+        context.out_path,
+        wav_dir_for_mel,
+        classify_alias_fn=lambda alias_text: context.classify_alias_fn(alias_text, context.custom_map),
+        validate_fn=context.validate_fn,
+        normalize_key_fn=normalize_wav_key,
+    )
+    log_changed_lines(context.log_fn, "[JA-Mel-Safety]", safety_changed, "mel safety clamp changed")
 
     run_ml_post_stage(
         language="japanese",

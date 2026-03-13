@@ -43,9 +43,21 @@ def run_kr_general_row(
     row_builder_fn,
     log_post_timing_events_fn,
     anchor_lock_lite=False,
+    voiced_onset_ms=None,
+    mel_ctx_for_file=None,
+    alignment_weight=0.0,
+    textgrid_trust_tier="",
 ):
     bridge_shift = 0.0
     if alias_type in {"vc", "vv"}:
+        mel_cutoff_candidate_ms = None
+        next_mel_voiced_onset_ms = None
+        if mel_ctx_for_file:
+            from core.oto_generator import _estimate_mel_cutoff_candidate
+
+            pre_abs = float(offset + pre)
+            cut_abs = float(offset + abs(float(cutoff)))
+            mel_cutoff_candidate_ms = _estimate_mel_cutoff_candidate(mel_ctx_for_file, pre_abs, cut_abs)
         prev_idx = bridge_pair.get("prev_idx")
         next_idx = bridge_pair.get("next_idx")
         if prev_idx is None or next_idx is None:
@@ -61,6 +73,11 @@ def run_kr_general_row(
             prev_anchor = realized_cv_anchor_by_idx.get(prev_idx) or cv_anchor_by_idx.get(prev_idx)
         if next_anchor is None and next_idx is not None:
             next_anchor = realized_cv_anchor_by_idx.get(next_idx) or cv_anchor_by_idx.get(next_idx)
+        if next_anchor is not None:
+            try:
+                next_mel_voiced_onset_ms = float(next_anchor.get("mel_voiced_onset_abs", 0.0) or 0.0) or None
+            except Exception:
+                next_mel_voiced_onset_ms = None
         if prev_anchor is not None and next_anchor is not None:
             pre_abs_before = float(offset + pre)
             offset, consonant, cutoff, pre, ovl = refine_bridge_fn(
@@ -73,6 +90,9 @@ def run_kr_general_row(
                 alias_text=alias,
                 prev_cv=prev_anchor,
                 next_cv=next_anchor,
+                format_type=file_format,
+                mel_cutoff_candidate_ms=mel_cutoff_candidate_ms,
+                next_mel_voiced_onset_ms=next_mel_voiced_onset_ms,
             )
             bridge_shift = float((offset + pre) - pre_abs_before)
 
@@ -100,6 +120,7 @@ def run_kr_general_row(
         next_vowel_abs_ms=next_vowel_abs,
         mapping_confidence=row_mapping_confidence,
         lite=bool(anchor_lock_lite),
+        voiced_onset_ms=voiced_onset_ms,
     )
     anchor_record = None
     if alias_type == "cv" and selected_w_idx is not None:
@@ -114,6 +135,7 @@ def run_kr_general_row(
             vowel_start_abs=n_start,
             vowel_end_abs=n_end,
             c_end_abs=c_end,
+            mel_voiced_onset_abs=voiced_onset_ms,
         )
     bridge_msg = build_bridge_message_fn(
         fname,

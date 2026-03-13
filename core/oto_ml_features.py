@@ -48,8 +48,8 @@ from core.oto_ml.features.mel_patches import (
 
 logger = logging.getLogger(__name__)
 
-FEATURE_VERSION = "v11"
-TRAIN_ROW_MATCH_VERSION = "v11"
+FEATURE_VERSION = "v12"
+TRAIN_ROW_MATCH_VERSION = "v12"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
 ANCHOR_TARGET_NAMES = ["delta_offset", "delta_pre", "delta_cutoff"]
 DELTA_TARGET_NAMES = ["delta_cons", "delta_ovl"]
@@ -59,7 +59,8 @@ FEATURE_NAMES = [
     "language", "format_type", "alias_type", "alias_group", "row_index_in_wav", "row_ratio_in_wav",
     "file_row_count", "file_cv_count", "file_vc_count", "file_vv_count", "file_vcv_count",
     "file_br_count", "file_mono_count", "file_cv_ratio", "file_vc_ratio",
-    "file_vc_cv_ratio", "file_cv_vc_balance",
+    "file_vc_cv_ratio", "file_cv_vc_balance", "file_mean_energy", "file_voiced_ratio",
+    "file_mean_syllable_dur_ms",
     "is_head_row", "is_tail_row", "wav_duration_ms", "base_offset", "base_cons",
     "base_cutoff_abs", "base_pre", "base_ovl", "base_cons_gap", "base_cut_gap",
     "base_ovl_ratio", "curr_phone_start_ms", "curr_phone_end_ms", "curr_phone_len_ms",
@@ -80,7 +81,9 @@ FEATURE_NAMES = [
     "local_peak_db", "local_valley_db", "mel_window_energy_mean", "mel_window_silence_ratio",
     "mel_voiced_formant_ratio", "mel_silence_sparse_ratio", "mel_unvoiced_diffuse_ratio",
     "mel_breath_like_ratio", "blank_span_confidence", "mel_offset_candidate_ms",
-    "mel_cutoff_candidate_ms", "onset_patch_energy_mean", "onset_patch_voiced_ratio",
+    "mel_cutoff_candidate_ms", "mel_voiced_onset_ms", "mel_vowel_nucleus_start_ms",
+    "mel_vowel_nucleus_end_ms", "mel_voiced_onset_to_pre_ms", "mel_safety_clamped",
+    "onset_patch_energy_mean", "onset_patch_voiced_ratio",
     "onset_patch_unvoiced_ratio", "tail_patch_energy_mean", "tail_patch_silence_ratio",
     "syllable_blank_confidence", "syllable_mel_voiced_conf", "syllable_mel_silence_conf",
     "syllable_mel_unvoiced_conf", "syllable_mel_breath_conf",
@@ -672,6 +675,11 @@ def _compute_segment_stats(mel_ctx, offset_ms: float, pre_abs: float, cut_abs: f
         "blank_span_confidence": 0.0,
         "mel_offset_candidate_ms": float(max(0.0, offset_ms)),
         "mel_cutoff_candidate_ms": float(max(cut_abs, pre_abs + 12.0)),
+        "mel_voiced_onset_ms": 0.0,
+        "mel_vowel_nucleus_start_ms": 0.0,
+        "mel_vowel_nucleus_end_ms": 0.0,
+        "mel_voiced_onset_to_pre_ms": 0.0,
+        "mel_safety_clamped": 0.0,
         "onset_patch_energy_mean": 0.0,
         "onset_patch_voiced_ratio": 0.0,
         "onset_patch_unvoiced_ratio": 0.0,
@@ -775,6 +783,21 @@ def _compute_segment_stats(mel_ctx, offset_ms: float, pre_abs: float, cut_abs: f
         if last_sil_idx is not None:
             cand_cut = float(times_ms[last_sil_idx]) + 4.0
             stats["mel_cutoff_candidate_ms"] = max(pre_abs + 12.0, min(cut_abs, cand_cut))
+
+    try:
+        from core.oto_generator import _estimate_mel_voiced_onset, _estimate_mel_vowel_nucleus
+
+        mel_onset = _estimate_mel_voiced_onset(mel_ctx, pre_abs)
+        if mel_onset is not None:
+            stats["mel_voiced_onset_ms"] = float(mel_onset)
+            stats["mel_voiced_onset_to_pre_ms"] = float(pre_abs - float(mel_onset))
+            nuc_start, nuc_end = _estimate_mel_vowel_nucleus(mel_ctx, mel_onset)
+            if nuc_start is not None:
+                stats["mel_vowel_nucleus_start_ms"] = float(nuc_start)
+            if nuc_end is not None:
+                stats["mel_vowel_nucleus_end_ms"] = float(nuc_end)
+    except Exception:
+        pass
 
     if audio is not None and sr and sr > 0:
         start_s = int(max(offset_ms, pre_abs - 20.0) * sr / 1000.0)
@@ -992,6 +1015,9 @@ def _feature_row_from_context(language: str, format_type: str, row: Dict[str, ob
         feat["file_vc_ratio"] = float(file_stats.get("vc_ratio", 0.0) or 0.0)
         feat["file_vc_cv_ratio"] = float(file_stats.get("vc_cv_ratio", 0.0) or 0.0)
         feat["file_cv_vc_balance"] = float(file_stats.get("cv_vc_balance", 0.0) or 0.0)
+        feat["file_mean_energy"] = float(file_stats.get("file_mean_energy", 0.0) or 0.0)
+        feat["file_voiced_ratio"] = float(file_stats.get("file_voiced_ratio", 0.0) or 0.0)
+        feat["file_mean_syllable_dur_ms"] = float(file_stats.get("file_mean_syllable_dur_ms", 0.0) or 0.0)
     feat["is_head_row"] = 1.0 if row_index == 0 else 0.0
     feat["is_tail_row"] = 1.0 if row_index == (total_rows - 1) else 0.0
     if audio is not None and sr and sr > 0:
@@ -1080,6 +1106,18 @@ def _feature_row_from_context(language: str, format_type: str, row: Dict[str, ob
     feat["base_cutoff_to_next_anchor_ms"] = next_anchor_ms - cut_abs if next_anchor_ms else 0.0
 
     feat.update(_compute_segment_stats(mel_ctx, offset, pre_abs, cut_abs, audio, sr))
+    mel_safety = 0.0
+    if alias_type in {"cv", "cv_head", "vcv"}:
+        blank_conf = float(feat.get("blank_span_confidence", 0.0) or 0.0)
+        cand_off = float(feat.get("mel_offset_candidate_ms", 0.0) or 0.0)
+        if blank_conf >= 0.72 and offset < cand_off - 12.0:
+            mel_safety = 1.0
+    if alias_type in {"vc", "vv"}:
+        tail_sil = float(feat.get("tail_patch_silence_ratio", 0.0) or 0.0)
+        cand_cut = float(feat.get("mel_cutoff_candidate_ms", 0.0) or 0.0)
+        if tail_sil >= 0.70 and (offset + abs(float(cutoff))) > cand_cut + 8.0:
+            mel_safety = 1.0
+    feat["mel_safety_clamped"] = mel_safety
     feat.update(_extract_structure_features(language, str(row.get("alias", "")), alias_type, row_index, total_rows))
     feat["alias_group"] = _derive_alias_group(
         language,
@@ -1137,6 +1175,41 @@ def _compute_file_context_stats(alias_types: List[str]) -> Dict[str, float]:
         "vc_cv_ratio": _safe_ratio(vc_count + 1.0, cv_count + 1.0),
         "cv_vc_balance": float(cv_count - vc_count) / float(denom),
     }
+
+
+def _compute_mel_file_stats(mel_ctx, phones: List[object], language: str) -> Dict[str, float]:
+    stats: Dict[str, float] = {}
+    if mel_ctx:
+        en = mel_ctx.get("energy")
+        f0v = mel_ctx.get("f0_voicing")
+        if en is not None and len(en):
+            if np is not None:
+                stats["file_mean_energy"] = float(np.mean(np.asarray(en, dtype=np.float64)))
+            else:
+                stats["file_mean_energy"] = float(sum(float(x) for x in en) / max(len(en), 1))
+        if f0v is not None and len(f0v):
+            if np is not None:
+                stats["file_voiced_ratio"] = float(np.mean(np.asarray(f0v, dtype=np.float64) >= 0.5))
+            else:
+                voiced_count = sum(1 for x in f0v if float(x) >= 0.5)
+                stats["file_voiced_ratio"] = float(voiced_count) / float(max(len(f0v), 1))
+
+    lengths = []
+    for iv in phones or []:
+        try:
+            if _is_vowel_mark(language, getattr(iv, "mark", "")):
+                lengths.append((float(iv.maxTime) - float(iv.minTime)) * 1000.0)
+        except Exception:
+            continue
+    if not lengths:
+        for iv in phones or []:
+            try:
+                lengths.append((float(iv.maxTime) - float(iv.minTime)) * 1000.0)
+            except Exception:
+                continue
+    if lengths:
+        stats["file_mean_syllable_dur_ms"] = float(sum(lengths) / max(len(lengths), 1))
+    return stats
 
 
 def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str, custom_phonemes_path: str = "", voicebank_id: str = "", format_type_override: str = "") -> List[Dict[str, object]]:
@@ -1209,6 +1282,7 @@ def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str
             row["alias_type"] = alias_type
             alias_types.append(alias_type)
         file_stats = _compute_file_context_stats(alias_types)
+        file_stats.update(_compute_mel_file_stats(mel_ctx, phones, lang))
 
         for idx, row in enumerate(wav_rows):
             alias_type = alias_types[idx]

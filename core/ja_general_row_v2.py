@@ -47,10 +47,42 @@ def run_ja_general_row(
     build_guard_messages_fn,
     anchor_store,
     anchor_lock_lite=False,
+    alignment_weight=0.0,
+    textgrid_trust_tier="",
 ):
     soft_off_shift = 0.0
     soft_cut_shift = 0.0
     cutoff_reduced = 0.0
+    mel_voiced_onset_ms = None
+
+    if alias_type == "cv" and mel_ctx_for_file:
+        from core.oto_generator import (
+            _estimate_mel_voiced_onset,
+            _resolve_mel_onset_weight,
+            _apply_mel_voiced_onset_pre_shift,
+        )
+        pre_abs = float(offset) + float(pre)
+        mel_weight = _resolve_mel_onset_weight(alignment_weight, textgrid_trust_tier)
+        if mel_weight > 0.0:
+            mel_onset = _estimate_mel_voiced_onset(mel_ctx_for_file, pre_abs)
+            if mel_onset is not None and abs(float(mel_onset) - pre_abs) <= 120.0:
+                (
+                    offset,
+                    consonant,
+                    cutoff,
+                    pre,
+                    ovl,
+                    _mel_shift,
+                ) = _apply_mel_voiced_onset_pre_shift(
+                    offset,
+                    consonant,
+                    cutoff,
+                    pre,
+                    ovl,
+                    mel_onset,
+                    weight=mel_weight,
+                )
+                mel_voiced_onset_ms = float(mel_onset)
 
     if alias_type in {"cv", "cv_head", "vcv"}:
         offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = soft_guard_fn(
@@ -144,6 +176,35 @@ def run_ja_general_row(
                 f"({pre_abs_before:.1f}->{pre_abs_after:.1f}ms, {alias})"
             )
 
+    if alias_type in {"vc", "vv"}:
+        mel_cutoff_candidate_ms = None
+        next_mel_voiced_onset_ms = None
+        if mel_ctx_for_file:
+            from core.oto_generator import _estimate_mel_cutoff_candidate
+
+            pre_abs = float(offset) + float(pre)
+            cut_abs = float(offset) + abs(float(cutoff))
+            mel_cutoff_candidate_ms = _estimate_mel_cutoff_candidate(mel_ctx_for_file, pre_abs, cut_abs)
+        if vc_next_anchor is not None:
+            try:
+                next_mel_voiced_onset_ms = float(vc_next_anchor.get("mel_voiced_onset_abs", 0.0) or 0.0) or None
+            except Exception:
+                next_mel_voiced_onset_ms = None
+        if mel_cutoff_candidate_ms is not None or next_mel_voiced_onset_ms is not None:
+            from core.ja_oto_bridge import _apply_vc_vv_mel_cutoff_cap
+
+            offset, consonant, cutoff, pre, ovl = _apply_vc_vv_mel_cutoff_cap(
+                offset,
+                consonant,
+                cutoff,
+                pre,
+                ovl,
+                alias_type=alias_type,
+                format_type=format_type,
+                mel_cutoff_candidate_ms=mel_cutoff_candidate_ms,
+                next_mel_voiced_onset_ms=next_mel_voiced_onset_ms,
+            )
+
     anchor_abs = c_end
     next_onset_abs = n_start
     next_vowel_abs = n_end
@@ -166,6 +227,7 @@ def run_ja_general_row(
         next_onset_abs_ms=next_onset_abs,
         next_vowel_abs_ms=next_vowel_abs,
         lite=bool(anchor_lock_lite),
+        voiced_onset_ms=mel_voiced_onset_ms,
     )
     if alias_type in {"cv", "cv_head"} and not anchor_lock_enabled_fn("japanese", format_type):
         offset, consonant, cutoff, pre, ovl = enforce_cv_pre_anchor_guard_fn(
@@ -204,6 +266,7 @@ def run_ja_general_row(
             vowel_start_abs=n_start,
             c_end_abs=c_end,
             vowel_end_abs=n_end,
+            mel_voiced_onset_abs=mel_voiced_onset_ms,
         )
         messages = build_guard_messages_fn(
             fname,

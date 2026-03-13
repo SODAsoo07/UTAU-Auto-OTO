@@ -32,6 +32,8 @@ def run_ja_cv_head_row(
     build_guard_messages_fn,
     anchor_store,
     anchor_lock_lite=False,
+    alignment_weight=0.0,
+    textgrid_trust_tier="",
 ):
     c_start, c_end, n_start, n_end = extract_cv_bounds_fn(
         curr_phones,
@@ -60,6 +62,36 @@ def run_ja_cv_head_row(
         cutoff = -(consonant + cv_vowel_len * 0.25)
     else:
         cutoff = -max(consonant + 14.0, min_cut_abs)
+
+    mel_voiced_onset_ms = None
+    if mel_ctx_for_file:
+        from core.oto_generator import (
+            _estimate_mel_voiced_onset,
+            _resolve_mel_onset_weight,
+            _apply_mel_voiced_onset_pre_shift,
+        )
+        pre_abs = float(offset) + float(pre)
+        mel_weight = _resolve_mel_onset_weight(alignment_weight, textgrid_trust_tier)
+        if mel_weight > 0.0:
+            mel_onset = _estimate_mel_voiced_onset(mel_ctx_for_file, pre_abs)
+            if mel_onset is not None and abs(float(mel_onset) - pre_abs) <= 120.0:
+                (
+                    offset,
+                    consonant,
+                    cutoff,
+                    pre,
+                    ovl,
+                    _mel_shift,
+                ) = _apply_mel_voiced_onset_pre_shift(
+                    offset,
+                    consonant,
+                    cutoff,
+                    pre,
+                    ovl,
+                    mel_onset,
+                    weight=mel_weight,
+                )
+                mel_voiced_onset_ms = float(mel_onset)
 
     offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = soft_guard_fn(
         offset,
@@ -111,6 +143,7 @@ def run_ja_cv_head_row(
         next_onset_abs_ms=n_start,
         next_vowel_abs_ms=n_end,
         lite=bool(anchor_lock_lite),
+        voiced_onset_ms=mel_voiced_onset_ms,
     )
     offset, consonant, cutoff, pre, offset_reduced = post_ctx.guard_cv_head_offset_to_onset(
         offset,
@@ -161,6 +194,7 @@ def run_ja_cv_head_row(
         vowel_start_abs=n_start,
         c_end_abs=c_end,
         vowel_end_abs=n_end,
+        mel_voiced_onset_abs=mel_voiced_onset_ms,
     )
     finalize_row_fn(
         final_lines=final_lines,
