@@ -475,16 +475,27 @@ def _apply_kr_bridge_coherence_to_oto_file(oto_path, custom_map=None):
             alias_type_cache[alias_norm] = alias_type
         return alias_type
 
+    def _row_anchor(row):
+        try:
+            return float(row.get("offset", 0.0)) + float(row.get("pre", 0.0))
+        except Exception:
+            try:
+                return float(row.get("offset", 0.0))
+            except Exception:
+                return 0.0
+
     changed = 0
     for _wav_name, rows in rows_by_wav.items():
-        row_types = [_classify_cached(row["alias"]) for row in rows]
-        for idx, row in enumerate(rows):
+        ordered = sorted(list(enumerate(rows)), key=lambda item: (_row_anchor(item[1]), item[0]))
+        ordered_rows = [row for _idx, row in ordered]
+        row_types = [_classify_cached(row["alias"]) for row in ordered_rows]
+        for idx, row in enumerate(ordered_rows):
             if row_types[idx] not in {"vc", "vv"}:
                 continue
             next_row = None
-            for j in range(idx + 1, len(rows)):
+            for j in range(idx + 1, len(ordered_rows)):
                 if row_types[j] in {"cv", "cv_head", "vcv", "mono"}:
-                    next_row = rows[j]
+                    next_row = ordered_rows[j]
                     break
             if not next_row:
                 continue

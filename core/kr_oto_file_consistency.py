@@ -334,12 +334,23 @@ def apply_file_consistency_to_oto_file(
 
     alias_cache: Dict[str, str] = {}
 
-    for _wav_name, rows in rows_by_wav.items():
-        row_types = [_classify_cached(str(row["alias"]), alias_cache, custom_map) for row in rows]
+    def _row_anchor(row):
+        try:
+            return float(row.get("offset", 0.0)) + float(row.get("pre", 0.0))
+        except Exception:
+            try:
+                return float(row.get("offset", 0.0))
+            except Exception:
+                return 0.0
 
-        stats["continuity_changed"] += enforce_adjacent_continuity(rows, row_types, validate_fn)
-        stats["smoothing_changed"] += smooth_abrupt_changes(rows, row_types, validate_fn)
-        stats["validation_changed"] += apply_file_level_validation(rows, row_types, validate_fn)
+    for _wav_name, rows in rows_by_wav.items():
+        ordered = sorted(list(enumerate(rows)), key=lambda item: (_row_anchor(item[1]), item[0]))
+        ordered_rows = [row for _idx, row in ordered]
+        row_types = [_classify_cached(str(row["alias"]), alias_cache, custom_map) for row in ordered_rows]
+
+        stats["continuity_changed"] += enforce_adjacent_continuity(ordered_rows, row_types, validate_fn)
+        stats["smoothing_changed"] += smooth_abrupt_changes(ordered_rows, row_types, validate_fn)
+        stats["validation_changed"] += apply_file_level_validation(ordered_rows, row_types, validate_fn)
 
     stats["total_changed"] = (
         stats["continuity_changed"] + stats["smoothing_changed"] + stats["validation_changed"]
@@ -371,4 +382,3 @@ __all__ = [
     "smooth_abrupt_changes",
     "apply_file_level_validation",
 ]
-

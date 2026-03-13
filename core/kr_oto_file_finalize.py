@@ -187,12 +187,22 @@ def apply_kr_mel_refine_to_oto_file(
             alias_type_cache[alias_text] = alias_type
         return alias_type
 
+    def _row_anchor(row):
+        try:
+            return float(row.get("offset", 0.0)) + float(row.get("pre", 0.0))
+        except Exception:
+            try:
+                return float(row.get("offset", 0.0))
+            except Exception:
+                return 0.0
+
     mel_cache = {}
     changed = 0
     for wav_name, rows in by_wav.items():
         wav_path = _find_wav_path_for_name(wav_name, wav_dir, wav_index)
         if not wav_path:
             continue
+        ordered_rows = sorted(rows, key=lambda item: (_row_anchor(item[1]), item[0]))
         mel_ctx = mel_cache.get(wav_path)
         if mel_ctx is None:
             audio, sr = _read_wav_mono_np(wav_path)
@@ -222,7 +232,7 @@ def apply_kr_mel_refine_to_oto_file(
         if len(t_ms) < 8:
             continue
 
-        for i, (_line_idx, row) in enumerate(rows):
+        for i, (_line_idx, row) in enumerate(ordered_rows):
             alias_type = _classify_cached(row["alias"])
             if alias_type not in {"cv", "cv_head"}:
                 continue
@@ -238,10 +248,10 @@ def apply_kr_mel_refine_to_oto_file(
                 continue
 
             next_anchor = None
-            for j in range(i + 1, len(rows)):
-                next_alias_type = _classify_cached(rows[j][1]["alias"])
+            for j in range(i + 1, len(ordered_rows)):
+                next_alias_type = _classify_cached(ordered_rows[j][1]["alias"])
                 if next_alias_type in {"cv", "cv_head", "vcv", "mono"}:
-                    next_anchor = float(rows[j][1]["offset"]) + float(rows[j][1]["pre"])
+                    next_anchor = float(ordered_rows[j][1]["offset"]) + float(ordered_rows[j][1]["pre"])
                     break
 
             search_start = pre_abs + _env_float("UTOA_KR_MEL_REFINE_SEARCH_START_FROM_PRE_MS", 14.0)

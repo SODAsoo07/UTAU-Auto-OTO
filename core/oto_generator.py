@@ -261,6 +261,28 @@ def replace_oto_line_wav_name(line, wav_name):
     _left, right = line.split("=", 1)
     return f"{target}={right}"
 
+
+def apply_output_wav_name_map(oto_path, wav_name_map):
+    if not oto_path or not wav_name_map or not os.path.exists(oto_path):
+        return 0
+    out_lines = []
+    changed = 0
+    for raw in _read_text_with_fallback(oto_path).splitlines():
+        line = raw.rstrip("\n")
+        if "=" not in line:
+            out_lines.append(line)
+            continue
+        wav, rest = line.split("=", 1)
+        mapped = wav_name_map.get(wav.strip())
+        if mapped and mapped != wav:
+            out_lines.append(f"{mapped}={rest}")
+            changed += 1
+        else:
+            out_lines.append(line)
+    if changed:
+        write_oto_lines(oto_path, out_lines)
+    return changed
+
 # ==============================================================================
 # 기본 튜닝 파라미터
 # ==============================================================================
@@ -799,14 +821,17 @@ def _build_alias_rows(
 ):
     """에일리어스(및 OpenUtau 변형)를 OTO 라인 문자열로 변환합니다."""
     generate_aliases_fn = generate_openutau_aliases
-    if str(alias_type or "").strip() or str(file_format or "").strip():
-        generate_aliases_fn = (
-            lambda alias_item: generate_korean_phonemizer_aliases(
-                alias_item,
-                alias_type=alias_type,
-                format_type=file_format,
+    # Korean phonemizer alias set can be opted-in explicitly.
+    use_phonemizer_alias = str(os.environ.get("UTOA_KR_USE_PHONEMIZER_ALIAS", "")).strip().lower()
+    if use_phonemizer_alias in {"1", "true", "yes", "on"}:
+        if str(alias_type or "").strip() or str(file_format or "").strip():
+            generate_aliases_fn = (
+                lambda alias_item: generate_korean_phonemizer_aliases(
+                    alias_item,
+                    alias_type=alias_type,
+                    format_type=file_format,
+                )
             )
-        )
     _params, rows = _prepare_oto_alias_rows_v2(
         real_wav_name,
         alias,
@@ -1600,8 +1625,18 @@ def _stabilize_params_to_phone_activity(offset, consonant, cutoff, pre, ovl, ph_
 
 
 def generate_openutau_aliases(base_alias):
-    """OpenUtau 호환을 위해 동일 발음의 대체 에일리어스를 추가 생성합니다."""
-    aliases = {base_alias}
+    """OpenUtau ??? ?? ?? ??? ?? ?????? ?? ?????."""
+    aliases = []
+    seen = set()
+
+    def _add(alias_text):
+        text = str(alias_text or "").strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        aliases.append(text)
+
+    _add(base_alias)
     parts = base_alias.split()
 
     if len(parts) == 2:
@@ -1636,61 +1671,62 @@ def generate_openutau_aliases(base_alias):
         }
 
 
-        aliases.add(f"{v} {c}")
-        aliases.add(f"{v}{c}")
+        _add(f"{v} {c}")
+        _add(f"{v}{c}")
 
 
         if c in ['a','e','i','o','u','eo','eu','ae','oe','wi','ya','yeo','yo','yu','ye','wa','wo','we','weo','eui','ui']:
-            aliases.add(f"{v} {c}")
-            aliases.add(f"{v}{c}")
+            _add(f"{v} {c}")
+            _add(f"{v}{c}")
 
-            aliases.add(f"{v} -")
-            aliases.add(f"{v}-")
+            _add(f"{v} -")
+            _add(f"{v}-")
         else:
 
             if c in batchim_map:
                 mapped_c = batchim_map[c]
 
-                aliases.add(f"{v} {mapped_c}")
-                aliases.add(f"{v}{mapped_c}")
-                aliases.add(f"{v} {mapped_c.upper()}")
-                aliases.add(f"{v}{mapped_c.upper()}")
+                _add(f"{v} {mapped_c}")
+                _add(f"{v}{mapped_c}")
+                _add(f"{v} {mapped_c.upper()}")
+                _add(f"{v}{mapped_c.upper()}")
 
 
-                aliases.add(f"{v} {mapped_c}-")
-                aliases.add(f"{v}{mapped_c}-")
-                aliases.add(f"{mapped_c}-")
+                _add(f"{v} {mapped_c}-")
+                _add(f"{v}{mapped_c}-")
+                _add(f"{mapped_c}-")
                 if c != mapped_c:
-                    aliases.add(f"{v} {c}-")
-                    aliases.add(f"{v}{c}-")
-                    aliases.add(f"{c}-")
+                    _add(f"{v} {c}-")
+                    _add(f"{v}{c}-")
+                    _add(f"{c}-")
 
             c_lower = c.lower()
             if c_lower in stop_variant_map:
                 for vc in stop_variant_map[c_lower]:
-                    aliases.add(f"{v} {vc}")
-                    aliases.add(f"{v}{vc}")
-                    aliases.add(f"{v} {vc.upper()}")
-                    aliases.add(f"{v}{vc.upper()}")
+                    _add(f"{v} {vc}")
+                    _add(f"{v}{vc}")
+                    _add(f"{v} {vc.upper()}")
+                    _add(f"{v}{vc.upper()}")
 
     elif len(parts) == 1:
         cv = parts[0]
 
-        aliases.add(f"- {cv}")
-        aliases.add(f"-{cv}")
+        _add(f"- {cv}")
+        _add(f"-{cv}")
 
 
-        aliases.add(f"{cv}-")
-        aliases.add(f"{cv} -")
+        _add(f"{cv}-")
+        _add(f"{cv} -")
 
 
         if cv == 'eui':
-            aliases.add('eu i')
-            aliases.update(['ui', '- ui', '-ui', 'ui -', 'ui-'])
+            _add('eu i')
+            for item in ['ui', '- ui', '-ui', 'ui -', 'ui-']:
+                _add(item)
         elif cv.startswith('-') and 'eui' in cv:
-            aliases.add(cv.replace('eui', 'eu i'))
+            _add(cv.replace('eui', 'eu i'))
 
-    return list(aliases)
+    return aliases
 
 
 def _dedupe_aliases_preserve_order(items):
@@ -3154,6 +3190,7 @@ def generate_oto(
         return matched, total, (matched / float(total))
 
     final_lines = []
+    wav_name_map = {}
 
 
     custom_map = load_custom_phonemes(custom_phonemes_path)
@@ -3230,7 +3267,11 @@ def generate_oto(
         )
         file_ctx.sinsy_label_entries = []
         file_ctx.sinsy_label_path = ""
-        preserved_output_wav_name = str(getattr(file_ctx, "output_wav_name", "") or "")
+        output_wav_name = str(getattr(file_ctx, "output_wav_name", "") or "")
+        if output_wav_name:
+            wav_name_map.setdefault(fname, output_wav_name)
+            if file_ctx.real_wav_name and file_ctx.real_wav_name != fname:
+                wav_name_map.setdefault(file_ctx.real_wav_name, output_wav_name)
         if use_sinsy_labels:
             try:
                 file_ctx.sinsy_label_entries = load_sinsy_label_entries(
@@ -3260,7 +3301,7 @@ def generate_oto(
             log(f"경고: {fname}: TextGrid 로드 실패로 원본 라인을 유지합니다. ({file_ctx.error_message})")
             _record_unset_lines("textgrid_load_failed", fname, lines)
             final_lines.extend([
-                apply_suffix_to_oto_line(replace_oto_line_wav_name(l, preserved_output_wav_name), alias_suffix)
+                apply_suffix_to_oto_line(l, alias_suffix)
                 for l in lines
             ])
             processed += 1
@@ -3269,14 +3310,14 @@ def generate_oto(
             log(f"경고: {fname}: phones tier가 없어 원본 라인을 유지합니다.")
             _record_unset_lines("tier_missing", fname, lines)
             final_lines.extend([
-                apply_suffix_to_oto_line(replace_oto_line_wav_name(l, preserved_output_wav_name), alias_suffix)
+                apply_suffix_to_oto_line(l, alias_suffix)
                 for l in lines
             ])
             processed += 1
             continue
 
         real_wav_name = file_ctx.real_wav_name
-        output_wav_name = str(getattr(file_ctx, "output_wav_name", "") or real_wav_name)
+        output_wav_name = output_wav_name or real_wav_name
         mel_ctx_for_file = file_ctx.mel_ctx_for_file
         wav_duration_ms = float(file_ctx.wav_duration_ms or 0.0)
         tg = file_ctx.tg
@@ -3288,7 +3329,7 @@ def generate_oto(
                 log(f"경고: {fname}: phones tier가 없어 원본 라인을 유지합니다.")
                 _record_unset_lines("tier_missing", fname, lines)
                 final_lines.extend([
-                    apply_suffix_to_oto_line(replace_oto_line_wav_name(l, output_wav_name), alias_suffix)
+                    apply_suffix_to_oto_line(l, alias_suffix)
                     for l in lines
                 ])
                 processed += 1
@@ -3325,7 +3366,7 @@ def generate_oto(
                 log(f"경고: {fname}: 유효한 음소 구간이 없어 원본 라인을 유지합니다.")
                 _record_unset_lines("mapping_failed_empty_intervals", fname, lines)
                 final_lines.extend([
-                    apply_suffix_to_oto_line(replace_oto_line_wav_name(l, output_wav_name), alias_suffix)
+                    apply_suffix_to_oto_line(l, alias_suffix)
                     for l in lines
                 ])
                 processed += 1
@@ -3334,7 +3375,7 @@ def generate_oto(
                 log(f"경고: {fname}: 유효한 에일리어스가 없어 원본 라인을 유지합니다.")
                 _record_unset_lines("no_valid_alias", fname, lines)
                 final_lines.extend([
-                    apply_suffix_to_oto_line(replace_oto_line_wav_name(l, output_wav_name), alias_suffix)
+                    apply_suffix_to_oto_line(l, alias_suffix)
                     for l in lines
                 ])
                 processed += 1
@@ -3655,7 +3696,7 @@ def generate_oto(
                     },
                 )
                 final_lines.extend([
-                    apply_suffix_to_oto_line(replace_oto_line_wav_name(l, output_wav_name), alias_suffix)
+                    apply_suffix_to_oto_line(l, alias_suffix)
                     for l in lines
                 ])
                 processed += 1
@@ -3678,7 +3719,7 @@ def generate_oto(
                     },
                 )
                 final_lines.extend([
-                    apply_suffix_to_oto_line(replace_oto_line_wav_name(l, output_wav_name), alias_suffix)
+                    apply_suffix_to_oto_line(l, alias_suffix)
                     for l in lines
                 ])
                 processed += 1
@@ -3725,7 +3766,7 @@ def generate_oto(
                 alias = parts[1].split(',', 1)[0].strip()
                 if not alias:
                     _record_unset("empty_alias", fname, line)
-                    preserved = f"{output_wav_name}={parts[1]}"
+                    preserved = f"{real_wav_name}={parts[1]}"
                     final_lines.append(apply_suffix_to_oto_line(preserved, alias_suffix))
                     continue
                 base_shape = _extract_base_timing_shape(line)
@@ -4086,7 +4127,9 @@ def generate_oto(
                         )
                         if use_template:
                             # 템플릿 모드에서는 매핑이 불확실한 행이라도 기존 alias를 보존한다.
-                            final_lines.append(apply_suffix_to_oto_line(line, alias_suffix))
+                            final_lines.append(
+                                apply_suffix_to_oto_line(line, alias_suffix)
+                            )
                         continue
                     current_w_idx = max(current_w_idx, selected_w_idx)
                     selected_w_idx, curr_phones, c_start, c_end, n_start, n_end = _prepare_cv_bounds_from_syllable(
@@ -4290,7 +4333,7 @@ def generate_oto(
             errors.append(err_msg)
             _record_unset_lines("file_exception", fname, lines)
             final_lines.extend([
-                apply_suffix_to_oto_line(replace_oto_line_wav_name(l, output_wav_name), alias_suffix)
+                apply_suffix_to_oto_line(l, alias_suffix)
                 for l in lines
             ])
             processed += 1
@@ -4400,6 +4443,9 @@ def generate_oto(
                 normalize_key_fn=normalize_key,
             )
         )
+        renamed = apply_output_wav_name_map(out_path, wav_name_map)
+        if renamed:
+            log(f"WAV 이름 교정 적용: {renamed}건")
     except Exception as e:
         err = f"OTO 파일 저장 실패: {e}"
         logger.error(err)

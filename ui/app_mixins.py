@@ -752,6 +752,15 @@ class ConfigMixin:
             self.out_entry.delete(0, "end")
             self.out_entry.insert(0, config.get("out_path", ""))
 
+            if "openutau_compatible" in config and hasattr(self, "openutau_var"):
+                self.openutau_var.set(bool(config.get("openutau_compatible", False)))
+            if "gen_missing_vowels" in config and hasattr(self, "gen_missing_vowels_var"):
+                self.gen_missing_vowels_var.set(bool(config.get("gen_missing_vowels", True)))
+            if "no_base_oto" in config and hasattr(self, "no_base_oto_var"):
+                self.no_base_oto_var.set(bool(config.get("no_base_oto", False)))
+            if "enable_ml_correction" in config and hasattr(self, "enable_ml_correction_var"):
+                self.enable_ml_correction_var.set(bool(config.get("enable_ml_correction", True)))
+
             if "language" in config and hasattr(self, "lang_var"):
                 saved_language = str(config.get("language", "") or "").strip()
                 if "Japanese" in saved_language:
