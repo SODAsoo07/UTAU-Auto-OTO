@@ -728,6 +728,11 @@ class PipelineActionsMixin:
                         if hasattr(self, "kr_continuity_max_offset_adj_var")
                         else ""
                     )
+                    ml_anchor_mel_gamma_raw = (
+                        self.ml_anchor_mel_gamma_var.get()
+                        if hasattr(self, "ml_anchor_mel_gamma_var")
+                        else ""
+                    )
                     ml_model_root = ""
                     if lang == "japanese" and hasattr(self, "ml_model_root_ja_var"):
                         ml_model_root = str(self.ml_model_root_ja_var.get() or "").strip()
@@ -781,6 +786,7 @@ class PipelineActionsMixin:
 
                     ml_coupled_min_conf = _parse_optional_threshold(ml_coupled_min_conf_raw, lo=0.0, hi=1.0)
                     kr_continuity_max_offset_adj = _parse_optional_float(kr_continuity_max_offset_adj_raw, lo=0.0, hi=2000.0)
+                    ml_anchor_mel_gamma = _parse_optional_float(ml_anchor_mel_gamma_raw, lo=0.1, hi=10.0)
 
                     os.environ["UTOA_ML_COUPLED_ENABLE"] = "1" if ml_coupled_enable else "0"
                     os.environ["UTOA_ML_ENSEMBLE_ENABLE"] = "1" if ensemble_enabled else "0"
@@ -799,6 +805,10 @@ class PipelineActionsMixin:
                         os.environ.pop("UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ", None)
                     else:
                         os.environ["UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ"] = str(float(kr_continuity_max_offset_adj))
+                    if ml_anchor_mel_gamma is None:
+                        os.environ.pop("UTOA_ML_ANCHOR_MEL_GAMMA", None)
+                    else:
+                        os.environ["UTOA_ML_ANCHOR_MEL_GAMMA"] = str(float(ml_anchor_mel_gamma))
                     if lang == "japanese":
                         if ml_model_root:
                             os.environ["UTOA_JA_OTO_ML_DIR"] = ml_model_root

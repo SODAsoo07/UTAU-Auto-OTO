@@ -81,6 +81,11 @@ class OtoActionsMixin:
                     if hasattr(self, "kr_continuity_max_offset_adj_var")
                     else ""
                 )
+                ml_anchor_mel_gamma_raw = (
+                    self.ml_anchor_mel_gamma_var.get()
+                    if hasattr(self, "ml_anchor_mel_gamma_var")
+                    else ""
+                )
                 ml_same_lang_only = (
                     self.ml_same_language_borrow_only_var.get()
                     if hasattr(self, "ml_same_language_borrow_only_var")
@@ -146,6 +151,7 @@ class OtoActionsMixin:
                 kr_conf_threshold = _parse_optional_threshold(kr_conf_raw, lo=0.0, hi=1.0)
                 ml_coupled_min_conf = _parse_optional_threshold(ml_coupled_min_conf_raw, lo=0.0, hi=1.0)
                 kr_continuity_max_offset_adj = _parse_optional_float(kr_continuity_max_offset_adj_raw, lo=0.0, hi=2000.0)
+                ml_anchor_mel_gamma = _parse_optional_float(ml_anchor_mel_gamma_raw, lo=0.1, hi=10.0)
 
                 os.environ["UTOA_ML_SAME_LANGUAGE_BORROW_ONLY"] = "1" if ml_same_lang_only else "0"
                 selector_mode_code = self._apply_ml_selector_runtime_mode(ml_selector_mode)
@@ -167,6 +173,10 @@ class OtoActionsMixin:
                     os.environ.pop("UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ", None)
                 else:
                     os.environ["UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ"] = str(float(kr_continuity_max_offset_adj))
+                if ml_anchor_mel_gamma is None:
+                    os.environ.pop("UTOA_ML_ANCHOR_MEL_GAMMA", None)
+                else:
+                    os.environ["UTOA_ML_ANCHOR_MEL_GAMMA"] = str(float(ml_anchor_mel_gamma))
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_DEFAULT"] = str(int(kr_jump_default))
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_HIGH_CONF"] = str(int(kr_jump_hi))
                 os.environ["UTOA_ML_COUPLED_ENABLE"] = "1" if ml_coupled_enable else "0"

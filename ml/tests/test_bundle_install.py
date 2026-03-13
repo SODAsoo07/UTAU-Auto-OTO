@@ -45,7 +45,7 @@ class BundleInstallTests(unittest.TestCase):
             f.write(b"pt")
         with open(os.path.join(model_dir, "model_meta.json"), "w", encoding="utf-8") as f:
             f.write(
-                '{"language":"korean","format_type":"vcv","backend":"coupled_nn_v1","model_version":"v1","feature_version":"v7"}'
+                '{"language":"korean","format_type":"vcv","backend":"coupled_nn_v1","model_version":"v2","feature_version":"v7","head_mode":"split","anchor_targets":["delta_offset","delta_pre","delta_cutoff"],"delta_targets":["delta_cons","delta_ovl"]}'
             )
         return model_dir
 
@@ -76,7 +76,7 @@ class BundleInstallTests(unittest.TestCase):
             "coupled": {
                 "feature_schema.json": "{}",
                 "eval_summary.json": "{}",
-                "model_meta.json": '{"language":"korean","format_type":"cvc","backend":"coupled_nn_v2_rawmel","model_version":"v1","feature_version":"v11"}',
+                "model_meta.json": '{"language":"korean","format_type":"cvc","backend":"coupled_nn_v2_rawmel","model_version":"v2","feature_version":"v11","head_mode":"split","anchor_targets":["delta_offset","delta_pre","delta_cutoff"],"delta_targets":["delta_cons","delta_ovl"]}',
             },
             "meta": {
                 "feature_schema.json": "{}",
@@ -136,8 +136,8 @@ class BundleInstallTests(unittest.TestCase):
             export_root = os.path.join(td, "exports")
             manifest = export_model_bundle(model_dir, export_root)
             result = install_exported_bundle(manifest["export_dir"], install_root=os.path.join(td, "installed"))
-            self.assertTrue(result["installed_dir"].endswith(os.path.join("japanese", "cvvc", "families", "bridge", "v1")))
-            self.assertEqual(result["alias_family"], "bridge")
+            self.assertTrue(result["installed_dir"].endswith(os.path.join("japanese", "cvvc", "families", "vc", "v1")))
+            self.assertEqual(result["alias_family"], "vc")
             self.assertTrue(os.path.isfile(os.path.join(result["installed_dir"], "model_meta.json")))
 
     def test_install_exported_coupled_bundle(self):
@@ -148,7 +148,7 @@ class BundleInstallTests(unittest.TestCase):
             result = install_exported_bundle(manifest["zip_path"], install_root=os.path.join(td, "installed"))
             self.assertTrue(os.path.isdir(result["installed_dir"]))
             self.assertTrue(os.path.isfile(os.path.join(result["installed_dir"], "coupled_model.pt")))
-            self.assertTrue(result["installed_dir"].endswith(os.path.join("korean", "vcv", "v1")))
+            self.assertTrue(result["installed_dir"].endswith(os.path.join("korean", "vcv", "v2")))
 
     def test_install_exported_ensemble_bundle(self):
         with tempfile.TemporaryDirectory() as td:

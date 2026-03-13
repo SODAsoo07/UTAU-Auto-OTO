@@ -47,6 +47,9 @@ class FileDialogMixin:
 
     def _ml_model_repo_root(self):
         base_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        installed_root = os.path.join(base_dir, "models_installed", "oto_ml")
+        if os.path.isdir(installed_root):
+            return installed_root
         return os.path.join(base_dir, "ML_models")
 
     def _ml_model_language_root(self, language):
@@ -71,6 +74,8 @@ class FileDialogMixin:
                 format_code = ""
 
         lang_root = self._ml_model_language_root(language)
+        base_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        legacy_root = os.path.join(base_dir, "ML_models", language)
         fmt_root = os.path.join(lang_root, format_code) if format_code else ""
         candidates = []
         if fmt_root:
@@ -82,7 +87,7 @@ class FileDialogMixin:
                     os.path.join(fmt_root, "v1"),
                 ]
             )
-        candidates.extend([lang_root, self._ml_model_repo_root()])
+        candidates.extend([lang_root, legacy_root, self._ml_model_repo_root()])
         for candidate in candidates:
             if candidate and os.path.isdir(candidate):
                 return candidate
@@ -92,6 +97,10 @@ class FileDialogMixin:
         lang_root = self._ml_model_language_root(language)
         if os.path.isdir(lang_root):
             return lang_root
+        base_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        legacy_root = os.path.join(base_dir, "ML_models", language)
+        if os.path.isdir(legacy_root):
+            return legacy_root
         repo_root = self._ml_model_repo_root()
         if os.path.isdir(repo_root):
             return repo_root
@@ -692,6 +701,7 @@ class ConfigMixin:
             "ml_coupled_device": self.ml_coupled_device_var.get() if hasattr(self, "ml_coupled_device_var") else "auto",
             "ml_coupled_backend": self.ml_coupled_backend_var.get() if hasattr(self, "ml_coupled_backend_var") else "auto",
             "ml_coupled_strict_constraint": self.ml_coupled_strict_constraint_var.get() if hasattr(self, "ml_coupled_strict_constraint_var") else False,
+            "ml_anchor_mel_gamma": self.ml_anchor_mel_gamma_var.get() if hasattr(self, "ml_anchor_mel_gamma_var") else "",
             "ml_model_root_kr": self.ml_model_root_kr_var.get() if hasattr(self, "ml_model_root_kr_var") else "",
             "ml_model_root_ja": self.ml_model_root_ja_var.get() if hasattr(self, "ml_model_root_ja_var") else "",
             "ja_mapping_words_fallback_enabled": self.ja_mapping_words_fallback_enabled_var.get() if hasattr(self, "ja_mapping_words_fallback_enabled_var") else True,
@@ -874,6 +884,25 @@ class ConfigMixin:
                                 )
                         except Exception:
                             self.kr_continuity_max_offset_adj_var.set("")
+            if "ml_anchor_mel_gamma" in config and hasattr(self, "ml_anchor_mel_gamma_var"):
+                raw_val = config.get("ml_anchor_mel_gamma", "")
+                if raw_val is None:
+                    self.ml_anchor_mel_gamma_var.set("")
+                else:
+                    txt = str(raw_val).strip()
+                    if not txt:
+                        self.ml_anchor_mel_gamma_var.set("")
+                    else:
+                        try:
+                            val = max(0.1, float(txt))
+                            if abs(val - 1.0) <= 1e-9:
+                                self.ml_anchor_mel_gamma_var.set("")
+                            else:
+                                self.ml_anchor_mel_gamma_var.set(
+                                    f"{val:.2f}".rstrip("0").rstrip(".")
+                                )
+                        except Exception:
+                            self.ml_anchor_mel_gamma_var.set("")
             if "ml_coupled_device" in config and hasattr(self, "ml_coupled_device_var"):
                 device = str(config.get("ml_coupled_device", "auto") or "auto").strip().lower()
                 if device in {"auto", "cpu", "cuda"}:

@@ -153,6 +153,21 @@ def run_kr_cv_head_row(
             next_vowel_abs_ms=n_end,
             mapping_confidence=row_mapping_confidence,
         )
+        (
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            offset_reduced_after_anchor,
+        ) = guard_cv_head_offset_to_current_onset_fn(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            selected_w_idx,
+            syllables_info,
+        )
+        offset_reduced += offset_reduced_after_anchor
     anchor_record = build_anchor_record_fn(
         selected_w_idx,
         offset=offset,

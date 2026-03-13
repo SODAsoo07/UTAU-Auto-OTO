@@ -14,6 +14,8 @@ from typing import Dict, List, Optional
 FEATURE_VERSION = "v11"
 TRAIN_ROW_MATCH_VERSION = "v11"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
+ANCHOR_TARGET_NAMES = ["delta_offset", "delta_pre", "delta_cutoff"]
+DELTA_TARGET_NAMES = ["delta_cons", "delta_ovl"]
 AUX_TARGET_NAMES = ["aux_vowel_start_rel", "aux_vowel_end_rel", "aux_next_onset_rel"]
 
 FEATURE_NAMES = [
@@ -132,6 +134,8 @@ def get_feature_schema() -> Dict[str, object]:
         "feature_names": list(FEATURE_NAMES),
         "categorical_features": list(CATEGORICAL_FEATURES),
         "target_names": list(TARGET_NAMES),
+        "anchor_target_names": list(ANCHOR_TARGET_NAMES),
+        "delta_target_names": list(DELTA_TARGET_NAMES),
         "aux_target_names": list(AUX_TARGET_NAMES),
     }
 

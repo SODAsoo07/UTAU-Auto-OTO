@@ -140,6 +140,7 @@ class App(
         self.ml_coupled_device_var = ctk.StringVar(value="auto")
         self.ml_coupled_backend_var = ctk.StringVar(value="auto")
         self.ml_coupled_strict_constraint_var = ctk.BooleanVar(value=False)
+        self.ml_anchor_mel_gamma_var = ctk.StringVar(value="1.2")
         self.ml_model_root_kr_var = ctk.StringVar(value="")
         self.ml_model_root_ja_var = ctk.StringVar(value="")
         self.ja_mapping_words_fallback_enabled_var = ctk.BooleanVar(value=True)

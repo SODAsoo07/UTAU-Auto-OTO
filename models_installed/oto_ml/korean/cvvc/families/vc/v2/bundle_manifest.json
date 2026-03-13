@@ -1,0 +1,42 @@
+{
+  "bundle_slug": "korean_cvvc_vc_v2",
+  "source_dir": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\ML_models\\korean\\cvvc\\families\\bridge\\v1_coupled",
+  "export_dir": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\ml_workspace\\exports\\model_bundles\\korean_cvvc_vc_v2",
+  "language": "korean",
+  "format_type": "cvvc",
+  "alias_family": "vc",
+  "backend": "coupled_nn_v1",
+  "model_version": "v2",
+  "feature_version": "v11",
+  "train_rows": 184,
+  "voicebank_count": 73,
+  "required_files": [
+    "feature_schema.json",
+    "model_meta.json",
+    "eval_summary.json",
+    "coupled_model.pt"
+  ],
+  "install_subdir": "korean/cvvc/families/vc/v2",
+  "files": [
+    {
+      "name": "feature_schema.json",
+      "size": 3427,
+      "sha256": "97b9f562f8d5a52c89996375386a225212f171e7b4d1d57ddf7f2748ca3ad0ea"
+    },
+    {
+      "name": "model_meta.json",
+      "size": 6410,
+      "sha256": "79c1effc5828c22770c49ddd0def7a49550c40452c3f6046d2cba7aced56358e"
+    },
+    {
+      "name": "eval_summary.json",
+      "size": 1199,
+      "sha256": "186b32351d852b1b772d785b7fd4310ad85fbf2da548e5161ea04c9671cb44c4"
+    },
+    {
+      "name": "coupled_model.pt",
+      "size": 481456,
+      "sha256": "75d82908fc1a294da972afb53a5bf8f6c182e2de5b5e171778ebb9f9bd6ccd72"
+    }
+  ]
+}

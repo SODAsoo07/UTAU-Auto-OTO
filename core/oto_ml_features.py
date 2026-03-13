@@ -51,6 +51,8 @@ logger = logging.getLogger(__name__)
 FEATURE_VERSION = "v11"
 TRAIN_ROW_MATCH_VERSION = "v11"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
+ANCHOR_TARGET_NAMES = ["delta_offset", "delta_pre", "delta_cutoff"]
+DELTA_TARGET_NAMES = ["delta_cons", "delta_ovl"]
 AUX_TARGET_NAMES = ["aux_vowel_start_rel", "aux_vowel_end_rel", "aux_next_onset_rel"]
 
 FEATURE_NAMES = [
@@ -181,6 +183,8 @@ def get_feature_schema() -> Dict[str, object]:
         "feature_names": list(FEATURE_NAMES),
         "categorical_features": list(CATEGORICAL_FEATURES),
         "target_names": list(TARGET_NAMES),
+        "anchor_target_names": list(ANCHOR_TARGET_NAMES),
+        "delta_target_names": list(DELTA_TARGET_NAMES),
         "aux_target_names": list(AUX_TARGET_NAMES),
     }
 
@@ -1342,6 +1346,28 @@ def _evaluate_training_row_quality(language: str, row: Dict[str, object]) -> Tup
     return keep, ";".join(reasons), float(score)
 
 
+def _compute_training_sample_weight(row: Dict[str, object]) -> float:
+    try:
+        quality = float(row.get("train_quality_score", 100.0) or 100.0)
+    except Exception:
+        quality = 100.0
+    try:
+        mapping_conf = float(row.get("mapping_confidence", 1.0) or 1.0)
+    except Exception:
+        mapping_conf = 1.0
+    try:
+        keep_default = int(row.get("train_keep_default", 1) or 1)
+    except Exception:
+        keep_default = 1
+
+    quality_norm = max(0.2, min(1.0, quality / 100.0))
+    mapping_norm = max(0.2, min(1.0, mapping_conf))
+    weight = quality_norm * (0.60 + (0.40 * mapping_norm))
+    if keep_default <= 0:
+        weight *= 0.55
+    return float(max(0.2, min(weight, 1.50)))
+
+
 def _mapping_max_shift_ms(feature_row: Dict[str, object]) -> float:
     wav_ms = float(feature_row.get("wav_duration_ms", 0.0) or 0.0)
     if wav_ms > 0.0:
@@ -1605,7 +1631,7 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
         jump_blocked = int(float(row.get("jump_blocked_flag", 0.0) or 0.0) > 0.0)
         label_source = "manual"
         row["label_source"] = label_source
-        row["sample_weight"] = 1.0
+        row["sample_weight"] = _compute_training_sample_weight(row)
         label_counts["manual"] += 1
         row["blank_risk_score"] = float(compute_blank_risk_score(row))
         row["blank_risk_flag"] = int(blank_risk_flag(row))

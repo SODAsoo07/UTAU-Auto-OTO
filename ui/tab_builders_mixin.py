@@ -372,6 +372,27 @@ class TabBuildersMixin:
             text_color="#9E9E9E",
         ).pack(side="left", padx=(8, 0))
 
+        gamma_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        gamma_row.pack(anchor="w", padx=12, pady=(2, 6), fill="x")
+        ctk.CTkLabel(
+            gamma_row,
+            text="Anchor mel gamma",
+            text_color="#B0BEC5",
+        ).pack(side="left")
+        gamma_entry = ctk.CTkEntry(
+            gamma_row,
+            width=80,
+            textvariable=self.ml_anchor_mel_gamma_var,
+            placeholder_text="1.0",
+        )
+        gamma_entry.pack(side="left", padx=(10, 8))
+        gamma_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(
+            gamma_row,
+            text="(>1.0: stronger shrink on low mel reliability)",
+            text_color="#9E9E9E",
+        ).pack(side="left", padx=(4, 0))
+
         detail_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
         detail_row.pack(anchor="w", padx=12, pady=(2, 0), fill="x")
         if not hasattr(self, "ml_coupled_status_detail_var"):

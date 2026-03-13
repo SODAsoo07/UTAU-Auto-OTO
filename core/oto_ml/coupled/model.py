@@ -15,7 +15,13 @@ try:
 except Exception:  # pragma: no cover
     np = None
 
-from core.oto_ml.features.schema import CATEGORICAL_FEATURES, FEATURE_NAMES, TARGET_NAMES
+from core.oto_ml.features.schema import (
+    ANCHOR_TARGET_NAMES,
+    CATEGORICAL_FEATURES,
+    DELTA_TARGET_NAMES,
+    FEATURE_NAMES,
+    TARGET_NAMES,
+)
 
 COUPLED_BACKEND = "coupled_nn_v1"
 COUPLED_BACKEND_RAWMEL = "coupled_nn_v2_rawmel"
@@ -175,6 +181,7 @@ def _build_model(
     hidden_dim: int = 160,
     aux_dim: int = 0,
     categorical_bucket_sizes: Optional[List[int]] = None,
+    head_mode: str = "single",
 ):
     class _CoupledModel(nn.Module):
         def __init__(self):
@@ -202,7 +209,14 @@ def _build_model(
                 nn.Linear(hidden_dim, hidden_dim // 2),
                 nn.ReLU(),
             )
-            self.delta_head = nn.Linear(hidden_dim // 2, len(TARGET_NAMES))
+            mode = str(head_mode or "single").strip().lower()
+            self.head_mode = mode
+            if mode == "split":
+                self.anchor_head = nn.Linear(hidden_dim // 2, len(ANCHOR_TARGET_NAMES))
+                self.delta_head = nn.Linear(hidden_dim // 2, len(DELTA_TARGET_NAMES))
+            else:
+                self.anchor_head = None
+                self.delta_head = nn.Linear(hidden_dim // 2, len(TARGET_NAMES))
             self.conf_head = nn.Sequential(nn.Linear(hidden_dim // 2, 1), nn.Sigmoid())
             self.aux_dim = int(aux_dim)
             if self.aux_dim > 0:
@@ -233,8 +247,15 @@ def _build_model(
             if cat_repr is not None:
                 pieces.append(cat_repr)
             z = self.joint(torch.cat(pieces, dim=1))
-            deltas = self.delta_head(z)
             conf = self.conf_head(z)
+            if self.head_mode == "split":
+                anchor = self.anchor_head(z)
+                delta = self.delta_head(z)
+                if self.aux_head is not None:
+                    aux = self.aux_head(z)
+                    return anchor, delta, conf, aux
+                return anchor, delta, conf
+            deltas = self.delta_head(z)
             if self.aux_head is not None:
                 aux = self.aux_head(z)
                 return deltas, conf, aux
@@ -255,6 +276,7 @@ def _build_model_rawmel(
     hidden_dim: int = 160,
     aux_dim: int = 0,
     categorical_bucket_sizes: Optional[List[int]] = None,
+    head_mode: str = "single",
 ):
     class _RawMelEncoder(nn.Module):
         def __init__(self, in_bins: int, in_frames: int):
@@ -310,7 +332,14 @@ def _build_model_rawmel(
                 nn.Linear(hidden_dim + 32, hidden_dim // 2),
                 nn.ReLU(),
             )
-            self.delta_head = nn.Linear(hidden_dim // 2, len(TARGET_NAMES))
+            mode = str(head_mode or "single").strip().lower()
+            self.head_mode = mode
+            if mode == "split":
+                self.anchor_head = nn.Linear(hidden_dim // 2, len(ANCHOR_TARGET_NAMES))
+                self.delta_head = nn.Linear(hidden_dim // 2, len(DELTA_TARGET_NAMES))
+            else:
+                self.anchor_head = None
+                self.delta_head = nn.Linear(hidden_dim // 2, len(TARGET_NAMES))
             self.conf_head = nn.Sequential(nn.Linear(hidden_dim // 2, 1), nn.Sigmoid())
             self.aux_dim = int(aux_dim)
             if self.aux_dim > 0:
@@ -343,8 +372,15 @@ def _build_model_rawmel(
             if cat_repr is not None:
                 pieces.append(cat_repr)
             z = self.joint(torch.cat(pieces, dim=1))
-            deltas = self.delta_head(z)
             conf = self.conf_head(z)
+            if self.head_mode == "split":
+                anchor = self.anchor_head(z)
+                delta = self.delta_head(z)
+                if self.aux_head is not None:
+                    aux = self.aux_head(z)
+                    return anchor, delta, conf, aux
+                return anchor, delta, conf
+            deltas = self.delta_head(z)
             if self.aux_head is not None:
                 aux = self.aux_head(z)
                 return deltas, conf, aux

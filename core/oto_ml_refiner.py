@@ -285,6 +285,17 @@ def _collect_model_dir_candidates(language: str, format_type: str, alias_family:
                 os.path.join(base_path, "v1_coupled"),
             ]
         )
+        if not os.path.isdir(base_path):
+            return
+        try:
+            for name in os.listdir(base_path):
+                if not str(name).lower().startswith("v"):
+                    continue
+                path = os.path.join(base_path, name)
+                if os.path.isfile(os.path.join(path, "model_meta.json")):
+                    candidates.append(path)
+        except Exception:
+            return
 
     for root in (
         _workspace_model_root_for_language(language),
@@ -927,6 +938,8 @@ def _apply_korean_cv_no_regression_guard(
         return params
     if format_type not in {"cv", "cvvc", "cvc", "vcv"}:
         return params
+    tight_cv = format_type in {"cvvc", "cvc"}
+    tight_cv = format_type in {"cvvc", "cvc"}
 
     offset, cons, cutoff, pre, ovl = validate_fn(*params)
     offset = float(offset)
@@ -966,6 +979,8 @@ def _apply_korean_cv_no_regression_guard(
 
     pre_abs = offset + pre
     pre_lead_cap = 18.0 if alias_type == "cv_head" else 24.0
+    if tight_cv:
+        pre_lead_cap -= 2.0
     if mapping_conf < 0.74:
         pre_lead_cap -= 4.0
     if blank_conf >= 0.58 or silence_ratio >= 0.62:
@@ -983,11 +998,15 @@ def _apply_korean_cv_no_regression_guard(
     early_pre_backoff = 4.0 if (blank_conf >= 0.62 or silence_ratio >= 0.66) else 10.0
     min_pre_abs = max(min_pre_abs, base_pre_abs - early_pre_backoff)
 
-    min_offset = base_offset - 6.0
+    early_offset_guard = 6.0 if not tight_cv else 4.0
+    min_offset = base_offset - early_offset_guard
     if curr_phone_start > 0.0:
-        min_offset = max(min_offset, curr_phone_start - 3.0)
+        min_offset = max(min_offset, curr_phone_start - (1.5 if alias_type == "cv_head" and tight_cv else 3.0))
     if onset_candidate > 0.0:
-        min_offset = max(min_offset, onset_candidate - (4.0 if alias_type == "cv_head" else 3.0))
+        onset_guard = 4.0 if alias_type == "cv_head" else 3.0
+        if tight_cv:
+            onset_guard = max(2.0, onset_guard - 1.0)
+        min_offset = max(min_offset, onset_candidate - onset_guard)
     if blank_conf >= 0.62 or silence_ratio >= 0.66:
         min_offset = max(min_offset, base_offset - 1.5)
 
@@ -1072,6 +1091,11 @@ def _apply_korean_cv_destination_guard(
     early_pre_allow = 3.0 if severe_blank else (7.0 if risky_blank else 12.0)
     onset_allow = 2.0 if severe_blank else (4.0 if risky_blank else 7.0)
     anchor_lead_allow = 8.0 if severe_blank else (12.0 if risky_blank else 18.0)
+    if tight_cv:
+        early_offset_allow = max(0.5, early_offset_allow - 2.0)
+        early_pre_allow = max(2.0, early_pre_allow - 2.0)
+        onset_allow = max(1.0, onset_allow - 1.0)
+        anchor_lead_allow = max(6.0, anchor_lead_allow - 3.0)
 
     violations = 0
     if offset < (base_offset - early_offset_allow):
@@ -1111,10 +1135,12 @@ def _apply_korean_bridge_post_guard(
     params: Tuple[float, float, float, float, float],
     validate_fn,
 ) -> Tuple[float, float, float, float, float]:
+    format_type = normalize_format_type("korean", row_context.get("format_type", ""))
     alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
     coda_type = str(row_context.get("coda_type", "") or "").strip().lower()
     if alias_type not in {"vc", "vv"}:
         return params
+    tight_bridge = format_type in {"cvvc", "cvc"}
 
     offset, cons, cutoff, pre, ovl = validate_fn(*params)
     pre = float(pre)
@@ -1143,6 +1169,13 @@ def _apply_korean_bridge_post_guard(
         cons_lo, cons_hi, cons_t = 58.0, 156.0, 98.0
         cut_lo, cut_hi, cut_t = 18.0, 98.0, 52.0
         next_allow = 34.0
+
+    if tight_bridge:
+        gap_lo = max(4.0, gap_lo - 2.0)
+        gap_hi = max(gap_lo + 2.0, gap_hi - 4.0)
+        gap_t = max(gap_lo, gap_t - 3.0)
+        if next_allow > 0.0:
+            next_allow = max(6.0, next_allow - 6.0)
 
     gap_now = max(pre - ovl, 0.0)
     cons_gap_now = max(cons - pre, 8.0)

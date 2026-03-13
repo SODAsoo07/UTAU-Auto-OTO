@@ -11,8 +11,10 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.oto_ml.coupled.model import (
+    ANCHOR_TARGET_NAMES,
     CATEGORICAL_FEATURES,
     COUPLED_MODEL_FILE,
+    DELTA_TARGET_NAMES,
     FEATURE_NAMES,
     PATCH_FEATURES,
     TARGET_NAMES,
@@ -27,6 +29,7 @@ from core.oto_ml.coupled.model import (
     np,
 )
 from core.oto_ml.features.schema import get_feature_schema
+from core.oto_ml_reliability import compute_mel_reliability_score
 
 
 def load_coupled_bundle(
@@ -50,6 +53,7 @@ def load_coupled_bundle(
     aux_dim = int(payload.get("aux_dim", 0) or 0)
 
     rawmel_enabled = bool(payload.get("rawmel_enabled", False))
+    head_mode = str(payload.get("head_mode", "") or "single").strip().lower()
     if rawmel_enabled:
         mel_bins = int(payload.get("mel_bins", 80) or 80)
         onset_frames = int(payload.get("onset_frames", 1) or 1)
@@ -65,6 +69,7 @@ def load_coupled_bundle(
             hidden_dim=int(payload.get("hidden_dim", 160)),
             aux_dim=aux_dim,
             categorical_bucket_sizes=categorical_bucket_sizes,
+            head_mode=head_mode,
         )
     else:
         model = _build_model(
@@ -75,6 +80,7 @@ def load_coupled_bundle(
             hidden_dim=int(payload.get("hidden_dim", 160)),
             aux_dim=aux_dim,
             categorical_bucket_sizes=categorical_bucket_sizes,
+            head_mode=head_mode,
         )
     model.load_state_dict(payload["state_dict"])
     run_device = _resolve_device(torch, device)
@@ -88,6 +94,9 @@ def load_coupled_bundle(
         "categorical_features": categorical_features,
         "categorical_bucket_sizes": categorical_bucket_sizes,
         "patch_features": patch_features,
+        "head_mode": head_mode,
+        "anchor_targets": list(payload.get("anchor_targets") or ANCHOR_TARGET_NAMES),
+        "delta_targets": list(payload.get("delta_targets") or DELTA_TARGET_NAMES),
         "rawmel_enabled": rawmel_enabled,
         "mel_patch_spec": payload.get("mel_patch_spec") or {},
         "device": run_device,
@@ -135,11 +144,34 @@ def predict_coupled_deltas(
         with torch.no_grad():
             out = model(x_t, p_t, cat_t)
 
+    head_mode = str(payload.get("head_mode", "") or "single").strip().lower()
+    if head_mode == "split":
+        if isinstance(out, tuple) and len(out) == 4:
+            anchor_t, delta_t, conf_t, _aux_t = out
+        else:
+            anchor_t, delta_t, conf_t = out
+        anchor_np = anchor_t.detach().cpu().numpy().reshape(-1)
+        delta_np = delta_t.detach().cpu().numpy().reshape(-1)
+        conf = float(conf_t.detach().cpu().numpy().reshape(-1)[0])
+        scale_gamma = float(os.environ.get("UTOA_ML_ANCHOR_MEL_GAMMA", 1.0) or 1.0)
+        if scale_gamma <= 0.0:
+            scale_gamma = 1.0
+        anchor_scale = float(compute_mel_reliability_score(feature_row)) ** float(scale_gamma)
+        anchor_scale = max(0.0, min(1.0, anchor_scale))
+        anchor_np = anchor_np * anchor_scale
+        anchor_targets = list(payload.get("anchor_targets") or ANCHOR_TARGET_NAMES)
+        delta_targets = list(payload.get("delta_targets") or DELTA_TARGET_NAMES)
+        out_vals = {name: 0.0 for name in TARGET_NAMES}
+        for idx, name in enumerate(anchor_targets):
+            out_vals[name] = float(anchor_np[idx]) if idx < len(anchor_np) else 0.0
+        for idx, name in enumerate(delta_targets):
+            out_vals[name] = float(delta_np[idx]) if idx < len(delta_np) else 0.0
+        return out_vals, conf
     if isinstance(out, tuple) and len(out) == 3:
         deltas_t, conf_t, _aux_t = out
     else:
         deltas_t, conf_t = out
     deltas_np = deltas_t.detach().cpu().numpy().reshape(-1)
     conf = float(conf_t.detach().cpu().numpy().reshape(-1)[0])
-    out = {target: float(deltas_np[i]) for i, target in enumerate(TARGET_NAMES)}
-    return out, conf
+    out_vals = {target: float(deltas_np[i]) for i, target in enumerate(TARGET_NAMES)}
+    return out_vals, conf

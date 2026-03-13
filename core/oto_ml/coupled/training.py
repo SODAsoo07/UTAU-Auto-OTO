@@ -39,10 +39,12 @@ except Exception:  # pragma: no cover
 from core.format_type_utils import normalize_format_type
 from core.oto_ml_policy import alias_family_to_alias_types, normalize_alias_family
 from core.oto_ml.coupled.model import (
+    ANCHOR_TARGET_NAMES,
     CATEGORICAL_FEATURES,
     COUPLED_BACKEND,
     COUPLED_BACKEND_RAWMEL,
     COUPLED_MODEL_FILE,
+    DELTA_TARGET_NAMES,
     FEATURE_NAMES,
     PATCH_FEATURES,
     TARGET_NAMES,
@@ -86,6 +88,39 @@ def _env_str(name: str, default: str) -> str:
         return str(default)
     text = str(raw).strip()
     return text or str(default)
+
+
+def _resolve_min_mapping_confidence(lang: str, fmt: str, min_mapping_confidence: float) -> float:
+    try:
+        if float(min_mapping_confidence) > 0.0:
+            return float(min_mapping_confidence)
+    except Exception:
+        pass
+    env_val = os.environ.get("UTOA_ML_TRAIN_MIN_MAPPING_CONF")
+    if env_val is not None:
+        try:
+            return max(0.0, float(env_val))
+        except Exception:
+            return 0.0
+    if str(lang).strip().lower() == "korean":
+        if str(fmt).strip().lower() in {"cvvc", "cvc"}:
+            return 0.55
+        return 0.50
+    return 0.0
+
+
+def _resolve_min_quality_score(lang: str, fmt: str) -> float:
+    env_val = os.environ.get("UTOA_ML_TRAIN_MIN_QUALITY_SCORE")
+    if env_val is not None:
+        try:
+            return max(0.0, float(env_val))
+        except Exception:
+            return 0.0
+    if str(lang).strip().lower() == "korean":
+        if str(fmt).strip().lower() in {"cvvc", "cvc"}:
+            return 55.0
+        return 45.0
+    return 0.0
 
 
 def _name_env_token(name: str) -> str:
@@ -132,6 +167,22 @@ def _resolve_loss_config(env_prefix: str, names: List[str], default_kinds: List[
         loss_kinds.append(kind)
         huber_deltas.append(max(1e-3, float(delta)))
     return loss_kinds, huber_deltas
+
+
+def _target_indices(target_names: List[str], subset_names: List[str]) -> List[int]:
+    indices = []
+    for name in subset_names:
+        if name not in target_names:
+            raise RuntimeError(f"Missing target name: {name}")
+        indices.append(target_names.index(name))
+    return indices
+
+
+def _combine_predictions(torch, anchor_pred, delta_pred, anchor_idx: List[int], delta_idx: List[int], total_dim: int):
+    combined = torch.zeros((int(anchor_pred.shape[0]), int(total_dim)), dtype=anchor_pred.dtype, device=anchor_pred.device)
+    combined[:, torch.tensor(anchor_idx, device=anchor_pred.device)] = anchor_pred
+    combined[:, torch.tensor(delta_idx, device=anchor_pred.device)] = delta_pred
+    return combined
 
 
 def _compute_static_hard_example_boost(
@@ -353,8 +404,14 @@ def _prepare_training_frame(
         normalized = [str(v).strip().lower() for v in alias_types if str(v).strip()]
         if normalized:
             df = df[df["alias_type"].astype(str).str.lower().isin(normalized)]
-    if float(min_mapping_confidence) > 0.0 and "mapping_confidence" in df.columns:
-        df = df[pd.to_numeric(df["mapping_confidence"], errors="coerce").fillna(0.0) >= float(min_mapping_confidence)]
+    min_map_conf = _resolve_min_mapping_confidence(lang, fmt, min_mapping_confidence)
+    if float(min_map_conf) > 0.0 and "mapping_confidence" in df.columns:
+        df = df[pd.to_numeric(df["mapping_confidence"], errors="coerce").fillna(0.0) >= float(min_map_conf)]
+    min_quality_score = _resolve_min_quality_score(lang, fmt)
+    if float(min_quality_score) > 0.0 and "train_quality_score" in df.columns:
+        df = df[pd.to_numeric(df["train_quality_score"], errors="coerce").fillna(0.0) >= float(min_quality_score)]
+    if _env_int("UTOA_ML_TRAIN_KEEP_DEFAULT_ONLY", 0) > 0 and "train_keep_default" in df.columns:
+        df = df[pd.to_numeric(df["train_keep_default"], errors="coerce").fillna(0.0) >= 1.0]
     return df
 
 
@@ -431,6 +488,8 @@ def train_coupled_bundle(
     feature_names = list(schema.get("feature_names") or FEATURE_NAMES)
     categorical_features = [c for c in CATEGORICAL_FEATURES if c in feature_names]
     categorical_bucket_sizes = _default_categorical_bucket_sizes(categorical_features)
+    prefetch_info = {"mode": "none", "estimated_patch_mb": 0.0, "reason": "not_rawmel"}
+    prefetch_mode = "none"
 
     x_rows = []
     c_rows = []
@@ -565,7 +624,7 @@ def train_coupled_bundle(
         val_src_pos = []
         val_dst_pos = []
 
-    pair_weight_base = float(os.environ.get("UTOA_ML_VC_CV_PAIR_WEIGHT", 0.06) or 0.06)
+    pair_weight_base = float(os.environ.get("UTOA_ML_VC_CV_PAIR_WEIGHT", 0.12) or 0.12)
     if pair_weight_base < 0.0:
         pair_weight_base = 0.0
     pair_weight_base = pair_weight_base * 0.5
@@ -579,6 +638,7 @@ def train_coupled_bundle(
         patch_dim=int(P.shape[1]),
         aux_dim=aux_dim,
         categorical_bucket_sizes=categorical_bucket_sizes,
+        head_mode="split",
     )
     run_device = _resolve_device(torch, requested=device)
     if isinstance(run_device, str):
@@ -618,7 +678,7 @@ def train_coupled_bundle(
     if sampler_mode not in {"group_balanced", "shuffle"}:
         sampler_mode = "group_balanced"
 
-    target_weight_values = [1.00, 0.90, 0.95, 1.00, 0.65]
+    target_weight_values = [1.00, 1.10, 0.95, 1.00, 0.90]
     target_weights = torch.tensor(target_weight_values, dtype=torch.float32, device=run_device).view(1, -1)
     target_loss_kinds, target_huber_deltas = _resolve_loss_config(
         "UTOA_ML_COUPLED_",
@@ -626,6 +686,18 @@ def train_coupled_bundle(
         ["huber", "l1", "huber", "l1", "l1"],
         [28.0, 18.0, 34.0, 14.0, 12.0],
     )
+    anchor_indices = _target_indices(TARGET_NAMES, ANCHOR_TARGET_NAMES)
+    delta_indices = _target_indices(TARGET_NAMES, DELTA_TARGET_NAMES)
+    anchor_weight_values = [target_weight_values[i] for i in anchor_indices]
+    delta_weight_values = [target_weight_values[i] for i in delta_indices]
+    anchor_weights = torch.tensor(anchor_weight_values, dtype=torch.float32, device=run_device).view(1, -1)
+    delta_weights = torch.tensor(delta_weight_values, dtype=torch.float32, device=run_device).view(1, -1)
+    anchor_loss_kinds = [target_loss_kinds[i] for i in anchor_indices]
+    anchor_huber_deltas = [target_huber_deltas[i] for i in anchor_indices]
+    delta_loss_kinds = [target_loss_kinds[i] for i in delta_indices]
+    delta_huber_deltas = [target_huber_deltas[i] for i in delta_indices]
+    anchor_loss_weight = _env_float("UTOA_ML_COUPLED_ANCHOR_WEIGHT", 1.0)
+    delta_loss_weight = _env_float("UTOA_ML_COUPLED_DELTA_WEIGHT", 1.0)
     aux_target_weight_values = [1.0, 1.0, 1.35]
     aux_target_weights = torch.tensor(aux_target_weight_values, dtype=torch.float32, device=run_device).view(1, -1)
     aux_loss_kinds, aux_huber_deltas = _resolve_loss_config(
@@ -676,13 +748,30 @@ def train_coupled_bundle(
 
             out = model(xb, pb, cb)
             if use_aux:
-                pred, conf, aux_pred = out
+                if isinstance(out, tuple) and len(out) == 4:
+                    anchor_pred, delta_pred, conf, aux_pred = out
+                else:
+                    pred, conf, aux_pred = out
+                    anchor_pred = pred[:, anchor_indices]
+                    delta_pred = pred[:, delta_indices]
             else:
-                pred, conf = out
+                if isinstance(out, tuple) and len(out) == 3:
+                    anchor_pred, delta_pred, conf = out
+                else:
+                    pred, conf = out
+                    anchor_pred = pred[:, anchor_indices]
+                    delta_pred = pred[:, delta_indices]
                 aux_pred = None
-            base_matrix = _loss_matrix(torch, pred, yb, target_loss_kinds, target_huber_deltas)
-            base_row = torch.mean(base_matrix * target_weights, dim=1)
-            base_loss = torch.mean(base_row * wb)
+            pred = _combine_predictions(torch, anchor_pred, delta_pred, anchor_indices, delta_indices, len(TARGET_NAMES))
+            yb_anchor = yb[:, anchor_indices]
+            yb_delta = yb[:, delta_indices]
+            anchor_matrix = _loss_matrix(torch, anchor_pred, yb_anchor, anchor_loss_kinds, anchor_huber_deltas)
+            anchor_row = torch.mean(anchor_matrix * anchor_weights, dim=1)
+            anchor_loss = torch.mean(anchor_row * wb)
+            delta_matrix = _loss_matrix(torch, delta_pred, yb_delta, delta_loss_kinds, delta_huber_deltas)
+            delta_row = torch.mean(delta_matrix * delta_weights, dim=1)
+            delta_loss = torch.mean(delta_row * wb)
+            base_loss = (anchor_loss * float(anchor_loss_weight)) + (delta_loss * float(delta_loss_weight))
 
             offset = bb[:, 0] + pred[:, 0]
             consonant = bb[:, 1] + pred[:, 1]
@@ -771,12 +860,28 @@ def train_coupled_bundle(
         with torch.no_grad():
             out_val = model(X_valid, P_valid, C_valid)
             if use_aux:
-                pred_val, conf_val, aux_val = out_val
+                if isinstance(out_val, tuple) and len(out_val) == 4:
+                    anchor_val, delta_val, conf_val, aux_val = out_val
+                else:
+                    pred_val, conf_val, aux_val = out_val
+                    anchor_val = pred_val[:, anchor_indices]
+                    delta_val = pred_val[:, delta_indices]
             else:
-                pred_val, conf_val = out_val
+                if isinstance(out_val, tuple) and len(out_val) == 3:
+                    anchor_val, delta_val, conf_val = out_val
+                else:
+                    pred_val, conf_val = out_val
+                    anchor_val = pred_val[:, anchor_indices]
+                    delta_val = pred_val[:, delta_indices]
                 aux_val = None
-            val_base_matrix = _loss_matrix(torch, pred_val, Y_valid, target_loss_kinds, target_huber_deltas)
-            val_base = torch.mean(torch.mean(val_base_matrix * target_weights, dim=1) * W_valid)
+            pred_val = _combine_predictions(torch, anchor_val, delta_val, anchor_indices, delta_indices, len(TARGET_NAMES))
+            val_anchor_matrix = _loss_matrix(torch, anchor_val, Y_valid[:, anchor_indices], anchor_loss_kinds, anchor_huber_deltas)
+            val_anchor_row = torch.mean(val_anchor_matrix * anchor_weights, dim=1)
+            val_anchor_loss = torch.mean(val_anchor_row * W_valid)
+            val_delta_matrix = _loss_matrix(torch, delta_val, Y_valid[:, delta_indices], delta_loss_kinds, delta_huber_deltas)
+            val_delta_row = torch.mean(val_delta_matrix * delta_weights, dim=1)
+            val_delta_loss = torch.mean(val_delta_row * W_valid)
+            val_base = (val_anchor_loss * float(anchor_loss_weight)) + (val_delta_loss * float(delta_loss_weight))
             offset_v = B_valid[:, 0] + pred_val[:, 0]
             consonant_v = B_valid[:, 1] + pred_val[:, 1]
             cutoff_abs_v = B_valid[:, 2] + pred_val[:, 2]
@@ -869,10 +974,21 @@ def train_coupled_bundle(
     with torch.no_grad():
         out_valid = model(X_valid, P_valid, C_valid)
         if use_aux:
-            pred_valid, conf_valid, aux_valid = out_valid
+            if isinstance(out_valid, tuple) and len(out_valid) == 4:
+                anchor_valid, delta_valid, conf_valid, aux_valid = out_valid
+            else:
+                pred_valid, conf_valid, aux_valid = out_valid
+                anchor_valid = pred_valid[:, anchor_indices]
+                delta_valid = pred_valid[:, delta_indices]
         else:
-            pred_valid, conf_valid = out_valid
+            if isinstance(out_valid, tuple) and len(out_valid) == 3:
+                anchor_valid, delta_valid, conf_valid = out_valid
+            else:
+                pred_valid, conf_valid = out_valid
+                anchor_valid = pred_valid[:, anchor_indices]
+                delta_valid = pred_valid[:, delta_indices]
             aux_valid = None
+        pred_valid = _combine_predictions(torch, anchor_valid, delta_valid, anchor_indices, delta_indices, len(TARGET_NAMES))
     pred_valid_np = pred_valid.detach().cpu().numpy()
     conf_valid_np = conf_valid.detach().cpu().numpy().reshape(-1)
     truth_valid_np = Y[valid_idx]
@@ -908,10 +1024,15 @@ def train_coupled_bundle(
             "categorical_features": categorical_features,
             "categorical_bucket_sizes": [int(v) for v in categorical_bucket_sizes],
             "target_names": list(TARGET_NAMES),
+            "anchor_targets": list(ANCHOR_TARGET_NAMES),
+            "delta_targets": list(DELTA_TARGET_NAMES),
             "patch_features": list(PATCH_FEATURES),
             "in_dim": int(X.shape[1]),
             "patch_dim": int(P.shape[1]),
             "hidden_dim": 160,
+            "head_mode": "split",
+            "anchor_dim": int(len(ANCHOR_TARGET_NAMES)),
+            "delta_dim": int(len(DELTA_TARGET_NAMES)),
             "aux_dim": int(aux_dim),
             "aux_targets": list(AUX_TARGET_NAMES) if use_aux else [],
         },
@@ -923,7 +1044,7 @@ def train_coupled_bundle(
         "backend": COUPLED_BACKEND,
         "language": str(language or "").strip().lower(),
         "format_type": normalize_format_type(language, format_type) or "general",
-        "model_version": "v1",
+        "model_version": "v2",
         "feature_version": schema.get("feature_version", ""),
         "feature_names": feature_names,
         "categorical_features": categorical_features,
@@ -932,6 +1053,9 @@ def train_coupled_bundle(
             "categorical_bucket_sizes": [int(v) for v in categorical_bucket_sizes],
         },
         "targets": list(TARGET_NAMES),
+        "anchor_targets": list(ANCHOR_TARGET_NAMES),
+        "delta_targets": list(DELTA_TARGET_NAMES),
+        "head_mode": "split",
         "aux_targets": list(AUX_TARGET_NAMES) if use_aux else [],
         "mel_patch_spec": list(PATCH_FEATURES),
         "min_confidence": float(min_confidence),
@@ -1235,7 +1359,7 @@ def train_coupled_bundle_rawmel(
     valid_idx = np.asarray(valid_idx, dtype=np.int64)
 
     pair_map = _build_vc_cv_pair_map(df)
-    pair_weight_base = float(os.environ.get("UTOA_ML_VC_CV_PAIR_WEIGHT", 0.06) or 0.06)
+    pair_weight_base = float(os.environ.get("UTOA_ML_VC_CV_PAIR_WEIGHT", 0.12) or 0.12)
     if pair_weight_base < 0.0:
         pair_weight_base = 0.0
     pair_weight_base = pair_weight_base * 0.5
@@ -1282,6 +1406,7 @@ def train_coupled_bundle_rawmel(
         tail_frames=int(tail_frames),
         aux_dim=aux_dim,
         categorical_bucket_sizes=categorical_bucket_sizes,
+        head_mode="split",
     )
     run_device = _resolve_device(torch, requested=device)
     if isinstance(run_device, str):
@@ -1398,10 +1523,10 @@ def train_coupled_bundle_rawmel(
 
     target_weight_values = [
         _env_float("UTOA_ML_RAWMEL_TARGET_W_OFFSET", 1.12),
-        _env_float("UTOA_ML_RAWMEL_TARGET_W_CONS", 0.90),
+        _env_float("UTOA_ML_RAWMEL_TARGET_W_CONS", 1.05),
         _env_float("UTOA_ML_RAWMEL_TARGET_W_CUTOFF", 1.02),
         _env_float("UTOA_ML_RAWMEL_TARGET_W_PRE", 1.08),
-        _env_float("UTOA_ML_RAWMEL_TARGET_W_OVL", 0.62),
+        _env_float("UTOA_ML_RAWMEL_TARGET_W_OVL", 0.90),
     ]
     target_weights = torch.tensor(target_weight_values, dtype=torch.float32, device=run_device).view(1, -1)
     target_loss_kinds, target_huber_deltas = _resolve_loss_config(
@@ -1410,6 +1535,18 @@ def train_coupled_bundle_rawmel(
         ["huber", "l1", "huber", "l1", "l1"],
         [30.0, 18.0, 38.0, 14.0, 12.0],
     )
+    anchor_indices = _target_indices(TARGET_NAMES, ANCHOR_TARGET_NAMES)
+    delta_indices = _target_indices(TARGET_NAMES, DELTA_TARGET_NAMES)
+    anchor_weight_values = [target_weight_values[i] for i in anchor_indices]
+    delta_weight_values = [target_weight_values[i] for i in delta_indices]
+    anchor_weights = torch.tensor(anchor_weight_values, dtype=torch.float32, device=run_device).view(1, -1)
+    delta_weights = torch.tensor(delta_weight_values, dtype=torch.float32, device=run_device).view(1, -1)
+    anchor_loss_kinds = [target_loss_kinds[i] for i in anchor_indices]
+    anchor_huber_deltas = [target_huber_deltas[i] for i in anchor_indices]
+    delta_loss_kinds = [target_loss_kinds[i] for i in delta_indices]
+    delta_huber_deltas = [target_huber_deltas[i] for i in delta_indices]
+    anchor_loss_weight = _env_float("UTOA_ML_RAWMEL_ANCHOR_WEIGHT", 1.0)
+    delta_loss_weight = _env_float("UTOA_ML_RAWMEL_DELTA_WEIGHT", 1.0)
     aux_target_weight_values = [1.0, 1.0, 1.45]
     aux_target_weights = torch.tensor(aux_target_weight_values, dtype=torch.float32, device=run_device).view(1, -1)
     aux_loss_kinds, aux_huber_deltas = _resolve_loss_config(
@@ -1475,13 +1612,30 @@ def train_coupled_bundle_rawmel(
 
             out = model(xb, pb, onset_t, tail_t, cb)
             if use_aux:
-                pred, conf, aux_pred = out
+                if isinstance(out, tuple) and len(out) == 4:
+                    anchor_pred, delta_pred, conf, aux_pred = out
+                else:
+                    pred, conf, aux_pred = out
+                    anchor_pred = pred[:, anchor_indices]
+                    delta_pred = pred[:, delta_indices]
             else:
-                pred, conf = out
+                if isinstance(out, tuple) and len(out) == 3:
+                    anchor_pred, delta_pred, conf = out
+                else:
+                    pred, conf = out
+                    anchor_pred = pred[:, anchor_indices]
+                    delta_pred = pred[:, delta_indices]
                 aux_pred = None
-            base_matrix = _loss_matrix(torch, pred, yb, target_loss_kinds, target_huber_deltas)
-            base_row = torch.mean(base_matrix * target_weights, dim=1)
-            base_loss = torch.mean(base_row * wb)
+            pred = _combine_predictions(torch, anchor_pred, delta_pred, anchor_indices, delta_indices, len(TARGET_NAMES))
+            yb_anchor = yb[:, anchor_indices]
+            yb_delta = yb[:, delta_indices]
+            anchor_matrix = _loss_matrix(torch, anchor_pred, yb_anchor, anchor_loss_kinds, anchor_huber_deltas)
+            anchor_row = torch.mean(anchor_matrix * anchor_weights, dim=1)
+            anchor_loss = torch.mean(anchor_row * wb)
+            delta_matrix = _loss_matrix(torch, delta_pred, yb_delta, delta_loss_kinds, delta_huber_deltas)
+            delta_row = torch.mean(delta_matrix * delta_weights, dim=1)
+            delta_loss = torch.mean(delta_row * wb)
+            base_loss = (anchor_loss * float(anchor_loss_weight)) + (delta_loss * float(delta_loss_weight))
 
             offset = bb[:, 0] + pred[:, 0]
             consonant = bb[:, 1] + pred[:, 1]
@@ -1584,12 +1738,28 @@ def train_coupled_bundle_rawmel(
                 tail_valid_t = _np_to_device(tail_valid_np).unsqueeze(1)
             out_val = model(X_valid, P_valid, onset_valid_t, tail_valid_t, C_valid)
             if use_aux:
-                pred_val, conf_val, aux_val = out_val
+                if isinstance(out_val, tuple) and len(out_val) == 4:
+                    anchor_val, delta_val, conf_val, aux_val = out_val
+                else:
+                    pred_val, conf_val, aux_val = out_val
+                    anchor_val = pred_val[:, anchor_indices]
+                    delta_val = pred_val[:, delta_indices]
             else:
-                pred_val, conf_val = out_val
+                if isinstance(out_val, tuple) and len(out_val) == 3:
+                    anchor_val, delta_val, conf_val = out_val
+                else:
+                    pred_val, conf_val = out_val
+                    anchor_val = pred_val[:, anchor_indices]
+                    delta_val = pred_val[:, delta_indices]
                 aux_val = None
-            val_base_matrix = _loss_matrix(torch, pred_val, Y_valid, target_loss_kinds, target_huber_deltas)
-            val_base = torch.mean(torch.mean(val_base_matrix * target_weights, dim=1) * W_valid)
+            pred_val = _combine_predictions(torch, anchor_val, delta_val, anchor_indices, delta_indices, len(TARGET_NAMES))
+            val_anchor_matrix = _loss_matrix(torch, anchor_val, Y_valid[:, anchor_indices], anchor_loss_kinds, anchor_huber_deltas)
+            val_anchor_row = torch.mean(val_anchor_matrix * anchor_weights, dim=1)
+            val_anchor_loss = torch.mean(val_anchor_row * W_valid)
+            val_delta_matrix = _loss_matrix(torch, delta_val, Y_valid[:, delta_indices], delta_loss_kinds, delta_huber_deltas)
+            val_delta_row = torch.mean(val_delta_matrix * delta_weights, dim=1)
+            val_delta_loss = torch.mean(val_delta_row * W_valid)
+            val_base = (val_anchor_loss * float(anchor_loss_weight)) + (val_delta_loss * float(delta_loss_weight))
             offset_v = B_valid[:, 0] + pred_val[:, 0]
             consonant_v = B_valid[:, 1] + pred_val[:, 1]
             cutoff_abs_v = B_valid[:, 2] + pred_val[:, 2]
@@ -1697,10 +1867,21 @@ def train_coupled_bundle_rawmel(
             tail_valid_t = _np_to_device(tail_valid_np).unsqueeze(1)
         out_valid = model(X_valid, P_valid, onset_valid_t, tail_valid_t, C_valid)
         if use_aux:
-            pred_valid, conf_valid, aux_valid = out_valid
+            if isinstance(out_valid, tuple) and len(out_valid) == 4:
+                anchor_valid, delta_valid, conf_valid, aux_valid = out_valid
+            else:
+                pred_valid, conf_valid, aux_valid = out_valid
+                anchor_valid = pred_valid[:, anchor_indices]
+                delta_valid = pred_valid[:, delta_indices]
         else:
-            pred_valid, conf_valid = out_valid
+            if isinstance(out_valid, tuple) and len(out_valid) == 3:
+                anchor_valid, delta_valid, conf_valid = out_valid
+            else:
+                pred_valid, conf_valid = out_valid
+                anchor_valid = pred_valid[:, anchor_indices]
+                delta_valid = pred_valid[:, delta_indices]
             aux_valid = None
+        pred_valid = _combine_predictions(torch, anchor_valid, delta_valid, anchor_indices, delta_indices, len(TARGET_NAMES))
     pred_valid_np = pred_valid.detach().cpu().numpy()
     conf_valid_np = conf_valid.detach().cpu().numpy().reshape(-1)
     truth_valid_np = Y[valid_idx]
@@ -1736,10 +1917,15 @@ def train_coupled_bundle_rawmel(
             "categorical_features": categorical_features,
             "categorical_bucket_sizes": [int(v) for v in categorical_bucket_sizes],
             "target_names": list(TARGET_NAMES),
+            "anchor_targets": list(ANCHOR_TARGET_NAMES),
+            "delta_targets": list(DELTA_TARGET_NAMES),
             "patch_features": list(PATCH_FEATURES),
             "in_dim": int(X.shape[1]),
             "patch_dim": int(P.shape[1]),
             "hidden_dim": 160,
+            "head_mode": "split",
+            "anchor_dim": int(len(ANCHOR_TARGET_NAMES)),
+            "delta_dim": int(len(DELTA_TARGET_NAMES)),
             "aux_dim": int(aux_dim),
             "aux_targets": list(AUX_TARGET_NAMES) if use_aux else [],
             "rawmel_enabled": True,
@@ -1766,6 +1952,9 @@ def train_coupled_bundle_rawmel(
             "categorical_bucket_sizes": [int(v) for v in categorical_bucket_sizes],
         },
         "targets": list(TARGET_NAMES),
+        "anchor_targets": list(ANCHOR_TARGET_NAMES),
+        "delta_targets": list(DELTA_TARGET_NAMES),
+        "head_mode": "split",
         "aux_targets": list(AUX_TARGET_NAMES) if use_aux else [],
         "mel_patch_spec": dict(patch_spec),
         "mel_patch_spec_hash": patch_hash,
