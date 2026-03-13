@@ -352,6 +352,73 @@ def extract_patches_for_row(
     return onset_patch, tail_patch
 
 
+def _patch_quality_metrics(patch: "np.ndarray") -> Dict[str, float]:
+    if patch is None or patch.size == 0:
+        return {"mean": 0.0, "std": 0.0, "low_ratio": 1.0}
+    mean = float(np.mean(patch))
+    std = float(np.std(patch))
+    if std < 1e-6:
+        low_ratio = 1.0 if mean <= 0.0 else 0.0
+    else:
+        threshold = mean - (0.65 * std)
+        low_ratio = float(np.mean(patch <= threshold))
+    return {"mean": mean, "std": std, "low_ratio": low_ratio}
+
+
+def extract_patches_for_row_with_quality(
+    *,
+    wav_path: str,
+    onset_anchor_ms: float,
+    tail_anchor_ms: float,
+    patch_spec: Dict[str, object],
+    mel_cache: Optional[Dict[str, Tuple["np.ndarray", float]]] = None,
+) -> Tuple["np.ndarray", "np.ndarray", Dict[str, float]]:
+    _ensure_numpy()
+    if not wav_path or not os.path.isfile(wav_path):
+        raise FileNotFoundError(wav_path)
+    mel_cache = mel_cache if mel_cache is not None else {}
+    mel_bins = int(patch_spec["mel_bins"])
+    hop_ms = float(patch_spec["frame_hop_ms"])
+    win_ms = float(patch_spec["win_ms"])
+    onset_win = tuple(patch_spec["onset_window_ms"])
+    tail_win = tuple(patch_spec["tail_window_ms"])
+    normalization = str(patch_spec["normalization"])
+    if wav_path in mel_cache:
+        mel, cached_hop = mel_cache[wav_path]
+    else:
+        audio, sr = read_wav_mono_np(wav_path)
+        if audio is None or sr is None:
+            raise ValueError("failed to read wav")
+        mel, cached_hop = compute_log_mel(
+            audio,
+            sr,
+            mel_bins=mel_bins,
+            frame_hop_ms=hop_ms,
+            win_ms=win_ms,
+        )
+        mel_cache[wav_path] = (mel, cached_hop)
+    onset_raw = extract_patch_from_mel(
+        mel,
+        anchor_ms=onset_anchor_ms,
+        window_ms=onset_win,
+        hop_ms=hop_ms,
+        mel_bins=mel_bins,
+    )
+    tail_raw = extract_patch_from_mel(
+        mel,
+        anchor_ms=tail_anchor_ms,
+        window_ms=tail_win,
+        hop_ms=hop_ms,
+        mel_bins=mel_bins,
+    )
+    quality = {}
+    quality.update({f"onset_{k}": v for k, v in _patch_quality_metrics(onset_raw).items()})
+    quality.update({f"tail_{k}": v for k, v in _patch_quality_metrics(tail_raw).items()})
+    onset_patch = normalize_patch(onset_raw, normalization)
+    tail_patch = normalize_patch(tail_raw, normalization)
+    return onset_patch, tail_patch, quality
+
+
 @dataclass
 class MelPatchCacheIndex:
     cache_dir: str

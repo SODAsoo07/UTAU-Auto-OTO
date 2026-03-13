@@ -723,6 +723,11 @@ class PipelineActionsMixin:
                         if hasattr(self, "ml_coupled_backend_var")
                         else "auto"
                     )
+                    kr_continuity_max_offset_adj_raw = (
+                        self.kr_continuity_max_offset_adj_var.get()
+                        if hasattr(self, "kr_continuity_max_offset_adj_var")
+                        else ""
+                    )
                     ml_model_root = ""
                     if lang == "japanese" and hasattr(self, "ml_model_root_ja_var"):
                         ml_model_root = str(self.ml_model_root_ja_var.get() or "").strip()
@@ -762,7 +767,20 @@ class PipelineActionsMixin:
                         except Exception:
                             return None
 
+                    def _parse_optional_float(raw_value, lo=0.0, hi=None):
+                        text = str(raw_value or "").strip()
+                        if not text:
+                            return None
+                        try:
+                            value = max(float(lo), float(text))
+                            if hi is not None:
+                                value = min(float(hi), value)
+                            return value
+                        except Exception:
+                            return None
+
                     ml_coupled_min_conf = _parse_optional_threshold(ml_coupled_min_conf_raw, lo=0.0, hi=1.0)
+                    kr_continuity_max_offset_adj = _parse_optional_float(kr_continuity_max_offset_adj_raw, lo=0.0, hi=2000.0)
 
                     os.environ["UTOA_ML_COUPLED_ENABLE"] = "1" if ml_coupled_enable else "0"
                     os.environ["UTOA_ML_ENSEMBLE_ENABLE"] = "1" if ensemble_enabled else "0"
@@ -777,6 +795,10 @@ class PipelineActionsMixin:
                     )
                     os.environ["UTOA_ML_COUPLED_BACKEND"] = str(coupled_backend_env)
                     os.environ["UTOA_ML_COUPLED_STRICT_CONSTRAINT"] = "1" if ml_coupled_strict_constraint else "0"
+                    if kr_continuity_max_offset_adj is None:
+                        os.environ.pop("UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ", None)
+                    else:
+                        os.environ["UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ"] = str(float(kr_continuity_max_offset_adj))
                     if lang == "japanese":
                         if ml_model_root:
                             os.environ["UTOA_JA_OTO_ML_DIR"] = ml_model_root

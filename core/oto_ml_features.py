@@ -36,6 +36,7 @@ except Exception:  # pragma: no cover
 from core.lab_generator import load_custom_phonemes
 from core.kr_oto_rules import should_ignore_korean_alias
 from core.oto_ml_mapping_quality import augment_mapping_quality_features
+from core.oto_ml_reliability import blank_risk_flag, compute_blank_risk_score
 from core.format_type_utils import normalize_format_type
 from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
 from core.prefix_map_utils import find_prefix_map_path, strip_prefix_map_affixes
@@ -93,87 +94,11 @@ FEATURE_DEFAULTS = {name: 0.0 for name in FEATURE_NAMES}
 for _name in CATEGORICAL_FEATURES:
     FEATURE_DEFAULTS[_name] = ""
 
-_PSEUDO_PATH_HINTS = ("pseudo", "autotest", "auto", "generated", "output", "out", "tuned")
-
-
-def _env_flag(name: str, default: bool) -> bool:
-    raw = str(os.environ.get(name, "")).strip().lower()
-    if not raw:
-        return bool(default)
-    if raw in {"1", "true", "yes", "on", "y"}:
-        return True
-    if raw in {"0", "false", "no", "off", "n"}:
-        return False
-    return bool(default)
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, default))
-    except Exception:
-        return float(default)
-
-
-def _looks_like_pseudo_path(path: str) -> bool:
-    raw = str(path or "").strip()
-    if not raw:
-        return False
-    norm = raw.replace("\\", "/").strip().lower()
-    parts = [part for part in norm.split("/") if part]
-    if not parts:
-        return False
-
-    # Only inspect the file name and the nearest parent folders.
-    # Absolute workspace roots such as "UTAU_Auto_OTO_v3" would otherwise
-    # falsely mark every staged manual oto as pseudo.
-    local_parts = parts[-3:]
-    for part in local_parts:
-        tokens = [tok for tok in re.split(r"[^a-z0-9]+", part) if tok]
-        if any(hint in tokens for hint in _PSEUDO_PATH_HINTS):
-            return True
-    return False
-
-
 def _stable_source_oto_id(path: str) -> str:
     abs_path = os.path.abspath(path or "")
     digest = hashlib.sha1(abs_path.encode("utf-8", errors="replace")).hexdigest()
     return digest[:16]
 
-
-def _compute_row_weight(
-    *,
-    label_source: str,
-    mapping_confidence: float,
-    keep_default: int,
-    jump_blocked_flag: int,
-) -> float:
-    source = str(label_source or "").strip().lower()
-    if not source.startswith("pseudo"):
-        return 1.0
-
-    if keep_default <= 0:
-        return 0.0
-    if int(jump_blocked_flag) > 0:
-        return 0.0
-
-    conf = float(mapping_confidence)
-    high = _env_float("UTOA_ML_PSEUDO_WEIGHT_HIGH", 0.7)
-    mid = _env_float("UTOA_ML_PSEUDO_WEIGHT_MID", 0.4)
-    use_pseudo = _env_flag("UTOA_ML_USE_PSEUDO_LABELS", True)
-    if not use_pseudo:
-        return 0.0
-    if source == "pseudo_high":
-        return max(0.0, min(1.0, high))
-    if source == "pseudo_mid":
-        return max(0.0, min(1.0, mid))
-    if source == "pseudo_low":
-        return 0.0
-    # Generic pseudo source without bucket.
-    if conf >= 0.80:
-        return max(0.0, min(1.0, high))
-    if conf >= 0.60:
-        return max(0.0, min(1.0, mid))
-    return 0.0
 
 KR_DELTA_CLIP_LIMITS = {
     "delta_offset": [-220.0, 220.0],
@@ -1615,14 +1540,7 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
     matched_rows: List[Dict[str, object]] = []
     skipped = 0
     skipped_cutoff = 0
-    label_counts = {
-        "manual": 0,
-        "pseudo_high": 0,
-        "pseudo_mid": 0,
-        "pseudo_low": 0,
-    }
-
-    manual_like_pseudo = _looks_like_pseudo_path(manual_oto_path)
+    label_counts = {"manual": 0}
 
     for feat_idx, feat in enumerate(auto_feats):
         manual_row = manual_matches.get(feat_idx)
@@ -1685,26 +1603,12 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
         row["train_quality_score"] = float(quality_score)
         mapping_conf = float(row.get("mapping_confidence", 0.0) or 0.0)
         jump_blocked = int(float(row.get("jump_blocked_flag", 0.0) or 0.0) > 0.0)
-        if manual_like_pseudo:
-            if keep_default > 0 and (mapping_conf >= 0.80) and not jump_blocked:
-                label_source = "pseudo_high"
-            elif keep_default > 0 and (mapping_conf >= 0.60) and not jump_blocked:
-                label_source = "pseudo_mid"
-            else:
-                label_source = "pseudo_low"
-        else:
-            label_source = "manual"
+        label_source = "manual"
         row["label_source"] = label_source
-        row["sample_weight"] = float(
-            _compute_row_weight(
-                label_source=label_source,
-                mapping_confidence=mapping_conf,
-                keep_default=int(keep_default),
-                jump_blocked_flag=jump_blocked,
-            )
-        )
-        if label_source in label_counts:
-            label_counts[label_source] += 1
+        row["sample_weight"] = 1.0
+        label_counts["manual"] += 1
+        row["blank_risk_score"] = float(compute_blank_risk_score(row))
+        row["blank_risk_flag"] = int(blank_risk_flag(row))
         row["skipped_reason"] = ""
         matched_rows.append(row)
 
@@ -1720,9 +1624,6 @@ def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str,
         "skip_mapping_far": int(match_stats.get("skip_far", 0)),
         "skip_mapping_unmatched": int(match_stats.get("skip_unmatched", 0)),
         "label_manual": int(label_counts["manual"]),
-        "label_pseudo_high": int(label_counts["pseudo_high"]),
-        "label_pseudo_mid": int(label_counts["pseudo_mid"]),
-        "label_pseudo_low": int(label_counts["pseudo_low"]),
     }
     _save_training_row_cache(cache_path, matched_rows, stats)
     return matched_rows, stats
@@ -1736,7 +1637,7 @@ def dataset_fieldnames() -> List[str]:
         "manual_offset", "manual_cons", "manual_cutoff", "manual_pre", "manual_ovl",
         *TARGET_NAMES,
         *AUX_TARGET_NAMES,
-        "label_source", "sample_weight",
+        "label_source", "sample_weight", "blank_risk_score", "blank_risk_flag",
         "train_keep_default", "train_skip_reason", "train_quality_score", "skipped_reason",
     ]
 

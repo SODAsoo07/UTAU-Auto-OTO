@@ -20,7 +20,8 @@ _TRAINING_MIN_CONF = {
 _ALIAS_FAMILY_TYPES = {
     "cv": ["cv", "cv_head"],
     "vowel": ["mono"],
-    "bridge": ["vc", "vv", "vcv"],
+    "vc": ["vc", "vv"],
+    "vcv": ["vcv"],
 }
 
 
@@ -34,7 +35,8 @@ _SELECTOR_DEFAULTS = {
     ("korean", "cvc", ""): True,
     ("korean", "cvc", "cv"): True,
     ("korean", "cvc", "vowel"): True,
-    ("korean", "cvc", "bridge"): True,
+    ("korean", "cvc", "vc"): True,
+    ("korean", "cvc", "vcv"): True,
     ("korean", "cvvc", "cv"): True,
     # Japanese CVVC stays guarded at runtime:
     # - cv family delta is disabled by default
@@ -42,7 +44,8 @@ _SELECTOR_DEFAULTS = {
     # - post-guard clamps overly early timing
     ("japanese", "cvvc", ""): True,
     ("japanese", "cvvc", "cv"): True,
-    ("japanese", "cvvc", "bridge"): True,
+    ("japanese", "cvvc", "vc"): True,
+    ("japanese", "cvvc", "vcv"): True,
 }
 
 
@@ -101,9 +104,9 @@ _DELTA_DEFAULTS = {
 
 
 _FAMILY_SPLIT_DEFAULTS = {
-    ("korean", "cvc"): ["cv", "bridge"],
-    ("korean", "cvvc"): ["cv", "bridge"],
-    ("japanese", "cvvc"): ["cv", "bridge"],
+    ("korean", "cvc"): ["cv", "vc", "vcv"],
+    ("korean", "cvvc"): ["cv", "vc", "vcv"],
+    ("japanese", "cvvc"): ["cv", "vc", "vcv"],
 }
 
 
@@ -115,8 +118,12 @@ def normalize_alias_family(alias_family: str) -> str:
         return "vowel"
     if value in {"cv", "head", "head_cv"}:
         return "cv"
-    if value in {"bridge", "vc", "vv", "vcv"}:
-        return "bridge"
+    if value in {"bridge"}:
+        return "vc"
+    if value in {"vc", "vv"}:
+        return "vc"
+    if value in {"vcv"}:
+        return "vcv"
     return value
 
 
@@ -132,8 +139,10 @@ def infer_alias_family(language: str, row_context: Dict[str, object]) -> str:
         return "cv"
     if alias_type == "mono":
         return "vowel"
-    if alias_type in {"vc", "vv", "vcv"}:
-        return "bridge"
+    if alias_type in {"vc", "vv"}:
+        return "vc"
+    if alias_type == "vcv":
+        return "vcv"
     return ""
 
 
@@ -153,7 +162,7 @@ def default_training_filters(language: str, format_type: str, alias_family: str 
     family = normalize_alias_family(alias_family)
     min_conf = float(_TRAINING_MIN_CONF.get((lang, fmt), 0.50))
     require_train_keep = True
-    if family == "bridge":
+    if family in {"vc", "vcv"}:
         min_conf = min(0.90, min_conf + 0.04)
         if fmt in {"cvc", "cvvc"}:
             # Bridge rows often fail the generic train_keep heuristic even when
@@ -165,7 +174,6 @@ def default_training_filters(language: str, format_type: str, alias_family: str 
         "require_train_keep": bool(require_train_keep),
         "min_mapping_confidence": float(min_conf),
         "exclude_nuclei_fallback": True,
-        "use_pseudo_labels": False,
     }
 
 

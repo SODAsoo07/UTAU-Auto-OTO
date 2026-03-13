@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple
 from core.oto_ml_features import extract_feature_rows, get_delta_clip_limits, parse_oto_rows
 from core.oto_ml.features.mel_patches import (
     build_wav_index,
-    extract_patches_for_row,
+    extract_patches_for_row_with_quality,
     find_wav_path,
     resolve_mel_patch_anchors,
 )
@@ -27,6 +27,7 @@ from core.oto_ml_policy import (
     selector_min_margin,
     selector_enabled_by_default,
 )
+from core.oto_ml_reliability import compute_blank_risk_score, is_mel_unreliable, mel_patch_is_fallback
 from core.oto_ml_selector import select_best_candidate
 from core.format_type_utils import normalize_format_type
 from core.pipeline_status import (
@@ -108,6 +109,36 @@ def _read_bounded_conf_env(name: str) -> Optional[float]:
         return max(0.0, min(float(raw), 1.0))
     except Exception:
         return None
+
+
+def _ml_anchor_lock_min_conf() -> float:
+    env_val = _read_bounded_conf_env("UTOA_ML_ANCHOR_LOCK_MIN_CONF")
+    if env_val is None:
+        return 0.45
+    return float(env_val)
+
+
+def _ml_anchor_blank_floor(language: str, format_type: str) -> Optional[float]:
+    lang = str(language or "").strip().lower()
+    if lang != "korean":
+        return None
+    fmt = normalize_format_type(lang, format_type) or str(format_type or "").strip().lower()
+    if fmt not in {"cvvc", "cvc", "cv"}:
+        return None
+    env_key_by_fmt = {
+        "cvvc": "UTOA_KR_CVVC_ROW_BLANK_FLOOR",
+        "cvc": "UTOA_KR_CVC_ROW_BLANK_FLOOR",
+        "cv": "UTOA_KR_CV_ROW_BLANK_FLOOR",
+    }
+    default_floor_by_fmt = {
+        "cvvc": 0.64,
+        "cvc": 0.62,
+        "cv": 0.60,
+    }
+    env_val = _read_bounded_conf_env(env_key_by_fmt.get(fmt, "UTOA_KR_CVVC_ROW_BLANK_FLOOR"))
+    if env_val is None:
+        return float(default_floor_by_fmt.get(fmt, 0.64))
+    return float(env_val)
 
 
 def _coupled_min_confidence_for_alias(
@@ -400,7 +431,7 @@ def _ensure_rawmel_patches(
     tail_anchor = float(feat.get("mel_tail_anchor_ms", 0.0) or 0.0)
     if onset_anchor <= 0.0 or tail_anchor <= 0.0:
         onset_anchor, tail_anchor, _src = resolve_mel_patch_anchors(feat)
-    onset_patch, tail_patch = extract_patches_for_row(
+    onset_patch, tail_patch, quality = extract_patches_for_row_with_quality(
         wav_path=wav_path,
         onset_anchor_ms=onset_anchor,
         tail_anchor_ms=tail_anchor,
@@ -409,6 +440,12 @@ def _ensure_rawmel_patches(
     )
     feat["mel_onset_patch"] = onset_patch
     feat["mel_tail_patch"] = tail_patch
+    feat["mel_patch_onset_mean"] = float(quality.get("onset_mean", 0.0))
+    feat["mel_patch_onset_std"] = float(quality.get("onset_std", 0.0))
+    feat["mel_patch_onset_low_ratio"] = float(quality.get("onset_low_ratio", 1.0))
+    feat["mel_patch_tail_mean"] = float(quality.get("tail_mean", 0.0))
+    feat["mel_patch_tail_std"] = float(quality.get("tail_std", 0.0))
+    feat["mel_patch_tail_low_ratio"] = float(quality.get("tail_low_ratio", 1.0))
 
 
 def _resolve_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
@@ -780,6 +817,7 @@ def _apply_korean_delta_policy(row_context: Dict[str, object], deltas: Dict[str,
     mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
 
     if alias_type in {"cv", "cv_head"}:
+        mel_unreliable = is_mel_unreliable(row_context)
         if format_type in {"cvvc", "cvc"} and _kr_cv_keep_base_location_enabled():
             deltas["delta_offset"] = 0.0
             deltas["delta_pre"] = 0.0
@@ -792,12 +830,13 @@ def _apply_korean_delta_policy(row_context: Dict[str, object], deltas: Dict[str,
             _to_float(row_context.get("db_silence_ratio"), 0.0),
             _to_float(row_context.get("mel_window_silence_ratio"), 0.0),
         )
-        blank_risk = max(blank_conf, syll_blank_conf, syll_sil_conf)
-        risky = (mapping_conf < 0.74) or (blank_risk >= 0.48) or (silence_ratio >= 0.56)
+        blank_risk = max(blank_conf, syll_blank_conf, syll_sil_conf, compute_blank_risk_score(row_context))
+        risky = (mapping_conf < 0.74) or (blank_risk >= 0.44) or (silence_ratio >= 0.52) or mel_unreliable
         severe = (
-            (blank_risk >= 0.62)
-            or (silence_ratio >= 0.66)
-            or ((blank_risk - syll_voiced_conf) >= 0.22)
+            (blank_risk >= 0.58)
+            or (silence_ratio >= 0.62)
+            or ((blank_risk - syll_voiced_conf) >= 0.18)
+            or mel_unreliable
         )
 
         if severe:
@@ -915,6 +954,13 @@ def _apply_korean_cv_no_regression_guard(
     onset_candidate = _to_float(row_context.get("mel_offset_candidate_ms"), 0.0)
     base_pre_abs = float(base_offset) + float(base_pre)
 
+    min_conf = _ml_anchor_lock_min_conf()
+    blank_floor = _ml_anchor_blank_floor("korean", format_type)
+    if mapping_conf < min_conf:
+        return validate_fn(offset, cons, cutoff, pre, ovl)
+    if blank_floor is not None and blank_conf >= blank_floor:
+        return validate_fn(offset, cons, cutoff, pre, ovl)
+
     if curr_vowel_start > 0.0:
         expected_anchor = curr_vowel_start
 
@@ -995,8 +1041,8 @@ def _apply_korean_cv_destination_guard(
         locked_pre = float(base_pre)
         locked_ovl = min(float(ovl), max(locked_pre - 1.0, 0.0))
         locked_cons = max(float(cons), locked_pre + 8.0)
-        locked_cutoff_abs = max(float(cutoff_abs), locked_cons + 10.0)
-        return validate_fn(locked_offset, locked_cons, -(locked_cutoff_abs - locked_offset), locked_pre, locked_ovl)
+        locked_cutoff_rel = max(abs(float(cutoff)), locked_cons + 10.0)
+        return validate_fn(locked_offset, locked_cons, -locked_cutoff_rel, locked_pre, locked_ovl)
 
     mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
     blank_conf = max(
@@ -1509,6 +1555,18 @@ def _apply_anchor_lock_lite_after_ml(
     if not is_anchor_lock_enabled(lang, fmt):
         return params, ()
 
+    mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
+    blank_conf = max(
+        _to_float(row_context.get("blank_span_confidence"), 0.0),
+        _to_float(row_context.get("syllable_blank_confidence"), 0.0),
+    )
+    if lang == "korean":
+        if mapping_conf < _ml_anchor_lock_min_conf():
+            return params, ()
+        blank_floor = _ml_anchor_blank_floor(lang, fmt)
+        if blank_floor is not None and blank_conf >= blank_floor:
+            return params, ()
+
     alias_key = _anchor_key_for_row(language, row_context)
     profile = get_anchor_profile(lang, fmt, alias_key, mode="rhythm_stable")
     if profile is None:
@@ -1546,7 +1604,7 @@ def _apply_anchor_lock_lite_after_ml(
         alias_type=alias_type,
         language=lang,
         format_type=fmt,
-        mapping_confidence=_to_float(row_context.get("mapping_confidence"), 1.0),
+        mapping_confidence=mapping_conf,
     )
     result = apply_anchor_lock(params, ctx, profile, validate_fn=validate_fn, lite=True)
     return (result.offset, result.consonant, result.cutoff, result.pre, result.ovl), tuple(result.applied_rules or ())
@@ -1722,6 +1780,7 @@ def apply_oto_ml_to_oto_file(
             format_type=format_type,
         )
         alias_family = infer_alias_family(language, feat)
+        mel_patch_fallback = mel_patch_is_fallback(feat)
         routed_features += 1
         route_label = format_type if not alias_family else f"{format_type}:{alias_family}"
         if route_label not in ml_report["attempted_routes"]:
@@ -1902,6 +1961,8 @@ def apply_oto_ml_to_oto_file(
                 elif bundle_backend_norm == "ensemble_v1":
                     needs_rawmel = bool((applied_bundle.payload or {}).get("coupled_rawmel_enabled", False))
                     patch_spec = dict((applied_bundle.payload or {}).get("coupled_patch_spec") or {})
+                if needs_rawmel and mel_patch_fallback:
+                    raise CoupledLowConfidenceError(0.0, coupled_min_conf)
                 if needs_rawmel:
                     _ensure_rawmel_patches(
                         feat,

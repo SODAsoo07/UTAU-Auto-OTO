@@ -150,10 +150,8 @@ class App(
         self.kr_mapping_confidence_threshold_var = ctk.StringVar(value="")
         self.kr_mapping_max_index_jump_default_var = ctk.IntVar(value=1)
         self.kr_mapping_max_index_jump_high_conf_var = ctk.IntVar(value=2)
+        self.kr_continuity_max_offset_adj_var = ctk.StringVar(value="")
         self.ml_same_language_borrow_only_var = ctk.BooleanVar(value=True)
-        self.ml_use_pseudo_labels_var = ctk.BooleanVar(value=True)
-        self.ml_pseudo_weight_high_var = ctk.DoubleVar(value=0.7)
-        self.ml_pseudo_weight_mid_var = ctk.DoubleVar(value=0.4)
         self.advanced_options_expanded = False
         
         # 언어 선택

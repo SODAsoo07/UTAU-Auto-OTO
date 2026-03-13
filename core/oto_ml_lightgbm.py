@@ -39,7 +39,12 @@ else:
     SKLEARN_IMPORT_ERROR = None
 
 from core.format_type_utils import normalize_format_type
-from core.oto_ml_policy import default_training_filters, normalize_alias_family, selector_enabled_by_default
+from core.oto_ml_policy import (
+    alias_family_to_alias_types,
+    default_training_filters,
+    normalize_alias_family,
+    selector_enabled_by_default,
+)
 from core.oto_ml_features import CATEGORICAL_FEATURES, FEATURE_NAMES, TARGET_NAMES, canonicalize_feature_row, get_delta_clip_limits, get_feature_schema, write_feature_schema
 from core.oto_ml_selector import (
     SELECTOR_CATEGORICAL_FEATURES,
@@ -223,6 +228,13 @@ def _clip_target_series(language: str, target: str, series):
     return series.clip(lower=lo, upper=hi)
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except Exception:
+        return float(default)
+
+
 def train_lightgbm_bundle(
     language: str,
     format_type: str,
@@ -237,9 +249,6 @@ def train_lightgbm_bundle(
     require_train_keep: bool = False,
     min_mapping_confidence: float = 0.0,
     exclude_nuclei_fallback: bool = False,
-    use_pseudo_labels: bool = False,
-    pseudo_weight_high: float = 0.7,
-    pseudo_weight_mid: float = 0.4,
 ) -> Dict[str, Any]:
     _require_training_stack()
     if not dataset_csv or not os.path.exists(dataset_csv):
@@ -250,6 +259,8 @@ def train_lightgbm_bundle(
     format_type = normalize_format_type(language, format_type)
     alias_family = normalize_alias_family(alias_family)
     default_policy = default_training_filters(language, format_type, alias_family=alias_family)
+    if alias_family and not alias_types:
+        alias_types = alias_family_to_alias_types(alias_family)
     if "language" in df.columns:
         df = df[df["language"].astype(str).str.lower() == language]
     if format_type and format_type != "general" and "format_type" in df.columns:
@@ -271,23 +282,17 @@ def train_lightgbm_bundle(
     if exclude_nuclei_fallback and "used_nuclei_fallback" in df.columns:
         df = df[pd.to_numeric(df["used_nuclei_fallback"], errors="coerce").fillna(0).astype(int) <= 0]
 
-    # Pseudo label handling: keep compatibility when columns are absent.
-    if "label_source" in df.columns:
-        label_series = df["label_source"].astype(str).str.strip().str.lower()
-    else:
-        label_series = pd.Series(["manual"] * len(df), index=df.index, dtype="string")
-
     if "sample_weight" in df.columns:
         sample_weight = pd.to_numeric(df["sample_weight"], errors="coerce").fillna(1.0).astype(float)
     else:
         sample_weight = pd.Series([1.0] * len(df), index=df.index, dtype=float)
-
-    if use_pseudo_labels:
-        sample_weight.loc[label_series == "pseudo_high"] = float(pseudo_weight_high)
-        sample_weight.loc[label_series == "pseudo_mid"] = float(pseudo_weight_mid)
-        sample_weight.loc[label_series == "pseudo_low"] = 0.0
-    else:
-        sample_weight.loc[label_series.str.startswith("pseudo")] = 0.0
+    if "blank_risk_score" in df.columns and "alias_type" in df.columns:
+        blank_weight = max(0.0, min(0.90, _env_float("UTOA_ML_BLANK_RISK_WEIGHT", 0.45)))
+        blank_score = pd.to_numeric(df["blank_risk_score"], errors="coerce").fillna(0.0).astype(float)
+        alias_type = df["alias_type"].astype(str).str.strip().str.lower()
+        cv_mask = alias_type.isin(["cv", "cv_head"])
+        blank_factor = (1.0 - (blank_weight * blank_score)).clip(lower=0.25, upper=1.0)
+        sample_weight = sample_weight * blank_factor.where(cv_mask, 1.0)
 
     df = df.copy()
     df["_train_sample_weight"] = sample_weight
@@ -366,9 +371,7 @@ def train_lightgbm_bundle(
             "require_train_keep": bool(require_train_keep),
             "min_mapping_confidence": float(min_mapping_confidence),
             "exclude_nuclei_fallback": bool(exclude_nuclei_fallback),
-            "use_pseudo_labels": bool(use_pseudo_labels),
-            "pseudo_weight_high": float(pseudo_weight_high),
-            "pseudo_weight_mid": float(pseudo_weight_mid),
+            "blank_risk_weight": float(_env_float("UTOA_ML_BLANK_RISK_WEIGHT", 0.45)),
         },
         "default_policy": default_policy,
         "selector_default_enabled": bool(selector_enabled_by_default(language, format_type, alias_family=alias_family)),
@@ -376,7 +379,7 @@ def train_lightgbm_bundle(
             "min": float(pd.to_numeric(df["_train_sample_weight"], errors="coerce").fillna(0.0).min()) if len(df) else 0.0,
             "max": float(pd.to_numeric(df["_train_sample_weight"], errors="coerce").fillna(0.0).max()) if len(df) else 0.0,
             "mean": float(pd.to_numeric(df["_train_sample_weight"], errors="coerce").fillna(0.0).mean()) if len(df) else 0.0,
-            "pseudo_rows": int(label_series.loc[df.index].str.startswith("pseudo").sum()) if len(df) else 0,
+            "blank_risk_rows": int(df["blank_risk_score"].ge(0.55).sum()) if "blank_risk_score" in df.columns else 0,
         },
     }
     with open(os.path.join(out_dir, "model_meta.json"), "w", encoding="utf-8") as f:

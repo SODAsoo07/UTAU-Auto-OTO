@@ -76,25 +76,15 @@ class OtoActionsMixin:
                     if hasattr(self, "kr_mapping_max_index_jump_high_conf_var")
                     else 2
                 )
+                kr_continuity_max_offset_adj_raw = (
+                    self.kr_continuity_max_offset_adj_var.get()
+                    if hasattr(self, "kr_continuity_max_offset_adj_var")
+                    else ""
+                )
                 ml_same_lang_only = (
                     self.ml_same_language_borrow_only_var.get()
                     if hasattr(self, "ml_same_language_borrow_only_var")
                     else True
-                )
-                ml_use_pseudo_labels = (
-                    self.ml_use_pseudo_labels_var.get()
-                    if hasattr(self, "ml_use_pseudo_labels_var")
-                    else True
-                )
-                ml_pseudo_weight_high = (
-                    self.ml_pseudo_weight_high_var.get()
-                    if hasattr(self, "ml_pseudo_weight_high_var")
-                    else 0.7
-                )
-                ml_pseudo_weight_mid = (
-                    self.ml_pseudo_weight_mid_var.get()
-                    if hasattr(self, "ml_pseudo_weight_mid_var")
-                    else 0.4
                 )
                 ml_selector_mode = (
                     self.ml_selector_mode_var.get()
@@ -141,13 +131,23 @@ class OtoActionsMixin:
                     except Exception:
                         return None
 
+                def _parse_optional_float(raw_value, lo=0.0, hi=None):
+                    text = str(raw_value or "").strip()
+                    if not text:
+                        return None
+                    try:
+                        value = max(float(lo), float(text))
+                        if hi is not None:
+                            value = min(float(hi), value)
+                        return value
+                    except Exception:
+                        return None
+
                 kr_conf_threshold = _parse_optional_threshold(kr_conf_raw, lo=0.0, hi=1.0)
                 ml_coupled_min_conf = _parse_optional_threshold(ml_coupled_min_conf_raw, lo=0.0, hi=1.0)
+                kr_continuity_max_offset_adj = _parse_optional_float(kr_continuity_max_offset_adj_raw, lo=0.0, hi=2000.0)
 
                 os.environ["UTOA_ML_SAME_LANGUAGE_BORROW_ONLY"] = "1" if ml_same_lang_only else "0"
-                os.environ["UTOA_ML_USE_PSEUDO_LABELS"] = "1" if ml_use_pseudo_labels else "0"
-                os.environ["UTOA_ML_PSEUDO_WEIGHT_HIGH"] = str(float(ml_pseudo_weight_high))
-                os.environ["UTOA_ML_PSEUDO_WEIGHT_MID"] = str(float(ml_pseudo_weight_mid))
                 selector_mode_code = self._apply_ml_selector_runtime_mode(ml_selector_mode)
                 if ml_coupled_device not in {"auto", "cpu", "cuda"}:
                     ml_coupled_device = "auto"
@@ -163,6 +163,10 @@ class OtoActionsMixin:
                     os.environ.pop("UTOA_KR_MAPPING_CONF_THRESHOLD", None)
                 else:
                     os.environ["UTOA_KR_MAPPING_CONF_THRESHOLD"] = str(float(kr_conf_threshold))
+                if kr_continuity_max_offset_adj is None:
+                    os.environ.pop("UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ", None)
+                else:
+                    os.environ["UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ"] = str(float(kr_continuity_max_offset_adj))
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_DEFAULT"] = str(int(kr_jump_default))
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_HIGH_CONF"] = str(int(kr_jump_hi))
                 os.environ["UTOA_ML_COUPLED_ENABLE"] = "1" if ml_coupled_enable else "0"

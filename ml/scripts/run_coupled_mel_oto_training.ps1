@@ -13,6 +13,7 @@ param(
     [string]$SingleManualOto = "",
     [string]$SingleVoicebankId = "",
     [string]$AliasTypes = "",
+    [string]$AliasFamily = "",
     [double]$MinMappingConfidence = 0.0,
     [string]$PythonExe = "python",
     [string]$Device = "cpu",
@@ -390,6 +391,9 @@ if ($runTrain) {
     )
     if ($AliasTypes) {
         $trainArgs += @("--alias-types", $AliasTypes)
+    }
+    if ($AliasFamily) {
+        $trainArgs += @("--alias-family", $AliasFamily)
     }
     Invoke-PythonScript -ScriptPath $TrainScript -ArgsList $trainArgs
 }

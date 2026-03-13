@@ -25,6 +25,16 @@ def _blend(a: float, b: float, w: float) -> float:
     return (1.0 - w2) * float(a) + w2 * float(b)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "")).strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
 def _parse_oto_line(line: str) -> Optional[Dict[str, object]]:
     line = line.strip()
     if not line or "=" not in line or "," not in line:
@@ -80,6 +90,9 @@ _OVERLAP_LIMITS = {
     "default": (-80.0, 50.0),
 }
 
+def _max_offset_adj_ms() -> float:
+    return _env_float("UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ", 180.0)
+
 
 def _get_overlap_key(prev_type: str, next_type: str) -> str:
     if prev_type in _BRIDGE_TYPES and next_type in _CV_TYPES:
@@ -132,6 +145,7 @@ def enforce_adjacent_continuity(
         return any(abs(a - b) > 1e-6 for a, b in zip(before_state, after_state))
 
     for i in range(len(rows) - 1):
+        max_offset_adj = _max_offset_adj_ms()
         prev_row = rows[i]
         next_row = rows[i + 1]
         prev_type = row_types[i]
@@ -164,6 +178,8 @@ def enforce_adjacent_continuity(
             overlap_ms = prev_end - float(next_row["offset"])
             if overlap_ms > max_overlap + 1e-6:
                 off_adj = float(overlap_ms - max_overlap)
+                if off_adj > max_offset_adj:
+                    continue
                 if off_adj > 1e-6:
                     before_state = _row_state(next_row)
                     next_row["offset"] = max(0.0, float(next_row["offset"]) + off_adj)
@@ -186,6 +202,8 @@ def enforce_adjacent_continuity(
             overlap_ms = prev_end - float(next_row["offset"])
             if overlap_ms < min_overlap - 1e-6:
                 off_adj = float(min_overlap - overlap_ms)
+                if off_adj > max_offset_adj:
+                    continue
                 if off_adj > 1e-6:
                     before_state = _row_state(next_row)
                     next_row["offset"] = max(0.0, float(next_row["offset"]) - off_adj)

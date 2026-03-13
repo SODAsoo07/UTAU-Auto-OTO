@@ -37,6 +37,7 @@ except Exception:  # pragma: no cover
     GroupShuffleSplit = None
 
 from core.format_type_utils import normalize_format_type
+from core.oto_ml_policy import alias_family_to_alias_types, normalize_alias_family
 from core.oto_ml.coupled.model import (
     CATEGORICAL_FEATURES,
     COUPLED_BACKEND,
@@ -151,7 +152,6 @@ def _compute_static_hard_example_boost(
     boost *= 1.0 + (0.60 * strength_v * low_conf)
     cv_mask = np.isin(alias_type_arr, ["cv", "cv_head"])
     bridge_mask = np.isin(alias_type_arr, ["vc", "vv", "vcv"])
-    boost *= np.where(cv_mask & (blank_conf_np >= 0.55), 1.0 + (0.22 * strength_v), 1.0)
     boost *= np.where(cv_mask & (jump_blocked_np > 0.5), 1.0 + (0.20 * strength_v), 1.0)
     boost *= np.where(bridge_mask, 1.0 + (0.20 * strength_v), 1.0)
     if aux_mask is not None and int(aux_mask.shape[1]) >= 3:
@@ -170,6 +170,21 @@ def _compute_static_hard_example_boost(
         )
         boost *= np.where(occurrence_mask, 1.0 + (0.10 * strength_v), 1.0)
     return np.clip(boost.astype(np.float32), 1.0, 3.0)
+
+
+def _apply_blank_risk_weight(df, weights: "np.ndarray") -> "np.ndarray":
+    if df is None or weights is None or len(weights) == 0:
+        return weights
+    if "blank_risk_score" not in df.columns or "alias_type" not in df.columns:
+        return weights
+    weight = max(0.0, min(0.90, _env_float("UTOA_ML_BLANK_RISK_WEIGHT", 0.45)))
+    if weight <= 0.0:
+        return weights
+    blank_score = pd.to_numeric(df["blank_risk_score"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+    alias_type_arr = df["alias_type"].astype(str).str.strip().str.lower().to_numpy()
+    cv_mask = np.isin(alias_type_arr, ["cv", "cv_head"])
+    factor = np.clip(1.0 - (weight * blank_score), 0.25, 1.0)
+    return (weights * np.where(cv_mask, factor, 1.0)).astype(np.float32)
 
 
 def _resolve_sampling_group_values(df, train_idx, preferred_column: str = ""):
@@ -320,10 +335,14 @@ def _prepare_training_frame(
     language: str,
     format_type: str,
     alias_types: Optional[List[str]] = None,
+    alias_family: str = "",
     min_mapping_confidence: float = 0.0,
 ):
     lang = str(language or "").strip().lower()
     fmt = normalize_format_type(lang, format_type) or "general"
+    family = normalize_alias_family(alias_family)
+    if family and not alias_types:
+        alias_types = alias_family_to_alias_types(family)
     if "language" in df.columns:
         df = df[df["language"].astype(str).str.lower() == lang]
     if "format_type" in df.columns and fmt and fmt != "general":
@@ -379,6 +398,7 @@ def train_coupled_bundle(
     *,
     group_column: str = "voicebank_id",
     alias_types: Optional[List[str]] = None,
+    alias_family: str = "",
     min_mapping_confidence: float = 0.0,
     device: str = "auto",
     epochs: int = 70,
@@ -400,6 +420,7 @@ def train_coupled_bundle(
         language=language,
         format_type=format_type,
         alias_types=alias_types,
+        alias_family=alias_family,
         min_mapping_confidence=min_mapping_confidence,
     )
     df = df.reset_index(drop=True)
@@ -465,6 +486,8 @@ def train_coupled_bundle(
         W = pd.to_numeric(df["sample_weight"], errors="coerce").fillna(1.0).to_numpy(dtype=np.float32)
     else:
         W = np.ones((len(df),), dtype=np.float32)
+    W = _apply_blank_risk_weight(df, W)
+    W = _apply_blank_risk_weight(df, W)
     if "alias_type" in df.columns:
         alias_type_arr = df["alias_type"].astype(str).str.lower().to_numpy()
     else:
@@ -994,6 +1017,7 @@ def train_coupled_bundle_rawmel(
     rawmel_cache_dir: str,
     group_column: str = "voicebank_id",
     alias_types: Optional[List[str]] = None,
+    alias_family: str = "",
     min_mapping_confidence: float = 0.0,
     device: str = "auto",
     epochs: int = 70,
@@ -1017,6 +1041,7 @@ def train_coupled_bundle_rawmel(
         language=language,
         format_type=format_type,
         alias_types=alias_types,
+        alias_family=alias_family,
         min_mapping_confidence=min_mapping_confidence,
     )
     df = df.reset_index(drop=True)
@@ -1175,7 +1200,8 @@ def train_coupled_bundle_rawmel(
     )
     risk_blank_th = _env_float("UTOA_ML_RAWMEL_RISK_BLANK_TH", 0.55)
     risk_map_conf_th = _env_float("UTOA_ML_RAWMEL_RISK_MAP_CONF_TH", 0.64)
-    risk_boost_blank = max(1.0, _env_float("UTOA_ML_RAWMEL_RISK_BOOST_BLANK", 1.22))
+    risk_boost_blank = _env_float("UTOA_ML_RAWMEL_RISK_BOOST_BLANK", 0.90)
+    risk_boost_blank = max(0.50, min(1.00, float(risk_boost_blank)))
     risk_boost_jump = max(1.0, _env_float("UTOA_ML_RAWMEL_RISK_BOOST_JUMP", 1.15))
     risk_boost_low_conf = max(1.0, _env_float("UTOA_ML_RAWMEL_RISK_BOOST_LOW_CONF", 1.08))
     risk_boost = np.ones((len(df),), dtype=np.float32)

@@ -49,6 +49,7 @@ def main():
     ap.add_argument("--out-dir", required=True, help="Output model directory")
     ap.add_argument("--group-column", default="wav_norm")
     ap.add_argument("--alias-types", default="", help="Comma-separated alias_type filter")
+    ap.add_argument("--alias-family", default="", help="Alias family filter (cv/vc/vcv/vowel)")
     ap.add_argument("--min-mapping-confidence", type=float, default=0.0)
     ap.add_argument("--device", default="auto", help="auto/cpu/cuda")
     ap.add_argument("--epochs", type=int, default=70)
@@ -66,6 +67,7 @@ def main():
     args = ap.parse_args()
 
     alias_types = [v.strip() for v in str(args.alias_types).split(",") if v.strip()]
+    alias_family = str(args.alias_family or "").strip()
     backend = str(args.backend or "coupled_nn_v1").strip().lower()
     env_prefix = "UTOA_ML_RAWMEL_" if backend == "coupled_nn_v2_rawmel" else "UTOA_ML_COUPLED_"
     if str(args.sampler or "").strip():
@@ -93,6 +95,7 @@ def main():
             rawmel_cache_dir=rawmel_cache,
             group_column=args.group_column,
             alias_types=alias_types,
+            alias_family=alias_family,
             min_mapping_confidence=float(args.min_mapping_confidence),
             device=args.device,
             epochs=int(args.epochs),
@@ -111,6 +114,7 @@ def main():
             out_dir=args.out_dir,
             group_column=args.group_column,
             alias_types=alias_types,
+            alias_family=alias_family,
             min_mapping_confidence=float(args.min_mapping_confidence),
             device=args.device,
             epochs=int(args.epochs),

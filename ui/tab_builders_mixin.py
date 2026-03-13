@@ -442,6 +442,36 @@ class TabBuildersMixin:
         if hasattr(self, "_refresh_ml_backend_status"):
             self._refresh_ml_backend_status()
 
+        post_frame = ctk.CTkFrame(container)
+        post_frame.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(
+            post_frame,
+            text="후처리(연속성) 옵션",
+            font=("", 14, "bold"),
+            text_color=PALETTE.header_accent,
+        ).pack(anchor="w", padx=12, pady=(10, 6))
+
+        cont_row = ctk.CTkFrame(post_frame, fg_color="transparent")
+        cont_row.pack(anchor="w", padx=12, pady=(0, 8), fill="x")
+        ctk.CTkLabel(
+            cont_row,
+            text="연속성 offset 보정 상한 (ms)",
+            text_color="#B0BEC5",
+        ).pack(side="left")
+        cont_entry = ctk.CTkEntry(
+            cont_row,
+            width=90,
+            textvariable=self.kr_continuity_max_offset_adj_var,
+            placeholder_text="기본값(180)",
+        )
+        cont_entry.pack(side="left", padx=(10, 8))
+        cont_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(
+            cont_row,
+            text="크게 잡을수록 연속성 보정이 강해지고, 작게 잡을수록 보정이 약해집니다.",
+            text_color="#9E9E9E",
+        ).pack(side="left", padx=(4, 0))
+
         aligner_frame = ctk.CTkFrame(container)
         aligner_frame.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(

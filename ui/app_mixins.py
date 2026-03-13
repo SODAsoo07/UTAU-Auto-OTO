@@ -702,10 +702,8 @@ class ConfigMixin:
             "kr_mapping_confidence_threshold": self.kr_mapping_confidence_threshold_var.get() if hasattr(self, "kr_mapping_confidence_threshold_var") else "",
             "kr_mapping_max_index_jump_default": self.kr_mapping_max_index_jump_default_var.get() if hasattr(self, "kr_mapping_max_index_jump_default_var") else 1,
             "kr_mapping_max_index_jump_high_conf": self.kr_mapping_max_index_jump_high_conf_var.get() if hasattr(self, "kr_mapping_max_index_jump_high_conf_var") else 2,
+            "kr_continuity_max_offset_adj": self.kr_continuity_max_offset_adj_var.get() if hasattr(self, "kr_continuity_max_offset_adj_var") else "",
             "ml_same_language_borrow_only": self.ml_same_language_borrow_only_var.get() if hasattr(self, "ml_same_language_borrow_only_var") else True,
-            "ml_use_pseudo_labels": self.ml_use_pseudo_labels_var.get() if hasattr(self, "ml_use_pseudo_labels_var") else True,
-            "ml_pseudo_weight_high": self.ml_pseudo_weight_high_var.get() if hasattr(self, "ml_pseudo_weight_high_var") else 0.7,
-            "ml_pseudo_weight_mid": self.ml_pseudo_weight_mid_var.get() if hasattr(self, "ml_pseudo_weight_mid_var") else 0.4,
             "language": self.lang_var.get(),
             "auto_format": self.auto_format_var.get(),
             "ja_alias_style": self.ja_alias_style_var.get(),
@@ -852,9 +850,30 @@ class ConfigMixin:
                             if abs(conf - 0.60) <= 1e-9:
                                 self.kr_mapping_confidence_threshold_var.set("")
                             else:
-                                self.kr_mapping_confidence_threshold_var.set(f"{conf:.2f}".rstrip("0").rstrip("."))
+                                self.kr_mapping_confidence_threshold_var.set(
+                                    f"{conf:.2f}".rstrip("0").rstrip(".")
+                                )
                         except Exception:
                             self.kr_mapping_confidence_threshold_var.set("")
+            if "kr_continuity_max_offset_adj" in config and hasattr(self, "kr_continuity_max_offset_adj_var"):
+                raw_val = config.get("kr_continuity_max_offset_adj", "")
+                if raw_val is None:
+                    self.kr_continuity_max_offset_adj_var.set("")
+                else:
+                    txt = str(raw_val).strip()
+                    if not txt:
+                        self.kr_continuity_max_offset_adj_var.set("")
+                    else:
+                        try:
+                            val = max(0.0, float(txt))
+                            if abs(val - 180.0) <= 1e-9:
+                                self.kr_continuity_max_offset_adj_var.set("")
+                            else:
+                                self.kr_continuity_max_offset_adj_var.set(
+                                    f"{val:.2f}".rstrip("0").rstrip(".")
+                                )
+                        except Exception:
+                            self.kr_continuity_max_offset_adj_var.set("")
             if "ml_coupled_device" in config and hasattr(self, "ml_coupled_device_var"):
                 device = str(config.get("ml_coupled_device", "auto") or "auto").strip().lower()
                 if device in {"auto", "cpu", "cuda"}:

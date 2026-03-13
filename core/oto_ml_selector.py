@@ -893,7 +893,6 @@ def build_selector_dataset_csv_from_delta_dataset(
     require_train_keep: bool = False,
     min_mapping_confidence: float = 0.0,
     exclude_nuclei_fallback: bool = False,
-    use_pseudo_labels: bool = True,
 ) -> Dict[str, object]:
     rows = read_delta_dataset_rows(delta_dataset_csv)
     lang = str(language or "").strip().lower()
@@ -928,8 +927,6 @@ def build_selector_dataset_csv_from_delta_dataset(
                     continue
             except Exception:
                 continue
-        if not use_pseudo_labels and str(row.get("label_source", "") or "").strip().lower().startswith("pseudo"):
-            continue
         filtered.append(row)
     selector_rows = build_selector_training_rows_from_delta_rows(filtered)
     write_selector_dataset_csv(out_csv, selector_rows)

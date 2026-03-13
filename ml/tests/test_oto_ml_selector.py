@@ -114,7 +114,7 @@ class OtoMlSelectorTests(unittest.TestCase):
             row2 = dict(row1)
             row2["source_row_id"] = "oto_a:1"
             row2["line_index"] = 1
-            row2["label_source"] = "pseudo_high"
+            row2["train_keep_default"] = 0
             with open(delta_csv, "w", encoding="utf-8", newline="") as f:
                 import csv
                 writer = csv.DictWriter(f, fieldnames=sorted(set(row1) | set(row2)))
@@ -129,7 +129,6 @@ class OtoMlSelectorTests(unittest.TestCase):
                 require_train_keep=True,
                 min_mapping_confidence=0.5,
                 exclude_nuclei_fallback=True,
-                use_pseudo_labels=False,
             )
             self.assertGreater(summary["rows"], 0)
             with open(selector_csv, "r", encoding="utf-8") as f:
