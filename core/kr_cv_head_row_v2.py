@@ -37,6 +37,7 @@ def run_kr_cv_head_row(
     build_guard_messages_fn,
     log_post_timing_events_fn,
     anchor_store,
+    anchor_lock_lite=False,
 ):
     (
         selected_w_idx,
@@ -152,6 +153,7 @@ def run_kr_cv_head_row(
             next_onset_abs_ms=n_start,
             next_vowel_abs_ms=n_end,
             mapping_confidence=row_mapping_confidence,
+            lite=bool(anchor_lock_lite),
         )
         (
             offset,

@@ -31,6 +31,7 @@ def run_ja_cv_head_row(
     alias_out_fn,
     build_guard_messages_fn,
     anchor_store,
+    anchor_lock_lite=False,
 ):
     c_start, c_end, n_start, n_end = extract_cv_bounds_fn(
         curr_phones,
@@ -109,6 +110,7 @@ def run_ja_cv_head_row(
         anchor_abs_ms=c_end,
         next_onset_abs_ms=n_start,
         next_vowel_abs_ms=n_end,
+        lite=bool(anchor_lock_lite),
     )
     offset, consonant, cutoff, pre, offset_reduced = post_ctx.guard_cv_head_offset_to_onset(
         offset,

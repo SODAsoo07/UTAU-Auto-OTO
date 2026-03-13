@@ -32,6 +32,7 @@ def run_kr_vcv_row(
     finalize_row_fn,
     row_builder_fn,
     log_post_timing_events_fn,
+    anchor_lock_lite=False,
 ):
     (
         current_w_idx,
@@ -98,6 +99,7 @@ def run_kr_vcv_row(
             next_onset_abs_ms=vcv_next_onset,
             next_vowel_abs_ms=vcv_next_vowel,
             mapping_confidence=row_mapping_confidence,
+            lite=bool(anchor_lock_lite),
         )
     finalize_row_fn(
         final_lines=final_lines,

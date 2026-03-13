@@ -1175,12 +1175,28 @@ def _build_ja_mapping_trace_record(
     filename_order_locked,
     local_conf=None,
     note="",
+    alignment_weight=None,
+    blank_conf_mean=None,
+    anchor_lock_lite=None,
 ):
     expected_norm = _normalize_ja_syllable_token(expected_tok)
     mapped_norm = _normalize_ja_syllable_token(mapped_tok)
     target_norm = _normalize_ja_syllable_token(target_tok)
     expected_match_level = int(_ja_soft_cv_match_level(target_norm, expected_norm) or 0) if target_norm else 0
     mapped_match_level = int(_ja_soft_cv_match_level(target_norm, mapped_norm) or 0) if target_norm else 0
+    extra = {
+        "expected_match_level": expected_match_level,
+        "mapped_match_level": mapped_match_level,
+        "filename_order_locked": bool(filename_order_locked),
+        "local_confidence": None if local_conf is None else float(local_conf),
+        "note": str(note or ""),
+    }
+    if alignment_weight is not None:
+        extra["alignment_weight"] = float(alignment_weight)
+    if blank_conf_mean is not None:
+        extra["blank_conf_mean"] = float(blank_conf_mean)
+    if anchor_lock_lite is not None:
+        extra["anchor_lock_lite"] = bool(anchor_lock_lite)
     return build_mapping_trace_record(
         event="ja_mapping_decision",
         fname=fname,
@@ -1195,13 +1211,7 @@ def _build_ja_mapping_trace_record(
         mapping_tier=mapping_tier,
         mapping_reason_code=mapping_reason_code,
         mapping_confidence=mapping_confidence,
-        extra={
-            "expected_match_level": expected_match_level,
-            "mapped_match_level": mapped_match_level,
-            "filename_order_locked": bool(filename_order_locked),
-            "local_confidence": None if local_conf is None else float(local_conf),
-            "note": str(note or ""),
-        },
+        extra=extra,
     )
 
 
@@ -2725,6 +2735,9 @@ def generate_ja_oto(
             textgrid_trust_tier = str(alignment_ingest.textgrid_trust_tier or "low")
             prefer_filename_sequence = bool(alignment_ingest.prefer_filename_sequence)
             spn_ratio = float(phone_quality.get("spn_ratio_in_phone_tier", 0.0) or 0.0)
+            alignment_weight = _clamp01(textgrid_trust_score * 0.85)
+            if filename_syllables and alignment_weight < 0.55:
+                prefer_filename_sequence = True
 
             post_ctx = build_ja_postprocess_context(
                 phone_spans_ms=phone_spans_ms,
@@ -2999,6 +3012,27 @@ def generate_ja_oto(
                 syllables_info = []
                 base_score = -1.0
                 syllable_confidence_by_idx = []
+            blank_conf_mean = 0.0
+            if syllables_info:
+                blank_vals = [
+                    float(s.get("blank_confidence", 0.0) or 0.0)
+                    for s in (syllables_info or [])
+                    if isinstance(s, dict)
+                ]
+                if blank_vals:
+                    blank_conf_mean = sum(blank_vals) / float(len(blank_vals))
+            alignment_weight = _clamp01(
+                (textgrid_trust_score * 0.85) - max(0.0, blank_conf_mean - 0.45) * 0.35
+            )
+            anchor_lock_lite = bool(alignment_weight < 0.58 or blank_conf_mean >= 0.55)
+
+            def _build_trace_record_with_context(**kwargs):
+                return _build_ja_mapping_trace_record(
+                    alignment_weight=alignment_weight,
+                    blank_conf_mean=blank_conf_mean,
+                    anchor_lock_lite=anchor_lock_lite,
+                    **kwargs,
+                )
 
             planned_cv_source = list(filename_syllables or cv_targets or [])
             ja_cv_plan = {"indices": None, "meta": {}, "source": ""}
@@ -3018,19 +3052,18 @@ def generate_ja_oto(
                     and mel_ctx_for_file
                     and syllables_info
                 ):
-                    if textgrid_trust_tier != "high" or low_phone_quality:
+                    if (
+                        textgrid_trust_tier != "high"
+                        or low_phone_quality
+                        or blank_conf_mean >= 0.45
+                        or alignment_weight < 0.65
+                    ):
                         use_mel_plan = _env_bool("UTOA_JA_CVVC_MEL_PLAN", True)
                     else:
                         mean_conf, min_conf, low_ratio = _summarize_ja_syllable_confidences(
                             syllable_confidence_by_idx
                         )
-                        blank_vals = [
-                            float(s.get("blank_confidence", 0.0) or 0.0)
-                            for s in (syllables_info or [])
-                            if isinstance(s, dict)
-                        ]
-                        blank_mean = sum(blank_vals) / float(len(blank_vals)) if blank_vals else 0.0
-                        if min_conf < 0.54 or low_ratio > 0.30 or blank_mean >= 0.55:
+                        if min_conf < 0.54 or low_ratio > 0.30 or blank_conf_mean >= 0.45:
                             use_mel_plan = _env_bool("UTOA_JA_CVVC_MEL_PLAN", True)
                 ja_cv_plan = _build_ja_cv_anchor_plan_v2(
                     planned_cv_source,
@@ -3040,7 +3073,7 @@ def generate_ja_oto(
             ja_planned_cv_indices = ja_cv_plan.get("indices")
             ja_anchor_graph = build_adjacent_anchor_graph(ja_planned_cv_indices)
             ja_plan_policy = resolve_plan_policy(
-                alignment_trust=textgrid_trust_score,
+                alignment_trust=alignment_weight,
                 plan_meta=ja_cv_plan.get("meta"),
                 expected_count=len(planned_cv_source),
                 planned_count=len(ja_planned_cv_indices or []),
@@ -3074,6 +3107,8 @@ def generate_ja_oto(
                 score_b=alt_score,
                 sequence_lock_formats={"cvvc", "cv"},
                 abstain_formats={"cvvc", "vcv", "cv"},
+                prefer_sequence=prefer_filename_sequence,
+                alignment_trust=alignment_weight,
             )
             if sinsy_label_entries:
                 plan_source = str(ja_cv_plan.get("source") or "")
@@ -3109,6 +3144,19 @@ def generate_ja_oto(
                     syllable_confidence_by_idx = list(selected_candidate.get("syllable_confidences", []) or [])
                     if mel_ctx_for_file:
                         _annotate_ja_syllable_mel_confidence(syllables_info, mel_ctx_for_file)
+                    blank_conf_mean = 0.0
+                    if syllables_info:
+                        blank_vals = [
+                            float(s.get("blank_confidence", 0.0) or 0.0)
+                            for s in (syllables_info or [])
+                            if isinstance(s, dict)
+                        ]
+                        if blank_vals:
+                            blank_conf_mean = sum(blank_vals) / float(len(blank_vals))
+                    alignment_weight = _clamp01(
+                        (textgrid_trust_score * 0.85) - max(0.0, blank_conf_mean - 0.45) * 0.35
+                    )
+                    anchor_lock_lite = bool(alignment_weight < 0.58 or blank_conf_mean >= 0.55)
                     mapping_reason_code = (
                         "filename_linear_low_conf"
                         if selected_candidate.get("name") == "filename_linear_fallback"
@@ -3142,19 +3190,18 @@ def generate_ja_oto(
                             and mel_ctx_for_file
                             and syllables_info
                         ):
-                            if textgrid_trust_tier != "high" or low_phone_quality:
+                            if (
+                                textgrid_trust_tier != "high"
+                                or low_phone_quality
+                                or blank_conf_mean >= 0.45
+                                or alignment_weight < 0.65
+                            ):
                                 use_mel_plan = _env_bool("UTOA_JA_CVVC_MEL_PLAN", True)
                             else:
                                 mean_conf, min_conf, low_ratio = _summarize_ja_syllable_confidences(
                                     syllable_confidence_by_idx
                                 )
-                                blank_vals = [
-                                    float(s.get("blank_confidence", 0.0) or 0.0)
-                                    for s in (syllables_info or [])
-                                    if isinstance(s, dict)
-                                ]
-                                blank_mean = sum(blank_vals) / float(len(blank_vals)) if blank_vals else 0.0
-                                if min_conf < 0.54 or low_ratio > 0.30 or blank_mean >= 0.55:
+                                if min_conf < 0.54 or low_ratio > 0.30 or blank_conf_mean >= 0.45:
                                     use_mel_plan = _env_bool("UTOA_JA_CVVC_MEL_PLAN", True)
                         ja_cv_plan = _build_ja_cv_anchor_plan_v2(
                             planned_cv_source,
@@ -3164,7 +3211,7 @@ def generate_ja_oto(
                     ja_planned_cv_indices = ja_cv_plan.get("indices")
                     ja_anchor_graph = build_adjacent_anchor_graph(ja_planned_cv_indices)
                     ja_plan_policy = resolve_plan_policy(
-                        alignment_trust=textgrid_trust_score,
+                        alignment_trust=alignment_weight,
                         plan_meta=ja_cv_plan.get("meta"),
                         expected_count=len(planned_cv_source),
                         planned_count=len(ja_planned_cv_indices or []),
@@ -3183,12 +3230,14 @@ def generate_ja_oto(
                         sequence_lock_formats={"cvvc", "cv"},
                         abstain_formats={"cvvc", "vcv", "cv"},
                         prefer_sequence=True,
+                        alignment_trust=alignment_weight,
                     )
                     mapping_confidence_base = float(runtime_policy.get("mapping_confidence", mapping_confidence_base))
                     mapping_tier = str(runtime_policy.get("mapping_tier", "low"))
                     log(
                         f"🧭 {fname}: 일본어 TextGrid 신뢰도 {textgrid_trust_tier.upper()} "
-                        f"(conf={mapping_confidence_base:.2f}, trust={textgrid_trust_score:.2f}) "
+                        f"(conf={mapping_confidence_base:.2f}, trust={textgrid_trust_score:.2f}, "
+                        f"weight={alignment_weight:.2f}) "
                         f"→ 파일명 기준 매핑 고정"
                     )
 
@@ -3229,6 +3278,11 @@ def generate_ja_oto(
                         f"🧭 {fname}: CVVC 보수 가드로 alias/phone 매핑 전환 "
                         f"(base={base_score:.1f}, corrected={alt_score:.1f}, reason={mapping_reason_code})"
                     )
+
+            log(
+                f"🧭 {fname}: alignment_weight={alignment_weight:.2f}, "
+                f"blank_mean={blank_conf_mean:.2f}, anchor_lock_lite={anchor_lock_lite}"
+            )
 
             if ja_mapping_debug_reason_logging and mapping_confidence_base < conf_th:
                 log(
@@ -3275,6 +3329,9 @@ def generate_ja_oto(
                         "mapping_margin": float(mapping_margin or 0.0),
                         "filename_order_locked": bool(filename_order_locked),
                         "forced_words_mapping": bool(forced_words_mapping),
+                        "alignment_weight": float(alignment_weight),
+                        "blank_conf_mean": float(blank_conf_mean),
+                        "anchor_lock_lite": bool(anchor_lock_lite),
                         "selected_candidate": str(selected_candidate.get("name", "")),
                         "filename_syllables": list(filename_syllables or []),
                         "cv_targets": list(cv_targets or []),
@@ -3316,7 +3373,8 @@ def generate_ja_oto(
             if bool(runtime_policy.get("should_abstain")):
                 log(
                     f"⚠️ {fname}: JA v2 planner abstain "
-                    f"(trust={textgrid_trust_score:.2f}, coverage={float(ja_plan_policy.get('coverage', 0.0)):.2f}, "
+                    f"(trust={textgrid_trust_score:.2f}, weight={alignment_weight:.2f}, "
+                    f"coverage={float(ja_plan_policy.get('coverage', 0.0)):.2f}, "
                     f"margin={float(ja_plan_policy.get('margin', 0.0)):.1f}) → 원본 유지"
                 )
                 _record_unset_lines(
@@ -3504,7 +3562,7 @@ def generate_ja_oto(
                         find_vowel_match_index_fn=_find_ja_cv_vowel_match_index,
                         prefer_vcv_candidate_index_fn=_prefer_vcv_candidate_index,
                         should_trace_mapping_decision_fn=should_trace_mapping_decision,
-                        build_mapping_trace_record_fn=_build_ja_mapping_trace_record,
+                        build_mapping_trace_record_fn=_build_trace_record_with_context,
                         append_mapping_trace_fn=_append_mapping_trace,
                         decide_cv_row_abstain_fn=decide_cv_row_abstain,
                         is_cv_syllable_active_fn=_is_ja_cv_syllable_active,
@@ -3560,6 +3618,7 @@ def generate_ja_oto(
                         row_builder_fn=_build_ja_alias_output_rows_v2,
                         generate_openutau_aliases_fn=generate_ja_openutau_aliases,
                         alias_out_fn=_alias_out,
+                        anchor_lock_lite=anchor_lock_lite,
                     )
                     continue
 
@@ -3800,7 +3859,7 @@ def generate_ja_oto(
                         mapped_token=_normalize_ja_syllable_token(mapped_tok_trace),
                     ):
                         _append_mapping_trace(
-                            _build_ja_mapping_trace_record(
+                            _build_trace_record_with_context(
                                 fname=fname,
                                 alias=alias,
                                 alias_type="cv_head",
@@ -3897,6 +3956,7 @@ def generate_ja_oto(
                         alias_out_fn=_alias_out,
                         build_guard_messages_fn=_build_ja_cv_guard_messages_v2,
                         anchor_store=realized_cv_anchor_by_idx,
+                        anchor_lock_lite=anchor_lock_lite,
                     )
                     continue
 
@@ -4114,7 +4174,7 @@ def generate_ja_oto(
                         mapped_token=_normalize_ja_syllable_token(mapped_tok_trace),
                     ):
                         _append_mapping_trace(
-                            _build_ja_mapping_trace_record(
+                            _build_trace_record_with_context(
                                 fname=fname,
                                 alias=alias,
                                 alias_type="cv",
@@ -4485,6 +4545,7 @@ def generate_ja_oto(
                     alias_out_fn=_alias_out,
                     build_guard_messages_fn=_build_ja_cv_guard_messages_v2,
                     anchor_store=realized_cv_anchor_by_idx,
+                    anchor_lock_lite=anchor_lock_lite,
                 )
 
             processed += 1

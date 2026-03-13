@@ -42,6 +42,7 @@ def run_kr_general_row(
     finalize_row_fn,
     row_builder_fn,
     log_post_timing_events_fn,
+    anchor_lock_lite=False,
 ):
     bridge_shift = 0.0
     if alias_type in {"vc", "vv"}:
@@ -98,6 +99,7 @@ def run_kr_general_row(
         next_onset_abs_ms=next_onset_abs,
         next_vowel_abs_ms=next_vowel_abs,
         mapping_confidence=row_mapping_confidence,
+        lite=bool(anchor_lock_lite),
     )
     anchor_record = None
     if alias_type == "cv" and selected_w_idx is not None:

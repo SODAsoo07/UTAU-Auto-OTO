@@ -26,6 +26,7 @@ def resolve_runtime_mapping_policy(
     abstain_formats=None,
     strict_formats=None,
     prefer_sequence=None,
+    alignment_trust=None,
 ):
     snapshot = ingest_snapshot
     plan = dict(plan_policy or {})
@@ -34,8 +35,17 @@ def resolve_runtime_mapping_policy(
     abstain_formats = {str(x).strip().lower() for x in (abstain_formats or set())}
     strict_formats = {str(x).strip().lower() for x in (strict_formats or set())}
 
-    trust_score = _clamp01(getattr(snapshot, "textgrid_trust_score", 0.0))
-    trust_tier = str(getattr(snapshot, "textgrid_trust_tier", "low") or "low").strip().lower()
+    if alignment_trust is None:
+        trust_score = _clamp01(getattr(snapshot, "textgrid_trust_score", 0.0))
+        trust_tier = str(getattr(snapshot, "textgrid_trust_tier", "low") or "low").strip().lower()
+    else:
+        trust_score = _clamp01(alignment_trust)
+        if trust_score >= 0.76:
+            trust_tier = "high"
+        elif trust_score >= 0.58:
+            trust_tier = "mid"
+        else:
+            trust_tier = "low"
     prefer_seq = bool(getattr(snapshot, "prefer_filename_sequence", False)) if prefer_sequence is None else bool(prefer_sequence)
     trust_cap = max(0.0, min(1.0, trust_score + (0.04 if prefer_seq else 0.10)))
     confidence_cap = min(float(plan.get("confidence_cap", 1.0) or 1.0), trust_cap)

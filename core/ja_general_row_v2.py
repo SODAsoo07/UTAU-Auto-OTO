@@ -46,6 +46,7 @@ def run_ja_general_row(
     alias_out_fn,
     build_guard_messages_fn,
     anchor_store,
+    anchor_lock_lite=False,
 ):
     soft_off_shift = 0.0
     soft_cut_shift = 0.0
@@ -164,6 +165,7 @@ def run_ja_general_row(
         anchor_abs_ms=anchor_abs,
         next_onset_abs_ms=next_onset_abs,
         next_vowel_abs_ms=next_vowel_abs,
+        lite=bool(anchor_lock_lite),
     )
     if alias_type in {"cv", "cv_head"} and not anchor_lock_enabled_fn("japanese", format_type):
         offset, consonant, cutoff, pre, ovl = enforce_cv_pre_anchor_guard_fn(

@@ -30,6 +30,7 @@ def run_ja_vcv_row(
     row_builder_fn,
     generate_openutau_aliases_fn,
     alias_out_fn,
+    anchor_lock_lite=False,
 ):
     current_w_idx = int(mapped_idx)
     post_file_format = str(getattr(post_ctx, "file_format", "") or "").strip().lower()
@@ -124,6 +125,7 @@ def run_ja_vcv_row(
         anchor_abs_ms=c_boundary,
         next_onset_abs_ms=n_start,
         next_vowel_abs_ms=n_end,
+        lite=bool(anchor_lock_lite),
     )
     finalize_row_fn(
         final_lines=final_lines,

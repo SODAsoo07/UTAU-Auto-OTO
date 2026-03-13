@@ -3401,6 +3401,10 @@ def generate_oto(
             textgrid_trust_tier = str(alignment_ingest.textgrid_trust_tier or "low")
             prefer_filename_sequence = bool(alignment_ingest.prefer_filename_sequence)
             spn_ratio = float(phone_quality.get("spn_ratio_in_phone_tier", 0.0))
+            alignment_weight = max(0.0, min(1.0, textgrid_trust_score * 0.85))
+            if filename_cv_targets and alignment_weight < 0.55:
+                prefer_filename_sequence = True
+                targets_for_build = list(filename_cv_targets)
 
             if try_handle_kr_single_vowel_file(
                 fname=fname,
@@ -3481,6 +3485,14 @@ def generate_oto(
             blank_conf_mean = 0.0
             if syllable_blank_confidences:
                 blank_conf_mean = float(sum(syllable_blank_confidences) / float(len(syllable_blank_confidences)))
+            alignment_weight = max(
+                0.0,
+                min(
+                    1.0,
+                    (textgrid_trust_score * 0.85) - max(0.0, blank_conf_mean - 0.45) * 0.35,
+                ),
+            )
+            anchor_lock_lite = bool(alignment_weight < 0.58 or blank_conf_mean >= 0.55)
             used_words_based = bool(kr_source_pick.get("used_words_based"))
             used_alias_based = bool(kr_source_pick.get("used_alias_based"))
             mapping_reason_code = str(kr_source_pick.get("mapping_reason_code") or mapping_reason_code)
@@ -3528,6 +3540,10 @@ def generate_oto(
                     f"🧭 {fname}: TextGrid(words) 매핑 유지 "
                     f"(base={base_score:.1f}, corrected={alt_score:.1f})"
                 )
+            log(
+                f"🧭 {fname}: alignment_weight={alignment_weight:.2f}, "
+                f"blank_mean={blank_conf_mean:.2f}, anchor_lock_lite={anchor_lock_lite}"
+            )
 
             plan_candidate_source = list(
                 filename_cv_targets
@@ -3554,7 +3570,12 @@ def generate_oto(
                     "cv": "UTOA_KR_CV_MEL_PLAN",
                 }
                 if fmt in mel_plan_env and mel_ctx_for_file and syllables_info:
-                    if textgrid_trust_tier != "high" or low_phone_quality or blank_conf_mean >= 0.55:
+                    if (
+                        textgrid_trust_tier != "high"
+                        or low_phone_quality
+                        or blank_conf_mean >= 0.45
+                        or alignment_weight < 0.65
+                    ):
                         use_mel_plan = _env_bool(mel_plan_env[fmt], True)
                 kr_cv_plan = _build_kr_cv_anchor_plan_v2(
                     plan_candidate_source,
@@ -3564,7 +3585,7 @@ def generate_oto(
             kr_planned_cv_indices = kr_cv_plan.get("indices")
             kr_anchor_graph = build_adjacent_anchor_graph(kr_planned_cv_indices)
             kr_plan_policy = resolve_plan_policy(
-                alignment_trust=textgrid_trust_score,
+                alignment_trust=alignment_weight,
                 plan_meta=kr_cv_plan.get("meta"),
                 expected_count=len(plan_candidate_source),
                 planned_count=len(kr_planned_cv_indices or []),
@@ -3591,6 +3612,8 @@ def generate_oto(
                 sequence_lock_formats={"cvvc", "cvc"},
                 abstain_formats={"cvvc", "vcv", "cvc", "cv"},
                 strict_formats={"cvvc"},
+                prefer_sequence=prefer_filename_sequence,
+                alignment_trust=alignment_weight,
             )
             if sinsy_label_entries:
                 plan_source = str(kr_cv_plan.get("source") or "")
@@ -3705,7 +3728,8 @@ def generate_oto(
             if bool(runtime_policy.get("should_abstain")):
                 log(
                     f"경고: {fname}: KR v2 planner abstain "
-                    f"(trust={textgrid_trust_score:.2f}, coverage={float(kr_plan_policy.get('coverage', 0.0)):.2f}, "
+                    f"(trust={textgrid_trust_score:.2f}, weight={alignment_weight:.2f}, "
+                    f"coverage={float(kr_plan_policy.get('coverage', 0.0)):.2f}, "
                     f"margin={float(kr_plan_policy.get('margin', 0.0)):.1f}) → 원본 유지"
                 )
                 _record_unset_lines(
@@ -3955,6 +3979,7 @@ def generate_oto(
                         finalize_row_fn=_finalize_kr_row_v2,
                         row_builder_fn=_build_alias_rows,
                         log_post_timing_events_fn=_log_post_timing_events,
+                        anchor_lock_lite=anchor_lock_lite,
                     )
                     continue
 
@@ -4016,6 +4041,7 @@ def generate_oto(
                         build_guard_messages_fn=_build_kr_cv_head_guard_messages_v2,
                         log_post_timing_events_fn=_log_post_timing_events,
                         anchor_store=realized_cv_anchor_by_idx,
+                        anchor_lock_lite=anchor_lock_lite,
                     )
                     continue
 
@@ -4323,6 +4349,7 @@ def generate_oto(
                     finalize_row_fn=_finalize_kr_row_v2,
                     row_builder_fn=_build_alias_rows,
                     log_post_timing_events_fn=_log_post_timing_events,
+                    anchor_lock_lite=anchor_lock_lite,
                 )
 
             processed += 1
