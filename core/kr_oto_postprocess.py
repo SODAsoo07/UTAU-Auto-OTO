@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional, Sequence, Tuple
 
-from core.kr_oto_rules import _canonicalize_kr_coda, _extract_vc_right_token
+from core.kr_oto_rules import _canonicalize_kr_coda, _extract_vc_right_token, is_plosive_ipa
 
 
 def guard_kr_vc_cutoff_to_next_segment(
@@ -112,6 +112,69 @@ def guard_kr_vv_cutoff_to_current_vowel(
     return validate_fn(offset, consonant, cutoff, pre, ovl)
 
 
+def guard_kr_cv_head_offset_to_current_onset(
+    offset: float,
+    consonant: float,
+    cutoff: float,
+    pre: float,
+    ovl: float,
+    syll_idx: Optional[int],
+    syllables_info: Sequence[dict],
+    validate_fn: Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]],
+) -> Tuple[float, float, float, float, float]:
+    """파일 어두 CV의 과도한 공백 포함을 줄이기 위해 offset을 onset 근처로 당깁니다."""
+    if syll_idx is None or syll_idx < 0:
+        return validate_fn(offset, consonant, cutoff, pre, ovl)
+    if not syllables_info or syll_idx >= len(syllables_info):
+        return validate_fn(offset, consonant, cutoff, pre, ovl)
+
+    # 앞 음절이 있으면 head로 보지 않는다.
+    if syll_idx > 0:
+        prev_syl = syllables_info[syll_idx - 1] or {}
+        if prev_syl.get("phones"):
+            return validate_fn(offset, consonant, cutoff, pre, ovl)
+
+    curr_syl = syllables_info[syll_idx] or {}
+    curr_phones = curr_syl.get("phones") or []
+    if not curr_phones:
+        return validate_fn(offset, consonant, cutoff, pre, ovl)
+
+    c_start = float(curr_phones[0].minTime) * 1000.0
+    if c_start <= 0.5:
+        return validate_fn(offset, consonant, cutoff, pre, ovl)
+
+    c_hint = (curr_phones[0].mark or "").strip().lower()
+    try:
+        from core.kr_oto_rules import find_vowel_phone
+
+        _v_idx, v_phone = find_vowel_phone(curr_phones)
+        c_end = float(getattr(v_phone, "minTime", 0.0) or 0.0) * 1000.0
+    except Exception:
+        c_end = float(curr_phones[0].maxTime) * 1000.0
+
+    c_len = max(0.0, c_end - c_start)
+    if is_plosive_ipa(c_hint) or c_hint in {"s", "ss", "sh", "ch", "j", "jj", "c", "ts", "h"}:
+        lead_min, lead_max = 10.0, 18.0
+    elif c_hint in {"m", "n", "ng", "l", "r", "y", "w", "ny"}:
+        lead_min, lead_max = 8.0, 14.0
+    else:
+        lead_min, lead_max = 9.0, 16.0
+    lead_keep = max(lead_min, min(lead_max, c_len * 0.45 + 6.0))
+
+    desired_offset = max(0.0, c_start - lead_keep)
+    if float(offset) >= desired_offset - 0.5:
+        return validate_fn(offset, consonant, cutoff, pre, ovl)
+
+    delta = desired_offset - float(offset)
+    offset = desired_offset
+    pre = max(0.0, float(pre) - delta)
+    ovl = max(0.0, float(ovl) - delta)
+    consonant = max(0.0, float(consonant) - delta)
+    cutoff_abs = max(0.0, abs(float(cutoff)) - delta)
+    cutoff = -cutoff_abs
+    return validate_fn(offset, consonant, cutoff, pre, ovl)
+
+
 def log_post_timing_events(log_fn, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced):
     """후처리 가드의 의미있는 이동량만 간단히 기록합니다."""
     if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
@@ -194,6 +257,18 @@ class KrPostprocessContext:
         offset, consonant, cutoff, pre, ovl = self.recenter_fn(
             offset, consonant, cutoff, pre, ovl, alias_type=alias_type, alias_text=alias_text
         )
+
+        if alias_type == "cv":
+            offset, consonant, cutoff, pre, ovl = guard_kr_cv_head_offset_to_current_onset(
+                offset,
+                consonant,
+                cutoff,
+                pre,
+                ovl,
+                current_w_idx,
+                self.syllables_info,
+                self.validate_fn,
+            )
 
         if alias_type == "vc":
             offset, consonant, cutoff, pre, ovl = guard_kr_vc_cutoff_to_next_segment(
