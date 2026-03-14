@@ -69,10 +69,6 @@ def _env_flag(name: str, default: bool) -> bool:
     return bool(default)
 
 
-def _coupled_enabled() -> bool:
-    return _env_flag("UTOA_ML_COUPLED_ENABLE", True)
-
-
 def _ensemble_enabled() -> bool:
     return _env_flag("UTOA_ML_ENSEMBLE_ENABLE", True)
 
@@ -86,19 +82,6 @@ def _ml_route(value: Optional[str] = None) -> str:
 
 def _gated_ensemble_enabled() -> bool:
     return _env_flag("UTOA_ML_GATED_ENSEMBLE_ENABLE", True)
-
-
-def _preferred_coupled_backend() -> str:
-    raw = str(os.environ.get("UTOA_ML_COUPLED_BACKEND", "")).strip().lower()
-    if not raw:
-        return "auto"
-    if raw in {"v1", "coupled_nn_v1"}:
-        return "coupled_nn_v1"
-    if raw in {"v2", "coupled_nn_v2_rawmel"}:
-        return "coupled_nn_v2_rawmel"
-    if raw == "auto":
-        return "auto"
-    return raw
 
 
 def _coupled_min_confidence() -> float:
@@ -418,19 +401,6 @@ def _resolve_ensemble_model_dir(language: str, format_type: str, alias_family: s
     return _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="ensemble_v1")
 
 
-def _resolve_coupled_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
-    preferred = _preferred_coupled_backend()
-    if preferred == "coupled_nn_v2_rawmel":
-        return _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="coupled_nn_v2_rawmel") or \
-            _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="coupled_nn_v1")
-    if preferred == "coupled_nn_v1":
-        return _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="coupled_nn_v1") or \
-            _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="coupled_nn_v2_rawmel")
-    # auto: prefer v2 if present, otherwise v1
-    return _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="coupled_nn_v2_rawmel") or \
-        _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="coupled_nn_v1")
-
-
 def _ensure_rawmel_patches(
     feat: Dict[str, object],
     *,
@@ -468,13 +438,10 @@ def _ensure_rawmel_patches(
 
 def _resolve_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
     ensemble_dir = _resolve_ensemble_model_dir(language, format_type, alias_family=alias_family) if _ensemble_enabled() else None
-    coupled_dir = _resolve_coupled_model_dir(language, format_type, alias_family=alias_family)
     lightgbm_dir = _resolve_lightgbm_model_dir(language, format_type, alias_family=alias_family)
     if ensemble_dir:
         return ensemble_dir
-    if _coupled_enabled():
-        return coupled_dir or lightgbm_dir
-    return lightgbm_dir or coupled_dir
+    return lightgbm_dir
 
 
 def _bundle_meta_exists(model_dir: str) -> bool:
@@ -599,23 +566,6 @@ def check_oto_ml_ready(language: str, format_type: str, alias_family: str = "") 
     if not bundle:
         primary_backend = _read_bundle_backend(model_dir)
         if primary_backend == "ensemble_v1":
-            fallback_dir = _resolve_coupled_model_dir(language, routed_format, alias_family=family) or _resolve_lightgbm_model_dir(
-                language, routed_format, alias_family=family
-            )
-            if fallback_dir and _bundle_meta_exists(fallback_dir):
-                fallback_bundle = load_oto_model_bundle(fallback_dir)
-                if fallback_bundle:
-                    return make_runtime_report(
-                        "ml",
-                        OK,
-                        "OTO ML 준비 완료 (ensemble fallback available)",
-                        language=str(language or "").strip().lower(),
-                        format_type=routed_format,
-                        alias_family=family,
-                        model_dir=str(fallback_dir),
-                        ready=True,
-                    )
-        if primary_backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
             fallback_dir = _resolve_lightgbm_model_dir(language, routed_format, alias_family=family)
             if fallback_dir and _bundle_meta_exists(fallback_dir):
                 fallback_bundle = load_oto_model_bundle(fallback_dir)
@@ -623,7 +573,7 @@ def check_oto_ml_ready(language: str, format_type: str, alias_family: str = "") 
                     return make_runtime_report(
                         "ml",
                         OK,
-                        "OTO ML 준비 완료 (coupled fallback: lightgbm)",
+                        "OTO ML 준비 완료 (ensemble fallback available)",
                         language=str(language or "").strip().lower(),
                         format_type=routed_format,
                         alias_family=family,
@@ -1893,19 +1843,14 @@ def apply_oto_ml_to_oto_file(
         cache_key = route_label
         if cache_key not in bundle_cache:
             ensemble_dir = _resolve_ensemble_model_dir(language, format_type, alias_family=alias_family) if _ensemble_enabled() else None
-            coupled_dir = _resolve_coupled_model_dir(language, format_type, alias_family=alias_family) if _coupled_enabled() else None
             lightgbm_dir = _resolve_lightgbm_model_dir(language, format_type, alias_family=alias_family)
-            primary_dir = ensemble_dir or coupled_dir or lightgbm_dir
+            primary_dir = ensemble_dir or lightgbm_dir
             fallback_dir = ""
             primary_backend = _read_bundle_backend(primary_dir) if primary_dir else ""
             route_primary_backend[cache_key] = str(primary_backend or "lightgbm")
             if primary_dir and primary_backend == "ensemble_v1":
-                if coupled_dir and coupled_dir != primary_dir:
-                    fallback_dir = coupled_dir
-                elif lightgbm_dir and lightgbm_dir != primary_dir:
+                if lightgbm_dir and lightgbm_dir != primary_dir:
                     fallback_dir = lightgbm_dir
-            elif primary_dir and primary_backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"} and lightgbm_dir and lightgbm_dir != primary_dir:
-                fallback_dir = lightgbm_dir
 
             if not primary_dir:
                 route_status[cache_key] = ML_MODEL_MISSING

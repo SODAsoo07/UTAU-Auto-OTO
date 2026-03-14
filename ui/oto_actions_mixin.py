@@ -164,10 +164,8 @@ class OtoActionsMixin:
                     ml_coupled_device = "auto"
                 ml_coupled_backend = {
                     "ensemble_v1": "ensemble",
-                    "coupled_nn_v1": "v1",
-                    "coupled_nn_v2_rawmel": "v2",
                 }.get(ml_coupled_backend, ml_coupled_backend)
-                if ml_coupled_backend not in {"auto", "ensemble", "v1", "v2"}:
+                if ml_coupled_backend not in {"auto", "ensemble"}:
                     ml_coupled_backend = "auto"
                 ensemble_enabled = ml_coupled_backend in {"auto", "ensemble"}
                 if kr_conf_threshold is None:
@@ -191,7 +189,7 @@ class OtoActionsMixin:
                 else:
                     os.environ["UTOA_ML_COUPLED_MIN_CONF"] = str(float(ml_coupled_min_conf))
                 os.environ["UTOA_ML_COUPLED_DEVICE"] = str(ml_coupled_device)
-                coupled_backend_env = {"auto": "auto", "ensemble": "auto", "v1": "v1", "v2": "v2"}.get(
+                coupled_backend_env = {"auto": "auto", "ensemble": "auto"}.get(
                     ml_coupled_backend,
                     "auto",
                 )

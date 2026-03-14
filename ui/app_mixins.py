@@ -83,8 +83,6 @@ class FileDialogMixin:
                 [
                     os.path.join(fmt_root, "v1_ensemble"),
                     fmt_root,
-                    os.path.join(fmt_root, "v1_coupled"),
-                    os.path.join(fmt_root, "v1"),
                 ]
             )
         candidates.extend([lang_root, legacy_root, self._ml_model_repo_root()])
@@ -916,10 +914,8 @@ class ConfigMixin:
                 backend = str(config.get("ml_coupled_backend", "auto") or "auto").strip().lower()
                 backend = {
                     "ensemble_v1": "ensemble",
-                    "coupled_nn_v1": "v1",
-                    "coupled_nn_v2_rawmel": "v2",
                 }.get(backend, backend)
-                if backend in {"auto", "ensemble", "v1", "v2"}:
+                if backend in {"auto", "ensemble"}:
                     self.ml_coupled_backend_var.set(backend)
             if "ml_coupled_strict_constraint" in config and hasattr(self, "ml_coupled_strict_constraint_var"):
                 self.ml_coupled_strict_constraint_var.set(bool(config.get("ml_coupled_strict_constraint", False)))

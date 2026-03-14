@@ -68,7 +68,7 @@ def required_bundle_files_for_backend(backend: str, meta: Optional[Dict[str, obj
     if backend_norm == "autofree_v1":
         return list(COMMON_BUNDLE_FILES) + list(AUTOFREE_BUNDLE_FILES)
     if backend_norm in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
-        return list(COMMON_BUNDLE_FILES) + list(COUPLED_BUNDLE_FILES)
+        raise ValueError("coupled v1/v2 bundle export is no longer supported")
     if backend_norm == "ensemble_v1":
         required = list(COMMON_BUNDLE_FILES)
         for subdir in ("lightgbm", "coupled"):

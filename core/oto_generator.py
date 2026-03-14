@@ -699,6 +699,99 @@ def _ensure_cv_min_vowel_coverage(
     return offset, consonant, new_cutoff, pre, extended_ms
 
 
+def _guard_cv_focus_window(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    ovl,
+    c_start_ms,
+    c_end_ms,
+    vowel_start_ms,
+    vowel_end_ms,
+    *,
+    alias_onset="",
+    ipa_onset="",
+):
+    """
+    CV의 핵심 구간을 보정합니다.
+    - offset이 onset 뒤로 밀려 자음이 잘리는 것을 방지
+    - cutoff가 모음 tail(흐려지는 구간)을 과도하게 포함하지 않도록 제한
+    """
+    try:
+        c_start = float(c_start_ms)
+        c_end = float(c_end_ms)
+        v_start = float(vowel_start_ms)
+        v_end = float(vowel_end_ms)
+    except Exception:
+        return offset, consonant, cutoff, pre, ovl, 0.0, 0.0
+
+    if v_end <= v_start or c_end < c_start:
+        return offset, consonant, cutoff, pre, ovl, 0.0, 0.0
+
+    onset = str(alias_onset or "").strip().lower()
+    ipa_hint = normalize_ipa_mark(ipa_onset)
+    hard_onset = is_plosive_ipa(ipa_hint) or ipa_hint in {"s", "ss", "sh", "ch", "j", "jj", "c", "ts", "h"}
+    sonorant_onset = _is_sonorant_like_onset(onset, ipa_hint)
+
+    offset_pulled_ms = 0.0
+    cutoff_trimmed_ms = 0.0
+
+    # 1) 자음 onset 이후로 offset이 밀리면, 상대 파라미터 절대축을 유지한 채 offset만 앞당김.
+    onset_late_slack = max(0.0, _env_float("UTOA_KR_CV_ONSET_LATE_SLACK_MS", 2.0))
+    max_allowed_offset = max(0.0, c_start + onset_late_slack)
+    if float(offset) > max_allowed_offset:
+        shift = float(offset) - max_allowed_offset
+        offset = max_allowed_offset
+        pre = float(pre) + shift
+        consonant = float(consonant) + shift
+        cutoff = -(abs(float(cutoff)) + shift)
+        offset_pulled_ms = shift
+
+    # 2) 모음 안정 구간 이후 tail은 cutoff 상한으로 제한.
+    vowel_len = max(0.0, v_end - v_start)
+    if vowel_len >= 38.0:
+        if hard_onset:
+            tail_trim = _env_float(
+                "UTOA_KR_CV_HARD_VOWEL_TAIL_TRIM_MS",
+                min(max(vowel_len * 0.24, 26.0), 125.0),
+            )
+            stable_ratio = _env_float("UTOA_KR_CV_HARD_VOWEL_STABLE_RATIO", 0.68)
+        elif sonorant_onset:
+            tail_trim = _env_float(
+                "UTOA_KR_CV_SONORANT_VOWEL_TAIL_TRIM_MS",
+                min(max(vowel_len * 0.12, 14.0), 65.0),
+            )
+            stable_ratio = _env_float("UTOA_KR_CV_SONORANT_VOWEL_STABLE_RATIO", 0.78)
+        else:
+            tail_trim = _env_float(
+                "UTOA_KR_CV_VOWEL_TAIL_TRIM_MS",
+                min(max(vowel_len * 0.18, 20.0), 95.0),
+            )
+            stable_ratio = _env_float("UTOA_KR_CV_VOWEL_STABLE_RATIO", 0.72)
+
+        stable_floor = v_start + max(48.0, min(vowel_len * stable_ratio, vowel_len - 8.0))
+        max_cut_abs = (v_end - max(8.0, float(tail_trim)))
+        max_cut_abs = max(max_cut_abs, stable_floor)
+
+        min_cut_abs = float(offset) + float(consonant) + 12.0
+        curr_cut_abs = float(offset) + abs(float(cutoff))
+        if max_cut_abs > (min_cut_abs + 2.0) and curr_cut_abs > max_cut_abs:
+            new_cut_rel = max(float(consonant) + 12.0, max_cut_abs - float(offset))
+            cutoff_trimmed_ms = max(0.0, abs(float(cutoff)) - new_cut_rel)
+            cutoff = -new_cut_rel
+
+    offset, consonant, cutoff, pre, ovl = validate_oto_params(
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        alias_type="cv",
+    )
+    return offset, consonant, cutoff, pre, ovl, offset_pulled_ms, cutoff_trimmed_ms
+
+
 def _prepare_vcv_syllable_timing(
     syllables_info,
     current_w_idx,
@@ -1020,6 +1113,64 @@ def _retune_kr_vcv_anchor_profile(profile, alias_text, alias_type):
     )
 
 
+def _apply_post_timing_strict_cv_guard(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    cutoff_reduced,
+    *,
+    enable_cutoff_guard,
+    alias_type,
+    file_format,
+    current_w_idx,
+    syllables_info,
+):
+    if (
+        enable_cutoff_guard
+        and alias_type == "cv"
+        and _is_kr_order_locked_cv_format(file_format)
+        and _env_bool("UTOA_KR_CV_ORDER_LOCK_STRICT_ONSET_GUARD", True)
+    ):
+        offset, consonant, cutoff, pre, strict_reduced = _guard_cv_cutoff_to_next_onset_strict(
+            offset, consonant, cutoff, pre, current_w_idx, syllables_info
+        )
+        cutoff_reduced += float(strict_reduced or 0.0)
+    return offset, consonant, cutoff, pre, cutoff_reduced
+
+
+def _apply_post_timing_blank_span_guard(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    ovl,
+    *,
+    base_offset,
+    base_consonant,
+    base_cutoff,
+    base_pre,
+    base_ovl,
+    alias_type,
+    mel_ctx_for_file,
+):
+    (offset, consonant, cutoff, pre, ovl), _blank_guard_reverted = _guard_kr_blank_region_span(
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        base_offset=base_offset,
+        base_consonant=base_consonant,
+        base_cutoff=base_cutoff,
+        base_pre=base_pre,
+        base_ovl=base_ovl,
+        alias_type=alias_type,
+        mel_ctx=mel_ctx_for_file,
+    )
+    return offset, consonant, cutoff, pre, ovl
+
+
 def _apply_post_timing_pipeline(
     offset,
     consonant,
@@ -1057,16 +1208,7 @@ def _apply_post_timing_pipeline(
         recenter_fn=_recenter_kr_params_around_pre,
         cv_cutoff_guard_fn=_guard_cv_cutoff_to_next_onset,
     )
-    (
-        offset,
-        consonant,
-        cutoff,
-        pre,
-        ovl,
-        soft_off_shift,
-        soft_cut_shift,
-        cutoff_reduced,
-    ) = ctx.apply(
+    result = ctx.apply_result(
         offset,
         consonant,
         cutoff,
@@ -1080,20 +1222,27 @@ def _apply_post_timing_pipeline(
         enable_stabilize=enable_stabilize,
         enable_cutoff_guard=enable_cutoff_guard,
     )
-    if (
-        enable_cutoff_guard
-        and alias_type == "cv"
-        and _is_kr_order_locked_cv_format(file_format)
-        and _env_bool("UTOA_KR_CV_ORDER_LOCK_STRICT_ONSET_GUARD", True)
-    ):
-        offset, consonant, cutoff, pre, strict_reduced = _guard_cv_cutoff_to_next_onset_strict(
-            offset, consonant, cutoff, pre, current_w_idx, syllables_info
-        )
-        cutoff_reduced += float(strict_reduced or 0.0)
-    (
-        (offset, consonant, cutoff, pre, ovl),
-        _blank_guard_reverted,
-    ) = _guard_kr_blank_region_span(
+    offset = float(result.offset)
+    consonant = float(result.consonant)
+    cutoff = float(result.cutoff)
+    pre = float(result.pre)
+    ovl = float(result.ovl)
+    soft_off_shift = float(result.soft_off_shift)
+    soft_cut_shift = float(result.soft_cut_shift)
+    cutoff_reduced = float(result.cutoff_reduced)
+    offset, consonant, cutoff, pre, cutoff_reduced = _apply_post_timing_strict_cv_guard(
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        cutoff_reduced,
+        enable_cutoff_guard=enable_cutoff_guard,
+        alias_type=alias_type,
+        file_format=file_format,
+        current_w_idx=current_w_idx,
+        syllables_info=syllables_info,
+    )
+    offset, consonant, cutoff, pre, ovl = _apply_post_timing_blank_span_guard(
         offset,
         consonant,
         cutoff,
@@ -1105,7 +1254,7 @@ def _apply_post_timing_pipeline(
         base_pre=base_pre,
         base_ovl=base_ovl,
         alias_type=alias_type,
-        mel_ctx=mel_ctx_for_file,
+        mel_ctx_for_file=mel_ctx_for_file,
     )
     return (
         offset,
@@ -4585,6 +4734,35 @@ def generate_oto(
                         alias_onset=alias_onset,
                         ipa_onset=ipa_onset,
                     )
+                if alias_type == "cv":
+                    alias_onset = _extract_alias_onset(alias)
+                    ipa_onset = curr_phones[0].mark if curr_phones else ""
+                    (
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                        cv_offset_pulled,
+                        cv_cutoff_trimmed,
+                    ) = _guard_cv_focus_window(
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                        c_start,
+                        c_end,
+                        n_start,
+                        n_end,
+                        alias_onset=alias_onset,
+                        ipa_onset=ipa_onset,
+                    )
+                    if (cv_offset_pulled >= 0.8) or (cv_cutoff_trimmed >= 0.8):
+                        log(
+                            f"🛡️ {fname}: CV 핵심구간 보정 "
+                            f"(offset -{cv_offset_pulled:.1f}ms, cutoff -{cv_cutoff_trimmed:.1f}ms) [{alias}]"
+                        )
                 _run_kr_general_row_v2(
                     final_lines=final_lines,
                     real_wav_name=output_wav_name,
@@ -4752,6 +4930,7 @@ def generate_oto(
                 log_fn=log,
                 validate_fn=validate_oto_params,
                 normalize_key_fn=normalize_key,
+                ml_route=os.environ.get("UTOA_ML_ROUTE", "legacy"),
             )
         )
         renamed = apply_output_wav_name_map(out_path, wav_name_map)

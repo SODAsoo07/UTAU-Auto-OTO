@@ -5,6 +5,32 @@ from typing import Callable, Optional, Sequence, Tuple
 
 from core.kr_oto_rules import _canonicalize_kr_coda, _extract_vc_right_token, is_plosive_ipa
 
+ValidateFn = Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]]
+
+
+@dataclass
+class KrPostprocessResult:
+    offset: float
+    consonant: float
+    cutoff: float
+    pre: float
+    ovl: float
+    soft_off_shift: float = 0.0
+    soft_cut_shift: float = 0.0
+    cutoff_reduced: float = 0.0
+
+    def as_tuple(self) -> Tuple[float, float, float, float, float, float, float, float]:
+        return (
+            self.offset,
+            self.consonant,
+            self.cutoff,
+            self.pre,
+            self.ovl,
+            self.soft_off_shift,
+            self.soft_cut_shift,
+            self.cutoff_reduced,
+        )
+
 
 def guard_kr_vc_cutoff_to_next_segment(
     offset: float,
@@ -14,11 +40,11 @@ def guard_kr_vc_cutoff_to_next_segment(
     ovl: float,
     syll_idx: Optional[int],
     syllables_info: Sequence[dict],
-    validate_fn: Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]],
+    validate_fn: ValidateFn,
     *,
     alias_text: str = "",
 ) -> Tuple[float, float, float, float, float]:
-    """VC cutoff가 다음 음절로 과도하게 넘어가지 않도록 제한합니다."""
+    """Clamp VC cutoff so it does not eat into the next syllable onset."""
     if syll_idx is None or syll_idx < 0:
         return validate_fn(offset, consonant, cutoff, pre, ovl)
     if not syllables_info or (syll_idx + 1) >= len(syllables_info):
@@ -70,7 +96,7 @@ def guard_kr_vv_cutoff_to_current_vowel(
     ovl: float,
     syll_idx: Optional[int],
     syllables_info: Sequence[dict],
-    validate_fn: Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]],
+    validate_fn: ValidateFn,
 ) -> Tuple[float, float, float, float, float]:
     if syll_idx is None or syll_idx < 0:
         return validate_fn(offset, consonant, cutoff, pre, ovl)
@@ -120,15 +146,15 @@ def guard_kr_cv_head_offset_to_current_onset(
     ovl: float,
     syll_idx: Optional[int],
     syllables_info: Sequence[dict],
-    validate_fn: Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]],
+    validate_fn: ValidateFn,
 ) -> Tuple[float, float, float, float, float]:
-    """파일 어두 CV의 과도한 공백 포함을 줄이기 위해 offset을 onset 근처로 당깁니다."""
+    """Keep CV(-CV) head offset near current onset to avoid excessive front silence."""
     if syll_idx is None or syll_idx < 0:
         return validate_fn(offset, consonant, cutoff, pre, ovl)
     if not syllables_info or syll_idx >= len(syllables_info):
         return validate_fn(offset, consonant, cutoff, pre, ovl)
 
-    # 앞 음절이 있으면 head로 보지 않는다.
+    # Apply only for true head rows.
     if syll_idx > 0:
         prev_syl = syllables_info[syll_idx - 1] or {}
         if prev_syl.get("phones"):
@@ -176,7 +202,7 @@ def guard_kr_cv_head_offset_to_current_onset(
 
 
 def log_post_timing_events(log_fn, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced):
-    """후처리 가드의 의미있는 이동량만 간단히 기록합니다."""
+    """Log notable postprocess timing changes."""
     if abs(soft_off_shift) > 1.0 or abs(soft_cut_shift) > 1.0:
         log_fn(
             f"🛡️ {fname}: 초기 멜 가드 적용 (offset {soft_off_shift:+.1f}ms, cutoff -{soft_cut_shift:.1f}ms) [{alias}]"
@@ -191,12 +217,213 @@ class KrPostprocessContext:
     mel_ctx_for_file: object
     ph_intervals: Sequence
     syllables_info: Sequence[dict]
-    validate_fn: Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]]
+    validate_fn: ValidateFn
     soft_mel_guard_fn: Callable
     base_shape_blend_fn: Callable
     stabilize_fn: Callable
     recenter_fn: Callable
     cv_cutoff_guard_fn: Callable
+
+    def _resolve_onset_hint(self, current_w_idx: Optional[int]) -> str:
+        try:
+            if current_w_idx is None:
+                return ""
+            idx = int(current_w_idx)
+            if idx < 0 or idx >= len(self.syllables_info):
+                return ""
+            curr_syl = self.syllables_info[idx] or {}
+            curr_phones = curr_syl.get("phones") or []
+            if not curr_phones:
+                return ""
+            return str(getattr(curr_phones[0], "mark", "") or "").strip()
+        except Exception:
+            return ""
+
+    def _apply_soft_mel_stage(
+        self,
+        offset: float,
+        consonant: float,
+        cutoff: float,
+        pre: float,
+        ovl: float,
+        *,
+        alias_type: str,
+        alias_text: str,
+        onset_hint: str,
+    ) -> Tuple[float, float, float, float, float, float, float]:
+        if alias_type not in {"cv", "cv_head", "vcv"}:
+            return offset, consonant, cutoff, pre, ovl, 0.0, 0.0
+        return self.soft_mel_guard_fn(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            alias_type,
+            self.mel_ctx_for_file,
+            onset_hint=onset_hint,
+            alias_text=alias_text,
+            file_format=self.file_format,
+        )
+
+    def _apply_alias_specific_guards(
+        self,
+        offset: float,
+        consonant: float,
+        cutoff: float,
+        pre: float,
+        ovl: float,
+        *,
+        alias_type: str,
+        alias_text: str,
+        current_w_idx: int,
+    ) -> Tuple[float, float, float, float, float]:
+        if alias_type == "cv":
+            return guard_kr_cv_head_offset_to_current_onset(
+                offset,
+                consonant,
+                cutoff,
+                pre,
+                ovl,
+                current_w_idx,
+                self.syllables_info,
+                self.validate_fn,
+            )
+        if alias_type == "vc":
+            return guard_kr_vc_cutoff_to_next_segment(
+                offset,
+                consonant,
+                cutoff,
+                pre,
+                ovl,
+                current_w_idx,
+                self.syllables_info,
+                self.validate_fn,
+                alias_text=alias_text,
+            )
+        if alias_type == "vv":
+            return guard_kr_vv_cutoff_to_current_vowel(
+                offset,
+                consonant,
+                cutoff,
+                pre,
+                ovl,
+                current_w_idx,
+                self.syllables_info,
+                self.validate_fn,
+            )
+        return offset, consonant, cutoff, pre, ovl
+
+    @staticmethod
+    def _enforce_spacing_floor(
+        offset: float,
+        consonant: float,
+        cutoff: float,
+        pre: float,
+        ovl: float,
+        *,
+        alias_type: str,
+    ) -> Tuple[float, float, float, float, float]:
+        # Keep conservative spacing floors for stability.
+        if alias_type in {"cv", "cv_head"}:
+            consonant = max(float(consonant), float(pre) + 58.0)
+            cutoff = -max(abs(float(cutoff)), float(consonant) + 44.0)
+        elif alias_type == "vc":
+            consonant = max(float(consonant), float(pre) + 24.0)
+            cutoff = -max(abs(float(cutoff)), float(consonant) + 16.0)
+        return offset, consonant, cutoff, pre, ovl
+
+    def apply_result(
+        self,
+        offset: float,
+        consonant: float,
+        cutoff: float,
+        pre: float,
+        ovl: float,
+        *,
+        alias_type: str,
+        alias_text: str,
+        base_shape: dict,
+        current_w_idx: int,
+        is_vc_plosive_coda: bool = False,
+        enable_stabilize: bool = True,
+        enable_cutoff_guard: bool = True,
+    ) -> KrPostprocessResult:
+        soft_off_shift = 0.0
+        soft_cut_shift = 0.0
+        cutoff_reduced = 0.0
+        offset, consonant, cutoff, pre, ovl = self.validate_fn(offset, consonant, cutoff, pre, ovl)
+
+        onset_hint = self._resolve_onset_hint(current_w_idx)
+        (
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            soft_off_shift,
+            soft_cut_shift,
+        ) = self._apply_soft_mel_stage(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            alias_type=alias_type,
+            alias_text=alias_text,
+            onset_hint=onset_hint,
+        )
+
+        if not is_vc_plosive_coda:
+            offset, consonant, cutoff, pre, ovl = self.base_shape_blend_fn(
+                offset, consonant, cutoff, pre, ovl, base_shape, alias_type=alias_type
+            )
+
+        if enable_stabilize:
+            offset, consonant, cutoff, pre, ovl = self.stabilize_fn(
+                offset, consonant, cutoff, pre, ovl, self.ph_intervals, alias_type=alias_type
+            )
+
+        offset, consonant, cutoff, pre, ovl = self.recenter_fn(
+            offset, consonant, cutoff, pre, ovl, alias_type=alias_type, alias_text=alias_text
+        )
+
+        offset, consonant, cutoff, pre, ovl = self._apply_alias_specific_guards(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            alias_type=alias_type,
+            alias_text=alias_text,
+            current_w_idx=current_w_idx,
+        )
+
+        if enable_cutoff_guard and alias_type in {"cv", "cv_head"}:
+            offset, consonant, cutoff, pre, cutoff_reduced = self.cv_cutoff_guard_fn(
+                offset, consonant, cutoff, pre, current_w_idx, self.syllables_info
+            )
+
+        offset, consonant, cutoff, pre, ovl = self._enforce_spacing_floor(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            alias_type=alias_type,
+        )
+        offset, consonant, cutoff, pre, ovl = self.validate_fn(offset, consonant, cutoff, pre, ovl)
+
+        return KrPostprocessResult(
+            offset=offset,
+            consonant=consonant,
+            cutoff=cutoff,
+            pre=pre,
+            ovl=ovl,
+            soft_off_shift=soft_off_shift,
+            soft_cut_shift=soft_cut_shift,
+            cutoff_reduced=cutoff_reduced,
+        )
 
     def apply(
         self,
@@ -214,101 +441,28 @@ class KrPostprocessContext:
         enable_stabilize: bool = True,
         enable_cutoff_guard: bool = True,
     ) -> Tuple[float, float, float, float, float, float, float, float]:
-        soft_off_shift = 0.0
-        soft_cut_shift = 0.0
-        cutoff_reduced = 0.0
-        # Enforce timeline order from the first postprocess step.
-        offset, consonant, cutoff, pre, ovl = self.validate_fn(offset, consonant, cutoff, pre, ovl)
-
-        onset_hint = ""
-        try:
-            if current_w_idx is not None and 0 <= int(current_w_idx) < len(self.syllables_info):
-                curr_syl = self.syllables_info[int(current_w_idx)] or {}
-                curr_phones = curr_syl.get("phones") or []
-                if curr_phones:
-                    onset_hint = str(getattr(curr_phones[0], "mark", "") or "").strip()
-        except Exception:
-            onset_hint = ""
-
-        if alias_type in {"cv", "cv_head", "vcv"}:
-            offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift = self.soft_mel_guard_fn(
-                offset,
-                consonant,
-                cutoff,
-                pre,
-                ovl,
-                alias_type,
-                self.mel_ctx_for_file,
-                onset_hint=onset_hint,
-                alias_text=alias_text,
-                file_format=self.file_format,
-            )
-
-        if not is_vc_plosive_coda:
-            offset, consonant, cutoff, pre, ovl = self.base_shape_blend_fn(
-                offset, consonant, cutoff, pre, ovl, base_shape, alias_type=alias_type
-            )
-
-        if enable_stabilize:
-            offset, consonant, cutoff, pre, ovl = self.stabilize_fn(
-                offset, consonant, cutoff, pre, ovl, self.ph_intervals, alias_type=alias_type
-            )
-
-        offset, consonant, cutoff, pre, ovl = self.recenter_fn(
-            offset, consonant, cutoff, pre, ovl, alias_type=alias_type, alias_text=alias_text
+        result = self.apply_result(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            alias_type=alias_type,
+            alias_text=alias_text,
+            base_shape=base_shape,
+            current_w_idx=current_w_idx,
+            is_vc_plosive_coda=is_vc_plosive_coda,
+            enable_stabilize=enable_stabilize,
+            enable_cutoff_guard=enable_cutoff_guard,
         )
+        return result.as_tuple()
 
-        if alias_type == "cv":
-            offset, consonant, cutoff, pre, ovl = guard_kr_cv_head_offset_to_current_onset(
-                offset,
-                consonant,
-                cutoff,
-                pre,
-                ovl,
-                current_w_idx,
-                self.syllables_info,
-                self.validate_fn,
-            )
 
-        if alias_type == "vc":
-            offset, consonant, cutoff, pre, ovl = guard_kr_vc_cutoff_to_next_segment(
-                offset,
-                consonant,
-                cutoff,
-                pre,
-                ovl,
-                current_w_idx,
-                self.syllables_info,
-                self.validate_fn,
-                alias_text=alias_text,
-            )
-
-        if alias_type == "vv":
-            offset, consonant, cutoff, pre, ovl = guard_kr_vv_cutoff_to_current_vowel(
-                offset,
-                consonant,
-                cutoff,
-                pre,
-                ovl,
-                current_w_idx,
-                self.syllables_info,
-                self.validate_fn,
-            )
-
-        if enable_cutoff_guard and alias_type in {"cv", "cv_head"}:
-            offset, consonant, cutoff, pre, cutoff_reduced = self.cv_cutoff_guard_fn(
-                offset, consonant, cutoff, pre, current_w_idx, self.syllables_info
-            )
-
-        # 회귀 방지: CV/VC의 pre-con/cut 길이가 지나치게 짧아지지 않도록 최소 폭을 보장.
-        if alias_type in {"cv", "cv_head"}:
-            consonant = max(float(consonant), float(pre) + 58.0)
-            cutoff_abs = max(abs(float(cutoff)), float(consonant) + 44.0)
-            cutoff = -cutoff_abs
-        elif alias_type == "vc":
-            consonant = max(float(consonant), float(pre) + 24.0)
-            cutoff_abs = max(abs(float(cutoff)), float(consonant) + 16.0)
-            cutoff = -cutoff_abs
-
-        offset, consonant, cutoff, pre, ovl = self.validate_fn(offset, consonant, cutoff, pre, ovl)
-        return offset, consonant, cutoff, pre, ovl, soft_off_shift, soft_cut_shift, cutoff_reduced
+__all__ = [
+    "KrPostprocessContext",
+    "KrPostprocessResult",
+    "guard_kr_cv_head_offset_to_current_onset",
+    "guard_kr_vc_cutoff_to_next_segment",
+    "guard_kr_vv_cutoff_to_current_vowel",
+    "log_post_timing_events",
+]

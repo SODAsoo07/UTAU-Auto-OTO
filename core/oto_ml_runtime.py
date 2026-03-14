@@ -88,15 +88,6 @@ def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
                 schema=schema,
                 device=coupled_device,
             )
-        elif backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
-            from core.oto_ml_coupled import load_coupled_bundle
-
-            payload = load_coupled_bundle(
-                model_dir,
-                meta=meta,
-                schema=schema,
-                device=coupled_device,
-            )
         elif backend == "autofree_v1":
             from core.oto_ml_autofree import load_autofree_bundle
 
@@ -139,15 +130,6 @@ def predict_oto_deltas(bundle: OtoModelBundle, feature_row: Dict[str, Any]) -> O
         confidence = result.get("confidence")
         route = str(result.get("route", route) or route)
         route_backend = str(result.get("route_backend", route_backend) or route_backend)
-    elif bundle.backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
-        from core.oto_ml_coupled import predict_coupled_deltas
-
-        deltas, confidence = predict_coupled_deltas(
-            bundle.payload,
-            feature_row,
-            meta=bundle.meta,
-            schema=bundle.feature_schema,
-        )
     elif bundle.backend == "autofree_v1":
         from core.oto_ml_autofree import predict_autofree_abs
 

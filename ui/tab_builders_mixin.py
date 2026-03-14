@@ -386,7 +386,7 @@ class TabBuildersMixin:
         ).pack(side="left")
         backend_menu = ctk.CTkOptionMenu(
             backend_row,
-            values=["auto", "ensemble", "v1", "v2"],
+            values=["auto", "ensemble"],
             variable=self.ml_coupled_backend_var,
             width=90,
             command=lambda _v: self._on_ml_backend_change(),
@@ -395,7 +395,7 @@ class TabBuildersMixin:
         backend_menu.pack(side="left", padx=(10, 0))
         ctk.CTkLabel(
             backend_row,
-            text="(auto=ensemble->v2->v1, v2=mel raw encoder)",
+            text="(auto=ensemble 우선)",
             text_color="#9E9E9E",
         ).pack(side="left", padx=(8, 0))
 

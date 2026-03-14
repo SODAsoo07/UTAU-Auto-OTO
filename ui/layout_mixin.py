@@ -543,8 +543,7 @@ class LayoutMixin:
             else:
                 os.environ.pop(env_key, None)
             ensemble_dir = _resolve_backend_model_dir(lang, routed_fmt, backend="ensemble_v1")
-            v2_dir = _resolve_backend_model_dir(lang, routed_fmt, backend="coupled_nn_v2_rawmel")
-            v1_dir = _resolve_backend_model_dir(lang, routed_fmt, backend="coupled_nn_v1")
+            lightgbm_dir = _resolve_backend_model_dir(lang, routed_fmt, backend="lightgbm")
         finally:
             if prev_env is None:
                 os.environ.pop(env_key, None)
@@ -559,13 +558,11 @@ class LayoutMixin:
             selected = str(self.ml_coupled_backend_var.get() or "auto").strip().lower()
         selected = {
             "ensemble_v1": "ensemble",
-            "coupled_nn_v1": "v1",
-            "coupled_nn_v2_rawmel": "v2",
         }.get(selected, selected or "auto")
 
         text = (
             f"현재 포맷: {fmt_display} | ensemble {_status_icon(ensemble_dir)} / "
-            f"v2 {_status_icon(v2_dir)} / v1 {_status_icon(v1_dir)}"
+            f"lightgbm {_status_icon(lightgbm_dir)}"
         )
         if selected:
             text += f" | 선택: {selected}"
@@ -610,8 +607,7 @@ class LayoutMixin:
             detail_lines.append(f"custom_root: {override}")
         detail_lines += [
             _fmt_line("ensemble", ensemble_dir or "", _read_meta(ensemble_dir) if ensemble_dir else {}),
-            _fmt_line("v2", v2_dir or "", _read_meta(v2_dir) if v2_dir else {}),
-            _fmt_line("v1", v1_dir or "", _read_meta(v1_dir) if v1_dir else {}),
+            _fmt_line("lightgbm", lightgbm_dir or "", _read_meta(lightgbm_dir) if lightgbm_dir else {}),
         ]
         self.ml_coupled_status_detail_label.configure(text="\n".join(detail_lines))
 

@@ -150,6 +150,7 @@ class KrPostFilePipelineContext:
     log_fn: object
     validate_fn: object
     normalize_key_fn: object
+    ml_route: str = ""
 
 
 def apply_kr_mel_refine_to_oto_file(
@@ -471,7 +472,9 @@ def apply_kr_wav_duration_safety_to_oto_file(
 
 def run_kr_post_file_pipeline(context: KrPostFilePipelineContext):
     wav_dir = resolve_wav_dir_from_tg_folder(context.tg_folder)
-    ml_route = _current_ml_route()
+    ml_route = _normalize_ml_route(getattr(context, "ml_route", "") or _current_ml_route())
+    if callable(context.log_fn):
+        context.log_fn(f"[OTO-ML] KR finalize route={ml_route}")
 
     if context.kr_profile:
         changed = _apply_kr_profile_to_oto_file(
@@ -542,6 +545,8 @@ def run_kr_post_file_pipeline(context: KrPostFilePipelineContext):
         _run_kr_legacy_post_filters()
         _run_ml_stage()
     else:
+        if callable(context.log_fn):
+            context.log_fn("[OTO-ML] KR finalize order: legacy ML -> legacy post-filters")
         _run_ml_stage()
         _run_kr_legacy_post_filters()
 
