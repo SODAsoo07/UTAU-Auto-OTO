@@ -118,7 +118,7 @@ def run_ja_cv_head_row(
         base_shape,
         alias_type="cv_head",
     )
-    offset, consonant, cutoff, pre, ovl = post_ctx.post_adjust(
+    adjusted = post_ctx.post_adjust_result(
         offset,
         consonant,
         cutoff,
@@ -129,6 +129,7 @@ def run_ja_cv_head_row(
         local_end_ms=n_end,
         local_cut_allow_ms=28.0,
     )
+    offset, consonant, cutoff, pre, ovl = adjusted.as_tuple()
     offset, consonant, cutoff, pre, ovl = apply_anchor_lock_fn(
         fname=fname,
         alias_text=alias,

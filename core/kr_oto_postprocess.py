@@ -324,13 +324,31 @@ class KrPostprocessContext:
         *,
         alias_type: str,
     ) -> Tuple[float, float, float, float, float]:
-        # Keep conservative spacing floors for stability.
+        # Keep fixed region compact while keeping cutoff near the original fixed-region zone.
+        original_consonant = float(consonant)
         if alias_type in {"cv", "cv_head"}:
-            consonant = max(float(consonant), float(pre) + 58.0)
-            cutoff = -max(abs(float(cutoff)), float(consonant) + 44.0)
+            min_cons_gap, max_cons_gap = 22.0, 42.0
+            min_cut_gap = 12.0
+            center_lead = 8.0
+            center_span = 18.0
         elif alias_type == "vc":
-            consonant = max(float(consonant), float(pre) + 24.0)
-            cutoff = -max(abs(float(cutoff)), float(consonant) + 16.0)
+            min_cons_gap, max_cons_gap = 10.0, 22.0
+            min_cut_gap = 8.0
+            center_lead = 6.0
+            center_span = 12.0
+        else:
+            return offset, consonant, cutoff, pre, ovl
+
+        cons_gap = float(consonant) - float(pre)
+        cons_gap = max(min_cons_gap, min(max_cons_gap, cons_gap))
+        consonant = float(pre) + cons_gap
+
+        target_center = max(float(consonant) + min_cut_gap, original_consonant + center_lead)
+        cut_min = max(float(consonant) + min_cut_gap, target_center - center_span)
+        cut_max = max(cut_min + 4.0, target_center + center_span)
+        cut_abs = abs(float(cutoff))
+        cut_abs = min(max(cut_abs, cut_min), cut_max)
+        cutoff = -cut_abs
         return offset, consonant, cutoff, pre, ovl
 
     def apply_result(

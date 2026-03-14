@@ -12,13 +12,46 @@ from typing import Callable, Optional, Sequence, Tuple
 
 from core.ja_oto_mapping import _clean_phone_mark
 
+ValidateFn = Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]]
+
 JA_PLOSIVE_CONSONANTS = {
-    'k', 'g', 't', 'd', 'b', 'p',
-    'kk', 'tt', 'pp', 'dd', 'gg', 'bb',
-    'ch', 'ts', 'q', 'c', 'j',
-    'ky', 'gy', 'ty', 'dy', 'by', 'py',
+    "k",
+    "g",
+    "t",
+    "d",
+    "b",
+    "p",
+    "kk",
+    "tt",
+    "pp",
+    "dd",
+    "gg",
+    "bb",
+    "ch",
+    "ts",
+    "q",
+    "c",
+    "j",
+    "ky",
+    "gy",
+    "ty",
+    "dy",
+    "by",
+    "py",
 }
-JA_SIBILANT_ONSETS = {'s', 'z', 'sh', 'j', 'ts', 'dz', 'ch'}
+JA_SIBILANT_ONSETS = {"s", "z", "sh", "j", "ts", "dz", "ch"}
+
+
+@dataclass
+class JaPostAdjustResult:
+    offset: float
+    consonant: float
+    cutoff: float
+    pre: float
+    ovl: float
+
+    def as_tuple(self) -> Tuple[float, float, float, float, float]:
+        return self.offset, self.consonant, self.cutoff, self.pre, self.ovl
 
 
 @dataclass
@@ -26,7 +59,7 @@ class JaPostprocessContext:
     phone_spans_ms: Sequence[Tuple[float, float]]
     timeline_start_ms: float
     effective_end_ms: float
-    validate_fn: Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]]
+    validate_fn: ValidateFn
     recenter_fn: Callable[..., Tuple[float, float, float, float, float]]
     extract_cv_bounds_fn: Callable[..., Tuple[float, float, float, float]]
     cv_onset_class_fn: Callable[..., Tuple[str, str]]
@@ -38,7 +71,7 @@ class JaPostprocessContext:
     style_apply_fn: Optional[Callable[..., Tuple[float, float, float, float, float]]] = None
     autotune_apply_fn: Optional[Callable[..., Tuple[float, float, float, float, float]]] = None
 
-    def post_adjust(
+    def post_adjust_result(
         self,
         offset: float,
         consonant: float,
@@ -50,8 +83,8 @@ class JaPostprocessContext:
         alias_text: str = "",
         local_end_ms: Optional[float] = None,
         local_cut_allow_ms: Optional[float] = None,
-    ) -> Tuple[float, float, float, float, float]:
-        return post_adjust_params(
+    ) -> JaPostAdjustResult:
+        return post_adjust_result(
             offset,
             consonant,
             cutoff,
@@ -72,6 +105,31 @@ class JaPostprocessContext:
             style_apply_fn=self.style_apply_fn,
             autotune_apply_fn=self.autotune_apply_fn,
         )
+
+    def post_adjust(
+        self,
+        offset: float,
+        consonant: float,
+        cutoff: float,
+        pre: float,
+        ovl: float,
+        *,
+        alias_type: str = "cv",
+        alias_text: str = "",
+        local_end_ms: Optional[float] = None,
+        local_cut_allow_ms: Optional[float] = None,
+    ) -> Tuple[float, float, float, float, float]:
+        return self.post_adjust_result(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            alias_type=alias_type,
+            alias_text=alias_text,
+            local_end_ms=local_end_ms,
+            local_cut_allow_ms=local_cut_allow_ms,
+        ).as_tuple()
 
     def guard_cv_cutoff_to_next_onset(
         self,
@@ -188,6 +246,296 @@ def _surrounding_gap_ms(phone_spans_ms: Sequence[Tuple[float, float]], anchor_ms
     return prev_end, next_start, (next_start - prev_end)
 
 
+def _stabilize_pre_abs(
+    pre_abs: float,
+    *,
+    alias_type: str,
+    phone_spans_ms: Sequence[Tuple[float, float]],
+) -> float:
+    nearest_edge, nearest_dist = _nearest_phone_edge_ms(phone_spans_ms, pre_abs)
+    prev_end_ms, next_start_ms, gap_len_ms = _surrounding_gap_ms(phone_spans_ms, pre_abs)
+    if gap_len_ms < 55.0 and nearest_dist <= 34.0:
+        return pre_abs
+
+    target = nearest_edge
+    if prev_end_ms is not None and next_start_ms is not None:
+        if alias_type in ("vc", "vv"):
+            target = max(prev_end_ms + 4.0, next_start_ms - 6.0)
+        elif alias_type in ("cv", "cv_head"):
+            target = max(prev_end_ms + 3.0, next_start_ms - 4.0)
+        else:
+            target = prev_end_ms
+    if abs(target - pre_abs) >= 2.0:
+        return target
+    return pre_abs
+
+
+def _clamp_pre_abs(
+    pre_abs: float,
+    *,
+    alias_type: str,
+    timeline_start_ms: float,
+    effective_end_ms: float,
+) -> float:
+    min_pre_abs = max(timeline_start_ms - (20.0 if alias_type in ("vc", "vv", "vcv") else 10.0), 0.0)
+    max_pre_abs = effective_end_ms + (30.0 if alias_type in ("vc", "vv", "vcv") else 80.0)
+    return max(min_pre_abs, min(pre_abs, max_pre_abs))
+
+
+def _offset_floor(alias_type: str, timeline_start_ms: float) -> float:
+    return max(timeline_start_ms - (70.0 if alias_type in ("vc", "vv", "vcv") else 40.0), 0.0)
+
+
+def _sync_offset_and_pre_abs(offset: float, pre_abs: float, *, offset_floor: float) -> Tuple[float, float]:
+    if offset < offset_floor:
+        offset = offset_floor
+    if pre_abs - offset > 340.0:
+        offset = max(pre_abs - 340.0, 0.0)
+    if pre_abs < offset:
+        pre_abs = offset + 10.0
+    return offset, pre_abs
+
+
+def _apply_vcv_pre_floor(offset: float, pre_abs: float, pre: float, *, offset_floor: float) -> Tuple[float, float, float]:
+    vcv_pre_floor = 46.0
+    if pre < vcv_pre_floor:
+        expand_offset = max(pre_abs - vcv_pre_floor, offset_floor)
+        if expand_offset < offset:
+            offset = expand_offset
+            pre = max(pre_abs - offset, 0.0)
+    if pre < vcv_pre_floor:
+        pre_abs = offset + vcv_pre_floor
+        pre = vcv_pre_floor
+    return offset, pre_abs, pre
+
+
+def _min_cons_gap_by_alias(alias_type: str) -> float:
+    if alias_type in {"cv", "cv_head"}:
+        return 28.0
+    if alias_type == "vc":
+        return 16.0
+    if alias_type == "vv":
+        return 20.0
+    if alias_type == "vcv":
+        return 52.0
+    return 25.0
+
+
+def _resolve_cut_allow_and_cons_allow(alias_type: str, local_cut_allow_ms: Optional[float]) -> Tuple[float, float]:
+    cut_allow_ms = 120.0 if local_cut_allow_ms is None else float(local_cut_allow_ms)
+    if alias_type == "vcv":
+        cut_allow_ms = max(cut_allow_ms, 88.0)
+        cons_allow_ms = max(72.0, cut_allow_ms - 12.0)
+    elif alias_type in {"cv", "cv_head"}:
+        cut_allow_ms = max(cut_allow_ms, 72.0)
+        cons_allow_ms = max(74.0, cut_allow_ms + 10.0)
+    elif alias_type == "vc":
+        cut_allow_ms = max(cut_allow_ms, 44.0)
+        cons_allow_ms = max(52.0, cut_allow_ms + 4.0)
+    else:
+        cons_allow_ms = max(40.0, cut_allow_ms - 40.0)
+    return cut_allow_ms, cons_allow_ms
+
+
+def _enforce_cutoff_floor(alias_type: str, consonant: float, cutoff_abs: float, max_cut_abs: float) -> float:
+    if alias_type == "vcv":
+        min_cut_abs = consonant + 32.0
+        if cutoff_abs < min_cut_abs:
+            cutoff_abs = min(min_cut_abs, max_cut_abs)
+    elif alias_type in {"cv", "cv_head"}:
+        min_cut_abs = consonant + 16.0
+        if cutoff_abs < min_cut_abs:
+            cutoff_abs = min(min_cut_abs, max_cut_abs)
+    elif alias_type == "vc":
+        min_cut_abs = consonant + 10.0
+        if cutoff_abs < min_cut_abs:
+            cutoff_abs = min(min_cut_abs, max_cut_abs)
+    return cutoff_abs
+
+
+def _cap_fixed_region(
+    alias_type: str,
+    pre: float,
+    consonant: float,
+    cutoff_abs: float,
+    *,
+    original_consonant: float,
+) -> Tuple[float, float]:
+    if alias_type in {"cv", "cv_head"}:
+        max_cons_gap = 46.0
+        min_cut_gap = 12.0
+        center_lead = 8.0
+        center_span = 20.0
+    elif alias_type == "vc":
+        max_cons_gap = 26.0
+        min_cut_gap = 8.0
+        center_lead = 6.0
+        center_span = 14.0
+    elif alias_type == "vv":
+        max_cons_gap = 34.0
+        min_cut_gap = 10.0
+        center_lead = 6.0
+        center_span = 14.0
+    elif alias_type == "vcv":
+        max_cons_gap = 78.0
+        min_cut_gap = 14.0
+        center_lead = 8.0
+        center_span = 18.0
+    else:
+        return consonant, cutoff_abs
+
+    cons_gap = max(0.0, float(consonant) - float(pre))
+    cons_gap = min(cons_gap, max_cons_gap)
+    consonant = float(pre) + cons_gap
+
+    target_center = max(float(consonant) + min_cut_gap, float(original_consonant) + center_lead)
+    cut_min = max(float(consonant) + min_cut_gap, target_center - center_span)
+    cut_max = max(cut_min + 4.0, target_center + center_span)
+    cutoff_abs = min(max(float(cutoff_abs), cut_min), cut_max)
+    return consonant, cutoff_abs
+
+
+def _apply_style_and_autotune(
+    offset: float,
+    consonant: float,
+    cutoff: float,
+    pre: float,
+    ovl: float,
+    *,
+    alias_type: str,
+    alias_text: str,
+    ja_style_enabled: bool,
+    ja_style_profile,
+    autotune_profile,
+    style_apply_fn,
+    autotune_apply_fn,
+) -> Tuple[float, float, float, float, float]:
+    if ja_style_enabled and ja_style_profile and not autotune_profile and style_apply_fn:
+        offset, consonant, cutoff, pre, ovl = style_apply_fn(
+            alias_type,
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            ja_style_profile,
+            alias_text=alias_text,
+        )
+    if autotune_profile and autotune_apply_fn:
+        offset, consonant, cutoff, pre, ovl = autotune_apply_fn(
+            alias_type,
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            autotune_profile,
+        )
+    return offset, consonant, cutoff, pre, ovl
+
+
+def post_adjust_result(
+    offset: float,
+    consonant: float,
+    cutoff: float,
+    pre: float,
+    ovl: float,
+    *,
+    alias_type: str = "cv",
+    alias_text: str = "",
+    local_end_ms: Optional[float] = None,
+    local_cut_allow_ms: Optional[float] = None,
+    phone_spans_ms: Sequence[Tuple[float, float]],
+    timeline_start_ms: float,
+    effective_end_ms: float,
+    validate_fn: ValidateFn,
+    recenter_fn: Callable[..., Tuple[float, float, float, float, float]],
+    ja_style_enabled: bool = False,
+    ja_style_profile=None,
+    autotune_profile=None,
+    style_apply_fn: Optional[Callable[..., Tuple[float, float, float, float, float]]] = None,
+    autotune_apply_fn: Optional[Callable[..., Tuple[float, float, float, float, float]]] = None,
+) -> JaPostAdjustResult:
+    alias_type = str(alias_type or "cv").strip().lower()
+    offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
+
+    pre_abs = float(offset) + float(pre)
+    pre_abs = _stabilize_pre_abs(pre_abs, alias_type=alias_type, phone_spans_ms=phone_spans_ms)
+    pre_abs = _clamp_pre_abs(
+        pre_abs,
+        alias_type=alias_type,
+        timeline_start_ms=float(timeline_start_ms),
+        effective_end_ms=float(effective_end_ms),
+    )
+
+    floor = _offset_floor(alias_type, float(timeline_start_ms))
+    offset, pre_abs = _sync_offset_and_pre_abs(float(offset), float(pre_abs), offset_floor=floor)
+
+    pre = max(pre_abs - float(offset), 0.0)
+    if alias_type == "vcv":
+        offset, pre_abs, pre = _apply_vcv_pre_floor(float(offset), float(pre_abs), float(pre), offset_floor=floor)
+
+    if ovl > pre:
+        ovl = pre * 0.72
+
+    original_consonant = float(consonant)
+    min_cons_gap = _min_cons_gap_by_alias(alias_type)
+    if consonant < pre + min_cons_gap:
+        consonant = pre + min_cons_gap
+
+    cut_anchor_ms = float(effective_end_ms if local_end_ms is None else local_end_ms)
+    cut_allow_ms, cons_allow_ms = _resolve_cut_allow_and_cons_allow(alias_type, local_cut_allow_ms)
+
+    max_cons_abs = max((cut_anchor_ms + cons_allow_ms) - float(offset), float(pre) + 40.0)
+    consonant = min(float(consonant), max_cons_abs)
+
+    max_cut_abs = max((cut_anchor_ms + cut_allow_ms) - float(offset), float(consonant) + 35.0)
+    cutoff_abs = min(abs(float(cutoff)), max_cut_abs)
+    consonant, cutoff_abs = _cap_fixed_region(
+        alias_type,
+        float(pre),
+        float(consonant),
+        float(cutoff_abs),
+        original_consonant=original_consonant,
+    )
+    consonant = min(float(consonant), max_cons_abs)
+    cutoff_abs = min(float(cutoff_abs), max_cut_abs)
+    cutoff_abs = _enforce_cutoff_floor(alias_type, float(consonant), float(cutoff_abs), float(max_cut_abs))
+    cutoff = -float(cutoff_abs)
+
+    offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
+    offset, consonant, cutoff, pre, ovl = _apply_style_and_autotune(
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        alias_type=alias_type,
+        alias_text=alias_text,
+        ja_style_enabled=ja_style_enabled,
+        ja_style_profile=ja_style_profile,
+        autotune_profile=autotune_profile,
+        style_apply_fn=style_apply_fn,
+        autotune_apply_fn=autotune_apply_fn,
+    )
+    offset, consonant, cutoff, pre, ovl = recenter_fn(
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        alias_type=alias_type,
+        alias_text=alias_text,
+    )
+    return JaPostAdjustResult(
+        offset=float(offset),
+        consonant=float(consonant),
+        cutoff=float(cutoff),
+        pre=float(pre),
+        ovl=float(ovl),
+    )
+
+
 def post_adjust_params(
     offset: float,
     consonant: float,
@@ -202,7 +550,7 @@ def post_adjust_params(
     phone_spans_ms: Sequence[Tuple[float, float]],
     timeline_start_ms: float,
     effective_end_ms: float,
-    validate_fn: Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]],
+    validate_fn: ValidateFn,
     recenter_fn: Callable[..., Tuple[float, float, float, float, float]],
     ja_style_enabled: bool = False,
     ja_style_profile=None,
@@ -210,106 +558,27 @@ def post_adjust_params(
     style_apply_fn: Optional[Callable[..., Tuple[float, float, float, float, float]]] = None,
     autotune_apply_fn: Optional[Callable[..., Tuple[float, float, float, float, float]]] = None,
 ) -> Tuple[float, float, float, float, float]:
-    alias_type = str(alias_type or "cv").strip().lower()
-    offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
-
-    pre_abs = offset + pre
-    nearest_edge, nearest_dist = _nearest_phone_edge_ms(phone_spans_ms, pre_abs)
-    prev_end_ms, next_start_ms, gap_len_ms = _surrounding_gap_ms(phone_spans_ms, pre_abs)
-    if gap_len_ms >= 55.0 or nearest_dist > 34.0:
-        target = nearest_edge
-        if prev_end_ms is not None and next_start_ms is not None:
-            if alias_type in ("vc", "vv"):
-                target = max(prev_end_ms + 4.0, next_start_ms - 6.0)
-            elif alias_type in ("cv", "cv_head"):
-                target = max(prev_end_ms + 3.0, next_start_ms - 4.0)
-            else:
-                target = prev_end_ms
-        if abs(target - pre_abs) >= 2.0:
-            pre_abs = target
-
-    min_pre_abs = max(timeline_start_ms - (20.0 if alias_type in ("vc", "vv", "vcv") else 10.0), 0.0)
-    max_pre_abs = effective_end_ms + (30.0 if alias_type in ("vc", "vv", "vcv") else 80.0)
-    pre_abs = max(min_pre_abs, min(pre_abs, max_pre_abs))
-
-    offset_floor = max(timeline_start_ms - (70.0 if alias_type in ("vc", "vv", "vcv") else 40.0), 0.0)
-    if offset < offset_floor:
-        offset = offset_floor
-
-    if pre_abs - offset > 340.0:
-        offset = max(pre_abs - 340.0, 0.0)
-    if pre_abs < offset:
-        pre_abs = offset + 10.0
-
-    pre = max(pre_abs - offset, 0.0)
-    if alias_type == "vcv":
-        # VCV는 pre가 너무 짧아지면 뒤 CV가 묻히기 쉬우므로 최소 길이를 보장한다.
-        vcv_pre_floor = 46.0
-        if pre < vcv_pre_floor:
-            expand_offset = max(pre_abs - vcv_pre_floor, offset_floor)
-            if expand_offset < offset:
-                offset = expand_offset
-                pre = max(pre_abs - offset, 0.0)
-        if pre < vcv_pre_floor:
-            pre_abs = offset + vcv_pre_floor
-            pre = vcv_pre_floor
-    if ovl > pre:
-        ovl = pre * 0.72
-    min_cons_gap = 25.0
-    if alias_type in {"cv", "cv_head"}:
-        min_cons_gap = 64.0
-    elif alias_type == "vc":
-        min_cons_gap = 30.0
-    elif alias_type == "vv":
-        min_cons_gap = 34.0
-    elif alias_type == "vcv":
-        min_cons_gap = 76.0
-    if consonant < pre + min_cons_gap:
-        consonant = pre + min_cons_gap
-
-    cut_anchor_ms = effective_end_ms if local_end_ms is None else float(local_end_ms)
-    cut_allow_ms = 120.0 if local_cut_allow_ms is None else float(local_cut_allow_ms)
-    if alias_type == "vcv":
-        # VCV는 고정영역/컷오프를 조금 더 길게 허용해 후행 CV 청감 손실을 줄인다.
-        cut_allow_ms = max(cut_allow_ms, 88.0)
-        cons_allow_ms = max(72.0, cut_allow_ms - 12.0)
-    elif alias_type in {"cv", "cv_head"}:
-        # CV 계열이 과도하게 짧아지는 회귀를 방지한다.
-        cut_allow_ms = max(cut_allow_ms, 72.0)
-        cons_allow_ms = max(74.0, cut_allow_ms + 10.0)
-    elif alias_type == "vc":
-        cut_allow_ms = max(cut_allow_ms, 44.0)
-        cons_allow_ms = max(52.0, cut_allow_ms + 4.0)
-    else:
-        cons_allow_ms = max(40.0, cut_allow_ms - 40.0)
-    max_cons_abs = max((cut_anchor_ms + cons_allow_ms) - offset, pre + 40.0)
-    consonant = min(consonant, max_cons_abs)
-    max_cut_abs = max((cut_anchor_ms + cut_allow_ms) - offset, consonant + 35.0)
-    cutoff = -min(abs(cutoff), max_cut_abs)
-    if alias_type == "vcv":
-        min_cut_abs = consonant + 48.0
-        if abs(cutoff) < min_cut_abs:
-            cutoff = -min(min_cut_abs, max_cut_abs)
-    elif alias_type in {"cv", "cv_head"}:
-        min_cut_abs = consonant + 52.0
-        if abs(cutoff) < min_cut_abs:
-            cutoff = -min(min_cut_abs, max_cut_abs)
-    elif alias_type == "vc":
-        min_cut_abs = consonant + 20.0
-        if abs(cutoff) < min_cut_abs:
-            cutoff = -min(min_cut_abs, max_cut_abs)
-    offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
-
-    if ja_style_enabled and ja_style_profile and not autotune_profile and style_apply_fn:
-        offset, consonant, cutoff, pre, ovl = style_apply_fn(
-            alias_type, offset, consonant, cutoff, pre, ovl, ja_style_profile, alias_text=alias_text
-        )
-    if autotune_profile and autotune_apply_fn:
-        offset, consonant, cutoff, pre, ovl = autotune_apply_fn(
-            alias_type, offset, consonant, cutoff, pre, ovl, autotune_profile
-        )
-
-    return recenter_fn(offset, consonant, cutoff, pre, ovl, alias_type=alias_type, alias_text=alias_text)
+    return post_adjust_result(
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        alias_type=alias_type,
+        alias_text=alias_text,
+        local_end_ms=local_end_ms,
+        local_cut_allow_ms=local_cut_allow_ms,
+        phone_spans_ms=phone_spans_ms,
+        timeline_start_ms=timeline_start_ms,
+        effective_end_ms=effective_end_ms,
+        validate_fn=validate_fn,
+        recenter_fn=recenter_fn,
+        ja_style_enabled=ja_style_enabled,
+        ja_style_profile=ja_style_profile,
+        autotune_profile=autotune_profile,
+        style_apply_fn=style_apply_fn,
+        autotune_apply_fn=autotune_apply_fn,
+    ).as_tuple()
 
 
 def ja_cv_head_min_cutoff_abs(offset: float, consonant: float, pre: float, vowel_start_ms: float, vowel_end_ms: float) -> Optional[float]:
@@ -344,7 +613,7 @@ def guard_ja_cv_cutoff_to_next_onset(
     pre: float,
     syll_idx: Optional[int],
     syllables_info: Sequence[dict],
-    validate_fn: Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]],
+    validate_fn: ValidateFn,
     *,
     alias_type: str = "cv",
     format_type: str = "",
@@ -377,7 +646,6 @@ def guard_ja_cv_cutoff_to_next_onset(
     consonant = max(consonant, pre + 10.0)
 
     cutoff_abs = min(original_cutoff_abs, max_cutoff_abs)
-    min_cutoff_abs = None
     if is_cv_head and vowel_start_ms is not None and vowel_end_ms is not None:
         min_cutoff_abs = ja_cv_head_min_cutoff_abs(offset, consonant, pre, vowel_start_ms, vowel_end_ms)
         if min_cutoff_abs is not None:
@@ -402,7 +670,7 @@ def guard_ja_cv_head_offset_to_onset(
     syllables_info: Sequence[dict],
     extract_cv_bounds_fn: Callable[..., Tuple[float, float, float, float]],
     cv_onset_class_fn: Callable[..., Tuple[str, str]],
-    validate_fn: Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]],
+    validate_fn: ValidateFn,
     *,
     alias_text: str = "",
 ) -> Tuple[float, float, float, float, float]:
@@ -447,7 +715,7 @@ def ensure_ja_cv_head_min_vowel_coverage(
     pre: float,
     vowel_start_ms: float,
     vowel_end_ms: float,
-    validate_fn: Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]],
+    validate_fn: ValidateFn,
 ) -> Tuple[float, float, float, float, float]:
     min_cut_abs = ja_cv_head_min_cutoff_abs(offset, consonant, pre, vowel_start_ms, vowel_end_ms)
     if min_cut_abs is None:
@@ -461,3 +729,17 @@ def ensure_ja_cv_head_min_vowel_coverage(
     offset, consonant, new_cutoff, pre, _ovl = validate_fn(offset, consonant, new_cutoff, pre, 0.0)
     extended_ms = max(0.0, abs(new_cutoff) - cut_abs)
     return offset, consonant, new_cutoff, pre, extended_ms
+
+
+__all__ = [
+    "JA_PLOSIVE_CONSONANTS",
+    "JA_SIBILANT_ONSETS",
+    "JaPostAdjustResult",
+    "JaPostprocessContext",
+    "ensure_ja_cv_head_min_vowel_coverage",
+    "guard_ja_cv_cutoff_to_next_onset",
+    "guard_ja_cv_head_offset_to_onset",
+    "ja_cv_head_min_cutoff_abs",
+    "post_adjust_params",
+    "post_adjust_result",
+]

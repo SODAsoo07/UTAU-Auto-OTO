@@ -110,7 +110,7 @@ def run_ja_general_row(
         base_shape,
         alias_type=alias_type,
     )
-    offset, consonant, cutoff, pre, ovl = post_ctx.post_adjust(
+    adjusted = post_ctx.post_adjust_result(
         offset,
         consonant,
         cutoff,
@@ -121,6 +121,7 @@ def run_ja_general_row(
         local_end_ms=n_end,
         local_cut_allow_ms=(44.0 if alias_type == "vc" else 40.0 if alias_type == "vv" else 54.0),
     )
+    offset, consonant, cutoff, pre, ovl = adjusted.as_tuple()
 
     if alias_type == "vc":
         pre_abs_before = offset + pre
