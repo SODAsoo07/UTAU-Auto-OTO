@@ -9,13 +9,26 @@
 - `rawmel-cache-dir`는 같은 데이터셋과 같은 patch spec로 생성된 캐시여야 한다.
 - 필터 후 최소 24행이 필요하다.
 - `voicebank_id` 기준 OOF를 쓰려면 최소 3개 이상 bank가 있는 편이 맞다.
+- rawmel cache는 `ml/scripts/coupled/build_mel_patch_cache.py`로 생성한다.
 
 ## 캐시 재생성이 필요한 경우
 - `mel_patch_spec`가 바뀐 경우
 - `wav_norm`, `alias_norm`, `occurrence_index`, `row_index_in_wav` 규칙이 바뀐 경우
 - 학습 중 rawmel cache missing key 오류가 나는 경우
+- `FEATURE_VERSION` 변경 또는 build_mel_patch_cache 기본 파라미터 변경 시
 
 그 외에는 기존 캐시를 그대로 재사용해도 된다.
+
+## 사전 단계: rawmel patch cache 생성
+
+아래 스크립트가 캐시 디렉토리를 생성하고 `manifest.json` 경로를 출력한다.
+출력된 캐시 디렉토리를 이후 `--rawmel-cache-dir`로 넘긴다.
+
+```powershell
+python .\ml\scripts\coupled\build_mel_patch_cache.py `
+  --dataset ".\ml_workspace\datasets\korean\dataset_korean_cvvc_coupled.csv" `
+  --dataset-root ".\dataset"
+```
 
 ## 공통 환경
 
@@ -24,6 +37,13 @@ $root = "C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO"
 Set-Location $root
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
+```
+
+Micromamba 환경을 쓰는 경우:
+
+```powershell
+$MambaExe = ".\micromamba\Library\bin\micromamba.exe"
+& $MambaExe run -r .\micromamba -p .\.env python --version
 ```
 
 ## 권장 명령 1: 한국어 CVVC 다중 bank

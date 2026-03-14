@@ -77,6 +77,13 @@ def _ensemble_enabled() -> bool:
     return _env_flag("UTOA_ML_ENSEMBLE_ENABLE", True)
 
 
+def _ml_route(value: Optional[str] = None) -> str:
+    raw = str(value or os.environ.get("UTOA_ML_ROUTE", "legacy") or "legacy").strip().lower()
+    if raw in {"autofree_v1", "autofree", "b", "route_b"}:
+        return "autofree_v1"
+    return "legacy"
+
+
 def _gated_ensemble_enabled() -> bool:
     return _env_flag("UTOA_ML_GATED_ENSEMBLE_ENABLE", True)
 
@@ -939,7 +946,6 @@ def _apply_korean_cv_no_regression_guard(
     if format_type not in {"cv", "cvvc", "cvc", "vcv"}:
         return params
     tight_cv = format_type in {"cvvc", "cvc"}
-    tight_cv = format_type in {"cvvc", "cvc"}
 
     offset, cons, cutoff, pre, ovl = validate_fn(*params)
     offset = float(offset)
@@ -1032,6 +1038,7 @@ def _apply_korean_cv_destination_guard(
         return params
     if format_type not in {"cv", "cvvc", "cvc", "vcv"}:
         return params
+    tight_cv = format_type in {"cvvc", "cvc"}
 
     offset, cons, cutoff, pre, ovl = validate_fn(*params)
     offset = float(offset)
@@ -1743,13 +1750,16 @@ def apply_oto_ml_to_oto_file(
     format_override: Optional[str] = None,
     policy: Optional[str] = None,
     report: Optional[Dict[str, object]] = None,
+    ml_route: Optional[str] = None,
 ) -> int:
     policy_name = normalize_ml_policy(policy, enabled_default=enabled)
     required_policy = policy_name == "on"
+    route_name = _ml_route(ml_route)
     ml_report = _ensure_report(
         report,
         stage="ml",
         policy=policy_name,
+        ml_route=route_name,
         status="skipped",
         code=OK,
         message="",
@@ -1785,6 +1795,30 @@ def apply_oto_ml_to_oto_file(
         ml_report.update(make_runtime_report("ml", ML_DISABLED_ENV, "환경변수로 OTO ML이 비활성화되었습니다."))
         ml_report["status"] = "skipped"
         return 0
+
+    if route_name == "autofree_v1":
+        try:
+            from core.oto_ml_autofree_runtime import apply_autofree_ml_to_oto_file
+        except Exception as exc:
+            ml_report.update(make_runtime_report("ml", ML_ROUTE_UNAVAILABLE, f"autofree runtime import failed: {exc}"))
+            ml_report["status"] = "fallback" if required_policy else "skipped"
+            ml_report["fallback_used"] = required_policy
+            return 0
+        return int(
+            apply_autofree_ml_to_oto_file(
+                language=language,
+                oto_path=oto_path,
+                tg_dir=tg_dir,
+                wav_dir=wav_dir,
+                custom_phonemes_path=custom_phonemes_path,
+                callback=callback,
+                enabled=enabled,
+                format_override=format_override,
+                policy=policy,
+                report=ml_report,
+            )
+            or 0
+        )
 
     if not oto_path or not os.path.exists(oto_path):
         ml_report.update(make_runtime_report("ml", ML_INPUT_MISSING, f"OTO 파일이 없습니다: {oto_path}"))

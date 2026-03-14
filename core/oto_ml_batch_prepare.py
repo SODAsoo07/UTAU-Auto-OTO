@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict
 from typing import Callable, Dict, List, Optional
 
@@ -192,6 +193,52 @@ def _run_mfa_align_with_fallbacks(
     return False, last_err, ""
 
 
+def _prepare_one_item(item: PreparedAutoPair, mfa_path: str) -> tuple[PreparedAutoPair, List[str]]:
+    logs: List[str] = []
+    item.mfa_path = mfa_path
+    item.tg_dir = item.work_dir
+    item.auto_oto = os.path.join(item.work_dir, "oto_auto_ml.ini")
+    item.dict_path = os.path.join(item.work_dir, "dictionary_auto.txt")
+
+    if _has_textgrid_files(item.tg_dir):
+        try:
+            _generate_auto_oto(item, logs)
+            item.status = "prepared"
+            item.reason = "textgrid_existing"
+        except Exception as exc:
+            item.status = "skip"
+            item.reason = f"auto_oto_failed:{exc}"
+        return item, logs
+
+    if not mfa_path:
+        item.status = "skip"
+        item.reason = "missing_mfa"
+        return item, logs
+
+    try:
+        _prepare_lab_and_dict(item, logs)
+        item.tg_dir = item.work_dir
+        os.makedirs(item.tg_dir, exist_ok=True)
+        ok, err, used_profile = _run_mfa_align_with_fallbacks(
+            mfa_path=mfa_path,
+            item=item,
+            logs=logs,
+        )
+        if not ok:
+            item.status = "skip"
+            item.reason = f"align_failed:{err}"
+            return item, logs
+        _generate_auto_oto(item, logs)
+        item.status = "prepared"
+        if used_profile:
+            item.reason = f"align_profile:{used_profile}"
+        return item, logs
+    except Exception as exc:
+        item.status = "skip"
+        item.reason = f"exception:{exc}"
+        return item, logs
+
+
 def prepare_staged_auto_pairs(
     dataset_root: str,
     dry_run: bool = False,
@@ -200,6 +247,7 @@ def prepare_staged_auto_pairs(
     report_path: str = "",
     resume: bool = False,
     retry_failed: bool = False,
+    workers: int = 0,
 ) -> Dict[str, object]:
     items = _discover_work_items(dataset_root)
     if limit > 0:
@@ -207,6 +255,8 @@ def prepare_staged_auto_pairs(
     report_path = os.path.abspath(
         report_path or os.path.join(dataset_root, "_manifest", "prepared_auto_pairs.json")
     )
+    if workers and workers > 1:
+        os.environ.setdefault("UTOA_MFA_ROOT_DIR_MODE", "per_process")
     mfa_path = find_mfa_executable() or ""
     results: List[PreparedAutoPair] = []
     logs_by_item: Dict[str, List[str]] = {}
@@ -225,9 +275,11 @@ def prepare_staged_auto_pairs(
             progress_callback(message)
 
     emit(
-        f"[Prepare] 시작: total={len(items)} dry_run={bool(dry_run)} "
+        f"[Prepare] start: total={len(items)} dry_run={bool(dry_run)} "
         f"mfa={'OK' if mfa_path else 'MISSING'} resume={bool(resume)}"
     )
+
+    work_items: List[tuple[str, PreparedAutoPair, List[str]]] = []
 
     for index, item in enumerate(items, start=1):
         key = os.path.relpath(item.work_dir, dataset_root)
@@ -255,20 +307,23 @@ def prepare_staged_auto_pairs(
                 item.reason = prev_item.reason
         emit(
             f"[Prepare] ({index}/{len(items)}) {item.language}/{item.format_type} "
-            f"{key} 처리 시작"
+            f"{key} start"
         )
+
+        tg_exists = _has_textgrid_files(item.tg_dir)
+        auto_oto_exists = _has_usable_oto_lines(item.auto_oto)
 
         if resume and prev_item is not None:
             if (
                 prev_item.status in _PREPARED_DONE_STATUSES
-                and _has_textgrid_files(item.tg_dir)
-                and _has_usable_oto_lines(item.auto_oto)
+                and auto_oto_exists
+                and (not tg_exists)
             ):
                 item.status = prev_item.status
                 item.reason = prev_item.reason
                 resume_skipped += 1
                 emit(
-                    f"[Prepare] ({index}/{len(items)}) {key} 체크포인트 재사용: "
+                    f"[Prepare] ({index}/{len(items)}) {key} checkpoint: "
                     f"{item.status}"
                 )
                 results.append(item)
@@ -289,7 +344,7 @@ def prepare_staged_auto_pairs(
                 item.reason = prev_item.reason
                 resume_skipped += 1
                 emit(
-                    f"[Prepare] ({index}/{len(items)}) {key} 이전 실패 유지: "
+                    f"[Prepare] ({index}/{len(items)}) {key} skip(previous): "
                     f"{item.reason or 'skip'}"
                 )
                 results.append(item)
@@ -323,27 +378,10 @@ def prepare_staged_auto_pairs(
             )
             continue
 
-        if _has_textgrid_files(item.tg_dir) and _has_usable_oto_lines(item.auto_oto):
-            item.status = "prepared_existing"
-            emit(f"[Prepare] ({index}/{len(items)}) {key} 기존 결과 재사용")
-            results.append(item)
-            _write_prepare_checkpoint(
-                report_path,
-                total_items=len(items),
-                items=results,
-                logs=logs_by_item,
-                dry_run=dry_run,
-                mfa_path=mfa_path,
-                resume=resume,
-                retry_failed=retry_failed,
-                resume_skipped=resume_skipped,
-            )
-            continue
-
-        if not mfa_path:
+        if auto_oto_exists:
             item.status = "skip"
-            item.reason = "missing_mfa"
-            emit(f"[Prepare] ({index}/{len(items)}) {key} 건너뜀: missing_mfa")
+            item.reason = "auto_oto_exists"
+            emit(f"[Prepare] ({index}/{len(items)}) {key} skip(existing_auto_oto)")
             results.append(item)
             _write_prepare_checkpoint(
                 report_path,
@@ -358,22 +396,53 @@ def prepare_staged_auto_pairs(
             )
             continue
 
-        try:
-            _prepare_lab_and_dict(item, logs)
-            item.tg_dir = item.work_dir
-            os.makedirs(item.tg_dir, exist_ok=True)
-            ok, err, used_profile = _run_mfa_align_with_fallbacks(
-                mfa_path=mfa_path,
-                item=item,
-                logs=logs,
-            )
-            if not ok:
-                item.status = "skip"
-                item.reason = f"align_failed:{err}"
-                emit(
-                    f"[Prepare] ({index}/{len(items)}) {key} 건너뜀: "
-                    f"align_failed:{err}"
-                )
+        work_items.append((key, item, list(logs)))
+
+    if work_items:
+        if workers and workers > 1:
+            with ProcessPoolExecutor(max_workers=int(workers)) as executor:
+                future_map = {
+                    executor.submit(_prepare_one_item, item, mfa_path): (key, prev_logs)
+                    for key, item, prev_logs in work_items
+                }
+                for future in as_completed(future_map):
+                    key, prev_logs = future_map[future]
+                    item, item_logs = future.result()
+                    logs_by_item[key] = list(prev_logs) + list(item_logs or [])
+                    if item.status == "prepared" and item.reason == "textgrid_existing":
+                        emit(f"[Prepare] {key} textgrid_existing -> auto_oto regenerated")
+                    elif item.status == "prepared" and str(item.reason or "").startswith("align_profile:"):
+                        profile = str(item.reason).split(":", 1)[-1]
+                        emit(f"[Prepare] {key} done (align_profile={profile})")
+                    elif item.status == "prepared":
+                        emit(f"[Prepare] {key} done")
+                    else:
+                        emit(f"[Prepare] {key} skip: {item.reason}")
+                    results.append(item)
+                    _write_prepare_checkpoint(
+                        report_path,
+                        total_items=len(items),
+                        items=results,
+                        logs=logs_by_item,
+                        dry_run=dry_run,
+                        mfa_path=mfa_path,
+                        resume=resume,
+                        retry_failed=retry_failed,
+                        resume_skipped=resume_skipped,
+                    )
+        else:
+            for key, item, prev_logs in work_items:
+                item, item_logs = _prepare_one_item(item, mfa_path)
+                logs_by_item[key] = list(prev_logs) + list(item_logs or [])
+                if item.status == "prepared" and item.reason == "textgrid_existing":
+                    emit(f"[Prepare] {key} textgrid_existing -> auto_oto regenerated")
+                elif item.status == "prepared" and str(item.reason or "").startswith("align_profile:"):
+                    profile = str(item.reason).split(":", 1)[-1]
+                    emit(f"[Prepare] {key} done (align_profile={profile})")
+                elif item.status == "prepared":
+                    emit(f"[Prepare] {key} done")
+                else:
+                    emit(f"[Prepare] {key} skip: {item.reason}")
                 results.append(item)
                 _write_prepare_checkpoint(
                     report_path,
@@ -386,46 +455,6 @@ def prepare_staged_auto_pairs(
                     retry_failed=retry_failed,
                     resume_skipped=resume_skipped,
                 )
-                continue
-
-            _generate_auto_oto(item, logs)
-            item.status = "prepared"
-            if used_profile:
-                emit(
-                    f"[Prepare] ({index}/{len(items)}) {key} 완료 "
-                    f"(align_profile={used_profile})"
-                )
-            else:
-                emit(f"[Prepare] ({index}/{len(items)}) {key} 완료")
-            results.append(item)
-            _write_prepare_checkpoint(
-                report_path,
-                total_items=len(items),
-                items=results,
-                logs=logs_by_item,
-                dry_run=dry_run,
-                mfa_path=mfa_path,
-                resume=resume,
-                retry_failed=retry_failed,
-                resume_skipped=resume_skipped,
-            )
-        except Exception as exc:
-            item.status = "skip"
-            item.reason = f"exception:{exc}"
-            emit(f"[Prepare] ({index}/{len(items)}) {key} 예외: {exc}")
-            results.append(item)
-            _write_prepare_checkpoint(
-                report_path,
-                total_items=len(items),
-                items=results,
-                logs=logs_by_item,
-                dry_run=dry_run,
-                mfa_path=mfa_path,
-                resume=resume,
-                retry_failed=retry_failed,
-                resume_skipped=resume_skipped,
-            )
-
     summary = _build_prepare_summary(
         total_items=len(items),
         items=results,
@@ -436,7 +465,7 @@ def prepare_staged_auto_pairs(
         resume_skipped=resume_skipped,
     )
     emit(
-        f"[Prepare] 종료: prepared={summary['prepared']} skipped={summary['skipped']} "
+        f"[Prepare] end: prepared={summary['prepared']} skipped={summary['skipped']} "
         f"pending={summary['pending']} total={summary['total_items']}"
     )
 

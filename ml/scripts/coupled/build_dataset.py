@@ -16,7 +16,7 @@ def main():
     bootstrap_utf8_runtime()
     ap = argparse.ArgumentParser(description="Build mel+oto coupled training dataset CSV.")
     ap.add_argument("--lang", required=True, choices=["korean", "japanese"])
-    ap.add_argument("--auto", required=True, help="Auto-generated oto.ini path")
+    ap.add_argument("--auto", default="", help="Auto-generated oto.ini path (optional with auto-oto policy)")
     ap.add_argument("--manual", required=True, help="Manually corrected oto.ini path")
     ap.add_argument("--tg-dir", required=True, help="TextGrid directory")
     ap.add_argument("--wav-dir", required=True, help="WAV directory")
@@ -25,7 +25,17 @@ def main():
     ap.add_argument("--custom-phonemes", default="", help="Optional custom phoneme map")
     ap.add_argument("--format-override", default="", help="Optional forced format_type for all rows")
     ap.add_argument("--append", action="store_true", help="Append to an existing CSV")
+    ap.add_argument(
+        "--auto-oto-policy",
+        default="require",
+        choices=["require", "generate-temp", "generate-persist"],
+        help="Auto OTO behavior when missing (require|generate-temp|generate-persist)",
+    )
     args = ap.parse_args()
+
+    policy = str(args.auto_oto_policy or "").strip().lower()
+    if policy in {"", "require", "required"} and not str(args.auto or "").strip():
+        raise SystemExit("--auto is required when --auto-oto-policy=require")
 
     stats = build_and_save_coupled_dataset(
         language=args.lang,
@@ -38,6 +48,7 @@ def main():
         voicebank_id=args.voicebank_id,
         append=args.append,
         format_type_override=args.format_override,
+        auto_oto_policy=args.auto_oto_policy,
     )
     print(f"saved_rows={stats.get('saved_rows', 0)}")
     print(f"matched_rows={stats.get('matched_rows', 0)}")

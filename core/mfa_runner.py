@@ -145,7 +145,7 @@ def _contains_non_ascii(text):
         return False
 
 
-def _default_mfa_root_dir(mfa_path=""):
+def _default_mfa_root_dir(mfa_path="", per_process: bool = False):
     if getattr(sys, 'frozen', False):
         app_dir = os.path.dirname(sys.executable)
     elif mfa_path:
@@ -153,8 +153,44 @@ def _default_mfa_root_dir(mfa_path=""):
     else:
         app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     root = os.path.join(app_dir, ".mfa_root_ascii")
+    if per_process:
+        root = f"{root}_p{os.getpid()}"
     os.makedirs(root, exist_ok=True)
     return root
+
+
+def _seed_mfa_pretrained_models(dst_root: str, src_root: str) -> None:
+    """Ensure per-process MFA root contains pretrained_models copied from shared root."""
+    if not dst_root or not src_root:
+        return
+    try:
+        dst_root = os.path.abspath(dst_root)
+        src_root = os.path.abspath(src_root)
+        if dst_root == src_root:
+            return
+        src_models = os.path.join(src_root, "pretrained_models")
+        dst_models = os.path.join(dst_root, "pretrained_models")
+        if not os.path.isdir(src_models):
+            return
+        dst_acoustic = os.path.join(dst_models, "acoustic")
+        if os.path.isdir(dst_models) and os.path.isdir(dst_acoustic):
+            return
+        os.makedirs(dst_root, exist_ok=True)
+        shutil.copytree(src_models, dst_models, dirs_exist_ok=True)
+    except Exception as exc:
+        logger.warning(f"[MFA] Failed to seed pretrained_models: {exc}")
+
+
+def _resolve_env_python_exe(env_dir: str) -> str:
+    candidates = [
+        os.path.join(env_dir, "python.exe"),
+        os.path.join(env_dir, "Scripts", "python.exe"),
+        os.path.join(env_dir, "bin", "python"),
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return ""
 
 
 def get_default_mfa_env_dir():
@@ -192,10 +228,6 @@ def _candidate_mfa_executable_paths():
         app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     shared_env_dir = get_default_mfa_env_dir()
     candidates = [
-        os.path.join(shared_env_dir, 'Scripts', 'mfa.exe'),
-        os.path.join(shared_env_dir, 'Scripts', 'mfa.bat'),
-        os.path.join(shared_env_dir, 'Scripts', 'mfa.cmd'),
-        os.path.join(shared_env_dir, 'bin', 'mfa'),
         os.path.join(app_dir, '.env', 'Scripts', 'mfa.exe'),
         os.path.join(app_dir, '.env', 'Scripts', 'mfa.bat'),
         os.path.join(app_dir, '.env', 'Scripts', 'mfa.cmd'),
@@ -203,6 +235,10 @@ def _candidate_mfa_executable_paths():
         os.path.join(app_dir, 'env', 'Scripts', 'mfa.exe'),
         os.path.join(app_dir, 'env', 'Scripts', 'mfa.bat'),
         os.path.join(app_dir, 'env', 'Scripts', 'mfa.cmd'),
+        os.path.join(shared_env_dir, 'Scripts', 'mfa.exe'),
+        os.path.join(shared_env_dir, 'Scripts', 'mfa.bat'),
+        os.path.join(shared_env_dir, 'Scripts', 'mfa.cmd'),
+        os.path.join(shared_env_dir, 'bin', 'mfa'),
     ]
     seen = set()
     unique = []
@@ -309,11 +345,7 @@ def get_mfa_env_python_version(mfa_path: str) -> str:
     if not mfa_path:
         return ""
     env_dir = os.path.dirname(os.path.dirname(os.path.abspath(mfa_path)))
-    candidates = [
-        os.path.join(env_dir, "python.exe"),
-        os.path.join(env_dir, "bin", "python"),
-    ]
-    python_exe = next((p for p in candidates if os.path.exists(p)), "")
+    python_exe = _resolve_env_python_exe(env_dir)
     if not python_exe:
         return ""
     try:
@@ -399,7 +431,11 @@ def _get_conda_env(mfa_path):
     """
     env = os.environ.copy()
     if sys.platform == 'win32' and mfa_path and 'Scripts' in mfa_path:
-        env_dir = os.path.dirname(os.path.dirname(mfa_path))
+        mfa_path = os.path.abspath(mfa_path)
+        env_dir = os.path.abspath(os.path.dirname(os.path.dirname(mfa_path)))
+        site_packages = os.path.join(env_dir, 'Lib', 'site-packages')
+        eunjeon_data = os.path.join(site_packages, 'eunjeon', 'data')
+        mecabrc = os.path.join(site_packages, 'mecabrc')
         new_paths = [
             env_dir,
             os.path.join(env_dir, 'Library', 'mingw-w64', 'bin'),
@@ -408,10 +444,22 @@ def _get_conda_env(mfa_path):
             os.path.join(env_dir, 'Scripts'),
             os.path.join(env_dir, 'bin'),
         ]
+        if os.path.isdir(site_packages):
+            new_paths.append(site_packages)
+        if os.path.isdir(eunjeon_data):
+            new_paths.append(eunjeon_data)
         current_path = env.get('PATH', '')
         env['PATH'] = os.pathsep.join(new_paths) + os.pathsep + current_path
         env['CONDA_PREFIX'] = env_dir
-    env.setdefault('MFA_ROOT_DIR', _default_mfa_root_dir(mfa_path))
+        if os.path.exists(mecabrc):
+            env.setdefault('MECABRC', mecabrc)
+    mode = str(os.environ.get("UTOA_MFA_ROOT_DIR_MODE", "")).strip().lower()
+    per_process = mode in {"per_process", "per-process", "process", "proc"}
+    mfa_root = _default_mfa_root_dir(mfa_path, per_process=per_process)
+    env.setdefault('MFA_ROOT_DIR', mfa_root)
+    if per_process:
+        shared_root = _default_mfa_root_dir(mfa_path, per_process=False)
+        _seed_mfa_pretrained_models(mfa_root, shared_root)
     return env
 
 
@@ -437,7 +485,7 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
         return True
 
     env_dir = os.path.dirname(os.path.dirname(mfa_path))
-    python_exe = os.path.join(env_dir, 'python.exe')
+    python_exe = _resolve_env_python_exe(env_dir)
     pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
     conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
     if not os.path.exists(python_exe):
@@ -518,7 +566,7 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
     report["checks"]["mfa_executable"] = True
     if 'Scripts' in resolved:
         env_dir = os.path.dirname(os.path.dirname(resolved))
-        python_exe = os.path.join(env_dir, 'python.exe')
+        python_exe = _resolve_env_python_exe(env_dir)
         pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
         report["env_dir"] = env_dir
         report["checks"]["python_exe"] = os.path.exists(python_exe)
@@ -775,7 +823,7 @@ def ensure_korean_support(mfa_path, callback=None):
         # System MFA path; skip env-local auto install here.
         return True
     env_dir = os.path.dirname(os.path.dirname(mfa_path))
-    python_exe = os.path.join(env_dir, 'python.exe')
+    python_exe = _resolve_env_python_exe(env_dir)
     pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
     if not os.path.exists(python_exe):
         return False
@@ -783,9 +831,104 @@ def ensure_korean_support(mfa_path, callback=None):
         log('[MFA] Failed to prepare base Python packaging tools before Korean dependency install')
         return False
     pkg_check_cmd = [python_exe, '-c', 'import pkg_resources']
-    check_cmd = [python_exe, '-c', 'import eunjeon; import jamo']
+    check_cmd = [
+        python_exe,
+        '-c',
+        (
+            "import jamo\n"
+            "ok=False\n"
+            "try:\n"
+            "    import eunjeon\n"
+            "    ok=True\n"
+            "except Exception:\n"
+            "    try:\n"
+            "        from mecab import MeCab\n"
+            "        ok=True\n"
+            "    except Exception:\n"
+            "        ok=False\n"
+            "import sys\n"
+            "sys.exit(0 if ok else 1)\n"
+        ),
+    ]
     try:
         env = _get_conda_env(mfa_path)
+
+        def _ensure_eunjeon_data_package():
+            site_packages = os.path.join(env_dir, 'Lib', 'site-packages')
+            data_dir = os.path.join(site_packages, 'eunjeon', 'data')
+            if not os.path.isdir(data_dir):
+                return
+            init_path = os.path.join(data_dir, '__init__.py')
+            if not os.path.exists(init_path):
+                try:
+                    with open(init_path, 'w', encoding='utf-8') as f:
+                        f.write("")
+                except Exception as e:
+                    log(f"[MFA] Failed to create eunjeon data package marker: {e}")
+
+        def _ensure_mecab_dictionary():
+            site_packages = os.path.join(env_dir, 'Lib', 'site-packages')
+            mecabrc = os.path.join(site_packages, 'mecabrc')
+            dic_src = os.path.join(site_packages, 'mecab_ko_dic', 'dictionary')
+            dic_dst = os.path.join(site_packages, 'mecab-ko-dic')
+            if os.path.exists(dic_dst):
+                return
+            if not (os.path.exists(mecabrc) and os.path.isdir(dic_src)):
+                return
+            try:
+                os.makedirs(dic_dst, exist_ok=True)
+                for name in os.listdir(dic_src):
+                    src = os.path.join(dic_src, name)
+                    dst = os.path.join(dic_dst, name)
+                    if os.path.isdir(src):
+                        shutil.copytree(src, dst, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(src, dst)
+            except Exception as e:
+                log(f"[MFA] Failed to seed mecab-ko-dic: {e}")
+
+        def _ensure_mecab_shim():
+            site_packages = os.path.join(env_dir, 'Lib', 'site-packages')
+            mecab_dir = os.path.join(site_packages, 'mecab')
+            mecab_init = os.path.join(mecab_dir, '__init__.py')
+            try:
+                if not os.path.isdir(mecab_dir):
+                    os.makedirs(mecab_dir, exist_ok=True)
+                    content = ""
+                else:
+                    with open(mecab_init, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                if 'UTOA_MECAB_SHIM' in content:
+                    return
+                shim = """
+
+# UTOA_MECAB_SHIM
+import MeCab as _MeCabMod
+class _UtoaMecabNode:
+    def __init__(self, surface, pos):
+        self.surface = surface
+        self.pos = pos
+
+class MeCab:
+    def __init__(self):
+        self._tagger = _MeCabMod.Tagger()
+
+    def parse(self, text):
+        node = self._tagger.parseToNode(text)
+        items = []
+        while node is not None:
+            surface = getattr(node, "surface", "") or ""
+            if surface:
+                feature = getattr(node, "feature", "") or ""
+                pos = feature.split(",", 1)[0] if feature else ""
+                items.append(_UtoaMecabNode(surface, pos))
+            node = getattr(node, "next", None)
+        return items
+"""
+                with open(mecab_init, 'w', encoding='utf-8') as f:
+                    f.write(content + shim)
+            except Exception as e:
+                log(f"[MFA] Failed to patch mecab shim: {e}")
 
         def _looks_like_pyexpat_dll_issue(msg):
             s = (msg or '').lower()
@@ -843,6 +986,9 @@ def ensure_korean_support(mfa_path, callback=None):
             log('[MFA] Failed to restore pkg_resources/setuptools')
             return False
 
+        _ensure_eunjeon_data_package()
+        _ensure_mecab_dictionary()
+        _ensure_mecab_shim()
         ok, detail = _check_imports()
         if (not ok) and _looks_like_pyexpat_dll_issue(detail):
             log('[MFA] Detected pyexpat/libexpat DLL issue; trying repair...')
@@ -912,7 +1058,7 @@ def ensure_japanese_support(mfa_path, callback=None):
         return True
 
     env_dir = os.path.dirname(os.path.dirname(mfa_path))
-    python_exe = os.path.join(env_dir, 'python.exe')
+    python_exe = _resolve_env_python_exe(env_dir)
     pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
     conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
 
@@ -1184,9 +1330,33 @@ def patch_mfa_korean_support(mfa_path, callback=None):
         
         spacy_py = os.path.join(site_packages, 'tokenization', 'spacy.py')
         korean_py = os.path.join(site_packages, 'tokenization', 'korean.py')
+
+        def _ensure_writable_copy(path: str):
+            # Conda/micromamba often hardlinks site-packages to pkgs cache.
+            # Break hardlinks before patching to avoid corrupting the package cache.
+            if not os.path.exists(path):
+                return
+            try:
+                st = os.stat(path)
+                if getattr(st, "st_nlink", 1) > 1:
+                    tmp = f"{path}.utoa_tmp"
+                    shutil.copy2(path, tmp)
+                    os.replace(tmp, path)
+            except Exception:
+                return
+
+        def _file_empty(path: str) -> bool:
+            try:
+                return os.path.exists(path) and os.path.getsize(path) == 0
+            except Exception:
+                return False
         
         # 1. spacy.py 패치: 'mecab' 대신 'eunjeon'을 체크하도록 수정
         if os.path.exists(spacy_py):
+            _ensure_writable_copy(spacy_py)
+            if _file_empty(spacy_py):
+                log("⚠️ spacy.py is empty. Reinstall MFA package before patching.")
+                return False
             with open(spacy_py, 'r', encoding='utf-8') as f:
                 content = f.read()
             
@@ -1204,6 +1374,10 @@ def patch_mfa_korean_support(mfa_path, callback=None):
 
         # 2. korean.py 패치: KO_AVAILABLE를 True로 만들고 Eunjeon 래퍼 주입
         if os.path.exists(korean_py):
+            _ensure_writable_copy(korean_py)
+            if _file_empty(korean_py):
+                log("⚠️ korean.py is empty. Reinstall MFA package before patching.")
+                return False
             with open(korean_py, 'r', encoding='utf-8') as f:
                 content = f.read()
                 

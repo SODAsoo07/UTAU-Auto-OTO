@@ -65,6 +65,7 @@ def run_ml_post_stage(
     ml_policy,
     runtime_report,
     log_fn: Optional[Callable[[str], None]],
+    ml_route: str = "",
 ) -> int:
     wav_dir = resolve_wav_dir_from_tg_folder(tg_folder)
     try:
@@ -82,6 +83,7 @@ def run_ml_post_stage(
             format_override=format_override,
             policy=ml_policy,
             report=ml_report,
+            ml_route=ml_route,
         )
         if isinstance(runtime_report, dict):
             runtime_report["ml"] = dict(ml_report)

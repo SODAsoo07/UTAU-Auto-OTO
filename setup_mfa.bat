@@ -3,11 +3,26 @@ setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
 title UTAU Auto OTO - MFA Setup
 
-if /i "%~1"=="--help" (
-    echo Usage: setup_mfa.bat
-    echo Installs a shared MFA environment in C:\Users\Public\UTAU_Auto_OTO_v3\.env using Micromamba.
-    exit /b 0
-)
+set "INSTALL_ML=0"
+set "DELETE_OLD_AFTER_INSTALL=0"
+set "AUTO_ML=0"
+
+:parse_args
+if "%~1"=="" goto :args_done
+if /i "%~1"=="--help" goto :show_help
+if /i "%~1"=="--with-ml" set "INSTALL_ML=1"
+if /i "%~1"=="--install-ml" set "INSTALL_ML=1"
+shift
+goto :parse_args
+
+:show_help
+echo Usage: setup_mfa.bat [--with-ml]
+echo Installs a local MFA environment in the script folder (.env) using Micromamba.
+echo Optional:
+echo   --with-ml / --install-ml  Install ML dependencies (pandas/sklearn/lightgbm/pytorch).
+exit /b 0
+
+:args_done
 
 echo ====================================================
 echo   UTAU Auto OTO - MFA Lightweight Environment Setup
@@ -22,18 +37,31 @@ echo.
 
 set "APP_DIR=%~dp0"
 set "APP_DIR=%APP_DIR:~0,-1%"
-set "PUBLIC_ROOT=%PUBLIC%"
-if not defined PUBLIC_ROOT set "PUBLIC_ROOT=C:\Users\Public"
-set "ENV_DIR=%PUBLIC_ROOT%\UTAU_Auto_OTO_v3\.env"
-set "MICROMAMBA_ROOT=%PUBLIC_ROOT%\UTAU_Auto_OTO_v3\micromamba"
+set "OLD_PUBLIC_ROOT=%PUBLIC%"
+if not defined OLD_PUBLIC_ROOT set "OLD_PUBLIC_ROOT=C:\Users\Public"
+set "OLD_ENV_DIR=%OLD_PUBLIC_ROOT%\UTAU_Auto_OTO_v3\.env"
+set "OLD_MICROMAMBA_ROOT=%OLD_PUBLIC_ROOT%\UTAU_Auto_OTO_v3\micromamba"
+set "ENV_DIR=%APP_DIR%\.env"
+set "MICROMAMBA_ROOT=%APP_DIR%\micromamba"
 set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\Library\bin\micromamba.exe"
 set "MICROMAMBA_ARCHIVE=%APP_DIR%\micromamba-win-64-latest.tar.bz2"
 set "MFA_EXE=%ENV_DIR%\Scripts\mfa.exe"
 set "MFA_PYTHON_VERSION=3.10"
 
-if not exist "%PUBLIC_ROOT%\UTAU_Auto_OTO_v3" mkdir "%PUBLIC_ROOT%\UTAU_Auto_OTO_v3" >nul 2>nul
 echo [INFO] MFA environment path: %ENV_DIR%
 echo [INFO] MFA Micromamba path: %MICROMAMBA_ROOT%
+
+if exist "%APP_DIR%\ML_models" set "AUTO_ML=1"
+if exist "%APP_DIR%\models_installed\oto_ml" set "AUTO_ML=1"
+if "%AUTO_ML%"=="1" if "%INSTALL_ML%"=="0" (
+    echo [INFO] ML bundle assets detected. Enabling ML dependencies.
+    set "INSTALL_ML=1"
+)
+if exist "%OLD_ENV_DIR%" (
+    if /i not "%OLD_ENV_DIR%"=="%ENV_DIR%" (
+        call :handle_old_env
+    )
+)
 
 if not exist "%MFA_EXE%" if exist "%ENV_DIR%\Scripts\mfa.bat" set "MFA_EXE=%ENV_DIR%\Scripts\mfa.bat"
 
@@ -60,12 +88,31 @@ echo      Path: %MFA_EXE%
 echo.
 call :bootstrap_python_tools
 if errorlevel 1 exit /b 1
+call :install_textgrid
+if errorlevel 1 exit /b 1
+call :verify_textgrid
+if errorlevel 1 exit /b 1
+call :install_audio_deps
+if errorlevel 1 exit /b 1
+call :install_korean_support
+if errorlevel 1 exit /b 1
 call :install_japanese_support
 if errorlevel 1 exit /b 1
+if "%INSTALL_ML%"=="1" (
+    call :install_ml_requirements
+    if errorlevel 1 exit /b 1
+    call :verify_ml_runtime
+    if errorlevel 1 exit /b 1
+)
 echo.
 echo Checking Korean acoustic model...
 call :download_acoustic_model korean_mfa
 if errorlevel 1 exit /b 1
+echo.
+echo Checking Japanese acoustic model...
+call :download_acoustic_model japanese_mfa
+if errorlevel 1 exit /b 1
+call :cleanup_old_env_if_requested
 echo.
 echo Done. You can now launch UTAU_Auto_OTO.exe.
 pause
@@ -74,7 +121,7 @@ exit /b 0
 :install_micromamba
 echo [INFO] Using Micromamba bootstrap to reduce installation cost.
 echo.
-echo [1/4] Downloading Micromamba... ^(about 15MB^)
+echo [1/5] Downloading Micromamba... ^(about 15MB^)
 if not exist "%MICROMAMBA_ARCHIVE%" (
     powershell -NoProfile -Command "& {[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://micro.mamba.pm/api/micromamba/win-64/latest' -OutFile '%MICROMAMBA_ARCHIVE%'}"
     if errorlevel 1 (
@@ -88,7 +135,7 @@ if not exist "%MICROMAMBA_ARCHIVE%" (
 echo [OK] Download complete.
 echo.
 
-echo [2/4] Extracting Micromamba...
+echo [2/5] Extracting Micromamba...
 if not exist "%MICROMAMBA_EXE%" (
     if exist "%MICROMAMBA_ROOT%" (
         echo [INFO] Removing previous Micromamba root...
@@ -116,7 +163,7 @@ if not exist "%MICROMAMBA_EXE%" (
 echo [OK] Micromamba ready.
 echo.
 
-echo [3/4] Installing Montreal Forced Aligner... ^(3-10 min^)
+echo [3/5] Installing Montreal Forced Aligner... ^(3-10 min^)
 if exist "%ENV_DIR%" if not exist "%MFA_EXE%" call :remove_env_dir
 set "MAMBA_ROOT_PREFIX=%MICROMAMBA_ROOT%"
 "%MICROMAMBA_EXE%" create -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge python=%MFA_PYTHON_VERSION% montreal-forced-aligner colorama
@@ -129,19 +176,36 @@ call :ensure_mfa_entrypoint
 if errorlevel 1 exit /b 1
 call :bootstrap_python_tools
 if errorlevel 1 exit /b 1
+call :install_textgrid
+if errorlevel 1 exit /b 1
+call :verify_textgrid
+if errorlevel 1 exit /b 1
 
-echo [4/4] Installing Japanese tokenizer dependencies...
+echo [4/5] Installing Korean/Japanese tokenizer dependencies...
+call :install_korean_support
+if errorlevel 1 exit /b 1
 call :install_japanese_support
 if errorlevel 1 exit /b 1
+call :install_audio_deps
+if errorlevel 1 exit /b 1
+if "%INSTALL_ML%"=="1" (
+    call :install_ml_requirements
+    if errorlevel 1 exit /b 1
+    call :verify_ml_runtime
+    if errorlevel 1 exit /b 1
+)
 
 echo Cleaning up installer cache...
 if exist "%MICROMAMBA_ARCHIVE%" del "%MICROMAMBA_ARCHIVE%" >nul 2>nul
 
 echo [OK] MFA installed successfully.
 echo.
-echo [Final] Downloading Korean acoustic model... ^(1-2 min^)
+echo [Final] Downloading Korean/Japanese acoustic models... ^(1-2 min^)
 call :download_acoustic_model korean_mfa
 if errorlevel 1 exit /b 1
+call :download_acoustic_model japanese_mfa
+if errorlevel 1 exit /b 1
+call :cleanup_old_env_if_requested
 echo.
 echo ====================================================
 echo   Setup complete.
@@ -207,6 +271,219 @@ if exist "%MICROMAMBA_EXE%" (
 echo [WARN] Micromamba command was not found. Skipping Japanese tokenizer dependency install.
 goto :eof
 
+:install_audio_deps
+if exist "%ENV_DIR%\Library\bin\libsndfile.dll" goto :eof
+echo Checking audio runtime dependencies ^(libsndfile^)...
+if exist "%MICROMAMBA_EXE%" (
+    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge libsndfile pysoundfile
+    if errorlevel 1 (
+        echo [FAILED] Audio dependency install failed.
+        pause
+        exit /b 1
+    )
+    goto :eof
+)
+if exist "%ENV_DIR%\Scripts\conda.exe" (
+    "%ENV_DIR%\Scripts\conda.exe" install -y --solver classic -p "%ENV_DIR%" -c conda-forge libsndfile pysoundfile
+    if errorlevel 1 (
+        echo [FAILED] Audio dependency install failed.
+        pause
+        exit /b 1
+    )
+    goto :eof
+)
+echo [WARN] No micromamba/conda found. Skipping audio dependency install.
+goto :eof
+
+:install_textgrid
+echo Checking textgrid module...
+if not exist "%ENV_DIR%\python.exe" (
+    echo [FAILED] MFA Python runtime was not found.
+    pause
+    exit /b 1
+)
+"%ENV_DIR%\python.exe" -c "import textgrid" >nul 2>nul
+if not errorlevel 1 goto :eof
+echo [INFO] Installing textgrid module...
+if exist "%ENV_DIR%\Scripts\pip.exe" (
+    "%ENV_DIR%\Scripts\pip.exe" install --upgrade "textgrid>=1.5"
+) else (
+    "%ENV_DIR%\python.exe" -m pip install --upgrade "textgrid>=1.5"
+)
+if errorlevel 1 (
+    echo [FAILED] textgrid install failed.
+    pause
+    exit /b 1
+)
+goto :eof
+
+:verify_textgrid
+if not exist "%ENV_DIR%\python.exe" (
+    echo [FAILED] MFA Python runtime was not found.
+    pause
+    exit /b 1
+)
+"%ENV_DIR%\python.exe" -c "import textgrid" >nul 2>nul
+if errorlevel 1 (
+    echo [FAILED] textgrid import failed.
+    echo        Re-run setup_mfa.bat to repair the environment.
+    pause
+    exit /b 1
+)
+goto :eof
+
+:install_ml_requirements
+echo Installing optional ML dependencies...
+if not exist "%ENV_DIR%\python.exe" (
+    echo [FAILED] MFA Python runtime was not found.
+    pause
+    exit /b 1
+)
+if not exist "%APP_DIR%\requirements.txt" (
+    echo [FAILED] requirements.txt not found in %APP_DIR%
+    pause
+    exit /b 1
+)
+if not exist "%APP_DIR%\requirements-ml.txt" (
+    echo [FAILED] requirements-ml.txt not found in %APP_DIR%
+    pause
+    exit /b 1
+)
+if exist "%MICROMAMBA_EXE%" (
+    echo [INFO] Installing ML runtime packages via micromamba...
+    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas scikit-learn lightgbm pytorch
+    if errorlevel 1 (
+        echo [WARN] Micromamba ML install failed. Falling back to pip.
+    ) else (
+        echo [OK] Micromamba ML packages installed.
+    )
+)
+echo [INFO] Installing from requirements.txt
+if exist "%ENV_DIR%\Scripts\pip.exe" (
+    "%ENV_DIR%\Scripts\pip.exe" install --upgrade -r "%APP_DIR%\requirements.txt"
+) else (
+    "%ENV_DIR%\python.exe" -m pip install --upgrade -r "%APP_DIR%\requirements.txt"
+)
+if errorlevel 1 (
+    echo [FAILED] requirements.txt install failed.
+    pause
+    exit /b 1
+)
+if not exist "%MICROMAMBA_EXE%" (
+    echo [INFO] Installing from requirements-ml.txt via pip (micromamba not found)
+    if exist "%ENV_DIR%\Scripts\pip.exe" (
+        "%ENV_DIR%\Scripts\pip.exe" install --upgrade -r "%APP_DIR%\requirements-ml.txt"
+    ) else (
+        "%ENV_DIR%\python.exe" -m pip install --upgrade -r "%APP_DIR%\requirements-ml.txt"
+    )
+    if errorlevel 1 (
+        echo [FAILED] ML dependency install failed.
+        echo        You may need Microsoft Visual C++ Build Tools for lightgbm.
+        pause
+        exit /b 1
+    )
+)
+echo [OK] ML dependencies installed.
+goto :eof
+
+:verify_ml_runtime
+if not exist "%ENV_DIR%\python.exe" (
+    echo [FAILED] MFA Python runtime was not found.
+    pause
+    exit /b 1
+)
+"%ENV_DIR%\python.exe" -c "import pandas, sklearn, lightgbm, torch" >nul 2>nul
+if errorlevel 1 (
+    echo [FAILED] ML runtime import failed. Missing pandas/sklearn/lightgbm/torch.
+    if exist "%MICROMAMBA_EXE%" (
+        echo        Try: "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas scikit-learn lightgbm pytorch
+    ) else (
+        echo        Re-run setup_mfa.bat --with-ml
+    )
+    pause
+    exit /b 1
+)
+goto :eof
+
+:install_korean_support
+echo Checking Korean tokenizer dependencies...
+call :ensure_mfa_entrypoint
+if errorlevel 1 exit /b 1
+if not exist "%ENV_DIR%\python.exe" (
+    echo [FAILED] MFA Python runtime was not found.
+    pause
+    exit /b 1
+)
+"%ENV_DIR%\python.exe" -c "import eunjeon, jamo" >nul 2>nul
+if not errorlevel 1 goto :patch_korean_support
+echo [INFO] Installing Korean tokenizer dependencies ^(eunjeon, jamo^)...
+if exist "%ENV_DIR%\Scripts\pip.exe" (
+    "%ENV_DIR%\Scripts\pip.exe" install --upgrade eunjeon jamo
+) else (
+    "%ENV_DIR%\python.exe" -m pip install --upgrade eunjeon jamo
+)
+if errorlevel 1 (
+    echo [FAILED] Korean tokenizer dependency install failed.
+    echo        You may need Microsoft Visual C++ Build Tools for eunjeon.
+    pause
+    exit /b 1
+)
+:patch_korean_support
+set "PYTHONPATH=%APP_DIR%"
+"%ENV_DIR%\python.exe" -c "from core.mfa_runner import patch_mfa_korean_support; patch_mfa_korean_support(r'%MFA_EXE%')" >nul 2>nul
+if errorlevel 1 (
+    echo [WARN] Korean MFA patch step failed. Alignment may still run, but Korean tokenizer support could be incomplete.
+)
+goto :eof
+
+:handle_old_env
+echo.
+echo [WARN] Legacy MFA environment detected:
+echo        %OLD_ENV_DIR%
+echo.
+echo Choose how to handle the legacy environment:
+echo   [M] Migrate ^(rebuild local env, then delete old^)
+echo   [D] Delete old now
+echo   [K] Keep old ^(no deletion^)
+choice /C MDK /N /M "Select M/D/K: "
+if errorlevel 3 goto :keep_old_env
+if errorlevel 2 goto :delete_old_env_now
+if errorlevel 1 goto :migrate_old_env
+goto :eof
+
+:migrate_old_env
+set "DELETE_OLD_AFTER_INSTALL=1"
+echo [INFO] Will delete legacy env after successful local install.
+goto :eof
+
+:delete_old_env_now
+call :remove_dir "%OLD_ENV_DIR%"
+call :remove_dir "%OLD_MICROMAMBA_ROOT%"
+goto :eof
+
+:keep_old_env
+echo [INFO] Keeping legacy env. Local install will continue.
+goto :eof
+
+:cleanup_old_env_if_requested
+if not "%DELETE_OLD_AFTER_INSTALL%"=="1" goto :eof
+if /i "%OLD_ENV_DIR%"=="%ENV_DIR%" goto :eof
+call :remove_dir "%OLD_ENV_DIR%"
+call :remove_dir "%OLD_MICROMAMBA_ROOT%"
+echo [OK] Legacy MFA environment removed.
+goto :eof
+
+:remove_dir
+set "TARGET_DIR=%~1"
+if "%TARGET_DIR%"=="" goto :eof
+if not exist "%TARGET_DIR%" goto :eof
+echo [INFO] Removing %TARGET_DIR%
+rmdir /s /q "%TARGET_DIR%" >nul 2>nul
+if exist "%TARGET_DIR%" (
+    echo [WARN] Failed to remove %TARGET_DIR%
+)
+goto :eof
+
 :ensure_mfa_entrypoint
 if exist "%MFA_EXE%" goto :eof
 if exist "%ENV_DIR%\Scripts\mfa.bat" (
@@ -239,12 +516,14 @@ if not defined MODEL_NAME (
 )
 if exist "%ENV_DIR%\python.exe" (
     set "CONDA_PREFIX=%ENV_DIR%"
+    set "MFA_ROOT_DIR=%APP_DIR%\.mfa_root_ascii"
     set "PATH=%ENV_DIR%;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\bin;%ENV_DIR%\Scripts;%ENV_DIR%\bin;%PATH%"
     "%ENV_DIR%\python.exe" -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME% --ignore_cache
     exit /b %errorlevel%
 )
 if exist "%MICROMAMBA_EXE%" (
     set "MAMBA_ROOT_PREFIX=%MICROMAMBA_ROOT%"
+    set "MFA_ROOT_DIR=%APP_DIR%\.mfa_root_ascii"
     "%MICROMAMBA_EXE%" run -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" python -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME% --ignore_cache
     exit /b %errorlevel%
 )

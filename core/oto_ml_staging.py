@@ -12,9 +12,10 @@ from dataclasses import dataclass, asdict
 from typing import Iterable, List
 
 from core.oto_ml_collection import load_training_roots
+from core.oto_ml_collection_discovery import _discover_oto_files
 
 
-ALLOWED_EXTENSIONS = {".wav", ".ini", ".lab", ".txt", ".yaml", ".yml", ".map"}
+ALLOWED_EXTENSIONS = {".wav", ".ini", ".lab", ".txt", ".yaml", ".yml", ".map", ".textgrid"}
 TEXT_NAME_HINTS = ("custom", "phoneme", "phone", "character", "dict", "reclist", "prefix")
 
 
@@ -38,6 +39,8 @@ def _should_copy(path: str) -> bool:
         return False
     if ext == ".wav" or ext == ".lab":
         return True
+    if ext == ".textgrid":
+        return True
     if ext == ".ini":
         return "oto" in name or "base" in name
     if ext == ".map":
@@ -53,51 +56,75 @@ def _safe_name(text: str) -> str:
     return out.strip().rstrip(".") or "voicebank"
 
 
+def _iter_voicebank_roots(root: str) -> List[str]:
+    if not root or not os.path.isdir(root):
+        return []
+    child_dirs = [
+        os.path.join(root, name)
+        for name in sorted(os.listdir(root))
+        if os.path.isdir(os.path.join(root, name))
+    ]
+    child_hits = [child for child in child_dirs if _discover_oto_files(child)]
+    if child_hits:
+        return child_hits
+    return [root]
+
+
 def stage_training_sources(config_path: str, dataset_root: str) -> List[StagedVoicebank]:
     roots = load_training_roots(config_path)
     results: List[StagedVoicebank] = []
     for language, groups in roots.items():
         for format_type, root_list in groups.items():
             for root in root_list:
-                stage_root = os.path.join(dataset_root, language, format_type, _safe_name(os.path.basename(root)))
-                item = StagedVoicebank(
-                    language=language,
-                    format_type=format_type,
-                    source_root=root,
-                    stage_root=stage_root,
-                )
                 if not os.path.isdir(root):
-                    item.status = "skip"
-                    item.reason = "missing_root"
-                    results.append(item)
+                    results.append(
+                        StagedVoicebank(
+                            language=language,
+                            format_type=format_type,
+                            source_root=root,
+                            stage_root=root,
+                            status="skip",
+                            reason="missing_root",
+                        )
+                    )
                     continue
-                if os.path.exists(stage_root):
-                    shutil.rmtree(stage_root)
-                os.makedirs(stage_root, exist_ok=True)
-                copied = 0
-                copied_wavs = 0
-                copied_otos = 0
-                for dp, dns, fns in os.walk(root):
-                    for fn in fns:
-                        src = os.path.join(dp, fn)
-                        if not _should_copy(src):
-                            continue
-                        rel = os.path.relpath(src, root)
-                        dst = os.path.join(stage_root, rel)
-                        os.makedirs(os.path.dirname(dst), exist_ok=True)
-                        shutil.copy2(src, dst)
-                        copied += 1
-                        low = fn.lower()
-                        if low.endswith(".wav"):
-                            copied_wavs += 1
-                        elif low.endswith(".ini"):
-                            copied_otos += 1
-                item.copied_files = copied
-                item.copied_wavs = copied_wavs
-                item.copied_otos = copied_otos
-                item.status = "staged" if copied > 0 else "skip"
-                item.reason = "" if copied > 0 else "no_matching_files"
-                results.append(item)
+                for vb_root in _iter_voicebank_roots(root):
+                    stage_root = os.path.join(
+                        dataset_root, language, format_type, _safe_name(os.path.basename(vb_root))
+                    )
+                    item = StagedVoicebank(
+                        language=language,
+                        format_type=format_type,
+                        source_root=vb_root,
+                        stage_root=stage_root,
+                    )
+                    if os.path.exists(stage_root):
+                        shutil.rmtree(stage_root)
+                    os.makedirs(stage_root, exist_ok=True)
+                    copied = 0
+                    copied_wavs = 0
+                    copied_otos = 0
+                    for dp, dns, fns in os.walk(vb_root):
+                        for fn in fns:
+                            src = os.path.join(dp, fn)
+                            if not _should_copy(src):
+                                continue
+                            rel = os.path.relpath(src, vb_root)
+                            dst = os.path.join(stage_root, rel)
+                            os.makedirs(os.path.dirname(dst), exist_ok=True)
+                            shutil.copy2(src, dst)
+                            copied += 1
+                            low = fn.lower()
+                            if low.endswith(".wav"):
+                                copied_wavs += 1
+                            elif low.endswith(".ini"):
+                                copied_otos += 1
+                    item.copied_files = copied
+                    item.copied_wavs = copied_wavs
+                    item.copied_otos = copied_otos
+                    item.status = "staged" if copied > 0 else "skip"
+                    item.reason = "" if copied > 0 else "no_matching_files"
+                    results.append(item)
     return results
 
 

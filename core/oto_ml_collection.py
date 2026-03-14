@@ -25,6 +25,7 @@ from core.oto_ml_dataset import build_and_save_oto_ml_dataset
 def build_datasets_from_candidates(
     candidates: List[TrainingCandidate],
     workspace_root: str,
+    auto_oto_policy: str = "",
 ) -> Dict[str, object]:
     """
     Build training CSVs from candidate rows.
@@ -68,6 +69,7 @@ def build_datasets_from_candidates(
             voicebank_id=candidate.voicebank_id,
             append=append,
             format_type_override=candidate.format_type,
+            auto_oto_policy=auto_oto_policy,
         )
         written_outputs.add(out_csv)
         candidate.status = "built"

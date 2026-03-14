@@ -25,6 +25,8 @@ param(
     [switch]$PrepareAuto,
     [switch]$ResumePrepare,
     [switch]$RetryFailedPrepare,
+    [ValidateSet("require", "generate-temp", "generate-persist")]
+    [string]$AutoOtoPolicy = "require",
     [switch]$BuildDatasetOnly,
     [switch]$TrainOnly,
     [switch]$EvaluateOnly,
@@ -47,6 +49,7 @@ if (-not $OutDir) { $OutDir = Join-Path $RepoRoot ("ML_models\{0}\{1}\v1_coupled
 if (-not $EvalReport) { $EvalReport = Join-Path $RepoRoot ("logs\eval_{0}_{1}_coupled.json" -f $Lang, $Format) }
 if (-not $ExportRoot) { $ExportRoot = Join-Path $WorkspaceRoot "exports\model_bundles" }
 if (-not $InstallRoot) { $InstallRoot = Join-Path $RepoRoot "models_installed\oto_ml" }
+$AutoOtoPolicy = ([string]$AutoOtoPolicy).ToLower()
 
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 try {
@@ -118,30 +121,65 @@ function Discover-WorkItemsByScan {
     }
 
     $items = @()
-    $autoFiles = Get-ChildItem -Path $fmtRoot -Recurse -File -Filter "oto_auto_ml.ini" -ErrorAction SilentlyContinue
-    foreach ($autoFile in $autoFiles) {
-        $work = $autoFile.DirectoryName
-        $manual = Resolve-ManualOtoFromWorkDir -WorkDir $work
-        if (-not $manual) { continue }
-        $rel = ""
-        try {
-            $rel = [System.IO.Path]::GetRelativePath($fmtRoot, $work)
-        } catch {
+    if ($AutoOtoPolicy -eq "require") {
+        $autoFiles = Get-ChildItem -Path $fmtRoot -Recurse -File -Filter "oto_auto_ml.ini" -ErrorAction SilentlyContinue
+        foreach ($autoFile in $autoFiles) {
+            $work = $autoFile.DirectoryName
+            $manual = Resolve-ManualOtoFromWorkDir -WorkDir $work
+            if (-not $manual) { continue }
             $rel = ""
+            try {
+                $rel = [System.IO.Path]::GetRelativePath($fmtRoot, $work)
+            } catch {
+                $rel = ""
+            }
+            $segments = @()
+            if ($rel) {
+                $segments = @($rel -split "[\\/]" | Where-Object { $_ })
+            }
+            $voicebank = if ($segments.Count -gt 0) { $segments[0] } else { Split-Path -Leaf (Split-Path -Parent $work) }
+            $items += [pscustomobject]@{
+                language = $LangValue
+                format_type = $FormatValue
+                status = "scan_discovered"
+                work_dir = $work
+                auto_oto = $autoFile.FullName
+                manual_oto = $manual
+                stage_root = (Join-Path $fmtRoot $voicebank)
+            }
         }
-        $segments = @()
-        if ($rel) {
-            $segments = @($rel -split "[\\/]" | Where-Object { $_ })
-        }
-        $voicebank = if ($segments.Count -gt 0) { $segments[0] } else { Split-Path -Leaf (Split-Path -Parent $work) }
-        $items += [pscustomobject]@{
-            language = $LangValue
-            format_type = $FormatValue
-            status = "scan_discovered"
-            work_dir = $work
-            auto_oto = $autoFile.FullName
-            manual_oto = $manual
-            stage_root = (Join-Path $fmtRoot $voicebank)
+    } else {
+        $iniFiles = Get-ChildItem -Path $fmtRoot -Recurse -File -Filter "*.ini" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match "oto|base" }
+        $grouped = $iniFiles | Group-Object DirectoryName
+        foreach ($group in $grouped) {
+            $work = $group.Name
+            if (-not $work) { continue }
+            $manual = Resolve-ManualOtoFromWorkDir -WorkDir $work
+            if (-not $manual) { continue }
+            $hasWav = @(Get-ChildItem -Path $work -File -Filter "*.wav" -ErrorAction SilentlyContinue).Count -gt 0
+            $hasTg = @(Get-ChildItem -Path $work -Recurse -File -Filter "*.TextGrid" -ErrorAction SilentlyContinue).Count -gt 0
+            if (-not $hasWav -and -not $hasTg) { continue }
+            $rel = ""
+            try {
+                $rel = [System.IO.Path]::GetRelativePath($fmtRoot, $work)
+            } catch {
+                $rel = ""
+            }
+            $segments = @()
+            if ($rel) {
+                $segments = @($rel -split "[\\/]" | Where-Object { $_ })
+            }
+            $voicebank = if ($segments.Count -gt 0) { $segments[0] } else { Split-Path -Leaf (Split-Path -Parent $work) }
+            $items += [pscustomobject]@{
+                language = $LangValue
+                format_type = $FormatValue
+                status = "scan_discovered"
+                work_dir = $work
+                auto_oto = (Join-Path $work "oto_auto_ml.ini")
+                manual_oto = $manual
+                stage_root = (Join-Path $fmtRoot $voicebank)
+            }
         }
     }
     return @($items)
@@ -202,7 +240,9 @@ function Build-DatasetFromSingleWorkDir {
     $manual = $SingleManualOto
     if (-not $manual) { $manual = Resolve-ManualOtoFromWorkDir -WorkDir $work }
     if (-not $manual) { throw "manual oto not found in $work" }
-    if (-not (Test-Path $auto)) { throw "auto oto not found: $auto" }
+    if ($AutoOtoPolicy -eq "require" -and (-not (Test-Path $auto))) {
+        throw "auto oto not found: $auto (policy=require)"
+    }
     if (-not (Test-Path $manual)) { throw "manual oto not found: $manual" }
     $voicebank = $SingleVoicebankId
     if (-not $voicebank) {
@@ -220,7 +260,8 @@ function Build-DatasetFromSingleWorkDir {
         "--wav-dir", $work,
         "--out", $DatasetCsv,
         "--voicebank-id", $voicebank,
-        "--format-override", $Format
+        "--format-override", $Format,
+        "--auto-oto-policy", $AutoOtoPolicy
     )
     Invoke-PythonScript -ScriptPath $BuildScript -ArgsList $args
 }
@@ -233,7 +274,7 @@ function Build-DatasetFromPreparedReport {
     } elseif ($DryRun) {
         Write-Host "[dry-run] prepared report missing: $PreparedReport (skip dataset build preview)"
         return
-    } elseif ($AutoPrepareOnMissing -and -not $script:AutoPrepareAttempted) {
+    } elseif ($AutoPrepareOnMissing -and -not $script:AutoPrepareAttempted -and $AutoOtoPolicy -eq "require") {
         $script:AutoPrepareAttempted = $true
         Write-Host "[build] prepared report missing -> running auto prepare once"
         try {
@@ -252,7 +293,7 @@ function Build-DatasetFromPreparedReport {
             $target = @($scanItems)
         }
     }
-    if ((-not $target -or $target.Count -eq 0) -and (-not $DryRun) -and $AutoPrepareOnMissing -and -not $script:AutoPrepareAttempted) {
+    if ((-not $target -or $target.Count -eq 0) -and (-not $DryRun) -and $AutoPrepareOnMissing -and -not $script:AutoPrepareAttempted -and $AutoOtoPolicy -eq "require") {
         $script:AutoPrepareAttempted = $true
         Write-Host "[build] no prepared/scan items -> running auto prepare once"
         try {
@@ -290,10 +331,34 @@ function Build-DatasetFromPreparedReport {
         if (-not $auto) { $auto = Join-Path $work "oto_auto_ml.ini" }
         $manual = [string]$it.manual_oto
         if (-not $manual) { $manual = Resolve-ManualOtoFromWorkDir -WorkDir $work }
-        if (-not $auto -or -not $manual) { continue }
-        if ((-not $DryRun) -and ((-not (Test-Path $auto)) -or (-not (Test-Path $manual)))) { continue }
+        if (-not $manual) { continue }
+        if ((-not $DryRun) -and (-not (Test-Path $manual))) { continue }
+        if ($AutoOtoPolicy -eq "require") {
+            if (-not $auto) { continue }
+            if ((-not $DryRun) -and (-not (Test-Path $auto))) { continue }
+        }
 
-        $voicebank = Split-Path -Leaf ([string]$it.stage_root)
+        $voicebank = ""
+        if ($it.voicebank_id) {
+            $voicebank = [string]$it.voicebank_id
+        }
+        if (-not $voicebank) {
+            $stage = [string]$it.stage_root
+            if ($stage) {
+                $base = Split-Path -Leaf $stage
+                $fmtToken = ([string]$Format).ToLower()
+                $fmtNames = @("cv", "cvc", "cvvc", "vcv", "general")
+                if ($base.ToLower() -eq $fmtToken -or $fmtNames -contains $base.ToLower()) {
+                    try {
+                        $rel = [System.IO.Path]::GetRelativePath($stage, $work)
+                        $seg = @($rel -split "[\\/]" | Where-Object { $_ })[0]
+                        if ($seg) { $voicebank = $seg }
+                    } catch {
+                    }
+                }
+                if (-not $voicebank) { $voicebank = $base }
+            }
+        }
         if (-not $voicebank) { $voicebank = Split-Path -Leaf (Split-Path -Parent $work) }
 
         $args = @(
@@ -304,7 +369,8 @@ function Build-DatasetFromPreparedReport {
             "--wav-dir", $work,
             "--out", $DatasetCsv,
             "--voicebank-id", $voicebank,
-            "--format-override", $Format
+            "--format-override", $Format,
+            "--auto-oto-policy", $AutoOtoPolicy
         )
         if ($built -gt 0 -or $KeepDatasetCsv) {
             $args += "--append"
@@ -356,6 +422,7 @@ Write-Host "[info] lang=$Lang format=$Format"
 Write-Host "[info] dataset_root=$DatasetRoot"
 Write-Host "[info] dataset_csv=$DatasetCsv"
 Write-Host "[info] out_dir=$OutDir"
+Write-Host "[info] auto_oto_policy=$AutoOtoPolicy"
 
 if ($StageSources) {
     Invoke-PythonScript -ScriptPath $StageScript -ArgsList @("--dataset-root", $DatasetRoot)

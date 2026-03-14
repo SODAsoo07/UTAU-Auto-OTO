@@ -426,6 +426,7 @@ def build_and_save_coupled_dataset(
     voicebank_id: str = "",
     append: bool = False,
     format_type_override: str = "",
+    auto_oto_policy: str = "",
 ) -> Dict[str, int]:
     from core.oto_ml_features import build_training_rows
 
@@ -438,6 +439,7 @@ def build_and_save_coupled_dataset(
         custom_phonemes_path=custom_phonemes_path,
         voicebank_id=voicebank_id,
         format_type_override=format_type_override,
+        auto_oto_policy=auto_oto_policy,
     )
     if rows:
         write_dataset_csv(out_csv, rows, append=append)

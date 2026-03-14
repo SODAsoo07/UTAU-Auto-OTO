@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import hashlib
+import tempfile
 from typing import Dict, List, Optional, Tuple
 
 import textgrid
@@ -40,6 +41,7 @@ from core.oto_ml_reliability import blank_risk_flag, compute_blank_risk_score
 from core.format_type_utils import normalize_format_type
 from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
 from core.prefix_map_utils import find_prefix_map_path, strip_prefix_map_affixes
+from core.pipeline_status import has_textgrid_files
 from core.oto_ml.features.mel_patches import (
     make_mel_patch_debug_key,
     make_mel_patch_key,
@@ -212,6 +214,130 @@ def _default_training_row_cache_dir() -> str:
     path = os.path.join(root, ".cache", "oto_ml_training_rows")
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def _has_usable_oto_lines(path: str) -> bool:
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        if os.path.getsize(path) <= 0:
+            return False
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for _ in range(64):
+                line = f.readline()
+                if not line:
+                    break
+                if "=" in line and "," in line:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def _infer_format_type_from_paths(language: str, *paths: str) -> str:
+    lang = str(language or "").strip().lower()
+    for path in paths:
+        if not path:
+            continue
+        try:
+            parts = [p for p in os.path.abspath(path).split(os.sep) if p]
+        except Exception:
+            continue
+        for part in reversed(parts):
+            fmt = normalize_format_type(lang, part)
+            if fmt:
+                return fmt
+    return ""
+
+
+def _normalize_auto_oto_policy(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        raw = str(os.environ.get("UTOA_ML_AUTO_OTO_POLICY", "") or "").strip().lower()
+    if raw in {"require", "required", "on", "true", "1"}:
+        return "require"
+    if raw in {"generate", "auto", "temp", "runtime", "generate-temp"}:
+        return "generate-temp"
+    if raw in {"persist", "save", "write", "generate-persist"}:
+        return "generate-persist"
+    return "require"
+
+
+def _resolve_auto_oto_for_training(
+    *,
+    language: str,
+    auto_oto_path: str,
+    manual_oto_path: str,
+    tg_dir: str,
+    wav_dir: str,
+    format_type_override: str,
+    auto_oto_policy: str,
+) -> Tuple[str, Dict[str, object]]:
+    policy = _normalize_auto_oto_policy(auto_oto_policy)
+    candidate_auto = auto_oto_path
+    if not candidate_auto:
+        if manual_oto_path:
+            candidate_auto = os.path.join(os.path.dirname(manual_oto_path), "oto_auto_ml.ini")
+        elif tg_dir:
+            candidate_auto = os.path.join(tg_dir, "oto_auto_ml.ini")
+        elif wav_dir:
+            candidate_auto = os.path.join(wav_dir, "oto_auto_ml.ini")
+    if _has_usable_oto_lines(candidate_auto):
+        return candidate_auto, {"status": "existing", "policy": policy}
+    if policy == "require":
+        return (candidate_auto or auto_oto_path), {"status": "missing_auto_oto", "policy": policy}
+    if not manual_oto_path or not os.path.isfile(manual_oto_path):
+        return auto_oto_path, {"status": "missing_manual_oto", "policy": policy}
+    if not tg_dir or not has_textgrid_files(tg_dir):
+        return auto_oto_path, {"status": "missing_textgrid", "policy": policy}
+
+    fmt = normalize_format_type(language, format_type_override)
+    if not fmt:
+        fmt = _infer_format_type_from_paths(language, manual_oto_path, tg_dir, wav_dir)
+    if not fmt:
+        fmt = "cvvc"
+
+    temp_dir = None
+    if policy == "generate-persist":
+        work_dir = os.path.dirname(auto_oto_path) if auto_oto_path else ""
+        if not work_dir:
+            work_dir = os.path.dirname(manual_oto_path) if manual_oto_path else ""
+        if not work_dir:
+            work_dir = tg_dir or wav_dir
+    else:
+        temp_dir = tempfile.TemporaryDirectory(prefix="utoa_auto_oto_")
+        work_dir = temp_dir.name
+
+    try:
+        from core.oto_ml_prepare_steps import _generate_auto_oto
+        from core.oto_ml_prepare_types import PreparedAutoPair
+
+        item = PreparedAutoPair(
+            language=str(language or "").strip().lower() or "korean",
+            format_type=str(fmt),
+            stage_root=work_dir,
+            work_dir=work_dir,
+            manual_oto=manual_oto_path,
+            tg_dir=tg_dir,
+        )
+        logs: List[str] = []
+        _generate_auto_oto(item, logs)
+        if _has_usable_oto_lines(item.auto_oto):
+            return item.auto_oto, {
+                "status": "generated",
+                "policy": policy,
+                "temp_dir": temp_dir,
+                "log_count": len(logs),
+            }
+    except Exception as exc:
+        logger.warning("auto oto generation failed: %s", exc)
+
+    if temp_dir is not None:
+        try:
+            temp_dir.cleanup()
+        except Exception:
+            pass
+    return auto_oto_path, {"status": "generate_failed", "policy": policy}
 
 
 def _path_signature(path: str) -> Dict[str, object]:
@@ -1602,131 +1728,163 @@ def _resolve_manual_cutoff_abs(
     return chosen_abs, chosen_mode
 
 
-def build_training_rows(language: str, auto_oto_path: str, manual_oto_path: str, tg_dir: str, wav_dir: str, custom_phonemes_path: str = "", voicebank_id: str = "", format_type_override: str = "") -> Tuple[List[Dict[str, object]], Dict[str, int]]:
+def build_training_rows(
+    language: str,
+    auto_oto_path: str,
+    manual_oto_path: str,
+    tg_dir: str,
+    wav_dir: str,
+    custom_phonemes_path: str = "",
+    voicebank_id: str = "",
+    format_type_override: str = "",
+    auto_oto_policy: str = "",
+) -> Tuple[List[Dict[str, object]], Dict[str, int]]:
     fmt_tag = str(format_type_override or "").strip().lower()
-    auto_prefix_map_path = find_prefix_map_path(auto_oto_path, wav_dir, tg_dir)
-    manual_prefix_map_path = find_prefix_map_path(manual_oto_path, wav_dir, tg_dir)
-    cache_path = _training_row_cache_path(
+    resolved_auto, auto_meta = _resolve_auto_oto_for_training(
         language=language,
         auto_oto_path=auto_oto_path,
         manual_oto_path=manual_oto_path,
         tg_dir=tg_dir,
         wav_dir=wav_dir,
-        custom_phonemes_path=custom_phonemes_path,
-        auto_prefix_map_path=auto_prefix_map_path,
-        manual_prefix_map_path=manual_prefix_map_path,
-        voicebank_id=f"{voicebank_id}|fmt={fmt_tag}",
-    )
-    cached = _load_training_row_cache(cache_path)
-    if cached is not None:
-        return cached
-    auto_feats = extract_feature_rows(
-        language,
-        auto_oto_path,
-        tg_dir=tg_dir,
-        wav_dir=wav_dir,
-        custom_phonemes_path=custom_phonemes_path,
-        voicebank_id=voicebank_id,
         format_type_override=fmt_tag,
+        auto_oto_policy=auto_oto_policy,
     )
-    manual_rows = parse_oto_rows(
-        manual_oto_path,
-        language=language,
-        custom_map=load_custom_map(custom_phonemes_path),
-        prefix_map_path=manual_prefix_map_path,
-        prefix_context_paths=[manual_oto_path, wav_dir, tg_dir],
-    )
-    manual_matches, match_stats = _build_manual_matches_by_time(auto_feats, manual_rows)
-    matched_rows: List[Dict[str, object]] = []
-    skipped = 0
-    skipped_cutoff = 0
-    label_counts = {"manual": 0}
+    auto_oto_path = resolved_auto
+    temp_dir = auto_meta.get("temp_dir")
 
-    for feat_idx, feat in enumerate(auto_feats):
-        manual_row = manual_matches.get(feat_idx)
-        if not manual_row:
-            skipped += 1
-            continue
-        row = dict(feat)
-        if not str(row.get("mapping_reason_code", "")).strip():
-            row["mapping_reason_code"] = "unknown"
-        try:
-            row["jump_blocked_flag"] = 1.0 if float(row.get("jump_blocked_flag", 0.0) or 0.0) > 0.0 else 0.0
-        except Exception:
-            row["jump_blocked_flag"] = 0.0
-
-        row["manual_offset"] = float(manual_row["offset"])
-        row["manual_cons"] = float(manual_row["cons"])
-        row["manual_cutoff"] = float(manual_row["cutoff"])
-        row["manual_pre"] = float(manual_row["pre"])
-        row["manual_ovl"] = float(manual_row["ovl"])
-        resolved_cutoff_abs, cutoff_mode = _resolve_manual_cutoff_abs(
-            feature_row=feat,
-            manual_offset=float(row["manual_offset"]),
-            manual_cutoff=float(row["manual_cutoff"]),
+    try:
+        auto_prefix_map_path = find_prefix_map_path(auto_oto_path, wav_dir, tg_dir)
+        manual_prefix_map_path = find_prefix_map_path(manual_oto_path, wav_dir, tg_dir)
+        cache_path = _training_row_cache_path(
+            language=language,
+            auto_oto_path=auto_oto_path,
+            manual_oto_path=manual_oto_path,
+            tg_dir=tg_dir,
+            wav_dir=wav_dir,
+            custom_phonemes_path=custom_phonemes_path,
+            auto_prefix_map_path=auto_prefix_map_path,
+            manual_prefix_map_path=manual_prefix_map_path,
+            voicebank_id=f"{voicebank_id}|fmt={fmt_tag}",
         )
-        if resolved_cutoff_abs is None:
-            skipped += 1
-            skipped_cutoff += 1
-            continue
-        row["manual_cutoff_abs"] = float(resolved_cutoff_abs)
-        row["manual_cutoff_mode"] = cutoff_mode
-        row["delta_offset"] = row["manual_offset"] - row["base_offset"]
-        row["delta_cons"] = row["manual_cons"] - row["base_cons"]
-        row["delta_cutoff"] = row["manual_cutoff_abs"] - row["base_cutoff_abs"]
-        row["delta_pre"] = row["manual_pre"] - row["base_pre"]
-        row["delta_ovl"] = row["manual_ovl"] - row["base_ovl"]
-        try:
-            manual_offset = float(row.get("manual_offset", 0.0) or 0.0)
-        except Exception:
-            manual_offset = 0.0
-        try:
-            vowel_start = float(row.get("curr_vowel_start_ms", 0.0) or 0.0)
-        except Exception:
-            vowel_start = 0.0
-        try:
-            vowel_end = float(row.get("curr_vowel_end_ms", 0.0) or 0.0)
-        except Exception:
-            vowel_end = 0.0
-        try:
-            next_anchor_abs = float(row.get("base_cutoff_abs", 0.0) or 0.0) + float(
-                row.get("base_cutoff_to_next_anchor_ms", 0.0) or 0.0
-            )
-        except Exception:
-            next_anchor_abs = 0.0
-        row["aux_vowel_start_rel"] = (vowel_start - manual_offset) if vowel_start > 0.0 else 0.0
-        row["aux_vowel_end_rel"] = (vowel_end - manual_offset) if vowel_end > 0.0 else 0.0
-        row["aux_next_onset_rel"] = (next_anchor_abs - manual_offset) if next_anchor_abs > 0.0 else 0.0
-        keep_default, skip_reason, quality_score = _evaluate_training_row_quality(language, row)
-        row["train_keep_default"] = int(keep_default)
-        row["train_skip_reason"] = skip_reason
-        row["train_quality_score"] = float(quality_score)
-        mapping_conf = float(row.get("mapping_confidence", 0.0) or 0.0)
-        jump_blocked = int(float(row.get("jump_blocked_flag", 0.0) or 0.0) > 0.0)
-        label_source = "manual"
-        row["label_source"] = label_source
-        row["sample_weight"] = _compute_training_sample_weight(row)
-        label_counts["manual"] += 1
-        row["blank_risk_score"] = float(compute_blank_risk_score(row))
-        row["blank_risk_flag"] = int(blank_risk_flag(row))
-        row["skipped_reason"] = ""
-        matched_rows.append(row)
+        cached = _load_training_row_cache(cache_path)
+        if cached is not None:
+            return cached
+        auto_feats = extract_feature_rows(
+            language,
+            auto_oto_path,
+            tg_dir=tg_dir,
+            wav_dir=wav_dir,
+            custom_phonemes_path=custom_phonemes_path,
+            voicebank_id=voicebank_id,
+            format_type_override=fmt_tag,
+        )
+        manual_rows = parse_oto_rows(
+            manual_oto_path,
+            language=language,
+            custom_map=load_custom_map(custom_phonemes_path),
+            prefix_map_path=manual_prefix_map_path,
+            prefix_context_paths=[manual_oto_path, wav_dir, tg_dir],
+        )
+        manual_matches, match_stats = _build_manual_matches_by_time(auto_feats, manual_rows)
+        matched_rows: List[Dict[str, object]] = []
+        skipped = 0
+        skipped_cutoff = 0
+        label_counts = {"manual": 0}
 
-    stats = {
-        "auto_rows": len(auto_feats),
-        "manual_rows": len(manual_rows),
-        "matched_rows": len(matched_rows),
-        "skipped_rows": skipped,
-        "skipped_cutoff_rows": skipped_cutoff,
-        "matched_single_direct": int(match_stats.get("single_direct", 0)),
-        "matched_occurrence_direct": int(match_stats.get("occurrence_direct", 0)),
-        "matched_time_nearest": int(match_stats.get("time_nearest", 0)),
-        "skip_mapping_far": int(match_stats.get("skip_far", 0)),
-        "skip_mapping_unmatched": int(match_stats.get("skip_unmatched", 0)),
-        "label_manual": int(label_counts["manual"]),
-    }
-    _save_training_row_cache(cache_path, matched_rows, stats)
-    return matched_rows, stats
+        for feat_idx, feat in enumerate(auto_feats):
+            manual_row = manual_matches.get(feat_idx)
+            if not manual_row:
+                skipped += 1
+                continue
+            row = dict(feat)
+            if not str(row.get("mapping_reason_code", "")).strip():
+                row["mapping_reason_code"] = "unknown"
+            try:
+                row["jump_blocked_flag"] = 1.0 if float(row.get("jump_blocked_flag", 0.0) or 0.0) > 0.0 else 0.0
+            except Exception:
+                row["jump_blocked_flag"] = 0.0
+
+            row["manual_offset"] = float(manual_row["offset"])
+            row["manual_cons"] = float(manual_row["cons"])
+            row["manual_cutoff"] = float(manual_row["cutoff"])
+            row["manual_pre"] = float(manual_row["pre"])
+            row["manual_ovl"] = float(manual_row["ovl"])
+            resolved_cutoff_abs, cutoff_mode = _resolve_manual_cutoff_abs(
+                feature_row=feat,
+                manual_offset=float(row["manual_offset"]),
+                manual_cutoff=float(row["manual_cutoff"]),
+            )
+            if resolved_cutoff_abs is None:
+                skipped += 1
+                skipped_cutoff += 1
+                continue
+            row["manual_cutoff_abs"] = float(resolved_cutoff_abs)
+            row["manual_cutoff_mode"] = cutoff_mode
+            row["delta_offset"] = row["manual_offset"] - row["base_offset"]
+            row["delta_cons"] = row["manual_cons"] - row["base_cons"]
+            row["delta_cutoff"] = row["manual_cutoff_abs"] - row["base_cutoff_abs"]
+            row["delta_pre"] = row["manual_pre"] - row["base_pre"]
+            row["delta_ovl"] = row["manual_ovl"] - row["base_ovl"]
+            try:
+                manual_offset = float(row.get("manual_offset", 0.0) or 0.0)
+            except Exception:
+                manual_offset = 0.0
+            try:
+                vowel_start = float(row.get("curr_vowel_start_ms", 0.0) or 0.0)
+            except Exception:
+                vowel_start = 0.0
+            try:
+                vowel_end = float(row.get("curr_vowel_end_ms", 0.0) or 0.0)
+            except Exception:
+                vowel_end = 0.0
+            try:
+                next_anchor_abs = float(row.get("base_cutoff_abs", 0.0) or 0.0) + float(
+                    row.get("base_cutoff_to_next_anchor_ms", 0.0) or 0.0
+                )
+            except Exception:
+                next_anchor_abs = 0.0
+            row["aux_vowel_start_rel"] = (vowel_start - manual_offset) if vowel_start > 0.0 else 0.0
+            row["aux_vowel_end_rel"] = (vowel_end - manual_offset) if vowel_end > 0.0 else 0.0
+            row["aux_next_onset_rel"] = (next_anchor_abs - manual_offset) if next_anchor_abs > 0.0 else 0.0
+            keep_default, skip_reason, quality_score = _evaluate_training_row_quality(language, row)
+            row["train_keep_default"] = int(keep_default)
+            row["train_skip_reason"] = skip_reason
+            row["train_quality_score"] = float(quality_score)
+            mapping_conf = float(row.get("mapping_confidence", 0.0) or 0.0)
+            jump_blocked = int(float(row.get("jump_blocked_flag", 0.0) or 0.0) > 0.0)
+            label_source = "manual"
+            row["label_source"] = label_source
+            row["sample_weight"] = _compute_training_sample_weight(row)
+            label_counts["manual"] += 1
+            row["blank_risk_score"] = float(compute_blank_risk_score(row))
+            row["blank_risk_flag"] = int(blank_risk_flag(row))
+            row["skipped_reason"] = ""
+            matched_rows.append(row)
+
+        stats = {
+            "auto_rows": len(auto_feats),
+            "manual_rows": len(manual_rows),
+            "matched_rows": len(matched_rows),
+            "skipped_rows": skipped,
+            "skipped_cutoff_rows": skipped_cutoff,
+            "matched_single_direct": int(match_stats.get("single_direct", 0)),
+            "matched_occurrence_direct": int(match_stats.get("occurrence_direct", 0)),
+            "matched_time_nearest": int(match_stats.get("time_nearest", 0)),
+            "skip_mapping_far": int(match_stats.get("skip_far", 0)),
+            "skip_mapping_unmatched": int(match_stats.get("skip_unmatched", 0)),
+            "label_manual": int(label_counts["manual"]),
+        }
+        if isinstance(auto_meta, dict):
+            stats["auto_oto_status"] = str(auto_meta.get("status", ""))
+            stats["auto_oto_policy"] = str(auto_meta.get("policy", ""))
+        _save_training_row_cache(cache_path, matched_rows, stats)
+        return matched_rows, stats
+    finally:
+        if temp_dir is not None:
+            try:
+                temp_dir.cleanup()
+            except Exception:
+                pass
 
 
 def dataset_fieldnames() -> List[str]:

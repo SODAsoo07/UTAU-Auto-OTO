@@ -2,6 +2,10 @@
 __pycache__/
 *.py[codz]
 *$py.class
+/micromamba
+/micromamba-*.tar.bz2
+/micromamba-win-64-latest.tar.bz2
+/1.5
 
 # C extensions
 *.so

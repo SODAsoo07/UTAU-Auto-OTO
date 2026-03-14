@@ -19,6 +19,7 @@ def build_oto_ml_dataset(
     custom_phonemes_path: str = "",
     voicebank_id: str = "",
     format_type_override: str = "",
+    auto_oto_policy: str = "",
 ) -> Tuple[List[Dict[str, object]], Dict[str, int]]:
     return build_training_rows(
         language=language,
@@ -29,6 +30,7 @@ def build_oto_ml_dataset(
         custom_phonemes_path=custom_phonemes_path,
         voicebank_id=voicebank_id,
         format_type_override=format_type_override,
+        auto_oto_policy=auto_oto_policy,
     )
 
 
@@ -43,6 +45,7 @@ def build_and_save_oto_ml_dataset(
     voicebank_id: str = "",
     append: bool = False,
     format_type_override: str = "",
+    auto_oto_policy: str = "",
 ) -> Dict[str, int]:
     rows, stats = build_oto_ml_dataset(
         language=language,
@@ -53,6 +56,7 @@ def build_and_save_oto_ml_dataset(
         custom_phonemes_path=custom_phonemes_path,
         voicebank_id=voicebank_id,
         format_type_override=format_type_override,
+        auto_oto_policy=auto_oto_policy,
     )
     if rows:
         write_dataset_csv(out_csv, rows, append=append)

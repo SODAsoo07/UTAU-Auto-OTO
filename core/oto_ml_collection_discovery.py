@@ -23,6 +23,23 @@ AUTO_KEYWORDS = ["autotest", "auto", "tuned", "generated", "output", "out"]
 TEXTGRID_DIR_NAMES = ["textgrids", "textgrid"]
 
 
+def _normalize_auto_oto_policy(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        raw = str(os.environ.get("UTOA_ML_AUTO_OTO_POLICY", "") or "").strip().lower()
+    if raw in {"require", "required", "on", "true", "1"}:
+        return "require"
+    if raw in {"generate", "auto", "temp", "runtime", "generate-temp"}:
+        return "generate-temp"
+    if raw in {"persist", "save", "write", "generate-persist"}:
+        return "generate-persist"
+    return "require"
+
+
+def _auto_oto_required(policy: str) -> bool:
+    return _normalize_auto_oto_policy(policy) == "require"
+
+
 def _has_usable_oto_lines(path: str) -> bool:
     if not path or not os.path.isfile(path):
         return False
@@ -208,6 +225,7 @@ def _build_candidate(
     wav_dir: str,
     custom_phonemes: str,
     voicebank_id: str,
+    auto_oto_policy: str = "",
 ) -> TrainingCandidate:
     candidate = TrainingCandidate(
         language=language,
@@ -224,7 +242,7 @@ def _build_candidate(
     missing = []
     if not manual:
         missing.append("manual_oto")
-    if not auto:
+    if not auto and _auto_oto_required(auto_oto_policy):
         missing.append("auto_oto")
     if not tg_dir:
         missing.append("textgrids")
@@ -235,10 +253,12 @@ def _build_candidate(
         candidate.reason = "missing_" + "_".join(missing)
     else:
         candidate.status = "ready"
+        if not auto and not _auto_oto_required(auto_oto_policy):
+            candidate.reason = "auto_oto_missing_optional"
     return candidate
 
 
-def discover_training_candidates(config_path: str) -> List[TrainingCandidate]:
+def discover_training_candidates(config_path: str, auto_oto_policy: str = "") -> List[TrainingCandidate]:
     roots = load_training_roots(config_path)
     candidates: List[TrainingCandidate] = []
     for language, groups in roots.items():
@@ -271,12 +291,16 @@ def discover_training_candidates(config_path: str) -> List[TrainingCandidate]:
                             wav_dir=wav_dir,
                             custom_phonemes=_find_custom_phoneme_map_chain(candidate_root, root),
                             voicebank_id=os.path.basename(os.path.abspath(candidate_root)),
+                            auto_oto_policy=auto_oto_policy,
                         )
                     )
     return candidates
 
 
-def discover_training_candidates_from_dataset_root(dataset_root: str) -> List[TrainingCandidate]:
+def discover_training_candidates_from_dataset_root(
+    dataset_root: str,
+    auto_oto_policy: str = "",
+) -> List[TrainingCandidate]:
     candidates: List[TrainingCandidate] = []
     try:
         language_dirs = sorted(os.listdir(dataset_root))
@@ -328,6 +352,7 @@ def discover_training_candidates_from_dataset_root(dataset_root: str) -> List[Tr
                             wav_dir=wav_dir,
                             custom_phonemes=_find_custom_phoneme_map_chain(dp, vb_root),
                             voicebank_id=_derive_dataset_voicebank_id(language, fmt, vb_root, dp),
+                            auto_oto_policy=auto_oto_policy,
                         )
                     )
     return candidates
