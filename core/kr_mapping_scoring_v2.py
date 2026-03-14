@@ -1,6 +1,18 @@
 from __future__ import annotations
 
+from functools import lru_cache
+
 from core.kr_oto_rules import _cv_match_score, _is_kr_glide_vowel, _split_kr_syllable_parts
+
+
+@lru_cache(maxsize=8192)
+def _split_parts_cached(token):
+    return _split_kr_syllable_parts(token)
+
+
+@lru_cache(maxsize=65536)
+def _cv_match_score_cached(target, token):
+    return _cv_match_score(target, token)
 
 
 def resolve_cv_syllable_index(
@@ -35,7 +47,7 @@ def resolve_cv_syllable_index(
     scan_start = max(cv_seq_idx - 1, 0)
     scan_end = min(cv_seq_idx + 4, len(romaji_syllables))
     for i in range(scan_start, scan_end):
-        score = _cv_match_score(target_clean, romaji_syllables[i])
+        score = _cv_match_score_cached(target_clean, romaji_syllables[i])
         score -= abs(i - cv_seq_idx) * 4
         if score > best_score:
             best_score = score
@@ -45,18 +57,18 @@ def resolve_cv_syllable_index(
 
     expected_score = -1
     if 0 <= cv_seq_idx < len(romaji_syllables):
-        expected_score = _cv_match_score(target_clean, romaji_syllables[cv_seq_idx])
+        expected_score = _cv_match_score_cached(target_clean, romaji_syllables[cv_seq_idx])
     meta["best_score"] = float(best_score)
     meta["expected_score"] = float(expected_score)
 
     if name_match_idx is not None and best_score >= 62:
         chosen_idx = name_match_idx
         best_gain = best_score - expected_score
-        target_onset, target_vowel, _target_coda = _split_kr_syllable_parts(target_clean)
+        target_onset, target_vowel, _target_coda = _split_parts_cached(target_clean)
         expected_tok = romaji_syllables[cv_seq_idx] if 0 <= cv_seq_idx < len(romaji_syllables) else ""
         best_tok = romaji_syllables[name_match_idx] if 0 <= name_match_idx < len(romaji_syllables) else ""
-        exp_onset, exp_vowel, _exp_coda = _split_kr_syllable_parts(expected_tok)
-        best_onset, best_vowel, _best_coda = _split_kr_syllable_parts(best_tok)
+        exp_onset, exp_vowel, _exp_coda = _split_parts_cached(expected_tok)
+        best_onset, best_vowel, _best_coda = _split_parts_cached(best_tok)
         same_vowel_expected = bool(target_vowel and exp_vowel and target_vowel == exp_vowel)
         best_vowel_match = bool(target_vowel and best_vowel and target_vowel == best_vowel)
         target_glide = _is_kr_glide_vowel(target_vowel)
@@ -105,6 +117,8 @@ def resolve_cv_syllable_index(
                 chosen_idx = cv_seq_idx
         max_forward_jump = int(max(0, max_jump_default))
         conf = float(mapping_confidence or 0.0)
+        if conf < 0.55:
+            max_forward_jump = 0
         if conf >= float(high_conf_threshold):
             if best_score >= 84 and best_gain >= 24:
                 max_forward_jump = int(max(max_forward_jump, max_jump_high_conf))

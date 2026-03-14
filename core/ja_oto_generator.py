@@ -3948,6 +3948,8 @@ def generate_ja_oto(
                         candidate_count=len(syllables_info),
                         confidence_margin=mapping_margin,
                         min_confidence_margin=runtime_policy.get("row_margin_floor"),
+                        row_confidence=mapping_confidence_base,
+                        min_row_confidence=runtime_policy.get("row_conf_floor"),
                         candidate_active=(
                             _is_ja_cv_syllable_active(syllables_info[mapped_idx], require_vowel=True)
                             if 0 <= mapped_idx < len(syllables_info)
@@ -3955,6 +3957,8 @@ def generate_ja_oto(
                         ),
                         active_only_formats={"cvvc", "cv"},
                         margin_formats={"cvvc", "cv"},
+                        min_confidence_margin_by_alias_type={"cv_head": float(runtime_policy.get("row_margin_floor", 0.0) or 0.0) + 1.0},
+                        min_row_confidence_by_alias_type={"cv_head": float(runtime_policy.get("row_conf_floor", 0.0) or 0.0) + 0.02},
                     )
                     if row_abstain.get("should_skip"):
                         if ja_mapping_debug_reason_logging:

@@ -4393,6 +4393,9 @@ def generate_oto(
                         active_only_formats={"cvvc", "cv"},
                         margin_formats={"cvvc", "cv"},
                         blank_formats={"cvvc", "cvc", "cv"},
+                        min_confidence_margin_by_alias_type={"cv_head": row_margin_floor + 1.5, "vcv": row_margin_floor + 1.0},
+                        min_row_confidence_by_alias_type={"cv_head": row_conf_floor + 0.03, "vcv": row_conf_floor + 0.02},
+                        max_blank_confidence_by_alias_type={"cv_head": max(0.0, row_blank_floor - 0.03), "vcv": max(0.0, row_blank_floor - 0.02)},
                     )
                     if row_abstain.get("should_skip"):
                         if kr_mapping_debug_reason_logging:

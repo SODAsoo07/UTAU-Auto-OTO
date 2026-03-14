@@ -1,6 +1,23 @@
 from __future__ import annotations
 
 
+def _normalize_key(value):
+    return str(value or "").strip().lower()
+
+
+def _resolve_threshold(default_value, *, fmt, alias_type, per_format=None, per_alias_type=None):
+    resolved = default_value
+    if isinstance(per_format, dict):
+        fmt_value = per_format.get(fmt, per_format.get("*"))
+        if fmt_value is not None:
+            resolved = fmt_value
+    if isinstance(per_alias_type, dict):
+        alias_value = per_alias_type.get(alias_type, per_alias_type.get("*"))
+        if alias_value is not None:
+            resolved = alias_value
+    return resolved
+
+
 def decide_cv_row_abstain(
     *,
     alias_type,
@@ -19,14 +36,20 @@ def decide_cv_row_abstain(
     margin_alias_types=None,
     margin_formats=None,
     blank_formats=None,
+    min_confidence_margin_by_format=None,
+    min_confidence_margin_by_alias_type=None,
+    min_row_confidence_by_format=None,
+    min_row_confidence_by_alias_type=None,
+    max_blank_confidence_by_format=None,
+    max_blank_confidence_by_alias_type=None,
 ):
-    fmt = str(format_type or "").strip().lower()
-    a_type = str(alias_type or "").strip().lower()
-    active_only_formats = {str(x).strip().lower() for x in (active_only_formats or set())}
-    active_alias_types = {str(x).strip().lower() for x in (active_alias_types or {"cv", "cv_head"})}
-    margin_alias_types = {str(x).strip().lower() for x in (margin_alias_types or {"cv", "cv_head"})}
-    margin_formats = {str(x).strip().lower() for x in (margin_formats or set())}
-    blank_formats = {str(x).strip().lower() for x in (blank_formats or set())}
+    fmt = _normalize_key(format_type)
+    a_type = _normalize_key(alias_type)
+    active_only_formats = {_normalize_key(x) for x in (active_only_formats or set())}
+    active_alias_types = {_normalize_key(x) for x in (active_alias_types or {"cv", "cv_head"})}
+    margin_alias_types = {_normalize_key(x) for x in (margin_alias_types or {"cv", "cv_head"})}
+    margin_formats = {_normalize_key(x) for x in (margin_formats or set())}
+    blank_formats = {_normalize_key(x) for x in (blank_formats or set())}
 
     try:
         idx = int(candidate_idx)
@@ -57,7 +80,15 @@ def decide_cv_row_abstain(
         except Exception:
             margin = None
         try:
-            min_margin = float(min_confidence_margin)
+            min_margin = float(
+                _resolve_threshold(
+                    min_confidence_margin,
+                    fmt=fmt,
+                    alias_type=a_type,
+                    per_format=min_confidence_margin_by_format,
+                    per_alias_type=min_confidence_margin_by_alias_type,
+                )
+            )
         except Exception:
             min_margin = None
         if margin is not None and min_margin is not None and margin < min_margin:
@@ -72,7 +103,15 @@ def decide_cv_row_abstain(
     except Exception:
         row_conf = None
     try:
-        min_row_conf = None if min_row_confidence is None else float(min_row_confidence)
+        min_row_conf = float(
+            _resolve_threshold(
+                min_row_confidence,
+                fmt=fmt,
+                alias_type=a_type,
+                per_format=min_row_confidence_by_format,
+                per_alias_type=min_row_confidence_by_alias_type,
+            )
+        )
     except Exception:
         min_row_conf = None
     if a_type in margin_alias_types and row_conf is not None and min_row_conf is not None and row_conf < min_row_conf:
@@ -88,7 +127,15 @@ def decide_cv_row_abstain(
         except Exception:
             blank = None
         try:
-            max_blank = None if max_blank_confidence is None else float(max_blank_confidence)
+            max_blank = float(
+                _resolve_threshold(
+                    max_blank_confidence,
+                    fmt=fmt,
+                    alias_type=a_type,
+                    per_format=max_blank_confidence_by_format,
+                    per_alias_type=max_blank_confidence_by_alias_type,
+                )
+            )
         except Exception:
             max_blank = None
         if blank is not None and max_blank is not None and blank >= max_blank:

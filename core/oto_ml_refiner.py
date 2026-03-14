@@ -1643,6 +1643,28 @@ def _apply_anchor_lock_lite_after_ml(
     return (result.offset, result.consonant, result.cutoff, result.pre, result.ovl), tuple(result.applied_rules or ())
 
 
+def _should_skip_ml_for_high_confidence_row(row_context: Dict[str, object]) -> bool:
+    if not _env_flag("UTOA_ML_SKIP_HIGH_CONF_RULE_ROWS", True):
+        return False
+    conf_floor = _read_bounded_conf_env("UTOA_ML_SKIP_HIGH_CONF_MIN")
+    blank_max = _read_bounded_conf_env("UTOA_ML_SKIP_HIGH_CONF_MAX_BLANK")
+    try:
+        margin_floor = float(os.environ.get("UTOA_ML_SKIP_HIGH_CONF_MIN_MARGIN", "12.0") or 12.0)
+    except Exception:
+        margin_floor = 12.0
+    if conf_floor is None:
+        conf_floor = 0.90
+    if blank_max is None:
+        blank_max = 0.18
+    mapping_conf = _to_float(row_context.get("mapping_confidence"), 0.0)
+    mapping_margin = _to_float(row_context.get("mapping_margin"), 0.0)
+    blank_conf = max(
+        _to_float(row_context.get("blank_span_confidence"), 0.0),
+        _to_float(row_context.get("syllable_blank_confidence"), 0.0),
+    )
+    return mapping_conf >= conf_floor and mapping_margin >= margin_floor and blank_conf <= blank_max
+
+
 def apply_oto_ml_delta(
     language: str,
     row_context: Dict[str, object],
@@ -1656,6 +1678,22 @@ def apply_oto_ml_delta(
     pred_result=None,
 ) -> Tuple[float, float, float, float, float]:
     validate_oto_params = _get_validate_func(language)
+    if pred_result is None and _should_skip_ml_for_high_confidence_row(row_context):
+        base_offset = float(row_context.get("base_offset", 0.0))
+        base_cons = float(row_context.get("base_cons", 0.0))
+        base_cutoff_abs = float(row_context.get("base_cutoff_abs", 0.0))
+        base_pre = float(row_context.get("base_pre", 0.0))
+        base_ovl = float(row_context.get("base_ovl", 0.0))
+        base_cutoff = -(base_cutoff_abs - base_offset)
+        return _finalize_ml_params(
+            language,
+            row_context,
+            (base_offset, base_cons, base_cutoff, base_pre, base_ovl),
+            validate_oto_params,
+            anchor_stats=anchor_stats,
+            strict_constraint=strict_constraint,
+            constraint_stats=constraint_stats,
+        )
     pred = pred_result if pred_result is not None else predict_oto_deltas(bundle, row_context)
     pred_backend = str(getattr(pred, "route_backend", "") or getattr(pred, "backend", bundle.backend)).strip().lower()
     if pred_backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
