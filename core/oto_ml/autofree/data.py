@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover
 
 from core.format_type_utils import normalize_format_type
 from core.oto_ml.autofree.schema import CONFIDENCE_TARGET_NAME, FEATURE_NAMES
-from core.oto_ml_features import detect_format_type, parse_oto_rows
+from core.oto_ml_features import classify_alias_type, detect_format_type, parse_oto_rows
 from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
 from core.pipeline_status import has_textgrid_files
 
@@ -173,8 +173,100 @@ def _load_tg_intervals(tg_path: str) -> List[Dict[str, float]]:
         start = _to_float(getattr(iv, "minTime", 0.0), 0.0) * 1000.0
         end = _to_float(getattr(iv, "maxTime", 0.0), 0.0) * 1000.0
         if end > start:
-            out.append({"start_ms": float(start), "end_ms": float(end)})
+            out.append(
+                {
+                    "start_ms": float(start),
+                    "end_ms": float(end),
+                    "mark": str(getattr(iv, "mark", "") or ""),
+                }
+            )
     return out
+
+
+_BLANK_TEXTGRID_MARKS = {
+    "",
+    "sil",
+    "silence",
+    "sp",
+    "spn",
+    "pau",
+    "pause",
+    "rest",
+    "_",
+    "-",
+}
+
+_PAUSE_ALIASES = {
+    "",
+    "r",
+    "rr",
+    "sil",
+    "sp",
+    "spn",
+    "pau",
+    "pause",
+    "rest",
+    "_",
+    "-",
+}
+
+
+def _normalize_short_text(value: object) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip().lower())
+
+
+def _is_blank_interval_mark(mark: object) -> bool:
+    m = _normalize_short_text(mark)
+    if not m:
+        return True
+    if m in _BLANK_TEXTGRID_MARKS:
+        return True
+    return bool(re.fullmatch(r"sil\d+|sp\d+|pau\d+|rest\d+", m))
+
+
+def _is_pause_alias(alias: str) -> bool:
+    a = _normalize_short_text(alias)
+    if a in _PAUSE_ALIASES:
+        return True
+    return a.startswith("br")
+
+
+def _interval_distance_ms(anchor_ms: float, interval: Dict[str, float]) -> float:
+    start = _to_float(interval.get("start_ms"), 0.0)
+    return abs(anchor_ms - start)
+
+
+def _select_interval_pool(intervals: List[Dict[str, float]], alias: str) -> List[Dict[str, float]]:
+    if not intervals:
+        return []
+    if _is_pause_alias(alias):
+        return intervals
+    non_blank = [iv for iv in intervals if not _is_blank_interval_mark(iv.get("mark", ""))]
+    return non_blank or intervals
+
+
+def _select_interval_for_row(
+    *,
+    row: Dict[str, object],
+    row_index: int,
+    row_count: int,
+    intervals: List[Dict[str, float]],
+) -> Dict[str, float]:
+    alias = str(row.get("alias", "") or "")
+    pool = _select_interval_pool(intervals, alias)
+    if not pool:
+        return {"start_ms": 0.0, "end_ms": 1.0, "mark": ""}
+
+    anchor = _to_float(row.get("offset"), -1.0)
+    if anchor >= 0.0:
+        nearest = pool[0]
+        best_dist = _interval_distance_ms(anchor, nearest)
+        for cand in pool[1:]:
+            dist = _interval_distance_ms(anchor, cand)
+            if dist < best_dist:
+                nearest, best_dist = cand, dist
+        return nearest
+    return pool[_map_index(row_index, row_count, len(pool))]
 
 
 def _map_index(src_idx: int, src_count: int, dst_count: int) -> int:
@@ -257,6 +349,13 @@ def _resolve_format(language: str, aliases: Sequence[str], format_override: str 
     except Exception:
         detected = ""
     return normalize_format_type(language, detected) or "general"
+
+
+def _safe_alias_type(language: str, alias: str) -> str:
+    try:
+        return str(classify_alias_type(language, alias)).strip().lower()
+    except Exception:
+        return ""
 
 
 def _make_row(
@@ -376,7 +475,8 @@ def build_textgrid_rows(
         file_energy, file_voiced = _file_audio_stats(samples)
         fmt = _resolve_format(lang, tokens, format_override=format_type_override)
         for idx, token in enumerate(tokens):
-            iv = intervals[_map_index(idx, len(tokens), len(intervals))]
+            pool = _select_interval_pool(intervals, str(token))
+            iv = pool[_map_index(idx, len(tokens), len(pool))]
             onset = _to_float(iv.get("start_ms"), 0.0)
             tail = _to_float(iv.get("end_ms"), onset + 1.0)
             seg = _segment_stats(samples, sr, onset, tail)
@@ -705,7 +805,13 @@ def build_rows_for_inference(
         intervals = _load_tg_intervals(tg_index.get(wav_norm, ""))
         if intervals:
             for idx, row in enumerate(wav_rows):
-                iv = intervals[_map_index(idx, len(wav_rows), len(intervals))]
+                alias = str(row.get("alias", "") or "")
+                iv = _select_interval_for_row(
+                    row=row,
+                    row_index=idx,
+                    row_count=len(wav_rows),
+                    intervals=intervals,
+                )
                 onset = _to_float(iv.get("start_ms"), 0.0)
                 tail = _to_float(iv.get("end_ms"), onset + 1.0)
                 seg = _segment_stats(samples, sr, onset, tail)
@@ -714,7 +820,7 @@ def build_rows_for_inference(
                     format_type=fmt,
                     voicebank_id=vb_id,
                     wav_name=wav_name,
-                    alias=str(row.get("alias", "") or ""),
+                    alias=alias,
                     row_index_in_wav=idx,
                     source_mode="textgrid",
                     token_source="filename",
@@ -732,6 +838,7 @@ def build_rows_for_inference(
                 item["current_cutoff"] = _to_float(row.get("cutoff"), 0.0)
                 item["current_pre"] = _to_float(row.get("pre"), 0.0)
                 item["current_ovl"] = _to_float(row.get("ovl"), 0.0)
+                item["alias_type"] = _safe_alias_type(lang, alias)
                 out_rows.append(item)
                 stats["rows_built"] += 1
                 stats["source_mode_textgrid_rows"] += 1
@@ -743,6 +850,7 @@ def build_rows_for_inference(
             continue
         count = len(wav_rows)
         for idx, row in enumerate(wav_rows):
+            alias = str(row.get("alias", "") or "")
             start = float(idx) * duration_ms / float(max(count, 1))
             end = float(idx + 1) * duration_ms / float(max(count, 1))
             seg = _segment_stats(samples, sr, start, end)
@@ -751,7 +859,7 @@ def build_rows_for_inference(
                 format_type=fmt,
                 voicebank_id=vb_id,
                 wav_name=wav_name,
-                alias=str(row.get("alias", "") or ""),
+                alias=alias,
                 row_index_in_wav=idx,
                 source_mode="audio_only",
                 token_source=token_source or "filename",
@@ -769,6 +877,7 @@ def build_rows_for_inference(
             item["current_cutoff"] = _to_float(row.get("cutoff"), 0.0)
             item["current_pre"] = _to_float(row.get("pre"), 0.0)
             item["current_ovl"] = _to_float(row.get("ovl"), 0.0)
+            item["alias_type"] = _safe_alias_type(lang, alias)
             out_rows.append(item)
             stats["rows_built"] += 1
             stats["source_mode_audio_only_rows"] += 1

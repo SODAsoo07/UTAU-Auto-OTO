@@ -116,6 +116,11 @@ class OtoActionsMixin:
                     if hasattr(self, "ml_coupled_backend_var")
                     else "auto"
                 )
+                ml_route = (
+                    str(self.ml_route_var.get()).strip().lower()
+                    if hasattr(self, "ml_route_var")
+                    else "legacy"
+                )
                 ml_model_root = ""
                 if lang == "japanese" and hasattr(self, "ml_model_root_ja_var"):
                     ml_model_root = str(self.ml_model_root_ja_var.get() or "").strip()
@@ -192,6 +197,7 @@ class OtoActionsMixin:
                 )
                 os.environ["UTOA_ML_COUPLED_BACKEND"] = str(coupled_backend_env)
                 os.environ["UTOA_ML_COUPLED_STRICT_CONSTRAINT"] = "1" if ml_coupled_strict_constraint else "0"
+                os.environ["UTOA_ML_ROUTE"] = "autofree_v1" if ml_route == "autofree_v1" else "legacy"
                 if lang == "japanese":
                     if ml_model_root:
                         os.environ["UTOA_JA_OTO_ML_DIR"] = ml_model_root
@@ -210,6 +216,7 @@ class OtoActionsMixin:
                 self._append_log(
                     f"[OTO-ML] 실행 옵션: ml={'ON' if enable_ml_correction else 'OFF'}, selector={self._describe_ml_selector_mode(selector_mode_code)}"
                 )
+                self._append_log(f"[OTO-ML] route={os.environ.get('UTOA_ML_ROUTE', 'legacy')}")
                 min_conf_display = f"{float(ml_coupled_min_conf):.2f}" if ml_coupled_min_conf is not None else "default(0.55)"
                 self._append_log(
                     f"[OTO-ML] coupled={'ON' if ml_coupled_enable else 'OFF'}, backend={ml_coupled_backend}, ensemble={'ON' if ensemble_enabled else 'OFF'}, min_conf={min_conf_display}, device={ml_coupled_device}, strict={'ON' if ml_coupled_strict_constraint else 'OFF'}"

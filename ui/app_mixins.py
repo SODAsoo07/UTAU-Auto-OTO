@@ -695,6 +695,7 @@ class ConfigMixin:
             "gen_missing_vowels": self.gen_missing_vowels_var.get(),
             "no_base_oto": self.no_base_oto_var.get(),
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
+            "ml_route": self.ml_route_var.get() if hasattr(self, "ml_route_var") else "legacy",
             "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "기본 정책",
             "ml_coupled_enable": self.ml_coupled_enable_var.get() if hasattr(self, "ml_coupled_enable_var") else True,
             "ml_coupled_min_conf": self.ml_coupled_min_conf_var.get() if hasattr(self, "ml_coupled_min_conf_var") else "",
@@ -766,8 +767,12 @@ class ConfigMixin:
                 self.gen_missing_vowels_var.set(bool(config.get("gen_missing_vowels", True)))
             if "no_base_oto" in config and hasattr(self, "no_base_oto_var"):
                 self.no_base_oto_var.set(bool(config.get("no_base_oto", False)))
-            if "enable_ml_correction" in config and hasattr(self, "enable_ml_correction_var"):
+            if hasattr(self, "enable_ml_correction_var"):
                 self.enable_ml_correction_var.set(bool(config.get("enable_ml_correction", True)))
+            if "ml_route" in config and hasattr(self, "ml_route_var"):
+                saved_route = str(config.get("ml_route", "legacy") or "legacy").strip().lower()
+                if saved_route in {"legacy", "autofree_v1"}:
+                    self.ml_route_var.set(saved_route)
 
             if "language" in config and hasattr(self, "lang_var"):
                 saved_language = str(config.get("language", "") or "").strip()

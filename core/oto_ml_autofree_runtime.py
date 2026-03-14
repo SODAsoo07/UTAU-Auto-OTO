@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Dict, List, Optional, Tuple
 
 from core.format_type_utils import normalize_format_type
@@ -43,6 +44,20 @@ def _to_float(value: object, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return float(default)
+
+
+def _normalize_short_text(value: object) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip().lower())
+
+
+def _is_pause_like_alias(alias: str, alias_type: str = "") -> bool:
+    a = _normalize_short_text(alias)
+    t = _normalize_short_text(alias_type)
+    if t in {"br", "pause", "rest", "sp", "sil"}:
+        return True
+    if a in {"", "r", "rr", "sil", "sp", "spn", "pau", "pause", "rest", "_", "-"}:
+        return True
+    return a.startswith("br")
 
 
 def _get_validate_func(language: str):
@@ -132,6 +147,19 @@ def validate_autofree_bundle_contract(bundle: Optional[OtoModelBundle]) -> Tuple
 def _apply_abs_guard(language: str, row: Dict[str, object], pred: Dict[str, float]) -> Tuple[float, float, float, float, float]:
     validate = _get_validate_func(language)
     offset = _to_float(pred.get("target_offset_ms"), _to_float(row.get("current_offset"), 0.0))
+    alias_type = str(row.get("alias_type", "") or "").strip().lower()
+    alias = str(row.get("alias", "") or "")
+
+    # Prevent collapse to leading silence when TextGrid onset is far from 0.
+    if not _is_pause_like_alias(alias, alias_type):
+        onset_ms = _to_float(row.get("onset_ms"), 0.0)
+        tail_ms = _to_float(row.get("tail_ms"), 0.0)
+        span_ms = max(1.0, tail_ms - onset_ms)
+        if onset_ms >= 120.0:
+            min_offset = max(0.0, onset_ms - max(220.0, span_ms * 1.8))
+            if offset < min_offset:
+                offset = min_offset
+
     cons = max(0.0, _to_float(pred.get("target_cons_ms"), _to_float(row.get("current_cons"), 0.0)))
     cutoff_abs = _to_float(pred.get("target_cutoff_abs_ms"), offset + 10.0)
     cutoff_abs = max(cutoff_abs, offset + 2.0)
@@ -141,7 +169,6 @@ def _apply_abs_guard(language: str, row: Dict[str, object], pred: Dict[str, floa
     pre = max(0.0, _to_float(pred.get("target_pre_ms"), _to_float(row.get("current_pre"), 0.0)))
     ovl = _to_float(pred.get("target_ovl_ms"), _to_float(row.get("current_ovl"), 0.0))
     cutoff = -(cutoff_abs - offset)
-    alias_type = str(row.get("alias_type", "") or "").strip().lower()
     try:
         return validate(offset, cons, cutoff, pre, ovl, alias_type=alias_type)
     except TypeError:

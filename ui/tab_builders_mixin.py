@@ -282,12 +282,17 @@ class TabBuildersMixin:
 
         self.enable_ml_correction_checkbox = ctk.CTkCheckBox(
             ml_frame,
-            text="LightGBM 보정 적용",
+            text="ML 보정 사용 (기본 ON)",
             text_color="#FFD54F",
             variable=self.enable_ml_correction_var,
             command=self._save_config,
         )
         self.enable_ml_correction_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
+        ctk.CTkLabel(
+            ml_frame,
+            text="OFF 시 ML 보정(legacy/autofree) 단계를 건너뜁니다.",
+            text_color="#9E9E9E",
+        ).pack(anchor="w", padx=12, pady=(0, 6))
 
         selector_mode_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
         selector_mode_row.pack(anchor="w", padx=12, pady=(4, 0), fill="x")

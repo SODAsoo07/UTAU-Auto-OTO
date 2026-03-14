@@ -134,6 +134,7 @@ class App(
         self.gen_missing_vowels_var = ctk.BooleanVar(value=True)
         self.no_base_oto_var = ctk.BooleanVar(value=False)
         self.enable_ml_correction_var = ctk.BooleanVar(value=True)
+        self.ml_route_var = ctk.StringVar(value="legacy")
         self.ml_selector_mode_var = ctk.StringVar(value="기본 정책")
         self.ml_coupled_enable_var = ctk.BooleanVar(value=True)
         self.ml_coupled_min_conf_var = ctk.StringVar(value="")

@@ -723,6 +723,11 @@ class PipelineActionsMixin:
                         if hasattr(self, "ml_coupled_backend_var")
                         else "auto"
                     )
+                    ml_route = (
+                        str(self.ml_route_var.get()).strip().lower()
+                        if hasattr(self, "ml_route_var")
+                        else "legacy"
+                    )
                     kr_continuity_max_offset_adj_raw = (
                         self.kr_continuity_max_offset_adj_var.get()
                         if hasattr(self, "kr_continuity_max_offset_adj_var")
@@ -801,6 +806,7 @@ class PipelineActionsMixin:
                     )
                     os.environ["UTOA_ML_COUPLED_BACKEND"] = str(coupled_backend_env)
                     os.environ["UTOA_ML_COUPLED_STRICT_CONSTRAINT"] = "1" if ml_coupled_strict_constraint else "0"
+                    os.environ["UTOA_ML_ROUTE"] = "autofree_v1" if ml_route == "autofree_v1" else "legacy"
                     if kr_continuity_max_offset_adj is None:
                         os.environ.pop("UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ", None)
                     else:
@@ -822,6 +828,7 @@ class PipelineActionsMixin:
                     self._append_log(
                         f"[OTO-ML] 설정: ml={'ON' if enable_ml_correction else 'OFF'}, selector={self._describe_ml_selector_mode(selector_mode_code)}"
                     )
+                    self._append_log(f"[OTO-ML] route={os.environ.get('UTOA_ML_ROUTE', 'legacy')}")
                     min_conf_display = f"{float(ml_coupled_min_conf):.2f}" if ml_coupled_min_conf is not None else "default(0.55)"
                     self._append_log(
                         f"[OTO-ML] coupled={'ON' if ml_coupled_enable else 'OFF'}, backend={ml_coupled_backend}, ensemble={'ON' if ensemble_enabled else 'OFF'}, min_conf={min_conf_display}, device={ml_coupled_device}, strict={'ON' if ml_coupled_strict_constraint else 'OFF'}"
