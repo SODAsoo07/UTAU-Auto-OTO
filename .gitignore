@@ -253,3 +253,5 @@ dataset_korean_cvc_stage/korean/cvc/CVC/Anonymous VB - KO CVC/alignment_analysis
 Voice_Datas.zip
 dataset.7z
 ml/notebooks/coupled_preprocess_colab.ipynb
+/ML_models
+ml/configs/autofree_bank_specs_korean_cvvc.colab.json
