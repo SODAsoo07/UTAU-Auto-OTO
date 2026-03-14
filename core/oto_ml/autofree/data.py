@@ -257,8 +257,15 @@ def _select_interval_for_row(
     if not pool:
         return {"start_ms": 0.0, "end_ms": 1.0, "mark": ""}
 
+    mapped = pool[_map_index(row_index, row_count, len(pool))]
     anchor = _to_float(row.get("offset"), -1.0)
     if anchor >= 0.0:
+        # If the current OTO row is already collapsed to file start (offset~0),
+        # anchoring by offset repeatedly snaps to the first non-blank interval.
+        # For non-leading rows, prefer order-based mapping to break this loop.
+        mapped_start = _to_float(mapped.get("start_ms"), 0.0)
+        if row_count > 1 and row_index > 0 and anchor <= 2.0 and mapped_start >= 10.0:
+            return mapped
         nearest = pool[0]
         best_dist = _interval_distance_ms(anchor, nearest)
         for cand in pool[1:]:
@@ -266,7 +273,7 @@ def _select_interval_for_row(
             if dist < best_dist:
                 nearest, best_dist = cand, dist
         return nearest
-    return pool[_map_index(row_index, row_count, len(pool))]
+    return mapped
 
 
 def _map_index(src_idx: int, src_count: int, dst_count: int) -> int:

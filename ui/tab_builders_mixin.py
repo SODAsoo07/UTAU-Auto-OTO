@@ -309,6 +309,28 @@ class TabBuildersMixin:
         )
         self.ml_selector_mode_segment.pack(side="left", padx=(10, 0))
 
+        route_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        route_row.pack(anchor="w", padx=12, pady=(6, 0), fill="x")
+        ctk.CTkLabel(
+            route_row,
+            text="ML route",
+            text_color="#B0BEC5",
+        ).pack(side="left")
+        route_menu = ctk.CTkOptionMenu(
+            route_row,
+            values=["legacy", "autofree_v1"],
+            variable=self.ml_route_var,
+            width=140,
+            command=lambda _v: self._save_config(),
+        )
+        _style_blue_menu(route_menu)
+        route_menu.pack(side="left", padx=(10, 8))
+        ctk.CTkLabel(
+            route_row,
+            text="(legacy / autofree_v1)",
+            text_color="#9E9E9E",
+        ).pack(side="left", padx=(4, 0))
+
         coupled_enable_checkbox = ctk.CTkCheckBox(
             ml_frame,
             text="Coupled mel+oto 보정 사용",

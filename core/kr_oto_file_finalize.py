@@ -39,6 +39,17 @@ def _env_float(name, default):
         return float(default)
 
 
+def _normalize_ml_route(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"autofree_v1", "autofree", "b", "route_b"}:
+        return "autofree_v1"
+    return "legacy"
+
+
+def _current_ml_route() -> str:
+    return _normalize_ml_route(os.environ.get("UTOA_ML_ROUTE", "legacy"))
+
+
 def _call_validate(validate_fn, offset, consonant, cutoff, pre, ovl, *, alias_type=""):
     try:
         return validate_fn(offset, consonant, cutoff, pre, ovl, alias_type=alias_type)
@@ -460,6 +471,7 @@ def apply_kr_wav_duration_safety_to_oto_file(
 
 def run_kr_post_file_pipeline(context: KrPostFilePipelineContext):
     wav_dir = resolve_wav_dir_from_tg_folder(context.tg_folder)
+    ml_route = _current_ml_route()
 
     if context.kr_profile:
         changed = _apply_kr_profile_to_oto_file(
@@ -479,45 +491,59 @@ def run_kr_post_file_pipeline(context: KrPostFilePipelineContext):
     )
     log_changed_lines(context.log_fn, "[KR-Mel-Safety]", safety_changed, "mel safety clamp changed")
 
-    run_ml_post_stage(
-        language="korean",
-        out_path=context.out_path,
-        tg_folder=context.tg_folder,
-        custom_phonemes_path=context.custom_phonemes_path,
-        enable_ml_correction=context.enable_ml_correction,
-        format_override=context.auto_gen_format,
-        ml_policy=context.ml_policy,
-        runtime_report=context.runtime_report,
-        log_fn=context.log_fn,
-    )
+    def _run_kr_legacy_post_filters() -> None:
+        mel_changed = apply_kr_mel_refine_to_oto_file(
+            context.out_path,
+            wav_dir,
+            custom_map=context.custom_map,
+            validate_fn=context.validate_fn,
+            normalize_key_fn=context.normalize_key_fn,
+        )
+        log_changed_lines(context.log_fn, "[KR-Mel]", mel_changed, "mel cutoff refine changed")
 
-    mel_changed = apply_kr_mel_refine_to_oto_file(
-        context.out_path,
-        wav_dir,
-        custom_map=context.custom_map,
-        validate_fn=context.validate_fn,
-        normalize_key_fn=context.normalize_key_fn,
-    )
-    log_changed_lines(context.log_fn, "[KR-Mel]", mel_changed, "mel cutoff refine changed")
+        bridge_changed = _apply_kr_bridge_coherence_to_oto_file(
+            context.out_path,
+            custom_map=context.custom_map,
+        )
+        log_changed_lines(context.log_fn, "[KR-Bridge]", bridge_changed, "VC/CV coherence changed")
 
-    bridge_changed = _apply_kr_bridge_coherence_to_oto_file(
-        context.out_path,
-        custom_map=context.custom_map,
-    )
-    log_changed_lines(context.log_fn, "[KR-Bridge]", bridge_changed, "VC/CV coherence changed")
+        # 파일 단위 일관성 후처리 (인접 연속성, 급변 스무딩, 순서 강제)
+        consistency_stats = apply_file_consistency_to_oto_file(
+            context.out_path,
+            custom_map=context.custom_map,
+            validate_fn=context.validate_fn,
+            log_fn=context.log_fn,
+        )
+        log_changed_lines(
+            context.log_fn, "[KR-Consistency]",
+            consistency_stats.get("total_changed", 0),
+            "file consistency changed",
+        )
 
-    # 파일 단위 일관성 후처리 (인접 연속성, 급변 스무딩, 순서 강제)
-    consistency_stats = apply_file_consistency_to_oto_file(
-        context.out_path,
-        custom_map=context.custom_map,
-        validate_fn=context.validate_fn,
-        log_fn=context.log_fn,
-    )
-    log_changed_lines(
-        context.log_fn, "[KR-Consistency]",
-        consistency_stats.get("total_changed", 0),
-        "file consistency changed",
-    )
+    def _run_ml_stage() -> None:
+        run_ml_post_stage(
+            language="korean",
+            out_path=context.out_path,
+            tg_folder=context.tg_folder,
+            custom_phonemes_path=context.custom_phonemes_path,
+            enable_ml_correction=context.enable_ml_correction,
+            format_override=context.auto_gen_format,
+            ml_policy=context.ml_policy,
+            runtime_report=context.runtime_report,
+            log_fn=context.log_fn,
+            ml_route=ml_route,
+        )
+
+    # Autofree absolute-model output should be the final shaping stage.
+    # Legacy retains the previous order for compatibility.
+    if ml_route == "autofree_v1":
+        if callable(context.log_fn):
+            context.log_fn("[OTO-ML] KR finalize order: legacy post-filters -> autofree ML")
+        _run_kr_legacy_post_filters()
+        _run_ml_stage()
+    else:
+        _run_ml_stage()
+        _run_kr_legacy_post_filters()
 
     safety_changed = apply_kr_wav_duration_safety_to_oto_file(
         context.out_path,
