@@ -167,6 +167,7 @@ class JaPostprocessContext:
         syll_idx: Optional[int],
         *,
         alias_text: str = "",
+        alias_type: str = "cv_head",
     ) -> Tuple[float, float, float, float, float]:
         return guard_ja_cv_head_offset_to_onset(
             offset,
@@ -179,6 +180,7 @@ class JaPostprocessContext:
             self.cv_onset_class_fn,
             self.validate_fn,
             alias_text=alias_text,
+            alias_type=alias_type,
         )
 
     def ensure_cv_head_min_vowel_coverage(
@@ -673,6 +675,7 @@ def guard_ja_cv_head_offset_to_onset(
     validate_fn: ValidateFn,
     *,
     alias_text: str = "",
+    alias_type: str = "cv_head",
 ) -> Tuple[float, float, float, float, float]:
     if syll_idx is None or syll_idx < 0 or syll_idx >= len(syllables_info):
         return offset, consonant, cutoff, pre, 0.0
@@ -681,31 +684,59 @@ def guard_ja_cv_head_offset_to_onset(
     if not curr_phones:
         return offset, consonant, cutoff, pre, 0.0
 
+    a_type = str(alias_type or "cv_head").strip().lower()
     c_hint = curr_phones[0].mark if curr_phones else ""
-    c_start, c_end, _n_start, _n_end = extract_cv_bounds_fn(curr_phones, alias_text=alias_text, alias_type="cv_head")
-    cls, _onset = cv_onset_class_fn(alias_text, c_hint=c_hint, alias_type="cv_head")
+    c_start, c_end, _n_start, _n_end = extract_cv_bounds_fn(curr_phones, alias_text=alias_text, alias_type=a_type)
+    cls, _onset = cv_onset_class_fn(alias_text, c_hint=c_hint, alias_type=a_type)
     if cls == "voiceless":
         base_lead = 44.0
+        late_allow = 2.0
     elif cls == "voiced":
         base_lead = 36.0
+        late_allow = 3.0
     elif cls == "nasal":
         base_lead = 30.0
+        late_allow = 3.5
     else:
         base_lead = 34.0
+        late_allow = 2.5
+    if a_type == "cv":
+        base_lead = max(24.0, base_lead - 4.0)
     c_len = max(0.0, float(c_end) - float(c_start))
     lead_cap = min(base_lead, max(20.0, c_len + 16.0))
     offset_floor = max(0.0, float(c_start) - lead_cap)
-    if offset >= offset_floor:
+    new_offset = float(offset)
+    new_pre = float(pre)
+    new_consonant = float(consonant)
+    new_cut_abs = abs(float(cutoff))
+    changed_ms = 0.0
+
+    if new_offset < offset_floor - 0.5:
+        shift = offset_floor - new_offset
+        new_offset = offset_floor
+        new_pre = max(8.0, new_pre - shift)
+        new_consonant = max(new_pre + 8.0, new_consonant - shift)
+        new_cut_abs = max(new_consonant + 12.0, new_cut_abs - shift)
+        changed_ms = max(changed_ms, abs(shift))
+
+    # Keep CV offset from drifting too late into consonant/vowel body.
+    offset_cap = float(c_start) + float(late_allow)
+    if new_offset > offset_cap + 0.5:
+        shift = new_offset - offset_cap
+        new_offset = offset_cap
+        new_pre = max(8.0, new_pre + shift)
+        new_consonant = max(new_pre + 8.0, new_consonant + shift)
+        new_cut_abs = max(new_consonant + 12.0, new_cut_abs + shift)
+        changed_ms = max(changed_ms, abs(shift))
+
+    if changed_ms <= 0.0:
         return offset, consonant, cutoff, pre, 0.0
 
-    new_offset = offset_floor
-    new_pre = max(float(pre), 8.0)
-    new_consonant = max(float(consonant), new_pre + 8.0)
-    new_cut_abs = max(abs(float(cutoff)), new_consonant + 12.0)
     new_cutoff = -new_cut_abs
-    new_offset, new_consonant, new_cutoff, new_pre, _ovl = validate_fn(new_offset, new_consonant, new_cutoff, new_pre, 0.0)
-    reduced_ms = max(0.0, new_offset - offset)
-    return new_offset, new_consonant, new_cutoff, new_pre, reduced_ms
+    new_offset, new_consonant, new_cutoff, new_pre, _ovl = validate_fn(
+        new_offset, new_consonant, new_cutoff, new_pre, 0.0
+    )
+    return new_offset, new_consonant, new_cutoff, new_pre, changed_ms
 
 
 def ensure_ja_cv_head_min_vowel_coverage(

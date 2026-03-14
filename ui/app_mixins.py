@@ -693,7 +693,7 @@ class ConfigMixin:
             "gen_missing_vowels": self.gen_missing_vowels_var.get(),
             "no_base_oto": self.no_base_oto_var.get(),
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
-            "ml_route": self.ml_route_var.get() if hasattr(self, "ml_route_var") else "legacy",
+            "ml_route": self.ml_route_var.get() if hasattr(self, "ml_route_var") else "autofree_v1",
             "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "기본 정책",
             "ml_coupled_enable": self.ml_coupled_enable_var.get() if hasattr(self, "ml_coupled_enable_var") else True,
             "ml_coupled_min_conf": self.ml_coupled_min_conf_var.get() if hasattr(self, "ml_coupled_min_conf_var") else "",
@@ -768,7 +768,7 @@ class ConfigMixin:
             if hasattr(self, "enable_ml_correction_var"):
                 self.enable_ml_correction_var.set(bool(config.get("enable_ml_correction", True)))
             if "ml_route" in config and hasattr(self, "ml_route_var"):
-                saved_route = str(config.get("ml_route", "legacy") or "legacy").strip().lower()
+                saved_route = str(config.get("ml_route", "autofree_v1") or "autofree_v1").strip().lower()
                 if saved_route in {"legacy", "autofree_v1"}:
                     self.ml_route_var.set(saved_route)
 
@@ -789,7 +789,13 @@ class ConfigMixin:
                 if saved_style in {"원본 그대로", "히라가나", "로마자"}:
                     self.ja_alias_style_var.set(saved_style)
             if "aligner" in config and hasattr(self, "aligner_var"):
-                self.aligner_var.set("MFA")
+                try:
+                    from core.pipeline_status import normalize_aligner_name
+
+                    saved_aligner = normalize_aligner_name(config.get("aligner", "mfa"), default="mfa")
+                except Exception:
+                    saved_aligner = "mfa"
+                self.aligner_var.set("No-MFA (Experimental)" if saved_aligner == "none" else "MFA")
             if hasattr(self, "show_advanced_aligner_var"):
                 self.show_advanced_aligner_var.set(False)
             if "mfa_align_profile" in config and hasattr(self, "mfa_align_profile_var"):

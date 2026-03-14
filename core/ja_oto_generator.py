@@ -1867,6 +1867,10 @@ def _refine_ja_vc_with_adjacent_cv(
     )
     if vowel_start_abs < onset_abs:
         vowel_start_abs = onset_abs
+    next_cons_end_abs = float(next_c_end_abs) if next_c_end_abs is not None else None
+    bridge_end_abs = float(vowel_start_abs)
+    if next_cons_end_abs is not None and next_cons_end_abs > onset_abs:
+        bridge_end_abs = max(bridge_end_abs, next_cons_end_abs)
 
     prev_v_end = (
         float(prev_cv_anchor.get("vowel_end_abs"))
@@ -1932,6 +1936,7 @@ def _refine_ja_vc_with_adjacent_cv(
 
     cons_abs_min = (offset_new + pre_new) + 12.0
     cons_abs_max = min(vowel_start_abs - 6.0, onset_abs + cons_allow_after_onset)
+    cons_abs_max = max(cons_abs_max, bridge_end_abs - (10.0 if hard_cls else 12.0))
     if cons_abs_max <= cons_abs_min:
         cons_abs_max = cons_abs_min + 2.0
     cons_abs_new = _blend(cur_cons_abs, cons_abs_target, 0.66)
@@ -1940,6 +1945,7 @@ def _refine_ja_vc_with_adjacent_cv(
 
     cut_abs_target = cons_abs_new + cut_gap_target
     cut_abs_upper = min(vowel_start_abs + cut_allow_after_vowel, onset_abs + cut_allow_after_onset)
+    cut_abs_upper = max(cut_abs_upper, bridge_end_abs - (2.0 if hard_cls else 4.0))
     cut_abs_min = cons_abs_new + 8.0
     if cut_abs_upper <= cut_abs_min:
         cut_abs_upper = cut_abs_min + 2.0
@@ -1948,12 +1954,13 @@ def _refine_ja_vc_with_adjacent_cv(
 
     if hard_cls:
         onset_rel = max(onset_abs - offset_new, pre_new + 8.0)
+        bridge_end_rel = max(onset_rel + 6.0, bridge_end_abs - offset_new)
         cons_floor = pre_new + 6.0
-        cons_cap = onset_rel - 6.0
+        cons_cap = bridge_end_rel - 8.0
         consonant_new = min(consonant_new, cons_cap)
         consonant_new = max(consonant_new, cons_floor)
 
-        cut_cap = onset_rel - 1.0
+        cut_cap = bridge_end_rel - 2.0
         cut_floor = consonant_new + 4.0
         if cut_floor > cut_cap:
             consonant_new = max(cons_floor, cut_cap - 4.0)
@@ -1963,9 +1970,71 @@ def _refine_ja_vc_with_adjacent_cv(
         cut_abs_new = min(cut_abs_new, cut_cap)
         cut_abs_new = max(cut_abs_new, cut_floor)
 
+    # 4) VC reference guard: keep VC around next CV left/pre guide.
+    next_pre_abs_ref = (
+        float(next_cv_anchor.get("pre_abs"))
+        if next_cv_anchor and next_cv_anchor.get("pre_abs") is not None
+        else float(onset_abs)
+    )
+    next_pre_ref = (
+        float(next_cv_anchor.get("pre"))
+        if next_cv_anchor and next_cv_anchor.get("pre") is not None
+        else 0.0
+    )
+    next_cons_abs_ref = (
+        float(next_cv_anchor.get("cons_abs"))
+        if next_cv_anchor and next_cv_anchor.get("cons_abs") is not None
+        else float(vowel_start_abs)
+    )
+    next_offset_abs_ref = next_pre_abs_ref - max(next_pre_ref, 0.0)
+    if next_offset_abs_ref > 0.0:
+        if hard_cls:
+            pre_abs_lo, pre_abs_hi = next_offset_abs_ref - 6.0, next_offset_abs_ref + 10.0
+        elif son_cls:
+            pre_abs_lo, pre_abs_hi = next_offset_abs_ref - 4.0, next_offset_abs_ref + 18.0
+        else:
+            pre_abs_lo, pre_abs_hi = next_offset_abs_ref - 5.0, next_offset_abs_ref + 14.0
+        pre_abs_guard = _clamp_range(offset_new + pre_new, pre_abs_lo, pre_abs_hi)
+
+        ovl_abs_guard = offset_new + ovl_new
+        cons_abs_guard = offset_new + consonant_new
+        cut_abs_guard = cut_abs_new
+
+        offset_new = max(pre_abs_guard - pre_new, 0.0)
+        pre_new = max(pre_abs_guard - offset_new, 0.0)
+        ovl_new = _clamp_ja_bridge_overlap(pre_new, ovl_abs_guard - offset_new, c_char, mode="vc")
+
+        if hard_cls:
+            cons_floor = max(pre_abs_guard + 6.0, onset_abs - 12.0)
+            cons_cap = onset_abs - 2.0
+            if cons_cap <= cons_floor:
+                cons_cap = cons_floor + 1.0
+            cons_abs_guard = _clamp_range(cons_abs_guard, cons_floor, cons_cap)
+
+            cut_floor = max(cons_abs_guard + 4.0, onset_abs - 2.2)
+            cut_cap = onset_abs - 0.7
+            if cut_cap <= cut_floor:
+                cut_cap = cut_floor + 0.8
+            cut_abs_guard = _clamp_range(cut_abs_guard, cut_floor, cut_cap)
+        else:
+            cons_floor = max(pre_abs_guard + (14.0 if son_cls else 12.0), onset_abs + (4.0 if son_cls else 2.0))
+            cons_cap = min(next_cons_abs_ref - 2.0, next_pre_abs_ref + (20.0 if son_cls else 12.0))
+            if cons_cap <= cons_floor:
+                cons_cap = cons_floor + 2.0
+            cons_abs_guard = _clamp_range(cons_abs_guard, cons_floor, cons_cap)
+
+            cut_floor = cons_abs_guard + (10.0 if son_cls else 8.0)
+            cut_cap = min(next_pre_abs_ref + (4.0 if son_cls else -2.0), next_cons_abs_ref + (8.0 if son_cls else 2.0))
+            if cut_cap <= cut_floor:
+                cut_cap = cut_floor + 1.0
+            cut_abs_guard = _clamp_range(cut_abs_guard, cut_floor, cut_cap)
+
+        consonant_new = max(cons_abs_guard - offset_new, pre_new + 6.0)
+        cut_abs_new = max(cut_abs_guard, consonant_new + 4.0)
+
     cutoff_new = -(cut_abs_new - offset_new)
 
-    return validate_oto_params(offset_new, consonant_new, cutoff_new, pre_new, ovl_abs_new - offset_new, alias_type="vc")
+    return validate_oto_params(offset_new, consonant_new, cutoff_new, pre_new, ovl_new, alias_type="vc")
 
 
 def _limit_pre_anchor_shift(
@@ -4735,6 +4804,7 @@ def generate_ja_oto(
             log_fn=log,
             validate_fn=validate_oto_params,
             classify_alias_fn=classify_ja_alias,
+            ml_route=os.environ.get("UTOA_ML_ROUTE", "autofree_v1"),
         )
     )
 

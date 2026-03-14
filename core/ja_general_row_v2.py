@@ -50,6 +50,54 @@ def run_ja_general_row(
     alignment_weight=0.0,
     textgrid_trust_tier="",
 ):
+    def _clamp_vc_tail_to_next_consonant(
+        _offset: float,
+        _consonant: float,
+        _cutoff: float,
+        _pre: float,
+        _ovl: float,
+    ):
+        next_on = float(n_start)
+        next_end = max(float(n_end), next_on + 8.0)
+        if next_on <= 0.0:
+            return _offset, _consonant, _cutoff, _pre, _ovl
+        hard_cls = bool(c_char in {"k", "g", "t", "d", "b", "p", "q", "c", "ch", "ts", "dz", "s", "z", "sh", "j", "h", "f", "v", "hy"})
+        son_cls = bool(c_char in {"m", "n", "ny", "r", "l", "ry", "w", "y"})
+
+        o = float(_offset)
+        p = float(_pre)
+        c_abs = o + float(_consonant)
+        cut_abs = o + abs(float(_cutoff))
+
+        if hard_cls:
+            # Stop/fricative-like VC should terminate before next onset.
+            c_floor = max(p + 6.0 + o, next_on - 12.0)
+            c_cap = next_on - 2.0
+        elif son_cls:
+            c_floor = max(next_on + 4.0, p + 12.0 + o)
+            c_cap = next_end - 3.0
+        else:
+            c_floor = max(next_on + 2.0, p + 10.0 + o)
+            c_cap = next_end - 4.0
+        if c_cap <= c_floor:
+            c_cap = c_floor + 2.0
+        c_abs = min(max(c_abs, c_floor), c_cap)
+
+        if hard_cls:
+            cut_floor = max(c_abs + 4.0, next_on - 2.0)
+            cut_cap = next_on - 0.7
+        elif son_cls:
+            cut_floor = max(c_abs + 10.0, next_end - 4.0)
+            cut_cap = next_end + 6.0
+        else:
+            cut_floor = max(c_abs + 8.0, next_end - 3.0)
+            cut_cap = next_end + 4.0
+        if cut_cap <= cut_floor:
+            cut_cap = cut_floor + 1.0
+        cut_abs = min(max(cut_abs, cut_floor), cut_cap)
+
+        return validate_fn(o, c_abs - o, -(cut_abs - o), p, float(_ovl))
+
     soft_off_shift = 0.0
     soft_cut_shift = 0.0
     cutoff_reduced = 0.0
@@ -122,6 +170,17 @@ def run_ja_general_row(
         local_cut_allow_ms=(44.0 if alias_type == "vc" else 40.0 if alias_type == "vv" else 54.0),
     )
     offset, consonant, cutoff, pre, ovl = adjusted.as_tuple()
+    if alias_type == "cv":
+        offset, consonant, cutoff, pre, _offset_adjusted = post_ctx.guard_cv_head_offset_to_onset(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            current_w_idx,
+            alias_text=alias,
+            alias_type="cv",
+        )
+        offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
 
     if alias_type == "vc":
         pre_abs_before = offset + pre
@@ -243,6 +302,14 @@ def run_ja_general_row(
 
     anchor_record = None
     messages = None
+    if alias_type == "vc":
+        offset, consonant, cutoff, pre, ovl = _clamp_vc_tail_to_next_consonant(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+        )
     if alias_type in {"cv", "cv_head"}:
         offset, consonant, cutoff, pre, cutoff_reduced = post_ctx.guard_cv_cutoff_to_next_onset(
             offset,

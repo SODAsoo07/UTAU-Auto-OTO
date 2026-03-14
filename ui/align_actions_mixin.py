@@ -2,6 +2,7 @@ import os
 
 from core.alignment_pipeline import run_alignment_with_fallback
 from core.mfa_runner import check_mfa_model, download_mfa_model
+from core.pipeline_status import normalize_aligner_name
 
 
 class AlignActionsMixin:
@@ -15,33 +16,41 @@ class AlignActionsMixin:
                 dict_filename = "japanese_dict.txt" if lang == "japanese" else "korean_dict.txt"
                 dict_path = os.path.join(wav_dir, dict_filename)
                 output_dir = os.path.join(wav_dir, "textgrids")
+                primary_engine = normalize_aligner_name(
+                    self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
+                    default="mfa",
+                )
 
-                if hasattr(self, "_ensure_mfa_ready_for_language"):
-                    if not self._ensure_mfa_ready_for_language(lang):
-                        self._set_status("MFA not ready")
-                        return
-                elif self.mfa_path:
-                    has_model, msg = check_mfa_model(self.mfa_path, language=lang)
-                    self._append_log(msg)
-                    if not has_model and not download_mfa_model(
-                        self.mfa_path, language=lang, callback=self._append_log
-                    ):
-                        self._set_status("MFA model missing")
-                        return
+                if primary_engine == "mfa":
+                    if hasattr(self, "_ensure_mfa_ready_for_language"):
+                        if not self._ensure_mfa_ready_for_language(lang):
+                            self._set_status("MFA not ready")
+                            return
+                    elif self.mfa_path:
+                        has_model, msg = check_mfa_model(self.mfa_path, language=lang)
+                        self._append_log(msg)
+                        if not has_model and not download_mfa_model(
+                            self.mfa_path, language=lang, callback=self._append_log
+                        ):
+                            self._set_status("MFA model missing")
+                            return
 
                 mfa_profile = (
                     self._get_mfa_align_profile_code()
                     if hasattr(self, "_get_mfa_align_profile_code")
                     else "accurate"
                 )
-                self._append_log(f"MFA profile: {mfa_profile}")
+                if primary_engine == "mfa":
+                    self._append_log(f"MFA profile: {mfa_profile}")
+                else:
+                    self._append_log("Alignment engine: none (MFA bypass)")
 
                 result = run_alignment_with_fallback(
                     language=lang,
                     wav_folder=wav_dir,
                     dictionary_path=dict_path,
                     output_folder=output_dir,
-                    primary_aligner="mfa",
+                    primary_aligner=primary_engine,
                     fallback_aligner="",
                     mfa_path=self.mfa_path or "",
                     mfa_align_profile=mfa_profile,

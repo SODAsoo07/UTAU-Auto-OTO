@@ -76,13 +76,15 @@ def guard_kr_vc_cutoff_to_next_segment(
         tail_keep = 10.0
         min_cons_gap = 14.0
 
-    cutoff_cap = min(next_onset_rel + onset_margin, next_seg_end_rel - tail_keep)
+    # Prefer ending near the next-consonant tail (segment end) rather than hard-cutting at onset.
+    cutoff_cap = max(next_onset_rel + onset_margin, next_seg_end_rel - tail_keep)
     consonant = min(float(consonant), cutoff_cap - tail_keep)
     consonant = max(float(consonant), float(pre) + min_cons_gap)
 
     if cutoff_cap <= consonant + tail_keep:
         consonant = max(float(pre) + min_cons_gap, cutoff_cap - tail_keep)
-    cutoff_abs = min(abs(float(cutoff)), max(consonant + tail_keep, cutoff_cap))
+    target_cut_floor = max(consonant + tail_keep, next_seg_end_rel - (tail_keep + 2.0))
+    cutoff_abs = max(abs(float(cutoff)), target_cut_floor)
     cutoff_abs = min(cutoff_abs, cutoff_cap)
     cutoff = -cutoff_abs
     return validate_fn(offset, consonant, cutoff, pre, ovl)
@@ -148,17 +150,18 @@ def guard_kr_cv_head_offset_to_current_onset(
     syllables_info: Sequence[dict],
     validate_fn: ValidateFn,
 ) -> Tuple[float, float, float, float, float]:
-    """Keep CV(-CV) head offset near current onset to avoid excessive front silence."""
+    """Keep CV offset near current onset while preserving consonant head."""
     if syll_idx is None or syll_idx < 0:
         return validate_fn(offset, consonant, cutoff, pre, ovl)
     if not syllables_info or syll_idx >= len(syllables_info):
         return validate_fn(offset, consonant, cutoff, pre, ovl)
 
-    # Apply only for true head rows.
+    # Head rows may shift forward to trim excessive front silence.
+    is_head_row = True
     if syll_idx > 0:
         prev_syl = syllables_info[syll_idx - 1] or {}
         if prev_syl.get("phones"):
-            return validate_fn(offset, consonant, cutoff, pre, ovl)
+            is_head_row = False
 
     curr_syl = syllables_info[syll_idx] or {}
     curr_phones = curr_syl.get("phones") or []
@@ -181,23 +184,34 @@ def guard_kr_cv_head_offset_to_current_onset(
     c_len = max(0.0, c_end - c_start)
     if is_plosive_ipa(c_hint) or c_hint in {"s", "ss", "sh", "ch", "j", "jj", "c", "ts", "h"}:
         lead_min, lead_max = 10.0, 18.0
+        late_allow = 2.0
     elif c_hint in {"m", "n", "ng", "l", "r", "y", "w", "ny"}:
         lead_min, lead_max = 8.0, 14.0
+        late_allow = 3.0
     else:
         lead_min, lead_max = 9.0, 16.0
+        late_allow = 2.5
     lead_keep = max(lead_min, min(lead_max, c_len * 0.45 + 6.0))
 
     desired_offset = max(0.0, c_start - lead_keep)
-    if float(offset) >= desired_offset - 0.5:
-        return validate_fn(offset, consonant, cutoff, pre, ovl)
+    if is_head_row and float(offset) < desired_offset - 0.5:
+        delta = desired_offset - float(offset)
+        offset = desired_offset
+        pre = max(0.0, float(pre) - delta)
+        ovl = max(0.0, float(ovl) - delta)
+        consonant = max(0.0, float(consonant) - delta)
+        cutoff_abs = max(0.0, abs(float(cutoff)) - delta)
+        cutoff = -cutoff_abs
 
-    delta = desired_offset - float(offset)
-    offset = desired_offset
-    pre = max(0.0, float(pre) - delta)
-    ovl = max(0.0, float(ovl) - delta)
-    consonant = max(0.0, float(consonant) - delta)
-    cutoff_abs = max(0.0, abs(float(cutoff)) - delta)
-    cutoff = -cutoff_abs
+    # For all CV rows, prevent offset from drifting too far into consonant/vowel body.
+    max_offset = c_start + late_allow
+    if float(offset) > max_offset + 0.5:
+        delta = float(offset) - max_offset
+        offset = max_offset
+        pre = float(pre) + delta
+        ovl = float(ovl) + delta
+        consonant = float(consonant) + delta
+        cutoff = -(abs(float(cutoff)) + delta)
     return validate_fn(offset, consonant, cutoff, pre, ovl)
 
 

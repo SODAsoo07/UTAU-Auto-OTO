@@ -46,6 +46,20 @@ def _to_float(value: object, default: float = 0.0) -> float:
         return float(default)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
+def _clip(value: float, lo: float, hi: float) -> float:
+    return max(float(lo), min(float(hi), float(value)))
+
+
 def _normalize_short_text(value: object) -> str:
     return re.sub(r"\s+", "", str(value or "").strip().lower())
 
@@ -175,6 +189,83 @@ def _apply_abs_guard(language: str, row: Dict[str, object], pred: Dict[str, floa
         return validate(offset, cons, cutoff, pre, ovl)
 
 
+def _apply_residual_guard(
+    language: str,
+    feat: Dict[str, object],
+    row: Dict[str, object],
+    abs_params: Tuple[float, float, float, float, float],
+    *,
+    confidence: float,
+) -> Tuple[Optional[Tuple[float, float, float, float, float]], str]:
+    conf = _to_float(confidence, 0.0)
+    min_conf = _clip(_env_float("UTOA_ML_AUTOFREE_AUX_MIN_CONF", 0.78), 0.0, 1.0)
+    if conf < min_conf:
+        return None, "low_confidence"
+
+    alias = str(feat.get("alias", row.get("alias", "")) or "")
+    alias_type = str(feat.get("alias_type", "") or "").strip().lower()
+    blank_conf = max(
+        _to_float(feat.get("blank_span_confidence"), 0.0),
+        _to_float(feat.get("syllable_blank_confidence"), 0.0),
+    )
+    max_blank = _clip(_env_float("UTOA_ML_AUTOFREE_AUX_MAX_BLANK", 0.62), 0.0, 1.0)
+    if blank_conf > max_blank and not _is_pause_like_alias(alias, alias_type):
+        return None, "high_blank_confidence"
+
+    min_scale = _clip(_env_float("UTOA_ML_AUTOFREE_AUX_MIN_SCALE", 0.35), 0.05, 1.0)
+    scale = _clip((conf - min_conf) / max(1e-6, 1.0 - min_conf), min_scale, 1.0)
+    max_delta = {
+        "offset": max(1.0, _env_float("UTOA_ML_AUTOFREE_AUX_MAX_DOFFSET_MS", 26.0)),
+        "cons": max(1.0, _env_float("UTOA_ML_AUTOFREE_AUX_MAX_DCONS_MS", 22.0)),
+        "cutoff": max(1.0, _env_float("UTOA_ML_AUTOFREE_AUX_MAX_DCUTOFF_MS", 34.0)),
+        "pre": max(1.0, _env_float("UTOA_ML_AUTOFREE_AUX_MAX_DPRE_MS", 18.0)),
+        "ovl": max(1.0, _env_float("UTOA_ML_AUTOFREE_AUX_MAX_DOVL_MS", 18.0)),
+    }
+
+    current = (
+        _to_float(row.get("offset"), 0.0),
+        _to_float(row.get("cons"), 0.0),
+        _to_float(row.get("cutoff"), 0.0),
+        _to_float(row.get("pre"), 0.0),
+        _to_float(row.get("ovl"), 0.0),
+    )
+    keys = ("offset", "cons", "cutoff", "pre", "ovl")
+    candidate = []
+    for idx, key in enumerate(keys):
+        cur = float(current[idx])
+        tgt = float(abs_params[idx])
+        d = (tgt - cur) * float(scale)
+        lim = float(max_delta[key])
+        d = _clip(d, -lim, lim)
+        candidate.append(cur + d)
+
+    validate = _get_validate_func(language)
+    try:
+        out = validate(
+            float(candidate[0]),
+            float(candidate[1]),
+            float(candidate[2]),
+            float(candidate[3]),
+            float(candidate[4]),
+            alias_type=alias_type,
+        )
+    except TypeError:
+        out = validate(
+            float(candidate[0]),
+            float(candidate[1]),
+            float(candidate[2]),
+            float(candidate[3]),
+            float(candidate[4]),
+        )
+    return (
+        float(out[0]),
+        float(out[1]),
+        float(out[2]),
+        float(out[3]),
+        float(out[4]),
+    ), "ok"
+
+
 def apply_autofree_ml_to_oto_file(
     language: str,
     oto_path: str,
@@ -186,13 +277,14 @@ def apply_autofree_ml_to_oto_file(
     format_override: Optional[str] = None,
     policy: Optional[str] = None,
     report: Optional[Dict[str, object]] = None,
+    residual_only: bool = False,
 ) -> int:
     _ = custom_phonemes_path  # reserved
     policy_name = normalize_ml_policy(policy, enabled_default=enabled)
     required_policy = policy_name == "on"
     ml_report = report if isinstance(report, dict) else {}
     ml_report.setdefault("stage", "ml")
-    ml_report.setdefault("route", AUTOFREE_BACKEND)
+    ml_report.setdefault("route", "autofree_v1_aux" if residual_only else AUTOFREE_BACKEND)
     ml_report.setdefault("policy", policy_name)
     ml_report.setdefault("status", "skipped")
     ml_report.setdefault("fallback_used", False)
@@ -204,6 +296,9 @@ def apply_autofree_ml_to_oto_file(
     ml_report.setdefault("changed_lines", 0)
     ml_report.setdefault("model_confidence", 0.0)
     ml_report.setdefault("fallback_reason", "")
+    ml_report.setdefault("residual_only", bool(residual_only))
+    ml_report["residual_only"] = bool(residual_only)
+    ml_report["route"] = "autofree_v1_aux" if residual_only else AUTOFREE_BACKEND
 
     if policy_name == "off":
         ml_report.update(make_runtime_report("ml", ML_POLICY_OFF, "ML 정책이 off로 설정되었습니다."))
@@ -250,6 +345,7 @@ def apply_autofree_ml_to_oto_file(
     bundle_cache: Dict[str, Optional[OtoModelBundle]] = {}
     changed = 0
     conf_values: List[float] = []
+    residual_skip_reasons: Dict[str, int] = {}
 
     for feat in feature_rows:
         fmt = normalize_format_type(language, str(format_override or feat.get("format_type", ""))) or "general"
@@ -289,6 +385,18 @@ def apply_autofree_ml_to_oto_file(
             conf = _to_float(pred.get("confidence"), 0.0)
             conf_values.append(conf)
             o2, c2, ct2, p2, ov2 = _apply_abs_guard(language, feat, pred)
+            if residual_only:
+                residual_params, residual_reason = _apply_residual_guard(
+                    language,
+                    feat,
+                    row,
+                    (o2, c2, ct2, p2, ov2),
+                    confidence=conf,
+                )
+                if residual_params is None:
+                    residual_skip_reasons[residual_reason] = int(residual_skip_reasons.get(residual_reason, 0)) + 1
+                    continue
+                o2, c2, ct2, p2, ov2 = residual_params
         except Exception as exc:
             ml_report["infer_failures"].append({"line_index": line_index, "message": str(exc)})
             continue
@@ -312,6 +420,8 @@ def apply_autofree_ml_to_oto_file(
     ml_report["changed_lines"] = int(changed)
     if conf_values:
         ml_report["model_confidence"] = float(sum(conf_values) / float(len(conf_values)))
+    if residual_only and residual_skip_reasons:
+        ml_report["residual_skip_reasons"] = dict(residual_skip_reasons)
     if int(feature_stats.get("skip_token_missing", 0)) > 0:
         ml_report["fallback_reason"] = "token_missing"
     if changed > 0:

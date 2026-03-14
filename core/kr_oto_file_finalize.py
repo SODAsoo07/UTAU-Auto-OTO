@@ -47,7 +47,7 @@ def _normalize_ml_route(value: str) -> str:
 
 
 def _current_ml_route() -> str:
-    return _normalize_ml_route(os.environ.get("UTOA_ML_ROUTE", "legacy"))
+    return _normalize_ml_route(os.environ.get("UTOA_ML_ROUTE", "autofree_v1"))
 
 
 def _call_validate(validate_fn, offset, consonant, cutoff, pre, ovl, *, alias_type=""):
@@ -491,6 +491,7 @@ def run_kr_post_file_pipeline(context: KrPostFilePipelineContext):
         classify_alias_fn=lambda alias_text: classify_alias(alias_text, context.custom_map),
         validate_fn=context.validate_fn,
         normalize_key_fn=context.normalize_key_fn,
+        language="korean",
     )
     log_changed_lines(context.log_fn, "[KR-Mel-Safety]", safety_changed, "mel safety clamp changed")
 

@@ -468,6 +468,16 @@ def _refine_kr_bridge_with_adjacent_cv(
             mel_cutoff_candidate_ms=mel_cutoff_candidate_ms,
             next_mel_voiced_onset_ms=next_mel_voiced_onset_ms,
         )
+    if a_type == "vc":
+        offset_new, cons_new, cutoff_new, pre_new, ovl_new = _apply_kr_vc_reference_guard(
+            offset_new,
+            cons_new,
+            cutoff_new,
+            pre_new,
+            ovl_new,
+            alias_text=alias_text,
+            next_cv=next_cv,
+        )
     return _validate_oto_params(offset_new, cons_new, cutoff_new, pre_new, ovl_new, alias_type=a_type)
 
 
@@ -622,6 +632,84 @@ def _apply_vc_vv_mel_cutoff_cap(
         if float(consonant) > cut_abs - 6.0:
             consonant = max(float(pre) + 8.0, cut_abs - 6.0)
     return _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=a_type)
+
+
+def _apply_kr_vc_reference_guard(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    ovl,
+    *,
+    alias_text="",
+    next_cv=None,
+):
+    if not isinstance(next_cv, dict):
+        return _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type="vc")
+
+    next_pre_abs = float(next_cv.get("pre_abs", 0.0) or 0.0)
+    next_pre = max(float(next_cv.get("pre", 0.0) or 0.0), 0.0)
+    next_cons_abs = float(next_cv.get("cons_abs", next_pre_abs + 14.0) or (next_pre_abs + 14.0))
+    next_onset_abs = float(next_cv.get("onset_abs", next_pre_abs) or next_pre_abs)
+    next_offset_abs = next_pre_abs - next_pre
+    if next_pre_abs <= 0.0:
+        return _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type="vc")
+
+    coda = _canonicalize_kr_coda(_extract_vc_right_token(alias_text))
+    is_stop = coda in {"k", "t", "p", "h"}
+    is_sonorant = coda in {"n", "m", "ng", "l", "r"}
+
+    pre_abs = float(offset) + float(pre)
+    ovl_abs = float(offset) + float(ovl)
+    if next_offset_abs > 0.0:
+        if is_stop:
+            pre_abs = _clamp(pre_abs, next_offset_abs - 6.0, next_offset_abs + 10.0)
+        elif is_sonorant:
+            pre_abs = _clamp(pre_abs, next_offset_abs - 4.0, next_offset_abs + 18.0)
+        else:
+            pre_abs = _clamp(pre_abs, next_offset_abs - 5.0, next_offset_abs + 14.0)
+
+    pre_new = max(float(pre), 0.0)
+    offset_new = max(pre_abs - pre_new, 0.0)
+    pre_new = pre_abs - offset_new
+
+    ovl_new = max(0.0, min(pre_new, ovl_abs - offset_new))
+    cons_abs = offset_new + float(consonant)
+    cut_abs = offset_new + abs(float(cutoff))
+
+    if is_stop:
+        cons_floor = max(pre_abs + 8.0, next_onset_abs - 12.0)
+        cons_cap = next_onset_abs - 2.0
+        if cons_cap <= cons_floor:
+            cons_cap = cons_floor + 1.0
+        cons_abs = _clamp(cons_abs, cons_floor, cons_cap)
+
+        cut_floor = max(cons_abs + 4.0, next_onset_abs - 2.4)
+        cut_cap = next_onset_abs - 0.8
+        if cut_cap <= cut_floor:
+            cut_cap = cut_floor + 0.8
+        cut_abs = _clamp(cut_abs, cut_floor, cut_cap)
+    else:
+        cons_floor = max(pre_abs + (14.0 if is_sonorant else 12.0), next_onset_abs + (4.0 if is_sonorant else 2.0))
+        cons_cap = min(next_cons_abs - 2.0, next_pre_abs + (22.0 if is_sonorant else 14.0))
+        if cons_cap <= cons_floor:
+            cons_cap = cons_floor + 2.0
+        cons_abs = _clamp(cons_abs, cons_floor, cons_cap)
+
+        cut_floor = cons_abs + (10.0 if is_sonorant else 8.0)
+        cut_cap = min(next_pre_abs + (4.0 if is_sonorant else -2.0), next_cons_abs + (8.0 if is_sonorant else 2.0))
+        if cut_cap <= cut_floor:
+            cut_cap = cut_floor + 1.0
+        cut_abs = _clamp(cut_abs, cut_floor, cut_cap)
+
+    return _validate_oto_params(
+        offset_new,
+        cons_abs - offset_new,
+        -(cut_abs - offset_new),
+        pre_new,
+        ovl_new,
+        alias_type="vc",
+    )
 
 
 __all__ = [

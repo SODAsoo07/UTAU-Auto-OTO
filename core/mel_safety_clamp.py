@@ -265,6 +265,88 @@ def _compute_silence_ratio(
     return 0.0
 
 
+def _find_head_pause_end(
+    t_ms,
+    en,
+    db_arr,
+    f0_arr,
+    cls_voiced,
+    cls_unvoiced,
+    cls_silence,
+    db_sil_th: float,
+    search_start_ms: float,
+    search_end_ms: float,
+    *,
+    language: str = "",
+) -> Optional[float]:
+    """Detect a short head-side pause run and return its end time (ms)."""
+    if t_ms is None or len(t_ms) == 0:
+        return None
+    mask = np.where((t_ms >= search_start_ms) & (t_ms <= search_end_ms))[0]
+    if len(mask) < 2:
+        return None
+
+    lang = str(language or "").strip().lower()
+    blank_th = _env_float(
+        "UTOA_SAFETY_CLAMP_HEAD_PAUSE_BLANK_TH",
+        0.72 if lang == "korean" else 0.76,
+    )
+    sound_guard_th = _env_float("UTOA_SAFETY_CLAMP_HEAD_PAUSE_SOUND_GUARD_TH", 0.34)
+    min_pause_ms = _env_float(
+        "UTOA_SAFETY_CLAMP_HEAD_PAUSE_MIN_MS",
+        9.0 if lang == "korean" else 11.0,
+    )
+    start_slack_ms = _env_float("UTOA_SAFETY_CLAMP_HEAD_PAUSE_START_SLACK_MS", 16.0)
+
+    run_start_t = None
+    run_end_t = None
+
+    for idx in mask:
+        t_v = float(t_ms[idx])
+        voiced_v = float(cls_voiced[idx]) if cls_voiced is not None and len(cls_voiced) == len(en) else 0.0
+        unvoiced_v = float(cls_unvoiced[idx]) if cls_unvoiced is not None and len(cls_unvoiced) == len(en) else 0.0
+        silence_v = float(cls_silence[idx]) if cls_silence is not None and len(cls_silence) == len(en) else 0.0
+        db_v = float(db_arr[idx]) if db_arr is not None and len(db_arr) == len(en) else -60.0
+        e_v = float(en[idx])
+        f0_v = float(f0_arr[idx]) if f0_arr is not None and len(f0_arr) == len(en) else 0.0
+        blank_conf = _frame_blank_confidence(
+            e_v=e_v,
+            db_v=db_v,
+            sil_v=silence_v,
+            f0_v=f0_v,
+            voiced_v=voiced_v,
+            unvoiced_v=unvoiced_v,
+            db_sil_th=db_sil_th,
+        )
+        sound_conf = _frame_sound_confidence(
+            e_v=e_v,
+            db_v=db_v,
+            sil_v=silence_v,
+            f0_v=f0_v,
+            voiced_v=voiced_v,
+            unvoiced_v=unvoiced_v,
+            db_sil_th=db_sil_th,
+        )
+        is_blank = (blank_conf >= blank_th) and (sound_conf <= sound_guard_th)
+
+        if is_blank:
+            if run_start_t is None:
+                if t_v > float(search_start_ms) + start_slack_ms:
+                    break
+                run_start_t = t_v
+            run_end_t = t_v
+            continue
+
+        if run_start_t is not None:
+            break
+
+    if run_start_t is None or run_end_t is None:
+        return None
+    if (run_end_t - run_start_t) < min_pause_ms:
+        return None
+    return float(run_end_t)
+
+
 # ---------------------------------------------------------------------------
 # Per-row clamp
 # ---------------------------------------------------------------------------
@@ -310,7 +392,10 @@ def _clamp_row(
     # --- Offset clamp: push offset forward if it sits in deep silence ---
     # Only for CV/CV_HEAD/VCV that have onset-side silence
     lang = str(language or "").strip().lower()
-    offset_margin_ms = _env_float("UTOA_SAFETY_CLAMP_OFFSET_MARGIN_MS", 12.0)
+    offset_margin_ms = _env_float(
+        "UTOA_SAFETY_CLAMP_OFFSET_MARGIN_MS",
+        14.0 if lang == "korean" else 12.0,
+    )
     offset_sil_threshold = _env_float(
         "UTOA_SAFETY_CLAMP_OFFSET_SIL_THRESHOLD",
         0.68 if lang == "korean" else 0.72,
@@ -332,22 +417,47 @@ def _clamp_row(
             check_end,
         )
         if sil_ratio >= offset_sil_threshold:
-            first_sound = _find_first_sound_frame(
-                t_ms, en, db_arr, f0_arr, cls_voiced, cls_unvoiced, cls_silence, db_sil_th,
-                max(0.0, off), pre_abs + 20.0,
+            pause_end = _find_head_pause_end(
+                t_ms,
+                en,
+                db_arr,
+                f0_arr,
+                cls_voiced,
+                cls_unvoiced,
+                cls_silence,
+                db_sil_th,
+                off,
+                check_end,
+                language=lang,
             )
-            if first_sound is not None and first_sound > off + offset_margin_ms:
-                new_off = max(0.0, first_sound - offset_margin_ms)
-                if new_off > off + 4.0 and new_off < pre_abs - 8.0:
-                    # Shift offset forward; adjust relative parameters
-                    shift = new_off - off
-                    row["offset"] = new_off
-                    row["pre"] = max(0.0, pre_rel - shift)
-                    row["cons"] = max(row["pre"] + 6.0, cons_rel - shift)
-                    row["ovl"] = max(0.0, min(ovl_rel - shift, row["pre"] * 0.82))
-                    # cutoff stays at same absolute position
-                    row["cutoff"] = -(cut_abs - new_off)
-                    changed = True
+            # Without a head-pause run, require a much stronger silence gate
+            # to avoid trimming away weak unvoiced consonant onsets.
+            sil_gate = offset_sil_threshold
+            if pause_end is None:
+                sil_gate = max(offset_sil_threshold, 0.84)
+            if sil_ratio >= sil_gate:
+                search_start_for_sound = max(0.0, off)
+                if pause_end is not None:
+                    search_start_for_sound = max(search_start_for_sound, float(pause_end) - 2.0)
+                first_sound = _find_first_sound_frame(
+                    t_ms, en, db_arr, f0_arr, cls_voiced, cls_unvoiced, cls_silence, db_sil_th,
+                    search_start_for_sound, pre_abs + 20.0,
+                )
+                if first_sound is not None and first_sound > off + offset_margin_ms:
+                    new_off = max(0.0, first_sound - offset_margin_ms)
+                    if pause_end is not None:
+                        head_backstep_ms = _env_float("UTOA_SAFETY_CLAMP_HEAD_PAUSE_BACKSTEP_MS", 2.0)
+                        new_off = max(new_off, float(pause_end) - head_backstep_ms)
+                    if new_off > off + 4.0 and new_off < pre_abs - 8.0:
+                        # Shift offset forward; adjust relative parameters
+                        shift = new_off - off
+                        row["offset"] = new_off
+                        row["pre"] = max(0.0, pre_rel - shift)
+                        row["cons"] = max(row["pre"] + 6.0, cons_rel - shift)
+                        row["ovl"] = max(0.0, min(ovl_rel - shift, row["pre"] * 0.82))
+                        # cutoff stays at same absolute position
+                        row["cutoff"] = -(cut_abs - new_off)
+                        changed = True
 
     # --- Cutoff clamp: pull cutoff back if tail is deep silence ---
     cutoff_sil_threshold = _env_float(

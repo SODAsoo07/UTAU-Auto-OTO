@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Dict, List, Optional, Tuple
 
 from core.oto_ml_features import extract_feature_rows, get_delta_clip_limits, parse_oto_rows
@@ -81,7 +82,15 @@ def _ml_route(value: Optional[str] = None) -> str:
 
 
 def _gated_ensemble_enabled() -> bool:
-    return _env_flag("UTOA_ML_GATED_ENSEMBLE_ENABLE", True)
+    # Default OFF to keep runtime stable: coupled is primary, LightGBM is fallback.
+    return _env_flag("UTOA_ML_GATED_ENSEMBLE_ENABLE", False)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except Exception:
+        return int(default)
 
 
 def _coupled_min_confidence() -> float:
@@ -1747,28 +1756,9 @@ def apply_oto_ml_to_oto_file(
         return 0
 
     if route_name == "autofree_v1":
-        try:
-            from core.oto_ml_autofree_runtime import apply_autofree_ml_to_oto_file
-        except Exception as exc:
-            ml_report.update(make_runtime_report("ml", ML_ROUTE_UNAVAILABLE, f"autofree runtime import failed: {exc}"))
-            ml_report["status"] = "fallback" if required_policy else "skipped"
-            ml_report["fallback_used"] = required_policy
-            return 0
-        return int(
-            apply_autofree_ml_to_oto_file(
-                language=language,
-                oto_path=oto_path,
-                tg_dir=tg_dir,
-                wav_dir=wav_dir,
-                custom_phonemes_path=custom_phonemes_path,
-                callback=callback,
-                enabled=enabled,
-                format_override=format_override,
-                policy=policy,
-                report=ml_report,
-            )
-            or 0
-        )
+        # Route orchestration is handled in post_file_pipeline:
+        # coupled/lightgbm primary + optional autofree residual auxiliary.
+        route_name = "legacy"
 
     if not oto_path or not os.path.exists(oto_path):
         ml_report.update(make_runtime_report("ml", ML_INPUT_MISSING, f"OTO 파일이 없습니다: {oto_path}"))
@@ -1823,8 +1813,23 @@ def apply_oto_ml_to_oto_file(
     routed_features = 0
     wav_index = build_wav_index(wav_dir) if wav_dir else {}
     rawmel_cache: Dict[str, object] = {}
+    total_features = int(len(feature_rows))
+    progress_every = max(20, _env_int("UTOA_ML_PROGRESS_EVERY", 80))
+    loop_started_at = time.perf_counter()
+    if total_features > progress_every:
+        _emit(
+            callback,
+            f"[OTO-ML] ML refine start: rows={total_features}, route={route_name}, gated_ensemble={'ON' if _gated_ensemble_enabled() else 'OFF'}",
+        )
 
-    for feat in feature_rows:
+    for feat_idx, feat in enumerate(feature_rows, start=1):
+        if total_features > progress_every and (feat_idx % progress_every == 0 or feat_idx == total_features):
+            elapsed = max(0.0, time.perf_counter() - loop_started_at)
+            rows_per_sec = float(feat_idx) / elapsed if elapsed > 1e-6 else 0.0
+            _emit(
+                callback,
+                f"[OTO-ML] ML refine progress: {feat_idx}/{total_features} ({(100.0 * feat_idx / total_features):.1f}%), {rows_per_sec:.1f} rows/s",
+            )
         format_type = _route_format_for_feature(language, feat, format_override=format_override)
         if not format_type:
             continue

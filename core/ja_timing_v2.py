@@ -288,6 +288,8 @@ def compute_ja_vc_from_adjacent_cv(
     next_onset_rel = max(float(next_cv["onset_abs"]) - offset, pre + 10.0)
     next_pre_rel = max(float(next_cv["pre_abs"]) - offset, pre + 16.0)
     next_cons_rel = max(float(next_cv["cons_abs"]) - offset, next_pre_rel + 10.0)
+    next_offset_rel = max(next_pre_rel - max(float(next_cv.get("pre", 0.0) or 0.0), 0.0), pre + 4.0)
+    son_like = str(c_char or "").strip().lower() in {"m", "n", "ny", "r", "l", "ry", "w", "y"}
 
     if a_type == "vc":
         if is_hard_stoplike:
@@ -305,9 +307,16 @@ def compute_ja_vc_from_adjacent_cv(
                 min_cut_gap=4.0,
             )
         else:
-            consonant = min(consonant, next_onset_rel + 24.0)
-            consonant = max(consonant, pre + 16.0)
-            cutoff_abs = max(consonant + 12.0, min(next_cons_rel + 24.0, next_pre_rel + 40.0))
+            pre_abs = offset + pre
+            pre_abs = _clamp_range(pre_abs, next_offset_rel - 5.0, next_offset_rel + (18.0 if son_like else 14.0))
+            offset = max(pre_abs - pre, 0.0)
+            next_onset_rel = max(float(next_cv["onset_abs"]) - offset, pre + 10.0)
+            next_pre_rel = max(float(next_cv["pre_abs"]) - offset, pre + 16.0)
+            next_cons_rel = max(float(next_cv["cons_abs"]) - offset, next_pre_rel + 10.0)
+
+            consonant = min(consonant, min(next_onset_rel + (16.0 if son_like else 10.0), next_cons_rel - 2.0))
+            consonant = max(consonant, pre + (14.0 if son_like else 12.0))
+            cutoff_abs = max(consonant + (10.0 if son_like else 8.0), min(next_pre_rel + (4.0 if son_like else -2.0), next_cons_rel + 2.0))
     else:
         consonant = min(max(consonant, pre + 22.0), next_pre_rel + 44.0)
         cutoff_abs = max(consonant + 20.0, next_pre_rel + 10.0)

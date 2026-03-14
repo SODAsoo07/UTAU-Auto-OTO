@@ -25,6 +25,17 @@ def _env_float(name, default):
         return float(default)
 
 
+def _normalize_ml_route(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"autofree_v1", "autofree", "b", "route_b"}:
+        return "autofree_v1"
+    return "legacy"
+
+
+def _current_ml_route() -> str:
+    return _normalize_ml_route(os.environ.get("UTOA_ML_ROUTE", "autofree_v1"))
+
+
 @dataclass(frozen=True)
 class JaPostFilePipelineContext:
     out_path: str
@@ -39,6 +50,7 @@ class JaPostFilePipelineContext:
     log_fn: object
     validate_fn: object
     classify_alias_fn: object
+    ml_route: str = ""
 
 
 def apply_ja_mel_refine_to_oto_file(
@@ -225,6 +237,9 @@ def apply_ja_mel_refine_to_oto_file(
 
 
 def run_ja_post_file_pipeline(context: JaPostFilePipelineContext):
+    ml_route = _normalize_ml_route(getattr(context, "ml_route", "") or _current_ml_route())
+    if callable(context.log_fn):
+        context.log_fn(f"[OTO-ML] JA finalize route={ml_route}")
     wav_dir_for_mel = resolve_wav_dir_from_tg_folder(context.tg_folder)
 
     safety_changed = apply_mel_safety_clamp_to_oto_file(
@@ -233,6 +248,7 @@ def run_ja_post_file_pipeline(context: JaPostFilePipelineContext):
         classify_alias_fn=lambda alias_text: context.classify_alias_fn(alias_text, context.custom_map),
         validate_fn=context.validate_fn,
         normalize_key_fn=normalize_wav_key,
+        language="japanese",
     )
     log_changed_lines(context.log_fn, "[JA-Mel-Safety]", safety_changed, "mel safety clamp changed")
 
@@ -246,6 +262,7 @@ def run_ja_post_file_pipeline(context: JaPostFilePipelineContext):
         ml_policy=context.ml_policy,
         runtime_report=context.runtime_report,
         log_fn=context.log_fn,
+        ml_route=ml_route,
     )
 
     try:

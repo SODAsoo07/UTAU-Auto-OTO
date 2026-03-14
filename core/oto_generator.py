@@ -264,8 +264,45 @@ def replace_oto_line_wav_name(line, wav_name):
 
 
 def apply_output_wav_name_map(oto_path, wav_name_map):
-    if not oto_path or not wav_name_map or not os.path.exists(oto_path):
+    if not oto_path or not os.path.exists(oto_path):
         return 0
+    exact_map = {}
+    norm_map = {}
+    norm_conflicts = set()
+    for src, dst in (wav_name_map or {}).items():
+        s = str(src or "").strip()
+        d = str(dst or "").strip()
+        if not s or not d:
+            continue
+        exact_map[s] = d
+        nk = normalize_key(s)
+        if not nk:
+            continue
+        prev = norm_map.get(nk)
+        if prev is None:
+            norm_map[nk] = d
+        elif str(prev).lower() != d.lower():
+            norm_conflicts.add(nk)
+
+    wav_dir = os.path.dirname(os.path.abspath(oto_path))
+    wav_norm_map = {}
+    wav_norm_conflicts = set()
+    if os.path.isdir(wav_dir):
+        try:
+            for fn in os.listdir(wav_dir):
+                if not str(fn).lower().endswith(".wav"):
+                    continue
+                nk = normalize_key(fn)
+                if not nk:
+                    continue
+                prev = wav_norm_map.get(nk)
+                if prev is None:
+                    wav_norm_map[nk] = fn
+                elif str(prev).lower() != str(fn).lower():
+                    wav_norm_conflicts.add(nk)
+        except Exception:
+            pass
+
     out_lines = []
     changed = 0
     for raw in _read_text_with_fallback(oto_path).splitlines():
@@ -274,8 +311,16 @@ def apply_output_wav_name_map(oto_path, wav_name_map):
             out_lines.append(line)
             continue
         wav, rest = line.split("=", 1)
-        mapped = wav_name_map.get(wav.strip())
-        if mapped and mapped != wav:
+        wav_raw = wav.strip()
+        mapped = exact_map.get(wav_raw)
+        if not mapped:
+            nk = normalize_key(wav_raw)
+            if nk:
+                if nk not in norm_conflicts:
+                    mapped = norm_map.get(nk)
+                if not mapped and nk not in wav_norm_conflicts:
+                    mapped = wav_norm_map.get(nk)
+        if mapped and mapped != wav_raw:
             out_lines.append(f"{mapped}={rest}")
             changed += 1
         else:
@@ -3498,11 +3543,17 @@ def generate_oto(
             if is_stoplike:
                 o, c, cut, p, v = [float(x) for x in out]
                 next_onset_rel = max(float(next_onset_abs_ms) - o, p + 10.0)
-                c_cap = next_onset_rel - 7.0
+                bridge_end_rel = next_onset_rel
+                if next_vowel_abs_ms is not None:
+                    try:
+                        bridge_end_rel = max(bridge_end_rel, float(next_vowel_abs_ms) - o)
+                    except Exception:
+                        pass
+                c_cap = bridge_end_rel - 8.0
                 c = min(c, c_cap)
                 c = max(c, p + 8.0)
                 cut_abs = abs(cut)
-                cut_cap = next_onset_rel - 1.0
+                cut_cap = bridge_end_rel - 2.0
                 cut_floor = c + 6.0
                 if cut_floor > cut_cap:
                     c = max(p + 8.0, cut_cap - 6.0)
@@ -4960,7 +5011,7 @@ def generate_oto(
                 log_fn=log,
                 validate_fn=validate_oto_params,
                 normalize_key_fn=normalize_key,
-                ml_route=os.environ.get("UTOA_ML_ROUTE", "legacy"),
+                ml_route=os.environ.get("UTOA_ML_ROUTE", "autofree_v1"),
             )
         )
         renamed = apply_output_wav_name_map(out_path, wav_name_map)

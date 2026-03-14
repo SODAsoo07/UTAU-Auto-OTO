@@ -696,6 +696,18 @@ class PipelineActionsMixin:
                 align_err = str(align_result.get("message", "") or "")
                 if align_result.get("fallback_used"):
                     self._append_log(f"ℹ 정렬 fallback 경로: {align_result.get('fallback_path', '')}")
+                if primary_engine == "none":
+                    has_textgrid = False
+                    if os.path.isdir(output_dir):
+                        for _name in os.listdir(output_dir):
+                            if str(_name).lower().endswith(".textgrid"):
+                                has_textgrid = True
+                                break
+                    if not has_textgrid:
+                        self._append_log("❌ No-MFA 모드는 현재 실험 단계이며 OTO 생성을 위해 TextGrid 입력이 필요합니다.")
+                        self._append_log("   대안: 정렬 엔진을 MFA로 변경하거나 textgrids 폴더에 TextGrid를 미리 준비하세요.")
+                        self._set_status("❌ No-MFA 입력 부족 (TextGrid 필요)")
+                        return
 
                 if not align_ok:
                     self._append_log("⚠ 정렬 실패 상태로 다음 단계를 진행합니다.")
@@ -733,7 +745,7 @@ class PipelineActionsMixin:
                     ml_route = (
                         str(self.ml_route_var.get()).strip().lower()
                         if hasattr(self, "ml_route_var")
-                        else "legacy"
+                        else "autofree_v1"
                     )
                     kr_continuity_max_offset_adj_raw = (
                         self.kr_continuity_max_offset_adj_var.get()
@@ -812,6 +824,7 @@ class PipelineActionsMixin:
                     os.environ["UTOA_ML_COUPLED_BACKEND"] = str(coupled_backend_env)
                     os.environ["UTOA_ML_COUPLED_STRICT_CONSTRAINT"] = "1" if ml_coupled_strict_constraint else "0"
                     os.environ["UTOA_ML_ROUTE"] = "autofree_v1" if ml_route == "autofree_v1" else "legacy"
+                    os.environ["UTOA_ML_AUTOFREE_AUX_ENABLE"] = "1" if ml_route == "autofree_v1" else "0"
                     if kr_continuity_max_offset_adj is None:
                         os.environ.pop("UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ", None)
                     else:
@@ -823,21 +836,27 @@ class PipelineActionsMixin:
                     if lang == "japanese":
                         if ml_model_root:
                             os.environ["UTOA_JA_OTO_ML_DIR"] = ml_model_root
+                            os.environ["UTOA_JA_AUTOFREE_ML_DIR"] = ml_model_root
                         else:
                             os.environ.pop("UTOA_JA_OTO_ML_DIR", None)
+                            os.environ.pop("UTOA_JA_AUTOFREE_ML_DIR", None)
                     else:
                         if ml_model_root:
                             os.environ["UTOA_KR_OTO_ML_DIR"] = ml_model_root
+                            os.environ["UTOA_KR_AUTOFREE_ML_DIR"] = ml_model_root
                         else:
                             os.environ.pop("UTOA_KR_OTO_ML_DIR", None)
+                            os.environ.pop("UTOA_KR_AUTOFREE_ML_DIR", None)
                     self._append_log(
                         f"[OTO-ML] 설정: ml={'ON' if enable_ml_correction else 'OFF'}, selector={self._describe_ml_selector_mode(selector_mode_code)}"
                     )
-                    self._append_log(f"[OTO-ML] route={os.environ.get('UTOA_ML_ROUTE', 'legacy')}")
+                    self._append_log(f"[OTO-ML] route={os.environ.get('UTOA_ML_ROUTE', 'autofree_v1')}")
                     min_conf_display = f"{float(ml_coupled_min_conf):.2f}" if ml_coupled_min_conf is not None else "default(0.55)"
                     self._append_log(
                         f"[OTO-ML] coupled={'ON' if ml_coupled_enable else 'OFF'}, backend={ml_coupled_backend}, ensemble={'ON' if ensemble_enabled else 'OFF'}, min_conf={min_conf_display}, device={ml_coupled_device}, strict={'ON' if ml_coupled_strict_constraint else 'OFF'}"
                     )
+                    if ml_route == "autofree_v1":
+                        self._append_log("[OTO-ML] route policy: coupled primary + autofree auxiliary(residual)")
                     if self.no_base_oto_var.get():
                         self._append_log("ℹ '베이스 OTO 없이 생성'이 활성화되어 OpenUtau 스타일로 생성합니다.")
 

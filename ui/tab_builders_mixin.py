@@ -327,7 +327,7 @@ class TabBuildersMixin:
         route_menu.pack(side="left", padx=(10, 8))
         ctk.CTkLabel(
             route_row,
-            text="(legacy / autofree_v1)",
+            text="legacy=coupled only, autofree_v1=coupled+autofree aux",
             text_color="#9E9E9E",
         ).pack(side="left", padx=(4, 0))
 

@@ -392,25 +392,25 @@ def _retarget_kr_bridge_to_next_cv(
             ovl_gap_lo, ovl_gap_hi, ovl_gap_t = 10.0, 22.0, 14.0
             cons_gap_lo, cons_gap_hi, cons_gap_t = 18.0, 48.0, 30.0
             cut_gap_lo, cut_gap_hi, cut_gap_t = 8.0, 20.0, 12.0
-            cut_allow_pre, cut_allow_cons = 8.0, 14.0
+            cut_allow_pre, cut_allow_cons = 0.0, 8.0
         elif is_liquid:
             pre_lo, pre_hi, pre_mix = 58.0, 188.0, 0.34
             ovl_gap_lo, ovl_gap_hi, ovl_gap_t = 7.0, 18.0, 10.0
             cons_gap_lo, cons_gap_hi, cons_gap_t = 44.0, 108.0, 70.0
             cut_gap_lo, cut_gap_hi, cut_gap_t = 14.0, 42.0, 26.0
-            cut_allow_pre, cut_allow_cons = 22.0, 38.0
+            cut_allow_pre, cut_allow_cons = 8.0, 20.0
         elif is_nasal:
             pre_lo, pre_hi, pre_mix = 48.0, 154.0, 0.36
             ovl_gap_lo, ovl_gap_hi, ovl_gap_t = 8.0, 20.0, 12.0
             cons_gap_lo, cons_gap_hi, cons_gap_t = 30.0, 84.0, 50.0
             cut_gap_lo, cut_gap_hi, cut_gap_t = 12.0, 32.0, 20.0
-            cut_allow_pre, cut_allow_cons = 18.0, 28.0
+            cut_allow_pre, cut_allow_cons = 4.0, 14.0
         else:
             pre_lo, pre_hi, pre_mix = 42.0, 140.0, 0.36
             ovl_gap_lo, ovl_gap_hi, ovl_gap_t = 8.0, 20.0, 12.0
             cons_gap_lo, cons_gap_hi, cons_gap_t = 24.0, 72.0, 42.0
             cut_gap_lo, cut_gap_hi, cut_gap_t = 10.0, 28.0, 18.0
-            cut_allow_pre, cut_allow_cons = 16.0, 24.0
+            cut_allow_pre, cut_allow_cons = 2.0, 10.0
     else:
         pre_lo, pre_hi, pre_mix = 36.0, 184.0, 0.32
         ovl_gap_lo, ovl_gap_hi, ovl_gap_t = 4.0, 12.0, 8.0
