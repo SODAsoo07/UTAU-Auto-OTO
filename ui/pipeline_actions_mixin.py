@@ -34,6 +34,7 @@ from core.oto_generator import (
     save_kr_autotune_profile,
     train_kr_autotune_profile,
 )
+from core.pipeline_status import normalize_aligner_name
 
 
 
@@ -656,19 +657,25 @@ class PipelineActionsMixin:
                 align_ok = False
                 align_err = ""
                 align_engine = self.aligner_var.get()
-                primary_engine = "mfa"
+                primary_engine = normalize_aligner_name(align_engine, default="mfa")
                 fallback_engine = ""
-                self._set_status("3/4 - MFA 정렬 준비 중...")
-                if not self._ensure_mfa_ready_for_language(lang):
-                    self._append_log("❌ MFA 설치/모델 준비 실패")
-                    self._set_status("❌ MFA 설치/모델 준비 실패")
-                    return
+                if primary_engine == "none":
+                    self._set_status("3/4 - 정렬 건너뛰기(no-MFA)")
+                else:
+                    self._set_status("3/4 - MFA 정렬 준비 중...")
+                    if not self._ensure_mfa_ready_for_language(lang):
+                        self._append_log("❌ MFA 설치/모델 준비 실패")
+                        self._set_status("❌ MFA 설치/모델 준비 실패")
+                        return
                 mfa_profile = (
                     self._get_mfa_align_profile_code()
                     if hasattr(self, "_get_mfa_align_profile_code")
                     else "accurate"
                 )
-                self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
+                if primary_engine == "mfa":
+                    self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
+                else:
+                    self._append_log("ℹ 정렬 엔진: none (MFA 비사용)")
 
                 align_result = run_alignment_with_fallback(
                     language=lang,

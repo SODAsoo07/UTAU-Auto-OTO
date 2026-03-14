@@ -46,6 +46,75 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on", "y"}
 
 
+def _clamp01(v: float) -> float:
+    try:
+        x = float(v)
+    except Exception:
+        return 0.0
+    if x < 0.0:
+        return 0.0
+    if x > 1.0:
+        return 1.0
+    return x
+
+
+def _frame_blank_confidence(
+    *,
+    e_v: float,
+    db_v: float,
+    sil_v: float,
+    f0_v: float,
+    voiced_v: float,
+    unvoiced_v: float,
+    db_sil_th: float,
+) -> float:
+    db_low = _clamp01((float(db_sil_th) + 3.0 - float(db_v)) / 8.0)
+    en_low = _clamp01((0.12 - float(e_v)) / 0.12)
+    f0_low = _clamp01((0.20 - float(f0_v)) / 0.20)
+    voiced_high = _clamp01(float(voiced_v))
+    unvoiced_high = _clamp01(float(unvoiced_v))
+    sil_high = _clamp01(float(sil_v))
+
+    # Blank if silence/dB/energy are all weak, with low F0 as auxiliary cue.
+    # Unvoiced confidence is a negative term to avoid treating fricative/plosive onset as blank.
+    score = (
+        (0.46 * sil_high)
+        + (0.24 * db_low)
+        + (0.20 * en_low)
+        + (0.10 * f0_low)
+        - (0.24 * voiced_high)
+        - (0.14 * unvoiced_high)
+    )
+    return _clamp01(score)
+
+
+def _frame_sound_confidence(
+    *,
+    e_v: float,
+    db_v: float,
+    sil_v: float,
+    f0_v: float,
+    voiced_v: float,
+    unvoiced_v: float,
+    db_sil_th: float,
+) -> float:
+    db_sound = _clamp01((float(db_v) - (float(db_sil_th) + 0.8)) / 10.0)
+    en_sound = _clamp01((float(e_v) - 0.06) / 0.22)
+    f0_sound = _clamp01((float(f0_v) - 0.18) / 0.42)
+    voiced_high = _clamp01(float(voiced_v))
+    unvoiced_high = _clamp01(float(unvoiced_v))
+    sil_high = _clamp01(float(sil_v))
+    score = (
+        (0.34 * voiced_high)
+        + (0.28 * unvoiced_high)
+        + (0.20 * db_sound)
+        + (0.14 * en_sound)
+        + (0.04 * f0_sound)
+        - (0.30 * sil_high)
+    )
+    return _clamp01(score)
+
+
 # ---------------------------------------------------------------------------
 # Core clamp logic
 # ---------------------------------------------------------------------------
@@ -54,6 +123,7 @@ def _find_first_sound_frame(
     t_ms,
     en,
     db_arr,
+    f0_arr,
     cls_voiced,
     cls_unvoiced,
     cls_silence,
@@ -67,16 +137,36 @@ def _find_first_sound_frame(
     mask = np.where((t_ms >= search_start_ms) & (t_ms <= search_end_ms))[0]
     if len(mask) == 0:
         return None
+    sound_frame_th = _env_float("UTOA_SAFETY_CLAMP_SOUND_FRAME_TH", 0.36)
+    blank_frame_th = _env_float("UTOA_SAFETY_CLAMP_BLANK_FRAME_TH", 0.62)
     for idx in mask:
         voiced_v = float(cls_voiced[idx]) if cls_voiced is not None and len(cls_voiced) == len(en) else 0.0
         unvoiced_v = float(cls_unvoiced[idx]) if cls_unvoiced is not None and len(cls_unvoiced) == len(en) else 0.0
         silence_v = float(cls_silence[idx]) if cls_silence is not None and len(cls_silence) == len(en) else 0.0
         db_v = float(db_arr[idx]) if db_arr is not None and len(db_arr) == len(en) else -60.0
         e_v = float(en[idx])
-        # Frame is audible if (voiced or unvoiced) and not deeply silent
-        if (voiced_v >= 0.45 or unvoiced_v >= 0.45) and silence_v < 0.55:
+        f0_v = float(f0_arr[idx]) if f0_arr is not None and len(f0_arr) == len(en) else 0.0
+        sound_conf = _frame_sound_confidence(
+            e_v=e_v,
+            db_v=db_v,
+            sil_v=silence_v,
+            f0_v=f0_v,
+            voiced_v=voiced_v,
+            unvoiced_v=unvoiced_v,
+            db_sil_th=db_sil_th,
+        )
+        blank_conf = _frame_blank_confidence(
+            e_v=e_v,
+            db_v=db_v,
+            sil_v=silence_v,
+            f0_v=f0_v,
+            voiced_v=voiced_v,
+            unvoiced_v=unvoiced_v,
+            db_sil_th=db_sil_th,
+        )
+        if sound_conf >= sound_frame_th and blank_conf <= blank_frame_th:
             return float(t_ms[idx])
-        if db_v > (db_sil_th + 2.0) and e_v > 0.15 and silence_v < 0.6:
+        if db_v > (db_sil_th + 1.2) and e_v > 0.10 and silence_v < 0.62:
             return float(t_ms[idx])
     return None
 
@@ -85,6 +175,7 @@ def _find_last_sound_frame(
     t_ms,
     en,
     db_arr,
+    f0_arr,
     cls_voiced,
     cls_unvoiced,
     cls_silence,
@@ -98,15 +189,36 @@ def _find_last_sound_frame(
     mask = np.where((t_ms >= search_start_ms) & (t_ms <= search_end_ms))[0]
     if len(mask) == 0:
         return None
+    sound_frame_th = _env_float("UTOA_SAFETY_CLAMP_SOUND_FRAME_TH", 0.36)
+    blank_frame_th = _env_float("UTOA_SAFETY_CLAMP_BLANK_FRAME_TH", 0.62)
     for idx in reversed(mask):
         voiced_v = float(cls_voiced[idx]) if cls_voiced is not None and len(cls_voiced) == len(en) else 0.0
         unvoiced_v = float(cls_unvoiced[idx]) if cls_unvoiced is not None and len(cls_unvoiced) == len(en) else 0.0
         silence_v = float(cls_silence[idx]) if cls_silence is not None and len(cls_silence) == len(en) else 0.0
         db_v = float(db_arr[idx]) if db_arr is not None and len(db_arr) == len(en) else -60.0
         e_v = float(en[idx])
-        if (voiced_v >= 0.45 or unvoiced_v >= 0.45) and silence_v < 0.55:
+        f0_v = float(f0_arr[idx]) if f0_arr is not None and len(f0_arr) == len(en) else 0.0
+        sound_conf = _frame_sound_confidence(
+            e_v=e_v,
+            db_v=db_v,
+            sil_v=silence_v,
+            f0_v=f0_v,
+            voiced_v=voiced_v,
+            unvoiced_v=unvoiced_v,
+            db_sil_th=db_sil_th,
+        )
+        blank_conf = _frame_blank_confidence(
+            e_v=e_v,
+            db_v=db_v,
+            sil_v=silence_v,
+            f0_v=f0_v,
+            voiced_v=voiced_v,
+            unvoiced_v=unvoiced_v,
+            db_sil_th=db_sil_th,
+        )
+        if sound_conf >= sound_frame_th and blank_conf <= blank_frame_th:
             return float(t_ms[idx])
-        if db_v > (db_sil_th + 2.0) and e_v > 0.15 and silence_v < 0.6:
+        if db_v > (db_sil_th + 1.2) and e_v > 0.10 and silence_v < 0.62:
             return float(t_ms[idx])
     return None
 
@@ -115,6 +227,9 @@ def _compute_silence_ratio(
     t_ms,
     en,
     db_arr,
+    f0_arr,
+    cls_voiced,
+    cls_unvoiced,
     cls_silence,
     db_sil_th: float,
     start_ms: float,
@@ -126,11 +241,28 @@ def _compute_silence_ratio(
     mask = np.where((t_ms >= start_ms) & (t_ms <= end_ms))[0]
     if len(mask) == 0:
         return 0.0
-    if cls_silence is not None and len(cls_silence) == len(en):
-        return float(np.mean(np.asarray(cls_silence[mask], dtype=np.float64) >= 0.5))
-    # fallback: dB + energy
-    sil_flags = (np.asarray(db_arr[mask], dtype=np.float64) <= db_sil_th) & (np.asarray(en[mask], dtype=np.float64) <= 0.10)
-    return float(np.mean(sil_flags))
+    blank_frame_th = _env_float("UTOA_SAFETY_CLAMP_BLANK_FRAME_TH", 0.62)
+    flags = []
+    for idx in mask:
+        voiced_v = float(cls_voiced[idx]) if cls_voiced is not None and len(cls_voiced) == len(en) else 0.0
+        unvoiced_v = float(cls_unvoiced[idx]) if cls_unvoiced is not None and len(cls_unvoiced) == len(en) else 0.0
+        silence_v = float(cls_silence[idx]) if cls_silence is not None and len(cls_silence) == len(en) else 0.0
+        db_v = float(db_arr[idx]) if db_arr is not None and len(db_arr) == len(en) else -60.0
+        e_v = float(en[idx])
+        f0_v = float(f0_arr[idx]) if f0_arr is not None and len(f0_arr) == len(en) else 0.0
+        blank_conf = _frame_blank_confidence(
+            e_v=e_v,
+            db_v=db_v,
+            sil_v=silence_v,
+            f0_v=f0_v,
+            voiced_v=voiced_v,
+            unvoiced_v=unvoiced_v,
+            db_sil_th=db_sil_th,
+        )
+        flags.append(blank_conf >= blank_frame_th)
+    if flags:
+        return float(np.mean(np.asarray(flags, dtype=np.float64)))
+    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +274,7 @@ def _clamp_row(
     alias_type: str,
     mel_ctx: Dict[str, object],
     *,
+    language: str = "",
     validate_fn: Callable,
 ) -> bool:
     """
@@ -151,6 +284,7 @@ def _clamp_row(
     t_ms = mel_ctx.get("times_ms")
     en = mel_ctx.get("energy")
     db_arr = mel_ctx.get("db_db")
+    f0_arr = mel_ctx.get("f0_voicing")
     cls_voiced = mel_ctx.get("cls_voiced_formant")
     cls_unvoiced = mel_ctx.get("cls_unvoiced_diffuse")
     cls_silence = mel_ctx.get("cls_silence_sparse")
@@ -175,16 +309,31 @@ def _clamp_row(
 
     # --- Offset clamp: push offset forward if it sits in deep silence ---
     # Only for CV/CV_HEAD/VCV that have onset-side silence
+    lang = str(language or "").strip().lower()
     offset_margin_ms = _env_float("UTOA_SAFETY_CLAMP_OFFSET_MARGIN_MS", 12.0)
-    offset_sil_threshold = _env_float("UTOA_SAFETY_CLAMP_OFFSET_SIL_THRESHOLD", 0.72)
+    offset_sil_threshold = _env_float(
+        "UTOA_SAFETY_CLAMP_OFFSET_SIL_THRESHOLD",
+        0.68 if lang == "korean" else 0.72,
+    )
 
     if alias_type in {"cv", "cv_head", "vcv"}:
         # Check silence ratio in the offset → pre region
         check_end = min(pre_abs, off + 80.0)
-        sil_ratio = _compute_silence_ratio(t_ms, en, db_arr, cls_silence, db_sil_th, off, check_end)
+        sil_ratio = _compute_silence_ratio(
+            t_ms,
+            en,
+            db_arr,
+            f0_arr,
+            cls_voiced,
+            cls_unvoiced,
+            cls_silence,
+            db_sil_th,
+            off,
+            check_end,
+        )
         if sil_ratio >= offset_sil_threshold:
             first_sound = _find_first_sound_frame(
-                t_ms, en, db_arr, cls_voiced, cls_unvoiced, cls_silence, db_sil_th,
+                t_ms, en, db_arr, f0_arr, cls_voiced, cls_unvoiced, cls_silence, db_sil_th,
                 max(0.0, off), pre_abs + 20.0,
             )
             if first_sound is not None and first_sound > off + offset_margin_ms:
@@ -201,7 +350,10 @@ def _clamp_row(
                     changed = True
 
     # --- Cutoff clamp: pull cutoff back if tail is deep silence ---
-    cutoff_sil_threshold = _env_float("UTOA_SAFETY_CLAMP_CUTOFF_SIL_THRESHOLD", 0.70)
+    cutoff_sil_threshold = _env_float(
+        "UTOA_SAFETY_CLAMP_CUTOFF_SIL_THRESHOLD",
+        0.66 if lang == "korean" else 0.70,
+    )
     cutoff_margin_ms = _env_float("UTOA_SAFETY_CLAMP_CUTOFF_MARGIN_MS", 8.0)
     min_active_ms = _env_float("UTOA_SAFETY_CLAMP_MIN_ACTIVE_MS", 20.0)
 
@@ -214,10 +366,21 @@ def _clamp_row(
     # Check silence in the cons → cutoff tail region (all alias types)
     tail_start = max(cons_abs, pre_abs + 10.0)
     if cut_abs > tail_start + 20.0:
-        sil_ratio = _compute_silence_ratio(t_ms, en, db_arr, cls_silence, db_sil_th, tail_start, cut_abs)
+        sil_ratio = _compute_silence_ratio(
+            t_ms,
+            en,
+            db_arr,
+            f0_arr,
+            cls_voiced,
+            cls_unvoiced,
+            cls_silence,
+            db_sil_th,
+            tail_start,
+            cut_abs,
+        )
         if sil_ratio >= cutoff_sil_threshold:
             last_sound = _find_last_sound_frame(
-                t_ms, en, db_arr, cls_voiced, cls_unvoiced, cls_silence, db_sil_th,
+                t_ms, en, db_arr, f0_arr, cls_voiced, cls_unvoiced, cls_silence, db_sil_th,
                 pre_abs, cut_abs,
             )
             if last_sound is not None:
@@ -259,6 +422,7 @@ def apply_mel_safety_clamp_to_oto_file(
     classify_alias_fn: Callable[[str], str],
     validate_fn: Callable,
     normalize_key_fn: Optional[Callable] = None,
+    language: str = "",
 ) -> int:
     """
     Apply mel-based safety clamping to all rows in an oto file.
@@ -331,7 +495,13 @@ def apply_mel_safety_clamp_to_oto_file(
             alias_type = _classify_cached(str(row.get("alias", "")))
             if alias_type not in {"cv", "cv_head", "vcv", "vc", "vv"}:
                 continue
-            if _clamp_row(row, alias_type, mel_ctx, validate_fn=validate_fn):
+            if _clamp_row(
+                row,
+                alias_type,
+                mel_ctx,
+                language=language,
+                validate_fn=validate_fn,
+            ):
                 changed += 1
 
     if changed <= 0:

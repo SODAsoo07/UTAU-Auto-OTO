@@ -733,20 +733,50 @@ def _guard_cv_focus_window(
     ipa_hint = normalize_ipa_mark(ipa_onset)
     hard_onset = is_plosive_ipa(ipa_hint) or ipa_hint in {"s", "ss", "sh", "ch", "j", "jj", "c", "ts", "h"}
     sonorant_onset = _is_sonorant_like_onset(onset, ipa_hint)
+    c_len = max(0.0, c_end - c_start)
+    if hard_onset:
+        base_lead = _env_float("UTOA_KR_CV_OFFSET_LEAD_HARD_MS", 22.0)
+    elif sonorant_onset:
+        base_lead = _env_float("UTOA_KR_CV_OFFSET_LEAD_SONORANT_MS", 16.0)
+    else:
+        base_lead = _env_float("UTOA_KR_CV_OFFSET_LEAD_DEFAULT_MS", 20.0)
+    lead_cap = min(float(base_lead), max(10.0, c_len + 8.0))
+    min_allowed_offset = max(0.0, c_start - lead_cap)
 
     offset_pulled_ms = 0.0
     cutoff_trimmed_ms = 0.0
 
-    # 1) 자음 onset 이후로 offset이 밀리면, 상대 파라미터 절대축을 유지한 채 offset만 앞당김.
+    # 1) 자음 onset 이후로 offset이 밀리면 offset 자체를 앞당겨
+    # pre/cons/cut 절대축도 같이 앞쪽으로 이동시킨다.
     onset_late_slack = max(0.0, _env_float("UTOA_KR_CV_ONSET_LATE_SLACK_MS", 2.0))
     max_allowed_offset = max(0.0, c_start + onset_late_slack)
     if float(offset) > max_allowed_offset:
         shift = float(offset) - max_allowed_offset
         offset = max_allowed_offset
-        pre = float(pre) + shift
-        consonant = float(consonant) + shift
-        cutoff = -(abs(float(cutoff)) + shift)
         offset_pulled_ms = shift
+    elif float(offset) < min_allowed_offset:
+        # 앞 모음 말미가 offset 구간으로 유입되지 않도록 offset 하한을 보장.
+        advance = min_allowed_offset - float(offset)
+        offset = min_allowed_offset
+        pre = max(6.0, float(pre) - advance)
+        consonant = max(float(pre) + 8.0, float(consonant) - advance)
+        cutoff = -max(float(consonant) + 12.0, abs(float(cutoff)) - advance)
+
+    # 1.5) pre(anchor)가 모음 중반으로 늦게 들어가는 경우를 강하게 제한.
+    # 우선 offset을 더 앞당기되 onset 하한을 넘지 않게 하고,
+    # 하한에 걸리면 pre를 직접 줄인다.
+    pre_abs = float(offset) + float(pre)
+    nucleus_late_slack = max(0.0, _env_float("UTOA_KR_CV_NUCLEUS_LATE_SLACK_MS", 9.0))
+    max_pre_abs = float(c_end) + nucleus_late_slack
+    if pre_abs > max_pre_abs:
+        need = pre_abs - max_pre_abs
+        movable = max(0.0, float(offset) - min_allowed_offset)
+        moved = min(need, movable)
+        offset = float(offset) - moved
+        offset_pulled_ms += moved
+        residual = max(0.0, need - moved)
+        if residual > 0.0 or (float(offset) + float(pre)) > max_pre_abs:
+            pre = max(6.0, max_pre_abs - float(offset))
 
     # 2) 모음 안정 구간 이후 tail은 cutoff 상한으로 제한.
     vowel_len = max(0.0, v_end - v_start)

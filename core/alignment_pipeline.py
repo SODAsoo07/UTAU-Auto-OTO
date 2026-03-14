@@ -54,6 +54,20 @@ def run_alignment_with_fallback(
             attempt_count=0,
         )
 
+    if primary == "none":
+        return make_runtime_report(
+            "align",
+            ALIGN_SKIPPED,
+            "alignment bypassed (engine=none).",
+            ok=True,
+            primary_engine="none",
+            used_engine="none",
+            attempts=attempts,
+            fallback_used=False,
+            attempt_count=0,
+            fallback_path="",
+        )
+
     if primary != "mfa":
         primary = "mfa"
 
