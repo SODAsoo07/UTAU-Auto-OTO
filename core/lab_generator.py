@@ -16,6 +16,7 @@ from core.conversion_tables import load_korean_conversion_table
 
 logger = logging.getLogger(__name__)
 _KR_FILENAME_SPLIT_RE = re.compile(r"[^0-9A-Za-z가-힣]+")
+_KR_BREATH_TOKEN_RE = re.compile(r"(?i)^breath\d*$")
 
 # ==============================================================================
 # 로마자 <-> 한글 자모 매핑 테이블
@@ -149,6 +150,10 @@ def _is_ko_silence_token(token):
     text = str(token or "").strip()
     if not text:
         return True
+    # MFA graph compile can crash when explicit breath token is treated as sil.
+    # Keep breath as non-silence noise token (spn) instead.
+    if _KR_BREATH_TOKEN_RE.fullmatch(text):
+        return False
     return text in KO_SILENCE_TOKEN_SET or text.lower() in KO_SILENCE_TOKEN_SET
 
 
@@ -187,8 +192,8 @@ _KO_KNOWN_PHONE_SET.update(_rebuild_ko_known_phone_set())
 
 def _normalize_mfa_sensitive_marker_ipa(token, ipa_text):
     """
-    MFA 3.x에서 비침묵 토큰(R/H/br/bre)을 sil로 두면 그래프 컴파일이 크래시할 수 있어
-    숨소리 계열 최소 비침묵 IPA(h)로 강제 보정한다.
+    MFA 3.x에서 특정 marker를 sil로 두면 graph compile이 크래시할 수 있어
+    숨소리/표식 계열을 비침묵 phone으로 강제 보정한다.
     """
     tok = str(token or "").strip()
     ipa = str(ipa_text or "").strip().lower()
@@ -197,6 +202,8 @@ def _normalize_mfa_sensitive_marker_ipa(token, ipa_text):
     if ipa != "sil":
         return ipa_text
     low = tok.lower()
+    if _KR_BREATH_TOKEN_RE.fullmatch(low):
+        return "spn"
     if tok == "R":
         return "h"
     if low in {"br", "bre", "h"} or tok == "H":
@@ -397,6 +404,8 @@ def get_ipa_from_roman(token):
     token = re.sub(r'[0-9]+', '', token)
     token = token.replace('long', '')
     token = KO_ALIAS_VARIANT_NORMALIZATION.get(token, token)
+    if _KR_BREATH_TOKEN_RE.fullmatch(token):
+        return ["spn"]
     if token in KO_ROMAJI_IPA_TABLE and not (prefer_phonetic_reserved and token in {'sil', 'r', 'h'}):
         return _ipa_value_to_list(KO_ROMAJI_IPA_TABLE[token])
 

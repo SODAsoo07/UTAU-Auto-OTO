@@ -1629,6 +1629,12 @@ def generate_ja_openutau_aliases(base_alias):
     """
     aliases = {base_alias}
     parts = base_alias.split()
+    dash_enabled = str(os.environ.get("UTOA_ENABLE_HEAD_TAIL_DASH_ALIAS", "1")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
     if len(parts) == 2:
         v, c = parts[0], parts[1]
@@ -1637,7 +1643,7 @@ def generate_ja_openutau_aliases(base_alias):
         aliases.add(f"{v}{c}")
         
         # 모음 종료 표기
-        if c == '-' or c == 'R':
+        if dash_enabled and (c == '-' or c == 'R'):
             aliases.add(f"{v} -")
             aliases.add(f"{v}-")
             aliases.add(f"{v} R")
@@ -1645,12 +1651,13 @@ def generate_ja_openutau_aliases(base_alias):
 
     elif len(parts) == 1:
         cv = parts[0]
-        # 시작형
-        aliases.add(f"- {cv}")
-        aliases.add(f"-{cv}")
-        # 종료형
-        aliases.add(f"{cv} -")
-        aliases.add(f"{cv}-")
+        if dash_enabled:
+            # 시작형
+            aliases.add(f"- {cv}")
+            aliases.add(f"-{cv}")
+            # 종료형
+            aliases.add(f"{cv} -")
+            aliases.add(f"{cv}-")
 
     return list(aliases)
 

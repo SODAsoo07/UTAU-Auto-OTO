@@ -30,6 +30,7 @@ MSVC_REQUIRED_TEXT = "microsoft visual c++ 14.0 or greater is required"
 MFA_PORTABLE_PYTHON_VERSION = "3.10"
 _MFA_SINGLE_SPEAKER_FLAG_CACHE = {}
 _MFA_SPEAKER_ADAPT_FLAG_CACHE = {}
+_MFA_BREATH_WORD_RE = re.compile(r"(?i)^breath\d*$")
 
 MFA_ALIGN_PROFILE_PRESETS = {
     # Stable default profile (legacy accurate behavior).
@@ -423,6 +424,86 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
     if last_not_found:
         return False, f"{err}: {last_not_found}"
     return False, err
+
+
+def _validate_alignment_dictionary(dict_path: str, callback=None):
+    """Validate MFA dictionary rows before native graph compilation."""
+    def log(msg):
+        logger.info(msg)
+        if callback:
+            callback(msg)
+
+    if not dict_path or not os.path.isfile(dict_path):
+        return False, f"Dictionary not found: {dict_path}"
+
+    try:
+        with open(dict_path, "rb") as f:
+            raw = f.read()
+        text = _decode_subprocess_output(raw)
+    except Exception as e:
+        return False, f"Failed to read dictionary: {e}"
+
+    bad_lines = []
+    total = 0
+    for idx, line in enumerate(str(text or "").splitlines(), start=1):
+        row = str(line or "").strip()
+        if not row or row.startswith("#"):
+            continue
+        total += 1
+        parts = row.split()
+        # Expected: <word> <phone1> [phone2 ...]
+        if len(parts) < 2 or "\ufffd" in row:
+            bad_lines.append((idx, row))
+
+    if bad_lines:
+        samples = "; ".join(f"{ln}:{txt[:40]}" for ln, txt in bad_lines[:5])
+        err = (
+            f"Dictionary malformed rows detected ({len(bad_lines)}/{max(total, 1)}). "
+            f"examples={samples}"
+        )
+        log(err)
+        return False, err
+    return True, ""
+
+
+def _sanitize_alignment_dictionary_for_mfa(dict_path: str, callback=None):
+    """Patch known crash-prone entries in dictionary before MFA graph compile."""
+    def log(msg):
+        logger.info(msg)
+        if callback:
+            callback(msg)
+
+    if not dict_path or not os.path.isfile(dict_path):
+        return False, f"Dictionary not found: {dict_path}"
+    try:
+        with open(dict_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except Exception as e:
+        return False, f"Failed to read dictionary for sanitize: {e}"
+
+    changed = 0
+    out = []
+    for line in lines:
+        row = str(line or "").strip()
+        if not row or row.startswith("#"):
+            out.append(line)
+            continue
+        parts = row.split()
+        if len(parts) >= 2 and _MFA_BREATH_WORD_RE.fullmatch(parts[0]) and parts[1].lower() in {"sil", "pau", "cl"}:
+            out.append(f"{parts[0]} spn")
+            changed += 1
+            continue
+        out.append(line)
+
+    if changed <= 0:
+        return True, ""
+    try:
+        with open(dict_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(out).rstrip() + "\n")
+    except Exception as e:
+        return False, f"Failed to write sanitized dictionary: {e}"
+    log(f"[MFA] Dictionary sanitize applied: breath->spn ({changed} rows)")
+    return True, ""
 
 def _get_conda_env(mfa_path):
     """
@@ -1229,6 +1310,12 @@ def run_mfa_align(
             err = f"Failed to prepare ASCII-safe MFA workspace: {e}"
             log(err)
             return False, err
+    dict_sanitize_ok, dict_sanitize_err = _sanitize_alignment_dictionary_for_mfa(work_dict_path, callback=callback)
+    if not dict_sanitize_ok:
+        return False, dict_sanitize_err
+    dict_ok, dict_err = _validate_alignment_dictionary(work_dict_path, callback=callback)
+    if not dict_ok:
+        return False, dict_err
     single_speaker_flag = _resolve_single_speaker_flag(mfa_path, env=env)
     resolved_profile, align_opts = _resolve_mfa_align_options(align_profile)
     cmd = [
@@ -1299,6 +1386,11 @@ def run_mfa_align(
         err = f'MFA alignment failed (code: {process.returncode})'
         if tail_lines:
             err += f' | tail: {tail_lines[-1][:180]}'
+        if process.returncode in {3221225477, -1073741819}:
+            err += (
+                " | hint: access_violation(0xC0000005), likely native kaldi crash "
+                "(env binary mismatch or corpus/lexicon edge-case), retry with lower-load profile(fast/default)"
+            )
         log(err)
         return False, err
     except FileNotFoundError:

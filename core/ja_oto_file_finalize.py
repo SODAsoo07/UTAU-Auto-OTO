@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from core.ja_oto_finalize import _convert_ja_internal_cutoff_to_oto_field
+from core.ja_oto_file_consistency import apply_ja_vc_neighbor_to_oto_file
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 from core.oto_normalization import normalize_wav_key
 from core.mel_safety_clamp import apply_mel_safety_clamp_to_oto_file
@@ -276,6 +277,22 @@ def run_ja_post_file_pipeline(context: JaPostFilePipelineContext):
         log_changed_lines(context.log_fn, "[JA-Mel]", mel_changed, "mel cutoff refine changed")
     except Exception as exc:
         context.log_fn(f"[JA-Mel] mel cutoff refine failed: {exc}")
+
+    try:
+        vc_neighbor_stats = apply_ja_vc_neighbor_to_oto_file(
+            context.out_path,
+            custom_map=context.custom_map,
+            validate_fn=context.validate_fn,
+            log_fn=context.log_fn,
+        )
+        log_changed_lines(
+            context.log_fn,
+            "[JA-Consistency]",
+            vc_neighbor_stats.get("total_changed", 0),
+            "file consistency changed",
+        )
+    except Exception as exc:
+        context.log_fn(f"[JA-Consistency] vc neighbor adjust failed: {exc}")
 
     try:
         final_changed = _convert_ja_internal_cutoff_to_oto_field(context.out_path, wav_dir_for_mel)

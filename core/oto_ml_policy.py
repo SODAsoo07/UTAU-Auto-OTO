@@ -16,6 +16,19 @@ _TRAINING_MIN_CONF = {
     ("japanese", "vcv"): 0.65,
 }
 
+# Runtime coupled min_conf defaults per language/format.
+# These are used when per-format overrides are empty.
+_COUPLED_MIN_CONF_DEFAULTS = {
+    ("korean", "cv"): 0.55,
+    ("korean", "cvc"): 0.75,
+    ("korean", "cvvc"): 0.78,
+    ("korean", "vcv"): 0.72,
+    ("japanese", "cv"): 0.40,
+    ("japanese", "cvc"): 0.50,
+    ("japanese", "cvvc"): 0.72,
+    ("japanese", "vcv"): 0.65,
+}
+
 
 _ALIAS_FAMILY_TYPES = {
     "cv": ["cv", "cv_head"],
@@ -177,6 +190,12 @@ def default_training_filters(language: str, format_type: str, alias_family: str 
     }
 
 
+def default_coupled_min_conf(language: str, format_type: str) -> float:
+    lang = str(language or "").strip().lower()
+    fmt = normalize_format_type(lang, format_type) or "general"
+    return float(_COUPLED_MIN_CONF_DEFAULTS.get((lang, fmt), 0.50))
+
+
 def delta_enabled_by_default(language: str, format_type: str, alias_family: str = "") -> bool:
     if str(os.environ.get("UTOA_DISABLE_OTO_DELTA", "")).strip().lower() in {"1", "true", "yes", "on"}:
         return False
@@ -248,6 +267,7 @@ def selector_error_weights(language: str, format_type: str, alias_family: str = 
 __all__ = [
     "alias_family_to_alias_types",
     "default_training_filters",
+    "default_coupled_min_conf",
     "delta_enabled_by_default",
     "infer_alias_family",
     "normalize_alias_family",

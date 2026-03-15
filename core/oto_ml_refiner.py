@@ -28,6 +28,7 @@ from core.oto_ml_runtime import (
 from core.oto_ml_lightgbm import load_lightgbm_selector_bundle, predict_lightgbm_selector_score
 from core.oto_ml_policy import (
     delta_enabled_by_default,
+    default_coupled_min_conf,
     infer_alias_family,
     normalize_alias_family,
     selector_min_margin,
@@ -274,6 +275,11 @@ def _coupled_min_confidence_for_alias(
         value = _read_bounded_conf_env(key)
         if value is not None:
             return float(value)
+
+    # If no per-format override is set, fall back to defaults by language/format.
+    if _read_bounded_conf_env("UTOA_ML_COUPLED_MIN_CONF") is None:
+        default_by_fmt = default_coupled_min_conf(lang, fmt)
+        base = max(base, min(float(default_by_fmt), 1.0))
     if lang_token == "KR":
         # Korean CV 계열 기본 게이트: 과도한 fallback을 줄이되, CV head는 여전히 보수적으로 유지.
         kr_floor_by_alias = {

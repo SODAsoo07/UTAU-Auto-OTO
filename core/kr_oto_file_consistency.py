@@ -93,6 +93,29 @@ _OVERLAP_LIMITS = {
 def _max_offset_adj_ms() -> float:
     return _env_float("UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ", 180.0)
 
+def _vc_neighbor_enabled() -> bool:
+    return str(os.environ.get("UTOA_KR_VC_NEIGHBOR_ENABLE", "1")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+def _vc_neighbor_blend() -> float:
+    return _env_float("UTOA_KR_VC_NEIGHBOR_BLEND", 0.35)
+
+def _vc_neighbor_max_shift() -> float:
+    return _env_float("UTOA_KR_VC_NEIGHBOR_MAX_SHIFT", 45.0)
+
+def _vc_neighbor_lead_ms() -> float:
+    return _env_float("UTOA_KR_VC_NEIGHBOR_LEAD_MS", 6.0)
+
+def _vc_neighbor_tail_ms() -> float:
+    return _env_float("UTOA_KR_VC_NEIGHBOR_TAIL_MS", 8.0)
+
+def _vc_neighbor_min_len() -> float:
+    return _env_float("UTOA_KR_VC_NEIGHBOR_MIN_LEN", 35.0)
+
 
 def _get_overlap_key(prev_type: str, next_type: str) -> str:
     if prev_type in _BRIDGE_TYPES and next_type in _CV_TYPES:
@@ -213,6 +236,93 @@ def enforce_adjacent_continuity(
     return changed
 
 
+def adjust_vc_neighbor_alignment(
+    rows: List[Dict[str, object]],
+    row_types: List[str],
+    validate_fn: Callable,
+) -> int:
+    """
+    Soft-align VC rows using immediate neighbor timing.
+    - offset is nudged toward previous row cutoff (end)
+    - cutoff is nudged toward next row offset (start)
+    """
+    if not _vc_neighbor_enabled():
+        return 0
+
+    changed = 0
+    blend = _vc_neighbor_blend()
+    max_shift = _vc_neighbor_max_shift()
+    lead_ms = _vc_neighbor_lead_ms()
+    tail_ms = _vc_neighbor_tail_ms()
+    min_len = _vc_neighbor_min_len()
+
+    def _row_state(row: Dict[str, object]) -> Tuple[float, float, float, float, float]:
+        return (
+            float(row["offset"]),
+            float(row["cons"]),
+            float(row["cutoff"]),
+            float(row["pre"]),
+            float(row["ovl"]),
+        )
+
+    def _validate_row(
+        row: Dict[str, object],
+        alias_type: str,
+        before_state: Tuple[float, float, float, float, float],
+    ) -> bool:
+        row["offset"], row["cons"], row["cutoff"], row["pre"], row["ovl"] = validate_fn(
+            row["offset"],
+            row["cons"],
+            row["cutoff"],
+            row["pre"],
+            row["ovl"],
+            alias_type=alias_type,
+        )
+        after_state = _row_state(row)
+        return any(abs(a - b) > 1e-6 for a, b in zip(before_state, after_state))
+
+    for i in range(1, len(rows) - 1):
+        if row_types[i] != "vc":
+            continue
+        prev_type = row_types[i - 1]
+        next_type = row_types[i + 1]
+        if prev_type == "br" or next_type == "br":
+            continue
+
+        prev_row = rows[i - 1]
+        row = rows[i]
+        next_row = rows[i + 1]
+
+        prev_end = float(prev_row["offset"]) + abs(float(prev_row["cutoff"]))
+        next_offset = float(next_row["offset"])
+        if next_offset <= 0.0 or prev_end <= 0.0:
+            continue
+
+        before_state = _row_state(row)
+
+        # Offset: pull toward previous cutoff end (slightly earlier)
+        target_off = max(0.0, prev_end - lead_ms)
+        delta_off = target_off - float(row["offset"])
+        if abs(delta_off) > 1e-6:
+            delta_off = _clamp(delta_off, -max_shift, max_shift)
+            row["offset"] = max(0.0, float(row["offset"]) + delta_off * blend)
+
+        # Cutoff: pull toward next offset (slightly earlier than next onset)
+        next_limit = next_offset - tail_ms
+        if next_limit > float(row["offset"]) + min_len:
+            curr_cut_abs = abs(float(row["cutoff"]))
+            target_cut_abs = max(float(row["cons"]) + 8.0, next_limit - float(row["offset"]))
+            delta_cut = target_cut_abs - curr_cut_abs
+            if abs(delta_cut) > 1e-6:
+                delta_cut = _clamp(delta_cut, -max_shift, max_shift)
+                new_cut_abs = max(float(row["cons"]) + 8.0, curr_cut_abs + delta_cut * blend)
+                row["cutoff"] = -new_cut_abs
+
+        if _validate_row(row, "vc", before_state):
+            changed += 1
+
+    return changed
+
 _SMOOTHING_THRESHOLD_RATIO = 0.30
 _SMOOTHING_BLEND_WEIGHT = 0.25
 
@@ -329,6 +439,7 @@ def apply_file_consistency_to_oto_file(
 
     stats = {
         "continuity_changed": 0,
+        "vc_neighbor_changed": 0,
         "smoothing_changed": 0,
         "validation_changed": 0,
         "total_changed": 0,
@@ -367,11 +478,12 @@ def apply_file_consistency_to_oto_file(
         row_types = [_classify_cached(str(row["alias"]), alias_cache, custom_map) for row in ordered_rows]
 
         stats["continuity_changed"] += enforce_adjacent_continuity(ordered_rows, row_types, validate_fn)
+        stats["vc_neighbor_changed"] += adjust_vc_neighbor_alignment(ordered_rows, row_types, validate_fn)
         stats["smoothing_changed"] += smooth_abrupt_changes(ordered_rows, row_types, validate_fn)
         stats["validation_changed"] += apply_file_level_validation(ordered_rows, row_types, validate_fn)
 
     stats["total_changed"] = (
-        stats["continuity_changed"] + stats["smoothing_changed"] + stats["validation_changed"]
+        stats["continuity_changed"] + stats["vc_neighbor_changed"] + stats["smoothing_changed"] + stats["validation_changed"]
     )
     if stats["total_changed"] <= 0:
         return stats
@@ -387,6 +499,7 @@ def apply_file_consistency_to_oto_file(
     if callable(log_fn):
         log_fn(
             f"[FileConsistency] continuity={stats['continuity_changed']}, "
+            f"vc_neighbor={stats['vc_neighbor_changed']}, "
             f"smoothing={stats['smoothing_changed']}, "
             f"validation={stats['validation_changed']}"
         )
@@ -396,6 +509,7 @@ def apply_file_consistency_to_oto_file(
 
 __all__ = [
     "apply_file_consistency_to_oto_file",
+    "adjust_vc_neighbor_alignment",
     "enforce_adjacent_continuity",
     "smooth_abrupt_changes",
     "apply_file_level_validation",

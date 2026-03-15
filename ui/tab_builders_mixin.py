@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import os
 
 import customtkinter as ctk
@@ -174,6 +174,14 @@ class TabBuildersMixin:
                     command=self._save_config,
                 )
                 self.gen_missing_vowels_checkbox.pack(anchor="w", pady=(5, 0))
+                self.gen_dash_alias_checkbox = ctk.CTkCheckBox(
+                    opt_frame,
+                    text="어두/어미 '-' 에일리어스 생성",
+                    text_color="#B0BEC5",
+                    variable=self.gen_dash_alias_var,
+                    command=self._save_config,
+                )
+                self.gen_dash_alias_checkbox.pack(anchor="w", pady=(5, 0))
 
                 ctk.CTkLabel(
                     opt_frame,
@@ -408,11 +416,11 @@ class TabBuildersMixin:
         model_conf_grid = ctk.CTkFrame(ml_frame, fg_color="transparent")
         model_conf_grid.pack(anchor="w", padx=12, pady=(4, 0), fill="x")
 
-        def _add_min_conf_field(parent, label, var):
+        def _add_min_conf_field(parent, label, var, placeholder):
             row = ctk.CTkFrame(parent, fg_color="transparent")
             row.pack(side="left", padx=(0, 10))
             ctk.CTkLabel(row, text=label, text_color="#B0BEC5").pack(side="left")
-            ent = ctk.CTkEntry(row, width=68, textvariable=var, placeholder_text="auto")
+            ent = ctk.CTkEntry(row, width=78, textvariable=var, placeholder_text=placeholder)
             ent.pack(side="left", padx=(6, 0))
             ent.bind("<FocusOut>", lambda _e: self._save_config())
             return ent
@@ -420,18 +428,18 @@ class TabBuildersMixin:
         kr_row = ctk.CTkFrame(model_conf_grid, fg_color="transparent")
         kr_row.pack(anchor="w", fill="x", pady=(0, 2))
         ctk.CTkLabel(kr_row, text="KR", text_color="#80CBC4", width=26, anchor="w").pack(side="left")
-        _add_min_conf_field(kr_row, "CV", self.ml_coupled_min_conf_kr_cv_var)
-        _add_min_conf_field(kr_row, "CVC", self.ml_coupled_min_conf_kr_cvc_var)
-        _add_min_conf_field(kr_row, "CVVC", self.ml_coupled_min_conf_kr_cvvc_var)
-        _add_min_conf_field(kr_row, "VCV", self.ml_coupled_min_conf_kr_vcv_var)
+        _add_min_conf_field(kr_row, "CV", self.ml_coupled_min_conf_kr_cv_var, "0.55")
+        _add_min_conf_field(kr_row, "CVC", self.ml_coupled_min_conf_kr_cvc_var, "0.75")
+        _add_min_conf_field(kr_row, "CVVC", self.ml_coupled_min_conf_kr_cvvc_var, "0.78")
+        _add_min_conf_field(kr_row, "VCV", self.ml_coupled_min_conf_kr_vcv_var, "0.72")
 
         ja_row = ctk.CTkFrame(model_conf_grid, fg_color="transparent")
         ja_row.pack(anchor="w", fill="x", pady=(0, 2))
         ctk.CTkLabel(ja_row, text="JA", text_color="#80CBC4", width=26, anchor="w").pack(side="left")
-        _add_min_conf_field(ja_row, "CV", self.ml_coupled_min_conf_ja_cv_var)
-        _add_min_conf_field(ja_row, "CVC", self.ml_coupled_min_conf_ja_cvc_var)
-        _add_min_conf_field(ja_row, "CVVC", self.ml_coupled_min_conf_ja_cvvc_var)
-        _add_min_conf_field(ja_row, "VCV", self.ml_coupled_min_conf_ja_vcv_var)
+        _add_min_conf_field(ja_row, "CV", self.ml_coupled_min_conf_ja_cv_var, "0.40")
+        _add_min_conf_field(ja_row, "CVC", self.ml_coupled_min_conf_ja_cvc_var, "0.50")
+        _add_min_conf_field(ja_row, "CVVC", self.ml_coupled_min_conf_ja_cvvc_var, "0.72")
+        _add_min_conf_field(ja_row, "VCV", self.ml_coupled_min_conf_ja_vcv_var, "0.65")
 
         backend_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
         backend_row.pack(anchor="w", padx=12, pady=(6, 8), fill="x")
@@ -626,65 +634,246 @@ class TabBuildersMixin:
         ).pack(anchor="w", padx=12, pady=(10, 10))
 
     def _build_profile_tune_tab(self):
-        tab = self.tabview.add("🎯 프로파일 미세 조정")
-        self.tune_auto_oto_var = ctk.StringVar(value="")
-        self.tune_manual_oto_var = ctk.StringVar(value="")
-        self.tune_profile_out_var = ctk.StringVar(value="")
-        self.tune_apply_target_var = ctk.StringVar(value="")
+        tab = self.tabview.add("보정값 조절")
+        scroll = ctk.CTkScrollableFrame(tab)
+        scroll.pack(fill="both", expand=True, padx=5, pady=5)
 
-        container = ctk.CTkScrollableFrame(tab)
-        container.pack(fill="both", expand=True, padx=10, pady=10)
+        self.param_vars = {}
+        param_groups = [
+            (
+                "VC 보정값",
+                [
+                    ("VC_CONSONANT_RATIO", "VC 자음 비율", 0.1, 1.0, 0.05),
+                    ("VC_VOWEL_START", "VC 모음 시작 비율", 0.1, 1.0, 0.05),
+                    ("VC_PRE_OFFSET", "VC pre 오프셋 (ms)", 0, 50, 1),
+                    ("VC_OVL_RATIO", "VC overlap 비율", 0.1, 1.0, 0.05),
+                ],
+            ),
+            (
+                "CV 보정값",
+                [
+                    ("CV_PRE_RATIO", "CV pre 비율", 0.1, 1.0, 0.05),
+                    ("CV_OVL_RATIO", "CV overlap 비율", 0.1, 1.0, 0.05),
+                ],
+            ),
+            (
+                "이중모음 CV 보정값",
+                [
+                    ("DIPHTHONG_CV_PRE_RATIO", "이중모음 CV pre 비율", 0.1, 1.0, 0.05),
+                    ("DIPHTHONG_CV_CONSONANT_RATIO", "이중모음 CV 자음 비율", 0.1, 1.0, 0.05),
+                ],
+            ),
+            (
+                "이중모음 VC 보정값",
+                [
+                    ("DIPHTHONG_VC_VOWEL_START", "이중모음 VC 모음 시작", 0.1, 1.0, 0.05),
+                    ("DIPHTHONG_VC_CONSONANT", "이중모음 VC 자음 비율", 0.1, 1.0, 0.05),
+                ],
+            ),
+        ]
 
-        desc = "자동 생성 OTO와 수동 OTO를 비교해 보정 프로파일을 만들고, 다른 OTO에 적용할 수 있습니다."
-        ctk.CTkLabel(container, text=desc, text_color="gray", wraplength=760, justify="left").pack(
-            fill="x", padx=10, pady=(8, 12)
-        )
+        for group_name, params in param_groups:
+            ctk.CTkLabel(scroll, text=group_name, font=("", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 5))
+            for key, label, min_val, max_val, step in params:
+                row = ctk.CTkFrame(scroll, fg_color="transparent")
+                row.pack(fill="x", padx=15, pady=2)
+                default = DEFAULT_PARAMS.get(key, 0.5)
+                var = ctk.DoubleVar(value=default)
+                self.param_vars[key] = var
+                ctk.CTkLabel(row, text=label, width=250, anchor="w").pack(side="left")
+                val_label = ctk.CTkLabel(row, text=f"{default:.2f}", width=50)
+                val_label.pack(side="right", padx=(5, 0))
+                slider = ctk.CTkSlider(
+                    row,
+                    from_=min_val,
+                    to=max_val,
+                    number_of_steps=int((max_val - min_val) / step),
+                    variable=var,
+                    command=lambda v, lbl=val_label: lbl.configure(text=f"{v:.2f}"),
+                )
+                slider.pack(side="right", fill="x", expand=True, padx=5)
 
-        def _row(parent, label, var, browse_cmd):
+        def _on_env_slider_change(value, var, label_widget, fmt):
+            try:
+                val = float(value)
+            except Exception:
+                return
+            label_widget.configure(text=fmt.format(val))
+            var.set(f"{val:.3f}".rstrip("0").rstrip("."))
+            self._save_config()
+
+        def _add_env_slider(parent, label, env_key, var, *, min_val, max_val, step, default_val, fmt):
             row = ctk.CTkFrame(parent, fg_color="transparent")
-            row.pack(fill="x", padx=10, pady=4)
-            ctk.CTkLabel(row, text=label, width=170, anchor="w").pack(side="left")
-            ent = ctk.CTkEntry(row, textvariable=var)
-            ent.pack(side="left", fill="x", expand=True, padx=(5, 5))
-            ctk.CTkButton(row, text="찾아보기", width=90, command=browse_cmd).pack(side="right")
-            return ent
+            row.pack(fill="x", padx=15, pady=2)
+            ctk.CTkLabel(row, text=label, width=230, anchor="w").pack(side="left")
+            try:
+                raw = str(var.get() or "").strip()
+                current = float(raw) if raw else float(default_val)
+            except Exception:
+                current = float(default_val)
+            dvar = ctk.DoubleVar(value=current)
+            val_label = ctk.CTkLabel(row, text=fmt.format(current), width=60)
+            val_label.pack(side="right", padx=(6, 0))
+            slider = ctk.CTkSlider(
+                row,
+                from_=min_val,
+                to=max_val,
+                number_of_steps=int(round((max_val - min_val) / step)),
+                variable=dvar,
+                command=lambda v, lbl=val_label: _on_env_slider_change(v, var, lbl, fmt),
+            )
+            slider.pack(side="right", fill="x", expand=True, padx=8)
+            ctk.CTkLabel(
+                row,
+                text=f"환경변수: {env_key}",
+                text_color="#9E9E9E",
+                anchor="w",
+            ).pack(side="left", padx=(6, 0))
+            return slider
 
-        _row(
-            container,
-            "자동 OTO (.ini):",
-            self.tune_auto_oto_var,
-            lambda: self._browse_file_by_var(self.tune_auto_oto_var, [("OTO 파일", "*.ini"), ("All", "*.*")]),
+        def _add_env_toggle(parent, label, env_key, var):
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", padx=15, pady=2)
+            ctk.CTkCheckBox(
+                row,
+                text=label,
+                variable=var,
+                command=self._save_config,
+            ).pack(side="left")
+            ctk.CTkLabel(
+                row,
+                text=f"환경변수: {env_key}",
+                text_color="#9E9E9E",
+                anchor="w",
+            ).pack(side="left", padx=(10, 0))
+
+        ctk.CTkLabel(scroll, text="VC 이웃 보정 (환경변수)", font=("", 14, "bold")).pack(
+            anchor="w", padx=10, pady=(14, 6)
         )
-        _row(
-            container,
-            "수동 OTO (.ini):",
-            self.tune_manual_oto_var,
-            lambda: self._browse_file_by_var(self.tune_manual_oto_var, [("OTO 파일", "*.ini"), ("All", "*.*")]),
+        ctk.CTkLabel(
+            scroll,
+            text="VC 오프셋/컷오프를 이웃 행의 컷오프/오프셋 기준으로 완만히 맞춥니다.",
+            text_color="#9E9E9E",
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(0, 6))
+
+        kr_box = ctk.CTkFrame(scroll)
+        kr_box.pack(fill="x", padx=10, pady=(2, 8))
+        ctk.CTkLabel(kr_box, text="한국어 (KR)", font=("", 13, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
+        _add_env_toggle(kr_box, "VC 이웃 보정 사용", "UTOA_KR_VC_NEIGHBOR_ENABLE", self.kr_vc_neighbor_enable_var)
+        _add_env_slider(
+            kr_box,
+            "보정 강도(Blend)",
+            "UTOA_KR_VC_NEIGHBOR_BLEND",
+            self.kr_vc_neighbor_blend_var,
+            min_val=0.0,
+            max_val=1.0,
+            step=0.01,
+            default_val=0.35,
+            fmt="{:.2f}",
         )
-        _row(
-            container,
-            "프로파일 저장 경로:",
-            self.tune_profile_out_var,
-            lambda: self._browse_save_by_var(self.tune_profile_out_var, [("JSON 파일", "*.json"), ("All", "*.*")], ".json"),
+        _add_env_slider(
+            kr_box,
+            "최대 이동(ms)",
+            "UTOA_KR_VC_NEIGHBOR_MAX_SHIFT",
+            self.kr_vc_neighbor_max_shift_var,
+            min_val=0.0,
+            max_val=200.0,
+            step=1.0,
+            default_val=45.0,
+            fmt="{:.0f}",
         )
-        _row(
-            container,
-            "적용 대상 OTO:",
-            self.tune_apply_target_var,
-            lambda: self._browse_file_by_var(self.tune_apply_target_var, [("OTO 파일", "*.ini"), ("All", "*.*")]),
+        _add_env_slider(
+            kr_box,
+            "이전 컷오프 기준 여유(ms)",
+            "UTOA_KR_VC_NEIGHBOR_LEAD_MS",
+            self.kr_vc_neighbor_lead_ms_var,
+            min_val=0.0,
+            max_val=80.0,
+            step=1.0,
+            default_val=6.0,
+            fmt="{:.0f}",
+        )
+        _add_env_slider(
+            kr_box,
+            "다음 오프셋 기준 여유(ms)",
+            "UTOA_KR_VC_NEIGHBOR_TAIL_MS",
+            self.kr_vc_neighbor_tail_ms_var,
+            min_val=0.0,
+            max_val=80.0,
+            step=1.0,
+            default_val=8.0,
+            fmt="{:.0f}",
+        )
+        _add_env_slider(
+            kr_box,
+            "최소 VC 길이(ms)",
+            "UTOA_KR_VC_NEIGHBOR_MIN_LEN",
+            self.kr_vc_neighbor_min_len_var,
+            min_val=0.0,
+            max_val=200.0,
+            step=1.0,
+            default_val=35.0,
+            fmt="{:.0f}",
         )
 
-        tip = "프로파일 생성만 할 경우 적용 대상 OTO는 비워도 됩니다. 적용 대상을 지정하면 바로 보정 적용까지 수행합니다."
-        ctk.CTkLabel(container, text=tip, text_color="#9E9E9E", wraplength=760, justify="left").pack(
-            fill="x", padx=10, pady=(8, 12)
+        ja_box = ctk.CTkFrame(scroll)
+        ja_box.pack(fill="x", padx=10, pady=(2, 8))
+        ctk.CTkLabel(ja_box, text="일본어 (JA)", font=("", 13, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
+        _add_env_toggle(ja_box, "VC 이웃 보정 사용", "UTOA_JA_VC_NEIGHBOR_ENABLE", self.ja_vc_neighbor_enable_var)
+        _add_env_slider(
+            ja_box,
+            "보정 강도(Blend)",
+            "UTOA_JA_VC_NEIGHBOR_BLEND",
+            self.ja_vc_neighbor_blend_var,
+            min_val=0.0,
+            max_val=1.0,
+            step=0.01,
+            default_val=0.35,
+            fmt="{:.2f}",
         )
-
-        btn_row = ctk.CTkFrame(container, fg_color="transparent")
-        btn_row.pack(fill="x", padx=10, pady=(2, 8))
-        ctk.CTkButton(
-            btn_row,
-            text="프로파일 생성 + 적용",
-            height=38,
-            font=("", 14, "bold"),
-            command=self._run_profile_finetune,
-        ).pack(side="right")
+        _add_env_slider(
+            ja_box,
+            "최대 이동(ms)",
+            "UTOA_JA_VC_NEIGHBOR_MAX_SHIFT",
+            self.ja_vc_neighbor_max_shift_var,
+            min_val=0.0,
+            max_val=200.0,
+            step=1.0,
+            default_val=45.0,
+            fmt="{:.0f}",
+        )
+        _add_env_slider(
+            ja_box,
+            "이전 컷오프 기준 여유(ms)",
+            "UTOA_JA_VC_NEIGHBOR_LEAD_MS",
+            self.ja_vc_neighbor_lead_ms_var,
+            min_val=0.0,
+            max_val=80.0,
+            step=1.0,
+            default_val=6.0,
+            fmt="{:.0f}",
+        )
+        _add_env_slider(
+            ja_box,
+            "다음 오프셋 기준 여유(ms)",
+            "UTOA_JA_VC_NEIGHBOR_TAIL_MS",
+            self.ja_vc_neighbor_tail_ms_var,
+            min_val=0.0,
+            max_val=80.0,
+            step=1.0,
+            default_val=8.0,
+            fmt="{:.0f}",
+        )
+        _add_env_slider(
+            ja_box,
+            "최소 VC 길이(ms)",
+            "UTOA_JA_VC_NEIGHBOR_MIN_LEN",
+            self.ja_vc_neighbor_min_len_var,
+            min_val=0.0,
+            max_val=200.0,
+            step=1.0,
+            default_val=35.0,
+            fmt="{:.0f}",
+        )

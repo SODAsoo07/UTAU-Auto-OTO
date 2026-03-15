@@ -154,13 +154,17 @@ def _should_retry_mfa_with_fallback(err: str) -> bool:
 def _preferred_mfa_profiles_for_prepare(language: str) -> list[str]:
     raw = str(os.environ.get("UTOA_ML_PREPARE_MFA_PROFILE", "")).strip().lower()
     valid = ["default", "accurate", "fast"]
-    if raw in valid:
-        return [raw] + [p for p in valid if p != raw]
+    primary = raw if raw in valid else ("default" if str(language or "").strip().lower() == "korean" else "accurate")
 
-    lang = str(language or "").strip().lower()
-    if lang == "korean":
-        return ["default", "accurate", "fast"]
-    return ["accurate", "default", "fast"]
+    # Retry policy: one retry at most (total max 2 attempts).
+    fallback = "fast"
+    if primary == "fast":
+        fallback = "default"
+    elif primary == "accurate":
+        fallback = "default"
+    if fallback == primary:
+        return [primary]
+    return [primary, fallback]
 
 
 def _run_mfa_align_with_fallbacks(

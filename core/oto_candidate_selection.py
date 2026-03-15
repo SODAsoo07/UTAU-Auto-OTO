@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 
 def build_candidate_index(candidates):
     return {
@@ -41,15 +43,40 @@ def select_primary_mapping_candidate(
             mapping_reason_code = str(selected_candidate.get("name", ""))
     else:
         stage1_pool = list(candidates)
-        if fmt in {"cvvc", "cv"}:
+        if fmt in {"cvvc", "cv", "vcv"}:
             order_pool = [c for c in candidates if c.get("order_preserving")]
             if order_pool:
-                stage1_pool = order_pool
+                # Relax order-preserving lock if the best ordered candidate is low quality
+                # and a non-ordered candidate is significantly better.
+                def _env_float(name, default):
+                    raw = os.getenv(name)
+                    try:
+                        return float(raw)
+                    except (TypeError, ValueError):
+                        return float(default)
+
+                relax_conf_max = _env_float("UTOA_JA_ORDER_LOCK_RELAX_CONF_MAX", 0.35)
+                relax_conf_gain = _env_float("UTOA_JA_ORDER_LOCK_RELAX_CONF_GAIN", 0.12)
+                relax_obj_gain = _env_float("UTOA_JA_ORDER_LOCK_RELAX_OBJ_GAIN", 6.0)
+
+                best_order = max(order_pool, key=lambda c: c.get("objective", -10**9))
+                best_any = max(candidates, key=lambda c: c.get("objective", -10**9))
+                if best_any is not best_order:
+                    order_conf = float(best_order.get("mean_syll_conf", 0.0) or 0.0)
+                    any_conf = float(best_any.get("mean_syll_conf", 0.0) or 0.0)
+                    obj_gain = float(best_any.get("objective", -10**9)) - float(best_order.get("objective", -10**9))
+                    conf_gain = any_conf - order_conf
+                    if order_conf < relax_conf_max and (conf_gain >= relax_conf_gain or obj_gain >= relax_obj_gain):
+                        stage1_pool = list(candidates)
+                    else:
+                        stage1_pool = order_pool
+                else:
+                    stage1_pool = order_pool
         selected_candidate = max(
             stage1_pool,
             key=lambda c: (
                 c.get("objective", -10**9)
-                + (3.0 if (fmt in {"cvvc", "cv"} and c.get("order_preserving")) else 0.0)
+                + (3.0 if (fmt in {"cvvc", "cv", "vcv"} and c.get("order_preserving")) else 0.0)
             ),
         )
         mapping_reason_code = str(selected_candidate.get("name", ""))

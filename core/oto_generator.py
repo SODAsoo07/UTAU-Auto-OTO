@@ -197,6 +197,29 @@ def _env_bool(name, default=False):
         return False
     return bool(default)
 
+def _debug_offset_trace(log_fn, stage, fname, alias, before, after, extra=""):
+    if not _env_bool("UTOA_DEBUG_OFFSET_TRACE", False):
+        return
+    try:
+        o0, p0, c0, cut0 = before
+        o1, p1, c1, cut1 = after
+        do = float(o1) - float(o0)
+        dp = float(p1) - float(p0)
+        dc = float(c1) - float(c0)
+        dcut = float(abs(float(cut1)) - abs(float(cut0)))
+        msg = (
+            f"[OffsetTrace] {stage} {fname} [{alias}] "
+            f"o:{o0:.1f}->{o1:.1f} ({do:+.1f}), "
+            f"p:{p0:.1f}->{p1:.1f} ({dp:+.1f}), "
+            f"c:{c0:.1f}->{c1:.1f} ({dc:+.1f}), "
+            f"cut:{abs(float(cut0)):.1f}->{abs(float(cut1)):.1f} ({dcut:+.1f})"
+        )
+        if extra:
+            msg = f"{msg} | {extra}"
+        log_fn(msg)
+    except Exception:
+        return
+
 __all__ = [
     "generate_oto",
     "validate_oto_params",
@@ -1272,13 +1295,19 @@ def _apply_post_timing_pipeline(
     base_cutoff = float(cutoff)
     base_pre = float(pre)
     base_ovl = float(ovl)
+    if _env_bool("UTOA_DISABLE_SOFT_MEL_GUARD", False):
+        def _noop_soft_mel_guard(_o, _c, _cut, _p, _v, *_args, **_kwargs):
+            return _o, _c, _cut, _p, _v, 0.0, 0.0
+        soft_guard_fn = _noop_soft_mel_guard
+    else:
+        soft_guard_fn = _apply_soft_mel_offset_cutoff_guard
     ctx = post_ctx or KrPostprocessContext(
         file_format=file_format,
         mel_ctx_for_file=mel_ctx_for_file,
         ph_intervals=ph_intervals,
         syllables_info=syllables_info,
         validate_fn=validate_oto_params,
-        soft_mel_guard_fn=_apply_soft_mel_offset_cutoff_guard,
+        soft_mel_guard_fn=soft_guard_fn,
         base_shape_blend_fn=_apply_base_shape_blend,
         stabilize_fn=_stabilize_params_to_phone_activity,
         recenter_fn=_recenter_kr_params_around_pre,
@@ -2000,13 +2029,19 @@ def generate_korean_phonemizer_aliases(base_alias, *, alias_type="", format_type
     a_type = str(alias_type or "").strip().lower()
     fmt = str(format_type or "").strip().lower()
     out = [alias]
+    dash_enabled = str(os.environ.get("UTOA_ENABLE_HEAD_TAIL_DASH_ALIAS", "1")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
     if a_type in {"cv", "mono"}:
-        if fmt in {"cv", "cvc", "cvvc", "vcv"}:
+        if dash_enabled and fmt in {"cv", "cvc", "cvvc", "vcv"}:
             out.extend([f"- {alias}", f"-{alias}"])
 
     elif a_type == "cv_head":
-        if alias.startswith("- "):
+        if dash_enabled and alias.startswith("- "):
             core = alias[2:].strip()
             if core:
                 out.append(f"-{core}")
@@ -4811,9 +4846,10 @@ def generate_oto(
                 if mel_ctx_for_file and alias_type == "cv":
                     pre_abs = float(offset) + float(pre)
                     mel_weight = _resolve_mel_onset_weight(alignment_weight, textgrid_trust_tier)
-                    if mel_weight > 0.0:
+                    if mel_weight > 0.0 and not _env_bool("UTOA_DISABLE_MEL_ONSET_SHIFT", False):
                         mel_onset = _estimate_mel_voiced_onset(mel_ctx_for_file, pre_abs)
                         if mel_onset is not None and abs(float(mel_onset) - pre_abs) <= 120.0:
+                            before = (offset, pre, consonant, cutoff)
                             (
                                 offset,
                                 consonant,
@@ -4831,7 +4867,18 @@ def generate_oto(
                                 weight=mel_weight,
                             )
                             row_mel_voiced_onset_ms = float(mel_onset)
+                            after = (offset, pre, consonant, cutoff)
+                            _debug_offset_trace(
+                                log,
+                                "mel_onset_shift",
+                                fname,
+                                alias,
+                                before,
+                                after,
+                                extra=f"mel={row_mel_voiced_onset_ms:.1f}",
+                            )
 
+                before_post = (offset, pre, consonant, cutoff)
                 (
                     offset,
                     consonant,
@@ -4842,6 +4889,7 @@ def generate_oto(
                     soft_cut_shift,
                     cutoff_reduced,
                 ) = _apply_post_timing_pipeline(
+                    # debug trace inside caller (before/after)
                     offset,
                     consonant,
                     cutoff,
@@ -4860,6 +4908,14 @@ def generate_oto(
                     enable_cutoff_guard=True,
                     post_ctx=kr_post_ctx,
                 )
+                _debug_offset_trace(
+                    log,
+                    "post_timing",
+                    fname,
+                    alias,
+                    before_post,
+                    (offset, pre, consonant, cutoff),
+                )
                 if (
                     alias_type == "cv"
                     and str(file_format or "").strip().lower() in {"cvvc", "cvc"}
@@ -4877,9 +4933,10 @@ def generate_oto(
                         alias_onset=alias_onset,
                         ipa_onset=ipa_onset,
                     )
-                if alias_type == "cv":
+                if alias_type == "cv" and not _env_bool("UTOA_DISABLE_CV_FOCUS_GUARD", False):
                     alias_onset = _extract_alias_onset(alias)
                     ipa_onset = curr_phones[0].mark if curr_phones else ""
+                    before_focus = (offset, pre, consonant, cutoff)
                     (
                         offset,
                         consonant,
@@ -4900,6 +4957,14 @@ def generate_oto(
                         n_end,
                         alias_onset=alias_onset,
                         ipa_onset=ipa_onset,
+                    )
+                    _debug_offset_trace(
+                        log,
+                        "cv_focus_guard",
+                        fname,
+                        alias,
+                        before_focus,
+                        (offset, pre, consonant, cutoff),
                     )
                     if (cv_offset_pulled >= 0.8) or (cv_cutoff_trimmed >= 0.8):
                         log(

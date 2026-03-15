@@ -33,6 +33,26 @@ JA_GLIDE_ONSETS = {"y", "w"}
 JA_FRICATIVE_ONSETS = {"h", "f", "v", "hy", "s", "z", "sh"}
 
 
+def _safe_validate_oto_params(offset, consonant, cutoff, pre, ovl):
+    """ja_oto_generator 순환 임포트/초기화 타이밍 이슈에 안전한 validate 래퍼."""
+    try:
+        from core.ja_oto_generator import validate_oto_params as _validate
+        return _validate(offset, consonant, cutoff, pre, ovl)
+    except Exception:
+        offset_v = max(float(offset), 0.0)
+        pre_v = max(float(pre), 0.0)
+        ovl_v = max(0.0, float(ovl))
+        consonant_v = max(float(consonant), 0.0)
+        if ovl_v > pre_v:
+            ovl_v = pre_v * 0.75
+        if consonant_v < pre_v:
+            consonant_v = pre_v + 20.0
+        cutoff_abs = abs(float(cutoff))
+        if cutoff_abs <= consonant_v:
+            cutoff_abs = consonant_v + 40.0
+        return offset_v, consonant_v, -cutoff_abs, pre_v, ovl_v
+
+
 def _ja_bridge_overlap_window(pre, consonant_hint="", mode="vc"):
     p = max(float(pre), 0.0)
     c = _clean_phone_mark(consonant_hint)
@@ -155,12 +175,10 @@ def _ja_precenter_gap_targets(alias_type, alias_text=""):
 
 
 def _recenter_ja_params_around_pre(offset, consonant, cutoff, pre, ovl, alias_type="cv", alias_text=""):
-    from core.ja_oto_generator import validate_oto_params
-
     targets = _ja_precenter_gap_targets(alias_type, alias_text)
     pre_v = max(float(pre), 0.0)
     if pre_v <= 0.0:
-        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+        return _safe_validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
     alias_type = str(alias_type or "cv").strip().lower()
     if alias_type == "vv":
@@ -190,7 +208,7 @@ def _recenter_ja_params_around_pre(offset, consonant, cutoff, pre, ovl, alias_ty
     ovl_new = max(0.0, pre_v - ovl_gap_new)
     cons_new = pre_v + cons_gap_new
     cutoff_new = -(cons_new + cut_gap_new)
-    return validate_oto_params(offset, cons_new, cutoff_new, pre_v, ovl_new)
+    return _safe_validate_oto_params(offset, cons_new, cutoff_new, pre_v, ovl_new)
 
 
 def _apply_vc_vv_mel_cutoff_cap(
@@ -207,7 +225,7 @@ def _apply_vc_vv_mel_cutoff_cap(
 ):
     a_type = str(alias_type or "").strip().lower()
     if a_type not in {"vc", "vv"}:
-        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+        return _safe_validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
     max_cut_allow = None
     try:
@@ -235,7 +253,7 @@ def _apply_vc_vv_mel_cutoff_cap(
             pass
 
     if max_cut_abs is None:
-        return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+        return _safe_validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
     max_cut_rel = max_cut_abs - float(offset)
     min_cut_rel = float(consonant) + 20.0
@@ -247,7 +265,7 @@ def _apply_vc_vv_mel_cutoff_cap(
         cutoff = -cut_abs
         if float(consonant) > cut_abs - 6.0:
             consonant = max(float(pre) + 8.0, cut_abs - 6.0)
-    return validate_oto_params(offset, consonant, cutoff, pre, ovl)
+    return _safe_validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
 
 def _adaptive_ja_overlap(pre, consonant_hint="", mode="cv"):

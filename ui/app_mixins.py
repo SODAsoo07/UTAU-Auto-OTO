@@ -695,6 +695,7 @@ class ConfigMixin:
             "alias_suffix": self.alias_suffix_var.get(),
             "openutau_compatible": self.openutau_var.get(),
             "gen_missing_vowels": self.gen_missing_vowels_var.get(),
+            "gen_dash_alias": self.gen_dash_alias_var.get() if hasattr(self, "gen_dash_alias_var") else True,
             "no_base_oto": self.no_base_oto_var.get(),
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
             "ml_route": self.ml_route_var.get() if hasattr(self, "ml_route_var") else "autofree_v1",
@@ -720,6 +721,18 @@ class ConfigMixin:
             "ml_anchor_mel_gamma": self.ml_anchor_mel_gamma_var.get() if hasattr(self, "ml_anchor_mel_gamma_var") else "",
             "ml_model_root_kr": self.ml_model_root_kr_var.get() if hasattr(self, "ml_model_root_kr_var") else "",
             "ml_model_root_ja": self.ml_model_root_ja_var.get() if hasattr(self, "ml_model_root_ja_var") else "",
+            "kr_vc_neighbor_enable": self.kr_vc_neighbor_enable_var.get() if hasattr(self, "kr_vc_neighbor_enable_var") else True,
+            "kr_vc_neighbor_blend": self.kr_vc_neighbor_blend_var.get() if hasattr(self, "kr_vc_neighbor_blend_var") else "",
+            "kr_vc_neighbor_max_shift": self.kr_vc_neighbor_max_shift_var.get() if hasattr(self, "kr_vc_neighbor_max_shift_var") else "",
+            "kr_vc_neighbor_lead_ms": self.kr_vc_neighbor_lead_ms_var.get() if hasattr(self, "kr_vc_neighbor_lead_ms_var") else "",
+            "kr_vc_neighbor_tail_ms": self.kr_vc_neighbor_tail_ms_var.get() if hasattr(self, "kr_vc_neighbor_tail_ms_var") else "",
+            "kr_vc_neighbor_min_len": self.kr_vc_neighbor_min_len_var.get() if hasattr(self, "kr_vc_neighbor_min_len_var") else "",
+            "ja_vc_neighbor_enable": self.ja_vc_neighbor_enable_var.get() if hasattr(self, "ja_vc_neighbor_enable_var") else True,
+            "ja_vc_neighbor_blend": self.ja_vc_neighbor_blend_var.get() if hasattr(self, "ja_vc_neighbor_blend_var") else "",
+            "ja_vc_neighbor_max_shift": self.ja_vc_neighbor_max_shift_var.get() if hasattr(self, "ja_vc_neighbor_max_shift_var") else "",
+            "ja_vc_neighbor_lead_ms": self.ja_vc_neighbor_lead_ms_var.get() if hasattr(self, "ja_vc_neighbor_lead_ms_var") else "",
+            "ja_vc_neighbor_tail_ms": self.ja_vc_neighbor_tail_ms_var.get() if hasattr(self, "ja_vc_neighbor_tail_ms_var") else "",
+            "ja_vc_neighbor_min_len": self.ja_vc_neighbor_min_len_var.get() if hasattr(self, "ja_vc_neighbor_min_len_var") else "",
             "ja_mapping_words_fallback_enabled": self.ja_mapping_words_fallback_enabled_var.get() if hasattr(self, "ja_mapping_words_fallback_enabled_var") else True,
             "ja_mapping_spn_ratio_threshold": self.ja_mapping_spn_ratio_threshold_var.get() if hasattr(self, "ja_mapping_spn_ratio_threshold_var") else 0.35,
             "ja_mapping_min_vowel_phone_ratio": self.ja_mapping_min_vowel_phone_ratio_var.get() if hasattr(self, "ja_mapping_min_vowel_phone_ratio_var") else 0.5,
@@ -735,7 +748,8 @@ class ConfigMixin:
             "ja_alias_style": self.ja_alias_style_var.get(),
             "show_advanced_aligner": self.show_advanced_aligner_var.get() if hasattr(self, "show_advanced_aligner_var") else False,
             "aligner": self.aligner_var.get(),
-            "mfa_align_profile": self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "기본",
+            "mfa_align_profile": self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "\uae30\ubcf8",
+            "mfa_align_profile_code": self._get_mfa_align_profile_code() if hasattr(self, "_get_mfa_align_profile_code") else "default",
             "whisperx_profile": self.whisperx_profile_var.get() if hasattr(self, "whisperx_profile_var") else "balanced",
             "whisperx_device": self.whisperx_device_var.get() if hasattr(self, "whisperx_device_var") else "auto",
             "whisperx_compute_type": self.whisperx_compute_type_var.get() if hasattr(self, "whisperx_compute_type_var") else "int8",
@@ -780,6 +794,8 @@ class ConfigMixin:
                 self.openutau_var.set(bool(config.get("openutau_compatible", False)))
             if "gen_missing_vowels" in config and hasattr(self, "gen_missing_vowels_var"):
                 self.gen_missing_vowels_var.set(bool(config.get("gen_missing_vowels", True)))
+            if "gen_dash_alias" in config and hasattr(self, "gen_dash_alias_var"):
+                self.gen_dash_alias_var.set(bool(config.get("gen_dash_alias", True)))
             if "no_base_oto" in config and hasattr(self, "no_base_oto_var"):
                 self.no_base_oto_var.set(bool(config.get("no_base_oto", False)))
             if hasattr(self, "enable_ml_correction_var"):
@@ -815,19 +831,36 @@ class ConfigMixin:
                 self.aligner_var.set("No-MFA (Experimental)" if saved_aligner == "none" else "MFA")
             if hasattr(self, "show_advanced_aligner_var"):
                 self.show_advanced_aligner_var.set(False)
-            if "mfa_align_profile" in config and hasattr(self, "mfa_align_profile_var"):
-                saved_profile = str(config.get("mfa_align_profile", "기본") or "").strip()
-                legacy_to_current = {
-                    "정확도 우선 (기본)": "기본",
-                    "default": "기본",
-                    "accurate": "정확도 우선",
-                    "accurate_adapted": "정확도 우선",
-                    "speaker_adapted": "정확도 우선",
-                    "fast": "빠름 (저사양 추천)",
-                }
-                saved_profile = legacy_to_current.get(saved_profile, saved_profile)
-                if saved_profile in {"기본", "정확도 우선", "빠름 (저사양 추천)"}:
-                    self.mfa_align_profile_var.set(saved_profile)
+            if hasattr(self, "mfa_align_profile_var"):
+                saved_profile_raw = str(
+                    config.get(
+                        "mfa_align_profile_code",
+                        config.get("mfa_align_profile", "\uae30\ubcf8"),
+                    )
+                    or ""
+                ).strip()
+                compact = saved_profile_raw.lower().replace(" ", "")
+                if compact in {
+                    "\ube60\ub984".replace(" ", ""),
+                    "\ube60\ub984(\uc800\uc0ac\uc591\ucd94\ucc9c)".replace(" ", ""),
+                    "fast",
+                    "quick",
+                    "lite",
+                    "speed",
+                }:
+                    self.mfa_align_profile_var.set("\ube60\ub984")
+                elif compact in {
+                    "\uc815\ubc00".replace(" ", ""),
+                    "\uc815\ud655\ub3c4\uc6b0\uc120".replace(" ", ""),
+                    "accurate",
+                    "accurate_adapted",
+                    "speaker_adapted",
+                    "adapt",
+                    "speaker",
+                }:
+                    self.mfa_align_profile_var.set("\uc815\ubc00")
+                else:
+                    self.mfa_align_profile_var.set("\uae30\ubcf8")
             if "whisperx_profile" in config and hasattr(self, "whisperx_profile_var"):
                 profile = str(config.get("whisperx_profile", "balanced") or "balanced").strip().lower()
                 if profile in {"low_load", "balanced", "high_accuracy"}:
@@ -992,6 +1025,41 @@ class ConfigMixin:
                                 )
                         except Exception:
                             self.ml_anchor_mel_gamma_var.set("")
+            if "kr_vc_neighbor_enable" in config and hasattr(self, "kr_vc_neighbor_enable_var"):
+                self.kr_vc_neighbor_enable_var.set(bool(config.get("kr_vc_neighbor_enable", True)))
+            if "ja_vc_neighbor_enable" in config and hasattr(self, "ja_vc_neighbor_enable_var"):
+                self.ja_vc_neighbor_enable_var.set(bool(config.get("ja_vc_neighbor_enable", True)))
+            vc_neighbor_defaults = {
+                "kr_vc_neighbor_blend": (self.kr_vc_neighbor_blend_var, 0.35),
+                "kr_vc_neighbor_max_shift": (self.kr_vc_neighbor_max_shift_var, 45.0),
+                "kr_vc_neighbor_lead_ms": (self.kr_vc_neighbor_lead_ms_var, 6.0),
+                "kr_vc_neighbor_tail_ms": (self.kr_vc_neighbor_tail_ms_var, 8.0),
+                "kr_vc_neighbor_min_len": (self.kr_vc_neighbor_min_len_var, 35.0),
+                "ja_vc_neighbor_blend": (self.ja_vc_neighbor_blend_var, 0.35),
+                "ja_vc_neighbor_max_shift": (self.ja_vc_neighbor_max_shift_var, 45.0),
+                "ja_vc_neighbor_lead_ms": (self.ja_vc_neighbor_lead_ms_var, 6.0),
+                "ja_vc_neighbor_tail_ms": (self.ja_vc_neighbor_tail_ms_var, 8.0),
+                "ja_vc_neighbor_min_len": (self.ja_vc_neighbor_min_len_var, 35.0),
+            }
+            for key, (var, default_val) in vc_neighbor_defaults.items():
+                if key not in config:
+                    continue
+                raw_val = config.get(key, "")
+                if raw_val is None:
+                    var.set("")
+                    continue
+                txt = str(raw_val).strip()
+                if not txt:
+                    var.set("")
+                    continue
+                try:
+                    val = float(txt)
+                    if abs(val - float(default_val)) <= 1e-9:
+                        var.set("")
+                    else:
+                        var.set(f"{val:.3f}".rstrip("0").rstrip("."))
+                except Exception:
+                    var.set("")
             if "ml_coupled_device" in config and hasattr(self, "ml_coupled_device_var"):
                 device = str(config.get("ml_coupled_device", "auto") or "auto").strip().lower()
                 if device in {"auto", "cpu", "cuda"}:
@@ -1033,3 +1101,4 @@ class ConfigMixin:
                         self.param_vars[key].set(val)
         except Exception as e:
             self.logger.error(f"설정 불러오기 실패: {e}")
+

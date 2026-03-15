@@ -49,6 +49,11 @@ python -X utf8 .\ml\scripts\coupled\build_mel_patch_cache.py `
   --dataset-root ".\dataset_staged" `
   --allow-missing
 
+python -X utf8 .\ml\scripts\coupled\build_mel_patch_cache.py `
+  --dataset ".\ml_workspace\datasets\japanese\dataset_japanese_cvvc.csv" `
+  --dataset-root ".\dataset_staged" `
+  --allow-missing
+
 ## 5) 단일 형식 학습 (예: KR CVC, v2 rawmel)
 ```powershell
 python -X utf8 ml\scripts\coupled\train.py `
@@ -68,16 +73,31 @@ python -X utf8 ml\scripts\coupled\train.py `
 복붙용
 python -X utf8 ml\scripts\coupled\train.py `
   --lang korean `
-  --format cv `
-  --dataset ml_workspace\datasets\korean\dataset_korean_cv.csv `
-  --out-dir ML_models\korean\cv\v2_coupled_rawmel_baseline `
+  --format vcv `
+  --dataset ml_workspace\datasets\korean\dataset_korean_vcv.csv `
+  --out-dir ML_models\korean\vcv\v2_coupled_rawmel_baseline `
   --backend coupled_nn_v2_rawmel `
-  --rawmel-cache ml_workspace\cache\mel_patches\korean\cv\v2 `
+  --rawmel-cache ml_workspace\cache\mel_patches\korean\vcv\v2 `
   --device cuda `
   --epochs 80 `
   --batch-size 192 `
-  --learning-rate 0.00055 `
-  --min-confidence 0.65 `
+  --learning-rate 0.0007 `
+  --min-confidence 0.655 `
+  --progress-every 50
+
+복붙용2
+python -X utf8 ml\scripts\coupled\train.py `
+  --lang japanese `
+  --format cvvc `
+  --dataset ml_workspace\datasets\japanese\dataset_japanese_cvvc.csv `
+  --out-dir ML_models\japanese\cvvc\v2_coupled_rawmel_baseline `
+  --backend coupled_nn_v2_rawmel `
+  --rawmel-cache ml_workspace\cache\mel_patches\japanese\cvvc\v2 `
+  --device cuda `
+  --epochs 80 `
+  --batch-size 192 `
+  --learning-rate 0.0007 `
+  --min-confidence 0.6 `
   --progress-every 50
 
 ## 6) 일괄 학습 (언어별 여러 형식)

@@ -720,6 +720,11 @@ class PipelineActionsMixin:
                     params = self._get_params()
                     gen_ou = self.openutau_var.get()
                     gen_missing = self.gen_missing_vowels_var.get()
+                    gen_dash_alias = (
+                        self.gen_dash_alias_var.get()
+                        if hasattr(self, "gen_dash_alias_var")
+                        else True
+                    )
                     enable_ml_correction = self.enable_ml_correction_var.get()
                     ml_selector_mode = self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "기본 정책"
                     ml_coupled_enable = (
@@ -804,6 +809,66 @@ class PipelineActionsMixin:
                         if hasattr(self, "kr_continuity_max_offset_adj_var")
                         else ""
                     )
+                    kr_vc_neighbor_enable = (
+                        bool(self.kr_vc_neighbor_enable_var.get())
+                        if hasattr(self, "kr_vc_neighbor_enable_var")
+                        else True
+                    )
+                    ja_vc_neighbor_enable = (
+                        bool(self.ja_vc_neighbor_enable_var.get())
+                        if hasattr(self, "ja_vc_neighbor_enable_var")
+                        else True
+                    )
+                    kr_vc_neighbor_blend_raw = (
+                        self.kr_vc_neighbor_blend_var.get()
+                        if hasattr(self, "kr_vc_neighbor_blend_var")
+                        else ""
+                    )
+                    kr_vc_neighbor_max_shift_raw = (
+                        self.kr_vc_neighbor_max_shift_var.get()
+                        if hasattr(self, "kr_vc_neighbor_max_shift_var")
+                        else ""
+                    )
+                    kr_vc_neighbor_lead_ms_raw = (
+                        self.kr_vc_neighbor_lead_ms_var.get()
+                        if hasattr(self, "kr_vc_neighbor_lead_ms_var")
+                        else ""
+                    )
+                    kr_vc_neighbor_tail_ms_raw = (
+                        self.kr_vc_neighbor_tail_ms_var.get()
+                        if hasattr(self, "kr_vc_neighbor_tail_ms_var")
+                        else ""
+                    )
+                    kr_vc_neighbor_min_len_raw = (
+                        self.kr_vc_neighbor_min_len_var.get()
+                        if hasattr(self, "kr_vc_neighbor_min_len_var")
+                        else ""
+                    )
+                    ja_vc_neighbor_blend_raw = (
+                        self.ja_vc_neighbor_blend_var.get()
+                        if hasattr(self, "ja_vc_neighbor_blend_var")
+                        else ""
+                    )
+                    ja_vc_neighbor_max_shift_raw = (
+                        self.ja_vc_neighbor_max_shift_var.get()
+                        if hasattr(self, "ja_vc_neighbor_max_shift_var")
+                        else ""
+                    )
+                    ja_vc_neighbor_lead_ms_raw = (
+                        self.ja_vc_neighbor_lead_ms_var.get()
+                        if hasattr(self, "ja_vc_neighbor_lead_ms_var")
+                        else ""
+                    )
+                    ja_vc_neighbor_tail_ms_raw = (
+                        self.ja_vc_neighbor_tail_ms_var.get()
+                        if hasattr(self, "ja_vc_neighbor_tail_ms_var")
+                        else ""
+                    )
+                    ja_vc_neighbor_min_len_raw = (
+                        self.ja_vc_neighbor_min_len_var.get()
+                        if hasattr(self, "ja_vc_neighbor_min_len_var")
+                        else ""
+                    )
                     ml_anchor_mel_gamma_raw = (
                         self.ml_anchor_mel_gamma_var.get()
                         if hasattr(self, "ml_anchor_mel_gamma_var")
@@ -884,6 +949,16 @@ class PipelineActionsMixin:
                         for key, raw_val in ml_coupled_min_conf_format_raw.items()
                     }
                     kr_continuity_max_offset_adj = _parse_optional_float(kr_continuity_max_offset_adj_raw, lo=0.0, hi=2000.0)
+                    kr_vc_neighbor_blend = _parse_optional_float(kr_vc_neighbor_blend_raw, lo=0.0, hi=1.0)
+                    kr_vc_neighbor_max_shift = _parse_optional_float(kr_vc_neighbor_max_shift_raw, lo=0.0, hi=300.0)
+                    kr_vc_neighbor_lead_ms = _parse_optional_float(kr_vc_neighbor_lead_ms_raw, lo=0.0, hi=200.0)
+                    kr_vc_neighbor_tail_ms = _parse_optional_float(kr_vc_neighbor_tail_ms_raw, lo=0.0, hi=200.0)
+                    kr_vc_neighbor_min_len = _parse_optional_float(kr_vc_neighbor_min_len_raw, lo=0.0, hi=400.0)
+                    ja_vc_neighbor_blend = _parse_optional_float(ja_vc_neighbor_blend_raw, lo=0.0, hi=1.0)
+                    ja_vc_neighbor_max_shift = _parse_optional_float(ja_vc_neighbor_max_shift_raw, lo=0.0, hi=300.0)
+                    ja_vc_neighbor_lead_ms = _parse_optional_float(ja_vc_neighbor_lead_ms_raw, lo=0.0, hi=200.0)
+                    ja_vc_neighbor_tail_ms = _parse_optional_float(ja_vc_neighbor_tail_ms_raw, lo=0.0, hi=200.0)
+                    ja_vc_neighbor_min_len = _parse_optional_float(ja_vc_neighbor_min_len_raw, lo=0.0, hi=400.0)
                     ml_anchor_mel_gamma = _parse_optional_float(ml_anchor_mel_gamma_raw, lo=0.1, hi=10.0)
                     try:
                         ml_batch_inference_size = max(32, min(4096, int(float(str(ml_batch_inference_size_raw).strip() or "256"))))
@@ -920,10 +995,53 @@ class PipelineActionsMixin:
                     os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = "1" if bool(ml_legacy_fallback_enable) else "0"
                     os.environ["UTOA_ML_ROUTE"] = "autofree_v1" if ml_route == "autofree_v1" else "legacy"
                     os.environ["UTOA_ML_AUTOFREE_AUX_ENABLE"] = "1" if ml_route == "autofree_v1" else "0"
+                    os.environ["UTOA_ENABLE_HEAD_TAIL_DASH_ALIAS"] = "1" if bool(gen_dash_alias) else "0"
                     if kr_continuity_max_offset_adj is None:
                         os.environ.pop("UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ", None)
                     else:
                         os.environ["UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ"] = str(float(kr_continuity_max_offset_adj))
+                    os.environ["UTOA_KR_VC_NEIGHBOR_ENABLE"] = "1" if kr_vc_neighbor_enable else "0"
+                    os.environ["UTOA_JA_VC_NEIGHBOR_ENABLE"] = "1" if ja_vc_neighbor_enable else "0"
+                    if kr_vc_neighbor_blend is None:
+                        os.environ.pop("UTOA_KR_VC_NEIGHBOR_BLEND", None)
+                    else:
+                        os.environ["UTOA_KR_VC_NEIGHBOR_BLEND"] = str(float(kr_vc_neighbor_blend))
+                    if kr_vc_neighbor_max_shift is None:
+                        os.environ.pop("UTOA_KR_VC_NEIGHBOR_MAX_SHIFT", None)
+                    else:
+                        os.environ["UTOA_KR_VC_NEIGHBOR_MAX_SHIFT"] = str(float(kr_vc_neighbor_max_shift))
+                    if kr_vc_neighbor_lead_ms is None:
+                        os.environ.pop("UTOA_KR_VC_NEIGHBOR_LEAD_MS", None)
+                    else:
+                        os.environ["UTOA_KR_VC_NEIGHBOR_LEAD_MS"] = str(float(kr_vc_neighbor_lead_ms))
+                    if kr_vc_neighbor_tail_ms is None:
+                        os.environ.pop("UTOA_KR_VC_NEIGHBOR_TAIL_MS", None)
+                    else:
+                        os.environ["UTOA_KR_VC_NEIGHBOR_TAIL_MS"] = str(float(kr_vc_neighbor_tail_ms))
+                    if kr_vc_neighbor_min_len is None:
+                        os.environ.pop("UTOA_KR_VC_NEIGHBOR_MIN_LEN", None)
+                    else:
+                        os.environ["UTOA_KR_VC_NEIGHBOR_MIN_LEN"] = str(float(kr_vc_neighbor_min_len))
+                    if ja_vc_neighbor_blend is None:
+                        os.environ.pop("UTOA_JA_VC_NEIGHBOR_BLEND", None)
+                    else:
+                        os.environ["UTOA_JA_VC_NEIGHBOR_BLEND"] = str(float(ja_vc_neighbor_blend))
+                    if ja_vc_neighbor_max_shift is None:
+                        os.environ.pop("UTOA_JA_VC_NEIGHBOR_MAX_SHIFT", None)
+                    else:
+                        os.environ["UTOA_JA_VC_NEIGHBOR_MAX_SHIFT"] = str(float(ja_vc_neighbor_max_shift))
+                    if ja_vc_neighbor_lead_ms is None:
+                        os.environ.pop("UTOA_JA_VC_NEIGHBOR_LEAD_MS", None)
+                    else:
+                        os.environ["UTOA_JA_VC_NEIGHBOR_LEAD_MS"] = str(float(ja_vc_neighbor_lead_ms))
+                    if ja_vc_neighbor_tail_ms is None:
+                        os.environ.pop("UTOA_JA_VC_NEIGHBOR_TAIL_MS", None)
+                    else:
+                        os.environ["UTOA_JA_VC_NEIGHBOR_TAIL_MS"] = str(float(ja_vc_neighbor_tail_ms))
+                    if ja_vc_neighbor_min_len is None:
+                        os.environ.pop("UTOA_JA_VC_NEIGHBOR_MIN_LEN", None)
+                    else:
+                        os.environ["UTOA_JA_VC_NEIGHBOR_MIN_LEN"] = str(float(ja_vc_neighbor_min_len))
                     if ml_anchor_mel_gamma is None:
                         os.environ.pop("UTOA_ML_ANCHOR_MEL_GAMMA", None)
                     else:
