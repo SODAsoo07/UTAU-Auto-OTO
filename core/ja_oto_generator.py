@@ -4012,6 +4012,7 @@ def generate_ja_oto(
                         )
                     row_abstain = decide_cv_row_abstain(
                         alias_type="cv_head",
+                        alias_text=alias,
                         format_type=format_type,
                         candidate_idx=mapped_idx,
                         candidate_count=len(syllables_info),

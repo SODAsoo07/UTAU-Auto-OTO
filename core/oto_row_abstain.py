@@ -5,6 +5,22 @@ def _normalize_key(value):
     return str(value or "").strip().lower()
 
 
+def _extract_onset_token(alias_text):
+    text = str(alias_text or "").strip().lower()
+    if not text:
+        return ""
+    vowels = set("aeiou")
+    out = []
+    for ch in text:
+        if ch in vowels:
+            break
+        if "a" <= ch <= "z":
+            out.append(ch)
+        elif out:
+            break
+    return "".join(out)
+
+
 def _resolve_threshold(default_value, *, fmt, alias_type, per_format=None, per_alias_type=None):
     resolved = default_value
     if isinstance(per_format, dict):
@@ -21,6 +37,7 @@ def _resolve_threshold(default_value, *, fmt, alias_type, per_format=None, per_a
 def decide_cv_row_abstain(
     *,
     alias_type,
+    alias_text=None,
     format_type,
     candidate_idx,
     candidate_count,
@@ -74,6 +91,8 @@ def decide_cv_row_abstain(
             "diag_hint": f"idx={idx}; format={fmt}; alias_type={a_type}",
         }
 
+    margin = None
+    min_margin = None
     if fmt in margin_formats and a_type in margin_alias_types:
         try:
             margin = float(confidence_margin)
@@ -139,10 +158,67 @@ def decide_cv_row_abstain(
         except Exception:
             max_blank = None
         if blank is not None and max_blank is not None and blank >= max_blank:
+            head_cv_relax = bool(
+                a_type in {"cv", "cv_head"}
+                and idx == 0
+                and count >= 2
+                and fmt in {"cv", "cvc", "cvvc", "vcv"}
+            )
+            if head_cv_relax:
+                # Avoid dropping head CV rows too aggressively; skipping here often
+                # propagates template offset=0 into later ML refinement.
+                conf_ok = True
+                if row_conf is not None and min_row_conf is not None:
+                    conf_ok = bool(row_conf >= (min_row_conf + 0.03))
+                hard_blank_cap = max(0.88, float(max_blank) + 0.20)
+                if conf_ok and blank < hard_blank_cap:
+                    return {
+                        "should_skip": False,
+                        "reason": "",
+                        "diag_hint": (
+                            f"idx={idx}; blank_relaxed={blank:.2f}; hard_cap={hard_blank_cap:.2f}; "
+                            f"conf={row_conf if row_conf is not None else -1:.2f}"
+                        ),
+                    }
+            mid_unvoiced_cv_relax = bool(
+                a_type in {"cv", "cv_head"}
+                and idx > 0
+                and idx < max(count - 1, 1)
+                and fmt in {"cvc", "cvvc", "vcv"}
+            )
+            if mid_unvoiced_cv_relax:
+                onset = _extract_onset_token(alias_text)
+                unvoiced_onsets = {
+                    "t", "tt", "d", "k", "kk", "g", "p", "pp", "b",
+                    "s", "ss", "h", "ch", "j", "c", "q", "f",
+                }
+                conf_ok = True
+                if row_conf is not None and min_row_conf is not None:
+                    conf_ok = bool(row_conf >= (min_row_conf + 0.02))
+                margin_ok = True
+                if margin is not None and min_margin is not None:
+                    margin_ok = bool(margin >= min_margin)
+                # Unvoiced CV (e.g., ti/te/to) can look blank-heavy around burst/closure.
+                if onset in unvoiced_onsets and conf_ok and margin_ok:
+                    hard_blank_cap = max(0.84, float(max_blank) + 0.18)
+                    if blank <= hard_blank_cap:
+                        return {
+                            "should_skip": False,
+                            "reason": "",
+                            "diag_hint": (
+                                f"idx={idx}; blank_relaxed_mid={blank:.2f}; hard_cap={hard_blank_cap:.2f}; "
+                                f"onset={onset}; conf={row_conf if row_conf is not None else -1:.2f}; "
+                                f"margin={margin if margin is not None else -1:.2f}"
+                            ),
+                        }
             return {
                 "should_skip": True,
                 "reason": "row_high_blank_confidence",
-                "diag_hint": f"idx={idx}; blank={blank:.2f}; max_blank={max_blank:.2f}",
+                "diag_hint": (
+                    f"idx={idx}; blank={blank:.2f}; max_blank={max_blank:.2f}; "
+                    f"conf={row_conf if row_conf is not None else -1:.2f}; "
+                    f"margin={margin if margin is not None else -1:.2f}"
+                ),
             }
 
     return {

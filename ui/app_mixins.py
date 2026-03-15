@@ -192,12 +192,16 @@ class AppRuntimeMixin:
         if mode == "delta":
             os.environ["UTOA_DISABLE_OTO_SELECTOR"] = "1"
             os.environ.pop("UTOA_FORCE_OTO_SELECTOR", None)
+            os.environ["UTOA_ML_SELECTOR_ENABLE"] = "0"
         elif mode == "selector":
             os.environ["UTOA_FORCE_OTO_SELECTOR"] = "1"
             os.environ.pop("UTOA_DISABLE_OTO_SELECTOR", None)
+            os.environ["UTOA_ML_SELECTOR_ENABLE"] = "1"
         else:
             os.environ.pop("UTOA_FORCE_OTO_SELECTOR", None)
             os.environ.pop("UTOA_DISABLE_OTO_SELECTOR", None)
+            # policy mode delegates to runtime default (currently selector OFF).
+            os.environ.pop("UTOA_ML_SELECTOR_ENABLE", None)
         return mode
 
     def _after_safe(self, callback, delay_ms=0):
@@ -700,6 +704,9 @@ class ConfigMixin:
             "ml_coupled_device": self.ml_coupled_device_var.get() if hasattr(self, "ml_coupled_device_var") else "auto",
             "ml_coupled_backend": self.ml_coupled_backend_var.get() if hasattr(self, "ml_coupled_backend_var") else "auto",
             "ml_coupled_strict_constraint": self.ml_coupled_strict_constraint_var.get() if hasattr(self, "ml_coupled_strict_constraint_var") else False,
+            "ml_batch_inference_enable": self.ml_batch_inference_enable_var.get() if hasattr(self, "ml_batch_inference_enable_var") else True,
+            "ml_batch_inference_size": self.ml_batch_inference_size_var.get() if hasattr(self, "ml_batch_inference_size_var") else "256",
+            "ml_legacy_fallback_enable": self.ml_legacy_fallback_enable_var.get() if hasattr(self, "ml_legacy_fallback_enable_var") else False,
             "ml_anchor_mel_gamma": self.ml_anchor_mel_gamma_var.get() if hasattr(self, "ml_anchor_mel_gamma_var") else "",
             "ml_model_root_kr": self.ml_model_root_kr_var.get() if hasattr(self, "ml_model_root_kr_var") else "",
             "ml_model_root_ja": self.ml_model_root_ja_var.get() if hasattr(self, "ml_model_root_ja_var") else "",
@@ -849,12 +856,26 @@ class ConfigMixin:
                     else:
                         try:
                             conf = max(0.0, min(1.0, float(txt)))
-                            if abs(conf - 0.55) <= 1e-9:
+                            if abs(conf - 0.42) <= 1e-9:
                                 self.ml_coupled_min_conf_var.set("")
                             else:
                                 self.ml_coupled_min_conf_var.set(f"{conf:.2f}".rstrip("0").rstrip("."))
                         except Exception:
                             self.ml_coupled_min_conf_var.set("")
+            if "ml_batch_inference_enable" in config and hasattr(self, "ml_batch_inference_enable_var"):
+                self.ml_batch_inference_enable_var.set(bool(config.get("ml_batch_inference_enable", True)))
+            if "ml_batch_inference_size" in config and hasattr(self, "ml_batch_inference_size_var"):
+                raw_size = str(config.get("ml_batch_inference_size", "256") or "").strip()
+                if not raw_size:
+                    self.ml_batch_inference_size_var.set("256")
+                else:
+                    try:
+                        val = max(32, min(4096, int(float(raw_size))))
+                        self.ml_batch_inference_size_var.set(str(val))
+                    except Exception:
+                        self.ml_batch_inference_size_var.set("256")
+            if "ml_legacy_fallback_enable" in config and hasattr(self, "ml_legacy_fallback_enable_var"):
+                self.ml_legacy_fallback_enable_var.set(bool(config.get("ml_legacy_fallback_enable", False)))
             if "kr_mapping_confidence_threshold" in config and hasattr(self, "kr_mapping_confidence_threshold_var"):
                 raw_conf = config.get("kr_mapping_confidence_threshold", "")
                 if raw_conf is None:

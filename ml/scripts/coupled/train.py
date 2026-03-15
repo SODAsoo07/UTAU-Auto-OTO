@@ -55,7 +55,7 @@ def main():
     ap.add_argument("--epochs", type=int, default=70)
     ap.add_argument("--batch-size", type=int, default=192)
     ap.add_argument("--learning-rate", type=float, default=1e-3)
-    ap.add_argument("--min-confidence", type=float, default=0.55)
+    ap.add_argument("--min-confidence", type=float, default=0.50)
     ap.add_argument("--progress-every", type=int, default=100, help="Print progress every N batches (0 disables).")
     ap.add_argument("--backend", default="coupled_nn_v1", help="coupled_nn_v1 or coupled_nn_v2_rawmel")
     ap.add_argument("--rawmel-cache", default="", help="Raw mel patch cache directory for coupled_nn_v2_rawmel")

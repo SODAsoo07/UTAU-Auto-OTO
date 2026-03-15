@@ -39,7 +39,11 @@ else:
     SKLEARN_IMPORT_ERROR = None
 
 from core.format_type_utils import normalize_format_type
-from core.oto_ml.coupled.inference import load_coupled_bundle, predict_coupled_deltas
+from core.oto_ml.coupled.inference import (
+    load_coupled_bundle,
+    predict_coupled_deltas,
+    predict_coupled_deltas_batch,
+)
 from core.oto_ml.coupled.training import _prepare_training_frame, train_coupled_bundle_rawmel
 from core.oto_ml.features.mel_patches import MelPatchCacheIndex, make_mel_patch_key
 from core.oto_ml_features import (
@@ -415,6 +419,80 @@ def predict_gated_ensemble_deltas(
     }
 
 
+def predict_gated_ensemble_deltas_batch(
+    *,
+    lightgbm_bundle: Dict[str, Any],
+    coupled_bundle: Dict[str, Any],
+    feature_rows: List[Dict[str, Any]],
+    min_coupled_confidence: float = 0.0,
+) -> List[Dict[str, Any]]:
+    if not feature_rows:
+        return []
+    if pd is None:
+        return [
+            predict_gated_ensemble_deltas(
+                lightgbm_bundle=lightgbm_bundle,
+                coupled_bundle=coupled_bundle,
+                feature_row=row,
+                min_coupled_confidence=min_coupled_confidence,
+            )
+            for row in feature_rows
+        ]
+
+    frame = pd.DataFrame(feature_rows)
+    lightgbm_preds = _predict_lightgbm_frame(lightgbm_bundle, frame)
+    coupled_pairs = predict_coupled_deltas_batch(
+        coupled_bundle.get("payload"),
+        feature_rows,
+        meta=coupled_bundle.get("meta"),
+        schema=coupled_bundle.get("schema"),
+    )
+
+    out: List[Dict[str, Any]] = []
+    for row_idx, feature_row in enumerate(feature_rows):
+        lightgbm_deltas = {
+            target: float((lightgbm_preds.get(target) or [0.0])[row_idx])
+            for target in TARGET_NAMES
+        }
+        coupled_deltas, coupled_confidence = coupled_pairs[row_idx] if row_idx < len(coupled_pairs) else ({}, 0.0)
+        coupled_deltas = {target: float(coupled_deltas.get(target, 0.0)) for target in TARGET_NAMES}
+        coupled_confidence = float(coupled_confidence or 0.0)
+        weights, gate_name = _gate_prediction_weights(
+            feature_row,
+            coupled_confidence,
+            float(min_coupled_confidence or 0.0),
+        )
+        if gate_name == "coupled_gate":
+            deltas = dict(coupled_deltas)
+            route_backend = str(coupled_bundle.get("backend", "") or "")
+            route = route_backend or "coupled_gate"
+            confidence = coupled_confidence
+        elif gate_name == "lightgbm_gate":
+            deltas = dict(lightgbm_deltas)
+            route_backend = "lightgbm"
+            route = f"{str(coupled_bundle.get('backend', '') or 'coupled')}->lightgbm_gate"
+            confidence = float(min(0.49, coupled_confidence))
+        else:
+            deltas = _blend_deltas(lightgbm_deltas, coupled_deltas, weights)
+            route_backend = ENSEMBLE_BACKEND
+            route = f"{str(coupled_bundle.get('backend', '') or 'coupled')}->gated_blend"
+            confidence = float(_clip01(coupled_confidence * (sum(weights.values()) / max(1, len(weights)))))
+        out.append(
+            {
+                "deltas": deltas,
+                "confidence": confidence,
+                "route": route,
+                "route_backend": route_backend,
+                "lightgbm_deltas": dict(lightgbm_deltas),
+                "coupled_deltas": dict(coupled_deltas),
+                "coupled_confidence": coupled_confidence,
+                "gate_weights": weights,
+                "gate_name": gate_name,
+            }
+        )
+    return out
+
+
 def load_ensemble_bundle(model_dir: str, *, meta: Optional[Dict[str, Any]] = None, schema: Optional[Dict[str, Any]] = None, device: str = "auto"):
     meta = meta or _load_json(os.path.join(model_dir, "model_meta.json"))
     schema = schema or _load_json(os.path.join(model_dir, "feature_schema.json")) or get_feature_schema()
@@ -505,6 +583,82 @@ def predict_ensemble_deltas(
         "gate_weights": gated.get("gate_weights") or {},
         "gated_deltas": gated.get("deltas") or {},
     }
+
+
+def predict_ensemble_deltas_batch(
+    payload: Dict[str, Any],
+    feature_rows: List[Dict[str, Any]],
+    *,
+    meta: Optional[Dict[str, Any]] = None,
+    schema: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    if not feature_rows:
+        return []
+
+    root_meta = meta or {}
+    gating_meta = dict((payload or {}).get("gating") or {})
+    min_conf = float(gating_meta.get("min_coupled_confidence", root_meta.get("min_coupled_confidence", 0.0)) or 0.0)
+    gated_rows = predict_gated_ensemble_deltas_batch(
+        lightgbm_bundle=(payload or {}).get("lightgbm") or {},
+        coupled_bundle=(payload or {}).get("coupled") or {},
+        feature_rows=feature_rows,
+        min_coupled_confidence=min_conf,
+    )
+
+    meta_bundle = (payload or {}).get("meta")
+    if not meta_bundle or not meta_bundle.get("payload"):
+        out: List[Dict[str, Any]] = []
+        for gated in gated_rows:
+            row = dict(gated)
+            row["route"] = f"{ENSEMBLE_BACKEND}:{gated.get('route', 'gated')}"
+            row["route_backend"] = gated.get("route_backend") or ENSEMBLE_BACKEND
+            out.append(row)
+        return out
+
+    if pd is None:
+        return [
+            predict_ensemble_deltas(payload, row, meta=meta, schema=schema)
+            for row in feature_rows
+        ]
+
+    meta_feature_rows: List[Dict[str, Any]] = []
+    for row, gated in zip(feature_rows, gated_rows):
+        meta_feature_rows.append(
+            build_meta_feature_row(
+                row,
+                lightgbm_deltas=gated.get("lightgbm_deltas") or {},
+                coupled_deltas=gated.get("coupled_deltas") or {},
+                gated_deltas=gated.get("deltas") or {},
+                coupled_confidence=float(gated.get("coupled_confidence", 0.0) or 0.0),
+                gate_weights=gated.get("gate_weights") or {},
+            )
+        )
+    feature_names = list(((meta_bundle.get("schema") or {}).get("feature_names") or ENSEMBLE_META_FEATURE_NAMES))
+    categorical = list(((meta_bundle.get("meta") or {}).get("categorical_features") or ENSEMBLE_META_CATEGORICAL_FEATURES))
+    frame = pd.DataFrame(meta_feature_rows)
+    frame = _prepare_frame(frame, feature_names, categorical)
+
+    meta_preds: Dict[str, List[float]] = {}
+    for target, model in ((meta_bundle.get("payload") or {}).get("models") or {}).items():
+        meta_preds[target] = [float(v) for v in model.predict(frame)]
+
+    out: List[Dict[str, Any]] = []
+    for row_idx, gated in enumerate(gated_rows):
+        meta_deltas = {target: float((meta_preds.get(target) or [0.0])[row_idx]) for target in TARGET_NAMES}
+        out.append(
+            {
+                "deltas": meta_deltas,
+                "confidence": float(max(gated.get("confidence", 0.0) or 0.0, gated.get("coupled_confidence", 0.0) or 0.0)),
+                "route": f"{ENSEMBLE_BACKEND}:meta",
+                "route_backend": ENSEMBLE_BACKEND,
+                "lightgbm_deltas": gated.get("lightgbm_deltas") or {},
+                "coupled_deltas": gated.get("coupled_deltas") or {},
+                "coupled_confidence": float(gated.get("coupled_confidence", 0.0) or 0.0),
+                "gate_weights": gated.get("gate_weights") or {},
+                "gated_deltas": gated.get("deltas") or {},
+            }
+        )
+    return out
 
 
 def _build_group_folds(df, group_column: str, num_folds: int):

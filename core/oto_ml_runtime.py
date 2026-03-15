@@ -8,7 +8,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -159,3 +159,31 @@ def predict_oto_deltas(bundle: OtoModelBundle, feature_row: Dict[str, Any]) -> O
         route=route,
         route_backend=route_backend,
     )
+
+
+def predict_oto_deltas_batch(bundle: OtoModelBundle, feature_rows: List[Dict[str, Any]]) -> List[OtoDeltaResult]:
+    if not feature_rows:
+        return []
+    if bundle.backend == "ensemble_v1":
+        from core.oto_ml_ensemble import predict_ensemble_deltas_batch
+
+        results = predict_ensemble_deltas_batch(
+            bundle.payload,
+            feature_rows,
+            meta=bundle.meta,
+            schema=bundle.feature_schema,
+        )
+        out: List[OtoDeltaResult] = []
+        for result in results:
+            out.append(
+                OtoDeltaResult(
+                    deltas=dict(result.get("deltas") or {}),
+                    backend=bundle.backend,
+                    applied_model=bundle.model_dir,
+                    confidence=result.get("confidence"),
+                    route=str(result.get("route", bundle.backend) or bundle.backend),
+                    route_backend=str(result.get("route_backend", bundle.backend) or bundle.backend),
+                )
+            )
+        return out
+    return [predict_oto_deltas(bundle, feature_row) for feature_row in feature_rows]

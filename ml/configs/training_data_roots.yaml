@@ -1,20 +1,20 @@
-﻿japanese:
+japanese:
   cv:
-    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\Voice_Datas\Jp\CV'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\dataset\japanese\cv'
   vcv:
-    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\Voice_Datas\Jp\VCV'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\dataset\japanese\vcv'
   cvvc:
-    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\Voice_Datas\Jp\CVVC'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\dataset\japanese\cvvc'
 
 korean:
   cv:
-    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\Voice_Datas\Kr\CV'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\dataset\korean\cv'
   cvc:
-    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\Voice_Datas\Kr\CVC'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\dataset\korean\cvc'
   cvvc:
-    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\Voice_Datas\Kr\CVVC'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\dataset\korean\cvvc'
   vcv:
-    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\Voice_Datas\Kr\VCV'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\dataset\korean\vcv'
 
 notes:
   recursive_oto_search: true
@@ -25,7 +25,5 @@ notes:
     - '_D4'
     - '-A4'
     - ' F4'
-    - '_G4?'
-    - '?'
-    - '?'
+    - '_G4'
     - '#'

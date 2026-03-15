@@ -175,3 +175,106 @@ def predict_coupled_deltas(
     conf = float(conf_t.detach().cpu().numpy().reshape(-1)[0])
     out_vals = {target: float(deltas_np[i]) for i, target in enumerate(TARGET_NAMES)}
     return out_vals, conf
+
+
+def predict_coupled_deltas_batch(
+    payload,
+    feature_rows: List[Dict[str, Any]],
+    *,
+    meta: Optional[Dict[str, Any]] = None,
+    schema: Optional[Dict[str, Any]] = None,
+) -> List[Tuple[Dict[str, float], float]]:
+    _require_numpy()
+    if not feature_rows:
+        return []
+
+    torch, _nn, _F = _import_torch()
+    feature_names = list(payload.get("feature_names") or (schema or {}).get("feature_names") or FEATURE_NAMES)
+    categorical_features = list(payload.get("categorical_features") or CATEGORICAL_FEATURES)
+    categorical_bucket_sizes = list(payload.get("categorical_bucket_sizes") or [])
+    patch_features = list(payload.get("patch_features") or PATCH_FEATURES)
+    model = payload["model"]
+    device = str(payload.get("device", "cpu"))
+
+    x_rows = []
+    cat_rows = []
+    patch_rows = []
+    onset_rows = []
+    tail_rows = []
+    rawmel_enabled = bool(payload.get("rawmel_enabled", False))
+
+    for feature_row in feature_rows:
+        x_rows.append(_row_feature_vector(feature_row, feature_names, categorical_features))
+        cat_rows.append(_row_categorical_index_vector(feature_row, categorical_features, categorical_bucket_sizes))
+        patch_rows.append(
+            np.asarray(
+                [float(feature_row.get(name, 0.0) or 0.0) if name in feature_row else 0.0 for name in patch_features],
+                dtype=np.float32,
+            )
+        )
+        if rawmel_enabled:
+            onset_patch = feature_row.get("mel_onset_patch")
+            tail_patch = feature_row.get("mel_tail_patch")
+            if onset_patch is None or tail_patch is None:
+                raise RuntimeError("raw mel patches are required for coupled v2 batch inference")
+            onset_rows.append(np.asarray(onset_patch, dtype=np.float32))
+            tail_rows.append(np.asarray(tail_patch, dtype=np.float32))
+
+    x_np = np.asarray(x_rows, dtype=np.float32)
+    cat_np = np.asarray(cat_rows, dtype=np.int64) if cat_rows else np.zeros((len(feature_rows), 0), dtype=np.int64)
+    patch_np = np.asarray(patch_rows, dtype=np.float32)
+
+    x_t = torch.tensor(x_np, dtype=torch.float32, device=device)
+    cat_t = torch.tensor(cat_np, dtype=torch.long, device=device) if cat_np.shape[1] > 0 else None
+    p_t = torch.tensor(patch_np, dtype=torch.float32, device=device)
+
+    with torch.no_grad():
+        if rawmel_enabled:
+            onset_np = np.asarray(onset_rows, dtype=np.float32)
+            tail_np = np.asarray(tail_rows, dtype=np.float32)
+            onset_t = torch.tensor(onset_np[:, None, :, :], dtype=torch.float32, device=device)
+            tail_t = torch.tensor(tail_np[:, None, :, :], dtype=torch.float32, device=device)
+            out = model(x_t, p_t, onset_t, tail_t, cat_t)
+        else:
+            out = model(x_t, p_t, cat_t)
+
+    head_mode = str(payload.get("head_mode", "") or "single").strip().lower()
+    results: List[Tuple[Dict[str, float], float]] = []
+
+    if head_mode == "split":
+        if isinstance(out, tuple) and len(out) == 4:
+            anchor_t, delta_t, conf_t, _aux_t = out
+        else:
+            anchor_t, delta_t, conf_t = out
+        anchor_np = anchor_t.detach().cpu().numpy()
+        delta_np = delta_t.detach().cpu().numpy()
+        conf_np = conf_t.detach().cpu().numpy().reshape(-1)
+        scale_gamma = float(os.environ.get("UTOA_ML_ANCHOR_MEL_GAMMA", 1.0) or 1.0)
+        if scale_gamma <= 0.0:
+            scale_gamma = 1.0
+        anchor_targets = list(payload.get("anchor_targets") or ANCHOR_TARGET_NAMES)
+        delta_targets = list(payload.get("delta_targets") or DELTA_TARGET_NAMES)
+        for row_idx, feature_row in enumerate(feature_rows):
+            anchor_scale = float(compute_mel_reliability_score(feature_row)) ** float(scale_gamma)
+            anchor_scale = max(0.0, min(1.0, anchor_scale))
+            a_row = anchor_np[row_idx] * anchor_scale
+            d_row = delta_np[row_idx]
+            out_vals = {name: 0.0 for name in TARGET_NAMES}
+            for idx, name in enumerate(anchor_targets):
+                out_vals[name] = float(a_row[idx]) if idx < len(a_row) else 0.0
+            for idx, name in enumerate(delta_targets):
+                out_vals[name] = float(d_row[idx]) if idx < len(d_row) else 0.0
+            results.append((out_vals, float(conf_np[row_idx] if row_idx < len(conf_np) else 0.0)))
+        return results
+
+    if isinstance(out, tuple) and len(out) == 3:
+        deltas_t, conf_t, _aux_t = out
+    else:
+        deltas_t, conf_t = out
+    deltas_np = deltas_t.detach().cpu().numpy()
+    conf_np = conf_t.detach().cpu().numpy().reshape(-1)
+    for row_idx in range(len(feature_rows)):
+        row_vals = deltas_np[row_idx]
+        out_vals = {target: float(row_vals[i]) for i, target in enumerate(TARGET_NAMES)}
+        results.append((out_vals, float(conf_np[row_idx] if row_idx < len(conf_np) else 0.0)))
+    return results

@@ -9,6 +9,7 @@ import re
 import json
 import wave
 import datetime
+import traceback
 from dataclasses import replace
 import logging
 from functools import lru_cache
@@ -2097,6 +2098,10 @@ def _wav_duration_ms(wav_path):
 def _read_wav_mono_np(wav_path):
     if np is None:
         return None, None
+    raw = None
+    sr = None
+    n_ch = 0
+    sw = 0
     try:
         with wave.open(wav_path, "rb") as wf:
             sr = wf.getframerate()
@@ -2105,21 +2110,69 @@ def _read_wav_mono_np(wav_path):
             n_frames = wf.getnframes()
             raw = wf.readframes(n_frames)
     except Exception:
-        return None, None
+        raw = None
 
-    if sw == 1:
-        audio = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
-        audio = (audio - 128.0) / 128.0
-    elif sw == 2:
-        audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-    elif sw == 4:
-        audio = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
-    else:
-        return None, None
+    if raw is not None:
+        if sw == 1:
+            audio = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
+            audio = (audio - 128.0) / 128.0
+        elif sw == 2:
+            audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        elif sw == 3:
+            # 24-bit PCM (little-endian) -> signed int32 -> float32 [-1, 1]
+            b = np.frombuffer(raw, dtype=np.uint8)
+            if b.size % 3 != 0:
+                return None, None
+            b = b.reshape(-1, 3)
+            v = (
+                b[:, 0].astype(np.int32)
+                | (b[:, 1].astype(np.int32) << 8)
+                | (b[:, 2].astype(np.int32) << 16)
+            )
+            v = np.where(v & 0x800000, v - 0x1000000, v)
+            audio = v.astype(np.float32) / 8388608.0
+        elif sw == 4:
+            audio = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+        else:
+            audio = None
 
-    if n_ch > 1:
-        audio = audio.reshape(-1, n_ch).mean(axis=1)
-    return audio, sr
+        if audio is not None:
+            if n_ch > 1:
+                try:
+                    audio = audio.reshape(-1, n_ch).mean(axis=1)
+                except Exception:
+                    return None, None
+            return audio, sr
+
+    # Fallback decoders for WAV variants wave module can't parse.
+    try:
+        import soundfile as sf  # type: ignore
+
+        audio, sr2 = sf.read(wav_path, always_2d=False, dtype="float32")
+        if audio is None:
+            return None, None
+        if getattr(audio, "ndim", 1) > 1:
+            audio = audio.mean(axis=1)
+        return np.asarray(audio, dtype=np.float32), int(sr2)
+    except Exception:
+        pass
+
+    try:
+        from scipy.io import wavfile  # type: ignore
+
+        sr3, audio = wavfile.read(wav_path)
+        if audio is None:
+            return None, None
+        if getattr(audio, "ndim", 1) > 1:
+            audio = audio.mean(axis=1)
+        if np.issubdtype(audio.dtype, np.integer):
+            max_abs = float(np.iinfo(audio.dtype).max) if np.iinfo(audio.dtype).max > 0 else 1.0
+            audio = audio.astype(np.float32) / max_abs
+        else:
+            audio = audio.astype(np.float32)
+        return audio, int(sr3)
+    except Exception:
+        return None, None
 
 
 def _estimate_f0_voicing_strength(frame, sr):
@@ -4602,8 +4655,14 @@ def generate_oto(
                     resolve_meta = dict(general_cv_selection["resolve_meta"])
                     row_jump_blocked = int(general_cv_selection["row_jump_blocked"])
                     forced_selected_idx = general_cv_selection["forced_selected_idx"]
+                    row_blank_floor_safe = (
+                        float(row_blank_floor)
+                        if row_blank_floor is not None
+                        else 0.62
+                    )
                     row_abstain = decide_cv_row_abstain(
                         alias_type=alias_type,
+                        alias_text=alias,
                         format_type=file_format,
                         candidate_idx=selected_w_idx,
                         candidate_count=len(syllables_info),
@@ -4617,7 +4676,7 @@ def generate_oto(
                         row_confidence=row_mapping_confidence,
                         min_row_confidence=row_conf_floor,
                         blank_confidence=_blank_conf_at(syllable_blank_confidences, selected_w_idx),
-                        max_blank_confidence=row_blank_floor,
+                        max_blank_confidence=row_blank_floor_safe,
                         # CVC는 파일/음절 특성상 margin 변동이 커 CV 계열이 과도 스킵될 수 있어
                         # row-level abstain 게이트를 CV/CVVC에만 적용한다.
                         active_only_formats={"cvvc", "cv"},
@@ -4625,7 +4684,10 @@ def generate_oto(
                         blank_formats={"cvvc", "cvc", "cv"},
                         min_confidence_margin_by_alias_type={"cv_head": row_margin_floor + 1.5, "vcv": row_margin_floor + 1.0},
                         min_row_confidence_by_alias_type={"cv_head": row_conf_floor + 0.03, "vcv": row_conf_floor + 0.02},
-                        max_blank_confidence_by_alias_type={"cv_head": max(0.0, row_blank_floor - 0.03), "vcv": max(0.0, row_blank_floor - 0.02)},
+                        max_blank_confidence_by_alias_type={
+                            "cv_head": max(0.0, row_blank_floor_safe - 0.03),
+                            "vcv": max(0.0, row_blank_floor_safe - 0.02),
+                        },
                     )
                     if row_abstain.get("should_skip"):
                         if kr_mapping_debug_reason_logging:
@@ -4898,7 +4960,14 @@ def generate_oto(
             processed += 1
 
         except Exception as e:
-            err_msg = f"처리 실패 ({fname}): {e}"
+            loc = ""
+            try:
+                tb_last = traceback.extract_tb(e.__traceback__)[-1] if e.__traceback__ else None
+                if tb_last is not None:
+                    loc = f" [{os.path.basename(tb_last.filename)}:{int(tb_last.lineno)}]"
+            except Exception:
+                loc = ""
+            err_msg = f"처리 실패 ({fname}): {e}{loc}"
             logger.error(err_msg)
             errors.append(err_msg)
             _record_unset_lines("file_exception", fname, lines)

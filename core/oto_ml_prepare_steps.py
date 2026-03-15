@@ -25,6 +25,12 @@ def _prepare_lab_and_dict(item: PreparedAutoPair, logs: List[str]) -> None:
 
 def _generate_auto_oto(item: PreparedAutoPair, logs: List[str]) -> None:
     item.auto_oto = os.path.join(item.work_dir, "oto_auto_ml.ini")
+    # Training data preparation should stay model-agnostic.
+    # Disable all ML/coupled refinements while generating auto oto pairs.
+    ml_disabled_kwargs = {
+        "enable_ml_correction": False,
+        "ml_policy": "off",
+    }
     if item.language == "japanese":
         generate_ja_oto(
             tg_folder=item.tg_dir,
@@ -33,6 +39,7 @@ def _generate_auto_oto(item: PreparedAutoPair, logs: List[str]) -> None:
             fallback_format=item.format_type,
             auto_format=item.format_type,
             callback=logs.append,
+            **ml_disabled_kwargs,
         )
     else:
         generate_oto(
@@ -42,6 +49,7 @@ def _generate_auto_oto(item: PreparedAutoPair, logs: List[str]) -> None:
             fallback_format=item.format_type,
             auto_format=item.format_type,
             callback=logs.append,
+            **ml_disabled_kwargs,
         )
 
 

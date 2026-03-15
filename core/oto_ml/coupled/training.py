@@ -123,6 +123,12 @@ def _resolve_min_quality_score(lang: str, fmt: str) -> float:
     return 0.0
 
 
+def _is_kr_cvc(language: str, format_type: str) -> bool:
+    lang = str(language or "").strip().lower()
+    fmt = normalize_format_type(lang, format_type) or str(format_type or "").strip().lower()
+    return lang == "korean" and fmt == "cvc"
+
+
 def _name_env_token(name: str) -> str:
     token = str(name or "").strip().upper()
     token = token.replace("DELTA_", "")
@@ -626,11 +632,14 @@ def train_coupled_bundle(
         val_src_pos = []
         val_dst_pos = []
 
-    pair_weight_base = float(os.environ.get("UTOA_ML_VC_CV_PAIR_WEIGHT", 0.12) or 0.12)
+    is_kr_cvc = _is_kr_cvc(language, format_type)
+    pair_weight_default = 0.20 if is_kr_cvc else 0.12
+    pair_weight_base = float(os.environ.get("UTOA_ML_VC_CV_PAIR_WEIGHT", pair_weight_default) or pair_weight_default)
     if pair_weight_base < 0.0:
         pair_weight_base = 0.0
     pair_weight_base = pair_weight_base * 0.5
-    pair_warmup_epochs = max(0, _env_int("UTOA_ML_COUPLED_PAIR_WARMUP_EPOCHS", 6))
+    pair_warmup_default = 8 if is_kr_cvc else 6
+    pair_warmup_epochs = max(0, _env_int("UTOA_ML_COUPLED_PAIR_WARMUP_EPOCHS", pair_warmup_default))
 
     aux_dim = len(AUX_TARGET_NAMES) if use_aux else 0
     model = _build_model(
@@ -680,7 +689,11 @@ def train_coupled_bundle(
     if sampler_mode not in {"group_balanced", "shuffle"}:
         sampler_mode = "group_balanced"
 
-    target_weight_values = [1.00, 1.10, 0.95, 1.00, 0.90]
+    if is_kr_cvc:
+        # KR CVC: strengthen consonant containment and overlap stability.
+        target_weight_values = [1.00, 1.15, 0.95, 1.00, 1.05]
+    else:
+        target_weight_values = [1.00, 1.10, 0.95, 1.00, 0.90]
     target_weights = torch.tensor(target_weight_values, dtype=torch.float32, device=run_device).view(1, -1)
     target_loss_kinds, target_huber_deltas = _resolve_loss_config(
         "UTOA_ML_COUPLED_",
@@ -710,8 +723,13 @@ def train_coupled_bundle(
     )
     cons_margin = 10.0
     cut_margin = 10.0
-    boundary_aux_weight = _env_float("UTOA_ML_COUPLED_BOUNDARY_AUX_WEIGHT", 0.14)
-    boundary_consistency_weight = _env_float("UTOA_ML_COUPLED_BOUNDARY_CONSISTENCY_WEIGHT", 0.06)
+    boundary_aux_default = 0.18 if is_kr_cvc else 0.14
+    boundary_consistency_default = 0.10 if is_kr_cvc else 0.06
+    boundary_aux_weight = _env_float("UTOA_ML_COUPLED_BOUNDARY_AUX_WEIGHT", boundary_aux_default)
+    boundary_consistency_weight = _env_float(
+        "UTOA_ML_COUPLED_BOUNDARY_CONSISTENCY_WEIGHT",
+        boundary_consistency_default,
+    )
 
     best_state = None
     best_val = float("inf")
@@ -1324,10 +1342,12 @@ def train_coupled_bundle_rawmel(
         if "mapping_confidence" in df.columns
         else np.ones((len(df),), dtype=np.float32)
     )
+    is_kr_cvc = _is_kr_cvc(language, format_type)
     risk_blank_th = _env_float("UTOA_ML_RAWMEL_RISK_BLANK_TH", 0.55)
     risk_map_conf_th = _env_float("UTOA_ML_RAWMEL_RISK_MAP_CONF_TH", 0.64)
-    risk_boost_blank = _env_float("UTOA_ML_RAWMEL_RISK_BOOST_BLANK", 0.90)
-    risk_boost_blank = max(0.50, min(1.00, float(risk_boost_blank)))
+    risk_boost_blank_default = 1.12 if is_kr_cvc else 0.90
+    risk_boost_blank = _env_float("UTOA_ML_RAWMEL_RISK_BOOST_BLANK", risk_boost_blank_default)
+    risk_boost_blank = max(0.50, min(1.50, float(risk_boost_blank)))
     risk_boost_jump = max(1.0, _env_float("UTOA_ML_RAWMEL_RISK_BOOST_JUMP", 1.15))
     risk_boost_low_conf = max(1.0, _env_float("UTOA_ML_RAWMEL_RISK_BOOST_LOW_CONF", 1.08))
     risk_boost = np.ones((len(df),), dtype=np.float32)
@@ -1361,11 +1381,13 @@ def train_coupled_bundle_rawmel(
     valid_idx = np.asarray(valid_idx, dtype=np.int64)
 
     pair_map = _build_vc_cv_pair_map(df)
-    pair_weight_base = float(os.environ.get("UTOA_ML_VC_CV_PAIR_WEIGHT", 0.12) or 0.12)
+    pair_weight_default = 0.20 if is_kr_cvc else 0.12
+    pair_weight_base = float(os.environ.get("UTOA_ML_VC_CV_PAIR_WEIGHT", pair_weight_default) or pair_weight_default)
     if pair_weight_base < 0.0:
         pair_weight_base = 0.0
     pair_weight_base = pair_weight_base * 0.5
-    pair_warmup_epochs = max(0, _env_int("UTOA_ML_RAWMEL_PAIR_WARMUP_EPOCHS", 8))
+    pair_warmup_default = 10 if is_kr_cvc else 8
+    pair_warmup_epochs = max(0, _env_int("UTOA_ML_RAWMEL_PAIR_WARMUP_EPOCHS", pair_warmup_default))
     if pair_map:
         train_mask = np.zeros((len(df),), dtype=bool)
         valid_mask = np.zeros((len(df),), dtype=bool)
@@ -1523,12 +1545,17 @@ def train_coupled_bundle_rawmel(
         onset_train_cache, tail_train_cache = cache_index.get_batch(keys_train)
         onset_valid_cache, tail_valid_cache = cache_index.get_batch(keys_valid)
 
+    target_default_offset = 1.12
+    target_default_cons = 1.15 if is_kr_cvc else 1.05
+    target_default_cutoff = 1.02
+    target_default_pre = 1.08
+    target_default_ovl = 1.05 if is_kr_cvc else 0.90
     target_weight_values = [
-        _env_float("UTOA_ML_RAWMEL_TARGET_W_OFFSET", 1.12),
-        _env_float("UTOA_ML_RAWMEL_TARGET_W_CONS", 1.05),
-        _env_float("UTOA_ML_RAWMEL_TARGET_W_CUTOFF", 1.02),
-        _env_float("UTOA_ML_RAWMEL_TARGET_W_PRE", 1.08),
-        _env_float("UTOA_ML_RAWMEL_TARGET_W_OVL", 0.90),
+        _env_float("UTOA_ML_RAWMEL_TARGET_W_OFFSET", target_default_offset),
+        _env_float("UTOA_ML_RAWMEL_TARGET_W_CONS", target_default_cons),
+        _env_float("UTOA_ML_RAWMEL_TARGET_W_CUTOFF", target_default_cutoff),
+        _env_float("UTOA_ML_RAWMEL_TARGET_W_PRE", target_default_pre),
+        _env_float("UTOA_ML_RAWMEL_TARGET_W_OVL", target_default_ovl),
     ]
     target_weights = torch.tensor(target_weight_values, dtype=torch.float32, device=run_device).view(1, -1)
     target_loss_kinds, target_huber_deltas = _resolve_loss_config(
@@ -1559,8 +1586,13 @@ def train_coupled_bundle_rawmel(
     )
     cons_margin = 10.0
     cut_margin = 10.0
-    boundary_aux_weight = _env_float("UTOA_ML_RAWMEL_BOUNDARY_AUX_WEIGHT", 0.18)
-    boundary_consistency_weight = _env_float("UTOA_ML_RAWMEL_BOUNDARY_CONSISTENCY_WEIGHT", 0.08)
+    boundary_aux_default = 0.24 if is_kr_cvc else 0.18
+    boundary_consistency_default = 0.12 if is_kr_cvc else 0.08
+    boundary_aux_weight = _env_float("UTOA_ML_RAWMEL_BOUNDARY_AUX_WEIGHT", boundary_aux_default)
+    boundary_consistency_weight = _env_float(
+        "UTOA_ML_RAWMEL_BOUNDARY_CONSISTENCY_WEIGHT",
+        boundary_consistency_default,
+    )
 
     best_state = None
     best_val = float("inf")

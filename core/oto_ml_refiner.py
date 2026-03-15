@@ -19,7 +19,12 @@ from core.oto_ml.features.mel_patches import (
     find_wav_path,
     resolve_mel_patch_anchors,
 )
-from core.oto_ml_runtime import OtoDeltaResult, load_oto_model_bundle, predict_oto_deltas
+from core.oto_ml_runtime import (
+    OtoDeltaResult,
+    load_oto_model_bundle,
+    predict_oto_deltas,
+    predict_oto_deltas_batch,
+)
 from core.oto_ml_lightgbm import load_lightgbm_selector_bundle, predict_lightgbm_selector_score
 from core.oto_ml_policy import (
     delta_enabled_by_default,
@@ -86,6 +91,24 @@ def _gated_ensemble_enabled() -> bool:
     return _env_flag("UTOA_ML_GATED_ENSEMBLE_ENABLE", False)
 
 
+def _selector_runtime_enabled() -> bool:
+    # Runtime 기본은 델타 보정 단일 모드(속도 우선). 필요 시 env로 명시적으로 켠다.
+    return _env_flag("UTOA_ML_SELECTOR_ENABLE", False)
+
+
+def _legacy_fallback_enabled() -> bool:
+    # Coupled/Ensemble의 내부 게이팅을 우선 사용하고, 구형 fallback 체인은 기본 비활성.
+    return _env_flag("UTOA_ML_LEGACY_FALLBACK_ENABLE", False)
+
+
+def _batch_inference_enabled() -> bool:
+    return _env_flag("UTOA_ML_BATCH_INFERENCE_ENABLE", True)
+
+
+def _batch_inference_size() -> int:
+    return max(32, _env_int("UTOA_ML_BATCH_INFERENCE_SIZE", 256))
+
+
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, default))
@@ -95,9 +118,9 @@ def _env_int(name: str, default: int) -> int:
 
 def _coupled_min_confidence() -> float:
     try:
-        return max(0.0, min(float(os.environ.get("UTOA_ML_COUPLED_MIN_CONF", "0.55")), 1.0))
+        return max(0.0, min(float(os.environ.get("UTOA_ML_COUPLED_MIN_CONF", "0.42")), 1.0))
     except Exception:
-        return 0.55
+        return 0.42
 
 
 def _read_bounded_conf_env(name: str) -> Optional[float]:
@@ -177,18 +200,18 @@ def _coupled_min_confidence_for_alias(
         if value is not None:
             return float(value)
     if lang_token == "KR":
-        # Korean CV 계열은 음절 오매핑 시 타이밍 붕괴가 커서 기본 게이트를 보수적으로 둔다.
+        # Korean CV 계열 기본 게이트: 과도한 fallback을 줄이되, CV head는 여전히 보수적으로 유지.
         kr_floor_by_alias = {
-            "cv": 0.66,
-            "cv_head": 0.68,
-            "vc": 0.56,
-            "vv": 0.58,
-            "vcv": 0.58,
+            "cv": 0.50,
+            "cv_head": 0.52,
+            "vc": 0.46,
+            "vv": 0.48,
+            "vcv": 0.48,
         }
         floor = kr_floor_by_alias.get(alias)
         if floor is not None:
             if alias in {"cv", "cv_head"} and fmt in {"cvvc", "cvc"}:
-                floor += 0.02
+                floor += 0.01
             return float(max(base, min(float(floor), 0.95)))
     return float(base)
 
@@ -199,6 +222,10 @@ def _coupled_strict_constraint() -> bool:
 
 def _kr_cv_keep_base_location_enabled() -> bool:
     return _env_flag("UTOA_ML_KR_CV_KEEP_BASE_LOCATION", True)
+
+
+def _head_zero_offset_guard_enabled() -> bool:
+    return _env_flag("UTOA_ML_HEAD_ZERO_OFFSET_GUARD", True)
 
 
 def _read_bundle_backend(model_dir: str) -> str:
@@ -1073,14 +1100,28 @@ def _apply_korean_cv_destination_guard(
     if expected_anchor > 0.0 and pre_abs < (expected_anchor - anchor_lead_allow):
         violations += 1
 
-    if severe_blank and violations >= 1:
+    head_zero_recoverable = bool(
+        base_offset <= 0.5
+        and onset_candidate >= 8.0
+        and mapping_conf >= 0.70
+        and alias_type in {"cv", "cv_head"}
+        and format_type in {"cvc", "cvvc", "cv", "vcv"}
+    )
+
+    if severe_blank and violations >= 1 and not head_zero_recoverable:
         return base_params
-    if risky_blank and violations >= 2:
+    if risky_blank and violations >= 2 and not head_zero_recoverable:
         return base_params
 
     min_offset = base_offset - early_offset_allow
     if onset_candidate > 0.0:
         min_offset = max(min_offset, onset_candidate - onset_allow)
+    if head_zero_recoverable:
+        # Recover from template/head collapse where base offset is pinned at 0.
+        recover_guard = 2.5 if tight_cv else 4.0
+        min_offset = max(min_offset, onset_candidate - recover_guard)
+        if curr_vowel_start > 0.0:
+            min_offset = max(min_offset, curr_vowel_start - (12.0 if tight_cv else 16.0))
     if offset < min_offset:
         offset = min_offset
 
@@ -1332,6 +1373,84 @@ def _apply_language_specific_post_guard(
     return out
 
 
+def _apply_head_zero_offset_recovery_guard(
+    language: str,
+    row_context: Dict[str, object],
+    params: Tuple[float, float, float, float, float],
+    validate_fn,
+) -> Tuple[float, float, float, float, float]:
+    if not _head_zero_offset_guard_enabled():
+        return params
+
+    lang = str(language or "").strip().lower()
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    if alias_type not in {"cv", "cv_head"}:
+        return params
+
+    format_type = normalize_format_type(lang, row_context.get("format_type", ""))
+    if lang == "korean":
+        valid_formats = {"cv", "cvc", "cvvc", "vcv"}
+    elif lang == "japanese":
+        valid_formats = {"cv", "cvvc", "vcv"}
+    else:
+        valid_formats = {"cv", "cvc", "cvvc", "vcv"}
+    if format_type not in valid_formats:
+        return params
+
+    offset, cons, cutoff, pre, ovl = validate_fn(*params)
+    offset = float(offset)
+    cons = float(cons)
+    pre = float(pre)
+    ovl = float(ovl)
+    cutoff_abs = abs(float(cutoff))
+
+    base_offset = _to_float(row_context.get("base_offset"), offset)
+    mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
+    onset_candidate = _to_float(row_context.get("mel_offset_candidate_ms"), 0.0)
+    curr_phone_start = _to_float(row_context.get("curr_phone_start_ms"), 0.0)
+    curr_vowel_start = _to_float(row_context.get("curr_vowel_start_ms"), 0.0)
+    blank_conf = max(
+        _to_float(row_context.get("blank_span_confidence"), 0.0),
+        _to_float(row_context.get("syllable_blank_confidence"), 0.0),
+        _to_float(row_context.get("syllable_mel_silence_conf"), 0.0),
+    )
+    silence_ratio = max(
+        _to_float(row_context.get("db_silence_ratio"), 0.0),
+        _to_float(row_context.get("mel_window_silence_ratio"), 0.0),
+    )
+
+    if mapping_conf < 0.64:
+        return params
+
+    anchor = max(onset_candidate, curr_phone_start, curr_vowel_start)
+    if anchor < 6.0:
+        return params
+
+    collapsed = bool(offset <= 0.8 or base_offset <= 0.8 or offset < (anchor - 10.0))
+    if not collapsed:
+        return params
+
+    # Avoid forcing recovery on near-all-silence leading segments.
+    if blank_conf >= 0.92 and anchor < 14.0 and silence_ratio >= 0.78:
+        return params
+
+    tight_cv = format_type in {"cvvc", "cvc"}
+    recover_guard = 2.0 if tight_cv else 3.5
+    min_offset = max(0.0, anchor - recover_guard)
+    if curr_vowel_start > 0.0:
+        min_offset = max(min_offset, curr_vowel_start - (10.0 if tight_cv else 14.0))
+    if offset >= min_offset:
+        return params
+
+    pre_abs = offset + pre
+    offset = min_offset
+    pre = max(pre_abs - offset, 0.0)
+    cons = max(cons, pre + (6.0 if alias_type == "cv_head" else 8.0))
+    cutoff_abs = max(cutoff_abs, cons + (8.0 if alias_type == "cv_head" else 10.0))
+    ovl = min(max(ovl, 0.0), pre)
+    return validate_fn(offset, cons, -cutoff_abs, pre, ovl)
+
+
 def _apply_ml_destination_guard(
     language: str,
     row_context: Dict[str, object],
@@ -1342,6 +1461,7 @@ def _apply_ml_destination_guard(
     out = params
     if lang == "korean":
         out = _apply_korean_cv_destination_guard(row_context, out, validate_fn)
+    out = _apply_head_zero_offset_recovery_guard(lang, row_context, out, validate_fn)
     return out
 
 
@@ -1789,10 +1909,16 @@ def apply_oto_ml_to_oto_file(
     bundle_cache: Dict[str, Optional[object]] = {}
     fallback_bundle_cache: Dict[str, Optional[object]] = {}
     selector_cache: Dict[str, Optional[object]] = {}
+    batch_pred_cache: Dict[str, Dict[int, OtoDeltaResult]] = {}
+    route_index_cache: Dict[str, List[int]] = {}
     route_status: Dict[str, str] = {}
     route_model_dir: Dict[str, str] = {}
     route_fallback_model_dir: Dict[str, str] = {}
     route_primary_backend: Dict[str, str] = {}
+    selector_enabled_runtime = _selector_runtime_enabled()
+    legacy_fallback_enabled = _legacy_fallback_enabled()
+    batch_enabled = _batch_inference_enabled()
+    batch_size = _batch_inference_size()
     model_notice = set()
     changed = 0
     route_counts: Dict[str, int] = {}
@@ -1819,7 +1945,11 @@ def apply_oto_ml_to_oto_file(
     if total_features > progress_every:
         _emit(
             callback,
-            f"[OTO-ML] ML refine start: rows={total_features}, route={route_name}, gated_ensemble={'ON' if _gated_ensemble_enabled() else 'OFF'}",
+            f"[OTO-ML] ML refine start: rows={total_features}, route={route_name}, "
+            f"gated_ensemble={'ON' if _gated_ensemble_enabled() else 'OFF'}, "
+            f"selector={'ON' if selector_enabled_runtime else 'OFF'}, "
+            f"legacy_fallback={'ON' if legacy_fallback_enabled else 'OFF'}, "
+            f"batch={'ON' if batch_enabled else 'OFF'}({batch_size})",
         )
 
     for feat_idx, feat in enumerate(feature_rows, start=1):
@@ -1854,7 +1984,7 @@ def apply_oto_ml_to_oto_file(
             primary_backend = _read_bundle_backend(primary_dir) if primary_dir else ""
             route_primary_backend[cache_key] = str(primary_backend or "lightgbm")
             if primary_dir and primary_backend == "ensemble_v1":
-                if lightgbm_dir and lightgbm_dir != primary_dir:
+                if legacy_fallback_enabled and lightgbm_dir and lightgbm_dir != primary_dir:
                     fallback_dir = lightgbm_dir
 
             if not primary_dir:
@@ -1873,7 +2003,7 @@ def apply_oto_ml_to_oto_file(
                 route_model_dir[cache_key] = str(primary_dir)
                 route_fallback_model_dir[cache_key] = str(fallback_dir or "")
                 delta_allowed = bool(delta_enabled_by_default(language, format_type, alias_family=alias_family))
-                selector_allowed = bool(selector_enabled_by_default(language, format_type, alias_family=alias_family))
+                selector_allowed = bool(selector_enabled_runtime and selector_enabled_by_default(language, format_type, alias_family=alias_family))
 
                 primary_bundle = None
                 fallback_bundle = None
@@ -1928,6 +2058,58 @@ def apply_oto_ml_to_oto_file(
                     model_notice.add(route_fallback_model_dir[cache_key])
                 if selector_cache.get(cache_key) is not None and selector_dir and selector_dir not in ml_report["selector_model_routes"]:
                     ml_report["selector_model_routes"].append(selector_dir)
+
+                if (
+                    batch_enabled
+                    and primary_bundle is not None
+                    and str(primary_bundle.backend).strip().lower() == "ensemble_v1"
+                ):
+                    try:
+                        key_indices = route_index_cache.get(cache_key)
+                        if key_indices is None:
+                            key_indices = []
+                            for i2, feat2 in enumerate(feature_rows):
+                                fmt2 = _route_format_for_feature(language, feat2, format_override=format_override)
+                                if not fmt2:
+                                    continue
+                                fam2 = infer_alias_family(language, feat2)
+                                key2 = fmt2 if not fam2 else f"{fmt2}:{fam2}"
+                                if key2 == cache_key:
+                                    key_indices.append(i2)
+                            route_index_cache[cache_key] = key_indices
+
+                        pred_map: Dict[int, OtoDeltaResult] = {}
+                        if key_indices:
+                            for st in range(0, len(key_indices), batch_size):
+                                chunk_indices = key_indices[st : st + batch_size]
+                                chunk_feats: List[Dict[str, object]] = []
+                                chunk_keys: List[int] = []
+                                for idx2 in chunk_indices:
+                                    feat2 = feature_rows[idx2]
+                                    if mel_patch_is_fallback(feat2):
+                                        continue
+                                    try:
+                                        if bool((primary_bundle.payload or {}).get("coupled_rawmel_enabled", False)):
+                                            _ensure_rawmel_patches(
+                                                feat2,
+                                                wav_dir=wav_dir,
+                                                wav_index=wav_index,
+                                                mel_cache=rawmel_cache,
+                                                patch_spec=dict((primary_bundle.payload or {}).get("coupled_patch_spec") or {}),
+                                            )
+                                        chunk_feats.append(feat2)
+                                        chunk_keys.append(idx2)
+                                    except Exception:
+                                        continue
+                                if not chunk_feats:
+                                    continue
+                                batch_results = predict_oto_deltas_batch(primary_bundle, chunk_feats)
+                                for local_i, pred in enumerate(batch_results):
+                                    if local_i < len(chunk_keys):
+                                        pred_map[chunk_keys[local_i]] = pred
+                        batch_pred_cache[cache_key] = pred_map
+                    except Exception:
+                        batch_pred_cache[cache_key] = {}
         bundle = bundle_cache.get(cache_key)
         fallback_bundle = fallback_bundle_cache.get(cache_key)
         selector_bundle = selector_cache.get(cache_key)
@@ -2003,7 +2185,7 @@ def apply_oto_ml_to_oto_file(
                     fallback_reasons.append("coupled_load_failed")
                 else:
                     fallback_reasons.append("primary_load_failed")
-            pred_preview = None
+            pred_preview = (batch_pred_cache.get(cache_key) or {}).get(feat_idx - 1)
             applied_conf = None
             route_name = ""
             if applied_bundle is not None:
@@ -2016,58 +2198,64 @@ def apply_oto_ml_to_oto_file(
                 elif bundle_backend_norm == "ensemble_v1":
                     needs_rawmel = bool((applied_bundle.payload or {}).get("coupled_rawmel_enabled", False))
                     patch_spec = dict((applied_bundle.payload or {}).get("coupled_patch_spec") or {})
-                if needs_rawmel and mel_patch_fallback:
-                    raise CoupledLowConfidenceError(0.0, coupled_min_conf)
-                if needs_rawmel:
-                    _ensure_rawmel_patches(
-                        feat,
-                        wav_dir=wav_dir,
-                        wav_index=wav_index,
-                        mel_cache=rawmel_cache,
-                        patch_spec=patch_spec,
-                    )
-                if (
-                    bundle_backend_norm in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}
-                    and fallback_bundle is not None
-                    and str(fallback_bundle.backend).strip().lower() == "lightgbm"
-                    and _gated_ensemble_enabled()
-                ):
-                    from core.oto_ml_ensemble import predict_gated_ensemble_deltas
+                if pred_preview is None:
+                    if needs_rawmel and mel_patch_fallback:
+                        raise CoupledLowConfidenceError(0.0, coupled_min_conf)
+                    if needs_rawmel:
+                        _ensure_rawmel_patches(
+                            feat,
+                            wav_dir=wav_dir,
+                            wav_index=wav_index,
+                            mel_cache=rawmel_cache,
+                            patch_spec=patch_spec,
+                        )
+                    if (
+                        bundle_backend_norm in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}
+                        and fallback_bundle is not None
+                        and str(fallback_bundle.backend).strip().lower() == "lightgbm"
+                        and _gated_ensemble_enabled()
+                    ):
+                        from core.oto_ml_ensemble import predict_gated_ensemble_deltas
 
-                    pred_dict = predict_gated_ensemble_deltas(
-                        lightgbm_bundle={
-                            "backend": str(fallback_bundle.backend),
-                            "model_dir": str(fallback_bundle.model_dir),
-                            "payload": fallback_bundle.payload,
-                            "meta": fallback_bundle.meta,
-                            "schema": fallback_bundle.feature_schema,
-                        },
-                        coupled_bundle={
-                            "backend": str(applied_bundle.backend),
-                            "model_dir": str(applied_bundle.model_dir),
-                            "payload": applied_bundle.payload,
-                            "meta": applied_bundle.meta,
-                            "schema": applied_bundle.feature_schema,
-                        },
-                        feature_row=feat,
-                        min_coupled_confidence=coupled_min_conf,
-                    )
-                    pred_preview = OtoDeltaResult(
-                        deltas=dict(pred_dict.get("deltas") or {}),
-                        backend=str(pred_dict.get("route_backend", "ensemble_v1") or "ensemble_v1"),
-                        applied_model=str(applied_bundle.model_dir),
-                        confidence=pred_dict.get("confidence"),
-                        route=str(pred_dict.get("route", "")),
-                        route_backend=str(pred_dict.get("route_backend", "")),
-                    )
-                elif bundle_backend_norm in {"coupled_nn_v1", "coupled_nn_v2_rawmel", "ensemble_v1"}:
-                    pred_preview = predict_oto_deltas(applied_bundle, feat)
+                        pred_dict = predict_gated_ensemble_deltas(
+                            lightgbm_bundle={
+                                "backend": str(fallback_bundle.backend),
+                                "model_dir": str(fallback_bundle.model_dir),
+                                "payload": fallback_bundle.payload,
+                                "meta": fallback_bundle.meta,
+                                "schema": fallback_bundle.feature_schema,
+                            },
+                            coupled_bundle={
+                                "backend": str(applied_bundle.backend),
+                                "model_dir": str(applied_bundle.model_dir),
+                                "payload": applied_bundle.payload,
+                                "meta": applied_bundle.meta,
+                                "schema": applied_bundle.feature_schema,
+                            },
+                            feature_row=feat,
+                            min_coupled_confidence=coupled_min_conf,
+                        )
+                        pred_preview = OtoDeltaResult(
+                            deltas=dict(pred_dict.get("deltas") or {}),
+                            backend=str(pred_dict.get("route_backend", "ensemble_v1") or "ensemble_v1"),
+                            applied_model=str(applied_bundle.model_dir),
+                            confidence=pred_dict.get("confidence"),
+                            route=str(pred_dict.get("route", "")),
+                            route_backend=str(pred_dict.get("route_backend", "")),
+                        )
+                    elif bundle_backend_norm in {"coupled_nn_v1", "coupled_nn_v2_rawmel", "ensemble_v1"}:
+                        pred_preview = predict_oto_deltas(applied_bundle, feat)
                 if pred_preview is not None:
                     applied_conf = float(getattr(pred_preview, "confidence", 0.0) or 0.0)
                     pred_backend = str(
                         getattr(pred_preview, "route_backend", "") or getattr(pred_preview, "backend", bundle_backend_norm)
-                    ).strip().lower()
-                    if pred_backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"} and applied_conf < coupled_min_conf:
+                    )
+                    pred_backend = pred_backend.strip().lower()
+                    if (
+                        bundle_backend_norm in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}
+                        and pred_backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}
+                        and applied_conf < coupled_min_conf
+                    ):
                         raise CoupledLowConfidenceError(applied_conf, coupled_min_conf)
 
             if applied_bundle is not None:

@@ -767,6 +767,21 @@ class PipelineActionsMixin:
                         if hasattr(self, "ml_coupled_strict_constraint_var")
                         else False
                     )
+                    ml_batch_inference_enable = (
+                        self.ml_batch_inference_enable_var.get()
+                        if hasattr(self, "ml_batch_inference_enable_var")
+                        else True
+                    )
+                    ml_batch_inference_size_raw = (
+                        self.ml_batch_inference_size_var.get()
+                        if hasattr(self, "ml_batch_inference_size_var")
+                        else "256"
+                    )
+                    ml_legacy_fallback_enable = (
+                        self.ml_legacy_fallback_enable_var.get()
+                        if hasattr(self, "ml_legacy_fallback_enable_var")
+                        else False
+                    )
                     auto_format = self.auto_format_var.get()
                     custom_phonemes_path = self.custom_phoneme_var.get().strip()
                     alias_suffix = self.alias_suffix_var.get().strip()
@@ -809,6 +824,10 @@ class PipelineActionsMixin:
                     ml_coupled_min_conf = _parse_optional_threshold(ml_coupled_min_conf_raw, lo=0.0, hi=1.0)
                     kr_continuity_max_offset_adj = _parse_optional_float(kr_continuity_max_offset_adj_raw, lo=0.0, hi=2000.0)
                     ml_anchor_mel_gamma = _parse_optional_float(ml_anchor_mel_gamma_raw, lo=0.1, hi=10.0)
+                    try:
+                        ml_batch_inference_size = max(32, min(4096, int(float(str(ml_batch_inference_size_raw).strip() or "256"))))
+                    except Exception:
+                        ml_batch_inference_size = 256
 
                     os.environ["UTOA_ML_COUPLED_ENABLE"] = "1" if ml_coupled_enable else "0"
                     os.environ["UTOA_ML_ENSEMBLE_ENABLE"] = "1" if ensemble_enabled else "0"
@@ -823,6 +842,9 @@ class PipelineActionsMixin:
                     )
                     os.environ["UTOA_ML_COUPLED_BACKEND"] = str(coupled_backend_env)
                     os.environ["UTOA_ML_COUPLED_STRICT_CONSTRAINT"] = "1" if ml_coupled_strict_constraint else "0"
+                    os.environ["UTOA_ML_BATCH_INFERENCE_ENABLE"] = "1" if bool(ml_batch_inference_enable) else "0"
+                    os.environ["UTOA_ML_BATCH_INFERENCE_SIZE"] = str(int(ml_batch_inference_size))
+                    os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = "1" if bool(ml_legacy_fallback_enable) else "0"
                     os.environ["UTOA_ML_ROUTE"] = "autofree_v1" if ml_route == "autofree_v1" else "legacy"
                     os.environ["UTOA_ML_AUTOFREE_AUX_ENABLE"] = "1" if ml_route == "autofree_v1" else "0"
                     if kr_continuity_max_offset_adj is None:
@@ -851,9 +873,12 @@ class PipelineActionsMixin:
                         f"[OTO-ML] 설정: ml={'ON' if enable_ml_correction else 'OFF'}, selector={self._describe_ml_selector_mode(selector_mode_code)}"
                     )
                     self._append_log(f"[OTO-ML] route={os.environ.get('UTOA_ML_ROUTE', 'autofree_v1')}")
-                    min_conf_display = f"{float(ml_coupled_min_conf):.2f}" if ml_coupled_min_conf is not None else "default(0.55)"
+                    min_conf_display = f"{float(ml_coupled_min_conf):.2f}" if ml_coupled_min_conf is not None else "default(0.42)"
                     self._append_log(
                         f"[OTO-ML] coupled={'ON' if ml_coupled_enable else 'OFF'}, backend={ml_coupled_backend}, ensemble={'ON' if ensemble_enabled else 'OFF'}, min_conf={min_conf_display}, device={ml_coupled_device}, strict={'ON' if ml_coupled_strict_constraint else 'OFF'}"
+                    )
+                    self._append_log(
+                        f"[OTO-ML] runtime: batch={'ON' if bool(ml_batch_inference_enable) else 'OFF'}({int(ml_batch_inference_size)}), legacy_fallback={'ON' if bool(ml_legacy_fallback_enable) else 'OFF'}"
                     )
                     if ml_route == "autofree_v1":
                         self._append_log("[OTO-ML] route policy: coupled primary + autofree auxiliary(residual)")

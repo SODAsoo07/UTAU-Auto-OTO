@@ -1,0 +1,269 @@
+한국어 CVC
+
+수정된 설정값
+    "normalization": "per_patch_log_mel_standardize",
+    "onset_anchor_policy": "mel_offset_then_base_offset",
+    "tail_anchor_policy": "mel_cutoff_then_base_cutoff_abs",
+    "padding_policy": "zero",
+    "source_feature_version": "v12"
+  },
+  "mel_patch_spec_hash": "6d95203e",
+  "mel_bins": 80,
+  "onset_frames": 49,
+  "tail_frames": 49,
+  "min_confidence": 0.5,
+  "vc_cv_pair_weight": 0.1,
+  "vc_cv_pair_warmup_epochs": 10,
+  "optimizer": "adamw",
+  "learning_rate": 0.0007,
+  "weight_decay": 0.0001,
+  "target_weights": [
+    1.12,
+    1.15,
+    1.02,
+    1.08,
+    1.05
+  ],
+  "target_loss": {
+    "kinds": [
+      "huber",
+      "l1",
+      "huber",
+      "l1",
+      "l1"
+    ],
+    "huber_deltas": [
+      30.0,
+      18.0,
+      38.0,
+      14.0,
+      12.0
+    ]
+  },
+  "boundary_aux": {
+    "weight": 0.24,
+    "consistency_weight": 0.12,
+    "target_weights": [
+      1.0,
+      1.0,
+      1.45
+    ],
+    "loss_kinds": [
+      "huber",
+      "huber",
+      "huber"
+    ],
+    "huber_deltas": [
+      18.0,
+      18.0,
+      26.0
+    ]
+  },
+  "grad_clip": 1.2,
+  "lr_scheduler": {
+    "type": "ReduceLROnPlateau",
+    "factor": 0.6,
+    "patience": 3,
+    "min_lr": 2e-05
+  },
+  "risk_weighting": {
+    "blank_threshold": 0.55,
+    "mapping_conf_threshold": 0.64,
+    "boost_blank": 1.12,
+    "boost_jump": 1.15,
+    "boost_low_conf": 1.08
+  },
+  "hard_example_mining": {
+    "strength": 0.55,
+    "mean_boost": 1.2347939014434814
+  },
+  "sampler": {
+    "mode": "group_balanced",
+    "group_column": "voicebank_id"
+  },
+  "vc_cv_pair_max_gap": 5,
+  "vc_cv_pairs_total": 3698,
+  "vc_cv_pairs_train": 3295,
+  "vc_cv_pairs_valid": 403,
+  "fallback_order": [
+    "coupled_nn_v2_rawmel",
+    "coupled_nn_v1",
+    "lightgbm",
+    "base"
+  ],
+  "created_at": "2026-03-16T01:37:08",
+  "train_rows": 13597,
+  "voicebank_count": 313,
+  "holdout_metrics": {
+    "delta_offset": {
+      "baseline_mae": 90.9084701538086,
+      "model_mae": 73.80227661132812
+    },
+    "delta_cons": {
+      "baseline_mae": 34.05284881591797,
+      "model_mae": 27.961103439331055
+    },
+    "delta_cutoff": {
+      "baseline_mae": 308.488525390625,
+      "model_mae": 135.60415649414062
+    },
+    "delta_pre": {
+      "baseline_mae": 36.12778091430664,
+      "model_mae": 25.129850387573242
+    },
+    "delta_ovl": {
+      "baseline_mae": 18.952978134155273,
+      "model_mae": 14.256914138793945
+    }
+  },
+  "aux_holdout_metrics": {
+    "aux_vowel_start_rel": {
+      "rows": 2053,
+      "model_mae": 93.15685272216797
+    },
+    "aux_vowel_end_rel": {
+      "rows": 2053,
+      "model_mae": 97.24077606201172
+    },
+    "aux_next_onset_rel": {
+      "rows": 1216,
+      "model_mae": 66.11017608642578
+    }
+  },
+  "holdout_confidence_mean": 0.4763795733451843,
+  "device_used": "cuda"
+}
+
+기본 설정
+   "normalization": "per_patch_log_mel_standardize",
+    "onset_anchor_policy": "mel_offset_then_base_offset",
+    "tail_anchor_policy": "mel_cutoff_then_base_cutoff_abs",
+    "padding_policy": "zero",
+    "source_feature_version": "v12"
+  },
+  "mel_patch_spec_hash": "6d95203e",
+  "mel_bins": 80,
+  "onset_frames": 49,
+  "tail_frames": 49,
+  "min_confidence": 0.65,
+  "vc_cv_pair_weight": 0.06,
+  "vc_cv_pair_warmup_epochs": 8,
+  "optimizer": "adamw",
+  "learning_rate": 0.0007,
+  "weight_decay": 0.0001,
+  "target_weights": [
+    1.12,
+    1.05,
+    1.02,
+    1.08,
+    0.9
+  ],
+  "target_loss": {
+    "kinds": [
+      "huber",
+      "l1",
+      "huber",
+      "l1",
+      "l1"
+    ],
+    "huber_deltas": [
+      30.0,
+      18.0,
+      38.0,
+      14.0,
+      12.0
+    ]
+  },
+  "boundary_aux": {
+    "weight": 0.18,
+    "consistency_weight": 0.08,
+    "target_weights": [
+      1.0,
+      1.0,
+      1.45
+    ],
+    "loss_kinds": [
+      "huber",
+      "huber",
+      "huber"
+    ],
+    "huber_deltas": [
+      18.0,
+      18.0,
+      26.0
+    ]
+  },
+  "grad_clip": 1.2,
+  "lr_scheduler": {
+    "type": "ReduceLROnPlateau",
+    "factor": 0.6,
+    "patience": 3,
+    "min_lr": 2e-05
+  },
+  "risk_weighting": {
+    "blank_threshold": 0.55,
+    "mapping_conf_threshold": 0.64,
+    "boost_blank": 0.9,
+    "boost_jump": 1.15,
+    "boost_low_conf": 1.08
+  },
+  "hard_example_mining": {
+    "strength": 0.55,
+    "mean_boost": 1.2347939014434814
+  },
+  "sampler": {
+    "mode": "group_balanced",
+    "group_column": "voicebank_id"
+  },
+  "vc_cv_pair_max_gap": 5,
+  "vc_cv_pairs_total": 3698,
+  "vc_cv_pairs_train": 3295,
+  "vc_cv_pairs_valid": 403,
+  "fallback_order": [
+    "coupled_nn_v2_rawmel",
+    "coupled_nn_v1",
+    "lightgbm",
+    "base"
+  ],
+  "created_at": "2026-03-16T01:43:34",
+  "train_rows": 13597,
+  "voicebank_count": 313,
+  "holdout_metrics": {
+    "delta_offset": {
+      "baseline_mae": 90.9084701538086,
+      "model_mae": 75.5517807006836
+    },
+    "delta_cons": {
+      "baseline_mae": 34.05284881591797,
+      "model_mae": 29.033700942993164
+    },
+    "delta_cutoff": {
+      "baseline_mae": 308.488525390625,
+      "model_mae": 128.43341064453125
+    },
+    "delta_pre": {
+      "baseline_mae": 36.12778091430664,
+      "model_mae": 24.7359619140625
+    },
+    "delta_ovl": {
+      "baseline_mae": 18.952978134155273,
+      "model_mae": 15.289388656616211
+    }
+  },
+  "aux_holdout_metrics": {
+    "aux_vowel_start_rel": {
+      "rows": 2053,
+      "model_mae": 96.15376281738281
+    },
+    "aux_vowel_end_rel": {
+      "rows": 2053,
+      "model_mae": 103.04266357421875
+    },
+    "aux_next_onset_rel": {
+      "rows": 1216,
+      "model_mae": 68.56060028076172
+    }
+  },
+  "holdout_confidence_mean": 0.469117671251297,
+  "device_used": "cuda"
+}

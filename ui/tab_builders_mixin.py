@@ -399,6 +399,45 @@ class TabBuildersMixin:
             text_color="#9E9E9E",
         ).pack(side="left", padx=(8, 0))
 
+        batch_enable_checkbox = ctk.CTkCheckBox(
+            ml_frame,
+            text="Batch inference (coupled v2) 사용",
+            text_color="#80CBC4",
+            variable=self.ml_batch_inference_enable_var,
+            command=self._save_config,
+        )
+        batch_enable_checkbox.pack(anchor="w", padx=12, pady=(4, 0))
+
+        batch_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        batch_row.pack(anchor="w", padx=12, pady=(4, 0), fill="x")
+        ctk.CTkLabel(
+            batch_row,
+            text="Batch size",
+            text_color="#B0BEC5",
+        ).pack(side="left")
+        batch_size_entry = ctk.CTkEntry(
+            batch_row,
+            width=90,
+            textvariable=self.ml_batch_inference_size_var,
+            placeholder_text="256",
+        )
+        batch_size_entry.pack(side="left", padx=(10, 8))
+        batch_size_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(
+            batch_row,
+            text="(권장 128~512, 최소 32)",
+            text_color="#9E9E9E",
+        ).pack(side="left", padx=(4, 0))
+
+        legacy_fallback_checkbox = ctk.CTkCheckBox(
+            ml_frame,
+            text="Legacy fallback(lightgbm) 체인 사용",
+            text_color="#B0BEC5",
+            variable=self.ml_legacy_fallback_enable_var,
+            command=self._save_config,
+        )
+        legacy_fallback_checkbox.pack(anchor="w", padx=12, pady=(4, 0))
+
         gamma_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
         gamma_row.pack(anchor="w", padx=12, pady=(2, 6), fill="x")
         ctk.CTkLabel(
