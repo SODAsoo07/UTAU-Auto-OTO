@@ -243,15 +243,10 @@ custom_test_wavs/*_dict.txt
 /Voice_Datas
 /dataset
 /dataset_korean_cvc_stage
-/dataset_korean_cvc_stage/**
-oto ・､・菩攪 ・ｰ・ｸ.txt
-dataset_korean_cvc_stage/_manifest/staged_sources.csv
-dataset_korean_cvc_stage/_manifest/staged_sources.json
-dataset_korean_cvc_stage/korean/cvc/CVC/Anonymous VB - KO CVC/alignment_analysis.csv
---dataset-root
-
+/dataset_staged
+/tmp
 Voice_Datas.zip
 dataset.7z
 ml/notebooks/coupled_preprocess_colab.ipynb
-/ML_models
 ml/configs/autofree_bank_specs_korean_cvvc.colab.json
+/ML_models
