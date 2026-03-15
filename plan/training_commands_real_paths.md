@@ -39,7 +39,7 @@ python -X utf8 .\ml\scripts\coupled\prepare_pairs.py `
 ## 4) rawmel 캐시 생성 (v2 학습 전 필수 권장)
 ```powershell
 python -X utf8 .\ml\scripts\coupled\build_mel_patch_cache.py `
-  --dataset ".\ml_workspace\datasets\korean\dataset_korean_cv.csv" `
+  --dataset ".\ml_workspace\datasets\korean\dataset_korean_vcv.csv" `
   --dataset-root ".\dataset_staged" `
   --allow-missing
 ```
@@ -51,19 +51,34 @@ python -X utf8 .\ml\scripts\coupled\build_mel_patch_cache.py `
 
 ## 5) 단일 형식 학습 (예: KR CVC, v2 rawmel)
 ```powershell
-python -X utf8 .\ml\scripts\train_oto_mel_coupled_model.py `
+python -X utf8 ml\scripts\coupled\train.py `
   --lang korean `
-  --format cvc `
-  --dataset ".\ml_workspace\datasets\korean\dataset_korean_cvc.csv" `
-  --out-dir ".\ML_models\korean\cvc\coupled_v2_rawmel" `
+  --format cvvc `
+  --dataset ml_workspace\datasets\korean\dataset_korean_cvvc.csv `
+  --out-dir ML_models\korean\cvvc\v2_coupled_rawmel_baseline `
   --backend coupled_nn_v2_rawmel `
+  --rawmel-cache ml_workspace\cache\mel_patches\korean\cvvc\v2 `
   --device cuda `
-  --epochs 120 `
+  --epochs 80 `
   --batch-size 192 `
   --learning-rate 0.0007 `
-  --group-column voicebank_id `
-  --min-confidence 0.65
+  --min-confidence 0.65 `
+  --progress-every 50
 ```
+복붙용
+python -X utf8 ml\scripts\coupled\train.py `
+  --lang korean `
+  --format cv `
+  --dataset ml_workspace\datasets\korean\dataset_korean_cv.csv `
+  --out-dir ML_models\korean\cv\v2_coupled_rawmel_baseline `
+  --backend coupled_nn_v2_rawmel `
+  --rawmel-cache ml_workspace\cache\mel_patches\korean\cv\v2 `
+  --device cuda `
+  --epochs 80 `
+  --batch-size 192 `
+  --learning-rate 0.00055 `
+  --min-confidence 0.65 `
+  --progress-every 50
 
 ## 6) 일괄 학습 (언어별 여러 형식)
 ```powershell

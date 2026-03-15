@@ -133,6 +133,77 @@ def _read_bounded_conf_env(name: str) -> Optional[float]:
         return None
 
 
+def _coupled_min_conf_use_model_meta() -> bool:
+    # 운영 기본은 모델 메타(min_confidence) 기반 분리 게이트를 사용한다.
+    return _env_flag("UTOA_ML_COUPLED_MIN_CONF_USE_MODEL_META", True)
+
+
+def _coupled_min_conf_model_offset() -> float:
+    raw = str(os.environ.get("UTOA_ML_COUPLED_MIN_CONF_MODEL_OFFSET", "")).strip()
+    if not raw:
+        return 0.0
+    try:
+        return max(-0.30, min(float(raw), 0.30))
+    except Exception:
+        return 0.0
+
+
+def _bounded_conf(value) -> Optional[float]:
+    try:
+        conf = float(value)
+    except Exception:
+        return None
+    if conf < 0.0 or conf > 1.0:
+        return None
+    return float(conf)
+
+
+def _min_conf_from_meta(meta: object) -> Optional[float]:
+    if not isinstance(meta, dict):
+        return None
+    candidates = [
+        meta.get("runtime_min_confidence"),
+        meta.get("min_confidence"),
+        meta.get("min_coupled_confidence"),
+    ]
+    gating = meta.get("gating")
+    if isinstance(gating, dict):
+        candidates.append(gating.get("min_coupled_confidence"))
+    for cand in candidates:
+        conf = _bounded_conf(cand)
+        if conf is not None and conf > 0.0:
+            return float(conf)
+    return None
+
+
+def _route_model_min_confidence(bundle: Optional[object], model_dir: str) -> Optional[float]:
+    # Explicit global override takes precedence over model-wise defaulting.
+    if _read_bounded_conf_env("UTOA_ML_COUPLED_MIN_CONF") is not None:
+        return None
+    if not _coupled_min_conf_use_model_meta():
+        return None
+
+    conf = None
+    if bundle is not None:
+        conf = _min_conf_from_meta(getattr(bundle, "meta", None))
+    if conf is None and model_dir:
+        try:
+            import json
+
+            meta_path = os.path.join(model_dir, "model_meta.json")
+            if os.path.isfile(meta_path):
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f) or {}
+                conf = _min_conf_from_meta(meta)
+        except Exception:
+            conf = None
+    if conf is None:
+        return None
+
+    conf = float(conf) + float(_coupled_min_conf_model_offset())
+    return float(max(0.0, min(conf, 1.0)))
+
+
 def _ml_anchor_lock_min_conf() -> float:
     env_val = _read_bounded_conf_env("UTOA_ML_ANCHOR_LOCK_MIN_CONF")
     if env_val is None:
@@ -168,8 +239,10 @@ def _coupled_min_confidence_for_alias(
     *,
     language: str = "",
     format_type: str = "",
+    base_override: Optional[float] = None,
 ) -> float:
-    base = _coupled_min_confidence()
+    base = float(base_override) if base_override is not None else _coupled_min_confidence()
+    base = max(0.0, min(base, 1.0))
     alias = str(alias_type or "").strip().lower()
     if not alias:
         return float(base)
@@ -187,8 +260,10 @@ def _coupled_min_confidence_for_alias(
     alias_token = str(alias).strip().upper()
     keys = [
         f"UTOA_ML_COUPLED_MIN_CONF_{lang_token}_{fmt_token}_{alias_token}",
+        f"UTOA_ML_COUPLED_MIN_CONF_{lang_token}_{fmt_token}",
         f"UTOA_ML_COUPLED_MIN_CONF_{lang_token}_{alias_token}",
         f"UTOA_ML_COUPLED_MIN_CONF_{alias_token}",
+        f"UTOA_ML_COUPLED_MIN_CONF_{fmt_token}",
     ]
     if alias in {"cv", "cv_head"}:
         keys.append("UTOA_ML_COUPLED_MIN_CONF_CV_FAMILY")
@@ -1857,6 +1932,7 @@ def apply_oto_ml_to_oto_file(
         selector_abstain_rows=0,
         selector_abstain_reasons=[],
         selector_hard_negative_rows=0,
+        model_conf_thresholds={},
         route="",
         model_confidence=0.0,
         fallback_reason="",
@@ -1909,6 +1985,7 @@ def apply_oto_ml_to_oto_file(
     bundle_cache: Dict[str, Optional[object]] = {}
     fallback_bundle_cache: Dict[str, Optional[object]] = {}
     selector_cache: Dict[str, Optional[object]] = {}
+    route_model_min_conf: Dict[str, Optional[float]] = {}
     batch_pred_cache: Dict[str, Dict[int, OtoDeltaResult]] = {}
     route_index_cache: Dict[str, List[int]] = {}
     route_status: Dict[str, str] = {}
@@ -1919,6 +1996,7 @@ def apply_oto_ml_to_oto_file(
     legacy_fallback_enabled = _legacy_fallback_enabled()
     batch_enabled = _batch_inference_enabled()
     batch_size = _batch_inference_size()
+    coupled_conf_mode = "model_meta" if (_coupled_min_conf_use_model_meta() and _read_bounded_conf_env("UTOA_ML_COUPLED_MIN_CONF") is None) else "global"
     model_notice = set()
     changed = 0
     route_counts: Dict[str, int] = {}
@@ -1949,7 +2027,8 @@ def apply_oto_ml_to_oto_file(
             f"gated_ensemble={'ON' if _gated_ensemble_enabled() else 'OFF'}, "
             f"selector={'ON' if selector_enabled_runtime else 'OFF'}, "
             f"legacy_fallback={'ON' if legacy_fallback_enabled else 'OFF'}, "
-            f"batch={'ON' if batch_enabled else 'OFF'}({batch_size})",
+            f"batch={'ON' if batch_enabled else 'OFF'}({batch_size}), "
+            f"min_conf_mode={coupled_conf_mode}",
         )
 
     for feat_idx, feat in enumerate(feature_rows, start=1):
@@ -1964,11 +2043,6 @@ def apply_oto_ml_to_oto_file(
         if not format_type:
             continue
         alias_type_for_row = str(feat.get("alias_type", "") or "").strip().lower()
-        coupled_min_conf = _coupled_min_confidence_for_alias(
-            alias_type_for_row,
-            language=language,
-            format_type=format_type,
-        )
         alias_family = infer_alias_family(language, feat)
         mel_patch_fallback = mel_patch_is_fallback(feat)
         routed_features += 1
@@ -1995,6 +2069,7 @@ def apply_oto_ml_to_oto_file(
                 ml_report["missing_routes"].append(
                     {"format_type": format_type, "alias_family": alias_family, "code": ML_MODEL_MISSING, "model_dir": ""}
                 )
+                route_model_min_conf[cache_key] = None
                 bundle_cache[cache_key] = None
                 fallback_bundle_cache[cache_key] = None
                 selector_cache[cache_key] = None
@@ -2030,6 +2105,12 @@ def apply_oto_ml_to_oto_file(
 
                 bundle_cache[cache_key] = primary_bundle
                 fallback_bundle_cache[cache_key] = fallback_bundle
+                route_model_min_conf[cache_key] = _route_model_min_confidence(primary_bundle, route_model_dir[cache_key])
+                if route_model_min_conf[cache_key] is not None:
+                    model_conf_report = ml_report.get("model_conf_thresholds", {})
+                    if isinstance(model_conf_report, dict):
+                        model_conf_report[cache_key] = float(route_model_min_conf[cache_key])
+                        ml_report["model_conf_thresholds"] = model_conf_report
 
                 selector_dir = lightgbm_dir or (primary_dir if _read_bundle_backend(primary_dir) == "lightgbm" else "")
                 selector_payload = load_lightgbm_selector_bundle(selector_dir) if (selector_allowed and selector_dir) else None
@@ -2049,6 +2130,12 @@ def apply_oto_ml_to_oto_file(
                 bundle = bundle_cache[cache_key]
                 if bundle and route_model_dir[cache_key] and route_model_dir[cache_key] not in model_notice:
                     _emit(callback, f"[OTO-ML] 모델 로드 ({bundle.backend}): {route_model_dir[cache_key]}")
+                    model_min_conf = route_model_min_conf.get(cache_key)
+                    if model_min_conf is not None:
+                        _emit(
+                            callback,
+                            f"[OTO-ML] min_conf(model-aware): {float(model_min_conf):.3f} [{cache_key}]",
+                        )
                     ml_report["loaded_models"].append(route_model_dir[cache_key])
                     model_notice.add(route_model_dir[cache_key])
                 fb = fallback_bundle_cache.get(cache_key)
@@ -2113,6 +2200,12 @@ def apply_oto_ml_to_oto_file(
         bundle = bundle_cache.get(cache_key)
         fallback_bundle = fallback_bundle_cache.get(cache_key)
         selector_bundle = selector_cache.get(cache_key)
+        coupled_min_conf = _coupled_min_confidence_for_alias(
+            alias_type_for_row,
+            language=language,
+            format_type=format_type,
+            base_override=route_model_min_conf.get(cache_key),
+        )
         if not bundle and not fallback_bundle and selector_bundle is None:
             continue
 

@@ -106,6 +106,58 @@ class OtoActionsMixin:
                     if hasattr(self, "ml_coupled_min_conf_var")
                     else ""
                 )
+                ml_coupled_min_conf_use_model_meta = (
+                    self.ml_coupled_min_conf_use_model_meta_var.get()
+                    if hasattr(self, "ml_coupled_min_conf_use_model_meta_var")
+                    else True
+                )
+                ml_coupled_min_conf_model_offset_raw = (
+                    self.ml_coupled_min_conf_model_offset_var.get()
+                    if hasattr(self, "ml_coupled_min_conf_model_offset_var")
+                    else ""
+                )
+                ml_coupled_min_conf_format_raw = {
+                    "UTOA_ML_COUPLED_MIN_CONF_KR_CV": (
+                        self.ml_coupled_min_conf_kr_cv_var.get()
+                        if hasattr(self, "ml_coupled_min_conf_kr_cv_var")
+                        else ""
+                    ),
+                    "UTOA_ML_COUPLED_MIN_CONF_KR_CVC": (
+                        self.ml_coupled_min_conf_kr_cvc_var.get()
+                        if hasattr(self, "ml_coupled_min_conf_kr_cvc_var")
+                        else ""
+                    ),
+                    "UTOA_ML_COUPLED_MIN_CONF_KR_CVVC": (
+                        self.ml_coupled_min_conf_kr_cvvc_var.get()
+                        if hasattr(self, "ml_coupled_min_conf_kr_cvvc_var")
+                        else ""
+                    ),
+                    "UTOA_ML_COUPLED_MIN_CONF_KR_VCV": (
+                        self.ml_coupled_min_conf_kr_vcv_var.get()
+                        if hasattr(self, "ml_coupled_min_conf_kr_vcv_var")
+                        else ""
+                    ),
+                    "UTOA_ML_COUPLED_MIN_CONF_JA_CV": (
+                        self.ml_coupled_min_conf_ja_cv_var.get()
+                        if hasattr(self, "ml_coupled_min_conf_ja_cv_var")
+                        else ""
+                    ),
+                    "UTOA_ML_COUPLED_MIN_CONF_JA_CVC": (
+                        self.ml_coupled_min_conf_ja_cvc_var.get()
+                        if hasattr(self, "ml_coupled_min_conf_ja_cvc_var")
+                        else ""
+                    ),
+                    "UTOA_ML_COUPLED_MIN_CONF_JA_CVVC": (
+                        self.ml_coupled_min_conf_ja_cvvc_var.get()
+                        if hasattr(self, "ml_coupled_min_conf_ja_cvvc_var")
+                        else ""
+                    ),
+                    "UTOA_ML_COUPLED_MIN_CONF_JA_VCV": (
+                        self.ml_coupled_min_conf_ja_vcv_var.get()
+                        if hasattr(self, "ml_coupled_min_conf_ja_vcv_var")
+                        else ""
+                    ),
+                }
                 ml_coupled_device = (
                     str(self.ml_coupled_device_var.get()).strip().lower()
                     if hasattr(self, "ml_coupled_device_var")
@@ -170,6 +222,15 @@ class OtoActionsMixin:
 
                 kr_conf_threshold = _parse_optional_threshold(kr_conf_raw, lo=0.0, hi=1.0)
                 ml_coupled_min_conf = _parse_optional_threshold(ml_coupled_min_conf_raw, lo=0.0, hi=1.0)
+                ml_coupled_min_conf_model_offset = _parse_optional_float(
+                    ml_coupled_min_conf_model_offset_raw,
+                    lo=-0.30,
+                    hi=0.30,
+                )
+                ml_coupled_min_conf_format = {
+                    key: _parse_optional_threshold(raw_val, lo=0.0, hi=1.0)
+                    for key, raw_val in ml_coupled_min_conf_format_raw.items()
+                }
                 kr_continuity_max_offset_adj = _parse_optional_float(kr_continuity_max_offset_adj_raw, lo=0.0, hi=2000.0)
                 ml_anchor_mel_gamma = _parse_optional_float(ml_anchor_mel_gamma_raw, lo=0.1, hi=10.0)
                 try:
@@ -207,6 +268,18 @@ class OtoActionsMixin:
                     os.environ.pop("UTOA_ML_COUPLED_MIN_CONF", None)
                 else:
                     os.environ["UTOA_ML_COUPLED_MIN_CONF"] = str(float(ml_coupled_min_conf))
+                os.environ["UTOA_ML_COUPLED_MIN_CONF_USE_MODEL_META"] = (
+                    "1" if bool(ml_coupled_min_conf_use_model_meta) else "0"
+                )
+                if ml_coupled_min_conf_model_offset is None:
+                    os.environ.pop("UTOA_ML_COUPLED_MIN_CONF_MODEL_OFFSET", None)
+                else:
+                    os.environ["UTOA_ML_COUPLED_MIN_CONF_MODEL_OFFSET"] = str(float(ml_coupled_min_conf_model_offset))
+                for env_key, env_val in ml_coupled_min_conf_format.items():
+                    if env_val is None:
+                        os.environ.pop(env_key, None)
+                    else:
+                        os.environ[env_key] = str(float(env_val))
                 os.environ["UTOA_ML_COUPLED_DEVICE"] = str(ml_coupled_device)
                 coupled_backend_env = {"auto": "auto", "ensemble": "auto"}.get(
                     ml_coupled_backend,
@@ -242,10 +315,21 @@ class OtoActionsMixin:
                     f"[OTO-ML] 실행 옵션: ml={'ON' if enable_ml_correction else 'OFF'}, selector={self._describe_ml_selector_mode(selector_mode_code)}"
                 )
                 self._append_log(f"[OTO-ML] route={os.environ.get('UTOA_ML_ROUTE', 'autofree_v1')}")
-                min_conf_display = f"{float(ml_coupled_min_conf):.2f}" if ml_coupled_min_conf is not None else "default(0.42)"
+                min_conf_display = (
+                    f"{float(ml_coupled_min_conf):.2f}"
+                    if ml_coupled_min_conf is not None
+                    else "default(0.42, model-aware)"
+                )
                 self._append_log(
                     f"[OTO-ML] coupled={'ON' if ml_coupled_enable else 'OFF'}, backend={ml_coupled_backend}, ensemble={'ON' if ensemble_enabled else 'OFF'}, min_conf={min_conf_display}, device={ml_coupled_device}, strict={'ON' if ml_coupled_strict_constraint else 'OFF'}"
                 )
+                if bool(ml_coupled_min_conf_use_model_meta):
+                    if ml_coupled_min_conf_model_offset is None:
+                        self._append_log("[OTO-ML] min_conf policy: model-aware(meta) + per-format override")
+                    else:
+                        self._append_log(
+                            f"[OTO-ML] min_conf policy: model-aware(meta, offset={float(ml_coupled_min_conf_model_offset):+.3f}) + per-format override"
+                        )
                 self._append_log(
                     f"[OTO-ML] runtime: batch={'ON' if bool(ml_batch_inference_enable) else 'OFF'}({int(ml_batch_inference_size)}), legacy_fallback={'ON' if bool(ml_legacy_fallback_enable) else 'OFF'}"
                 )

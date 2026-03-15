@@ -377,6 +377,62 @@ class TabBuildersMixin:
             command=self._save_config,
         ).pack(side="left")
 
+        model_conf_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        model_conf_row.pack(anchor="w", padx=12, pady=(4, 0), fill="x")
+        ctk.CTkCheckBox(
+            model_conf_row,
+            text="Model-aware min_conf (model_meta) 사용",
+            text_color="#80CBC4",
+            variable=self.ml_coupled_min_conf_use_model_meta_var,
+            command=self._save_config,
+        ).pack(side="left")
+        ctk.CTkLabel(
+            model_conf_row,
+            text="offset",
+            text_color="#B0BEC5",
+        ).pack(side="left", padx=(10, 4))
+        model_conf_offset_entry = ctk.CTkEntry(
+            model_conf_row,
+            width=70,
+            textvariable=self.ml_coupled_min_conf_model_offset_var,
+            placeholder_text="0.00",
+        )
+        model_conf_offset_entry.pack(side="left", padx=(0, 8))
+        model_conf_offset_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(
+            model_conf_row,
+            text="(range: -0.30 ~ +0.30)",
+            text_color="#9E9E9E",
+        ).pack(side="left", padx=(2, 0))
+
+        model_conf_grid = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        model_conf_grid.pack(anchor="w", padx=12, pady=(4, 0), fill="x")
+
+        def _add_min_conf_field(parent, label, var):
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(side="left", padx=(0, 10))
+            ctk.CTkLabel(row, text=label, text_color="#B0BEC5").pack(side="left")
+            ent = ctk.CTkEntry(row, width=68, textvariable=var, placeholder_text="auto")
+            ent.pack(side="left", padx=(6, 0))
+            ent.bind("<FocusOut>", lambda _e: self._save_config())
+            return ent
+
+        kr_row = ctk.CTkFrame(model_conf_grid, fg_color="transparent")
+        kr_row.pack(anchor="w", fill="x", pady=(0, 2))
+        ctk.CTkLabel(kr_row, text="KR", text_color="#80CBC4", width=26, anchor="w").pack(side="left")
+        _add_min_conf_field(kr_row, "CV", self.ml_coupled_min_conf_kr_cv_var)
+        _add_min_conf_field(kr_row, "CVC", self.ml_coupled_min_conf_kr_cvc_var)
+        _add_min_conf_field(kr_row, "CVVC", self.ml_coupled_min_conf_kr_cvvc_var)
+        _add_min_conf_field(kr_row, "VCV", self.ml_coupled_min_conf_kr_vcv_var)
+
+        ja_row = ctk.CTkFrame(model_conf_grid, fg_color="transparent")
+        ja_row.pack(anchor="w", fill="x", pady=(0, 2))
+        ctk.CTkLabel(ja_row, text="JA", text_color="#80CBC4", width=26, anchor="w").pack(side="left")
+        _add_min_conf_field(ja_row, "CV", self.ml_coupled_min_conf_ja_cv_var)
+        _add_min_conf_field(ja_row, "CVC", self.ml_coupled_min_conf_ja_cvc_var)
+        _add_min_conf_field(ja_row, "CVVC", self.ml_coupled_min_conf_ja_cvvc_var)
+        _add_min_conf_field(ja_row, "VCV", self.ml_coupled_min_conf_ja_vcv_var)
+
         backend_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
         backend_row.pack(anchor="w", padx=12, pady=(6, 8), fill="x")
         ctk.CTkLabel(

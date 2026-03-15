@@ -701,6 +701,16 @@ class ConfigMixin:
             "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "기본 정책",
             "ml_coupled_enable": self.ml_coupled_enable_var.get() if hasattr(self, "ml_coupled_enable_var") else True,
             "ml_coupled_min_conf": self.ml_coupled_min_conf_var.get() if hasattr(self, "ml_coupled_min_conf_var") else "",
+            "ml_coupled_min_conf_use_model_meta": self.ml_coupled_min_conf_use_model_meta_var.get() if hasattr(self, "ml_coupled_min_conf_use_model_meta_var") else True,
+            "ml_coupled_min_conf_model_offset": self.ml_coupled_min_conf_model_offset_var.get() if hasattr(self, "ml_coupled_min_conf_model_offset_var") else "",
+            "ml_coupled_min_conf_kr_cv": self.ml_coupled_min_conf_kr_cv_var.get() if hasattr(self, "ml_coupled_min_conf_kr_cv_var") else "",
+            "ml_coupled_min_conf_kr_cvc": self.ml_coupled_min_conf_kr_cvc_var.get() if hasattr(self, "ml_coupled_min_conf_kr_cvc_var") else "",
+            "ml_coupled_min_conf_kr_cvvc": self.ml_coupled_min_conf_kr_cvvc_var.get() if hasattr(self, "ml_coupled_min_conf_kr_cvvc_var") else "",
+            "ml_coupled_min_conf_kr_vcv": self.ml_coupled_min_conf_kr_vcv_var.get() if hasattr(self, "ml_coupled_min_conf_kr_vcv_var") else "",
+            "ml_coupled_min_conf_ja_cv": self.ml_coupled_min_conf_ja_cv_var.get() if hasattr(self, "ml_coupled_min_conf_ja_cv_var") else "",
+            "ml_coupled_min_conf_ja_cvc": self.ml_coupled_min_conf_ja_cvc_var.get() if hasattr(self, "ml_coupled_min_conf_ja_cvc_var") else "",
+            "ml_coupled_min_conf_ja_cvvc": self.ml_coupled_min_conf_ja_cvvc_var.get() if hasattr(self, "ml_coupled_min_conf_ja_cvvc_var") else "",
+            "ml_coupled_min_conf_ja_vcv": self.ml_coupled_min_conf_ja_vcv_var.get() if hasattr(self, "ml_coupled_min_conf_ja_vcv_var") else "",
             "ml_coupled_device": self.ml_coupled_device_var.get() if hasattr(self, "ml_coupled_device_var") else "auto",
             "ml_coupled_backend": self.ml_coupled_backend_var.get() if hasattr(self, "ml_coupled_backend_var") else "auto",
             "ml_coupled_strict_constraint": self.ml_coupled_strict_constraint_var.get() if hasattr(self, "ml_coupled_strict_constraint_var") else False,
@@ -862,6 +872,55 @@ class ConfigMixin:
                                 self.ml_coupled_min_conf_var.set(f"{conf:.2f}".rstrip("0").rstrip("."))
                         except Exception:
                             self.ml_coupled_min_conf_var.set("")
+            if "ml_coupled_min_conf_use_model_meta" in config and hasattr(self, "ml_coupled_min_conf_use_model_meta_var"):
+                self.ml_coupled_min_conf_use_model_meta_var.set(bool(config.get("ml_coupled_min_conf_use_model_meta", True)))
+            if "ml_coupled_min_conf_model_offset" in config and hasattr(self, "ml_coupled_min_conf_model_offset_var"):
+                raw_offset = config.get("ml_coupled_min_conf_model_offset", "")
+                if raw_offset is None:
+                    self.ml_coupled_min_conf_model_offset_var.set("")
+                else:
+                    txt = str(raw_offset).strip()
+                    if not txt:
+                        self.ml_coupled_min_conf_model_offset_var.set("")
+                    else:
+                        try:
+                            val = max(-0.3, min(0.3, float(txt)))
+                            if abs(val) <= 1e-9:
+                                self.ml_coupled_min_conf_model_offset_var.set("")
+                            else:
+                                self.ml_coupled_min_conf_model_offset_var.set(
+                                    f"{val:.3f}".rstrip("0").rstrip(".")
+                                )
+                        except Exception:
+                            self.ml_coupled_min_conf_model_offset_var.set("")
+
+            threshold_vars = [
+                ("ml_coupled_min_conf_kr_cv", "ml_coupled_min_conf_kr_cv_var"),
+                ("ml_coupled_min_conf_kr_cvc", "ml_coupled_min_conf_kr_cvc_var"),
+                ("ml_coupled_min_conf_kr_cvvc", "ml_coupled_min_conf_kr_cvvc_var"),
+                ("ml_coupled_min_conf_kr_vcv", "ml_coupled_min_conf_kr_vcv_var"),
+                ("ml_coupled_min_conf_ja_cv", "ml_coupled_min_conf_ja_cv_var"),
+                ("ml_coupled_min_conf_ja_cvc", "ml_coupled_min_conf_ja_cvc_var"),
+                ("ml_coupled_min_conf_ja_cvvc", "ml_coupled_min_conf_ja_cvvc_var"),
+                ("ml_coupled_min_conf_ja_vcv", "ml_coupled_min_conf_ja_vcv_var"),
+            ]
+            for conf_key, var_name in threshold_vars:
+                if conf_key not in config or not hasattr(self, var_name):
+                    continue
+                var = getattr(self, var_name)
+                raw_conf = config.get(conf_key, "")
+                if raw_conf is None:
+                    var.set("")
+                    continue
+                txt = str(raw_conf).strip()
+                if not txt:
+                    var.set("")
+                    continue
+                try:
+                    conf = max(0.0, min(1.0, float(txt)))
+                    var.set(f"{conf:.3f}".rstrip("0").rstrip("."))
+                except Exception:
+                    var.set("")
             if "ml_batch_inference_enable" in config and hasattr(self, "ml_batch_inference_enable_var"):
                 self.ml_batch_inference_enable_var.set(bool(config.get("ml_batch_inference_enable", True)))
             if "ml_batch_inference_size" in config and hasattr(self, "ml_batch_inference_size_var"):
