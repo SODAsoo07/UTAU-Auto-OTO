@@ -266,7 +266,7 @@ class AppRuntimeMixin:
         payloads = {
             "recommended": {
                 "enable_ml_correction": True,
-                "ml_route": "autofree_v1",
+                "ml_route": "legacy",
                 "ml_coupled_enable": True,
                 "ml_coupled_backend": "auto",
                 "ml_coupled_device": "auto",
@@ -292,7 +292,7 @@ class AppRuntimeMixin:
             },
             "quality": {
                 "enable_ml_correction": True,
-                "ml_route": "autofree_v1",
+                "ml_route": "legacy",
                 "ml_coupled_enable": True,
                 "ml_coupled_backend": "auto",
                 "ml_coupled_device": "auto",
@@ -304,7 +304,58 @@ class AppRuntimeMixin:
                 "ml_anchor_mel_gamma": "1.35",
             },
         }
-        return payloads.get(normalized, payloads["recommended"])
+        payload = dict(payloads.get(normalized, payloads["recommended"]))
+
+        language = self._get_language() if hasattr(self, "_get_language") else "korean"
+        format_code = ""
+        if hasattr(self, "auto_format_var"):
+            try:
+                format_code = normalize_auto_format_value(language, self.auto_format_var.get()) or ""
+            except Exception:
+                format_code = ""
+        fmt = format_code or "general"
+
+        context_overrides = {
+            ("korean", "cv"): {
+                "recommended": {"ml_batch_inference_size": "320", "ml_anchor_mel_gamma": "1.1", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
+                "speed": {"ml_batch_inference_size": "640", "ml_anchor_mel_gamma": "1.0", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
+                "quality": {"ml_batch_inference_size": "192", "ml_anchor_mel_gamma": "1.25"},
+            },
+            ("korean", "cvc"): {
+                "recommended": {"ml_batch_inference_size": "224", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.3"},
+                "speed": {"ml_batch_inference_size": "448", "ml_coupled_strict_constraint": False, "ml_anchor_mel_gamma": "1.15"},
+                "quality": {"ml_batch_inference_size": "128", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.4"},
+            },
+            ("korean", "cvvc"): {
+                "recommended": {"ml_batch_inference_size": "224", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.3"},
+                "speed": {"ml_batch_inference_size": "448", "ml_coupled_strict_constraint": False, "ml_anchor_mel_gamma": "1.15"},
+                "quality": {"ml_batch_inference_size": "128", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.4"},
+            },
+            ("korean", "vcv"): {
+                "recommended": {"ml_batch_inference_size": "192", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.35", "ml_mel_weight_mode": "MEL ・ｰ・(・､嵭・"},
+                "speed": {"ml_batch_inference_size": "384", "ml_coupled_strict_constraint": False, "ml_anchor_mel_gamma": "1.2", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
+                "quality": {"ml_batch_inference_size": "96", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.45", "ml_mel_weight_mode": "MEL ・ｰ・(・､嵭・"},
+            },
+            ("japanese", "cv"): {
+                "recommended": {"ml_batch_inference_size": "384", "ml_anchor_mel_gamma": "1.0", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
+                "speed": {"ml_batch_inference_size": "640", "ml_anchor_mel_gamma": "1.0", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
+                "quality": {"ml_batch_inference_size": "224", "ml_anchor_mel_gamma": "1.15", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
+            },
+            ("japanese", "cvvc"): {
+                "recommended": {"ml_batch_inference_size": "320", "ml_anchor_mel_gamma": "1.05", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
+                "speed": {"ml_batch_inference_size": "640", "ml_anchor_mel_gamma": "1.0", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
+                "quality": {"ml_batch_inference_size": "192", "ml_anchor_mel_gamma": "1.2", "ml_mel_weight_mode": "MEL ・ｰ・(・､嵭・"},
+            },
+            ("japanese", "vcv"): {
+                "recommended": {"ml_batch_inference_size": "256", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.2", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
+                "speed": {"ml_batch_inference_size": "512", "ml_coupled_strict_constraint": False, "ml_anchor_mel_gamma": "1.05", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
+                "quality": {"ml_batch_inference_size": "160", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.3", "ml_mel_weight_mode": "MEL ・ｰ・(・､嵭・"},
+            },
+        }
+        default_context = ("korean", "cvvc") if language == "korean" else ("japanese", "cvvc")
+        override = context_overrides.get((language, fmt), context_overrides.get(default_context, {})).get(normalized, {})
+        payload.update(override)
+        return payload
 
     def _apply_ml_runtime_preset(self, value: str, *, log_message: bool = False):
         code = self._normalize_ml_runtime_preset(value)
@@ -839,9 +890,10 @@ class ConfigMixin:
             "gen_dash_alias": self.gen_dash_alias_var.get() if hasattr(self, "gen_dash_alias_var") else True,
             "no_base_oto": self.no_base_oto_var.get(),
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
-            "ml_route": self.ml_route_var.get() if hasattr(self, "ml_route_var") else "autofree_v1",
+            "ml_route": self.ml_route_var.get() if hasattr(self, "ml_route_var") else "legacy",
             "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "기본 정책",
             "ml_coupled_enable": self.ml_coupled_enable_var.get() if hasattr(self, "ml_coupled_enable_var") else True,
+            "ml_two_stage_model_enable": self.ml_two_stage_model_enable_var.get() if hasattr(self, "ml_two_stage_model_enable_var") else True,
             "ml_coupled_min_conf": self.ml_coupled_min_conf_var.get() if hasattr(self, "ml_coupled_min_conf_var") else "",
             "ml_coupled_min_conf_use_model_meta": self.ml_coupled_min_conf_use_model_meta_var.get() if hasattr(self, "ml_coupled_min_conf_use_model_meta_var") else True,
             "ml_coupled_min_conf_model_offset": self.ml_coupled_min_conf_model_offset_var.get() if hasattr(self, "ml_coupled_min_conf_model_offset_var") else "",
@@ -889,6 +941,7 @@ class ConfigMixin:
             "kr_mapping_max_index_jump_default": self.kr_mapping_max_index_jump_default_var.get() if hasattr(self, "kr_mapping_max_index_jump_default_var") else 1,
             "kr_mapping_max_index_jump_high_conf": self.kr_mapping_max_index_jump_high_conf_var.get() if hasattr(self, "kr_mapping_max_index_jump_high_conf_var") else 2,
             "kr_continuity_max_offset_adj": self.kr_continuity_max_offset_adj_var.get() if hasattr(self, "kr_continuity_max_offset_adj_var") else "",
+            "kr_uncommon_reclist_stable_mode": self.kr_uncommon_reclist_stable_mode_var.get() if hasattr(self, "kr_uncommon_reclist_stable_mode_var") else False,
             "ml_same_language_borrow_only": self.ml_same_language_borrow_only_var.get() if hasattr(self, "ml_same_language_borrow_only_var") else True,
             "language": self.lang_var.get(),
             "auto_format": self.auto_format_var.get(),
@@ -948,9 +1001,8 @@ class ConfigMixin:
             if hasattr(self, "enable_ml_correction_var"):
                 self.enable_ml_correction_var.set(bool(config.get("enable_ml_correction", True)))
             if "ml_route" in config and hasattr(self, "ml_route_var"):
-                saved_route = str(config.get("ml_route", "autofree_v1") or "autofree_v1").strip().lower()
-                if saved_route in {"legacy", "autofree_v1"}:
-                    self.ml_route_var.set(saved_route)
+                saved_route = str(config.get("ml_route", "legacy") or "legacy").strip().lower()
+                self.ml_route_var.set("legacy" if saved_route != "legacy" else saved_route)
 
             if "language" in config and hasattr(self, "lang_var"):
                 saved_language = str(config.get("language", "") or "").strip()
@@ -1035,6 +1087,8 @@ class ConfigMixin:
                     self.ml_selector_mode_var.set(saved_selector_mode)
             if "ml_coupled_enable" in config and hasattr(self, "ml_coupled_enable_var"):
                 self.ml_coupled_enable_var.set(bool(config.get("ml_coupled_enable", True)))
+            if "ml_two_stage_model_enable" in config and hasattr(self, "ml_two_stage_model_enable_var"):
+                self.ml_two_stage_model_enable_var.set(bool(config.get("ml_two_stage_model_enable", True)))
             if "ml_coupled_min_conf" in config and hasattr(self, "ml_coupled_min_conf_var"):
                 raw_conf = config.get("ml_coupled_min_conf", "")
                 if raw_conf is None:
@@ -1153,6 +1207,8 @@ class ConfigMixin:
                                 )
                         except Exception:
                             self.kr_continuity_max_offset_adj_var.set("")
+            if "kr_uncommon_reclist_stable_mode" in config and hasattr(self, "kr_uncommon_reclist_stable_mode_var"):
+                self.kr_uncommon_reclist_stable_mode_var.set(bool(config.get("kr_uncommon_reclist_stable_mode", False)))
             if "ml_anchor_mel_gamma" in config and hasattr(self, "ml_anchor_mel_gamma_var"):
                 raw_val = config.get("ml_anchor_mel_gamma", "")
                 if raw_val is None:

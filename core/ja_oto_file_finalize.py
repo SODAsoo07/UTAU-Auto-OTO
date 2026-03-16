@@ -27,14 +27,12 @@ def _env_float(name, default):
 
 
 def _normalize_ml_route(value: str) -> str:
-    raw = str(value or "").strip().lower()
-    if raw in {"autofree_v1", "autofree", "b", "route_b"}:
-        return "autofree_v1"
+    _ = str(value or "").strip().lower()
     return "legacy"
 
 
 def _current_ml_route() -> str:
-    return _normalize_ml_route(os.environ.get("UTOA_ML_ROUTE", "autofree_v1"))
+    return _normalize_ml_route(os.environ.get("UTOA_ML_ROUTE", "legacy"))
 
 
 @dataclass(frozen=True)

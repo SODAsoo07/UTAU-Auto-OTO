@@ -171,6 +171,11 @@ class OtoActionsMixin:
                     if hasattr(self, "ml_coupled_enable_var")
                     else True
                 )
+                ml_two_stage_model_enable = (
+                    self.ml_two_stage_model_enable_var.get()
+                    if hasattr(self, "ml_two_stage_model_enable_var")
+                    else True
+                )
                 ml_coupled_min_conf_raw = (
                     self.ml_coupled_min_conf_var.get()
                     if hasattr(self, "ml_coupled_min_conf_var")
@@ -241,7 +246,7 @@ class OtoActionsMixin:
                 ml_route = (
                     str(self.ml_route_var.get()).strip().lower()
                     if hasattr(self, "ml_route_var")
-                    else "autofree_v1"
+                    else "legacy"
                 )
                 ml_model_root = ""
                 if lang == "japanese" and hasattr(self, "ml_model_root_ja_var"):
@@ -386,6 +391,7 @@ class OtoActionsMixin:
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_DEFAULT"] = str(int(kr_jump_default))
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_HIGH_CONF"] = str(int(kr_jump_hi))
                 os.environ["UTOA_ML_COUPLED_ENABLE"] = "1" if ml_coupled_enable else "0"
+                os.environ["UTOA_ML_TWO_STAGE_MODEL_ENABLE"] = "1" if bool(ml_two_stage_model_enable) else "0"
                 os.environ["UTOA_ML_ENSEMBLE_ENABLE"] = "1" if ensemble_enabled else "0"
                 if ml_coupled_min_conf is None:
                     os.environ.pop("UTOA_ML_COUPLED_MIN_CONF", None)
@@ -413,23 +419,19 @@ class OtoActionsMixin:
                 os.environ["UTOA_ML_BATCH_INFERENCE_ENABLE"] = "1" if bool(ml_batch_inference_enable) else "0"
                 os.environ["UTOA_ML_BATCH_INFERENCE_SIZE"] = str(int(ml_batch_inference_size))
                 os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = "1" if bool(ml_legacy_fallback_enable) else "0"
-                os.environ["UTOA_ML_ROUTE"] = "autofree_v1" if ml_route == "autofree_v1" else "legacy"
-                os.environ["UTOA_ML_AUTOFREE_AUX_ENABLE"] = "1" if ml_route == "autofree_v1" else "0"
+                os.environ["UTOA_ML_ROUTE"] = "legacy"
+                os.environ.pop("UTOA_ML_AUTOFREE_AUX_ENABLE", None)
                 os.environ["UTOA_ENABLE_HEAD_TAIL_DASH_ALIAS"] = "1" if bool(gen_dash_alias) else "0"
                 if lang == "japanese":
                     if ml_model_root:
                         os.environ["UTOA_JA_OTO_ML_DIR"] = ml_model_root
-                        os.environ["UTOA_JA_AUTOFREE_ML_DIR"] = ml_model_root
                     else:
                         os.environ.pop("UTOA_JA_OTO_ML_DIR", None)
-                        os.environ.pop("UTOA_JA_AUTOFREE_ML_DIR", None)
                 else:
                     if ml_model_root:
                         os.environ["UTOA_KR_OTO_ML_DIR"] = ml_model_root
-                        os.environ["UTOA_KR_AUTOFREE_ML_DIR"] = ml_model_root
                     else:
                         os.environ.pop("UTOA_KR_OTO_ML_DIR", None)
-                        os.environ.pop("UTOA_KR_AUTOFREE_ML_DIR", None)
                 if kr_anchor_profile_path:
                     os.environ["UTOA_KR_ANCHOR_PROFILE_PATH"] = kr_anchor_profile_path
                 else:
@@ -438,7 +440,10 @@ class OtoActionsMixin:
                 self._append_log(
                     f"[OTO-ML] 실행 옵션: ml={'ON' if enable_ml_correction else 'OFF'}, selector={self._describe_ml_selector_mode(selector_mode_code)}"
                 )
-                self._append_log(f"[OTO-ML] route={os.environ.get('UTOA_ML_ROUTE', 'autofree_v1')}")
+                self._append_log(f"[OTO-ML] route={os.environ.get('UTOA_ML_ROUTE', 'legacy')}")
+                self._append_log(
+                    f"[OTO-ML] two_stage_model={'ON' if bool(ml_two_stage_model_enable) else 'OFF'}"
+                )
                 self._append_log(
                     f"[OTO-ML] mel_weight_mode={self._describe_mel_weight_mode(mel_weight_mode_code)}"
                 )
@@ -460,8 +465,7 @@ class OtoActionsMixin:
                 self._append_log(
                     f"[OTO-ML] runtime: batch={'ON' if bool(ml_batch_inference_enable) else 'OFF'}({int(ml_batch_inference_size)}), legacy_fallback={'ON' if bool(ml_legacy_fallback_enable) else 'OFF'}"
                 )
-                if ml_route == "autofree_v1":
-                    self._append_log("[OTO-ML] route policy: coupled primary + autofree auxiliary(residual)")
+                self._append_log("[OTO-ML] route policy: legacy only")
                 kr_conf_display = f"{float(kr_conf_threshold):.2f}" if kr_conf_threshold is not None else "default(by format)"
                 self._append_log(f"[KR-MAP] confidence_threshold={kr_conf_display}")
                 if self.no_base_oto_var.get():

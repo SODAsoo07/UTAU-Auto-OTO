@@ -135,9 +135,10 @@ class App(
         self.gen_dash_alias_var = ctk.BooleanVar(value=True)
         self.no_base_oto_var = ctk.BooleanVar(value=False)
         self.enable_ml_correction_var = ctk.BooleanVar(value=True)
-        self.ml_route_var = ctk.StringVar(value="autofree_v1")
+        self.ml_route_var = ctk.StringVar(value="legacy")
         self.ml_selector_mode_var = ctk.StringVar(value="기본 정책")
         self.ml_coupled_enable_var = ctk.BooleanVar(value=True)
+        self.ml_two_stage_model_enable_var = ctk.BooleanVar(value=True)
         self.ml_coupled_min_conf_var = ctk.StringVar(value="")
         self.ml_coupled_min_conf_use_model_meta_var = ctk.BooleanVar(value=True)
         self.ml_coupled_min_conf_model_offset_var = ctk.StringVar(value="")
@@ -181,6 +182,7 @@ class App(
         self.kr_mapping_max_index_jump_default_var = ctk.IntVar(value=1)
         self.kr_mapping_max_index_jump_high_conf_var = ctk.IntVar(value=2)
         self.kr_continuity_max_offset_adj_var = ctk.StringVar(value="")
+        self.kr_uncommon_reclist_stable_mode_var = ctk.BooleanVar(value=False)
         self.ml_same_language_borrow_only_var = ctk.BooleanVar(value=True)
         self.advanced_options_expanded = False
         

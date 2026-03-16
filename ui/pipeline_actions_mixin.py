@@ -732,6 +732,11 @@ class PipelineActionsMixin:
                         if hasattr(self, "ml_coupled_enable_var")
                         else True
                     )
+                    ml_two_stage_model_enable = (
+                        self.ml_two_stage_model_enable_var.get()
+                        if hasattr(self, "ml_two_stage_model_enable_var")
+                        else True
+                    )
                     ml_coupled_min_conf_raw = (
                         self.ml_coupled_min_conf_var.get()
                         if hasattr(self, "ml_coupled_min_conf_var")
@@ -802,7 +807,7 @@ class PipelineActionsMixin:
                     ml_route = (
                         str(self.ml_route_var.get()).strip().lower()
                         if hasattr(self, "ml_route_var")
-                        else "autofree_v1"
+                        else "legacy"
                     )
                     kr_continuity_max_offset_adj_raw = (
                         self.kr_continuity_max_offset_adj_var.get()
@@ -909,6 +914,11 @@ class PipelineActionsMixin:
                         if hasattr(self, "ml_legacy_fallback_enable_var")
                         else False
                     )
+                    kr_uncommon_reclist_stable_mode = (
+                        bool(self.kr_uncommon_reclist_stable_mode_var.get())
+                        if hasattr(self, "kr_uncommon_reclist_stable_mode_var")
+                        else False
+                    )
                     auto_format = self.auto_format_var.get()
                     custom_phonemes_path = self.custom_phoneme_var.get().strip()
                     alias_suffix = self.alias_suffix_var.get().strip()
@@ -976,6 +986,7 @@ class PipelineActionsMixin:
                         ml_batch_inference_size = 256
 
                     os.environ["UTOA_ML_COUPLED_ENABLE"] = "1" if ml_coupled_enable else "0"
+                    os.environ["UTOA_ML_TWO_STAGE_MODEL_ENABLE"] = "1" if bool(ml_two_stage_model_enable) else "0"
                     os.environ["UTOA_ML_ENSEMBLE_ENABLE"] = "1" if ensemble_enabled else "0"
                     if ml_coupled_min_conf is None:
                         os.environ.pop("UTOA_ML_COUPLED_MIN_CONF", None)
@@ -1003,8 +1014,7 @@ class PipelineActionsMixin:
                     os.environ["UTOA_ML_BATCH_INFERENCE_ENABLE"] = "1" if bool(ml_batch_inference_enable) else "0"
                     os.environ["UTOA_ML_BATCH_INFERENCE_SIZE"] = str(int(ml_batch_inference_size))
                     os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = "1" if bool(ml_legacy_fallback_enable) else "0"
-                    os.environ["UTOA_ML_ROUTE"] = "autofree_v1" if ml_route == "autofree_v1" else "legacy"
-                    os.environ["UTOA_ML_AUTOFREE_AUX_ENABLE"] = "1" if ml_route == "autofree_v1" else "0"
+                    os.environ["UTOA_ML_ROUTE"] = "legacy"
                     os.environ["UTOA_ENABLE_HEAD_TAIL_DASH_ALIAS"] = "1" if bool(gen_dash_alias) else "0"
                     if kr_continuity_max_offset_adj is None:
                         os.environ.pop("UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ", None)
@@ -1057,25 +1067,43 @@ class PipelineActionsMixin:
                     else:
                         os.environ["UTOA_ML_ANCHOR_MEL_GAMMA"] = str(float(ml_anchor_mel_gamma))
                     mel_weight_mode_code = self._apply_mel_weight_runtime_mode(ml_mel_weight_mode)
+                    kr_stable_env_values = {
+                        "UTOA_KR_DISABLE_CVVC_ORDER_LOCK": "1",
+                        "UTOA_KR_CVVC_MEL_PLAN": "1",
+                        "UTOA_KR_CVC_MEL_PLAN": "1",
+                        "UTOA_KR_CV_MEL_PLAN": "1",
+                        "UTOA_KR_CVVC_ROW_BLANK_FLOOR": "0.68",
+                        "UTOA_KR_CVC_ROW_BLANK_FLOOR": "0.66",
+                        "UTOA_KR_CV_ROW_BLANK_FLOOR": "0.62",
+                        "UTOA_KR_MAPPING_MAX_INDEX_JUMP_DEFAULT": "0",
+                        "UTOA_KR_MAPPING_MAX_INDEX_JUMP_HIGH_CONF": "1",
+                        "UTOA_KR_MAPPING_CONF_THRESHOLD": "0.66",
+                        "UTOA_KR_MAPPING_WORDS_FALLBACK": "1",
+                    }
+                    if lang == "korean" and kr_uncommon_reclist_stable_mode:
+                        for env_key, env_val in kr_stable_env_values.items():
+                            os.environ[env_key] = env_val
+                    else:
+                        for env_key in kr_stable_env_values.keys():
+                            os.environ.pop(env_key, None)
                     if lang == "japanese":
                         if ml_model_root:
                             os.environ["UTOA_JA_OTO_ML_DIR"] = ml_model_root
-                            os.environ["UTOA_JA_AUTOFREE_ML_DIR"] = ml_model_root
                         else:
                             os.environ.pop("UTOA_JA_OTO_ML_DIR", None)
-                            os.environ.pop("UTOA_JA_AUTOFREE_ML_DIR", None)
                     else:
                         if ml_model_root:
                             os.environ["UTOA_KR_OTO_ML_DIR"] = ml_model_root
-                            os.environ["UTOA_KR_AUTOFREE_ML_DIR"] = ml_model_root
                         else:
                             os.environ.pop("UTOA_KR_OTO_ML_DIR", None)
-                            os.environ.pop("UTOA_KR_AUTOFREE_ML_DIR", None)
                     self._append_log(
                         f"[OTO-ML] 설정: ml={'ON' if enable_ml_correction else 'OFF'}, selector={self._describe_ml_selector_mode(selector_mode_code)}"
                     )
                     self._append_log(f"[OTO-ML] runtime preset={self._describe_ml_runtime_preset(ml_runtime_preset)}")
-                    self._append_log(f"[OTO-ML] route={os.environ.get('UTOA_ML_ROUTE', 'autofree_v1')}")
+                    self._append_log(f"[OTO-ML] route={os.environ.get('UTOA_ML_ROUTE', 'legacy')}")
+                    self._append_log(
+                        f"[OTO-ML] two_stage_model={'ON' if bool(ml_two_stage_model_enable) else 'OFF'}"
+                    )
                     self._append_log(
                         f"[OTO-ML] mel_weight_mode={self._describe_mel_weight_mode(mel_weight_mode_code)}"
                     )
@@ -1097,8 +1125,9 @@ class PipelineActionsMixin:
                     self._append_log(
                         f"[OTO-ML] runtime: batch={'ON' if bool(ml_batch_inference_enable) else 'OFF'}({int(ml_batch_inference_size)}), legacy_fallback={'ON' if bool(ml_legacy_fallback_enable) else 'OFF'}"
                     )
-                    if ml_route == "autofree_v1":
-                        self._append_log("[OTO-ML] route policy: coupled primary + autofree auxiliary(residual)")
+                    if lang == "korean" and kr_uncommon_reclist_stable_mode:
+                        self._append_log("[KR-Mapping] 비주류 reclist 안정 모드: ON (order-lock 완화 + MEL/blank/jump 안전 설정)")
+                    self._append_log("[OTO-ML] route policy: legacy only")
                     if self.no_base_oto_var.get():
                         self._append_log("ℹ '베이스 OTO 없이 생성'이 활성화되어 OpenUtau 스타일로 생성합니다.")
 

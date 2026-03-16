@@ -325,6 +325,7 @@ def adjust_vc_neighbor_alignment(
 
 _SMOOTHING_THRESHOLD_RATIO = 0.30
 _SMOOTHING_BLEND_WEIGHT = 0.25
+_CV_LIKE_TYPES = {"cv", "cv_head", "vcv", "mono"}
 
 _CONSONANT_GROUPS = {
     "plosive": {"g", "k", "kk", "gg", "d", "t", "tt", "dd", "b", "p", "bb", "pp"},
@@ -347,6 +348,24 @@ def _get_consonant_group(alias: str) -> str:
     return "other"
 
 
+def _smoothing_threshold_for_row(row_type: str) -> float:
+    row_norm = str(row_type or "").strip().lower()
+    if row_norm in _CV_LIKE_TYPES:
+        return _env_float("UTOA_KR_SMOOTHING_THRESHOLD_CVLIKE", 0.45)
+    if row_norm == "vc":
+        return _env_float("UTOA_KR_SMOOTHING_THRESHOLD_VC", 0.30)
+    return _env_float("UTOA_KR_SMOOTHING_THRESHOLD_DEFAULT", _SMOOTHING_THRESHOLD_RATIO)
+
+
+def _smoothing_blend_for_row(row_type: str) -> float:
+    row_norm = str(row_type or "").strip().lower()
+    if row_norm in _CV_LIKE_TYPES:
+        return _env_float("UTOA_KR_SMOOTHING_BLEND_CVLIKE", 0.14)
+    if row_norm == "vc":
+        return _env_float("UTOA_KR_SMOOTHING_BLEND_VC", 0.22)
+    return _env_float("UTOA_KR_SMOOTHING_BLEND_DEFAULT", _SMOOTHING_BLEND_WEIGHT)
+
+
 def smooth_abrupt_changes(
     rows: List[Dict[str, object]],
     row_types: List[str],
@@ -356,13 +375,21 @@ def smooth_abrupt_changes(
     params_to_smooth = ["pre", "cons", "ovl", "cutoff_abs"]
 
     for i in range(1, len(rows)):
-        if row_types[i] != row_types[i - 1]:
+        row_type = str(row_types[i] or "").strip().lower()
+        if row_type != str(row_types[i - 1] or "").strip().lower():
             continue
         if _get_consonant_group(rows[i]["alias"]) != _get_consonant_group(rows[i - 1]["alias"]):
             continue
 
+        threshold_ratio = _smoothing_threshold_for_row(row_type)
+        blend_weight = _smoothing_blend_for_row(row_type)
+        if row_type in _CV_LIKE_TYPES:
+            params = ("pre", "ovl")
+        else:
+            params = tuple(params_to_smooth)
+
         row_changed = False
-        for param in params_to_smooth:
+        for param in params:
             if param == "cutoff_abs":
                 prev_val = abs(float(rows[i - 1]["cutoff"]))
                 curr_val = abs(float(rows[i]["cutoff"]))
@@ -375,10 +402,10 @@ def smooth_abrupt_changes(
 
             ref = max(abs(prev_val), abs(curr_val), 1.0)
             change_ratio = abs(curr_val - prev_val) / ref
-            if change_ratio <= _SMOOTHING_THRESHOLD_RATIO:
+            if change_ratio <= threshold_ratio:
                 continue
 
-            smoothed = _blend(curr_val, prev_val, _SMOOTHING_BLEND_WEIGHT)
+            smoothed = _blend(curr_val, prev_val, blend_weight)
             if abs(smoothed - curr_val) > 0.5:
                 if param == "cutoff_abs":
                     rows[i]["cutoff"] = -smoothed

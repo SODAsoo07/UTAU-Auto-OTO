@@ -1559,13 +1559,63 @@ def _compute_training_sample_weight(row: Dict[str, object]) -> float:
         keep_default = int(row.get("train_keep_default", 1) or 1)
     except Exception:
         keep_default = 1
+    alias_type = str(row.get("alias_type", "") or "").strip().lower()
+    mapping_reason = str(row.get("mapping_reason_code", "") or "").strip().lower()
+    try:
+        jump_blocked = int(float(row.get("jump_blocked_flag", 0.0) or 0.0) > 0.0)
+    except Exception:
+        jump_blocked = 0
+    try:
+        alias_occurrence = int(float(row.get("used_alias_occurrence_mapping", 0.0) or 0.0) > 0.0)
+    except Exception:
+        alias_occurrence = 0
+    try:
+        nuclei_fallback = int(float(row.get("used_nuclei_fallback", 0.0) or 0.0) > 0.0)
+    except Exception:
+        nuclei_fallback = 0
+    try:
+        alias_based = int(float(row.get("used_alias_based_syllables", 0.0) or 0.0) > 0.0)
+    except Exception:
+        alias_based = 0
 
     quality_norm = max(0.2, min(1.0, quality / 100.0))
     mapping_norm = max(0.2, min(1.0, mapping_conf))
     weight = quality_norm * (0.60 + (0.40 * mapping_norm))
     if keep_default <= 0:
         weight *= 0.55
-    return float(max(0.2, min(weight, 1.50)))
+
+    if mapping_conf < 0.42:
+        weight *= 0.82
+
+    hard_boost = 1.0
+    if alias_type in {"vc", "vv", "vcv"} and mapping_conf >= 0.52:
+        hard_boost *= 1.08
+    if jump_blocked > 0:
+        hard_boost *= 1.08
+    if alias_occurrence > 0 and mapping_conf >= 0.56:
+        hard_boost *= 1.06
+    if nuclei_fallback > 0 and mapping_conf >= 0.56:
+        hard_boost *= 1.05
+    if alias_based > 0 and mapping_conf >= 0.58:
+        hard_boost *= 1.04
+    if mapping_reason in {
+        "order_locked_glide_mismatch",
+        "order_locked_length_mismatch",
+        "order_locked_low_phone_quality",
+        "alias_based_recover",
+        "alias_based_empty_words",
+    } and mapping_conf >= 0.54:
+        hard_boost *= 1.06
+    if mapping_reason in {"words_keep_high_conf", "filename_sequence_lock"} and mapping_conf >= 0.76:
+        hard_boost *= 1.03
+    weight *= min(hard_boost, 1.36)
+
+    blank_score = float(compute_blank_risk_score(row))
+    if alias_type in {"cv", "cv_head"} and blank_score >= 0.55:
+        blank_penalty = min(0.60, 0.12 + ((blank_score - 0.55) * 0.85))
+        weight *= max(0.40, 1.0 - blank_penalty)
+
+    return float(max(0.18, min(weight, 1.80)))
 
 
 def _mapping_max_shift_ms(feature_row: Dict[str, object]) -> float:

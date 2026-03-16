@@ -4812,7 +4812,7 @@ def generate_ja_oto(
             log_fn=log,
             validate_fn=validate_oto_params,
             classify_alias_fn=classify_ja_alias,
-            ml_route=os.environ.get("UTOA_ML_ROUTE", "autofree_v1"),
+            ml_route=os.environ.get("UTOA_ML_ROUTE", "legacy"),
         )
     )
 

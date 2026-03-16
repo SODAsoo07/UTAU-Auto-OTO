@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import math
 import os
 import wave
 from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 from core.kr_oto_file_ops import (
     _apply_kr_bridge_coherence_to_oto_file,
@@ -39,15 +41,470 @@ def _env_float(name, default):
         return float(default)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.environ.get(name, "")).strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in {"1", "true", "yes", "on", "y"}:
+        return True
+    if raw in {"0", "false", "no", "off", "n"}:
+        return False
+    return bool(default)
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(float(lo), min(float(hi), float(v)))
+
+
+def _quantile(values: List[float], q: float) -> float:
+    if not values:
+        return 0.0
+    arr = sorted(float(v) for v in values)
+    if len(arr) == 1:
+        return float(arr[0])
+    qq = _clamp(float(q), 0.0, 1.0)
+    pos = (len(arr) - 1) * qq
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return float(arr[lo])
+    w = float(pos - lo)
+    return float((1.0 - w) * float(arr[lo]) + w * float(arr[hi]))
+
+
+def _soft_clip(value: float, lo: float, hi: float, blend: float) -> float:
+    v = float(value)
+    l = float(lo)
+    h = float(hi)
+    if l > h:
+        l, h = h, l
+    b = _clamp(float(blend), 0.0, 1.0)
+    if v < l:
+        return float(v + ((l - v) * b))
+    if v > h:
+        return float(v - ((v - h) * b))
+    return float(v)
+
+
+def _format_oto_row_line(row: Dict[str, object]) -> str:
+    return (
+        f"{row['wav']}={row['alias']},"
+        f"{float(row['offset']):.2f},{float(row['cons']):.2f},{float(row['cutoff']):.2f},"
+        f"{float(row['pre']):.2f},{float(row['ovl']):.2f}"
+    )
+
+
+@dataclass
+class _OtoSnapshot:
+    lines: List[str]
+    rows_by_index: Dict[int, Dict[str, object]]
+    alias_type_by_index: Dict[int, str]
+    total_rows: int
+
+
+def _take_oto_snapshot(oto_path: str, *, custom_map=None) -> _OtoSnapshot:
+    text = read_text_with_fallback(oto_path) if oto_path and os.path.exists(oto_path) else ""
+    lines = text.splitlines()
+    rows_by_index: Dict[int, Dict[str, object]] = {}
+    alias_type_by_index: Dict[int, str] = {}
+    for idx, line in enumerate(lines):
+        row = parse_oto_line(line)
+        if not row:
+            continue
+        rows_by_index[idx] = dict(row)
+        alias_type_by_index[idx] = str(classify_alias(str(row.get("alias", "")), custom_map) or "").strip().lower()
+    return _OtoSnapshot(
+        lines=list(lines),
+        rows_by_index=rows_by_index,
+        alias_type_by_index=alias_type_by_index,
+        total_rows=len(rows_by_index),
+    )
+
+
+def _rows_different(a: Optional[Dict[str, object]], b: Optional[Dict[str, object]]) -> bool:
+    if not a or not b:
+        return False
+    keys = ("offset", "cons", "cutoff", "pre", "ovl")
+    for k in keys:
+        if abs(float(a.get(k, 0.0)) - float(b.get(k, 0.0))) > 1e-6:
+            return True
+    return False
+
+
+def _resolve_gate_scope(stage_name: str) -> str:
+    stage = str(stage_name or "").strip().lower()
+    stage_key = "UTOA_KR_QG_SCOPE_ML" if stage == "ml" else "UTOA_KR_QG_SCOPE_POST"
+    raw = str(os.environ.get(stage_key, os.environ.get("UTOA_KR_QG_SCOPE", "cv_family"))).strip().lower()
+    if raw in {"all", "cv_family", "vc_family", "none"}:
+        return raw
+    return "cv_family"
+
+
+def _gate_scope_aliases(scope: str) -> Optional[set]:
+    name = str(scope or "").strip().lower()
+    if name == "none":
+        return set()
+    if name == "all":
+        return None
+    if name == "vc_family":
+        return {"vc", "vv"}
+    return {"cv", "cv_head", "vcv", "mono"}
+
+
+def _extract_quality_gate_risk(runtime_report: object) -> float:
+    if not isinstance(runtime_report, dict):
+        return 0.0
+    risk = 0.0
+    ml = runtime_report.get("ml")
+    if isinstance(ml, dict):
+        rel = ml.get("reliability_metrics")
+        if isinstance(rel, dict):
+            rows = int(rel.get("rows", 0) or 0)
+            if rows > 0:
+                blank_ratio = float(rel.get("blank_flag_rows", 0) or 0.0) / float(rows)
+                mel_unreliable_ratio = float(rel.get("mel_unreliable_rows", 0) or 0.0) / float(rows)
+                abstain_ratio = float(rel.get("abstain_rows", 0) or 0.0) / float(rows)
+                risk = max(risk, blank_ratio, mel_unreliable_ratio, abstain_ratio)
+    mapping = runtime_report.get("mapping")
+    if isinstance(mapping, dict):
+        if bool(mapping.get("file_low_conf", False)):
+            risk = max(risk, 0.50)
+        try:
+            blank_mean = float(mapping.get("blank_confidence_mean", 0.0) or 0.0)
+            if blank_mean >= 0.45:
+                risk = max(risk, min(1.0, blank_mean))
+        except Exception:
+            pass
+    return float(_clamp(risk, 0.0, 1.0))
+
+
+def _resolve_stage_gate_profile(stage_name: str, high_risk_ratio: float) -> Dict[str, float]:
+    stage = str(stage_name or "").strip().lower()
+    if stage == "ml":
+        soft = _env_float("UTOA_KR_QG_ML_SOFT_RATIO", 0.45)
+        hard = _env_float("UTOA_KR_QG_ML_HARD_RATIO", 0.65)
+        soft_scale = _env_float("UTOA_KR_QG_ML_SOFT_SCALE", 0.70)
+    else:
+        soft = _env_float("UTOA_KR_QG_POST_SOFT_RATIO", 0.35)
+        hard = _env_float("UTOA_KR_QG_POST_HARD_RATIO", 0.55)
+        soft_scale = _env_float("UTOA_KR_QG_POST_SOFT_SCALE", 0.68)
+
+    risk_soft = _env_float("UTOA_KR_QG_HIGH_RISK_SOFT", 0.30)
+    risk_hard = _env_float("UTOA_KR_QG_HIGH_RISK_HARD", 0.50)
+    if float(high_risk_ratio) >= float(risk_soft):
+        soft = max(0.05, soft - 0.10)
+        hard = max(soft + 0.05, hard - 0.08)
+    if float(high_risk_ratio) >= float(risk_hard):
+        soft = max(0.05, soft - 0.08)
+        hard = max(soft + 0.05, hard - 0.08)
+    return {
+        "soft_ratio": float(_clamp(soft, 0.01, 1.0)),
+        "hard_ratio": float(_clamp(hard, 0.05, 1.0)),
+        "soft_scale": float(_clamp(soft_scale, 0.05, 0.98)),
+    }
+
+
+def _apply_stage_quality_gate(
+    oto_path: str,
+    *,
+    stage_name: str,
+    before_snapshot: Optional[_OtoSnapshot],
+    custom_map,
+    validate_fn,
+    log_fn=None,
+    runtime_report: object = None,
+) -> Dict[str, object]:
+    stats: Dict[str, object] = {
+        "stage": str(stage_name or ""),
+        "enabled": False,
+        "scope": "none",
+        "stage_changed_lines": 0,
+        "stage_changed_ratio": 0.0,
+        "risk_ratio": 0.0,
+        "soft_ratio": 0.0,
+        "hard_ratio": 0.0,
+        "action": "off",
+        "gate_adjusted_lines": 0,
+    }
+    if not _env_bool("UTOA_KR_QG_ENABLE", True):
+        return stats
+    if not before_snapshot or not oto_path or not os.path.exists(oto_path):
+        return stats
+
+    after_snapshot = _take_oto_snapshot(oto_path, custom_map=custom_map)
+    total_rows = int(max(before_snapshot.total_rows, after_snapshot.total_rows, 1))
+    changed_indices = [
+        idx
+        for idx, after_row in after_snapshot.rows_by_index.items()
+        if _rows_different(before_snapshot.rows_by_index.get(idx), after_row)
+    ]
+    changed_count = int(len(changed_indices))
+    changed_ratio = float(changed_count) / float(total_rows)
+    risk_ratio = _extract_quality_gate_risk(runtime_report)
+    profile = _resolve_stage_gate_profile(stage_name, risk_ratio)
+    scope = _resolve_gate_scope(stage_name)
+    scope_aliases = _gate_scope_aliases(scope)
+    target_indices = []
+    if scope_aliases == set():
+        target_indices = []
+    elif scope_aliases is None:
+        target_indices = list(changed_indices)
+    else:
+        for idx in changed_indices:
+            alias_type = str(after_snapshot.alias_type_by_index.get(idx) or before_snapshot.alias_type_by_index.get(idx) or "").strip().lower()
+            if alias_type in scope_aliases:
+                target_indices.append(idx)
+    target_count = int(len(target_indices))
+
+    stats.update(
+        {
+            "enabled": True,
+            "scope": str(scope),
+            "stage_changed_lines": changed_count,
+            "stage_changed_ratio": float(changed_ratio),
+            "risk_ratio": float(risk_ratio),
+            "soft_ratio": float(profile["soft_ratio"]),
+            "hard_ratio": float(profile["hard_ratio"]),
+        }
+    )
+    if target_count <= 0:
+        stats["action"] = "off"
+        return stats
+
+    if changed_ratio < float(profile["soft_ratio"]):
+        stats["action"] = "off"
+        return stats
+    action = "hard_rollback" if changed_ratio >= float(profile["hard_ratio"]) else "soft_scale"
+    stats["action"] = action
+
+    out_lines = list(after_snapshot.lines)
+    gate_adjusted = 0
+    if action == "hard_rollback":
+        for idx in target_indices:
+            base_row = before_snapshot.rows_by_index.get(idx)
+            if not base_row:
+                continue
+            out_lines[idx] = _format_oto_row_line(base_row)
+            gate_adjusted += 1
+    else:
+        scale = float(profile["soft_scale"])
+        for idx in target_indices:
+            base_row = before_snapshot.rows_by_index.get(idx)
+            curr_row = after_snapshot.rows_by_index.get(idx)
+            if not base_row or not curr_row:
+                continue
+            alias_type = str(after_snapshot.alias_type_by_index.get(idx) or before_snapshot.alias_type_by_index.get(idx) or "").strip().lower()
+            try:
+                o = float(base_row["offset"]) + ((float(curr_row["offset"]) - float(base_row["offset"])) * scale)
+                c = float(base_row["cons"]) + ((float(curr_row["cons"]) - float(base_row["cons"])) * scale)
+                ct = float(base_row["cutoff"]) + ((float(curr_row["cutoff"]) - float(base_row["cutoff"])) * scale)
+                p = float(base_row["pre"]) + ((float(curr_row["pre"]) - float(base_row["pre"])) * scale)
+                ov = float(base_row["ovl"]) + ((float(curr_row["ovl"]) - float(base_row["ovl"])) * scale)
+                try:
+                    o, c, ct, p, ov = validate_fn(o, c, ct, p, ov, alias_type=alias_type)
+                except TypeError:
+                    o, c, ct, p, ov = validate_fn(o, c, ct, p, ov)
+                new_row = dict(curr_row)
+                new_row["offset"] = float(o)
+                new_row["cons"] = float(c)
+                new_row["cutoff"] = float(ct)
+                new_row["pre"] = float(p)
+                new_row["ovl"] = float(ov)
+                out_lines[idx] = _format_oto_row_line(new_row)
+                gate_adjusted += 1
+            except Exception:
+                continue
+
+    if gate_adjusted > 0:
+        with open(oto_path, "w", encoding="utf-8") as f:
+            for line in out_lines:
+                f.write(str(line).rstrip("\n") + "\n")
+    stats["gate_adjusted_lines"] = int(gate_adjusted)
+
+    if callable(log_fn):
+        log_fn(
+            "[KR-QualityGate] "
+            f"stage={stage_name}, action={action}, scope={scope}, "
+            f"changed={changed_count}/{total_rows} ({(100.0 * changed_ratio):.1f}%), "
+            f"risk={risk_ratio:.2f}, soft={profile['soft_ratio']:.2f}, hard={profile['hard_ratio']:.2f}, "
+            f"adjusted={gate_adjusted}"
+        )
+    if isinstance(runtime_report, dict):
+        qg = runtime_report.setdefault("quality_gate", {})
+        if isinstance(qg, dict):
+            qg[str(stage_name)] = dict(stats)
+    return stats
+
+
+def _apply_kr_bank_autocalibration_to_oto_file(
+    oto_path: str,
+    *,
+    custom_map=None,
+    validate_fn=None,
+    log_fn=None,
+) -> Dict[str, object]:
+    stats: Dict[str, object] = {
+        "enabled": False,
+        "changed_lines": 0,
+        "groups": {},
+    }
+    if not _env_bool("UTOA_KR_BANK_AUTOCAL_ENABLE", True):
+        return stats
+    if not oto_path or not os.path.exists(oto_path):
+        return stats
+    if validate_fn is None:
+        return stats
+
+    text = read_text_with_fallback(oto_path)
+    lines = text.splitlines()
+    parsed_rows: Dict[int, Dict[str, object]] = {}
+    alias_types: Dict[int, str] = {}
+    for idx, line in enumerate(lines):
+        row = parse_oto_line(line)
+        if not row:
+            continue
+        a_type = str(classify_alias(str(row.get("alias", "")), custom_map) or "").strip().lower()
+        parsed_rows[idx] = dict(row)
+        alias_types[idx] = a_type
+
+    if not parsed_rows:
+        return stats
+
+    cv_min_rows = int(max(4, _env_float("UTOA_KR_BANK_AUTOCAL_MIN_ROWS_CV", 18)))
+    vc_min_rows = int(max(4, _env_float("UTOA_KR_BANK_AUTOCAL_MIN_ROWS_VC", 12)))
+    iqr_mul = float(max(0.4, _env_float("UTOA_KR_BANK_AUTOCAL_IQR_MUL", 1.8)))
+    blend = float(_clamp(_env_float("UTOA_KR_BANK_AUTOCAL_BLEND", 0.72), 0.05, 1.0))
+
+    group_keys: Dict[int, str] = {}
+    group_values: Dict[str, Dict[str, List[float]]] = {
+        "cv_family": {"pre": [], "cons_gap": [], "cut_gap": []},
+        "vc_family": {"pre": [], "cons_gap": [], "cut_gap": []},
+    }
+    for idx, row in parsed_rows.items():
+        a_type = alias_types.get(idx, "")
+        if a_type in {"cv", "cv_head", "vcv", "mono"}:
+            gk = "cv_family"
+        elif a_type in {"vc", "vv"}:
+            gk = "vc_family"
+        else:
+            continue
+        pre = float(row["pre"])
+        cons = float(row["cons"])
+        cut_abs = abs(float(row["cutoff"]))
+        group_keys[idx] = gk
+        group_values[gk]["pre"].append(pre)
+        group_values[gk]["cons_gap"].append(max(cons - pre, 6.0))
+        group_values[gk]["cut_gap"].append(max(cut_abs - cons, 8.0))
+
+    bounds: Dict[str, Dict[str, Tuple[float, float]]] = {}
+    for gk, values_map in group_values.items():
+        row_count = len(values_map["pre"])
+        min_rows = cv_min_rows if gk == "cv_family" else vc_min_rows
+        if row_count < min_rows:
+            continue
+        bounds[gk] = {}
+        for name, values in values_map.items():
+            q1 = _quantile(values, 0.25)
+            q3 = _quantile(values, 0.75)
+            iqr = max(0.0, q3 - q1)
+            lo = q1 - (iqr_mul * iqr)
+            hi = q3 + (iqr_mul * iqr)
+            if name == "pre":
+                lo = max(lo, 12.0)
+                hi = min(max(hi, lo + 8.0), 340.0)
+            elif name == "cons_gap":
+                lo = max(lo, 8.0)
+                hi = min(max(hi, lo + 8.0), 320.0)
+            else:
+                lo = max(lo, 10.0)
+                hi = min(max(hi, lo + 8.0), 360.0)
+            bounds[gk][name] = (float(lo), float(hi))
+
+    if not bounds:
+        stats["enabled"] = True
+        return stats
+
+    changed = 0
+    for idx, row in parsed_rows.items():
+        gk = group_keys.get(idx)
+        if not gk or gk not in bounds:
+            continue
+        a_type = alias_types.get(idx, "")
+        pre_old = float(row["pre"])
+        cons_old = float(row["cons"])
+        cut_abs_old = abs(float(row["cutoff"]))
+        cons_gap_old = max(cons_old - pre_old, 6.0)
+        cut_gap_old = max(cut_abs_old - cons_old, 8.0)
+        pre_new = _soft_clip(pre_old, *bounds[gk]["pre"], blend=blend)
+        cons_gap_new = _soft_clip(cons_gap_old, *bounds[gk]["cons_gap"], blend=blend)
+        cut_gap_new = _soft_clip(cut_gap_old, *bounds[gk]["cut_gap"], blend=blend)
+        cons_new = pre_new + cons_gap_new
+        cut_new = -(cons_new + cut_gap_new)
+        try:
+            o2, c2, ct2, p2, ov2 = validate_fn(
+                float(row["offset"]),
+                float(cons_new),
+                float(cut_new),
+                float(pre_new),
+                float(row["ovl"]),
+                alias_type=a_type,
+            )
+        except TypeError:
+            o2, c2, ct2, p2, ov2 = validate_fn(
+                float(row["offset"]),
+                float(cons_new),
+                float(cut_new),
+                float(pre_new),
+                float(row["ovl"]),
+            )
+        if (
+            abs(float(o2) - float(row["offset"])) > 1e-6
+            or abs(float(c2) - float(row["cons"])) > 1e-6
+            or abs(float(ct2) - float(row["cutoff"])) > 1e-6
+            or abs(float(p2) - float(row["pre"])) > 1e-6
+            or abs(float(ov2) - float(row["ovl"])) > 1e-6
+        ):
+            row["offset"] = float(o2)
+            row["cons"] = float(c2)
+            row["cutoff"] = float(ct2)
+            row["pre"] = float(p2)
+            row["ovl"] = float(ov2)
+            lines[idx] = _format_oto_row_line(row)
+            changed += 1
+
+    if changed > 0:
+        with open(oto_path, "w", encoding="utf-8") as f:
+            for line in lines:
+                f.write(str(line).rstrip("\n") + "\n")
+
+    stats["enabled"] = True
+    stats["changed_lines"] = int(changed)
+    stats["groups"] = {
+        gk: {
+            "rows": int(len(group_values[gk]["pre"])),
+            "pre_bounds": list(bounds[gk]["pre"]),
+            "cons_gap_bounds": list(bounds[gk]["cons_gap"]),
+            "cut_gap_bounds": list(bounds[gk]["cut_gap"]),
+        }
+        for gk in bounds.keys()
+    }
+    if callable(log_fn):
+        cv_rows = int(len(group_values["cv_family"]["pre"]))
+        vc_rows = int(len(group_values["vc_family"]["pre"]))
+        log_fn(
+            f"[KR-AutoCal] bank autocal changed: {changed} lines "
+            f"(cv_rows={cv_rows}, vc_rows={vc_rows}, blend={blend:.2f}, iqr={iqr_mul:.2f})"
+        )
+    return stats
+
+
 def _normalize_ml_route(value: str) -> str:
-    raw = str(value or "").strip().lower()
-    if raw in {"autofree_v1", "autofree", "b", "route_b"}:
-        return "autofree_v1"
+    _ = str(value or "").strip().lower()
     return "legacy"
 
 
 def _current_ml_route() -> str:
-    return _normalize_ml_route(os.environ.get("UTOA_ML_ROUTE", "autofree_v1"))
+    return _normalize_ml_route(os.environ.get("UTOA_ML_ROUTE", "legacy"))
 
 
 def _call_validate(validate_fn, offset, consonant, cutoff, pre, ovl, *, alias_type=""):
@@ -495,6 +952,15 @@ def run_kr_post_file_pipeline(context: KrPostFilePipelineContext):
     )
     log_changed_lines(context.log_fn, "[KR-Mel-Safety]", safety_changed, "mel safety clamp changed")
 
+    bank_autocal_stats = _apply_kr_bank_autocalibration_to_oto_file(
+        context.out_path,
+        custom_map=context.custom_map,
+        validate_fn=context.validate_fn,
+        log_fn=context.log_fn,
+    )
+    if isinstance(context.runtime_report, dict):
+        context.runtime_report["bank_autocal"] = dict(bank_autocal_stats)
+
     def _run_kr_legacy_post_filters() -> None:
         mel_changed = apply_kr_mel_refine_to_oto_file(
             context.out_path,
@@ -538,18 +1004,35 @@ def run_kr_post_file_pipeline(context: KrPostFilePipelineContext):
             ml_route=ml_route,
         )
 
-    # Autofree absolute-model output should be the final shaping stage.
-    # Legacy retains the previous order for compatibility.
-    if ml_route == "autofree_v1":
-        if callable(context.log_fn):
-            context.log_fn("[OTO-ML] KR finalize order: legacy post-filters -> autofree ML")
-        _run_kr_legacy_post_filters()
-        _run_ml_stage()
-    else:
-        if callable(context.log_fn):
-            context.log_fn("[OTO-ML] KR finalize order: legacy ML -> legacy post-filters")
-        _run_ml_stage()
-        _run_kr_legacy_post_filters()
+    if callable(context.log_fn):
+        context.log_fn("[OTO-ML] KR finalize order: legacy ML -> legacy post-filters")
+    ml_before_snapshot = _take_oto_snapshot(context.out_path, custom_map=context.custom_map)
+    _run_ml_stage()
+    ml_qg_stats = _apply_stage_quality_gate(
+        context.out_path,
+        stage_name="ml",
+        before_snapshot=ml_before_snapshot,
+        custom_map=context.custom_map,
+        validate_fn=context.validate_fn,
+        log_fn=context.log_fn,
+        runtime_report=context.runtime_report,
+    )
+    if isinstance(context.runtime_report, dict):
+        ml_report = context.runtime_report.get("ml")
+        if isinstance(ml_report, dict):
+            ml_report["quality_gate"] = dict(ml_qg_stats)
+
+    post_before_snapshot = _take_oto_snapshot(context.out_path, custom_map=context.custom_map)
+    _run_kr_legacy_post_filters()
+    _apply_stage_quality_gate(
+        context.out_path,
+        stage_name="post",
+        before_snapshot=post_before_snapshot,
+        custom_map=context.custom_map,
+        validate_fn=context.validate_fn,
+        log_fn=context.log_fn,
+        runtime_report=context.runtime_report,
+    )
 
     safety_changed = apply_kr_wav_duration_safety_to_oto_file(
         context.out_path,

@@ -34,9 +34,19 @@ from core.oto_ml_policy import (
     selector_min_margin,
     selector_enabled_by_default,
 )
-from core.oto_ml_reliability import compute_blank_risk_score, is_mel_unreliable, mel_patch_is_fallback
+from core.oto_ml_reliability import (
+    compute_blank_risk_score,
+    compute_mel_reliability_score,
+    is_mel_unreliable,
+    mel_patch_is_fallback,
+)
 from core.oto_ml_selector import select_best_candidate
 from core.format_type_utils import normalize_format_type
+from core.silence_profile_runtime import (
+    apply_reliability_hysteresis,
+    make_reliability_state_key,
+    resolve_silence_reliability_profile,
+)
 from core.pipeline_status import (
     ML_APPLIED,
     ML_BUNDLE_INVALID,
@@ -81,9 +91,8 @@ def _ensemble_enabled() -> bool:
 
 
 def _ml_route(value: Optional[str] = None) -> str:
-    raw = str(value or os.environ.get("UTOA_ML_ROUTE", "legacy") or "legacy").strip().lower()
-    if raw in {"autofree_v1", "autofree", "b", "route_b"}:
-        return "autofree_v1"
+    # Runtime route is fixed to legacy.
+    _ = str(value or os.environ.get("UTOA_ML_ROUTE", "legacy") or "legacy").strip().lower()
     return "legacy"
 
 
@@ -108,6 +117,15 @@ def _batch_inference_enabled() -> bool:
 
 def _batch_inference_size() -> int:
     return max(32, _env_int("UTOA_ML_BATCH_INFERENCE_SIZE", 256))
+
+
+def _two_stage_model_enabled() -> bool:
+    return _env_flag("UTOA_ML_TWO_STAGE_MODEL_ENABLE", True)
+
+
+def _looks_like_two_stage_model_name(name: str) -> bool:
+    token = str(name or "").strip().lower()
+    return token.startswith("v2") or "two_stage" in token or "twostage" in token
 
 
 def _env_int(name: str, default: int) -> int:
@@ -380,6 +398,7 @@ def _collect_model_dir_candidates(language: str, format_type: str, alias_family:
     fmt = normalize_format_type(language, format_type) or "general"
     family = normalize_alias_family(alias_family)
     lang = str(language or "").strip().lower()
+    allow_two_stage = _two_stage_model_enabled()
     candidates: List[str] = []
 
     def _append_version_dirs(base_path: str) -> None:
@@ -398,6 +417,8 @@ def _collect_model_dir_candidates(language: str, format_type: str, alias_family:
             for name in os.listdir(base_path):
                 if not str(name).lower().startswith("v"):
                     continue
+                if (not allow_two_stage) and _looks_like_two_stage_model_name(name):
+                    continue
                 path = os.path.join(base_path, name)
                 if os.path.isfile(os.path.join(path, "model_meta.json")):
                     candidates.append(path)
@@ -410,7 +431,9 @@ def _collect_model_dir_candidates(language: str, format_type: str, alias_family:
         _structured_export_model_root_for_language(language),
         _model_root_for_language(language),
     ):
-        if os.path.isfile(os.path.join(root, "model_meta.json")):
+        if os.path.isfile(os.path.join(root, "model_meta.json")) and (
+            allow_two_stage or (not _looks_like_two_stage_model_name(os.path.basename(root)))
+        ):
             candidates.append(root)
         else:
             if family:
@@ -902,7 +925,8 @@ def _apply_korean_delta_policy(row_context: Dict[str, object], deltas: Dict[str,
     mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
 
     if alias_type in {"cv", "cv_head"}:
-        mel_unreliable = is_mel_unreliable(row_context)
+        runtime_mel_unreliable = row_context.get("_runtime_mel_unreliable")
+        mel_unreliable = bool(runtime_mel_unreliable) if runtime_mel_unreliable is not None else is_mel_unreliable(row_context)
         if format_type in {"cvvc", "cvc"} and _kr_cv_keep_base_location_enabled():
             deltas["delta_offset"] = 0.0
             deltas["delta_pre"] = 0.0
@@ -915,10 +939,23 @@ def _apply_korean_delta_policy(row_context: Dict[str, object], deltas: Dict[str,
             _to_float(row_context.get("db_silence_ratio"), 0.0),
             _to_float(row_context.get("mel_window_silence_ratio"), 0.0),
         )
-        blank_risk = max(blank_conf, syll_blank_conf, syll_sil_conf, compute_blank_risk_score(row_context))
-        risky = (mapping_conf < 0.74) or (blank_risk >= 0.44) or (silence_ratio >= 0.52) or mel_unreliable
+        runtime_blank_risk = _to_float(row_context.get("_runtime_blank_risk_score"), -1.0)
+        if runtime_blank_risk < 0.0:
+            runtime_blank_risk = compute_blank_risk_score(row_context)
+        blank_risk = max(blank_conf, syll_blank_conf, syll_sil_conf, runtime_blank_risk)
+        blank_thr = _to_float(row_context.get("_runtime_blank_threshold"), 0.55)
+        blank_risky_floor = _to_float(row_context.get("_runtime_blank_risky_threshold"), 0.44)
+        blank_severe_floor = _to_float(row_context.get("_runtime_blank_severe_threshold"), 0.58)
+        runtime_blank_flag = bool(_to_float(row_context.get("_runtime_blank_risk_flag"), 1.0 if blank_risk >= blank_thr else 0.0) >= 0.5)
+        risky = (
+            (mapping_conf < 0.74)
+            or runtime_blank_flag
+            or (blank_risk >= blank_risky_floor)
+            or (silence_ratio >= 0.52)
+            or mel_unreliable
+        )
         severe = (
-            (blank_risk >= 0.58)
+            (blank_risk >= blank_severe_floor)
             or (silence_ratio >= 0.62)
             or ((blank_risk - syll_voiced_conf) >= 0.18)
             or mel_unreliable
@@ -1714,6 +1751,40 @@ def _to_float(value: object, default: float = 0.0) -> float:
         return float(default)
 
 
+def _blank_truth_proxy(row_context: Dict[str, object]) -> bool:
+    blank_conf = max(
+        _to_float(row_context.get("blank_span_confidence"), 0.0),
+        _to_float(row_context.get("syllable_blank_confidence"), 0.0),
+        _to_float(row_context.get("syllable_mel_silence_conf"), 0.0),
+    )
+    silence_ratio = max(
+        _to_float(row_context.get("db_silence_ratio"), 0.0),
+        _to_float(row_context.get("mel_window_silence_ratio"), 0.0),
+    )
+    voiced_hint = max(
+        _to_float(row_context.get("syllable_mel_voiced_conf"), 0.0),
+        _to_float(row_context.get("mel_voiced_formant_ratio"), 0.0),
+    )
+    return bool((blank_conf >= 0.66 or silence_ratio >= 0.72) and voiced_hint <= 0.30)
+
+
+def _voiced_truth_proxy(row_context: Dict[str, object]) -> bool:
+    blank_conf = max(
+        _to_float(row_context.get("blank_span_confidence"), 0.0),
+        _to_float(row_context.get("syllable_blank_confidence"), 0.0),
+        _to_float(row_context.get("syllable_mel_silence_conf"), 0.0),
+    )
+    silence_ratio = max(
+        _to_float(row_context.get("db_silence_ratio"), 0.0),
+        _to_float(row_context.get("mel_window_silence_ratio"), 0.0),
+    )
+    voiced_hint = max(
+        _to_float(row_context.get("syllable_mel_voiced_conf"), 0.0),
+        _to_float(row_context.get("mel_voiced_formant_ratio"), 0.0),
+    )
+    return bool(voiced_hint >= 0.58 and silence_ratio <= 0.34 and blank_conf <= 0.30)
+
+
 def _build_alias_aware_validator(validate_fn, row_context: Dict[str, object]):
     alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
 
@@ -1944,6 +2015,7 @@ def apply_oto_ml_to_oto_file(
         fallback_reason="",
         blank_confidence=0.0,
         constraint_adjust_count=0,
+        reliability_metrics={},
     )
     ml_report["policy"] = policy_name
 
@@ -1956,11 +2028,6 @@ def apply_oto_ml_to_oto_file(
         ml_report.update(make_runtime_report("ml", ML_DISABLED_ENV, "환경변수로 OTO ML이 비활성화되었습니다."))
         ml_report["status"] = "skipped"
         return 0
-
-    if route_name == "autofree_v1":
-        # Route orchestration is handled in post_file_pipeline:
-        # coupled/lightgbm primary + optional autofree residual auxiliary.
-        route_name = "legacy"
 
     if not oto_path or not os.path.exists(oto_path):
         ml_report.update(make_runtime_report("ml", ML_INPUT_MISSING, f"OTO 파일이 없습니다: {oto_path}"))
@@ -2016,6 +2083,20 @@ def apply_oto_ml_to_oto_file(
         "vc_cutoff_leak_guard_count": 0,
     }
     constraint_stats = {"constraint_adjust_count": 0}
+    reliability_state: Dict[str, Dict[str, object]] = {}
+    reliability_stats = {
+        "rows": 0,
+        "blank_flag_rows": 0,
+        "mel_unreliable_rows": 0,
+        "mel_fallback_rows": 0,
+        "abstain_rows": 0,
+        "blank_hys_switches": 0,
+        "mel_hys_switches": 0,
+        "proxy_fp_count": 0,
+        "proxy_fp_denom": 0,
+        "proxy_fn_count": 0,
+        "proxy_fn_denom": 0,
+    }
     with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
         raw_lines = [line.rstrip("\n") for line in f]
 
@@ -2051,6 +2132,54 @@ def apply_oto_ml_to_oto_file(
         alias_type_for_row = str(feat.get("alias_type", "") or "").strip().lower()
         alias_family = infer_alias_family(language, feat)
         mel_patch_fallback = mel_patch_is_fallback(feat)
+        reliability_profile = resolve_silence_reliability_profile(feat)
+        blank_risk_score = compute_blank_risk_score(feat, profile=reliability_profile)
+        mel_reliability_score = compute_mel_reliability_score(
+            feat,
+            profile=reliability_profile,
+            blank_risk_score=blank_risk_score,
+        )
+        state_key = make_reliability_state_key(feat)
+        reliability_decision = apply_reliability_hysteresis(
+            blank_risk_score=blank_risk_score,
+            mel_reliability_score=mel_reliability_score,
+            profile=reliability_profile,
+            prev_state=reliability_state.get(state_key),
+        )
+        reliability_state[state_key] = dict(reliability_decision.get("state") or {})
+        feat["_runtime_blank_risk_score"] = float(blank_risk_score)
+        feat["_runtime_blank_risk_flag"] = int(reliability_decision.get("blank_flag", 0))
+        feat["_runtime_mel_reliability_score"] = float(mel_reliability_score)
+        feat["_runtime_mel_unreliable"] = bool(reliability_decision.get("mel_unreliable", False))
+        feat["_runtime_blank_threshold"] = float(reliability_decision.get("blank_threshold", 0.55))
+        feat["_runtime_blank_risky_threshold"] = float(reliability_decision.get("blank_risky_threshold", 0.44))
+        feat["_runtime_blank_severe_threshold"] = float(reliability_decision.get("blank_severe_threshold", 0.58))
+        feat["_runtime_mel_threshold"] = float(reliability_decision.get("mel_threshold", 0.42))
+        reliability_stats["rows"] = int(reliability_stats["rows"]) + 1
+        if int(feat["_runtime_blank_risk_flag"]) > 0:
+            reliability_stats["blank_flag_rows"] = int(reliability_stats["blank_flag_rows"]) + 1
+        if bool(feat["_runtime_mel_unreliable"]):
+            reliability_stats["mel_unreliable_rows"] = int(reliability_stats["mel_unreliable_rows"]) + 1
+        if mel_patch_fallback:
+            reliability_stats["mel_fallback_rows"] = int(reliability_stats["mel_fallback_rows"]) + 1
+        if bool(reliability_decision.get("blank_switched", False)):
+            reliability_stats["blank_hys_switches"] = int(reliability_stats["blank_hys_switches"]) + 1
+        if bool(reliability_decision.get("mel_switched", False)):
+            reliability_stats["mel_hys_switches"] = int(reliability_stats["mel_hys_switches"]) + 1
+        if alias_type_for_row in {"cv", "cv_head"} and (
+            int(feat["_runtime_blank_risk_flag"]) > 0 or bool(feat["_runtime_mel_unreliable"])
+        ):
+            reliability_stats["abstain_rows"] = int(reliability_stats["abstain_rows"]) + 1
+        blank_truth = _blank_truth_proxy(feat)
+        voiced_truth = _voiced_truth_proxy(feat)
+        if voiced_truth:
+            reliability_stats["proxy_fp_denom"] = int(reliability_stats["proxy_fp_denom"]) + 1
+            if int(feat["_runtime_blank_risk_flag"]) > 0:
+                reliability_stats["proxy_fp_count"] = int(reliability_stats["proxy_fp_count"]) + 1
+        if blank_truth:
+            reliability_stats["proxy_fn_denom"] = int(reliability_stats["proxy_fn_denom"]) + 1
+            if int(feat["_runtime_blank_risk_flag"]) <= 0:
+                reliability_stats["proxy_fn_count"] = int(reliability_stats["proxy_fn_count"]) + 1
         routed_features += 1
         route_label = format_type if not alias_family else f"{format_type}:{alias_family}"
         if route_label not in ml_report["attempted_routes"]:
@@ -2463,6 +2592,15 @@ def apply_oto_ml_to_oto_file(
             f"cutoff_clamped_count={int(anchor_stats.get('cutoff_clamped_count', 0))}, "
             f"vc_cutoff_leak_guard_count={int(anchor_stats.get('vc_cutoff_leak_guard_count', 0))}",
         )
+    if int(reliability_stats.get("rows", 0)) > 0:
+        _emit(
+            callback,
+            "[OTO-ML] Silence reliability: "
+            f"rows={int(reliability_stats.get('rows', 0))}, "
+            f"blank_flags={int(reliability_stats.get('blank_flag_rows', 0))}, "
+            f"mel_unreliable={int(reliability_stats.get('mel_unreliable_rows', 0))}, "
+            f"mel_fallback={int(reliability_stats.get('mel_fallback_rows', 0))}",
+        )
 
     ml_report["anchor_stats"] = dict(anchor_stats)
     ml_report["changed_lines"] = int(changed)
@@ -2475,6 +2613,38 @@ def apply_oto_ml_to_oto_file(
         ml_report["blank_confidence"] = float(sum(blank_conf_values) / float(len(blank_conf_values)))
     if confidence_values:
         ml_report["model_confidence"] = float(sum(confidence_values) / float(len(confidence_values)))
+    rel_rows = int(reliability_stats.get("rows", 0))
+    rel_fp_denom = int(reliability_stats.get("proxy_fp_denom", 0))
+    rel_fn_denom = int(reliability_stats.get("proxy_fn_denom", 0))
+    ml_report["reliability_metrics"] = {
+        "rows": rel_rows,
+        "blank_flag_rows": int(reliability_stats.get("blank_flag_rows", 0)),
+        "mel_unreliable_rows": int(reliability_stats.get("mel_unreliable_rows", 0)),
+        "mel_fallback_rows": int(reliability_stats.get("mel_fallback_rows", 0)),
+        "abstain_rows": int(reliability_stats.get("abstain_rows", 0)),
+        "abstain_rate": (
+            float(reliability_stats.get("abstain_rows", 0)) / float(rel_rows)
+            if rel_rows > 0
+            else None
+        ),
+        "fallback_rate": (
+            float(reliability_stats.get("mel_fallback_rows", 0)) / float(rel_rows)
+            if rel_rows > 0
+            else None
+        ),
+        "silence_fpr_proxy": (
+            float(reliability_stats.get("proxy_fp_count", 0)) / float(rel_fp_denom)
+            if rel_fp_denom > 0
+            else None
+        ),
+        "silence_fnr_proxy": (
+            float(reliability_stats.get("proxy_fn_count", 0)) / float(rel_fn_denom)
+            if rel_fn_denom > 0
+            else None
+        ),
+        "blank_hysteresis_switches": int(reliability_stats.get("blank_hys_switches", 0)),
+        "mel_hysteresis_switches": int(reliability_stats.get("mel_hys_switches", 0)),
+    }
     if fallback_reasons:
         uniq_reasons = list(dict.fromkeys(str(r) for r in fallback_reasons if str(r).strip()))
         ml_report["fallback_reason"] = "; ".join(uniq_reasons[:5])

@@ -233,7 +233,48 @@ def _compute_static_hard_example_boost(
             pd.to_numeric(df["used_alias_occurrence_mapping"], errors="coerce").fillna(0.0).to_numpy() > 0.5
         )
         boost *= np.where(occurrence_mask, 1.0 + (0.10 * strength_v), 1.0)
-    return np.clip(boost.astype(np.float32), 1.0, 3.0)
+    if "used_nuclei_fallback" in df.columns:
+        nuclei_mask = pd.to_numeric(df["used_nuclei_fallback"], errors="coerce").fillna(0.0).to_numpy() > 0.5
+        boost *= np.where(nuclei_mask, 1.0 + (0.08 * strength_v), 1.0)
+    if "used_alias_based_syllables" in df.columns:
+        alias_based_mask = (
+            pd.to_numeric(df["used_alias_based_syllables"], errors="coerce").fillna(0.0).to_numpy() > 0.5
+        )
+        boost *= np.where(alias_based_mask, 1.0 + (0.06 * strength_v), 1.0)
+    if "mapping_reason_code" in df.columns:
+        reason = df["mapping_reason_code"].astype(str).str.strip().str.lower().to_numpy()
+        risky_reason_mask = np.isin(
+            reason,
+            [
+                "order_locked_length_mismatch",
+                "order_locked_glide_mismatch",
+                "order_locked_low_phone_quality",
+                "alias_based_recover",
+                "alias_based_empty_words",
+            ],
+        )
+        recover_reason_mask = np.isin(
+            reason,
+            [
+                "alias_based_cvvc",
+                "words_low_phone_quality",
+                "alias_phone_minimal",
+            ],
+        )
+        boost *= np.where(risky_reason_mask, 1.0 + (0.14 * strength_v), 1.0)
+        boost *= np.where(recover_reason_mask, 1.0 + (0.09 * strength_v), 1.0)
+    if "train_quality_score" in df.columns:
+        quality_np = pd.to_numeric(df["train_quality_score"], errors="coerce").fillna(100.0).to_numpy(dtype=np.float32)
+        boost *= np.where(quality_np < 70.0, 1.0 + (0.06 * strength_v), 1.0)
+    if "train_keep_default" in df.columns:
+        keep_default_np = pd.to_numeric(df["train_keep_default"], errors="coerce").fillna(1.0).to_numpy(dtype=np.float32)
+        # Keep low-quality labels from dominating while still keeping them in training.
+        boost *= np.where(keep_default_np <= 0.5, 1.0 - (0.10 * strength_v), 1.0)
+    if "blank_risk_score" in df.columns:
+        blank_risk_np = pd.to_numeric(df["blank_risk_score"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+        severe_blank_mask = cv_mask & (blank_risk_np >= 0.72)
+        boost *= np.where(severe_blank_mask, 1.0 - (0.08 * strength_v), 1.0)
+    return np.clip(boost.astype(np.float32), 0.70, 3.00)
 
 
 def _apply_blank_risk_weight(df, weights: "np.ndarray") -> "np.ndarray":
@@ -560,7 +601,6 @@ def train_coupled_bundle(
         W = pd.to_numeric(df["sample_weight"], errors="coerce").fillna(1.0).to_numpy(dtype=np.float32)
     else:
         W = np.ones((len(df),), dtype=np.float32)
-    W = _apply_blank_risk_weight(df, W)
     W = _apply_blank_risk_weight(df, W)
     if "alias_type" in df.columns:
         alias_type_arr = df["alias_type"].astype(str).str.lower().to_numpy()

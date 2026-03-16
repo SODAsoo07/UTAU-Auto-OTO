@@ -1,10 +1,93 @@
 from __future__ import annotations
 
+import os
+
 from core.kr_oto_rules import (
     _canonicalize_kr_coda,
     _extract_vc_right_token,
     _is_kr_plosive_coda_alias,
 )
+
+_KR_VC_SHARP_CONSONANTS = {
+    "g", "k", "kk", "gg",
+    "d", "t", "tt", "dd",
+    "b", "p", "bb", "pp",
+    "s", "ss", "h",
+    "j", "jj", "ch",
+}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in {"1", "true", "yes", "on", "y"}:
+        return True
+    if raw in {"0", "false", "no", "off", "n"}:
+        return False
+    return bool(default)
+
+
+def _is_sharp_vc_consonant(c_char: str) -> bool:
+    token = str(c_char or "").strip().lower()
+    if not token:
+        return False
+    canon = _canonicalize_kr_coda(token)
+    return token in _KR_VC_SHARP_CONSONANTS or canon in {"k", "t", "p", "s", "h", "ch"}
+
+
+def _apply_vc_sharp_cutoff_guard(
+    offset: float,
+    consonant: float,
+    cutoff: float,
+    pre: float,
+    ovl: float,
+    *,
+    n_start: float,
+    c_char: str,
+):
+    if not _env_bool("UTOA_KR_VC_SHARP_GUARD_ENABLE", True):
+        return offset, consonant, cutoff, pre, ovl
+    if not _is_sharp_vc_consonant(c_char):
+        return offset, consonant, cutoff, pre, ovl
+
+    offset = float(offset)
+    pre = max(0.0, float(pre))
+    consonant = float(consonant)
+    cutoff_abs = abs(float(cutoff))
+    ovl = max(0.0, float(ovl))
+    next_onset_rel = max(float(n_start) - offset, pre + 8.0)
+
+    cons_margin = max(2.0, _env_float("UTOA_KR_VC_SHARP_CONS_MARGIN_MS", 6.5))
+    cut_margin = max(0.6, _env_float("UTOA_KR_VC_SHARP_CUTOFF_MARGIN_MS", 1.2))
+    tail_min = max(4.0, _env_float("UTOA_KR_VC_SHARP_MIN_TAIL_MS", 7.0))
+
+    min_cons = pre + max(5.0, tail_min - 2.0)
+    max_cons = next_onset_rel - max(cons_margin, tail_min + 0.5)
+    if max_cons < min_cons:
+        max_cons = min_cons
+    consonant = min(max(consonant, min_cons), max_cons)
+
+    cutoff_cap = next_onset_rel - cut_margin
+    if cutoff_cap <= consonant + 0.2:
+        consonant = max(min_cons, cutoff_cap - (tail_min + 0.4))
+    cutoff_floor = consonant + tail_min
+    if cutoff_cap <= cutoff_floor:
+        cutoff_cap = cutoff_floor + 0.6
+    cutoff_abs = min(cutoff_abs, cutoff_cap)
+    cutoff_abs = max(cutoff_abs, cutoff_floor)
+    ovl = min(ovl, max(pre - 10.0, 0.0))
+    return offset, consonant, -cutoff_abs, pre, ovl
 
 
 def _prepare_vc_bounds_from_context(syllables_info, current_w_idx, next_w_idx=None):
@@ -125,12 +208,30 @@ def _compute_kr_vc_timing(
                 cutoff_soft_cap = cutoff_min_abs + 0.8
         cutoff_abs = _clamp(cutoff_abs, cutoff_min_abs, cutoff_soft_cap)
         cutoff = -cutoff_abs
+        offset, consonant, cutoff, pre, ovl = _apply_vc_sharp_cutoff_guard(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            n_start=n_start,
+            c_char=c_char,
+        )
         return offset, consonant, cutoff, pre, ovl, True
 
     if file_format == "cvvc":
         direct_params = _compute_kr_cvvc_vc_timing_direct(alias, c_start, c_end, n_start, n_end)
         if direct_params is not None:
             offset, consonant, cutoff, pre, ovl = direct_params
+            offset, consonant, cutoff, pre, ovl = _apply_vc_sharp_cutoff_guard(
+                offset,
+                consonant,
+                cutoff,
+                pre,
+                ovl,
+                n_start=n_start,
+                c_char=c_char,
+            )
             return offset, consonant, cutoff, pre, ovl, False
 
     vc_anchor_params = None
@@ -138,13 +239,22 @@ def _compute_kr_vc_timing(
     if resolved_next_w_idx < len(syllables_info):
         prev_cv_anchor = prev_cv_anchor or cv_anchor_by_idx.get(current_w_idx)
         next_cv_anchor = next_cv_anchor or cv_anchor_by_idx.get(resolved_next_w_idx)
-        is_plosive_sibilant = c_char in ["g", "k", "kk", "gg", "d", "t", "tt", "dd", "b", "p", "bb", "pp", "s", "ss", "h", "j", "jj", "ch"]
+        is_plosive_sibilant = c_char in _KR_VC_SHARP_CONSONANTS
         vc_anchor_params = _compute_vc_from_adjacent_cv(
             prev_cv_anchor, next_cv_anchor, alias_type, is_plosive_sibilant
         )
 
     if vc_anchor_params is not None:
         offset, consonant, cutoff, pre, ovl = vc_anchor_params
+        offset, consonant, cutoff, pre, ovl = _apply_vc_sharp_cutoff_guard(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            n_start=n_start,
+            c_char=c_char,
+        )
         return offset, consonant, cutoff, pre, ovl, False
 
     vc_target = n_start
@@ -159,7 +269,7 @@ def _compute_kr_vc_timing(
     offset = boundary - offset_padding
     pre = boundary - offset
 
-    is_plosive_sibilant = c_char in ["g", "k", "kk", "gg", "d", "t", "tt", "dd", "b", "p", "bb", "pp", "s", "ss", "h", "j", "jj", "ch"]
+    is_plosive_sibilant = c_char in _KR_VC_SHARP_CONSONANTS
     ovl = adaptive_overlap(pre, c_char, mode="vc")
 
     if is_plosive_sibilant:
@@ -195,6 +305,15 @@ def _compute_kr_vc_timing(
         cutoff_abs = max(cutoff_abs, consonant + 12.0)
         cutoff = -cutoff_abs
 
+    offset, consonant, cutoff, pre, ovl = _apply_vc_sharp_cutoff_guard(
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        n_start=n_start,
+        c_char=c_char,
+    )
     return offset, consonant, cutoff, pre, ovl, False
 
 

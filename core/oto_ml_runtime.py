@@ -76,7 +76,7 @@ def _bundle_cache_stamp(model_dir: str, backend: str, coupled_device: str) -> tu
         except Exception:
             files_mtime = max(files_mtime, 0.0)
     else:
-        # Ensemble/coupled/autofree commonly use binary payloads.
+        # Ensemble/coupled backends commonly use binary payloads.
         for name in ("model_bundle.pt", "model.pt", "bundle.pt", "model.pkl", "model.pickle"):
             files_mtime = max(files_mtime, _safe_mtime(os.path.join(model_dir, name)))
     dir_mtime = _safe_mtime(model_dir)
@@ -93,13 +93,8 @@ def _bundle_cache_stamp(model_dir: str, backend: str, coupled_device: str) -> tu
 def validate_bundle_compat(bundle: OtoModelBundle, feature_schema: Dict[str, Any]) -> bool:
     if not bundle or not feature_schema:
         return False
-    backend = str(bundle.meta.get("backend", "") or bundle.backend or "").strip().lower()
-    if backend == "autofree_v1":
-        meta_ver = str(bundle.meta.get("feature_schema_version", ""))
-        schema_ver = str(feature_schema.get("feature_schema_version", ""))
-    else:
-        meta_ver = str(bundle.meta.get("feature_version", ""))
-        schema_ver = str(feature_schema.get("feature_version", ""))
+    meta_ver = str(bundle.meta.get("feature_version", ""))
+    schema_ver = str(feature_schema.get("feature_version", ""))
     if meta_ver and schema_ver and meta_ver != schema_ver:
         return False
     expected_names = list(feature_schema.get("feature_names") or [])
@@ -115,12 +110,12 @@ def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
     if not meta:
         return None
     backend = str(meta.get("backend", "")).strip().lower() or "lightgbm"
+    if backend == "autofree_v1":
+        logger.warning("Autofree backend is removed from runtime correction support: %s", model_dir)
+        return None
     schema = _load_json(os.path.join(abs_model_dir, "feature_schema.json"))
     if not schema:
-        if backend == "autofree_v1":
-            from core.oto_ml.autofree.schema import get_feature_schema
-        else:
-            from core.oto_ml_features import get_feature_schema
+        from core.oto_ml_features import get_feature_schema
         schema = get_feature_schema()
     coupled_device = str(os.environ.get("UTOA_ML_COUPLED_DEVICE", "auto") or "auto").strip()
     cache_key = abs_model_dir
@@ -144,10 +139,6 @@ def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
                 schema=schema,
                 device=coupled_device,
             )
-        elif backend == "autofree_v1":
-            from core.oto_ml_autofree import load_autofree_bundle
-
-            payload = load_autofree_bundle(abs_model_dir, meta=meta, schema=schema)
         else:
             logger.warning("Unsupported OTO ML backend: %s", backend)
             return None
@@ -189,25 +180,6 @@ def predict_oto_deltas(bundle: OtoModelBundle, feature_row: Dict[str, Any]) -> O
         confidence = result.get("confidence")
         route = str(result.get("route", route) or route)
         route_backend = str(result.get("route_backend", route_backend) or route_backend)
-    elif bundle.backend == "autofree_v1":
-        from core.oto_ml_autofree import predict_autofree_abs
-
-        result = predict_autofree_abs(
-            bundle.payload,
-            feature_row,
-            meta=bundle.meta,
-            schema=bundle.feature_schema,
-        )
-        deltas = {
-            "target_offset_ms": float(result.get("target_offset_ms", 0.0)),
-            "target_cons_ms": float(result.get("target_cons_ms", 0.0)),
-            "target_cutoff_abs_ms": float(result.get("target_cutoff_abs_ms", 0.0)),
-            "target_pre_ms": float(result.get("target_pre_ms", 0.0)),
-            "target_ovl_ms": float(result.get("target_ovl_ms", 0.0)),
-        }
-        confidence = float(result.get("confidence", 0.0))
-        route = "autofree_v1"
-        route_backend = "autofree_v1"
     else:
         raise RuntimeError(f"Unsupported OTO ML backend: {bundle.backend}")
     return OtoDeltaResult(

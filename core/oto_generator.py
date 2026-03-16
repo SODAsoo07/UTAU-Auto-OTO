@@ -373,6 +373,97 @@ DEFAULT_PARAMS = {
     'DIPHTHONG_VC_PRE_EXTEND': 1.2,
 }
 
+
+DEFAULT_PARAMS_PRESET_BY_CONTEXT = {
+    "korean": {
+        "default": {
+            "VC_CONSONANT_RATIO": 0.47,
+            "VC_VOWEL_START": 0.36,
+            "VC_PRE_OFFSET": 20.0,
+            "VC_OVL_RATIO": 0.34,
+            "CV_PRE_RATIO": 0.92,
+            "CV_OVL_RATIO": 0.38,
+            "DIPHTHONG_CV_PRE_RATIO": 0.33,
+            "DIPHTHONG_CV_CONSONANT_RATIO": 0.58,
+            "DIPHTHONG_VC_VOWEL_START": 0.34,
+            "DIPHTHONG_VC_CONSONANT": 0.48,
+        },
+        "cv": {
+            "CV_PRE_RATIO": 0.88,
+            "CV_OVL_RATIO": 0.36,
+            "VC_PRE_OFFSET": 16.0,
+        },
+        "cvc": {
+            "VC_CONSONANT_RATIO": 0.42,
+            "VC_VOWEL_START": 0.34,
+            "VC_PRE_OFFSET": 18.0,
+            "VC_OVL_RATIO": 0.36,
+            "CV_PRE_RATIO": 0.90,
+        },
+        "cvvc": {
+            "VC_CONSONANT_RATIO": 0.44,
+            "VC_VOWEL_START": 0.35,
+            "VC_PRE_OFFSET": 19.0,
+            "VC_OVL_RATIO": 0.35,
+            "CV_PRE_RATIO": 0.90,
+        },
+        "vcv": {
+            "VC_CONSONANT_RATIO": 0.48,
+            "VC_VOWEL_START": 0.40,
+            "VC_PRE_OFFSET": 22.0,
+            "VC_OVL_RATIO": 0.33,
+            "CV_PRE_RATIO": 0.95,
+            "CV_OVL_RATIO": 0.36,
+        },
+    },
+    "japanese": {
+        "default": {
+            "VC_CONSONANT_RATIO": 0.50,
+            "VC_VOWEL_START": 0.32,
+            "VC_PRE_OFFSET": 20.0,
+            "VC_OVL_RATIO": 0.32,
+            "CV_PRE_RATIO": 0.86,
+            "CV_OVL_RATIO": 0.34,
+            "DIPHTHONG_CV_PRE_RATIO": 0.34,
+            "DIPHTHONG_CV_CONSONANT_RATIO": 0.58,
+            "DIPHTHONG_VC_VOWEL_START": 0.31,
+            "DIPHTHONG_VC_CONSONANT": 0.50,
+        },
+        "cv": {
+            "CV_PRE_RATIO": 0.82,
+            "CV_OVL_RATIO": 0.33,
+        },
+        "cvvc": {
+            "VC_CONSONANT_RATIO": 0.52,
+            "VC_PRE_OFFSET": 18.0,
+            "CV_PRE_RATIO": 0.80,
+        },
+        "vcv": {
+            "VC_CONSONANT_RATIO": 0.46,
+            "VC_VOWEL_START": 0.36,
+            "VC_PRE_OFFSET": 22.0,
+            "CV_PRE_RATIO": 0.98,
+            "CV_OVL_RATIO": 0.40,
+        },
+    },
+}
+
+
+def get_default_params_for_context(language="korean", format_type=""):
+    lang = str(language or "korean").strip().lower()
+    if lang not in DEFAULT_PARAMS_PRESET_BY_CONTEXT:
+        lang = "korean"
+    fmt = normalize_format_type(lang, format_type) or "general"
+    lang_presets = DEFAULT_PARAMS_PRESET_BY_CONTEXT.get(lang, {})
+    resolved = dict(DEFAULT_PARAMS)
+    resolved.update(lang_presets.get("default", {}))
+    if fmt in {"general", "default"}:
+        fallback_fmt = "cvvc" if lang == "korean" else "cvvc"
+        resolved.update(lang_presets.get(fallback_fmt, {}))
+    else:
+        resolved.update(lang_presets.get(fmt, {}))
+    return resolved
+
 # 한국어 매핑 신뢰도 임계치 기본값(포맷별)
 # - CVVC: 현재 안정성 기준값 유지
 # - VCV: 점프 허용 전 신뢰도를 조금 더 엄격하게 본다
@@ -2585,29 +2676,96 @@ def _resolve_mel_weight_mode(raw_value: str) -> str:
     return "auto"
 
 
+def _estimate_file_mel_reliability(mel_ctx, *, blank_conf_mean: float = 0.0) -> float:
+    if not mel_ctx:
+        return 0.0
+    if np is None:
+        return float(_clamp(1.0 - (float(blank_conf_mean) * 0.85), 0.0, 1.0))
+
+    en = mel_ctx.get("energy")
+    f0v = mel_ctx.get("f0_voicing")
+    cls_sil = mel_ctx.get("cls_silence_sparse")
+    if en is None or len(en) == 0:
+        return float(_clamp(1.0 - (float(blank_conf_mean) * 0.85), 0.0, 1.0))
+    en_arr = np.asarray(en, dtype=np.float64)
+    if f0v is None or len(f0v) != len(en_arr):
+        f0_arr = np.zeros_like(en_arr, dtype=np.float64)
+    else:
+        f0_arr = np.asarray(f0v, dtype=np.float64)
+    if cls_sil is None or len(cls_sil) != len(en_arr):
+        sil_arr = np.zeros_like(en_arr, dtype=np.float64)
+    else:
+        sil_arr = np.asarray(cls_sil, dtype=np.float64)
+
+    energy_mean = float(np.mean(en_arr))
+    voiced_ratio = float(np.mean(f0_arr >= 0.5))
+    silence_ratio = float(np.mean(sil_arr >= 0.5))
+    blank_penalty = max(0.0, float(blank_conf_mean) - 0.35)
+    score = (
+        (0.46 * _clamp(voiced_ratio, 0.0, 1.0))
+        + (0.34 * _clamp(1.0 - silence_ratio, 0.0, 1.0))
+        + (0.20 * _clamp(energy_mean, 0.0, 1.0))
+        - (0.38 * _clamp(blank_penalty, 0.0, 1.0))
+    )
+    return float(_clamp(score, 0.0, 1.0))
+
+
+def _apply_mel_boost_alignment_scale(alignment_weight: float, textgrid_trust_tier: str) -> float:
+    weight = float(alignment_weight or 0.0)
+    tier = str(textgrid_trust_tier or "").strip().lower()
+    if tier == "low":
+        weight *= 0.72
+    elif tier == "mid":
+        weight *= 0.84
+    else:
+        weight *= 0.94
+    return float(_clamp(weight, 0.0, 1.0))
+
+
 def _should_force_mel_branch(
     textgrid_trust_tier: str,
     *,
     trust_score: Optional[float] = None,
     alignment_weight: Optional[float] = None,
+    mapping_confidence: Optional[float] = None,
+    mel_reliability: Optional[float] = None,
 ) -> bool:
     tier = str(textgrid_trust_tier or "").strip().lower()
     if tier != "high":
         return True
     trust_min = _env_float("UTOA_MEL_FORCE_TRUST_MIN", 0.82)
     align_min = _env_float("UTOA_MEL_FORCE_ALIGN_WEIGHT_MIN", 0.70)
+    map_min = _env_float("UTOA_MEL_FORCE_MAPPING_CONF_MIN", 0.58)
+    mel_rel_min = _env_float("UTOA_MEL_FORCE_MEL_RELIABILITY_MIN", 0.44)
     if trust_score is not None and float(trust_score) < float(trust_min):
         return True
     if alignment_weight is not None and float(alignment_weight) < float(align_min):
         return True
+    if mapping_confidence is not None and float(mapping_confidence) < float(map_min):
+        return True
+    if mel_reliability is not None and float(mel_reliability) < float(mel_rel_min):
+        return True
     return False
 
 
-def _resolve_mel_onset_weight(alignment_weight: float, textgrid_trust_tier: str) -> float:
+def _resolve_mel_onset_weight(
+    alignment_weight: float,
+    textgrid_trust_tier: str,
+    *,
+    trust_score: Optional[float] = None,
+    mapping_confidence: Optional[float] = None,
+    mel_reliability: Optional[float] = None,
+) -> float:
     tier = str(textgrid_trust_tier or "").strip().lower()
     w = float(alignment_weight or 0.0)
     mode = _resolve_mel_weight_mode(os.environ.get("UTOA_MEL_WEIGHT_MODE", "auto"))
-    if _should_force_mel_branch(tier, alignment_weight=w):
+    if _should_force_mel_branch(
+        tier,
+        trust_score=trust_score,
+        alignment_weight=w,
+        mapping_confidence=mapping_confidence,
+        mel_reliability=mel_reliability,
+    ):
         mode = "mel_boost"
     if tier == "high" and w >= 0.75:
         return 0.0
@@ -3462,6 +3620,7 @@ def generate_oto(
             callback(err)
         return 0, 0, [err]
 
+    use_context_default_params = params is None
     if params is None:
         params = DEFAULT_PARAMS.copy()
     use_sinsy_labels = bool(params.get("USE_SINSY_LABELS", False)) if params else False
@@ -3490,6 +3649,11 @@ def generate_oto(
         if callback:
             callback(msg)
         auto_gen_format = "cvvc"
+
+    if use_context_default_params:
+        params = get_default_params_for_context("korean", auto_gen_format)
+        use_sinsy_labels = bool(params.get("USE_SINSY_LABELS", False)) if params else False
+        sinsy_label_path = str(params.get("SINSY_LABEL_PATH", "") or "").strip() if params else ""
 
     env_words_fallback = str(os.environ.get("UTOA_KR_MAPPING_WORDS_FALLBACK", "")).strip().lower()
     if env_words_fallback in {"0", "false", "off", "no"}:
@@ -4086,31 +4250,21 @@ def generate_oto(
             blank_conf_mean = 0.0
             if syllable_blank_confidences:
                 blank_conf_mean = float(sum(syllable_blank_confidences) / float(len(syllable_blank_confidences)))
-            alignment_weight = max(
+            alignment_weight_base = max(
                 0.0,
                 min(
                     1.0,
                     (textgrid_trust_score * 0.85) - max(0.0, blank_conf_mean - 0.45) * 0.35,
                 ),
             )
-            mel_weight_mode = _resolve_mel_weight_mode(os.environ.get("UTOA_MEL_WEIGHT_MODE", "auto"))
-            force_mel_branch = _should_force_mel_branch(
-                textgrid_trust_tier,
-                trust_score=textgrid_trust_score,
-                alignment_weight=alignment_weight,
+            alignment_weight = float(alignment_weight_base)
+            mel_reliability_score = _estimate_file_mel_reliability(
+                mel_ctx_for_file,
+                blank_conf_mean=blank_conf_mean,
             )
-            if force_mel_branch:
-                mel_weight_mode = "mel_boost"
-            if mel_weight_mode == "mel_boost":
-                tier_for_boost = str(textgrid_trust_tier or "").strip().lower()
-                if tier_for_boost == "low":
-                    alignment_weight *= 0.72
-                elif tier_for_boost == "mid":
-                    alignment_weight *= 0.84
-                else:
-                    alignment_weight *= 0.94
-                alignment_weight = max(0.0, min(1.0, alignment_weight))
-            anchor_lock_lite = bool(alignment_weight < 0.58 or blank_conf_mean >= 0.55)
+            mel_weight_mode = _resolve_mel_weight_mode(os.environ.get("UTOA_MEL_WEIGHT_MODE", "auto"))
+            force_mel_branch = False
+            anchor_lock_lite = False
             used_words_based = bool(kr_source_pick.get("used_words_based"))
             used_alias_based = bool(kr_source_pick.get("used_alias_based"))
             mapping_reason_code = str(kr_source_pick.get("mapping_reason_code") or mapping_reason_code)
@@ -4158,12 +4312,6 @@ def generate_oto(
                     f"🧭 {fname}: TextGrid(words) 매핑 유지 "
                     f"(base={base_score:.1f}, corrected={alt_score:.1f})"
                 )
-            log(
-                f"🧭 {fname}: alignment_weight={alignment_weight:.2f}, "
-                f"blank_mean={blank_conf_mean:.2f}, anchor_lock_lite={anchor_lock_lite}, "
-                f"mel_weight_mode={mel_weight_mode}, force_mel_branch={force_mel_branch}"
-            )
-
             file_anchor_adapt_stats = _compute_file_anchor_adapt_stats(
                 mel_ctx_for_file,
                 syllables_info,
@@ -4269,6 +4417,32 @@ def generate_oto(
                     f"margin={mapping_margin:+.1f}, reason={mapping_reason_code})"
                 )
 
+            force_mel_branch = _should_force_mel_branch(
+                textgrid_trust_tier,
+                trust_score=textgrid_trust_score,
+                alignment_weight=alignment_weight_base,
+                mapping_confidence=mapping_confidence_base,
+                mel_reliability=mel_reliability_score,
+            )
+            if force_mel_branch:
+                mel_weight_mode = "mel_boost"
+            alignment_weight = float(alignment_weight_base)
+            if mel_weight_mode == "mel_boost":
+                alignment_weight = _apply_mel_boost_alignment_scale(alignment_weight, textgrid_trust_tier)
+            alignment_weight = float(_clamp(alignment_weight, 0.0, 1.0))
+            anchor_lock_lite = bool(
+                alignment_weight < 0.58
+                or blank_conf_mean >= 0.55
+                or mapping_confidence_base < float(file_mapping_conf_th)
+                or mel_reliability_score < _env_float("UTOA_MEL_FORCE_MEL_RELIABILITY_MIN", 0.44)
+            )
+            log(
+                f"🧭 {fname}: align_base={alignment_weight_base:.2f}, align_final={alignment_weight:.2f}, "
+                f"blank_mean={blank_conf_mean:.2f}, map_conf={mapping_confidence_base:.2f}, "
+                f"mel_rel={mel_reliability_score:.2f}, anchor_lock_lite={anchor_lock_lite}, "
+                f"mel_weight_mode={mel_weight_mode}, force_mel_branch={force_mel_branch}"
+            )
+
             file_mapping_low_conf = bool(runtime_policy.get("is_low_conf"))
             file_conf_floor = float(runtime_policy.get("file_conf_floor", file_mapping_conf_th))
             if mapping_confidence_base < file_conf_floor:
@@ -4311,12 +4485,18 @@ def generate_oto(
                     "mapping_tier": str(runtime_policy.get("mapping_tier") or ""),
                     "trust_score": float(textgrid_trust_score),
                     "trust_tier": str(textgrid_trust_tier or ""),
+                    "alignment_weight_base": float(alignment_weight_base),
+                    "alignment_weight": float(alignment_weight),
                     "file_conf_floor": float(file_conf_floor),
                     "row_conf_floor": float(row_conf_floor),
                     "row_margin_floor": float(row_margin_floor),
                     "file_low_conf": bool(file_mapping_low_conf),
                     "low_conf_reasons": list(low_conf_reasons),
                     "blank_confidence_mean": float(blank_conf_mean),
+                    "mel_reliability_score": float(mel_reliability_score),
+                    "mel_weight_mode": str(mel_weight_mode),
+                    "force_mel_branch": bool(force_mel_branch),
+                    "anchor_lock_lite": bool(anchor_lock_lite),
                     "plan_source": str(kr_cv_plan.get("source") or ""),
                     "plan_margin": float((kr_cv_plan.get("meta") or {}).get("margin", 0.0) or 0.0),
                     "plan_coverage": float(kr_plan_policy.get("coverage", 0.0) or 0.0),
@@ -4389,8 +4569,42 @@ def generate_oto(
             kr_cvvc_occurrence_state = {}
             kr_cvvc_vv_occurrence_map = _build_kr_cvvc_vv_occurrence_map(kr_cvvc_occurrence_source) if file_format == "cvvc" else None
             kr_cvvc_vv_occurrence_state = {}
+            file_has_explicit_vc_alias = False
+            file_has_cv_family_alias = False
+            for _line in lines:
+                _parts = _line.split("=", 1)
+                if len(_parts) < 2:
+                    continue
+                _alias = _parts[1].split(",", 1)[0].strip()
+                if not _alias:
+                    continue
+                _alias_type = _classify_alias_cached(_alias)
+                if _alias_type == "vc":
+                    file_has_explicit_vc_alias = True
+                elif _alias_type in {"cv", "cv_head", "vcv", "mono"}:
+                    file_has_cv_family_alias = True
+
+            _format_norm = str(file_format or "").strip().lower()
+            file_has_mixed_cv_vc = file_has_explicit_vc_alias and (
+                file_has_cv_family_alias or _format_norm in {"cvvc", "cvc", "vcv"}
+            )
+            if file_has_mixed_cv_vc:
+                kr_cv_timing_mode = "vcv_context" if _format_norm == "vcv" else "vc_context"
+            else:
+                kr_cv_timing_mode = "standalone"
+            if kr_mapping_debug_reason_logging:
+                log(
+                    f"🧭 {fname}: KR CV timing mode={kr_cv_timing_mode} "
+                    f"(format={_format_norm or 'unknown'}, "
+                    f"vc_alias={'yes' if file_has_explicit_vc_alias else 'no'}, "
+                    f"cv_family={'yes' if file_has_cv_family_alias else 'no'})"
+                )
             cv_anchor_by_idx = {
-                i: _estimate_cv_anchor_from_syllable(syllables_info[i], ph_intervals)
+                i: _estimate_cv_anchor_from_syllable(
+                    syllables_info[i],
+                    ph_intervals,
+                    cv_mode=kr_cv_timing_mode,
+                )
                 for i in range(len(syllables_info))
             }
             realized_cv_anchor_by_idx = {}
@@ -4858,6 +5072,7 @@ def generate_oto(
                             alias_onset,
                             True,
                             False,
+                            cv_mode=kr_cv_timing_mode,
                         )
 
                     elif _looks_like_vv_alias(alias):
@@ -4897,12 +5112,19 @@ def generate_oto(
                             alias_onset,
                             False,
                             is_plosive,
+                            cv_mode=kr_cv_timing_mode,
                         )
 
                 row_mel_voiced_onset_ms = None
                 if mel_ctx_for_file and alias_type == "cv":
                     pre_abs = float(offset) + float(pre)
-                    mel_weight = _resolve_mel_onset_weight(alignment_weight, textgrid_trust_tier)
+                    mel_weight = _resolve_mel_onset_weight(
+                        alignment_weight,
+                        textgrid_trust_tier,
+                        trust_score=textgrid_trust_score,
+                        mapping_confidence=row_mapping_confidence,
+                        mel_reliability=mel_reliability_score,
+                    )
                     if mel_weight > 0.0 and not _env_bool("UTOA_DISABLE_MEL_ONSET_SHIFT", False):
                         mel_onset = _estimate_mel_voiced_onset(mel_ctx_for_file, pre_abs)
                         if mel_onset is not None and abs(float(mel_onset) - pre_abs) <= 120.0:
@@ -5202,7 +5424,7 @@ def generate_oto(
                 log_fn=log,
                 validate_fn=validate_oto_params,
                 normalize_key_fn=normalize_key,
-                ml_route=os.environ.get("UTOA_ML_ROUTE", "autofree_v1"),
+                ml_route=os.environ.get("UTOA_ML_ROUTE", "legacy"),
             )
         )
         renamed = apply_output_wav_name_map(out_path, wav_name_map)

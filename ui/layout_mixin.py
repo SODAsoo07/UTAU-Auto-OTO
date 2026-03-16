@@ -323,6 +323,7 @@ class LayoutMixin:
         self._build_params_tab()
         self._build_profile_tune_tab()
         self._build_advanced_settings_tab()
+        self._build_developer_settings_tab()
         self._build_log_tab()
         self.tabview.set("로그")
 
@@ -441,6 +442,10 @@ class LayoutMixin:
                 self.ja_alias_style_menu.configure(state="normal")
         current_code = normalize_auto_format_value(self._get_language(), self.auto_format_var.get())
         self._set_auto_format_from_code(current_code, self._get_language())
+        if hasattr(self, "_apply_current_param_preset"):
+            self._apply_current_param_preset(save=False, log=False)
+        if hasattr(self, "_apply_ml_runtime_preset") and hasattr(self, "ml_runtime_preset_var"):
+            self._apply_ml_runtime_preset(self.ml_runtime_preset_var.get(), log_message=False)
         if hasattr(self, "_apply_recommended_ml_model_defaults"):
             self._apply_recommended_ml_model_defaults()
         self._save_config()
@@ -513,6 +518,10 @@ class LayoutMixin:
         self._save_config()
 
     def _on_format_change(self, _value=None):
+        if hasattr(self, "_apply_current_param_preset"):
+            self._apply_current_param_preset(save=False, log=False)
+        if hasattr(self, "_apply_ml_runtime_preset") and hasattr(self, "ml_runtime_preset_var"):
+            self._apply_ml_runtime_preset(self.ml_runtime_preset_var.get(), log_message=False)
         self._save_config()
         self._refresh_ml_backend_status()
 
@@ -543,18 +552,26 @@ class LayoutMixin:
         fmt_display = fmt or "auto"
         routed_fmt = fmt or "general"
         env_key = "UTOA_JA_OTO_ML_DIR" if lang == "japanese" else "UTOA_KR_OTO_ML_DIR"
+        two_stage_env_key = "UTOA_ML_TWO_STAGE_MODEL_ENABLE"
         override = ""
         if lang == "japanese" and hasattr(self, "ml_model_root_ja_var"):
             override = str(self.ml_model_root_ja_var.get() or "").strip()
         if lang == "korean" and hasattr(self, "ml_model_root_kr_var"):
             override = str(self.ml_model_root_kr_var.get() or "").strip()
+        two_stage_enabled = (
+            bool(self.ml_two_stage_model_enable_var.get())
+            if hasattr(self, "ml_two_stage_model_enable_var")
+            else True
+        )
 
         prev_env = os.environ.get(env_key)
+        prev_two_stage_env = os.environ.get(two_stage_env_key)
         try:
             if override:
                 os.environ[env_key] = override
             else:
                 os.environ.pop(env_key, None)
+            os.environ[two_stage_env_key] = "1" if two_stage_enabled else "0"
             ensemble_dir = _resolve_backend_model_dir(lang, routed_fmt, backend="ensemble_v1")
             lightgbm_dir = _resolve_backend_model_dir(lang, routed_fmt, backend="lightgbm")
         finally:
@@ -562,6 +579,10 @@ class LayoutMixin:
                 os.environ.pop(env_key, None)
             else:
                 os.environ[env_key] = prev_env
+            if prev_two_stage_env is None:
+                os.environ.pop(two_stage_env_key, None)
+            else:
+                os.environ[two_stage_env_key] = prev_two_stage_env
 
         def _status_icon(model_dir: str) -> str:
             return "OK" if model_dir else "--"
@@ -579,6 +600,7 @@ class LayoutMixin:
         )
         if selected:
             text += f" | 선택: {selected}"
+        text += f" | two_stage={'ON' if two_stage_enabled else 'OFF'}"
         if override:
             text += " | 사용자 경로 사용"
         self.ml_coupled_status_label.configure(text=text)
