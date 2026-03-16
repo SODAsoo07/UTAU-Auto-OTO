@@ -156,6 +156,8 @@ class App(
         self.ml_batch_inference_size_var = ctk.StringVar(value="256")
         self.ml_legacy_fallback_enable_var = ctk.BooleanVar(value=False)
         self.ml_anchor_mel_gamma_var = ctk.StringVar(value="1.2")
+        self.ml_mel_weight_mode_var = ctk.StringVar(value="기본(auto)")
+        self.ml_runtime_preset_var = ctk.StringVar(value="권장(균형)")
         self.ml_model_root_kr_var = ctk.StringVar(value="")
         self.ml_model_root_ja_var = ctk.StringVar(value="")
         self.kr_vc_neighbor_enable_var = ctk.BooleanVar(value=True)

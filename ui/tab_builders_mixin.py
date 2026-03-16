@@ -288,6 +288,32 @@ class TabBuildersMixin:
             text_color=PALETTE.header_accent,
         ).pack(anchor="w", padx=12, pady=(10, 6))
 
+        preset_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        preset_row.pack(anchor="w", padx=12, pady=(0, 6), fill="x")
+        ctk.CTkLabel(
+            preset_row,
+            text="ML 실행 프리셋",
+            text_color="#B0BEC5",
+        ).pack(side="left")
+        preset_values = (
+            self._ml_runtime_preset_values()
+            if hasattr(self, "_ml_runtime_preset_values")
+            else ["권장(균형)", "속도 우선", "정밀 우선"]
+        )
+        self.ml_runtime_preset_segment = ctk.CTkSegmentedButton(
+            preset_row,
+            values=preset_values,
+            variable=self.ml_runtime_preset_var,
+            command=lambda value: self._on_ml_runtime_preset_change(value),
+            width=320,
+        )
+        self.ml_runtime_preset_segment.pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(
+            ml_frame,
+            text="프리셋은 ML route, batch, MEL 가중, fallback 설정을 한번에 조정합니다.",
+            text_color="#9E9E9E",
+        ).pack(anchor="w", padx=12, pady=(0, 6))
+
         self.enable_ml_correction_checkbox = ctk.CTkCheckBox(
             ml_frame,
             text="ML 보정 사용 (기본 ON)",
@@ -501,6 +527,24 @@ class TabBuildersMixin:
             command=self._save_config,
         )
         legacy_fallback_checkbox.pack(anchor="w", padx=12, pady=(4, 0))
+
+        if not hasattr(self, "ml_mel_weight_mode_var"):
+            self.ml_mel_weight_mode_var = ctk.StringVar(value="기본(auto)")
+        mel_weight_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        mel_weight_row.pack(anchor="w", padx=12, pady=(6, 0), fill="x")
+        ctk.CTkLabel(
+            mel_weight_row,
+            text="TextGrid/MEL 가중",
+            text_color="#B0BEC5",
+        ).pack(side="left")
+        self.ml_mel_weight_mode_segment = ctk.CTkSegmentedButton(
+            mel_weight_row,
+            values=["기본(auto)", "MEL 우선(실험)"],
+            variable=self.ml_mel_weight_mode_var,
+            command=lambda _v: self._save_config(),
+            width=260,
+        )
+        self.ml_mel_weight_mode_segment.pack(side="left", padx=(10, 8))
 
         gamma_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
         gamma_row.pack(anchor="w", padx=12, pady=(2, 6), fill="x")

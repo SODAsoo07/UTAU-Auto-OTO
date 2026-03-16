@@ -90,6 +90,13 @@ def _env_str(name: str, default: str) -> str:
     return text or str(default)
 
 
+def _resolve_head_mode(raw_value: str, default: str = "split") -> str:
+    mode = str(raw_value or default).strip().lower()
+    if mode in {"single", "split"}:
+        return mode
+    return str(default).strip().lower() or "split"
+
+
 def _resolve_min_mapping_confidence(lang: str, fmt: str, min_mapping_confidence: float) -> float:
     try:
         if float(min_mapping_confidence) > 0.0:
@@ -642,6 +649,7 @@ def train_coupled_bundle(
     pair_warmup_epochs = max(0, _env_int("UTOA_ML_COUPLED_PAIR_WARMUP_EPOCHS", pair_warmup_default))
 
     aux_dim = len(AUX_TARGET_NAMES) if use_aux else 0
+    head_mode = _resolve_head_mode(_env_str("UTOA_ML_COUPLED_HEAD_MODE", "split"), default="split")
     model = _build_model(
         torch,
         nn,
@@ -649,7 +657,7 @@ def train_coupled_bundle(
         patch_dim=int(P.shape[1]),
         aux_dim=aux_dim,
         categorical_bucket_sizes=categorical_bucket_sizes,
-        head_mode="split",
+        head_mode=head_mode,
     )
     run_device = _resolve_device(torch, requested=device)
     if isinstance(run_device, str):
@@ -721,8 +729,11 @@ def train_coupled_bundle(
         ["huber", "huber", "huber"],
         [18.0, 18.0, 24.0],
     )
-    cons_margin = 10.0
-    cut_margin = 10.0
+    cons_margin = max(0.0, _env_float("UTOA_ML_COUPLED_CONS_MARGIN", 10.0))
+    cut_margin = max(0.0, _env_float("UTOA_ML_COUPLED_CUT_MARGIN", 10.0))
+    penalty_loss_weight = max(0.0, _env_float("UTOA_ML_COUPLED_CONSTRAINT_WEIGHT", 0.25))
+    align_loss_weight = max(0.0, _env_float("UTOA_ML_COUPLED_ALIGN_WEIGHT", 0.12))
+    conf_loss_weight = max(0.0, _env_float("UTOA_ML_COUPLED_CONF_WEIGHT", 0.05))
     boundary_aux_default = 0.18 if is_kr_cvc else 0.14
     boundary_consistency_default = 0.10 if is_kr_cvc else 0.06
     boundary_aux_weight = _env_float("UTOA_ML_COUPLED_BOUNDARY_AUX_WEIGHT", boundary_aux_default)
@@ -859,9 +870,9 @@ def train_coupled_bundle(
 
             total_loss = (
                 base_loss
-                + (0.25 * penalty_loss)
-                + (0.12 * align_loss)
-                + (0.05 * conf_loss)
+                + (float(penalty_loss_weight) * penalty_loss)
+                + (float(align_loss_weight) * align_loss)
+                + (float(conf_loss_weight) * conf_loss)
                 + (float(boundary_aux_weight) * aux_loss)
                 + (float(boundary_consistency_weight) * boundary_consistency_loss)
                 + (epoch_pair_weight * pair_loss)
@@ -962,9 +973,9 @@ def train_coupled_bundle(
             val_total = float(
                 (
                     val_base
-                    + (0.25 * val_penalty)
-                    + (0.12 * val_align)
-                    + (0.05 * val_conf)
+                    + (float(penalty_loss_weight) * val_penalty)
+                    + (float(align_loss_weight) * val_align)
+                    + (float(conf_loss_weight) * val_conf)
                     + (float(boundary_aux_weight) * val_aux)
                     + (float(boundary_consistency_weight) * val_boundary_consistency)
                     + (epoch_pair_weight * val_pair)
@@ -1050,7 +1061,7 @@ def train_coupled_bundle(
             "in_dim": int(X.shape[1]),
             "patch_dim": int(P.shape[1]),
             "hidden_dim": 160,
-            "head_mode": "split",
+            "head_mode": str(head_mode),
             "anchor_dim": int(len(ANCHOR_TARGET_NAMES)),
             "delta_dim": int(len(DELTA_TARGET_NAMES)),
             "aux_dim": int(aux_dim),
@@ -1075,7 +1086,7 @@ def train_coupled_bundle(
         "targets": list(TARGET_NAMES),
         "anchor_targets": list(ANCHOR_TARGET_NAMES),
         "delta_targets": list(DELTA_TARGET_NAMES),
-        "head_mode": "split",
+        "head_mode": str(head_mode),
         "aux_targets": list(AUX_TARGET_NAMES) if use_aux else [],
         "mel_patch_spec": list(PATCH_FEATURES),
         "min_confidence": float(min_confidence),
@@ -1109,6 +1120,13 @@ def train_coupled_bundle(
             "target_weights": [float(v) for v in aux_target_weight_values],
             "loss_kinds": list(aux_loss_kinds),
             "huber_deltas": [float(v) for v in aux_huber_deltas],
+        },
+        "constraint_loss": {
+            "penalty_weight": float(penalty_loss_weight),
+            "align_weight": float(align_loss_weight),
+            "conf_weight": float(conf_loss_weight),
+            "cons_margin": float(cons_margin),
+            "cut_margin": float(cut_margin),
         },
         "fallback_order": [COUPLED_BACKEND, "lightgbm", "base"],
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -1420,6 +1438,7 @@ def train_coupled_bundle_rawmel(
         val_dst_pos = []
 
     aux_dim = len(AUX_TARGET_NAMES) if use_aux else 0
+    head_mode = _resolve_head_mode(_env_str("UTOA_ML_RAWMEL_HEAD_MODE", "split"), default="split")
     model = _build_model_rawmel(
         torch,
         nn,
@@ -1430,7 +1449,7 @@ def train_coupled_bundle_rawmel(
         tail_frames=int(tail_frames),
         aux_dim=aux_dim,
         categorical_bucket_sizes=categorical_bucket_sizes,
-        head_mode="split",
+        head_mode=head_mode,
     )
     run_device = _resolve_device(torch, requested=device)
     if isinstance(run_device, str):
@@ -1584,8 +1603,11 @@ def train_coupled_bundle_rawmel(
         ["huber", "huber", "huber"],
         [18.0, 18.0, 26.0],
     )
-    cons_margin = 10.0
-    cut_margin = 10.0
+    cons_margin = max(0.0, _env_float("UTOA_ML_RAWMEL_CONS_MARGIN", 10.0))
+    cut_margin = max(0.0, _env_float("UTOA_ML_RAWMEL_CUT_MARGIN", 10.0))
+    penalty_loss_weight = max(0.0, _env_float("UTOA_ML_RAWMEL_CONSTRAINT_WEIGHT", 0.25))
+    align_loss_weight = max(0.0, _env_float("UTOA_ML_RAWMEL_ALIGN_WEIGHT", 0.12))
+    conf_loss_weight = max(0.0, _env_float("UTOA_ML_RAWMEL_CONF_WEIGHT", 0.05))
     boundary_aux_default = 0.24 if is_kr_cvc else 0.18
     boundary_consistency_default = 0.12 if is_kr_cvc else 0.08
     boundary_aux_weight = _env_float("UTOA_ML_RAWMEL_BOUNDARY_AUX_WEIGHT", boundary_aux_default)
@@ -1737,9 +1759,9 @@ def train_coupled_bundle_rawmel(
 
             total_loss = (
                 base_loss
-                + (0.25 * penalty_loss)
-                + (0.12 * align_loss)
-                + (0.05 * conf_loss)
+                + (float(penalty_loss_weight) * penalty_loss)
+                + (float(align_loss_weight) * align_loss)
+                + (float(conf_loss_weight) * conf_loss)
                 + (float(boundary_aux_weight) * aux_loss)
                 + (float(boundary_consistency_weight) * boundary_consistency_loss)
                 + (epoch_pair_weight * pair_loss)
@@ -1854,9 +1876,9 @@ def train_coupled_bundle_rawmel(
             val_total = float(
                 (
                     val_base
-                    + (0.25 * val_penalty)
-                    + (0.12 * val_align)
-                    + (0.05 * val_conf)
+                    + (float(penalty_loss_weight) * val_penalty)
+                    + (float(align_loss_weight) * val_align)
+                    + (float(conf_loss_weight) * val_conf)
                     + (float(boundary_aux_weight) * val_aux)
                     + (float(boundary_consistency_weight) * val_boundary_consistency)
                     + (epoch_pair_weight * val_pair)
@@ -1957,7 +1979,7 @@ def train_coupled_bundle_rawmel(
             "in_dim": int(X.shape[1]),
             "patch_dim": int(P.shape[1]),
             "hidden_dim": 160,
-            "head_mode": "split",
+            "head_mode": str(head_mode),
             "anchor_dim": int(len(ANCHOR_TARGET_NAMES)),
             "delta_dim": int(len(DELTA_TARGET_NAMES)),
             "aux_dim": int(aux_dim),
@@ -1988,7 +2010,7 @@ def train_coupled_bundle_rawmel(
         "targets": list(TARGET_NAMES),
         "anchor_targets": list(ANCHOR_TARGET_NAMES),
         "delta_targets": list(DELTA_TARGET_NAMES),
-        "head_mode": "split",
+        "head_mode": str(head_mode),
         "aux_targets": list(AUX_TARGET_NAMES) if use_aux else [],
         "mel_patch_spec": dict(patch_spec),
         "mel_patch_spec_hash": patch_hash,
@@ -2012,6 +2034,13 @@ def train_coupled_bundle_rawmel(
             "target_weights": [float(v) for v in aux_target_weight_values],
             "loss_kinds": list(aux_loss_kinds),
             "huber_deltas": [float(v) for v in aux_huber_deltas],
+        },
+        "constraint_loss": {
+            "penalty_weight": float(penalty_loss_weight),
+            "align_weight": float(align_loss_weight),
+            "conf_weight": float(conf_loss_weight),
+            "cons_margin": float(cons_margin),
+            "cut_margin": float(cut_margin),
         },
         "grad_clip": float(grad_clip),
         "lr_scheduler": {

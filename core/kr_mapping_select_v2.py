@@ -57,11 +57,15 @@ def _effective_jump_limits(row_jump_default, row_jump_high_conf, expected_blank_
 def _blank_guard_idx(expected_idx, selected_idx, syllable_blank_confidences):
     if selected_idx is None:
         return selected_idx, False
+    if expected_idx is None:
+        return selected_idx, False
     sel_blank = _blank_conf_at(syllable_blank_confidences, selected_idx)
     exp_blank = _blank_conf_at(syllable_blank_confidences, expected_idx)
+    if selected_idx != expected_idx and sel_blank >= 0.58 and (exp_blank + 0.06) < sel_blank:
+        return expected_idx, True
     if selected_idx > expected_idx and sel_blank >= 0.60 and (exp_blank + 0.10) < sel_blank:
         return expected_idx, True
-    if sel_blank >= 0.78 and exp_blank <= 0.62:
+    if sel_blank >= 0.74 and exp_blank <= 0.64:
         return expected_idx, True
     return selected_idx, False
 
@@ -152,6 +156,46 @@ def _mel_conf_at(syllables_info, idx, key, fallback=0.0):
         return max(0.0, min(1.0, float(row.get(key, fallback) or fallback)))
     except Exception:
         return float(fallback)
+
+
+def _is_blank_risky_idx(syllables_info, syllable_blank_confidences, idx):
+    blank = _blank_conf_at(syllable_blank_confidences, idx)
+    sil = _mel_conf_at(syllables_info, idx, "mel_silence_sparse_conf", fallback=blank)
+    voiced = _mel_conf_at(syllables_info, idx, "mel_voiced_formant_conf", 0.0)
+    unvoiced = _mel_conf_at(syllables_info, idx, "mel_unvoiced_diffuse_conf", 0.0)
+    return bool(blank >= 0.70 or (sil >= 0.68 and (voiced + unvoiced) <= 0.18))
+
+
+def _find_nonblank_fallback_idx(
+    *,
+    expected_idx,
+    target_clean,
+    romaji_syllables,
+    syllables_info,
+    syllable_blank_confidences,
+    cv_match_score_fn,
+    search_back=1,
+    search_fwd=2,
+):
+    if expected_idx is None or not romaji_syllables:
+        return None
+    n = len(romaji_syllables)
+    e = max(0, min(int(expected_idx), n - 1))
+    lo = max(0, e - max(0, int(search_back)))
+    hi = min(n - 1, e + max(0, int(search_fwd)))
+    best_idx = None
+    best_score = -10**9
+    for idx in range(lo, hi + 1):
+        if _is_blank_risky_idx(syllables_info, syllable_blank_confidences, idx):
+            continue
+        text_score = float(cv_match_score_fn(target_clean, romaji_syllables[idx])) if target_clean else 0.0
+        blank = _blank_conf_at(syllable_blank_confidences, idx)
+        sil = _mel_conf_at(syllables_info, idx, "mel_silence_sparse_conf", fallback=blank)
+        score = text_score - (abs(idx - e) * 8.0) - (blank * 20.0) - (sil * 16.0)
+        if score > best_score:
+            best_score = score
+            best_idx = int(idx)
+    return best_idx
 
 
 def _is_unvoiced_like_onset(onset: str) -> bool:
@@ -580,7 +624,28 @@ def select_kr_general_cv_index(
         ):
             keep_forced = False
         forced_blank_conf = _blank_conf_at(syllable_blank_confidences, forced_selected_idx)
-        if forced_blank_conf >= 0.66 and (expected_blank_conf + 0.08) < forced_blank_conf:
+        forced_sil_conf = _mel_conf_at(
+            syllables_info,
+            forced_selected_idx,
+            "mel_silence_sparse_conf",
+            fallback=forced_blank_conf,
+        )
+        expected_sil_conf = _mel_conf_at(
+            syllables_info,
+            expected_cv_idx,
+            "mel_silence_sparse_conf",
+            fallback=expected_blank_conf,
+        )
+        fmt_norm = str(file_format or "").strip().lower()
+        alias_norm = str(alias_type or "").strip().lower()
+        forced_blank_gate = 0.66
+        forced_blank_margin = 0.08
+        if fmt_norm in {"cvvc", "cvc"} and alias_norm in {"cv", "cv_head"}:
+            forced_blank_gate = 0.60
+            forced_blank_margin = 0.06
+        if forced_blank_conf >= forced_blank_gate and (expected_blank_conf + forced_blank_margin) < forced_blank_conf:
+            keep_forced = False
+        if forced_sil_conf >= (forced_blank_gate + 0.04) and (expected_sil_conf + 0.08) < forced_sil_conf:
             keep_forced = False
         if keep_forced:
             selected_w_idx = int(forced_selected_idx)

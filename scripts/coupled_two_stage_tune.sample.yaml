@@ -1,0 +1,91 @@
+output_root: "logs/coupled_experiments"
+run_tag: "coupled_kr_rawmel_lowcost"
+trial_timeout_sec: 0
+stop_on_error: false
+per_trial_model_root: true
+
+train_matrix:
+  script: "ml/scripts/coupled/train_matrix.py"
+  args:
+    dataset-root: "dataset_staged"
+    workspace-root: "ml_workspace"
+    backend: "coupled_nn_v2_rawmel"
+    languages: "korean"
+    formats: "korean=cvvc,cvc"
+    auto-oto-policy: "require"
+    device: "cuda"
+    epochs: 60
+    batch-size: 192
+    learning-rate: 0.001
+    min-confidence: 0.50
+    min-mapping-confidence: 0.72
+    group-column: "voicebank_id"
+    require-all: true
+    skip-build: false
+    skip-eval: false
+
+fixed_env:
+  UTOA_ML_RAWMEL_SAMPLER: "group_balanced"
+  UTOA_ML_RAWMEL_PATIENCE: 10
+  UTOA_ML_RAWMEL_PAIR_WARMUP_EPOCHS: 8
+  UTOA_ML_RAWMEL_TARGET_W_CUTOFF: 1.08
+  UTOA_ML_RAWMEL_TARGET_W_CONS: 1.12
+
+objective:
+  target_weights:
+    delta_offset: 1.10
+    delta_cons: 1.20
+    delta_cutoff: 1.35
+    delta_pre: 1.00
+    delta_ovl: 0.85
+  job_weights:
+    korean/cvvc: 1.00
+    korean/cvc: 1.30
+    default: 1.00
+  failed_job_penalty: 2200.0
+  failed_trial_penalty: 12000.0
+  missing_eval_penalty: 1200.0
+  missing_target_penalty: 180.0
+  regression_penalty_weight: 1.8
+  confidence_penalty_weight: 24.0
+  low_rows_threshold: 300
+  low_rows_penalty_per_row: 0.08
+
+search:
+  top_k: 5
+  max_trials: 12
+  shuffle: false
+  random_seed: 1234
+  parameters:
+    - kind: "env"
+      name: "UTOA_ML_RAWMEL_HEAD_MODE"
+      values: ["split", "single"]
+    - kind: "env"
+      name: "UTOA_ML_RAWMEL_HARD_MINING_STRENGTH"
+      values: [0.45, 0.60, 0.75]
+    - kind: "env"
+      name: "UTOA_ML_RAWMEL_CONSTRAINT_WEIGHT"
+      values: [0.20, 0.30, 0.40]
+    - kind: "env"
+      name: "UTOA_ML_RAWMEL_ALIGN_WEIGHT"
+      values: [0.08, 0.12, 0.18]
+    - kind: "env"
+      name: "UTOA_ML_RAWMEL_CONF_WEIGHT"
+      values: [0.03, 0.06]
+    - kind: "env"
+      name: "UTOA_ML_VC_CV_PAIR_WEIGHT"
+      values: [0.16, 0.24]
+
+two_stage:
+  enabled: true
+  stage2:
+    neighbor_window: 1
+    min_values_per_parameter: 2
+    lock_parameters:
+      - "UTOA_ML_RAWMEL_HEAD_MODE"
+    top_k: 5
+    max_trials: 10
+    shuffle: false
+    random_seed: 4321
+    train_matrix_args:
+      epochs: 50

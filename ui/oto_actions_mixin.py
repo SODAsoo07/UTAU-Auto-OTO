@@ -151,6 +151,11 @@ class OtoActionsMixin:
                     if hasattr(self, "ml_anchor_mel_gamma_var")
                     else ""
                 )
+                ml_mel_weight_mode = (
+                    self.ml_mel_weight_mode_var.get()
+                    if hasattr(self, "ml_mel_weight_mode_var")
+                    else "auto"
+                )
                 ml_same_lang_only = (
                     self.ml_same_language_borrow_only_var.get()
                     if hasattr(self, "ml_same_language_borrow_only_var")
@@ -377,6 +382,7 @@ class OtoActionsMixin:
                     os.environ.pop("UTOA_ML_ANCHOR_MEL_GAMMA", None)
                 else:
                     os.environ["UTOA_ML_ANCHOR_MEL_GAMMA"] = str(float(ml_anchor_mel_gamma))
+                mel_weight_mode_code = self._apply_mel_weight_runtime_mode(ml_mel_weight_mode)
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_DEFAULT"] = str(int(kr_jump_default))
                 os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_HIGH_CONF"] = str(int(kr_jump_hi))
                 os.environ["UTOA_ML_COUPLED_ENABLE"] = "1" if ml_coupled_enable else "0"
@@ -433,6 +439,9 @@ class OtoActionsMixin:
                     f"[OTO-ML] 실행 옵션: ml={'ON' if enable_ml_correction else 'OFF'}, selector={self._describe_ml_selector_mode(selector_mode_code)}"
                 )
                 self._append_log(f"[OTO-ML] route={os.environ.get('UTOA_ML_ROUTE', 'autofree_v1')}")
+                self._append_log(
+                    f"[OTO-ML] mel_weight_mode={self._describe_mel_weight_mode(mel_weight_mode_code)}"
+                )
                 min_conf_display = (
                     f"{float(ml_coupled_min_conf):.2f}"
                     if ml_coupled_min_conf is not None

@@ -2578,16 +2578,55 @@ def _estimate_mel_vowel_nucleus(mel_ctx, onset_ms: Optional[float], search_after
     return float(times_ms[start_idx]), float(times_ms[end_idx])
 
 
+def _resolve_mel_weight_mode(raw_value: str) -> str:
+    mode = str(raw_value or "").strip().lower()
+    if mode in {"mel_boost", "mel-boost", "melboost", "boost", "mel"}:
+        return "mel_boost"
+    return "auto"
+
+
+def _should_force_mel_branch(
+    textgrid_trust_tier: str,
+    *,
+    trust_score: Optional[float] = None,
+    alignment_weight: Optional[float] = None,
+) -> bool:
+    tier = str(textgrid_trust_tier or "").strip().lower()
+    if tier != "high":
+        return True
+    trust_min = _env_float("UTOA_MEL_FORCE_TRUST_MIN", 0.82)
+    align_min = _env_float("UTOA_MEL_FORCE_ALIGN_WEIGHT_MIN", 0.70)
+    if trust_score is not None and float(trust_score) < float(trust_min):
+        return True
+    if alignment_weight is not None and float(alignment_weight) < float(align_min):
+        return True
+    return False
+
+
 def _resolve_mel_onset_weight(alignment_weight: float, textgrid_trust_tier: str) -> float:
     tier = str(textgrid_trust_tier or "").strip().lower()
     w = float(alignment_weight or 0.0)
+    mode = _resolve_mel_weight_mode(os.environ.get("UTOA_MEL_WEIGHT_MODE", "auto"))
+    if _should_force_mel_branch(tier, alignment_weight=w):
+        mode = "mel_boost"
     if tier == "high" and w >= 0.75:
         return 0.0
     if w < 0.45:
-        return 0.72
-    if w < 0.65:
-        return 0.58
-    return 0.36
+        base = 0.72
+    elif w < 0.65:
+        base = 0.58
+    else:
+        base = 0.36
+    if mode == "mel_boost":
+        if tier == "low":
+            base = min(0.90, base + 0.16)
+        elif tier == "mid":
+            base = min(0.82, base + 0.10)
+        else:
+            base = min(0.68, base + 0.06)
+        if w < 0.35:
+            base = min(0.92, base + 0.04)
+    return max(0.0, min(1.0, base))
 
 
 def _apply_mel_voiced_onset_pre_shift(
@@ -4054,6 +4093,23 @@ def generate_oto(
                     (textgrid_trust_score * 0.85) - max(0.0, blank_conf_mean - 0.45) * 0.35,
                 ),
             )
+            mel_weight_mode = _resolve_mel_weight_mode(os.environ.get("UTOA_MEL_WEIGHT_MODE", "auto"))
+            force_mel_branch = _should_force_mel_branch(
+                textgrid_trust_tier,
+                trust_score=textgrid_trust_score,
+                alignment_weight=alignment_weight,
+            )
+            if force_mel_branch:
+                mel_weight_mode = "mel_boost"
+            if mel_weight_mode == "mel_boost":
+                tier_for_boost = str(textgrid_trust_tier or "").strip().lower()
+                if tier_for_boost == "low":
+                    alignment_weight *= 0.72
+                elif tier_for_boost == "mid":
+                    alignment_weight *= 0.84
+                else:
+                    alignment_weight *= 0.94
+                alignment_weight = max(0.0, min(1.0, alignment_weight))
             anchor_lock_lite = bool(alignment_weight < 0.58 or blank_conf_mean >= 0.55)
             used_words_based = bool(kr_source_pick.get("used_words_based"))
             used_alias_based = bool(kr_source_pick.get("used_alias_based"))
@@ -4104,7 +4160,8 @@ def generate_oto(
                 )
             log(
                 f"🧭 {fname}: alignment_weight={alignment_weight:.2f}, "
-                f"blank_mean={blank_conf_mean:.2f}, anchor_lock_lite={anchor_lock_lite}"
+                f"blank_mean={blank_conf_mean:.2f}, anchor_lock_lite={anchor_lock_lite}, "
+                f"mel_weight_mode={mel_weight_mode}, force_mel_branch={force_mel_branch}"
             )
 
             file_anchor_adapt_stats = _compute_file_anchor_adapt_stats(

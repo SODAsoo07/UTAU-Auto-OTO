@@ -145,6 +145,11 @@ class FileDialogMixin:
 
 class AppRuntimeMixin:
     _MSVC_BUILD_TOOLS_URL = "https://visualstudio.microsoft.com/visual-cpp-build-tools/"
+    _ML_RUNTIME_PRESET_LABELS = {
+        "recommended": "권장(균형)",
+        "speed": "속도 우선",
+        "quality": "정밀 우선",
+    }
 
     def _normalize_ui_message(self, msg: str) -> str:
         original = str(msg or "")
@@ -203,6 +208,142 @@ class AppRuntimeMixin:
             # policy mode delegates to runtime default (currently selector OFF).
             os.environ.pop("UTOA_ML_SELECTOR_ENABLE", None)
         return mode
+
+    def _normalize_mel_weight_mode(self, value: str) -> str:
+        mode = str(value or "").strip().lower().replace(" ", "")
+        if mode in {
+            "mel_boost",
+            "mel-boost",
+            "melboost",
+            "boost",
+            "mel",
+            "mel우선(실험)",
+            "mel우선",
+        }:
+            return "mel_boost"
+        return "auto"
+
+    def _describe_mel_weight_mode(self, value: str) -> str:
+        mode = self._normalize_mel_weight_mode(value)
+        if mode == "mel_boost":
+            return "MEL 우선(실험)"
+        return "기본(auto)"
+
+    def _apply_mel_weight_runtime_mode(self, value: str) -> str:
+        mode = self._normalize_mel_weight_mode(value)
+        os.environ["UTOA_MEL_WEIGHT_MODE"] = mode
+        return mode
+
+    def _normalize_ml_runtime_preset(self, value: str) -> str:
+        raw = str(value or "").strip().lower().replace(" ", "")
+        mapping = {
+            "권장(균형)": "recommended",
+            "권장": "recommended",
+            "균형": "recommended",
+            "recommended": "recommended",
+            "balanced": "recommended",
+            "속도우선": "speed",
+            "속도": "speed",
+            "빠름": "speed",
+            "speed": "speed",
+            "정밀우선": "quality",
+            "정밀": "quality",
+            "품질": "quality",
+            "quality": "quality",
+            "accurate": "quality",
+        }
+        return mapping.get(raw, "recommended")
+
+    def _describe_ml_runtime_preset(self, value: str) -> str:
+        code = self._normalize_ml_runtime_preset(value)
+        return self._ML_RUNTIME_PRESET_LABELS.get(code, self._ML_RUNTIME_PRESET_LABELS["recommended"])
+
+    def _ml_runtime_preset_values(self):
+        return [self._ML_RUNTIME_PRESET_LABELS["recommended"], self._ML_RUNTIME_PRESET_LABELS["speed"], self._ML_RUNTIME_PRESET_LABELS["quality"]]
+
+    def _ml_runtime_preset_payload(self, code: str):
+        normalized = self._normalize_ml_runtime_preset(code)
+        payloads = {
+            "recommended": {
+                "enable_ml_correction": True,
+                "ml_route": "autofree_v1",
+                "ml_coupled_enable": True,
+                "ml_coupled_backend": "auto",
+                "ml_coupled_device": "auto",
+                "ml_coupled_strict_constraint": False,
+                "ml_batch_inference_enable": True,
+                "ml_batch_inference_size": "256",
+                "ml_legacy_fallback_enable": False,
+                "ml_mel_weight_mode": "MEL 우선(실험)",
+                "ml_anchor_mel_gamma": "1.2",
+            },
+            "speed": {
+                "enable_ml_correction": True,
+                "ml_route": "legacy",
+                "ml_coupled_enable": True,
+                "ml_coupled_backend": "auto",
+                "ml_coupled_device": "auto",
+                "ml_coupled_strict_constraint": False,
+                "ml_batch_inference_enable": True,
+                "ml_batch_inference_size": "512",
+                "ml_legacy_fallback_enable": False,
+                "ml_mel_weight_mode": "기본(auto)",
+                "ml_anchor_mel_gamma": "1.0",
+            },
+            "quality": {
+                "enable_ml_correction": True,
+                "ml_route": "autofree_v1",
+                "ml_coupled_enable": True,
+                "ml_coupled_backend": "auto",
+                "ml_coupled_device": "auto",
+                "ml_coupled_strict_constraint": True,
+                "ml_batch_inference_enable": True,
+                "ml_batch_inference_size": "128",
+                "ml_legacy_fallback_enable": True,
+                "ml_mel_weight_mode": "MEL 우선(실험)",
+                "ml_anchor_mel_gamma": "1.35",
+            },
+        }
+        return payloads.get(normalized, payloads["recommended"])
+
+    def _apply_ml_runtime_preset(self, value: str, *, log_message: bool = False):
+        code = self._normalize_ml_runtime_preset(value)
+        label = self._describe_ml_runtime_preset(code)
+        payload = self._ml_runtime_preset_payload(code)
+
+        if hasattr(self, "ml_runtime_preset_var"):
+            self.ml_runtime_preset_var.set(label)
+
+        var_map = {
+            "enable_ml_correction": "enable_ml_correction_var",
+            "ml_route": "ml_route_var",
+            "ml_coupled_enable": "ml_coupled_enable_var",
+            "ml_coupled_backend": "ml_coupled_backend_var",
+            "ml_coupled_device": "ml_coupled_device_var",
+            "ml_coupled_strict_constraint": "ml_coupled_strict_constraint_var",
+            "ml_batch_inference_enable": "ml_batch_inference_enable_var",
+            "ml_batch_inference_size": "ml_batch_inference_size_var",
+            "ml_legacy_fallback_enable": "ml_legacy_fallback_enable_var",
+            "ml_mel_weight_mode": "ml_mel_weight_mode_var",
+            "ml_anchor_mel_gamma": "ml_anchor_mel_gamma_var",
+        }
+        for key, var_name in var_map.items():
+            if not hasattr(self, var_name):
+                continue
+            try:
+                getattr(self, var_name).set(payload[key])
+            except Exception:
+                continue
+
+        if hasattr(self, "_save_config"):
+            self._save_config()
+        if hasattr(self, "_refresh_ml_backend_status"):
+            self._refresh_ml_backend_status()
+        if log_message and hasattr(self, "_append_log"):
+            self._append_log(f"[OTO-ML] runtime preset applied: {label}")
+
+    def _on_ml_runtime_preset_change(self, value=None):
+        self._apply_ml_runtime_preset(value or (self.ml_runtime_preset_var.get() if hasattr(self, "ml_runtime_preset_var") else "권장(균형)"), log_message=True)
 
     def _after_safe(self, callback, delay_ms=0):
         if self._is_closing:
@@ -719,6 +860,12 @@ class ConfigMixin:
             "ml_batch_inference_size": self.ml_batch_inference_size_var.get() if hasattr(self, "ml_batch_inference_size_var") else "256",
             "ml_legacy_fallback_enable": self.ml_legacy_fallback_enable_var.get() if hasattr(self, "ml_legacy_fallback_enable_var") else False,
             "ml_anchor_mel_gamma": self.ml_anchor_mel_gamma_var.get() if hasattr(self, "ml_anchor_mel_gamma_var") else "",
+            "ml_mel_weight_mode": self._normalize_mel_weight_mode(
+                self.ml_mel_weight_mode_var.get() if hasattr(self, "ml_mel_weight_mode_var") else "auto"
+            ),
+            "ml_runtime_preset": self._normalize_ml_runtime_preset(
+                self.ml_runtime_preset_var.get() if hasattr(self, "ml_runtime_preset_var") else "권장(균형)"
+            ),
             "ml_model_root_kr": self.ml_model_root_kr_var.get() if hasattr(self, "ml_model_root_kr_var") else "",
             "ml_model_root_ja": self.ml_model_root_ja_var.get() if hasattr(self, "ml_model_root_ja_var") else "",
             "kr_vc_neighbor_enable": self.kr_vc_neighbor_enable_var.get() if hasattr(self, "kr_vc_neighbor_enable_var") else True,
@@ -1025,6 +1172,15 @@ class ConfigMixin:
                                 )
                         except Exception:
                             self.ml_anchor_mel_gamma_var.set("")
+            if hasattr(self, "ml_mel_weight_mode_var"):
+                mode_raw = config.get("ml_mel_weight_mode", self.ml_mel_weight_mode_var.get())
+                mode = self._normalize_mel_weight_mode(mode_raw)
+                self.ml_mel_weight_mode_var.set(
+                    "MEL 우선(실험)" if mode == "mel_boost" else "기본(auto)"
+                )
+            if hasattr(self, "ml_runtime_preset_var"):
+                preset_raw = config.get("ml_runtime_preset", self.ml_runtime_preset_var.get())
+                self.ml_runtime_preset_var.set(self._describe_ml_runtime_preset(preset_raw))
             if "kr_vc_neighbor_enable" in config and hasattr(self, "kr_vc_neighbor_enable_var"):
                 self.kr_vc_neighbor_enable_var.set(bool(config.get("kr_vc_neighbor_enable", True)))
             if "ja_vc_neighbor_enable" in config and hasattr(self, "ja_vc_neighbor_enable_var"):

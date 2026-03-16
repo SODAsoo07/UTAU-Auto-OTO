@@ -5,6 +5,11 @@ from typing import Callable, Optional
 
 from core.pipeline_status import ML_APPLIED, ML_INFER_FAILED
 
+_ML_LOADING_NOTICE = (
+    "[OTO-ML] Loading correction models. "
+    "Coupled+ML mode may take longer on the first run; please wait."
+)
+
 
 def resolve_wav_dir_from_tg_folder(tg_folder: str) -> str:
     return os.path.dirname(os.path.abspath(str(tg_folder or "").rstrip("\\/")))
@@ -178,6 +183,8 @@ def run_ml_post_stage(
     legacy_changed = 0
     autofree_aux_report = None
     autofree_aux_changed = 0
+    if callable(log_fn):
+        log_fn(_ML_LOADING_NOTICE)
     try:
         from core.oto_ml_refiner import apply_oto_ml_to_oto_file
 

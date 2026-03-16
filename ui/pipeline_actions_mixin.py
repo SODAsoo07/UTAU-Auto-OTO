@@ -874,6 +874,16 @@ class PipelineActionsMixin:
                         if hasattr(self, "ml_anchor_mel_gamma_var")
                         else ""
                     )
+                    ml_mel_weight_mode = (
+                        self.ml_mel_weight_mode_var.get()
+                        if hasattr(self, "ml_mel_weight_mode_var")
+                        else "auto"
+                    )
+                    ml_runtime_preset = (
+                        self.ml_runtime_preset_var.get()
+                        if hasattr(self, "ml_runtime_preset_var")
+                        else "권장(균형)"
+                    )
                     ml_model_root = ""
                     if lang == "japanese" and hasattr(self, "ml_model_root_ja_var"):
                         ml_model_root = str(self.ml_model_root_ja_var.get() or "").strip()
@@ -1046,6 +1056,7 @@ class PipelineActionsMixin:
                         os.environ.pop("UTOA_ML_ANCHOR_MEL_GAMMA", None)
                     else:
                         os.environ["UTOA_ML_ANCHOR_MEL_GAMMA"] = str(float(ml_anchor_mel_gamma))
+                    mel_weight_mode_code = self._apply_mel_weight_runtime_mode(ml_mel_weight_mode)
                     if lang == "japanese":
                         if ml_model_root:
                             os.environ["UTOA_JA_OTO_ML_DIR"] = ml_model_root
@@ -1063,7 +1074,11 @@ class PipelineActionsMixin:
                     self._append_log(
                         f"[OTO-ML] 설정: ml={'ON' if enable_ml_correction else 'OFF'}, selector={self._describe_ml_selector_mode(selector_mode_code)}"
                     )
+                    self._append_log(f"[OTO-ML] runtime preset={self._describe_ml_runtime_preset(ml_runtime_preset)}")
                     self._append_log(f"[OTO-ML] route={os.environ.get('UTOA_ML_ROUTE', 'autofree_v1')}")
+                    self._append_log(
+                        f"[OTO-ML] mel_weight_mode={self._describe_mel_weight_mode(mel_weight_mode_code)}"
+                    )
                     min_conf_display = (
                         f"{float(ml_coupled_min_conf):.2f}"
                         if ml_coupled_min_conf is not None

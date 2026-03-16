@@ -123,3 +123,32 @@ python -X utf8 .\ml\scripts\train_oto_lightgbm_model.py `
   --group-column voicebank_id `
   --min-mapping-confidence 0.40
 ```
+
+## 8) Two-stage 보정 탐색 훈련 (broad -> narrow)
+```powershell
+python -X utf8 .\scripts\run_coupled_two_stage_tune.py `
+  --config ".\scripts\coupled_two_stage_tune.sample.yaml"
+```
+
+trial 수 오버라이드 예시:
+```powershell
+python -X utf8 .\scripts\run_coupled_two_stage_tune.py `
+  --config ".\scripts\coupled_two_stage_tune.sample.yaml" `
+  --stage1-max-trials 12 `
+  --stage2-max-trials 8 `
+  --neighbor-window 1
+```
+
+stage1만 먼저 실행:
+```powershell
+python -X utf8 .\scripts\run_coupled_two_stage_tune.py `
+  --config ".\scripts\coupled_two_stage_tune.sample.yaml" `
+  --stage1-only
+```
+
+dry-run (학습 실행 없이 커맨드/설정 검증):
+```powershell
+python -X utf8 .\scripts\run_coupled_two_stage_tune.py `
+  --config ".\scripts\coupled_two_stage_tune.sample.yaml" `
+  --force-dry-run
+```

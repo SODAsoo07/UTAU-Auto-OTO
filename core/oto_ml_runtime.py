@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+_BUNDLE_CACHE: Dict[str, Dict[str, Any]] = {}
+
 
 @dataclass
 class OtoModelBundle:
@@ -42,6 +44,52 @@ def _load_json(path: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _cache_enabled() -> bool:
+    raw = str(os.environ.get("UTOA_ML_RUNTIME_BUNDLE_CACHE", "1") or "").strip().lower()
+    return raw not in {"0", "false", "off", "no", "n"}
+
+
+def _safe_mtime(path: str) -> float:
+    try:
+        if path and os.path.exists(path):
+            return float(os.path.getmtime(path))
+    except Exception:
+        return 0.0
+    return 0.0
+
+
+def _bundle_cache_stamp(model_dir: str, backend: str, coupled_device: str) -> tuple:
+    meta_path = os.path.join(model_dir, "model_meta.json")
+    schema_path = os.path.join(model_dir, "feature_schema.json")
+    backend_norm = str(backend or "").strip().lower()
+    files_mtime = 0.0
+    if backend_norm == "lightgbm":
+        # LightGBM bundles are split files (model_*.txt). Use max mtime across model files.
+        try:
+            for name in os.listdir(model_dir):
+                low = str(name).strip().lower()
+                if not low.startswith("model_"):
+                    continue
+                if not (low.endswith(".txt") or low.endswith(".json") or low.endswith(".pkl") or low.endswith(".pickle")):
+                    continue
+                files_mtime = max(files_mtime, _safe_mtime(os.path.join(model_dir, name)))
+        except Exception:
+            files_mtime = max(files_mtime, 0.0)
+    else:
+        # Ensemble/coupled/autofree commonly use binary payloads.
+        for name in ("model_bundle.pt", "model.pt", "bundle.pt", "model.pkl", "model.pickle"):
+            files_mtime = max(files_mtime, _safe_mtime(os.path.join(model_dir, name)))
+    dir_mtime = _safe_mtime(model_dir)
+    return (
+        backend_norm,
+        str(coupled_device or "auto").strip().lower(),
+        _safe_mtime(meta_path),
+        _safe_mtime(schema_path),
+        files_mtime,
+        dir_mtime,
+    )
+
+
 def validate_bundle_compat(bundle: OtoModelBundle, feature_schema: Dict[str, Any]) -> bool:
     if not bundle or not feature_schema:
         return False
@@ -62,11 +110,12 @@ def validate_bundle_compat(bundle: OtoModelBundle, feature_schema: Dict[str, Any
 def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
     if not model_dir or not os.path.isdir(model_dir):
         return None
-    meta = _load_json(os.path.join(model_dir, "model_meta.json"))
+    abs_model_dir = os.path.abspath(model_dir)
+    meta = _load_json(os.path.join(abs_model_dir, "model_meta.json"))
     if not meta:
         return None
     backend = str(meta.get("backend", "")).strip().lower() or "lightgbm"
-    schema = _load_json(os.path.join(model_dir, "feature_schema.json"))
+    schema = _load_json(os.path.join(abs_model_dir, "feature_schema.json"))
     if not schema:
         if backend == "autofree_v1":
             from core.oto_ml.autofree.schema import get_feature_schema
@@ -74,16 +123,23 @@ def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
             from core.oto_ml_features import get_feature_schema
         schema = get_feature_schema()
     coupled_device = str(os.environ.get("UTOA_ML_COUPLED_DEVICE", "auto") or "auto").strip()
+    cache_key = abs_model_dir
+    stamp = _bundle_cache_stamp(abs_model_dir, backend, coupled_device)
+    if _cache_enabled():
+        cached = _BUNDLE_CACHE.get(cache_key)
+        if isinstance(cached, dict):
+            if cached.get("stamp") == stamp and isinstance(cached.get("bundle"), OtoModelBundle):
+                return cached.get("bundle")
     try:
         if backend == "lightgbm":
             from core.oto_ml_lightgbm import load_lightgbm_bundle
 
-            payload = load_lightgbm_bundle(model_dir, meta=meta, schema=schema)
+            payload = load_lightgbm_bundle(abs_model_dir, meta=meta, schema=schema)
         elif backend == "ensemble_v1":
             from core.oto_ml_ensemble import load_ensemble_bundle
 
             payload = load_ensemble_bundle(
-                model_dir,
+                abs_model_dir,
                 meta=meta,
                 schema=schema,
                 device=coupled_device,
@@ -91,7 +147,7 @@ def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
         elif backend == "autofree_v1":
             from core.oto_ml_autofree import load_autofree_bundle
 
-            payload = load_autofree_bundle(model_dir, meta=meta, schema=schema)
+            payload = load_autofree_bundle(abs_model_dir, meta=meta, schema=schema)
         else:
             logger.warning("Unsupported OTO ML backend: %s", backend)
             return None
@@ -100,13 +156,16 @@ def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
         return None
     if payload is None:
         return None
-    return OtoModelBundle(
+    bundle = OtoModelBundle(
         backend=backend,
-        model_dir=os.path.abspath(model_dir),
+        model_dir=abs_model_dir,
         meta=meta,
         feature_schema=schema,
         payload=payload,
     )
+    if _cache_enabled():
+        _BUNDLE_CACHE[cache_key] = {"stamp": stamp, "bundle": bundle}
+    return bundle
 
 
 def predict_oto_deltas(bundle: OtoModelBundle, feature_row: Dict[str, Any]) -> OtoDeltaResult:

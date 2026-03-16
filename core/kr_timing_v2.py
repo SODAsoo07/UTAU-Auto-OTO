@@ -82,21 +82,30 @@ def prepare_vcv_syllable_timing(
 
     c_boundary = c_end
     prev_v_len = max(prev_v_end - prev_v_start, 40.0)
-    offset_padding = min(prev_v_len * 0.6, 200.0)
-    if offset_padding < 80.0:
-        offset_padding = max(prev_v_len * 0.5, 50.0)
+    stable_start = prev_v_start + (prev_v_len * 0.22)
+    stable_end = prev_v_start + (prev_v_len * 0.74)
+    if stable_end <= (stable_start + 4.0):
+        stable_start = prev_v_start
+        stable_end = prev_v_end
 
-    offset = max(prev_v_end - offset_padding, 0.0)
+    offset_padding = max(58.0, min(prev_v_len * 0.52, 168.0))
+    offset_candidate = prev_v_end - offset_padding
+    offset = max(min(offset_candidate, stable_end), stable_start)
+    offset = max(offset, 0.0)
     pre = c_boundary - offset
+    if pre < 28.0:
+        offset = max(0.0, offset - (28.0 - pre))
+        pre = c_boundary - offset
     c_hint = curr_phones[0].mark if curr_phones else ""
     ovl = adaptive_overlap_fn(pre, c_hint, mode="vcv")
 
-    vowel_len = max(n_end - c_boundary, 20.0)
-    added_cons = min(vowel_len * float(diphthong_cv_consonant_ratio), 150.0)
-    if added_cons < 50.0:
-        added_cons = 50.0
+    vowel_len = max(n_end - c_boundary, 24.0)
+    cons_ratio = max(float(diphthong_cv_consonant_ratio), 0.56)
+    added_cons = min(vowel_len * cons_ratio, 190.0)
+    if added_cons < 62.0:
+        added_cons = min(max(vowel_len * 0.46, 54.0), 82.0)
     consonant = pre + added_cons
-    cutoff = -(consonant + vowel_len * 0.25)
+    cutoff = -(consonant + max(vowel_len * 0.38, 58.0))
     offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
     return current_w_idx, cv_seq_idx, offset, consonant, cutoff, pre, ovl
 
