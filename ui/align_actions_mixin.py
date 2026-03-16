@@ -21,29 +21,25 @@ class AlignActionsMixin:
                     default="mfa",
                 )
 
-                if primary_engine == "mfa":
-                    if hasattr(self, "_ensure_mfa_ready_for_language"):
-                        if not self._ensure_mfa_ready_for_language(lang):
-                            self._set_status("MFA not ready")
-                            return
-                    elif self.mfa_path:
-                        has_model, msg = check_mfa_model(self.mfa_path, language=lang)
-                        self._append_log(msg)
-                        if not has_model and not download_mfa_model(
-                            self.mfa_path, language=lang, callback=self._append_log
-                        ):
-                            self._set_status("MFA model missing")
-                            return
+                if hasattr(self, "_ensure_mfa_ready_for_language"):
+                    if not self._ensure_mfa_ready_for_language(lang):
+                        self._set_status("MFA not ready")
+                        return
+                elif self.mfa_path:
+                    has_model, msg = check_mfa_model(self.mfa_path, language=lang)
+                    self._append_log(msg)
+                    if not has_model and not download_mfa_model(
+                        self.mfa_path, language=lang, callback=self._append_log
+                    ):
+                        self._set_status("MFA model missing")
+                        return
 
                 mfa_profile = (
                     self._get_mfa_align_profile_code()
                     if hasattr(self, "_get_mfa_align_profile_code")
                     else "accurate"
                 )
-                if primary_engine == "mfa":
-                    self._append_log(f"MFA profile: {mfa_profile}")
-                else:
-                    self._append_log("Alignment engine: none (MFA bypass)")
+                self._append_log(f"MFA profile: {mfa_profile}")
 
                 result = run_alignment_with_fallback(
                     language=lang,

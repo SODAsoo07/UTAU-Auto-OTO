@@ -223,7 +223,7 @@ class LayoutMixin:
         build_left_label(self.row_aligner, "정렬 엔진:").pack(side="left")
         self.aligner_menu = ctk.CTkOptionMenu(
             self.row_aligner,
-            values=["MFA", "No-MFA (Experimental)"],
+            values=["MFA"],
             variable=self.aligner_var,
             width=190,
             command=self._on_aligner_change,
@@ -477,7 +477,7 @@ class LayoutMixin:
         self._save_config()
 
     def _sync_aligner_ui(self):
-        options = ["MFA", "No-MFA (Experimental)"]
+        options = ["MFA"]
         current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA").strip()
         if current not in options:
             current = "MFA"
@@ -489,21 +489,13 @@ class LayoutMixin:
                 self.aligner_menu.set(current)
             except Exception:
                 pass
-        use_no_mfa = current == "No-MFA (Experimental)"
         if hasattr(self, "mfa_align_profile_menu"):
-            self.mfa_align_profile_menu.configure(state="disabled" if use_no_mfa else "normal")
+            self.mfa_align_profile_menu.configure(state="normal")
         if hasattr(self, "aligner_help_label"):
-            if use_no_mfa:
-                self.aligner_help_label.configure(text="(No-MFA experimental path. Boundary model quality is critical.)")
-            else:
-                self.aligner_help_label.configure(text="(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)")
+            self.aligner_help_label.configure(text="(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)")
         if hasattr(self, "align_step_title_label") and hasattr(self, "align_step_desc_label"):
-            if use_no_mfa:
-                self.align_step_title_label.configure(text="3. 음성 경계 추정 (No-MFA)")
-                self.align_step_desc_label.configure(text="MFA/TextGrid 생성을 건너뜁니다. No-MFA 경계 모델 기반 경로를 사용합니다.")
-            else:
-                self.align_step_title_label.configure(text="3. 음성 정렬 (MFA)")
-                self.align_step_desc_label.configure(text="MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.")
+            self.align_step_title_label.configure(text="3. 음성 정렬 (MFA)")
+            self.align_step_desc_label.configure(text="MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.")
 
     def _on_no_base_oto_toggle(self):
         no_base = bool(self.no_base_oto_var.get())

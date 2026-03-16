@@ -6,7 +6,6 @@ from core.mfa_runner import check_mfa_ready, run_mfa_align
 from core.pipeline_status import (
     ALIGN_OUTPUT_EMPTY,
     ALIGN_RUN_FAILED,
-    ALIGN_SKIPPED,
     ALIGN_USING_EXISTING,
     OK,
     classify_alignment_error,
@@ -89,20 +88,6 @@ def run_alignment_with_fallback(
             attempt_count=0,
         )
 
-    if primary == "none":
-        return make_runtime_report(
-            "align",
-            ALIGN_SKIPPED,
-            "alignment bypassed (engine=none).",
-            ok=True,
-            primary_engine="none",
-            used_engine="none",
-            attempts=attempts,
-            fallback_used=False,
-            attempt_count=0,
-            fallback_path="",
-        )
-
     if primary != "mfa":
         primary = "mfa"
 
@@ -117,7 +102,7 @@ def run_alignment_with_fallback(
         )
         return make_runtime_report(
             "align",
-            str(ready.get("code", ALIGN_SKIPPED) or ALIGN_SKIPPED),
+            str(ready.get("code", ALIGN_RUN_FAILED) or ALIGN_RUN_FAILED),
             str(ready.get("message", "") or "alignment not ready"),
             ok=False,
             primary_engine=primary,

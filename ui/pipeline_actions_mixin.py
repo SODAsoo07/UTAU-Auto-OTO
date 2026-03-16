@@ -659,23 +659,17 @@ class PipelineActionsMixin:
                 align_engine = self.aligner_var.get()
                 primary_engine = normalize_aligner_name(align_engine, default="mfa")
                 fallback_engine = ""
-                if primary_engine == "none":
-                    self._set_status("3/4 - 정렬 건너뛰기(no-MFA)")
-                else:
-                    self._set_status("3/4 - MFA 정렬 준비 중...")
-                    if not self._ensure_mfa_ready_for_language(lang):
-                        self._append_log("❌ MFA 설치/모델 준비 실패")
-                        self._set_status("❌ MFA 설치/모델 준비 실패")
-                        return
+                self._set_status("3/4 - MFA 정렬 준비 중...")
+                if not self._ensure_mfa_ready_for_language(lang):
+                    self._append_log("❌ MFA 설치/모델 준비 실패")
+                    self._set_status("❌ MFA 설치/모델 준비 실패")
+                    return
                 mfa_profile = (
                     self._get_mfa_align_profile_code()
                     if hasattr(self, "_get_mfa_align_profile_code")
                     else "accurate"
                 )
-                if primary_engine == "mfa":
-                    self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
-                else:
-                    self._append_log("ℹ 정렬 엔진: none (MFA 비사용)")
+                self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
 
                 align_result = run_alignment_with_fallback(
                     language=lang,
@@ -696,18 +690,6 @@ class PipelineActionsMixin:
                 align_err = str(align_result.get("message", "") or "")
                 if align_result.get("fallback_used"):
                     self._append_log(f"ℹ 정렬 fallback 경로: {align_result.get('fallback_path', '')}")
-                if primary_engine == "none":
-                    has_textgrid = False
-                    if os.path.isdir(output_dir):
-                        for _name in os.listdir(output_dir):
-                            if str(_name).lower().endswith(".textgrid"):
-                                has_textgrid = True
-                                break
-                    if not has_textgrid:
-                        self._append_log("❌ No-MFA 모드는 현재 실험 단계이며 OTO 생성을 위해 TextGrid 입력이 필요합니다.")
-                        self._append_log("   대안: 정렬 엔진을 MFA로 변경하거나 textgrids 폴더에 TextGrid를 미리 준비하세요.")
-                        self._set_status("❌ No-MFA 입력 부족 (TextGrid 필요)")
-                        return
 
                 if not align_ok:
                     self._append_log("⚠ 정렬 실패 상태로 다음 단계를 진행합니다.")

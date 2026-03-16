@@ -1021,13 +1021,7 @@ class ConfigMixin:
                 if saved_style in {"원본 그대로", "히라가나", "로마자"}:
                     self.ja_alias_style_var.set(saved_style)
             if "aligner" in config and hasattr(self, "aligner_var"):
-                try:
-                    from core.pipeline_status import normalize_aligner_name
-
-                    saved_aligner = normalize_aligner_name(config.get("aligner", "mfa"), default="mfa")
-                except Exception:
-                    saved_aligner = "mfa"
-                self.aligner_var.set("No-MFA (Experimental)" if saved_aligner == "none" else "MFA")
+                self.aligner_var.set("MFA")
             if hasattr(self, "show_advanced_aligner_var"):
                 self.show_advanced_aligner_var.set(False)
             if hasattr(self, "mfa_align_profile_var"):
