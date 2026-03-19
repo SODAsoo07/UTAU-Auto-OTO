@@ -6,6 +6,7 @@ on:
 jobs:
   build-windows-preview:
     runs-on: windows-latest
+    timeout-minutes: 90
     env:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
@@ -58,9 +59,10 @@ jobs:
 
       - name: Build App (preview)
         shell: pwsh
+        timeout-minutes: 70
         run: |
           $suppress = 'Nuitka-Inclusion: Writing cache for dependencies of .* ignoring\.'
-          python build.py --name UTAU_Auto_OTO --backend nuitka --skip-deps --channel "preview" 2>&1 |
+          python -u build.py --name UTAU_Auto_OTO --backend nuitka --skip-deps --channel "preview" 2>&1 |
             ForEach-Object {
               if ($_ -notmatch $suppress) { $_ }
             }

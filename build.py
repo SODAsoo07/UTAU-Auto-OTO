@@ -1,5 +1,8 @@
 ﻿import argparse
+import datetime
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -13,12 +16,28 @@ BUILD_ASSET_DIR = os.path.join(APP_DIR, "build_assets")
 FFMPEG_DIR = os.path.join(BUILD_ASSET_DIR, "ffmpeg")
 FFMPEG_BIN_DIR = os.path.join(FFMPEG_DIR, "bin")
 FFMPEG_RELEASE_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+REQUIRED_FFMPEG_BINARIES = ("ffmpeg.exe", "ffprobe.exe")
+
 DEFAULT_APP_NAME = "UTAU_Auto_OTO"
+DEFAULT_CHANNEL = "stable"
+SUPPORTED_CHANNELS = ("stable", "preview")
+CHANNEL_ALIASES = {"default": "stable"}
+SUPPORTED_CHANNEL_INPUTS = ("stable", "preview", "default")
+
+DEFAULT_BACKEND = "nuitka"
+SUPPORTED_BACKENDS = ("nuitka", "pyinstaller")
+
+RELEASE_DIR_PREFIX = "UTAU_Auto_OTO_Release"
+
 EXCLUDED_MODULES = [
     "torch",
     "torchaudio",
     "torchvision",
     "ml",
+]
+EXCLUDED_TRAINING_MODULES = [
+    "core.ja_oto_autotune",
+    "core.oto_ml.coupled.training",
 ]
 RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "profiles"), "assets/profiles"),
@@ -29,12 +48,25 @@ RUNTIME_DATA_PATHS = [
 RELEASE_AUX_FILES = [
     os.path.join(APP_DIR, "setup_mfa.bat"),
     os.path.join(APP_DIR, "release_assets", "먼저 실행.txt"),
+    os.path.join(APP_DIR, "release_assets", "설치_도우미.bat"),
 ]
-args = argparse.Namespace(onefile=False, allow_unsafe_onefile=False, name=DEFAULT_APP_NAME)
+APP_ICON_CANDIDATES = [
+    os.path.join(APP_DIR, "release_assets", "AutoOTO-icon.ico"),
+    os.path.join(APP_DIR, "AutoOTO-icon.ico"),
+]
+
+args = argparse.Namespace(
+    onefile=False,
+    allow_unsafe_onefile=False,
+    name=DEFAULT_APP_NAME,
+    channel=DEFAULT_CHANNEL,
+    channels="",
+    backend=DEFAULT_BACKEND,
+    skip_deps=False,
+)
 
 
 def _configure_console_encoding():
-    # GitHub Actions Windows(cp1252) 환경에서 이모지/한글 로그 출력 시 인코딩 오류 방지
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -42,23 +74,54 @@ def _configure_console_encoding():
             pass
 
 
+def _normalize_channel(channel: str) -> str:
+    normalized = (channel or "").strip().lower()
+    return CHANNEL_ALIASES.get(normalized, normalized)
+
+
+def _parse_channels(channel: str, channels: str) -> list[str]:
+    raw_values = []
+    if str(channels or "").strip():
+        raw_values = [part.strip() for part in str(channels).split(",")]
+    elif str(channel or "").strip():
+        raw_values = [str(channel).strip()]
+    resolved = []
+    seen = set()
+    for raw in raw_values:
+        if not raw:
+            continue
+        normalized = _normalize_channel(raw)
+        if normalized not in SUPPORTED_CHANNELS:
+            raise SystemExit(
+                f"Invalid channel: {raw} (supported: {', '.join(SUPPORTED_CHANNEL_INPUTS)})"
+            )
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        resolved.append(normalized)
+    if not resolved:
+        resolved.append(DEFAULT_CHANNEL)
+    return resolved
+
+
 def _ensure_ffmpeg_bin():
     ffmpeg_exe = os.path.join(FFMPEG_BIN_DIR, "ffmpeg.exe")
     ffprobe_exe = os.path.join(FFMPEG_BIN_DIR, "ffprobe.exe")
     if os.path.exists(ffmpeg_exe) and os.path.exists(ffprobe_exe):
-        print(f"✅ FFmpeg 바이너리 재사용: {FFMPEG_BIN_DIR}")
+        _validate_ffmpeg_bin(FFMPEG_BIN_DIR)
+        print(f"FFmpeg reuse: {FFMPEG_BIN_DIR}")
         return FFMPEG_BIN_DIR
 
     os.makedirs(BUILD_ASSET_DIR, exist_ok=True)
     tmp_zip = os.path.join(BUILD_ASSET_DIR, "ffmpeg_release_essentials.zip")
     tmp_extract = tempfile.mkdtemp(prefix="ffmpeg_extract_", dir=BUILD_ASSET_DIR)
     try:
-        print("📦 FFmpeg(Windows shared build) 다운로드 중...")
+        print("Downloading FFmpeg (Windows shared build)...")
         with urllib.request.urlopen(FFMPEG_RELEASE_ZIP_URL, timeout=180) as resp:
             with open(tmp_zip, "wb") as f:
                 f.write(resp.read())
 
-        print("📦 FFmpeg 압축 해제 중...")
+        print("Extracting FFmpeg archive...")
         with zipfile.ZipFile(tmp_zip, "r") as zf:
             zf.extractall(tmp_extract)
 
@@ -68,13 +131,14 @@ def _ensure_ffmpeg_bin():
                 source_bin = os.path.join(root, "bin")
                 break
         if not source_bin:
-            raise RuntimeError("압축 내부에서 ffmpeg.exe를 찾지 못했습니다.")
+            raise RuntimeError("ffmpeg.exe was not found in archive.")
 
         if os.path.exists(FFMPEG_DIR):
             shutil.rmtree(FFMPEG_DIR)
         os.makedirs(FFMPEG_DIR, exist_ok=True)
         shutil.copytree(source_bin, FFMPEG_BIN_DIR)
-        print(f"✅ FFmpeg 준비 완료: {FFMPEG_BIN_DIR}")
+        print(f"FFmpeg prepared: {FFMPEG_BIN_DIR}")
+        _validate_ffmpeg_bin(FFMPEG_BIN_DIR)
         return FFMPEG_BIN_DIR
     finally:
         if os.path.exists(tmp_zip):
@@ -83,6 +147,31 @@ def _ensure_ffmpeg_bin():
             except OSError:
                 pass
         shutil.rmtree(tmp_extract, ignore_errors=True)
+
+
+def _validate_ffmpeg_bin(ffmpeg_bin):
+    missing = []
+    for file_name in REQUIRED_FFMPEG_BINARIES:
+        full_path = os.path.join(ffmpeg_bin, file_name)
+        if (not os.path.isfile(full_path)) or os.path.getsize(full_path) <= 0:
+            missing.append(full_path)
+    if missing:
+        lines = "\n".join(f"  - {p}" for p in missing)
+        raise RuntimeError(f"Required FFmpeg runtime files are missing:\n{lines}")
+
+
+def _iter_ffmpeg_runtime_files(ffmpeg_bin):
+    if not os.path.isdir(ffmpeg_bin):
+        return []
+    files = []
+    for name in sorted(os.listdir(ffmpeg_bin)):
+        src = os.path.join(ffmpeg_bin, name)
+        if not os.path.isfile(src):
+            continue
+        low = name.lower()
+        if low.endswith(".exe") or low.endswith(".dll"):
+            files.append((src, name))
+    return files
 
 
 def _parse_args():
@@ -96,9 +185,62 @@ def _parse_args():
     parser.add_argument(
         "--name",
         default=DEFAULT_APP_NAME,
-        help="PyInstaller app name.",
+        help="Executable name.",
+    )
+    parser.add_argument(
+        "--channel",
+        default=DEFAULT_CHANNEL,
+        choices=SUPPORTED_CHANNEL_INPUTS,
+        help="Release channel tag (stable/default or preview).",
+    )
+    parser.add_argument(
+        "--channels",
+        default="",
+        help="Comma-separated release channels to package in one build (e.g. stable,preview).",
+    )
+    parser.add_argument(
+        "--backend",
+        default=DEFAULT_BACKEND,
+        choices=SUPPORTED_BACKENDS,
+        help="Build backend (nuitka or pyinstaller).",
+    )
+    parser.add_argument(
+        "--skip-deps",
+        action="store_true",
+        help="Skip dependency installation step (useful in CI when already installed).",
     )
     return parser.parse_args()
+
+
+def _detect_app_version():
+    main_path = os.path.join(APP_DIR, "main.py")
+    if not os.path.exists(main_path):
+        return "0.0.0"
+    try:
+        with open(main_path, "r", encoding="utf-8") as f:
+            text = f.read()
+        m = re.search(r'APP_VERSION\s*=\s*"([^"]+)"', text)
+        if m:
+            return m.group(1).strip()
+    except OSError:
+        pass
+    return "0.0.0"
+
+
+def _write_release_channel_metadata(target_path, app_name, app_version, channel):
+    payload = {
+        "app_name": app_name,
+        "app_version": app_version,
+        "channel": channel,
+        "built_at_utc": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+    }
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    with open(target_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _get_release_dir(channel):
+    return os.path.join(APP_DIR, f"{RELEASE_DIR_PREFIX}_{channel}")
 
 
 def _iter_runtime_data_entries():
@@ -107,15 +249,22 @@ def _iter_runtime_data_entries():
         if os.path.exists(src):
             entries.append((src, dst))
         else:
-            print(f"⚠ 런타임 데이터 누락(건너뜀): {src}")
+            print(f"[WARN] Runtime data missing (skip): {src}")
     return entries
 
 
-def _build_pyinstaller_args(app_name, ffmpeg_bin, onefile=False):
+def _resolve_app_icon_path():
+    for candidate in APP_ICON_CANDIDATES:
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def _build_pyinstaller_args(app_name, ffmpeg_bin, app_icon_path="", onefile=False):
     import customtkinter
 
     ctk_path = os.path.dirname(customtkinter.__file__)
-    args = [
+    pyinstaller_args = [
         "main.py",
         f"--name={app_name}",
         "--windowed",
@@ -128,42 +277,164 @@ def _build_pyinstaller_args(app_name, ffmpeg_bin, onefile=False):
         "--hidden-import=customtkinter",
     ]
     for src, dst in _iter_runtime_data_entries():
-        args.append(f"--add-data={src};{dst}")
-    for module_name in EXCLUDED_MODULES:
-        args.append(f"--exclude-module={module_name}")
-    return args
+        pyinstaller_args.append(f"--add-data={src};{dst}")
+    if app_icon_path:
+        pyinstaller_args.append(f"--icon={app_icon_path}")
+    for module_name in EXCLUDED_MODULES + EXCLUDED_TRAINING_MODULES:
+        pyinstaller_args.append(f"--exclude-module={module_name}")
+    return pyinstaller_args
 
 
-def _copy_release_outputs(app_name, onefile=False):
-    release_dir = os.path.join(APP_DIR, "UTAU_Auto_OTO_Release")
+def _run_pyinstaller_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False):
+    print("Loading PyInstaller...")
+    import PyInstaller.__main__
+
+    pyinstaller_args = _build_pyinstaller_args(
+        app_name=app_name,
+        ffmpeg_bin=ffmpeg_bin,
+        app_icon_path=app_icon_path,
+        onefile=onefile,
+    )
+    PyInstaller.__main__.run(pyinstaller_args)
+
+    if onefile:
+        exe_path = os.path.join(APP_DIR, "dist", f"{app_name}.exe")
+        if not os.path.isfile(exe_path):
+            raise FileNotFoundError(f"Built executable not found: {exe_path}")
+        return exe_path
+
+    dist_dir = os.path.join(APP_DIR, "dist", app_name)
+    if not os.path.isdir(dist_dir):
+        raise FileNotFoundError(f"Built app directory not found: {dist_dir}")
+    return dist_dir
+
+
+def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False):
+    import customtkinter
+
+    ctk_path = os.path.dirname(customtkinter.__file__)
+    output_root = os.path.join(APP_DIR, "dist_nuitka")
+    if os.path.exists(output_root):
+        shutil.rmtree(output_root)
+    os.makedirs(output_root, exist_ok=True)
+
+    cpu_jobs = os.cpu_count() or 1
+    cpu_jobs = max(1, int(cpu_jobs))
+    cmd = [
+        sys.executable,
+        "-m",
+        "nuitka",
+        "main.py",
+        "--onefile" if onefile else "--standalone",
+        "--assume-yes-for-downloads",
+        "--enable-plugin=tk-inter",
+        "--windows-console-mode=disable",
+        f"--output-dir={output_root}",
+        f"--output-filename={app_name}.exe",
+        "--include-module=textgrid",
+        "--include-package=customtkinter",
+        "--remove-output",
+        f"--jobs={cpu_jobs}",
+        f"--nofollow-import-to={','.join(EXCLUDED_MODULES + EXCLUDED_TRAINING_MODULES)}",
+    ]
+
+    _validate_ffmpeg_bin(ffmpeg_bin)
+    include_entries = [(ctk_path, "customtkinter")]
+    include_entries.extend(_iter_runtime_data_entries())
+    for src, dst in include_entries:
+        cmd.append(f"--include-data-dir={src}={dst}")
+    ffmpeg_runtime_files = _iter_ffmpeg_runtime_files(ffmpeg_bin)
+    for src, name in ffmpeg_runtime_files:
+        cmd.append(f"--include-data-files={src}=ffmpeg/bin/{name}")
+    if app_icon_path:
+        cmd.append(f"--windows-icon-from-ico={app_icon_path}")
+
+    print("Running Nuitka build command:")
+    print(" ".join(cmd))
+    subprocess.check_call(cmd)
+
+    if onefile:
+        expected = os.path.join(output_root, f"{app_name}.exe")
+        if os.path.isfile(expected):
+            return expected
+        exe_candidates = [
+            os.path.join(output_root, n)
+            for n in os.listdir(output_root)
+            if n.lower().endswith(".exe")
+        ]
+        if len(exe_candidates) == 1:
+            return exe_candidates[0]
+        raise FileNotFoundError(f"Nuitka onefile executable not found in: {output_root}")
+
+    expected_dist = os.path.join(output_root, f"{app_name}.dist")
+    if os.path.isdir(expected_dist):
+        _validate_packaged_ffmpeg(expected_dist)
+        return expected_dist
+
+    dist_candidates = [
+        os.path.join(output_root, n)
+        for n in os.listdir(output_root)
+        if n.lower().endswith(".dist") and os.path.isdir(os.path.join(output_root, n))
+    ]
+    if len(dist_candidates) == 1:
+        _validate_packaged_ffmpeg(dist_candidates[0])
+        return dist_candidates[0]
+
+    raise FileNotFoundError(f"Nuitka standalone directory not found in: {output_root}")
+
+
+def _validate_packaged_ffmpeg(dist_dir):
+    ffmpeg_bin = os.path.join(dist_dir, "ffmpeg", "bin")
+    missing = []
+    for file_name in REQUIRED_FFMPEG_BINARIES:
+        full_path = os.path.join(ffmpeg_bin, file_name)
+        if (not os.path.isfile(full_path)) or os.path.getsize(full_path) <= 0:
+            missing.append(full_path)
+    if missing:
+        lines = "\n".join(f"  - {p}" for p in missing)
+        raise RuntimeError(f"Nuitka output is missing required FFmpeg files:\n{lines}")
+
+
+def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, onefile=False):
+    release_dir = _get_release_dir(channel)
     if os.path.exists(release_dir):
         shutil.rmtree(release_dir)
     os.makedirs(release_dir, exist_ok=True)
 
+    _write_release_channel_metadata(
+        os.path.join(release_dir, "release_channel.json"),
+        app_name=app_name,
+        app_version=app_version,
+        channel=channel,
+    )
+
     if onefile:
-        exe_path = os.path.join(APP_DIR, "dist", f"{app_name}.exe")
-        if not os.path.exists(exe_path):
-            raise FileNotFoundError(f"빌드 결과 exe를 찾지 못했습니다: {exe_path}")
-        shutil.copy(exe_path, release_dir)
-        print(f"   -> 복사 완료: {exe_path}")
+        if not os.path.isfile(built_artifact_path):
+            raise FileNotFoundError(f"Built executable not found: {built_artifact_path}")
+        shutil.copy(built_artifact_path, release_dir)
+        print(f"   -> copied: {built_artifact_path}")
     else:
-        dist_dir = os.path.join(APP_DIR, "dist", app_name)
-        if not os.path.isdir(dist_dir):
-            raise FileNotFoundError(f"빌드 결과 폴더를 찾지 못했습니다: {dist_dir}")
+        if not os.path.isdir(built_artifact_path):
+            raise FileNotFoundError(f"Built app directory not found: {built_artifact_path}")
         target_dir = os.path.join(release_dir, app_name)
-        shutil.copytree(dist_dir, target_dir)
-        print(f"   -> 폴더 복사 완료: {dist_dir}")
+        shutil.copytree(built_artifact_path, target_dir)
+        print(f"   -> copied directory: {built_artifact_path}")
+        _write_release_channel_metadata(
+            os.path.join(target_dir, "release_channel.json"),
+            app_name=app_name,
+            app_version=app_version,
+            channel=channel,
+        )
 
     for extra_path in RELEASE_AUX_FILES:
         if os.path.exists(extra_path):
             shutil.copy(extra_path, release_dir)
-            print(f"   -> 복사 완료: {os.path.basename(extra_path)}")
+            print(f"   -> copied: {os.path.basename(extra_path)}")
     return release_dir
 
 
-def _install_build_dependencies():
+def _install_build_dependencies(backend):
     subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
 
     req_candidates = [
         os.path.join(APP_DIR, "requirements.txt"),
@@ -173,6 +444,11 @@ def _install_build_dependencies():
         if os.path.exists(req_path):
             subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_path])
 
+    if backend == "nuitka":
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "nuitka", "ordered-set", "zstandard"])
+    elif backend == "pyinstaller":
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
+
 
 def main():
     _configure_console_encoding()
@@ -180,42 +456,60 @@ def main():
     parsed_args = _parse_args()
     if parsed_args is not None:
         args = parsed_args
+
+    target_channels = _parse_channels(args.channel, args.channels)
+    args.channel = target_channels[0]
+
     if args.onefile and not args.allow_unsafe_onefile:
         raise SystemExit(
-            "onefile 빌드는 기본 비활성화되어 있습니다. "
-            "SOFA/모델 캐시 경로 이슈를 이해한 경우에만 --allow-unsafe-onefile을 함께 사용하세요."
+            "onefile builds are disabled by default. Use --allow-unsafe-onefile to proceed."
         )
     if args.allow_unsafe_onefile and not args.onefile:
-        print("ℹ --allow-unsafe-onefile 은 --onefile 미사용 시 무시됩니다.")
+        print("[INFO] --allow-unsafe-onefile is ignored when --onefile is not used.")
 
     os.chdir(APP_DIR)
-    print("🚀 [1/5] 빌드 의존성 설치 중...")
-    _install_build_dependencies()
-
-    print("🚀 [2/5] FFmpeg 바이너리 준비 중...")
-    ffmpeg_bin = _ensure_ffmpeg_bin()
-
-    print("🚀 [3/5] PyInstaller 모듈 로딩 중...")
-    import PyInstaller.__main__
-
+    app_version = _detect_app_version()
     mode_text = "onefile" if args.onefile else "onedir"
-    print(f"🚀 [4/5] {args.name} 빌드 중... (mode={mode_text}, variant=lightgbm-only)")
-    pyinstaller_args = _build_pyinstaller_args(
-        app_name=args.name,
-        ffmpeg_bin=ffmpeg_bin,
-        onefile=args.onefile,
-    )
-    PyInstaller.__main__.run(pyinstaller_args)
 
-    print("🚀 [5/5] 배포 폴더 구성 중...")
-    release_dir = _copy_release_outputs(args.name, onefile=args.onefile)
-
-    print(f"\n✅ 빌드 완료: {release_dir}")
-    if args.onefile:
-        print("⚠ onefile 배포: 실행 경로/캐시 특성상 SOFA/모델 설치가 불안정할 수 있습니다.")
+    channel_text = ",".join(target_channels)
+    print(f"[INFO] channels={channel_text}, backend={args.backend}, version={app_version}")
+    if args.skip_deps:
+        print("[1/5] Skipping dependency install (--skip-deps).")
     else:
-        print("ℹ onedir 배포는 시작 속도가 빠르며, 사용자용 배포에 권장됩니다.")
-    print("ℹ 이 브랜치 빌드는 LightGBM 전용입니다.")
+        print("[1/5] Installing build dependencies...")
+        _install_build_dependencies(args.backend)
+
+    print("[2/5] Preparing FFmpeg runtime...")
+    ffmpeg_bin = _ensure_ffmpeg_bin()
+    app_icon_path = _resolve_app_icon_path()
+    if app_icon_path:
+        print(f"[INFO] app_icon={app_icon_path}")
+    else:
+        print("[WARN] app icon not found; executable will use default icon.")
+
+    print(f"[3/5] Building app with {args.backend}...")
+    if args.backend == "nuitka":
+        built_artifact = _run_nuitka_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile)
+    else:
+        built_artifact = _run_pyinstaller_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile)
+
+    print(f"[4/5] Packaging release folder ({mode_text})...")
+    release_dirs = []
+    total_channels = len(target_channels)
+    for idx, channel in enumerate(target_channels, start=1):
+        print(f"[4/5] Packaging channel {idx}/{total_channels}: {channel}")
+        release_dir = _copy_release_outputs(
+            args.name,
+            channel=channel,
+            app_version=app_version,
+            built_artifact_path=built_artifact,
+            onefile=args.onefile,
+        )
+        release_dirs.append(release_dir)
+
+    print("[5/5] Build complete.")
+    for release_dir in release_dirs:
+        print(f"[DONE] release_dir={release_dir}")
 
 
 if __name__ == "__main__":
