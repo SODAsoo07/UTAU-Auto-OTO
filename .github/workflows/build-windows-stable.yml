@@ -1,0 +1,103 @@
+﻿name: Build Windows (stable)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows-stable:
+    runs-on: windows-latest
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Fetch LFS Objects (stable)
+        shell: pwsh
+        run: |
+          git lfs pull --include="ML_models/**,ML_models_stable/**"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            requirements-ml.txt
+
+      - name: Cache Nuitka Build Artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\Nuitka\Nuitka\Cache
+          key: nuitka-${{ runner.os }}-py311-stable-${{ hashFiles('requirements.txt', 'requirements-ml.txt', 'build.py', 'main.py') }}
+          restore-keys: |
+            nuitka-${{ runner.os }}-py311-stable-
+            nuitka-${{ runner.os }}-py311-
+
+      - name: Cache FFmpeg Runtime
+        uses: actions/cache@v4
+        with:
+          path: |
+            build_assets\ffmpeg
+          key: ffmpeg-runtime-${{ runner.os }}-${{ hashFiles('build.py') }}
+          restore-keys: |
+            ffmpeg-runtime-${{ runner.os }}-
+
+      - name: Install Dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install --prefer-binary -r requirements.txt
+          pip install --prefer-binary -r requirements-ml.txt
+          pip install nuitka ordered-set zstandard
+
+      - name: Build App (stable)
+        shell: pwsh
+        run: |
+          $suppress = 'Nuitka-Inclusion: Writing cache for dependencies of .* ignoring\.'
+          python build.py --name UTAU_Auto_OTO --backend nuitka --skip-deps --channel "stable" 2>&1 |
+            ForEach-Object {
+              if ($_ -notmatch $suppress) { $_ }
+            }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+
+      - name: Build Installer (stable)
+        shell: pwsh
+        run: |
+          pwsh -File scripts/build_installer.ps1 -Channel "stable" -SourceDir "UTAU_Auto_OTO_Release_stable"
+
+      - name: Build Portable Zip (stable, with ML_models)
+        shell: pwsh
+        run: |
+          pwsh -File scripts/build_portable_with_models.ps1 -Channel "stable" -SourceDir "UTAU_Auto_OTO_Release_stable" -OutputZip "portable_output/UTAU_Auto_OTO_portable_with_models_stable.zip"
+
+      - name: Upload Portable Artifact (stable/default)
+        uses: actions/upload-artifact@v4
+        with:
+          name: UTAU_Auto_OTO_windows_portable_default
+          path: UTAU_Auto_OTO_Release_stable/**
+          if-no-files-found: error
+
+      - name: Upload Portable Zip With Models (stable/default)
+        uses: actions/upload-artifact@v4
+        with:
+          name: UTAU_Auto_OTO_windows_portable_with_models_default
+          path: portable_output/UTAU_Auto_OTO_portable_with_models_stable.zip
+          if-no-files-found: error
+
+      - name: Upload Installer Artifact (stable/default)
+        uses: actions/upload-artifact@v4
+        with:
+          name: UTAU_Auto_OTO_windows_setup_default
+          path: installer_output/UTAU_Auto_OTO_Setup_*_stable.exe
+          if-no-files-found: error
