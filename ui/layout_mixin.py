@@ -1080,9 +1080,9 @@ class LayoutMixin:
 
     def _get_mfa_align_profile_code(self):
         profile = str(self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "").strip()
-        if profile in {"빠름 (저사양 추천)", "fast"}:
+        if profile in {"빠름", "빠름 (저사양 추천)", "fast"}:
             return "fast"
-        if profile in {"정확도 우선", "accurate", "accurate_adapted", "speaker_adapted"}:
+        if profile in {"정밀", "정확도 우선", "정확도 우선 (정밀)", "accurate", "accurate_adapted", "speaker_adapted"}:
             return "accurate"
         if profile in {"기본", "default", "정확도 우선 (기본)"}:
             return "default"
