@@ -5260,23 +5260,34 @@ def generate_oto(
                         token_pair_missing = True
 
                     if token_pair_missing:
-                        _append_strict_skip_alias(alias)
-                        _record_unset(
-                            "token_invariant_pair_missing",
-                            fname,
-                            line,
-                            meta={
-                                "mode": str(kr_token_invariant_mode),
-                                "alias_type": str(alias_type),
-                                "diag_hint": "strict token-invariant pair unavailable",
-                                "syllable_count_guard": bool(kr_syllable_count_guard_active),
-                                "syllable_count_guard_hard": bool(kr_syllable_count_guard_hard),
-                                "expected_cv_count": int(expected_cv_count),
-                                "observed_cv_count": int(observed_cv_count),
-                            },
+                        token_pair_missing_hard = bool(
+                            kr_token_invariant_hard or kr_syllable_count_guard_hard
                         )
-                        final_lines.append(apply_suffix_to_oto_line(line, alias_suffix))
-                        continue
+                        if not token_pair_missing_hard and kr_token_invariant_soft:
+                            if kr_mapping_debug_reason_logging:
+                                log(
+                                    f"🧭 {fname}: KR VC token invariant pair 누락 "
+                                    f"→ soft fallback bridge 사용 ({alias})"
+                                )
+                            token_pair_missing = False
+                        else:
+                            _append_strict_skip_alias(alias)
+                            _record_unset(
+                                "token_invariant_pair_missing",
+                                fname,
+                                line,
+                                meta={
+                                    "mode": str(kr_token_invariant_mode),
+                                    "alias_type": str(alias_type),
+                                    "diag_hint": "strict token-invariant pair unavailable",
+                                    "syllable_count_guard": bool(kr_syllable_count_guard_active),
+                                    "syllable_count_guard_hard": bool(kr_syllable_count_guard_hard),
+                                    "expected_cv_count": int(expected_cv_count),
+                                    "observed_cv_count": int(observed_cv_count),
+                                },
+                            )
+                            final_lines.append(apply_suffix_to_oto_line(line, alias_suffix))
+                            continue
 
                     if not bridge_pair:
                         bridge_seq_slot = bridge_seq_idx
@@ -5566,23 +5577,44 @@ def generate_oto(
                         },
                     )
                     if row_abstain.get("should_skip"):
-                        if kr_mapping_debug_reason_logging:
-                            log(
-                                f"🛡️ {fname}: KR 행 생성 스킵 "
-                                f"({row_abstain.get('reason')}, {alias})"
-                            )
-                        _record_unset(
-                            str(row_abstain.get("reason") or "row_abstain"),
-                            fname,
-                            line,
-                            meta={"diag_hint": row_abstain.get("diag_hint", "")},
-                        )
                         if use_template:
-                            # 템플릿 모드에서는 매핑이 불확실한 행이라도 기존 alias를 보존한다.
-                            final_lines.append(
-                                apply_suffix_to_oto_line(line, alias_suffix)
+                            # 템플릿 모드에서도 0,0,0,0,0 행은 보존하지 않고
+                            # 계산 기반 fallback 생성을 시도해 zero-row 고착을 막는다.
+                            template_shape = _extract_base_timing_shape(line)
+                            if template_shape:
+                                if kr_mapping_debug_reason_logging:
+                                    log(
+                                        f"🛡️ {fname}: KR 행 생성 스킵 "
+                                        f"({row_abstain.get('reason')}, {alias})"
+                                    )
+                                _record_unset(
+                                    str(row_abstain.get("reason") or "row_abstain"),
+                                    fname,
+                                    line,
+                                    meta={"diag_hint": row_abstain.get("diag_hint", "")},
+                                )
+                                final_lines.append(
+                                    apply_suffix_to_oto_line(line, alias_suffix)
+                                )
+                                continue
+                            if kr_mapping_debug_reason_logging:
+                                log(
+                                    f"🛡️ {fname}: KR 스킵 완화 "
+                                    f"(template zero-row fallback 생성, {alias})"
+                                )
+                        else:
+                            if kr_mapping_debug_reason_logging:
+                                log(
+                                    f"🛡️ {fname}: KR 행 생성 스킵 "
+                                    f"({row_abstain.get('reason')}, {alias})"
+                                )
+                            _record_unset(
+                                str(row_abstain.get("reason") or "row_abstain"),
+                                fname,
+                                line,
+                                meta={"diag_hint": row_abstain.get("diag_hint", "")},
                             )
-                        continue
+                            continue
                     current_w_idx = max(current_w_idx, selected_w_idx)
                     _append_kr_confirmed_cv_idx(selected_w_idx)
                     selected_w_idx, curr_phones, c_start, c_end, n_start, n_end = _prepare_cv_bounds_from_syllable(

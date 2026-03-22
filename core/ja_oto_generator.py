@@ -4835,19 +4835,34 @@ def generate_ja_oto(
                         token_pair_missing = True
 
                     if token_pair_missing:
-                        _append_strict_skip_alias(alias)
-                        _record_unset(
-                            "token_invariant_pair_missing",
-                            fname,
-                            line,
-                            meta={
-                                "mode": str(ja_token_invariant_mode),
-                                "alias_type": str(alias_type),
-                                "diag_hint": "strict token-invariant pair unavailable",
-                            },
-                        )
-                        final_lines.append(apply_suffix_to_oto_line(line, alias_suffix))
-                        continue
+                        if ja_token_invariant_soft:
+                            if ja_mapping_debug_reason_logging:
+                                log(
+                                    f"🧭 {fname}: JA VC token invariant pair 누락 "
+                                    f"→ soft fallback bridge 사용 ({alias})"
+                                )
+                            token_pair_missing = False
+                        else:
+                            _append_strict_skip_alias(alias)
+                            _record_unset(
+                                "token_invariant_pair_missing",
+                                fname,
+                                line,
+                                meta={
+                                    "mode": str(ja_token_invariant_mode),
+                                    "alias_type": str(alias_type),
+                                    "diag_hint": "strict token-invariant pair unavailable",
+                                },
+                            )
+                            # strict/하드 스킵에서도 템플릿 0행(0,0,0,0,0)은 보존하지 않는다.
+                            template_shape = _extract_base_timing_shape(line)
+                            if template_shape:
+                                final_lines.append(apply_suffix_to_oto_line(line, alias_suffix))
+                            elif ja_mapping_debug_reason_logging:
+                                log(
+                                    f"🛡️ {fname}: JA strict skip zero-row 보존 차단 ({alias})"
+                                )
+                            continue
 
                     if not bridge_pair:
                         local_bridge_prev_idx = max(cv_seq_idx - 1, vc_seq_idx)
