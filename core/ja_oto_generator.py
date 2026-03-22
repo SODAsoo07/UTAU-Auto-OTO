@@ -3977,6 +3977,12 @@ def generate_ja_oto(
             ja_token_invariant_mode = _resolve_syllable_strict_mode(format_type=format_type)
             ja_token_invariant_enabled = ja_token_invariant_mode in {"soft", "strict"}
             ja_token_invariant_hard = ja_token_invariant_mode == "strict"
+            ja_token_invariant_soft = ja_token_invariant_mode == "soft"
+            ja_soft_strict_order_lock = bool(
+                ja_token_invariant_soft
+                and ja_order_locked_format
+                and filename_order_locked
+            )
             ja_confirmed_cv_indices = []
             ja_vc_pair_seq_idx = 0
 
@@ -3992,6 +3998,34 @@ def generate_ja_oto(
                 if ja_confirmed_cv_indices and mapped <= ja_confirmed_cv_indices[-1]:
                     return
                 ja_confirmed_cv_indices.append(mapped)
+
+            def _allow_soft_forward_resync(target_tok, expected_tok, mapped_tok, *, expected_idx, mapped_idx):
+                if not _should_allow_ja_soft_forward_shift(target_tok, expected_tok, mapped_tok):
+                    return False
+                if not ja_soft_strict_order_lock:
+                    return True
+                if mapped_idx > (expected_idx + 1):
+                    return False
+                target_norm = _normalize_ja_syllable_token(target_tok)
+                expected_norm = _normalize_ja_syllable_token(expected_tok)
+                mapped_norm = _normalize_ja_syllable_token(mapped_tok)
+                if not target_norm or not mapped_norm:
+                    return False
+                if mapped_norm != target_norm:
+                    return False
+                expected_match = int(_ja_soft_cv_match_level(target_norm, expected_norm) or 0)
+                mapped_match = int(_ja_soft_cv_match_level(target_norm, mapped_norm) or 0)
+                if mapped_match <= expected_match:
+                    return False
+                if syllable_confidence_by_idx:
+                    exp_idx = max(0, min(int(expected_idx), len(syllable_confidence_by_idx) - 1))
+                    map_idx = max(0, min(int(mapped_idx), len(syllable_confidence_by_idx) - 1))
+                    expected_conf = float(syllable_confidence_by_idx[exp_idx])
+                    mapped_conf = float(syllable_confidence_by_idx[map_idx])
+                    conf_floor = max(local_conf_lock_threshold + 0.06, 0.58)
+                    if min(expected_conf, mapped_conf) < conf_floor:
+                        return False
+                return True
             for line_num, line in enumerate(lines_for_mapping):
                 alias = resolve_mapping_line_alias(
                     line=line,
@@ -4228,7 +4262,13 @@ def generate_ja_oto(
                             ):
                                 expected_tok_trace = _syllable_info_token(syllables_info[expected_idx])
                                 mapped_tok_trace = _syllable_info_token(syllables_info[resync_idx])
-                                if _should_allow_ja_soft_forward_shift(target_tok, expected_tok_trace, mapped_tok_trace):
+                                if _allow_soft_forward_resync(
+                                    target_tok,
+                                    expected_tok_trace,
+                                    mapped_tok_trace,
+                                    expected_idx=expected_idx,
+                                    mapped_idx=resync_idx,
+                                ):
                                     mapped_idx = resync_idx
                                     log(
                                         f"🧭 {fname}: CV_HEAD 순서 잠금 미세 보정 "
@@ -4305,10 +4345,12 @@ def generate_ja_oto(
                                     expected_tok_norm = _normalize_ja_syllable_token(
                                         _syllable_info_token(syllables_info[expected_idx])
                                     )
-                                    allow_forward = _should_allow_ja_soft_forward_shift(
+                                    allow_forward = _allow_soft_forward_resync(
                                         target_norm,
                                         expected_tok_norm,
                                         mapped_tok_norm,
+                                        expected_idx=expected_idx,
+                                        mapped_idx=mapped_idx,
                                     )
                                 if not allow_forward:
                                     mapped_idx = expected_idx
@@ -4564,7 +4606,13 @@ def generate_ja_oto(
                             ):
                                 expected_tok_trace = _syllable_info_token(syllables_info[expected_idx])
                                 mapped_tok_trace = _syllable_info_token(syllables_info[resync_idx])
-                                if _should_allow_ja_soft_forward_shift(target_tok, expected_tok_trace, mapped_tok_trace):
+                                if _allow_soft_forward_resync(
+                                    target_tok,
+                                    expected_tok_trace,
+                                    mapped_tok_trace,
+                                    expected_idx=expected_idx,
+                                    mapped_idx=resync_idx,
+                                ):
                                     mapped_idx = resync_idx
                                     log(
                                         f"🧭 {fname}: CV 순서 잠금 미세 보정 "
@@ -4641,10 +4689,12 @@ def generate_ja_oto(
                                     expected_tok_norm = _normalize_ja_syllable_token(
                                         _syllable_info_token(syllables_info[expected_idx])
                                     )
-                                    allow_forward = _should_allow_ja_soft_forward_shift(
+                                    allow_forward = _allow_soft_forward_resync(
                                         target_norm,
                                         expected_tok_norm,
                                         mapped_tok_norm,
+                                        expected_idx=expected_idx,
+                                        mapped_idx=mapped_idx,
                                     )
                                 if not allow_forward:
                                     mapped_idx = expected_idx
@@ -4774,7 +4824,14 @@ def generate_ja_oto(
                                 f"({local_bridge_prev_idx + 1}->{local_bridge_next_idx + 1}, "
                                 f"confirmed={len(ja_confirmed_cv_indices)}, {alias})"
                             )
-                    elif ja_token_invariant_enabled and ja_token_invariant_hard:
+                    elif ja_token_invariant_enabled and (
+                        ja_token_invariant_hard
+                        or (
+                            ja_token_invariant_soft
+                            and ja_order_locked_format
+                            and str(mapping_tier or "").strip().lower() == "low"
+                        )
+                    ):
                         token_pair_missing = True
 
                     if token_pair_missing:

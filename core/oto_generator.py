@@ -5072,6 +5072,7 @@ def generate_oto(
             kr_token_invariant_mode = _resolve_syllable_strict_mode(file_format=file_format)
             kr_token_invariant_enabled = kr_token_invariant_mode in {"soft", "strict"}
             kr_token_invariant_hard = kr_token_invariant_mode == "strict"
+            kr_token_invariant_soft = kr_token_invariant_mode == "soft"
             expected_cv_count = len([t for t in (filename_cv_targets or []) if str(t or "").strip()])
             if expected_cv_count <= 0:
                 expected_cv_count = len([t for t in (romaji_syllables or []) if str(t or "").strip()])
@@ -5154,6 +5155,16 @@ def generate_oto(
                 if kr_syllable_count_guard_active:
                     row_jump_default = 0
                     row_jump_high_conf = 0 if kr_syllable_count_guard_hard else min(row_jump_high_conf, 1)
+                if kr_token_invariant_soft and kr_order_locked_format:
+                    if alias_type in {"cv", "cv_head", "vcv"}:
+                        row_jump_default = 0
+                        if file_mapping_low_conf or textgrid_trust_tier != "high":
+                            row_jump_high_conf = 0
+                        else:
+                            row_jump_high_conf = min(row_jump_high_conf, 1)
+                    elif alias_type in {"vc", "vv"}:
+                        row_jump_default = 0
+                        row_jump_high_conf = min(row_jump_high_conf, 1)
 
                 if alias_type == 'br':
 
@@ -5237,7 +5248,15 @@ def generate_oto(
                                 f"({local_prev_idx + 1}->{local_next_idx + 1}, "
                                 f"confirmed={len(kr_confirmed_cv_indices)}, {alias})"
                             )
-                    elif kr_token_invariant_enabled and (kr_token_invariant_hard or kr_syllable_count_guard_active):
+                    elif kr_token_invariant_enabled and (
+                        kr_token_invariant_hard
+                        or kr_syllable_count_guard_active
+                        or (
+                            kr_token_invariant_soft
+                            and kr_order_locked_format
+                            and (file_mapping_low_conf or textgrid_trust_tier == "low")
+                        )
+                    ):
                         token_pair_missing = True
 
                     if token_pair_missing:

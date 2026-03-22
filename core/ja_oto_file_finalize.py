@@ -11,6 +11,10 @@ from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 from core.oto_normalization import normalize_wav_key
 from core.mel_refine_profile import resolve_mel_refine_float
 from core.mel_safety_clamp import apply_mel_safety_clamp_to_oto_file
+from core.oto_post_regression_guard import (
+    apply_oto_post_regression_guard,
+    capture_oto_baseline_snapshot,
+)
 from core.post_file_pipeline import (
     log_changed_lines,
     resolve_wav_dir_from_tg_folder,
@@ -260,6 +264,10 @@ def apply_ja_mel_refine_to_oto_file(
 
 def run_ja_post_file_pipeline(context: JaPostFilePipelineContext):
     ml_route = _normalize_ml_route(getattr(context, "ml_route", "") or _current_ml_route())
+    format_type = str(getattr(context, "forced_format", "") or getattr(context, "fallback_format", "") or "").strip().lower()
+    guard_snapshot = None
+    if format_type == "cvvc":
+        guard_snapshot = capture_oto_baseline_snapshot(context.out_path)
     if callable(context.log_fn):
         context.log_fn(f"[OTO-ML] JA finalize route={ml_route}")
     wav_dir_for_mel = resolve_wav_dir_from_tg_folder(context.tg_folder)
@@ -320,6 +328,31 @@ def run_ja_post_file_pipeline(context: JaPostFilePipelineContext):
         log_changed_lines(context.log_fn, "[JA-Finalize]", final_changed, "cutoff finalize changed")
     except Exception as exc:
         context.log_fn(f"[JA-Finalize] cutoff finalize failed: {exc}")
+
+    if guard_snapshot is not None:
+        guard_stats = apply_oto_post_regression_guard(
+            context.out_path,
+            baseline_snapshot=guard_snapshot,
+            alias_type_resolver=lambda alias_text: context.classify_alias_fn(alias_text, context.custom_map),
+            log_fn=context.log_fn,
+            log_tag="[JA-RegressionGuard]",
+        )
+        guard_changed = int(guard_stats.get("reverted", 0) or 0)
+        if guard_changed > 0 and callable(context.log_fn):
+            reasons = guard_stats.get("reasons") or {}
+            reason_text = ", ".join(
+                f"{name}:{int(count)}"
+                for name, count in sorted(reasons.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))
+            )
+            checked = int(guard_stats.get("checked", 0) or 0)
+            if reason_text:
+                context.log_fn(
+                    f"[JA-RegressionGuard] post-pass rollback: {guard_changed}/{checked} rows ({reason_text})"
+                )
+            else:
+                context.log_fn(
+                    f"[JA-RegressionGuard] post-pass rollback: {guard_changed}/{checked} rows"
+                )
 
 
 __all__ = [

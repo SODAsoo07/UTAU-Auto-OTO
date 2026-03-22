@@ -18,6 +18,10 @@ from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 from core.mel_refine_profile import resolve_mel_refine_float
 from core.kr_oto_file_consistency import apply_file_consistency_to_oto_file
 from core.mel_safety_clamp import apply_mel_safety_clamp_to_oto_file
+from core.oto_post_regression_guard import (
+    apply_oto_post_regression_guard,
+    capture_oto_baseline_snapshot,
+)
 from core.generator_finish import write_oto_lines
 from core.post_file_pipeline import (
     log_changed_lines,
@@ -598,6 +602,10 @@ def apply_kr_wav_duration_safety_to_oto_file(
 def run_kr_post_file_pipeline(context: KrPostFilePipelineContext):
     wav_dir = resolve_wav_dir_from_tg_folder(context.tg_folder)
     ml_route = _normalize_ml_route(getattr(context, "ml_route", "") or _current_ml_route())
+    format_type = str(getattr(context, "auto_gen_format", "") or "").strip().lower()
+    guard_snapshot = None
+    if format_type in {"cvc", "cvvc"}:
+        guard_snapshot = capture_oto_baseline_snapshot(context.out_path)
     if callable(context.log_fn):
         context.log_fn(f"[OTO-ML] KR finalize route={ml_route}")
 
@@ -690,6 +698,31 @@ def run_kr_post_file_pipeline(context: KrPostFilePipelineContext):
         safety_changed,
         "wav-duration safety changed",
     )
+
+    if guard_snapshot is not None:
+        guard_stats = apply_oto_post_regression_guard(
+            context.out_path,
+            baseline_snapshot=guard_snapshot,
+            alias_type_resolver=lambda alias_text: classify_alias(alias_text, context.custom_map),
+            log_fn=context.log_fn,
+            log_tag="[KR-RegressionGuard]",
+        )
+        guard_changed = int(guard_stats.get("reverted", 0) or 0)
+        if guard_changed > 0 and callable(context.log_fn):
+            reasons = guard_stats.get("reasons") or {}
+            reason_text = ", ".join(
+                f"{name}:{int(count)}"
+                for name, count in sorted(reasons.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))
+            )
+            checked = int(guard_stats.get("checked", 0) or 0)
+            if reason_text:
+                context.log_fn(
+                    f"[KR-RegressionGuard] post-pass rollback: {guard_changed}/{checked} rows ({reason_text})"
+                )
+            else:
+                context.log_fn(
+                    f"[KR-RegressionGuard] post-pass rollback: {guard_changed}/{checked} rows"
+                )
 
 
 __all__ = [
