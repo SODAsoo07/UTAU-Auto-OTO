@@ -1,0 +1,618 @@
+import os
+import re
+
+from core.en_cvvc_builder import generate_en_cvvc_oto
+from core.format_type_utils import normalize_auto_format_value
+from core.ja_oto_generator import generate_ja_oto
+from core.kr_cmpx_preview_builder import (
+    generate_kr_cmpx_preview_oto,
+    resolve_kr_cmpx_preview_source_oto,
+)
+from core.no_mfa_oto_builder import (
+    generate_no_mfa_auto_oto,
+    resolve_no_mfa_source_oto,
+)
+from core.oto_generator import generate_oto
+from core.pipeline_status import normalize_aligner_name
+from core.preflight_common import collect_runtime_preflight_issues
+
+
+class OtoActionsMixin:
+    @staticmethod
+    def _has_top_level_wavs(folder_path: str) -> bool:
+        try:
+            return any(str(name).lower().endswith(".wav") for name in os.listdir(folder_path))
+        except Exception:
+            return False
+
+    def _discover_recursive_voicebank_dirs(self, root_dir: str) -> list[str]:
+        root = os.path.abspath(str(root_dir or "").strip())
+        if not root or not os.path.isdir(root):
+            return []
+
+        candidates: list[str] = []
+        for cur_root, _dirs, files in os.walk(root):
+            if any(str(name).lower().endswith(".wav") for name in files):
+                candidates.append(os.path.abspath(cur_root))
+
+        if not candidates:
+            return []
+
+        deduped = sorted(set(candidates), key=lambda path: (len(path), path.lower()))
+        leaf_only: list[str] = []
+        for current in deduped:
+            current_norm = os.path.normcase(os.path.abspath(current)).rstrip("\\/")
+            child_prefix = current_norm + os.sep
+            has_child_candidate = False
+            for other in deduped:
+                if other == current:
+                    continue
+                other_norm = os.path.normcase(os.path.abspath(other))
+                if other_norm.startswith(child_prefix):
+                    has_child_candidate = True
+                    break
+            if not has_child_candidate:
+                leaf_only.append(current)
+
+        return leaf_only or deduped
+
+    @staticmethod
+    def _resolve_recursive_out_path(
+        root_wav_dir: str,
+        base_out_path: str,
+        target_wav_dir: str,
+        target_count: int,
+    ) -> str:
+        target_abs = os.path.abspath(str(target_wav_dir or "").strip())
+        out_raw = str(base_out_path or "").strip()
+        if target_count <= 1:
+            if out_raw:
+                return out_raw
+            return os.path.join(target_abs, "oto.ini")
+
+        if not out_raw:
+            return os.path.join(target_abs, "oto.ini")
+
+        out_abs = os.path.abspath(out_raw)
+        out_ext = str(os.path.splitext(out_abs)[1] or "").lower()
+        if out_ext == ".ini":
+            out_root = os.path.dirname(out_abs)
+            out_name = os.path.basename(out_abs) or "oto.ini"
+        else:
+            out_root = out_abs
+            out_name = "oto.ini"
+        root_abs = os.path.abspath(str(root_wav_dir or "").strip())
+        rel = ""
+        try:
+            rel = os.path.relpath(target_abs, root_abs)
+        except Exception:
+            rel = ""
+        if not rel or rel.startswith(".."):
+            rel = os.path.basename(target_abs)
+        if rel in {".", ""}:
+            return os.path.join(out_root, out_name)
+        return os.path.join(out_root, rel, out_name)
+
+    def _run_oto_gen(self):
+        def task():
+            self._set_running(True)
+            self._set_status("4단계 OTO.ini 생성 중...")
+            progress_state = {"oto": 0.0, "validate": 0.0}
+            progress_detail_state = {"oto_last": -1.0, "validate_last": -1.0}
+
+            def _safe_ratio(value):
+                try:
+                    return max(0.0, min(1.0, float(value)))
+                except Exception:
+                    return 0.0
+
+            def _set_progress_part(*, oto_ratio=None, validate_ratio=None):
+                if oto_ratio is not None:
+                    progress_state["oto"] = max(progress_state["oto"], _safe_ratio(oto_ratio))
+                if validate_ratio is not None:
+                    progress_state["validate"] = max(progress_state["validate"], _safe_ratio(validate_ratio))
+                self._set_progress(progress_state["oto"] * 0.75 + progress_state["validate"] * 0.25)
+
+            def _set_stage_status(stage: str, detail: str, ratio: float) -> None:
+                r = _safe_ratio(ratio)
+                pct = int(round(r * 100.0))
+                self._set_status(f"{stage} [{detail}] ({pct}%)")
+
+            def _update_oto_stage(detail: str, ratio: float, *, force: bool = False) -> None:
+                rr = _safe_ratio(ratio)
+                _set_progress_part(oto_ratio=rr)
+                if force or abs(rr - progress_detail_state["oto_last"]) >= 0.03:
+                    progress_detail_state["oto_last"] = rr
+                    _set_stage_status("4단계 OTO.ini 생성 중...", detail, rr)
+
+            def _update_validate_stage(detail: str, ratio: float, *, force: bool = False) -> None:
+                rr = _safe_ratio(ratio)
+                _set_progress_part(validate_ratio=rr)
+                if force or abs(rr - progress_detail_state["validate_last"]) >= 0.03:
+                    progress_detail_state["validate_last"] = rr
+                    _set_stage_status("5단계 OTO 자동 검증 중...", detail, rr)
+
+            def _batch_ratio(batch_index: int, batch_total: int, local_ratio: float) -> float:
+                r = _safe_ratio(local_ratio)
+                if int(batch_total or 0) <= 1:
+                    return r
+                return _safe_ratio((float(batch_index) + r) / float(batch_total))
+
+            def _extract_progress_ratio(msg):
+                text = str(msg or "")
+                ratio = self._parse_progress_ratio_from_status(text) if hasattr(self, "_parse_progress_ratio_from_status") else None
+                if ratio is not None:
+                    return ratio
+                m = re.search(r"(?:files?|rows?|items?)\s*=\s*(\d+)\s*/\s*(\d+)", text, flags=re.IGNORECASE)
+                if m:
+                    total = int(m.group(2))
+                    if total > 0:
+                        return max(0.0, min(1.0, float(int(m.group(1))) / float(total)))
+                return None
+
+            def _make_progress_callback(stage, batch_index=0, batch_total=1):
+                def _cb(msg):
+                    self._append_log(msg)
+                    ratio = _extract_progress_ratio(msg)
+                    if ratio is None:
+                        return
+                    scaled = _batch_ratio(batch_index, batch_total, ratio)
+                    if stage == "oto":
+                        detail = "생성 진행" if batch_total <= 1 else f"생성 진행 ({batch_index + 1}/{batch_total})"
+                        _update_oto_stage(detail, scaled)
+                    else:
+                        detail = "검증 진행" if batch_total <= 1 else f"검증 진행 ({batch_index + 1}/{batch_total})"
+                        _update_validate_stage(detail, scaled)
+                return _cb
+
+            def _read_oto_line_count(path):
+                try:
+                    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                        return sum(1 for _ in handle)
+                except Exception:
+                    return -1
+
+            try:
+                _update_oto_stage("입력 검사", 0.02, force=True)
+                root_wav_dir = str(self.wav_entry.get() or "").strip()
+                base_tpl_path = "" if self.no_base_oto_var.get() else str(self.tpl_entry.get() or "").strip()
+                base_out_path = str(self.out_entry.get() or "").strip()
+                batch_scan_enabled = (
+                    bool(self.recursive_voicebank_scan_var.get())
+                    if hasattr(self, "recursive_voicebank_scan_var")
+                    else False
+                )
+                lang = self._get_language()
+                selected_format = normalize_auto_format_value(
+                    lang,
+                    self.auto_format_var.get() if hasattr(self, "auto_format_var") else "",
+                )
+
+                if not root_wav_dir:
+                    self._append_log("오류: WAV 폴더를 입력해 주세요.")
+                    return
+                if not base_out_path and not batch_scan_enabled:
+                    self._append_log("오류: 출력 경로를 입력해 주세요.")
+                    return
+
+                if batch_scan_enabled:
+                    target_wav_dirs = self._discover_recursive_voicebank_dirs(root_wav_dir)
+                    if not target_wav_dirs:
+                        self._append_log("오류: 하위 폴더에서 WAV 파일이 있는 보이스 폴더를 찾지 못했습니다.")
+                        self._set_status("오류: 배치 대상 없음")
+                        return
+                else:
+                    target_wav_dirs = [os.path.abspath(root_wav_dir)]
+
+                target_count = len(target_wav_dirs)
+                if target_count > 1:
+                    self._append_log(f"ℹ 하위 폴더 자동 탐색 활성화: 총 {target_count}개 보이스 폴더를 순차 처리합니다.")
+                elif batch_scan_enabled:
+                    self._append_log("ℹ 하위 폴더 자동 탐색 활성화: 처리 대상 1개를 찾았습니다.")
+                _update_oto_stage("입력 경로 확인 완료", 0.07, force=True)
+
+                params = self._get_params()
+                gen_ou = self.openutau_var.get()
+                gen_missing = self.gen_missing_vowels_var.get()
+                gen_dash_alias = self.gen_dash_alias_var.get() if hasattr(self, "gen_dash_alias_var") else True
+                enable_ml_correction = self.enable_ml_correction_var.get()
+                auto_format = self.auto_format_var.get()
+                custom_phonemes_path = self.custom_phoneme_var.get().strip()
+                alias_suffix = self.alias_suffix_var.get().strip()
+                ja_alias_style = self._get_ja_alias_style_code()
+                ja_words_fallback = (
+                    self.ja_mapping_words_fallback_enabled_var.get()
+                    if hasattr(self, "ja_mapping_words_fallback_enabled_var")
+                    else True
+                )
+                ja_spn_threshold = (
+                    self.ja_mapping_spn_ratio_threshold_var.get()
+                    if hasattr(self, "ja_mapping_spn_ratio_threshold_var")
+                    else 0.35
+                )
+                ja_min_vowel_ratio = (
+                    self.ja_mapping_min_vowel_phone_ratio_var.get()
+                    if hasattr(self, "ja_mapping_min_vowel_phone_ratio_var")
+                    else 0.5
+                )
+                ja_debug_reason = (
+                    self.ja_mapping_debug_reason_logging_var.get()
+                    if hasattr(self, "ja_mapping_debug_reason_logging_var")
+                    else True
+                )
+                kr_anchor_profile_path = (
+                    self.kr_anchor_profile_path_var.get().strip()
+                    if hasattr(self, "kr_anchor_profile_path_var")
+                    else ""
+                )
+                kr_conf_raw = (
+                    self.kr_mapping_confidence_threshold_var.get()
+                    if hasattr(self, "kr_mapping_confidence_threshold_var")
+                    else ""
+                )
+                kr_conf_threshold = None
+                try:
+                    raw_conf = str(kr_conf_raw or "").strip()
+                    if raw_conf:
+                        kr_conf_threshold = max(0.0, min(1.0, float(raw_conf)))
+                except Exception:
+                    kr_conf_threshold = None
+                kr_jump_default = (
+                    self.kr_mapping_max_index_jump_default_var.get()
+                    if hasattr(self, "kr_mapping_max_index_jump_default_var")
+                    else 1
+                )
+                kr_jump_hi = (
+                    self.kr_mapping_max_index_jump_high_conf_var.get()
+                    if hasattr(self, "kr_mapping_max_index_jump_high_conf_var")
+                    else 2
+                )
+
+                _update_oto_stage("옵션/정책 적용", 0.12, force=True)
+                auto_policy = self._apply_auto_ml_policy_env(
+                    lang,
+                    auto_format,
+                    enable_ml_default=enable_ml_correction,
+                    gen_dash_alias=gen_dash_alias,
+                )
+                enable_ml_correction = bool(auto_policy.get("enable_ml"))
+                self._apply_advanced_tuning_envs()
+                if lang == "korean":
+                    os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_DEFAULT"] = str(int(kr_jump_default))
+                    os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_HIGH_CONF"] = str(int(kr_jump_hi))
+                    if kr_anchor_profile_path:
+                        os.environ["UTOA_KR_ANCHOR_PROFILE_PATH"] = kr_anchor_profile_path
+                    else:
+                        os.environ.pop("UTOA_KR_ANCHOR_PROFILE_PATH", None)
+                else:
+                    os.environ.pop("UTOA_KR_ANCHOR_PROFILE_PATH", None)
+
+                self._append_log(
+                    f"[OTO-ML] auto policy: ml={'ON' if enable_ml_correction else 'OFF'}, "
+                    f"route={auto_policy.get('route')}, coupled={'ON' if auto_policy.get('has_coupled') else 'OFF'}, "
+                    f"hybrid={'ON' if auto_policy.get('hybrid_routing') else 'OFF'}"
+                )
+                if not enable_ml_correction:
+                    self._append_log("[OTO-ML] ML 모델이 없어 보정을 건너뜁니다.")
+                route_code = str(auto_policy.get("route", "") or "").strip().lower()
+                if route_code in {"nomfa", "v2"}:
+                    self._append_log(f"[OTO-ML] route policy: {route_code} (coupled primary + autofree auxiliary)")
+                if lang == "korean":
+                    self._append_log("[KR-MAP] confidence_threshold=default(by format)")
+                if self.no_base_oto_var.get():
+                    self._append_log("설정: '기본 OTO 없이 생성' 사용 중입니다.")
+
+                def _run_single_target(target_wav_dir: str, target_out_path: str, batch_index: int, batch_total: int):
+                    prefix = f"[Batch {batch_index + 1}/{batch_total}] " if batch_total > 1 else ""
+
+                    def _update_oto_local(detail: str, ratio: float, *, force: bool = False):
+                        _update_oto_stage(detail, _batch_ratio(batch_index, batch_total, ratio), force=force)
+
+                    def _update_validate_local(detail: str, ratio: float, *, force: bool = False):
+                        _update_validate_stage(detail, _batch_ratio(batch_index, batch_total, ratio), force=force)
+
+                    _update_oto_local("생성 준비 완료", 0.18, force=True)
+                    tpl_path = "" if self.no_base_oto_var.get() else base_tpl_path
+                    cleanup_snapshot = self._snapshot_output_tree_for_cleanup(target_out_path)
+                    tg_folder = os.path.join(target_wav_dir, "textgrids")
+                    has_textgrid = False
+                    if os.path.isdir(tg_folder):
+                        try:
+                            has_textgrid = any(str(name).lower().endswith(".textgrid") for name in os.listdir(tg_folder))
+                        except Exception:
+                            has_textgrid = False
+                    aligner_engine = normalize_aligner_name(
+                        self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
+                        default="mfa",
+                    )
+                    no_mfa_auto_mode = (
+                        aligner_engine == "none"
+                        and lang != "english"
+                        and selected_format != "cmpx"
+                    )
+                    no_mfa_mode_code = (
+                        self._get_no_mfa_oto_mode_code()
+                        if hasattr(self, "_get_no_mfa_oto_mode_code")
+                        else "remap"
+                    )
+                    no_mfa_mode_text = (
+                        "에일리어스 기반 자동 생성(빈 OTO 기준)"
+                        if no_mfa_mode_code == "alias_auto"
+                        else "베이스 OTO 재매핑 + 보정"
+                    )
+                    no_mfa_source_oto = ""
+                    if no_mfa_auto_mode:
+                        if bool(self.no_base_oto_var.get()):
+                            self._append_log(f"{prefix}오류: No-MFA 자동설정 모드에서는 베이스 OTO(템플릿 ini)가 필요합니다.")
+                            self._set_status("오류: 베이스 OTO 필요")
+                            return False, False, 0, 0
+                        no_mfa_source_oto = resolve_no_mfa_source_oto(
+                            wav_dir=target_wav_dir,
+                            source_hint=tpl_path,
+                        )
+                        if not no_mfa_source_oto:
+                            self._append_log(f"{prefix}오류: No-MFA 자동설정용 베이스 OTO를 찾지 못했습니다.")
+                            self._append_log("   템플릿 OTO 경로에 baseoto.ini 또는 oto.ini를 지정해 주세요.")
+                            self._set_status("오류: 베이스 OTO 필요")
+                            return False, False, 0, 0
+                        tpl_path = no_mfa_source_oto
+                        self._append_log("ℹ No-MFA 모드: 선택한 생성 방식으로 OTO를 생성합니다.")
+                        if has_textgrid:
+                            self._append_log(f"{prefix}ℹ TextGrid가 있어도 No-MFA 선택 시에는 선택한 No-MFA 생성 방식으로 진행합니다.")
+                        self._append_log(f"ℹ No-MFA 생성 방식: {no_mfa_mode_text}")
+                        self._append_log(f"[No-MFA] base oto: {no_mfa_source_oto}")
+                    elif lang != "english" and selected_format != "cmpx" and not has_textgrid:
+                        self._append_log(f"{prefix}경고: textgrids 폴더가 없습니다. 3단계 정렬/라벨 생성을 먼저 실행하세요.")
+
+                    if not (lang == "english" or (lang == "korean" and selected_format == "cmpx")):
+                        preflight = collect_runtime_preflight_issues(
+                            language=lang,
+                            wav_dir=target_wav_dir,
+                            out_path=target_out_path,
+                            aligner=self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA",
+                            textgrid_dir=tg_folder,
+                            tpl_path=tpl_path,
+                            no_base_oto=bool(self.no_base_oto_var.get()),
+                            custom_phonemes_path=custom_phonemes_path,
+                            require_output=True,
+                        )
+                        warning_records = list(preflight.get("warning_records") or [])
+                        error_records = list(preflight.get("error_records") or [])
+                        for item in warning_records:
+                            self._append_log(f"⚠ {item.get('display')}")
+                        if error_records:
+                            for item in error_records:
+                                self._append_log(f"❌ {item.get('display')}")
+                            first_code = str((error_records or [{}])[0].get("code", "PRECHECK_FAILED"))
+                            self._set_status(f"오류: 사전 점검 실패 ({first_code})")
+                            return False, False, 0, 0
+
+                    if lang == "english":
+                        if not getattr(self, "_is_preview_channel", lambda: False)():
+                            self._append_log(f"{prefix}오류: 영어 CVVC 모드는 Preview 채널에서만 사용할 수 있습니다.")
+                            self._set_status("오류: Preview 전용 기능")
+                            return False, True, 0, 0
+                        if (not self.no_base_oto_var.get()) and str(tpl_path or "").strip():
+                            self._append_log("ℹ 영어 Preview CVVC 모드에서는 템플릿 OTO 입력을 사용하지 않습니다.")
+                        en_pack = self.en_cvvc_pack_var.get() if hasattr(self, "en_cvvc_pack_var") else "LITE"
+                        en_beat = self.en_cvvc_beat_var.get() if hasattr(self, "en_cvvc_beat_var") else "8-beat"
+                        en_preset = self.en_cvvc_preset_var.get() if hasattr(self, "en_cvvc_preset_var") else "Core"
+                        en_list_fallback = (
+                            bool(self.en_cvvc_list_fallback_var.get())
+                            if hasattr(self, "en_cvvc_list_fallback_var")
+                            else True
+                        )
+                        self._append_log(
+                            f"[EN-CVVC] pack={en_pack} beat={en_beat} preset={en_preset} "
+                            f"list_only_synth={'ON' if en_list_fallback else 'OFF'}"
+                        )
+                        _update_oto_local("영어 CVVC 생성", 0.22, force=True)
+                        processed, total, errors = generate_en_cvvc_oto(
+                            wav_dir=target_wav_dir,
+                            out_path=target_out_path,
+                            pack=en_pack,
+                            beat=en_beat,
+                            preset=en_preset,
+                            alias_suffix=alias_suffix,
+                            include_list_only_synthesis=en_list_fallback,
+                            callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
+                        )
+                    elif lang == "korean" and selected_format == "cmpx":
+                        if not getattr(self, "_is_preview_channel", lambda: False)():
+                            self._append_log(f"{prefix}오류: 한국어 CMPX 모드는 Preview 채널에서만 사용할 수 있습니다.")
+                            self._set_status("오류: Preview 전용 기능")
+                            return False, True, 0, 0
+                        if hasattr(self, "ml_route_var"):
+                            try:
+                                current_route = (
+                                    self._get_ml_route_code()
+                                    if hasattr(self, "_get_ml_route_code")
+                                    else str(self.ml_route_var.get() or "").strip().lower()
+                                )
+                            except Exception:
+                                current_route = ""
+                            if current_route != "nomfa":
+                                try:
+                                    if hasattr(self, "_set_ml_route_from_code"):
+                                        self._set_ml_route_from_code("nomfa")
+                                    else:
+                                        self.ml_route_var.set("No-MFA")
+                                except Exception:
+                                    pass
+                                self._append_log("ℹ CMPX 모드 제한: ML route를 No-MFA로 고정합니다.")
+                        os.environ["UTOA_ML_ROUTE"] = "autofree_v1"
+                        os.environ["UTOA_ML_AUTOFREE_AUX_ENABLE"] = "1"
+                        os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = "0"
+                        if self.no_base_oto_var.get():
+                            self._append_log(f"{prefix}오류: 한국어 CMPX Preview 모드는 베이스 OTO(템플릿 ini)가 필수입니다.")
+                            self._set_status("오류: 베이스 OTO 필요")
+                            return False, False, 0, 0
+                        source_oto = resolve_kr_cmpx_preview_source_oto(
+                            wav_dir=target_wav_dir,
+                            source_hint=tpl_path,
+                        )
+                        if not source_oto:
+                            self._append_log(f"{prefix}오류: 한국어 CMPX Preview용 베이스 OTO를 찾지 못했습니다.")
+                            self._append_log("   템플릿 OTO에 비교용 oto.ini 또는 baseoto.ini를 지정해 주세요.")
+                            self._set_status("오류: 베이스 OTO 필요")
+                            return False, False, 0, 0
+
+                        self._append_log("ℹ 한국어 CMPX Preview 모드: 정렬 단계를 건너뜁니다.")
+                        self._append_log(f"[KR-CMPX] base oto: {source_oto}")
+                        _update_oto_local("CMPX 베이스 매핑 생성", 0.22, force=True)
+                        processed, total, errors = generate_kr_cmpx_preview_oto(
+                            wav_dir=target_wav_dir,
+                            out_path=target_out_path,
+                            source_oto_path=source_oto,
+                            alias_suffix=alias_suffix,
+                            callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
+                        )
+                    elif no_mfa_auto_mode:
+                        _update_oto_local("No-MFA 자동설정 생성", 0.22, force=True)
+                        processed, total, errors = generate_no_mfa_auto_oto(
+                            wav_dir=target_wav_dir,
+                            out_path=target_out_path,
+                            source_oto_path=no_mfa_source_oto or tpl_path,
+                            alias_suffix=alias_suffix,
+                            language=lang,
+                            stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
+                            generation_mode=no_mfa_mode_code,
+                            callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
+                        )
+                    elif lang == "japanese":
+                        self._append_log(f"설정: 일본어 에일리어스 스타일 = {self.ja_alias_style_var.get()}")
+                        _update_oto_local("일본어 OTO 생성", 0.22, force=True)
+                        processed, total, errors = generate_ja_oto(
+                            tg_folder,
+                            tpl_path,
+                            target_out_path,
+                            params=None,
+                            generate_openutau=gen_ou,
+                            gen_missing_vowels=gen_missing,
+                            enable_ml_correction=enable_ml_correction,
+                            alias_style=ja_alias_style,
+                            ja_mapping_words_fallback_enabled=bool(ja_words_fallback),
+                            ja_mapping_spn_ratio_threshold=float(ja_spn_threshold),
+                            ja_mapping_min_vowel_phone_ratio=float(ja_min_vowel_ratio),
+                            ja_mapping_debug_reason_logging=bool(ja_debug_reason),
+                            auto_format=auto_format,
+                            custom_phonemes_path=custom_phonemes_path,
+                            alias_suffix=alias_suffix,
+                            callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
+                        )
+                    else:
+                        _update_oto_local("한국어 OTO 생성", 0.22, force=True)
+                        processed, total, errors = generate_oto(
+                            tg_folder,
+                            tpl_path,
+                            target_out_path,
+                            params,
+                            gen_ou,
+                            gen_missing,
+                            enable_ml_correction=enable_ml_correction,
+                            auto_format=auto_format,
+                            custom_phonemes_path=custom_phonemes_path,
+                            alias_suffix=alias_suffix,
+                            kr_anchor_profile_path=kr_anchor_profile_path,
+                            kr_mapping_confidence_threshold=kr_conf_threshold,
+                            kr_mapping_max_index_jump_default=int(kr_jump_default),
+                            kr_mapping_max_index_jump_high_conf=int(kr_jump_hi),
+                            callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
+                        )
+
+                    if total:
+                        _update_oto_local("생성 결과 정리", float(processed) / float(total))
+                    _update_oto_local("생성 결과 정리", 0.92, force=True)
+
+                    out_exists = os.path.isfile(target_out_path)
+                    out_lines = _read_oto_line_count(target_out_path) if out_exists else -1
+                    if out_exists:
+                        line_info = f"{out_lines}" if out_lines >= 0 else "unknown"
+                        self._append_log(
+                            f"{prefix}1차 생성 완료: OTO 파일 저장 -> {target_out_path} "
+                            f"(processed={processed}/{total}, lines={line_info})"
+                        )
+                        _update_oto_local("OTO 파일 저장 확인", 1.0, force=True)
+                    else:
+                        self._append_log(f"{prefix}오류: OTO 파일 저장 실패 -> {target_out_path}")
+                        self._set_status("오류: OTO 저장 실패")
+                        return False, False, int(processed or 0), int(total or 0)
+
+                    if int(processed or 0) <= 0 and int(total or 0) <= 0:
+                        self._append_log(f"{prefix}오류: OTO 생성 결과가 비어 있어 자동 검증을 건너뜁니다.")
+                        self._set_status("오류: OTO 생성 결과 없음")
+                        return False, False, int(processed or 0), int(total or 0)
+
+                    _update_validate_local("검증 준비", 0.05, force=True)
+                    self._run_auto_validation(
+                        target_wav_dir,
+                        tg_folder,
+                        target_out_path,
+                        callback=_make_progress_callback("validate", batch_index=batch_index, batch_total=batch_total),
+                    )
+                    _update_validate_local("검증 완료", 1.0, force=True)
+                    if not errors:
+                        self._cleanup_generated_output_artifacts(target_out_path, snapshot=cleanup_snapshot)
+                    if errors:
+                        for err in errors:
+                            self._append_log(f"  - {err}")
+                        self._set_status(f"오류: OTO 생성 실패 {len(errors)}건 ({processed}/{total})")
+                        return False, False, int(processed or 0), int(total or 0)
+
+                    self._set_status(f"완료: OTO 생성 성공 ({processed}/{total})")
+                    return True, False, int(processed or 0), int(total or 0)
+
+                success_count = 0
+                failed_count = 0
+                fatal_stop = False
+                last_processed = 0
+                last_total = 0
+                for idx, target_wav_dir in enumerate(target_wav_dirs):
+                    target_out_path = self._resolve_recursive_out_path(
+                        root_wav_dir,
+                        base_out_path,
+                        target_wav_dir,
+                        target_count,
+                    )
+                    if not target_out_path:
+                        failed_count += 1
+                        self._append_log(f"[Batch {idx + 1}/{target_count}] 오류: 출력 경로 계산 실패")
+                        continue
+                    if target_count > 1:
+                        self._append_log(f"[Batch {idx + 1}/{target_count}] 대상 폴더: {target_wav_dir}")
+                        self._append_log(f"[Batch {idx + 1}/{target_count}] 출력 경로: {target_out_path}")
+                    ok, fatal, processed, total = _run_single_target(
+                        target_wav_dir,
+                        target_out_path,
+                        idx,
+                        target_count,
+                    )
+                    last_processed = processed
+                    last_total = total
+                    if ok:
+                        success_count += 1
+                    else:
+                        failed_count += 1
+                    if fatal:
+                        fatal_stop = True
+                        break
+
+                if target_count > 1:
+                    if success_count <= 0:
+                        if fatal_stop:
+                            self._set_status("오류: 배치 OTO 생성 중단")
+                        else:
+                            self._set_status(f"오류: 배치 OTO 생성 실패 (0/{target_count})")
+                    elif failed_count > 0:
+                        self._set_status(f"완료(부분 성공): 배치 OTO 생성 {success_count}/{target_count}")
+                    else:
+                        self._set_status(f"완료: 배치 OTO 생성 성공 ({success_count}/{target_count})")
+                elif failed_count > 0 and last_total <= 0:
+                    self._set_status("오류: OTO 생성 실패")
+
+            except Exception as e:
+                self._handle_error("OTO 생성", e)
+            finally:
+                self._set_running(False)
+
+        self._run_in_thread(task)

@@ -1,0 +1,84 @@
+﻿# Public-source publishing profile (additional ignore file)
+#
+# IMPORTANT
+# - This file is NOT applied automatically by Git.
+# - Use it as a temporary publish profile (e.g. copy to .gitignore on a publish branch,
+#   or use with core.excludesFile for export-only workflows).
+#
+# Goal: include source code only, exclude datasets/docs/venv/cache/build/runtime artifacts.
+
+# 1) Ignore everything by default
+*
+
+# 2) Keep directory traversal so allowlist rules below can work
+!*/
+
+# 3) Keep repo metadata and essential root-level source configs
+!.gitignore
+!.gitignore.public
+!.gitattributes
+!LICENSE
+!main.py
+!build.py
+!build_pyinstaller_beta.py
+!pytest.ini
+!requirements.txt
+!requirements-ml.txt
+!setup_mfa.bat
+!setup_mfa_beta.bat
+!run_prepare_pairs.ps1
+!UTAU_Auto_OTO.spec
+!release_channel.json
+
+# 4) Keep source directories
+!core/
+!core/**
+!ui/
+!ui/**
+!ml/
+!ml/**
+!scripts/
+!scripts/**
+!.github/
+!.github/**
+
+# 5) Exclude non-code/data-heavy content even under kept trees
+ml/notebooks/
+ml/notebooks/**
+*.ipynb
+
+# 6) Explicitly exclude local artifacts and private/training data roots
+.cache/
+.venv/
+.env/
+__pycache__/
+logs/
+build_assets/
+installer_output/
+UTAU_Auto_OTO_Release*/
+release_assets/
+Docs/
+dataset/
+dataset_staged/
+custom_test_wavs/
+test_wavs/
+experiments/
+plan/
+ml_workspace/
+ML_models/
+models_installed/
+
+# 7) Common binary/media artifacts
+*.wav
+*.flac
+*.mp3
+*.TextGrid
+*.lab
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.zip
+*.7z
+*.tar
+*.tar.gz

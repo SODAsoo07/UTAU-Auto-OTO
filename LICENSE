@@ -1,21 +1,84 @@
-MIT License
+Auto OTO Source-Available Freeware License
+Draft v0.1
 
-Copyright (c) 2026 SODAsoo07
+Copyright (c) 2026 Auto OTO contributors
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. Scope
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+This license applies to the source code, scripts, UI assets, build files, and
+project documentation distributed in this repository, except for:
+
+- model weights, checkpoints, model metadata, and other files covered by
+  `MODEL_LICENSE.md`
+- third-party components distributed under their own licenses
+
+2. Permission Grant
+
+Subject to this license, you may:
+
+- use the Software free of charge
+- read, copy, and modify the source code
+- build and run the Software
+- redistribute original or modified copies of the Software in source or binary
+  form, provided that the redistribution is free of charge
+
+3. Conditions
+
+When you redistribute the Software or a modified version, you must:
+
+- include this license text
+- preserve existing copyright notices and attribution notices
+- clearly state that you changed the Software
+- not imply that the original author endorses your modified version
+
+4. Commercial Restriction
+
+You may not commercially exploit the Software or any modified version of the
+Software.
+
+For this license, "commercially exploit" includes, without limitation:
+
+- selling, licensing, sublicensing, renting, or leasing the Software
+- charging for access to the Software
+- distributing the Software as part of a paid product, paid bundle, or paid
+  membership benefit
+- offering paid support, paid hosting, paid API access, paid SaaS access, or
+  other paid services where access to or use of the Software is a material part
+  of the paid offering
+- using a modified version of the Software to create software revenue
+
+5. Outputs and User Content
+
+This license does not claim ownership over files, oto settings, configuration
+data, voicebanks, or creative works produced by users. Rights relating to model
+outputs and official bundled models are described separately in
+`MODEL_LICENSE.md`.
+
+6. Third-Party Components
+
+Third-party components remain subject to their own licenses. If a third-party
+license imposes additional obligations, you must comply with them.
+
+7. No Trademark License
+
+This license does not grant any right to use the project's name, logo, or
+branding except as reasonably necessary for attribution.
+
+8. Termination
+
+Your rights under this license terminate automatically if you violate this
+license. If you stop the violation, destroy unauthorized paid distributions, and
+come back into compliance, the licensor may allow your rights to resume.
+
+9. No Warranty
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+10. Limitation of Liability
+
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR
+OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE
+OR OTHER DEALINGS IN THE SOFTWARE.

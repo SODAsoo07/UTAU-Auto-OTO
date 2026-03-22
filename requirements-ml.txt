@@ -1,0 +1,4 @@
+lightgbm>=4.3
+pandas>=2.0
+scikit-learn>=1.4
+PyYAML>=6.0
