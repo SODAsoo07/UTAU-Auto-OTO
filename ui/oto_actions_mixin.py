@@ -539,7 +539,7 @@ class OtoActionsMixin:
                         return False, False, int(processed or 0), int(total or 0)
 
                     if int(processed or 0) <= 0 and int(total or 0) <= 0:
-                        self._append_log(f"{prefix}오류: OTO 생성 결과가 비어 있어 자동 검증을 건너뜁니다.")
+                        self._append_log(f"{prefix}[ERROR] 오류: OTO 생성 결과가 비어 있어 자동 검증을 건너뜁니다.")
                         self._set_status("오류: OTO 생성 결과 없음")
                         return False, False, int(processed or 0), int(total or 0)
 

@@ -19,6 +19,15 @@ from ui.theme_tokens import (
 class LayoutMixin:
     def _build_ui(self):
         self.configure(fg_color=PALETTE.panel_bg)
+        try:
+            pending_job = getattr(self, "_lazy_prewarm_job", None)
+            if pending_job:
+                self.after_cancel(pending_job)
+        except Exception:
+            pass
+        self._lazy_prewarm_job = None
+        self._lazy_prewarm_queue = []
+        self._tab_build_pending = set()
         if not hasattr(self, "auto_format_var"):
             self.auto_format_var = ctk.StringVar(value="자동 감지 (권장)")
 
@@ -38,6 +47,8 @@ class LayoutMixin:
         right_panel = ctk.CTkFrame(right_wrap, fg_color=PALETTE.panel_bg)
         left_panel.pack(fill="both", expand=True, padx=(15, 8), pady=(10, 5))
         right_panel.pack(fill="both", expand=True, padx=(8, 15), pady=(10, 5))
+        left_scroll = ctk.CTkScrollableFrame(left_panel, fg_color=PALETTE.panel_bg)
+        left_scroll.pack(fill="both", expand=True, padx=0, pady=0)
         main_body.add(left_wrap, minsize=340)
         main_body.add(right_wrap, minsize=320)
 
@@ -62,7 +73,7 @@ class LayoutMixin:
             pass
 
         path_frame = ctk.CTkFrame(
-            left_panel,
+            left_scroll,
             fg_color=PALETTE.panel_bg,
             border_width=1,
             border_color=PALETTE.panel_border,
@@ -405,13 +416,13 @@ class LayoutMixin:
         self._toggle_advanced_options(force=False)
 
         self.pipeline_action_host = ctk.CTkFrame(
-            left_panel,
+            left_scroll,
             fg_color=PALETTE.panel_bg,
             border_width=1,
             border_color=PALETTE.panel_border,
             corner_radius=8,
         )
-        self.pipeline_action_host.pack(side="bottom", fill="x", padx=0, pady=(8, 0))
+        self.pipeline_action_host.pack(side="top", fill="x", padx=0, pady=(8, 0))
 
         tab_header = ctk.CTkFrame(right_panel, fg_color=PALETTE.panel_bg)
         tab_header.pack(fill="x", padx=0, pady=(0, 4))
@@ -467,10 +478,11 @@ class LayoutMixin:
                 self._get_or_add_tab(tab_name)
             except Exception:
                 pass
-        for tab_name in ("파이프라인", "로그"):
+        for tab_name in ("파이프라인",):
             self._ensure_tab_built(tab_name)
         self.tabview.set("파이프라인")
         self._on_tabview_change()
+        self._schedule_lazy_tab_prewarm()
         self._sync_developer_mode_ui()
 
         bottom = ctk.CTkFrame(self, fg_color=PALETTE.panel_bg)
@@ -629,7 +641,35 @@ class LayoutMixin:
             except Exception:
                 current = ""
         if current:
-            self._ensure_tab_built(current)
+            self._request_tab_build(current)
+
+    def _request_tab_build(self, tab_name):
+        name = str(tab_name or "").strip()
+        if not name:
+            return
+        if name in (getattr(self, "_built_tabs", set()) or set()):
+            return
+        pending = getattr(self, "_tab_build_pending", None)
+        if not isinstance(pending, set):
+            pending = set()
+            self._tab_build_pending = pending
+        if name in pending:
+            return
+        pending.add(name)
+
+        def _build_once():
+            try:
+                self._ensure_tab_built(name)
+            finally:
+                try:
+                    pending.discard(name)
+                except Exception:
+                    pass
+
+        try:
+            self.after_idle(_build_once)
+        except Exception:
+            _build_once()
 
     def _ensure_tab_built(self, tab_name):
         name = str(tab_name or "").strip()
@@ -659,6 +699,43 @@ class LayoutMixin:
                 self._sync_advanced_tuning_slider_controls()
             if hasattr(self, "_refresh_ml_backend_status"):
                 self._refresh_ml_backend_status()
+
+    def _schedule_lazy_tab_prewarm(self):
+        builders = getattr(self, "_lazy_tab_builders", None) or {}
+        built_tabs = getattr(self, "_built_tabs", None) or set()
+        preferred_order = ("로그", "고급 설정", "파라미터 조정", "상세 로그", "크레딧", "파이프라인")
+        queue = [name for name in preferred_order if name in builders and name not in built_tabs]
+        for name in builders.keys():
+            if name not in built_tabs and name not in queue:
+                queue.append(name)
+        self._lazy_prewarm_queue = queue
+        if not queue:
+            return
+
+        def _kickoff():
+            self._lazy_prewarm_job = None
+            self._run_lazy_tab_prewarm_step()
+
+        try:
+            self._lazy_prewarm_job = self.after(180, _kickoff)
+        except Exception:
+            _kickoff()
+
+    def _run_lazy_tab_prewarm_step(self):
+        queue = list(getattr(self, "_lazy_prewarm_queue", []) or [])
+        if not queue:
+            self._lazy_prewarm_job = None
+            return
+        name = queue.pop(0)
+        self._lazy_prewarm_queue = queue
+        self._request_tab_build(name)
+        if not queue:
+            self._lazy_prewarm_job = None
+            return
+        try:
+            self._lazy_prewarm_job = self.after(120, self._run_lazy_tab_prewarm_step)
+        except Exception:
+            self._run_lazy_tab_prewarm_step()
 
     def _rebuild_ui_for_theme_change(self):
         if bool(getattr(self, "is_running", False)):
