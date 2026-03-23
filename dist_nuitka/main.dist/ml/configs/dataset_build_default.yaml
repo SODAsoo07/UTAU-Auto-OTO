@@ -1,7 +1,0 @@
-feature_version: v1
-matching_key:
-  - wav_norm
-  - alias_norm
-  - occurrence_index
-split_policy: voicebank_group
-workspace_root: ../ml_workspace
