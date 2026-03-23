@@ -19,7 +19,6 @@ FFMPEG_BIN_DIR = os.path.join(FFMPEG_DIR, "bin")
 FFMPEG_RELEASE_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 REQUIRED_FFMPEG_BINARIES = ("ffmpeg.exe", "ffprobe.exe")
 REQUIRED_MSVC_RUNTIME_DLLS = ("msvcp140.dll", "msvcp140_1.dll")
-OPTIONAL_MSVC_RUNTIME_DLLS = ("vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll")
 
 DEFAULT_APP_NAME = "UTAU_Auto_OTO"
 DEFAULT_CHANNEL = "stable"
@@ -40,7 +39,6 @@ EXCLUDED_MODULES = [
     "ml",
 ]
 EXCLUDED_TRAINING_MODULES = [
-    "core.ja_oto_autotune",
     "core.oto_ml.coupled.training",
 ]
 RUNTIME_DATA_PATHS = [
@@ -206,7 +204,7 @@ def _iter_msvc_runtime_files():
     found = []
     found_names = set()
     missing_required = []
-    for dll_name in REQUIRED_MSVC_RUNTIME_DLLS + OPTIONAL_MSVC_RUNTIME_DLLS:
+    for dll_name in REQUIRED_MSVC_RUNTIME_DLLS:
         located_path = ""
         for root in search_roots:
             probe = os.path.join(root, dll_name)
@@ -216,7 +214,7 @@ def _iter_msvc_runtime_files():
         if located_path:
             found.append((located_path, dll_name))
             found_names.add(dll_name.lower())
-        elif dll_name in REQUIRED_MSVC_RUNTIME_DLLS:
+        else:
             missing_required.append(dll_name)
 
     if found:

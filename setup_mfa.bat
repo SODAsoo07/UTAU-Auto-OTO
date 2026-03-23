@@ -1,4 +1,5 @@
-﻿@echo off
+@echo off
+@echo off
 setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
 title UTAU Auto OTO - MFA 설치
