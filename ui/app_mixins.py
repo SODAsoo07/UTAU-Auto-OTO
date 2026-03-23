@@ -3,6 +3,7 @@ import glob
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import sys
@@ -19,7 +20,7 @@ from core.format_type_utils import normalize_auto_format_value
 from core.log_events import classify_log_message, log_with_event
 from core.mfa_runner import ALERT_MFA_PERMISSION_DENIED, ALERT_MSVC_REQUIRED
 from core.oto_validator import validate_oto_timing
-from core.pipeline_status import normalize_aligner_name
+from ui.theme_tokens import DEFAULT_THEME_PROFILE, PALETTE, normalize_theme_profile_name
 
 
 class FileDialogMixin:
@@ -48,13 +49,24 @@ class FileDialogMixin:
 
     def _ml_model_repo_root(self):
         base_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        external_root = os.path.join(base_dir, "models")
+        if os.path.isdir(external_root):
+            return external_root
         installed_root = os.path.join(base_dir, "models_installed", "oto_ml")
         if os.path.isdir(installed_root):
             return installed_root
         return os.path.join(base_dir, "ML_models")
 
     def _ml_model_language_root(self, language):
-        return os.path.join(self._ml_model_repo_root(), str(language or "").strip().lower())
+        lang = str(language or "").strip().lower()
+        repo_root = self._ml_model_repo_root()
+        direct = os.path.join(repo_root, lang)
+        if os.path.isdir(direct):
+            return direct
+        nested = os.path.join(repo_root, "oto_ml", lang)
+        if os.path.isdir(nested):
+            return nested
+        return direct
 
     def _ml_model_language_for_var(self, var):
         if hasattr(self, "ml_model_root_ja_var") and var is self.ml_model_root_ja_var:
@@ -114,7 +126,9 @@ class FileDialogMixin:
 
     def _apply_recommended_ml_model_defaults(self):
         language = self._get_language() if hasattr(self, "_get_language") else "korean"
-        if language == "japanese" and hasattr(self, "ml_model_root_ja_var"):
+        if language == "english":
+            target_var = None
+        elif language == "japanese" and hasattr(self, "ml_model_root_ja_var"):
             target_var = self.ml_model_root_ja_var
         elif hasattr(self, "ml_model_root_kr_var"):
             target_var = self.ml_model_root_kr_var
@@ -138,6 +152,110 @@ class FileDialogMixin:
         if path:
             var.set(path)
 
+    def _dir_has_model_meta(self, path):
+        raw = str(path or "").strip()
+        if not raw or not os.path.isdir(raw):
+            return False
+        try:
+            for _root, _dirs, files in os.walk(raw):
+                if "model_meta.json" in files:
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def _detect_language_model_root(self, selected_root, language):
+        lang = str(language or "").strip().lower()
+        base = str(selected_root or "").strip()
+        if not base:
+            return ""
+        base_abs = os.path.abspath(base)
+
+        candidates = [
+            os.path.join(base, lang),
+            os.path.join(base, "oto_ml", lang),
+            os.path.join(base, "ML_models", lang),
+            os.path.join(base, "models", lang),
+            os.path.join(base, "models", "oto_ml", lang),
+        ]
+        for candidate in candidates:
+            if self._dir_has_model_meta(candidate):
+                return candidate
+
+        # Allow selecting a language root directly (e.g. .../models/korean)
+        leaf = os.path.basename(os.path.normpath(base)).strip().lower()
+        if leaf == lang and self._dir_has_model_meta(base):
+            return base
+
+        # Recursive fallback: allow selecting a parent folder that contains model trees.
+        # Pick the highest (shortest) language root, preferring non-autofree trees.
+        scored = []
+        try:
+            for root, _dirs, files in os.walk(base_abs):
+                if "model_meta.json" not in files:
+                    continue
+                norm_parts = os.path.normpath(root).split(os.sep)
+                lower_parts = [part.lower() for part in norm_parts]
+                for idx, part in enumerate(lower_parts):
+                    if part != lang:
+                        continue
+                    cand = os.sep.join(norm_parts[: idx + 1])
+                    cand_abs = os.path.abspath(cand)
+                    if not cand_abs.lower().startswith(base_abs.lower()):
+                        continue
+                    if not self._dir_has_model_meta(cand_abs):
+                        continue
+                    in_autofree = "autofree" in lower_parts[:idx]
+                    priority = 1 if not in_autofree else 2
+                    depth = cand_abs.count(os.sep)
+                    scored.append((priority, depth, len(cand_abs), cand_abs))
+        except Exception:
+            scored = []
+
+        if scored:
+            scored.sort()
+            return scored[0][3]
+        return ""
+
+    def _browse_and_apply_downloaded_model_root(self):
+        initial_dir = self._ml_model_repo_root() if hasattr(self, "_ml_model_repo_root") else ""
+        selected = filedialog.askdirectory(initialdir=initial_dir)
+        if not selected:
+            return
+
+        kr_root = self._detect_language_model_root(selected, "korean")
+        ja_root = self._detect_language_model_root(selected, "japanese")
+
+        if hasattr(self, "ml_model_root_kr_var") and kr_root:
+            self.ml_model_root_kr_var.set(kr_root)
+        if hasattr(self, "ml_model_root_ja_var") and ja_root:
+            self.ml_model_root_ja_var.set(ja_root)
+
+        if hasattr(self, "_on_ml_model_root_change"):
+            self._on_ml_model_root_change()
+
+        try:
+            if hasattr(self, "_append_log"):
+                self._append_log(
+                    "[OTO-ML] 다운로드 모델 경로 적용: "
+                    f"KR={kr_root or '(미감지)'} / JA={ja_root or '(미감지)'}"
+                )
+        except Exception:
+            pass
+
+        if not kr_root and not ja_root:
+            messagebox.showwarning(
+                "모델 경로 감지 실패",
+                "선택한 폴더에서 model_meta.json을 찾지 못했습니다.\n"
+                "예: models/korean 또는 models/oto_ml/korean 구조를 확인해 주세요.",
+            )
+        elif (not kr_root) or (not ja_root):
+            messagebox.showinfo(
+                "모델 경로 부분 적용",
+                "한 언어만 감지되어 부분 적용했습니다.\n"
+                f"한국어: {kr_root or '미감지'}\n일본어: {ja_root or '미감지'}",
+            )
+
     def _browse_save_by_var(self, var, filetypes, defext):
         path = filedialog.asksaveasfilename(filetypes=filetypes, defaultextension=defext)
         if path:
@@ -146,14 +264,100 @@ class FileDialogMixin:
 
 class AppRuntimeMixin:
     _MSVC_BUILD_TOOLS_URL = "https://visualstudio.microsoft.com/visual-cpp-build-tools/"
-    _ML_RUNTIME_PRESET_LABELS = {
-        "recommended": "권장(균형)",
-        "speed": "속도 우선",
-        "quality": "정밀 우선",
-    }
+
+    def _path_mask_roots(self):
+        roots = []
+        seen = set()
+
+        def _add_root(label, value):
+            raw = str(value or "").strip()
+            if not raw:
+                return
+            try:
+                normalized = os.path.normcase(os.path.abspath(raw))
+            except Exception:
+                return
+            if not normalized or normalized in seen:
+                return
+            seen.add(normalized)
+            roots.append((label, normalized))
+
+        _add_root("app", getattr(self, "app_dir", ""))
+        _add_root("data", getattr(self, "writable_data_dir", ""))
+        _add_root("data", getattr(self, "app_data_dir", ""))
+        try:
+            _add_root("cwd", os.getcwd())
+        except Exception:
+            pass
+        _add_root("user", os.environ.get("USERPROFILE", ""))
+        _add_root("localappdata", os.environ.get("LOCALAPPDATA", ""))
+        _add_root("temp", os.environ.get("TEMP", ""))
+        _add_root("tmp", os.environ.get("TMP", ""))
+        return roots
+
+    def _sanitize_path_value(self, value):
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        expanded = os.path.expandvars(os.path.expanduser(text))
+        looks_abs = bool(re.match(r"^[A-Za-z]:[\\/]", expanded)) or expanded.startswith("\\\\")
+        if not looks_abs:
+            return text.replace("\\", "/")
+
+        try:
+            normalized = os.path.normcase(os.path.abspath(expanded))
+        except Exception:
+            normalized = expanded
+
+        for label, root in self._path_mask_roots():
+            root_cmp = root.rstrip("\\/")
+            if normalized == root_cmp:
+                return f"<{label}>"
+            prefix = root_cmp + os.sep
+            if normalized.startswith(prefix):
+                try:
+                    rel = os.path.relpath(expanded, root_cmp)
+                except Exception:
+                    rel = expanded[len(prefix):]
+                rel = str(rel or "").replace("\\", "/").lstrip("./")
+                return f"<{label}>/{rel}" if rel else f"<{label}>"
+
+        tail = re.split(r"[\\/]+", expanded.strip("\\/"))
+        tail = [part for part in tail if part and not re.match(r"^[A-Za-z]:$", part)]
+        if not tail:
+            return "<path>"
+        short_tail = "/".join(tail[-3:])
+        return f"<path>/{short_tail}"
+
+    def _mask_sensitive_text(self, text):
+        masked = str(text or "")
+        if not masked:
+            return masked
+
+        def _replace_path(match):
+            return self._sanitize_path_value(match.group(0))
+
+        masked = re.sub(r"(?<![\w/])(?:[A-Za-z]:\\|[A-Za-z]:/)[^\s\"'<>|]+", _replace_path, masked)
+        masked = re.sub(r"\\\\[^\s\"'<>|]+", _replace_path, masked)
+
+        usernames = set()
+        for value in (
+            os.environ.get("USERNAME", ""),
+            os.path.basename(os.environ.get("USERPROFILE", "") or ""),
+            os.path.basename(os.environ.get("HOME", "") or ""),
+        ):
+            token = str(value or "").strip()
+            if token:
+                usernames.add(token)
+
+        masked = re.sub(r"(?i)(\\\\users\\\\)([^\\\\/\r\n]+)", r"\1***", masked)
+        masked = re.sub(r"(?i)(/users/)([^/\r\n]+)", r"\1***", masked)
+        for username in sorted(usernames, key=len, reverse=True):
+            masked = re.sub(re.escape(username), "***", masked, flags=re.IGNORECASE)
+        return masked
 
     def _normalize_ui_message(self, msg: str) -> str:
-        original = str(msg or "")
+        original = self._mask_sensitive_text(str(msg or ""))
         text = original
         if not text:
             return text
@@ -176,6 +380,45 @@ class AppRuntimeMixin:
             if "dict" in original.lower() or "사전" in original:
                 return "사전 작업 진행 중..."
         return text
+
+    def _install_global_exception_hooks(self):
+        if getattr(self, "_global_exception_hooks_installed", False):
+            return
+        self._global_exception_hooks_installed = True
+
+        def _tk_exception_handler(exc_type, exc_value, exc_traceback):
+            if isinstance(exc_value, KeyboardInterrupt):
+                return
+            tb = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+            self._handle_error("UI Callback", exc_value, traceback_text=tb, auto_popup=True)
+
+        self.report_callback_exception = _tk_exception_handler
+
+        previous_thread_hook = getattr(threading, "excepthook", None)
+
+        def _thread_exception_handler(args):
+            try:
+                if args is None or args.exc_type is KeyboardInterrupt:
+                    return
+                tb = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+                thread_name = getattr(getattr(args, "thread", None), "name", "") or "worker"
+                self._after_safe(
+                    lambda step=f"Thread:{thread_name}", err=args.exc_value, trace=tb: self._handle_error(
+                        step,
+                        err,
+                        traceback_text=trace,
+                        auto_popup=True,
+                    )
+                )
+            finally:
+                if callable(previous_thread_hook):
+                    try:
+                        previous_thread_hook(args)
+                    except Exception:
+                        pass
+
+        if callable(previous_thread_hook):
+            threading.excepthook = _thread_exception_handler
 
     def _normalize_ml_selector_mode(self, value: str) -> str:
         mode = str(value or "").strip().lower()
@@ -210,192 +453,858 @@ class AppRuntimeMixin:
             os.environ.pop("UTOA_ML_SELECTOR_ENABLE", None)
         return mode
 
-    def _normalize_mel_weight_mode(self, value: str) -> str:
-        mode = str(value or "").strip().lower().replace(" ", "")
-        if mode in {
-            "mel_boost",
-            "mel-boost",
-            "melboost",
-            "boost",
-            "mel",
-            "mel우선(실험)",
-            "mel우선",
-        }:
-            return "mel_boost"
-        return "auto"
+    def _resolve_auto_format_for_policy(self, language: str, auto_format_value: str) -> str:
+        lang = str(language or "korean").strip().lower()
+        try:
+            normalized = normalize_auto_format_value(lang, auto_format_value)
+        except Exception:
+            normalized = ""
+        fmt = str(normalized or "").strip().lower()
+        if not fmt:
+            return "general"
+        if "auto" in fmt or "자동" in fmt:
+            return "general"
+        return fmt
 
-    def _describe_mel_weight_mode(self, value: str) -> str:
-        mode = self._normalize_mel_weight_mode(value)
-        if mode == "mel_boost":
-            return "MEL 우선(실험)"
-        return "기본(auto)"
+    def _clear_ml_override_envs(self) -> None:
+        for key in list(os.environ.keys()):
+            if key.startswith("UTOA_ML_COUPLED_MIN_CONF_"):
+                os.environ.pop(key, None)
+        for key in (
+            "UTOA_ML_COUPLED_MIN_CONF",
+            "UTOA_ML_COUPLED_MIN_CONF_MODEL_OFFSET",
+            "UTOA_ML_GATED_ENSEMBLE_ENABLE",
+            "UTOA_ML_ANCHOR_MEL_GAMMA",
+        ):
+            os.environ.pop(key, None)
 
-    def _apply_mel_weight_runtime_mode(self, value: str) -> str:
-        mode = self._normalize_mel_weight_mode(value)
-        os.environ["UTOA_MEL_WEIGHT_MODE"] = mode
-        return mode
+    def _clear_advanced_tuning_envs(self) -> None:
+        for key in (
+            "UTOA_KR_MAPPING_CONF_THRESHOLD",
+            "UTOA_KR_CONTINUITY_ENABLE",
+            "UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ",
+            "UTOA_KR_VC_NEIGHBOR_ENABLE",
+            "UTOA_KR_VC_NEIGHBOR_BLEND",
+            "UTOA_KR_VC_NEIGHBOR_MAX_SHIFT",
+            "UTOA_KR_VC_NEIGHBOR_LEAD_MS",
+            "UTOA_KR_VC_NEIGHBOR_TAIL_MS",
+            "UTOA_KR_VC_NEIGHBOR_MIN_LEN",
+            "UTOA_JA_VC_NEIGHBOR_ENABLE",
+            "UTOA_JA_VC_NEIGHBOR_BLEND",
+            "UTOA_JA_VC_NEIGHBOR_MAX_SHIFT",
+            "UTOA_JA_VC_NEIGHBOR_LEAD_MS",
+            "UTOA_JA_VC_NEIGHBOR_TAIL_MS",
+            "UTOA_JA_VC_NEIGHBOR_MIN_LEN",
+            "UTOA_SOFT_BANK_MODE",
+            "UTOA_MFA_SOFT_BANK_MODE",
+            "UTOA_MEL_SOUND_DB_MARGIN",
+            "UTOA_MEL_SOUND_ENERGY_MIN",
+            "UTOA_MEL_HARD_SILENCE_ENERGY_MAX",
+            "UTOA_MEL_SOFT_SILENCE_ENERGY_MAX",
+            "UTOA_MEL_WEAK_F2_MAX",
+            "UTOA_MEL_WEAK_F3_MAX",
+            "UTOA_MEL_WEAK_HIGH_MAX",
+            "UTOA_MEL_ONSET_SLOPE_BASE",
+            "UTOA_MEL_ONSET_ENERGY_BASE",
+            "UTOA_MEL_ONSET_DB_MARGIN_BASE",
+            "UTOA_MEL_ONSET_ENERGY_SIBILANT",
+            "UTOA_MEL_ONSET_DB_MARGIN_SIBILANT",
+            "UTOA_MFA_LOW_RMS_GAIN_ENABLE",
+            "UTOA_MFA_WEAK_VOICE_ASSIST_ENABLE",
+            "UTOA_MFA_WEAK_VOICE_PREEMPH_MIX",
+            "UTOA_SYLLABLE_STRICT_MODE",
+        ):
+            os.environ.pop(key, None)
 
-    def _normalize_ml_runtime_preset(self, value: str) -> str:
-        raw = str(value or "").strip().lower().replace(" ", "")
-        mapping = {
-            "권장(균형)": "recommended",
-            "권장": "recommended",
-            "균형": "recommended",
-            "recommended": "recommended",
-            "balanced": "recommended",
-            "속도우선": "speed",
-            "속도": "speed",
-            "빠름": "speed",
-            "speed": "speed",
-            "정밀우선": "quality",
-            "정밀": "quality",
-            "품질": "quality",
-            "quality": "quality",
-            "accurate": "quality",
-        }
-        return mapping.get(raw, "recommended")
+    def _apply_advanced_tuning_envs(self) -> None:
+        self._clear_advanced_tuning_envs()
 
-    def _describe_ml_runtime_preset(self, value: str) -> str:
-        code = self._normalize_ml_runtime_preset(value)
-        return self._ML_RUNTIME_PRESET_LABELS.get(code, self._ML_RUNTIME_PRESET_LABELS["recommended"])
-
-    def _ml_runtime_preset_values(self):
-        return [self._ML_RUNTIME_PRESET_LABELS["recommended"], self._ML_RUNTIME_PRESET_LABELS["speed"], self._ML_RUNTIME_PRESET_LABELS["quality"]]
-
-    def _ml_runtime_preset_payload(self, code: str):
-        normalized = self._normalize_ml_runtime_preset(code)
-        payloads = {
-            "recommended": {
-                "enable_ml_correction": True,
-                "ml_route": "legacy",
-                "ml_coupled_enable": True,
-                "ml_coupled_backend": "auto",
-                "ml_coupled_device": "auto",
-                "ml_coupled_strict_constraint": False,
-                "ml_batch_inference_enable": True,
-                "ml_batch_inference_size": "256",
-                "ml_legacy_fallback_enable": False,
-                "ml_mel_weight_mode": "MEL 우선(실험)",
-                "ml_anchor_mel_gamma": "1.2",
-            },
-            "speed": {
-                "enable_ml_correction": True,
-                "ml_route": "legacy",
-                "ml_coupled_enable": True,
-                "ml_coupled_backend": "auto",
-                "ml_coupled_device": "auto",
-                "ml_coupled_strict_constraint": False,
-                "ml_batch_inference_enable": True,
-                "ml_batch_inference_size": "512",
-                "ml_legacy_fallback_enable": False,
-                "ml_mel_weight_mode": "기본(auto)",
-                "ml_anchor_mel_gamma": "1.0",
-            },
-            "quality": {
-                "enable_ml_correction": True,
-                "ml_route": "legacy",
-                "ml_coupled_enable": True,
-                "ml_coupled_backend": "auto",
-                "ml_coupled_device": "auto",
-                "ml_coupled_strict_constraint": True,
-                "ml_batch_inference_enable": True,
-                "ml_batch_inference_size": "128",
-                "ml_legacy_fallback_enable": True,
-                "ml_mel_weight_mode": "MEL 우선(실험)",
-                "ml_anchor_mel_gamma": "1.35",
-            },
-        }
-        payload = dict(payloads.get(normalized, payloads["recommended"]))
-
-        language = self._get_language() if hasattr(self, "_get_language") else "korean"
-        format_code = ""
-        if hasattr(self, "auto_format_var"):
+        def _parse_float(raw_value):
+            txt = str(raw_value or "").strip()
+            if not txt:
+                return None
             try:
-                format_code = normalize_auto_format_value(language, self.auto_format_var.get()) or ""
+                return float(txt)
             except Exception:
-                format_code = ""
-        fmt = format_code or "general"
+                return None
 
-        context_overrides = {
-            ("korean", "cv"): {
-                "recommended": {"ml_batch_inference_size": "320", "ml_anchor_mel_gamma": "1.1", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
-                "speed": {"ml_batch_inference_size": "640", "ml_anchor_mel_gamma": "1.0", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
-                "quality": {"ml_batch_inference_size": "192", "ml_anchor_mel_gamma": "1.25"},
-            },
-            ("korean", "cvc"): {
-                "recommended": {"ml_batch_inference_size": "224", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.3"},
-                "speed": {"ml_batch_inference_size": "448", "ml_coupled_strict_constraint": False, "ml_anchor_mel_gamma": "1.15"},
-                "quality": {"ml_batch_inference_size": "128", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.4"},
-            },
-            ("korean", "cvvc"): {
-                "recommended": {"ml_batch_inference_size": "224", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.3"},
-                "speed": {"ml_batch_inference_size": "448", "ml_coupled_strict_constraint": False, "ml_anchor_mel_gamma": "1.15"},
-                "quality": {"ml_batch_inference_size": "128", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.4"},
-            },
-            ("korean", "vcv"): {
-                "recommended": {"ml_batch_inference_size": "192", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.35", "ml_mel_weight_mode": "MEL ・ｰ・(・､嵭・"},
-                "speed": {"ml_batch_inference_size": "384", "ml_coupled_strict_constraint": False, "ml_anchor_mel_gamma": "1.2", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
-                "quality": {"ml_batch_inference_size": "96", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.45", "ml_mel_weight_mode": "MEL ・ｰ・(・､嵭・"},
-            },
-            ("japanese", "cv"): {
-                "recommended": {"ml_batch_inference_size": "384", "ml_anchor_mel_gamma": "1.0", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
-                "speed": {"ml_batch_inference_size": "640", "ml_anchor_mel_gamma": "1.0", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
-                "quality": {"ml_batch_inference_size": "224", "ml_anchor_mel_gamma": "1.15", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
-            },
-            ("japanese", "cvvc"): {
-                "recommended": {"ml_batch_inference_size": "320", "ml_anchor_mel_gamma": "1.05", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
-                "speed": {"ml_batch_inference_size": "640", "ml_anchor_mel_gamma": "1.0", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
-                "quality": {"ml_batch_inference_size": "192", "ml_anchor_mel_gamma": "1.2", "ml_mel_weight_mode": "MEL ・ｰ・(・､嵭・"},
-            },
-            ("japanese", "vcv"): {
-                "recommended": {"ml_batch_inference_size": "256", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.2", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
-                "speed": {"ml_batch_inference_size": "512", "ml_coupled_strict_constraint": False, "ml_anchor_mel_gamma": "1.05", "ml_mel_weight_mode": "・ｰ・ｸ(auto)"},
-                "quality": {"ml_batch_inference_size": "160", "ml_coupled_strict_constraint": True, "ml_anchor_mel_gamma": "1.3", "ml_mel_weight_mode": "MEL ・ｰ・(・､嵭・"},
-            },
-        }
-        default_context = ("korean", "cvvc") if language == "korean" else ("japanese", "cvvc")
-        override = context_overrides.get((language, fmt), context_overrides.get(default_context, {})).get(normalized, {})
-        payload.update(override)
-        return payload
-
-    def _apply_ml_runtime_preset(self, value: str, *, log_message: bool = False):
-        code = self._normalize_ml_runtime_preset(value)
-        label = self._describe_ml_runtime_preset(code)
-        payload = self._ml_runtime_preset_payload(code)
-
-        if hasattr(self, "ml_runtime_preset_var"):
-            self.ml_runtime_preset_var.set(label)
-
-        var_map = {
-            "enable_ml_correction": "enable_ml_correction_var",
-            "ml_route": "ml_route_var",
-            "ml_coupled_enable": "ml_coupled_enable_var",
-            "ml_coupled_backend": "ml_coupled_backend_var",
-            "ml_coupled_device": "ml_coupled_device_var",
-            "ml_coupled_strict_constraint": "ml_coupled_strict_constraint_var",
-            "ml_batch_inference_enable": "ml_batch_inference_enable_var",
-            "ml_batch_inference_size": "ml_batch_inference_size_var",
-            "ml_legacy_fallback_enable": "ml_legacy_fallback_enable_var",
-            "ml_mel_weight_mode": "ml_mel_weight_mode_var",
-            "ml_anchor_mel_gamma": "ml_anchor_mel_gamma_var",
-        }
-        for key, var_name in var_map.items():
+        def _set_float_env(var_name: str, env_name: str, *, min_value=None, max_value=None):
             if not hasattr(self, var_name):
+                return
+            try:
+                raw = getattr(self, var_name).get()
+            except Exception:
+                return
+            val = _parse_float(raw)
+            if val is None:
+                return
+            if min_value is not None:
+                val = max(float(min_value), val)
+            if max_value is not None:
+                val = min(float(max_value), val)
+            os.environ[env_name] = f"{val:.3f}".rstrip("0").rstrip(".")
+
+        continuity_enabled = (
+            bool(self.kr_continuity_enable_var.get())
+            if hasattr(self, "kr_continuity_enable_var")
+            else True
+        )
+        os.environ["UTOA_KR_CONTINUITY_ENABLE"] = "1" if continuity_enabled else "0"
+        if continuity_enabled:
+            _set_float_env(
+                "kr_continuity_max_offset_adj_var",
+                "UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ",
+                min_value=0.0,
+            )
+
+        kr_vc_enabled = (
+            bool(self.kr_vc_neighbor_enable_var.get())
+            if hasattr(self, "kr_vc_neighbor_enable_var")
+            else True
+        )
+        ja_vc_enabled = (
+            bool(self.ja_vc_neighbor_enable_var.get())
+            if hasattr(self, "ja_vc_neighbor_enable_var")
+            else True
+        )
+        os.environ["UTOA_KR_VC_NEIGHBOR_ENABLE"] = "1" if kr_vc_enabled else "0"
+        os.environ["UTOA_JA_VC_NEIGHBOR_ENABLE"] = "1" if ja_vc_enabled else "0"
+
+        _set_float_env("kr_vc_neighbor_blend_var", "UTOA_KR_VC_NEIGHBOR_BLEND", min_value=0.0, max_value=1.0)
+        _set_float_env("kr_vc_neighbor_max_shift_var", "UTOA_KR_VC_NEIGHBOR_MAX_SHIFT", min_value=0.0)
+        _set_float_env("kr_vc_neighbor_lead_ms_var", "UTOA_KR_VC_NEIGHBOR_LEAD_MS", min_value=0.0)
+        _set_float_env("kr_vc_neighbor_tail_ms_var", "UTOA_KR_VC_NEIGHBOR_TAIL_MS", min_value=0.0)
+        _set_float_env("kr_vc_neighbor_min_len_var", "UTOA_KR_VC_NEIGHBOR_MIN_LEN", min_value=0.0)
+
+        _set_float_env("ja_vc_neighbor_blend_var", "UTOA_JA_VC_NEIGHBOR_BLEND", min_value=0.0, max_value=1.0)
+        _set_float_env("ja_vc_neighbor_max_shift_var", "UTOA_JA_VC_NEIGHBOR_MAX_SHIFT", min_value=0.0)
+        _set_float_env("ja_vc_neighbor_lead_ms_var", "UTOA_JA_VC_NEIGHBOR_LEAD_MS", min_value=0.0)
+        _set_float_env("ja_vc_neighbor_tail_ms_var", "UTOA_JA_VC_NEIGHBOR_TAIL_MS", min_value=0.0)
+        _set_float_env("ja_vc_neighbor_min_len_var", "UTOA_JA_VC_NEIGHBOR_MIN_LEN", min_value=0.0)
+
+        soft_bank_mode = (
+            bool(self.soft_bank_mode_var.get())
+            if hasattr(self, "soft_bank_mode_var")
+            else False
+        )
+        if soft_bank_mode:
+            os.environ["UTOA_SOFT_BANK_MODE"] = "1"
+            os.environ["UTOA_MFA_SOFT_BANK_MODE"] = "1"
+            # Low-level/noisy bank mode:
+            # Relax onset/sound thresholds so weak voiced segments are less likely
+            # to be treated as silence.
+            os.environ["UTOA_MEL_SOUND_DB_MARGIN"] = "1.15"
+            os.environ["UTOA_MEL_SOUND_ENERGY_MIN"] = "0.10"
+            os.environ["UTOA_MEL_HARD_SILENCE_ENERGY_MAX"] = "0.11"
+            os.environ["UTOA_MEL_SOFT_SILENCE_ENERGY_MAX"] = "0.14"
+            os.environ["UTOA_MEL_WEAK_F2_MAX"] = "0.04"
+            os.environ["UTOA_MEL_WEAK_F3_MAX"] = "0.04"
+            os.environ["UTOA_MEL_WEAK_HIGH_MAX"] = "0.085"
+            os.environ["UTOA_MEL_ONSET_SLOPE_BASE"] = "0.012"
+            os.environ["UTOA_MEL_ONSET_ENERGY_BASE"] = "0.10"
+            os.environ["UTOA_MEL_ONSET_DB_MARGIN_BASE"] = "-2.6"
+            os.environ["UTOA_MEL_ONSET_ENERGY_SIBILANT"] = "0.095"
+            os.environ["UTOA_MEL_ONSET_DB_MARGIN_SIBILANT"] = "-4.2"
+
+        low_rms_gain_enabled = (
+            bool(self.low_rms_gain_enable_var.get())
+            if hasattr(self, "low_rms_gain_enable_var")
+            else True
+        )
+        os.environ["UTOA_MFA_LOW_RMS_GAIN_ENABLE"] = "1" if low_rms_gain_enabled else "0"
+        weak_voice_assist_enabled = (
+            bool(self.weak_voice_assist_enable_var.get())
+            if hasattr(self, "weak_voice_assist_enable_var")
+            else True
+        )
+        os.environ["UTOA_MFA_WEAK_VOICE_ASSIST_ENABLE"] = "1" if weak_voice_assist_enabled else "0"
+        if weak_voice_assist_enabled:
+            _set_float_env(
+                "weak_voice_assist_strength_var",
+                "UTOA_MFA_WEAK_VOICE_PREEMPH_MIX",
+                min_value=0.0,
+                max_value=1.0,
+            )
+        strict_mode_code = (
+            self._get_mapping_strict_mode_code()
+            if hasattr(self, "_get_mapping_strict_mode_code")
+            else "soft"
+        )
+        os.environ["UTOA_SYLLABLE_STRICT_MODE"] = str(strict_mode_code or "soft").strip().lower()
+
+    def _sync_advanced_tuning_slider_controls(self) -> None:
+        bindings = getattr(self, "advanced_tuning_slider_bindings", None)
+        if not isinstance(bindings, dict):
+            return
+        for _, meta in bindings.items():
+            if not isinstance(meta, dict):
+                continue
+            var = meta.get("var")
+            dvar = meta.get("dvar")
+            label = meta.get("label")
+            fmt = str(meta.get("fmt", "{:.2f}") or "{:.2f}")
+            try:
+                default_val = float(meta.get("default", 0.0))
+            except Exception:
+                default_val = 0.0
+            try:
+                min_val = float(meta.get("min", default_val))
+            except Exception:
+                min_val = default_val
+            try:
+                max_val = float(meta.get("max", default_val))
+            except Exception:
+                max_val = default_val
+            if max_val < min_val:
+                min_val, max_val = max_val, min_val
+
+            current = default_val
+            if var is not None:
+                try:
+                    raw = str(var.get() or "").strip()
+                except Exception:
+                    raw = ""
+                if raw:
+                    try:
+                        current = float(raw)
+                    except Exception:
+                        current = default_val
+            current = max(min_val, min(max_val, current))
+
+            if dvar is not None:
+                try:
+                    dvar.set(current)
+                except Exception:
+                    pass
+            if label is not None:
+                try:
+                    label.configure(text=fmt.format(current))
+                except Exception:
+                    pass
+
+    def _sync_weak_voice_assist_controls(self) -> None:
+        enabled = (
+            bool(self.weak_voice_assist_enable_var.get())
+            if hasattr(self, "weak_voice_assist_enable_var")
+            else True
+        )
+        slider_state = "normal" if enabled else "disabled"
+        title_color = PALETTE.neutral_text if enabled else PALETTE.hint_text
+        value_color = PALETTE.neutral_text if enabled else PALETTE.hint_text
+        if hasattr(self, "weak_voice_strength_slider"):
+            try:
+                self.weak_voice_strength_slider.configure(state=slider_state)
+            except Exception:
+                pass
+        if hasattr(self, "weak_voice_strength_title_label"):
+            try:
+                self.weak_voice_strength_title_label.configure(text_color=title_color)
+            except Exception:
+                pass
+        if hasattr(self, "weak_voice_strength_value_label"):
+            try:
+                self.weak_voice_strength_value_label.configure(text_color=value_color)
+            except Exception:
+                pass
+
+    def _on_weak_voice_assist_toggle(self) -> None:
+        self._sync_weak_voice_assist_controls()
+        self._save_config()
+
+    def _on_voicebank_preset_button(self, bank_type: str, aggressiveness: str) -> None:
+        key = f"{str(bank_type or '').strip().lower()}:{str(aggressiveness or '').strip().lower()}"
+        self._selected_voicebank_preset_key = key
+        self._apply_voicebank_tuning_preset(bank_type, aggressiveness)
+        self._sync_voicebank_preset_button_styles()
+
+    def _sync_voicebank_preset_button_styles(self) -> None:
+        buttons = getattr(self, "voicebank_preset_buttons", None)
+        if not isinstance(buttons, dict):
+            return
+        selected_key = str(getattr(self, "_selected_voicebank_preset_key", "") or "").strip().lower()
+        for key, btn in buttons.items():
+            if btn is None:
                 continue
             try:
-                getattr(self, var_name).set(payload[key])
+                if str(key).strip().lower() == selected_key:
+                    btn.configure(
+                        fg_color=PALETTE.menu_button,
+                        hover_color=PALETTE.menu_button_hover,
+                        text_color=PALETTE.menu_text,
+                    )
+                else:
+                    btn.configure(
+                        fg_color=PALETTE.primary_button_bg,
+                        hover_color=PALETTE.primary_button_hover,
+                        text_color=PALETTE.primary_button_text,
+                    )
             except Exception:
                 continue
 
-        if hasattr(self, "_save_config"):
-            self._save_config()
+    def _apply_voicebank_tuning_preset(self, bank_type: str, aggressiveness: str) -> None:
+        bank = str(bank_type or "").strip().lower()
+        mode = str(aggressiveness or "").strip().lower()
+        presets = {
+            ("soft", "aggressive"): {
+                "label": "soft voice - aggressive",
+                "values": {
+                    "kr_continuity_enable_var": True,
+                    "kr_continuity_max_offset_adj_var": "240",
+                    "vc_correction_enable_var": True,
+                    "kr_vc_neighbor_enable_var": True,
+                    "ja_vc_neighbor_enable_var": True,
+                    "kr_vc_neighbor_blend_var": "0.72",
+                    "kr_vc_neighbor_max_shift_var": "85",
+                    "kr_vc_neighbor_lead_ms_var": "12",
+                    "kr_vc_neighbor_tail_ms_var": "14",
+                    "kr_vc_neighbor_min_len_var": "20",
+                    "ja_vc_neighbor_blend_var": "0.72",
+                    "ja_vc_neighbor_max_shift_var": "85",
+                    "ja_vc_neighbor_lead_ms_var": "12",
+                    "ja_vc_neighbor_tail_ms_var": "14",
+                    "ja_vc_neighbor_min_len_var": "20",
+                    "ml_anchor_mel_gamma_var": "0.95",
+                    "soft_bank_mode_var": True,
+                },
+            },
+            ("soft", "conservative"): {
+                "label": "soft voice - conservative",
+                "values": {
+                    "kr_continuity_enable_var": True,
+                    "kr_continuity_max_offset_adj_var": "170",
+                    "vc_correction_enable_var": True,
+                    "kr_vc_neighbor_enable_var": True,
+                    "ja_vc_neighbor_enable_var": True,
+                    "kr_vc_neighbor_blend_var": "0.42",
+                    "kr_vc_neighbor_max_shift_var": "55",
+                    "kr_vc_neighbor_lead_ms_var": "7",
+                    "kr_vc_neighbor_tail_ms_var": "9",
+                    "kr_vc_neighbor_min_len_var": "30",
+                    "ja_vc_neighbor_blend_var": "0.42",
+                    "ja_vc_neighbor_max_shift_var": "55",
+                    "ja_vc_neighbor_lead_ms_var": "7",
+                    "ja_vc_neighbor_tail_ms_var": "9",
+                    "ja_vc_neighbor_min_len_var": "30",
+                    "ml_anchor_mel_gamma_var": "1.28",
+                    "soft_bank_mode_var": True,
+                },
+            },
+            ("normal", "aggressive"): {
+                "label": "normal voice - aggressive",
+                "values": {
+                    "kr_continuity_enable_var": True,
+                    "kr_continuity_max_offset_adj_var": "210",
+                    "vc_correction_enable_var": True,
+                    "kr_vc_neighbor_enable_var": True,
+                    "ja_vc_neighbor_enable_var": True,
+                    "kr_vc_neighbor_blend_var": "0.58",
+                    "kr_vc_neighbor_max_shift_var": "68",
+                    "kr_vc_neighbor_lead_ms_var": "8",
+                    "kr_vc_neighbor_tail_ms_var": "10",
+                    "kr_vc_neighbor_min_len_var": "26",
+                    "ja_vc_neighbor_blend_var": "0.58",
+                    "ja_vc_neighbor_max_shift_var": "68",
+                    "ja_vc_neighbor_lead_ms_var": "8",
+                    "ja_vc_neighbor_tail_ms_var": "10",
+                    "ja_vc_neighbor_min_len_var": "26",
+                    "ml_anchor_mel_gamma_var": "1.05",
+                    "soft_bank_mode_var": False,
+                },
+            },
+            ("normal", "conservative"): {
+                "label": "normal voice - conservative",
+                "values": {
+                    "kr_continuity_enable_var": True,
+                    "kr_continuity_max_offset_adj_var": "150",
+                    "vc_correction_enable_var": True,
+                    "kr_vc_neighbor_enable_var": True,
+                    "ja_vc_neighbor_enable_var": True,
+                    "kr_vc_neighbor_blend_var": "0.30",
+                    "kr_vc_neighbor_max_shift_var": "40",
+                    "kr_vc_neighbor_lead_ms_var": "5",
+                    "kr_vc_neighbor_tail_ms_var": "7",
+                    "kr_vc_neighbor_min_len_var": "40",
+                    "ja_vc_neighbor_blend_var": "0.30",
+                    "ja_vc_neighbor_max_shift_var": "40",
+                    "ja_vc_neighbor_lead_ms_var": "5",
+                    "ja_vc_neighbor_tail_ms_var": "7",
+                    "ja_vc_neighbor_min_len_var": "40",
+                    "ml_anchor_mel_gamma_var": "1.25",
+                    "soft_bank_mode_var": False,
+                },
+            },
+        }
+        selected = presets.get((bank, mode))
+        if not selected:
+            return
+        values = selected.get("values", {})
+        for attr, value in values.items():
+            if not hasattr(self, attr):
+                continue
+            try:
+                getattr(self, attr).set(value)
+            except Exception:
+                continue
+        if hasattr(self, "_sync_vc_correction_toggle"):
+            self._sync_vc_correction_toggle()
+        if hasattr(self, "_sync_advanced_tuning_slider_controls"):
+            self._sync_advanced_tuning_slider_controls()
+        if hasattr(self, "_sync_weak_voice_assist_controls"):
+            self._sync_weak_voice_assist_controls()
+        self._save_config()
+        if hasattr(self, "_append_log"):
+            self._append_log(f"[고급 설정] 보이스뱅크 튜닝 프리셋 적용: {selected.get('label', '')}")
+
+    def _reset_developer_settings_defaults(self) -> None:
+        defaults = {
+            "developer_mode_enabled_var": False,
+            "enable_ml_correction_var": True,
+            "ml_route_var": "자동(자동 라우팅)",
+            "ml_selector_mode_var": "델타+셀렉터",
+            "ml_coupled_enable_var": True,
+            "ml_coupled_min_conf_var": "",
+            "ml_coupled_min_conf_use_model_meta_var": True,
+            "ml_coupled_min_conf_model_offset_var": "",
+            "ml_coupled_min_conf_kr_cv_var": "",
+            "ml_coupled_min_conf_kr_cvc_var": "",
+            "ml_coupled_min_conf_kr_cvvc_var": "",
+            "ml_coupled_min_conf_kr_vcv_var": "",
+            "ml_coupled_min_conf_ja_cv_var": "",
+            "ml_coupled_min_conf_ja_cvc_var": "",
+            "ml_coupled_min_conf_ja_cvvc_var": "",
+            "ml_coupled_min_conf_ja_vcv_var": "",
+            "ml_coupled_device_var": "auto",
+            "ml_coupled_backend_var": "auto",
+            "ml_coupled_strict_constraint_var": True,
+            "ml_batch_inference_enable_var": True,
+            "ml_batch_inference_size_var": "256",
+            "ml_legacy_fallback_enable_var": False,
+            "ml_hybrid_routing_enable_var": True,
+            "ml_anchor_mel_gamma_var": "1.2",
+            "kr_mapping_confidence_threshold_var": "",
+            "kr_continuity_enable_var": True,
+            "kr_continuity_max_offset_adj_var": "",
+            "vc_correction_enable_var": True,
+            "kr_vc_neighbor_enable_var": True,
+            "kr_vc_neighbor_blend_var": "",
+            "kr_vc_neighbor_max_shift_var": "",
+            "kr_vc_neighbor_lead_ms_var": "",
+            "kr_vc_neighbor_tail_ms_var": "",
+            "kr_vc_neighbor_min_len_var": "",
+            "ja_vc_neighbor_enable_var": True,
+            "ja_vc_neighbor_blend_var": "",
+            "ja_vc_neighbor_max_shift_var": "",
+            "ja_vc_neighbor_lead_ms_var": "",
+            "ja_vc_neighbor_tail_ms_var": "",
+            "ja_vc_neighbor_min_len_var": "",
+            "soft_bank_mode_var": False,
+            "weak_voice_assist_enable_var": True,
+            "weak_voice_assist_strength_var": "",
+            "mapping_strict_mode_var": "적당히 엄격 모드(누락 행은 폴백)",
+        }
+        for attr, value in defaults.items():
+            if not hasattr(self, attr):
+                continue
+            try:
+                getattr(self, attr).set(value)
+            except Exception:
+                continue
+
+        if hasattr(self, "_apply_recommended_ml_model_defaults"):
+            self._apply_recommended_ml_model_defaults()
+        self._clear_ml_override_envs()
+        self._clear_advanced_tuning_envs()
+        self._save_config()
+        if hasattr(self, "_sync_vc_correction_toggle"):
+            self._sync_vc_correction_toggle()
+        if hasattr(self, "_sync_advanced_tuning_slider_controls"):
+            self._sync_advanced_tuning_slider_controls()
+        if hasattr(self, "_sync_weak_voice_assist_controls"):
+            self._sync_weak_voice_assist_controls()
+        if hasattr(self, "_sync_developer_mode_ui"):
+            self._sync_developer_mode_ui()
         if hasattr(self, "_refresh_ml_backend_status"):
             self._refresh_ml_backend_status()
-        if log_message and hasattr(self, "_append_log"):
-            self._append_log(f"[OTO-ML] runtime preset applied: {label}")
+        self._append_log("개발자 설정을 기본값으로 초기화했습니다.")
 
-    def _on_ml_runtime_preset_change(self, value=None):
-        self._apply_ml_runtime_preset(value or (self.ml_runtime_preset_var.get() if hasattr(self, "ml_runtime_preset_var") else "권장(균형)"), log_message=True)
+    @staticmethod
+    def _normalize_mapping_strict_mode_code(value: str) -> str:
+        raw = str(value or "").strip().lower()
+        if raw in {
+            "strict",
+            "full",
+            "full_strict",
+            "hard",
+            "완전 엄격 모드",
+            "완전 엄격",
+            "완전엄격",
+        }:
+            return "strict"
+        if raw in {
+            "off",
+            "none",
+            "disable",
+            "disabled",
+            "0",
+            "false",
+            "끄기",
+        }:
+            return "off"
+        if raw in {
+            "soft",
+            "moderate",
+            "balanced",
+            "적당히 엄격 모드(누락 행은 폴백)",
+            "적당히 엄격 모드",
+            "적당히 엄격",
+        }:
+            return "soft"
+        return "soft"
+
+    @staticmethod
+    def _mapping_strict_mode_label_from_code(code: str) -> str:
+        normalized = AppRuntimeMixin._normalize_mapping_strict_mode_code(code)
+        label_map = {
+            "strict": "완전 엄격 모드",
+            "soft": "적당히 엄격 모드(누락 행은 폴백)",
+            "off": "off",
+        }
+        return label_map.get(normalized, "적당히 엄격 모드(누락 행은 폴백)")
+
+    def _set_mapping_strict_mode_from_code(self, code: str) -> str:
+        normalized = self._normalize_mapping_strict_mode_code(code)
+        label = self._mapping_strict_mode_label_from_code(normalized)
+        if hasattr(self, "mapping_strict_mode_var"):
+            try:
+                self.mapping_strict_mode_var.set(label)
+            except Exception:
+                pass
+        return normalized
+
+    def _get_mapping_strict_mode_code(self) -> str:
+        if not hasattr(self, "mapping_strict_mode_var"):
+            return "soft"
+        try:
+            raw = self.mapping_strict_mode_var.get()
+        except Exception:
+            raw = ""
+        normalized = self._normalize_mapping_strict_mode_code(raw)
+        normalized_label = self._mapping_strict_mode_label_from_code(normalized)
+        try:
+            if str(raw or "").strip() != normalized_label:
+                self.mapping_strict_mode_var.set(normalized_label)
+        except Exception:
+            pass
+        return normalized
+
+    def _get_mapping_strict_mode_option_labels(self) -> list[str]:
+        return [
+            self._mapping_strict_mode_label_from_code("strict"),
+            self._mapping_strict_mode_label_from_code("soft"),
+            self._mapping_strict_mode_label_from_code("off"),
+        ]
+
+    @staticmethod
+    def _normalize_ml_route_code(value: str) -> str:
+        raw = str(value or "").strip().lower()
+        if raw in {
+            "",
+            "auto",
+            "automatic",
+            "policy",
+            "자동(자동 라우팅)",
+            "자동 라우팅",
+            "자동",
+        }:
+            return "auto"
+        if raw in {
+            "no-mfa",
+            "no_mfa",
+            "nomfa",
+            "no mfa",
+            "autofree",
+            "autofree_v1",
+            "route_b",
+            "b",
+        }:
+            return "nomfa"
+        if raw in {"legacy", "v1", "route_a", "a"}:
+            return "v1"
+        if raw in {"v2", "route_v2"}:
+            return "v2"
+        return "auto"
+
+    @staticmethod
+    def _ml_route_label_from_code(code: str) -> str:
+        normalized = AppRuntimeMixin._normalize_ml_route_code(code)
+        label_map = {
+            "auto": "자동(자동 라우팅)",
+            "nomfa": "No-MFA",
+            "v1": "v1",
+            "v2": "v2",
+        }
+        return label_map.get(normalized, "자동(자동 라우팅)")
+
+    def _set_ml_route_from_code(self, code: str) -> str:
+        normalized = self._normalize_ml_route_code(code)
+        label = self._ml_route_label_from_code(normalized)
+        if hasattr(self, "ml_route_var"):
+            try:
+                self.ml_route_var.set(label)
+            except Exception:
+                pass
+        return normalized
+
+    def _get_ml_route_code(self) -> str:
+        if not hasattr(self, "ml_route_var"):
+            return "auto"
+        try:
+            raw = self.ml_route_var.get()
+        except Exception:
+            raw = ""
+        normalized = self._normalize_ml_route_code(raw)
+        normalized_label = self._ml_route_label_from_code(normalized)
+        try:
+            if str(raw or "").strip() != normalized_label:
+                self.ml_route_var.set(normalized_label)
+        except Exception:
+            pass
+        return normalized
+
+    def _get_ml_route_option_labels(self, *, no_mfa_only: bool = False) -> list[str]:
+        codes = ["auto", "nomfa"] if no_mfa_only else ["auto", "nomfa", "v1", "v2"]
+        return [self._ml_route_label_from_code(code) for code in codes]
+
+    @staticmethod
+    def _map_ml_route_code_to_internal(route_code: str) -> str:
+        normalized = AppRuntimeMixin._normalize_ml_route_code(route_code)
+        if normalized in {"nomfa", "v2"}:
+            return "autofree_v1"
+        return "legacy"
+
+    def _apply_auto_ml_policy_env(
+        self,
+        language: str,
+        auto_format_value: str,
+        *,
+        enable_ml_default: bool = True,
+        gen_dash_alias: bool = True,
+    ) -> dict:
+        lang = str(language or "korean").strip().lower()
+        fmt = self._resolve_auto_format_for_policy(lang, auto_format_value)
+        route_selected = self._get_ml_route_code() if hasattr(self, "_get_ml_route_code") else "auto"
+
+        selector_mode = (
+            self.ml_selector_mode_var.get()
+            if hasattr(self, "ml_selector_mode_var")
+            else "델타+셀렉터"
+        )
+
+        if lang not in {"korean", "japanese"}:
+            for key in (
+                "UTOA_KR_OTO_ML_DIR",
+                "UTOA_KR_AUTOFREE_ML_DIR",
+                "UTOA_JA_OTO_ML_DIR",
+                "UTOA_JA_AUTOFREE_ML_DIR",
+            ):
+                os.environ.pop(key, None)
+
+            self._apply_ml_selector_runtime_mode("policy")
+            self._clear_ml_override_envs()
+
+            os.environ["UTOA_ML_COUPLED_ENABLE"] = "0"
+            os.environ["UTOA_ML_ENSEMBLE_ENABLE"] = "0"
+            os.environ["UTOA_ML_COUPLED_MIN_CONF_USE_MODEL_META"] = "1"
+            os.environ["UTOA_ML_COUPLED_DEVICE"] = "auto"
+            os.environ["UTOA_ML_COUPLED_BACKEND"] = "auto"
+            os.environ["UTOA_ML_BATCH_INFERENCE_ENABLE"] = "0"
+            os.environ["UTOA_ML_BATCH_INFERENCE_SIZE"] = "256"
+            os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = "0"
+            os.environ["UTOA_ML_GATED_ENSEMBLE_ENABLE"] = "0"
+            os.environ.setdefault("UTOA_MEL_WEIGHT_MODE", "mel_first")
+            os.environ["UTOA_ML_ROUTE"] = "disabled"
+            os.environ["UTOA_ML_AUTOFREE_AUX_ENABLE"] = "0"
+            os.environ["UTOA_ENABLE_HEAD_TAIL_DASH_ALIAS"] = "1" if bool(gen_dash_alias) else "0"
+            os.environ["UTOA_DISABLE_OTO_ML"] = "1"
+
+            return {
+                "language": lang,
+                "format_type": fmt,
+                "model_root": "",
+                "enable_ml": False,
+                "route": "disabled",
+                "route_selected": route_selected,
+                "route_internal": "disabled",
+                "has_coupled": False,
+                "has_ensemble": False,
+                "has_autofree": False,
+            }
+
+        selector_mode = (
+            self.ml_selector_mode_var.get()
+            if hasattr(self, "ml_selector_mode_var")
+            else "델타+셀렉터"
+        )
+
+        if lang not in {"korean", "japanese"}:
+            for key in (
+                "UTOA_KR_OTO_ML_DIR",
+                "UTOA_KR_AUTOFREE_ML_DIR",
+                "UTOA_JA_OTO_ML_DIR",
+                "UTOA_JA_AUTOFREE_ML_DIR",
+            ):
+                os.environ.pop(key, None)
+
+            self._apply_ml_selector_runtime_mode("policy")
+            self._clear_ml_override_envs()
+
+            os.environ["UTOA_ML_COUPLED_ENABLE"] = "0"
+            os.environ["UTOA_ML_ENSEMBLE_ENABLE"] = "0"
+            os.environ["UTOA_ML_COUPLED_MIN_CONF_USE_MODEL_META"] = "1"
+            os.environ["UTOA_ML_COUPLED_DEVICE"] = "auto"
+            os.environ["UTOA_ML_COUPLED_BACKEND"] = "auto"
+            os.environ["UTOA_ML_BATCH_INFERENCE_ENABLE"] = "0"
+            os.environ["UTOA_ML_BATCH_INFERENCE_SIZE"] = "256"
+            os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = "0"
+            os.environ["UTOA_ML_GATED_ENSEMBLE_ENABLE"] = "0"
+            os.environ.setdefault("UTOA_MEL_WEIGHT_MODE", "mel_first")
+            os.environ["UTOA_ML_ROUTE"] = "disabled"
+            os.environ["UTOA_ML_AUTOFREE_AUX_ENABLE"] = "0"
+            os.environ["UTOA_ENABLE_HEAD_TAIL_DASH_ALIAS"] = "1" if bool(gen_dash_alias) else "0"
+            os.environ["UTOA_DISABLE_OTO_ML"] = "1"
+
+            return {
+                "language": lang,
+                "format_type": fmt,
+                "model_root": "",
+                "enable_ml": False,
+                "route": "disabled",
+                "route_selected": route_selected,
+                "route_internal": "disabled",
+                "has_coupled": False,
+                "has_ensemble": False,
+                "has_autofree": False,
+            }
+
+        model_root = ""
+        if lang == "japanese" and hasattr(self, "ml_model_root_ja_var"):
+            model_root = str(self.ml_model_root_ja_var.get() or "").strip()
+        elif lang == "korean" and hasattr(self, "ml_model_root_kr_var"):
+            model_root = str(self.ml_model_root_kr_var.get() or "").strip()
+        if not model_root and hasattr(self, "_recommended_ml_model_root"):
+            try:
+                model_root = str(self._recommended_ml_model_root(lang) or "").strip()
+            except Exception:
+                model_root = ""
+
+        if lang == "japanese":
+            if model_root:
+                os.environ["UTOA_JA_OTO_ML_DIR"] = model_root
+                os.environ["UTOA_JA_AUTOFREE_ML_DIR"] = model_root
+            else:
+                os.environ.pop("UTOA_JA_OTO_ML_DIR", None)
+                os.environ.pop("UTOA_JA_AUTOFREE_ML_DIR", None)
+        else:
+            if model_root:
+                os.environ["UTOA_KR_OTO_ML_DIR"] = model_root
+                os.environ["UTOA_KR_AUTOFREE_ML_DIR"] = model_root
+            else:
+                os.environ.pop("UTOA_KR_OTO_ML_DIR", None)
+                os.environ.pop("UTOA_KR_AUTOFREE_ML_DIR", None)
+
+        has_ensemble = False
+        has_coupled = False
+        try:
+            from core.oto_ml_refiner import _resolve_ensemble_model_dir, _resolve_lightgbm_model_dir
+
+            ensemble_dir = _resolve_ensemble_model_dir(lang, fmt)
+            lightgbm_dir = _resolve_lightgbm_model_dir(lang, fmt)
+            has_ensemble = bool(ensemble_dir)
+            has_coupled = bool(ensemble_dir or lightgbm_dir)
+        except Exception:
+            has_ensemble = False
+            has_coupled = False
+
+        has_autofree = False
+        try:
+            from core.oto_ml_autofree_runtime import _resolve_autofree_model_dir
+
+            has_autofree = bool(_resolve_autofree_model_dir(lang, fmt))
+        except Exception:
+            has_autofree = False
+
+        hybrid_routing_enabled = (
+            bool(self.ml_hybrid_routing_enable_var.get())
+            if hasattr(self, "ml_hybrid_routing_enable_var")
+            else True
+        )
+        aligner_raw = (
+            str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA")
+            .strip()
+            .lower()
+        )
+        aligner_no_mfa = aligner_raw in {"no-mfa", "no_mfa", "none", "none-mfa", "nomfa", "no mfa"}
+        no_mfa_generation_mode = bool(
+            aligner_no_mfa
+            and lang in {"korean", "japanese"}
+            and not (lang == "korean" and fmt == "cmpx")
+        )
+        if no_mfa_generation_mode and route_selected in {"v1", "v2"}:
+            route_selected = "auto"
+            if hasattr(self, "_set_ml_route_from_code"):
+                self._set_ml_route_from_code("auto")
+
+        enable_ml = bool(enable_ml_default and has_coupled)
+        if route_selected == "auto":
+            if no_mfa_generation_mode and has_autofree:
+                route = "nomfa"
+            elif has_autofree:
+                route = "v2"
+            else:
+                route = "v1"
+        elif route_selected == "nomfa":
+            route = "nomfa" if has_autofree else "v1"
+        elif route_selected == "v2":
+            route = "v2" if has_autofree else "v1"
+        else:
+            route = "v1"
+        route_internal = self._map_ml_route_code_to_internal(route)
+        aux_enabled = bool(enable_ml and route_internal == "autofree_v1" and has_autofree)
+
+        self._apply_ml_selector_runtime_mode(selector_mode)
+        self._clear_ml_override_envs()
+
+        os.environ["UTOA_ML_COUPLED_ENABLE"] = "1" if enable_ml else "0"
+        os.environ["UTOA_ML_ENSEMBLE_ENABLE"] = "1" if (enable_ml and has_ensemble) else "0"
+        os.environ["UTOA_ML_COUPLED_MIN_CONF_USE_MODEL_META"] = "1"
+        os.environ["UTOA_ML_COUPLED_DEVICE"] = "auto"
+        os.environ["UTOA_ML_COUPLED_BACKEND"] = "auto"
+        os.environ["UTOA_ML_BATCH_INFERENCE_ENABLE"] = "1" if enable_ml else "0"
+        os.environ["UTOA_ML_BATCH_INFERENCE_SIZE"] = "256"
+        os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = "0"
+        os.environ["UTOA_ML_GATED_ENSEMBLE_ENABLE"] = "1" if (enable_ml and hybrid_routing_enabled) else "0"
+        os.environ.setdefault("UTOA_MEL_WEIGHT_MODE", "mel_first")
+        os.environ["UTOA_ML_ROUTE"] = route_internal
+        os.environ["UTOA_ML_AUTOFREE_AUX_ENABLE"] = "1" if aux_enabled else "0"
+        os.environ["UTOA_ENABLE_HEAD_TAIL_DASH_ALIAS"] = "1" if bool(gen_dash_alias) else "0"
+        if enable_ml:
+            os.environ.pop("UTOA_DISABLE_OTO_ML", None)
+        else:
+            os.environ["UTOA_DISABLE_OTO_ML"] = "1"
+
+        return {
+            "language": lang,
+            "format_type": fmt,
+            "model_root": model_root,
+            "enable_ml": enable_ml,
+            "route": route,
+            "route_selected": route_selected,
+            "route_internal": route_internal,
+            "has_coupled": has_coupled,
+            "has_ensemble": has_ensemble,
+            "has_autofree": has_autofree,
+            "hybrid_routing": bool(enable_ml and hybrid_routing_enabled),
+        }
 
     def _after_safe(self, callback, delay_ms=0):
         if self._is_closing:
@@ -405,33 +1314,132 @@ class AppRuntimeMixin:
         except tk.TclError:
             pass
 
-    def _ask_yes_no_dialog(self, title, message, default=False):
-        if self._is_closing:
-            return bool(default)
-        if threading.current_thread() is threading.main_thread():
-            try:
-                return bool(messagebox.askyesno(title, message, parent=self))
-            except Exception:
-                return bool(default)
+    def _compute_adaptive_widget_scale(self, width: int, height: int) -> float:
+        base_w = 1280.0
+        base_h = 760.0
+        try:
+            w = max(1.0, float(width))
+            h = max(1.0, float(height))
+        except Exception:
+            return 1.0
+        raw = min(w / base_w, h / base_h)
+        if raw >= 1.08:
+            target = 1.06
+        elif raw >= 1.0:
+            target = 1.0 + ((raw - 1.0) * 0.5)
+        elif raw >= 0.92:
+            target = 0.94 + ((raw - 0.92) * 0.75)
+        else:
+            target = max(0.90, raw * 0.98)
+        if raw < 1.0:
+            target *= 1.15
+        return max(0.90, min(1.08, float(target)))
 
-        done = threading.Event()
-        result = {"value": bool(default)}
+    def _update_responsive_bottom_layout(self, width: int | None = None):
+        bottom = getattr(self, "bottom_bar_frame", None)
+        status_group = getattr(self, "bottom_status_group", None)
+        actions_group = getattr(self, "bottom_actions_group", None)
+        if bottom is None or status_group is None or actions_group is None:
+            return
+        try:
+            ui_width = int(width) if width is not None else int(self.winfo_width())
+        except Exception:
+            return
 
-        def _show():
-            try:
-                result["value"] = bool(messagebox.askyesno(title, message, parent=self))
-            except Exception:
-                result["value"] = bool(default)
-            finally:
-                done.set()
+        compact = ui_width < 1040
+        mode = "compact" if compact else "wide"
+        if getattr(self, "_bottom_layout_mode", None) == mode:
+            return
+        self._bottom_layout_mode = mode
 
         try:
-            self.after(0, _show)
+            status_group.pack_forget()
+            actions_group.pack_forget()
         except Exception:
-            return bool(default)
-        if not done.wait(timeout=600):
-            return bool(default)
-        return bool(result["value"])
+            pass
+
+        if compact:
+            status_group.pack(side="top", fill="x", expand=True, padx=(10, 6), pady=(0, 4))
+            actions_group.pack(side="top", fill="x", padx=(10, 6), pady=(0, 0))
+        else:
+            status_group.pack(side="left", fill="x", expand=True, padx=(10, 6))
+            actions_group.pack(side="right", padx=(6, 0))
+
+        run_btn = getattr(self, "run_btn", None)
+        report_btn = getattr(self, "report_btn", None)
+        if run_btn is not None:
+            try:
+                run_btn.pack_forget()
+            except Exception:
+                pass
+        if report_btn is not None:
+            try:
+                report_btn.pack_forget()
+            except Exception:
+                pass
+
+        run_width = 140 if compact else 150
+        run_height = 36 if compact else 40
+        report_width = 115 if compact else 120
+        report_height = 36 if compact else 40
+        if run_btn is not None:
+            try:
+                run_btn.configure(width=run_width, height=run_height, font=("", 13 if compact else 14, "bold"))
+            except Exception:
+                pass
+            run_btn.pack(side="right", padx=(8, 0))
+        if report_btn is not None:
+            try:
+                report_btn.configure(width=report_width, height=report_height)
+            except Exception:
+                pass
+            report_btn.pack(side="right", padx=(6, 0))
+
+    def _apply_adaptive_ui_scaling(self):
+        self._adaptive_scale_job = None
+        try:
+            width = int(self.winfo_width())
+            height = int(self.winfo_height())
+        except Exception:
+            return
+        if hasattr(self, "_update_responsive_bottom_layout"):
+            self._update_responsive_bottom_layout(width)
+        target = self._compute_adaptive_widget_scale(width, height)
+        current = float(getattr(self, "_adaptive_widget_scale", 1.0) or 1.0)
+        if abs(target - current) < 0.02:
+            return
+        try:
+            ctk.set_widget_scaling(target)
+            self._adaptive_widget_scale = target
+        except Exception:
+            pass
+
+    def _schedule_adaptive_ui_scaling(self, _event=None):
+        if self._is_closing:
+            return
+        job = getattr(self, "_adaptive_scale_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        try:
+            self._adaptive_scale_job = self.after(120, self._apply_adaptive_ui_scaling)
+        except Exception:
+            self._adaptive_scale_job = None
+
+    def _install_adaptive_ui_scaling(self):
+        if getattr(self, "_adaptive_scale_installed", False):
+            return
+        self._adaptive_scale_installed = True
+        self._adaptive_widget_scale = 1.0
+        self._bottom_layout_mode = None
+        self._adaptive_scale_job = None
+        try:
+            self.bind("<Configure>", self._schedule_adaptive_ui_scaling, add="+")
+        except Exception:
+            pass
+        self._after_safe(self._apply_adaptive_ui_scaling, delay_ms=160)
 
     def _force_exit_now(self):
         try:
@@ -479,8 +1487,98 @@ class AppRuntimeMixin:
             return True
         return bool(classify_log_message(str(msg or "")).get("ui_visible"))
 
+    def _append_detail_log(self, msg):
+        entry = str(msg or "").rstrip()
+        if not entry:
+            return
+        stamp = datetime.datetime.now().strftime("%H:%M:%S")
+        line = f"[{stamp}] {entry}"
+        buf = getattr(self, "_detail_log_buffer", None)
+        if buf is None:
+            buf = []
+            self._detail_log_buffer = buf
+        buf.append(line)
+        max_buffer = int(getattr(self, "_detail_log_buffer_limit", 2000) or 2000)
+        if len(buf) > max_buffer:
+            del buf[: len(buf) - max_buffer]
+        if not getattr(self, "_detail_log_flush_pending", False):
+            self._detail_log_flush_pending = True
+            self._after_safe(self._flush_detail_log_buffer, delay_ms=120)
+
+    def _flush_detail_log_buffer(self):
+        self._detail_log_flush_pending = False
+        widget = getattr(self, "detail_log_text", None)
+        if widget is None:
+            return
+        lines = list(getattr(self, "_detail_log_buffer", []) or [])
+        if not lines:
+            return
+        self._detail_log_buffer = []
+        try:
+            widget.insert("end", "\n".join(lines) + "\n")
+            widget.see("end")
+            max_lines = int(getattr(self, "_detail_log_max_lines", 6000) or 6000)
+            current_line = int(float(str(widget.index("end-1c")).split(".")[0]))
+            if current_line > max_lines:
+                trim_lines = current_line - max_lines
+                widget.delete("1.0", f"{trim_lines + 1}.0")
+        except Exception:
+            pass
+
+    def _flush_ui_log_buffer(self):
+        widget = getattr(self, "log_text", None)
+        if widget is None:
+            return
+        lines = list(getattr(self, "_ui_log_buffer", []) or [])
+        if not lines:
+            return
+        self._ui_log_buffer = []
+        try:
+            widget.insert("end", "\n".join(lines) + "\n")
+            widget.see("end")
+            max_lines = int(getattr(self, "_ui_log_max_lines", 3000) or 3000)
+            current_line = int(float(str(widget.index("end-1c")).split(".")[0]))
+            if current_line > max_lines:
+                trim_lines = current_line - max_lines
+                widget.delete("1.0", f"{trim_lines + 1}.0")
+        except Exception:
+            pass
+
+    def _insert_ui_log_line(self, msg):
+        record = classify_log_message(str(msg or ""))
+        if not record.get("ui_visible"):
+            return
+
+        line = str(record.get("message", "") or "").rstrip()
+        if not line:
+            return
+        buf = getattr(self, "_ui_log_buffer", None)
+        if buf is None:
+            buf = []
+            self._ui_log_buffer = buf
+        buf.append(line)
+        max_buffer = int(getattr(self, "_ui_log_buffer_limit", 2000) or 2000)
+        if len(buf) > max_buffer:
+            del buf[: len(buf) - max_buffer]
+
+        if getattr(self, "log_text", None) is None:
+            return
+
+        def _do():
+            self._flush_ui_log_buffer()
+
+        self._after_safe(_do)
+
     def _append_log(self, msg, log_to_file=True):
-        msg = self._normalize_ui_message(str(msg))
+        raw_msg = self._mask_sensitive_text(str(msg or ""))
+        self._append_detail_log(raw_msg)
+        msg = self._normalize_ui_message(raw_msg)
+        link_line = ""
+        if msg == ALERT_MSVC_REQUIRED:
+            msg = "⚠ 일부 의존성 설치에 실패했습니다. 사용은 가능하지만 정확도에 영향이 있을 수 있으니 C++ 툴을 설치해주세요."
+            link_line = f"설치 링크: {self._MSVC_BUILD_TOOLS_URL}"
+        elif self._looks_like_msvc_requirement_message(msg):
+            link_line = f"설치 링크: {self._MSVC_BUILD_TOOLS_URL}"
         now = time.monotonic()
         last_msg = getattr(self, "_last_log_msg", "")
         last_ts = float(getattr(self, "_last_log_ts", 0.0) or 0.0)
@@ -493,36 +1591,29 @@ class AppRuntimeMixin:
 
         if log_to_file:
             self._log_to_file(msg)
+            if link_line:
+                self._log_to_file(link_line)
         if msg == ALERT_MSVC_REQUIRED or self._looks_like_msvc_requirement_message(msg):
             self._after_safe(
                 self._show_msvc_required_alert
             )
-            return
         if msg == ALERT_MFA_PERMISSION_DENIED:
             self._after_safe(
                 lambda: self._show_copyable_alert(
                     title="MFA 실행 권한 오류",
                     message=(
-                        "MFA 내부 실행 파일(compute-mfcc-feats) 실행 권한이 없어 정렬이 실패할 수 있습니다. (WinError 5)\n\n"
+                        "MFA 내부 실행 파일(compute-mfcc-feats) 권한 문제로 정렬이 실패할 수 있습니다. (WinError 5)\n\n"
                         "확인 항목:\n"
-                        "- 백신/Defender 격리 또는 실행 차단 여부\n"
+                        "- 백신/Defender의 실행 차단 여부\n"
                         "- Controlled Folder Access/AppLocker 정책\n"
-                        "- 프로젝트를 Desktop 외 경로로 이동 후 재설치"
+                        "- 앱과 음원 폴더 접근 권한"
                     ),
                     alert_key="mfa_permission_denied",
                 )
             )
-            return
-
-        record = classify_log_message(str(msg or ""))
-        if not record.get("ui_visible"):
-            return
-
-        def _do():
-            self.log_text.insert("end", record["message"] + "\n")
-            self.log_text.see("end")
-
-        self._after_safe(_do)
+        self._insert_ui_log_line(msg)
+        if link_line:
+            self._insert_ui_log_line(link_line)
 
     def _looks_like_msvc_requirement_message(self, msg):
         text = str(msg or "")
@@ -532,21 +1623,54 @@ class AppRuntimeMixin:
             and ("필요" in text or "required" in lowered)
         )
 
+    def _resolve_setup_mfa_script_path(self):
+        candidates = []
+        app_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if app_dir:
+            candidates.append(os.path.join(app_dir, "setup_mfa.bat"))
+        exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", ""))) if getattr(sys, "frozen", False) else ""
+        if exe_dir:
+            candidates.append(os.path.join(exe_dir, "setup_mfa.bat"))
+        for candidate in candidates:
+            if candidate and os.path.isfile(candidate):
+                return candidate
+        return ""
+
+    def _build_setup_mfa_recovery_guide(self):
+        script_path = self._resolve_setup_mfa_script_path()
+        if script_path:
+            command = f'cmd /c ""{script_path}" --non-interactive"'
+            return (
+                "자동 복구가 계속 실패하면 설치 폴더의 setup_mfa.bat을 직접 실행해 주세요.\n"
+                f"- 파일: {script_path}\n"
+                "- 실행 명령:\n"
+                f"{command}"
+            )
+        return (
+            "자동 복구가 계속 실패하면 설치 폴더의 setup_mfa.bat을 직접 실행해 주세요.\n"
+            "- 실행 예시:\n"
+            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --non-interactive\""
+        )
+
     def _show_msvc_required_alert(self):
+        setup_guide = self._build_setup_mfa_recovery_guide()
         self._show_copyable_alert(
-            title="MFA 의존성 설치 안내",
+            title="\ud55c\uad6d\uc5b4 \uc758\uc874\uc131 \uc548\ub0b4",
             message=(
-                "MFA 한국어 의존성 설치 중 Microsoft Visual C++ 14.0+가 필요합니다.\n\n"
-                "설치 링크:\n"
+                "\uc77c\ubd80 \uc758\uc874\uc131 \uc124\uce58\uc5d0 \uc2e4\ud328\ud588\uc2b5\ub2c8\ub2e4. "
+                "\uc0ac\uc6a9\uc740 \uac00\ub2a5\ud558\uc9c0\ub9cc \uc815\ud655\ub3c4\uc5d0 \uc601\ud5a5\uc774 \uc788\uc744 \uc218 \uc788\uc73c\ub2c8 "
+                "C++ \ud234\uc744 \uc124\uce58\ud574\uc8fc\uc138\uc694.\n\n"
+                "\uc124\uce58 \ub9c1\ud06c:\n"
                 f"{self._MSVC_BUILD_TOOLS_URL}\n\n"
-                "권장:\n"
-                "1) C++ Build Tools 설치\n"
-                "2) 터미널 재시작\n"
-                "3) MFA 설치/정렬 재시도"
+                "\uad8c\uc7a5:\n"
+                "1) C++ Build Tools \uc124\uce58\n"
+                "2) \ud130\ubbf8\ub110 \uc7ac\uc2dc\uc791\n"
+                "3) MFA \uc124\uce58/\uc815\ub82c \uc7ac\uc2dc\ub3c4\n\n"
+                f"{setup_guide}"
             ),
             alert_key="msvc_required",
             link_url=self._MSVC_BUILD_TOOLS_URL,
-            link_label="설치 링크 열기",
+            link_label="\uc124\uce58 \ud398\uc774\uc9c0 \uc5f4\uae30",
         )
 
     def _show_copyable_alert(self, title, message, alert_key=None, link_url="", link_label="링크 열기"):
@@ -557,8 +1681,10 @@ class AppRuntimeMixin:
         if alert_key:
             self._shown_alert_keys.add(alert_key)
 
+        safe_title = self._normalize_ui_message(str(title or "알림"))
+        safe_message = self._mask_sensitive_text(str(message or ""))
         win = tk.Toplevel(self)
-        win.title(title)
+        win.title(safe_title)
         win.geometry("700x330")
         win.minsize(520, 260)
         win.transient(self)
@@ -567,13 +1693,13 @@ class AppRuntimeMixin:
         frame = ctk.CTkFrame(win)
         frame.pack(fill="both", expand=True, padx=12, pady=12)
 
-        ctk.CTkLabel(frame, text=title, font=("", 16, "bold"), anchor="w").pack(
+        ctk.CTkLabel(frame, text=safe_title, font=("", 16, "bold"), anchor="w").pack(
             fill="x", padx=10, pady=(10, 6)
         )
 
         text = ctk.CTkTextbox(frame, wrap="word", font=("Consolas", 12))
         text.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        text.insert("1.0", message)
+        text.insert("1.0", safe_message)
         text.configure(state="disabled")
 
         btns = ctk.CTkFrame(frame, fg_color="transparent")
@@ -581,7 +1707,7 @@ class AppRuntimeMixin:
 
         def _copy_text():
             win.clipboard_clear()
-            win.clipboard_append(message)
+            win.clipboard_append(safe_message)
             win.update()
 
         def _copy_link():
@@ -608,6 +1734,24 @@ class AppRuntimeMixin:
             ctk.CTkButton(btns, text=link_label, width=120, command=_open_link).pack(side="right", padx=(0, 8))
         ctk.CTkButton(btns, text="닫기", width=90, command=win.destroy).pack(side="right", padx=(0, 8))
 
+    def _ask_yes_no_dialog_sync(self, title: str, message: str, default: bool = False) -> bool:
+        result = {"value": bool(default)}
+        done = threading.Event()
+
+        def _prompt():
+            try:
+                safe_title = self._normalize_ui_message(str(title or "확인"))
+                safe_message = self._mask_sensitive_text(str(message or ""))
+                result["value"] = bool(messagebox.askyesno(safe_title, safe_message))
+            except Exception:
+                result["value"] = bool(default)
+            finally:
+                done.set()
+
+        self._after_safe(_prompt)
+        done.wait(timeout=1200.0)
+        return bool(result.get("value", default))
+
     def _set_status(self, msg):
         msg = self._normalize_ui_message(str(msg))
         color = self._status_color_for_message(msg)
@@ -616,9 +1760,10 @@ class AppRuntimeMixin:
             self.status_label.configure(text=msg, text_color=color)
             ratio = self._parse_progress_ratio_from_status(msg)
             if ratio is None:
-                if msg.strip().startswith("✅") or ("완료" in msg and not self.is_running):
+                lower = msg.strip().lower()
+                if ("완료" in msg or "success" in lower) and not self.is_running:
                     ratio = 1.0
-                elif msg.strip().startswith("❌") and not self.is_running:
+                elif ("오류" in msg or "error" in lower) and not self.is_running:
                     ratio = 0.0
             if ratio is not None:
                 self._set_progress(ratio)
@@ -637,6 +1782,50 @@ class AppRuntimeMixin:
         if pct:
             val = int(pct.group(1))
             return max(0.0, min(1.0, float(val) / 100.0))
+        keyword_ratio = self._infer_progress_ratio_from_keywords(text)
+        if keyword_ratio is not None:
+            return keyword_ratio
+        return None
+
+    def _infer_progress_ratio_from_keywords(self, msg):
+        text = str(msg or "")
+        lowered = text.lower()
+        stage_pairs = {
+            "1/5": 0.12,
+            "2/5": 0.28,
+            "3/5": 0.48,
+            "4/5": 0.72,
+            "5/5": 0.90,
+        }
+        for token, ratio in stage_pairs.items():
+            if token in lowered:
+                return ratio
+        stage_text = {
+            "1단계": 0.12,
+            "2단계": 0.28,
+            "3단계": 0.48,
+            "4단계": 0.72,
+            "5단계": 0.90,
+        }
+        for token, ratio in stage_text.items():
+            if token in text:
+                return ratio
+        keyword_map = [
+            ("micromamba 다운로드", 0.10),
+            ("micromamba 압축 해제", 0.20),
+            ("mfa 환경 설치", 0.40),
+            ("mfa python 도구", 0.55),
+            ("의존성 점검", 0.68),
+            ("mfa 모델 다운로드", 0.85),
+            ("mfa 모델 점검", 0.80),
+            ("oto 자동 검증", 0.92),
+            ("전체 파이프라인 완료", 1.0),
+        ]
+        for token, ratio in keyword_map:
+            if token in lowered:
+                return ratio
+        if ("완료" in text or "success" in lowered) and not getattr(self, "is_running", False):
+            return 1.0
         return None
 
     def _set_progress(self, ratio):
@@ -646,6 +1835,17 @@ class AppRuntimeMixin:
             value = max(0.0, min(1.0, float(ratio)))
         except Exception:
             return
+        if threading.current_thread() is not threading.main_thread():
+            self._after_safe(lambda v=value: self._set_progress(v))
+            return
+        if bool(getattr(self, "is_running", False)):
+            peak = float(getattr(self, "_progress_peak_ratio", 0.0) or 0.0)
+            if value < peak:
+                value = peak
+            else:
+                self._progress_peak_ratio = value
+        else:
+            self._progress_peak_ratio = value
         self.progress_bar.set(value)
         if hasattr(self, "progress_label"):
             self.progress_label.configure(text=f"{int(round(value * 100.0))}%")
@@ -655,31 +1855,169 @@ class AppRuntimeMixin:
         lowered = text.lower()
 
         if self.is_running:
-            # 작업 중 상태는 눈에 띄도록 밝은 색 사용
+            # running state
             return "#FFE082"
-        if text.strip().startswith("❌") or "error" in lowered or "실패" in text or "오류" in text:
+        if ("오류" in text) or ("error" in lowered):
             return "#FF6B6B"
-        if text.strip().startswith("⚠") or "warning" in lowered or "경고" in text:
+        if ("경고" in text) or ("warning" in lowered):
             return "#FFB74D"
-        if text.strip().startswith("✅") or "success" in lowered or "완료" in text:
+        if ("완료" in text) or ("success" in lowered):
             return "#66BB6A"
-        return "gray"
+        return "#FFFFFF"
+    def _run_auto_validation(self, wav_dir, tg_folder, out_path, callback=None):
+        log_cb = callback if callable(callback) else (lambda msg: self._append_log(msg, log_to_file=True))
+        out_file = str(out_path or "").strip()
+        if not out_file:
+            log_cb("ℹ 출력 OTO 경로가 없어 자동 검증을 건너뜁니다.")
+            return {"errors": 0, "warnings": 0, "sampled_wavs": 0, "checked_wavs_total": 0, "truncated_issues": 0, "skipped": True}
+        if not os.path.isfile(out_file):
+            log_cb(f"ℹ OTO 파일이 아직 생성되지 않아 자동 검증을 건너뜁니다: {out_file}")
+            return {"errors": 0, "warnings": 0, "sampled_wavs": 0, "checked_wavs_total": 0, "truncated_issues": 0, "skipped": True}
 
-    def _run_auto_validation(self, wav_dir, tg_folder, out_path):
-        self._append_log("🧪 OTO 자동 검증 시작...")
+        os.environ.setdefault("UTOA_OTO_AUTO_VALIDATE_FAST", "1")
+        os.environ.setdefault("UTOA_OTO_AUTO_VALIDATE_MAX_FILES", "180")
+        os.environ.setdefault("UTOA_OTO_AUTO_VALIDATE_MAX_ISSUES", "1200")
+        os.environ.setdefault("UTOA_OTO_AUTO_VALIDATE_USE_TEXTGRID", "0")
+        log_cb(
+            "🔎 OTO 자동 검증 시작 "
+            f"(fast={os.environ.get('UTOA_OTO_AUTO_VALIDATE_FAST', '1')}, "
+            f"max_files={os.environ.get('UTOA_OTO_AUTO_VALIDATE_MAX_FILES', '180')})"
+        )
         summary = validate_oto_timing(
             wav_dir=wav_dir,
             tg_folder=tg_folder,
-            oto_path=out_path,
+            oto_path=out_file,
             language=self._get_language(),
-            callback=lambda msg: self._append_log(msg, log_to_file=True),
+            callback=lambda msg: log_cb(msg),
         )
-        err_count = summary.get("errors", 0)
-        warn_count = summary.get("warnings", 0)
+        err_count = int(summary.get("errors", 0) or 0)
+        warn_count = int(summary.get("warnings", 0) or 0)
+        sampled_wavs = int(summary.get("sampled_wavs", 0) or 0)
+        checked_wavs_total = int(summary.get("checked_wavs_total", 0) or 0)
+        truncated_issues = int(summary.get("truncated_issues", 0) or 0)
         if err_count > 0:
-            self._append_log(f"⚠ 자동 검증 결과: error {err_count}, warning {warn_count}")
+            log_cb(
+                f"⚠ OTO 자동 검증 결과: error {err_count}, warning {warn_count} "
+                f"(files={sampled_wavs}/{checked_wavs_total}, truncated={truncated_issues})"
+            )
         else:
-            self._append_log(f"✅ 자동 검증 결과: warning {warn_count} (error 0)")
+            log_cb(
+                f"✅ OTO 자동 검증 결과: warning {warn_count} (error 0) "
+                f"(files={sampled_wavs}/{checked_wavs_total}, truncated={truncated_issues})"
+            )
+        return summary
+
+    def _path_is_within(self, path, parent):
+        try:
+            abs_path = os.path.normcase(os.path.abspath(path or ""))
+            abs_parent = os.path.normcase(os.path.abspath(parent or ""))
+            if not abs_path or not abs_parent:
+                return False
+            return os.path.commonpath([abs_path, abs_parent]) == abs_parent
+        except Exception:
+            return False
+
+    def _snapshot_output_tree_for_cleanup(self, out_path):
+        out_file = os.path.abspath(str(out_path or "").strip())
+        if not out_file:
+            return None
+        out_dir = os.path.dirname(out_file) or os.getcwd()
+        snapshot = {"root": os.path.normcase(out_dir), "files": set(), "dirs": set()}
+        if not os.path.isdir(out_dir):
+            return snapshot
+        for cur_root, _dir_names, file_names in os.walk(out_dir):
+            cur_abs = os.path.normcase(os.path.abspath(cur_root))
+            snapshot["dirs"].add(cur_abs)
+            for name in file_names:
+                fpath = os.path.normcase(os.path.abspath(os.path.join(cur_root, name)))
+                snapshot["files"].add(fpath)
+        return snapshot
+
+    def _is_generated_oto_artifact_file(self, file_name, file_path_norm, keep_file_norm, snapshot_files, snapshot_provided):
+        low = str(file_name or "").strip().lower()
+        if not low:
+            return False
+        if file_path_norm == keep_file_norm:
+            return False
+        if not snapshot_provided:
+            # 안전을 위해 스냅샷이 없으면 자동 삭제를 수행하지 않는다.
+            return False
+        # out_dir가 새로 생성된 경우(snapshot_files가 비어 있음)에도 새 파일로 간주한다.
+        is_new_in_run = (not snapshot_files) or (file_path_norm not in snapshot_files)
+        if not is_new_in_run:
+            return False
+        # 자동 생성 부산물 OTO 계열만 정리한다.
+        return (
+            low == "oto.ini"
+            or (low.startswith("oto.") and low.endswith(".ini"))
+            or (low.startswith("oto_") and low.endswith(".ini"))
+        )
+
+    def _cleanup_generated_output_artifacts(self, out_path, snapshot=None):
+        out_file = os.path.abspath(str(out_path or "").strip())
+        if not out_file:
+            return {"removed_files": 0, "removed_dirs": 0, "failed": 0}
+        out_dir = os.path.dirname(out_file) or os.getcwd()
+        if not os.path.isdir(out_dir):
+            return {"removed_files": 0, "removed_dirs": 0, "failed": 0}
+
+        keep_file = os.path.normcase(out_file)
+        snapshot_files = set()
+        snapshot_dirs = set()
+        snapshot_provided = isinstance(snapshot, dict)
+        if snapshot_provided:
+            snapshot_files = set(snapshot.get("files") or [])
+            snapshot_dirs = set(snapshot.get("dirs") or [])
+
+        removed_files = 0
+        removed_dirs = 0
+        failed = 0
+
+        for cur_root, _dir_names, file_names in os.walk(out_dir):
+            for name in file_names:
+                fpath = os.path.abspath(os.path.join(cur_root, name))
+                norm = os.path.normcase(fpath)
+                if norm == keep_file:
+                    continue
+                if not self._is_generated_oto_artifact_file(
+                    name,
+                    norm,
+                    keep_file,
+                    snapshot_files,
+                    snapshot_provided,
+                ):
+                    continue
+                try:
+                    os.remove(fpath)
+                    removed_files += 1
+                except Exception:
+                    failed += 1
+
+        textgrids_dir = os.path.abspath(os.path.join(out_dir, "textgrids"))
+        # Keep generated TextGrid files for inspection/reuse.
+        _ = textgrids_dir
+
+        for cur_root, dir_names, _file_names in os.walk(out_dir, topdown=False):
+            for name in dir_names:
+                dpath = os.path.abspath(os.path.join(cur_root, name))
+                dnorm = os.path.normcase(dpath)
+                if snapshot_dirs and dnorm in snapshot_dirs:
+                    continue
+                if self._path_is_within(out_file, dpath):
+                    continue
+                try:
+                    os.rmdir(dpath)
+                    removed_dirs += 1
+                except OSError:
+                    continue
+                except Exception:
+                    failed += 1
+
+        if removed_files > 0 or removed_dirs > 0:
+            self._append_log(f"🧹 자동 정리 완료: files={removed_files}, dirs={removed_dirs}")
+        if failed > 0:
+            self._append_log(f"⚠ 자동 정리 실패 항목: {failed}")
+        return {"removed_files": removed_files, "removed_dirs": removed_dirs, "failed": failed}
 
     def _path_is_within(self, path, parent):
         try:
@@ -794,7 +2132,21 @@ class AppRuntimeMixin:
         return {"removed_files": removed_files, "removed_dirs": removed_dirs, "failed": failed}
 
     def _clear_log(self):
-        self.log_text.delete("1.0", "end")
+        log_widget = getattr(self, "log_text", None)
+        if log_widget is not None:
+            try:
+                log_widget.delete("1.0", "end")
+            except Exception:
+                pass
+        self._ui_log_buffer = []
+        detail_widget = getattr(self, "detail_log_text", None)
+        if detail_widget is not None:
+            try:
+                detail_widget.delete("1.0", "end")
+            except Exception:
+                pass
+        self._detail_log_buffer = []
+        self._detail_log_flush_pending = False
 
     def _set_running(self, running):
         self.is_running = running
@@ -806,13 +2158,15 @@ class AppRuntimeMixin:
                 current_text = self.status_label.cget("text")
                 self.status_label.configure(text_color=self._status_color_for_message(current_text))
                 if running:
+                    self._progress_peak_ratio = 0.0
                     self._set_progress(0.0)
                 else:
                     ratio = self._parse_progress_ratio_from_status(current_text)
                     if ratio is None:
-                        if str(current_text).strip().startswith("✅") or "완료" in str(current_text):
+                        lowered = str(current_text).strip().lower()
+                        if ("완료" in str(current_text)) or ("success" in lowered):
                             ratio = 1.0
-                        elif str(current_text).strip().startswith("❌"):
+                        elif ("오류" in str(current_text)) or ("error" in lowered):
                             ratio = 0.0
                     if ratio is not None:
                         self._set_progress(ratio)
@@ -823,9 +2177,9 @@ class AppRuntimeMixin:
         if self.is_running:
             messagebox.showwarning("실행 중", "이미 작업이 진행 중입니다. 완료 후 다시 시도해 주세요.")
             return
-        # 탭 이름이 변경되어도 로그 탭으로 안전하게 이동
+        # Try to switch to log tab even if the label changed by theme/localization.
         switched = False
-        for tab_name in ("로그", "📋 로그", "📝 로그"):
+        for tab_name in ("로그", "상세 로그", "📋 로그", "📝 로그"):
             try:
                 self.tabview.set(tab_name)
                 switched = True
@@ -842,73 +2196,210 @@ class AppRuntimeMixin:
         thread = threading.Thread(target=func, daemon=True)
         thread.start()
 
-    def _handle_error(self, step_name, exception):
-        tb = traceback.format_exc()
-        self.logger.error(f"[{step_name}] {exception}\n{tb}")
+    def _safe_clipboard_copy(self, text):
+        payload = self._mask_sensitive_text(str(text or ""))
+        if not payload:
+            return False
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(payload)
+            self.update_idletasks()
+            return True
+        except Exception:
+            return False
+
+    def _collect_recent_ui_log_tail(self, max_lines=120, max_chars=8000):
+        try:
+            raw = str(self.log_text.get("1.0", "end") or "").strip()
+        except Exception:
+            raw = ""
+        if not raw:
+            return "(ui log unavailable)"
+        lines = raw.splitlines()
+        tail = lines[-int(max_lines):] if max_lines > 0 else lines
+        text = "\n".join(tail).strip()
+        if len(text) > int(max_chars):
+            text = text[-int(max_chars):]
+        return self._mask_sensitive_text(text or "(ui log empty)")
+
+    def _build_quick_error_report(self, step_name, exception_text, traceback_text=""):
+        now = datetime.datetime.now().isoformat()
+        language = self._get_language() if hasattr(self, "_get_language") else "unknown"
+        auto_format = ""
+        try:
+            if hasattr(self, "auto_format_var"):
+                auto_format = str(self.auto_format_var.get() or "").strip()
+        except Exception:
+            auto_format = ""
+        aligner = ""
+        try:
+            if hasattr(self, "aligner_var"):
+                aligner = str(self.aligner_var.get() or "").strip()
+        except Exception:
+            aligner = ""
+        safe_step = self._mask_sensitive_text(str(step_name or ""))
+        safe_error = self._mask_sensitive_text(str(exception_text or ""))
+        report_lines = [
+            "=== UTAU Auto OTO Quick Report ===",
+            f"time: {now}",
+            f"app_version: {getattr(self, 'app_version', '')}",
+            f"release_channel: {getattr(self, 'release_channel', '')}",
+            f"os: {platform.platform()}",
+            f"python: {sys.version.split()[0]}",
+            f"step: {safe_step}",
+            f"error: {safe_error}",
+            f"language: {language}",
+            f"format: {auto_format}",
+            f"aligner: {aligner}",
+            f"wav_dir: {self._sanitize_path_value(self.wav_entry.get() if hasattr(self, 'wav_entry') else '')}",
+            f"template_oto: {self._sanitize_path_value(self.tpl_entry.get() if hasattr(self, 'tpl_entry') else '')}",
+            f"output_oto: {self._sanitize_path_value(self.out_entry.get() if hasattr(self, 'out_entry') else '')}",
+            f"log_path: {self._sanitize_path_value(getattr(self, 'log_path', ''))}",
+            f"event_log_path: {self._sanitize_path_value(getattr(self, 'event_log_path', ''))}",
+            "",
+            "[UI Log Tail]",
+            self._collect_recent_ui_log_tail(),
+        ]
+        tb = self._mask_sensitive_text(str(traceback_text or "").strip())
+        if tb:
+            report_lines.extend(["", "[Traceback]", tb])
+        return "\n".join(report_lines).strip() + "\n"
+
+    def _copy_quick_error_report(self):
+        step_name = str(getattr(self, "_last_error_step", "manual_report") or "manual_report")
+        err_msg = str(getattr(self, "_last_error_message", "(no captured exception)") or "(no captured exception)")
+        tb = str(getattr(self, "_last_error_traceback", "") or "")
+        report_text = self._build_quick_error_report(step_name, err_msg, tb)
+        copied = self._safe_clipboard_copy(report_text)
+        if copied:
+            self._append_log("🧾 제보용 리포트를 클립보드에 복사했습니다. 그대로 붙여넣어 제보해 주세요.")
+            self._show_copyable_alert(
+                title="제보용 리포트 복사 완료",
+                message=report_text,
+                alert_key=None,
+            )
+        else:
+            self._show_copyable_alert(
+                title="제보용 리포트",
+                message=report_text,
+                alert_key=None,
+            )
+
+    def _handle_error(self, step_name, exception, traceback_text=None, auto_popup=True):
+        if traceback_text is None:
+            traceback_text = traceback.format_exc()
+        safe_step = self._mask_sensitive_text(str(step_name or "unknown"))
+        tb = self._mask_sensitive_text(str(traceback_text or "").strip())
+        exc_text = self._mask_sensitive_text(str(exception or ""))
+        self._last_error_step = safe_step
+        self._last_error_message = exc_text
+        self._last_error_traceback = tb
+        self.logger.error(f"[{safe_step}] {exc_text}\n{tb}")
         self._append_log(f"\n{'=' * 50}")
-        self._append_log(f"❌ [{step_name}] 에서 오류가 발생했습니다!")
-        self._append_log(f"   오류 내용: {exception}")
-        self._append_log("   💡 '오류 제보' 버튼을 눌러 로그 파일을 개발자에게 보내주세요.")
+        self._append_log(f"오류 발생 [{safe_step}]")
+        self._append_log(f"   메시지: {exc_text}")
+        report_text = self._build_quick_error_report(safe_step, exc_text, tb)
+        copied = self._safe_clipboard_copy(report_text)
+        if copied:
+            self._append_log("   요약 리포트를 클립보드에 복사했습니다.")
+        else:
+            self._append_log("   리포트 자동 복사에 실패했습니다. 팝업에서 복사해 주세요.")
         self._append_log(f"{'=' * 50}\n")
-        self._set_status(f"❌ 에러 발생: {step_name}")
+        self._set_status(f"오류 발생: {safe_step}")
+        if auto_popup:
+            self._after_safe(
+                lambda payload=report_text: self._show_copyable_alert(
+                    title="오류 리포트",
+                    message=payload,
+                    alert_key=None,
+                )
+            )
 
     def _export_error_report(self):
+        writable_dir = (
+            getattr(self, "writable_data_dir", "")
+            or getattr(self, "app_data_dir", "")
+            or self.app_dir
+        )
         report_path = os.path.join(
-            self.app_dir,
+            writable_dir,
             f"error_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
         )
 
         try:
+            step_name = str(getattr(self, "_last_error_step", "manual_report") or "manual_report")
+            err_msg = str(getattr(self, "_last_error_message", "(no captured exception)") or "(no captured exception)")
+            tb = str(getattr(self, "_last_error_traceback", "") or "")
+            quick_report = self._build_quick_error_report(step_name, err_msg, tb)
+            safe_report_path = self._sanitize_path_value(report_path)
             with open(report_path, "w", encoding="utf-8") as f:
-                f.write("=== UTAU Auto OTO 오류 보고서 ===\n")
-                f.write(f"프로그램 버전: {self.app_version}\n")
-                f.write(f"시간: {datetime.datetime.now().isoformat()}\n")
-                f.write(f"OS: {sys.platform}\n")
-                f.write(f"Python: {sys.version}\n")
-                f.write(f"MFA 경로: {self.mfa_path or '미설치'}\n")
-                f.write(f"정렬 엔진: {self.aligner_var.get()}\n")
-                if hasattr(self, "mfa_align_profile_var"):
-                    f.write(f"MFA 정렬 프로필: {self.mfa_align_profile_var.get()}\n")
-                f.write(f"구조화 이벤트 로그: {getattr(self, 'event_log_path', '')}\n")
-                f.write("\n--- 사용자 설정 ---\n")
-                f.write(f"WAV 폴더: {self.wav_entry.get()}\n")
-                f.write(f"템플릿 OTO: {self.tpl_entry.get()}\n")
-                f.write(f"베이스 OTO 없음: {self.no_base_oto_var.get()}\n")
-                f.write(f"출력 경로: {self.out_entry.get()}\n")
-                f.write("\n--- 파라미터 ---\n")
-                for key, var in self.param_vars.items():
-                    f.write(f"{key}: {var.get()}\n")
-                f.write("\n--- 로그 내용 ---\n")
-                f.write(self.log_text.get("1.0", "end"))
-
+                f.write(quick_report)
+                f.write("\n--- Full UI Log ---\n")
+                f.write(self._mask_sensitive_text(str(self.log_text.get("1.0", "end") or "")))
                 if os.path.exists(self.log_path):
-                    f.write(f"\n--- 상세 로그 파일 ({self.log_path}) ---\n")
-                    with open(self.log_path, "r", encoding="utf-8") as lf:
-                        f.write(lf.read())
+                    f.write(f"\n--- File Log ({self._sanitize_path_value(self.log_path)}) ---\n")
+                    with open(self.log_path, "r", encoding="utf-8", errors="replace") as lf:
+                        f.write(self._mask_sensitive_text(lf.read()))
                 event_log_path = getattr(self, "event_log_path", "")
                 if event_log_path and os.path.exists(event_log_path):
-                    f.write(f"\n--- 구조화 이벤트 로그 ({event_log_path}) ---\n")
-                    with open(event_log_path, "r", encoding="utf-8") as ef:
-                        f.write(ef.read())
+                    f.write(f"\n--- Event Log ({self._sanitize_path_value(event_log_path)}) ---\n")
+                    with open(event_log_path, "r", encoding="utf-8", errors="replace") as ef:
+                        f.write(self._mask_sensitive_text(ef.read()))
 
+            copied = self._safe_clipboard_copy(quick_report)
+            if copied:
+                self._append_log("🧾 제보용 리포트를 클립보드에 복사했습니다.")
             if sys.platform == "win32":
                 os.startfile(os.path.dirname(report_path))
 
             messagebox.showinfo(
-                "오류 보고서 생성 완료",
-                f"오류 보고서가 생성되었습니다!\n\n"
-                f"파일 위치:\n{report_path}\n\n"
-                f"이 파일을 개발자에게 보내주시면\n"
-                f"문제를 빠르게 해결할 수 있습니다.",
+                "오류 제보",
+                (
+                    f"제보 리포트를 생성했습니다.\n\n파일 위치:\n{safe_report_path}\n\n"
+                    + ("클립보드에도 요약 리포트를 복사했습니다.\n바로 붙여넣어 제보할 수 있습니다." if copied else "클립보드 복사에 실패했습니다. 파일을 전달해 주세요.")
+                ),
             )
         except Exception as e:
-            messagebox.showerror("오류", f"보고서 생성 실패: {e}")
-
+            messagebox.showerror("오류", f"보고서 생성 실패: {self._mask_sensitive_text(str(e))}")
 
 class ConfigMixin:
+    def _config_path_candidates(self):
+        primary_dir = (
+            getattr(self, "writable_data_dir", "")
+            or getattr(self, "app_data_dir", "")
+            or ""
+        )
+        app_dir = getattr(self, "app_dir", "")
+        candidates = [
+            os.path.join(primary_dir, "config.json") if primary_dir else "",
+            os.path.join(app_dir, "config.json") if app_dir else "",
+        ]
+        dedup = []
+        seen = set()
+        for path in candidates:
+            norm = os.path.normcase(os.path.abspath(str(path or "")))
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            dedup.append(path)
+        return dedup
+
+    def _primary_config_path(self):
+        candidates = self._config_path_candidates()
+        if candidates:
+            return candidates[0]
+        fallback_dir = getattr(self, "app_dir", "") or os.getcwd()
+        return os.path.join(fallback_dir, "config.json")
+
     def _save_config(self, *_args):
         params = self._get_params()
         config = {
+            "ui_theme_profile": (
+                normalize_theme_profile_name(self.ui_theme_var.get(), default=DEFAULT_THEME_PROFILE)
+                if hasattr(self, "ui_theme_var")
+                else DEFAULT_THEME_PROFILE
+            ),
+            "voicebank_tuning_preset_key": str(getattr(self, "_selected_voicebank_preset_key", "") or ""),
             "wav_dir": self.wav_entry.get(),
             "tpl_path": self.tpl_entry.get(),
             "out_path": self.out_entry.get(),
@@ -918,11 +2409,16 @@ class ConfigMixin:
             "gen_missing_vowels": self.gen_missing_vowels_var.get(),
             "gen_dash_alias": self.gen_dash_alias_var.get() if hasattr(self, "gen_dash_alias_var") else True,
             "no_base_oto": self.no_base_oto_var.get(),
+            "no_mfa_oto_mode": (
+                self._get_no_mfa_oto_mode_code()
+                if hasattr(self, "_get_no_mfa_oto_mode_code")
+                else "remap"
+            ),
+            "recursive_voicebank_scan": self.recursive_voicebank_scan_var.get() if hasattr(self, "recursive_voicebank_scan_var") else False,
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
-            "ml_route": self.ml_route_var.get() if hasattr(self, "ml_route_var") else "legacy",
-            "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "기본 정책",
+            "ml_route": self._get_ml_route_code() if hasattr(self, "_get_ml_route_code") else "auto",
+            "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "델타+셀렉터",
             "ml_coupled_enable": self.ml_coupled_enable_var.get() if hasattr(self, "ml_coupled_enable_var") else True,
-            "ml_two_stage_model_enable": self.ml_two_stage_model_enable_var.get() if hasattr(self, "ml_two_stage_model_enable_var") else True,
             "ml_coupled_min_conf": self.ml_coupled_min_conf_var.get() if hasattr(self, "ml_coupled_min_conf_var") else "",
             "ml_coupled_min_conf_use_model_meta": self.ml_coupled_min_conf_use_model_meta_var.get() if hasattr(self, "ml_coupled_min_conf_use_model_meta_var") else True,
             "ml_coupled_min_conf_model_offset": self.ml_coupled_min_conf_model_offset_var.get() if hasattr(self, "ml_coupled_min_conf_model_offset_var") else "",
@@ -940,13 +2436,8 @@ class ConfigMixin:
             "ml_batch_inference_enable": self.ml_batch_inference_enable_var.get() if hasattr(self, "ml_batch_inference_enable_var") else True,
             "ml_batch_inference_size": self.ml_batch_inference_size_var.get() if hasattr(self, "ml_batch_inference_size_var") else "256",
             "ml_legacy_fallback_enable": self.ml_legacy_fallback_enable_var.get() if hasattr(self, "ml_legacy_fallback_enable_var") else False,
+            "ml_hybrid_routing_enable": self.ml_hybrid_routing_enable_var.get() if hasattr(self, "ml_hybrid_routing_enable_var") else True,
             "ml_anchor_mel_gamma": self.ml_anchor_mel_gamma_var.get() if hasattr(self, "ml_anchor_mel_gamma_var") else "",
-            "ml_mel_weight_mode": self._normalize_mel_weight_mode(
-                self.ml_mel_weight_mode_var.get() if hasattr(self, "ml_mel_weight_mode_var") else "auto"
-            ),
-            "ml_runtime_preset": self._normalize_ml_runtime_preset(
-                self.ml_runtime_preset_var.get() if hasattr(self, "ml_runtime_preset_var") else "권장(균형)"
-            ),
             "ml_model_root_kr": self.ml_model_root_kr_var.get() if hasattr(self, "ml_model_root_kr_var") else "",
             "ml_model_root_ja": self.ml_model_root_ja_var.get() if hasattr(self, "ml_model_root_ja_var") else "",
             "kr_vc_neighbor_enable": self.kr_vc_neighbor_enable_var.get() if hasattr(self, "kr_vc_neighbor_enable_var") else True,
@@ -961,6 +2452,15 @@ class ConfigMixin:
             "ja_vc_neighbor_lead_ms": self.ja_vc_neighbor_lead_ms_var.get() if hasattr(self, "ja_vc_neighbor_lead_ms_var") else "",
             "ja_vc_neighbor_tail_ms": self.ja_vc_neighbor_tail_ms_var.get() if hasattr(self, "ja_vc_neighbor_tail_ms_var") else "",
             "ja_vc_neighbor_min_len": self.ja_vc_neighbor_min_len_var.get() if hasattr(self, "ja_vc_neighbor_min_len_var") else "",
+            "soft_bank_mode": self.soft_bank_mode_var.get() if hasattr(self, "soft_bank_mode_var") else False,
+            "low_rms_gain_enable": self.low_rms_gain_enable_var.get() if hasattr(self, "low_rms_gain_enable_var") else True,
+            "weak_voice_assist_enable": self.weak_voice_assist_enable_var.get() if hasattr(self, "weak_voice_assist_enable_var") else True,
+            "weak_voice_assist_strength": self.weak_voice_assist_strength_var.get() if hasattr(self, "weak_voice_assist_strength_var") else "",
+            "mapping_strict_mode": (
+                self._get_mapping_strict_mode_code()
+                if hasattr(self, "_get_mapping_strict_mode_code")
+                else "soft"
+            ),
             "ja_mapping_words_fallback_enabled": self.ja_mapping_words_fallback_enabled_var.get() if hasattr(self, "ja_mapping_words_fallback_enabled_var") else True,
             "ja_mapping_spn_ratio_threshold": self.ja_mapping_spn_ratio_threshold_var.get() if hasattr(self, "ja_mapping_spn_ratio_threshold_var") else 0.35,
             "ja_mapping_min_vowel_phone_ratio": self.ja_mapping_min_vowel_phone_ratio_var.get() if hasattr(self, "ja_mapping_min_vowel_phone_ratio_var") else 0.5,
@@ -969,18 +2469,18 @@ class ConfigMixin:
             "kr_mapping_confidence_threshold": self.kr_mapping_confidence_threshold_var.get() if hasattr(self, "kr_mapping_confidence_threshold_var") else "",
             "kr_mapping_max_index_jump_default": self.kr_mapping_max_index_jump_default_var.get() if hasattr(self, "kr_mapping_max_index_jump_default_var") else 1,
             "kr_mapping_max_index_jump_high_conf": self.kr_mapping_max_index_jump_high_conf_var.get() if hasattr(self, "kr_mapping_max_index_jump_high_conf_var") else 2,
+            "kr_continuity_enable": self.kr_continuity_enable_var.get() if hasattr(self, "kr_continuity_enable_var") else True,
             "kr_continuity_max_offset_adj": self.kr_continuity_max_offset_adj_var.get() if hasattr(self, "kr_continuity_max_offset_adj_var") else "",
-            "kr_uncommon_reclist_stable_mode": self.kr_uncommon_reclist_stable_mode_var.get() if hasattr(self, "kr_uncommon_reclist_stable_mode_var") else False,
             "ml_same_language_borrow_only": self.ml_same_language_borrow_only_var.get() if hasattr(self, "ml_same_language_borrow_only_var") else True,
-            "mapping_strict_mode": (
-                self._normalize_mapping_strict_mode(self.mapping_strict_mode_var.get())
-                if hasattr(self, "mapping_strict_mode_var") and hasattr(self, "_normalize_mapping_strict_mode")
-                else (self.mapping_strict_mode_var.get() if hasattr(self, "mapping_strict_mode_var") else "off")
-            ),
             "language": self.lang_var.get(),
             "auto_format": self.auto_format_var.get(),
             "ja_alias_style": self.ja_alias_style_var.get(),
+            "en_cvvc_pack": self.en_cvvc_pack_var.get() if hasattr(self, "en_cvvc_pack_var") else "LITE",
+            "en_cvvc_beat": self.en_cvvc_beat_var.get() if hasattr(self, "en_cvvc_beat_var") else "8-beat",
+            "en_cvvc_preset": self.en_cvvc_preset_var.get() if hasattr(self, "en_cvvc_preset_var") else "Core",
+            "en_cvvc_list_fallback": self.en_cvvc_list_fallback_var.get() if hasattr(self, "en_cvvc_list_fallback_var") else True,
             "show_advanced_aligner": self.show_advanced_aligner_var.get() if hasattr(self, "show_advanced_aligner_var") else False,
+            "developer_mode_enabled": self.developer_mode_enabled_var.get() if hasattr(self, "developer_mode_enabled_var") else False,
             "aligner": self.aligner_var.get(),
             "mfa_align_profile": self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "\uae30\ubcf8",
             "mfa_align_profile_code": self._get_mfa_align_profile_code() if hasattr(self, "_get_mfa_align_profile_code") else "default",
@@ -997,16 +2497,21 @@ class ConfigMixin:
             "tune_apply_target": self.tune_apply_target_var.get() if hasattr(self, "tune_apply_target_var") else "",
             "params": params,
         }
-        config_path = os.path.join(self.app_dir, "config.json")
+        config_path = self._primary_config_path()
         try:
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=4, ensure_ascii=False)
         except Exception as e:
             self.logger.error(f"설정 저장 실패: {e}")
 
     def _load_config(self):
-        config_path = os.path.join(self.app_dir, "config.json")
-        if not os.path.exists(config_path):
+        config_path = ""
+        for candidate in self._config_path_candidates():
+            if os.path.exists(candidate):
+                config_path = candidate
+                break
+        if not config_path:
             if hasattr(self, "_apply_recommended_ml_model_defaults"):
                 self._apply_recommended_ml_model_defaults()
             if hasattr(self, "_refresh_ml_backend_status"):
@@ -1016,6 +2521,29 @@ class ConfigMixin:
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
+
+            if "ui_theme_profile" in config and hasattr(self, "ui_theme_var") and hasattr(self, "_apply_ui_theme_profile"):
+                saved_theme = normalize_theme_profile_name(
+                    config.get("ui_theme_profile", DEFAULT_THEME_PROFILE),
+                    default=DEFAULT_THEME_PROFILE,
+                )
+                current_theme = str(self.ui_theme_var.get() or "").strip()
+                if current_theme != saved_theme:
+                    self._apply_ui_theme_profile(saved_theme, persist=False, rebuild=True)
+                    return
+                self.ui_theme_var.set(saved_theme)
+            saved_preset_key = str(config.get("voicebank_tuning_preset_key", "") or "").strip().lower()
+            if saved_preset_key in {
+                "soft:aggressive",
+                "soft:conservative",
+                "normal:aggressive",
+                "normal:conservative",
+            }:
+                self._selected_voicebank_preset_key = saved_preset_key
+            else:
+                self._selected_voicebank_preset_key = ""
+            if hasattr(self, "_sync_voicebank_preset_button_styles"):
+                self._sync_voicebank_preset_button_styles()
 
             if "wav_dir" in config:
                 self.wav_entry.insert(0, config["wav_dir"])
@@ -1032,18 +2560,66 @@ class ConfigMixin:
                 self.gen_dash_alias_var.set(bool(config.get("gen_dash_alias", True)))
             if "no_base_oto" in config and hasattr(self, "no_base_oto_var"):
                 self.no_base_oto_var.set(bool(config.get("no_base_oto", False)))
+            if "no_mfa_oto_mode" in config and hasattr(self, "no_mfa_oto_mode_var"):
+                if hasattr(self, "_set_no_mfa_oto_mode_from_code"):
+                    self._set_no_mfa_oto_mode_from_code(config.get("no_mfa_oto_mode", "remap"))
+                else:
+                    self.no_mfa_oto_mode_var.set(str(config.get("no_mfa_oto_mode", "remap") or "remap"))
+            if "soft_bank_mode" in config and hasattr(self, "soft_bank_mode_var"):
+                self.soft_bank_mode_var.set(bool(config.get("soft_bank_mode", False)))
+            if "low_rms_gain_enable" in config and hasattr(self, "low_rms_gain_enable_var"):
+                self.low_rms_gain_enable_var.set(bool(config.get("low_rms_gain_enable", True)))
+            if "weak_voice_assist_enable" in config and hasattr(self, "weak_voice_assist_enable_var"):
+                self.weak_voice_assist_enable_var.set(bool(config.get("weak_voice_assist_enable", True)))
+            if "weak_voice_assist_strength" in config and hasattr(self, "weak_voice_assist_strength_var"):
+                self.weak_voice_assist_strength_var.set(str(config.get("weak_voice_assist_strength", "") or ""))
+            if "mapping_strict_mode" in config and hasattr(self, "mapping_strict_mode_var"):
+                if hasattr(self, "_set_mapping_strict_mode_from_code"):
+                    self._set_mapping_strict_mode_from_code(config.get("mapping_strict_mode", "soft"))
+                else:
+                    self.mapping_strict_mode_var.set(str(config.get("mapping_strict_mode", "soft") or "soft"))
+            if "recursive_voicebank_scan" in config and hasattr(self, "recursive_voicebank_scan_var"):
+                self.recursive_voicebank_scan_var.set(bool(config.get("recursive_voicebank_scan", False)))
             if hasattr(self, "enable_ml_correction_var"):
                 self.enable_ml_correction_var.set(bool(config.get("enable_ml_correction", True)))
             if "ml_route" in config and hasattr(self, "ml_route_var"):
-                saved_route = str(config.get("ml_route", "legacy") or "legacy").strip().lower()
-                self.ml_route_var.set("legacy" if saved_route != "legacy" else saved_route)
+                saved_route = self._normalize_ml_route_code(config.get("ml_route", "auto"))
+                if hasattr(self, "_set_ml_route_from_code"):
+                    self._set_ml_route_from_code(saved_route)
+                else:
+                    self.ml_route_var.set(saved_route)
 
             if "language" in config and hasattr(self, "lang_var"):
                 saved_language = str(config.get("language", "") or "").strip()
-                if "Japanese" in saved_language:
+                saved_language_lower = saved_language.lower()
+                if "english" in saved_language_lower:
+                    if str(getattr(self, "release_channel", "stable")).strip().lower() == "preview":
+                        self.lang_var.set("English (Preview CVVC)")
+                    else:
+                        self.lang_var.set("Korean (한국어)")
+                elif "japanese" in saved_language_lower:
                     self.lang_var.set("Japanese (日本語)")
-                elif "Korean" in saved_language:
+                elif "korean" in saved_language_lower:
                     self.lang_var.set("Korean (한국어)")
+
+            if "en_cvvc_pack" in config and hasattr(self, "en_cvvc_pack_var"):
+                pack = str(config.get("en_cvvc_pack", "LITE") or "LITE").strip().upper()
+                if pack not in {"LITE", "FULL_GA"}:
+                    pack = "LITE"
+                self.en_cvvc_pack_var.set(pack)
+            if "en_cvvc_beat" in config and hasattr(self, "en_cvvc_beat_var"):
+                beat_raw = str(config.get("en_cvvc_beat", "8-beat") or "8-beat").strip().lower()
+                self.en_cvvc_beat_var.set("4-beat" if beat_raw.startswith("4") else "8-beat")
+            if "en_cvvc_preset" in config and hasattr(self, "en_cvvc_preset_var"):
+                preset_raw = str(config.get("en_cvvc_preset", "Core") or "Core").strip().lower()
+                if preset_raw in {"core+", "core_plus", "plus", "recommended"}:
+                    self.en_cvvc_preset_var.set("Core+")
+                elif preset_raw in {"all", "all+alt", "all_with_alt", "full"}:
+                    self.en_cvvc_preset_var.set("All+Alt")
+                else:
+                    self.en_cvvc_preset_var.set("Core")
+            if "en_cvvc_list_fallback" in config and hasattr(self, "en_cvvc_list_fallback_var"):
+                self.en_cvvc_list_fallback_var.set(bool(config.get("en_cvvc_list_fallback", True)))
 
             lang = self._get_language() if hasattr(self, "_get_language") else "korean"
             saved_auto = config.get("auto_format", "자동 감지 (권장)")
@@ -1055,8 +2631,23 @@ class ConfigMixin:
                 if saved_style in {"원본 그대로", "히라가나", "로마자"}:
                     self.ja_alias_style_var.set(saved_style)
             if "aligner" in config and hasattr(self, "aligner_var"):
-                saved_aligner = normalize_aligner_name(config.get("aligner", "mfa"), default="mfa")
-                self.aligner_var.set("Domino (JP)" if saved_aligner == "domino" else "MFA")
+                try:
+                    from core.pipeline_status import normalize_aligner_name
+
+                    saved_aligner = normalize_aligner_name(config.get("aligner", "mfa"), default="mfa")
+                except Exception:
+                    saved_aligner = "mfa"
+                self.aligner_var.set("No-MFA" if saved_aligner == "none" else "MFA")
+            if "developer_mode_enabled" in config and hasattr(self, "developer_mode_enabled_var"):
+                allow_persist_dev = str(os.environ.get("UTOA_ALLOW_PERSISTENT_DEVELOPER_MODE", "")).strip().lower() in {
+                    "1", "true", "yes", "on"
+                }
+                release_channel = str(getattr(self, "release_channel", "") or "").strip().lower()
+                force_default_off = release_channel in {"stable", "preview"}
+                saved_dev_mode = bool(config.get("developer_mode_enabled", False))
+                self.developer_mode_enabled_var.set(
+                    saved_dev_mode if (allow_persist_dev or not force_default_off) else False
+                )
             if hasattr(self, "show_advanced_aligner_var"):
                 self.show_advanced_aligner_var.set(False)
             if hasattr(self, "mfa_align_profile_var"):
@@ -1111,13 +2702,11 @@ class ConfigMixin:
             if "whisperx_save_debug_json" in config and hasattr(self, "whisperx_save_debug_json_var"):
                 self.whisperx_save_debug_json_var.set(bool(config.get("whisperx_save_debug_json", False)))
             if "ml_selector_mode" in config and hasattr(self, "ml_selector_mode_var"):
-                saved_selector_mode = str(config.get("ml_selector_mode", "기본 정책") or "").strip()
+                saved_selector_mode = str(config.get("ml_selector_mode", "델타+셀렉터") or "").strip()
                 if saved_selector_mode in {"기본 정책", "델타만", "델타+셀렉터"}:
                     self.ml_selector_mode_var.set(saved_selector_mode)
             if "ml_coupled_enable" in config and hasattr(self, "ml_coupled_enable_var"):
                 self.ml_coupled_enable_var.set(bool(config.get("ml_coupled_enable", True)))
-            if "ml_two_stage_model_enable" in config and hasattr(self, "ml_two_stage_model_enable_var"):
-                self.ml_two_stage_model_enable_var.set(bool(config.get("ml_two_stage_model_enable", True)))
             if "ml_coupled_min_conf" in config and hasattr(self, "ml_coupled_min_conf_var"):
                 raw_conf = config.get("ml_coupled_min_conf", "")
                 if raw_conf is None:
@@ -1198,6 +2787,8 @@ class ConfigMixin:
                         self.ml_batch_inference_size_var.set("256")
             if "ml_legacy_fallback_enable" in config and hasattr(self, "ml_legacy_fallback_enable_var"):
                 self.ml_legacy_fallback_enable_var.set(bool(config.get("ml_legacy_fallback_enable", False)))
+            if "ml_hybrid_routing_enable" in config and hasattr(self, "ml_hybrid_routing_enable_var"):
+                self.ml_hybrid_routing_enable_var.set(bool(config.get("ml_hybrid_routing_enable", True)))
             if "kr_mapping_confidence_threshold" in config and hasattr(self, "kr_mapping_confidence_threshold_var"):
                 raw_conf = config.get("kr_mapping_confidence_threshold", "")
                 if raw_conf is None:
@@ -1236,8 +2827,8 @@ class ConfigMixin:
                                 )
                         except Exception:
                             self.kr_continuity_max_offset_adj_var.set("")
-            if "kr_uncommon_reclist_stable_mode" in config and hasattr(self, "kr_uncommon_reclist_stable_mode_var"):
-                self.kr_uncommon_reclist_stable_mode_var.set(bool(config.get("kr_uncommon_reclist_stable_mode", False)))
+            if "kr_continuity_enable" in config and hasattr(self, "kr_continuity_enable_var"):
+                self.kr_continuity_enable_var.set(bool(config.get("kr_continuity_enable", True)))
             if "ml_anchor_mel_gamma" in config and hasattr(self, "ml_anchor_mel_gamma_var"):
                 raw_val = config.get("ml_anchor_mel_gamma", "")
                 if raw_val is None:
@@ -1257,15 +2848,6 @@ class ConfigMixin:
                                 )
                         except Exception:
                             self.ml_anchor_mel_gamma_var.set("")
-            if hasattr(self, "ml_mel_weight_mode_var"):
-                mode_raw = config.get("ml_mel_weight_mode", self.ml_mel_weight_mode_var.get())
-                mode = self._normalize_mel_weight_mode(mode_raw)
-                self.ml_mel_weight_mode_var.set(
-                    "MEL 우선(실험)" if mode == "mel_boost" else "기본(auto)"
-                )
-            if hasattr(self, "ml_runtime_preset_var"):
-                preset_raw = config.get("ml_runtime_preset", self.ml_runtime_preset_var.get())
-                self.ml_runtime_preset_var.set(self._describe_ml_runtime_preset(preset_raw))
             if "kr_vc_neighbor_enable" in config and hasattr(self, "kr_vc_neighbor_enable_var"):
                 self.kr_vc_neighbor_enable_var.set(bool(config.get("kr_vc_neighbor_enable", True)))
             if "ja_vc_neighbor_enable" in config and hasattr(self, "ja_vc_neighbor_enable_var"):
@@ -1313,16 +2895,7 @@ class ConfigMixin:
                 if backend in {"auto", "ensemble"}:
                     self.ml_coupled_backend_var.set(backend)
             if "ml_coupled_strict_constraint" in config and hasattr(self, "ml_coupled_strict_constraint_var"):
-                self.ml_coupled_strict_constraint_var.set(bool(config.get("ml_coupled_strict_constraint", False)))
-            if "mapping_strict_mode" in config and hasattr(self, "mapping_strict_mode_var"):
-                if hasattr(self, "_normalize_mapping_strict_mode"):
-                    mode = self._normalize_mapping_strict_mode(config.get("mapping_strict_mode", "off"))
-                else:
-                    mode = str(config.get("mapping_strict_mode", "off") or "off").strip().lower()
-                if hasattr(self, "_describe_mapping_strict_mode"):
-                    self.mapping_strict_mode_var.set(self._describe_mapping_strict_mode(mode))
-                else:
-                    self.mapping_strict_mode_var.set(mode)
+                self.ml_coupled_strict_constraint_var.set(bool(config.get("ml_coupled_strict_constraint", True)))
             if "ml_model_root_kr" in config and hasattr(self, "ml_model_root_kr_var"):
                 self.ml_model_root_kr_var.set(str(config.get("ml_model_root_kr", "") or ""))
             if "ml_model_root_ja" in config and hasattr(self, "ml_model_root_ja_var"):
@@ -1343,8 +2916,16 @@ class ConfigMixin:
             self._on_no_base_oto_toggle()
             if hasattr(self, "_sync_aligner_ui"):
                 self._sync_aligner_ui()
+            if hasattr(self, "_sync_developer_mode_ui"):
+                self._sync_developer_mode_ui()
+            if hasattr(self, "_sync_vc_correction_toggle"):
+                self._sync_vc_correction_toggle()
+            if hasattr(self, "_sync_advanced_tuning_slider_controls"):
+                self._sync_advanced_tuning_slider_controls()
+            if hasattr(self, "_sync_weak_voice_assist_controls"):
+                self._sync_weak_voice_assist_controls()
 
-            if "params" in config:
+            if "params" in config and hasattr(self, "param_vars") and isinstance(self.param_vars, dict):
                 params = config["params"]
                 for key, val in params.items():
                     if key in self.param_vars:

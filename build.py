@@ -18,6 +18,7 @@ FFMPEG_DIR = os.path.join(BUILD_ASSET_DIR, "ffmpeg")
 FFMPEG_BIN_DIR = os.path.join(FFMPEG_DIR, "bin")
 FFMPEG_RELEASE_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 REQUIRED_FFMPEG_BINARIES = ("ffmpeg.exe", "ffprobe.exe")
+REQUIRED_MSVC_RUNTIME_DLLS = ("msvcp140.dll", "msvcp140_1.dll")
 
 DEFAULT_APP_NAME = "UTAU_Auto_OTO"
 DEFAULT_CHANNEL = "stable"
@@ -38,7 +39,6 @@ EXCLUDED_MODULES = [
     "ml",
 ]
 EXCLUDED_TRAINING_MODULES = [
-    "core.ja_oto_autotune",
     "core.oto_ml.coupled.training",
 ]
 RUNTIME_DATA_PATHS = [
@@ -176,6 +176,59 @@ def _iter_ffmpeg_runtime_files(ffmpeg_bin):
     return files
 
 
+def _iter_msvc_runtime_files():
+    """
+    Collect MSVC runtime DLLs for app-local bundling.
+    This avoids target-machine startup failures when VC++ redistributable is absent.
+    """
+    candidates = []
+    windir = os.environ.get("WINDIR", r"C:\Windows")
+    if windir:
+        candidates.append(os.path.join(windir, "System32"))
+    candidates.append(os.path.join(sys.base_prefix, "DLLs"))
+    candidates.append(sys.base_prefix)
+
+    search_roots = []
+    seen = set()
+    for root in candidates:
+        norm = os.path.normcase(os.path.abspath(str(root or "")))
+        if not root or norm in seen or not os.path.isdir(root):
+            continue
+        seen.add(norm)
+        search_roots.append(root)
+
+    if not search_roots:
+        print("[WARN] MSVC runtime search roots were not found.")
+        return []
+
+    found = []
+    found_names = set()
+    missing_required = []
+    for dll_name in REQUIRED_MSVC_RUNTIME_DLLS:
+        located_path = ""
+        for root in search_roots:
+            probe = os.path.join(root, dll_name)
+            if os.path.isfile(probe):
+                located_path = probe
+                break
+        if located_path:
+            found.append((located_path, dll_name))
+            found_names.add(dll_name.lower())
+        else:
+            missing_required.append(dll_name)
+
+    if found:
+        names = ", ".join(name for _, name in found)
+        print(f"[INFO] Bundling MSVC runtime DLLs: {names}")
+    if missing_required:
+        missing = ", ".join(missing_required)
+        print(
+            "[WARN] Required MSVC runtime DLLs were not found on build machine: "
+            f"{missing}. Target machine may require VC++ Redistributable."
+        )
+    return found
+
+
 def _has_preview_channel(target_channels) -> bool:
     return any(str(ch).strip().lower() == "preview" for ch in (target_channels or []))
 
@@ -291,6 +344,8 @@ def _build_pyinstaller_args(app_name, ffmpeg_bin, app_icon_path="", onefile=Fals
         "--hidden-import=customtkinter",
         "--hidden-import=onnxruntime",
     ]
+    for src, name in _iter_msvc_runtime_files():
+        pyinstaller_args.append(f"--add-binary={src};.")
     if include_domino_module:
         pyinstaller_args.append("--hidden-import=pydomino")
     for src, dst in _iter_runtime_data_entries():
@@ -372,6 +427,8 @@ def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, inc
     ffmpeg_runtime_files = _iter_ffmpeg_runtime_files(ffmpeg_bin)
     for src, name in ffmpeg_runtime_files:
         cmd.append(f"--include-data-files={src}=ffmpeg/bin/{name}")
+    for src, name in _iter_msvc_runtime_files():
+        cmd.append(f"--include-data-files={src}={name}")
     if app_icon_path:
         cmd.append(f"--windows-icon-from-ico={app_icon_path}")
 
