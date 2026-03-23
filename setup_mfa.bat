@@ -1,42 +1,53 @@
-@echo off
+﻿@echo off
 setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
-title UTAU Auto OTO - MFA Setup
+title UTAU Auto OTO - MFA 설치
 
 set "INSTALL_ML=0"
 set "DELETE_OLD_AFTER_INSTALL=0"
 set "AUTO_ML=0"
+set "NON_INTERACTIVE=0"
 
 :parse_args
 if "%~1"=="" goto :args_done
 if /i "%~1"=="--help" goto :show_help
 if /i "%~1"=="--with-ml" set "INSTALL_ML=1"
 if /i "%~1"=="--install-ml" set "INSTALL_ML=1"
+if /i "%~1"=="--non-interactive" set "NON_INTERACTIVE=1"
+if /i "%~1"=="--yes" set "NON_INTERACTIVE=1"
 shift
 goto :parse_args
 
 :show_help
-echo Usage: setup_mfa.bat [--with-ml]
-echo Installs a local MFA environment in the script folder (.env) using Micromamba.
-echo Optional:
-echo   --with-ml / --install-ml  Install ML dependencies (pandas/sklearn/lightgbm/pytorch).
+echo 사용법: setup_mfa.bat [--with-ml]
+echo 스크립트 폴더^(.env^)에 Micromamba 기반 로컬 MFA 환경을 설치합니다.
+echo 옵션:
+echo   --with-ml / --install-ml  ML 의존성^ (pandas/sklearn/lightgbm/pytorch^) 설치
 exit /b 0
 
 :args_done
 
 echo ====================================================
-echo   UTAU Auto OTO - MFA Lightweight Environment Setup
-echo   This script only needs to run once.
+echo   UTAU Auto OTO - MFA 경량 환경 설치
+echo   이 스크립트는 최초 1회만 실행하면 됩니다.
 echo ====================================================
 echo.
-echo [안내] 처음 설치 또는 복구에는 시간이 오래 걸릴 수 있습니다.
-echo        네트워크 속도와 PC 성능에 따라 10-20분, 경우에 따라 그 이상 걸릴 수 있습니다.
-echo        설치 중에는 창을 닫지 말고 기다려 주세요.
-echo        설치 후에는 현재 언어용 MFA 모델 다운로드가 이어질 수 있습니다.
+echo [안내] 설치에는 인터넷 연결이 필요합니다.
+echo        PC 환경에 따라 10~20분 정도 소요될 수 있습니다.
+echo        설치 중에는 창을 닫지 말아 주세요.
+echo        완료 후 MFA 정렬 기능을 바로 사용할 수 있습니다.
 echo.
 
-set "APP_DIR=%~dp0"
-set "APP_DIR=%APP_DIR:~0,-1%"
+for %%I in ("%~f0") do set "APP_DIR=%%~dpI"
+if defined APP_DIR set "APP_DIR=%APP_DIR:~0,-1%"
+if not defined APP_DIR set "APP_DIR=%CD%"
+if /i "%APP_DIR%"=="%WINDIR%\System32" (
+    echo [WARN] setup_mfa.bat이 System32 경로에서 실행되었습니다.
+    echo        MFA 작업 경로를 LOCALAPPDATA로 전환합니다.
+    set "APP_DIR=%LOCALAPPDATA%\UTAU_Auto_OTO_v3"
+)
+if not exist "%APP_DIR%" mkdir "%APP_DIR%" >nul 2>nul
+pushd "%APP_DIR%" >nul 2>nul
 set "OLD_PUBLIC_ROOT=%PUBLIC%"
 if not defined OLD_PUBLIC_ROOT set "OLD_PUBLIC_ROOT=C:\Users\Public"
 set "OLD_ENV_DIR=%OLD_PUBLIC_ROOT%\UTAU_Auto_OTO_v3\.env"
@@ -44,17 +55,20 @@ set "OLD_MICROMAMBA_ROOT=%OLD_PUBLIC_ROOT%\UTAU_Auto_OTO_v3\micromamba"
 set "ENV_DIR=%APP_DIR%\.env"
 set "MICROMAMBA_ROOT=%APP_DIR%\micromamba"
 set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\Library\bin\micromamba.exe"
-set "MICROMAMBA_ARCHIVE=%APP_DIR%\micromamba-win-64-latest.tar.bz2"
+set "MICROMAMBA_ARCHIVE=%TEMP%\utau_auto_oto_micromamba-win-64-latest.tar.bz2"
+set "MICROMAMBA_LATEST_URL=https://micro.mamba.pm/api/micromamba/win-64/latest"
+set "MICROMAMBA_MD5_EXPECTED="
+set "MICROMAMBA_MD5_ACTUAL="
 set "MFA_EXE=%ENV_DIR%\Scripts\mfa.exe"
 set "MFA_PYTHON_VERSION=3.10"
 
-echo [INFO] MFA environment path: %ENV_DIR%
-echo [INFO] MFA Micromamba path: %MICROMAMBA_ROOT%
+echo [INFO] MFA 환경 경로: %ENV_DIR%
+echo [INFO] MFA Micromamba 경로: %MICROMAMBA_ROOT%
 
 if exist "%APP_DIR%\ML_models" set "AUTO_ML=1"
 if exist "%APP_DIR%\models_installed\oto_ml" set "AUTO_ML=1"
 if "%AUTO_ML%"=="1" if "%INSTALL_ML%"=="0" (
-    echo [INFO] ML bundle assets detected. Enabling ML dependencies.
+    echo [INFO] ML 번들 자산이 감지되어 ML 의존성 설치를 활성화합니다.
     set "INSTALL_ML=1"
 )
 if exist "%OLD_ENV_DIR%" (
@@ -68,11 +82,11 @@ if not exist "%MFA_EXE%" if exist "%ENV_DIR%\Scripts\mfa.bat" set "MFA_EXE=%ENV_
 if exist "%MFA_EXE%" (
     call :get_env_python_version "%ENV_DIR%" MFA_ENV_PYTHON
     if defined MFA_ENV_PYTHON (
-        echo [INFO] Existing MFA Python version: !MFA_ENV_PYTHON!
+        echo [INFO] 기존 MFA Python 버전: !MFA_ENV_PYTHON!
         call :python_requires_rebuild "!MFA_ENV_PYTHON!" MFA_ENV_REBUILD
         if "!MFA_ENV_REBUILD!"=="1" (
-            echo [WARN] Python !MFA_ENV_PYTHON! is not compatible with the Windows MFA dependency flow.
-            echo        Rebuilding the environment with Python %MFA_PYTHON_VERSION%...
+            echo [WARN] Python !MFA_ENV_PYTHON! 버전은 Windows MFA 의존성 흐름과 호환되지 않습니다.
+            echo        Python %MFA_PYTHON_VERSION% 기준으로 환경을 재구성합니다...
             call :remove_env_dir
             if errorlevel 1 exit /b 1
         )
@@ -83,8 +97,8 @@ if exist "%MFA_EXE%" goto :existing_env_ready
 goto :install_micromamba
 
 :existing_env_ready
-echo [OK] MFA is already installed.
-echo      Path: %MFA_EXE%
+echo [OK] MFA가 이미 설치되어 있습니다.
+echo      경로: %MFA_EXE%
 echo.
 call :bootstrap_python_tools
 if errorlevel 1 exit /b 1
@@ -105,48 +119,67 @@ if "%INSTALL_ML%"=="1" (
     if errorlevel 1 exit /b 1
 )
 echo.
-echo Checking Korean acoustic model...
+echo 한국어 음향 모델 확인 중...
 call :download_acoustic_model korean_mfa
 if errorlevel 1 exit /b 1
 echo.
-echo Checking Japanese acoustic model...
+echo 일본어 음향 모델 확인 중...
 call :download_acoustic_model japanese_mfa
 if errorlevel 1 exit /b 1
 call :cleanup_env_caches
 if errorlevel 1 exit /b 1
 call :cleanup_old_env_if_requested
 echo.
-echo Done. You can now launch UTAU_Auto_OTO.exe.
+echo 완료되었습니다. 이제 UTAU_Auto_OTO.exe를 실행할 수 있습니다.
 pause
 exit /b 0
 
 :install_micromamba
-echo [INFO] Using Micromamba bootstrap to reduce installation cost.
+echo [INFO] 설치 비용을 줄이기 위해 Micromamba 부트스트랩을 사용합니다.
 echo.
-echo [1/5] Downloading Micromamba... ^(about 15MB^)
+echo [1/5] Micromamba 다운로드 중... ^(약 15MB^)
+call :resolve_micromamba_expected_md5
+if errorlevel 1 (
+    echo [WARN] 신뢰 가능한 Micromamba 해시 메타데이터를 가져오지 못했습니다.
+    if "%NON_INTERACTIVE%"=="1" (
+        echo [FAILED] 비대화형 모드에서는 해시 검증 메타데이터가 필요합니다.
+        exit /b 1
+    )
+    choice /C YN /N /M "신뢰 해시 메타데이터 없이 계속할까요? [Y/N]: "
+    if errorlevel 2 (
+        echo [FAILED] 사용자에 의해 중단되었습니다.
+        exit /b 1
+    )
+)
 if not exist "%MICROMAMBA_ARCHIVE%" (
-    powershell -NoProfile -Command "& {[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://micro.mamba.pm/api/micromamba/win-64/latest' -OutFile '%MICROMAMBA_ARCHIVE%'}"
+    powershell -NoProfile -Command "& {$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '%MICROMAMBA_LATEST_URL%' -OutFile '%MICROMAMBA_ARCHIVE%'}"
     if errorlevel 1 (
-        echo [FAILED] Micromamba download failed.
+        echo [FAILED] Micromamba 다운로드에 실패했습니다.
         pause
         exit /b 1
     )
 ) else (
-    echo    Already downloaded. Skipping.
+    echo    이미 다운로드되어 있어 건너뜁니다.
 )
-echo [OK] Download complete.
+call :verify_micromamba_archive
+if errorlevel 1 (
+    echo [FAILED] Micromamba 해시 검증에 실패했습니다.
+    pause
+    exit /b 1
+)
+echo [OK] 다운로드가 완료되었습니다.
 echo.
 
-echo [2/5] Extracting Micromamba...
+echo [2/5] Micromamba 압축 해제 중...
 if not exist "%MICROMAMBA_EXE%" (
     if exist "%MICROMAMBA_ROOT%" (
-        echo [INFO] Removing previous Micromamba root...
+        echo [INFO] 기존 Micromamba 루트를 제거합니다...
         rmdir /s /q "%MICROMAMBA_ROOT%" >nul 2>nul
     )
     mkdir "%MICROMAMBA_ROOT%" >nul 2>nul
     tar -xjf "%MICROMAMBA_ARCHIVE%" -C "%MICROMAMBA_ROOT%"
     if errorlevel 1 (
-        echo [FAILED] Micromamba extraction failed.
+        echo [FAILED] Micromamba 압축 해제에 실패했습니다.
         pause
         exit /b 1
     )
@@ -158,19 +191,19 @@ if not exist "%MICROMAMBA_EXE%" (
     )
 )
 if not exist "%MICROMAMBA_EXE%" (
-    echo [FAILED] Micromamba executable was not found after extraction.
+    echo [FAILED] 압축 해제 후 Micromamba 실행 파일을 찾지 못했습니다.
     pause
     exit /b 1
 )
-echo [OK] Micromamba ready.
+echo [OK] Micromamba 준비 완료.
 echo.
 
-echo [3/5] Installing Montreal Forced Aligner... ^(3-10 min^)
+echo [3/5] Montreal Forced Aligner 설치 중... ^(약 3~10분^)
 if exist "%ENV_DIR%" if not exist "%MFA_EXE%" call :remove_env_dir
 set "MAMBA_ROOT_PREFIX=%MICROMAMBA_ROOT%"
 "%MICROMAMBA_EXE%" create -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge python=%MFA_PYTHON_VERSION% montreal-forced-aligner colorama
 if errorlevel 1 (
-    echo [FAILED] MFA install failed.
+    echo [FAILED] MFA 설치에 실패했습니다.
     pause
     exit /b 1
 )
@@ -183,7 +216,7 @@ if errorlevel 1 exit /b 1
 call :verify_textgrid
 if errorlevel 1 exit /b 1
 
-echo [4/5] Installing Korean/Japanese tokenizer dependencies...
+echo [4/5] 한국어/일본어 토크나이저 의존성 설치 중...
 call :install_korean_support
 if errorlevel 1 exit /b 1
 call :install_japanese_support
@@ -197,12 +230,12 @@ if "%INSTALL_ML%"=="1" (
     if errorlevel 1 exit /b 1
 )
 
-echo Cleaning up installer cache...
+echo 설치 캐시 정리 중...
 if exist "%MICROMAMBA_ARCHIVE%" del "%MICROMAMBA_ARCHIVE%" >nul 2>nul
 
-echo [OK] MFA installed successfully.
+echo [OK] MFA 설치가 완료되었습니다.
 echo.
-echo [Final] Downloading Korean/Japanese acoustic models... ^(1-2 min^)
+echo [최종] 한국어/일본어 음향 모델 다운로드 중... ^(약 1~2분^)
 call :download_acoustic_model korean_mfa
 if errorlevel 1 exit /b 1
 call :download_acoustic_model japanese_mfa
@@ -212,32 +245,32 @@ if errorlevel 1 exit /b 1
 call :cleanup_old_env_if_requested
 echo.
 echo ====================================================
-echo   Setup complete.
-echo   Next step:
-echo   1) Launch UTAU_Auto_OTO.exe ^(release build^)
-echo   2) Or run run.bat ^(source checkout^)
-echo   3) Then click "3. Voice Alignment" to continue
+echo   설치가 완료되었습니다.
+echo   다음 단계:
+echo   1) UTAU_Auto_OTO.exe 실행 ^(릴리즈 빌드^)
+echo   2) 또는 run.bat 실행 ^(소스 체크아웃^)
+echo   3) 이후 "3. Voice Alignment"를 눌러 진행
 echo ====================================================
 echo.
 pause
 exit /b 0
 
 :bootstrap_python_tools
-echo Checking MFA Python package tools...
+echo MFA Python 패키지 도구 점검 중...
 if not exist "%ENV_DIR%\python.exe" (
-    echo [FAILED] MFA Python runtime was not found.
+    echo [FAILED] MFA Python 런타임을 찾을 수 없습니다.
     pause
     exit /b 1
 )
 "%ENV_DIR%\python.exe" -c "import pip, pkg_resources, wheel" >nul 2>nul
 if not errorlevel 1 (
-    echo [OK] pip/setuptools/wheel are ready.
+    echo [OK] pip/setuptools/wheel이 준비되어 있습니다.
     goto :eof
 )
-echo [INFO] Repairing pip/setuptools/wheel...
+echo [INFO] pip/setuptools/wheel 복구 중...
 "%ENV_DIR%\python.exe" -m ensurepip --upgrade
 if errorlevel 1 (
-    echo [WARN] ensurepip did not complete cleanly. Trying pip repair anyway...
+    echo [WARN] ensurepip이 완전히 끝나지 않았습니다. pip 복구를 계속 시도합니다...
 )
 if exist "%ENV_DIR%\Scripts\pip.exe" (
     "%ENV_DIR%\Scripts\pip.exe" install --upgrade "setuptools<81" wheel
@@ -245,43 +278,43 @@ if exist "%ENV_DIR%\Scripts\pip.exe" (
     "%ENV_DIR%\python.exe" -m pip install --upgrade "setuptools<81" wheel
 )
 if errorlevel 1 (
-    echo [FAILED] pip/setuptools/wheel repair failed.
+    echo [FAILED] pip/setuptools/wheel 복구에 실패했습니다.
     pause
     exit /b 1
 )
 "%ENV_DIR%\python.exe" -c "import pip, pkg_resources, wheel" >nul 2>nul
 if errorlevel 1 (
-    echo [FAILED] Python package tools are still unavailable after repair.
+    echo [FAILED] 복구 후에도 Python 패키지 도구를 사용할 수 없습니다.
     pause
     exit /b 1
 )
-echo [OK] pip/setuptools/wheel repair complete.
+echo [OK] pip/setuptools/wheel 복구 완료.
 goto :eof
 
 :install_japanese_support
-echo Checking Japanese tokenizer dependencies...
+echo 일본어 토크나이저 의존성 점검 중...
 set "MAMBA_ROOT_PREFIX=%MICROMAMBA_ROOT%"
 call :ensure_mfa_entrypoint
 if errorlevel 1 exit /b 1
 if exist "%MICROMAMBA_EXE%" (
     "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge spacy sudachipy sudachidict-core
     if errorlevel 1 (
-        echo [FAILED] Japanese tokenizer dependency install failed.
+        echo [FAILED] 일본어 토크나이저 의존성 설치에 실패했습니다.
         pause
         exit /b 1
     )
     goto :eof
 )
-echo [WARN] Micromamba command was not found. Skipping Japanese tokenizer dependency install.
+echo [WARN] Micromamba 명령을 찾지 못해 일본어 토크나이저 의존성 설치를 건너뜁니다.
 goto :eof
 
 :install_audio_deps
 if exist "%ENV_DIR%\Library\bin\libsndfile.dll" goto :eof
-echo Checking audio runtime dependencies ^(libsndfile^)...
+echo 오디오 런타임 의존성 점검 중 ^(libsndfile^)...
 if exist "%MICROMAMBA_EXE%" (
     "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge libsndfile pysoundfile
     if errorlevel 1 (
-        echo [FAILED] Audio dependency install failed.
+        echo [FAILED] 오디오 의존성 설치에 실패했습니다.
         pause
         exit /b 1
     )
@@ -290,32 +323,32 @@ if exist "%MICROMAMBA_EXE%" (
 if exist "%ENV_DIR%\Scripts\conda.exe" (
     "%ENV_DIR%\Scripts\conda.exe" install -y --solver classic -p "%ENV_DIR%" -c conda-forge libsndfile pysoundfile
     if errorlevel 1 (
-        echo [FAILED] Audio dependency install failed.
+        echo [FAILED] 오디오 의존성 설치에 실패했습니다.
         pause
         exit /b 1
     )
     goto :eof
 )
-echo [WARN] No micromamba/conda found. Skipping audio dependency install.
+echo [WARN] micromamba/conda를 찾지 못해 오디오 의존성 설치를 건너뜁니다.
 goto :eof
 
 :install_textgrid
-echo Checking textgrid module...
+echo textgrid 모듈 점검 중...
 if not exist "%ENV_DIR%\python.exe" (
-    echo [FAILED] MFA Python runtime was not found.
+    echo [FAILED] MFA Python 런타임을 찾을 수 없습니다.
     pause
     exit /b 1
 )
 "%ENV_DIR%\python.exe" -c "import textgrid" >nul 2>nul
 if not errorlevel 1 goto :eof
-echo [INFO] Installing textgrid module...
+echo [INFO] textgrid 모듈 설치 중...
 if exist "%ENV_DIR%\Scripts\pip.exe" (
     "%ENV_DIR%\Scripts\pip.exe" install --upgrade "textgrid>=1.5"
 ) else (
     "%ENV_DIR%\python.exe" -m pip install --upgrade "textgrid>=1.5"
 )
 if errorlevel 1 (
-    echo [FAILED] textgrid install failed.
+    echo [FAILED] textgrid 설치에 실패했습니다.
     pause
     exit /b 1
 )
@@ -323,86 +356,86 @@ goto :eof
 
 :verify_textgrid
 if not exist "%ENV_DIR%\python.exe" (
-    echo [FAILED] MFA Python runtime was not found.
+    echo [FAILED] MFA Python 런타임을 찾을 수 없습니다.
     pause
     exit /b 1
 )
 "%ENV_DIR%\python.exe" -c "import textgrid" >nul 2>nul
 if errorlevel 1 (
-    echo [FAILED] textgrid import failed.
-    echo        Re-run setup_mfa.bat to repair the environment.
+    echo [FAILED] textgrid import 검사에 실패했습니다.
+    echo        환경 복구를 위해 setup_mfa.bat를 다시 실행해 주세요.
     pause
     exit /b 1
 )
 goto :eof
 
 :install_ml_requirements
-echo Installing optional ML dependencies...
+echo 선택 ML 의존성 설치 중...
 if not exist "%ENV_DIR%\python.exe" (
-    echo [FAILED] MFA Python runtime was not found.
+    echo [FAILED] MFA Python 런타임을 찾을 수 없습니다.
     pause
     exit /b 1
 )
 if not exist "%APP_DIR%\requirements.txt" (
-    echo [FAILED] requirements.txt not found in %APP_DIR%
+    echo [FAILED] %APP_DIR%에서 requirements.txt를 찾을 수 없습니다.
     pause
     exit /b 1
 )
 if not exist "%APP_DIR%\requirements-ml.txt" (
-    echo [FAILED] requirements-ml.txt not found in %APP_DIR%
+    echo [FAILED] %APP_DIR%에서 requirements-ml.txt를 찾을 수 없습니다.
     pause
     exit /b 1
 )
 if exist "%MICROMAMBA_EXE%" (
-    echo [INFO] Installing ML runtime packages via micromamba...
+    echo [INFO] micromamba로 ML 런타임 패키지 설치 중...
     "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas lightgbm onnxruntime
     if errorlevel 1 (
-        echo [WARN] Micromamba ML install failed. Falling back to pip.
+        echo [WARN] micromamba ML 설치에 실패했습니다. pip로 폴백합니다.
     ) else (
-        echo [OK] Micromamba ML packages installed.
+        echo [OK] micromamba ML 패키지 설치 완료.
     )
 )
-echo [INFO] Installing from requirements.txt
+echo [INFO] requirements.txt 설치 중
 if exist "%ENV_DIR%\Scripts\pip.exe" (
     "%ENV_DIR%\Scripts\pip.exe" install --upgrade -r "%APP_DIR%\requirements.txt"
 ) else (
     "%ENV_DIR%\python.exe" -m pip install --upgrade -r "%APP_DIR%\requirements.txt"
 )
 if errorlevel 1 (
-    echo [FAILED] requirements.txt install failed.
+    echo [FAILED] requirements.txt 설치에 실패했습니다.
     pause
     exit /b 1
 )
 if not exist "%MICROMAMBA_EXE%" (
-    echo [INFO] Installing from requirements-ml.txt via pip (micromamba not found)
+    echo [INFO] pip로 requirements-ml.txt 설치 중 ^(micromamba를 찾지 못함^)
     if exist "%ENV_DIR%\Scripts\pip.exe" (
         "%ENV_DIR%\Scripts\pip.exe" install --upgrade -r "%APP_DIR%\requirements-ml.txt"
     ) else (
         "%ENV_DIR%\python.exe" -m pip install --upgrade -r "%APP_DIR%\requirements-ml.txt"
     )
     if errorlevel 1 (
-        echo [FAILED] ML dependency install failed.
-        echo        You may need Microsoft Visual C++ Build Tools for lightgbm.
+        echo [FAILED] ML 의존성 설치에 실패했습니다.
+        echo        lightgbm 빌드를 위해 Microsoft Visual C++ Build Tools가 필요할 수 있습니다.
         pause
         exit /b 1
     )
 )
-echo [OK] ML runtime dependencies installed.
+echo [OK] ML 런타임 의존성 설치 완료.
 goto :eof
 
 :verify_ml_runtime
 if not exist "%ENV_DIR%\python.exe" (
-    echo [FAILED] MFA Python runtime was not found.
+    echo [FAILED] MFA Python 런타임을 찾을 수 없습니다.
     pause
     exit /b 1
 )
 "%ENV_DIR%\python.exe" -c "import pandas, lightgbm, onnxruntime" >nul 2>nul
 if errorlevel 1 (
-    echo [FAILED] ML runtime import failed. Missing pandas/lightgbm/onnxruntime.
+    echo [FAILED] ML 런타임 import 검사에 실패했습니다. pandas/lightgbm/onnxruntime가 필요합니다.
     if exist "%MICROMAMBA_EXE%" (
-        echo        Try: "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas lightgbm onnxruntime
+        echo        시도: "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas lightgbm onnxruntime
     ) else (
-        echo        Re-run setup_mfa.bat --with-ml
+        echo        setup_mfa.bat --with-ml 을 다시 실행해 주세요.
     )
     pause
     exit /b 1
@@ -410,36 +443,36 @@ if errorlevel 1 (
 goto :eof
 
 :cleanup_env_caches
-echo Cleaning package caches to reduce final install size...
+echo 최종 설치 용량 축소를 위해 패키지 캐시 정리 중...
 if exist "%MICROMAMBA_EXE%" (
     "%MICROMAMBA_EXE%" clean -a -y -r "%MICROMAMBA_ROOT%" >nul 2>nul
 )
 if exist "%ENV_DIR%\python.exe" (
     "%ENV_DIR%\python.exe" -m pip cache purge >nul 2>nul
 )
-echo [OK] Cache cleanup complete.
+echo [OK] 캐시 정리 완료.
 goto :eof
 
 :install_korean_support
-echo Checking Korean tokenizer dependencies...
+echo 한국어 토크나이저 의존성 점검 중...
 call :ensure_mfa_entrypoint
 if errorlevel 1 exit /b 1
 if not exist "%ENV_DIR%\python.exe" (
-    echo [FAILED] MFA Python runtime was not found.
+    echo [FAILED] MFA Python 런타임을 찾을 수 없습니다.
     pause
     exit /b 1
 )
 "%ENV_DIR%\python.exe" -c "import eunjeon, jamo" >nul 2>nul
 if not errorlevel 1 goto :patch_korean_support
-echo [INFO] Installing Korean tokenizer dependencies ^(eunjeon, jamo^)...
+echo [INFO] 한국어 토크나이저 의존성 ^(eunjeon, jamo^) 설치 중...
 if exist "%ENV_DIR%\Scripts\pip.exe" (
     "%ENV_DIR%\Scripts\pip.exe" install --upgrade eunjeon jamo
 ) else (
     "%ENV_DIR%\python.exe" -m pip install --upgrade eunjeon jamo
 )
 if errorlevel 1 (
-    echo [FAILED] Korean tokenizer dependency install failed.
-    echo        You may need Microsoft Visual C++ Build Tools for eunjeon.
+    echo [FAILED] 한국어 토크나이저 의존성 설치에 실패했습니다.
+    echo        eunjeon 빌드를 위해 Microsoft Visual C++ Build Tools가 필요할 수 있습니다.
     pause
     exit /b 1
 )
@@ -447,20 +480,83 @@ if errorlevel 1 (
 set "PYTHONPATH=%APP_DIR%"
 "%ENV_DIR%\python.exe" -c "from core.mfa_runner import patch_mfa_korean_support; patch_mfa_korean_support(r'%MFA_EXE%')" >nul 2>nul
 if errorlevel 1 (
-    echo [WARN] Korean MFA patch step failed. Alignment may still run, but Korean tokenizer support could be incomplete.
+    echo [WARN] 한국어 MFA 패치 단계에 실패했습니다. 정렬은 동작할 수 있으나 한국어 토크나이저 지원이 불완전할 수 있습니다.
 )
 goto :eof
 
+:resolve_micromamba_expected_md5
+set "MICROMAMBA_MD5_EXPECTED="
+set "MICROMAMBA_MD5_FILE=%TEMP%\utau_auto_oto_micromamba_expected_md5.txt"
+if exist "%MICROMAMBA_MD5_FILE%" del "%MICROMAMBA_MD5_FILE%" >nul 2>nul
+powershell -NoProfile -Command ^
+ "$ErrorActionPreference='Stop';" ^
+ " [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;" ^
+ " $latest='%MICROMAMBA_LATEST_URL%';" ^
+ " $resp=$null;" ^
+ " $redirect=$null;" ^
+ " try { $resp=Invoke-WebRequest -Uri $latest -MaximumRedirection 0 -UseBasicParsing -TimeoutSec 30 } catch { if ($_.Exception.Response) { $resp=$_.Exception.Response } };" ^
+ " if ($resp -and $resp.Headers) { $redirect=$resp.Headers['Location'] };" ^
+ " if (-not $redirect) { throw 'redirect location not found' };" ^
+ " if ($redirect.StartsWith('//')) { $redirect='https:' + $redirect };" ^
+ " $leaf=Split-Path $redirect -Leaf;" ^
+ " $target='win-64/' + $leaf;" ^
+ " $files=Invoke-RestMethod -Uri 'https://api.anaconda.org/package/conda-forge/micromamba/files' -TimeoutSec 60;" ^
+ " $hit=$files | Where-Object { $_.basename -eq $target } | Select-Object -First 1;" ^
+ " if (-not $hit) { throw ('metadata not found: ' + $target) };" ^
+ " if (-not $hit.md5) { throw 'metadata md5 is empty' };" ^
+ " Set-Content -LiteralPath '%MICROMAMBA_MD5_FILE%' -Value ($hit.md5.ToLowerInvariant()) -Encoding ASCII;"
+if errorlevel 1 (
+    if exist "%MICROMAMBA_MD5_FILE%" del "%MICROMAMBA_MD5_FILE%" >nul 2>nul
+    exit /b 1
+)
+if not exist "%MICROMAMBA_MD5_FILE%" exit /b 1
+set /p MICROMAMBA_MD5_EXPECTED=<"%MICROMAMBA_MD5_FILE%"
+if exist "%MICROMAMBA_MD5_FILE%" del "%MICROMAMBA_MD5_FILE%" >nul 2>nul
+if not defined MICROMAMBA_MD5_EXPECTED exit /b 1
+echo [INFO] 신뢰 Micromamba MD5 메타데이터: %MICROMAMBA_MD5_EXPECTED%
+exit /b 0
+
+:verify_micromamba_archive
+if not exist "%MICROMAMBA_ARCHIVE%" (
+    echo [FAILED] Micromamba 아카이브 파일이 없습니다: %MICROMAMBA_ARCHIVE%
+    exit /b 1
+)
+set "MICROMAMBA_MD5_ACTUAL="
+for /f "tokens=1" %%h in ('certutil -hashfile "%MICROMAMBA_ARCHIVE%" MD5 ^| findstr /R /I "^[0-9A-F][0-9A-F]"') do (
+    if not defined MICROMAMBA_MD5_ACTUAL set "MICROMAMBA_MD5_ACTUAL=%%h"
+)
+if not defined MICROMAMBA_MD5_ACTUAL (
+    echo [FAILED] Micromamba MD5 해시를 계산하지 못했습니다.
+    exit /b 1
+)
+echo [INFO] Micromamba 아카이브 MD5: %MICROMAMBA_MD5_ACTUAL%
+if defined MICROMAMBA_MD5_EXPECTED (
+    if /I not "%MICROMAMBA_MD5_ACTUAL%"=="%MICROMAMBA_MD5_EXPECTED%" (
+        echo [FAILED] Micromamba 해시 불일치가 감지되었습니다.
+        echo         기대값: %MICROMAMBA_MD5_EXPECTED%
+        echo         실제값: %MICROMAMBA_MD5_ACTUAL%
+        del "%MICROMAMBA_ARCHIVE%" >nul 2>nul
+        exit /b 1
+    )
+    echo [OK] Micromamba 해시 검증 통과.
+) else (
+    echo [WARN] 신뢰 Micromamba 해시 메타데이터를 사용할 수 없습니다.
+    if "%NON_INTERACTIVE%"=="1" exit /b 1
+    choice /C YN /N /M "검증된 Micromamba 해시 없이 계속할까요? [Y/N]: "
+    if errorlevel 2 exit /b 1
+)
+exit /b 0
+
 :handle_old_env
 echo.
-echo [WARN] Legacy MFA environment detected:
+echo [WARN] 레거시 MFA 환경이 감지되었습니다:
 echo        %OLD_ENV_DIR%
 echo.
-echo Choose how to handle the legacy environment:
-echo   [M] Migrate ^(rebuild local env, then delete old^)
-echo   [D] Delete old now
-echo   [K] Keep old ^(no deletion^)
-choice /C MDK /N /M "Select M/D/K: "
+echo 레거시 환경 처리 방법을 선택하세요:
+echo   [M] 마이그레이션 ^(로컬 환경 재구성 후 기존 환경 삭제^)
+echo   [D] 기존 환경을 지금 바로 삭제
+echo   [K] 기존 환경 유지 ^(삭제하지 않음^)
+choice /C MDK /N /M "선택 ^(M/D/K^): "
 if errorlevel 3 goto :keep_old_env
 if errorlevel 2 goto :delete_old_env_now
 if errorlevel 1 goto :migrate_old_env
@@ -468,7 +564,7 @@ goto :eof
 
 :migrate_old_env
 set "DELETE_OLD_AFTER_INSTALL=1"
-echo [INFO] Will delete legacy env after successful local install.
+echo [INFO] 로컬 설치가 성공하면 레거시 환경을 삭제합니다.
 goto :eof
 
 :delete_old_env_now
@@ -477,7 +573,7 @@ call :remove_dir "%OLD_MICROMAMBA_ROOT%"
 goto :eof
 
 :keep_old_env
-echo [INFO] Keeping legacy env. Local install will continue.
+echo [INFO] 레거시 환경을 유지한 채 로컬 설치를 계속합니다.
 goto :eof
 
 :cleanup_old_env_if_requested
@@ -485,17 +581,17 @@ if not "%DELETE_OLD_AFTER_INSTALL%"=="1" goto :eof
 if /i "%OLD_ENV_DIR%"=="%ENV_DIR%" goto :eof
 call :remove_dir "%OLD_ENV_DIR%"
 call :remove_dir "%OLD_MICROMAMBA_ROOT%"
-echo [OK] Legacy MFA environment removed.
+echo [OK] 레거시 MFA 환경을 제거했습니다.
 goto :eof
 
 :remove_dir
 set "TARGET_DIR=%~1"
 if "%TARGET_DIR%"=="" goto :eof
 if not exist "%TARGET_DIR%" goto :eof
-echo [INFO] Removing %TARGET_DIR%
+echo [INFO] 제거 중: %TARGET_DIR%
 rmdir /s /q "%TARGET_DIR%" >nul 2>nul
 if exist "%TARGET_DIR%" (
-    echo [WARN] Failed to remove %TARGET_DIR%
+    echo [WARN] 제거 실패: %TARGET_DIR%
 )
 goto :eof
 
@@ -518,14 +614,14 @@ if exist "%MICROMAMBA_EXE%" (
     set "MFA_EXE=%ENV_DIR%\Scripts\mfa.bat"
     goto :eof
 )
-echo [FAILED] MFA executable was not found after environment creation.
+echo [FAILED] 환경 생성 후 MFA 실행 파일을 찾지 못했습니다.
 pause
 exit /b 1
 
 :download_acoustic_model
 set "MODEL_NAME=%~1"
 if not defined MODEL_NAME (
-    echo [FAILED] Acoustic model name is missing.
+    echo [FAILED] 음향 모델 이름이 비어 있습니다.
     pause
     exit /b 1
 )
@@ -542,16 +638,16 @@ if exist "%MICROMAMBA_EXE%" (
     "%MICROMAMBA_EXE%" run -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" python -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME% --ignore_cache
     exit /b %errorlevel%
 )
-echo [FAILED] No runnable MFA environment was found for model download.
+echo [FAILED] 모델 다운로드에 사용할 실행 가능한 MFA 환경을 찾지 못했습니다.
 pause
 exit /b 1
 
 :remove_env_dir
 if not exist "%ENV_DIR%" goto :eof
-echo [INFO] Removing existing env: %ENV_DIR%
+echo [INFO] 기존 환경 제거 중: %ENV_DIR%
 rmdir /s /q "%ENV_DIR%" >nul 2>nul
 if exist "%ENV_DIR%" (
-    echo [FAILED] Could not remove the old MFA environment.
+    echo [FAILED] 기존 MFA 환경을 제거하지 못했습니다.
     pause
     exit /b 1
 )
