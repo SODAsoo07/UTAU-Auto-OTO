@@ -1,0 +1,26 @@
+{
+  "rows": 13597,
+  "targets": {
+    "delta_offset": {
+      "baseline_mae": 68.546329705082,
+      "model_mae": 59.150035410225726
+    },
+    "delta_cons": {
+      "baseline_mae": 34.1822504228874,
+      "model_mae": 28.797331648392532
+    },
+    "delta_cutoff": {
+      "baseline_mae": 308.18672231936586,
+      "model_mae": 243.4468403244805
+    },
+    "delta_pre": {
+      "baseline_mae": 37.050813561815104,
+      "model_mae": 29.71736348190051
+    },
+    "delta_ovl": {
+      "baseline_mae": 19.881348017945136,
+      "model_mae": 16.520784980427862
+    }
+  },
+  "confidence_mean": 0.4624356507527166
+}

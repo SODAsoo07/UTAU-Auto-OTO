@@ -1,0 +1,24 @@
+{
+  "metrics": {
+    "target_offset_ms": {
+      "baseline_mae": 6931.264212121212,
+      "model_mae": 620.5258314025073
+    },
+    "target_cons_ms": {
+      "baseline_mae": 140.8382857142857,
+      "model_mae": 48.82865776489178
+    },
+    "target_cutoff_abs_ms": {
+      "baseline_mae": 7562.277401439075,
+      "model_mae": 466.3580129677191
+    },
+    "target_pre_ms": {
+      "baseline_mae": 81.68685064935066,
+      "model_mae": 28.775733547631827
+    },
+    "target_ovl_ms": {
+      "baseline_mae": 28.806844155844153,
+      "model_mae": 14.304220635942322
+    }
+  }
+}

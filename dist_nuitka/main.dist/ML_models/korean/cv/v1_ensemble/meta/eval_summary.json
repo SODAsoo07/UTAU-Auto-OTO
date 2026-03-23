@@ -1,0 +1,39 @@
+{
+  "metrics": {
+    "delta_offset": {
+      "baseline_mae": 37.473353700516356,
+      "lightgbm_mae": 25.505982386159328,
+      "coupled_mae": 32.341586319316825,
+      "gated_mae": 25.807066267800757,
+      "meta_mae": 26.057324993734575
+    },
+    "delta_cons": {
+      "baseline_mae": 36.98868674698795,
+      "lightgbm_mae": 26.482997423212353,
+      "coupled_mae": 30.843412025487666,
+      "gated_mae": 27.130663895689608,
+      "meta_mae": 25.458606005607347
+    },
+    "delta_cutoff": {
+      "baseline_mae": 57.08460413080895,
+      "lightgbm_mae": 55.537528964695305,
+      "coupled_mae": 53.869808267142965,
+      "gated_mae": 55.58890603162122,
+      "meta_mae": 56.63949788803028
+    },
+    "delta_pre": {
+      "baseline_mae": 22.16131153184165,
+      "lightgbm_mae": 20.635212909326373,
+      "coupled_mae": 23.069559671031886,
+      "gated_mae": 20.639206228627348,
+      "meta_mae": 20.67212359312702
+    },
+    "delta_ovl": {
+      "baseline_mae": 15.48454475043029,
+      "lightgbm_mae": 16.608529086669783,
+      "coupled_mae": 24.04214168909433,
+      "gated_mae": 17.954690818885595,
+      "meta_mae": 14.683621570133292
+    }
+  }
+}

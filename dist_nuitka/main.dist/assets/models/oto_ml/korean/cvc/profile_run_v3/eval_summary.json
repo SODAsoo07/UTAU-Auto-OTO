@@ -1,0 +1,31 @@
+{
+  "targets": {
+    "delta_offset": "model_offset.txt",
+    "delta_cons": "model_cons.txt",
+    "delta_cutoff": "model_cutoff.txt",
+    "delta_pre": "model_pre.txt",
+    "delta_ovl": "model_ovl.txt"
+  },
+  "metrics": {
+    "delta_offset": {
+      "baseline_mae": 203.4081818181818,
+      "model_mae": 56.591818181818205
+    },
+    "delta_cons": {
+      "baseline_mae": 137.35999999999999,
+      "model_mae": 55.55181918057528
+    },
+    "delta_cutoff": {
+      "baseline_mae": 242.81000000000014,
+      "model_mae": 77.35545454545469
+    },
+    "delta_pre": {
+      "baseline_mae": 67.93727272727273,
+      "model_mae": 29.15409074263139
+    },
+    "delta_ovl": {
+      "baseline_mae": 29.970000000000002,
+      "model_mae": 16.087272394353693
+    }
+  }
+}

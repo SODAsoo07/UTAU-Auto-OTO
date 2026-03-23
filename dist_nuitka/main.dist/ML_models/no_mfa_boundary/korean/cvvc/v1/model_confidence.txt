@@ -1,0 +1,159 @@
+tree
+version=v4
+num_class=1
+num_tree_per_iteration=1
+label_index=0
+max_feature_idx=30
+objective=binary sigmoid:1
+feature_names=language format_type voicebank_id wav_norm alias_norm occurrence_index row_index_in_wav source_mode source_detail token_source source_confidence onset_ms voiced_onset_ms nucleus_start_ms nucleus_end_ms nucleus_span_ms tail_ms tail_margin_ms blank_confidence voiced_confidence unvoiced_confidence boundary_confidence mel_window_energy_mean mel_window_silence_ratio mel_window_voiced_ratio prev_gap_ms next_gap_ms neighbor_boundary_gap_ms file_row_count file_mean_energy file_voiced_ratio
+feature_infos=none none -1:3:2:0 -1:36:15:55:104:157:169:122:63:81:100:26:215:111:112:136:188:24:56:77:82:98:103:106:140:143:159:186:216:222:12:16:21:23:30:32:58:59:62:70:71:91:94:101:107:117:126:133:139:148:166:178:179:181:183:185:192:193:194:195:206:209:210:217:40:68:89:96:134 -1:0:252:254:3:12:15:26:27:29:44:51:55:74:83:84:104:149:155:192:227:231:239:278:115:4:5:19:43:46:50:67:68:75:89:101:102:110:111:112:122:124:134:136:147:156:161:165:169:197:203:205:208:212:230:242:250:261:287:291:300:117:249 none [0:3] none none none none [869.99286054421771:5682.7746976873477] [971.11266666666677:5688.3619261892236] [971.11266666666677:5688.3619261892236] [1204.0516609268709:6272.72746334353] [38.506342654908622:2525.4771001275512] [1276.7820459183674:6795.1120101412889] [0.93728124999961437:972.61879953231301] [0.019269879062736198:0.80666784252026336] [0.23002784150624681:0.95579263038548756] [0.029992999999999902:0.5398313859049596] [0.85999999999999999:0.93501049999999997] [0:0.13454106344517869] [0.032606145906638503:1] [0:0.90515286574399878] [0:1410.7720750243029] [0:1707.6369670646388] [0:1707.6369670646388] [1:4] [0.0027766247370630001:0.0362059077978674] [0.030971089201408002:0.41959027743022531]
+tree_sizes=241
+
+Tree=0
+num_leaves=1
+num_cat=0
+split_feature=
+split_gain=
+threshold=
+decision_type=
+left_child=
+right_child=
+leaf_value=34.539575992340879
+leaf_weight=
+leaf_count=755
+internal_value=
+internal_weight=
+internal_count=
+is_linear=0
+shrinkage=1
+
+
+end of trees
+
+feature_importances:
+
+parameters:
+[boosting: gbdt]
+[objective: binary]
+[metric: binary_logloss]
+[tree_learner: serial]
+[device_type: cpu]
+[data_sample_strategy: bagging]
+[data: ]
+[valid: ]
+[num_iterations: 225]
+[learning_rate: 0.05]
+[num_leaves: 31]
+[num_threads: 0]
+[seed: 0]
+[deterministic: 0]
+[force_col_wise: 0]
+[force_row_wise: 0]
+[histogram_pool_size: -1]
+[max_depth: -1]
+[min_data_in_leaf: 24]
+[min_sum_hessian_in_leaf: 0.001]
+[bagging_fraction: 0.85]
+[pos_bagging_fraction: 1]
+[neg_bagging_fraction: 1]
+[bagging_freq: 1]
+[bagging_seed: 3]
+[bagging_by_query: 0]
+[feature_fraction: 0.9]
+[feature_fraction_bynode: 1]
+[feature_fraction_seed: 2]
+[extra_trees: 0]
+[extra_seed: 6]
+[early_stopping_round: 0]
+[early_stopping_min_delta: 0]
+[first_metric_only: 0]
+[max_delta_step: 0]
+[lambda_l1: 0]
+[lambda_l2: 0]
+[linear_lambda: 0]
+[min_gain_to_split: 0]
+[drop_rate: 0.1]
+[max_drop: 50]
+[skip_drop: 0.5]
+[xgboost_dart_mode: 0]
+[uniform_drop: 0]
+[drop_seed: 4]
+[top_rate: 0.2]
+[other_rate: 0.1]
+[min_data_per_group: 100]
+[max_cat_threshold: 32]
+[cat_l2: 10]
+[cat_smooth: 10]
+[max_cat_to_onehot: 4]
+[top_k: 20]
+[monotone_constraints: ]
+[monotone_constraints_method: basic]
+[monotone_penalty: 0]
+[feature_contri: ]
+[forcedsplits_filename: ]
+[refit_decay_rate: 0.9]
+[cegb_tradeoff: 1]
+[cegb_penalty_split: 0]
+[cegb_penalty_feature_lazy: ]
+[cegb_penalty_feature_coupled: ]
+[path_smooth: 0]
+[interaction_constraints: ]
+[verbosity: -1]
+[saved_feature_importance_type: 0]
+[use_quantized_grad: 0]
+[num_grad_quant_bins: 4]
+[quant_train_renew_leaf: 0]
+[stochastic_rounding: 1]
+[linear_tree: 0]
+[max_bin: 255]
+[max_bin_by_feature: ]
+[min_data_in_bin: 3]
+[bin_construct_sample_cnt: 200000]
+[data_random_seed: 1]
+[is_enable_sparse: 1]
+[enable_bundle: 1]
+[use_missing: 1]
+[zero_as_missing: 0]
+[feature_pre_filter: 1]
+[pre_partition: 0]
+[two_round: 0]
+[header: 0]
+[label_column: ]
+[weight_column: ]
+[group_column: ]
+[ignore_column: ]
+[categorical_feature: 0,1,2,3,4,7,8,9]
+[forcedbins_filename: ]
+[precise_float_parser: 0]
+[parser_config_file: ]
+[objective_seed: 5]
+[num_class: 1]
+[is_unbalance: 0]
+[scale_pos_weight: 1]
+[sigmoid: 1]
+[boost_from_average: 1]
+[reg_sqrt: 0]
+[alpha: 0.9]
+[fair_c: 1]
+[poisson_max_delta_step: 0.7]
+[tweedie_variance_power: 1.5]
+[lambdarank_truncation_level: 30]
+[lambdarank_norm: 1]
+[label_gain: ]
+[lambdarank_position_bias_regularization: 0]
+[eval_at: ]
+[multi_error_top_k: 1]
+[auc_mu_weights: ]
+[num_machines: 1]
+[local_listen_port: 12400]
+[time_out: 120]
+[machine_list_filename: ]
+[machines: ]
+[gpu_platform_id: -1]
+[gpu_device_id: -1]
+[gpu_use_dp: 0]
+[num_gpu: 1]
+
+end of parameters
+
+pandas_categorical:[["korean"], ["cvvc"], ["Achu_CVVC", "KII_kor_CVVC", "SONG_CMYK_CVVC", "So Yoon Spindrift_CVVC"], ["aayayawawa", "aeuiueuieeui", "angpangpingalpalpil", "anthanthinamthamthim", "bababyabyabwa", "bababyabyabwabwa", "bebebyebyebwe", "bebebyebyebwebwe", "beobeobyeobyeobweo", "beobeobyeobyeobweobweo", "beubeubeuibeuiilbi", "bibibwibeubeubi", "bibibwibwiinbi", "bobobyobyobyu", "bububyubyuumbu", "bwabwebwibweo", "chachachyachyachwa", "chachachyachyachwachwa", "chechechyechyechwe", "cheocheochyeochyeochweo", "cheocheochyeochyeochweochweo", "cheucheucheuicheuiilchi", "chichichwicheucheuchi", "chochochyochyochyu", "chuchuchyucheuicheui", "chuchuchyuchyuumchu", "chwachwechwichweo", "dadadyadyadwa", "dadadyadyadwadwa", "dededyedyedwedwe", "deodeodyeodyeodweodweo", "deudeudeuideuiildi", "dididwidwiindi", "dododyodyodyu", "dododyodyoongdo", "dududyudeuideui", "dwadwedwidweo", "eeyeyewewe", "eoeeoeeuer", "eoeoeueoaeua", "eoeoyeoyeoweoweo", "eueueeuieuo", "fafafyafyafwa", "feofeofyeofyeofweo", "fofofyofyofyu", "fufufyufeuifeui", "fwafwefwifweo", "gagagyagyagwa", "gagagyagyagwagwa", "geogeogyeogyeogweo", "geogeogyeogyeogweogweo", "geugeugeuigeuiilgi", "gigigwigwiingi", "gogogyogyogyu", "gugugyugyuumgu", "gwagwegwigweo", "hahahyahyahwa", "hahahyahyahwahwa", "heoheohyeohyeohweohweo", "heuheuheuiheuiilhi", "hihihwihwiinhi", "hohohyohyoongho", "huhuhyuheuiheui", "hwahwehwihweo", "iioiuieo", "jajajyajyajwa", "jejejyejyejwe", "jejejyejyejwejwe", "jeojeojyeojyeojweojweo", "jijijwijwiinji", "jjajjajjyajjyajjwa", "jjejjejjyejjyejjwe", "jjejjejjyejjyejjwejjwe", "jjeojjeojjyeojjyeojjweo", "jjeojjeojjyeojjyeojjweojjweo", "jjujjujjyujjeuijjeui", "jjujjujjyujjyuumjju", "jjwajjwejjwijjweo", "jojojyojyojyu", "jujujyujeuijeui", "jujujyujyuumju", "jwajwejwijweo", "kakakyakyakwa", "kakakyakyakwakwa", "kekekyekyekwekwe", "keokeokyeokyeokweo", "kikikwikeukeuki", "kikikwikwiinki", "kkakkakkyakkyakkwa", "kkakkakkyakkyakkwakkwa", "kkekkekkyekkyekkwe", "kkekkekkyekkyekkwekkwe", "kkeokkeokkyeokkyeokkweo", "kkeokkeokkyeokkyeokkweokkweo", "kkeukkeukkeuikkeuiilkki", "kkikkikkwikkwiinkki", "kkokkokkyokkyokkyu", "kkokkokkyokkyoongkko", "kkukkukkyukkeuikkeui", "kkukkukkyukkyuumkku", "kkwakkwekkwikkweo", "kokokyokyokyu", "kokokyokyoongko", "kukukyukeuikeui", "kwakwekwikweo", "lallalilli", "leulleuleuilleui", "lillillwilwi", "loluleol", "lullulelle", "lwellwelweollweo", "lweo", "lyalwalyelwe", "mamamyamyamwa", "mamamyamyamwamwa", "mamemim", "mememyemyemwe", "mememyemyemwemwe", "meomeomyeomyeomweo", "mmweo", "momomyomyomyu", "mumumyumeuimeui", "mwamwemwimweo", "nananyanyanwa", "nananyanyanwanwa", "nenenyenyenwenwe", "neoneonyeonyeonweonweo", "ngangenging", "ngeui", "ngngweo", "ngongungeong", "nininwinwiinni", "nonuneon", "nununyuneuineui", "nununyunyuumnu", "nwanwenwi", "nwanwenwinweo", "oeuieoeuieueui", "owaowiowe", "papapyapyapwa", "papapyapyapwapwa", "peopeopyeopyeopweo", "peopeopyeopyeopweopweo", "pepepyepyepwe", "pepepyepyepwepwe", "peupeupeuipeuiilpi", "pipipwipwiinpi", "popopyopyoongpo", "popopyopyopyu", "ppappappyappyappwa", "ppappappyappyappwappwa", "ppeoppeoppyeoppyeoppweo", "ppeppeppyeppyeppwe", "ppeppeppyeppyeppweppwe", "ppippippwippwiinppi", "ppoppoppyoppyoongppo", "ppuppuppyuppyuumppu", "ppwappweppwippweo", "pupupyupyuumpu", "pwapwepwipweo", "rararyaryarwa", "reoreoryeoryeorweo", "reoreoryeoryeorweorweo", "rereryeryerwe", "rereryeryerwerwe", "ririrwirwiinli", "rreorreorreurreu", "rrerrirrorru", "rururyureuireui", "rwarwerwirweo", "sasasyasyaswa", "seoseosyeosyeosweo", "seoseosyeosyeosweosweo", "sesesyesyesweswe", "sisiswiseuseusi", "sisiswiswiinsi", "sososyosyoongso", "sososyosyosyu", "ssassassyassyasswa", "ssassassyassyasswasswa", "sseosseossyeossyeossweo", "ssessessyessyesswe", "ssessessyessyesswesswe", "ssississwisseusseussi", "ssississwisswiinssi", "ssossossyossyoongsso", "ssossossyossyossyu", "ssussussyusseuisseui", "sswasswesswissweo", "sususyuseuiseui", "sususyusyuumsu", "swasweswisweo", "tatatyatyatwa", "tatatyatyatwatwa", "teoteotyeotyeotweo", "teoteotyeotyeotweotweo", "tetetyetyetwetwe", "thathathyathyathwa", "thethethyethyethwe", "thuthuthyutheuitheui", "thwathwethwithweo", "tititwiteuteuti", "tititwitwiinti", "tototyotyoongto", "tototyotyotyu", "ttattattyattyattwa", "ttattattyattyattwattwa", "tteotteottyeottyeottweo", "tteotteottyeottyeottweottweo", "ttettettyettyettwe", "ttettettyettyettwettwe", "ttittittwittwiintti", "ttottottyottyoongtto", "ttottottyottyottyu", "ttuttuttyutteuitteui", "ttwattwettwittweo", "twatwetwitweo", "uueoueuue", "uuyuyu", "uwauwiuwe", "uweooweoeuweo", "vevevyevyevwe", "vwavwevwivweo", "yayayeyaiyayu", "zazazyazyazwa", "zeozeozyeozyeozweo", "zezezyezyezwe", "zozozyozyozyu", "zwazwezwizweo"], ["'", "'am'tham'thim", "'bwa'bwa", "'bwe'", "'bweo", "'bwi'", "'bwi'bwi'", "'bya'bwa", "'bye'bye'", "'byeo'byeo'", "'byu", "'byu'byu'", "'cheui'cheui", "'cheui'cheui'", "'chwa'chwa", "'chwe'", "'chweo", "'chweo'chweo", "'chwi'", "'chya'chwa", "'chye'chwe", "'chyeo'chweo", "'chyu", "'chyu'chyu'", "'deui'deui", "'dwa'dwa", "'dwe'", "'dweo", "'dweo'dweo", "'dwi'", "'dwi'dwi'", "'dya'dwa", "'dye'dye'", "'dyeo'dyeo'", "'dyo'dyo'", "'dyu", "'e'eui", "'eu'eui", "'feui'feui", "'fwe'", "'fya'fwa", "'fyeo'fweo", "'gwa'gwa", "'gwe'", "'gweo", "'gweo'gweo", "'gwi'", "'gwi'gwi'", "'gya'gwa", "'gyo'", "'heui'heui", "'hwe'", "'hweo'hweo", "'hwi'", "'hwi'hwi'", "'hya'hwa", "'hya'hya'", "'il'bi", "'il'chi", "'il'di", "'il'gi", "'il'hi", "'in'bi", "'in'di", "'in'ji", "'jeui'jeui", "'jjeui'jjeui", "'jjweo", "'jjya'jjwa", "'jjye'jjwe", "'jjye'jjye'", "'jjyeo'jjweo", "'jjyeo'jjyeo'", "'jjyu'jjyu'", "'jwe'", "'jweo", "'jweo'jweo", "'jwi'", "'jya'jwa", "'jye'jwe", "'jye'jye'", "'jyeo'jyeo'", "'keu'keu'ki", "'keui'keui", "'kkeui'kkeui", "'kkeui'kkeui'", "'kkwa'kkwa", "'kkwe'", "'kkwe'kkwe", "'kkweo", "'kkwi'", "'kkwi'kkwi'", "'kkya'kkwa", "'kkya'kkya'", "'kkye'kkwe", "'kkye'kkye'", "'kkyeo'kkweo", "'kkyeo'kkyeo'", "'kkyo'kkyo'", "'kkyu'kkyu'", "'kwe'", "'kweo", "'kwi'", "'kwi'kwi'", "'kya'kwa", "'kya'kya'", "'kye'kye'", "'kyeo'kweo", "'kyo'", "'kyo'kyo'", "'leui'l'leui", "'lwa'", "'lwi", "'lye'", "'meui'meui", "'mwe'", "'mweo", "'mwi'", "'mya'mwa", "'mye'mwe", "'mye'mye'", "'myeo'mweo", "'neui'neui", "'nwa'nwa", "'nwe'", "'nwi'", "'nya'nwa", "'nye'nye'", "'nyeo'nyeo'", "'nyu'nyu'", "'o'weo'", "'o'wi'", "'ong'ho", "'peui'peui'", "'ppwe'", "'ppwe'ppwe", "'ppweo", "'ppwi'", "'ppwi'ppwi'", "'ppya'ppwa", "'ppye'ppwe", "'ppyu'ppyu'", "'pwa'pwa", "'pwe'", "'pwe'pwe", "'pweo", "'pwi'pwi'", "'pya'pwa", "'pya'pya'", "'pye'pwe", "'pyeo'pweo", "'pyo'pyo'", "'pyu", "'reui'reui", "'rreu'rreu", "'rwe'", "'rwi'", "'rya'rwa", "'ryeo'rweo", "'seu'seu'si", "'seui'seui", "'sseu'sseu'ssi", "'sseui'sseui", "'sswa'sswa", "'sswe'", "'ssweo", "'sswi'", "'sswi'sswi'", "'ssya'sswa", "'ssye'sswe", "'ssye'ssye'", "'ssyeo'ssweo", "'ssyo'ssyo'", "'ssyu", "'swe'", "'swe'swe", "'sweo'sweo", "'swi'swi'", "'sya'swa", "'syeo'sweo", "'syo'syo'", "'syu", "'syu'syu'", "'teu'teu'ti", "'theui'theui", "'thwe'", "'thya'thwa", "'thye'thwe", "'tteui'tteui", "'ttwa'ttwa", "'ttwe'", "'ttwe'ttwe", "'ttweo", "'ttwi'", "'ttwi'ttwi'", "'ttya'ttwa", "'ttya'ttya'", "'ttye'ttwe", "'ttye'ttye'", "'ttyeo'ttweo", "'ttyeo'ttyeo'", "'ttyo'ttyo'", "'twe'", "'tweo", "'tweo'tweo", "'tya'twa", "'tya'tya'", "'tye'tye'", "'tyeo'tweo", "'u'wi'", "'um'gu", "'vwe'", "'vwi'", "'vye'vwe", "'wa'wa", "'weo'weo", "'ya'ya'", "'yeo'yeo'", "'yu'yu", "'zya'zwa", "'zye'zwe", "'zyeo'zweo", "'zyo'", "ang'pang'ping'", "be'be'bye'", "beo'beo'byeo'", "bi'bi'bwi'", "bwa'", "chi'chi'chwi'", "cho'cho'chyo'", "chwa'", "dwa'", "e'e'", "e'o'e'eo'e'eu'e'r", "eo'eo'eu'eo'a'eu'a", "eu'eu'e'eu'i'eu'o", "fo'fo'fyo'", "fwa'", "geo'geo'gyeo'", "gwa'", "heo'heo'", "heu'heu'", "hwa'", "i'i'o'i'u'i'eo", "jje'jje'jjye'", "jjwa'", "jo'jo'jyo'", "ju'ju'", "kkeu'kkeu'", "kko'kko'kkyo'", "kkwa'", "ko'ko'kyo'", "kwa'", "l'o'l'u'l'eo'l", "lweo", "lya'", "m'a'm'e'm'i'm", "m'm'weo", "ma'ma'", "me'me'", "mo'mo'myo'", "mwa'", "n'o'n'u'n'eo'n", "n'wa'n'we'n'wi", "neo'neo'", "ng'a'ng'e'ng'i'ng", "ng'eui", "ng'ng'weo", "ng'o'ng'u'ng'eo'ng", "ni'ni'", "nu'nu'", "nwa'", "pa'pa'", "peo'peo'", "po'po'pyo'", "ppa'ppa'", "ppeo'ppeo'ppyeo'", "ppo'ppo'", "ppwa'", "pu'pu'", "pwa'", "re're'", "re're'rye'", "reo'reo'", "ri'ri'", "rre'", "rreo'rreo'", "rwa'", "ssa'ssa'", "ssa'ssa'ssya'", "sso'sso'", "sso'sso'ssyo'", "swa'", "ta'ta'", "teo'teo'", "ti'ti'", "to'to'", "to'to'tyo'", "tto'tto'ttyo'", "ttwa'", "u'u'eo'u'eu'u'e", "vwa'", "ya'ya'ye'ya'i'ya'yu", "zwa'"], ["textgrid"], ["textgrid+audio_fused"], ["filename"]]

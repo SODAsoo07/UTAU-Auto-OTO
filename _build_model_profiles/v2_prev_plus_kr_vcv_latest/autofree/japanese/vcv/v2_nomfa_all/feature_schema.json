@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "backend": "autofree_v1",
+  "feature_schema_version": "af_v2",
+  "feature_names": [
+    "language",
+    "format_type",
+    "voicebank_id",
+    "wav_norm",
+    "alias_norm",
+    "occurrence_index",
+    "row_index_in_wav",
+    "source_mode",
+    "source_detail",
+    "token_source",
+    "source_confidence",
+    "onset_ms",
+    "voiced_onset_ms",
+    "nucleus_start_ms",
+    "nucleus_end_ms",
+    "nucleus_span_ms",
+    "tail_ms",
+    "tail_margin_ms",
+    "blank_confidence",
+    "voiced_confidence",
+    "unvoiced_confidence",
+    "boundary_confidence",
+    "mel_window_energy_mean",
+    "mel_window_silence_ratio",
+    "mel_window_voiced_ratio",
+    "prev_gap_ms",
+    "next_gap_ms",
+    "neighbor_boundary_gap_ms",
+    "file_row_count",
+    "file_mean_energy",
+    "file_voiced_ratio"
+  ],
+  "categorical_features": [
+    "language",
+    "format_type",
+    "voicebank_id",
+    "wav_norm",
+    "alias_norm",
+    "source_mode",
+    "source_detail",
+    "token_source"
+  ],
+  "source_modes": [
+    "textgrid",
+    "audio_only"
+  ],
+  "token_sources": [
+    "filename",
+    "external_map",
+    "oto_rows"
+  ],
+  "source_details": [
+    "textgrid",
+    "boundary_guided",
+    "boundary_guided_pause",
+    "uniform_split"
+  ]
+}

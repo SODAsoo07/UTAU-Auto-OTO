@@ -1,0 +1,236 @@
+{
+  "backend": "ensemble_v1",
+  "language": "global",
+  "format_type": "general",
+  "model_version": "v1",
+  "feature_version": "v12",
+  "feature_names": [
+    "language",
+    "format_type",
+    "alias_type",
+    "alias_group",
+    "row_index_in_wav",
+    "row_ratio_in_wav",
+    "file_row_count",
+    "file_cv_count",
+    "file_vc_count",
+    "file_vv_count",
+    "file_vcv_count",
+    "file_br_count",
+    "file_mono_count",
+    "file_cv_ratio",
+    "file_vc_ratio",
+    "file_vc_cv_ratio",
+    "file_cv_vc_balance",
+    "file_mean_energy",
+    "file_voiced_ratio",
+    "file_mean_syllable_dur_ms",
+    "is_head_row",
+    "is_tail_row",
+    "wav_duration_ms",
+    "base_offset",
+    "base_cons",
+    "base_cutoff_abs",
+    "base_pre",
+    "base_ovl",
+    "base_cons_gap",
+    "base_cut_gap",
+    "base_ovl_ratio",
+    "curr_phone_start_ms",
+    "curr_phone_end_ms",
+    "curr_phone_len_ms",
+    "curr_vowel_start_ms",
+    "curr_vowel_end_ms",
+    "curr_vowel_len_ms",
+    "syllable_start_ms",
+    "syllable_end_ms",
+    "syllable_len_ms",
+    "prev_phone_gap_ms",
+    "next_phone_gap_ms",
+    "expected_anchor_ms",
+    "base_offset_to_expected_ms",
+    "base_pre_to_expected_ms",
+    "base_cutoff_to_next_anchor_ms",
+    "energy_mean",
+    "energy_min",
+    "energy_max",
+    "energy_slope_pre",
+    "energy_slope_post",
+    "valley_energy",
+    "valley_dist_from_cutoff_ms",
+    "db_mean",
+    "db_min",
+    "db_silence_ratio",
+    "f0_voicing_mean",
+    "f0_voicing_near_pre",
+    "zcr_mean",
+    "spectral_flux_mean",
+    "onset_class",
+    "voicing_class",
+    "is_tense",
+    "is_diphthong",
+    "coda_type",
+    "vowel_class",
+    "mora_position",
+    "bridge_type",
+    "is_nasal_or_sonorant",
+    "prev_alias_type",
+    "next_alias_type",
+    "prev_base_pre",
+    "next_base_pre",
+    "prev_base_offset",
+    "next_base_offset",
+    "prev_base_cutoff_abs",
+    "next_base_cutoff_abs",
+    "mapping_confidence",
+    "used_alias_occurrence_mapping",
+    "used_exact_vowel_fix",
+    "used_nuclei_fallback",
+    "used_alias_based_syllables",
+    "words_vs_alias_score_margin",
+    "jump_blocked_flag",
+    "mapping_reason_code",
+    "local_peak_db",
+    "local_valley_db",
+    "mel_window_energy_mean",
+    "mel_window_silence_ratio",
+    "mel_voiced_formant_ratio",
+    "mel_silence_sparse_ratio",
+    "mel_unvoiced_diffuse_ratio",
+    "mel_breath_like_ratio",
+    "blank_span_confidence",
+    "mel_offset_candidate_ms",
+    "mel_cutoff_candidate_ms",
+    "mel_voiced_onset_ms",
+    "mel_vowel_nucleus_start_ms",
+    "mel_vowel_nucleus_end_ms",
+    "mel_voiced_onset_to_pre_ms",
+    "mel_safety_clamped",
+    "onset_patch_energy_mean",
+    "onset_patch_voiced_ratio",
+    "onset_patch_unvoiced_ratio",
+    "tail_patch_energy_mean",
+    "tail_patch_silence_ratio",
+    "syllable_blank_confidence",
+    "syllable_mel_voiced_conf",
+    "syllable_mel_silence_conf",
+    "syllable_mel_unvoiced_conf",
+    "syllable_mel_breath_conf"
+  ],
+  "categorical_features": [
+    "language",
+    "format_type",
+    "alias_type",
+    "alias_group",
+    "onset_class",
+    "voicing_class",
+    "coda_type",
+    "vowel_class",
+    "mora_position",
+    "bridge_type",
+    "prev_alias_type",
+    "next_alias_type",
+    "mapping_reason_code"
+  ],
+  "created_at": "2026-03-19T17:04:05",
+  "train_rows": 1944,
+  "voicebank_count": 14,
+  "alias_family": "vowel",
+  "rawmel_cache_dir_requested": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\core\\.cache\\oto_ml_mel_patches",
+  "rawmel_cache_dir": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\core\\.cache\\oto_ml_mel_patches\\japanese\\cvvc\\v1\\6d95203e",
+  "meta_enabled": true,
+  "submodels": {
+    "lightgbm": "lightgbm",
+    "coupled": "coupled",
+    "meta": "meta"
+  },
+  "coupled_backend": "coupled_nn_v2_rawmel",
+  "gating": {
+    "min_coupled_confidence": 0.0,
+    "mode": "confidence_blank_mapping_gate"
+  },
+  "oof_folds": 5,
+  "holdout_metrics": {
+    "lightgbm": {
+      "delta_offset": {
+        "baseline_mae": 197.51112173913043,
+        "model_mae": 102.0969225986302
+      },
+      "delta_cons": {
+        "baseline_mae": 125.14639130434784,
+        "model_mae": 47.91199678379096
+      },
+      "delta_cutoff": {
+        "baseline_mae": 201.41292173913044,
+        "model_mae": 106.12240591162998
+      },
+      "delta_pre": {
+        "baseline_mae": 106.8707391304348,
+        "model_mae": 28.37693722026464
+      },
+      "delta_ovl": {
+        "baseline_mae": 48.75198260869564,
+        "model_mae": 16.719000346942778
+      }
+    },
+    "coupled": {
+      "delta_offset": {
+        "baseline_mae": 493.950439453125,
+        "model_mae": 405.0000305175781
+      },
+      "delta_cons": {
+        "baseline_mae": 125.25265502929688,
+        "model_mae": 69.05206298828125
+      },
+      "delta_cutoff": {
+        "baseline_mae": 540.75732421875,
+        "model_mae": 434.59588623046875
+      },
+      "delta_pre": {
+        "baseline_mae": 112.77682495117188,
+        "model_mae": 69.19297790527344
+      },
+      "delta_ovl": {
+        "baseline_mae": 49.32274627685547,
+        "model_mae": 49.445526123046875
+      }
+    },
+    "meta": {
+      "delta_offset": {
+        "baseline_mae": 197.51112173913046,
+        "lightgbm_mae": 114.1355844440932,
+        "coupled_mae": 157.62480766075797,
+        "gated_mae": 111.93461104775282,
+        "meta_mae": 105.68845189367114
+      },
+      "delta_cons": {
+        "baseline_mae": 125.14639130434784,
+        "lightgbm_mae": 45.78321128638214,
+        "coupled_mae": 62.19325795749996,
+        "gated_mae": 49.79935162470031,
+        "meta_mae": 50.9893215304346
+      },
+      "delta_cutoff": {
+        "baseline_mae": 201.41292173913047,
+        "lightgbm_mae": 120.26263605373342,
+        "coupled_mae": 148.23921049514723,
+        "gated_mae": 117.70730531304466,
+        "meta_mae": 106.59751820718736
+      },
+      "delta_pre": {
+        "baseline_mae": 106.8707391304348,
+        "lightgbm_mae": 29.67938773794339,
+        "coupled_mae": 82.62452285036835,
+        "gated_mae": 38.75599253234939,
+        "meta_mae": 31.382731711349066
+      },
+      "delta_ovl": {
+        "baseline_mae": 48.751982608695634,
+        "lightgbm_mae": 18.11675856353861,
+        "coupled_mae": 43.237312509802116,
+        "gated_mae": 22.293164218825577,
+        "meta_mae": 22.024513459278467
+      }
+    }
+  }
+}

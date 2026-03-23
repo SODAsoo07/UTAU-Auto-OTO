@@ -1,0 +1,31 @@
+{
+  "targets": {
+    "delta_offset": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\ml_workspace\\models\\korean\\cvc\\families\\bridge\\v1\\model_offset.txt",
+    "delta_cons": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\ml_workspace\\models\\korean\\cvc\\families\\bridge\\v1\\model_cons.txt",
+    "delta_cutoff": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\ml_workspace\\models\\korean\\cvc\\families\\bridge\\v1\\model_cutoff.txt",
+    "delta_pre": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\ml_workspace\\models\\korean\\cvc\\families\\bridge\\v1\\model_pre.txt",
+    "delta_ovl": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\ml_workspace\\models\\korean\\cvc\\families\\bridge\\v1\\model_ovl.txt"
+  },
+  "metrics": {
+    "delta_offset": {
+      "baseline_mae": 198.6107738095238,
+      "model_mae": 45.04533480286319
+    },
+    "delta_cons": {
+      "baseline_mae": 36.77755952380952,
+      "model_mae": 34.602065363902426
+    },
+    "delta_cutoff": {
+      "baseline_mae": 186.12380952380948,
+      "model_mae": 67.9290619230848
+    },
+    "delta_pre": {
+      "baseline_mae": 39.04553571428572,
+      "model_mae": 19.437373798205936
+    },
+    "delta_ovl": {
+      "baseline_mae": 18.790535714285717,
+      "model_mae": 14.473318361529081
+    }
+  }
+}

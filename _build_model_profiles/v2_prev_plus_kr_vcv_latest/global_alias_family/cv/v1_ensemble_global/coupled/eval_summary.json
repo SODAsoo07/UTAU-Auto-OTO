@@ -1,0 +1,44 @@
+{
+  "metrics": {
+    "delta_offset": {
+      "baseline_mae": 45.67637252807617,
+      "model_mae": 39.21815872192383
+    },
+    "delta_cons": {
+      "baseline_mae": 57.60193634033203,
+      "model_mae": 29.755138397216797
+    },
+    "delta_cutoff": {
+      "baseline_mae": 79.00343322753906,
+      "model_mae": 71.48566436767578
+    },
+    "delta_pre": {
+      "baseline_mae": 49.439476013183594,
+      "model_mae": 24.3873348236084
+    },
+    "delta_ovl": {
+      "baseline_mae": 15.439510345458984,
+      "model_mae": 15.833220481872559
+    }
+  },
+  "aux_metrics": {
+    "aux_vowel_start_rel": {
+      "rows": 1099,
+      "model_mae": 43.28179168701172
+    },
+    "aux_vowel_end_rel": {
+      "rows": 1099,
+      "model_mae": 52.80070114135742
+    },
+    "aux_next_onset_rel": {
+      "rows": 60,
+      "model_mae": 240.42645263671875
+    }
+  },
+  "confidence_mean": 0.6163930892944336,
+  "confidence_min": 6.274439783737762e-06,
+  "confidence_max": 1.0,
+  "vc_cv_pair_weight": 0.06,
+  "vc_cv_pairs_total": 0,
+  "vc_cv_pairs_valid": 0
+}

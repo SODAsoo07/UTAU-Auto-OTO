@@ -1,0 +1,410 @@
+tree
+version=v4
+num_class=1
+num_tree_per_iteration=1
+label_index=0
+max_feature_idx=30
+objective=regression_l1
+feature_names=language format_type voicebank_id wav_norm alias_norm occurrence_index row_index_in_wav source_mode source_detail token_source source_confidence onset_ms voiced_onset_ms nucleus_start_ms nucleus_end_ms nucleus_span_ms tail_ms tail_margin_ms blank_confidence voiced_confidence unvoiced_confidence boundary_confidence mel_window_energy_mean mel_window_silence_ratio mel_window_voiced_ratio prev_gap_ms next_gap_ms neighbor_boundary_gap_ms file_row_count file_mean_energy file_voiced_ratio
+feature_infos=none none -1:3:2:0 -1:2:3:6:9:11:12:14:18:32:37:42:44:63:72 -1:7:3:12:14:16:18:20:33:34:37:56:78:86 none none none none none [0.78631569173307314:0.81679999999999997] [0:2409.5238095238096] [409.07029478458048:2773.6961451247166] [453.96825396825398:2773.6961451247166] [648.52607709750566:4090.7029478458048] [4.988662131519277:3322.4489795918366] [853.0612244897959:4130.6122448979586] [9.9773242630385539:2479.3650793650791] [0:0.79640718562874246] [0:1] [0.012326656394453:1] [0.78947307333170724:0.97999999999999998] [0.0026400798075907001:0.22281273816515509] [0.0274248924073805:0.98800580656868076] [0:0.92068886908586001] none none none none [0.0017171544440541999:0.1480353762644418] [0:0.65960791925465834]
+tree_sizes=463 471 476 474 475 457 574 458 472 455 457 474 457
+
+Tree=0
+num_leaves=3
+num_cat=1
+split_feature=30 2
+split_gain=36.1135 12.3836
+threshold=0.36139813338961735 0
+decision_type=2 1
+left_child=-1 -2
+right_child=1 -3
+leaf_value=935.70363159179692 821.15482177734373 842.45982055664058
+leaf_weight=44.142017841339111 27.693743705749512 25.791716873645782
+leaf_count=44 29 27
+internal_value=843.012 842.984
+internal_weight=97.6275 53.4855
+internal_count=100 56
+cat_boundaries=0 1
+cat_threshold=8
+is_linear=0
+shrinkage=1
+
+
+Tree=1
+num_leaves=3
+num_cat=1
+split_feature=30 2
+split_gain=26.8726 13.3712
+threshold=0.36139813338961735 0
+decision_type=2 1
+left_child=-1 -2
+right_child=1 -3
+leaf_value=26.364818420410156 -20.422740478515625 6.7205087280273466
+leaf_weight=44.65655106306076 26.7376948595047 26.746965646743774
+leaf_count=44 28 28
+internal_value=-0.00108854 -0.0249957
+internal_weight=98.1412 53.4847
+internal_count=100 56
+cat_boundaries=0 1
+cat_threshold=8
+is_linear=0
+shrinkage=0.05
+
+
+Tree=2
+num_leaves=3
+num_cat=1
+split_feature=30 2
+split_gain=26.0333 10.1563
+threshold=0.36139813338961735 0
+decision_type=2 1
+left_child=-1 -2
+right_child=1 -3
+leaf_value=19.865949263346124 -20.535604614257814 -0.85951695251464466
+leaf_weight=44.128401339054108 22.918872237205505 24.836468100547791
+leaf_count=44 24 26
+internal_value=-0.000412754 -0.0259964
+internal_weight=91.8837 47.7553
+internal_count=94 50
+cat_boundaries=0 1
+cat_threshold=8
+is_linear=0
+shrinkage=0.05
+
+
+Tree=3
+num_leaves=3
+num_cat=1
+split_feature=2 18
+split_gain=26.5501 10.6511
+threshold=0 0.11804025502655636
+decision_type=1 2
+left_child=-1 -2
+right_child=1 -3
+leaf_value=-16.900824200439452 -0.93254147109984731 85.746590583097344
+leaf_weight=38.122272849082947 22.924179553985596 37.601918518543243
+leaf_count=38 24 38
+internal_value=-0.00206118 0.018525
+internal_weight=98.6484 60.5261
+internal_count=100 62
+cat_boundaries=0 1
+cat_threshold=8
+is_linear=0
+shrinkage=0.05
+
+
+Tree=4
+num_leaves=3
+num_cat=1
+split_feature=2 18
+split_gain=31.1007 12.7907
+threshold=0 0.081203007518796957
+decision_type=1 2
+left_child=-1 -2
+right_child=1 -3
+leaf_value=-17.342782502136227 -0.76991403133391723 81.459261053942484
+leaf_weight=34.475838899612427 24.836468100547791 37.365210950374603
+leaf_count=35 26 38
+internal_value=-0.00484109 0.0162718
+internal_weight=96.6775 62.2017
+internal_count=99 64
+cat_boundaries=0 1
+cat_threshold=8
+is_linear=0
+shrinkage=0.05
+
+
+Tree=5
+num_leaves=3
+num_cat=0
+split_feature=11 18
+split_gain=25.4022 13.9688
+threshold=401.58730158730162 0.10415132239705387
+decision_type=2 2
+left_child=-1 -2
+right_child=1 -3
+leaf_value=-15.978539872789504 -0.73141832976722299 68.792987454370348
+leaf_weight=32.549199759960175 22.925970554351807 36.966360569000244
+leaf_count=33 24 37
+internal_value=-0.00115997 0.0181622
+internal_weight=92.4415 59.8923
+internal_count=94 61
+is_linear=0
+shrinkage=0.05
+
+
+Tree=6
+num_leaves=4
+num_cat=1
+split_feature=30 2 11
+split_gain=30.1669 11.1566 1.70433
+threshold=0.36139813338961735 0 476.41723356009078
+decision_type=2 1 2
+left_child=2 -2 -1
+right_child=1 -3 -4
+leaf_value=12.214311975195109 -16.997717054776661 -0.69484741327886468 50.622832710558079
+leaf_weight=24.376811683177948 27.692802667617798 24.836468100547791 25.549156785011292
+leaf_count=24 29 26 25
+internal_value=-0.00172759 -0.0281779 0.0261019
+internal_weight=102.455 52.5293 49.926
+internal_count=104 55 49
+cat_boundaries=0 1
+cat_threshold=8
+is_linear=0
+shrinkage=0.05
+
+
+Tree=7
+num_leaves=3
+num_cat=0
+split_feature=10 14
+split_gain=21.8767 11.1211
+threshold=0.81561859015885563 1908.1632653061229
+decision_type=2 2
+left_child=-1 -2
+right_child=1 -3
+leaf_value=62.822196446123932 -14.826830530651108 -0.077670593242385177
+leaf_weight=34.314293324947357 27.277208983898163 30.832712590694427
+leaf_count=34 28 32
+internal_value=-0.0045495 -0.0232426
+internal_weight=92.4242 58.1099
+internal_count=94 60
+is_linear=0
+shrinkage=0.05
+
+
+Tree=8
+num_leaves=3
+num_cat=1
+split_feature=30 2
+split_gain=22.3473 11.2182
+threshold=0.36139813338961735 0
+decision_type=2 1
+left_child=-1 -2
+right_child=1 -3
+leaf_value=11.607479906097467 -15.40648967550527 -0.77222187916373741
+leaf_weight=46.163904786109924 24.827056348323822 23.881219327449799
+leaf_count=45 26 25
+internal_value=-0.0028415 -0.026466
+internal_weight=94.8722 48.7083
+internal_count=96 51
+cat_boundaries=0 1
+cat_threshold=8
+is_linear=0
+shrinkage=0.05
+
+
+Tree=9
+num_leaves=3
+num_cat=0
+split_feature=10 11
+split_gain=24.377 11.7513
+threshold=0.8104745912493373 376.6439909297053
+decision_type=2 2
+left_child=-1 -2
+right_child=1 -3
+leaf_value=81.277771523746125 -16.223164703448756 -0.87028885211374252
+leaf_weight=28.732771217823029 23.445338845252991 45.67809784412384
+leaf_count=29 24 47
+internal_value=-0.00513485 -0.0212243
+internal_weight=97.8562 69.1234
+internal_count=100 71
+is_linear=0
+shrinkage=0.05
+
+
+Tree=10
+num_leaves=3
+num_cat=0
+split_feature=30 14
+split_gain=22.3119 14.4548
+threshold=0.25635327662649759 1985.4875283446715
+decision_type=2 2
+left_child=-1 -2
+right_child=1 -3
+leaf_value=82.337617509356804 -13.402607830467417 -0.5740959763889294
+leaf_weight=28.983548700809479 35.419807374477386 30.386869072914124
+leaf_count=30 36 31
+internal_value=-0.00949906 -0.025598
+internal_weight=94.7902 65.8067
+internal_count=97 67
+is_linear=0
+shrinkage=0.05
+
+
+Tree=11
+num_leaves=3
+num_cat=1
+split_feature=2 18
+split_gain=14.9639 7.85108
+threshold=0 0.12690839694656489
+decision_type=1 2
+left_child=-1 -2
+right_child=1 -3
+leaf_value=-12.601519686214226 -1.4333916658507349 45.591924245343812
+leaf_weight=34.726912200450897 22.923396289348602 32.341988444328308
+leaf_count=35 24 33
+internal_value=-0.0062843 0.00987772
+internal_weight=89.9923 55.2654
+internal_count=92 57
+cat_boundaries=0 1
+cat_threshold=8
+is_linear=0
+shrinkage=0.05
+
+
+Tree=12
+num_leaves=3
+num_cat=0
+split_feature=10 16
+split_gain=15.0195 11.0531
+threshold=0.81655371556051726 3180.2721088435378
+decision_type=2 2
+left_child=-1 -2
+right_child=1 -3
+leaf_value=43.312328033076625 -12.158443213622263 0.94881674522949311
+leaf_weight=41.772219598293304 25.102038383483887 26.746965646743774
+leaf_count=41 26 28
+internal_value=-0.00438889 -0.0223645
+internal_weight=93.6212 51.849
+internal_count=95 54
+is_linear=0
+shrinkage=0.05
+
+
+end of trees
+
+feature_importances:
+voicebank_id=8
+file_voiced_ratio=6
+blank_confidence=4
+source_confidence=3
+onset_ms=3
+nucleus_end_ms=2
+tail_ms=1
+
+parameters:
+[boosting: gbdt]
+[objective: regression_l1]
+[metric: l1]
+[tree_learner: serial]
+[device_type: cpu]
+[data_sample_strategy: bagging]
+[data: ]
+[valid: ]
+[num_iterations: 700]
+[learning_rate: 0.05]
+[num_leaves: 31]
+[num_threads: 0]
+[seed: 0]
+[deterministic: 0]
+[force_col_wise: 0]
+[force_row_wise: 0]
+[histogram_pool_size: -1]
+[max_depth: -1]
+[min_data_in_leaf: 24]
+[min_sum_hessian_in_leaf: 0.001]
+[bagging_fraction: 0.85]
+[pos_bagging_fraction: 1]
+[neg_bagging_fraction: 1]
+[bagging_freq: 1]
+[bagging_seed: 3]
+[bagging_by_query: 0]
+[feature_fraction: 0.9]
+[feature_fraction_bynode: 1]
+[feature_fraction_seed: 2]
+[extra_trees: 0]
+[extra_seed: 6]
+[early_stopping_round: 0]
+[early_stopping_min_delta: 0]
+[first_metric_only: 0]
+[max_delta_step: 0]
+[lambda_l1: 0]
+[lambda_l2: 0]
+[linear_lambda: 0]
+[min_gain_to_split: 0]
+[drop_rate: 0.1]
+[max_drop: 50]
+[skip_drop: 0.5]
+[xgboost_dart_mode: 0]
+[uniform_drop: 0]
+[drop_seed: 4]
+[top_rate: 0.2]
+[other_rate: 0.1]
+[min_data_per_group: 100]
+[max_cat_threshold: 32]
+[cat_l2: 10]
+[cat_smooth: 10]
+[max_cat_to_onehot: 4]
+[top_k: 20]
+[monotone_constraints: ]
+[monotone_constraints_method: basic]
+[monotone_penalty: 0]
+[feature_contri: ]
+[forcedsplits_filename: ]
+[refit_decay_rate: 0.9]
+[cegb_tradeoff: 1]
+[cegb_penalty_split: 0]
+[cegb_penalty_feature_lazy: ]
+[cegb_penalty_feature_coupled: ]
+[path_smooth: 0]
+[interaction_constraints: ]
+[verbosity: -1]
+[saved_feature_importance_type: 0]
+[use_quantized_grad: 0]
+[num_grad_quant_bins: 4]
+[quant_train_renew_leaf: 0]
+[stochastic_rounding: 1]
+[linear_tree: 0]
+[max_bin: 255]
+[max_bin_by_feature: ]
+[min_data_in_bin: 3]
+[bin_construct_sample_cnt: 200000]
+[data_random_seed: 1]
+[is_enable_sparse: 1]
+[enable_bundle: 1]
+[use_missing: 1]
+[zero_as_missing: 0]
+[feature_pre_filter: 1]
+[pre_partition: 0]
+[two_round: 0]
+[header: 0]
+[label_column: ]
+[weight_column: ]
+[group_column: ]
+[ignore_column: ]
+[categorical_feature: 0,1,2,3,4,7,8,9]
+[forcedbins_filename: ]
+[precise_float_parser: 0]
+[parser_config_file: ]
+[objective_seed: 5]
+[num_class: 1]
+[is_unbalance: 0]
+[scale_pos_weight: 1]
+[sigmoid: 1]
+[boost_from_average: 1]
+[reg_sqrt: 0]
+[alpha: 0.9]
+[fair_c: 1]
+[poisson_max_delta_step: 0.7]
+[tweedie_variance_power: 1.5]
+[lambdarank_truncation_level: 30]
+[lambdarank_norm: 1]
+[label_gain: ]
+[lambdarank_position_bias_regularization: 0]
+[eval_at: ]
+[multi_error_top_k: 1]
+[auc_mu_weights: ]
+[num_machines: 1]
+[local_listen_port: 12400]
+[time_out: 120]
+[machine_list_filename: ]
+[machines: ]
+[gpu_platform_id: -1]
+[gpu_device_id: -1]
+[gpu_use_dp: 0]
+[num_gpu: 1]
+
+end of parameters
+
+pandas_categorical:[["japanese"], ["cvvc"], ["Dokunagi Gyokuro JP_CVVC", "TARO \u3010CVVC\u3011", "nowano Test_CVVC", "\u5712\u97f3\u30a2\u30ce\u30cd_\u3042\u308b\u3075\u3041_CVVC"], ["\u3042\u3044\u3046\u3048\u304a\u3093", "\u3042\u304b\u304d\u304f\u3051\u3053\u304b", "\u3042\u3093\u3042\u3042\u3044\u3042\u3046\u3042", "\u3042\u5438\u3044\u5438\u3046\u5438\u304b", "\u3042\u5438\u304b\u5410", "\u3044\u3084\u3086\u3044\u3047\u3088\u3084\u3093\u3084", "\u3044\u3093\u3044\u3044\u3046\u3044\u3048\u3044", "\u3044\u5438\u304d\u5410", "\u3046\u308f\u3046\u3043\u3046\u3047\u3046\u3049\u308f\u3093\u308f", "\u3046\u3093\u3046\u3046\u3048\u3046\u304a\u3046", "\u3046\u5438\u304f\u5410", "\u3048\u3093\u3048\u3048\u304a\u3048\u3042\u3048", "\u3048\u5438\u304a\u5438\u3093\u5438\u304b", "\u3048\u5438\u3051\u5410", "\u304a\u3093\u304a\u304a\u3042\u304a\u3044\u304a", "\u304a\u5438\u3053\u5410", "\u304b\u304d\u304f\u3051\u3053\u304b\u3093\u304b", "\u304c\u304e\u3050\u3052\u3054\u304c", "\u304c\u304e\u3050\u3052\u3054\u304c\u3093\u304c", "\u304d\u304b\u304f\u3051\u3053\u304b\u3093\u304b", "\u304d\u3083\u304d\u304d\u3085\u304d\u3047\u304d\u3087\u304d\u3083", "\u304d\u3083\u304d\u304d\u3085\u304d\u3047\u304d\u3087\u304d\u3083\u3093\u304d\u3083", "\u304d\u3083\u304d\u3085\u304d\u3047\u304d\u3087\u304e\u3083\u304e\u3085\u304e\u3047\u304e\u3087", "\u304e\u304c\u3050\u3052\u3054\u304c\u3093\u304c", "\u304e\u3083\u304e\u304e\u3085\u304e\u3047\u304e\u3087\u304e\u3083", "\u304e\u3083\u304e\u304e\u3085\u304e\u3047\u304e\u3087\u304e\u3083\u3093\u304e\u3083", "\u304f\u3041\u304f\u3043\u304f\u304f\u3047\u304f\u3049\u304f\u3041", "\u304f\u3041\u304f\u3043\u304f\u304f\u3047\u304f\u3049\u304f\u3041\u3093\u304f\u3041", "\u3050\u3041\u3050\u3043\u3050\u3050\u3047\u3050\u3049\u3050\u3041", "\u3050\u3041\u3050\u3043\u3050\u3050\u3047\u3050\u3049\u3050\u3041\u3093\u3050\u3041", "\u3055\u3059\u3043\u3059\u305b\u305d\u3055", "\u3055\u3059\u3043\u3059\u305b\u305d\u3055\u3093\u3055", "\u3056\u305a\u3043\u305a\u305c\u305e\u3056\u3093\u3056", "\u3056\u305c\u3043\u305a\u305c\u305e\u3056", "\u3057\u3083\u3057\u3057\u3085\u3057\u3047\u3057\u3087\u3057\u3083", "\u3057\u3083\u3057\u3057\u3085\u3057\u3047\u3057\u3087\u3057\u3083\u3093\u3057\u3083", "\u3058\u3083\u3058\u3058\u3085\u3058\u3047\u3058\u3087\u3058\u3083", "\u3058\u3083\u3058\u3058\u3085\u3058\u3047\u3058\u3087\u3058\u3083\u3093\u3058\u3083", "\u3059\u3043\u3055\u3059\u305b\u305d\u3055\u3093\u3055", "\u305f\u3066\u3043\u3068\u3045\u3066\u3068\u305f", "\u305f\u3066\u3043\u3068\u3045\u3066\u3068\u305f\u3093\u305f", "\u3060\u3067\u3043\u3069\u3045\u3067\u3069\u3060", "\u3060\u3067\u3043\u3069\u3045\u3067\u3069\u3060\u3093\u3060", "\u3061\u3083\u3061\u3061\u3085\u3061\u3047\u3061\u3087\u3061\u3083", "\u3061\u3083\u3061\u3061\u3085\u3061\u3047\u3061\u3087\u3061\u3083\u3093\u3061\u3083", "\u3064\u3041\u3064\u3043\u3064\u3064\u3047\u3064\u3049\u3064\u3041", "\u3064\u3041\u3064\u3043\u3064\u3064\u3047\u3064\u3049\u3064\u3041\u3093\u3064\u3041", "\u3066\u3043\u305f\u3068\u3045\u3066\u3068\u305f\u3093\u305f", "\u3066\u3085\u3066\u3085", "\u3067\u3085\u3067\u3085", "\u306a\u306b\u306c\u306d\u306e\u306a", "\u306a\u306b\u306c\u306d\u306e\u306a\u3093\u306a", "\u306b\u3083\u306b\u306b\u3085\u306b\u3047\u306b\u3087\u306b\u3083", "\u306b\u3083\u306b\u306b\u3085\u306b\u3047\u306b\u3087\u306b\u3083\u3093\u306b\u3083", "\u306b\u3083\u306b\u3085\u306b\u3047\u306b\u3087\u307f\u3083\u307f\u3085\u307f\u3047\u307f\u3087", "\u306f\u306f\u3044\u306f", "\u306f\u3072\u3075\u3078\u307b\u306f", "\u3070\u3073\u3076\u3079\u307c\u3070", "\u3070\u3073\u3076\u3079\u307c\u3070\u3093\u3070", "\u3071\u3074\u3077\u307a\u307d\u3071", "\u3071\u3074\u3077\u307a\u307d\u3071\u3093\u3071", "\u3072\u306f\u3075\u3078\u307b", "\u3072\u3083\u3072\u3072\u3085\u3072\u3047\u3072\u3087\u3072\u3083", "\u3072\u3083\u3072\u3072\u3085\u3072\u3047\u3072\u3087\u3072\u3083\u3093\u3072\u3083", "\u3073\u3070\u3076\u3079\u307c\u3070\u3093\u3070", "\u3073\u3083\u3073\u3073\u3085\u3073\u3047\u3073\u3087\u3073\u3083", "\u3073\u3083\u3073\u3073\u3085\u3073\u3047\u3073\u3087\u3073\u3083\u3093\u3073\u3083", "\u3073\u3083\u3073\u3085\u3073\u3047\u3073\u3087\u3074\u3083\u3074\u3085\u3074\u3047\u3074\u3087", "\u3074\u3071\u3077\u307a\u307d\u3071\u3093\u3071", "\u3074\u3083\u3074\u3074\u3085\u3074\u3047\u3074\u3087\u3074\u3083", "\u3074\u3083\u3074\u3074\u3085\u3074\u3047\u3074\u3087\u3074\u3083\u3093\u3074\u3083", "\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041", "\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041", "\u3078\u3078\u3046\u3078", "\u307b\u306f\u3093\u306f\u306f", "\u307b\u307b\u3093\u307b", "\u307e\u307f\u3080\u3081\u3082\u307e", "\u307e\u307f\u3080\u3081\u3082\u307e\u3093\u307e", "\u307f\u3083\u307f\u307f\u3085\u307f\u3047\u307f\u3087\u307f\u3083", "\u307f\u3083\u307f\u307f\u3085\u307f\u3047\u307f\u3087\u307f\u3083\u3093\u307f\u3083", "\u3084\u3044\u3043\u3086\u3044\u3047\u3088\u3084\u3093\u3084", "\u3084\u3086\u3044\u3047\u3088\u3084", "\u3089\u308a\u308b\u308c\u308d\u3089", "\u3089\u308a\u308b\u308c\u308d\u3089\u3093\u3089", "\u308a\u3083\u308a\u3085\u308a\u3047\u308a\u3087\u3066\u3085\u3067\u3085", "\u308a\u3083\u308a\u308a\u3085\u308a\u3047\u308a\u3087\u308a\u3083", "\u308a\u3083\u308a\u308a\u3085\u308a\u3047\u308a\u3087\u308a\u3083\u3093\u308a\u3083", "\u308f\u3046\u3043\u3046\u3045\u3046\u3047\u3046\u3049\u308f\u3093\u308f", "\u308f\u3046\u3043\u3046\u3047\u3092\u308f", "\u3093\u3042\u3044\u3046\u3048\u304a\u3093", "\u3093\u3093", "\u3093\u5438\u3093\u5410", "\u3094\u3041\u3094\u3043\u3094\u3094\u3047\u3094\u3049\u3094\u3041\u3093\u3094\u3041", "\u606f", "\u606f2", "\u606f\u9577h"], ["2", "aiueon", "akakikukekoka", "anaaiaua", "babibubeboba", "babibubebobanba", "bibabubebobanba", "br", "byabibyubyebyobya", "byabibyubyebyobyanbya", "byabyubyebyopyapyupyepyo", "chachichuchechocha", "chachichuchechochancha", "dadidudedoda", "dadidudedodanda", "dede", "eneeoeae", "fafifufefofa", "fafifufefofanfa", "gagigugegoga", "gagigugegoganga", "gigagugegoganga", "guaguigugueguogua", "guaguigugueguoguangua", "gyagigyugyegyogya", "gyagigyugyegyogyangya", "hahaiha", "hahifuhehoha", "heheuhe", "hihafuheho", "hohanhaha", "hohonho", "hyahihyuhyehyohya", "hyahihyuhyehyohyanhya", "iniiuiei", "iyayuyeyoyanya", "jajijujejoja", "jajijujejojanja", "kakikukekokanka", "kikakukekokanka", "kuakuikukuekuokua", "kuakuikukuekuokuankua", "kyakikyukyekyokya", "kyakikyukyekyokyankya", "kyakyukyekyogyagyugyegyo", "mamimumemoma", "mamimumemomanma", "myamimyumyemyomya", "myamimyumyemyomyanmya", "naiueon", "naninunenona", "naninunenonanna", "nn", "nyaninyunyenyonya", "nyaninyunyenyonyannya", "nyanyunyenyomyamyumyemyo", "onooaoio", "papipupepopa", "papipupepopanpa", "pipapupepopanpa", "pyapipyupyepyopya", "pyapipyupyepyopyanpya", "rarirurerora", "rarirureroranra", "ryariryuryeryorya", "ryariryuryeryoryanrya", "ryaryuryeryotede", "sasisusesosa", "sasisusesosansa", "shashishusheshosha", "shashishusheshoshansha", "sisasusesosansa", "tatitutetota", "tatitutetotanta", "tete", "titatutetotanta", "tsatsitsutsetsotsa", "tsatsitsutsetsotsantsa", "unuueuou", "uwawiwewowanwa", "vavivevovanva", "wawiwewowa", "wawiwuwewowanwa", "yayiyuyeyoyanya", "yayuyeyoya", "zazeizuzezoza", "zazizuzezozanza"], ["audio_only"], ["boundary_guided"], ["filename"]]

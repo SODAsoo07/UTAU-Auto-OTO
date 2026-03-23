@@ -1,0 +1,181 @@
+tree
+version=v4
+num_class=1
+num_tree_per_iteration=1
+label_index=0
+max_feature_idx=74
+objective=regression_l1
+feature_names=language format_type alias_type alias_group row_index_in_wav row_ratio_in_wav is_head_row is_tail_row wav_duration_ms base_offset base_cons base_cutoff_abs base_pre base_ovl base_cons_gap base_cut_gap base_ovl_ratio curr_phone_start_ms curr_phone_end_ms curr_phone_len_ms curr_vowel_start_ms curr_vowel_end_ms curr_vowel_len_ms syllable_start_ms syllable_end_ms syllable_len_ms prev_phone_gap_ms next_phone_gap_ms expected_anchor_ms base_offset_to_expected_ms base_pre_to_expected_ms base_cutoff_to_next_anchor_ms energy_mean energy_min energy_max energy_slope_pre energy_slope_post valley_energy valley_dist_from_cutoff_ms db_mean db_min db_silence_ratio f0_voicing_mean f0_voicing_near_pre zcr_mean spectral_flux_mean onset_class voicing_class is_tense is_diphthong coda_type vowel_class mora_position bridge_type is_nasal_or_sonorant prev_alias_type next_alias_type prev_base_pre next_base_pre prev_base_offset next_base_offset prev_base_cutoff_abs next_base_cutoff_abs mapping_confidence used_alias_occurrence_mapping used_exact_vowel_fix used_nuclei_fallback used_alias_based_syllables words_vs_alias_score_margin jump_blocked_flag mapping_reason_code local_peak_db local_valley_db mel_window_energy_mean mel_window_silence_ratio
+feature_infos=none none -1:0:2:3:1 -1:12:6:9:0:7:10:2:11:5:8:4:3:1 [0:15] [0:1] [0:1] [0:1] [4246.3492063492067:5999.4557823129253] [438.20999999999998:5047.9200000000001] [39.460000000000001:398.60000000000002] [539.38:5194.2600000000002] [31.440000000000001:259.43000000000001] [9.7799999999999994:228.36000000000001] [4.2800000000000011:161.78] [0.0100000000000051:114.20999999999999] [0.28446771378708541:0.99422115447048898] [450:5060] [530:5610] [10:3040] [450:5060] [530:5610] [10:3040] [450:5060] [530:5610] [29.999999999999773:3070] [0:1500] [0:1190] [450:5060] [-254.16000000000031:42.389999999999873] [-39.619999999999891:238.58999999999992] [-3956.1100000000006:3036.1400000000003] [0.000112035901755:1] [0:1] [0.00070331211183659998:1] [-0.87805226914209944:1] [-0.95129347959133559:0.98573646943198179] [0:1] [-32.578798185941203:314.39247165532925] [-72.113136325761715:-9.9308719817785445] [-84.816403556884978:-11.203556039587015] [0:1] [0:1] [0:1] [0.0085470085470084993:0.50416982562547386] [0:0.189132822934269] -1:1:2:3:0 -1:0:1:2 none none none -1:0:3:2:1:6:5:4 -1:1:0:2 -1:0:1:2 [0:1] -1:3:0:4:1:2 none [0:271.13] [0:325.13] [0:4992.9799999999996] [0:5063.7399999999998] [0:5173.9199999999992] [0:5372.9700000000003] [0.72017804847290745:1] none [0:1] none none [-25.416000000000032:1541.5840000000001] none none [-72.113136325761715:-9.9308719817785445] [-84.816403556884978:-11.203556039587015] [0.000112035901755:1] [0:1]
+tree_sizes=2640
+
+Tree=0
+num_leaves=31
+num_cat=1
+split_feature=68 13 15 39 31 53 18 8 40 31 16 25 29 14 44 31 32 15 59 19 44 32 68 25 44 36 15 30 14 12
+split_gain=325.423 193.926 205.712 74.4489 64.6144 34.8584 28.761 25.4704 23.5101 21.5465 21.3762 18.7687 18.3668 8.6775 6.87619 6.61658 5.25621 4.94902 3.84895 2.95063 4.81681 2.91868 4.93878 1.5616 1.39882 2.4113 1.33005 0.721782 0.0865772 0.0587629
+threshold=1.0000000180025095e-35 76.930000000000021 52.925000000000018 -17.409662473115731 -202.55000000000015 0 1175.0000000000002 5262.460317460318 -16.840848465742329 -225.61999999999998 0.68734164593136293 275.00000000000006 -31.004999999999878 130.13000000000002 0.029015921675541803 121.70000000000006 0.66851857407868998 6.510000000000006 2939.2750000000005 435.00000000000006 0.027769543095660102 0.88854205369998651 70.883500000000126 555.00000000000034 0.046356677062659453 0.05893592899772241 51.465000000000011 63.135000000000055 121.63500000000002 73.810000000000016
+decision_type=2 2 2 2 2 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+left_child=5 2 17 4 10 -1 -5 16 19 -3 13 -11 23 -4 -10 21 -6 -2 -15 20 -7 22 -8 28 -19 -26 -22 -21 -13 -23
+right_child=1 9 3 6 7 8 15 -9 14 11 -12 12 -14 18 -16 -17 -18 24 -20 27 26 29 -24 -25 25 -27 -28 -29 -30 -31
+leaf_value=46.916700553894046 58.776050949096678 48.170550537109378 48.415550613403319 48.430625534057619 47.156050491333005 50.861250686645505 47.235650539398193 48.611000442504881 48.951500511169435 46.807550525665285 48.023625469207765 43.076900482177734 40.463450622558597 48.849025535583493 49.53110046386719 46.277425527572632 36.193550491333006 56.639300537109378 50.373750686645508 53.17180061340332 55.138875579833986 46.326600503921512 45.786150521039964 42.659300613403317 54.40355033874512 54.154050445556642 50.477800559997561 53.7536003112793 45.678225523233415 46.55025053024292
+leaf_weight=51 56 41 49 46 47 45 49 41 56 53 56 258 60 58 40 46 49 90 53 162 60 57 49 51 49 42 56 40 40 40
+leaf_count=51 56 41 49 46 47 45 49 41 56 53 56 258 60 58 40 46 49 90 53 162 60 57 49 51 49 42 56 40 40 40
+internal_value=48.2492 48.2366 48.2508 48.236 48.2514 48.2833 48.2171 48.2245 48.2877 48.2118 48.2684 48.2087 48.2051 48.2778 48.2657 48.2102 48.2105 48.2906 48.2855 48.2935 48.2884 48.2062 48.2123 48.2007 48.2946 48.2902 48.2938 48.2975 48.1993 48.2
+internal_weight=1890 1380 877 640 353 510 287 137 459 503 216 462 409 160 96 241 96 237 111 363 161 195 98 349 181 91 116 202 298 97
+internal_count=1890 1380 877 640 353 510 287 137 459 503 216 462 409 160 96 241 96 237 111 363 161 195 98 349 181 91 116 202 298 97
+cat_boundaries=0 1
+cat_threshold=2
+is_linear=0
+shrinkage=1
+
+
+end of trees
+
+feature_importances:
+base_cut_gap=3
+base_cutoff_to_next_anchor_ms=3
+zcr_mean=3
+base_cons_gap=2
+syllable_len_ms=2
+energy_mean=2
+words_vs_alias_score_margin=2
+wav_duration_ms=1
+base_pre=1
+base_ovl=1
+base_ovl_ratio=1
+curr_phone_end_ms=1
+curr_phone_len_ms=1
+base_offset_to_expected_ms=1
+base_pre_to_expected_ms=1
+energy_slope_post=1
+db_mean=1
+db_min=1
+bridge_type=1
+prev_base_offset=1
+
+parameters:
+[boosting: gbdt]
+[objective: regression_l1]
+[metric: l1]
+[tree_learner: serial]
+[device_type: cpu]
+[data_sample_strategy: bagging]
+[data: ]
+[valid: ]
+[num_iterations: 500]
+[learning_rate: 0.05]
+[num_leaves: 31]
+[num_threads: 0]
+[seed: 0]
+[deterministic: 0]
+[force_col_wise: 0]
+[force_row_wise: 0]
+[histogram_pool_size: -1]
+[max_depth: -1]
+[min_data_in_leaf: 40]
+[min_sum_hessian_in_leaf: 0.001]
+[bagging_fraction: 0.85]
+[pos_bagging_fraction: 1]
+[neg_bagging_fraction: 1]
+[bagging_freq: 1]
+[bagging_seed: 3]
+[bagging_by_query: 0]
+[feature_fraction: 0.85]
+[feature_fraction_bynode: 1]
+[feature_fraction_seed: 2]
+[extra_trees: 0]
+[extra_seed: 6]
+[early_stopping_round: 0]
+[early_stopping_min_delta: 0]
+[first_metric_only: 0]
+[max_delta_step: 0]
+[lambda_l1: 0]
+[lambda_l2: 0]
+[linear_lambda: 0]
+[min_gain_to_split: 0]
+[drop_rate: 0.1]
+[max_drop: 50]
+[skip_drop: 0.5]
+[xgboost_dart_mode: 0]
+[uniform_drop: 0]
+[drop_seed: 4]
+[top_rate: 0.2]
+[other_rate: 0.1]
+[min_data_per_group: 100]
+[max_cat_threshold: 32]
+[cat_l2: 10]
+[cat_smooth: 10]
+[max_cat_to_onehot: 4]
+[top_k: 20]
+[monotone_constraints: ]
+[monotone_constraints_method: basic]
+[monotone_penalty: 0]
+[feature_contri: ]
+[forcedsplits_filename: ]
+[refit_decay_rate: 0.9]
+[cegb_tradeoff: 1]
+[cegb_penalty_split: 0]
+[cegb_penalty_feature_lazy: ]
+[cegb_penalty_feature_coupled: ]
+[path_smooth: 0]
+[interaction_constraints: ]
+[verbosity: -1]
+[saved_feature_importance_type: 0]
+[use_quantized_grad: 0]
+[num_grad_quant_bins: 4]
+[quant_train_renew_leaf: 0]
+[stochastic_rounding: 1]
+[linear_tree: 0]
+[max_bin: 255]
+[max_bin_by_feature: ]
+[min_data_in_bin: 3]
+[bin_construct_sample_cnt: 200000]
+[data_random_seed: 1]
+[is_enable_sparse: 1]
+[enable_bundle: 1]
+[use_missing: 1]
+[zero_as_missing: 0]
+[feature_pre_filter: 1]
+[pre_partition: 0]
+[two_round: 0]
+[header: 0]
+[label_column: ]
+[weight_column: ]
+[group_column: ]
+[ignore_column: ]
+[categorical_feature: 0,1,2,3,46,47,50,51,52,53,55,56,70]
+[forcedbins_filename: ]
+[precise_float_parser: 0]
+[parser_config_file: ]
+[objective_seed: 5]
+[num_class: 1]
+[is_unbalance: 0]
+[scale_pos_weight: 1]
+[sigmoid: 1]
+[boost_from_average: 1]
+[reg_sqrt: 0]
+[alpha: 0.9]
+[fair_c: 1]
+[poisson_max_delta_step: 0.7]
+[tweedie_variance_power: 1.5]
+[lambdarank_truncation_level: 30]
+[lambdarank_norm: 1]
+[label_gain: ]
+[lambdarank_position_bias_regularization: 0]
+[eval_at: ]
+[multi_error_top_k: 1]
+[auc_mu_weights: ]
+[num_machines: 1]
+[local_listen_port: 12400]
+[time_out: 120]
+[machine_list_filename: ]
+[machines: ]
+[gpu_platform_id: -1]
+[gpu_device_id: -1]
+[gpu_use_dp: 0]
+[num_gpu: 1]
+
+end of parameters
+
+pandas_categorical:[["japanese"], ["cvvc"], ["cv", "cv_head", "vc", "vv"], ["cv_fricative", "cv_head_fricative", "cv_head_other", "cv_head_plosive", "cv_head_sonorant", "cv_other", "cv_plosive", "cv_sonorant", "vc_fricative", "vc_other", "vc_plosive", "vc_sonorant", "vv"], ["fricative", "other", "plosive", "sonorant"], ["unknown", "voiced", "voiceless"], ["none"], ["", "a", "e", "i", "n", "o", "u"], ["head", "mid", "tail"], ["", "vc", "vv"], ["", "cv", "cv_head", "vc", "vv"], [""], ["unknown"]]

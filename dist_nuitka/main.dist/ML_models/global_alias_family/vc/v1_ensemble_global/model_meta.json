@@ -1,0 +1,236 @@
+{
+  "backend": "ensemble_v1",
+  "language": "global",
+  "format_type": "general",
+  "model_version": "v1",
+  "feature_version": "v12",
+  "feature_names": [
+    "language",
+    "format_type",
+    "alias_type",
+    "alias_group",
+    "row_index_in_wav",
+    "row_ratio_in_wav",
+    "file_row_count",
+    "file_cv_count",
+    "file_vc_count",
+    "file_vv_count",
+    "file_vcv_count",
+    "file_br_count",
+    "file_mono_count",
+    "file_cv_ratio",
+    "file_vc_ratio",
+    "file_vc_cv_ratio",
+    "file_cv_vc_balance",
+    "file_mean_energy",
+    "file_voiced_ratio",
+    "file_mean_syllable_dur_ms",
+    "is_head_row",
+    "is_tail_row",
+    "wav_duration_ms",
+    "base_offset",
+    "base_cons",
+    "base_cutoff_abs",
+    "base_pre",
+    "base_ovl",
+    "base_cons_gap",
+    "base_cut_gap",
+    "base_ovl_ratio",
+    "curr_phone_start_ms",
+    "curr_phone_end_ms",
+    "curr_phone_len_ms",
+    "curr_vowel_start_ms",
+    "curr_vowel_end_ms",
+    "curr_vowel_len_ms",
+    "syllable_start_ms",
+    "syllable_end_ms",
+    "syllable_len_ms",
+    "prev_phone_gap_ms",
+    "next_phone_gap_ms",
+    "expected_anchor_ms",
+    "base_offset_to_expected_ms",
+    "base_pre_to_expected_ms",
+    "base_cutoff_to_next_anchor_ms",
+    "energy_mean",
+    "energy_min",
+    "energy_max",
+    "energy_slope_pre",
+    "energy_slope_post",
+    "valley_energy",
+    "valley_dist_from_cutoff_ms",
+    "db_mean",
+    "db_min",
+    "db_silence_ratio",
+    "f0_voicing_mean",
+    "f0_voicing_near_pre",
+    "zcr_mean",
+    "spectral_flux_mean",
+    "onset_class",
+    "voicing_class",
+    "is_tense",
+    "is_diphthong",
+    "coda_type",
+    "vowel_class",
+    "mora_position",
+    "bridge_type",
+    "is_nasal_or_sonorant",
+    "prev_alias_type",
+    "next_alias_type",
+    "prev_base_pre",
+    "next_base_pre",
+    "prev_base_offset",
+    "next_base_offset",
+    "prev_base_cutoff_abs",
+    "next_base_cutoff_abs",
+    "mapping_confidence",
+    "used_alias_occurrence_mapping",
+    "used_exact_vowel_fix",
+    "used_nuclei_fallback",
+    "used_alias_based_syllables",
+    "words_vs_alias_score_margin",
+    "jump_blocked_flag",
+    "mapping_reason_code",
+    "local_peak_db",
+    "local_valley_db",
+    "mel_window_energy_mean",
+    "mel_window_silence_ratio",
+    "mel_voiced_formant_ratio",
+    "mel_silence_sparse_ratio",
+    "mel_unvoiced_diffuse_ratio",
+    "mel_breath_like_ratio",
+    "blank_span_confidence",
+    "mel_offset_candidate_ms",
+    "mel_cutoff_candidate_ms",
+    "mel_voiced_onset_ms",
+    "mel_vowel_nucleus_start_ms",
+    "mel_vowel_nucleus_end_ms",
+    "mel_voiced_onset_to_pre_ms",
+    "mel_safety_clamped",
+    "onset_patch_energy_mean",
+    "onset_patch_voiced_ratio",
+    "onset_patch_unvoiced_ratio",
+    "tail_patch_energy_mean",
+    "tail_patch_silence_ratio",
+    "syllable_blank_confidence",
+    "syllable_mel_voiced_conf",
+    "syllable_mel_silence_conf",
+    "syllable_mel_unvoiced_conf",
+    "syllable_mel_breath_conf"
+  ],
+  "categorical_features": [
+    "language",
+    "format_type",
+    "alias_type",
+    "alias_group",
+    "onset_class",
+    "voicing_class",
+    "coda_type",
+    "vowel_class",
+    "mora_position",
+    "bridge_type",
+    "prev_alias_type",
+    "next_alias_type",
+    "mapping_reason_code"
+  ],
+  "created_at": "2026-03-19T17:01:57",
+  "train_rows": 2941,
+  "voicebank_count": 14,
+  "alias_family": "vc",
+  "rawmel_cache_dir_requested": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\core\\.cache\\oto_ml_mel_patches",
+  "rawmel_cache_dir": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\core\\.cache\\oto_ml_mel_patches\\japanese\\cvvc\\v1\\6d95203e",
+  "meta_enabled": true,
+  "submodels": {
+    "lightgbm": "lightgbm",
+    "coupled": "coupled",
+    "meta": "meta"
+  },
+  "coupled_backend": "coupled_nn_v2_rawmel",
+  "gating": {
+    "min_coupled_confidence": 0.0,
+    "mode": "confidence_blank_mapping_gate"
+  },
+  "oof_folds": 5,
+  "holdout_metrics": {
+    "lightgbm": {
+      "delta_offset": {
+        "baseline_mae": 210.22345026178013,
+        "model_mae": 61.56242010116759
+      },
+      "delta_cons": {
+        "baseline_mae": 166.03628272251308,
+        "model_mae": 16.578100177993225
+      },
+      "delta_cutoff": {
+        "baseline_mae": 155.74390314136127,
+        "model_mae": 122.01442263045746
+      },
+      "delta_pre": {
+        "baseline_mae": 93.9141230366492,
+        "model_mae": 39.09142080359431
+      },
+      "delta_ovl": {
+        "baseline_mae": 21.650437172774872,
+        "model_mae": 15.347969517096017
+      }
+    },
+    "coupled": {
+      "delta_offset": {
+        "baseline_mae": 704.494384765625,
+        "model_mae": 276.0292053222656
+      },
+      "delta_cons": {
+        "baseline_mae": 643.126953125,
+        "model_mae": 40.85614013671875
+      },
+      "delta_cutoff": {
+        "baseline_mae": 366.7366638183594,
+        "model_mae": 278.2301330566406
+      },
+      "delta_pre": {
+        "baseline_mae": 93.91412353515625,
+        "model_mae": 37.99612808227539
+      },
+      "delta_ovl": {
+        "baseline_mae": 21.71064567565918,
+        "model_mae": 27.71384620666504
+      }
+    },
+    "meta": {
+      "delta_offset": {
+        "baseline_mae": 210.22345026178013,
+        "lightgbm_mae": 71.29685225955902,
+        "coupled_mae": 151.01038802859668,
+        "gated_mae": 66.62563711566058,
+        "meta_mae": 59.44916870455727
+      },
+      "delta_cons": {
+        "baseline_mae": 166.03628272251308,
+        "lightgbm_mae": 19.430363175013763,
+        "coupled_mae": 508.6190278441732,
+        "gated_mae": 25.673180777067163,
+        "meta_mae": 15.60710159259906
+      },
+      "delta_cutoff": {
+        "baseline_mae": 155.74390314136127,
+        "lightgbm_mae": 153.40191642250073,
+        "coupled_mae": 131.3808951103674,
+        "gated_mae": 153.02062043180086,
+        "meta_mae": 133.54365326402848
+      },
+      "delta_pre": {
+        "baseline_mae": 93.9141230366492,
+        "lightgbm_mae": 43.663558883524644,
+        "coupled_mae": 71.60129388516017,
+        "gated_mae": 39.92734765781794,
+        "meta_mae": 44.96690375989507
+      },
+      "delta_ovl": {
+        "baseline_mae": 21.650437172774872,
+        "lightgbm_mae": 16.057439810991617,
+        "coupled_mae": 24.451178091672706,
+        "gated_mae": 16.450414215507706,
+        "meta_mae": 16.105946500966613
+      }
+    }
+  }
+}

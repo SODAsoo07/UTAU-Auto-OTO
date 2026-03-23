@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "backend": "autofree_v1",
+  "target_schema_version": "af_v1_abs",
+  "coordinate_system": "absolute_ms",
+  "target_names": [
+    "target_offset_ms",
+    "target_cons_ms",
+    "target_cutoff_abs_ms",
+    "target_pre_ms",
+    "target_ovl_ms"
+  ],
+  "confidence_name": "target_confidence"
+}

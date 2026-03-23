@@ -1,0 +1,12 @@
+{
+  "metrics": {
+    "target_onset_delta_ms": {
+      "baseline_mae": 50.651702517706404,
+      "model_mae": 75.7146939830684
+    },
+    "target_tail_delta_ms": {
+      "baseline_mae": 70.10662254217247,
+      "model_mae": 44.57982144364905
+    }
+  }
+}

@@ -1,0 +1,177 @@
+{
+  "backend": "lightgbm",
+  "language": "japanese",
+  "format_type": "cvvc",
+  "model_version": "v1",
+  "feature_version": "v6",
+  "feature_names": [
+    "language",
+    "format_type",
+    "alias_type",
+    "alias_group",
+    "row_index_in_wav",
+    "row_ratio_in_wav",
+    "is_head_row",
+    "is_tail_row",
+    "wav_duration_ms",
+    "base_offset",
+    "base_cons",
+    "base_cutoff_abs",
+    "base_pre",
+    "base_ovl",
+    "base_cons_gap",
+    "base_cut_gap",
+    "base_ovl_ratio",
+    "curr_phone_start_ms",
+    "curr_phone_end_ms",
+    "curr_phone_len_ms",
+    "curr_vowel_start_ms",
+    "curr_vowel_end_ms",
+    "curr_vowel_len_ms",
+    "syllable_start_ms",
+    "syllable_end_ms",
+    "syllable_len_ms",
+    "prev_phone_gap_ms",
+    "next_phone_gap_ms",
+    "expected_anchor_ms",
+    "base_offset_to_expected_ms",
+    "base_pre_to_expected_ms",
+    "base_cutoff_to_next_anchor_ms",
+    "energy_mean",
+    "energy_min",
+    "energy_max",
+    "energy_slope_pre",
+    "energy_slope_post",
+    "valley_energy",
+    "valley_dist_from_cutoff_ms",
+    "db_mean",
+    "db_min",
+    "db_silence_ratio",
+    "f0_voicing_mean",
+    "f0_voicing_near_pre",
+    "zcr_mean",
+    "spectral_flux_mean",
+    "onset_class",
+    "voicing_class",
+    "is_tense",
+    "is_diphthong",
+    "coda_type",
+    "vowel_class",
+    "mora_position",
+    "bridge_type",
+    "is_nasal_or_sonorant",
+    "prev_alias_type",
+    "next_alias_type",
+    "prev_base_pre",
+    "next_base_pre",
+    "prev_base_offset",
+    "next_base_offset",
+    "prev_base_cutoff_abs",
+    "next_base_cutoff_abs",
+    "mapping_confidence",
+    "used_alias_occurrence_mapping",
+    "used_exact_vowel_fix",
+    "used_nuclei_fallback",
+    "used_alias_based_syllables",
+    "words_vs_alias_score_margin",
+    "jump_blocked_flag",
+    "mapping_reason_code",
+    "local_peak_db",
+    "local_valley_db",
+    "mel_window_energy_mean",
+    "mel_window_silence_ratio"
+  ],
+  "categorical_features": [
+    "language",
+    "format_type",
+    "alias_type",
+    "alias_group",
+    "onset_class",
+    "voicing_class",
+    "coda_type",
+    "vowel_class",
+    "mora_position",
+    "bridge_type",
+    "prev_alias_type",
+    "next_alias_type",
+    "mapping_reason_code"
+  ],
+  "targets": [
+    "delta_offset",
+    "delta_cons",
+    "delta_cutoff",
+    "delta_pre",
+    "delta_ovl"
+  ],
+  "delta_clip_limits": {
+    "delta_offset": [
+      -260.0,
+      260.0
+    ],
+    "delta_cons": [
+      -220.0,
+      220.0
+    ],
+    "delta_cutoff": [
+      -280.0,
+      280.0
+    ],
+    "delta_pre": [
+      -220.0,
+      220.0
+    ],
+    "delta_ovl": [
+      -160.0,
+      160.0
+    ]
+  },
+  "created_at": "2026-03-09T21:58:16",
+  "train_rows": 2394,
+  "voicebank_count": 6,
+  "holdout_metrics": {
+    "delta_offset": {
+      "baseline_mae": 115.33150282485873,
+      "model_mae": 85.99673130880998
+    },
+    "delta_cons": {
+      "baseline_mae": 65.7859209039548,
+      "model_mae": 45.25430635919475
+    },
+    "delta_cutoff": {
+      "baseline_mae": 106.15786835261412,
+      "model_mae": 105.98492508727033
+    },
+    "delta_pre": {
+      "baseline_mae": 48.77037288135593,
+      "model_mae": 27.749087212257876
+    },
+    "delta_ovl": {
+      "baseline_mae": 36.34904519774011,
+      "model_mae": 32.164532180533186
+    }
+  },
+  "filters": {
+    "alias_types": [],
+    "alias_groups": [],
+    "alias_family": "",
+    "require_train_keep": true,
+    "min_mapping_confidence": 0.72,
+    "exclude_nuclei_fallback": true,
+    "use_pseudo_labels": false,
+    "pseudo_weight_high": 0.7,
+    "pseudo_weight_mid": 0.4
+  },
+  "default_policy": {
+    "require_train_keep": true,
+    "min_mapping_confidence": 0.72,
+    "exclude_nuclei_fallback": true,
+    "use_pseudo_labels": false
+  },
+  "selector_default_enabled": false,
+  "weight_summary": {
+    "min": 1.0,
+    "max": 1.0,
+    "mean": 1.0,
+    "pseudo_rows": 0
+  }
+}

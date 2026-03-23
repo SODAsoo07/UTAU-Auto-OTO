@@ -1,0 +1,182 @@
+tree
+version=v4
+num_class=1
+num_tree_per_iteration=1
+label_index=0
+max_feature_idx=110
+objective=regression_l1
+feature_names=language format_type alias_type alias_group row_index_in_wav row_ratio_in_wav file_row_count file_cv_count file_vc_count file_vv_count file_vcv_count file_br_count file_mono_count file_cv_ratio file_vc_ratio file_vc_cv_ratio file_cv_vc_balance file_mean_energy file_voiced_ratio file_mean_syllable_dur_ms is_head_row is_tail_row wav_duration_ms base_offset base_cons base_cutoff_abs base_pre base_ovl base_cons_gap base_cut_gap base_ovl_ratio curr_phone_start_ms curr_phone_end_ms curr_phone_len_ms curr_vowel_start_ms curr_vowel_end_ms curr_vowel_len_ms syllable_start_ms syllable_end_ms syllable_len_ms prev_phone_gap_ms next_phone_gap_ms expected_anchor_ms base_offset_to_expected_ms base_pre_to_expected_ms base_cutoff_to_next_anchor_ms energy_mean energy_min energy_max energy_slope_pre energy_slope_post valley_energy valley_dist_from_cutoff_ms db_mean db_min db_silence_ratio f0_voicing_mean f0_voicing_near_pre zcr_mean spectral_flux_mean onset_class voicing_class is_tense is_diphthong coda_type vowel_class mora_position bridge_type is_nasal_or_sonorant prev_alias_type next_alias_type prev_base_pre next_base_pre prev_base_offset next_base_offset prev_base_cutoff_abs next_base_cutoff_abs mapping_confidence used_alias_occurrence_mapping used_exact_vowel_fix used_nuclei_fallback used_alias_based_syllables words_vs_alias_score_margin jump_blocked_flag mapping_reason_code local_peak_db local_valley_db mel_window_energy_mean mel_window_silence_ratio mel_voiced_formant_ratio mel_silence_sparse_ratio mel_unvoiced_diffuse_ratio mel_breath_like_ratio blank_span_confidence mel_offset_candidate_ms mel_cutoff_candidate_ms mel_voiced_onset_ms mel_vowel_nucleus_start_ms mel_vowel_nucleus_end_ms mel_voiced_onset_to_pre_ms mel_safety_clamped onset_patch_energy_mean onset_patch_voiced_ratio onset_patch_unvoiced_ratio tail_patch_energy_mean tail_patch_silence_ratio syllable_blank_confidence syllable_mel_voiced_conf syllable_mel_silence_conf syllable_mel_unvoiced_conf syllable_mel_breath_conf
+feature_infos=none none -1:5:2:1:6:4:3 -1:9:4:3:10:2:1:8:7:5:6 [0:17] [0:1] [1:20] [0:5] [0:3] [0:7] [0:14] none [0:1] [0:1] [0:1] [0.1666666666666666:4] [-1:1] [0.21846002526954189:0.77510847639437497] [0.21951219512195119:0.99656357388316164] [10.000000000000009:5570] [0:1] [0:1] [2543.310657596372:8756.8253968253975] [0:5135.96] [20.859999999999999:467.25999999999999] [185.27000000000001:5479.4099999999999] [0:367.75] [0:353.83999999999997] [14.619999999999999:296.69999999999999] [8:375.47000000000003] [0:0.9855670103092784] [0:5310] [120:6440] [9.9999999999997726:5570] [0:5310] [0:6440] [0:3390] [0:4720] [160:6530] [10:5990] none [0:1070] [0:5310] [-368.13000000000011:38.419999999999959] [-36.46999999999997:393.07000000000016] [-2052.46:3908.3699999999999] [0.043894361865435799:1] [0:1] [0.13238142241569439:1] [-0.80076537104332823:1] [-0.99450801292944624:0.99746011418302161] [0:1] [0.00047619047609249998:515.25943310657613] [-60.602716875770909:-7.5369323348009294] [-96.774007988542024:-8.9145289556942267] [0:0.56716417910447758] [0.00030202076535730001:1] [0:1] [0.0062375956903884004:0.43804933371136939] [0:0.080245211960530596] -1:1:3:2:0 -1:1:2:0 [0:1] [0:1] -1:2:4:3:0 -1:1:12:16:14:2:18:11:8:15:7:17:3:13:6:10:9:4:0 -1:0:1:2 -1:0:2:3 [0:1] -1:0:5:2:6:1:4 -1:4:0:5:1:3 [0:2303.5599999999999] [0:4178.9099999999999] [0:5050] [0:6378.9700000000003] [0:5387.1400000000003] [0:6642.6599999999999] [0.75000820435742854:1] none [0:1] [0:1] none [8.9279999999999973:5956.5320000000002] none none [-60.602716875770909:-7.5369323348009294] [-96.774007988542024:-8.9145289556942267] [0.043894361865435799:1] [0:0.56716417910447758] [0:1] [0:0.53731343283582089] [0:0.7142857142857143] [0:0.20754716981132071] [0:0.45597014925373131] [0:5266.0045351473927] [103.77324263038548:5479.4099999999999] [0:5278.0045351473927] [0:5278.0045351473927] [0:5497.50566893424] [-79.992675736961246:79.992154195011381] none [0:1] [0:1] [0:1] [2.2064654064274944e-05:1] [0:1] [0:0.79999999999999993] [0:1] [0:1] [0:1] none
+tree_sizes=3289
+
+Tree=0
+num_leaves=31
+num_cat=1
+split_feature=37 6 37 24 38 28 7 30 43 37 72 60 8 10 56 45 6 25 62 56 44 39 24 72 101 27 58 30 62 44
+split_gain=995.076 331.226 110.722 105.352 96.1701 96.8761 79.2803 57.2015 50.0867 50.074 40.9369 35.9762 29.4511 28.6022 27.8691 23.9351 20.2977 19.5371 19.4265 19.2656 18.5257 16.4707 21.1061 16.2127 16.2021 15.8469 15.1283 14.8645 14.5784 20.7663
+threshold=255.00000000000003 4.5000000000000009 875.00000000000011 350.39500000000004 3995.0000000000005 85.095000000000013 1.5000000000000002 0.66991044356615215 -116.96500000000002 525.00000000000011 206.51500000000001 0 1.0000000180025095e-35 4.5000000000000009 0.45378875021474202 1.0000000180025095e-35 8.5000000000000018 2533.4500000000003 1.0000000180025095e-35 0.99999717154530343 141.66500000000011 5171.6100000000015 169.53500000000005 332.62000000000006 0.63359677441618834 155.30000000000004 0.034024857124327908 0.50528409884126779 1.0000000180025095e-35 6.210000000000151
+decision_type=2 2 2 2 2 2 2 2 2 2 2 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+left_child=3 4 9 6 8 10 13 -7 -2 14 -6 28 15 -1 -3 -13 18 -5 23 -9 -10 -16 -23 -15 -20 27 -12 -4 29 -11
+right_child=1 2 25 17 5 7 -8 19 20 11 26 12 -14 16 21 -17 -18 -19 24 -21 -22 22 -24 -25 -26 -27 -28 -29 -30 -31
+leaf_value=54.183000564575195 48.688500785827635 48.821000862121579 48.57850093841553 44.750500869750979 50.567500686645509 52.588000869750978 45.519500875473021 44.764500904083249 45.435500860214233 45.109500885009766 47.686000823974609 47.064000892639157 44.498500823974609 51.320500946044923 43.997500801086424 49.391500854492186 49.489500808715817 48.884000778198242 48.582500839233397 49.764500808715823 48.210000801086423 48.389500808715823 44.399000835418704 48.813000869750979 49.594001007080081 44.491000843048099 45.610500869154933 51.99750099182129 44.838500881195067 47.254500961303712
+leaf_weight=431.77799107134342 70.898516863584518 25.056312382221222 81.625353276729584 56.530806168913841 47.325993433594704 326.8198320120573 60.315139472484589 32.777118250727654 129.59721280634403 186.52630221843719 25.451174110174179 106.06915648281574 56.775888696312904 569.4013469517231 816.96061229705811 98.754890128970146 270.30196312069893 21.294568628072739 100.05857726931572 35.68560878932476 26.298461779952049 33.535139963030815 119.79806253314018 60.755980014801025 193.58599352836609 15.676069989800451 67.858512386679649 55.809106156229973 209.66667960584164 127.7549939006567
+leaf_count=643 98 40 207 127 90 533 98 67 165 283 54 176 99 892 1187 164 385 50 136 85 70 81 226 93 246 36 96 148 274 218
+internal_value=48.0397 48.0206 48.0096 48.0689 48.0486 48.0601 48.0716 48.0728 48.0213 48.0061 48.0245 48.0156 48.0319 48.0737 47.9987 48.0405 48.0697 48.0121 48.0732 48.0312 48.0054 47.9973 48.0124 48.0781 48.0626 48.0504 48.0053 48.0559 48.0082 48.0144
+internal_weight=4460.74 2696.72 1934.01 1764.02 762.712 535.918 1686.2 395.283 226.794 1780.9 140.636 785.548 261.6 1625.88 995.35 204.824 1194.1 77.8254 923.802 68.4627 155.896 970.294 153.333 630.157 293.645 153.111 93.3097 137.434 523.948 314.281
+internal_count=7067 4397 3139 2670 1258 925 2493 685 333 2748 240 1214 439 2395 1534 340 1752 177 1367 152 235 1494 307 985 382 391 150 355 775 501
+cat_boundaries=0 1
+cat_threshold=2
+is_linear=0
+shrinkage=1
+
+
+end of trees
+
+feature_importances:
+syllable_start_ms=3
+file_row_count=2
+base_cons=2
+base_ovl_ratio=2
+base_pre_to_expected_ms=2
+f0_voicing_mean=2
+is_tense=2
+next_base_pre=2
+file_cv_count=1
+file_vc_count=1
+file_vcv_count=1
+base_cutoff_abs=1
+base_ovl=1
+base_cons_gap=1
+syllable_end_ms=1
+syllable_len_ms=1
+base_offset_to_expected_ms=1
+base_cutoff_to_next_anchor_ms=1
+zcr_mean=1
+onset_class=1
+onset_patch_energy_mean=1
+
+parameters:
+[boosting: gbdt]
+[objective: regression_l1]
+[metric: l1]
+[tree_learner: serial]
+[device_type: cpu]
+[data_sample_strategy: bagging]
+[data: ]
+[valid: ]
+[num_iterations: 500]
+[learning_rate: 0.05]
+[num_leaves: 31]
+[num_threads: 0]
+[seed: 0]
+[deterministic: 0]
+[force_col_wise: 0]
+[force_row_wise: 0]
+[histogram_pool_size: -1]
+[max_depth: -1]
+[min_data_in_leaf: 40]
+[min_sum_hessian_in_leaf: 0.001]
+[bagging_fraction: 0.85]
+[pos_bagging_fraction: 1]
+[neg_bagging_fraction: 1]
+[bagging_freq: 1]
+[bagging_seed: 3]
+[bagging_by_query: 0]
+[feature_fraction: 0.85]
+[feature_fraction_bynode: 1]
+[feature_fraction_seed: 2]
+[extra_trees: 0]
+[extra_seed: 6]
+[early_stopping_round: 0]
+[early_stopping_min_delta: 0]
+[first_metric_only: 0]
+[max_delta_step: 0]
+[lambda_l1: 0]
+[lambda_l2: 0]
+[linear_lambda: 0]
+[min_gain_to_split: 0]
+[drop_rate: 0.1]
+[max_drop: 50]
+[skip_drop: 0.5]
+[xgboost_dart_mode: 0]
+[uniform_drop: 0]
+[drop_seed: 4]
+[top_rate: 0.2]
+[other_rate: 0.1]
+[min_data_per_group: 100]
+[max_cat_threshold: 32]
+[cat_l2: 10]
+[cat_smooth: 10]
+[max_cat_to_onehot: 4]
+[top_k: 20]
+[monotone_constraints: ]
+[monotone_constraints_method: basic]
+[monotone_penalty: 0]
+[feature_contri: ]
+[forcedsplits_filename: ]
+[refit_decay_rate: 0.9]
+[cegb_tradeoff: 1]
+[cegb_penalty_split: 0]
+[cegb_penalty_feature_lazy: ]
+[cegb_penalty_feature_coupled: ]
+[path_smooth: 0]
+[interaction_constraints: ]
+[verbosity: -1]
+[saved_feature_importance_type: 0]
+[use_quantized_grad: 0]
+[num_grad_quant_bins: 4]
+[quant_train_renew_leaf: 0]
+[stochastic_rounding: 1]
+[linear_tree: 0]
+[max_bin: 255]
+[max_bin_by_feature: ]
+[min_data_in_bin: 3]
+[bin_construct_sample_cnt: 200000]
+[data_random_seed: 1]
+[is_enable_sparse: 1]
+[enable_bundle: 1]
+[use_missing: 1]
+[zero_as_missing: 0]
+[feature_pre_filter: 1]
+[pre_partition: 0]
+[two_round: 0]
+[header: 0]
+[label_column: ]
+[weight_column: ]
+[group_column: ]
+[ignore_column: ]
+[categorical_feature: 0,1,2,3,60,61,64,65,66,67,69,70,84]
+[forcedbins_filename: ]
+[precise_float_parser: 0]
+[parser_config_file: ]
+[objective_seed: 5]
+[num_class: 1]
+[is_unbalance: 0]
+[scale_pos_weight: 1]
+[sigmoid: 1]
+[boost_from_average: 1]
+[reg_sqrt: 0]
+[alpha: 0.9]
+[fair_c: 1]
+[poisson_max_delta_step: 0.7]
+[tweedie_variance_power: 1.5]
+[lambdarank_truncation_level: 30]
+[lambdarank_norm: 1]
+[label_gain: ]
+[lambdarank_position_bias_regularization: 0]
+[eval_at: ]
+[multi_error_top_k: 1]
+[auc_mu_weights: ]
+[num_machines: 1]
+[local_listen_port: 12400]
+[time_out: 120]
+[machine_list_filename: ]
+[machines: ]
+[gpu_platform_id: -1]
+[gpu_device_id: -1]
+[gpu_use_dp: 0]
+[num_gpu: 1]
+
+end of parameters
+
+pandas_categorical:[["korean"], ["vcv"], ["br", "cv", "cv_head", "mono", "vc", "vcv", "vv"], ["br_standalone", "cv", "cv_glide", "cv_head", "cv_head_glide", "mono", "vc_other", "vc_sonorant", "vc_stop", "vcv", "vv"], ["other", "plosive", "sibilant", "sonorant"], ["unknown", "voiced", "voiceless"], ["liquid", "nasal", "none", "other", "stop"], ["", "a", "e", "eo", "eu", "eui", "i", "o", "u", "ui", "wa", "we", "weo", "wi", "ya", "ye", "yeo", "yo", "yu"], ["head", "mid", "tail"], ["", "vc", "vcv", "vv"], ["", "cv", "cv_head", "mono", "vc", "vcv", "vv"], ["", "cv", "mono", "vc", "vcv", "vv"], ["unknown"]]

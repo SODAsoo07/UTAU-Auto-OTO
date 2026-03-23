@@ -1,0 +1,159 @@
+tree
+version=v4
+num_class=1
+num_tree_per_iteration=1
+label_index=0
+max_feature_idx=30
+objective=binary sigmoid:1
+feature_names=language format_type voicebank_id wav_norm alias_norm occurrence_index row_index_in_wav source_mode source_detail token_source source_confidence onset_ms voiced_onset_ms nucleus_start_ms nucleus_end_ms nucleus_span_ms tail_ms tail_margin_ms blank_confidence voiced_confidence unvoiced_confidence boundary_confidence mel_window_energy_mean mel_window_silence_ratio mel_window_voiced_ratio prev_gap_ms next_gap_ms neighbor_boundary_gap_ms file_row_count file_mean_energy file_voiced_ratio
+feature_infos=none none -1:3:4:2:5 -1:39:44:30:48:111:28:4:80:29:74:5:122:128:129:131:132:133:136:137:138:139:140:143:144:145:146:147:149:150:151:152:153:154:155:156:158:159:160:161:162:163:164:165:166:167:168:169:170:171:172:173:174:175:176:177:178:179:180:181:182:183:184:185:186:187:188:189:190:191:192:193:194:195:196:197:198:199:200:201:202:203:204:205:206:207:208:209:210:211:212:213:214:215:216:217:218:219:220:221:222:223:224:225:226:227:228:229:230:231:232:233:234:235:236:237:238:239:240:241:242:243:244:245:246:247:248:249:250:251:252:253:254:255:256:257:258:259:260:261:262:263:264:265:266:6:120:127:141:142:148:157:267 -1:44:45:47:49:50:24:26:43:42:46:52:133:23:1:92:85:122:144:17:25:142:27:103:104:143:28:58:76:98:106:121:139:2:3:4:5:6:7:8:9:10:11:12:13:14:15:16:18:19:20:30:31:33:38:39:41:48:51:53:54:57:59:60:61:67:68:71:72:73:75:77:78:79:81:82:83:84:86:87:88:90:93:94:95:96:97:99:101:102:105:107:109:110:111:112:113:114:115:117:119:123:124:129:145:146:147:149:0:29:32:34:35:36:40:55:56:62:63:64:65:66:69:70:74:80:89:100:108:116:118:120:125:126:127:128:130:140:141:148:150:151:37:91:132 none [0:4] none none none none [12.473401360544219:2984.7589198534943] [12.473401360544219:2984.7589198534943] [12.473401360544219:2984.7589198534943] [129.27317814155273:3192.1027628778425] [18.244634177222679:995.85953167517005] [206.47742006802719:3236.7731874516458] [0.93728124999995543:430.0634736612725] [0.016719453892668101:1] [0.22202173737943859:0.95643023667800442] [0.029992999999999902:0.74688587401849404] [0.85999999999999999:0.93501049999999997] [0.00018133700239350001:0.13354725873472381] [0.032925170068027199:1] [0:0.8936507936507937] [-190.57484189124531:726.86137773221583] [-989.84726105442178:887.33646623289633] [0:989.84726105442178] [1:6] [0.0036462827703251:0.1041698393171839] [0:0.65417179802955661]
+tree_sizes=242
+
+Tree=0
+num_leaves=1
+num_cat=0
+split_feature=
+split_gain=
+threshold=
+decision_type=
+left_child=
+right_child=
+leaf_value=34.539575992340879
+leaf_weight=
+leaf_count=1531
+internal_value=
+internal_weight=
+internal_count=
+is_linear=0
+shrinkage=1
+
+
+end of trees
+
+feature_importances:
+
+parameters:
+[boosting: gbdt]
+[objective: binary]
+[metric: binary_logloss]
+[tree_learner: serial]
+[device_type: cpu]
+[data_sample_strategy: bagging]
+[data: ]
+[valid: ]
+[num_iterations: 225]
+[learning_rate: 0.05]
+[num_leaves: 31]
+[num_threads: 0]
+[seed: 0]
+[deterministic: 0]
+[force_col_wise: 0]
+[force_row_wise: 0]
+[histogram_pool_size: -1]
+[max_depth: -1]
+[min_data_in_leaf: 24]
+[min_sum_hessian_in_leaf: 0.001]
+[bagging_fraction: 0.85]
+[pos_bagging_fraction: 1]
+[neg_bagging_fraction: 1]
+[bagging_freq: 1]
+[bagging_seed: 3]
+[bagging_by_query: 0]
+[feature_fraction: 0.9]
+[feature_fraction_bynode: 1]
+[feature_fraction_seed: 2]
+[extra_trees: 0]
+[extra_seed: 6]
+[early_stopping_round: 0]
+[early_stopping_min_delta: 0]
+[first_metric_only: 0]
+[max_delta_step: 0]
+[lambda_l1: 0]
+[lambda_l2: 0]
+[linear_lambda: 0]
+[min_gain_to_split: 0]
+[drop_rate: 0.1]
+[max_drop: 50]
+[skip_drop: 0.5]
+[xgboost_dart_mode: 0]
+[uniform_drop: 0]
+[drop_seed: 4]
+[top_rate: 0.2]
+[other_rate: 0.1]
+[min_data_per_group: 100]
+[max_cat_threshold: 32]
+[cat_l2: 10]
+[cat_smooth: 10]
+[max_cat_to_onehot: 4]
+[top_k: 20]
+[monotone_constraints: ]
+[monotone_constraints_method: basic]
+[monotone_penalty: 0]
+[feature_contri: ]
+[forcedsplits_filename: ]
+[refit_decay_rate: 0.9]
+[cegb_tradeoff: 1]
+[cegb_penalty_split: 0]
+[cegb_penalty_feature_lazy: ]
+[cegb_penalty_feature_coupled: ]
+[path_smooth: 0]
+[interaction_constraints: ]
+[verbosity: -1]
+[saved_feature_importance_type: 0]
+[use_quantized_grad: 0]
+[num_grad_quant_bins: 4]
+[quant_train_renew_leaf: 0]
+[stochastic_rounding: 1]
+[linear_tree: 0]
+[max_bin: 255]
+[max_bin_by_feature: ]
+[min_data_in_bin: 3]
+[bin_construct_sample_cnt: 200000]
+[data_random_seed: 1]
+[is_enable_sparse: 1]
+[enable_bundle: 1]
+[use_missing: 1]
+[zero_as_missing: 0]
+[feature_pre_filter: 1]
+[pre_partition: 0]
+[two_round: 0]
+[header: 0]
+[label_column: ]
+[weight_column: ]
+[group_column: ]
+[ignore_column: ]
+[categorical_feature: 0,1,2,3,4,7,8,9]
+[forcedbins_filename: ]
+[precise_float_parser: 0]
+[parser_config_file: ]
+[objective_seed: 5]
+[num_class: 1]
+[is_unbalance: 0]
+[scale_pos_weight: 1]
+[sigmoid: 1]
+[boost_from_average: 1]
+[reg_sqrt: 0]
+[alpha: 0.9]
+[fair_c: 1]
+[poisson_max_delta_step: 0.7]
+[tweedie_variance_power: 1.5]
+[lambdarank_truncation_level: 30]
+[lambdarank_norm: 1]
+[label_gain: ]
+[lambdarank_position_bias_regularization: 0]
+[eval_at: ]
+[multi_error_top_k: 1]
+[auc_mu_weights: ]
+[num_machines: 1]
+[local_listen_port: 12400]
+[time_out: 120]
+[machine_list_filename: ]
+[machines: ]
+[gpu_platform_id: -1]
+[gpu_device_id: -1]
+[gpu_use_dp: 0]
+[num_gpu: 1]
+
+end of parameters
+
+pandas_categorical:[["japanese"], ["cv"], ["Anonymous VB - JP CV", "Darae JP_CV", "SOLTiE JP_CV", "Tsurugi_multipitch", "infecho jp rentan", "ryosuke_rentan"], ["a", "akakikukeko", "amyamyumyo", "apyapyupyo", "ar", "ararirurero", "atatituteto", "ba", "be", "bi", "bo", "bu", "bya", "bye", "byo", "byu", "cha", "che", "chi", "cho", "chu", "da", "de", "di", "do", "du", "dyu", "e", "er", "fafifefo", "fafifufefo", "fu", "ge", "gi", "gu", "gya", "gye", "gyu", "ha", "hahihuheho", "he", "hi", "ho", "hya", "hyahyuhyo", "hye", "hyu", "i", "ir", "ja", "je", "ju", "ka", "ke", "ki", "ko", "ku", "kya", "kye", "kyo", "kyu", "ma", "me", "mi", "mu", "mya", "mye", "myo", "myu", "n", "na", "ne", "ni", "no", "nr", "nu", "nya", "nye", "nyu", "o", "or", "pa", "pe", "pi", "po", "pu", "pya", "pye", "pyu", "ra", "re", "ri", "ro", "ru", "rya", "ryo", "ryu", "sa", "se", "sha", "she", "shi", "shu", "so", "ta", "te", "ti", "to", "tsu", "tyu", "u", "ur", "va", "ve", "vi", "vu", "wa", "wawa", "wo", "ya", "yaya", "ye", "yeye", "yo", "yu", "za", "zi", "\u3042", "\u3044", "\u3044\u3047", "\u3046", "\u3046\u3043", "\u3046\u3047", "\u3046\u3049", "\u3048", "\u304a", "\u304b", "\u304c", "\u304d", "\u304d\u3047", "\u304d\u3083", "\u304d\u3085", "\u304d\u3087", "\u304e", "\u304e\u3047", "\u304e\u3083", "\u304e\u3085", "\u304e\u3087", "\u304f", "\u304f\u3041", "\u304f\u3043", "\u304f\u3047", "\u304f\u3049", "\u3050", "\u3050\u3041", "\u3050\u3043", "\u3050\u3047", "\u3050\u3049", "\u3051", "\u3052", "\u3053", "\u3054", "\u3055", "\u3056", "\u3057", "\u3057\u3047", "\u3057\u3083", "\u3057\u3085", "\u3057\u3087", "\u3058", "\u3058\u3047", "\u3058\u3083", "\u3058\u3085", "\u3058\u3087", "\u3059", "\u3059\u3043", "\u305a", "\u305a\u3043", "\u305b", "\u305c", "\u305d", "\u305e", "\u305f", "\u3060", "\u3061", "\u3061\u3047", "\u3061\u3083", "\u3061\u3085", "\u3061\u3087", "\u3064", "\u3064\u3041", "\u3064\u3043", "\u3064\u3047", "\u3064\u3049", "\u3066", "\u3066\u3043", "\u3066\u3085", "\u3067", "\u3067\u3043", "\u3067\u3085", "\u3068", "\u3068\u3045", "\u3069", "\u3069\u3045", "\u306a", "\u306b", "\u306b\u3047", "\u306b\u3083", "\u306b\u3085", "\u306b\u3087", "\u306c", "\u306d", "\u306e", "\u306f", "\u3070", "\u3071", "\u3072", "\u3072\u3047", "\u3072\u3083", "\u3072\u3085", "\u3072\u3087", "\u3073", "\u3073\u3047", "\u3073\u3083", "\u3073\u3085", "\u3073\u3087", "\u3074", "\u3074\u3047", "\u3074\u3083", "\u3074\u3085", "\u3074\u3087", "\u3075", "\u3075\u3041", "\u3075\u3043", "\u3075\u3047", "\u3075\u3049", "\u3076", "\u3077", "\u3078", "\u3079", "\u307a", "\u307b", "\u307c", "\u307d", "\u307e", "\u307f", "\u307f\u3047", "\u307f\u3083", "\u307f\u3085", "\u307f\u3087", "\u3080", "\u3081", "\u3082", "\u3084", "\u3086", "\u3088", "\u3089", "\u308a", "\u308a\u3047", "\u308a\u3083", "\u308a\u3085", "\u308a\u3087", "\u308b", "\u308c", "\u308d", "\u308f", "\u3092", "\u3093", "\u3094\u3041", "\u3094\u3043", "\u3094\u3047", "\u3094\u3049"], ["a", "ar", "ba", "be", "bi", "bo", "bu", "bya", "bye", "byo", "byu", "cha", "che", "chi", "cho", "chu", "da", "de", "di", "do", "du", "dyu", "e", "er", "fa", "fe", "fi", "fo", "fu", "ga", "ge", "gi", "go", "gu", "gua", "gue", "gui", "guo", "gya", "gye", "gyo", "gyu", "ha", "he", "hi", "ho", "hu", "hya", "hye", "hyo", "hyu", "i", "ir", "ja", "je", "ji", "jo", "ju", "ka", "ke", "ki", "ko", "ku", "kua", "kue", "kui", "kuo", "kya", "kye", "kyo", "kyu", "ma", "me", "mi", "mo", "mu", "mya", "mye", "myo", "myu", "n", "na", "ne", "ni", "no", "nr", "nu", "nya", "nye", "nyo", "nyu", "o", "or", "pa", "pe", "pi", "po", "pu", "pya", "pye", "pyo", "pyu", "ra", "re", "ri", "ro", "ru", "rya", "rye", "ryo", "ryu", "sa", "se", "sha", "she", "shi", "sho", "shu", "si", "so", "su", "ta", "te", "ti", "to", "tsa", "tse", "tsi", "tso", "tsu", "tu", "tyu", "u", "ur", "va", "ve", "vi", "vo", "vu", "wa", "we", "wi", "wo", "ya", "ye", "yo", "yu", "za", "ze", "zi", "zo", "zu"], ["textgrid"], ["textgrid+audio_fused"], ["filename"]]

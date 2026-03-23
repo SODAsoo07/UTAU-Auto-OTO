@@ -1,0 +1,325 @@
+{
+  "backend": "coupled_nn_v2_rawmel",
+  "language": "korean",
+  "format_type": "cv",
+  "model_version": "v2",
+  "feature_version": "v12",
+  "feature_names": [
+    "language",
+    "format_type",
+    "alias_type",
+    "alias_group",
+    "row_index_in_wav",
+    "row_ratio_in_wav",
+    "file_row_count",
+    "file_cv_count",
+    "file_vc_count",
+    "file_vv_count",
+    "file_vcv_count",
+    "file_br_count",
+    "file_mono_count",
+    "file_cv_ratio",
+    "file_vc_ratio",
+    "file_vc_cv_ratio",
+    "file_cv_vc_balance",
+    "file_mean_energy",
+    "file_voiced_ratio",
+    "file_mean_syllable_dur_ms",
+    "is_head_row",
+    "is_tail_row",
+    "wav_duration_ms",
+    "base_offset",
+    "base_cons",
+    "base_cutoff_abs",
+    "base_pre",
+    "base_ovl",
+    "base_cons_gap",
+    "base_cut_gap",
+    "base_ovl_ratio",
+    "curr_phone_start_ms",
+    "curr_phone_end_ms",
+    "curr_phone_len_ms",
+    "curr_vowel_start_ms",
+    "curr_vowel_end_ms",
+    "curr_vowel_len_ms",
+    "syllable_start_ms",
+    "syllable_end_ms",
+    "syllable_len_ms",
+    "prev_phone_gap_ms",
+    "next_phone_gap_ms",
+    "expected_anchor_ms",
+    "base_offset_to_expected_ms",
+    "base_pre_to_expected_ms",
+    "base_cutoff_to_next_anchor_ms",
+    "energy_mean",
+    "energy_min",
+    "energy_max",
+    "energy_slope_pre",
+    "energy_slope_post",
+    "valley_energy",
+    "valley_dist_from_cutoff_ms",
+    "db_mean",
+    "db_min",
+    "db_silence_ratio",
+    "f0_voicing_mean",
+    "f0_voicing_near_pre",
+    "zcr_mean",
+    "spectral_flux_mean",
+    "onset_class",
+    "voicing_class",
+    "is_tense",
+    "is_diphthong",
+    "coda_type",
+    "vowel_class",
+    "mora_position",
+    "bridge_type",
+    "is_nasal_or_sonorant",
+    "prev_alias_type",
+    "next_alias_type",
+    "prev_base_pre",
+    "next_base_pre",
+    "prev_base_offset",
+    "next_base_offset",
+    "prev_base_cutoff_abs",
+    "next_base_cutoff_abs",
+    "mapping_confidence",
+    "used_alias_occurrence_mapping",
+    "used_exact_vowel_fix",
+    "used_nuclei_fallback",
+    "used_alias_based_syllables",
+    "words_vs_alias_score_margin",
+    "jump_blocked_flag",
+    "mapping_reason_code",
+    "local_peak_db",
+    "local_valley_db",
+    "mel_window_energy_mean",
+    "mel_window_silence_ratio",
+    "mel_voiced_formant_ratio",
+    "mel_silence_sparse_ratio",
+    "mel_unvoiced_diffuse_ratio",
+    "mel_breath_like_ratio",
+    "blank_span_confidence",
+    "mel_offset_candidate_ms",
+    "mel_cutoff_candidate_ms",
+    "mel_voiced_onset_ms",
+    "mel_vowel_nucleus_start_ms",
+    "mel_vowel_nucleus_end_ms",
+    "mel_voiced_onset_to_pre_ms",
+    "mel_safety_clamped",
+    "onset_patch_energy_mean",
+    "onset_patch_voiced_ratio",
+    "onset_patch_unvoiced_ratio",
+    "tail_patch_energy_mean",
+    "tail_patch_silence_ratio",
+    "syllable_blank_confidence",
+    "syllable_mel_voiced_conf",
+    "syllable_mel_silence_conf",
+    "syllable_mel_unvoiced_conf",
+    "syllable_mel_breath_conf"
+  ],
+  "categorical_features": [
+    "language",
+    "format_type",
+    "alias_type",
+    "alias_group",
+    "onset_class",
+    "voicing_class",
+    "coda_type",
+    "vowel_class",
+    "mora_position",
+    "bridge_type",
+    "prev_alias_type",
+    "next_alias_type",
+    "mapping_reason_code"
+  ],
+  "phoneme_aware_conditioning": {
+    "enabled": true,
+    "categorical_bucket_sizes": [
+      8,
+      16,
+      16,
+      24,
+      32,
+      16,
+      24,
+      32,
+      16,
+      24,
+      16,
+      16,
+      32
+    ]
+  },
+  "targets": [
+    "delta_offset",
+    "delta_cons",
+    "delta_cutoff",
+    "delta_pre",
+    "delta_ovl"
+  ],
+  "anchor_targets": [
+    "delta_offset",
+    "delta_pre",
+    "delta_cutoff"
+  ],
+  "delta_targets": [
+    "delta_cons",
+    "delta_ovl"
+  ],
+  "head_mode": "split",
+  "aux_targets": [
+    "aux_vowel_start_rel",
+    "aux_vowel_end_rel",
+    "aux_next_onset_rel"
+  ],
+  "mel_patch_spec": {
+    "mel_bins": 80,
+    "frame_hop_ms": 5.0,
+    "win_ms": 25.0,
+    "onset_window_ms": [
+      -80.0,
+      160.0
+    ],
+    "tail_window_ms": [
+      -160.0,
+      80.0
+    ],
+    "normalization": "per_patch_log_mel_standardize",
+    "onset_anchor_policy": "mel_offset_then_base_offset",
+    "tail_anchor_policy": "mel_cutoff_then_base_cutoff_abs",
+    "padding_policy": "zero",
+    "source_feature_version": "v12"
+  },
+  "mel_patch_spec_hash": "6d95203e",
+  "mel_bins": 80,
+  "onset_frames": 49,
+  "tail_frames": 49,
+  "min_confidence": 0.65,
+  "vc_cv_pair_weight": 0.06,
+  "vc_cv_pair_warmup_epochs": 8,
+  "optimizer": "adamw",
+  "learning_rate": 0.0007,
+  "weight_decay": 0.0001,
+  "target_weights": [
+    1.12,
+    1.05,
+    1.02,
+    1.08,
+    0.9
+  ],
+  "target_loss": {
+    "kinds": [
+      "huber",
+      "l1",
+      "huber",
+      "l1",
+      "l1"
+    ],
+    "huber_deltas": [
+      30.0,
+      18.0,
+      38.0,
+      14.0,
+      12.0
+    ]
+  },
+  "boundary_aux": {
+    "weight": 0.18,
+    "consistency_weight": 0.08,
+    "target_weights": [
+      1.0,
+      1.0,
+      1.45
+    ],
+    "loss_kinds": [
+      "huber",
+      "huber",
+      "huber"
+    ],
+    "huber_deltas": [
+      18.0,
+      18.0,
+      26.0
+    ]
+  },
+  "constraint_loss": {
+    "penalty_weight": 0.25,
+    "align_weight": 0.12,
+    "conf_weight": 0.05,
+    "cons_margin": 10.0,
+    "cut_margin": 10.0
+  },
+  "grad_clip": 1.2,
+  "lr_scheduler": {
+    "type": "ReduceLROnPlateau",
+    "factor": 0.6,
+    "patience": 3,
+    "min_lr": 2e-05
+  },
+  "risk_weighting": {
+    "blank_threshold": 0.55,
+    "mapping_conf_threshold": 0.64,
+    "boost_blank": 0.9,
+    "boost_jump": 1.15,
+    "boost_low_conf": 1.08
+  },
+  "hard_example_mining": {
+    "strength": 0.55,
+    "mean_boost": 1.1426303386688232
+  },
+  "sampler": {
+    "mode": "group_balanced",
+    "group_column": "voicebank_id"
+  },
+  "vc_cv_pair_max_gap": 5,
+  "vc_cv_pairs_total": 128,
+  "vc_cv_pairs_train": 66,
+  "vc_cv_pairs_valid": 62,
+  "fallback_order": [
+    "coupled_nn_v2_rawmel",
+    "coupled_nn_v1",
+    "lightgbm",
+    "base"
+  ],
+  "created_at": "2026-03-16T18:57:16",
+  "train_rows": 3912,
+  "voicebank_count": 683,
+  "holdout_metrics": {
+    "delta_offset": {
+      "baseline_mae": 53.42198181152344,
+      "model_mae": 41.945186614990234
+    },
+    "delta_cons": {
+      "baseline_mae": 37.32439041137695,
+      "model_mae": 25.137859344482422
+    },
+    "delta_cutoff": {
+      "baseline_mae": 106.51594543457031,
+      "model_mae": 66.74756622314453
+    },
+    "delta_pre": {
+      "baseline_mae": 28.84811019897461,
+      "model_mae": 21.877941131591797
+    },
+    "delta_ovl": {
+      "baseline_mae": 25.082996368408203,
+      "model_mae": 18.543912887573242
+    }
+  },
+  "aux_holdout_metrics": {
+    "aux_vowel_start_rel": {
+      "rows": 686,
+      "model_mae": 45.83003234863281
+    },
+    "aux_vowel_end_rel": {
+      "rows": 686,
+      "model_mae": 54.97246170043945
+    },
+    "aux_next_onset_rel": {
+      "rows": 101,
+      "model_mae": 218.3437957763672
+    }
+  },
+  "holdout_confidence_mean": 0.625236988067627,
+  "device_used": "cuda"
+}

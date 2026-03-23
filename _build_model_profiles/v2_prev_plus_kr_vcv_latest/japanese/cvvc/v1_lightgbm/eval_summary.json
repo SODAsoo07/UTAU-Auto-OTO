@@ -1,0 +1,31 @@
+{
+  "targets": {
+    "delta_offset": ".\\ML_models\\japanese\\cvvc\\v1_lightgbm\\model_offset.txt",
+    "delta_cons": ".\\ML_models\\japanese\\cvvc\\v1_lightgbm\\model_cons.txt",
+    "delta_cutoff": ".\\ML_models\\japanese\\cvvc\\v1_lightgbm\\model_cutoff.txt",
+    "delta_pre": ".\\ML_models\\japanese\\cvvc\\v1_lightgbm\\model_pre.txt",
+    "delta_ovl": ".\\ML_models\\japanese\\cvvc\\v1_lightgbm\\model_ovl.txt"
+  },
+  "metrics": {
+    "delta_offset": {
+      "baseline_mae": 181.9615065731814,
+      "model_mae": 87.08911736617802
+    },
+    "delta_cons": {
+      "baseline_mae": 92.24778527607361,
+      "model_mae": 26.485869567856202
+    },
+    "delta_cutoff": {
+      "baseline_mae": 185.04599386503068,
+      "model_mae": 122.90991298114346
+    },
+    "delta_pre": {
+      "baseline_mae": 58.65220070113936,
+      "model_mae": 26.96340486654003
+    },
+    "delta_ovl": {
+      "baseline_mae": 26.307455740578437,
+      "model_mae": 17.117615465925894
+    }
+  }
+}

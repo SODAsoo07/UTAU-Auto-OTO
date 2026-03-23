@@ -1,0 +1,31 @@
+{
+  "targets": {
+    "delta_offset": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\ml_workspace\\models\\korean\\cvc\\v1_ensemble\\lightgbm\\model_offset.txt",
+    "delta_cons": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\ml_workspace\\models\\korean\\cvc\\v1_ensemble\\lightgbm\\model_cons.txt",
+    "delta_cutoff": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\ml_workspace\\models\\korean\\cvc\\v1_ensemble\\lightgbm\\model_cutoff.txt",
+    "delta_pre": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\ml_workspace\\models\\korean\\cvc\\v1_ensemble\\lightgbm\\model_pre.txt",
+    "delta_ovl": "C:\\Users\\oyh57\\SODAsoo1\\Devs\\UTAU_Auto_OTO_v3\\Auto_OTO\\ml_workspace\\models\\korean\\cvc\\v1_ensemble\\lightgbm\\model_ovl.txt"
+  },
+  "metrics": {
+    "delta_offset": {
+      "baseline_mae": 40.52131865144099,
+      "model_mae": 25.860754275315244
+    },
+    "delta_cons": {
+      "baseline_mae": 32.20201468189233,
+      "model_mae": 24.13489408184592
+    },
+    "delta_cutoff": {
+      "baseline_mae": 173.67338636669092,
+      "model_mae": 58.52540166823168
+    },
+    "delta_pre": {
+      "baseline_mae": 27.806653072321915,
+      "model_mae": 18.30371814423394
+    },
+    "delta_ovl": {
+      "baseline_mae": 14.524712343665037,
+      "model_mae": 9.719413254236883
+    }
+  }
+}
