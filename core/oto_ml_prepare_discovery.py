@@ -33,24 +33,6 @@ def _has_textgrid_files(path: str) -> bool:
     return False
 
 
-def _resolve_manual_oto_in_dir(dir_path: str, filenames: List[str]) -> str:
-    lower = {fn.lower(): fn for fn in filenames}
-    candidates: List[str] = []
-    if "oto.ini" in lower:
-        candidates.append(os.path.join(dir_path, lower["oto.ini"]))
-    candidates.extend(
-        sorted(
-            os.path.join(dir_path, fn)
-            for fn in filenames
-            if fn.lower().endswith(".ini") and ("oto" in fn.lower() or "base" in fn.lower())
-        )
-    )
-    for candidate in candidates:
-        if _has_usable_oto_lines(candidate):
-            return candidate
-    return ""
-
-
 def _discover_work_items(dataset_root: str) -> List[PreparedAutoPair]:
     items: List[PreparedAutoPair] = []
     for language in ("korean", "japanese"):
@@ -65,15 +47,22 @@ def _discover_work_items(dataset_root: str) -> List[PreparedAutoPair]:
                 vb_root = os.path.join(fmt_root, voicebank)
                 if not os.path.isdir(vb_root):
                     continue
-                # Keep the nearest usable manual oto.ini (or compatible ini) per directory.
-                # Child pitch folders can inherit a parent manual oto when split layouts are used.
-                manual_by_dir: dict[str, str] = {}
                 for dp, dns, fns in os.walk(vb_root):
-                    parent = os.path.dirname(dp)
-                    parent_manual = manual_by_dir.get(parent, "")
-                    manual_here = _resolve_manual_oto_in_dir(dp, fns)
-                    manual = manual_here or parent_manual
-                    manual_by_dir[dp] = manual
+                    lower = {fn.lower(): fn for fn in fns}
+                    manual = ""
+                    candidates = []
+                    if "oto.ini" in lower:
+                        candidates.append(os.path.join(dp, lower["oto.ini"]))
+                    base_candidates = [
+                        os.path.join(dp, fn)
+                        for fn in fns
+                        if fn.lower().endswith(".ini") and ("oto" in fn.lower() or "base" in fn.lower())
+                    ]
+                    candidates.extend(sorted(base_candidates))
+                    for candidate in candidates:
+                        if _has_usable_oto_lines(candidate):
+                            manual = candidate
+                            break
                     wavs = [fn for fn in fns if fn.lower().endswith(".wav")]
                     if manual and wavs:
                         items.append(

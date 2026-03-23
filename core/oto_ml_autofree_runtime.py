@@ -5,7 +5,6 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from core.format_type_utils import normalize_format_type
-from core.generator_finish import write_oto_lines
 from core.oto_ml_autofree import (
     AUTOFREE_BACKEND,
     FEATURE_SCHEMA_VERSION,
@@ -14,7 +13,6 @@ from core.oto_ml_autofree import (
     predict_autofree_abs,
 )
 from core.oto_ml_features import parse_oto_rows
-from core.oto_file_utils import read_text_with_fallback
 from core.oto_ml_runtime import OtoModelBundle, load_oto_model_bundle
 from core.pipeline_status import (
     ML_APPLIED,
@@ -340,7 +338,8 @@ def apply_autofree_ml_to_oto_file(
         ml_report["fallback_reason"] = "token_missing" if int(feature_stats.get("skip_token_missing", 0)) > 0 else ""
         return 0
 
-    raw_lines = [line.rstrip("\n") for line in read_text_with_fallback(oto_path).splitlines()]
+    with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
+        raw_lines = [line.rstrip("\n") for line in f]
     rows_by_index = {int(row["line_index"]): row for row in rows}
 
     bundle_cache: Dict[str, Optional[OtoModelBundle]] = {}
@@ -413,7 +412,9 @@ def apply_autofree_ml_to_oto_file(
         raw_lines[line_index] = f"{row['wav']}={row['alias']},{o2:.2f},{c2:.2f},{ct2:.2f},{p2:.2f},{ov2:.2f}"
 
     if changed > 0:
-        write_oto_lines(oto_path, raw_lines)
+        with open(oto_path, "w", encoding="utf-8") as f:
+            for line in raw_lines:
+                f.write(line + "\n")
         _emit(callback, f"[OTO-ML] autofree 수치 보정 적용: {changed} lines")
 
     ml_report["changed_lines"] = int(changed)

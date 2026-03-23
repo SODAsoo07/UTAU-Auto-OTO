@@ -27,122 +27,6 @@ from core.oto_normalization import normalize_wav_key
 
 
 SIL_MARKS = {"", "sil", "sp", "spn", "pau"}
-_VALIDATION_MEL_CACHE: Dict[Tuple[str, int, int, bool], Dict[str, object]] = {}
-_VALIDATION_PHONE_CACHE: Dict[Tuple[str, int, int], Tuple[List[float], List[float]]] = {}
-_VALIDATION_CACHE_MAX = 512
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = str(os.environ.get(name, "")).strip().lower()
-    if not raw:
-        return bool(default)
-    return raw in {"1", "true", "yes", "on", "y"}
-
-
-def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
-    raw = str(os.environ.get(name, "")).strip()
-    if not raw:
-        return int(default)
-    try:
-        value = int(float(raw))
-    except Exception:
-        return int(default)
-    return max(int(min_value), min(int(max_value), value))
-
-
-def _trim_cache(cache: Dict[object, object], max_size: int = _VALIDATION_CACHE_MAX) -> None:
-    if len(cache) <= max_size:
-        return
-    remove_count = max(1, len(cache) - max_size)
-    for key in list(cache.keys())[:remove_count]:
-        cache.pop(key, None)
-
-
-def _sample_items(items: List[Tuple[str, List[Dict[str, object]]]], max_count: int) -> List[Tuple[str, List[Dict[str, object]]]]:
-    total = len(items)
-    if max_count <= 0 or total <= max_count:
-        return items
-    if max_count == 1:
-        return [items[0]]
-
-    selected = []
-    seen = set()
-    step = (total - 1) / float(max_count - 1)
-    for i in range(max_count):
-        idx = int(round(i * step))
-        idx = max(0, min(total - 1, idx))
-        if idx in seen:
-            continue
-        seen.add(idx)
-        selected.append(items[idx])
-    if selected[-1][0] != items[-1][0]:
-        selected[-1] = items[-1]
-    return selected
-
-
-def _percentile(values: List[float], q: float) -> float:
-    if not values:
-        return 0.0
-    arr = sorted(float(v) for v in values)
-    if len(arr) == 1:
-        return arr[0]
-    qv = max(0.0, min(100.0, float(q)))
-    pos = (len(arr) - 1) * (qv / 100.0)
-    lo = int(math.floor(pos))
-    hi = int(math.ceil(pos))
-    if lo == hi:
-        return arr[lo]
-    weight = pos - lo
-    return (arr[lo] * (1.0 - weight)) + (arr[hi] * weight)
-
-
-def _init_alias_metric_bucket() -> Dict[str, List[float]]:
-    return {
-        "offset_late_ms": [],
-        "pre_boundary_dist_ms": [],
-        "cutoff_overrun_ms": [],
-        "blank_ratio": [],
-    }
-
-
-def _append_alias_metric(
-    metrics: Dict[str, Dict[str, List[float]]],
-    alias_type: str,
-    key: str,
-    value: float,
-) -> None:
-    if not key:
-        return
-    alias = str(alias_type or "unknown").strip().lower() or "unknown"
-    bucket = metrics.setdefault(alias, _init_alias_metric_bucket())
-    try:
-        val = float(value)
-    except Exception:
-        return
-    if not math.isfinite(val):
-        return
-    if key not in bucket:
-        bucket[key] = []
-    bucket[key].append(val)
-
-
-def _summarize_alias_metrics(metrics: Dict[str, Dict[str, List[float]]]) -> Dict[str, Dict[str, object]]:
-    out: Dict[str, Dict[str, object]] = {}
-    for alias_type, values_by_key in sorted((metrics or {}).items()):
-        if not isinstance(values_by_key, dict):
-            continue
-        metric_out = {}
-        for metric_key, values in values_by_key.items():
-            if not isinstance(values, list) or not values:
-                continue
-            metric_out[metric_key] = {
-                "count": len(values),
-                "p50": round(_percentile(values, 50.0), 3),
-                "p90": round(_percentile(values, 90.0), 3),
-            }
-        if metric_out:
-            out[str(alias_type)] = metric_out
-    return out
 
 
 def _build_textgrid_index(tg_folder: str) -> Dict[str, str]:
@@ -225,7 +109,7 @@ def _read_wav_mono(wav_path: str) -> Tuple[Optional[np.ndarray], Optional[int], 
     return data, sr, None
 
 
-def _mel_activity(audio: np.ndarray, sr: int, *, fast: bool = False) -> Dict[str, float]:
+def _mel_activity(audio: np.ndarray, sr: int) -> Dict[str, float]:
     if len(audio) == 0:
         return {
             "active_start_ms": 0.0,
@@ -236,11 +120,11 @@ def _mel_activity(audio: np.ndarray, sr: int, *, fast: bool = False) -> Dict[str
             "active_mask": np.array([], dtype=bool),
         }
 
-    n_fft = 512 if fast else 1024
-    hop = max(1, int(sr * (0.010 if fast else 0.005)))
-    win = min(n_fft, max(256, int(sr * (0.020 if fast else 0.025))))
+    n_fft = 1024
+    hop = max(1, int(sr * 0.005))
+    win = min(n_fft, max(256, int(sr * 0.025)))
     window = np.hanning(win).astype(np.float64)
-    fb = _mel_filterbank(sr, n_fft, n_mels=24 if fast else 40)
+    fb = _mel_filterbank(sr, n_fft, n_mels=40)
 
     frames = []
     for st in range(0, max(len(audio) - win + 1, 1), hop):
@@ -670,24 +554,11 @@ def validate_oto_timing(
     summary = {
         "total_lines": 0,
         "checked_files": 0,
-        "checked_wavs_total": 0,
-        "sampled_wavs": 0,
         "warnings": 0,
         "errors": 0,
-        "truncated_issues": 0,
         "report_path": "",
         "message": "",
-        "alias_metrics": {},
     }
-
-    fast_mode = _env_bool("UTOA_OTO_AUTO_VALIDATE_FAST", True)
-    max_files = _env_int("UTOA_OTO_AUTO_VALIDATE_MAX_FILES", 180, min_value=10, max_value=50000)
-    max_issues = _env_int("UTOA_OTO_AUTO_VALIDATE_MAX_ISSUES", 1200, min_value=100, max_value=20000)
-    use_textgrid = _env_bool("UTOA_OTO_AUTO_VALIDATE_USE_TEXTGRID", not fast_mode)
-    log(
-        f"🧪 auto-validate options: fast={int(fast_mode)}, max_files={max_files}, "
-        f"max_issues={max_issues}, textgrid={int(use_textgrid)}"
-    )
 
     if np is None:
         summary["errors"] = 1
@@ -724,42 +595,17 @@ def validate_oto_timing(
     by_wav = defaultdict(list)
     for row in parsed_lines:
         by_wav[row["wav"]].append(row)
-    wav_items = sorted(by_wav.items(), key=lambda x: x[0].lower())
-    summary["checked_wavs_total"] = len(wav_items)
-    sampled = _sample_items(wav_items, max_files) if fast_mode else wav_items
-    summary["sampled_wavs"] = len(sampled)
-    if len(sampled) < len(wav_items):
-        log(
-            f"🧪 자동 검증 샘플링 적용: {len(sampled)}/{len(wav_items)} files "
-            f"(fast={int(bool(fast_mode))}, max_files={max_files})"
-        )
 
     if language == "japanese":
         from core.ja_oto_generator import classify_ja_alias as classify_fn
     else:
         from core.oto_generator import classify_alias as classify_fn
 
-    list_map = _load_recording_list_map(wav_dir) if not fast_mode else {}
+    list_map = _load_recording_list_map(wav_dir)
     issues = []
-    alias_metric_values: Dict[str, Dict[str, List[float]]] = {}
-    warn_count_total = 0
-    err_count_total = 0
-    truncated_issue_count = 0
-
-    def add_issue(level: str, wav_name: str, alias: str, msg: str) -> None:
-        nonlocal warn_count_total, err_count_total, truncated_issue_count
-        if str(level).lower() == "warn":
-            warn_count_total += 1
-        else:
-            err_count_total += 1
-        if len(issues) < max_issues:
-            issues.append((level, wav_name, alias, msg))
-        else:
-            truncated_issue_count += 1
-
     missing_wavs: List[str] = []
     wav_idx = _build_wav_name_index(wav_dir)
-    tg_idx = _build_textgrid_index(tg_folder) if use_textgrid else {}
+    tg_idx = _build_textgrid_index(tg_folder)
     is_japanese = (language == "japanese")
     # Japanese multi-syllable files naturally have later offsets on subsequent aliases.
     # Keep strict checks for parameter ordering, but relax global-time heuristics.
@@ -769,55 +615,22 @@ def validate_oto_timing(
     cutoff_after_margin_ms = 320.0 if is_japanese else 260.0
     boundary_dist_warn_ms = 260.0 if is_japanese else 180.0
 
-    for wav_name, rows in sampled:
+    for wav_name, rows in by_wav.items():
         wav_path = _resolve_wav_path(wav_name, wav_dir, wav_idx)
         if not wav_path:
-            add_issue("error", wav_name, "", "WAV file missing")
+            issues.append(("error", wav_name, "", "WAV file missing"))
             missing_wavs.append(wav_name)
             continue
 
         audio, sr, wav_err = _read_wav_mono(wav_path)
         if wav_err or audio is None:
-            add_issue("error", wav_name, "", f"Audio decode failed: {wav_err}")
+            issues.append(("error", wav_name, "", f"Audio decode failed: {wav_err}"))
             continue
 
-        try:
-            wav_stat = os.stat(wav_path)
-            mel_cache_key = (
-                os.path.normcase(os.path.abspath(wav_path)),
-                int(wav_stat.st_mtime_ns),
-                int(wav_stat.st_size),
-                bool(fast_mode),
-            )
-        except Exception:
-            mel_cache_key = (os.path.normcase(os.path.abspath(wav_path)), 0, 0, bool(fast_mode))
-
-        mel_sig = _VALIDATION_MEL_CACHE.get(mel_cache_key)
-        if mel_sig is None:
-            mel_sig = _mel_activity(audio, sr, fast=fast_mode)
-            _VALIDATION_MEL_CACHE[mel_cache_key] = mel_sig
-            _trim_cache(_VALIDATION_MEL_CACHE)
-
+        mel_sig = _mel_activity(audio, sr)
         base = os.path.splitext(wav_name)[0]
         tg_path = tg_idx.get(base.lower()) or tg_idx.get(normalize_wav_key(wav_name)) or ""
-        if use_textgrid and tg_path and os.path.exists(tg_path):
-            try:
-                tg_stat = os.stat(tg_path)
-                tg_cache_key = (
-                    os.path.normcase(os.path.abspath(tg_path)),
-                    int(tg_stat.st_mtime_ns),
-                    int(tg_stat.st_size),
-                )
-            except Exception:
-                tg_cache_key = (os.path.normcase(os.path.abspath(tg_path)), 0, 0)
-            cached_bounds = _VALIDATION_PHONE_CACHE.get(tg_cache_key)
-            if cached_bounds is None:
-                cached_bounds = _load_phone_bounds_ms(tg_path)
-                _VALIDATION_PHONE_CACHE[tg_cache_key] = cached_bounds
-                _trim_cache(_VALIDATION_PHONE_CACHE)
-            ph_starts, ph_ends = cached_bounds
-        else:
-            ph_starts, ph_ends = ([], [])
+        ph_starts, ph_ends = _load_phone_bounds_ms(tg_path) if os.path.exists(tg_path) else ([], [])
         boundary_check_enabled = bool(ph_starts)
         if is_japanese and ph_starts:
             boundary_check_enabled = len(ph_starts) >= max(4, len(rows) // 3)
@@ -833,57 +646,41 @@ def validate_oto_timing(
             pre = off + row["pre"]
             cons = off + row["cons"]
             cut = off + abs(row["cutoff"])
-            _append_alias_metric(
-                alias_metric_values,
-                alias_type,
-                "offset_late_ms",
-                max(0.0, off - float(mel_sig["active_start_ms"])),
-            )
-            _append_alias_metric(
-                alias_metric_values,
-                alias_type,
-                "cutoff_overrun_ms",
-                max(0.0, cut - float(mel_sig["active_end_ms"])),
-            )
             pre_abs_seq.append(pre)
             if alias_type not in ("vc", "vv"):
                 anchor_pre_abs_seq.append(pre)
 
             if not (off <= ovl <= pre <= cons < cut):
-                add_issue("error", wav_name, alias, "Parameter order invalid")
+                issues.append(("error", wav_name, alias, "Parameter order invalid"))
 
             # Offset-late check is meaningful mostly for the first alias.
             # Later aliases in multi-mora files are expected to be far from active_start.
             if row_idx == 0 and alias_type not in ("vc", "vv") and off > mel_sig["active_start_ms"] + offset_head_late_ms:
-                add_issue("warn", wav_name, alias, f"Offset seems late ({off:.1f}ms)")
+                issues.append(("warn", wav_name, alias, f"Offset seems late ({off:.1f}ms)"))
             early_margin = 120.0
             if is_japanese and alias_type in ("vc", "vv"):
                 early_margin = 220.0
             elif is_japanese and alias_type in ("cv_head", "cv", "vcv"):
                 early_margin = 160.0
             if off < mel_sig["active_start_ms"] - early_margin:
-                add_issue("warn", wav_name, alias, f"Offset before active region ({off:.1f}ms)")
+                issues.append(("warn", wav_name, alias, f"Offset before active region ({off:.1f}ms)"))
 
             pre_before_margin = pre_before_margin_ms
             if is_japanese and alias_type in ("cv_head", "cv", "vcv"):
                 pre_before_margin += 40.0
             if pre < mel_sig["active_start_ms"] - pre_before_margin or pre > mel_sig["active_end_ms"] + pre_after_margin_ms:
-                add_issue("warn", wav_name, alias, f"Preutterance out of active region ({pre:.1f}ms)")
+                issues.append(("warn", wav_name, alias, f"Preutterance out of active region ({pre:.1f}ms)"))
             if cut > mel_sig["active_end_ms"] + cutoff_after_margin_ms:
-                add_issue("warn", wav_name, alias, f"Cutoff too long after active end ({cut:.1f}ms)")
+                issues.append(("warn", wav_name, alias, f"Cutoff too long after active end ({cut:.1f}ms)"))
             blank_stats = _blank_span_activity_stats(mel_sig, off, cut)
-            _append_alias_metric(
-                alias_metric_values,
-                alias_type,
-                "blank_ratio",
-                float(blank_stats.get("blank_ratio", 0.0) or 0.0),
-            )
             if _should_warn_blank_only_span(alias_type, blank_stats):
-                add_issue(
-                    "warn",
-                    wav_name,
-                    alias,
-                    f"Offset-cutoff span is blank-heavy ({blank_stats['blank_ratio']:.2f})",
+                issues.append(
+                    (
+                        "warn",
+                        wav_name,
+                        alias,
+                        f"Offset-cutoff span is blank-heavy ({blank_stats['blank_ratio']:.2f})",
+                    )
                 )
 
             if boundary_check_enabled:
@@ -891,9 +688,8 @@ def validate_oto_timing(
                     d = _nearest_dist_ms(pre, ph_ends)
                 else:
                     d = min(_nearest_dist_ms(pre, ph_starts), _nearest_dist_ms(pre, ph_ends))
-                _append_alias_metric(alias_metric_values, alias_type, "pre_boundary_dist_ms", d)
                 if d > boundary_dist_warn_ms:
-                    add_issue("warn", wav_name, alias, f"Preutterance far from phone boundary ({d:.1f}ms)")
+                    issues.append(("warn", wav_name, alias, f"Preutterance far from phone boundary ({d:.1f}ms)"))
 
         seq_for_check = pre_abs_seq
         if is_japanese and len(anchor_pre_abs_seq) >= 4:
@@ -904,9 +700,9 @@ def validate_oto_timing(
                 if seq_for_check[i] + 5 < seq_for_check[i - 1]:
                     inv += 1
             if inv >= max(2, len(seq_for_check) // 4):
-                add_issue("warn", wav_name, "", "Alias timing sequence appears shifted/backward")
+                issues.append(("warn", wav_name, "", "Alias timing sequence appears shifted/backward"))
 
-        rec_aliases = list_map.get(wav_name.lower()) if not fast_mode else None
+        rec_aliases = list_map.get(wav_name.lower())
         if rec_aliases:
             oto_aliases = [r["alias"] for r in rows]
             if len(rec_aliases) >= 3 and len(oto_aliases) >= 3:
@@ -922,19 +718,24 @@ def validate_oto_timing(
                         if pos[b] < pos[a]:
                             bad += 1
                 if pairs >= 3 and bad >= max(2, pairs // 3):
-                    add_issue("warn", wav_name, "", "Recording list order mismatch with OTO aliases")
+                    issues.append(("warn", wav_name, "", "Recording list order mismatch with OTO aliases"))
 
         # filename-based hint for Japanese vowel chains
-        if language == "japanese" and not fast_mode:
+        if language == "japanese":
             s = parse_ja_filename(base)
             if len(s) >= 4 and all(re.match(r"^[aiueo]$", x) for x in s):
                 spread = max(pre_abs_seq) - min(pre_abs_seq) if pre_abs_seq else 0
                 if spread < 80:
-                    add_issue("warn", wav_name, "", "Vowel-chain file has too little timing spread")
+                    issues.append(("warn", wav_name, "", "Vowel-chain file has too little timing spread"))
+
+    warn_count = sum(1 for x in issues if x[0] == "warn")
+    err_count = sum(1 for x in issues if x[0] == "error")
+    summary["warnings"] = warn_count
+    summary["errors"] = err_count
 
     # If very few/no files could be checked, this is usually a dataset/path mismatch
     # rather than timing quality regression.
-    total_wavs = len(wav_items)
+    total_wavs = len(by_wav)
     low_match = summary["checked_files"] <= max(3, int(total_wavs * 0.10))
     if low_match and by_wav:
         if summary["checked_files"] == 0:
@@ -948,7 +749,6 @@ def validate_oto_timing(
                 "검증 결과가 실제 품질을 반영하지 않을 수 있습니다."
             )
         summary["message"] = msg
-        add_issue("warn", "(validation)", "", msg)
         log(f"⚠ {msg}")
         if missing_wavs:
             log(f"   예시 누락 파일: {missing_wavs[0]}")
@@ -978,16 +778,7 @@ def validate_oto_timing(
         if hint:
             h_dir, h_match, h_total = hint
             log(f"💡 후보 WAV 폴더: {h_dir} (matched {h_match}/{total_wavs}, wavs={h_total})")
-            add_issue("warn", "(validation)", "", f"Suggested WAV folder: {h_dir} ({h_match}/{total_wavs} match)")
-
-    warn_count = int(warn_count_total)
-    err_count = int(err_count_total)
-    summary["warnings"] = warn_count
-    summary["errors"] = err_count
-    summary["truncated_issues"] = int(truncated_issue_count)
-    summary["alias_metrics"] = _summarize_alias_metrics(alias_metric_values)
-    if truncated_issue_count > 0 and len(issues) < max_issues:
-        issues.append(("warn", "(validation)", "", f"Issues truncated: +{truncated_issue_count} more (max={max_issues})"))
+            issues.append(("warn", "(validation)", "", f"Suggested WAV folder: {h_dir} ({h_match}/{total_wavs} match)"))
 
     report_path = oto_path + ".validation.txt"
     summary["report_path"] = report_path
@@ -1002,23 +793,6 @@ def validate_oto_timing(
             f.write(f"checked_files: {summary['checked_files']}\n")
             f.write(f"errors: {err_count}\n")
             f.write(f"warnings: {warn_count}\n\n")
-            alias_metrics = summary.get("alias_metrics") if isinstance(summary, dict) else {}
-            if isinstance(alias_metrics, dict) and alias_metrics:
-                f.write("alias_metrics:\n")
-                for alias_type, metric_map in sorted(alias_metrics.items()):
-                    f.write(f"  - {alias_type}\n")
-                    if not isinstance(metric_map, dict):
-                        continue
-                    for metric_key, metric_stat in sorted(metric_map.items()):
-                        if not isinstance(metric_stat, dict):
-                            continue
-                        f.write(
-                            "    "
-                            + f"{metric_key}: n={int(metric_stat.get('count', 0) or 0)} "
-                            + f"p50={float(metric_stat.get('p50', 0.0) or 0.0):.3f} "
-                            + f"p90={float(metric_stat.get('p90', 0.0) or 0.0):.3f}\n"
-                        )
-                f.write("\n")
             if not issues:
                 f.write("No issues detected.\n")
             else:

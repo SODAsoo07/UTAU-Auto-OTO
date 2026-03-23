@@ -44,8 +44,8 @@ from core.oto_ml.coupled.inference import (
     predict_coupled_deltas,
     predict_coupled_deltas_batch,
 )
-from core.oto_ml.coupled.training import _prepare_training_frame, train_coupled_bundle, train_coupled_bundle_rawmel
-from core.oto_ml.features.mel_patches import MEL_PATCH_CACHE_VERSION, MelPatchCacheIndex, make_mel_patch_key
+from core.oto_ml.coupled.training import _prepare_training_frame, train_coupled_bundle_rawmel
+from core.oto_ml.features.mel_patches import MelPatchCacheIndex, make_mel_patch_key
 from core.oto_ml_features import (
     CATEGORICAL_FEATURES,
     FEATURE_NAMES,
@@ -166,24 +166,6 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return float(default)
-
-
-def _sanitize_meta_path_for_export(path_value: str) -> str:
-    raw = str(path_value or "").strip()
-    if not raw:
-        return ""
-    try:
-        abs_path = os.path.abspath(raw)
-    except Exception:
-        abs_path = raw
-    try:
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        rel = os.path.relpath(abs_path, project_root)
-        if rel and not str(rel).startswith(".."):
-            return str(rel).replace("\\", "/")
-    except Exception:
-        pass
-    return os.path.basename(str(abs_path).rstrip("\\/"))
 
 
 def _clip01(value: float) -> float:
@@ -801,97 +783,15 @@ def _train_meta_bundle(meta_df, out_dir: str, language: str, format_type: str, g
     return meta
 
 
-def _iter_direct_manifest_dirs(root_dir: str) -> List[str]:
-    root = os.path.abspath(str(root_dir or "").strip())
-    if not root or not os.path.isdir(root):
-        return []
-    out: List[str] = []
-    if os.path.isfile(os.path.join(root, "manifest.json")):
-        out.append(root)
-    try:
-        entries = sorted(os.listdir(root))
-    except Exception:
-        entries = []
-    for name in entries:
-        path = os.path.join(root, name)
-        if os.path.isdir(path) and os.path.isfile(os.path.join(path, "manifest.json")):
-            out.append(path)
-    return out
-
-
-def _pick_latest_manifest_dir(candidates: List[str]) -> Optional[str]:
-    best_dir: Optional[str] = None
-    best_time = -1.0
-    for path in candidates:
-        manifest_path = os.path.join(path, "manifest.json")
-        try:
-            mtime = float(os.path.getmtime(manifest_path))
-        except Exception:
-            continue
-        if mtime >= best_time:
-            best_time = mtime
-            best_dir = path
-    return best_dir
-
-
-def _resolve_rawmel_cache_dir(rawmel_cache_dir: str, language: str, format_type: str) -> str:
-    requested = os.path.abspath(str(rawmel_cache_dir or "").strip())
-    if not requested or not os.path.isdir(requested):
-        raise FileNotFoundError(rawmel_cache_dir)
-    if os.path.isfile(os.path.join(requested, "manifest.json")):
-        return requested
-
-    lang = str(language or "").strip().lower()
-    fmt = normalize_format_type(lang, format_type) or str(format_type or "").strip().lower() or "general"
-    version_dir = str(MEL_PATCH_CACHE_VERSION or "v1").strip() or "v1"
-    roots: List[str] = [
-        os.path.join(requested, lang, fmt, version_dir),
-        os.path.join(requested, lang, fmt),
-        os.path.join(requested, version_dir),
-        requested,
-    ]
-
-    seen: set[str] = set()
-    ordered_roots: List[str] = []
-    for root in roots:
-        key = os.path.abspath(root)
-        if key in seen:
-            continue
-        seen.add(key)
-        ordered_roots.append(key)
-
-    candidates: List[str] = []
-    for root in ordered_roots:
-        candidates.extend(_iter_direct_manifest_dirs(root))
-
-    resolved = _pick_latest_manifest_dir(candidates)
-    if resolved:
-        logger.info(
-            "[OTO-ML] rawmel cache auto-resolved: requested=%s resolved=%s language=%s format=%s",
-            requested,
-            resolved,
-            lang,
-            fmt,
-        )
-        return resolved
-
-    raise FileNotFoundError(
-        f"{rawmel_cache_dir} (no manifest.json found under expected roots: "
-        + ", ".join(ordered_roots)
-        + ")"
-    )
-
-
 def train_ensemble_bundle(
     language: str,
     format_type: str,
     dataset_csv: str,
     out_dir: str,
     *,
-    rawmel_cache_dir: str = "",
+    rawmel_cache_dir: str,
     group_column: str = "voicebank_id",
     alias_types: Optional[List[str]] = None,
-    alias_family: str = "",
     min_mapping_confidence: float = 0.0,
     num_folds: int = 5,
     lightgbm_num_boost_round: int = 500,
@@ -899,32 +799,21 @@ def train_ensemble_bundle(
     coupled_epochs: int = 70,
     coupled_batch_size: int = 192,
     coupled_learning_rate: float = 1e-3,
-    coupled_backend: str = "coupled_nn_v2_rawmel",
-    coupled_device: str = "auto",
-    enforce_language_format: bool = True,
 ) -> Dict[str, Any]:
     _require_training_stack()
     if not dataset_csv or not os.path.exists(dataset_csv):
         raise FileNotFoundError(dataset_csv)
+    if not rawmel_cache_dir or not os.path.isdir(rawmel_cache_dir):
+        raise FileNotFoundError(rawmel_cache_dir)
 
     df = pd.read_csv(dataset_csv, low_memory=False)
     language = str(language or "").strip().lower()
     format_type = normalize_format_type(language, format_type) or "general"
-    coupled_backend = str(coupled_backend or "").strip().lower() or "coupled_nn_v2_rawmel"
-    if coupled_backend not in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
-        raise ValueError(f"Unsupported coupled backend: {coupled_backend}")
-    if not enforce_language_format:
-        prep_language = "global"
-        prep_format_type = "general"
-    else:
-        prep_language = language
-        prep_format_type = format_type
     df = _prepare_training_frame(
         df,
-        language=prep_language,
-        format_type=prep_format_type,
+        language=language,
+        format_type=format_type,
         alias_types=alias_types,
-        alias_family=alias_family,
         min_mapping_confidence=min_mapping_confidence,
     )
     df = df.reset_index(drop=True)
@@ -932,59 +821,12 @@ def train_ensemble_bundle(
     if len(df) < 24:
         raise RuntimeError("Ensemble dataset is too small (need >= 24 rows).")
 
-    resolved_rawmel_cache_dir = ""
-    cache_language = language
-    cache_format_type = format_type
-    if coupled_backend == "coupled_nn_v2_rawmel":
-        if not rawmel_cache_dir:
-            raise FileNotFoundError("rawmel_cache_dir is required for coupled_nn_v2_rawmel ensemble training")
-        # Global alias-family training may mix multiple language/format rows while rawmel cache is format-specific.
-        # In this case, select the dominant (language, format) pair to keep cache lookup and coupled training consistent.
-        if format_type == "general" and str(alias_family or "").strip():
-            row_lang = (
-                df["language"].astype(str).str.strip().str.lower()
-                if "language" in df.columns
-                else pd.Series([language] * len(df), index=df.index, dtype="string")
-            )
-            row_fmt_raw = (
-                df["format_type"].astype(str).str.strip().str.lower()
-                if "format_type" in df.columns
-                else pd.Series([format_type] * len(df), index=df.index, dtype="string")
-            )
-            row_fmt = pd.Series(
-                [
-                    normalize_format_type(str(lang_val), str(fmt_val)) or str(fmt_val or "").strip().lower() or "general"
-                    for lang_val, fmt_val in zip(row_lang.tolist(), row_fmt_raw.tolist())
-                ],
-                index=df.index,
-            )
-            pair_keys = row_lang.astype(str) + "|" + row_fmt.astype(str)
-            if len(pair_keys):
-                pair_counts = pair_keys.value_counts(dropna=True)
-                if len(pair_counts):
-                    dom_pair = str(pair_counts.index[0] or "")
-                    if "|" in dom_pair:
-                        dom_lang, dom_fmt = dom_pair.split("|", 1)
-                        dom_mask = (row_lang == dom_lang) & (row_fmt == dom_fmt)
-                        dropped_rows = int((~dom_mask).sum())
-                        if dropped_rows > 0:
-                            print(
-                                f"[ENSEMBLE] rawmel(global) dominant pair selected lang={dom_lang} format={dom_fmt} "
-                                f"kept={int(dom_mask.sum())} dropped={dropped_rows}"
-                            )
-                            df = df[dom_mask].reset_index(drop=True)
-                        cache_language = str(dom_lang or cache_language).strip().lower() or cache_language
-                        cache_format_type = str(dom_fmt or cache_format_type).strip().lower() or cache_format_type
-                        if len(df) < 24:
-                            raise RuntimeError("Ensemble dataset is too small after dominant rawmel pair filtering (need >= 24 rows).")
-        resolved_rawmel_cache_dir = _resolve_rawmel_cache_dir(rawmel_cache_dir, cache_language, cache_format_type)
-
     folds = _build_group_folds(df, group_column, num_folds=max(2, int(num_folds)))
-    cache_index = MelPatchCacheIndex.load(resolved_rawmel_cache_dir) if resolved_rawmel_cache_dir else None
+    cache_index = MelPatchCacheIndex.load(rawmel_cache_dir)
     oof_rows: List[Dict[str, Any]] = []
     print(
         f"[ENSEMBLE] start format={format_type} rows={int(len(df))} folds={int(len(folds))} "
-        f"group={group_column} backend={coupled_backend} rawmel_cache={resolved_rawmel_cache_dir or 'n/a'}"
+        f"group={group_column} rawmel_cache={rawmel_cache_dir}"
     )
 
     for fold_idx, (train_idx, valid_idx) in enumerate(folds):
@@ -1011,42 +853,22 @@ def train_ensemble_bundle(
                 num_boost_round=int(lightgbm_num_boost_round),
                 early_stopping_rounds=int(lightgbm_early_stopping_rounds),
                 alias_types=alias_types,
-                alias_family=alias_family,
                 min_mapping_confidence=float(min_mapping_confidence),
             )
-            if coupled_backend == "coupled_nn_v2_rawmel":
-                print(f"[ENSEMBLE] fold {fold_idx + 1}/{len(folds)} train coupled_rawmel")
-                train_coupled_bundle_rawmel(
-                    language=language,
-                    format_type=format_type,
-                    dataset_csv=train_csv,
-                    out_dir=coupled_dir,
-                    rawmel_cache_dir=resolved_rawmel_cache_dir,
-                    group_column=group_column,
-                    alias_types=alias_types,
-                    alias_family=alias_family,
-                    min_mapping_confidence=float(min_mapping_confidence),
-                    device=str(coupled_device or "auto"),
-                    epochs=int(coupled_epochs),
-                    batch_size=int(coupled_batch_size),
-                    learning_rate=float(coupled_learning_rate),
-                )
-            else:
-                print(f"[ENSEMBLE] fold {fold_idx + 1}/{len(folds)} train coupled_v1")
-                train_coupled_bundle(
-                    language=language,
-                    format_type=format_type,
-                    dataset_csv=train_csv,
-                    out_dir=coupled_dir,
-                    group_column=group_column,
-                    alias_types=alias_types,
-                    alias_family=alias_family,
-                    min_mapping_confidence=float(min_mapping_confidence),
-                    device=str(coupled_device or "auto"),
-                    epochs=int(coupled_epochs),
-                    batch_size=int(coupled_batch_size),
-                    learning_rate=float(coupled_learning_rate),
-                )
+            print(f"[ENSEMBLE] fold {fold_idx + 1}/{len(folds)} train coupled_rawmel")
+            train_coupled_bundle_rawmel(
+                language=language,
+                format_type=format_type,
+                dataset_csv=train_csv,
+                out_dir=coupled_dir,
+                rawmel_cache_dir=rawmel_cache_dir,
+                group_column=group_column,
+                alias_types=alias_types,
+                min_mapping_confidence=float(min_mapping_confidence),
+                epochs=int(coupled_epochs),
+                batch_size=int(coupled_batch_size),
+                learning_rate=float(coupled_learning_rate),
+            )
             lgb_meta = _load_json(os.path.join(lightgbm_dir, "model_meta.json"))
             lgb_schema = _load_json(os.path.join(lightgbm_dir, "feature_schema.json"))
             lgb_payload = load_lightgbm_bundle(lightgbm_dir, meta=lgb_meta, schema=lgb_schema)
@@ -1054,12 +876,7 @@ def train_ensemble_bundle(
 
             coupled_meta = _load_json(os.path.join(coupled_dir, "model_meta.json"))
             coupled_schema = _load_json(os.path.join(coupled_dir, "feature_schema.json"))
-            coupled_payload = load_coupled_bundle(
-                coupled_dir,
-                meta=coupled_meta,
-                schema=coupled_schema,
-                device=str(coupled_device or "auto"),
-            )
+            coupled_payload = load_coupled_bundle(coupled_dir, meta=coupled_meta, schema=coupled_schema, device="auto")
             coupled_bundle = _subbundle_info(coupled_dir, str(coupled_meta.get("backend", "") or ""), coupled_payload, coupled_meta, coupled_schema)
 
             lgb_preds = _predict_lightgbm_frame(lgb_bundle, valid_df)
@@ -1099,57 +916,33 @@ def train_ensemble_bundle(
     coupled_out = _bundle_dir(root_out, "coupled")
     meta_out = _bundle_dir(root_out, "meta")
     os.makedirs(root_out, exist_ok=True)
-    final_train_csv = ""
-    with tempfile.TemporaryDirectory(prefix="utoa_ens_final_") as final_td:
-        final_train_csv = os.path.join(final_td, "train.csv")
-        df.to_csv(final_train_csv, index=False, encoding="utf-8")
 
-        print("[ENSEMBLE] final train lightgbm")
-        train_lightgbm_bundle(
-            language=language,
-            format_type=format_type,
-            dataset_csv=final_train_csv,
-            out_dir=lightgbm_out,
-            group_column=group_column,
-            num_boost_round=int(lightgbm_num_boost_round),
-            early_stopping_rounds=int(lightgbm_early_stopping_rounds),
-            alias_types=alias_types,
-            alias_family=alias_family,
-            min_mapping_confidence=float(min_mapping_confidence),
-        )
-        if coupled_backend == "coupled_nn_v2_rawmel":
-            print("[ENSEMBLE] final train coupled_rawmel")
-            train_coupled_bundle_rawmel(
-                language=language,
-                format_type=format_type,
-                dataset_csv=final_train_csv,
-                out_dir=coupled_out,
-                rawmel_cache_dir=resolved_rawmel_cache_dir,
-                group_column=group_column,
-                alias_types=alias_types,
-                alias_family=alias_family,
-                min_mapping_confidence=float(min_mapping_confidence),
-                device=str(coupled_device or "auto"),
-                epochs=int(coupled_epochs),
-                batch_size=int(coupled_batch_size),
-                learning_rate=float(coupled_learning_rate),
-            )
-        else:
-            print("[ENSEMBLE] final train coupled_v1")
-            train_coupled_bundle(
-                language=language,
-                format_type=format_type,
-                dataset_csv=final_train_csv,
-                out_dir=coupled_out,
-                group_column=group_column,
-                alias_types=alias_types,
-                alias_family=alias_family,
-                min_mapping_confidence=float(min_mapping_confidence),
-                device=str(coupled_device or "auto"),
-                epochs=int(coupled_epochs),
-                batch_size=int(coupled_batch_size),
-                learning_rate=float(coupled_learning_rate),
-            )
+    print("[ENSEMBLE] final train lightgbm")
+    train_lightgbm_bundle(
+        language=language,
+        format_type=format_type,
+        dataset_csv=dataset_csv,
+        out_dir=lightgbm_out,
+        group_column=group_column,
+        num_boost_round=int(lightgbm_num_boost_round),
+        early_stopping_rounds=int(lightgbm_early_stopping_rounds),
+        alias_types=alias_types,
+        min_mapping_confidence=float(min_mapping_confidence),
+    )
+    print("[ENSEMBLE] final train coupled_rawmel")
+    train_coupled_bundle_rawmel(
+        language=language,
+        format_type=format_type,
+        dataset_csv=dataset_csv,
+        out_dir=coupled_out,
+        rawmel_cache_dir=rawmel_cache_dir,
+        group_column=group_column,
+        alias_types=alias_types,
+        min_mapping_confidence=float(min_mapping_confidence),
+        epochs=int(coupled_epochs),
+        batch_size=int(coupled_batch_size),
+        learning_rate=float(coupled_learning_rate),
+    )
     print("[ENSEMBLE] final train meta")
     meta_bundle_meta = _train_meta_bundle(meta_df, meta_out, language, format_type, group_column)
 
@@ -1167,16 +960,13 @@ def train_ensemble_bundle(
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "train_rows": int(len(df)),
         "voicebank_count": int(df[group_column].nunique()) if group_column in df.columns else 1,
-        "alias_family": str(alias_family or "").strip().lower(),
-        "rawmel_cache_dir_requested": _sanitize_meta_path_for_export(rawmel_cache_dir),
-        "rawmel_cache_dir": _sanitize_meta_path_for_export(resolved_rawmel_cache_dir),
         "meta_enabled": True,
         "submodels": {
             "lightgbm": "lightgbm",
             "coupled": "coupled",
             "meta": "meta",
         },
-        "coupled_backend": coupled_backend,
+        "coupled_backend": "coupled_nn_v2_rawmel",
         "gating": {
             "min_coupled_confidence": 0.0,
             "mode": "confidence_blank_mapping_gate",

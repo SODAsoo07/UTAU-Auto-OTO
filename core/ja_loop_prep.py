@@ -4,11 +4,6 @@ import os
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
-from core.mapping_format_policy import (
-    is_ja_filename_sequence_format,
-    is_ja_sequence_locked_format,
-)
-
 
 @dataclass
 class JaLoopPrepResult:
@@ -68,7 +63,7 @@ def _estimate_ja_textgrid_trust(
             conf -= min(abs(words_count - filename_count) / float(max(filename_count, 1)) * 0.18, 0.18)
         if alias_count:
             conf -= min(abs(alias_count - filename_count) / float(max(filename_count, 1)) * 0.12, 0.12)
-        if is_ja_filename_sequence_format(format_type):
+        if str(format_type or "").strip().lower() in {"cvvc", "cv"}:
             conf += 0.06
     elif max(alias_count, words_count) >= 2:
         conf -= 0.08
@@ -175,7 +170,7 @@ def prepare_ja_loop_state(
         format_type=result.format_type,
     )
     result.prefer_filename_sequence = bool(
-        is_ja_filename_sequence_format(result.format_type)
+        result.format_type in {"cvvc", "cv"}
         and result.filename_syllables
         and (
             result.textgrid_trust_tier == "low"
@@ -184,7 +179,7 @@ def prepare_ja_loop_state(
     )
 
     if (
-        is_ja_sequence_locked_format(result.format_type)
+        result.format_type in {"vcv", "cvvc", "cv"}
         and ja_mapping_words_fallback_enabled
         and result.low_phone_quality
     ):

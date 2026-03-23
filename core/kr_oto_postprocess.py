@@ -1,18 +1,9 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Callable, Optional, Sequence, Tuple
 
-from core.kr_oto_rules import (
-    KR_PLOSIVE_ONSETS,
-    KR_SIBILANT_ONSETS,
-    KR_SONORANT_CONSONANTS,
-    _canonicalize_kr_coda,
-    _extract_vc_right_token,
-    is_plosive_ipa,
-    normalize_ipa_mark,
-)
+from core.kr_oto_rules import _canonicalize_kr_coda, _extract_vc_right_token, is_plosive_ipa
 
 ValidateFn = Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]]
 
@@ -224,7 +215,27 @@ def guard_kr_cv_head_offset_to_current_onset(
     return validate_fn(offset, consonant, cutoff, pre, ovl)
 
 
-def guard_kr_vcv_timing_to_cv_boundary(
+def _shift_offset_preserve_absolute(
+    offset: float,
+    consonant: float,
+    cutoff: float,
+    pre: float,
+    ovl: float,
+    *,
+    new_offset: float,
+) -> Tuple[float, float, float, float, float]:
+    old_offset = float(offset)
+    new_offset = max(0.0, float(new_offset))
+    delta = new_offset - old_offset
+    if abs(delta) <= 1e-6:
+        return float(offset), float(consonant), float(cutoff), float(pre), float(ovl)
+    consonant = float(consonant) - delta
+    cutoff = -max(0.0, abs(float(cutoff)) - delta)
+    ovl = float(ovl) - delta
+    return new_offset, consonant, cutoff, float(pre), ovl
+
+
+def guard_kr_vcv_pre_to_cv_boundary(
     offset: float,
     consonant: float,
     cutoff: float,
@@ -236,74 +247,77 @@ def guard_kr_vcv_timing_to_cv_boundary(
     *,
     alias_text: str = "",
 ) -> Tuple[float, float, float, float, float]:
-    """Stabilize Korean VCV pre/consonant timing around CV boundary."""
     if syll_idx is None or syll_idx < 0:
         return validate_fn(offset, consonant, cutoff, pre, ovl)
     if not syllables_info or syll_idx >= len(syllables_info):
         return validate_fn(offset, consonant, cutoff, pre, ovl)
 
-    curr_syl = syllables_info[syll_idx] or {}
-    curr_phones = curr_syl.get("phones") or []
+    curr = syllables_info[syll_idx] or {}
+    curr_phones = curr.get("phones") or []
     if not curr_phones:
         return validate_fn(offset, consonant, cutoff, pre, ovl)
 
+    from core.kr_oto_rules import find_vowel_phone
+
     try:
-        from core.kr_oto_rules import find_vowel_phone
-
         _v_idx, v_phone = find_vowel_phone(curr_phones)
-        c_boundary = float(getattr(v_phone, "minTime", 0.0) or 0.0) * 1000.0
-        n_end = float(getattr(v_phone, "maxTime", 0.0) or 0.0) * 1000.0
+        onset_abs = float(getattr(v_phone, "minTime", 0.0) or 0.0) * 1000.0
+        vowel_end_abs = float(getattr(v_phone, "maxTime", 0.0) or 0.0) * 1000.0
     except Exception:
-        c_boundary = float(curr_phones[0].maxTime) * 1000.0
-        n_end = c_boundary + 60.0
+        onset_abs = float(curr_phones[0].maxTime) * 1000.0
+        vowel_end_abs = float(curr_phones[-1].maxTime) * 1000.0
 
-    # Keep previous-vowel tail include within ~1/3..2/5 when possible.
+    if onset_abs <= 0.0:
+        return validate_fn(offset, consonant, cutoff, pre, ovl)
+
+    offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
+    pre_abs = float(offset) + float(pre)
+
+    # Keep Pre anchored to the current CV boundary to avoid slurred VCV output.
+    if abs(pre_abs - onset_abs) > 4.0:
+        new_offset = onset_abs - float(pre)
+        offset, consonant, cutoff, pre, ovl = _shift_offset_preserve_absolute(
+            offset, consonant, cutoff, pre, ovl, new_offset=new_offset
+        )
+
     if syll_idx > 0:
-        prev_syl = syllables_info[syll_idx - 1] or {}
-        prev_phones = prev_syl.get("phones") or []
+        prev = syllables_info[syll_idx - 1] or {}
+        prev_phones = prev.get("phones") or []
         if prev_phones:
             try:
-                _pv_idx, prev_v = find_vowel_phone(prev_phones)  # type: ignore[name-defined]
-                prev_v_start = float(getattr(prev_v, "minTime", 0.0) or 0.0) * 1000.0
-                prev_v_end = float(getattr(prev_v, "maxTime", 0.0) or 0.0) * 1000.0
-                prev_v_len = max(prev_v_end - prev_v_start, 30.0)
-                tail_lo = prev_v_len / 3.0
-                tail_hi = prev_v_len * 0.40
-                off_lo = max(0.0, prev_v_end - tail_hi)
-                off_hi = max(off_lo, prev_v_end - tail_lo)
-                offset = min(max(float(offset), off_lo), off_hi)
+                _pv_idx, pv_phone = find_vowel_phone(prev_phones)
+                prev_v_start = float(getattr(pv_phone, "minTime", 0.0) or 0.0) * 1000.0
+                prev_v_end = float(getattr(pv_phone, "maxTime", 0.0) or 0.0) * 1000.0
             except Exception:
-                pass
+                prev_v_start = float(prev_phones[0].minTime) * 1000.0
+                prev_v_end = float(prev_phones[-1].maxTime) * 1000.0
+            prev_v_len = max(40.0, prev_v_end - prev_v_start)
+            tail_now = max(0.0, prev_v_end - float(offset))
+            tail_min = prev_v_len / 3.0
+            tail_max = prev_v_len * 0.40
+            if tail_now < (tail_min - 2.0) or tail_now > (tail_max + 4.0):
+                tail_target = max(tail_min, min(tail_max, tail_now))
+                new_offset = prev_v_end - tail_target
+                offset, consonant, cutoff, pre, ovl = _shift_offset_preserve_absolute(
+                    offset, consonant, cutoff, pre, ovl, new_offset=new_offset
+                )
 
-    # Preutterance should stay on CV boundary for V-CV rows.
-    pre = max(8.0, float(c_boundary) - float(offset))
+    # Maintain consonant and cutoff around current vowel body.
+    onset_rel = max(onset_abs - float(offset), float(pre))
+    vowel_end_rel = max(vowel_end_abs - float(offset), onset_rel + 20.0)
+    cons_floor = onset_rel + 14.0
+    cons_ceil = vowel_end_rel - 8.0
+    if cons_ceil < cons_floor:
+        cons_ceil = cons_floor
+    consonant = max(cons_floor, min(float(consonant), cons_ceil))
 
-    cv_end_rel = max(float(n_end) - float(offset), pre + 24.0)
-    cons_floor = pre + 18.0
-    cons_cap = max(cons_floor + 2.0, cv_end_rel - 4.0)
-    # Bias consonant region toward trailing CV body (clearer onset articulation).
-    consonant = max(float(consonant), cv_end_rel - 12.0)
-    consonant = min(max(consonant, cons_floor), cons_cap)
+    cut_gap_floor = 12.0
+    cut_tail = max(6.0, min((vowel_end_rel - onset_rel) * 0.10, 18.0))
+    cutoff_abs = abs(float(cutoff))
+    cutoff_abs = max(cutoff_abs, consonant + cut_gap_floor)
+    cutoff_abs = min(cutoff_abs, vowel_end_rel + cut_tail)
+    cutoff = -cutoff_abs
 
-    # Keep cutoff after current CV end, but avoid leaking too hard into next onset.
-    cut_abs = abs(float(cutoff))
-    min_cut = max(consonant + 12.0, cv_end_rel + 2.0)
-    cut_abs = max(cut_abs, min_cut)
-    if (syll_idx + 1) < len(syllables_info):
-        next_syl = syllables_info[syll_idx + 1] or {}
-        next_phones = next_syl.get("phones") or []
-        if next_phones:
-            try:
-                next_onset_abs = float(getattr(next_phones[0], "minTime", 0.0) or 0.0) * 1000.0
-                cut_cap = max(min_cut, (next_onset_abs - float(offset)) - 2.0)
-                cut_abs = min(cut_abs, cut_cap)
-            except Exception:
-                pass
-    cutoff = -cut_abs
-
-    ovl_floor = pre * 0.36
-    ovl_cap = max(0.0, pre * 0.62)
-    ovl = min(max(float(ovl), ovl_floor), ovl_cap)
     return validate_fn(offset, consonant, cutoff, pre, ovl)
 
 
@@ -315,44 +329,6 @@ def log_post_timing_events(log_fn, fname, alias, soft_off_shift, soft_cut_shift,
         )
     if cutoff_reduced > 0.5:
         log_fn(f"🛡️ {fname}: CV 컷오프 과연장 보정(-{cutoff_reduced:.1f}ms) [{alias}]")
-
-
-def _extract_tail_cv_token(alias_text: str) -> str:
-    parts = [re.sub(r"[^a-z]", "", p.lower()) for p in str(alias_text or "").split() if p.strip()]
-    parts = [p for p in parts if p]
-    if parts:
-        return parts[-1]
-    return re.sub(r"[^a-z]", "", str(alias_text or "").lower())
-
-
-def _resolve_pre_boundary_group(alias_text: str, onset_hint: str) -> str:
-    token = _extract_tail_cv_token(alias_text)
-    m = re.match(r"^([^aeiouyw]+)", token)
-    roman = m.group(1) if m else ""
-    if len(roman) >= 2 and roman[:2] in (KR_SIBILANT_ONSETS | KR_PLOSIVE_ONSETS | KR_SONORANT_CONSONANTS):
-        roman = roman[:2]
-    elif len(roman) >= 1 and roman[:1] in (KR_SIBILANT_ONSETS | KR_PLOSIVE_ONSETS | KR_SONORANT_CONSONANTS):
-        roman = roman[:1]
-
-    ipa = (normalize_ipa_mark(onset_hint or "") or "").lower()
-    roman_sonorant = set(KR_SONORANT_CONSONANTS) | {"m", "n", "ng", "l", "r", "w", "y", "ny", "my", "ry", "ly"}
-    roman_fricative = {"h", "f", "v", "x", "th", "dh", "zh"}
-    roman_sibilant = set(KR_SIBILANT_ONSETS) | {"sh", "ch", "ts", "dz", "z", "j", "jj", "c", "tsh"}
-
-    sonorant_like = roman in roman_sonorant or ipa in {"m", "n", "ng", "l", "r", "w", "j", "y"}
-    fricative_like = roman in roman_fricative or ipa in {"h", "f", "v", "x", "th", "dh"}
-    sibilant_like = (roman in roman_sibilant) or ("sh" in ipa) or ("ts" in ipa) or ("dz" in ipa)
-    plosive_like = bool(roman) and (roman in KR_PLOSIVE_ONSETS or is_plosive_ipa(ipa) or is_plosive_ipa(roman))
-
-    if sonorant_like:
-        return "sonorant"
-    if fricative_like:
-        return "fricative"
-    if sibilant_like:
-        return "sibilant"
-    if plosive_like:
-        return "plosive"
-    return "default"
 
 
 @dataclass
@@ -382,157 +358,6 @@ class KrPostprocessContext:
             return str(getattr(curr_phones[0], "mark", "") or "").strip()
         except Exception:
             return ""
-
-    def _resolve_cv_boundary_ms(self, current_w_idx: Optional[int]) -> Optional[Tuple[float, float, float, str]]:
-        try:
-            if current_w_idx is None:
-                return None
-            idx = int(current_w_idx)
-            if idx < 0 or idx >= len(self.syllables_info):
-                return None
-            curr_syl = self.syllables_info[idx] or {}
-            curr_phones = curr_syl.get("phones") or []
-            if not curr_phones:
-                return None
-            from core.kr_oto_rules import find_vowel_phone
-
-            _v_idx, v_phone = find_vowel_phone(curr_phones)
-            c_start = float(getattr(curr_phones[0], "minTime", 0.0) or 0.0) * 1000.0
-            c_boundary = float(getattr(v_phone, "minTime", 0.0) or 0.0) * 1000.0
-            n_end = float(getattr(v_phone, "maxTime", 0.0) or 0.0) * 1000.0
-            onset_mark = str(getattr(curr_phones[0], "mark", "") or "").strip()
-            if c_boundary <= c_start + 1.0:
-                return None
-            return c_start, c_boundary, n_end, onset_mark
-        except Exception:
-            return None
-
-    def _apply_pre_boundary_guard(
-        self,
-        offset: float,
-        consonant: float,
-        cutoff: float,
-        pre: float,
-        ovl: float,
-        *,
-        alias_type: str,
-        alias_text: str,
-        current_w_idx: int,
-        onset_hint: str,
-    ) -> Tuple[float, float, float, float, float]:
-        if alias_type not in {"cv", "cv_head", "vcv"}:
-            return self.validate_fn(offset, consonant, cutoff, pre, ovl)
-
-        bounds = self._resolve_cv_boundary_ms(current_w_idx)
-        if not bounds:
-            return self.validate_fn(offset, consonant, cutoff, pre, ovl)
-        c_start, c_boundary, n_end, mark_hint = bounds
-        c_span = max(c_boundary - c_start, 12.0)
-
-        group = _resolve_pre_boundary_group(alias_text, onset_hint or mark_hint)
-        cfg_map = {
-            "plosive": {
-                "ratio_lo": 0.78,
-                "ratio_hi": 0.96,
-                "min_lead": 0.8,
-                "max_lead": 8.5,
-                "target_lead": 2.0,
-                "blend": 0.72,
-                "cons_gap_min": 20.0,
-                "cons_gap_max": 44.0,
-                "cons_tail": 6.0,
-                "cut_gap_min": 11.0,
-            },
-            "sibilant": {
-                "ratio_lo": 0.68,
-                "ratio_hi": 0.92,
-                "min_lead": 1.4,
-                "max_lead": 13.0,
-                "target_lead": 3.4,
-                "blend": 0.68,
-                "cons_gap_min": 18.0,
-                "cons_gap_max": 40.0,
-                "cons_tail": 5.0,
-                "cut_gap_min": 10.0,
-            },
-            "fricative": {
-                "ratio_lo": 0.64,
-                "ratio_hi": 0.90,
-                "min_lead": 1.8,
-                "max_lead": 14.0,
-                "target_lead": 3.8,
-                "blend": 0.65,
-                "cons_gap_min": 17.0,
-                "cons_gap_max": 36.0,
-                "cons_tail": 4.5,
-                "cut_gap_min": 9.5,
-            },
-            "sonorant": {
-                "ratio_lo": 0.60,
-                "ratio_hi": 0.84,
-                "min_lead": 2.2,
-                "max_lead": 18.0,
-                "target_lead": 5.2,
-                "blend": 0.62,
-                "cons_gap_min": 16.0,
-                "cons_gap_max": 34.0,
-                "cons_tail": 4.0,
-                "cut_gap_min": 9.0,
-            },
-            "default": {
-                "ratio_lo": 0.70,
-                "ratio_hi": 0.90,
-                "min_lead": 1.4,
-                "max_lead": 12.0,
-                "target_lead": 3.0,
-                "blend": 0.66,
-                "cons_gap_min": 18.0,
-                "cons_gap_max": 38.0,
-                "cons_tail": 5.0,
-                "cut_gap_min": 10.0,
-            },
-        }
-        cfg = dict(cfg_map.get(group, cfg_map["default"]))
-        if alias_type == "vcv":
-            cfg["ratio_lo"] = max(0.52, float(cfg["ratio_lo"]) - 0.05)
-            cfg["max_lead"] = float(cfg["max_lead"]) + 3.0
-            cfg["blend"] = float(cfg["blend"]) * 0.90
-
-        pre_abs = float(offset) + float(pre)
-        floor = max(
-            c_start + 1.5,
-            c_start + (c_span * float(cfg["ratio_lo"])),
-            c_boundary - float(cfg["max_lead"]),
-        )
-        ceil = min(
-            c_boundary - 0.8,
-            c_start + (c_span * float(cfg["ratio_hi"])),
-            c_boundary - float(cfg["min_lead"]),
-        )
-        if ceil <= floor:
-            center = c_boundary - float(cfg["target_lead"])
-            floor = max(c_start + 1.5, center - 1.5)
-            ceil = min(c_boundary - 0.8, max(center + 1.5, floor + 1.2))
-        target = max(float(floor), min(c_boundary - float(cfg["target_lead"]), float(ceil)))
-
-        blend = max(0.0, min(1.0, float(cfg["blend"])))
-        pre_abs_new = ((1.0 - blend) * pre_abs) + (blend * target)
-        pre_abs_new = max(float(floor), min(float(ceil), pre_abs_new))
-        pre_new = max(0.0, pre_abs_new - float(offset))
-        delta_pre = pre_new - float(pre)
-
-        consonant = float(consonant) + delta_pre
-        ovl = max(0.0, float(ovl) + (delta_pre * 0.55))
-
-        cons_floor = pre_new + float(cfg["cons_gap_min"])
-        cons_cap = pre_new + float(cfg["cons_gap_max"])
-        n_end_rel = max(c_boundary - float(offset), float(n_end) - float(offset))
-        cons_cap = min(cons_cap, max(cons_floor, n_end_rel - float(cfg["cons_tail"])))
-        consonant = min(max(consonant, cons_floor), cons_cap)
-
-        cut_abs = max(abs(float(cutoff)), float(consonant) + float(cfg["cut_gap_min"]))
-        cutoff = -cut_abs
-        return self.validate_fn(offset, consonant, cutoff, pre_new, ovl)
 
     def _apply_soft_mel_stage(
         self,
@@ -584,6 +409,18 @@ class KrPostprocessContext:
                 self.syllables_info,
                 self.validate_fn,
             )
+        if alias_type == "vcv":
+            return guard_kr_vcv_pre_to_cv_boundary(
+                offset,
+                consonant,
+                cutoff,
+                pre,
+                ovl,
+                current_w_idx,
+                self.syllables_info,
+                self.validate_fn,
+                alias_text=alias_text,
+            )
         if alias_type == "vc":
             return guard_kr_vc_cutoff_to_next_segment(
                 offset,
@@ -606,18 +443,6 @@ class KrPostprocessContext:
                 current_w_idx,
                 self.syllables_info,
                 self.validate_fn,
-            )
-        if alias_type == "vcv":
-            return guard_kr_vcv_timing_to_cv_boundary(
-                offset,
-                consonant,
-                cutoff,
-                pre,
-                ovl,
-                current_w_idx,
-                self.syllables_info,
-                self.validate_fn,
-                alias_text=alias_text,
             )
         return offset, consonant, cutoff, pre, ovl
 
@@ -723,17 +548,6 @@ class KrPostprocessContext:
             alias_text=alias_text,
             current_w_idx=current_w_idx,
         )
-        offset, consonant, cutoff, pre, ovl = self._apply_pre_boundary_guard(
-            offset,
-            consonant,
-            cutoff,
-            pre,
-            ovl,
-            alias_type=alias_type,
-            alias_text=alias_text,
-            current_w_idx=current_w_idx,
-            onset_hint=onset_hint,
-        )
 
         if enable_cutoff_guard and alias_type in {"cv", "cv_head"}:
             offset, consonant, cutoff, pre, cutoff_reduced = self.cv_cutoff_guard_fn(
@@ -798,8 +612,8 @@ __all__ = [
     "KrPostprocessContext",
     "KrPostprocessResult",
     "guard_kr_cv_head_offset_to_current_onset",
+    "guard_kr_vcv_pre_to_cv_boundary",
     "guard_kr_vc_cutoff_to_next_segment",
     "guard_kr_vv_cutoff_to_current_vowel",
-    "guard_kr_vcv_timing_to_cv_boundary",
     "log_post_timing_events",
 ]

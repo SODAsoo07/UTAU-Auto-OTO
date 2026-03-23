@@ -7,8 +7,6 @@ def normalize_language_name(language: str) -> str:
         return "japanese"
     if lang in {"korean", "kr", "ko", "kor"}:
         return "korean"
-    if lang in {"english", "en", "eng"}:
-        return "english"
     return lang
 
 
@@ -30,34 +28,27 @@ def normalize_format_type(language: str, format_type: str) -> str:
         return "general"
 
     if lang == "korean":
-        if fmt.startswith("cmpx"):
-            return "cmpx"
+        if fmt.startswith("cvc"):
+            return "cvc"
+        if "rentan" in fmt or "연단음" in raw:
+            return "cv"
+        if "단독음" in raw or fmt in {"mono", "cvsimple", "cv_simple", "cv"}:
+            return "cv"
         if fmt.startswith("cvvc"):
             return "cvvc"
         if fmt.startswith("vcv"):
             return "vcv"
-        if fmt.startswith("cvc"):
-            return "cvc"
-        if fmt.startswith("cv") or fmt.startswith("mono"):
-            return "cv"
         return fmt
 
     if lang == "japanese":
+        if "rentan" in fmt or "연단음" in raw:
+            return "cv"
+        if fmt in {"mono", "cv", "cvc"}:
+            return "cv"
         if fmt.startswith("cvvc"):
             return "cvvc"
         if fmt.startswith("vcv"):
             return "vcv"
-        if fmt.startswith("cvc") or fmt.startswith("cv") or fmt.startswith("mono"):
-            return "cv"
-        return fmt
-
-    if lang == "english":
-        if fmt.startswith("cvvc"):
-            return "cvvc"
-        if fmt.startswith("vcv"):
-            return "vcv"
-        if fmt.startswith("cvc") or fmt.startswith("cv") or fmt.startswith("mono"):
-            return "cv"
         return fmt
 
     return fmt
@@ -70,25 +61,24 @@ def normalize_auto_format_value(language: str, auto_format: str) -> str:
         return ""
 
     normalized = _normalize_token(raw)
-    if normalized.startswith("auto") or "자동" in raw:
+    if normalized.startswith("auto") or "자동감지" in raw:
         return ""
     if normalized.startswith("cvvc"):
         return "cvvc"
     if normalized.startswith("vcv"):
         return "vcv"
-    if lang == "korean" and normalized.startswith("cmpx"):
-        return "cmpx"
 
     if lang == "korean":
-        if normalized.startswith("cvc"):
+        if normalized == "cvc" or normalized.startswith("cvc/") or normalized.startswith("cvc("):
             return "cvc"
-        if normalized.startswith("cv") or normalized.startswith("mono"):
-            return "cv"
-    elif lang == "english":
-        if normalized.startswith("cvc") or normalized.startswith("cv") or normalized.startswith("mono"):
+        if normalized.startswith("cvc(한국어전용)") or raw.strip() == "CVC (한국어 전용)":
+            return "cvc"
+        if normalized.startswith("cv/") or normalized == "cv" or normalized.startswith("cv("):
             return "cv"
     else:
-        if normalized.startswith("cvc") or normalized.startswith("cv") or normalized.startswith("mono"):
+        if normalized.startswith("cvc/") or normalized.startswith("cvc(") or normalized == "cvc":
+            return "cv"
+        if normalized.startswith("cv/") or normalized == "cv" or normalized.startswith("cv("):
             return "cv"
 
     return normalize_format_type(lang, raw)

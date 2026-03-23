@@ -156,8 +156,7 @@ class ExportBundleTests(unittest.TestCase):
     def test_validate_bundle_dir_coupled(self):
         with tempfile.TemporaryDirectory() as td:
             model_dir = self._make_coupled_bundle(td)
-            with self.assertRaisesRegex(ValueError, "no longer supported"):
-                validate_bundle_dir(model_dir)
+            self.assertEqual(validate_bundle_dir(model_dir), [])
 
     def test_export_model_bundle_with_zip(self):
         with tempfile.TemporaryDirectory() as td:
@@ -203,8 +202,12 @@ class ExportBundleTests(unittest.TestCase):
     def test_export_model_bundle_coupled_uses_coupled_required_files(self):
         with tempfile.TemporaryDirectory() as td:
             model_dir = self._make_coupled_bundle(td)
-            with self.assertRaisesRegex(ValueError, "no longer supported"):
-                export_model_bundle(model_dir, os.path.join(td, "exports"))
+            manifest = export_model_bundle(model_dir, os.path.join(td, "exports"))
+            self.assertEqual(manifest["backend"], "coupled_nn_v1")
+            self.assertIn("coupled_model.pt", manifest["required_files"])
+            names = {entry["name"] for entry in manifest["files"]}
+            self.assertIn("coupled_model.pt", names)
+            self.assertNotIn("model_offset.txt", names)
 
     def test_export_model_bundle_ensemble_keeps_nested_files(self):
         with tempfile.TemporaryDirectory() as td:

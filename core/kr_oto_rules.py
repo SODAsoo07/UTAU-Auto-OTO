@@ -75,62 +75,6 @@ KR_CODA_PLOSIVE_MAP = {
 }
 
 HIRAGANA_RE = re.compile(r"[\u3041-\u3096\u309d-\u309f]")
-KR_CONSONANTS.update({"th", "dh", "zh", "ts", "dz", "tr", "dr", "tsh"})
-GLOTTAL_MARKS.update({
-    "\u30fb",
-    "\u00b7",
-    "\uff65",
-    "\u2022",
-    "\u2019",
-    "\u02bc",
-    "\u0294",
-    "\u02c0",
-    "`",
-})
-_VOCAL_FRY_TAG_RE = re.compile(
-    r"(?:^|[_\-\s])(?:vf|vfry|vocalfry|fry|creaky|glottal|edge)(?:$|[_\-\s]|\d)",
-    flags=re.IGNORECASE,
-)
-_KANA_TOKEN_RE = re.compile(r"^[\u3041-\u3096\u30A1-\u30FA\u30FC]+$")
-_KR_TAIL_BREATH_TEXT_HINTS = (
-    "breath",
-    "breathy",
-    "inhale",
-    "exhale",
-    "asp",
-    "air",
-    "숨",
-    "흡",
-    "호",
-    "호기",
-    "흡기",
-    "息",
-    "吸",
-    "吐",
-)
-_KR_TAIL_BREATH_WORDS = {
-    "r",
-    "h",
-    "bre",
-    "breath",
-    "breathy",
-    "inhale",
-    "exhale",
-    "asp",
-    "aspirate",
-    "air",
-    "숨",
-    "흡",
-    "호",
-    "호기",
-    "흡기",
-    "息",
-    "吸",
-    "吐",
-    "吸い",
-    "吐き",
-    "息継ぎ",
-}
 
 
 def clean_phone_mark(mark):
@@ -150,8 +94,8 @@ def _normalize_custom_alias_lookup(alias):
     if not text:
         return []
     variants = [text, text.lower()]
-    stripped = re.sub(r"(?:[_\-\s]*)(?:[a-g](?:[#♯]|[b♭])?[0-8])$", "", text, flags=re.IGNORECASE)
-    stripped = re.sub(r"(?:[_\-\s]*)(?:[a-g](?:sharp|flat)?[0-8])$", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:#|b)?[0-8])$", "", text, flags=re.IGNORECASE)
+    stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:sharp|flat)?[0-8])$", "", stripped, flags=re.IGNORECASE)
     stripped = re.sub(r"\s*[\(\[\{（【].*?[\)\]\}）】]\s*$", "", stripped).strip()
     if stripped:
         variants.extend([stripped, stripped.lower()])
@@ -266,68 +210,12 @@ def _detect_glottal_kind(alias):
     return None
 
 
-def _has_vocal_fry_hint(alias):
-    text = unicodedata.normalize("NFKC", str(alias or "")).strip()
-    if not text:
-        return False
-    return bool(_VOCAL_FRY_TAG_RE.search(text))
-
-
-def _is_tail_breath_marker_token(token):
-    raw = unicodedata.normalize("NFKC", str(token or "")).strip()
-    if not raw:
-        return False
-    upper = raw.upper()
-    if upper in {"R", "H"}:
-        return True
-    low = raw.lower()
-    if low in _KR_TAIL_BREATH_WORDS:
-        return True
-    if any(hint in low for hint in _KR_TAIL_BREATH_TEXT_HINTS):
-        return True
-    return False
-
-
-def is_tail_breath_alias(alias):
-    text = unicodedata.normalize("NFKC", str(alias or "")).strip()
-    if not text:
-        return False
-
-    parts = [p for p in re.split(r"\s+", text) if p]
-    if len(parts) >= 2:
-        left = parts[0].strip()
-        left_low = left.lower()
-        right = parts[-1].strip()
-        left_is_vowel_like = (
-            left_low in KR_VOWELS
-            or left_low in {"a", "e", "i", "o", "u"}
-            or bool(_KANA_TOKEN_RE.fullmatch(left))
-        )
-        if left_is_vowel_like and _is_tail_breath_marker_token(right):
-            return True
-
-    compact = re.sub(r"[\s_\-]+", "", text)
-    if len(compact) >= 2 and compact[-1].upper() in {"R", "H"}:
-        stem = compact[:-1].lower()
-        if stem in KR_VOWELS or stem in {"a", "e", "i", "o", "u"}:
-            return True
-
-    if re.fullmatch(r"[\u3041-\u3096\u30A1-\u30FA\u30FC]+(?:息|吸|吐|吸い|吐き|息継ぎ)", text):
-        return True
-    return False
-
-
 def is_breath(alias):
     """숨소리(br, br1...) 에일리어스인지 판별합니다."""
     clean = unicodedata.normalize("NFKC", str(alias or "")).strip().lower()
     if not clean:
         return False
-    # `a R`, `i H`, `あ 吸い` 등 어미숨은 standalone breath가 아니라 VC 계열로 처리한다.
-    if is_tail_breath_alias(clean):
-        return False
     if re.match(r"^br\d*$", clean):
-        return True
-    if re.match(r"^(?:bre|breath|breathy|inhale|exhale|air|asp|aspirate)(?:[_\-\s]?[a-z0-9]{0,4})?$", clean):
         return True
     if clean in {"bre", "breath", "息", "吸", "吐", "흡", "호", "숨"}:
         return True
@@ -408,7 +296,7 @@ def _extract_vc_right_token(alias):
             return parts[1].strip().rstrip("-")
         return ""
     m = re.match(
-        r"^([aoueiwy]+|eo|eu|ae|oe|wa|wo|we|ye|ya|yo|yu|wae|weo|eui|ui)([gknmdrlbsjtph]+|ng|kk|ss|pp|tt|jj|ch|c|q|h|th|dh|zh|ts|dz|tsh)$",
+        r"^([aoueiwy]+|eo|eu|ae|oe|wa|wo|we|ye|ya|yo|yu|wae|weo|eui|ui)([gknmdrlbsjtph]+|ng|kk|ss|pp|tt|jj|ch|c|q|h)$",
         a.lower(),
     )
     if m:
@@ -529,9 +417,6 @@ def classify_alias(alias, custom_map=None):
         left = parts[0].strip()
         right = " ".join(parts[1:]).strip()
 
-        if is_tail_breath_alias(clean):
-            return "vc"
-
         if left == "-":
             return "cv_head"
 
@@ -544,11 +429,6 @@ def classify_alias(alias, custom_map=None):
             return "cv_head"
         if left_lower in KR_VOWELS and right in GLOTTAL_MARKS:
             return "vc"
-        if _has_vocal_fry_hint(clean):
-            if left in GLOTTAL_MARKS or left == "-":
-                return "cv_head"
-            if left_lower in KR_VOWELS:
-                return "vc"
 
         left_upper = left.upper()
         if left_upper in KR_BATCHIM_MARKERS:
@@ -573,17 +453,10 @@ def classify_alias(alias, custom_map=None):
 
     clean_lower = clean.lower().rstrip("-")
 
-    if is_tail_breath_alias(clean):
-        return "vc"
-
     gk = _detect_glottal_kind(clean)
     if gk == "head":
         return "cv_head"
     if gk == "tail":
-        return "vc"
-    if _has_vocal_fry_hint(clean):
-        if gk == "head":
-            return "cv_head"
         return "vc"
 
     mapped_val = _lookup_custom_alias_value(custom_map, clean_lower)
@@ -599,7 +472,7 @@ def classify_alias(alias, custom_map=None):
         return "mono"
 
     m = re.match(
-        r"^([aoueiwy]+|eo|eu|ae|oe|wa|wo|we|ye|ya|yo|yu|wae|weo|eui|ui)([gknmdrlbsjtph]+|ng|kk|ss|pp|tt|jj|ch|th|dh|zh|ts|dz|tsh)$",
+        r"^([aoueiwy]+|eo|eu|ae|oe|wa|wo|we|ye|ya|yo|yu|wae|weo|eui|ui)([gknmdrlbsjtph]+|ng|kk|ss|pp|tt|jj|ch)$",
         clean_lower,
     )
     if m:

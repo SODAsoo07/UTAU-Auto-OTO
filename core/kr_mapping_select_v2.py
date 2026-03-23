@@ -47,37 +47,25 @@ def _effective_jump_limits(row_jump_default, row_jump_high_conf, expected_blank_
     jump_default = int(max(0, row_jump_default))
     jump_high_conf = int(max(jump_default, row_jump_high_conf))
     blank = max(0.0, min(1.0, float(expected_blank_conf)))
-    if blank >= 0.66:
+    if blank >= 0.70:
         return 0, 0
-    if blank >= 0.40:
+    if blank >= 0.45:
         return min(jump_default, 1), min(jump_high_conf, 1)
     return jump_default, jump_high_conf
 
 
-def _blank_guard_idx(expected_idx, selected_idx, syllable_blank_confidences, alias_type=""):
+def _blank_guard_idx(expected_idx, selected_idx, syllable_blank_confidences):
     if selected_idx is None:
         return selected_idx, False
-    a_type = str(alias_type or "").strip().lower()
+    if expected_idx is None:
+        return selected_idx, False
     sel_blank = _blank_conf_at(syllable_blank_confidences, selected_idx)
     exp_blank = _blank_conf_at(syllable_blank_confidences, expected_idx)
-    if a_type == "cv_head":
-        fwd_blank_th = 0.48
-        blank_gap_th = 0.06
-        hard_blank_th = 0.68
-        exp_blank_max = 0.56
-    elif a_type == "vcv":
-        fwd_blank_th = 0.52
-        blank_gap_th = 0.07
-        hard_blank_th = 0.72
-        exp_blank_max = 0.58
-    else:
-        fwd_blank_th = 0.54
-        blank_gap_th = 0.08
-        hard_blank_th = 0.74
-        exp_blank_max = 0.60
-    if selected_idx > expected_idx and sel_blank >= fwd_blank_th and (exp_blank + blank_gap_th) < sel_blank:
+    if selected_idx != expected_idx and sel_blank >= 0.58 and (exp_blank + 0.06) < sel_blank:
         return expected_idx, True
-    if sel_blank >= hard_blank_th and exp_blank <= exp_blank_max:
+    if selected_idx > expected_idx and sel_blank >= 0.60 and (exp_blank + 0.10) < sel_blank:
+        return expected_idx, True
+    if sel_blank >= 0.74 and exp_blank <= 0.64:
         return expected_idx, True
     return selected_idx, False
 
@@ -132,10 +120,8 @@ def _global_plan_guard_idx(
             planned_score = -1.0
 
     # 저신뢰/고공백 상황에서는 전역 monotonic planner를 사실상 고정점으로 사용한다.
-    lock_blank_th = 0.48 if a_type == "cv_head" else 0.52
-    strong_lock = bool(file_mapping_low_conf) or (selected_blank >= lock_blank_th) or (planned_blank >= lock_blank_th)
-    conf_gate = max(conf_th + 0.06, 0.68) if a_type == "cv_head" else max(conf_th + 0.04, 0.64)
-    if conf < conf_gate:
+    strong_lock = bool(file_mapping_low_conf) or (selected_blank >= 0.58) or (planned_blank >= 0.58)
+    if conf < max(conf_th + 0.05, 0.66):
         strong_lock = True
 
     if strong_lock:
@@ -170,6 +156,109 @@ def _mel_conf_at(syllables_info, idx, key, fallback=0.0):
         return max(0.0, min(1.0, float(row.get(key, fallback) or fallback)))
     except Exception:
         return float(fallback)
+
+
+def _is_blank_risky_idx(syllables_info, syllable_blank_confidences, idx):
+    blank = _blank_conf_at(syllable_blank_confidences, idx)
+    sil = _mel_conf_at(syllables_info, idx, "mel_silence_sparse_conf", fallback=blank)
+    voiced = _mel_conf_at(syllables_info, idx, "mel_voiced_formant_conf", 0.0)
+    unvoiced = _mel_conf_at(syllables_info, idx, "mel_unvoiced_diffuse_conf", 0.0)
+    return bool(blank >= 0.70 or (sil >= 0.68 and (voiced + unvoiced) <= 0.18))
+
+
+def _find_nonblank_fallback_idx(
+    *,
+    expected_idx,
+    target_clean,
+    romaji_syllables,
+    syllables_info,
+    syllable_blank_confidences,
+    cv_match_score_fn,
+    search_back=1,
+    search_fwd=2,
+):
+    if expected_idx is None or not romaji_syllables:
+        return None
+    n = len(romaji_syllables)
+    e = max(0, min(int(expected_idx), n - 1))
+    lo = max(0, e - max(0, int(search_back)))
+    hi = min(n - 1, e + max(0, int(search_fwd)))
+    best_idx = None
+    best_score = -10**9
+    for idx in range(lo, hi + 1):
+        if _is_blank_risky_idx(syllables_info, syllable_blank_confidences, idx):
+            continue
+        text_score = float(cv_match_score_fn(target_clean, romaji_syllables[idx])) if target_clean else 0.0
+        blank = _blank_conf_at(syllable_blank_confidences, idx)
+        sil = _mel_conf_at(syllables_info, idx, "mel_silence_sparse_conf", fallback=blank)
+        score = text_score - (abs(idx - e) * 8.0) - (blank * 20.0) - (sil * 16.0)
+        if score > best_score:
+            best_score = score
+            best_idx = int(idx)
+    return best_idx
+
+
+def _token_invariant_guard_idx(
+    *,
+    alias_type,
+    target_clean,
+    expected_idx,
+    selected_idx,
+    row_mapping_confidence,
+    file_mapping_conf_th,
+    file_mapping_low_conf,
+    romaji_syllables,
+    syllable_blank_confidences,
+    split_syllable_parts_fn,
+    cv_match_score_fn,
+):
+    if selected_idx is None or expected_idx is None or not romaji_syllables:
+        return selected_idx, False
+    n = len(romaji_syllables)
+    if n <= 0:
+        return selected_idx, False
+    e = int(max(0, min(int(expected_idx), n - 1)))
+    s = int(max(0, min(int(selected_idx), n - 1)))
+    if s == e:
+        return s, False
+    target = str(target_clean or "").strip()
+    if not target:
+        return s, False
+
+    exp_tok = str(romaji_syllables[e] or "")
+    sel_tok = str(romaji_syllables[s] or "")
+    exp_score = float(cv_match_score_fn(target, exp_tok))
+    sel_score = float(cv_match_score_fn(target, sel_tok))
+    exp_blank = _blank_conf_at(syllable_blank_confidences, e)
+    sel_blank = _blank_conf_at(syllable_blank_confidences, s)
+    conf = float(row_mapping_confidence or 0.0)
+    conf_th = float(file_mapping_conf_th or 0.0)
+    low_conf = bool(file_mapping_low_conf) or conf < max(conf_th + 0.02, 0.62)
+
+    t_on, t_v, _t_c = split_syllable_parts_fn(target)
+    e_on, e_v, _e_c = split_syllable_parts_fn(exp_tok)
+    s_on, s_v, _s_c = split_syllable_parts_fn(sel_tok)
+
+    expected_exact = exp_score >= 98.0
+    selected_exact = sel_score >= 98.0
+    expected_vowel_match = bool(t_v and e_v and t_v == e_v)
+    selected_vowel_match = bool(t_v and s_v and t_v == s_v)
+
+    if expected_exact and (not selected_exact):
+        return e, True
+    if expected_vowel_match and (not selected_vowel_match):
+        if low_conf or exp_score >= max(84.0, sel_score + 2.0):
+            return e, True
+    if alias_type in {"cv", "cv_head"} and t_on and e_on:
+        exp_onset_match = bool(t_on == e_on or t_on[:1] == e_on[:1])
+        sel_onset_match = bool(t_on == s_on or t_on[:1] == s_on[:1])
+        if exp_onset_match and (not sel_onset_match) and exp_score >= (sel_score - 6.0):
+            return e, True
+    if sel_blank >= 0.66 and (exp_blank + 0.08) < sel_blank and exp_score >= max(84.0, sel_score - 8.0):
+        return e, True
+    if low_conf and (sel_score + 12.0) < exp_score:
+        return e, True
+    return s, False
 
 
 def _is_unvoiced_like_onset(onset: str) -> bool:
@@ -281,9 +370,23 @@ def _mel_guided_cvvc_adjustment(
         return selected_idx, False
 
     t_onset, _t_vowel, _t_coda = split_syllable_parts_fn(target_clean)
+    t_onset = str(t_onset or "").strip().lower()
+    t_vowel = str(_t_vowel or "").strip().lower()
+    t_coda = str(_t_coda or "").strip().lower()
     target_unvoiced = _is_unvoiced_like_onset(t_onset)
     voiced_weight = 10.0 if a_type in {"cv", "cv_head", "vcv"} else 7.0
     unvoiced_weight = 8.0 if target_unvoiced else 3.0
+
+    def _parts_at(idx):
+        try:
+            on, vw, cd = split_syllable_parts_fn(romaji_syllables[idx])
+            return (
+                str(on or "").strip().lower(),
+                str(vw or "").strip().lower(),
+                str(cd or "").strip().lower(),
+            )
+        except Exception:
+            return "", "", ""
 
     def _score(idx):
         text = float(cv_match_score_fn(target_clean, romaji_syllables[idx]))
@@ -297,11 +400,28 @@ def _mel_guided_cvvc_adjustment(
         voiced = _mel_conf_at(syllables_info, idx, "mel_voiced_formant_conf", 0.0)
         unvoiced = _mel_conf_at(syllables_info, idx, "mel_unvoiced_diffuse_conf", 0.0)
         breath = _mel_conf_at(syllables_info, idx, "mel_breath_like_conf", 0.0)
-        jump_penalty = abs(idx - expected_idx) * 8.0
+        c_onset, c_vowel, c_coda = _parts_at(idx)
+        jump_penalty = abs(idx - expected_idx) * 10.0
         mel_bonus = (voiced_weight * voiced) + (unvoiced_weight * unvoiced)
         mel_penalty = (22.0 * blank) + (14.0 * sil) + (6.0 * breath)
+        core_bonus = 0.0
+        mismatch_penalty = 0.0
+        if t_vowel:
+            if c_vowel == t_vowel:
+                core_bonus += 9.0
+            else:
+                mismatch_penalty += 34.0 if a_type == "vcv" else 44.0
+        if t_onset:
+            if c_onset == t_onset:
+                core_bonus += 4.0
+            elif a_type in {"cv", "cv_head"}:
+                mismatch_penalty += 12.0
+            else:
+                mismatch_penalty += 6.0
+        if a_type == "vcv" and t_coda and c_coda and c_coda != t_coda:
+            mismatch_penalty += 4.0
         stability_bonus = 1.5 if idx == selected_idx else 0.0
-        return text + mel_bonus + stability_bonus - mel_penalty - jump_penalty
+        return text + mel_bonus + stability_bonus + core_bonus - mel_penalty - jump_penalty - mismatch_penalty
 
     best_idx = int(selected_idx)
     best_score = float(_score(best_idx))
@@ -316,10 +436,28 @@ def _mel_guided_cvvc_adjustment(
 
     # Keep changes conservative unless evidence is strong.
     selected_score = float(_score(int(selected_idx)))
-    if best_score < (selected_score + 4.0):
+    min_gain = 6.0 if a_type in {"cv", "cv_head"} else 5.0
+    if best_score < (selected_score + min_gain):
         return selected_idx, False
     if _blank_conf_at(syllable_blank_confidences, best_idx) >= 0.72 and expected_blank <= 0.60:
         return selected_idx, False
+
+    sel_onset, sel_vowel, _sel_coda = _parts_at(int(selected_idx))
+    best_onset, best_vowel, _best_coda = _parts_at(best_idx)
+    if t_vowel:
+        sel_vowel_match = bool(sel_vowel and sel_vowel == t_vowel)
+        best_vowel_match = bool(best_vowel and best_vowel == t_vowel)
+        if sel_vowel_match and not best_vowel_match:
+            return selected_idx, False
+        if not best_vowel_match:
+            return selected_idx, False
+    if a_type in {"cv", "cv_head"} and t_onset:
+        sel_onset_match = bool(sel_onset and sel_onset == t_onset)
+        best_onset_match = bool(best_onset and best_onset == t_onset)
+        if sel_onset_match and not best_onset_match:
+            return selected_idx, False
+        if not best_onset_match and best_score < (selected_score + 10.0):
+            return selected_idx, False
     return best_idx, True
 
 
@@ -459,7 +597,6 @@ def select_kr_vcv_index(
             expected_vcv_idx,
             vcv_selected_w_idx,
             syllable_blank_confidences,
-            alias_type="vcv",
         )
         if guarded and guarded_idx != vcv_selected_w_idx:
             if debug_logging:
@@ -493,6 +630,28 @@ def select_kr_vcv_index(
                 )
             vcv_selected_w_idx = int(mel_idx)
             cv_seq_idx = max(cv_seq_idx, vcv_selected_w_idx + 1)
+        invariant_idx, invariant_guarded = _token_invariant_guard_idx(
+            alias_type="vcv",
+            target_clean=target_clean,
+            expected_idx=expected_vcv_idx,
+            selected_idx=vcv_selected_w_idx,
+            row_mapping_confidence=row_mapping_confidence,
+            file_mapping_conf_th=file_mapping_conf_th,
+            file_mapping_low_conf=bool(row_mapping_confidence < max(float(file_mapping_conf_th), 0.60)),
+            romaji_syllables=romaji_syllables,
+            syllable_blank_confidences=syllable_blank_confidences,
+            split_syllable_parts_fn=split_syllable_parts_fn,
+            cv_match_score_fn=cv_match_score_fn,
+        )
+        if invariant_guarded and invariant_idx != vcv_selected_w_idx:
+            if debug_logging:
+                log_fn(
+                    f"🛡️ {fname}: KR VCV token invariant guard "
+                    f"({vcv_selected_w_idx + 1}->{invariant_idx + 1}, {alias})"
+                )
+            vcv_selected_w_idx = int(invariant_idx)
+            cv_seq_idx = max(cv_seq_idx, vcv_selected_w_idx + 1)
+            row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.08)
     return vcv_selected_w_idx, cv_seq_idx, row_mapping_confidence
 
 
@@ -599,7 +758,28 @@ def select_kr_general_cv_index(
         ):
             keep_forced = False
         forced_blank_conf = _blank_conf_at(syllable_blank_confidences, forced_selected_idx)
-        if forced_blank_conf >= 0.66 and (expected_blank_conf + 0.08) < forced_blank_conf:
+        forced_sil_conf = _mel_conf_at(
+            syllables_info,
+            forced_selected_idx,
+            "mel_silence_sparse_conf",
+            fallback=forced_blank_conf,
+        )
+        expected_sil_conf = _mel_conf_at(
+            syllables_info,
+            expected_cv_idx,
+            "mel_silence_sparse_conf",
+            fallback=expected_blank_conf,
+        )
+        fmt_norm = str(file_format or "").strip().lower()
+        alias_norm = str(alias_type or "").strip().lower()
+        forced_blank_gate = 0.66
+        forced_blank_margin = 0.08
+        if fmt_norm in {"cvvc", "cvc"} and alias_norm in {"cv", "cv_head"}:
+            forced_blank_gate = 0.60
+            forced_blank_margin = 0.06
+        if forced_blank_conf >= forced_blank_gate and (expected_blank_conf + forced_blank_margin) < forced_blank_conf:
+            keep_forced = False
+        if forced_sil_conf >= (forced_blank_gate + 0.04) and (expected_sil_conf + 0.08) < forced_sil_conf:
             keep_forced = False
         if keep_forced:
             selected_w_idx = int(forced_selected_idx)
@@ -741,7 +921,6 @@ def select_kr_general_cv_index(
         expected_cv_idx,
         selected_w_idx,
         syllable_blank_confidences,
-        alias_type=alias_type,
     )
     if guarded and guarded_idx != selected_w_idx:
         if debug_logging:
@@ -801,6 +980,29 @@ def select_kr_general_cv_index(
             row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.12)
             selected_w_idx = int(guarded_plan_idx)
             cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
+    invariant_idx, invariant_guarded = _token_invariant_guard_idx(
+        alias_type=alias_type,
+        target_clean=target_clean,
+        expected_idx=expected_cv_idx,
+        selected_idx=selected_w_idx,
+        row_mapping_confidence=row_mapping_confidence,
+        file_mapping_conf_th=file_mapping_conf_th,
+        file_mapping_low_conf=file_mapping_low_conf,
+        romaji_syllables=romaji_syllables,
+        syllable_blank_confidences=syllable_blank_confidences,
+        split_syllable_parts_fn=split_syllable_parts_fn,
+        cv_match_score_fn=cv_match_score_fn,
+    )
+    if invariant_guarded and invariant_idx != selected_w_idx:
+        if debug_logging:
+            log_fn(
+                f"🛡️ {fname}: KR {str(alias_type or '').upper()} token invariant guard "
+                f"({selected_w_idx + 1}->{invariant_idx + 1}, {alias})"
+            )
+        row_jump_blocked = 1
+        row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.08)
+        selected_w_idx = int(invariant_idx)
+        cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
     return {
         "expected_cv_idx": int(expected_cv_idx),
         "selected_w_idx": int(selected_w_idx) if selected_w_idx is not None else None,

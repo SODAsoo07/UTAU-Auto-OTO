@@ -6,10 +6,9 @@ on:
 jobs:
   build-windows-stable:
     runs-on: windows-latest
-    timeout-minutes: 180
+    timeout-minutes: 90
     env:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      UTOA_NUITKA_JOBS: "1"
 
     steps:
       - name: Checkout
@@ -60,7 +59,7 @@ jobs:
 
       - name: Build App (stable)
         shell: pwsh
-        timeout-minutes: 140
+        timeout-minutes: 70
         run: |
           $suppress = 'Nuitka-Inclusion: Writing cache for dependencies of .* ignoring\.'
           python -u build.py --name UTAU_Auto_OTO --backend nuitka --skip-deps --channel "stable" 2>&1 |

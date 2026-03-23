@@ -44,6 +44,8 @@ from core.oto_ml.coupled.model import (
     COUPLED_BACKEND,
     COUPLED_BACKEND_RAWMEL,
     COUPLED_MODEL_FILE,
+    COUPLED_MODEL_ONNX_FILE,
+    COUPLED_MODEL_ONNX_META_FILE,
     DELTA_TARGET_NAMES,
     FEATURE_NAMES,
     PATCH_FEATURES,
@@ -75,6 +77,212 @@ from core.oto_ml.pairing.vc_cv_pairing import _batch_pair_positions, _build_vc_c
 logger = logging.getLogger(__name__)
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in {"1", "true", "yes", "on", "y"}:
+        return True
+    if raw in {"0", "false", "no", "off", "n"}:
+        return False
+    return bool(default)
+
+
+def _export_coupled_onnx(
+    torch,
+    model,
+    out_dir: str,
+    *,
+    feature_names: List[str],
+    categorical_features: List[str],
+    categorical_bucket_sizes: List[int],
+    patch_features: List[str],
+    head_mode: str,
+    anchor_targets: List[str],
+    delta_targets: List[str],
+    rawmel_enabled: bool = False,
+    mel_bins: int = 80,
+    onset_frames: int = 8,
+    tail_frames: int = 8,
+    mel_patch_spec: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if not _env_flag("UTOA_ML_EXPORT_ONNX", True):
+        return {"enabled": False, "status": "disabled"}
+
+    onnx_path = os.path.join(out_dir, COUPLED_MODEL_ONNX_FILE)
+    sidecar_path = os.path.join(out_dir, COUPLED_MODEL_ONNX_META_FILE)
+    use_cat_input = bool(categorical_bucket_sizes)
+    head_mode_norm = str(head_mode or "single").strip().lower()
+
+    class _ExportWrapper(torch.nn.Module):
+        def __init__(self, base_model, is_rawmel: bool, use_cat: bool, mode: str):
+            super().__init__()
+            self.base_model = base_model
+            self.is_rawmel = bool(is_rawmel)
+            self.use_cat = bool(use_cat)
+            self.mode = str(mode or "single").strip().lower()
+
+        def _encode_rawmel_export(self, encoder, mel_tensor):
+            # ONNX export compatibility:
+            # AdaptiveAvgPool2d((4,1)) fails for some frame lengths (e.g. 49),
+            # so we use bilinear resize to the same target shape during export.
+            x = encoder.net[0](mel_tensor)
+            x = encoder.net[1](x)
+            x = encoder.net[2](x)
+            x = encoder.net[3](x)
+            x = encoder.net[4](x)
+            x = encoder.net[5](x)
+            x = torch.nn.functional.interpolate(x, size=(4, 1), mode="bilinear", align_corners=False)
+            x = encoder.proj[0](x)
+            x = encoder.proj[1](x)
+            x = encoder.proj[2](x)
+            x = encoder.proj[3](x)
+            x = encoder.proj[4](x)
+            return x
+
+        def forward(self, *inputs):
+            idx = 0
+            x = inputs[idx]
+            idx += 1
+            patch = inputs[idx]
+            idx += 1
+            if self.is_rawmel:
+                onset = inputs[idx]
+                idx += 1
+                tail = inputs[idx]
+                idx += 1
+                cat = inputs[idx] if self.use_cat else None
+                # Build the rawmel forward path explicitly to avoid
+                # exporter limitation in AdaptiveAvgPool2d for non-factor sizes.
+                xf = self.base_model.feature_net(x)
+                xp = self.base_model.patch_net(patch)
+                xo = self._encode_rawmel_export(self.base_model.onset_encoder, onset)
+                xt = self._encode_rawmel_export(self.base_model.tail_encoder, tail)
+                pieces = [xf, xp, xo, xt]
+                cat_repr = self.base_model._cat_repr(x, cat)
+                if cat_repr is not None:
+                    pieces.append(cat_repr)
+                z = self.base_model.joint(torch.cat(pieces, dim=1))
+                conf = self.base_model.conf_head(z)
+                if self.mode == "split":
+                    anchor = self.base_model.anchor_head(z)
+                    delta = self.base_model.delta_head(z)
+                    out = (anchor, delta, conf)
+                else:
+                    deltas = self.base_model.delta_head(z)
+                    out = (deltas, conf)
+            else:
+                cat = inputs[idx] if self.use_cat else None
+                out = self.base_model(x, patch, cat)
+            if not isinstance(out, tuple):
+                raise RuntimeError("Coupled model export failed: unexpected non-tuple output.")
+            if self.mode == "split":
+                if len(out) >= 3:
+                    return out[0], out[1], out[2]
+                raise RuntimeError("Coupled split head export failed: missing outputs.")
+            if len(out) >= 2:
+                return out[0], out[1]
+            raise RuntimeError("Coupled single head export failed: missing outputs.")
+
+    try:
+        wrapper = _ExportWrapper(model, rawmel_enabled, use_cat_input, head_mode_norm).to("cpu")
+        wrapper.eval()
+
+        dummy_x = torch.zeros((1, max(1, len(feature_names))), dtype=torch.float32)
+        dummy_patch = torch.zeros((1, max(1, len(patch_features))), dtype=torch.float32)
+        input_tensors = [dummy_x, dummy_patch]
+        input_names = ["x", "patch"]
+        dynamic_axes = {
+            "x": {0: "batch"},
+            "patch": {0: "batch"},
+        }
+
+        if rawmel_enabled:
+            dummy_onset = torch.zeros((1, 1, int(onset_frames), int(mel_bins)), dtype=torch.float32)
+            dummy_tail = torch.zeros((1, 1, int(tail_frames), int(mel_bins)), dtype=torch.float32)
+            input_tensors.extend([dummy_onset, dummy_tail])
+            input_names.extend(["onset", "tail"])
+            dynamic_axes["onset"] = {0: "batch"}
+            dynamic_axes["tail"] = {0: "batch"}
+
+        if use_cat_input:
+            dummy_cat = torch.zeros((1, len(categorical_bucket_sizes)), dtype=torch.long)
+            input_tensors.append(dummy_cat)
+            input_names.append("cat_idx")
+            dynamic_axes["cat_idx"] = {0: "batch"}
+
+        if head_mode_norm == "split":
+            output_names = ["anchor", "delta", "confidence"]
+            dynamic_axes.update(
+                {
+                    "anchor": {0: "batch"},
+                    "delta": {0: "batch"},
+                    "confidence": {0: "batch"},
+                }
+            )
+        else:
+            output_names = ["deltas", "confidence"]
+            dynamic_axes.update(
+                {
+                    "deltas": {0: "batch"},
+                    "confidence": {0: "batch"},
+                }
+            )
+
+        torch.onnx.export(
+            wrapper,
+            tuple(input_tensors),
+            onnx_path,
+            input_names=input_names,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes,
+            opset_version=int(os.environ.get("UTOA_ML_ONNX_OPSET", "17") or 17),
+            do_constant_folding=True,
+        )
+
+        sidecar = {
+            "feature_names": list(feature_names),
+            "categorical_features": list(categorical_features),
+            "categorical_bucket_sizes": [int(v) for v in categorical_bucket_sizes],
+            "patch_features": list(patch_features),
+            "head_mode": head_mode_norm if head_mode_norm in {"single", "split"} else "single",
+            "anchor_targets": list(anchor_targets),
+            "delta_targets": list(delta_targets),
+            "rawmel_enabled": bool(rawmel_enabled),
+            "mel_bins": int(mel_bins),
+            "onset_frames": int(onset_frames),
+            "tail_frames": int(tail_frames),
+            "mel_patch_spec": dict(mel_patch_spec or {}),
+            "use_cat_input": bool(use_cat_input),
+            "input_names": {
+                "x": "x",
+                "patch": "patch",
+                "onset": "onset" if rawmel_enabled else "",
+                "tail": "tail" if rawmel_enabled else "",
+                "cat": "cat_idx" if use_cat_input else "",
+            },
+            "output_names": {
+                "anchor": "anchor" if head_mode_norm == "split" else "",
+                "delta": "delta" if head_mode_norm == "split" else "",
+                "deltas": "deltas" if head_mode_norm != "split" else "",
+                "confidence": "confidence",
+            },
+        }
+        with open(sidecar_path, "w", encoding="utf-8") as f:
+            json.dump(sidecar, f, ensure_ascii=False, indent=2)
+        return {
+            "enabled": True,
+            "status": "ok",
+            "onnx_path": onnx_path,
+            "sidecar_path": sidecar_path,
+            "input_names": list(input_names),
+            "output_names": list(output_names),
+        }
+    except Exception as exc:
+        logger.warning("Failed to export coupled ONNX bundle: %s", exc)
+        return {"enabled": True, "status": "failed", "error": str(exc)}
+
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, default))
@@ -88,6 +296,13 @@ def _env_str(name: str, default: str) -> str:
         return str(default)
     text = str(raw).strip()
     return text or str(default)
+
+
+def _resolve_head_mode(raw_value: str, default: str = "split") -> str:
+    mode = str(raw_value or default).strip().lower()
+    if mode in {"single", "split"}:
+        return mode
+    return str(default).strip().lower() or "split"
 
 
 def _resolve_min_mapping_confidence(lang: str, fmt: str, min_mapping_confidence: float) -> float:
@@ -226,7 +441,48 @@ def _compute_static_hard_example_boost(
             pd.to_numeric(df["used_alias_occurrence_mapping"], errors="coerce").fillna(0.0).to_numpy() > 0.5
         )
         boost *= np.where(occurrence_mask, 1.0 + (0.10 * strength_v), 1.0)
-    return np.clip(boost.astype(np.float32), 1.0, 3.0)
+    if "used_nuclei_fallback" in df.columns:
+        nuclei_mask = pd.to_numeric(df["used_nuclei_fallback"], errors="coerce").fillna(0.0).to_numpy() > 0.5
+        boost *= np.where(nuclei_mask, 1.0 + (0.08 * strength_v), 1.0)
+    if "used_alias_based_syllables" in df.columns:
+        alias_based_mask = (
+            pd.to_numeric(df["used_alias_based_syllables"], errors="coerce").fillna(0.0).to_numpy() > 0.5
+        )
+        boost *= np.where(alias_based_mask, 1.0 + (0.06 * strength_v), 1.0)
+    if "mapping_reason_code" in df.columns:
+        reason = df["mapping_reason_code"].astype(str).str.strip().str.lower().to_numpy()
+        risky_reason_mask = np.isin(
+            reason,
+            [
+                "order_locked_length_mismatch",
+                "order_locked_glide_mismatch",
+                "order_locked_low_phone_quality",
+                "alias_based_recover",
+                "alias_based_empty_words",
+            ],
+        )
+        recover_reason_mask = np.isin(
+            reason,
+            [
+                "alias_based_cvvc",
+                "words_low_phone_quality",
+                "alias_phone_minimal",
+            ],
+        )
+        boost *= np.where(risky_reason_mask, 1.0 + (0.14 * strength_v), 1.0)
+        boost *= np.where(recover_reason_mask, 1.0 + (0.09 * strength_v), 1.0)
+    if "train_quality_score" in df.columns:
+        quality_np = pd.to_numeric(df["train_quality_score"], errors="coerce").fillna(100.0).to_numpy(dtype=np.float32)
+        boost *= np.where(quality_np < 70.0, 1.0 + (0.06 * strength_v), 1.0)
+    if "train_keep_default" in df.columns:
+        keep_default_np = pd.to_numeric(df["train_keep_default"], errors="coerce").fillna(1.0).to_numpy(dtype=np.float32)
+        # Keep low-quality labels from dominating while still keeping them in training.
+        boost *= np.where(keep_default_np <= 0.5, 1.0 - (0.10 * strength_v), 1.0)
+    if "blank_risk_score" in df.columns:
+        blank_risk_np = pd.to_numeric(df["blank_risk_score"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+        severe_blank_mask = cv_mask & (blank_risk_np >= 0.72)
+        boost *= np.where(severe_blank_mask, 1.0 - (0.08 * strength_v), 1.0)
+    return np.clip(boost.astype(np.float32), 0.70, 3.00)
 
 
 def _apply_blank_risk_weight(df, weights: "np.ndarray") -> "np.ndarray":
@@ -398,10 +654,9 @@ def _prepare_training_frame(
     lang = str(language or "").strip().lower()
     fmt = normalize_format_type(lang, format_type) or "general"
     family = normalize_alias_family(alias_family)
-    lang_filter_enabled = bool(lang) and lang not in {"all", "global", "*", "any"}
     if family and not alias_types:
         alias_types = alias_family_to_alias_types(family)
-    if "language" in df.columns and lang_filter_enabled:
+    if "language" in df.columns:
         df = df[df["language"].astype(str).str.lower() == lang]
     if "format_type" in df.columns and fmt and fmt != "general":
         df = df[
@@ -555,7 +810,6 @@ def train_coupled_bundle(
     else:
         W = np.ones((len(df),), dtype=np.float32)
     W = _apply_blank_risk_weight(df, W)
-    W = _apply_blank_risk_weight(df, W)
     if "alias_type" in df.columns:
         alias_type_arr = df["alias_type"].astype(str).str.lower().to_numpy()
     else:
@@ -643,6 +897,7 @@ def train_coupled_bundle(
     pair_warmup_epochs = max(0, _env_int("UTOA_ML_COUPLED_PAIR_WARMUP_EPOCHS", pair_warmup_default))
 
     aux_dim = len(AUX_TARGET_NAMES) if use_aux else 0
+    head_mode = _resolve_head_mode(_env_str("UTOA_ML_COUPLED_HEAD_MODE", "split"), default="split")
     model = _build_model(
         torch,
         nn,
@@ -650,7 +905,7 @@ def train_coupled_bundle(
         patch_dim=int(P.shape[1]),
         aux_dim=aux_dim,
         categorical_bucket_sizes=categorical_bucket_sizes,
-        head_mode="split",
+        head_mode=head_mode,
     )
     run_device = _resolve_device(torch, requested=device)
     if isinstance(run_device, str):
@@ -722,8 +977,11 @@ def train_coupled_bundle(
         ["huber", "huber", "huber"],
         [18.0, 18.0, 24.0],
     )
-    cons_margin = 10.0
-    cut_margin = 10.0
+    cons_margin = max(0.0, _env_float("UTOA_ML_COUPLED_CONS_MARGIN", 10.0))
+    cut_margin = max(0.0, _env_float("UTOA_ML_COUPLED_CUT_MARGIN", 10.0))
+    penalty_loss_weight = max(0.0, _env_float("UTOA_ML_COUPLED_CONSTRAINT_WEIGHT", 0.25))
+    align_loss_weight = max(0.0, _env_float("UTOA_ML_COUPLED_ALIGN_WEIGHT", 0.12))
+    conf_loss_weight = max(0.0, _env_float("UTOA_ML_COUPLED_CONF_WEIGHT", 0.05))
     boundary_aux_default = 0.18 if is_kr_cvc else 0.14
     boundary_consistency_default = 0.10 if is_kr_cvc else 0.06
     boundary_aux_weight = _env_float("UTOA_ML_COUPLED_BOUNDARY_AUX_WEIGHT", boundary_aux_default)
@@ -860,9 +1118,9 @@ def train_coupled_bundle(
 
             total_loss = (
                 base_loss
-                + (0.25 * penalty_loss)
-                + (0.12 * align_loss)
-                + (0.05 * conf_loss)
+                + (float(penalty_loss_weight) * penalty_loss)
+                + (float(align_loss_weight) * align_loss)
+                + (float(conf_loss_weight) * conf_loss)
                 + (float(boundary_aux_weight) * aux_loss)
                 + (float(boundary_consistency_weight) * boundary_consistency_loss)
                 + (epoch_pair_weight * pair_loss)
@@ -963,9 +1221,9 @@ def train_coupled_bundle(
             val_total = float(
                 (
                     val_base
-                    + (0.25 * val_penalty)
-                    + (0.12 * val_align)
-                    + (0.05 * val_conf)
+                    + (float(penalty_loss_weight) * val_penalty)
+                    + (float(align_loss_weight) * val_align)
+                    + (float(conf_loss_weight) * val_conf)
                     + (float(boundary_aux_weight) * val_aux)
                     + (float(boundary_consistency_weight) * val_boundary_consistency)
                     + (epoch_pair_weight * val_pair)
@@ -1051,7 +1309,7 @@ def train_coupled_bundle(
             "in_dim": int(X.shape[1]),
             "patch_dim": int(P.shape[1]),
             "hidden_dim": 160,
-            "head_mode": "split",
+            "head_mode": str(head_mode),
             "anchor_dim": int(len(ANCHOR_TARGET_NAMES)),
             "delta_dim": int(len(DELTA_TARGET_NAMES)),
             "aux_dim": int(aux_dim),
@@ -1060,6 +1318,20 @@ def train_coupled_bundle(
         os.path.join(out_dir, COUPLED_MODEL_FILE),
     )
     write_feature_schema(os.path.join(out_dir, "feature_schema.json"))
+    onnx_export = _export_coupled_onnx(
+        torch,
+        model,
+        out_dir,
+        feature_names=feature_names,
+        categorical_features=categorical_features,
+        categorical_bucket_sizes=[int(v) for v in categorical_bucket_sizes],
+        patch_features=list(PATCH_FEATURES),
+        head_mode=str(head_mode),
+        anchor_targets=list(ANCHOR_TARGET_NAMES),
+        delta_targets=list(DELTA_TARGET_NAMES),
+        rawmel_enabled=False,
+        mel_patch_spec={},
+    )
 
     meta = {
         "backend": COUPLED_BACKEND,
@@ -1076,9 +1348,10 @@ def train_coupled_bundle(
         "targets": list(TARGET_NAMES),
         "anchor_targets": list(ANCHOR_TARGET_NAMES),
         "delta_targets": list(DELTA_TARGET_NAMES),
-        "head_mode": "split",
+        "head_mode": str(head_mode),
         "aux_targets": list(AUX_TARGET_NAMES) if use_aux else [],
         "mel_patch_spec": list(PATCH_FEATURES),
+        "onnx_export": onnx_export,
         "min_confidence": float(min_confidence),
         "vc_cv_pair_weight": float(pair_weight_base),
         "vc_cv_pair_warmup_epochs": int(pair_warmup_epochs),
@@ -1110,6 +1383,13 @@ def train_coupled_bundle(
             "target_weights": [float(v) for v in aux_target_weight_values],
             "loss_kinds": list(aux_loss_kinds),
             "huber_deltas": [float(v) for v in aux_huber_deltas],
+        },
+        "constraint_loss": {
+            "penalty_weight": float(penalty_loss_weight),
+            "align_weight": float(align_loss_weight),
+            "conf_weight": float(conf_loss_weight),
+            "cons_margin": float(cons_margin),
+            "cut_margin": float(cut_margin),
         },
         "fallback_order": [COUPLED_BACKEND, "lightgbm", "base"],
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -1421,6 +1701,7 @@ def train_coupled_bundle_rawmel(
         val_dst_pos = []
 
     aux_dim = len(AUX_TARGET_NAMES) if use_aux else 0
+    head_mode = _resolve_head_mode(_env_str("UTOA_ML_RAWMEL_HEAD_MODE", "split"), default="split")
     model = _build_model_rawmel(
         torch,
         nn,
@@ -1431,7 +1712,7 @@ def train_coupled_bundle_rawmel(
         tail_frames=int(tail_frames),
         aux_dim=aux_dim,
         categorical_bucket_sizes=categorical_bucket_sizes,
-        head_mode="split",
+        head_mode=head_mode,
     )
     run_device = _resolve_device(torch, requested=device)
     if isinstance(run_device, str):
@@ -1585,8 +1866,11 @@ def train_coupled_bundle_rawmel(
         ["huber", "huber", "huber"],
         [18.0, 18.0, 26.0],
     )
-    cons_margin = 10.0
-    cut_margin = 10.0
+    cons_margin = max(0.0, _env_float("UTOA_ML_RAWMEL_CONS_MARGIN", 10.0))
+    cut_margin = max(0.0, _env_float("UTOA_ML_RAWMEL_CUT_MARGIN", 10.0))
+    penalty_loss_weight = max(0.0, _env_float("UTOA_ML_RAWMEL_CONSTRAINT_WEIGHT", 0.25))
+    align_loss_weight = max(0.0, _env_float("UTOA_ML_RAWMEL_ALIGN_WEIGHT", 0.12))
+    conf_loss_weight = max(0.0, _env_float("UTOA_ML_RAWMEL_CONF_WEIGHT", 0.05))
     boundary_aux_default = 0.24 if is_kr_cvc else 0.18
     boundary_consistency_default = 0.12 if is_kr_cvc else 0.08
     boundary_aux_weight = _env_float("UTOA_ML_RAWMEL_BOUNDARY_AUX_WEIGHT", boundary_aux_default)
@@ -1738,9 +2022,9 @@ def train_coupled_bundle_rawmel(
 
             total_loss = (
                 base_loss
-                + (0.25 * penalty_loss)
-                + (0.12 * align_loss)
-                + (0.05 * conf_loss)
+                + (float(penalty_loss_weight) * penalty_loss)
+                + (float(align_loss_weight) * align_loss)
+                + (float(conf_loss_weight) * conf_loss)
                 + (float(boundary_aux_weight) * aux_loss)
                 + (float(boundary_consistency_weight) * boundary_consistency_loss)
                 + (epoch_pair_weight * pair_loss)
@@ -1855,9 +2139,9 @@ def train_coupled_bundle_rawmel(
             val_total = float(
                 (
                     val_base
-                    + (0.25 * val_penalty)
-                    + (0.12 * val_align)
-                    + (0.05 * val_conf)
+                    + (float(penalty_loss_weight) * val_penalty)
+                    + (float(align_loss_weight) * val_align)
+                    + (float(conf_loss_weight) * val_conf)
                     + (float(boundary_aux_weight) * val_aux)
                     + (float(boundary_consistency_weight) * val_boundary_consistency)
                     + (epoch_pair_weight * val_pair)
@@ -1958,7 +2242,7 @@ def train_coupled_bundle_rawmel(
             "in_dim": int(X.shape[1]),
             "patch_dim": int(P.shape[1]),
             "hidden_dim": 160,
-            "head_mode": "split",
+            "head_mode": str(head_mode),
             "anchor_dim": int(len(ANCHOR_TARGET_NAMES)),
             "delta_dim": int(len(DELTA_TARGET_NAMES)),
             "aux_dim": int(aux_dim),
@@ -1973,6 +2257,23 @@ def train_coupled_bundle_rawmel(
         os.path.join(out_dir, COUPLED_MODEL_FILE),
     )
     write_feature_schema(os.path.join(out_dir, "feature_schema.json"))
+    onnx_export = _export_coupled_onnx(
+        torch,
+        model,
+        out_dir,
+        feature_names=feature_names,
+        categorical_features=categorical_features,
+        categorical_bucket_sizes=[int(v) for v in categorical_bucket_sizes],
+        patch_features=list(PATCH_FEATURES),
+        head_mode=str(head_mode),
+        anchor_targets=list(ANCHOR_TARGET_NAMES),
+        delta_targets=list(DELTA_TARGET_NAMES),
+        rawmel_enabled=True,
+        mel_bins=int(mel_bins),
+        onset_frames=int(onset_frames),
+        tail_frames=int(tail_frames),
+        mel_patch_spec=dict(patch_spec),
+    )
 
     meta = {
         "backend": COUPLED_BACKEND_RAWMEL,
@@ -1989,13 +2290,14 @@ def train_coupled_bundle_rawmel(
         "targets": list(TARGET_NAMES),
         "anchor_targets": list(ANCHOR_TARGET_NAMES),
         "delta_targets": list(DELTA_TARGET_NAMES),
-        "head_mode": "split",
+        "head_mode": str(head_mode),
         "aux_targets": list(AUX_TARGET_NAMES) if use_aux else [],
         "mel_patch_spec": dict(patch_spec),
         "mel_patch_spec_hash": patch_hash,
         "mel_bins": int(mel_bins),
         "onset_frames": int(onset_frames),
         "tail_frames": int(tail_frames),
+        "onnx_export": onnx_export,
         "min_confidence": float(min_confidence),
         "vc_cv_pair_weight": float(pair_weight_base),
         "vc_cv_pair_warmup_epochs": int(pair_warmup_epochs),
@@ -2013,6 +2315,13 @@ def train_coupled_bundle_rawmel(
             "target_weights": [float(v) for v in aux_target_weight_values],
             "loss_kinds": list(aux_loss_kinds),
             "huber_deltas": [float(v) for v in aux_huber_deltas],
+        },
+        "constraint_loss": {
+            "penalty_weight": float(penalty_loss_weight),
+            "align_weight": float(align_loss_weight),
+            "conf_weight": float(conf_loss_weight),
+            "cons_margin": float(cons_margin),
+            "cut_margin": float(cut_margin),
         },
         "grad_clip": float(grad_clip),
         "lr_scheduler": {

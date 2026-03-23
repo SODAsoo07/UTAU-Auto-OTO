@@ -20,27 +20,8 @@ JA_CONSONANTS = [
     'sh', 'ch', 'ts', 'dz', 'hy', 'ky', 'gy', 'ny', 'my', 'ry', 'by', 'py',
     'dy', 'ty', 'ss', 'kk', 'tt', 'pp', 'dd', 'gg', 'bb', 'zz', 'jj',
 ]
-for _extra_cons in ("th", "dh", "zh", "tr", "dr", "tsh"):
-    if _extra_cons not in JA_CONSONANTS:
-        JA_CONSONANTS.append(_extra_cons)
 JA_VOWELS = ['a', 'i', 'u', 'e', 'o']
-JA_U_PHONE_MARKS = {'u', '\u026f', '\u0289'}
-JA_N_PHONE_MARKS = {'n', '\u0274', '\u014b', 'm', 'nn', 'xn', 'ng', 'ngy', 'ﾉｴ'}
 JA_KANA_VOWELS = {'?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?'}
-JA_EDGE_CANON = "\u30fb"
-JA_EDGE_MARKS = {
-    JA_EDGE_CANON,
-    "\u00b7",
-    "\uff65",
-    "\u2022",
-    "'",
-    "\u2019",
-    "\u02bc",
-    "\u0294",
-    "\u02c0",
-    ".",
-    "`",
-}
 JA_NASAL_ONSETS = {'m', 'n', 'ny', 'ng', 'ngy'}
 JA_VOICED_ONSETS = {
     'g', 'z', 'd', 'b', 'j', 'dz', 'v',
@@ -51,28 +32,6 @@ JA_VOICELESS_ONSETS = {
     'q', 'c', 'ky', 'ty', 'py', 'hy', 'ss', 'kk', 'tt', 'pp',
 }
 _JA_KANA_RE = re.compile(r"[\u3041-\u3096\u30A1-\u30FA\u30FC]")
-_JA_EDGE_SPLIT_RE = re.compile(
-    "|".join(re.escape(ch) for ch in sorted(JA_EDGE_MARKS, key=len, reverse=True))
-)
-_JA_TAIL_BREATH_MARKERS = {
-    "r",
-    "h",
-    "息",
-    "吸",
-    "吐",
-    "吸い",
-    "吐き",
-    "息継ぎ",
-    "bre",
-    "breath",
-    "breathy",
-    "inhale",
-    "exhale",
-    "asp",
-    "aspirate",
-    "air",
-}
-_JA_TAIL_BREATH_HINTS = ("息", "吸", "吐", "breath", "inhale", "exhale", "asp", "air")
 
 
 def _normalize_custom_alias_lookup(alias):
@@ -81,8 +40,8 @@ def _normalize_custom_alias_lookup(alias):
     if not text:
         return []
     variants = [text, text.lower()]
-    stripped = re.sub(r"(?:[_\-\s]*)(?:[a-g](?:[#♯]|[b♭])?[0-8])$", "", text, flags=re.IGNORECASE)
-    stripped = re.sub(r"(?:[_\-\s]*)(?:[a-g](?:sharp|flat)?[0-8])$", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:#|b)?[0-8])$", "", text, flags=re.IGNORECASE)
+    stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:sharp|flat)?[0-8])$", "", stripped, flags=re.IGNORECASE)
     stripped = re.sub(r"\s*[\(\[\{（【].*?[\)\]\}）】]\s*$", "", stripped).strip()
     if stripped:
         variants.extend([stripped, stripped.lower()])
@@ -108,65 +67,11 @@ def _clean_phone_mark(mark):
     return re.sub(r"[0-9]", "", (mark or "").strip().lower())
 
 
-def _is_ja_edge_token(token: str) -> bool:
-    t = unicodedata.normalize("NFKC", str(token or "")).strip()
-    return bool(t and t in JA_EDGE_MARKS)
-
-
-def _split_ja_alias_parts(text: str) -> list[str]:
-    normalized = unicodedata.normalize("NFKC", str(text or "")).strip()
-    if not normalized:
-        return []
-    normalized = _JA_EDGE_SPLIT_RE.sub(f" {JA_EDGE_CANON} ", normalized)
-    return [part for part in re.split(r"\s+", normalized) if part]
-
-
-def _is_ja_tail_breath_marker(token: str) -> bool:
-    raw = unicodedata.normalize("NFKC", str(token or "")).strip()
-    if not raw:
-        return False
-    if raw.upper() in {"R", "H"}:
-        return True
-    low = raw.lower()
-    if low in _JA_TAIL_BREATH_MARKERS:
-        return True
-    if any(hint in low for hint in _JA_TAIL_BREATH_HINTS):
-        return True
-    return False
-
-
-def is_ja_tail_breath_alias(alias: str) -> bool:
-    text = unicodedata.normalize("NFKC", str(alias or "")).strip()
-    if not text:
-        return False
-
-    parts = [p for p in re.split(r"\s+", text) if p]
-    if len(parts) >= 2:
-        left = parts[0].strip()
-        if (_is_ja_vowel_token(left) or bool(_JA_KANA_RE.search(left))) and _is_ja_tail_breath_marker(parts[-1]):
-            return True
-
-    compact = re.sub(r"[\s_\-]+", "", text)
-    if len(compact) >= 2 and compact[-1].upper() in {"R", "H"}:
-        stem = compact[:-1].strip().lower()
-        if stem in JA_VOWELS:
-            return True
-
-    if re.fullmatch(r"[\u3041-\u3096\u30A1-\u30FA\u30FC]+(?:息|吸|吐|吸い|吐き|息継ぎ)", text):
-        return True
-    return False
-
-
 def is_breath(alias):
     clean = unicodedata.normalize("NFKC", str(alias or "")).strip().lower()
     if not clean:
         return False
-    # `a R`, `i H`, `あ 吸い` 등 tail breath는 VC 계열 특수 음소로 취급한다.
-    if is_ja_tail_breath_alias(clean):
-        return False
     if re.match(r'^br\d*$', clean):
-        return True
-    if re.match(r"^(?:bre|breath|breathy|inhale|exhale|air|asp|aspirate)(?:[_\-\s]?[a-z0-9]{0,4})?$", clean):
         return True
     if clean in {"bre", "breath", "息", "吸", "吐", "吸い", "吐き", "息継ぎ"}:
         return True
@@ -183,10 +88,6 @@ def _is_ja_vowel_token(token):
     if t_raw in JA_KANA_VOWELS:
         return True
     t = t_raw.lower()
-    for edge in JA_EDGE_MARKS:
-        t = t.replace(edge, "")
-    if not t:
-        return False
     if t in JA_VOWELS or t in ['n', 'nn', 'xn']:
         return True
     onset, vowel = split_ja_romaji_syllable(t)
@@ -205,12 +106,6 @@ def _classify_ja_alias_core(clean, custom_map=None):
         if ipa and (ipa in ['a', 'i', '?', 'e', 'o'] or _is_ja_vowel_token(mapped_val)):
             return 'mono'
         return 'cv'
-    parts_norm = _split_ja_alias_parts(clean)
-    if parts_norm and any(_is_ja_edge_token(token) for token in parts_norm):
-        edge_idx = next((idx for idx, token in enumerate(parts_norm) if _is_ja_edge_token(token)), -1)
-        if edge_idx == 0 and len(parts_norm) >= 2:
-            return "cv_head"
-        return "vc"
     if ' ' in clean:
         parts = clean.split()
         left = parts[0]
@@ -218,8 +113,6 @@ def _classify_ja_alias_core(clean, custom_map=None):
         if left == '-':
             return 'cv_head'
         left_is_vowel = _is_ja_vowel_token(left)
-        if left_is_vowel and is_ja_tail_breath_alias(clean):
-            return "vc"
         if left_is_vowel:
             if right.strip() == '-':
                 return 'vv'
@@ -305,10 +198,6 @@ def _normalize_ja_syllable_token(token):
     if not t_raw:
         return ''
     t = t_raw.lower()
-    for edge in JA_EDGE_MARKS:
-        t = t.replace(edge, "")
-    if not t:
-        return ""
     if re.search(r'[ぁ-ゖァ-ヺー]', t_raw):
         syls = parse_ja_filename(t_raw)
         if syls:
@@ -329,10 +218,7 @@ def _normalize_ja_syllable_token_strict(token):
     raw = str(token or "").strip()
     if not raw:
         return ""
-    text = raw.lower()
-    for edge in JA_EDGE_MARKS:
-        text = text.replace(edge, "")
-    return text.replace("'", "").strip("-_ ")
+    return raw.lower().replace("'", "").strip("-_ ")
 
 
 def _is_kana_token(token):
@@ -471,8 +357,8 @@ def _extract_ja_cv_targets_from_lines(lines, custom_map=None):
 
 
 def _is_nucleus_phone(mark):
-    vowel = _ja_mark_to_vowel(mark)
-    return vowel in {'a', 'i', 'u', 'e', 'o', 'n'}
+    m = _clean_phone_mark(mark)
+    return m in {'a', 'i', '?', 'u', 'e', 'o', '?', 'n', '?', '?', '?', '?', '?', '?', '?'}
 
 
 def _build_ja_syllables_from_phone_nuclei(ph_intervals, cv_targets):
@@ -484,9 +370,6 @@ def _build_ja_syllables_from_phone_nuclei(ph_intervals, cv_targets):
         return None
     target_vowels = [_target_vowel_from_filename_syllable(s) for s in cv_targets]
     nucleus_vowels = [_ja_mark_to_vowel(getattr(ph_intervals[i], 'mark', '')) for i in nuclei]
-    nuclei, nucleus_vowels = _filter_nasal_nuclei_for_targets(nuclei, nucleus_vowels, target_vowels)
-    if len(nuclei) < target_n:
-        return None
     aligned = _align_nuclei_positions_to_targets(nuclei, nucleus_vowels, target_vowels)
     if aligned and len(aligned) == target_n:
         selected = aligned
@@ -634,10 +517,6 @@ def _vowel_match_score(target_vowel, nucleus_vowel):
         return -1.2
     if tv == nv:
         return 4.0
-    if tv == 'n' and nv != 'n':
-        return -4.5
-    if nv == 'n' and tv != 'n':
-        return -6.0
     if {tv, nv} <= {'i', 'u'}:
         return 1.0
     if {tv, nv} <= {'e', 'i'}:
@@ -647,32 +526,6 @@ def _vowel_match_score(target_vowel, nucleus_vowel):
     if tv == 'n' or nv == 'n':
         return -2.0
     return -1.5
-
-
-def _filter_nasal_nuclei_for_targets(nuclei, nucleus_vowels, target_vowels):
-    """
-    Remove extra standalone nasal nuclei when targets do not need them.
-
-    This stabilizes CV/CVVC index mapping when an inserted mid-row nasal
-    phone appears in MFA phone tier.
-    """
-    if not nuclei or not nucleus_vowels or not target_vowels:
-        return list(nuclei or []), list(nucleus_vowels or [])
-
-    pairs = list(zip(nuclei, nucleus_vowels))
-    target_n = len(target_vowels)
-    target_nasal_n = sum(1 for v in target_vowels if v == 'n')
-
-    non_nasal_pairs = [(idx, v) for idx, v in pairs if v != 'n']
-
-    if target_nasal_n <= 0:
-        if len(non_nasal_pairs) >= target_n:
-            return [idx for idx, _ in non_nasal_pairs], [v for _, v in non_nasal_pairs]
-        return list(nuclei), list(nucleus_vowels)
-
-    # If nasal targets are explicitly expected, keep original candidates to avoid
-    # trimming needed mora in edge banks.
-    return list(nuclei), list(nucleus_vowels)
 
 
 def _align_nuclei_positions_to_targets(nuclei, nucleus_vowels, target_vowels):
@@ -733,11 +586,11 @@ def _ja_mark_to_vowel(mark):
     clean = re.sub(r"[0-9]", "", (mark or "").strip().lower())
     if not clean:
         return ""
-    if clean in JA_N_PHONE_MARKS:
+    if clean in {"n", "ɴ", "m", "nn", "xn", "ng", "ngy"}:
         return "n"
     if clean in {"a", "i", "e", "o"}:
         return clean
-    if clean in JA_U_PHONE_MARKS or clean in {"?", "?"}:
+    if clean in {"u", "?", "?"}:
         return "u"
     if _is_ja_vowel_token(clean):
         onset, vowel = split_ja_romaji_syllable(clean)
@@ -757,9 +610,6 @@ def _build_syllables_from_filename(ph_intervals, filename_syllables):
         return None
     target_vowels = [_target_vowel_from_filename_syllable(s) for s in filename_syllables]
     nucleus_vowels = [_ja_mark_to_vowel(getattr(ph_intervals[i], 'mark', '')) for i in nuclei]
-    nuclei, nucleus_vowels = _filter_nasal_nuclei_for_targets(nuclei, nucleus_vowels, target_vowels)
-    if len(nuclei) < target_n:
-        return None
     aligned = _align_nuclei_positions_to_targets(nuclei, nucleus_vowels, target_vowels)
     if aligned and len(aligned) == target_n:
         selected = aligned

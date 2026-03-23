@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from core.ja_oto_mapping import _ja_soft_cv_match_level
-from core.mapping_format_policy import JA_ROW_GUARD_ACTIVE_FORMATS
 
 
 def _blank_conf_at(syllables_info, idx):
@@ -132,11 +131,16 @@ def _mel_guided_ja_cvvc_adjustment(
         voiced = _mel_conf_at(syllables_info, idx, "mel_voiced_formant_conf", 0.0)
         unvoiced = _mel_conf_at(syllables_info, idx, "mel_unvoiced_diffuse_conf", 0.0)
         breath = _mel_conf_at(syllables_info, idx, "mel_breath_like_conf", 0.0)
-        jump_penalty = abs(idx - expected_idx) * 8.0
+        jump_penalty = abs(idx - expected_idx) * (10.0 if a_type in {"cv", "cv_head"} else 8.0)
         mel_bonus = (9.0 * voiced) + (5.0 * unvoiced)
         mel_penalty = (20.0 * blank) + (12.0 * sil) + (6.0 * breath)
+        mismatch_penalty = 0.0
+        if soft <= 0:
+            mismatch_penalty += 46.0 if a_type in {"cv", "cv_head"} else 34.0
+        elif soft == 1:
+            mismatch_penalty += 12.0 if a_type in {"cv", "cv_head"} else 6.0
         stability_bonus = 1.5 if idx == selected_idx else 0.0
-        return text + mel_bonus + stability_bonus - mel_penalty - jump_penalty
+        return text + mel_bonus + stability_bonus - mel_penalty - jump_penalty - mismatch_penalty
 
     best_idx = int(selected_idx)
     best_score = float(_score(best_idx))
@@ -150,7 +154,18 @@ def _mel_guided_ja_cvvc_adjustment(
         return selected_idx, False
 
     selected_score = float(_score(int(selected_idx)))
-    if best_score < (selected_score + 4.0):
+    min_gain = 6.0 if a_type in {"cv", "cv_head"} else 5.0
+    if best_score < (selected_score + min_gain):
+        return selected_idx, False
+    selected_tok = normalize_syllable_token_fn(syllable_info_token_fn(syllables_info[int(selected_idx)]))
+    best_tok = normalize_syllable_token_fn(syllable_info_token_fn(syllables_info[int(best_idx)]))
+    selected_soft = int(_ja_soft_cv_match_level(target_norm, selected_tok) or 0) if selected_tok else 0
+    best_soft = int(_ja_soft_cv_match_level(target_norm, best_tok) or 0) if best_tok else 0
+    if best_soft <= 0:
+        return selected_idx, False
+    if selected_soft >= 2 and best_soft < selected_soft:
+        return selected_idx, False
+    if a_type in {"cv", "cv_head"} and best_soft < 2 and best_score < (selected_score + 12.0):
         return selected_idx, False
     expected_blank = _blank_conf_at(syllables_info, expected_idx)
     if _blank_conf_at(syllables_info, best_idx) >= 0.72 and expected_blank <= 0.60:
@@ -406,7 +421,7 @@ def select_ja_vcv_mapping(
             if 0 <= mapped_idx < len(syllables_info)
             else False
         ),
-        active_only_formats=JA_ROW_GUARD_ACTIVE_FORMATS,
+        active_only_formats={"cvvc", "cv"},
     )
     return {
         "expected_idx": int(expected_idx),

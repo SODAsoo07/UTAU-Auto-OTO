@@ -5,7 +5,7 @@ import os
 import shutil
 import sys
 import traceback
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 try:
     import yaml
@@ -36,15 +36,6 @@ from core.pipeline_status import (
     normalize_ml_policy,
 )
 from core.oto_validator import validate_oto_timing
-from core.preflight_common import (
-    build_preflight_issue_payload,
-    collect_batch_preflight_issue_records,
-    collect_batch_preflight_issues,
-)
-from core.generation.mapping_runtime import (
-    format_mapping_reason_schema_summary,
-    format_mapping_summary,
-)
 
 
 def _ensure_default_ml_workspace_root():
@@ -88,147 +79,6 @@ def _to_bool(v, default=False):
     if s in {"0", "false", "no", "n", "off"}:
         return False
     return default
-
-
-def _looks_like_path_value(value: str) -> bool:
-    text = str(value or "").strip()
-    if not text:
-        return False
-    if text.startswith(".") or text.startswith("~"):
-        return True
-    if "\\" in text or "/" in text:
-        return True
-    if len(text) >= 2 and text[1] == ":":
-        return True
-    return False
-
-
-def _normalize_env_overrides(raw_env, config_dir: str) -> Dict[str, object]:
-    out: Dict[str, object] = {}
-    if raw_env is None:
-        return out
-    if isinstance(raw_env, dict):
-        items = raw_env.items()
-    elif isinstance(raw_env, list):
-        parsed_items = []
-        for item in raw_env:
-            text = str(item or "").strip()
-            if not text or "=" not in text:
-                continue
-            key, value = text.split("=", 1)
-            parsed_items.append((key.strip(), value))
-        items = parsed_items
-    else:
-        return out
-
-    for key_raw, value_raw in items:
-        key = str(key_raw or "").strip()
-        if not key:
-            continue
-        if value_raw is None:
-            out[key] = None
-            continue
-        value = os.path.expandvars(os.path.expanduser(str(value_raw)))
-        if _looks_like_path_value(value) and not os.path.isabs(value):
-            value = os.path.normpath(os.path.join(config_dir, value))
-        out[key] = value
-    return out
-
-
-def _merge_case_env_overrides(defaults: dict, case: dict, config_dir: str) -> Dict[str, object]:
-    merged = {}
-    merged.update(_normalize_env_overrides(defaults.get("env"), config_dir))
-    merged.update(_normalize_env_overrides(case.get("env"), config_dir))
-    return merged
-
-
-def _validation_feedback_enabled() -> bool:
-    raw = str(os.environ.get("UTOA_BATCH_VALIDATION_FEEDBACK_ENABLE", "1") or "").strip().lower()
-    return raw not in {"0", "false", "off", "no"}
-
-
-def _metric_p90(alias_metrics: Dict[str, object], aliases: List[str], metric_key: str) -> float:
-    values: List[float] = []
-    for alias in aliases:
-        bucket = alias_metrics.get(alias) if isinstance(alias_metrics, dict) else None
-        if not isinstance(bucket, dict):
-            continue
-        metric = bucket.get(metric_key)
-        if not isinstance(metric, dict):
-            continue
-        try:
-            values.append(float(metric.get("p90", 0.0) or 0.0))
-        except Exception:
-            continue
-    return max(values) if values else 0.0
-
-
-def _derive_validation_feedback_env(validation: Dict[str, object], language: str) -> Dict[str, str]:
-    if not isinstance(validation, dict):
-        return {}
-    alias_metrics = validation.get("alias_metrics")
-    if not isinstance(alias_metrics, dict) or not alias_metrics:
-        return {}
-
-    lang = str(language or "").strip().lower()
-    feedback: Dict[str, str] = {}
-    if lang == "korean":
-        cut_p90 = _metric_p90(alias_metrics, ["cv", "cv_head"], "cutoff_overrun_ms")
-        pre_boundary_p90 = _metric_p90(alias_metrics, ["cv", "cv_head", "vcv"], "pre_boundary_dist_ms")
-        blank_p90 = _metric_p90(alias_metrics, ["cv", "cv_head", "vc", "vv"], "blank_ratio")
-
-        if cut_p90 >= 220.0:
-            feedback["UTOA_KR_MEL_REFINE_TARGET_SHIFT_MS"] = "0.8"
-        elif cut_p90 >= 140.0:
-            feedback["UTOA_KR_MEL_REFINE_TARGET_SHIFT_MS"] = "1.3"
-        elif cut_p90 >= 80.0:
-            feedback["UTOA_KR_MEL_REFINE_TARGET_SHIFT_MS"] = "1.7"
-        elif cut_p90 > 0.0 and cut_p90 <= 40.0:
-            feedback["UTOA_KR_MEL_REFINE_TARGET_SHIFT_MS"] = "2.3"
-
-        if cut_p90 >= 180.0:
-            feedback["UTOA_KR_MEL_REFINE_MIN_CUT_FROM_PRE_MS"] = "24.0"
-        elif cut_p90 >= 120.0:
-            feedback["UTOA_KR_MEL_REFINE_MIN_CUT_FROM_PRE_MS"] = "22.0"
-
-        if blank_p90 >= 0.82:
-            feedback["UTOA_KR_MEL_REFINE_CONTRAST_MIN"] = "0.13"
-        elif blank_p90 >= 0.72:
-            feedback["UTOA_KR_MEL_REFINE_CONTRAST_MIN"] = "0.12"
-
-        if pre_boundary_p90 >= 240.0:
-            feedback["UTOA_KR_GLOBAL_ALIGN_MIN_GAP_MS"] = "4.0"
-            feedback["UTOA_KR_STAGE2_BRIDGE_SHIFT_CAP_MS"] = "32.0"
-        elif pre_boundary_p90 >= 180.0:
-            feedback["UTOA_KR_GLOBAL_ALIGN_MIN_GAP_MS"] = "3.0"
-            feedback["UTOA_KR_STAGE2_BRIDGE_SHIFT_CAP_MS"] = "36.0"
-
-    elif lang == "japanese":
-        cut_p90 = _metric_p90(alias_metrics, ["cv", "cv_head", "vcv"], "cutoff_overrun_ms")
-        pre_boundary_p90 = _metric_p90(alias_metrics, ["cv", "cv_head", "vcv"], "pre_boundary_dist_ms")
-        blank_p90 = _metric_p90(alias_metrics, ["cv", "cv_head", "vcv", "vc", "vv"], "blank_ratio")
-
-        if cut_p90 >= 220.0:
-            feedback["UTOA_JA_MEL_REFINE_TARGET_SHIFT_MS"] = "0.9"
-        elif cut_p90 >= 140.0:
-            feedback["UTOA_JA_MEL_REFINE_TARGET_SHIFT_MS"] = "1.4"
-        elif cut_p90 > 0.0 and cut_p90 <= 50.0:
-            feedback["UTOA_JA_MEL_REFINE_TARGET_SHIFT_MS"] = "2.2"
-
-        if cut_p90 >= 160.0:
-            feedback["UTOA_JA_MEL_REFINE_MIN_CUT_FROM_PRE_MS"] = "23.0"
-
-        if blank_p90 >= 0.82:
-            feedback["UTOA_JA_MEL_REFINE_CONTRAST_MIN"] = "0.13"
-        elif blank_p90 >= 0.72:
-            feedback["UTOA_JA_MEL_REFINE_CONTRAST_MIN"] = "0.12"
-
-        if pre_boundary_p90 >= 240.0:
-            feedback["UTOA_JA_MEL_REFINE_NEXT_ANCHOR_MARGIN_MS"] = "10.0"
-        elif pre_boundary_p90 >= 180.0:
-            feedback["UTOA_JA_MEL_REFINE_NEXT_ANCHOR_MARGIN_MS"] = "9.0"
-
-    return feedback
 
 
 def _safe_console_print(text: str):
@@ -371,7 +221,6 @@ def _resolve_case_settings(
     fallback_aligner = normalize_aligner_name(case.get("fallback_aligner", defaults.get("fallback_aligner", "")), default="")
     mfa_path = _resolve_path(config_dir, str(case.get("mfa_path", defaults.get("mfa_path", ""))).strip())
     mfa_align_profile = str(case.get("mfa_align_profile", defaults.get("mfa_align_profile", "default"))).strip() or "default"
-    env_overrides = _merge_case_env_overrides(defaults, case, config_dir)
     return {
         "name": name,
         "enabled": enabled,
@@ -397,22 +246,84 @@ def _resolve_case_settings(
         "do_validation": _to_bool(case.get("validation", defaults.get("validation", True)), True) and (not force_no_validation),
         "replace_oto_ini": replace_oto_ini,
         "replace_target_oto": os.path.join(voicebank_dir, "oto.ini") if voicebank_dir else "",
-        "validation_feedback_enable": _to_bool(
-            case.get("validation_feedback_enable", defaults.get("validation_feedback_enable", True)),
-            True,
-        ),
-        "env_overrides": env_overrides,
     }
 
 
-def _collect_preflight_issues(case_infos: List[Dict[str, object]]) -> Dict[str, object]:
-    records = collect_batch_preflight_issue_records(case_infos)
-    if not isinstance(records, dict):
-        return collect_batch_preflight_issues(case_infos)
-    return build_preflight_issue_payload(records)
+def _validate_case_settings(case_info: Dict[str, object]) -> List[str]:
+    issues: List[str] = []
+    if not bool(case_info.get("enabled", True)):
+        return issues
+
+    name = str(case_info.get("name", "") or "").strip() or "case"
+    language = str(case_info.get("language", "") or "").strip().lower()
+    voicebank_dir = str(case_info.get("voicebank_dir", "") or "").strip()
+    textgrid_dir = str(case_info.get("textgrid_dir", "") or "").strip()
+    tpl_path = str(case_info.get("tpl_path", "") or "").strip()
+    custom_phonemes_path = str(case_info.get("custom_phonemes_path", "") or "").strip()
+    out_path = str(case_info.get("output_oto", "") or "").strip()
+    replace_target_oto = str(case_info.get("replace_target_oto", "") or "").strip()
+
+    if language not in {"japanese", "korean"}:
+        issues.append(f"case={name}: unsupported language: {language}")
+    if not voicebank_dir or not os.path.isdir(voicebank_dir):
+        issues.append(f"case={name}: voicebank_dir not found: {voicebank_dir}")
+    align_if_missing = bool(case_info.get("align_if_missing", False))
+    if (not textgrid_dir or not os.path.isdir(textgrid_dir)) and not align_if_missing:
+        issues.append(f"case={name}: textgrid_dir not found: {textgrid_dir}")
+    if tpl_path and not os.path.exists(tpl_path):
+        issues.append(f"case={name}: base_oto not found: {tpl_path}")
+    if custom_phonemes_path and not os.path.exists(custom_phonemes_path):
+        issues.append(f"case={name}: custom_phonemes_path not found: {custom_phonemes_path}")
+    if not out_path:
+        issues.append(f"case={name}: output path could not be resolved")
+    if bool(case_info.get("replace_oto_ini", False)) and not replace_target_oto:
+        issues.append(f"case={name}: replace target oto.ini path could not be resolved")
+    return issues
 
 
-def _write_preflight_report(run_dir: str, config_path: str, case_infos: List[Dict[str, object]], issues: Dict[str, object]) -> str:
+def _collect_preflight_issues(case_infos: List[Dict[str, object]]) -> Dict[str, List[str]]:
+    errors: List[str] = []
+    warnings: List[str] = []
+    seen_names = set()
+    seen_output_paths: Dict[str, str] = {}
+    seen_replace_targets: Dict[str, str] = {}
+
+    for case_info in case_infos:
+        name = str(case_info.get("name", "") or "").strip() or "case"
+        if name in seen_names:
+            errors.append(f"duplicate case name: {name}")
+        else:
+            seen_names.add(name)
+
+        errors.extend(_validate_case_settings(case_info))
+        if bool(case_info.get("enabled", True)) and bool(case_info.get("align_if_missing", False)):
+            textgrid_dir = str(case_info.get("textgrid_dir", "") or "").strip()
+            if not textgrid_dir or not os.path.isdir(textgrid_dir):
+                warnings.append(f"case={name}: textgrid_dir missing, align_if_missing=true -> runtime alignment will run")
+        if not bool(case_info.get("enabled", True)):
+            continue
+
+        out_path = str(case_info.get("output_oto", "") or "").strip()
+        if out_path:
+            prev_name = seen_output_paths.get(out_path)
+            if prev_name and prev_name != name:
+                errors.append(f"output collision: {name} and {prev_name} -> {out_path}")
+            else:
+                seen_output_paths[out_path] = name
+
+        if bool(case_info.get("replace_oto_ini", False)):
+            replace_target = str(case_info.get("replace_target_oto", "") or "").strip()
+            if replace_target:
+                prev_name = seen_replace_targets.get(replace_target)
+                if prev_name and prev_name != name:
+                    errors.append(f"replace collision: {name} and {prev_name} -> {replace_target}")
+                else:
+                    seen_replace_targets[replace_target] = name
+
+    return {"errors": errors, "warnings": warnings}
+
+
+def _write_preflight_report(run_dir: str, config_path: str, case_infos: List[Dict[str, object]], issues: Dict[str, List[str]]) -> str:
     report = {
         "config": os.path.abspath(config_path),
         "created_at": dt.datetime.now().isoformat(),
@@ -420,8 +331,6 @@ def _write_preflight_report(run_dir: str, config_path: str, case_infos: List[Dic
         "warning_count": len(issues.get("warnings") or []),
         "errors": list(issues.get("errors") or []),
         "warnings": list(issues.get("warnings") or []),
-        "error_records": list(issues.get("error_records") or []),
-        "warning_records": list(issues.get("warning_records") or []),
         "cases": case_infos,
     }
     out_path = os.path.join(run_dir, "preflight.json")
@@ -463,7 +372,6 @@ def _write_summary_text(summary_path: str, summary: Dict[str, object]) -> str:
         f"ok_cases={summary.get('ok_cases', 0)}",
         f"error_cases={summary.get('error_cases', 0)}",
         f"skipped_cases={summary.get('skipped_cases', 0)}",
-        f"adaptive_feedback_languages={','.join(sorted((summary.get('adaptive_feedback_by_language') or {}).keys()))}",
         "",
     ]
     for row in summary.get("results", []) or []:
@@ -497,25 +405,9 @@ def _write_summary_text(summary_path: str, summary: Dict[str, object]) -> str:
                 f"status={ml.get('status', '')} "
                 f"fallback_used={bool(ml.get('fallback_used', False))}"
             )
-        generation = row.get("generation") or {}
-        if isinstance(generation, dict) and generation:
-            lines.append(
-                "generation="
-                f"code={generation.get('code', '')} "
-                f"processed={int(generation.get('processed', row.get('processed_files', 0)) or 0)}/"
-                f"{int(generation.get('total', row.get('total_files', 0)) or 0)} "
-                f"errors={int(generation.get('error_count', len(row.get('generator_errors') or [])) or 0)}"
-            )
-            mapping = generation.get("mapping") if isinstance(generation.get("mapping"), dict) else {}
-            if mapping:
-                lines.append("mapping=" + format_mapping_summary(mapping))
-                lines.append("mapping_reason=" + format_mapping_reason_schema_summary(mapping))
         fallback_path = row.get("fallback_path") or []
         if fallback_path:
             lines.append(f"fallback_path={','.join(str(x) for x in fallback_path)}")
-        feedback_env = row.get("feedback_env") or {}
-        if isinstance(feedback_env, dict) and feedback_env:
-            lines.append(f"feedback_env={','.join(sorted(str(k) for k in feedback_env.keys()))}")
         validation = row.get("validation") or {}
         if isinstance(validation, dict) and validation:
             lines.append(
@@ -543,7 +435,6 @@ def _run_one_case(
     run_dir: str,
     force_replace: bool = False,
     force_no_validation: bool = False,
-    feedback_env: Optional[Dict[str, str]] = None,
 ):
     case_info = _resolve_case_settings(
         case=case,
@@ -587,9 +478,6 @@ def _run_one_case(
     align_if_missing = bool(case_info.get("align_if_missing", False))
     primary_aligner = str(case_info.get("primary_aligner", "mfa") or "mfa")
     fallback_aligner = str(case_info.get("fallback_aligner", "") or "")
-    env_overrides = dict(feedback_env or {})
-    env_overrides.update(dict(case_info.get("env_overrides") or {}))
-    validation_feedback_enable = bool(case_info.get("validation_feedback_enable", True))
 
     case_log_name = f"{case_index:03d}_{_safe_name(name)}.log"
     case_log_path = os.path.join(run_dir, case_log_name)
@@ -613,9 +501,7 @@ def _run_one_case(
         validation=None,
         alignment=None,
         ml=None,
-        generation=None,
         fallback_path=None,
-        feedback_env=None,
     ):
         return {
             "name": name,
@@ -633,12 +519,8 @@ def _run_one_case(
             "validation": validation or {},
             "alignment": alignment or {},
             "ml": ml or {},
-            "generation": generation or {},
             "fallback_path": list(fallback_path or []),
             "log_path": case_log_path,
-            "validation_feedback_enable": bool(validation_feedback_enable),
-            "feedback_env": dict(feedback_env or {}),
-            "env_overrides": sorted([str(k) for k in env_overrides.keys()]),
         }
 
     log(f"start lang={language} format={auto_format or 'auto'}")
@@ -647,10 +529,6 @@ def _run_one_case(
     log(f"output_oto={out_path}")
     log(f"ml_policy={ml_policy}")
     log(f"align_if_missing={align_if_missing} primary={primary_aligner} fallback={fallback_aligner or '-'}")
-    if env_overrides:
-        log(f"env_overrides={','.join(sorted(env_overrides.keys()))}")
-    if validation_feedback_enable and _validation_feedback_enabled():
-        log("validation_feedback=on")
 
     processed = 0
     total = 0
@@ -659,15 +537,6 @@ def _run_one_case(
     runtime_report: Dict[str, object] = {}
     alignment_report = make_runtime_report("align", ALIGN_SKIPPED, "not_attempted", used_engine="", fallback_used=False)
     fallback_path: List[str] = []
-    feedback_env_result: Dict[str, str] = {}
-    env_before = {}
-    for key in env_overrides.keys():
-        env_before[key] = os.environ.get(key)
-    for key, value in env_overrides.items():
-        if value is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[str(key)] = str(value)
 
     try:
         if language not in {"japanese", "korean"}:
@@ -722,7 +591,6 @@ def _run_one_case(
                         failure_code=str(alignment_report.get("code", TEXTGRID_MISSING) or TEXTGRID_MISSING),
                         failure_stage="align",
                         alignment=alignment_report,
-                        generation=runtime_report if isinstance(runtime_report, dict) else {},
                         fallback_path=fallback_path,
                     )
             else:
@@ -804,7 +672,6 @@ def _run_one_case(
                 generator_errors=errors,
                 alignment=alignment_report,
                 ml=ml_report,
-                generation=runtime_report if isinstance(runtime_report, dict) else {},
                 fallback_path=fallback_path,
             )
 
@@ -816,10 +683,6 @@ def _run_one_case(
                 language=language,
                 callback=log,
             )
-            if validation_feedback_enable and _validation_feedback_enabled():
-                feedback_env_result = _derive_validation_feedback_env(validation, language)
-                if feedback_env_result:
-                    log(f"validation_feedback_env={','.join(sorted(feedback_env_result.keys()))}")
 
         if replace_oto_ini and os.path.exists(out_path):
             target_oto = os.path.join(voicebank_dir, "oto.ini")
@@ -840,9 +703,7 @@ def _run_one_case(
             validation=validation,
             alignment=alignment_report,
             ml=runtime_report.get("ml") if isinstance(runtime_report, dict) else {},
-            generation=runtime_report if isinstance(runtime_report, dict) else {},
             fallback_path=fallback_path,
-            feedback_env=feedback_env_result,
         )
 
     except Exception as e:
@@ -860,15 +721,9 @@ def _run_one_case(
             validation=validation,
             alignment=alignment_report,
             ml=runtime_report.get("ml") if isinstance(runtime_report, dict) else {},
-            generation=runtime_report if isinstance(runtime_report, dict) else {},
             fallback_path=fallback_path,
         )
     finally:
-        for key, old_value in env_before.items():
-            if old_value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[str(key)] = str(old_value)
         with open(case_log_path, "w", encoding="utf-8") as f:
             for line in case_logs:
                 f.write(line + "\n")
@@ -937,13 +792,9 @@ def main():
         raise ValueError(f"Preflight failed with {len(preflight_issues['errors'])} error(s).")
 
     results = []
-    adaptive_feedback_by_language: Dict[str, Dict[str, str]] = {}
     for idx, case in enumerate(cases, start=1):
-        case_obj = case if isinstance(case, dict) else {}
-        lang_hint = str(case_obj.get("language", defaults.get("language", "")) or "").strip().lower()
-        case_feedback_env = dict(adaptive_feedback_by_language.get(lang_hint, {}))
         res = _run_one_case(
-            case=case_obj,
+            case=case if isinstance(case, dict) else {},
             defaults=defaults,
             config_dir=config_dir,
             run_tag=run_tag,
@@ -951,14 +802,8 @@ def main():
             run_dir=run_dir,
             force_replace=args.replace,
             force_no_validation=args.skip_validation,
-            feedback_env=case_feedback_env,
         )
         results.append(res)
-        if _validation_feedback_enabled() and res.get("status") == "ok":
-            lang = str(res.get("language", "") or "").strip().lower()
-            feedback_env = res.get("feedback_env")
-            if lang and isinstance(feedback_env, dict) and feedback_env:
-                adaptive_feedback_by_language[lang] = {str(k): str(v) for k, v in feedback_env.items()}
         _safe_console_print(f"[BatchOTO] done {idx}/{len(cases)} name={res.get('name')} status={res.get('status')}")
         if args.stop_on_error and res.get("status") == "error":
             _safe_console_print("[BatchOTO] stop_on_error triggered.")
@@ -972,7 +817,6 @@ def main():
         "ok_cases": sum(1 for r in results if r.get("status") == "ok"),
         "error_cases": sum(1 for r in results if r.get("status") == "error"),
         "skipped_cases": sum(1 for r in results if r.get("status") == "skipped"),
-        "adaptive_feedback_by_language": adaptive_feedback_by_language,
         "results": results,
     }
     summary_path = os.path.join(run_dir, "summary.json")

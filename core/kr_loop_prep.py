@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
-from core.mapping_format_policy import is_kr_filename_sequence_format
-
 
 @dataclass
 class KrLoopPrepResult:
@@ -64,7 +62,7 @@ def _estimate_kr_textgrid_trust(
             conf -= min(abs(words_count - filename_count) / float(max(filename_count, 1)) * 0.18, 0.18)
         if alias_count:
             conf -= min(abs(alias_count - filename_count) / float(max(filename_count, 1)) * 0.14, 0.14)
-        if is_kr_filename_sequence_format(file_format):
+        if file_format in {"cvc", "cvvc"}:
             conf += 0.05
     elif max(alias_count, words_count) >= 2:
         conf -= 0.08
@@ -198,7 +196,7 @@ def prepare_kr_loop_state(
         file_format=result.file_format,
     )
     result.prefer_filename_sequence = bool(
-        is_kr_filename_sequence_format(result.file_format)
+        result.file_format in {"cvc", "cvvc"}
         and result.filename_cv_targets
         and (
             result.textgrid_trust_tier == "low"
