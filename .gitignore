@@ -250,3 +250,11 @@ dataset.7z
 ml/notebooks/coupled_preprocess_colab.ipynb
 ml/configs/autofree_bank_specs_korean_cvvc.colab.json
 /ML_models
+/_build_model_profiles
+/dist_nuitka
+/experiments
+/installer_output
+/models_installed
+/release_assets
+/UTAU_Auto_OTO_Release_preview
+/UTAU_Auto_OTO_Release_stable
