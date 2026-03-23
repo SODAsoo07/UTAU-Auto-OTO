@@ -17,14 +17,14 @@ if /I not "%CHANNEL%"=="stable" if /I not "%CHANNEL%"=="preview" (
 set "RELEASE_DIR=UTAU_Auto_OTO_Release_%CHANNEL%"
 set "RELEASE_ZIP=UTAU_Auto_OTO_Release_%CHANNEL%.zip"
 set "PORTABLE_ZIP=portable_output\UTAU_Auto_OTO_portable_with_models_%CHANNEL%.zip"
-set "MFA_BUNDLE_ARGS=--bundle-mfa-runtime --require-mfa-models"
+set "MFA_BUNDLE_ARGS=--bundle-mfa-models --require-mfa-models"
 if /I "%UTOA_DISABLE_MFA_BUNDLE%"=="1" set "MFA_BUNDLE_ARGS="
 
 echo ==========================================
 echo   UTAU Auto OTO - Build and Package
 echo   Channel: %CHANNEL%
 if defined MFA_BUNDLE_ARGS (
-echo   MFA bundle: enabled ^(runtime + acoustic models^)
+echo   MFA bundle: enabled ^(acoustic models only^)
 ) else (
 echo   MFA bundle: disabled ^(UTOA_DISABLE_MFA_BUNDLE=1^)
 )
