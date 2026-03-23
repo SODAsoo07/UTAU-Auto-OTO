@@ -1,268 +1,84 @@
-﻿# Byte-compiled / optimized / DLL files
+﻿# Public-source publishing profile (additional ignore file)
+#
+# IMPORTANT
+# - This file is NOT applied automatically by Git.
+# - Use it as a temporary publish profile (e.g. copy to .gitignore on a publish branch,
+#   or use with core.excludesFile for export-only workflows).
+#
+# Goal: include source code only, exclude datasets/docs/venv/cache/build/runtime artifacts.
+
+# 1) Ignore everything by default
+*
+
+# 2) Keep directory traversal so allowlist rules below can work
+!*/
+
+# 3) Keep repo metadata and essential root-level source configs
+!.gitignore
+!.gitignore.public
+!.gitattributes
+!LICENSE
+!main.py
+!build.py
+!build_pyinstaller_beta.py
+!pytest.ini
+!requirements.txt
+!requirements-ml.txt
+!setup_mfa.bat
+!setup_mfa_beta.bat
+!run_prepare_pairs.ps1
+!UTAU_Auto_OTO.spec
+!release_channel.json
+
+# 4) Keep source directories
+!core/
+!core/**
+!ui/
+!ui/**
+!ml/
+!ml/**
+!scripts/
+!scripts/**
+!.github/
+!.github/**
+
+# 5) Exclude non-code/data-heavy content even under kept trees
+ml/notebooks/
+ml/notebooks/**
+*.ipynb
+
+# 6) Explicitly exclude local artifacts and private/training data roots
+.cache/
+.venv/
+.env/
 __pycache__/
-*.py[codz]
-*$py.class
-/micromamba
-/micromamba-*.tar.bz2
-/micromamba-win-64-latest.tar.bz2
-/1.5
-
-# C extensions
-*.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-/dataset
-/ml_workspace
-
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py.cover
-.hypothesis/
-.pytest_cache/
-cover/
-
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-.pybuilder/
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
-
-# UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#uv.lock
-
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
-#poetry.toml
-
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#   pdm recommends including project-wide configuration in pdm.toml, but excluding .pdm-python.
-#   https://pdm-project.org/en/latest/usage/project/#working-with-version-control
-#pdm.lock
-#pdm.toml
-.pdm-python
-.pdm-build/
-
-# pixi
-#   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
-#pixi.lock
-#   Pixi creates a virtual environment in the .pixi directory, just like venv module creates one
-#   in the .venv directory. It is recommended not to include this directory in version control.
-.pixi
-
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.env
-.envrc
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# PyCharm
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
-
-# Abstra
-# Abstra is an AI-powered process automation framework.
-# Ignore directories containing user credentials, local state, and settings.
-# Learn more at https://abstra.io/docs
-.abstra/
-
-# Visual Studio Code
-#  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
-#  that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#  and can be added to the global gitignore or merged into this file. However, if you prefer, 
-#  you could uncomment the following to ignore the entire vscode folder
-# .vscode/
-
-# Ruff stuff:
-.ruff_cache/
-
-# PyPI configuration file
-.pypirc
-
-# Cursor
-#  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to
-#  exclude from AI features like autocomplete and code analysis. Recommended for sensitive data
-#  refer to https://docs.cursor.com/context/ignore-files
-.cursorignore
-.cursorindexingignore
-
-# Marimo
-marimo/_static/
-marimo/_lsp/
-__marimo__/
-
-# UTAU Auto OTO project artifacts
-UTAU_Auto_OTO.exe
-UTAU_Auto_OTO_Release/
 logs/
-
-# Local run/test outputs
-config.json
-error_report_*.txt
 build_assets/
-test_wavs/*.ini
-test_wavs/*.validation.txt
-test_wavs/*.wav
-custom_test_wavs/*.lab
-custom_test_wavs/*_dict.txt
-/.env_sofa
-/.tmp_ext
-/.sofa
-/sofa_utau_kr/data/**
-/sofa_utau_kr/ckpt/**
-/sofa_utau_kr/reports/**
-/sofa_utau_kr/ab_tests/**
-!/sofa_utau_kr/data/.gitkeep
-!/sofa_utau_kr/ckpt/.gitkeep
-!/sofa_utau_kr/reports/.gitkeep
-!/sofa_utau_kr/ab_tests/.gitkeep
+installer_output/
+UTAU_Auto_OTO_Release*/
+release_assets/
+Docs/
+dataset/
+dataset_staged/
+custom_test_wavs/
+test_wavs/
+experiments/
+plan/
+ml_workspace/
+ML_models/
+models_installed/
 
-# AI/ML workspace and model training artifacts
-/sofa_utau_kr
-/Voice_Datas
-/dataset
-/dataset_korean_cvc_stage
-/dataset_staged
-/tmp
-Voice_Datas.zip
-dataset.7z
-ml/notebooks/coupled_preprocess_colab.ipynb
-ml/configs/autofree_bank_specs_korean_cvvc.colab.json
-/ML_models
-/_build_model_profiles
-/dist_nuitka
-/experiments
-/installer_output
-/models_installed
-/release_assets
-/UTAU_Auto_OTO_Release_preview
-/UTAU_Auto_OTO_Release_stable
-/_build_model_profiles
-/_build_model_profiles
-/_build_model_profiles
-/_build_model_profiles
-/dist_nuitka
-/_build_model_profiles
-/dist_nuitka
-/assets/models
+# 7) Common binary/media artifacts
+*.wav
+*.flac
+*.mp3
+*.TextGrid
+*.lab
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.zip
+*.7z
+*.tar
+*.tar.gz

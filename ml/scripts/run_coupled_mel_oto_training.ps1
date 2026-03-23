@@ -87,25 +87,109 @@ function Ensure-ParentDir {
     }
 }
 
+function Test-UsableOtoIni {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+    try {
+        $line = Get-Content -Path $Path -Encoding UTF8 -ErrorAction Stop | Select-Object -First 64 |
+            Where-Object { $_ -match "=" -and $_ -match "," } | Select-Object -First 1
+        return [bool]$line
+    } catch {
+        return $false
+    }
+}
+
 function Resolve-ManualOtoFromWorkDir {
-    param([string]$WorkDir)
-    $candidates = @()
-    $otoIni = Join-Path $WorkDir "oto.ini"
-    if (Test-Path $otoIni) { $candidates += $otoIni }
-    $extra = Get-ChildItem -Path $WorkDir -File -Filter "*.ini" -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match "oto|base" } |
-        Sort-Object Name |
-        Select-Object -ExpandProperty FullName
-    $candidates += $extra
-    foreach ($path in $candidates) {
-        if (-not (Test-Path $path)) { continue }
-        try {
-            $line = Get-Content -Path $path -Encoding UTF8 -ErrorAction Stop | Select-Object -First 64 |
-                Where-Object { $_ -match "=" -and $_ -match "," } | Select-Object -First 1
-            if ($line) { return $path }
-        } catch {
-            continue
+    param(
+        [string]$WorkDir,
+        [string]$StopDir = ""
+    )
+    if (-not $WorkDir) { return "" }
+
+    $current = $WorkDir
+    if (Test-Path -LiteralPath $current) {
+        $current = (Resolve-Path -LiteralPath $current).Path
+    }
+    $stop = ""
+    if ($StopDir -and (Test-Path -LiteralPath $StopDir)) {
+        $stop = (Resolve-Path -LiteralPath $StopDir).Path
+    }
+
+    while ($current) {
+        $candidates = @()
+        $otoIni = Join-Path $current "oto.ini"
+        if (Test-Path -LiteralPath $otoIni) { $candidates += $otoIni }
+        $extra = Get-ChildItem -Path $current -File -Filter "*.ini" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match "oto|base" } |
+            Sort-Object Name |
+            Select-Object -ExpandProperty FullName
+        $candidates += $extra
+        foreach ($path in $candidates) {
+            if (Test-UsableOtoIni -Path $path) {
+                return $path
+            }
         }
+
+        if ($stop) {
+            $normCurrent = [System.IO.Path]::GetFullPath($current).TrimEnd('\')
+            $normStop = [System.IO.Path]::GetFullPath($stop).TrimEnd('\')
+            if ($normCurrent.Equals($normStop, [System.StringComparison]::OrdinalIgnoreCase)) {
+                break
+            }
+        }
+        $parent = Split-Path -Parent $current
+        if (-not $parent -or $parent -eq $current) { break }
+        if ($stop) {
+            $normParent = [System.IO.Path]::GetFullPath($parent).TrimEnd('\')
+            $normStop = [System.IO.Path]::GetFullPath($stop).TrimEnd('\')
+            if (-not $normParent.StartsWith($normStop, [System.StringComparison]::OrdinalIgnoreCase)) {
+                break
+            }
+        }
+        $current = $parent
+    }
+    return ""
+}
+
+function Resolve-AutoOtoFromWorkDir {
+    param(
+        [string]$WorkDir,
+        [string]$StopDir = ""
+    )
+    if (-not $WorkDir) { return "" }
+    $current = $WorkDir
+    if (Test-Path -LiteralPath $current) {
+        $current = (Resolve-Path -LiteralPath $current).Path
+    }
+    $stop = ""
+    if ($StopDir -and (Test-Path -LiteralPath $StopDir)) {
+        $stop = (Resolve-Path -LiteralPath $StopDir).Path
+    }
+
+    while ($current) {
+        $candidate = Join-Path $current "oto_auto_ml.ini"
+        if (Test-UsableOtoIni -Path $candidate) {
+            return $candidate
+        }
+        if ($stop) {
+            $normCurrent = [System.IO.Path]::GetFullPath($current).TrimEnd('\')
+            $normStop = [System.IO.Path]::GetFullPath($stop).TrimEnd('\')
+            if ($normCurrent.Equals($normStop, [System.StringComparison]::OrdinalIgnoreCase)) {
+                break
+            }
+        }
+        $parent = Split-Path -Parent $current
+        if (-not $parent -or $parent -eq $current) { break }
+        if ($stop) {
+            $normParent = [System.IO.Path]::GetFullPath($parent).TrimEnd('\')
+            $normStop = [System.IO.Path]::GetFullPath($stop).TrimEnd('\')
+            if (-not $normParent.StartsWith($normStop, [System.StringComparison]::OrdinalIgnoreCase)) {
+                break
+            }
+        }
+        $current = $parent
     }
     return ""
 }
@@ -125,8 +209,6 @@ function Discover-WorkItemsByScan {
         $autoFiles = Get-ChildItem -Path $fmtRoot -Recurse -File -Filter "oto_auto_ml.ini" -ErrorAction SilentlyContinue
         foreach ($autoFile in $autoFiles) {
             $work = $autoFile.DirectoryName
-            $manual = Resolve-ManualOtoFromWorkDir -WorkDir $work
-            if (-not $manual) { continue }
             $rel = ""
             try {
                 $rel = [System.IO.Path]::GetRelativePath($fmtRoot, $work)
@@ -138,28 +220,30 @@ function Discover-WorkItemsByScan {
                 $segments = @($rel -split "[\\/]" | Where-Object { $_ })
             }
             $voicebank = if ($segments.Count -gt 0) { $segments[0] } else { Split-Path -Leaf (Split-Path -Parent $work) }
+            $vbRoot = Join-Path $fmtRoot $voicebank
+            $manual = Resolve-ManualOtoFromWorkDir -WorkDir $work -StopDir $vbRoot
+            if (-not $manual) { continue }
+            $resolvedAuto = Resolve-AutoOtoFromWorkDir -WorkDir $work -StopDir $vbRoot
+            if (-not $resolvedAuto) { $resolvedAuto = $autoFile.FullName }
+            $hasWav = @(Get-ChildItem -Path $work -Recurse -File -Filter "*.wav" -ErrorAction SilentlyContinue).Count -gt 0
+            $hasTg = @(Get-ChildItem -Path $work -Recurse -File -Filter "*.TextGrid" -ErrorAction SilentlyContinue).Count -gt 0
+            if (-not $hasWav -and -not $hasTg) { continue }
             $items += [pscustomobject]@{
                 language = $LangValue
                 format_type = $FormatValue
                 status = "scan_discovered"
                 work_dir = $work
-                auto_oto = $autoFile.FullName
+                auto_oto = $resolvedAuto
                 manual_oto = $manual
                 stage_root = (Join-Path $fmtRoot $voicebank)
             }
         }
     } else {
-        $iniFiles = Get-ChildItem -Path $fmtRoot -Recurse -File -Filter "*.ini" -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match "oto|base" }
-        $grouped = $iniFiles | Group-Object DirectoryName
+        $wavFiles = Get-ChildItem -Path $fmtRoot -Recurse -File -Filter "*.wav" -ErrorAction SilentlyContinue
+        $grouped = $wavFiles | Group-Object DirectoryName
         foreach ($group in $grouped) {
             $work = $group.Name
             if (-not $work) { continue }
-            $manual = Resolve-ManualOtoFromWorkDir -WorkDir $work
-            if (-not $manual) { continue }
-            $hasWav = @(Get-ChildItem -Path $work -File -Filter "*.wav" -ErrorAction SilentlyContinue).Count -gt 0
-            $hasTg = @(Get-ChildItem -Path $work -Recurse -File -Filter "*.TextGrid" -ErrorAction SilentlyContinue).Count -gt 0
-            if (-not $hasWav -and -not $hasTg) { continue }
             $rel = ""
             try {
                 $rel = [System.IO.Path]::GetRelativePath($fmtRoot, $work)
@@ -171,12 +255,19 @@ function Discover-WorkItemsByScan {
                 $segments = @($rel -split "[\\/]" | Where-Object { $_ })
             }
             $voicebank = if ($segments.Count -gt 0) { $segments[0] } else { Split-Path -Leaf (Split-Path -Parent $work) }
+            $vbRoot = Join-Path $fmtRoot $voicebank
+            $manual = Resolve-ManualOtoFromWorkDir -WorkDir $work -StopDir $vbRoot
+            if (-not $manual) { continue }
+            $hasWav = @(Get-ChildItem -Path $work -File -Filter "*.wav" -ErrorAction SilentlyContinue).Count -gt 0
+            $hasTg = @(Get-ChildItem -Path $work -Recurse -File -Filter "*.TextGrid" -ErrorAction SilentlyContinue).Count -gt 0
+            if (-not $hasWav -and -not $hasTg) { continue }
+            $resolvedAuto = Resolve-AutoOtoFromWorkDir -WorkDir $work -StopDir $vbRoot
             $items += [pscustomobject]@{
                 language = $LangValue
                 format_type = $FormatValue
                 status = "scan_discovered"
                 work_dir = $work
-                auto_oto = (Join-Path $work "oto_auto_ml.ini")
+                auto_oto = $(if ($resolvedAuto) { $resolvedAuto } else { Join-Path $work "oto_auto_ml.ini" })
                 manual_oto = $manual
                 stage_root = (Join-Path $fmtRoot $voicebank)
             }
@@ -199,7 +290,10 @@ function Get-TargetItemsFromPreparedReport {
         ($_ -ne $null) -and
         (($_.language -as [string]).ToLower() -eq $Lang) -and
         (($_.format_type -as [string]).ToLower() -eq $Format) -and
-        (($_.status -as [string]) -in @("prepared", "prepared_existing"))
+        (
+            (($_.status -as [string]).ToLower() -in @("prepared", "prepared_existing")) -or
+            ((($_.status -as [string]).ToLower() -eq "skip") -and ((($_.reason -as [string]).ToLower()) -eq "auto_oto_exists"))
+        )
     })
 }
 

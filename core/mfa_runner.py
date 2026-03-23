@@ -844,12 +844,72 @@ def check_mfa_model(mfa_path, language='korean'):
             capture_output=True, text=False, timeout=30, env=env
         )
         stdout_text = _decode_subprocess_output(result.stdout)
-        if model_name in stdout_text:
+        stderr_text = _decode_subprocess_output(result.stderr)
+        combined_text = f"{stdout_text}\n{stderr_text}"
+        if model_name in combined_text:
             return True, f"{lang_label} MFA 모델이 설치되어 있습니다."
-        else:
-            return False, f"{lang_label} MFA 모델이 설치되어 있지 않습니다. 다운로드가 필요합니다."
+        if _has_local_acoustic_model_artifact(mfa_path, model_name, env=env):
+            return True, f"{lang_label} MFA 모델 로컬 아티팩트를 확인했습니다."
+        if result.returncode != 0:
+            return False, (
+                f"{lang_label} MFA 모델 확인 명령이 실패했습니다(code={result.returncode}). "
+                "모델 다운로드가 필요합니다."
+            )
+        return False, f"{lang_label} MFA 모델이 설치되어 있지 않습니다. 다운로드가 필요합니다."
     except Exception as e:
         return False, f"MFA 모델 확인 실패: {e}"
+
+
+def _candidate_mfa_root_dirs(mfa_path: str, env: Optional[dict] = None) -> List[str]:
+    roots: List[str] = []
+
+    def _add(path: str):
+        p = os.path.abspath(str(path or "").strip())
+        if p and p not in roots:
+            roots.append(p)
+
+    try:
+        env_root = str((env or {}).get("MFA_ROOT_DIR", "")).strip()
+        if env_root:
+            _add(env_root)
+    except Exception:
+        pass
+
+    try:
+        _add(_default_mfa_root_dir(mfa_path, per_process=False))
+    except Exception:
+        pass
+
+    try:
+        if mfa_path:
+            app_dir = os.path.dirname(os.path.dirname(os.path.abspath(mfa_path)))
+            if os.path.isdir(app_dir):
+                for name in os.listdir(app_dir):
+                    if name.startswith(".mfa_root_ascii_p"):
+                        _add(os.path.join(app_dir, name))
+    except Exception:
+        pass
+
+    # MFA 기본 루트(레거시)도 확인
+    _add(os.path.expanduser("~/Documents/MFA"))
+    return roots
+
+
+def _has_local_acoustic_model_artifact(mfa_path: str, model_name: str, env: Optional[dict] = None) -> bool:
+    if not model_name:
+        return False
+    for root in _candidate_mfa_root_dirs(mfa_path, env=env):
+        acoustic_dir = os.path.join(root, "pretrained_models", "acoustic")
+        candidates = [
+            os.path.join(acoustic_dir, model_name),
+            os.path.join(acoustic_dir, f"{model_name}.zip"),
+            os.path.join(acoustic_dir, f"{model_name}.yaml"),
+            os.path.join(acoustic_dir, f"{model_name}.yml"),
+            os.path.join(acoustic_dir, f"{model_name}.meta"),
+        ]
+        if any(os.path.exists(path) for path in candidates):
+            return True
+    return False
 
 
 def check_mfa_ready(language='korean', mfa_path=''):
@@ -1225,34 +1285,65 @@ def download_mfa_model(mfa_path, language='korean', callback=None):
         return False
     model_name = 'japanese_mfa' if language == 'japanese' else 'korean_mfa'
     lang_label = 'Japanese' if language == 'japanese' else 'Korean'
-    if language == 'korean':
-        if not ensure_korean_support(mfa_path, callback):
-            log('Failed to prepare Korean dependencies (eunjeon, jamo).')
-            return False
-    elif language == 'japanese':
-        if not ensure_japanese_support(mfa_path, callback):
-            log('Failed to prepare Japanese dependencies (spacy, sudachipy, sudachidict-core).')
-            return False
+
+    has_model, msg = check_mfa_model(mfa_path, language=language)
+    if has_model:
+        if msg:
+            log(msg)
+        return True
+
+    # 모델 다운로드는 언어 의존성 준비와 분리해 처리합니다.
+    # (의존성 import 오류가 있어도 모델 자체 다운로드는 가능한 경우가 있음)
+    try:
+        if language == 'korean':
+            if not ensure_korean_support(mfa_path, callback):
+                log('⚠ Korean dependency prepare failed, but model download will continue.')
+        elif language == 'japanese':
+            if not ensure_japanese_support(mfa_path, callback):
+                log('⚠ Japanese dependency prepare failed, but model download will continue.')
+    except Exception as dep_exc:
+        log(f'⚠ Dependency prepare check raised error, but model download will continue: {dep_exc}')
+
     log(f'Downloading {lang_label} MFA model...')
     try:
         env = _get_conda_env(mfa_path)
-        process = subprocess.Popen(
+        attempts = [
             [mfa_path, 'model', 'download', 'acoustic', model_name, '--ignore_cache'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=False,
-            env=env,
-        )
-        if process.stdout:
-            for raw_line in iter(process.stdout.readline, b""):
-                line = _decode_subprocess_output(raw_line).strip()
-                if line:
-                    log(line)
-        process.wait()
-        if process.returncode == 0:
-            log(f'{lang_label} MFA model download completed.')
-            return True
-        log(f'Model download failed (code: {process.returncode})')
+            [mfa_path, 'model', 'download', 'acoustic', model_name],
+        ]
+        for idx, cmd in enumerate(attempts, start=1):
+            log(f"[MFA] model download attempt {idx}/{len(attempts)}: {' '.join(cmd)}")
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=False,
+                env=env,
+            )
+            seen_lines: List[str] = []
+            if process.stdout:
+                for raw_line in iter(process.stdout.readline, b""):
+                    line = _decode_subprocess_output(raw_line).strip()
+                    if line:
+                        seen_lines.append(line)
+                        log(line)
+            process.wait()
+            if process.returncode == 0:
+                log(f'{lang_label} MFA model download completed.')
+                return True
+
+            has_model, _msg = check_mfa_model(mfa_path, language=language)
+            if has_model:
+                log(f'{lang_label} MFA model is present despite non-zero downloader exit code. Continuing.')
+                return True
+
+            tail = " | ".join(seen_lines[-6:])[:500]
+            if tail:
+                log(f"[MFA] download attempt {idx} failed (code={process.returncode}): {tail}")
+            else:
+                log(f"[MFA] download attempt {idx} failed (code={process.returncode})")
+
+        log('Model download failed after retries.')
         return False
     except Exception as e:
         log(f'Model download error: {e}')
