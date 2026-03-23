@@ -198,6 +198,69 @@ def _find_nonblank_fallback_idx(
     return best_idx
 
 
+def _token_invariant_guard_idx(
+    *,
+    alias_type,
+    target_clean,
+    expected_idx,
+    selected_idx,
+    row_mapping_confidence,
+    file_mapping_conf_th,
+    file_mapping_low_conf,
+    romaji_syllables,
+    syllable_blank_confidences,
+    split_syllable_parts_fn,
+    cv_match_score_fn,
+):
+    if selected_idx is None or expected_idx is None or not romaji_syllables:
+        return selected_idx, False
+    n = len(romaji_syllables)
+    if n <= 0:
+        return selected_idx, False
+    e = int(max(0, min(int(expected_idx), n - 1)))
+    s = int(max(0, min(int(selected_idx), n - 1)))
+    if s == e:
+        return s, False
+    target = str(target_clean or "").strip()
+    if not target:
+        return s, False
+
+    exp_tok = str(romaji_syllables[e] or "")
+    sel_tok = str(romaji_syllables[s] or "")
+    exp_score = float(cv_match_score_fn(target, exp_tok))
+    sel_score = float(cv_match_score_fn(target, sel_tok))
+    exp_blank = _blank_conf_at(syllable_blank_confidences, e)
+    sel_blank = _blank_conf_at(syllable_blank_confidences, s)
+    conf = float(row_mapping_confidence or 0.0)
+    conf_th = float(file_mapping_conf_th or 0.0)
+    low_conf = bool(file_mapping_low_conf) or conf < max(conf_th + 0.02, 0.62)
+
+    t_on, t_v, _t_c = split_syllable_parts_fn(target)
+    e_on, e_v, _e_c = split_syllable_parts_fn(exp_tok)
+    s_on, s_v, _s_c = split_syllable_parts_fn(sel_tok)
+
+    expected_exact = exp_score >= 98.0
+    selected_exact = sel_score >= 98.0
+    expected_vowel_match = bool(t_v and e_v and t_v == e_v)
+    selected_vowel_match = bool(t_v and s_v and t_v == s_v)
+
+    if expected_exact and (not selected_exact):
+        return e, True
+    if expected_vowel_match and (not selected_vowel_match):
+        if low_conf or exp_score >= max(84.0, sel_score + 2.0):
+            return e, True
+    if alias_type in {"cv", "cv_head"} and t_on and e_on:
+        exp_onset_match = bool(t_on == e_on or t_on[:1] == e_on[:1])
+        sel_onset_match = bool(t_on == s_on or t_on[:1] == s_on[:1])
+        if exp_onset_match and (not sel_onset_match) and exp_score >= (sel_score - 6.0):
+            return e, True
+    if sel_blank >= 0.66 and (exp_blank + 0.08) < sel_blank and exp_score >= max(84.0, sel_score - 8.0):
+        return e, True
+    if low_conf and (sel_score + 12.0) < exp_score:
+        return e, True
+    return s, False
+
+
 def _is_unvoiced_like_onset(onset: str) -> bool:
     o = str(onset or "").strip().lower()
     if not o:
@@ -567,6 +630,28 @@ def select_kr_vcv_index(
                 )
             vcv_selected_w_idx = int(mel_idx)
             cv_seq_idx = max(cv_seq_idx, vcv_selected_w_idx + 1)
+        invariant_idx, invariant_guarded = _token_invariant_guard_idx(
+            alias_type="vcv",
+            target_clean=target_clean,
+            expected_idx=expected_vcv_idx,
+            selected_idx=vcv_selected_w_idx,
+            row_mapping_confidence=row_mapping_confidence,
+            file_mapping_conf_th=file_mapping_conf_th,
+            file_mapping_low_conf=bool(row_mapping_confidence < max(float(file_mapping_conf_th), 0.60)),
+            romaji_syllables=romaji_syllables,
+            syllable_blank_confidences=syllable_blank_confidences,
+            split_syllable_parts_fn=split_syllable_parts_fn,
+            cv_match_score_fn=cv_match_score_fn,
+        )
+        if invariant_guarded and invariant_idx != vcv_selected_w_idx:
+            if debug_logging:
+                log_fn(
+                    f"🛡️ {fname}: KR VCV token invariant guard "
+                    f"({vcv_selected_w_idx + 1}->{invariant_idx + 1}, {alias})"
+                )
+            vcv_selected_w_idx = int(invariant_idx)
+            cv_seq_idx = max(cv_seq_idx, vcv_selected_w_idx + 1)
+            row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.08)
     return vcv_selected_w_idx, cv_seq_idx, row_mapping_confidence
 
 
@@ -895,6 +980,29 @@ def select_kr_general_cv_index(
             row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.12)
             selected_w_idx = int(guarded_plan_idx)
             cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
+    invariant_idx, invariant_guarded = _token_invariant_guard_idx(
+        alias_type=alias_type,
+        target_clean=target_clean,
+        expected_idx=expected_cv_idx,
+        selected_idx=selected_w_idx,
+        row_mapping_confidence=row_mapping_confidence,
+        file_mapping_conf_th=file_mapping_conf_th,
+        file_mapping_low_conf=file_mapping_low_conf,
+        romaji_syllables=romaji_syllables,
+        syllable_blank_confidences=syllable_blank_confidences,
+        split_syllable_parts_fn=split_syllable_parts_fn,
+        cv_match_score_fn=cv_match_score_fn,
+    )
+    if invariant_guarded and invariant_idx != selected_w_idx:
+        if debug_logging:
+            log_fn(
+                f"🛡️ {fname}: KR {str(alias_type or '').upper()} token invariant guard "
+                f"({selected_w_idx + 1}->{invariant_idx + 1}, {alias})"
+            )
+        row_jump_blocked = 1
+        row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.08)
+        selected_w_idx = int(invariant_idx)
+        cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
     return {
         "expected_cv_idx": int(expected_cv_idx),
         "selected_w_idx": int(selected_w_idx) if selected_w_idx is not None else None,
