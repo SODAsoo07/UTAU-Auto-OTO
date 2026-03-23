@@ -139,7 +139,7 @@ class PipelineActionsMixin:
         if reason:
             self._append_log(f"   사유: {reason}")
 
-        cmd = [script_path, "--non-interactive"]
+        cmd = [script_path, "--recovery", "--non-interactive"]
         env = os.environ.copy()
         try:
             env_dir = get_default_mfa_env_dir()
@@ -189,7 +189,7 @@ class PipelineActionsMixin:
     def _build_setup_mfa_recovery_guide(self):
         script_path = self._resolve_setup_mfa_script_path()
         if script_path:
-            command = f'cmd /c ""{script_path}" --non-interactive"'
+            command = f'cmd /c ""{script_path}" --recovery --non-interactive"'
             return (
                 "설치 프로그램에 동봉된 setup_mfa.bat을 직접 실행해 추가 복구를 진행해 주세요.\n"
                 f"- 파일: {script_path}\n"
@@ -199,7 +199,7 @@ class PipelineActionsMixin:
         return (
             "설치 프로그램에 동봉된 setup_mfa.bat을 직접 실행해 추가 복구를 진행해 주세요.\n"
             "- 실행 예시:\n"
-            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --non-interactive\""
+            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --recovery --non-interactive\""
         )
 
     def _read_runtime_var(self, var_name, default=None):

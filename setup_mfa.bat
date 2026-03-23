@@ -8,6 +8,13 @@ set "INSTALL_ML=0"
 set "DELETE_OLD_AFTER_INSTALL=0"
 set "AUTO_ML=0"
 set "NON_INTERACTIVE=0"
+set "DIRECT_SETUP=0"
+set "NO_RECOVERY_SHIM=0"
+set "FORCE_MENU=0"
+set "REQUESTED_MODE="
+set "WRAPPER_MODE="
+set "SETUP_MFA_SELF=%~f0"
+set "SETUP_MFA_DIR=%~dp0"
 
 :parse_args
 if "%~1"=="" goto :args_done
@@ -16,17 +23,178 @@ if /i "%~1"=="--with-ml" set "INSTALL_ML=1"
 if /i "%~1"=="--install-ml" set "INSTALL_ML=1"
 if /i "%~1"=="--non-interactive" set "NON_INTERACTIVE=1"
 if /i "%~1"=="--yes" set "NON_INTERACTIVE=1"
+if /i "%~1"=="--menu" set "FORCE_MENU=1"
+if /i "%~1"=="--install" set "REQUESTED_MODE=install"
+if /i "%~1"=="--recovery" set "REQUESTED_MODE=recovery"
+if /i "%~1"=="--recover" set "REQUESTED_MODE=recovery"
+if /i "%~1"=="--mode=install" set "REQUESTED_MODE=install"
+if /i "%~1"=="--mode=recovery" set "REQUESTED_MODE=recovery"
+if /i "%~1"=="--mode=menu" set "FORCE_MENU=1"
+if /i "%~1"=="--direct-setup" set "DIRECT_SETUP=1"
+if /i "%~1"=="--no-recovery-shim" set "NO_RECOVERY_SHIM=1"
 shift
 goto :parse_args
 
 :show_help
-echo 사용법: setup_mfa.bat [--with-ml]
+echo 사용법: setup_mfa.bat [--install ^| --recovery ^| --menu] [--with-ml] [--non-interactive]
 echo 스크립트 폴더^(.env^)에 Micromamba 기반 로컬 MFA 환경을 설치합니다.
 echo 옵션:
+echo   --install                 설치 모드 강제 실행
+echo   --recovery / --recover    복구 모드 강제 실행
+echo   --menu                    시작 메뉴 강제 표시
 echo   --with-ml / --install-ml  ML 의존성^ (pandas/sklearn/lightgbm/pytorch^) 설치
+echo   --non-interactive         비대화형 실행^ (자동 분기: env 있으면 복구, 없으면 설치^)
+echo   --direct-setup            내부 사용^: 기존 설치 엔진 직접 실행
+echo   --no-recovery-shim        복구 래퍼 비활성화^ (설치 모드 강제^)
 exit /b 0
 
 :args_done
+
+for %%I in ("%SETUP_MFA_SELF%") do set "APP_DIR=%%~dpI"
+if defined APP_DIR set "APP_DIR=%APP_DIR:~0,-1%"
+if not defined APP_DIR set "APP_DIR=%CD%"
+if /i "%APP_DIR%"=="%WINDIR%\System32" (
+    echo [WARN] setup_mfa.bat이 System32 경로에서 실행되었습니다.
+    echo        MFA 작업 경로를 LOCALAPPDATA로 전환합니다.
+    set "APP_DIR=%LOCALAPPDATA%\UTAU_Auto_OTO_v3"
+)
+
+if "%DIRECT_SETUP%"=="1" goto :direct_setup_start
+
+if "%NO_RECOVERY_SHIM%"=="1" set "REQUESTED_MODE=install"
+call :resolve_runtime_recovery_script
+
+if "%FORCE_MENU%"=="1" set "WRAPPER_MODE=menu"
+if not defined WRAPPER_MODE if defined REQUESTED_MODE set "WRAPPER_MODE=%REQUESTED_MODE%"
+if not defined WRAPPER_MODE if "%INSTALL_ML%"=="1" set "WRAPPER_MODE=install"
+if not defined WRAPPER_MODE if "%NON_INTERACTIVE%"=="1" (
+    if defined RUNTIME_RECOVERY_SCRIPT if exist "%APP_DIR%\.env" (
+        set "WRAPPER_MODE=recovery"
+    ) else (
+        set "WRAPPER_MODE=install"
+    )
+)
+if not defined WRAPPER_MODE set "WRAPPER_MODE=menu"
+
+if /i "%WRAPPER_MODE%"=="menu" (
+    call :select_start_mode
+    if /i "!WRAPPER_MODE!"=="exit" exit /b 2
+)
+
+:wrapper_dispatch
+if /i "%WRAPPER_MODE%"=="install" (
+    call :preflight_install_tools
+    if errorlevel 1 exit /b 1
+    set "WRAPPER_ARGS=--direct-setup --no-recovery-shim"
+    if "%INSTALL_ML%"=="1" set "WRAPPER_ARGS=!WRAPPER_ARGS! --with-ml"
+    if "%NON_INTERACTIVE%"=="1" set "WRAPPER_ARGS=!WRAPPER_ARGS! --non-interactive"
+    echo [INFO] 설치 모드 실행: !WRAPPER_ARGS!
+    call "%SETUP_MFA_SELF%" !WRAPPER_ARGS!
+    exit /b !ERRORLEVEL!
+)
+
+if /i "%WRAPPER_MODE%"=="recovery" (
+    if not defined RUNTIME_RECOVERY_SCRIPT (
+        echo [WARN] runtime_recovery.ps1를 찾지 못했습니다.
+        if "%NON_INTERACTIVE%"=="1" (
+            echo [FAILED] 비대화형 복구를 시작할 수 없습니다. setup_mfa.bat --install 로 설치를 실행해 주세요.
+            exit /b 1
+        )
+        echo [INFO] 설치 모드로 전환합니다.
+        set "WRAPPER_MODE=install"
+        goto :wrapper_dispatch
+    )
+    echo [INFO] 복구 모드 실행: !RUNTIME_RECOVERY_SCRIPT!
+    if "%NON_INTERACTIVE%"=="1" (
+        if "%INSTALL_ML%"=="1" (
+            powershell -NoProfile -ExecutionPolicy Bypass -File "!RUNTIME_RECOVERY_SCRIPT!" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language korean -NonInteractive -WithMl
+        ) else (
+            powershell -NoProfile -ExecutionPolicy Bypass -File "!RUNTIME_RECOVERY_SCRIPT!" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language korean -NonInteractive
+        )
+    ) else (
+        if "%INSTALL_ML%"=="1" (
+            powershell -NoProfile -ExecutionPolicy Bypass -File "!RUNTIME_RECOVERY_SCRIPT!" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language korean -WithMl
+        ) else (
+            powershell -NoProfile -ExecutionPolicy Bypass -File "!RUNTIME_RECOVERY_SCRIPT!" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language korean
+        )
+    )
+    set "RECOVERY_RC=!ERRORLEVEL!"
+    if not "!RECOVERY_RC!"=="0" (
+        echo [FAILED] runtime_recovery.ps1 실행 실패 ^(code=!RECOVERY_RC!^)
+    )
+    exit /b !RECOVERY_RC!
+)
+
+echo [WARN] 알 수 없는 실행 모드입니다: %WRAPPER_MODE%
+set "WRAPPER_MODE=install"
+goto :wrapper_dispatch
+
+:resolve_runtime_recovery_script
+set "RUNTIME_RECOVERY_SCRIPT="
+if exist "%APP_DIR%\runtime_recovery.ps1" (
+    set "RUNTIME_RECOVERY_SCRIPT=%APP_DIR%\runtime_recovery.ps1"
+)
+if not defined RUNTIME_RECOVERY_SCRIPT if exist "%APP_DIR%\scripts\runtime_recovery.ps1" (
+    set "RUNTIME_RECOVERY_SCRIPT=%APP_DIR%\scripts\runtime_recovery.ps1"
+)
+goto :eof
+
+:select_start_mode
+echo.
+echo ====================================================
+echo   UTAU Auto OTO - 실행 모드 선택
+echo ====================================================
+echo   [1] 기본 설치 ^(권장^)
+echo   [2] 설치 + ML 의존성
+echo   [3] 복구 메뉴 실행 ^(문제 진단/선택 복구^)
+echo   [4] 자동 복구 ^(비대화형^)
+echo   [0] 종료
+choice /C 12340 /N /M "선택 ^(1/2/3/4/0^): "
+if errorlevel 5 (
+    set "WRAPPER_MODE=exit"
+    goto :eof
+)
+if errorlevel 4 (
+    set "WRAPPER_MODE=recovery"
+    set "NON_INTERACTIVE=1"
+    goto :eof
+)
+if errorlevel 3 (
+    set "WRAPPER_MODE=recovery"
+    set "NON_INTERACTIVE=0"
+    goto :eof
+)
+if errorlevel 2 (
+    set "WRAPPER_MODE=install"
+    set "INSTALL_ML=1"
+    goto :eof
+)
+if errorlevel 1 (
+    set "WRAPPER_MODE=install"
+    goto :eof
+)
+set "WRAPPER_MODE=install"
+goto :eof
+
+:preflight_install_tools
+where powershell >nul 2>nul
+if errorlevel 1 (
+    echo [FAILED] powershell 명령을 찾지 못했습니다.
+    exit /b 1
+)
+where certutil >nul 2>nul
+if errorlevel 1 (
+    echo [FAILED] certutil 명령을 찾지 못했습니다.
+    exit /b 1
+)
+where tar >nul 2>nul
+if errorlevel 1 (
+    echo [FAILED] tar 명령을 찾지 못했습니다.
+    exit /b 1
+)
+goto :eof
+
+:direct_setup_start
 
 echo ====================================================
 echo   UTAU Auto OTO - MFA 경량 환경 설치
@@ -39,14 +207,6 @@ echo        설치 중에는 창을 닫지 말아 주세요.
 echo        완료 후 MFA 정렬 기능을 바로 사용할 수 있습니다.
 echo.
 
-for %%I in ("%~f0") do set "APP_DIR=%%~dpI"
-if defined APP_DIR set "APP_DIR=%APP_DIR:~0,-1%"
-if not defined APP_DIR set "APP_DIR=%CD%"
-if /i "%APP_DIR%"=="%WINDIR%\System32" (
-    echo [WARN] setup_mfa.bat이 System32 경로에서 실행되었습니다.
-    echo        MFA 작업 경로를 LOCALAPPDATA로 전환합니다.
-    set "APP_DIR=%LOCALAPPDATA%\UTAU_Auto_OTO_v3"
-)
 if not exist "%APP_DIR%" mkdir "%APP_DIR%" >nul 2>nul
 pushd "%APP_DIR%" >nul 2>nul
 set "OLD_PUBLIC_ROOT=%PUBLIC%"

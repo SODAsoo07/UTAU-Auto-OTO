@@ -1639,7 +1639,7 @@ class AppRuntimeMixin:
     def _build_setup_mfa_recovery_guide(self):
         script_path = self._resolve_setup_mfa_script_path()
         if script_path:
-            command = f'cmd /c ""{script_path}" --non-interactive"'
+            command = f'cmd /c ""{script_path}" --recovery --non-interactive"'
             return (
                 "자동 복구가 계속 실패하면 설치 폴더의 setup_mfa.bat을 직접 실행해 주세요.\n"
                 f"- 파일: {script_path}\n"
@@ -1649,7 +1649,7 @@ class AppRuntimeMixin:
         return (
             "자동 복구가 계속 실패하면 설치 폴더의 setup_mfa.bat을 직접 실행해 주세요.\n"
             "- 실행 예시:\n"
-            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --non-interactive\""
+            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --recovery --non-interactive\""
         )
 
     def _show_msvc_required_alert(self):

@@ -57,9 +57,34 @@ if (Test-Path -LiteralPath $setupMfaSrc) {
     }
 }
 
+$runtimeRecoverySrc = Join-Path $repoRoot "scripts\runtime_recovery.ps1"
+$runtimeRecoveryDst = Join-Path $sourceAbs "runtime_recovery.ps1"
+if (Test-Path -LiteralPath $runtimeRecoverySrc) {
+    $needsRuntimeRecoverySync = $true
+    if (Test-Path -LiteralPath $runtimeRecoveryDst) {
+        try {
+            $srcHash = (Get-FileHash -LiteralPath $runtimeRecoverySrc -Algorithm SHA256).Hash
+            $dstHash = (Get-FileHash -LiteralPath $runtimeRecoveryDst -Algorithm SHA256).Hash
+            if ($srcHash -eq $dstHash) {
+                $needsRuntimeRecoverySync = $false
+            }
+        } catch {
+            $needsRuntimeRecoverySync = $true
+        }
+    }
+    if ($needsRuntimeRecoverySync) {
+        Copy-Item -LiteralPath $runtimeRecoverySrc -Destination $runtimeRecoveryDst -Force
+        Write-Host "[INFO] Synced latest runtime_recovery.ps1 into release payload source:"
+        Write-Host "  - $runtimeRecoveryDst"
+    }
+} else {
+    Write-Host "[WARN] runtime_recovery.ps1 not found at scripts/runtime_recovery.ps1; sync skipped."
+}
+
 $requiredPayload = @(
     @{ Name = "Main executable"; Path = (Join-Path $sourceAbs "UTAU_Auto_OTO\\UTAU_Auto_OTO.exe") },
     @{ Name = "MFA setup script"; Path = (Join-Path $sourceAbs "setup_mfa.bat") },
+    @{ Name = "Runtime recovery script"; Path = (Join-Path $sourceAbs "runtime_recovery.ps1") },
     @{ Name = "Release channel metadata"; Path = (Join-Path $sourceAbs "release_channel.json") }
 )
 $missingPayload = @()
@@ -247,5 +272,18 @@ if ($EmitExternalSetupMfa) {
         Write-Host "  (Setup.exe will prefer setup_mfa.bat in the same folder when present.)"
     } else {
         Write-Host "[WARN] setup_mfa.bat not found at repo root; external attachment skipped."
+    }
+
+    $runtimeRecoverySrc = Join-Path $repoRoot "scripts\runtime_recovery.ps1"
+    if (Test-Path -LiteralPath $runtimeRecoverySrc) {
+        $runtimeRecoveryOut = Join-Path $outputAbs "runtime_recovery.ps1"
+        $runtimeRecoveryVersionedOut = Join-Path $outputAbs ("runtime_recovery_{0}_{1}.ps1" -f $version, $channelNorm)
+        Copy-Item -LiteralPath $runtimeRecoverySrc -Destination $runtimeRecoveryOut -Force
+        Copy-Item -LiteralPath $runtimeRecoverySrc -Destination $runtimeRecoveryVersionedOut -Force
+        Write-Host "[INFO] External runtime_recovery.ps1 attached:"
+        Write-Host "  - $runtimeRecoveryOut"
+        Write-Host "  - $runtimeRecoveryVersionedOut"
+    } else {
+        Write-Host "[WARN] runtime_recovery.ps1 not found at scripts/runtime_recovery.ps1; external attachment skipped."
     }
 }
