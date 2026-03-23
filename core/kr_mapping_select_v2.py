@@ -307,9 +307,23 @@ def _mel_guided_cvvc_adjustment(
         return selected_idx, False
 
     t_onset, _t_vowel, _t_coda = split_syllable_parts_fn(target_clean)
+    t_onset = str(t_onset or "").strip().lower()
+    t_vowel = str(_t_vowel or "").strip().lower()
+    t_coda = str(_t_coda or "").strip().lower()
     target_unvoiced = _is_unvoiced_like_onset(t_onset)
     voiced_weight = 10.0 if a_type in {"cv", "cv_head", "vcv"} else 7.0
     unvoiced_weight = 8.0 if target_unvoiced else 3.0
+
+    def _parts_at(idx):
+        try:
+            on, vw, cd = split_syllable_parts_fn(romaji_syllables[idx])
+            return (
+                str(on or "").strip().lower(),
+                str(vw or "").strip().lower(),
+                str(cd or "").strip().lower(),
+            )
+        except Exception:
+            return "", "", ""
 
     def _score(idx):
         text = float(cv_match_score_fn(target_clean, romaji_syllables[idx]))
@@ -323,11 +337,28 @@ def _mel_guided_cvvc_adjustment(
         voiced = _mel_conf_at(syllables_info, idx, "mel_voiced_formant_conf", 0.0)
         unvoiced = _mel_conf_at(syllables_info, idx, "mel_unvoiced_diffuse_conf", 0.0)
         breath = _mel_conf_at(syllables_info, idx, "mel_breath_like_conf", 0.0)
-        jump_penalty = abs(idx - expected_idx) * 8.0
+        c_onset, c_vowel, c_coda = _parts_at(idx)
+        jump_penalty = abs(idx - expected_idx) * 10.0
         mel_bonus = (voiced_weight * voiced) + (unvoiced_weight * unvoiced)
         mel_penalty = (22.0 * blank) + (14.0 * sil) + (6.0 * breath)
+        core_bonus = 0.0
+        mismatch_penalty = 0.0
+        if t_vowel:
+            if c_vowel == t_vowel:
+                core_bonus += 9.0
+            else:
+                mismatch_penalty += 34.0 if a_type == "vcv" else 44.0
+        if t_onset:
+            if c_onset == t_onset:
+                core_bonus += 4.0
+            elif a_type in {"cv", "cv_head"}:
+                mismatch_penalty += 12.0
+            else:
+                mismatch_penalty += 6.0
+        if a_type == "vcv" and t_coda and c_coda and c_coda != t_coda:
+            mismatch_penalty += 4.0
         stability_bonus = 1.5 if idx == selected_idx else 0.0
-        return text + mel_bonus + stability_bonus - mel_penalty - jump_penalty
+        return text + mel_bonus + stability_bonus + core_bonus - mel_penalty - jump_penalty - mismatch_penalty
 
     best_idx = int(selected_idx)
     best_score = float(_score(best_idx))
@@ -342,10 +373,28 @@ def _mel_guided_cvvc_adjustment(
 
     # Keep changes conservative unless evidence is strong.
     selected_score = float(_score(int(selected_idx)))
-    if best_score < (selected_score + 4.0):
+    min_gain = 6.0 if a_type in {"cv", "cv_head"} else 5.0
+    if best_score < (selected_score + min_gain):
         return selected_idx, False
     if _blank_conf_at(syllable_blank_confidences, best_idx) >= 0.72 and expected_blank <= 0.60:
         return selected_idx, False
+
+    sel_onset, sel_vowel, _sel_coda = _parts_at(int(selected_idx))
+    best_onset, best_vowel, _best_coda = _parts_at(best_idx)
+    if t_vowel:
+        sel_vowel_match = bool(sel_vowel and sel_vowel == t_vowel)
+        best_vowel_match = bool(best_vowel and best_vowel == t_vowel)
+        if sel_vowel_match and not best_vowel_match:
+            return selected_idx, False
+        if not best_vowel_match:
+            return selected_idx, False
+    if a_type in {"cv", "cv_head"} and t_onset:
+        sel_onset_match = bool(sel_onset and sel_onset == t_onset)
+        best_onset_match = bool(best_onset and best_onset == t_onset)
+        if sel_onset_match and not best_onset_match:
+            return selected_idx, False
+        if not best_onset_match and best_score < (selected_score + 10.0):
+            return selected_idx, False
     return best_idx, True
 
 

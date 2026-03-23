@@ -277,9 +277,14 @@ def _compute_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, is_plosive_sibila
             pre_floor, pre_ceil = 34.0, 108.0
             pre_target = _clamp(transition_len * 0.82, pre_floor, pre_ceil)
         else:
-            pre_floor, pre_ceil = 42.0, 132.0
-            pre_target = _clamp(transition_len * 0.92, pre_floor, pre_ceil)
+            pre_floor, pre_ceil = 40.0, 118.0
+            pre_target = _clamp(transition_len * 0.86, pre_floor, pre_ceil)
         pre_target = _blend(pre_target, min(next_cv["pre"], pre_ceil), 0.22)
+        if is_plosive_sibilant:
+            transition_cap = _clamp((transition_len * 0.82) + 56.0, 78.0, 112.0)
+        else:
+            transition_cap = _clamp((transition_len * 0.84) + 54.0, 82.0, 132.0)
+        pre_target = min(pre_target, transition_cap)
     else:
         pre_target = _clamp(_blend(prev_cv["pre"], next_cv["pre"], 0.28), 40.0, 180.0)
     offset = max(boundary_abs - pre_target, 0.0)
@@ -321,10 +326,10 @@ def _compute_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, is_plosive_sibila
                 min_cut_gap=8.0,
             )
         else:
-            consonant = min(consonant, next_onset_rel + 16.0)
-            consonant = max(consonant, pre + 16.0)
-            cutoff_abs = max(consonant + 12.0, min(next_cons_rel + 18.0, next_pre_rel + 30.0))
-        max_gap = 16.0 if is_plosive_sibilant else 42.0
+            consonant = min(consonant, min(next_onset_rel + 8.0, next_pre_rel + 8.0))
+            consonant = max(consonant, pre + 12.0)
+            cutoff_abs = max(consonant + 8.0, min(next_cons_rel + 8.0, next_pre_rel + 14.0))
+        max_gap = 16.0 if is_plosive_sibilant else 28.0
         cutoff_abs = min(cutoff_abs, consonant + max_gap)
     else:
         consonant = min(max(consonant, pre + 24.0), next_pre_rel + 48.0)
@@ -516,6 +521,15 @@ def _compute_kr_cvvc_vc_timing_direct(alias, *args):
 
     bridge_abs = float(n_start)
     if is_hard:
+        stop_lead = _clamp(transition_gap * 0.24, 6.0, 18.0)
+        bridge_abs = max(float(c_end) + 4.0, float(n_start) - stop_lead)
+    elif is_nasal:
+        nasal_lead = _clamp(transition_gap * 0.16, 4.0, 12.0)
+        bridge_abs = max(float(c_end) + 5.0, float(n_start) - nasal_lead)
+    else:
+        soft_lead = _clamp(transition_gap * 0.12, 3.0, 8.0)
+        bridge_abs = max(float(c_end) + 6.0, float(n_start) - soft_lead)
+    if is_hard:
         tail_keep = _clamp(prev_vowel_len * 0.42, 56.0, 118.0)
         ovl_gap = _clamp(prev_vowel_len * 0.52, 78.0, 122.0)
         cons_gap = _clamp(next_seg_len * 0.44, 34.0, 74.0)
@@ -539,17 +553,28 @@ def _compute_kr_cvvc_vc_timing_direct(alias, *args):
         cons_gap = _clamp(next_seg_len * 0.58, 40.0, 96.0)
         cut_gap = _clamp(next_seg_len * 0.74, 36.0, 92.0)
         cutoff_margin = 28.0
+    tail_keep_floor = _clamp(prev_vowel_len * 0.33, 32.0, 88.0)
+    tail_keep_ceil = _clamp(prev_vowel_len * 0.40, 46.0, 120.0)
+    if tail_keep_ceil <= tail_keep_floor:
+        tail_keep_ceil = tail_keep_floor + 2.0
+    tail_keep = _clamp(tail_keep, tail_keep_floor, tail_keep_ceil)
+    cutoff_margin = min(cutoff_margin, 18.0 if is_hard else (24.0 if is_nasal else 24.0))
+
     offset = max(float(c_end) - tail_keep, 0.0)
     pre_floor = 112.0 if is_hard else (168.0 if is_liquid else 138.0 if is_nasal else 128.0)
     pre_ceil = 214.0 if is_hard else (286.0 if is_liquid else 248.0 if is_nasal else 232.0)
     pre_target = _clamp(transition_gap + tail_keep, pre_floor, pre_ceil)
+    pre_target = min(pre_target, _clamp((transition_gap * 0.88) + 72.0, 92.0, 178.0))
     pre = max(bridge_abs - offset, pre_target)
     ovl = max(0.0, pre - ovl_gap)
     consonant = pre + cons_gap
     cutoff_abs = consonant + cut_gap
     next_onset_rel = max(float(n_start) - offset, pre + 12.0)
     next_seg_end_rel = max(float(n_end) - offset, next_onset_rel + 8.0)
-    consonant = min(consonant, next_onset_rel + (8.0 if is_hard else 22.0 if is_nasal else 42.0 if is_liquid else 28.0))
+    cons_cap_after_onset = 8.0 if is_hard else 22.0 if is_nasal else 42.0 if is_liquid else 28.0
+    if is_hard:
+        cons_cap_after_onset = min(cons_cap_after_onset, 14.0)
+    consonant = min(consonant, next_onset_rel + cons_cap_after_onset)
     min_cons_gap = 28.0 if is_liquid else 18.0 if is_nasal else 16.0
     consonant = max(consonant, pre + min_cons_gap)
     cutoff_cap = min(

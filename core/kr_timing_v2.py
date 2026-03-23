@@ -82,30 +82,23 @@ def prepare_vcv_syllable_timing(
 
     c_boundary = c_end
     prev_v_len = max(prev_v_end - prev_v_start, 40.0)
-    stable_start = prev_v_start + (prev_v_len * 0.22)
-    stable_end = prev_v_start + (prev_v_len * 0.74)
-    if stable_end <= (stable_start + 4.0):
-        stable_start = prev_v_start
-        stable_end = prev_v_end
-
-    offset_padding = max(58.0, min(prev_v_len * 0.52, 168.0))
-    offset_candidate = prev_v_end - offset_padding
-    offset = max(min(offset_candidate, stable_end), stable_start)
-    offset = max(offset, 0.0)
+    # Korean VCV: keep only the tail section of the previous vowel (about 1/3~2/5).
+    tail_lo = prev_v_len / 3.0
+    tail_hi = prev_v_len * 0.40
+    offset_padding = max(tail_lo, min(prev_v_len * 0.36, tail_hi))
+    offset = max(prev_v_end - offset_padding, 0.0)
     pre = c_boundary - offset
-    if pre < 28.0:
-        offset = max(0.0, offset - (28.0 - pre))
-        pre = c_boundary - offset
     c_hint = curr_phones[0].mark if curr_phones else ""
     ovl = adaptive_overlap_fn(pre, c_hint, mode="vcv")
 
-    vowel_len = max(n_end - c_boundary, 24.0)
-    cons_ratio = max(float(diphthong_cv_consonant_ratio), 0.56)
-    added_cons = min(vowel_len * cons_ratio, 190.0)
-    if added_cons < 62.0:
-        added_cons = min(max(vowel_len * 0.46, 54.0), 82.0)
-    consonant = pre + added_cons
-    cutoff = -(consonant + max(vowel_len * 0.38, 58.0))
+    vowel_len = max(n_end - c_boundary, 20.0)
+    cv_end_rel = max(n_end - offset, pre + 24.0)
+    onset_rel = max(c_boundary - offset, pre + 4.0)
+    cons_follow = max(14.0, min(vowel_len * 0.22, 34.0))
+    consonant = max(pre + 16.0, onset_rel + cons_follow)
+    consonant = min(consonant, cv_end_rel - 8.0)
+    cutoff_tail_add = max(3.0, min(vowel_len * 0.08, 12.0))
+    cutoff = -(max(consonant + 12.0, cv_end_rel + cutoff_tail_add))
     offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
     return current_w_idx, cv_seq_idx, offset, consonant, cutoff, pre, ovl
 

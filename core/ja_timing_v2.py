@@ -186,6 +186,12 @@ def compute_vcv_params_from_virtual_split(
     if n_bridge:
         pad_cap = 70.0 if onset_cls in {"voiced", "nasal"} else 82.0
         offset_padding = min(offset_padding, max(prev_v_len * 0.60, pad_cap))
+    # Keep VCV carry tail compact to avoid sluggish entries.
+    carry_tail_lo = prev_v_len * 0.32
+    carry_tail_hi = prev_v_len * (0.44 if n_bridge else 0.42)
+    if carry_tail_hi <= carry_tail_lo:
+        carry_tail_hi = carry_tail_lo + 4.0
+    offset_padding = _clamp_range(offset_padding, carry_tail_lo, carry_tail_hi)
 
     offset = max(boundary - offset_padding, 0.0)
     pre_floor = 44.0 if n_bridge else 36.0
@@ -212,6 +218,14 @@ def compute_vcv_params_from_virtual_split(
     consonant = pre + cons_add
     consonant = max(consonant, pre + float(profile.get("cons_floor", 18.0)))
     consonant = min(consonant, pre + max(curr_v_len * 0.72, 96.0))
+    onset_rel = max(float(c_boundary) - offset, pre + 6.0)
+    onset_floor = 7.0 if onset_cls in {"voiced", "nasal"} else 6.0
+    onset_cap = 18.0 if onset_cls in {"voiced", "nasal"} else 14.0
+    if n_bridge:
+        onset_floor += 2.0
+        onset_cap += 3.0
+    consonant = max(consonant, onset_rel + onset_floor)
+    consonant = min(consonant, onset_rel + onset_cap)
 
     cut_add = float(profile.get("cut_add_base", 58.0)) + max(n_ref - 70.0, 0.0) * float(profile.get("cut_add_mul", 0.20))
     cut_add = _clamp_range(
@@ -226,7 +240,12 @@ def compute_vcv_params_from_virtual_split(
         pre + cut_add,
     )
     end_rel = max(float(n_end) - offset, pre + 40.0)
-    cutoff_abs = min(cutoff_abs, end_rel + float(profile.get("cut_to_next_allow", 22.0)))
+    cut_to_next_allow = float(profile.get("cut_to_next_allow", 22.0))
+    if onset_cls in {"voiced", "nasal"}:
+        cut_to_next_allow = min(cut_to_next_allow, 18.0)
+    else:
+        cut_to_next_allow = min(cut_to_next_allow, 16.0)
+    cutoff_abs = min(cutoff_abs, end_rel + cut_to_next_allow)
     if cutoff_abs <= consonant + 10.0:
         cutoff_abs = consonant + 12.0
     cutoff = -cutoff_abs
@@ -268,7 +287,25 @@ def compute_ja_vc_from_adjacent_cv(
             boundary_abs = max(float(prev_cv["vowel_end_abs"]) + 4.0, next_onset_abs - onset_lead)
     else:
         boundary_abs = next_cv["pre_abs"]
-    pre_target = _clamp_range(_blend(prev_cv["pre"], next_cv["pre"], 0.34), 40.0, 220.0)
+    transition_len = max(float(next_cv["onset_abs"]) - float(prev_cv["vowel_end_abs"]), 12.0)
+    fric_like = str(c_char or "").strip().lower() in {"s", "z", "sh", "j", "h", "f", "v", "ch", "ts", "dz", "hy"}
+    son_like = str(c_char or "").strip().lower() in {"m", "n", "ny", "r", "l", "ry", "w", "y"}
+    if a_type == "vc":
+        if is_hard_stoplike:
+            pre_target = _clamp_range(_blend(prev_cv["pre"], next_cv["pre"], 0.40), 34.0, 114.0)
+            transition_cap = _clamp_range((transition_len * 0.82) + 62.0, 82.0, 120.0)
+        elif fric_like:
+            pre_target = _clamp_range(_blend(prev_cv["pre"], next_cv["pre"], 0.36), 36.0, 140.0)
+            transition_cap = _clamp_range((transition_len * 0.84) + 60.0, 86.0, 136.0)
+        elif son_like:
+            pre_target = _clamp_range(_blend(prev_cv["pre"], next_cv["pre"], 0.32), 42.0, 164.0)
+            transition_cap = _clamp_range((transition_len * 0.90) + 68.0, 96.0, 154.0)
+        else:
+            pre_target = _clamp_range(_blend(prev_cv["pre"], next_cv["pre"], 0.34), 38.0, 150.0)
+            transition_cap = _clamp_range((transition_len * 0.86) + 64.0, 90.0, 144.0)
+        pre_target = min(pre_target, transition_cap)
+    else:
+        pre_target = _clamp_range(_blend(prev_cv["pre"], next_cv["pre"], 0.34), 40.0, 220.0)
     offset = max(float(boundary_abs) - pre_target, 0.0)
     pre = float(boundary_abs) - offset
     if pre <= 0.0:
@@ -289,8 +326,6 @@ def compute_ja_vc_from_adjacent_cv(
     next_pre_rel = max(float(next_cv["pre_abs"]) - offset, pre + 16.0)
     next_cons_rel = max(float(next_cv["cons_abs"]) - offset, next_pre_rel + 10.0)
     next_offset_rel = max(next_pre_rel - max(float(next_cv.get("pre", 0.0) or 0.0), 0.0), pre + 4.0)
-    son_like = str(c_char or "").strip().lower() in {"m", "n", "ny", "r", "l", "ry", "w", "y"}
-
     if a_type == "vc":
         if is_hard_stoplike:
             consonant = min(consonant, next_onset_rel - 7.0)
@@ -313,10 +348,26 @@ def compute_ja_vc_from_adjacent_cv(
             next_onset_rel = max(float(next_cv["onset_abs"]) - offset, pre + 10.0)
             next_pre_rel = max(float(next_cv["pre_abs"]) - offset, pre + 16.0)
             next_cons_rel = max(float(next_cv["cons_abs"]) - offset, next_pre_rel + 10.0)
-
-            consonant = min(consonant, min(next_onset_rel + (16.0 if son_like else 10.0), next_cons_rel - 2.0))
-            consonant = max(consonant, pre + (14.0 if son_like else 12.0))
-            cutoff_abs = max(consonant + (10.0 if son_like else 8.0), min(next_pre_rel + (4.0 if son_like else -2.0), next_cons_rel + 2.0))
+            if fric_like:
+                consonant = min(consonant, min(next_onset_rel + 4.0, next_pre_rel + 5.0, next_cons_rel - 3.0))
+                consonant = max(consonant, pre + 10.0)
+                cutoff_abs = max(consonant + 8.0, min(next_pre_rel + 0.0, next_cons_rel + 2.0))
+                cutoff_abs = min(cutoff_abs, min(next_pre_rel + 2.0, next_cons_rel + 4.0))
+            else:
+                consonant = min(
+                    consonant,
+                    min(
+                        next_onset_rel + (10.0 if son_like else 8.0),
+                        next_pre_rel + (10.0 if son_like else 7.0),
+                        next_cons_rel - 3.0,
+                    ),
+                )
+                consonant = max(consonant, pre + (13.0 if son_like else 11.0))
+                cutoff_abs = max(
+                    consonant + (10.0 if son_like else 8.0),
+                    min(next_pre_rel + (2.0 if son_like else 0.0), next_cons_rel + (3.0 if son_like else 1.0)),
+                )
+                cutoff_abs = min(cutoff_abs, next_cons_rel + (5.0 if son_like else 3.0))
     else:
         consonant = min(max(consonant, pre + 22.0), next_pre_rel + 44.0)
         cutoff_abs = max(consonant + 20.0, next_pre_rel + 10.0)
