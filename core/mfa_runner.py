@@ -1,4 +1,4 @@
-﻿"""
+"""
 MFA (Montreal Forced Aligner) 실행 모듈
 - 로컬 또는 포터블 Conda 환경에서 MFA 실행
 - 실시간 로그 스트리밍
@@ -194,19 +194,59 @@ def _resolve_env_python_exe(env_dir: str) -> str:
     return ""
 
 
+def _candidate_mfa_runtime_roots() -> List[str]:
+    roots: List[str] = []
+    seen = set()
+
+    def _add(path: str) -> None:
+        norm = os.path.normcase(os.path.abspath(str(path or "")))
+        if not norm or norm in seen:
+            return
+        seen.add(norm)
+        roots.append(os.path.abspath(path))
+
+    shared_root = str(os.environ.get("UTOA_MFA_SHARED_ROOT", "") or "").strip()
+    if shared_root:
+        _add(shared_root)
+
+    local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
+    if local_app_data:
+        _add(os.path.join(local_app_data, "UTAU_Auto_OTO_v3"))
+    else:
+        _add(os.path.join(os.path.expanduser("~"), "AppData", "Local", "UTAU_Auto_OTO_v3"))
+
+    public_root = str(os.environ.get("PUBLIC", r"C:\Users\Public") or r"C:\Users\Public").strip()
+    _add(os.path.join(public_root, "UTAU_Auto_OTO_v3"))
+    return roots
+
+
+def _resolve_default_mfa_runtime_root() -> str:
+    candidates = _candidate_mfa_runtime_roots()
+    for candidate in candidates:
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            fd, probe = tempfile.mkstemp(prefix=".utoa_mfa_probe_", dir=candidate)
+            os.close(fd)
+            os.remove(probe)
+            return candidate
+        except Exception:
+            continue
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return candidate
+    return candidates[0] if candidates else os.path.join(r"C:\Users\Public", "UTAU_Auto_OTO_v3")
+
+
 def get_default_mfa_env_dir():
-    public_root = os.environ.get("PUBLIC", r"C:\Users\Public")
-    return os.path.join(public_root, "UTAU_Auto_OTO_v3", ".env")
+    return os.path.join(_resolve_default_mfa_runtime_root(), ".env")
 
 
 def get_default_mfa_conda_root():
-    public_root = os.environ.get("PUBLIC", r"C:\Users\Public")
-    return os.path.join(public_root, "UTAU_Auto_OTO_v3", "miniconda")
+    return os.path.join(_resolve_default_mfa_runtime_root(), "miniconda")
 
 
 def get_default_mfa_micromamba_root():
-    public_root = os.environ.get("PUBLIC", r"C:\Users\Public")
-    return os.path.join(public_root, "UTAU_Auto_OTO_v3", "micromamba")
+    return os.path.join(_resolve_default_mfa_runtime_root(), "micromamba")
 
 
 def get_default_mfa_micromamba_exe():

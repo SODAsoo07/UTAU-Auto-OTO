@@ -13,12 +13,16 @@ set "NO_RECOVERY_SHIM=0"
 set "FORCE_MENU=0"
 set "REQUESTED_MODE="
 set "WRAPPER_MODE="
+set "RUNTIME_ROOT_OVERRIDE="
 set "SETUP_MFA_SELF=%~f0"
 set "SETUP_MFA_DIR=%~dp0"
 
 :parse_args
 if "%~1"=="" goto :args_done
 if /i "%~1"=="--help" goto :show_help
+if /i "%~1"=="--runtime-root" goto :capture_runtime_root
+set "ARG_RAW=%~1"
+if /i "!ARG_RAW:~0,15!"=="--runtime-root=" goto :capture_runtime_root_inline
 if /i "%~1"=="--with-ml" set "INSTALL_ML=1"
 if /i "%~1"=="--install-ml" set "INSTALL_ML=1"
 if /i "%~1"=="--non-interactive" set "NON_INTERACTIVE=1"
@@ -35,13 +39,35 @@ if /i "%~1"=="--no-recovery-shim" set "NO_RECOVERY_SHIM=1"
 shift
 goto :parse_args
 
+:capture_runtime_root
+shift
+if "%~1"=="" goto :missing_runtime_root
+set "RUNTIME_ROOT_CANDIDATE=%~1"
+if /i "!RUNTIME_ROOT_CANDIDATE:~0,2!"=="--" goto :missing_runtime_root
+set "RUNTIME_ROOT_OVERRIDE=%~1"
+shift
+goto :parse_args
+
+:capture_runtime_root_inline
+set "RUNTIME_ROOT_OVERRIDE=!ARG_RAW:~15!"
+if "!RUNTIME_ROOT_OVERRIDE!"=="" goto :missing_runtime_root
+shift
+goto :parse_args
+
+:missing_runtime_root
+echo [FAILED] --runtime-root 뒤에 대상 경로를 지정해 주세요.
+echo          예: --runtime-root "C:\Users\%USERNAME%\AppData\Local\UTAU_Auto_OTO_v3"
+exit /b 1
+
 :show_help
-echo 사용법: setup_mfa.bat [--install ^| --recovery ^| --menu] [--with-ml] [--non-interactive]
+echo 사용법: setup_mfa.bat [--install ^| --recovery ^| --menu] [--runtime-root 경로] [--with-ml] [--non-interactive]
 echo 스크립트 폴더^(.env^)에 Micromamba 기반 로컬 MFA 환경을 설치합니다.
 echo 옵션:
 echo   --install                 설치 모드 강제 실행
 echo   --recovery / --recover    복구 모드 강제 실행
 echo   --menu                    시작 메뉴 강제 표시
+echo   --runtime-root 경로       설치/복구 대상 루트 경로 강제 지정
+echo   --runtime-root=경로       위 옵션의 등호 형태
 echo   --with-ml / --install-ml  ML 의존성^ (pandas/sklearn/lightgbm/pytorch^) 설치
 echo   --non-interactive         비대화형 실행^ (자동 분기: env 있으면 복구, 없으면 설치^)
 echo   --direct-setup            내부 사용^: 기존 설치 엔진 직접 실행
@@ -50,13 +76,22 @@ exit /b 0
 
 :args_done
 
-for %%I in ("%SETUP_MFA_SELF%") do set "APP_DIR=%%~dpI"
-if defined APP_DIR set "APP_DIR=%APP_DIR:~0,-1%"
+for %%I in ("%SETUP_MFA_DIR%") do set "SETUP_MFA_DIR_NORM=%%~fI"
+if defined SETUP_MFA_DIR_NORM if "%SETUP_MFA_DIR_NORM:~-1%"=="\" set "SETUP_MFA_DIR_NORM=%SETUP_MFA_DIR_NORM:~0,-1%"
+if defined RUNTIME_ROOT_OVERRIDE (
+    for %%I in ("%RUNTIME_ROOT_OVERRIDE%") do set "APP_DIR=%%~fI"
+) else (
+    for %%I in ("%SETUP_MFA_SELF%") do set "APP_DIR=%%~dpI"
+)
+if defined APP_DIR if "%APP_DIR:~-1%"=="\" set "APP_DIR=%APP_DIR:~0,-1%"
 if not defined APP_DIR set "APP_DIR=%CD%"
-if /i "%APP_DIR%"=="%WINDIR%\System32" (
+if not defined RUNTIME_ROOT_OVERRIDE if /i "%APP_DIR%"=="%WINDIR%\System32" (
     echo [WARN] setup_mfa.bat이 System32 경로에서 실행되었습니다.
     echo        MFA 작업 경로를 LOCALAPPDATA로 전환합니다.
     set "APP_DIR=%LOCALAPPDATA%\UTAU_Auto_OTO_v3"
+)
+if defined RUNTIME_ROOT_OVERRIDE (
+    echo [INFO] runtime-root override 사용: %APP_DIR%
 )
 
 if "%DIRECT_SETUP%"=="1" goto :direct_setup_start
@@ -88,8 +123,10 @@ if /i "%WRAPPER_MODE%"=="install" (
     set "WRAPPER_ARGS=--direct-setup --no-recovery-shim"
     if "%INSTALL_ML%"=="1" set "WRAPPER_ARGS=!WRAPPER_ARGS! --with-ml"
     if "%NON_INTERACTIVE%"=="1" set "WRAPPER_ARGS=!WRAPPER_ARGS! --non-interactive"
+    set "WRAPPER_RUNTIME_ARG="
+    if defined RUNTIME_ROOT_OVERRIDE set "WRAPPER_RUNTIME_ARG=--runtime-root ""!APP_DIR!"""
     echo [INFO] 설치 모드 실행: !WRAPPER_ARGS!
-    call "%SETUP_MFA_SELF%" !WRAPPER_ARGS!
+    call "%SETUP_MFA_SELF%" !WRAPPER_ARGS! !WRAPPER_RUNTIME_ARG!
     exit /b !ERRORLEVEL!
 )
 
@@ -136,6 +173,12 @@ if exist "%APP_DIR%\runtime_recovery.ps1" (
 )
 if not defined RUNTIME_RECOVERY_SCRIPT if exist "%APP_DIR%\scripts\runtime_recovery.ps1" (
     set "RUNTIME_RECOVERY_SCRIPT=%APP_DIR%\scripts\runtime_recovery.ps1"
+)
+if not defined RUNTIME_RECOVERY_SCRIPT if defined SETUP_MFA_DIR_NORM if exist "%SETUP_MFA_DIR_NORM%\runtime_recovery.ps1" (
+    set "RUNTIME_RECOVERY_SCRIPT=%SETUP_MFA_DIR_NORM%\runtime_recovery.ps1"
+)
+if not defined RUNTIME_RECOVERY_SCRIPT if defined SETUP_MFA_DIR_NORM if exist "%SETUP_MFA_DIR_NORM%\scripts\runtime_recovery.ps1" (
+    set "RUNTIME_RECOVERY_SCRIPT=%SETUP_MFA_DIR_NORM%\scripts\runtime_recovery.ps1"
 )
 goto :eof
 
@@ -195,6 +238,9 @@ if errorlevel 1 (
 goto :eof
 
 :direct_setup_start
+
+call :preflight_install_tools
+if errorlevel 1 exit /b 1
 
 echo ====================================================
 echo   UTAU Auto OTO - MFA 경량 환경 설치
@@ -292,7 +338,7 @@ if errorlevel 1 exit /b 1
 call :cleanup_old_env_if_requested
 echo.
 echo 완료되었습니다. 이제 UTAU_Auto_OTO.exe를 실행할 수 있습니다.
-pause
+if not "%NON_INTERACTIVE%"=="1" pause
 exit /b 0
 
 :install_micromamba
@@ -316,7 +362,7 @@ if not exist "%MICROMAMBA_ARCHIVE%" (
     powershell -NoProfile -Command "& {$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '%MICROMAMBA_LATEST_URL%' -OutFile '%MICROMAMBA_ARCHIVE%'}"
     if errorlevel 1 (
         echo [FAILED] Micromamba 다운로드에 실패했습니다.
-        pause
+        if not "%NON_INTERACTIVE%"=="1" pause
         exit /b 1
     )
 ) else (
@@ -325,7 +371,7 @@ if not exist "%MICROMAMBA_ARCHIVE%" (
 call :verify_micromamba_archive
 if errorlevel 1 (
     echo [FAILED] Micromamba 해시 검증에 실패했습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 echo [OK] 다운로드가 완료되었습니다.
@@ -341,7 +387,7 @@ if not exist "%MICROMAMBA_EXE%" (
     tar -xjf "%MICROMAMBA_ARCHIVE%" -C "%MICROMAMBA_ROOT%"
     if errorlevel 1 (
         echo [FAILED] Micromamba 압축 해제에 실패했습니다.
-        pause
+        if not "%NON_INTERACTIVE%"=="1" pause
         exit /b 1
     )
     if not exist "%MICROMAMBA_EXE%" if exist "%MICROMAMBA_ROOT%\bin\micromamba.exe" (
@@ -353,7 +399,7 @@ if not exist "%MICROMAMBA_EXE%" (
 )
 if not exist "%MICROMAMBA_EXE%" (
     echo [FAILED] 압축 해제 후 Micromamba 실행 파일을 찾지 못했습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 echo [OK] Micromamba 준비 완료.
@@ -365,7 +411,7 @@ set "MAMBA_ROOT_PREFIX=%MICROMAMBA_ROOT%"
 "%MICROMAMBA_EXE%" create -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge python=%MFA_PYTHON_VERSION% montreal-forced-aligner colorama
 if errorlevel 1 (
     echo [FAILED] MFA 설치에 실패했습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 call :ensure_mfa_entrypoint
@@ -413,14 +459,14 @@ echo   2) 또는 run.bat 실행 ^(소스 체크아웃^)
 echo   3) 이후 "3. Voice Alignment"를 눌러 진행
 echo ====================================================
 echo.
-pause
+if not "%NON_INTERACTIVE%"=="1" pause
 exit /b 0
 
 :bootstrap_python_tools
 echo MFA Python 패키지 도구 점검 중...
 if not exist "%ENV_DIR%\python.exe" (
     echo [FAILED] MFA Python 런타임을 찾을 수 없습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 "%ENV_DIR%\python.exe" -c "import pip, pkg_resources, wheel" >nul 2>nul
@@ -440,13 +486,13 @@ if exist "%ENV_DIR%\Scripts\pip.exe" (
 )
 if errorlevel 1 (
     echo [FAILED] pip/setuptools/wheel 복구에 실패했습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 "%ENV_DIR%\python.exe" -c "import pip, pkg_resources, wheel" >nul 2>nul
 if errorlevel 1 (
     echo [FAILED] 복구 후에도 Python 패키지 도구를 사용할 수 없습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 echo [OK] pip/setuptools/wheel 복구 완료.
@@ -461,7 +507,7 @@ if exist "%MICROMAMBA_EXE%" (
     "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge spacy sudachipy sudachidict-core
     if errorlevel 1 (
         echo [FAILED] 일본어 토크나이저 의존성 설치에 실패했습니다.
-        pause
+        if not "%NON_INTERACTIVE%"=="1" pause
         exit /b 1
     )
     goto :eof
@@ -476,7 +522,7 @@ if exist "%MICROMAMBA_EXE%" (
     "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge libsndfile pysoundfile
     if errorlevel 1 (
         echo [FAILED] 오디오 의존성 설치에 실패했습니다.
-        pause
+        if not "%NON_INTERACTIVE%"=="1" pause
         exit /b 1
     )
     goto :eof
@@ -485,7 +531,7 @@ if exist "%ENV_DIR%\Scripts\conda.exe" (
     "%ENV_DIR%\Scripts\conda.exe" install -y --solver classic -p "%ENV_DIR%" -c conda-forge libsndfile pysoundfile
     if errorlevel 1 (
         echo [FAILED] 오디오 의존성 설치에 실패했습니다.
-        pause
+        if not "%NON_INTERACTIVE%"=="1" pause
         exit /b 1
     )
     goto :eof
@@ -497,7 +543,7 @@ goto :eof
 echo textgrid 모듈 점검 중...
 if not exist "%ENV_DIR%\python.exe" (
     echo [FAILED] MFA Python 런타임을 찾을 수 없습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 "%ENV_DIR%\python.exe" -c "import textgrid" >nul 2>nul
@@ -510,7 +556,7 @@ if exist "%ENV_DIR%\Scripts\pip.exe" (
 )
 if errorlevel 1 (
     echo [FAILED] textgrid 설치에 실패했습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 goto :eof
@@ -518,14 +564,14 @@ goto :eof
 :verify_textgrid
 if not exist "%ENV_DIR%\python.exe" (
     echo [FAILED] MFA Python 런타임을 찾을 수 없습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 "%ENV_DIR%\python.exe" -c "import textgrid" >nul 2>nul
 if errorlevel 1 (
     echo [FAILED] textgrid import 검사에 실패했습니다.
     echo        환경 복구를 위해 setup_mfa.bat를 다시 실행해 주세요.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 goto :eof
@@ -534,17 +580,17 @@ goto :eof
 echo 선택 ML 의존성 설치 중...
 if not exist "%ENV_DIR%\python.exe" (
     echo [FAILED] MFA Python 런타임을 찾을 수 없습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 if not exist "%APP_DIR%\requirements.txt" (
     echo [FAILED] %APP_DIR%에서 requirements.txt를 찾을 수 없습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 if not exist "%APP_DIR%\requirements-ml.txt" (
     echo [FAILED] %APP_DIR%에서 requirements-ml.txt를 찾을 수 없습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 if exist "%MICROMAMBA_EXE%" (
@@ -564,7 +610,7 @@ if exist "%ENV_DIR%\Scripts\pip.exe" (
 )
 if errorlevel 1 (
     echo [FAILED] requirements.txt 설치에 실패했습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 if not exist "%MICROMAMBA_EXE%" (
@@ -577,7 +623,7 @@ if not exist "%MICROMAMBA_EXE%" (
     if errorlevel 1 (
         echo [FAILED] ML 의존성 설치에 실패했습니다.
         echo        lightgbm 빌드를 위해 Microsoft Visual C++ Build Tools가 필요할 수 있습니다.
-        pause
+        if not "%NON_INTERACTIVE%"=="1" pause
         exit /b 1
     )
 )
@@ -587,7 +633,7 @@ goto :eof
 :verify_ml_runtime
 if not exist "%ENV_DIR%\python.exe" (
     echo [FAILED] MFA Python 런타임을 찾을 수 없습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 "%ENV_DIR%\python.exe" -c "import pandas, lightgbm, onnxruntime" >nul 2>nul
@@ -598,7 +644,7 @@ if errorlevel 1 (
     ) else (
         echo        setup_mfa.bat --with-ml 을 다시 실행해 주세요.
     )
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 goto :eof
@@ -620,7 +666,7 @@ call :ensure_mfa_entrypoint
 if errorlevel 1 exit /b 1
 if not exist "%ENV_DIR%\python.exe" (
     echo [FAILED] MFA Python 런타임을 찾을 수 없습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 "%ENV_DIR%\python.exe" -c "import eunjeon, jamo" >nul 2>nul
@@ -634,7 +680,7 @@ if exist "%ENV_DIR%\Scripts\pip.exe" (
 if errorlevel 1 (
     echo [FAILED] 한국어 토크나이저 의존성 설치에 실패했습니다.
     echo        eunjeon 빌드를 위해 Microsoft Visual C++ Build Tools가 필요할 수 있습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 :patch_korean_support
@@ -776,14 +822,14 @@ if exist "%MICROMAMBA_EXE%" (
     goto :eof
 )
 echo [FAILED] 환경 생성 후 MFA 실행 파일을 찾지 못했습니다.
-pause
+if not "%NON_INTERACTIVE%"=="1" pause
 exit /b 1
 
 :download_acoustic_model
 set "MODEL_NAME=%~1"
 if not defined MODEL_NAME (
     echo [FAILED] 음향 모델 이름이 비어 있습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 if exist "%ENV_DIR%\python.exe" (
@@ -800,7 +846,7 @@ if exist "%MICROMAMBA_EXE%" (
     exit /b %errorlevel%
 )
 echo [FAILED] 모델 다운로드에 사용할 실행 가능한 MFA 환경을 찾지 못했습니다.
-pause
+if not "%NON_INTERACTIVE%"=="1" pause
 exit /b 1
 
 :remove_env_dir
@@ -809,7 +855,7 @@ echo [INFO] 기존 환경 제거 중: %ENV_DIR%
 rmdir /s /q "%ENV_DIR%" >nul 2>nul
 if exist "%ENV_DIR%" (
     echo [FAILED] 기존 MFA 환경을 제거하지 못했습니다.
-    pause
+    if not "%NON_INTERACTIVE%"=="1" pause
     exit /b 1
 )
 goto :eof

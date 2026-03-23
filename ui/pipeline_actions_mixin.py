@@ -261,14 +261,61 @@ class PipelineActionsMixin:
 
     def _install_mfa_runtime(self, language="korean"):
         import shutil
+        import tempfile
 
         lang = str(language or "korean").strip().lower()
         app_dir = getattr(self, "app_dir", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         env_dir = get_default_mfa_env_dir()
         legacy_conda_root = get_default_mfa_conda_root()
         micromamba_root = get_default_mfa_micromamba_root()
-        micromamba_exe = get_default_mfa_micromamba_exe()
         runtime_root = os.path.dirname(env_dir)
+
+        def _resolve_micromamba_exe_path(root: str) -> str:
+            candidates = [
+                os.path.join(root, "Library", "bin", "micromamba.exe"),
+                os.path.join(root, "bin", "micromamba.exe"),
+                os.path.join(root, "micromamba.exe"),
+            ]
+            for path in candidates:
+                if os.path.exists(path):
+                    return path
+            return candidates[0]
+
+        def _ensure_writable_dir(path: str) -> tuple[bool, str]:
+            try:
+                os.makedirs(path, exist_ok=True)
+                fd, probe = tempfile.mkstemp(prefix=".utoa_write_probe_", dir=path)
+                os.close(fd)
+                os.remove(probe)
+                return True, ""
+            except Exception as e:
+                return False, str(e)
+
+        root_ok, root_err = _ensure_writable_dir(runtime_root)
+        if not root_ok:
+            local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
+            if local_app_data:
+                fallback_root = os.path.join(local_app_data, "UTAU_Auto_OTO_v3")
+            else:
+                fallback_root = os.path.join(os.path.expanduser("~"), "AppData", "Local", "UTAU_Auto_OTO_v3")
+            fallback_ok, fallback_err = _ensure_writable_dir(fallback_root)
+            if fallback_ok:
+                self._append_log(f"⚠ 기본 MFA 경로 쓰기 실패: {runtime_root} ({root_err})")
+                self._append_log(f"ℹ LOCALAPPDATA 경로로 전환: {fallback_root}")
+                runtime_root = fallback_root
+                env_dir = os.path.join(runtime_root, ".env")
+                legacy_conda_root = os.path.join(runtime_root, "miniconda")
+                micromamba_root = os.path.join(runtime_root, "micromamba")
+            else:
+                self._append_log(f"❌ MFA 런타임 경로를 준비하지 못했습니다: {runtime_root}")
+                if root_err:
+                    self._append_log(f"   원인: {root_err}")
+                self._append_log(f"❌ LOCALAPPDATA 대체 경로도 실패: {fallback_root}")
+                if fallback_err:
+                    self._append_log(f"   원인: {fallback_err}")
+                return False
+
+        micromamba_exe = _resolve_micromamba_exe_path(micromamba_root)
         if any(ord(ch) > 127 for ch in app_dir):
             self._append_log("⚠ 앱 경로에 비ASCII 문자가 있어도 MFA 환경은 공용 폴더를 사용합니다.")
         self._append_log(f"ℹ MFA 공용 환경 경로: {env_dir}")
@@ -411,6 +458,12 @@ class PipelineActionsMixin:
             if os.path.exists(micromamba_exe):
                 self._append_log("ℹ Micromamba 실행 파일이 이미 있어 재사용합니다.")
                 return True
+            try:
+                os.makedirs(os.path.dirname(micromamba_archive), exist_ok=True)
+            except Exception as e:
+                self._append_log(f"❌ Micromamba 다운로드 폴더 생성 실패: {e}")
+                self._append_log(f"   경로: {os.path.dirname(micromamba_archive)}")
+                return False
             self._set_status("⬇ Micromamba 다운로드 중...")
             self._append_log("[1/3] ⬇ Micromamba 다운로드 중... (약 15MB)")
 
