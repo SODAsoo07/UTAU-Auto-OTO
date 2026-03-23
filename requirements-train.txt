@@ -1,0 +1,6 @@
+-r requirements.txt
+-r requirements-ml.txt
+scikit-learn>=1.4
+torch>=2.3
+PyYAML>=6.0
+onnx>=1.16

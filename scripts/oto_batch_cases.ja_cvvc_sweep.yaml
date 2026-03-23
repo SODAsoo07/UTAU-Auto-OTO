@@ -1,0 +1,20 @@
+﻿defaults:
+  enabled: true
+  no_base_oto: false
+  base_oto: ""
+  output_name_template: "oto.sweep.{run_tag}.ini"
+  generate_openutau: false
+  gen_missing_vowels: false
+  enable_ml_correction: true
+  validation: true
+  alias_suffix: ""
+  custom_phonemes_path: ""
+  alias_style: "original"
+
+cases:
+  - name: "SODA_D4_CVVC"
+    language: "japanese"
+    voicebank_dir: 'C:\Users\oyh57\SODAsoo1\VocalSynth\OpenUtau\Singer\SODA_D4_CVVC_8mora_Ultimate+ 2025-08-25'
+    textgrid_dir: "textgrids"
+    auto_format: "cvvc"
+    base_oto: "boto.ini"

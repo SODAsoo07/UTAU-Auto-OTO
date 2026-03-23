@@ -1,47 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
-import unicodedata
-
-
-_KR_KANA_ONLY_RE = re.compile(r"^[\u3041-\u3096\u30A1-\u30FA\u30FC]+$")
-_KR_TAIL_BREATH_HINTS = ("숨", "흡", "호", "호기", "흡기", "breath", "inhale", "exhale", "asp", "air", "息", "吸", "吐")
-_KR_TAIL_BREATH_WORDS = {
-    "r",
-    "h",
-    "숨",
-    "흡",
-    "호",
-    "호기",
-    "흡기",
-    "bre",
-    "breath",
-    "breathy",
-    "inhale",
-    "exhale",
-    "asp",
-    "aspirate",
-    "air",
-    "息",
-    "吸",
-    "吐",
-    "吸い",
-    "吐き",
-    "息継ぎ",
-}
-
-
-def _is_kr_tail_breath_marker(token: str) -> bool:
-    raw = unicodedata.normalize("NFKC", str(token or "")).strip()
-    if not raw:
-        return False
-    if raw.upper() in {"R", "H"}:
-        return True
-    low = raw.lower()
-    if low in _KR_TAIL_BREATH_WORDS:
-        return True
-    return any(hint in low for hint in _KR_TAIL_BREATH_HINTS)
 
 
 @dataclass(frozen=True)
@@ -70,21 +29,10 @@ def build_kr_alias_family_state(
     alias_type_norm = str(alias_type or "").strip().lower()
     breath_tail = ""
     parts = text.split()
-    if len(parts) >= 2:
-        left = parts[0].strip()
-        left_low = left.lower()
-        right = parts[-1].strip()
-        left_is_vowel_like = (
-            left_low in kr_vowels
-            or left_low in {"a", "e", "i", "o", "u"}
-            or bool(_KR_KANA_ONLY_RE.fullmatch(left))
-        )
-        if left_is_vowel_like and _is_kr_tail_breath_marker(right):
-            breath_tail = right
-    if not breath_tail and text and text[-1].upper() in {"R", "H"} and text[:-1].lower() in kr_vowels:
+    if len(parts) >= 2 and parts[0].lower() in kr_vowels and parts[1].upper() in {"R", "H"}:
+        breath_tail = parts[1].upper()
+    elif text and text[-1].upper() in {"R", "H"} and text[:-1].lower() in kr_vowels:
         breath_tail = text[-1].upper()
-    if not breath_tail and re.fullmatch(r"[\u3041-\u3096\u30A1-\u30FA\u30FC]+(?:息|吸|吐|吸い|吐き|息継ぎ)", text):
-        breath_tail = "BREATH"
 
     return KrAliasFamilyState(
         alias_type=alias_type_norm,
@@ -208,35 +156,20 @@ def try_handle_kr_breath_tail_alias(
     if current_w_idx >= len(syllables_info):
         current_w_idx = len(syllables_info) - 1
     curr_syl = syllables_info[current_w_idx]
-    curr_phones = list(curr_syl.get("phones") or [])
-    if not curr_phones:
-        return False, current_w_idx
+    curr_phones = curr_syl["phones"]
     _, v_phone = find_vowel_phone_fn(curr_phones)
     vowel_start = v_phone.minTime * 1000
     vowel_end = v_phone.maxTime * 1000
-    vowel_len = max(vowel_end - vowel_start, 60)
+    vowel_len = max(vowel_end - vowel_start, 80)
+    last_end = (ph_intervals_all[-1].maxTime * 1000) if ph_intervals_all else (curr_syl["end_time"] * 1000)
 
-    all_phones = list(ph_intervals_all or [])
-    last_end = (all_phones[-1].maxTime * 1000) if all_phones else max(curr_syl.get("end_time", 0.0) * 1000, curr_phones[-1].maxTime * 1000)
-    breath_start = vowel_end
-    for ph in all_phones:
-        st = float(getattr(ph, "minTime", 0.0)) * 1000.0
-        en = float(getattr(ph, "maxTime", 0.0)) * 1000.0
-        if st >= (vowel_end - 1.0) and en > (vowel_end + 2.0):
-            breath_start = max(vowel_end, st)
-            break
-    if last_end <= breath_start + 8.0:
-        fallback_tail = max(min(vowel_len * 0.42, 120.0), 45.0)
-        breath_start = max(vowel_end - min(fallback_tail * 0.42, 26.0), 0.0)
-        last_end = max(vowel_end + fallback_tail, breath_start + 42.0)
-
-    breath_len = max(last_end - breath_start, 40.0)
-    lead = min(max(breath_len * 0.34, 18.0), 74.0)
-    offset = max(breath_start - lead, 0.0)
-    pre = max(breath_start - offset, 12.0)
-    ovl = min(pre * 0.45, max(pre - 10.0, 0.0))
-    consonant = pre + min(max(breath_len * 0.64, 40.0), 200.0)
-    cutoff = -(consonant + min(max(breath_len * 0.82, 58.0), 280.0))
+    offset_padding = min(max(vowel_len * 0.7, 180), 320)
+    offset = max(vowel_end - offset_padding, 0)
+    pre_abs = max(vowel_end - 20, offset)
+    pre = pre_abs - offset
+    ovl = pre * 0.85
+    consonant = max(vowel_end - offset, pre + 10)
+    cutoff = -(max(last_end - offset, consonant + 80))
     try:
         offset, consonant, cutoff, pre, ovl = validate_fn(
             offset, consonant, cutoff, pre, ovl, alias_type=state.alias_type

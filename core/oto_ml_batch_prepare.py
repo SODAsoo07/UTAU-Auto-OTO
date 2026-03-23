@@ -383,9 +383,9 @@ def prepare_staged_auto_pairs(
             continue
 
         if auto_oto_exists:
-            item.status = "prepared_existing"
+            item.status = "skip"
             item.reason = "auto_oto_exists"
-            emit(f"[Prepare] ({index}/{len(items)}) {key} prepared(existing_auto_oto)")
+            emit(f"[Prepare] ({index}/{len(items)}) {key} skip(existing_auto_oto)")
             results.append(item)
             _write_prepare_checkpoint(
                 report_path,

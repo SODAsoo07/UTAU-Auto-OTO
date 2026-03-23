@@ -6,11 +6,12 @@ import os
 from typing import Dict, List, Optional
 
 AUTOFREE_BACKEND = "autofree_v1"
-FEATURE_SCHEMA_VERSION = "af_v1"
+FEATURE_SCHEMA_VERSION = "af_v2"
 TARGET_SCHEMA_VERSION = "af_v1_abs"
 
 SOURCE_MODES = ["textgrid", "audio_only"]
-TOKEN_SOURCES = ["filename", "external_map"]
+TOKEN_SOURCES = ["filename", "external_map", "oto_rows"]
+SOURCE_DETAILS = ["textgrid", "boundary_guided", "boundary_guided_pause", "uniform_split"]
 
 FEATURE_NAMES = [
     "language",
@@ -21,18 +22,26 @@ FEATURE_NAMES = [
     "occurrence_index",
     "row_index_in_wav",
     "source_mode",
+    "source_detail",
     "token_source",
     "source_confidence",
     "onset_ms",
+    "voiced_onset_ms",
     "nucleus_start_ms",
     "nucleus_end_ms",
+    "nucleus_span_ms",
     "tail_ms",
+    "tail_margin_ms",
     "blank_confidence",
+    "voiced_confidence",
+    "unvoiced_confidence",
+    "boundary_confidence",
     "mel_window_energy_mean",
     "mel_window_silence_ratio",
     "mel_window_voiced_ratio",
     "prev_gap_ms",
     "next_gap_ms",
+    "neighbor_boundary_gap_ms",
     "file_row_count",
     "file_mean_energy",
     "file_voiced_ratio",
@@ -45,6 +54,7 @@ CATEGORICAL_FEATURES = [
     "wav_norm",
     "alias_norm",
     "source_mode",
+    "source_detail",
     "token_source",
 ]
 
@@ -71,6 +81,7 @@ def get_feature_schema() -> Dict[str, object]:
         "categorical_features": list(CATEGORICAL_FEATURES),
         "source_modes": list(SOURCE_MODES),
         "token_sources": list(TOKEN_SOURCES),
+        "source_details": list(SOURCE_DETAILS),
     }
 
 
@@ -164,6 +175,7 @@ __all__ = [
     "FEATURE_NAMES",
     "FEATURE_SCHEMA_VERSION",
     "SOURCE_MODES",
+    "SOURCE_DETAILS",
     "TARGET_NAMES",
     "TARGET_SCHEMA_VERSION",
     "TOKEN_SOURCES",

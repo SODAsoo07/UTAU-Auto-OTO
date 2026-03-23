@@ -93,11 +93,9 @@ def _segment_stats(samples: Sequence[float], sr: int, start_ms: float, end_ms: f
     window = samples[start_idx:end_idx]
     n = float(len(window))
     abs_vals = [abs(float(v)) for v in window]
-    sil_abs_th = _to_float(os.environ.get("UTOA_AUTOFREE_SEG_SILENCE_ABS_TH", 0.011), 0.011)
-    voiced_abs_th = _to_float(os.environ.get("UTOA_AUTOFREE_SEG_VOICED_ABS_TH", 0.040), 0.040)
     out["mel_window_energy_mean"] = float(sum(abs_vals) / n)
-    out["mel_window_silence_ratio"] = float(sum(1 for v in abs_vals if v < sil_abs_th) / n)
-    out["mel_window_voiced_ratio"] = float(sum(1 for v in abs_vals if v > voiced_abs_th) / n)
+    out["mel_window_silence_ratio"] = float(sum(1 for v in abs_vals if v < 0.01) / n)
+    out["mel_window_voiced_ratio"] = float(sum(1 for v in abs_vals if v > 0.03) / n)
     return out
 
 
@@ -106,8 +104,7 @@ def _file_audio_stats(samples: Sequence[float]) -> Tuple[float, float]:
         return 0.0, 0.0
     n = float(len(samples))
     abs_vals = [abs(float(v)) for v in samples]
-    voiced_abs_th = _to_float(os.environ.get("UTOA_AUTOFREE_FILE_VOICED_ABS_TH", 0.040), 0.040)
-    return float(sum(abs_vals) / n), float(sum(1 for v in abs_vals if v > voiced_abs_th) / n)
+    return float(sum(abs_vals) / n), float(sum(1 for v in abs_vals if v > 0.03) / n)
 
 
 def _wav_duration_ms(samples: Sequence[float], sr: int, wav_path: str = "") -> float:
@@ -368,6 +365,68 @@ def _safe_alias_type(language: str, alias: str) -> str:
         return ""
 
 
+def _boundary_payload(
+    *,
+    onset_ms: float,
+    tail_ms: float,
+    segment_stats: Dict[str, float],
+    source_confidence: float,
+    source_detail: str,
+    boundary_info: Optional[Dict[str, object]] = None,
+) -> Dict[str, float]:
+    boundary = dict(boundary_info or {})
+    onset = max(0.0, float(onset_ms))
+    tail = max(onset + 1.0, float(tail_ms))
+    span = max(1.0, tail - onset)
+    voiced_onset = _to_float(boundary.get("voiced_onset_ms"), onset)
+    nucleus_start = _to_float(boundary.get("nucleus_start_ms"), onset + (span * 0.25))
+    nucleus_end = _to_float(boundary.get("nucleus_end_ms"), onset + (span * 0.75))
+    nucleus_start = _clamp(nucleus_start, onset, tail - 1.0)
+    nucleus_end = _clamp(max(nucleus_start + 1.0, nucleus_end), nucleus_start + 1.0, tail)
+    return {
+        "source_detail": str(boundary.get("source_detail", source_detail) or source_detail),
+        "voiced_onset_ms": float(_clamp(voiced_onset, onset, tail)),
+        "nucleus_start_ms": float(nucleus_start),
+        "nucleus_end_ms": float(nucleus_end),
+        "nucleus_span_ms": float(max(0.0, nucleus_end - nucleus_start)),
+        "tail_margin_ms": float(max(0.0, tail - nucleus_end)),
+        "blank_confidence": float(
+            _clamp(
+                _to_float(boundary.get("blank_confidence"), segment_stats.get("mel_window_silence_ratio", 1.0)),
+                0.0,
+                1.0,
+            )
+        ),
+        "voiced_confidence": float(
+            _clamp(
+                _to_float(boundary.get("voiced_confidence"), segment_stats.get("mel_window_voiced_ratio", 0.0)),
+                0.0,
+                1.0,
+            )
+        ),
+        "unvoiced_confidence": float(_clamp(_to_float(boundary.get("unvoiced_confidence"), 0.0), 0.0, 1.0)),
+        "boundary_confidence": float(
+            _clamp(_to_float(boundary.get("boundary_confidence"), source_confidence), 0.0, 1.0)
+        ),
+    }
+
+
+def _resolve_audio_source_confidence(token_source: str, boundary_confidence: float, source_detail: str) -> float:
+    token = str(token_source or "").strip().lower()
+    detail = str(source_detail or "").strip().lower()
+    base = 0.52
+    if token == "external_map":
+        base = 0.64
+    elif token == "oto_rows":
+        base = 0.72
+    conf = (base * 0.58) + (_clamp(boundary_confidence, 0.0, 1.0) * 0.42)
+    if detail == "uniform_split":
+        conf -= 0.10
+    elif detail == "boundary_guided_pause":
+        conf -= 0.06
+    return float(_clamp(conf, 0.05, 0.96))
+
+
 def _make_row(
     *,
     language: str,
@@ -384,12 +443,22 @@ def _make_row(
     segment_stats: Dict[str, float],
     file_mean_energy: float,
     file_voiced_ratio: float,
+    source_detail: str = "",
+    boundary_info: Optional[Dict[str, object]] = None,
     line_index: int = -1,
 ) -> Dict[str, object]:
     onset_ms = max(0.0, float(onset_ms))
     tail_ms = max(onset_ms + 1.0, float(tail_ms))
     dur_ms = max(1.0, tail_ms - onset_ms)
     alias_norm = canonicalize_alias_for_matching(language, alias)
+    boundary_payload = _boundary_payload(
+        onset_ms=onset_ms,
+        tail_ms=tail_ms,
+        segment_stats=segment_stats,
+        source_confidence=source_confidence,
+        source_detail=source_detail,
+        boundary_info=boundary_info,
+    )
     return {
         "row_uid": "",
         "language": str(language).strip().lower(),
@@ -403,18 +472,26 @@ def _make_row(
         "row_index_in_wav": int(row_index_in_wav),
         "line_index": int(line_index),
         "source_mode": str(source_mode),
+        "source_detail": str(boundary_payload.get("source_detail", source_detail) or source_detail),
         "token_source": str(token_source),
         "source_confidence": float(_clamp(source_confidence, 0.0, 1.0)),
         "onset_ms": float(onset_ms),
-        "nucleus_start_ms": float(onset_ms + (dur_ms * 0.25)),
-        "nucleus_end_ms": float(onset_ms + (dur_ms * 0.75)),
+        "voiced_onset_ms": float(_to_float(boundary_payload.get("voiced_onset_ms"), onset_ms)),
+        "nucleus_start_ms": float(_to_float(boundary_payload.get("nucleus_start_ms"), onset_ms + (dur_ms * 0.25))),
+        "nucleus_end_ms": float(_to_float(boundary_payload.get("nucleus_end_ms"), onset_ms + (dur_ms * 0.75))),
+        "nucleus_span_ms": float(_to_float(boundary_payload.get("nucleus_span_ms"), dur_ms * 0.5)),
         "tail_ms": float(tail_ms),
-        "blank_confidence": float(_clamp(_to_float(segment_stats.get("mel_window_silence_ratio"), 1.0), 0.0, 1.0)),
+        "tail_margin_ms": float(_to_float(boundary_payload.get("tail_margin_ms"), max(0.0, tail_ms - (onset_ms + (dur_ms * 0.75))))),
+        "blank_confidence": float(_to_float(boundary_payload.get("blank_confidence"), _clamp(_to_float(segment_stats.get("mel_window_silence_ratio"), 1.0), 0.0, 1.0))),
+        "voiced_confidence": float(_to_float(boundary_payload.get("voiced_confidence"), 0.0)),
+        "unvoiced_confidence": float(_to_float(boundary_payload.get("unvoiced_confidence"), 0.0)),
+        "boundary_confidence": float(_to_float(boundary_payload.get("boundary_confidence"), source_confidence)),
         "mel_window_energy_mean": float(_to_float(segment_stats.get("mel_window_energy_mean"), 0.0)),
         "mel_window_silence_ratio": float(_clamp(_to_float(segment_stats.get("mel_window_silence_ratio"), 1.0), 0.0, 1.0)),
         "mel_window_voiced_ratio": float(_clamp(_to_float(segment_stats.get("mel_window_voiced_ratio"), 0.0), 0.0, 1.0)),
         "prev_gap_ms": 0.0,
         "next_gap_ms": 0.0,
+        "neighbor_boundary_gap_ms": 0.0,
         "file_row_count": 0,
         "file_mean_energy": float(file_mean_energy),
         "file_voiced_ratio": float(file_voiced_ratio),
@@ -443,6 +520,10 @@ def _apply_occurrence_and_context(rows: List[Dict[str, object]]) -> None:
             tail = _to_float(row.get("tail_ms"), 0.0)
             row["prev_gap_ms"] = onset - _to_float(wav_rows[idx - 1].get("tail_ms"), 0.0) if idx > 0 else 0.0
             row["next_gap_ms"] = _to_float(wav_rows[idx + 1].get("onset_ms"), 0.0) - tail if idx + 1 < row_count else 0.0
+            row["nucleus_span_ms"] = max(0.0, _to_float(row.get("nucleus_end_ms"), 0.0) - _to_float(row.get("nucleus_start_ms"), 0.0))
+            row["tail_margin_ms"] = max(0.0, tail - _to_float(row.get("nucleus_end_ms"), tail))
+            gap_candidates = [abs(float(v)) for v in (row["prev_gap_ms"], row["next_gap_ms"]) if abs(float(v)) > 1e-6]
+            row["neighbor_boundary_gap_ms"] = min(gap_candidates) if gap_candidates else 0.0
             row["row_uid"] = (
                 f"{row.get('voicebank_id', 'unknown')}:{wav_norm}:"
                 f"{alias_norm}:{int(occ)}:{int(row.get('row_index_in_wav', idx))}"

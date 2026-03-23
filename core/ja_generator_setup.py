@@ -88,7 +88,6 @@ class JaTracePreparation:
 class JaGenerationSetupResult:
     custom_map: object
     template_lines: list[str]
-    template_encoding: str
     use_template: bool
     file_groups: dict[str, list[str]]
     tg_index: JaTextGridPreparation
@@ -153,18 +152,15 @@ def prepare_ja_generation_setup(
         tpl_path = ""
 
     template_lines: list[str] = []
-    template_encoding = ""
     if tpl_path:
-        lines, detected_enc, warning, err = load_template_lines_fn(tpl_path)
+        lines, _detected_enc, warning, err = load_template_lines_fn(tpl_path)
         if err:
             log_fn(f"{err}")
             log_fn(f"⚡ 템플릿 로드 실패로 OpenUtau 호환 {auto_gen_format.upper()} 자동 에일리어스 생성으로 전환합니다.")
             lines = []
-            detected_enc = ""
         if warning:
             log_fn(warning)
         template_lines = list(lines or [])
-        template_encoding = str(detected_enc or "").strip()
 
     tg_index = build_ja_textgrid_preparation(
         tg_folder,
@@ -193,7 +189,6 @@ def prepare_ja_generation_setup(
     return JaGenerationSetupResult(
         custom_map=custom_map,
         template_lines=template_lines,
-        template_encoding=template_encoding,
         use_template=use_template,
         file_groups=file_groups,
         tg_index=tg_index,

@@ -1,38 +1,6 @@
 from __future__ import annotations
 
 
-def _clamp(value, lo, hi):
-    return max(float(lo), min(float(hi), float(value)))
-
-
-def _resolve_kr_vcv_prev_vowel_tail_ratio(consonant_hint: str) -> float:
-    """VCV 앞모음 포함 비율(끝에서부터) 기본값을 onset 계열별로 반환."""
-    hint = str(consonant_hint or "").strip().lower()
-    hard_like = {
-        "k",
-        "t",
-        "p",
-        "ch",
-        "c",
-        "kk",
-        "tt",
-        "pp",
-        "jj",
-        "kh",
-        "th",
-        "ph",
-    }
-    fric_like = {"s", "ss", "sh", "h", "f", "z", "x"}
-    son_like = {"m", "n", "ng", "l", "r", "y", "w", "ɫ", "ɾ"}
-    if hint in hard_like:
-        return 0.40
-    if hint in fric_like:
-        return 0.38
-    if hint in son_like:
-        return 0.34
-    return 0.36
-
-
 def build_realized_cv_anchor(
     offset,
     consonant,
@@ -114,26 +82,23 @@ def prepare_vcv_syllable_timing(
 
     c_boundary = c_end
     prev_v_len = max(prev_v_end - prev_v_start, 40.0)
-    c_hint = curr_phones[0].mark if curr_phones else ""
-    prev_tail_ratio = _resolve_kr_vcv_prev_vowel_tail_ratio(c_hint)
-    # Korean VCV guideline:
-    # keep only tail part of previous vowel (about 1/3 ~ 2/5).
-    prev_tail_lo = prev_v_len / 3.0
-    prev_tail_hi = prev_v_len * 0.40
-    offset_padding = _clamp(prev_v_len * prev_tail_ratio, prev_tail_lo, prev_tail_hi)
+    # Korean VCV: keep only the tail section of the previous vowel (about 1/3~2/5).
+    tail_lo = prev_v_len / 3.0
+    tail_hi = prev_v_len * 0.40
+    offset_padding = max(tail_lo, min(prev_v_len * 0.36, tail_hi))
     offset = max(prev_v_end - offset_padding, 0.0)
     pre = c_boundary - offset
+    c_hint = curr_phones[0].mark if curr_phones else ""
     ovl = adaptive_overlap_fn(pre, c_hint, mode="vcv")
 
     vowel_len = max(n_end - c_boundary, 20.0)
-    # Include the trailing CV almost entirely in the sampled span.
     cv_end_rel = max(n_end - offset, pre + 24.0)
-    cons_tail_keep = _clamp(vowel_len * 0.08, 6.0, 16.0)
-    consonant = max(pre + 20.0, cv_end_rel - cons_tail_keep)
-    consonant = min(consonant, cv_end_rel - 4.0)
-    cutoff_tail_add = _clamp(vowel_len * 0.05, 2.0, 10.0)
-    cutoff_abs = max(consonant + 12.0, cv_end_rel + cutoff_tail_add)
-    cutoff = -cutoff_abs
+    onset_rel = max(c_boundary - offset, pre + 4.0)
+    cons_follow = max(14.0, min(vowel_len * 0.22, 34.0))
+    consonant = max(pre + 16.0, onset_rel + cons_follow)
+    consonant = min(consonant, cv_end_rel - 8.0)
+    cutoff_tail_add = max(3.0, min(vowel_len * 0.08, 12.0))
+    cutoff = -(max(consonant + 12.0, cv_end_rel + cutoff_tail_add))
     offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
     return current_w_idx, cv_seq_idx, offset, consonant, cutoff, pre, ovl
 

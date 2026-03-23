@@ -242,20 +242,20 @@ def _kr_vv_profile() -> AnchorTimingProfile:
 
 def _kr_vcv_profile() -> AnchorTimingProfile:
     return AnchorTimingProfile(
-        pre_window_before_ms=8.0,
-        pre_window_after_ms=6.0,
-        pre_floor_ms=46.0,
+        pre_window_before_ms=13.0,
+        pre_window_after_ms=3.0,
+        pre_floor_ms=50.0,
         ovl_gap_min_ms=12.0,
         ovl_gap_max_ms=28.0,
         ovl_gap_target_ms=19.0,
-        cons_gap_min_ms=72.0,
-        cons_gap_max_ms=168.0,
-        cons_gap_target_ms=108.0,
-        cut_gap_min_ms=36.0,
-        cut_gap_max_ms=132.0,
-        cut_gap_target_ms=78.0,
-        cut_to_next_onset_allow_ms=8.0,
-        cut_to_next_vowel_allow_ms=2.0,
+        cons_gap_min_ms=78.0,
+        cons_gap_max_ms=182.0,
+        cons_gap_target_ms=122.0,
+        cut_gap_min_ms=42.0,
+        cut_gap_max_ms=148.0,
+        cut_gap_target_ms=96.0,
+        cut_to_next_onset_allow_ms=10.0,
+        cut_to_next_vowel_allow_ms=8.0,
     )
 
 

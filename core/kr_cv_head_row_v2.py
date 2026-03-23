@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from core.mapping_format_policy import is_kr_order_locked_timing_format
-
 
 def run_kr_cv_head_row(
     *,
@@ -43,9 +41,6 @@ def run_kr_cv_head_row(
     alignment_weight=0.0,
     textgrid_trust_tier="",
 ):
-    order_locked = bool(is_kr_order_locked_timing_format(file_format))
-    min_keep_from_pre_ms = 112.0 if order_locked else 96.0
-
     (
         selected_w_idx,
         cv_seq_idx,
@@ -133,7 +128,6 @@ def run_kr_cv_head_row(
         pre,
         selected_w_idx,
         syllables_info,
-        file_format=file_format,
     )
     (
         offset,
@@ -148,7 +142,6 @@ def run_kr_cv_head_row(
         pre,
         n_start,
         n_end,
-        file_format=file_format,
     )
     (
         offset,
@@ -163,8 +156,6 @@ def run_kr_cv_head_row(
         pre,
         selected_w_idx,
         syllables_info,
-        alias_type="cv_head",
-        min_keep_from_pre_ms=min_keep_from_pre_ms,
     )
     cutoff_reduced += cutoff_reduced_after_offset
 
@@ -209,42 +200,8 @@ def run_kr_cv_head_row(
             pre,
             selected_w_idx,
             syllables_info,
-            file_format=file_format,
         )
         offset_reduced += offset_reduced_after_anchor
-        (
-            offset,
-            consonant,
-            cutoff,
-            pre,
-            cutoff_extended_after_anchor,
-        ) = ensure_cv_head_min_vowel_coverage_fn(
-            offset,
-            consonant,
-            cutoff,
-            pre,
-            n_start,
-            n_end,
-            file_format=file_format,
-        )
-        cutoff_extended += cutoff_extended_after_anchor
-        (
-            offset,
-            consonant,
-            cutoff,
-            pre,
-            cutoff_reduced_after_anchor,
-        ) = guard_cv_cutoff_to_next_onset_fn(
-            offset,
-            consonant,
-            cutoff,
-            pre,
-            selected_w_idx,
-            syllables_info,
-            alias_type="cv_head",
-            min_keep_from_pre_ms=min_keep_from_pre_ms,
-        )
-        cutoff_reduced += cutoff_reduced_after_anchor
     anchor_record = build_anchor_record_fn(
         selected_w_idx,
         offset=offset,

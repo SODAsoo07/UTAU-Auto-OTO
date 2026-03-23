@@ -58,7 +58,6 @@ from core.kr_oto_mapping import (
     _extract_kr_cv_targets_from_filename,
     _find_kr_cv_vowel_match_index,
     _is_kr_order_locked_cv_format,
-    _is_kr_sequence_locked_mapping_format,
     _resolve_kr_cvvc_occurrence_index,
     _resolve_kr_cvvc_vv_index,
     _score_kr_syllable_mapping,
@@ -104,14 +103,17 @@ from core.kr_oto_postprocess import (
 from core.kr_oto_file_ops import (
     _apply_kr_bridge_coherence_to_oto_file,
     _apply_kr_profile_to_oto_file,
-    _build_kr_profile_bucket_keys,
     _extract_base_timing_shape,
     _parse_oto_line_profile,
     _read_text_with_fallback,
     _resolve_kr_reference_dirs,
     _retarget_kr_bridge_to_next_cv,
+    apply_kr_autotune_profile_to_oto,
+    load_kr_autotune_profile,
+    save_kr_autotune_profile,
+    train_kr_autotune_profile,
 )
-from core.distribution_guard import is_training_paths_enabled
+from core.kr_oto_file_finalize import KrPostFilePipelineContext, run_kr_post_file_pipeline
 from core.kr_generator_setup import prepare_kr_profile_setup
 from core.generator_finish import (
     GeneratorFinishContext,
@@ -171,55 +173,6 @@ from core.oto_mapping_policy import resolve_plan_policy
 from core.oto_row_abstain import decide_cv_row_abstain
 from core.oto_row_policy import apply_row_confidence_penalty
 from core.oto_runtime_policy import resolve_runtime_mapping_policy
-from core.mapping_format_policy import (
-    KR_ROW_GUARD_ACTIVE_FORMATS,
-    KR_ROW_GUARD_BLANK_FORMATS,
-    KR_ROW_GUARD_MARGIN_FORMATS,
-    KR_RUNTIME_ABSTAIN_FORMATS,
-    KR_RUNTIME_STRICT_FORMATS,
-    KR_SEQUENCE_LOCK_FORMATS,
-    is_kr_sequence_locked_format,
-)
-from core.cv_anchor_adaptation import derive_cv_bridge_tuning
-from core.generation.contracts import (
-    GenerationRequest,
-    attach_request_metadata,
-    finalize_runtime_report,
-    initialize_runtime_report,
-)
-from core.generation.normalizer import normalize_korean_generation_options
-from core.generation.output_finalize import persist_korean_generation_output
-from core.generation.file_stages import (
-    append_preserved_lines,
-    handle_mapping_abstain_fallback,
-    handle_mapping_failure_fallback,
-    handle_kr_file_context_status,
-    handle_kr_loop_prep_status,
-    resolve_mapping_line_alias,
-    resolve_mapping_failure_reason,
-)
-from core.generation.mapping_runtime import (
-    compute_runtime_low_conf_state,
-    format_alignment_guard_summary,
-    update_mapping_vc_bridge_runtime_report,
-    update_kr_mapping_runtime_report,
-)
-from core.generation.mapping_reason_logs import build_kr_mapping_reason_log
-from core.generation.mapping_reason_codes import (
-    COMMON_REASON_FILENAME_TOKEN,
-    normalize_mapping_reason_code,
-)
-from core.generation.runtime_diagnostics import (
-    build_mapping_abstain_meta,
-    build_mapping_failure_meta,
-)
-from core.generation.plan_runtime import (
-    build_language_runtime_state,
-    build_common_plan_context,
-    extract_language_runtime_state,
-    log_sinsy_plan_guard,
-    recompute_common_plan_runtime_state,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -244,19 +197,6 @@ def _env_bool(name, default=False):
         return False
     return bool(default)
 
-
-def _resolve_syllable_strict_mode(*, file_format="") -> str:
-    fmt = str(file_format or "").strip().lower()
-    if fmt not in {"cvvc", "cvc"}:
-        return "off"
-    raw = str(os.environ.get("UTOA_SYLLABLE_STRICT_MODE", "") or "").strip().lower()
-    if raw in {"strict", "full", "full_strict", "hard"}:
-        return "strict"
-    if raw in {"off", "none", "disable", "disabled", "0", "false"}:
-        return "off"
-    return "soft"
-
-
 def _debug_offset_trace(log_fn, stage, fname, alias, before, after, extra=""):
     if not _env_bool("UTOA_DEBUG_OFFSET_TRACE", False):
         return
@@ -279,82 +219,6 @@ def _debug_offset_trace(log_fn, stage, fname, alias, before, after, extra=""):
         log_fn(msg)
     except Exception:
         return
-
-
-def _new_vc_bridge_ab_stats():
-    return {
-        "rows": 0,
-        "pre_abs_shift_sum": 0.0,
-        "pre_abs_shift_abs_sum": 0.0,
-        "cons_shift_sum": 0.0,
-        "cutoff_abs_shift_sum": 0.0,
-        "ovl_shift_sum": 0.0,
-    }
-
-
-def _accumulate_vc_bridge_ab_stats(stats, base_params, tuned_params):
-    if not isinstance(stats, dict):
-        return
-    if not base_params or not tuned_params:
-        return
-    try:
-        b_off, b_cons, b_cut, b_pre, b_ovl = base_params
-        t_off, t_cons, t_cut, t_pre, t_ovl = tuned_params
-        pre_abs_delta = (float(t_off) + float(t_pre)) - (float(b_off) + float(b_pre))
-        cons_delta = float(t_cons) - float(b_cons)
-        cut_delta = abs(float(t_cut)) - abs(float(b_cut))
-        ovl_delta = float(t_ovl) - float(b_ovl)
-        stats["rows"] = int(stats.get("rows", 0) or 0) + 1
-        stats["pre_abs_shift_sum"] = float(stats.get("pre_abs_shift_sum", 0.0) or 0.0) + pre_abs_delta
-        stats["pre_abs_shift_abs_sum"] = float(stats.get("pre_abs_shift_abs_sum", 0.0) or 0.0) + abs(pre_abs_delta)
-        stats["cons_shift_sum"] = float(stats.get("cons_shift_sum", 0.0) or 0.0) + cons_delta
-        stats["cutoff_abs_shift_sum"] = float(stats.get("cutoff_abs_shift_sum", 0.0) or 0.0) + cut_delta
-        stats["ovl_shift_sum"] = float(stats.get("ovl_shift_sum", 0.0) or 0.0) + ovl_delta
-    except Exception:
-        return
-
-
-def _summarize_vc_bridge_ab_stats(stats):
-    if not isinstance(stats, dict):
-        return {}
-    rows = int(stats.get("rows", 0) or 0)
-    if rows <= 0:
-        return {}
-    denom = float(rows)
-    return {
-        "rows": rows,
-        "pre_abs_shift_mean_ms": float(stats.get("pre_abs_shift_sum", 0.0) or 0.0) / denom,
-        "pre_abs_shift_abs_mean_ms": float(stats.get("pre_abs_shift_abs_sum", 0.0) or 0.0) / denom,
-        "cons_shift_mean_ms": float(stats.get("cons_shift_sum", 0.0) or 0.0) / denom,
-        "cutoff_abs_shift_mean_ms": float(stats.get("cutoff_abs_shift_sum", 0.0) or 0.0) / denom,
-        "ovl_shift_mean_ms": float(stats.get("ovl_shift_sum", 0.0) or 0.0) / denom,
-    }
-
-
-def train_kr_autotune_profile(auto_oto_path, manual_oto_path, custom_phonemes_path=""):
-    if not is_training_paths_enabled():
-        raise RuntimeError("Distribution build does not support autotune profile training.")
-    from core.kr_oto_file_ops import train_kr_autotune_profile as _train_kr_profile
-    return _train_kr_profile(auto_oto_path, manual_oto_path, custom_phonemes_path=custom_phonemes_path)
-
-
-def save_kr_autotune_profile(path, profile):
-    if not is_training_paths_enabled():
-        raise RuntimeError("Distribution build does not support autotune profile training.")
-    from core.kr_oto_file_ops import save_kr_autotune_profile as _save_kr_profile
-    return _save_kr_profile(path, profile)
-
-
-def load_kr_autotune_profile(path):
-    from core.kr_oto_file_ops import load_kr_autotune_profile as _load_kr_profile
-    return _load_kr_profile(path)
-
-
-def apply_kr_autotune_profile_to_oto(oto_path, profile, custom_phonemes_path=""):
-    if not is_training_paths_enabled():
-        raise RuntimeError("Distribution build does not support autotune profile training.")
-    from core.kr_oto_file_ops import apply_kr_autotune_profile_to_oto as _apply_kr_profile
-    return _apply_kr_profile(oto_path, profile, custom_phonemes_path=custom_phonemes_path)
 
 __all__ = [
     "generate_oto",
@@ -509,21 +373,112 @@ DEFAULT_PARAMS = {
     'DIPHTHONG_VC_PRE_EXTEND': 1.2,
 }
 
+
+DEFAULT_PARAMS_PRESET_BY_CONTEXT = {
+    "korean": {
+        "default": {
+            "VC_CONSONANT_RATIO": 0.47,
+            "VC_VOWEL_START": 0.36,
+            "VC_PRE_OFFSET": 20.0,
+            "VC_OVL_RATIO": 0.34,
+            "CV_PRE_RATIO": 0.92,
+            "CV_OVL_RATIO": 0.38,
+            "DIPHTHONG_CV_PRE_RATIO": 0.33,
+            "DIPHTHONG_CV_CONSONANT_RATIO": 0.58,
+            "DIPHTHONG_VC_VOWEL_START": 0.34,
+            "DIPHTHONG_VC_CONSONANT": 0.48,
+        },
+        "cv": {
+            "CV_PRE_RATIO": 0.88,
+            "CV_OVL_RATIO": 0.36,
+            "VC_PRE_OFFSET": 16.0,
+        },
+        "cvc": {
+            "VC_CONSONANT_RATIO": 0.42,
+            "VC_VOWEL_START": 0.34,
+            "VC_PRE_OFFSET": 18.0,
+            "VC_OVL_RATIO": 0.36,
+            "CV_PRE_RATIO": 0.90,
+        },
+        "cvvc": {
+            "VC_CONSONANT_RATIO": 0.44,
+            "VC_VOWEL_START": 0.35,
+            "VC_PRE_OFFSET": 19.0,
+            "VC_OVL_RATIO": 0.35,
+            "CV_PRE_RATIO": 0.90,
+        },
+        "vcv": {
+            "VC_CONSONANT_RATIO": 0.48,
+            "VC_VOWEL_START": 0.40,
+            "VC_PRE_OFFSET": 22.0,
+            "VC_OVL_RATIO": 0.33,
+            "CV_PRE_RATIO": 0.95,
+            "CV_OVL_RATIO": 0.36,
+        },
+    },
+    "japanese": {
+        "default": {
+            "VC_CONSONANT_RATIO": 0.50,
+            "VC_VOWEL_START": 0.32,
+            "VC_PRE_OFFSET": 20.0,
+            "VC_OVL_RATIO": 0.32,
+            "CV_PRE_RATIO": 0.86,
+            "CV_OVL_RATIO": 0.34,
+            "DIPHTHONG_CV_PRE_RATIO": 0.34,
+            "DIPHTHONG_CV_CONSONANT_RATIO": 0.58,
+            "DIPHTHONG_VC_VOWEL_START": 0.31,
+            "DIPHTHONG_VC_CONSONANT": 0.50,
+        },
+        "cv": {
+            "CV_PRE_RATIO": 0.82,
+            "CV_OVL_RATIO": 0.33,
+        },
+        "cvvc": {
+            "VC_CONSONANT_RATIO": 0.52,
+            "VC_PRE_OFFSET": 18.0,
+            "CV_PRE_RATIO": 0.80,
+        },
+        "vcv": {
+            "VC_CONSONANT_RATIO": 0.46,
+            "VC_VOWEL_START": 0.36,
+            "VC_PRE_OFFSET": 22.0,
+            "CV_PRE_RATIO": 0.98,
+            "CV_OVL_RATIO": 0.40,
+        },
+    },
+}
+
+
+def get_default_params_for_context(language="korean", format_type=""):
+    lang = str(language or "korean").strip().lower()
+    if lang not in DEFAULT_PARAMS_PRESET_BY_CONTEXT:
+        lang = "korean"
+    fmt = normalize_format_type(lang, format_type) or "general"
+    lang_presets = DEFAULT_PARAMS_PRESET_BY_CONTEXT.get(lang, {})
+    resolved = dict(DEFAULT_PARAMS)
+    resolved.update(lang_presets.get("default", {}))
+    if fmt in {"general", "default"}:
+        fallback_fmt = "cvvc" if lang == "korean" else "cvvc"
+        resolved.update(lang_presets.get(fallback_fmt, {}))
+    else:
+        resolved.update(lang_presets.get(fmt, {}))
+    return resolved
+
 # 한국어 매핑 신뢰도 임계치 기본값(포맷별)
 # - CVVC: 현재 안정성 기준값 유지
 # - VCV: 점프 허용 전 신뢰도를 조금 더 엄격하게 본다
 # - CV/CVC: 정보량이 상대적으로 단순해 과도한 저신뢰 판정을 완화
 # - VC_ONLY/VV_ONLY: CV 정렬 점프 로직 영향이 거의 없어 완화값 사용
 KR_MAPPING_CONF_THRESHOLD_BY_FORMAT = {
-    "cv": 0.62,
-    "cvvc": 0.66,
-    "vcv": 0.68,
-    "cvc": 0.63,
-    "cv_simple": 0.61,
-    "mono": 0.61,
+    "cv": 0.60,
+    "cvvc": 0.64,
+    "vcv": 0.64,
+    "cvc": 0.60,
+    "cv_simple": 0.60,
+    "mono": 0.60,
     "vc_only": 0.58,
     "vv_only": 0.58,
-    "default": 0.64,
+    "default": 0.62,
 }
 
 
@@ -531,8 +486,8 @@ def _resolve_kr_mapping_conf_threshold(file_format, override_threshold=None, pho
     """포맷별 기본 매핑 신뢰도 임계값을 반환합니다.
 
     phone_quality_score가 제공되면 phone tier 품질에 따라 동적으로 조정합니다:
-    - 품질 < 0.4 -> 임계값을 0.03 낮춤 (완화 폭을 줄여 과도한 점프를 억제)
-    - 품질 > 0.8 -> 임계값을 0.02 올림
+    - 품질 < 0.4 -> 임계값을 0.05 낮춤 (과도한 저신뢰 판정 완화)
+    - 품질 > 0.8 -> 임계값을 0.03 올림 (고품질 데이터에서 더 엄격)
     """
     if override_threshold is not None:
         try:
@@ -551,9 +506,9 @@ def _resolve_kr_mapping_conf_threshold(file_format, override_threshold=None, pho
         try:
             pq = float(phone_quality_score)
             if pq < 0.4:
-                threshold = max(0.42, threshold - 0.03)
+                threshold = max(0.40, threshold - 0.05)
             elif pq > 0.8:
-                threshold = min(0.85, threshold + 0.02)
+                threshold = min(0.85, threshold + 0.03)
         except (TypeError, ValueError):
             pass
 
@@ -679,17 +634,7 @@ def adaptive_overlap(pre, consonant_hint="", mode="cv"):
     return max(0.0, min(ovl, p))
 
 
-def _guard_cv_cutoff_to_next_onset(
-    offset,
-    consonant,
-    cutoff,
-    pre,
-    syll_idx,
-    syllables_info,
-    *,
-    alias_type="",
-    min_keep_from_pre_ms=None,
-):
+def _guard_cv_cutoff_to_next_onset(offset, consonant, cutoff, pre, syll_idx, syllables_info):
     """CV/CV_HEAD cutoff이 다음 음절 onset을 침범하지 않도록 상한을 건다."""
     if syll_idx is None or syll_idx < 0:
         return offset, consonant, cutoff, pre, 0.0
@@ -705,11 +650,7 @@ def _guard_cv_cutoff_to_next_onset(
     hard_next = is_plosive_ipa(next_mark) or next_mark in {
         "s", "ss", "sh", "ch", "j", "jj", "c", "ts", "h"
     }
-    a_type = str(alias_type or "").strip().lower()
     safety = 12.0 if hard_next else 7.0
-    if a_type == "cv_head":
-        safety_scale = _env_float("UTOA_KR_CV_HEAD_NEXT_ONSET_SAFETY_SCALE", 0.72)
-        safety = max(4.0, safety * max(0.4, min(1.2, float(safety_scale))))
     next_onset_rel = (next_phones[0].minTime * 1000.0) - offset
     max_cutoff_abs = next_onset_rel - safety
     if max_cutoff_abs <= (pre + 26.0):
@@ -720,14 +661,6 @@ def _guard_cv_cutoff_to_next_onset(
     consonant = max(consonant, pre + 16.0)
 
     cutoff_abs = min(original_cutoff_abs, max_cutoff_abs)
-    if min_keep_from_pre_ms is not None:
-        try:
-            keep_ms = max(24.0, float(min_keep_from_pre_ms))
-        except Exception:
-            keep_ms = 24.0
-        cutoff_abs = max(cutoff_abs, min(max_cutoff_abs, pre + keep_ms))
-        consonant = min(consonant, cutoff_abs - 10.0)
-        consonant = max(consonant, pre + 10.0)
     if cutoff_abs <= (consonant + 8.0):
         cutoff_abs = min(max_cutoff_abs, consonant + 14.0)
         if cutoff_abs <= (consonant + 6.0):
@@ -798,15 +731,7 @@ def _guard_kr_vc_cutoff_to_next_segment(offset, consonant, cutoff, pre, ovl, syl
     )
 
 
-def _guard_cv_head_offset_to_current_onset(
-    offset,
-    consonant,
-    cutoff,
-    pre,
-    syll_idx,
-    syllables_info,
-    file_format="",
-):
+def _guard_cv_head_offset_to_current_onset(offset, consonant, cutoff, pre, syll_idx, syllables_info):
     """
     CV_HEAD(- CV) offset이 현재 음절 onset보다 과도하게 앞서지 않도록 제한합니다.
     공백 영역 과포함을 줄이기 위한 가드입니다.
@@ -830,41 +755,20 @@ def _guard_cv_head_offset_to_current_onset(
         c_end = float(curr_phones[0].maxTime) * 1000.0
     c_len = max(0.0, c_end - c_start)
 
-    fmt = str(file_format or "").strip().lower()
-    order_locked = _is_kr_order_locked_cv_format(fmt)
-
     # onset 특성별 허용 리드(ms): 파열/치찰은 조금 넓게, 공명음은 더 타이트하게.
     if is_plosive_ipa(c_hint) or c_hint in {"s", "ss", "sh", "ch", "j", "jj", "c", "ts", "h"}:
-        base_lead = 36.0
+        base_lead = 44.0
     elif c_hint in {"m", "n", "ng", "l", "r", "y", "w", "ny"}:
-        base_lead = 24.0
-    else:
         base_lead = 30.0
-    if order_locked:
-        base_lead += 2.0
-    lead_cap = min(base_lead, max(18.0, c_len + 12.0))
+    else:
+        base_lead = 36.0
+    lead_cap = min(base_lead, max(22.0, c_len + 16.0))
     offset_floor = max(0.0, c_start - lead_cap)
-    late_guard_ms = _env_float(
-        "UTOA_KR_CV_HEAD_OFFSET_LATE_GUARD_MS",
-        8.0 if order_locked else 10.0,
-    )
-    offset_ceil = c_start + late_guard_ms
-
-    new_offset = float(offset)
-    if new_offset < offset_floor:
-        new_offset = float(offset_floor)
-    elif new_offset > offset_ceil:
-        target_lead = _env_float(
-            "UTOA_KR_CV_HEAD_OFFSET_TARGET_LEAD_MS",
-            19.0 if order_locked else 15.0,
-        )
-        target_cap = min(lead_cap, max(12.0, target_lead))
-        new_offset = max(0.0, c_start - target_cap)
-
-    if abs(new_offset - float(offset)) < 0.5:
+    if offset >= offset_floor:
         return offset, consonant, cutoff, pre, 0.0
 
-    # 오프셋만 재정렬할 때 상대 길이(pre/cons/cutoff)가 급격히 줄어들지 않도록
+    new_offset = offset_floor
+    # 오프셋만 당길 때 상대 길이(pre/cons/cutoff)가 급격히 줄어들지 않도록
     # 기존 상대 파라미터를 우선 보존한다.
     new_pre = max(float(pre), 8.0)
     new_consonant = max(float(consonant), new_pre + 8.0)
@@ -874,74 +778,26 @@ def _guard_cv_head_offset_to_current_onset(
     new_offset, new_consonant, new_cutoff, new_pre, _ovl = validate_oto_params(
         new_offset, new_consonant, new_cutoff, new_pre, 0.0
     )
-    adjusted_ms = abs(float(new_offset) - float(offset))
-    return new_offset, new_consonant, new_cutoff, new_pre, adjusted_ms
+    reduced_ms = max(0.0, new_offset - offset)
+    return new_offset, new_consonant, new_cutoff, new_pre, reduced_ms
 
 
-def _ensure_cv_head_min_vowel_coverage(
-    offset,
-    consonant,
-    cutoff,
-    pre,
-    vowel_start_ms,
-    vowel_end_ms,
-    file_format="",
-):
+def _ensure_cv_head_min_vowel_coverage(offset, consonant, cutoff, pre, vowel_start_ms, vowel_end_ms):
     """
     CV_HEAD(-CV)에서 컷오프가 너무 이르게 닫혀 모음이 거의 포함되지 않는 경우를 방지합니다.
     """
-    fmt = str(file_format or "").strip().lower()
-    order_locked = _is_kr_order_locked_cv_format(fmt)
     v_start = float(vowel_start_ms)
     v_end = float(vowel_end_ms)
     v_len = max(0.0, v_end - v_start)
+    if v_len < 40.0:
+        return offset, consonant, cutoff, pre, 0.0
 
     cut_abs = abs(float(cutoff))
-    if v_len < 40.0:
-        # vowel 구간 추정이 불안정해도 -CV가 -C로 붕괴하지 않도록 pre 기준 최소 길이를 강제한다.
-        min_from_pre_fallback = _env_float(
-            "UTOA_KR_CV_HEAD_MIN_FROM_PRE_FALLBACK_MS",
-            112.0 if order_locked else 98.0,
-        )
-        min_cut_abs = max(float(consonant) + 12.0, float(pre) + float(min_from_pre_fallback))
-        if cut_abs >= min_cut_abs:
-            return offset, consonant, cutoff, pre, 0.0
-        new_cutoff = -min_cut_abs
-        offset, consonant, new_cutoff, pre, _ovl = validate_oto_params(
-            offset, consonant, new_cutoff, pre, 0.0
-        )
-        extended_ms = max(0.0, abs(new_cutoff) - cut_abs)
-        return offset, consonant, new_cutoff, pre, extended_ms
-
     # 모음 구간을 최소 일부(비율+하한) 포함하도록 컷오프 하한을 설정.
-    keep_v_ratio = _env_float(
-        "UTOA_KR_CV_HEAD_KEEP_VOWEL_RATIO",
-        0.34 if order_locked else 0.30,
-    )
-    keep_v_floor = _env_float(
-        "UTOA_KR_CV_HEAD_KEEP_VOWEL_FLOOR_MS",
-        78.0 if order_locked else 70.0,
-    )
-    keep_v_ceil = _env_float(
-        "UTOA_KR_CV_HEAD_KEEP_VOWEL_CEIL_MS",
-        205.0 if order_locked else 190.0,
-    )
-    keep_v_ms = min(max(v_len * keep_v_ratio, keep_v_floor), keep_v_ceil)
+    keep_v_ms = min(max(v_len * 0.30, 70.0), 190.0)
     vowel_start_rel = max(v_start - float(offset), float(pre) + 8.0)
     # pre 이후 너무 빨리 닫히는 케이스(자음만 남는 길이)를 방지.
-    min_from_pre_ratio = _env_float(
-        "UTOA_KR_CV_HEAD_MIN_FROM_PRE_RATIO",
-        0.28 if order_locked else 0.24,
-    )
-    min_from_pre_floor = _env_float(
-        "UTOA_KR_CV_HEAD_MIN_FROM_PRE_FLOOR_MS",
-        96.0 if order_locked else 90.0,
-    )
-    min_from_pre_ceil = _env_float(
-        "UTOA_KR_CV_HEAD_MIN_FROM_PRE_CEIL_MS",
-        186.0 if order_locked else 180.0,
-    )
-    min_from_pre = min(max(v_len * min_from_pre_ratio, min_from_pre_floor), min_from_pre_ceil)
+    min_from_pre = min(max(v_len * 0.24, 90.0), 180.0)
     min_cut_abs = max(float(consonant) + 12.0, vowel_start_rel + keep_v_ms, float(pre) + min_from_pre)
     if cut_abs >= min_cut_abs:
         return offset, consonant, cutoff, pre, 0.0
@@ -1907,399 +1763,6 @@ def _estimate_kr_mapping_confidence(
     return float(conf), float(margin)
 
 
-def _build_kr_words_syllables(
-    wd_intervals,
-    ph_intervals,
-    *,
-    force_words_phone_fill,
-    decompose_hangul_to_roman_fn,
-):
-    syllables_info = []
-    for w in (wd_intervals or []):
-        w_start = w.minTime
-        w_end = w.maxTime
-        s_phones = [p for p in ph_intervals if p.minTime >= w_start - 0.01 and p.maxTime <= w_end + 0.01]
-        if force_words_phone_fill and not s_phones:
-            s_phones = _synthesize_kr_word_phones(
-                w.mark,
-                float(w_start),
-                float(w_end),
-                decompose_hangul_to_roman_fn,
-            )
-        roman_parts = []
-        for ch in w.mark:
-            roman_parts.extend(decompose_hangul_to_roman_fn(ch))
-        roman_raw = "".join(roman_parts).lower()
-        roman_cv = _kr_cv_kernel(roman_raw)
-        syllables_info.append(
-            {
-                "word": w.mark,
-                "roman": roman_raw,
-                "roman_cv": roman_cv,
-                "start_time": w_start,
-                "end_time": w_end,
-                "phones": s_phones,
-            }
-        )
-    return syllables_info
-
-
-def _select_kr_syllable_source_state(
-    *,
-    file_format,
-    prefer_filename_sequence,
-    low_phone_quality,
-    wd_intervals,
-    ph_intervals,
-    targets_for_build,
-    force_words_phone_fill,
-    decompose_hangul_to_roman_fn,
-    mel_ctx_for_file,
-    textgrid_trust_score,
-):
-    words_syllables = _build_kr_words_syllables(
-        wd_intervals,
-        ph_intervals,
-        force_words_phone_fill=force_words_phone_fill,
-        decompose_hangul_to_roman_fn=decompose_hangul_to_roman_fn,
-    )
-    used_words_based = len(words_syllables) > 0
-    alias_syllables = _build_kr_syllables_from_phone_nuclei(ph_intervals, targets_for_build) if targets_for_build else None
-    if mel_ctx_for_file:
-        _annotate_kr_syllable_blank_confidence(words_syllables, mel_ctx_for_file)
-        _annotate_kr_syllable_blank_confidence(alias_syllables, mel_ctx_for_file)
-
-    source_pick = select_kr_syllable_source(
-        file_format=file_format,
-        prefer_filename_sequence=prefer_filename_sequence,
-        low_phone_quality=low_phone_quality,
-        used_words_based=used_words_based,
-        words_syllables=words_syllables,
-        alias_syllables=alias_syllables,
-        targets_for_build=targets_for_build,
-        score_mapping_fn=_score_kr_syllable_mapping,
-        should_prefer_alias_fn=_should_prefer_alias_based_syllables,
-        compute_glide_mismatch_fn=_compute_kr_glide_mismatch_ratio,
-        is_order_locked_format_fn=_is_kr_sequence_locked_mapping_format,
-    )
-
-    syllables_info = list(source_pick.get("syllables_info") or [])
-    if mel_ctx_for_file:
-        _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx_for_file)
-    syllable_blank_confidences = [
-        float((s or {}).get("blank_confidence", 0.0) or 0.0)
-        for s in (syllables_info or [])
-    ]
-    blank_conf_mean = 0.0
-    if syllable_blank_confidences:
-        blank_conf_mean = float(sum(syllable_blank_confidences) / float(len(syllable_blank_confidences)))
-    alignment_weight = max(
-        0.0,
-        min(
-            1.0,
-            (textgrid_trust_score * 0.85) - max(0.0, blank_conf_mean - 0.45) * 0.35,
-        ),
-    )
-    anchor_lock_lite = bool(alignment_weight < 0.58 or blank_conf_mean >= 0.55)
-    return {
-        "syllables_info": syllables_info,
-        "used_words_based": bool(source_pick.get("used_words_based")),
-        "used_alias_based": bool(source_pick.get("used_alias_based")),
-        "base_score": float(source_pick.get("base_score", 0.0) or 0.0),
-        "alt_score": float(source_pick.get("alt_score", 0.0) or 0.0),
-        "mapping_reason_code": normalize_mapping_reason_code(
-            source_pick.get("mapping_reason_code"),
-            language="kr",
-            fallback_code=COMMON_REASON_FILENAME_TOKEN,
-        ),
-        "words_glide_mismatch_ratio": float(source_pick.get("words_glide_mismatch_ratio", 0.0) or 0.0),
-        "blank_conf_mean": float(blank_conf_mean),
-        "alignment_weight": float(alignment_weight),
-        "anchor_lock_lite": bool(anchor_lock_lite),
-        "syllable_blank_confidences": syllable_blank_confidences,
-        "alias_syllables_present": bool(alias_syllables),
-    }
-
-
-def _log_kr_mapping_selection(
-    *,
-    log_fn,
-    fname,
-    mapping_reason_code,
-    base_score,
-    alt_score,
-    words_glide_mismatch_ratio,
-    low_quality_reasons,
-    alias_syllables_present,
-    targets_for_build,
-    textgrid_trust_tier,
-    textgrid_trust_score,
-    alignment_weight,
-    blank_conf_mean,
-    anchor_lock_lite,
-):
-    reason_line = build_kr_mapping_reason_log(
-        mapping_reason_code=mapping_reason_code,
-        base_score=base_score,
-        alt_score=alt_score,
-        words_glide_mismatch_ratio=words_glide_mismatch_ratio,
-        low_quality_reasons=low_quality_reasons,
-        alias_syllables_present=alias_syllables_present,
-        targets_for_build=targets_for_build,
-        textgrid_trust_tier=textgrid_trust_tier,
-        textgrid_trust_score=textgrid_trust_score,
-    )
-    if reason_line:
-        log_fn(f"🧭 {fname}: {reason_line}")
-    log_fn(
-        f"🧭 {fname}: "
-        f"{format_alignment_guard_summary(alignment_weight=alignment_weight, blank_confidence_mean=blank_conf_mean, anchor_lock_lite=anchor_lock_lite)}"
-    )
-
-
-def _build_kr_plan_context(
-    *,
-    plan_candidate_source,
-    syllables_info,
-    sinsy_label_entries,
-    file_format,
-    textgrid_trust_tier,
-    low_phone_quality,
-    blank_conf_mean,
-    alignment_weight,
-    mel_ctx_for_file,
-    prefer_filename_sequence,
-):
-    fmt = str(file_format or "").strip().lower()
-    mel_plan_env = {
-        "cvvc": "UTOA_KR_CVVC_MEL_PLAN",
-        "cvc": "UTOA_KR_CVC_MEL_PLAN",
-        "vcv": "UTOA_KR_VCV_MEL_PLAN",
-        "cv": "UTOA_KR_CV_MEL_PLAN",
-    }
-    return build_common_plan_context(
-        planned_cv_source=list(plan_candidate_source or []),
-        syllables_info=syllables_info,
-        sinsy_label_entries=list(sinsy_label_entries or []),
-        format_type=file_format,
-        alignment_weight=alignment_weight,
-        prefer_sequence=bool(prefer_filename_sequence),
-        normalize_expected_fn=_normalize_cv_match_token,
-        normalize_label_fn=_normalize_cv_match_token,
-        label_match_score_fn=lambda target, label: float(_cv_match_score(target, label)),
-        should_enable_mel_plan_fn=lambda: bool(
-            fmt in mel_plan_env
-            and mel_ctx_for_file
-            and syllables_info
-            and (
-                textgrid_trust_tier != "high"
-                or low_phone_quality
-                or blank_conf_mean >= 0.45
-                or alignment_weight < 0.65
-            )
-            and _env_bool(mel_plan_env[fmt], True)
-        ),
-        build_cv_anchor_plan_fn=_build_kr_cv_anchor_plan_v2,
-        build_sinsy_guided_anchor_plan_fn=build_sinsy_guided_anchor_plan,
-        build_adjacent_anchor_graph_fn=build_adjacent_anchor_graph,
-        resolve_plan_policy_fn=resolve_plan_policy,
-    )
-
-
-def _compute_kr_runtime_mapping_state(
-    *,
-    runtime_policy,
-    mapping_confidence_base,
-    mapping_margin,
-    blank_conf_mean,
-    syllable_blank_confidences,
-    file_mapping_conf_th,
-    file_format,
-    kr_mapping_debug_reason_logging,
-    fname,
-    mapping_reason_code,
-    log_fn,
-):
-    runtime_policy = dict(runtime_policy or {})
-    mapping_confidence = float(runtime_policy.get("mapping_confidence", mapping_confidence_base))
-    if syllable_blank_confidences and blank_conf_mean >= 0.55:
-        mapping_confidence = max(
-            0.0,
-            mapping_confidence - min(0.22, (blank_conf_mean - 0.55) * 0.45 + 0.04),
-        )
-    if kr_mapping_debug_reason_logging and mapping_confidence < float(file_mapping_conf_th):
-        log_fn(
-            f"🧭 {fname}: KR 매핑 신뢰도 낮음(conf={mapping_confidence:.2f}, "
-            f"margin={float(mapping_margin):+.1f}, reason={mapping_reason_code})"
-        )
-
-    file_conf_floor = float(runtime_policy.get("file_conf_floor", file_mapping_conf_th))
-    low_conf_state = compute_runtime_low_conf_state(
-        runtime_policy=runtime_policy,
-        mapping_confidence=mapping_confidence,
-        conf_floor=file_conf_floor,
-        blank_confidence_mean=blank_conf_mean,
-        conf_below_reason="conf_below_floor",
-        row_conf_floor_default=file_mapping_conf_th,
-    )
-    row_conf_floor = float(low_conf_state.get("row_conf_floor", file_mapping_conf_th))
-    row_margin_floor = float(low_conf_state.get("row_margin_floor", 6.0))
-    file_mapping_low_conf = bool(low_conf_state.get("file_low_conf"))
-
-    row_blank_floor = None
-    fmt_norm = str(file_format or "").strip().lower()
-    if is_kr_sequence_locked_format(fmt_norm):
-        # CV 계열은 blank 구간 오매핑이 발생하면 이후 ML 보정이 과보정될 수 있어
-        # 저신뢰 파일에서 row-level blank gate를 더 엄격하게 건다.
-        apply_blank_gate = bool(runtime_policy.get("strict_mode")) or bool(file_mapping_low_conf)
-        if blank_conf_mean >= 0.45 or file_mapping_low_conf:
-            apply_blank_gate = True
-        if apply_blank_gate:
-            env_key_by_fmt = {
-                "cvvc": "UTOA_KR_CVVC_ROW_BLANK_FLOOR",
-                "cvc": "UTOA_KR_CVC_ROW_BLANK_FLOOR",
-                "cv": "UTOA_KR_CV_ROW_BLANK_FLOOR",
-            }
-            default_floor_by_fmt = {
-                "cvvc": 0.64,
-                "cvc": 0.62,
-                "cv": 0.60,
-            }
-            row_blank_floor = _env_float(
-                env_key_by_fmt.get(fmt_norm, "UTOA_KR_CVVC_ROW_BLANK_FLOOR"),
-                default_floor_by_fmt.get(fmt_norm, 0.64),
-            )
-
-    low_conf_reasons = list(low_conf_state.get("low_conf_reasons") or [])
-
-    return {
-        "runtime_policy": runtime_policy,
-        "mapping_confidence_base": float(mapping_confidence),
-        "mapping_margin": float(mapping_margin),
-        "mapping_tier": str(runtime_policy.get("mapping_tier") or ""),
-        "file_mapping_low_conf": bool(file_mapping_low_conf),
-        "file_conf_floor": float(file_conf_floor),
-        "row_conf_floor": float(row_conf_floor),
-        "row_margin_floor": float(row_margin_floor),
-        "row_blank_floor": (float(row_blank_floor) if row_blank_floor is not None else None),
-        "low_conf_reasons": low_conf_reasons,
-    }
-
-
-def _recompute_kr_runtime_state(
-    *,
-    alignment_ingest,
-    file_mapping_conf_th,
-    file_format,
-    phone_quality,
-    base_score,
-    alt_score,
-    used_words_based,
-    used_alias_based,
-    mapping_reason_code,
-    kr_mapping_debug_reason_logging,
-    fname,
-    blank_conf_mean,
-    syllable_blank_confidences,
-    plan_candidate_source,
-    sinsy_label_entries,
-    syllables_info,
-    textgrid_trust_tier,
-    low_phone_quality,
-    alignment_weight,
-    mel_ctx_for_file,
-    prefer_filename_sequence,
-    log_fn,
-):
-    mapping_confidence_base, mapping_margin = _estimate_kr_mapping_confidence(
-        phone_quality,
-        words_score=base_score,
-        alias_score=alt_score,
-        used_words_based=used_words_based,
-        used_alias_based=used_alias_based,
-    )
-    plan_runtime_state = recompute_common_plan_runtime_state(
-        build_plan_context_fn=_build_kr_plan_context,
-        plan_context_kwargs={
-            "plan_candidate_source": plan_candidate_source,
-            "syllables_info": syllables_info,
-            "sinsy_label_entries": sinsy_label_entries,
-            "file_format": file_format,
-            "textgrid_trust_tier": textgrid_trust_tier,
-            "low_phone_quality": low_phone_quality,
-            "blank_conf_mean": blank_conf_mean,
-            "alignment_weight": alignment_weight,
-            "mel_ctx_for_file": mel_ctx_for_file,
-            "prefer_filename_sequence": prefer_filename_sequence,
-        },
-        ingest_snapshot=alignment_ingest,
-        mapping_confidence=mapping_confidence_base,
-        mapping_margin=mapping_margin,
-        conf_threshold=file_mapping_conf_th,
-        format_type=file_format,
-        score_a=base_score,
-        score_b=alt_score,
-        sequence_lock_formats=KR_SEQUENCE_LOCK_FORMATS,
-        abstain_formats=KR_RUNTIME_ABSTAIN_FORMATS,
-        strict_formats=KR_RUNTIME_STRICT_FORMATS,
-        prefer_sequence=prefer_filename_sequence,
-        alignment_trust=alignment_weight,
-        resolve_runtime_mapping_policy_fn=resolve_runtime_mapping_policy,
-    )
-    kr_cv_plan = dict(plan_runtime_state.get("cv_plan") or {})
-    kr_planned_cv_indices = plan_runtime_state.get("planned_indices")
-    kr_anchor_graph = plan_runtime_state.get("anchor_graph")
-    kr_plan_policy = dict(plan_runtime_state.get("plan_policy") or {})
-    runtime_policy = dict(plan_runtime_state.get("runtime_policy") or {})
-    mapping_confidence_base = float(plan_runtime_state.get("mapping_confidence", mapping_confidence_base))
-    mapping_margin = float(plan_runtime_state.get("mapping_margin", mapping_margin))
-    log_sinsy_plan_guard(
-        sinsy_label_entries=sinsy_label_entries,
-        cv_plan=kr_cv_plan,
-        runtime_policy=runtime_policy,
-        fname=fname,
-        log_fn=log_fn,
-    )
-    runtime_state = _compute_kr_runtime_mapping_state(
-        runtime_policy=runtime_policy,
-        mapping_confidence_base=mapping_confidence_base,
-        mapping_margin=mapping_margin,
-        blank_conf_mean=blank_conf_mean,
-        syllable_blank_confidences=syllable_blank_confidences,
-        file_mapping_conf_th=file_mapping_conf_th,
-        file_format=file_format,
-        kr_mapping_debug_reason_logging=kr_mapping_debug_reason_logging,
-        fname=fname,
-        mapping_reason_code=mapping_reason_code,
-        log_fn=log_fn,
-    )
-    runtime_policy = dict(runtime_state.get("runtime_policy") or runtime_policy)
-    mapping_confidence_base = float(runtime_state.get("mapping_confidence_base", mapping_confidence_base))
-    mapping_margin = float(runtime_state.get("mapping_margin", mapping_margin))
-    mapping_tier = str(runtime_policy.get("mapping_tier") or "")
-    return build_language_runtime_state(
-        language_prefix="kr",
-        mapping_confidence_base=float(mapping_confidence_base),
-        mapping_margin=float(mapping_margin),
-        mapping_tier=str(mapping_tier),
-        cv_plan=kr_cv_plan,
-        planned_indices=kr_planned_cv_indices,
-        anchor_graph=kr_anchor_graph,
-        plan_policy=kr_plan_policy,
-        runtime_policy=runtime_policy,
-        postprocess={
-            "file_mapping_low_conf": bool(runtime_state.get("file_mapping_low_conf")),
-            "file_conf_floor": float(runtime_state.get("file_conf_floor", file_mapping_conf_th)),
-            "row_conf_floor": float(runtime_state.get("row_conf_floor", file_mapping_conf_th)),
-            "row_margin_floor": float(runtime_state.get("row_margin_floor", 6.0)),
-            "row_blank_floor": runtime_state.get("row_blank_floor"),
-            "low_conf_reasons": list(runtime_state.get("low_conf_reasons") or []),
-            "sequence_lock_applied": False,
-            "sequence_lock_reason": "",
-        },
-    )
-
-
 def _synthesize_kr_word_phones(word, w_start, w_end, decompose_hangul_to_roman):
     """
     words 구간에 대응하는 phones가 비어 있을 때 최소 합성 phone을 생성합니다.
@@ -2920,7 +2383,6 @@ def _mel_envelope(audio, sr):
     low_idx = np.where((band_centers_hz >= 80.0) & (band_centers_hz <= 700.0))[0]
 
     frames = []
-    rms_vals = []
     db_vals = []
     f0_voicing = []
     f2_ratio_vals = []
@@ -2937,7 +2399,6 @@ def _mel_envelope(audio, sr):
             fr_raw = np.concatenate([fr_raw, np.zeros(win - len(fr_raw), dtype=np.float32)], axis=0)
 
         rms = float(np.sqrt(np.mean(fr_raw.astype(np.float64) ** 2) + 1e-12))
-        rms_vals.append(rms)
         db_vals.append(20.0 * np.log10(max(rms, 1e-7)))
 
         # F0는 저가중치 보조 신호만 제공하도록 저밀도 계산.
@@ -2984,10 +2445,6 @@ def _mel_envelope(audio, sr):
     span = max(p90 - p10, 1e-6)
     en = (e - p10) / span
     en = np.clip(en, 0.0, 1.0)
-    rms_arr = np.asarray(rms_vals, dtype=np.float64) if rms_vals else np.zeros_like(en)
-    if len(rms_arr) != len(en):
-        rms_arr = np.resize(rms_arr, len(en))
-    rms_arr = np.clip(rms_arr, 1e-8, 1.0)
     db_arr = np.array(db_vals, dtype=np.float64) if db_vals else np.zeros_like(en)
     f0v_arr = np.array(f0_voicing, dtype=np.float64) if f0_voicing else np.zeros_like(en)
     if len(f0v_arr) >= 3:
@@ -3013,24 +2470,6 @@ def _mel_envelope(audio, sr):
     high_arr = np.clip(np.asarray(high_ratio_vals, dtype=np.float64), 0.0, 1.0) if high_ratio_vals else np.zeros_like(en)
     low_arr = np.clip(np.asarray(low_ratio_vals, dtype=np.float64), 0.0, 1.0) if low_ratio_vals else np.zeros_like(en)
     spec_presence_arr = _normalize01(spec_presence_vals)
-    rms_norm_arr = _normalize01(rms_arr.tolist())
-
-    rms_p10 = float(np.percentile(rms_arr, 10)) if len(rms_arr) else 1e-8
-    rms_p20 = float(np.percentile(rms_arr, 20)) if len(rms_arr) else rms_p10
-    rms_p60 = float(np.percentile(rms_arr, 60)) if len(rms_arr) else rms_p20
-    rms_p85 = float(np.percentile(rms_arr, 85)) if len(rms_arr) else rms_p60
-    rms_sil_th = max(1e-8, min(0.30, (0.78 * rms_p20) + (0.22 * rms_p10)))
-    rms_sound_th = max(rms_sil_th + 1e-8, (0.74 * rms_p60) + (0.26 * rms_p85))
-    if rms_sound_th < (rms_sil_th * 1.35):
-        rms_sound_th = rms_sil_th * 1.35
-
-    rms_norm_sil_th = max(0.05, min(0.42, float(np.percentile(rms_norm_arr, 22)) + 0.03))
-    rms_norm_sound_th = max(
-        rms_norm_sil_th + 0.08,
-        min(0.95, float(np.percentile(rms_norm_arr, 64)) - 0.02),
-    )
-    if rms_norm_sound_th <= rms_norm_sil_th:
-        rms_norm_sound_th = min(0.95, rms_norm_sil_th + 0.08)
 
     f2_p60 = float(np.percentile(f2_arr, 60)) if len(f2_arr) else 0.0
     f3_p60 = float(np.percentile(f3_arr, 60)) if len(f3_arr) else 0.0
@@ -3046,43 +2485,20 @@ def _mel_envelope(audio, sr):
     f3_strong_th = max(0.04, min(0.22, (0.7 * 0.082) + (0.3 * f3_p60)))
     high_noise_th = max(0.10, min(0.35, (0.7 * 0.20) + (0.3 * high_p65)))
     spec_noise_th = max(0.06, min(0.32, (0.7 * 0.14) + (0.3 * spec_p40)))
-    rms_silence_mask = (rms_arr <= rms_sil_th) | (rms_norm_arr <= rms_norm_sil_th)
-    rms_sound_mask = (rms_arr >= rms_sound_th) | (rms_norm_arr >= rms_norm_sound_th)
-    rms_mid_sound_mask = (rms_arr >= max(rms_sil_th * 1.05, 1e-8)) | (rms_norm_arr >= max(0.08, rms_norm_sil_th * 1.05))
 
     voiced_formant = (
-        (
-            (f2_arr > f2_strong_th)
-            & (f3_arr > f3_strong_th)
-            & (db_arr > (db_sil_th + 1.2))
-            & (rms_mid_sound_mask | (en >= 0.13))
-        )
-        | (
-            (f2_arr > max(0.08, f2_p60 * 0.85))
-            & (f0v_arr > 0.38)
-            & (db_arr > (db_sil_th - 1.0))
-            & (rms_mid_sound_mask | (en >= 0.11))
-        )
+        ((f2_arr > f2_strong_th) & (f3_arr > f3_strong_th) & (db_arr > (db_sil_th + 1.2)))
+        | ((f2_arr > max(0.08, f2_p60 * 0.85)) & (f0v_arr > 0.38) & (db_arr > (db_sil_th - 1.0)))
     )
     silence_sparse = (
-        (
-            (db_arr <= (db_sil_th - 1.5))
-            & (en <= 0.12)
-            & (spec_presence_arr <= max(0.10, spec_p40 * 0.92))
-            & (rms_norm_arr <= max(rms_norm_sil_th, 0.30))
-        )
-        | (
-            rms_silence_mask
-            & (db_arr <= (db_sil_th + 0.8))
-            & (en <= 0.20)
-            & ~voiced_formant
-        )
+        (db_arr <= (db_sil_th - 1.5))
+        & (en <= 0.12)
+        & (spec_presence_arr <= max(0.10, spec_p40 * 0.92))
     )
     unvoiced_diffuse = (
         (high_arr >= max(0.12, high_noise_th * 0.88))
         & (spec_presence_arr >= max(0.08, spec_noise_th * 0.86))
         & (db_arr > (db_sil_th - 2.0))
-        & ~rms_silence_mask
         & (f2_arr < max(0.05, f2_strong_th * 0.92))
         & (f3_arr < max(0.04, f3_strong_th * 0.92))
         & ~voiced_formant
@@ -3092,7 +2508,6 @@ def _mel_envelope(audio, sr):
         & (db_arr <= (db_sil_th + 5.5))
         & (high_arr >= max(0.08, high_p65 * 0.72))
         & (spec_presence_arr >= max(0.05, spec_p40 * 0.62))
-        & (rms_arr >= max(rms_sil_th * 0.85, 1e-8))
         & ~voiced_formant
     )
     return {
@@ -3100,14 +2515,8 @@ def _mel_envelope(audio, sr):
         "energy": en,
         "energy_ma": en_ma,
         "span": span,
-        "rms": rms_arr,
-        "rms_norm": rms_norm_arr,
         "db_db": db_arr,
         "db_silence_th": float(db_sil_th),
-        "rms_silence_th": float(rms_sil_th),
-        "rms_sound_th": float(rms_sound_th),
-        "rms_norm_silence_th": float(rms_norm_sil_th),
-        "rms_norm_sound_th": float(rms_norm_sound_th),
         "f0_voicing": f0v_arr,
         "f2_ratio": f2_arr,
         "f3_ratio": f3_arr,
@@ -3122,82 +2531,9 @@ def _mel_envelope(audio, sr):
         "cls_silence_sparse": np.asarray(silence_sparse, dtype=np.float64),
         "cls_unvoiced_diffuse": np.asarray(unvoiced_diffuse, dtype=np.float64),
         "cls_breath_like": np.asarray(breath_like, dtype=np.float64),
-        "rms_silence_mask": np.asarray(rms_silence_mask, dtype=np.float64),
-        "rms_sound_mask": np.asarray(rms_sound_mask, dtype=np.float64),
         "voiced_mask": np.asarray(f0v_arr >= 0.5, dtype=np.float64),
         "formant_mask": np.asarray(voiced_formant, dtype=np.float64),
     }
-
-
-def _resolve_mel_rms_views(mel_ctx, n_frames: int):
-    if np is None or n_frames <= 0:
-        return (
-            np.zeros(max(int(n_frames), 0), dtype=np.float64),
-            np.zeros(max(int(n_frames), 0), dtype=np.float64),
-            1e-8,
-            1e-8,
-            0.10,
-            0.20,
-        )
-
-    rms_arr = mel_ctx.get("rms") if isinstance(mel_ctx, dict) else None
-    if rms_arr is None or len(rms_arr) != n_frames:
-        db_arr = mel_ctx.get("db_db") if isinstance(mel_ctx, dict) else None
-        if db_arr is not None and len(db_arr) == n_frames:
-            rms_arr = np.power(10.0, np.asarray(db_arr, dtype=np.float64) / 20.0)
-        else:
-            rms_arr = np.zeros(n_frames, dtype=np.float64)
-    else:
-        rms_arr = np.asarray(rms_arr, dtype=np.float64)
-    rms_arr = np.clip(rms_arr, 1e-8, 1.0)
-
-    rms_norm_arr = mel_ctx.get("rms_norm") if isinstance(mel_ctx, dict) else None
-    if rms_norm_arr is None or len(rms_norm_arr) != n_frames:
-        p10 = float(np.percentile(rms_arr, 10)) if len(rms_arr) else 0.0
-        p90 = float(np.percentile(rms_arr, 90)) if len(rms_arr) else 1.0
-        span = max(p90 - p10, 1e-9)
-        rms_norm_arr = np.clip((rms_arr - p10) / span, 0.0, 1.0)
-    else:
-        rms_norm_arr = np.clip(np.asarray(rms_norm_arr, dtype=np.float64), 0.0, 1.0)
-
-    rms_sil_th = float(mel_ctx.get("rms_silence_th", 0.0) or 0.0) if isinstance(mel_ctx, dict) else 0.0
-    rms_sound_th = float(mel_ctx.get("rms_sound_th", 0.0) or 0.0) if isinstance(mel_ctx, dict) else 0.0
-    rms_norm_sil_th = float(mel_ctx.get("rms_norm_silence_th", 0.0) or 0.0) if isinstance(mel_ctx, dict) else 0.0
-    rms_norm_sound_th = float(mel_ctx.get("rms_norm_sound_th", 0.0) or 0.0) if isinstance(mel_ctx, dict) else 0.0
-
-    if rms_sil_th <= 0.0 or rms_sound_th <= 0.0:
-        rms_p10 = float(np.percentile(rms_arr, 10)) if len(rms_arr) else 1e-8
-        rms_p20 = float(np.percentile(rms_arr, 20)) if len(rms_arr) else rms_p10
-        rms_p60 = float(np.percentile(rms_arr, 60)) if len(rms_arr) else rms_p20
-        rms_p85 = float(np.percentile(rms_arr, 85)) if len(rms_arr) else rms_p60
-        rms_sil_th = max(1e-8, min(0.30, (0.78 * rms_p20) + (0.22 * rms_p10)))
-        rms_sound_th = max(rms_sil_th + 1e-8, (0.74 * rms_p60) + (0.26 * rms_p85))
-        if rms_sound_th < (rms_sil_th * 1.35):
-            rms_sound_th = rms_sil_th * 1.35
-    else:
-        rms_sil_th = max(1e-8, min(1.0, rms_sil_th))
-        rms_sound_th = max(rms_sil_th + 1e-8, min(1.0, rms_sound_th))
-
-    if rms_norm_sil_th <= 0.0 or rms_norm_sound_th <= 0.0:
-        rms_norm_sil_th = max(0.05, min(0.42, float(np.percentile(rms_norm_arr, 22)) + 0.03))
-        rms_norm_sound_th = max(
-            rms_norm_sil_th + 0.08,
-            min(0.95, float(np.percentile(rms_norm_arr, 64)) - 0.02),
-        )
-        if rms_norm_sound_th <= rms_norm_sil_th:
-            rms_norm_sound_th = min(0.95, rms_norm_sil_th + 0.08)
-    else:
-        rms_norm_sil_th = max(0.0, min(1.0, rms_norm_sil_th))
-        rms_norm_sound_th = max(rms_norm_sil_th + 1e-6, min(1.0, rms_norm_sound_th))
-
-    return (
-        rms_arr,
-        rms_norm_arr,
-        float(rms_sil_th),
-        float(rms_sound_th),
-        float(rms_norm_sil_th),
-        float(rms_norm_sound_th),
-    )
 
 
 def _find_wav_path_for_name(wav_name, wav_dir, wav_index):
@@ -3266,20 +2602,8 @@ def _estimate_mel_voiced_onset(mel_ctx, anchor_ms: float, window_ms: float = 80.
     en_ma = mel_ctx.get("energy_ma")
     if en_ma is None or len(en_ma) != len(en):
         en_ma = np.asarray(en, dtype=np.float64)
-    (
-        rms_arr,
-        rms_norm_arr,
-        rms_sil_th,
-        rms_sound_th,
-        rms_norm_sil_th,
-        rms_norm_sound_th,
-    ) = _resolve_mel_rms_views(mel_ctx, len(en))
     voiced_mask = np.asarray(f0v, dtype=np.float64) >= 0.5
-    rms_support_mask = (
-        (rms_arr >= max(rms_sound_th * 0.82, rms_sil_th * 1.08))
-        | (rms_norm_arr >= max(0.42, rms_norm_sound_th * 0.72))
-    )
-    energy_mask = (en_ma >= 0.12) | (np.asarray(en, dtype=np.float64) >= 0.15) | rms_support_mask
+    energy_mask = (en_ma >= 0.12) | (np.asarray(en, dtype=np.float64) >= 0.15)
 
     cand_mask = voiced_mask & formant_mask & energy_mask
     if not np.any(cand_mask[mask]):
@@ -3345,40 +2669,122 @@ def _estimate_mel_vowel_nucleus(mel_ctx, onset_ms: Optional[float], search_after
     return float(times_ms[start_idx]), float(times_ms[end_idx])
 
 
-def _resolve_mel_onset_weight(alignment_weight: float, textgrid_trust_tier: str) -> float:
+def _resolve_mel_weight_mode(raw_value: str) -> str:
+    mode = str(raw_value or "").strip().lower()
+    if mode in {"mel_boost", "mel-boost", "melboost", "boost", "mel"}:
+        return "mel_boost"
+    return "auto"
+
+
+def _estimate_file_mel_reliability(mel_ctx, *, blank_conf_mean: float = 0.0) -> float:
+    if not mel_ctx:
+        return 0.0
+    if np is None:
+        return float(_clamp(1.0 - (float(blank_conf_mean) * 0.85), 0.0, 1.0))
+
+    en = mel_ctx.get("energy")
+    f0v = mel_ctx.get("f0_voicing")
+    cls_sil = mel_ctx.get("cls_silence_sparse")
+    if en is None or len(en) == 0:
+        return float(_clamp(1.0 - (float(blank_conf_mean) * 0.85), 0.0, 1.0))
+    en_arr = np.asarray(en, dtype=np.float64)
+    if f0v is None or len(f0v) != len(en_arr):
+        f0_arr = np.zeros_like(en_arr, dtype=np.float64)
+    else:
+        f0_arr = np.asarray(f0v, dtype=np.float64)
+    if cls_sil is None or len(cls_sil) != len(en_arr):
+        sil_arr = np.zeros_like(en_arr, dtype=np.float64)
+    else:
+        sil_arr = np.asarray(cls_sil, dtype=np.float64)
+
+    energy_mean = float(np.mean(en_arr))
+    voiced_ratio = float(np.mean(f0_arr >= 0.5))
+    silence_ratio = float(np.mean(sil_arr >= 0.5))
+    blank_penalty = max(0.0, float(blank_conf_mean) - 0.35)
+    score = (
+        (0.46 * _clamp(voiced_ratio, 0.0, 1.0))
+        + (0.34 * _clamp(1.0 - silence_ratio, 0.0, 1.0))
+        + (0.20 * _clamp(energy_mean, 0.0, 1.0))
+        - (0.38 * _clamp(blank_penalty, 0.0, 1.0))
+    )
+    return float(_clamp(score, 0.0, 1.0))
+
+
+def _apply_mel_boost_alignment_scale(alignment_weight: float, textgrid_trust_tier: str) -> float:
+    weight = float(alignment_weight or 0.0)
+    tier = str(textgrid_trust_tier or "").strip().lower()
+    if tier == "low":
+        weight *= 0.72
+    elif tier == "mid":
+        weight *= 0.84
+    else:
+        weight *= 0.94
+    return float(_clamp(weight, 0.0, 1.0))
+
+
+def _should_force_mel_branch(
+    textgrid_trust_tier: str,
+    *,
+    trust_score: Optional[float] = None,
+    alignment_weight: Optional[float] = None,
+    mapping_confidence: Optional[float] = None,
+    mel_reliability: Optional[float] = None,
+) -> bool:
+    tier = str(textgrid_trust_tier or "").strip().lower()
+    if tier != "high":
+        return True
+    trust_min = _env_float("UTOA_MEL_FORCE_TRUST_MIN", 0.82)
+    align_min = _env_float("UTOA_MEL_FORCE_ALIGN_WEIGHT_MIN", 0.70)
+    map_min = _env_float("UTOA_MEL_FORCE_MAPPING_CONF_MIN", 0.58)
+    mel_rel_min = _env_float("UTOA_MEL_FORCE_MEL_RELIABILITY_MIN", 0.44)
+    if trust_score is not None and float(trust_score) < float(trust_min):
+        return True
+    if alignment_weight is not None and float(alignment_weight) < float(align_min):
+        return True
+    if mapping_confidence is not None and float(mapping_confidence) < float(map_min):
+        return True
+    if mel_reliability is not None and float(mel_reliability) < float(mel_rel_min):
+        return True
+    return False
+
+
+def _resolve_mel_onset_weight(
+    alignment_weight: float,
+    textgrid_trust_tier: str,
+    *,
+    trust_score: Optional[float] = None,
+    mapping_confidence: Optional[float] = None,
+    mel_reliability: Optional[float] = None,
+) -> float:
     tier = str(textgrid_trust_tier or "").strip().lower()
     w = float(alignment_weight or 0.0)
-    mode = str(os.environ.get("UTOA_MEL_WEIGHT_MODE", "mel_first") or "mel_first").strip().lower()
-
-    if mode in {"auto", "textgrid", "textgrid_trust", "legacy"}:
-        if tier == "high" and w >= 0.75:
-            base = 0.0
-        elif w < 0.45:
-            base = 0.72
-        elif w < 0.65:
-            base = 0.58
-        else:
-            base = 0.36
+    mode = _resolve_mel_weight_mode(os.environ.get("UTOA_MEL_WEIGHT_MODE", "auto"))
+    if _should_force_mel_branch(
+        tier,
+        trust_score=trust_score,
+        alignment_weight=w,
+        mapping_confidence=mapping_confidence,
+        mel_reliability=mel_reliability,
+    ):
+        mode = "mel_boost"
+    if tier == "high" and w >= 0.75:
+        return 0.0
+    if w < 0.45:
+        base = 0.72
+    elif w < 0.65:
+        base = 0.58
     else:
-        # mel_first: keep MEL influence even when TextGrid trust is high.
-        if w < 0.45:
-            base = 0.82
-        elif w < 0.65:
-            base = 0.70
-        elif tier == "high" and w >= 0.75:
-            base = 0.48
+        base = 0.36
+    if mode == "mel_boost":
+        if tier == "low":
+            base = min(0.90, base + 0.16)
+        elif tier == "mid":
+            base = min(0.82, base + 0.10)
         else:
-            base = 0.58
-
-    gamma = max(0.5, min(2.5, _env_float("UTOA_ML_ANCHOR_MEL_GAMMA", 1.2)))
-    reliability = max(0.0, min(1.0, w))
-    if gamma > 1.0 and reliability < 1.0:
-        shrink = max(0.55, reliability ** (gamma - 1.0))
-        base *= shrink
-
-    if mode in {"auto", "textgrid", "textgrid_trust", "legacy"}:
-        return max(0.0, min(0.92, base))
-    return max(0.22, min(0.92, base))
+            base = min(0.68, base + 0.06)
+        if w < 0.35:
+            base = min(0.92, base + 0.04)
+    return max(0.0, min(1.0, base))
 
 
 def _apply_mel_voiced_onset_pre_shift(
@@ -3500,14 +2906,6 @@ def _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms):
     cls_breath = mel_ctx.get("cls_breath_like")
     db_arr = mel_ctx.get("db_db")
     db_sil_th = float(mel_ctx.get("db_silence_th", -42.0))
-    (
-        rms_arr,
-        rms_norm_arr,
-        rms_sil_th,
-        rms_sound_th,
-        rms_norm_sil_th,
-        rms_norm_sound_th,
-    ) = _resolve_mel_rms_views(mel_ctx, len(times_ms))
 
     sil = float(cls_sil[idx]) if cls_sil is not None and len(cls_sil) == len(times_ms) else 0.0
     voiced = float(cls_voiced[idx]) if cls_voiced is not None and len(cls_voiced) == len(times_ms) else 0.0
@@ -3516,37 +2914,13 @@ def _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms):
     db_sparse = 0.0
     if db_arr is not None and len(db_arr) == len(times_ms):
         db_sparse = 1.0 if float(db_arr[idx]) <= (db_sil_th - 1.0) else 0.0
-    rms_v = float(rms_arr[idx]) if len(rms_arr) == len(times_ms) else 0.0
-    rms_norm_v = float(rms_norm_arr[idx]) if len(rms_norm_arr) == len(times_ms) else 0.0
-    rms_blank = 0.0
-    if rms_sil_th > 1e-8:
-        rms_blank = max(0.0, min(1.0, ((rms_sil_th * 1.15) - rms_v) / max(rms_sil_th * 1.15, 1e-8)))
-    rms_blank_norm = max(
-        0.0,
-        min(1.0, ((rms_norm_sil_th + 0.04) - rms_norm_v) / max(rms_norm_sil_th + 0.04, 1e-8)),
-    )
-    rms_sound = max(
-        0.0,
-        min(
-            1.0,
-            (rms_v - (rms_sound_th * 0.85)) / max(rms_sound_th - rms_sil_th, rms_sound_th * 0.50, 1e-8),
-        ),
-    )
-    rms_sound_norm = max(
-        0.0,
-        min(1.0, (rms_norm_v - (rms_norm_sound_th - 0.05)) / max(1.0 - (rms_norm_sound_th - 0.05), 1e-8)),
-    )
-    rms_blank_mix = (0.55 * rms_blank) + (0.45 * rms_blank_norm)
-    rms_sound_mix = (0.55 * rms_sound) + (0.45 * rms_sound_norm)
 
     blank = (
-        (0.48 * sil)
-        + (0.16 * breath)
-        + (0.18 * db_sparse)
-        + (0.24 * rms_blank_mix)
-        - (0.42 * voiced)
-        - (0.14 * unvoiced)
-        - (0.18 * rms_sound_mix)
+        (0.58 * sil)
+        + (0.20 * breath)
+        + (0.22 * db_sparse)
+        - (0.46 * voiced)
+        - (0.12 * unvoiced)
     )
     return max(0.0, min(1.0, float(blank)))
 
@@ -3655,40 +3029,9 @@ def _collect_kr_blank_region_stats(mel_ctx, start_ms, end_ms):
         voiced_sel = np.asarray(cls_voiced[idxs], dtype=np.float64)
     else:
         voiced_sel = np.zeros_like(en_sel, dtype=np.float64)
-    (
-        rms_arr,
-        rms_norm_arr,
-        rms_sil_th,
-        rms_sound_th,
-        rms_norm_sil_th,
-        rms_norm_sound_th,
-    ) = _resolve_mel_rms_views(mel_ctx, len(times_ms))
-    rms_sel = np.asarray(rms_arr[idxs], dtype=np.float64) if len(rms_arr) == len(times_ms) else np.zeros_like(en_sel)
-    rms_norm_sel = (
-        np.asarray(rms_norm_arr[idxs], dtype=np.float64)
-        if len(rms_norm_arr) == len(times_ms)
-        else np.zeros_like(en_sel)
-    )
 
-    rms_sound_mask = (
-        (rms_sel >= max(rms_sound_th * 0.82, rms_sil_th * 1.06))
-        | (rms_norm_sel >= max(0.42, rms_norm_sound_th * 0.75))
-    )
-    rms_blank_mask = (
-        (rms_sel <= (rms_sil_th * 1.08))
-        | (rms_norm_sel <= max(0.05, rms_norm_sil_th * 1.05))
-    )
-
-    sound_mask = (
-        (((db_sel > (db_sil_th + 1.4)) & (en_sel > 0.10)) | (en_sel > 0.16) | (voiced_sel >= 0.50))
-        & (rms_sound_mask | (voiced_sel >= 0.50) | (en_sel > 0.20))
-        & ~((rms_blank_mask) & (db_sel <= (db_sil_th + 0.4)) & (en_sel <= 0.12))
-    )
-    blank_mask = (
-        (sil_sel >= 0.50)
-        | ((db_sel <= (db_sil_th - 1.2)) & (en_sel <= 0.10) & rms_blank_mask)
-        | (rms_blank_mask & (db_sel <= (db_sil_th + 0.8)) & (en_sel <= 0.13))
-    )
+    sound_mask = (db_sel > (db_sil_th + 1.4)) & (en_sel > 0.10)
+    blank_mask = (sil_sel >= 0.50) | ((db_sel <= (db_sil_th - 1.2)) & (en_sel <= 0.10))
     voiced_mask = voiced_sel >= 0.50
 
     onset_end = min(end, start + 56.0)
@@ -3849,14 +3192,6 @@ def _apply_soft_mel_offset_cutoff_guard(
         high_arr = np.zeros_like(en, dtype=np.float64)
     if spec_presence_arr is None or len(spec_presence_arr) != len(en):
         spec_presence_arr = np.asarray(en, dtype=np.float64)
-    (
-        rms_arr,
-        rms_norm_arr,
-        rms_sil_th,
-        rms_sound_th,
-        rms_norm_sil_th,
-        rms_norm_sound_th,
-    ) = _resolve_mel_rms_views(mel_ctx, len(en))
 
     f2_p60 = float(mel_ctx.get("f2_p60", np.percentile(f2_arr, 60) if len(f2_arr) else 0.0))
     f3_p60 = float(mel_ctx.get("f3_p60", np.percentile(f3_arr, 60) if len(f3_arr) else 0.0))
@@ -3867,14 +3202,14 @@ def _apply_soft_mel_offset_cutoff_guard(
     base_f3_strong = _env_float("UTOA_MEL_F3_STRONG_MIN", 0.082)
     base_high_noise = _env_float("UTOA_MEL_HIGH_NOISE_MIN", 0.20)
     base_spec_noise = _env_float("UTOA_MEL_SPEC_NOISE_MIN", 0.14)
-    base_sound_db_margin = _env_float("UTOA_MEL_SOUND_DB_MARGIN", 1.7)
-    base_sound_energy = _env_float("UTOA_MEL_SOUND_ENERGY_MIN", 0.15)
+    base_sound_db_margin = _env_float("UTOA_MEL_SOUND_DB_MARGIN", 1.4)
+    base_sound_energy = _env_float("UTOA_MEL_SOUND_ENERGY_MIN", 0.13)
     base_weak_f2 = _env_float("UTOA_MEL_WEAK_F2_MAX", 0.05)
     base_weak_f3 = _env_float("UTOA_MEL_WEAK_F3_MAX", 0.05)
     base_weak_high = _env_float("UTOA_MEL_WEAK_HIGH_MAX", 0.10)
     hard_sil_db_margin = _env_float("UTOA_MEL_HARD_SILENCE_DB_MARGIN", -3.0)
-    hard_sil_energy = _env_float("UTOA_MEL_HARD_SILENCE_ENERGY_MAX", 0.09)
-    soft_sil_energy = _env_float("UTOA_MEL_SOFT_SILENCE_ENERGY_MAX", 0.11)
+    hard_sil_energy = _env_float("UTOA_MEL_HARD_SILENCE_ENERGY_MAX", 0.08)
+    soft_sil_energy = _env_float("UTOA_MEL_SOFT_SILENCE_ENERGY_MAX", 0.10)
     noise_db_margin = _env_float("UTOA_MEL_NOISE_DB_MARGIN", 1.0)
 
     # Adapt thresholds slightly to per-file spectral distribution.
@@ -3915,22 +3250,10 @@ def _apply_soft_mel_offset_cutoff_guard(
             & ~voiced_formant_mask
         )
 
-    rms_sound_mask = (
-        (rms_arr >= max(rms_sound_th * 0.82, rms_sil_th * 1.08))
-        | (rms_norm_arr >= max(0.40, rms_norm_sound_th * 0.74))
-    )
-    rms_blank_mask = (
-        (rms_arr <= (rms_sil_th * 1.08))
-        | (rms_norm_arr <= max(0.05, rms_norm_sil_th * 1.05))
-    )
-    sound_mask = (
-        (((db_arr > (db_sil_th + base_sound_db_margin)) & (en > base_sound_energy)) | voiced_formant_mask | noisy_unvoiced_mask)
-        & (~rms_blank_mask | voiced_formant_mask | noisy_unvoiced_mask)
-    ) | rms_sound_mask
+    sound_mask = ((db_arr > (db_sil_th + base_sound_db_margin)) & (en > base_sound_energy)) | voiced_formant_mask | noisy_unvoiced_mask
     weak_spec_mask = (f2_arr < base_weak_f2) & (f3_arr < base_weak_f3) & (high_arr < base_weak_high)
     hard_silence_mask = (db_arr <= (db_sil_th + hard_sil_db_margin)) | (en <= hard_sil_energy)
     silence_mask = hard_silence_mask | (((db_arr <= db_sil_th) | (en <= soft_sil_energy)) & weak_spec_mask)
-    silence_mask = silence_mask | (rms_blank_mask & (db_arr <= (db_sil_th + 0.8)) & (en <= max(soft_sil_energy + 0.02, 0.13)))
     if cls_silence is not None and len(cls_silence) == len(en):
         silence_mask = silence_mask | (np.asarray(cls_silence, dtype=np.float64) >= 0.5)
     # onset 보조 탐지: 에너지 이동평균 + 1차 기울기로 유효 onset 후보를 만든다.
@@ -3985,22 +3308,22 @@ def _apply_soft_mel_offset_cutoff_guard(
     # Onset-class aware onset mask tuning:
     # - sibilant/fricative: flatter slope before vowel, so lower slope threshold
     # - plosive: sharper attack, so keep stricter slope threshold
-    onset_slope_th = _env_float("UTOA_MEL_ONSET_SLOPE_BASE", 0.016)
-    onset_energy_th = _env_float("UTOA_MEL_ONSET_ENERGY_BASE", 0.125)
-    onset_db_margin = _env_float("UTOA_MEL_ONSET_DB_MARGIN_BASE", -1.5)
+    onset_slope_th = _env_float("UTOA_MEL_ONSET_SLOPE_BASE", 0.015)
+    onset_energy_th = _env_float("UTOA_MEL_ONSET_ENERGY_BASE", 0.12)
+    onset_db_margin = _env_float("UTOA_MEL_ONSET_DB_MARGIN_BASE", -2.0)
     if is_sibilant_like:
-        onset_slope_th = _env_float("UTOA_MEL_ONSET_SLOPE_SIBILANT", 0.011)
-        onset_energy_th = _env_float("UTOA_MEL_ONSET_ENERGY_SIBILANT", 0.11)
-        onset_db_margin = _env_float("UTOA_MEL_ONSET_DB_MARGIN_SIBILANT", -3.5)
+        onset_slope_th = _env_float("UTOA_MEL_ONSET_SLOPE_SIBILANT", 0.010)
+        onset_energy_th = _env_float("UTOA_MEL_ONSET_ENERGY_SIBILANT", 0.10)
+        onset_db_margin = _env_float("UTOA_MEL_ONSET_DB_MARGIN_SIBILANT", -4.0)
     elif is_plosive_like:
-        onset_slope_th = _env_float("UTOA_MEL_ONSET_SLOPE_PLOSIVE", 0.019)
-        onset_energy_th = _env_float("UTOA_MEL_ONSET_ENERGY_PLOSIVE", 0.14)
-        onset_db_margin = _env_float("UTOA_MEL_ONSET_DB_MARGIN_PLOSIVE", -1.2)
+        onset_slope_th = _env_float("UTOA_MEL_ONSET_SLOPE_PLOSIVE", 0.018)
+        onset_energy_th = _env_float("UTOA_MEL_ONSET_ENERGY_PLOSIVE", 0.13)
+        onset_db_margin = _env_float("UTOA_MEL_ONSET_DB_MARGIN_PLOSIVE", -1.5)
     onset_mask = (en_slope > onset_slope_th) & (en_ma > onset_energy_th) & (db_arr > (db_sil_th + onset_db_margin))
     if is_sibilant_like or is_plosive_like:
         f0_slope_th = _env_float("UTOA_MEL_ONSET_F0_SLOPE_MIN", 0.03)
         onset_energy_relax = _env_float("UTOA_MEL_ONSET_ENERGY_RELAX", 0.02)
-        onset_f0_db_margin = _env_float("UTOA_MEL_ONSET_F0_DB_MARGIN", -2.5)
+        onset_f0_db_margin = _env_float("UTOA_MEL_ONSET_F0_DB_MARGIN", -3.0)
         f0_slope = np.diff(f0v_arr, prepend=float(f0v_arr[0]) if len(f0v_arr) else 0.0)
         onset_mask = onset_mask | (
             (f0_slope > f0_slope_th)
@@ -4012,14 +3335,9 @@ def _apply_soft_mel_offset_cutoff_guard(
     # 한국어 CVVC의 CV/CV_HEAD는 onset anchor와 후단 guard만으로도 충분한 경우가 많다.
     # 멜 offset soft guard가 추가로 들어가면 단모음/활음 구분이 약한 파일에서
     # offset이 공백 쪽으로 과하게 끌리는 경향이 커진다.
-    order_locked = _is_kr_order_locked_cv_format(file_format)
     allow_order_locked_cv = _env_bool("UTOA_KR_ALLOW_ORDER_LOCKED_CV_MEL_OFFSET", True)
-    enable_cv_head_soft_guard = _env_bool(
-        "UTOA_KR_ENABLE_CV_HEAD_SOFT_MEL_OFFSET_GUARD",
-        not order_locked,
-    )
-    skip_offset_soft_guard = ((alias_type == "cv_head") and (not enable_cv_head_soft_guard)) or (
-        order_locked
+    skip_offset_soft_guard = (alias_type == "cv_head") or (
+        _is_kr_order_locked_cv_format(file_format)
         and alias_type in {"cv", "cv_head"}
         and not allow_order_locked_cv
     )
@@ -4048,25 +3366,17 @@ def _apply_soft_mel_offset_cutoff_guard(
                         rel = int(np.where(seg)[0][0])
                         sound_start_idx = lo + rel
             if sound_start_idx is not None:
-                offset_lead_ms = _env_float("UTOA_MEL_OFFSET_LEAD_BASE_MS", 9.0)
+                offset_lead_ms = _env_float("UTOA_MEL_OFFSET_LEAD_BASE_MS", 12.0)
                 pre_guard_ms = _env_float("UTOA_MEL_OFFSET_PRE_GUARD_BASE_MS", 18.0)
                 if is_sibilant_like or is_fricative_like:
-                    offset_lead_ms = _env_float("UTOA_MEL_OFFSET_LEAD_SIBILANT_MS", 12.0)
+                    offset_lead_ms = _env_float("UTOA_MEL_OFFSET_LEAD_SIBILANT_MS", 15.0)
                     pre_guard_ms = _env_float("UTOA_MEL_OFFSET_PRE_GUARD_SIBILANT_MS", 20.0)
                 elif is_plosive_like:
-                    offset_lead_ms = _env_float("UTOA_MEL_OFFSET_LEAD_PLOSIVE_MS", 14.0)
+                    offset_lead_ms = _env_float("UTOA_MEL_OFFSET_LEAD_PLOSIVE_MS", 18.0)
                     pre_guard_ms = _env_float("UTOA_MEL_OFFSET_PRE_GUARD_PLOSIVE_MS", 22.0)
-                offset_blend = _env_float("UTOA_MEL_OFFSET_BLEND_BASE", 0.36)
-                if order_locked and alias_type == "cv_head":
-                    offset_lead_ms = max(6.0, offset_lead_ms - 2.0)
-                    pre_guard_ms += _env_float("UTOA_MEL_OFFSET_PRE_GUARD_CV_HEAD_ORDER_LOCKED_MS", 2.0)
-                    offset_blend = _env_float("UTOA_MEL_OFFSET_BLEND_CV_HEAD_ORDER_LOCKED", 0.26)
-                elif order_locked and alias_type == "cv":
-                    offset_blend = _env_float("UTOA_MEL_OFFSET_BLEND_CV_ORDER_LOCKED", 0.31)
-
                 target_offset = float(t_ms[sound_start_idx]) - offset_lead_ms
                 target_offset = max(0.0, min(pre_abs - pre_guard_ms, target_offset))
-                new_offset = _blend(offset, target_offset, offset_blend)
+                new_offset = _blend(offset, target_offset, 0.36)
                 offset_shift_ms = float(new_offset - offset)
                 offset = new_offset
                 pre = max(pre_abs - offset, 0.0)
@@ -4194,37 +3504,33 @@ def _build_kr_reference_profile_from_dirs(ref_dirs, custom_map=None):
             total_wavs += 1
             for idx, row in enumerate(rows):
                 alias_type = _classify_cached(row["alias"])
-                bucket_keys = _build_kr_profile_bucket_keys(row["alias"], alias_type)
-                if not bucket_keys:
-                    continue
+                b = bucket_values.setdefault(alias_type, {
+                    "pre": [],
+                    "cons_gap": [],
+                    "cut_gap": [],
+                    "ovl_ratio": [],
+                    "head_off_ratio": [],
+                })
                 pre = max(row["pre"], 0.0)
                 cons = max(row["cons"], pre)
                 cut_abs = abs(row["cutoff"])
-                for bucket_key in bucket_keys:
-                    b = bucket_values.setdefault(bucket_key, {
-                        "pre": [],
-                        "cons_gap": [],
-                        "cut_gap": [],
-                        "ovl_ratio": [],
-                        "head_off_ratio": [],
-                    })
-                    b["pre"].append(_clamp(pre, 0.0, 360.0))
-                    b["cons_gap"].append(_clamp(max(cons - pre, 10.0), 10.0, 220.0))
-                    b["cut_gap"].append(_clamp(max(cut_abs - cons, 20.0), 20.0, 180.0))
-                    b["ovl_ratio"].append(_clamp(_safe_ratio(row["ovl"], pre, fallback=0.0), 0.05, 0.78))
-                    if idx == 0:
-                        b["head_off_ratio"].append(_clamp(_safe_ratio(row["offset"], dur_ms, fallback=0.0), 0.0, 0.35))
+                b["pre"].append(_clamp(pre, 0.0, 360.0))
+                b["cons_gap"].append(_clamp(max(cons - pre, 10.0), 10.0, 220.0))
+                b["cut_gap"].append(_clamp(max(cut_abs - cons, 20.0), 20.0, 180.0))
+                b["ovl_ratio"].append(_clamp(_safe_ratio(row["ovl"], pre, fallback=0.0), 0.05, 0.78))
+                if idx == 0:
+                    b["head_off_ratio"].append(_clamp(_safe_ratio(row["offset"], dur_ms, fallback=0.0), 0.0, 0.35))
                 total_rows += 1
 
     if total_rows < 100:
         return None
 
     buckets = {}
-    for alias_key, vals in bucket_values.items():
+    for alias_type, vals in bucket_values.items():
         n = len(vals["pre"])
         if n < 8:
             continue
-        buckets[alias_key] = {
+        buckets[alias_type] = {
             "n": n,
             "pre": _median(vals["pre"]),
             "cons_gap": _median(vals["cons_gap"]),
@@ -4237,9 +3543,8 @@ def _build_kr_reference_profile_from_dirs(ref_dirs, custom_map=None):
         return None
 
     return {
-        "version": 2,
+        "version": 1,
         "language": "korean",
-        "bucket_key_mode": "alias+phonetic",
         "source_count": len([d for d in ref_dirs if d and os.path.isdir(d)]),
         "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
         "rows": total_rows,
@@ -4291,12 +3596,12 @@ def generate_oto(
     custom_phonemes_path='',
     alias_suffix='',
     kr_mapping_words_fallback_enabled=True,
-    kr_mapping_spn_ratio_threshold=0.30,
-    kr_mapping_min_vowel_phone_ratio=0.56,
+    kr_mapping_spn_ratio_threshold=0.35,
+    kr_mapping_min_vowel_phone_ratio=0.5,
     kr_mapping_debug_reason_logging=True,
     kr_anchor_profile_path="",
     kr_mapping_confidence_threshold=None,
-    kr_mapping_max_index_jump_default=0,
+    kr_mapping_max_index_jump_default=1,
     kr_mapping_max_index_jump_high_conf=1,
     cleanup_timing_jsonl=True,
     auto_format=None,
@@ -4313,59 +3618,100 @@ def generate_oto(
         logger.error(err)
         if callback:
             callback(err)
-        initialize_runtime_report(runtime_report, language="korean", stage="generate")
-        finalize_runtime_report(runtime_report, processed=0, total=0, errors=[err])
         return 0, 0, [err]
 
-    normalized_options = normalize_korean_generation_options(
-        params=params,
-        default_params=DEFAULT_PARAMS,
-        fallback_format=fallback_format,
-        auto_format=auto_format,
-        kr_mapping_words_fallback_enabled=kr_mapping_words_fallback_enabled,
-        kr_mapping_spn_ratio_threshold=kr_mapping_spn_ratio_threshold,
-        kr_mapping_min_vowel_phone_ratio=kr_mapping_min_vowel_phone_ratio,
-        kr_mapping_debug_reason_logging=kr_mapping_debug_reason_logging,
-        kr_anchor_profile_path=kr_anchor_profile_path,
-        kr_mapping_confidence_threshold=kr_mapping_confidence_threshold,
-        kr_mapping_max_index_jump_default=kr_mapping_max_index_jump_default,
-        kr_mapping_max_index_jump_high_conf=kr_mapping_max_index_jump_high_conf,
-        cleanup_timing_jsonl=cleanup_timing_jsonl,
-        callback=callback,
-    )
-    params = normalized_options.params
-    fallback_format = normalized_options.fallback_format
-    auto_gen_format = normalized_options.auto_gen_format
-    use_sinsy_labels = normalized_options.use_sinsy_labels
-    sinsy_label_path = normalized_options.sinsy_label_path
-    kr_mapping_words_fallback_enabled = normalized_options.words_fallback_enabled
-    kr_mapping_spn_ratio_threshold = normalized_options.spn_ratio_threshold
-    kr_mapping_min_vowel_phone_ratio = normalized_options.min_vowel_phone_ratio
-    kr_mapping_debug_reason_logging = normalized_options.debug_reason_logging
-    kr_anchor_profile_path = normalized_options.anchor_profile_path
-    kr_mapping_confidence_threshold = normalized_options.confidence_threshold
-    kr_mapping_max_index_jump_default = normalized_options.max_index_jump_default
-    kr_mapping_max_index_jump_high_conf = normalized_options.max_index_jump_high_conf
-    cleanup_timing_jsonl = normalized_options.cleanup_timing_jsonl
-    kr_disable_cvvc_order_lock = normalized_options.disable_cvvc_order_lock
-    initialize_runtime_report(runtime_report, language="korean", stage="generate")
-    generation_request = GenerationRequest(
-        language="korean",
-        tg_folder=str(tg_folder or "").strip(),
-        tpl_path=str(tpl_path or "").strip(),
-        out_path=str(out_path or "").strip(),
-        fallback_format=str(fallback_format or "").strip().lower(),
-        custom_phonemes_path=str(custom_phonemes_path or "").strip(),
-        alias_suffix=str(alias_suffix or "").strip(),
-        auto_format=str(auto_format or "").strip(),
-        params=dict(params or {}),
-        options={
-            "auto_gen_format": auto_gen_format,
-            "ml_policy": str(ml_policy or "").strip(),
-            "enable_ml_correction": bool(enable_ml_correction),
-        },
-    )
-    attach_request_metadata(runtime_report, generation_request)
+    use_context_default_params = params is None
+    if params is None:
+        params = DEFAULT_PARAMS.copy()
+    use_sinsy_labels = bool(params.get("USE_SINSY_LABELS", False)) if params else False
+    sinsy_label_path = str(params.get("SINSY_LABEL_PATH", "") or "").strip() if params else ""
+
+
+    if auto_format:
+        from core.format_type_utils import normalize_auto_format_value
+
+        normalized_auto_format = normalize_auto_format_value("korean", auto_format)
+        if normalized_auto_format:
+            fallback_format = normalized_auto_format
+
+    try:
+        from core.format_type_utils import normalize_format_type
+
+        auto_gen_format = normalize_format_type("korean", fallback_format or "cvvc") or "cvvc"
+    except Exception:
+        auto_gen_format = (fallback_format or "cvvc").strip().lower()
+
+    if auto_gen_format not in {"cv", "cvc", "cvvc", "vcv"}:
+        msg = (
+            f"⚠ 자동 에일리어스 생성은 현재 CV/연단음, CVC, CVVC, VCV만 지원합니다. "
+            f"{auto_gen_format.upper()} -> CVVC로 전환합니다."
+        )
+        if callback:
+            callback(msg)
+        auto_gen_format = "cvvc"
+
+    if use_context_default_params:
+        params = get_default_params_for_context("korean", auto_gen_format)
+        use_sinsy_labels = bool(params.get("USE_SINSY_LABELS", False)) if params else False
+        sinsy_label_path = str(params.get("SINSY_LABEL_PATH", "") or "").strip() if params else ""
+
+    env_words_fallback = str(os.environ.get("UTOA_KR_MAPPING_WORDS_FALLBACK", "")).strip().lower()
+    if env_words_fallback in {"0", "false", "off", "no"}:
+        kr_mapping_words_fallback_enabled = False
+    elif env_words_fallback in {"1", "true", "on", "yes"}:
+        kr_mapping_words_fallback_enabled = True
+    env_spn_th = str(os.environ.get("UTOA_KR_MAPPING_SPN_RATIO_THRESHOLD", "")).strip()
+    if env_spn_th:
+        try:
+            kr_mapping_spn_ratio_threshold = float(env_spn_th)
+        except Exception:
+            pass
+    env_vowel_ratio = str(os.environ.get("UTOA_KR_MAPPING_MIN_VOWEL_PHONE_RATIO", "")).strip()
+    if env_vowel_ratio:
+        try:
+            kr_mapping_min_vowel_phone_ratio = float(env_vowel_ratio)
+        except Exception:
+            pass
+    env_debug_reason = str(os.environ.get("UTOA_KR_MAPPING_DEBUG_REASON", "")).strip().lower()
+    if env_debug_reason in {"0", "false", "off", "no"}:
+        kr_mapping_debug_reason_logging = False
+    elif env_debug_reason in {"1", "true", "on", "yes"}:
+        kr_mapping_debug_reason_logging = True
+    env_use_sinsy = str(os.environ.get("UTOA_USE_SINSY_LABELS", "")).strip().lower()
+    if env_use_sinsy in {"0", "false", "off", "no"}:
+        use_sinsy_labels = False
+    elif env_use_sinsy in {"1", "true", "on", "yes"}:
+        use_sinsy_labels = True
+    env_sinsy_path = str(os.environ.get("UTOA_SINSY_LABEL_PATH", "")).strip()
+    if env_sinsy_path:
+        sinsy_label_path = env_sinsy_path
+    env_anchor_profile = str(os.environ.get("UTOA_KR_ANCHOR_PROFILE_PATH", "")).strip()
+    if env_anchor_profile:
+        kr_anchor_profile_path = env_anchor_profile
+    env_conf_th = str(os.environ.get("UTOA_KR_MAPPING_CONF_THRESHOLD", "")).strip()
+    if env_conf_th:
+        try:
+            kr_mapping_confidence_threshold = float(env_conf_th)
+        except Exception:
+            pass
+    env_jump_default = str(os.environ.get("UTOA_KR_MAPPING_MAX_INDEX_JUMP_DEFAULT", "")).strip()
+    if env_jump_default:
+        try:
+            kr_mapping_max_index_jump_default = int(float(env_jump_default))
+        except Exception:
+            pass
+    env_jump_hi = str(os.environ.get("UTOA_KR_MAPPING_MAX_INDEX_JUMP_HIGH_CONF", "")).strip()
+    if env_jump_hi:
+        try:
+            kr_mapping_max_index_jump_high_conf = int(float(env_jump_hi))
+        except Exception:
+            pass
+    env_cleanup_jsonl = str(os.environ.get("UTOA_CLEANUP_TIMING_JSONL", "")).strip().lower()
+    if env_cleanup_jsonl in {"0", "false", "off", "no"}:
+        cleanup_timing_jsonl = False
+    elif env_cleanup_jsonl in {"1", "true", "on", "yes"}:
+        cleanup_timing_jsonl = True
+    kr_disable_cvvc_order_lock = _env_bool("UTOA_KR_DISABLE_CVVC_ORDER_LOCK", False)
 
     def log(msg):
         if callback:
@@ -4533,22 +3879,19 @@ def generate_oto(
 
 
     template_lines = []
-    template_encoding = ""
     if tpl_path:
         lines, detected_enc, warning, err = load_template_oto_lines(
             tpl_path,
-            require_utf8=False,
+            require_utf8=True,
             mode_label="한국어 OTO",
         )
         if err:
             log(err)
             log(f"⚡ 템플릿 로드 실패로 OpenUtau 호환 {auto_gen_format.upper()} 자동 에일리어스 생성으로 전환합니다.")
             lines = []
-            detected_enc = ""
         if warning:
             log(warning)
         template_lines = lines or []
-        template_encoding = str(detected_enc or "").strip()
 
 
     wav_root_for_signal = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
@@ -4707,16 +4050,10 @@ def generate_oto(
                 file_ctx.sinsy_label_entries = []
                 file_ctx.sinsy_label_path = ""
 
-        if handle_kr_file_context_status(
-            file_ctx=file_ctx,
-            fname=fname,
-            lines=lines,
-            final_lines=final_lines,
-            alias_suffix=alias_suffix,
-            log_fn=log,
-            record_unset_lines_fn=_record_unset_lines,
-            apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
-        ):
+        if file_ctx.status == "textgrid_missing":
+            log(f"경고: {fname}: TextGrid를 찾을 수 없어 원본 라인을 유지합니다.")
+            _record_unset_lines("textgrid_missing", fname, lines)
+            final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
             processed += 1
             continue
 
@@ -4725,16 +4062,22 @@ def generate_oto(
             load_textgrid_fn=textgrid.TextGrid.fromFile,
             tier_predicate=lambda tier: isinstance(tier, textgrid.IntervalTier),
         )
-        if handle_kr_file_context_status(
-            file_ctx=file_ctx,
-            fname=fname,
-            lines=lines,
-            final_lines=final_lines,
-            alias_suffix=alias_suffix,
-            log_fn=log,
-            record_unset_lines_fn=_record_unset_lines,
-            apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
-        ):
+        if file_ctx.status == "textgrid_load_failed":
+            log(f"경고: {fname}: TextGrid 로드 실패로 원본 라인을 유지합니다. ({file_ctx.error_message})")
+            _record_unset_lines("textgrid_load_failed", fname, lines)
+            final_lines.extend([
+                apply_suffix_to_oto_line(l, alias_suffix)
+                for l in lines
+            ])
+            processed += 1
+            continue
+        if file_ctx.status == "tier_missing":
+            log(f"경고: {fname}: phones tier가 없어 원본 라인을 유지합니다.")
+            _record_unset_lines("tier_missing", fname, lines)
+            final_lines.extend([
+                apply_suffix_to_oto_line(l, alias_suffix)
+                for l in lines
+            ])
             processed += 1
             continue
 
@@ -4748,28 +4091,16 @@ def generate_oto(
 
         try:
             if not phone_tier:
-                append_preserved_lines(
-                    final_lines,
-                    lines,
-                    alias_suffix=alias_suffix,
-                    apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
-                )
                 log(f"경고: {fname}: phones tier가 없어 원본 라인을 유지합니다.")
                 _record_unset_lines("tier_missing", fname, lines)
+                final_lines.extend([
+                    apply_suffix_to_oto_line(l, alias_suffix)
+                    for l in lines
+                ])
                 processed += 1
                 continue
 
             try:
-                strict_skip_aliases = []
-                strict_skip_alias_seen = set()
-
-                def _append_strict_skip_alias(alias_name):
-                    name = str(alias_name or "").strip()
-                    if not name or name in strict_skip_alias_seen:
-                        return
-                    strict_skip_alias_seen.add(name)
-                    strict_skip_aliases.append(name)
-
                 from core.lab_generator import decompose_hangul_to_roman
             except ImportError:
                 def decompose_hangul_to_roman(ch):
@@ -4796,16 +4127,22 @@ def generate_oto(
                 resolve_mapping_conf_threshold_fn=_resolve_kr_mapping_conf_threshold,
                 preferred_format=auto_gen_format,
             )
-            if handle_kr_loop_prep_status(
-                loop_prep=loop_prep,
-                fname=fname,
-                lines=lines,
-                final_lines=final_lines,
-                alias_suffix=alias_suffix,
-                log_fn=log,
-                record_unset_lines_fn=_record_unset_lines,
-                apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
-            ):
+            if loop_prep.status == "empty_intervals":
+                log(f"경고: {fname}: 유효한 음소 구간이 없어 원본 라인을 유지합니다.")
+                _record_unset_lines("mapping_failed_empty_intervals", fname, lines)
+                final_lines.extend([
+                    apply_suffix_to_oto_line(l, alias_suffix)
+                    for l in lines
+                ])
+                processed += 1
+                continue
+            if loop_prep.status == "no_valid_alias":
+                log(f"경고: {fname}: 유효한 에일리어스가 없어 원본 라인을 유지합니다.")
+                _record_unset_lines("no_valid_alias", fname, lines)
+                final_lines.extend([
+                    apply_suffix_to_oto_line(l, alias_suffix)
+                    for l in lines
+                ])
                 processed += 1
                 continue
 
@@ -4851,52 +4188,130 @@ def generate_oto(
             ):
                 processed += 1
                 continue
-            kr_source_state = _select_kr_syllable_source_state(
+            syllables_info = []
+            used_words_based = False
+            used_alias_based = False
+            base_score = 0.0
+            alt_score = 0.0
+            mapping_reason_code = "filename_token"
+            if wd_intervals:
+                for w in wd_intervals:
+                    w_start = w.minTime
+                    w_end = w.maxTime
+
+                    s_phones = [p for p in ph_intervals if p.minTime >= w_start - 0.01 and p.maxTime <= w_end + 0.01]
+                    if force_words_phone_fill and not s_phones:
+                        s_phones = _synthesize_kr_word_phones(
+                            w.mark,
+                            float(w_start),
+                            float(w_end),
+                            decompose_hangul_to_roman,
+                        )
+                    roman_parts = []
+                    for ch in w.mark:
+                        roman_parts.extend(decompose_hangul_to_roman(ch))
+                    roman_raw = "".join(roman_parts).lower()
+                    roman_cv = _kr_cv_kernel(roman_raw)
+
+                    syllables_info.append({
+                        'word': w.mark,
+                        'roman': roman_raw,
+                        'roman_cv': roman_cv,
+                        'start_time': w_start,
+                        'end_time': w_end,
+                        'phones': s_phones
+                    })
+                used_words_based = len(syllables_info) > 0
+
+            alias_based = _build_kr_syllables_from_phone_nuclei(ph_intervals, targets_for_build) if targets_for_build else None
+            if mel_ctx_for_file:
+                _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx_for_file)
+                _annotate_kr_syllable_blank_confidence(alias_based, mel_ctx_for_file)
+            kr_source_pick = select_kr_syllable_source(
                 file_format=file_format,
                 prefer_filename_sequence=prefer_filename_sequence,
                 low_phone_quality=low_phone_quality,
-                wd_intervals=wd_intervals,
-                ph_intervals=ph_intervals,
+                used_words_based=used_words_based,
+                words_syllables=syllables_info,
+                alias_syllables=alias_based,
                 targets_for_build=targets_for_build,
-                force_words_phone_fill=force_words_phone_fill,
-                decompose_hangul_to_roman_fn=decompose_hangul_to_roman,
-                mel_ctx_for_file=mel_ctx_for_file,
-                textgrid_trust_score=textgrid_trust_score,
+                score_mapping_fn=_score_kr_syllable_mapping,
+                should_prefer_alias_fn=_should_prefer_alias_based_syllables,
+                compute_glide_mismatch_fn=_compute_kr_glide_mismatch_ratio,
+                is_order_locked_format_fn=_is_kr_order_locked_cv_format,
             )
-            syllables_info = list(kr_source_state.get("syllables_info") or [])
-            used_words_based = bool(kr_source_state.get("used_words_based"))
-            used_alias_based = bool(kr_source_state.get("used_alias_based"))
-            mapping_reason_code = str(kr_source_state.get("mapping_reason_code") or COMMON_REASON_FILENAME_TOKEN)
-            mapping_reason_code = normalize_mapping_reason_code(
-                mapping_reason_code,
-                language="kr",
-                fallback_code=COMMON_REASON_FILENAME_TOKEN,
+            syllables_info = list(kr_source_pick.get("syllables_info") or [])
+            if mel_ctx_for_file:
+                _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx_for_file)
+            syllable_blank_confidences = [
+                float((s or {}).get("blank_confidence", 0.0) or 0.0)
+                for s in (syllables_info or [])
+            ]
+            blank_conf_mean = 0.0
+            if syllable_blank_confidences:
+                blank_conf_mean = float(sum(syllable_blank_confidences) / float(len(syllable_blank_confidences)))
+            alignment_weight_base = max(
+                0.0,
+                min(
+                    1.0,
+                    (textgrid_trust_score * 0.85) - max(0.0, blank_conf_mean - 0.45) * 0.35,
+                ),
             )
-            base_score = float(kr_source_state.get("base_score", 0.0) or 0.0)
-            alt_score = float(kr_source_state.get("alt_score", 0.0) or 0.0)
-            words_glide_mismatch_ratio = float(kr_source_state.get("words_glide_mismatch_ratio", 0.0) or 0.0)
-            blank_conf_mean = float(kr_source_state.get("blank_conf_mean", 0.0) or 0.0)
-            alignment_weight = float(kr_source_state.get("alignment_weight", 0.0) or 0.0)
-            anchor_lock_lite = bool(kr_source_state.get("anchor_lock_lite"))
-            syllable_blank_confidences = list(kr_source_state.get("syllable_blank_confidences") or [])
-
-            _log_kr_mapping_selection(
-                log_fn=log,
-                fname=fname,
-                mapping_reason_code=mapping_reason_code,
-                base_score=base_score,
-                alt_score=alt_score,
-                words_glide_mismatch_ratio=words_glide_mismatch_ratio,
-                low_quality_reasons=low_quality_reasons,
-                alias_syllables_present=bool(kr_source_state.get("alias_syllables_present")),
-                targets_for_build=targets_for_build,
-                textgrid_trust_tier=textgrid_trust_tier,
-                textgrid_trust_score=textgrid_trust_score,
-                alignment_weight=alignment_weight,
+            alignment_weight = float(alignment_weight_base)
+            mel_reliability_score = _estimate_file_mel_reliability(
+                mel_ctx_for_file,
                 blank_conf_mean=blank_conf_mean,
-                anchor_lock_lite=anchor_lock_lite,
             )
+            mel_weight_mode = _resolve_mel_weight_mode(os.environ.get("UTOA_MEL_WEIGHT_MODE", "auto"))
+            force_mel_branch = False
+            anchor_lock_lite = False
+            used_words_based = bool(kr_source_pick.get("used_words_based"))
+            used_alias_based = bool(kr_source_pick.get("used_alias_based"))
+            mapping_reason_code = str(kr_source_pick.get("mapping_reason_code") or mapping_reason_code)
+            base_score = float(kr_source_pick.get("base_score", 0.0) or 0.0)
+            alt_score = float(kr_source_pick.get("alt_score", 0.0) or 0.0)
+            words_glide_mismatch_ratio = float(kr_source_pick.get("words_glide_mismatch_ratio", 0.0) or 0.0)
 
+            if mapping_reason_code == "filename_sequence_lock":
+                log(
+                    f"🧭 {fname}: TextGrid 신뢰도 {textgrid_trust_tier.upper()} "
+                    f"(trust={textgrid_trust_score:.2f}) → 파일명 순서 기반 매핑 고정"
+                )
+            elif mapping_reason_code == "alias_based_empty_words":
+                log(f"🧭 {fname}: words 매핑에 빈 phone 구간 존재 → alias/phone 기반 음절 매핑 사용")
+            elif mapping_reason_code == "alias_phone_minimal":
+                log(f"🧭 {fname}: words 티어 없음/실패 → phones 핵 기반 음절 매핑 사용")
+            elif mapping_reason_code in {"order_locked_length_mismatch", "order_locked_glide_mismatch", "order_locked_low_phone_quality"}:
+                log(
+                    f"🧭 {fname}: CV 계열 순서 고정 포맷 보정 "
+                    f"(reason={mapping_reason_code}, words={base_score:.1f}, alias={alt_score:.1f}, "
+                    f"glide_mismatch={words_glide_mismatch_ratio:.2f})"
+                )
+            elif mapping_reason_code == "words_low_phone_quality":
+                log(
+                    f"🧭 {fname}: phones 저신뢰({','.join(low_quality_reasons)}) → words 매핑 고정 "
+                    f"(words={base_score:.1f}, alias={alt_score:.1f})"
+                )
+            elif mapping_reason_code == "alias_based_cvvc":
+                log(
+                    f"🧭 {fname}: CVVC는 alias 기반 음절 매핑 우선 "
+                    f"(words={base_score:.1f}, alias={alt_score:.1f})"
+                )
+            elif mapping_reason_code == "alias_based_recover":
+                log(
+                    f"🧭 {fname}: 매핑 이탈 보정 적용 "
+                    f"(base={base_score:.1f}, corrected={alt_score:.1f})"
+                )
+            elif mapping_reason_code == "words_keep_high_conf":
+                log(
+                    f"🧭 {fname}: words 매핑 신뢰도 높음 → alias 보정 생략 "
+                    f"(base={base_score:.1f}, corrected={alt_score:.1f})"
+                )
+            elif alias_based and targets_for_build:
+                log(
+                    f"🧭 {fname}: TextGrid(words) 매핑 유지 "
+                    f"(base={base_score:.1f}, corrected={alt_score:.1f})"
+                )
             file_anchor_adapt_stats = _compute_file_anchor_adapt_stats(
                 mel_ctx_for_file,
                 syllables_info,
@@ -4909,124 +4324,234 @@ def generate_oto(
                 or [s.get('roman_cv') or s.get('roman', '') for s in (syllables_info or [])]
                 or []
             )
-            runtime_state = _recompute_kr_runtime_state(
-                alignment_ingest=alignment_ingest,
-                file_mapping_conf_th=file_mapping_conf_th,
-                file_format=file_format,
-                phone_quality=phone_quality,
-                base_score=base_score,
-                alt_score=alt_score,
-                used_words_based=used_words_based,
-                used_alias_based=used_alias_based,
-                mapping_reason_code=mapping_reason_code,
-                kr_mapping_debug_reason_logging=kr_mapping_debug_reason_logging,
-                fname=fname,
-                blank_conf_mean=blank_conf_mean,
-                syllable_blank_confidences=syllable_blank_confidences,
-                plan_candidate_source=plan_candidate_source,
-                sinsy_label_entries=sinsy_label_entries,
-                syllables_info=syllables_info,
-                textgrid_trust_tier=textgrid_trust_tier,
-                low_phone_quality=low_phone_quality,
-                alignment_weight=alignment_weight,
-                mel_ctx_for_file=mel_ctx_for_file,
-                prefer_filename_sequence=prefer_filename_sequence,
-                log_fn=log,
-            )
-            runtime_view = extract_language_runtime_state(
-                runtime_state,
-                language_prefix="kr",
-                conf_floor_default=file_mapping_conf_th,
-                row_margin_floor_default=6.0,
-            )
-            runtime_policy = dict(runtime_view["runtime_policy"] or {})
-            mapping_confidence_base = float(runtime_view["mapping_confidence_base"])
-            mapping_margin = float(runtime_view["mapping_margin"])
-            kr_cv_plan = dict(runtime_view["kr_cv_plan"] or {})
-            kr_planned_cv_indices = runtime_view["kr_planned_cv_indices"]
-            kr_anchor_graph = runtime_view["kr_anchor_graph"]
-            kr_plan_policy = dict(runtime_view["kr_plan_policy"] or {})
-            file_mapping_low_conf = bool(runtime_view["file_mapping_low_conf"])
-            file_conf_floor = float(runtime_view["file_conf_floor"])
-            row_conf_floor = float(runtime_view["row_conf_floor"])
-            row_margin_floor = float(runtime_view["row_margin_floor"])
-            row_blank_floor = runtime_view.get("row_blank_floor")
-            low_conf_reasons = list(runtime_view.get("low_conf_reasons") or [])
-            mapping_tier = str(runtime_view.get("mapping_tier") or runtime_policy.get("mapping_tier") or "")
-            update_kr_mapping_runtime_report(
-                runtime_report,
-                file_format=str(file_format or ""),
-                mapping_confidence=float(mapping_confidence_base),
-                mapping_margin=float(mapping_margin),
-                mapping_tier=str(runtime_policy.get("mapping_tier") or ""),
-                trust_score=float(textgrid_trust_score),
-                trust_tier=str(textgrid_trust_tier or ""),
-                file_conf_floor=float(file_conf_floor),
-                row_conf_floor=float(row_conf_floor),
-                row_margin_floor=float(row_margin_floor),
-                file_low_conf=bool(file_mapping_low_conf),
-                low_conf_reasons=list(low_conf_reasons),
-                blank_confidence_mean=float(blank_conf_mean),
-                plan_source=str(kr_cv_plan.get("source") or ""),
-                plan_margin=float((kr_cv_plan.get("meta") or {}).get("margin", 0.0) or 0.0),
-                plan_coverage=float(kr_plan_policy.get("coverage", 0.0) or 0.0),
-                mapping_reason_code=str(mapping_reason_code or ""),
-                row_blank_floor=(float(row_blank_floor) if row_blank_floor is not None else None),
-                vc_bridge_tuning={},
+            kr_cv_plan = {"indices": None, "meta": {}, "source": ""}
+            if plan_candidate_source and sinsy_label_entries:
+                kr_cv_plan = build_sinsy_guided_anchor_plan(
+                    expected_tokens=plan_candidate_source,
+                    syllables_info=syllables_info,
+                    label_entries=sinsy_label_entries,
+                    normalize_expected_fn=_normalize_cv_match_token,
+                    normalize_label_fn=_normalize_cv_match_token,
+                    label_match_score_fn=lambda target, label: float(_cv_match_score(target, label)),
+                )
+            if not kr_cv_plan.get("indices"):
+                use_mel_plan = False
+                fmt = str(file_format or "").strip().lower()
+                mel_plan_env = {
+                    "cvvc": "UTOA_KR_CVVC_MEL_PLAN",
+                    "cvc": "UTOA_KR_CVC_MEL_PLAN",
+                    "vcv": "UTOA_KR_VCV_MEL_PLAN",
+                    "cv": "UTOA_KR_CV_MEL_PLAN",
+                }
+                if fmt in mel_plan_env and mel_ctx_for_file and syllables_info:
+                    if (
+                        textgrid_trust_tier != "high"
+                        or low_phone_quality
+                        or blank_conf_mean >= 0.45
+                        or alignment_weight < 0.65
+                    ):
+                        use_mel_plan = _env_bool(mel_plan_env[fmt], True)
+                kr_cv_plan = _build_kr_cv_anchor_plan_v2(
+                    plan_candidate_source,
+                    syllables_info,
+                    use_mel=bool(use_mel_plan),
+                ) if plan_candidate_source else {"indices": None, "meta": {}}
+            kr_planned_cv_indices = kr_cv_plan.get("indices")
+            kr_anchor_graph = build_adjacent_anchor_graph(kr_planned_cv_indices)
+            kr_plan_policy = resolve_plan_policy(
+                alignment_trust=alignment_weight,
+                plan_meta=kr_cv_plan.get("meta"),
+                expected_count=len(plan_candidate_source),
+                planned_count=len(kr_planned_cv_indices or []),
+                format_type=file_format,
+                prefer_sequence=prefer_filename_sequence,
             )
 
+            mapping_confidence_base, mapping_margin = _estimate_kr_mapping_confidence(
+                phone_quality,
+                words_score=base_score,
+                alias_score=alt_score,
+                used_words_based=used_words_based,
+                used_alias_based=used_alias_based,
+            )
+            runtime_policy = resolve_runtime_mapping_policy(
+                ingest_snapshot=alignment_ingest,
+                plan_policy=kr_plan_policy,
+                mapping_confidence=mapping_confidence_base,
+                mapping_margin=mapping_margin,
+                conf_threshold=file_mapping_conf_th,
+                format_type=file_format,
+                score_a=base_score,
+                score_b=alt_score,
+                sequence_lock_formats={"cvvc", "cvc"},
+                abstain_formats={"cvvc", "vcv", "cvc", "cv"},
+                strict_formats={"cvvc"},
+                prefer_sequence=prefer_filename_sequence,
+                alignment_trust=alignment_weight,
+            )
+            if sinsy_label_entries:
+                plan_source = str(kr_cv_plan.get("source") or "")
+                if plan_source != "sinsy_labels":
+                    log(
+                        f"🛡️ {fname}: sinsy 라벨이 있지만 planner에 적용되지 않음 "
+                        f"(source={plan_source or 'fallback'})"
+                    )
+                else:
+                    plan_margin = float((kr_cv_plan.get("meta") or {}).get("margin", 0.0) or 0.0)
+                    row_margin_floor = float(runtime_policy.get("row_margin_floor", 6.0))
+                    if plan_margin < row_margin_floor:
+                        log(
+                            f"🛡️ {fname}: sinsy planner margin 낮음 "
+                            f"(margin={plan_margin:.1f} < {row_margin_floor:.1f})"
+                        )
+            mapping_confidence_base = float(runtime_policy.get("mapping_confidence", mapping_confidence_base))
+            if syllable_blank_confidences:
+                if blank_conf_mean >= 0.55:
+                    mapping_confidence_base = max(
+                        0.0,
+                        mapping_confidence_base - min(0.22, (blank_conf_mean - 0.55) * 0.45 + 0.04),
+                    )
+            if kr_mapping_debug_reason_logging and mapping_confidence_base < float(file_mapping_conf_th):
+                log(
+                    f"🧭 {fname}: KR 매핑 신뢰도 낮음(conf={mapping_confidence_base:.2f}, "
+                    f"margin={mapping_margin:+.1f}, reason={mapping_reason_code})"
+                )
+
+            force_mel_branch = _should_force_mel_branch(
+                textgrid_trust_tier,
+                trust_score=textgrid_trust_score,
+                alignment_weight=alignment_weight_base,
+                mapping_confidence=mapping_confidence_base,
+                mel_reliability=mel_reliability_score,
+            )
+            if force_mel_branch:
+                mel_weight_mode = "mel_boost"
+            alignment_weight = float(alignment_weight_base)
+            if mel_weight_mode == "mel_boost":
+                alignment_weight = _apply_mel_boost_alignment_scale(alignment_weight, textgrid_trust_tier)
+            alignment_weight = float(_clamp(alignment_weight, 0.0, 1.0))
+            anchor_lock_lite = bool(
+                alignment_weight < 0.58
+                or blank_conf_mean >= 0.55
+                or mapping_confidence_base < float(file_mapping_conf_th)
+                or mel_reliability_score < _env_float("UTOA_MEL_FORCE_MEL_RELIABILITY_MIN", 0.44)
+            )
+            log(
+                f"🧭 {fname}: align_base={alignment_weight_base:.2f}, align_final={alignment_weight:.2f}, "
+                f"blank_mean={blank_conf_mean:.2f}, map_conf={mapping_confidence_base:.2f}, "
+                f"mel_rel={mel_reliability_score:.2f}, anchor_lock_lite={anchor_lock_lite}, "
+                f"mel_weight_mode={mel_weight_mode}, force_mel_branch={force_mel_branch}"
+            )
+
+            file_mapping_low_conf = bool(runtime_policy.get("is_low_conf"))
+            file_conf_floor = float(runtime_policy.get("file_conf_floor", file_mapping_conf_th))
+            if mapping_confidence_base < file_conf_floor:
+                file_mapping_low_conf = True
+            row_conf_floor = float(runtime_policy.get("row_conf_floor", file_mapping_conf_th))
+            row_margin_floor = float(runtime_policy.get("row_margin_floor", 6.0))
+            row_blank_floor = None
+            fmt_norm = str(file_format or "").strip().lower()
+            if fmt_norm in {"cvvc", "cvc", "cv"}:
+                # CV 계열은 blank 구간 오매핑이 발생하면 이후 ML 보정이 과보정될 수 있어
+                # 저신뢰 파일에서 row-level blank gate를 더 엄격하게 건다.
+                apply_blank_gate = bool(runtime_policy.get("strict_mode")) or bool(file_mapping_low_conf)
+                if blank_conf_mean >= 0.45 or file_mapping_low_conf:
+                    apply_blank_gate = True
+                if apply_blank_gate:
+                    env_key_by_fmt = {
+                        "cvvc": "UTOA_KR_CVVC_ROW_BLANK_FLOOR",
+                        "cvc": "UTOA_KR_CVC_ROW_BLANK_FLOOR",
+                        "cv": "UTOA_KR_CV_ROW_BLANK_FLOOR",
+                    }
+                    default_floor_by_fmt = {
+                        "cvvc": 0.64,
+                        "cvc": 0.62,
+                        "cv": 0.60,
+                    }
+                    row_blank_floor = _env_float(
+                        env_key_by_fmt.get(fmt_norm, "UTOA_KR_CVVC_ROW_BLANK_FLOOR"),
+                        default_floor_by_fmt.get(fmt_norm, 0.64),
+                    )
+            if isinstance(runtime_report, dict):
+                low_conf_reasons = list(runtime_policy.get("low_conf_reasons") or [])
+                if blank_conf_mean >= 0.55 and "blank_confidence_high" not in low_conf_reasons:
+                    low_conf_reasons.append("blank_confidence_high")
+                if mapping_confidence_base < file_conf_floor and "conf_below_floor" not in low_conf_reasons:
+                    low_conf_reasons.append("conf_below_floor")
+                runtime_report["mapping"] = {
+                    "format": str(file_format or ""),
+                    "mapping_confidence": float(mapping_confidence_base),
+                    "mapping_margin": float(mapping_margin),
+                    "mapping_tier": str(runtime_policy.get("mapping_tier") or ""),
+                    "trust_score": float(textgrid_trust_score),
+                    "trust_tier": str(textgrid_trust_tier or ""),
+                    "alignment_weight_base": float(alignment_weight_base),
+                    "alignment_weight": float(alignment_weight),
+                    "file_conf_floor": float(file_conf_floor),
+                    "row_conf_floor": float(row_conf_floor),
+                    "row_margin_floor": float(row_margin_floor),
+                    "file_low_conf": bool(file_mapping_low_conf),
+                    "low_conf_reasons": list(low_conf_reasons),
+                    "blank_confidence_mean": float(blank_conf_mean),
+                    "mel_reliability_score": float(mel_reliability_score),
+                    "mel_weight_mode": str(mel_weight_mode),
+                    "force_mel_branch": bool(force_mel_branch),
+                    "anchor_lock_lite": bool(anchor_lock_lite),
+                    "plan_source": str(kr_cv_plan.get("source") or ""),
+                    "plan_margin": float((kr_cv_plan.get("meta") or {}).get("margin", 0.0) or 0.0),
+                    "plan_coverage": float(kr_plan_policy.get("coverage", 0.0) or 0.0),
+                    "mapping_reason_code": str(mapping_reason_code or ""),
+                }
+
             if (not syllables_info) or any(len(s['phones']) == 0 for s in syllables_info):
-                fail_reason = resolve_mapping_failure_reason(
-                    low_quality_reasons=low_quality_reasons,
-                    low_phone_quality=bool(low_phone_quality),
-                    has_word_intervals=bool(wd_intervals),
-                    has_phone_intervals=True,
+                log(f"경고: {fname}: 음절-음소 매핑 실패로 원본 라인을 유지합니다.")
+                fail_reason = "mapping_failed"
+                if "spn_heavy" in low_quality_reasons:
+                    fail_reason = "mapping_failed_spn_heavy"
+                elif "insufficient_phones" in low_quality_reasons or "insufficient_vowel_phones" in low_quality_reasons:
+                    fail_reason = "mapping_failed_insufficient_phones"
+                elif low_phone_quality and not wd_intervals:
+                    fail_reason = "mapping_failed_no_words_support"
+                _record_unset_lines(
+                    fail_reason,
+                    fname,
+                    lines,
+                    meta={
+                        "diag_hint": f"spn_ratio={spn_ratio:.2f}; conf={mapping_confidence_base:.2f}",
+                        "phone_quality": phone_quality,
+                        "force_words_phone_fill": force_words_phone_fill,
+                        "mapping_confidence": mapping_confidence_base,
+                        "mapping_reason_code": mapping_reason_code,
+                    },
                 )
-                handle_mapping_failure_fallback(
-                    fail_reason=fail_reason,
-                    fname=fname,
-                    lines=lines,
-                    final_lines=final_lines,
-                    alias_suffix=alias_suffix,
-                    log_fn=log,
-                    failure_log_message=f"경고: {fname}: 음절-음소 매핑 실패로 원본 라인을 유지합니다.",
-                    record_unset_lines_fn=_record_unset_lines,
-                    meta=build_mapping_failure_meta(
-                        mapping_confidence=mapping_confidence_base,
-                        mapping_reason_code=mapping_reason_code,
-                        spn_ratio=spn_ratio,
-                        include_reason_in_diag=False,
-                        extra={
-                            "phone_quality": phone_quality,
-                            "force_words_phone_fill": force_words_phone_fill,
-                        },
-                    ),
-                    apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
-                )
+                final_lines.extend([
+                    apply_suffix_to_oto_line(l, alias_suffix)
+                    for l in lines
+                ])
                 processed += 1
                 continue
 
             if bool(runtime_policy.get("should_abstain")):
-                handle_mapping_abstain_fallback(
-                    fname=fname,
-                    lines=lines,
-                    final_lines=final_lines,
-                    alias_suffix=alias_suffix,
-                    log_fn=log,
-                    abstain_log_message=(
-                        f"경고: {fname}: KR v2 planner abstain "
-                        f"(trust={textgrid_trust_score:.2f}, weight={alignment_weight:.2f}, "
-                        f"coverage={float(kr_plan_policy.get('coverage', 0.0)):.2f}, "
-                        f"margin={float(kr_plan_policy.get('margin', 0.0)):.1f}) → 원본 유지"
-                    ),
-                    record_unset_lines_fn=_record_unset_lines,
-                    meta=build_mapping_abstain_meta(
-                        mapping_confidence=mapping_confidence_base,
-                        mapping_reason_code=mapping_reason_code,
-                        plan_policy=kr_plan_policy,
-                    ),
-                    apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
+                log(
+                    f"경고: {fname}: KR v2 planner abstain "
+                    f"(trust={textgrid_trust_score:.2f}, weight={alignment_weight:.2f}, "
+                    f"coverage={float(kr_plan_policy.get('coverage', 0.0)):.2f}, "
+                    f"margin={float(kr_plan_policy.get('margin', 0.0)):.1f}) → 원본 유지"
                 )
+                _record_unset_lines(
+                    "mapping_v2_abstain",
+                    fname,
+                    lines,
+                    meta={
+                        "mapping_confidence": mapping_confidence_base,
+                        "mapping_reason_code": mapping_reason_code,
+                        "plan_policy": dict(kr_plan_policy or {}),
+                    },
+                )
+                final_lines.extend([
+                    apply_suffix_to_oto_line(l, alias_suffix)
+                    for l in lines
+                ])
                 processed += 1
                 continue
 
@@ -5034,29 +4559,55 @@ def generate_oto(
             current_w_idx = 0
             cv_seq_idx = 0
             bridge_seq_idx = 0
-            kr_order_locked_format = _is_kr_sequence_locked_mapping_format(file_format)
+            kr_order_locked_format = _is_kr_order_locked_cv_format(file_format)
             if kr_order_locked_format and kr_disable_cvvc_order_lock:
                 kr_order_locked_format = False
                 if kr_mapping_debug_reason_logging:
-                    log(f"🧭 {fname}: KR CV-family filename order lock 비활성화(UTOA_KR_DISABLE_CVVC_ORDER_LOCK=1)")
+                    log(f"🧭 {fname}: KR CVVC/CVC filename order lock 비활성화(UTOA_KR_DISABLE_CVVC_ORDER_LOCK=1)")
             kr_cvvc_occurrence_source = filename_cv_targets if (kr_order_locked_format and filename_cv_targets) else syllables_info
             kr_cvvc_occurrence_map = _build_kr_cvvc_occurrence_map(kr_cvvc_occurrence_source) if kr_order_locked_format else None
             kr_cvvc_occurrence_state = {}
             kr_cvvc_vv_occurrence_map = _build_kr_cvvc_vv_occurrence_map(kr_cvvc_occurrence_source) if file_format == "cvvc" else None
             kr_cvvc_vv_occurrence_state = {}
+            file_has_explicit_vc_alias = False
+            file_has_cv_family_alias = False
+            for _line in lines:
+                _parts = _line.split("=", 1)
+                if len(_parts) < 2:
+                    continue
+                _alias = _parts[1].split(",", 1)[0].strip()
+                if not _alias:
+                    continue
+                _alias_type = _classify_alias_cached(_alias)
+                if _alias_type == "vc":
+                    file_has_explicit_vc_alias = True
+                elif _alias_type in {"cv", "cv_head", "vcv", "mono"}:
+                    file_has_cv_family_alias = True
+
+            _format_norm = str(file_format or "").strip().lower()
+            file_has_mixed_cv_vc = file_has_explicit_vc_alias and (
+                file_has_cv_family_alias or _format_norm in {"cvvc", "cvc", "vcv"}
+            )
+            if file_has_mixed_cv_vc:
+                kr_cv_timing_mode = "vcv_context" if _format_norm == "vcv" else "vc_context"
+            else:
+                kr_cv_timing_mode = "standalone"
+            if kr_mapping_debug_reason_logging:
+                log(
+                    f"🧭 {fname}: KR CV timing mode={kr_cv_timing_mode} "
+                    f"(format={_format_norm or 'unknown'}, "
+                    f"vc_alias={'yes' if file_has_explicit_vc_alias else 'no'}, "
+                    f"cv_family={'yes' if file_has_cv_family_alias else 'no'})"
+                )
             cv_anchor_by_idx = {
-                i: _estimate_cv_anchor_from_syllable(syllables_info[i], ph_intervals)
+                i: _estimate_cv_anchor_from_syllable(
+                    syllables_info[i],
+                    ph_intervals,
+                    cv_mode=kr_cv_timing_mode,
+                )
                 for i in range(len(syllables_info))
             }
             realized_cv_anchor_by_idx = {}
-            kr_vc_bridge_tuning = derive_cv_bridge_tuning(
-                realized_anchor_by_idx=realized_cv_anchor_by_idx,
-                estimated_anchor_by_idx=cv_anchor_by_idx,
-                trust_tier=textgrid_trust_tier,
-                mapping_tier=mapping_tier,
-                min_samples=8,
-            )
-            kr_vc_ab_stats = _new_vc_bridge_ab_stats()
             kr_post_ctx = build_kr_postprocess_context(
                 file_format=file_format,
                 mel_ctx_for_file=mel_ctx_for_file,
@@ -5069,63 +4620,18 @@ def generate_oto(
                 recenter_fn=_recenter_kr_params_around_pre,
                 cv_cutoff_guard_fn=_guard_cv_cutoff_to_next_onset,
             )
-            kr_token_invariant_mode = _resolve_syllable_strict_mode(file_format=file_format)
-            kr_token_invariant_enabled = kr_token_invariant_mode in {"soft", "strict"}
-            kr_token_invariant_hard = kr_token_invariant_mode == "strict"
-            kr_token_invariant_soft = kr_token_invariant_mode == "soft"
-            expected_cv_count = len([t for t in (filename_cv_targets or []) if str(t or "").strip()])
-            if expected_cv_count <= 0:
-                expected_cv_count = len([t for t in (romaji_syllables or []) if str(t or "").strip()])
-            observed_cv_count = len([s for s in (syllables_info or []) if (s.get("phones") or [])])
-            mismatch_delta = abs(int(expected_cv_count) - int(observed_cv_count))
-            mismatch_soft_threshold = max(2, int(round(float(expected_cv_count) * 0.30))) if expected_cv_count > 0 else 2
-            mismatch_hard_threshold = max(3, int(round(float(expected_cv_count) * 0.45))) if expected_cv_count > 0 else 3
-            kr_syllable_count_guard_active = bool(
-                kr_token_invariant_enabled
-                and expected_cv_count > 0
-                and observed_cv_count > 0
-                and mismatch_delta >= mismatch_soft_threshold
-            )
-            kr_syllable_count_guard_hard = bool(
-                kr_syllable_count_guard_active
-                and (
-                    kr_token_invariant_hard
-                    or mismatch_delta >= mismatch_hard_threshold
-                )
-            )
-            if kr_syllable_count_guard_active and kr_mapping_debug_reason_logging:
-                mode_tag = "hard" if kr_syllable_count_guard_hard else "soft"
-                log(
-                    f"🧭 {fname}: 음절 수 불변 가드({mode_tag}) "
-                    f"(expected={expected_cv_count}, observed={observed_cv_count}, delta={mismatch_delta})"
-                )
-            kr_confirmed_cv_indices = []
-            kr_vc_pair_seq_idx = 0
-
-            def _append_kr_confirmed_cv_idx(idx):
-                if idx is None:
-                    return
-                try:
-                    mapped = int(idx)
-                except Exception:
-                    return
-                if not (0 <= mapped < len(syllables_info)):
-                    return
-                if kr_confirmed_cv_indices and mapped <= kr_confirmed_cv_indices[-1]:
-                    return
-                kr_confirmed_cv_indices.append(mapped)
 
             for line_num, line in enumerate(lines):
-                alias = resolve_mapping_line_alias(
-                    line=line,
-                    fname=fname,
-                    real_wav_name=real_wav_name,
-                    final_lines=final_lines,
-                    alias_suffix=alias_suffix,
-                    record_unset_fn=_record_unset,
-                    apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
-                )
+                parts = line.split('=', 1)
+                if len(parts) < 2:
+                    _record_unset("malformed_line", fname, line)
+                    final_lines.append(apply_suffix_to_oto_line(line, alias_suffix))
+                    continue
+                alias = parts[1].split(',', 1)[0].strip()
                 if not alias:
+                    _record_unset("empty_alias", fname, line)
+                    preserved = f"{real_wav_name}={parts[1]}"
+                    final_lines.append(apply_suffix_to_oto_line(preserved, alias_suffix))
                     continue
                 base_shape = _extract_base_timing_shape(line)
                 row_mapping_confidence = float(mapping_confidence_base)
@@ -5152,19 +4658,6 @@ def generate_oto(
                 elif alias_type == "vv":
                     row_jump_default = int(max(row_jump_default, kr_mapping_max_index_jump_default + 1))
                     row_jump_high_conf = int(max(row_jump_high_conf, row_jump_default + 1))
-                if kr_syllable_count_guard_active:
-                    row_jump_default = 0
-                    row_jump_high_conf = 0 if kr_syllable_count_guard_hard else min(row_jump_high_conf, 1)
-                if kr_token_invariant_soft and kr_order_locked_format:
-                    if alias_type in {"cv", "cv_head", "vcv"}:
-                        row_jump_default = 0
-                        if file_mapping_low_conf or textgrid_trust_tier != "high":
-                            row_jump_high_conf = 0
-                        else:
-                            row_jump_high_conf = min(row_jump_high_conf, 1)
-                    elif alias_type in {"vc", "vv"}:
-                        row_jump_default = 0
-                        row_jump_high_conf = min(row_jump_high_conf, 1)
 
                 if alias_type == 'br':
 
@@ -5218,89 +4711,17 @@ def generate_oto(
                 bridge_pair = {}
                 bridge_seq_slot = None
                 if alias_type in {"vc", "vv"}:
-                    token_pair_missing = False
-                    if (
-                        kr_token_invariant_enabled
-                        and len(syllables_info) >= 2
-                        and len(kr_confirmed_cv_indices) >= 2
-                    ):
-                        pair_slot = max(0, min(kr_vc_pair_seq_idx, len(kr_confirmed_cv_indices) - 2))
-                        local_prev_idx = int(kr_confirmed_cv_indices[pair_slot])
-                        local_next_idx = int(kr_confirmed_cv_indices[pair_slot + 1])
-                        if kr_vc_pair_seq_idx < (len(kr_confirmed_cv_indices) - 2):
-                            kr_vc_pair_seq_idx += 1
-                        bridge_pair = {
-                            "prev_idx": local_prev_idx,
-                            "next_idx": local_next_idx,
-                            "prev_anchor": (
-                                realized_cv_anchor_by_idx.get(local_prev_idx)
-                                or cv_anchor_by_idx.get(local_prev_idx)
-                            ),
-                            "next_anchor": (
-                                realized_cv_anchor_by_idx.get(local_next_idx)
-                                or cv_anchor_by_idx.get(local_next_idx)
-                            ),
-                            "source": "token_invariant",
-                        }
-                        if alias_type == "vc" and kr_mapping_debug_reason_logging:
-                            log(
-                                f"🧪 {fname}: KR VC bridge A/B token invariant pair "
-                                f"({local_prev_idx + 1}->{local_next_idx + 1}, "
-                                f"confirmed={len(kr_confirmed_cv_indices)}, {alias})"
-                            )
-                    elif kr_token_invariant_enabled and (
-                        kr_token_invariant_hard
-                        or kr_syllable_count_guard_active
-                        or (
-                            kr_token_invariant_soft
-                            and kr_order_locked_format
-                            and (file_mapping_low_conf or textgrid_trust_tier == "low")
-                        )
-                    ):
-                        token_pair_missing = True
-
-                    if token_pair_missing:
-                        token_pair_missing_hard = bool(
-                            kr_token_invariant_hard or kr_syllable_count_guard_hard
-                        )
-                        if not token_pair_missing_hard and kr_token_invariant_soft:
-                            if kr_mapping_debug_reason_logging:
-                                log(
-                                    f"🧭 {fname}: KR VC token invariant pair 누락 "
-                                    f"→ soft fallback bridge 사용 ({alias})"
-                                )
-                            token_pair_missing = False
-                        else:
-                            _append_strict_skip_alias(alias)
-                            _record_unset(
-                                "token_invariant_pair_missing",
-                                fname,
-                                line,
-                                meta={
-                                    "mode": str(kr_token_invariant_mode),
-                                    "alias_type": str(alias_type),
-                                    "diag_hint": "strict token-invariant pair unavailable",
-                                    "syllable_count_guard": bool(kr_syllable_count_guard_active),
-                                    "syllable_count_guard_hard": bool(kr_syllable_count_guard_hard),
-                                    "expected_cv_count": int(expected_cv_count),
-                                    "observed_cv_count": int(observed_cv_count),
-                                },
-                            )
-                            final_lines.append(apply_suffix_to_oto_line(line, alias_suffix))
-                            continue
-
-                    if not bridge_pair:
-                        bridge_seq_slot = bridge_seq_idx
-                        bridge_pair = resolve_bridge_anchor_pair(
-                            kr_anchor_graph,
-                            bridge_seq_slot,
-                            realized_anchor_by_idx=realized_cv_anchor_by_idx,
-                            estimated_anchor_by_idx=cv_anchor_by_idx,
-                            local_prev_idx=current_w_idx,
-                            local_next_idx=current_w_idx + 1,
-                        )
-                        if bridge_seq_idx < len(syllables_info) - 1:
-                            bridge_seq_idx += 1
+                    bridge_seq_slot = bridge_seq_idx
+                    bridge_pair = resolve_bridge_anchor_pair(
+                        kr_anchor_graph,
+                        bridge_seq_slot,
+                        realized_anchor_by_idx=realized_cv_anchor_by_idx,
+                        estimated_anchor_by_idx=cv_anchor_by_idx,
+                        local_prev_idx=current_w_idx,
+                        local_next_idx=current_w_idx + 1,
+                    )
+                    if bridge_seq_idx < len(syllables_info) - 1:
+                        bridge_seq_idx += 1
 
                 handled_glottal, current_w_idx, cv_seq_idx = try_handle_kr_glottal_alias(
                     alias=alias,
@@ -5402,7 +4823,6 @@ def generate_oto(
                         alignment_weight=alignment_weight,
                         textgrid_trust_tier=textgrid_trust_tier,
                     )
-                    _append_kr_confirmed_cv_idx(current_w_idx)
                     continue
 
 
@@ -5467,7 +4887,6 @@ def generate_oto(
                         alignment_weight=alignment_weight,
                         textgrid_trust_tier=textgrid_trust_tier,
                     )
-                    _append_kr_confirmed_cv_idx(current_w_idx)
                     continue
 
 
@@ -5566,9 +4985,9 @@ def generate_oto(
                         max_blank_confidence=row_blank_floor_safe,
                         # CVC는 파일/음절 특성상 margin 변동이 커 CV 계열이 과도 스킵될 수 있어
                         # row-level abstain 게이트를 CV/CVVC에만 적용한다.
-                        active_only_formats=KR_ROW_GUARD_ACTIVE_FORMATS,
-                        margin_formats=KR_ROW_GUARD_MARGIN_FORMATS,
-                        blank_formats=KR_ROW_GUARD_BLANK_FORMATS,
+                        active_only_formats={"cvvc", "cv"},
+                        margin_formats={"cvvc", "cv"},
+                        blank_formats={"cvvc", "cvc", "cv"},
                         min_confidence_margin_by_alias_type={"cv_head": row_margin_floor + 1.5, "vcv": row_margin_floor + 1.0},
                         min_row_confidence_by_alias_type={"cv_head": row_conf_floor + 0.03, "vcv": row_conf_floor + 0.02},
                         max_blank_confidence_by_alias_type={
@@ -5577,46 +4996,24 @@ def generate_oto(
                         },
                     )
                     if row_abstain.get("should_skip"):
-                        if use_template:
-                            # 템플릿 모드에서도 0,0,0,0,0 행은 보존하지 않고
-                            # 계산 기반 fallback 생성을 시도해 zero-row 고착을 막는다.
-                            template_shape = _extract_base_timing_shape(line)
-                            if template_shape:
-                                if kr_mapping_debug_reason_logging:
-                                    log(
-                                        f"🛡️ {fname}: KR 행 생성 스킵 "
-                                        f"({row_abstain.get('reason')}, {alias})"
-                                    )
-                                _record_unset(
-                                    str(row_abstain.get("reason") or "row_abstain"),
-                                    fname,
-                                    line,
-                                    meta={"diag_hint": row_abstain.get("diag_hint", "")},
-                                )
-                                final_lines.append(
-                                    apply_suffix_to_oto_line(line, alias_suffix)
-                                )
-                                continue
-                            if kr_mapping_debug_reason_logging:
-                                log(
-                                    f"🛡️ {fname}: KR 스킵 완화 "
-                                    f"(template zero-row fallback 생성, {alias})"
-                                )
-                        else:
-                            if kr_mapping_debug_reason_logging:
-                                log(
-                                    f"🛡️ {fname}: KR 행 생성 스킵 "
-                                    f"({row_abstain.get('reason')}, {alias})"
-                                )
-                            _record_unset(
-                                str(row_abstain.get("reason") or "row_abstain"),
-                                fname,
-                                line,
-                                meta={"diag_hint": row_abstain.get("diag_hint", "")},
+                        if kr_mapping_debug_reason_logging:
+                            log(
+                                f"🛡️ {fname}: KR 행 생성 스킵 "
+                                f"({row_abstain.get('reason')}, {alias})"
                             )
-                            continue
+                        _record_unset(
+                            str(row_abstain.get("reason") or "row_abstain"),
+                            fname,
+                            line,
+                            meta={"diag_hint": row_abstain.get("diag_hint", "")},
+                        )
+                        if use_template:
+                            # 템플릿 모드에서는 매핑이 불확실한 행이라도 기존 alias를 보존한다.
+                            final_lines.append(
+                                apply_suffix_to_oto_line(line, alias_suffix)
+                            )
+                        continue
                     current_w_idx = max(current_w_idx, selected_w_idx)
-                    _append_kr_confirmed_cv_idx(selected_w_idx)
                     selected_w_idx, curr_phones, c_start, c_end, n_start, n_end = _prepare_cv_bounds_from_syllable(
                         syllables_info, selected_w_idx
                     )
@@ -5637,50 +5034,6 @@ def generate_oto(
                 cv_vowel_len = n_end - n_start
                 is_vc_plosive_coda = False
                 if is_vc:
-                    next_anchor_idx_for_vc = (
-                        int(bridge_next_idx)
-                        if bridge_next_idx is not None
-                        else int(current_w_idx + 1)
-                    )
-                    vc_prev_anchor = (
-                        bridge_pair.get("prev_anchor")
-                        or realized_cv_anchor_by_idx.get(current_w_idx)
-                        or cv_anchor_by_idx.get(current_w_idx)
-                    )
-                    vc_next_anchor = (
-                        bridge_pair.get("next_anchor")
-                        or realized_cv_anchor_by_idx.get(next_anchor_idx_for_vc)
-                        or cv_anchor_by_idx.get(next_anchor_idx_for_vc)
-                    )
-                    kr_vc_bridge_tuning = derive_cv_bridge_tuning(
-                        realized_anchor_by_idx=realized_cv_anchor_by_idx,
-                        estimated_anchor_by_idx=cv_anchor_by_idx,
-                        trust_tier=textgrid_trust_tier,
-                        mapping_tier=mapping_tier,
-                        min_samples=6,
-                    )
-                    base_vc_params = None
-                    try:
-                        base_pack = _compute_kr_vc_timing(
-                            alias,
-                            alias_type,
-                            file_format,
-                            curr_phones,
-                            current_w_idx,
-                            syllables_info,
-                            c_start,
-                            c_end,
-                            n_start,
-                            n_end,
-                            cv_anchor_by_idx,
-                            next_w_idx=bridge_next_idx,
-                            prev_cv_anchor=vc_prev_anchor,
-                            next_cv_anchor=vc_next_anchor,
-                            bridge_tuning=None,
-                        )
-                        base_vc_params = tuple(base_pack[:5]) if base_pack else None
-                    except Exception:
-                        base_vc_params = None
                     (
                         offset,
                         consonant,
@@ -5701,14 +5054,8 @@ def generate_oto(
                         n_end,
                         cv_anchor_by_idx,
                         next_w_idx=bridge_next_idx,
-                        prev_cv_anchor=vc_prev_anchor,
-                        next_cv_anchor=vc_next_anchor,
-                        bridge_tuning=kr_vc_bridge_tuning,
-                    )
-                    _accumulate_vc_bridge_ab_stats(
-                        kr_vc_ab_stats,
-                        base_vc_params,
-                        (offset, consonant, cutoff, pre, ovl),
+                        prev_cv_anchor=bridge_pair.get("prev_anchor"),
+                        next_cv_anchor=bridge_pair.get("next_anchor"),
                     )
 
                 else:
@@ -5725,6 +5072,7 @@ def generate_oto(
                             alias_onset,
                             True,
                             False,
+                            cv_mode=kr_cv_timing_mode,
                         )
 
                     elif _looks_like_vv_alias(alias):
@@ -5764,12 +5112,19 @@ def generate_oto(
                             alias_onset,
                             False,
                             is_plosive,
+                            cv_mode=kr_cv_timing_mode,
                         )
 
                 row_mel_voiced_onset_ms = None
                 if mel_ctx_for_file and alias_type == "cv":
                     pre_abs = float(offset) + float(pre)
-                    mel_weight = _resolve_mel_onset_weight(alignment_weight, textgrid_trust_tier)
+                    mel_weight = _resolve_mel_onset_weight(
+                        alignment_weight,
+                        textgrid_trust_tier,
+                        trust_score=textgrid_trust_score,
+                        mapping_confidence=row_mapping_confidence,
+                        mel_reliability=mel_reliability_score,
+                    )
                     if mel_weight > 0.0 and not _env_bool("UTOA_DISABLE_MEL_ONSET_SHIFT", False):
                         mel_onset = _estimate_mel_voiced_onset(mel_ctx_for_file, pre_abs)
                         if mel_onset is not None and abs(float(mel_onset) - pre_abs) <= 120.0:
@@ -5944,27 +5299,7 @@ def generate_oto(
                     mel_ctx_for_file=mel_ctx_for_file,
                     textgrid_trust_tier=textgrid_trust_tier,
                     alignment_weight=alignment_weight,
-                    bridge_tuning=kr_vc_bridge_tuning,
                 )
-
-            if strict_skip_aliases:
-                for i in range(0, len(strict_skip_aliases), 24):
-                    chunk = strict_skip_aliases[i:i + 24]
-                    log(" ".join(chunk))
-
-            kr_vc_ab_summary = _summarize_vc_bridge_ab_stats(kr_vc_ab_stats)
-            if kr_vc_ab_summary:
-                log(
-                    f"🧪 {fname}: KR VC bridge A/B "
-                    f"(rows={int(kr_vc_ab_summary.get('rows', 0))}, "
-                    f"pre_abs_mean={float(kr_vc_ab_summary.get('pre_abs_shift_mean_ms', 0.0)):+.1f}ms, "
-                    f"pre_abs_abs_mean={float(kr_vc_ab_summary.get('pre_abs_shift_abs_mean_ms', 0.0)):.1f}ms)"
-                )
-            update_mapping_vc_bridge_runtime_report(
-                runtime_report,
-                vc_bridge_tuning=dict(kr_vc_bridge_tuning or {}),
-                vc_bridge_ab_summary=kr_vc_ab_summary,
-            )
 
             processed += 1
 
@@ -6072,33 +5407,35 @@ def generate_oto(
         timing_jsonl_prefix="timing_anchor_kr_",
     )
 
-    persist_korean_generation_output(
-        out_path=out_path,
-        final_lines=final_lines,
-        tg_folder=tg_folder,
-        kr_profile=kr_profile,
-        custom_map=custom_map,
-        custom_phonemes_path=custom_phonemes_path,
-        enable_ml_correction=enable_ml_correction,
-        auto_gen_format=auto_gen_format,
-        ml_policy=ml_policy,
-        runtime_report=runtime_report,
-        log_fn=log,
-        validate_fn=validate_oto_params,
-        normalize_key_fn=normalize_key,
-        wav_name_map=wav_name_map,
-        apply_output_wav_name_map_fn=apply_output_wav_name_map,
-        oto_encoding=template_encoding,
-        errors=errors,
-    )
+    try:
+        write_oto_lines(out_path, final_lines)
+        log(f"1차 생성 완료: OTO 파일 저장 -> {out_path}")
+        run_kr_post_file_pipeline(
+            KrPostFilePipelineContext(
+                out_path=out_path,
+                tg_folder=tg_folder,
+                kr_profile=kr_profile,
+                custom_map=custom_map,
+                custom_phonemes_path=custom_phonemes_path,
+                enable_ml_correction=enable_ml_correction,
+                auto_gen_format=auto_gen_format,
+                ml_policy=ml_policy,
+                runtime_report=runtime_report,
+                log_fn=log,
+                validate_fn=validate_oto_params,
+                normalize_key_fn=normalize_key,
+                ml_route=os.environ.get("UTOA_ML_ROUTE", "legacy"),
+            )
+        )
+        renamed = apply_output_wav_name_map(out_path, wav_name_map)
+        if renamed:
+            log(f"WAV 이름 교정 적용: {renamed}건")
+    except Exception as e:
+        err = f"OTO 파일 저장 실패: {e}"
+        logger.error(err)
+        errors.append(err)
 
     finalize_generator_finish(finish_context)
 
     _log_unset_summary()
-    finalize_runtime_report(
-        runtime_report,
-        processed=processed,
-        total=total,
-        errors=errors,
-    )
     return processed, total, errors

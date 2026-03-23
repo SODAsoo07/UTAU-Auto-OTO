@@ -258,11 +258,10 @@ def train_lightgbm_bundle(
     language = str(language).strip().lower()
     format_type = normalize_format_type(language, format_type)
     alias_family = normalize_alias_family(alias_family)
-    lang_filter_enabled = bool(language) and language not in {"all", "global", "*", "any"}
     default_policy = default_training_filters(language, format_type, alias_family=alias_family)
     if alias_family and not alias_types:
         alias_types = alias_family_to_alias_types(alias_family)
-    if "language" in df.columns and lang_filter_enabled:
+    if "language" in df.columns:
         df = df[df["language"].astype(str).str.lower() == language]
     if format_type and format_type != "general" and "format_type" in df.columns:
         df = df[

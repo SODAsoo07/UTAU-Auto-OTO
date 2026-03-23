@@ -10,7 +10,6 @@ import os
 import re
 import unicodedata
 import logging
-from functools import lru_cache
 from typing import Any
 
 from core.conversion_tables import load_korean_conversion_table
@@ -316,128 +315,7 @@ def _split_kr_filename_tokens(name_or_base):
         if len(parts) <= 1:
             return [ch for ch in base if re.match(r'[가-힣]', ch)]
         return parts
-    return _expand_compound_kr_roman_tokens(parts)
-
-
-_KR_SEGMENT_VALID_ONSETS = {str(k or "").lower() for k in INITIAL_MAP.keys()}
-_KR_SEGMENT_VALID_ONSETS.update({"th", "dh", "zh", "ts", "dz", "tr", "dr", "tsh"})
-_KR_SEGMENT_VALID_ONSETS.add("")
-_KR_SEGMENT_VALID_VOWELS = {str(k or "").lower() for k in VOWEL_MAP.keys()}
-_KR_SEGMENT_VALID_CODAS = {str(k or "").lower() for k in FINAL_MAP.keys()}
-_KR_SEGMENT_VALID_CODAS.update({
-    "ng", "n", "l", "r", "m", "k", "g", "t", "d", "s", "ss", "j", "jj", "ch", "h", "p", "b",
-})
-_KR_SEGMENT_VALID_CODAS.add("")
-
-
-def _split_kr_syllable_parts_for_segment(text):
-    token = str(text or "").strip().lower()
-    token = re.sub(r"[^a-z]", "", token)
-    if not token:
-        return "", "", ""
-    vowels = sorted(_KR_SEGMENT_VALID_VOWELS, key=len, reverse=True)
-    v_idx = -1
-    v_val = ""
-    for i in range(len(token)):
-        matched = ""
-        for v in vowels:
-            if token.startswith(v, i):
-                matched = v
-                break
-        if matched:
-            v_idx = i
-            v_val = matched
-            break
-    if v_idx < 0:
-        return "", "", token
-    onset = token[:v_idx]
-    coda = token[v_idx + len(v_val):]
-    return onset, v_val, coda
-
-
-@lru_cache(maxsize=65536)
-def _split_compound_kr_roman_token(token_text):
-    """
-    붙어쓴 한국어 로마자 토큰(예: obbui, wawaweowawewa)을
-    음절 단위(예: o+bbui / wa+wa+weo+wa+we+wa)로 분해합니다.
-    """
-    raw = str(token_text or "").strip()
-    if not raw:
-        return tuple()
-    if any(ch.isupper() for ch in raw):
-        return (raw,)
-    if not re.fullmatch(r"[a-zA-Z]+", raw):
-        return (raw,)
-    text = raw.lower()
-    if len(text) <= 2:
-        return (text,)
-
-    max_probe = 8
-
-    @lru_cache(maxsize=None)
-    def _walk(start_idx):
-        if start_idx >= len(text):
-            return ((), (0, 0))
-
-        best_tokens = None
-        best_score = None
-        max_end = min(len(text), start_idx + max_probe)
-        for end_idx in range(start_idx + 1, max_end + 1):
-            cand = text[start_idx:end_idx]
-            onset, vowel, coda = _split_kr_syllable_parts_for_segment(cand)
-            rebuilt = f"{onset}{vowel}{coda}".lower()
-            if (
-                not vowel
-                or rebuilt != cand
-                or onset not in _KR_SEGMENT_VALID_ONSETS
-                or vowel not in _KR_SEGMENT_VALID_VOWELS
-                or coda not in _KR_SEGMENT_VALID_CODAS
-            ):
-                continue
-            rest = _walk(end_idx)
-            if rest is None:
-                continue
-            rest_tokens, rest_score = rest
-            tokens = (cand,) + rest_tokens
-            score = (
-                1 + rest_score[0],           # prefer fewer syllable pieces
-                len(coda) + rest_score[1],   # then prefer open syllables
-            )
-            if best_score is None or score < best_score:
-                best_tokens = tokens
-                best_score = score
-
-        if best_tokens is None:
-            return None
-        return best_tokens, best_score
-
-    result = _walk(0)
-    if result is None:
-        return (text,)
-    tokens = tuple(result[0])
-    if len(tokens) <= 1:
-        return tokens
-    return tokens
-
-
-def _expand_compound_kr_roman_tokens(tokens):
-    expanded = []
-    for tok in tokens or []:
-        raw = str(tok or "").strip()
-        if not raw:
-            continue
-        if re.search(r"[가-힣]", raw):
-            expanded.append(raw)
-            continue
-        clean = re.sub(r"[0-9]+$", "", raw)
-        if not clean:
-            continue
-        pieces = list(_split_compound_kr_roman_token(clean))
-        if not pieces:
-            expanded.append(clean.lower())
-            continue
-        expanded.extend(pieces)
-    return expanded
+    return parts
 
 
 def _split_kr_lab_content_tokens(content):
@@ -446,23 +324,16 @@ def _split_kr_lab_content_tokens(content):
     if not normalized:
         return []
 
-    ws_tokens = [t for t in re.split(r'[\s+_]+', normalized) if t and t != '~']
+    ws_tokens = [t for t in re.split(r'\s+', normalized) if t and t != '~']
     if not ws_tokens:
         return []
 
-    out = []
-    for tok in ws_tokens:
-        token = str(tok or "").strip()
-        if not token:
-            continue
-        if re.fullmatch(r"[가-힣]+", token):
-            out.extend(list(token))
-            continue
-        if re.fullmatch(r"[A-Za-z0-9'`~-]+", token):
-            out.extend(_expand_compound_kr_roman_tokens([token]))
-            continue
-        out.append(token)
-    return out or ws_tokens
+    joined = "".join(ws_tokens)
+    if re.fullmatch(r"[A-Za-z0-9'`~-]+", joined):
+        return _split_kr_filename_tokens(joined)
+    if len(ws_tokens) == 1 and re.fullmatch(r'[가-힣]+', ws_tokens[0]):
+        return list(ws_tokens[0])
+    return ws_tokens
 
 
 def _romanize_hangul_token(token):

@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from statistics import median
 from typing import Callable, Optional
 
-from core.generator_finish import write_oto_lines
 from core.ja_oto_mapping import classify_ja_alias
 from core.lab_generator import load_custom_phonemes
 from core.oto_file_utils import (
@@ -17,7 +16,6 @@ from core.oto_file_utils import (
     read_text_with_fallback,
 )
 from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
-from core.distribution_guard import is_training_paths_enabled
 
 
 @dataclass(frozen=True)
@@ -159,8 +157,6 @@ def _train_ja_autotune_profile(auto_oto_path, ref_oto_path, custom_map=None):
 
 
 def train_ja_autotune_profile(auto_oto_path, manual_oto_path, custom_phonemes_path=""):
-    if not is_training_paths_enabled():
-        raise RuntimeError("Distribution build does not support autotune profile training.")
     custom_map = load_custom_phonemes(custom_phonemes_path)
     return _train_ja_autotune_profile(auto_oto_path, manual_oto_path, custom_map=custom_map)
 
@@ -179,8 +175,6 @@ def load_ja_autotune_profile(path):
 
 
 def save_ja_autotune_profile(path, profile):
-    if not is_training_paths_enabled():
-        raise RuntimeError("Distribution build does not support autotune profile training.")
     if not path or not profile:
         return False
     try:
@@ -275,7 +269,9 @@ def _apply_profile_to_oto_file(
             changed += 1
         out_lines.append(f"{parsed['wav']}={parsed['alias']},{o2:.2f},{c2:.2f},{ct2:.2f},{pr2:.2f},{ov2:.2f}")
 
-    write_oto_lines(oto_path, out_lines)
+    with open(oto_path, "w", encoding="utf-8") as f:
+        for line in out_lines:
+            f.write(line + "\n")
     return changed
 
 
@@ -286,8 +282,6 @@ def apply_ja_autotune_profile_to_oto(
     *,
     validate_fn: Optional[Callable[[float, float, float, float, float], tuple[float, float, float, float, float]]] = None,
 ):
-    if not is_training_paths_enabled():
-        raise RuntimeError("Distribution build does not support autotune profile training.")
     if isinstance(profile, str):
         profile = load_ja_autotune_profile(profile)
     if not profile:
@@ -302,8 +296,6 @@ def apply_ja_autotune_profile_to_oto(
 
 
 def refresh_ja_autotune_profile_after_generation(context: JaAutotuneRefreshContext):
-    if not is_training_paths_enabled():
-        return None
     ref_oto = _find_reference_oto(context.out_path)
     if not ref_oto:
         return None

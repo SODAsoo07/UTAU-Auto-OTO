@@ -31,13 +31,77 @@ def _clamp(v, lo, hi):
     return max(float(lo), min(float(hi), float(v)))
 
 
+def _normalize_kr_cv_timing_mode(cv_mode="standalone"):
+    mode = str(cv_mode or "").strip().lower().replace("-", "_")
+    if mode in {"vc_context", "with_vc", "vc_present", "bridge"}:
+        return "vc_context"
+    if mode in {"vcv_context", "vcv_with_vc", "vcv_bridge", "vcv"}:
+        return "vcv_context"
+    return "standalone"
+
+
+def _retune_kr_cv_for_mode(offset, consonant, cutoff, pre, ovl, cv_vowel_len, *, is_diph, cv_mode):
+    """
+    Separate CV timing behavior by VC context.
+    - standalone: keep legacy behavior (CV/VCV or VC-missing banks)
+    - vc_context: tighten CV body to leave more room for explicit VC aliases
+    """
+    mode_norm = _normalize_kr_cv_timing_mode(cv_mode)
+    if mode_norm == "standalone":
+        return offset, consonant, cutoff, pre, ovl
+
+    pre_old = float(pre)
+    cons_gap_old = max(float(consonant) - pre_old, 10.0)
+    cut_gap_old = max(abs(float(cutoff)) - float(consonant), 12.0)
+
+    if mode_norm == "vcv_context":
+        pre_scale = 0.94
+        cons_scale = 0.90 if is_diph else 0.88
+        cut_scale = 0.90 if is_diph else 0.86
+        pre_min = 48.0 if is_diph else 38.0
+        pre_max = 176.0 if is_diph else 160.0
+    else:
+        pre_scale = 0.90
+        cons_scale = 0.84 if is_diph else 0.82
+        cut_scale = 0.82 if is_diph else 0.78
+        pre_min = 42.0 if is_diph else 34.0
+        pre_max = 170.0 if is_diph else 150.0
+
+    pre_new = _clamp(pre_old * pre_scale, pre_min, pre_max)
+    shift = max(0.0, pre_old - pre_new)
+    offset = max(float(offset) + shift, 0.0)
+    pre = pre_new
+
+    if is_diph:
+        cons_gap = _clamp(cons_gap_old * cons_scale, 58.0, 170.0)
+        cut_gap = _clamp(cut_gap_old * cut_scale, 34.0, 92.0)
+    else:
+        cons_gap = _clamp(cons_gap_old * cons_scale, 38.0, 142.0)
+        cut_gap = _clamp(cut_gap_old * cut_scale, 34.0, 84.0)
+    consonant = pre + cons_gap
+    cutoff_floor = max((float(cv_vowel_len) * (0.16 if is_diph else 0.18)), 30.0)
+    cutoff = -(consonant + max(cut_gap, cutoff_floor))
+    ovl = min(float(ovl), max(pre * 0.44, 8.0))
+    return offset, consonant, cutoff, pre, ovl
+
+
 def adaptive_overlap(pre, consonant_hint="", mode="cv"):
     from core.oto_generator import adaptive_overlap as _adaptive_overlap
 
     return _adaptive_overlap(pre, consonant_hint, mode)
 
 
-def _compute_kr_cv_timing(c_start, c_end, cv_vowel_len, c_hint, alias_onset, is_diph, is_plosive):
+def _compute_kr_cv_timing(
+    c_start,
+    c_end,
+    cv_vowel_len,
+    c_hint,
+    alias_onset,
+    is_diph,
+    is_plosive,
+    *,
+    cv_mode="standalone",
+):
     boundary = c_end
     cv_vowel_len = max(float(cv_vowel_len), 20.0)
     is_tense_cv = _is_tense_consonant(c_hint, alias_onset)
@@ -67,7 +131,16 @@ def _compute_kr_cv_timing(c_start, c_end, cv_vowel_len, c_hint, alias_onset, is_
             added_cons = min(max(v_ref * 0.55, 90.0), 230.0)
         consonant = pre + added_cons
         cutoff = -(consonant + max(cv_vowel_len * 0.2, 45.0))
-        return offset, consonant, cutoff, pre, ovl
+        return _retune_kr_cv_for_mode(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+            cv_vowel_len,
+            is_diph=True,
+            cv_mode=cv_mode,
+        )
 
     is_fricative_cv = _is_fricative_consonant(c_hint, alias_onset)
     is_aspirate_cv = _is_aspirate_consonant(c_hint, alias_onset)
@@ -130,7 +203,16 @@ def _compute_kr_cv_timing(c_start, c_end, cv_vowel_len, c_hint, alias_onset, is_
         added_cons = min(max(v_ref * 0.45, 70.0), 180.0)
     consonant = pre + added_cons
     cutoff = -(consonant + max(cv_vowel_len * 0.25, 45.0))
-    return offset, consonant, cutoff, pre, ovl
+    return _retune_kr_cv_for_mode(
+        offset,
+        consonant,
+        cutoff,
+        pre,
+        ovl,
+        cv_vowel_len,
+        is_diph=False,
+        cv_mode=cv_mode,
+    )
 
 
 def _select_kr_cv_onset_slice(curr_phones):
@@ -161,7 +243,7 @@ def _select_kr_cv_onset_slice(curr_phones):
     return onset_idx, c_start, c_end, n_start, n_end
 
 
-def _estimate_cv_anchor_from_syllable(syl, ph_intervals):
+def _estimate_cv_anchor_from_syllable(syl, ph_intervals, *, cv_mode="standalone"):
     from core.oto_generator import _stabilize_params_to_phone_activity, validate_oto_params, is_diphthong
 
     curr_phones = (syl or {}).get("phones") or []
@@ -192,6 +274,7 @@ def _estimate_cv_anchor_from_syllable(syl, ph_intervals):
         alias_onset,
         is_diph_syl,
         is_plosive,
+        cv_mode=cv_mode,
     )
 
     offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)

@@ -47,7 +47,6 @@ def run_kr_general_row(
     mel_ctx_for_file=None,
     alignment_weight=0.0,
     textgrid_trust_tier="",
-    bridge_tuning=None,
 ):
     def _clamp_cv_window(
         _offset: float,
@@ -106,70 +105,11 @@ def run_kr_general_row(
             coda = ""
         is_stop = coda in {"k", "t", "p", "h"}
         is_sonorant = coda in {"n", "m", "ng", "l", "r"}
-        bridge_source = str((bridge_pair or {}).get("source") or "").strip().lower()
-        strict_bridge = bridge_source in {"token_invariant", "cv_confirmed"}
 
         o = float(_offset)
         p = float(_pre)
-        ovl_abs = o + max(float(_ovl), 0.0)
         c_abs = o + float(_consonant)
         cut_abs = o + abs(float(_cutoff))
-
-        # Keep preceding vowel include around last 1/3~2/5 when we have reliable CV anchors.
-        if strict_bridge and isinstance(prev_anchor, dict):
-            try:
-                prev_v_start = float(prev_anchor.get("vowel_start_abs", 0.0) or 0.0)
-                prev_v_end = float(prev_anchor.get("vowel_end_abs", 0.0) or 0.0)
-                prev_v_len = max(prev_v_end - prev_v_start, 30.0)
-                off_lo = max(0.0, prev_v_end - (prev_v_len * 0.40))
-                off_hi = max(off_lo, prev_v_end - (prev_v_len / 3.0))
-                if o < off_lo - 0.5:
-                    shift = off_lo - o
-                    o = off_lo
-                    p = max(0.0, p - shift)
-                    ovl_abs = max(o, ovl_abs - shift)
-                    c_abs = max(o + p + 8.0, c_abs - shift)
-                    cut_abs = max(c_abs + 8.0, cut_abs - shift)
-                elif o > off_hi + 0.5:
-                    shift = o - off_hi
-                    o = off_hi
-                    p = max(0.0, p + shift)
-                    ovl_abs = ovl_abs + shift
-                    c_abs = max(o + p + 8.0, c_abs + shift)
-                    cut_abs = max(c_abs + 8.0, cut_abs + shift)
-            except Exception:
-                pass
-
-        next_pre_abs = next_on
-        next_pre = 0.0
-        if isinstance(next_anchor, dict):
-            try:
-                next_pre_abs = float(next_anchor.get("pre_abs", next_on) or next_on)
-                next_pre = max(float(next_anchor.get("pre", 0.0) or 0.0), 0.0)
-            except Exception:
-                next_pre_abs = next_on
-                next_pre = 0.0
-        next_offset_abs = next_pre_abs - next_pre
-        if next_offset_abs <= 0.0:
-            next_offset_abs = next_on
-
-        pre_abs = o + p
-        if strict_bridge and is_stop:
-            pre_abs = min(max(pre_abs, next_offset_abs - 4.0), next_offset_abs + 6.0)
-        elif strict_bridge and is_sonorant:
-            pre_abs = min(max(pre_abs, next_offset_abs - 3.0), next_offset_abs + 10.0)
-        elif strict_bridge:
-            pre_abs = min(max(pre_abs, next_offset_abs - 4.0), next_offset_abs + 8.0)
-        elif is_stop:
-            pre_abs = min(max(pre_abs, next_offset_abs - 7.0), next_offset_abs + 8.0)
-        elif is_sonorant:
-            pre_abs = min(max(pre_abs, next_offset_abs - 5.0), next_offset_abs + 14.0)
-        else:
-            pre_abs = min(max(pre_abs, next_offset_abs - 6.0), next_offset_abs + 10.0)
-        o = max(pre_abs - p, 0.0)
-        c_abs = o + float(_consonant)
-        cut_abs = o + abs(float(_cutoff))
-        ovl = max(0.0, min(p, ovl_abs - o))
 
         if is_stop:
             # Stop-like VC should end before next onset to avoid double release.
@@ -177,28 +117,28 @@ def run_kr_general_row(
             c_cap = next_on - 2.0
         elif is_sonorant:
             c_floor = max(next_on + 4.0, p + 14.0 + o)
-            c_cap = next_end - (4.0 if strict_bridge else 3.0)
+            c_cap = next_end - 3.0
         else:
             c_floor = max(next_on + 2.0, p + 12.0 + o)
-            c_cap = next_end - (5.0 if strict_bridge else 4.0)
+            c_cap = next_end - 4.0
         if c_cap <= c_floor:
             c_cap = c_floor + 2.0
         c_abs = min(max(c_abs, c_floor), c_cap)
 
         if is_stop:
             cut_floor = max(c_abs + 4.0, next_on - 2.2)
-            cut_cap = next_on - (0.9 if strict_bridge else 0.7)
+            cut_cap = next_on - 0.7
         elif is_sonorant:
             cut_floor = max(c_abs + 10.0, next_end - 4.0)
-            cut_cap = next_end + (4.0 if strict_bridge else 6.0)
+            cut_cap = next_end + 6.0
         else:
             cut_floor = max(c_abs + 8.0, next_end - 3.0)
-            cut_cap = next_end + (2.5 if strict_bridge else 4.0)
+            cut_cap = next_end + 4.0
         if cut_cap <= cut_floor:
             cut_cap = cut_floor + 1.0
         cut_abs = min(max(cut_abs, cut_floor), cut_cap)
 
-        return validate_fn(o, c_abs - o, -(cut_abs - o), p, ovl)
+        return validate_fn(o, c_abs - o, -(cut_abs - o), p, float(_ovl))
 
     bridge_shift = 0.0
     if alias_type in {"vc", "vv"}:
@@ -232,39 +172,20 @@ def run_kr_general_row(
                 next_mel_voiced_onset_ms = None
         if prev_anchor is not None and next_anchor is not None:
             pre_abs_before = float(offset + pre)
-            try:
-                offset, consonant, cutoff, pre, ovl = refine_bridge_fn(
-                    offset,
-                    consonant,
-                    cutoff,
-                    pre,
-                    ovl,
-                    alias_type=alias_type,
-                    alias_text=alias,
-                    prev_cv=prev_anchor,
-                    next_cv=next_anchor,
-                    format_type=file_format,
-                    mel_cutoff_candidate_ms=mel_cutoff_candidate_ms,
-                    next_mel_voiced_onset_ms=next_mel_voiced_onset_ms,
-                    bridge_tuning=bridge_tuning,
-                )
-            except TypeError as exc:
-                if "bridge_tuning" not in str(exc):
-                    raise
-                offset, consonant, cutoff, pre, ovl = refine_bridge_fn(
-                    offset,
-                    consonant,
-                    cutoff,
-                    pre,
-                    ovl,
-                    alias_type=alias_type,
-                    alias_text=alias,
-                    prev_cv=prev_anchor,
-                    next_cv=next_anchor,
-                    format_type=file_format,
-                    mel_cutoff_candidate_ms=mel_cutoff_candidate_ms,
-                    next_mel_voiced_onset_ms=next_mel_voiced_onset_ms,
-                )
+            offset, consonant, cutoff, pre, ovl = refine_bridge_fn(
+                offset,
+                consonant,
+                cutoff,
+                pre,
+                ovl,
+                alias_type=alias_type,
+                alias_text=alias,
+                prev_cv=prev_anchor,
+                next_cv=next_anchor,
+                format_type=file_format,
+                mel_cutoff_candidate_ms=mel_cutoff_candidate_ms,
+                next_mel_voiced_onset_ms=next_mel_voiced_onset_ms,
+            )
             bridge_shift = float((offset + pre) - pre_abs_before)
 
     anchor_abs, next_onset_abs, next_vowel_abs = resolve_anchor_targets_fn(

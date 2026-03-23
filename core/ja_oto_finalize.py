@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import os
 
-from core.generator_finish import write_oto_lines
-from core.oto_file_utils import read_text_with_fallback
-
 
 def sanitize_ja_oto_for_wav_duration(offset, consonant, cutoff, pre, ovl, wav_duration_ms, alias_type="cv"):
     """
@@ -136,7 +133,8 @@ def _convert_ja_internal_cutoff_to_oto_field(oto_path, wav_dir):
     if not oto_path or not os.path.exists(oto_path) or not os.path.isdir(wav_dir):
         return 0
 
-    lines = read_text_with_fallback(oto_path).splitlines()
+    with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.read().splitlines()
 
     wav_index = {}
     try:
@@ -207,7 +205,8 @@ def _convert_ja_internal_cutoff_to_oto_field(oto_path, wav_dir):
         out_lines.append(new_line)
 
     if changed:
-        write_oto_lines(oto_path, out_lines)
+        with open(oto_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(out_lines).rstrip() + "\n")
     return changed
 
 

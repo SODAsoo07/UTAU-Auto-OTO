@@ -90,7 +90,7 @@ def clamp_ja_cv_index_to_order(
     if not syllables_info:
         return int(expected_idx)
     fmt = str(format_type or "").strip().lower()
-    if fmt not in {"cvvc", "cv", "vcv"}:
+    if fmt not in {"cvvc", "cv"}:
         return int(mapped_idx)
 
     e = max(0, min(int(expected_idx), len(syllables_info) - 1))
@@ -108,28 +108,6 @@ def clamp_ja_cv_index_to_order(
 
     if fmt == "cv":
         return min(m, e + 1)
-    if fmt == "vcv":
-        if m > (e + 1):
-            return e
-        if not target_norm:
-            return e
-        allow_forward = bool(
-            m == (e + 1)
-            and should_allow_ja_soft_forward_shift(
-                target_tok,
-                expected_raw or expected_norm,
-                mapped_raw or mapped_norm,
-            )
-        )
-        if not allow_forward:
-            return e
-        if mapped_norm == target_norm and expected_norm != target_norm:
-            return m
-        if mapped_level >= 2 and expected_level <= 1:
-            return m
-        if not filename_order_locked and str(mapping_tier or "").strip().lower() == "high" and mapped_level >= 3:
-            return m
-        return e
 
     if m > (e + 1):
         return e

@@ -1,7 +1,18 @@
 version: 1
 mode: rhythm_stable
-source_otos: []
-source_count: 0
+source_otos:
+- C:\Users\oyh57\SODAsoo1\Devs\VBs\JaneDoeKR_VCV\oto.ini
+- C:\Users\oyh57\SODAsoo1\Devs\VBs\JangHyeun_VCV\oto.ini
+- C:\Users\oyh57\SODAsoo1\Devs\VBs\MentheKR_VCV\oto.ini
+- C:\Users\oyh57\SODAsoo1\Devs\VBs\Darling_KRkire_VCV\A3\oto.ini
+- C:\Users\oyh57\SODAsoo1\Devs\VBs\Darling_KRkire_VCV\C5\oto.ini
+- C:\Users\oyh57\SODAsoo1\Devs\VBs\Darling_KRkire_VCV\D#4\oto.ini
+- C:\Users\oyh57\SODAsoo1\Devs\VBs\Darling_KRkire_VCV\G4\oto.ini
+- C:\Users\oyh57\SODAsoo1\Devs\VBs\JAEYOON_KR_VCV\JYC4\oto.ini
+- C:\Users\oyh57\SODAsoo1\Devs\VBs\JAEYOON_KR_VCV\JYF3\oto.ini
+- C:\Users\oyh57\SODAsoo1\Devs\VBs\JAEYOON_KR_VCV\JYFA\oto.ini
+- C:\Users\oyh57\SODAsoo1\Devs\VBs\JAEYOON_KR_VCV\JYG#4\oto.ini
+source_count: 11
 skipped_otos: []
 skipped_count: 0
 sample_counts:

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from core.mapping_format_policy import is_ja_sequence_locked_format
-
 
 def run_ja_general_row(
     *,
@@ -68,33 +66,8 @@ def run_ja_general_row(
 
         o = float(_offset)
         p = float(_pre)
-        ovl_abs = o + max(float(_ovl), 0.0)
         c_abs = o + float(_consonant)
         cut_abs = o + abs(float(_cutoff))
-        next_pre_abs = next_on
-        next_pre = 0.0
-        if isinstance(vc_next_anchor, dict):
-            try:
-                next_pre_abs = float(vc_next_anchor.get("pre_abs", next_on) or next_on)
-                next_pre = max(float(vc_next_anchor.get("pre", 0.0) or 0.0), 0.0)
-            except Exception:
-                next_pre_abs = next_on
-                next_pre = 0.0
-        next_offset_abs = next_pre_abs - next_pre
-        if next_offset_abs <= 0.0:
-            next_offset_abs = next_on
-
-        pre_abs = o + p
-        if hard_cls:
-            pre_abs = min(max(pre_abs, next_offset_abs - 7.0), next_offset_abs + 8.0)
-        elif son_cls:
-            pre_abs = min(max(pre_abs, next_offset_abs - 5.0), next_offset_abs + 12.0)
-        else:
-            pre_abs = min(max(pre_abs, next_offset_abs - 6.0), next_offset_abs + 10.0)
-        o = max(pre_abs - p, 0.0)
-        c_abs = o + float(_consonant)
-        cut_abs = o + abs(float(_cutoff))
-        ovl = max(0.0, min(p, ovl_abs - o))
 
         if hard_cls:
             # Stop/fricative-like VC should terminate before next onset.
@@ -123,7 +96,7 @@ def run_ja_general_row(
             cut_cap = cut_floor + 1.0
         cut_abs = min(max(cut_abs, cut_floor), cut_cap)
 
-        return validate_fn(o, c_abs - o, -(cut_abs - o), p, ovl)
+        return validate_fn(o, c_abs - o, -(cut_abs - o), p, float(_ovl))
 
     soft_off_shift = 0.0
     soft_cut_shift = 0.0
@@ -225,7 +198,7 @@ def run_ja_general_row(
             next_c_end_abs=n_end,
         )
         pre_abs_after = offset + pre
-        if is_ja_sequence_locked_format(format_type):
+        if format_type in {"cvvc", "cv"}:
             max_shift = 26.0
             if mapping_tier == "high":
                 max_shift = 34.0

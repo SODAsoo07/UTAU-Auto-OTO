@@ -6,10 +6,9 @@ on:
 jobs:
   build-windows-preview:
     runs-on: windows-latest
-    timeout-minutes: 180
+    timeout-minutes: 90
     env:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      UTOA_NUITKA_JOBS: "1"
 
     steps:
       - name: Checkout
@@ -30,13 +29,14 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-ml.txt
+            requirements-preview.txt
 
       - name: Cache Nuitka Build Artifacts
         uses: actions/cache@v4
         with:
           path: |
             ~\AppData\Local\Nuitka\Nuitka\Cache
-          key: nuitka-${{ runner.os }}-py311-preview-${{ hashFiles('requirements.txt', 'requirements-ml.txt', 'build.py', 'main.py') }}
+          key: nuitka-${{ runner.os }}-py311-preview-${{ hashFiles('requirements.txt', 'requirements-ml.txt', 'requirements-preview.txt', 'build.py', 'main.py') }}
           restore-keys: |
             nuitka-${{ runner.os }}-py311-preview-
             nuitka-${{ runner.os }}-py311-
@@ -56,11 +56,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install --prefer-binary -r requirements.txt
           pip install --prefer-binary -r requirements-ml.txt
+          pip install --no-build-isolation -r requirements-preview.txt
           pip install nuitka ordered-set zstandard
 
       - name: Build App (preview)
         shell: pwsh
-        timeout-minutes: 140
+        timeout-minutes: 70
         run: |
           $suppress = 'Nuitka-Inclusion: Writing cache for dependencies of .* ignoring\.'
           python -u build.py --name UTAU_Auto_OTO --backend nuitka --skip-deps --channel "preview" 2>&1 |
