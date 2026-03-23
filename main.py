@@ -8,6 +8,7 @@ import sys
 import datetime
 import logging
 import traceback
+import json
 
 
 def _suppress_windows_loader_popup():
@@ -105,6 +106,24 @@ LANGUAGE_OPTIONS = [
 ]
 
 
+def _read_release_channel(app_dir: str) -> str:
+    """
+    Read packaged release channel metadata.
+    Default to stable so preview builds inherit stable feature set unless
+    explicitly enabled.
+    """
+    meta_path = os.path.join(str(app_dir or ""), "release_channel.json")
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        channel = str(payload.get("channel", "") or "").strip().lower()
+        if channel in {"stable", "preview"}:
+            return channel
+    except Exception:
+        pass
+    return "stable"
+
+
 class App(
     LayoutMixin,
     FileDialogMixin,
@@ -184,6 +203,7 @@ class App(
         self.kr_continuity_max_offset_adj_var = ctk.StringVar(value="")
         self.kr_uncommon_reclist_stable_mode_var = ctk.BooleanVar(value=False)
         self.ml_same_language_borrow_only_var = ctk.BooleanVar(value=True)
+        self.mapping_strict_mode_var = ctk.StringVar(value="off")
         self.advanced_options_expanded = False
         
         # 언어 선택
@@ -210,6 +230,7 @@ class App(
         self.whisperx_save_debug_json_var = ctk.BooleanVar(value=False)
 
         self.app_dir = APP_DIR
+        self.release_channel = _read_release_channel(APP_DIR)
         self.log_path = LOG_PATH
         self.event_log_path = EVENT_LOG_PATH
         self.logger = logger
@@ -219,6 +240,7 @@ class App(
         self.protocol("WM_DELETE_WINDOW", self._on_close_request)
 
         logger.info(f"{APP_NAME} v{APP_VERSION} 시작")
+        logger.info(f"release_channel={self.release_channel}")
         logger.info(f"구조화 이벤트 로그: {EVENT_LOG_PATH}")
         if self.mfa_path:
             logger.info(f"MFA 경로: {self.mfa_path}")

@@ -77,7 +77,16 @@ def _bundle_cache_stamp(model_dir: str, backend: str, coupled_device: str) -> tu
             files_mtime = max(files_mtime, 0.0)
     else:
         # Ensemble/coupled backends commonly use binary payloads.
-        for name in ("model_bundle.pt", "model.pt", "bundle.pt", "model.pkl", "model.pickle"):
+        for name in (
+            "model_bundle.pt",
+            "model.pt",
+            "bundle.pt",
+            "model.pkl",
+            "model.pickle",
+            "coupled_model.pt",
+            "coupled_model.onnx",
+            "coupled_model_onnx_meta.json",
+        ):
             files_mtime = max(files_mtime, _safe_mtime(os.path.join(model_dir, name)))
     dir_mtime = _safe_mtime(model_dir)
     return (

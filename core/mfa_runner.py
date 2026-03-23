@@ -13,7 +13,7 @@ import shutil
 import hashlib
 import tempfile
 import locale
-from typing import Sequence
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from core.pipeline_status import (
     ALIGN_EXEC_MISSING,
@@ -1257,6 +1257,489 @@ def download_mfa_model(mfa_path, language='korean', callback=None):
     except Exception as e:
         log(f'Model download error: {e}')
         return False
+
+
+def _normalize_alignment_strict_mode(value) -> str:
+    text = str(value or "").strip().lower()
+    compact = text.replace(" ", "").replace("-", "_")
+    if "완전" in text and "엄격" in text:
+        return "strict"
+    if ("적당" in text or "보통" in text or "중간" in text) and "엄격" in text:
+        return "moderate"
+    if compact in {
+        "strict",
+        "full_strict",
+        "hard",
+        "hard_strict",
+        "완전엄격",
+        "완전_엄격",
+    }:
+        return "strict"
+    if compact in {
+        "moderate",
+        "medium",
+        "balanced",
+        "soft_strict",
+        "fallback",
+        "적당히엄격",
+        "적당히_엄격",
+    }:
+        return "moderate"
+    return "off"
+
+
+def _resolve_mfa_runtime_options(
+    *,
+    resolved_profile: str,
+    runtime_options: Optional[Dict[str, object]] = None,
+    callback=None,
+) -> Dict[str, object]:
+    def log(msg):
+        logger.info(msg)
+        if callback:
+            callback(msg)
+
+    raw = dict(runtime_options or {})
+    constrained_mode = _normalize_alignment_strict_mode(raw.get("constrained_mode", "off"))
+    recursive_requested = bool(raw.get("recursive_mfa", True))
+    recursive_enabled = recursive_requested and constrained_mode in {"strict", "moderate"}
+    recursive_skip_reason = ""
+    if resolved_profile == "fast":
+        if recursive_enabled:
+            recursive_skip_reason = "fast profile"
+        recursive_enabled = False
+    elif resolved_profile == "default" and constrained_mode != "strict":
+        # Keep default profile responsive unless user explicitly requests strict behavior.
+        if recursive_enabled:
+            recursive_skip_reason = "default profile"
+        recursive_enabled = False
+
+    chunk_size_default = 72 if resolved_profile == "accurate" else 96
+    chunk_size = chunk_size_default
+    raw_chunk_size = str(raw.get("recursive_chunk_size", "") or "").strip()
+    if raw_chunk_size:
+        try:
+            chunk_size = max(12, min(240, int(float(raw_chunk_size))))
+        except Exception:
+            chunk_size = chunk_size_default
+
+    max_depth = 8
+    raw_max_depth = str(raw.get("recursive_max_depth", "") or "").strip()
+    if raw_max_depth:
+        try:
+            max_depth = max(2, min(12, int(float(raw_max_depth))))
+        except Exception:
+            max_depth = 8
+
+    beam_scale = 1.0
+    if constrained_mode == "strict":
+        beam_scale = 0.72
+    elif constrained_mode == "moderate":
+        beam_scale = 0.84
+
+    if constrained_mode in {"strict", "moderate"}:
+        log(
+            f"[MFA][constrained] mode={constrained_mode}, "
+            f"recursive={'on' if recursive_enabled else 'off'}, "
+            f"profile={resolved_profile}"
+        )
+        if recursive_skip_reason:
+            log(f"[MFA][recursive] skipped by profile policy ({recursive_skip_reason}).")
+
+    return {
+        "constrained_mode": constrained_mode,
+        "recursive_mfa": recursive_enabled,
+        "recursive_chunk_size": int(chunk_size),
+        "recursive_max_depth": int(max_depth),
+        "beam_scale": float(beam_scale),
+    }
+
+
+def _collect_alignment_token_sequence(corpus_dir: str) -> List[str]:
+    tokens: List[str] = []
+    seen: Set[str] = set()
+    if not os.path.isdir(corpus_dir):
+        return tokens
+    for filename in sorted(os.listdir(corpus_dir)):
+        low = filename.lower()
+        if not (low.endswith(".lab") or low.endswith(".txt")):
+            continue
+        path = os.path.join(corpus_dir, filename)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+        except Exception:
+            continue
+        for tok in str(text or "").replace("\n", " ").replace("\t", " ").split():
+            token = str(tok or "").strip()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            tokens.append(token)
+    return tokens
+
+
+def _build_constrained_dictionary(
+    base_dict_path: str,
+    corpus_dir: str,
+    *,
+    mode: str = "moderate",
+    callback=None,
+) -> Tuple[bool, str, str, Dict[str, int]]:
+    def log(msg):
+        logger.info(msg)
+        if callback:
+            callback(msg)
+
+    stats = {
+        "token_total": 0,
+        "selected": 0,
+        "missing": 0,
+        "duplicates": 0,
+    }
+    mode_code = _normalize_alignment_strict_mode(mode)
+    tokens = _collect_alignment_token_sequence(corpus_dir)
+    stats["token_total"] = len(tokens)
+    if not tokens:
+        return False, "No lab tokens found for constrained dictionary build.", "", stats
+
+    entries: Dict[str, str] = {}
+    duplicate_count = 0
+    try:
+        with open(base_dict_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except Exception as exc:
+        return False, f"Failed to read dictionary: {exc}", "", stats
+
+    for raw_line in lines:
+        stripped = str(raw_line or "").strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        if len(parts) < 2:
+            continue
+        key = parts[0]
+        pron = " ".join(parts[1:])
+        if key in entries:
+            duplicate_count += 1
+            continue
+        entries[key] = pron
+    stats["duplicates"] = int(duplicate_count)
+
+    selected_lines: List[str] = []
+    missing_tokens: List[str] = []
+    for token in tokens:
+        pron = entries.get(token)
+        if not pron:
+            missing_tokens.append(token)
+            continue
+        selected_lines.append(f"{token} {pron}")
+
+    stats["selected"] = len(selected_lines)
+    stats["missing"] = len(missing_tokens)
+    if not selected_lines:
+        return False, "Constrained dictionary became empty.", "", stats
+
+    dict_dir = os.path.dirname(os.path.abspath(base_dict_path))
+    dict_ext = os.path.splitext(base_dict_path)[1] or ".txt"
+    constrained_path = os.path.join(dict_dir, f"dictionary_constrained{dict_ext}")
+    try:
+        with open(constrained_path, "w", encoding="utf-8", newline="\n") as f:
+            for line in selected_lines:
+                f.write(f"{line}\n")
+    except Exception as exc:
+        return False, f"Failed to write constrained dictionary: {exc}", "", stats
+
+    log(
+        f"[MFA][constrained] dictionary selected={stats['selected']}/{stats['token_total']} "
+        f"missing={stats['missing']} duplicate_skipped={stats['duplicates']}"
+    )
+
+    if missing_tokens:
+        preview = ", ".join(missing_tokens[:10])
+        if mode_code == "strict":
+            return (
+                False,
+                f"Strict constrained dictionary missing {len(missing_tokens)} tokens: {preview}",
+                constrained_path,
+                stats,
+            )
+        log(
+            f"[MFA][constrained] moderate mode missing tokens={len(missing_tokens)} "
+            f"(sample: {preview})"
+        )
+
+    return True, "", constrained_path, stats
+
+
+def _collect_alignment_units(corpus_dir: str) -> List[Dict[str, str]]:
+    units: List[Dict[str, str]] = []
+    if not os.path.isdir(corpus_dir):
+        return units
+    wav_map: Dict[str, str] = {}
+    for filename in os.listdir(corpus_dir):
+        if not filename.lower().endswith(".wav"):
+            continue
+        path = os.path.join(corpus_dir, filename)
+        if not os.path.isfile(path):
+            continue
+        stem = os.path.splitext(filename)[0]
+        wav_map[stem] = path
+    for stem in sorted(wav_map.keys()):
+        lab_path = os.path.join(corpus_dir, f"{stem}.lab")
+        txt_path = os.path.join(corpus_dir, f"{stem}.txt")
+        label_path = ""
+        if os.path.isfile(lab_path):
+            label_path = lab_path
+        elif os.path.isfile(txt_path):
+            label_path = txt_path
+        if not label_path:
+            continue
+        units.append(
+            {
+                "stem": stem,
+                "wav": wav_map[stem],
+                "label": label_path,
+            }
+        )
+    return units
+
+
+def _build_mfa_align_command(
+    *,
+    mfa_path: str,
+    corpus_dir: str,
+    dict_path: str,
+    model_name: str,
+    output_dir: str,
+    single_speaker_flag: str,
+    align_opts: Dict[str, object],
+    profile_label: str,
+    env=None,
+    callback=None,
+) -> Tuple[List[str], bool]:
+    def log(msg):
+        logger.info(msg)
+        if callback:
+            callback(msg)
+
+    cmd = [
+        mfa_path,
+        "align",
+        corpus_dir,
+        dict_path,
+        model_name,
+        output_dir,
+        single_speaker_flag,
+    ]
+    speaker_adapt_enabled = bool(align_opts.get("speaker_adaptation", False))
+    if speaker_adapt_enabled:
+        adapt_flag = _resolve_speaker_adaptation_flag(mfa_path, env=env)
+        if adapt_flag:
+            cmd.append(adapt_flag)
+        else:
+            speaker_adapt_enabled = False
+            log("[MFA] Speaker adaptation flag not supported by this MFA version; skipped.")
+
+    if align_opts.get("clean", True):
+        cmd.append("--clean")
+    if align_opts.get("fine_tune", False):
+        cmd.append("--fine_tune")
+    if align_opts.get("textgrid_cleanup", True):
+        cmd.append("--textgrid_cleanup")
+
+    cmd.extend(
+        [
+            "--beam",
+            str(int(align_opts.get("beam", 1000))),
+            "--retry_beam",
+            str(int(align_opts.get("retry_beam", 4000))),
+            "--num_jobs",
+            str(int(align_opts.get("num_jobs", 1))),
+        ]
+    )
+    return cmd, speaker_adapt_enabled
+
+
+def _run_mfa_align_command(
+    *,
+    mfa_path: str,
+    corpus_dir: str,
+    dict_path: str,
+    model_name: str,
+    output_dir: str,
+    single_speaker_flag: str,
+    align_opts: Dict[str, object],
+    profile_label: str,
+    env=None,
+    callback=None,
+    pass_tag: str = "",
+) -> Tuple[bool, str, List[str]]:
+    def log(msg):
+        logger.info(msg)
+        if callback:
+            callback(msg)
+
+    cmd, speaker_adapt_enabled = _build_mfa_align_command(
+        mfa_path=mfa_path,
+        corpus_dir=corpus_dir,
+        dict_path=dict_path,
+        model_name=model_name,
+        output_dir=output_dir,
+        single_speaker_flag=single_speaker_flag,
+        align_opts=align_opts,
+        profile_label=profile_label,
+        env=env,
+        callback=callback,
+    )
+    tag = f" [{pass_tag}]" if pass_tag else ""
+    log(
+        "Starting MFA alignment"
+        f"{tag}... ({single_speaker_flag}, profile={profile_label}, "
+        f"speaker_adapt={'on' if speaker_adapt_enabled else 'off'}, "
+        f"fine_tune={'on' if align_opts.get('fine_tune') else 'off'}, "
+        f"beam={align_opts.get('beam')}, retry_beam={align_opts.get('retry_beam')}, "
+        f"num_jobs={align_opts.get('num_jobs')})"
+    )
+
+    tail_lines: List[str] = []
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=False,
+            env=env,
+        )
+        if process.stdout:
+            for raw_line in iter(process.stdout.readline, b""):
+                stripped = _decode_subprocess_output(raw_line).strip()
+                if not stripped:
+                    continue
+                log(stripped)
+                tail_lines.append(stripped)
+                if len(tail_lines) > 120:
+                    tail_lines.pop(0)
+        process.wait()
+    except FileNotFoundError:
+        return False, "MFA executable not found. Check MFA installation.", tail_lines
+    except Exception as exc:
+        return False, f"Unexpected MFA error: {exc}", tail_lines
+
+    if process.returncode == 0:
+        return True, "", tail_lines
+
+    joined_tail = "\n".join(tail_lines[-40:]).lower()
+    if (
+        "please install korean support" in joined_tail
+        or ("importerror" in joined_tail and "eunjeon" in joined_tail and "jamo" in joined_tail)
+    ):
+        return False, "Korean dependencies (eunjeon, jamo) are missing in MFA env.", tail_lines
+
+    err = f"MFA alignment failed (code: {process.returncode})"
+    if tail_lines:
+        err += f" | tail: {tail_lines[-1][:180]}"
+    if process.returncode in {3221225477, -1073741819}:
+        err += (
+            " | hint: access_violation(0xC0000005), likely native kaldi crash "
+            "(env binary mismatch or corpus/lexicon edge-case), retry with lower-load profile(fast/default)"
+        )
+    return False, err, tail_lines
+
+
+def _run_recursive_mfa_align(
+    *,
+    mfa_path: str,
+    corpus_dir: str,
+    dict_path: str,
+    model_name: str,
+    output_dir: str,
+    single_speaker_flag: str,
+    align_opts: Dict[str, object],
+    profile_label: str,
+    env=None,
+    callback=None,
+    chunk_size: int = 96,
+    max_depth: int = 8,
+) -> Tuple[bool, str, int, List[str]]:
+    def log(msg):
+        logger.info(msg)
+        if callback:
+            callback(msg)
+
+    units = _collect_alignment_units(corpus_dir)
+    if not units:
+        return False, "No wav/lab pairs found for recursive MFA.", 0, []
+
+    merged_count = 0
+
+    def _split_and_align(sub_units: List[Dict[str, str]], depth: int) -> Tuple[bool, List[str]]:
+        nonlocal merged_count
+        if not sub_units:
+            return True, []
+
+        if len(sub_units) > int(chunk_size) and depth < int(max_depth):
+            mid = max(1, len(sub_units) // 2)
+            left_ok, left_fail = _split_and_align(sub_units[:mid], depth + 1)
+            right_ok, right_fail = _split_and_align(sub_units[mid:], depth + 1)
+            return left_ok and right_ok, left_fail + right_fail
+
+        tmp_root = tempfile.mkdtemp(prefix="utoa_mfa_recursive_")
+        try:
+            sub_corpus = os.path.join(tmp_root, "corpus")
+            sub_out = os.path.join(tmp_root, "out")
+            os.makedirs(sub_corpus, exist_ok=True)
+            os.makedirs(sub_out, exist_ok=True)
+            for unit in sub_units:
+                wav_dst = os.path.join(sub_corpus, os.path.basename(unit["wav"]))
+                label_dst = os.path.join(sub_corpus, os.path.basename(unit["label"]))
+                _link_or_copy(unit["wav"], wav_dst)
+                _link_or_copy(unit["label"], label_dst)
+
+            ok, _err, _tail = _run_mfa_align_command(
+                mfa_path=mfa_path,
+                corpus_dir=sub_corpus,
+                dict_path=dict_path,
+                model_name=model_name,
+                output_dir=sub_out,
+                single_speaker_flag=single_speaker_flag,
+                align_opts=align_opts,
+                profile_label=profile_label,
+                env=env,
+                callback=callback,
+                pass_tag=f"recursive depth={depth} size={len(sub_units)}",
+            )
+            if ok:
+                merged_count += _copy_back_textgrids(sub_out, output_dir)
+                return True, []
+
+            if len(sub_units) <= 1 or depth >= int(max_depth):
+                failed = [str(unit.get("stem", "")) for unit in sub_units]
+                return False, failed
+
+            mid = max(1, len(sub_units) // 2)
+            left_ok, left_fail = _split_and_align(sub_units[:mid], depth + 1)
+            right_ok, right_fail = _split_and_align(sub_units[mid:], depth + 1)
+            return left_ok and right_ok, left_fail + right_fail
+        finally:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    log(
+        f"[MFA][recursive] start chunk_size={chunk_size}, max_depth={max_depth}, "
+        f"items={len(units)}"
+    )
+    ok, failed = _split_and_align(units, 0)
+    if ok:
+        log(f"[MFA][recursive] complete merged_textgrids={merged_count}")
+        return True, "", merged_count, []
+    preview = ", ".join(failed[:15])
+    err = f"Recursive MFA failed for {len(failed)} item(s): {preview}"
+    log(f"[MFA][recursive] {err}")
+    return False, err, merged_count, failed
+
+
 def run_mfa_align(
     mfa_path,
     wav_folder,
@@ -1265,6 +1748,7 @@ def run_mfa_align(
     language='korean',
     callback=None,
     align_profile='accurate',
+    runtime_options: Optional[Dict[str, object]] = None,
 ):
     """Run MFA forced alignment."""
     def log(msg):
@@ -1318,89 +1802,119 @@ def run_mfa_align(
         return False, dict_err
     single_speaker_flag = _resolve_single_speaker_flag(mfa_path, env=env)
     resolved_profile, align_opts = _resolve_mfa_align_options(align_profile)
-    cmd = [
-        mfa_path, 'align',
-        work_wav_folder, work_dict_path, model_name, work_output_folder,
-        single_speaker_flag,
-    ]
-    speaker_adapt_enabled = bool(align_opts.get("speaker_adaptation", False))
-    if speaker_adapt_enabled:
-        adapt_flag = _resolve_speaker_adaptation_flag(mfa_path, env=env)
-        if adapt_flag:
-            cmd.append(adapt_flag)
-        else:
-            speaker_adapt_enabled = False
-            log("[MFA] Speaker adaptation flag not supported by this MFA version; skipped.")
-    if align_opts.get("clean", True):
-        cmd.append("--clean")
-    if align_opts.get("fine_tune", False):
-        cmd.append("--fine_tune")
-    if align_opts.get("textgrid_cleanup", True):
-        cmd.append("--textgrid_cleanup")
-    cmd.extend([
-        "--beam", str(int(align_opts.get("beam", 1000))),
-        "--retry_beam", str(int(align_opts.get("retry_beam", 4000))),
-        "--num_jobs", str(int(align_opts.get("num_jobs", 1))),
-    ])
-    log(
-        "Starting MFA alignment... "
-        f"({single_speaker_flag}, profile={resolved_profile}, "
-        f"speaker_adapt={'on' if speaker_adapt_enabled else 'off'}, "
-        f"fine_tune={'on' if align_opts.get('fine_tune') else 'off'}, "
-        f"beam={align_opts.get('beam')}, retry_beam={align_opts.get('retry_beam')}, "
-        f"num_jobs={align_opts.get('num_jobs')})"
+    runtime_ctx = _resolve_mfa_runtime_options(
+        resolved_profile=resolved_profile,
+        runtime_options=runtime_options,
+        callback=callback,
     )
-    try:
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=False,
-            env=env,
+    constrained_mode = str(runtime_ctx.get("constrained_mode", "off"))
+    recursive_enabled = bool(runtime_ctx.get("recursive_mfa", False))
+    recursive_chunk_size = int(runtime_ctx.get("recursive_chunk_size", 96))
+    recursive_max_depth = int(runtime_ctx.get("recursive_max_depth", 8))
+    beam_scale = float(runtime_ctx.get("beam_scale", 1.0))
+    if constrained_mode in {"strict", "moderate"} and beam_scale > 0:
+        base_beam = int(align_opts.get("beam", 1000))
+        base_retry = int(align_opts.get("retry_beam", 4000))
+        align_opts["beam"] = max(120, int(round(base_beam * beam_scale)))
+        align_opts["retry_beam"] = max(320, int(round(base_retry * beam_scale)))
+        log(
+            f"[MFA][constrained] beam {base_beam}->{align_opts['beam']}, "
+            f"retry_beam {base_retry}->{align_opts['retry_beam']}"
         )
-        tail_lines = []
-        if process.stdout:
-            for raw_line in iter(process.stdout.readline, b""):
-                stripped = _decode_subprocess_output(raw_line).strip()
-                if stripped:
-                    log(stripped)
-                    tail_lines.append(stripped)
-                    if len(tail_lines) > 120:
-                        tail_lines.pop(0)
-        process.wait()
-        if process.returncode == 0:
-            if safe_workspace is not None:
-                copied = _copy_back_textgrids(work_output_folder, output_folder)
-                log(f"[MFA] Copied back {copied} TextGrid files from ASCII-safe workspace.")
-            log('MFA alignment completed successfully.')
-            return True, ''
-        joined_tail = '\n'.join(tail_lines[-40:])
-        lowered_tail = joined_tail.lower()
-        if (
-            'please install korean support' in lowered_tail
-            or ('importerror' in lowered_tail and 'eunjeon' in lowered_tail and 'jamo' in lowered_tail)
-        ):
-            err = 'Korean dependencies (eunjeon, jamo) are missing in MFA env.'
-            log(err)
-            return False, err
-        err = f'MFA alignment failed (code: {process.returncode})'
-        if tail_lines:
-            err += f' | tail: {tail_lines[-1][:180]}'
-        if process.returncode in {3221225477, -1073741819}:
-            err += (
-                " | hint: access_violation(0xC0000005), likely native kaldi crash "
-                "(env binary mismatch or corpus/lexicon edge-case), retry with lower-load profile(fast/default)"
+
+    attempt_dict_path = work_dict_path
+    constrained_active = False
+    if constrained_mode in {"strict", "moderate"}:
+        c_ok, c_err, constrained_dict_path, _c_stats = _build_constrained_dictionary(
+            work_dict_path,
+            work_wav_folder,
+            mode=constrained_mode,
+            callback=callback,
+        )
+        if c_ok and constrained_dict_path:
+            constrained_active = True
+            attempt_dict_path = constrained_dict_path
+            c_sanitize_ok, c_sanitize_err = _sanitize_alignment_dictionary_for_mfa(
+                attempt_dict_path,
+                callback=callback,
             )
-        log(err)
-        return False, err
-    except FileNotFoundError:
-        err = 'MFA executable not found. Check MFA installation.'
-        log(err)
-        return False, err
-    except Exception as e:
-        err = f'Unexpected MFA error: {e}'
-        log(err)
-        return False, err
+            if not c_sanitize_ok:
+                if constrained_mode == "strict":
+                    return False, c_sanitize_err
+                log(f"[MFA][constrained] sanitize failed, fallback to base dictionary: {c_sanitize_err}")
+                constrained_active = False
+                attempt_dict_path = work_dict_path
+            c_dict_ok, c_dict_err = _validate_alignment_dictionary(attempt_dict_path, callback=callback)
+            if not c_dict_ok:
+                if constrained_mode == "strict":
+                    return False, c_dict_err
+                log(f"[MFA][constrained] validation failed, fallback to base dictionary: {c_dict_err}")
+                constrained_active = False
+                attempt_dict_path = work_dict_path
+        else:
+            if constrained_mode == "strict":
+                return False, c_err or "Strict constrained mode failed."
+            log(f"[MFA][constrained] disabled in moderate mode: {c_err}")
+
+    def _run_once_with_optional_recursive(current_dict_path: str, pass_tag: str, allow_recursive: bool):
+        ok_run, err_run, _tail = _run_mfa_align_command(
+            mfa_path=mfa_path,
+            corpus_dir=work_wav_folder,
+            dict_path=current_dict_path,
+            model_name=model_name,
+            output_dir=work_output_folder,
+            single_speaker_flag=single_speaker_flag,
+            align_opts=align_opts,
+            profile_label=resolved_profile,
+            env=env,
+            callback=callback,
+            pass_tag=pass_tag,
+        )
+        if ok_run:
+            return True, ""
+        if not allow_recursive:
+            return False, err_run
+        log("[MFA][recursive] primary alignment failed; starting segmented fallback.")
+        rec_ok, rec_err, _merged_count, _failed = _run_recursive_mfa_align(
+            mfa_path=mfa_path,
+            corpus_dir=work_wav_folder,
+            dict_path=current_dict_path,
+            model_name=model_name,
+            output_dir=work_output_folder,
+            single_speaker_flag=single_speaker_flag,
+            align_opts=align_opts,
+            profile_label=resolved_profile,
+            env=env,
+            callback=callback,
+            chunk_size=recursive_chunk_size,
+            max_depth=recursive_max_depth,
+        )
+        if rec_ok:
+            return True, ""
+        return False, f"{err_run} | recursive: {rec_err}"
+
+    ok, err = _run_once_with_optional_recursive(
+        attempt_dict_path,
+        "constrained" if constrained_active else "primary",
+        recursive_enabled,
+    )
+    if (not ok) and constrained_active and constrained_mode == "moderate":
+        log("[MFA][constrained] moderate fallback: retry with base dictionary.")
+        ok, err = _run_once_with_optional_recursive(
+            work_dict_path,
+            "moderate-fallback",
+            False,
+        )
+
+    if ok:
+        if safe_workspace is not None:
+            copied = _copy_back_textgrids(work_output_folder, output_folder)
+            log(f"[MFA] Copied back {copied} TextGrid files from ASCII-safe workspace.")
+        log('MFA alignment completed successfully.')
+        return True, ''
+
+    log(str(err or "MFA alignment failed"))
+    return False, str(err or "MFA alignment failed")
 
 def patch_mfa_korean_support(mfa_path, callback=None):
     """

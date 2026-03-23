@@ -6,10 +6,38 @@ import tkinter as tk
 import customtkinter as ctk
 
 from core.format_type_utils import normalize_auto_format_value
+from core.pipeline_status import normalize_aligner_name
 from ui.theme_tokens import LANGUAGE_DROPDOWN_THEME, LANGUAGE_NOTICE_THEME, PALETTE
 
 
 class LayoutMixin:
+    def _release_channel(self) -> str:
+        channel = str(getattr(self, "release_channel", "stable") or "").strip().lower()
+        return channel if channel in {"stable", "preview"} else "stable"
+
+    def _preview_extra_format_options(self, language: str):
+        """
+        Preview-only format labels.
+        Keep empty by default and allow optional env extension without changing
+        stable baseline behavior.
+        """
+        lang = str(language or "").strip().lower()
+        env_key = "UTOA_PREVIEW_EXTRA_FORMATS_JA" if lang == "japanese" else "UTOA_PREVIEW_EXTRA_FORMATS_KR"
+        raw = str(os.environ.get(env_key, "") or "").strip()
+        if not raw:
+            return []
+        items = [item.strip() for item in raw.split("|") if item.strip()]
+        # de-dup while preserving order
+        deduped = []
+        seen = set()
+        for item in items:
+            key = item.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
+
     def _build_ui(self):
         self.auto_format_var = ctk.StringVar(value="자동 감지 (권장)")
 
@@ -381,9 +409,18 @@ class LayoutMixin:
 
     def _get_auto_format_options(self, language=None):
         lang = language or self._get_language()
+        # Stable baseline first.
         if lang == "korean":
-            return ["자동 감지 (권장)", "CV/연단음", "CVC (한국어 전용)", "CVVC", "VCV (연속음)"]
-        return ["자동 감지 (권장)", "CV/연단음", "CVVC", "VCV (연속음)"]
+            options = ["자동 감지 (권장)", "CV/연단음", "CVC (한국어 전용)", "CVVC", "VCV (연속음)"]
+        else:
+            options = ["자동 감지 (권장)", "CV/연단음", "CVVC", "VCV (연속음)"]
+
+        # Preview channel inherits stable options and can append preview-only formats.
+        if self._release_channel() == "preview":
+            for extra in self._preview_extra_format_options(lang):
+                if extra not in options:
+                    options.append(extra)
+        return options
 
     def _set_auto_format_from_code(self, format_code, language=None):
         lang = language or self._get_language()
@@ -448,6 +485,8 @@ class LayoutMixin:
             self._apply_ml_runtime_preset(self.ml_runtime_preset_var.get(), log_message=False)
         if hasattr(self, "_apply_recommended_ml_model_defaults"):
             self._apply_recommended_ml_model_defaults()
+        if hasattr(self, "_sync_aligner_ui"):
+            self._sync_aligner_ui()
         self._save_config()
         self._refresh_ml_backend_status()
     def _get_ja_alias_style_code(self):
@@ -460,13 +499,79 @@ class LayoutMixin:
 
     def _get_mfa_align_profile_code(self):
         profile = str(self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "").strip()
-        if profile in {"빠름 (저사양 추천)", "fast"}:
+        if profile in {"빠름", "빠름 (저사양 추천)", "fast"}:
             return "fast"
-        if profile in {"정확도 우선", "accurate", "accurate_adapted", "speaker_adapted"}:
+        if profile in {"정밀", "정확도 우선", "accurate", "accurate_adapted", "speaker_adapted"}:
             return "accurate"
         if profile in {"기본", "default", "정확도 우선 (기본)"}:
             return "default"
         return "default"
+
+    def _normalize_mapping_strict_mode(self, value) -> str:
+        text = str(value or "").strip().lower()
+        compact = text.replace(" ", "").replace("-", "_")
+        if "완전" in text and "엄격" in text:
+            return "strict"
+        if ("적당" in text or "보통" in text or "중간" in text) and "엄격" in text:
+            return "moderate"
+        if compact in {
+            "완전엄격",
+            "완전_엄격",
+            "strict",
+            "full_strict",
+            "hard",
+            "hard_strict",
+            "on_strict",
+        }:
+            return "strict"
+        if compact in {
+            "적당히엄격",
+            "적당히_엄격",
+            "moderate",
+            "medium",
+            "balanced",
+            "relaxed_strict",
+            "soft_strict",
+            "fallback",
+            "fallback_on",
+        }:
+            return "moderate"
+        return "off"
+
+    def _get_mapping_strict_mode_code(self) -> str:
+        if hasattr(self, "mapping_strict_mode_var"):
+            try:
+                return self._normalize_mapping_strict_mode(self.mapping_strict_mode_var.get())
+            except Exception:
+                pass
+        for attr_name in (
+            "mapping_strictness_var",
+            "token_mapping_strict_mode_var",
+            "token_invariant_mode_var",
+            "strict_mode_var",
+        ):
+            if not hasattr(self, attr_name):
+                continue
+            try:
+                return self._normalize_mapping_strict_mode(getattr(self, attr_name).get())
+            except Exception:
+                continue
+        return self._normalize_mapping_strict_mode(os.environ.get("UTOA_MAPPING_STRICT_MODE", "off"))
+
+    def _describe_mapping_strict_mode(self, mode: str) -> str:
+        normalized = self._normalize_mapping_strict_mode(mode)
+        if normalized == "strict":
+            return "완전 엄격"
+        if normalized == "moderate":
+            return "적당히 엄격"
+        return "off"
+
+    def _build_mfa_runtime_options(self):
+        strict_mode = self._get_mapping_strict_mode_code()
+        return {
+            "constrained_mode": strict_mode,
+            "recursive_mfa": True,
+        }
 
     def _on_aligner_change(self, _value=None):
         self._sync_aligner_ui()
@@ -477,10 +582,18 @@ class LayoutMixin:
         self._save_config()
 
     def _sync_aligner_ui(self):
+        lang = self._get_language() if hasattr(self, "_get_language") else "korean"
         options = ["MFA"]
-        current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA").strip()
-        if current not in options:
+        if lang == "japanese":
+            options.append("Domino (JP)")
+
+        current_raw = str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA").strip()
+        current_engine = normalize_aligner_name(current_raw, default="mfa")
+        if current_engine == "domino" and "Domino (JP)" in options:
+            current = "Domino (JP)"
+        else:
             current = "MFA"
+
         if hasattr(self, "aligner_var"):
             self.aligner_var.set(current)
         if hasattr(self, "aligner_menu"):
@@ -490,12 +603,27 @@ class LayoutMixin:
             except Exception:
                 pass
         if hasattr(self, "mfa_align_profile_menu"):
-            self.mfa_align_profile_menu.configure(state="normal")
+            self.mfa_align_profile_menu.configure(state="normal" if current == "MFA" else "disabled")
         if hasattr(self, "aligner_help_label"):
-            self.aligner_help_label.configure(text="(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)")
+            if current == "Domino (JP)":
+                self.aligner_help_label.configure(
+                    text="(일본어에서만 사용 가능. 실패 시 MFA 폴백을 자동 시도합니다.)"
+                )
+            else:
+                self.aligner_help_label.configure(
+                    text="(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)"
+                )
         if hasattr(self, "align_step_title_label") and hasattr(self, "align_step_desc_label"):
-            self.align_step_title_label.configure(text="3. 음성 정렬 (MFA)")
-            self.align_step_desc_label.configure(text="MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.")
+            if current == "Domino (JP)":
+                self.align_step_title_label.configure(text="3. 음성 정렬 (Domino)")
+                self.align_step_desc_label.configure(
+                    text="Domino(pydomino)로 일본어 TextGrid를 생성하고, 필요 시 MFA로 자동 폴백합니다."
+                )
+            else:
+                self.align_step_title_label.configure(text="3. 음성 정렬 (MFA)")
+                self.align_step_desc_label.configure(
+                    text="MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다."
+                )
 
     def _on_no_base_oto_toggle(self):
         no_base = bool(self.no_base_oto_var.get())

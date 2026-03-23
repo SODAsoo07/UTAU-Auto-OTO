@@ -1,5 +1,6 @@
 ﻿import argparse
 import datetime
+import importlib.util
 import json
 import os
 import re
@@ -23,7 +24,8 @@ DEFAULT_CHANNEL = "stable"
 SUPPORTED_CHANNELS = ("stable", "preview")
 CHANNEL_ALIASES = {"default": "stable"}
 SUPPORTED_CHANNEL_INPUTS = ("stable", "preview", "default")
-
+PREVIEW_REQUIREMENTS_FILE = "requirements-preview.txt"
+PYDOMINO_PACKAGE = "pydomino"
 DEFAULT_BACKEND = "nuitka"
 SUPPORTED_BACKENDS = ("nuitka", "pyinstaller")
 
@@ -174,6 +176,18 @@ def _iter_ffmpeg_runtime_files(ffmpeg_bin):
     return files
 
 
+def _has_preview_channel(target_channels) -> bool:
+    return any(str(ch).strip().lower() == "preview" for ch in (target_channels or []))
+
+
+def _is_module_available(module_name: str) -> bool:
+    if not module_name:
+        return False
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except Exception:
+        return False
+
 def _parse_args():
     parser = argparse.ArgumentParser(description="Build UTAU Auto OTO distributables.")
     parser.add_argument("--onefile", action="store_true", help="Build onefile executable (unsafe/experimental).")
@@ -260,7 +274,7 @@ def _resolve_app_icon_path():
     return ""
 
 
-def _build_pyinstaller_args(app_name, ffmpeg_bin, app_icon_path="", onefile=False):
+def _build_pyinstaller_args(app_name, ffmpeg_bin, app_icon_path="", onefile=False, include_domino_module=False):
     import customtkinter
 
     ctk_path = os.path.dirname(customtkinter.__file__)
@@ -275,7 +289,10 @@ def _build_pyinstaller_args(app_name, ffmpeg_bin, app_icon_path="", onefile=Fals
         f"--add-data={ffmpeg_bin};ffmpeg/bin",
         "--hidden-import=textgrid",
         "--hidden-import=customtkinter",
+        "--hidden-import=onnxruntime",
     ]
+    if include_domino_module:
+        pyinstaller_args.append("--hidden-import=pydomino")
     for src, dst in _iter_runtime_data_entries():
         pyinstaller_args.append(f"--add-data={src};{dst}")
     if app_icon_path:
@@ -284,8 +301,7 @@ def _build_pyinstaller_args(app_name, ffmpeg_bin, app_icon_path="", onefile=Fals
         pyinstaller_args.append(f"--exclude-module={module_name}")
     return pyinstaller_args
 
-
-def _run_pyinstaller_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False):
+def _run_pyinstaller_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, include_domino_module=False):
     print("Loading PyInstaller...")
     import PyInstaller.__main__
 
@@ -294,6 +310,7 @@ def _run_pyinstaller_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False
         ffmpeg_bin=ffmpeg_bin,
         app_icon_path=app_icon_path,
         onefile=onefile,
+        include_domino_module=include_domino_module,
     )
     PyInstaller.__main__.run(pyinstaller_args)
 
@@ -308,8 +325,7 @@ def _run_pyinstaller_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False
         raise FileNotFoundError(f"Built app directory not found: {dist_dir}")
     return dist_dir
 
-
-def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False):
+def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, include_domino_module=False):
     import customtkinter
 
     ctk_path = os.path.dirname(customtkinter.__file__)
@@ -333,16 +349,26 @@ def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False):
         f"--output-filename={app_name}.exe",
         "--include-module=textgrid",
         "--include-package=customtkinter",
+        "--include-package=onnxruntime",
         "--remove-output",
         f"--jobs={cpu_jobs}",
         f"--nofollow-import-to={','.join(EXCLUDED_MODULES + EXCLUDED_TRAINING_MODULES)}",
     ]
+    if include_domino_module:
+        cmd.append("--include-package=pydomino")
 
     _validate_ffmpeg_bin(ffmpeg_bin)
     include_entries = [(ctk_path, "customtkinter")]
     include_entries.extend(_iter_runtime_data_entries())
     for src, dst in include_entries:
-        cmd.append(f"--include-data-dir={src}={dst}")
+        if os.path.isdir(src):
+            cmd.append(f"--include-data-dir={src}={dst}")
+        elif os.path.isfile(src):
+            file_name = os.path.basename(src)
+            target_path = f"{dst}/{file_name}" if str(dst).strip() not in {"", "."} else file_name
+            cmd.append(f"--include-data-files={src}={target_path}")
+        else:
+            print(f"[WARN] Runtime include source missing (skip): {src}")
     ffmpeg_runtime_files = _iter_ffmpeg_runtime_files(ffmpeg_bin)
     for src, name in ffmpeg_runtime_files:
         cmd.append(f"--include-data-files={src}=ffmpeg/bin/{name}")
@@ -381,7 +407,6 @@ def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False):
         return dist_candidates[0]
 
     raise FileNotFoundError(f"Nuitka standalone directory not found in: {output_root}")
-
 
 def _validate_packaged_ffmpeg(dist_dir):
     ffmpeg_bin = os.path.join(dist_dir, "ffmpeg", "bin")
@@ -433,7 +458,7 @@ def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, o
     return release_dir
 
 
-def _install_build_dependencies(backend):
+def _install_build_dependencies(backend, target_channels=None):
     subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
 
     req_candidates = [
@@ -449,6 +474,30 @@ def _install_build_dependencies(backend):
     elif backend == "pyinstaller":
         subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
 
+    if not _has_preview_channel(target_channels):
+        print("[INFO] Preview channel not selected; skipping pydomino dependency install.")
+        return
+
+    preview_req = os.path.join(APP_DIR, PREVIEW_REQUIREMENTS_FILE)
+    if not os.path.isfile(preview_req):
+        print(
+            f"[WARN] Preview channel selected but {PREVIEW_REQUIREMENTS_FILE} was not found. "
+            "Skipping pydomino install."
+        )
+        return
+
+    print("[INFO] Preview channel selected; installing preview-only dependencies (pydomino)...")
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--no-build-isolation",
+            "-r",
+            preview_req,
+        ]
+    )
 
 def main():
     _configure_console_encoding()
@@ -459,6 +508,7 @@ def main():
 
     target_channels = _parse_channels(args.channel, args.channels)
     args.channel = target_channels[0]
+    include_domino_module = _has_preview_channel(target_channels)
 
     if args.onefile and not args.allow_unsafe_onefile:
         raise SystemExit(
@@ -477,7 +527,12 @@ def main():
         print("[1/5] Skipping dependency install (--skip-deps).")
     else:
         print("[1/5] Installing build dependencies...")
-        _install_build_dependencies(args.backend)
+        _install_build_dependencies(args.backend, target_channels=target_channels)
+
+    if include_domino_module and not _is_module_available(PYDOMINO_PACKAGE):
+        print("[WARN] Preview channel selected but pydomino is unavailable in this Python env.")
+        print("[WARN] Domino runtime module will not be bundled in this build.")
+        include_domino_module = False
 
     print("[2/5] Preparing FFmpeg runtime...")
     ffmpeg_bin = _ensure_ffmpeg_bin()
@@ -489,9 +544,9 @@ def main():
 
     print(f"[3/5] Building app with {args.backend}...")
     if args.backend == "nuitka":
-        built_artifact = _run_nuitka_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile)
+        built_artifact = _run_nuitka_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile, include_domino_module=include_domino_module)
     else:
-        built_artifact = _run_pyinstaller_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile)
+        built_artifact = _run_pyinstaller_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile, include_domino_module=include_domino_module)
 
     print(f"[4/5] Packaging release folder ({mode_text})...")
     release_dirs = []

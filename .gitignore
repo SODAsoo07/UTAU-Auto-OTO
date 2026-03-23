@@ -265,3 +265,4 @@ ml/configs/autofree_bank_specs_korean_cvvc.colab.json
 /dist_nuitka
 /_build_model_profiles
 /dist_nuitka
+/assets/models

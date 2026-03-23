@@ -44,6 +44,8 @@ from core.oto_ml.coupled.model import (
     COUPLED_BACKEND,
     COUPLED_BACKEND_RAWMEL,
     COUPLED_MODEL_FILE,
+    COUPLED_MODEL_ONNX_FILE,
+    COUPLED_MODEL_ONNX_META_FILE,
     DELTA_TARGET_NAMES,
     FEATURE_NAMES,
     PATCH_FEATURES,
@@ -73,6 +75,212 @@ from core.oto_ml.features.mel_patches import (
 from core.oto_ml.pairing.vc_cv_pairing import _batch_pair_positions, _build_vc_cv_pair_map
 
 logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in {"1", "true", "yes", "on", "y"}:
+        return True
+    if raw in {"0", "false", "no", "off", "n"}:
+        return False
+    return bool(default)
+
+
+def _export_coupled_onnx(
+    torch,
+    model,
+    out_dir: str,
+    *,
+    feature_names: List[str],
+    categorical_features: List[str],
+    categorical_bucket_sizes: List[int],
+    patch_features: List[str],
+    head_mode: str,
+    anchor_targets: List[str],
+    delta_targets: List[str],
+    rawmel_enabled: bool = False,
+    mel_bins: int = 80,
+    onset_frames: int = 8,
+    tail_frames: int = 8,
+    mel_patch_spec: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if not _env_flag("UTOA_ML_EXPORT_ONNX", True):
+        return {"enabled": False, "status": "disabled"}
+
+    onnx_path = os.path.join(out_dir, COUPLED_MODEL_ONNX_FILE)
+    sidecar_path = os.path.join(out_dir, COUPLED_MODEL_ONNX_META_FILE)
+    use_cat_input = bool(categorical_bucket_sizes)
+    head_mode_norm = str(head_mode or "single").strip().lower()
+
+    class _ExportWrapper(torch.nn.Module):
+        def __init__(self, base_model, is_rawmel: bool, use_cat: bool, mode: str):
+            super().__init__()
+            self.base_model = base_model
+            self.is_rawmel = bool(is_rawmel)
+            self.use_cat = bool(use_cat)
+            self.mode = str(mode or "single").strip().lower()
+
+        def _encode_rawmel_export(self, encoder, mel_tensor):
+            # ONNX export compatibility:
+            # AdaptiveAvgPool2d((4,1)) fails for some frame lengths (e.g. 49),
+            # so we use bilinear resize to the same target shape during export.
+            x = encoder.net[0](mel_tensor)
+            x = encoder.net[1](x)
+            x = encoder.net[2](x)
+            x = encoder.net[3](x)
+            x = encoder.net[4](x)
+            x = encoder.net[5](x)
+            x = torch.nn.functional.interpolate(x, size=(4, 1), mode="bilinear", align_corners=False)
+            x = encoder.proj[0](x)
+            x = encoder.proj[1](x)
+            x = encoder.proj[2](x)
+            x = encoder.proj[3](x)
+            x = encoder.proj[4](x)
+            return x
+
+        def forward(self, *inputs):
+            idx = 0
+            x = inputs[idx]
+            idx += 1
+            patch = inputs[idx]
+            idx += 1
+            if self.is_rawmel:
+                onset = inputs[idx]
+                idx += 1
+                tail = inputs[idx]
+                idx += 1
+                cat = inputs[idx] if self.use_cat else None
+                # Build the rawmel forward path explicitly to avoid
+                # exporter limitation in AdaptiveAvgPool2d for non-factor sizes.
+                xf = self.base_model.feature_net(x)
+                xp = self.base_model.patch_net(patch)
+                xo = self._encode_rawmel_export(self.base_model.onset_encoder, onset)
+                xt = self._encode_rawmel_export(self.base_model.tail_encoder, tail)
+                pieces = [xf, xp, xo, xt]
+                cat_repr = self.base_model._cat_repr(x, cat)
+                if cat_repr is not None:
+                    pieces.append(cat_repr)
+                z = self.base_model.joint(torch.cat(pieces, dim=1))
+                conf = self.base_model.conf_head(z)
+                if self.mode == "split":
+                    anchor = self.base_model.anchor_head(z)
+                    delta = self.base_model.delta_head(z)
+                    out = (anchor, delta, conf)
+                else:
+                    deltas = self.base_model.delta_head(z)
+                    out = (deltas, conf)
+            else:
+                cat = inputs[idx] if self.use_cat else None
+                out = self.base_model(x, patch, cat)
+            if not isinstance(out, tuple):
+                raise RuntimeError("Coupled model export failed: unexpected non-tuple output.")
+            if self.mode == "split":
+                if len(out) >= 3:
+                    return out[0], out[1], out[2]
+                raise RuntimeError("Coupled split head export failed: missing outputs.")
+            if len(out) >= 2:
+                return out[0], out[1]
+            raise RuntimeError("Coupled single head export failed: missing outputs.")
+
+    try:
+        wrapper = _ExportWrapper(model, rawmel_enabled, use_cat_input, head_mode_norm).to("cpu")
+        wrapper.eval()
+
+        dummy_x = torch.zeros((1, max(1, len(feature_names))), dtype=torch.float32)
+        dummy_patch = torch.zeros((1, max(1, len(patch_features))), dtype=torch.float32)
+        input_tensors = [dummy_x, dummy_patch]
+        input_names = ["x", "patch"]
+        dynamic_axes = {
+            "x": {0: "batch"},
+            "patch": {0: "batch"},
+        }
+
+        if rawmel_enabled:
+            dummy_onset = torch.zeros((1, 1, int(onset_frames), int(mel_bins)), dtype=torch.float32)
+            dummy_tail = torch.zeros((1, 1, int(tail_frames), int(mel_bins)), dtype=torch.float32)
+            input_tensors.extend([dummy_onset, dummy_tail])
+            input_names.extend(["onset", "tail"])
+            dynamic_axes["onset"] = {0: "batch"}
+            dynamic_axes["tail"] = {0: "batch"}
+
+        if use_cat_input:
+            dummy_cat = torch.zeros((1, len(categorical_bucket_sizes)), dtype=torch.long)
+            input_tensors.append(dummy_cat)
+            input_names.append("cat_idx")
+            dynamic_axes["cat_idx"] = {0: "batch"}
+
+        if head_mode_norm == "split":
+            output_names = ["anchor", "delta", "confidence"]
+            dynamic_axes.update(
+                {
+                    "anchor": {0: "batch"},
+                    "delta": {0: "batch"},
+                    "confidence": {0: "batch"},
+                }
+            )
+        else:
+            output_names = ["deltas", "confidence"]
+            dynamic_axes.update(
+                {
+                    "deltas": {0: "batch"},
+                    "confidence": {0: "batch"},
+                }
+            )
+
+        torch.onnx.export(
+            wrapper,
+            tuple(input_tensors),
+            onnx_path,
+            input_names=input_names,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes,
+            opset_version=int(os.environ.get("UTOA_ML_ONNX_OPSET", "17") or 17),
+            do_constant_folding=True,
+        )
+
+        sidecar = {
+            "feature_names": list(feature_names),
+            "categorical_features": list(categorical_features),
+            "categorical_bucket_sizes": [int(v) for v in categorical_bucket_sizes],
+            "patch_features": list(patch_features),
+            "head_mode": head_mode_norm if head_mode_norm in {"single", "split"} else "single",
+            "anchor_targets": list(anchor_targets),
+            "delta_targets": list(delta_targets),
+            "rawmel_enabled": bool(rawmel_enabled),
+            "mel_bins": int(mel_bins),
+            "onset_frames": int(onset_frames),
+            "tail_frames": int(tail_frames),
+            "mel_patch_spec": dict(mel_patch_spec or {}),
+            "use_cat_input": bool(use_cat_input),
+            "input_names": {
+                "x": "x",
+                "patch": "patch",
+                "onset": "onset" if rawmel_enabled else "",
+                "tail": "tail" if rawmel_enabled else "",
+                "cat": "cat_idx" if use_cat_input else "",
+            },
+            "output_names": {
+                "anchor": "anchor" if head_mode_norm == "split" else "",
+                "delta": "delta" if head_mode_norm == "split" else "",
+                "deltas": "deltas" if head_mode_norm != "split" else "",
+                "confidence": "confidence",
+            },
+        }
+        with open(sidecar_path, "w", encoding="utf-8") as f:
+            json.dump(sidecar, f, ensure_ascii=False, indent=2)
+        return {
+            "enabled": True,
+            "status": "ok",
+            "onnx_path": onnx_path,
+            "sidecar_path": sidecar_path,
+            "input_names": list(input_names),
+            "output_names": list(output_names),
+        }
+    except Exception as exc:
+        logger.warning("Failed to export coupled ONNX bundle: %s", exc)
+        return {"enabled": True, "status": "failed", "error": str(exc)}
 
 
 def _env_float(name: str, default: float) -> float:
@@ -1110,6 +1318,20 @@ def train_coupled_bundle(
         os.path.join(out_dir, COUPLED_MODEL_FILE),
     )
     write_feature_schema(os.path.join(out_dir, "feature_schema.json"))
+    onnx_export = _export_coupled_onnx(
+        torch,
+        model,
+        out_dir,
+        feature_names=feature_names,
+        categorical_features=categorical_features,
+        categorical_bucket_sizes=[int(v) for v in categorical_bucket_sizes],
+        patch_features=list(PATCH_FEATURES),
+        head_mode=str(head_mode),
+        anchor_targets=list(ANCHOR_TARGET_NAMES),
+        delta_targets=list(DELTA_TARGET_NAMES),
+        rawmel_enabled=False,
+        mel_patch_spec={},
+    )
 
     meta = {
         "backend": COUPLED_BACKEND,
@@ -1129,6 +1351,7 @@ def train_coupled_bundle(
         "head_mode": str(head_mode),
         "aux_targets": list(AUX_TARGET_NAMES) if use_aux else [],
         "mel_patch_spec": list(PATCH_FEATURES),
+        "onnx_export": onnx_export,
         "min_confidence": float(min_confidence),
         "vc_cv_pair_weight": float(pair_weight_base),
         "vc_cv_pair_warmup_epochs": int(pair_warmup_epochs),
@@ -2034,6 +2257,23 @@ def train_coupled_bundle_rawmel(
         os.path.join(out_dir, COUPLED_MODEL_FILE),
     )
     write_feature_schema(os.path.join(out_dir, "feature_schema.json"))
+    onnx_export = _export_coupled_onnx(
+        torch,
+        model,
+        out_dir,
+        feature_names=feature_names,
+        categorical_features=categorical_features,
+        categorical_bucket_sizes=[int(v) for v in categorical_bucket_sizes],
+        patch_features=list(PATCH_FEATURES),
+        head_mode=str(head_mode),
+        anchor_targets=list(ANCHOR_TARGET_NAMES),
+        delta_targets=list(DELTA_TARGET_NAMES),
+        rawmel_enabled=True,
+        mel_bins=int(mel_bins),
+        onset_frames=int(onset_frames),
+        tail_frames=int(tail_frames),
+        mel_patch_spec=dict(patch_spec),
+    )
 
     meta = {
         "backend": COUPLED_BACKEND_RAWMEL,
@@ -2057,6 +2297,7 @@ def train_coupled_bundle_rawmel(
         "mel_bins": int(mel_bins),
         "onset_frames": int(onset_frames),
         "tail_frames": int(tail_frames),
+        "onnx_export": onnx_export,
         "min_confidence": float(min_confidence),
         "vc_cv_pair_weight": float(pair_weight_base),
         "vc_cv_pair_warmup_epochs": int(pair_warmup_epochs),

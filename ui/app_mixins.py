@@ -19,6 +19,7 @@ from core.format_type_utils import normalize_auto_format_value
 from core.log_events import classify_log_message, log_with_event
 from core.mfa_runner import ALERT_MFA_PERMISSION_DENIED, ALERT_MSVC_REQUIRED
 from core.oto_validator import validate_oto_timing
+from core.pipeline_status import normalize_aligner_name
 
 
 class FileDialogMixin:
@@ -403,6 +404,34 @@ class AppRuntimeMixin:
             self.after(delay_ms, callback)
         except tk.TclError:
             pass
+
+    def _ask_yes_no_dialog(self, title, message, default=False):
+        if self._is_closing:
+            return bool(default)
+        if threading.current_thread() is threading.main_thread():
+            try:
+                return bool(messagebox.askyesno(title, message, parent=self))
+            except Exception:
+                return bool(default)
+
+        done = threading.Event()
+        result = {"value": bool(default)}
+
+        def _show():
+            try:
+                result["value"] = bool(messagebox.askyesno(title, message, parent=self))
+            except Exception:
+                result["value"] = bool(default)
+            finally:
+                done.set()
+
+        try:
+            self.after(0, _show)
+        except Exception:
+            return bool(default)
+        if not done.wait(timeout=600):
+            return bool(default)
+        return bool(result["value"])
 
     def _force_exit_now(self):
         try:
@@ -943,6 +972,11 @@ class ConfigMixin:
             "kr_continuity_max_offset_adj": self.kr_continuity_max_offset_adj_var.get() if hasattr(self, "kr_continuity_max_offset_adj_var") else "",
             "kr_uncommon_reclist_stable_mode": self.kr_uncommon_reclist_stable_mode_var.get() if hasattr(self, "kr_uncommon_reclist_stable_mode_var") else False,
             "ml_same_language_borrow_only": self.ml_same_language_borrow_only_var.get() if hasattr(self, "ml_same_language_borrow_only_var") else True,
+            "mapping_strict_mode": (
+                self._normalize_mapping_strict_mode(self.mapping_strict_mode_var.get())
+                if hasattr(self, "mapping_strict_mode_var") and hasattr(self, "_normalize_mapping_strict_mode")
+                else (self.mapping_strict_mode_var.get() if hasattr(self, "mapping_strict_mode_var") else "off")
+            ),
             "language": self.lang_var.get(),
             "auto_format": self.auto_format_var.get(),
             "ja_alias_style": self.ja_alias_style_var.get(),
@@ -1021,7 +1055,8 @@ class ConfigMixin:
                 if saved_style in {"원본 그대로", "히라가나", "로마자"}:
                     self.ja_alias_style_var.set(saved_style)
             if "aligner" in config and hasattr(self, "aligner_var"):
-                self.aligner_var.set("MFA")
+                saved_aligner = normalize_aligner_name(config.get("aligner", "mfa"), default="mfa")
+                self.aligner_var.set("Domino (JP)" if saved_aligner == "domino" else "MFA")
             if hasattr(self, "show_advanced_aligner_var"):
                 self.show_advanced_aligner_var.set(False)
             if hasattr(self, "mfa_align_profile_var"):
@@ -1279,6 +1314,15 @@ class ConfigMixin:
                     self.ml_coupled_backend_var.set(backend)
             if "ml_coupled_strict_constraint" in config and hasattr(self, "ml_coupled_strict_constraint_var"):
                 self.ml_coupled_strict_constraint_var.set(bool(config.get("ml_coupled_strict_constraint", False)))
+            if "mapping_strict_mode" in config and hasattr(self, "mapping_strict_mode_var"):
+                if hasattr(self, "_normalize_mapping_strict_mode"):
+                    mode = self._normalize_mapping_strict_mode(config.get("mapping_strict_mode", "off"))
+                else:
+                    mode = str(config.get("mapping_strict_mode", "off") or "off").strip().lower()
+                if hasattr(self, "_describe_mapping_strict_mode"):
+                    self.mapping_strict_mode_var.set(self._describe_mapping_strict_mode(mode))
+                else:
+                    self.mapping_strict_mode_var.set(mode)
             if "ml_model_root_kr" in config and hasattr(self, "ml_model_root_kr_var"):
                 self.ml_model_root_kr_var.set(str(config.get("ml_model_root_kr", "") or ""))
             if "ml_model_root_ja" in config and hasattr(self, "ml_model_root_ja_var"):

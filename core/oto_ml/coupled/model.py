@@ -26,6 +26,8 @@ from core.oto_ml.features.schema import (
 COUPLED_BACKEND = "coupled_nn_v1"
 COUPLED_BACKEND_RAWMEL = "coupled_nn_v2_rawmel"
 COUPLED_MODEL_FILE = "coupled_model.pt"
+COUPLED_MODEL_ONNX_FILE = "coupled_model.onnx"
+COUPLED_MODEL_ONNX_META_FILE = "coupled_model_onnx_meta.json"
 PATCH_FEATURES = [
     "onset_patch_energy_mean",
     "onset_patch_voiced_ratio",
@@ -69,6 +71,15 @@ def _import_torch():
         return torch, nn, F
     except Exception as exc:  # pragma: no cover
         raise RuntimeError(f"torch is required for coupled backend: {exc}") from exc
+
+
+def _import_onnxruntime():
+    try:
+        import onnxruntime as ort
+
+        return ort
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(f"onnxruntime is required for coupled ONNX backend: {exc}") from exc
 
 
 # ── Utility functions ────────────────────────────────────────────────────────

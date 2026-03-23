@@ -29,13 +29,14 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-ml.txt
+            requirements-preview.txt
 
       - name: Cache Nuitka Build Artifacts
         uses: actions/cache@v4
         with:
           path: |
             ~\AppData\Local\Nuitka\Nuitka\Cache
-          key: nuitka-${{ runner.os }}-py311-preview-${{ hashFiles('requirements.txt', 'requirements-ml.txt', 'build.py', 'main.py') }}
+          key: nuitka-${{ runner.os }}-py311-preview-${{ hashFiles('requirements.txt', 'requirements-ml.txt', 'requirements-preview.txt', 'build.py', 'main.py') }}
           restore-keys: |
             nuitka-${{ runner.os }}-py311-preview-
             nuitka-${{ runner.os }}-py311-
@@ -55,6 +56,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install --prefer-binary -r requirements.txt
           pip install --prefer-binary -r requirements-ml.txt
+          pip install --no-build-isolation -r requirements-preview.txt
           pip install nuitka ordered-set zstandard
 
       - name: Build App (preview)

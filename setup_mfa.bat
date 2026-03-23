@@ -112,6 +112,8 @@ echo.
 echo Checking Japanese acoustic model...
 call :download_acoustic_model japanese_mfa
 if errorlevel 1 exit /b 1
+call :cleanup_env_caches
+if errorlevel 1 exit /b 1
 call :cleanup_old_env_if_requested
 echo.
 echo Done. You can now launch UTAU_Auto_OTO.exe.
@@ -204,6 +206,8 @@ echo [Final] Downloading Korean/Japanese acoustic models... ^(1-2 min^)
 call :download_acoustic_model korean_mfa
 if errorlevel 1 exit /b 1
 call :download_acoustic_model japanese_mfa
+if errorlevel 1 exit /b 1
+call :cleanup_env_caches
 if errorlevel 1 exit /b 1
 call :cleanup_old_env_if_requested
 echo.
@@ -351,7 +355,7 @@ if not exist "%APP_DIR%\requirements-ml.txt" (
 )
 if exist "%MICROMAMBA_EXE%" (
     echo [INFO] Installing ML runtime packages via micromamba...
-    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas scikit-learn lightgbm pytorch
+    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas lightgbm onnxruntime
     if errorlevel 1 (
         echo [WARN] Micromamba ML install failed. Falling back to pip.
     ) else (
@@ -383,7 +387,7 @@ if not exist "%MICROMAMBA_EXE%" (
         exit /b 1
     )
 )
-echo [OK] ML dependencies installed.
+echo [OK] ML runtime dependencies installed.
 goto :eof
 
 :verify_ml_runtime
@@ -392,17 +396,28 @@ if not exist "%ENV_DIR%\python.exe" (
     pause
     exit /b 1
 )
-"%ENV_DIR%\python.exe" -c "import pandas, sklearn, lightgbm, torch" >nul 2>nul
+"%ENV_DIR%\python.exe" -c "import pandas, lightgbm, onnxruntime" >nul 2>nul
 if errorlevel 1 (
-    echo [FAILED] ML runtime import failed. Missing pandas/sklearn/lightgbm/torch.
+    echo [FAILED] ML runtime import failed. Missing pandas/lightgbm/onnxruntime.
     if exist "%MICROMAMBA_EXE%" (
-        echo        Try: "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas scikit-learn lightgbm pytorch
+        echo        Try: "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas lightgbm onnxruntime
     ) else (
         echo        Re-run setup_mfa.bat --with-ml
     )
     pause
     exit /b 1
 )
+goto :eof
+
+:cleanup_env_caches
+echo Cleaning package caches to reduce final install size...
+if exist "%MICROMAMBA_EXE%" (
+    "%MICROMAMBA_EXE%" clean -a -y -r "%MICROMAMBA_ROOT%" >nul 2>nul
+)
+if exist "%ENV_DIR%\python.exe" (
+    "%ENV_DIR%\python.exe" -m pip cache purge >nul 2>nul
+)
+echo [OK] Cache cleanup complete.
 goto :eof
 
 :install_korean_support

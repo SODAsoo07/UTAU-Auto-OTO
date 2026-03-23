@@ -3,6 +3,7 @@ import locale
 import subprocess as sp
 
 from core.alignment_pipeline import run_alignment_with_fallback
+from core.domino_runner import check_domino_ready
 from core.ja_lab_generator import generate_ja_dictionary, generate_ja_labs
 from core.ja_oto_generator import (
     apply_ja_autotune_profile_to_oto,
@@ -34,7 +35,7 @@ from core.oto_generator import (
     save_kr_autotune_profile,
     train_kr_autotune_profile,
 )
-from core.pipeline_status import normalize_aligner_name
+from core.pipeline_status import OK, has_textgrid_files, normalize_aligner_name
 
 
 
@@ -328,6 +329,28 @@ class PipelineActionsMixin:
             if not download_mfa_model(self.mfa_path, language=lang, callback=self._append_log):
                 self._append_log("❌ MFA 모델 다운로드 실패")
                 return False
+
+        # 설치 직후 캐시를 정리해 최종 설치 용량을 줄입니다(런타임 성능 영향 없음).
+        try:
+            if os.path.exists(micromamba_exe):
+                self._append_log("🧹 Micromamba 캐시 정리 중...")
+                sp.run(
+                    [micromamba_exe, "clean", "-a", "-y", "-r", micromamba_root],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+            env_python = os.path.join(env_dir, "python.exe")
+            if os.path.exists(env_python):
+                self._append_log("🧹 pip 캐시 정리 중...")
+                sp.run(
+                    [env_python, "-m", "pip", "cache", "purge"],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+        except Exception as e:
+            self._append_log(f"⚠ 캐시 정리 단계에서 오류가 발생했습니다: {e}")
 
         if os.path.exists(micromamba_archive):
             try:
@@ -656,20 +679,62 @@ class PipelineActionsMixin:
                 output_dir = os.path.join(wav_dir, "textgrids")
                 align_ok = False
                 align_err = ""
+                overwrite_existing_tg = False
+                has_existing_tg = has_textgrid_files(output_dir)
+                if has_existing_tg:
+                    overwrite_existing_tg = bool(
+                        self._ask_yes_no_dialog(
+                            "기존 TextGrid 감지",
+                            "기존 TextGrid 파일이 있습니다.\n정렬 결과를 덮어쓰시겠습니까?\n\n"
+                            "예: 기존 TextGrid 삭제 후 다시 정렬\n"
+                            "아니오: 기존 결과 유지(정렬 건너뜀)",
+                            default=False,
+                        )
+                    )
+                    if overwrite_existing_tg:
+                        self._append_log("ℹ 기존 TextGrid를 덮어쓰도록 정렬을 다시 실행합니다.")
+                    else:
+                        self._append_log("ℹ 기존 TextGrid를 유지합니다. 정렬 단계는 건너뜁니다.")
+                use_existing_tg_only = bool(has_existing_tg and not overwrite_existing_tg)
                 align_engine = self.aligner_var.get()
                 primary_engine = normalize_aligner_name(align_engine, default="mfa")
-                fallback_engine = ""
-                self._set_status("3/4 - MFA 정렬 준비 중...")
-                if not self._ensure_mfa_ready_for_language(lang):
-                    self._append_log("❌ MFA 설치/모델 준비 실패")
-                    self._set_status("❌ MFA 설치/모델 준비 실패")
-                    return
+                fallback_engine = "mfa" if primary_engine == "domino" else ""
+                if not use_existing_tg_only:
+                    if primary_engine == "domino":
+                        if lang != "japanese":
+                            self._append_log("❌ Domino (JP) 정렬은 일본어에서만 지원됩니다.")
+                            self._set_status("❌ Domino는 일본어 전용입니다.")
+                            return
+                        self._set_status("3/4 - Domino 정렬 준비 중...")
+                        domino_ready = check_domino_ready(language=lang, wav_folder=wav_dir, callback=self._append_log)
+                        if str(domino_ready.get("code", "")).upper() != OK:
+                            self._append_log("⚠ Domino 준비 미완료: MFA 폴백을 시도합니다.")
+                    else:
+                        self._set_status("3/4 - MFA 정렬 준비 중...")
+                        if not self._ensure_mfa_ready_for_language(lang):
+                            self._append_log("❌ MFA 설치/모델 준비 실패")
+                            self._set_status("❌ MFA 설치/모델 준비 실패")
+                            return
                 mfa_profile = (
                     self._get_mfa_align_profile_code()
                     if hasattr(self, "_get_mfa_align_profile_code")
                     else "accurate"
                 )
-                self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
+                if primary_engine == "mfa":
+                    self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
+                else:
+                    self._append_log("ℹ 정렬 엔진: Domino (JP) + MFA fallback")
+                mfa_runtime_options = (
+                    self._build_mfa_runtime_options()
+                    if hasattr(self, "_build_mfa_runtime_options")
+                    else {"constrained_mode": "off", "recursive_mfa": True}
+                )
+                strict_label = (
+                    self._describe_mapping_strict_mode(mfa_runtime_options.get("constrained_mode", "off"))
+                    if hasattr(self, "_describe_mapping_strict_mode")
+                    else str(mfa_runtime_options.get("constrained_mode", "off"))
+                )
+                self._append_log(f"ℹ MFA constrained mode: {strict_label}")
 
                 align_result = run_alignment_with_fallback(
                     language=lang,
@@ -684,6 +749,8 @@ class PipelineActionsMixin:
                         if hasattr(self, "_get_mfa_align_profile_code")
                         else "accurate"
                     ),
+                    mfa_runtime_options=mfa_runtime_options,
+                    overwrite_existing_textgrids=overwrite_existing_tg,
                     callback=self._append_log,
                 )
                 align_ok = bool(align_result.get("ok", False))

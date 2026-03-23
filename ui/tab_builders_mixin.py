@@ -723,13 +723,33 @@ class TabBuildersMixin:
 
         aligner_frame = ctk.CTkFrame(container)
         aligner_frame.pack(fill="x", padx=10, pady=5)
+        if not hasattr(self, "mapping_strict_mode_var"):
+            self.mapping_strict_mode_var = ctk.StringVar(value="off")
+        strict_row = ctk.CTkFrame(aligner_frame, fg_color="transparent")
+        strict_row.pack(fill="x", padx=12, pady=(8, 2))
+        ctk.CTkLabel(
+            strict_row,
+            text="토큰 매핑 엄격도",
+            text_color="#B0BEC5",
+            width=130,
+            anchor="w",
+        ).pack(side="left")
+        strict_mode_menu = ctk.CTkOptionMenu(
+            strict_row,
+            values=["off", "적당히 엄격", "완전 엄격"],
+            variable=self.mapping_strict_mode_var,
+            width=160,
+            command=lambda _v: self._save_config(),
+        )
+        _style_blue_menu(strict_mode_menu)
+        strict_mode_menu.pack(side="left", padx=(8, 8))
         ctk.CTkLabel(
             aligner_frame,
-            text="고급 정렬 엔진 옵션은 현재 제공하지 않습니다.",
-            text_color="gray",
+            text="음절 오매핑을 줄이는 대신 자동 설정에서 스킵되는 에일리어스가 늘어날 수 있습니다.\n완전 엄격/적당히 엄격에서만 Constrained MFA(탐색공간 축소)가 적용됩니다.",
+            text_color="#9E9E9E",
             wraplength=740,
             justify="left",
-        ).pack(anchor="w", padx=12, pady=(10, 10))
+        ).pack(anchor="w", padx=12, pady=(2, 10))
 
     def _resolve_param_defaults_for_current_context(self):
         lang = self._get_language() if hasattr(self, "_get_language") else "korean"
