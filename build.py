@@ -50,8 +50,10 @@ RUNTIME_DATA_PATHS = [
 RELEASE_AUX_FILES = [
     os.path.join(APP_DIR, "setup_mfa.bat"),
     os.path.join(APP_DIR, "scripts", "runtime_recovery.ps1"),
+    os.path.join(APP_DIR, "scripts", "startup_diagnose.ps1"),
     os.path.join(APP_DIR, "release_assets", "먼저 실행.txt"),
     os.path.join(APP_DIR, "release_assets", "설치_도우미.bat"),
+    os.path.join(APP_DIR, "scripts", "startup_diagnose.bat"),
 ]
 APP_ICON_CANDIDATES = [
     os.path.join(APP_DIR, "release_assets", "AutoOTO-icon.ico"),

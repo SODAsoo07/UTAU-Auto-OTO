@@ -26,6 +26,39 @@ if ([string]::IsNullOrWhiteSpace($SourceDir)) {
 
 $repoRoot = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 
+function Sync-FileIfNeeded {
+    param(
+        [string]$SourcePath,
+        [string]$DestinationPath,
+        [string]$Label
+    )
+
+    if (-not (Test-Path -LiteralPath $SourcePath)) {
+        Write-Host "[WARN] $Label not found; sync skipped:"
+        Write-Host "  - $SourcePath"
+        return
+    }
+
+    $needsSync = $true
+    if (Test-Path -LiteralPath $DestinationPath) {
+        try {
+            $srcHash = (Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash
+            $dstHash = (Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256).Hash
+            if ($srcHash -eq $dstHash) {
+                $needsSync = $false
+            }
+        } catch {
+            $needsSync = $true
+        }
+    }
+
+    if ($needsSync) {
+        Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force
+        Write-Host "[INFO] Synced latest $Label into release payload source:"
+        Write-Host "  - $DestinationPath"
+    }
+}
+
 function Resolve-AbsolutePath {
     param(
         [string]$InputPath,
@@ -58,54 +91,34 @@ if (-not (Test-Path -LiteralPath $sourceAbs)) {
 
 $setupMfaSrc = Join-Path $repoRoot "setup_mfa.bat"
 $setupMfaDst = Join-Path $sourceAbs "setup_mfa.bat"
-if (Test-Path -LiteralPath $setupMfaSrc) {
-    $needsSync = $true
-    if (Test-Path -LiteralPath $setupMfaDst) {
-        try {
-            $srcHash = (Get-FileHash -LiteralPath $setupMfaSrc -Algorithm SHA256).Hash
-            $dstHash = (Get-FileHash -LiteralPath $setupMfaDst -Algorithm SHA256).Hash
-            if ($srcHash -eq $dstHash) {
-                $needsSync = $false
-            }
-        } catch {
-            $needsSync = $true
-        }
-    }
-    if ($needsSync) {
-        Copy-Item -LiteralPath $setupMfaSrc -Destination $setupMfaDst -Force
-        Write-Host "[INFO] Synced latest setup_mfa.bat into release payload source:"
-        Write-Host "  - $setupMfaDst"
-    }
-}
+Sync-FileIfNeeded -SourcePath $setupMfaSrc -DestinationPath $setupMfaDst -Label "setup_mfa.bat"
 
 $runtimeRecoverySrc = Join-Path $repoRoot "scripts\runtime_recovery.ps1"
 $runtimeRecoveryDst = Join-Path $sourceAbs "runtime_recovery.ps1"
-if (Test-Path -LiteralPath $runtimeRecoverySrc) {
-    $needsRuntimeRecoverySync = $true
-    if (Test-Path -LiteralPath $runtimeRecoveryDst) {
-        try {
-            $srcHash = (Get-FileHash -LiteralPath $runtimeRecoverySrc -Algorithm SHA256).Hash
-            $dstHash = (Get-FileHash -LiteralPath $runtimeRecoveryDst -Algorithm SHA256).Hash
-            if ($srcHash -eq $dstHash) {
-                $needsRuntimeRecoverySync = $false
-            }
-        } catch {
-            $needsRuntimeRecoverySync = $true
-        }
-    }
-    if ($needsRuntimeRecoverySync) {
-        Copy-Item -LiteralPath $runtimeRecoverySrc -Destination $runtimeRecoveryDst -Force
-        Write-Host "[INFO] Synced latest runtime_recovery.ps1 into release payload source:"
-        Write-Host "  - $runtimeRecoveryDst"
-    }
-} else {
-    Write-Host "[WARN] runtime_recovery.ps1 not found at scripts/runtime_recovery.ps1; sync skipped."
-}
+Sync-FileIfNeeded -SourcePath $runtimeRecoverySrc -DestinationPath $runtimeRecoveryDst -Label "runtime_recovery.ps1"
+
+$startupDiagnoseSrc = Join-Path $repoRoot "scripts\startup_diagnose.ps1"
+$startupDiagnoseDst = Join-Path $sourceAbs "startup_diagnose.ps1"
+Sync-FileIfNeeded -SourcePath $startupDiagnoseSrc -DestinationPath $startupDiagnoseDst -Label "startup_diagnose.ps1"
+
+$helperSetupSrc = Join-Path $repoRoot "release_assets\설치_도우미.bat"
+$helperSetupDst = Join-Path $sourceAbs "설치_도우미.bat"
+Sync-FileIfNeeded -SourcePath $helperSetupSrc -DestinationPath $helperSetupDst -Label "설치_도우미.bat"
+
+$helperDiagnoseSrc = Join-Path $repoRoot "scripts\startup_diagnose.bat"
+$helperDiagnoseDst = Join-Path $sourceAbs "startup_diagnose.bat"
+Sync-FileIfNeeded -SourcePath $helperDiagnoseSrc -DestinationPath $helperDiagnoseDst -Label "startup_diagnose.bat"
+
+$quickStartSrc = Join-Path $repoRoot "release_assets\먼저 실행.txt"
+$quickStartDst = Join-Path $sourceAbs "먼저 실행.txt"
+Sync-FileIfNeeded -SourcePath $quickStartSrc -DestinationPath $quickStartDst -Label "먼저 실행.txt"
 
 $requiredPayload = @(
     @{ Name = "Main executable"; Path = (Join-Path $sourceAbs "UTAU_Auto_OTO\\UTAU_Auto_OTO.exe") },
     @{ Name = "MFA setup script"; Path = (Join-Path $sourceAbs "setup_mfa.bat") },
     @{ Name = "Runtime recovery script"; Path = (Join-Path $sourceAbs "runtime_recovery.ps1") },
+    @{ Name = "Startup diagnose script"; Path = (Join-Path $sourceAbs "startup_diagnose.ps1") },
+    @{ Name = "Startup diagnose launcher"; Path = (Join-Path $sourceAbs "startup_diagnose.bat") },
     @{ Name = "Release channel metadata"; Path = (Join-Path $sourceAbs "release_channel.json") }
 )
 $missingPayload = @()

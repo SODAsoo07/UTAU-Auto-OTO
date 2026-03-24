@@ -1,4 +1,4 @@
-#define MyAppName "UTAU Auto OTO"
+﻿#define MyAppName "UTAU Auto OTO"
 #define MyAppPublisher "UTAU Auto OTO"
 #define MyAppExeName "UTAU_Auto_OTO\\UTAU_Auto_OTO.exe"
 
@@ -81,7 +81,13 @@ Source: "{src}\setup_mfa.bat"; DestDir: "{app}"; DestName: "setup_mfa.bat"; Flag
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autoprograms}\{#MyAppName} Startup Diagnose"; Filename: "{app}\startup_diagnose.bat"; Check: FileExists(ExpandConstant('{app}\startup_diagnose.bat'))
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}\.env"
+Type: filesandordirs; Name: "{app}\micromamba"
+Type: filesandordirs; Name: "{app}\.mfa_root_ascii"
 
 [Run]
 Filename: "{app}\setup_mfa.bat"; Description: "Install/verify MFA runtime"; Flags: postinstall shellexec waituntilterminated skipifsilent; Tasks: setupmfa; Check: FileExists(ExpandConstant('{app}\setup_mfa.bat'))
