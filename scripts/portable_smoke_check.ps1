@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$PortableRoot = "",
     [string]$WorkDir = "portable_output",
     [int]$LaunchWaitSeconds = 10,
@@ -39,7 +39,8 @@ if (-not (Test-Path -LiteralPath $portableAbs)) {
 }
 
 New-Item -ItemType Directory -Path $workAbs -Force | Out-Null
-$testRoot = Join-Path $workAbs "smoke_path_한글 공백"
+$koreanPathLabel = [string]::Concat([char]0xD55C, [char]0xAE00, " ", [char]0xACF5, [char]0xBC31)
+$testRoot = Join-Path $workAbs ("smoke_path_" + $koreanPathLabel)
 if (Test-Path -LiteralPath $testRoot) {
     Remove-Item -LiteralPath $testRoot -Recurse -Force
 }
@@ -75,13 +76,16 @@ $requiredRelativePaths = @(
     "runtime_recovery.ps1",
     "startup_diagnose.ps1",
     "startup_diagnose.bat",
-    "UTAU_Auto_OTO.lnk",
+    "Launch_UTAU_Auto_OTO.cmd",
     "UTAU_Auto_OTO\UTAU_Auto_OTO.exe"
 )
 foreach ($rel in $requiredRelativePaths) {
     $probe = Join-Path $testRoot $rel
     Add-Check -Name ("required_file_" + ($rel -replace "[\\/: ]", "_")) -Passed (Test-Path -LiteralPath $probe) -Value $probe -Required $true
 }
+
+$legacyShortcut = Join-Path $testRoot "UTAU_Auto_OTO.lnk"
+Add-Check -Name "optional_file_UTAU_Auto_OTO_lnk" -Passed (Test-Path -LiteralPath $legacyShortcut) -Value $legacyShortcut -Required $false
 
 $appExe = Join-Path $testRoot "UTAU_Auto_OTO\UTAU_Auto_OTO.exe"
 $setupMfa = Join-Path $testRoot "setup_mfa.bat"
@@ -106,7 +110,7 @@ if (Test-Path -LiteralPath $setupMfa) {
 
     $setupRc = -1
     try {
-        $proc = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "call ""$setupMfa"" --help") -Wait -PassThru
+        $proc = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "call `"$setupMfa`" --help") -Wait -PassThru
         $setupRc = $proc.ExitCode
     } catch {
         Add-Check -Name "setup_mfa_help_exit_zero" -Passed $false -Value $setupMfa -Detail $_.Exception.Message -Required $true

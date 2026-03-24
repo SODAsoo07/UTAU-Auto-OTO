@@ -223,9 +223,17 @@ def _candidate_mfa_runtime_roots() -> List[str]:
 
     if getattr(sys, 'frozen', False):
         app_dir = os.path.dirname(sys.executable)
-        _add(app_dir)
+        parent_dir = os.path.dirname(app_dir)
+        # Portable release layout:
+        # <payload_root>\UTAU_Auto_OTO\UTAU_Auto_OTO.exe
+        # setup_mfa/runtime env are created in <payload_root>\.env.
+        # Prefer payload_root first to avoid selecting stale bundled env.
         if os.path.basename(app_dir).lower() in {"utau_auto_oto", "auto_oto"}:
-            _add(os.path.dirname(app_dir))
+            _add(parent_dir)
+            _add(app_dir)
+        else:
+            _add(app_dir)
+            _add(parent_dir)
     else:
         source_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         _add(source_root)
@@ -292,13 +300,22 @@ def _candidate_mfa_executable_paths():
         app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     parent_dir = os.path.dirname(app_dir)
     shared_env_dir = get_default_mfa_env_dir()
-    env_candidates = [
-        os.path.join(app_dir, '.env'),
-        os.path.join(app_dir, 'env'),
-        os.path.join(parent_dir, '.env'),
-        os.path.join(parent_dir, 'env'),
-        shared_env_dir,
-    ]
+    env_candidates = [shared_env_dir]
+    # Prefer payload-root env in portable frozen layout.
+    if getattr(sys, 'frozen', False) and os.path.basename(app_dir).lower() in {"utau_auto_oto", "auto_oto"}:
+        env_candidates.extend([
+            os.path.join(parent_dir, '.env'),
+            os.path.join(parent_dir, 'env'),
+            os.path.join(app_dir, '.env'),
+            os.path.join(app_dir, 'env'),
+        ])
+    else:
+        env_candidates.extend([
+            os.path.join(app_dir, '.env'),
+            os.path.join(app_dir, 'env'),
+            os.path.join(parent_dir, '.env'),
+            os.path.join(parent_dir, 'env'),
+        ])
     candidates = []
     for env_dir in env_candidates:
         if not env_dir:
@@ -722,7 +739,7 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
         ok, _detail = _check_env_imports(
             python_exe,
             env,
-            "import pip; import pkg_resources; import wheel",
+            "import pip; import setuptools; import wheel",
         )
         return bool(ok)
 
@@ -950,7 +967,7 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
     else:
         log("[MFA] Bundled/online get-pip.py could not be resolved.")
 
-    log("[MFA] Failed to restore pip/setuptools/pkg_resources/wheel")
+    log("[MFA] Failed to restore pip/setuptools/wheel")
     return False
 
 
@@ -986,7 +1003,7 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
 
     if not resolved or not os.path.exists(resolved):
         report["issues"].append("mfa_missing")
-        log("[MFA] 繝ｻ繝ｻ蜊ｿ: MFA 繝ｻ・､蠏ゅ・逕ｯ隴ｷ謾ｵ繝ｻ繝ｻ繝ｻ・ｾ繝ｻﾂ 繝ｻ・ｻ蠏よｺ｢諷｣繝ｻ螢ｱ蜈ｱ.")
+        log("[MFA] MFA executable was not found.")
         return report
 
     report["checks"]["mfa_executable"] = True
@@ -1005,7 +1022,7 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
             report["issues"].append("python_rebuild_required")
         if report["checks"]["python_exe"]:
             env = _get_conda_env(resolved)
-            ok, _detail = _check_env_imports(python_exe, env, 'import pip; import pkg_resources; import wheel')
+            ok, _detail = _check_env_imports(python_exe, env, 'import pip; import setuptools; import wheel')
             report["checks"]["packaging_stack"] = ok
             if not ok:
                 report["issues"].append("packaging_stack_missing")
@@ -1177,10 +1194,10 @@ def check_mfa_model(mfa_path, language='korean'):
         (繝ｻ・､繝ｻ繝ｻ繝ｻ・ｬ繝ｻﾂ: bool, 繝ｻ閧･莠ｨ繝ｻﾂ: str)
     """
     if not mfa_path:
-        return False, "MFA 繝ｻ・､蠏ゅ・逕ｯ隴ｷ謾ｵ繝ｻ繝ｻ繝ｻ・ｾ繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ諷｣繝ｻ螢ｱ蜈ｱ."
+        return False, "MFA executable not found."
 
     model_name = 'japanese_mfa' if language == 'japanese' else 'korean_mfa'
-    lang_label = '繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ' if language == 'japanese' else '・第㈲・ｵ・ｭ繝ｻ・ｴ'
+    lang_label = 'Japanese' if language == 'japanese' else 'Korean'
 
     try:
         env = _get_conda_env(mfa_path)
@@ -1192,17 +1209,17 @@ def check_mfa_model(mfa_path, language='korean'):
         stderr_text = _decode_subprocess_output(result.stderr)
         combined_text = f"{stdout_text}\n{stderr_text}"
         if model_name in combined_text:
-            return True, f"{lang_label} MFA 繝ｻ・ｨ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ・､繝ｻ菫ｯ謐ｮ繝ｻ・ｴ 繝ｻ貅｢諷｣繝ｻ螢ｱ蜈ｱ."
+            return True, f"{lang_label} MFA model is available."
         if _has_local_acoustic_model_artifact(mfa_path, model_name, env=env):
-            return True, f"{lang_label} MFA 繝ｻ・ｨ繝ｻ・ｸ 繝ｻ諛搾ｽｻ・ｬ 繝ｻ繝ｻ諱千髪・ｩ蟄厄ｽｸ繝ｻ・ｼ 蠍ｹ闖ｩ謾､蠏よｺ｢諷｣繝ｻ螢ｱ蜈ｱ."
+            return True, f"{lang_label} MFA model is available (local artifact found)."
         if result.returncode != 0:
             return False, (
-                f"{lang_label} MFA 繝ｻ・ｨ繝ｻ・ｸ 蠍ｹ闖ｩ謾､ 繝ｻ繝ｻ・ｰ・ｹ繝ｻ・ｴ 繝ｻ・､逕ｯ・ｨ蠏よｺ｢諷｣繝ｻ螢ｱ蜈ｱ(code={result.returncode}). "
-                "繝ｻ・ｨ繝ｻ・ｸ 繝ｻ・､繝ｻ・ｴ繝ｻ鄂ｹ邉悶・ﾂ ・代・蝗茨ｨ托ｽｩ繝ｻ螢ｱ蜈ｱ."
+                f"{lang_label} MFA model check failed (code={result.returncode}). "
+                "Please re-download the model."
             )
-        return False, f"{lang_label} MFA 繝ｻ・ｨ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ・､繝ｻ菫ｯ謐ｮ繝ｻ・ｴ 繝ｻ貅｢・ｧﾂ 繝ｻ蝟懈・繝ｻ螢ｱ蜈ｱ. 繝ｻ・､繝ｻ・ｴ繝ｻ鄂ｹ邉悶・ﾂ ・代・蝗茨ｨ托ｽｩ繝ｻ螢ｱ蜈ｱ."
+        return False, f"{lang_label} MFA model is missing. Please run model download."
     except Exception as e:
-        return False, f"MFA 繝ｻ・ｨ繝ｻ・ｸ 蠍ｹ闖ｩ謾､ 繝ｻ・､逕ｯ・ｨ: {e}"
+        return False, f"MFA model check failed: {e}"
 
 
 def _candidate_mfa_root_dirs(mfa_path: str, env: Optional[dict] = None) -> List[str]:
@@ -1269,7 +1286,7 @@ def check_mfa_ready(language='korean', mfa_path=''):
         return make_runtime_report(
             "align",
             ALIGN_EXEC_MISSING,
-            "MFA 繝ｻ・､蠏ゅ・逕ｯ隴ｷ謾ｵ繝ｻ繝ｻ繝ｻ・ｾ繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ諷｣繝ｻ螢ｱ蜈ｱ.",
+            "MFA executable not found.",
             engine="mfa",
             language=str(language or "korean").strip().lower(),
             mfa_path=str(resolved_mfa or ""),
@@ -1281,7 +1298,7 @@ def check_mfa_ready(language='korean', mfa_path=''):
         return make_runtime_report(
             "align",
             ALIGN_MODEL_MISSING,
-            msg or "MFA 繝ｻ・ｨ繝ｻ・ｸ繝ｻ繝ｻ繝ｻ・ｾ繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ諷｣繝ｻ螢ｱ蜈ｱ.",
+            msg or "MFA model is missing.",
             engine="mfa",
             language=str(language or "korean").strip().lower(),
             mfa_path=str(resolved_mfa or ""),
@@ -1322,7 +1339,7 @@ def ensure_korean_support(mfa_path, callback=None):
     if not ensure_mfa_python_packaging_stack(mfa_path, callback=callback):
         log('[MFA] Failed to prepare base Python packaging tools before Korean dependency install')
         return False
-    pkg_check_cmd = [python_exe, '-c', 'import pkg_resources']
+    pkg_check_cmd = [python_exe, '-c', 'import pip, setuptools, wheel']
     check_cmd = [python_exe, '-c', _korean_tokenizer_import_expr()]
     try:
         env = _get_conda_env(mfa_path)
@@ -1575,7 +1592,7 @@ def ensure_japanese_support(mfa_path, callback=None):
     if not os.path.exists(python_exe):
         return True
     if not ensure_mfa_python_packaging_stack(mfa_path, callback=callback):
-        log("隨橸｣ｰ繝ｻ繝ｻMFA Python 逕ｯ・ｨ蠅ｲ・､繝ｻﾂ 繝ｻ繝ｻ・ｵ・ｬ 繝ｻ・ｵ繝ｻ・ｬ繝ｻ繝ｻ繝ｻ・､逕ｯ・ｨ・托ｽｴ 繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ 繝ｻ・､繝ｻ菫ｯ・･・ｼ 繝ｻ繝ｻ繝ｻ・托｣ｰ 繝ｻ繝ｻ繝ｻ繝ｻ諷｣繝ｻ螢ｱ蜈ｱ.")
+        log("[MFA] Failed to prepare Python packaging tools before Japanese dependency install.")
         return False
 
     check_cmd = [python_exe, '-c', 'import spacy; import sudachipy; import sudachidict_core']
@@ -1585,7 +1602,7 @@ def ensure_japanese_support(mfa_path, callback=None):
         if result.returncode == 0:
             return True
 
-        log("﨟樣・MFA 繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ 螂晢｣ｰ蠅橸ｽｬ繝ｻ蛟第匿繝ｻﾂ 繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ(spacy, sudachipy, sudachidict-core) 繝ｻ・､繝ｻ繝ｻ蠍ｹ闖ｩ謾､ 繝ｻ繝ｻ..")
+        log("[MFA] Installing Japanese tokenizer dependencies (spacy, sudachipy, sudachidict-core)...")
 
         install_cmd = None
         if os.path.exists(conda_exe):
@@ -1606,25 +1623,25 @@ def ensure_japanese_support(mfa_path, callback=None):
                 install_cmd = [pip_exe, 'install', 'spacy', 'sudachipy', 'sudachidict-core']
 
         if not install_cmd:
-            log("隨橸｣ｰ繝ｻ繝ｻ繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ 繝ｻ蟆門ｾ・繝ｻ・､繝ｻ繝ｻ繝ｻ・ｽ繝ｻ鄂ｹ・･・ｼ 繝ｻ・ｾ繝ｻﾂ 繝ｻ・ｻ蠏よｺ｢諷｣繝ｻ螢ｱ蜈ｱ.")
+            log("[MFA] No conda/pip installer is available for Japanese dependency setup.")
             return False
 
-        log(f"   -> 繝ｻ・､蠏ゅ・繝ｻ繝ｻ・ｰ・ｹ繝ｻ・ｴ: {' '.join(install_cmd)}")
+        log(f"   -> install cmd: {' '.join(install_cmd)}")
         install_result = _run_subprocess_text(install_cmd, env=env)
         if install_result.returncode != 0:
             if install_result.stderr:
-                log(f"   隨橸｣ｰ繝ｻ繝ｻ繝ｻ・､繝ｻ繝ｻstderr: {install_result.stderr[:500]}")
+                log(f"   install stderr: {install_result.stderr[:500]}")
             if install_result.stdout:
-                log(f"   隨橸｣ｰ繝ｻ繝ｻ繝ｻ・､繝ｻ繝ｻstdout: {install_result.stdout[:500]}")
+                log(f"   install stdout: {install_result.stdout[:500]}")
             if os.path.exists(pip_exe):
                 pip_cmd = [pip_exe, 'install', 'spacy', 'sudachipy', 'sudachidict-core']
-                log(f"   -> 繝ｻﾂ繝ｻ・ｴ 繝ｻ・､繝ｻ繝ｻ繝ｻ繝ｻ・ｰ・ｹ繝ｻ・ｴ(pip): {' '.join(pip_cmd)}")
+                log(f"   -> fallback pip cmd: {' '.join(pip_cmd)}")
                 pip_result = _run_subprocess_text(pip_cmd, env=env)
                 if pip_result.returncode != 0:
                     if pip_result.stderr:
-                        log(f"   隨橸｣ｰ繝ｻ繝ｻpip stderr: {pip_result.stderr[:500]}")
+                        log(f"   pip stderr: {pip_result.stderr[:500]}")
                     if pip_result.stdout:
-                        log(f"   隨橸｣ｰ繝ｻ繝ｻpip stdout: {pip_result.stdout[:500]}")
+                        log(f"   pip stdout: {pip_result.stdout[:500]}")
                     return False
             else:
                 return False
@@ -1634,12 +1651,12 @@ def ensure_japanese_support(mfa_path, callback=None):
             log("[MFA] Japanese tokenizer dependencies are ready.")
             return True
 
-        log("隨橸｣ｰ繝ｻ繝ｻ繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ 繝ｻ・､繝ｻ繝ｻ蠑｡繝ｻ荵ｱ繝ｻ繝ｻimport 繝ｻﾂ繝ｻ譎ｧ荵ｱ 繝ｻ・､逕ｯ・ｨ蠏よｺ｢諷｣繝ｻ螢ｱ蜈ｱ.")
+        log("[MFA] Japanese dependency install completed, but import verification still failed.")
         if verify.stderr:
-            log(f"   繝ｻ繝ｻ笏ｷ stderr: {verify.stderr[:500]}")
+            log(f"   verify stderr: {verify.stderr[:500]}")
         return False
     except Exception as e:
-        log(f"隨橸｣ｰ繝ｻ繝ｻ繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ 繝ｻ蟆門ｾ・蠍ｹ闖ｩ謾､/繝ｻ・､繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ・､繝ｻ繝ｻ繝ｻ諛阪・: {e}")
+        log(f"[MFA] Japanese dependency setup error: {e}")
         return False
 
 
@@ -1694,12 +1711,12 @@ def download_mfa_model(mfa_path, language='korean', callback=None):
     try:
         if language == 'korean':
             if not ensure_korean_support(mfa_path, callback):
-                log('隨橸｣ｰ Korean dependency prepare failed, but model download will continue.')
+                log('[MFA] Korean dependency prepare failed, but model download will continue.')
         elif language == 'japanese':
             if not ensure_japanese_support(mfa_path, callback):
-                log('隨橸｣ｰ Japanese dependency prepare failed, but model download will continue.')
+                log('[MFA] Japanese dependency prepare failed, but model download will continue.')
     except Exception as dep_exc:
-        log(f'隨橸｣ｰ Dependency prepare check raised error, but model download will continue: {dep_exc}')
+        log(f'[MFA] Dependency prepare check raised error, but model download will continue: {dep_exc}')
 
     log(f'Downloading {lang_label} MFA model...')
     try:

@@ -88,6 +88,13 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Type: filesandordirs; Name: "{app}\.env"
 Type: filesandordirs; Name: "{app}\micromamba"
 Type: filesandordirs; Name: "{app}\.mfa_root_ascii"
+; Runtime fallback roots that can be used by setup_mfa/UI auto-repair.
+Type: filesandordirs; Name: "{localappdata}\UTAU_Auto_OTO\.env"
+Type: filesandordirs; Name: "{localappdata}\UTAU_Auto_OTO\micromamba"
+Type: filesandordirs; Name: "{localappdata}\UTAU_Auto_OTO\.mfa_root_ascii"
+Type: filesandordirs; Name: "{localappdata}\UTAU_Auto_OTO_v3\.env"
+Type: filesandordirs; Name: "{localappdata}\UTAU_Auto_OTO_v3\micromamba"
+Type: filesandordirs; Name: "{localappdata}\UTAU_Auto_OTO_v3\.mfa_root_ascii"
 
 [Run]
 Filename: "{app}\setup_mfa.bat"; Description: "Install/verify MFA runtime"; Flags: postinstall shellexec waituntilterminated skipifsilent; Tasks: setupmfa; Check: FileExists(ExpandConstant('{app}\setup_mfa.bat'))

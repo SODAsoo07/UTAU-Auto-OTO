@@ -598,7 +598,7 @@ if (-not $mfaImportCheck.ok) {
     Add-Hint "MFA python module import failed. Re-run setup_mfa.bat --non-interactive --install to rebuild the environment."
 }
 
-$packagingCheck = Invoke-PythonCheck -PythonExe $pythonExe -Code "import pip,pkg_resources,wheel"
+    $packagingCheck = Invoke-PythonCheck -PythonExe $pythonExe -Code "import pip,setuptools,wheel"
 Add-Check -Name "packaging_stack_ready" -Passed $packagingCheck.ok -Value $pythonExe -Detail $packagingCheck.output.Trim() -Required $true
 if (-not $packagingCheck.ok) {
     Add-Hint "pip/setuptools/wheel check failed. Re-run setup_mfa.bat --non-interactive --install."

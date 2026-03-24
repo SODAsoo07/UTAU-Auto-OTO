@@ -207,9 +207,7 @@ class PipelineActionsMixin:
                 cwd=os.path.dirname(script_path) or None,
                 stdout=sp.PIPE,
                 stderr=sp.STDOUT,
-                text=True,
-                encoding=self._preferred_subprocess_encoding(),
-                errors="replace",
+                text=False,
                 env=env,
             )
         except Exception as e:
@@ -217,10 +215,8 @@ class PipelineActionsMixin:
             return False
 
         if process.stdout is not None:
-            for line in process.stdout:
-                text = str(line or "").strip()
-                if text:
-                    self._append_log(text)
+            for line in self._iter_decoded_stdout_lines(process):
+                self._append_log(line)
         process.wait()
         if process.returncode != 0:
             self._append_log(f"❌ setup_mfa.bat 폴백 복구 실패 (code={process.returncode})")
@@ -308,9 +304,74 @@ class PipelineActionsMixin:
         return sp.Popen(args, **kwargs)
 
     def _preferred_subprocess_encoding(self):
-        # Windows 배포 환경에서 utf-8 고정 디코딩 시 콘솔 로그가 깨지는 경우가 있어,
-        # 시스템 기본 인코딩을 우선 사용하고 실패 시 utf-8로 폴백한다.
-        return locale.getpreferredencoding(False) or "utf-8"
+        try:
+            return locale.getpreferredencoding(False) or "utf-8"
+        except Exception:
+            return "utf-8"
+
+    def _subprocess_decode_candidates(self):
+        candidates = []
+        for enc in (
+            "utf-8-sig",
+            "utf-8",
+            self._preferred_subprocess_encoding(),
+            getattr(locale, "getencoding", lambda: "")() or "",
+            "cp932",
+            "cp949",
+            "mbcs",
+        ):
+            enc = str(enc or "").strip()
+            if enc and enc not in candidates:
+                candidates.append(enc)
+        return candidates
+
+    def _score_decoded_subprocess_text(self, text):
+        score = 0
+        for ch in str(text or ""):
+            code = ord(ch)
+            if ch == "\ufffd":
+                score -= 20
+            elif 0x20 <= code <= 0x7E or ch in "\r\n\t":
+                score += 1
+            elif 0xAC00 <= code <= 0xD7A3:
+                score += 4
+            elif 0x3040 <= code <= 0x30FF or 0x4E00 <= code <= 0x9FFF:
+                score += 3
+            elif 0xFF61 <= code <= 0xFF9F:
+                score -= 6
+            elif code < 0x20:
+                score -= 10
+        return score
+
+    def _decode_subprocess_output(self, data):
+        if data is None:
+            return ""
+        if isinstance(data, str):
+            return data
+        raw = bytes(data)
+        best_text = ""
+        best_score = None
+        for enc in self._subprocess_decode_candidates():
+            try:
+                decoded = raw.decode(enc)
+            except (LookupError, UnicodeDecodeError):
+                continue
+            score = self._score_decoded_subprocess_text(decoded)
+            if best_score is None or score > best_score:
+                best_text = decoded
+                best_score = score
+        if best_score is not None:
+            return best_text
+        return raw.decode("utf-8", errors="replace")
+
+    def _iter_decoded_stdout_lines(self, process):
+        stdout = getattr(process, "stdout", None)
+        if stdout is None:
+            return
+        for raw_line in stdout:
+            line = self._decode_subprocess_output(raw_line).strip()
+            if line:
+                yield line
 
     def _install_mfa_runtime(self, language="korean"):
         import shutil
@@ -593,9 +654,7 @@ class PipelineActionsMixin:
                     [micromamba_exe, *cmd],
                     stdout=sp.PIPE,
                     stderr=sp.STDOUT,
-                    text=True,
-                    encoding=self._preferred_subprocess_encoding(),
-                    errors='replace',
+                    text=False,
                     env=env,
                 )
             except OSError as e:
@@ -607,10 +666,8 @@ class PipelineActionsMixin:
                 self._append_log(f"❌ Micromamba 실행 실패: {err}")
                 return False
             self._append_log(step_label)
-            for line in process.stdout:
-                stripped = line.strip()
-                if stripped:
-                    self._append_log(stripped)
+            for line in self._iter_decoded_stdout_lines(process):
+                self._append_log(line)
             process.wait()
             return process.returncode == 0
 
@@ -779,9 +836,7 @@ class PipelineActionsMixin:
                     [micromamba_exe, *cmd],
                     stdout=sp.PIPE,
                     stderr=sp.STDOUT,
-                    text=True,
-                    encoding=self._preferred_subprocess_encoding(),
-                    errors='replace',
+                    text=False,
                     env=env,
                 )
             except OSError as e:
@@ -793,10 +848,8 @@ class PipelineActionsMixin:
                 self._append_log(f"❌ Micromamba 실행 실패: {err}")
                 return False
             self._append_log(step_label)
-            for line in process.stdout:
-                stripped = line.strip()
-                if stripped:
-                    self._append_log(stripped)
+            for line in self._iter_decoded_stdout_lines(process):
+                self._append_log(line)
             process.wait()
             return process.returncode == 0
 
