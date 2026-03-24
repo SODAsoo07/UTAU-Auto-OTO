@@ -201,10 +201,10 @@ Add-Check -Name "runtime_mfa_entry_exists" -Passed $mfaEntryExists -Value $mfaEn
 
 if (-not $SkipSetupMfa) {
     if (Test-Path -LiteralPath $setupMfaInInstall) {
-        Write-Host "[INFO] Running setup_mfa.bat --non-interactive for recovery smoke..."
+        Write-Host "[INFO] Running setup_mfa.bat --non-interactive --install for setup smoke..."
         $setupProc = $null
         try {
-            $setupProc = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "`"$setupMfaInInstall`" --non-interactive") -PassThru
+            $setupProc = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "`"$setupMfaInInstall`" --non-interactive --install") -PassThru
             $setupDone = Wait-ProcessWithTimeout -Process $setupProc -TimeoutSeconds ($SetupMfaTimeoutMinutes * 60)
             if (-not $setupDone) {
                 Safe-StopProcess -Process $setupProc

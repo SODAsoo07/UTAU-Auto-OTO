@@ -1,7 +1,7 @@
 """
-MFA (Montreal Forced Aligner) 실행 모듈
-- 로컬 또는 포터블 Conda 환경에서 MFA 실행
-- 실시간 로그 스트리밍
+MFA (Montreal Forced Aligner) ・､嵂・・ｨ・・
+- ・懍ｻｬ ・尖株 尞ｬ奓ｰ・・Conda 嶹俾ｲｽ・川・ MFA ・､嵂・
+- ・､・懋ｰ・・懋ｷｸ ・､孖ｸ・ｬ・・
 """
 
 import os
@@ -154,6 +154,11 @@ def _default_mfa_root_dir(mfa_path="", per_process: bool = False):
     else:
         app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     root = os.path.join(app_dir, ".mfa_root_ascii")
+    if sys.platform == "win32" and (
+        _contains_non_ascii(root) or "!" in root or "%" in root
+    ):
+        public_root = str(os.environ.get("PUBLIC", r"C:\Users\Public") or r"C:\Users\Public").strip()
+        root = os.path.join(public_root, "UTAU_Auto_OTO_v3", ".mfa_root_ascii")
     if per_process:
         root = f"{root}_p{os.getpid()}"
     os.makedirs(root, exist_ok=True)
@@ -206,14 +211,29 @@ def _candidate_mfa_runtime_roots() -> List[str]:
         roots.append(os.path.abspath(path))
 
     shared_root = str(os.environ.get("UTOA_MFA_SHARED_ROOT", "") or "").strip()
+    explicit_runtime_root = str(os.environ.get("UTOA_RUNTIME_ROOT", "") or "").strip()
+    if explicit_runtime_root:
+        _add(explicit_runtime_root)
+
     if shared_root:
         _add(shared_root)
+
+    if getattr(sys, 'frozen', False):
+        app_dir = os.path.dirname(sys.executable)
+        _add(app_dir)
+        if os.path.basename(app_dir).lower() in {"utau_auto_oto", "auto_oto"}:
+            _add(os.path.dirname(app_dir))
+    else:
+        source_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        _add(source_root)
 
     local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
     if local_app_data:
         _add(os.path.join(local_app_data, "UTAU_Auto_OTO_v3"))
+        _add(os.path.join(local_app_data, "UTAU_Auto_OTO"))
     else:
         _add(os.path.join(os.path.expanduser("~"), "AppData", "Local", "UTAU_Auto_OTO_v3"))
+        _add(os.path.join(os.path.expanduser("~"), "AppData", "Local", "UTAU_Auto_OTO"))
 
     public_root = str(os.environ.get("PUBLIC", r"C:\Users\Public") or r"C:\Users\Public").strip()
     _add(os.path.join(public_root, "UTAU_Auto_OTO_v3"))
@@ -267,20 +287,25 @@ def _candidate_mfa_executable_paths():
         app_dir = os.path.dirname(sys.executable)
     else:
         app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    parent_dir = os.path.dirname(app_dir)
     shared_env_dir = get_default_mfa_env_dir()
-    candidates = [
-        os.path.join(app_dir, '.env', 'Scripts', 'mfa.exe'),
-        os.path.join(app_dir, '.env', 'Scripts', 'mfa.bat'),
-        os.path.join(app_dir, '.env', 'Scripts', 'mfa.cmd'),
-        os.path.join(app_dir, '.env', 'bin', 'mfa'),
-        os.path.join(app_dir, 'env', 'Scripts', 'mfa.exe'),
-        os.path.join(app_dir, 'env', 'Scripts', 'mfa.bat'),
-        os.path.join(app_dir, 'env', 'Scripts', 'mfa.cmd'),
-        os.path.join(shared_env_dir, 'Scripts', 'mfa.exe'),
-        os.path.join(shared_env_dir, 'Scripts', 'mfa.bat'),
-        os.path.join(shared_env_dir, 'Scripts', 'mfa.cmd'),
-        os.path.join(shared_env_dir, 'bin', 'mfa'),
+    env_candidates = [
+        os.path.join(app_dir, '.env'),
+        os.path.join(app_dir, 'env'),
+        os.path.join(parent_dir, '.env'),
+        os.path.join(parent_dir, 'env'),
+        shared_env_dir,
     ]
+    candidates = []
+    for env_dir in env_candidates:
+        if not env_dir:
+            continue
+        candidates.extend([
+            os.path.join(env_dir, 'Scripts', 'mfa.exe'),
+            os.path.join(env_dir, 'Scripts', 'mfa.bat'),
+            os.path.join(env_dir, 'Scripts', 'mfa.cmd'),
+            os.path.join(env_dir, 'bin', 'mfa'),
+        ])
     seen = set()
     unique = []
     for path in candidates:
@@ -366,8 +391,8 @@ def _stderr_has_msvc_requirement(text):
 def _emit_msvc_required_notice(callback, log_fn):
     if callback:
         callback(ALERT_MSVC_REQUIRED)
-    log_fn("⚠ Microsoft Visual C++ 14.0+ (C++ Build Tools)가 필요합니다.")
-    log_fn("   설치 링크: https://visualstudio.microsoft.com/visual-cpp-build-tools/")
+    log_fn("笞 Microsoft Visual C++ 14.0+ (C++ Build Tools)・ 﨑・囈﨑ｩ・壱共.")
+    log_fn("   ・､・・・・〓: https://visualstudio.microsoft.com/visual-cpp-build-tools/")
 
 
 def mfa_python_version_requires_downgrade(version_text: str) -> bool:
@@ -412,14 +437,14 @@ def mfa_env_requires_python_downgrade(mfa_path: str) -> bool:
 
 
 def _preflight_compute_mfcc(mfa_path, callback=None):
-    """MFA 정렬 시작 전에 compute-mfcc-feats 실행 가능 여부를 점검합니다."""
+    """MFA ・簿ｬ ・懍梠 ・・乱 compute-mfcc-feats ・､嵂・・・･ ・ｬ・・ｼ ・専ｲ﨑ｩ・壱共."""
     def log(msg):
         logger.info(msg)
         if callback:
             callback(msg)
 
     if not mfa_path:
-        return False, "MFA 실행 파일 경로가 비어 있습니다."
+        return False, "MFA ・､嵂・甯護攵 ・ｽ・懋ｰ ・・牟 ・溢慣・壱共."
 
     env = _get_conda_env(mfa_path)
     candidates = []
@@ -432,7 +457,7 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
     last_not_found = None
     for candidate in candidates:
         try:
-            # Windows + Python 3.13 조합에서는 확장자 없는 실행명 검색이 실패할 수 있다.
+            # Windows + Python 3.13 ・ｰ﨑ｩ・川・・・嶹菩棗・・・・株 ・､嵂雅ｪ・・・餓擽 ・､甯ｨ﨑 ・・・壱共.
             subprocess.run(
                 [candidate, '--help'],
                 capture_output=True,
@@ -448,19 +473,19 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
             if callback:
                 callback(ALERT_MFA_PERMISSION_DENIED)
             err = (
-                "compute-mfcc-feats 실행 권한이 없어 MFA 정렬을 시작할 수 없습니다. "
+                "compute-mfcc-feats ・､嵂・・醐復・ｴ ・・牟 MFA ・簿ｬ・・・懍梠﨑 ・・・・慣・壱共. "
                 "(WinError 5: Access denied)"
             )
-            log(f"❌ {err}")
-            log("   보안 프로그램/권한 정책/파일 차단 여부를 확인해 주세요.")
+            log(f"笶・{err}")
+            log("   ・ｴ・・嵓・｡懋ｷｸ・ｨ/・醐復 ・菩ｱ・甯護攵 ・ｨ・ｨ ・ｬ・・ｼ 嶹菩攤﨑ｴ ・ｼ・ｸ・・")
             return False, f"{err}: {e}"
         except Exception as e:
-            err = f"compute-mfcc-feats 사전 점검 중 오류: {e}"
-            log(f"❌ {err}")
+            err = f"compute-mfcc-feats ・ｬ・・・専ｲ ・・・､・・ {e}"
+            log(f"笶・{err}")
             return False, err
 
-    err = "compute-mfcc-feats를 찾지 못했습니다. MFA 환경이 손상되었을 수 있습니다."
-    log(f"❌ {err}")
+    err = "compute-mfcc-feats・ｼ ・ｾ・ ・ｻ嵂溢慣・壱共. MFA 嶹俾ｲｽ・ｴ ・川メ・們来・・・・・溢慣・壱共."
+    log(f"笶・{err}")
     if last_not_found:
         return False, f"{err}: {last_not_found}"
     return False, err
@@ -547,15 +572,14 @@ def _sanitize_alignment_dictionary_for_mfa(dict_path: str, callback=None):
 
 def _get_conda_env(mfa_path):
     """
-    Windows 환경에서 Conda 활성화 없이 mfa.exe를 직접 호출할 때 
-    DLL 로드 에러(코드 3228369023)가 발생하는 것을 막기 위해 환경 변수에 PATH를 주입합니다.
+    Windows 嶹俾ｲｽ・川・ Conda 嶹懍┳嶹・・・擽 mfa.exe・ｼ ・・・嶸ｸ・懦腹 ・・
+    DLL ・罹糖 ・尖洳(・罷糖 3228369023)・ ・懍・﨑俯株 ・・揆 ・賀ｸｰ ・・紛 嶹俾ｲｽ ・・們乱 PATH・ｼ ・ｼ・・鮒・壱共.
     """
     env = os.environ.copy()
     if sys.platform == 'win32' and mfa_path and 'Scripts' in mfa_path:
         mfa_path = os.path.abspath(mfa_path)
         env_dir = os.path.abspath(os.path.dirname(os.path.dirname(mfa_path)))
         site_packages = os.path.join(env_dir, 'Lib', 'site-packages')
-        eunjeon_data = os.path.join(site_packages, 'eunjeon', 'data')
         mecabrc = os.path.join(site_packages, 'mecabrc')
         new_paths = [
             env_dir,
@@ -567,8 +591,6 @@ def _get_conda_env(mfa_path):
         ]
         if os.path.isdir(site_packages):
             new_paths.append(site_packages)
-        if os.path.isdir(eunjeon_data):
-            new_paths.append(eunjeon_data)
         current_path = env.get('PATH', '')
         env['PATH'] = os.pathsep.join(new_paths) + os.pathsep + current_path
         env['CONDA_PREFIX'] = env_dir
@@ -593,20 +615,25 @@ def _check_env_imports(python_exe: str, env: dict, import_expr: str):
 
 
 def _korean_tokenizer_import_expr() -> str:
-    # Korean path is ready when jamo is importable and either eunjeon or mecab backend exists.
+    # Korean path is ready when jamo is importable and one mecab backend is importable.
+    # Accept both python-mecab-ko ("mecab") and mecab-python3 ("MeCab") module styles.
     return (
         "import sys\n"
         "import jamo\n"
         "ok=False\n"
         "try:\n"
-        "    import eunjeon\n"
+        "    from mecab import MeCab\n"
         "    ok=True\n"
         "except Exception:\n"
         "    try:\n"
-        "        from mecab import MeCab\n"
+        "        import MeCab\n"
         "        ok=True\n"
         "    except Exception:\n"
-        "        ok=False\n"
+        "        try:\n"
+        "            import mecab_ko\n"
+        "            ok=True\n"
+        "        except Exception:\n"
+        "            ok=False\n"
         "sys.exit(0 if ok else 1)\n"
     )
 
@@ -636,7 +663,7 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
     if ok:
         return True
 
-    log('[MFA] Python 패키지 도구(pip/setuptools/wheel) 복구 중...')
+    log('[MFA] Python 甯ｨ墲､・ ・・ｵｬ(pip/setuptools/wheel) ・ｵ・ｬ ・・..')
     repair_cmds = [
         [python_exe, '-m', 'ensurepip', '--upgrade'],
         [python_exe, '-m', 'pip', 'install', '--upgrade', 'setuptools<81', 'wheel'],
@@ -700,7 +727,7 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
 
     if not resolved or not os.path.exists(resolved):
         report["issues"].append("mfa_missing")
-        log("[MFA] 진단: MFA 실행 파일을 찾지 못했습니다.")
+        log("[MFA] ・・卿: MFA ・､嵂・甯護攵・・・ｾ・ ・ｻ嵂溢慣・壱共.")
         return report
 
     report["checks"]["mfa_executable"] = True
@@ -750,8 +777,8 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
 
 def _resolve_single_speaker_flag(mfa_path, env=None):
     """
-    MFA 버전에 따라 단일 화자 옵션 표기가 다를 수 있어(--single-speaker / --single_speaker)
-    help 출력을 보고 지원되는 표기를 선택합니다.
+    MFA ・・・乱 ・ｰ・ｼ ・ｨ・ｼ 嶹肥梵 ・ｵ・・岺懋ｸｰ・ ・､・ｼ ・・・溢牟(--single-speaker / --single_speaker)
+    help ・罹･・・・ｴ・ ・・尖据・・岺懋ｸｰ・ｼ ・夋晨鮒・壱共.
     """
     key = os.path.abspath(mfa_path or "")
     cached = _MFA_SINGLE_SPEAKER_FLAG_CACHE.get(key)
@@ -778,7 +805,7 @@ def _resolve_single_speaker_flag(mfa_path, env=None):
     except Exception:
         pass
 
-    # 기본값은 요청에 맞춰 하이픈 표기 우선
+    # ・ｰ・ｸ・廷捩 ・肥ｲｭ・・・樌ｶｰ 﨑們擽嵓・岺懋ｸｰ ・ｰ・
     _MFA_SINGLE_SPEAKER_FLAG_CACHE[key] = "--single-speaker"
     return "--single-speaker"
 
@@ -847,25 +874,25 @@ def _resolve_mfa_align_options(align_profile):
 
 def find_mfa_executable():
     """
-    시스템에 설치된 MFA 실행 파일을 탐색합니다.
-    포터블 환경 -> Conda 환경 -> 시스템 PATH 순서로 검색합니다.
+    ・懍侃奛懍乱 ・､・俯頗 MFA ・､嵂・甯護攵・・夋川ラ﨑ｩ・壱共.
+    尞ｬ奓ｰ・・嶹俾ｲｽ -> Conda 嶹俾ｲｽ -> ・懍侃奛・PATH ・懍・・・・・駕鮒・壱共.
     
     Returns:
-        MFA 실행 파일 경로 또는 None
+        MFA ・､嵂・甯護攵 ・ｽ・・・尖株 None
     """
-    # 1. 공유/레거시 포터블 환경
+    # 1. ・ｵ・/・一ｱｰ・・尞ｬ奓ｰ・・嶹俾ｲｽ
     for p in _candidate_mfa_executable_paths():
         if os.path.exists(p):
-            logger.info(f"포터블 MFA 발견: {p}")
+            logger.info(f"尞ｬ奓ｰ・・MFA ・懋ｲｬ: {p}")
             return p
 
-    # 2. 시스템 PATH
+    # 2. ・懍侃奛・PATH
     mfa_path = shutil.which('mfa')
     if mfa_path:
-        logger.info(f"시스템 MFA 발견: {mfa_path}")
+        logger.info(f"・懍侃奛・MFA ・懋ｲｬ: {mfa_path}")
         return mfa_path
 
-    # 3. Conda 환경 기본 경로
+    # 3. Conda 嶹俾ｲｽ ・ｰ・ｸ ・ｽ・・
     conda_paths = [
         os.path.expanduser('~/miniconda3/envs/aligner/Scripts/mfa.exe'),
         os.path.expanduser('~/anaconda3/envs/aligner/Scripts/mfa.exe'),
@@ -873,7 +900,7 @@ def find_mfa_executable():
     ]
     for p in conda_paths:
         if os.path.exists(p):
-            logger.info(f"Conda MFA 발견: {p}")
+            logger.info(f"Conda MFA ・懋ｲｬ: {p}")
             return p
 
     return None
@@ -881,20 +908,20 @@ def find_mfa_executable():
 
 def check_mfa_model(mfa_path, language='korean'):
     """
-    MFA 음향 모델이 다운로드되어 있는지 확인합니다.
+    MFA ・醐箕 ・ｨ・ｸ・ｴ ・､・ｴ・罹糖・們牟 ・壱株・ 嶹菩攤﨑ｩ・壱共.
     
     Args:
-        mfa_path: MFA 실행 파일 경로
-        language: 'korean' 또는 'japanese'
+        mfa_path: MFA ・､嵂・甯護攵 ・ｽ・・
+        language: 'korean' ・尖株 'japanese'
     
     Returns:
-        (설치 여부: bool, 메시지: str)
+        (・､・・・ｬ・: bool, ・肥亨・: str)
     """
     if not mfa_path:
-        return False, "MFA 실행 파일을 찾을 수 없습니다."
+        return False, "MFA ・､嵂・甯護攵・・・ｾ・・・・・・慣・壱共."
 
     model_name = 'japanese_mfa' if language == 'japanese' else 'korean_mfa'
-    lang_label = '일본어' if language == 'japanese' else '한국어'
+    lang_label = '・ｼ・ｸ・ｴ' if language == 'japanese' else '﨑懋ｵｭ・ｴ'
 
     try:
         env = _get_conda_env(mfa_path)
@@ -906,17 +933,17 @@ def check_mfa_model(mfa_path, language='korean'):
         stderr_text = _decode_subprocess_output(result.stderr)
         combined_text = f"{stdout_text}\n{stderr_text}"
         if model_name in combined_text:
-            return True, f"{lang_label} MFA 모델이 설치되어 있습니다."
+            return True, f"{lang_label} MFA ・ｨ・ｸ・ｴ ・､・俯据・ｴ ・溢慣・壱共."
         if _has_local_acoustic_model_artifact(mfa_path, model_name, env=env):
-            return True, f"{lang_label} MFA 모델 로컬 아티팩트를 확인했습니다."
+            return True, f"{lang_label} MFA ・ｨ・ｸ ・懍ｻｬ ・・恐甯ｩ孖ｸ・ｼ 嶹菩攤嵂溢慣・壱共."
         if result.returncode != 0:
             return False, (
-                f"{lang_label} MFA 모델 확인 명령이 실패했습니다(code={result.returncode}). "
-                "모델 다운로드가 필요합니다."
+                f"{lang_label} MFA ・ｨ・ｸ 嶹菩攤 ・・ｹ・ｴ ・､甯ｨ嵂溢慣・壱共(code={result.returncode}). "
+                "・ｨ・ｸ ・､・ｴ・罹糖・ 﨑・囈﨑ｩ・壱共."
             )
-        return False, f"{lang_label} MFA 모델이 설치되어 있지 않습니다. 다운로드가 필요합니다."
+        return False, f"{lang_label} MFA ・ｨ・ｸ・ｴ ・､・俯据・ｴ ・溢ｧ ・喜慣・壱共. ・､・ｴ・罹糖・ 﨑・囈﨑ｩ・壱共."
     except Exception as e:
-        return False, f"MFA 모델 확인 실패: {e}"
+        return False, f"MFA ・ｨ・ｸ 嶹菩攤 ・､甯ｨ: {e}"
 
 
 def _candidate_mfa_root_dirs(mfa_path: str, env: Optional[dict] = None) -> List[str]:
@@ -940,6 +967,12 @@ def _candidate_mfa_root_dirs(mfa_path: str, env: Optional[dict] = None) -> List[
         pass
 
     try:
+        for runtime_root in _candidate_mfa_runtime_roots():
+            _add(os.path.join(runtime_root, ".mfa_root_ascii"))
+    except Exception:
+        pass
+
+    try:
         if mfa_path:
             app_dir = os.path.dirname(os.path.dirname(os.path.abspath(mfa_path)))
             if os.path.isdir(app_dir):
@@ -949,7 +982,7 @@ def _candidate_mfa_root_dirs(mfa_path: str, env: Optional[dict] = None) -> List[
     except Exception:
         pass
 
-    # MFA 기본 루트(레거시)도 확인
+    # MFA ・ｰ・ｸ ・ｨ孖ｸ(・一ｱｰ・・・・嶹菩攤
     _add(os.path.expanduser("~/Documents/MFA"))
     return roots
 
@@ -977,7 +1010,7 @@ def check_mfa_ready(language='korean', mfa_path=''):
         return make_runtime_report(
             "align",
             ALIGN_EXEC_MISSING,
-            "MFA 실행 파일을 찾을 수 없습니다.",
+            "MFA ・､嵂・甯護攵・・・ｾ・・・・・・慣・壱共.",
             engine="mfa",
             language=str(language or "korean").strip().lower(),
             mfa_path=str(resolved_mfa or ""),
@@ -989,7 +1022,7 @@ def check_mfa_ready(language='korean', mfa_path=''):
         return make_runtime_report(
             "align",
             ALIGN_MODEL_MISSING,
-            msg or "MFA 모델을 찾을 수 없습니다.",
+            msg or "MFA ・ｨ・ｸ・・・ｾ・・・・・・慣・壱共.",
             engine="mfa",
             language=str(language or "korean").strip().lower(),
             mfa_path=str(resolved_mfa or ""),
@@ -999,7 +1032,7 @@ def check_mfa_ready(language='korean', mfa_path=''):
     return make_runtime_report(
         "align",
         OK,
-        "MFA 정렬 준비 완료",
+        "MFA runtime is ready.",
         engine="mfa",
         language=str(language or "korean").strip().lower(),
         mfa_path=str(resolved_mfa or ""),
@@ -1010,8 +1043,8 @@ def check_mfa_ready(language='korean', mfa_path=''):
 def ensure_korean_support(mfa_path, callback=None):
     """
     Ensure Korean MFA tokenizer dependencies are available:
-    - eunjeon
     - jamo
+    - python-mecab-ko or mecab-python3
     """
     def log(msg):
         logger.info(msg)
@@ -1034,19 +1067,6 @@ def ensure_korean_support(mfa_path, callback=None):
     check_cmd = [python_exe, '-c', _korean_tokenizer_import_expr()]
     try:
         env = _get_conda_env(mfa_path)
-
-        def _ensure_eunjeon_data_package():
-            site_packages = os.path.join(env_dir, 'Lib', 'site-packages')
-            data_dir = os.path.join(site_packages, 'eunjeon', 'data')
-            if not os.path.isdir(data_dir):
-                return
-            init_path = os.path.join(data_dir, '__init__.py')
-            if not os.path.exists(init_path):
-                try:
-                    with open(init_path, 'w', encoding='utf-8') as f:
-                        f.write("")
-                except Exception as e:
-                    log(f"[MFA] Failed to create eunjeon data package marker: {e}")
 
         def _ensure_mecab_dictionary():
             site_packages = os.path.join(env_dir, 'Lib', 'site-packages')
@@ -1168,7 +1188,6 @@ class MeCab:
             log('[MFA] Failed to restore pkg_resources/setuptools')
             return False
 
-        _ensure_eunjeon_data_package()
         _ensure_mecab_dictionary()
         _ensure_mecab_shim()
         ok, detail = _check_imports()
@@ -1179,15 +1198,16 @@ class MeCab:
         if ok:
             patch_mfa_korean_support(mfa_path, callback)
             return True
-        def _run_install_stage(packages, *, emit_msvc_notice: bool):
-            stage_cmds = [[python_exe, '-m', 'pip', 'install', '--upgrade', *packages]]
+        def _run_install_stage(packages, *, pip_extra_args=None):
+            extra_args = list(pip_extra_args or [])
+            stage_cmds = [[python_exe, '-m', 'pip', 'install', '--upgrade', *extra_args, *packages]]
             if os.path.exists(pip_exe):
-                stage_cmds.append([pip_exe, 'install', '--upgrade', *packages])
+                stage_cmds.append([pip_exe, 'install', '--upgrade', *extra_args, *packages])
             system_conda = shutil.which('conda')
             if system_conda:
                 stage_cmds.append([
                     system_conda, 'run', '-p', env_dir, 'python', '-m', 'pip', 'install',
-                    '--upgrade', *packages
+                    '--upgrade', *extra_args, *packages
                 ])
             stage_last_err = ''
             for install_cmd in stage_cmds:
@@ -1197,8 +1217,6 @@ class MeCab:
                     err_txt = (result.stderr or result.stdout or '').strip()
                     if err_txt:
                         log(f"   [warn] install failed: {err_txt[:500]}")
-                    if emit_msvc_notice and _stderr_has_msvc_requirement(result.stderr):
-                        _emit_msvc_required_notice(callback, log)
                     stage_last_err = err_txt or stage_last_err
                     continue
                 if not _ensure_pkg_resources():
@@ -1218,19 +1236,22 @@ class MeCab:
 
         last_err = detail
 
-        # Stage 1: install jamo first (pure Python), so mecab-backed environments can pass without eunjeon.
+        # Stage 1: install jamo first (pure Python).
         log('[MFA] Installing Korean tokenizer deps: jamo')
-        ok, stage_err = _run_install_stage(['jamo'], emit_msvc_notice=False)
+        ok, stage_err = _run_install_stage(['jamo'])
         if stage_err:
             last_err = stage_err
         if ok:
-            log('[MFA] Korean tokenizer deps are ready (jamo + mecab/eunjeon)')
+            log('[MFA] Korean tokenizer deps are ready (jamo + mecab backend)')
             patch_mfa_korean_support(mfa_path, callback)
             return True
 
-        # Stage 2: install eunjeon if still missing backend.
-        log('[MFA] Installing Korean tokenizer deps: eunjeon')
-        ok, stage_err = _run_install_stage(['eunjeon'], emit_msvc_notice=True)
+        # Stage 2: python-mecab-ko wheels only (avoid source-build toolchain on Windows).
+        log('[MFA] Installing Korean tokenizer deps: python-mecab-ko + dictionary')
+        ok, stage_err = _run_install_stage(
+            ['python-mecab-ko', 'python-mecab-ko-dic'],
+            pip_extra_args=['--only-binary=:all:'],
+        )
         if stage_err:
             last_err = stage_err
         if ok:
@@ -1238,7 +1259,20 @@ class MeCab:
             patch_mfa_korean_support(mfa_path, callback)
             return True
 
-        log('[MFA] Failed to prepare Korean tokenizer deps (eunjeon, jamo)')
+        # Stage 3: fallback to mecab-python3 wheels only.
+        log('[MFA] Installing Korean tokenizer deps fallback: mecab-python3')
+        ok, stage_err = _run_install_stage(
+            ['mecab-python3'],
+            pip_extra_args=['--only-binary=:all:'],
+        )
+        if stage_err:
+            last_err = stage_err
+        if ok:
+            log('[MFA] Korean tokenizer deps are ready')
+            patch_mfa_korean_support(mfa_path, callback)
+            return True
+
+        log('[MFA] Failed to prepare Korean tokenizer deps (jamo, python-mecab-ko, mecab-python3)')
         if last_err:
             log(f"   last error: {last_err[:500]}")
         return False
@@ -1248,8 +1282,8 @@ class MeCab:
 
 def ensure_japanese_support(mfa_path, callback=None):
     """
-    MFA 일본어 정렬에 필요한 spacy/sudachipy/sudachidict-core가 있는지 확인하고,
-    누락 시 자동 설치를 시도합니다.
+    MFA ・ｼ・ｸ・ｴ ・簿ｬ・・﨑・囈﨑・spacy/sudachipy/sudachidict-core・ ・壱株・ 嶹菩攤﨑俾ｳ,
+    ・・攷 ・・・尖徐 ・､・俯･ｼ ・罹巡﨑ｩ・壱共.
     """
     def log(msg):
         logger.info(msg)
@@ -1267,7 +1301,7 @@ def ensure_japanese_support(mfa_path, callback=None):
     if not os.path.exists(python_exe):
         return True
     if not ensure_mfa_python_packaging_stack(mfa_path, callback=callback):
-        log("⚠️ MFA Python 패키지 도구 복구에 실패해 일본어 의존성 설치를 계속할 수 없습니다.")
+        log("笞・・MFA Python 甯ｨ墲､・ ・・ｵｬ ・ｵ・ｬ・・・､甯ｨ﨑ｴ ・ｼ・ｸ・ｴ ・們｡ｴ・ｱ ・､・俯･ｼ ・・・﨑 ・・・・慣・壱共.")
         return False
 
     check_cmd = [python_exe, '-c', 'import spacy; import sudachipy; import sudachidict_core']
@@ -1277,7 +1311,7 @@ def ensure_japanese_support(mfa_path, callback=None):
         if result.returncode == 0:
             return True
 
-        log("📦 MFA 일본어 토크나이저 의존성(spacy, sudachipy, sudachidict-core) 설치/확인 중...")
+        log("逃 MFA ・ｼ・ｸ・ｴ 奝增ｬ・們擽・ ・們｡ｴ・ｱ(spacy, sudachipy, sudachidict-core) ・､・・嶹菩攤 ・・..")
 
         install_cmd = None
         if os.path.exists(conda_exe):
@@ -1298,40 +1332,40 @@ def ensure_japanese_support(mfa_path, callback=None):
                 install_cmd = [pip_exe, 'install', 'spacy', 'sudachipy', 'sudachidict-core']
 
         if not install_cmd:
-            log("⚠️ 일본어 의존성 자동 설치 경로를 찾지 못했습니다.")
+            log("笞・・・ｼ・ｸ・ｴ ・們｡ｴ・ｱ ・尖徐 ・､・・・ｽ・罹･ｼ ・ｾ・ ・ｻ嵂溢慣・壱共.")
             return False
 
-        log(f"   -> 실행 명령어: {' '.join(install_cmd)}")
+        log(f"   -> ・､嵂・・・ｹ・ｴ: {' '.join(install_cmd)}")
         install_result = _run_subprocess_text(install_cmd, env=env)
         if install_result.returncode != 0:
             if install_result.stderr:
-                log(f"   ⚠️ 설치 stderr: {install_result.stderr[:500]}")
+                log(f"   笞・・・､・・stderr: {install_result.stderr[:500]}")
             if install_result.stdout:
-                log(f"   ⚠️ 설치 stdout: {install_result.stdout[:500]}")
+                log(f"   笞・・・､・・stdout: {install_result.stdout[:500]}")
             if os.path.exists(pip_exe):
                 pip_cmd = [pip_exe, 'install', 'spacy', 'sudachipy', 'sudachidict-core']
-                log(f"   -> 대체 설치 명령어(pip): {' '.join(pip_cmd)}")
+                log(f"   -> ・・ｴ ・､・・・・ｹ・ｴ(pip): {' '.join(pip_cmd)}")
                 pip_result = _run_subprocess_text(pip_cmd, env=env)
                 if pip_result.returncode != 0:
                     if pip_result.stderr:
-                        log(f"   ⚠️ pip stderr: {pip_result.stderr[:500]}")
+                        log(f"   笞・・pip stderr: {pip_result.stderr[:500]}")
                     if pip_result.stdout:
-                        log(f"   ⚠️ pip stdout: {pip_result.stdout[:500]}")
+                        log(f"   笞・・pip stdout: {pip_result.stdout[:500]}")
                     return False
             else:
                 return False
 
         verify = _run_subprocess_text(check_cmd, env=env)
         if verify.returncode == 0:
-            log("✅ 일본어 토크나이저 의존성 설치 확인 완료")
+            log("[MFA] Japanese tokenizer dependencies are ready.")
             return True
 
-        log("⚠️ 일본어 의존성 설치 후에도 import 검증에 실패했습니다.")
+        log("笞・・・ｼ・ｸ・ｴ ・們｡ｴ・ｱ ・､・・弡・乱・・import ・・晧乱 ・､甯ｨ嵂溢慣・壱共.")
         if verify.stderr:
-            log(f"   상세 stderr: {verify.stderr[:500]}")
+            log(f"   ・・┷ stderr: {verify.stderr[:500]}")
         return False
     except Exception as e:
-        log(f"⚠️ 일본어 의존성 자동 확인/설치 중 오류 발생: {e}")
+        log(f"笞・・・ｼ・ｸ・ｴ ・們｡ｴ・ｱ ・尖徐 嶹菩攤/・､・・・・・､・・・懍・: {e}")
         return False
 
 
@@ -1353,17 +1387,17 @@ def download_mfa_model(mfa_path, language='korean', callback=None):
             log(msg)
         return True
 
-    # 모델 다운로드는 언어 의존성 준비와 분리해 처리합니다.
-    # (의존성 import 오류가 있어도 모델 자체 다운로드는 가능한 경우가 있음)
+    # ・ｨ・ｸ ・､・ｴ・罹糖・・・ｸ・ｴ ・們｡ｴ・ｱ ・・・凰 ・・ｦｬ﨑ｴ ・俯ｦｬ﨑ｩ・壱共.
+    # (・們｡ｴ・ｱ import ・､・俾ｰ ・溢牟・・・ｨ・ｸ ・川ｲｴ ・､・ｴ・罹糖・・・・･﨑・・ｽ・ｰ・ ・溢搆)
     try:
         if language == 'korean':
             if not ensure_korean_support(mfa_path, callback):
-                log('⚠ Korean dependency prepare failed, but model download will continue.')
+                log('笞 Korean dependency prepare failed, but model download will continue.')
         elif language == 'japanese':
             if not ensure_japanese_support(mfa_path, callback):
-                log('⚠ Japanese dependency prepare failed, but model download will continue.')
+                log('笞 Japanese dependency prepare failed, but model download will continue.')
     except Exception as dep_exc:
-        log(f'⚠ Dependency prepare check raised error, but model download will continue: {dep_exc}')
+        log(f'笞 Dependency prepare check raised error, but model download will continue: {dep_exc}')
 
     log(f'Downloading {lang_label} MFA model...')
     try:
@@ -1414,17 +1448,17 @@ def download_mfa_model(mfa_path, language='korean', callback=None):
 def _normalize_alignment_strict_mode(value) -> str:
     text = str(value or "").strip().lower()
     compact = text.replace(" ", "").replace("-", "_")
-    if "완전" in text and "엄격" in text:
+    if "strict mode" in text:
         return "strict"
-    if ("적당" in text or "보통" in text or "중간" in text) and "엄격" in text:
+    if ("moderate mode" in text or "balanced mode" in text or "soft strict" in text):
         return "moderate"
     if compact in {
         "strict",
         "full_strict",
         "hard",
         "hard_strict",
-        "완전엄격",
-        "완전_엄격",
+        "・・・淀・ｩ",
+        "・・Ю・・ｲｩ",
     }:
         return "strict"
     if compact in {
@@ -1433,8 +1467,8 @@ def _normalize_alignment_strict_mode(value) -> str:
         "balanced",
         "soft_strict",
         "fallback",
-        "적당히엄격",
-        "적당히_엄격",
+        "・・胸德溢淀・ｩ",
+        "・・胸德・・・ｲｩ",
     }:
         return "moderate"
     return "off"
@@ -1786,9 +1820,9 @@ def _run_mfa_align_command(
     joined_tail = "\n".join(tail_lines[-40:]).lower()
     if (
         "please install korean support" in joined_tail
-        or ("importerror" in joined_tail and "eunjeon" in joined_tail and "jamo" in joined_tail)
+        or ("importerror" in joined_tail and "jamo" in joined_tail and "mecab" in joined_tail)
     ):
-        return False, "Korean dependencies (eunjeon, jamo) are missing in MFA env.", tail_lines
+        return False, "Korean tokenizer dependencies (jamo + mecab backend) are missing in MFA env.", tail_lines
 
     err = f"MFA alignment failed (code: {process.returncode})"
     if tail_lines:
@@ -1918,7 +1952,7 @@ def run_mfa_align(
     log(f'Checking MFA prerequisites... ({lang_label})')
     if language == 'korean':
         if not ensure_korean_support(mfa_path, callback):
-            err = 'Missing Korean tokenizer dependencies (eunjeon, jamo).'
+            err = 'Missing Korean tokenizer dependencies (jamo + mecab backend).'
             log(err)
             return False, err
     elif language == 'japanese':
@@ -2070,28 +2104,29 @@ def run_mfa_align(
 
 def patch_mfa_korean_support(mfa_path, callback=None):
     """
-    Windows 환경에서 python-mecab-ko는 C++ 빌드 툴이 없어 설치가 실패합니다.
-    대신 윈도우용 사전 컴파일된 eunjeon(mecab-ko 포크)를 설치한 뒤, 
-    MFA 내부 소스코드(spacy.py, korean.py)가 eunjeon을 참조하도록 강제로 패치합니다.
+    Patch MFA Korean tokenization modules for mecab-only backend usage.
     """
     def log(msg):
         logger.info(msg)
         if callback:
             callback(msg)
 
-    if sys.platform != 'win32' or not mfa_path or 'Scripts' not in mfa_path:
+    if sys.platform != "win32" or not mfa_path or "Scripts" not in mfa_path:
         return True
-        
+
     try:
         env_dir = os.path.dirname(os.path.dirname(mfa_path))
-        site_packages = os.path.join(env_dir, 'Lib', 'site-packages', 'montreal_forced_aligner')
-        
-        spacy_py = os.path.join(site_packages, 'tokenization', 'spacy.py')
-        korean_py = os.path.join(site_packages, 'tokenization', 'korean.py')
+        tokenization_dir = os.path.join(
+            env_dir,
+            "Lib",
+            "site-packages",
+            "montreal_forced_aligner",
+            "tokenization",
+        )
+        spacy_py = os.path.join(tokenization_dir, "spacy.py")
+        korean_py = os.path.join(tokenization_dir, "korean.py")
 
-        def _ensure_writable_copy(path: str):
-            # Conda/micromamba often hardlinks site-packages to pkgs cache.
-            # Break hardlinks before patching to avoid corrupting the package cache.
+        def _ensure_writable_copy(path: str) -> None:
             if not os.path.exists(path):
                 return
             try:
@@ -2103,93 +2138,60 @@ def patch_mfa_korean_support(mfa_path, callback=None):
             except Exception:
                 return
 
-        def _file_empty(path: str) -> bool:
+        def _read_file(path: str) -> Optional[str]:
+            if not os.path.exists(path):
+                return None
             try:
-                return os.path.exists(path) and os.path.getsize(path) == 0
+                if os.path.getsize(path) == 0:
+                    return None
+                with open(path, "r", encoding="utf-8") as f:
+                    return f.read()
             except Exception:
-                return False
-        
-        # 1. spacy.py 패치: 'mecab' 대신 'eunjeon'을 체크하도록 수정
-        if os.path.exists(spacy_py):
-            _ensure_writable_copy(spacy_py)
-            if _file_empty(spacy_py):
-                log("⚠️ spacy.py is empty. Reinstall MFA package before patching.")
-                return False
-            with open(spacy_py, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            # (1) 에러 메시지 수정 (eunjeon 안내 포함)
-            if 'pip install python-mecab-ko jamo' in content:
-                content = content.replace("pip install python-mecab-ko jamo", "pip install eunjeon jamo")
-            
-            # (2) 가용성 체크 로직 수정: 'from mecab import' 나 'import mecab'을 eunjeon으로 우회
-            if "import mecab" in content and "import eunjeon" not in content:
-                content = content.replace("import mecab", "import eunjeon")
-                
-            with open(spacy_py, 'w', encoding='utf-8') as f:
-                f.write(content)
-            log("   [Patch] spacy.py 가용성 체크 수정 완료")
+                return None
 
-        # 2. korean.py 패치: KO_AVAILABLE를 True로 만들고 Eunjeon 래퍼 주입
-        if os.path.exists(korean_py):
-            _ensure_writable_copy(korean_py)
-            if _file_empty(korean_py):
-                log("⚠️ korean.py is empty. Reinstall MFA package before patching.")
-                return False
-            with open(korean_py, 'r', encoding='utf-8') as f:
-                content = f.read()
-                
-            # (1) KO_AVAILABLE 결정 로직 수정 (eunjeon이 있으면 True가 되도록)
-            # 중복 패치 방지 및 손상된 파일 복구 로직 추가
-            if 'EunjeonWrapper' not in content:
-                # 이미 잘못된 패치가 되어있는 경우 (중첩 try) 복구 시도
-                content = re.sub(r'try:\s+try:\s+from mecab import MeCab', 'from mecab import MeCab', content)
-                content = re.sub(r'try:\s+from mecab import MeCab', 'from mecab import MeCab', content)
-                
-                # 정석적인 4분할 시퀀스로 교체 (정확한 인덴트 유지)
-                if '    from mecab import MeCab' in content:
-                    content = content.replace(
-                        '    from mecab import MeCab', 
-                        '    try:\n        from mecab import MeCab\n    except:\n        from eunjeon import Mecab as MeCab'
-                    )
-                elif 'from mecab import MeCab' in content:
-                    # 인덴트가 없는 경우 (가능성은 낮지만 방어용)
-                    content = content.replace(
-                        'from mecab import MeCab', 
-                        'try:\n    from mecab import MeCab\nexcept:\n    from eunjeon import Mecab as MeCab'
-                    )
-                
-            wrapper_code = '''
-class EunjeonNode:
-    def __init__(self, surface, pos):
-        self.surface = surface
-        self.pos = pos
+        def _write_if_changed(path: str, old: str, new: str, label: str) -> None:
+            if new == old:
+                return
+            _ensure_writable_copy(path)
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(new)
+            log(f"[MFA] Patched {label} for mecab compatibility.")
 
-class EunjeonWrapper:
-    def __init__(self):
-        from eunjeon import Mecab
-        self.mecab = Mecab()
-        
-    def parse(self, text):
-        return [EunjeonNode(w, p) for w, p in self.mecab.pos(text)]
-'''
-            if 'class EunjeonWrapper' not in content:
-                # Add wrapper class after imports
-                content = content.replace('class KoreanTokenizer:', wrapper_code + '\nclass KoreanTokenizer:')
-                # Replace the tokenizer instantiation
-                if 'self.tokenizer = MeCab()' in content:
-                    content = content.replace("self.tokenizer = MeCab()", "self.tokenizer = EunjeonWrapper()")
-                
-            with open(korean_py, 'w', encoding='utf-8') as f:
-                f.write(content)
-            log("   [Patch] korean.py 참조 수정 (KO_AVAILABLE 및 Eunjeon 래퍼) 완료")
-                
+        spacy_content = _read_file(spacy_py)
+        if spacy_content:
+            spacy_new = spacy_content
+            spacy_new = spacy_new.replace(
+                "pip install python-mecab-ko jamo",
+            )
+            _write_if_changed(spacy_py, spacy_content, spacy_new, "spacy.py")
+
+        korean_content = _read_file(korean_py)
+        if korean_content:
+            korean_new = korean_content
+
+            # Normalize old try/except import blocks to a single mecab import.
+            korean_new = re.sub(
+                r"try:\s*from\s+\w+\s+import\s+\w+\s+as\s+MeCab\s*except\s+Exception:\s*from\s+\w+\s+import\s+\w+\s+as\s+MeCab",
+                "from mecab import MeCab",
+                korean_new,
+                count=1,
+                flags=re.MULTILINE,
+            )
+            korean_new = re.sub(
+                r"from\s+\w+\s+import\s+\w+\s+as\s+MeCab",
+                "from mecab import MeCab",
+                korean_new,
+                count=1,
+            )
+            korean_new = re.sub(
+                r"self\.tokenizer\s*=\s*\w+Wrapper\(\)",
+                "self.tokenizer = MeCab()",
+                korean_new,
+            )
+
+            _write_if_changed(korean_py, korean_content, korean_new, "korean.py")
+
         return True
     except Exception as e:
-        log(f"⚠️ MFA 한국어 패치 중 오류 발생: {e}")
+        log(f"[MFA] Korean patch error: {e}")
         return False
-
-
-
-
-

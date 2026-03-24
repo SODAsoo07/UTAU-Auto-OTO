@@ -213,7 +213,7 @@ logger = logging.getLogger(__name__)
 # ==============================================================================
 
 APP_NAME = "UTAU Auto OTO Generator"
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.1.3"
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 760
 SUPPORTED_RELEASE_CHANNELS = {"stable", "preview"}
@@ -396,10 +396,9 @@ class App(
             self._install_adaptive_ui_scaling()
         if hasattr(self, "_install_global_exception_hooks"):
             self._install_global_exception_hooks()
-        self._load_config()
         self.protocol("WM_DELETE_WINDOW", self._on_close_request)
-        self._schedule_startup_mfa_auto_repair()
-        self._schedule_startup_cuda_runtime_check()
+        self._post_ui_startup_done = False
+        self.after(0, self._run_post_ui_startup_tasks)
 
         logger.info(f"{APP_NAME} v{APP_VERSION} 시작")
         logger.info(f"릴리스 채널: {RELEASE_CHANNEL}")
@@ -411,6 +410,26 @@ class App(
             logger.info(f"MFA 경로: {self.mfa_path}")
         else:
             logger.warning("MFA를 찾을 수 없습니다.")
+
+    def _run_post_ui_startup_tasks(self):
+        if bool(getattr(self, "_post_ui_startup_done", False)):
+            return
+        self._post_ui_startup_done = True
+
+        try:
+            self._load_config()
+        except Exception:
+            logger.exception("초기 설정 로드 중 예외가 발생했습니다.")
+
+        try:
+            self._schedule_startup_mfa_auto_repair()
+        except Exception:
+            logger.exception("초기 MFA 자동 복구 예약 중 예외가 발생했습니다.")
+
+        try:
+            self._schedule_startup_cuda_runtime_check()
+        except Exception:
+            logger.exception("초기 CUDA 런타임 점검 예약 중 예외가 발생했습니다.")
 
     def _start_async_mfa_path_probe(self):
         if bool(getattr(self, "_mfa_path_probe_started", False)):

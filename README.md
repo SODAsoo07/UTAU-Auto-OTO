@@ -1,19 +1,52 @@
-UTAU 보이스뱅크의 자동 원음 설정을 위한 프로그램입니다. 현재 윈도우만 지원합니다 (타 OS 지원 예정 없음)
+# Auto OTO
 
+Auto OTO is a source-available freeware tool for automatic oto setup and related
+voicebank preparation workflows.
 
-해당 프로그램은 처음부터 완벽한 oto를 생성하는 게 아닌, 자동 제작으로 초안 작성 후 사람이 수정할 것을 염두에 두고 제작되었습니다. 이 프로그램으로 생성한 oto는 틀릴 수 있으니 주의하세요.
+## License Summary
 
-버그, 취약점, 어쨌든 프로그램이 뜻대로 동작하지 않는 경우를 발견하신다면 꼭 제보 부탁드립니다!!!
+This repository is not an open-source project in the OSI sense.
 
-+이 코드 왜 이렇게 짰지? 이렇게 하면 더 좋은데... 라는 의문이 들 때:
-당신은 이 저장소에 기여해주실 수 있는 능력자이십니다 환영합니다 제발요
+- The source code is published under the source-available freeware terms in
+  [LICENSE](./LICENSE).
+- The official bundled models are licensed separately under
+  [MODEL_LICENSE.md](./MODEL_LICENSE.md).
+- Output created with the official models, such as generated oto settings,
+  prepared voicebanks, and songs created with those voicebanks, may be used
+  commercially under the terms described in `MODEL_LICENSE.md`.
 
-----
+## What You Can Do
 
-작성 중...
+- Use the software for free.
+- Read and modify the source code.
+- Share original or modified copies for free with the license notices kept
+  intact.
+- Use the generated outputs in commercial creative work.
 
+## What You Cannot Do
 
-----
-이 프로그램은 AI를 이용하여 제작되었고 본인이 코드 일부 수정 및 검수를 완료했습니다.
+- Sell the software itself or modified versions of the software.
+- Charge for access to the software.
+- Sell, host, or otherwise commercially exploit the official bundled models.
 
-이 프로그램은 있는 그대로 제공되며. 개발자는 이 프로그램을 사용하여 입은 손해에 대해 어떤 것도 책임지지 않습니다.
+## Important Notes
+
+- Third-party dependencies remain under their own licenses.
+- The official model package and the source code are licensed separately.
+- This repository may contain model files and metadata that are covered by
+  `MODEL_LICENSE.md`, not by `LICENSE`.
+- If you use your own models or your own data, you remain responsible for the
+  rights to those materials.
+
+## Draft Status
+
+The files `LICENSE` and `MODEL_LICENSE.md` are project drafts intended to define
+the distribution policy of this repository. Review and adjust them before public
+release if you want tighter wording for contributor, data, or jurisdiction-
+specific issues.
+
+## UI Design Workflow (Pencil MCP)
+
+- Integration workflow draft: `plan/pencil_integration_workflow.md`
+- Design asset folder: `design/`
+- Shared UI token module: `ui/theme_tokens.py`

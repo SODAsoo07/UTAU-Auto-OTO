@@ -139,7 +139,7 @@ class PipelineActionsMixin:
         if reason:
             self._append_log(f"   사유: {reason}")
 
-        cmd = [script_path, "--non-interactive"]
+        cmd = [script_path, "--recovery", "--non-interactive"]
         env = os.environ.copy()
         try:
             env_dir = get_default_mfa_env_dir()
@@ -189,7 +189,7 @@ class PipelineActionsMixin:
     def _build_setup_mfa_recovery_guide(self):
         script_path = self._resolve_setup_mfa_script_path()
         if script_path:
-            command = f'cmd /c ""{script_path}" --non-interactive"'
+            command = f'cmd /c ""{script_path}" --recovery --non-interactive"'
             return (
                 "설치 프로그램에 동봉된 setup_mfa.bat을 직접 실행해 추가 복구를 진행해 주세요.\n"
                 f"- 파일: {script_path}\n"
@@ -199,7 +199,7 @@ class PipelineActionsMixin:
         return (
             "설치 프로그램에 동봉된 setup_mfa.bat을 직접 실행해 추가 복구를 진행해 주세요.\n"
             "- 실행 예시:\n"
-            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --non-interactive\""
+            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --recovery --non-interactive\""
         )
 
     def _read_runtime_var(self, var_name, default=None):
@@ -261,14 +261,61 @@ class PipelineActionsMixin:
 
     def _install_mfa_runtime(self, language="korean"):
         import shutil
+        import tempfile
 
         lang = str(language or "korean").strip().lower()
         app_dir = getattr(self, "app_dir", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         env_dir = get_default_mfa_env_dir()
         legacy_conda_root = get_default_mfa_conda_root()
         micromamba_root = get_default_mfa_micromamba_root()
-        micromamba_exe = get_default_mfa_micromamba_exe()
         runtime_root = os.path.dirname(env_dir)
+
+        def _resolve_micromamba_exe_path(root: str) -> str:
+            candidates = [
+                os.path.join(root, "Library", "bin", "micromamba.exe"),
+                os.path.join(root, "bin", "micromamba.exe"),
+                os.path.join(root, "micromamba.exe"),
+            ]
+            for path in candidates:
+                if os.path.exists(path):
+                    return path
+            return candidates[0]
+
+        def _ensure_writable_dir(path: str) -> tuple[bool, str]:
+            try:
+                os.makedirs(path, exist_ok=True)
+                fd, probe = tempfile.mkstemp(prefix=".utoa_write_probe_", dir=path)
+                os.close(fd)
+                os.remove(probe)
+                return True, ""
+            except Exception as e:
+                return False, str(e)
+
+        root_ok, root_err = _ensure_writable_dir(runtime_root)
+        if not root_ok:
+            local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
+            if local_app_data:
+                fallback_root = os.path.join(local_app_data, "UTAU_Auto_OTO_v3")
+            else:
+                fallback_root = os.path.join(os.path.expanduser("~"), "AppData", "Local", "UTAU_Auto_OTO_v3")
+            fallback_ok, fallback_err = _ensure_writable_dir(fallback_root)
+            if fallback_ok:
+                self._append_log(f"⚠ 기본 MFA 경로 쓰기 실패: {runtime_root} ({root_err})")
+                self._append_log(f"ℹ LOCALAPPDATA 경로로 전환: {fallback_root}")
+                runtime_root = fallback_root
+                env_dir = os.path.join(runtime_root, ".env")
+                legacy_conda_root = os.path.join(runtime_root, "miniconda")
+                micromamba_root = os.path.join(runtime_root, "micromamba")
+            else:
+                self._append_log(f"❌ MFA 런타임 경로를 준비하지 못했습니다: {runtime_root}")
+                if root_err:
+                    self._append_log(f"   원인: {root_err}")
+                self._append_log(f"❌ LOCALAPPDATA 대체 경로도 실패: {fallback_root}")
+                if fallback_err:
+                    self._append_log(f"   원인: {fallback_err}")
+                return False
+
+        micromamba_exe = _resolve_micromamba_exe_path(micromamba_root)
         if any(ord(ch) > 127 for ch in app_dir):
             self._append_log("⚠ 앱 경로에 비ASCII 문자가 있어도 MFA 환경은 공용 폴더를 사용합니다.")
         self._append_log(f"ℹ MFA 공용 환경 경로: {env_dir}")
@@ -411,6 +458,12 @@ class PipelineActionsMixin:
             if os.path.exists(micromamba_exe):
                 self._append_log("ℹ Micromamba 실행 파일이 이미 있어 재사용합니다.")
                 return True
+            try:
+                os.makedirs(os.path.dirname(micromamba_archive), exist_ok=True)
+            except Exception as e:
+                self._append_log(f"❌ Micromamba 다운로드 폴더 생성 실패: {e}")
+                self._append_log(f"   경로: {os.path.dirname(micromamba_archive)}")
+                return False
             self._set_status("⬇ Micromamba 다운로드 중...")
             self._append_log("[1/3] ⬇ Micromamba 다운로드 중... (약 15MB)")
 
@@ -1273,393 +1326,6 @@ class PipelineActionsMixin:
 
             self._append_log("⚠ 초기 설치 점검에서 MFA 이상을 감지했습니다.")
             self._append_log("ℹ 자동복구는 진단 후 사용자 확인을 받은 경우에만 설치를 진행합니다.")
-            self._append_log(self._format_mfa_diagnosis_summary(before))
-            recovered = self._ensure_mfa_ready_for_language(lang)
-            after = diagnose_mfa_runtime(self.mfa_path or "", language=lang)
-
-            if recovered and after.get("ready"):
-                self._append_log("✅ 초기 MFA 자동 복구 완료")
-                self._update_mfa_status(True)
-                self._set_status("✅ 초기 MFA 복구 완료")
-                self._save_mfa_startup_repair_state(
-                    last_result="success",
-                    last_success_ts=time.time(),
-                    last_success_version=str(getattr(self, "app_version", "") or ""),
-                    last_issues=[],
-                    first_check_done=True,
-                )
-            else:
-                issues = list(after.get("issues", []) or [])
-                if bool(getattr(self, "_last_mfa_install_declined", False)):
-                    self._append_log("ℹ 사용자 선택으로 MFA 설치/복구를 건너뛰었습니다.")
-                self._append_log("⚠ 초기 MFA 자동 복구가 완료되지 않았습니다. 'MFA 진단/복구' 버튼으로 재시도하세요.")
-                recovery_guide = self._build_setup_mfa_recovery_guide()
-                self._after_safe(
-                    lambda guide=recovery_guide: self._show_copyable_alert(
-                        title="MFA 자동 복구 추가 안내",
-                        message=(
-                            "초기 자동 복구가 완료되지 않았습니다.\n"
-                            "앱 내부의 'MFA 진단/복구'를 다시 시도하거나 아래 방법으로 수동 복구를 진행해 주세요.\n\n"
-                            f"{guide}"
-                        ),
-                        alert_key="mfa_startup_repair_needs_attention",
-                    )
-                )
-                self._set_status("⚠ MFA 추가 복구 필요")
-                declined = bool(getattr(self, "_last_mfa_install_declined", False))
-                self._save_mfa_startup_repair_state(
-                    last_result="user_declined" if declined else "failed",
-                    last_issues=issues,
-                    last_failure_ts=time.time(),
-                    first_check_done=True,
-                )
-        except Exception as e:
-            self._save_mfa_startup_repair_state(
-                last_result="error",
-                last_error=str(e),
-                last_error_ts=time.time(),
-                first_check_done=True,
-            )
-            self._handle_error("초기 MFA 자동 복구", e)
-        finally:
-            self._save_mfa_startup_repair_state(
-                first_check_done=True,
-                last_checked_ts=time.time(),
-            )
-            self._set_running(False)
-
-    def _schedule_alignment_failure_mfa_followup(self, language="korean", align_code="", align_message=""):
-        if getattr(self, "_mfa_alignment_failure_followup_running", False):
-            return
-        self._mfa_alignment_failure_followup_running = True
-        thread = threading.Thread(
-            target=self._run_alignment_failure_mfa_followup_task,
-            args=(language, align_code, align_message),
-            daemon=True,
-        )
-        thread.start()
-
-    def _run_alignment_failure_mfa_followup_task(self, language="korean", align_code="", align_message=""):
-        lang = str(language or "korean").strip().lower()
-        try:
-            resolved = self.mfa_path or find_mfa_executable() or ""
-            if resolved and os.path.exists(resolved):
-                self.mfa_path = resolved
-            report = diagnose_mfa_runtime(self.mfa_path or "", language=lang)
-            summary = self._format_mfa_diagnosis_summary(report)
-            issues = list(report.get("issues", []) or [])
-            self._append_log("🔎 정렬 실패 후 MFA 자동 점검 결과")
-            self._append_log(summary)
-            if "korean_deps_degraded" in issues:
-                self._notify_korean_dependency_degraded()
-
-            ready = bool(report.get("ready", False))
-            issue_token = "_".join(sorted(str(i) for i in issues))[:80] or "none"
-            if ready:
-                message = (
-                    "정렬 실패 후 MFA 자동 점검 결과, 런타임 자체는 준비 상태입니다.\n"
-                    "이번 실패는 입력 데이터(발음/사전/오디오) 또는 현재 정렬 프로필 영향일 가능성이 큽니다.\n\n"
-                    f"- 실패 코드: {align_code or '(없음)'}\n"
-                    f"- 실패 메시지: {align_message or '(없음)'}\n\n"
-                    "권장:\n"
-                    "1) 사전/라벨 파일 재생성\n"
-                    "2) MFA 프로필을 '기본' 또는 '빠름'으로 변경 후 재시도\n"
-                    "3) 계속 실패하면 'MFA 진단/복구' 버튼 실행\n\n"
-                    "[자동 점검 요약]\n"
-                    f"{summary}"
-                )
-                alert_key = f"mfa_after_align_fail_ready_{lang}_{issue_token}"
-            else:
-                recovery_guide = self._build_setup_mfa_recovery_guide()
-                message = (
-                    "정렬 실패 후 MFA 자동 점검에서 추가 복구가 필요하다고 판단되었습니다.\n"
-                    "앱의 'MFA 진단/복구' 버튼을 눌러 복구를 진행해 주세요.\n\n"
-                    f"- 실패 코드: {align_code or '(없음)'}\n"
-                    f"- 실패 메시지: {align_message or '(없음)'}\n\n"
-                    "[자동 점검 요약]\n"
-                    f"{summary}\n\n"
-                    "[수동 복구]\n"
-                    f"{recovery_guide}"
-                )
-                alert_key = f"mfa_after_align_fail_repair_{lang}_{issue_token}"
-
-            self._after_safe(
-                lambda msg=message, key=alert_key: self._show_copyable_alert(
-                    title="MFA 정렬 실패 후 점검 안내",
-                    message=msg,
-                    alert_key=key,
-                )
-            )
-        except Exception as exc:
-            self._append_log(f"⚠ 정렬 실패 후 MFA 자동 점검 중 오류: {exc}")
-        finally:
-            self._mfa_alignment_failure_followup_running = False
-
-    def _mfa_startup_repair_state_path(self):
-        base_dir = (
-            getattr(self, "writable_data_dir", "")
-            or getattr(self, "app_data_dir", "")
-            or getattr(self, "app_dir", "")
-            or os.getcwd()
-        )
-        return os.path.join(base_dir, ".mfa_startup_repair_state.json")
-
-    def _load_mfa_startup_repair_state(self):
-        path = self._mfa_startup_repair_state_path()
-        if not os.path.isfile(path):
-            return {}
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
-
-    def _save_mfa_startup_repair_state(self, **updates):
-        state = self._load_mfa_startup_repair_state()
-        state.update(updates or {})
-        path = self._mfa_startup_repair_state_path()
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(state, f, ensure_ascii=False, indent=2)
-        except Exception:
-            return
-
-    def _schedule_startup_mfa_auto_repair(self):
-        if str(os.environ.get("UTOA_DISABLE_STARTUP_MFA_AUTO_REPAIR", "")).strip().lower() in {"1", "true", "yes", "on"}:
-            return
-        if getattr(self, "_startup_mfa_auto_repair_scheduled", False):
-            return
-        try:
-            if normalize_aligner_name(self.aligner_var.get(), default="mfa") == "none":
-                return
-        except Exception:
-            pass
-
-        state = self._load_mfa_startup_repair_state()
-        # Run startup MFA check only once per install/runtime.
-        if bool(state.get("first_check_done", False)):
-            return
-        if float(state.get("last_attempt_ts", 0.0) or 0.0) > 0:
-            return
-
-        def _kickoff():
-            if self.is_running:
-                return
-            self._run_in_thread(self._run_startup_mfa_auto_repair_task)
-
-        self._startup_mfa_auto_repair_scheduled = True
-        self._after_safe(_kickoff, delay_ms=1200)
-
-    def _cuda_startup_check_state_path(self):
-        base_dir = (
-            getattr(self, "writable_data_dir", "")
-            or getattr(self, "app_data_dir", "")
-            or getattr(self, "app_dir", "")
-            or os.getcwd()
-        )
-        return os.path.join(base_dir, ".cuda_startup_check_state.json")
-
-    def _load_cuda_startup_check_state(self):
-        path = self._cuda_startup_check_state_path()
-        if not os.path.isfile(path):
-            return {}
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            return payload if isinstance(payload, dict) else {}
-        except Exception:
-            return {}
-
-    def _save_cuda_startup_check_state(self, **updates):
-        state = self._load_cuda_startup_check_state()
-        state.update(updates or {})
-        path = self._cuda_startup_check_state_path()
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(state, f, ensure_ascii=False, indent=2)
-        except Exception:
-            return
-
-    def _schedule_startup_cuda_runtime_check(self):
-        if str(os.environ.get("UTOA_DISABLE_STARTUP_CUDA_RUNTIME_CHECK", "")).strip().lower() in {"1", "true", "yes", "on"}:
-            return
-        if getattr(self, "_startup_cuda_runtime_check_scheduled", False):
-            return
-        state = self._load_cuda_startup_check_state()
-        if bool(state.get("first_check_done", False)):
-            return
-
-        def _kickoff():
-            if getattr(self, "_is_closing", False):
-                return
-            thread = threading.Thread(
-                target=self._run_startup_cuda_runtime_check_task,
-                daemon=True,
-            )
-            thread.start()
-
-        self._startup_cuda_runtime_check_scheduled = True
-        self._after_safe(_kickoff, delay_ms=1800)
-
-    def _run_startup_cuda_runtime_check_task(self):
-        now = time.time()
-        self._save_cuda_startup_check_state(
-            last_attempt_ts=now,
-            last_result="running",
-        )
-        try:
-            diagnosis = collect_cuda_runtime_diagnosis()
-            has_nvidia = bool(diagnosis.get("nvidia_gpu_present"))
-            has_cuda = bool(diagnosis.get("torch_cuda_available"))
-            gpu_name = str((diagnosis.get("nvidia_gpu_names") or [""])[0] or "").strip()
-            nvidia_cuda_ver = str(diagnosis.get("nvidia_cuda_version", "") or "").strip()
-            torch_ver = str(diagnosis.get("torch_version", "") or "").strip()
-            torch_cuda_ver = str(diagnosis.get("torch_cuda_version", "") or "").strip()
-            direct_cmd = str(diagnosis.get("recommended_install_command_text", "") or "").strip()
-
-            if (not has_nvidia) or has_cuda:
-                self._save_cuda_startup_check_state(
-                    first_check_done=True,
-                    last_result="ready" if has_cuda else "skip_no_nvidia",
-                    last_checked_ts=time.time(),
-                    nvidia_gpu_present=has_nvidia,
-                    torch_cuda_available=has_cuda,
-                )
-                return
-
-            app_dir = getattr(self, "app_dir", "") or os.getcwd()
-            setup_script_path = os.path.join(app_dir, "setup_mfa.bat")
-            setup_cmd = "setup_mfa.bat --with-ml --with-cuda"
-            setup_cmd_line = setup_cmd if os.path.isfile(setup_script_path) else "(setup_mfa.bat 파일을 찾지 못함)"
-            title = "CUDA 런타임 자동 설치"
-            message = (
-                "NVIDIA GPU가 감지되었지만 현재 Python 런타임에서 CUDA를 사용할 수 없습니다.\n\n"
-                f"- GPU: {gpu_name or '(미확인)'}\n"
-                f"- nvidia-smi CUDA 버전: {nvidia_cuda_ver or '(미확인)'}\n"
-                f"- torch 버전: {torch_ver or '(미설치 또는 import 실패)'}\n"
-                f"- torch CUDA 빌드: {torch_cuda_ver or '(없음)'}\n\n"
-                "지금 네트워크로 CUDA용 PyTorch를 자동 설치할까요?\n\n"
-                f"- 자동 설치 실패 시 수동 명령: {direct_cmd or '(권장 pip 명령 생성 실패)'}\n"
-                f"- 대체 경로: {setup_cmd_line}"
-            )
-            self._append_log(
-                "⚠ NVIDIA GPU는 감지되었지만 torch CUDA 런타임이 비활성 상태입니다. "
-                "초기 1회 자동 설치 선택 팝업을 표시합니다."
-            )
-
-            wants_auto_install = False
-            if hasattr(self, "_ask_yes_no_dialog_sync"):
-                wants_auto_install = bool(
-                    self._ask_yes_no_dialog_sync(
-                        title=title,
-                        message=message,
-                        default=False,
-                    )
-                )
-
-            post_diag = diagnosis
-            install_result = {}
-            state_result = "needs_cuda_runtime"
-            if wants_auto_install:
-                self._append_log("ℹ 사용자 선택: CUDA 런타임 자동 설치를 시작합니다.")
-                command_args = diagnosis.get("recommended_install_command") or []
-                python_exe = ""
-                if isinstance(command_args, (list, tuple)) and command_args:
-                    python_exe = str(command_args[0] or "").strip()
-                install_result = install_torch_cuda_runtime(
-                    python_exe=python_exe,
-                    cuda_version=nvidia_cuda_ver,
-                    timeout_sec=3600,
-                )
-                post_diag = collect_cuda_runtime_diagnosis(python_exe=python_exe)
-                install_ok = bool(install_result.get("success", False))
-                runtime_ok = bool(post_diag.get("torch_cuda_available", False))
-                if install_ok and runtime_ok:
-                    state_result = "auto_install_success"
-                    self._append_log("✅ CUDA 런타임 자동 설치가 완료되었습니다.")
-                else:
-                    state_result = "auto_install_failed"
-                    self._append_log("❌ CUDA 런타임 자동 설치에 실패했습니다.")
-                    tail = str(install_result.get("stderr_tail", "") or install_result.get("stdout_tail", "") or "").strip()
-                    if tail:
-                        self._append_log(f"   설치 로그 요약: {tail[-240:]}")
-                    self._after_safe(
-                        lambda cmd=direct_cmd, setup=setup_cmd_line, t=tail: self._show_copyable_alert(
-                            title="CUDA 런타임 자동 설치 실패",
-                            message=(
-                                "CUDA 자동 설치가 실패했습니다.\n\n"
-                                "아래 방법으로 수동 설치 후 앱을 다시 실행해 주세요.\n"
-                                f"1) {cmd or '(권장 pip 명령 생성 실패)'}\n"
-                                f"2) {setup}\n\n"
-                                f"마지막 오류:\n{(t or '(로그 없음)')[-600:]}"
-                            ),
-                            alert_key="cuda_runtime_auto_install_failed",
-                            link_url="https://pytorch.org/get-started/locally/",
-                            link_label="PyTorch 설치 가이드",
-                        )
-                    )
-            else:
-                state_result = "user_declined_install"
-                self._append_log("ℹ 사용자 선택: CUDA 런타임 자동 설치를 건너뛰었습니다.")
-
-            self._save_cuda_startup_check_state(
-                first_check_done=True,
-                last_result=state_result,
-                last_checked_ts=time.time(),
-                nvidia_gpu_present=has_nvidia,
-                torch_cuda_available=bool(post_diag.get("torch_cuda_available", False)),
-                nvidia_gpu_name=gpu_name,
-                nvidia_cuda_version=nvidia_cuda_ver,
-                torch_version=torch_ver,
-                torch_cuda_version=str(post_diag.get("torch_cuda_version", "") or torch_cuda_ver),
-                recommended_command=direct_cmd,
-                setup_command=setup_cmd if os.path.isfile(setup_script_path) else "",
-                auto_install_attempted=bool(wants_auto_install),
-                auto_install_success=bool(state_result == "auto_install_success"),
-                install_returncode=int(install_result.get("returncode", -1)) if install_result else -1,
-            )
-        except Exception as exc:
-            self._save_cuda_startup_check_state(
-                first_check_done=True,
-                last_result="error",
-                last_error=str(exc),
-                last_error_ts=time.time(),
-            )
-
-    def _run_startup_mfa_auto_repair_task(self):
-        self._set_running(True)
-        lang = self._get_language()
-        now = time.time()
-        self._save_mfa_startup_repair_state(
-            last_attempt_ts=now,
-            last_result="running",
-            last_language=lang,
-        )
-        try:
-            self._set_status("⏳ 조금만 기다려주세요, 프로그램 필수 요소들을 설치하고 점검하는 중입니다.")
-            self._append_log("🔍 초기 설치 점검: MFA 상태를 자동 진단합니다.")
-            resolved = self.mfa_path or find_mfa_executable() or ""
-            if resolved and os.path.exists(resolved):
-                self.mfa_path = resolved
-
-            before = diagnose_mfa_runtime(self.mfa_path or "", language=lang)
-            if before.get("ready"):
-                if "korean_deps_degraded" in list(before.get("issues", []) or []):
-                    self._notify_korean_dependency_degraded()
-                self._append_log("✅ 초기 MFA 상태 점검 완료 (복구 불필요)")
-                self._update_mfa_status(True)
-                self._set_status("✅ 초기 MFA 점검 완료")
-                self._save_mfa_startup_repair_state(
-                    last_result="success",
-                    last_success_ts=time.time(),
-                    last_success_version=str(getattr(self, "app_version", "") or ""),
-                    last_issues=[],
-                    first_check_done=True,
-                )
-                return
-
-            self._append_log("⚠ 초기 설치 점검에서 MFA 이상을 감지해 자동 복구를 시작합니다.")
             self._append_log(self._format_mfa_diagnosis_summary(before))
             recovered = self._ensure_mfa_ready_for_language(lang)
             after = diagnose_mfa_runtime(self.mfa_path or "", language=lang)
