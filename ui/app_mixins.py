@@ -1526,6 +1526,7 @@ class AppRuntimeMixin:
             pass
 
     def _flush_ui_log_buffer(self):
+        self._ui_log_flush_pending = False
         widget = getattr(self, "log_text", None)
         if widget is None:
             return
@@ -1564,10 +1565,9 @@ class AppRuntimeMixin:
         if getattr(self, "log_text", None) is None:
             return
 
-        def _do():
-            self._flush_ui_log_buffer()
-
-        self._after_safe(_do)
+        if not getattr(self, "_ui_log_flush_pending", False):
+            self._ui_log_flush_pending = True
+            self._after_safe(self._flush_ui_log_buffer, delay_ms=120)
 
     def _append_log(self, msg, log_to_file=True):
         raw_msg = self._mask_sensitive_text(str(msg or ""))
@@ -2139,6 +2139,7 @@ class AppRuntimeMixin:
             except Exception:
                 pass
         self._ui_log_buffer = []
+        self._ui_log_flush_pending = False
         detail_widget = getattr(self, "detail_log_text", None)
         if detail_widget is not None:
             try:

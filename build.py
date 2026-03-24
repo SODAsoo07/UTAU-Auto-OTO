@@ -5,9 +5,11 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
 
@@ -313,6 +315,54 @@ def _get_release_dir(channel):
     return os.path.join(APP_DIR, f"{RELEASE_DIR_PREFIX}_{channel}")
 
 
+def _on_rmtree_error(func, path, exc_info):
+    """
+    Windows can leave read-only bits on copied directories/files.
+    Try removing read-only and retry the failing operation.
+    """
+    try:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    except OSError:
+        pass
+    func(path)
+
+
+def _clear_readonly_recursive(root_path):
+    if not os.path.exists(root_path):
+        return
+    for dirpath, _, filenames in os.walk(root_path):
+        try:
+            os.chmod(dirpath, stat.S_IWRITE | stat.S_IREAD)
+        except OSError:
+            pass
+        for name in filenames:
+            file_path = os.path.join(dirpath, name)
+            try:
+                os.chmod(file_path, stat.S_IWRITE | stat.S_IREAD)
+            except OSError:
+                pass
+
+
+def _safe_rmtree(path, retries=3):
+    if not os.path.exists(path):
+        return
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            shutil.rmtree(path, onerror=_on_rmtree_error)
+            return
+        except PermissionError as e:
+            last_err = e
+            _clear_readonly_recursive(path)
+            if attempt < retries:
+                time.sleep(0.4 * attempt)
+        except OSError as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(0.4 * attempt)
+    raise RuntimeError(f"Failed to remove directory after retries: {path}\nCause: {last_err}")
+
+
 def _iter_runtime_data_entries():
     entries = []
     for src, dst in RUNTIME_DATA_PATHS:
@@ -483,7 +533,7 @@ def _validate_packaged_ffmpeg(dist_dir):
 def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, onefile=False):
     release_dir = _get_release_dir(channel)
     if os.path.exists(release_dir):
-        shutil.rmtree(release_dir)
+        _safe_rmtree(release_dir)
     os.makedirs(release_dir, exist_ok=True)
 
     _write_release_channel_metadata(

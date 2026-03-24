@@ -43,6 +43,26 @@ if (-not (Test-Path $modelsAbs)) {
 }
 Write-Host "Using model directory: $modelsAbs"
 
+$requiredReleaseFiles = @(
+    "release_channel.json",
+    "setup_mfa.bat",
+    "runtime_recovery.ps1",
+    "startup_diagnose.ps1",
+    "startup_diagnose.bat",
+    "UTAU_Auto_OTO/UTAU_Auto_OTO.exe"
+)
+$missingReleaseFiles = @()
+foreach ($relativePath in $requiredReleaseFiles) {
+    $probe = Join-Path $sourceAbs $relativePath
+    if (-not (Test-Path $probe)) {
+        $missingReleaseFiles += $probe
+    }
+}
+if ($missingReleaseFiles.Count -gt 0) {
+    $lines = $missingReleaseFiles -join [Environment]::NewLine
+    throw "Release preflight failed. Missing required files:`n$lines"
+}
+
 $pointerFiles = Get-ChildItem -Path $modelsAbs -Recurse -File | Where-Object {
     try {
         (Get-Content -Path $_.FullName -TotalCount 1 -ErrorAction Stop) -eq "version https://git-lfs.github.com/spec/v1"
@@ -63,6 +83,12 @@ if (Test-Path $stageRoot) {
 New-Item -ItemType Directory -Path $workAbs -Force | Out-Null
 Copy-Item -Path $sourceAbs -Destination $stageRoot -Recurse -Force
 Copy-Item -Path $modelsAbs -Destination (Join-Path $appDir "ML_models") -Recurse -Force
+
+$modelFileCount = @(Get-ChildItem -Path (Join-Path $appDir "ML_models") -Recurse -File -ErrorAction SilentlyContinue).Count
+if ($modelFileCount -le 0) {
+    throw "Model copy verification failed: no files found under $appDir\\ML_models"
+}
+Write-Host "Model copy verification passed: $modelFileCount files"
 
 $outputDir = Split-Path -Parent $outputAbs
 if (-not (Test-Path $outputDir)) {

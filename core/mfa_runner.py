@@ -13,6 +13,7 @@ import shutil
 import hashlib
 import tempfile
 import locale
+import time
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from core.pipeline_status import (
@@ -1371,10 +1372,38 @@ def ensure_japanese_support(mfa_path, callback=None):
 
 def download_mfa_model(mfa_path, language='korean', callback=None):
     """Download MFA acoustic model for selected language."""
-    def log(msg):
+    interval_raw = str(os.environ.get("UTOA_MFA_MODEL_LOG_INTERVAL_SEC", "30") or "").strip()
+    try:
+        interval_sec = float(interval_raw)
+    except Exception:
+        interval_sec = 30.0
+    interval_sec = max(5.0, min(600.0, interval_sec))
+
+    last_emit = {"ts": 0.0, "pending": ""}
+
+    def _emit_throttled(msg, force=False):
+        if not callback:
+            return
+        now = time.monotonic()
+        if force or (now - last_emit["ts"]) >= interval_sec:
+            last_emit["ts"] = now
+            last_emit["pending"] = ""
+            callback(msg)
+        else:
+            last_emit["pending"] = msg
+
+    def _flush_pending():
+        pending = str(last_emit.get("pending", "") or "").strip()
+        if not pending or not callback:
+            return
+        last_emit["pending"] = ""
+        last_emit["ts"] = time.monotonic()
+        callback(pending)
+
+    def log(msg, stream=False):
         logger.info(msg)
         if callback:
-            callback(msg)
+            _emit_throttled(msg, force=not stream)
     if not mfa_path:
         log('MFA executable not found.')
         return False
@@ -1421,8 +1450,9 @@ def download_mfa_model(mfa_path, language='korean', callback=None):
                     line = _decode_subprocess_output(raw_line).strip()
                     if line:
                         seen_lines.append(line)
-                        log(line)
+                        log(line, stream=True)
             process.wait()
+            _flush_pending()
             if process.returncode == 0:
                 log(f'{lang_label} MFA model download completed.')
                 return True
