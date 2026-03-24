@@ -34,6 +34,38 @@ $modelsAbs = Join-Path $repoRoot $ModelDir
 $workAbs = Join-Path $repoRoot $WorkDir
 $outputAbs = Join-Path $repoRoot $OutputZip
 
+function New-PortableTopShortcut {
+    param(
+        [Parameter(Mandatory = $true)][string]$RootDir,
+        [string]$AppFolder = "UTAU_Auto_OTO",
+        [string]$ExeName = "UTAU_Auto_OTO.exe",
+        [string]$ShortcutName = "UTAU_Auto_OTO.lnk"
+    )
+
+    $targetExe = Join-Path (Join-Path $RootDir $AppFolder) $ExeName
+    if (-not (Test-Path -LiteralPath $targetExe)) {
+        throw "Shortcut target executable not found: $targetExe"
+    }
+
+    $shortcutPath = Join-Path $RootDir $ShortcutName
+    if (Test-Path -LiteralPath $shortcutPath) {
+        Remove-Item -LiteralPath $shortcutPath -Force
+    }
+
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath = $targetExe
+    $shortcut.WorkingDirectory = Split-Path -Parent $targetExe
+    $shortcut.IconLocation = "$targetExe,0"
+    $shortcut.Description = "Launch UTAU Auto OTO"
+    $shortcut.Save()
+
+    if (-not (Test-Path -LiteralPath $shortcutPath)) {
+        throw "Failed to create top-level shortcut: $shortcutPath"
+    }
+    return $shortcutPath
+}
+
 if (-not (Test-Path $sourceAbs)) {
     throw "Release folder not found: $sourceAbs"
 }
@@ -83,6 +115,9 @@ if (Test-Path $stageRoot) {
 New-Item -ItemType Directory -Path $workAbs -Force | Out-Null
 Copy-Item -Path $sourceAbs -Destination $stageRoot -Recurse -Force
 Copy-Item -Path $modelsAbs -Destination (Join-Path $appDir "ML_models") -Recurse -Force
+
+$shortcutPath = New-PortableTopShortcut -RootDir $stageRoot
+Write-Host "Created top-level shortcut: $shortcutPath"
 
 $modelFileCount = @(Get-ChildItem -Path (Join-Path $appDir "ML_models") -Recurse -File -ErrorAction SilentlyContinue).Count
 if ($modelFileCount -le 0) {

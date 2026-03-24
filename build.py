@@ -46,6 +46,7 @@ EXCLUDED_TRAINING_MODULES = [
 RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "profiles"), "assets/profiles"),
     (os.path.join(APP_DIR, "assets", "models", "oto_ml"), "assets/models/oto_ml"),
+    (os.path.join(APP_DIR, "assets", "bootstrap", "get-pip.py"), "assets/bootstrap"),
     (os.path.join(APP_DIR, "ml", "configs"), "ml/configs"),
     (os.path.join(APP_DIR, "config.json"), "."),
 ]
@@ -530,6 +531,114 @@ def _validate_packaged_ffmpeg(dist_dir):
         raise RuntimeError(f"Nuitka output is missing required FFmpeg files:\n{lines}")
 
 
+def _resolve_release_executable_path(release_dir, app_name, onefile=False):
+    if onefile:
+        preferred = os.path.join(release_dir, f"{app_name}.exe")
+        if os.path.isfile(preferred):
+            return preferred
+        exe_candidates = [
+            os.path.join(release_dir, name)
+            for name in os.listdir(release_dir)
+            if str(name).lower().endswith(".exe")
+            and os.path.isfile(os.path.join(release_dir, name))
+        ]
+        if len(exe_candidates) == 1:
+            return exe_candidates[0]
+        return ""
+
+    app_dir = os.path.join(release_dir, app_name)
+    preferred = os.path.join(app_dir, f"{app_name}.exe")
+    if os.path.isfile(preferred):
+        return preferred
+    if os.path.isdir(app_dir):
+        exe_candidates = [
+            os.path.join(app_dir, name)
+            for name in os.listdir(app_dir)
+            if str(name).lower().endswith(".exe")
+            and os.path.isfile(os.path.join(app_dir, name))
+        ]
+        if len(exe_candidates) == 1:
+            return exe_candidates[0]
+    return ""
+
+
+def _create_windows_shortcut(shortcut_path, target_path, working_dir="", description=""):
+    if os.name != "nt":
+        return False
+    if not os.path.isfile(target_path):
+        raise FileNotFoundError(f"Shortcut target not found: {target_path}")
+
+    def _ps_quote(value):
+        return "'" + str(value).replace("'", "''") + "'"
+
+    target_abs = os.path.abspath(target_path)
+    shortcut_abs = os.path.abspath(shortcut_path)
+    working_abs = os.path.abspath(working_dir or os.path.dirname(target_abs))
+    os.makedirs(os.path.dirname(shortcut_abs), exist_ok=True)
+    if os.path.exists(shortcut_abs):
+        os.remove(shortcut_abs)
+
+    ps_script = "\n".join(
+        [
+            "$wsh = New-Object -ComObject WScript.Shell",
+            f"$shortcut = $wsh.CreateShortcut({_ps_quote(shortcut_abs)})",
+            f"$shortcut.TargetPath = {_ps_quote(target_abs)}",
+            f"$shortcut.WorkingDirectory = {_ps_quote(working_abs)}",
+            f"$shortcut.IconLocation = {_ps_quote(f'{target_abs},0')}",
+            f"$shortcut.Description = {_ps_quote(description or 'Launch app')}",
+            "$shortcut.Save()",
+        ]
+    )
+    subprocess.check_call(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            ps_script,
+        ]
+    )
+    if not os.path.isfile(shortcut_abs):
+        raise RuntimeError(f"Failed to create shortcut: {shortcut_abs}")
+    return True
+
+
+def _write_portable_launcher_cmd(release_dir, app_name, target_path):
+    """
+    Create a path-relocatable launcher script in the release root.
+    This is robust across different machines/path roots unlike build-time .lnk files.
+    """
+    target_abs = os.path.abspath(target_path)
+    release_abs = os.path.abspath(release_dir)
+    try:
+        rel_target = os.path.relpath(target_abs, release_abs)
+    except Exception:
+        rel_target = os.path.basename(target_abs)
+    rel_target = str(rel_target).replace("/", "\\")
+
+    launcher_name = f"Launch_{app_name}.cmd"
+    launcher_path = os.path.join(release_abs, launcher_name)
+    lines = [
+        "@echo off",
+        "setlocal EnableExtensions DisableDelayedExpansion",
+        "set \"ROOT=%~dp0\"",
+        f"set \"TARGET=%ROOT%{rel_target}\"",
+        "if not exist \"%TARGET%\" (",
+        "  echo [FAILED] App executable not found:",
+        "  echo          %TARGET%",
+        "  pause",
+        "  exit /b 1",
+        ")",
+        "start \"\" \"%TARGET%\" %*",
+        "exit /b %ERRORLEVEL%",
+        "",
+    ]
+    with open(launcher_path, "w", encoding="utf-8", newline="\r\n") as f:
+        f.write("\r\n".join(lines))
+    return launcher_path
+
+
 def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, onefile=False):
     release_dir = _get_release_dir(channel)
     if os.path.exists(release_dir):
@@ -565,6 +674,33 @@ def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, o
         if os.path.exists(extra_path):
             shutil.copy(extra_path, release_dir)
             print(f"   -> copied: {os.path.basename(extra_path)}")
+
+    if os.name == "nt":
+        release_exe = _resolve_release_executable_path(release_dir, app_name, onefile=onefile)
+        if not release_exe:
+            raise RuntimeError(
+                f"Failed to locate release executable for shortcut creation: release_dir={release_dir}, app={app_name}"
+            )
+        launcher_path = _write_portable_launcher_cmd(
+            release_dir=release_dir,
+            app_name=app_name,
+            target_path=release_exe,
+        )
+        print(f"   -> created portable launcher: {os.path.basename(launcher_path)}")
+
+        shortcut_path = os.path.join(release_dir, f"{app_name}.lnk")
+        create_lnk = str(os.environ.get("UTOA_CREATE_BUILD_SHORTCUT", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        if create_lnk:
+            _create_windows_shortcut(
+                shortcut_path=shortcut_path,
+                target_path=release_exe,
+                working_dir=os.path.dirname(release_exe),
+                description=f"Launch {app_name}",
+            )
+            print(f"   -> created shortcut: {os.path.basename(shortcut_path)}")
+        else:
+            print("   -> skipped .lnk creation (portable-safe default).")
+            print("      set UTOA_CREATE_BUILD_SHORTCUT=1 to keep build-time .lnk output.")
     return release_dir
 
 

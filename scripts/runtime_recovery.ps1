@@ -168,6 +168,7 @@ function Resolve-SetupScriptPath {
     $candidates += (Join-Path (Get-Location) "setup_mfa.bat")
 
     if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $candidates += (Join-Path $env:LOCALAPPDATA "UTAU_Auto_OTO_v3\setup_mfa.bat")
         $candidates += (Join-Path $env:LOCALAPPDATA "UTAU_Auto_OTO\setup_mfa.bat")
     }
 
@@ -597,21 +598,27 @@ if (-not $mfaImportCheck.ok) {
     Add-Hint "MFA python module import failed. Re-run setup_mfa.bat --non-interactive --install to rebuild the environment."
 }
 
-$packagingCheck = Invoke-PythonCheck -PythonExe $pythonExe -Code "import pip,pkg_resources,wheel"
+    $packagingCheck = Invoke-PythonCheck -PythonExe $pythonExe -Code "import pip,setuptools,wheel"
 Add-Check -Name "packaging_stack_ready" -Passed $packagingCheck.ok -Value $pythonExe -Detail $packagingCheck.output.Trim() -Required $true
 if (-not $packagingCheck.ok) {
     Add-Hint "pip/setuptools/wheel check failed. Re-run setup_mfa.bat --non-interactive --install."
 }
 
+$audioCheck = Invoke-PythonCheck -PythonExe $pythonExe -Code "import soundfile"
+Add-Check -Name "audio_dependencies_ready" -Passed $audioCheck.ok -Value $pythonExe -Detail $audioCheck.output.Trim() -Required $true
+if (-not $audioCheck.ok) {
+    Add-Hint "Audio deps (libsndfile/soundfile) are missing or broken. Re-run setup_mfa.bat --non-interactive --install."
+}
+
 if ($Language -eq "japanese") {
     $langCheck = Invoke-PythonCheck -PythonExe $pythonExe -Code "import spacy,sudachipy,sudachidict_core"
 } else {
-    $langCheck = Invoke-PythonCheck -PythonExe $pythonExe -Code "import sys,jamo`nok=False`ntry:`n import eunjeon`n ok=True`nexcept Exception:`n try:`n  from mecab import MeCab`n  ok=True`n except Exception:`n  ok=False`nsys.exit(0 if ok else 1)"
+    $langCheck = Invoke-PythonCheck -PythonExe $pythonExe -Code "import sys,jamo`nok=False`ntry:`n from mecab import MeCab`n ok=True`nexcept Exception:`n try:`n  import MeCab`n  ok=True`n except Exception:`n  try:`n   import mecab_ko`n   ok=True`n  except Exception:`n   ok=False`nsys.exit(0 if ok else 1)"
 }
 Add-Check -Name "${Language}_dependencies_ready" -Passed $langCheck.ok -Value $pythonExe -Detail $langCheck.output.Trim() -Required $true
 if (-not $langCheck.ok) {
     if ($Language -eq "korean") {
-        Add-Hint "Korean tokenizer deps are still missing. Install VC++ Build Tools if eunjeon wheel/build keeps failing."
+        Add-Hint "Korean tokenizer deps are still missing. Check python-mecab-ko / mecab-python3 wheel install and VC++ runtime."
     } else {
         Add-Hint "Japanese tokenizer deps are still missing. Re-run setup_mfa.bat with stable network and conda-forge access."
     }

@@ -20,6 +20,8 @@ set "DIRECT_SETUP=0"
 
 set "NO_RECOVERY_SHIM=0"
 
+set "FORCE_CLEAN=0"
+
 set "FORCE_MENU=0"
 
 set "REQUESTED_MODE="
@@ -74,6 +76,8 @@ if /i "%~1"=="--mode=menu" set "FORCE_MENU=1"
 if /i "%~1"=="--direct-setup" set "DIRECT_SETUP=1"
 
 if /i "%~1"=="--no-recovery-shim" set "NO_RECOVERY_SHIM=1"
+
+if /i "%~1"=="--clean" set "FORCE_CLEAN=1"
 
 shift
 
@@ -138,6 +142,8 @@ echo   --non-interactive         Run without prompts ^(requires valid runtime ro
 echo   --direct-setup            Skip wrapper and run install flow directly
 
 echo   --no-recovery-shim        Disable runtime_recovery.ps1 wrapper
+
+echo   --clean                   Force-clean MFA env before install
 
 exit /b 0
 
@@ -241,9 +247,15 @@ set "WRAPPER_RUNTIME_ARG="
 
 if defined RUNTIME_ROOT_OVERRIDE set "WRAPPER_RUNTIME_ARG=--runtime-root ""%APP_DIR%"""
 
+if "%FORCE_CLEAN%"=="1" set "WRAPPER_ARGS=%WRAPPER_ARGS% --clean"
+
 echo [INFO] %WRAPPER_ARGS%
 
-call "%SETUP_MFA_SELF%" %WRAPPER_ARGS% %WRAPPER_RUNTIME_ARG%
+if defined RUNTIME_ROOT_OVERRIDE (
+    call "%SETUP_MFA_SELF%" %WRAPPER_ARGS% --runtime-root "%APP_DIR%"
+) else (
+    call "%SETUP_MFA_SELF%" %WRAPPER_ARGS%
+)
 
 exit /b %ERRORLEVEL%
 
@@ -723,6 +735,8 @@ set "MFA_PYTHON_VERSION=3.10"
 
 set "BUNDLE_RESTORED=0"
 
+set "AUTO_CLEAN_DONE=0"
+
 call :resolve_runtime_bundle_dir
 
 if defined MFA_RUNTIME_BUNDLE_DIR (
@@ -733,6 +747,16 @@ if defined MFA_RUNTIME_BUNDLE_DIR (
 echo [INFO] MFA env path: %ENV_DIR%
 
 echo [INFO] MFA micromamba path: %MICROMAMBA_ROOT%
+
+if "%FORCE_CLEAN%"=="1" (
+
+    echo [INFO] --clean option detected. Running pre-install clean...
+
+    call :run_clean_recovery
+
+    if errorlevel 1 exit /b 1
+
+)
 
 if exist "%APP_DIR%\ML_models" set "AUTO_ML=1"
 
@@ -1002,7 +1026,7 @@ if exist "%ENV_DIR%" if not exist "%MFA_EXE%" call :remove_env_dir
 
 set "MAMBA_ROOT_PREFIX=%MICROMAMBA_ROOT%"
 
-"%MICROMAMBA_EXE%" create -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge python=%MFA_PYTHON_VERSION% montreal-forced-aligner colorama
+call :run_mfa_create_with_recovery
 
 if errorlevel 1 (
 
@@ -1102,6 +1126,132 @@ if not "%NON_INTERACTIVE%"=="1" pause
 
 exit /b 0
 
+:run_mfa_create_with_recovery
+
+set "MFA_CREATE_LOG1=%TEMP%\utau_auto_oto_mfa_create_1_%RANDOM%_%RANDOM%.log"
+
+set "MFA_CREATE_LOG2=%TEMP%\utau_auto_oto_mfa_create_2_%RANDOM%_%RANDOM%.log"
+
+set "MFA_CREATE_LOG3=%TEMP%\utau_auto_oto_mfa_create_3_%RANDOM%_%RANDOM%.log"
+
+call :run_mfa_create_once "%MFA_CREATE_LOG1%"
+
+if not errorlevel 1 exit /b 0
+
+call :is_mfa_lock_error "%MFA_CREATE_LOG1%" LOCK_ERR_1
+
+if not "%LOCK_ERR_1%"=="1" exit /b 1
+
+echo [WARN] Detected MFA env lock during micromamba create.
+
+call :release_env_lock_processes
+
+echo [INFO] Retrying MFA create after lock cleanup...
+
+call :run_mfa_create_once "%MFA_CREATE_LOG2%"
+
+if not errorlevel 1 exit /b 0
+
+call :is_mfa_lock_error "%MFA_CREATE_LOG2%" LOCK_ERR_2
+
+if not "%LOCK_ERR_2%"=="1" exit /b 1
+
+if "%AUTO_CLEAN_DONE%"=="1" exit /b 1
+
+echo [WARN] Lock error persisted. Running automatic clean recovery...
+
+call :run_clean_recovery
+
+if errorlevel 1 exit /b 1
+
+set "AUTO_CLEAN_DONE=1"
+
+echo [INFO] Retrying MFA create after clean recovery...
+
+call :run_mfa_create_once "%MFA_CREATE_LOG3%"
+
+if not errorlevel 1 exit /b 0
+
+exit /b 1
+
+:run_mfa_create_once
+
+set "MFA_CREATE_LOG=%~1"
+
+if exist "%MFA_CREATE_LOG%" del "%MFA_CREATE_LOG%" >nul 2>nul
+
+"%MICROMAMBA_EXE%" create -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge python=%MFA_PYTHON_VERSION% montreal-forced-aligner colorama >"%MFA_CREATE_LOG%" 2>&1
+
+set "MFA_CREATE_RC=%ERRORLEVEL%"
+
+type "%MFA_CREATE_LOG%"
+
+if "%MFA_CREATE_RC%"=="0" exit /b 0
+
+exit /b 1
+
+:is_mfa_lock_error
+
+set "%~2=0"
+
+if "%~1"=="" goto :eof
+
+if not exist "%~1" goto :eof
+
+findstr /I /C:"remove_all" /C:"being used by another process" /C:"The process cannot access the file because it is being used by another process" /C:"access is denied" "%~1" >nul 2>nul
+
+if not errorlevel 1 set "%~2=1"
+
+goto :eof
+
+:release_env_lock_processes
+
+echo [INFO] Attempting to release MFA env lock...
+
+set "UTOA_ENV_DIR_LOCK_TARGET=%ENV_DIR%"
+
+powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $target=[Regex]::Escape($env:UTOA_ENV_DIR_LOCK_TARGET); $names=@('python.exe','mfa.exe','micromamba.exe','conda.exe'); Get-CimInstance Win32_Process | Where-Object { $_.Name -in $names -and $_.CommandLine -and $_.CommandLine -match $target } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; Write-Host ('[INFO] Stopped lock process: ' + $_.Name + ' pid=' + $_.ProcessId) } catch {} }; Start-Sleep -Seconds 3"
+
+set "UTOA_ENV_DIR_LOCK_TARGET="
+
+taskkill /F /IM mfa.exe >nul 2>nul
+
+taskkill /F /IM micromamba.exe >nul 2>nul
+
+goto :eof
+
+:run_clean_recovery
+
+echo [INFO] Running clean recovery for MFA runtime...
+
+call :release_env_lock_processes
+
+if exist "%ENV_DIR%" (
+
+    call :remove_env_dir
+
+    if errorlevel 1 (
+
+        echo [FAILED] Could not remove locked MFA env during clean recovery.
+
+        if not "%NON_INTERACTIVE%"=="1" pause
+
+        exit /b 1
+
+    )
+
+)
+
+if exist "%MICROMAMBA_EXE%" (
+
+    "%MICROMAMBA_EXE%" clean -a -y -r "%MICROMAMBA_ROOT%" >nul 2>nul
+
+)
+
+echo [OK] Clean recovery complete.
+
+goto :eof
+
 :bootstrap_python_tools
 
 echo MFA Python ..
@@ -1121,6 +1271,8 @@ if not exist "%ENV_DIR%\python.exe" (
 if not errorlevel 1 (
 
     echo [OK] pip/setuptools/wheel
+
+    call :ensure_seaborn_dependency
 
     goto :eof
 
@@ -1147,6 +1299,8 @@ if errorlevel 1 (
     "%ENV_DIR%\python.exe" -m ensurepip --upgrade --default-pip
 
 )
+
+call :ensure_seaborn_dependency
 
 set "PYTOOLS_REPAIR_OK=0"
 
@@ -1190,6 +1344,62 @@ echo [OK] pip/setuptools/wheel
 
 goto :eof
 
+:ensure_seaborn_dependency
+
+if not exist "%ENV_DIR%\python.exe" goto :eof
+
+"%ENV_DIR%\python.exe" -c "import seaborn" >nul 2>nul
+
+if not errorlevel 1 (
+
+    echo [OK] seaborn
+
+    goto :eof
+
+)
+
+echo [INFO] Installing MFA dependency: seaborn
+
+if exist "%MICROMAMBA_EXE%" (
+
+    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge seaborn >nul 2>nul
+
+    if not errorlevel 1 (
+
+        "%ENV_DIR%\python.exe" -c "import seaborn" >nul 2>nul
+
+        if not errorlevel 1 (
+
+            echo [OK] seaborn
+
+            goto :eof
+
+        )
+
+    ) else (
+
+        echo [WARN] micromamba seaborn install failed. Falling back to pip...
+
+    )
+
+)
+
+"%ENV_DIR%\python.exe" -m pip install --upgrade seaborn >nul 2>nul
+
+"%ENV_DIR%\python.exe" -c "import seaborn" >nul 2>nul
+
+if errorlevel 1 (
+
+    echo [WARN] seaborn install failed. Continuing without seaborn.
+
+) else (
+
+    echo [OK] seaborn
+
+)
+
+goto :eof
+
 :install_japanese_support
 
 echo ..
@@ -1224,9 +1434,11 @@ goto :eof
 
 :install_audio_deps
 
-if exist "%ENV_DIR%\Library\bin\libsndfile.dll" goto :eof
-
 echo ^(libsndfile^)...
+
+call :verify_audio_deps
+
+if not errorlevel 1 goto :eof
 
 if exist "%MICROMAMBA_EXE%" (
 
@@ -1235,6 +1447,18 @@ if exist "%MICROMAMBA_EXE%" (
     if errorlevel 1 (
 
         echo [FAILED] Operation failed. Check the log output.
+
+        if not "%NON_INTERACTIVE%"=="1" pause
+
+        exit /b 1
+
+    )
+
+    call :verify_audio_deps
+
+    if errorlevel 1 (
+
+        echo [FAILED] libsndfile/soundfile verification failed after micromamba install.
 
         if not "%NON_INTERACTIVE%"=="1" pause
 
@@ -1260,13 +1484,55 @@ if exist "%ENV_DIR%\Scripts\conda.exe" (
 
     )
 
+    call :verify_audio_deps
+
+    if errorlevel 1 (
+
+        echo [FAILED] libsndfile/soundfile verification failed after conda install.
+
+        if not "%NON_INTERACTIVE%"=="1" pause
+
+        exit /b 1
+
+    )
+
     goto :eof
 
 )
 
-echo [WARN] micromamba/conda
+if exist "%ENV_DIR%\python.exe" (
+
+    "%ENV_DIR%\python.exe" -m pip install --upgrade soundfile
+
+    call :verify_audio_deps
+
+    if not errorlevel 1 goto :eof
+
+)
+
+echo [WARN] micromamba/conda/pip
 
 goto :eof
+
+:verify_audio_deps
+
+if not exist "%ENV_DIR%\python.exe" exit /b 1
+
+setlocal EnableExtensions DisableDelayedExpansion
+
+set "OLD_PATH=%PATH%"
+
+set "PATH=%ENV_DIR%;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\bin;%ENV_DIR%\Scripts;%ENV_DIR%\bin;%OLD_PATH%"
+
+"%ENV_DIR%\python.exe" -c "import soundfile" >nul 2>nul
+
+set "VERIFY_RC=%ERRORLEVEL%"
+
+endlocal & set "VERIFY_RC=%VERIFY_RC%"
+
+if "%VERIFY_RC%"=="0" exit /b 0
+
+exit /b 1
 
 :install_textgrid
 
@@ -1558,7 +1824,11 @@ exit /b 1
 
 :patch_korean_support
 
-set "PYTHONPATH=%APP_DIR%"
+set "UTOA_APP_PYTHONPATH=%APP_DIR%"
+
+if exist "%APP_DIR%\UTAU_Auto_OTO\core\mfa_runner.py" set "UTOA_APP_PYTHONPATH=%APP_DIR%\UTAU_Auto_OTO;%APP_DIR%"
+
+set "PYTHONPATH=%UTOA_APP_PYTHONPATH%"
 
 set "UTOA_MFA_EXE=%MFA_EXE%"
 
@@ -1566,11 +1836,13 @@ set "UTOA_MFA_EXE=%MFA_EXE%"
 
 if errorlevel 1 (
 
-    echo [WARN] MFA
+    echo [WARN] MFA Korean patch step failed. Continuing.
+
+    exit /b 0
 
 )
 
-goto :eof
+exit /b 0
 
 :check_korean_tokenizer_ready
 

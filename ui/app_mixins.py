@@ -1,4 +1,4 @@
-import datetime
+﻿import datetime
 import glob
 import json
 import logging
@@ -237,23 +237,23 @@ class FileDialogMixin:
         try:
             if hasattr(self, "_append_log"):
                 self._append_log(
-                    "[OTO-ML] 다운로드 모델 경로 적용: "
-                    f"KR={kr_root or '(미감지)'} / JA={ja_root or '(미감지)'}"
+                    "[OTO-ML] 모델 루트를 적용했습니다: "
+                    f"KR={kr_root or '(없음)'} / JA={ja_root or '(없음)'}"
                 )
         except Exception:
             pass
 
         if not kr_root and not ja_root:
             messagebox.showwarning(
-                "모델 경로 감지 실패",
+                "모델 경로 확인",
                 "선택한 폴더에서 model_meta.json을 찾지 못했습니다.\n"
-                "예: models/korean 또는 models/oto_ml/korean 구조를 확인해 주세요.",
+                "예: models/korean 또는 models/oto_ml/korean 경로를 선택해 주세요.",
             )
         elif (not kr_root) or (not ja_root):
             messagebox.showinfo(
-                "모델 경로 부분 적용",
-                "한 언어만 감지되어 부분 적용했습니다.\n"
-                f"한국어: {kr_root or '미감지'}\n일본어: {ja_root or '미감지'}",
+                "모델 경로 일부 적용",
+                "한쪽 언어 모델만 찾았습니다.\n"
+                f"한국어: {kr_root or '없음'}\n일본어: {ja_root or '없음'}",
             )
 
     def _browse_save_by_var(self, var, filetypes, defext):
@@ -362,23 +362,33 @@ class AppRuntimeMixin:
         if not text:
             return text
 
-        # 제어문자/깨진 영역을 최대한 정리해 UI 로그 가독성을 유지한다.
         text = re.sub(r"[\uF8F0-\uF8FF]", " ", text)
         text = re.sub(r"[\uFF61-\uFF9F]", " ", text)
         text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text)
         text = re.sub(r"\s{2,}", " ", text).strip()
 
-        if len(text) <= 2:
-            if "MFA" in original:
-                return "MFA 작업 진행 중..."
-            if "WhisperX" in original or "whisperx" in original:
-                return "WhisperX 작업 진행 중..."
-            if "OTO" in original:
-                return "OTO 작업 진행 중..."
-            if "Lab" in original or "lab" in original:
-                return "Lab 작업 진행 중..."
-            if "dict" in original.lower() or "사전" in original:
-                return "사전 작업 진행 중..."
+        def _looks_like_mojibake(s: str) -> bool:
+            if not s:
+                return False
+            markers = ("繝", "荳", "逕", "蛯", "笞", "隨", "邃", "", "甯", "嶹", "・ｻ", "ｽ")
+            marker_hits = sum(s.count(m) for m in markers)
+            replacement_hits = s.count("\ufffd")
+            broken_halfwidth = len(re.findall(r"[ｦ-ﾟ]", s))
+            return marker_hits >= 2 or replacement_hits >= 1 or broken_halfwidth >= 6
+
+        if len(text) <= 2 or _looks_like_mojibake(text) or _looks_like_mojibake(original):
+            lowered = original.lower()
+            if "mfa" in lowered:
+                return "MFA task in progress..."
+            if "whisperx" in lowered:
+                return "WhisperX task in progress..."
+            if "oto" in lowered:
+                return "OTO task in progress..."
+            if "lab" in lowered:
+                return "Lab generation in progress..."
+            if "dict" in lowered or "dictionary" in lowered:
+                return "Dictionary processing in progress..."
+            return "Processing..."
         return text
 
     def _install_global_exception_hooks(self):
@@ -422,19 +432,19 @@ class AppRuntimeMixin:
 
     def _normalize_ml_selector_mode(self, value: str) -> str:
         mode = str(value or "").strip().lower()
-        if mode in {"delta", "delta_only", "delta only", "델타만"}:
+        if mode in {"delta", "delta_only", "delta only", "delta-only"}:
             return "delta"
-        if mode in {"selector", "delta+selector", "delta + selector", "델타+셀렉터"}:
+        if mode in {"selector", "delta+selector", "delta + selector"}:
             return "selector"
         return "policy"
 
     def _describe_ml_selector_mode(self, value: str) -> str:
         mode = self._normalize_ml_selector_mode(value)
         if mode == "delta":
-            return "델타만"
+            return "delta"
         if mode == "selector":
-            return "델타+셀렉터"
-        return "기본 정책"
+            return "delta+selector"
+        return "policy"
 
     def _apply_ml_selector_runtime_mode(self, value: str) -> str:
         mode = self._normalize_ml_selector_mode(value)
@@ -462,7 +472,7 @@ class AppRuntimeMixin:
         fmt = str(normalized or "").strip().lower()
         if not fmt:
             return "general"
-        if "auto" in fmt or "자동" in fmt:
+        if "auto" in fmt or "・尖徐" in fmt:
             return "general"
         return fmt
 
@@ -853,7 +863,7 @@ class AppRuntimeMixin:
             self._sync_weak_voice_assist_controls()
         self._save_config()
         if hasattr(self, "_append_log"):
-            self._append_log(f"[고급 설정] 보이스뱅크 튜닝 프리셋 적용: {selected.get('label', '')}")
+            self._append_log(f"[프리셋] 적용 완료: {selected.get('label', '')}")
 
     def _reset_developer_settings_defaults(self) -> None:
         defaults = {
@@ -935,9 +945,6 @@ class AppRuntimeMixin:
             "full",
             "full_strict",
             "hard",
-            "완전 엄격 모드",
-            "완전 엄격",
-            "완전엄격",
         }:
             return "strict"
         if raw in {
@@ -947,16 +954,12 @@ class AppRuntimeMixin:
             "disabled",
             "0",
             "false",
-            "끄기",
         }:
             return "off"
         if raw in {
             "soft",
             "moderate",
             "balanced",
-            "적당히 엄격 모드(누락 행은 폴백)",
-            "적당히 엄격 모드",
-            "적당히 엄격",
         }:
             return "soft"
         return "soft"
@@ -965,11 +968,11 @@ class AppRuntimeMixin:
     def _mapping_strict_mode_label_from_code(code: str) -> str:
         normalized = AppRuntimeMixin._normalize_mapping_strict_mode_code(code)
         label_map = {
-            "strict": "완전 엄격 모드",
-            "soft": "적당히 엄격 모드(누락 행은 폴백)",
+            "strict": "strict",
+            "soft": "soft (fallback allowed)",
             "off": "off",
         }
-        return label_map.get(normalized, "적당히 엄격 모드(누락 행은 폴백)")
+        return label_map.get(normalized, "soft (fallback allowed)")
 
     def _set_mapping_strict_mode_from_code(self, code: str) -> str:
         normalized = self._normalize_mapping_strict_mode_code(code)
@@ -1012,9 +1015,6 @@ class AppRuntimeMixin:
             "auto",
             "automatic",
             "policy",
-            "자동(자동 라우팅)",
-            "자동 라우팅",
-            "자동",
         }:
             return "auto"
         if raw in {
@@ -1038,12 +1038,12 @@ class AppRuntimeMixin:
     def _ml_route_label_from_code(code: str) -> str:
         normalized = AppRuntimeMixin._normalize_ml_route_code(code)
         label_map = {
-            "auto": "자동(자동 라우팅)",
+            "auto": "auto",
             "nomfa": "No-MFA",
             "v1": "v1",
             "v2": "v2",
         }
-        return label_map.get(normalized, "자동(자동 라우팅)")
+        return label_map.get(normalized, "auto")
 
     def _set_ml_route_from_code(self, code: str) -> str:
         normalized = self._normalize_ml_route_code(code)
@@ -1097,7 +1097,7 @@ class AppRuntimeMixin:
         selector_mode = (
             self.ml_selector_mode_var.get()
             if hasattr(self, "ml_selector_mode_var")
-            else "델타+셀렉터"
+            else "・ｸ夋+・・駕┣"
         )
 
         if lang not in {"korean", "japanese"}:
@@ -1143,7 +1143,7 @@ class AppRuntimeMixin:
         selector_mode = (
             self.ml_selector_mode_var.get()
             if hasattr(self, "ml_selector_mode_var")
-            else "델타+셀렉터"
+            else "・ｸ夋+・・駕┣"
         )
 
         if lang not in {"korean", "japanese"}:
@@ -1457,8 +1457,8 @@ class AppRuntimeMixin:
         except Exception:
             pass
 
-        # 기본은 정상 종료를 우선합니다.
-        # onefile(frozen)에서는 강제 종료가 _MEI 정리 경고를 유발할 수 있으므로 제한합니다.
+        # ・ｰ・ｸ・ ・菩メ ・・｣誤･ｼ ・ｰ・﨑ｩ・壱共.
+        # onefile(frozen)・川・・・・菩・・・｣語ｰ _MEI ・簿ｦｬ ・ｽ・・ｼ ・・懦腹 ・・・溢愍・・・・懦復﨑ｩ・壱共.
         killer = None
         if self.is_running and not getattr(sys, "frozen", False):
             killer = threading.Timer(2.5, self._force_exit_now)
@@ -1526,6 +1526,7 @@ class AppRuntimeMixin:
             pass
 
     def _flush_ui_log_buffer(self):
+        self._ui_log_flush_pending = False
         widget = getattr(self, "log_text", None)
         if widget is None:
             return
@@ -1564,10 +1565,9 @@ class AppRuntimeMixin:
         if getattr(self, "log_text", None) is None:
             return
 
-        def _do():
-            self._flush_ui_log_buffer()
-
-        self._after_safe(_do)
+        if not getattr(self, "_ui_log_flush_pending", False):
+            self._ui_log_flush_pending = True
+            self._after_safe(self._flush_ui_log_buffer, delay_ms=120)
 
     def _append_log(self, msg, log_to_file=True):
         raw_msg = self._mask_sensitive_text(str(msg or ""))
@@ -1575,15 +1575,18 @@ class AppRuntimeMixin:
         msg = self._normalize_ui_message(raw_msg)
         link_line = ""
         if msg == ALERT_MSVC_REQUIRED:
-            msg = "⚠ 일부 의존성 설치에 실패했습니다. 사용은 가능하지만 정확도에 영향이 있을 수 있으니 C++ 툴을 설치해주세요."
-            link_line = f"설치 링크: {self._MSVC_BUILD_TOOLS_URL}"
+            msg = (
+                "일부 한국어 의존성 설치에 실패했습니다. "
+                "Windows에서는 Microsoft C++ Build Tools가 필요할 수 있습니다."
+            )
+            link_line = f"다운로드 링크: {self._MSVC_BUILD_TOOLS_URL}"
         elif self._looks_like_msvc_requirement_message(msg):
-            link_line = f"설치 링크: {self._MSVC_BUILD_TOOLS_URL}"
+            link_line = f"다운로드 링크: {self._MSVC_BUILD_TOOLS_URL}"
         now = time.monotonic()
         last_msg = getattr(self, "_last_log_msg", "")
         last_ts = float(getattr(self, "_last_log_ts", 0.0) or 0.0)
-        # 여러 계층(callback + logger + task print)에서 동일 메시지가 짧은 시간 내
-        # 중복 유입되는 경우 1회만 기록한다.
+        # ・ｬ・ｬ ・・ｸｵ(callback + logger + task print)・川・ ・呷攵 ・肥亨・・ ・ｧ・ ・懋ｰ・・ｴ
+        # ・瀧ｳｵ ・・・据・・・ｽ・ｰ 1巐誤ｧ・・ｰ・晨復・､.
         if msg == last_msg and (now - last_ts) < 0.35:
             return
         self._last_log_msg = msg
@@ -1600,13 +1603,13 @@ class AppRuntimeMixin:
         if msg == ALERT_MFA_PERMISSION_DENIED:
             self._after_safe(
                 lambda: self._show_copyable_alert(
-                    title="MFA 실행 권한 오류",
+                    title="MFA permission error",
                     message=(
-                        "MFA 내부 실행 파일(compute-mfcc-feats) 권한 문제로 정렬이 실패할 수 있습니다. (WinError 5)\n\n"
-                        "확인 항목:\n"
-                        "- 백신/Defender의 실행 차단 여부\n"
-                        "- Controlled Folder Access/AppLocker 정책\n"
-                        "- 앱과 음원 폴더 접근 권한"
+                        "MFA internal executable (compute-mfcc-feats) may fail due to permission issues (WinError 5).\n\n"
+                        "Checklist:\n"
+                        "- Check antivirus/Defender exclusion for the MFA runtime path\n"
+                        "- Check Controlled Folder Access/AppLocker policies\n"
+                        "- Try running the app once with administrator privileges"
                     ),
                     alert_key="mfa_permission_denied",
                 )
@@ -1620,7 +1623,7 @@ class AppRuntimeMixin:
         lowered = text.lower()
         return (
             ("microsoft visual c++ 14.0" in lowered or "c++ build tools" in lowered)
-            and ("필요" in text or "required" in lowered)
+            and ("필수" in text or "required" in lowered)
         )
 
     def _resolve_setup_mfa_script_path(self):
@@ -1628,11 +1631,35 @@ class AppRuntimeMixin:
         app_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if app_dir:
             candidates.append(os.path.join(app_dir, "setup_mfa.bat"))
+            candidates.append(os.path.join(os.path.dirname(app_dir), "setup_mfa.bat"))
         exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", ""))) if getattr(sys, "frozen", False) else ""
         if exe_dir:
             candidates.append(os.path.join(exe_dir, "setup_mfa.bat"))
+            candidates.append(os.path.join(os.path.dirname(exe_dir), "setup_mfa.bat"))
+        local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
+        if local_app_data:
+            candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO", "setup_mfa.bat"))
+            candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO_v3", "setup_mfa.bat"))
+        try:
+            candidates.append(os.path.join(os.getcwd(), "setup_mfa.bat"))
+        except Exception:
+            pass
+        app_data_dir = str(getattr(self, "app_data_dir", "") or "").strip()
+        if app_data_dir:
+            candidates.append(os.path.join(app_data_dir, "setup_mfa.bat"))
+        writable_data_dir = str(getattr(self, "writable_data_dir", "") or "").strip()
+        if writable_data_dir:
+            candidates.append(os.path.join(writable_data_dir, "setup_mfa.bat"))
+
+        seen = set()
         for candidate in candidates:
-            if candidate and os.path.isfile(candidate):
+            if not candidate:
+                continue
+            norm = os.path.normcase(os.path.abspath(candidate))
+            if norm in seen:
+                continue
+            seen.add(norm)
+            if os.path.isfile(candidate):
                 return candidate
         return ""
 
@@ -1641,14 +1668,16 @@ class AppRuntimeMixin:
         if script_path:
             command = f'cmd /c ""{script_path}" --recovery --non-interactive"'
             return (
-                "자동 복구가 계속 실패하면 설치 폴더의 setup_mfa.bat을 직접 실행해 주세요.\n"
-                f"- 파일: {script_path}\n"
+                "자동 복구를 위해 setup_mfa.bat를 수동 실행해 주세요.\n"
+                f"- 스크립트 경로: {script_path}\n"
                 "- 실행 명령:\n"
                 f"{command}"
             )
         return (
-            "자동 복구가 계속 실패하면 설치 폴더의 setup_mfa.bat을 직접 실행해 주세요.\n"
-            "- 실행 예시:\n"
+            "자동 복구를 위해 setup_mfa.bat를 수동 실행해 주세요.\n"
+            "- 실행 명령:\n"
+            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO_v3\\setup_mfa.bat\" --recovery --non-interactive\"\n"
+            "또는\n"
             "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --recovery --non-interactive\""
         )
 
@@ -1673,7 +1702,7 @@ class AppRuntimeMixin:
             link_label="\uc124\uce58 \ud398\uc774\uc9c0 \uc5f4\uae30",
         )
 
-    def _show_copyable_alert(self, title, message, alert_key=None, link_url="", link_label="링크 열기"):
+    def _show_copyable_alert(self, title, message, alert_key=None, link_url="", link_label="・・〓 ・ｴ・ｰ"):
         if self._is_closing:
             return
         if alert_key and alert_key in self._shown_alert_keys:
@@ -1681,7 +1710,7 @@ class AppRuntimeMixin:
         if alert_key:
             self._shown_alert_keys.add(alert_key)
 
-        safe_title = self._normalize_ui_message(str(title or "알림"))
+        safe_title = self._normalize_ui_message(str(title or "・誤ｦｼ"))
         safe_message = self._mask_sensitive_text(str(message or ""))
         win = tk.Toplevel(self)
         win.title(safe_title)
@@ -1740,7 +1769,7 @@ class AppRuntimeMixin:
 
         def _prompt():
             try:
-                safe_title = self._normalize_ui_message(str(title or "확인"))
+                safe_title = self._normalize_ui_message(str(title or "안내"))
                 safe_message = self._mask_sensitive_text(str(message or ""))
                 result["value"] = bool(messagebox.askyesno(safe_title, safe_message))
             except Exception:
@@ -1761,9 +1790,9 @@ class AppRuntimeMixin:
             ratio = self._parse_progress_ratio_from_status(msg)
             if ratio is None:
                 lower = msg.strip().lower()
-                if ("완료" in msg or "success" in lower) and not self.is_running:
+                if ("완료" in msg or "success" in lower or "complete" in lower) and not self.is_running:
                     ratio = 1.0
-                elif ("오류" in msg or "error" in lower) and not self.is_running:
+                elif ("오류" in msg or "error" in lower or "failed" in lower) and not self.is_running:
                     ratio = 0.0
             if ratio is not None:
                 self._set_progress(ratio)
@@ -1810,21 +1839,37 @@ class AppRuntimeMixin:
         for token, ratio in stage_text.items():
             if token in text:
                 return ratio
-        keyword_map = [
-            ("micromamba 다운로드", 0.10),
-            ("micromamba 압축 해제", 0.20),
-            ("mfa 환경 설치", 0.40),
-            ("mfa python 도구", 0.55),
-            ("의존성 점검", 0.68),
-            ("mfa 모델 다운로드", 0.85),
-            ("mfa 모델 점검", 0.80),
-            ("oto 자동 검증", 0.92),
-            ("전체 파이프라인 완료", 1.0),
+        keyword_map_lower = [
+            ("checking mfa prerequisites", 0.08),
+            ("creating micromamba environment", 0.12),
+            ("installing micromamba", 0.20),
+            ("installing mfa", 0.40),
+            ("repairing python packaging tools", 0.55),
+            ("installing korean dependencies", 0.68),
+            ("downloading mfa model", 0.80),
+            ("extracting mfa model", 0.85),
+            ("generating oto", 0.92),
+            ("completed successfully", 1.0),
         ]
-        for token, ratio in keyword_map:
+        for token, ratio in keyword_map_lower:
             if token in lowered:
                 return ratio
-        if ("완료" in text or "success" in lowered) and not getattr(self, "is_running", False):
+        keyword_map_text = [
+            ("MFA 필수 구성요소 점검", 0.08),
+            ("Micromamba 환경 생성", 0.12),
+            ("Micromamba 설치", 0.20),
+            ("MFA 설치", 0.40),
+            ("Python 패키징 도구 복구", 0.55),
+            ("한국어 의존성 설치", 0.68),
+            ("MFA 모델 다운로드", 0.80),
+            ("MFA 모델 압축 해제", 0.85),
+            ("OTO 생성", 0.92),
+            ("완료", 1.0),
+        ]
+        for token, ratio in keyword_map_text:
+            if token in text:
+                return ratio
+        if ("완료" in text or "success" in lowered or "complete" in lowered) and not getattr(self, "is_running", False):
             return 1.0
         return None
 
@@ -1857,21 +1902,22 @@ class AppRuntimeMixin:
         if self.is_running:
             # running state
             return "#FFE082"
-        if ("오류" in text) or ("error" in lowered):
+        if ("오류" in text) or ("error" in lowered) or ("failed" in lowered):
             return "#FF6B6B"
         if ("경고" in text) or ("warning" in lowered):
             return "#FFB74D"
-        if ("완료" in text) or ("success" in lowered):
+        if ("완료" in text) or ("성공" in text) or ("success" in lowered):
             return "#66BB6A"
         return "#FFFFFF"
+
     def _run_auto_validation(self, wav_dir, tg_folder, out_path, callback=None):
         log_cb = callback if callable(callback) else (lambda msg: self._append_log(msg, log_to_file=True))
         out_file = str(out_path or "").strip()
         if not out_file:
-            log_cb("ℹ 출력 OTO 경로가 없어 자동 검증을 건너뜁니다.")
+            log_cb("기준 OTO 경로가 없어 자동 검증을 건너뜁니다.")
             return {"errors": 0, "warnings": 0, "sampled_wavs": 0, "checked_wavs_total": 0, "truncated_issues": 0, "skipped": True}
         if not os.path.isfile(out_file):
-            log_cb(f"ℹ OTO 파일이 아직 생성되지 않아 자동 검증을 건너뜁니다: {out_file}")
+            log_cb(f"기준 OTO 파일을 찾을 수 없어 자동 검증을 건너뜁니다: {out_file}")
             return {"errors": 0, "warnings": 0, "sampled_wavs": 0, "checked_wavs_total": 0, "truncated_issues": 0, "skipped": True}
 
         os.environ.setdefault("UTOA_OTO_AUTO_VALIDATE_FAST", "1")
@@ -1879,7 +1925,7 @@ class AppRuntimeMixin:
         os.environ.setdefault("UTOA_OTO_AUTO_VALIDATE_MAX_ISSUES", "1200")
         os.environ.setdefault("UTOA_OTO_AUTO_VALIDATE_USE_TEXTGRID", "0")
         log_cb(
-            "🔎 OTO 자동 검증 시작 "
+            "OTO 자동 검증 시작 "
             f"(fast={os.environ.get('UTOA_OTO_AUTO_VALIDATE_FAST', '1')}, "
             f"max_files={os.environ.get('UTOA_OTO_AUTO_VALIDATE_MAX_FILES', '180')})"
         )
@@ -1897,12 +1943,12 @@ class AppRuntimeMixin:
         truncated_issues = int(summary.get("truncated_issues", 0) or 0)
         if err_count > 0:
             log_cb(
-                f"⚠ OTO 자동 검증 결과: error {err_count}, warning {warn_count} "
+                f"笞 OTO ・尖徐 ・・・・ｰ・ｼ: error {err_count}, warning {warn_count} "
                 f"(files={sampled_wavs}/{checked_wavs_total}, truncated={truncated_issues})"
             )
         else:
             log_cb(
-                f"✅ OTO 자동 검증 결과: warning {warn_count} (error 0) "
+                f"笨・OTO ・尖徐 ・・・・ｰ・ｼ: warning {warn_count} (error 0) "
                 f"(files={sampled_wavs}/{checked_wavs_total}, truncated={truncated_issues})"
             )
         return summary
@@ -1940,13 +1986,13 @@ class AppRuntimeMixin:
         if file_path_norm == keep_file_norm:
             return False
         if not snapshot_provided:
-            # 안전을 위해 스냅샷이 없으면 자동 삭제를 수행하지 않는다.
+            # ・溢・揆 ・・紛 ・､・・・・ｴ ・・愍・ｴ ・尖徐 ・ｭ・罹･ｼ ・倆哩﨑們ｧ ・危株・､.
             return False
-        # out_dir가 새로 생성된 경우(snapshot_files가 비어 있음)에도 새 파일로 간주한다.
+        # out_dir・ ・壱｡・・晧┳・・・ｽ・ｰ(snapshot_files・ ・・牟 ・溢搆)・尖巡 ・・甯護攵・・・・｣ｼ﨑罹共.
         is_new_in_run = (not snapshot_files) or (file_path_norm not in snapshot_files)
         if not is_new_in_run:
             return False
-        # 자동 생성 부산물 OTO 계열만 정리한다.
+        # ・尖徐 ・晧┳ ・・ｰ・ｼ OTO ・・龍・・・簿ｦｬ﨑罹共.
         return (
             low == "oto.ini"
             or (low.startswith("oto.") and low.endswith(".ini"))
@@ -2014,9 +2060,9 @@ class AppRuntimeMixin:
                     failed += 1
 
         if removed_files > 0 or removed_dirs > 0:
-            self._append_log(f"🧹 자동 정리 완료: files={removed_files}, dirs={removed_dirs}")
+            self._append_log(f"임시 정리 완료: files={removed_files}, dirs={removed_dirs}")
         if failed > 0:
-            self._append_log(f"⚠ 자동 정리 실패 항목: {failed}")
+            self._append_log(f"임시 정리 실패 항목: {failed}")
         return {"removed_files": removed_files, "removed_dirs": removed_dirs, "failed": failed}
 
     def _path_is_within(self, path, parent):
@@ -2052,13 +2098,13 @@ class AppRuntimeMixin:
         if file_path_norm == keep_file_norm:
             return False
         if not snapshot_provided:
-            # 안전을 위해 스냅샷이 없으면 자동 삭제를 수행하지 않는다.
+            # ・溢・揆 ・・紛 ・､・・・・ｴ ・・愍・ｴ ・尖徐 ・ｭ・罹･ｼ ・倆哩﨑們ｧ ・危株・､.
             return False
-        # out_dir가 새로 생성된 경우(snapshot_files가 비어 있음)에도 새 파일로 간주한다.
+        # out_dir・ ・壱｡・・晧┳・・・ｽ・ｰ(snapshot_files・ ・・牟 ・溢搆)・尖巡 ・・甯護攵・・・・｣ｼ﨑罹共.
         is_new_in_run = (not snapshot_files) or (file_path_norm not in snapshot_files)
         if not is_new_in_run:
             return False
-        # 자동 생성 부산물 OTO 계열만 정리한다.
+        # ・尖徐 ・晧┳ ・・ｰ・ｼ OTO ・・龍・・・簿ｦｬ﨑罹共.
         return (
             low == "oto.ini"
             or (low.startswith("oto.") and low.endswith(".ini"))
@@ -2126,9 +2172,9 @@ class AppRuntimeMixin:
                     failed += 1
 
         if removed_files > 0 or removed_dirs > 0:
-            self._append_log(f"🧹 자동 정리 완료: files={removed_files}, dirs={removed_dirs}")
+            self._append_log(f"임시 정리 완료: files={removed_files}, dirs={removed_dirs}")
         if failed > 0:
-            self._append_log(f"⚠ 자동 정리 실패 항목: {failed}")
+            self._append_log(f"임시 정리 실패 항목: {failed}")
         return {"removed_files": removed_files, "removed_dirs": removed_dirs, "failed": failed}
 
     def _clear_log(self):
@@ -2139,6 +2185,7 @@ class AppRuntimeMixin:
             except Exception:
                 pass
         self._ui_log_buffer = []
+        self._ui_log_flush_pending = False
         detail_widget = getattr(self, "detail_log_text", None)
         if detail_widget is not None:
             try:
@@ -2164,9 +2211,9 @@ class AppRuntimeMixin:
                     ratio = self._parse_progress_ratio_from_status(current_text)
                     if ratio is None:
                         lowered = str(current_text).strip().lower()
-                        if ("완료" in str(current_text)) or ("success" in lowered):
+                        if ("완료" in str(current_text)) or ("성공" in str(current_text)) or ("success" in lowered):
                             ratio = 1.0
-                        elif ("오류" in str(current_text)) or ("error" in lowered):
+                        elif ("오류" in str(current_text)) or ("실패" in str(current_text)) or ("error" in lowered):
                             ratio = 0.0
                     if ratio is not None:
                         self._set_progress(ratio)
@@ -2175,11 +2222,11 @@ class AppRuntimeMixin:
 
     def _run_in_thread(self, func):
         if self.is_running:
-            messagebox.showwarning("실행 중", "이미 작업이 진행 중입니다. 완료 후 다시 시도해 주세요.")
+            messagebox.showwarning("안내", "작업이 이미 실행 중입니다. 완료 후 다시 시도해 주세요.")
             return
         # Try to switch to log tab even if the label changed by theme/localization.
         switched = False
-        for tab_name in ("로그", "상세 로그", "📋 로그", "📝 로그"):
+        for tab_name in ("로그", "진행 로그", "상세 로그", "Log"):
             try:
                 self.tabview.set(tab_name)
                 switched = True
@@ -2272,15 +2319,15 @@ class AppRuntimeMixin:
         report_text = self._build_quick_error_report(step_name, err_msg, tb)
         copied = self._safe_clipboard_copy(report_text)
         if copied:
-            self._append_log("🧾 제보용 리포트를 클립보드에 복사했습니다. 그대로 붙여넣어 제보해 주세요.")
+            self._append_log("빠른 오류 리포트를 클립보드에 복사했습니다.")
             self._show_copyable_alert(
-                title="제보용 리포트 복사 완료",
+                title="빠른 오류 리포트",
                 message=report_text,
                 alert_key=None,
             )
         else:
             self._show_copyable_alert(
-                title="제보용 리포트",
+                title="빠른 오류 리포트",
                 message=report_text,
                 alert_key=None,
             )
@@ -2301,9 +2348,9 @@ class AppRuntimeMixin:
         report_text = self._build_quick_error_report(safe_step, exc_text, tb)
         copied = self._safe_clipboard_copy(report_text)
         if copied:
-            self._append_log("   요약 리포트를 클립보드에 복사했습니다.")
+            self._append_log("   빠른 리포트를 클립보드에 복사했습니다.")
         else:
-            self._append_log("   리포트 자동 복사에 실패했습니다. 팝업에서 복사해 주세요.")
+            self._append_log("   리포트 자동 복사에 실패했습니다. 아래 내용을 수동으로 복사해 주세요.")
         self._append_log(f"{'=' * 50}\n")
         self._set_status(f"오류 발생: {safe_step}")
         if auto_popup:
@@ -2348,19 +2395,23 @@ class AppRuntimeMixin:
 
             copied = self._safe_clipboard_copy(quick_report)
             if copied:
-                self._append_log("🧾 제보용 리포트를 클립보드에 복사했습니다.")
+                self._append_log("빠른 오류 리포트를 클립보드에 복사했습니다.")
             if sys.platform == "win32":
                 os.startfile(os.path.dirname(report_path))
 
             messagebox.showinfo(
-                "오류 제보",
+                "오류 리포트",
                 (
-                    f"제보 리포트를 생성했습니다.\n\n파일 위치:\n{safe_report_path}\n\n"
-                    + ("클립보드에도 요약 리포트를 복사했습니다.\n바로 붙여넣어 제보할 수 있습니다." if copied else "클립보드 복사에 실패했습니다. 파일을 전달해 주세요.")
+                    f"오류 리포트를 저장했습니다.\n\n저장 위치:\n{safe_report_path}\n\n"
+                    + (
+                        "빠른 리포트는 클립보드에도 복사되었습니다.\n필요 시 그대로 붙여넣어 공유해 주세요."
+                        if copied
+                        else "클립보드 자동 복사에 실패했습니다. 저장된 파일 내용을 공유해 주세요."
+                    )
                 ),
             )
         except Exception as e:
-            messagebox.showerror("오류", f"보고서 생성 실패: {self._mask_sensitive_text(str(e))}")
+            messagebox.showerror("오류", f"오류 리포트 저장에 실패했습니다: {self._mask_sensitive_text(str(e))}")
 
 class ConfigMixin:
     def _config_path_candidates(self):
@@ -2596,11 +2647,11 @@ class ConfigMixin:
                     if str(getattr(self, "release_channel", "stable")).strip().lower() == "preview":
                         self.lang_var.set("English (Preview CVVC)")
                     else:
-                        self.lang_var.set("Korean (한국어)")
+                        self.lang_var.set("한국어 (CV/연단음/CVVC/연속음 자동 매핑)")
                 elif "japanese" in saved_language_lower:
-                    self.lang_var.set("Japanese (日本語)")
+                    self.lang_var.set("日本語 (CV/연단음/CVVC/연속음 자동 매핑)")
                 elif "korean" in saved_language_lower:
-                    self.lang_var.set("Korean (한국어)")
+                    self.lang_var.set("한국어 (CV/연단음/CVVC/연속음 자동 매핑)")
 
             if "en_cvvc_pack" in config and hasattr(self, "en_cvvc_pack_var"):
                 pack = str(config.get("en_cvvc_pack", "LITE") or "LITE").strip().upper()
@@ -2622,12 +2673,12 @@ class ConfigMixin:
                 self.en_cvvc_list_fallback_var.set(bool(config.get("en_cvvc_list_fallback", True)))
 
             lang = self._get_language() if hasattr(self, "_get_language") else "korean"
-            saved_auto = config.get("auto_format", "자동 감지 (권장)")
+            saved_auto = config.get("auto_format", "CVVC")
             saved_auto_code = normalize_auto_format_value(lang, saved_auto)
             if hasattr(self, "_set_auto_format_from_code"):
                 self._set_auto_format_from_code(saved_auto_code, lang)
             if "ja_alias_style" in config:
-                saved_style = config.get("ja_alias_style", "원본 그대로")
+                saved_style = str(config.get("ja_alias_style", "원본 그대로") or "원본 그대로").strip()
                 if saved_style in {"원본 그대로", "히라가나", "로마자"}:
                     self.ja_alias_style_var.set(saved_style)
             if "aligner" in config and hasattr(self, "aligner_var"):
@@ -2702,9 +2753,14 @@ class ConfigMixin:
             if "whisperx_save_debug_json" in config and hasattr(self, "whisperx_save_debug_json_var"):
                 self.whisperx_save_debug_json_var.set(bool(config.get("whisperx_save_debug_json", False)))
             if "ml_selector_mode" in config and hasattr(self, "ml_selector_mode_var"):
-                saved_selector_mode = str(config.get("ml_selector_mode", "델타+셀렉터") or "").strip()
-                if saved_selector_mode in {"기본 정책", "델타만", "델타+셀렉터"}:
-                    self.ml_selector_mode_var.set(saved_selector_mode)
+                saved_selector_mode = str(config.get("ml_selector_mode", "selector") or "").strip()
+                normalized_mode = self._normalize_ml_selector_mode(saved_selector_mode)
+                label_map = {
+                    "policy": "기본 정책",
+                    "delta": "델타만",
+                    "selector": "델타+셀렉터",
+                }
+                self.ml_selector_mode_var.set(label_map.get(normalized_mode, "델타+셀렉터"))
             if "ml_coupled_enable" in config and hasattr(self, "ml_coupled_enable_var"):
                 self.ml_coupled_enable_var.set(bool(config.get("ml_coupled_enable", True)))
             if "ml_coupled_min_conf" in config and hasattr(self, "ml_coupled_min_conf_var"):
@@ -2931,5 +2987,6 @@ class ConfigMixin:
                     if key in self.param_vars:
                         self.param_vars[key].set(val)
         except Exception as e:
-            self.logger.error(f"설정 불러오기 실패: {e}")
+            self.logger.error(f"설정 로드 실패: {e}")
+
 

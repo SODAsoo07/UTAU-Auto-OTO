@@ -133,7 +133,11 @@ class TabBuildersMixin:
         status_group = ctk.CTkFrame(mfa_inner, fg_color="transparent")
         status_group.pack(side="left")
 
-        if getattr(self, "_mfa_path_probe_pending", False):
+        if getattr(self, "_mfa_install_in_progress", False):
+            self.mfa_status_label = ctk.CTkLabel(
+                status_group, text="🔧 MFA 설치 중...", font=("", 13, "bold"), text_color="#C27803"
+            )
+        elif getattr(self, "_mfa_path_probe_pending", False):
             self.mfa_status_label = ctk.CTkLabel(
                 status_group, text="⏳ MFA 확인 중...", font=("", 13, "bold"), text_color=PALETTE.hint_text
             )
@@ -213,7 +217,9 @@ class TabBuildersMixin:
             text_color="black",
             command=self._run_mfa_setup,
         )
-        if getattr(self, "_mfa_path_probe_pending", False):
+        if getattr(self, "_mfa_install_in_progress", False):
+            self.mfa_install_btn.configure(text="🔧 설치 중...", state="disabled", fg_color="#B0BEC5")
+        elif getattr(self, "_mfa_path_probe_pending", False):
             self.mfa_install_btn.configure(text="확인 중...", state="disabled", fg_color="#B0BEC5")
         elif self.mfa_path:
             self.mfa_install_btn.configure(text="✅ 설치 완료", state="disabled", fg_color="#388E3C")

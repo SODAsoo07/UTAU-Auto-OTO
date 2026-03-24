@@ -11,6 +11,7 @@ import logging
 import tempfile
 import threading
 import traceback
+import tkinter as tk
 
 
 def _suppress_windows_loader_popup():
@@ -290,6 +291,10 @@ class App(
         self.mfa_path = ""
         self._mfa_path_probe_pending = True
         self._mfa_path_probe_started = False
+        self._mfa_install_in_progress = False
+        self._startup_loading_win = None
+        self._startup_loading_label = None
+        self._show_startup_loading_window()
         
         # OpenUtau 호환 에일리어스 생성 여부
         self.openutau_var = ctk.BooleanVar(value=False)
@@ -390,15 +395,10 @@ class App(
         self.logger = logger
         self.app_version = APP_VERSION
         self.release_channel = RELEASE_CHANNEL
-        self._build_ui()
-        self._start_async_mfa_path_probe()
-        if hasattr(self, "_install_adaptive_ui_scaling"):
-            self._install_adaptive_ui_scaling()
-        if hasattr(self, "_install_global_exception_hooks"):
-            self._install_global_exception_hooks()
         self.protocol("WM_DELETE_WINDOW", self._on_close_request)
         self._post_ui_startup_done = False
-        self.after(0, self._run_post_ui_startup_tasks)
+        self._ui_bootstrap_done = False
+        self.after(0, self._bootstrap_ui)
 
         logger.info(f"{APP_NAME} v{APP_VERSION} 시작")
         logger.info(f"릴리스 채널: {RELEASE_CHANNEL}")
@@ -410,6 +410,76 @@ class App(
             logger.info(f"MFA 경로: {self.mfa_path}")
         else:
             logger.warning("MFA를 찾을 수 없습니다.")
+
+    def _bootstrap_ui(self):
+        if bool(getattr(self, "_ui_bootstrap_done", False)):
+            return
+        self._ui_bootstrap_done = True
+
+        try:
+            self._build_ui()
+            self._start_async_mfa_path_probe()
+            if hasattr(self, "_install_adaptive_ui_scaling"):
+                self._install_adaptive_ui_scaling()
+            if hasattr(self, "_install_global_exception_hooks"):
+                self._install_global_exception_hooks()
+            self.after(0, self._run_post_ui_startup_tasks)
+        finally:
+            self._hide_startup_loading_window()
+
+    def _show_startup_loading_window(self):
+        if getattr(self, "_startup_loading_win", None) is not None:
+            return
+        try:
+            self.withdraw()
+        except Exception:
+            pass
+        win = tk.Toplevel(self)
+        win.title(f"{APP_NAME} 로딩 중")
+        win.resizable(False, False)
+        width, height = 420, 220
+        win.geometry(f"{width}x{height}")
+        try:
+            win.attributes("-topmost", True)
+        except Exception:
+            pass
+        try:
+            win.update_idletasks()
+            screen_w = win.winfo_screenwidth()
+            screen_h = win.winfo_screenheight()
+            x = max(0, int((screen_w - width) / 2))
+            y = max(0, int((screen_h - height) / 2))
+            win.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception:
+            pass
+
+        frame = tk.Frame(win, bg="white")
+        frame.pack(fill="both", expand=True)
+        label = tk.Label(
+            frame,
+            text="로딩 중... 잠시만 기다려 주세요.",
+            font=("Segoe UI", 12, "bold"),
+            bg="white",
+        )
+        label.pack(expand=True)
+
+        self._startup_loading_win = win
+        self._startup_loading_label = label
+
+    def _hide_startup_loading_window(self):
+        win = getattr(self, "_startup_loading_win", None)
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+        self._startup_loading_win = None
+        self._startup_loading_label = None
+        try:
+            self.deiconify()
+            self.lift()
+        except Exception:
+            pass
 
     def _run_post_ui_startup_tasks(self):
         if bool(getattr(self, "_post_ui_startup_done", False)):

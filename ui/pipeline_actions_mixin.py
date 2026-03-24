@@ -93,11 +93,61 @@ class PipelineActionsMixin:
             )
         )
 
+    @staticmethod
+    def _has_any_lab_files(wav_dir: str) -> bool:
+        root = str(wav_dir or "").strip()
+        if not root or not os.path.isdir(root):
+            return False
+        for _cur, _dirs, files in os.walk(root):
+            if any(str(name).lower().endswith(".lab") for name in files):
+                return True
+        return False
+
+    def _notify_lab_or_dict_missing(self, wav_dir: str, dict_path: str) -> None:
+        guide = "Lab 파일 또는 딕셔너리 파일이 없습니다. 왼쪽 탭에서 Lab+사전 생성 버튼을 클릭해주세요."
+        self._append_log(f"❌ {guide}")
+        if not self._has_any_lab_files(wav_dir):
+            self._append_log(f"   - Lab 파일 미존재: {wav_dir}")
+        if not (dict_path and os.path.isfile(dict_path)):
+            self._append_log(f"   - 딕셔너리 파일 미존재: {dict_path}")
+        self._after_safe(
+            lambda: self._show_copyable_alert(
+                title="정렬 입력 파일 누락",
+                message=guide,
+                alert_key="align_lab_dict_missing",
+            )
+        )
+
+    def _validate_alignment_input_files(self, wav_dir: str, dict_path: str) -> bool:
+        has_lab = self._has_any_lab_files(wav_dir)
+        has_dict = bool(dict_path and os.path.isfile(dict_path))
+        if has_lab and has_dict:
+            return True
+        self._notify_lab_or_dict_missing(wav_dir, dict_path)
+        self._set_status("❌ 정렬 입력 파일 누락")
+        return False
+
+    @staticmethod
+    def _is_lab_or_dict_missing_alignment_error(code: str, message: str) -> bool:
+        c = str(code or "").strip().upper()
+        text = str(message or "")
+        lowered = text.lower()
+        if c == "ALIGN_DICT_MISSING":
+            return True
+        if "dictionary not found" in lowered:
+            return True
+        if "textgrid" in lowered and ("not found" in lowered or "missing" in lowered):
+            return True
+        if "lab" in lowered and ("not found" in lowered or "missing" in lowered):
+            return True
+        return False
+
     def _resolve_setup_mfa_script_path(self):
         candidates = []
         app_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if app_dir:
             candidates.append(os.path.join(app_dir, "setup_mfa.bat"))
+            candidates.append(os.path.join(os.path.dirname(app_dir), "setup_mfa.bat"))
         exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", ""))) if getattr(sys, "frozen", False) else ""
         if exe_dir:
             candidates.append(os.path.join(exe_dir, "setup_mfa.bat"))
@@ -105,6 +155,7 @@ class PipelineActionsMixin:
         local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
         if local_app_data:
             candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO", "setup_mfa.bat"))
+            candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO_v3", "setup_mfa.bat"))
         app_data_dir = str(getattr(self, "app_data_dir", "") or "").strip()
         if app_data_dir:
             candidates.append(os.path.join(app_data_dir, "setup_mfa.bat"))
@@ -156,9 +207,7 @@ class PipelineActionsMixin:
                 cwd=os.path.dirname(script_path) or None,
                 stdout=sp.PIPE,
                 stderr=sp.STDOUT,
-                text=True,
-                encoding=self._preferred_subprocess_encoding(),
-                errors="replace",
+                text=False,
                 env=env,
             )
         except Exception as e:
@@ -166,10 +215,8 @@ class PipelineActionsMixin:
             return False
 
         if process.stdout is not None:
-            for line in process.stdout:
-                text = str(line or "").strip()
-                if text:
-                    self._append_log(text)
+            for line in self._iter_decoded_stdout_lines(process):
+                self._append_log(line)
         process.wait()
         if process.returncode != 0:
             self._append_log(f"❌ setup_mfa.bat 폴백 복구 실패 (code={process.returncode})")
@@ -199,6 +246,8 @@ class PipelineActionsMixin:
         return (
             "설치 프로그램에 동봉된 setup_mfa.bat을 직접 실행해 추가 복구를 진행해 주세요.\n"
             "- 실행 예시:\n"
+            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO_v3\\setup_mfa.bat\" --recovery --non-interactive\"\n"
+            "또는\n"
             "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --recovery --non-interactive\""
         )
 
@@ -255,9 +304,74 @@ class PipelineActionsMixin:
         return sp.Popen(args, **kwargs)
 
     def _preferred_subprocess_encoding(self):
-        # Windows 배포 환경에서 utf-8 고정 디코딩 시 콘솔 로그가 깨지는 경우가 있어,
-        # 시스템 기본 인코딩을 우선 사용하고 실패 시 utf-8로 폴백한다.
-        return locale.getpreferredencoding(False) or "utf-8"
+        try:
+            return locale.getpreferredencoding(False) or "utf-8"
+        except Exception:
+            return "utf-8"
+
+    def _subprocess_decode_candidates(self):
+        candidates = []
+        for enc in (
+            "utf-8-sig",
+            "utf-8",
+            self._preferred_subprocess_encoding(),
+            getattr(locale, "getencoding", lambda: "")() or "",
+            "cp932",
+            "cp949",
+            "mbcs",
+        ):
+            enc = str(enc or "").strip()
+            if enc and enc not in candidates:
+                candidates.append(enc)
+        return candidates
+
+    def _score_decoded_subprocess_text(self, text):
+        score = 0
+        for ch in str(text or ""):
+            code = ord(ch)
+            if ch == "\ufffd":
+                score -= 20
+            elif 0x20 <= code <= 0x7E or ch in "\r\n\t":
+                score += 1
+            elif 0xAC00 <= code <= 0xD7A3:
+                score += 4
+            elif 0x3040 <= code <= 0x30FF or 0x4E00 <= code <= 0x9FFF:
+                score += 3
+            elif 0xFF61 <= code <= 0xFF9F:
+                score -= 6
+            elif code < 0x20:
+                score -= 10
+        return score
+
+    def _decode_subprocess_output(self, data):
+        if data is None:
+            return ""
+        if isinstance(data, str):
+            return data
+        raw = bytes(data)
+        best_text = ""
+        best_score = None
+        for enc in self._subprocess_decode_candidates():
+            try:
+                decoded = raw.decode(enc)
+            except (LookupError, UnicodeDecodeError):
+                continue
+            score = self._score_decoded_subprocess_text(decoded)
+            if best_score is None or score > best_score:
+                best_text = decoded
+                best_score = score
+        if best_score is not None:
+            return best_text
+        return raw.decode("utf-8", errors="replace")
+
+    def _iter_decoded_stdout_lines(self, process):
+        stdout = getattr(process, "stdout", None)
+        if stdout is None:
+            return
+        for raw_line in stdout:
+            line = self._decode_subprocess_output(raw_line).strip()
+            if line:
+                yield line
 
     def _install_mfa_runtime(self, language="korean"):
         import shutil
@@ -540,9 +654,7 @@ class PipelineActionsMixin:
                     [micromamba_exe, *cmd],
                     stdout=sp.PIPE,
                     stderr=sp.STDOUT,
-                    text=True,
-                    encoding=self._preferred_subprocess_encoding(),
-                    errors='replace',
+                    text=False,
                     env=env,
                 )
             except OSError as e:
@@ -554,10 +666,8 @@ class PipelineActionsMixin:
                 self._append_log(f"❌ Micromamba 실행 실패: {err}")
                 return False
             self._append_log(step_label)
-            for line in process.stdout:
-                stripped = line.strip()
-                if stripped:
-                    self._append_log(stripped)
+            for line in self._iter_decoded_stdout_lines(process):
+                self._append_log(line)
             process.wait()
             return process.returncode == 0
 
@@ -726,9 +836,7 @@ class PipelineActionsMixin:
                     [micromamba_exe, *cmd],
                     stdout=sp.PIPE,
                     stderr=sp.STDOUT,
-                    text=True,
-                    encoding=self._preferred_subprocess_encoding(),
-                    errors='replace',
+                    text=False,
                     env=env,
                 )
             except OSError as e:
@@ -740,10 +848,8 @@ class PipelineActionsMixin:
                 self._append_log(f"❌ Micromamba 실행 실패: {err}")
                 return False
             self._append_log(step_label)
-            for line in process.stdout:
-                stripped = line.strip()
-                if stripped:
-                    self._append_log(stripped)
+            for line in self._iter_decoded_stdout_lines(process):
+                self._append_log(line)
             process.wait()
             return process.returncode == 0
 
@@ -1011,7 +1117,13 @@ class PipelineActionsMixin:
                 self._mfa_ready_cache_ok = False
                 self._last_mfa_install_declined = True
                 return False
-            if self._install_mfa_runtime(language=lang):
+            install_ok = False
+            self._set_mfa_install_progress_state(True)
+            try:
+                install_ok = self._install_mfa_runtime(language=lang)
+            finally:
+                self._set_mfa_install_progress_state(False)
+            if install_ok:
                 cache_key = f"{lang}|{os.path.normcase(os.path.abspath(str(self.mfa_path or '')))}"
                 self._mfa_ready_cache_key = cache_key
                 self._mfa_ready_cache_ok = True
@@ -1029,7 +1141,13 @@ class PipelineActionsMixin:
             if not self._confirm_mfa_install_action(language=lang, reason="python_rebuild"):
                 self._last_mfa_install_declined = True
                 return False
-            if self._install_mfa_runtime(language=lang):
+            install_ok = False
+            self._set_mfa_install_progress_state(True)
+            try:
+                install_ok = self._install_mfa_runtime(language=lang)
+            finally:
+                self._set_mfa_install_progress_state(False)
+            if install_ok:
                 cache_key = f"{lang}|{os.path.normcase(os.path.abspath(str(self.mfa_path or '')))}"
                 self._mfa_ready_cache_key = cache_key
                 self._mfa_ready_cache_ok = True
@@ -1467,7 +1585,11 @@ class PipelineActionsMixin:
                 ok = False
                 if not before.get("checks", {}).get("mfa_executable") or before.get("checks", {}).get("python_rebuild_required"):
                     self._append_log("ℹ MFA 환경이 없거나 재구성이 필요해 새로 설치합니다.")
-                    ok = self._install_mfa_runtime(language=lang)
+                    self._set_mfa_install_progress_state(True)
+                    try:
+                        ok = self._install_mfa_runtime(language=lang)
+                    finally:
+                        self._set_mfa_install_progress_state(False)
                 else:
                     ok = self._repair_existing_mfa_runtime(language=lang)
 
@@ -1510,7 +1632,12 @@ class PipelineActionsMixin:
             self._set_running(True)
             self._set_status("⏳ 조금만 기다려주세요, 프로그램 필수 요소들을 설치하고 점검하는 중입니다.")
             try:
-                if self._install_mfa_runtime(language=self._get_language()):
+                self._set_mfa_install_progress_state(True)
+                try:
+                    install_ok = self._install_mfa_runtime(language=self._get_language())
+                finally:
+                    self._set_mfa_install_progress_state(False)
+                if install_ok:
                     self._set_status("✅ MFA 설치 완료")
                 else:
                     self._set_status("❌ MFA 설치 실패")
@@ -1521,8 +1648,26 @@ class PipelineActionsMixin:
                 self._set_running(False)
         self._run_in_thread(task)
 
+    def _set_mfa_install_progress_state(self, installing):
+        self._mfa_install_in_progress = bool(installing)
+        if not installing:
+            installed_now = bool(self.mfa_path and os.path.exists(str(self.mfa_path)))
+            self._update_mfa_status(installed_now)
+            return
+
+        def _do():
+            status_label = getattr(self, "mfa_status_label", None)
+            install_btn = getattr(self, "mfa_install_btn", None)
+            if status_label is None or install_btn is None:
+                return
+            status_label.configure(text="🔧 MFA 설치 중...", text_color="#C27803")
+            install_btn.configure(text="🔧 설치 중...", state="disabled", fg_color="#B0BEC5")
+
+        self._after_safe(_do)
+
     def _update_mfa_status(self, installed):
         """MFA 설치 상태를 UI에 반영합니다."""
+        self._mfa_install_in_progress = False
         def _do():
             status_label = getattr(self, "mfa_status_label", None)
             install_btn = getattr(self, "mfa_install_btn", None)
@@ -1823,6 +1968,9 @@ class PipelineActionsMixin:
                 out_path = self.out_entry.get().strip()
                 cleanup_snapshot = self._snapshot_output_tree_for_cleanup(out_path) if out_path else None
                 lang = self._get_language()
+                self._append_log(
+                    f"ℹ 현재 언어: {'일본어' if lang == 'japanese' else '한국어' if lang == 'korean' else '영어'}"
+                )
                 selected_format = normalize_auto_format_value(
                     lang,
                     self.auto_format_var.get() if hasattr(self, "auto_format_var") else "",
@@ -2137,6 +2285,8 @@ class PipelineActionsMixin:
                         self._append_log("❌ MFA 설치/모델 준비 실패")
                         self._set_status("❌ MFA 설치/모델 준비 실패")
                         return
+                    if not self._validate_alignment_input_files(wav_dir, dict_path):
+                        return
                 mfa_profile = (
                     self._get_mfa_align_profile_code()
                     if hasattr(self, "_get_mfa_align_profile_code")
@@ -2184,6 +2334,8 @@ class PipelineActionsMixin:
                 if not align_ok:
                     align_code = str(align_result.get("code", "ALIGN_RUN_FAILED"))
                     self._append_log(f"⚠ {format_error_with_recovery(align_code, align_err)}")
+                    if self._is_lab_or_dict_missing_alignment_error(align_code, align_err):
+                        self._notify_lab_or_dict_missing(wav_dir, dict_path)
                     if primary_engine == "mfa":
                         self._schedule_alignment_failure_mfa_followup(
                             language=lang,
