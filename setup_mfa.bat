@@ -1272,6 +1272,8 @@ if not errorlevel 1 (
 
     echo [OK] pip/setuptools/wheel
 
+    call :ensure_seaborn_dependency
+
     goto :eof
 
 )
@@ -1297,6 +1299,8 @@ if errorlevel 1 (
     "%ENV_DIR%\python.exe" -m ensurepip --upgrade --default-pip
 
 )
+
+call :ensure_seaborn_dependency
 
 set "PYTOOLS_REPAIR_OK=0"
 
@@ -1337,6 +1341,62 @@ if errorlevel 1 (
 )
 
 echo [OK] pip/setuptools/wheel
+
+goto :eof
+
+:ensure_seaborn_dependency
+
+if not exist "%ENV_DIR%\python.exe" goto :eof
+
+"%ENV_DIR%\python.exe" -c "import seaborn" >nul 2>nul
+
+if not errorlevel 1 (
+
+    echo [OK] seaborn
+
+    goto :eof
+
+)
+
+echo [INFO] Installing MFA dependency: seaborn
+
+if exist "%MICROMAMBA_EXE%" (
+
+    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge seaborn >nul 2>nul
+
+    if not errorlevel 1 (
+
+        "%ENV_DIR%\python.exe" -c "import seaborn" >nul 2>nul
+
+        if not errorlevel 1 (
+
+            echo [OK] seaborn
+
+            goto :eof
+
+        )
+
+    ) else (
+
+        echo [WARN] micromamba seaborn install failed. Falling back to pip...
+
+    )
+
+)
+
+"%ENV_DIR%\python.exe" -m pip install --upgrade seaborn >nul 2>nul
+
+"%ENV_DIR%\python.exe" -c "import seaborn" >nul 2>nul
+
+if errorlevel 1 (
+
+    echo [WARN] seaborn install failed. Continuing without seaborn.
+
+) else (
+
+    echo [OK] seaborn
+
+)
 
 goto :eof
 
@@ -1764,7 +1824,11 @@ exit /b 1
 
 :patch_korean_support
 
-set "PYTHONPATH=%APP_DIR%"
+set "UTOA_APP_PYTHONPATH=%APP_DIR%"
+
+if exist "%APP_DIR%\UTAU_Auto_OTO\core\mfa_runner.py" set "UTOA_APP_PYTHONPATH=%APP_DIR%\UTAU_Auto_OTO;%APP_DIR%"
+
+set "PYTHONPATH=%UTOA_APP_PYTHONPATH%"
 
 set "UTOA_MFA_EXE=%MFA_EXE%"
 
@@ -1772,11 +1836,13 @@ set "UTOA_MFA_EXE=%MFA_EXE%"
 
 if errorlevel 1 (
 
-    echo [WARN] MFA
+    echo [WARN] MFA Korean patch step failed. Continuing.
+
+    exit /b 0
 
 )
 
-goto :eof
+exit /b 0
 
 :check_korean_tokenizer_ready
 
