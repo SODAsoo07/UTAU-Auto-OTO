@@ -960,13 +960,52 @@ class PipelineActionsMixin:
             ):
                 self._append_log("❌ MFA 설치 실패")
                 return False
-            self._append_log("✅ Micromamba 기반 MFA 설치 완료!")
+            self._append_log("✅ Micromamba 기반 MFA 환경 생성 완료 (후속 점검 진행)")
             if not _refresh_mfa_path():
                 self._append_log("❌ MFA 실행 파일을 찾지 못했습니다.")
                 return False
 
+        def _create_portable_mfa_env(step_label: str) -> bool:
+            return _run_micromamba(
+                [
+                    'create',
+                    '-y',
+                    '-r',
+                    micromamba_root,
+                    '-p',
+                    env_dir,
+                    '-c',
+                    'conda-forge',
+                    f'python={MFA_PORTABLE_PYTHON_VERSION}',
+                    'montreal-forced-aligner',
+                    'colorama',
+                ],
+                step_label,
+            )
+
         self._set_status("🔧 MFA Python 도구 점검 중...")
-        if not ensure_mfa_python_packaging_stack(self.mfa_path or mfa_exe, callback=self._append_log):
+        packaging_ok = ensure_mfa_python_packaging_stack(self.mfa_path or mfa_exe, callback=self._append_log)
+        if not packaging_ok:
+            self._append_log("⚠ MFA Python 패키지 도구 복구 실패. 환경을 재구성해 1회 재시도합니다.")
+            if not _remove_env_dir():
+                self._append_log("❌ MFA 환경 재구성 전 기존 env 삭제 실패")
+                return False
+            self.mfa_path = ""
+            if not _download_micromamba():
+                return False
+            if not _extract_micromamba():
+                return False
+            self._set_status("🔧 MFA 환경 재구성 중...")
+            if not _create_portable_mfa_env("[재시도] 🔧 MFA 환경 재구성 중... (3~10분)"):
+                self._append_log("❌ MFA 환경 재구성 실패")
+                return False
+            if not _refresh_mfa_path():
+                self._append_log("❌ 재구성 후 MFA 실행 파일을 찾지 못했습니다.")
+                return False
+            self._set_status("🔧 MFA Python 도구 재점검 중...")
+            packaging_ok = ensure_mfa_python_packaging_stack(self.mfa_path or mfa_exe, callback=self._append_log)
+
+        if not packaging_ok:
             self._append_log("❌ MFA Python 패키지 도구 준비 실패")
             return False
 
@@ -1208,6 +1247,141 @@ class PipelineActionsMixin:
         except Exception:
             return
 
+    def _check_startup_ml_runtime_ready(self, mfa_report=None):
+        report = mfa_report if isinstance(mfa_report, dict) else {}
+        env_dir = str(report.get("env_dir", "") or "").strip()
+        python_exe = os.path.join(env_dir, "python.exe") if env_dir else ""
+        result = {
+            "ready": False,
+            "python_exe": python_exe,
+            "missing_modules": [],
+            "detail": "",
+        }
+        if not python_exe or not os.path.isfile(python_exe):
+            result["detail"] = "MFA Python 실행 파일을 찾지 못했습니다."
+            return result
+
+        probe_code = (
+            "import json\n"
+            "mods=['pandas','lightgbm','onnxruntime']\n"
+            "missing=[]\n"
+            "for m in mods:\n"
+            "    try:\n"
+            "        __import__(m)\n"
+            "    except Exception as e:\n"
+            "        missing.append({'module':m,'error':f'{type(e).__name__}: {e}'})\n"
+            "print(json.dumps({'missing':missing}, ensure_ascii=False))\n"
+            "raise SystemExit(1 if missing else 0)\n"
+        )
+        probe_env = os.environ.copy()
+        path_parts = [
+            env_dir,
+            os.path.join(env_dir, "Scripts"),
+            os.path.join(env_dir, "Library", "bin"),
+            os.path.join(env_dir, "Library", "usr", "bin"),
+            os.path.join(env_dir, "Library", "mingw-w64", "bin"),
+        ]
+        existing_path = str(probe_env.get("PATH", "") or "")
+        probe_env["PATH"] = os.pathsep.join(path_parts + ([existing_path] if existing_path else []))
+        try:
+            run = self._run_subprocess_hidden(
+                [python_exe, "-c", probe_code],
+                capture_output=True,
+                text=False,
+                timeout=180,
+                env=probe_env,
+            )
+        except Exception as exc:
+            result["detail"] = f"ML 런타임 점검 실행 실패: {exc}"
+            return result
+
+        stdout_text = self._decode_subprocess_output(getattr(run, "stdout", b"") or b"").strip()
+        stderr_text = self._decode_subprocess_output(getattr(run, "stderr", b"") or b"").strip()
+        payload = {}
+        for raw in (stdout_text, stderr_text):
+            if not raw:
+                continue
+            for line in reversed(raw.splitlines()):
+                line = str(line or "").strip()
+                if not line or not line.startswith("{"):
+                    continue
+                try:
+                    parsed = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(parsed, dict):
+                    payload = parsed
+                    break
+            if payload:
+                break
+
+        missing_items = list(payload.get("missing", []) or [])
+        missing_modules = []
+        detail_tokens = []
+        for item in missing_items:
+            if not isinstance(item, dict):
+                continue
+            mod = str(item.get("module", "") or "").strip()
+            err = str(item.get("error", "") or "").strip()
+            if mod:
+                missing_modules.append(mod)
+                if err:
+                    detail_tokens.append(f"{mod}: {err}")
+        result["missing_modules"] = missing_modules
+        result["ready"] = bool(run.returncode == 0 and not missing_modules)
+        if result["ready"]:
+            return result
+        if detail_tokens:
+            result["detail"] = " | ".join(detail_tokens)
+        else:
+            tail = (stderr_text or stdout_text or "").strip()
+            result["detail"] = tail[-400:] if tail else "ML 런타임 모듈 import 확인에 실패했습니다."
+        return result
+
+    def _run_setup_mfa_install_with_ml(self):
+        script_path = self._resolve_setup_mfa_script_path()
+        if not script_path:
+            self._append_log("⚠ setup_mfa.bat을 찾지 못해 MFA+ML 자동 설치를 진행할 수 없습니다.")
+            return False
+
+        cmd = [script_path, "--non-interactive", "--install", "--with-ml"]
+        env = os.environ.copy()
+        try:
+            runtime_root = os.path.dirname(get_default_mfa_env_dir())
+        except Exception:
+            runtime_root = ""
+        if runtime_root:
+            env["UTOA_MFA_SHARED_ROOT"] = runtime_root
+            cmd.extend(["--runtime-root", runtime_root])
+
+        self._append_log("ℹ startup 점검: setup_mfa.bat로 MFA+ML 설치/복구를 진행합니다.")
+        self._append_log(f"   실행: {' '.join(cmd)}")
+        try:
+            process = self._popen_subprocess_hidden(
+                cmd,
+                cwd=os.path.dirname(script_path) or None,
+                stdout=sp.PIPE,
+                stderr=sp.STDOUT,
+                text=False,
+                env=env,
+            )
+        except Exception as exc:
+            self._append_log(f"❌ setup_mfa.bat 실행 실패: {exc}")
+            return False
+
+        if process.stdout is not None:
+            for line in self._iter_decoded_stdout_lines(process):
+                self._append_log(line)
+        process.wait()
+        if process.returncode != 0:
+            self._append_log(f"❌ setup_mfa.bat MFA+ML 설치 실패 (code={process.returncode})")
+            return False
+
+        resolved = find_mfa_executable() or ""
+        if resolved and os.path.exists(resolved):
+            self.mfa_path = resolved
+        return True
+
     def _schedule_startup_mfa_auto_repair(self):
         if str(os.environ.get("UTOA_DISABLE_STARTUP_MFA_AUTO_REPAIR", "")).strip().lower() in {"1", "true", "yes", "on"}:
             return
@@ -1220,7 +1394,7 @@ class PipelineActionsMixin:
             pass
 
         state = self._load_mfa_startup_repair_state()
-        # Run startup MFA check only once per install/runtime.
+        # Run startup MFA+ML check only once per install/runtime.
         if bool(state.get("first_check_done", False)):
             return
         if float(state.get("last_attempt_ts", 0.0) or 0.0) > 0:
@@ -1265,6 +1439,14 @@ class PipelineActionsMixin:
             return
 
     def _schedule_startup_cuda_runtime_check(self):
+        enabled = str(os.environ.get("UTOA_ENABLE_STARTUP_CUDA_RUNTIME_CHECK", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if not enabled:
+            return
         if str(os.environ.get("UTOA_DISABLE_STARTUP_CUDA_RUNTIME_CHECK", "")).strip().lower() in {"1", "true", "yes", "on"}:
             return
         if getattr(self, "_startup_cuda_runtime_check_scheduled", False):
@@ -1421,66 +1603,123 @@ class PipelineActionsMixin:
         )
         try:
             self._set_status("⏳ 조금만 기다려주세요, 프로그램 필수 요소들을 설치하고 점검하는 중입니다.")
-            self._append_log("🔍 초기 설치 점검: MFA 상태를 자동 진단합니다.")
+            self._append_log("🔍 초기 설치 점검: MFA+ML 상태를 자동 진단합니다.")
             resolved = self.mfa_path or find_mfa_executable() or ""
             if resolved and os.path.exists(resolved):
                 self.mfa_path = resolved
 
             before = diagnose_mfa_runtime(self.mfa_path or "", language=lang)
-            if before.get("ready"):
+            ml_before = self._check_startup_ml_runtime_ready(before)
+
+            if before.get("ready") and ml_before.get("ready"):
                 if "korean_deps_degraded" in list(before.get("issues", []) or []):
                     self._notify_korean_dependency_degraded()
-                self._append_log("✅ 초기 MFA 상태 점검 완료 (복구 불필요)")
+                self._append_log("✅ 초기 MFA+ML 상태 점검 완료 (복구 불필요)")
                 self._update_mfa_status(True)
-                self._set_status("✅ 초기 MFA 점검 완료")
+                self._set_status("✅ 초기 MFA+ML 점검 완료")
                 self._save_mfa_startup_repair_state(
                     last_result="success",
                     last_success_ts=time.time(),
                     last_success_version=str(getattr(self, "app_version", "") or ""),
                     last_issues=[],
+                    last_ml_missing_modules=[],
                     first_check_done=True,
                 )
                 return
 
-            self._append_log("⚠ 초기 설치 점검에서 MFA 이상을 감지했습니다.")
+            self._append_log("⚠ 초기 설치 점검에서 MFA 또는 ML 런타임 이상을 감지했습니다.")
             self._append_log("ℹ 자동복구는 진단 후 사용자 확인을 받은 경우에만 설치를 진행합니다.")
             self._append_log(self._format_mfa_diagnosis_summary(before))
-            recovered = self._ensure_mfa_ready_for_language(lang)
-            after = diagnose_mfa_runtime(self.mfa_path or "", language=lang)
+            if not ml_before.get("ready"):
+                missing_ml = ", ".join(list(ml_before.get("missing_modules", []) or [])) or "pandas/lightgbm/onnxruntime"
+                self._append_log(f"ℹ ML 런타임 점검 결과: 복구 필요 ({missing_ml})")
+                detail = str(ml_before.get("detail", "") or "").strip()
+                if detail:
+                    self._append_log(f"   상세: {detail}")
 
-            if recovered and after.get("ready"):
-                self._append_log("✅ 초기 MFA 자동 복구 완료")
+            missing_targets = []
+            if not before.get("ready"):
+                missing_targets.append("MFA 런타임")
+            if not ml_before.get("ready"):
+                missing_targets.append("ML 런타임")
+            missing_label = ", ".join(missing_targets) or "MFA/ML 런타임"
+            confirm_title = "초기 설치 자동 복구 확인"
+            confirm_message = (
+                f"초기 점검 결과 {missing_label} 복구가 필요합니다.\n\n"
+                "지금 setup_mfa.bat을 실행해 자동 설치/복구를 진행할까요?\n"
+                "(MFA + ML 패키지 설치 포함)"
+            )
+            approved = False
+            if hasattr(self, "_ask_yes_no_dialog_sync"):
+                approved = bool(
+                    self._ask_yes_no_dialog_sync(
+                        title=confirm_title,
+                        message=confirm_message,
+                        default=False,
+                    )
+                )
+            if not approved:
+                self._append_log("ℹ 사용자 선택: startup MFA+ML 자동 설치를 건너뛰었습니다.")
+                self._set_status("⚠ MFA/ML 추가 복구 필요")
+                issues = list(before.get("issues", []) or [])
+                self._save_mfa_startup_repair_state(
+                    last_result="user_declined",
+                    last_issues=issues,
+                    last_ml_missing_modules=list(ml_before.get("missing_modules", []) or []),
+                    last_failure_ts=time.time(),
+                    first_check_done=True,
+                )
+                return
+
+            self._append_log("ℹ 사용자 확인: startup MFA+ML 자동 설치/복구를 진행합니다.")
+            self._notify_long_install_time("MFA+ML")
+            install_ok = False
+            self._set_mfa_install_progress_state(True)
+            try:
+                install_ok = self._run_setup_mfa_install_with_ml()
+            finally:
+                self._set_mfa_install_progress_state(False)
+
+            after = diagnose_mfa_runtime(self.mfa_path or "", language=lang)
+            ml_after = self._check_startup_ml_runtime_ready(after)
+            final_ready = bool(after.get("ready")) and bool(ml_after.get("ready"))
+
+            if install_ok and final_ready:
+                self._append_log("✅ 초기 MFA+ML 자동 복구 완료")
                 self._update_mfa_status(True)
-                self._set_status("✅ 초기 MFA 복구 완료")
+                self._set_status("✅ 초기 MFA+ML 복구 완료")
                 self._save_mfa_startup_repair_state(
                     last_result="success",
                     last_success_ts=time.time(),
                     last_success_version=str(getattr(self, "app_version", "") or ""),
                     last_issues=[],
+                    last_ml_missing_modules=[],
                     first_check_done=True,
                 )
             else:
                 issues = list(after.get("issues", []) or [])
-                if bool(getattr(self, "_last_mfa_install_declined", False)):
-                    self._append_log("ℹ 사용자 선택으로 MFA 설치/복구를 건너뛰었습니다.")
-                self._append_log("⚠ 초기 MFA 자동 복구가 완료되지 않았습니다. 'MFA 진단/복구' 버튼으로 재시도하세요.")
+                self._append_log("⚠ 초기 MFA+ML 자동 복구가 완료되지 않았습니다. 'MFA 진단/복구' 버튼으로 재시도하세요.")
+                detail = str(ml_after.get("detail", "") or "").strip()
+                if detail and not ml_after.get("ready"):
+                    self._append_log(f"⚠ ML 런타임 점검 상세: {detail}")
                 recovery_guide = self._build_setup_mfa_recovery_guide()
                 self._after_safe(
                     lambda guide=recovery_guide: self._show_copyable_alert(
-                        title="MFA 자동 복구 추가 안내",
+                        title="MFA/ML 자동 복구 추가 안내",
                         message=(
                             "초기 자동 복구가 완료되지 않았습니다.\n"
                             "앱 내부의 'MFA 진단/복구'를 다시 시도하거나 아래 방법으로 수동 복구를 진행해 주세요.\n\n"
-                            f"{guide}"
+                            f"{guide}\n"
+                            "추가로 ML 런타임이 누락된 경우 setup_mfa.bat --with-ml 옵션으로 재실행해 주세요."
                         ),
-                        alert_key="mfa_startup_repair_needs_attention",
+                        alert_key="mfa_ml_startup_repair_needs_attention",
                     )
                 )
-                self._set_status("⚠ MFA 추가 복구 필요")
-                declined = bool(getattr(self, "_last_mfa_install_declined", False))
+                self._set_status("⚠ MFA/ML 추가 복구 필요")
                 self._save_mfa_startup_repair_state(
-                    last_result="user_declined" if declined else "failed",
+                    last_result="failed",
                     last_issues=issues,
+                    last_ml_missing_modules=list(ml_after.get("missing_modules", []) or []),
                     last_failure_ts=time.time(),
                     first_check_done=True,
                 )
@@ -1491,7 +1730,7 @@ class PipelineActionsMixin:
                 last_error_ts=time.time(),
                 first_check_done=True,
             )
-            self._handle_error("초기 MFA 자동 복구", e)
+            self._handle_error("초기 MFA/ML 자동 복구", e)
         finally:
             self._save_mfa_startup_repair_state(
                 first_check_done=True,
@@ -1640,7 +1879,7 @@ class PipelineActionsMixin:
                 if install_ok:
                     self._set_status("✅ MFA 설치 완료")
                 else:
-                    self._set_status("❌ MFA 설치 실패")
+                    self._set_status("⚪ MFA 설치 미완료")
 
             except Exception as e:
                 self._handle_error("MFA 설치", e)
@@ -1651,7 +1890,15 @@ class PipelineActionsMixin:
     def _set_mfa_install_progress_state(self, installing):
         self._mfa_install_in_progress = bool(installing)
         if not installing:
-            installed_now = bool(self.mfa_path and os.path.exists(str(self.mfa_path)))
+            installed_now = False
+            try:
+                resolved = self.mfa_path or find_mfa_executable() or ""
+                if resolved and os.path.exists(resolved):
+                    self.mfa_path = resolved
+                report = diagnose_mfa_runtime(self.mfa_path or "", language=self._get_language())
+                installed_now = bool(report.get("ready", False))
+            except Exception:
+                installed_now = bool(self.mfa_path and os.path.exists(str(self.mfa_path)))
             self._update_mfa_status(installed_now)
             return
 
@@ -1668,6 +1915,7 @@ class PipelineActionsMixin:
     def _update_mfa_status(self, installed):
         """MFA 설치 상태를 UI에 반영합니다."""
         self._mfa_install_in_progress = False
+        self._mfa_ui_ready = bool(installed)
         def _do():
             status_label = getattr(self, "mfa_status_label", None)
             install_btn = getattr(self, "mfa_install_btn", None)
@@ -1677,7 +1925,7 @@ class PipelineActionsMixin:
                 status_label.configure(text="✅ MFA 설치됨", text_color="#4F8F61")
                 install_btn.configure(text="✅ 설치 완료", state="disabled", fg_color="#388E3C")
             else:
-                status_label.configure(text="❌ MFA 미설치", text_color="#B45A63")
+                status_label.configure(text="⚪ MFA 미완료", text_color="#90A4AE")
                 install_btn.configure(text="⬇ MFA 원클릭 설치", state="normal", fg_color="#FFA726")
         self._after_safe(_do)
 

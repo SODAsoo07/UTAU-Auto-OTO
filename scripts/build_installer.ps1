@@ -1,10 +1,10 @@
 param(
     [string]$Channel = "stable",
-    [string]$SourceDir = "",
-    [string]$OutputDir = "installer_output",
-    [ValidateSet("bundled", "online")]
-    [string]$MfaMode = "bundled",
-    [bool]$EmitExternalSetupMfa = $true,
+[string]$SourceDir = "",
+[string]$OutputDir = "installer_output",
+[ValidateSet("bundled", "online")]
+[string]$MfaMode = "online",
+[bool]$EmitExternalSetupMfa = $true,
     [switch]$Sign,
     [string]$SignSubject = "SODAsoo",
     [string]$SignToolPath = "",
@@ -113,12 +113,22 @@ $quickStartSrc = Join-Path $repoRoot "release_assets\먼저 실행.txt"
 $quickStartDst = Join-Path $sourceAbs "먼저 실행.txt"
 Sync-FileIfNeeded -SourcePath $quickStartSrc -DestinationPath $quickStartDst -Label "먼저 실행.txt"
 
+$requirementsSrc = Join-Path $repoRoot "requirements.txt"
+$requirementsDst = Join-Path $sourceAbs "requirements.txt"
+Sync-FileIfNeeded -SourcePath $requirementsSrc -DestinationPath $requirementsDst -Label "requirements.txt"
+
+$requirementsMlSrc = Join-Path $repoRoot "requirements-ml.txt"
+$requirementsMlDst = Join-Path $sourceAbs "requirements-ml.txt"
+Sync-FileIfNeeded -SourcePath $requirementsMlSrc -DestinationPath $requirementsMlDst -Label "requirements-ml.txt"
+
 $requiredPayload = @(
     @{ Name = "Main executable"; Path = (Join-Path $sourceAbs "UTAU_Auto_OTO\\UTAU_Auto_OTO.exe") },
     @{ Name = "MFA setup script"; Path = (Join-Path $sourceAbs "setup_mfa.bat") },
     @{ Name = "Runtime recovery script"; Path = (Join-Path $sourceAbs "runtime_recovery.ps1") },
     @{ Name = "Startup diagnose script"; Path = (Join-Path $sourceAbs "startup_diagnose.ps1") },
     @{ Name = "Startup diagnose launcher"; Path = (Join-Path $sourceAbs "startup_diagnose.bat") },
+    @{ Name = "requirements.txt"; Path = (Join-Path $sourceAbs "requirements.txt") },
+    @{ Name = "requirements-ml.txt"; Path = (Join-Path $sourceAbs "requirements-ml.txt") },
     @{ Name = "Release channel metadata"; Path = (Join-Path $sourceAbs "release_channel.json") }
 )
 $missingPayload = @()
