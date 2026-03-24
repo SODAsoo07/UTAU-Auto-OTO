@@ -881,6 +881,10 @@ call :cleanup_env_caches
 
 if errorlevel 1 exit /b 1
 
+call :cleanup_mfa_root_artifacts
+
+if errorlevel 1 exit /b 1
+
 call :cleanup_old_env_if_requested
 
 echo.
@@ -1099,6 +1103,10 @@ call :download_acoustic_model japanese_mfa
 if errorlevel 1 exit /b 1
 
 call :cleanup_env_caches
+
+if errorlevel 1 exit /b 1
+
+call :cleanup_mfa_root_artifacts
 
 if errorlevel 1 exit /b 1
 
@@ -1766,6 +1774,88 @@ if exist "%ENV_DIR%\python.exe" (
 )
 
 echo [OK] Completed.
+
+goto :eof
+
+:cleanup_mfa_root_artifacts
+
+echo [INFO] Cleaning stale MFA root artifacts...
+
+if not defined MFA_SHARED_ROOT goto :cleanup_mfa_root_artifacts_done
+
+if not exist "%MFA_SHARED_ROOT%" mkdir "%MFA_SHARED_ROOT%" >nul 2>nul
+
+if exist "%ENV_DIR%\.mfa_root_ascii\pretrained_models" (
+
+    call :sync_bundle_tree "%ENV_DIR%\.mfa_root_ascii\pretrained_models" "%MFA_SHARED_ROOT%\pretrained_models"
+
+)
+
+if exist "%ENV_DIR%\.mfa_root_ascii\extracted_models" if not exist "%MFA_SHARED_ROOT%\extracted_models" (
+
+    call :sync_bundle_tree "%ENV_DIR%\.mfa_root_ascii\extracted_models" "%MFA_SHARED_ROOT%\extracted_models"
+
+)
+
+if exist "%ENV_DIR%\.mfa_root_ascii" (
+
+    rmdir /s /q "%ENV_DIR%\.mfa_root_ascii" >nul 2>nul
+
+    if exist "%ENV_DIR%\.mfa_root_ascii" (
+
+        echo [WARN] Failed to remove legacy MFA root from env: "%ENV_DIR%\.mfa_root_ascii"
+
+    ) else (
+
+        echo [OK] Removed legacy MFA root from env.
+
+    )
+
+)
+
+if exist "%ENV_DIR%\.mfa_root_ascii_p*" for /d %%D in ("%ENV_DIR%\.mfa_root_ascii_p*") do (
+
+    rmdir /s /q "%%~fD" >nul 2>nul
+
+)
+
+if exist "%APP_DIR%\.mfa_root_ascii_p*" for /d %%D in ("%APP_DIR%\.mfa_root_ascii_p*") do (
+
+    rmdir /s /q "%%~fD" >nul 2>nul
+
+)
+
+call :prune_mfa_shared_root_cache_dirs
+
+:cleanup_mfa_root_artifacts_done
+
+echo [OK] MFA root artifact cleanup completed.
+
+goto :eof
+
+:prune_mfa_shared_root_cache_dirs
+
+if not defined MFA_SHARED_ROOT goto :eof
+
+if not exist "%MFA_SHARED_ROOT%" goto :eof
+
+setlocal EnableDelayedExpansion
+
+for /d %%D in ("%MFA_SHARED_ROOT%\*") do (
+
+    set "MFA_ROOT_NAME=%%~nxD"
+    set "MFA_ROOT_KEEP=0"
+    if /I "!MFA_ROOT_NAME!"=="pretrained_models" set "MFA_ROOT_KEEP=1"
+    if /I "!MFA_ROOT_NAME!"=="extracted_models" set "MFA_ROOT_KEEP=1"
+    if /I "!MFA_ROOT_KEEP!"=="0" (
+
+        rmdir /s /q "%%~fD" >nul 2>nul
+
+    )
+
+)
+
+endlocal
 
 goto :eof
 

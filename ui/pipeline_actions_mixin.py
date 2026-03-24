@@ -1439,6 +1439,14 @@ class PipelineActionsMixin:
             return
 
     def _schedule_startup_cuda_runtime_check(self):
+        enabled = str(os.environ.get("UTOA_ENABLE_STARTUP_CUDA_RUNTIME_CHECK", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if not enabled:
+            return
         if str(os.environ.get("UTOA_DISABLE_STARTUP_CUDA_RUNTIME_CHECK", "")).strip().lower() in {"1", "true", "yes", "on"}:
             return
         if getattr(self, "_startup_cuda_runtime_check_scheduled", False):

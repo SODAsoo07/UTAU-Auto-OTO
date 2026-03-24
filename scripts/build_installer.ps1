@@ -1,10 +1,10 @@
 param(
     [string]$Channel = "stable",
-    [string]$SourceDir = "",
-    [string]$OutputDir = "installer_output",
-    [ValidateSet("bundled", "online")]
-    [string]$MfaMode = "bundled",
-    [bool]$EmitExternalSetupMfa = $true,
+[string]$SourceDir = "",
+[string]$OutputDir = "installer_output",
+[ValidateSet("bundled", "online")]
+[string]$MfaMode = "online",
+[bool]$EmitExternalSetupMfa = $true,
     [switch]$Sign,
     [string]$SignSubject = "SODAsoo",
     [string]$SignToolPath = "",

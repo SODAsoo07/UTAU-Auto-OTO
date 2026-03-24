@@ -1,7 +1,7 @@
 ﻿"""
-MFA (Montreal Forced Aligner) 繝ｻ・､蠏ゅ・繝ｻ・ｨ繝ｻ繝ｻ
-- 繝ｻ諛搾ｽｻ・ｬ 繝ｻ蟆匁ｪ 蟆橸ｽｬ螂難ｽｰ繝ｻ繝ｻConda 蠍ｹ菫ｾ・ｲ・ｽ繝ｻ蟾昴・ MFA 繝ｻ・､蠏ゅ・
-- 繝ｻ・､繝ｻ諛具ｽｰ繝ｻ繝ｻ諛具ｽｷ・ｸ 繝ｻ・､蟄厄ｽｸ繝ｻ・ｬ繝ｻ繝ｻ
+MFA (Montreal Forced Aligner) runtime helpers.
+- Locate MFA executable in portable/runtime/Conda environments.
+- Validate and repair dependency/runtime issues before alignment.
 """
 
 import os
@@ -77,20 +77,21 @@ def _preferred_subprocess_encoding():
 
 
 def _subprocess_decode_candidates() -> list[str]:
+    # Prefer UTF-8 first to prevent locale-dependent mojibake in logs.
     candidates: list[str] = []
     for enc in (
+        "utf-8-sig",
         "utf-8",
+        _preferred_subprocess_encoding(),
+        getattr(locale, "getencoding", lambda: "")() or "",
         "cp949",
         "cp932",
         "mbcs",
-        _preferred_subprocess_encoding(),
-        getattr(locale, "getencoding", lambda: "")() or "",
     ):
         enc = str(enc or "").strip()
         if enc and enc not in candidates:
             candidates.append(enc)
     return candidates
-
 
 def _score_decoded_subprocess_text(text: str) -> int:
     score = 0
@@ -119,21 +120,23 @@ def _decode_subprocess_output(data) -> str:
     if isinstance(data, str):
         return data
     raw = bytes(data)
-    best_text = ""
-    best_score = None
-    for enc in _subprocess_decode_candidates():
+
+    # Hard-fix UTF-8 first. If it succeeds, do not attempt locale fallback.
+    for enc in ("utf-8-sig", "utf-8"):
         try:
-            decoded = raw.decode(enc)
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            pass
+
+    for enc in _subprocess_decode_candidates():
+        if enc in {"utf-8", "utf-8-sig"}:
+            continue
+        try:
+            return raw.decode(enc)
         except (LookupError, UnicodeDecodeError):
             continue
-        score = _score_decoded_subprocess_text(decoded)
-        if best_score is None or score > best_score:
-            best_text = decoded
-            best_score = score
-    if best_score is not None:
-        return best_text
-    return raw.decode("utf-8", errors="replace")
 
+    return raw.decode("utf-8", errors="replace")
 
 def _run_subprocess_text(args: Sequence[str], **kwargs):
     completed = subprocess.run(args, capture_output=True, text=False, **kwargs)
@@ -154,6 +157,12 @@ def _default_mfa_root_dir(mfa_path="", per_process: bool = False):
         app_dir = os.path.dirname(sys.executable)
     elif mfa_path:
         app_dir = os.path.dirname(os.path.dirname(os.path.abspath(mfa_path)))
+        # mfa_path often points to "<runtime>\\.env\\Scripts\\mfa.exe".
+        # Store MFA_ROOT_DIR under runtime root, not inside .env, to prevent
+        # cache bloat in the virtual environment directory.
+        base_name = os.path.basename(os.path.normpath(app_dir)).strip().lower()
+        if base_name in {".env", "env"}:
+            app_dir = os.path.dirname(app_dir)
     else:
         app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     root = os.path.join(app_dir, ".mfa_root_ascii")
@@ -411,8 +420,8 @@ def _stderr_has_msvc_requirement(text):
 def _emit_msvc_required_notice(callback, log_fn):
     if callback:
         callback(ALERT_MSVC_REQUIRED)
-    log_fn("隨橸｣ｰ Microsoft Visual C++ 14.0+ (C++ Build Tools)繝ｻﾂ ・代・蝗茨ｨ托ｽｩ繝ｻ螢ｱ蜈ｱ.")
-    log_fn("   繝ｻ・､繝ｻ繝ｻ繝ｻ繝ｻ縲・ https://visualstudio.microsoft.com/visual-cpp-build-tools/")
+    log_fn("오류: Microsoft Visual C++ 14.0+ (C++ Build Tools)가 필요합니다.")
+    log_fn("   설치 링크: https://visualstudio.microsoft.com/visual-cpp-build-tools/")
 
 
 def mfa_python_version_requires_downgrade(version_text: str) -> bool:
@@ -469,14 +478,14 @@ def mfa_env_requires_python_downgrade(mfa_path: str) -> bool:
 
 
 def _preflight_compute_mfcc(mfa_path, callback=None):
-    """MFA 繝ｻ邁ｿ・ｰ・ｬ 繝ｻ諛肴｢ 繝ｻ繝ｻ荵ｱ compute-mfcc-feats 繝ｻ・､蠏ゅ・繝ｻﾂ繝ｻ・･ 繝ｻ・ｬ繝ｻﾂ繝ｻ・ｼ 繝ｻ蟆ゑｽｲﾂ・托ｽｩ繝ｻ螢ｱ蜈ｱ."""
+    """MFA 정렬 전에 compute-mfcc-feats 실행 가능 여부를 점검한다."""
     def log(msg):
         logger.info(msg)
         if callback:
             callback(msg)
 
     if not mfa_path:
-        return False, "MFA 繝ｻ・､蠏ゅ・逕ｯ隴ｷ謾ｵ 繝ｻ・ｽ繝ｻ諛具ｽｰﾂ 繝ｻ繝ｻ迚・繝ｻ貅｢諷｣繝ｻ螢ｱ蜈ｱ."
+        return False, "MFA 실행 파일을 찾을 수 없습니다."
 
     env = _get_conda_env(mfa_path)
     candidates = []
@@ -489,7 +498,7 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
     last_not_found = None
     for candidate in candidates:
         try:
-            # Windows + Python 3.13 繝ｻ・ｰ・托ｽｩ繝ｻ蟾昴・繝ｻ繝ｻ蠍ｹ闖ｩ譽励・繝ｻ繝ｻ繝ｻ譬ｪ 繝ｻ・､蠏る寉・ｪ繝ｻ繝ｻﾂ繝ｻ鬢捺匿 繝ｻ・､逕ｯ・ｨ・托｣ｰ 繝ｻ繝ｻ繝ｻ螢ｱ蜈ｱ.
+            # Windows 환경에서는 실행 파일 존재/권한을 우선 점검한다.
             subprocess.run(
                 [candidate, '--help'],
                 capture_output=True,
@@ -505,23 +514,22 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
             if callback:
                 callback(ALERT_MFA_PERMISSION_DENIED)
             err = (
-                "compute-mfcc-feats 繝ｻ・､蠏ゅ・繝ｻ驢仙ｾｩ繝ｻ・ｴ 繝ｻ繝ｻ迚・MFA 繝ｻ邁ｿ・ｰ・ｬ繝ｻ繝ｻ繝ｻ諛肴｢・托｣ｰ 繝ｻ繝ｻ繝ｻ繝ｻ諷｣繝ｻ螢ｱ蜈ｱ. "
+                "compute-mfcc-feats 실행 권한이 없어 MFA 정렬을 진행할 수 없습니다. "
                 "(WinError 5: Access denied)"
             )
-            log(f"隨ｶ繝ｻ{err}")
-            log("   繝ｻ・ｴ繝ｻ繝ｻ蠏薙・・｡諛具ｽｷ・ｸ繝ｻ・ｨ/繝ｻ驢仙ｾｩ 繝ｻ闖ｩ・ｱ繝ｻ逕ｯ隴ｷ謾ｵ 繝ｻ・ｨ繝ｻ・ｨ 繝ｻ・ｬ繝ｻﾂ繝ｻ・ｼ 蠍ｹ闖ｩ謾､・托ｽｴ 繝ｻ・ｼ繝ｻ・ｸ繝ｻ繝ｻ")
+            log(f"오류: {err}")
+            log("   백신/보안 정책 또는 폴더 권한을 확인한 뒤 다시 시도해 주세요.")
             return False, f"{err}: {e}"
         except Exception as e:
-            err = f"compute-mfcc-feats 繝ｻ・ｬ繝ｻ繝ｻ繝ｻ蟆ゑｽｲﾂ 繝ｻ繝ｻ繝ｻ・､繝ｻ繝ｻ {e}"
-            log(f"隨ｶ繝ｻ{err}")
+            err = f"compute-mfcc-feats 점검 중 예외가 발생했습니다: {e}"
+            log(f"오류: {err}")
             return False, err
 
-    err = "compute-mfcc-feats繝ｻ・ｼ 繝ｻ・ｾ繝ｻﾂ 繝ｻ・ｻ蠏よｺ｢諷｣繝ｻ螢ｱ蜈ｱ. MFA 蠍ｹ菫ｾ・ｲ・ｽ繝ｻ・ｴ 繝ｻ蟾昴Γ繝ｻ蛟第擂繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ貅｢諷｣繝ｻ螢ｱ蜈ｱ."
-    log(f"隨ｶ繝ｻ{err}")
+    err = "compute-mfcc-feats를 찾지 못했습니다. MFA 환경 복구 또는 재설치를 시도해 주세요."
+    log(f"오류: {err}")
     if last_not_found:
         return False, f"{err}: {last_not_found}"
     return False, err
-
 
 def _validate_alignment_dictionary(dict_path: str, callback=None):
     """Validate MFA dictionary rows before native graph compilation."""
@@ -604,8 +612,8 @@ def _sanitize_alignment_dictionary_for_mfa(dict_path: str, callback=None):
 
 def _get_conda_env(mfa_path):
     """
-    Windows 蠍ｹ菫ｾ・ｲ・ｽ繝ｻ蟾昴・ Conda 蠍ｹ諛坂筏蠍ｹ繝ｻ繝ｻ繝ｻ謫ｽ mfa.exe繝ｻ・ｼ 繝ｻ繝ｻ・ｰ繝ｻ蠍ｸ・ｸ繝ｻ諛ｦ閻ｹ 繝ｻ繝ｻ
-    DLL 繝ｻ鄂ｹ邉・繝ｻ蟆匁ｴｳ(繝ｻ鄂ｷ邉・3228369023)繝ｻﾂ 繝ｻ諛阪・・台ｿｯ譬ｪ 繝ｻ繝ｻ謠・繝ｻ雉・ｸ・ｰ 繝ｻ繝ｻ邏・蠍ｹ菫ｾ・ｲ・ｽ 繝ｻﾂ繝ｻ蛟台ｹｱ PATH繝ｻ・ｼ 繝ｻ・ｼ繝ｻ繝ｻ魄偵・螢ｱ蜈ｱ.
+    Build subprocess environment for MFA runtime.
+    On Windows, prepend env-specific binary directories to PATH to avoid DLL load errors.
     """
     env = os.environ.copy()
     # Frozen launcher state can leak host Python vars into subprocesses and
@@ -620,6 +628,8 @@ def _get_conda_env(mfa_path):
         "CONDA_PROMPT_MODIFIER",
     ):
         env.pop(leaked_key, None)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     if sys.platform == 'win32' and mfa_path and 'Scripts' in mfa_path:
         mfa_path = os.path.abspath(mfa_path)
         env_dir = os.path.abspath(os.path.dirname(os.path.dirname(mfa_path)))
@@ -739,7 +749,7 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
         ok, _detail = _check_env_imports(
             python_exe,
             env,
-            "import pip; import setuptools; import wheel",
+            "import setuptools; import pip; import wheel",
         )
         return bool(ok)
 
@@ -1032,7 +1042,7 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
             report["issues"].append("python_rebuild_required")
         if report["checks"]["python_exe"]:
             env = _get_conda_env(resolved)
-            ok, _detail = _check_env_imports(python_exe, env, 'import pip; import setuptools; import wheel')
+            ok, _detail = _check_env_imports(python_exe, env, 'import setuptools; import pip; import wheel')
             report["checks"]["packaging_stack"] = ok
             if not ok:
                 report["issues"].append("packaging_stack_missing")
@@ -1063,8 +1073,8 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
 
 def _resolve_single_speaker_flag(mfa_path, env=None):
     """
-    MFA 繝ｻ繝ｻ・ｰ繝ｻ荵ｱ 繝ｻ・ｰ繝ｻ・ｼ 繝ｻ・ｨ繝ｻ・ｼ 蠍ｹ閧･譴ｵ 繝ｻ・ｵ繝ｻ繝ｻ蟯ｺ諛具ｽｸ・ｰ繝ｻﾂ 繝ｻ・､繝ｻ・ｼ 繝ｻ繝ｻ繝ｻ貅｢迚・--single-speaker / --single_speaker)
-    help 繝ｻ鄂ｹ・ｰ・･繝ｻ繝ｻ繝ｻ・ｴ繝ｻ・ｰ 繝ｻﾂ繝ｻ蟆匁紺繝ｻ繝ｻ蟯ｺ諛具ｽｸ・ｰ繝ｻ・ｼ 繝ｻ・ｰ螟区勣魄偵・螢ｱ蜈ｱ.
+    Detect which single-speaker flag is supported by current MFA version.
+    Uses `mfa align --help` and picks `--single-speaker` or `--single_speaker`.
     """
     key = os.path.abspath(mfa_path or "")
     cached = _MFA_SINGLE_SPEAKER_FLAG_CACHE.get(key)
@@ -1091,7 +1101,7 @@ def _resolve_single_speaker_flag(mfa_path, env=None):
     except Exception:
         pass
 
-    # 繝ｻ・ｰ繝ｻ・ｸ繝ｻ蟒ｷ謐ｩ 繝ｻ閧･・ｲ・ｭ繝ｻ繝ｻ繝ｻ讓鯉ｽｶ・ｰ ・大第匿蠏薙・蟯ｺ諛具ｽｸ・ｰ 繝ｻ・ｰ繝ｻ・ｰ
+    # Safe fallback for old MFA versions when help probing fails.
     _MFA_SINGLE_SPEAKER_FLAG_CACHE[key] = "--single-speaker"
     return "--single-speaker"
 
@@ -1160,25 +1170,25 @@ def _resolve_mfa_align_options(align_profile):
 
 def find_mfa_executable():
     """
-    繝ｻ諛堺ｾ・･帶㍾荵ｱ 繝ｻ・､繝ｻ菫ｯ鬆・MFA 繝ｻ・､蠏ゅ・逕ｯ隴ｷ謾ｵ繝ｻ繝ｻ螟句ｷ昴Λ・托ｽｩ繝ｻ螢ｱ蜈ｱ.
-    蟆橸ｽｬ螂難ｽｰ繝ｻ繝ｻ蠍ｹ菫ｾ・ｲ・ｽ -> Conda 蠍ｹ菫ｾ・ｲ・ｽ -> 繝ｻ諛堺ｾ・･帙・PATH 繝ｻ諛阪・繝ｻ繝ｻ繝ｻﾂ繝ｻ鬧暮ｮ偵・螢ｱ蜈ｱ.
-    
+    현재 실행 환경에서 MFA 실행 파일 경로를 탐색한다.
+    검색 순서: 후보 경로 -> PATH -> Conda 후보 경로
+
     Returns:
-        MFA 繝ｻ・､蠏ゅ・逕ｯ隴ｷ謾ｵ 繝ｻ・ｽ繝ｻ繝ｻ繝ｻ蟆匁ｪ None
+        MFA 실행 파일 경로 또는 None
     """
-    # 1. 繝ｻ・ｵ繝ｻ・ｰ/繝ｻ荳・ｱ・ｰ繝ｻ繝ｻ蟆橸ｽｬ螂難ｽｰ繝ｻ繝ｻ蠍ｹ菫ｾ・ｲ・ｽ
+    # 1) Portable/로컬 후보 경로
     for p in _candidate_mfa_executable_paths():
         if os.path.exists(p):
-            logger.info(f"蟆橸ｽｬ螂難ｽｰ繝ｻ繝ｻMFA 繝ｻ諛具ｽｲ・ｬ: {p}")
+            logger.info(f"기본 후보 경로에서 MFA 실행 파일 발견: {p}")
             return p
 
-    # 2. 繝ｻ諛堺ｾ・･帙・PATH
+    # 2) PATH
     mfa_path = shutil.which('mfa')
     if mfa_path:
-        logger.info(f"繝ｻ諛堺ｾ・･帙・MFA 繝ｻ諛具ｽｲ・ｬ: {mfa_path}")
+        logger.info(f"PATH에서 MFA 실행 파일 발견: {mfa_path}")
         return mfa_path
 
-    # 3. Conda 蠍ｹ菫ｾ・ｲ・ｽ 繝ｻ・ｰ繝ｻ・ｸ 繝ｻ・ｽ繝ｻ繝ｻ
+    # 3) Conda 후보 경로
     conda_paths = [
         os.path.expanduser('~/miniconda3/envs/aligner/Scripts/mfa.exe'),
         os.path.expanduser('~/anaconda3/envs/aligner/Scripts/mfa.exe'),
@@ -1186,22 +1196,21 @@ def find_mfa_executable():
     ]
     for p in conda_paths:
         if os.path.exists(p):
-            logger.info(f"Conda MFA 繝ｻ諛具ｽｲ・ｬ: {p}")
+            logger.info(f"Conda 후보 경로에서 MFA 실행 파일 발견: {p}")
             return p
 
     return None
 
-
 def check_mfa_model(mfa_path, language='korean'):
     """
-    MFA 繝ｻ驢千ｮ・繝ｻ・ｨ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ・､繝ｻ・ｴ繝ｻ鄂ｹ邉悶・蛟醍押 繝ｻ螢ｱ譬ｪ繝ｻﾂ 蠍ｹ闖ｩ謾､・托ｽｩ繝ｻ螢ｱ蜈ｱ.
-    
+    Check whether MFA acoustic model is available for selected language.
+
     Args:
-        mfa_path: MFA 繝ｻ・､蠏ゅ・逕ｯ隴ｷ謾ｵ 繝ｻ・ｽ繝ｻ繝ｻ
-        language: 'korean' 繝ｻ蟆匁ｪ 'japanese'
-    
+        mfa_path: MFA executable path
+        language: 'korean' or 'japanese'
+
     Returns:
-        (繝ｻ・､繝ｻ繝ｻ繝ｻ・ｬ繝ｻﾂ: bool, 繝ｻ閧･莠ｨ繝ｻﾂ: str)
+        (is_ready: bool, message: str)
     """
     if not mfa_path:
         return False, "MFA executable not found."
@@ -1268,7 +1277,7 @@ def _candidate_mfa_root_dirs(mfa_path: str, env: Optional[dict] = None) -> List[
     except Exception:
         pass
 
-    # MFA 繝ｻ・ｰ繝ｻ・ｸ 繝ｻ・ｨ蟄厄ｽｸ(繝ｻ荳・ｱ・ｰ繝ｻ繝ｻ繝ｻ繝ｻ蠍ｹ闖ｩ謾､
+    # Legacy shared MFA root (still checked for compatibility).
     _add(os.path.expanduser("~/Documents/MFA"))
     return roots
 
@@ -1349,7 +1358,7 @@ def ensure_korean_support(mfa_path, callback=None):
     if not ensure_mfa_python_packaging_stack(mfa_path, callback=callback):
         log('[MFA] Failed to prepare base Python packaging tools before Korean dependency install')
         return False
-    pkg_check_cmd = [python_exe, '-c', 'import pip, setuptools, wheel']
+    pkg_check_cmd = [python_exe, '-c', 'import setuptools, pip, wheel']
     check_cmd = [python_exe, '-c', _korean_tokenizer_import_expr()]
     try:
         env = _get_conda_env(mfa_path)
@@ -1583,8 +1592,8 @@ class MeCab:
 
 def ensure_japanese_support(mfa_path, callback=None):
     """
-    MFA 繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ邁ｿ・ｰ・ｬ繝ｻ繝ｻ・代・蝗茨ｨ代・spacy/sudachipy/sudachidict-core繝ｻﾂ 繝ｻ螢ｱ譬ｪ繝ｻﾂ 蠍ｹ闖ｩ謾､・台ｿｾ・ｳ・ｰ,
-    繝ｻ繝ｻ謾ｷ 繝ｻ繝ｻ繝ｻ蟆門ｾ・繝ｻ・､繝ｻ菫ｯ・･・ｼ 繝ｻ鄂ｹ蟾｡・托ｽｩ繝ｻ螢ｱ蜈ｱ.
+    Prepare Japanese tokenizer/runtime dependencies for MFA.
+    Installs spacy/sudachipy/sudachidict-core and verifies imports.
     """
     def log(msg):
         logger.info(msg)
@@ -1716,8 +1725,8 @@ def download_mfa_model(mfa_path, language='korean', callback=None):
             log(msg)
         return True
 
-    # 繝ｻ・ｨ繝ｻ・ｸ 繝ｻ・､繝ｻ・ｴ繝ｻ鄂ｹ邉悶・繝ｻ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ 繝ｻﾂ繝ｻ繝ｻ蜃ｰ 繝ｻ繝ｻ・ｦ・ｬ・托ｽｴ 繝ｻ菫ｯ・ｦ・ｬ・托ｽｩ繝ｻ螢ｱ蜈ｱ.
-    # (繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ import 繝ｻ・､繝ｻ菫ｾ・ｰﾂ 繝ｻ貅｢迚溘・繝ｻ繝ｻ・ｨ繝ｻ・ｸ 繝ｻ蟾晢ｽｲ・ｴ 繝ｻ・､繝ｻ・ｴ繝ｻ鄂ｹ邉悶・繝ｻ繝ｻﾂ繝ｻ・･・代・繝ｻ・ｽ繝ｻ・ｰ繝ｻﾂ 繝ｻ貅｢謳・
+    # Dependency preparation is best-effort: continue model download even when it fails.
+    # Import verification runs again after download in the regular readiness checks.
     try:
         if language == 'korean':
             if not ensure_korean_support(mfa_path, callback):
@@ -1787,8 +1796,6 @@ def _normalize_alignment_strict_mode(value) -> str:
         "full_strict",
         "hard",
         "hard_strict",
-        "繝ｻ繝ｻ・ｰ繝ｻ豺繝ｻ・ｩ",
-        "繝ｻ繝ｻ・ｰﾐｮ繝ｻ繝ｻ・ｲ・ｩ",
     }:
         return "strict"
     if compact in {
@@ -1797,8 +1804,6 @@ def _normalize_alignment_strict_mode(value) -> str:
         "balanced",
         "soft_strict",
         "fallback",
-        "繝ｻ繝ｻ閭ｸ蠕ｷ貅｢豺繝ｻ・ｩ",
-        "繝ｻ繝ｻ閭ｸ蠕ｷ繝ｻ繝ｻ繝ｻ・ｲ・ｩ",
     }:
         return "moderate"
     return "off"
