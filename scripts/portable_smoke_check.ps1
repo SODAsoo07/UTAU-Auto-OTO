@@ -73,6 +73,8 @@ function Add-Check {
 $requiredRelativePaths = @(
     "release_channel.json",
     "setup_mfa.bat",
+    "requirements.txt",
+    "requirements-ml.txt",
     "runtime_recovery.ps1",
     "startup_diagnose.ps1",
     "startup_diagnose.bat",

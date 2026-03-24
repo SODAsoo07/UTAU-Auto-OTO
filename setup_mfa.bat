@@ -1614,25 +1614,8 @@ if not exist "%ENV_DIR%\python.exe" (
 
 )
 
-if not exist "%APP_DIR%\requirements.txt" (
-
-    echo [FAILED] %APP_DIR% requirements.txt
-
-    if not "%NON_INTERACTIVE%"=="1" pause
-
-    exit /b 1
-
-)
-
-if not exist "%APP_DIR%\requirements-ml.txt" (
-
-    echo [FAILED] %APP_DIR% requirements-ml.txt
-
-    if not "%NON_INTERACTIVE%"=="1" pause
-
-    exit /b 1
-
-)
+set "REQ_BASE=%APP_DIR%\requirements.txt"
+set "REQ_ML=%APP_DIR%\requirements-ml.txt"
 
 if exist "%MICROMAMBA_EXE%" (
 
@@ -1652,25 +1635,63 @@ if exist "%MICROMAMBA_EXE%" (
 
 )
 
-echo [INFO] requirements.txt
+if exist "%REQ_BASE%" (
 
-"%ENV_DIR%\python.exe" -m pip install --upgrade -r "%APP_DIR%\requirements.txt"
+    echo [INFO] requirements.txt
 
-if errorlevel 1 (
+    "%ENV_DIR%\python.exe" -m pip install --upgrade -r "%REQ_BASE%"
 
-    echo [FAILED] requirements.txt
+    if errorlevel 1 (
 
-    if not "%NON_INTERACTIVE%"=="1" pause
+        echo [WARN] requirements.txt install failed. Continuing to ML runtime verification.
 
-    exit /b 1
+    )
+
+) else (
+
+    echo [WARN] requirements.txt not found at "%REQ_BASE%". Skipping optional base pip sync.
 
 )
 
-if not exist "%MICROMAMBA_EXE%" (
+if exist "%REQ_ML%" (
 
-    echo [INFO] pip requirements-ml.txt ^(micromamba ^)
+    echo [INFO] requirements-ml.txt
 
-    "%ENV_DIR%\python.exe" -m pip install --upgrade -r "%APP_DIR%\requirements-ml.txt"
+    "%ENV_DIR%\python.exe" -m pip install --upgrade -r "%REQ_ML%"
+
+    if errorlevel 1 (
+
+        if exist "%MICROMAMBA_EXE%" (
+
+            echo [WARN] requirements-ml.txt pip install failed after micromamba ML install. Continuing to verification.
+
+        ) else (
+
+            echo [FAILED] ML
+
+            echo lightgbm Microsoft Visual C++ Build Tools .
+
+            if not "%NON_INTERACTIVE%"=="1" pause
+
+            exit /b 1
+
+        )
+
+    )
+
+    goto :ml_install_done
+
+)
+
+if exist "%MICROMAMBA_EXE%" (
+
+    echo [WARN] requirements-ml.txt not found at "%REQ_ML%". Using micromamba-installed ML packages only.
+
+) else (
+
+    echo [INFO] requirements-ml.txt missing. Installing minimal ML packages via pip.
+
+    "%ENV_DIR%\python.exe" -m pip install --upgrade pandas lightgbm onnxruntime
 
     if errorlevel 1 (
 
@@ -1685,6 +1706,8 @@ if not exist "%MICROMAMBA_EXE%" (
     )
 
 )
+
+:ml_install_done
 
 echo [OK] ML
 

@@ -651,7 +651,7 @@ class TabBuildersMixin:
 
         self.soft_bank_mode_checkbox = ctk.CTkCheckBox(
             basic_toggle_frame,
-            text="발성이 약하거나 숨노이즈가 많은 음원에 추천",
+            text="발음 누락 줄이기 추천",
             text_color="#6F819A",
             variable=self.soft_bank_mode_var,
             command=self._save_config,

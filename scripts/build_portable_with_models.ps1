@@ -66,6 +66,39 @@ function New-PortableTopShortcut {
     return $shortcutPath
 }
 
+function Sync-ReleaseFileIfNeeded {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    if (-not (Test-Path -LiteralPath $SourcePath)) {
+        Write-Host "[WARN] $Label not found; sync skipped:"
+        Write-Host "  - $SourcePath"
+        return
+    }
+
+    $needsSync = $true
+    if (Test-Path -LiteralPath $DestinationPath) {
+        try {
+            $srcHash = (Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash
+            $dstHash = (Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256).Hash
+            if ($srcHash -eq $dstHash) {
+                $needsSync = $false
+            }
+        } catch {
+            $needsSync = $true
+        }
+    }
+
+    if ($needsSync) {
+        Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force
+        Write-Host "[INFO] Synced latest $Label into release payload source:"
+        Write-Host "  - $DestinationPath"
+    }
+}
+
 if (-not (Test-Path $sourceAbs)) {
     throw "Release folder not found: $sourceAbs"
 }
@@ -75,9 +108,19 @@ if (-not (Test-Path $modelsAbs)) {
 }
 Write-Host "Using model directory: $modelsAbs"
 
+$requirementsSrc = Join-Path $repoRoot "requirements.txt"
+$requirementsDst = Join-Path $sourceAbs "requirements.txt"
+Sync-ReleaseFileIfNeeded -SourcePath $requirementsSrc -DestinationPath $requirementsDst -Label "requirements.txt"
+
+$requirementsMlSrc = Join-Path $repoRoot "requirements-ml.txt"
+$requirementsMlDst = Join-Path $sourceAbs "requirements-ml.txt"
+Sync-ReleaseFileIfNeeded -SourcePath $requirementsMlSrc -DestinationPath $requirementsMlDst -Label "requirements-ml.txt"
+
 $requiredReleaseFiles = @(
     "release_channel.json",
     "setup_mfa.bat",
+    "requirements.txt",
+    "requirements-ml.txt",
     "runtime_recovery.ps1",
     "startup_diagnose.ps1",
     "startup_diagnose.bat",
