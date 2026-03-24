@@ -24,14 +24,35 @@ if ([string]::IsNullOrWhiteSpace($SourceDir)) {
     $SourceDir = "UTAU_Auto_OTO_Release_$channelNorm"
 }
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
-$issPath = Join-Path $repoRoot "installer\UTAU_Auto_OTO.iss"
-if (-not (Test-Path $issPath)) {
+$repoRoot = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
+
+function Resolve-AbsolutePath {
+    param(
+        [string]$InputPath,
+        [string]$BasePath
+    )
+    if ([string]::IsNullOrWhiteSpace($InputPath)) {
+        return ""
+    }
+    $candidate = if ([System.IO.Path]::IsPathRooted($InputPath)) {
+        $InputPath
+    } else {
+        Join-Path $BasePath $InputPath
+    }
+    $resolved = Resolve-Path -LiteralPath $candidate -ErrorAction SilentlyContinue
+    if ($resolved) {
+        return $resolved.Path
+    }
+    return [System.IO.Path]::GetFullPath($candidate)
+}
+
+$issPath = Resolve-AbsolutePath -InputPath "installer\UTAU_Auto_OTO.iss" -BasePath $repoRoot
+if (-not (Test-Path -LiteralPath $issPath)) {
     throw "Inno Setup script not found: $issPath"
 }
 
-$sourceAbs = Join-Path $repoRoot $SourceDir
-if (-not (Test-Path $sourceAbs)) {
+$sourceAbs = Resolve-AbsolutePath -InputPath $SourceDir -BasePath $repoRoot
+if (-not (Test-Path -LiteralPath $sourceAbs)) {
     throw "Release folder not found: $sourceAbs"
 }
 
@@ -161,6 +182,56 @@ function Invoke-CodeSign {
     }
 }
 
+function Get-FreeSubstDrive {
+    $used = @((Get-PSDrive -PSProvider FileSystem).Name)
+    $candidates = @("Z", "Y", "X", "W", "V", "U", "T", "S", "R", "Q", "P", "O", "N", "M", "L", "K", "J", "I", "H", "G", "F", "E", "D")
+    foreach ($letter in $candidates) {
+        if ($used -notcontains $letter) {
+            return "${letter}:"
+        }
+    }
+    return ""
+}
+
+function New-ShortPathMapping {
+    param(
+        [string]$TargetPath,
+        [string]$Label
+    )
+    if ([string]::IsNullOrWhiteSpace($TargetPath)) {
+        return $null
+    }
+    if ($TargetPath.StartsWith("\\")) {
+        Write-Host "[WARN] Skipping short-path mapping ($Label): UNC path is not supported by SUBST."
+        return $null
+    }
+
+    $drive = Get-FreeSubstDrive
+    if (-not $drive) {
+        Write-Host "[WARN] Skipping short-path mapping ($Label): no free drive letter found."
+        return $null
+    }
+
+    cmd.exe /c "subst $drive `"$TargetPath`"" | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath "$drive\")) {
+        Write-Host "[WARN] Failed to create short-path mapping ($Label): $TargetPath"
+        return $null
+    }
+
+    Write-Host "[INFO] Using short path mapping ($Label): $drive\ -> $TargetPath"
+    return $drive
+}
+
+function Remove-ShortPathMapping {
+    param(
+        [string]$Drive
+    )
+    if ([string]::IsNullOrWhiteSpace($Drive)) {
+        return
+    }
+    cmd.exe /c "subst $Drive /d" | Out-Null
+}
+
 $payloadFiles = @(Get-ChildItem -LiteralPath $sourceAbs -Recurse -File -ErrorAction SilentlyContinue)
 if ($MfaMode -eq "online") {
     $bundleRoot = (Join-Path $sourceAbs "mfa_runtime_bundle").ToLowerInvariant()
@@ -175,10 +246,14 @@ Write-Host ("Source payload size: {0} GiB" -f $payloadSizeGiB)
 if ($payloadSizeBytes -ge 3900000000) {
     Write-Host "[INFO] Large payload detected. Installer will be emitted as Setup.exe + one or more .bin slice files."
 }
+$longPathFiles = @($payloadFiles | Where-Object { $_.FullName.Length -gt 260 })
+if ($longPathFiles.Count -gt 0) {
+    Write-Host ("[WARN] Payload contains {0} files with path length > 260. Enabling short-path fallback for ISCC." -f $longPathFiles.Count)
+}
 
 $iconAbs = Join-Path $repoRoot "release_assets\AutoOTO-icon.ico"
 
-$outputAbs = Join-Path $repoRoot $OutputDir
+$outputAbs = Resolve-AbsolutePath -InputPath $OutputDir -BasePath $repoRoot
 New-Item -ItemType Directory -Path $outputAbs -Force | Out-Null
 
 $mainPy = Join-Path $repoRoot "main.py"
@@ -218,26 +293,49 @@ if ($MfaMode -eq "online") {
     $excludeMfaRuntimeBundle = "1"
 }
 Write-Host "MFA packaging mode: $MfaMode"
+$sourceForIscc = $sourceAbs
+$mappedSourceDrive = $null
+$requiresShortSource = ($sourceAbs.Length -gt 120) -or ($longPathFiles.Count -gt 0)
+if ($requiresShortSource) {
+    $mappedSourceDrive = New-ShortPathMapping -TargetPath $sourceAbs -Label "installer source"
+    if ($mappedSourceDrive) {
+        $sourceForIscc = $mappedSourceDrive
+    }
+}
 
 $isccArgs = @(
     "/Qp",
     "/DAppVersion=$version",
     "/DAppChannel=$channelNorm",
-    "/DSourceDir=$sourceAbs",
+    "/DSourceDir=$sourceForIscc",
     "/DOutputDir=$outputAbs",
     "/DOutputNameSuffix=$outputNameSuffix",
     "/DExcludeMfaRuntimeBundle=$excludeMfaRuntimeBundle",
     $issPath
 )
-if (Test-Path $iconAbs) {
+if (Test-Path -LiteralPath $iconAbs) {
     Write-Host "Using installer icon: $iconAbs"
+    $isccArgs += "/DSetupIconFilePath=$iconAbs"
 } else {
     Write-Host "Installer icon not found, setup will use default icon."
 }
-& $isccPath $isccArgs
 
-if ($LASTEXITCODE -ne 0) {
-    throw "ISCC failed with exit code $LASTEXITCODE"
+$isccExit = 0
+try {
+    & $isccPath $isccArgs
+    $isccExit = $LASTEXITCODE
+    if ($isccExit -ne 0) {
+        Write-Host "[WARN] ISCC quiet compile failed. Re-running once with verbose output for diagnosis..."
+        $isccVerboseArgs = @($isccArgs | Where-Object { $_ -ne "/Qp" })
+        & $isccPath $isccVerboseArgs
+        $isccExit = $LASTEXITCODE
+    }
+} finally {
+    Remove-ShortPathMapping -Drive $mappedSourceDrive
+}
+
+if ($isccExit -ne 0) {
+    throw "ISCC failed with exit code $isccExit"
 }
 
 $baseName = "UTAU_Auto_OTO_Setup_${version}_${channelNorm}${outputNameSuffix}"

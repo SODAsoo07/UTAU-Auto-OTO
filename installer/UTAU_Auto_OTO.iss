@@ -32,8 +32,12 @@
   #define ReleaseFileExcludes "config.json,.mfa_startup_repair_state.json,.cuda_startup_check_state.json,logs\\*"
 #endif
 
-#ifexist "..\\release_assets\\AutoOTO-icon.ico"
-  #define SetupIconFileParam "..\\release_assets\\AutoOTO-icon.ico"
+#ifdef SetupIconFilePath
+  #define SetupIconFileParam SetupIconFilePath
+#else
+  #ifexist "..\\release_assets\\AutoOTO-icon.ico"
+    #define SetupIconFileParam "..\\release_assets\\AutoOTO-icon.ico"
+  #endif
 #endif
 
 [Setup]
