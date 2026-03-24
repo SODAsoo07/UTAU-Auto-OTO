@@ -15,6 +15,8 @@ from ui.theme_tokens import (
     get_theme_appearance_mode,
 )
 
+EN_CVVC_UI_ENABLED = False
+
 
 class LayoutMixin:
     def _build_ui(self):
@@ -270,103 +272,62 @@ class LayoutMixin:
         )
         self.ja_alias_hint_label.pack(side="left", fill="x", expand=True)
 
-        self.en_cvvc_row = build_form_row(form_body)
-        build_left_label(self.en_cvvc_row, "EN CVVC", width=115).pack(side="left")
+        if EN_CVVC_UI_ENABLED:
+            self.en_cvvc_row = build_form_row(form_body)
+            build_left_label(self.en_cvvc_row, "EN CVVC", width=115).pack(side="left")
 
-        self.en_cvvc_pack_menu = ctk.CTkOptionMenu(
-            self.en_cvvc_row,
-            values=["LITE", "FULL_GA"],
-            variable=self.en_cvvc_pack_var,
-            width=95,
-            command=lambda _v: self._save_config(),
-        )
-        _style_blue_menu(self.en_cvvc_pack_menu)
-        self.en_cvvc_pack_menu.pack(side="left", padx=(6, 6))
+            self.en_cvvc_pack_menu = ctk.CTkOptionMenu(
+                self.en_cvvc_row,
+                values=["LITE", "FULL_GA"],
+                variable=self.en_cvvc_pack_var,
+                width=95,
+                command=lambda _v: self._save_config(),
+            )
+            _style_blue_menu(self.en_cvvc_pack_menu)
+            self.en_cvvc_pack_menu.pack(side="left", padx=(6, 6))
 
-        self.en_cvvc_beat_menu = ctk.CTkOptionMenu(
-            self.en_cvvc_row,
-            values=["8-beat", "4-beat"],
-            variable=self.en_cvvc_beat_var,
-            width=95,
-            command=lambda _v: self._save_config(),
-        )
-        _style_blue_menu(self.en_cvvc_beat_menu)
-        self.en_cvvc_beat_menu.pack(side="left", padx=(0, 6))
+            self.en_cvvc_beat_menu = ctk.CTkOptionMenu(
+                self.en_cvvc_row,
+                values=["8-beat", "4-beat"],
+                variable=self.en_cvvc_beat_var,
+                width=95,
+                command=lambda _v: self._save_config(),
+            )
+            _style_blue_menu(self.en_cvvc_beat_menu)
+            self.en_cvvc_beat_menu.pack(side="left", padx=(0, 6))
 
-        self.en_cvvc_preset_menu = ctk.CTkOptionMenu(
-            self.en_cvvc_row,
-            values=["Core", "Core+", "All+Alt"],
-            variable=self.en_cvvc_preset_var,
-            width=110,
-            command=lambda _v: self._save_config(),
-        )
-        _style_blue_menu(self.en_cvvc_preset_menu)
-        self.en_cvvc_preset_menu.pack(side="left", padx=(0, 8))
+            self.en_cvvc_preset_menu = ctk.CTkOptionMenu(
+                self.en_cvvc_row,
+                values=["Core", "Core+", "All+Alt"],
+                variable=self.en_cvvc_preset_var,
+                width=110,
+                command=lambda _v: self._save_config(),
+            )
+            _style_blue_menu(self.en_cvvc_preset_menu)
+            self.en_cvvc_preset_menu.pack(side="left", padx=(0, 8))
 
-        self.en_cvvc_list_fallback_checkbox = ctk.CTkCheckBox(
-            self.en_cvvc_row,
-            text="List-only 합성(실험)",
-            variable=self.en_cvvc_list_fallback_var,
-            command=self._save_config,
-            width=140,
-        )
-        self.en_cvvc_list_fallback_checkbox.pack(side="left", padx=(0, 8))
+            self.en_cvvc_list_fallback_checkbox = ctk.CTkCheckBox(
+                self.en_cvvc_row,
+                text="List-only 합성(실험)",
+                variable=self.en_cvvc_list_fallback_var,
+                command=self._save_config,
+                width=140,
+            )
+            self.en_cvvc_list_fallback_checkbox.pack(side="left", padx=(0, 8))
 
-        self.en_cvvc_hint_label = ctk.CTkLabel(
-            self.en_cvvc_row,
-            text="(Preview: 기본 OTO + 옵션 시 list-only(vv/cc/alt) 합성)",
-            text_color=PALETTE.neutral_text,
-        )
-        self.en_cvvc_hint_label.pack(side="left", fill="x", expand=True)
-
-        self.en_cvvc_row = build_form_row(form_body)
-        build_left_label(self.en_cvvc_row, "EN CVVC", width=115).pack(side="left")
-
-        self.en_cvvc_pack_menu = ctk.CTkOptionMenu(
-            self.en_cvvc_row,
-            values=["LITE", "FULL_GA"],
-            variable=self.en_cvvc_pack_var,
-            width=95,
-            command=lambda _v: self._save_config(),
-        )
-        _style_blue_menu(self.en_cvvc_pack_menu)
-        self.en_cvvc_pack_menu.pack(side="left", padx=(6, 6))
-
-        self.en_cvvc_beat_menu = ctk.CTkOptionMenu(
-            self.en_cvvc_row,
-            values=["8-beat", "4-beat"],
-            variable=self.en_cvvc_beat_var,
-            width=95,
-            command=lambda _v: self._save_config(),
-        )
-        _style_blue_menu(self.en_cvvc_beat_menu)
-        self.en_cvvc_beat_menu.pack(side="left", padx=(0, 6))
-
-        self.en_cvvc_preset_menu = ctk.CTkOptionMenu(
-            self.en_cvvc_row,
-            values=["Core", "Core+", "All+Alt"],
-            variable=self.en_cvvc_preset_var,
-            width=110,
-            command=lambda _v: self._save_config(),
-        )
-        _style_blue_menu(self.en_cvvc_preset_menu)
-        self.en_cvvc_preset_menu.pack(side="left", padx=(0, 8))
-
-        self.en_cvvc_list_fallback_checkbox = ctk.CTkCheckBox(
-            self.en_cvvc_row,
-            text="List-only 합성(실험)",
-            variable=self.en_cvvc_list_fallback_var,
-            command=self._save_config,
-            width=140,
-        )
-        self.en_cvvc_list_fallback_checkbox.pack(side="left", padx=(0, 8))
-
-        self.en_cvvc_hint_label = ctk.CTkLabel(
-            self.en_cvvc_row,
-            text="(Preview: 기본 OTO + 옵션 시 list-only(vv/cc/alt) 합성)",
-            text_color=PALETTE.neutral_text,
-        )
-        self.en_cvvc_hint_label.pack(side="left", fill="x", expand=True)
+            self.en_cvvc_hint_label = ctk.CTkLabel(
+                self.en_cvvc_row,
+                text="(Preview: 기본 OTO + 옵션 시 list-only(vv/cc/alt) 합성)",
+                text_color=PALETTE.neutral_text,
+            )
+            self.en_cvvc_hint_label.pack(side="left", fill="x", expand=True)
+        else:
+            self.en_cvvc_row = None
+            self.en_cvvc_pack_menu = None
+            self.en_cvvc_beat_menu = None
+            self.en_cvvc_preset_menu = None
+            self.en_cvvc_list_fallback_checkbox = None
+            self.en_cvvc_hint_label = None
 
 
 
@@ -861,7 +822,7 @@ class LayoutMixin:
         row = getattr(self, "en_cvvc_row", None)
         if row is None:
             return
-        show = self._is_preview_channel() and self._get_language() == "english"
+        show = EN_CVVC_UI_ENABLED and self._is_preview_channel() and self._get_language() == "english"
         is_english = self._get_language() == "english"
         try:
             if show:

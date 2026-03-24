@@ -1,4 +1,4 @@
-﻿"""
+"""
 MFA (Montreal Forced Aligner) 실행 모듈
 - 로컬 또는 포터블 Conda 환경에서 MFA 실행
 - 실시간 로그 스트리밍
@@ -194,19 +194,59 @@ def _resolve_env_python_exe(env_dir: str) -> str:
     return ""
 
 
+def _candidate_mfa_runtime_roots() -> List[str]:
+    roots: List[str] = []
+    seen = set()
+
+    def _add(path: str) -> None:
+        norm = os.path.normcase(os.path.abspath(str(path or "")))
+        if not norm or norm in seen:
+            return
+        seen.add(norm)
+        roots.append(os.path.abspath(path))
+
+    shared_root = str(os.environ.get("UTOA_MFA_SHARED_ROOT", "") or "").strip()
+    if shared_root:
+        _add(shared_root)
+
+    local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
+    if local_app_data:
+        _add(os.path.join(local_app_data, "UTAU_Auto_OTO_v3"))
+    else:
+        _add(os.path.join(os.path.expanduser("~"), "AppData", "Local", "UTAU_Auto_OTO_v3"))
+
+    public_root = str(os.environ.get("PUBLIC", r"C:\Users\Public") or r"C:\Users\Public").strip()
+    _add(os.path.join(public_root, "UTAU_Auto_OTO_v3"))
+    return roots
+
+
+def _resolve_default_mfa_runtime_root() -> str:
+    candidates = _candidate_mfa_runtime_roots()
+    for candidate in candidates:
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            fd, probe = tempfile.mkstemp(prefix=".utoa_mfa_probe_", dir=candidate)
+            os.close(fd)
+            os.remove(probe)
+            return candidate
+        except Exception:
+            continue
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return candidate
+    return candidates[0] if candidates else os.path.join(r"C:\Users\Public", "UTAU_Auto_OTO_v3")
+
+
 def get_default_mfa_env_dir():
-    public_root = os.environ.get("PUBLIC", r"C:\Users\Public")
-    return os.path.join(public_root, "UTAU_Auto_OTO_v3", ".env")
+    return os.path.join(_resolve_default_mfa_runtime_root(), ".env")
 
 
 def get_default_mfa_conda_root():
-    public_root = os.environ.get("PUBLIC", r"C:\Users\Public")
-    return os.path.join(public_root, "UTAU_Auto_OTO_v3", "miniconda")
+    return os.path.join(_resolve_default_mfa_runtime_root(), "miniconda")
 
 
 def get_default_mfa_micromamba_root():
-    public_root = os.environ.get("PUBLIC", r"C:\Users\Public")
-    return os.path.join(public_root, "UTAU_Auto_OTO_v3", "micromamba")
+    return os.path.join(_resolve_default_mfa_runtime_root(), "micromamba")
 
 
 def get_default_mfa_micromamba_exe():
@@ -552,6 +592,25 @@ def _check_env_imports(python_exe: str, env: dict, import_expr: str):
     return False, detail
 
 
+def _korean_tokenizer_import_expr() -> str:
+    # Korean path is ready when jamo is importable and either eunjeon or mecab backend exists.
+    return (
+        "import sys\n"
+        "import jamo\n"
+        "ok=False\n"
+        "try:\n"
+        "    import eunjeon\n"
+        "    ok=True\n"
+        "except Exception:\n"
+        "    try:\n"
+        "        from mecab import MeCab\n"
+        "        ok=True\n"
+        "    except Exception:\n"
+        "        ok=False\n"
+        "sys.exit(0 if ok else 1)\n"
+    )
+
+
 def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
     """
     Ensure pip/setuptools/pkg_resources/wheel are available inside the MFA env.
@@ -665,7 +724,7 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
             if not ok:
                 report["issues"].append("packaging_stack_missing")
             import_expr = (
-                'import eunjeon; import jamo'
+                _korean_tokenizer_import_expr()
                 if lang == 'korean'
                 else 'import spacy; import sudachipy; import sudachidict_core'
             )
@@ -972,25 +1031,7 @@ def ensure_korean_support(mfa_path, callback=None):
         log('[MFA] Failed to prepare base Python packaging tools before Korean dependency install')
         return False
     pkg_check_cmd = [python_exe, '-c', 'import pkg_resources']
-    check_cmd = [
-        python_exe,
-        '-c',
-        (
-            "import jamo\n"
-            "ok=False\n"
-            "try:\n"
-            "    import eunjeon\n"
-            "    ok=True\n"
-            "except Exception:\n"
-            "    try:\n"
-            "        from mecab import MeCab\n"
-            "        ok=True\n"
-            "    except Exception:\n"
-            "        ok=False\n"
-            "import sys\n"
-            "sys.exit(0 if ok else 1)\n"
-        ),
-    ]
+    check_cmd = [python_exe, '-c', _korean_tokenizer_import_expr()]
     try:
         env = _get_conda_env(mfa_path)
 
@@ -1138,45 +1179,65 @@ class MeCab:
         if ok:
             patch_mfa_korean_support(mfa_path, callback)
             return True
-        log('[MFA] Installing Korean tokenizer deps: eunjeon, jamo')
-        install_cmds = [
-            [python_exe, '-m', 'pip', 'install', '--upgrade', 'eunjeon', 'jamo'],
-        ]
-        if os.path.exists(pip_exe):
-            install_cmds.append([pip_exe, 'install', '--upgrade', 'eunjeon', 'jamo'])
-        system_conda = shutil.which('conda')
-        if system_conda:
-            install_cmds.append([
-                system_conda, 'run', '-p', env_dir, 'python', '-m', 'pip', 'install',
-                '--upgrade', 'eunjeon', 'jamo'
-            ])
+        def _run_install_stage(packages, *, emit_msvc_notice: bool):
+            stage_cmds = [[python_exe, '-m', 'pip', 'install', '--upgrade', *packages]]
+            if os.path.exists(pip_exe):
+                stage_cmds.append([pip_exe, 'install', '--upgrade', *packages])
+            system_conda = shutil.which('conda')
+            if system_conda:
+                stage_cmds.append([
+                    system_conda, 'run', '-p', env_dir, 'python', '-m', 'pip', 'install',
+                    '--upgrade', *packages
+                ])
+            stage_last_err = ''
+            for install_cmd in stage_cmds:
+                log(f"   -> cmd: {' '.join(install_cmd)}")
+                result = _run_subprocess_text(install_cmd, env=env)
+                if result.returncode != 0:
+                    err_txt = (result.stderr or result.stdout or '').strip()
+                    if err_txt:
+                        log(f"   [warn] install failed: {err_txt[:500]}")
+                    if emit_msvc_notice and _stderr_has_msvc_requirement(result.stderr):
+                        _emit_msvc_required_notice(callback, log)
+                    stage_last_err = err_txt or stage_last_err
+                    continue
+                if not _ensure_pkg_resources():
+                    stage_last_err = 'pkg_resources/setuptools repair failed after install'
+                    continue
+                ok_local, detail_local = _check_imports()
+                if (not ok_local) and _looks_like_pyexpat_dll_issue(detail_local):
+                    log('[MFA] Detected pyexpat/libexpat DLL issue after install; trying repair...')
+                    if _try_repair_pyexpat():
+                        ok_local, detail_local = _check_imports()
+                if ok_local:
+                    return True, stage_last_err
+                if detail_local:
+                    log(f"   [warn] import check failed after install: {detail_local[:500]}")
+                    stage_last_err = detail_local
+            return False, stage_last_err
+
         last_err = detail
-        for install_cmd in install_cmds:
-            log(f"   -> cmd: {' '.join(install_cmd)}")
-            result = _run_subprocess_text(install_cmd, env=env)
-            if result.returncode != 0:
-                err_txt = (result.stderr or result.stdout or '').strip()
-                if err_txt:
-                    log(f"   [warn] install failed: {err_txt[:500]}")
-                if _stderr_has_msvc_requirement(result.stderr):
-                    _emit_msvc_required_notice(callback, log)
-                last_err = err_txt or last_err
-                continue
-            if not _ensure_pkg_resources():
-                last_err = 'pkg_resources/setuptools repair failed after install'
-                continue
-            ok, detail = _check_imports()
-            if (not ok) and _looks_like_pyexpat_dll_issue(detail):
-                log('[MFA] Detected pyexpat/libexpat DLL issue after install; trying repair...')
-                if _try_repair_pyexpat():
-                    ok, detail = _check_imports()
-            if ok:
-                log('[MFA] Korean tokenizer deps are ready')
-                patch_mfa_korean_support(mfa_path, callback)
-                return True
-            if detail:
-                log(f"   [warn] import check failed after install: {detail[:500]}")
-                last_err = detail
+
+        # Stage 1: install jamo first (pure Python), so mecab-backed environments can pass without eunjeon.
+        log('[MFA] Installing Korean tokenizer deps: jamo')
+        ok, stage_err = _run_install_stage(['jamo'], emit_msvc_notice=False)
+        if stage_err:
+            last_err = stage_err
+        if ok:
+            log('[MFA] Korean tokenizer deps are ready (jamo + mecab/eunjeon)')
+            patch_mfa_korean_support(mfa_path, callback)
+            return True
+
+        # Stage 2: install eunjeon if still missing backend.
+        log('[MFA] Installing Korean tokenizer deps: eunjeon')
+        ok, stage_err = _run_install_stage(['eunjeon'], emit_msvc_notice=True)
+        if stage_err:
+            last_err = stage_err
+        if ok:
+            log('[MFA] Korean tokenizer deps are ready')
+            patch_mfa_korean_support(mfa_path, callback)
+            return True
+
         log('[MFA] Failed to prepare Korean tokenizer deps (eunjeon, jamo)')
         if last_err:
             log(f"   last error: {last_err[:500]}")
