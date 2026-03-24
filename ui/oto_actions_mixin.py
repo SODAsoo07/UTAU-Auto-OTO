@@ -183,6 +183,9 @@ class OtoActionsMixin:
                     else False
                 )
                 lang = self._get_language()
+                self._append_log(
+                    f"ℹ 현재 언어: {'일본어' if lang == 'japanese' else '한국어' if lang == 'korean' else '영어'}"
+                )
                 selected_format = normalize_auto_format_value(
                     lang,
                     self.auto_format_var.get() if hasattr(self, "auto_format_var") else "",
@@ -230,13 +233,21 @@ class OtoActionsMixin:
                 # 일반 OTO 경로에서는 파이프라인과 동일한 사전 점검을 먼저 수행합니다.
                 # (영어 Preview / 한국어 CMPX Preview는 별도 전용 분기에서 검사)
                 if not (lang == "english" or (lang == "korean" and selected_format == "cmpx")):
+                    preflight_wav_dir = os.path.abspath(root_wav_dir)
+                    preflight_out_path = (
+                        os.path.abspath(base_out_path)
+                        if str(base_out_path or "").strip()
+                        else os.path.join(preflight_wav_dir, "oto.ini")
+                    )
+                    preflight_tg_folder = os.path.join(preflight_wav_dir, "textgrids")
+                    preflight_tpl_path = "" if self.no_base_oto_var.get() else base_tpl_path
                     preflight = collect_runtime_preflight_issues(
                         language=lang,
-                        wav_dir=wav_dir,
-                        out_path=out_path,
+                        wav_dir=preflight_wav_dir,
+                        out_path=preflight_out_path,
                         aligner=self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA",
-                        textgrid_dir=tg_folder,
-                        tpl_path=tpl_path,
+                        textgrid_dir=preflight_tg_folder,
+                        tpl_path=preflight_tpl_path,
                         no_base_oto=bool(self.no_base_oto_var.get()),
                         custom_phonemes_path=self.custom_phoneme_var.get().strip(),
                         require_output=True,

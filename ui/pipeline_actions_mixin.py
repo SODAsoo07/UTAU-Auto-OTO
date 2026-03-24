@@ -93,11 +93,61 @@ class PipelineActionsMixin:
             )
         )
 
+    @staticmethod
+    def _has_any_lab_files(wav_dir: str) -> bool:
+        root = str(wav_dir or "").strip()
+        if not root or not os.path.isdir(root):
+            return False
+        for _cur, _dirs, files in os.walk(root):
+            if any(str(name).lower().endswith(".lab") for name in files):
+                return True
+        return False
+
+    def _notify_lab_or_dict_missing(self, wav_dir: str, dict_path: str) -> None:
+        guide = "Lab 파일 또는 딕셔너리 파일이 없습니다. 왼쪽 탭에서 Lab+사전 생성 버튼을 클릭해주세요."
+        self._append_log(f"❌ {guide}")
+        if not self._has_any_lab_files(wav_dir):
+            self._append_log(f"   - Lab 파일 미존재: {wav_dir}")
+        if not (dict_path and os.path.isfile(dict_path)):
+            self._append_log(f"   - 딕셔너리 파일 미존재: {dict_path}")
+        self._after_safe(
+            lambda: self._show_copyable_alert(
+                title="정렬 입력 파일 누락",
+                message=guide,
+                alert_key="align_lab_dict_missing",
+            )
+        )
+
+    def _validate_alignment_input_files(self, wav_dir: str, dict_path: str) -> bool:
+        has_lab = self._has_any_lab_files(wav_dir)
+        has_dict = bool(dict_path and os.path.isfile(dict_path))
+        if has_lab and has_dict:
+            return True
+        self._notify_lab_or_dict_missing(wav_dir, dict_path)
+        self._set_status("❌ 정렬 입력 파일 누락")
+        return False
+
+    @staticmethod
+    def _is_lab_or_dict_missing_alignment_error(code: str, message: str) -> bool:
+        c = str(code or "").strip().upper()
+        text = str(message or "")
+        lowered = text.lower()
+        if c == "ALIGN_DICT_MISSING":
+            return True
+        if "dictionary not found" in lowered:
+            return True
+        if "textgrid" in lowered and ("not found" in lowered or "missing" in lowered):
+            return True
+        if "lab" in lowered and ("not found" in lowered or "missing" in lowered):
+            return True
+        return False
+
     def _resolve_setup_mfa_script_path(self):
         candidates = []
         app_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if app_dir:
             candidates.append(os.path.join(app_dir, "setup_mfa.bat"))
+            candidates.append(os.path.join(os.path.dirname(app_dir), "setup_mfa.bat"))
         exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", ""))) if getattr(sys, "frozen", False) else ""
         if exe_dir:
             candidates.append(os.path.join(exe_dir, "setup_mfa.bat"))
@@ -105,6 +155,7 @@ class PipelineActionsMixin:
         local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
         if local_app_data:
             candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO", "setup_mfa.bat"))
+            candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO_v3", "setup_mfa.bat"))
         app_data_dir = str(getattr(self, "app_data_dir", "") or "").strip()
         if app_data_dir:
             candidates.append(os.path.join(app_data_dir, "setup_mfa.bat"))
@@ -199,6 +250,8 @@ class PipelineActionsMixin:
         return (
             "설치 프로그램에 동봉된 setup_mfa.bat을 직접 실행해 추가 복구를 진행해 주세요.\n"
             "- 실행 예시:\n"
+            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO_v3\\setup_mfa.bat\" --recovery --non-interactive\"\n"
+            "또는\n"
             "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --recovery --non-interactive\""
         )
 
@@ -1862,6 +1915,9 @@ class PipelineActionsMixin:
                 out_path = self.out_entry.get().strip()
                 cleanup_snapshot = self._snapshot_output_tree_for_cleanup(out_path) if out_path else None
                 lang = self._get_language()
+                self._append_log(
+                    f"ℹ 현재 언어: {'일본어' if lang == 'japanese' else '한국어' if lang == 'korean' else '영어'}"
+                )
                 selected_format = normalize_auto_format_value(
                     lang,
                     self.auto_format_var.get() if hasattr(self, "auto_format_var") else "",
@@ -2176,6 +2232,8 @@ class PipelineActionsMixin:
                         self._append_log("❌ MFA 설치/모델 준비 실패")
                         self._set_status("❌ MFA 설치/모델 준비 실패")
                         return
+                    if not self._validate_alignment_input_files(wav_dir, dict_path):
+                        return
                 mfa_profile = (
                     self._get_mfa_align_profile_code()
                     if hasattr(self, "_get_mfa_align_profile_code")
@@ -2223,6 +2281,8 @@ class PipelineActionsMixin:
                 if not align_ok:
                     align_code = str(align_result.get("code", "ALIGN_RUN_FAILED"))
                     self._append_log(f"⚠ {format_error_with_recovery(align_code, align_err)}")
+                    if self._is_lab_or_dict_missing_alignment_error(align_code, align_err):
+                        self._notify_lab_or_dict_missing(wav_dir, dict_path)
                     if primary_engine == "mfa":
                         self._schedule_alignment_failure_mfa_followup(
                             language=lang,

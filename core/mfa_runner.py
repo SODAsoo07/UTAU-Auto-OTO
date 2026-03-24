@@ -1,7 +1,7 @@
-"""
-MFA (Montreal Forced Aligner) ・､嵂・・ｨ・・
-- ・懍ｻｬ ・尖株 尞ｬ奓ｰ・・Conda 嶹俾ｲｽ・川・ MFA ・､嵂・
-- ・､・懋ｰ・・懋ｷｸ ・､孖ｸ・ｬ・・
+﻿"""
+MFA (Montreal Forced Aligner) 繝ｻ・､蠏ゅ・繝ｻ・ｨ繝ｻ繝ｻ
+- 繝ｻ諛搾ｽｻ・ｬ 繝ｻ蟆匁ｪ 蟆橸ｽｬ螂難ｽｰ繝ｻ繝ｻConda 蠍ｹ菫ｾ・ｲ・ｽ繝ｻ蟾昴・ MFA 繝ｻ・､蠏ゅ・
+- 繝ｻ・､繝ｻ諛具ｽｰ繝ｻ繝ｻ諛具ｽｷ・ｸ 繝ｻ・､蟄厄ｽｸ繝ｻ・ｬ繝ｻ繝ｻ
 """
 
 import os
@@ -14,6 +14,8 @@ import hashlib
 import tempfile
 import locale
 import time
+import urllib.error
+import urllib.request
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from core.pipeline_status import (
@@ -392,8 +394,8 @@ def _stderr_has_msvc_requirement(text):
 def _emit_msvc_required_notice(callback, log_fn):
     if callback:
         callback(ALERT_MSVC_REQUIRED)
-    log_fn("笞 Microsoft Visual C++ 14.0+ (C++ Build Tools)・ 﨑・囈﨑ｩ・壱共.")
-    log_fn("   ・､・・・・〓: https://visualstudio.microsoft.com/visual-cpp-build-tools/")
+    log_fn("隨橸｣ｰ Microsoft Visual C++ 14.0+ (C++ Build Tools)繝ｻﾂ ・代・蝗茨ｨ托ｽｩ繝ｻ螢ｱ蜈ｱ.")
+    log_fn("   繝ｻ・､繝ｻ繝ｻ繝ｻ繝ｻ縲・ https://visualstudio.microsoft.com/visual-cpp-build-tools/")
 
 
 def mfa_python_version_requires_downgrade(version_text: str) -> bool:
@@ -417,6 +419,18 @@ def get_mfa_env_python_version(mfa_path: str) -> str:
         return ""
     try:
         env = _get_conda_env(mfa_path)
+        pip_common_args = ['--no-cache-dir', '--disable-pip-version-check', '--retries', '5', '--timeout', '120']
+        trusted_hosts = [
+            '--trusted-host', 'pypi.org',
+            '--trusted-host', 'files.pythonhosted.org',
+            '--trusted-host', 'pypi.python.org',
+        ]
+
+        def _looks_like_tls_error(msg):
+            text = (msg or '').lower()
+            return (
+                'ssl' in text and ('certificate' in text or 'secure channel' in text or 'tls' in text)
+            ) or ('certificate verify failed' in text)
         result = _run_subprocess_text(
             [
                 python_exe,
@@ -438,14 +452,14 @@ def mfa_env_requires_python_downgrade(mfa_path: str) -> bool:
 
 
 def _preflight_compute_mfcc(mfa_path, callback=None):
-    """MFA ・簿ｬ ・懍梠 ・・乱 compute-mfcc-feats ・､嵂・・・･ ・ｬ・・ｼ ・専ｲ﨑ｩ・壱共."""
+    """MFA 繝ｻ邁ｿ・ｰ・ｬ 繝ｻ諛肴｢ 繝ｻ繝ｻ荵ｱ compute-mfcc-feats 繝ｻ・､蠏ゅ・繝ｻﾂ繝ｻ・･ 繝ｻ・ｬ繝ｻﾂ繝ｻ・ｼ 繝ｻ蟆ゑｽｲﾂ・托ｽｩ繝ｻ螢ｱ蜈ｱ."""
     def log(msg):
         logger.info(msg)
         if callback:
             callback(msg)
 
     if not mfa_path:
-        return False, "MFA ・､嵂・甯護攵 ・ｽ・懋ｰ ・・牟 ・溢慣・壱共."
+        return False, "MFA 繝ｻ・､蠏ゅ・逕ｯ隴ｷ謾ｵ 繝ｻ・ｽ繝ｻ諛具ｽｰﾂ 繝ｻ繝ｻ迚・繝ｻ貅｢諷｣繝ｻ螢ｱ蜈ｱ."
 
     env = _get_conda_env(mfa_path)
     candidates = []
@@ -458,7 +472,7 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
     last_not_found = None
     for candidate in candidates:
         try:
-            # Windows + Python 3.13 ・ｰ﨑ｩ・川・・・嶹菩棗・・・・株 ・､嵂雅ｪ・・・餓擽 ・､甯ｨ﨑 ・・・壱共.
+            # Windows + Python 3.13 繝ｻ・ｰ・托ｽｩ繝ｻ蟾昴・繝ｻ繝ｻ蠍ｹ闖ｩ譽励・繝ｻ繝ｻ繝ｻ譬ｪ 繝ｻ・､蠏る寉・ｪ繝ｻ繝ｻﾂ繝ｻ鬢捺匿 繝ｻ・､逕ｯ・ｨ・托｣ｰ 繝ｻ繝ｻ繝ｻ螢ｱ蜈ｱ.
             subprocess.run(
                 [candidate, '--help'],
                 capture_output=True,
@@ -474,19 +488,19 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
             if callback:
                 callback(ALERT_MFA_PERMISSION_DENIED)
             err = (
-                "compute-mfcc-feats ・､嵂・・醐復・ｴ ・・牟 MFA ・簿ｬ・・・懍梠﨑 ・・・・慣・壱共. "
+                "compute-mfcc-feats 繝ｻ・､蠏ゅ・繝ｻ驢仙ｾｩ繝ｻ・ｴ 繝ｻ繝ｻ迚・MFA 繝ｻ邁ｿ・ｰ・ｬ繝ｻ繝ｻ繝ｻ諛肴｢・托｣ｰ 繝ｻ繝ｻ繝ｻ繝ｻ諷｣繝ｻ螢ｱ蜈ｱ. "
                 "(WinError 5: Access denied)"
             )
-            log(f"笶・{err}")
-            log("   ・ｴ・・嵓・｡懋ｷｸ・ｨ/・醐復 ・菩ｱ・甯護攵 ・ｨ・ｨ ・ｬ・・ｼ 嶹菩攤﨑ｴ ・ｼ・ｸ・・")
+            log(f"隨ｶ繝ｻ{err}")
+            log("   繝ｻ・ｴ繝ｻ繝ｻ蠏薙・・｡諛具ｽｷ・ｸ繝ｻ・ｨ/繝ｻ驢仙ｾｩ 繝ｻ闖ｩ・ｱ繝ｻ逕ｯ隴ｷ謾ｵ 繝ｻ・ｨ繝ｻ・ｨ 繝ｻ・ｬ繝ｻﾂ繝ｻ・ｼ 蠍ｹ闖ｩ謾､・托ｽｴ 繝ｻ・ｼ繝ｻ・ｸ繝ｻ繝ｻ")
             return False, f"{err}: {e}"
         except Exception as e:
-            err = f"compute-mfcc-feats ・ｬ・・・専ｲ ・・・､・・ {e}"
-            log(f"笶・{err}")
+            err = f"compute-mfcc-feats 繝ｻ・ｬ繝ｻ繝ｻ繝ｻ蟆ゑｽｲﾂ 繝ｻ繝ｻ繝ｻ・､繝ｻ繝ｻ {e}"
+            log(f"隨ｶ繝ｻ{err}")
             return False, err
 
-    err = "compute-mfcc-feats・ｼ ・ｾ・ ・ｻ嵂溢慣・壱共. MFA 嶹俾ｲｽ・ｴ ・川メ・們来・・・・・溢慣・壱共."
-    log(f"笶・{err}")
+    err = "compute-mfcc-feats繝ｻ・ｼ 繝ｻ・ｾ繝ｻﾂ 繝ｻ・ｻ蠏よｺ｢諷｣繝ｻ螢ｱ蜈ｱ. MFA 蠍ｹ菫ｾ・ｲ・ｽ繝ｻ・ｴ 繝ｻ蟾昴Γ繝ｻ蛟第擂繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ貅｢諷｣繝ｻ螢ｱ蜈ｱ."
+    log(f"隨ｶ繝ｻ{err}")
     if last_not_found:
         return False, f"{err}: {last_not_found}"
     return False, err
@@ -573,10 +587,22 @@ def _sanitize_alignment_dictionary_for_mfa(dict_path: str, callback=None):
 
 def _get_conda_env(mfa_path):
     """
-    Windows 嶹俾ｲｽ・川・ Conda 嶹懍┳嶹・・・擽 mfa.exe・ｼ ・・・嶸ｸ・懦腹 ・・
-    DLL ・罹糖 ・尖洳(・罷糖 3228369023)・ ・懍・﨑俯株 ・・揆 ・賀ｸｰ ・・紛 嶹俾ｲｽ ・・們乱 PATH・ｼ ・ｼ・・鮒・壱共.
+    Windows 蠍ｹ菫ｾ・ｲ・ｽ繝ｻ蟾昴・ Conda 蠍ｹ諛坂筏蠍ｹ繝ｻ繝ｻ繝ｻ謫ｽ mfa.exe繝ｻ・ｼ 繝ｻ繝ｻ・ｰ繝ｻ蠍ｸ・ｸ繝ｻ諛ｦ閻ｹ 繝ｻ繝ｻ
+    DLL 繝ｻ鄂ｹ邉・繝ｻ蟆匁ｴｳ(繝ｻ鄂ｷ邉・3228369023)繝ｻﾂ 繝ｻ諛阪・・台ｿｯ譬ｪ 繝ｻ繝ｻ謠・繝ｻ雉・ｸ・ｰ 繝ｻ繝ｻ邏・蠍ｹ菫ｾ・ｲ・ｽ 繝ｻﾂ繝ｻ蛟台ｹｱ PATH繝ｻ・ｼ 繝ｻ・ｼ繝ｻ繝ｻ魄偵・螢ｱ蜈ｱ.
     """
     env = os.environ.copy()
+    # Frozen launcher state can leak host Python vars into subprocesses and
+    # break ensurepip/pip module resolution inside the MFA env.
+    for leaked_key in (
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONEXECUTABLE",
+        "__PYVENV_LAUNCHER__",
+        "VIRTUAL_ENV",
+        "CONDA_DEFAULT_ENV",
+        "CONDA_PROMPT_MODIFIER",
+    ):
+        env.pop(leaked_key, None)
     if sys.platform == 'win32' and mfa_path and 'Scripts' in mfa_path:
         mfa_path = os.path.abspath(mfa_path)
         env_dir = os.path.abspath(os.path.dirname(os.path.dirname(mfa_path)))
@@ -639,60 +665,292 @@ def _korean_tokenizer_import_expr() -> str:
     )
 
 
+def _resolve_get_pip_script() -> str:
+    env_override = str(os.environ.get("UTOA_GET_PIP_PATH", "") or "").strip()
+    if env_override and os.path.isfile(env_override):
+        return env_override
+
+    if getattr(sys, "frozen", False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    meipass_dir = str(getattr(sys, "_MEIPASS", "") or "").strip()
+
+    candidates = [
+        os.path.join(base_dir, "assets", "bootstrap", "get-pip.py"),
+        os.path.join(base_dir, "UTAU_Auto_OTO", "assets", "bootstrap", "get-pip.py"),
+        os.path.join(base_dir, "get-pip.py"),
+        os.path.join(os.getcwd(), "assets", "bootstrap", "get-pip.py"),
+        os.path.join(os.getcwd(), "get-pip.py"),
+    ]
+    if meipass_dir:
+        candidates.extend([
+            os.path.join(meipass_dir, "assets", "bootstrap", "get-pip.py"),
+            os.path.join(meipass_dir, "get-pip.py"),
+        ])
+
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return ""
+
+
 def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
     """
     Ensure pip/setuptools/pkg_resources/wheel are available inside the MFA env.
     This is a prerequisite for language-specific dependency repair on native Windows.
     """
+
     def log(msg):
         logger.info(msg)
         if callback:
             callback(msg)
 
-    if not mfa_path or 'Scripts' not in mfa_path:
+    if not mfa_path or "Scripts" not in mfa_path:
         return True
 
     env_dir = os.path.dirname(os.path.dirname(mfa_path))
     python_exe = _resolve_env_python_exe(env_dir)
-    pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
-    conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
+    pip_exe = os.path.join(env_dir, "Scripts", "pip.exe")
+    conda_exe = os.path.join(env_dir, "Scripts", "conda.exe")
     if not os.path.exists(python_exe):
         return False
 
     env = _get_conda_env(mfa_path)
-    ok, _detail = _check_env_imports(python_exe, env, 'import pip; import pkg_resources; import wheel')
-    if ok:
+
+    def _check_stack_ready() -> bool:
+        ok, _detail = _check_env_imports(
+            python_exe,
+            env,
+            "import pip; import pkg_resources; import wheel",
+        )
+        return bool(ok)
+
+    if _check_stack_ready():
         return True
 
-    log('[MFA] Python 甯ｨ墲､・ ・・ｵｬ(pip/setuptools/wheel) ・ｵ・ｬ ・・..')
-    repair_cmds = [
-        [python_exe, '-m', 'ensurepip', '--upgrade'],
-        [python_exe, '-m', 'pip', 'install', '--upgrade', 'setuptools<81', 'wheel'],
+    pip_common_args = [
+        "--no-cache-dir",
+        "--disable-pip-version-check",
+        "--retries",
+        "5",
+        "--timeout",
+        "120",
+    ]
+    trusted_hosts = [
+        "--trusted-host", "pypi.org",
+        "--trusted-host", "files.pythonhosted.org",
+        "--trusted-host", "pypi.python.org",
+    ]
+
+    index_args = []
+    index_url = str(os.environ.get("UTOA_PIP_INDEX_URL", "") or "").strip()
+    extra_index_url = str(os.environ.get("UTOA_PIP_EXTRA_INDEX_URL", "") or "").strip()
+    if index_url:
+        index_args.extend(["--index-url", index_url])
+    if extra_index_url:
+        index_args.extend(["--extra-index-url", extra_index_url])
+
+    def _looks_like_tls_error(text):
+        msg = (text or "").lower()
+        return (
+            ("ssl" in msg and ("certificate" in msg or "secure channel" in msg or "tls" in msg))
+            or ("certificate verify failed" in msg)
+            or ("trust relationship" in msg)
+        )
+
+    def _looks_like_connectivity_error(text):
+        msg = (text or "").lower()
+        return (
+            "timed out" in msg
+            or "connection reset" in msg
+            or "name or service not known" in msg
+            or "temporary failure in name resolution" in msg
+            or "nodename nor servname provided" in msg
+            or "failed to establish a new connection" in msg
+        )
+
+    def _run_repair(cmd, env_override=None):
+        log(f"   -> repair cmd: {' '.join(cmd)}")
+        result = _run_subprocess_text(cmd, env=(env_override or env))
+        if result.returncode != 0:
+            tail = (result.stderr or result.stdout or "").strip()
+            if tail:
+                log(f"[MFA] repair failed: {tail[:500]}")
+        return result
+
+    def _download_online_get_pip() -> str:
+        if str(os.environ.get("UTOA_DISABLE_ONLINE_GET_PIP", "") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            return ""
+        url_candidates = []
+        env_url = str(os.environ.get("UTOA_GET_PIP_URL", "") or "").strip()
+        if env_url:
+            url_candidates.append(env_url)
+        url_candidates.append("https://bootstrap.pypa.io/get-pip.py")
+
+        for url in url_candidates:
+            try:
+                with urllib.request.urlopen(url, timeout=90) as resp:
+                    payload = resp.read()
+                if not payload or len(payload) < 8192:
+                    continue
+                target = os.path.join(tempfile.gettempdir(), f"utoa_get_pip_{int(time.time())}.py")
+                with open(target, "wb") as fp:
+                    fp.write(payload)
+                if os.path.isfile(target):
+                    log(f"[MFA] Downloaded online get-pip.py: {target}")
+                    return target
+            except Exception as e:
+                log(f"[MFA] online get-pip download failed: {url} ({e})")
+                continue
+        return ""
+
+    log("[MFA] Python packaging tools (pip/setuptools/wheel) repair started...")
+
+    saw_tls_error = False
+    saw_connectivity_error = False
+
+    pip_targets = ["pip", "setuptools<81", "wheel"]
+    setuptools_wheel_targets = ["setuptools<81", "wheel"]
+
+    stage_cmds = [
+        [python_exe, "-m", "ensurepip", "--upgrade"],
+        [python_exe, "-m", "ensurepip", "--default-pip"],
+        [python_exe, "-m", "pip", "install", "--upgrade", *pip_common_args, *index_args, *pip_targets],
     ]
     if os.path.exists(pip_exe):
-        repair_cmds.append([pip_exe, 'install', '--upgrade', 'setuptools<81', 'wheel'])
+        # pip.exe cannot reliably self-upgrade pip on Windows.
+        stage_cmds.append([pip_exe, "install", "--upgrade", *pip_common_args, *index_args, *setuptools_wheel_targets])
     if os.path.exists(conda_exe):
-        repair_cmds.append([
-            conda_exe, 'install', '-y', '--solver', 'classic', '-p', env_dir,
-            'pip', 'setuptools', 'wheel'
+        stage_cmds.append([
+            conda_exe,
+            "install",
+            "-y",
+            "--solver",
+            "classic",
+            "-p",
+            env_dir,
+            "pip",
+            "setuptools",
+            "wheel",
         ])
-    system_conda = shutil.which('conda')
+    system_conda = shutil.which("conda")
     if system_conda:
-        repair_cmds.append([
-            system_conda, 'install', '-y', '--solver', 'classic', '-p', env_dir,
-            'pip', 'setuptools', 'wheel'
+        stage_cmds.append([
+            system_conda,
+            "install",
+            "-y",
+            "--solver",
+            "classic",
+            "-p",
+            env_dir,
+            "pip",
+            "setuptools",
+            "wheel",
         ])
 
-    for repair_cmd in repair_cmds:
-        log(f"   -> repair cmd: {' '.join(repair_cmd)}")
-        result = _run_subprocess_text(repair_cmd, env=env)
+    for repair_cmd in stage_cmds:
+        result = _run_repair(repair_cmd)
         if result.returncode != 0:
+            err_txt = (result.stderr or result.stdout or "").strip()
+            saw_tls_error = saw_tls_error or _looks_like_tls_error(err_txt)
+            saw_connectivity_error = saw_connectivity_error or _looks_like_connectivity_error(err_txt)
             continue
-        ok, _detail = _check_env_imports(python_exe, env, 'import pip; import pkg_resources; import wheel')
-        if ok:
+        if _check_stack_ready():
             return True
 
-    log('[MFA] Failed to restore pip/setuptools/pkg_resources/wheel')
+    if saw_tls_error or saw_connectivity_error:
+        tls_cmds = [
+            [python_exe, "-m", "pip", "install", "--upgrade", *pip_common_args, *index_args, *trusted_hosts, *pip_targets],
+        ]
+        if os.path.exists(pip_exe):
+            tls_cmds.append([pip_exe, "install", "--upgrade", *pip_common_args, *index_args, *trusted_hosts, *setuptools_wheel_targets])
+        for repair_cmd in tls_cmds:
+            result = _run_repair(repair_cmd)
+            if result.returncode != 0:
+                continue
+            if _check_stack_ready():
+                return True
+
+    force_cmds = [
+        [python_exe, "-m", "pip", "install", "--upgrade", "--force-reinstall", *pip_common_args, *index_args, *trusted_hosts, *pip_targets],
+    ]
+    if os.path.exists(pip_exe):
+        force_cmds.append([pip_exe, "install", "--upgrade", "--force-reinstall", *pip_common_args, *index_args, *trusted_hosts, *setuptools_wheel_targets])
+    for repair_cmd in force_cmds:
+        result = _run_repair(repair_cmd)
+        if result.returncode != 0:
+            continue
+        if _check_stack_ready():
+            return True
+
+    get_pip_path = _resolve_get_pip_script()
+    if not get_pip_path:
+        get_pip_path = _download_online_get_pip()
+
+    if get_pip_path:
+        log(f"[MFA] Falling back to get-pip.py: {get_pip_path}")
+        env_boot = dict(env or {})
+        env_boot.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+        env_boot.setdefault("PIP_NO_CACHE_DIR", "1")
+        env_boot.setdefault("PIP_DEFAULT_TIMEOUT", "120")
+        env_boot.setdefault("PIP_RETRIES", "5")
+
+        get_pip_cmds = [
+            [
+                python_exe,
+                get_pip_path,
+                "--disable-pip-version-check",
+                "--no-cache-dir",
+                "--retries",
+                "5",
+                "--timeout",
+                "120",
+                "pip",
+                "setuptools<81",
+                "wheel",
+            ],
+            [
+                python_exe,
+                get_pip_path,
+                "--disable-pip-version-check",
+                "--no-cache-dir",
+                "--retries",
+                "5",
+                "--timeout",
+                "120",
+                *trusted_hosts,
+                "pip",
+                "setuptools<81",
+                "wheel",
+            ],
+        ]
+
+        for repair_cmd in get_pip_cmds:
+            result = _run_repair(repair_cmd, env_override=env_boot)
+            if result.returncode != 0:
+                continue
+            post_cmd = [
+                python_exe,
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "--force-reinstall",
+                *pip_common_args,
+                *index_args,
+                *trusted_hosts,
+                "pip",
+                "setuptools<81",
+                "wheel",
+            ]
+            _run_repair(post_cmd, env_override=env_boot)
+            if _check_stack_ready():
+                return True
+    else:
+        log("[MFA] Bundled/online get-pip.py could not be resolved.")
+
+    log("[MFA] Failed to restore pip/setuptools/pkg_resources/wheel")
     return False
 
 
@@ -728,7 +986,7 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
 
     if not resolved or not os.path.exists(resolved):
         report["issues"].append("mfa_missing")
-        log("[MFA] ・・卿: MFA ・､嵂・甯護攵・・・ｾ・ ・ｻ嵂溢慣・壱共.")
+        log("[MFA] 繝ｻ繝ｻ蜊ｿ: MFA 繝ｻ・､蠏ゅ・逕ｯ隴ｷ謾ｵ繝ｻ繝ｻ繝ｻ・ｾ繝ｻﾂ 繝ｻ・ｻ蠏よｺ｢諷｣繝ｻ螢ｱ蜈ｱ.")
         return report
 
     report["checks"]["mfa_executable"] = True
@@ -778,8 +1036,8 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
 
 def _resolve_single_speaker_flag(mfa_path, env=None):
     """
-    MFA ・・・乱 ・ｰ・ｼ ・ｨ・ｼ 嶹肥梵 ・ｵ・・岺懋ｸｰ・ ・､・ｼ ・・・溢牟(--single-speaker / --single_speaker)
-    help ・罹･・・・ｴ・ ・・尖据・・岺懋ｸｰ・ｼ ・夋晨鮒・壱共.
+    MFA 繝ｻ繝ｻ・ｰ繝ｻ荵ｱ 繝ｻ・ｰ繝ｻ・ｼ 繝ｻ・ｨ繝ｻ・ｼ 蠍ｹ閧･譴ｵ 繝ｻ・ｵ繝ｻ繝ｻ蟯ｺ諛具ｽｸ・ｰ繝ｻﾂ 繝ｻ・､繝ｻ・ｼ 繝ｻ繝ｻ繝ｻ貅｢迚・--single-speaker / --single_speaker)
+    help 繝ｻ鄂ｹ・ｰ・･繝ｻ繝ｻ繝ｻ・ｴ繝ｻ・ｰ 繝ｻﾂ繝ｻ蟆匁紺繝ｻ繝ｻ蟯ｺ諛具ｽｸ・ｰ繝ｻ・ｼ 繝ｻ・ｰ螟区勣魄偵・螢ｱ蜈ｱ.
     """
     key = os.path.abspath(mfa_path or "")
     cached = _MFA_SINGLE_SPEAKER_FLAG_CACHE.get(key)
@@ -806,7 +1064,7 @@ def _resolve_single_speaker_flag(mfa_path, env=None):
     except Exception:
         pass
 
-    # ・ｰ・ｸ・廷捩 ・肥ｲｭ・・・樌ｶｰ 﨑們擽嵓・岺懋ｸｰ ・ｰ・
+    # 繝ｻ・ｰ繝ｻ・ｸ繝ｻ蟒ｷ謐ｩ 繝ｻ閧･・ｲ・ｭ繝ｻ繝ｻ繝ｻ讓鯉ｽｶ・ｰ ・大第匿蠏薙・蟯ｺ諛具ｽｸ・ｰ 繝ｻ・ｰ繝ｻ・ｰ
     _MFA_SINGLE_SPEAKER_FLAG_CACHE[key] = "--single-speaker"
     return "--single-speaker"
 
@@ -875,25 +1133,25 @@ def _resolve_mfa_align_options(align_profile):
 
 def find_mfa_executable():
     """
-    ・懍侃奛懍乱 ・､・俯頗 MFA ・､嵂・甯護攵・・夋川ラ﨑ｩ・壱共.
-    尞ｬ奓ｰ・・嶹俾ｲｽ -> Conda 嶹俾ｲｽ -> ・懍侃奛・PATH ・懍・・・・・駕鮒・壱共.
+    繝ｻ諛堺ｾ・･帶㍾荵ｱ 繝ｻ・､繝ｻ菫ｯ鬆・MFA 繝ｻ・､蠏ゅ・逕ｯ隴ｷ謾ｵ繝ｻ繝ｻ螟句ｷ昴Λ・托ｽｩ繝ｻ螢ｱ蜈ｱ.
+    蟆橸ｽｬ螂難ｽｰ繝ｻ繝ｻ蠍ｹ菫ｾ・ｲ・ｽ -> Conda 蠍ｹ菫ｾ・ｲ・ｽ -> 繝ｻ諛堺ｾ・･帙・PATH 繝ｻ諛阪・繝ｻ繝ｻ繝ｻﾂ繝ｻ鬧暮ｮ偵・螢ｱ蜈ｱ.
     
     Returns:
-        MFA ・､嵂・甯護攵 ・ｽ・・・尖株 None
+        MFA 繝ｻ・､蠏ゅ・逕ｯ隴ｷ謾ｵ 繝ｻ・ｽ繝ｻ繝ｻ繝ｻ蟆匁ｪ None
     """
-    # 1. ・ｵ・/・一ｱｰ・・尞ｬ奓ｰ・・嶹俾ｲｽ
+    # 1. 繝ｻ・ｵ繝ｻ・ｰ/繝ｻ荳・ｱ・ｰ繝ｻ繝ｻ蟆橸ｽｬ螂難ｽｰ繝ｻ繝ｻ蠍ｹ菫ｾ・ｲ・ｽ
     for p in _candidate_mfa_executable_paths():
         if os.path.exists(p):
-            logger.info(f"尞ｬ奓ｰ・・MFA ・懋ｲｬ: {p}")
+            logger.info(f"蟆橸ｽｬ螂難ｽｰ繝ｻ繝ｻMFA 繝ｻ諛具ｽｲ・ｬ: {p}")
             return p
 
-    # 2. ・懍侃奛・PATH
+    # 2. 繝ｻ諛堺ｾ・･帙・PATH
     mfa_path = shutil.which('mfa')
     if mfa_path:
-        logger.info(f"・懍侃奛・MFA ・懋ｲｬ: {mfa_path}")
+        logger.info(f"繝ｻ諛堺ｾ・･帙・MFA 繝ｻ諛具ｽｲ・ｬ: {mfa_path}")
         return mfa_path
 
-    # 3. Conda 嶹俾ｲｽ ・ｰ・ｸ ・ｽ・・
+    # 3. Conda 蠍ｹ菫ｾ・ｲ・ｽ 繝ｻ・ｰ繝ｻ・ｸ 繝ｻ・ｽ繝ｻ繝ｻ
     conda_paths = [
         os.path.expanduser('~/miniconda3/envs/aligner/Scripts/mfa.exe'),
         os.path.expanduser('~/anaconda3/envs/aligner/Scripts/mfa.exe'),
@@ -901,7 +1159,7 @@ def find_mfa_executable():
     ]
     for p in conda_paths:
         if os.path.exists(p):
-            logger.info(f"Conda MFA ・懋ｲｬ: {p}")
+            logger.info(f"Conda MFA 繝ｻ諛具ｽｲ・ｬ: {p}")
             return p
 
     return None
@@ -909,20 +1167,20 @@ def find_mfa_executable():
 
 def check_mfa_model(mfa_path, language='korean'):
     """
-    MFA ・醐箕 ・ｨ・ｸ・ｴ ・､・ｴ・罹糖・們牟 ・壱株・ 嶹菩攤﨑ｩ・壱共.
+    MFA 繝ｻ驢千ｮ・繝ｻ・ｨ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ・､繝ｻ・ｴ繝ｻ鄂ｹ邉悶・蛟醍押 繝ｻ螢ｱ譬ｪ繝ｻﾂ 蠍ｹ闖ｩ謾､・托ｽｩ繝ｻ螢ｱ蜈ｱ.
     
     Args:
-        mfa_path: MFA ・､嵂・甯護攵 ・ｽ・・
-        language: 'korean' ・尖株 'japanese'
+        mfa_path: MFA 繝ｻ・､蠏ゅ・逕ｯ隴ｷ謾ｵ 繝ｻ・ｽ繝ｻ繝ｻ
+        language: 'korean' 繝ｻ蟆匁ｪ 'japanese'
     
     Returns:
-        (・､・・・ｬ・: bool, ・肥亨・: str)
+        (繝ｻ・､繝ｻ繝ｻ繝ｻ・ｬ繝ｻﾂ: bool, 繝ｻ閧･莠ｨ繝ｻﾂ: str)
     """
     if not mfa_path:
-        return False, "MFA ・､嵂・甯護攵・・・ｾ・・・・・・慣・壱共."
+        return False, "MFA 繝ｻ・､蠏ゅ・逕ｯ隴ｷ謾ｵ繝ｻ繝ｻ繝ｻ・ｾ繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ諷｣繝ｻ螢ｱ蜈ｱ."
 
     model_name = 'japanese_mfa' if language == 'japanese' else 'korean_mfa'
-    lang_label = '・ｼ・ｸ・ｴ' if language == 'japanese' else '﨑懋ｵｭ・ｴ'
+    lang_label = '繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ' if language == 'japanese' else '・第㈲・ｵ・ｭ繝ｻ・ｴ'
 
     try:
         env = _get_conda_env(mfa_path)
@@ -934,17 +1192,17 @@ def check_mfa_model(mfa_path, language='korean'):
         stderr_text = _decode_subprocess_output(result.stderr)
         combined_text = f"{stdout_text}\n{stderr_text}"
         if model_name in combined_text:
-            return True, f"{lang_label} MFA ・ｨ・ｸ・ｴ ・､・俯据・ｴ ・溢慣・壱共."
+            return True, f"{lang_label} MFA 繝ｻ・ｨ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ・､繝ｻ菫ｯ謐ｮ繝ｻ・ｴ 繝ｻ貅｢諷｣繝ｻ螢ｱ蜈ｱ."
         if _has_local_acoustic_model_artifact(mfa_path, model_name, env=env):
-            return True, f"{lang_label} MFA ・ｨ・ｸ ・懍ｻｬ ・・恐甯ｩ孖ｸ・ｼ 嶹菩攤嵂溢慣・壱共."
+            return True, f"{lang_label} MFA 繝ｻ・ｨ繝ｻ・ｸ 繝ｻ諛搾ｽｻ・ｬ 繝ｻ繝ｻ諱千髪・ｩ蟄厄ｽｸ繝ｻ・ｼ 蠍ｹ闖ｩ謾､蠏よｺ｢諷｣繝ｻ螢ｱ蜈ｱ."
         if result.returncode != 0:
             return False, (
-                f"{lang_label} MFA ・ｨ・ｸ 嶹菩攤 ・・ｹ・ｴ ・､甯ｨ嵂溢慣・壱共(code={result.returncode}). "
-                "・ｨ・ｸ ・､・ｴ・罹糖・ 﨑・囈﨑ｩ・壱共."
+                f"{lang_label} MFA 繝ｻ・ｨ繝ｻ・ｸ 蠍ｹ闖ｩ謾､ 繝ｻ繝ｻ・ｰ・ｹ繝ｻ・ｴ 繝ｻ・､逕ｯ・ｨ蠏よｺ｢諷｣繝ｻ螢ｱ蜈ｱ(code={result.returncode}). "
+                "繝ｻ・ｨ繝ｻ・ｸ 繝ｻ・､繝ｻ・ｴ繝ｻ鄂ｹ邉悶・ﾂ ・代・蝗茨ｨ托ｽｩ繝ｻ螢ｱ蜈ｱ."
             )
-        return False, f"{lang_label} MFA ・ｨ・ｸ・ｴ ・､・俯据・ｴ ・溢ｧ ・喜慣・壱共. ・､・ｴ・罹糖・ 﨑・囈﨑ｩ・壱共."
+        return False, f"{lang_label} MFA 繝ｻ・ｨ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ・､繝ｻ菫ｯ謐ｮ繝ｻ・ｴ 繝ｻ貅｢・ｧﾂ 繝ｻ蝟懈・繝ｻ螢ｱ蜈ｱ. 繝ｻ・､繝ｻ・ｴ繝ｻ鄂ｹ邉悶・ﾂ ・代・蝗茨ｨ托ｽｩ繝ｻ螢ｱ蜈ｱ."
     except Exception as e:
-        return False, f"MFA ・ｨ・ｸ 嶹菩攤 ・､甯ｨ: {e}"
+        return False, f"MFA 繝ｻ・ｨ繝ｻ・ｸ 蠍ｹ闖ｩ謾､ 繝ｻ・､逕ｯ・ｨ: {e}"
 
 
 def _candidate_mfa_root_dirs(mfa_path: str, env: Optional[dict] = None) -> List[str]:
@@ -983,7 +1241,7 @@ def _candidate_mfa_root_dirs(mfa_path: str, env: Optional[dict] = None) -> List[
     except Exception:
         pass
 
-    # MFA ・ｰ・ｸ ・ｨ孖ｸ(・一ｱｰ・・・・嶹菩攤
+    # MFA 繝ｻ・ｰ繝ｻ・ｸ 繝ｻ・ｨ蟄厄ｽｸ(繝ｻ荳・ｱ・ｰ繝ｻ繝ｻ繝ｻ繝ｻ蠍ｹ闖ｩ謾､
     _add(os.path.expanduser("~/Documents/MFA"))
     return roots
 
@@ -1011,7 +1269,7 @@ def check_mfa_ready(language='korean', mfa_path=''):
         return make_runtime_report(
             "align",
             ALIGN_EXEC_MISSING,
-            "MFA ・､嵂・甯護攵・・・ｾ・・・・・・慣・壱共.",
+            "MFA 繝ｻ・､蠏ゅ・逕ｯ隴ｷ謾ｵ繝ｻ繝ｻ繝ｻ・ｾ繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ諷｣繝ｻ螢ｱ蜈ｱ.",
             engine="mfa",
             language=str(language or "korean").strip().lower(),
             mfa_path=str(resolved_mfa or ""),
@@ -1023,7 +1281,7 @@ def check_mfa_ready(language='korean', mfa_path=''):
         return make_runtime_report(
             "align",
             ALIGN_MODEL_MISSING,
-            msg or "MFA ・ｨ・ｸ・・・ｾ・・・・・・慣・壱共.",
+            msg or "MFA 繝ｻ・ｨ繝ｻ・ｸ繝ｻ繝ｻ繝ｻ・ｾ繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ諷｣繝ｻ螢ｱ蜈ｱ.",
             engine="mfa",
             language=str(language or "korean").strip().lower(),
             mfa_path=str(resolved_mfa or ""),
@@ -1201,38 +1459,53 @@ class MeCab:
             return True
         def _run_install_stage(packages, *, pip_extra_args=None):
             extra_args = list(pip_extra_args or [])
-            stage_cmds = [[python_exe, '-m', 'pip', 'install', '--upgrade', *extra_args, *packages]]
-            if os.path.exists(pip_exe):
-                stage_cmds.append([pip_exe, 'install', '--upgrade', *extra_args, *packages])
-            system_conda = shutil.which('conda')
-            if system_conda:
-                stage_cmds.append([
-                    system_conda, 'run', '-p', env_dir, 'python', '-m', 'pip', 'install',
-                    '--upgrade', *extra_args, *packages
-                ])
             stage_last_err = ''
-            for install_cmd in stage_cmds:
-                log(f"   -> cmd: {' '.join(install_cmd)}")
-                result = _run_subprocess_text(install_cmd, env=env)
-                if result.returncode != 0:
-                    err_txt = (result.stderr or result.stdout or '').strip()
-                    if err_txt:
-                        log(f"   [warn] install failed: {err_txt[:500]}")
-                    stage_last_err = err_txt or stage_last_err
-                    continue
-                if not _ensure_pkg_resources():
-                    stage_last_err = 'pkg_resources/setuptools repair failed after install'
-                    continue
-                ok_local, detail_local = _check_imports()
-                if (not ok_local) and _looks_like_pyexpat_dll_issue(detail_local):
-                    log('[MFA] Detected pyexpat/libexpat DLL issue after install; trying repair...')
-                    if _try_repair_pyexpat():
-                        ok_local, detail_local = _check_imports()
-                if ok_local:
-                    return True, stage_last_err
-                if detail_local:
-                    log(f"   [warn] import check failed after install: {detail_local[:500]}")
-                    stage_last_err = detail_local
+
+            def _build_cmds(extra):
+                args = ['install', '--upgrade', *pip_common_args, *extra, *packages]
+                cmds = [[python_exe, '-m', 'pip', *args]]
+                if os.path.exists(pip_exe):
+                    cmds.append([pip_exe, *args])
+                system_conda = shutil.which('conda')
+                if system_conda:
+                    cmds.append([
+                        system_conda, 'run', '-p', env_dir, 'python', '-m', 'pip',
+                        *args
+                    ])
+                return cmds
+
+            for pass_idx in range(2):
+                use_trusted = pass_idx == 1
+                trusted_extra = trusted_hosts if use_trusted else []
+                stage_cmds = _build_cmds(extra_args + trusted_extra)
+                saw_tls = False
+                for install_cmd in stage_cmds:
+                    log(f"   -> cmd: {' '.join(install_cmd)}")
+                    result = _run_subprocess_text(install_cmd, env=env)
+                    if result.returncode != 0:
+                        err_txt = (result.stderr or result.stdout or '').strip()
+                        if err_txt:
+                            log(f"   [warn] install failed: {err_txt[:500]}")
+                        stage_last_err = err_txt or stage_last_err
+                        if _looks_like_tls_error(err_txt):
+                            saw_tls = True
+                        continue
+                    if not _ensure_pkg_resources():
+                        stage_last_err = 'pkg_resources/setuptools repair failed after install'
+                        continue
+                    ok_local, detail_local = _check_imports()
+                    if (not ok_local) and _looks_like_pyexpat_dll_issue(detail_local):
+                        log('[MFA] Detected pyexpat/libexpat DLL issue after install; trying repair...')
+                        if _try_repair_pyexpat():
+                            ok_local, detail_local = _check_imports()
+                    if ok_local:
+                        return True, stage_last_err
+                    if detail_local:
+                        log(f"   [warn] import check failed after install: {detail_local[:500]}")
+                        stage_last_err = detail_local
+                if not saw_tls:
+                    break
+
             return False, stage_last_err
 
         last_err = detail
@@ -1283,8 +1556,8 @@ class MeCab:
 
 def ensure_japanese_support(mfa_path, callback=None):
     """
-    MFA ・ｼ・ｸ・ｴ ・簿ｬ・・﨑・囈﨑・spacy/sudachipy/sudachidict-core・ ・壱株・ 嶹菩攤﨑俾ｳ,
-    ・・攷 ・・・尖徐 ・､・俯･ｼ ・罹巡﨑ｩ・壱共.
+    MFA 繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ邁ｿ・ｰ・ｬ繝ｻ繝ｻ・代・蝗茨ｨ代・spacy/sudachipy/sudachidict-core繝ｻﾂ 繝ｻ螢ｱ譬ｪ繝ｻﾂ 蠍ｹ闖ｩ謾､・台ｿｾ・ｳ・ｰ,
+    繝ｻ繝ｻ謾ｷ 繝ｻ繝ｻ繝ｻ蟆門ｾ・繝ｻ・､繝ｻ菫ｯ・･・ｼ 繝ｻ鄂ｹ蟾｡・托ｽｩ繝ｻ螢ｱ蜈ｱ.
     """
     def log(msg):
         logger.info(msg)
@@ -1302,7 +1575,7 @@ def ensure_japanese_support(mfa_path, callback=None):
     if not os.path.exists(python_exe):
         return True
     if not ensure_mfa_python_packaging_stack(mfa_path, callback=callback):
-        log("笞・・MFA Python 甯ｨ墲､・ ・・ｵｬ ・ｵ・ｬ・・・､甯ｨ﨑ｴ ・ｼ・ｸ・ｴ ・們｡ｴ・ｱ ・､・俯･ｼ ・・・﨑 ・・・・慣・壱共.")
+        log("隨橸｣ｰ繝ｻ繝ｻMFA Python 逕ｯ・ｨ蠅ｲ・､繝ｻﾂ 繝ｻ繝ｻ・ｵ・ｬ 繝ｻ・ｵ繝ｻ・ｬ繝ｻ繝ｻ繝ｻ・､逕ｯ・ｨ・托ｽｴ 繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ 繝ｻ・､繝ｻ菫ｯ・･・ｼ 繝ｻ繝ｻ繝ｻ・托｣ｰ 繝ｻ繝ｻ繝ｻ繝ｻ諷｣繝ｻ螢ｱ蜈ｱ.")
         return False
 
     check_cmd = [python_exe, '-c', 'import spacy; import sudachipy; import sudachidict_core']
@@ -1312,7 +1585,7 @@ def ensure_japanese_support(mfa_path, callback=None):
         if result.returncode == 0:
             return True
 
-        log("逃 MFA ・ｼ・ｸ・ｴ 奝增ｬ・們擽・ ・們｡ｴ・ｱ(spacy, sudachipy, sudachidict-core) ・､・・嶹菩攤 ・・..")
+        log("﨟樣・MFA 繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ 螂晢｣ｰ蠅橸ｽｬ繝ｻ蛟第匿繝ｻﾂ 繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ(spacy, sudachipy, sudachidict-core) 繝ｻ・､繝ｻ繝ｻ蠍ｹ闖ｩ謾､ 繝ｻ繝ｻ..")
 
         install_cmd = None
         if os.path.exists(conda_exe):
@@ -1333,25 +1606,25 @@ def ensure_japanese_support(mfa_path, callback=None):
                 install_cmd = [pip_exe, 'install', 'spacy', 'sudachipy', 'sudachidict-core']
 
         if not install_cmd:
-            log("笞・・・ｼ・ｸ・ｴ ・們｡ｴ・ｱ ・尖徐 ・､・・・ｽ・罹･ｼ ・ｾ・ ・ｻ嵂溢慣・壱共.")
+            log("隨橸｣ｰ繝ｻ繝ｻ繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ 繝ｻ蟆門ｾ・繝ｻ・､繝ｻ繝ｻ繝ｻ・ｽ繝ｻ鄂ｹ・･・ｼ 繝ｻ・ｾ繝ｻﾂ 繝ｻ・ｻ蠏よｺ｢諷｣繝ｻ螢ｱ蜈ｱ.")
             return False
 
-        log(f"   -> ・､嵂・・・ｹ・ｴ: {' '.join(install_cmd)}")
+        log(f"   -> 繝ｻ・､蠏ゅ・繝ｻ繝ｻ・ｰ・ｹ繝ｻ・ｴ: {' '.join(install_cmd)}")
         install_result = _run_subprocess_text(install_cmd, env=env)
         if install_result.returncode != 0:
             if install_result.stderr:
-                log(f"   笞・・・､・・stderr: {install_result.stderr[:500]}")
+                log(f"   隨橸｣ｰ繝ｻ繝ｻ繝ｻ・､繝ｻ繝ｻstderr: {install_result.stderr[:500]}")
             if install_result.stdout:
-                log(f"   笞・・・､・・stdout: {install_result.stdout[:500]}")
+                log(f"   隨橸｣ｰ繝ｻ繝ｻ繝ｻ・､繝ｻ繝ｻstdout: {install_result.stdout[:500]}")
             if os.path.exists(pip_exe):
                 pip_cmd = [pip_exe, 'install', 'spacy', 'sudachipy', 'sudachidict-core']
-                log(f"   -> ・・ｴ ・､・・・・ｹ・ｴ(pip): {' '.join(pip_cmd)}")
+                log(f"   -> 繝ｻﾂ繝ｻ・ｴ 繝ｻ・､繝ｻ繝ｻ繝ｻ繝ｻ・ｰ・ｹ繝ｻ・ｴ(pip): {' '.join(pip_cmd)}")
                 pip_result = _run_subprocess_text(pip_cmd, env=env)
                 if pip_result.returncode != 0:
                     if pip_result.stderr:
-                        log(f"   笞・・pip stderr: {pip_result.stderr[:500]}")
+                        log(f"   隨橸｣ｰ繝ｻ繝ｻpip stderr: {pip_result.stderr[:500]}")
                     if pip_result.stdout:
-                        log(f"   笞・・pip stdout: {pip_result.stdout[:500]}")
+                        log(f"   隨橸｣ｰ繝ｻ繝ｻpip stdout: {pip_result.stdout[:500]}")
                     return False
             else:
                 return False
@@ -1361,12 +1634,12 @@ def ensure_japanese_support(mfa_path, callback=None):
             log("[MFA] Japanese tokenizer dependencies are ready.")
             return True
 
-        log("笞・・・ｼ・ｸ・ｴ ・們｡ｴ・ｱ ・､・・弡・乱・・import ・・晧乱 ・､甯ｨ嵂溢慣・壱共.")
+        log("隨橸｣ｰ繝ｻ繝ｻ繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ 繝ｻ・､繝ｻ繝ｻ蠑｡繝ｻ荵ｱ繝ｻ繝ｻimport 繝ｻﾂ繝ｻ譎ｧ荵ｱ 繝ｻ・､逕ｯ・ｨ蠏よｺ｢諷｣繝ｻ螢ｱ蜈ｱ.")
         if verify.stderr:
-            log(f"   ・・┷ stderr: {verify.stderr[:500]}")
+            log(f"   繝ｻ繝ｻ笏ｷ stderr: {verify.stderr[:500]}")
         return False
     except Exception as e:
-        log(f"笞・・・ｼ・ｸ・ｴ ・們｡ｴ・ｱ ・尖徐 嶹菩攤/・､・・・・・､・・・懍・: {e}")
+        log(f"隨橸｣ｰ繝ｻ繝ｻ繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ 繝ｻ蟆門ｾ・蠍ｹ闖ｩ謾､/繝ｻ・､繝ｻ繝ｻ繝ｻ繝ｻ繝ｻ・､繝ｻ繝ｻ繝ｻ諛阪・: {e}")
         return False
 
 
@@ -1416,17 +1689,17 @@ def download_mfa_model(mfa_path, language='korean', callback=None):
             log(msg)
         return True
 
-    # ・ｨ・ｸ ・､・ｴ・罹糖・・・ｸ・ｴ ・們｡ｴ・ｱ ・・・凰 ・・ｦｬ﨑ｴ ・俯ｦｬ﨑ｩ・壱共.
-    # (・們｡ｴ・ｱ import ・､・俾ｰ ・溢牟・・・ｨ・ｸ ・川ｲｴ ・､・ｴ・罹糖・・・・･﨑・・ｽ・ｰ・ ・溢搆)
+    # 繝ｻ・ｨ繝ｻ・ｸ 繝ｻ・､繝ｻ・ｴ繝ｻ鄂ｹ邉悶・繝ｻ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ 繝ｻﾂ繝ｻ繝ｻ蜃ｰ 繝ｻ繝ｻ・ｦ・ｬ・托ｽｴ 繝ｻ菫ｯ・ｦ・ｬ・托ｽｩ繝ｻ螢ｱ蜈ｱ.
+    # (繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ import 繝ｻ・､繝ｻ菫ｾ・ｰﾂ 繝ｻ貅｢迚溘・繝ｻ繝ｻ・ｨ繝ｻ・ｸ 繝ｻ蟾晢ｽｲ・ｴ 繝ｻ・､繝ｻ・ｴ繝ｻ鄂ｹ邉悶・繝ｻ繝ｻﾂ繝ｻ・･・代・繝ｻ・ｽ繝ｻ・ｰ繝ｻﾂ 繝ｻ貅｢謳・
     try:
         if language == 'korean':
             if not ensure_korean_support(mfa_path, callback):
-                log('笞 Korean dependency prepare failed, but model download will continue.')
+                log('隨橸｣ｰ Korean dependency prepare failed, but model download will continue.')
         elif language == 'japanese':
             if not ensure_japanese_support(mfa_path, callback):
-                log('笞 Japanese dependency prepare failed, but model download will continue.')
+                log('隨橸｣ｰ Japanese dependency prepare failed, but model download will continue.')
     except Exception as dep_exc:
-        log(f'笞 Dependency prepare check raised error, but model download will continue: {dep_exc}')
+        log(f'隨橸｣ｰ Dependency prepare check raised error, but model download will continue: {dep_exc}')
 
     log(f'Downloading {lang_label} MFA model...')
     try:
@@ -1487,8 +1760,8 @@ def _normalize_alignment_strict_mode(value) -> str:
         "full_strict",
         "hard",
         "hard_strict",
-        "・・・淀・ｩ",
-        "・・Ю・・ｲｩ",
+        "繝ｻ繝ｻ・ｰ繝ｻ豺繝ｻ・ｩ",
+        "繝ｻ繝ｻ・ｰﾐｮ繝ｻ繝ｻ・ｲ・ｩ",
     }:
         return "strict"
     if compact in {
@@ -1497,8 +1770,8 @@ def _normalize_alignment_strict_mode(value) -> str:
         "balanced",
         "soft_strict",
         "fallback",
-        "・・胸德溢淀・ｩ",
-        "・・胸德・・・ｲｩ",
+        "繝ｻ繝ｻ閭ｸ蠕ｷ貅｢豺繝ｻ・ｩ",
+        "繝ｻ繝ｻ閭ｸ蠕ｷ繝ｻ繝ｻ繝ｻ・ｲ・ｩ",
     }:
         return "moderate"
     return "off"
@@ -2225,3 +2498,4 @@ def patch_mfa_korean_support(mfa_path, callback=None):
     except Exception as e:
         log(f"[MFA] Korean patch error: {e}")
         return False
+

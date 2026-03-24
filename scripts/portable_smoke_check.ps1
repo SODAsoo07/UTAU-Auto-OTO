@@ -75,6 +75,7 @@ $requiredRelativePaths = @(
     "runtime_recovery.ps1",
     "startup_diagnose.ps1",
     "startup_diagnose.bat",
+    "UTAU_Auto_OTO.lnk",
     "UTAU_Auto_OTO\UTAU_Auto_OTO.exe"
 )
 foreach ($rel in $requiredRelativePaths) {
