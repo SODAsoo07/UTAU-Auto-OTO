@@ -960,13 +960,52 @@ class PipelineActionsMixin:
             ):
                 self._append_log("❌ MFA 설치 실패")
                 return False
-            self._append_log("✅ Micromamba 기반 MFA 설치 완료!")
+            self._append_log("✅ Micromamba 기반 MFA 환경 생성 완료 (후속 점검 진행)")
             if not _refresh_mfa_path():
                 self._append_log("❌ MFA 실행 파일을 찾지 못했습니다.")
                 return False
 
+        def _create_portable_mfa_env(step_label: str) -> bool:
+            return _run_micromamba(
+                [
+                    'create',
+                    '-y',
+                    '-r',
+                    micromamba_root,
+                    '-p',
+                    env_dir,
+                    '-c',
+                    'conda-forge',
+                    f'python={MFA_PORTABLE_PYTHON_VERSION}',
+                    'montreal-forced-aligner',
+                    'colorama',
+                ],
+                step_label,
+            )
+
         self._set_status("🔧 MFA Python 도구 점검 중...")
-        if not ensure_mfa_python_packaging_stack(self.mfa_path or mfa_exe, callback=self._append_log):
+        packaging_ok = ensure_mfa_python_packaging_stack(self.mfa_path or mfa_exe, callback=self._append_log)
+        if not packaging_ok:
+            self._append_log("⚠ MFA Python 패키지 도구 복구 실패. 환경을 재구성해 1회 재시도합니다.")
+            if not _remove_env_dir():
+                self._append_log("❌ MFA 환경 재구성 전 기존 env 삭제 실패")
+                return False
+            self.mfa_path = ""
+            if not _download_micromamba():
+                return False
+            if not _extract_micromamba():
+                return False
+            self._set_status("🔧 MFA 환경 재구성 중...")
+            if not _create_portable_mfa_env("[재시도] 🔧 MFA 환경 재구성 중... (3~10분)"):
+                self._append_log("❌ MFA 환경 재구성 실패")
+                return False
+            if not _refresh_mfa_path():
+                self._append_log("❌ 재구성 후 MFA 실행 파일을 찾지 못했습니다.")
+                return False
+            self._set_status("🔧 MFA Python 도구 재점검 중...")
+            packaging_ok = ensure_mfa_python_packaging_stack(self.mfa_path or mfa_exe, callback=self._append_log)
+
+        if not packaging_ok:
             self._append_log("❌ MFA Python 패키지 도구 준비 실패")
             return False
 
@@ -1640,7 +1679,7 @@ class PipelineActionsMixin:
                 if install_ok:
                     self._set_status("✅ MFA 설치 완료")
                 else:
-                    self._set_status("❌ MFA 설치 실패")
+                    self._set_status("⚪ MFA 설치 미완료")
 
             except Exception as e:
                 self._handle_error("MFA 설치", e)
@@ -1651,7 +1690,15 @@ class PipelineActionsMixin:
     def _set_mfa_install_progress_state(self, installing):
         self._mfa_install_in_progress = bool(installing)
         if not installing:
-            installed_now = bool(self.mfa_path and os.path.exists(str(self.mfa_path)))
+            installed_now = False
+            try:
+                resolved = self.mfa_path or find_mfa_executable() or ""
+                if resolved and os.path.exists(resolved):
+                    self.mfa_path = resolved
+                report = diagnose_mfa_runtime(self.mfa_path or "", language=self._get_language())
+                installed_now = bool(report.get("ready", False))
+            except Exception:
+                installed_now = bool(self.mfa_path and os.path.exists(str(self.mfa_path)))
             self._update_mfa_status(installed_now)
             return
 
@@ -1668,6 +1715,7 @@ class PipelineActionsMixin:
     def _update_mfa_status(self, installed):
         """MFA 설치 상태를 UI에 반영합니다."""
         self._mfa_install_in_progress = False
+        self._mfa_ui_ready = bool(installed)
         def _do():
             status_label = getattr(self, "mfa_status_label", None)
             install_btn = getattr(self, "mfa_install_btn", None)
@@ -1677,7 +1725,7 @@ class PipelineActionsMixin:
                 status_label.configure(text="✅ MFA 설치됨", text_color="#4F8F61")
                 install_btn.configure(text="✅ 설치 완료", state="disabled", fg_color="#388E3C")
             else:
-                status_label.configure(text="❌ MFA 미설치", text_color="#B45A63")
+                status_label.configure(text="⚪ MFA 미완료", text_color="#90A4AE")
                 install_btn.configure(text="⬇ MFA 원클릭 설치", state="normal", fg_color="#FFA726")
         self._after_safe(_do)
 

@@ -830,11 +830,21 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
     pip_targets = ["pip", "setuptools<81", "wheel"]
     setuptools_wheel_targets = ["setuptools<81", "wheel"]
 
-    stage_cmds = [
-        [python_exe, "-m", "ensurepip", "--upgrade"],
-        [python_exe, "-m", "ensurepip", "--default-pip"],
-        [python_exe, "-m", "pip", "install", "--upgrade", *pip_common_args, *index_args, *pip_targets],
-    ]
+    is_conda_managed_env = bool(
+        os.path.isdir(os.path.join(env_dir, "conda-meta")) or os.path.exists(conda_exe)
+    )
+    stage_cmds = []
+    if not is_conda_managed_env:
+        stage_cmds.extend([
+            [python_exe, "-m", "ensurepip", "--upgrade"],
+            [python_exe, "-m", "ensurepip", "--default-pip"],
+        ])
+    else:
+        log("[MFA] Conda-managed Python detected; skipping ensurepip stage.")
+
+    stage_cmds.append(
+        [python_exe, "-m", "pip", "install", "--upgrade", *pip_common_args, *index_args, *pip_targets]
+    )
     if os.path.exists(pip_exe):
         # pip.exe cannot reliably self-upgrade pip on Windows.
         stage_cmds.append([pip_exe, "install", "--upgrade", *pip_common_args, *index_args, *setuptools_wheel_targets])

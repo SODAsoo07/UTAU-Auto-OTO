@@ -1210,13 +1210,17 @@ echo [INFO] Attempting to release MFA env lock...
 
 set "UTOA_ENV_DIR_LOCK_TARGET=%ENV_DIR%"
 
-powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $target=[Regex]::Escape($env:UTOA_ENV_DIR_LOCK_TARGET); $names=@('python.exe','mfa.exe','micromamba.exe','conda.exe'); Get-CimInstance Win32_Process | Where-Object { $_.Name -in $names -and $_.CommandLine -and $_.CommandLine -match $target } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; Write-Host ('[INFO] Stopped lock process: ' + $_.Name + ' pid=' + $_.ProcessId) } catch {} }; Start-Sleep -Seconds 3"
+powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $target=[Regex]::Escape($env:UTOA_ENV_DIR_LOCK_TARGET); $names=@('python.exe','pythonw.exe','mfa.exe','micromamba.exe','conda.exe','UTAU_Auto_OTO.exe'); Get-CimInstance Win32_Process | Where-Object { $_.Name -in $names -and ((($_.CommandLine) -and $_.CommandLine -match $target) -or (($_.ExecutablePath) -and $_.ExecutablePath -match $target)) } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; Write-Host ('[INFO] Stopped lock process: ' + $_.Name + ' pid=' + $_.ProcessId) } catch {} }; Start-Sleep -Seconds 3"
 
 set "UTOA_ENV_DIR_LOCK_TARGET="
 
 taskkill /F /IM mfa.exe >nul 2>nul
 
 taskkill /F /IM micromamba.exe >nul 2>nul
+
+taskkill /F /IM UTAU_Auto_OTO.exe >nul 2>nul
+
+timeout /t 2 /nobreak >nul
 
 goto :eof
 
@@ -2294,18 +2298,38 @@ if not exist "%ENV_DIR%" goto :eof
 
 echo [INFO] %ENV_DIR%
 
+setlocal EnableDelayedExpansion
+set "REMOVE_RETRY=0"
+:remove_env_retry_loop
 rmdir /s /q "%ENV_DIR%" >nul 2>nul
 
 if exist "%ENV_DIR%" (
 
-    echo [FAILED] MFA
+    set /a REMOVE_RETRY+=1
 
-    if not "%NON_INTERACTIVE%"=="1" pause
+    if !REMOVE_RETRY! GEQ 4 (
 
-    exit /b 1
+        endlocal
+        echo [FAILED] MFA
+
+        if not "%NON_INTERACTIVE%"=="1" pause
+
+        exit /b 1
+
+    )
+
+    echo [WARN] MFA env delete retry !REMOVE_RETRY!/3 ...
+
+    call :release_env_lock_processes
+
+    timeout /t 2 /nobreak >nul
+
+    goto :remove_env_retry_loop
+
 
 )
 
+endlocal
 goto :eof
 
 :get_env_python_version
