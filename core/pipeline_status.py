@@ -107,6 +107,7 @@ def classify_alignment_error(engine: str, message: str) -> str:
     tokenizer_markers = (
         "missing korean tokenizer dependencies",
         "missing japanese tokenizer dependencies",
+        "japanese tokenizer readiness is uncertain",
         "korean tokenizer dependencies (jamo + mecab backend) are missing",
         "please install korean support",
     )

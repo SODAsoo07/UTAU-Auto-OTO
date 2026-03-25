@@ -182,6 +182,35 @@ class AlignmentPipelineTests(unittest.TestCase):
         self.assertFalse(bool(result.get("ok", True)))
         self.assertEqual(str(result.get("code", "")), ALIGN_EXEC_MISSING)
 
+    def test_mfa_precheck_soft_gate_limit_escalates_to_block(self):
+        with tempfile.TemporaryDirectory() as td:
+            dict_path = os.path.join(td, "dictionary.txt")
+            with open(dict_path, "w", encoding="utf-8") as handle:
+                handle.write("a a\n")
+            output_dir = os.path.join(td, "textgrids")
+
+            with patch.dict(os.environ, {"UTOA_MFA_SOFT_GATE_RETRY_LIMIT": "2"}, clear=False):
+                alignment_pipeline._MFA_SOFT_GATE_FAIL_CACHE.clear()
+                with mock.patch(
+                    "core.alignment_pipeline.check_mfa_ready",
+                    return_value={"code": ALIGN_NOT_READY, "message": "precheck unstable", "mfa_path": "fake_mfa"},
+                ), mock.patch(
+                    "core.alignment_pipeline.run_mfa_align",
+                    return_value=(False, "MFA alignment failed"),
+                ) as mocked_mfa_align:
+                    for _ in range(3):
+                        run_alignment_with_fallback(
+                            language="korean",
+                            wav_folder=td,
+                            dictionary_path=dict_path,
+                            output_folder=output_dir,
+                            primary_aligner="mfa",
+                            fallback_aligner="",
+                            mfa_path="",
+                            mfa_align_profile="default",
+                            callback=None,
+                        )
+            self.assertEqual(mocked_mfa_align.call_count, 2)
 
 if __name__ == "__main__":
     unittest.main()

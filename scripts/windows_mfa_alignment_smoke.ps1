@@ -160,9 +160,25 @@ ok, err = run_mfa_align(
     language="korean",
 )
 tg_count = len([n for n in os.listdir(out_dir) if n.lower().endswith(".textgrid")])
+low_err = str(err or "").lower()
+if ok:
+    failure_category = ""
+elif "permission" in low_err or "access denied" in low_err:
+    failure_category = "permission"
+elif "tokenizer" in low_err or "dependency" in low_err:
+    failure_category = "dependency"
+elif "dictionary" in low_err:
+    failure_category = "dictionary"
+elif "model" in low_err:
+    failure_category = "model"
+elif "executable not found" in low_err:
+    failure_category = "executable"
+else:
+    failure_category = "runtime"
 payload = {
     "ok": bool(ok),
     "error": str(err or ""),
+    "failure_category": failure_category,
     "mfa_path": resolved_mfa,
     "wav_dir": wav_dir,
     "dict_path": dict_path,
@@ -187,7 +203,7 @@ print(json.dumps(payload, ensure_ascii=False))
                 $payload = $jsonLine | ConvertFrom-Json
                 Add-Check -Name "alignment_invoked" -Passed $true -Detail ($payload.mfa_path) -Required $true
                 Add-Check -Name "input_mode" -Passed $true -Detail ($(if ($payload.generated_sample) { "generated_sample" } else { "external_inputs" })) -Required $false
-                Add-Check -Name "alignment_ok" -Passed ([bool]$payload.ok) -Detail ($payload.error) -Required $true
+                Add-Check -Name "alignment_ok" -Passed ([bool]$payload.ok) -Detail ($payload.error + " | category=" + $payload.failure_category) -Required $true
                 Add-Check -Name "textgrid_generated" -Passed (($payload.textgrid_count -as [int]) -gt 0) -Detail ("count=" + $payload.textgrid_count) -Required $true
             } catch {
                 Add-Check -Name "smoke_output_parseable_json" -Passed $false -Detail $jsonLine -Required $true

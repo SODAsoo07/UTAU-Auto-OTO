@@ -518,6 +518,11 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
         "true",
         "yes",
         "on",
+    }
+    try:
+        soft_permission_retry_limit = max(0, int(str(os.environ.get("UTOA_MFA_SOFT_PERMISSION_RETRY_LIMIT", "1") or "1")))
+    except Exception:
+        soft_permission_retry_limit = 1
     last_not_found = None
     for candidate in candidates:
         try:
@@ -546,8 +551,19 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
             log(f"오류: {err}")
             log("   백신/보안 정책 또는 폴더 권한을 확인한 뒤 다시 시도해 주세요.")
             if not strict_preflight_gate and soft_permission_gate:
-                log("[MFA] preflight soft-gate: 권한 오류를 경고로 전환하고 정렬 실행을 시도합니다.")
-                return True, ""
+                cache_key = os.path.normcase(os.path.abspath(str(mfa_path or "")))
+                retry_count = int(_MFA_PERMISSION_SOFT_RETRY_CACHE.get(cache_key, 0)) + 1
+                _MFA_PERMISSION_SOFT_RETRY_CACHE[cache_key] = retry_count
+                if retry_count <= soft_permission_retry_limit:
+                    log(
+                        f"[MFA] preflight soft-gate: 권한 오류를 경고로 전환하고 정렬 실행을 시도합니다. "
+                        f"(soft retry {retry_count}/{soft_permission_retry_limit})"
+                    )
+                    return True, ""
+                log(
+                    f"[MFA] preflight soft-gate limit exceeded: 동일 권한 오류가 반복되어 하드 실패로 전환합니다. "
+                    f"(limit={soft_permission_retry_limit})"
+                )
             return False, f"{err}: {e}"
         except Exception as e:
             err = f"compute-mfcc-feats 점검 중 예외가 발생했습니다: {e}"
@@ -612,6 +628,10 @@ def _validate_alignment_dictionary(dict_path: str, callback=None, soft: bool = F
                 log("[MFA] 해결 방법: 사전을 다시 생성하거나, 각 행이 '<word> <phone...>' 형식인지 확인해 주세요.")
             return False, err
         try:
+            backup_path = f"{dict_path}.bak"
+            if not os.path.exists(backup_path):
+                shutil.copy2(dict_path, backup_path)
+                log(f"[MFA] dictionary backup saved: {backup_path}")
             with open(dict_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write("\n".join(valid_lines).rstrip() + "\n")
             log(f"[MFA] soft dictionary validation applied: dropped={len(bad_lines)}/{max(total, 1)} rows")
@@ -2377,7 +2397,7 @@ def run_mfa_align(
             log(f"[MFA] {err} Proceeding because strict tokenizer gate is disabled.")
     elif language == 'japanese':
         if not ensure_japanese_support(mfa_path, callback):
-            err = 'Missing Japanese tokenizer dependencies.'
+            err = 'Japanese tokenizer readiness is uncertain or dependencies are missing.'
             if strict_tokenizer_gate:
                 log(err)
                 return False, err

@@ -214,6 +214,27 @@ def run_alignment_with_fallback(
                 last_err = str(ready.get("message", "") or "mfa not ready")
                 last_code = str(ready.get("code", ALIGN_RUN_FAILED) or ALIGN_RUN_FAILED)
                 continue
+            try:
+                soft_limit = max(1, int(str(os.environ.get("UTOA_MFA_SOFT_GATE_RETRY_LIMIT", "2") or "2")))
+            except Exception:
+                soft_limit = 2
+            soft_key = "|".join(
+                [
+                    str(lang or ""),
+                    str(mfa_path or ready.get("mfa_path", "") or ""),
+                    str(ready_code or ""),
+                ]
+            )
+            soft_count = int(_MFA_SOFT_GATE_FAIL_CACHE.get(soft_key, 0)) + 1
+            _MFA_SOFT_GATE_FAIL_CACHE[soft_key] = soft_count
+            if soft_count > soft_limit:
+                _emit(
+                    callback,
+                    f"[Align] precheck soft-gate limit exceeded ({soft_count-1}>{soft_limit}); switching to hard block.",
+                )
+                last_err = str(ready.get("message", "") or "mfa not ready")
+                last_code = str(ready.get("code", ALIGN_RUN_FAILED) or ALIGN_RUN_FAILED)
+                continue
             _emit(callback, "[Align] precheck failed but continuing with runtime attempt (soft gate).")
 
         mfa_exec = mfa_path or str(ready.get("mfa_path", "") or "")

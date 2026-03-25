@@ -173,6 +173,7 @@ def test_validate_alignment_dictionary_soft_drops_bad_rows(tmp_path):
     text = dict_path.read_text(encoding="utf-8")
     assert "bad_only" not in text
     assert "good g u d" in text
+    assert (tmp_path / "dict.txt.bak").exists()
 
 
 def test_ensure_japanese_support_non_portable_path_returns_false():
