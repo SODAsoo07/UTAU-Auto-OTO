@@ -3,11 +3,13 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from core import alignment_pipeline
 from core.alignment_pipeline import run_alignment_with_fallback
 from core.pipeline_status import ALIGN_EXEC_MISSING, ALIGN_NOT_READY, OK, normalize_aligner_name, resolve_aligner_chain
 

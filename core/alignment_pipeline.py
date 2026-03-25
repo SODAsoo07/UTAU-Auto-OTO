@@ -18,6 +18,8 @@ from core.pipeline_status import (
     resolve_aligner_chain,
 )
 
+_MFA_SOFT_GATE_FAIL_CACHE: Dict[str, int] = {}
+
 
 def _emit(callback, message: str) -> None:
     if not callback:
@@ -253,6 +255,17 @@ def run_alignment_with_fallback(
                 )
             )
             if ok:
+                try:
+                    soft_key = "|".join(
+                        [
+                            str(lang or ""),
+                            str(mfa_exec or ""),
+                            str(ready_code or ""),
+                        ]
+                    )
+                    _MFA_SOFT_GATE_FAIL_CACHE.pop(soft_key, None)
+                except Exception:
+                    pass
                 used_profile = profile
                 break
 

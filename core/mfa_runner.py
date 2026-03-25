@@ -34,6 +34,7 @@ MFA_PORTABLE_PYTHON_VERSION = "3.10"
 _MFA_SINGLE_SPEAKER_FLAG_CACHE = {}
 _MFA_SPEAKER_ADAPT_FLAG_CACHE = {}
 _MFA_BREATH_WORD_RE = re.compile(r"(?i)^breath\d*$")
+_MFA_PERMISSION_SOFT_RETRY_CACHE: Dict[str, int] = {}
 
 MFA_ALIGN_PROFILE_PRESETS = {
     # Stable default profile (legacy accurate behavior).
@@ -366,14 +367,15 @@ def _link_or_copy(src, dst):
         shutil.copy2(src, dst)
 
 
-def _prepare_ascii_safe_alignment_workspace(wav_folder, dict_path, output_folder):
+def _prepare_ascii_safe_alignment_workspace(wav_folder, dict_path, output_folder, temp_root: str = ""):
     token_src = "|".join([
         os.path.abspath(wav_folder or ""),
         os.path.abspath(dict_path or ""),
         os.path.abspath(output_folder or ""),
     ])
     token = hashlib.sha1(token_src.encode("utf-8", errors="replace")).hexdigest()[:12]
-    base = os.path.join(tempfile.gettempdir(), "utoa_mfa_ascii", token)
+    root_dir = str(temp_root or tempfile.gettempdir())
+    base = os.path.join(root_dir, "utoa_mfa_ascii", token)
     if os.path.isdir(base):
         shutil.rmtree(base, ignore_errors=True)
     corpus_dir = os.path.join(base, "corpus")
@@ -527,6 +529,9 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
                 timeout=15,
                 env=env,
             )
+            cache_key = os.path.normcase(os.path.abspath(str(mfa_path or "")))
+            if cache_key in _MFA_PERMISSION_SOFT_RETRY_CACHE:
+                _MFA_PERMISSION_SOFT_RETRY_CACHE.pop(cache_key, None)
             return True, ""
         except FileNotFoundError as e:
             last_not_found = e
@@ -2394,9 +2399,23 @@ def run_mfa_align(
             work_output_folder = safe_workspace["output_dir"]
             log(f"[MFA] Non-ASCII path detected, using ASCII-safe workspace: {safe_workspace['base']}")
         except Exception as e:
-            err = f"Failed to prepare ASCII-safe MFA workspace: {e}"
-            log(err)
-            return False, err
+            log(f"[MFA] ASCII-safe workspace primary prepare failed: {e}")
+            try:
+                retry_root = tempfile.mkdtemp(prefix="utoa_mfa_retry_")
+                safe_workspace = _prepare_ascii_safe_alignment_workspace(
+                    wav_folder,
+                    dict_path,
+                    output_folder,
+                    temp_root=retry_root,
+                )
+                work_wav_folder = safe_workspace["corpus_dir"]
+                work_dict_path = safe_workspace["dict_path"]
+                work_output_folder = safe_workspace["output_dir"]
+                log(f"[MFA] ASCII-safe workspace retry succeeded: {safe_workspace['base']}")
+            except Exception as retry_exc:
+                err = f"Failed to prepare ASCII-safe MFA workspace: {retry_exc}"
+                log(err)
+                return False, err
     dict_sanitize_ok, dict_sanitize_err = _sanitize_alignment_dictionary_for_mfa(work_dict_path, callback=callback)
     if not dict_sanitize_ok:
         return False, dict_sanitize_err
