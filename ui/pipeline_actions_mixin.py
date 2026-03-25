@@ -1285,6 +1285,20 @@ class PipelineActionsMixin:
             "raise SystemExit(1 if missing else 0)\n"
         )
         probe_env = os.environ.copy()
+        # Prevent host/runtime Python vars from leaking into the MFA env probe.
+        for leaked_key in (
+            "PYTHONHOME",
+            "PYTHONPATH",
+            "PYTHONEXECUTABLE",
+            "__PYVENV_LAUNCHER__",
+            "VIRTUAL_ENV",
+            "CONDA_DEFAULT_ENV",
+            "CONDA_PROMPT_MODIFIER",
+        ):
+            probe_env.pop(leaked_key, None)
+        probe_env["PYTHONNOUSERSITE"] = "1"
+        probe_env["PYTHONUTF8"] = "1"
+        probe_env["PYTHONIOENCODING"] = "utf-8"
         path_parts = [
             env_dir,
             os.path.join(env_dir, "Scripts"),
@@ -1357,6 +1371,19 @@ class PipelineActionsMixin:
 
         cmd = [script_path, "--non-interactive", "--install", "--with-ml"]
         env = os.environ.copy()
+        for leaked_key in (
+            "PYTHONHOME",
+            "PYTHONPATH",
+            "PYTHONEXECUTABLE",
+            "__PYVENV_LAUNCHER__",
+            "VIRTUAL_ENV",
+            "CONDA_DEFAULT_ENV",
+            "CONDA_PROMPT_MODIFIER",
+        ):
+            env.pop(leaked_key, None)
+        env["PYTHONNOUSERSITE"] = "1"
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         try:
             runtime_root = os.path.dirname(get_default_mfa_env_dir())
         except Exception:

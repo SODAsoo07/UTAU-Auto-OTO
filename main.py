@@ -43,6 +43,28 @@ def _suppress_windows_loader_popup():
 
 _suppress_windows_loader_popup()
 
+def _sanitize_python_env_for_children() -> None:
+    """
+    Prevent host Python (e.g., 3.11) env leakage into subprocesses.
+    This avoids mixed DLL/site-packages conflicts when MFA env is Python 3.10.
+    """
+    for key in (
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONEXECUTABLE",
+        "__PYVENV_LAUNCHER__",
+        "VIRTUAL_ENV",
+        "CONDA_DEFAULT_ENV",
+        "CONDA_PROMPT_MODIFIER",
+    ):
+        os.environ.pop(key, None)
+    os.environ.setdefault("PYTHONNOUSERSITE", "1")
+    os.environ.setdefault("PYTHONUTF8", "1")
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+
+
+_sanitize_python_env_for_children()
+
 try:
     import customtkinter as ctk
 except ImportError:

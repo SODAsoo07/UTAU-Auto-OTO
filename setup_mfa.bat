@@ -39,6 +39,18 @@ set "MFA_RUNTIME_BUNDLE_DIR="
 set "HAS_CERTUTIL=1"
 
 set "HAS_TAR=1"
+
+REM Clean host Python environment to avoid python311.dll conflicts.
+set "PYTHONHOME="
+set "PYTHONPATH="
+set "PYTHONEXECUTABLE="
+set "__PYVENV_LAUNCHER__="
+set "VIRTUAL_ENV="
+set "CONDA_DEFAULT_ENV="
+set "CONDA_PROMPT_MODIFIER="
+set "PYTHONNOUSERSITE=1"
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 :parse_args
 
 if "%~1"=="" goto :args_done
@@ -1306,7 +1318,7 @@ if not exist "%ENV_DIR%\python.exe" (
 
 )
 
-"%ENV_DIR%\python.exe" -c "import pip, pkg_resources, wheel" >nul 2>nul
+call :run_env_python -c "import pip, pkg_resources, wheel" >nul 2>nul
 
 if not errorlevel 1 (
 
@@ -1320,7 +1332,7 @@ if not errorlevel 1 (
 
 echo [INFO] pip/setuptools/wheel
 
-"%ENV_DIR%\python.exe" -m ensurepip --upgrade
+call :run_env_python -m ensurepip --upgrade
 
 if errorlevel 1 (
 
@@ -1330,13 +1342,13 @@ if errorlevel 1 (
 
 echo [INFO] pip module availability check...
 
-"%ENV_DIR%\python.exe" -m pip --version >nul 2>nul
+call :run_env_python -m pip --version >nul 2>nul
 
 if errorlevel 1 (
 
     echo [WARN] python -m pip failed. Retrying ensurepip with --default-pip...
 
-    "%ENV_DIR%\python.exe" -m ensurepip --upgrade --default-pip
+    call :run_env_python -m ensurepip --upgrade --default-pip
 
 )
 
@@ -1344,7 +1356,7 @@ call :ensure_seaborn_dependency
 
 set "PYTOOLS_REPAIR_OK=0"
 
-"%ENV_DIR%\python.exe" -m pip install --upgrade --force-reinstall "setuptools<81" wheel
+call :run_env_python -m pip install --upgrade --force-reinstall "setuptools<81" wheel
 
 if not errorlevel 1 set "PYTOOLS_REPAIR_OK=1"
 
@@ -1352,7 +1364,7 @@ if "%PYTOOLS_REPAIR_OK%"=="0" (
 
     echo [WARN] force-reinstall path failed. Retrying with normal upgrade...
 
-    "%ENV_DIR%\python.exe" -m pip install --upgrade "setuptools<81" wheel
+    call :run_env_python -m pip install --upgrade "setuptools<81" wheel
 
     if not errorlevel 1 set "PYTOOLS_REPAIR_OK=1"
 
@@ -1368,7 +1380,7 @@ if "%PYTOOLS_REPAIR_OK%"=="0" (
 
 )
 
-"%ENV_DIR%\python.exe" -c "import pip, pkg_resources, wheel" >nul 2>nul
+call :run_env_python -c "import pip, pkg_resources, wheel" >nul 2>nul
 
 if errorlevel 1 (
 
@@ -1388,7 +1400,7 @@ goto :eof
 
 if not exist "%ENV_DIR%\python.exe" goto :eof
 
-"%ENV_DIR%\python.exe" -c "import seaborn" >nul 2>nul
+call :run_env_python -c "import seaborn" >nul 2>nul
 
 if not errorlevel 1 (
 
@@ -1406,7 +1418,7 @@ if exist "%MICROMAMBA_EXE%" (
 
     if not errorlevel 1 (
 
-        "%ENV_DIR%\python.exe" -c "import seaborn" >nul 2>nul
+        call :run_env_python -c "import seaborn" >nul 2>nul
 
         if not errorlevel 1 (
 
@@ -1424,9 +1436,9 @@ if exist "%MICROMAMBA_EXE%" (
 
 )
 
-"%ENV_DIR%\python.exe" -m pip install --upgrade seaborn >nul 2>nul
+call :run_env_python -m pip install --upgrade seaborn >nul 2>nul
 
-"%ENV_DIR%\python.exe" -c "import seaborn" >nul 2>nul
+call :run_env_python -c "import seaborn" >nul 2>nul
 
 if errorlevel 1 (
 
@@ -1474,7 +1486,7 @@ if exist "%ENV_DIR%\python.exe" (
 
     echo [INFO] Micromamba 미탐지: pip fallback으로 일본어 tokenizer 의존성 설치를 시도합니다.
 
-    "%ENV_DIR%\python.exe" -m pip install --upgrade spacy sudachipy sudachidict-core
+    call :run_env_python -m pip install --upgrade spacy sudachipy sudachidict-core
 
     if errorlevel 1 (
 
@@ -1560,7 +1572,7 @@ if exist "%ENV_DIR%\Scripts\conda.exe" (
 
 if exist "%ENV_DIR%\python.exe" (
 
-    "%ENV_DIR%\python.exe" -m pip install --upgrade soundfile
+    call :run_env_python -m pip install --upgrade soundfile
 
     call :verify_audio_deps
 
@@ -1582,7 +1594,7 @@ set "OLD_PATH=%PATH%"
 
 set "PATH=%ENV_DIR%;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\bin;%ENV_DIR%\Scripts;%ENV_DIR%\bin;%OLD_PATH%"
 
-"%ENV_DIR%\python.exe" -c "import soundfile" >nul 2>nul
+call :run_env_python -c "import soundfile" >nul 2>nul
 
 set "VERIFY_RC=%ERRORLEVEL%"
 
@@ -1606,13 +1618,13 @@ if not exist "%ENV_DIR%\python.exe" (
 
 )
 
-"%ENV_DIR%\python.exe" -c "import textgrid" >nul 2>nul
+call :run_env_python -c "import textgrid" >nul 2>nul
 
 if not errorlevel 1 goto :eof
 
 echo [INFO] textgrid
 
-"%ENV_DIR%\python.exe" -m pip install --upgrade "textgrid>=1.5"
+call :run_env_python -m pip install --upgrade "textgrid>=1.5"
 
 if errorlevel 1 (
 
@@ -1638,7 +1650,7 @@ if not exist "%ENV_DIR%\python.exe" (
 
 )
 
-"%ENV_DIR%\python.exe" -c "import textgrid" >nul 2>nul
+call :run_env_python -c "import textgrid" >nul 2>nul
 
 if errorlevel 1 (
 
@@ -1693,7 +1705,7 @@ if exist "%REQ_BASE%" (
 
     echo [INFO] requirements.txt
 
-    "%ENV_DIR%\python.exe" -m pip install --upgrade -r "%REQ_BASE%"
+    call :run_env_python -m pip install --upgrade -r "%REQ_BASE%"
 
     if errorlevel 1 (
 
@@ -1711,7 +1723,7 @@ if exist "%REQ_ML%" (
 
     echo [INFO] requirements-ml.txt
 
-    "%ENV_DIR%\python.exe" -m pip install --upgrade -r "%REQ_ML%"
+    call :run_env_python -m pip install --upgrade -r "%REQ_ML%"
 
     if errorlevel 1 (
 
@@ -1745,7 +1757,7 @@ if exist "%MICROMAMBA_EXE%" (
 
     echo [INFO] requirements-ml.txt missing. Installing minimal ML packages via pip.
 
-    "%ENV_DIR%\python.exe" -m pip install --upgrade pandas lightgbm onnxruntime
+    call :run_env_python -m pip install --upgrade pandas lightgbm onnxruntime
 
     if errorlevel 1 (
 
@@ -1779,7 +1791,7 @@ if not exist "%ENV_DIR%\python.exe" (
 
 )
 
-"%ENV_DIR%\python.exe" -c "import pandas, lightgbm, onnxruntime" >nul 2>nul
+call :run_env_python -c "import pandas, lightgbm, onnxruntime" >nul 2>nul
 
 if errorlevel 1 (
 
@@ -1815,7 +1827,7 @@ if exist "%MICROMAMBA_EXE%" (
 
 if exist "%ENV_DIR%\python.exe" (
 
-    "%ENV_DIR%\python.exe" -m pip cache purge >nul 2>nul
+    call :run_env_python -m pip cache purge >nul 2>nul
 
 )
 
@@ -1929,7 +1941,7 @@ if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
 
 echo [INFO] Installing Korean tokenizer dependency: jamo
 
-"%ENV_DIR%\python.exe" -m pip install --upgrade jamo
+call :run_env_python -m pip install --upgrade jamo
 
 if errorlevel 1 (
 
@@ -1947,7 +1959,7 @@ if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
 
 echo [INFO] Installing Korean tokenizer backend: python-mecab-ko ^(wheel-only^)
 
-"%ENV_DIR%\python.exe" -m pip install --upgrade --only-binary=:all: python-mecab-ko python-mecab-ko-dic
+call :run_env_python -m pip install --upgrade --only-binary=:all: python-mecab-ko python-mecab-ko-dic
 
 if not errorlevel 1 (
 
@@ -1963,7 +1975,7 @@ if not errorlevel 1 (
 
 echo [INFO] Installing Korean tokenizer backend fallback: mecab-python3 ^(wheel-only^)
 
-"%ENV_DIR%\python.exe" -m pip install --upgrade --only-binary=:all: mecab-python3
+call :run_env_python -m pip install --upgrade --only-binary=:all: mecab-python3
 
 if not errorlevel 1 (
 
@@ -1995,7 +2007,7 @@ set "PYTHONPATH=%UTOA_APP_PYTHONPATH%"
 
 set "UTOA_MFA_EXE=%MFA_EXE%"
 
-"%ENV_DIR%\python.exe" -c "import os; from core.mfa_runner import patch_mfa_korean_support; patch_mfa_korean_support(os.environ.get('UTOA_MFA_EXE',''))" >nul 2>nul
+call :run_env_python -c "import os; from core.mfa_runner import patch_mfa_korean_support; patch_mfa_korean_support(os.environ.get('UTOA_MFA_EXE',''))" >nul 2>nul
 
 if errorlevel 1 (
 
@@ -2013,7 +2025,7 @@ set "KOREAN_TOKENIZER_OK=0"
 
 if not exist "%ENV_DIR%\python.exe" goto :eof
 
-"%ENV_DIR%\python.exe" -c "import sys,importlib.util,jamo; ok=any(importlib.util.find_spec(m) is not None for m in ('mecab','MeCab','mecab_ko')); sys.exit(0 if ok else 1)" >nul 2>nul
+call :run_env_python -c "import sys,importlib.util,jamo; ok=any(importlib.util.find_spec(m) is not None for m in ('mecab','MeCab','mecab_ko')); sys.exit(0 if ok else 1)" >nul 2>nul
 
 if not errorlevel 1 set "KOREAN_TOKENIZER_OK=1"
 
@@ -2329,13 +2341,13 @@ if exist "%ENV_DIR%\python.exe" (
 
     set "PATH=%ENV_DIR%;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\bin;%ENV_DIR%\Scripts;%ENV_DIR%\bin;%PATH%"
 
-    "%ENV_DIR%\python.exe" -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME%
+    call :run_env_python -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME%
 
     if errorlevel 1 (
 
         echo [WARN] Model download failed once. Retrying with --ignore_cache...
 
-        "%ENV_DIR%\python.exe" -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME% --ignore_cache
+        call :run_env_python -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME% --ignore_cache
 
     )
 
@@ -2517,13 +2529,32 @@ if exist "%ENV_DIR%" (
 endlocal
 goto :eof
 
+:run_env_python
+
+if not exist "%ENV_DIR%\python.exe" exit /b 1
+
+setlocal EnableExtensions DisableDelayedExpansion
+
+set "OLD_PATH=%PATH%"
+set "PATH=%ENV_DIR%;%ENV_DIR%\Scripts;%ENV_DIR%\Library\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\bin;%OLD_PATH%"
+
+"%ENV_DIR%\python.exe" %*
+
+set "RUN_RC=%ERRORLEVEL%"
+
+endlocal & exit /b %RUN_RC%
+
 :get_env_python_version
 
 set "%~2="
 
 if exist "%~1\python.exe" (
 
-    for /f "usebackq delims=" %%i in (`"%~1\python.exe" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2^>nul`) do set "%~2=%%i"
+    setlocal EnableExtensions DisableDelayedExpansion
+    set "OLD_PATH=%PATH%"
+    set "PATH=%~1;%~1\Scripts;%~1\Library\bin;%~1\Library\usr\bin;%~1\Library\mingw-w64\bin;%~1\bin;%OLD_PATH%"
+    for /f "usebackq delims=" %%i in (`"%~1\python.exe" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2^>nul`) do set "PY_VER=%%i"
+    endlocal & set "%~2=%PY_VER%"
 
     goto :eof
 
@@ -2531,7 +2562,11 @@ if exist "%~1\python.exe" (
 
 if exist "%~1\Scripts\python.exe" (
 
-    for /f "usebackq delims=" %%i in (`"%~1\Scripts\python.exe" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2^>nul`) do set "%~2=%%i"
+    setlocal EnableExtensions DisableDelayedExpansion
+    set "OLD_PATH=%PATH%"
+    set "PATH=%~1;%~1\Scripts;%~1\Library\bin;%~1\Library\usr\bin;%~1\Library\mingw-w64\bin;%~1\bin;%OLD_PATH%"
+    for /f "usebackq delims=" %%i in (`"%~1\Scripts\python.exe" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2^>nul`) do set "PY_VER=%%i"
+    endlocal & set "%~2=%PY_VER%"
 
 )
 
