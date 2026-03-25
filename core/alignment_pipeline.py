@@ -6,6 +6,7 @@ from typing import Dict, List
 from core.domino_runner import check_domino_ready, run_domino_align
 from core.mfa_runner import check_mfa_ready, run_mfa_align
 from core.pipeline_status import (
+    ALIGN_EXEC_MISSING,
     ALIGN_OUTPUT_EMPTY,
     ALIGN_RUN_FAILED,
     ALIGN_USING_EXISTING,
@@ -198,14 +199,20 @@ def run_alignment_with_fallback(
         ready["engine"] = "mfa"
         ready["attempt_index"] = len(attempts) + 1
         attempts.append(dict(ready))
-        if str(ready.get("code", OK)).upper() != OK:
+        ready_code = str(ready.get("code", OK) or OK).upper()
+        if ready_code != OK:
             _emit(
                 callback,
-                f"[Align] not ready engine=mfa code={ready.get('code')} message={ready.get('message', '')}",
+                f"[Align] precheck engine=mfa code={ready.get('code')} message={ready.get('message', '')}",
             )
-            last_err = str(ready.get("message", "") or "mfa not ready")
-            last_code = str(ready.get("code", ALIGN_RUN_FAILED) or ALIGN_RUN_FAILED)
-            continue
+            # Hybrid relaxed policy:
+            # - Hard-block only when MFA executable is missing.
+            # - For model/dependency precheck failures, attempt actual MFA run first.
+            if ready_code == ALIGN_EXEC_MISSING:
+                last_err = str(ready.get("message", "") or "mfa not ready")
+                last_code = str(ready.get("code", ALIGN_RUN_FAILED) or ALIGN_RUN_FAILED)
+                continue
+            _emit(callback, "[Align] precheck failed but continuing with runtime attempt (soft gate).")
 
         mfa_exec = mfa_path or str(ready.get("mfa_path", "") or "")
         profile_chain = _mfa_profile_chain(lang, mfa_align_profile)

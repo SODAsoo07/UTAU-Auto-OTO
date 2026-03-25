@@ -495,6 +495,12 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
         candidates.append('compute-mfcc-feats.exe')
     candidates.append('compute-mfcc-feats')
 
+    strict_preflight_gate = str(os.environ.get("UTOA_STRICT_MFA_PREFLIGHT", "0") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     last_not_found = None
     for candidate in candidates:
         try:
@@ -523,10 +529,16 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
         except Exception as e:
             err = f"compute-mfcc-feats 점검 중 예외가 발생했습니다: {e}"
             log(f"오류: {err}")
-            return False, err
+            if strict_preflight_gate:
+                return False, err
+            log("[MFA] preflight soft-gate: 점검 예외를 경고로 전환하고 정렬 실행을 시도합니다.")
+            return True, ""
 
     err = "compute-mfcc-feats를 찾지 못했습니다. MFA 환경 복구 또는 재설치를 시도해 주세요."
     log(f"오류: {err}")
+    if not strict_preflight_gate:
+        log("[MFA] preflight soft-gate: compute-mfcc-feats 미탐지 상태로 정렬 실행을 시도합니다.")
+        return True, ""
     if last_not_found:
         return False, f"{err}: {last_not_found}"
     return False, err
@@ -2303,16 +2315,26 @@ def run_mfa_align(
     model_name = 'japanese_mfa' if language == 'japanese' else 'korean_mfa'
     lang_label = 'Japanese' if language == 'japanese' else 'Korean'
     log(f'Checking MFA prerequisites... ({lang_label})')
+    strict_tokenizer_gate = str(os.environ.get("UTOA_STRICT_TOKENIZER_GATE", "0") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     if language == 'korean':
         if not ensure_korean_support(mfa_path, callback):
             err = 'Missing Korean tokenizer dependencies (jamo + mecab backend).'
-            log(err)
-            return False, err
+            if strict_tokenizer_gate:
+                log(err)
+                return False, err
+            log(f"[MFA] {err} Proceeding because strict tokenizer gate is disabled.")
     elif language == 'japanese':
         if not ensure_japanese_support(mfa_path, callback):
             err = 'Missing Japanese tokenizer dependencies.'
-            log(err)
-            return False, err
+            if strict_tokenizer_gate:
+                log(err)
+                return False, err
+            log(f"[MFA] {err} Proceeding because strict tokenizer gate is disabled.")
     os.makedirs(output_folder, exist_ok=True)
     env = _get_conda_env(mfa_path)
     ok, preflight_err = _preflight_compute_mfcc(mfa_path, callback=callback)
@@ -2548,4 +2570,3 @@ def patch_mfa_korean_support(mfa_path, callback=None):
     except Exception as e:
         log(f"[MFA] Korean patch error: {e}")
         return False
-
