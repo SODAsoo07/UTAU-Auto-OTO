@@ -745,15 +745,16 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
 
     env = _get_conda_env(mfa_path)
 
-    def _check_stack_ready() -> bool:
-        ok, _detail = _check_env_imports(
+    def _check_stack_ready() -> tuple[bool, str]:
+        ok, detail = _check_env_imports(
             python_exe,
             env,
             "import setuptools; import pip; import wheel",
         )
-        return bool(ok)
+        return bool(ok), detail or ""
 
-    if _check_stack_ready():
+    ok, detail = _check_stack_ready()
+    if ok:
         return True
 
     pip_common_args = [
@@ -893,8 +894,11 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
             saw_tls_error = saw_tls_error or _looks_like_tls_error(err_txt)
             saw_connectivity_error = saw_connectivity_error or _looks_like_connectivity_error(err_txt)
             continue
-        if _check_stack_ready():
+        ok, detail = _check_stack_ready()
+        if ok:
             return True
+        if detail:
+            log(f"[MFA] packaging import still failing: {detail[:500]}")
 
     if saw_tls_error or saw_connectivity_error:
         tls_cmds = [
@@ -906,8 +910,11 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
             result = _run_repair(repair_cmd)
             if result.returncode != 0:
                 continue
-            if _check_stack_ready():
+            ok, detail = _check_stack_ready()
+            if ok:
                 return True
+            if detail:
+                log(f"[MFA] packaging import still failing: {detail[:500]}")
 
     force_cmds = [
         [python_exe, "-m", "pip", "install", "--upgrade", "--force-reinstall", *pip_common_args, *index_args, *trusted_hosts, *pip_targets],
@@ -918,8 +925,11 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
         result = _run_repair(repair_cmd)
         if result.returncode != 0:
             continue
-        if _check_stack_ready():
+        ok, detail = _check_stack_ready()
+        if ok:
             return True
+        if detail:
+            log(f"[MFA] packaging import still failing: {detail[:500]}")
 
     get_pip_path = _resolve_get_pip_script()
     if not get_pip_path:
@@ -982,11 +992,16 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
                 "wheel",
             ]
             _run_repair(post_cmd, env_override=env_boot)
-            if _check_stack_ready():
+            ok, detail = _check_stack_ready()
+            if ok:
                 return True
+            if detail:
+                log(f"[MFA] packaging import still failing: {detail[:500]}")
     else:
         log("[MFA] Bundled/online get-pip.py could not be resolved.")
 
+    if detail:
+        log(f"[MFA] packaging import failed after repairs: {detail[:500]}")
     log("[MFA] Failed to restore pip/setuptools/wheel")
     return False
 
@@ -1457,6 +1472,9 @@ class MeCab:
             res = _run_subprocess_text(pkg_check_cmd, env=env)
             if res.returncode == 0:
                 return True
+            err_detail = (res.stderr or res.stdout or "").strip()
+            if err_detail:
+                log(f"[MFA] pkg_resources import failed: {err_detail[:500]}")
             log('[MFA] pkg_resources is missing; repairing setuptools first')
             install_cmds = [
                 [python_exe, '-m', 'pip', 'install', '--upgrade', 'setuptools<81'],

@@ -720,10 +720,16 @@ set "ENV_DIR=%APP_DIR%\.env"
 set "MICROMAMBA_ROOT=%APP_DIR%\micromamba"
 
 set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\Library\bin\micromamba.exe"
+set "MICROMAMBA_PORTABLE_EXE=%APP_DIR%\micromamba.exe"
+
+if exist "%MICROMAMBA_PORTABLE_EXE%" (
+    set "MICROMAMBA_EXE=%MICROMAMBA_PORTABLE_EXE%"
+)
 
 set "MICROMAMBA_ARCHIVE=%TEMP%\utau_auto_oto_micromamba-win-64-latest.tar.bz2"
 
 set "MICROMAMBA_LATEST_URL=https://micro.mamba.pm/api/micromamba/win-64/latest"
+set "MICROMAMBA_EXE_URL=https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-win-64"
 
 set "MICROMAMBA_MD5_EXPECTED="
 
@@ -974,11 +980,21 @@ if not exist "%MICROMAMBA_EXE%" (
 
     if "%HAS_TAR%"=="0" (
 
-        echo [FAILED] tar was not found, so micromamba archive extraction cannot continue.
+        echo [WARN] tar was not found. Attempting to download micromamba.exe directly.
 
-        if not "%NON_INTERACTIVE%"=="1" pause
+        call :download_micromamba_exe
 
-        exit /b 1
+        if errorlevel 1 (
+
+            echo [FAILED] Micromamba
+
+            if not "%NON_INTERACTIVE%"=="1" pause
+
+            exit /b 1
+
+        )
+
+        goto :micromamba_exe_post
 
     )
 
@@ -988,11 +1004,21 @@ if not exist "%MICROMAMBA_EXE%" (
 
     if errorlevel 1 (
 
-        echo [FAILED] Micromamba
+        echo [WARN] micromamba archive extraction failed. Attempting to download micromamba.exe directly.
 
-        if not "%NON_INTERACTIVE%"=="1" pause
+        call :download_micromamba_exe
 
-        exit /b 1
+        if errorlevel 1 (
+
+            echo [FAILED] Micromamba
+
+            if not "%NON_INTERACTIVE%"=="1" pause
+
+            exit /b 1
+
+        )
+
+        goto :micromamba_exe_post
 
     )
 
@@ -1253,6 +1279,8 @@ if exist "%ENV_DIR%" (
     )
 
 )
+
+:micromamba_exe_post
 
 if exist "%MICROMAMBA_EXE%" (
 
@@ -2032,6 +2060,32 @@ if exist "%MICROMAMBA_MD5_FILE%" del "%MICROMAMBA_MD5_FILE%" >nul 2>nul
 if not defined MICROMAMBA_MD5_EXPECTED exit /b 1
 
 echo [INFO] Micromamba MD5 : %MICROMAMBA_MD5_EXPECTED%
+
+exit /b 0
+
+:download_micromamba_exe
+
+if not exist "%MICROMAMBA_ROOT%" mkdir "%MICROMAMBA_ROOT%" >nul 2>nul
+
+powershell -NoProfile -Command ^
+
+ "$ErrorActionPreference='Stop';" ^
+
+ " [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;" ^
+
+ " $url='%MICROMAMBA_EXE_URL%';" ^
+
+ " $dst=Join-Path '%MICROMAMBA_ROOT%' 'micromamba.exe';" ^
+
+ " Invoke-WebRequest -Uri $url -OutFile $dst -TimeoutSec 120 -UseBasicParsing;" ^
+
+ " if (-not (Test-Path -LiteralPath $dst)) { throw 'micromamba.exe download failed' }"
+
+if errorlevel 1 exit /b 1
+
+if not exist "%MICROMAMBA_ROOT%\micromamba.exe" exit /b 1
+
+set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\micromamba.exe"
 
 exit /b 0
 
