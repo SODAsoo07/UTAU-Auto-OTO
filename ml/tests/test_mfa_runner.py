@@ -148,3 +148,32 @@ def test_preflight_compute_mfcc_is_soft_by_default(monkeypatch):
     ok, err = mfa_runner._preflight_compute_mfcc("fake_mfa")
     assert ok is True
     assert err == ""
+
+def test_preflight_permission_error_is_soft_by_default(monkeypatch):
+    monkeypatch.delenv("UTOA_STRICT_MFA_PREFLIGHT", raising=False)
+    monkeypatch.delenv("UTOA_MFA_SOFT_PERMISSION", raising=False)
+    monkeypatch.setattr(mfa_runner, "_get_conda_env", lambda *_a, **_k: {})
+
+    def _raise_perm(*_args, **_kwargs):
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(mfa_runner.subprocess, "run", _raise_perm)
+    ok, err = mfa_runner._preflight_compute_mfcc("fake_mfa")
+    assert ok is True
+    assert err == ""
+
+
+def test_validate_alignment_dictionary_soft_drops_bad_rows(tmp_path):
+    dict_path = tmp_path / "dict.txt"
+    dict_path.write_text("good g u d\nbad_only\n#comment\n", encoding="utf-8")
+
+    ok, msg = mfa_runner._validate_alignment_dictionary(str(dict_path), soft=True)
+    assert ok is True
+    assert "dropped" in msg.lower()
+    text = dict_path.read_text(encoding="utf-8")
+    assert "bad_only" not in text
+    assert "good g u d" in text
+
+
+def test_ensure_japanese_support_non_portable_path_returns_false():
+    assert mfa_runner.ensure_japanese_support("/usr/local/bin/mfa") is False

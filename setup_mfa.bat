@@ -1470,6 +1470,24 @@ if exist "%MICROMAMBA_EXE%" (
 
 echo [WARN] Micromamba
 
+if exist "%ENV_DIR%\python.exe" (
+
+    echo [INFO] Micromamba 미탐지: pip fallback으로 일본어 tokenizer 의존성 설치를 시도합니다.
+
+    "%ENV_DIR%\python.exe" -m pip install --upgrade spacy sudachipy sudachidict-core
+
+    if errorlevel 1 (
+
+        echo [WARN] pip fallback 설치도 실패했습니다. 일본어 정렬 시 런타임에서 재시도됩니다.
+
+    ) else (
+
+        echo [OK] Japanese tokenizer deps installed via pip fallback.
+
+    )
+
+)
+
 goto :eof
 
 :install_audio_deps
@@ -2550,4 +2568,3 @@ if %PY_MAJOR% GTR 3 (
 if %PY_MAJOR% EQU 3 if %PY_MINOR% GEQ 13 set "%~2=1"
 
 goto :eof
-

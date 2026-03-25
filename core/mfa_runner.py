@@ -145,6 +145,16 @@ def _run_subprocess_text(args: Sequence[str], **kwargs):
     return completed
 
 
+def _safe_env_subprocess_cwd(env_dir: str) -> Optional[str]:
+    path = str(env_dir or "").strip()
+    if not path:
+        return None
+    abs_path = os.path.abspath(path)
+    if os.path.isdir(abs_path):
+        return abs_path
+    return None
+
+
 def _contains_non_ascii(text):
     try:
         return any(ord(ch) > 127 for ch in str(text or ""))
@@ -501,6 +511,11 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
         "yes",
         "on",
     }
+    soft_permission_gate = str(os.environ.get("UTOA_MFA_SOFT_PERMISSION", "1") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
     last_not_found = None
     for candidate in candidates:
         try:
@@ -525,6 +540,9 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
             )
             log(f"오류: {err}")
             log("   백신/보안 정책 또는 폴더 권한을 확인한 뒤 다시 시도해 주세요.")
+            if not strict_preflight_gate and soft_permission_gate:
+                log("[MFA] preflight soft-gate: 권한 오류를 경고로 전환하고 정렬 실행을 시도합니다.")
+                return True, ""
             return False, f"{err}: {e}"
         except Exception as e:
             err = f"compute-mfcc-feats 점검 중 예외가 발생했습니다: {e}"
@@ -543,7 +561,7 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
         return False, f"{err}: {last_not_found}"
     return False, err
 
-def _validate_alignment_dictionary(dict_path: str, callback=None):
+def _validate_alignment_dictionary(dict_path: str, callback=None, soft: bool = False):
     """Validate MFA dictionary rows before native graph compilation."""
     def log(msg):
         logger.info(msg)
@@ -561,25 +579,43 @@ def _validate_alignment_dictionary(dict_path: str, callback=None):
         return False, f"Failed to read dictionary: {e}"
 
     bad_lines = []
+    valid_lines = []
     total = 0
     for idx, line in enumerate(str(text or "").splitlines(), start=1):
         row = str(line or "").strip()
         if not row or row.startswith("#"):
+            valid_lines.append(line)
             continue
         total += 1
         parts = row.split()
         # Expected: <word> <phone1> [phone2 ...]
         if len(parts) < 2 or "\ufffd" in row:
             bad_lines.append((idx, row))
+            continue
+        valid_lines.append(line)
 
     if bad_lines:
+        valid_count = max(total - len(bad_lines), 0)
         samples = "; ".join(f"{ln}:{txt[:40]}" for ln, txt in bad_lines[:5])
         err = (
             f"Dictionary malformed rows detected ({len(bad_lines)}/{max(total, 1)}). "
             f"examples={samples}"
         )
-        log(err)
-        return False, err
+        if (not soft) or valid_count <= 0:
+            log(err)
+            if valid_count <= 0:
+                log("[MFA] 해결 방법: 사전을 다시 생성하거나, 각 행이 '<word> <phone...>' 형식인지 확인해 주세요.")
+            return False, err
+        try:
+            with open(dict_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write("\n".join(valid_lines).rstrip() + "\n")
+            log(f"[MFA] soft dictionary validation applied: dropped={len(bad_lines)}/{max(total, 1)} rows")
+            log(f"[MFA] dropped row samples: {samples}")
+            log("[MFA] 해결 방법: Lab/사전 생성 단계를 다시 실행하거나 인코딩(UTF-8) 및 발음 열 형식을 점검해 주세요.")
+            return True, f"Dictionary had malformed rows; dropped {len(bad_lines)} row(s) in soft mode."
+        except Exception as e:
+            log(f"{err} | soft repair failed: {e}")
+            return False, f"{err} | soft repair failed: {e}"
     return True, ""
 
 
@@ -1630,16 +1666,22 @@ def ensure_japanese_support(mfa_path, callback=None):
         if callback:
             callback(msg)
 
-    if not mfa_path or 'Scripts' not in mfa_path:
-        return True
+    if not mfa_path:
+        log("[MFA] Japanese dependency check skipped: mfa_path is empty.")
+        return False
+    if 'Scripts' not in mfa_path:
+        log("[MFA] Japanese dependency check is uncertain: non-portable MFA path (Scripts missing).")
+        return False
 
     env_dir = os.path.dirname(os.path.dirname(mfa_path))
     python_exe = _resolve_env_python_exe(env_dir)
     pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
     conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
+    safe_cwd = _safe_env_subprocess_cwd(env_dir)
 
     if not os.path.exists(python_exe):
-        return True
+        log("[MFA] Japanese dependency check is uncertain: env python.exe not found.")
+        return False
     if not ensure_mfa_python_packaging_stack(mfa_path, callback=callback):
         log("[MFA] Failed to prepare Python packaging tools before Japanese dependency install.")
         return False
@@ -1647,7 +1689,7 @@ def ensure_japanese_support(mfa_path, callback=None):
     check_cmd = [python_exe, '-c', 'import spacy; import sudachipy; import sudachidict_core']
     try:
         env = _get_conda_env(mfa_path)
-        result = _run_subprocess_text(check_cmd, env=env)
+        result = _run_subprocess_text(check_cmd, env=env, cwd=safe_cwd)
         if result.returncode == 0:
             return True
 
@@ -1676,7 +1718,7 @@ def ensure_japanese_support(mfa_path, callback=None):
             return False
 
         log(f"   -> install cmd: {' '.join(install_cmd)}")
-        install_result = _run_subprocess_text(install_cmd, env=env)
+        install_result = _run_subprocess_text(install_cmd, env=env, cwd=safe_cwd)
         if install_result.returncode != 0:
             if install_result.stderr:
                 log(f"   install stderr: {install_result.stderr[:500]}")
@@ -1685,7 +1727,7 @@ def ensure_japanese_support(mfa_path, callback=None):
             if os.path.exists(pip_exe):
                 pip_cmd = [pip_exe, 'install', 'spacy', 'sudachipy', 'sudachidict-core']
                 log(f"   -> fallback pip cmd: {' '.join(pip_cmd)}")
-                pip_result = _run_subprocess_text(pip_cmd, env=env)
+                pip_result = _run_subprocess_text(pip_cmd, env=env, cwd=safe_cwd)
                 if pip_result.returncode != 0:
                     if pip_result.stderr:
                         log(f"   pip stderr: {pip_result.stderr[:500]}")
@@ -1695,7 +1737,7 @@ def ensure_japanese_support(mfa_path, callback=None):
             else:
                 return False
 
-        verify = _run_subprocess_text(check_cmd, env=env)
+        verify = _run_subprocess_text(check_cmd, env=env, cwd=safe_cwd)
         if verify.returncode == 0:
             log("[MFA] Japanese tokenizer dependencies are ready.")
             return True
@@ -2358,7 +2400,17 @@ def run_mfa_align(
     dict_sanitize_ok, dict_sanitize_err = _sanitize_alignment_dictionary_for_mfa(work_dict_path, callback=callback)
     if not dict_sanitize_ok:
         return False, dict_sanitize_err
-    dict_ok, dict_err = _validate_alignment_dictionary(work_dict_path, callback=callback)
+    strict_dict_gate = str(os.environ.get("UTOA_STRICT_DICT_VALIDATION", "0") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    dict_ok, dict_err = _validate_alignment_dictionary(
+        work_dict_path,
+        callback=callback,
+        soft=(not strict_dict_gate),
+    )
     if not dict_ok:
         return False, dict_err
     single_speaker_flag = _resolve_single_speaker_flag(mfa_path, env=env)
@@ -2405,7 +2457,11 @@ def run_mfa_align(
                 log(f"[MFA][constrained] sanitize failed, fallback to base dictionary: {c_sanitize_err}")
                 constrained_active = False
                 attempt_dict_path = work_dict_path
-            c_dict_ok, c_dict_err = _validate_alignment_dictionary(attempt_dict_path, callback=callback)
+            c_dict_ok, c_dict_err = _validate_alignment_dictionary(
+                attempt_dict_path,
+                callback=callback,
+                soft=(not strict_dict_gate),
+            )
             if not c_dict_ok:
                 if constrained_mode == "strict":
                     return False, c_dict_err
