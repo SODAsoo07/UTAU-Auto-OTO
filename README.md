@@ -1,52 +1,8 @@
-# Auto OTO
+우타우 보이스뱅크의 자동 원음설정을 위한 툴입니다.
 
-Auto OTO is a source-available freeware tool for automatic oto setup and related
-voicebank preparation workflows.
+가이드 작성 중...
 
-## License Summary
+</br>
 
-This repository is not an open-source project in the OSI sense.
-
-- The source code is published under the source-available freeware terms in
-  [LICENSE](./LICENSE).
-- The official bundled models are licensed separately under
-  [MODEL_LICENSE.md](./MODEL_LICENSE.md).
-- Output created with the official models, such as generated oto settings,
-  prepared voicebanks, and songs created with those voicebanks, may be used
-  commercially under the terms described in `MODEL_LICENSE.md`.
-
-## What You Can Do
-
-- Use the software for free.
-- Read and modify the source code.
-- Share original or modified copies for free with the license notices kept
-  intact.
-- Use the generated outputs in commercial creative work.
-
-## What You Cannot Do
-
-- Sell the software itself or modified versions of the software.
-- Charge for access to the software.
-- Sell, host, or otherwise commercially exploit the official bundled models.
-
-## Important Notes
-
-- Third-party dependencies remain under their own licenses.
-- The official model package and the source code are licensed separately.
-- This repository may contain model files and metadata that are covered by
-  `MODEL_LICENSE.md`, not by `LICENSE`.
-- If you use your own models or your own data, you remain responsible for the
-  rights to those materials.
-
-## Draft Status
-
-The files `LICENSE` and `MODEL_LICENSE.md` are project drafts intended to define
-the distribution policy of this repository. Review and adjust them before public
-release if you want tighter wording for contributor, data, or jurisdiction-
-specific issues.
-
-## UI Design Workflow (Pencil MCP)
-
-- Integration workflow draft: `plan/pencil_integration_workflow.md`
-- Design asset folder: `design/`
-- Shared UI token module: `ui/theme_tokens.py`
+이 툴의 소스코드는 AI를 이용해 생성했으며, 인간이 검수 후 일부 수정을 거쳤습니다.
+이 프로그램은 '있는 그대로' 제공되며, 제작자는 이 프로그램을 사용하여 입은 손해에 대해 어떤 것도 책임지지 않습니다.
