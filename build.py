@@ -40,6 +40,7 @@ EXCLUDED_MODULES = [
     "torchaudio",
     "torchvision",
     "ml",
+    "librosa",
 ]
 EXCLUDED_TRAINING_MODULES = [
     "core.oto_ml.coupled.training",
@@ -76,6 +77,8 @@ args = argparse.Namespace(
     skip_deps=False,
 )
 
+EXPECTED_BUILD_PYTHON = (3, 10)
+
 
 def _configure_console_encoding():
     for stream in (sys.stdout, sys.stderr):
@@ -83,6 +86,19 @@ def _configure_console_encoding():
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
+
+
+def _assert_build_python_version(expected=EXPECTED_BUILD_PYTHON):
+    major, minor = expected
+    if os.environ.get("UTOA_ALLOW_NON_310_BUILD", "").strip().lower() in {"1", "true", "yes", "on"}:
+        print("[WARN] UTOA_ALLOW_NON_310_BUILD enabled; skipping build Python version check.")
+        return
+    if (sys.version_info.major, sys.version_info.minor) != (major, minor):
+        raise SystemExit(
+            f"Build Python must be {major}.{minor}. "
+            f"Current={sys.version_info.major}.{sys.version_info.minor} "
+            f"({sys.executable})."
+        )
 
 
 def _normalize_channel(channel: str) -> str:
@@ -790,6 +806,8 @@ def main():
     target_channels = _parse_channels(args.channel, args.channels)
     args.channel = target_channels[0]
     include_domino_module = _has_preview_channel(target_channels)
+
+    _assert_build_python_version()
 
     if args.onefile and not args.allow_unsafe_onefile:
         raise SystemExit(

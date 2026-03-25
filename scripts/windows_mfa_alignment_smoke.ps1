@@ -39,6 +39,122 @@ function Resolve-ExistingPath {
     return ""
 }
 
+function Get-RuntimeRootCandidates {
+    param([string]$RepoRoot)
+
+    $candidates = @(
+        $RepoRoot,
+        (Join-Path $RepoRoot "UTAU_Auto_OTO"),
+        (Join-Path $env:LOCALAPPDATA "UTAU_Auto_OTO"),
+        (Join-Path $env:LOCALAPPDATA "UTAU_Auto_OTO_v3"),
+        (Join-Path $env:USERPROFILE "AppData\Local\UTAU_Auto_OTO"),
+        (Join-Path $env:USERPROFILE "AppData\Local\UTAU_Auto_OTO_v3")
+    )
+    $resolved = New-Object System.Collections.ArrayList
+    foreach ($c in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($c)) { continue }
+        if (-not (Test-Path -LiteralPath $c)) { continue }
+        try {
+            $full = (Resolve-Path -LiteralPath $c).Path
+            if (-not ($resolved -contains $full)) {
+                $resolved.Add($full) | Out-Null
+            }
+        } catch {}
+    }
+    return $resolved
+}
+
+function Resolve-RuntimePython {
+    param(
+        [string]$RepoRoot,
+        [string]$MfaPath = ""
+    )
+
+    $roots = @()
+    if (-not [string]::IsNullOrWhiteSpace($MfaPath) -and (Test-Path -LiteralPath $MfaPath)) {
+        try {
+            $mfaDir = Split-Path -Parent $MfaPath
+            $envDir = Split-Path -Parent $mfaDir
+            if (-not [string]::IsNullOrWhiteSpace($envDir)) {
+                $roots += $envDir
+                $envName = (Split-Path -Leaf $envDir).ToLowerInvariant()
+                if ($envName -in @(".env", "env")) {
+                    $roots += (Split-Path -Parent $envDir)
+                }
+            }
+        } catch {}
+    }
+    $roots += Get-RuntimeRootCandidates -RepoRoot $RepoRoot
+
+    $candidates = @()
+    foreach ($r in $roots) {
+        $candidates += @(
+            (Join-Path $r ".env\python.exe"),
+            (Join-Path $r ".env\Scripts\python.exe"),
+            (Join-Path $r "env\python.exe"),
+            (Join-Path $r "env\Scripts\python.exe"),
+            (Join-Path $r "python.exe"),
+            (Join-Path $r "Scripts\python.exe")
+        )
+    }
+
+    $resolved = Resolve-ExistingPath $candidates
+    if (-not [string]::IsNullOrWhiteSpace($resolved)) {
+        return $resolved
+    }
+    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -ne $pythonCmd) {
+        return $pythonCmd.Source
+    }
+    return ""
+}
+
+function Resolve-RuntimeMfa {
+    param(
+        [string]$RepoRoot,
+        [string]$PythonPath = ""
+    )
+
+    $roots = @()
+    if (-not [string]::IsNullOrWhiteSpace($PythonPath) -and (Test-Path -LiteralPath $PythonPath)) {
+        try {
+            $pyDir = Split-Path -Parent $PythonPath
+            $base = Split-Path -Leaf $pyDir
+            if ($base -ieq "Scripts") {
+                $roots += (Split-Path -Parent $pyDir)
+            } else {
+                $roots += $pyDir
+            }
+        } catch {}
+    }
+    $roots += Get-RuntimeRootCandidates -RepoRoot $RepoRoot
+
+    $candidates = @()
+    foreach ($r in $roots) {
+        $candidates += @(
+            (Join-Path $r ".env\Scripts\mfa.exe"),
+            (Join-Path $r ".env\Scripts\mfa.bat"),
+            (Join-Path $r ".env\Scripts\mfa.cmd"),
+            (Join-Path $r "env\Scripts\mfa.exe"),
+            (Join-Path $r "env\Scripts\mfa.bat"),
+            (Join-Path $r "env\Scripts\mfa.cmd"),
+            (Join-Path $r "Scripts\mfa.exe"),
+            (Join-Path $r "Scripts\mfa.bat"),
+            (Join-Path $r "Scripts\mfa.cmd")
+        )
+    }
+
+    $resolved = Resolve-ExistingPath $candidates
+    if (-not [string]::IsNullOrWhiteSpace($resolved)) {
+        return $resolved
+    }
+    $mfaCmd = Get-Command mfa -ErrorAction SilentlyContinue
+    if ($null -ne $mfaCmd) {
+        return $mfaCmd.Source
+    }
+    return ""
+}
+
 $Checks = New-Object System.Collections.ArrayList
 $Warnings = New-Object System.Collections.ArrayList
 
@@ -59,32 +175,31 @@ if (-not [string]::IsNullOrWhiteSpace($DictionaryPath)) {
     try { $inputDictPath = (Resolve-Path -LiteralPath $DictionaryPath).Path } catch { $inputDictPath = $DictionaryPath }
 }
 
+if ([string]::IsNullOrWhiteSpace($inputWavFolder) -or [string]::IsNullOrWhiteSpace($inputDictPath)) {
+    $corpusCandidates = @(
+        (Join-Path $repoAbs "SODAsoo KR CVC"),
+        (Join-Path $repoAbs "UTAU_Auto_OTO\SODAsoo KR CVC"),
+        (Join-Path $repoAbs "Test\SODAsoo KR CVC")
+    )
+    foreach ($candidate in $corpusCandidates) {
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+        $dictCandidate = Join-Path $candidate "korean_dict.txt"
+        if (-not (Test-Path -LiteralPath $dictCandidate)) { continue }
+        $wavCount = @(Get-ChildItem -LiteralPath $candidate -Filter "*.wav" -File -ErrorAction SilentlyContinue).Count
+        $labCount = @(Get-ChildItem -LiteralPath $candidate -Filter "*.lab" -File -ErrorAction SilentlyContinue).Count
+        if ($wavCount -lt 1 -or $labCount -lt 1) { continue }
+        $inputWavFolder = (Resolve-Path -LiteralPath $candidate).Path
+        $inputDictPath = (Resolve-Path -LiteralPath $dictCandidate).Path
+        break
+    }
+}
+
 Push-Location $repoAbs
 try {
-    $pythonPath = Resolve-ExistingPath @(
-        (Join-Path $repoAbs ".env\python.exe"),
-        (Join-Path $repoAbs ".env\Scripts\python.exe")
-    )
-    if ([string]::IsNullOrWhiteSpace($pythonPath)) {
-        $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
-        if ($null -ne $pythonCmd) {
-            $pythonPath = $pythonCmd.Source
-        }
-    }
-    Add-Check -Name "python_available" -Passed (-not [string]::IsNullOrWhiteSpace($pythonPath)) -Detail $pythonPath -Required $true
-
-    $mfaPath = Resolve-ExistingPath @(
-        (Join-Path $repoAbs ".env\Scripts\mfa.exe"),
-        (Join-Path $repoAbs ".env\Scripts\mfa.bat"),
-        (Join-Path $repoAbs ".env\Scripts\mfa.cmd")
-    )
-    if ([string]::IsNullOrWhiteSpace($mfaPath)) {
-        $mfaCmd = Get-Command mfa -ErrorAction SilentlyContinue
-        if ($null -ne $mfaCmd) {
-            $mfaPath = $mfaCmd.Source
-        }
-    }
-    Add-Check -Name "mfa_entry_discovered" -Passed (-not [string]::IsNullOrWhiteSpace($mfaPath)) -Detail $mfaPath -Required $false
+    $mfaPath = Resolve-RuntimeMfa -RepoRoot $repoAbs
+    $pythonPath = Resolve-RuntimePython -RepoRoot $repoAbs -MfaPath $mfaPath
+    Add-Check -Name "python_available_precheck" -Passed (-not [string]::IsNullOrWhiteSpace($pythonPath)) -Detail $pythonPath -Required $false
+    Add-Check -Name "mfa_entry_discovered_precheck" -Passed (-not [string]::IsNullOrWhiteSpace($mfaPath)) -Detail $mfaPath -Required $false
 
     if (-not $SkipSetupMfa) {
         $setupBat = Join-Path $repoAbs "setup_mfa.bat"
@@ -98,13 +213,8 @@ try {
             } else {
                 Add-Check -Name "setup_mfa_exit_zero" -Passed ($setupProc.ExitCode -eq 0) -Detail ("exit=" + $setupProc.ExitCode) -Required $true
             }
-            if ([string]::IsNullOrWhiteSpace($mfaPath)) {
-                $mfaPath = Resolve-ExistingPath @(
-                    (Join-Path $repoAbs ".env\Scripts\mfa.exe"),
-                    (Join-Path $repoAbs ".env\Scripts\mfa.bat"),
-                    (Join-Path $repoAbs ".env\Scripts\mfa.cmd")
-                )
-            }
+            $mfaPath = Resolve-RuntimeMfa -RepoRoot $repoAbs -PythonPath $pythonPath
+            $pythonPath = Resolve-RuntimePython -RepoRoot $repoAbs -MfaPath $mfaPath
         } else {
             Add-Warn "setup_mfa.bat not found. Skipping install stage."
         }
@@ -112,13 +222,23 @@ try {
         Add-Warn "SkipSetupMfa enabled; setup stage skipped."
     }
 
+    Add-Check -Name "python_available" -Passed (-not [string]::IsNullOrWhiteSpace($pythonPath)) -Detail $pythonPath -Required $true
+    Add-Check -Name "mfa_entry_discovered" -Passed (-not [string]::IsNullOrWhiteSpace($mfaPath)) -Detail $mfaPath -Required $false
+    if (-not [string]::IsNullOrWhiteSpace($inputWavFolder) -and -not [string]::IsNullOrWhiteSpace($inputDictPath)) {
+        Add-Check -Name "smoke_input_autodetect" -Passed $true -Detail ("wav={0}; dict={1}" -f $inputWavFolder, $inputDictPath) -Required $false
+    } else {
+        Add-Check -Name "smoke_input_autodetect" -Passed $false -Detail "external sample not found; fallback to generated sample" -Required $false
+    }
+
     $runnerPy = Join-Path $workAbs "run_windows_mfa_smoke.py"
-    @'
+@'
 import json
 import os
 import struct
 import sys
+import traceback
 import wave
+import importlib.util
 
 repo_root = sys.argv[1]
 work_dir = sys.argv[2]
@@ -126,8 +246,27 @@ mfa_path = sys.argv[3] if len(sys.argv) > 3 else ""
 input_wav_dir = sys.argv[4] if len(sys.argv) > 4 else ""
 input_dict_path = sys.argv[5] if len(sys.argv) > 5 else ""
 
-sys.path.insert(0, repo_root)
-from core.mfa_runner import run_mfa_align, find_mfa_executable  # noqa: E402
+def _resolve_code_root(root: str) -> str:
+    candidates = [
+        root,
+        os.path.join(root, "source_bundle"),
+        os.path.join(root, "UTAU_Auto_OTO"),
+        os.path.join(root, "Auto_OTO"),
+    ]
+    for c in candidates:
+        if os.path.isfile(os.path.join(c, "core", "mfa_runner.py")):
+            return c
+    return root
+
+code_root = _resolve_code_root(repo_root)
+sys.path.insert(0, code_root)
+
+dep_probe = {
+    "jamo": bool(importlib.util.find_spec("jamo")),
+    "mecab": bool(importlib.util.find_spec("mecab")),
+    "mecab_caps": bool(importlib.util.find_spec("MeCab")),
+    "mecab_ko": bool(importlib.util.find_spec("mecab_ko")),
+}
 
 out_dir = os.path.join(work_dir, "textgrids")
 os.makedirs(out_dir, exist_ok=True)
@@ -151,41 +290,59 @@ else:
         w.writeframes(b"".join(struct.pack("<h", x) for x in frames))
     generated_sample = True
 
-resolved_mfa = mfa_path or (find_mfa_executable() or "")
-ok, err = run_mfa_align(
-    resolved_mfa,
-    wav_dir,
-    dict_path,
-    out_dir,
-    language="korean",
-)
-tg_count = len([n for n in os.listdir(out_dir) if n.lower().endswith(".textgrid")])
-low_err = str(err or "").lower()
-if ok:
-    failure_category = ""
-elif "permission" in low_err or "access denied" in low_err:
-    failure_category = "permission"
-elif "tokenizer" in low_err or "dependency" in low_err:
-    failure_category = "dependency"
-elif "dictionary" in low_err:
-    failure_category = "dictionary"
-elif "model" in low_err:
-    failure_category = "model"
-elif "executable not found" in low_err:
-    failure_category = "executable"
-else:
-    failure_category = "runtime"
-payload = {
-    "ok": bool(ok),
-    "error": str(err or ""),
-    "failure_category": failure_category,
-    "mfa_path": resolved_mfa,
-    "wav_dir": wav_dir,
-    "dict_path": dict_path,
-    "output_dir": out_dir,
-    "textgrid_count": tg_count,
-    "generated_sample": generated_sample,
-}
+try:
+    from core.mfa_runner import run_mfa_align, find_mfa_executable  # noqa: E402
+    resolved_mfa = mfa_path or (find_mfa_executable() or "")
+    ok, err = run_mfa_align(
+        resolved_mfa,
+        wav_dir,
+        dict_path,
+        out_dir,
+        language="korean",
+    )
+    tg_count = len([n for n in os.listdir(out_dir) if n.lower().endswith(".textgrid")])
+    low_err = str(err or "").lower()
+    if ok:
+        failure_category = ""
+    elif "permission" in low_err or "access denied" in low_err:
+        failure_category = "permission"
+    elif "tokenizer" in low_err or "dependency" in low_err:
+        failure_category = "dependency"
+    elif "dictionary" in low_err:
+        failure_category = "dictionary"
+    elif "model" in low_err:
+        failure_category = "model"
+    elif "executable not found" in low_err:
+        failure_category = "executable"
+    else:
+        failure_category = "runtime"
+    payload = {
+        "ok": bool(ok),
+        "error": str(err or ""),
+        "failure_category": failure_category,
+        "code_root": code_root,
+        "dep_probe": dep_probe,
+        "mfa_path": resolved_mfa,
+        "wav_dir": wav_dir,
+        "dict_path": dict_path,
+        "output_dir": out_dir,
+        "textgrid_count": tg_count,
+        "generated_sample": generated_sample,
+    }
+except Exception:
+    payload = {
+        "ok": False,
+        "error": traceback.format_exc(),
+        "failure_category": "runtime",
+        "code_root": code_root,
+        "dep_probe": dep_probe,
+        "mfa_path": mfa_path,
+        "wav_dir": wav_dir,
+        "dict_path": dict_path,
+        "output_dir": out_dir,
+        "textgrid_count": 0,
+        "generated_sample": generated_sample,
+    }
 print(json.dumps(payload, ensure_ascii=False))
 '@ | Set-Content -LiteralPath $runnerPy -Encoding UTF8
 
@@ -193,7 +350,11 @@ print(json.dumps(payload, ensure_ascii=False))
         Add-Check -Name "smoke_python_runner" -Passed $false -Detail "python not found" -Required $true
     } else {
         Write-Host "[INFO] Running Korean MFA alignment smoke..."
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         $smokeOutput = & $pythonPath $runnerPy $repoAbs $workAbs $mfaPath $inputWavFolder $inputDictPath 2>&1
+        $pythonExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEap
         $smokeText = ($smokeOutput | Out-String).Trim()
         if ([string]::IsNullOrWhiteSpace($smokeText)) {
             Add-Check -Name "smoke_output_emitted" -Passed $false -Detail "empty output" -Required $true
@@ -201,8 +362,13 @@ print(json.dumps(payload, ensure_ascii=False))
             $jsonLine = ($smokeText -split "`r?`n" | Select-Object -Last 1)
             try {
                 $payload = $jsonLine | ConvertFrom-Json
+                Add-Check -Name "smoke_python_exit_zero" -Passed ($pythonExit -eq 0) -Detail ("exit=" + $pythonExit) -Required $false
                 Add-Check -Name "alignment_invoked" -Passed $true -Detail ($payload.mfa_path) -Required $true
                 Add-Check -Name "input_mode" -Passed $true -Detail ($(if ($payload.generated_sample) { "generated_sample" } else { "external_inputs" })) -Required $false
+                if ($null -ne $payload.dep_probe) {
+                    $depDetail = "jamo=$($payload.dep_probe.jamo); mecab=$($payload.dep_probe.mecab); mecab_caps=$($payload.dep_probe.mecab_caps); mecab_ko=$($payload.dep_probe.mecab_ko)"
+                    Add-Check -Name "korean_dep_probe" -Passed $true -Detail $depDetail -Required $false
+                }
                 Add-Check -Name "alignment_ok" -Passed ([bool]$payload.ok) -Detail ($payload.error + " | category=" + $payload.failure_category) -Required $true
                 Add-Check -Name "textgrid_generated" -Passed (($payload.textgrid_count -as [int]) -gt 0) -Detail ("count=" + $payload.textgrid_count) -Required $true
             } catch {

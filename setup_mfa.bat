@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 
 @echo off
 
@@ -1484,13 +1484,13 @@ echo [WARN] Micromamba
 
 if exist "%ENV_DIR%\python.exe" (
 
-    echo [INFO] Micromamba 미탐지: pip fallback으로 일본어 tokenizer 의존성 설치를 시도합니다.
+    echo [INFO] Micromamba ・ｸ夋川ｧ: pip fallback・ｼ・・・ｼ・ｸ・ｴ tokenizer ・們｡ｴ・ｱ ・､・俯･ｼ ・罹巡﨑ｩ・壱共.
 
     call :run_env_python -m pip install --upgrade spacy sudachipy sudachidict-core
 
     if errorlevel 1 (
 
-        echo [WARN] pip fallback 설치도 실패했습니다. 일본어 정렬 시 런타임에서 재시도됩니다.
+        echo [WARN] pip fallback ・､・俯巡 ・､甯ｨ嵂溢慣・壱共. ・ｼ・ｸ・ｴ ・簿ｬ ・・・ｰ夋・・乱・・・ｬ・罹巡・ｩ・壱共.
 
     ) else (
 
@@ -1959,7 +1959,9 @@ if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
 
 echo [INFO] Installing Korean tokenizer backend: python-mecab-ko ^(wheel-only^)
 
-call :run_env_python -m pip install --upgrade --only-binary=:all: python-mecab-ko python-mecab-ko-dic
+call :run_env_python -m pip uninstall -y mecab-python3 >nul 2>nul
+
+call :run_env_python -m pip install --upgrade --force-reinstall --only-binary=:all: python-mecab-ko python-mecab-ko-dic
 
 if not errorlevel 1 (
 
@@ -1974,6 +1976,8 @@ if not errorlevel 1 (
 )
 
 echo [INFO] Installing Korean tokenizer backend fallback: mecab-python3 ^(wheel-only^)
+
+call :run_env_python -m pip uninstall -y python-mecab-ko python-mecab-ko-dic >nul 2>nul
 
 call :run_env_python -m pip install --upgrade --only-binary=:all: mecab-python3
 
@@ -2025,7 +2029,7 @@ set "KOREAN_TOKENIZER_OK=0"
 
 if not exist "%ENV_DIR%\python.exe" goto :eof
 
-call :run_env_python -c "import sys,importlib.util,jamo; ok=any(importlib.util.find_spec(m) is not None for m in ('mecab','MeCab','mecab_ko')); sys.exit(0 if ok else 1)" >nul 2>nul
+call :run_env_python -c "import sys,jamo,subprocess; cmds=['from mecab import MeCab; m=MeCab(); _=m.parse(chr(97))','from mecab import Tagger; t=Tagger(); _=t.parseToNode(chr(97))','import MeCab as M; t=M.Tagger(); _=t.parseToNode(chr(97))','import mecab_ko']; ok=any(subprocess.run([sys.executable,'-c',c],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0 for c in cmds); sys.exit(0 if ok else 1)" >nul 2>nul
 
 if not errorlevel 1 set "KOREAN_TOKENIZER_OK=1"
 
@@ -2592,14 +2596,26 @@ for /f "tokens=1,2 delims=." %%a in ("%PY_CHECK%") do (
 
 if not defined PY_MAJOR goto :eof
 
-if %PY_MAJOR% GTR 3 (
-
-    set "%~2=1"
-
-    goto :eof
-
+set "REQ_MAJOR="
+set "REQ_MINOR="
+for /f "tokens=1,2 delims=." %%a in ("%MFA_PYTHON_VERSION%") do (
+    set /a REQ_MAJOR=%%a
+    set /a REQ_MINOR=%%b
 )
 
-if %PY_MAJOR% EQU 3 if %PY_MINOR% GEQ 13 set "%~2=1"
+if not defined REQ_MAJOR (
+    if %PY_MAJOR% GTR 3 (
+        set "%~2=1"
+        goto :eof
+    )
+    if %PY_MAJOR% EQU 3 if %PY_MINOR% GEQ 13 set "%~2=1"
+    goto :eof
+)
+
+if not "%PY_MAJOR%"=="%REQ_MAJOR%" (
+    set "%~2=1"
+    goto :eof
+)
+if not "%PY_MINOR%"=="%REQ_MINOR%" set "%~2=1"
 
 goto :eof
