@@ -613,7 +613,7 @@ if (-not $audioCheck.ok) {
 if ($Language -eq "japanese") {
     $langCheck = Invoke-PythonCheck -PythonExe $pythonExe -Code "import spacy,sudachipy,sudachidict_core"
 } else {
-    $langCheck = Invoke-PythonCheck -PythonExe $pythonExe -Code "import sys,jamo`nok=False`ntry:`n from mecab import MeCab`n ok=True`nexcept Exception:`n try:`n  import MeCab`n  ok=True`n except Exception:`n  try:`n   import mecab_ko`n   ok=True`n  except Exception:`n   ok=False`nsys.exit(0 if ok else 1)"
+    $langCheck = Invoke-PythonCheck -PythonExe $pythonExe -Code "import sys,jamo`nok=False`ntry:`n from mecab import MeCab`n ok=True`nexcept Exception:`n try:`n  from mecab import Tagger`n  ok=True`n except Exception:`n  try:`n   import MeCab`n   ok=True`n  except Exception:`n   try:`n    import mecab_ko`n    ok=True`n   except Exception:`n    ok=False`nsys.exit(0 if ok else 1)"
 }
 Add-Check -Name "${Language}_dependencies_ready" -Passed $langCheck.ok -Value $pythonExe -Detail $langCheck.output.Trim() -Required $true
 if (-not $langCheck.ok) {

@@ -2050,7 +2050,7 @@ set "KOREAN_TOKENIZER_OK=0"
 
 if not exist "%ENV_DIR%\python.exe" goto :eof
 
-call :run_env_python -c "import sys,jamo,subprocess; cmds=['from mecab import MeCab; m=MeCab(); _=m.parse(chr(97))','from mecab import Tagger; t=Tagger(); _=t.parseToNode(chr(97))','import MeCab as M; t=M.Tagger(); _=t.parseToNode(chr(97))','import mecab_ko']; ok=any(subprocess.run([sys.executable,'-c',c],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0 for c in cmds); sys.exit(0 if ok else 1)" >nul 2>nul
+call :run_env_python -c "import sys,jamo,subprocess; cmds=['from mecab import MeCab','from mecab import MeCab; MeCab()','from mecab import Tagger','from mecab import Tagger; Tagger()','import MeCab as M','import MeCab as M; M.Tagger()','import mecab_ko']; ok=any(subprocess.run([sys.executable,'-c',c],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0 for c in cmds); sys.exit(0 if ok else 1)" >nul 2>nul
 
 if not errorlevel 1 set "KOREAN_TOKENIZER_OK=1"
 
