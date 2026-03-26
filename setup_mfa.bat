@@ -39,6 +39,18 @@ set "MFA_RUNTIME_BUNDLE_DIR="
 set "HAS_CERTUTIL=1"
 
 set "HAS_TAR=1"
+
+REM Clean host Python environment to avoid python311.dll conflicts.
+set "PYTHONHOME="
+set "PYTHONPATH="
+set "PYTHONEXECUTABLE="
+set "__PYVENV_LAUNCHER__="
+set "VIRTUAL_ENV="
+set "CONDA_DEFAULT_ENV="
+set "CONDA_PROMPT_MODIFIER="
+set "PYTHONNOUSERSITE=1"
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 :parse_args
 
 if "%~1"=="" goto :args_done
@@ -135,7 +147,7 @@ echo   --runtime-root PATH       Explicit runtime root path
 
 echo   --runtime-root=PATH       Same as above ^(inline form^)
 
-echo   --with-ml / --install-ml  Install ML dependencies ^(pandas/sklearn/lightgbm/pytorch^)
+echo   --with-ml / --install-ml  Install ML dependencies ^(pandas/pyarrow/lightgbm/onnxruntime^)
 
 echo   --non-interactive         Run without prompts ^(requires valid runtime root^)
 
@@ -720,10 +732,16 @@ set "ENV_DIR=%APP_DIR%\.env"
 set "MICROMAMBA_ROOT=%APP_DIR%\micromamba"
 
 set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\Library\bin\micromamba.exe"
+set "MICROMAMBA_PORTABLE_EXE=%APP_DIR%\micromamba.exe"
+
+if exist "%MICROMAMBA_PORTABLE_EXE%" (
+    set "MICROMAMBA_EXE=%MICROMAMBA_PORTABLE_EXE%"
+)
 
 set "MICROMAMBA_ARCHIVE=%TEMP%\utau_auto_oto_micromamba-win-64-latest.tar.bz2"
 
 set "MICROMAMBA_LATEST_URL=https://micro.mamba.pm/api/micromamba/win-64/latest"
+set "MICROMAMBA_EXE_URL=https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-win-64"
 
 set "MICROMAMBA_MD5_EXPECTED="
 
@@ -762,9 +780,17 @@ if exist "%APP_DIR%\ML_models" set "AUTO_ML=1"
 
 if exist "%APP_DIR%\models_installed\oto_ml" set "AUTO_ML=1"
 
+if exist "%APP_DIR%\requirements-ml.txt" set "AUTO_ML=1"
+
+if exist "%APP_DIR%\UTAU_Auto_OTO\pandas" set "AUTO_ML=1"
+
+if exist "%APP_DIR%\UTAU_Auto_OTO\onnxruntime" set "AUTO_ML=1"
+
+if exist "%APP_DIR%\UTAU_Auto_OTO\lightgbm" set "AUTO_ML=1"
+
 if "%AUTO_ML%"=="1" if "%INSTALL_ML%"=="0" (
 
-    echo [INFO] ML model folder detected. Enabling ML dependency install.
+    echo [INFO] ML runtime hints detected. Enabling ML dependency install.
 
     set "INSTALL_ML=1"
 
@@ -974,11 +1000,21 @@ if not exist "%MICROMAMBA_EXE%" (
 
     if "%HAS_TAR%"=="0" (
 
-        echo [FAILED] tar was not found, so micromamba archive extraction cannot continue.
+        echo [WARN] tar was not found. Attempting to download micromamba.exe directly.
 
-        if not "%NON_INTERACTIVE%"=="1" pause
+        call :download_micromamba_exe
 
-        exit /b 1
+        if errorlevel 1 (
+
+            echo [FAILED] Micromamba
+
+            if not "%NON_INTERACTIVE%"=="1" pause
+
+            exit /b 1
+
+        )
+
+        goto :micromamba_exe_post
 
     )
 
@@ -988,11 +1024,21 @@ if not exist "%MICROMAMBA_EXE%" (
 
     if errorlevel 1 (
 
-        echo [FAILED] Micromamba
+        echo [WARN] micromamba archive extraction failed. Attempting to download micromamba.exe directly.
 
-        if not "%NON_INTERACTIVE%"=="1" pause
+        call :download_micromamba_exe
 
-        exit /b 1
+        if errorlevel 1 (
+
+            echo [FAILED] Micromamba
+
+            if not "%NON_INTERACTIVE%"=="1" pause
+
+            exit /b 1
+
+        )
+
+        goto :micromamba_exe_post
 
     )
 
@@ -1254,6 +1300,8 @@ if exist "%ENV_DIR%" (
 
 )
 
+:micromamba_exe_post
+
 if exist "%MICROMAMBA_EXE%" (
 
     "%MICROMAMBA_EXE%" clean -a -y -r "%MICROMAMBA_ROOT%" >nul 2>nul
@@ -1278,7 +1326,7 @@ if not exist "%ENV_DIR%\python.exe" (
 
 )
 
-"%ENV_DIR%\python.exe" -c "import pip, pkg_resources, wheel" >nul 2>nul
+call :run_env_python -c "import pip, pkg_resources, wheel" >nul 2>nul
 
 if not errorlevel 1 (
 
@@ -1292,7 +1340,7 @@ if not errorlevel 1 (
 
 echo [INFO] pip/setuptools/wheel
 
-"%ENV_DIR%\python.exe" -m ensurepip --upgrade
+call :run_env_python -m ensurepip --upgrade
 
 if errorlevel 1 (
 
@@ -1302,13 +1350,13 @@ if errorlevel 1 (
 
 echo [INFO] pip module availability check...
 
-"%ENV_DIR%\python.exe" -m pip --version >nul 2>nul
+call :run_env_python -m pip --version >nul 2>nul
 
 if errorlevel 1 (
 
     echo [WARN] python -m pip failed. Retrying ensurepip with --default-pip...
 
-    "%ENV_DIR%\python.exe" -m ensurepip --upgrade --default-pip
+    call :run_env_python -m ensurepip --upgrade --default-pip
 
 )
 
@@ -1316,7 +1364,7 @@ call :ensure_seaborn_dependency
 
 set "PYTOOLS_REPAIR_OK=0"
 
-"%ENV_DIR%\python.exe" -m pip install --upgrade --force-reinstall "setuptools<81" wheel
+call :run_env_python -m pip install --upgrade --force-reinstall "setuptools<81" wheel
 
 if not errorlevel 1 set "PYTOOLS_REPAIR_OK=1"
 
@@ -1324,7 +1372,7 @@ if "%PYTOOLS_REPAIR_OK%"=="0" (
 
     echo [WARN] force-reinstall path failed. Retrying with normal upgrade...
 
-    "%ENV_DIR%\python.exe" -m pip install --upgrade "setuptools<81" wheel
+    call :run_env_python -m pip install --upgrade "setuptools<81" wheel
 
     if not errorlevel 1 set "PYTOOLS_REPAIR_OK=1"
 
@@ -1340,7 +1388,7 @@ if "%PYTOOLS_REPAIR_OK%"=="0" (
 
 )
 
-"%ENV_DIR%\python.exe" -c "import pip, pkg_resources, wheel" >nul 2>nul
+call :run_env_python -c "import pip, pkg_resources, wheel" >nul 2>nul
 
 if errorlevel 1 (
 
@@ -1360,7 +1408,7 @@ goto :eof
 
 if not exist "%ENV_DIR%\python.exe" goto :eof
 
-"%ENV_DIR%\python.exe" -c "import seaborn" >nul 2>nul
+call :run_env_python -c "import seaborn" >nul 2>nul
 
 if not errorlevel 1 (
 
@@ -1378,7 +1426,7 @@ if exist "%MICROMAMBA_EXE%" (
 
     if not errorlevel 1 (
 
-        "%ENV_DIR%\python.exe" -c "import seaborn" >nul 2>nul
+        call :run_env_python -c "import seaborn" >nul 2>nul
 
         if not errorlevel 1 (
 
@@ -1396,9 +1444,9 @@ if exist "%MICROMAMBA_EXE%" (
 
 )
 
-"%ENV_DIR%\python.exe" -m pip install --upgrade seaborn >nul 2>nul
+call :run_env_python -m pip install --upgrade seaborn >nul 2>nul
 
-"%ENV_DIR%\python.exe" -c "import seaborn" >nul 2>nul
+call :run_env_python -c "import seaborn" >nul 2>nul
 
 if errorlevel 1 (
 
@@ -1441,6 +1489,24 @@ if exist "%MICROMAMBA_EXE%" (
 )
 
 echo [WARN] Micromamba
+
+if exist "%ENV_DIR%\python.exe" (
+
+    echo [INFO] Micromamba 繝ｻ・ｸ螟句ｷ晢ｽｧﾂ: pip fallback繝ｻ・ｼ繝ｻ繝ｻ繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ tokenizer 繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ 繝ｻ・､繝ｻ菫ｯ・･・ｼ 繝ｻ鄂ｹ蟾｡・托ｽｩ繝ｻ螢ｱ蜈ｱ.
+
+    call :run_env_python -m pip install --upgrade spacy sudachipy sudachidict-core
+
+    if errorlevel 1 (
+
+        echo [WARN] pip fallback 繝ｻ・､繝ｻ菫ｯ蟾｡ 繝ｻ・､逕ｯ・ｨ蠏よｺ｢諷｣繝ｻ螢ｱ蜈ｱ. 繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ邁ｿ・ｰ・ｬ 繝ｻ繝ｻ繝ｻ・ｰ螟仰繝ｻ繝ｻ荵ｱ繝ｻ繝ｻ繝ｻ・ｬ繝ｻ鄂ｹ蟾｡繝ｻ・ｩ繝ｻ螢ｱ蜈ｱ.
+
+    ) else (
+
+        echo [OK] Japanese tokenizer deps installed via pip fallback.
+
+    )
+
+)
 
 goto :eof
 
@@ -1514,7 +1580,7 @@ if exist "%ENV_DIR%\Scripts\conda.exe" (
 
 if exist "%ENV_DIR%\python.exe" (
 
-    "%ENV_DIR%\python.exe" -m pip install --upgrade soundfile
+    call :run_env_python -m pip install --upgrade soundfile
 
     call :verify_audio_deps
 
@@ -1536,7 +1602,7 @@ set "OLD_PATH=%PATH%"
 
 set "PATH=%ENV_DIR%;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\bin;%ENV_DIR%\Scripts;%ENV_DIR%\bin;%OLD_PATH%"
 
-"%ENV_DIR%\python.exe" -c "import soundfile" >nul 2>nul
+call :run_env_python -c "import soundfile" >nul 2>nul
 
 set "VERIFY_RC=%ERRORLEVEL%"
 
@@ -1560,13 +1626,13 @@ if not exist "%ENV_DIR%\python.exe" (
 
 )
 
-"%ENV_DIR%\python.exe" -c "import textgrid" >nul 2>nul
+call :run_env_python -c "import textgrid" >nul 2>nul
 
 if not errorlevel 1 goto :eof
 
 echo [INFO] textgrid
 
-"%ENV_DIR%\python.exe" -m pip install --upgrade "textgrid>=1.5"
+call :run_env_python -m pip install --upgrade "textgrid>=1.5"
 
 if errorlevel 1 (
 
@@ -1592,7 +1658,7 @@ if not exist "%ENV_DIR%\python.exe" (
 
 )
 
-"%ENV_DIR%\python.exe" -c "import textgrid" >nul 2>nul
+call :run_env_python -c "import textgrid" >nul 2>nul
 
 if errorlevel 1 (
 
@@ -1629,7 +1695,7 @@ if exist "%MICROMAMBA_EXE%" (
 
     echo [INFO] micromamba ML
 
-    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas lightgbm onnxruntime
+    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas pyarrow lightgbm onnxruntime
 
     if errorlevel 1 (
 
@@ -1647,7 +1713,7 @@ if exist "%REQ_BASE%" (
 
     echo [INFO] requirements.txt
 
-    "%ENV_DIR%\python.exe" -m pip install --upgrade -r "%REQ_BASE%"
+    call :run_env_python -m pip install --upgrade -r "%REQ_BASE%"
 
     if errorlevel 1 (
 
@@ -1665,7 +1731,7 @@ if exist "%REQ_ML%" (
 
     echo [INFO] requirements-ml.txt
 
-    "%ENV_DIR%\python.exe" -m pip install --upgrade -r "%REQ_ML%"
+    call :run_env_python -m pip install --upgrade -r "%REQ_ML%"
 
     if errorlevel 1 (
 
@@ -1699,7 +1765,7 @@ if exist "%MICROMAMBA_EXE%" (
 
     echo [INFO] requirements-ml.txt missing. Installing minimal ML packages via pip.
 
-    "%ENV_DIR%\python.exe" -m pip install --upgrade pandas lightgbm onnxruntime
+    call :run_env_python -m pip install --upgrade pandas pyarrow lightgbm onnxruntime
 
     if errorlevel 1 (
 
@@ -1733,15 +1799,15 @@ if not exist "%ENV_DIR%\python.exe" (
 
 )
 
-"%ENV_DIR%\python.exe" -c "import pandas, lightgbm, onnxruntime" >nul 2>nul
+call :run_env_python -c "import pandas, pyarrow, lightgbm, onnxruntime" >nul 2>nul
 
 if errorlevel 1 (
 
-    echo [FAILED] ML import . pandas/lightgbm/onnxruntime
+    echo [FAILED] ML import . pandas/pyarrow/lightgbm/onnxruntime
 
     if exist "%MICROMAMBA_EXE%" (
 
-        echo : "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas lightgbm onnxruntime
+        echo : "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas pyarrow lightgbm onnxruntime
 
     ) else (
 
@@ -1769,7 +1835,7 @@ if exist "%MICROMAMBA_EXE%" (
 
 if exist "%ENV_DIR%\python.exe" (
 
-    "%ENV_DIR%\python.exe" -m pip cache purge >nul 2>nul
+    call :run_env_python -m pip cache purge >nul 2>nul
 
 )
 
@@ -1883,7 +1949,7 @@ if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
 
 echo [INFO] Installing Korean tokenizer dependency: jamo
 
-"%ENV_DIR%\python.exe" -m pip install --upgrade jamo
+call :run_env_python -m pip install --upgrade jamo
 
 if errorlevel 1 (
 
@@ -1901,9 +1967,17 @@ if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
 
 echo [INFO] Installing Korean tokenizer backend: python-mecab-ko ^(wheel-only^)
 
-"%ENV_DIR%\python.exe" -m pip install --upgrade --only-binary=:all: python-mecab-ko python-mecab-ko-dic
+call :run_env_python -m pip uninstall -y mecab-python3 >nul 2>nul
+
+call :run_env_python -m pip install --upgrade --force-reinstall --only-binary=:all: python-mecab-ko python-mecab-ko-dic
 
 if not errorlevel 1 (
+
+    call :check_korean_tokenizer_ready
+
+    if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
+
+    call :ensure_mecab_module_shim
 
     call :check_korean_tokenizer_ready
 
@@ -1915,19 +1989,30 @@ if not errorlevel 1 (
 
 )
 
-echo [INFO] Installing Korean tokenizer backend fallback: mecab-python3 ^(wheel-only^)
+if /i "%UTOA_ENABLE_MECAB_PYTHON3_FALLBACK%"=="1" (
 
-"%ENV_DIR%\python.exe" -m pip install --upgrade --only-binary=:all: mecab-python3
+    echo [INFO] Installing Korean tokenizer backend fallback: mecab-python3 ^(wheel-only^)
 
-if not errorlevel 1 (
+    call :run_env_python -m pip uninstall -y python-mecab-ko python-mecab-ko-dic >nul 2>nul
 
-    call :check_korean_tokenizer_ready
+    call :run_env_python -m pip install --upgrade --only-binary=:all: mecab-python3
 
-    if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
+    if not errorlevel 1 (
+
+        call :check_korean_tokenizer_ready
+
+        if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
+
+    ) else (
+
+        echo [WARN] mecab-python3 install failed or wheel unavailable.
+
+    )
 
 ) else (
 
-    echo [WARN] mecab-python3 install failed or wheel unavailable.
+    echo [INFO] Skipping mecab-python3 fallback by default.
+    echo [INFO] Set UTOA_ENABLE_MECAB_PYTHON3_FALLBACK=1 to enable fallback.
 
 )
 
@@ -1939,26 +2024,24 @@ if not "%NON_INTERACTIVE%"=="1" pause
 
 exit /b 1
 
+:ensure_mecab_module_shim
+
+if not exist "%ENV_DIR%\python.exe" goto :eof
+
+call :run_env_python -c "import importlib.util as u, pathlib, sysconfig; has_mecab=u.find_spec('mecab') is not None; has_mecab_caps=u.find_spec('MeCab') is not None; purelib=sysconfig.get_paths().get('purelib'); target=pathlib.Path(purelib) / 'mecab.py' if purelib else None; (not has_mecab and has_mecab_caps and target and not target.exists()) and target.write_text('from MeCab import *\\n', encoding='utf-8')" >nul 2>nul
+
+goto :eof
+
 :patch_korean_support
 
-set "UTOA_APP_PYTHONPATH=%APP_DIR%"
-
-if exist "%APP_DIR%\UTAU_Auto_OTO\core\mfa_runner.py" set "UTOA_APP_PYTHONPATH=%APP_DIR%\UTAU_Auto_OTO;%APP_DIR%"
-
-set "PYTHONPATH=%UTOA_APP_PYTHONPATH%"
-
+set "UTOA_APP_DIR=%APP_DIR%"
 set "UTOA_MFA_EXE=%MFA_EXE%"
 
-"%ENV_DIR%\python.exe" -c "import os; from core.mfa_runner import patch_mfa_korean_support; patch_mfa_korean_support(os.environ.get('UTOA_MFA_EXE',''))" >nul 2>nul
+call :run_env_python -c "import os,sys; app=os.environ.get('UTOA_APP_DIR',''); cand=[os.path.join(app,'UTAU_Auto_OTO'), app]; [sys.path.insert(0,p) for p in cand if p and p not in sys.path]; from core.mfa_runner import patch_mfa_korean_support; patch_mfa_korean_support(os.environ.get('UTOA_MFA_EXE',''))" >nul 2>nul
 
-if errorlevel 1 (
+if not errorlevel 1 exit /b 0
 
-    echo [WARN] MFA Korean patch step failed. Continuing.
-
-    exit /b 0
-
-)
-
+echo [WARN] MFA Korean patch step failed. Continuing.
 exit /b 0
 
 :check_korean_tokenizer_ready
@@ -1967,7 +2050,7 @@ set "KOREAN_TOKENIZER_OK=0"
 
 if not exist "%ENV_DIR%\python.exe" goto :eof
 
-"%ENV_DIR%\python.exe" -c "import sys,importlib.util,jamo; ok=any(importlib.util.find_spec(m) is not None for m in ('mecab','MeCab','mecab_ko')); sys.exit(0 if ok else 1)" >nul 2>nul
+call :run_env_python -c "import sys,jamo,subprocess; cmds=['from mecab import MeCab','from mecab import MeCab; MeCab()','from mecab import Tagger','from mecab import Tagger; Tagger()','import MeCab as M','import MeCab as M; M.Tagger()','import mecab_ko']; ok=any(subprocess.run([sys.executable,'-c',c],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0 for c in cmds); sys.exit(0 if ok else 1)" >nul 2>nul
 
 if not errorlevel 1 set "KOREAN_TOKENIZER_OK=1"
 
@@ -2032,6 +2115,32 @@ if exist "%MICROMAMBA_MD5_FILE%" del "%MICROMAMBA_MD5_FILE%" >nul 2>nul
 if not defined MICROMAMBA_MD5_EXPECTED exit /b 1
 
 echo [INFO] Micromamba MD5 : %MICROMAMBA_MD5_EXPECTED%
+
+exit /b 0
+
+:download_micromamba_exe
+
+if not exist "%MICROMAMBA_ROOT%" mkdir "%MICROMAMBA_ROOT%" >nul 2>nul
+
+powershell -NoProfile -Command ^
+
+ "$ErrorActionPreference='Stop';" ^
+
+ " [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;" ^
+
+ " $url='%MICROMAMBA_EXE_URL%';" ^
+
+ " $dst=Join-Path '%MICROMAMBA_ROOT%' 'micromamba.exe';" ^
+
+ " Invoke-WebRequest -Uri $url -OutFile $dst -TimeoutSec 120 -UseBasicParsing;" ^
+
+ " if (-not (Test-Path -LiteralPath $dst)) { throw 'micromamba.exe download failed' }"
+
+if errorlevel 1 exit /b 1
+
+if not exist "%MICROMAMBA_ROOT%\micromamba.exe" exit /b 1
+
+set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\micromamba.exe"
 
 exit /b 0
 
@@ -2257,13 +2366,13 @@ if exist "%ENV_DIR%\python.exe" (
 
     set "PATH=%ENV_DIR%;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\bin;%ENV_DIR%\Scripts;%ENV_DIR%\bin;%PATH%"
 
-    "%ENV_DIR%\python.exe" -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME%
+    call :run_env_python -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME%
 
     if errorlevel 1 (
 
         echo [WARN] Model download failed once. Retrying with --ignore_cache...
 
-        "%ENV_DIR%\python.exe" -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME% --ignore_cache
+        call :run_env_python -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME% --ignore_cache
 
     )
 
@@ -2445,13 +2554,37 @@ if exist "%ENV_DIR%" (
 endlocal
 goto :eof
 
+:run_env_python
+
+if not exist "%ENV_DIR%\python.exe" exit /b 1
+
+setlocal EnableExtensions DisableDelayedExpansion
+
+set "OLD_PATH=%PATH%"
+set "PATH=%ENV_DIR%;%ENV_DIR%\Scripts;%ENV_DIR%\Library\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\bin;%OLD_PATH%"
+set "PYTHONHOME="
+set "PYTHONPATH="
+set "PYTHONEXECUTABLE="
+set "__PYVENV_LAUNCHER__="
+set "PYTHONNOUSERSITE=1"
+
+"%ENV_DIR%\python.exe" %*
+
+set "RUN_RC=%ERRORLEVEL%"
+
+endlocal & exit /b %RUN_RC%
+
 :get_env_python_version
 
 set "%~2="
 
 if exist "%~1\python.exe" (
 
-    for /f "usebackq delims=" %%i in (`"%~1\python.exe" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2^>nul`) do set "%~2=%%i"
+    setlocal EnableExtensions DisableDelayedExpansion
+    set "OLD_PATH=%PATH%"
+    set "PATH=%~1;%~1\Scripts;%~1\Library\bin;%~1\Library\usr\bin;%~1\Library\mingw-w64\bin;%~1\bin;%OLD_PATH%"
+    for /f "usebackq delims=" %%i in (`"%~1\python.exe" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2^>nul`) do set "PY_VER=%%i"
+    endlocal & set "%~2=%PY_VER%"
 
     goto :eof
 
@@ -2459,7 +2592,11 @@ if exist "%~1\python.exe" (
 
 if exist "%~1\Scripts\python.exe" (
 
-    for /f "usebackq delims=" %%i in (`"%~1\Scripts\python.exe" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2^>nul`) do set "%~2=%%i"
+    setlocal EnableExtensions DisableDelayedExpansion
+    set "OLD_PATH=%PATH%"
+    set "PATH=%~1;%~1\Scripts;%~1\Library\bin;%~1\Library\usr\bin;%~1\Library\mingw-w64\bin;%~1\bin;%OLD_PATH%"
+    for /f "usebackq delims=" %%i in (`"%~1\Scripts\python.exe" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2^>nul`) do set "PY_VER=%%i"
+    endlocal & set "%~2=%PY_VER%"
 
 )
 
@@ -2485,15 +2622,26 @@ for /f "tokens=1,2 delims=." %%a in ("%PY_CHECK%") do (
 
 if not defined PY_MAJOR goto :eof
 
-if %PY_MAJOR% GTR 3 (
-
-    set "%~2=1"
-
-    goto :eof
-
+set "REQ_MAJOR="
+set "REQ_MINOR="
+for /f "tokens=1,2 delims=." %%a in ("%MFA_PYTHON_VERSION%") do (
+    set /a REQ_MAJOR=%%a
+    set /a REQ_MINOR=%%b
 )
 
-if %PY_MAJOR% EQU 3 if %PY_MINOR% GEQ 13 set "%~2=1"
+if not defined REQ_MAJOR (
+    if %PY_MAJOR% GTR 3 (
+        set "%~2=1"
+        goto :eof
+    )
+    if %PY_MAJOR% EQU 3 if %PY_MINOR% GEQ 13 set "%~2=1"
+    goto :eof
+)
+
+if not "%PY_MAJOR%"=="%REQ_MAJOR%" (
+    set "%~2=1"
+    goto :eof
+)
+if not "%PY_MINOR%"=="%REQ_MINOR%" set "%~2=1"
 
 goto :eof
-

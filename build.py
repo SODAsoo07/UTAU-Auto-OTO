@@ -21,6 +21,7 @@ FFMPEG_BIN_DIR = os.path.join(FFMPEG_DIR, "bin")
 FFMPEG_RELEASE_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 REQUIRED_FFMPEG_BINARIES = ("ffmpeg.exe", "ffprobe.exe")
 REQUIRED_MSVC_RUNTIME_DLLS = ("msvcp140.dll", "msvcp140_1.dll")
+MICROMAMBA_EXE_URL = "https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-win-64"
 
 DEFAULT_APP_NAME = "UTAU_Auto_OTO"
 DEFAULT_CHANNEL = "stable"
@@ -39,6 +40,7 @@ EXCLUDED_MODULES = [
     "torchaudio",
     "torchvision",
     "ml",
+    "librosa",
 ]
 EXCLUDED_TRAINING_MODULES = [
     "core.oto_ml.coupled.training",
@@ -75,6 +77,8 @@ args = argparse.Namespace(
     skip_deps=False,
 )
 
+EXPECTED_BUILD_PYTHON = (3, 10)
+
 
 def _configure_console_encoding():
     for stream in (sys.stdout, sys.stderr):
@@ -82,6 +86,19 @@ def _configure_console_encoding():
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
+
+
+def _assert_build_python_version(expected=EXPECTED_BUILD_PYTHON):
+    major, minor = expected
+    if os.environ.get("UTOA_ALLOW_NON_310_BUILD", "").strip().lower() in {"1", "true", "yes", "on"}:
+        print("[WARN] UTOA_ALLOW_NON_310_BUILD enabled; skipping build Python version check.")
+        return
+    if (sys.version_info.major, sys.version_info.minor) != (major, minor):
+        raise SystemExit(
+            f"Build Python must be {major}.{minor}. "
+            f"Current={sys.version_info.major}.{sys.version_info.minor} "
+            f"({sys.executable})."
+        )
 
 
 def _normalize_channel(channel: str) -> str:
@@ -168,6 +185,34 @@ def _validate_ffmpeg_bin(ffmpeg_bin):
     if missing:
         lines = "\n".join(f"  - {p}" for p in missing)
         raise RuntimeError(f"Required FFmpeg runtime files are missing:\n{lines}")
+
+
+def _ensure_micromamba_exe():
+    """
+    Download micromamba.exe for portable builds so setup_mfa.bat can skip tar/bzip2 extraction.
+    Best-effort: warn and continue if download fails.
+    """
+    if os.name != "nt":
+        return False
+    target_dir = os.path.join(BUILD_ASSET_DIR, "micromamba")
+    target_path = os.path.join(target_dir, "micromamba.exe")
+    if os.path.isfile(target_path) and os.path.getsize(target_path) > 0:
+        print(f"Micromamba reuse: {target_path}")
+        return True
+    os.makedirs(target_dir, exist_ok=True)
+    try:
+        print("Downloading micromamba.exe for portable bundle...")
+        with urllib.request.urlopen(MICROMAMBA_EXE_URL, timeout=120) as resp:
+            payload = resp.read()
+        if not payload or len(payload) < 1024 * 512:
+            raise RuntimeError("Downloaded micromamba.exe payload is too small.")
+        with open(target_path, "wb") as f:
+            f.write(payload)
+        print(f"Micromamba prepared: {target_path}")
+        return True
+    except Exception as exc:
+        print(f"[WARN] Failed to download micromamba.exe: {exc}")
+        return False
 
 
 def _iter_ffmpeg_runtime_files(ffmpeg_bin):
@@ -307,6 +352,8 @@ def _write_release_channel_metadata(target_path, app_name, app_version, channel)
         "app_name": app_name,
         "app_version": app_version,
         "channel": channel,
+        "build_python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "build_python_executable": os.path.abspath(sys.executable),
         "built_at_utc": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
     }
     os.makedirs(os.path.dirname(target_path), exist_ok=True)
@@ -676,6 +723,10 @@ def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, o
         if os.path.exists(extra_path):
             shutil.copy(extra_path, release_dir)
             print(f"   -> copied: {os.path.basename(extra_path)}")
+    micromamba_src = os.path.join(BUILD_ASSET_DIR, "micromamba", "micromamba.exe")
+    if os.path.exists(micromamba_src):
+        shutil.copy(micromamba_src, os.path.join(release_dir, "micromamba.exe"))
+        print("   -> copied: micromamba.exe")
 
     if os.name == "nt":
         release_exe = _resolve_release_executable_path(release_dir, app_name, onefile=onefile)
@@ -758,6 +809,8 @@ def main():
     args.channel = target_channels[0]
     include_domino_module = _has_preview_channel(target_channels)
 
+    _assert_build_python_version()
+
     if args.onefile and not args.allow_unsafe_onefile:
         raise SystemExit(
             "onefile builds are disabled by default. Use --allow-unsafe-onefile to proceed."
@@ -784,6 +837,7 @@ def main():
 
     print("[2/5] Preparing FFmpeg runtime...")
     ffmpeg_bin = _ensure_ffmpeg_bin()
+    _ensure_micromamba_exe()
     app_icon_path = _resolve_app_icon_path()
     if app_icon_path:
         print(f"[INFO] app_icon={app_icon_path}")

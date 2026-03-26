@@ -6,6 +6,7 @@ from typing import Dict, List
 from core.domino_runner import check_domino_ready, run_domino_align
 from core.mfa_runner import check_mfa_ready, run_mfa_align
 from core.pipeline_status import (
+    ALIGN_EXEC_MISSING,
     ALIGN_OUTPUT_EMPTY,
     ALIGN_RUN_FAILED,
     ALIGN_USING_EXISTING,
@@ -16,6 +17,8 @@ from core.pipeline_status import (
     normalize_aligner_name,
     resolve_aligner_chain,
 )
+
+_MFA_SOFT_GATE_FAIL_CACHE: Dict[str, int] = {}
 
 
 def _emit(callback, message: str) -> None:
@@ -198,14 +201,41 @@ def run_alignment_with_fallback(
         ready["engine"] = "mfa"
         ready["attempt_index"] = len(attempts) + 1
         attempts.append(dict(ready))
-        if str(ready.get("code", OK)).upper() != OK:
+        ready_code = str(ready.get("code", OK) or OK).upper()
+        if ready_code != OK:
             _emit(
                 callback,
-                f"[Align] not ready engine=mfa code={ready.get('code')} message={ready.get('message', '')}",
+                f"[Align] precheck engine=mfa code={ready.get('code')} message={ready.get('message', '')}",
             )
-            last_err = str(ready.get("message", "") or "mfa not ready")
-            last_code = str(ready.get("code", ALIGN_RUN_FAILED) or ALIGN_RUN_FAILED)
-            continue
+            # Hybrid relaxed policy:
+            # - Hard-block only when MFA executable is missing.
+            # - For model/dependency precheck failures, attempt actual MFA run first.
+            if ready_code == ALIGN_EXEC_MISSING:
+                last_err = str(ready.get("message", "") or "mfa not ready")
+                last_code = str(ready.get("code", ALIGN_RUN_FAILED) or ALIGN_RUN_FAILED)
+                continue
+            try:
+                soft_limit = max(1, int(str(os.environ.get("UTOA_MFA_SOFT_GATE_RETRY_LIMIT", "2") or "2")))
+            except Exception:
+                soft_limit = 2
+            soft_key = "|".join(
+                [
+                    str(lang or ""),
+                    str(mfa_path or ready.get("mfa_path", "") or ""),
+                    str(ready_code or ""),
+                ]
+            )
+            soft_count = int(_MFA_SOFT_GATE_FAIL_CACHE.get(soft_key, 0)) + 1
+            _MFA_SOFT_GATE_FAIL_CACHE[soft_key] = soft_count
+            if soft_count > soft_limit:
+                _emit(
+                    callback,
+                    f"[Align] precheck soft-gate limit exceeded ({soft_count-1}>{soft_limit}); switching to hard block.",
+                )
+                last_err = str(ready.get("message", "") or "mfa not ready")
+                last_code = str(ready.get("code", ALIGN_RUN_FAILED) or ALIGN_RUN_FAILED)
+                continue
+            _emit(callback, "[Align] precheck failed but continuing with runtime attempt (soft gate).")
 
         mfa_exec = mfa_path or str(ready.get("mfa_path", "") or "")
         profile_chain = _mfa_profile_chain(lang, mfa_align_profile)
@@ -246,6 +276,17 @@ def run_alignment_with_fallback(
                 )
             )
             if ok:
+                try:
+                    soft_key = "|".join(
+                        [
+                            str(lang or ""),
+                            str(mfa_exec or ""),
+                            str(ready_code or ""),
+                        ]
+                    )
+                    _MFA_SOFT_GATE_FAIL_CACHE.pop(soft_key, None)
+                except Exception:
+                    pass
                 used_profile = profile
                 break
 

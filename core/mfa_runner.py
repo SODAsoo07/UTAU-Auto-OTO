@@ -14,6 +14,7 @@ import hashlib
 import tempfile
 import locale
 import time
+import importlib.util
 import urllib.error
 import urllib.request
 from typing import Dict, List, Optional, Sequence, Set, Tuple
@@ -34,6 +35,7 @@ MFA_PORTABLE_PYTHON_VERSION = "3.10"
 _MFA_SINGLE_SPEAKER_FLAG_CACHE = {}
 _MFA_SPEAKER_ADAPT_FLAG_CACHE = {}
 _MFA_BREATH_WORD_RE = re.compile(r"(?i)^breath\d*$")
+_MFA_PERMISSION_SOFT_RETRY_CACHE: Dict[str, int] = {}
 
 MFA_ALIGN_PROFILE_PRESETS = {
     # Stable default profile (legacy accurate behavior).
@@ -143,6 +145,16 @@ def _run_subprocess_text(args: Sequence[str], **kwargs):
     completed.stdout = _decode_subprocess_output(getattr(completed, "stdout", b""))
     completed.stderr = _decode_subprocess_output(getattr(completed, "stderr", b""))
     return completed
+
+
+def _safe_env_subprocess_cwd(env_dir: str) -> Optional[str]:
+    path = str(env_dir or "").strip()
+    if not path:
+        return None
+    abs_path = os.path.abspath(path)
+    if os.path.isdir(abs_path):
+        return abs_path
+    return None
 
 
 def _contains_non_ascii(text):
@@ -356,14 +368,15 @@ def _link_or_copy(src, dst):
         shutil.copy2(src, dst)
 
 
-def _prepare_ascii_safe_alignment_workspace(wav_folder, dict_path, output_folder):
+def _prepare_ascii_safe_alignment_workspace(wav_folder, dict_path, output_folder, temp_root: str = ""):
     token_src = "|".join([
         os.path.abspath(wav_folder or ""),
         os.path.abspath(dict_path or ""),
         os.path.abspath(output_folder or ""),
     ])
     token = hashlib.sha1(token_src.encode("utf-8", errors="replace")).hexdigest()[:12]
-    base = os.path.join(tempfile.gettempdir(), "utoa_mfa_ascii", token)
+    root_dir = str(temp_root or tempfile.gettempdir())
+    base = os.path.join(root_dir, "utoa_mfa_ascii", token)
     if os.path.isdir(base):
         shutil.rmtree(base, ignore_errors=True)
     corpus_dir = os.path.join(base, "corpus")
@@ -495,6 +508,22 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
         candidates.append('compute-mfcc-feats.exe')
     candidates.append('compute-mfcc-feats')
 
+    strict_preflight_gate = str(os.environ.get("UTOA_STRICT_MFA_PREFLIGHT", "0") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    soft_permission_gate = str(os.environ.get("UTOA_MFA_SOFT_PERMISSION", "1") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    try:
+        soft_permission_retry_limit = max(0, int(str(os.environ.get("UTOA_MFA_SOFT_PERMISSION_RETRY_LIMIT", "1") or "1")))
+    except Exception:
+        soft_permission_retry_limit = 1
     last_not_found = None
     for candidate in candidates:
         try:
@@ -506,6 +535,9 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
                 timeout=15,
                 env=env,
             )
+            cache_key = os.path.normcase(os.path.abspath(str(mfa_path or "")))
+            if cache_key in _MFA_PERMISSION_SOFT_RETRY_CACHE:
+                _MFA_PERMISSION_SOFT_RETRY_CACHE.pop(cache_key, None)
             return True, ""
         except FileNotFoundError as e:
             last_not_found = e
@@ -519,19 +551,39 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
             )
             log(f"오류: {err}")
             log("   백신/보안 정책 또는 폴더 권한을 확인한 뒤 다시 시도해 주세요.")
+            if not strict_preflight_gate and soft_permission_gate:
+                cache_key = os.path.normcase(os.path.abspath(str(mfa_path or "")))
+                retry_count = int(_MFA_PERMISSION_SOFT_RETRY_CACHE.get(cache_key, 0)) + 1
+                _MFA_PERMISSION_SOFT_RETRY_CACHE[cache_key] = retry_count
+                if retry_count <= soft_permission_retry_limit:
+                    log(
+                        f"[MFA] preflight soft-gate: 권한 오류를 경고로 전환하고 정렬 실행을 시도합니다. "
+                        f"(soft retry {retry_count}/{soft_permission_retry_limit})"
+                    )
+                    return True, ""
+                log(
+                    f"[MFA] preflight soft-gate limit exceeded: 동일 권한 오류가 반복되어 하드 실패로 전환합니다. "
+                    f"(limit={soft_permission_retry_limit})"
+                )
             return False, f"{err}: {e}"
         except Exception as e:
             err = f"compute-mfcc-feats 점검 중 예외가 발생했습니다: {e}"
             log(f"오류: {err}")
-            return False, err
+            if strict_preflight_gate:
+                return False, err
+            log("[MFA] preflight soft-gate: 점검 예외를 경고로 전환하고 정렬 실행을 시도합니다.")
+            return True, ""
 
     err = "compute-mfcc-feats를 찾지 못했습니다. MFA 환경 복구 또는 재설치를 시도해 주세요."
     log(f"오류: {err}")
+    if not strict_preflight_gate:
+        log("[MFA] preflight soft-gate: compute-mfcc-feats 미탐지 상태로 정렬 실행을 시도합니다.")
+        return True, ""
     if last_not_found:
         return False, f"{err}: {last_not_found}"
     return False, err
 
-def _validate_alignment_dictionary(dict_path: str, callback=None):
+def _validate_alignment_dictionary(dict_path: str, callback=None, soft: bool = False):
     """Validate MFA dictionary rows before native graph compilation."""
     def log(msg):
         logger.info(msg)
@@ -549,25 +601,47 @@ def _validate_alignment_dictionary(dict_path: str, callback=None):
         return False, f"Failed to read dictionary: {e}"
 
     bad_lines = []
+    valid_lines = []
     total = 0
     for idx, line in enumerate(str(text or "").splitlines(), start=1):
         row = str(line or "").strip()
         if not row or row.startswith("#"):
+            valid_lines.append(line)
             continue
         total += 1
         parts = row.split()
         # Expected: <word> <phone1> [phone2 ...]
         if len(parts) < 2 or "\ufffd" in row:
             bad_lines.append((idx, row))
+            continue
+        valid_lines.append(line)
 
     if bad_lines:
+        valid_count = max(total - len(bad_lines), 0)
         samples = "; ".join(f"{ln}:{txt[:40]}" for ln, txt in bad_lines[:5])
         err = (
             f"Dictionary malformed rows detected ({len(bad_lines)}/{max(total, 1)}). "
             f"examples={samples}"
         )
-        log(err)
-        return False, err
+        if (not soft) or valid_count <= 0:
+            log(err)
+            if valid_count <= 0:
+                log("[MFA] 해결 방법: 사전을 다시 생성하거나, 각 행이 '<word> <phone...>' 형식인지 확인해 주세요.")
+            return False, err
+        try:
+            backup_path = f"{dict_path}.bak"
+            if not os.path.exists(backup_path):
+                shutil.copy2(dict_path, backup_path)
+                log(f"[MFA] dictionary backup saved: {backup_path}")
+            with open(dict_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write("\n".join(valid_lines).rstrip() + "\n")
+            log(f"[MFA] soft dictionary validation applied: dropped={len(bad_lines)}/{max(total, 1)} rows")
+            log(f"[MFA] dropped row samples: {samples}")
+            log("[MFA] 해결 방법: Lab/사전 생성 단계를 다시 실행하거나 인코딩(UTF-8) 및 발음 열 형식을 점검해 주세요.")
+            return True, f"Dictionary had malformed rows; dropped {len(bad_lines)} row(s) in soft mode."
+        except Exception as e:
+            log(f"{err} | soft repair failed: {e}")
+            return False, f"{err} | soft repair failed: {e}"
     return True, ""
 
 
@@ -677,17 +751,27 @@ def _korean_tokenizer_import_expr() -> str:
         "ok=False\n"
         "try:\n"
         "    from mecab import MeCab\n"
-        "    ok=True\n"
+        "    _m=MeCab()\n"
+        "    _items=_m.parse('가')\n"
+        "    ok=bool(_items)\n"
         "except Exception:\n"
         "    try:\n"
-        "        import MeCab\n"
-        "        ok=True\n"
+        "        from mecab import Tagger\n"
+        "        _t=Tagger()\n"
+        "        _n=_t.parseToNode('가')\n"
+        "        ok=(_n is not None)\n"
         "    except Exception:\n"
         "        try:\n"
-        "            import mecab_ko\n"
-        "            ok=True\n"
+        "            import MeCab\n"
+        "            _t=MeCab.Tagger()\n"
+        "            _n=_t.parseToNode('가')\n"
+        "            ok=(_n is not None)\n"
         "        except Exception:\n"
-        "            ok=False\n"
+        "            try:\n"
+        "                import mecab_ko\n"
+        "                ok=True\n"
+        "            except Exception:\n"
+        "                ok=False\n"
         "sys.exit(0 if ok else 1)\n"
     )
 
@@ -745,15 +829,16 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
 
     env = _get_conda_env(mfa_path)
 
-    def _check_stack_ready() -> bool:
-        ok, _detail = _check_env_imports(
+    def _check_stack_ready() -> tuple[bool, str]:
+        ok, detail = _check_env_imports(
             python_exe,
             env,
             "import setuptools; import pip; import wheel",
         )
-        return bool(ok)
+        return bool(ok), detail or ""
 
-    if _check_stack_ready():
+    ok, detail = _check_stack_ready()
+    if ok:
         return True
 
     pip_common_args = [
@@ -893,8 +978,11 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
             saw_tls_error = saw_tls_error or _looks_like_tls_error(err_txt)
             saw_connectivity_error = saw_connectivity_error or _looks_like_connectivity_error(err_txt)
             continue
-        if _check_stack_ready():
+        ok, detail = _check_stack_ready()
+        if ok:
             return True
+        if detail:
+            log(f"[MFA] packaging import still failing: {detail[:500]}")
 
     if saw_tls_error or saw_connectivity_error:
         tls_cmds = [
@@ -906,8 +994,11 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
             result = _run_repair(repair_cmd)
             if result.returncode != 0:
                 continue
-            if _check_stack_ready():
+            ok, detail = _check_stack_ready()
+            if ok:
                 return True
+            if detail:
+                log(f"[MFA] packaging import still failing: {detail[:500]}")
 
     force_cmds = [
         [python_exe, "-m", "pip", "install", "--upgrade", "--force-reinstall", *pip_common_args, *index_args, *trusted_hosts, *pip_targets],
@@ -918,8 +1009,11 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
         result = _run_repair(repair_cmd)
         if result.returncode != 0:
             continue
-        if _check_stack_ready():
+        ok, detail = _check_stack_ready()
+        if ok:
             return True
+        if detail:
+            log(f"[MFA] packaging import still failing: {detail[:500]}")
 
     get_pip_path = _resolve_get_pip_script()
     if not get_pip_path:
@@ -982,11 +1076,16 @@ def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
                 "wheel",
             ]
             _run_repair(post_cmd, env_override=env_boot)
-            if _check_stack_ready():
+            ok, detail = _check_stack_ready()
+            if ok:
                 return True
+            if detail:
+                log(f"[MFA] packaging import still failing: {detail[:500]}")
     else:
         log("[MFA] Bundled/online get-pip.py could not be resolved.")
 
+    if detail:
+        log(f"[MFA] packaging import failed after repairs: {detail[:500]}")
     log("[MFA] Failed to restore pip/setuptools/wheel")
     return False
 
@@ -1282,9 +1381,9 @@ def _candidate_mfa_root_dirs(mfa_path: str, env: Optional[dict] = None) -> List[
     return roots
 
 
-def _has_local_acoustic_model_artifact(mfa_path: str, model_name: str, env: Optional[dict] = None) -> bool:
+def _find_local_acoustic_model_artifact(mfa_path: str, model_name: str, env: Optional[dict] = None) -> str:
     if not model_name:
-        return False
+        return ""
     for root in _candidate_mfa_root_dirs(mfa_path, env=env):
         acoustic_dir = os.path.join(root, "pretrained_models", "acoustic")
         candidates = [
@@ -1292,11 +1391,31 @@ def _has_local_acoustic_model_artifact(mfa_path: str, model_name: str, env: Opti
             os.path.join(acoustic_dir, f"{model_name}.zip"),
             os.path.join(acoustic_dir, f"{model_name}.yaml"),
             os.path.join(acoustic_dir, f"{model_name}.yml"),
-            os.path.join(acoustic_dir, f"{model_name}.meta"),
         ]
-        if any(os.path.exists(path) for path in candidates):
-            return True
-    return False
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+    return ""
+
+
+def _has_local_acoustic_model_artifact(mfa_path: str, model_name: str, env: Optional[dict] = None) -> bool:
+    return bool(_find_local_acoustic_model_artifact(mfa_path, model_name, env=env))
+
+
+def _resolve_acoustic_model_reference(mfa_path: str, model_name: str, env: Optional[dict] = None) -> str:
+    if not mfa_path or not model_name:
+        return model_name
+    try:
+        result = _run_subprocess_text([mfa_path, "model", "list", "acoustic"], env=env)
+        combined = f"{result.stdout}\n{result.stderr}"
+        if model_name in combined:
+            return model_name
+    except Exception:
+        pass
+    local_artifact = _find_local_acoustic_model_artifact(mfa_path, model_name, env=env)
+    if local_artifact:
+        return local_artifact
+    return model_name
 
 
 def check_mfa_ready(language='korean', mfa_path=''):
@@ -1353,6 +1472,27 @@ def ensure_korean_support(mfa_path, callback=None):
     env_dir = os.path.dirname(os.path.dirname(mfa_path))
     python_exe = _resolve_env_python_exe(env_dir)
     pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
+    safe_cwd = _safe_env_subprocess_cwd(env_dir)
+    pip_common_args = [
+        '--no-cache-dir',
+        '--disable-pip-version-check',
+        '--retries',
+        '5',
+        '--timeout',
+        '120',
+    ]
+    trusted_hosts = [
+        '--trusted-host', 'pypi.org',
+        '--trusted-host', 'files.pythonhosted.org',
+        '--trusted-host', 'pypi.python.org',
+    ]
+    index_args = []
+    index_url = str(os.environ.get("UTOA_PIP_INDEX_URL", "") or "").strip()
+    extra_index_url = str(os.environ.get("UTOA_PIP_EXTRA_INDEX_URL", "") or "").strip()
+    if index_url:
+        index_args.extend(['--index-url', index_url])
+    if extra_index_url:
+        index_args.extend(['--extra-index-url', extra_index_url])
     if not os.path.exists(python_exe):
         return False
     if not ensure_mfa_python_packaging_stack(mfa_path, callback=callback):
@@ -1389,47 +1529,32 @@ def ensure_korean_support(mfa_path, callback=None):
             mecab_dir = os.path.join(site_packages, 'mecab')
             mecab_init = os.path.join(mecab_dir, '__init__.py')
             try:
-                if not os.path.isdir(mecab_dir):
-                    os.makedirs(mecab_dir, exist_ok=True)
-                    content = ""
-                else:
-                    with open(mecab_init, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                if 'UTOA_MECAB_SHIM' in content:
+                if not os.path.isfile(mecab_init):
                     return
-                shim = """
-
-# UTOA_MECAB_SHIM
-import MeCab as _MeCabMod
-class _UtoaMecabNode:
-    def __init__(self, surface, pos):
-        self.surface = surface
-        self.pos = pos
-
-class MeCab:
-    def __init__(self):
-        self._tagger = _MeCabMod.Tagger()
-
-    def parse(self, text):
-        node = self._tagger.parseToNode(text)
-        items = []
-        while node is not None:
-            surface = getattr(node, "surface", "") or ""
-            if surface:
-                feature = getattr(node, "feature", "") or ""
-                pos = feature.split(",", 1)[0] if feature else ""
-                items.append(_UtoaMecabNode(surface, pos))
-            node = getattr(node, "next", None)
-        return items
-"""
-                with open(mecab_init, 'w', encoding='utf-8') as f:
-                    f.write(content + shim)
+                with open(mecab_init, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                marker = "\n# UTOA_MECAB_SHIM"
+                if marker not in content:
+                    return
+                repaired = content.split(marker, 1)[0].rstrip() + "\n"
+                if repaired != content:
+                    with open(mecab_init, 'w', encoding='utf-8', newline='\n') as f:
+                        f.write(repaired)
+                    log('[MFA] Removed legacy mecab shim from mecab package (__init__.py).')
             except Exception as e:
                 log(f"[MFA] Failed to patch mecab shim: {e}")
 
         def _looks_like_pyexpat_dll_issue(msg):
             s = (msg or '').lower()
             return ('pyexpat' in s and 'dll load failed' in s) or ('libexpat' in s and 'not found' in s)
+
+        def _looks_like_tls_error(msg):
+            s = (msg or '').lower()
+            return (
+                ('ssl' in s and ('certificate' in s or 'secure channel' in s or 'tls' in s))
+                or ('certificate verify failed' in s)
+                or ('trust relationship' in s)
+            )
 
         def _try_repair_pyexpat():
             conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
@@ -1441,22 +1566,25 @@ class MeCab:
                 cmds.append([system_conda, 'install', '-y', '--solver', 'classic', '-p', env_dir, 'libexpat'])
             for cmd in cmds:
                 log(f"   -> repair cmd: {' '.join(cmd)}")
-                res = _run_subprocess_text(cmd, env=env)
+                res = _run_subprocess_text(cmd, env=env, cwd=safe_cwd)
                 if res.returncode == 0:
                     return True
             return False
 
         def _check_imports():
-            res = _run_subprocess_text(check_cmd, env=env)
+            res = _run_subprocess_text(check_cmd, env=env, cwd=safe_cwd)
             if res.returncode == 0:
                 return True, ''
             detail = (res.stderr or res.stdout or '').strip()
             return False, detail
 
         def _ensure_pkg_resources():
-            res = _run_subprocess_text(pkg_check_cmd, env=env)
+            res = _run_subprocess_text(pkg_check_cmd, env=env, cwd=safe_cwd)
             if res.returncode == 0:
                 return True
+            err_detail = (res.stderr or res.stdout or "").strip()
+            if err_detail:
+                log(f"[MFA] pkg_resources import failed: {err_detail[:500]}")
             log('[MFA] pkg_resources is missing; repairing setuptools first')
             install_cmds = [
                 [python_exe, '-m', 'pip', 'install', '--upgrade', 'setuptools<81'],
@@ -1471,10 +1599,10 @@ class MeCab:
                 install_cmds.append([system_conda, 'install', '-y', '--solver', 'classic', '-p', env_dir, 'setuptools'])
             for install_cmd in install_cmds:
                 log(f"   -> repair cmd: {' '.join(install_cmd)}")
-                result = _run_subprocess_text(install_cmd, env=env)
+                result = _run_subprocess_text(install_cmd, env=env, cwd=safe_cwd)
                 if result.returncode != 0:
                     continue
-                verify = _run_subprocess_text(pkg_check_cmd, env=env)
+                verify = _run_subprocess_text(pkg_check_cmd, env=env, cwd=safe_cwd)
                 if verify.returncode == 0:
                     return True
             return False
@@ -1493,12 +1621,28 @@ class MeCab:
         if ok:
             patch_mfa_korean_support(mfa_path, callback)
             return True
+
+        def _run_uninstall_stage(packages):
+            pkgs = [str(p).strip() for p in packages if str(p).strip()]
+            if not pkgs:
+                return True
+            args = ['uninstall', '-y', *pkgs]
+            cmds = [[python_exe, '-m', 'pip', *args]]
+            if os.path.exists(pip_exe):
+                cmds.append([pip_exe, *args])
+            for uninstall_cmd in cmds:
+                log(f"   -> cleanup cmd: {' '.join(uninstall_cmd)}")
+                result = _run_subprocess_text(uninstall_cmd, env=env, cwd=safe_cwd)
+                if result.returncode == 0:
+                    return True
+            return False
+
         def _run_install_stage(packages, *, pip_extra_args=None):
             extra_args = list(pip_extra_args or [])
             stage_last_err = ''
 
             def _build_cmds(extra):
-                args = ['install', '--upgrade', *pip_common_args, *extra, *packages]
+                args = ['install', '--upgrade', *pip_common_args, *index_args, *extra, *packages]
                 cmds = [[python_exe, '-m', 'pip', *args]]
                 if os.path.exists(pip_exe):
                     cmds.append([pip_exe, *args])
@@ -1517,7 +1661,7 @@ class MeCab:
                 saw_tls = False
                 for install_cmd in stage_cmds:
                     log(f"   -> cmd: {' '.join(install_cmd)}")
-                    result = _run_subprocess_text(install_cmd, env=env)
+                    result = _run_subprocess_text(install_cmd, env=env, cwd=safe_cwd)
                     if result.returncode != 0:
                         err_txt = (result.stderr or result.stdout or '').strip()
                         if err_txt:
@@ -1558,9 +1702,10 @@ class MeCab:
 
         # Stage 2: python-mecab-ko wheels only (avoid source-build toolchain on Windows).
         log('[MFA] Installing Korean tokenizer deps: python-mecab-ko + dictionary')
+        _run_uninstall_stage(['mecab-python3'])
         ok, stage_err = _run_install_stage(
             ['python-mecab-ko', 'python-mecab-ko-dic'],
-            pip_extra_args=['--only-binary=:all:'],
+            pip_extra_args=['--only-binary=:all:', '--force-reinstall'],
         )
         if stage_err:
             last_err = stage_err
@@ -1571,6 +1716,7 @@ class MeCab:
 
         # Stage 3: fallback to mecab-python3 wheels only.
         log('[MFA] Installing Korean tokenizer deps fallback: mecab-python3')
+        _run_uninstall_stage(['python-mecab-ko', 'python-mecab-ko-dic'])
         ok, stage_err = _run_install_stage(
             ['mecab-python3'],
             pip_extra_args=['--only-binary=:all:'],
@@ -1600,16 +1746,42 @@ def ensure_japanese_support(mfa_path, callback=None):
         if callback:
             callback(msg)
 
-    if not mfa_path or 'Scripts' not in mfa_path:
-        return True
+    if not mfa_path:
+        log("[MFA] Japanese dependency check skipped: mfa_path is empty.")
+        return False
+    if 'Scripts' not in mfa_path:
+        log("[MFA] Japanese dependency check is uncertain: non-portable MFA path (Scripts missing).")
+        return False
 
     env_dir = os.path.dirname(os.path.dirname(mfa_path))
     python_exe = _resolve_env_python_exe(env_dir)
     pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
     conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
+    safe_cwd = _safe_env_subprocess_cwd(env_dir)
+    pip_common_args = [
+        '--no-cache-dir',
+        '--disable-pip-version-check',
+        '--retries',
+        '5',
+        '--timeout',
+        '120',
+    ]
+    trusted_hosts = [
+        '--trusted-host', 'pypi.org',
+        '--trusted-host', 'files.pythonhosted.org',
+        '--trusted-host', 'pypi.python.org',
+    ]
+    index_args = []
+    index_url = str(os.environ.get("UTOA_PIP_INDEX_URL", "") or "").strip()
+    extra_index_url = str(os.environ.get("UTOA_PIP_EXTRA_INDEX_URL", "") or "").strip()
+    if index_url:
+        index_args.extend(['--index-url', index_url])
+    if extra_index_url:
+        index_args.extend(['--extra-index-url', extra_index_url])
 
     if not os.path.exists(python_exe):
-        return True
+        log("[MFA] Japanese dependency check is uncertain: env python.exe not found.")
+        return False
     if not ensure_mfa_python_packaging_stack(mfa_path, callback=callback):
         log("[MFA] Failed to prepare Python packaging tools before Japanese dependency install.")
         return False
@@ -1617,7 +1789,42 @@ def ensure_japanese_support(mfa_path, callback=None):
     check_cmd = [python_exe, '-c', 'import spacy; import sudachipy; import sudachidict_core']
     try:
         env = _get_conda_env(mfa_path)
-        result = _run_subprocess_text(check_cmd, env=env)
+
+        def _looks_like_tls_error(msg):
+            s = (msg or '').lower()
+            return (
+                ('ssl' in s and ('certificate' in s or 'secure channel' in s or 'tls' in s))
+                or ('certificate verify failed' in s)
+                or ('trust relationship' in s)
+            )
+
+        def _run_pip_install(packages):
+            last_err = ""
+            for pass_idx in range(2):
+                use_trusted = pass_idx == 1
+                extra = trusted_hosts if use_trusted else []
+                cmds = [
+                    [python_exe, '-m', 'pip', 'install', '--upgrade', *pip_common_args, *index_args, *extra, *packages]
+                ]
+                if os.path.exists(pip_exe):
+                    cmds.append([pip_exe, 'install', '--upgrade', *pip_common_args, *index_args, *extra, *packages])
+                saw_tls = False
+                for pip_cmd in cmds:
+                    log(f"   -> fallback pip cmd: {' '.join(pip_cmd)}")
+                    pip_result = _run_subprocess_text(pip_cmd, env=env, cwd=safe_cwd)
+                    if pip_result.returncode == 0:
+                        return True, last_err
+                    err_txt = (pip_result.stderr or pip_result.stdout or '').strip()
+                    if err_txt:
+                        log(f"   pip stderr/stdout: {err_txt[:500]}")
+                    last_err = err_txt or last_err
+                    if _looks_like_tls_error(err_txt):
+                        saw_tls = True
+                if not saw_tls:
+                    break
+            return False, last_err
+
+        result = _run_subprocess_text(check_cmd, env=env, cwd=safe_cwd)
         if result.returncode == 0:
             return True
 
@@ -1646,26 +1853,19 @@ def ensure_japanese_support(mfa_path, callback=None):
             return False
 
         log(f"   -> install cmd: {' '.join(install_cmd)}")
-        install_result = _run_subprocess_text(install_cmd, env=env)
+        install_result = _run_subprocess_text(install_cmd, env=env, cwd=safe_cwd)
         if install_result.returncode != 0:
             if install_result.stderr:
                 log(f"   install stderr: {install_result.stderr[:500]}")
             if install_result.stdout:
                 log(f"   install stdout: {install_result.stdout[:500]}")
-            if os.path.exists(pip_exe):
-                pip_cmd = [pip_exe, 'install', 'spacy', 'sudachipy', 'sudachidict-core']
-                log(f"   -> fallback pip cmd: {' '.join(pip_cmd)}")
-                pip_result = _run_subprocess_text(pip_cmd, env=env)
-                if pip_result.returncode != 0:
-                    if pip_result.stderr:
-                        log(f"   pip stderr: {pip_result.stderr[:500]}")
-                    if pip_result.stdout:
-                        log(f"   pip stdout: {pip_result.stdout[:500]}")
-                    return False
-            else:
+            pip_ok, pip_err = _run_pip_install(['spacy', 'sudachipy', 'sudachidict-core'])
+            if not pip_ok:
+                if pip_err:
+                    log(f"   pip fallback failed: {pip_err[:500]}")
                 return False
 
-        verify = _run_subprocess_text(check_cmd, env=env)
+        verify = _run_subprocess_text(check_cmd, env=env, cwd=safe_cwd)
         if verify.returncode == 0:
             log("[MFA] Japanese tokenizer dependencies are ready.")
             return True
@@ -2285,18 +2485,31 @@ def run_mfa_align(
     model_name = 'japanese_mfa' if language == 'japanese' else 'korean_mfa'
     lang_label = 'Japanese' if language == 'japanese' else 'Korean'
     log(f'Checking MFA prerequisites... ({lang_label})')
+    strict_tokenizer_gate = str(os.environ.get("UTOA_STRICT_TOKENIZER_GATE", "0") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     if language == 'korean':
         if not ensure_korean_support(mfa_path, callback):
             err = 'Missing Korean tokenizer dependencies (jamo + mecab backend).'
-            log(err)
-            return False, err
+            if strict_tokenizer_gate:
+                log(err)
+                return False, err
+            log(f"[MFA] {err} Proceeding because strict tokenizer gate is disabled.")
     elif language == 'japanese':
         if not ensure_japanese_support(mfa_path, callback):
-            err = 'Missing Japanese tokenizer dependencies.'
-            log(err)
-            return False, err
+            err = 'Japanese tokenizer readiness is uncertain or dependencies are missing.'
+            if strict_tokenizer_gate:
+                log(err)
+                return False, err
+            log(f"[MFA] {err} Proceeding because strict tokenizer gate is disabled.")
     os.makedirs(output_folder, exist_ok=True)
     env = _get_conda_env(mfa_path)
+    model_reference = _resolve_acoustic_model_reference(mfa_path, model_name, env=env)
+    if model_reference != model_name:
+        log(f"[MFA] Using local acoustic model artifact: {model_reference}")
     ok, preflight_err = _preflight_compute_mfcc(mfa_path, callback=callback)
     if not ok:
         return False, preflight_err
@@ -2312,13 +2525,37 @@ def run_mfa_align(
             work_output_folder = safe_workspace["output_dir"]
             log(f"[MFA] Non-ASCII path detected, using ASCII-safe workspace: {safe_workspace['base']}")
         except Exception as e:
-            err = f"Failed to prepare ASCII-safe MFA workspace: {e}"
-            log(err)
-            return False, err
+            log(f"[MFA] ASCII-safe workspace primary prepare failed: {e}")
+            try:
+                retry_root = tempfile.mkdtemp(prefix="utoa_mfa_retry_")
+                safe_workspace = _prepare_ascii_safe_alignment_workspace(
+                    wav_folder,
+                    dict_path,
+                    output_folder,
+                    temp_root=retry_root,
+                )
+                work_wav_folder = safe_workspace["corpus_dir"]
+                work_dict_path = safe_workspace["dict_path"]
+                work_output_folder = safe_workspace["output_dir"]
+                log(f"[MFA] ASCII-safe workspace retry succeeded: {safe_workspace['base']}")
+            except Exception as retry_exc:
+                err = f"Failed to prepare ASCII-safe MFA workspace: {retry_exc}"
+                log(err)
+                return False, err
     dict_sanitize_ok, dict_sanitize_err = _sanitize_alignment_dictionary_for_mfa(work_dict_path, callback=callback)
     if not dict_sanitize_ok:
         return False, dict_sanitize_err
-    dict_ok, dict_err = _validate_alignment_dictionary(work_dict_path, callback=callback)
+    strict_dict_gate = str(os.environ.get("UTOA_STRICT_DICT_VALIDATION", "0") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    dict_ok, dict_err = _validate_alignment_dictionary(
+        work_dict_path,
+        callback=callback,
+        soft=(not strict_dict_gate),
+    )
     if not dict_ok:
         return False, dict_err
     single_speaker_flag = _resolve_single_speaker_flag(mfa_path, env=env)
@@ -2365,7 +2602,11 @@ def run_mfa_align(
                 log(f"[MFA][constrained] sanitize failed, fallback to base dictionary: {c_sanitize_err}")
                 constrained_active = False
                 attempt_dict_path = work_dict_path
-            c_dict_ok, c_dict_err = _validate_alignment_dictionary(attempt_dict_path, callback=callback)
+            c_dict_ok, c_dict_err = _validate_alignment_dictionary(
+                attempt_dict_path,
+                callback=callback,
+                soft=(not strict_dict_gate),
+            )
             if not c_dict_ok:
                 if constrained_mode == "strict":
                     return False, c_dict_err
@@ -2382,7 +2623,7 @@ def run_mfa_align(
             mfa_path=mfa_path,
             corpus_dir=work_wav_folder,
             dict_path=current_dict_path,
-            model_name=model_name,
+            model_name=model_reference,
             output_dir=work_output_folder,
             single_speaker_flag=single_speaker_flag,
             align_opts=align_opts,
@@ -2400,7 +2641,7 @@ def run_mfa_align(
             mfa_path=mfa_path,
             corpus_dir=work_wav_folder,
             dict_path=current_dict_path,
-            model_name=model_name,
+            model_name=model_reference,
             output_dir=work_output_folder,
             single_speaker_flag=single_speaker_flag,
             align_opts=align_opts,
@@ -2497,6 +2738,7 @@ def patch_mfa_korean_support(mfa_path, callback=None):
             spacy_new = spacy_content
             spacy_new = spacy_new.replace(
                 "pip install python-mecab-ko jamo",
+                "pip install python-mecab-ko jamo mecab-python3",
             )
             _write_if_changed(spacy_py, spacy_content, spacy_new, "spacy.py")
 
@@ -2504,20 +2746,88 @@ def patch_mfa_korean_support(mfa_path, callback=None):
         if korean_content:
             korean_new = korean_content
 
-            # Normalize old try/except import blocks to a single mecab import.
-            korean_new = re.sub(
-                r"try:\s*from\s+\w+\s+import\s+\w+\s+as\s+MeCab\s*except\s+Exception:\s*from\s+\w+\s+import\s+\w+\s+as\s+MeCab",
-                "from mecab import MeCab",
-                korean_new,
-                count=1,
-                flags=re.MULTILINE,
-            )
-            korean_new = re.sub(
-                r"from\s+\w+\s+import\s+\w+\s+as\s+MeCab",
-                "from mecab import MeCab",
-                korean_new,
-                count=1,
-            )
+            compat_block = """
+# UTOA_KOREAN_IMPORT_COMPAT
+try:
+    import jamo
+    _utoa_has_backend = False
+
+    try:
+        from mecab import MeCab as _NativeMeCab
+        MeCab = _NativeMeCab
+        _utoa_has_backend = True
+    except Exception:
+        try:
+            from mecab import Tagger as _MecabTagger
+
+            class _UtoaMecabNode:
+                def __init__(self, surface, pos):
+                    self.surface = surface
+                    self.pos = pos
+
+            class MeCab:
+                def __init__(self):
+                    self._tagger = _MecabTagger()
+
+                def parse(self, text):
+                    node = self._tagger.parseToNode(text)
+                    items = []
+                    while node is not None:
+                        surface = getattr(node, "surface", "") or ""
+                        if surface:
+                            feature = getattr(node, "feature", "") or ""
+                            if not isinstance(feature, str):
+                                feature = str(feature)
+                            pos = feature.split(",", 1)[0] if feature else ""
+                            items.append(_UtoaMecabNode(surface, pos))
+                        node = getattr(node, "next", None)
+                    return items
+
+            _utoa_has_backend = True
+        except Exception:
+            try:
+                import MeCab as _MeCabModule
+
+                class _UtoaMecabNode:
+                    def __init__(self, surface, pos):
+                        self.surface = surface
+                        self.pos = pos
+
+                class MeCab:
+                    def __init__(self):
+                        self._tagger = _MeCabModule.Tagger()
+
+                    def parse(self, text):
+                        node = self._tagger.parseToNode(text)
+                        items = []
+                        while node is not None:
+                            surface = getattr(node, "surface", "") or ""
+                            if surface:
+                                feature = getattr(node, "feature", "") or ""
+                                if not isinstance(feature, str):
+                                    feature = str(feature)
+                                pos = feature.split(",", 1)[0] if feature else ""
+                                items.append(_UtoaMecabNode(surface, pos))
+                            node = getattr(node, "next", None)
+                        return items
+
+                _utoa_has_backend = True
+            except Exception:
+                MeCab = None
+
+    KO_AVAILABLE = _utoa_has_backend
+except (ImportError, ModuleNotFoundError):
+    KO_AVAILABLE = False
+    MeCab = None
+    jamo = None
+"""
+            if "UTOA_KOREAN_IMPORT_COMPAT" not in korean_new:
+                korean_new = re.sub(
+                    r"try:\s*[\s\S]*?KO_AVAILABLE\s*=\s*False\s*[\s\S]*?jamo\s*=\s*None\s*",
+                    compat_block + "\n",
+                    korean_new,
+                    count=1,
+                )
             korean_new = re.sub(
                 r"self\.tokenizer\s*=\s*\w+Wrapper\(\)",
                 "self.tokenizer = MeCab()",
@@ -2530,4 +2840,3 @@ def patch_mfa_korean_support(mfa_path, callback=None):
     except Exception as e:
         log(f"[MFA] Korean patch error: {e}")
         return False
-

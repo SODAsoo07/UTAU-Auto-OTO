@@ -104,7 +104,14 @@ def classify_alignment_error(engine: str, message: str) -> str:
         return ALIGN_MODEL_MISSING
     if ".onnx" in lowered or "onnx" in lowered:
         return ALIGN_MODEL_MISSING
-    if "dependency" in lowered or "tokenizer" in lowered or "의존성" in text:
+    tokenizer_markers = (
+        "missing korean tokenizer dependencies",
+        "missing japanese tokenizer dependencies",
+        "japanese tokenizer readiness is uncertain",
+        "korean tokenizer dependencies (jamo + mecab backend) are missing",
+        "please install korean support",
+    )
+    if any(marker in lowered for marker in tokenizer_markers):
         return ALIGN_NOT_READY
     if "japanese only" in lowered:
         return ALIGN_NOT_READY

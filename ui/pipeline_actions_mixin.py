@@ -1169,29 +1169,40 @@ class PipelineActionsMixin:
                 return True
             self._mfa_ready_cache_ok = False
             return self._run_setup_mfa_script_fallback(language=lang, reason="auto_install_failed")
+        soft_rebuild_gate = str(os.environ.get("UTOA_MFA_SOFT_REBUILD", "1") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         if mfa_env_requires_python_downgrade(self.mfa_path):
             py_ver = get_mfa_env_python_version(self.mfa_path)
-            self._append_log(
-                f"⚠ 현재 MFA 환경 Python {py_ver or '(unknown)'} 은/는 "
-                f"Windows MFA 의존성과 호환되지 않아 Python {MFA_PORTABLE_PYTHON_VERSION} 기준으로 다시 구성합니다."
-            )
-            self.mfa_path = ""
-            self._mfa_ready_cache_ok = False
-            if not self._confirm_mfa_install_action(language=lang, reason="python_rebuild"):
-                self._last_mfa_install_declined = True
-                return False
-            install_ok = False
-            self._set_mfa_install_progress_state(True)
-            try:
-                install_ok = self._install_mfa_runtime(language=lang)
-            finally:
-                self._set_mfa_install_progress_state(False)
-            if install_ok:
-                cache_key = f"{lang}|{os.path.normcase(os.path.abspath(str(self.mfa_path or '')))}"
-                self._mfa_ready_cache_key = cache_key
-                self._mfa_ready_cache_ok = True
-                return True
-            return self._run_setup_mfa_script_fallback(language=lang, reason="python_rebuild_install_failed")
+            if soft_rebuild_gate:
+                self._append_log(
+                    f"⚠ MFA 환경 Python {py_ver or '(unknown)'} 감지: 재구성 권장 상태지만 soft 정책으로 현재 환경으로 먼저 실행을 시도합니다."
+                )
+            else:
+                self._append_log(
+                    f"⚠ 현재 MFA 환경 Python {py_ver or '(unknown)'} 은/는 "
+                    f"Windows MFA 의존성과 호환되지 않아 Python {MFA_PORTABLE_PYTHON_VERSION} 기준으로 다시 구성합니다."
+                )
+                self.mfa_path = ""
+                self._mfa_ready_cache_ok = False
+                if not self._confirm_mfa_install_action(language=lang, reason="python_rebuild"):
+                    self._last_mfa_install_declined = True
+                    return False
+                install_ok = False
+                self._set_mfa_install_progress_state(True)
+                try:
+                    install_ok = self._install_mfa_runtime(language=lang)
+                finally:
+                    self._set_mfa_install_progress_state(False)
+                if install_ok:
+                    cache_key = f"{lang}|{os.path.normcase(os.path.abspath(str(self.mfa_path or '')))}"
+                    self._mfa_ready_cache_key = cache_key
+                    self._mfa_ready_cache_ok = True
+                    return True
+                return self._run_setup_mfa_script_fallback(language=lang, reason="python_rebuild_install_failed")
 
         # Runtime path exists: keep per-run check lightweight.
         cache_key = f"{lang}|{os.path.normcase(os.path.abspath(str(self.mfa_path or '')))}"
@@ -1274,6 +1285,20 @@ class PipelineActionsMixin:
             "raise SystemExit(1 if missing else 0)\n"
         )
         probe_env = os.environ.copy()
+        # Prevent host/runtime Python vars from leaking into the MFA env probe.
+        for leaked_key in (
+            "PYTHONHOME",
+            "PYTHONPATH",
+            "PYTHONEXECUTABLE",
+            "__PYVENV_LAUNCHER__",
+            "VIRTUAL_ENV",
+            "CONDA_DEFAULT_ENV",
+            "CONDA_PROMPT_MODIFIER",
+        ):
+            probe_env.pop(leaked_key, None)
+        probe_env["PYTHONNOUSERSITE"] = "1"
+        probe_env["PYTHONUTF8"] = "1"
+        probe_env["PYTHONIOENCODING"] = "utf-8"
         path_parts = [
             env_dir,
             os.path.join(env_dir, "Scripts"),
@@ -1285,11 +1310,12 @@ class PipelineActionsMixin:
         probe_env["PATH"] = os.pathsep.join(path_parts + ([existing_path] if existing_path else []))
         try:
             run = self._run_subprocess_hidden(
-                [python_exe, "-c", probe_code],
+                [python_exe, "-I", "-c", probe_code],
                 capture_output=True,
                 text=False,
                 timeout=180,
                 env=probe_env,
+                cwd=env_dir or None,
             )
         except Exception as exc:
             result["detail"] = f"ML 런타임 점검 실행 실패: {exc}"
@@ -1346,6 +1372,19 @@ class PipelineActionsMixin:
 
         cmd = [script_path, "--non-interactive", "--install", "--with-ml"]
         env = os.environ.copy()
+        for leaked_key in (
+            "PYTHONHOME",
+            "PYTHONPATH",
+            "PYTHONEXECUTABLE",
+            "__PYVENV_LAUNCHER__",
+            "VIRTUAL_ENV",
+            "CONDA_DEFAULT_ENV",
+            "CONDA_PROMPT_MODIFIER",
+        ):
+            env.pop(leaked_key, None)
+        env["PYTHONNOUSERSITE"] = "1"
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         try:
             runtime_root = os.path.dirname(get_default_mfa_env_dir())
         except Exception:
@@ -2873,6 +2912,5 @@ class PipelineActionsMixin:
             finally:
                 self._set_running(False)
         self._run_in_thread(task)
-
 
 

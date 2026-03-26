@@ -52,3 +52,129 @@ def test_ensure_japanese_support_uses_env_dir_as_safe_cwd(monkeypatch, tmp_path)
     assert len(calls) == 3
     for _args, kwargs in calls:
         assert kwargs.get('cwd') == str(env_dir)
+
+
+def test_run_mfa_align_japanese_dependency_check_is_soft_by_default(monkeypatch, tmp_path):
+    env_dir = tmp_path / ".env"
+    scripts_dir = env_dir / "Scripts"
+    scripts_dir.mkdir(parents=True)
+    mfa_exe = scripts_dir / "mfa.exe"
+    mfa_exe.write_text("", encoding="utf-8")
+
+    wav_dir = tmp_path / "wav"
+    wav_dir.mkdir()
+    out_dir = tmp_path / "textgrids"
+    dict_path = tmp_path / "dict.txt"
+    dict_path.write_text("a a\n", encoding="utf-8")
+
+    monkeypatch.delenv("UTOA_STRICT_TOKENIZER_GATE", raising=False)
+    monkeypatch.setattr(mfa_runner, "ensure_japanese_support", lambda *_a, **_k: False)
+    monkeypatch.setattr(mfa_runner, "_get_conda_env", lambda *_a, **_k: {})
+    monkeypatch.setattr(mfa_runner, "_preflight_compute_mfcc", lambda *_a, **_k: (True, ""))
+    monkeypatch.setattr(mfa_runner, "_contains_non_ascii", lambda *_a, **_k: False)
+    monkeypatch.setattr(mfa_runner, "_sanitize_alignment_dictionary_for_mfa", lambda *_a, **_k: (True, ""))
+    monkeypatch.setattr(mfa_runner, "_validate_alignment_dictionary", lambda *_a, **_k: (True, ""))
+    monkeypatch.setattr(mfa_runner, "_resolve_single_speaker_flag", lambda *_a, **_k: "--single_speaker")
+    monkeypatch.setattr(mfa_runner, "_resolve_mfa_align_options", lambda *_a, **_k: ("default", {"beam": 1000, "retry_beam": 4000, "num_jobs": 1, "fine_tune": False}))
+    monkeypatch.setattr(
+        mfa_runner,
+        "_resolve_mfa_runtime_options",
+        lambda **_k: {"constrained_mode": "off", "recursive_mfa": False, "recursive_chunk_size": 96, "recursive_max_depth": 8, "beam_scale": 1.0},
+    )
+    monkeypatch.setattr(mfa_runner, "_run_mfa_align_command", lambda **_k: (True, "", []))
+
+    ok, err = mfa_runner.run_mfa_align(
+        str(mfa_exe),
+        str(wav_dir),
+        str(dict_path),
+        str(out_dir),
+        language="japanese",
+    )
+
+    assert ok is True
+    assert err == ""
+
+
+def test_run_mfa_align_korean_dependency_check_is_soft_by_default(monkeypatch, tmp_path):
+    env_dir = tmp_path / ".env"
+    scripts_dir = env_dir / "Scripts"
+    scripts_dir.mkdir(parents=True)
+    mfa_exe = scripts_dir / "mfa.exe"
+    mfa_exe.write_text("", encoding="utf-8")
+
+    wav_dir = tmp_path / "wav"
+    wav_dir.mkdir()
+    out_dir = tmp_path / "textgrids"
+    dict_path = tmp_path / "dict.txt"
+    dict_path.write_text("a a\n", encoding="utf-8")
+
+    monkeypatch.delenv("UTOA_STRICT_TOKENIZER_GATE", raising=False)
+    monkeypatch.setattr(mfa_runner, "ensure_korean_support", lambda *_a, **_k: False)
+    monkeypatch.setattr(mfa_runner, "_get_conda_env", lambda *_a, **_k: {})
+    monkeypatch.setattr(mfa_runner, "_preflight_compute_mfcc", lambda *_a, **_k: (True, ""))
+    monkeypatch.setattr(mfa_runner, "_contains_non_ascii", lambda *_a, **_k: False)
+    monkeypatch.setattr(mfa_runner, "_sanitize_alignment_dictionary_for_mfa", lambda *_a, **_k: (True, ""))
+    monkeypatch.setattr(mfa_runner, "_validate_alignment_dictionary", lambda *_a, **_k: (True, ""))
+    monkeypatch.setattr(mfa_runner, "_resolve_single_speaker_flag", lambda *_a, **_k: "--single_speaker")
+    monkeypatch.setattr(mfa_runner, "_resolve_mfa_align_options", lambda *_a, **_k: ("default", {"beam": 1000, "retry_beam": 4000, "num_jobs": 1, "fine_tune": False}))
+    monkeypatch.setattr(
+        mfa_runner,
+        "_resolve_mfa_runtime_options",
+        lambda **_k: {"constrained_mode": "off", "recursive_mfa": False, "recursive_chunk_size": 96, "recursive_max_depth": 8, "beam_scale": 1.0},
+    )
+    monkeypatch.setattr(mfa_runner, "_run_mfa_align_command", lambda **_k: (True, "", []))
+
+    ok, err = mfa_runner.run_mfa_align(
+        str(mfa_exe),
+        str(wav_dir),
+        str(dict_path),
+        str(out_dir),
+        language="korean",
+    )
+
+    assert ok is True
+    assert err == ""
+
+
+def test_preflight_compute_mfcc_is_soft_by_default(monkeypatch):
+    monkeypatch.delenv("UTOA_STRICT_MFA_PREFLIGHT", raising=False)
+    monkeypatch.setattr(mfa_runner, "_get_conda_env", lambda *_a, **_k: {})
+
+    def _raise_not_found(*_args, **_kwargs):
+        raise FileNotFoundError("missing")
+
+    monkeypatch.setattr(mfa_runner.subprocess, "run", _raise_not_found)
+
+    ok, err = mfa_runner._preflight_compute_mfcc("fake_mfa")
+    assert ok is True
+    assert err == ""
+
+def test_preflight_permission_error_is_soft_by_default(monkeypatch):
+    monkeypatch.delenv("UTOA_STRICT_MFA_PREFLIGHT", raising=False)
+    monkeypatch.delenv("UTOA_MFA_SOFT_PERMISSION", raising=False)
+    monkeypatch.setattr(mfa_runner, "_get_conda_env", lambda *_a, **_k: {})
+
+    def _raise_perm(*_args, **_kwargs):
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(mfa_runner.subprocess, "run", _raise_perm)
+    ok, err = mfa_runner._preflight_compute_mfcc("fake_mfa")
+    assert ok is True
+    assert err == ""
+
+
+def test_validate_alignment_dictionary_soft_drops_bad_rows(tmp_path):
+    dict_path = tmp_path / "dict.txt"
+    dict_path.write_text("good g u d\nbad_only\n#comment\n", encoding="utf-8")
+
+    ok, msg = mfa_runner._validate_alignment_dictionary(str(dict_path), soft=True)
+    assert ok is True
+    assert "dropped" in msg.lower()
+    text = dict_path.read_text(encoding="utf-8")
+    assert "bad_only" not in text
+    assert "good g u d" in text
+    assert (tmp_path / "dict.txt.bak").exists()
+
+
+def test_ensure_japanese_support_non_portable_path_returns_false():
+    assert mfa_runner.ensure_japanese_support("/usr/local/bin/mfa") is False
