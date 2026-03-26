@@ -1310,11 +1310,12 @@ class PipelineActionsMixin:
         probe_env["PATH"] = os.pathsep.join(path_parts + ([existing_path] if existing_path else []))
         try:
             run = self._run_subprocess_hidden(
-                [python_exe, "-c", probe_code],
+                [python_exe, "-I", "-c", probe_code],
                 capture_output=True,
                 text=False,
                 timeout=180,
                 env=probe_env,
+                cwd=env_dir or None,
             )
         except Exception as exc:
             result["detail"] = f"ML 런타임 점검 실행 실패: {exc}"

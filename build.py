@@ -352,6 +352,8 @@ def _write_release_channel_metadata(target_path, app_name, app_version, channel)
         "app_name": app_name,
         "app_version": app_version,
         "channel": channel,
+        "build_python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "build_python_executable": os.path.abspath(sys.executable),
         "built_at_utc": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
     }
     os.makedirs(os.path.dirname(target_path), exist_ok=True)

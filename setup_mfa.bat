@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 
 @echo off
 
@@ -147,7 +147,7 @@ echo   --runtime-root PATH       Explicit runtime root path
 
 echo   --runtime-root=PATH       Same as above ^(inline form^)
 
-echo   --with-ml / --install-ml  Install ML dependencies ^(pandas/sklearn/lightgbm/pytorch^)
+echo   --with-ml / --install-ml  Install ML dependencies ^(pandas/pyarrow/lightgbm/onnxruntime^)
 
 echo   --non-interactive         Run without prompts ^(requires valid runtime root^)
 
@@ -780,9 +780,17 @@ if exist "%APP_DIR%\ML_models" set "AUTO_ML=1"
 
 if exist "%APP_DIR%\models_installed\oto_ml" set "AUTO_ML=1"
 
+if exist "%APP_DIR%\requirements-ml.txt" set "AUTO_ML=1"
+
+if exist "%APP_DIR%\UTAU_Auto_OTO\pandas" set "AUTO_ML=1"
+
+if exist "%APP_DIR%\UTAU_Auto_OTO\onnxruntime" set "AUTO_ML=1"
+
+if exist "%APP_DIR%\UTAU_Auto_OTO\lightgbm" set "AUTO_ML=1"
+
 if "%AUTO_ML%"=="1" if "%INSTALL_ML%"=="0" (
 
-    echo [INFO] ML model folder detected. Enabling ML dependency install.
+    echo [INFO] ML runtime hints detected. Enabling ML dependency install.
 
     set "INSTALL_ML=1"
 
@@ -1484,13 +1492,13 @@ echo [WARN] Micromamba
 
 if exist "%ENV_DIR%\python.exe" (
 
-    echo [INFO] Micromamba ・ｸ夋川ｧ: pip fallback・ｼ・・・ｼ・ｸ・ｴ tokenizer ・們｡ｴ・ｱ ・､・俯･ｼ ・罹巡﨑ｩ・壱共.
+    echo [INFO] Micromamba 繝ｻ・ｸ螟句ｷ晢ｽｧﾂ: pip fallback繝ｻ・ｼ繝ｻ繝ｻ繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ tokenizer 繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ 繝ｻ・､繝ｻ菫ｯ・･・ｼ 繝ｻ鄂ｹ蟾｡・托ｽｩ繝ｻ螢ｱ蜈ｱ.
 
     call :run_env_python -m pip install --upgrade spacy sudachipy sudachidict-core
 
     if errorlevel 1 (
 
-        echo [WARN] pip fallback ・､・俯巡 ・､甯ｨ嵂溢慣・壱共. ・ｼ・ｸ・ｴ ・簿ｬ ・・・ｰ夋・・乱・・・ｬ・罹巡・ｩ・壱共.
+        echo [WARN] pip fallback 繝ｻ・､繝ｻ菫ｯ蟾｡ 繝ｻ・､逕ｯ・ｨ蠏よｺ｢諷｣繝ｻ螢ｱ蜈ｱ. 繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ邁ｿ・ｰ・ｬ 繝ｻ繝ｻ繝ｻ・ｰ螟仰繝ｻ繝ｻ荵ｱ繝ｻ繝ｻ繝ｻ・ｬ繝ｻ鄂ｹ蟾｡繝ｻ・ｩ繝ｻ螢ｱ蜈ｱ.
 
     ) else (
 
@@ -1687,7 +1695,7 @@ if exist "%MICROMAMBA_EXE%" (
 
     echo [INFO] micromamba ML
 
-    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas lightgbm onnxruntime
+    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas pyarrow lightgbm onnxruntime
 
     if errorlevel 1 (
 
@@ -1757,7 +1765,7 @@ if exist "%MICROMAMBA_EXE%" (
 
     echo [INFO] requirements-ml.txt missing. Installing minimal ML packages via pip.
 
-    call :run_env_python -m pip install --upgrade pandas lightgbm onnxruntime
+    call :run_env_python -m pip install --upgrade pandas pyarrow lightgbm onnxruntime
 
     if errorlevel 1 (
 
@@ -1791,15 +1799,15 @@ if not exist "%ENV_DIR%\python.exe" (
 
 )
 
-call :run_env_python -c "import pandas, lightgbm, onnxruntime" >nul 2>nul
+call :run_env_python -c "import pandas, pyarrow, lightgbm, onnxruntime" >nul 2>nul
 
 if errorlevel 1 (
 
-    echo [FAILED] ML import . pandas/lightgbm/onnxruntime
+    echo [FAILED] ML import . pandas/pyarrow/lightgbm/onnxruntime
 
     if exist "%MICROMAMBA_EXE%" (
 
-        echo : "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas lightgbm onnxruntime
+        echo : "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas pyarrow lightgbm onnxruntime
 
     ) else (
 
@@ -1969,19 +1977,7 @@ if not errorlevel 1 (
 
     if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
 
-) else (
-
-    echo [WARN] python-mecab-ko install failed or wheel unavailable.
-
-)
-
-echo [INFO] Installing Korean tokenizer backend fallback: mecab-python3 ^(wheel-only^)
-
-call :run_env_python -m pip uninstall -y python-mecab-ko python-mecab-ko-dic >nul 2>nul
-
-call :run_env_python -m pip install --upgrade --only-binary=:all: mecab-python3
-
-if not errorlevel 1 (
+    call :ensure_mecab_module_shim
 
     call :check_korean_tokenizer_ready
 
@@ -1989,7 +1985,34 @@ if not errorlevel 1 (
 
 ) else (
 
-    echo [WARN] mecab-python3 install failed or wheel unavailable.
+    echo [WARN] python-mecab-ko install failed or wheel unavailable.
+
+)
+
+if /i "%UTOA_ENABLE_MECAB_PYTHON3_FALLBACK%"=="1" (
+
+    echo [INFO] Installing Korean tokenizer backend fallback: mecab-python3 ^(wheel-only^)
+
+    call :run_env_python -m pip uninstall -y python-mecab-ko python-mecab-ko-dic >nul 2>nul
+
+    call :run_env_python -m pip install --upgrade --only-binary=:all: mecab-python3
+
+    if not errorlevel 1 (
+
+        call :check_korean_tokenizer_ready
+
+        if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
+
+    ) else (
+
+        echo [WARN] mecab-python3 install failed or wheel unavailable.
+
+    )
+
+) else (
+
+    echo [INFO] Skipping mecab-python3 fallback by default.
+    echo [INFO] Set UTOA_ENABLE_MECAB_PYTHON3_FALLBACK=1 to enable fallback.
 
 )
 
@@ -2001,26 +2024,24 @@ if not "%NON_INTERACTIVE%"=="1" pause
 
 exit /b 1
 
+:ensure_mecab_module_shim
+
+if not exist "%ENV_DIR%\python.exe" goto :eof
+
+call :run_env_python -c "import importlib.util as u, pathlib, sysconfig; has_mecab=u.find_spec('mecab') is not None; has_mecab_caps=u.find_spec('MeCab') is not None; purelib=sysconfig.get_paths().get('purelib'); target=pathlib.Path(purelib) / 'mecab.py' if purelib else None; (not has_mecab and has_mecab_caps and target and not target.exists()) and target.write_text('from MeCab import *\\n', encoding='utf-8')" >nul 2>nul
+
+goto :eof
+
 :patch_korean_support
 
-set "UTOA_APP_PYTHONPATH=%APP_DIR%"
-
-if exist "%APP_DIR%\UTAU_Auto_OTO\core\mfa_runner.py" set "UTOA_APP_PYTHONPATH=%APP_DIR%\UTAU_Auto_OTO;%APP_DIR%"
-
-set "PYTHONPATH=%UTOA_APP_PYTHONPATH%"
-
+set "UTOA_APP_DIR=%APP_DIR%"
 set "UTOA_MFA_EXE=%MFA_EXE%"
 
-call :run_env_python -c "import os; from core.mfa_runner import patch_mfa_korean_support; patch_mfa_korean_support(os.environ.get('UTOA_MFA_EXE',''))" >nul 2>nul
+call :run_env_python -c "import os,sys; app=os.environ.get('UTOA_APP_DIR',''); cand=[os.path.join(app,'UTAU_Auto_OTO'), app]; [sys.path.insert(0,p) for p in cand if p and p not in sys.path]; from core.mfa_runner import patch_mfa_korean_support; patch_mfa_korean_support(os.environ.get('UTOA_MFA_EXE',''))" >nul 2>nul
 
-if errorlevel 1 (
+if not errorlevel 1 exit /b 0
 
-    echo [WARN] MFA Korean patch step failed. Continuing.
-
-    exit /b 0
-
-)
-
+echo [WARN] MFA Korean patch step failed. Continuing.
 exit /b 0
 
 :check_korean_tokenizer_ready
@@ -2541,6 +2562,11 @@ setlocal EnableExtensions DisableDelayedExpansion
 
 set "OLD_PATH=%PATH%"
 set "PATH=%ENV_DIR%;%ENV_DIR%\Scripts;%ENV_DIR%\Library\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\bin;%OLD_PATH%"
+set "PYTHONHOME="
+set "PYTHONPATH="
+set "PYTHONEXECUTABLE="
+set "__PYVENV_LAUNCHER__="
+set "PYTHONNOUSERSITE=1"
 
 "%ENV_DIR%\python.exe" %*
 

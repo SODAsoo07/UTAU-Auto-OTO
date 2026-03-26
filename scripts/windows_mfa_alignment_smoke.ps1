@@ -235,10 +235,12 @@ try {
 import json
 import os
 import struct
+import subprocess
 import sys
 import traceback
 import wave
 import importlib.util
+import shutil
 
 repo_root = sys.argv[1]
 work_dir = sys.argv[2]
@@ -256,10 +258,11 @@ def _resolve_code_root(root: str) -> str:
     for c in candidates:
         if os.path.isfile(os.path.join(c, "core", "mfa_runner.py")):
             return c
-    return root
+    return ""
 
 code_root = _resolve_code_root(repo_root)
-sys.path.insert(0, code_root)
+if code_root:
+    sys.path.insert(0, code_root)
 
 dep_probe = {
     "jamo": bool(importlib.util.find_spec("jamo")),
@@ -290,16 +293,220 @@ else:
         w.writeframes(b"".join(struct.pack("<h", x) for x in frames))
     generated_sample = True
 
-try:
-    from core.mfa_runner import run_mfa_align, find_mfa_executable  # noqa: E402
-    resolved_mfa = mfa_path or (find_mfa_executable() or "")
-    ok, err = run_mfa_align(
-        resolved_mfa,
-        wav_dir,
-        dict_path,
-        out_dir,
-        language="korean",
+def _env_root_from_mfa_path(path: str) -> str:
+    if not path:
+        return ""
+    p = os.path.abspath(path)
+    parent = os.path.dirname(p)
+    if os.path.basename(parent).lower() == "scripts":
+        return os.path.dirname(parent)
+    return parent
+
+def _ensure_mecab_module_alias(mfa_exe: str) -> bool:
+    try:
+        if importlib.util.find_spec("mecab"):
+            return False
+        if not importlib.util.find_spec("MeCab"):
+            return False
+        env_root = _env_root_from_mfa_path(mfa_exe)
+        if not env_root:
+            return False
+        site_dir = os.path.join(env_root, "Lib", "site-packages")
+        if not os.path.isdir(site_dir):
+            return False
+        shim_path = os.path.join(site_dir, "mecab.py")
+        if os.path.isfile(shim_path):
+            return False
+        shim_code = (
+            "from MeCab import Tagger\n"
+            "class _Node:\n"
+            "    def __init__(self, surface, pos):\n"
+            "        self.surface = surface\n"
+            "        self.pos = pos\n"
+            "class MeCab:\n"
+            "    def __init__(self):\n"
+            "        self._tagger = Tagger()\n"
+            "    def parse(self, text):\n"
+            "        node = self._tagger.parseToNode(text)\n"
+            "        out = []\n"
+            "        while node is not None:\n"
+            "            surface = getattr(node, 'surface', '') or ''\n"
+            "            if surface:\n"
+            "                feature = getattr(node, 'feature', '') or ''\n"
+            "                if not isinstance(feature, str):\n"
+            "                    feature = str(feature)\n"
+            "                pos = feature.split(',', 1)[0] if feature else ''\n"
+            "                out.append(_Node(surface, pos))\n"
+            "            node = getattr(node, 'next', None)\n"
+            "        return out\n"
+        )
+        with open(shim_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(shim_code)
+        return True
+    except Exception:
+        return False
+
+def _resolve_mfa_root(repo_root_path: str, env_root: str) -> str:
+    candidates = []
+    for c in (
+        os.environ.get("MFA_ROOT_DIR", ""),
+        os.path.join(repo_root_path, ".mfa_root_ascii"),
+        os.path.join(env_root, ".mfa_root_ascii") if env_root else "",
+        os.path.join(os.environ.get("PUBLIC", r"C:\Users\Public"), "UTAU_Auto_OTO_v3", ".mfa_root_ascii"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "UTAU_Auto_OTO_v3", ".mfa_root_ascii"),
+    ):
+        if c and c not in candidates:
+            candidates.append(c)
+    for c in candidates:
+        if os.path.isdir(os.path.join(c, "pretrained_models", "acoustic")):
+            return c
+    return ""
+
+def _find_local_model_artifact(model_name: str, mfa_exe: str, mfa_root: str) -> str:
+    env_root = _env_root_from_mfa_path(mfa_exe)
+    search_roots = []
+    for root in (repo_root, code_root, env_root, mfa_root):
+        if root and os.path.isdir(root) and root not in search_roots:
+            search_roots.append(root)
+    for root in search_roots:
+        model_dir = os.path.join(root, "pretrained_models", "acoustic")
+        if not os.path.isdir(model_dir):
+            nested_dir = os.path.join(root, ".mfa_root_ascii", "pretrained_models", "acoustic")
+            if os.path.isdir(nested_dir):
+                model_dir = nested_dir
+        candidates = [
+            os.path.join(model_dir, model_name),
+            os.path.join(model_dir, model_name + ".zip"),
+            os.path.join(model_dir, model_name + ".yaml"),
+            os.path.join(model_dir, model_name + ".yml"),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+    return ""
+
+def _resolve_model_reference(model_name: str, mfa_exe: str) -> str:
+    env = os.environ.copy()
+    env_root = _env_root_from_mfa_path(mfa_exe)
+    mfa_root = _resolve_mfa_root(repo_root, env_root)
+    if env_root:
+        env_path_parts = [
+            env_root,
+            os.path.join(env_root, "Library", "mingw-w64", "bin"),
+            os.path.join(env_root, "Library", "usr", "bin"),
+            os.path.join(env_root, "Library", "bin"),
+            os.path.join(env_root, "Scripts"),
+            os.path.join(env_root, "bin"),
+            env.get("PATH", ""),
+        ]
+        env["PATH"] = os.pathsep.join([p for p in env_path_parts if p])
+    if mfa_root:
+        env["MFA_ROOT_DIR"] = mfa_root
+    if mfa_exe:
+        list_cmd = [mfa_exe, "model", "list", "acoustic"]
+        if mfa_exe.lower().endswith((".bat", ".cmd")):
+            list_cmd = ["cmd.exe", "/c", mfa_exe, "model", "list", "acoustic"]
+        try:
+            result = subprocess.run(
+                list_cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=45,
+                env=env,
+            )
+            listed = ((result.stdout or "") + "\n" + (result.stderr or "")).lower()
+            if result.returncode == 0 and model_name.lower() in listed:
+                return model_name
+        except Exception:
+            pass
+
+    local = _find_local_model_artifact(model_name, mfa_exe, mfa_root)
+    if local:
+        return local
+    return model_name
+
+def _run_align_cli(mfa_exe: str, wav_path: str, dictionary_path: str, output_path: str):
+    if not mfa_exe:
+        return False, "MFA executable not found", ""
+
+    env = os.environ.copy()
+    env_root = _env_root_from_mfa_path(mfa_exe)
+    mfa_root = _resolve_mfa_root(repo_root, env_root)
+    if env_root:
+        env["CONDA_PREFIX"] = env_root
+        env_path_parts = [
+            env_root,
+            os.path.join(env_root, "Library", "mingw-w64", "bin"),
+            os.path.join(env_root, "Library", "usr", "bin"),
+            os.path.join(env_root, "Library", "bin"),
+            os.path.join(env_root, "Scripts"),
+            os.path.join(env_root, "bin"),
+            env.get("PATH", ""),
+        ]
+        env["PATH"] = os.pathsep.join([p for p in env_path_parts if p])
+    if mfa_root:
+        env["MFA_ROOT_DIR"] = mfa_root
+
+    model_reference = _resolve_model_reference("korean_mfa", mfa_exe)
+    cmd = [
+        mfa_exe,
+        "align",
+        wav_path,
+        dictionary_path,
+        model_reference,
+        output_path,
+        "--clean",
+        "--single_speaker",
+        "--num_jobs",
+        "1",
+    ]
+    if mfa_exe.lower().endswith((".bat", ".cmd")):
+        cmd = ["cmd.exe", "/c", mfa_exe] + cmd[1:]
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
     )
+    merged = (proc.stderr or "").strip()
+    if not merged:
+        merged = (proc.stdout or "").strip()
+    tail = "\n".join(merged.splitlines()[-15:]).strip()
+    return proc.returncode == 0, tail, model_reference
+
+try:
+    runner_mode = "core_api"
+    core_import_error = ""
+    model_reference = ""
+    resolved_mfa = mfa_path or (shutil.which("mfa") or "")
+    mecab_alias_written = _ensure_mecab_module_alias(resolved_mfa)
+    ok = False
+    err = ""
+
+    if code_root:
+        try:
+            from core.mfa_runner import run_mfa_align, find_mfa_executable  # noqa: E402
+            resolved_mfa = mfa_path or (find_mfa_executable() or resolved_mfa)
+            ok, err = run_mfa_align(
+                resolved_mfa,
+                wav_dir,
+                dict_path,
+                out_dir,
+                language="korean",
+            )
+        except Exception as exc:
+            runner_mode = "cli_fallback"
+            core_import_error = f"{type(exc).__name__}: {exc}"
+            ok, err, model_reference = _run_align_cli(resolved_mfa, wav_dir, dict_path, out_dir)
+    else:
+        runner_mode = "cli_fallback"
+        core_import_error = "core.mfa_runner not found in build payload"
+        ok, err, model_reference = _run_align_cli(resolved_mfa, wav_dir, dict_path, out_dir)
+
     tg_count = len([n for n in os.listdir(out_dir) if n.lower().endswith(".textgrid")])
     low_err = str(err or "").lower()
     if ok:
@@ -308,10 +515,10 @@ try:
         failure_category = "permission"
     elif "tokenizer" in low_err or "dependency" in low_err:
         failure_category = "dependency"
+    elif "model" in low_err or "pretrainedmodelnotfounderror" in low_err:
+        failure_category = "model"
     elif "dictionary" in low_err:
         failure_category = "dictionary"
-    elif "model" in low_err:
-        failure_category = "model"
     elif "executable not found" in low_err:
         failure_category = "executable"
     else:
@@ -320,6 +527,10 @@ try:
         "ok": bool(ok),
         "error": str(err or ""),
         "failure_category": failure_category,
+        "runner_mode": runner_mode,
+        "mecab_alias_written": mecab_alias_written,
+        "core_import_error": core_import_error,
+        "model_reference": model_reference,
         "code_root": code_root,
         "dep_probe": dep_probe,
         "mfa_path": resolved_mfa,
@@ -334,6 +545,7 @@ except Exception:
         "ok": False,
         "error": traceback.format_exc(),
         "failure_category": "runtime",
+        "mecab_alias_written": False,
         "code_root": code_root,
         "dep_probe": dep_probe,
         "mfa_path": mfa_path,
@@ -343,7 +555,7 @@ except Exception:
         "textgrid_count": 0,
         "generated_sample": generated_sample,
     }
-print(json.dumps(payload, ensure_ascii=False))
+print(json.dumps(payload, ensure_ascii=True))
 '@ | Set-Content -LiteralPath $runnerPy -Encoding UTF8
 
     if ([string]::IsNullOrWhiteSpace($pythonPath)) {
@@ -363,7 +575,9 @@ print(json.dumps(payload, ensure_ascii=False))
             try {
                 $payload = $jsonLine | ConvertFrom-Json
                 Add-Check -Name "smoke_python_exit_zero" -Passed ($pythonExit -eq 0) -Detail ("exit=" + $pythonExit) -Required $false
-                Add-Check -Name "alignment_invoked" -Passed $true -Detail ($payload.mfa_path) -Required $true
+                $hasMfaPath = -not [string]::IsNullOrWhiteSpace([string]$payload.mfa_path)
+                $invokeDetail = "mfa={0}; mode={1}" -f [string]$payload.mfa_path, [string]$payload.runner_mode
+                Add-Check -Name "alignment_invoked" -Passed $hasMfaPath -Detail $invokeDetail -Required $true
                 Add-Check -Name "input_mode" -Passed $true -Detail ($(if ($payload.generated_sample) { "generated_sample" } else { "external_inputs" })) -Required $false
                 if ($null -ne $payload.dep_probe) {
                     $depDetail = "jamo=$($payload.dep_probe.jamo); mecab=$($payload.dep_probe.mecab); mecab_caps=$($payload.dep_probe.mecab_caps); mecab_ko=$($payload.dep_probe.mecab_ko)"
