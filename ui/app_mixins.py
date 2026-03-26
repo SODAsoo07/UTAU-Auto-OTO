@@ -505,6 +505,9 @@ class AppRuntimeMixin:
             "UTOA_JA_VC_NEIGHBOR_LEAD_MS",
             "UTOA_JA_VC_NEIGHBOR_TAIL_MS",
             "UTOA_JA_VC_NEIGHBOR_MIN_LEN",
+            "UTOA_CVN_CORRECTION_ENABLE",
+            "UTOA_CVN_LOW_CONF_ONLY",
+            "UTOA_CVN_C_THRESHOLD",
             "UTOA_SOFT_BANK_MODE",
             "UTOA_MFA_SOFT_BANK_MODE",
             "UTOA_MEL_SOUND_DB_MARGIN",
@@ -579,6 +582,19 @@ class AppRuntimeMixin:
         )
         os.environ["UTOA_KR_VC_NEIGHBOR_ENABLE"] = "1" if kr_vc_enabled else "0"
         os.environ["UTOA_JA_VC_NEIGHBOR_ENABLE"] = "1" if ja_vc_enabled else "0"
+        cvn_correction_enabled = (
+            bool(self.cvn_correction_enable_var.get())
+            if hasattr(self, "cvn_correction_enable_var")
+            else True
+        )
+        os.environ["UTOA_CVN_CORRECTION_ENABLE"] = "1" if cvn_correction_enabled else "0"
+        cvn_low_conf_only = (
+            bool(self.cvn_low_conf_only_var.get())
+            if hasattr(self, "cvn_low_conf_only_var")
+            else False
+        )
+        os.environ["UTOA_CVN_LOW_CONF_ONLY"] = "1" if cvn_low_conf_only else "0"
+        os.environ["UTOA_CVN_C_THRESHOLD"] = "0.4"
 
         _set_float_env("kr_vc_neighbor_blend_var", "UTOA_KR_VC_NEIGHBOR_BLEND", min_value=0.0, max_value=1.0)
         _set_float_env("kr_vc_neighbor_max_shift_var", "UTOA_KR_VC_NEIGHBOR_MAX_SHIFT", min_value=0.0)
@@ -857,6 +873,8 @@ class AppRuntimeMixin:
                 continue
         if hasattr(self, "_sync_vc_correction_toggle"):
             self._sync_vc_correction_toggle()
+        if hasattr(self, "_sync_cvn_correction_toggle"):
+            self._sync_cvn_correction_toggle()
         if hasattr(self, "_sync_advanced_tuning_slider_controls"):
             self._sync_advanced_tuning_slider_controls()
         if hasattr(self, "_sync_weak_voice_assist_controls"):
@@ -895,6 +913,8 @@ class AppRuntimeMixin:
             "kr_continuity_enable_var": True,
             "kr_continuity_max_offset_adj_var": "",
             "vc_correction_enable_var": True,
+            "cvn_correction_enable_var": True,
+            "cvn_low_conf_only_var": False,
             "kr_vc_neighbor_enable_var": True,
             "kr_vc_neighbor_blend_var": "",
             "kr_vc_neighbor_max_shift_var": "",
@@ -910,7 +930,7 @@ class AppRuntimeMixin:
             "soft_bank_mode_var": False,
             "weak_voice_assist_enable_var": True,
             "weak_voice_assist_strength_var": "",
-            "mapping_strict_mode_var": "적당히 엄격 모드(누락 행은 폴백)",
+            "mapping_strict_mode_var": "적당히 엄격(누락 행은 폴백)",
         }
         for attr, value in defaults.items():
             if not hasattr(self, attr):
@@ -927,6 +947,8 @@ class AppRuntimeMixin:
         self._save_config()
         if hasattr(self, "_sync_vc_correction_toggle"):
             self._sync_vc_correction_toggle()
+        if hasattr(self, "_sync_cvn_correction_toggle"):
+            self._sync_cvn_correction_toggle()
         if hasattr(self, "_sync_advanced_tuning_slider_controls"):
             self._sync_advanced_tuning_slider_controls()
         if hasattr(self, "_sync_weak_voice_assist_controls"):
@@ -940,12 +962,13 @@ class AppRuntimeMixin:
     @staticmethod
     def _normalize_mapping_strict_mode_code(value: str) -> str:
         raw = str(value or "").strip().lower()
+        compact = raw.replace(" ", "")
         if raw in {
             "strict",
             "full",
             "full_strict",
             "hard",
-        }:
+        } or compact in {"완전엄격", "완전엄격모드"}:
             return "strict"
         if raw in {
             "off",
@@ -954,13 +977,17 @@ class AppRuntimeMixin:
             "disabled",
             "0",
             "false",
-        }:
+        } or compact in {"끄기", "비활성", "미사용"}:
             return "off"
         if raw in {
             "soft",
             "moderate",
             "balanced",
-        }:
+        } or compact in {"적당히엄격", "적당히엄격모드", "적당히엄격(누락행은폴백)"}:
+            return "soft"
+        if "완전엄격" in compact:
+            return "strict"
+        if "적당히엄격" in compact:
             return "soft"
         return "soft"
 
@@ -968,11 +995,11 @@ class AppRuntimeMixin:
     def _mapping_strict_mode_label_from_code(code: str) -> str:
         normalized = AppRuntimeMixin._normalize_mapping_strict_mode_code(code)
         label_map = {
-            "strict": "strict",
-            "soft": "soft (fallback allowed)",
+            "strict": "완전 엄격",
+            "soft": "적당히 엄격(누락 행은 폴백)",
             "off": "off",
         }
-        return label_map.get(normalized, "soft (fallback allowed)")
+        return label_map.get(normalized, "적당히 엄격(누락 행은 폴백)")
 
     def _set_mapping_strict_mode_from_code(self, code: str) -> str:
         normalized = self._normalize_mapping_strict_mode_code(code)
@@ -2491,6 +2518,8 @@ class ConfigMixin:
             "ml_anchor_mel_gamma": self.ml_anchor_mel_gamma_var.get() if hasattr(self, "ml_anchor_mel_gamma_var") else "",
             "ml_model_root_kr": self.ml_model_root_kr_var.get() if hasattr(self, "ml_model_root_kr_var") else "",
             "ml_model_root_ja": self.ml_model_root_ja_var.get() if hasattr(self, "ml_model_root_ja_var") else "",
+            "cvn_correction_enable": self.cvn_correction_enable_var.get() if hasattr(self, "cvn_correction_enable_var") else True,
+            "cvn_low_conf_only": self.cvn_low_conf_only_var.get() if hasattr(self, "cvn_low_conf_only_var") else False,
             "kr_vc_neighbor_enable": self.kr_vc_neighbor_enable_var.get() if hasattr(self, "kr_vc_neighbor_enable_var") else True,
             "kr_vc_neighbor_blend": self.kr_vc_neighbor_blend_var.get() if hasattr(self, "kr_vc_neighbor_blend_var") else "",
             "kr_vc_neighbor_max_shift": self.kr_vc_neighbor_max_shift_var.get() if hasattr(self, "kr_vc_neighbor_max_shift_var") else "",
@@ -2633,6 +2662,10 @@ class ConfigMixin:
                 self.recursive_voicebank_scan_var.set(bool(config.get("recursive_voicebank_scan", False)))
             if hasattr(self, "enable_ml_correction_var"):
                 self.enable_ml_correction_var.set(bool(config.get("enable_ml_correction", True)))
+            if hasattr(self, "cvn_correction_enable_var"):
+                self.cvn_correction_enable_var.set(bool(config.get("cvn_correction_enable", True)))
+            if hasattr(self, "cvn_low_conf_only_var"):
+                self.cvn_low_conf_only_var.set(bool(config.get("cvn_low_conf_only", False)))
             if "ml_route" in config and hasattr(self, "ml_route_var"):
                 saved_route = self._normalize_ml_route_code(config.get("ml_route", "auto"))
                 if hasattr(self, "_set_ml_route_from_code"):
@@ -2688,7 +2721,12 @@ class ConfigMixin:
                     saved_aligner = normalize_aligner_name(config.get("aligner", "mfa"), default="mfa")
                 except Exception:
                     saved_aligner = "mfa"
-                self.aligner_var.set("No-MFA" if saved_aligner == "none" else "MFA")
+                aligner_label_map = {
+                    "none": "No-MFA",
+                    "ctc": "CTC",
+                    "mfa": "MFA",
+                }
+                self.aligner_var.set(aligner_label_map.get(saved_aligner, "MFA"))
             if "developer_mode_enabled" in config and hasattr(self, "developer_mode_enabled_var"):
                 allow_persist_dev = str(os.environ.get("UTOA_ALLOW_PERSISTENT_DEVELOPER_MODE", "")).strip().lower() in {
                     "1", "true", "yes", "on"
@@ -2976,6 +3014,8 @@ class ConfigMixin:
                 self._sync_developer_mode_ui()
             if hasattr(self, "_sync_vc_correction_toggle"):
                 self._sync_vc_correction_toggle()
+            if hasattr(self, "_sync_cvn_correction_toggle"):
+                self._sync_cvn_correction_toggle()
             if hasattr(self, "_sync_advanced_tuning_slider_controls"):
                 self._sync_advanced_tuning_slider_controls()
             if hasattr(self, "_sync_weak_voice_assist_controls"):

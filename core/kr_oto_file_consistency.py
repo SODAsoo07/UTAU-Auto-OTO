@@ -93,7 +93,18 @@ _OVERLAP_LIMITS = {
 def _max_offset_adj_ms() -> float:
     return _env_float("UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ", 180.0)
 
+def _cvn_correction_enabled() -> bool:
+    return str(os.environ.get("UTOA_CVN_CORRECTION_ENABLE", "1")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 def _vc_neighbor_enabled() -> bool:
+    if not _cvn_correction_enabled():
+        return False
     return str(os.environ.get("UTOA_KR_VC_NEIGHBOR_ENABLE", "1")).strip().lower() not in {
         "0",
         "false",

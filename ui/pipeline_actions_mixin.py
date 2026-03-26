@@ -3,6 +3,7 @@ import sys
 import locale
 import subprocess as sp
 import json
+import hashlib
 import re
 import time
 import threading
@@ -23,6 +24,8 @@ from core.no_mfa_oto_builder import (
 from core.mfa_runner import (
     ALERT_MSVC_REQUIRED,
     MFA_PORTABLE_PYTHON_VERSION,
+    _find_local_acoustic_model_artifact,
+    _get_conda_env,
     check_mfa_model,
     diagnose_mfa_runtime,
     download_mfa_model,
@@ -1150,10 +1153,12 @@ class PipelineActionsMixin:
         if resolved and os.path.exists(resolved):
             self.mfa_path = resolved
         if not self.mfa_path or not os.path.exists(self.mfa_path):
+            self._clear_mfa_ready_stamp(language=lang)
             self._notify_long_install_time("MFA")
             self._append_log("ℹ MFA가 없어 지금 자동 설치를 시작합니다.")
             if not self._confirm_mfa_install_action(language=lang, reason="missing_runtime"):
                 self._mfa_ready_cache_ok = False
+                self._clear_mfa_ready_stamp(language=lang)
                 self._last_mfa_install_declined = True
                 return False
             install_ok = False
@@ -1166,8 +1171,12 @@ class PipelineActionsMixin:
                 cache_key = f"{lang}|{os.path.normcase(os.path.abspath(str(self.mfa_path or '')))}"
                 self._mfa_ready_cache_key = cache_key
                 self._mfa_ready_cache_ok = True
+                signature = self._build_mfa_ready_signature(self.mfa_path, lang)
+                if signature and self._mfa_ready_cache_enabled():
+                    self._save_mfa_ready_stamp(lang, signature, cache_key=cache_key)
                 return True
             self._mfa_ready_cache_ok = False
+            self._clear_mfa_ready_stamp(language=lang)
             return self._run_setup_mfa_script_fallback(language=lang, reason="auto_install_failed")
         soft_rebuild_gate = str(os.environ.get("UTOA_MFA_SOFT_REBUILD", "1") or "").strip().lower() in {
             "1",
@@ -1188,6 +1197,7 @@ class PipelineActionsMixin:
                 )
                 self.mfa_path = ""
                 self._mfa_ready_cache_ok = False
+                self._clear_mfa_ready_stamp(language=lang)
                 if not self._confirm_mfa_install_action(language=lang, reason="python_rebuild"):
                     self._last_mfa_install_declined = True
                     return False
@@ -1201,7 +1211,11 @@ class PipelineActionsMixin:
                     cache_key = f"{lang}|{os.path.normcase(os.path.abspath(str(self.mfa_path or '')))}"
                     self._mfa_ready_cache_key = cache_key
                     self._mfa_ready_cache_ok = True
+                    signature = self._build_mfa_ready_signature(self.mfa_path, lang)
+                    if signature and self._mfa_ready_cache_enabled():
+                        self._save_mfa_ready_stamp(lang, signature, cache_key=cache_key)
                     return True
+                self._clear_mfa_ready_stamp(language=lang)
                 return self._run_setup_mfa_script_fallback(language=lang, reason="python_rebuild_install_failed")
 
         # Runtime path exists: keep per-run check lightweight.
@@ -1211,6 +1225,17 @@ class PipelineActionsMixin:
             and str(getattr(self, "_mfa_ready_cache_key", "") or "") == cache_key
         ):
             return True
+        signature = self._build_mfa_ready_signature(self.mfa_path, lang)
+        if signature and self._mfa_ready_cache_enabled():
+            env_stamp = self._read_mfa_ready_stamp_from_env(lang)
+            file_stamp = self._read_mfa_ready_stamp_from_state(lang)
+            if signature == env_stamp or signature == file_stamp:
+                self._mfa_ready_cache_key = cache_key
+                self._mfa_ready_cache_ok = True
+                self._save_mfa_ready_stamp(lang, signature, cache_key=cache_key)
+                if hasattr(self, "_append_detail_log"):
+                    self._append_detail_log("ℹ MFA 빠른 점검: 설치 스탬프 일치로 모델 재점검을 건너뜁니다.")
+                return True
         has_model, msg = check_mfa_model(self.mfa_path, language=lang)
         if msg:
             self._append_log(msg)
@@ -1218,14 +1243,19 @@ class PipelineActionsMixin:
             self._append_log("ℹ 현재 언어용 MFA 모델이 없어 자동 다운로드를 시작합니다.")
             if not self._confirm_mfa_install_action(language=lang, reason="model_download"):
                 self._mfa_ready_cache_ok = False
+                self._clear_mfa_ready_stamp(language=lang)
                 self._last_mfa_install_declined = True
                 return False
             if not download_mfa_model(self.mfa_path, language=lang, callback=self._append_log):
                 self._append_log("❌ MFA 모델 다운로드 실패")
                 self._mfa_ready_cache_ok = False
+                self._clear_mfa_ready_stamp(language=lang)
                 return False
         self._mfa_ready_cache_key = cache_key
         self._mfa_ready_cache_ok = True
+        signature = self._build_mfa_ready_signature(self.mfa_path, lang)
+        if signature and self._mfa_ready_cache_enabled():
+            self._save_mfa_ready_stamp(lang, signature, cache_key=cache_key)
         return True
 
     def _mfa_startup_repair_state_path(self):
@@ -1257,6 +1287,164 @@ class PipelineActionsMixin:
                 json.dump(state, f, ensure_ascii=False, indent=2)
         except Exception:
             return
+
+    @staticmethod
+    def _mfa_ready_cache_enabled() -> bool:
+        raw = str(os.environ.get("UTOA_MFA_READY_CACHE_ENABLE", "1") or "").strip().lower()
+        return raw not in {"0", "false", "off", "no", "n"}
+
+    def _mfa_ready_cache_state_path(self):
+        base_dir = (
+            getattr(self, "writable_data_dir", "")
+            or getattr(self, "app_data_dir", "")
+            or getattr(self, "app_dir", "")
+            or os.getcwd()
+        )
+        return os.path.join(base_dir, ".mfa_ready_cache_state.json")
+
+    def _load_mfa_ready_cache_state(self):
+        path = self._mfa_ready_cache_state_path()
+        if not os.path.isfile(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_mfa_ready_cache_state(self, state):
+        if not isinstance(state, dict):
+            return
+        path = self._mfa_ready_cache_state_path()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except Exception:
+            return
+
+    @staticmethod
+    def _file_integrity_fingerprint(path: str) -> str:
+        target = str(path or "").strip()
+        if not target:
+            return ""
+        try:
+            st = os.stat(target)
+            return "|".join(
+                [
+                    os.path.normcase(os.path.abspath(target)),
+                    str(int(st.st_size)),
+                    str(int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)))),
+                ]
+            )
+        except Exception:
+            return f"{os.path.normcase(os.path.abspath(target))}|missing"
+
+    def _build_mfa_ready_signature(self, mfa_path: str, language: str) -> str:
+        resolved = str(mfa_path or "").strip()
+        if not resolved or not os.path.isfile(resolved):
+            return ""
+        lang = str(language or "korean").strip().lower()
+        env_dir = ""
+        if "Scripts" in resolved:
+            try:
+                env_dir = os.path.dirname(os.path.dirname(os.path.abspath(resolved)))
+            except Exception:
+                env_dir = ""
+        python_exe = os.path.join(env_dir, "python.exe") if env_dir else ""
+        pip_exe = os.path.join(env_dir, "Scripts", "pip.exe") if env_dir else ""
+        model_name = "japanese_mfa" if lang == "japanese" else "korean_mfa"
+        env = None
+        try:
+            env = _get_conda_env(resolved)
+        except Exception:
+            env = None
+        model_artifact = ""
+        try:
+            model_artifact = _find_local_acoustic_model_artifact(resolved, model_name, env=env) or ""
+        except Exception:
+            model_artifact = ""
+        parts = [
+            f"lang={lang}",
+            f"mfa={self._file_integrity_fingerprint(resolved)}",
+            f"python={self._file_integrity_fingerprint(python_exe)}",
+            f"pip={self._file_integrity_fingerprint(pip_exe)}",
+            f"model={self._file_integrity_fingerprint(model_artifact)}",
+        ]
+        try:
+            return hashlib.sha256("||".join(parts).encode("utf-8", errors="replace")).hexdigest()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _read_mfa_ready_stamp_from_env(language: str) -> str:
+        lang = str(language or "korean").strip().lower()
+        raw = str(os.environ.get("UTOA_MFA_READY_STAMP", "") or "").strip()
+        if not raw:
+            return ""
+        if "|" not in raw:
+            return raw if len(raw) >= 16 else ""
+        left, right = raw.split("|", 1)
+        if str(left).strip().lower() != lang:
+            return ""
+        return str(right or "").strip()
+
+    def _read_mfa_ready_stamp_from_state(self, language: str) -> str:
+        lang = str(language or "korean").strip().lower()
+        state = self._load_mfa_ready_cache_state()
+        stamps = state.get("stamps", {})
+        if not isinstance(stamps, dict):
+            return ""
+        item = stamps.get(lang, {})
+        if isinstance(item, dict):
+            return str(item.get("signature", "") or "").strip()
+        if isinstance(item, str):
+            return str(item).strip()
+        return ""
+
+    def _save_mfa_ready_stamp(self, language: str, signature: str, cache_key: str = "") -> None:
+        lang = str(language or "korean").strip().lower()
+        sig = str(signature or "").strip()
+        if not lang:
+            return
+        if not sig:
+            self._clear_mfa_ready_stamp(language=lang)
+            return
+        os.environ["UTOA_MFA_READY_STAMP"] = f"{lang}|{sig}"
+        state = self._load_mfa_ready_cache_state()
+        stamps = state.get("stamps", {})
+        if not isinstance(stamps, dict):
+            stamps = {}
+        stamps[lang] = {
+            "signature": sig,
+            "cache_key": str(cache_key or ""),
+            "updated_ts": float(time.time()),
+        }
+        state["stamps"] = stamps
+        self._save_mfa_ready_cache_state(state)
+
+    def _clear_mfa_ready_stamp(self, language: str = "") -> None:
+        lang = str(language or "").strip().lower()
+        try:
+            raw = str(os.environ.get("UTOA_MFA_READY_STAMP", "") or "").strip()
+            if raw:
+                if (not lang) or raw.startswith(f"{lang}|"):
+                    os.environ.pop("UTOA_MFA_READY_STAMP", None)
+        except Exception:
+            pass
+        state = self._load_mfa_ready_cache_state()
+        stamps = state.get("stamps", {})
+        if not isinstance(stamps, dict):
+            return
+        if lang:
+            if lang in stamps:
+                stamps.pop(lang, None)
+                state["stamps"] = stamps
+                self._save_mfa_ready_cache_state(state)
+            return
+        if stamps:
+            state["stamps"] = {}
+            self._save_mfa_ready_cache_state(state)
 
     def _check_startup_ml_runtime_ready(self, mfa_report=None):
         report = mfa_report if isinstance(mfa_report, dict) else {}
@@ -1656,6 +1844,10 @@ class PipelineActionsMixin:
                 self._append_log("✅ 초기 MFA+ML 상태 점검 완료 (복구 불필요)")
                 self._update_mfa_status(True)
                 self._set_status("✅ 초기 MFA+ML 점검 완료")
+                signature = self._build_mfa_ready_signature(self.mfa_path or "", lang)
+                if signature and self._mfa_ready_cache_enabled():
+                    cache_key = f"{lang}|{os.path.normcase(os.path.abspath(str(self.mfa_path or '')))}"
+                    self._save_mfa_ready_stamp(lang, signature, cache_key=cache_key)
                 self._save_mfa_startup_repair_state(
                     last_result="success",
                     last_success_ts=time.time(),
@@ -1727,6 +1919,10 @@ class PipelineActionsMixin:
                 self._append_log("✅ 초기 MFA+ML 자동 복구 완료")
                 self._update_mfa_status(True)
                 self._set_status("✅ 초기 MFA+ML 복구 완료")
+                signature = self._build_mfa_ready_signature(self.mfa_path or "", lang)
+                if signature and self._mfa_ready_cache_enabled():
+                    cache_key = f"{lang}|{os.path.normcase(os.path.abspath(str(self.mfa_path or '')))}"
+                    self._save_mfa_ready_stamp(lang, signature, cache_key=cache_key)
                 self._save_mfa_startup_repair_state(
                     last_result="success",
                     last_success_ts=time.time(),
@@ -1737,6 +1933,7 @@ class PipelineActionsMixin:
                 )
             else:
                 issues = list(after.get("issues", []) or [])
+                self._clear_mfa_ready_stamp(language=lang)
                 self._append_log("⚠ 초기 MFA+ML 자동 복구가 완료되지 않았습니다. 'MFA 진단/복구' 버튼으로 재시도하세요.")
                 detail = str(ml_after.get("detail", "") or "").strip()
                 if detail and not ml_after.get("ready"):
@@ -1763,6 +1960,7 @@ class PipelineActionsMixin:
                     first_check_done=True,
                 )
         except Exception as e:
+            self._clear_mfa_ready_stamp(language=lang)
             self._save_mfa_startup_repair_state(
                 last_result="error",
                 last_error=str(e),
@@ -2566,6 +2764,8 @@ class PipelineActionsMixin:
                 _set_stage_progress("align", 0.05)
                 if primary_engine == "none":
                     self._set_status("3/5 - 정렬 건너뛰기(no-MFA)")
+                elif primary_engine == "ctc":
+                    self._set_status("3/5 - CTC 정렬 준비 중...")
                 else:
                     self._set_status("3/5 - MFA 정렬 준비 중...")
                     if not self._ensure_mfa_ready_for_language(lang):
@@ -2581,6 +2781,8 @@ class PipelineActionsMixin:
                 )
                 if primary_engine == "mfa":
                     self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
+                elif primary_engine == "ctc":
+                    self._append_log("ℹ 정렬 엔진: CTC (MMS)")
                 else:
                     self._append_log("ℹ 정렬 엔진: none (MFA 비사용)")
                 if hasattr(self, "_apply_advanced_tuning_envs"):

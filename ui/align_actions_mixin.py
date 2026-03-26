@@ -21,14 +21,15 @@ class AlignActionsMixin:
                 dict_filename = "japanese_dict.txt" if lang == "japanese" else "korean_dict.txt"
                 dict_path = os.path.join(wav_dir, dict_filename)
                 output_dir = os.path.join(wav_dir, "textgrids")
-                if hasattr(self, "_validate_alignment_input_files"):
-                    if not self._validate_alignment_input_files(wav_dir, dict_path):
-                        return
 
                 primary_engine = normalize_aligner_name(
                     self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
                     default="mfa",
                 )
+                if primary_engine == "mfa":
+                    if hasattr(self, "_validate_alignment_input_files"):
+                        if not self._validate_alignment_input_files(wav_dir, dict_path):
+                            return
                 mfa_profile = (
                     self._get_mfa_align_profile_code()
                     if hasattr(self, "_get_mfa_align_profile_code")
@@ -37,6 +38,10 @@ class AlignActionsMixin:
                 self._append_log(
                     f"ℹ 정렬 실행 시작: engine={primary_engine}, profile={mfa_profile}"
                 )
+                if primary_engine == "none":
+                    self._append_log("ℹ No-MFA 설정에서는 정렬 실행을 건너뜁니다.")
+                    self._set_status("Alignment skipped (No-MFA)")
+                    return
 
                 if primary_engine == "mfa":
                     if hasattr(self, "_ensure_mfa_ready_for_language"):
@@ -51,9 +56,13 @@ class AlignActionsMixin:
                         ):
                             self._set_status("MFA model missing")
                             return
+                elif primary_engine == "ctc":
+                    self._append_log("ℹ CTC 엔진 선택: torchaudio MMS 백엔드로 실행합니다.")
 
                 if primary_engine == "mfa":
                     self._append_log(f"MFA profile: {mfa_profile}")
+                elif primary_engine == "ctc":
+                    self._append_log("Alignment engine: CTC (MMS)")
                 else:
                     self._append_log("Alignment engine: none (MFA bypass)")
                 if hasattr(self, "_apply_advanced_tuning_envs"):

@@ -372,6 +372,8 @@ class App(
         self.kr_continuity_enable_var = ctk.BooleanVar(value=True)
         self.kr_continuity_max_offset_adj_var = ctk.StringVar(value="")
         self.vc_correction_enable_var = ctk.BooleanVar(value=True)
+        self.cvn_correction_enable_var = ctk.BooleanVar(value=True)
+        self.cvn_low_conf_only_var = ctk.BooleanVar(value=False)
         self.soft_bank_mode_var = ctk.BooleanVar(value=False)
         self.low_rms_gain_enable_var = ctk.BooleanVar(value=True)
         self.weak_voice_assist_enable_var = ctk.BooleanVar(value=True)

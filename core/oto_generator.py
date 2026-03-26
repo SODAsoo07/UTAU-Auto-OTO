@@ -5060,9 +5060,13 @@ def generate_oto(
 
                 else:
                     cv_vowel_len = n_end - n_start
+                    onset_slice_hint = _select_kr_cv_onset_slice(curr_phones) if curr_phones else None
+                    onset_idx_hint = int(onset_slice_hint[0]) if onset_slice_hint is not None else 0
+                    if onset_idx_hint < 0 or onset_idx_hint >= len(curr_phones or []):
+                        onset_idx_hint = 0
+                    c_hint = curr_phones[onset_idx_hint].mark if curr_phones else ""
 
                     if is_diph:
-                        c_hint = curr_phones[0].mark if curr_phones else ""
                         alias_onset = _extract_alias_onset(alias)
                         offset, consonant, cutoff, pre, ovl = _compute_kr_cv_timing(
                             c_start,
@@ -5098,11 +5102,10 @@ def generate_oto(
                                 n_start, n_end
                             )
                     else:
-                        first_phone_plosive = len(curr_phones) >= 2 and is_plosive_ipa(curr_phones[0].mark)
+                        first_phone_plosive = bool(curr_phones) and is_plosive_ipa(c_hint)
                         alias_consonant = re.match(r'^([^aeiouyw]+)', alias.lower())
                         roman_plosive = alias_consonant and is_plosive_roman(alias_consonant.group(1)) if alias_consonant else False
                         alias_onset = alias_consonant.group(1) if alias_consonant else ""
-                        c_hint = curr_phones[0].mark if curr_phones else ""
                         is_plosive = first_phone_plosive or roman_plosive
                         offset, consonant, cutoff, pre, ovl = _compute_kr_cv_timing(
                             c_start,

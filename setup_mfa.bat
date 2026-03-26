@@ -28,6 +28,8 @@ set "REQUESTED_MODE="
 
 set "WRAPPER_MODE="
 
+set "RECOVERY_LANGUAGE=korean"
+
 set "RUNTIME_ROOT_OVERRIDE="
 
 set "SETUP_MFA_SELF=%~f0"
@@ -58,10 +60,12 @@ if "%~1"=="" goto :args_done
 if /i "%~1"=="--help" goto :show_help
 
 if /i "%~1"=="--runtime-root" goto :capture_runtime_root
+if /i "%~1"=="--language" goto :capture_language
 
 set "ARG_RAW=%~1"
 
 if /i "%ARG_RAW:~0,15%"=="--runtime-root=" goto :capture_runtime_root_inline
+if /i "%ARG_RAW:~0,11%"=="--language=" goto :capture_language_inline
 
 if /i "%~1"=="--with-ml" set "INSTALL_ML=1"
 
@@ -121,6 +125,48 @@ shift
 
 goto :parse_args
 
+:capture_language
+
+shift
+
+if "%~1"=="" goto :missing_language
+
+set "LANG_CANDIDATE=%~1"
+
+if /i "%LANG_CANDIDATE:~0,2%"=="--" goto :missing_language
+
+set "RECOVERY_LANGUAGE=%~1"
+
+call :normalize_recovery_language
+
+if errorlevel 1 exit /b 1
+
+shift
+
+goto :parse_args
+
+:capture_language_inline
+
+set "RECOVERY_LANGUAGE=%ARG_RAW:~11%"
+
+if "%RECOVERY_LANGUAGE%"=="" goto :missing_language
+
+call :normalize_recovery_language
+
+if errorlevel 1 exit /b 1
+
+shift
+
+goto :parse_args
+
+:missing_language
+
+echo [FAILED] --language requires a value: korean or japanese.
+
+echo          Example: --language japanese
+
+exit /b 1
+
 :missing_runtime_root
 
 echo [FAILED] --runtime-root requires a valid path value.
@@ -134,6 +180,7 @@ exit /b 1
 echo Usage: setup_mfa.bat [--install ^| --recovery ^| --menu] [--runtime-root PATH] [--with-ml] [--non-interactive]
 
 echo Installs or repairs MFA runtime ^(.env^), micromamba packages, and language/model dependencies.
+echo For CTC runtime ^(.env_ctc^) use setup_ctc.bat.
 
 echo.
 
@@ -146,6 +193,10 @@ echo   --menu                    Show mode selection menu
 echo   --runtime-root PATH       Explicit runtime root path
 
 echo   --runtime-root=PATH       Same as above ^(inline form^)
+
+echo   --language LANG           Recovery language: korean ^| japanese
+
+echo   --language=LANG           Same as above ^(inline form^)
 
 echo   --with-ml / --install-ml  Install ML dependencies ^(pandas/pyarrow/lightgbm/onnxruntime^)
 
@@ -299,11 +350,11 @@ if "%NON_INTERACTIVE%"=="1" (
 
     if "%INSTALL_ML%"=="1" (
 
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language korean -NonInteractive -WithMl
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language %RECOVERY_LANGUAGE% -NonInteractive -WithMl
 
     ) else (
 
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language korean -NonInteractive
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language %RECOVERY_LANGUAGE% -NonInteractive
 
     )
 
@@ -311,11 +362,11 @@ if "%NON_INTERACTIVE%"=="1" (
 
     if "%INSTALL_ML%"=="1" (
 
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language korean -WithMl
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language %RECOVERY_LANGUAGE% -WithMl
 
     ) else (
 
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language korean
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language %RECOVERY_LANGUAGE%
 
     )
 
@@ -652,6 +703,22 @@ if errorlevel 1 (
 set "WRAPPER_MODE=install"
 
 goto :eof
+
+:normalize_recovery_language
+
+set "RECOVERY_LANGUAGE=%RECOVERY_LANGUAGE:"=%"
+
+if /i "%RECOVERY_LANGUAGE%"=="ko" set "RECOVERY_LANGUAGE=korean"
+if /i "%RECOVERY_LANGUAGE%"=="kr" set "RECOVERY_LANGUAGE=korean"
+if /i "%RECOVERY_LANGUAGE%"=="ja" set "RECOVERY_LANGUAGE=japanese"
+if /i "%RECOVERY_LANGUAGE%"=="jp" set "RECOVERY_LANGUAGE=japanese"
+
+if /i "%RECOVERY_LANGUAGE%"=="korean" exit /b 0
+if /i "%RECOVERY_LANGUAGE%"=="japanese" exit /b 0
+
+echo [FAILED] Invalid --language value: %RECOVERY_LANGUAGE%
+echo          Allowed values: korean, japanese
+exit /b 1
 
 :preflight_install_tools
 

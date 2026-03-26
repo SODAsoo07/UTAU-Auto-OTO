@@ -174,7 +174,7 @@ class TabBuildersMixin:
             ),
             (
                 "align",
-                "2. 음성 정렬 (MFA)",
+                "2. 음성 정렬",
                 "MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.",
                 self._run_mfa,
             ),
@@ -201,18 +201,18 @@ class TabBuildersMixin:
         self.mfa_repair_btn = ctk.CTkButton(
             mfa_btn_row,
             text="🔍 MFA 진단/복구",
-            width=160,
+            width=108,
             fg_color="#B0BEC5",
             hover_color="#90A4AE",
             text_color="black",
             command=self._run_mfa_diagnose_repair,
         )
-        self.mfa_repair_btn.grid(row=0, column=0, padx=(0, 6), pady=2, sticky="w")
+        self.mfa_repair_btn.grid(row=0, column=0, padx=(0, 6), pady=1, sticky="w")
 
         self.mfa_install_btn = ctk.CTkButton(
             mfa_btn_row,
             text="⬇ MFA 원클릭 설치",
-            width=160,
+            width=108,
             fg_color="#FFA726",
             hover_color="#FB8C00",
             text_color="black",
@@ -224,11 +224,11 @@ class TabBuildersMixin:
             self.mfa_install_btn.configure(text="확인 중...", state="disabled", fg_color="#B0BEC5")
         elif mfa_ready:
             self.mfa_install_btn.configure(text="✅ 설치 완료", state="disabled", fg_color="#388E3C")
-        self.mfa_install_btn.grid(row=0, column=1, padx=(6, 0), pady=2, sticky="w")
+        self.mfa_install_btn.grid(row=0, column=1, padx=(6, 0), pady=1, sticky="w")
 
         ctk.CTkLabel(
             right_actions,
-            text="파이프라인 단계",
+            text="순서대로 실행",
             font=("", 13, "bold"),
             text_color=PALETTE.neutral_text,
         ).pack(anchor="w", pady=(0, 4))
@@ -248,7 +248,7 @@ class TabBuildersMixin:
                 command=cmd,
             )
             _style_primary_button(step_btn)
-            step_btn.grid(row=idx * 2, column=0, padx=(0, 8), pady=2, sticky="w")
+            step_btn.grid(row=idx * 2, column=0, padx=(0, 8), pady=1, sticky="w")
             if idx < len(steps) - 1:
                 ctk.CTkLabel(
                     steps_grid,
@@ -256,16 +256,16 @@ class TabBuildersMixin:
                     font=("", 14, "bold"),
                     text_color=PALETTE.hint_text,
                     anchor="w",
-                ).grid(row=(idx * 2) + 1, column=0, padx=(82, 0), pady=(0, 2), sticky="w")
+                ).grid(row=(idx * 2) + 1, column=0, padx=(82, 0), pady=(0, 1), sticky="w")
             self.pipeline_step_buttons[step_key] = step_btn
             if step_key == "align":
                 self.pipeline_step_align_btn = step_btn
 
         for step_key, title, desc, cmd in steps:
             frame = ctk.CTkFrame(content, fg_color=overlay, border_width=1, border_color=PALETTE.panel_border)
-            frame.pack(fill="x", padx=10, pady=5)
+            frame.pack(fill="x", padx=10, pady=4)
             left = ctk.CTkFrame(frame, fg_color="transparent")
-            left.pack(side="left", fill="x", expand=True, padx=10, pady=8)
+            left.pack(side="left", fill="x", expand=True, padx=10, pady=6)
             title_label = ctk.CTkLabel(left, text=title, font=("", 14, "bold"), anchor="w")
             title_label.pack(anchor="w")
             desc_label = ctk.CTkLabel(left, text=desc, text_color=PALETTE.neutral_text, anchor="w", wraplength=500)
@@ -579,6 +579,41 @@ class TabBuildersMixin:
         continuity_help_label.pack(anchor="w", padx=34, pady=(0, 6))
         self._bind_wraplength_to_container(basic_toggle_frame, [continuity_help_label], padding=64, min_wrap=260)
 
+        post_frame = ctk.CTkFrame(
+            container,
+            fg_color=PALETTE.panel_bg,
+            border_width=1,
+            border_color=PALETTE.panel_border,
+        )
+        post_frame.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkLabel(
+            post_frame,
+            text="후처리(연속성) 옵션",
+            font=("", 14, "bold"),
+            text_color=PALETTE.header_accent,
+        ).pack(anchor="w", padx=12, pady=(10, 6))
+
+        cont_row = ctk.CTkFrame(post_frame, fg_color="transparent")
+        cont_row.pack(anchor="w", padx=12, pady=(0, 8), fill="x")
+        ctk.CTkLabel(
+            cont_row,
+            text="연속성 offset 보정 상한 (ms)",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+        cont_entry = ctk.CTkEntry(
+            cont_row,
+            width=90,
+            textvariable=self.kr_continuity_max_offset_adj_var,
+            placeholder_text="기본값(180)",
+        )
+        cont_entry.pack(side="left", padx=(10, 8))
+        cont_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(
+            cont_row,
+            text="크게 잡을수록 연속성 보정이 강해지고, 작게 잡을수록 보정이 약해집니다.",
+            text_color=PALETTE.hint_text,
+        ).pack(side="left", padx=(4, 0))
+
         bank_preset_frame = ctk.CTkFrame(basic_toggle_frame, fg_color="transparent")
         bank_preset_frame.pack(fill="x", padx=12, pady=(0, 8))
         ctk.CTkLabel(
@@ -782,7 +817,7 @@ class TabBuildersMixin:
             values=(
                 self._get_mapping_strict_mode_option_labels()
                 if hasattr(self, "_get_mapping_strict_mode_option_labels")
-                else ["완전 엄격 모드", "적당히 엄격 모드(누락 행은 폴백)", "off"]
+                else ["완전 엄격", "적당히 엄격(누락 행은 폴백)", "off"]
             ),
             variable=self.mapping_strict_mode_var,
             width=260,
@@ -831,6 +866,28 @@ class TabBuildersMixin:
             text="OFF 시 ML 보정(자동/No-MFA/v1/v2) 단계를 건너뜁니다.",
             text_color=PALETTE.hint_text,
         ).pack(anchor="w", padx=12, pady=(0, 6))
+
+        self.cvn_correction_enable_checkbox = ctk.CTkCheckBox(
+            ml_frame,
+            text="자음 구분기(C/V) 보정 사용",
+            text_color="#5F8C87",
+            variable=self.cvn_correction_enable_var,
+            command=(
+                self._on_cvn_correction_toggle
+                if hasattr(self, "_on_cvn_correction_toggle")
+                else self._save_config
+            ),
+        )
+        self.cvn_correction_enable_checkbox.pack(anchor="w", padx=12, pady=(2, 2))
+
+        self.cvn_low_conf_only_checkbox = ctk.CTkCheckBox(
+            ml_frame,
+            text="정렬 저신뢰 샘플에만 C/V 후보정 적용",
+            text_color=PALETTE.neutral_text,
+            variable=self.cvn_low_conf_only_var,
+            command=self._save_config,
+        )
+        self.cvn_low_conf_only_checkbox.pack(anchor="w", padx=34, pady=(0, 4))
 
         selector_mode_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
         selector_mode_row.pack(anchor="w", padx=12, pady=(4, 0), fill="x")
@@ -1140,41 +1197,6 @@ class TabBuildersMixin:
         self.ml_coupled_status_detail_label.pack(anchor="w", padx=12, pady=(0, 8))
         if hasattr(self, "_refresh_ml_backend_status"):
             self._refresh_ml_backend_status()
-
-        post_frame = ctk.CTkFrame(
-            dev_container,
-            fg_color=PALETTE.panel_bg,
-            border_width=1,
-            border_color=PALETTE.panel_border,
-        )
-        post_frame.pack(fill="x", padx=10, pady=5)
-        ctk.CTkLabel(
-            post_frame,
-            text="후처리(연속성) 옵션",
-            font=("", 14, "bold"),
-            text_color=PALETTE.header_accent,
-        ).pack(anchor="w", padx=12, pady=(10, 6))
-
-        cont_row = ctk.CTkFrame(post_frame, fg_color="transparent")
-        cont_row.pack(anchor="w", padx=12, pady=(0, 8), fill="x")
-        ctk.CTkLabel(
-            cont_row,
-            text="연속성 offset 보정 상한 (ms)",
-            text_color=PALETTE.neutral_text,
-        ).pack(side="left")
-        cont_entry = ctk.CTkEntry(
-            cont_row,
-            width=90,
-            textvariable=self.kr_continuity_max_offset_adj_var,
-            placeholder_text="기본값(180)",
-        )
-        cont_entry.pack(side="left", padx=(10, 8))
-        cont_entry.bind("<FocusOut>", lambda _e: self._save_config())
-        ctk.CTkLabel(
-            cont_row,
-            text="크게 잡을수록 연속성 보정이 강해지고, 작게 잡을수록 보정이 약해집니다.",
-            text_color=PALETTE.hint_text,
-        ).pack(side="left", padx=(4, 0))
 
         vc_frame = ctk.CTkFrame(dev_container)
         vc_frame.pack(fill="x", padx=10, pady=5)
