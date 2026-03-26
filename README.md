@@ -1,5 +1,9 @@
 우타우 보이스뱅크의 자동 원음설정을 위한 툴입니다. 현재 한국어와 일본어를 지원합니다.
 
+A tool for automatic Otoing in Utau VoiceBank. It currently supports Korean and Japanese.
+
+---
+
 가이드 작성 중...
 
 </br>
