@@ -934,11 +934,7 @@ call :install_audio_deps
 
 if errorlevel 1 exit /b 1
 
-call :install_korean_support
-
-if errorlevel 1 exit /b 1
-
-call :install_japanese_support
+call :install_selected_language_support
 
 if errorlevel 1 exit /b 1
 
@@ -958,15 +954,7 @@ echo.
 
 echo ..
 
-call :download_acoustic_model korean_mfa
-
-if errorlevel 1 exit /b 1
-
-echo.
-
-echo ..
-
-call :download_acoustic_model japanese_mfa
+call :download_selected_acoustic_models
 
 if errorlevel 1 exit /b 1
 
@@ -1173,11 +1161,7 @@ if errorlevel 1 exit /b 1
 
 echo [4/5] Installing language and audio dependencies...
 
-call :install_korean_support
-
-if errorlevel 1 exit /b 1
-
-call :install_japanese_support
+call :install_selected_language_support
 
 if errorlevel 1 exit /b 1
 
@@ -1207,11 +1191,7 @@ echo.
 
 echo [ / .. ^( 1~2 )
 
-call :download_acoustic_model korean_mfa
-
-if errorlevel 1 exit /b 1
-
-call :download_acoustic_model japanese_mfa
+call :download_selected_acoustic_models
 
 if errorlevel 1 exit /b 1
 
@@ -1341,7 +1321,8 @@ taskkill /F /IM micromamba.exe >nul 2>nul
 
 taskkill /F /IM UTAU_Auto_OTO.exe >nul 2>nul
 
-timeout /t 2 /nobreak >nul
+timeout /t 2 /nobreak >nul 2>nul
+ver >nul
 
 goto :eof
 
@@ -1576,6 +1557,52 @@ if exist "%ENV_DIR%\python.exe" (
 )
 
 goto :eof
+
+:install_selected_language_support
+
+if /i "%RECOVERY_LANGUAGE%"=="japanese" (
+
+    call :install_japanese_support
+    exit /b %ERRORLEVEL%
+
+)
+
+if /i "%RECOVERY_LANGUAGE%"=="korean" (
+
+    call :install_korean_support
+    exit /b %ERRORLEVEL%
+
+)
+
+call :install_korean_support
+if errorlevel 1 exit /b 1
+call :install_japanese_support
+exit /b %ERRORLEVEL%
+
+:download_selected_acoustic_models
+
+echo.
+
+echo ..
+
+if /i "%RECOVERY_LANGUAGE%"=="japanese" (
+
+    call :download_acoustic_model japanese_mfa
+    exit /b %ERRORLEVEL%
+
+)
+
+if /i "%RECOVERY_LANGUAGE%"=="korean" (
+
+    call :download_acoustic_model korean_mfa
+    exit /b %ERRORLEVEL%
+
+)
+
+call :download_acoustic_model korean_mfa
+if errorlevel 1 exit /b 1
+call :download_acoustic_model japanese_mfa
+exit /b %ERRORLEVEL%
 
 :install_audio_deps
 
@@ -2611,7 +2638,7 @@ if exist "%ENV_DIR%" (
 
     call :release_env_lock_processes
 
-    timeout /t 2 /nobreak >nul
+    timeout /t 2 /nobreak >nul 2>nul
 
     goto :remove_env_retry_loop
 

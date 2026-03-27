@@ -84,3 +84,4 @@ models_installed/
 *.tar
 *.tar.gz
 /micromamba
+/.env_ctc
