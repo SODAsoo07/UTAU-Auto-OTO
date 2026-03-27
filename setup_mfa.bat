@@ -28,6 +28,10 @@ set "REQUESTED_MODE="
 
 set "WRAPPER_MODE="
 
+set "REQUESTED_LANGUAGE="
+
+set "RECOVERY_LANGUAGE=korean"
+
 set "RUNTIME_ROOT_OVERRIDE="
 
 set "SETUP_MFA_SELF=%~f0"
@@ -62,6 +66,10 @@ if /i "%~1"=="--runtime-root" goto :capture_runtime_root
 set "ARG_RAW=%~1"
 
 if /i "%ARG_RAW:~0,15%"=="--runtime-root=" goto :capture_runtime_root_inline
+
+if /i "%~1"=="--language" goto :capture_language
+
+if /i "%ARG_RAW:~0,11%"=="--language=" goto :capture_language_inline
 
 if /i "%~1"=="--with-ml" set "INSTALL_ML=1"
 
@@ -121,11 +129,45 @@ shift
 
 goto :parse_args
 
+:capture_language
+
+shift
+
+if "%~1"=="" goto :missing_language
+
+set "LANGUAGE_CANDIDATE=%~1"
+
+if /i "%LANGUAGE_CANDIDATE:~0,2%"=="--" goto :missing_language
+
+set "REQUESTED_LANGUAGE=%~1"
+
+shift
+
+goto :parse_args
+
+:capture_language_inline
+
+set "REQUESTED_LANGUAGE=%ARG_RAW:~11%"
+
+if "%REQUESTED_LANGUAGE%"=="" goto :missing_language
+
+shift
+
+goto :parse_args
+
 :missing_runtime_root
 
 echo [FAILED] --runtime-root requires a valid path value.
 
 echo          Example: --runtime-root "C:\Users\%USERNAME%\AppData\Local\UTAU_Auto_OTO"
+
+exit /b 1
+
+:missing_language
+
+echo [FAILED] --language requires a value ^(korean or japanese^).
+
+echo          Example: --language japanese
 
 exit /b 1
 
@@ -147,6 +189,10 @@ echo   --runtime-root PATH       Explicit runtime root path
 
 echo   --runtime-root=PATH       Same as above ^(inline form^)
 
+echo   --language NAME           Recovery language ^(korean or japanese^)
+
+echo   --language=NAME           Same as above ^(inline form^)
+
 echo   --with-ml / --install-ml  Install ML dependencies ^(pandas/pyarrow/lightgbm/onnxruntime^)
 
 echo   --non-interactive         Run without prompts ^(requires valid runtime root^)
@@ -160,6 +206,28 @@ echo   --clean                   Force-clean MFA env before install
 exit /b 0
 
 :args_done
+
+if not defined REQUESTED_LANGUAGE if defined UTOA_MFA_RECOVERY_LANGUAGE set "REQUESTED_LANGUAGE=%UTOA_MFA_RECOVERY_LANGUAGE%"
+
+if defined REQUESTED_LANGUAGE (
+
+    if /i "%REQUESTED_LANGUAGE%"=="japanese" (
+
+        set "RECOVERY_LANGUAGE=japanese"
+
+    ) else if /i "%REQUESTED_LANGUAGE%"=="korean" (
+
+        set "RECOVERY_LANGUAGE=korean"
+
+    ) else (
+
+        echo [WARN] Unsupported recovery language "%REQUESTED_LANGUAGE%". Falling back to korean.
+
+        set "RECOVERY_LANGUAGE=korean"
+
+    )
+
+)
 
 for %%I in ("%SETUP_MFA_DIR%") do set "SETUP_MFA_DIR_NORM=%%~fI"
 
@@ -299,11 +367,11 @@ if "%NON_INTERACTIVE%"=="1" (
 
     if "%INSTALL_ML%"=="1" (
 
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language korean -NonInteractive -WithMl
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language %RECOVERY_LANGUAGE% -NonInteractive -WithMl
 
     ) else (
 
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language korean -NonInteractive
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language %RECOVERY_LANGUAGE% -NonInteractive
 
     )
 
@@ -311,11 +379,11 @@ if "%NON_INTERACTIVE%"=="1" (
 
     if "%INSTALL_ML%"=="1" (
 
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language korean -WithMl
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language %RECOVERY_LANGUAGE% -WithMl
 
     ) else (
 
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language korean
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language %RECOVERY_LANGUAGE%
 
     )
 

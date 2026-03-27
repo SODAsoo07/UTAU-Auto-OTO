@@ -65,6 +65,41 @@ from core.generation.mapping_runtime import (
 
 
 class PipelineActionsMixin:
+    @staticmethod
+    def _is_mfa_module_missing_error(code: str, message: str) -> bool:
+        c = str(code or "").strip().upper()
+        text = str(message or "")
+        lowered = text.lower()
+        if c == "ALIGN_EXEC_MISSING" and ("mfa runtime module is missing" in lowered or "mfa_module_missing" in lowered):
+            return True
+        if "no module named" in lowered and "montreal_forced_aligner" in lowered:
+            return True
+        if "montreal_forced_aligner.command_line.mfa" in lowered:
+            return True
+        return False
+
+    def _notify_mfa_module_missing(self, language: str, detail: str = "") -> None:
+        lang = str(language or "korean").strip().lower()
+        lang_label = "일본어" if lang == "japanese" else "한국어"
+        guide = self._build_setup_mfa_recovery_guide(language=lang)
+        tail = str(detail or "").strip()
+        if len(tail) > 420:
+            tail = tail[-420:]
+        message = (
+            f"{lang_label} MFA 실행 모듈이 현재 환경에서 누락되었거나 손상되었습니다.\n"
+            "정렬을 계속 진행하려면 MFA 복구를 먼저 실행해 주세요.\n\n"
+            f"{guide}"
+        )
+        if tail:
+            message += f"\n\n[오류 요약]\n{tail}"
+        self._after_safe(
+            lambda msg=message, l=lang: self._show_copyable_alert(
+                title="MFA 모듈 누락 감지",
+                message=msg,
+                alert_key=f"mfa_module_missing_{l}",
+            )
+        )
+
     def _notify_korean_dependency_degraded(self):
         self._append_log(ALERT_MSVC_REQUIRED)
         self._append_log(
@@ -190,7 +225,7 @@ class PipelineActionsMixin:
         if reason:
             self._append_log(f"   사유: {reason}")
 
-        cmd = [script_path, "--recovery", "--non-interactive"]
+        cmd = [script_path, "--recovery", "--non-interactive", "--language", lang]
         env = os.environ.copy()
         try:
             env_dir = get_default_mfa_env_dir()
@@ -233,10 +268,13 @@ class PipelineActionsMixin:
         self._append_log("❌ setup_mfa.bat 실행은 완료됐지만 MFA 상태가 아직 준비되지 않았습니다.")
         return False
 
-    def _build_setup_mfa_recovery_guide(self):
+    def _build_setup_mfa_recovery_guide(self, language="korean"):
+        lang = str(language or "korean").strip().lower()
+        if lang not in {"korean", "japanese"}:
+            lang = "korean"
         script_path = self._resolve_setup_mfa_script_path()
         if script_path:
-            command = f'cmd /c ""{script_path}" --recovery --non-interactive"'
+            command = f'cmd /c ""{script_path}" --recovery --non-interactive --language {lang}"'
             return (
                 "설치 프로그램에 동봉된 setup_mfa.bat을 직접 실행해 추가 복구를 진행해 주세요.\n"
                 f"- 파일: {script_path}\n"
@@ -246,9 +284,9 @@ class PipelineActionsMixin:
         return (
             "설치 프로그램에 동봉된 setup_mfa.bat을 직접 실행해 추가 복구를 진행해 주세요.\n"
             "- 실행 예시:\n"
-            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO_v3\\setup_mfa.bat\" --recovery --non-interactive\"\n"
+            f"cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO_v3\\setup_mfa.bat\" --recovery --non-interactive --language {lang}\"\n"
             "또는\n"
-            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --recovery --non-interactive\""
+            f"cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --recovery --non-interactive --language {lang}\""
         )
 
     def _read_runtime_var(self, var_name, default=None):
@@ -1741,7 +1779,7 @@ class PipelineActionsMixin:
                 detail = str(ml_after.get("detail", "") or "").strip()
                 if detail and not ml_after.get("ready"):
                     self._append_log(f"⚠ ML 런타임 점검 상세: {detail}")
-                recovery_guide = self._build_setup_mfa_recovery_guide()
+                recovery_guide = self._build_setup_mfa_recovery_guide(language=lang)
                 self._after_safe(
                     lambda guide=recovery_guide: self._show_copyable_alert(
                         title="MFA/ML 자동 복구 추가 안내",
@@ -1819,7 +1857,7 @@ class PipelineActionsMixin:
                 )
                 alert_key = f"mfa_after_align_fail_ready_{lang}_{issue_token}"
             else:
-                recovery_guide = self._build_setup_mfa_recovery_guide()
+                recovery_guide = self._build_setup_mfa_recovery_guide(language=lang)
                 message = (
                     "정렬 실패 후 MFA 자동 점검에서 추가 복구가 필요하다고 판단되었습니다.\n"
                     "앱의 'MFA 진단/복구' 버튼을 눌러 복구를 진행해 주세요.\n\n"
@@ -1873,7 +1911,7 @@ class PipelineActionsMixin:
 
                 after = diagnose_mfa_runtime(self.mfa_path or "", language=lang)
                 needs_attention = not bool(after.get("ready", False))
-                recovery_guide = self._build_setup_mfa_recovery_guide() if needs_attention else ""
+                recovery_guide = self._build_setup_mfa_recovery_guide(language=lang) if needs_attention else ""
                 summary = (
                     "[진단 전]\n"
                     f"{self._format_mfa_diagnosis_summary(before)}\n\n"
@@ -2621,6 +2659,9 @@ class PipelineActionsMixin:
                 if not align_ok:
                     align_code = str(align_result.get("code", "ALIGN_RUN_FAILED"))
                     self._append_log(f"⚠ {format_error_with_recovery(align_code, align_err)}")
+                    if self._is_mfa_module_missing_error(align_code, align_err):
+                        self._append_log("❌ MFA 모듈 누락이 감지되어 정렬이 실패했습니다. 'MFA 진단/복구'를 실행해 주세요.")
+                        self._notify_mfa_module_missing(language=lang, detail=align_err)
                     if self._is_lab_or_dict_missing_alignment_error(align_code, align_err):
                         self._notify_lab_or_dict_missing(wav_dir, dict_path)
                     if primary_engine == "mfa":

@@ -742,6 +742,26 @@ def _check_env_imports(python_exe: str, env: dict, import_expr: str):
     return False, detail
 
 
+def _check_mfa_module_import_ready(mfa_path: str) -> tuple[Optional[bool], str]:
+    """
+    Verify that the MFA entry module is importable from the resolved runtime env.
+    Returns:
+      (True, "") when import succeeds
+      (False, "<detail>") when env is identifiable and import fails
+      (None, "") when module check is not applicable (non-portable/system mfa path)
+    """
+    resolved = str(mfa_path or "").strip()
+    if not resolved or "Scripts" not in resolved:
+        return None, ""
+    env_dir = os.path.dirname(os.path.dirname(os.path.abspath(resolved)))
+    python_exe = _resolve_env_python_exe(env_dir)
+    if not python_exe or not os.path.exists(python_exe):
+        return False, f"MFA env python.exe not found: {python_exe or '(empty)'}"
+    env = _get_conda_env(resolved)
+    ok, detail = _check_env_imports(python_exe, env, "import montreal_forced_aligner.command_line.mfa")
+    return bool(ok), str(detail or "").strip()
+
+
 def _korean_tokenizer_import_expr() -> str:
     # Korean path is ready when jamo is importable and one mecab backend is importable.
     # Accept both python-mecab-ko ("mecab") and mecab-python3 ("MeCab") module styles.
@@ -1115,6 +1135,7 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
             "python_version": "",
             "python_rebuild_required": False,
             "packaging_stack": None,
+            "mfa_module": None,
             "language_support": None,
             "model_ready": False,
         },
@@ -1145,6 +1166,10 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
             report["checks"]["packaging_stack"] = ok
             if not ok:
                 report["issues"].append("packaging_stack_missing")
+            module_ok, _module_detail = _check_mfa_module_import_ready(resolved)
+            report["checks"]["mfa_module"] = module_ok
+            if module_ok is False:
+                report["issues"].append("mfa_module_missing")
             import_expr = (
                 _korean_tokenizer_import_expr()
                 if lang == 'korean'
@@ -1164,6 +1189,7 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
         report["checks"]["mfa_executable"]
         and report["checks"]["python_rebuild_required"] is False
         and report["checks"]["packaging_stack"] in {True, None}
+        and report["checks"]["mfa_module"] in {True, None}
         and report["checks"]["language_support"] in {True, None}
         and report["checks"]["model_ready"]
     )
@@ -1425,6 +1451,22 @@ def check_mfa_ready(language='korean', mfa_path=''):
             "align",
             ALIGN_EXEC_MISSING,
             "MFA executable not found.",
+            engine="mfa",
+            language=str(language or "korean").strip().lower(),
+            mfa_path=str(resolved_mfa or ""),
+            ready=False,
+        )
+
+    module_ok, module_detail = _check_mfa_module_import_ready(resolved_mfa)
+    if module_ok is False:
+        detail = str(module_detail or "").strip()
+        msg = "MFA runtime module is missing or broken."
+        if detail:
+            msg = f"{msg} {detail[-280:]}"
+        return make_runtime_report(
+            "align",
+            ALIGN_EXEC_MISSING,
+            msg,
             engine="mfa",
             language=str(language or "korean").strip().lower(),
             mfa_path=str(resolved_mfa or ""),
