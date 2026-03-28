@@ -526,6 +526,8 @@ class AppRuntimeMixin:
             "UTOA_MFA_WEAK_VOICE_ASSIST_ENABLE",
             "UTOA_MFA_WEAK_VOICE_PREEMPH_MIX",
             "UTOA_SYLLABLE_STRICT_MODE",
+            "UTOA_WEAK_BOUNDARY_MISSING_REDUCTION_ENABLE",
+            "UTOA_WEAK_BOUNDARY_ANTIMISMAP_ENABLE",
         ):
             os.environ.pop(key, None)
 
@@ -557,7 +559,12 @@ class AppRuntimeMixin:
                 val = min(float(max_value), val)
             os.environ[env_name] = f"{val:.3f}".rstrip("0").rstrip(".")
 
-        continuity_enabled = (
+        file_consistency_enabled = (
+            bool(self.vc_correction_enable_var.get())
+            if hasattr(self, "vc_correction_enable_var")
+            else True
+        )
+        continuity_enabled = file_consistency_enabled and (
             bool(self.kr_continuity_enable_var.get())
             if hasattr(self, "kr_continuity_enable_var")
             else True
@@ -570,12 +577,12 @@ class AppRuntimeMixin:
                 min_value=0.0,
             )
 
-        kr_vc_enabled = (
+        kr_vc_enabled = file_consistency_enabled and (
             bool(self.kr_vc_neighbor_enable_var.get())
             if hasattr(self, "kr_vc_neighbor_enable_var")
             else True
         )
-        ja_vc_enabled = (
+        ja_vc_enabled = file_consistency_enabled and (
             bool(self.ja_vc_neighbor_enable_var.get())
             if hasattr(self, "ja_vc_neighbor_enable_var")
             else True
@@ -657,6 +664,18 @@ class AppRuntimeMixin:
             else "soft"
         )
         os.environ["UTOA_SYLLABLE_STRICT_MODE"] = str(strict_mode_code or "soft").strip().lower()
+        weak_missing_reduce = (
+            bool(self.weak_boundary_reduce_missing_var.get())
+            if hasattr(self, "weak_boundary_reduce_missing_var")
+            else False
+        )
+        weak_block_mismap = (
+            bool(self.weak_boundary_block_mismap_var.get())
+            if hasattr(self, "weak_boundary_block_mismap_var")
+            else False
+        )
+        os.environ["UTOA_WEAK_BOUNDARY_MISSING_REDUCTION_ENABLE"] = "1" if weak_missing_reduce else "0"
+        os.environ["UTOA_WEAK_BOUNDARY_ANTIMISMAP_ENABLE"] = "1" if weak_block_mismap else "0"
 
     def _sync_advanced_tuning_slider_controls(self) -> None:
         bindings = getattr(self, "advanced_tuning_slider_bindings", None)
@@ -707,6 +726,205 @@ class AppRuntimeMixin:
                     label.configure(text=fmt.format(current))
                 except Exception:
                     pass
+
+    @staticmethod
+    def _get_format_consistency_recommendation(language: str, format_code: str) -> dict:
+        lang = str(language or "korean").strip().lower()
+        fmt = str(format_code or "").strip().lower()
+        if not fmt:
+            fmt = "general"
+
+        common_enable = {
+            "vc_correction_enable_var": True,
+            "kr_continuity_enable_var": True,
+            "kr_vc_neighbor_enable_var": True,
+            "ja_vc_neighbor_enable_var": True,
+        }
+        profiles = {
+            "korean": {
+                "general": {
+                    "kr_continuity_max_offset_adj_var": "170",
+                    "kr_vc_neighbor_blend_var": "0.32",
+                    "kr_vc_neighbor_max_shift_var": "40",
+                    "kr_vc_neighbor_lead_ms_var": "5",
+                    "kr_vc_neighbor_tail_ms_var": "7",
+                    "kr_vc_neighbor_min_len_var": "38",
+                    "ja_vc_neighbor_blend_var": "0.35",
+                    "ja_vc_neighbor_max_shift_var": "45",
+                    "ja_vc_neighbor_lead_ms_var": "6",
+                    "ja_vc_neighbor_tail_ms_var": "8",
+                    "ja_vc_neighbor_min_len_var": "35",
+                },
+                "cv": {
+                    "kr_continuity_max_offset_adj_var": "140",
+                    "kr_vc_neighbor_blend_var": "0.24",
+                    "kr_vc_neighbor_max_shift_var": "30",
+                    "kr_vc_neighbor_lead_ms_var": "4",
+                    "kr_vc_neighbor_tail_ms_var": "6",
+                    "kr_vc_neighbor_min_len_var": "45",
+                    "ja_vc_neighbor_blend_var": "0.28",
+                    "ja_vc_neighbor_max_shift_var": "34",
+                    "ja_vc_neighbor_lead_ms_var": "5",
+                    "ja_vc_neighbor_tail_ms_var": "6",
+                    "ja_vc_neighbor_min_len_var": "42",
+                },
+                "cvc": {
+                    "kr_continuity_max_offset_adj_var": "175",
+                    "kr_vc_neighbor_blend_var": "0.34",
+                    "kr_vc_neighbor_max_shift_var": "42",
+                    "kr_vc_neighbor_lead_ms_var": "6",
+                    "kr_vc_neighbor_tail_ms_var": "8",
+                    "kr_vc_neighbor_min_len_var": "34",
+                    "ja_vc_neighbor_blend_var": "0.32",
+                    "ja_vc_neighbor_max_shift_var": "40",
+                    "ja_vc_neighbor_lead_ms_var": "5",
+                    "ja_vc_neighbor_tail_ms_var": "7",
+                    "ja_vc_neighbor_min_len_var": "36",
+                },
+                "cvvc": {
+                    "kr_continuity_max_offset_adj_var": "200",
+                    "kr_vc_neighbor_blend_var": "0.44",
+                    "kr_vc_neighbor_max_shift_var": "58",
+                    "kr_vc_neighbor_lead_ms_var": "8",
+                    "kr_vc_neighbor_tail_ms_var": "10",
+                    "kr_vc_neighbor_min_len_var": "26",
+                    "ja_vc_neighbor_blend_var": "0.42",
+                    "ja_vc_neighbor_max_shift_var": "56",
+                    "ja_vc_neighbor_lead_ms_var": "7",
+                    "ja_vc_neighbor_tail_ms_var": "9",
+                    "ja_vc_neighbor_min_len_var": "28",
+                },
+                "vcv": {
+                    "kr_continuity_max_offset_adj_var": "190",
+                    "kr_vc_neighbor_blend_var": "0.38",
+                    "kr_vc_neighbor_max_shift_var": "50",
+                    "kr_vc_neighbor_lead_ms_var": "7",
+                    "kr_vc_neighbor_tail_ms_var": "9",
+                    "kr_vc_neighbor_min_len_var": "30",
+                    "ja_vc_neighbor_blend_var": "0.34",
+                    "ja_vc_neighbor_max_shift_var": "44",
+                    "ja_vc_neighbor_lead_ms_var": "6",
+                    "ja_vc_neighbor_tail_ms_var": "8",
+                    "ja_vc_neighbor_min_len_var": "34",
+                },
+                "c_plus_v": {
+                    "kr_continuity_max_offset_adj_var": "120",
+                    "kr_vc_neighbor_blend_var": "0.18",
+                    "kr_vc_neighbor_max_shift_var": "24",
+                    "kr_vc_neighbor_lead_ms_var": "4",
+                    "kr_vc_neighbor_tail_ms_var": "5",
+                    "kr_vc_neighbor_min_len_var": "48",
+                    "ja_vc_neighbor_blend_var": "0.22",
+                    "ja_vc_neighbor_max_shift_var": "28",
+                    "ja_vc_neighbor_lead_ms_var": "4",
+                    "ja_vc_neighbor_tail_ms_var": "6",
+                    "ja_vc_neighbor_min_len_var": "46",
+                },
+                "cmpx": {
+                    "kr_continuity_max_offset_adj_var": "150",
+                    "kr_vc_neighbor_blend_var": "0.25",
+                    "kr_vc_neighbor_max_shift_var": "34",
+                    "kr_vc_neighbor_lead_ms_var": "5",
+                    "kr_vc_neighbor_tail_ms_var": "6",
+                    "kr_vc_neighbor_min_len_var": "42",
+                    "ja_vc_neighbor_blend_var": "0.28",
+                    "ja_vc_neighbor_max_shift_var": "34",
+                    "ja_vc_neighbor_lead_ms_var": "5",
+                    "ja_vc_neighbor_tail_ms_var": "6",
+                    "ja_vc_neighbor_min_len_var": "40",
+                },
+            },
+            "japanese": {
+                "general": {
+                    "kr_continuity_max_offset_adj_var": "170",
+                    "kr_vc_neighbor_blend_var": "0.32",
+                    "kr_vc_neighbor_max_shift_var": "40",
+                    "kr_vc_neighbor_lead_ms_var": "5",
+                    "kr_vc_neighbor_tail_ms_var": "7",
+                    "kr_vc_neighbor_min_len_var": "38",
+                    "ja_vc_neighbor_blend_var": "0.30",
+                    "ja_vc_neighbor_max_shift_var": "38",
+                    "ja_vc_neighbor_lead_ms_var": "5",
+                    "ja_vc_neighbor_tail_ms_var": "7",
+                    "ja_vc_neighbor_min_len_var": "36",
+                },
+                "cv": {
+                    "kr_continuity_max_offset_adj_var": "150",
+                    "kr_vc_neighbor_blend_var": "0.26",
+                    "kr_vc_neighbor_max_shift_var": "32",
+                    "kr_vc_neighbor_lead_ms_var": "4",
+                    "kr_vc_neighbor_tail_ms_var": "6",
+                    "kr_vc_neighbor_min_len_var": "44",
+                    "ja_vc_neighbor_blend_var": "0.24",
+                    "ja_vc_neighbor_max_shift_var": "30",
+                    "ja_vc_neighbor_lead_ms_var": "4",
+                    "ja_vc_neighbor_tail_ms_var": "6",
+                    "ja_vc_neighbor_min_len_var": "44",
+                },
+                "cvvc": {
+                    "kr_continuity_max_offset_adj_var": "185",
+                    "kr_vc_neighbor_blend_var": "0.36",
+                    "kr_vc_neighbor_max_shift_var": "48",
+                    "kr_vc_neighbor_lead_ms_var": "6",
+                    "kr_vc_neighbor_tail_ms_var": "8",
+                    "kr_vc_neighbor_min_len_var": "32",
+                    "ja_vc_neighbor_blend_var": "0.42",
+                    "ja_vc_neighbor_max_shift_var": "56",
+                    "ja_vc_neighbor_lead_ms_var": "7",
+                    "ja_vc_neighbor_tail_ms_var": "9",
+                    "ja_vc_neighbor_min_len_var": "28",
+                },
+                "vcv": {
+                    "kr_continuity_max_offset_adj_var": "170",
+                    "kr_vc_neighbor_blend_var": "0.31",
+                    "kr_vc_neighbor_max_shift_var": "40",
+                    "kr_vc_neighbor_lead_ms_var": "5",
+                    "kr_vc_neighbor_tail_ms_var": "7",
+                    "kr_vc_neighbor_min_len_var": "36",
+                    "ja_vc_neighbor_blend_var": "0.34",
+                    "ja_vc_neighbor_max_shift_var": "44",
+                    "ja_vc_neighbor_lead_ms_var": "6",
+                    "ja_vc_neighbor_tail_ms_var": "8",
+                    "ja_vc_neighbor_min_len_var": "34",
+                },
+            },
+        }
+        selected = profiles.get(lang, {}).get(fmt) or profiles.get(lang, {}).get("general")
+        if not isinstance(selected, dict):
+            return {}
+        result = dict(common_enable)
+        result.update(selected)
+        return result
+
+    def _apply_format_consistency_recommendation(self, *, save_config: bool = False, write_log: bool = False) -> None:
+        if not hasattr(self, "_get_language") or not hasattr(self, "auto_format_var"):
+            return
+        language = self._get_language()
+        if str(language or "").strip().lower() == "english":
+            return
+        try:
+            format_code = normalize_auto_format_value(language, self.auto_format_var.get())
+        except Exception:
+            format_code = ""
+        recommended = self._get_format_consistency_recommendation(language, format_code)
+        if not recommended:
+            return
+        for attr, value in recommended.items():
+            if not hasattr(self, attr):
+                continue
+            try:
+                getattr(self, attr).set(value)
+            except Exception:
+                continue
+        if hasattr(self, "_sync_vc_correction_toggle"):
+            self._sync_vc_correction_toggle()
+        if hasattr(self, "_sync_advanced_tuning_slider_controls"):
+            self._sync_advanced_tuning_slider_controls()
+        if save_config:
+            self._save_config()
+        if write_log and hasattr(self, "_append_log"):
+            fmt_txt = str(format_code or "auto").strip().lower() or "auto"
+            self._append_log(f"[권장값] 형식별 연속성/파일 일관성 보정값 적용: lang={language}, fmt={fmt_txt}")
 
     def _sync_weak_voice_assist_controls(self) -> None:
         enabled = (
@@ -931,6 +1149,8 @@ class AppRuntimeMixin:
             "weak_voice_assist_enable_var": True,
             "weak_voice_assist_strength_var": "",
             "mapping_strict_mode_var": "적당히 엄격(누락 행은 폴백)",
+            "weak_boundary_reduce_missing_var": False,
+            "weak_boundary_block_mismap_var": False,
         }
         for attr, value in defaults.items():
             if not hasattr(self, attr):
@@ -2529,6 +2749,7 @@ class ConfigMixin:
             "ml_model_root_ja": self.ml_model_root_ja_var.get() if hasattr(self, "ml_model_root_ja_var") else "",
             "cvn_correction_enable": self.cvn_correction_enable_var.get() if hasattr(self, "cvn_correction_enable_var") else True,
             "cvn_low_conf_only": self.cvn_low_conf_only_var.get() if hasattr(self, "cvn_low_conf_only_var") else False,
+            "vc_correction_enable": self.vc_correction_enable_var.get() if hasattr(self, "vc_correction_enable_var") else True,
             "kr_vc_neighbor_enable": self.kr_vc_neighbor_enable_var.get() if hasattr(self, "kr_vc_neighbor_enable_var") else True,
             "kr_vc_neighbor_blend": self.kr_vc_neighbor_blend_var.get() if hasattr(self, "kr_vc_neighbor_blend_var") else "",
             "kr_vc_neighbor_max_shift": self.kr_vc_neighbor_max_shift_var.get() if hasattr(self, "kr_vc_neighbor_max_shift_var") else "",
@@ -2550,6 +2771,8 @@ class ConfigMixin:
                 if hasattr(self, "_get_mapping_strict_mode_code")
                 else "soft"
             ),
+            "weak_boundary_reduce_missing": self.weak_boundary_reduce_missing_var.get() if hasattr(self, "weak_boundary_reduce_missing_var") else False,
+            "weak_boundary_block_mismap": self.weak_boundary_block_mismap_var.get() if hasattr(self, "weak_boundary_block_mismap_var") else False,
             "ja_mapping_words_fallback_enabled": self.ja_mapping_words_fallback_enabled_var.get() if hasattr(self, "ja_mapping_words_fallback_enabled_var") else True,
             "ja_mapping_spn_ratio_threshold": self.ja_mapping_spn_ratio_threshold_var.get() if hasattr(self, "ja_mapping_spn_ratio_threshold_var") else 0.35,
             "ja_mapping_min_vowel_phone_ratio": self.ja_mapping_min_vowel_phone_ratio_var.get() if hasattr(self, "ja_mapping_min_vowel_phone_ratio_var") else 0.5,
@@ -2667,6 +2890,10 @@ class ConfigMixin:
                     self._set_mapping_strict_mode_from_code(config.get("mapping_strict_mode", "soft"))
                 else:
                     self.mapping_strict_mode_var.set(str(config.get("mapping_strict_mode", "soft") or "soft"))
+            if "weak_boundary_reduce_missing" in config and hasattr(self, "weak_boundary_reduce_missing_var"):
+                self.weak_boundary_reduce_missing_var.set(bool(config.get("weak_boundary_reduce_missing", False)))
+            if "weak_boundary_block_mismap" in config and hasattr(self, "weak_boundary_block_mismap_var"):
+                self.weak_boundary_block_mismap_var.set(bool(config.get("weak_boundary_block_mismap", False)))
             if "recursive_voicebank_scan" in config and hasattr(self, "recursive_voicebank_scan_var"):
                 self.recursive_voicebank_scan_var.set(bool(config.get("recursive_voicebank_scan", False)))
             if hasattr(self, "enable_ml_correction_var"):
@@ -2955,6 +3182,16 @@ class ConfigMixin:
                 self.kr_vc_neighbor_enable_var.set(bool(config.get("kr_vc_neighbor_enable", True)))
             if "ja_vc_neighbor_enable" in config and hasattr(self, "ja_vc_neighbor_enable_var"):
                 self.ja_vc_neighbor_enable_var.set(bool(config.get("ja_vc_neighbor_enable", True)))
+            if "vc_correction_enable" in config:
+                master_enabled = bool(config.get("vc_correction_enable", True))
+                if hasattr(self, "vc_correction_enable_var"):
+                    self.vc_correction_enable_var.set(master_enabled)
+                if hasattr(self, "kr_continuity_enable_var"):
+                    self.kr_continuity_enable_var.set(master_enabled)
+                if hasattr(self, "kr_vc_neighbor_enable_var"):
+                    self.kr_vc_neighbor_enable_var.set(master_enabled)
+                if hasattr(self, "ja_vc_neighbor_enable_var"):
+                    self.ja_vc_neighbor_enable_var.set(master_enabled)
             vc_neighbor_defaults = {
                 "kr_vc_neighbor_blend": (self.kr_vc_neighbor_blend_var, 0.35),
                 "kr_vc_neighbor_max_shift": (self.kr_vc_neighbor_max_shift_var, 45.0),

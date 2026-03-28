@@ -703,6 +703,8 @@ class LayoutMixin:
         if name == "고급 설정":
             if hasattr(self, "_sync_developer_mode_ui"):
                 self._sync_developer_mode_ui()
+            if hasattr(self, "_sync_consistency_toggle_label"):
+                self._sync_consistency_toggle_label()
             if hasattr(self, "_sync_vc_correction_toggle"):
                 self._sync_vc_correction_toggle()
             if hasattr(self, "_sync_cvn_correction_toggle"):
@@ -979,6 +981,8 @@ class LayoutMixin:
         self._set_auto_format_from_code(current_code, self._get_language())
         if hasattr(self, "_apply_recommended_ml_model_defaults"):
             self._apply_recommended_ml_model_defaults()
+        if hasattr(self, "_sync_consistency_toggle_label"):
+            self._sync_consistency_toggle_label()
         self._sync_ja_alias_controls()
         self._sync_en_cvvc_controls()
         self._sync_base_oto_requirement_ui()
@@ -986,6 +990,22 @@ class LayoutMixin:
         self._sync_aligner_ui()
         self._save_config()
         self._refresh_ml_backend_status()
+
+    def _sync_consistency_toggle_label(self):
+        checkbox = getattr(self, "kr_continuity_enable_checkbox", None)
+        if checkbox is None:
+            return
+        lang = self._get_language() if hasattr(self, "_get_language") else "korean"
+        if lang == "japanese":
+            text = "일관성 보정 사용"
+        elif lang == "korean":
+            text = "연속성 보정 사용"
+        else:
+            text = "연속성/파일 일관성 보정 사용"
+        try:
+            checkbox.configure(text=text)
+        except Exception:
+            pass
     def _requires_base_oto_for_current_mode(self):
         lang = self._get_language()
         if lang == "english":
@@ -1332,6 +1352,11 @@ class LayoutMixin:
     def _sync_vc_correction_toggle(self):
         if not hasattr(self, "vc_correction_enable_var"):
             return
+        continuity_enabled = (
+            bool(self.kr_continuity_enable_var.get())
+            if hasattr(self, "kr_continuity_enable_var")
+            else True
+        )
         kr_enabled = (
             bool(self.kr_vc_neighbor_enable_var.get())
             if hasattr(self, "kr_vc_neighbor_enable_var")
@@ -1342,7 +1367,7 @@ class LayoutMixin:
             if hasattr(self, "ja_vc_neighbor_enable_var")
             else True
         )
-        self.vc_correction_enable_var.set(bool(kr_enabled and ja_enabled))
+        self.vc_correction_enable_var.set(bool(continuity_enabled and kr_enabled and ja_enabled))
         if hasattr(self, "_sync_cvn_correction_toggle"):
             self._sync_cvn_correction_toggle()
 
@@ -1376,6 +1401,8 @@ class LayoutMixin:
 
     def _on_vc_correction_toggle(self):
         enabled = bool(self.vc_correction_enable_var.get()) if hasattr(self, "vc_correction_enable_var") else True
+        if hasattr(self, "kr_continuity_enable_var"):
+            self.kr_continuity_enable_var.set(enabled)
         if hasattr(self, "kr_vc_neighbor_enable_var"):
             self.kr_vc_neighbor_enable_var.set(enabled)
         if hasattr(self, "ja_vc_neighbor_enable_var"):
@@ -1404,6 +1431,8 @@ class LayoutMixin:
         self._save_config()
 
     def _on_format_change(self, _value=None):
+        if hasattr(self, "_apply_format_consistency_recommendation"):
+            self._apply_format_consistency_recommendation(save_config=False, write_log=False)
         self._sync_base_oto_requirement_ui()
         self._sync_cmpx_route_lock()
         self._sync_aligner_ui()

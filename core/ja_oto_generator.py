@@ -2632,6 +2632,16 @@ def generate_ja_oto(
     elif ja_style_profile and not ja_style_enabled:
         log("[JA-Profile] 추상 프리셋 적용 비활성화(환경변수 설정)")
 
+    wav_root_for_signal = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
+    existing_wav_names: set[str] = set()
+    try:
+        if os.path.isdir(wav_root_for_signal):
+            for fn in os.listdir(wav_root_for_signal):
+                if fn.lower().endswith(".wav"):
+                    existing_wav_names.add(fn)
+    except Exception:
+        existing_wav_names = set()
+
     ja_setup = prepare_ja_generation_setup(
         tg_folder=tg_folder,
         tpl_path=tpl_path,
@@ -2644,6 +2654,8 @@ def generate_ja_oto(
             require_utf8=False,
             mode_label="일본어 모드",
         ),
+        existing_wav_names=existing_wav_names,
+        existing_wav_only=True,
     )
     final_lines = []
     custom_map = ja_setup.custom_map
@@ -2672,7 +2684,6 @@ def generate_ja_oto(
 
     processed = 0
     total = len(file_groups)
-    wav_root_for_signal = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
     wav_index_for_signal = {}
     try:
         if os.path.isdir(wav_root_for_signal):
@@ -4523,7 +4534,7 @@ def generate_ja_oto(
                     use_vcv_anchor = (
                         alias_type == 'vc'
                         and bridge_profile is not None
-                        and format_type in ('cvvc', 'cv')
+                        and format_type == 'vcv'
                         and detected_format == 'vcv'
                         and _is_reliable_base_profile(source_profile)
                     )

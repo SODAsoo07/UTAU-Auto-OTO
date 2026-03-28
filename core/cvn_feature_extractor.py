@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import wave
 from typing import Tuple
 
@@ -10,6 +11,59 @@ from core.cvn_types import FrameFeatures
 
 
 _EPS = 1e-10
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        val = float(raw)
+    except Exception:
+        return float(default)
+    if not np.isfinite(val):
+        return float(default)
+    return float(val)
+
+
+def _apply_weak_voice_assist_preemphasis(audio: np.ndarray) -> np.ndarray:
+    sig = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if sig.size <= 1:
+        return sig
+    if not _env_bool("UTOA_MFA_WEAK_VOICE_ASSIST_ENABLE", default=False):
+        return sig
+
+    mix = _env_float("UTOA_MFA_WEAK_VOICE_PREEMPH_MIX", 0.35)
+    mix = float(np.clip(mix, 0.0, 1.0))
+    if mix <= 1e-6:
+        return sig
+
+    coeff = _env_float("UTOA_CVN_PREEMPH_COEFF", 0.97)
+    coeff = float(np.clip(coeff, 0.0, 0.99))
+
+    pre = sig.copy()
+    pre[1:] = sig[1:] - (coeff * sig[:-1])
+    pre[0] = sig[0]
+    mixed = ((1.0 - mix) * sig) + (mix * pre)
+
+    # Keep overall loudness close to original so CVN threshold behavior remains stable.
+    src_rms = float(np.sqrt(np.mean(np.square(sig), dtype=np.float64)))
+    dst_rms = float(np.sqrt(np.mean(np.square(mixed), dtype=np.float64)))
+    if src_rms > 1e-8 and dst_rms > 1e-8:
+        mixed = mixed * float(src_rms / dst_rms)
+
+    return np.clip(mixed.astype(np.float32), -1.0, 1.0)
 
 
 def _read_wav_mono_float(path: str) -> Tuple[np.ndarray, int]:
@@ -241,6 +295,7 @@ def extract_frame_features(
     f0_max: float = 600.0,
 ) -> FrameFeatures:
     audio, sr = _read_wav_mono_float(wav_path)
+    audio = _apply_weak_voice_assist_preemphasis(audio)
     return extract_frame_features_from_audio(
         audio,
         sr,
@@ -257,4 +312,3 @@ __all__ = [
     "extract_frame_features",
     "extract_frame_features_from_audio",
 ]
-

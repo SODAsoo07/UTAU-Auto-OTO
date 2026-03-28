@@ -563,15 +563,15 @@ class TabBuildersMixin:
 
         self.kr_continuity_enable_checkbox = ctk.CTkCheckBox(
             basic_toggle_frame,
-            text="연속성 후처리 옵션 사용",
+            text="연속성/파일 일관성 보정 사용",
             text_color="#64866F",
-            variable=self.kr_continuity_enable_var,
-            command=self._save_config,
+            variable=self.vc_correction_enable_var,
+            command=self._on_vc_correction_toggle,
         )
         self.kr_continuity_enable_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
         continuity_help_label = ctk.CTkLabel(
             basic_toggle_frame,
-            text="연속성 값은 70~100을 권장하며, 녹음 속도가 빠를수록 값을 더 작게 설정해 주세요.",
+            text="형식 변경 시 추천값이 자동 적용됩니다. 필요한 경우 아래 개발자 슬라이더에서 세부값만 미세 조정하세요.",
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=730,
@@ -835,13 +835,36 @@ class TabBuildersMixin:
         mapping_strict_help_label.pack(anchor="w", padx=34, pady=(0, 8))
         self._bind_wraplength_to_container(basic_toggle_frame, [mapping_strict_help_label], padding=64, min_wrap=260)
 
+        weak_boundary_row = ctk.CTkFrame(basic_toggle_frame, fg_color="transparent")
+        weak_boundary_row.pack(fill="x", padx=12, pady=(0, 2))
+        ctk.CTkLabel(
+            weak_boundary_row,
+            text="약경계 자음(m/n/l/r/j/y/w/ng) 강화",
+            text_color=PALETTE.neutral_text,
+            width=200,
+            anchor="w",
+        ).pack(side="left")
         ctk.CTkCheckBox(
+            weak_boundary_row,
+            text="발음 누락 줄이기",
+            variable=self.weak_boundary_reduce_missing_var,
+            command=self._save_config,
+        ).pack(side="left", padx=(10, 6))
+        ctk.CTkCheckBox(
+            weak_boundary_row,
+            text="오매핑 차단",
+            variable=self.weak_boundary_block_mismap_var,
+            command=self._save_config,
+        ).pack(side="left", padx=(4, 0))
+        weak_boundary_help = ctk.CTkLabel(
             basic_toggle_frame,
-            text="VC 보정 옵션 사용",
-            text_color="#5E7E95",
-            variable=self.vc_correction_enable_var,
-            command=self._on_vc_correction_toggle,
-        ).pack(anchor="w", padx=12, pady=(0, 10))
+            text="기본값은 OFF입니다. OFF여도 약경계 자음에는 약한 점프 제한/모음 고정이 기본 적용되며, 체크 시 각각 더 엄격하게 강화됩니다.",
+            text_color=PALETTE.hint_text,
+            justify="left",
+            wraplength=730,
+        )
+        weak_boundary_help.pack(anchor="w", padx=34, pady=(0, 8))
+        self._bind_wraplength_to_container(basic_toggle_frame, [weak_boundary_help], padding=64, min_wrap=260)
 
         dev_container = ctk.CTkFrame(container, fg_color="transparent")
         dev_container.pack(fill="x", padx=0, pady=(0, 0))

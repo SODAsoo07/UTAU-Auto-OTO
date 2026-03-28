@@ -328,6 +328,22 @@ def _ctc_cvn_low_conf_threshold() -> float:
     return max(0.0, min(1.0, val))
 
 
+def _ctc_weak_voice_assist_status() -> tuple[bool, float]:
+    enabled = str(os.environ.get("UTOA_MFA_WEAK_VOICE_ASSIST_ENABLE", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    raw = str(os.environ.get("UTOA_MFA_WEAK_VOICE_PREEMPH_MIX", "0.35") or "").strip()
+    try:
+        mix = float(raw)
+    except Exception:
+        mix = 0.35
+    mix = max(0.0, min(1.0, mix))
+    return enabled, mix
+
+
 def _span_score_value(span) -> float | None:
     for key in ("score", "prob", "probability", "confidence"):
         try:
@@ -522,6 +538,9 @@ def _build_phone_rows_with_cvn_adapter(
                 phone_rows.append((float(start), float(end), mark))
 
     adapter_info = f"cvn_backend={backend}, cv_split={split_count}/{len(word_rows)}"
+    weak_assist_enabled, weak_assist_mix = _ctc_weak_voice_assist_status()
+    if weak_assist_enabled:
+        adapter_info += f", weak_assist=1, weak_mix={weak_assist_mix:.2f}"
     if low_conf_only:
         adapter_info += (
             f", cv_low_conf_only=1, cv_low_conf_thr={low_conf_threshold:.2f},"

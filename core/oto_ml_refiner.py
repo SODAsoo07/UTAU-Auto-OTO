@@ -123,6 +123,12 @@ def _two_stage_model_enabled() -> bool:
     return _env_flag("UTOA_ML_TWO_STAGE_MODEL_ENABLE", True)
 
 
+def _auto_select_vbest_enabled() -> bool:
+    # Keep runtime routing stable: do not auto-pick experimental "vbest_*"
+    # unless explicitly opted in.
+    return _env_flag("UTOA_ML_AUTO_SELECT_VBEST", False)
+
+
 def _looks_like_two_stage_model_name(name: str) -> bool:
     token = str(name or "").strip().lower()
     return token.startswith("v2") or "two_stage" in token or "twostage" in token
@@ -399,6 +405,7 @@ def _collect_model_dir_candidates(language: str, format_type: str, alias_family:
     family = normalize_alias_family(alias_family)
     lang = str(language or "").strip().lower()
     allow_two_stage = _two_stage_model_enabled()
+    allow_vbest_auto = _auto_select_vbest_enabled()
     candidates: List[str] = []
 
     def _append_version_dirs(base_path: str) -> None:
@@ -416,6 +423,8 @@ def _collect_model_dir_candidates(language: str, format_type: str, alias_family:
         try:
             for name in os.listdir(base_path):
                 if not str(name).lower().startswith("v"):
+                    continue
+                if (not allow_vbest_auto) and str(name).strip().lower().startswith("vbest"):
                     continue
                 if (not allow_two_stage) and _looks_like_two_stage_model_name(name):
                     continue
@@ -1291,7 +1300,10 @@ def _cv_overlap_cap_ratio(language: str, row_context: Dict[str, object]) -> floa
     if blank_conf >= 0.50:
         ratio -= 0.04
     if lang == "japanese":
-        ratio += 0.02
+        if format_type == "cvvc":
+            ratio -= 0.05
+        else:
+            ratio += 0.01
 
     env_ratio = _read_cv_overlap_cap_ratio_env(lang)
     if env_ratio is not None:

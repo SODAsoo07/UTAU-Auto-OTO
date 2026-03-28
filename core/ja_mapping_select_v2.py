@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import re
+
 from core.ja_oto_mapping import _ja_soft_cv_match_level
 
 
@@ -25,6 +28,100 @@ def _mel_conf_at(syllables_info, idx, key, fallback=0.0):
         return max(0.0, min(1.0, float(row.get(key, fallback) or fallback)))
     except Exception:
         return float(fallback)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _token_alpha(tok):
+    return re.sub(r"[^a-z]", "", str(tok or "").strip().lower())
+
+
+def _is_ja_vowel_only_token(tok):
+    s = _token_alpha(tok)
+    if not s:
+        return False
+    return all(ch in "aeiou" for ch in s)
+
+
+def _is_ja_liquid_token(tok):
+    s = _token_alpha(tok)
+    return bool(s) and s.startswith(("r", "l"))
+
+
+def _split_ja_token_parts(tok):
+    s = _token_alpha(tok)
+    if not s:
+        return "", ""
+    for i, ch in enumerate(s):
+        if ch in "aeiou":
+            return s[:i], ch
+    return s, ""
+
+
+def _is_ja_weak_boundary_token(tok):
+    onset, _vowel = _split_ja_token_parts(tok)
+    if not onset:
+        return False
+    weak_roots = ("m", "n", "l", "r", "j", "y", "w", "ng", "ny", "my", "ry", "ly")
+    return any(onset == root or onset.startswith(root) for root in weak_roots)
+
+
+def _local_transition_contrast(syllables_info, idx):
+    if not syllables_info or idx is None:
+        return 0.0
+    n = len(syllables_info)
+    i = int(max(0, min(int(idx), n - 1)))
+
+    def _vec(at_idx):
+        return (
+            _mel_conf_at(syllables_info, at_idx, "mel_voiced_formant_conf", 0.0),
+            _mel_conf_at(syllables_info, at_idx, "mel_unvoiced_diffuse_conf", 0.0),
+            _mel_conf_at(
+                syllables_info,
+                at_idx,
+                "mel_silence_sparse_conf",
+                fallback=_mel_conf_at(syllables_info, at_idx, "blank_confidence", 0.0),
+            ),
+            _blank_conf_at(syllables_info, at_idx),
+        )
+
+    base = _vec(i)
+    contrast = 0.0
+    for nb in (i - 1, i + 1):
+        if nb < 0 or nb >= n:
+            continue
+        cur = _vec(nb)
+        dist = sum(abs(float(base[k]) - float(cur[k])) for k in range(len(base))) / float(len(base))
+        contrast = max(contrast, max(0.0, min(1.0, dist)))
+    return float(contrast)
+
+
+def _estimate_fry_like_conf(syllables_info, idx):
+    if not syllables_info or idx is None:
+        return 0.0
+    explicit = 0.0
+    for key in ("mel_vocal_fry_conf", "mel_fry_like_conf", "vocal_fry_conf"):
+        explicit = max(explicit, _mel_conf_at(syllables_info, idx, key, 0.0))
+    voiced = _mel_conf_at(syllables_info, idx, "mel_voiced_formant_conf", 0.0)
+    unvoiced = _mel_conf_at(syllables_info, idx, "mel_unvoiced_diffuse_conf", 0.0)
+    sil = _mel_conf_at(
+        syllables_info,
+        idx,
+        "mel_silence_sparse_conf",
+        fallback=_mel_conf_at(syllables_info, idx, "blank_confidence", 0.0),
+    )
+    breath = _mel_conf_at(syllables_info, idx, "mel_breath_like_conf", 0.0)
+    blank = _blank_conf_at(syllables_info, idx)
+    proxy = max(
+        0.0,
+        min(1.0, (0.92 * voiced) - (0.52 * unvoiced) - (0.38 * sil) - (0.28 * breath) - (0.20 * blank)),
+    )
+    return max(explicit, proxy)
 
 
 def _mel_guided_ja_cvvc_adjustment(
@@ -73,7 +170,12 @@ def _mel_guided_ja_cvvc_adjustment(
     conf = float(local_conf) if local_conf is not None else float(mapping_confidence or 0.0)
     conf_th = float(mapping_conf_threshold or 0.0)
     selected_blank = _blank_conf_at(syllables_info, selected_idx)
-    should_try = bool(conf < max(conf_th + 0.08, 0.62) or selected_blank >= 0.58)
+    selected_tok_now = normalize_syllable_token_fn(syllable_info_token_fn(syllables_info[selected_idx]))
+    expected_tok_now = normalize_syllable_token_fn(syllable_info_token_fn(syllables_info[expected_idx]))
+    selected_soft_now = int(_ja_soft_cv_match_level(target_norm, selected_tok_now) or 0) if selected_tok_now else 0
+    expected_soft_now = int(_ja_soft_cv_match_level(target_norm, expected_tok_now) or 0) if expected_tok_now else 0
+    score_gap_trigger = bool(expected_soft_now >= max(1, selected_soft_now + 1))
+    should_try = bool(conf < max(conf_th + 0.08, 0.62) or selected_blank >= 0.58 or score_gap_trigger)
     if not should_try:
         return selected_idx, False
 
@@ -117,9 +219,27 @@ def _mel_guided_ja_cvvc_adjustment(
     if lo >= hi:
         return selected_idx, False
 
+    weak_target = _is_ja_weak_boundary_token(target_norm)
+    reduce_missing_strict = _env_bool("UTOA_WEAK_BOUNDARY_MISSING_REDUCTION_ENABLE", False)
+    anti_mismap_strict = _env_bool("UTOA_WEAK_BOUNDARY_ANTIMISMAP_ENABLE", False)
+    if weak_target:
+        if anti_mismap_strict:
+            hi = min(hi, expected_idx + 1)
+        elif reduce_missing_strict:
+            hi = min(hi, expected_idx + 3)
+        else:
+            hi = min(hi, expected_idx + 2)
+        if lo >= hi:
+            return selected_idx, False
+
+    target_onset, target_vowel = _split_ja_token_parts(target_norm)
+    target_fry_suppress = bool(_is_ja_vowel_only_token(target_norm) or _is_ja_liquid_token(target_norm))
+    fry_weight = -8.5 if target_fry_suppress else 1.2
+
     def _score(idx):
         cand_tok = normalize_syllable_token_fn(syllable_info_token_fn(syllables_info[idx]))
         soft = int(_ja_soft_cv_match_level(target_norm, cand_tok) or 0) if cand_tok else 0
+        cand_onset, cand_vowel = _split_ja_token_parts(cand_tok)
         text = (soft * 40.0) + (40.0 if cand_tok == target_norm else 0.0)
         blank = _blank_conf_at(syllables_info, idx)
         sil = _mel_conf_at(
@@ -131,16 +251,53 @@ def _mel_guided_ja_cvvc_adjustment(
         voiced = _mel_conf_at(syllables_info, idx, "mel_voiced_formant_conf", 0.0)
         unvoiced = _mel_conf_at(syllables_info, idx, "mel_unvoiced_diffuse_conf", 0.0)
         breath = _mel_conf_at(syllables_info, idx, "mel_breath_like_conf", 0.0)
-        jump_penalty = abs(idx - expected_idx) * (10.0 if a_type in {"cv", "cv_head"} else 8.0)
-        mel_bonus = (9.0 * voiced) + (5.0 * unvoiced)
-        mel_penalty = (20.0 * blank) + (12.0 * sil) + (6.0 * breath)
+        fry_like = _estimate_fry_like_conf(syllables_info, idx)
+        jump_scale = 10.0 if a_type in {"cv", "cv_head"} else 8.0
+        if weak_target:
+            jump_scale += 2.0
+            if anti_mismap_strict:
+                jump_scale += 3.0
+            elif reduce_missing_strict:
+                jump_scale -= 1.0
+        jump_penalty = abs(idx - expected_idx) * jump_scale
+        mel_bonus = (9.0 * voiced) + (5.0 * unvoiced) + (fry_weight * fry_like)
+        blank_weight = 20.0
+        sil_weight = 12.0
+        if weak_target:
+            blank_weight = 14.0
+            sil_weight = 9.0
+            if anti_mismap_strict:
+                blank_weight = 12.0
+                sil_weight = 8.0
+        mel_penalty = (blank_weight * blank) + (sil_weight * sil) + (6.0 * breath)
         mismatch_penalty = 0.0
+        core_bonus = 0.0
         if soft <= 0:
             mismatch_penalty += 46.0 if a_type in {"cv", "cv_head"} else 34.0
         elif soft == 1:
             mismatch_penalty += 12.0 if a_type in {"cv", "cv_head"} else 6.0
+        if target_vowel:
+            if cand_vowel == target_vowel:
+                core_bonus += 8.0 if weak_target else 5.0
+            else:
+                mismatch_penalty += 24.0
+                if weak_target:
+                    mismatch_penalty += 10.0 if anti_mismap_strict else 6.0
+        if target_onset and a_type in {"cv", "cv_head"}:
+            if cand_onset == target_onset:
+                core_bonus += 3.0
+            elif weak_target:
+                mismatch_penalty += 8.0 if anti_mismap_strict else 4.0
+        if weak_target and idx != expected_idx:
+            contrast = _local_transition_contrast(syllables_info, idx)
+            contrast_th = 0.18 if anti_mismap_strict else 0.14
+            if contrast < contrast_th:
+                contrast_penalty = (contrast_th - contrast) * (30.0 if anti_mismap_strict else 18.0)
+                if reduce_missing_strict and not anti_mismap_strict:
+                    contrast_penalty *= 0.8
+                mismatch_penalty += contrast_penalty
         stability_bonus = 1.5 if idx == selected_idx else 0.0
-        return text + mel_bonus + stability_bonus - mel_penalty - jump_penalty - mismatch_penalty
+        return text + mel_bonus + stability_bonus + core_bonus - mel_penalty - jump_penalty - mismatch_penalty
 
     best_idx = int(selected_idx)
     best_score = float(_score(best_idx))
@@ -155,7 +312,19 @@ def _mel_guided_ja_cvvc_adjustment(
 
     selected_score = float(_score(int(selected_idx)))
     min_gain = 6.0 if a_type in {"cv", "cv_head"} else 5.0
+    if weak_target:
+        min_gain += 0.8
+        if anti_mismap_strict:
+            min_gain += 1.8
+        elif reduce_missing_strict:
+            min_gain = max(4.0, min_gain - 0.8)
     if best_score < (selected_score + min_gain):
+        if weak_target and reduce_missing_strict:
+            expected_tok = normalize_syllable_token_fn(syllable_info_token_fn(syllables_info[int(expected_idx)]))
+            expected_soft = int(_ja_soft_cv_match_level(target_norm, expected_tok) or 0) if expected_tok else 0
+            expected_blank = _blank_conf_at(syllables_info, expected_idx)
+            if expected_soft > 0 and selected_blank >= 0.62 and expected_blank + 0.06 < selected_blank:
+                return int(expected_idx), bool(int(expected_idx) != int(selected_idx))
         return selected_idx, False
     selected_tok = normalize_syllable_token_fn(syllable_info_token_fn(syllables_info[int(selected_idx)]))
     best_tok = normalize_syllable_token_fn(syllable_info_token_fn(syllables_info[int(best_idx)]))
@@ -167,6 +336,11 @@ def _mel_guided_ja_cvvc_adjustment(
         return selected_idx, False
     if a_type in {"cv", "cv_head"} and best_soft < 2 and best_score < (selected_score + 12.0):
         return selected_idx, False
+    if weak_target and target_vowel:
+        _best_on, best_vowel = _split_ja_token_parts(best_tok)
+        _exp_on, exp_vowel = _split_ja_token_parts(expected_tok_now)
+        if exp_vowel == target_vowel and best_vowel != target_vowel:
+            return selected_idx, False
     expected_blank = _blank_conf_at(syllables_info, expected_idx)
     if _blank_conf_at(syllables_info, best_idx) >= 0.72 and expected_blank <= 0.60:
         return selected_idx, False

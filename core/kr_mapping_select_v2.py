@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import os
 import re
 
 from core.kr_oto_rules import _is_kr_glide_vowel
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _extract_vv_pair_tokens(alias, split_syllable_parts_fn):
@@ -238,6 +246,8 @@ def _token_invariant_guard_idx(
     t_on, t_v, _t_c = split_syllable_parts_fn(target)
     e_on, e_v, _e_c = split_syllable_parts_fn(exp_tok)
     s_on, s_v, _s_c = split_syllable_parts_fn(sel_tok)
+    weak_target = _is_weak_boundary_onset(t_on)
+    anti_mismap_strict = _env_bool("UTOA_WEAK_BOUNDARY_ANTIMISMAP_ENABLE", False)
 
     expected_exact = exp_score >= 98.0
     selected_exact = sel_score >= 98.0
@@ -247,6 +257,8 @@ def _token_invariant_guard_idx(
     if expected_exact and (not selected_exact):
         return e, True
     if expected_vowel_match and (not selected_vowel_match):
+        if weak_target or anti_mismap_strict:
+            return e, True
         if low_conf or exp_score >= max(84.0, sel_score + 2.0):
             return e, True
     if alias_type in {"cv", "cv_head"} and t_on and e_on:
@@ -266,6 +278,75 @@ def _is_unvoiced_like_onset(onset: str) -> bool:
     if not o:
         return False
     return o.startswith(("s", "sh", "h", "j", "ch", "c", "f", "th"))
+
+
+def _is_weak_boundary_onset(onset: str) -> bool:
+    o = str(onset or "").strip().lower()
+    if not o:
+        return False
+    weak_roots = ("m", "n", "l", "r", "j", "y", "w", "ng", "ny", "my", "ry", "ly")
+    return any(o == root or o.startswith(root) for root in weak_roots)
+
+
+def _is_liquid_or_vowel_target(target_clean, split_syllable_parts_fn):
+    try:
+        onset, vowel, coda = split_syllable_parts_fn(target_clean)
+    except Exception:
+        return False
+    onset_s = str(onset or "").strip().lower()
+    vowel_s = str(vowel or "").strip().lower()
+    coda_s = str(coda or "").strip().lower()
+    vowel_only = bool(vowel_s and not onset_s and not coda_s)
+    liquid = bool(onset_s and onset_s.startswith(("r", "l")))
+    return bool(vowel_only or liquid)
+
+
+def _local_transition_contrast(syllables_info, syllable_blank_confidences, idx):
+    if not syllables_info or idx is None:
+        return 0.0
+    n = len(syllables_info)
+    i = int(max(0, min(int(idx), n - 1)))
+
+    def _vec(at_idx):
+        return (
+            _mel_conf_at(syllables_info, at_idx, "mel_voiced_formant_conf", 0.0),
+            _mel_conf_at(syllables_info, at_idx, "mel_unvoiced_diffuse_conf", 0.0),
+            _mel_conf_at(
+                syllables_info,
+                at_idx,
+                "mel_silence_sparse_conf",
+                fallback=_blank_conf_at(syllable_blank_confidences, at_idx),
+            ),
+            _blank_conf_at(syllable_blank_confidences, at_idx),
+        )
+
+    base = _vec(i)
+    contrast = 0.0
+    for nb in (i - 1, i + 1):
+        if nb < 0 or nb >= n:
+            continue
+        cur = _vec(nb)
+        dist = sum(abs(float(base[k]) - float(cur[k])) for k in range(len(base))) / float(len(base))
+        contrast = max(contrast, max(0.0, min(1.0, dist)))
+    return float(contrast)
+
+
+def _estimate_fry_like_conf(syllables_info, syllable_blank_confidences, idx):
+    if not syllables_info or idx is None:
+        return 0.0
+    explicit = 0.0
+    for key in ("mel_vocal_fry_conf", "mel_fry_like_conf", "vocal_fry_conf"):
+        explicit = max(explicit, _mel_conf_at(syllables_info, idx, key, 0.0))
+    voiced = _mel_conf_at(syllables_info, idx, "mel_voiced_formant_conf", 0.0)
+    unvoiced = _mel_conf_at(syllables_info, idx, "mel_unvoiced_diffuse_conf", 0.0)
+    sil = _mel_conf_at(syllables_info, idx, "mel_silence_sparse_conf", fallback=_blank_conf_at(syllable_blank_confidences, idx))
+    breath = _mel_conf_at(syllables_info, idx, "mel_breath_like_conf", 0.0)
+    blank = _blank_conf_at(syllable_blank_confidences, idx)
+    proxy = max(
+        0.0,
+        min(1.0, (0.92 * voiced) - (0.52 * unvoiced) - (0.38 * sil) - (0.28 * breath) - (0.20 * blank)),
+    )
+    return max(explicit, proxy)
 
 
 def _mel_guided_cvvc_adjustment(
@@ -359,7 +440,15 @@ def _mel_guided_cvvc_adjustment(
     }
     conf_floor = conf_floor_by_fmt.get(fmt, 0.62)
     blank_gate = blank_gate_by_fmt.get(fmt, 0.58)
-    should_try = bool(conf < max(conf_th + 0.08, conf_floor) or selected_blank >= blank_gate)
+    score_gap_trigger = False
+    try:
+        selected_score_now = float(cv_match_score_fn(target_clean, romaji_syllables[int(selected_idx)]))
+        expected_score_now = float(cv_match_score_fn(target_clean, romaji_syllables[int(expected_idx)]))
+        if (selected_score_now + 8.0) < expected_score_now:
+            score_gap_trigger = True
+    except Exception:
+        score_gap_trigger = False
+    should_try = bool(conf < max(conf_th + 0.08, conf_floor) or selected_blank >= blank_gate or score_gap_trigger)
     if not should_try:
         return selected_idx, False
 
@@ -373,9 +462,23 @@ def _mel_guided_cvvc_adjustment(
     t_onset = str(t_onset or "").strip().lower()
     t_vowel = str(_t_vowel or "").strip().lower()
     t_coda = str(_t_coda or "").strip().lower()
+    weak_target = _is_weak_boundary_onset(t_onset)
+    reduce_missing_strict = _env_bool("UTOA_WEAK_BOUNDARY_MISSING_REDUCTION_ENABLE", False)
+    anti_mismap_strict = _env_bool("UTOA_WEAK_BOUNDARY_ANTIMISMAP_ENABLE", False)
+    if weak_target:
+        if anti_mismap_strict:
+            hi = min(hi, expected_idx + 1)
+        elif reduce_missing_strict:
+            hi = min(hi, expected_idx + 3)
+        else:
+            hi = min(hi, expected_idx + 2)
+        if lo >= hi:
+            return selected_idx, False
     target_unvoiced = _is_unvoiced_like_onset(t_onset)
+    target_fry_suppress = _is_liquid_or_vowel_target(target_clean, split_syllable_parts_fn)
     voiced_weight = 10.0 if a_type in {"cv", "cv_head", "vcv"} else 7.0
     unvoiced_weight = 8.0 if target_unvoiced else 3.0
+    fry_weight = -9.0 if target_fry_suppress else 1.2
 
     def _parts_at(idx):
         try:
@@ -400,10 +503,26 @@ def _mel_guided_cvvc_adjustment(
         voiced = _mel_conf_at(syllables_info, idx, "mel_voiced_formant_conf", 0.0)
         unvoiced = _mel_conf_at(syllables_info, idx, "mel_unvoiced_diffuse_conf", 0.0)
         breath = _mel_conf_at(syllables_info, idx, "mel_breath_like_conf", 0.0)
+        fry_like = _estimate_fry_like_conf(syllables_info, syllable_blank_confidences, idx)
         c_onset, c_vowel, c_coda = _parts_at(idx)
-        jump_penalty = abs(idx - expected_idx) * 10.0
-        mel_bonus = (voiced_weight * voiced) + (unvoiced_weight * unvoiced)
-        mel_penalty = (22.0 * blank) + (14.0 * sil) + (6.0 * breath)
+        jump_scale = 10.0
+        if weak_target:
+            jump_scale = 12.0
+            if anti_mismap_strict:
+                jump_scale = 15.0
+            elif reduce_missing_strict:
+                jump_scale = 9.0
+        jump_penalty = abs(idx - expected_idx) * jump_scale
+        mel_bonus = (voiced_weight * voiced) + (unvoiced_weight * unvoiced) + (fry_weight * fry_like)
+        blank_weight = 22.0
+        sil_weight = 14.0
+        if weak_target:
+            blank_weight = 16.0
+            sil_weight = 9.0
+            if anti_mismap_strict:
+                blank_weight = 14.0
+                sil_weight = 8.0
+        mel_penalty = (blank_weight * blank) + (sil_weight * sil) + (6.0 * breath)
         core_bonus = 0.0
         mismatch_penalty = 0.0
         if t_vowel:
@@ -411,6 +530,8 @@ def _mel_guided_cvvc_adjustment(
                 core_bonus += 9.0
             else:
                 mismatch_penalty += 34.0 if a_type == "vcv" else 44.0
+                if weak_target:
+                    mismatch_penalty += 10.0 if anti_mismap_strict else 6.0
         if t_onset:
             if c_onset == t_onset:
                 core_bonus += 4.0
@@ -418,8 +539,18 @@ def _mel_guided_cvvc_adjustment(
                 mismatch_penalty += 12.0
             else:
                 mismatch_penalty += 6.0
+            if weak_target and c_onset and c_onset != t_onset and a_type in {"cv", "cv_head"}:
+                mismatch_penalty += 8.0 if anti_mismap_strict else 4.0
         if a_type == "vcv" and t_coda and c_coda and c_coda != t_coda:
             mismatch_penalty += 4.0
+        if weak_target and idx != expected_idx:
+            contrast = _local_transition_contrast(syllables_info, syllable_blank_confidences, idx)
+            contrast_th = 0.18 if anti_mismap_strict else 0.14
+            if contrast < contrast_th:
+                contrast_penalty = (contrast_th - contrast) * (34.0 if anti_mismap_strict else 20.0)
+                if reduce_missing_strict and not anti_mismap_strict:
+                    contrast_penalty *= 0.8
+                mismatch_penalty += contrast_penalty
         stability_bonus = 1.5 if idx == selected_idx else 0.0
         return text + mel_bonus + stability_bonus + core_bonus - mel_penalty - jump_penalty - mismatch_penalty
 
@@ -437,6 +568,12 @@ def _mel_guided_cvvc_adjustment(
     # Keep changes conservative unless evidence is strong.
     selected_score = float(_score(int(selected_idx)))
     min_gain = 6.0 if a_type in {"cv", "cv_head"} else 5.0
+    if weak_target:
+        min_gain += 1.0
+        if anti_mismap_strict:
+            min_gain += 1.8
+        elif reduce_missing_strict:
+            min_gain = max(4.2, min_gain - 0.9)
     if best_score < (selected_score + min_gain):
         return selected_idx, False
     if _blank_conf_at(syllable_blank_confidences, best_idx) >= 0.72 and expected_blank <= 0.60:
@@ -451,6 +588,10 @@ def _mel_guided_cvvc_adjustment(
             return selected_idx, False
         if not best_vowel_match:
             return selected_idx, False
+        if weak_target:
+            _exp_onset, exp_vowel, _exp_coda = _parts_at(int(expected_idx))
+            if exp_vowel == t_vowel and best_vowel != t_vowel:
+                return selected_idx, False
     if a_type in {"cv", "cv_head"} and t_onset:
         sel_onset_match = bool(sel_onset and sel_onset == t_onset)
         best_onset_match = bool(best_onset and best_onset == t_onset)
@@ -973,7 +1114,7 @@ def select_kr_general_cv_index(
         if plan_guarded and guarded_plan_idx != selected_w_idx:
             if debug_logging:
                 log_fn(
-                    f"孱・・{fname}: KR global-plan guard ・・圸 "
+                    f"🛡️ {fname}: KR global-plan guard "
                     f"({selected_w_idx + 1}->{guarded_plan_idx + 1}, {alias})"
                 )
             row_jump_blocked = 1
@@ -1003,6 +1144,33 @@ def select_kr_general_cv_index(
         row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.08)
         selected_w_idx = int(invariant_idx)
         cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
+    if (
+        selected_w_idx is not None
+        and alias_type in {"cv", "cv_head", "vcv"}
+        and _env_bool("UTOA_WEAK_BOUNDARY_MISSING_REDUCTION_ENABLE", False)
+    ):
+        t_onset_now, _t_vowel_now, _t_coda_now = split_syllable_parts_fn(target_clean)
+        if _is_weak_boundary_onset(t_onset_now):
+            sel_blank_now = _blank_conf_at(syllable_blank_confidences, selected_w_idx)
+            if sel_blank_now >= 0.60:
+                fallback_idx = _find_nonblank_fallback_idx(
+                    expected_idx=expected_cv_idx,
+                    target_clean=target_clean,
+                    romaji_syllables=romaji_syllables,
+                    syllables_info=syllables_info,
+                    syllable_blank_confidences=syllable_blank_confidences,
+                    cv_match_score_fn=cv_match_score_fn,
+                    search_back=1,
+                    search_fwd=(1 if _env_bool("UTOA_WEAK_BOUNDARY_ANTIMISMAP_ENABLE", False) else 2),
+                )
+                if fallback_idx is not None and int(fallback_idx) != int(selected_w_idx):
+                    if debug_logging:
+                        log_fn(
+                            f"🧭 {fname}: KR 약경계 누락 완화 fallback "
+                            f"({selected_w_idx + 1}->{int(fallback_idx) + 1}, {alias})"
+                        )
+                    selected_w_idx = int(fallback_idx)
+                    cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
     return {
         "expected_cv_idx": int(expected_cv_idx),
         "selected_w_idx": int(selected_w_idx) if selected_w_idx is not None else None,

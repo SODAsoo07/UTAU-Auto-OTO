@@ -165,17 +165,39 @@ def detect_ja_alias_format(alias_list, custom_map=None):
             type_cache[a] = t
         types.append(t)
     type_set = set(types)
+    type_counts = {}
+    for t in types:
+        type_counts[t] = int(type_counts.get(t, 0)) + 1
+    non_br_total = int(sum(v for k, v in type_counts.items() if k != "br"))
+    vcv_count = int(type_counts.get("vcv", 0))
+    vc_count = int(type_counts.get("vc", 0))
+    vv_count = int(type_counts.get("vv", 0))
+    cv_like_count = int(
+        type_counts.get("cv", 0)
+        + type_counts.get("cv_head", 0)
+        + type_counts.get("mono", 0)
+    )
     if type_set == {'br'}:
         return 'br'
     if type_set <= {'mono', 'cv_head', 'cv'}:
         return 'cv'
-    if 'vcv' in type_set:
-        return 'vcv'
-    if 'vc' in type_set or 'vv' in type_set:
-        return 'cvvc'
     non_br = type_set - {'br'}
     if non_br <= {'vc', 'vv'}:
         return 'vc_only'
+    if vc_count > 0 or vv_count > 0:
+        # CVVC 계열은 VC/VV가 존재하는 순간 우선한다.
+        return 'cvvc'
+    if vcv_count > 0:
+        # 과거에는 vcv가 1개만 있어도 전체를 vcv로 잡아 CVVC가 흔들렸다.
+        # vcv가 충분히 지배적인 경우에만 vcv로 분류한다.
+        if non_br_total <= 0:
+            return 'vcv'
+        vcv_ratio = float(vcv_count) / float(non_br_total)
+        if vcv_count >= 2 and (vcv_ratio >= 0.55 or vcv_count > cv_like_count):
+            return 'vcv'
+        if cv_like_count > 0:
+            return 'cv'
+        return 'vcv'
     return 'cv'
 
 

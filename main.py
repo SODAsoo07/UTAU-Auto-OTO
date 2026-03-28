@@ -379,6 +379,8 @@ class App(
         self.weak_voice_assist_enable_var = ctk.BooleanVar(value=True)
         self.weak_voice_assist_strength_var = ctk.StringVar(value="")
         self.mapping_strict_mode_var = ctk.StringVar(value="적당히 엄격 모드(누락 행은 폴백)")
+        self.weak_boundary_reduce_missing_var = ctk.BooleanVar(value=False)
+        self.weak_boundary_block_mismap_var = ctk.BooleanVar(value=False)
         self.ml_same_language_borrow_only_var = ctk.BooleanVar(value=True)
         self.developer_mode_enabled_var = ctk.BooleanVar(value=False)
         self.advanced_options_expanded = False
