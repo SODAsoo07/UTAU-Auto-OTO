@@ -559,6 +559,24 @@ def _resolve_ensemble_model_dir(language: str, format_type: str, alias_family: s
     return _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="ensemble_v1")
 
 
+def _resolve_coupled_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
+    # Prefer v2 rawmel when present; fallback to v1 coupled.
+    coupled_v2 = _resolve_backend_model_dir(
+        language,
+        format_type,
+        alias_family=alias_family,
+        backend="coupled_nn_v2_rawmel",
+    )
+    if coupled_v2:
+        return coupled_v2
+    return _resolve_backend_model_dir(
+        language,
+        format_type,
+        alias_family=alias_family,
+        backend="coupled_nn_v1",
+    )
+
+
 def _ensure_rawmel_patches(
     feat: Dict[str, object],
     *,
@@ -597,9 +615,12 @@ def _ensure_rawmel_patches(
 def _resolve_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
     ensemble_dir = _resolve_ensemble_model_dir(language, format_type, alias_family=alias_family) if _ensemble_enabled() else None
     lightgbm_dir = _resolve_lightgbm_model_dir(language, format_type, alias_family=alias_family)
+    coupled_dir = _resolve_coupled_model_dir(language, format_type, alias_family=alias_family)
     if ensemble_dir:
         return ensemble_dir
-    return lightgbm_dir
+    if lightgbm_dir:
+        return lightgbm_dir
+    return coupled_dir
 
 
 def _bundle_meta_exists(model_dir: str) -> bool:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 
 from core.ja_lab_generator import split_ja_romaji_syllable
@@ -14,6 +15,15 @@ from core.ja_oto_mapping import (
 
 JA_VOWELS = {"a", "i", "u", "e", "o"}
 _JA_KANA_RE = re.compile(r"[ぁ-ゖァ-ヺー]")
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
 
 
 def _normalize_ja_syllable_token_strict(token):
@@ -108,6 +118,14 @@ def clamp_ja_cv_index_to_order(
 
     if fmt == "cv":
         # CV는 파일명/순서 정합을 최우선으로 두고 전진 매핑(+1)도 차단한다.
+        return e
+
+    # CVVC에서 CV/CV_HEAD 전방 이동은 오매핑을 유발하기 쉬우므로
+    # 기본값은 저티어/순서잠금 상황에서 차단한다.
+    # 필요 시 `UTOA_JA_CVVC_STRICT_CV_FORWARD=0`으로 이전 동작을 복원 가능.
+    strict_cvvc_forward = _env_bool("UTOA_JA_CVVC_STRICT_CV_FORWARD", True)
+    tier = str(mapping_tier or "").strip().lower()
+    if fmt == "cvvc" and strict_cvvc_forward and (filename_order_locked or tier != "high"):
         return e
 
     if m > (e + 1):

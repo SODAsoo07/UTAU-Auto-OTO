@@ -54,10 +54,10 @@ class FileDialogMixin:
         noml_auto_root = os.path.join(base_dir, "ML_models_noml_auto")
         legacy_root = os.path.join(base_dir, "ML_models")
 
-        for candidate in (external_root, installed_root, noml_auto_root, legacy_root):
+        for candidate in (external_root, noml_auto_root, installed_root, legacy_root):
             if self._dir_has_model_meta(candidate):
                 return candidate
-        for candidate in (external_root, installed_root, noml_auto_root, legacy_root):
+        for candidate in (external_root, noml_auto_root, installed_root, legacy_root):
             if os.path.isdir(candidate):
                 return candidate
         return legacy_root
@@ -147,6 +147,7 @@ class FileDialogMixin:
 
     def _apply_recommended_ml_model_defaults(self):
         current_language = self._get_language() if hasattr(self, "_get_language") else "korean"
+        base_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         targets = []
         if hasattr(self, "ml_model_root_kr_var"):
             targets.append(("korean", self.ml_model_root_kr_var))
@@ -159,8 +160,14 @@ class FileDialogMixin:
             if not recommended_root:
                 continue
             use_recommended = False
+            models_lang_root = os.path.abspath(os.path.join(base_dir, "models", str(language or "").strip().lower()))
+            recommended_abs = os.path.abspath(recommended_root)
+            current_abs = os.path.abspath(current_root) if current_root else ""
             if not current_root or not os.path.isdir(current_root):
                 use_recommended = True
+            elif recommended_abs == models_lang_root and self._dir_has_model_meta(models_lang_root):
+                if current_abs != models_lang_root:
+                    use_recommended = True
             elif "ML_models_noml_auto" in os.path.abspath(recommended_root):
                 if self._is_legacy_ml_language_root(current_root, language):
                     use_recommended = True
@@ -534,6 +541,7 @@ class AppRuntimeMixin:
     def _clear_advanced_tuning_envs(self) -> None:
         for key in (
             "UTOA_KR_MAPPING_CONF_THRESHOLD",
+            "UTOA_KR_MAPPING_ONLY_ENABLE",
             "UTOA_KR_CONTINUITY_ENABLE",
             "UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ",
             "UTOA_KR_VC_NEIGHBOR_ENABLE",
@@ -1506,12 +1514,13 @@ class AppRuntimeMixin:
         has_ensemble = False
         has_coupled = False
         try:
-            from core.oto_ml_refiner import _resolve_ensemble_model_dir, _resolve_lightgbm_model_dir
+            from core.oto_ml_refiner import _resolve_ensemble_model_dir, _resolve_lightgbm_model_dir, _resolve_model_dir
 
             ensemble_dir = _resolve_ensemble_model_dir(lang, fmt)
             lightgbm_dir = _resolve_lightgbm_model_dir(lang, fmt)
+            primary_dir = _resolve_model_dir(lang, fmt)
             has_ensemble = bool(ensemble_dir)
-            has_coupled = bool(ensemble_dir or lightgbm_dir)
+            has_coupled = bool(primary_dir or ensemble_dir or lightgbm_dir)
         except Exception:
             has_ensemble = False
             has_coupled = False

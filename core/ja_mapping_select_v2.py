@@ -37,6 +37,27 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        return int(float(raw))
+    except Exception:
+        return int(default)
+
+
+def _resolve_ja_low_tier_forward_window(format_type: str, fallback: int = 1) -> int:
+    fmt = str(format_type or "").strip().lower()
+    if fmt:
+        fmt_key = "UTOA_JA_LOW_TIER_FORWARD_MAX_" + re.sub(r"[^a-z0-9]+", "_", fmt).strip("_").upper()
+        fmt_val = _env_int(fmt_key, -1)
+        if fmt_val >= 1:
+            return int(fmt_val)
+    global_val = _env_int("UTOA_JA_LOW_TIER_FORWARD_MAX", int(fallback))
+    return max(1, int(global_val))
+
+
 def _token_alpha(tok):
     return re.sub(r"[^a-z]", "", str(tok or "").strip().lower())
 
@@ -213,6 +234,10 @@ def _mel_guided_ja_cvvc_adjustment(
     n = len(syllables_info)
     lo = max(0, expected_idx - 1)
     hi = min(n - 1, expected_idx + int(max(1, max_search_fwd)))
+    low_tier = bool(conf < max(conf_th, 0.62) or selected_blank >= 0.58)
+    if low_tier:
+        low_cap = _resolve_ja_low_tier_forward_window(fmt, fallback=1)
+        hi = min(hi, expected_idx + int(max(1, low_cap)))
     if order_locked:
         lo = expected_idx
         hi = min(hi, expected_idx + 1)
@@ -443,7 +468,7 @@ def select_ja_vcv_mapping(
             expected_idx,
             syllables_info,
             search_back=(1 if mapping_tier == "low" else 2),
-            search_fwd=(2 if mapping_tier == "low" else 3),
+            search_fwd=(1 if mapping_tier == "low" else 3),
         )
         if fixed_idx_vcv is not None and fixed_idx_vcv != mapped_idx:
             log_fn(
@@ -493,7 +518,7 @@ def select_ja_vcv_mapping(
         selected_idx=mapped_idx,
         mapping_confidence=mapping_confidence_base,
         mapping_conf_threshold=mapping_conf_threshold,
-        max_search_fwd=(2 if str(mapping_tier or "").strip().lower() == "low" else 3),
+        max_search_fwd=(1 if str(mapping_tier or "").strip().lower() == "low" else 3),
         syllables_info=syllables_info,
         normalize_syllable_token_fn=normalize_syllable_token_fn,
         syllable_info_token_fn=syllable_info_token_fn,
@@ -518,7 +543,7 @@ def select_ja_vcv_mapping(
             expected_idx,
             syllables_info,
             search_back=(2 if mapping_tier == "low" else 4),
-            search_fwd=(2 if mapping_tier == "low" else 4),
+            search_fwd=(1 if mapping_tier == "low" else 4),
         )
         if (
             retry_idx_vcv is not None

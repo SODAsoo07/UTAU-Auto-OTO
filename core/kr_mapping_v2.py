@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from core.kr_oto_rules import IPA_VOWELS, KR_VOWELS, _cv_match_score, _normalize_cv_match_token, _split_kr_syllable_parts, is_glide, normalize_ipa_mark
+from core.mapping_supervised_runtime import rescore_mapping_score_rows
 from core.oto_mapping_candidates import collect_phone_activity_metrics, is_active_candidate
 from core.oto_mapping_confidence import evaluate_index_plan
 from core.oto_mapping_plan import build_monotonic_index_plan
@@ -15,6 +16,13 @@ def _clean_mark(mark):
 def _is_vowel_mark(mark):
     norm = str(normalize_ipa_mark(mark) or "").strip().lower()
     return norm in IPA_VOWELS or mark in KR_VOWELS
+
+
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
 
 
 def collect_kr_syllable_activity_metrics(syl_info):
@@ -36,13 +44,21 @@ def is_kr_cv_syllable_active(syl_info, *, require_vowel=True, min_active_ms=16.0
     )
 
 
-def build_kr_cv_anchor_plan(expected_tokens, syllables_info, *, use_mel=False):
+def _candidate_duration_ms(syl) -> float:
+    if not isinstance(syl, dict):
+        return 0.0
+    start = _safe_float(syl.get("start_time"), 0.0)
+    end = _safe_float(syl.get("end_time"), 0.0)
+    return max(0.0, (end - start) * 1000.0)
+
+
+def build_kr_cv_anchor_score_grid(expected_tokens, syllables_info, *, use_mel=False):
     if not expected_tokens or not syllables_info:
-        return {"indices": None, "score_rows": [], "meta": evaluate_index_plan([], [])}
+        return {"token_list": [], "score_rows": [], "feature_rows": []}
 
     token_list = [_normalize_cv_match_token(t) for t in (expected_tokens or []) if t]
     if not token_list or len(syllables_info) < len(token_list):
-        return {"indices": None, "score_rows": [], "meta": evaluate_index_plan([], [])}
+        return {"token_list": [], "score_rows": [], "feature_rows": []}
 
     target_count = len(token_list)
     cand_count = len(syllables_info)
@@ -64,10 +80,12 @@ def build_kr_cv_anchor_plan(expected_tokens, syllables_info, *, use_mel=False):
         return (22.0 * voiced) + (8.0 * unvoiced) - (26.0 * silence) - (28.0 * blank) - (10.0 * breath)
 
     score_rows = []
+    feature_rows = []
     for i, target_tok in enumerate(token_list):
         t_onset, t_vowel, t_coda = _split_kr_syllable_parts(target_tok)
         ideal = 0.0 if target_count <= 1 else (float(i) * float(max(cand_count - 1, 0)) / float(target_count - 1))
         row = []
+        feat_row = []
         for j, syl in enumerate(syllables_info):
             cand_tok = _normalize_cv_match_token(
                 syl.get("roman_cv") or syl.get("roman") or syl.get("word") or ""
@@ -75,7 +93,8 @@ def build_kr_cv_anchor_plan(expected_tokens, syllables_info, *, use_mel=False):
             c_onset, c_vowel, c_coda = _split_kr_syllable_parts(cand_tok)
             active_ms, vowel_ms, _cnt = collect_kr_syllable_activity_metrics(syl)
             active = is_kr_cv_syllable_active(syl, require_vowel=True)
-            score = float(_cv_match_score(target_tok, cand_tok)) - (abs(float(j) - ideal) * 9.0)
+            text_score = float(_cv_match_score(target_tok, cand_tok))
+            score = text_score - (abs(float(j) - ideal) * 9.0)
             if target_tok and cand_tok == target_tok:
                 score += 80.0
             if bool(t_coda) != bool(c_coda):
@@ -99,11 +118,60 @@ def build_kr_cv_anchor_plan(expected_tokens, syllables_info, *, use_mel=False):
             score -= 18.0 * blank_prior
             score += _mel_score(syl)
             row.append(float(score))
+            feat_row.append(
+                {
+                    "target_pos": (float(i) / float(max(target_count - 1, 1))),
+                    "cand_pos": (float(j) / float(max(cand_count - 1, 1))),
+                    "pos_delta": (float(j) - ideal),
+                    "abs_pos_delta": abs(float(j) - ideal),
+                    "target_has_onset": 1.0 if t_onset else 0.0,
+                    "target_has_coda": 1.0 if t_coda else 0.0,
+                    "cand_has_onset": 1.0 if c_onset else 0.0,
+                    "cand_has_coda": 1.0 if c_coda else 0.0,
+                    "onset_initial_match": 1.0 if (t_onset and c_onset and t_onset[:1] == c_onset[:1]) else 0.0,
+                    "vowel_match": 1.0 if (t_vowel and c_vowel and t_vowel == c_vowel) else 0.0,
+                    "coda_match": 1.0 if (bool(t_coda) == bool(c_coda)) else 0.0,
+                    "target_is_glide": 1.0 if (t_vowel and is_glide(t_vowel)) else 0.0,
+                    "cand_is_glide": 1.0 if (c_vowel and is_glide(c_vowel)) else 0.0,
+                    "special_class_match": 0.0,
+                    "text_match_score": max(0.0, min(1.0, text_score / 100.0)),
+                    "active_ms": max(0.0, float(active_ms)),
+                    "vowel_ms": max(0.0, float(vowel_ms)),
+                    "blank_conf": max(0.0, min(1.0, blank_prior)),
+                    "mel_voiced": max(0.0, min(1.0, _safe_float((syl or {}).get("mel_voiced_formant_conf"), 0.0))),
+                    "mel_silence": max(0.0, min(1.0, _safe_float((syl or {}).get("mel_silence_sparse_conf"), 0.0))),
+                    "mel_unvoiced": max(0.0, min(1.0, _safe_float((syl or {}).get("mel_unvoiced_diffuse_conf"), 0.0))),
+                    "mel_breath": max(0.0, min(1.0, _safe_float((syl or {}).get("mel_breath_like_conf"), 0.0))),
+                    "cand_duration_ms": _candidate_duration_ms(syl),
+                }
+            )
         score_rows.append(row)
+        feature_rows.append(feat_row)
 
-    indices = build_monotonic_index_plan(score_rows)
-    meta = evaluate_index_plan(score_rows, indices or [])
-    return {"indices": indices, "score_rows": score_rows, "meta": meta}
+    return {"token_list": token_list, "score_rows": score_rows, "feature_rows": feature_rows}
+
+
+def build_kr_cv_anchor_plan(expected_tokens, syllables_info, *, use_mel=False, format_type=""):
+    grid = build_kr_cv_anchor_score_grid(expected_tokens, syllables_info, use_mel=use_mel)
+    token_list = list(grid.get("token_list") or [])
+    score_rows = list(grid.get("score_rows") or [])
+    feature_rows = list(grid.get("feature_rows") or [])
+    if not token_list or not score_rows:
+        return {"indices": None, "score_rows": [], "meta": evaluate_index_plan([], [])}
+
+    rescored_rows, model_meta = rescore_mapping_score_rows(
+        language="korean",
+        format_type=(str(format_type or "").strip().lower() or "cv"),
+        score_rows=score_rows,
+        feature_rows=feature_rows,
+    )
+    used_rows = rescored_rows if rescored_rows else score_rows
+
+    indices = build_monotonic_index_plan(used_rows)
+    meta = evaluate_index_plan(used_rows, indices or [])
+    if isinstance(model_meta, dict):
+        meta["mapping_supervised"] = dict(model_meta)
+    return {"indices": indices, "score_rows": used_rows, "meta": meta}
 
 
 def resolve_kr_planned_cv_index(planned_indices, expected_seq_idx, target_clean, syllables_info, *, alias_type="cv"):
@@ -139,6 +207,7 @@ def resolve_kr_planned_cv_index(planned_indices, expected_seq_idx, target_clean,
 
 __all__ = [
     "build_kr_cv_anchor_plan",
+    "build_kr_cv_anchor_score_grid",
     "collect_kr_syllable_activity_metrics",
     "is_kr_cv_syllable_active",
     "resolve_kr_planned_cv_index",

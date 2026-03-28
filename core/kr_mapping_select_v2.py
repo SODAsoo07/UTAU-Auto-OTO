@@ -13,6 +13,102 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        return int(float(raw))
+    except Exception:
+        return int(default)
+
+
+def _resolve_low_tier_forward_window(file_format: str, fallback: int = 1) -> int:
+    fmt = str(file_format or "").strip().lower()
+    if fmt:
+        fmt_key = "UTOA_KR_LOW_TIER_FORWARD_MAX_" + re.sub(r"[^a-z0-9]+", "_", fmt).strip("_").upper()
+        fmt_val = _env_int(fmt_key, -1)
+        if fmt_val >= 1:
+            return int(fmt_val)
+    global_val = _env_int("UTOA_KR_LOW_TIER_FORWARD_MAX", int(fallback))
+    return max(1, int(global_val))
+
+
+def _is_kr_mapping_only_enabled(file_format: str, alias_type: str) -> bool:
+    if not _env_bool("UTOA_KR_MAPPING_ONLY_ENABLE", False):
+        return False
+    fmt = str(file_format or "").strip().lower()
+    a_type = str(alias_type or "").strip().lower()
+    if fmt not in {"cv", "cvc", "cvvc", "vcv"}:
+        return False
+    return a_type in {"cv", "cv_head", "vcv", "vv", "mono"}
+
+
+def _pick_kr_mapping_only_idx(
+    *,
+    alias_type,
+    target_clean,
+    expected_idx,
+    forced_selected_idx,
+    planned_cv_idx,
+    forced_vv_idx,
+    planned_vv_idx,
+    romaji_syllables,
+    syllables_info,
+    syllable_blank_confidences,
+    cv_match_score_fn,
+    split_syllable_parts_fn,
+    vv_left,
+    vv_right,
+):
+    if not romaji_syllables:
+        return None
+    n = len(romaji_syllables)
+    if n <= 0:
+        return None
+
+    a_type = str(alias_type or "").strip().lower()
+    expected = int(max(0, min(int(expected_idx), n - 1)))
+    ordered = []
+    if a_type == "vv":
+        ordered.extend([planned_vv_idx, forced_vv_idx, planned_cv_idx, forced_selected_idx, expected])
+    else:
+        ordered.extend([planned_cv_idx, forced_selected_idx, expected])
+
+    candidates = []
+    seen = set()
+    for idx in ordered:
+        if idx is None:
+            continue
+        cand = int(max(0, min(int(idx), n - 1)))
+        if cand in seen:
+            continue
+        seen.add(cand)
+        if a_type == "vv" and vv_left and vv_right:
+            if not _vv_pair_matches(cand, romaji_syllables, split_syllable_parts_fn, vv_left, vv_right):
+                continue
+        candidates.append(cand)
+    if not candidates:
+        candidates = [expected]
+
+    best_idx = candidates[0]
+    best_score = -1.0e12
+    for cand in candidates:
+        text_score = 0.0
+        if target_clean:
+            try:
+                text_score = float(cv_match_score_fn(target_clean, romaji_syllables[cand]))
+            except Exception:
+                text_score = 0.0
+        blank = _blank_conf_at(syllable_blank_confidences, cand)
+        sil = _mel_conf_at(syllables_info, cand, "mel_silence_sparse_conf", fallback=blank)
+        score = text_score - (abs(cand - expected) * 10.0) - (blank * 22.0) - (sil * 14.0)
+        if score > best_score:
+            best_score = score
+            best_idx = cand
+    return int(best_idx)
+
+
 def _extract_vv_pair_tokens(alias, split_syllable_parts_fn):
     parts = [p for p in re.split(r"\s+", (alias or "").strip().lower()) if p]
     if len(parts) != 2:
@@ -455,6 +551,16 @@ def _mel_guided_cvvc_adjustment(
     n = len(romaji_syllables)
     lo = max(0, expected_idx - 1)
     hi = min(n - 1, expected_idx + int(max(1, max_search_fwd)))
+    low_tier = bool(conf < max(conf_th, conf_floor) or selected_blank >= blank_gate)
+    if low_tier:
+        low_cap_default = {
+            "cvvc": 1,
+            "vcv": 1,
+            "cvc": 1,
+            "cv": 1,
+        }.get(fmt, 1)
+        low_cap = _resolve_low_tier_forward_window(fmt, fallback=low_cap_default)
+        hi = min(hi, expected_idx + int(max(1, low_cap)))
     if lo >= hi:
         return selected_idx, False
 
@@ -830,6 +936,7 @@ def select_kr_general_cv_index(
 ):
     expected_cv_idx = int(cv_seq_idx)
     expected_blank_conf = _blank_conf_at(syllable_blank_confidences, expected_cv_idx)
+    mapping_only_enabled = _is_kr_mapping_only_enabled(file_format, alias_type)
     eff_jump_default, eff_jump_high_conf = _effective_jump_limits(
         row_jump_default,
         row_jump_high_conf,
@@ -949,6 +1056,33 @@ def select_kr_general_cv_index(
             )
         if row_jump_blocked:
             row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.18)
+    if mapping_only_enabled:
+        mapping_only_idx = _pick_kr_mapping_only_idx(
+            alias_type=alias_type,
+            target_clean=target_clean,
+            expected_idx=expected_cv_idx,
+            forced_selected_idx=forced_selected_idx,
+            planned_cv_idx=planned_cv_idx,
+            forced_vv_idx=forced_vv_idx,
+            planned_vv_idx=planned_vv_idx,
+            romaji_syllables=romaji_syllables,
+            syllables_info=syllables_info,
+            syllable_blank_confidences=syllable_blank_confidences,
+            cv_match_score_fn=cv_match_score_fn,
+            split_syllable_parts_fn=split_syllable_parts_fn,
+            vv_left=vv_left,
+            vv_right=vv_right,
+        )
+        if mapping_only_idx is not None and mapping_only_idx != selected_w_idx:
+            if debug_logging:
+                log_fn(
+                    f"[KR mapping-only] {fname}: idx {int(selected_w_idx) + 1 if selected_w_idx is not None else '?'}"
+                    f"->{int(mapping_only_idx) + 1} ({alias})"
+                )
+            selected_w_idx = int(mapping_only_idx)
+            cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
+            row_jump_blocked = 1
+            row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.04)
     target_onset, target_vowel, _target_coda = split_syllable_parts_fn(target_clean)
     forced_cv_head_severe_mismatch = False
     if (
@@ -988,6 +1122,11 @@ def select_kr_general_cv_index(
             fixed_search_fwd = 4 if file_format == "cvvc" else 2
             if file_format == "cvvc" and forced_selected_idx is not None and alias_type == "cv_head":
                 fixed_search_fwd = 1
+            if file_mapping_low_conf:
+                fixed_search_fwd = min(
+                    int(fixed_search_fwd),
+                    int(_resolve_low_tier_forward_window(file_format, fallback=1)),
+                )
             fixed_idx = find_cv_vowel_match_index_fn(
                 target_clean,
                 romaji_syllables,
@@ -1073,21 +1212,23 @@ def select_kr_general_cv_index(
         row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.10)
         selected_w_idx = int(guarded_idx)
         cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
-    mel_idx, mel_adjusted = _mel_guided_cvvc_adjustment(
-        file_format=file_format,
-        alias_type=alias_type,
-        target_clean=target_clean,
-        expected_idx=expected_cv_idx,
-        selected_idx=selected_w_idx,
-        row_mapping_confidence=row_mapping_confidence,
-        file_mapping_conf_th=file_mapping_conf_th,
-        max_search_fwd=max(eff_jump_high_conf, 2),
-        romaji_syllables=romaji_syllables,
-        syllables_info=syllables_info,
-        syllable_blank_confidences=syllable_blank_confidences,
-        split_syllable_parts_fn=split_syllable_parts_fn,
-        cv_match_score_fn=cv_match_score_fn,
-    )
+    mel_idx, mel_adjusted = selected_w_idx, False
+    if not mapping_only_enabled:
+        mel_idx, mel_adjusted = _mel_guided_cvvc_adjustment(
+            file_format=file_format,
+            alias_type=alias_type,
+            target_clean=target_clean,
+            expected_idx=expected_cv_idx,
+            selected_idx=selected_w_idx,
+            row_mapping_confidence=row_mapping_confidence,
+            file_mapping_conf_th=file_mapping_conf_th,
+            max_search_fwd=max(eff_jump_high_conf, 2),
+            romaji_syllables=romaji_syllables,
+            syllables_info=syllables_info,
+            syllable_blank_confidences=syllable_blank_confidences,
+            split_syllable_parts_fn=split_syllable_parts_fn,
+            cv_match_score_fn=cv_match_score_fn,
+        )
     if mel_adjusted and mel_idx != selected_w_idx:
         if debug_logging:
             log_fn(

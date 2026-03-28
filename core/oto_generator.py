@@ -465,21 +465,34 @@ def get_default_params_for_context(language="korean", format_type=""):
     return resolved
 
 # 한국어 매핑 신뢰도 임계치 기본값(포맷별)
-# - CVVC: 현재 안정성 기준값 유지
-# - VCV: 점프 허용 전 신뢰도를 조금 더 엄격하게 본다
-# - CV/CVC: 정보량이 상대적으로 단순해 과도한 저신뢰 판정을 완화
-# - VC_ONLY/VV_ONLY: CV 정렬 점프 로직 영향이 거의 없어 완화값 사용
+# - CVVC/VCV: 오매핑 억제를 위해 보수적으로 상향
+# - CV/CVC: CVVC보다 완화하되 기존값 대비 소폭 상향
+# - VC_ONLY/VV_ONLY: CV 정렬 점프 영향이 작아 중간값 유지
 KR_MAPPING_CONF_THRESHOLD_BY_FORMAT = {
-    "cv": 0.60,
-    "cvvc": 0.64,
-    "vcv": 0.64,
-    "cvc": 0.60,
-    "cv_simple": 0.60,
-    "mono": 0.60,
-    "vc_only": 0.58,
-    "vv_only": 0.58,
-    "default": 0.62,
+    "cv": 0.62,
+    "cvvc": 0.67,
+    "vcv": 0.66,
+    "cvc": 0.63,
+    "cv_simple": 0.61,
+    "mono": 0.61,
+    "vc_only": 0.60,
+    "vv_only": 0.60,
+    "default": 0.64,
 }
+
+
+def _resolve_kr_threshold_env_override(file_format):
+    fmt = str(file_format or "").strip().lower()
+    if not fmt:
+        return None
+    env_key = "UTOA_KR_MAPPING_CONF_THRESHOLD_" + re.sub(r"[^a-z0-9]+", "_", fmt).strip("_").upper()
+    raw = str(os.environ.get(env_key, "") or "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except Exception:
+        return None
 
 
 def _resolve_kr_mapping_conf_threshold(file_format, override_threshold=None, phone_quality_score=None):
@@ -495,6 +508,9 @@ def _resolve_kr_mapping_conf_threshold(file_format, override_threshold=None, pho
         except Exception:
             pass
     fmt = str(file_format or "").strip().lower()
+    env_override = _resolve_kr_threshold_env_override(fmt)
+    if env_override is not None:
+        return float(env_override)
     base = KR_MAPPING_CONF_THRESHOLD_BY_FORMAT.get(
         fmt,
         KR_MAPPING_CONF_THRESHOLD_BY_FORMAT["default"],
@@ -1038,7 +1054,19 @@ def _fit_oto_to_wav_duration(
 
     changed = False
     margin = 1.0
+    alias_key = str(alias_type or "").strip().lower()
     min_tail = 2.0
+    if alias_key in {"cv", "cv_head"}:
+        min_tail = _env_float(
+            "UTOA_KR_CV_MIN_CUTOFF_SPAN_MS",
+            _env_float("UTOA_CV_MIN_CUTOFF_SPAN_MS", 96.0),
+        )
+        if alias_key == "cv_head":
+            min_tail = _env_float(
+                "UTOA_KR_CV_HEAD_MIN_CUTOFF_SPAN_MS",
+                max(72.0, float(min_tail) - 12.0),
+            )
+    min_tail = max(2.0, float(min_tail))
     max_offset = max(0.0, dur - min_tail)
     if offset < 0.0:
         offset = 0.0
@@ -1052,7 +1080,10 @@ def _fit_oto_to_wav_duration(
     cons_hi = max(0.8, available - 0.6)
     consonant = max(pre + 0.4, min(float(consonant), cons_hi))
     cut_abs = abs(float(cutoff))
-    cut_abs = max(consonant + 0.3, min(cut_abs, available))
+    cut_floor = consonant + 0.3
+    if alias_key in {"cv", "cv_head"}:
+        cut_floor = max(cut_floor, min(min_tail, float(available)))
+    cut_abs = max(cut_floor, min(cut_abs, available))
     cutoff = -cut_abs
     ovl = max(0.0, min(float(ovl), max(pre - 0.1, 0.0)))
 
@@ -1243,8 +1274,8 @@ def _is_kr_cv_syllable_active(syl_info, *, require_vowel=True, min_active_ms=16.
     )
 
 
-def _build_kr_planned_cv_indices(expected_tokens, syllables_info):
-    plan = _build_kr_cv_anchor_plan_v2(expected_tokens, syllables_info)
+def _build_kr_planned_cv_indices(expected_tokens, syllables_info, *, format_type=""):
+    plan = _build_kr_cv_anchor_plan_v2(expected_tokens, syllables_info, format_type=format_type)
     return plan.get("indices")
 
 
@@ -1839,6 +1870,18 @@ def validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=""):
     }
     min_cons_gap = _MIN_CONS_GAP.get(a_type, 14.0) if a_type else 30.0
     min_cut_gap = _MIN_CUT_GAP.get(a_type, 12.0) if a_type else 50.0
+    min_cutoff_span = 0.0
+    if a_type in {"cv", "cv_head"}:
+        cv_span_default = _env_float(
+            "UTOA_KR_CV_MIN_CUTOFF_SPAN_MS",
+            _env_float("UTOA_CV_MIN_CUTOFF_SPAN_MS", 96.0),
+        )
+        if a_type == "cv_head":
+            cv_span_default = _env_float(
+                "UTOA_KR_CV_HEAD_MIN_CUTOFF_SPAN_MS",
+                max(72.0, float(cv_span_default) - 12.0),
+            )
+        min_cutoff_span = max(float(min_cut_gap) + 8.0, float(cv_span_default))
 
     # --- 기본 하한 ---
     if offset < 0:
@@ -1862,6 +1905,8 @@ def validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=""):
     cutoff_abs = abs(cutoff)
     if cutoff_abs <= consonant + min_cut_gap:
         cutoff_abs = consonant + min_cut_gap
+    if min_cutoff_span > 0.0 and cutoff_abs < min_cutoff_span:
+        cutoff_abs = min_cutoff_span
     cutoff = -cutoff_abs
 
     # --- 최종 순서 검증 (안전망) ---
@@ -1872,6 +1917,8 @@ def validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=""):
     cutoff_abs = abs(cutoff)
     if cutoff_abs <= consonant:
         cutoff_abs = consonant + min_cut_gap
+    if min_cutoff_span > 0.0 and cutoff_abs < min_cutoff_span:
+        cutoff_abs = min_cutoff_span
     cutoff = -cutoff_abs
 
     return offset, consonant, cutoff, pre, ovl
@@ -3712,6 +3759,7 @@ def generate_oto(
     elif env_cleanup_jsonl in {"1", "true", "on", "yes"}:
         cleanup_timing_jsonl = True
     kr_disable_cvvc_order_lock = _env_bool("UTOA_KR_DISABLE_CVVC_ORDER_LOCK", False)
+    kr_mapping_only_enable = _env_bool("UTOA_KR_MAPPING_ONLY_ENABLE", False)
 
     def log(msg):
         if callback:
@@ -4355,6 +4403,7 @@ def generate_oto(
                     plan_candidate_source,
                     syllables_info,
                     use_mel=bool(use_mel_plan),
+                    format_type=file_format,
                 ) if plan_candidate_source else {"indices": None, "meta": {}}
             kr_planned_cv_indices = kr_cv_plan.get("indices")
             kr_anchor_graph = build_adjacent_anchor_graph(kr_planned_cv_indices)
@@ -4641,6 +4690,9 @@ def generate_oto(
                 alias_type = _classify_alias_cached(alias)
                 row_jump_default = int(max(0, kr_mapping_max_index_jump_default))
                 row_jump_high_conf = int(max(row_jump_default, kr_mapping_max_index_jump_high_conf))
+                if kr_mapping_only_enable and alias_type in {"cv", "cv_head", "vcv", "vv", "mono"}:
+                    row_jump_default = 0
+                    row_jump_high_conf = 0
                 if kr_order_locked_format and textgrid_trust_tier == "low":
                     row_jump_default = 0
                     row_jump_high_conf = max(0, min(row_jump_high_conf, 1))

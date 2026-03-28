@@ -19,6 +19,47 @@ from core.preflight_common import collect_runtime_preflight_issues
 
 class OtoActionsMixin:
     @staticmethod
+    def _recommended_format_env_preset() -> dict[str, str]:
+        # Keep as conservative defaults; users can still override by explicitly setting env/UI values.
+        return {
+            # KR format thresholds
+            "UTOA_KR_MAPPING_CONF_THRESHOLD_CV": "0.62",
+            "UTOA_KR_MAPPING_CONF_THRESHOLD_CVC": "0.63",
+            "UTOA_KR_MAPPING_CONF_THRESHOLD_CVVC": "0.67",
+            "UTOA_KR_MAPPING_CONF_THRESHOLD_VCV": "0.66",
+            # JA format thresholds
+            "UTOA_JA_MAPPING_CONF_THRESHOLD_CV": "0.70",
+            "UTOA_JA_MAPPING_CONF_THRESHOLD_CVVC": "0.71",
+            "UTOA_JA_MAPPING_CONF_THRESHOLD_VCV": "0.62",
+            # Low-tier forward search caps
+            "UTOA_KR_LOW_TIER_FORWARD_MAX": "1",
+            "UTOA_KR_LOW_TIER_FORWARD_MAX_CV": "1",
+            "UTOA_KR_LOW_TIER_FORWARD_MAX_CVC": "1",
+            "UTOA_KR_LOW_TIER_FORWARD_MAX_CVVC": "1",
+            "UTOA_KR_LOW_TIER_FORWARD_MAX_VCV": "1",
+            "UTOA_JA_LOW_TIER_FORWARD_MAX": "1",
+            "UTOA_JA_LOW_TIER_FORWARD_MAX_CV": "1",
+            "UTOA_JA_LOW_TIER_FORWARD_MAX_CVVC": "1",
+            "UTOA_JA_LOW_TIER_FORWARD_MAX_VCV": "1",
+            # CV minimum cutoff span guards
+            "UTOA_KR_CV_MIN_CUTOFF_SPAN_MS": "96",
+            "UTOA_KR_CV_HEAD_MIN_CUTOFF_SPAN_MS": "84",
+            "UTOA_JA_CV_MIN_CUTOFF_SPAN_MS": "92",
+            "UTOA_JA_CV_HEAD_MIN_CUTOFF_SPAN_MS": "82",
+        }
+
+    def _apply_recommended_format_env_preset(self) -> tuple[int, int]:
+        preset = self._recommended_format_env_preset()
+        applied = 0
+        total = len(preset)
+        for key, value in preset.items():
+            if str(os.environ.get(key, "") or "").strip():
+                continue
+            os.environ[key] = str(value)
+            applied += 1
+        return applied, total
+
+    @staticmethod
     def _has_top_level_wavs(folder_path: str) -> bool:
         try:
             return any(str(name).lower().endswith(".wav") for name in os.listdir(folder_path))
@@ -332,6 +373,11 @@ class OtoActionsMixin:
                 )
                 enable_ml_correction = bool(auto_policy.get("enable_ml"))
                 self._apply_advanced_tuning_envs()
+                preset_applied, preset_total = self._apply_recommended_format_env_preset()
+                if preset_applied > 0:
+                    self._append_log(
+                        f"[Preset] format tuning preset applied ({preset_applied}/{preset_total}, env setdefault)"
+                    )
                 if lang == "korean":
                     os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_DEFAULT"] = str(int(kr_jump_default))
                     os.environ["UTOA_KR_MAPPING_MAX_INDEX_JUMP_HIGH_CONF"] = str(int(kr_jump_hi))

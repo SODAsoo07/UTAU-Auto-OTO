@@ -162,6 +162,12 @@ def _env_bool(name, default=False):
     return bool(default)
 
 
+def _allow_ja_cvvc_soft_forward_in_lock() -> bool:
+    # CVVC 순서 잠금 구간에서의 +1 소프트 전진은 오매핑을 만들기 쉬워 기본 비활성.
+    # 필요 시 `UTOA_JA_CVVC_SOFT_FORWARD_IN_LOCK=1`로 복원.
+    return _env_bool("UTOA_JA_CVVC_SOFT_FORWARD_IN_LOCK", False)
+
+
 def apply_suffix_to_oto_line(line, suffix):
     """`wav=alias,params...` 라인에서 alias에만 접미사를 적용합니다."""
     suf = _normalize_alias_suffix(suffix)
@@ -322,13 +328,27 @@ JA_DEFAULT_PARAMS = {
 
 # 일본어 매핑 신뢰도 임계치 기본값(포맷별).
 # - CV/CVVC: 음절 1칸 밀림 방지를 위해 보수적으로 운용
-# - VCV: 기존 호환성을 유지
+# - VCV: 누적 오매핑 억제를 위해 소폭 상향
 JA_MAPPING_CONF_THRESHOLD_BY_FORMAT = {
-    "cv": 0.68,
-    "cvvc": 0.68,
-    "vcv": 0.60,
-    "default": 0.62,
+    "cv": 0.70,
+    "cvvc": 0.71,
+    "vcv": 0.62,
+    "default": 0.65,
 }
+
+
+def _resolve_ja_threshold_env_override(format_type):
+    fmt = str(format_type or "").strip().lower()
+    if not fmt:
+        return None
+    env_key = "UTOA_JA_MAPPING_CONF_THRESHOLD_" + re.sub(r"[^a-z0-9]+", "_", fmt).strip("_").upper()
+    raw = str(os.environ.get(env_key, "") or "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except Exception:
+        return None
 
 
 def _resolve_ja_mapping_conf_threshold(format_type, override_threshold=None):
@@ -338,6 +358,9 @@ def _resolve_ja_mapping_conf_threshold(format_type, override_threshold=None):
         except Exception:
             pass
     fmt = str(format_type or "").strip().lower()
+    env_override = _resolve_ja_threshold_env_override(fmt)
+    if env_override is not None:
+        return float(env_override)
     base = JA_MAPPING_CONF_THRESHOLD_BY_FORMAT.get(
         fmt,
         JA_MAPPING_CONF_THRESHOLD_BY_FORMAT["default"],
@@ -557,6 +580,16 @@ JA_CVVC_BRIDGE_TIMING = {
 }
 
 
+def _env_float(name, default):
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
 def validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=""):
     """
     UTAU OTO 파라미터 순서 제약을 강제합니다.
@@ -583,6 +616,18 @@ def validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=""):
     }
     min_cons_gap = min_cons_gap_by_type.get(a_type, 30.0 if not a_type else 14.0)
     min_cut_gap = min_cut_gap_by_type.get(a_type, 50.0 if not a_type else 12.0)
+    min_cutoff_span = 0.0
+    if a_type in {"cv", "cv_head"}:
+        cv_span_default = _env_float(
+            "UTOA_JA_CV_MIN_CUTOFF_SPAN_MS",
+            _env_float("UTOA_CV_MIN_CUTOFF_SPAN_MS", 92.0),
+        )
+        if a_type == "cv_head":
+            cv_span_default = _env_float(
+                "UTOA_JA_CV_HEAD_MIN_CUTOFF_SPAN_MS",
+                max(70.0, float(cv_span_default) - 10.0),
+            )
+        min_cutoff_span = max(float(min_cut_gap) + 8.0, float(cv_span_default))
 
     if offset < 0: offset = 0
     if pre < 0: pre = 0
@@ -597,6 +642,18 @@ def validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=""):
     cutoff_abs = abs(cutoff)
     if cutoff_abs <= consonant + min_cut_gap:
         cutoff_abs = consonant + min_cut_gap
+    if min_cutoff_span > 0.0 and cutoff_abs < min_cutoff_span:
+        cutoff_abs = min_cutoff_span
+    cutoff = -cutoff_abs
+    if ovl >= pre:
+        ovl = max(0.0, pre - 2.0)
+    if consonant < pre:
+        consonant = pre + min_cons_gap
+    cutoff_abs = abs(cutoff)
+    if cutoff_abs <= consonant:
+        cutoff_abs = consonant + min_cut_gap
+    if min_cutoff_span > 0.0 and cutoff_abs < min_cutoff_span:
+        cutoff_abs = min_cutoff_span
     cutoff = -cutoff_abs
     
     return offset, consonant, cutoff, pre, ovl
@@ -1443,8 +1500,13 @@ def _find_ja_vv_pair_prev_index(alias, expected_prev_idx, syllables_info, search
     return None
 
 
-def _build_ja_planned_cv_indices(expected_tokens, syllables_info, *, use_mel=False):
-    plan = _build_ja_cv_anchor_plan_v2(expected_tokens, syllables_info, use_mel=bool(use_mel))
+def _build_ja_planned_cv_indices(expected_tokens, syllables_info, *, use_mel=False, format_type=""):
+    plan = _build_ja_cv_anchor_plan_v2(
+        expected_tokens,
+        syllables_info,
+        use_mel=bool(use_mel),
+        format_type=format_type,
+    )
     return plan.get("indices")
 
 
@@ -3171,6 +3233,7 @@ def generate_ja_oto(
                     planned_cv_source,
                     syllables_info,
                     use_mel=bool(use_mel_plan),
+                    format_type=format_type,
                 ) if planned_cv_source else {"indices": None, "meta": {}}
             ja_planned_cv_indices = ja_cv_plan.get("indices")
             ja_anchor_graph = build_adjacent_anchor_graph(ja_planned_cv_indices)
@@ -3309,6 +3372,7 @@ def generate_ja_oto(
                             planned_cv_source,
                             syllables_info,
                             use_mel=bool(use_mel_plan),
+                            format_type=format_type,
                         ) if planned_cv_source else {"indices": None, "meta": {}}
                     ja_planned_cv_indices = ja_cv_plan.get("indices")
                     ja_anchor_graph = build_adjacent_anchor_graph(ja_planned_cv_indices)
@@ -3831,6 +3895,22 @@ def generate_ja_oto(
                                 f"🧭 {fname}: CV_HEAD occurrence 고정 "
                                 f"{expected_idx + 1}->{mapped_idx + 1} ({alias})"
                             )
+                        if format_type in {"cvvc", "cv"}:
+                            ordered_idx = _clamp_ja_cv_index_to_order(
+                                target_tok,
+                                expected_idx,
+                                mapped_idx,
+                                syllables_info,
+                                format_type=format_type,
+                                filename_order_locked=filename_order_locked,
+                                mapping_tier=mapping_tier,
+                            )
+                            if ordered_idx != mapped_idx:
+                                log(
+                                    f"🛡️ {fname}: CV_HEAD occurrence 순서 고정 "
+                                    f"({mapped_idx + 1}->{ordered_idx + 1}, {alias})"
+                                )
+                                mapped_idx = ordered_idx
                     elif skip_cv_align:
                         mapped_idx = expected_idx
                         # CVVC/CV 파일명 순서 잠금에서도 요음/삽입 모음으로 인한 1칸 밀림은 보정.
@@ -3856,7 +3936,10 @@ def generate_ja_oto(
                             ):
                                 expected_tok_trace = _syllable_info_token(syllables_info[expected_idx])
                                 mapped_tok_trace = _syllable_info_token(syllables_info[resync_idx])
-                                if _should_allow_ja_soft_forward_shift(target_tok, expected_tok_trace, mapped_tok_trace):
+                                if (
+                                    format_type != "cvvc"
+                                    or _allow_ja_cvvc_soft_forward_in_lock()
+                                ) and _should_allow_ja_soft_forward_shift(target_tok, expected_tok_trace, mapped_tok_trace):
                                     mapped_idx = resync_idx
                                     log(
                                         f"🧭 {fname}: CV_HEAD 순서 잠금 미세 보정 "
@@ -3933,11 +4016,15 @@ def generate_ja_oto(
                                     expected_tok_norm = _normalize_ja_syllable_token(
                                         _syllable_info_token(syllables_info[expected_idx])
                                     )
-                                    allow_forward = _should_allow_ja_soft_forward_shift(
-                                        target_norm,
-                                        expected_tok_norm,
-                                        mapped_tok_norm,
-                                    )
+                                    if (
+                                        format_type != "cvvc"
+                                        or _allow_ja_cvvc_soft_forward_in_lock()
+                                    ):
+                                        allow_forward = _should_allow_ja_soft_forward_shift(
+                                            target_norm,
+                                            expected_tok_norm,
+                                            mapped_tok_norm,
+                                        )
                                 if not allow_forward:
                                     mapped_idx = expected_idx
                             elif mapped_idx > (expected_idx + 1):
@@ -3997,6 +4084,17 @@ def generate_ja_oto(
                                 f"({mapped_idx + 1}->{active_idx + 1}, {alias})"
                             )
                         mapped_idx = active_idx
+                    if (
+                        format_type == "cvvc"
+                        and mapped_idx > expected_idx
+                        and not _allow_ja_cvvc_soft_forward_in_lock()
+                    ):
+                        if ja_mapping_debug_reason_logging:
+                            log(
+                                f"🛡️ {fname}: CV_HEAD CVVC 전진 매핑 차단 "
+                                f"({mapped_idx + 1}->{expected_idx + 1}, {alias})"
+                            )
+                        mapped_idx = expected_idx
                     expected_tok_trace = _syllable_info_token(syllables_info[expected_idx])
                     mapped_tok_trace = _syllable_info_token(syllables_info[mapped_idx])
                     local_trace_conf = None
@@ -4177,6 +4275,22 @@ def generate_ja_oto(
                                 f"🧭 {fname}: CV occurrence 고정 "
                                 f"{expected_idx + 1}->{mapped_idx + 1} ({alias})"
                             )
+                        if format_type in {"cvvc", "cv"}:
+                            ordered_idx = _clamp_ja_cv_index_to_order(
+                                target_tok,
+                                expected_idx,
+                                mapped_idx,
+                                syllables_info,
+                                format_type=format_type,
+                                filename_order_locked=filename_order_locked,
+                                mapping_tier=mapping_tier,
+                            )
+                            if ordered_idx != mapped_idx:
+                                log(
+                                    f"🛡️ {fname}: CV occurrence 순서 고정 "
+                                    f"({mapped_idx + 1}->{ordered_idx + 1}, {alias})"
+                                )
+                                mapped_idx = ordered_idx
                     elif skip_cv_align:
                         mapped_idx = expected_idx
                         # CVVC/CV 파일명 순서 잠금에서도 요음/삽입 모음으로 인한 1칸 밀림은 보정.
@@ -4202,7 +4316,10 @@ def generate_ja_oto(
                             ):
                                 expected_tok_trace = _syllable_info_token(syllables_info[expected_idx])
                                 mapped_tok_trace = _syllable_info_token(syllables_info[resync_idx])
-                                if _should_allow_ja_soft_forward_shift(target_tok, expected_tok_trace, mapped_tok_trace):
+                                if (
+                                    format_type != "cvvc"
+                                    or _allow_ja_cvvc_soft_forward_in_lock()
+                                ) and _should_allow_ja_soft_forward_shift(target_tok, expected_tok_trace, mapped_tok_trace):
                                     mapped_idx = resync_idx
                                     log(
                                         f"🧭 {fname}: CV 순서 잠금 미세 보정 "
@@ -4279,11 +4396,15 @@ def generate_ja_oto(
                                     expected_tok_norm = _normalize_ja_syllable_token(
                                         _syllable_info_token(syllables_info[expected_idx])
                                     )
-                                    allow_forward = _should_allow_ja_soft_forward_shift(
-                                        target_norm,
-                                        expected_tok_norm,
-                                        mapped_tok_norm,
-                                    )
+                                    if (
+                                        format_type != "cvvc"
+                                        or _allow_ja_cvvc_soft_forward_in_lock()
+                                    ):
+                                        allow_forward = _should_allow_ja_soft_forward_shift(
+                                            target_norm,
+                                            expected_tok_norm,
+                                            mapped_tok_norm,
+                                        )
                                 if not allow_forward:
                                     mapped_idx = expected_idx
                             elif mapped_idx > (expected_idx + 1):
@@ -4319,6 +4440,17 @@ def generate_ja_oto(
                                 f"({mapped_idx + 1}->{active_idx + 1}, {alias})"
                             )
                         mapped_idx = active_idx
+                    if (
+                        format_type == "cvvc"
+                        and mapped_idx > expected_idx
+                        and not _allow_ja_cvvc_soft_forward_in_lock()
+                    ):
+                        if ja_mapping_debug_reason_logging:
+                            log(
+                                f"🛡️ {fname}: CV CVVC 전진 매핑 차단 "
+                                f"({mapped_idx + 1}->{expected_idx + 1}, {alias})"
+                            )
+                        mapped_idx = expected_idx
                     expected_tok_trace = _syllable_info_token(syllables_info[expected_idx])
                     mapped_tok_trace = _syllable_info_token(syllables_info[mapped_idx])
                     local_trace_conf = None
