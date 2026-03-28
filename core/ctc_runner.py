@@ -355,7 +355,8 @@ def _resolve_cvn_model_path(language: str) -> str:
     candidates = [str(os.environ.get(k, "") or "").strip() for k in env_keys]
     candidates.extend(
         [
-            os.path.join(root, "_tmp_smoke_check", "cv_binary_full.npz"),
+            os.path.join(root, "ml_workspace", "models", "cvn", lang, "cv_binary_full_tuned.npz"),
+            os.path.join(root, "ml_workspace", "models", "cvn", lang, "cv_binary_full.npz"),
             os.path.join(root, "ML_models", "cvn", lang, "cv_binary_full.npz"),
             os.path.join(root, "models_installed", "cvn", lang, "cv_binary_full.npz"),
         ]

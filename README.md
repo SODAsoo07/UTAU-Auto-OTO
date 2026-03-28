@@ -3,6 +3,10 @@
 Auto OTO is a source-available freeware tool for automatic oto setup and related
 voicebank preparation workflows.
 
+## Default Encoding
+
+- The app default text/file encoding is **UTF-8**.
+
 ## License Summary
 
 This repository is not an open-source project in the OSI sense.

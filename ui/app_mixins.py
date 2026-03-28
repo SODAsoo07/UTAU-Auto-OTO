@@ -1124,7 +1124,7 @@ class AppRuntimeMixin:
         selector_mode = (
             self.ml_selector_mode_var.get()
             if hasattr(self, "ml_selector_mode_var")
-            else "・ｸ夋+・・駕┣"
+            else "델타+셀렉터"
         )
 
         if lang not in {"korean", "japanese"}:
@@ -1170,7 +1170,7 @@ class AppRuntimeMixin:
         selector_mode = (
             self.ml_selector_mode_var.get()
             if hasattr(self, "ml_selector_mode_var")
-            else "・ｸ夋+・・駕┣"
+            else "델타+셀렉터"
         )
 
         if lang not in {"korean", "japanese"}:
@@ -1729,7 +1729,7 @@ class AppRuntimeMixin:
             link_label="\uc124\uce58 \ud398\uc774\uc9c0 \uc5f4\uae30",
         )
 
-    def _show_copyable_alert(self, title, message, alert_key=None, link_url="", link_label="・・〓 ・ｴ・ｰ"):
+    def _show_copyable_alert(self, title, message, alert_key=None, link_url="", link_label="링크 열기"):
         if self._is_closing:
             return
         if alert_key and alert_key in self._shown_alert_keys:
@@ -1737,7 +1737,7 @@ class AppRuntimeMixin:
         if alert_key:
             self._shown_alert_keys.add(alert_key)
 
-        safe_title = self._normalize_ui_message(str(title or "・誤ｦｼ"))
+        safe_title = self._normalize_ui_message(str(title or "알림"))
         safe_message = self._mask_sensitive_text(str(message or ""))
         win = tk.Toplevel(self)
         win.title(safe_title)
@@ -1791,13 +1791,22 @@ class AppRuntimeMixin:
         ctk.CTkButton(btns, text="닫기", width=90, command=win.destroy).pack(side="right", padx=(0, 8))
 
     def _ask_yes_no_dialog_sync(self, title: str, message: str, default: bool = False) -> bool:
+        safe_title = self._normalize_ui_message(str(title or "안내"))
+        safe_message = self._mask_sensitive_text(str(message or ""))
+
+        # Main-thread callers must show the dialog immediately.
+        # Waiting on an Event here would block Tk's event loop and freeze the app.
+        if threading.current_thread() is threading.main_thread():
+            try:
+                return bool(messagebox.askyesno(safe_title, safe_message))
+            except Exception:
+                return bool(default)
+
         result = {"value": bool(default)}
         done = threading.Event()
 
         def _prompt():
             try:
-                safe_title = self._normalize_ui_message(str(title or "안내"))
-                safe_message = self._mask_sensitive_text(str(message or ""))
                 result["value"] = bool(messagebox.askyesno(safe_title, safe_message))
             except Exception:
                 result["value"] = bool(default)
@@ -1970,12 +1979,12 @@ class AppRuntimeMixin:
         truncated_issues = int(summary.get("truncated_issues", 0) or 0)
         if err_count > 0:
             log_cb(
-                f"笞 OTO ・尖徐 ・・・・ｰ・ｼ: error {err_count}, warning {warn_count} "
+                f"⚠ OTO 검증 결과: error {err_count}, warning {warn_count} "
                 f"(files={sampled_wavs}/{checked_wavs_total}, truncated={truncated_issues})"
             )
         else:
             log_cb(
-                f"笨・OTO ・尖徐 ・・・・ｰ・ｼ: warning {warn_count} (error 0) "
+                f"✅ OTO 검증 결과: warning {warn_count} (error 0) "
                 f"(files={sampled_wavs}/{checked_wavs_total}, truncated={truncated_issues})"
             )
         return summary

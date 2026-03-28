@@ -3829,7 +3829,7 @@ def generate_ja_oto(
                                 expected_idx,
                                 syllables_info,
                                 search_back=0,
-                                search_fwd=2,
+                                search_fwd=(1 if format_type == "cv" else 2),
                             )
                             if resync_idx is None:
                                 resync_idx = _find_ja_cv_vowel_match_index(
@@ -3865,7 +3865,7 @@ def generate_ja_oto(
                                     expected_idx,
                                     syllables_info,
                                     search_back=(2 if format_type == 'vcv' else 1),
-                                    search_fwd=(3 if format_type == 'vcv' else 2),
+                                    search_fwd=(3 if format_type == 'vcv' else 1 if format_type == 'cv' else 2),
                                 )
                                 if fixed_idx is not None:
                                     mapped_idx = fixed_idx
@@ -4175,7 +4175,7 @@ def generate_ja_oto(
                                 expected_idx,
                                 syllables_info,
                                 search_back=0,
-                                search_fwd=2,
+                                search_fwd=(1 if format_type == "cv" else 2),
                             )
                             if resync_idx is None:
                                 resync_idx = _find_ja_cv_vowel_match_index(
@@ -4211,7 +4211,7 @@ def generate_ja_oto(
                                     expected_idx,
                                     syllables_info,
                                     search_back=(2 if format_type == 'vcv' else 1),
-                                    search_fwd=(3 if format_type == 'vcv' else 2),
+                                    search_fwd=(3 if format_type == 'vcv' else 1 if format_type == 'cv' else 2),
                                 )
                                 if fixed_idx is not None:
                                     mapped_idx = fixed_idx

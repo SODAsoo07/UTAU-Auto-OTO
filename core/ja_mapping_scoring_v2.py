@@ -107,7 +107,8 @@ def clamp_ja_cv_index_to_order(
     mapped_level = int(_ja_soft_cv_match_level(target_norm, mapped_norm) or 0) if target_norm else 0
 
     if fmt == "cv":
-        return min(m, e + 1)
+        # CV는 파일명/순서 정합을 최우선으로 두고 전진 매핑(+1)도 차단한다.
+        return e
 
     if m > (e + 1):
         return e

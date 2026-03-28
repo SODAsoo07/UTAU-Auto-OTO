@@ -899,7 +899,11 @@ class LayoutMixin:
         if lang == "korean":
             self.lang_info_label.configure(text="한국어 단위(a, k, ga 등) 에일리어스를 기준으로 생성합니다.")
             self.lang_notice_label.configure(
-                text="현재 언어: 한국어\nLab 생성, 사전 생성, 정렬, OTO 계산이 모두 한국어 규칙으로 진행됩니다.",
+                text=(
+                    "현재 언어: 한국어\n"
+                    "Lab 생성, 사전 생성, 정렬, OTO 계산이 모두 한국어 규칙으로 진행됩니다.\n"
+                    "기본 인코딩: UTF-8"
+                ),
                 fg_color=LANGUAGE_NOTICE_THEME["korean"]["fg_color"],
                 text_color=LANGUAGE_NOTICE_THEME["korean"]["text_color"],
             )
@@ -917,7 +921,11 @@ class LayoutMixin:
         elif lang == "japanese":
             self.lang_info_label.configure(text="일본어 단위(a, k, ka 등) 에일리어스를 기준으로 생성합니다.")
             self.lang_notice_label.configure(
-                text="현재 언어: 일본어\n특수 발음 기호가 섞인 파일은 Lab 생성 전에 언어 선택을 다시 확인하세요.",
+                text=(
+                    "현재 언어: 일본어\n"
+                    "특수 발음 기호가 섞인 파일은 Lab 생성 전에 언어 선택을 다시 확인하세요.\n"
+                    "기본 인코딩: UTF-8"
+                ),
                 fg_color=LANGUAGE_NOTICE_THEME["japanese"]["fg_color"],
                 text_color=LANGUAGE_NOTICE_THEME["japanese"]["text_color"],
             )
