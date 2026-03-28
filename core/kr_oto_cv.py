@@ -307,6 +307,7 @@ def _estimate_cv_anchor_from_syllable(syl, ph_intervals, *, cv_mode="standalone"
         "pre_abs": offset + pre,
         "cons_abs": offset + consonant,
         "onset_abs": c_start,
+        "vowel_start_abs": n_start,
         "vowel_end_abs": n_end,
         "vowel_len": cv_vowel_len,
         "cons_gap": max(consonant - pre, 10.0),

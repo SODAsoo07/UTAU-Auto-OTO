@@ -382,6 +382,9 @@ def _export_model_root() -> str:
     configured = os.environ.get("UTOA_OTO_ML_EXPORT_ROOT", "").strip()
     if configured:
         return configured
+    noml_auto_root = os.path.join(base_dir, "ML_models_noml_auto")
+    if os.path.isdir(noml_auto_root):
+        return noml_auto_root
     return os.path.join(base_dir, "ML_models")
 
 
@@ -434,12 +437,18 @@ def _collect_model_dir_candidates(language: str, format_type: str, alias_family:
         except Exception:
             return
 
-    for root in (
-        _workspace_model_root_for_language(language),
-        _installed_model_root_for_language(language),
-        _structured_export_model_root_for_language(language),
-        _model_root_for_language(language),
-    ):
+    explicit_override = _has_explicit_model_override(language)
+    if explicit_override:
+        root_candidates = (_model_root_for_language(language),)
+    else:
+        root_candidates = (
+            _workspace_model_root_for_language(language),
+            _installed_model_root_for_language(language),
+            _structured_export_model_root_for_language(language),
+            _model_root_for_language(language),
+        )
+
+    for root in root_candidates:
         if os.path.isfile(os.path.join(root, "model_meta.json")) and (
             allow_two_stage or (not _looks_like_two_stage_model_name(os.path.basename(root)))
         ):

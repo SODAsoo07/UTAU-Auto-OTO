@@ -68,9 +68,9 @@ def _apply_vc_sharp_cutoff_guard(
     ovl = max(0.0, float(ovl))
     next_onset_rel = max(float(n_start) - offset, pre + 8.0)
 
-    cons_margin = max(2.0, _env_float("UTOA_KR_VC_SHARP_CONS_MARGIN_MS", 6.5))
-    cut_margin = max(0.6, _env_float("UTOA_KR_VC_SHARP_CUTOFF_MARGIN_MS", 1.2))
-    tail_min = max(4.0, _env_float("UTOA_KR_VC_SHARP_MIN_TAIL_MS", 7.0))
+    cons_margin = max(2.0, _env_float("UTOA_KR_VC_SHARP_CONS_MARGIN_MS", 7.5))
+    cut_margin = max(0.6, _env_float("UTOA_KR_VC_SHARP_CUTOFF_MARGIN_MS", 1.6))
+    tail_min = max(4.0, _env_float("UTOA_KR_VC_SHARP_MIN_TAIL_MS", 6.5))
 
     min_cons = pre + max(5.0, tail_min - 2.0)
     max_cons = next_onset_rel - max(cons_margin, tail_min + 0.5)

@@ -50,12 +50,17 @@ class FileDialogMixin:
     def _ml_model_repo_root(self):
         base_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         external_root = os.path.join(base_dir, "models")
-        if os.path.isdir(external_root):
-            return external_root
         installed_root = os.path.join(base_dir, "models_installed", "oto_ml")
-        if os.path.isdir(installed_root):
-            return installed_root
-        return os.path.join(base_dir, "ML_models")
+        noml_auto_root = os.path.join(base_dir, "ML_models_noml_auto")
+        legacy_root = os.path.join(base_dir, "ML_models")
+
+        for candidate in (external_root, installed_root, noml_auto_root, legacy_root):
+            if self._dir_has_model_meta(candidate):
+                return candidate
+        for candidate in (external_root, installed_root, noml_auto_root, legacy_root):
+            if os.path.isdir(candidate):
+                return candidate
+        return legacy_root
 
     def _ml_model_language_root(self, language):
         lang = str(language or "").strip().lower()
@@ -72,6 +77,19 @@ class FileDialogMixin:
         if hasattr(self, "ml_model_root_ja_var") and var is self.ml_model_root_ja_var:
             return "japanese"
         return "korean"
+
+    def _is_legacy_ml_language_root(self, path, language):
+        raw = str(path or "").strip()
+        if not raw:
+            return False
+        base_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        legacy_lang_root = os.path.abspath(os.path.join(base_dir, "ML_models", str(language or "").strip().lower()))
+        target = os.path.abspath(raw)
+        try:
+            common = os.path.commonpath([target, legacy_lang_root])
+        except Exception:
+            return False
+        return common == legacy_lang_root
 
     def _preferred_ml_model_browse_dir(self, var):
         language = self._ml_model_language_for_var(var)
@@ -109,6 +127,9 @@ class FileDialogMixin:
         if os.path.isdir(lang_root):
             return lang_root
         base_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        noml_root = os.path.join(base_dir, "ML_models_noml_auto", str(language or "").strip().lower())
+        if os.path.isdir(noml_root):
+            return noml_root
         legacy_root = os.path.join(base_dir, "ML_models", language)
         if os.path.isdir(legacy_root):
             return legacy_root
@@ -125,27 +146,49 @@ class FileDialogMixin:
         return any(os.path.isfile(path) for path in glob.glob(pattern))
 
     def _apply_recommended_ml_model_defaults(self):
-        language = self._get_language() if hasattr(self, "_get_language") else "korean"
-        if language == "english":
-            target_var = None
-        elif language == "japanese" and hasattr(self, "ml_model_root_ja_var"):
-            target_var = self.ml_model_root_ja_var
-        elif hasattr(self, "ml_model_root_kr_var"):
-            target_var = self.ml_model_root_kr_var
-        else:
-            target_var = None
+        current_language = self._get_language() if hasattr(self, "_get_language") else "korean"
+        targets = []
+        if hasattr(self, "ml_model_root_kr_var"):
+            targets.append(("korean", self.ml_model_root_kr_var))
+        if hasattr(self, "ml_model_root_ja_var"):
+            targets.append(("japanese", self.ml_model_root_ja_var))
 
-        if target_var is not None:
+        for language, target_var in targets:
             current_root = str(target_var.get() or "").strip()
+            recommended_root = str(self._recommended_ml_model_root(language) or "").strip()
+            if not recommended_root:
+                continue
+            use_recommended = False
             if not current_root or not os.path.isdir(current_root):
-                recommended_root = self._recommended_ml_model_root(language)
-                if recommended_root:
-                    target_var.set(recommended_root)
+                use_recommended = True
+            elif "ML_models_noml_auto" in os.path.abspath(recommended_root):
+                if self._is_legacy_ml_language_root(current_root, language):
+                    use_recommended = True
+            if use_recommended:
+                target_var.set(recommended_root)
 
         if hasattr(self, "ml_coupled_backend_var"):
             backend = str(self.ml_coupled_backend_var.get() or "auto").strip().lower()
-            if backend in {"", "auto"} and self._language_has_ensemble_bundle(language):
+            if backend in {"", "auto"} and self._language_has_ensemble_bundle(current_language):
                 self.ml_coupled_backend_var.set("ensemble")
+
+    def _effective_ml_model_root(self, language):
+        lang = str(language or "").strip().lower()
+        configured = ""
+        if lang == "japanese" and hasattr(self, "ml_model_root_ja_var"):
+            configured = str(self.ml_model_root_ja_var.get() or "").strip()
+        elif lang == "korean" and hasattr(self, "ml_model_root_kr_var"):
+            configured = str(self.ml_model_root_kr_var.get() or "").strip()
+        if configured and self._dir_has_model_meta(configured):
+            return os.path.abspath(configured), "configured"
+        recommended = str(self._recommended_ml_model_root(lang) or "").strip()
+        if recommended and self._dir_has_model_meta(recommended):
+            return os.path.abspath(recommended), "recommended"
+        env_key = "UTOA_JA_OTO_ML_DIR" if lang == "japanese" else "UTOA_KR_OTO_ML_DIR"
+        env_root = str(os.environ.get(env_key, "") or "").strip()
+        if env_root and self._dir_has_model_meta(env_root):
+            return os.path.abspath(env_root), "env"
+        return (configured or recommended or env_root or ""), "missing"
 
     def _browse_folder_by_var(self, var, initial_dir=""):
         path = filedialog.askdirectory(initialdir=initial_dir or self._preferred_ml_model_browse_dir(var))
@@ -1364,6 +1407,7 @@ class AppRuntimeMixin:
             os.environ["UTOA_ML_COUPLED_MIN_CONF_USE_MODEL_META"] = "1"
             os.environ["UTOA_ML_COUPLED_DEVICE"] = "auto"
             os.environ["UTOA_ML_COUPLED_BACKEND"] = "auto"
+            os.environ["UTOA_ML_COUPLED_ONNX_ENABLE"] = "1"
             os.environ["UTOA_ML_BATCH_INFERENCE_ENABLE"] = "0"
             os.environ["UTOA_ML_BATCH_INFERENCE_SIZE"] = "256"
             os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = "0"
@@ -1526,6 +1570,7 @@ class AppRuntimeMixin:
         os.environ["UTOA_ML_COUPLED_MIN_CONF_USE_MODEL_META"] = "1"
         os.environ["UTOA_ML_COUPLED_DEVICE"] = "auto"
         os.environ["UTOA_ML_COUPLED_BACKEND"] = "auto"
+        os.environ["UTOA_ML_COUPLED_ONNX_ENABLE"] = "1"
         os.environ["UTOA_ML_BATCH_INFERENCE_ENABLE"] = "1" if enable_ml else "0"
         os.environ["UTOA_ML_BATCH_INFERENCE_SIZE"] = "256"
         os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = "0"
@@ -2054,6 +2099,21 @@ class AppRuntimeMixin:
                 self._set_progress(ratio)
 
         self._after_safe(_do)
+
+    def _log_startup_ml_model_roots_once(self):
+        if bool(getattr(self, "_ml_model_root_startup_logged", False)):
+            return
+        if not hasattr(self, "_effective_ml_model_root"):
+            return
+        kr_root, kr_src = self._effective_ml_model_root("korean")
+        ja_root, ja_src = self._effective_ml_model_root("japanese")
+        kr_txt = kr_root if kr_root else "(none)"
+        ja_txt = ja_root if ja_root else "(none)"
+        self._append_log(
+            f"[OTO-ML] startup model roots | KR[{kr_src}]={kr_txt} | JA[{ja_src}]={ja_txt}",
+            log_to_file=True,
+        )
+        self._ml_model_root_startup_logged = True
 
     def _parse_progress_ratio_from_status(self, msg):
         text = str(msg or "")
@@ -2828,6 +2888,8 @@ class ConfigMixin:
                 self._apply_recommended_ml_model_defaults()
             if hasattr(self, "_refresh_ml_backend_status"):
                 self._refresh_ml_backend_status()
+            if hasattr(self, "_log_startup_ml_model_roots_once"):
+                self._log_startup_ml_model_roots_once()
             return
 
         try:
@@ -3266,6 +3328,8 @@ class ConfigMixin:
                 self._sync_advanced_tuning_slider_controls()
             if hasattr(self, "_sync_weak_voice_assist_controls"):
                 self._sync_weak_voice_assist_controls()
+            if hasattr(self, "_log_startup_ml_model_roots_once"):
+                self._log_startup_ml_model_roots_once()
 
             if "params" in config and hasattr(self, "param_vars") and isinstance(self.param_vars, dict):
                 params = config["params"]

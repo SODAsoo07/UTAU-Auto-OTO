@@ -3,7 +3,6 @@ import sys
 import locale
 import subprocess as sp
 import json
-import hashlib
 import re
 import time
 import threading
@@ -24,8 +23,6 @@ from core.no_mfa_oto_builder import (
 from core.mfa_runner import (
     ALERT_MSVC_REQUIRED,
     MFA_PORTABLE_PYTHON_VERSION,
-    _find_local_acoustic_model_artifact,
-    _get_conda_env,
     check_mfa_model,
     diagnose_mfa_runtime,
     download_mfa_model,
@@ -46,6 +43,7 @@ from core.preflight_common import collect_runtime_preflight_issues
 from core.error_codes import format_error_with_recovery
 from core.format_type_utils import normalize_auto_format_value
 from core.distribution_guard import is_training_paths_enabled
+from core.runtime_paths import resolve_setup_ctc_script_path, resolve_setup_mfa_script_path
 from core.cuda_runtime_bootstrap import (
     collect_cuda_runtime_diagnosis,
     install_torch_cuda_runtime,
@@ -54,20 +52,69 @@ from core.generation.mapping_runtime import (
     format_mapping_reason_schema_summary,
     format_mapping_summary,
 )
-from core.pipeline_status import normalize_aligner_name
-from core.preflight_common import collect_runtime_preflight_issues
-from core.error_codes import format_error_with_recovery
-from core.format_type_utils import normalize_auto_format_value
-from core.distribution_guard import is_training_paths_enabled
-from core.cuda_runtime_bootstrap import collect_cuda_runtime_diagnosis
-from core.generation.mapping_runtime import (
-    format_mapping_reason_schema_summary,
-    format_mapping_summary,
-)
 
 
 
 class PipelineActionsMixin:
+    @staticmethod
+    def _is_mfa_module_missing_error(code: str, message: str) -> bool:
+        c = str(code or "").strip().upper()
+        text = str(message or "")
+        lowered = text.lower()
+        if c == "ALIGN_EXEC_MISSING" and ("mfa runtime module is missing" in lowered or "mfa_module_missing" in lowered):
+            return True
+        if "no module named" in lowered and "montreal_forced_aligner" in lowered:
+            return True
+        if "montreal_forced_aligner.command_line.mfa" in lowered:
+            return True
+        return False
+
+    @staticmethod
+    def _is_ctc_runtime_missing_error(code: str, message: str) -> bool:
+        c = str(code or "").strip().upper()
+        text = str(message or "")
+        lowered = text.lower()
+        if c == "ALIGN_EXEC_MISSING":
+            if "ctc runtime import failed" in lowered:
+                return True
+            if ("torch" in lowered or "torchaudio" in lowered) and (
+                "no module named" in lowered or "import failed" in lowered
+            ):
+                return True
+            if "python-textgrid import failed" in lowered:
+                return True
+        if "ctc runtime import failed" in lowered:
+            return True
+        if "mms ctc bundle unavailable" in lowered:
+            return True
+        if "no module named" in lowered and (
+            "torch" in lowered or "torchaudio" in lowered or "textgrid" in lowered
+        ):
+            return True
+        return False
+
+    def _notify_mfa_module_missing(self, language: str, detail: str = "") -> None:
+        lang = str(language or "korean").strip().lower()
+        lang_label = "일본어" if lang == "japanese" else "한국어"
+        guide = self._build_setup_mfa_recovery_guide(language=lang)
+        tail = str(detail or "").strip()
+        if len(tail) > 420:
+            tail = tail[-420:]
+        message = (
+            f"{lang_label} MFA 실행 모듈이 현재 환경에서 누락되었거나 손상되었습니다.\n"
+            "정렬을 계속 진행하려면 MFA 복구를 먼저 실행해 주세요.\n\n"
+            f"{guide}"
+        )
+        if tail:
+            message += f"\n\n[오류 요약]\n{tail}"
+        self._after_safe(
+            lambda msg=message, l=lang: self._show_copyable_alert(
+                title="MFA 모듈 누락 감지",
+                message=msg,
+                alert_key=f"mfa_module_missing_{l}",
+            )
+        )
+
     def _notify_korean_dependency_degraded(self):
         self._append_log(ALERT_MSVC_REQUIRED)
         self._append_log(
@@ -146,41 +193,118 @@ class PipelineActionsMixin:
         return False
 
     def _resolve_setup_mfa_script_path(self):
-        candidates = []
-        app_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if app_dir:
-            candidates.append(os.path.join(app_dir, "setup_mfa.bat"))
-            candidates.append(os.path.join(os.path.dirname(app_dir), "setup_mfa.bat"))
-        exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", ""))) if getattr(sys, "frozen", False) else ""
-        if exe_dir:
-            candidates.append(os.path.join(exe_dir, "setup_mfa.bat"))
-            candidates.append(os.path.join(os.path.dirname(exe_dir), "setup_mfa.bat"))
-        local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
-        if local_app_data:
-            candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO", "setup_mfa.bat"))
-            candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO_v3", "setup_mfa.bat"))
-        app_data_dir = str(getattr(self, "app_data_dir", "") or "").strip()
-        if app_data_dir:
-            candidates.append(os.path.join(app_data_dir, "setup_mfa.bat"))
-        writable_data_dir = str(getattr(self, "writable_data_dir", "") or "").strip()
-        if writable_data_dir:
-            candidates.append(os.path.join(writable_data_dir, "setup_mfa.bat"))
-        try:
-            candidates.append(os.path.join(os.getcwd(), "setup_mfa.bat"))
-        except Exception:
-            pass
+        return resolve_setup_mfa_script_path(
+            app_dir=str(getattr(self, "app_dir", "") or ""),
+            app_data_dir=str(getattr(self, "app_data_dir", "") or ""),
+            writable_data_dir=str(getattr(self, "writable_data_dir", "") or ""),
+            frozen=bool(getattr(sys, "frozen", False)),
+            executable_path=str(getattr(sys, "executable", "") or ""),
+        )
 
-        seen = set()
-        for candidate in candidates:
+    def _resolve_setup_ctc_script_path(self):
+        return resolve_setup_ctc_script_path(
+            app_dir=str(getattr(self, "app_dir", "") or ""),
+            app_data_dir=str(getattr(self, "app_data_dir", "") or ""),
+            writable_data_dir=str(getattr(self, "writable_data_dir", "") or ""),
+            frozen=bool(getattr(sys, "frozen", False)),
+            executable_path=str(getattr(sys, "executable", "") or ""),
+        )
+
+    def _build_setup_ctc_recovery_guide(self):
+        script_path = self._resolve_setup_ctc_script_path()
+        if script_path:
+            command = f'cmd /c ""{script_path}" --non-interactive"'
+            return (
+                "설치 프로그램에 동봉된 setup_ctc.bat을 직접 실행해 CTC 런타임을 복구해 주세요.\n"
+                f"- 파일: {script_path}\n"
+                "- 실행 명령:\n"
+                f"{command}"
+            )
+        return (
+            "설치 프로그램에 동봉된 setup_ctc.bat을 직접 실행해 CTC 런타임을 복구해 주세요.\n"
+            "- 실행 예시:\n"
+            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO_v3\\setup_ctc.bat\" --non-interactive\"\n"
+            "또는\n"
+            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_ctc.bat\" --non-interactive\""
+        )
+
+    def _notify_ctc_runtime_missing(self, detail: str = "") -> None:
+        guide = self._build_setup_ctc_recovery_guide()
+        tail = str(detail or "").strip()
+        if len(tail) > 420:
+            tail = tail[-420:]
+        message = (
+            "CTC 실행 모듈이 현재 환경에서 누락되었거나 손상되었습니다.\n"
+            "정렬을 계속 진행하려면 CTC 런타임 복구를 먼저 실행해 주세요.\n\n"
+            f"{guide}"
+        )
+        if tail:
+            message += f"\n\n[오류 요약]\n{tail}"
+        self._after_safe(
+            lambda msg=message: self._show_copyable_alert(
+                title="CTC 런타임 누락 감지",
+                message=msg,
+                alert_key="ctc_runtime_missing",
+            )
+        )
+
+    def _run_setup_ctc_script_fallback(self, reason="") -> bool:
+        script_path = self._resolve_setup_ctc_script_path()
+        if not script_path:
+            self._append_log("⚠ setup_ctc.bat을 찾지 못해 CTC 폴백 복구를 건너뜁니다.")
+            return False
+
+        self._append_log("⚠ CTC 런타임이 누락되어 setup_ctc.bat 폴백 복구를 시도합니다.")
+        if reason:
+            self._append_log(f"   사유: {reason}")
+
+        runtime_root = ""
+        for raw in (
+            str(getattr(self, "app_dir", "") or ""),
+            str(getattr(self, "writable_data_dir", "") or ""),
+            os.path.dirname(script_path),
+        ):
+            candidate = str(raw or "").strip()
             if not candidate:
                 continue
-            norm = os.path.normcase(os.path.abspath(candidate))
-            if norm in seen:
+            try:
+                candidate_abs = os.path.abspath(candidate)
+            except Exception:
                 continue
-            seen.add(norm)
-            if os.path.isfile(candidate):
-                return candidate
-        return ""
+            if (
+                os.path.isfile(os.path.join(candidate_abs, "core", "ctc_runner.py"))
+                or os.path.isfile(os.path.join(candidate_abs, "UTAU_Auto_OTO", "core", "ctc_runner.py"))
+            ):
+                runtime_root = candidate_abs
+                break
+
+        cmd = [script_path, "--non-interactive"]
+        if runtime_root:
+            cmd.extend(["--runtime-root", runtime_root])
+        self._append_log(f"   실행: {' '.join(cmd)}")
+
+        try:
+            process = self._popen_subprocess_hidden(
+                cmd,
+                cwd=os.path.dirname(script_path) or None,
+                stdout=sp.PIPE,
+                stderr=sp.STDOUT,
+                text=False,
+                env=os.environ.copy(),
+            )
+        except Exception as e:
+            self._append_log(f"❌ setup_ctc.bat 실행 실패: {e}")
+            return False
+
+        if process.stdout is not None:
+            for line in self._iter_decoded_stdout_lines(process):
+                self._append_log(line)
+        process.wait()
+        if process.returncode != 0:
+            self._append_log(f"❌ setup_ctc.bat 폴백 복구 실패 (code={process.returncode})")
+            return False
+        self._append_log("✅ setup_ctc.bat 폴백 복구 완료")
+        return True
 
     def _run_setup_mfa_script_fallback(self, language="korean", reason="") -> bool:
         script_path = self._resolve_setup_mfa_script_path()
@@ -193,7 +317,7 @@ class PipelineActionsMixin:
         if reason:
             self._append_log(f"   사유: {reason}")
 
-        cmd = [script_path, "--recovery", "--non-interactive"]
+        cmd = [script_path, "--recovery", "--non-interactive", "--language", lang]
         env = os.environ.copy()
         try:
             env_dir = get_default_mfa_env_dir()
@@ -236,10 +360,13 @@ class PipelineActionsMixin:
         self._append_log("❌ setup_mfa.bat 실행은 완료됐지만 MFA 상태가 아직 준비되지 않았습니다.")
         return False
 
-    def _build_setup_mfa_recovery_guide(self):
+    def _build_setup_mfa_recovery_guide(self, language="korean"):
+        lang = str(language or "korean").strip().lower()
+        if lang not in {"korean", "japanese"}:
+            lang = "korean"
         script_path = self._resolve_setup_mfa_script_path()
         if script_path:
-            command = f'cmd /c ""{script_path}" --recovery --non-interactive"'
+            command = f'cmd /c ""{script_path}" --recovery --non-interactive --language {lang}"'
             return (
                 "설치 프로그램에 동봉된 setup_mfa.bat을 직접 실행해 추가 복구를 진행해 주세요.\n"
                 f"- 파일: {script_path}\n"
@@ -249,9 +376,9 @@ class PipelineActionsMixin:
         return (
             "설치 프로그램에 동봉된 setup_mfa.bat을 직접 실행해 추가 복구를 진행해 주세요.\n"
             "- 실행 예시:\n"
-            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO_v3\\setup_mfa.bat\" --recovery --non-interactive\"\n"
+            f"cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO_v3\\setup_mfa.bat\" --recovery --non-interactive --language {lang}\"\n"
             "또는\n"
-            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --recovery --non-interactive\""
+            f"cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --recovery --non-interactive --language {lang}\""
         )
 
     def _read_runtime_var(self, var_name, default=None):
@@ -1153,12 +1280,10 @@ class PipelineActionsMixin:
         if resolved and os.path.exists(resolved):
             self.mfa_path = resolved
         if not self.mfa_path or not os.path.exists(self.mfa_path):
-            self._clear_mfa_ready_stamp(language=lang)
             self._notify_long_install_time("MFA")
             self._append_log("ℹ MFA가 없어 지금 자동 설치를 시작합니다.")
             if not self._confirm_mfa_install_action(language=lang, reason="missing_runtime"):
                 self._mfa_ready_cache_ok = False
-                self._clear_mfa_ready_stamp(language=lang)
                 self._last_mfa_install_declined = True
                 return False
             install_ok = False
@@ -1171,12 +1296,8 @@ class PipelineActionsMixin:
                 cache_key = f"{lang}|{os.path.normcase(os.path.abspath(str(self.mfa_path or '')))}"
                 self._mfa_ready_cache_key = cache_key
                 self._mfa_ready_cache_ok = True
-                signature = self._build_mfa_ready_signature(self.mfa_path, lang)
-                if signature and self._mfa_ready_cache_enabled():
-                    self._save_mfa_ready_stamp(lang, signature, cache_key=cache_key)
                 return True
             self._mfa_ready_cache_ok = False
-            self._clear_mfa_ready_stamp(language=lang)
             return self._run_setup_mfa_script_fallback(language=lang, reason="auto_install_failed")
         soft_rebuild_gate = str(os.environ.get("UTOA_MFA_SOFT_REBUILD", "1") or "").strip().lower() in {
             "1",
@@ -1197,7 +1318,6 @@ class PipelineActionsMixin:
                 )
                 self.mfa_path = ""
                 self._mfa_ready_cache_ok = False
-                self._clear_mfa_ready_stamp(language=lang)
                 if not self._confirm_mfa_install_action(language=lang, reason="python_rebuild"):
                     self._last_mfa_install_declined = True
                     return False
@@ -1211,11 +1331,7 @@ class PipelineActionsMixin:
                     cache_key = f"{lang}|{os.path.normcase(os.path.abspath(str(self.mfa_path or '')))}"
                     self._mfa_ready_cache_key = cache_key
                     self._mfa_ready_cache_ok = True
-                    signature = self._build_mfa_ready_signature(self.mfa_path, lang)
-                    if signature and self._mfa_ready_cache_enabled():
-                        self._save_mfa_ready_stamp(lang, signature, cache_key=cache_key)
                     return True
-                self._clear_mfa_ready_stamp(language=lang)
                 return self._run_setup_mfa_script_fallback(language=lang, reason="python_rebuild_install_failed")
 
         # Runtime path exists: keep per-run check lightweight.
@@ -1225,17 +1341,6 @@ class PipelineActionsMixin:
             and str(getattr(self, "_mfa_ready_cache_key", "") or "") == cache_key
         ):
             return True
-        signature = self._build_mfa_ready_signature(self.mfa_path, lang)
-        if signature and self._mfa_ready_cache_enabled():
-            env_stamp = self._read_mfa_ready_stamp_from_env(lang)
-            file_stamp = self._read_mfa_ready_stamp_from_state(lang)
-            if signature == env_stamp or signature == file_stamp:
-                self._mfa_ready_cache_key = cache_key
-                self._mfa_ready_cache_ok = True
-                self._save_mfa_ready_stamp(lang, signature, cache_key=cache_key)
-                if hasattr(self, "_append_detail_log"):
-                    self._append_detail_log("ℹ MFA 빠른 점검: 설치 스탬프 일치로 모델 재점검을 건너뜁니다.")
-                return True
         has_model, msg = check_mfa_model(self.mfa_path, language=lang)
         if msg:
             self._append_log(msg)
@@ -1243,19 +1348,14 @@ class PipelineActionsMixin:
             self._append_log("ℹ 현재 언어용 MFA 모델이 없어 자동 다운로드를 시작합니다.")
             if not self._confirm_mfa_install_action(language=lang, reason="model_download"):
                 self._mfa_ready_cache_ok = False
-                self._clear_mfa_ready_stamp(language=lang)
                 self._last_mfa_install_declined = True
                 return False
             if not download_mfa_model(self.mfa_path, language=lang, callback=self._append_log):
                 self._append_log("❌ MFA 모델 다운로드 실패")
                 self._mfa_ready_cache_ok = False
-                self._clear_mfa_ready_stamp(language=lang)
                 return False
         self._mfa_ready_cache_key = cache_key
         self._mfa_ready_cache_ok = True
-        signature = self._build_mfa_ready_signature(self.mfa_path, lang)
-        if signature and self._mfa_ready_cache_enabled():
-            self._save_mfa_ready_stamp(lang, signature, cache_key=cache_key)
         return True
 
     def _mfa_startup_repair_state_path(self):
@@ -1287,164 +1387,6 @@ class PipelineActionsMixin:
                 json.dump(state, f, ensure_ascii=False, indent=2)
         except Exception:
             return
-
-    @staticmethod
-    def _mfa_ready_cache_enabled() -> bool:
-        raw = str(os.environ.get("UTOA_MFA_READY_CACHE_ENABLE", "1") or "").strip().lower()
-        return raw not in {"0", "false", "off", "no", "n"}
-
-    def _mfa_ready_cache_state_path(self):
-        base_dir = (
-            getattr(self, "writable_data_dir", "")
-            or getattr(self, "app_data_dir", "")
-            or getattr(self, "app_dir", "")
-            or os.getcwd()
-        )
-        return os.path.join(base_dir, ".mfa_ready_cache_state.json")
-
-    def _load_mfa_ready_cache_state(self):
-        path = self._mfa_ready_cache_state_path()
-        if not os.path.isfile(path):
-            return {}
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
-
-    def _save_mfa_ready_cache_state(self, state):
-        if not isinstance(state, dict):
-            return
-        path = self._mfa_ready_cache_state_path()
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(state, f, ensure_ascii=False, indent=2)
-        except Exception:
-            return
-
-    @staticmethod
-    def _file_integrity_fingerprint(path: str) -> str:
-        target = str(path or "").strip()
-        if not target:
-            return ""
-        try:
-            st = os.stat(target)
-            return "|".join(
-                [
-                    os.path.normcase(os.path.abspath(target)),
-                    str(int(st.st_size)),
-                    str(int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)))),
-                ]
-            )
-        except Exception:
-            return f"{os.path.normcase(os.path.abspath(target))}|missing"
-
-    def _build_mfa_ready_signature(self, mfa_path: str, language: str) -> str:
-        resolved = str(mfa_path or "").strip()
-        if not resolved or not os.path.isfile(resolved):
-            return ""
-        lang = str(language or "korean").strip().lower()
-        env_dir = ""
-        if "Scripts" in resolved:
-            try:
-                env_dir = os.path.dirname(os.path.dirname(os.path.abspath(resolved)))
-            except Exception:
-                env_dir = ""
-        python_exe = os.path.join(env_dir, "python.exe") if env_dir else ""
-        pip_exe = os.path.join(env_dir, "Scripts", "pip.exe") if env_dir else ""
-        model_name = "japanese_mfa" if lang == "japanese" else "korean_mfa"
-        env = None
-        try:
-            env = _get_conda_env(resolved)
-        except Exception:
-            env = None
-        model_artifact = ""
-        try:
-            model_artifact = _find_local_acoustic_model_artifact(resolved, model_name, env=env) or ""
-        except Exception:
-            model_artifact = ""
-        parts = [
-            f"lang={lang}",
-            f"mfa={self._file_integrity_fingerprint(resolved)}",
-            f"python={self._file_integrity_fingerprint(python_exe)}",
-            f"pip={self._file_integrity_fingerprint(pip_exe)}",
-            f"model={self._file_integrity_fingerprint(model_artifact)}",
-        ]
-        try:
-            return hashlib.sha256("||".join(parts).encode("utf-8", errors="replace")).hexdigest()
-        except Exception:
-            return ""
-
-    @staticmethod
-    def _read_mfa_ready_stamp_from_env(language: str) -> str:
-        lang = str(language or "korean").strip().lower()
-        raw = str(os.environ.get("UTOA_MFA_READY_STAMP", "") or "").strip()
-        if not raw:
-            return ""
-        if "|" not in raw:
-            return raw if len(raw) >= 16 else ""
-        left, right = raw.split("|", 1)
-        if str(left).strip().lower() != lang:
-            return ""
-        return str(right or "").strip()
-
-    def _read_mfa_ready_stamp_from_state(self, language: str) -> str:
-        lang = str(language or "korean").strip().lower()
-        state = self._load_mfa_ready_cache_state()
-        stamps = state.get("stamps", {})
-        if not isinstance(stamps, dict):
-            return ""
-        item = stamps.get(lang, {})
-        if isinstance(item, dict):
-            return str(item.get("signature", "") or "").strip()
-        if isinstance(item, str):
-            return str(item).strip()
-        return ""
-
-    def _save_mfa_ready_stamp(self, language: str, signature: str, cache_key: str = "") -> None:
-        lang = str(language or "korean").strip().lower()
-        sig = str(signature or "").strip()
-        if not lang:
-            return
-        if not sig:
-            self._clear_mfa_ready_stamp(language=lang)
-            return
-        os.environ["UTOA_MFA_READY_STAMP"] = f"{lang}|{sig}"
-        state = self._load_mfa_ready_cache_state()
-        stamps = state.get("stamps", {})
-        if not isinstance(stamps, dict):
-            stamps = {}
-        stamps[lang] = {
-            "signature": sig,
-            "cache_key": str(cache_key or ""),
-            "updated_ts": float(time.time()),
-        }
-        state["stamps"] = stamps
-        self._save_mfa_ready_cache_state(state)
-
-    def _clear_mfa_ready_stamp(self, language: str = "") -> None:
-        lang = str(language or "").strip().lower()
-        try:
-            raw = str(os.environ.get("UTOA_MFA_READY_STAMP", "") or "").strip()
-            if raw:
-                if (not lang) or raw.startswith(f"{lang}|"):
-                    os.environ.pop("UTOA_MFA_READY_STAMP", None)
-        except Exception:
-            pass
-        state = self._load_mfa_ready_cache_state()
-        stamps = state.get("stamps", {})
-        if not isinstance(stamps, dict):
-            return
-        if lang:
-            if lang in stamps:
-                stamps.pop(lang, None)
-                state["stamps"] = stamps
-                self._save_mfa_ready_cache_state(state)
-            return
-        if stamps:
-            state["stamps"] = {}
-            self._save_mfa_ready_cache_state(state)
 
     def _check_startup_ml_runtime_ready(self, mfa_report=None):
         report = mfa_report if isinstance(mfa_report, dict) else {}
@@ -1844,10 +1786,6 @@ class PipelineActionsMixin:
                 self._append_log("✅ 초기 MFA+ML 상태 점검 완료 (복구 불필요)")
                 self._update_mfa_status(True)
                 self._set_status("✅ 초기 MFA+ML 점검 완료")
-                signature = self._build_mfa_ready_signature(self.mfa_path or "", lang)
-                if signature and self._mfa_ready_cache_enabled():
-                    cache_key = f"{lang}|{os.path.normcase(os.path.abspath(str(self.mfa_path or '')))}"
-                    self._save_mfa_ready_stamp(lang, signature, cache_key=cache_key)
                 self._save_mfa_startup_repair_state(
                     last_result="success",
                     last_success_ts=time.time(),
@@ -1919,10 +1857,6 @@ class PipelineActionsMixin:
                 self._append_log("✅ 초기 MFA+ML 자동 복구 완료")
                 self._update_mfa_status(True)
                 self._set_status("✅ 초기 MFA+ML 복구 완료")
-                signature = self._build_mfa_ready_signature(self.mfa_path or "", lang)
-                if signature and self._mfa_ready_cache_enabled():
-                    cache_key = f"{lang}|{os.path.normcase(os.path.abspath(str(self.mfa_path or '')))}"
-                    self._save_mfa_ready_stamp(lang, signature, cache_key=cache_key)
                 self._save_mfa_startup_repair_state(
                     last_result="success",
                     last_success_ts=time.time(),
@@ -1933,12 +1867,11 @@ class PipelineActionsMixin:
                 )
             else:
                 issues = list(after.get("issues", []) or [])
-                self._clear_mfa_ready_stamp(language=lang)
                 self._append_log("⚠ 초기 MFA+ML 자동 복구가 완료되지 않았습니다. 'MFA 진단/복구' 버튼으로 재시도하세요.")
                 detail = str(ml_after.get("detail", "") or "").strip()
                 if detail and not ml_after.get("ready"):
                     self._append_log(f"⚠ ML 런타임 점검 상세: {detail}")
-                recovery_guide = self._build_setup_mfa_recovery_guide()
+                recovery_guide = self._build_setup_mfa_recovery_guide(language=lang)
                 self._after_safe(
                     lambda guide=recovery_guide: self._show_copyable_alert(
                         title="MFA/ML 자동 복구 추가 안내",
@@ -1960,7 +1893,6 @@ class PipelineActionsMixin:
                     first_check_done=True,
                 )
         except Exception as e:
-            self._clear_mfa_ready_stamp(language=lang)
             self._save_mfa_startup_repair_state(
                 last_result="error",
                 last_error=str(e),
@@ -2017,7 +1949,7 @@ class PipelineActionsMixin:
                 )
                 alert_key = f"mfa_after_align_fail_ready_{lang}_{issue_token}"
             else:
-                recovery_guide = self._build_setup_mfa_recovery_guide()
+                recovery_guide = self._build_setup_mfa_recovery_guide(language=lang)
                 message = (
                     "정렬 실패 후 MFA 자동 점검에서 추가 복구가 필요하다고 판단되었습니다.\n"
                     "앱의 'MFA 진단/복구' 버튼을 눌러 복구를 진행해 주세요.\n\n"
@@ -2071,7 +2003,7 @@ class PipelineActionsMixin:
 
                 after = diagnose_mfa_runtime(self.mfa_path or "", language=lang)
                 needs_attention = not bool(after.get("ready", False))
-                recovery_guide = self._build_setup_mfa_recovery_guide() if needs_attention else ""
+                recovery_guide = self._build_setup_mfa_recovery_guide(language=lang) if needs_attention else ""
                 summary = (
                     "[진단 전]\n"
                     f"{self._format_mfa_diagnosis_summary(before)}\n\n"
@@ -2653,6 +2585,10 @@ class PipelineActionsMixin:
                     return
 
                 if lang == "korean" and selected_format == "c_plus_v":
+                    if not getattr(self, "_is_preview_channel", lambda: False)():
+                        self._append_log("❌ 한국어 C+V 모드는 Preview 채널에서만 사용할 수 있습니다.")
+                        self._set_status("❌ Preview 전용 기능")
+                        return
                     if not out_path:
                         self._append_log("❌ 출력 경로를 먼저 지정해 주세요.")
                         self._set_status("❌ 출력 경로 누락")
@@ -2882,6 +2818,15 @@ class PipelineActionsMixin:
                 if not align_ok:
                     align_code = str(align_result.get("code", "ALIGN_RUN_FAILED"))
                     self._append_log(f"⚠ {format_error_with_recovery(align_code, align_err)}")
+                    if self._is_mfa_module_missing_error(align_code, align_err):
+                        self._append_log("❌ MFA 모듈 누락이 감지되어 정렬이 실패했습니다. 'MFA 진단/복구'를 실행해 주세요.")
+                        self._notify_mfa_module_missing(language=lang, detail=align_err)
+                    if primary_engine == "ctc" and self._is_ctc_runtime_missing_error(align_code, align_err):
+                        self._append_log("❌ CTC 런타임 누락이 감지되었습니다. setup_ctc.bat 폴백 복구를 시도합니다.")
+                        if not self._run_setup_ctc_script_fallback(reason="align_runtime_missing"):
+                            self._notify_ctc_runtime_missing(detail=align_err)
+                        else:
+                            self._append_log("ℹ CTC 런타임 복구 완료. 정렬을 다시 시도해 주세요.")
                     if self._is_lab_or_dict_missing_alignment_error(align_code, align_err):
                         self._notify_lab_or_dict_missing(wav_dir, dict_path)
                     if primary_engine == "mfa":

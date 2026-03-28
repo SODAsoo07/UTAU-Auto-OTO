@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from core.kr_oto_rules import (
     KR_PLOSIVE_ONSETS,
     KR_SIBILANT_ONSETS,
@@ -27,6 +29,16 @@ def _safe_ratio(num, den, fallback=0.0):
 def _blend(a, b, w):
     w2 = max(0.0, min(1.0, float(w)))
     return (1.0 - w2) * float(a) + w2 * float(b)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
 
 
 def _enforce_stoplike_vc_before_next_onset(
@@ -406,6 +418,12 @@ def _refine_kr_bridge_with_adjacent_cv(
         cut_gap_lo, cut_gap_hi = 16.0, 88.0
         cut_allow_ms = 28.0
 
+    if a_type == "vc":
+        boost = max(0.0, _env_float("UTOA_KR_VC_ANCHOR_WEIGHT_BOOST", 0.08))
+        if boost > 0.0:
+            w_anchor = _clamp(w_anchor + boost, 0.0, 0.90)
+            w_shape = _clamp(w_shape + (boost * 0.9), 0.0, 0.88)
+
     curr_pre_abs = float(offset) + float(pre)
     cand_pre_abs = float(c_off) + float(c_pre)
     pre_abs_new = _blend(curr_pre_abs, cand_pre_abs, w_anchor)
@@ -442,6 +460,7 @@ def _refine_kr_bridge_with_adjacent_cv(
 
     next_onset_abs = float(next_cv.get("onset_abs", 0.0) or 0.0)
     next_pre_abs = float(next_cv.get("pre_abs", next_onset_abs) or next_onset_abs)
+    next_vowel_abs = float(next_cv.get("vowel_start_abs", 0.0) or 0.0)
     if next_onset_abs > 0.0:
         next_onset_rel = max(next_onset_abs - offset_new, pre_new + 10.0)
         next_pre_rel = max(next_pre_abs - offset_new, next_onset_rel)
@@ -459,6 +478,11 @@ def _refine_kr_bridge_with_adjacent_cv(
         else:
             cap = min(next_onset_rel + cut_allow_ms, next_pre_rel + max(8.0, cut_allow_ms * 0.75))
             cutoff_abs_new = min(cutoff_abs_new, max(cons_new + cut_gap_lo, cap))
+    if a_type == "vc" and next_vowel_abs > 0.0:
+        margin = max(2.0, _env_float("UTOA_KR_VC_NEXT_VOWEL_MARGIN_MS", 6.0))
+        next_vowel_rel = max(next_vowel_abs - offset_new, pre_new + 12.0)
+        vowel_cap = max(next_vowel_rel - margin, cons_new + max(6.0, cut_gap_lo))
+        cutoff_abs_new = min(cutoff_abs_new, vowel_cap)
 
     cutoff_new = -cutoff_abs_new
     if (mel_cutoff_candidate_ms is not None) or (next_mel_voiced_onset_ms is not None):
