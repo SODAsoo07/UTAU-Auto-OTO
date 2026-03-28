@@ -1,4 +1,4 @@
-"""
+﻿"""
 Korean OTO file-level consistency postprocess.
 
 This module performs a lightweight second pass after row-level generation:
@@ -92,6 +92,55 @@ _OVERLAP_LIMITS = {
 
 def _max_offset_adj_ms() -> float:
     return _env_float("UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ", 180.0)
+
+def _cvn_correction_enabled() -> bool:
+    return str(os.environ.get("UTOA_CVN_CORRECTION_ENABLE", "1")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _cvn_low_conf_only_enabled() -> bool:
+    return str(os.environ.get("UTOA_CVN_LOW_CONF_ONLY", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _runtime_mapping_is_low_conf(runtime_report: object) -> bool:
+    if not isinstance(runtime_report, dict):
+        return False
+    mapping = runtime_report.get("mapping")
+    if not isinstance(mapping, dict):
+        return False
+    if bool(mapping.get("file_low_conf", False)):
+        return True
+    trust_tier = str(mapping.get("trust_tier", "") or "").strip().lower()
+    if trust_tier == "low":
+        return True
+    reasons = mapping.get("low_conf_reasons")
+    if isinstance(reasons, list) and len(reasons) > 0:
+        return True
+    try:
+        trust_score = float(mapping.get("trust_score", 1.0) or 1.0)
+    except Exception:
+        trust_score = 1.0
+    if trust_tier == "mid" and trust_score < 0.66:
+        return True
+    return False
+
+
+def _cvn_mfa_gate_allows(runtime_report: object) -> bool:
+    if not _cvn_correction_enabled():
+        return False
+    if not _cvn_low_conf_only_enabled():
+        return True
+    return _runtime_mapping_is_low_conf(runtime_report)
+
 
 def _vc_neighbor_enabled() -> bool:
     return str(os.environ.get("UTOA_KR_VC_NEIGHBOR_ENABLE", "1")).strip().lower() not in {
@@ -458,6 +507,7 @@ def apply_file_consistency_to_oto_file(
     custom_map: Optional[Dict[str, str]] = None,
     validate_fn: Callable = None,
     log_fn: Optional[Callable[[str], None]] = None,
+    runtime_report: object = None,
 ) -> Dict[str, int]:
     if validate_fn is None:
         from core.oto_generator import validate_oto_params
@@ -489,6 +539,12 @@ def apply_file_consistency_to_oto_file(
         line_order.append(("row", wav_key, len(rows_by_wav[wav_key]) - 1))
 
     alias_cache: Dict[str, str] = {}
+    apply_vc_neighbor = bool(_vc_neighbor_enabled() and _cvn_mfa_gate_allows(runtime_report))
+    if (not apply_vc_neighbor) and callable(log_fn) and _vc_neighbor_enabled():
+        if _cvn_low_conf_only_enabled():
+            log_fn("[FileConsistency] CVN low_conf_only gate: skip VC neighbor (MFA confidence criteria not met).")
+        elif not _cvn_correction_enabled():
+            log_fn("[FileConsistency] CVN gate OFF: skip VC neighbor.")
 
     def _row_anchor(row):
         try:
@@ -505,7 +561,8 @@ def apply_file_consistency_to_oto_file(
         row_types = [_classify_cached(str(row["alias"]), alias_cache, custom_map) for row in ordered_rows]
 
         stats["continuity_changed"] += enforce_adjacent_continuity(ordered_rows, row_types, validate_fn)
-        stats["vc_neighbor_changed"] += adjust_vc_neighbor_alignment(ordered_rows, row_types, validate_fn)
+        if apply_vc_neighbor:
+            stats["vc_neighbor_changed"] += adjust_vc_neighbor_alignment(ordered_rows, row_types, validate_fn)
         stats["smoothing_changed"] += smooth_abrupt_changes(ordered_rows, row_types, validate_fn)
         stats["validation_changed"] += apply_file_level_validation(ordered_rows, row_types, validate_fn)
 

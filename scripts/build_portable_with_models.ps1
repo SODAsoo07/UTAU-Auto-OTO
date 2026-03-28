@@ -116,9 +116,14 @@ $requirementsMlSrc = Join-Path $repoRoot "requirements-ml.txt"
 $requirementsMlDst = Join-Path $sourceAbs "requirements-ml.txt"
 Sync-ReleaseFileIfNeeded -SourcePath $requirementsMlSrc -DestinationPath $requirementsMlDst -Label "requirements-ml.txt"
 
+$setupCtcSrc = Join-Path $repoRoot "setup_ctc.bat"
+$setupCtcDst = Join-Path $sourceAbs "setup_ctc.bat"
+Sync-ReleaseFileIfNeeded -SourcePath $setupCtcSrc -DestinationPath $setupCtcDst -Label "setup_ctc.bat"
+
 $requiredReleaseFiles = @(
     "release_channel.json",
     "setup_mfa.bat",
+    "setup_ctc.bat",
     "requirements.txt",
     "requirements-ml.txt",
     "runtime_recovery.ps1",

@@ -282,6 +282,7 @@ def run_ja_post_file_pipeline(context: JaPostFilePipelineContext):
             custom_map=context.custom_map,
             validate_fn=context.validate_fn,
             log_fn=context.log_fn,
+            runtime_report=context.runtime_report,
         )
         log_changed_lines(
             context.log_fn,

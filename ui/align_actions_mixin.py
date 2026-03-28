@@ -51,9 +51,13 @@ class AlignActionsMixin:
                         ):
                             self._set_status("MFA model missing")
                             return
+                elif primary_engine == "ctc":
+                    self._append_log("ℹ CTC 엔진 선택: torchaudio MMS 백엔드로 실행합니다.")
 
                 if primary_engine == "mfa":
                     self._append_log(f"MFA profile: {mfa_profile}")
+                elif primary_engine == "ctc":
+                    self._append_log("Alignment engine: CTC (MMS)")
                 else:
                     self._append_log("Alignment engine: none (MFA bypass)")
                 if hasattr(self, "_apply_advanced_tuning_envs"):
@@ -78,6 +82,18 @@ class AlignActionsMixin:
                     err = str(result.get("message", "") or "alignment failed")
                     code = str(result.get("code", "") or "")
                     self._append_log(f"Alignment failed: {err} ({code})")
+                    if (
+                        primary_engine == "ctc"
+                        and hasattr(self, "_is_ctc_runtime_missing_error")
+                        and self._is_ctc_runtime_missing_error(code, err)
+                    ):
+                        recovered = False
+                        if hasattr(self, "_run_setup_ctc_script_fallback"):
+                            recovered = bool(self._run_setup_ctc_script_fallback(reason="align_runtime_missing"))
+                        if recovered:
+                            self._append_log("ℹ CTC 런타임 복구 완료. 정렬을 다시 시도해 주세요.")
+                        elif hasattr(self, "_notify_ctc_runtime_missing"):
+                            self._notify_ctc_runtime_missing(detail=err)
                     if hasattr(self, "_is_lab_or_dict_missing_alignment_error") and hasattr(self, "_notify_lab_or_dict_missing"):
                         if self._is_lab_or_dict_missing_alignment_error(code, err):
                             self._notify_lab_or_dict_missing(wav_dir, dict_path)

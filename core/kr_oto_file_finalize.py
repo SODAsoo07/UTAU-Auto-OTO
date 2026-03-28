@@ -983,6 +983,7 @@ def run_kr_post_file_pipeline(context: KrPostFilePipelineContext):
             custom_map=context.custom_map,
             validate_fn=context.validate_fn,
             log_fn=context.log_fn,
+            runtime_report=context.runtime_report,
         )
         log_changed_lines(
             context.log_fn, "[KR-Consistency]",

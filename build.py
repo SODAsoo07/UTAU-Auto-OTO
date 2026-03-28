@@ -54,6 +54,7 @@ RUNTIME_DATA_PATHS = [
 ]
 RELEASE_AUX_FILES = [
     os.path.join(APP_DIR, "setup_mfa.bat"),
+    os.path.join(APP_DIR, "setup_ctc.bat"),
     os.path.join(APP_DIR, "requirements.txt"),
     os.path.join(APP_DIR, "requirements-ml.txt"),
     os.path.join(APP_DIR, "scripts", "runtime_recovery.ps1"),

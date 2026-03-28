@@ -4,6 +4,7 @@ import os
 from typing import Dict, List
 
 from core.domino_runner import check_domino_ready, run_domino_align
+from core.ctc_runner import check_ctc_ready, run_ctc_align
 from core.mfa_runner import check_mfa_ready, run_mfa_align
 from core.pipeline_status import (
     ALIGN_EXEC_MISSING,
@@ -102,6 +103,9 @@ def run_alignment_with_fallback(
     if normalized_primary == "domino" and not str(fallback_aligner or "").strip():
         # Domino is Japanese-only and optional. Keep MFA as implicit fallback.
         resolved_fallback = "mfa"
+    if normalized_primary == "ctc" and not str(fallback_aligner or "").strip():
+        # CTC can run standalone; keep fallback empty unless explicitly requested.
+        resolved_fallback = ""
 
     chain = resolve_aligner_chain(primary_aligner, resolved_fallback)
     primary = chain[0] if chain else "mfa"
@@ -141,6 +145,76 @@ def run_alignment_with_fallback(
     fallback_notes: List[str] = []
 
     for engine in chain:
+        if engine == "none":
+            attempts.append(
+                make_runtime_report(
+                    "align",
+                    ALIGN_USING_EXISTING,
+                    "Alignment skipped by aligner setting.",
+                    engine="none",
+                    attempt_index=len(attempts) + 1,
+                    ready=True,
+                    ok=True,
+                )
+            )
+            used_engine = "none"
+            break
+
+        if engine == "ctc":
+            ready = check_ctc_ready(
+                language=lang,
+                wav_folder=wav_folder,
+                callback=callback,
+            )
+            ready["engine"] = "ctc"
+            ready["attempt_index"] = len(attempts) + 1
+            attempts.append(dict(ready))
+            if str(ready.get("code", OK)).upper() != OK:
+                _emit(
+                    callback,
+                    f"[Align] not ready engine=ctc code={ready.get('code')} message={ready.get('message', '')}",
+                )
+                last_err = str(ready.get("message", "") or "ctc not ready")
+                last_code = str(ready.get("code", ALIGN_RUN_FAILED) or ALIGN_RUN_FAILED)
+                continue
+
+            run_attempt_count += 1
+            _emit(callback, "[Align] start engine=ctc attempt=1/1")
+            ok, err = run_ctc_align(
+                "",
+                wav_folder,
+                dictionary_path,
+                output_folder,
+                language=lang,
+                callback=callback,
+            )
+            if ok and not has_textgrid_files(output_folder):
+                ok = False
+                err = "TextGrid output missing after alignment."
+                code = ALIGN_OUTPUT_EMPTY
+            else:
+                code = OK if ok else classify_alignment_error("ctc", err)
+
+            attempts.append(
+                make_runtime_report(
+                    "align",
+                    code,
+                    err or ("alignment complete" if ok else ""),
+                    engine="ctc",
+                    attempt_index=len(attempts) + 1,
+                    ready=True,
+                    ok=bool(ok),
+                )
+            )
+            if ok:
+                used_engine = "ctc"
+                break
+
+            last_err = str(err or "")
+            last_code = str(code or ALIGN_RUN_FAILED)
+            _emit(callback, f"[Align] failed engine=ctc code={code} message={err}")
+            continue
+
         if engine == "domino":
             ready = check_domino_ready(
                 language=lang,

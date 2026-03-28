@@ -400,6 +400,7 @@ class App(
         self.aligner_var = ctk.StringVar(value="MFA")
         self.no_mfa_oto_mode_var = ctk.StringVar(value="베이스 OTO 재매핑 + 보정")
         self.mfa_align_profile_var = ctk.StringVar(value="기본")
+        self.cvn_correction_mode_var = ctk.StringVar(value="끄기")
         # WhisperX 런타임 옵션(고급): UI에서 직접 노출하지 않아도 config.json으로 제어 가능
         self.whisperx_profile_var = ctk.StringVar(value="balanced")
         self.whisperx_device_var = ctk.StringVar(value="auto")

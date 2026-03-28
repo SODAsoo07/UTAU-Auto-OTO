@@ -43,20 +43,11 @@ from core.preflight_common import collect_runtime_preflight_issues
 from core.error_codes import format_error_with_recovery
 from core.format_type_utils import normalize_auto_format_value
 from core.distribution_guard import is_training_paths_enabled
+from core.runtime_paths import resolve_setup_ctc_script_path, resolve_setup_mfa_script_path
 from core.cuda_runtime_bootstrap import (
     collect_cuda_runtime_diagnosis,
     install_torch_cuda_runtime,
 )
-from core.generation.mapping_runtime import (
-    format_mapping_reason_schema_summary,
-    format_mapping_summary,
-)
-from core.pipeline_status import normalize_aligner_name
-from core.preflight_common import collect_runtime_preflight_issues
-from core.error_codes import format_error_with_recovery
-from core.format_type_utils import normalize_auto_format_value
-from core.distribution_guard import is_training_paths_enabled
-from core.cuda_runtime_bootstrap import collect_cuda_runtime_diagnosis
 from core.generation.mapping_runtime import (
     format_mapping_reason_schema_summary,
     format_mapping_summary,
@@ -75,6 +66,30 @@ class PipelineActionsMixin:
         if "no module named" in lowered and "montreal_forced_aligner" in lowered:
             return True
         if "montreal_forced_aligner.command_line.mfa" in lowered:
+            return True
+        return False
+
+    @staticmethod
+    def _is_ctc_runtime_missing_error(code: str, message: str) -> bool:
+        c = str(code or "").strip().upper()
+        text = str(message or "")
+        lowered = text.lower()
+        if c == "ALIGN_EXEC_MISSING":
+            if "ctc runtime import failed" in lowered:
+                return True
+            if ("torch" in lowered or "torchaudio" in lowered) and (
+                "no module named" in lowered or "import failed" in lowered
+            ):
+                return True
+            if "python-textgrid import failed" in lowered:
+                return True
+        if "ctc runtime import failed" in lowered:
+            return True
+        if "mms ctc bundle unavailable" in lowered:
+            return True
+        if "no module named" in lowered and (
+            "torch" in lowered or "torchaudio" in lowered or "textgrid" in lowered
+        ):
             return True
         return False
 
@@ -178,41 +193,118 @@ class PipelineActionsMixin:
         return False
 
     def _resolve_setup_mfa_script_path(self):
-        candidates = []
-        app_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if app_dir:
-            candidates.append(os.path.join(app_dir, "setup_mfa.bat"))
-            candidates.append(os.path.join(os.path.dirname(app_dir), "setup_mfa.bat"))
-        exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", ""))) if getattr(sys, "frozen", False) else ""
-        if exe_dir:
-            candidates.append(os.path.join(exe_dir, "setup_mfa.bat"))
-            candidates.append(os.path.join(os.path.dirname(exe_dir), "setup_mfa.bat"))
-        local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
-        if local_app_data:
-            candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO", "setup_mfa.bat"))
-            candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO_v3", "setup_mfa.bat"))
-        app_data_dir = str(getattr(self, "app_data_dir", "") or "").strip()
-        if app_data_dir:
-            candidates.append(os.path.join(app_data_dir, "setup_mfa.bat"))
-        writable_data_dir = str(getattr(self, "writable_data_dir", "") or "").strip()
-        if writable_data_dir:
-            candidates.append(os.path.join(writable_data_dir, "setup_mfa.bat"))
-        try:
-            candidates.append(os.path.join(os.getcwd(), "setup_mfa.bat"))
-        except Exception:
-            pass
+        return resolve_setup_mfa_script_path(
+            app_dir=str(getattr(self, "app_dir", "") or ""),
+            app_data_dir=str(getattr(self, "app_data_dir", "") or ""),
+            writable_data_dir=str(getattr(self, "writable_data_dir", "") or ""),
+            frozen=bool(getattr(sys, "frozen", False)),
+            executable_path=str(getattr(sys, "executable", "") or ""),
+        )
 
-        seen = set()
-        for candidate in candidates:
+    def _resolve_setup_ctc_script_path(self):
+        return resolve_setup_ctc_script_path(
+            app_dir=str(getattr(self, "app_dir", "") or ""),
+            app_data_dir=str(getattr(self, "app_data_dir", "") or ""),
+            writable_data_dir=str(getattr(self, "writable_data_dir", "") or ""),
+            frozen=bool(getattr(sys, "frozen", False)),
+            executable_path=str(getattr(sys, "executable", "") or ""),
+        )
+
+    def _build_setup_ctc_recovery_guide(self):
+        script_path = self._resolve_setup_ctc_script_path()
+        if script_path:
+            command = f'cmd /c ""{script_path}" --non-interactive"'
+            return (
+                "설치 프로그램에 동봉된 setup_ctc.bat을 직접 실행해 CTC 런타임을 복구해 주세요.\n"
+                f"- 파일: {script_path}\n"
+                "- 실행 명령:\n"
+                f"{command}"
+            )
+        return (
+            "설치 프로그램에 동봉된 setup_ctc.bat을 직접 실행해 CTC 런타임을 복구해 주세요.\n"
+            "- 실행 예시:\n"
+            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO_v3\\setup_ctc.bat\" --non-interactive\"\n"
+            "또는\n"
+            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_ctc.bat\" --non-interactive\""
+        )
+
+    def _notify_ctc_runtime_missing(self, detail: str = "") -> None:
+        guide = self._build_setup_ctc_recovery_guide()
+        tail = str(detail or "").strip()
+        if len(tail) > 420:
+            tail = tail[-420:]
+        message = (
+            "CTC 실행 모듈이 현재 환경에서 누락되었거나 손상되었습니다.\n"
+            "정렬을 계속 진행하려면 CTC 런타임 복구를 먼저 실행해 주세요.\n\n"
+            f"{guide}"
+        )
+        if tail:
+            message += f"\n\n[오류 요약]\n{tail}"
+        self._after_safe(
+            lambda msg=message: self._show_copyable_alert(
+                title="CTC 런타임 누락 감지",
+                message=msg,
+                alert_key="ctc_runtime_missing",
+            )
+        )
+
+    def _run_setup_ctc_script_fallback(self, reason="") -> bool:
+        script_path = self._resolve_setup_ctc_script_path()
+        if not script_path:
+            self._append_log("⚠ setup_ctc.bat을 찾지 못해 CTC 폴백 복구를 건너뜁니다.")
+            return False
+
+        self._append_log("⚠ CTC 런타임이 누락되어 setup_ctc.bat 폴백 복구를 시도합니다.")
+        if reason:
+            self._append_log(f"   사유: {reason}")
+
+        runtime_root = ""
+        for raw in (
+            str(getattr(self, "app_dir", "") or ""),
+            str(getattr(self, "writable_data_dir", "") or ""),
+            os.path.dirname(script_path),
+        ):
+            candidate = str(raw or "").strip()
             if not candidate:
                 continue
-            norm = os.path.normcase(os.path.abspath(candidate))
-            if norm in seen:
+            try:
+                candidate_abs = os.path.abspath(candidate)
+            except Exception:
                 continue
-            seen.add(norm)
-            if os.path.isfile(candidate):
-                return candidate
-        return ""
+            if (
+                os.path.isfile(os.path.join(candidate_abs, "core", "ctc_runner.py"))
+                or os.path.isfile(os.path.join(candidate_abs, "UTAU_Auto_OTO", "core", "ctc_runner.py"))
+            ):
+                runtime_root = candidate_abs
+                break
+
+        cmd = [script_path, "--non-interactive"]
+        if runtime_root:
+            cmd.extend(["--runtime-root", runtime_root])
+        self._append_log(f"   실행: {' '.join(cmd)}")
+
+        try:
+            process = self._popen_subprocess_hidden(
+                cmd,
+                cwd=os.path.dirname(script_path) or None,
+                stdout=sp.PIPE,
+                stderr=sp.STDOUT,
+                text=False,
+                env=os.environ.copy(),
+            )
+        except Exception as e:
+            self._append_log(f"❌ setup_ctc.bat 실행 실패: {e}")
+            return False
+
+        if process.stdout is not None:
+            for line in self._iter_decoded_stdout_lines(process):
+                self._append_log(line)
+        process.wait()
+        if process.returncode != 0:
+            self._append_log(f"❌ setup_ctc.bat 폴백 복구 실패 (code={process.returncode})")
+            return False
+        self._append_log("✅ setup_ctc.bat 폴백 복구 완료")
+        return True
 
     def _run_setup_mfa_script_fallback(self, language="korean", reason="") -> bool:
         script_path = self._resolve_setup_mfa_script_path()
@@ -2604,6 +2696,8 @@ class PipelineActionsMixin:
                 _set_stage_progress("align", 0.05)
                 if primary_engine == "none":
                     self._set_status("3/5 - 정렬 건너뛰기(no-MFA)")
+                elif primary_engine == "ctc":
+                    self._set_status("3/5 - CTC 정렬 준비 중...")
                 else:
                     self._set_status("3/5 - MFA 정렬 준비 중...")
                     if not self._ensure_mfa_ready_for_language(lang):
@@ -2619,6 +2713,8 @@ class PipelineActionsMixin:
                 )
                 if primary_engine == "mfa":
                     self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
+                elif primary_engine == "ctc":
+                    self._append_log("ℹ 정렬 엔진: CTC (MMS)")
                 else:
                     self._append_log("ℹ 정렬 엔진: none (MFA 비사용)")
                 if hasattr(self, "_apply_advanced_tuning_envs"):
@@ -2662,6 +2758,12 @@ class PipelineActionsMixin:
                     if self._is_mfa_module_missing_error(align_code, align_err):
                         self._append_log("❌ MFA 모듈 누락이 감지되어 정렬이 실패했습니다. 'MFA 진단/복구'를 실행해 주세요.")
                         self._notify_mfa_module_missing(language=lang, detail=align_err)
+                    if primary_engine == "ctc" and self._is_ctc_runtime_missing_error(align_code, align_err):
+                        self._append_log("❌ CTC 런타임 누락이 감지되었습니다. setup_ctc.bat 폴백 복구를 시도합니다.")
+                        if not self._run_setup_ctc_script_fallback(reason="align_runtime_missing"):
+                            self._notify_ctc_runtime_missing(detail=align_err)
+                        else:
+                            self._append_log("ℹ CTC 런타임 복구 완료. 정렬을 다시 시도해 주세요.")
                     if self._is_lab_or_dict_missing_alignment_error(align_code, align_err):
                         self._notify_lab_or_dict_missing(wav_dir, dict_path)
                     if primary_engine == "mfa":

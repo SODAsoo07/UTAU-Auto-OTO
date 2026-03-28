@@ -832,6 +832,32 @@ class TabBuildersMixin:
             text_color=PALETTE.hint_text,
         ).pack(anchor="w", padx=12, pady=(0, 6))
 
+        cvn_mode_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        cvn_mode_row.pack(anchor="w", padx=12, pady=(2, 2), fill="x")
+        ctk.CTkLabel(
+            cvn_mode_row,
+            text="자모음 판별기(CVN) 적용",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+        self.cvn_correction_mode_menu = ctk.CTkOptionMenu(
+            cvn_mode_row,
+            values=["항상 적용", "부정확한 파일만 적용", "끄기"],
+            variable=self.cvn_correction_mode_var,
+            width=210,
+            command=(
+                self._on_cvn_correction_mode_change
+                if hasattr(self, "_on_cvn_correction_mode_change")
+                else (lambda _v: self._save_config())
+            ),
+        )
+        _style_blue_menu(self.cvn_correction_mode_menu)
+        self.cvn_correction_mode_menu.pack(side="left", padx=(10, 8))
+        ctk.CTkLabel(
+            ml_frame,
+            text="MFA→OTO 후처리/CTC 어댑터에 선택적으로 적용됩니다. (기본: 끄기)",
+            text_color=PALETTE.hint_text,
+        ).pack(anchor="w", padx=12, pady=(0, 4))
+
         selector_mode_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
         selector_mode_row.pack(anchor="w", padx=12, pady=(4, 0), fill="x")
         ctk.CTkLabel(

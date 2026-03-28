@@ -321,7 +321,7 @@ class LayoutMixin:
         build_left_label(self.row_aligner, "정렬 엔진:").pack(side="left")
         self.aligner_menu = ctk.CTkOptionMenu(
             self.row_aligner,
-            values=["MFA", "No-MFA"],
+            values=["MFA", "CTC", "No-MFA"],
             variable=self.aligner_var,
             width=190,
             command=self._on_aligner_change,
@@ -1113,8 +1113,8 @@ class LayoutMixin:
         self._save_config()
 
     def _sync_aligner_ui(self):
-        options = ["MFA", "No-MFA"]
         lang = self._get_language()
+        options = ["No-MFA"] if (lang == "english") else ["MFA", "CTC", "No-MFA"]
         current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA").strip()
         fmt = normalize_auto_format_value(lang, self.auto_format_var.get()) if hasattr(self, "auto_format_var") else ""
         if current == "No-MFA (Experimental)":
@@ -1132,6 +1132,7 @@ class LayoutMixin:
             except Exception:
                 pass
         use_no_mfa = current == "No-MFA"
+        use_ctc = current == "CTC"
         is_cmpx_preview = (lang == "korean" and fmt == "cmpx")
         limit_ml_routes_for_no_mfa = use_no_mfa and not (
             lang == "english" or is_cmpx_preview
@@ -1175,7 +1176,7 @@ class LayoutMixin:
             else "베이스 OTO 재매핑 + 보정"
         )
         if hasattr(self, "mfa_align_profile_menu"):
-            self.mfa_align_profile_menu.configure(state="disabled" if use_no_mfa else "normal")
+            self.mfa_align_profile_menu.configure(state="disabled" if (use_no_mfa or use_ctc) else "normal")
         show_no_mfa_mode_row = use_no_mfa and not (
             lang == "english" or (lang == "korean" and fmt == "cmpx")
         )
@@ -1201,6 +1202,8 @@ class LayoutMixin:
                     self.aligner_help_label.configure(
                         text=f"(No-MFA 생성 방식: {no_mfa_mode_desc})"
                     )
+            elif use_ctc:
+                self.aligner_help_label.configure(text="(CTC(MMS) 기반 정렬 + C/V 어댑터를 사용합니다.)")
             else:
                 self.aligner_help_label.configure(text="(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)")
         if hasattr(self, "pipeline_step_align_btn") and self.pipeline_step_align_btn is not None:
@@ -1240,8 +1243,12 @@ class LayoutMixin:
                             text="MFA 정렬 없이 진행합니다. 베이스 OTO를 WAV에 재매핑하고 0값 라인은 경계 추정으로 보정합니다."
                         )
             else:
-                self.align_step_title_label.configure(text="2. 음성 정렬 (MFA)")
-                self.align_step_desc_label.configure(text="MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.")
+                if use_ctc:
+                    self.align_step_title_label.configure(text="2. 음성 정렬 (CTC)")
+                    self.align_step_desc_label.configure(text="torchaudio MMS CTC로 TextGrid를 생성하고 C/V 어댑터를 적용합니다.")
+                else:
+                    self.align_step_title_label.configure(text="2. 음성 정렬 (MFA)")
+                    self.align_step_desc_label.configure(text="MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.")
 
     def _toggle_developer_mode(self):
         if not hasattr(self, "developer_mode_enabled_var"):
@@ -1313,6 +1320,9 @@ class LayoutMixin:
     def _on_vc_neighbor_language_toggle(self):
         if hasattr(self, "_sync_vc_correction_toggle"):
             self._sync_vc_correction_toggle()
+        self._save_config()
+
+    def _on_cvn_correction_mode_change(self, _value=None):
         self._save_config()
 
     def _on_vc_correction_toggle(self):

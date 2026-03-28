@@ -176,6 +176,7 @@ exit /b 1
 echo Usage: setup_mfa.bat [--install ^| --recovery ^| --menu] [--runtime-root PATH] [--with-ml] [--non-interactive]
 
 echo Installs or repairs MFA runtime ^(.env^), micromamba packages, and language/model dependencies.
+echo For CTC runtime ^(.env_ctc^) use setup_ctc.bat.
 
 echo.
 
@@ -2118,7 +2119,7 @@ set "KOREAN_TOKENIZER_OK=0"
 
 if not exist "%ENV_DIR%\python.exe" goto :eof
 
-call :run_env_python -c "import sys,jamo,subprocess; cmds=['from mecab import MeCab','from mecab import MeCab; MeCab()','from mecab import Tagger','from mecab import Tagger; Tagger()','import MeCab as M','import MeCab as M; M.Tagger()','import mecab_ko']; ok=any(subprocess.run([sys.executable,'-c',c],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0 for c in cmds); sys.exit(0 if ok else 1)" >nul 2>nul
+call :run_env_python -c "import importlib.util as u,sys; has_jamo=u.find_spec('jamo') is not None; backends=('mecab','mecab_ko','MeCab'); has_backend=any(u.find_spec(name) is not None for name in backends); sys.exit(0 if (has_jamo and has_backend) else 1)" >nul 2>nul
 
 if not errorlevel 1 set "KOREAN_TOKENIZER_OK=1"
 

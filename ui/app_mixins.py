@@ -20,6 +20,7 @@ from core.format_type_utils import normalize_auto_format_value
 from core.log_events import classify_log_message, log_with_event
 from core.mfa_runner import ALERT_MFA_PERMISSION_DENIED, ALERT_MSVC_REQUIRED
 from core.oto_validator import validate_oto_timing
+from core.runtime_paths import resolve_setup_mfa_script_path
 from ui.theme_tokens import DEFAULT_THEME_PROFILE, PALETTE, normalize_theme_profile_name
 
 
@@ -505,6 +506,9 @@ class AppRuntimeMixin:
             "UTOA_JA_VC_NEIGHBOR_LEAD_MS",
             "UTOA_JA_VC_NEIGHBOR_TAIL_MS",
             "UTOA_JA_VC_NEIGHBOR_MIN_LEN",
+            "UTOA_CVN_CORRECTION_ENABLE",
+            "UTOA_CVN_LOW_CONF_ONLY",
+            "UTOA_CVN_C_THRESHOLD",
             "UTOA_SOFT_BANK_MODE",
             "UTOA_MFA_SOFT_BANK_MODE",
             "UTOA_MEL_SOUND_DB_MARGIN",
@@ -579,6 +583,17 @@ class AppRuntimeMixin:
         )
         os.environ["UTOA_KR_VC_NEIGHBOR_ENABLE"] = "1" if kr_vc_enabled else "0"
         os.environ["UTOA_JA_VC_NEIGHBOR_ENABLE"] = "1" if ja_vc_enabled else "0"
+        cvn_mode = self._get_cvn_correction_mode_code() if hasattr(self, "_get_cvn_correction_mode_code") else "off"
+        if cvn_mode == "always":
+            os.environ["UTOA_CVN_CORRECTION_ENABLE"] = "1"
+            os.environ["UTOA_CVN_LOW_CONF_ONLY"] = "0"
+        elif cvn_mode == "low_conf":
+            os.environ["UTOA_CVN_CORRECTION_ENABLE"] = "1"
+            os.environ["UTOA_CVN_LOW_CONF_ONLY"] = "1"
+        else:
+            os.environ["UTOA_CVN_CORRECTION_ENABLE"] = "0"
+            os.environ["UTOA_CVN_LOW_CONF_ONLY"] = "0"
+        os.environ["UTOA_CVN_C_THRESHOLD"] = "0.4"
 
         _set_float_env("kr_vc_neighbor_blend_var", "UTOA_KR_VC_NEIGHBOR_BLEND", min_value=0.0, max_value=1.0)
         _set_float_env("kr_vc_neighbor_max_shift_var", "UTOA_KR_VC_NEIGHBOR_MAX_SHIFT", min_value=0.0)
@@ -895,6 +910,7 @@ class AppRuntimeMixin:
             "kr_continuity_enable_var": True,
             "kr_continuity_max_offset_adj_var": "",
             "vc_correction_enable_var": True,
+            "cvn_correction_mode_var": "끄기",
             "kr_vc_neighbor_enable_var": True,
             "kr_vc_neighbor_blend_var": "",
             "kr_vc_neighbor_max_shift_var": "",
@@ -936,6 +952,39 @@ class AppRuntimeMixin:
         if hasattr(self, "_refresh_ml_backend_status"):
             self._refresh_ml_backend_status()
         self._append_log("개발자 설정을 기본값으로 초기화했습니다.")
+
+    @staticmethod
+    def _normalize_cvn_correction_mode_code(value: str) -> str:
+        raw = str(value or "").strip().lower().replace(" ", "")
+        if raw in {"always", "on", "all", "항상적용", "항상"}:
+            return "always"
+        if raw in {"low_conf", "lowconf", "uncertain_only", "부정확한파일만적용", "부정확한파일만"}:
+            return "low_conf"
+        if raw in {"off", "none", "disable", "disabled", "끄기", "0", "false"}:
+            return "off"
+        return "off"
+
+    @staticmethod
+    def _cvn_correction_mode_label_from_code(code: str) -> str:
+        normalized = AppRuntimeMixin._normalize_cvn_correction_mode_code(code)
+        label_map = {
+            "always": "항상 적용",
+            "low_conf": "부정확한 파일만 적용",
+            "off": "끄기",
+        }
+        return label_map.get(normalized, "끄기")
+
+    def _set_cvn_correction_mode_from_code(self, code: str) -> str:
+        normalized = self._normalize_cvn_correction_mode_code(code)
+        label = self._cvn_correction_mode_label_from_code(normalized)
+        if hasattr(self, "cvn_correction_mode_var"):
+            self.cvn_correction_mode_var.set(label)
+        return normalized
+
+    def _get_cvn_correction_mode_code(self) -> str:
+        if not hasattr(self, "cvn_correction_mode_var"):
+            return "off"
+        return self._normalize_cvn_correction_mode_code(self.cvn_correction_mode_var.get())
 
     @staticmethod
     def _normalize_mapping_strict_mode_code(value: str) -> str:
@@ -1627,41 +1676,13 @@ class AppRuntimeMixin:
         )
 
     def _resolve_setup_mfa_script_path(self):
-        candidates = []
-        app_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if app_dir:
-            candidates.append(os.path.join(app_dir, "setup_mfa.bat"))
-            candidates.append(os.path.join(os.path.dirname(app_dir), "setup_mfa.bat"))
-        exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", ""))) if getattr(sys, "frozen", False) else ""
-        if exe_dir:
-            candidates.append(os.path.join(exe_dir, "setup_mfa.bat"))
-            candidates.append(os.path.join(os.path.dirname(exe_dir), "setup_mfa.bat"))
-        local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
-        if local_app_data:
-            candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO", "setup_mfa.bat"))
-            candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO_v3", "setup_mfa.bat"))
-        try:
-            candidates.append(os.path.join(os.getcwd(), "setup_mfa.bat"))
-        except Exception:
-            pass
-        app_data_dir = str(getattr(self, "app_data_dir", "") or "").strip()
-        if app_data_dir:
-            candidates.append(os.path.join(app_data_dir, "setup_mfa.bat"))
-        writable_data_dir = str(getattr(self, "writable_data_dir", "") or "").strip()
-        if writable_data_dir:
-            candidates.append(os.path.join(writable_data_dir, "setup_mfa.bat"))
-
-        seen = set()
-        for candidate in candidates:
-            if not candidate:
-                continue
-            norm = os.path.normcase(os.path.abspath(candidate))
-            if norm in seen:
-                continue
-            seen.add(norm)
-            if os.path.isfile(candidate):
-                return candidate
-        return ""
+        return resolve_setup_mfa_script_path(
+            app_dir=str(getattr(self, "app_dir", "") or ""),
+            app_data_dir=str(getattr(self, "app_data_dir", "") or ""),
+            writable_data_dir=str(getattr(self, "writable_data_dir", "") or ""),
+            frozen=bool(getattr(sys, "frozen", False)),
+            executable_path=str(getattr(sys, "executable", "") or ""),
+        )
 
     def _build_setup_mfa_recovery_guide(self):
         script_path = self._resolve_setup_mfa_script_path()
@@ -2503,6 +2524,11 @@ class ConfigMixin:
             "ja_vc_neighbor_lead_ms": self.ja_vc_neighbor_lead_ms_var.get() if hasattr(self, "ja_vc_neighbor_lead_ms_var") else "",
             "ja_vc_neighbor_tail_ms": self.ja_vc_neighbor_tail_ms_var.get() if hasattr(self, "ja_vc_neighbor_tail_ms_var") else "",
             "ja_vc_neighbor_min_len": self.ja_vc_neighbor_min_len_var.get() if hasattr(self, "ja_vc_neighbor_min_len_var") else "",
+            "cvn_correction_mode": (
+                self._get_cvn_correction_mode_code()
+                if hasattr(self, "_get_cvn_correction_mode_code")
+                else "off"
+            ),
             "soft_bank_mode": self.soft_bank_mode_var.get() if hasattr(self, "soft_bank_mode_var") else False,
             "low_rms_gain_enable": self.low_rms_gain_enable_var.get() if hasattr(self, "low_rms_gain_enable_var") else True,
             "weak_voice_assist_enable": self.weak_voice_assist_enable_var.get() if hasattr(self, "weak_voice_assist_enable_var") else True,
@@ -2624,6 +2650,22 @@ class ConfigMixin:
                 self.weak_voice_assist_enable_var.set(bool(config.get("weak_voice_assist_enable", True)))
             if "weak_voice_assist_strength" in config and hasattr(self, "weak_voice_assist_strength_var"):
                 self.weak_voice_assist_strength_var.set(str(config.get("weak_voice_assist_strength", "") or ""))
+            if hasattr(self, "cvn_correction_mode_var"):
+                if "cvn_correction_mode" in config:
+                    if hasattr(self, "_set_cvn_correction_mode_from_code"):
+                        self._set_cvn_correction_mode_from_code(config.get("cvn_correction_mode", "off"))
+                    else:
+                        self.cvn_correction_mode_var.set(str(config.get("cvn_correction_mode", "끄기") or "끄기"))
+                else:
+                    legacy_enabled = bool(config.get("cvn_correction_enable", False))
+                    legacy_low_conf = bool(config.get("cvn_low_conf_only", False))
+                    legacy_code = "off"
+                    if legacy_enabled:
+                        legacy_code = "low_conf" if legacy_low_conf else "always"
+                    if hasattr(self, "_set_cvn_correction_mode_from_code"):
+                        self._set_cvn_correction_mode_from_code(legacy_code)
+                    else:
+                        self.cvn_correction_mode_var.set("끄기")
             if "mapping_strict_mode" in config and hasattr(self, "mapping_strict_mode_var"):
                 if hasattr(self, "_set_mapping_strict_mode_from_code"):
                     self._set_mapping_strict_mode_from_code(config.get("mapping_strict_mode", "soft"))
@@ -2688,7 +2730,12 @@ class ConfigMixin:
                     saved_aligner = normalize_aligner_name(config.get("aligner", "mfa"), default="mfa")
                 except Exception:
                     saved_aligner = "mfa"
-                self.aligner_var.set("No-MFA" if saved_aligner == "none" else "MFA")
+                aligner_label_map = {
+                    "none": "No-MFA",
+                    "ctc": "CTC",
+                    "mfa": "MFA",
+                }
+                self.aligner_var.set(aligner_label_map.get(saved_aligner, "MFA"))
             if "developer_mode_enabled" in config and hasattr(self, "developer_mode_enabled_var"):
                 allow_persist_dev = str(os.environ.get("UTOA_ALLOW_PERSISTENT_DEVELOPER_MODE", "")).strip().lower() in {
                     "1", "true", "yes", "on"

@@ -50,10 +50,18 @@ def normalize_aligner_name(value, default: str = "mfa") -> str:
     text = str(value or "").strip().lower()
     if not text:
         return default
+    if text in {"none", "nomfa", "no-mfa", "no_mfa", "no mfa", "off", "skip"}:
+        return "none"
     if text in {"mfa", "montreal"}:
         return "mfa"
+    if text in {"ctc", "mms", "mms-fa", "mms_fa", "torchaudio-ctc", "torchaudio_ctc"}:
+        return "ctc"
     if text in {"domino", "pydomino", "domino (jp)", "domino(jp)", "jp_domino", "jp-domino"}:
         return "domino"
+    if "no-mfa" in text or "nomfa" in text:
+        return "none"
+    if "ctc" in text:
+        return "ctc"
     if "domino" in text:
         return "domino"
     return default
@@ -121,6 +129,14 @@ def classify_alignment_error(engine: str, message: str) -> str:
         return ALIGN_EXEC_MISSING
     if eng == "domino" and ("pydomino" in lowered or "domino executable" in lowered):
         return ALIGN_EXEC_MISSING
+    if eng == "ctc" and (
+        "torch" in lowered
+        or "torchaudio" in lowered
+        or "ctc runtime import failed" in lowered
+    ):
+        return ALIGN_EXEC_MISSING
+    if eng == "ctc" and ("mms" in lowered or "bundle" in lowered or "model" in lowered):
+        return ALIGN_MODEL_MISSING
     return ALIGN_RUN_FAILED
 
 
