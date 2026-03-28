@@ -865,7 +865,14 @@ class LayoutMixin:
     def _get_auto_format_options(self, language=None):
         lang = language or self._get_language()
         if lang == "korean":
-            values = ["자동 감지 (권장)", "CV/연단음", "CVC (한국어 전용)", "CVVC", "VCV (연속음)"]
+            values = [
+                "자동 감지 (권장)",
+                "CV/연단음",
+                "C+V (템플릿 전용)",
+                "CVC (한국어 전용)",
+                "CVVC",
+                "VCV (연속음)",
+            ]
             if self._is_preview_channel():
                 values.append("CMPX (프리뷰)")
             return values
@@ -884,6 +891,7 @@ class LayoutMixin:
         label_map = {
             "": "자동 감지 (권장)",
             "cv": "CV/연단음",
+            "c_plus_v": "C+V (템플릿 전용)",
             "cvc": "CVC (한국어 전용)",
             "cvvc": "CVVC",
             "vcv": "VCV (연속음)",
@@ -891,7 +899,10 @@ class LayoutMixin:
         }
         label = label_map.get(str(format_code or "").strip().lower(), "자동 감지 (권장)")
         if label not in values:
-            label = "CV/연단음" if label == "CVC (한국어 전용)" and lang != "korean" else "자동 감지 (권장)"
+            if label in {"CVC (한국어 전용)", "C+V (템플릿 전용)"} and lang != "korean":
+                label = "CV/연단음"
+            else:
+                label = "자동 감지 (권장)"
         self.auto_format_var.set(label)
 
     def _on_language_change(self, value):
@@ -981,7 +992,7 @@ class LayoutMixin:
             return True
         if lang == "korean":
             fmt = normalize_auto_format_value(lang, self.auto_format_var.get()) if hasattr(self, "auto_format_var") else ""
-            if fmt == "cmpx":
+            if fmt in {"cmpx", "c_plus_v"}:
                 return True
         return False
 
@@ -1024,14 +1035,14 @@ class LayoutMixin:
                     pass
 
     def _sync_cmpx_route_lock(self):
-        is_cmpx_preview = False
+        is_kr_template_only = False
         try:
             lang = self._get_language()
             fmt = normalize_auto_format_value(lang, self.auto_format_var.get()) if hasattr(self, "auto_format_var") else ""
-            is_cmpx_preview = (lang == "korean" and fmt == "cmpx")
+            is_kr_template_only = (lang == "korean" and fmt in {"cmpx", "c_plus_v"})
         except Exception:
-            is_cmpx_preview = False
-        if is_cmpx_preview and hasattr(self, "ml_route_var"):
+            is_kr_template_only = False
+        if is_kr_template_only and hasattr(self, "ml_route_var"):
             try:
                 if hasattr(self, "_set_ml_route_from_code"):
                     self._set_ml_route_from_code("nomfa")
@@ -1041,8 +1052,7 @@ class LayoutMixin:
                 pass
         if hasattr(self, "ml_route_menu"):
             try:
-                if is_cmpx_preview:
-                    self.ml_route_menu.configure(state="disabled")
+                self.ml_route_menu.configure(state="disabled" if is_kr_template_only else "normal")
             except Exception:
                 pass
     def _get_ja_alias_style_code(self):
@@ -1127,9 +1137,10 @@ class LayoutMixin:
         lang = self._get_language()
         current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA").strip()
         fmt = normalize_auto_format_value(lang, self.auto_format_var.get()) if hasattr(self, "auto_format_var") else ""
+        is_kr_template_only = (lang == "korean" and fmt in {"cmpx", "c_plus_v"})
         if current == "No-MFA (Experimental)":
             current = "No-MFA"
-        if lang == "english" or (lang == "korean" and fmt == "cmpx"):
+        if lang == "english" or is_kr_template_only:
             current = "No-MFA"
         if current not in options:
             current = "MFA"
@@ -1144,15 +1155,16 @@ class LayoutMixin:
         use_no_mfa = current == "No-MFA"
         use_ctc = current == "CTC"
         is_cmpx_preview = (lang == "korean" and fmt == "cmpx")
+        is_c_plus_v_mode = (lang == "korean" and fmt == "c_plus_v")
         limit_ml_routes_for_no_mfa = use_no_mfa and not (
-            lang == "english" or is_cmpx_preview
+            lang == "english" or is_kr_template_only
         )
         current_route_code = (
             self._get_ml_route_code()
             if hasattr(self, "_get_ml_route_code")
             else str(self.ml_route_var.get() if hasattr(self, "ml_route_var") else "auto")
         )
-        if is_cmpx_preview:
+        if is_kr_template_only:
             current_route_code = "nomfa"
         elif limit_ml_routes_for_no_mfa and current_route_code not in {"auto", "nomfa"}:
             current_route_code = "auto"
@@ -1173,7 +1185,7 @@ class LayoutMixin:
             try:
                 self.ml_route_menu.configure(
                     values=route_values,
-                    state="disabled" if is_cmpx_preview else "normal",
+                    state="disabled" if is_kr_template_only else "normal",
                 )
                 self.ml_route_menu.set(route_label)
             except Exception:
@@ -1188,7 +1200,7 @@ class LayoutMixin:
         if hasattr(self, "mfa_align_profile_menu"):
             self.mfa_align_profile_menu.configure(state="disabled" if (use_no_mfa or use_ctc) else "normal")
         show_no_mfa_mode_row = use_no_mfa and not (
-            lang == "english" or (lang == "korean" and fmt == "cmpx")
+            lang == "english" or is_kr_template_only
         )
         if hasattr(self, "row_no_mfa_oto_mode") and self.row_no_mfa_oto_mode is not None:
             try:
@@ -1208,6 +1220,8 @@ class LayoutMixin:
                     self.aligner_help_label.configure(text="(영어 Preview CVVC 모드에서는 정렬을 사용하지 않습니다.)")
                 elif lang == "korean" and fmt == "cmpx":
                     self.aligner_help_label.configure(text="(CMPX Preview 모드에서는 정렬을 사용하지 않습니다.)")
+                elif is_c_plus_v_mode:
+                    self.aligner_help_label.configure(text="(한국어 C+V 모드는 템플릿 기반 생성으로 정렬을 사용하지 않습니다.)")
                 else:
                     self.aligner_help_label.configure(
                         text=f"(No-MFA 생성 방식: {no_mfa_mode_desc})"
@@ -1242,6 +1256,9 @@ class LayoutMixin:
                 elif lang == "korean" and fmt == "cmpx":
                     self.align_step_title_label.configure(text="2. 정렬 단계 건너뜀 (CMPX Preview)")
                     self.align_step_desc_label.configure(text="한국어 CMPX Preview 모드는 Lab/사전/MFA 없이 base OTO를 WAV에 재매핑해 생성합니다.")
+                elif is_c_plus_v_mode:
+                    self.align_step_title_label.configure(text="2. 정렬 단계 건너뜀 (한국어 C+V)")
+                    self.align_step_desc_label.configure(text="한국어 C+V 모드는 템플릿 OTO를 WAV에 재매핑하는 방식으로 생성합니다.")
                 else:
                     self.align_step_title_label.configure(text="2. 정렬 단계 건너뜀 (No-MFA)")
                     if no_mfa_mode_code == "alias_auto":
@@ -1430,8 +1447,11 @@ class LayoutMixin:
             if hasattr(self, "ml_coupled_status_detail_label"):
                 self.ml_coupled_status_detail_label.configure(text="")
             return
-        if lang == "korean" and fmt == "cmpx":
-            self.ml_coupled_status_label.configure(text="현재 포맷: cmpx | CMPX Preview 모드에서는 ML 보정을 사용하지 않습니다.")
+        if lang == "korean" and fmt in {"cmpx", "c_plus_v"}:
+            mode_label = "cmpx" if fmt == "cmpx" else "c_plus_v"
+            self.ml_coupled_status_label.configure(
+                text=f"현재 포맷: {mode_label} | 템플릿 전용 모드에서는 ML 보정을 사용하지 않습니다."
+            )
             if hasattr(self, "ml_coupled_status_detail_label"):
                 self.ml_coupled_status_detail_label.configure(text="")
             return

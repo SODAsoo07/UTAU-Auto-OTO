@@ -231,8 +231,11 @@ class OtoActionsMixin:
                 _update_oto_stage("입력 경로 확인 완료", 0.07, force=True)
 
                 # 일반 OTO 경로에서는 파이프라인과 동일한 사전 점검을 먼저 수행합니다.
-                # (영어 Preview / 한국어 CMPX Preview는 별도 전용 분기에서 검사)
-                if not (lang == "english" or (lang == "korean" and selected_format == "cmpx")):
+                # (영어 Preview / 한국어 템플릿 전용 포맷은 별도 전용 분기에서 검사)
+                if not (
+                    lang == "english"
+                    or (lang == "korean" and selected_format in {"cmpx", "c_plus_v"})
+                ):
                     preflight_wav_dir = os.path.abspath(root_wav_dir)
                     preflight_out_path = (
                         os.path.abspath(base_out_path)
@@ -380,7 +383,7 @@ class OtoActionsMixin:
                     no_mfa_auto_mode = (
                         aligner_engine == "none"
                         and lang != "english"
-                        and selected_format != "cmpx"
+                        and selected_format not in {"cmpx", "c_plus_v"}
                     )
                     no_mfa_mode_code = (
                         self._get_no_mfa_oto_mode_code()
@@ -423,10 +426,13 @@ class OtoActionsMixin:
                             self._append_log(f"{prefix}ℹ TextGrid가 있어도 No-MFA 선택 시에는 선택한 No-MFA 생성 방식으로 진행합니다.")
                         self._append_log(f"ℹ No-MFA 생성 방식: {no_mfa_mode_text}")
                         self._append_log(f"[No-MFA] base oto: {no_mfa_source_oto}")
-                    elif lang != "english" and selected_format != "cmpx" and not has_textgrid:
+                    elif lang != "english" and selected_format not in {"cmpx", "c_plus_v"} and not has_textgrid:
                         self._append_log(f"{prefix}경고: textgrids 폴더가 없습니다. 3단계 정렬/라벨 생성을 먼저 실행하세요.")
 
-                    if not (lang == "english" or (lang == "korean" and selected_format == "cmpx")):
+                    if not (
+                        lang == "english"
+                        or (lang == "korean" and selected_format in {"cmpx", "c_plus_v"})
+                    ):
                         preflight = collect_runtime_preflight_issues(
                             language=lang,
                             wav_dir=target_wav_dir,
@@ -527,6 +533,34 @@ class OtoActionsMixin:
                             out_path=target_out_path,
                             source_oto_path=source_oto,
                             alias_suffix=alias_suffix,
+                            callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
+                        )
+                    elif lang == "korean" and selected_format == "c_plus_v":
+                        if self.no_base_oto_var.get():
+                            self._append_log(f"{prefix}오류: 한국어 C+V 모드는 베이스 OTO(템플릿 ini)가 필수입니다.")
+                            self._set_status("오류: 베이스 OTO 필요")
+                            return False, False, 0, 0
+                        source_oto = resolve_no_mfa_source_oto(
+                            wav_dir=target_wav_dir,
+                            source_hint=tpl_path,
+                        )
+                        if not source_oto:
+                            self._append_log(f"{prefix}오류: 한국어 C+V 모드용 베이스 OTO를 찾지 못했습니다.")
+                            self._append_log("   템플릿 OTO에 baseoto.ini 또는 oto.ini를 지정해 주세요.")
+                            self._set_status("오류: 베이스 OTO 필요")
+                            return False, False, 0, 0
+
+                        self._append_log("ℹ 한국어 C+V 모드: 정렬 없이 템플릿 OTO 재매핑으로 생성합니다.")
+                        self._append_log(f"[KR-C+V] base oto: {source_oto}")
+                        _update_oto_local("C+V 템플릿 재매핑 생성", 0.22, force=True)
+                        processed, total, errors = generate_no_mfa_auto_oto(
+                            wav_dir=target_wav_dir,
+                            out_path=target_out_path,
+                            source_oto_path=source_oto,
+                            alias_suffix=alias_suffix,
+                            language=lang,
+                            stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
+                            generation_mode="remap",
                             callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                         )
                     elif no_mfa_auto_mode:

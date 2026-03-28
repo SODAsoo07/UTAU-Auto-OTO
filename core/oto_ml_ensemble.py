@@ -61,6 +61,7 @@ from core.oto_ml_lightgbm import (
     _split_train_valid,
     load_lightgbm_bundle,
     predict_lightgbm_deltas,
+    predict_lightgbm_deltas_batch,
     train_lightgbm_bundle,
 )
 
@@ -238,16 +239,17 @@ def _ensure_mel_patch_keys(df, language: str):
 
 
 def _predict_lightgbm_frame(bundle: Dict[str, Any], df):
-    feature_names = list((bundle.get("schema") or {}).get("feature_names") or FEATURE_NAMES)
-    categorical = list((bundle.get("meta") or {}).get("categorical_features") or CATEGORICAL_FEATURES)
-    frame = df.copy()
-    for name in feature_names:
-        if name not in frame.columns:
-            frame[name] = "" if name in categorical else 0.0
-    frame = _prepare_frame(frame, feature_names, categorical)
-    out: Dict[str, List[float]] = {}
-    for target, model in (bundle.get("payload") or {}).get("models", {}).items():
-        out[target] = [float(v) for v in model.predict(frame)]
+    rows = df.to_dict("records")
+    preds = predict_lightgbm_deltas_batch(
+        bundle.get("payload"),
+        rows,
+        meta=bundle.get("meta"),
+        schema=bundle.get("schema"),
+    )
+    out: Dict[str, List[float]] = {target: [] for target in TARGET_NAMES}
+    for pred in preds:
+        for target in TARGET_NAMES:
+            out[target].append(float(pred.get(target, 0.0)))
     return out
 
 
@@ -799,6 +801,7 @@ def train_ensemble_bundle(
     coupled_epochs: int = 70,
     coupled_batch_size: int = 192,
     coupled_learning_rate: float = 1e-3,
+    coupled_device: str = "auto",
 ) -> Dict[str, Any]:
     _require_training_stack()
     if not dataset_csv or not os.path.exists(dataset_csv):
@@ -826,7 +829,7 @@ def train_ensemble_bundle(
     oof_rows: List[Dict[str, Any]] = []
     print(
         f"[ENSEMBLE] start format={format_type} rows={int(len(df))} folds={int(len(folds))} "
-        f"group={group_column} rawmel_cache={rawmel_cache_dir}"
+        f"group={group_column} rawmel_cache={rawmel_cache_dir} device={str(coupled_device or 'auto')}"
     )
 
     for fold_idx, (train_idx, valid_idx) in enumerate(folds):
@@ -865,6 +868,7 @@ def train_ensemble_bundle(
                 group_column=group_column,
                 alias_types=alias_types,
                 min_mapping_confidence=float(min_mapping_confidence),
+                device=str(coupled_device),
                 epochs=int(coupled_epochs),
                 batch_size=int(coupled_batch_size),
                 learning_rate=float(coupled_learning_rate),
@@ -876,7 +880,12 @@ def train_ensemble_bundle(
 
             coupled_meta = _load_json(os.path.join(coupled_dir, "model_meta.json"))
             coupled_schema = _load_json(os.path.join(coupled_dir, "feature_schema.json"))
-            coupled_payload = load_coupled_bundle(coupled_dir, meta=coupled_meta, schema=coupled_schema, device="auto")
+            coupled_payload = load_coupled_bundle(
+                coupled_dir,
+                meta=coupled_meta,
+                schema=coupled_schema,
+                device=str(coupled_device),
+            )
             coupled_bundle = _subbundle_info(coupled_dir, str(coupled_meta.get("backend", "") or ""), coupled_payload, coupled_meta, coupled_schema)
 
             lgb_preds = _predict_lightgbm_frame(lgb_bundle, valid_df)
@@ -939,6 +948,7 @@ def train_ensemble_bundle(
         group_column=group_column,
         alias_types=alias_types,
         min_mapping_confidence=float(min_mapping_confidence),
+        device=str(coupled_device),
         epochs=int(coupled_epochs),
         batch_size=int(coupled_batch_size),
         learning_rate=float(coupled_learning_rate),
@@ -967,6 +977,7 @@ def train_ensemble_bundle(
             "meta": "meta",
         },
         "coupled_backend": "coupled_nn_v2_rawmel",
+        "coupled_device": str(coupled_device or "auto"),
         "gating": {
             "min_coupled_confidence": 0.0,
             "mode": "confidence_blank_mapping_gate",

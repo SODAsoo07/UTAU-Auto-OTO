@@ -316,7 +316,7 @@ def _coupled_min_confidence_for_alias(
 
 
 def _coupled_strict_constraint() -> bool:
-    return _env_flag("UTOA_ML_COUPLED_STRICT_CONSTRAINT", False)
+    return _env_flag("UTOA_ML_COUPLED_STRICT_CONSTRAINT", True)
 
 
 def _kr_cv_keep_base_location_enabled() -> bool:

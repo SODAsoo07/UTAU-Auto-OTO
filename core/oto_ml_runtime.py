@@ -64,15 +64,16 @@ def _bundle_cache_stamp(model_dir: str, backend: str, coupled_device: str) -> tu
     backend_norm = str(backend or "").strip().lower()
     files_mtime = 0.0
     if backend_norm == "lightgbm":
-        # LightGBM bundles are split files (model_*.txt). Use max mtime across model files.
+        # LightGBM bundles are split files (model_*.txt). Include nested format-head models too.
         try:
-            for name in os.listdir(model_dir):
-                low = str(name).strip().lower()
-                if not low.startswith("model_"):
-                    continue
-                if not (low.endswith(".txt") or low.endswith(".json") or low.endswith(".pkl") or low.endswith(".pickle")):
-                    continue
-                files_mtime = max(files_mtime, _safe_mtime(os.path.join(model_dir, name)))
+            for dp, _dns, fns in os.walk(model_dir):
+                for name in fns:
+                    low = str(name).strip().lower()
+                    if not low.startswith("model_"):
+                        continue
+                    if not (low.endswith(".txt") or low.endswith(".json") or low.endswith(".pkl") or low.endswith(".pickle")):
+                        continue
+                    files_mtime = max(files_mtime, _safe_mtime(os.path.join(dp, name)))
         except Exception:
             files_mtime = max(files_mtime, 0.0)
     else:
@@ -204,6 +205,26 @@ def predict_oto_deltas(bundle: OtoModelBundle, feature_row: Dict[str, Any]) -> O
 def predict_oto_deltas_batch(bundle: OtoModelBundle, feature_rows: List[Dict[str, Any]]) -> List[OtoDeltaResult]:
     if not feature_rows:
         return []
+    if bundle.backend == "lightgbm":
+        from core.oto_ml_lightgbm import predict_lightgbm_deltas_batch
+
+        deltas_batch = predict_lightgbm_deltas_batch(
+            bundle.payload,
+            feature_rows,
+            meta=bundle.meta,
+            schema=bundle.feature_schema,
+        )
+        return [
+            OtoDeltaResult(
+                deltas=dict(deltas or {}),
+                backend=bundle.backend,
+                applied_model=bundle.model_dir,
+                confidence=None,
+                route=str(bundle.backend),
+                route_backend=str(bundle.backend),
+            )
+            for deltas in deltas_batch
+        ]
     if bundle.backend == "ensemble_v1":
         from core.oto_ml_ensemble import predict_ensemble_deltas_batch
 
