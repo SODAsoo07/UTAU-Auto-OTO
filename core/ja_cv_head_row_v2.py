@@ -153,6 +153,7 @@ def run_ja_cv_head_row(
         pre,
         current_w_idx,
         alias_text=alias,
+        format_type=format_type,
     )
     v_cov_start = n_start
     v_cov_end = n_end

@@ -312,6 +312,11 @@ def run_alignment_with_fallback(
             _emit(callback, "[Align] precheck failed but continuing with runtime attempt (soft gate).")
 
         mfa_exec = mfa_path or str(ready.get("mfa_path", "") or "")
+        if not str(mfa_exec or "").strip():
+            last_err = str(ready.get("message", "") or "mfa executable not found")
+            last_code = ALIGN_EXEC_MISSING
+            _emit(callback, "[Align] mfa executable is missing; skipping runtime attempt.")
+            continue
         profile_chain = _mfa_profile_chain(lang, mfa_align_profile)
         used_profile = ""
 

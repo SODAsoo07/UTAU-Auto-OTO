@@ -302,6 +302,14 @@ def guard_kr_vcv_pre_to_cv_boundary(
                     offset, consonant, cutoff, pre, ovl, new_offset=new_offset
                 )
 
+    # Keep pre-anchor locked to current onset as final priority.
+    pre_abs = float(offset) + float(pre)
+    if abs(pre_abs - onset_abs) > 6.0:
+        new_offset = onset_abs - float(pre)
+        offset, consonant, cutoff, pre, ovl = _shift_offset_preserve_absolute(
+            offset, consonant, cutoff, pre, ovl, new_offset=new_offset
+        )
+
     # Maintain consonant and cutoff around current vowel body.
     onset_rel = max(onset_abs - float(offset), float(pre))
     vowel_end_rel = max(vowel_end_abs - float(offset), onset_rel + 20.0)

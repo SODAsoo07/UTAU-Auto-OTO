@@ -32,6 +32,13 @@ COUPLED_BUNDLE_FILES = [
     "coupled_model.pt",
 ]
 
+AUTOFREE_BUNDLE_FILES = [
+    "target_schema.json",
+    "model_target_offset.txt",
+    "model_target_cutoff_abs.txt",
+    "model_confidence.txt",
+]
+
 ENSEMBLE_SUBDIRS = {
     "lightgbm": list(COMMON_BUNDLE_FILES) + list(LIGHTGBM_BUNDLE_FILES),
     "coupled": list(COMMON_BUNDLE_FILES) + list(COUPLED_BUNDLE_FILES),
@@ -56,9 +63,9 @@ def read_bundle_meta(model_dir: str) -> Dict[str, object]:
 def required_bundle_files_for_backend(backend: str, meta: Optional[Dict[str, object]] = None) -> List[str]:
     backend_norm = str(backend or "").strip().lower()
     if backend_norm == "autofree_v1":
-        raise ValueError("autofree bundle export is removed")
+        return list(COMMON_BUNDLE_FILES) + list(AUTOFREE_BUNDLE_FILES)
     if backend_norm in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
-        raise ValueError("coupled v1/v2 bundle export is no longer supported")
+        return list(COMMON_BUNDLE_FILES) + list(COUPLED_BUNDLE_FILES)
     if backend_norm == "ensemble_v1":
         required = list(COMMON_BUNDLE_FILES)
         for subdir in ("lightgbm", "coupled"):

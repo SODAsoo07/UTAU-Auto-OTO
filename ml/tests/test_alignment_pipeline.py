@@ -168,17 +168,22 @@ class AlignmentPipelineTests(unittest.TestCase):
             dict_path = os.path.join(td, "dictionary.txt")
             with open(dict_path, "w", encoding="utf-8") as handle:
                 handle.write("a a\n")
-            result = run_alignment_with_fallback(
-                language="korean",
-                wav_folder=td,
-                dictionary_path=dict_path,
-                output_folder=os.path.join(td, "textgrids"),
-                primary_aligner="mfa",
-                fallback_aligner="",
-                mfa_path="",
-                mfa_align_profile="default",
-                callback=None,
-            )
+            with mock.patch(
+                "core.alignment_pipeline.check_mfa_ready",
+                return_value={"code": ALIGN_EXEC_MISSING, "message": "missing executable", "mfa_path": ""},
+            ) as mocked_ready:
+                result = run_alignment_with_fallback(
+                    language="korean",
+                    wav_folder=td,
+                    dictionary_path=dict_path,
+                    output_folder=os.path.join(td, "textgrids"),
+                    primary_aligner="mfa",
+                    fallback_aligner="",
+                    mfa_path="",
+                    mfa_align_profile="default",
+                    callback=None,
+                )
+        mocked_ready.assert_called_once()
         self.assertFalse(bool(result.get("ok", True)))
         self.assertEqual(str(result.get("code", "")), ALIGN_EXEC_MISSING)
 

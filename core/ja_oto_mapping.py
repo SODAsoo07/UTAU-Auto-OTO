@@ -1,4 +1,4 @@
-"""
+﻿"""
 Japanese OTO mapping / format detection helpers.
 
 This module isolates alias classification, syllable token normalization,
@@ -42,7 +42,7 @@ def _normalize_custom_alias_lookup(alias):
     variants = [text, text.lower()]
     stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:#|b)?[0-8])$", "", text, flags=re.IGNORECASE)
     stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:sharp|flat)?[0-8])$", "", stripped, flags=re.IGNORECASE)
-    stripped = re.sub(r"\s*[\(\[\{（【].*?[\)\]\}）】]\s*$", "", stripped).strip()
+    stripped = re.sub(r"\s*[\(\[\{・医疹.*?[\)\]\}・峨曽\s*$", "", stripped).strip()
     if stripped:
         variants.extend([stripped, stripped.lower()])
     out = []
@@ -71,12 +71,31 @@ def is_breath(alias):
     clean = unicodedata.normalize("NFKC", str(alias or "")).strip().lower()
     if not clean:
         return False
-    if re.match(r'^br\d*$', clean):
+    parts = [p for p in clean.split() if p]
+    if len(parts) >= 2 and _is_ja_vowel_token(parts[0]) and parts[-1] in {"r", "h", "・", "·"}:
+        # Tail markers in VC aliases should not be treated as standalone breath aliases.
+        return False
+    if re.match(r"^br\d*$", clean):
         return True
-    if clean in {"bre", "breath", "息", "吸", "吐", "吸い", "吐き", "息継ぎ"}:
+    if clean in {
+        "bre",
+        "breath",
+        "breathy",
+        "inhale",
+        "exhale",
+        "aspirate",
+        "諱ｯ",
+        "蜷ｸ",
+        "蜷・",
+        "蜷ｸ縺・",
+        "蜷舌″",
+        "諱ｯ邯吶℃",
+    }:
         return True
-    # Some banks annotate inhale/exhale variants like 吸こ吐, 吸き吐.
-    if any(ch in clean for ch in ("吸", "吐", "息")):
+    # Some banks annotate inhale/exhale variants like 蜷ｸ縺灘瑞, 蜷ｸ縺榊瑞.
+    if any(ch in clean for ch in ("蜷ｸ", "蜷・", "諱ｯ")) and not (
+        len(parts) >= 2 and _is_ja_vowel_token(parts[0])
+    ):
         return True
     return False
 
@@ -110,13 +129,13 @@ def _classify_ja_alias_core(clean, custom_map=None):
         parts = clean.split()
         left = parts[0]
         right = ' '.join(parts[1:])
-        if left == '-':
+        if left in {'-', '・', '·'}:
             return 'cv_head'
         left_is_vowel = _is_ja_vowel_token(left)
         if left_is_vowel:
             if right.strip() == '-':
                 return 'vv'
-            if re.fullmatch(r"^[^0-9A-Za-z぀-ヿㇰ-ㇿ]+$", right.strip()):
+            if right.strip() and not any(ch.isalnum() for ch in right.strip()):
                 return 'vc'
             if right.lower() in JA_CONSONANTS:
                 return 'vc'
@@ -131,6 +150,8 @@ def _classify_ja_alias_core(clean, custom_map=None):
     if _is_ja_vowel_token(clean) or clean == '-':
         return 'mono'
     clean_lower = clean.lower()
+    if re.fullmatch(r"[aeiou][・·]", clean_lower):
+        return 'vc'
     for v in JA_VOWELS:
         if clean_lower.startswith(v) and len(clean_lower) > len(v):
             tail = clean_lower[len(v):]
@@ -198,7 +219,7 @@ def _normalize_ja_syllable_token(token):
     if not t_raw:
         return ''
     t = t_raw.lower()
-    if re.search(r'[ぁ-ゖァ-ヺー]', t_raw):
+    if re.search(r'[縺・繧悶ぃ-繝ｺ繝ｼ]', t_raw):
         syls = parse_ja_filename(t_raw)
         if syls:
             t = syls[0].lower()
@@ -351,8 +372,8 @@ def _extract_ja_cv_targets_from_lines(lines, custom_map=None):
         if tok:
             targets.append(tok)
     # IMPORTANT:
-    # VCV/CVVC에서는 연속 중복 음절(예: ma ma mi..., ra ra ri...) 자체가
-    # 실제 매핑 순서를 결정하므로, 여기서 중복을 제거하면 1칸 밀림이 발생한다.
+    # VCV/CVVC・川・・・・ｰ・・・瀧ｳｵ ・護・・・ ma ma mi..., ra ra ri...) ・川ｲｴ・
+    # ・､・・・､﨑・・懍・・ｼ ・ｰ・倣葺・・・ ・ｬ・ｰ・・・瀧ｳｵ・・・懋ｱｰ﨑俯ｩｴ 1・ｸ ・・ｼ・ｴ ・懍・﨑罹共.
     return targets if targets else []
 
 
@@ -428,7 +449,7 @@ def _score_ja_syllable_mapping(candidate_infos, cv_targets):
             x = float(v)
         except Exception:
             return None
-        # TextGrid sec 기반이면 ms로 변환
+        # TextGrid sec ・ｰ・們擽・ｴ ms・・・嶹・
         return x * 1000.0 if abs(x) < 60.0 else x
 
     anchor_ms = []
@@ -454,7 +475,7 @@ def _score_ja_syllable_mapping(candidate_infos, cv_targets):
                 cur = _vcv_syllable_match_score(tgt, cand[j])
                 vals.append(cur)
                 idxs.append(j)
-                # 이웃보다 현재 점수가 많이 낮으면 한 칸 밀림 가능성이 높다.
+                # ・ｴ・・ｳｴ・､ 嶸・椪 ・川・・ ・珠擽 ・ｮ・ｼ・ｴ 﨑・・ｸ ・・ｼ ・・･・ｱ・ｴ ・庭共.
                 neighbor_best = cur
                 if j > 0:
                     neighbor_best = max(neighbor_best, _vcv_syllable_match_score(tgt, cand[j - 1]))
@@ -469,7 +490,7 @@ def _score_ja_syllable_mapping(candidate_infos, cv_targets):
         length_penalty = abs(len(cand) - len(targets)) * 4.0
         shift_penalty = abs(int(shift)) * 7.0
 
-        # 순서 일관성 패널티: 시간축 역행/급점프를 감점.
+        # ・懍・ ・ｼ・・ｱ 甯ｨ・戦恐: ・懋ｰ・ｶ・・ｭ嵂・・餓戦売・ｼ ・川・
         order_penalty = 0.0
         if idxs:
             prev_t = None
@@ -586,7 +607,7 @@ def _ja_mark_to_vowel(mark):
     clean = re.sub(r"[0-9]", "", (mark or "").strip().lower())
     if not clean:
         return ""
-    if clean in {"n", "ɴ", "m", "nn", "xn", "ng", "ngy"}:
+    if clean in {"n", "ﾉｴ", "m", "nn", "xn", "ng", "ngy"}:
         return "n"
     if clean in {"a", "i", "e", "o"}:
         return clean
@@ -811,7 +832,7 @@ def _ja_special_mora_class(token):
         return "nasal"
     if raw in {"q", "cl", "xtu", "xtsu", "ltsu", "ltu"} or norm in {"q", "cl", "xtu", "xtsu", "ltsu", "ltu"}:
         return "geminate"
-    if raw in {"-", "ー", "long"}:
+    if raw in {"-", "繝ｼ", "long"}:
         return "long"
     onset, vowel = split_ja_romaji_syllable(norm)
     if onset and any(ch in {"y", "w"} for ch in onset[1:]):
@@ -885,8 +906,8 @@ def _select_vcv_syllable_index(alias, expected_idx, syllables_info):
     best_gain = best_score - expected_score
     if best_gain < 20:
         return e
-    # VCV는 한 칸 전진을 매우 보수적으로 허용한다.
-    # 다음 칸이 "정확히 target 토큰"이고 현재 expected가 target이 아닐 때만 전진.
+    # VCV・・﨑・・ｸ ・・ｧ・揆 ・､・ｰ ・ｴ・們・愍・・嵭溢圸﨑罹共.
+    # ・､・・・ｸ・ｴ "・倣剳德・target 奝增ｰ"・ｴ・ 嶸・椪 expected・ target・ｴ ・・巨 ・誤ｧ・・・ｧ・
     cand_tok = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[best_idx]))
     exp_tok = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[e]))
     tgt_tok = _normalize_ja_syllable_token(target)
@@ -1024,3 +1045,4 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
                 return e
         return best_idx
     return e
+

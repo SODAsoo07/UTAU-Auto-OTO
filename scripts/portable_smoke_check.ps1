@@ -105,7 +105,11 @@ if (Test-Path -LiteralPath $appExe) {
 if (Test-Path -LiteralPath $setupMfa) {
     try {
         $setupText = Get-Content -LiteralPath $setupMfa -Raw
-        $probeReady = $setupText -match "importlib\.util,jamo" -and $setupText -match "find_spec\(m\)\s+is\s+not\s+None"
+        $probeReady = (
+            $setupText -match ":check_korean_tokenizer_ready" -and
+            $setupText -match "find_spec\('jamo'\)" -and
+            $setupText -match "backends=\('mecab','mecab_ko','MeCab'\)"
+        )
         Add-Check -Name "setup_mfa_tokenizer_probe_contains_importlib_util" -Passed $probeReady -Value $setupMfa -Required $true
     } catch {
         Add-Check -Name "setup_mfa_tokenizer_probe_contains_importlib_util" -Passed $false -Value $setupMfa -Detail $_.Exception.Message -Required $true

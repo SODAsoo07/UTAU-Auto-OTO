@@ -119,9 +119,6 @@ def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
     if not meta:
         return None
     backend = str(meta.get("backend", "")).strip().lower() or "lightgbm"
-    if backend == "autofree_v1":
-        logger.warning("Autofree backend is removed from runtime correction support: %s", model_dir)
-        return None
     schema = _load_json(os.path.join(abs_model_dir, "feature_schema.json"))
     if not schema:
         from core.oto_ml_features import get_feature_schema
@@ -139,6 +136,19 @@ def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
             from core.oto_ml_lightgbm import load_lightgbm_bundle
 
             payload = load_lightgbm_bundle(abs_model_dir, meta=meta, schema=schema)
+        elif backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
+            from core.oto_ml_coupled import load_coupled_bundle
+
+            payload = load_coupled_bundle(
+                abs_model_dir,
+                meta=meta,
+                schema=schema,
+                device=coupled_device,
+            )
+        elif backend == "autofree_v1":
+            from core.oto_ml_autofree import load_autofree_bundle
+
+            payload = load_autofree_bundle(abs_model_dir, meta=meta, schema=schema)
         elif backend == "ensemble_v1":
             from core.oto_ml_ensemble import load_ensemble_bundle
 
@@ -176,6 +186,31 @@ def predict_oto_deltas(bundle: OtoModelBundle, feature_row: Dict[str, Any]) -> O
         from core.oto_ml_lightgbm import predict_lightgbm_deltas
 
         deltas = predict_lightgbm_deltas(bundle.payload, feature_row, meta=bundle.meta, schema=bundle.feature_schema)
+    elif bundle.backend in {"coupled_nn_v1", "coupled_nn_v2_rawmel"}:
+        from core.oto_ml_coupled import predict_coupled_deltas
+
+        deltas, confidence = predict_coupled_deltas(
+            bundle.payload,
+            feature_row,
+            meta=bundle.meta,
+            schema=bundle.feature_schema,
+        )
+    elif bundle.backend == "autofree_v1":
+        from core.oto_ml_autofree import predict_autofree_abs
+
+        result = predict_autofree_abs(
+            bundle.payload,
+            feature_row,
+            meta=bundle.meta,
+            schema=bundle.feature_schema,
+        )
+        result = dict(result or {})
+        if "deltas" in result and isinstance(result.get("deltas"), dict):
+            deltas = dict(result.get("deltas") or {})
+            confidence = result.get("confidence")
+        else:
+            confidence = result.pop("confidence", None)
+            deltas = dict(result)
     elif bundle.backend == "ensemble_v1":
         from core.oto_ml_ensemble import predict_ensemble_deltas
 

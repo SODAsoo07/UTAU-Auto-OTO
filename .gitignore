@@ -85,3 +85,5 @@ models_installed/
 *.tar.gz
 /micromamba
 /.env_ctc
+/.venv_build
+/_tmp_smoke_check

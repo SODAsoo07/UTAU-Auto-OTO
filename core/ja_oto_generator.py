@@ -1134,6 +1134,516 @@ def _estimate_ja_mapping_confidence(
     return float(conf), float(margin)
 
 
+def recompute_common_plan_runtime_state(
+    *,
+    build_plan_context_fn,
+    plan_context_kwargs,
+    ingest_snapshot,
+    mapping_confidence,
+    mapping_margin,
+    conf_threshold,
+    format_type,
+    score_a,
+    score_b,
+    sequence_lock_formats,
+    abstain_formats,
+    strict_formats=None,
+    prefer_sequence=False,
+    alignment_trust=1.0,
+    resolve_runtime_mapping_policy_fn=resolve_runtime_mapping_policy,
+):
+    """
+    Backward-compatible helper used by unit tests.
+    Newer runtime paths inline this logic, but tests still monkeypatch this symbol.
+    """
+    plan_state = build_plan_context_fn(**dict(plan_context_kwargs or {}))
+    cv_plan = dict((plan_state or {}).get("cv_plan") or {})
+    planned_indices = (plan_state or {}).get("planned_indices")
+    anchor_graph = (plan_state or {}).get("anchor_graph")
+    plan_policy = dict((plan_state or {}).get("plan_policy") or {})
+
+    runtime_policy = resolve_runtime_mapping_policy_fn(
+        ingest_snapshot=ingest_snapshot,
+        plan_policy=plan_policy,
+        mapping_confidence=float(mapping_confidence),
+        mapping_margin=float(mapping_margin),
+        conf_threshold=float(conf_threshold),
+        format_type=format_type,
+        score_a=float(score_a),
+        score_b=float(score_b),
+        sequence_lock_formats=set(sequence_lock_formats or set()),
+        abstain_formats=set(abstain_formats or set()),
+        strict_formats=set(strict_formats or set()),
+        prefer_sequence=bool(prefer_sequence),
+        alignment_trust=float(alignment_trust),
+    )
+    runtime_policy = dict(runtime_policy or {})
+    out_conf = float(runtime_policy.get("mapping_confidence", mapping_confidence))
+    out_margin = float(runtime_policy.get("mapping_margin", mapping_margin))
+    out_tier = str(runtime_policy.get("mapping_tier") or "low")
+    return {
+        "cv_plan": cv_plan,
+        "planned_indices": planned_indices,
+        "anchor_graph": anchor_graph,
+        "plan_policy": plan_policy,
+        "runtime_policy": runtime_policy,
+        "mapping_confidence": out_conf,
+        "mapping_margin": out_margin,
+        "mapping_tier": out_tier,
+    }
+
+
+def _select_ja_mapping_candidate_with_guards(
+    *,
+    mapping_candidates,
+    format_type,
+    forced_words_mapping,
+    phone_quality,
+    words_tier_confidence,
+    conf_th,
+    cv_targets,
+    low_phone_quality,
+    debug_reason_logging,
+    log_fn,
+    fname,
+):
+    selected_candidate, mapping_reason_code, candidate_by_name = select_primary_mapping_candidate(
+        mapping_candidates,
+        format_type=format_type,
+        forced_words_mapping=forced_words_mapping,
+        alias_candidate_name="alias_phone_fallback",
+    )
+    alias_candidate = (candidate_by_name or {}).get("alias_phone_fallback")
+    if not selected_candidate:
+        return selected_candidate, mapping_reason_code, candidate_by_name, alias_candidate
+
+    provisional_conf, _ = _estimate_ja_mapping_confidence(
+        phone_quality,
+        words_score=selected_candidate.get("score", 0.0),
+        alias_score=(alias_candidate.get("score", -1.0) if alias_candidate else -1.0),
+        used_filename_based=selected_candidate.get("use_filename", False),
+        used_alias_based=selected_candidate.get("use_alias", False),
+        forced_words_mapping=forced_words_mapping,
+        syllable_confidences=selected_candidate.get("syllable_confidences", []),
+        words_align_score=selected_candidate.get("words_align_score"),
+        words_tier_confidence=words_tier_confidence,
+    )
+
+    if (
+        alias_candidate
+        and alias_candidate is not selected_candidate
+        and not (str(format_type or "").strip().lower() in {"cvvc", "cv"} and selected_candidate.get("lock_order"))
+        and provisional_conf >= float(conf_th)
+    ):
+        selected_candidate, promoted = maybe_promote_alias_candidate(
+            selected_candidate=selected_candidate,
+            alias_candidate=alias_candidate,
+            provisional_conf=provisional_conf,
+            conf_threshold=conf_th,
+            format_type=format_type,
+        )
+        if promoted:
+            selected_candidate = alias_candidate
+            mapping_reason_code = "alias_recover"
+
+    if (
+        str(format_type or "").strip().lower() == "cvvc"
+        and alias_candidate
+        and alias_candidate is not selected_candidate
+    ):
+        force_alias, force_reason, youon_mismatch_ratio = _should_force_alias_for_ja_cvvc(
+            selected_candidate=selected_candidate,
+            alias_candidate=alias_candidate,
+            cv_targets=cv_targets,
+            low_phone_quality=low_phone_quality,
+        )
+        if force_alias:
+            selected_candidate = alias_candidate
+            mapping_reason_code = force_reason
+            if debug_reason_logging:
+                log_fn(
+                    f"🧭 {fname}: CVVC 보수 전환 "
+                    f"(reason={force_reason}, youon_mismatch={youon_mismatch_ratio:.2f})"
+                )
+
+    return selected_candidate, mapping_reason_code, candidate_by_name, alias_candidate
+
+
+def _derive_ja_selected_candidate_state(
+    *,
+    selected_candidate,
+    format_type,
+    mel_ctx_for_file,
+    textgrid_trust_score,
+):
+    if selected_candidate:
+        syllables_info = list(selected_candidate.get("infos") or [])
+        used_filename_based = bool(selected_candidate.get("use_filename"))
+        used_alias_based = bool(selected_candidate.get("use_alias"))
+        filename_order_locked = bool(
+            selected_candidate.get("lock_order")
+            and str(format_type or "").strip().lower() in {"cvvc", "cv"}
+        )
+        base_score = float(selected_candidate.get("score", -1.0))
+        syllable_confidence_by_idx = list(selected_candidate.get("syllable_confidences", []) or [])
+        if mel_ctx_for_file:
+            _annotate_ja_syllable_mel_confidence(syllables_info, mel_ctx_for_file)
+    else:
+        syllables_info = []
+        used_filename_based = False
+        used_alias_based = False
+        filename_order_locked = False
+        base_score = -1.0
+        syllable_confidence_by_idx = []
+
+    blank_conf_mean = 0.0
+    if syllables_info:
+        blank_vals = [
+            float(s.get("blank_confidence", 0.0) or 0.0)
+            for s in (syllables_info or [])
+            if isinstance(s, dict)
+        ]
+        if blank_vals:
+            blank_conf_mean = sum(blank_vals) / float(len(blank_vals))
+    alignment_weight = _clamp01(
+        (float(textgrid_trust_score) * 0.85) - max(0.0, blank_conf_mean - 0.45) * 0.35
+    )
+    anchor_lock_lite = bool(alignment_weight < 0.58 or blank_conf_mean >= 0.55)
+    return {
+        "syllables_info": syllables_info,
+        "used_filename_based": used_filename_based,
+        "used_alias_based": used_alias_based,
+        "filename_order_locked": filename_order_locked,
+        "base_score": base_score,
+        "syllable_confidence_by_idx": syllable_confidence_by_idx,
+        "blank_conf_mean": float(blank_conf_mean),
+        "alignment_weight": float(alignment_weight),
+        "anchor_lock_lite": bool(anchor_lock_lite),
+    }
+
+
+def _should_enable_ja_cvvc_mel_plan(
+    *,
+    format_type,
+    mel_ctx_for_file,
+    syllables_info,
+    textgrid_trust_tier,
+    low_phone_quality,
+    blank_conf_mean,
+    alignment_weight,
+    syllable_confidence_by_idx,
+):
+    if str(format_type or "").strip().lower() != "cvvc" or not mel_ctx_for_file or not syllables_info:
+        return False
+    if (
+        textgrid_trust_tier != "high"
+        or low_phone_quality
+        or float(blank_conf_mean) >= 0.45
+        or float(alignment_weight) < 0.65
+    ):
+        return _env_bool("UTOA_JA_CVVC_MEL_PLAN", True)
+    _mean_conf, min_conf, low_ratio = _summarize_ja_syllable_confidences(syllable_confidence_by_idx)
+    if min_conf < 0.54 or low_ratio > 0.30 or float(blank_conf_mean) >= 0.45:
+        return _env_bool("UTOA_JA_CVVC_MEL_PLAN", True)
+    return False
+
+
+def _build_ja_plan_context(
+    *,
+    planned_cv_source,
+    sinsy_label_entries,
+    syllables_info,
+    format_type,
+    textgrid_trust_tier,
+    low_phone_quality,
+    blank_conf_mean,
+    alignment_weight,
+    syllable_confidence_by_idx,
+    mel_ctx_for_file,
+    prefer_filename_sequence,
+):
+    planned_cv_source = list(planned_cv_source or [])
+    sinsy_label_entries = list(sinsy_label_entries or [])
+    ja_cv_plan = {"indices": None, "meta": {}, "source": ""}
+
+    if planned_cv_source and sinsy_label_entries:
+        ja_cv_plan = build_sinsy_guided_anchor_plan(
+            expected_tokens=planned_cv_source,
+            syllables_info=syllables_info,
+            label_entries=sinsy_label_entries,
+            normalize_expected_fn=_normalize_ja_syllable_token,
+            normalize_label_fn=_normalize_ja_syllable_token,
+            label_match_score_fn=lambda target, label: float(
+                int(_ja_soft_cv_match_level(target, label) or 0) * 42.0
+            ),
+        )
+    if not ja_cv_plan.get("indices"):
+        use_mel_plan = _should_enable_ja_cvvc_mel_plan(
+            format_type=format_type,
+            mel_ctx_for_file=mel_ctx_for_file,
+            syllables_info=syllables_info,
+            textgrid_trust_tier=textgrid_trust_tier,
+            low_phone_quality=low_phone_quality,
+            blank_conf_mean=blank_conf_mean,
+            alignment_weight=alignment_weight,
+            syllable_confidence_by_idx=syllable_confidence_by_idx,
+        )
+        ja_cv_plan = (
+            _build_ja_cv_anchor_plan_v2(planned_cv_source, syllables_info, use_mel=bool(use_mel_plan))
+            if planned_cv_source
+            else {"indices": None, "meta": {}}
+        )
+
+    ja_planned_cv_indices = ja_cv_plan.get("indices")
+    ja_anchor_graph = build_adjacent_anchor_graph(ja_planned_cv_indices)
+    ja_plan_policy = resolve_plan_policy(
+        alignment_trust=alignment_weight,
+        plan_meta=ja_cv_plan.get("meta"),
+        expected_count=len(planned_cv_source),
+        planned_count=len(ja_planned_cv_indices or []),
+        format_type=format_type,
+        prefer_sequence=bool(prefer_filename_sequence),
+    )
+    return {
+        "cv_plan": dict(ja_cv_plan or {}),
+        "planned_indices": ja_planned_cv_indices,
+        "anchor_graph": ja_anchor_graph,
+        "plan_policy": dict(ja_plan_policy or {}),
+    }
+
+
+def _recompute_ja_runtime_state(
+    *,
+    alignment_ingest,
+    conf_th,
+    format_type,
+    base_score,
+    alt_score,
+    phone_quality,
+    used_filename_based,
+    used_alias_based,
+    forced_words_mapping,
+    syllable_confidence_by_idx,
+    words_align_score,
+    words_tier_confidence,
+    planned_cv_source,
+    sinsy_label_entries,
+    syllables_info,
+    textgrid_trust_tier,
+    low_phone_quality,
+    blank_conf_mean,
+    alignment_weight,
+    mel_ctx_for_file,
+    prefer_filename_sequence,
+):
+    mapping_confidence_base, mapping_margin = _estimate_ja_mapping_confidence(
+        phone_quality,
+        words_score=base_score,
+        alias_score=alt_score,
+        used_filename_based=used_filename_based,
+        used_alias_based=used_alias_based,
+        forced_words_mapping=forced_words_mapping,
+        syllable_confidences=syllable_confidence_by_idx,
+        words_align_score=words_align_score,
+        words_tier_confidence=words_tier_confidence,
+    )
+    runtime_state = recompute_common_plan_runtime_state(
+        build_plan_context_fn=_build_ja_plan_context,
+        plan_context_kwargs={
+            "planned_cv_source": planned_cv_source,
+            "sinsy_label_entries": sinsy_label_entries,
+            "syllables_info": syllables_info,
+            "format_type": format_type,
+            "textgrid_trust_tier": textgrid_trust_tier,
+            "low_phone_quality": low_phone_quality,
+            "blank_conf_mean": blank_conf_mean,
+            "alignment_weight": alignment_weight,
+            "syllable_confidence_by_idx": syllable_confidence_by_idx,
+            "mel_ctx_for_file": mel_ctx_for_file,
+            "prefer_filename_sequence": prefer_filename_sequence,
+        },
+        ingest_snapshot=alignment_ingest,
+        mapping_confidence=mapping_confidence_base,
+        mapping_margin=mapping_margin,
+        conf_threshold=conf_th,
+        format_type=format_type,
+        score_a=base_score,
+        score_b=alt_score,
+        sequence_lock_formats={"cvvc", "cv"},
+        abstain_formats={"cvvc", "vcv", "cv"},
+        strict_formats={"cvvc"},
+        prefer_sequence=prefer_filename_sequence,
+        alignment_trust=alignment_weight,
+        resolve_runtime_mapping_policy_fn=resolve_runtime_mapping_policy,
+    )
+    cv_plan = dict(runtime_state.get("cv_plan") or {})
+    planned_indices = runtime_state.get("planned_indices")
+    anchor_graph = runtime_state.get("anchor_graph")
+    plan_policy = dict(runtime_state.get("plan_policy") or {})
+    runtime_policy = dict(runtime_state.get("runtime_policy") or {})
+    mapping_confidence_base = float(runtime_state.get("mapping_confidence", mapping_confidence_base))
+    mapping_margin = float(runtime_state.get("mapping_margin", mapping_margin))
+    mapping_tier = str(runtime_state.get("mapping_tier") or runtime_policy.get("mapping_tier") or "low")
+    return {
+        "mapping_confidence_base": float(mapping_confidence_base),
+        "mapping_margin": float(mapping_margin),
+        "mapping_tier": str(mapping_tier),
+        "cv_plan": cv_plan,
+        "planned_indices": planned_indices,
+        "ja_cv_plan": cv_plan,
+        "ja_planned_cv_indices": planned_indices,
+        "ja_anchor_graph": anchor_graph,
+        "ja_plan_policy": plan_policy,
+        "runtime_policy": runtime_policy,
+        "sequence_lock_applied": False,
+        "sequence_lock_reason": "",
+    }
+
+
+def _log_ja_mapping_selection(
+    *,
+    log_fn,
+    fname,
+    selected_candidate,
+    mapping_reason_code,
+    filename_syllable_count,
+    cv_target_count,
+    phone_interval_count,
+    word_interval_count,
+    spn_ratio,
+    base_score,
+    alt_score,
+    alignment_weight,
+    blank_conf_mean,
+    anchor_lock_lite,
+):
+    if selected_candidate:
+        c_name = str((selected_candidate or {}).get("name") or "")
+        log_fn(
+            f"🧭 {fname}: candidate={c_name}, reason={mapping_reason_code}, "
+            f"filename={int(filename_syllable_count)}, targets={int(cv_target_count)}, "
+            f"phones={int(phone_interval_count)}, words={int(word_interval_count)}, "
+            f"spn_ratio={float(spn_ratio):.2f}, base={float(base_score):.1f}, alt={float(alt_score):.1f}"
+        )
+    log_fn(
+        f"🧭 {fname}: alignment_weight={float(alignment_weight):.2f}, "
+        f"blank_mean={float(blank_conf_mean):.2f}, anchor_lock_lite={bool(anchor_lock_lite)}"
+    )
+
+
+def _apply_ja_force_sequence_lock_fallback(
+    *,
+    runtime_policy,
+    filename_order_locked,
+    candidate_by_name,
+    selected_candidate,
+    format_type,
+    mel_ctx_for_file,
+    textgrid_trust_score,
+    phone_quality,
+    base_score,
+    alt_score,
+    forced_words_mapping,
+    words_tier_confidence,
+    planned_cv_source,
+    sinsy_label_entries,
+    textgrid_trust_tier,
+    low_phone_quality,
+    alignment_ingest,
+    conf_th,
+    fname,
+    log_fn,
+):
+    if (not bool((runtime_policy or {}).get("force_sequence_lock"))) or bool(filename_order_locked):
+        return None
+    fallback_candidate = (candidate_by_name or {}).get("filename_linear_fallback") or (candidate_by_name or {}).get("filename_token")
+    if fallback_candidate is None or fallback_candidate is selected_candidate:
+        return None
+
+    selected_candidate = fallback_candidate
+    selected_state = _derive_ja_selected_candidate_state(
+        selected_candidate=selected_candidate,
+        format_type=format_type,
+        mel_ctx_for_file=mel_ctx_for_file,
+        textgrid_trust_score=textgrid_trust_score,
+    )
+    syllables_info = list(selected_state.get("syllables_info") or [])
+    used_filename_based = bool(selected_state.get("used_filename_based"))
+    used_alias_based = bool(selected_state.get("used_alias_based"))
+    filename_order_locked = True
+    base_score = float(selected_candidate.get("score", base_score))
+    syllable_confidence_by_idx = list(selected_state.get("syllable_confidence_by_idx") or [])
+    blank_conf_mean = float(selected_state.get("blank_conf_mean", 0.0))
+    alignment_weight = float(selected_state.get("alignment_weight", 0.0))
+    anchor_lock_lite = bool(selected_state.get("anchor_lock_lite", False))
+    mapping_reason_code = (
+        "filename_linear_low_conf"
+        if selected_candidate.get("name") == "filename_linear_fallback"
+        else "filename_low_conf"
+    )
+
+    runtime_state = _recompute_ja_runtime_state(
+        alignment_ingest=alignment_ingest,
+        conf_th=conf_th,
+        format_type=format_type,
+        base_score=base_score,
+        alt_score=alt_score,
+        phone_quality=phone_quality,
+        used_filename_based=used_filename_based,
+        used_alias_based=used_alias_based,
+        forced_words_mapping=forced_words_mapping,
+        syllable_confidence_by_idx=syllable_confidence_by_idx,
+        words_align_score=selected_candidate.get("words_align_score"),
+        words_tier_confidence=words_tier_confidence,
+        planned_cv_source=planned_cv_source,
+        sinsy_label_entries=sinsy_label_entries,
+        syllables_info=syllables_info,
+        textgrid_trust_tier=textgrid_trust_tier,
+        low_phone_quality=low_phone_quality,
+        blank_conf_mean=blank_conf_mean,
+        alignment_weight=alignment_weight,
+        mel_ctx_for_file=mel_ctx_for_file,
+        prefer_filename_sequence=True,
+    )
+    mapping_confidence_base = float(runtime_state.get("mapping_confidence_base", 0.0))
+    mapping_margin = float(runtime_state.get("mapping_margin", 0.0))
+    mapping_tier = str(runtime_state.get("mapping_tier") or "low")
+    runtime_policy = dict(runtime_state.get("runtime_policy") or {})
+    runtime_policy["sequence_lock_applied"] = True
+    runtime_policy["sequence_lock_reason"] = "filename_low_conf_fallback"
+    log_fn(
+        f"🧭 {fname}: 일본어 TextGrid 신뢰도 {str(textgrid_trust_tier).upper()} "
+        f"(conf={mapping_confidence_base:.2f}, trust={float(textgrid_trust_score):.2f}, "
+        f"weight={alignment_weight:.2f}) "
+        f"→ 파일명 기준 매핑 고정"
+    )
+    return {
+        "selected_candidate": selected_candidate,
+        "syllables_info": syllables_info,
+        "used_filename_based": used_filename_based,
+        "used_alias_based": used_alias_based,
+        "filename_order_locked": filename_order_locked,
+        "base_score": float(base_score),
+        "syllable_confidence_by_idx": syllable_confidence_by_idx,
+        "blank_conf_mean": float(blank_conf_mean),
+        "alignment_weight": float(alignment_weight),
+        "anchor_lock_lite": bool(anchor_lock_lite),
+        "mapping_reason_code": mapping_reason_code,
+        "mapping_confidence_base": float(mapping_confidence_base),
+        "mapping_margin": float(mapping_margin),
+        "mapping_tier": str(mapping_tier),
+        "cv_plan": dict(runtime_state.get("cv_plan") or {}),
+        "planned_indices": runtime_state.get("planned_indices"),
+        "ja_cv_plan": dict(runtime_state.get("ja_cv_plan") or runtime_state.get("cv_plan") or {}),
+        "ja_planned_cv_indices": runtime_state.get("ja_planned_cv_indices", runtime_state.get("planned_indices")),
+        "ja_anchor_graph": runtime_state.get("ja_anchor_graph"),
+        "ja_plan_policy": dict(runtime_state.get("ja_plan_policy") or {}),
+        "runtime_policy": runtime_policy,
+        "sequence_lock_applied": True,
+        "sequence_lock_reason": "filename_low_conf_fallback",
+    }
+
+
 def _should_allow_ja_soft_forward_shift(target_tok, expected_tok, mapped_tok):
     return _should_allow_ja_soft_forward_shift_v2(target_tok, expected_tok, mapped_tok)
 
@@ -3829,7 +4339,7 @@ def generate_ja_oto(
                                 expected_idx,
                                 syllables_info,
                                 search_back=0,
-                                search_fwd=2,
+                                search_fwd=(1 if format_type == "cv" else 2),
                             )
                             if resync_idx is None:
                                 resync_idx = _find_ja_cv_vowel_match_index(
@@ -3865,7 +4375,7 @@ def generate_ja_oto(
                                     expected_idx,
                                     syllables_info,
                                     search_back=(2 if format_type == 'vcv' else 1),
-                                    search_fwd=(3 if format_type == 'vcv' else 2),
+                                    search_fwd=(3 if format_type == 'vcv' else 1 if format_type == 'cv' else 2),
                                 )
                                 if fixed_idx is not None:
                                     mapped_idx = fixed_idx
@@ -4175,7 +4685,7 @@ def generate_ja_oto(
                                 expected_idx,
                                 syllables_info,
                                 search_back=0,
-                                search_fwd=2,
+                                search_fwd=(1 if format_type == "cv" else 2),
                             )
                             if resync_idx is None:
                                 resync_idx = _find_ja_cv_vowel_match_index(
@@ -4211,7 +4721,7 @@ def generate_ja_oto(
                                     expected_idx,
                                     syllables_info,
                                     search_back=(2 if format_type == 'vcv' else 1),
-                                    search_fwd=(3 if format_type == 'vcv' else 2),
+                                    search_fwd=(3 if format_type == 'vcv' else 1 if format_type == 'cv' else 2),
                                 )
                                 if fixed_idx is not None:
                                     mapped_idx = fixed_idx

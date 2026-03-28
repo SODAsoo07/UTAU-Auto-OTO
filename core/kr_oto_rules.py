@@ -1,9 +1,9 @@
-"""
-한국어 OTO 생성에서 공통으로 쓰는 정적 규칙/분류/토큰화 계층입니다.
+﻿"""
+﨑懋ｵｭ・ｴ OTO ・晧┳・川・ ・ｵ奝ｵ・ｼ・・・ｰ・・・菩・・懍ｹ・・・･・奝增ｰ嶹・・・ｸｵ・・笈・､.
 
-이 모듈은 한국어 생성기에서 자주 바뀌는 timing 계산식과 분리해,
-형식 감지/에일리어스 분류/음절 토큰 정규화 같은 규칙층을 독립적으로
-다룰 수 있게 하기 위한 목적입니다.
+・ｴ ・ｨ・溢捩 﨑懋ｵｭ・ｴ ・晧┳・ｰ・川・ ・川｣ｼ ・罷誤株 timing ・・げ・晝ｳｼ ・・ｦｬ﨑ｴ,
+嶸菩享 ・川ｧ/・川攵・ｬ・ｴ・､ ・・･・・護・奝增ｰ ・母ｷ懦剩 ・呷捩 ・懍ｹ呷ｸｵ・・・・ｦｽ・・愍・・
+・､・ｰ ・・・一ｲ・﨑俾ｸｰ ・・復 ・ｩ・・桿・壱共.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from core.alias_annotation_utils import strip_alias_annotation_suffixes
 IPA_VOWELS = {
     "a", "e", "i", "o", "u", "y",
     "eo", "eu", "ae", "oe", "wa", "we", "wi", "wo", "ui",
-    "ɯ", "ʌ", "ɛ", "ə", "æ", "ɑ", "ɐ", "ɔ", "ɪ", "ʊ", "ø", "œ",
+    "ʌ", "ɯ", "ɛ", "ø", "wʌ",
 }
 
 IPA_PLOSIVES = {
@@ -83,7 +83,7 @@ def clean_phone_mark(mark):
 
 def should_ignore_korean_alias(alias):
     """
-    한국어 OTO에서 히라가나 alias는 잘못 섞인 일본어 데이터로 간주하고 무시한다.
+    﨑懋ｵｭ・ｴ OTO・川・ 德壱攵・・・alias・・・俯ｪｻ ・樌攤 ・ｼ・ｸ・ｴ ・ｰ・ｴ奓ｰ・・・・｣ｼ﨑俾ｳ ・ｴ・懦復・､.
     """
     return bool(HIRAGANA_RE.search(str(alias or "")))
 
@@ -96,7 +96,7 @@ def _normalize_custom_alias_lookup(alias):
     variants = [text, text.lower()]
     stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:#|b)?[0-8])$", "", text, flags=re.IGNORECASE)
     stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:sharp|flat)?[0-8])$", "", stripped, flags=re.IGNORECASE)
-    stripped = re.sub(r"\s*[\(\[\{（【].*?[\)\]\}）】]\s*$", "", stripped).strip()
+    stripped = re.sub(r"\s*[\(\[\{・医疹.*?[\)\]\}・峨曽\s*$", "", stripped).strip()
     if stripped:
         variants.extend([stripped, stripped.lower()])
     out = []
@@ -118,21 +118,21 @@ def _lookup_custom_alias_value(custom_map, alias):
 
 
 def normalize_ipa_mark(mark):
-    """IPA 마크를 정규화해 비교 가능한 형태로 만듭니다."""
+    """IPA ・逸〓・ｼ ・母ｷ懦剩﨑ｴ ・・ｵ・・・･﨑・嶸倣・・・・誤働・壱共."""
     base = clean_phone_mark(mark)
     nfd = unicodedata.normalize("NFD", base)
     stripped = "".join(ch for ch in nfd if not unicodedata.combining(ch))
-    stripped = stripped.replace("ː", "").replace("ˈ", "").replace("ˌ", "").replace("ʰ", "")
+    stripped = stripped.replace("ʰ", "").replace("ː", "").replace("ˑ", "").replace("-", "")
     return stripped
 
 
 def is_glide(phone_mark):
     clean = normalize_ipa_mark(phone_mark)
-    return clean in ["j", "w", "y", "ɥ", "ɰ", "ʋ"]
+    return clean in ["j", "w", "y", "ɥ", "ɰ"]
 
 
 def find_vowel_phone(phones):
-    """음소 시퀀스에서 대표 모음을 찾아 (index, phone)으로 반환합니다."""
+    """・護・ ・懦・､・川・ ・岺・・ｨ・護揆 ・ｾ・・(index, phone)・ｼ・・・倆劍﨑ｩ・壱共."""
     for idx, ph in enumerate(phones):
         mark = normalize_ipa_mark(ph.mark)
         if mark in IPA_VOWELS and not is_glide(mark):
@@ -147,7 +147,7 @@ def find_vowel_phone(phones):
 
 
 def is_plosive_ipa(phone_mark):
-    """IPA 표기가 파열음 계열인지 판별합니다."""
+    """IPA 岺懋ｸｰ・ 甯護龍・・・・龍・ｸ・ 甯尖ｳ・鮒・壱共."""
     clean = normalize_ipa_mark(phone_mark)
     if clean in IPA_PLOSIVES:
         return True
@@ -155,7 +155,7 @@ def is_plosive_ipa(phone_mark):
 
 
 def is_plosive_roman(consonant_str):
-    """로마자 자음 문자열이 파열음 계열인지 판별합니다."""
+    """・罹ｧ溢梵 ・川搆 ・ｸ・川龍・ｴ 甯護龍・・・・龍・ｸ・ 甯尖ｳ・鮒・壱共."""
     return consonant_str.lower() in [
         "g", "gg", "d", "dd", "b", "bb", "j", "jj",
         "k", "kk", "t", "tt", "p", "pp", "ch",
@@ -164,7 +164,7 @@ def is_plosive_roman(consonant_str):
 
 @lru_cache(maxsize=32768)
 def _extract_alias_onset(alias):
-    """CV 에일리어스에서 초성(로마자 자음군)을 추출합니다."""
+    """CV ・川攵・ｬ・ｴ・､・川・ ・溢┳(・罹ｧ溢梵 ・川搆・ｰ)・・・肥ｶ懦鮒・壱共."""
     a = re.sub(r"[^a-z]", "", (alias or "").lower())
     if not a:
         return ""
@@ -185,7 +185,7 @@ def _is_sonorant_consonant(ipa_hint="", roman_hint=""):
 
 
 def _is_kr_closure_token(token):
-    """pcl/tcl/kcl 같은 폐쇄 구간 표기를 한국어 종성형 VC로 취급합니다."""
+    """pcl/tcl/kcl ・呷捩 尞川℡ ・ｬ・・岺懋ｸｰ・ｼ 﨑懋ｵｭ・ｴ ・・┳嶸・VC・・・ｨ・駕鮒・壱共."""
     t = (token or "").strip().lower().rstrip("-")
     if not t:
         return False
@@ -193,7 +193,7 @@ def _is_kr_closure_token(token):
 
 
 def _detect_glottal_kind(alias):
-    """에일리어스의 성문 파열 표식 위치(head/tail)를 판별합니다."""
+    """・川攵・ｬ・ｴ・､・・・ｱ・ｸ 甯護龍 岺懍享 ・・ｹ・head/tail)・ｼ 甯尖ｳ・鮒・壱共."""
     a = (alias or "").strip()
     if not a:
         return None
@@ -211,15 +211,19 @@ def _detect_glottal_kind(alias):
 
 
 def is_breath(alias):
-    """숨소리(br, br1...) 에일리어스인지 판별합니다."""
+    """Breath alias detector (br, inhale/exhale variants)."""
     clean = unicodedata.normalize("NFKC", str(alias or "")).strip().lower()
     if not clean:
         return False
+    parts = [p for p in clean.split() if p]
+    if len(parts) >= 2 and parts[0] in KR_VOWELS and parts[-1] in {"r", "h", "・", "·", "fry", "vf"}:
+        # VC tail markers should remain VC, not breath.
+        return False
     if re.match(r"^br\d*$", clean):
         return True
-    if clean in {"bre", "breath", "息", "吸", "吐", "흡", "호", "숨"}:
+    if clean in {"bre", "breath", "breathy", "inhale", "exhale", "aspirate", "諱ｯ", "蜷ｸ", "蜷・", "彧｡", "嶸ｸ", "・ｨ"}:
         return True
-    if any(ch in clean for ch in ("吸", "吐", "息")):
+    if any(ch in clean for ch in ("蜷ｸ", "蜷・", "諱ｯ")) and not (len(parts) >= 2 and parts[0] in KR_VOWELS):
         return True
     return False
 
@@ -234,7 +238,7 @@ def _extract_vowel_consonant(text):
 
 @lru_cache(maxsize=65536)
 def _normalize_cv_match_token(token):
-    """CV 음절 매핑 비교용 정규화(r/l 혼용 등)를 적용합니다."""
+    """CV ・護・・､﨑・・・ｵ川圸 ・母ｷ懦剩(r/l 嶸ｼ・ｩ ・ｱ)・ｼ ・・圸﨑ｩ・壱共."""
     t = re.sub(r"[^a-z]", "", (token or "").lower())
     if not t:
         return t
@@ -247,8 +251,8 @@ def _normalize_cv_match_token(token):
 @lru_cache(maxsize=65536)
 def _split_kr_syllable_parts(text):
     """
-    한국어 로마자 음절을 (초성, 중성, 종성)으로 분해합니다.
-    예: nyeong -> (n, yeo, ng), ryeo -> (r, yeo, "")
+    﨑懋ｵｭ・ｴ ・罹ｧ溢梵 ・護溢揆 (・溢┳, ・卓┳, ・・┳)・ｼ・・・・紛﨑ｩ・壱共.
+    ・・ nyeong -> (n, yeo, ng), ryeo -> (r, yeo, "")
     """
     t = _normalize_cv_match_token(text)
     if not t:
@@ -278,7 +282,7 @@ def _split_kr_syllable_parts(text):
 
 @lru_cache(maxsize=65536)
 def _kr_cv_kernel(text):
-    """비교용 CV 핵심 문자열(onset+vowel)을 반환합니다."""
+    """・・ｵ川圸 CV 﨑ｵ・ｬ ・ｸ・川龍(onset+vowel)・・・倆劍﨑ｩ・壱共."""
     onset, vowel, _ = _split_kr_syllable_parts(text)
     if vowel:
         return f"{onset}{vowel}"
@@ -286,7 +290,7 @@ def _kr_cv_kernel(text):
 
 
 def _extract_vc_right_token(alias):
-    """VC 에일리어스에서 우측 자음(받침 후보)을 추출합니다."""
+    """VC ・川攵・ｬ・ｴ・､・川・ ・ｰ・｡ ・川搆(・幗ｹｨ 弡・ｳｴ)・・・肥ｶ懦鮒・壱共."""
     a = (alias or "").strip()
     if not a:
         return ""
@@ -305,7 +309,7 @@ def _extract_vc_right_token(alias):
 
 
 def _canonicalize_kr_coda(token):
-    """받침 자음 표기를 K/T/P 계열 기준으로 정규화합니다."""
+    """・幗ｹｨ ・川搆 岺懋ｸｰ・ｼ K/T/P ・・龍 ・ｰ・・ｼ・・・母ｷ懦剩﨑ｩ・壱共."""
     t = re.sub(r"[^A-Za-z]", "", (token or "")).strip()
     if not t:
         return ""
@@ -320,7 +324,7 @@ def _canonicalize_kr_coda(token):
 
 
 def _is_kr_plosive_coda_alias(alias):
-    """VC 에일리어스가 파열음 받침(K/T/P 계열)인지 판별합니다."""
+    """VC ・川攵・ｬ・ｴ・､・ 甯護龍・・・幗ｹｨ(K/T/P ・・龍)・ｸ・ 甯尖ｳ・鮒・壱共."""
     right = _extract_vc_right_token(alias)
     if not right:
         return False
@@ -335,7 +339,7 @@ def _is_kr_glide_vowel(vowel):
 
 @lru_cache(maxsize=131072)
 def _cv_match_score(alias_token, syllable_token):
-    """에일리어스 CV와 음절 로마자 간 매핑 점수를 계산합니다."""
+    """・川攵・ｬ・ｴ・､ CV・ ・護・・罹ｧ溢梵 ・・・､﨑・・川・・ｼ ・・げ﨑ｩ・壱共."""
     a = _normalize_cv_match_token(alias_token)
     s = _normalize_cv_match_token(syllable_token)
     if not a or not s:
@@ -384,7 +388,7 @@ def _cv_match_score(alias_token, syllable_token):
 
 @lru_cache(maxsize=65536)
 def _extract_kr_cv_alias_token(alias):
-    """CV 매핑용 에일리어스 핵심 토큰을 추출합니다."""
+    """CV ・､﨑卓圸 ・川攵・ｬ・ｴ・､ 﨑ｵ・ｬ 奝增ｰ・・・肥ｶ懦鮒・壱共."""
     parts = [p for p in re.split(r"\s+", (alias or "").strip().lower()) if p]
     if not parts:
         return ""
@@ -397,7 +401,7 @@ def _extract_kr_cv_alias_token(alias):
 
 
 def classify_alias(alias, custom_map=None):
-    """에일리어스 문자열을 br/cv/cv_head/vc/vv/vcv/mono 타입으로 분류합니다."""
+    """・川攵・ｬ・ｴ・､ ・ｸ・川龍・・br/cv/cv_head/vc/vv/vcv/mono 夋・・愍・・・・･倆鮒・壱共."""
     clean = unicodedata.normalize("NFKC", str(alias or "")).strip()
 
     if is_breath(clean):
@@ -417,7 +421,7 @@ def classify_alias(alias, custom_map=None):
         left = parts[0].strip()
         right = " ".join(parts[1:]).strip()
 
-        if left == "-":
+        if left in {"-", "・", "·"}:
             return "cv_head"
 
         if right == "-":
@@ -443,9 +447,24 @@ def classify_alias(alias, custom_map=None):
             return "vc"
 
         if left_lower in KR_VOWELS:
-            if right_lower in KR_CONSONANTS or right.upper() in KR_BATCHIM_MARKERS or _is_kr_closure_token(right):
+            if right_lower in {"・", "·", "fry", "vf", "h", "r"}:
                 return "vc"
-            if right_lower in KR_VOWELS:
+            if any(ord(ch) > 127 for ch in right):
+                return "vc"
+            right_ascii = unicodedata.normalize("NFKD", right_lower)
+            right_alpha = "".join(ch for ch in right_ascii if "a" <= ch <= "z")
+            if right_alpha and right_alpha not in KR_VOWELS and len(right_alpha) <= 2:
+                return "vc"
+            if (not right_alpha) and any(not ch.isalnum() for ch in right_lower):
+                return "vc"
+            if (
+                right_lower in KR_CONSONANTS
+                or right_alpha in KR_CONSONANTS
+                or right.upper() in KR_BATCHIM_MARKERS
+                or _is_kr_closure_token(right)
+            ):
+                return "vc"
+            if right_lower in KR_VOWELS or right_alpha in KR_VOWELS:
                 return "vv"
             return "vcv"
 
@@ -494,7 +513,7 @@ def classify_alias(alias, custom_map=None):
 
 
 def detect_alias_format(alias_list, custom_map=None):
-    """파일 단위 에일리어스 목록의 전체 포맷(CVC/CVVC/VCV 등)을 추정합니다."""
+    """甯護攵 ・ｨ・・・川攵・ｬ・ｴ・､ ・ｩ・晧攪 ・・ｲｴ 尞ｬ・ｷ(CVC/CVVC/VCV ・ｱ)・・・肥倣鮒・壱共."""
     if not alias_list:
         return "cv"
 
@@ -530,7 +549,7 @@ def detect_alias_format(alias_list, custom_map=None):
 
 
 def _looks_like_vv_alias(alias):
-    """공백 없는 단순 VV 에일리어스 형태인지 판별합니다."""
+    """・ｵ・ｱ ・・株 ・ｨ・・VV ・川攵・ｬ・ｴ・､ 嶸倣・・ｸ・ 甯尖ｳ・鮒・壱共."""
     if not alias:
         return False
     a = alias.strip().lower()
@@ -580,3 +599,4 @@ __all__ = [
     "is_plosive_roman",
     "normalize_ipa_mark",
 ]
+

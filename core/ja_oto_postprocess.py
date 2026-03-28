@@ -168,6 +168,7 @@ class JaPostprocessContext:
         *,
         alias_text: str = "",
         alias_type: str = "cv_head",
+        format_type: str = "",
     ) -> Tuple[float, float, float, float, float]:
         return guard_ja_cv_head_offset_to_onset(
             offset,
@@ -181,6 +182,7 @@ class JaPostprocessContext:
             self.validate_fn,
             alias_text=alias_text,
             alias_type=alias_type,
+            format_type=format_type,
         )
 
     def ensure_cv_head_min_vowel_coverage(
@@ -631,9 +633,18 @@ def guard_ja_cv_cutoff_to_next_onset(
 
     next_mark = _clean_phone_mark(getattr(next_phones[0], "mark", ""))
     hard_next = next_mark in JA_PLOSIVE_CONSONANTS or next_mark in JA_SIBILANT_ONSETS or next_mark in {"ts", "ch", "j", "sh", "s", "z", "h"}
-    is_cv_head = str(alias_type or "").strip().lower() == "cv_head"
+    a_type = str(alias_type or "").strip().lower()
+    is_cv_head = a_type == "cv_head"
+    is_cv = a_type == "cv"
     fmt = str(format_type or "").strip().lower()
-    safety = 10.0 if is_cv_head else (18.0 if hard_next else 12.0)
+    if is_cv_head:
+        safety = 10.0
+    elif is_cv:
+        safety = 24.0 if hard_next else 18.0
+    else:
+        safety = 18.0 if hard_next else 12.0
+    if is_cv and fmt == "cv":
+        safety += 4.0
     if not is_cv_head and fmt == "cvvc":
         safety += 4.0
     next_onset_rel = (next_phones[0].minTime * 1000.0) - offset
@@ -642,10 +653,17 @@ def guard_ja_cv_cutoff_to_next_onset(
         max_cutoff_abs = next_onset_rel + (10.0 if hard_next else 18.0)
     if max_cutoff_abs <= (pre + 18.0):
         return offset, consonant, cutoff, pre, 0.0
+    if is_cv:
+        cv_tail_cap = pre + (132.0 if fmt == "cv" else 150.0)
+        max_cutoff_abs = min(max_cutoff_abs, cv_tail_cap)
+        if max_cutoff_abs <= (pre + 16.0):
+            return offset, consonant, cutoff, pre, 0.0
 
     original_cutoff_abs = abs(cutoff)
-    consonant = min(consonant, max_cutoff_abs - 14.0)
-    consonant = max(consonant, pre + 10.0)
+    cons_tail_margin = 12.0 if is_cv else 14.0
+    cons_pre_gap = 8.0 if is_cv else 10.0
+    consonant = min(consonant, max_cutoff_abs - cons_tail_margin)
+    consonant = max(consonant, pre + cons_pre_gap)
 
     cutoff_abs = min(original_cutoff_abs, max_cutoff_abs)
     if is_cv_head and vowel_start_ms is not None and vowel_end_ms is not None:
@@ -676,6 +694,7 @@ def guard_ja_cv_head_offset_to_onset(
     *,
     alias_text: str = "",
     alias_type: str = "cv_head",
+    format_type: str = "",
 ) -> Tuple[float, float, float, float, float]:
     if syll_idx is None or syll_idx < 0 or syll_idx >= len(syllables_info):
         return offset, consonant, cutoff, pre, 0.0
@@ -685,6 +704,7 @@ def guard_ja_cv_head_offset_to_onset(
         return offset, consonant, cutoff, pre, 0.0
 
     a_type = str(alias_type or "cv_head").strip().lower()
+    fmt = str(format_type or "").strip().lower()
     c_hint = curr_phones[0].mark if curr_phones else ""
     c_start, c_end, _n_start, _n_end = extract_cv_bounds_fn(curr_phones, alias_text=alias_text, alias_type=a_type)
     cls, _onset = cv_onset_class_fn(alias_text, c_hint=c_hint, alias_type=a_type)
@@ -701,7 +721,12 @@ def guard_ja_cv_head_offset_to_onset(
         base_lead = 34.0
         late_allow = 2.5
     if a_type == "cv":
-        base_lead = max(24.0, base_lead - 4.0)
+        base_lead = max(14.0, base_lead - 10.0)
+        if fmt == "cv":
+            base_lead = min(base_lead, 18.0)
+            late_allow = min(late_allow, 1.4)
+        else:
+            late_allow = min(late_allow, 2.0)
     c_len = max(0.0, float(c_end) - float(c_start))
     lead_cap = min(base_lead, max(20.0, c_len + 16.0))
     offset_floor = max(0.0, float(c_start) - lead_cap)

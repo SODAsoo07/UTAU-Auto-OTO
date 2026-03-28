@@ -63,13 +63,23 @@ def run_ja_general_row(
             return _offset, _consonant, _cutoff, _pre, _ovl
         hard_cls = bool(c_char in {"k", "g", "t", "d", "b", "p", "q", "c", "ch", "ts", "dz", "s", "z", "sh", "j", "h", "f", "v", "hy"})
         son_cls = bool(c_char in {"m", "n", "ny", "r", "l", "ry", "w", "y"})
+        strict_cvvc = str(format_type or "").strip().lower() == "cvvc"
 
         o = float(_offset)
         p = float(_pre)
         c_abs = o + float(_consonant)
         cut_abs = o + abs(float(_cutoff))
 
-        if hard_cls:
+        if strict_cvvc and hard_cls:
+            c_floor = max(p + 6.0 + o, next_on - 14.0)
+            c_cap = next_on - 2.5
+        elif strict_cvvc and son_cls:
+            c_floor = max(next_on - 4.0, p + 10.0 + o)
+            c_cap = next_on + 3.0
+        elif strict_cvvc:
+            c_floor = max(next_on - 6.0, p + 9.0 + o)
+            c_cap = next_on + 2.0
+        elif hard_cls:
             # Stop/fricative-like VC should terminate before next onset.
             c_floor = max(p + 6.0 + o, next_on - 12.0)
             c_cap = next_on - 2.0
@@ -83,7 +93,16 @@ def run_ja_general_row(
             c_cap = c_floor + 2.0
         c_abs = min(max(c_abs, c_floor), c_cap)
 
-        if hard_cls:
+        if strict_cvvc and hard_cls:
+            cut_floor = max(c_abs + 4.0, next_on - 2.0)
+            cut_cap = next_on + 0.8
+        elif strict_cvvc and son_cls:
+            cut_floor = max(c_abs + 8.0, next_on + 1.0)
+            cut_cap = min(next_end + 3.0, next_on + 8.0)
+        elif strict_cvvc:
+            cut_floor = max(c_abs + 7.0, next_on + 0.6)
+            cut_cap = min(next_end + 2.0, next_on + 6.0)
+        elif hard_cls:
             cut_floor = max(c_abs + 4.0, next_on - 2.0)
             cut_cap = next_on - 0.7
         elif son_cls:
@@ -179,6 +198,7 @@ def run_ja_general_row(
             current_w_idx,
             alias_text=alias,
             alias_type="cv",
+            format_type=format_type,
         )
         offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
 
@@ -235,6 +255,14 @@ def run_ja_general_row(
                 f"🧭 {fname}: VC-CV 앵커 재정렬 "
                 f"({pre_abs_before:.1f}->{pre_abs_after:.1f}ms, {alias})"
             )
+        if format_type == "cvvc" and float(n_start) > 0.0:
+            onset_cls = onset_class_fn(c_char)
+            late_allow = 3.5 if onset_cls in {"voiced", "nasal"} else 2.0
+            pre_abs_cap = float(n_start) + late_allow
+            if pre_abs_after > pre_abs_cap:
+                offset = max(float(offset) - (pre_abs_after - pre_abs_cap), 0.0)
+                offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
+                pre_abs_after = offset + pre
 
     if alias_type in {"vc", "vv"}:
         mel_cutoff_candidate_ms = None

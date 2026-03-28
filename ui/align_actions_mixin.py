@@ -7,6 +7,34 @@ from core.pipeline_status import normalize_aligner_name
 
 class AlignActionsMixin:
     def _run_mfa(self):
+        wav_dir_for_prompt = str(self.wav_entry.get() or "").strip()
+        overwrite_existing_textgrids = False
+        lang_for_prompt = self._get_language() if hasattr(self, "_get_language") else ""
+        primary_engine_for_prompt = normalize_aligner_name(
+            self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
+            default="mfa",
+        )
+        if wav_dir_for_prompt and primary_engine_for_prompt != "none" and lang_for_prompt != "english":
+            textgrid_dir_for_prompt = os.path.join(wav_dir_for_prompt, "textgrids")
+            if os.path.isdir(textgrid_dir_for_prompt):
+                ask_fn = getattr(self, "_ask_yes_no_dialog_sync", None)
+                if callable(ask_fn):
+                    proceed = ask_fn(
+                        "기존 TextGrid 덮어쓰기 확인",
+                        (
+                            "textgrids 폴더에 기존 정렬 결과가 있습니다.\n"
+                            "기존 폴더를 덮어씌워 재생성하겠습니까?"
+                        ),
+                        default=False,
+                    )
+                else:
+                    proceed = False
+                if not proceed:
+                    self._append_log("ℹ 사용자가 기존 textgrids 덮어쓰기를 취소했습니다. 정렬을 중단합니다.")
+                    self._set_status("정렬 취소됨")
+                    return
+                overwrite_existing_textgrids = True
+
         def task():
             self._set_running(True)
             self._set_status("3. Alignment running...")
@@ -72,6 +100,7 @@ class AlignActionsMixin:
                     fallback_aligner="",
                     mfa_path=self.mfa_path or "",
                     mfa_align_profile=mfa_profile,
+                    overwrite_existing_textgrids=bool(overwrite_existing_textgrids),
                     callback=self._append_log,
                 )
                 if bool(result.get("ok", False)):

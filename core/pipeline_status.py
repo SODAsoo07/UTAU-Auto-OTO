@@ -50,16 +50,16 @@ def normalize_aligner_name(value, default: str = "mfa") -> str:
     text = str(value or "").strip().lower()
     if not text:
         return default
-    if text in {"none", "nomfa", "no-mfa", "no_mfa", "no mfa", "off", "skip"}:
-        return "none"
+    if text in {"none", "nomfa", "no-mfa", "no_mfa", "no mfa", "off", "skip", "disabled", "disable", "no_align"}:
+        return default or "mfa"
     if text in {"mfa", "montreal"}:
         return "mfa"
     if text in {"ctc", "mms", "mms-fa", "mms_fa", "torchaudio-ctc", "torchaudio_ctc"}:
         return "ctc"
     if text in {"domino", "pydomino", "domino (jp)", "domino(jp)", "jp_domino", "jp-domino"}:
         return "domino"
-    if "no-mfa" in text or "nomfa" in text:
-        return "none"
+    if "no-mfa" in text or "nomfa" in text or "no_mfa" in text:
+        return default or "mfa"
     if "ctc" in text:
         return "ctc"
     if "domino" in text:
