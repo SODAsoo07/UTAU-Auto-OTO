@@ -1461,6 +1461,12 @@ def _remap_ja_cvvc_inactive_cv_index(
         except Exception:
             return 0.0
 
+    def _mel_conf(syl, key):
+        try:
+            return max(0.0, min(1.0, float((syl or {}).get(key, 0.0) or 0.0)))
+        except Exception:
+            return 0.0
+
     def _soft(target, syl):
         cand_tok = _syllable_info_token(syl)
         return int(_ja_soft_cv_match_level(target, cand_tok) or 0) if target else 0
@@ -1468,18 +1474,42 @@ def _remap_ja_cvvc_inactive_cv_index(
     mapped_syl = syllables_info[m]
     mapped_active = _is_ja_cv_syllable_active(mapped_syl, require_vowel=require_vowel)
     mapped_blank = _blank_conf(mapped_syl)
+    mapped_sil = _mel_conf(mapped_syl, "mel_silence_sparse_conf")
+    mapped_voiced = _mel_conf(mapped_syl, "mel_voiced_formant_conf")
     mapped_soft = _soft(target_norm, mapped_syl)
     mapped_edge = bool(m == 0 or m == (n - 1))
     strict_edge_blank = 0.52 if a_type == "cv_head" else 0.58
     hard_blank = 0.74 if a_type == "cv_head" else 0.78
+    leading_blank_guard = _env_bool("UTOA_JA_CVVC_LEADING_BLANK_GUARD", True)
+    edge_soft_blank = max(
+        0.0,
+        min(
+            1.0,
+            _env_float(
+                "UTOA_JA_CVVC_EDGE_SOFT_BLANK",
+                0.46 if a_type == "cv_head" else (0.50 if a_type in {"cv", "vv"} else 0.54),
+            ),
+        ),
+    )
+    edge_silence_th = max(0.0, min(1.0, _env_float("UTOA_JA_CVVC_EDGE_SILENCE_TH", 0.56)))
+    edge_voiced_cap = max(0.0, min(1.0, _env_float("UTOA_JA_CVVC_EDGE_VOICED_CAP", 0.16)))
     if weak_target:
         strict_edge_blank -= 0.08
         hard_blank -= 0.06
+    mapped_leading_blank_like = bool(
+        leading_blank_guard
+        and m == 0
+        and (
+            (mapped_blank >= edge_soft_blank and mapped_sil >= edge_silence_th and mapped_voiced <= edge_voiced_cap)
+            or (mapped_sil >= min(1.0, edge_silence_th + 0.20) and mapped_voiced <= max(0.10, edge_voiced_cap - 0.04))
+        )
+    )
     mapped_needs_remap = bool(
         (not mapped_active)
         or (mapped_blank >= hard_blank)
         or (mapped_blank >= 0.72 and mapped_soft <= 1)
         or (mapped_edge and mapped_blank >= strict_edge_blank)
+        or mapped_leading_blank_like
         or (weak_target and mapped_edge and mapped_blank >= (strict_edge_blank - 0.04))
     )
     if not mapped_needs_remap:
@@ -1522,6 +1552,7 @@ def _remap_ja_cvvc_inactive_cv_index(
     best_key = None
     prefer_non_edge = bool(
         (a_type == "cv_head" and mapped_edge and mapped_blank >= strict_edge_blank)
+        or mapped_leading_blank_like
         or (weak_target and mapped_edge)
     )
     for i in scan_order:
@@ -1531,7 +1562,13 @@ def _remap_ja_cvvc_inactive_cv_index(
             continue
         soft_match = _soft(target_norm, syl)
         blank = _blank_conf(syl)
+        sil = _mel_conf(syl, "mel_silence_sparse_conf")
         is_edge = bool(i == 0 or i == (n - 1))
+        if mapped_leading_blank_like and i == 0:
+            # When index 0 is likely silence/blank, force a forward escape unless
+            # token+mel evidence is clearly stronger than silence.
+            if soft_match < 3 or blank >= max(0.40, edge_soft_blank - 0.06) or sil >= edge_silence_th:
+                continue
         if weak_target and is_edge and blank >= (strict_edge_blank - 0.04):
             continue
         edge_rank = 1 if (not prefer_non_edge or not is_edge) else 0
@@ -4764,31 +4801,59 @@ def generate_ja_oto(
                             if bridge_pair.get("next_idx") is not None
                             else local_bridge_next_idx
                         )
-                    if alias_type == "vc" and format_type == "cvvc" and 0 <= bridge_next_idx < len(syllables_info):
-                        remap_next_idx = _remap_ja_cvvc_inactive_cv_index(
-                            _syllable_info_token(syllables_info[bridge_next_idx]),
-                            bridge_next_idx,
-                            bridge_next_idx,
-                            syllables_info,
-                            alias_type="vc",
-                        )
-                        if remap_next_idx != bridge_next_idx:
-                            if ja_mapping_debug_reason_logging:
-                                log(
-                                    f"[JA] {fname}: VC next-syllable inactive remap "
-                                    f"({bridge_next_idx + 1}->{int(remap_next_idx) + 1}, {alias})"
+                    if format_type == "cvvc" and 0 <= bridge_next_idx < len(syllables_info):
+                        if alias_type == "vc":
+                            remap_next_idx = _remap_ja_cvvc_inactive_cv_index(
+                                _syllable_info_token(syllables_info[bridge_next_idx]),
+                                bridge_next_idx,
+                                bridge_next_idx,
+                                syllables_info,
+                                alias_type="vc",
+                            )
+                            if remap_next_idx != bridge_next_idx:
+                                if ja_mapping_debug_reason_logging:
+                                    log(
+                                        f"[JA] {fname}: VC next-syllable inactive remap "
+                                        f"({bridge_next_idx + 1}->{int(remap_next_idx) + 1}, {alias})"
+                                    )
+                                bridge_next_idx = int(remap_next_idx)
+                                bridge_prev_idx = min(max(0, bridge_next_idx - 1), max(len(syllables_info) - 1, 0))
+                                bridge_pair = dict(bridge_pair or {})
+                                bridge_pair["prev_idx"] = bridge_prev_idx
+                                bridge_pair["next_idx"] = bridge_next_idx
+                                bridge_pair["prev_anchor"] = (
+                                    realized_cv_anchor_by_idx.get(bridge_prev_idx) or cv_anchor_by_idx.get(bridge_prev_idx)
                                 )
-                            bridge_next_idx = int(remap_next_idx)
-                            bridge_prev_idx = min(max(0, bridge_next_idx - 1), max(len(syllables_info) - 1, 0))
-                            bridge_pair = dict(bridge_pair or {})
-                            bridge_pair["prev_idx"] = bridge_prev_idx
-                            bridge_pair["next_idx"] = bridge_next_idx
-                            bridge_pair["prev_anchor"] = (
-                                realized_cv_anchor_by_idx.get(bridge_prev_idx) or cv_anchor_by_idx.get(bridge_prev_idx)
+                                bridge_pair["next_anchor"] = (
+                                    realized_cv_anchor_by_idx.get(bridge_next_idx) or cv_anchor_by_idx.get(bridge_next_idx)
+                                )
+                        elif alias_type == "vv":
+                            vv_parts = [p for p in str(alias or "").split() if p]
+                            vv_left = vv_parts[0] if vv_parts else _syllable_info_token(syllables_info[bridge_prev_idx])
+                            remap_prev_idx = _remap_ja_cvvc_inactive_cv_index(
+                                vv_left,
+                                bridge_prev_idx,
+                                bridge_prev_idx,
+                                syllables_info,
+                                alias_type="vv",
                             )
-                            bridge_pair["next_anchor"] = (
-                                realized_cv_anchor_by_idx.get(bridge_next_idx) or cv_anchor_by_idx.get(bridge_next_idx)
-                            )
+                            if remap_prev_idx != bridge_prev_idx:
+                                if ja_mapping_debug_reason_logging:
+                                    log(
+                                        f"[JA] {fname}: VV leading-blank remap "
+                                        f"({bridge_prev_idx + 1}->{int(remap_prev_idx) + 1}, {alias})"
+                                    )
+                                bridge_prev_idx = int(remap_prev_idx)
+                                bridge_next_idx = min(max(0, bridge_prev_idx + 1), max(len(syllables_info) - 1, 0))
+                                bridge_pair = dict(bridge_pair or {})
+                                bridge_pair["prev_idx"] = bridge_prev_idx
+                                bridge_pair["next_idx"] = bridge_next_idx
+                                bridge_pair["prev_anchor"] = (
+                                    realized_cv_anchor_by_idx.get(bridge_prev_idx) or cv_anchor_by_idx.get(bridge_prev_idx)
+                                )
+                                bridge_pair["next_anchor"] = (
+                                    realized_cv_anchor_by_idx.get(bridge_next_idx) or cv_anchor_by_idx.get(bridge_next_idx)
+                                )
                     if alias_type == "vv":
                         vv_back = 1 if str(mapping_tier or "").strip().lower() == "low" else 2
                         vv_fwd = 1 if str(mapping_tier or "").strip().lower() == "low" else 3

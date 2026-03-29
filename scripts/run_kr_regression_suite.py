@@ -255,6 +255,31 @@ def _write_report_text(path: str, report: Dict[str, object]) -> str:
     return path
 
 
+def _write_baseline_artifacts(
+    *,
+    run_dir: str,
+    summary: Dict[str, object],
+    metrics: Dict[str, float],
+    prefix: str,
+) -> Tuple[str, str]:
+    token = str(prefix or "").strip() or "regression_baseline"
+    summary_path = os.path.join(run_dir, f"{token}_summary.json")
+    metrics_path = os.path.join(run_dir, f"{token}_metrics.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+                "metrics": dict(metrics or {}),
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+    return summary_path, metrics_path
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Run KR OTO batch regression and apply quality gates."
@@ -262,6 +287,16 @@ def main() -> int:
     ap.add_argument("--batch-config", required=True, help="YAML path for run_oto_generation_batch.py")
     ap.add_argument("--run-tag", default="", help="Optional run tag for batch runner")
     ap.add_argument("--baseline-summary", default="", help="Optional baseline summary.json path")
+    ap.add_argument(
+        "--save-baseline",
+        action="store_true",
+        help="Write current run summary/metrics as baseline artifacts in run dir.",
+    )
+    ap.add_argument(
+        "--baseline-prefix",
+        default="regression_baseline",
+        help="Filename prefix for --save-baseline artifacts.",
+    )
     ap.add_argument("--skip-validation", action="store_true", help="Pass through to batch runner")
     ap.add_argument("--stop-on-error", action="store_true", help="Pass through to batch runner")
     ap.add_argument("--max-error-cases", type=int, default=0)
@@ -337,6 +372,15 @@ def main() -> int:
     report_txt = os.path.join(run_dir, "regression_gate.txt")
     _write_report(report_json, report)
     _write_report_text(report_txt, report)
+    if bool(args.save_baseline):
+        baseline_summary_out, baseline_metrics_out = _write_baseline_artifacts(
+            run_dir=run_dir,
+            summary=summary,
+            metrics=metrics,
+            prefix=str(args.baseline_prefix or ""),
+        )
+        _safe_print(f"[Regression] baseline_summary={baseline_summary_out}")
+        _safe_print(f"[Regression] baseline_metrics={baseline_metrics_out}")
     _safe_print(f"[Regression] status={status}")
     _safe_print(f"[Regression] report_json={report_json}")
     _safe_print(f"[Regression] report_txt={report_txt}")

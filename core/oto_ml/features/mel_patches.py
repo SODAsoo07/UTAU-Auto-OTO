@@ -17,7 +17,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
     import numpy as np
@@ -25,6 +25,7 @@ except Exception:  # pragma: no cover
     np = None
 
 from core.oto_normalization import normalize_wav_key
+from core.format_type_utils import normalize_format_type
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +163,94 @@ def patch_cache_dir(
         str(cache_version),
         spec_hash,
     )
+
+
+def _pick_cache_candidate(version_dir: str) -> str:
+    """
+    Resolve a concrete cache leaf that owns manifest.json.
+    Supports:
+      - <root>/<lang>/<fmt>/<version>/<spec_hash>/manifest.json
+      - <root>/<lang>/<fmt>/<version>/manifest.json
+      - <root>/<lang>/<fmt>/manifest.json
+    """
+    if not version_dir or not os.path.isdir(version_dir):
+        return ""
+    candidates: List[Tuple[float, str]] = []
+    manifest_here = os.path.join(version_dir, "manifest.json")
+    if os.path.isfile(manifest_here):
+        try:
+            mtime = os.path.getmtime(manifest_here)
+        except Exception:
+            mtime = 0.0
+        candidates.append((mtime, version_dir))
+    for name in os.listdir(version_dir):
+        path = os.path.join(version_dir, name)
+        if not os.path.isdir(path):
+            continue
+        manifest = os.path.join(path, "manifest.json")
+        if not os.path.isfile(manifest):
+            continue
+        try:
+            mtime = os.path.getmtime(manifest)
+        except Exception:
+            mtime = 0.0
+        candidates.append((mtime, path))
+    if not candidates:
+        return ""
+    candidates.sort(reverse=True, key=lambda x: x[0])
+    return candidates[0][1]
+
+
+def resolve_rawmel_cache_dir(
+    *,
+    language: str,
+    format_type: str,
+    root_hint: str = "",
+    extra_roots: Optional[Sequence[str]] = None,
+) -> str:
+    """
+    Find the best cache leaf for (language, format_type).
+
+    root_hint has top priority, then default_patch_cache_root, then extra_roots.
+    """
+    lang = str(language or "").strip().lower()
+    fmt = normalize_format_type(lang, format_type) or str(format_type or "").strip().lower()
+    roots: List[str] = []
+    hinted = str(root_hint or "").strip()
+    if hinted:
+        roots.append(hinted)
+    roots.append(default_patch_cache_root())
+    for r in list(extra_roots or []):
+        rr = str(r or "").strip()
+        if rr:
+            roots.append(rr)
+
+    seen = set()
+    unique_roots: List[str] = []
+    for root in roots:
+        path = os.path.normpath(root)
+        key = path.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_roots.append(path)
+
+    for root in unique_roots:
+        if not os.path.isdir(root):
+            continue
+        manifest = os.path.join(root, "manifest.json")
+        if os.path.isfile(manifest):
+            return root
+        version_dirs = [
+            os.path.join(root, lang, fmt, str(MEL_PATCH_CACHE_VERSION)),
+            os.path.join(root, lang, fmt),
+            os.path.join(root, str(MEL_PATCH_CACHE_VERSION)),
+        ]
+        for version_dir in version_dirs:
+            picked = _pick_cache_candidate(version_dir)
+            if picked:
+                return picked
+    return ""
 
 
 def _mel_filterbank(sr: int, n_fft: int, mel_bins: int) -> "np.ndarray":

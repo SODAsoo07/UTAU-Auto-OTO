@@ -500,6 +500,237 @@ def _apply_blank_risk_weight(df, weights: "np.ndarray") -> "np.ndarray":
     return (weights * np.where(cv_mask, factor, 1.0)).astype(np.float32)
 
 
+def _blank_attach_alias_set() -> set:
+    raw = str(os.environ.get("UTOA_ML_BLANK_ATTACH_ALIAS_TYPES", "") or "").strip().lower()
+    if raw:
+        toks = [t.strip().lower() for t in raw.split(",") if t.strip()]
+        if toks:
+            return set(toks)
+    return {"cv", "cv_head", "vv", "v"}
+
+
+def _safe_numeric_np(df, col: str, default: float = 0.0) -> "np.ndarray":
+    if df is None or col not in df.columns:
+        return np.full((0 if df is None else len(df),), float(default), dtype=np.float64)
+    return pd.to_numeric(df[col], errors="coerce").fillna(float(default)).to_numpy(dtype=np.float64)
+
+
+def _blank_like_score_np(df) -> "np.ndarray":
+    if df is None:
+        return np.zeros((0,), dtype=np.float64)
+    n = len(df)
+    cols = [
+        "blank_risk_score",
+        "blank_span_confidence",
+        "syllable_blank_confidence",
+        "mel_silence_sparse_ratio",
+        "mel_silence_sparse_conf",
+    ]
+    arrs = []
+    for col in cols:
+        if col in df.columns:
+            arrs.append(_safe_numeric_np(df, col, 0.0))
+    if not arrs:
+        return np.zeros((n,), dtype=np.float64)
+    stacked = np.vstack(arrs)
+    return np.clip(np.max(stacked, axis=0), 0.0, 1.0)
+
+
+def _blank_attach_scope_masks(df, *, language: str = "", format_type: str = ""):
+    if df is None:
+        z = np.zeros((0,), dtype=bool)
+        return z, z, z
+    n = len(df)
+    alias_types = _blank_attach_alias_set()
+    alias_arr = (
+        df["alias_type"].astype(str).str.strip().str.lower().to_numpy()
+        if "alias_type" in df.columns
+        else np.full((n,), "", dtype=object)
+    )
+    alias_mask = np.isin(alias_arr, list(alias_types))
+
+    fmt_fallback = normalize_format_type(language, format_type) or str(format_type or "").strip().lower()
+    fmt_series = (
+        df["format_type"].astype(str).str.strip().str.lower().map(
+            lambda v: normalize_format_type(language, v) or str(v or "").strip().lower()
+        ).to_numpy()
+        if "format_type" in df.columns
+        else np.full((n,), fmt_fallback, dtype=object)
+    )
+    cvvc_only = _env_flag("UTOA_ML_BLANK_ATTACH_SCOPE_CVVC_ONLY", True)
+    fmt_mask = np.ones((n,), dtype=bool) if not cvvc_only else (fmt_series == "cvvc")
+
+    head_row = np.zeros((n,), dtype=bool)
+    if "is_head_row" in df.columns:
+        head_row |= (_safe_numeric_np(df, "is_head_row", 0.0) >= 0.5)
+    if "mora_position" in df.columns:
+        head_row |= (df["mora_position"].astype(str).str.strip().str.lower() == "head").to_numpy()
+    head_row |= np.isin(alias_arr, ["cv_head"])
+    vv_mask = np.isin(alias_arr, ["vv", "v"])
+
+    scope_mask = alias_mask & fmt_mask
+    head_scope = scope_mask & (head_row | vv_mask)
+    vv_scope = scope_mask & vv_mask
+    return scope_mask, head_scope, vv_scope
+
+
+def _derive_blank_attach_label(df, *, language: str = "", format_type: str = ""):
+    if df is None or len(df) == 0:
+        return np.zeros((0,), dtype=np.int32), {"rows": 0, "positive_rows": 0, "positive_rate": 0.0}
+    scope_mask, head_scope, _vv_scope = _blank_attach_scope_masks(df, language=language, format_type=format_type)
+    blank_like = _blank_like_score_np(df)
+    blank_th = float(_env_float("UTOA_ML_BLANK_ATTACH_RISK_TH", 0.55))
+    margin_ms = float(_env_float("UTOA_ML_BLANK_ATTACH_MARGIN_MS", 14.0))
+    expected_anchor = (
+        _safe_numeric_np(df, "expected_anchor_ms", 0.0)
+        if "expected_anchor_ms" in df.columns
+        else _safe_numeric_np(df, "curr_vowel_start_ms", 0.0)
+    )
+    manual_offset = (
+        _safe_numeric_np(df, "manual_offset", np.nan)
+        if "manual_offset" in df.columns
+        else (_safe_numeric_np(df, "base_offset", 0.0) + _safe_numeric_np(df, "delta_offset", 0.0))
+    )
+    finite = np.isfinite(expected_anchor) & np.isfinite(manual_offset)
+    lead_gap = expected_anchor - manual_offset
+    attach = finite & scope_mask & head_scope & (blank_like >= blank_th) & (lead_gap >= margin_ms)
+    label = attach.astype(np.int32)
+    rows = int(np.sum(scope_mask & head_scope))
+    pos = int(np.sum(attach))
+    rate = (float(pos) / float(max(1, rows))) if rows > 0 else 0.0
+    return label, {"rows": rows, "positive_rows": pos, "positive_rate": float(rate)}
+
+
+def _apply_blank_attach_focus_weight(df, weights: "np.ndarray", *, language: str = "", format_type: str = "") -> "np.ndarray":
+    if df is None or weights is None or len(weights) == 0:
+        return weights
+    focus_weight = float(_env_float("UTOA_ML_BLANK_ATTACH_FOCUS_WEIGHT", 1.15))
+    if focus_weight <= 1.0:
+        return weights
+    scope_mask, head_scope, _vv_scope = _blank_attach_scope_masks(df, language=language, format_type=format_type)
+    blank_like = _blank_like_score_np(df)
+    focus_factor = 1.0 + ((focus_weight - 1.0) * np.clip(blank_like, 0.0, 1.0))
+    out = weights.astype(np.float32).copy()
+    out *= np.where(head_scope, focus_factor.astype(np.float32), 1.0)
+    if "blank_attach_label" in df.columns:
+        pos = (_safe_numeric_np(df, "blank_attach_label", 0.0) > 0.5) & head_scope
+        pos_weight = max(1.0, float(_env_float("UTOA_ML_BLANK_ATTACH_POS_WEIGHT", 1.30)))
+        out *= np.where(pos, np.float32(pos_weight), np.float32(1.0))
+    return out.astype(np.float32)
+
+
+def _compute_blank_attach_kpi(
+    df,
+    *,
+    pred_delta_offset,
+    truth_delta_offset=None,
+    language: str = "",
+    format_type: str = "",
+):
+    if df is None or len(df) == 0:
+        return {
+            "enabled": False,
+            "scope_rows": 0,
+            "head_rows": 0,
+            "vv_rows": 0,
+            "pred_attach_rate": 0.0,
+            "head_pred_attach_rate": 0.0,
+            "vv_pred_attach_rate": 0.0,
+            "primary_kpi_name": "head_pred_attach_rate",
+            "primary_kpi_value": 0.0,
+            "has_gold_labels": False,
+        }
+    n = len(df)
+    pred_delta = np.asarray(pred_delta_offset, dtype=np.float64).reshape(-1)
+    if pred_delta.shape[0] != n:
+        pred_delta = np.resize(pred_delta, n)
+    truth_delta = None
+    if truth_delta_offset is not None:
+        truth_delta = np.asarray(truth_delta_offset, dtype=np.float64).reshape(-1)
+        if truth_delta.shape[0] != n:
+            truth_delta = np.resize(truth_delta, n)
+
+    base_offset = _safe_numeric_np(df, "base_offset", 0.0)
+    expected_anchor = (
+        _safe_numeric_np(df, "expected_anchor_ms", 0.0)
+        if "expected_anchor_ms" in df.columns
+        else _safe_numeric_np(df, "curr_vowel_start_ms", 0.0)
+    )
+    pred_offset_abs = base_offset + pred_delta
+    if truth_delta is not None:
+        truth_offset_abs = base_offset + truth_delta
+    elif "manual_offset" in df.columns:
+        truth_offset_abs = _safe_numeric_np(df, "manual_offset", np.nan)
+    else:
+        truth_offset_abs = np.full((n,), np.nan, dtype=np.float64)
+
+    blank_like = _blank_like_score_np(df)
+    blank_th = float(_env_float("UTOA_ML_BLANK_ATTACH_RISK_TH", 0.55))
+    margin_ms = float(_env_float("UTOA_ML_BLANK_ATTACH_MARGIN_MS", 14.0))
+    scope_mask, head_scope, vv_scope = _blank_attach_scope_masks(df, language=language, format_type=format_type)
+    finite_pred = np.isfinite(expected_anchor) & np.isfinite(pred_offset_abs)
+    pred_attach = finite_pred & head_scope & (blank_like >= blank_th) & ((expected_anchor - pred_offset_abs) >= margin_ms)
+
+    has_gold = False
+    if "blank_attach_label" in df.columns:
+        gold_attach = (_safe_numeric_np(df, "blank_attach_label", 0.0) > 0.5) & head_scope
+        has_gold = True
+    else:
+        finite_truth = np.isfinite(expected_anchor) & np.isfinite(truth_offset_abs)
+        gold_attach = finite_truth & head_scope & (blank_like >= blank_th) & ((expected_anchor - truth_offset_abs) >= margin_ms)
+        has_gold = bool(np.any(finite_truth & head_scope))
+
+    def _rate(mask, flag):
+        rows = int(np.sum(mask))
+        if rows <= 0:
+            return 0.0, rows, 0
+        pos = int(np.sum(mask & flag))
+        return float(pos) / float(rows), rows, pos
+
+    pred_rate, scope_rows, pred_rows = _rate(head_scope, pred_attach)
+    overall_rate, overall_rows, overall_pred_rows = _rate(scope_mask, pred_attach)
+    vv_rate, vv_rows, vv_pred_rows = _rate(vv_scope, pred_attach)
+    gold_rate, gold_rows, gold_pos = _rate(head_scope, gold_attach)
+
+    precision = 0.0
+    recall = 0.0
+    f1 = 0.0
+    tp = fp = fn = 0
+    if has_gold and gold_rows > 0:
+        tp = int(np.sum(head_scope & pred_attach & gold_attach))
+        fp = int(np.sum(head_scope & pred_attach & (~gold_attach)))
+        fn = int(np.sum(head_scope & (~pred_attach) & gold_attach))
+        precision = float(tp) / float(max(1, tp + fp))
+        recall = float(tp) / float(max(1, tp + fn))
+        if (precision + recall) > 0.0:
+            f1 = 2.0 * precision * recall / (precision + recall)
+
+    return {
+        "enabled": bool(scope_rows > 0),
+        "scope_rows": int(overall_rows),
+        "head_rows": int(scope_rows),
+        "vv_rows": int(vv_rows),
+        "pred_attach_rows": int(pred_rows),
+        "pred_attach_rate": float(overall_rate),
+        "head_pred_attach_rate": float(pred_rate),
+        "vv_pred_attach_rate": float(vv_rate),
+        "head_gold_attach_rate": float(gold_rate),
+        "gold_attach_rows": int(gold_pos),
+        "pred_minus_gold_rate": float(pred_rate - gold_rate),
+        "primary_kpi_name": "head_pred_attach_rate",
+        "primary_kpi_value": float(pred_rate),
+        "risk_threshold": float(blank_th),
+        "attach_margin_ms": float(margin_ms),
+        "has_gold_labels": bool(has_gold),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "tp": int(tp),
+        "fp": int(fp),
+        "fn": int(fn),
+    }
+
+
 def _resolve_sampling_group_values(df, train_idx, preferred_column: str = ""):
     candidates = [preferred_column, "voicebank_id", "wav_norm"]
     for name in candidates:
@@ -643,6 +874,45 @@ def _read_dataset_csv_resilient(path: str):
         raise
 
 
+def _infer_mapping_reason_codes(df):
+    if df is None or "mapping_reason_code" not in df.columns:
+        return df, 0, 0
+    reasons = df["mapping_reason_code"].astype(str).str.strip().str.lower()
+    unknown_mask = reasons.isin(["", "unknown", "none", "nan", "null"])
+    unknown_before = int(unknown_mask.sum())
+    if unknown_before <= 0:
+        return df, 0, 0
+
+    inferred = np.asarray(["unspecified"] * len(df), dtype=object)
+    if "used_alias_occurrence_mapping" in df.columns:
+        occ = pd.to_numeric(df["used_alias_occurrence_mapping"], errors="coerce").fillna(0.0).to_numpy() > 0.5
+        inferred = np.where(occ, "alias_occurrence", inferred)
+    if "used_alias_based_syllables" in df.columns:
+        alias_based = pd.to_numeric(df["used_alias_based_syllables"], errors="coerce").fillna(0.0).to_numpy() > 0.5
+        inferred = np.where(alias_based, "alias_based_syllables", inferred)
+    if "used_nuclei_fallback" in df.columns:
+        nuclei = pd.to_numeric(df["used_nuclei_fallback"], errors="coerce").fillna(0.0).to_numpy() > 0.5
+        inferred = np.where(nuclei, "nuclei_fallback", inferred)
+    if "jump_blocked_flag" in df.columns:
+        jump_blocked = pd.to_numeric(df["jump_blocked_flag"], errors="coerce").fillna(0.0).to_numpy() > 0.5
+        inferred = np.where(jump_blocked, "jump_blocked", inferred)
+    if "blank_risk_flag" in df.columns:
+        blank_flag = pd.to_numeric(df["blank_risk_flag"], errors="coerce").fillna(0.0).to_numpy() > 0.5
+        inferred = np.where(blank_flag, "blank_risk", inferred)
+    if "words_vs_alias_score_margin" in df.columns:
+        margin = pd.to_numeric(df["words_vs_alias_score_margin"], errors="coerce").fillna(0.0).to_numpy()
+        inferred = np.where(margin <= -0.05, "words_alias_margin_low", inferred)
+
+    out = df.copy()
+    reason_arr = reasons.to_numpy(dtype=object)
+    reason_arr[unknown_mask.to_numpy()] = inferred[unknown_mask.to_numpy()]
+    out["mapping_reason_code"] = reason_arr
+
+    after_reasons = out["mapping_reason_code"].astype(str).str.strip().str.lower()
+    unknown_after = int(after_reasons.isin(["", "unknown", "none", "nan", "null"]).sum())
+    return out, unknown_before, unknown_after
+
+
 def _prepare_training_frame(
     df,
     language: str,
@@ -674,6 +944,28 @@ def _prepare_training_frame(
         df = df[pd.to_numeric(df["train_quality_score"], errors="coerce").fillna(0.0) >= float(min_quality_score)]
     if _env_int("UTOA_ML_TRAIN_KEEP_DEFAULT_ONLY", 0) > 0 and "train_keep_default" in df.columns:
         df = df[pd.to_numeric(df["train_keep_default"], errors="coerce").fillna(0.0) >= 1.0]
+    if _env_int("UTOA_ML_INFER_REASON_CODE", 1) > 0:
+        df, unknown_before, unknown_after = _infer_mapping_reason_codes(df)
+        if unknown_before > 0:
+            print(
+                f"[TRAIN] mapping_reason_code inferred: unknown {unknown_before} -> {unknown_after}",
+                flush=True,
+            )
+    if _env_int("UTOA_ML_ENABLE_BLANK_ATTACH_LABEL", 1) > 0:
+        if "blank_attach_label" not in df.columns:
+            labels, label_meta = _derive_blank_attach_label(df, language=lang, format_type=fmt)
+            if len(labels) == len(df):
+                out = df.copy()
+                out["blank_attach_label"] = labels.astype(np.int32)
+                df = out
+                if int(label_meta.get("rows", 0)) > 0:
+                    print(
+                        "[TRAIN] blank_attach_label derived: "
+                        f"rows={int(label_meta.get('rows', 0))}, "
+                        f"positive={int(label_meta.get('positive_rows', 0))}, "
+                        f"rate={float(label_meta.get('positive_rate', 0.0)):.4f}",
+                        flush=True,
+                    )
     return df
 
 
@@ -810,6 +1102,12 @@ def train_coupled_bundle(
     else:
         W = np.ones((len(df),), dtype=np.float32)
     W = _apply_blank_risk_weight(df, W)
+    W = _apply_blank_attach_focus_weight(
+        df,
+        W,
+        language=str(language or "").strip().lower(),
+        format_type=normalize_format_type(language, format_type) or str(format_type or "").strip().lower(),
+    )
     if "alias_type" in df.columns:
         alias_type_arr = df["alias_type"].astype(str).str.lower().to_numpy()
     else:
@@ -1271,6 +1569,14 @@ def train_coupled_bundle(
     pred_valid_np = pred_valid.detach().cpu().numpy()
     conf_valid_np = conf_valid.detach().cpu().numpy().reshape(-1)
     truth_valid_np = Y[valid_idx]
+    df_valid = df.iloc[valid_idx].reset_index(drop=True)
+    blank_attach_kpi = _compute_blank_attach_kpi(
+        df_valid,
+        pred_delta_offset=pred_valid_np[:, 0],
+        truth_delta_offset=truth_valid_np[:, 0],
+        language=str(language or "").strip().lower(),
+        format_type=normalize_format_type(language, format_type) or str(format_type or "").strip().lower(),
+    )
 
     metrics = {}
     for col_i, target in enumerate(TARGET_NAMES):
@@ -1397,6 +1703,7 @@ def train_coupled_bundle(
         "voicebank_count": int(df[group_column].nunique()) if group_column in df.columns else 1,
         "holdout_metrics": metrics,
         "aux_holdout_metrics": aux_metrics,
+        "blank_attach_kpi": blank_attach_kpi,
         "holdout_confidence_mean": float(np.mean(conf_valid_np)) if len(conf_valid_np) else 0.0,
         "device_used": str(run_device),
     }
@@ -1410,6 +1717,11 @@ def train_coupled_bundle(
                 "confidence_mean": float(np.mean(conf_valid_np)) if len(conf_valid_np) else 0.0,
                 "confidence_min": float(np.min(conf_valid_np)) if len(conf_valid_np) else 0.0,
                 "confidence_max": float(np.max(conf_valid_np)) if len(conf_valid_np) else 0.0,
+                "blank_attach_kpi": blank_attach_kpi,
+                "kpi_primary": {
+                    "name": str(blank_attach_kpi.get("primary_kpi_name", "head_pred_attach_rate")),
+                    "value": float(blank_attach_kpi.get("primary_kpi_value", 0.0)),
+                },
                 "vc_cv_pair_weight": float(pair_weight_base),
                 "vc_cv_pairs_total": int(pair_total_count),
                 "vc_cv_pairs_valid": int(pair_valid_count),
@@ -1540,9 +1852,34 @@ def train_coupled_bundle_rawmel(
     patch_hash = patch_spec_hash(patch_spec)
 
     keys = df["mel_patch_key"].astype(str).tolist()
-    missing_keys = [k for k in keys if not cache_index.has_key(k)]
-    if missing_keys:
-        raise RuntimeError(f"Raw mel cache missing keys (count={len(missing_keys)}).")
+    missing_sample_n = max(1, int(_env_int("UTOA_ML_RAWMEL_MISSING_KEYS_SAMPLE", 20) or 20))
+    missing_count = 0
+    missing_sample: List[str] = []
+    for key in keys:
+        if cache_index.has_key(key):
+            continue
+        missing_count += 1
+        if len(missing_sample) < missing_sample_n:
+            missing_sample.append(str(key))
+    if missing_count > 0:
+        os.makedirs(out_dir, exist_ok=True)
+        missing_report = os.path.join(out_dir, "rawmel_missing_keys.sample.json")
+        with open(missing_report, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "cache_dir": rawmel_cache_dir,
+                    "missing_count": int(missing_count),
+                    "sample_limit": int(missing_sample_n),
+                    "sample_keys": missing_sample,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        raise RuntimeError(
+            f"Raw mel cache missing keys (count={int(missing_count)}). "
+            f"sample_report={missing_report}"
+        )
 
     schema = get_feature_schema()
     feature_names = list(schema.get("feature_names") or FEATURE_NAMES)
@@ -1646,6 +1983,12 @@ def train_coupled_bundle_rawmel(
         strength=hard_example_strength,
     )
     W = np.clip((W * risk_boost * np.sqrt(hard_boost)).astype(np.float32), 0.20, 3.00)
+    W = _apply_blank_attach_focus_weight(
+        df,
+        W,
+        language=str(language or "").strip().lower(),
+        format_type=normalize_format_type(language, format_type) or str(format_type or "").strip().lower(),
+    )
     sampling_weights = np.clip((W * hard_boost).astype(np.float32), 0.20, 4.00)
 
     if group_column in df.columns and df[group_column].nunique() >= 2 and GroupShuffleSplit is not None:
@@ -2355,6 +2698,7 @@ def train_coupled_bundle_rawmel(
         "voicebank_count": int(df[group_column].nunique()) if group_column in df.columns else 1,
         "holdout_metrics": metrics,
         "aux_holdout_metrics": aux_metrics,
+        "blank_attach_kpi": blank_attach_kpi,
         "holdout_confidence_mean": float(np.mean(conf_valid_np)) if len(conf_valid_np) else 0.0,
         "device_used": str(run_device),
     }
@@ -2368,6 +2712,11 @@ def train_coupled_bundle_rawmel(
                 "confidence_mean": float(np.mean(conf_valid_np)) if len(conf_valid_np) else 0.0,
                 "confidence_min": float(np.min(conf_valid_np)) if len(conf_valid_np) else 0.0,
                 "confidence_max": float(np.max(conf_valid_np)) if len(conf_valid_np) else 0.0,
+                "blank_attach_kpi": blank_attach_kpi,
+                "kpi_primary": {
+                    "name": str(blank_attach_kpi.get("primary_kpi_name", "head_pred_attach_rate")),
+                    "value": float(blank_attach_kpi.get("primary_kpi_value", 0.0)),
+                },
                 "vc_cv_pair_weight": float(pair_weight_base),
                 "vc_cv_pairs_total": int(pair_total_count),
                 "vc_cv_pairs_valid": int(pair_valid_count),
@@ -2427,6 +2776,24 @@ def evaluate_coupled_bundle(
         confs.append(float(c))
 
     summary = {"rows": int(len(df)), "targets": {}, "confidence_mean": float(np.mean(confs)) if confs else 0.0}
+    pred_delta_offset_np = np.asarray([float(p.get("delta_offset", 0.0)) for p in preds], dtype=np.float64)
+    truth_delta_offset_np = (
+        pd.to_numeric(df["delta_offset"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        if "delta_offset" in df.columns
+        else None
+    )
+    blank_attach_kpi = _compute_blank_attach_kpi(
+        df.reset_index(drop=True),
+        pred_delta_offset=pred_delta_offset_np,
+        truth_delta_offset=truth_delta_offset_np,
+        language=lang,
+        format_type=fmt,
+    )
+    summary["blank_attach_kpi"] = blank_attach_kpi
+    summary["kpi_primary"] = {
+        "name": str(blank_attach_kpi.get("primary_kpi_name", "head_pred_attach_rate")),
+        "value": float(blank_attach_kpi.get("primary_kpi_value", 0.0)),
+    }
     for target in TARGET_NAMES:
         truth = pd.to_numeric(df[target], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
         pred = np.asarray([float(p.get(target, 0.0)) for p in preds], dtype=np.float64)

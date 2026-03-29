@@ -1,7 +1,7 @@
-"""
-TextGrid를 기반으로 한국어 OTO.ini를 생성합니다.
-- phones/words tier를 이용해 OTO 파라미터를 계산합니다.
-- CV/VC/VCV/VV/단모음/숨소리(br) 케이스를 처리합니다.
+﻿"""
+TextGrid・ｼ ・ｰ・們愍・・﨑懋ｵｭ・ｴ OTO.ini・ｼ ・晧┳﨑ｩ・壱共.
+- phones/words tier・ｼ ・ｴ・ｩ﨑ｴ OTO 甯誤攵・ｸ奓ｰ・ｼ ・・げ﨑ｩ・壱共.
+- CV/VC/VCV/VV/・ｨ・ｨ・・・ｨ・誤ｦｬ(br) ・・ｴ・､・ｼ ・俯ｦｬ﨑ｩ・壱共.
 """
 
 import os
@@ -188,6 +188,16 @@ def _env_float(name, default):
         return float(default)
 
 
+def _env_int(name, default):
+    raw = str(os.environ.get(name, "")).strip()
+    if not raw:
+        return int(default)
+    try:
+        return int(float(raw))
+    except Exception:
+        return int(default)
+
+
 def _env_bool(name, default=False):
     raw = str(os.environ.get(name, "")).strip().lower()
     if not raw:
@@ -243,7 +253,7 @@ __all__ = [
 ]
 
 # ==============================================================================
-# 접미사 처리 유틸리티
+# ・瀧ｯｸ・ｬ ・俯ｦｬ ・寀ｸ・ｬ寀ｰ
 # ==============================================================================
 
 def _normalize_alias_suffix(suffix):
@@ -254,7 +264,7 @@ def _normalize_alias_suffix(suffix):
 
 
 def apply_alias_suffix(alias, suffix):
-    """에일리어스 끝에 `_<suffix>` 접미사를 붙입니다."""
+    """・川攵・ｬ・ｴ・､ ・晧乱 `_<suffix>` ・瀧ｯｸ・ｬ・ｼ ・呷桿・壱共."""
     suf = _normalize_alias_suffix(suffix)
     if not suf:
         return alias
@@ -265,7 +275,7 @@ def apply_alias_suffix(alias, suffix):
 
 
 def apply_suffix_to_oto_line(line, suffix):
-    """`wav=alias,params...` 라인에서 alias에만 접미사를 적용합니다."""
+    """`wav=alias,params...` ・ｼ・ｸ・川・ alias・尖ｧ・・瀧ｯｸ・ｬ・ｼ ・・圸﨑ｩ・壱共."""
     suf = _normalize_alias_suffix(suffix)
     if not suf:
         return line
@@ -355,7 +365,7 @@ def apply_output_wav_name_map(oto_path, wav_name_map):
     return changed
 
 # ==============================================================================
-# 기본 튜닝 파라미터
+# ・ｰ・ｸ 孖罹享 甯誤攵・ｸ奓ｰ
 # ==============================================================================
 
 DEFAULT_PARAMS = {
@@ -465,10 +475,10 @@ def get_default_params_for_context(language="korean", format_type=""):
         resolved.update(lang_presets.get(fmt, {}))
     return resolved
 
-# 한국어 매핑 신뢰도 임계치 기본값(포맷별)
-# - CVVC/VCV: 오매핑 억제를 위해 보수적으로 상향
-# - CV/CVC: CVVC보다 완화하되 기존값 대비 소폭 상향
-# - VC_ONLY/VV_ONLY: CV 정렬 점프 영향이 작아 중간값 유지
+# 﨑懋ｵｭ・ｴ ・､﨑・・・ｰ・・・・ｳ・ｹ・・ｰ・ｸ・・尞ｬ・ｷ・・
+# - CVVC/VCV: ・､・､﨑・・ｵ・罹･ｼ ・・紛 ・ｴ・們・愍・・・・箕
+# - CV/CVC: CVVC・ｴ・､ ・・剩﨑俯据 ・ｰ・ｴ・・・・・・醐少 ・・箕
+# - VC_ONLY/VV_ONLY: CV ・簿ｬ ・戦売 ・・箕・ｴ ・卓符 ・滝ｰ・ｰ・・・
 KR_MAPPING_CONF_THRESHOLD_BY_FORMAT = {
     "cv": 0.62,
     "cvvc": 0.67,
@@ -497,11 +507,11 @@ def _resolve_kr_threshold_env_override(file_format):
 
 
 def _resolve_kr_mapping_conf_threshold(file_format, override_threshold=None, phone_quality_score=None):
-    """포맷별 기본 매핑 신뢰도 임계값을 반환합니다.
+    """尞ｬ・ｷ・・・ｰ・ｸ ・､﨑・・・ｰ・・・・ｳ・ｰ廷揆 ・倆劍﨑ｩ・壱共.
 
-    phone_quality_score가 제공되면 phone tier 품질에 따라 동적으로 조정합니다:
-    - 품질 < 0.4 -> 임계값을 0.05 낮춤 (과도한 저신뢰 판정 완화)
-    - 품질 > 0.8 -> 임계값을 0.03 올림 (고품질 데이터에서 더 엄격)
+    phone_quality_score・ ・懋ｳｵ・俯ｩｴ phone tier 峵溢ｧ溢乱 ・ｰ・ｼ ・呷・愍・・・ｰ・倣鮒・壱共:
+    - 峵溢ｧ・< 0.4 -> ・・ｳ・ｰ廷揆 0.05 ・ｮ・､ (・ｼ・・復 ・・・ｰ 甯川・・・剩)
+    - 峵溢ｧ・> 0.8 -> ・・ｳ・ｰ廷揆 0.03 ・ｬ・ｼ (・峵溢ｧ・・ｰ・ｴ奓ｰ・川・ ・・・・ｲｩ)
     """
     if override_threshold is not None:
         try:
@@ -518,7 +528,7 @@ def _resolve_kr_mapping_conf_threshold(file_format, override_threshold=None, pho
     )
     threshold = float(base)
 
-    # phone tier 품질에 따른 동적 조정
+    # phone tier 峵溢ｧ溢乱 ・ｰ・ｸ ・呷・・ｰ・・
     if phone_quality_score is not None:
         try:
             pq = float(phone_quality_score)
@@ -575,7 +585,7 @@ def _should_keep_template_alias_set_exact(*, use_template, generate_openutau, ge
 
 
 def is_diphthong_file(filename):
-    """파일명에 이중모음 표식이 포함되는지 확인합니다."""
+    """甯護攵・・乱 ・ｴ・瀧ｪｨ・・岺懍享・ｴ 尞ｬ﨑ｨ・俯株・ 嶹菩攤﨑ｩ・壱共."""
     clean = filename.lower().replace("'", "").replace(".wav", "")
     diphthong_markers = [
         'ya','yeo','yo','yu','ye','wa','wo','wi','we','weo','eui',
@@ -600,7 +610,7 @@ def is_diphthong_file(filename):
 
 @lru_cache(maxsize=16384)
 def is_diphthong(alias):
-    """에일리어스 문자열에 이중모음 패턴이 있는지 확인합니다."""
+    """・川攵・ｬ・ｴ・､ ・ｸ・川龍・・・ｴ・瀧ｪｨ・・甯ｨ奓ｴ・ｴ ・壱株・ 嶹菩攤﨑ｩ・壱共."""
     clean = alias.replace(' ', '').lower()
     diphthongs = ['ya','yeo','yo','yu','ye','wa','wo','wi','we','weo','eui','ui']
     for diph in diphthongs:
@@ -611,7 +621,7 @@ def is_diphthong(alias):
 
 def adaptive_overlap(pre, consonant_hint="", mode="cv"):
     """
-    자음 성질/에일리어스 타입에 따라 overlap을 동적으로 조정합니다.
+    ・川搆 ・ｱ・・・川攵・ｬ・ｴ・､ 夋・・乱 ・ｰ・ｼ overlap・・・呷・愍・・・ｰ・倣鮒・壱共.
     """
     p = max(float(pre), 0.0)
     if p <= 0:
@@ -619,8 +629,8 @@ def adaptive_overlap(pre, consonant_hint="", mode="cv"):
 
     hint = normalize_ipa_mark(consonant_hint or "")
     hard = {'g', 'd', 'b', 'c', 'j'}
-    tense = {'kk', 'tt', 'pp', 'gg', 'dd', 'bb', 'ss', 'jj'}  # 경음: VOT 짧음
-    aspirate = {'k', 't', 'p', 'ch'}  # 격음: 기식 길음
+    tense = {'kk', 'tt', 'pp', 'gg', 'dd', 'bb', 'ss', 'jj'}  # ・ｽ・・ VOT ・ｧ・・
+    aspirate = {'k', 't', 'p', 'ch'}  # ・ｩ・・ ・ｰ・・・ｸ・・
     fric = {'s', 'ss', 'sh', 'h', 'f', 'z'}
     sonorant = {'m', 'n', 'ng', 'r', 'l', 'y', 'w'}
 
@@ -634,11 +644,11 @@ def adaptive_overlap(pre, consonant_hint="", mode="cv"):
     ratio = base_by_mode.get(mode, 0.46)
 
     if hint in tense:
-        ratio -= 0.20  # 경음: VOT가 짧아 overlap을 더 줄임
+        ratio -= 0.20  # ・ｽ・・ VOT・ ・ｧ・・overlap・・・・・・桷
     elif hint in hard:
         ratio -= 0.14
     elif hint in aspirate:
-        ratio += 0.02  # 격음: 기식이 길어 overlap을 약간 넓힘
+        ratio += 0.02  # ・ｩ・・ ・ｰ・晧擽 ・ｸ・ｴ overlap・・・ｽ・・・楠椈
     elif hint in fric:
         ratio += 0.05
     elif hint in sonorant:
@@ -652,7 +662,7 @@ def adaptive_overlap(pre, consonant_hint="", mode="cv"):
 
 
 def _guard_cv_cutoff_to_next_onset(offset, consonant, cutoff, pre, syll_idx, syllables_info):
-    """CV/CV_HEAD cutoff이 다음 음절 onset을 침범하지 않도록 상한을 건다."""
+    """CV/CV_HEAD cutoff・ｴ ・､・・・護・onset・・・ｨ・被葺・ ・危巡・・・・復・・・ｴ・､."""
     if syll_idx is None or syll_idx < 0:
         return offset, consonant, cutoff, pre, 0.0
     if (syll_idx + 1) >= len(syllables_info):
@@ -692,7 +702,7 @@ def _guard_cv_cutoff_to_next_onset(offset, consonant, cutoff, pre, syll_idx, syl
 
 
 def _guard_cv_cutoff_to_next_onset_strict(offset, consonant, cutoff, pre, syll_idx, syllables_info):
-    """order-locked CV에서 다음 음절 onset 침범을 더 강하게 막는 가드."""
+    """order-locked CV・川・ ・､・・・護・onset ・ｨ・肥揆 ・・・倣葺・・・雅株 ・・・"""
     if syll_idx is None or syll_idx < 0:
         return offset, consonant, cutoff, pre, 0.0
     if (syll_idx + 1) >= len(syllables_info):
@@ -734,7 +744,7 @@ def _guard_cv_cutoff_to_next_onset_strict(offset, consonant, cutoff, pre, syll_i
 
 
 def _guard_kr_vc_cutoff_to_next_segment(offset, consonant, cutoff, pre, ovl, syll_idx, syllables_info, alias_text=""):
-    """한국어 VC cutoff 가드(호환 래퍼)."""
+    """﨑懋ｵｭ・ｴ VC cutoff ・・・嶸ｸ嶹・・倆詐)."""
     return _guard_kr_vc_cutoff_to_next_segment_core(
         offset,
         consonant,
@@ -750,8 +760,8 @@ def _guard_kr_vc_cutoff_to_next_segment(offset, consonant, cutoff, pre, ovl, syl
 
 def _guard_cv_head_offset_to_current_onset(offset, consonant, cutoff, pre, syll_idx, syllables_info):
     """
-    CV_HEAD(- CV) offset이 현재 음절 onset보다 과도하게 앞서지 않도록 제한합니다.
-    공백 영역 과포함을 줄이기 위한 가드입니다.
+    CV_HEAD(- CV) offset・ｴ 嶸・椪 ・護・onset・ｴ・､ ・ｼ・・葺・・・樌・・ ・危巡・・・懦復﨑ｩ・壱共.
+    ・ｵ・ｱ ・・溜 ・ｼ尞ｬ﨑ｨ・・・・擽・ｰ ・・復 ・・懍桿・壱共.
     """
     if syll_idx is None or syll_idx < 0:
         return offset, consonant, cutoff, pre, 0.0
@@ -772,7 +782,7 @@ def _guard_cv_head_offset_to_current_onset(offset, consonant, cutoff, pre, syll_
         c_end = float(curr_phones[0].maxTime) * 1000.0
     c_len = max(0.0, c_end - c_start)
 
-    # onset 특성별 허용 리드(ms): 파열/치찰은 조금 넓게, 공명음은 더 타이트하게.
+    # onset 孖ｹ・ｱ・・嵭溢圸 ・ｬ・・ms): 甯護龍/・們ｰｰ・ ・ｰ・・・縄ｲ・ ・ｵ・・搆・ ・・夋・ｴ孖ｸ﨑俾ｲ・
     if is_plosive_ipa(c_hint) or c_hint in {"s", "ss", "sh", "ch", "j", "jj", "c", "ts", "h"}:
         base_lead = 44.0
     elif c_hint in {"m", "n", "ng", "l", "r", "y", "w", "ny"}:
@@ -785,8 +795,8 @@ def _guard_cv_head_offset_to_current_onset(offset, consonant, cutoff, pre, syll_
         return offset, consonant, cutoff, pre, 0.0
 
     new_offset = offset_floor
-    # 오프셋만 당길 때 상대 길이(pre/cons/cutoff)가 급격히 줄어들지 않도록
-    # 기존 상대 파라미터를 우선 보존한다.
+    # ・､嵓・・・・・ｹ・ｸ ・・・・劇 ・ｸ・ｴ(pre/cons/cutoff)・ ・賀ｲｩ德・・・牟・､・ ・危巡・・
+    # ・ｰ・ｴ ・・劇 甯誤攵・ｸ奓ｰ・ｼ ・ｰ・ ・ｴ・ｴ﨑罹共.
     new_pre = max(float(pre), 8.0)
     new_consonant = max(float(consonant), new_pre + 8.0)
     new_cut_abs = max(abs(float(cutoff)), new_consonant + 12.0)
@@ -801,7 +811,7 @@ def _guard_cv_head_offset_to_current_onset(offset, consonant, cutoff, pre, syll_
 
 def _ensure_cv_head_min_vowel_coverage(offset, consonant, cutoff, pre, vowel_start_ms, vowel_end_ms):
     """
-    CV_HEAD(-CV)에서 컷오프가 너무 이르게 닫혀 모음이 거의 포함되지 않는 경우를 방지합니다.
+    CV_HEAD(-CV)・川・ ・ｷ・､嵓・ｰ ・壱ｬｴ ・ｴ・ｴ・・・ｫ嶸 ・ｨ・護擽 ・ｰ・・尞ｬ﨑ｨ・們ｧ ・危株 ・ｽ・ｰ・ｼ ・ｩ・﨑ｩ・壱共.
     """
     v_start = float(vowel_start_ms)
     v_end = float(vowel_end_ms)
@@ -810,10 +820,10 @@ def _ensure_cv_head_min_vowel_coverage(offset, consonant, cutoff, pre, vowel_sta
         return offset, consonant, cutoff, pre, 0.0
 
     cut_abs = abs(float(cutoff))
-    # 모음 구간을 최소 일부(비율+하한) 포함하도록 컷오프 하한을 설정.
+    # ・ｨ・・・ｬ・・揆 ・懍・ ・ｼ・(・・惠+﨑倆復) 尞ｬ﨑ｨ﨑俯巡・・・ｷ・､嵓・﨑倆復・・・､・・
     keep_v_ms = min(max(v_len * 0.30, 70.0), 190.0)
     vowel_start_rel = max(v_start - float(offset), float(pre) + 8.0)
-    # pre 이후 너무 빨리 닫히는 케이스(자음만 남는 길이)를 방지.
+    # pre ・ｴ弡・・壱ｬｴ ・ｨ・ｬ ・ｫ德壱株 ・・ｴ・､(・川搆・・・ｨ・・・ｸ・ｴ)・ｼ ・ｩ・.
     min_from_pre = min(max(v_len * 0.24, 90.0), 180.0)
     min_cut_abs = max(float(consonant) + 12.0, vowel_start_rel + keep_v_ms, float(pre) + min_from_pre)
     if cut_abs >= min_cut_abs:
@@ -832,7 +842,7 @@ def _is_sonorant_like_onset(onset, ipa_hint=""):
     h = str(ipa_hint or "").strip().lower()
     if o.startswith(("m", "n", "ng", "l", "r")):
         return True
-    if h.startswith(("m", "n", "ŋ", "l", "r")):
+    if h.startswith(("m", "n", "ng", "l", "r")):
         return True
     return False
 
@@ -849,8 +859,8 @@ def _ensure_cv_min_vowel_coverage(
     ipa_onset="",
 ):
     """
-    CV에서 컷오프가 너무 짧아 모음 시작이 거의 포함되지 않는 경우를 보정합니다.
-    특히 유성 자음(m/n/l/r)에서 보수적으로 적용합니다.
+    CV・川・ ・ｷ・､嵓・ｰ ・壱ｬｴ ・ｧ・・・ｨ・・・懍梠・ｴ ・ｰ・・尞ｬ﨑ｨ・們ｧ ・危株 ・ｽ・ｰ・ｼ ・ｴ・倣鮒・壱共.
+    孖ｹ德・・・ｱ ・川搆(m/n/l/r)・川・ ・ｴ・們・愍・・・・圸﨑ｩ・壱共.
     """
     if not _is_sonorant_like_onset(alias_onset, ipa_onset):
         return offset, consonant, cutoff, pre, 0.0
@@ -891,9 +901,9 @@ def _guard_cv_focus_window(
     ipa_onset="",
 ):
     """
-    CV의 핵심 구간을 보정합니다.
-    - offset이 onset 뒤로 밀려 자음이 잘리는 것을 방지
-    - cutoff가 모음 tail(흐려지는 구간)을 과도하게 포함하지 않도록 제한
+    CV・・﨑ｵ・ｬ ・ｬ・・揆 ・ｴ・倣鮒・壱共.
+    - offset・ｴ onset ・､・・・・､ ・川搆・ｴ ・俯ｦｬ・・・・揆 ・ｩ・
+    - cutoff・ ・ｨ・・tail(彧尖､・・・・ｬ・・・・・ｼ・・葺・・尞ｬ﨑ｨ﨑們ｧ ・危巡・・・懦復
     """
     try:
         c_start = float(c_start_ms)
@@ -923,8 +933,8 @@ def _guard_cv_focus_window(
     offset_pulled_ms = 0.0
     cutoff_trimmed_ms = 0.0
 
-    # 1) 자음 onset 이후로 offset이 밀리면 offset 자체를 앞당겨
-    # pre/cons/cut 절대축도 같이 앞쪽으로 이동시킨다.
+    # 1) ・川搆 onset ・ｴ弡・｡・offset・ｴ ・・ｬ・ｴ offset ・川ｲｴ・ｼ ・橄胸・ｨ
+    # pre/cons/cut ・壱劇・簿巡 ・呷擽 ・樌ｪｽ・ｼ・・・ｴ・呷亨墲ｨ・､.
     onset_late_slack = max(0.0, _env_float("UTOA_KR_CV_ONSET_LATE_SLACK_MS", 2.0))
     max_allowed_offset = max(0.0, c_start + onset_late_slack)
     if float(offset) > max_allowed_offset:
@@ -932,16 +942,16 @@ def _guard_cv_focus_window(
         offset = max_allowed_offset
         offset_pulled_ms = shift
     elif float(offset) < min_allowed_offset:
-        # 앞 모음 말미가 offset 구간으로 유입되지 않도록 offset 하한을 보장.
+        # ・・・ｨ・・・尖ｯｸ・ offset ・ｬ・・愍・・・・・据・ ・危巡・・offset 﨑倆復・・・ｴ・･.
         advance = min_allowed_offset - float(offset)
         offset = min_allowed_offset
         pre = max(6.0, float(pre) - advance)
         consonant = max(float(pre) + 8.0, float(consonant) - advance)
         cutoff = -max(float(consonant) + 12.0, abs(float(cutoff)) - advance)
 
-    # 1.5) pre(anchor)가 모음 중반으로 늦게 들어가는 경우를 강하게 제한.
-    # 우선 offset을 더 앞당기되 onset 하한을 넘지 않게 하고,
-    # 하한에 걸리면 pre를 직접 줄인다.
+    # 1.5) pre(anchor)・ ・ｨ・・・瀧ｰ們愍・・・ｦ・・・､・ｴ・・・・ｽ・ｰ・ｼ ・倣葺・・・懦復.
+    # ・ｰ・ offset・・・・・橄胸・ｰ・・onset 﨑倆復・・・們ｧ ・伎ｲ・﨑俾ｳ,
+    # 﨑倆復・・・ｸ・ｬ・ｴ pre・ｼ ・・・・・攤・､.
     pre_abs = float(offset) + float(pre)
     nucleus_late_slack = max(0.0, _env_float("UTOA_KR_CV_NUCLEUS_LATE_SLACK_MS", 9.0))
     max_pre_abs = float(c_end) + nucleus_late_slack
@@ -955,7 +965,7 @@ def _guard_cv_focus_window(
         if residual > 0.0 or (float(offset) + float(pre)) > max_pre_abs:
             pre = max(6.0, max_pre_abs - float(offset))
 
-    # 2) 모음 안정 구간 이후 tail은 cutoff 상한으로 제한.
+    # 2) ・ｨ・・・溢・・ｬ・・・ｴ弡・tail・ cutoff ・・復・ｼ・・・懦復.
     vowel_len = max(0.0, v_end - v_start)
     if vowel_len >= 38.0:
         if hard_onset:
@@ -1007,7 +1017,7 @@ def _prepare_vcv_syllable_timing(
     *,
     forced_w_idx=None,
 ):
-    """VCV 계산에 필요한 음절 인덱스 갱신과 기본 타이밍을 산출합니다."""
+    """VCV ・・げ・・﨑・囈﨑・・護・・ｸ・ｱ・､ ・ｱ・・ｼ ・ｰ・ｸ 夋・ｴ・作揆 ・ｰ・懦鮒・壱共."""
     return _prepare_vcv_syllable_timing_v2(
         syllables_info,
         current_w_idx,
@@ -1032,10 +1042,10 @@ def _fit_oto_to_wav_duration(
     validate_fn=None,
 ):
     """
-    생성 파라미터를 WAV 길이 경계 안으로 강제 보정합니다.
+    ・晧┳ 甯誤攵・ｸ奓ｰ・ｼ WAV ・ｸ・ｴ ・ｽ・・・溢愍・・・菩・・ｴ・倣鮒・壱共.
     - offset >= 0
     - offset + |cutoff| <= wav_duration
-    - ovl <= pre <= consonant < |cutoff| (가능한 범위에서 유지)
+    - ovl <= pre <= consonant < |cutoff| (・・･﨑・・肥怱・川・ ・・)
     """
     if validate_fn is None:
         validate_fn = validate_oto_params
@@ -1102,7 +1112,7 @@ def _fit_oto_to_wav_duration(
 
     end_abs2 = offset + abs(cutoff)
     if end_abs2 > dur + 1e-6 or offset > dur + 1e-6:
-        # 극단 케이스 최종 안전망
+        # ・ｹ・ｨ ・・ｴ・､ ・懍｢・・溢・ｧ・
         offset = max(0.0, min(offset, max(0.0, dur - 1.5)))
         cut_abs = max(0.8, min(abs(cutoff), max(0.8, dur - offset - 0.1)))
         consonant = max(0.2, min(consonant, max(0.2, cut_abs - 0.2)))
@@ -1135,7 +1145,7 @@ def _build_alias_rows(
     wav_duration_ms=0.0,
     validate_fn=None,
 ):
-    """에일리어스(및 OpenUtau 변형)를 OTO 라인 문자열로 변환합니다."""
+    """・川攵・ｬ・ｴ・､(・・OpenUtau ・嶸・・ｼ OTO ・ｼ・ｸ ・ｸ・川龍・・・嶹倆鮒・壱共."""
     generate_aliases_fn = generate_openutau_aliases
     # Korean phonemizer alias set can be opted-in explicitly.
     use_phonemizer_alias = str(os.environ.get("UTOA_KR_USE_PHONEMIZER_ALIAS", "")).strip().lower()
@@ -1189,7 +1199,7 @@ def _append_alias_rows(
     wav_duration_ms=0.0,
     validate_fn=None,
 ):
-    """에일리어스(및 OpenUtau 변형)를 OTO 라인으로 누적합니다."""
+    """・川攵・ｬ・ｴ・､(・・OpenUtau ・嶸・・ｼ OTO ・ｼ・ｸ・ｼ・・・・・鮒・壱共."""
     final_lines.extend(
         _build_alias_rows(
             real_wav_name,
@@ -1235,7 +1245,7 @@ def _resolve_cv_syllable_index(
 
 
 def _remap_kr_forced_cv_index(target_clean, romaji_syllables, expected_idx):
-    """강제 occurrence 인덱스가 유효하지 않을 때 사용 가능한 인덱스로 재매핑합니다."""
+    """・菩・occurrence ・ｸ・ｱ・､・ ・巐ｨ﨑們ｧ ・喜揆 ・・・ｬ・ｩ ・・･﨑・・ｸ・ｱ・､・・・ｬ・､﨑啄鮒・壱共."""
     if not target_clean or not romaji_syllables:
         return None
 
@@ -1412,7 +1422,7 @@ def _apply_post_timing_pipeline(
     enable_cutoff_guard=True,
     post_ctx=None,
 ):
-    """후처리 가드(soft mel/base shape/stabilize/cutoff)를 일관 적용합니다."""
+    """弡・ｲ俯ｦｬ ・・・soft mel/base shape/stabilize/cutoff)・ｼ ・ｼ・ ・・圸﨑ｩ・壱共."""
     base_offset = float(offset)
     base_consonant = float(consonant)
     base_cutoff = float(cutoff)
@@ -1497,7 +1507,7 @@ def _apply_post_timing_pipeline(
 
 
 def _log_post_timing_events(log_fn, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced):
-    """후처리 가드 로그(호환 래퍼)."""
+    """弡・ｲ俯ｦｬ ・・・・懋ｷｸ(嶸ｸ嶹・・倆詐)."""
     _log_post_timing_events_core(log_fn, fname, alias, soft_off_shift, soft_cut_shift, cutoff_reduced)
 
 
@@ -1507,29 +1517,85 @@ def _is_kr_nucleus_phone_mark(mark):
         return False
     if m in IPA_VOWELS:
         return True
-    return m in {"ɯ", "ʌ", "ɛ", "ə", "æ", "ɑ", "ɐ", "ɔ", "ɪ", "ʊ", "ø", "œ"}
+    if m in KR_VOWELS:
+        return True
+    mapped = _map_kr_phone_vowel_to_roman(m)
+    return bool(mapped and mapped in KR_VOWELS)
 
 
 def _map_kr_phone_vowel_to_roman(mark):
-    m = normalize_ipa_mark(mark)
-    return {
-        "ʌ": "eo",
-        "ɯ": "eu",
-        "ɛ": "ae",
-        "æ": "ae",
-        "ə": "eo",
-        "ø": "oe",
-        "œ": "oe",
-        "ɪ": "i",
-        "ʊ": "u",
-        "ɔ": "o",
-        "ɑ": "a",
-        "ɐ": "a",
-    }.get(m, m)
+    m = str(normalize_ipa_mark(mark) or '').strip().lower()
+    if not m:
+        return ''
+
+    direct = {
+        'a': 'a',
+        'e': 'e',
+        'i': 'i',
+        'o': 'o',
+        'u': 'u',
+        'eo': 'eo',
+        'eu': 'eu',
+        'ae': 'ae',
+        'oe': 'oe',
+        'ui': 'ui',
+        'wa': 'wa',
+        'we': 'we',
+        'weo': 'weo',
+        'wi': 'wi',
+        'wo': 'wo',
+        'wae': 'wae',
+        'ya': 'ya',
+        'ye': 'ye',
+        'yeo': 'yeo',
+        'yo': 'yo',
+        'yu': 'yu',
+    }
+    if m in direct:
+        return direct[m]
+
+    ipa_map = {
+        '\u0259': 'eo',  # schwa
+        '\u028c': 'eo',  # open-mid back unrounded
+        '\u026f': 'eu',  # close back unrounded
+        '\u025b': 'ae',  # open-mid front unrounded
+        '\u00f8': 'oe',  # close-mid front rounded
+        '\u0153': 'oe',  # open-mid front rounded
+        '\u026a': 'i',
+        '\u028a': 'u',
+        '\u0252': 'o',
+        '\u0250': 'a',
+    }
+    if m in ipa_map:
+        return ipa_map[m]
+
+    if m.startswith('j') and len(m) > 1:
+        tail = _map_kr_phone_vowel_to_roman(m[1:])
+        return {
+            'a': 'ya',
+            'e': 'ye',
+            'eo': 'yeo',
+            'o': 'yo',
+            'u': 'yu',
+            'ae': 'yae',
+        }.get(tail, tail)
+
+    if m.startswith('w') and len(m) > 1:
+        tail = _map_kr_phone_vowel_to_roman(m[1:])
+        return {
+            'a': 'wa',
+            'e': 'we',
+            'eo': 'weo',
+            'i': 'wi',
+            'o': 'wo',
+            'ae': 'wae',
+        }.get(tail, tail)
+
+    return m
 
 
 def _estimate_kr_nucleus_token(ph_intervals, nuc_idx):
-    """phone nuclei 근방에서 한국어 CV 핵심 토큰을 추정합니다."""
+    """phone nuclei ・ｼ・ｩ・川・ 﨑懋ｵｭ・ｴ CV 﨑ｵ・ｬ 奝增ｰ・・・肥倣鮒・壱共."""
     if nuc_idx < 0 or nuc_idx >= len(ph_intervals):
         return ""
     vowel = _map_kr_phone_vowel_to_roman(ph_intervals[nuc_idx].mark)
@@ -1542,7 +1608,7 @@ def _estimate_kr_nucleus_token(ph_intervals, nuc_idx):
         gmark = normalize_ipa_mark(ph_intervals[prev_idx].mark)
         if gmark in {"j", "y"}:
             glide = "y"
-        elif gmark in {"w", "ʋ", "ɥ"}:
+        elif gmark in {"w", "\u02b7", "\u0265"}:
             glide = "w"
         prev_idx -= 1
 
@@ -1573,7 +1639,7 @@ def _estimate_kr_nucleus_token(ph_intervals, nuc_idx):
 
 
 def _select_kr_nuclei_for_targets(ph_intervals, nuclei, cv_targets):
-    """target 순서와 nuclei token score를 이용해 monotonic alignment를 수행합니다."""
+    """target ・懍・・ nuclei token score・ｼ ・ｴ・ｩ﨑ｴ monotonic alignment・ｼ ・倆哩﨑ｩ・壱共."""
     if not nuclei or not cv_targets:
         return None
     n_count = len(nuclei)
@@ -1637,9 +1703,9 @@ def _build_kr_syllables_from_phone_nuclei(ph_intervals, cv_targets):
         if _is_kr_nucleus_phone_mark(p.mark) and not is_glide(p.mark)
     ]
     if len(nuclei) < target_n:
-        # 저볼륨 녹음에서는 nucleus가 target 개수보다 적게 검출되는 경우가 있다.
-        # 이때 매핑 전체를 포기하면 CVVC 파일이 통째로 mapping_failed로 떨어지므로,
-        # phone 구간을 target 개수에 맞춰 contiguous chunk로 강제 분할한다.
+        # ・・ｼ・ｨ ・ｹ・護乱・罹株 nucleus・ target ・懍・・ｴ・､ ・・ｲ・・・罹据・・・ｽ・ｰ・ ・壱共.
+        # ・ｴ・・・､﨑・・・ｲｴ・ｼ 尞ｬ・ｰ﨑俯ｩｴ CVVC 甯護攵・ｴ 奝ｵ・ｸ・・mapping_failed・・・ｨ・ｴ・・・・
+        # phone ・ｬ・・揆 target ・懍・・・・樌ｶｰ contiguous chunk・・・菩・・・腹﨑罹共.
         total = len(ph_intervals)
         if total <= 0:
             return None
@@ -1704,11 +1770,11 @@ def _build_kr_syllables_from_phone_nuclei(ph_intervals, cv_targets):
 
 def _collect_kr_phone_tier_quality(phone_tier, expected_syllables, min_vowel_phone_ratio=0.5):
     """
-    phones tier 품질을 계산합니다.
-    - 비침묵 phone 수
-    - spn 비율
-    - 핵 모음 phone 수
-    - 기대 음절 대비 phone 수 비율
+    phones tier 峵溢ｧ溢揆 ・・げ﨑ｩ・壱共.
+    - ・・ｹｨ・ｵ phone ・・
+    - spn ・・惠
+    - 﨑ｵ ・ｨ・・phone ・・
+    - ・ｰ・ ・護・・・・phone ・・・・惠
     """
     silence_marks = {"", "sil", "pau", "sp"}
     phone_count_non_sil = 0
@@ -1757,10 +1823,10 @@ def _estimate_kr_mapping_confidence(
     used_alias_based=False,
 ):
     """
-    한국어 음절 매핑 신뢰도를 0~1로 추정합니다.
-    - phones/words 품질
-    - words vs alias 점수 마진
-    - 적용된 매핑 경로
+    﨑懋ｵｭ・ｴ ・護・・､﨑・・・ｰ・・･ｼ 0~1・・・肥倣鮒・壱共.
+    - phones/words 峵溢ｧ・
+    - words vs alias ・川・ ・溢ｧ・
+    - ・・圸・・・､﨑・・ｽ・・
     """
     pq = phone_quality or {}
     spn_ratio = float(pq.get("spn_ratio_in_phone_tier", 0.0) or 0.0)
@@ -1795,7 +1861,7 @@ def _estimate_kr_mapping_confidence(
 
 def _synthesize_kr_word_phones(word, w_start, w_end, decompose_hangul_to_roman):
     """
-    words 구간에 대응하는 phones가 비어 있을 때 최소 합성 phone을 생성합니다.
+    words ・ｬ・・乱 ・・啄葺・・phones・ ・・牟 ・溢揆 ・・・懍・ 﨑ｩ・ｱ phone・・・晧┳﨑ｩ・壱共.
     """
     start = float(w_start)
     end = float(w_end)
@@ -1820,15 +1886,15 @@ def _synthesize_kr_word_phones(word, w_start, w_end, decompose_hangul_to_roman):
         "u": "u",
         "e": "e",
         "o": "o",
-        "eo": "ʌ",
-        "eu": "ɯ",
-        "ae": "ɛ",
-        "oe": "ø",
+        "eo": "\u0259",
+        "eu": "ﾉｯ",
+        "ae": "\u025b",
+        "oe": "ﾃｸ",
         "wi": "wi",
         "wo": "wo",
         "wa": "wa",
         "we": "we",
-        "weo": "wʌ",
+        "weo": "w\u0259",
     }.get(vowel, vowel)
 
     phones = []
@@ -1843,22 +1909,22 @@ def _synthesize_kr_word_phones(word, w_start, w_end, decompose_hangul_to_roman):
 
 
 def validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=""):
-    """UTAU OTO 파라미터를 유효 범위로 보정합니다.
+    """UTAU OTO 甯誤攵・ｸ奓ｰ・ｼ ・巐ｨ ・肥怱・・・ｴ・倣鮒・壱共.
 
-    UTAU 필수 순서 제약: ovl < pre <= consonant < |cutoff|
-    alias_type에 따라 파라미터 간 최소 간격을 차등 적용합니다.
+    UTAU 﨑・・ ・懍・ ・懍平: ovl < pre <= consonant < |cutoff|
+    alias_type・・・ｰ・ｼ 甯誤攵・ｸ奓ｰ ・・・懍・ ・・ｲｩ・・・ｨ・ｱ ・・圸﨑ｩ・壱共.
 
     Args:
-        offset: 파일 앞부분부터의 시작 위치 (ms, >= 0)
-        consonant: 고정자음부 (오프셋 기준 상대, 스트레치 불가 구간)
-        cutoff: 컷오프 (음수, 오프셋 기준 상대, 이후 소리 잘림)
-        pre: 선행발음 (오프셋 기준 상대, 자음->모음 전이점)
-        ovl: 오버랩 (오프셋 기준 상대, 앞 노트와 블렌딩)
-        alias_type: 에일리어스 타입 (cv, cv_head, vc, vv, vcv 등, 선택적)
+        offset: 甯護攵 ・橄ｶ・・ｶ奓ｰ・・・懍梠 ・・ｹ・(ms, >= 0)
+        consonant: ・・菩梵・誤ｶ (・､嵓・・ ・ｰ・ ・・劇, ・､孖ｸ・溢ｹ・・一ｰ ・ｬ・・
+        cutoff: ・ｷ・､嵓・(・護・, ・､嵓・・ ・ｰ・ ・・劇, ・ｴ弡・・誤ｦｬ ・俯ｦｼ)
+        pre: ・嵂雅ｰ懍搆 (・､嵓・・ ・ｰ・ ・・劇, ・川搆->・ｨ・・・・擽・・
+        ovl: ・､・・棠 (・､嵓・・ ・ｰ・ ・・劇, ・・・ｸ孖ｸ・ ・罷誤畠)
+        alias_type: ・川攵・ｬ・ｴ・､ 夋・・(cv, cv_head, vc, vv, vcv ・ｱ, ・夋晧・
     """
     a_type = str(alias_type or "").strip().lower()
 
-    # --- alias_type별 최소 간격 테이블 ---
+    # --- alias_type・・・懍・ ・・ｲｩ 奛護擽・・---
     _MIN_CONS_GAP = {
         "cv": 20.0, "cv_head": 20.0, "vc": 10.0,
         "vv": 16.0, "vcv": 18.0, "mono": 12.0, "br": 8.0,
@@ -1882,7 +1948,7 @@ def validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=""):
             )
         min_cutoff_span = max(float(min_cut_gap) + 8.0, float(cv_span_default))
 
-    # --- 기본 하한 ---
+    # --- ・ｰ・ｸ 﨑倆復 ---
     if offset < 0:
         offset = 0
     if pre < 0:
@@ -1892,15 +1958,15 @@ def validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=""):
     if consonant < 0:
         consonant = 0
 
-    # --- ovl < pre 강제 ---
+    # --- ovl < pre ・菩・---
     if ovl > pre:
         ovl = pre * 0.75
 
-    # --- pre <= consonant 강제 (alias_type별 최소 간격) ---
+    # --- pre <= consonant ・菩・(alias_type・・・懍・ ・・ｲｩ) ---
     if consonant < pre + min_cons_gap:
         consonant = pre + min_cons_gap
 
-    # --- consonant < |cutoff| 강제 (alias_type별 최소 간격) ---
+    # --- consonant < |cutoff| ・菩・(alias_type・・・懍・ ・・ｲｩ) ---
     cutoff_abs = abs(cutoff)
     if cutoff_abs <= consonant + min_cut_gap:
         cutoff_abs = consonant + min_cut_gap
@@ -1908,7 +1974,7 @@ def validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=""):
         cutoff_abs = min_cutoff_span
     cutoff = -cutoff_abs
 
-    # --- 최종 순서 검증 (안전망) ---
+    # --- ・懍｢・・懍・ ・・・(・溢・ｧ・ ---
     if ovl >= pre:
         ovl = max(0.0, pre - 2.0)
     if consonant < pre:
@@ -1924,7 +1990,7 @@ def validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=""):
 
 
 def _nearest_phone_edge_ms(anchor_ms, ph_intervals):
-    """anchor_ms에 가장 가까운 phone 경계(ms)를 반환합니다."""
+    """anchor_ms・・・・･ ・・護垓 phone ・ｽ・・ms)・ｼ ・倆劍﨑ｩ・壱共."""
     nearest = None
     nearest_dist = float("inf")
     for ph in ph_intervals or []:
@@ -1947,8 +2013,8 @@ def _nearest_phone_edge_ms(anchor_ms, ph_intervals):
 
 def _surrounding_phone_gap(anchor_ms, ph_intervals):
     """
-    anchor_ms가 phone 사이 gap에 있을 때 (prev_end, next_start, gap_len_ms) 반환.
-    gap 내부가 아니면 (None, None, 0.0).
+    anchor_ms・ phone ・ｬ・ｴ gap・・・溢揆 ・・(prev_end, next_start, gap_len_ms) ・倆劍.
+    gap ・ｴ・・ ・・笈・ｴ (None, None, 0.0).
     """
     prev_end = None
     next_start = None
@@ -1969,8 +2035,8 @@ def _surrounding_phone_gap(anchor_ms, ph_intervals):
 
 def _stabilize_params_to_phone_activity(offset, consonant, cutoff, pre, ovl, ph_intervals, alias_type="cv"):
     """
-    선행발성 기준점(pre 절대위치)이 무음 gap에 걸리면
-    가장 가까운 유효 phone 경계로 스냅해 빈 공간 정렬을 완화합니다.
+    ・嵂雅ｰ懍┳ ・ｰ・・・pre ・壱劇・・ｹ・・ｴ ・ｴ・・gap・・・ｸ・ｬ・ｴ
+    ・・･ ・・護垓 ・巐ｨ phone ・ｽ・・｡・・､・・紛 ・・・ｵ・・・簿ｬ・・・・剩﨑ｩ・壱共.
     """
     if not ph_intervals:
         return validate_oto_params(offset, consonant, cutoff, pre, ovl)
@@ -1980,23 +2046,23 @@ def _stabilize_params_to_phone_activity(offset, consonant, cutoff, pre, ovl, ph_
     nearest_edge, nearest_dist = _nearest_phone_edge_ms(pre_abs, ph_intervals)
     prev_end, next_start, gap_len = _surrounding_phone_gap(pre_abs, ph_intervals)
 
-    # 충분히 넓은 gap 내부이거나 phone과 멀리 떨어진 경우만 보정
+    # ・ｩ・・梭 ・南捩 gap ・ｴ・・ｴ・ｰ・・phone・ｼ ・・ｬ ・ｨ・ｴ・・・ｽ・ｰ・・・ｴ・・
     if gap_len < 55.0 and nearest_dist <= 34.0:
         return offset, consonant, cutoff, pre, ovl
 
     target = nearest_edge
     if prev_end is not None and next_start is not None:
         if alias_type in {"vc", "vv"}:
-            # VC/VV는 다음 음절 입구를 겨냥하되, 경계보다 약간 앞에서 잡는다.
+            # VC/VV・・・､・・・護・・・ｵｬ・ｼ ・ｨ・･﨑俯据, ・ｽ・・ｳｴ・､ ・ｽ・・・樌乱・・・｡・罷共.
             target = next_start - 6.0
             target = max(target, prev_end + 4.0)
         elif alias_type in {"cv", "cv_head"}:
-            # CV 계열은 이전 음절 끝으로 끌어당기지 않고,
-            # 현재 자음 onset 직전으로 스냅해 앞 발음 유입을 줄인다.
+            # CV ・・龍・ ・ｴ・・・護・・晧愍・・・護牟・ｹ・ｰ・ ・伎ｳ,
+            # 嶸・椪 ・川搆 onset ・・・愍・・・､・・紛 ・・・懍搆 ・・・揆 ・・攤・､.
             target = next_start - 4.0
             target = max(target, prev_end + 3.0)
         else:
-            # VCV 등은 이전 음절 끝 경계 근처로 당겨서 공백 정렬을 방지한다.
+            # VCV ・ｱ・ ・ｴ・・・護・・・・ｽ・・・ｼ・俯｡・・ｹ・ｨ・・・ｵ・ｱ ・簿ｬ・・・ｩ・﨑罹共.
             target = prev_end
 
     delta = target - pre_abs
@@ -2008,10 +2074,10 @@ def _stabilize_params_to_phone_activity(offset, consonant, cutoff, pre, ovl, ph_
     if nearest_dist >= force_snap_dist:
         offset = target_offset
     elif abs(delta) > 30.0:
-        # 큰 거리 snap은 과교정을 유발할 수 있어 블렌딩으로 완화한다.
+        # 增ｰ ・ｰ・ｬ snap・ ・ｼ・川菩揆 ・・懦腹 ・・・溢牟 ・罷誤畠・ｼ・・・・剩﨑罹共.
         offset = _blend(float(offset), target_offset, 0.45)
     else:
-        # 짧은 거리 보정은 기존처럼 즉시 snap한다.
+        # ・ｧ・ ・ｰ・ｬ ・ｴ・菩捩 ・ｰ・ｴ・俯涵 ・餓亨 snap﨑罹共.
         offset = target_offset
     return validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
@@ -2214,8 +2280,8 @@ def _apply_base_shape_blend(offset, consonant, cutoff, pre, ovl, base_shape, ali
     if not base_shape:
         return validate_oto_params(offset, consonant, cutoff, pre, ovl)
     if alias_type == "cv_head":
-        # 템플릿의 head 라인이 비정상적으로 짧은 경우(cut_gap 과소),
-        # 그대로 블렌딩하면 -CV 길이가 급격히 줄어들 수 있어 보수적으로 생략한다.
+        # 奛懦伯・ｿ・・head ・ｼ・ｸ・ｴ ・・菩メ・・愍・・・ｧ・ ・ｽ・ｰ(cut_gap ・ｼ・・,
+        # ・ｸ・・・・罷誤畠﨑俯ｩｴ -CV ・ｸ・ｴ・ ・賀ｲｩ德・・・牟・､ ・・・溢牟 ・ｴ・們・愍・・・晤楫﨑罹共.
         src_cut_gap = float(base_shape.get("cut_gap", max(abs(cutoff) - consonant, 20.0)))
         src_pre = float(base_shape.get("pre", pre))
         if src_cut_gap < 90.0 or src_pre > 280.0:
@@ -2349,13 +2415,15 @@ def _read_wav_mono_np(wav_path):
 
 def _estimate_f0_voicing_strength(frame, sr):
     """
-    간단한 자기상관 기반 유성도(0~1) 추정.
-    정확한 F0 추적이 아니라 보정 보조 지표로만 사용합니다.
+    ・・卿﨑・・専ｸｰ・・ｴ ・ｰ・・・・ｱ・・0~1) ・肥・
+    ・倣剳﨑・F0 ・肥・擽 ・・笈・ｼ ・ｴ・・・ｴ・ｰ ・岺罹｡罹ｧ・・ｬ・ｩ﨑ｩ・壱共.
     """
     if np is None or frame is None or len(frame) < 96 or sr <= 0:
         return 0.0
     x = frame.astype(np.float64)
     x = x - np.mean(x)
+    if len(x) >= 5:
+        x = np.convolve(x, np.array([0.2, 0.6, 0.2], dtype=np.float64), mode="same")
     rms = float(np.sqrt(np.mean(x * x) + 1e-12))
     if rms < 1e-4:
         return 0.0
@@ -2385,7 +2453,152 @@ def _estimate_f0_voicing_strength(frame, sr):
     clarity = peak / (ac0 + 1e-9)
     if clarity < 0.25:
         return 0.0
-    return float(np.clip((clarity - 0.25) / 0.45, 0.0, 1.0))
+    zcr = 0.0
+    if len(x) >= 2:
+        zcr = float(np.mean((x[:-1] * x[1:]) < 0.0))
+    zcr_penalty = float(np.clip((zcr - 0.14) / 0.30, 0.0, 1.0))
+    harmonic = float(np.clip((clarity - 0.25) / 0.45, 0.0, 1.0))
+    voiced_conf = harmonic * (1.0 - (0.42 * zcr_penalty))
+    return float(np.clip(voiced_conf, 0.0, 1.0))
+
+
+def _run_length_true(mask):
+    if np is None:
+        return []
+    arr = np.asarray(mask, dtype=bool)
+    out = np.zeros(len(arr), dtype=np.float64)
+    i = 0
+    n = len(arr)
+    while i < n:
+        if not arr[i]:
+            i += 1
+            continue
+        j = i + 1
+        while j < n and arr[j]:
+            j += 1
+        run_len = float(j - i)
+        out[i:j] = run_len
+        i = j
+    return out
+
+
+def _build_f0_quality_metrics(
+    f0v_arr,
+    en_arr,
+    en_ma_arr,
+    cls_voiced_arr,
+    cls_unvoiced_arr,
+    cls_breath_arr,
+):
+    if np is None or f0v_arr is None:
+        return {
+            "valid_ratio": 0.0,
+            "gap_ratio": 0.0,
+            "continuity": 0.0,
+            "valid_local": np.array([], dtype=np.float64) if np is not None else [],
+            "gap_local": np.array([], dtype=np.float64) if np is not None else [],
+            "sparse_local": np.array([], dtype=np.float64) if np is not None else [],
+            "continuity_local": np.array([], dtype=np.float64) if np is not None else [],
+        }
+
+    n = len(f0v_arr)
+    if n <= 0:
+        return {
+            "valid_ratio": 0.0,
+            "gap_ratio": 0.0,
+            "continuity": 0.0,
+            "valid_local": np.zeros(0, dtype=np.float64),
+            "gap_local": np.zeros(0, dtype=np.float64),
+            "sparse_local": np.zeros(0, dtype=np.float64),
+            "continuity_local": np.zeros(0, dtype=np.float64),
+        }
+
+    f0 = np.asarray(f0v_arr, dtype=np.float64)
+    en = np.asarray(en_arr, dtype=np.float64) if en_arr is not None and len(en_arr) == n else np.zeros(n, dtype=np.float64)
+    en_ma = np.asarray(en_ma_arr, dtype=np.float64) if en_ma_arr is not None and len(en_ma_arr) == n else en
+    cls_voiced = (
+        np.asarray(cls_voiced_arr, dtype=np.float64)
+        if cls_voiced_arr is not None and len(cls_voiced_arr) == n
+        else np.zeros(n, dtype=np.float64)
+    )
+    cls_unvoiced = (
+        np.asarray(cls_unvoiced_arr, dtype=np.float64)
+        if cls_unvoiced_arr is not None and len(cls_unvoiced_arr) == n
+        else np.zeros(n, dtype=np.float64)
+    )
+    cls_breath = (
+        np.asarray(cls_breath_arr, dtype=np.float64)
+        if cls_breath_arr is not None and len(cls_breath_arr) == n
+        else np.zeros(n, dtype=np.float64)
+    )
+
+    valid_th = float(_env_float("UTOA_F0_VALID_TH", 0.46))
+    cand_energy_th = float(_env_float("UTOA_F0_CAND_ENERGY_TH", 0.12))
+    cand_voiced_th = float(_env_float("UTOA_F0_CAND_VOICED_TH", 0.34))
+    exclude_mask = (cls_unvoiced >= 0.5) | (cls_breath >= 0.5)
+    candidate_mask = (~exclude_mask) & (
+        (en_ma >= cand_energy_th)
+        | (cls_voiced >= cand_voiced_th)
+        | (f0 >= max(0.24, valid_th * 0.62))
+    )
+    if not np.any(candidate_mask):
+        candidate_mask = (~exclude_mask) & (en_ma >= max(0.08, cand_energy_th * 0.8))
+    if not np.any(candidate_mask):
+        candidate_mask = (~exclude_mask)
+
+    valid_mask = candidate_mask & (f0 >= valid_th)
+    gap_mask = candidate_mask & (~valid_mask)
+
+    run_len = _run_length_true(valid_mask)
+    sparse_run_max = int(max(1, _env_int("UTOA_F0_SPARSE_RUN_MAX_FRAMES", 3)))
+    sparse_mask = valid_mask & (run_len <= float(sparse_run_max))
+
+    cont_ref = max(2.0, float(_env_float("UTOA_F0_CONTINUITY_REF_FRAMES", 7.0)))
+    cont_signal = np.zeros(n, dtype=np.float64)
+    if np.any(valid_mask):
+        cont_signal[valid_mask] = np.clip(run_len[valid_mask] / cont_ref, 0.0, 1.0)
+
+    local_window = int(max(5, _env_int("UTOA_F0_LOCAL_WINDOW_FRAMES", 9)))
+    if local_window % 2 == 0:
+        local_window += 1
+    kernel = np.ones(local_window, dtype=np.float64) / float(local_window)
+    eps = 1.0e-6
+
+    cand_den = np.convolve(candidate_mask.astype(np.float64), kernel, mode="same")
+    valid_den = np.convolve(valid_mask.astype(np.float64), kernel, mode="same")
+    valid_local = np.convolve(valid_mask.astype(np.float64), kernel, mode="same") / np.maximum(cand_den, eps)
+    gap_local = np.convolve(gap_mask.astype(np.float64), kernel, mode="same") / np.maximum(cand_den, eps)
+    sparse_local = np.convolve(sparse_mask.astype(np.float64), kernel, mode="same") / np.maximum(cand_den, eps)
+    continuity_num = np.convolve(cont_signal, kernel, mode="same")
+    continuity_local = np.where(valid_den > eps, continuity_num / np.maximum(valid_den, eps), 0.0)
+
+    valid_local = np.clip(valid_local, 0.0, 1.0)
+    gap_local = np.clip(gap_local, 0.0, 1.0)
+    sparse_local = np.clip(sparse_local, 0.0, 1.0)
+    continuity_local = np.clip(continuity_local, 0.0, 1.0)
+
+    cand_cnt = int(np.sum(candidate_mask))
+    if cand_cnt <= 0:
+        valid_ratio = 0.0
+        gap_ratio = 0.0
+    else:
+        valid_ratio = float(np.sum(valid_mask)) / float(cand_cnt)
+        gap_ratio = float(np.sum(gap_mask)) / float(cand_cnt)
+
+    if np.any(valid_mask):
+        continuity = float(np.mean(cont_signal[valid_mask]))
+    else:
+        continuity = 0.0
+
+    return {
+        "valid_ratio": float(np.clip(valid_ratio, 0.0, 1.0)),
+        "gap_ratio": float(np.clip(gap_ratio, 0.0, 1.0)),
+        "continuity": float(np.clip(continuity, 0.0, 1.0)),
+        "valid_local": valid_local,
+        "gap_local": gap_local,
+        "sparse_local": sparse_local,
+        "continuity_local": continuity_local,
+    }
 
 
 def _mel_envelope(audio, sr):
@@ -2438,6 +2651,7 @@ def _mel_envelope(audio, sr):
     spec_presence_vals = []
     times = []
     last_voicing = 0.0
+    f0_stride = int(max(1, _env_int("UTOA_F0_SAMPLE_STRIDE", 2)))
     frame_idx = 0
     for st in range(0, max(len(audio) - win + 1, 1), hop):
         fr_raw = audio[st:st + win]
@@ -2447,9 +2661,18 @@ def _mel_envelope(audio, sr):
         rms = float(np.sqrt(np.mean(fr_raw.astype(np.float64) ** 2) + 1e-12))
         db_vals.append(20.0 * np.log10(max(rms, 1e-7)))
 
-        # F0는 저가중치 보조 신호만 제공하도록 저밀도 계산.
-        if (frame_idx % 3) == 0:
-            last_voicing = _estimate_f0_voicing_strength(fr_raw, sr)
+        # F0・・・・・卓ｹ・・ｴ・ｰ ・嶸ｸ・・・懋ｳｵ﨑俯巡・・・・・・・・げ.
+        if (frame_idx % f0_stride) == 0 or last_voicing <= 0.05:
+            curr_voicing = _estimate_f0_voicing_strength(fr_raw, sr)
+            if frame_idx > 0:
+                blend = float(_env_float("UTOA_F0_BLEND", 0.72))
+                blend = max(0.0, min(1.0, blend))
+                last_voicing = ((1.0 - blend) * float(last_voicing)) + (blend * float(curr_voicing))
+            else:
+                last_voicing = float(curr_voicing)
+        else:
+            decay = float(_env_float("UTOA_F0_HOLD_DECAY", 0.02))
+            last_voicing = max(0.0, float(last_voicing) - max(0.0, decay))
         f0_voicing.append(last_voicing)
 
         fr = fr_raw.astype(np.float64) * window
@@ -2556,6 +2779,14 @@ def _mel_envelope(audio, sr):
         & (spec_presence_arr >= max(0.05, spec_p40 * 0.62))
         & ~voiced_formant
     )
+    f0_metrics = _build_f0_quality_metrics(
+        f0v_arr=f0v_arr,
+        en_arr=en,
+        en_ma_arr=en_ma,
+        cls_voiced_arr=np.asarray(voiced_formant, dtype=np.float64),
+        cls_unvoiced_arr=np.asarray(unvoiced_diffuse, dtype=np.float64),
+        cls_breath_arr=np.asarray(breath_like, dtype=np.float64),
+    )
     return {
         "times_ms": np.array(times, dtype=np.float64),
         "energy": en,
@@ -2577,6 +2808,13 @@ def _mel_envelope(audio, sr):
         "cls_silence_sparse": np.asarray(silence_sparse, dtype=np.float64),
         "cls_unvoiced_diffuse": np.asarray(unvoiced_diffuse, dtype=np.float64),
         "cls_breath_like": np.asarray(breath_like, dtype=np.float64),
+        "f0_valid_ratio": float(f0_metrics.get("valid_ratio", 0.0) or 0.0),
+        "f0_gap_ratio": float(f0_metrics.get("gap_ratio", 0.0) or 0.0),
+        "f0_continuity": float(f0_metrics.get("continuity", 0.0) or 0.0),
+        "f0_valid_local": np.asarray(f0_metrics.get("valid_local"), dtype=np.float64),
+        "f0_gap_local": np.asarray(f0_metrics.get("gap_local"), dtype=np.float64),
+        "f0_sparse_local": np.asarray(f0_metrics.get("sparse_local"), dtype=np.float64),
+        "f0_continuity_local": np.asarray(f0_metrics.get("continuity_local"), dtype=np.float64),
         "voiced_mask": np.asarray(f0v_arr >= 0.5, dtype=np.float64),
         "formant_mask": np.asarray(voiced_formant, dtype=np.float64),
     }
@@ -2952,6 +3190,12 @@ def _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms):
     cls_breath = mel_ctx.get("cls_breath_like")
     db_arr = mel_ctx.get("db_db")
     db_sil_th = float(mel_ctx.get("db_silence_th", -42.0))
+    f0_gap_local_arr = mel_ctx.get("f0_gap_local")
+    f0_sparse_local_arr = mel_ctx.get("f0_sparse_local")
+    f0_cont_local_arr = mel_ctx.get("f0_continuity_local")
+    f0_valid_ratio = float(mel_ctx.get("f0_valid_ratio", 0.0) or 0.0)
+    f0_gap_ratio = float(mel_ctx.get("f0_gap_ratio", 0.0) or 0.0)
+    f0_cont_global = float(mel_ctx.get("f0_continuity", 0.0) or 0.0)
 
     sil = float(cls_sil[idx]) if cls_sil is not None and len(cls_sil) == len(times_ms) else 0.0
     voiced = float(cls_voiced[idx]) if cls_voiced is not None and len(cls_voiced) == len(times_ms) else 0.0
@@ -2961,14 +3205,69 @@ def _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms):
     if db_arr is not None and len(db_arr) == len(times_ms):
         db_sparse = 1.0 if float(db_arr[idx]) <= (db_sil_th - 1.0) else 0.0
 
+    gap_penalty, sparse_penalty, continuity_bonus = _compute_f0_blank_adjustment(
+        idx=idx,
+        n=len(times_ms),
+        unvoiced=unvoiced,
+        breath=breath,
+        f0_gap_local_arr=f0_gap_local_arr,
+        f0_sparse_local_arr=f0_sparse_local_arr,
+        f0_cont_local_arr=f0_cont_local_arr,
+        f0_valid_ratio=f0_valid_ratio,
+        f0_gap_ratio=f0_gap_ratio,
+        f0_cont_global=f0_cont_global,
+    )
     blank = (
         (0.58 * sil)
         + (0.20 * breath)
         + (0.22 * db_sparse)
         - (0.46 * voiced)
         - (0.12 * unvoiced)
+        + gap_penalty
+        + sparse_penalty
+        - continuity_bonus
     )
     return max(0.0, min(1.0, float(blank)))
+
+
+def _mel_local_prob(arr, idx, n, fallback=0.0):
+    try:
+        if arr is None or len(arr) != int(n):
+            return max(0.0, min(1.0, float(fallback)))
+        return max(0.0, min(1.0, float(arr[int(idx)])))
+    except Exception:
+        return max(0.0, min(1.0, float(fallback)))
+
+
+def _compute_f0_blank_adjustment(
+    *,
+    idx,
+    n,
+    unvoiced,
+    breath,
+    f0_gap_local_arr,
+    f0_sparse_local_arr,
+    f0_cont_local_arr,
+    f0_valid_ratio,
+    f0_gap_ratio,
+    f0_cont_global,
+):
+    f0_gap_local = _mel_local_prob(f0_gap_local_arr, idx, n, fallback=f0_gap_ratio)
+    f0_sparse_local = _mel_local_prob(f0_sparse_local_arr, idx, n, fallback=0.0)
+    f0_cont_local = _mel_local_prob(f0_cont_local_arr, idx, n, fallback=f0_cont_global)
+
+    gap_w = float(_env_float("UTOA_F0_GAP_PENALTY_WEIGHT", 0.24))
+    sparse_w = float(_env_float("UTOA_F0_SPARSE_PENALTY_WEIGHT", 0.16))
+    cont_w = float(_env_float("UTOA_F0_CONTINUITY_BONUS_WEIGHT", 0.18))
+    valid_scale = max(0.35, min(1.0, float(f0_valid_ratio) + 0.22))
+
+    if float(unvoiced) >= 0.5 or float(breath) >= 0.5:
+        continuity_bonus = 0.0
+    else:
+        continuity_bonus = cont_w * f0_cont_local * valid_scale
+    gap_penalty = gap_w * max(f0_gap_local, min(1.0, float(f0_gap_ratio) + 0.12))
+    sparse_penalty = sparse_w * f0_sparse_local
+    return float(gap_penalty), float(sparse_penalty), float(continuity_bonus)
 
 
 def _blank_conf_at(values, idx):
@@ -3206,9 +3505,9 @@ def _apply_soft_mel_offset_cutoff_guard(
     file_format="",
 ):
     """
-    이른 단계 soft guard:
-    - dB 최소 임계값 + mel 에너지로 무음/유음 전이를 감지
-    - F0 유성도는 낮은 가중치(보조)로만 반영
+    ・ｴ・ｸ ・ｨ・・soft guard:
+    - dB ・懍・ ・・ｳ・ｰ・+ mel ・尖ц・・・・ｴ・・・・・・・擽・ｼ ・川ｧ
+    - F0 ・・ｱ・・株 ・ｮ・ ・・卓ｹ・・ｴ・ｰ)・罹ｧ・・們・
     """
     if np is None or not mel_ctx:
         return offset, consonant, cutoff, pre, ovl, 0.0, 0.0
@@ -3302,7 +3601,7 @@ def _apply_soft_mel_offset_cutoff_guard(
     silence_mask = hard_silence_mask | (((db_arr <= db_sil_th) | (en <= soft_sil_energy)) & weak_spec_mask)
     if cls_silence is not None and len(cls_silence) == len(en):
         silence_mask = silence_mask | (np.asarray(cls_silence, dtype=np.float64) >= 0.5)
-    # onset 보조 탐지: 에너지 이동평균 + 1차 기울기로 유효 onset 후보를 만든다.
+    # onset ・ｴ・ｰ 夋川ｧ: ・尖ц・ ・ｴ・呰初・ + 1・ｨ ・ｰ・ｸ・ｰ・・・巐ｨ onset 弡・ｳｴ・ｼ ・誤蕩・､.
     if len(en) >= 5:
         kernel = np.ones(5, dtype=np.float64) / 5.0
         en_ma = np.convolve(en, kernel, mode="same")
@@ -3319,7 +3618,7 @@ def _apply_soft_mel_offset_cutoff_guard(
     offset_shift_ms = 0.0
     cutoff_shift_ms = 0.0
     hint = (onset_hint or "").strip().lower()
-    if hint in {"ɯ", "a", "i", "u", "e", "o"}:
+    if hint in {"ﾉｯ", "a", "i", "u", "e", "o"}:
         hint = ""
     if not hint and alias_text:
         parts = [p.strip().lower() for p in str(alias_text).split() if p.strip()]
@@ -3343,12 +3642,12 @@ def _apply_soft_mel_offset_cutoff_guard(
     is_plosive_like = bool(hint) and (is_plosive_roman(hint) or is_plosive_ipa(hint) or hint in KR_PLOSIVE_ONSETS)
     is_sibilant_like = hint in KR_SIBILANT_ONSETS or hint in {"sh", "ch", "ts", "z", "dz", "j", "jj", "c"}
     is_fricative_like = is_sibilant_like or hint in {"h", "f", "v", "x"}
-    # 유성/비음 계열(m,n,r,l,w,y...)은 멜 저역 에너지가 약해
-    # offset guard가 모음 시작으로 과도 이동할 수 있어 보수적으로 처리한다.
+    # ・・ｱ/・・搆 ・・龍(m,n,r,l,w,y...)・ ・・・・ｭ ・尖ц・・ ・ｽ﨑ｴ
+    # offset guard・ ・ｨ・・・懍梠・ｼ・・・ｼ・・・ｴ・呰腹 ・・・溢牟 ・ｴ・們・愍・・・俯ｦｬ﨑罹共.
     low_energy_voiced = hint in {
         "m", "n", "ny", "ng", "r", "l", "ry", "w", "y", "j",
         "g", "d", "b", "z", "dz", "v", "gy", "dy", "by",
-        "ɴ", "ŋ", "ɲ", "ɾ", "ɹ",
+        "\u014b", "\u0272", "\u027e", "\u0279",
     } or hint.startswith("m")
 
     # Onset-class aware onset mask tuning:
@@ -3378,9 +3677,9 @@ def _apply_soft_mel_offset_cutoff_guard(
         )
 
     # ---- soft offset guard ----
-    # 한국어 CVVC의 CV/CV_HEAD는 onset anchor와 후단 guard만으로도 충분한 경우가 많다.
-    # 멜 offset soft guard가 추가로 들어가면 단모음/활음 구분이 약한 파일에서
-    # offset이 공백 쪽으로 과하게 끌리는 경향이 커진다.
+    # 﨑懋ｵｭ・ｴ CVVC・・CV/CV_HEAD・・onset anchor・ 弡・卿 guard・護愍・罹巡 ・ｩ・・復 ・ｽ・ｰ・ ・狩共.
+    # ・・offset soft guard・ ・緋ｰ・・・､・ｴ・・ｴ ・ｨ・ｨ・・嶹懍搆 ・ｬ・・擽 ・ｽ﨑・甯護攵・川・
+    # offset・ｴ ・ｵ・ｱ ・ｽ・ｼ・・・ｼ﨑俾ｲ・・誤ｦｬ・・・ｽ嵂･・ｴ ・､・・共.
     allow_order_locked_cv = _env_bool("UTOA_KR_ALLOW_ORDER_LOCKED_CV_MEL_OFFSET", True)
     skip_offset_soft_guard = (alias_type == "cv_head") or (
         _is_kr_order_locked_cv_format(file_format)
@@ -3403,7 +3702,7 @@ def _apply_soft_mel_offset_cutoff_guard(
             if sound_start_idx is None:
                 onset_seg = onset_mask[lo:pre_idx + 1]
                 if np.any(onset_seg):
-                    # onset 후보가 있으면 기존 sound 시작점보다 우선 사용한다.
+                    # onset 弡・ｳｴ・ ・溢愍・ｴ ・ｰ・ｴ sound ・懍梠・尖ｳｴ・､ ・ｰ・ ・ｬ・ｩ﨑罹共.
                     rel = int(np.where(onset_seg)[0][0])
                     sound_start_idx = lo + rel
                 else:
@@ -3449,7 +3748,7 @@ def _apply_soft_mel_offset_cutoff_guard(
                 elif is_plosive_like:
                     min_cut_reduction = _env_float("UTOA_MEL_MIN_CUT_REDUCTION_PLOSIVE_MS", 10.0)
                 if target_cut_abs < cut_abs - min_cut_reduction:
-                    # F0 유성도는 보조(저가중치)로만 반영
+                    # F0 ・・ｱ・・株 ・ｴ・ｰ(・・・卓ｹ・・罹ｧ・・們・
                     f0v = float(f0v_arr[last_sil_idx])
                     blend_base = _env_float("UTOA_MEL_CUTOFF_BLEND_BASE", 0.42)
                     blend_f0_scale = _env_float("UTOA_MEL_CUTOFF_BLEND_F0_SCALE", 0.08)
@@ -3655,12 +3954,12 @@ def generate_oto(
     ml_policy="",
     runtime_report=None,
 ):
-    """TextGrid와 템플릿/자동 포맷 정보를 사용해 최종 OTO를 생성합니다."""
+    """TextGrid・ 奛懦伯・ｿ/・尖徐 尞ｬ・ｷ ・簿ｳｴ・ｼ ・ｬ・ｩ﨑ｴ ・懍｢・OTO・ｼ ・晧┳﨑ｩ・壱共."""
 
     try:
         import textgrid
     except ImportError:
-        err = "textgrid 모듈이 설치되어 있지 않습니다. `pip install textgrid`를 실행해 주세요."
+        err = "textgrid ・ｨ・溢擽 ・､・俯据・ｴ ・溢ｧ ・喜慣・壱共. `pip install textgrid`・ｼ ・､嵂駕紛 ・ｼ・ｸ・・"
         logger.error(err)
         if callback:
             callback(err)
@@ -3689,8 +3988,8 @@ def generate_oto(
 
     if auto_gen_format not in {"cv", "cvc", "cvvc", "vcv"}:
         msg = (
-            f"⚠ 자동 에일리어스 생성은 현재 CV/연단음, CVC, CVVC, VCV만 지원합니다. "
-            f"{auto_gen_format.upper()} -> CVVC로 전환합니다."
+            f"笞 ・尖徐 ・川攵・ｬ・ｴ・､ ・晧┳・ 嶸・椪 CV/・ｰ・ｨ・・ CVC, CVVC, VCV・・・・戦鮒・壱共. "
+            f"{auto_gen_format.upper()} -> CVVC・・・・劍﨑ｩ・壱共."
         )
         if callback:
             callback(msg)
@@ -3918,8 +4217,8 @@ def generate_oto(
     kr_profile = kr_profile_setup.profile
 
     if tpl_path and not os.path.exists(tpl_path):
-        log(f"⚠ 템플릿 파일을 찾을 수 없습니다: {tpl_path}")
-        log(f"⚡ OpenUtau 호환 {auto_gen_format.upper()} 자동 에일리어스 생성으로 전환합니다.")
+        log(f"笞 奛懦伯・ｿ 甯護攵・・・ｾ・・・・・・慣・壱共: {tpl_path}")
+        log(f"笞｡ OpenUtau 嶸ｸ嶹・{auto_gen_format.upper()} ・尖徐 ・川攵・ｬ・ｴ・､ ・晧┳・ｼ・・・・劍﨑ｩ・壱共.")
         tpl_path = ""
 
     DIPHTHONG_CV_CONSONANT_RATIO = params.get('DIPHTHONG_CV_CONSONANT_RATIO', 0.6) if params else 0.6
@@ -3930,11 +4229,11 @@ def generate_oto(
         lines, detected_enc, warning, err = load_template_oto_lines(
             tpl_path,
             require_utf8=True,
-            mode_label="한국어 OTO",
+            mode_label="﨑懋ｵｭ・ｴ OTO",
         )
         if err:
             log(err)
-            log(f"⚡ 템플릿 로드 실패로 OpenUtau 호환 {auto_gen_format.upper()} 자동 에일리어스 생성으로 전환합니다.")
+            log(f"笞｡ 奛懦伯・ｿ ・罹糖 ・､甯ｨ・・OpenUtau 嶸ｸ嶹・{auto_gen_format.upper()} ・尖徐 ・川攵・ｬ・ｴ・､ ・晧┳・ｼ・・・・劍﨑ｩ・壱共.")
             lines = []
         if warning:
             log(warning)
@@ -3982,7 +4281,7 @@ def generate_oto(
             same_name = [c for c in candidates if c['real_name'].lower() == exact_name]
             if len(same_name) == 1:
                 return same_name[0]
-            log(f"파일명 매핑 충돌: {wav_name} (정규화 키 {norm_name}, 후보 {len(candidates)}개) -> 원본 파일명을 유지합니다.")
+            log(f"甯護攵・・・､﨑・・ｩ・・ {wav_name} (・母ｷ懦剩 墲､ {norm_name}, 弡・ｳｴ {len(candidates)}・・ -> ・尖ｳｸ 甯護攵・・揆 ・・﨑ｩ・壱共.")
             return None
         return None
 
@@ -4021,18 +4320,18 @@ def generate_oto(
         t_match, t_total, t_ratio = _template_match_stats(template_lines)
         if t_total == 0 or t_match == 0 or t_ratio < 0.25:
             log(
-                f"⚠ 템플릿-TextGrid 매칭률 낮음 ({t_match}/{t_total}, {t_ratio:.1%}) "
-                f"-> OpenUtau 호환 {auto_gen_format.upper()} 자동 에일리어스 생성으로 전환"
+                f"笞 奛懦伯・ｿ-TextGrid ・､・ｭ・ ・ｮ・・({t_match}/{t_total}, {t_ratio:.1%}) "
+                f"-> OpenUtau 嶸ｸ嶹・{auto_gen_format.upper()} ・尖徐 ・川攵・ｬ・ｴ・､ ・晧┳・ｼ・・・・劍"
             )
             use_template = False
         else:
-            log(f"📌 템플릿 베이스 OTO 사용 ({t_match}/{t_total}, {t_ratio:.1%})")
+            log(f"東 奛懦伯・ｿ ・・ｴ・､ OTO ・ｬ・ｩ ({t_match}/{t_total}, {t_ratio:.1%})")
     if _should_keep_template_alias_set_exact(
         use_template=use_template,
         generate_openutau=generate_openutau,
         gen_missing_vowels=gen_missing_vowels,
     ):
-        log("📌 템플릿 모드: 추가 alias 생성 없이 베이스 OTO alias 집합을 그대로 유지")
+        log("東 奛懦伯・ｿ ・ｨ・・ ・緋ｰ alias ・晧┳ ・・擽 ・・ｴ・､ OTO alias ・啄鮒・・・ｸ・・・・・")
 
     preloaded_tg_by_path = {}
     if use_template:
@@ -4043,7 +4342,7 @@ def generate_oto(
                 file_groups[fname] = []
             file_groups[fname].append(line)
     else:
-        log(f"⚡ 템플릿 없음/미적합 -> OpenUtau 호환 {auto_gen_format.upper()} 형식으로 에일리어스를 자동 생성합니다.")
+        log(f"笞｡ 奛懦伯・ｿ ・・搆/・ｸ・・鮒 -> OpenUtau 嶸ｸ嶹・{auto_gen_format.upper()} 嶸菩享・ｼ・・・川攵・ｬ・ｴ・､・ｼ ・尖徐 ・晧┳﨑ｩ・壱共.")
         try:
             from core.lab_generator import decompose_hangul_to_roman
         except ImportError:
@@ -4106,7 +4405,7 @@ def generate_oto(
                 file_ctx.sinsy_label_path = ""
 
         if file_ctx.status == "textgrid_missing":
-            log(f"경고: {fname}: TextGrid를 찾을 수 없어 원본 라인을 유지합니다.")
+            log(f"・ｽ・: {fname}: TextGrid・ｼ ・ｾ・・・・・・牟 ・尖ｳｸ ・ｼ・ｸ・・・・﨑ｩ・壱共.")
             _record_unset_lines("textgrid_missing", fname, lines)
             final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
             processed += 1
@@ -4119,7 +4418,7 @@ def generate_oto(
             tier_predicate=lambda tier: isinstance(tier, textgrid.IntervalTier),
         )
         if file_ctx.status == "textgrid_load_failed":
-            log(f"경고: {fname}: TextGrid 로드 실패로 원본 라인을 유지합니다. ({file_ctx.error_message})")
+            log(f"・ｽ・: {fname}: TextGrid ・罹糖 ・､甯ｨ・・・尖ｳｸ ・ｼ・ｸ・・・・﨑ｩ・壱共. ({file_ctx.error_message})")
             _record_unset_lines("textgrid_load_failed", fname, lines)
             final_lines.extend([
                 apply_suffix_to_oto_line(l, alias_suffix)
@@ -4128,7 +4427,7 @@ def generate_oto(
             processed += 1
             continue
         if file_ctx.status == "tier_missing":
-            log(f"경고: {fname}: phones tier가 없어 원본 라인을 유지합니다.")
+            log(f"・ｽ・: {fname}: phones tier・ ・・牟 ・尖ｳｸ ・ｼ・ｸ・・・・﨑ｩ・壱共.")
             _record_unset_lines("tier_missing", fname, lines)
             final_lines.extend([
                 apply_suffix_to_oto_line(l, alias_suffix)
@@ -4147,7 +4446,7 @@ def generate_oto(
 
         try:
             if not phone_tier:
-                log(f"경고: {fname}: phones tier가 없어 원본 라인을 유지합니다.")
+                log(f"・ｽ・: {fname}: phones tier・ ・・牟 ・尖ｳｸ ・ｼ・ｸ・・・・﨑ｩ・壱共.")
                 _record_unset_lines("tier_missing", fname, lines)
                 final_lines.extend([
                     apply_suffix_to_oto_line(l, alias_suffix)
@@ -4184,7 +4483,7 @@ def generate_oto(
                 preferred_format=auto_gen_format,
             )
             if loop_prep.status == "empty_intervals":
-                log(f"경고: {fname}: 유효한 음소 구간이 없어 원본 라인을 유지합니다.")
+                log(f"・ｽ・: {fname}: ・巐ｨ﨑・・護・ ・ｬ・・擽 ・・牟 ・尖ｳｸ ・ｼ・ｸ・・・・﨑ｩ・壱共.")
                 _record_unset_lines("mapping_failed_empty_intervals", fname, lines)
                 final_lines.extend([
                     apply_suffix_to_oto_line(l, alias_suffix)
@@ -4193,7 +4492,7 @@ def generate_oto(
                 processed += 1
                 continue
             if loop_prep.status == "no_valid_alias":
-                log(f"경고: {fname}: 유효한 에일리어스가 없어 원본 라인을 유지합니다.")
+                log(f"・ｽ・: {fname}: ・巐ｨ﨑・・川攵・ｬ・ｴ・､・ ・・牟 ・尖ｳｸ ・ｼ・ｸ・・・・﨑ｩ・壱共.")
                 _record_unset_lines("no_valid_alias", fname, lines)
                 final_lines.extend([
                     apply_suffix_to_oto_line(l, alias_suffix)
@@ -4344,42 +4643,42 @@ def generate_oto(
 
             if mapping_reason_code == "filename_sequence_lock":
                 log(
-                    f"🧭 {fname}: TextGrid 신뢰도 {textgrid_trust_tier.upper()} "
-                    f"(trust={textgrid_trust_score:.2f}) → 파일명 순서 기반 매핑 고정"
+                    f"ｧｭ {fname}: TextGrid ・・ｰ・・{textgrid_trust_tier.upper()} "
+                    f"(trust={textgrid_trust_score:.2f}) sequence lock kept"
                 )
             elif mapping_reason_code == "alias_based_empty_words":
-                log(f"🧭 {fname}: words 매핑에 빈 phone 구간 존재 → alias/phone 기반 음절 매핑 사용")
+                log(f"ｧｭ {fname}: words ・､﨑卓乱 ・・phone ・ｬ・・・ｴ・ｬ 竊・alias/phone ・ｰ・・・護・・､﨑・・ｬ・ｩ")
             elif mapping_reason_code == "alias_phone_minimal":
-                log(f"🧭 {fname}: words 티어 없음/실패 → phones 핵 기반 음절 매핑 사용")
+                log(f"ｧｭ {fname}: words 寀ｰ・ｴ ・・搆/・､甯ｨ 竊・phones 﨑ｵ ・ｰ・・・護・・､﨑・・ｬ・ｩ")
             elif mapping_reason_code in {"order_locked_length_mismatch", "order_locked_glide_mismatch", "order_locked_low_phone_quality"}:
                 log(
-                    f"🧭 {fname}: CV 계열 순서 고정 포맷 보정 "
+                    f"ｧｭ {fname}: CV ・・龍 ・懍・ ・・・尞ｬ・ｷ ・ｴ・・"
                     f"(reason={mapping_reason_code}, words={base_score:.1f}, alias={alt_score:.1f}, "
                     f"glide_mismatch={words_glide_mismatch_ratio:.2f})"
                 )
             elif mapping_reason_code == "words_low_phone_quality":
                 log(
-                    f"🧭 {fname}: phones 저신뢰({','.join(low_quality_reasons)}) → words 매핑 고정 "
+                    f"ｧｭ {fname}: phones ・・・ｰ({','.join(low_quality_reasons)}) 竊・words ・､﨑・・・・"
                     f"(words={base_score:.1f}, alias={alt_score:.1f})"
                 )
             elif mapping_reason_code == "alias_based_cvvc":
                 log(
-                    f"🧭 {fname}: CVVC는 alias 기반 음절 매핑 우선 "
+                    f"ｧｭ {fname}: CVVC・・alias ・ｰ・・・護・・､﨑・・ｰ・ "
                     f"(words={base_score:.1f}, alias={alt_score:.1f})"
                 )
             elif mapping_reason_code == "alias_based_recover":
                 log(
-                    f"🧭 {fname}: 매핑 이탈 보정 적용 "
+                    f"ｧｭ {fname}: ・､﨑・・ｴ夋・・ｴ・・・・圸 "
                     f"(base={base_score:.1f}, corrected={alt_score:.1f})"
                 )
             elif mapping_reason_code == "words_keep_high_conf":
                 log(
-                    f"🧭 {fname}: words 매핑 신뢰도 높음 → alias 보정 생략 "
+                    f"ｧｭ {fname}: words ・､﨑・・・ｰ・・・廷搆 竊・alias ・ｴ・・・晤楫 "
                     f"(base={base_score:.1f}, corrected={alt_score:.1f})"
                 )
             elif alias_based and targets_for_build:
                 log(
-                    f"🧭 {fname}: TextGrid(words) 매핑 유지 "
+                    f"ｧｭ {fname}: TextGrid(words) ・､﨑・・・ "
                     f"(base={base_score:.1f}, corrected={alt_score:.1f})"
                 )
             file_anchor_adapt_stats = _compute_file_anchor_adapt_stats(
@@ -4464,7 +4763,7 @@ def generate_oto(
                 plan_source = str(kr_cv_plan.get("source") or "")
                 if plan_source != "sinsy_labels":
                     log(
-                        f"🛡️ {fname}: sinsy 라벨이 있지만 planner에 적용되지 않음 "
+                        f"孱・・{fname}: sinsy ・ｼ・ｨ・ｴ ・溢ｧ・・planner・・・・圸・們ｧ ・喜搆 "
                         f"(source={plan_source or 'fallback'})"
                     )
                 else:
@@ -4472,7 +4771,7 @@ def generate_oto(
                     row_margin_floor = float(runtime_policy.get("row_margin_floor", 6.0))
                     if plan_margin < row_margin_floor:
                         log(
-                            f"🛡️ {fname}: sinsy planner margin 낮음 "
+                            f"孱・・{fname}: sinsy planner margin ・ｮ・・"
                             f"(margin={plan_margin:.1f} < {row_margin_floor:.1f})"
                         )
             mapping_confidence_base = float(runtime_policy.get("mapping_confidence", mapping_confidence_base))
@@ -4484,7 +4783,7 @@ def generate_oto(
                     )
             if kr_mapping_debug_reason_logging and mapping_confidence_base < float(file_mapping_conf_th):
                 log(
-                    f"🧭 {fname}: KR 매핑 신뢰도 낮음(conf={mapping_confidence_base:.2f}, "
+                    f"ｧｭ {fname}: KR ・､﨑・・・ｰ・・・ｮ・・conf={mapping_confidence_base:.2f}, "
                     f"margin={mapping_margin:+.1f}, reason={mapping_reason_code})"
                 )
 
@@ -4508,7 +4807,7 @@ def generate_oto(
                 or mel_reliability_score < _env_float("UTOA_MEL_FORCE_MEL_RELIABILITY_MIN", 0.44)
             )
             log(
-                f"🧭 {fname}: align_base={alignment_weight_base:.2f}, align_final={alignment_weight:.2f}, "
+                f"ｧｭ {fname}: align_base={alignment_weight_base:.2f}, align_final={alignment_weight:.2f}, "
                 f"blank_mean={blank_conf_mean:.2f}, map_conf={mapping_confidence_base:.2f}, "
                 f"mel_rel={mel_reliability_score:.2f}, anchor_lock_lite={anchor_lock_lite}, "
                 f"mel_weight_mode={mel_weight_mode}, force_mel_branch={force_mel_branch}"
@@ -4523,8 +4822,8 @@ def generate_oto(
             row_blank_floor = None
             fmt_norm = str(file_format or "").strip().lower()
             if fmt_norm in {"cvvc", "cvc", "cv"}:
-                # CV 계열은 blank 구간 오매핑이 발생하면 이후 ML 보정이 과보정될 수 있어
-                # 저신뢰 파일에서 row-level blank gate를 더 엄격하게 건다.
+                # CV ・・龍・ blank ・ｬ・・・､・､﨑卓擽 ・懍・﨑俯ｩｴ ・ｴ弡・ML ・ｴ・菩擽 ・ｼ・ｴ・簿摺 ・・・溢牟
+                # ・・・ｰ 甯護攵・川・ row-level blank gate・ｼ ・・・・ｲｩ﨑俾ｲ・・ｴ・､.
                 apply_blank_gate = bool(runtime_policy.get("strict_mode")) or bool(file_mapping_low_conf)
                 if blank_conf_mean >= 0.45 or file_mapping_low_conf:
                     apply_blank_gate = True
@@ -4575,7 +4874,7 @@ def generate_oto(
                 }
 
             if (not syllables_info) or any(len(s['phones']) == 0 for s in syllables_info):
-                log(f"경고: {fname}: 음절-음소 매핑 실패로 원본 라인을 유지합니다.")
+                log(f"・ｽ・: {fname}: ・護・・護・ ・､﨑・・､甯ｨ・・・尖ｳｸ ・ｼ・ｸ・・・・﨑ｩ・壱共.")
                 fail_reason = "mapping_failed"
                 if "spn_heavy" in low_quality_reasons:
                     fail_reason = "mapping_failed_spn_heavy"
@@ -4604,10 +4903,10 @@ def generate_oto(
 
             if bool(runtime_policy.get("should_abstain")):
                 log(
-                    f"경고: {fname}: KR v2 planner abstain "
+                    f"・ｽ・: {fname}: KR v2 planner abstain "
                     f"(trust={textgrid_trust_score:.2f}, weight={alignment_weight:.2f}, "
                     f"coverage={float(kr_plan_policy.get('coverage', 0.0)):.2f}, "
-                    f"margin={float(kr_plan_policy.get('margin', 0.0)):.1f}) → 원본 유지"
+                    f"margin={float(kr_plan_policy.get('margin', 0.0)):.1f}) 竊・・尖ｳｸ ・・"
                 )
                 _record_unset_lines(
                     "mapping_v2_abstain",
@@ -4634,7 +4933,7 @@ def generate_oto(
             if kr_order_locked_format and kr_disable_cvvc_order_lock:
                 kr_order_locked_format = False
                 if kr_mapping_debug_reason_logging:
-                    log(f"🧭 {fname}: KR CVVC/CVC filename order lock 비활성화(UTOA_KR_DISABLE_CVVC_ORDER_LOCK=1)")
+                    log(f"ｧｭ {fname}: KR CVVC/CVC filename order lock ・・劈・ｱ嶹・UTOA_KR_DISABLE_CVVC_ORDER_LOCK=1)")
             kr_cvvc_occurrence_source = filename_cv_targets if (kr_order_locked_format and filename_cv_targets) else syllables_info
             kr_cvvc_occurrence_map = _build_kr_cvvc_occurrence_map(kr_cvvc_occurrence_source) if kr_order_locked_format else None
             kr_cvvc_occurrence_state = {}
@@ -4665,7 +4964,7 @@ def generate_oto(
                 kr_cv_timing_mode = "standalone"
             if kr_mapping_debug_reason_logging:
                 log(
-                    f"🧭 {fname}: KR CV timing mode={kr_cv_timing_mode} "
+                    f"ｧｭ {fname}: KR CV timing mode={kr_cv_timing_mode} "
                     f"(format={_format_norm or 'unknown'}, "
                     f"vc_alias={'yes' if file_has_explicit_vc_alias else 'no'}, "
                     f"cv_family={'yes' if file_has_cv_family_alias else 'no'})"
@@ -4996,7 +5295,7 @@ def generate_oto(
                         )
                         if planned_cv_idx is not None and kr_mapping_debug_reason_logging and planned_cv_idx != expected_cv_idx:
                             log(
-                                f"🧭 {fname}: KR CV 전역 anchor plan 적용 "
+                                f"ｧｭ {fname}: KR CV ・・溜 anchor plan ・・圸 "
                                 f"({expected_cv_idx + 1}->{planned_cv_idx + 1}, {alias})"
                             )
                     general_cv_selection = _select_kr_general_cv_index_v2(
@@ -5059,8 +5358,8 @@ def generate_oto(
                         min_row_confidence=row_conf_floor,
                         blank_confidence=_blank_conf_at(syllable_blank_confidences, selected_w_idx),
                         max_blank_confidence=row_blank_floor_safe,
-                        # CVC는 파일/음절 특성상 margin 변동이 커 CV 계열이 과도 스킵될 수 있어
-                        # row-level abstain 게이트를 CV/CVVC에만 적용한다.
+                        # CVC・・甯護攵/・護・孖ｹ・ｱ・・margin ・・呷擽 ・､ CV ・・龍・ｴ ・ｼ・・・､墲ｵ・ ・・・溢牟
+                        # row-level abstain ・護擽孖ｸ・ｼ CV/CVVC・尖ｧ・・・圸﨑罹共.
                         active_only_formats={"cvvc", "cv"},
                         margin_formats={"cvvc", "cv"},
                         blank_formats={"cvvc", "cvc", "cv"},
@@ -5074,7 +5373,7 @@ def generate_oto(
                     if row_abstain.get("should_skip"):
                         if kr_mapping_debug_reason_logging:
                             log(
-                                f"🛡️ {fname}: KR 행 생성 스킵 "
+                                f"孱・・{fname}: KR 嵂・・晧┳ ・､墲ｵ "
                                 f"({row_abstain.get('reason')}, {alias})"
                             )
                         _record_unset(
@@ -5084,7 +5383,7 @@ def generate_oto(
                             meta={"diag_hint": row_abstain.get("diag_hint", "")},
                         )
                         if use_template:
-                            # 템플릿 모드에서는 매핑이 불확실한 행이라도 기존 alias를 보존한다.
+                            # 奛懦伯・ｿ ・ｨ・懍乱・罹株 ・､﨑卓擽 ・逸剳・､﨑・嵂餓擽・ｼ・・・ｰ・ｴ alias・ｼ ・ｴ・ｴ﨑罹共.
                             final_lines.append(
                                 apply_suffix_to_oto_line(line, alias_suffix)
                             )
@@ -5326,7 +5625,7 @@ def generate_oto(
                     )
                     if (cv_offset_pulled >= 0.8) or (cv_cutoff_trimmed >= 0.8):
                         log(
-                            f"🛡️ {fname}: CV 핵심구간 보정 "
+                            f"孱・・{fname}: CV 﨑ｵ・ｬ・ｬ・・・ｴ・・"
                             f"(offset -{cv_offset_pulled:.1f}ms, cutoff -{cv_cutoff_trimmed:.1f}ms) [{alias}]"
                         )
                 _run_kr_general_row_v2(
@@ -5390,7 +5689,7 @@ def generate_oto(
                     loc = f" [{os.path.basename(tb_last.filename)}:{int(tb_last.lineno)}]"
             except Exception:
                 loc = ""
-            err_msg = f"처리 실패 ({fname}): {e}{loc}"
+            err_msg = f"・俯ｦｬ ・､甯ｨ ({fname}): {e}{loc}"
             logger.error(err_msg)
             errors.append(err_msg)
             _record_unset_lines("file_exception", fname, lines)
@@ -5401,11 +5700,11 @@ def generate_oto(
             processed += 1
 
         if callback and total > 0 and (processed % 5 == 0 or processed == total):
-            callback(f"OTO 생성 중... ({processed}/{total})")
+            callback(f"OTO ・晧┳ ・・.. ({processed}/{total})")
 
 
     if gen_missing_vowels:
-        log("누락된 단모음 에일리어스 자동 생성을 시작합니다...")
+        log("・・攷・・・ｨ・ｨ・・・川攵・ｬ・ｴ・､ ・尖徐 ・晧┳・・・懍梠﨑ｩ・壱共...")
         vowels_list = ['a', 'e', 'i', 'o', 'u', 'eo', 'eu', 'ae', 'oe', 'wi', 'wa', 'we', 'weo', 'ya', 'ye', 'yo', 'yeo', 'yu', 'ui', 'eui']
         template_aliases = set()
         for g_lines in file_groups.values():
@@ -5456,7 +5755,7 @@ def generate_oto(
                 v_start, v_end = v_span
                 alias = detected_vowel
                 if alias not in template_aliases:
-                    log(f"추가: 단모음 에일리어스 생성 -> {tg_info['real_name']} [{alias}]")
+                    log(f"・緋ｰ: ・ｨ・ｨ・・・川攵・ｬ・ｴ・､ ・晧┳ -> {tg_info['real_name']} [{alias}]")
                     offset, consonant, cutoff, pre, ovl = _compute_kr_noninitial_vowel_timing(
                         v_start, v_end
                     )
@@ -5489,7 +5788,7 @@ def generate_oto(
 
     try:
         write_oto_lines(out_path, final_lines)
-        log(f"1차 생성 완료: OTO 파일 저장 -> {out_path}")
+        log(f"1・ｨ ・晧┳ ・・｣・ OTO 甯護攵 ・・･ -> {out_path}")
         run_kr_post_file_pipeline(
             KrPostFilePipelineContext(
                 out_path=out_path,
@@ -5509,9 +5808,9 @@ def generate_oto(
         )
         renamed = apply_output_wav_name_map(out_path, wav_name_map)
         if renamed:
-            log(f"WAV 이름 교정 적용: {renamed}건")
+            log(f"WAV ・ｴ・・・川・・・圸: {renamed}・ｴ")
     except Exception as e:
-        err = f"OTO 파일 저장 실패: {e}"
+        err = f"OTO 甯護攵 ・・･ ・､甯ｨ: {e}"
         logger.error(err)
         errors.append(err)
 
@@ -5519,3 +5818,6 @@ def generate_oto(
 
     _log_unset_summary()
     return processed, total, errors
+
+
+
