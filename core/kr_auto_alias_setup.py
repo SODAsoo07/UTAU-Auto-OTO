@@ -114,6 +114,7 @@ def build_kr_auto_file_groups(
     split_syllable_parts_fn: Callable[[str], tuple[str, str, str]],
     kr_vowels: set[str],
     kr_consonants: set[str],
+    textgrid_cache_by_path: dict[str, object] | None = None,
 ) -> dict[str, list[str]]:
     file_groups: dict[str, list[str]] = {}
     coda_alias_map = {
@@ -175,6 +176,11 @@ def build_kr_auto_file_groups(
         real_name = tg_info["real_name"]
         try:
             tg = load_textgrid_fn(tg_path)
+            if textgrid_cache_by_path is not None:
+                try:
+                    textgrid_cache_by_path[str(tg_path or "").strip().replace("\\", "/").lower()] = tg
+                except Exception:
+                    pass
             word_tier = None
             for tier in tg:
                 if hasattr(tier, "name") and tier.name == "words":

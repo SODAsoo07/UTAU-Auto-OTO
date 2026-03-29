@@ -125,6 +125,7 @@ from core.kr_candidate_selection_v2 import select_kr_syllable_source
 from core.oto_diagnostics import SkippedEntryCollector
 from core.oto_diagnostics_adapter_v2 import GeneratorDiagnosticsAdapter
 from core.file_prepare import load_named_tiers, prepare_file_context
+from core.interval_lookup import build_interval_lookup, intervals_within_bounds
 from core.timing_anchor_profiles import is_anchor_lock_enabled
 from core.timing_anchor_runtime import append_timing_anchor_log
 from core.anchor_lock_adapter_v2 import apply_language_anchor_lock
@@ -1668,6 +1669,7 @@ def _build_kr_syllables_from_phone_nuclei(ph_intervals, cv_targets):
         return None
 
     out = []
+    phone_lookup = build_interval_lookup(ph_intervals)
     global_start = float(ph_intervals[0].minTime)
     global_end = float(ph_intervals[-1].maxTime)
     for i, nuc_idx in enumerate(selected):
@@ -1683,10 +1685,7 @@ def _build_kr_syllables_from_phone_nuclei(ph_intervals, cv_targets):
         else:
             e_t = global_end
 
-        phones = [
-            p for p in ph_intervals
-            if float(p.minTime) >= s_t - 1e-6 and float(p.maxTime) <= e_t + 1e-6
-        ]
+        phones = intervals_within_bounds(phone_lookup, s_t, e_t)
         if not phones:
             phones = [ph_intervals[nuc_idx]]
 
@@ -4034,10 +4033,11 @@ def generate_oto(
     ):
         log("📌 템플릿 모드: 추가 alias 생성 없이 베이스 OTO alias 집합을 그대로 유지")
 
+    preloaded_tg_by_path = {}
     if use_template:
         file_groups = {}
         for line in template_lines:
-            fname = line.split('=')[0]
+            fname = line.split('=', 1)[0]
             if fname not in file_groups:
                 file_groups[fname] = []
             file_groups[fname].append(line)
@@ -4058,11 +4058,19 @@ def generate_oto(
             split_syllable_parts_fn=_split_kr_syllable_parts,
             kr_vowels=set(KR_VOWELS),
             kr_consonants=set(KR_CONSONANTS),
+            textgrid_cache_by_path=preloaded_tg_by_path,
         )
 
     processed = 0
     total = len(file_groups)
     mel_cache_for_signal = {}
+    single_vowel_span_by_tg_path = {}
+
+    def _norm_tg_path_key(path):
+        try:
+            return os.path.normcase(os.path.abspath(str(path or "")))
+        except Exception:
+            return str(path or "")
 
     for fname, lines in file_groups.items():
         file_ctx = prepare_file_context(
@@ -4107,6 +4115,7 @@ def generate_oto(
         file_ctx = load_named_tiers(
             file_ctx,
             load_textgrid_fn=textgrid.TextGrid.fromFile,
+            preloaded_tg_by_path=preloaded_tg_by_path if not use_template else None,
             tier_predicate=lambda tier: isinstance(tier, textgrid.IntervalTier),
         )
         if file_ctx.status == "textgrid_load_failed":
@@ -4197,6 +4206,15 @@ def generate_oto(
             ph_intervals_all = alignment_ingest.phones_all
             ph_intervals = alignment_ingest.phones
             wd_intervals = alignment_ingest.words
+            if len(ph_intervals) == 1:
+                try:
+                    one = ph_intervals[0]
+                    single_vowel_span_by_tg_path[_norm_tg_path_key(file_ctx.tg_path)] = (
+                        float(one.minTime) * 1000.0,
+                        float(one.maxTime) * 1000.0,
+                    )
+                except Exception:
+                    pass
             wav_duration_ms = float(alignment_ingest.wav_duration_ms or 0.0)
             timeline_start_ms = float(alignment_ingest.timeline_meta.get("timeline_start_ms", 0.0) or 0.0)
             timeline_end_ms = float(alignment_ingest.timeline_meta.get("timeline_end_ms", 0.0) or 0.0)
@@ -4242,11 +4260,16 @@ def generate_oto(
             alt_score = 0.0
             mapping_reason_code = "filename_token"
             if wd_intervals:
+                words_phone_lookup = build_interval_lookup(ph_intervals)
                 for w in wd_intervals:
                     w_start = w.minTime
                     w_end = w.maxTime
 
-                    s_phones = [p for p in ph_intervals if p.minTime >= w_start - 0.01 and p.maxTime <= w_end + 0.01]
+                    s_phones = intervals_within_bounds(
+                        words_phone_lookup,
+                        float(w_start) - 0.01,
+                        float(w_end) + 0.01,
+                    )
                     if force_words_phone_fill and not s_phones:
                         s_phones = _synthesize_kr_word_phones(
                             w.mark,
@@ -5382,7 +5405,7 @@ def generate_oto(
         template_aliases = set()
         for g_lines in file_groups.values():
             for line in g_lines:
-                parts = line.split('=')
+                parts = line.split('=', 1)
                 if len(parts) > 1:
                     alias = parts[1].split(',')[0].strip().lower()
                     template_aliases.add(alias)
@@ -5411,43 +5434,44 @@ def generate_oto(
                 detected_vowel = norm_key_clean
 
             if detected_vowel:
-                try:
-                    tg = textgrid.TextGrid.fromFile(tg_info['path'])
-                    phone_tier = next((t for t in tg if isinstance(t, textgrid.IntervalTier) and t.name == 'phones'), None)
-                    if not phone_tier: continue
-                    intervals = [i for i in phone_tier if i.mark.strip() not in ['', 'sil', 'spn', 'pau']]
-
-                    if len(intervals) == 1:
+                v_span = single_vowel_span_by_tg_path.get(_norm_tg_path_key(tg_info.get("path")))
+                if v_span is None:
+                    try:
+                        tg = textgrid.TextGrid.fromFile(tg_info['path'])
+                        phone_tier = next((t for t in tg if isinstance(t, textgrid.IntervalTier) and t.name == 'phones'), None)
+                        if not phone_tier:
+                            continue
+                        intervals = [i for i in phone_tier if i.mark.strip() not in ['', 'sil', 'spn', 'pau']]
+                        if len(intervals) != 1:
+                            continue
                         vowel = intervals[0]
-                        v_start = vowel.minTime * 1000
-                        v_end = vowel.maxTime * 1000
-                        v_len = v_end - v_start
+                        v_span = (float(vowel.minTime) * 1000.0, float(vowel.maxTime) * 1000.0)
+                    except Exception:
+                        continue
+                v_start, v_end = v_span
+                alias = detected_vowel
+                if alias not in template_aliases:
+                    log(f"추가: 단모음 에일리어스 생성 -> {tg_info['real_name']} [{alias}]")
+                    offset, consonant, cutoff, pre, ovl = _compute_kr_noninitial_vowel_timing(
+                        v_start, v_end
+                    )
 
-                        alias = detected_vowel
-                        if alias not in template_aliases:
-                            log(f"추가: 단모음 에일리어스 생성 -> {tg_info['real_name']} [{alias}]")
-                            offset, consonant, cutoff, pre, ovl = _compute_kr_noninitial_vowel_timing(
-                                v_start, v_end
-                            )
+                    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
 
-                            offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
-
-                            _append_alias_rows(
-                                final_lines,
-                                output_name or tg_info['real_name'],
-                                alias,
-                                offset,
-                                consonant,
-                                cutoff,
-                                pre,
-                                ovl,
-                                generate_openutau=generate_openutau,
-                                alias_suffix=alias_suffix,
-                                alias_type="mono",
-                                validate_fn=validate_oto_params,
-                            )
-                except:
-                    continue
+                    _append_alias_rows(
+                        final_lines,
+                        output_name or tg_info['real_name'],
+                        alias,
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                        generate_openutau=generate_openutau,
+                        alias_suffix=alias_suffix,
+                        alias_type="mono",
+                        validate_fn=validate_oto_params,
+                    )
 
     finish_context = GeneratorFinishContext(
         log_fn=log,

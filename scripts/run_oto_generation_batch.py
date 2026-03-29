@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import sys
+import time
 import traceback
 from typing import Dict, List
 
@@ -372,6 +373,7 @@ def _write_summary_text(summary_path: str, summary: Dict[str, object]) -> str:
         f"ok_cases={summary.get('ok_cases', 0)}",
         f"error_cases={summary.get('error_cases', 0)}",
         f"skipped_cases={summary.get('skipped_cases', 0)}",
+        f"total_duration_sec={float(summary.get('total_duration_sec', 0.0) or 0.0):.3f}",
         "",
     ]
     for row in summary.get("results", []) or []:
@@ -382,7 +384,9 @@ def _write_summary_text(summary_path: str, summary: Dict[str, object]) -> str:
         reason = str(row.get("reason", "") or "")
         failure_code = str(row.get("failure_code", "") or "")
         failure_stage = str(row.get("failure_stage", "") or "")
+        duration_sec = float(row.get("duration_sec", 0.0) or 0.0)
         lines.append(f"[{status}] {name}")
+        lines.append(f"duration_sec={duration_sec:.3f}")
         if reason:
             lines.append(f"reason={reason}")
         if failure_code:
@@ -446,6 +450,12 @@ def _run_one_case(
         force_no_validation=force_no_validation,
     )
     name = str(case_info["name"])
+    case_started_iso = dt.datetime.now().isoformat()
+    case_started_perf = time.perf_counter()
+
+    def _elapsed_sec() -> float:
+        return max(0.0, float(time.perf_counter() - case_started_perf))
+
     enabled = bool(case_info["enabled"])
     if not enabled:
         return {
@@ -457,6 +467,9 @@ def _run_one_case(
             "alignment": make_runtime_report("align", ALIGN_SKIPPED, "disabled"),
             "ml": {},
             "fallback_path": [],
+            "started_at": case_started_iso,
+            "ended_at": dt.datetime.now().isoformat(),
+            "duration_sec": round(_elapsed_sec(), 6),
         }
 
     language = str(case_info["language"]).strip().lower()
@@ -509,6 +522,9 @@ def _run_one_case(
             "reason": reason,
             "failure_code": failure_code,
             "failure_stage": failure_stage,
+            "started_at": case_started_iso,
+            "ended_at": dt.datetime.now().isoformat(),
+            "duration_sec": round(_elapsed_sec(), 6),
             "language": language,
             "voicebank_dir": voicebank_dir,
             "textgrid_dir": tg_folder,
@@ -755,6 +771,7 @@ def main():
     run_tag = args.run_tag.strip() or _now_tag()
     run_dir = os.path.join("logs", "oto_batch", run_tag)
     os.makedirs(run_dir, exist_ok=True)
+    batch_started_perf = time.perf_counter()
 
     case_infos = [
         _resolve_case_settings(
@@ -817,6 +834,7 @@ def main():
         "ok_cases": sum(1 for r in results if r.get("status") == "ok"),
         "error_cases": sum(1 for r in results if r.get("status") == "error"),
         "skipped_cases": sum(1 for r in results if r.get("status") == "skipped"),
+        "total_duration_sec": round(max(0.0, float(time.perf_counter() - batch_started_perf)), 6),
         "results": results,
     }
     summary_path = os.path.join(run_dir, "summary.json")
