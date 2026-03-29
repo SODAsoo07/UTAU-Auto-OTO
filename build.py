@@ -743,7 +743,7 @@ def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, o
         print(f"   -> created portable launcher: {os.path.basename(launcher_path)}")
 
         shortcut_path = os.path.join(release_dir, f"{app_name}.lnk")
-        create_lnk = str(os.environ.get("UTOA_CREATE_BUILD_SHORTCUT", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        create_lnk = str(os.environ.get("UTOA_CREATE_BUILD_SHORTCUT", "1")).strip().lower() in {"1", "true", "yes", "on"}
         if create_lnk:
             _create_windows_shortcut(
                 shortcut_path=shortcut_path,
@@ -753,8 +753,8 @@ def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, o
             )
             print(f"   -> created shortcut: {os.path.basename(shortcut_path)}")
         else:
-            print("   -> skipped .lnk creation (portable-safe default).")
-            print("      set UTOA_CREATE_BUILD_SHORTCUT=1 to keep build-time .lnk output.")
+            print("   -> skipped .lnk creation (UTOA_CREATE_BUILD_SHORTCUT disabled).")
+            print("      set UTOA_CREATE_BUILD_SHORTCUT=1 to enable build-time .lnk output.")
     return release_dir
 
 

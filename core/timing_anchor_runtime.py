@@ -80,9 +80,19 @@ def adapt_profile_to_file(
     energy_ratio = (energy / ref_energy) if ref_energy > 1e-6 else 1.0
     speed_ratio = (ref_syllable / syllable_ms) if syllable_ms > 1e-6 else 1.0
 
-    pre_window_scale = _clamp(speed_ratio, 0.80, 1.20)
-    cons_gap_scale = _clamp(speed_ratio, 0.82, 1.18)
-    cut_gap_scale = _clamp((energy_ratio * 0.3) + (speed_ratio * 0.7), 0.80, 1.20)
+    strength = _env_float("UTOA_ANCHOR_PROFILE_ADAPT_STRENGTH", 1.15)
+    pre_window_scale = _clamp(speed_ratio, 0.78, 1.22)
+    cons_gap_scale = _clamp(speed_ratio, 0.80, 1.20)
+    cut_gap_scale = _clamp((energy_ratio * 0.35) + (speed_ratio * 0.65), 0.78, 1.22)
+
+    def _boost(scale: float) -> float:
+        if float(strength) <= 1.0:
+            return float(scale)
+        return 1.0 + ((float(scale) - 1.0) * float(strength))
+
+    pre_window_scale = _clamp(_boost(pre_window_scale), 0.75, 1.25)
+    cons_gap_scale = _clamp(_boost(cons_gap_scale), 0.76, 1.24)
+    cut_gap_scale = _clamp(_boost(cut_gap_scale), 0.75, 1.25)
 
     return replace(
         profile,

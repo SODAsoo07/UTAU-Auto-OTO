@@ -117,6 +117,50 @@ def run_ja_general_row(
 
         return validate_fn(o, c_abs - o, -(cut_abs - o), p, float(_ovl))
 
+    def _tighten_cv_overlap_for_cvvc(
+        _offset: float,
+        _consonant: float,
+        _cutoff: float,
+        _pre: float,
+        _ovl: float,
+    ):
+        if str(format_type or "").strip().lower() != "cvvc":
+            return validate_fn(_offset, _consonant, _cutoff, _pre, _ovl)
+
+        o, c, cut, p, v = validate_fn(_offset, _consonant, _cutoff, _pre, _ovl)
+        p = max(float(p), 0.0)
+        if p <= 0.0:
+            return o, c, cut, p, 0.0
+
+        onset_cls = str(onset_class_fn(c_char) or "").strip().lower()
+        vowel_len = max(float(n_end) - float(n_start), 20.0)
+        hard_cls = bool(c_char in {"k", "g", "t", "d", "b", "p", "q", "c", "ch", "ts", "dz", "s", "z", "sh", "j", "h", "f", "v", "hy"})
+
+        ratio_cap = 0.66 if alias_type == "cv_head" else 0.62
+        if onset_cls == "voiceless":
+            ratio_cap -= 0.07
+        elif onset_cls in {"voiced", "nasal"}:
+            ratio_cap += 0.02
+        if hard_cls:
+            ratio_cap -= 0.03
+        if vowel_len < 90.0:
+            ratio_cap -= 0.05
+        elif vowel_len > 220.0:
+            ratio_cap += 0.02
+        ratio_cap = min(max(ratio_cap, 0.46), 0.72)
+
+        min_gap = 8.0 if alias_type == "cv_head" else 10.0
+        if onset_cls == "voiceless" or hard_cls:
+            min_gap += 2.0
+        if vowel_len < 80.0:
+            min_gap += 2.0
+        min_gap = min(max(min_gap, 6.0), 20.0)
+
+        ovl_cap = min(p * ratio_cap, max(p - min_gap, 0.0))
+        if float(v) > ovl_cap:
+            v = ovl_cap
+        return validate_fn(o, c, cut, p, v)
+
     soft_off_shift = 0.0
     soft_cut_shift = 0.0
     cutoff_reduced = 0.0
@@ -250,11 +294,6 @@ def run_ja_general_row(
                     f"🛡️ {fname}: VC-CV 앵커 이동 제한 "
                     f"({pre_abs_before:.1f}->{pre_abs_after:.1f}ms, {alias})"
                 )
-        if abs(pre_abs_after - pre_abs_before) >= 6.0:
-            log_fn(
-                f"🧭 {fname}: VC-CV 앵커 재정렬 "
-                f"({pre_abs_before:.1f}->{pre_abs_after:.1f}ms, {alias})"
-            )
         if format_type == "cvvc" and float(n_start) > 0.0:
             onset_cls = onset_class_fn(c_char)
             late_allow = 3.5 if onset_cls in {"voiced", "nasal"} else 2.0
@@ -263,6 +302,11 @@ def run_ja_general_row(
                 offset = max(float(offset) - (pre_abs_after - pre_abs_cap), 0.0)
                 offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
                 pre_abs_after = offset + pre
+        if abs(pre_abs_after - pre_abs_before) >= 6.0:
+            log_fn(
+                f"🧭 {fname}: VC-CV 앵커 재정렬 "
+                f"({pre_abs_before:.1f}->{pre_abs_after:.1f}ms, {alias})"
+            )
 
     if alias_type in {"vc", "vv"}:
         mel_cutoff_candidate_ms = None
@@ -339,6 +383,13 @@ def run_ja_general_row(
             ovl,
         )
     if alias_type in {"cv", "cv_head"}:
+        offset, consonant, cutoff, pre, ovl = _tighten_cv_overlap_for_cvvc(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+        )
         offset, consonant, cutoff, pre, cutoff_reduced = post_ctx.guard_cv_cutoff_to_next_onset(
             offset,
             consonant,

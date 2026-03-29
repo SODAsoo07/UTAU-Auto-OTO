@@ -7,10 +7,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import tempfile
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     import lightgbm as lgb
@@ -235,6 +236,113 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in {"1", "true", "yes", "on", "y"}:
+        return True
+    if raw in {"0", "false", "no", "off", "n"}:
+        return False
+    return bool(default)
+
+
+def _safe_format_token(value: str) -> str:
+    token = str(value or "").strip().lower().replace(" ", "_").replace("-", "_").replace("+", "plus")
+    token = "".join(ch for ch in token if ch.isalnum() or ch == "_")
+    return token or "general"
+
+
+def _target_mode() -> str:
+    raw = str(os.environ.get("UTOA_ML_TARGET_MODE", "direct") or "").strip().lower()
+    if raw in {"direct", "absolute", "abs"}:
+        return "direct"
+    return "delta"
+
+
+def _target_transform_mode() -> str:
+    raw = str(os.environ.get("UTOA_ML_TARGET_TRANSFORM", "asinh") or "").strip().lower()
+    if raw in {"none", "identity", "off", "0"}:
+        return "none"
+    return "asinh"
+
+
+def _target_scale(target: str, default: float) -> float:
+    token = str(target or "").strip().upper().replace("DELTA_", "")
+    key = f"UTOA_ML_TARGET_SCALE_{token}"
+    return max(1e-3, _env_float(key, default))
+
+
+def _target_transform_forward(value: float, *, mode: str, scale: float) -> float:
+    if mode == "asinh":
+        return float(math.asinh(float(value) / max(1e-6, float(scale))))
+    return float(value)
+
+
+def _target_transform_inverse(value: float, *, mode: str, scale: float) -> float:
+    if mode == "asinh":
+        return float(math.sinh(float(value)) * max(1e-6, float(scale)))
+    return float(value)
+
+
+def _resolve_target_defaults(language: str, target: str) -> tuple[str, float]:
+    lang = str(language or "").strip().lower()
+    if target == "delta_cutoff":
+        return ("asinh", 90.0 if lang == "korean" else 120.0)
+    if target in {"delta_cons", "delta_offset"}:
+        return ("asinh", 80.0 if lang == "korean" else 110.0)
+    if target == "delta_pre":
+        return ("asinh", 70.0 if lang == "korean" else 95.0)
+    if target == "delta_ovl":
+        return ("asinh", 55.0 if lang == "korean" else 80.0)
+    return ("asinh", 80.0)
+
+
+def _absolute_target_name(target: str) -> str:
+    mapping = {
+        "delta_offset": "_abs_offset",
+        "delta_cons": "_abs_cons",
+        "delta_cutoff": "_abs_cutoff",
+        "delta_pre": "_abs_pre",
+        "delta_ovl": "_abs_ovl",
+    }
+    return mapping.get(target, target)
+
+
+def _make_absolute_targets(df):
+    out = df.copy()
+    out["_abs_offset"] = pd.to_numeric(out.get("base_offset"), errors="coerce").fillna(0.0) + pd.to_numeric(out.get("delta_offset"), errors="coerce").fillna(0.0)
+    out["_abs_cons"] = pd.to_numeric(out.get("base_cons"), errors="coerce").fillna(0.0) + pd.to_numeric(out.get("delta_cons"), errors="coerce").fillna(0.0)
+    out["_abs_cutoff"] = pd.to_numeric(out.get("base_cutoff_abs"), errors="coerce").fillna(0.0) + pd.to_numeric(out.get("delta_cutoff"), errors="coerce").fillna(0.0)
+    out["_abs_pre"] = pd.to_numeric(out.get("base_pre"), errors="coerce").fillna(0.0) + pd.to_numeric(out.get("delta_pre"), errors="coerce").fillna(0.0)
+    out["_abs_ovl"] = pd.to_numeric(out.get("base_ovl"), errors="coerce").fillna(0.0) + pd.to_numeric(out.get("delta_ovl"), errors="coerce").fillna(0.0)
+    out["_abs_offset"] = out["_abs_offset"].clip(lower=0.0)
+    out["_abs_cons"] = out[["_abs_offset", "_abs_cons"]].max(axis=1)
+    out["_abs_pre"] = out["_abs_pre"].clip(lower=0.0)
+    out["_abs_ovl"] = out["_abs_ovl"].clip(lower=0.0)
+    out["_abs_ovl"] = out[["_abs_ovl", "_abs_pre"]].min(axis=1)
+    out["_abs_cutoff"] = out[["_abs_cutoff", "_abs_cons"]].max(axis=1)
+    return out
+
+
+def _apply_balanced_sample_weight(df, sample_weight):
+    weights = pd.to_numeric(sample_weight, errors="coerce").fillna(1.0).astype(float)
+    alias_strength = max(0.0, min(1.0, _env_float("UTOA_ML_ALIAS_BALANCE_STRENGTH", 0.45)))
+    format_strength = max(0.0, min(1.0, _env_float("UTOA_ML_FORMAT_BALANCE_STRENGTH", 0.55)))
+    if alias_strength > 0.0 and "alias_type" in df.columns:
+        alias_counts = df["alias_type"].astype(str).str.strip().str.lower().value_counts()
+        denom = df["alias_type"].astype(str).str.strip().str.lower().map(lambda k: max(1.0, float(alias_counts.get(k, 1.0))))
+        alias_factor = (1.0 / denom.pow(0.5)).clip(lower=0.20, upper=3.0)
+        weights = weights * (1.0 + alias_strength * ((alias_factor / max(alias_factor.mean(), 1e-6)) - 1.0))
+    if format_strength > 0.0 and "format_type" in df.columns:
+        fmt_norm = df["format_type"].astype(str).str.lower().map(lambda v: normalize_format_type("", v) or str(v).strip().lower())
+        fmt_counts = fmt_norm.value_counts()
+        denom = fmt_norm.map(lambda k: max(1.0, float(fmt_counts.get(k, 1.0))))
+        fmt_factor = (1.0 / denom.pow(0.5)).clip(lower=0.20, upper=3.0)
+        weights = weights * (1.0 + format_strength * ((fmt_factor / max(fmt_factor.mean(), 1e-6)) - 1.0))
+    return weights.clip(lower=0.10, upper=4.50)
+
+
 def train_lightgbm_bundle(
     language: str,
     format_type: str,
@@ -293,10 +401,31 @@ def train_lightgbm_bundle(
         cv_mask = alias_type.isin(["cv", "cv_head"])
         blank_factor = (1.0 - (blank_weight * blank_score)).clip(lower=0.25, upper=1.0)
         sample_weight = sample_weight * blank_factor.where(cv_mask, 1.0)
+    sample_weight = _apply_balanced_sample_weight(df, sample_weight)
+
+    target_mode = _target_mode()
+    transform_mode = _target_transform_mode()
+    target_scale_map: Dict[str, float] = {}
+    target_transform_map: Dict[str, str] = {}
+    for target in TARGET_NAMES:
+        default_transform, default_scale = _resolve_target_defaults(language, target)
+        target_transform_map[target] = transform_mode if transform_mode != "none" else "none"
+        target_scale_map[target] = float(_target_scale(target, default_scale if default_transform == "asinh" else 1.0))
 
     df = df.copy()
+    if target_mode == "direct":
+        df = _make_absolute_targets(df)
     df["_train_sample_weight"] = sample_weight
     df = df[pd.to_numeric(df["_train_sample_weight"], errors="coerce").fillna(0.0) > 0.0]
+    if "format_type" in df.columns:
+        df["_format_head"] = (
+            df["format_type"]
+            .astype(str)
+            .str.lower()
+            .map(lambda v: normalize_format_type(language, v) or "general")
+        )
+    else:
+        df["_format_head"] = (format_type or "general") if format_type else "general"
 
     if len(df) < 8:
         raise RuntimeError("Filtered dataset is too small for training.")
@@ -304,61 +433,112 @@ def train_lightgbm_bundle(
     feature_schema = get_feature_schema()
     feature_names = list(feature_schema["feature_names"])
     categorical_features = [c for c in CATEGORICAL_FEATURES if c in feature_names]
-    frame = _prepare_frame(df, feature_names, categorical_features)
-    train_idx, valid_idx = _split_train_valid(df, group_column)
-    X_train = frame.iloc[train_idx]
-    X_valid = frame.iloc[valid_idx]
-    w_train = pd.to_numeric(df.iloc[train_idx]["_train_sample_weight"], errors="coerce").fillna(1.0)
-    w_valid = pd.to_numeric(df.iloc[valid_idx]["_train_sample_weight"], errors="coerce").fillna(1.0)
-
-    out_metrics = {}
     os.makedirs(out_dir, exist_ok=True)
-    targets = {}
-    for target in TARGET_NAMES:
-        y_train = pd.to_numeric(df.iloc[train_idx][target], errors="coerce").fillna(0.0)
-        y_valid = pd.to_numeric(df.iloc[valid_idx][target], errors="coerce").fillna(0.0)
-        y_train = _clip_target_series(language, target, y_train)
-        y_valid = _clip_target_series(language, target, y_valid)
-        dtrain = lgb.Dataset(
-            X_train,
-            label=y_train,
-            weight=w_train,
-            categorical_feature=categorical_features,
-            free_raw_data=False,
-        )
-        dvalid = lgb.Dataset(
-            X_valid,
-            label=y_valid,
-            weight=w_valid,
-            categorical_feature=categorical_features,
-            free_raw_data=False,
-        )
-        booster = lgb.train(
-            dict(DEFAULT_LGB_PARAMS),
-            dtrain,
-            num_boost_round=num_boost_round,
-            valid_sets=[dvalid],
-            callbacks=[lgb.early_stopping(early_stopping_rounds, verbose=False)],
-        )
-        model_path = os.path.join(out_dir, f"model_{target.replace('delta_', '')}.txt")
-        booster.save_model(model_path)
-        pred = booster.predict(X_valid)
-        out_metrics[target] = {
-            "baseline_mae": float(mean_absolute_error(y_valid, [0.0] * len(y_valid))),
-            "model_mae": float(mean_absolute_error(y_valid, pred)),
-        }
-        targets[target] = model_path
+
+    def _target_column(target_name: str) -> str:
+        if target_mode == "direct":
+            return _absolute_target_name(target_name)
+        return target_name
+
+    def _fit_head_models(head_df, head_out_dir: str) -> tuple[Dict[str, Any], Dict[str, str]]:
+        if len(head_df) < 8:
+            raise RuntimeError("head dataset is too small for training.")
+        os.makedirs(head_out_dir, exist_ok=True)
+        frame = _prepare_frame(head_df, feature_names, categorical_features)
+        train_idx, valid_idx = _split_train_valid(head_df, group_column)
+        X_train = frame.iloc[train_idx]
+        X_valid = frame.iloc[valid_idx]
+        w_train = pd.to_numeric(head_df.iloc[train_idx]["_train_sample_weight"], errors="coerce").fillna(1.0)
+        w_valid = pd.to_numeric(head_df.iloc[valid_idx]["_train_sample_weight"], errors="coerce").fillna(1.0)
+
+        head_metrics: Dict[str, Any] = {}
+        head_targets: Dict[str, str] = {}
+        for target in TARGET_NAMES:
+            col_name = _target_column(target)
+            y_train_raw = pd.to_numeric(head_df.iloc[train_idx][col_name], errors="coerce").fillna(0.0)
+            y_valid_raw = pd.to_numeric(head_df.iloc[valid_idx][col_name], errors="coerce").fillna(0.0)
+            if target_mode == "delta":
+                y_train_raw = _clip_target_series(language, target, y_train_raw)
+                y_valid_raw = _clip_target_series(language, target, y_valid_raw)
+
+            t_mode = target_transform_map.get(target, "none")
+            t_scale = float(target_scale_map.get(target, 1.0))
+            y_train = y_train_raw.map(lambda v: _target_transform_forward(v, mode=t_mode, scale=t_scale))
+            y_valid = y_valid_raw.map(lambda v: _target_transform_forward(v, mode=t_mode, scale=t_scale))
+            dtrain = lgb.Dataset(
+                X_train,
+                label=y_train,
+                weight=w_train,
+                categorical_feature=categorical_features,
+                free_raw_data=False,
+            )
+            dvalid = lgb.Dataset(
+                X_valid,
+                label=y_valid,
+                weight=w_valid,
+                categorical_feature=categorical_features,
+                free_raw_data=False,
+            )
+            params = dict(DEFAULT_LGB_PARAMS)
+            if str(params.get("objective", "")).strip().lower() == "regression_l1":
+                params["objective"] = "huber"
+                params["alpha"] = 0.85
+            booster = lgb.train(
+                params,
+                dtrain,
+                num_boost_round=num_boost_round,
+                valid_sets=[dvalid],
+                callbacks=[lgb.early_stopping(early_stopping_rounds, verbose=False)],
+            )
+            model_path = os.path.join(head_out_dir, f"model_{target.replace('delta_', '')}.txt")
+            booster.save_model(model_path)
+            pred_trans = booster.predict(X_valid)
+            pred = [_target_transform_inverse(v, mode=t_mode, scale=t_scale) for v in pred_trans]
+            head_metrics[target] = {
+                "baseline_mae": float(mean_absolute_error(y_valid_raw, [0.0] * len(y_valid_raw))),
+                "model_mae": float(mean_absolute_error(y_valid_raw, pred)),
+            }
+            head_targets[target] = model_path
+        return head_metrics, head_targets
+
+    # Root head (always trained)
+    out_metrics, targets = _fit_head_models(df, out_dir)
+
+    format_heads: Dict[str, Any] = {}
+    if _env_flag("UTOA_ML_FORMAT_HEADS", True):
+        for head_fmt in sorted({str(v or "general").strip().lower() for v in df["_format_head"].tolist()}):
+            if not head_fmt:
+                continue
+            head_df = df[df["_format_head"] == head_fmt].copy()
+            if len(head_df) < 16:
+                continue
+            head_dir = os.path.join(out_dir, "heads", _safe_format_token(head_fmt))
+            head_metrics, head_targets = _fit_head_models(head_df, head_dir)
+            format_heads[head_fmt] = {
+                "model_dir": head_dir,
+                "rows": int(len(head_df)),
+                "targets": dict(head_targets),
+                "holdout_metrics": dict(head_metrics),
+            }
 
     write_feature_schema(os.path.join(out_dir, "feature_schema.json"))
     meta = {
         "backend": "lightgbm",
         "language": language,
         "format_type": format_type,
-        "model_version": "v1",
+        "model_version": "v2",
         "feature_version": feature_schema["feature_version"],
         "feature_names": feature_names,
         "categorical_features": categorical_features,
         "targets": list(TARGET_NAMES),
+        "target_mode": target_mode,
+        "target_transform": {
+            "mode": transform_mode,
+            "scales": {k: float(v) for k, v in target_scale_map.items()},
+        },
+        "format_heads_enabled": bool(_env_flag("UTOA_ML_FORMAT_HEADS", True)),
+        "format_heads": dict(format_heads),
+        "default_head": "__default__",
         "delta_clip_limits": get_delta_clip_limits(language),
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "train_rows": int(len(df)),
@@ -372,6 +552,8 @@ def train_lightgbm_bundle(
             "min_mapping_confidence": float(min_mapping_confidence),
             "exclude_nuclei_fallback": bool(exclude_nuclei_fallback),
             "blank_risk_weight": float(_env_float("UTOA_ML_BLANK_RISK_WEIGHT", 0.45)),
+            "alias_balance_strength": float(_env_float("UTOA_ML_ALIAS_BALANCE_STRENGTH", 0.45)),
+            "format_balance_strength": float(_env_float("UTOA_ML_FORMAT_BALANCE_STRENGTH", 0.55)),
         },
         "default_policy": default_policy,
         "selector_default_enabled": bool(selector_enabled_by_default(language, format_type, alias_family=alias_family)),
@@ -590,10 +772,197 @@ def evaluate_lightgbm_selector_bundle(model_dir: str, selector_dataset_csv: str,
     return summary
 
 
+def _clip_delta_scalar(language: str, target: str, value: float) -> float:
+    clip = get_delta_clip_limits(str(language or "").strip().lower()).get(target)
+    if not clip:
+        return float(value)
+    lo, hi = float(clip[0]), float(clip[1])
+    return float(min(max(float(value), lo), hi))
+
+
+def _target_transform_for_runtime(meta: Dict[str, Any], target: str) -> tuple[str, float]:
+    info = meta.get("target_transform")
+    if not isinstance(info, dict):
+        return "none", 1.0
+    raw_mode = str(info.get("mode", "none") or "none").strip().lower()
+    mode = "asinh" if raw_mode == "asinh" else "none"
+    modes = info.get("modes")
+    if isinstance(modes, dict):
+        per_target_mode = str(modes.get(target, mode) or mode).strip().lower()
+        mode = "asinh" if per_target_mode == "asinh" else "none"
+    scales = info.get("scales")
+    scale = 1.0
+    if isinstance(scales, dict):
+        try:
+            scale = float(scales.get(target, 1.0))
+        except Exception:
+            scale = 1.0
+    if not math.isfinite(scale) or scale <= 0.0:
+        scale = 1.0
+    return mode, scale
+
+
+def _base_feature_name_for_target(target: str) -> str:
+    mapping = {
+        "delta_offset": "base_offset",
+        "delta_cons": "base_cons",
+        "delta_cutoff": "base_cutoff_abs",
+        "delta_pre": "base_pre",
+        "delta_ovl": "base_ovl",
+    }
+    return mapping.get(target, "")
+
+
+def _target_mode_from_meta(meta: Dict[str, Any]) -> str:
+    raw = str(meta.get("target_mode", "delta") or "delta").strip().lower()
+    if raw in {"direct", "absolute", "abs"}:
+        return "direct"
+    return "delta"
+
+
+def _normalized_row_format(language: str, feature_row: Dict[str, Any]) -> str:
+    for key in ("format_type", "_format_head", "format"):
+        raw = str(feature_row.get(key, "") or "").strip()
+        if not raw:
+            continue
+        norm = normalize_format_type(language, raw)
+        if norm:
+            return norm
+        return raw.lower()
+    return "general"
+
+
+def _resolve_head_name(meta: Dict[str, Any], feature_row: Dict[str, Any]) -> str:
+    format_heads = meta.get("format_heads")
+    if not isinstance(format_heads, dict) or not format_heads:
+        return "__default__"
+    language = str(meta.get("language", "") or feature_row.get("language", "") or "").strip().lower()
+    row_fmt = _normalized_row_format(language, feature_row)
+    if row_fmt in format_heads:
+        return row_fmt
+    return "__default__"
+
+
+def _load_head_models(model_dir: str, head_name: str, head_meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    models: Dict[str, Any] = {}
+    targets_map = head_meta.get("targets")
+    if not isinstance(targets_map, dict):
+        targets_map = {}
+    for target in TARGET_NAMES:
+        model_path = str(targets_map.get(target, "") or "").strip()
+        if not model_path:
+            model_path = os.path.join(
+                model_dir,
+                "heads",
+                _safe_format_token(head_name),
+                f"model_{target.replace('delta_', '')}.txt",
+            )
+        elif not os.path.isabs(model_path):
+            model_path = os.path.join(model_dir, model_path)
+        if not os.path.exists(model_path):
+            return None
+        runtime_model_path = _normalize_model_file_for_runtime(model_path)
+        models[target] = lgb.Booster(model_file=runtime_model_path)
+    return models
+
+
+def _resolve_runtime_models(payload: Dict[str, Any], head_name: str) -> Dict[str, Any]:
+    default_models = dict((payload or {}).get("models") or {})
+    head_models = dict(((payload or {}).get("head_models") or {}).get(head_name) or {})
+    resolved: Dict[str, Any] = {}
+    for target in TARGET_NAMES:
+        model = head_models.get(target) or default_models.get(target)
+        if model is None:
+            raise RuntimeError(f"Missing LightGBM target model: {target} (head={head_name})")
+        resolved[target] = model
+    return resolved
+
+
+def _decode_prediction_to_delta(
+    *,
+    raw_pred: float,
+    target: str,
+    feature_row: Dict[str, Any],
+    meta: Dict[str, Any],
+) -> float:
+    mode, scale = _target_transform_for_runtime(meta, target)
+    value = _target_transform_inverse(raw_pred, mode=mode, scale=scale)
+    target_mode = _target_mode_from_meta(meta)
+    if target_mode == "direct":
+        base_name = _base_feature_name_for_target(target)
+        try:
+            base_value = float(feature_row.get(base_name, 0.0) or 0.0)
+        except Exception:
+            base_value = 0.0
+        value = float(value) - float(base_value)
+    language = str(meta.get("language", "") or feature_row.get("language", "") or "").strip().lower()
+    return _clip_delta_scalar(language, target, value)
+
+
+def predict_lightgbm_deltas_batch(
+    payload,
+    feature_rows: List[Dict[str, Any]],
+    meta: Optional[Dict[str, Any]] = None,
+    schema: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, float]]:
+    if pd is None:
+        raise RuntimeError(f"pandas is required for runtime inference: {PANDAS_IMPORT_ERROR}")
+    if not feature_rows:
+        return []
+    meta = meta or payload.get("meta") or {}
+    schema = schema or payload.get("schema") or get_feature_schema()
+    feature_names = list(schema.get("feature_names") or FEATURE_NAMES)
+    categorical = list(meta.get("categorical_features") or CATEGORICAL_FEATURES)
+    canonical_rows = [
+        canonicalize_feature_row(feature_row, feature_names=feature_names)
+        for feature_row in feature_rows
+    ]
+    frame = pd.DataFrame(canonical_rows)
+    frame = _prepare_frame(frame, feature_names, categorical)
+
+    head_names = [_resolve_head_name(meta, row) for row in canonical_rows]
+    by_head: Dict[str, List[int]] = {}
+    for idx, head_name in enumerate(head_names):
+        by_head.setdefault(head_name, []).append(idx)
+
+    out: List[Dict[str, float]] = [{target: 0.0 for target in TARGET_NAMES} for _ in range(len(canonical_rows))]
+    for head_name, indices in by_head.items():
+        models = _resolve_runtime_models(payload, head_name)
+        sub_frame = frame.iloc[indices]
+        for target in TARGET_NAMES:
+            pred_values = models[target].predict(sub_frame)
+            for local_idx, row_idx in enumerate(indices):
+                out[row_idx][target] = float(
+                    _decode_prediction_to_delta(
+                        raw_pred=float(pred_values[local_idx]),
+                        target=target,
+                        feature_row=canonical_rows[row_idx],
+                        meta=meta,
+                    )
+                )
+    return out
+
+
 def load_lightgbm_bundle(model_dir: str, meta: Optional[Dict[str, Any]] = None, schema: Optional[Dict[str, Any]] = None):
     if lgb is None:
         raise RuntimeError(f"lightgbm is required for runtime inference: {LIGHTGBM_IMPORT_ERROR}")
-    models = {}
+    model_dir = os.path.abspath(model_dir)
+    if not isinstance(meta, dict) or not meta:
+        meta_path = os.path.join(model_dir, "model_meta.json")
+        if os.path.isfile(meta_path):
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f) or {}
+        else:
+            meta = {}
+    if not isinstance(schema, dict) or not schema:
+        schema_path = os.path.join(model_dir, "feature_schema.json")
+        if os.path.isfile(schema_path):
+            with open(schema_path, "r", encoding="utf-8") as f:
+                schema = json.load(f) or {}
+        else:
+            schema = get_feature_schema()
+
+    models: Dict[str, Any] = {}
     for target in TARGET_NAMES:
         model_name = f"model_{target.replace('delta_', '')}.txt"
         model_path = os.path.join(model_dir, model_name)
@@ -601,28 +970,54 @@ def load_lightgbm_bundle(model_dir: str, meta: Optional[Dict[str, Any]] = None, 
             raise FileNotFoundError(model_path)
         runtime_model_path = _normalize_model_file_for_runtime(model_path)
         models[target] = lgb.Booster(model_file=runtime_model_path)
-    return {"models": models, "meta": meta or {}, "schema": schema or get_feature_schema()}
+
+    head_models: Dict[str, Dict[str, Any]] = {}
+    format_heads = meta.get("format_heads")
+    if isinstance(format_heads, dict) and bool(meta.get("format_heads_enabled", False)):
+        for head_name, head_meta in format_heads.items():
+            if not isinstance(head_meta, dict):
+                continue
+            loaded = _load_head_models(model_dir, str(head_name), head_meta)
+            if loaded:
+                head_models[str(head_name)] = loaded
+            else:
+                logger.warning("Skipped invalid LightGBM format head: %s", head_name)
+
+    return {
+        "models": models,
+        "head_models": head_models,
+        "meta": meta or {},
+        "schema": schema or get_feature_schema(),
+    }
 
 
 def predict_lightgbm_deltas(payload, feature_row: Dict[str, Any], meta: Optional[Dict[str, Any]] = None, schema: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
-    if pd is None:
-        raise RuntimeError(f"pandas is required for runtime inference: {PANDAS_IMPORT_ERROR}")
-    meta = meta or payload.get("meta") or {}
-    schema = schema or payload.get("schema") or get_feature_schema()
-    feature_names = list(schema.get("feature_names") or FEATURE_NAMES)
-    frame = pd.DataFrame([canonicalize_feature_row(feature_row, feature_names=feature_names)])
-    frame = _prepare_frame(frame, feature_names, list(meta.get("categorical_features") or CATEGORICAL_FEATURES))
-    deltas = {}
-    for target, model in payload["models"].items():
-        deltas[target] = float(model.predict(frame)[0])
-    return deltas
+    preds = predict_lightgbm_deltas_batch(
+        payload,
+        [feature_row],
+        meta=meta,
+        schema=schema,
+    )
+    if not preds:
+        return {target: 0.0 for target in TARGET_NAMES}
+    return dict(preds[0])
 
 
 def evaluate_lightgbm_bundle(model_dir: str, dataset_csv: str, language: str = "", format_type: str = "") -> Dict[str, Any]:
     _require_training_stack()
-    bundle = load_lightgbm_bundle(model_dir)
-    meta = bundle["meta"]
-    schema = bundle["schema"]
+    meta_path = os.path.join(model_dir, "model_meta.json")
+    schema_path = os.path.join(model_dir, "feature_schema.json")
+    meta = {}
+    schema = {}
+    if os.path.isfile(meta_path):
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f) or {}
+    if os.path.isfile(schema_path):
+        with open(schema_path, "r", encoding="utf-8") as f:
+            schema = json.load(f) or {}
+    bundle = load_lightgbm_bundle(model_dir, meta=meta, schema=schema)
+    meta = bundle.get("meta") or {}
+    schema = bundle.get("schema") or get_feature_schema()
     df = pd.read_csv(dataset_csv)
     if language:
         df = df[df["language"].astype(str).str.lower() == str(language).strip().lower()]
@@ -631,15 +1026,21 @@ def evaluate_lightgbm_bundle(model_dir: str, dataset_csv: str, language: str = "
         df = df[
             df["format_type"].astype(str).str.lower().map(lambda v: normalize_format_type(language or meta.get("language", ""), v)) == format_type
         ]
-    frame = _prepare_frame(df, list(schema.get("feature_names") or FEATURE_NAMES), list(meta.get("categorical_features") or CATEGORICAL_FEATURES))
+    rows = df.to_dict("records")
+    pred_rows = predict_lightgbm_deltas_batch(bundle, rows, meta=meta, schema=schema)
     summary = {"rows": int(len(df)), "targets": {}}
     for target in TARGET_NAMES:
         truth = pd.to_numeric(df[target], errors="coerce").fillna(0.0)
         lang_for_clip = language or meta.get("language", "")
         truth = _clip_target_series(lang_for_clip, target, truth)
-        pred = bundle["models"][target].predict(frame)
+        pred = [float(row.get(target, 0.0)) for row in pred_rows]
         summary["targets"][target] = {
             "baseline_mae": float(mean_absolute_error(truth, [0.0] * len(truth))),
             "model_mae": float(mean_absolute_error(truth, pred)),
+        }
+    if len(pred_rows) > 0:
+        summary["format_heads_used"] = {
+            "enabled": bool(meta.get("format_heads_enabled", False)),
+            "available": sorted(list(((bundle.get("head_models") or {}).keys()))),
         }
     return summary

@@ -643,6 +643,9 @@ def generate_ja_labs(wav_dir, custom_phonemes_path='', callback=None):
         log(msg)
         return 0, 0, [msg]
 
+    if any(_HANGUL_RE.search(str(name or "")) for name in wav_files):
+        log("⚠️ 경고: 일본어 모드인데 파일명에 한글이 포함되어 있습니다. 언어 설정을 확인하세요.")
+
     total = len(wav_files)
     success = 0
     

@@ -123,6 +123,12 @@ def _two_stage_model_enabled() -> bool:
     return _env_flag("UTOA_ML_TWO_STAGE_MODEL_ENABLE", True)
 
 
+def _auto_select_vbest_enabled() -> bool:
+    # Keep runtime routing stable: do not auto-pick experimental "vbest_*"
+    # unless explicitly opted in.
+    return _env_flag("UTOA_ML_AUTO_SELECT_VBEST", False)
+
+
 def _looks_like_two_stage_model_name(name: str) -> bool:
     token = str(name or "").strip().lower()
     return token.startswith("v2") or "two_stage" in token or "twostage" in token
@@ -316,7 +322,7 @@ def _coupled_min_confidence_for_alias(
 
 
 def _coupled_strict_constraint() -> bool:
-    return _env_flag("UTOA_ML_COUPLED_STRICT_CONSTRAINT", False)
+    return _env_flag("UTOA_ML_COUPLED_STRICT_CONSTRAINT", True)
 
 
 def _kr_cv_keep_base_location_enabled() -> bool:
@@ -376,6 +382,9 @@ def _export_model_root() -> str:
     configured = os.environ.get("UTOA_OTO_ML_EXPORT_ROOT", "").strip()
     if configured:
         return configured
+    noml_auto_root = os.path.join(base_dir, "ML_models_noml_auto")
+    if os.path.isdir(noml_auto_root):
+        return noml_auto_root
     return os.path.join(base_dir, "ML_models")
 
 
@@ -399,6 +408,7 @@ def _collect_model_dir_candidates(language: str, format_type: str, alias_family:
     family = normalize_alias_family(alias_family)
     lang = str(language or "").strip().lower()
     allow_two_stage = _two_stage_model_enabled()
+    allow_vbest_auto = _auto_select_vbest_enabled()
     candidates: List[str] = []
 
     def _append_version_dirs(base_path: str) -> None:
@@ -417,6 +427,8 @@ def _collect_model_dir_candidates(language: str, format_type: str, alias_family:
             for name in os.listdir(base_path):
                 if not str(name).lower().startswith("v"):
                     continue
+                if (not allow_vbest_auto) and str(name).strip().lower().startswith("vbest"):
+                    continue
                 if (not allow_two_stage) and _looks_like_two_stage_model_name(name):
                     continue
                 path = os.path.join(base_path, name)
@@ -425,12 +437,18 @@ def _collect_model_dir_candidates(language: str, format_type: str, alias_family:
         except Exception:
             return
 
-    for root in (
-        _workspace_model_root_for_language(language),
-        _installed_model_root_for_language(language),
-        _structured_export_model_root_for_language(language),
-        _model_root_for_language(language),
-    ):
+    explicit_override = _has_explicit_model_override(language)
+    if explicit_override:
+        root_candidates = (_model_root_for_language(language),)
+    else:
+        root_candidates = (
+            _workspace_model_root_for_language(language),
+            _installed_model_root_for_language(language),
+            _structured_export_model_root_for_language(language),
+            _model_root_for_language(language),
+        )
+
+    for root in root_candidates:
         if os.path.isfile(os.path.join(root, "model_meta.json")) and (
             allow_two_stage or (not _looks_like_two_stage_model_name(os.path.basename(root)))
         ):
@@ -541,6 +559,24 @@ def _resolve_ensemble_model_dir(language: str, format_type: str, alias_family: s
     return _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="ensemble_v1")
 
 
+def _resolve_coupled_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
+    # Prefer v2 rawmel when present; fallback to v1 coupled.
+    coupled_v2 = _resolve_backend_model_dir(
+        language,
+        format_type,
+        alias_family=alias_family,
+        backend="coupled_nn_v2_rawmel",
+    )
+    if coupled_v2:
+        return coupled_v2
+    return _resolve_backend_model_dir(
+        language,
+        format_type,
+        alias_family=alias_family,
+        backend="coupled_nn_v1",
+    )
+
+
 def _ensure_rawmel_patches(
     feat: Dict[str, object],
     *,
@@ -579,9 +615,12 @@ def _ensure_rawmel_patches(
 def _resolve_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
     ensemble_dir = _resolve_ensemble_model_dir(language, format_type, alias_family=alias_family) if _ensemble_enabled() else None
     lightgbm_dir = _resolve_lightgbm_model_dir(language, format_type, alias_family=alias_family)
+    coupled_dir = _resolve_coupled_model_dir(language, format_type, alias_family=alias_family)
     if ensemble_dir:
         return ensemble_dir
-    return lightgbm_dir
+    if lightgbm_dir:
+        return lightgbm_dir
+    return coupled_dir
 
 
 def _bundle_meta_exists(model_dir: str) -> bool:
@@ -903,7 +942,7 @@ def _apply_japanese_delta_policy(row_context: Dict[str, object], deltas: Dict[st
             deltas["delta_pre"] = _scale_signed(deltas.get("delta_pre", 0.0), neg_scale=0.18, pos_scale=0.80)
             deltas["delta_cutoff"] = _scale_signed(deltas.get("delta_cutoff", 0.0), neg_scale=0.85, pos_scale=0.18)
             deltas["delta_cons"] = _scale_signed(deltas.get("delta_cons", 0.0), neg_scale=0.60, pos_scale=0.85)
-            deltas["delta_ovl"] = _scale_signed(deltas.get("delta_ovl", 0.0), neg_scale=0.60, pos_scale=0.85)
+            deltas["delta_ovl"] = _scale_signed(deltas.get("delta_ovl", 0.0), neg_scale=0.60, pos_scale=0.62)
             if alias_type in {"cv", "cv_head"}:
                 deltas["delta_cutoff"] = min(deltas.get("delta_cutoff", 0.0), 0.0)
             return deltas
@@ -993,7 +1032,7 @@ def _apply_korean_delta_policy(row_context: Dict[str, object], deltas: Dict[str,
         deltas["delta_ovl"] = _scale_signed(
             deltas.get("delta_ovl", 0.0),
             neg_scale=0.68 if risky else 0.82,
-            pos_scale=0.78 if risky else 0.90,
+            pos_scale=0.62 if risky else 0.74,
         )
 
     elif alias_type == "vc":
@@ -1253,6 +1292,127 @@ def _apply_korean_cv_destination_guard(
     cons = max(cons, pre + 8.0)
     cutoff_abs = max(cutoff_abs, cons + 10.0)
     return validate_fn(offset, cons, -cutoff_abs, pre, ovl)
+
+
+def _read_cv_overlap_cap_ratio_env(language: str) -> Optional[float]:
+    lang = str(language or "").strip().lower()
+    if lang == "korean":
+        key = "UTOA_ML_KR_CV_OVL_CAP_RATIO"
+    elif lang == "japanese":
+        key = "UTOA_ML_JA_CV_OVL_CAP_RATIO"
+    else:
+        return None
+    raw = str(os.environ.get(key, "")).strip()
+    if not raw:
+        return None
+    try:
+        return max(0.40, min(float(raw), 0.92))
+    except Exception:
+        return None
+
+
+def _cv_overlap_cap_ratio(language: str, row_context: Dict[str, object]) -> float:
+    lang = str(language or "").strip().lower()
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    format_type = normalize_format_type(lang, row_context.get("format_type", ""))
+    mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
+    blank_conf = max(
+        _to_float(row_context.get("blank_span_confidence"), 0.0),
+        _to_float(row_context.get("syllable_blank_confidence"), 0.0),
+        _to_float(row_context.get("syllable_mel_silence_conf"), 0.0),
+    )
+
+    ratio = 0.72 if alias_type == "cv_head" else 0.76
+    if format_type in {"cvvc", "cvc"}:
+        ratio -= 0.03
+    if mapping_conf < 0.75:
+        ratio -= 0.04
+    if blank_conf >= 0.50:
+        ratio -= 0.04
+    if lang == "japanese":
+        if format_type == "cvvc":
+            ratio -= 0.05
+        else:
+            ratio += 0.01
+
+    env_ratio = _read_cv_overlap_cap_ratio_env(lang)
+    if env_ratio is not None:
+        ratio = env_ratio
+    return max(0.52, min(ratio, 0.88))
+
+
+def _cv_overlap_min_gap_ms(language: str, row_context: Dict[str, object], base_gap: float) -> float:
+    lang = str(language or "").strip().lower()
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    format_type = normalize_format_type(lang, row_context.get("format_type", ""))
+    mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
+    blank_conf = max(
+        _to_float(row_context.get("blank_span_confidence"), 0.0),
+        _to_float(row_context.get("syllable_blank_confidence"), 0.0),
+        _to_float(row_context.get("syllable_mel_silence_conf"), 0.0),
+    )
+
+    min_gap = 6.0 if alias_type == "cv_head" else 8.0
+    if format_type in {"cvvc", "cvc"}:
+        min_gap = max(5.0, min_gap - 1.0)
+    if mapping_conf < 0.74:
+        min_gap += 1.0
+    if blank_conf >= 0.50:
+        min_gap += 1.0
+    if lang == "japanese":
+        min_gap = max(5.0, min_gap - 0.5)
+
+    if base_gap > 0.0:
+        base_guard = min(max(base_gap * 0.86, 0.0), 18.0)
+        min_gap = max(min_gap, base_guard)
+    return float(min_gap)
+
+
+def _apply_cv_overlap_destination_guard(
+    language: str,
+    row_context: Dict[str, object],
+    params: Tuple[float, float, float, float, float],
+    validate_fn,
+) -> Tuple[float, float, float, float, float]:
+    lang = str(language or "").strip().lower()
+    if lang not in {"korean", "japanese"}:
+        return params
+
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    if alias_type not in {"cv", "cv_head"}:
+        return params
+
+    format_type = normalize_format_type(lang, row_context.get("format_type", ""))
+    valid_formats = {"cv", "cvvc", "vcv"} if lang == "japanese" else {"cv", "cvc", "cvvc", "vcv"}
+    if format_type not in valid_formats:
+        return params
+
+    offset, cons, cutoff, pre, ovl = validate_fn(*params)
+    offset = float(offset)
+    cons = float(cons)
+    cutoff = float(cutoff)
+    pre = max(float(pre), 0.0)
+    ovl = max(float(ovl), 0.0)
+
+    base_pre = max(_to_float(row_context.get("base_pre"), pre), 0.0)
+    base_ovl = max(_to_float(row_context.get("base_ovl"), ovl), 0.0)
+    base_gap = max(base_pre - base_ovl, 0.0)
+
+    ratio_cap = pre * _cv_overlap_cap_ratio(lang, row_context)
+    gap_cap = max(pre - _cv_overlap_min_gap_ms(lang, row_context, base_gap), 0.0)
+
+    growth_cap = 10.0 if alias_type == "cv_head" else 12.0
+    if format_type in {"cvvc", "cvc"}:
+        growth_cap = max(6.0, growth_cap - 2.0)
+    if _to_float(row_context.get("mapping_confidence"), 1.0) < 0.74:
+        growth_cap = max(4.0, growth_cap - 3.0)
+    growth_cap = max(base_ovl + growth_cap, 0.0)
+
+    ovl_cap = max(0.0, min(ratio_cap, gap_cap, growth_cap))
+    if ovl <= ovl_cap:
+        return offset, cons, cutoff, pre, ovl
+
+    return validate_fn(offset, cons, cutoff, pre, ovl_cap)
 
 
 def _apply_korean_bridge_post_guard(
@@ -1580,6 +1740,7 @@ def _apply_ml_destination_guard(
     if lang == "korean":
         out = _apply_korean_cv_destination_guard(row_context, out, validate_fn)
     out = _apply_head_zero_offset_recovery_guard(lang, row_context, out, validate_fn)
+    out = _apply_cv_overlap_destination_guard(lang, row_context, out, validate_fn)
     return out
 
 

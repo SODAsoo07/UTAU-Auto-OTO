@@ -135,14 +135,16 @@ def prepare_ja_loop_state(
 
     detected_format = detect_alias_format_fn(alias_names, custom_map)
     result.detected_format = detected_format
-    result.format_type = forced_format or detected_format
+    forced_norm = str(forced_format or "").strip().lower()
+    forced_explicit = bool(forced_norm and forced_norm not in {"auto", "detect", "detected"})
+    result.format_type = forced_norm if forced_explicit else detected_format
     result.ja_style_profile = get_profile_fn(result.format_type)
-    if result.is_vowel_chain:
+    if result.is_vowel_chain and (not forced_explicit or forced_norm == "vcv"):
         prev_format = result.format_type
         result.format_type = "vcv"
         result.ja_style_profile = get_profile_fn(result.format_type)
-        log_fn(f"🎵 {fname}: 모음 연속음 파일 감지 → VCV 강제 적용 (기존: {prev_format.upper()})")
-    elif forced_format:
+        log_fn(f"🎵 {fname}: 모음 연속음 파일 감지 → VCV 강제 적용 (기존: {str(prev_format or '').upper()})")
+    elif forced_explicit:
         log_fn(f"🎵 {fname}: 포맷 수동 지정 → {result.format_type.upper()} (자동 감지: {detected_format.upper()})")
     else:
         log_fn(f"🎵 {fname}: 포맷 감지 → {result.format_type.upper()}")

@@ -20,7 +20,6 @@ from core.format_type_utils import normalize_auto_format_value
 from core.log_events import classify_log_message, log_with_event
 from core.mfa_runner import ALERT_MFA_PERMISSION_DENIED, ALERT_MSVC_REQUIRED
 from core.oto_validator import validate_oto_timing
-from core.runtime_paths import resolve_setup_mfa_script_path
 from ui.theme_tokens import DEFAULT_THEME_PROFILE, PALETTE, normalize_theme_profile_name
 
 
@@ -51,12 +50,17 @@ class FileDialogMixin:
     def _ml_model_repo_root(self):
         base_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         external_root = os.path.join(base_dir, "models")
-        if os.path.isdir(external_root):
-            return external_root
         installed_root = os.path.join(base_dir, "models_installed", "oto_ml")
-        if os.path.isdir(installed_root):
-            return installed_root
-        return os.path.join(base_dir, "ML_models")
+        noml_auto_root = os.path.join(base_dir, "ML_models_noml_auto")
+        legacy_root = os.path.join(base_dir, "ML_models")
+
+        for candidate in (external_root, noml_auto_root, installed_root, legacy_root):
+            if self._dir_has_model_meta(candidate):
+                return candidate
+        for candidate in (external_root, noml_auto_root, installed_root, legacy_root):
+            if os.path.isdir(candidate):
+                return candidate
+        return legacy_root
 
     def _ml_model_language_root(self, language):
         lang = str(language or "").strip().lower()
@@ -73,6 +77,19 @@ class FileDialogMixin:
         if hasattr(self, "ml_model_root_ja_var") and var is self.ml_model_root_ja_var:
             return "japanese"
         return "korean"
+
+    def _is_legacy_ml_language_root(self, path, language):
+        raw = str(path or "").strip()
+        if not raw:
+            return False
+        base_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        legacy_lang_root = os.path.abspath(os.path.join(base_dir, "ML_models", str(language or "").strip().lower()))
+        target = os.path.abspath(raw)
+        try:
+            common = os.path.commonpath([target, legacy_lang_root])
+        except Exception:
+            return False
+        return common == legacy_lang_root
 
     def _preferred_ml_model_browse_dir(self, var):
         language = self._ml_model_language_for_var(var)
@@ -110,6 +127,9 @@ class FileDialogMixin:
         if os.path.isdir(lang_root):
             return lang_root
         base_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        noml_root = os.path.join(base_dir, "ML_models_noml_auto", str(language or "").strip().lower())
+        if os.path.isdir(noml_root):
+            return noml_root
         legacy_root = os.path.join(base_dir, "ML_models", language)
         if os.path.isdir(legacy_root):
             return legacy_root
@@ -126,27 +146,56 @@ class FileDialogMixin:
         return any(os.path.isfile(path) for path in glob.glob(pattern))
 
     def _apply_recommended_ml_model_defaults(self):
-        language = self._get_language() if hasattr(self, "_get_language") else "korean"
-        if language == "english":
-            target_var = None
-        elif language == "japanese" and hasattr(self, "ml_model_root_ja_var"):
-            target_var = self.ml_model_root_ja_var
-        elif hasattr(self, "ml_model_root_kr_var"):
-            target_var = self.ml_model_root_kr_var
-        else:
-            target_var = None
+        current_language = self._get_language() if hasattr(self, "_get_language") else "korean"
+        base_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        targets = []
+        if hasattr(self, "ml_model_root_kr_var"):
+            targets.append(("korean", self.ml_model_root_kr_var))
+        if hasattr(self, "ml_model_root_ja_var"):
+            targets.append(("japanese", self.ml_model_root_ja_var))
 
-        if target_var is not None:
+        for language, target_var in targets:
             current_root = str(target_var.get() or "").strip()
+            recommended_root = str(self._recommended_ml_model_root(language) or "").strip()
+            if not recommended_root:
+                continue
+            use_recommended = False
+            models_lang_root = os.path.abspath(os.path.join(base_dir, "models", str(language or "").strip().lower()))
+            recommended_abs = os.path.abspath(recommended_root)
+            current_abs = os.path.abspath(current_root) if current_root else ""
             if not current_root or not os.path.isdir(current_root):
-                recommended_root = self._recommended_ml_model_root(language)
-                if recommended_root:
-                    target_var.set(recommended_root)
+                use_recommended = True
+            elif recommended_abs == models_lang_root and self._dir_has_model_meta(models_lang_root):
+                if current_abs != models_lang_root:
+                    use_recommended = True
+            elif "ML_models_noml_auto" in os.path.abspath(recommended_root):
+                if self._is_legacy_ml_language_root(current_root, language):
+                    use_recommended = True
+            if use_recommended:
+                target_var.set(recommended_root)
 
         if hasattr(self, "ml_coupled_backend_var"):
             backend = str(self.ml_coupled_backend_var.get() or "auto").strip().lower()
-            if backend in {"", "auto"} and self._language_has_ensemble_bundle(language):
+            if backend in {"", "auto"} and self._language_has_ensemble_bundle(current_language):
                 self.ml_coupled_backend_var.set("ensemble")
+
+    def _effective_ml_model_root(self, language):
+        lang = str(language or "").strip().lower()
+        configured = ""
+        if lang == "japanese" and hasattr(self, "ml_model_root_ja_var"):
+            configured = str(self.ml_model_root_ja_var.get() or "").strip()
+        elif lang == "korean" and hasattr(self, "ml_model_root_kr_var"):
+            configured = str(self.ml_model_root_kr_var.get() or "").strip()
+        if configured and self._dir_has_model_meta(configured):
+            return os.path.abspath(configured), "configured"
+        recommended = str(self._recommended_ml_model_root(lang) or "").strip()
+        if recommended and self._dir_has_model_meta(recommended):
+            return os.path.abspath(recommended), "recommended"
+        env_key = "UTOA_JA_OTO_ML_DIR" if lang == "japanese" else "UTOA_KR_OTO_ML_DIR"
+        env_root = str(os.environ.get(env_key, "") or "").strip()
+        if env_root and self._dir_has_model_meta(env_root):
+            return os.path.abspath(env_root), "env"
+        return (configured or recommended or env_root or ""), "missing"
 
     def _browse_folder_by_var(self, var, initial_dir=""):
         path = filedialog.askdirectory(initialdir=initial_dir or self._preferred_ml_model_browse_dir(var))
@@ -473,7 +522,7 @@ class AppRuntimeMixin:
         fmt = str(normalized or "").strip().lower()
         if not fmt:
             return "general"
-        if "auto" in fmt or "자동" in fmt:
+        if "auto" in fmt or "・尖徐" in fmt:
             return "general"
         return fmt
 
@@ -492,6 +541,7 @@ class AppRuntimeMixin:
     def _clear_advanced_tuning_envs(self) -> None:
         for key in (
             "UTOA_KR_MAPPING_CONF_THRESHOLD",
+            "UTOA_KR_MAPPING_ONLY_ENABLE",
             "UTOA_KR_CONTINUITY_ENABLE",
             "UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ",
             "UTOA_KR_VC_NEIGHBOR_ENABLE",
@@ -509,6 +559,10 @@ class AppRuntimeMixin:
             "UTOA_CVN_CORRECTION_ENABLE",
             "UTOA_CVN_LOW_CONF_ONLY",
             "UTOA_CVN_C_THRESHOLD",
+            "UTOA_MAPPING_SUPERVISED_ENABLE",
+            "UTOA_MAPPING_SUPERVISED_MODE",
+            "UTOA_CV_ORDER_PRIOR_ENABLE",
+            "UTOA_CV_ORDER_PRIOR_STRENGTH",
             "UTOA_SOFT_BANK_MODE",
             "UTOA_MFA_SOFT_BANK_MODE",
             "UTOA_MEL_SOUND_DB_MARGIN",
@@ -527,6 +581,8 @@ class AppRuntimeMixin:
             "UTOA_MFA_WEAK_VOICE_ASSIST_ENABLE",
             "UTOA_MFA_WEAK_VOICE_PREEMPH_MIX",
             "UTOA_SYLLABLE_STRICT_MODE",
+            "UTOA_WEAK_BOUNDARY_MISSING_REDUCTION_ENABLE",
+            "UTOA_WEAK_BOUNDARY_ANTIMISMAP_ENABLE",
         ):
             os.environ.pop(key, None)
 
@@ -558,7 +614,12 @@ class AppRuntimeMixin:
                 val = min(float(max_value), val)
             os.environ[env_name] = f"{val:.3f}".rstrip("0").rstrip(".")
 
-        continuity_enabled = (
+        file_consistency_enabled = (
+            bool(self.vc_correction_enable_var.get())
+            if hasattr(self, "vc_correction_enable_var")
+            else True
+        )
+        continuity_enabled = file_consistency_enabled and (
             bool(self.kr_continuity_enable_var.get())
             if hasattr(self, "kr_continuity_enable_var")
             else True
@@ -571,29 +632,55 @@ class AppRuntimeMixin:
                 min_value=0.0,
             )
 
-        kr_vc_enabled = (
+        kr_vc_enabled = file_consistency_enabled and (
             bool(self.kr_vc_neighbor_enable_var.get())
             if hasattr(self, "kr_vc_neighbor_enable_var")
             else True
         )
-        ja_vc_enabled = (
+        ja_vc_enabled = file_consistency_enabled and (
             bool(self.ja_vc_neighbor_enable_var.get())
             if hasattr(self, "ja_vc_neighbor_enable_var")
             else True
         )
         os.environ["UTOA_KR_VC_NEIGHBOR_ENABLE"] = "1" if kr_vc_enabled else "0"
         os.environ["UTOA_JA_VC_NEIGHBOR_ENABLE"] = "1" if ja_vc_enabled else "0"
-        cvn_mode = self._get_cvn_correction_mode_code() if hasattr(self, "_get_cvn_correction_mode_code") else "off"
-        if cvn_mode == "always":
-            os.environ["UTOA_CVN_CORRECTION_ENABLE"] = "1"
-            os.environ["UTOA_CVN_LOW_CONF_ONLY"] = "0"
-        elif cvn_mode == "low_conf":
-            os.environ["UTOA_CVN_CORRECTION_ENABLE"] = "1"
-            os.environ["UTOA_CVN_LOW_CONF_ONLY"] = "1"
-        else:
-            os.environ["UTOA_CVN_CORRECTION_ENABLE"] = "0"
-            os.environ["UTOA_CVN_LOW_CONF_ONLY"] = "0"
+        cvn_correction_enabled = (
+            bool(self.cvn_correction_enable_var.get())
+            if hasattr(self, "cvn_correction_enable_var")
+            else True
+        )
+        os.environ["UTOA_CVN_CORRECTION_ENABLE"] = "1" if cvn_correction_enabled else "0"
+        cvn_low_conf_only = (
+            bool(self.cvn_low_conf_only_var.get())
+            if hasattr(self, "cvn_low_conf_only_var")
+            else False
+        )
+        os.environ["UTOA_CVN_LOW_CONF_ONLY"] = "1" if cvn_low_conf_only else "0"
         os.environ["UTOA_CVN_C_THRESHOLD"] = "0.4"
+        mapping_supervised_enabled = (
+            bool(self.mapping_supervised_enable_var.get())
+            if hasattr(self, "mapping_supervised_enable_var")
+            else True
+        )
+        os.environ["UTOA_MAPPING_SUPERVISED_ENABLE"] = "1" if mapping_supervised_enabled else "0"
+        mapping_mode_code = (
+            self._get_mapping_supervised_mode_code()
+            if hasattr(self, "_get_mapping_supervised_mode_code")
+            else "auto"
+        )
+        os.environ["UTOA_MAPPING_SUPERVISED_MODE"] = str(mapping_mode_code or "auto").strip().lower()
+        cv_order_prior_enabled = (
+            bool(self.cv_order_prior_enable_var.get())
+            if hasattr(self, "cv_order_prior_enable_var")
+            else True
+        )
+        os.environ["UTOA_CV_ORDER_PRIOR_ENABLE"] = "1" if cv_order_prior_enabled else "0"
+        _set_float_env(
+            "cv_order_prior_strength_var",
+            "UTOA_CV_ORDER_PRIOR_STRENGTH",
+            min_value=0.0,
+            max_value=1.0,
+        )
 
         _set_float_env("kr_vc_neighbor_blend_var", "UTOA_KR_VC_NEIGHBOR_BLEND", min_value=0.0, max_value=1.0)
         _set_float_env("kr_vc_neighbor_max_shift_var", "UTOA_KR_VC_NEIGHBOR_MAX_SHIFT", min_value=0.0)
@@ -656,6 +743,18 @@ class AppRuntimeMixin:
             else "soft"
         )
         os.environ["UTOA_SYLLABLE_STRICT_MODE"] = str(strict_mode_code or "soft").strip().lower()
+        weak_missing_reduce = (
+            bool(self.weak_boundary_reduce_missing_var.get())
+            if hasattr(self, "weak_boundary_reduce_missing_var")
+            else False
+        )
+        weak_block_mismap = (
+            bool(self.weak_boundary_block_mismap_var.get())
+            if hasattr(self, "weak_boundary_block_mismap_var")
+            else False
+        )
+        os.environ["UTOA_WEAK_BOUNDARY_MISSING_REDUCTION_ENABLE"] = "1" if weak_missing_reduce else "0"
+        os.environ["UTOA_WEAK_BOUNDARY_ANTIMISMAP_ENABLE"] = "1" if weak_block_mismap else "0"
 
     def _sync_advanced_tuning_slider_controls(self) -> None:
         bindings = getattr(self, "advanced_tuning_slider_bindings", None)
@@ -706,6 +805,205 @@ class AppRuntimeMixin:
                     label.configure(text=fmt.format(current))
                 except Exception:
                     pass
+
+    @staticmethod
+    def _get_format_consistency_recommendation(language: str, format_code: str) -> dict:
+        lang = str(language or "korean").strip().lower()
+        fmt = str(format_code or "").strip().lower()
+        if not fmt:
+            fmt = "general"
+
+        common_enable = {
+            "vc_correction_enable_var": True,
+            "kr_continuity_enable_var": True,
+            "kr_vc_neighbor_enable_var": True,
+            "ja_vc_neighbor_enable_var": True,
+        }
+        profiles = {
+            "korean": {
+                "general": {
+                    "kr_continuity_max_offset_adj_var": "170",
+                    "kr_vc_neighbor_blend_var": "0.32",
+                    "kr_vc_neighbor_max_shift_var": "40",
+                    "kr_vc_neighbor_lead_ms_var": "5",
+                    "kr_vc_neighbor_tail_ms_var": "7",
+                    "kr_vc_neighbor_min_len_var": "38",
+                    "ja_vc_neighbor_blend_var": "0.35",
+                    "ja_vc_neighbor_max_shift_var": "45",
+                    "ja_vc_neighbor_lead_ms_var": "6",
+                    "ja_vc_neighbor_tail_ms_var": "8",
+                    "ja_vc_neighbor_min_len_var": "35",
+                },
+                "cv": {
+                    "kr_continuity_max_offset_adj_var": "140",
+                    "kr_vc_neighbor_blend_var": "0.24",
+                    "kr_vc_neighbor_max_shift_var": "30",
+                    "kr_vc_neighbor_lead_ms_var": "4",
+                    "kr_vc_neighbor_tail_ms_var": "6",
+                    "kr_vc_neighbor_min_len_var": "45",
+                    "ja_vc_neighbor_blend_var": "0.28",
+                    "ja_vc_neighbor_max_shift_var": "34",
+                    "ja_vc_neighbor_lead_ms_var": "5",
+                    "ja_vc_neighbor_tail_ms_var": "6",
+                    "ja_vc_neighbor_min_len_var": "42",
+                },
+                "cvc": {
+                    "kr_continuity_max_offset_adj_var": "175",
+                    "kr_vc_neighbor_blend_var": "0.34",
+                    "kr_vc_neighbor_max_shift_var": "42",
+                    "kr_vc_neighbor_lead_ms_var": "6",
+                    "kr_vc_neighbor_tail_ms_var": "8",
+                    "kr_vc_neighbor_min_len_var": "34",
+                    "ja_vc_neighbor_blend_var": "0.32",
+                    "ja_vc_neighbor_max_shift_var": "40",
+                    "ja_vc_neighbor_lead_ms_var": "5",
+                    "ja_vc_neighbor_tail_ms_var": "7",
+                    "ja_vc_neighbor_min_len_var": "36",
+                },
+                "cvvc": {
+                    "kr_continuity_max_offset_adj_var": "200",
+                    "kr_vc_neighbor_blend_var": "0.44",
+                    "kr_vc_neighbor_max_shift_var": "58",
+                    "kr_vc_neighbor_lead_ms_var": "8",
+                    "kr_vc_neighbor_tail_ms_var": "10",
+                    "kr_vc_neighbor_min_len_var": "26",
+                    "ja_vc_neighbor_blend_var": "0.42",
+                    "ja_vc_neighbor_max_shift_var": "56",
+                    "ja_vc_neighbor_lead_ms_var": "7",
+                    "ja_vc_neighbor_tail_ms_var": "9",
+                    "ja_vc_neighbor_min_len_var": "28",
+                },
+                "vcv": {
+                    "kr_continuity_max_offset_adj_var": "190",
+                    "kr_vc_neighbor_blend_var": "0.38",
+                    "kr_vc_neighbor_max_shift_var": "50",
+                    "kr_vc_neighbor_lead_ms_var": "7",
+                    "kr_vc_neighbor_tail_ms_var": "9",
+                    "kr_vc_neighbor_min_len_var": "30",
+                    "ja_vc_neighbor_blend_var": "0.34",
+                    "ja_vc_neighbor_max_shift_var": "44",
+                    "ja_vc_neighbor_lead_ms_var": "6",
+                    "ja_vc_neighbor_tail_ms_var": "8",
+                    "ja_vc_neighbor_min_len_var": "34",
+                },
+                "c_plus_v": {
+                    "kr_continuity_max_offset_adj_var": "120",
+                    "kr_vc_neighbor_blend_var": "0.18",
+                    "kr_vc_neighbor_max_shift_var": "24",
+                    "kr_vc_neighbor_lead_ms_var": "4",
+                    "kr_vc_neighbor_tail_ms_var": "5",
+                    "kr_vc_neighbor_min_len_var": "48",
+                    "ja_vc_neighbor_blend_var": "0.22",
+                    "ja_vc_neighbor_max_shift_var": "28",
+                    "ja_vc_neighbor_lead_ms_var": "4",
+                    "ja_vc_neighbor_tail_ms_var": "6",
+                    "ja_vc_neighbor_min_len_var": "46",
+                },
+                "cmpx": {
+                    "kr_continuity_max_offset_adj_var": "150",
+                    "kr_vc_neighbor_blend_var": "0.25",
+                    "kr_vc_neighbor_max_shift_var": "34",
+                    "kr_vc_neighbor_lead_ms_var": "5",
+                    "kr_vc_neighbor_tail_ms_var": "6",
+                    "kr_vc_neighbor_min_len_var": "42",
+                    "ja_vc_neighbor_blend_var": "0.28",
+                    "ja_vc_neighbor_max_shift_var": "34",
+                    "ja_vc_neighbor_lead_ms_var": "5",
+                    "ja_vc_neighbor_tail_ms_var": "6",
+                    "ja_vc_neighbor_min_len_var": "40",
+                },
+            },
+            "japanese": {
+                "general": {
+                    "kr_continuity_max_offset_adj_var": "170",
+                    "kr_vc_neighbor_blend_var": "0.32",
+                    "kr_vc_neighbor_max_shift_var": "40",
+                    "kr_vc_neighbor_lead_ms_var": "5",
+                    "kr_vc_neighbor_tail_ms_var": "7",
+                    "kr_vc_neighbor_min_len_var": "38",
+                    "ja_vc_neighbor_blend_var": "0.30",
+                    "ja_vc_neighbor_max_shift_var": "38",
+                    "ja_vc_neighbor_lead_ms_var": "5",
+                    "ja_vc_neighbor_tail_ms_var": "7",
+                    "ja_vc_neighbor_min_len_var": "36",
+                },
+                "cv": {
+                    "kr_continuity_max_offset_adj_var": "150",
+                    "kr_vc_neighbor_blend_var": "0.26",
+                    "kr_vc_neighbor_max_shift_var": "32",
+                    "kr_vc_neighbor_lead_ms_var": "4",
+                    "kr_vc_neighbor_tail_ms_var": "6",
+                    "kr_vc_neighbor_min_len_var": "44",
+                    "ja_vc_neighbor_blend_var": "0.24",
+                    "ja_vc_neighbor_max_shift_var": "30",
+                    "ja_vc_neighbor_lead_ms_var": "4",
+                    "ja_vc_neighbor_tail_ms_var": "6",
+                    "ja_vc_neighbor_min_len_var": "44",
+                },
+                "cvvc": {
+                    "kr_continuity_max_offset_adj_var": "185",
+                    "kr_vc_neighbor_blend_var": "0.36",
+                    "kr_vc_neighbor_max_shift_var": "48",
+                    "kr_vc_neighbor_lead_ms_var": "6",
+                    "kr_vc_neighbor_tail_ms_var": "8",
+                    "kr_vc_neighbor_min_len_var": "32",
+                    "ja_vc_neighbor_blend_var": "0.42",
+                    "ja_vc_neighbor_max_shift_var": "56",
+                    "ja_vc_neighbor_lead_ms_var": "7",
+                    "ja_vc_neighbor_tail_ms_var": "9",
+                    "ja_vc_neighbor_min_len_var": "28",
+                },
+                "vcv": {
+                    "kr_continuity_max_offset_adj_var": "170",
+                    "kr_vc_neighbor_blend_var": "0.31",
+                    "kr_vc_neighbor_max_shift_var": "40",
+                    "kr_vc_neighbor_lead_ms_var": "5",
+                    "kr_vc_neighbor_tail_ms_var": "7",
+                    "kr_vc_neighbor_min_len_var": "36",
+                    "ja_vc_neighbor_blend_var": "0.34",
+                    "ja_vc_neighbor_max_shift_var": "44",
+                    "ja_vc_neighbor_lead_ms_var": "6",
+                    "ja_vc_neighbor_tail_ms_var": "8",
+                    "ja_vc_neighbor_min_len_var": "34",
+                },
+            },
+        }
+        selected = profiles.get(lang, {}).get(fmt) or profiles.get(lang, {}).get("general")
+        if not isinstance(selected, dict):
+            return {}
+        result = dict(common_enable)
+        result.update(selected)
+        return result
+
+    def _apply_format_consistency_recommendation(self, *, save_config: bool = False, write_log: bool = False) -> None:
+        if not hasattr(self, "_get_language") or not hasattr(self, "auto_format_var"):
+            return
+        language = self._get_language()
+        if str(language or "").strip().lower() == "english":
+            return
+        try:
+            format_code = normalize_auto_format_value(language, self.auto_format_var.get())
+        except Exception:
+            format_code = ""
+        recommended = self._get_format_consistency_recommendation(language, format_code)
+        if not recommended:
+            return
+        for attr, value in recommended.items():
+            if not hasattr(self, attr):
+                continue
+            try:
+                getattr(self, attr).set(value)
+            except Exception:
+                continue
+        if hasattr(self, "_sync_vc_correction_toggle"):
+            self._sync_vc_correction_toggle()
+        if hasattr(self, "_sync_advanced_tuning_slider_controls"):
+            self._sync_advanced_tuning_slider_controls()
+        if save_config:
+            self._save_config()
+        if write_log and hasattr(self, "_append_log"):
+            fmt_txt = str(format_code or "auto").strip().lower() or "auto"
+            self._append_log(f"[권장값] 형식별 연속성/파일 일관성 보정값 적용: lang={language}, fmt={fmt_txt}")
 
     def _sync_weak_voice_assist_controls(self) -> None:
         enabled = (
@@ -872,6 +1170,8 @@ class AppRuntimeMixin:
                 continue
         if hasattr(self, "_sync_vc_correction_toggle"):
             self._sync_vc_correction_toggle()
+        if hasattr(self, "_sync_cvn_correction_toggle"):
+            self._sync_cvn_correction_toggle()
         if hasattr(self, "_sync_advanced_tuning_slider_controls"):
             self._sync_advanced_tuning_slider_controls()
         if hasattr(self, "_sync_weak_voice_assist_controls"):
@@ -910,7 +1210,12 @@ class AppRuntimeMixin:
             "kr_continuity_enable_var": True,
             "kr_continuity_max_offset_adj_var": "",
             "vc_correction_enable_var": True,
-            "cvn_correction_mode_var": "끄기",
+            "cvn_correction_enable_var": True,
+            "cvn_low_conf_only_var": False,
+            "mapping_supervised_enable_var": True,
+            "mapping_supervised_mode_var": "자동(권장)",
+            "cv_order_prior_enable_var": True,
+            "cv_order_prior_strength_var": "",
             "kr_vc_neighbor_enable_var": True,
             "kr_vc_neighbor_blend_var": "",
             "kr_vc_neighbor_max_shift_var": "",
@@ -926,7 +1231,9 @@ class AppRuntimeMixin:
             "soft_bank_mode_var": False,
             "weak_voice_assist_enable_var": True,
             "weak_voice_assist_strength_var": "",
-            "mapping_strict_mode_var": "적당히 엄격 모드(누락 행은 폴백)",
+            "mapping_strict_mode_var": "적당히 엄격(누락 행은 폴백)",
+            "weak_boundary_reduce_missing_var": False,
+            "weak_boundary_block_mismap_var": False,
         }
         for attr, value in defaults.items():
             if not hasattr(self, attr):
@@ -943,6 +1250,8 @@ class AppRuntimeMixin:
         self._save_config()
         if hasattr(self, "_sync_vc_correction_toggle"):
             self._sync_vc_correction_toggle()
+        if hasattr(self, "_sync_cvn_correction_toggle"):
+            self._sync_cvn_correction_toggle()
         if hasattr(self, "_sync_advanced_tuning_slider_controls"):
             self._sync_advanced_tuning_slider_controls()
         if hasattr(self, "_sync_weak_voice_assist_controls"):
@@ -954,47 +1263,15 @@ class AppRuntimeMixin:
         self._append_log("개발자 설정을 기본값으로 초기화했습니다.")
 
     @staticmethod
-    def _normalize_cvn_correction_mode_code(value: str) -> str:
-        raw = str(value or "").strip().lower().replace(" ", "")
-        if raw in {"always", "on", "all", "항상적용", "항상"}:
-            return "always"
-        if raw in {"low_conf", "lowconf", "uncertain_only", "부정확한파일만적용", "부정확한파일만"}:
-            return "low_conf"
-        if raw in {"off", "none", "disable", "disabled", "끄기", "0", "false"}:
-            return "off"
-        return "off"
-
-    @staticmethod
-    def _cvn_correction_mode_label_from_code(code: str) -> str:
-        normalized = AppRuntimeMixin._normalize_cvn_correction_mode_code(code)
-        label_map = {
-            "always": "항상 적용",
-            "low_conf": "부정확한 파일만 적용",
-            "off": "끄기",
-        }
-        return label_map.get(normalized, "끄기")
-
-    def _set_cvn_correction_mode_from_code(self, code: str) -> str:
-        normalized = self._normalize_cvn_correction_mode_code(code)
-        label = self._cvn_correction_mode_label_from_code(normalized)
-        if hasattr(self, "cvn_correction_mode_var"):
-            self.cvn_correction_mode_var.set(label)
-        return normalized
-
-    def _get_cvn_correction_mode_code(self) -> str:
-        if not hasattr(self, "cvn_correction_mode_var"):
-            return "off"
-        return self._normalize_cvn_correction_mode_code(self.cvn_correction_mode_var.get())
-
-    @staticmethod
     def _normalize_mapping_strict_mode_code(value: str) -> str:
         raw = str(value or "").strip().lower()
+        compact = raw.replace(" ", "")
         if raw in {
             "strict",
             "full",
             "full_strict",
             "hard",
-        }:
+        } or compact in {"완전엄격", "완전엄격모드"}:
             return "strict"
         if raw in {
             "off",
@@ -1003,25 +1280,82 @@ class AppRuntimeMixin:
             "disabled",
             "0",
             "false",
-        }:
+        } or compact in {"끄기", "비활성", "미사용"}:
             return "off"
         if raw in {
             "soft",
             "moderate",
             "balanced",
-        }:
+        } or compact in {"적당히엄격", "적당히엄격모드", "적당히엄격(누락행은폴백)"}:
+            return "soft"
+        if "완전엄격" in compact:
+            return "strict"
+        if "적당히엄격" in compact:
             return "soft"
         return "soft"
+
+    @staticmethod
+    def _normalize_mapping_supervised_mode_code(value: str) -> str:
+        raw = str(value or "").strip().lower()
+        compact = raw.replace(" ", "").replace("_", "").replace("-", "")
+        if raw in {"global_first", "global-first", "global", "전역우선"} or "전역우선" in compact:
+            return "global_first"
+        if raw in {"format_first", "format-first", "format", "포맷우선"} or "포맷우선" in compact:
+            return "format_first"
+        return "auto"
+
+    @staticmethod
+    def _mapping_supervised_mode_label_from_code(code: str) -> str:
+        normalized = AppRuntimeMixin._normalize_mapping_supervised_mode_code(code)
+        table = {
+            "auto": "자동(권장)",
+            "format_first": "포맷 우선",
+            "global_first": "전역 우선",
+        }
+        return table.get(normalized, "자동(권장)")
+
+    def _set_mapping_supervised_mode_from_code(self, code: str) -> str:
+        normalized = self._normalize_mapping_supervised_mode_code(code)
+        label = self._mapping_supervised_mode_label_from_code(normalized)
+        if hasattr(self, "mapping_supervised_mode_var"):
+            try:
+                self.mapping_supervised_mode_var.set(label)
+            except Exception:
+                pass
+        return normalized
+
+    def _get_mapping_supervised_mode_code(self) -> str:
+        if not hasattr(self, "mapping_supervised_mode_var"):
+            return "auto"
+        try:
+            raw = self.mapping_supervised_mode_var.get()
+        except Exception:
+            return "auto"
+        normalized = self._normalize_mapping_supervised_mode_code(raw)
+        normalized_label = self._mapping_supervised_mode_label_from_code(normalized)
+        if str(raw or "").strip() != normalized_label:
+            try:
+                self.mapping_supervised_mode_var.set(normalized_label)
+            except Exception:
+                pass
+        return normalized
+
+    def _get_mapping_supervised_mode_option_labels(self) -> list[str]:
+        return [
+            self._mapping_supervised_mode_label_from_code("auto"),
+            self._mapping_supervised_mode_label_from_code("format_first"),
+            self._mapping_supervised_mode_label_from_code("global_first"),
+        ]
 
     @staticmethod
     def _mapping_strict_mode_label_from_code(code: str) -> str:
         normalized = AppRuntimeMixin._normalize_mapping_strict_mode_code(code)
         label_map = {
-            "strict": "strict",
-            "soft": "soft (fallback allowed)",
+            "strict": "완전 엄격",
+            "soft": "적당히 엄격(누락 행은 폴백)",
             "off": "off",
         }
-        return label_map.get(normalized, "soft (fallback allowed)")
+        return label_map.get(normalized, "적당히 엄격(누락 행은 폴백)")
 
     def _set_mapping_strict_mode_from_code(self, code: str) -> str:
         normalized = self._normalize_mapping_strict_mode_code(code)
@@ -1166,6 +1500,7 @@ class AppRuntimeMixin:
             os.environ["UTOA_ML_COUPLED_MIN_CONF_USE_MODEL_META"] = "1"
             os.environ["UTOA_ML_COUPLED_DEVICE"] = "auto"
             os.environ["UTOA_ML_COUPLED_BACKEND"] = "auto"
+            os.environ["UTOA_ML_COUPLED_ONNX_ENABLE"] = "1"
             os.environ["UTOA_ML_BATCH_INFERENCE_ENABLE"] = "0"
             os.environ["UTOA_ML_BATCH_INFERENCE_SIZE"] = "256"
             os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = "0"
@@ -1264,12 +1599,13 @@ class AppRuntimeMixin:
         has_ensemble = False
         has_coupled = False
         try:
-            from core.oto_ml_refiner import _resolve_ensemble_model_dir, _resolve_lightgbm_model_dir
+            from core.oto_ml_refiner import _resolve_ensemble_model_dir, _resolve_lightgbm_model_dir, _resolve_model_dir
 
             ensemble_dir = _resolve_ensemble_model_dir(lang, fmt)
             lightgbm_dir = _resolve_lightgbm_model_dir(lang, fmt)
+            primary_dir = _resolve_model_dir(lang, fmt)
             has_ensemble = bool(ensemble_dir)
-            has_coupled = bool(ensemble_dir or lightgbm_dir)
+            has_coupled = bool(primary_dir or ensemble_dir or lightgbm_dir)
         except Exception:
             has_ensemble = False
             has_coupled = False
@@ -1328,6 +1664,7 @@ class AppRuntimeMixin:
         os.environ["UTOA_ML_COUPLED_MIN_CONF_USE_MODEL_META"] = "1"
         os.environ["UTOA_ML_COUPLED_DEVICE"] = "auto"
         os.environ["UTOA_ML_COUPLED_BACKEND"] = "auto"
+        os.environ["UTOA_ML_COUPLED_ONNX_ENABLE"] = "1"
         os.environ["UTOA_ML_BATCH_INFERENCE_ENABLE"] = "1" if enable_ml else "0"
         os.environ["UTOA_ML_BATCH_INFERENCE_SIZE"] = "256"
         os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = "0"
@@ -1676,13 +2013,41 @@ class AppRuntimeMixin:
         )
 
     def _resolve_setup_mfa_script_path(self):
-        return resolve_setup_mfa_script_path(
-            app_dir=str(getattr(self, "app_dir", "") or ""),
-            app_data_dir=str(getattr(self, "app_data_dir", "") or ""),
-            writable_data_dir=str(getattr(self, "writable_data_dir", "") or ""),
-            frozen=bool(getattr(sys, "frozen", False)),
-            executable_path=str(getattr(sys, "executable", "") or ""),
-        )
+        candidates = []
+        app_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if app_dir:
+            candidates.append(os.path.join(app_dir, "setup_mfa.bat"))
+            candidates.append(os.path.join(os.path.dirname(app_dir), "setup_mfa.bat"))
+        exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", ""))) if getattr(sys, "frozen", False) else ""
+        if exe_dir:
+            candidates.append(os.path.join(exe_dir, "setup_mfa.bat"))
+            candidates.append(os.path.join(os.path.dirname(exe_dir), "setup_mfa.bat"))
+        local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
+        if local_app_data:
+            candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO", "setup_mfa.bat"))
+            candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO_v3", "setup_mfa.bat"))
+        try:
+            candidates.append(os.path.join(os.getcwd(), "setup_mfa.bat"))
+        except Exception:
+            pass
+        app_data_dir = str(getattr(self, "app_data_dir", "") or "").strip()
+        if app_data_dir:
+            candidates.append(os.path.join(app_data_dir, "setup_mfa.bat"))
+        writable_data_dir = str(getattr(self, "writable_data_dir", "") or "").strip()
+        if writable_data_dir:
+            candidates.append(os.path.join(writable_data_dir, "setup_mfa.bat"))
+
+        seen = set()
+        for candidate in candidates:
+            if not candidate:
+                continue
+            norm = os.path.normcase(os.path.abspath(candidate))
+            if norm in seen:
+                continue
+            seen.add(norm)
+            if os.path.isfile(candidate):
+                return candidate
+        return ""
 
     def _build_setup_mfa_recovery_guide(self):
         script_path = self._resolve_setup_mfa_script_path()
@@ -1788,6 +2153,8 @@ class AppRuntimeMixin:
         safe_title = self._normalize_ui_message(str(title or "안내"))
         safe_message = self._mask_sensitive_text(str(message or ""))
 
+        # Main-thread callers must show the dialog immediately.
+        # Waiting on an Event here would block Tk's event loop and freeze the app.
         if threading.current_thread() is threading.main_thread():
             try:
                 return bool(messagebox.askyesno(safe_title, safe_message))
@@ -1826,6 +2193,21 @@ class AppRuntimeMixin:
                 self._set_progress(ratio)
 
         self._after_safe(_do)
+
+    def _log_startup_ml_model_roots_once(self):
+        if bool(getattr(self, "_ml_model_root_startup_logged", False)):
+            return
+        if not hasattr(self, "_effective_ml_model_root"):
+            return
+        kr_root, kr_src = self._effective_ml_model_root("korean")
+        ja_root, ja_src = self._effective_ml_model_root("japanese")
+        kr_txt = kr_root if kr_root else "(none)"
+        ja_txt = ja_root if ja_root else "(none)"
+        self._append_log(
+            f"[OTO-ML] startup model roots | KR[{kr_src}]={kr_txt} | JA[{ja_src}]={ja_txt}",
+            log_to_file=True,
+        )
+        self._ml_model_root_startup_logged = True
 
     def _parse_progress_ratio_from_status(self, msg):
         text = str(msg or "")
@@ -1971,12 +2353,12 @@ class AppRuntimeMixin:
         truncated_issues = int(summary.get("truncated_issues", 0) or 0)
         if err_count > 0:
             log_cb(
-                f"⚠ OTO 자동 검증 요약: error {err_count}, warning {warn_count} "
+                f"⚠ OTO 검증 결과: error {err_count}, warning {warn_count} "
                 f"(files={sampled_wavs}/{checked_wavs_total}, truncated={truncated_issues})"
             )
         else:
             log_cb(
-                f"✅ OTO 자동 검증 요약: warning {warn_count} (error 0) "
+                f"✅ OTO 검증 결과: warning {warn_count} (error 0) "
                 f"(files={sampled_wavs}/{checked_wavs_total}, truncated={truncated_issues})"
             )
         return summary
@@ -2519,6 +2901,17 @@ class ConfigMixin:
             "ml_anchor_mel_gamma": self.ml_anchor_mel_gamma_var.get() if hasattr(self, "ml_anchor_mel_gamma_var") else "",
             "ml_model_root_kr": self.ml_model_root_kr_var.get() if hasattr(self, "ml_model_root_kr_var") else "",
             "ml_model_root_ja": self.ml_model_root_ja_var.get() if hasattr(self, "ml_model_root_ja_var") else "",
+            "cvn_correction_enable": self.cvn_correction_enable_var.get() if hasattr(self, "cvn_correction_enable_var") else True,
+            "cvn_low_conf_only": self.cvn_low_conf_only_var.get() if hasattr(self, "cvn_low_conf_only_var") else False,
+            "mapping_supervised_enable": self.mapping_supervised_enable_var.get() if hasattr(self, "mapping_supervised_enable_var") else True,
+            "mapping_supervised_mode": (
+                self._get_mapping_supervised_mode_code()
+                if hasattr(self, "_get_mapping_supervised_mode_code")
+                else "auto"
+            ),
+            "cv_order_prior_enable": self.cv_order_prior_enable_var.get() if hasattr(self, "cv_order_prior_enable_var") else True,
+            "cv_order_prior_strength": self.cv_order_prior_strength_var.get() if hasattr(self, "cv_order_prior_strength_var") else "",
+            "vc_correction_enable": self.vc_correction_enable_var.get() if hasattr(self, "vc_correction_enable_var") else True,
             "kr_vc_neighbor_enable": self.kr_vc_neighbor_enable_var.get() if hasattr(self, "kr_vc_neighbor_enable_var") else True,
             "kr_vc_neighbor_blend": self.kr_vc_neighbor_blend_var.get() if hasattr(self, "kr_vc_neighbor_blend_var") else "",
             "kr_vc_neighbor_max_shift": self.kr_vc_neighbor_max_shift_var.get() if hasattr(self, "kr_vc_neighbor_max_shift_var") else "",
@@ -2531,11 +2924,6 @@ class ConfigMixin:
             "ja_vc_neighbor_lead_ms": self.ja_vc_neighbor_lead_ms_var.get() if hasattr(self, "ja_vc_neighbor_lead_ms_var") else "",
             "ja_vc_neighbor_tail_ms": self.ja_vc_neighbor_tail_ms_var.get() if hasattr(self, "ja_vc_neighbor_tail_ms_var") else "",
             "ja_vc_neighbor_min_len": self.ja_vc_neighbor_min_len_var.get() if hasattr(self, "ja_vc_neighbor_min_len_var") else "",
-            "cvn_correction_mode": (
-                self._get_cvn_correction_mode_code()
-                if hasattr(self, "_get_cvn_correction_mode_code")
-                else "off"
-            ),
             "soft_bank_mode": self.soft_bank_mode_var.get() if hasattr(self, "soft_bank_mode_var") else False,
             "low_rms_gain_enable": self.low_rms_gain_enable_var.get() if hasattr(self, "low_rms_gain_enable_var") else True,
             "weak_voice_assist_enable": self.weak_voice_assist_enable_var.get() if hasattr(self, "weak_voice_assist_enable_var") else True,
@@ -2545,6 +2933,8 @@ class ConfigMixin:
                 if hasattr(self, "_get_mapping_strict_mode_code")
                 else "soft"
             ),
+            "weak_boundary_reduce_missing": self.weak_boundary_reduce_missing_var.get() if hasattr(self, "weak_boundary_reduce_missing_var") else False,
+            "weak_boundary_block_mismap": self.weak_boundary_block_mismap_var.get() if hasattr(self, "weak_boundary_block_mismap_var") else False,
             "ja_mapping_words_fallback_enabled": self.ja_mapping_words_fallback_enabled_var.get() if hasattr(self, "ja_mapping_words_fallback_enabled_var") else True,
             "ja_mapping_spn_ratio_threshold": self.ja_mapping_spn_ratio_threshold_var.get() if hasattr(self, "ja_mapping_spn_ratio_threshold_var") else 0.35,
             "ja_mapping_min_vowel_phone_ratio": self.ja_mapping_min_vowel_phone_ratio_var.get() if hasattr(self, "ja_mapping_min_vowel_phone_ratio_var") else 0.5,
@@ -2600,6 +2990,8 @@ class ConfigMixin:
                 self._apply_recommended_ml_model_defaults()
             if hasattr(self, "_refresh_ml_backend_status"):
                 self._refresh_ml_backend_status()
+            if hasattr(self, "_log_startup_ml_model_roots_once"):
+                self._log_startup_ml_model_roots_once()
             return
 
         try:
@@ -2657,31 +3049,34 @@ class ConfigMixin:
                 self.weak_voice_assist_enable_var.set(bool(config.get("weak_voice_assist_enable", True)))
             if "weak_voice_assist_strength" in config and hasattr(self, "weak_voice_assist_strength_var"):
                 self.weak_voice_assist_strength_var.set(str(config.get("weak_voice_assist_strength", "") or ""))
-            if hasattr(self, "cvn_correction_mode_var"):
-                if "cvn_correction_mode" in config:
-                    if hasattr(self, "_set_cvn_correction_mode_from_code"):
-                        self._set_cvn_correction_mode_from_code(config.get("cvn_correction_mode", "off"))
-                    else:
-                        self.cvn_correction_mode_var.set(str(config.get("cvn_correction_mode", "끄기") or "끄기"))
-                else:
-                    legacy_enabled = bool(config.get("cvn_correction_enable", False))
-                    legacy_low_conf = bool(config.get("cvn_low_conf_only", False))
-                    legacy_code = "off"
-                    if legacy_enabled:
-                        legacy_code = "low_conf" if legacy_low_conf else "always"
-                    if hasattr(self, "_set_cvn_correction_mode_from_code"):
-                        self._set_cvn_correction_mode_from_code(legacy_code)
-                    else:
-                        self.cvn_correction_mode_var.set("끄기")
             if "mapping_strict_mode" in config and hasattr(self, "mapping_strict_mode_var"):
                 if hasattr(self, "_set_mapping_strict_mode_from_code"):
                     self._set_mapping_strict_mode_from_code(config.get("mapping_strict_mode", "soft"))
                 else:
                     self.mapping_strict_mode_var.set(str(config.get("mapping_strict_mode", "soft") or "soft"))
+            if "weak_boundary_reduce_missing" in config and hasattr(self, "weak_boundary_reduce_missing_var"):
+                self.weak_boundary_reduce_missing_var.set(bool(config.get("weak_boundary_reduce_missing", False)))
+            if "weak_boundary_block_mismap" in config and hasattr(self, "weak_boundary_block_mismap_var"):
+                self.weak_boundary_block_mismap_var.set(bool(config.get("weak_boundary_block_mismap", False)))
             if "recursive_voicebank_scan" in config and hasattr(self, "recursive_voicebank_scan_var"):
                 self.recursive_voicebank_scan_var.set(bool(config.get("recursive_voicebank_scan", False)))
             if hasattr(self, "enable_ml_correction_var"):
                 self.enable_ml_correction_var.set(bool(config.get("enable_ml_correction", True)))
+            if hasattr(self, "cvn_correction_enable_var"):
+                self.cvn_correction_enable_var.set(bool(config.get("cvn_correction_enable", True)))
+            if hasattr(self, "cvn_low_conf_only_var"):
+                self.cvn_low_conf_only_var.set(bool(config.get("cvn_low_conf_only", False)))
+            if hasattr(self, "mapping_supervised_enable_var"):
+                self.mapping_supervised_enable_var.set(bool(config.get("mapping_supervised_enable", True)))
+            if hasattr(self, "mapping_supervised_mode_var"):
+                if hasattr(self, "_set_mapping_supervised_mode_from_code"):
+                    self._set_mapping_supervised_mode_from_code(config.get("mapping_supervised_mode", "auto"))
+                else:
+                    self.mapping_supervised_mode_var.set(str(config.get("mapping_supervised_mode", "auto") or "auto"))
+            if hasattr(self, "cv_order_prior_enable_var"):
+                self.cv_order_prior_enable_var.set(bool(config.get("cv_order_prior_enable", True)))
+            if hasattr(self, "cv_order_prior_strength_var"):
+                self.cv_order_prior_strength_var.set(str(config.get("cv_order_prior_strength", "") or ""))
             if "ml_route" in config and hasattr(self, "ml_route_var"):
                 saved_route = self._normalize_ml_route_code(config.get("ml_route", "auto"))
                 if hasattr(self, "_set_ml_route_from_code"):
@@ -2962,6 +3357,16 @@ class ConfigMixin:
                 self.kr_vc_neighbor_enable_var.set(bool(config.get("kr_vc_neighbor_enable", True)))
             if "ja_vc_neighbor_enable" in config and hasattr(self, "ja_vc_neighbor_enable_var"):
                 self.ja_vc_neighbor_enable_var.set(bool(config.get("ja_vc_neighbor_enable", True)))
+            if "vc_correction_enable" in config:
+                master_enabled = bool(config.get("vc_correction_enable", True))
+                if hasattr(self, "vc_correction_enable_var"):
+                    self.vc_correction_enable_var.set(master_enabled)
+                if hasattr(self, "kr_continuity_enable_var"):
+                    self.kr_continuity_enable_var.set(master_enabled)
+                if hasattr(self, "kr_vc_neighbor_enable_var"):
+                    self.kr_vc_neighbor_enable_var.set(master_enabled)
+                if hasattr(self, "ja_vc_neighbor_enable_var"):
+                    self.ja_vc_neighbor_enable_var.set(master_enabled)
             vc_neighbor_defaults = {
                 "kr_vc_neighbor_blend": (self.kr_vc_neighbor_blend_var, 0.35),
                 "kr_vc_neighbor_max_shift": (self.kr_vc_neighbor_max_shift_var, 45.0),
@@ -3030,10 +3435,14 @@ class ConfigMixin:
                 self._sync_developer_mode_ui()
             if hasattr(self, "_sync_vc_correction_toggle"):
                 self._sync_vc_correction_toggle()
+            if hasattr(self, "_sync_cvn_correction_toggle"):
+                self._sync_cvn_correction_toggle()
             if hasattr(self, "_sync_advanced_tuning_slider_controls"):
                 self._sync_advanced_tuning_slider_controls()
             if hasattr(self, "_sync_weak_voice_assist_controls"):
                 self._sync_weak_voice_assist_controls()
+            if hasattr(self, "_log_startup_ml_model_roots_once"):
+                self._log_startup_ml_model_roots_once()
 
             if "params" in config and hasattr(self, "param_vars") and isinstance(self.param_vars, dict):
                 params = config["params"]

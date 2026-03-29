@@ -13,6 +13,7 @@ from core.kr_oto_rules import (
 KR_FRICATIVE_ONSETS = {"s", "ss", "sh", "h", "f"}
 # 격음 (기식이 길다)
 KR_ASPIRATE_ONSETS = {"k", "t", "p", "ch"}
+_SILENCE_PHONE_MARKS = {"", "sil", "pau", "sp", "spn", "br", "bre", "breath", "r"}
 
 
 def _is_fricative_consonant(ipa_hint="", roman_hint=""):
@@ -29,6 +30,11 @@ def _is_aspirate_consonant(ipa_hint="", roman_hint=""):
 
 def _clamp(v, lo, hi):
     return max(float(lo), min(float(hi), float(v)))
+
+
+def _is_silence_like_phone_mark(mark: str) -> bool:
+    m = str(mark or "").strip().lower()
+    return m in _SILENCE_PHONE_MARKS
 
 
 def _normalize_kr_cv_timing_mode(cv_mode="standalone"):
@@ -233,10 +239,19 @@ def _select_kr_cv_onset_slice(curr_phones):
         return 0, n_start, n_start, n_start, n_end
 
     onset_idx = v_idx - 1
+    while onset_idx >= 0 and _is_silence_like_phone_mark(curr_phones[onset_idx].mark):
+        onset_idx -= 1
+    if onset_idx < 0:
+        return 0, n_start, n_start, n_start, n_end
+
     last_mark = (curr_phones[onset_idx].mark or "").strip().lower()
     from core.kr_oto_rules import is_glide as _is_glide
     if onset_idx - 1 >= 0 and _is_glide(last_mark):
-        onset_idx = onset_idx - 1
+        prev_idx = onset_idx - 1
+        while prev_idx >= 0 and _is_silence_like_phone_mark(curr_phones[prev_idx].mark):
+            prev_idx -= 1
+        if prev_idx >= 0:
+            onset_idx = prev_idx
 
     c_start = float(curr_phones[onset_idx].minTime) * 1000.0
     c_end = n_start
@@ -253,14 +268,15 @@ def _estimate_cv_anchor_from_syllable(syl, ph_intervals, *, cv_mode="standalone"
     roman_tok = (syl.get("roman_cv") or syl.get("roman") or "")
     onset_slice = _select_kr_cv_onset_slice(curr_phones)
     if onset_slice is not None:
-        _onset_idx, c_start, c_end, n_start, n_end = onset_slice
+        onset_idx, c_start, c_end, n_start, n_end = onset_slice
     else:
+        onset_idx = 0
         c_start = curr_phones[0].minTime * 1000
         c_end = c_start
         n_start = c_start
         n_end = curr_phones[0].maxTime * 1000
 
-    c_hint = curr_phones[0].mark if curr_phones else ""
+    c_hint = curr_phones[onset_idx].mark if curr_phones and 0 <= onset_idx < len(curr_phones) else ""
     alias_onset = _extract_alias_onset(roman_tok)
     is_diph_syl = is_diphthong(roman_tok)
     cv_vowel_len = max(n_end - n_start, 20.0)
@@ -291,6 +307,7 @@ def _estimate_cv_anchor_from_syllable(syl, ph_intervals, *, cv_mode="standalone"
         "pre_abs": offset + pre,
         "cons_abs": offset + consonant,
         "onset_abs": c_start,
+        "vowel_start_abs": n_start,
         "vowel_end_abs": n_end,
         "vowel_len": cv_vowel_len,
         "cons_gap": max(consonant - pre, 10.0),
@@ -314,14 +331,15 @@ def _prepare_cv_head_syllable_timing(syllables_info, current_w_idx, cv_seq_idx, 
 
     onset_slice = _select_kr_cv_onset_slice(curr_phones)
     if onset_slice is not None:
-        _onset_idx, c_start, c_end, n_start, n_end = onset_slice
+        onset_idx, c_start, c_end, n_start, n_end = onset_slice
     else:
+        onset_idx = 0
         c_start = curr_phones[0].minTime * 1000
         c_end = c_start
         n_start = c_start
         n_end = curr_phones[0].maxTime * 1000
 
-    c_hint = curr_phones[0].mark if curr_phones else ""
+    c_hint = curr_phones[onset_idx].mark if curr_phones and 0 <= onset_idx < len(curr_phones) else ""
     alias_onset = _extract_alias_onset(alias)
     is_tense_cv = _is_tense_consonant(c_hint, alias_onset)
     is_sonorant_cv = _is_sonorant_consonant(c_hint, alias_onset)

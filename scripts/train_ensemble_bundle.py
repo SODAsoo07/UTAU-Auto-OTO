@@ -24,6 +24,7 @@ def _parse_args():
     parser.add_argument("--coupled-epochs", type=int, default=70)
     parser.add_argument("--coupled-batch-size", type=int, default=192)
     parser.add_argument("--coupled-learning-rate", type=float, default=1e-3)
+    parser.add_argument("--device", default="auto", help="auto/cpu/cuda")
     parser.add_argument("--alias-type", action="append", dest="alias_types")
     return parser.parse_args()
 
@@ -45,6 +46,7 @@ def main():
         coupled_epochs=int(args.coupled_epochs),
         coupled_batch_size=int(args.coupled_batch_size),
         coupled_learning_rate=float(args.coupled_learning_rate),
+        coupled_device=str(args.device),
     )
     print("model_meta.json written:", os.path.join(args.out_dir, "model_meta.json"))
     print("backend:", meta.get("backend", ""))

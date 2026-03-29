@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass
 from typing import Callable, Optional, Sequence, Tuple
 
-from core.kr_oto_rules import _canonicalize_kr_coda, _extract_vc_right_token, is_plosive_ipa
+from core.kr_oto_rules import _canonicalize_kr_coda, _extract_vc_right_token, find_vowel_phone, is_plosive_ipa
 
 ValidateFn = Callable[[float, float, float, float, float], Tuple[float, float, float, float, float]]
 
@@ -57,6 +59,14 @@ def guard_kr_vc_cutoff_to_next_segment(
 
     next_onset_rel = max((float(next_phones[0].minTime) * 1000.0) - float(offset), float(pre) + 10.0)
     next_seg_end_rel = max((float(next_phones[0].maxTime) * 1000.0) - float(offset), next_onset_rel + 6.0)
+    next_vowel_rel = None
+    try:
+        _v_idx, v_phone = find_vowel_phone(next_phones)
+        next_vowel_abs = float(getattr(v_phone, "minTime", 0.0) or 0.0) * 1000.0
+        if next_vowel_abs > 0.0:
+            next_vowel_rel = max(next_vowel_abs - float(offset), float(pre) + 12.0)
+    except Exception:
+        next_vowel_rel = None
 
     coda = _canonicalize_kr_coda(_extract_vc_right_token(alias_text))
     if coda in {"k", "t", "p", "h"}:
@@ -78,6 +88,16 @@ def guard_kr_vc_cutoff_to_next_segment(
 
     # Prefer ending near the next-consonant tail (segment end) rather than hard-cutting at onset.
     cutoff_cap = max(next_onset_rel + onset_margin, next_seg_end_rel - tail_keep)
+    # Hard cap: keep VC from leaking into the next vowel body.
+    guard_enabled = str(os.environ.get("UTOA_KR_VC_NEXT_VOWEL_GUARD", "")).strip().lower()
+    if guard_enabled not in {"0", "false", "off", "no"} and next_vowel_rel is not None:
+        try:
+            margin = float(os.environ.get("UTOA_KR_VC_NEXT_VOWEL_MARGIN_MS", "") or 6.0)
+        except Exception:
+            margin = 6.0
+        margin = max(2.0, float(margin))
+        vowel_cap = max(next_vowel_rel - margin, float(pre) + min_cons_gap + 4.0)
+        cutoff_cap = min(cutoff_cap, vowel_cap)
     consonant = min(float(consonant), cutoff_cap - tail_keep)
     consonant = max(float(consonant), float(pre) + min_cons_gap)
 
@@ -301,14 +321,6 @@ def guard_kr_vcv_pre_to_cv_boundary(
                 offset, consonant, cutoff, pre, ovl = _shift_offset_preserve_absolute(
                     offset, consonant, cutoff, pre, ovl, new_offset=new_offset
                 )
-
-    # Keep pre-anchor locked to current onset as final priority.
-    pre_abs = float(offset) + float(pre)
-    if abs(pre_abs - onset_abs) > 6.0:
-        new_offset = onset_abs - float(pre)
-        offset, consonant, cutoff, pre, ovl = _shift_offset_preserve_absolute(
-            offset, consonant, cutoff, pre, ovl, new_offset=new_offset
-        )
 
     # Maintain consonant and cutoff around current vowel body.
     onset_rel = max(onset_abs - float(offset), float(pre))

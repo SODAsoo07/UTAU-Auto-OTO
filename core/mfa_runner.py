@@ -14,10 +14,13 @@ import hashlib
 import tempfile
 import locale
 import time
+import wave
 import importlib.util
 import urllib.error
 import urllib.request
 from typing import Dict, List, Optional, Sequence, Set, Tuple
+
+import numpy as np
 
 from core.pipeline_status import (
     ALIGN_EXEC_MISSING,
@@ -368,11 +371,210 @@ def _link_or_copy(src, dst):
         shutil.copy2(src, dst)
 
 
-def _prepare_ascii_safe_alignment_workspace(wav_folder, dict_path, output_folder, temp_root: str = ""):
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        value = float(raw)
+    except Exception:
+        return float(default)
+    if not np.isfinite(value):
+        return float(default)
+    return float(value)
+
+
+def _mfa_audio_preprocess_required() -> bool:
+    low_rms = _env_bool("UTOA_MFA_LOW_RMS_GAIN_ENABLE", default=False)
+    weak = _env_bool("UTOA_MFA_WEAK_VOICE_ASSIST_ENABLE", default=False)
+    return bool(low_rms or weak)
+
+
+def _read_wav_float(path: str) -> tuple[np.ndarray, dict]:
+    with wave.open(path, "rb") as wf:
+        channels = int(wf.getnchannels() or 1)
+        sampwidth = int(wf.getsampwidth() or 2)
+        framerate = int(wf.getframerate() or 44100)
+        comptype = str(wf.getcomptype() or "NONE")
+        compname = str(wf.getcompname() or "not compressed")
+        nframes = int(wf.getnframes() or 0)
+        raw = wf.readframes(nframes)
+
+    if nframes <= 0:
+        meta = {
+            "channels": channels,
+            "sampwidth": sampwidth,
+            "framerate": framerate,
+            "comptype": comptype,
+            "compname": compname,
+        }
+        return np.zeros((0, max(1, channels)), dtype=np.float32), meta
+
+    if sampwidth == 1:
+        data = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
+        data = (data - 128.0) / 128.0
+    elif sampwidth == 2:
+        data = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    elif sampwidth == 3:
+        data_u8 = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3)
+        data_i32 = (
+            data_u8[:, 0].astype(np.int32)
+            | (data_u8[:, 1].astype(np.int32) << 8)
+            | (data_u8[:, 2].astype(np.int32) << 16)
+        )
+        sign_bit = 1 << 23
+        data_i32 = (data_i32 ^ sign_bit) - sign_bit
+        data = data_i32.astype(np.float32) / float(1 << 23)
+    elif sampwidth == 4:
+        data = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / float(1 << 31)
+    else:
+        raise ValueError(f"Unsupported WAV sample width: {sampwidth}")
+
+    if channels > 1:
+        usable = (data.shape[0] // channels) * channels
+        data = data[:usable].reshape(-1, channels)
+    else:
+        data = data.reshape(-1, 1)
+
+    meta = {
+        "channels": channels,
+        "sampwidth": sampwidth,
+        "framerate": framerate,
+        "comptype": comptype,
+        "compname": compname,
+    }
+    return np.clip(data.astype(np.float32), -1.0, 1.0), meta
+
+
+def _write_wav_float(path: str, audio: np.ndarray, meta: dict) -> None:
+    arr = np.asarray(audio, dtype=np.float32)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    arr = np.clip(arr, -1.0, 1.0)
+
+    channels = int(meta.get("channels", 1) or 1)
+    sampwidth = int(meta.get("sampwidth", 2) or 2)
+    framerate = int(meta.get("framerate", 44100) or 44100)
+    comptype = str(meta.get("comptype", "NONE") or "NONE")
+    compname = str(meta.get("compname", "not compressed") or "not compressed")
+
+    if arr.shape[1] != channels:
+        if channels <= 1:
+            arr = np.mean(arr, axis=1, keepdims=True)
+            channels = 1
+        else:
+            arr = np.tile(np.mean(arr, axis=1, keepdims=True), (1, channels))
+
+    flat = arr.reshape(-1)
+    if sampwidth == 1:
+        pcm = np.clip(np.round((flat * 128.0) + 128.0), 0, 255).astype(np.uint8).tobytes()
+    elif sampwidth == 2:
+        pcm = np.clip(np.round(flat * 32768.0), -32768, 32767).astype(np.int16).tobytes()
+    elif sampwidth == 3:
+        ints = np.clip(np.round(flat * float(1 << 23)), -(1 << 23), (1 << 23) - 1).astype(np.int32)
+        packed = np.empty((ints.size, 3), dtype=np.uint8)
+        packed[:, 0] = (ints & 0xFF).astype(np.uint8)
+        packed[:, 1] = ((ints >> 8) & 0xFF).astype(np.uint8)
+        packed[:, 2] = ((ints >> 16) & 0xFF).astype(np.uint8)
+        pcm = packed.tobytes()
+    elif sampwidth == 4:
+        pcm = np.clip(np.round(flat * float(1 << 31)), -(1 << 31), (1 << 31) - 1).astype(np.int32).tobytes()
+    else:
+        raise ValueError(f"Unsupported WAV sample width: {sampwidth}")
+
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(int(channels))
+        wf.setsampwidth(int(sampwidth))
+        wf.setframerate(int(framerate))
+        try:
+            wf.setcomptype(comptype, compname)
+        except Exception:
+            pass
+        wf.writeframes(pcm)
+
+
+def _preprocess_alignment_wav(src: str, dst: str) -> tuple[bool, str]:
+    low_rms = _env_bool("UTOA_MFA_LOW_RMS_GAIN_ENABLE", default=False)
+    weak_assist = _env_bool("UTOA_MFA_WEAK_VOICE_ASSIST_ENABLE", default=False)
+    if not (low_rms or weak_assist):
+        _link_or_copy(src, dst)
+        return True, "copied"
+
+    try:
+        audio, meta = _read_wav_float(src)
+    except Exception as exc:
+        _link_or_copy(src, dst)
+        return False, f"read failed: {exc}"
+
+    if audio.size <= 0:
+        try:
+            _write_wav_float(dst, audio, meta)
+            return True, "empty"
+        except Exception as exc:
+            _link_or_copy(src, dst)
+            return False, f"write empty failed: {exc}"
+
+    x = np.asarray(audio, dtype=np.float32)
+    mono = np.mean(x, axis=1)
+    base_rms = float(np.sqrt(np.mean(np.square(mono), dtype=np.float64)))
+
+    if low_rms and base_rms > 1e-8:
+        target_rms = _env_float("UTOA_MFA_LOW_RMS_TARGET", 0.11)
+        target_rms = max(0.02, min(0.30, target_rms))
+        max_gain_db = _env_float("UTOA_MFA_LOW_RMS_MAX_GAIN_DB", 14.0)
+        max_gain = 10.0 ** (max(0.0, min(30.0, max_gain_db)) / 20.0)
+        if base_rms < target_rms:
+            gain = min(target_rms / max(base_rms, 1e-8), max_gain)
+            x = x * float(gain)
+
+    if weak_assist:
+        mix = _env_float("UTOA_MFA_WEAK_VOICE_PREEMPH_MIX", 0.35)
+        mix = max(0.0, min(1.0, mix))
+        coeff = _env_float("UTOA_MFA_WEAK_VOICE_PREEMPH_COEFF", 0.97)
+        coeff = max(0.0, min(0.99, coeff))
+        if mix > 1e-6:
+            pre = x.copy()
+            pre[1:, :] = x[1:, :] - (coeff * x[:-1, :])
+            pre[0, :] = x[0, :]
+            x = ((1.0 - mix) * x) + (mix * pre)
+            # Keep RMS stable after spectral tilt.
+            out_rms = float(np.sqrt(np.mean(np.square(np.mean(x, axis=1)), dtype=np.float64)))
+            if out_rms > 1e-8 and base_rms > 1e-8:
+                x = x * float(base_rms / out_rms)
+
+    x = np.clip(x, -1.0, 1.0).astype(np.float32)
+    try:
+        _write_wav_float(dst, x, meta)
+        return True, "processed"
+    except Exception as exc:
+        _link_or_copy(src, dst)
+        return False, f"write failed: {exc}"
+
+
+def _prepare_ascii_safe_alignment_workspace(
+    wav_folder,
+    dict_path,
+    output_folder,
+    temp_root: str = "",
+    callback=None,
+):
     token_src = "|".join([
         os.path.abspath(wav_folder or ""),
         os.path.abspath(dict_path or ""),
         os.path.abspath(output_folder or ""),
+        "prep=1" if _mfa_audio_preprocess_required() else "prep=0",
     ])
     token = hashlib.sha1(token_src.encode("utf-8", errors="replace")).hexdigest()[:12]
     root_dir = str(temp_root or tempfile.gettempdir())
@@ -386,12 +588,30 @@ def _prepare_ascii_safe_alignment_workspace(wav_folder, dict_path, output_folder
     os.makedirs(dict_dir, exist_ok=True)
     os.makedirs(out_dir, exist_ok=True)
 
+    preprocess_enabled = _mfa_audio_preprocess_required()
+    wav_total = 0
+    wav_processed = 0
+    wav_failed = 0
     for fn in os.listdir(wav_folder):
         low = fn.lower()
         if low.endswith(".wav") or low.endswith(".lab") or low.endswith(".txt"):
             src = os.path.join(wav_folder, fn)
             if os.path.isfile(src):
-                _link_or_copy(src, os.path.join(corpus_dir, fn))
+                dst = os.path.join(corpus_dir, fn)
+                if low.endswith(".wav") and preprocess_enabled:
+                    wav_total += 1
+                    ok, reason = _preprocess_alignment_wav(src, dst)
+                    if ok and reason == "processed":
+                        wav_processed += 1
+                    elif not ok:
+                        wav_failed += 1
+                        if callback:
+                            try:
+                                callback(f"[MFA][AudioPrep] fallback copy: {fn} ({reason})")
+                            except Exception:
+                                pass
+                else:
+                    _link_or_copy(src, dst)
 
     ext = os.path.splitext(dict_path)[1] or ".txt"
     safe_dict_path = os.path.join(dict_dir, f"dictionary{ext}")
@@ -401,6 +621,10 @@ def _prepare_ascii_safe_alignment_workspace(wav_folder, dict_path, output_folder
         "corpus_dir": corpus_dir,
         "dict_path": safe_dict_path,
         "output_dir": out_dir,
+        "audio_preprocess_enabled": preprocess_enabled,
+        "audio_preprocess_total": wav_total,
+        "audio_preprocess_applied": wav_processed,
+        "audio_preprocess_failed": wav_failed,
     }
 
 
@@ -740,26 +964,6 @@ def _check_env_imports(python_exe: str, env: dict, import_expr: str):
         return True, ''
     detail = (res.stderr or res.stdout or '').strip()
     return False, detail
-
-
-def _check_mfa_module_import_ready(mfa_path: str) -> tuple[Optional[bool], str]:
-    """
-    Verify that the MFA entry module is importable from the resolved runtime env.
-    Returns:
-      (True, "") when import succeeds
-      (False, "<detail>") when env is identifiable and import fails
-      (None, "") when module check is not applicable (non-portable/system mfa path)
-    """
-    resolved = str(mfa_path or "").strip()
-    if not resolved or "Scripts" not in resolved:
-        return None, ""
-    env_dir = os.path.dirname(os.path.dirname(os.path.abspath(resolved)))
-    python_exe = _resolve_env_python_exe(env_dir)
-    if not python_exe or not os.path.exists(python_exe):
-        return False, f"MFA env python.exe not found: {python_exe or '(empty)'}"
-    env = _get_conda_env(resolved)
-    ok, detail = _check_env_imports(python_exe, env, "import montreal_forced_aligner.command_line.mfa")
-    return bool(ok), str(detail or "").strip()
 
 
 def _korean_tokenizer_import_expr() -> str:
@@ -1135,7 +1339,6 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
             "python_version": "",
             "python_rebuild_required": False,
             "packaging_stack": None,
-            "mfa_module": None,
             "language_support": None,
             "model_ready": False,
         },
@@ -1166,10 +1369,6 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
             report["checks"]["packaging_stack"] = ok
             if not ok:
                 report["issues"].append("packaging_stack_missing")
-            module_ok, _module_detail = _check_mfa_module_import_ready(resolved)
-            report["checks"]["mfa_module"] = module_ok
-            if module_ok is False:
-                report["issues"].append("mfa_module_missing")
             import_expr = (
                 _korean_tokenizer_import_expr()
                 if lang == 'korean'
@@ -1189,7 +1388,6 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
         report["checks"]["mfa_executable"]
         and report["checks"]["python_rebuild_required"] is False
         and report["checks"]["packaging_stack"] in {True, None}
-        and report["checks"]["mfa_module"] in {True, None}
         and report["checks"]["language_support"] in {True, None}
         and report["checks"]["model_ready"]
     )
@@ -1451,22 +1649,6 @@ def check_mfa_ready(language='korean', mfa_path=''):
             "align",
             ALIGN_EXEC_MISSING,
             "MFA executable not found.",
-            engine="mfa",
-            language=str(language or "korean").strip().lower(),
-            mfa_path=str(resolved_mfa or ""),
-            ready=False,
-        )
-
-    module_ok, module_detail = _check_mfa_module_import_ready(resolved_mfa)
-    if module_ok is False:
-        detail = str(module_detail or "").strip()
-        msg = "MFA runtime module is missing or broken."
-        if detail:
-            msg = f"{msg} {detail[-280:]}"
-        return make_runtime_report(
-            "align",
-            ALIGN_EXEC_MISSING,
-            msg,
             engine="mfa",
             language=str(language or "korean").strip().lower(),
             mfa_path=str(resolved_mfa or ""),
@@ -2559,15 +2741,35 @@ def run_mfa_align(
     work_dict_path = dict_path
     work_output_folder = output_folder
     safe_workspace = None
-    if any(_contains_non_ascii(p) for p in (wav_folder, dict_path, output_folder)):
+    needs_audio_prep = _mfa_audio_preprocess_required()
+    needs_ascii_safe = any(_contains_non_ascii(p) for p in (wav_folder, dict_path, output_folder))
+    if needs_ascii_safe or needs_audio_prep:
         try:
-            safe_workspace = _prepare_ascii_safe_alignment_workspace(wav_folder, dict_path, output_folder)
+            safe_workspace = _prepare_ascii_safe_alignment_workspace(
+                wav_folder,
+                dict_path,
+                output_folder,
+                callback=callback,
+            )
             work_wav_folder = safe_workspace["corpus_dir"]
             work_dict_path = safe_workspace["dict_path"]
             work_output_folder = safe_workspace["output_dir"]
-            log(f"[MFA] Non-ASCII path detected, using ASCII-safe workspace: {safe_workspace['base']}")
+            reason_tokens = []
+            if needs_ascii_safe:
+                reason_tokens.append("ascii-safe")
+            if needs_audio_prep:
+                reason_tokens.append("audio-prep")
+            reason_text = "+".join(reason_tokens) if reason_tokens else "workspace"
+            log(f"[MFA] Using temporary alignment workspace ({reason_text}): {safe_workspace['base']}")
+            if safe_workspace.get("audio_preprocess_enabled"):
+                log(
+                    "[MFA][AudioPrep] applied="
+                    f"{int(safe_workspace.get('audio_preprocess_applied', 0))}/"
+                    f"{int(safe_workspace.get('audio_preprocess_total', 0))}, "
+                    f"fallback_copy={int(safe_workspace.get('audio_preprocess_failed', 0))}"
+                )
         except Exception as e:
-            log(f"[MFA] ASCII-safe workspace primary prepare failed: {e}")
+            log(f"[MFA] Temporary workspace primary prepare failed: {e}")
             try:
                 retry_root = tempfile.mkdtemp(prefix="utoa_mfa_retry_")
                 safe_workspace = _prepare_ascii_safe_alignment_workspace(
@@ -2575,13 +2777,21 @@ def run_mfa_align(
                     dict_path,
                     output_folder,
                     temp_root=retry_root,
+                    callback=callback,
                 )
                 work_wav_folder = safe_workspace["corpus_dir"]
                 work_dict_path = safe_workspace["dict_path"]
                 work_output_folder = safe_workspace["output_dir"]
-                log(f"[MFA] ASCII-safe workspace retry succeeded: {safe_workspace['base']}")
+                log(f"[MFA] Temporary workspace retry succeeded: {safe_workspace['base']}")
+                if safe_workspace.get("audio_preprocess_enabled"):
+                    log(
+                        "[MFA][AudioPrep] applied="
+                        f"{int(safe_workspace.get('audio_preprocess_applied', 0))}/"
+                        f"{int(safe_workspace.get('audio_preprocess_total', 0))}, "
+                        f"fallback_copy={int(safe_workspace.get('audio_preprocess_failed', 0))}"
+                    )
             except Exception as retry_exc:
-                err = f"Failed to prepare ASCII-safe MFA workspace: {retry_exc}"
+                err = f"Failed to prepare temporary MFA workspace: {retry_exc}"
                 log(err)
                 return False, err
     dict_sanitize_ok, dict_sanitize_err = _sanitize_alignment_dictionary_for_mfa(work_dict_path, callback=callback)

@@ -7,15 +7,6 @@ from core.error_codes import format_error_with_recovery, get_error_entry
 from core.pipeline_status import has_textgrid_files, normalize_aligner_name
 
 
-def _is_no_aligner_request(value: str) -> bool:
-    text = str(value or "").strip().lower()
-    if not text:
-        return False
-    if text in {"none", "off", "skip", "disabled", "disable", "no_align", "nomfa", "no_mfa", "no-mfa", "no mfa"}:
-        return True
-    return ("no-mfa" in text) or ("nomfa" in text) or ("no_mfa" in text)
-
-
 def _issue(code: str, message: str, level: str = "error") -> Dict[str, str]:
     normalized_code = str(code or "").strip().upper()
     entry = get_error_entry(normalized_code)
@@ -80,15 +71,9 @@ def validate_runtime_preflight(
     elif not output_path:
         warnings.append(_issue("PRE_OUTPUT_PATH_MISSING", "출력 경로가 없어 OTO 생성 단계는 건너뜁니다.", level="warning"))
 
-    no_mfa_without_textgrid = _is_no_aligner_request(aligner) and (not has_textgrid_files(tg_dir))
+    no_mfa_without_textgrid = align_name == "none" and (not has_textgrid_files(tg_dir))
     template_checked_in_no_mfa_path = False
     if no_mfa_without_textgrid:
-        errors.append(
-            _issue(
-                "PRE_TEXTGRID_REQUIRED",
-                f"No-align mode requires existing TextGrid files: {tg_dir}",
-            )
-        )
         if no_base_oto:
             errors.append(
                 _issue(

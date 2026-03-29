@@ -87,3 +87,6 @@ models_installed/
 /.env_ctc
 /.venv_build
 /_tmp_smoke_check
+README.md
+/ml/wfl_asr
+/installer_output_online

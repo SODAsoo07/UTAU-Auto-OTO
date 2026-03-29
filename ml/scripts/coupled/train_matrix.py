@@ -87,16 +87,25 @@ def _parse_format_filter(raw: str) -> Dict[str, Optional[set]]:
     return out
 
 
-def _auto_rawmel_cache_dir(language: str, format_type: str) -> str:
-    lang = str(language or "").strip().lower()
-    fmt = normalize_format_type(lang, format_type) or str(format_type or "").strip().lower()
-    root = default_patch_cache_root()
-    base = os.path.join(root, lang, fmt, str(MEL_PATCH_CACHE_VERSION))
-    if not os.path.isdir(base):
+def _pick_rawmel_cache_candidate(version_dir: str) -> str:
+    """
+    Resolve the actual cache leaf directory that contains manifest.json.
+    Supports both layouts:
+      - <...>/<version>/<spec_hash>/manifest.json
+      - <...>/<version>/manifest.json  (legacy/single-spec cache)
+    """
+    if not version_dir or not os.path.isdir(version_dir):
         return ""
     candidates: List[Tuple[float, str]] = []
-    for name in os.listdir(base):
-        path = os.path.join(base, name)
+    manifest_here = os.path.join(version_dir, "manifest.json")
+    if os.path.isfile(manifest_here):
+        try:
+            mtime = os.path.getmtime(manifest_here)
+        except Exception:
+            mtime = 0.0
+        candidates.append((mtime, version_dir))
+    for name in os.listdir(version_dir):
+        path = os.path.join(version_dir, name)
         if not os.path.isdir(path):
             continue
         manifest = os.path.join(path, "manifest.json")
@@ -111,6 +120,45 @@ def _auto_rawmel_cache_dir(language: str, format_type: str) -> str:
         return ""
     candidates.sort(reverse=True, key=lambda x: x[0])
     return candidates[0][1]
+
+
+def _auto_rawmel_cache_dir(language: str, format_type: str, root_hint: str = "") -> str:
+    lang = str(language or "").strip().lower()
+    fmt = normalize_format_type(lang, format_type) or str(format_type or "").strip().lower()
+    roots = []
+    hinted = str(root_hint or "").strip()
+    if hinted:
+        roots.append(hinted)
+    roots.append(default_patch_cache_root())
+    roots.append(os.path.join(ROOT, "ml_workspace", "rawmel_cache_noml_auto"))
+    roots.append(os.path.join(ROOT, "ml_workspace", "rawmel_cache"))
+
+    seen = set()
+    unique_roots: List[str] = []
+    for root in roots:
+        path = os.path.normpath(root)
+        key = path.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_roots.append(path)
+
+    for root in unique_roots:
+        if not os.path.isdir(root):
+            continue
+        # If a leaf cache path is supplied directly, respect it.
+        if os.path.isfile(os.path.join(root, "manifest.json")):
+            return root
+        version_dirs = [
+            os.path.join(root, lang, fmt, str(MEL_PATCH_CACHE_VERSION)),
+            os.path.join(root, lang, fmt),
+            os.path.join(root, str(MEL_PATCH_CACHE_VERSION)),
+        ]
+        for version_dir in version_dirs:
+            picked = _pick_rawmel_cache_candidate(version_dir)
+            if picked:
+                return picked
+    return ""
 
 
 def _default_min_mapping_conf(language: str, fmt: str) -> float:
@@ -295,11 +343,12 @@ def main():
             os.makedirs(out_dir, exist_ok=True)
             if not args.skip_train:
                 if backend == "coupled_nn_v2_rawmel":
-                    rawmel_cache = str(args.rawmel_cache or "").strip()
-                    if rawmel_cache and not os.path.isdir(rawmel_cache):
-                        rawmel_cache = ""
-                    if not rawmel_cache:
-                        rawmel_cache = _auto_rawmel_cache_dir(lang, fmt)
+                    rawmel_cache_hint = str(args.rawmel_cache or "").strip()
+                    if not rawmel_cache_hint:
+                        rawmel_cache_hint = os.path.join(workspace_root, "rawmel_cache_noml_auto")
+                    if rawmel_cache_hint and not os.path.isdir(rawmel_cache_hint):
+                        rawmel_cache_hint = ""
+                    rawmel_cache = _auto_rawmel_cache_dir(lang, fmt, root_hint=rawmel_cache_hint)
                     if not rawmel_cache:
                         raise RuntimeError(f"rawmel cache not found for {lang}/{fmt}")
                     job["rawmel_cache"] = rawmel_cache

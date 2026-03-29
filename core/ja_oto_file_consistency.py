@@ -80,16 +80,6 @@ def _classify_cached(
         cache[key] = classify_ja_alias(key, custom_map)
     return cache[key]
 
-
-def _vc_neighbor_enabled() -> bool:
-    return str(os.environ.get("UTOA_JA_VC_NEIGHBOR_ENABLE", "1")).strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
-
-
 def _cvn_correction_enabled() -> bool:
     return str(os.environ.get("UTOA_CVN_CORRECTION_ENABLE", "1")).strip().lower() not in {
         "0",
@@ -99,44 +89,15 @@ def _cvn_correction_enabled() -> bool:
     }
 
 
-def _cvn_low_conf_only_enabled() -> bool:
-    return str(os.environ.get("UTOA_CVN_LOW_CONF_ONLY", "0")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-def _runtime_mapping_is_low_conf(runtime_report: object) -> bool:
-    if not isinstance(runtime_report, dict):
-        return False
-    mapping = runtime_report.get("mapping")
-    if not isinstance(mapping, dict):
-        return False
-    if bool(mapping.get("file_low_conf", False)):
-        return True
-    trust_tier = str(mapping.get("trust_tier", "") or "").strip().lower()
-    if trust_tier == "low":
-        return True
-    reasons = mapping.get("low_conf_reasons")
-    if isinstance(reasons, list) and len(reasons) > 0:
-        return True
-    try:
-        trust_score = float(mapping.get("trust_score", 1.0) or 1.0)
-    except Exception:
-        trust_score = 1.0
-    if trust_tier == "mid" and trust_score < 0.66:
-        return True
-    return False
-
-
-def _cvn_mfa_gate_allows(runtime_report: object) -> bool:
+def _vc_neighbor_enabled() -> bool:
     if not _cvn_correction_enabled():
         return False
-    if not _cvn_low_conf_only_enabled():
-        return True
-    return _runtime_mapping_is_low_conf(runtime_report)
+    return str(os.environ.get("UTOA_JA_VC_NEIGHBOR_ENABLE", "1")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
 
 def _vc_neighbor_blend() -> float:
@@ -252,7 +213,6 @@ def apply_ja_vc_neighbor_to_oto_file(
     custom_map: Optional[Dict[str, str]] = None,
     validate_fn: Callable = None,
     log_fn: Optional[Callable[[str], None]] = None,
-    runtime_report: object = None,
 ) -> Dict[str, int]:
     if validate_fn is None:
         from core.oto_generator import validate_oto_params
@@ -265,18 +225,6 @@ def apply_ja_vc_neighbor_to_oto_file(
     }
 
     if not oto_path or not os.path.exists(oto_path):
-        return stats
-
-    if not _vc_neighbor_enabled():
-        if callable(log_fn):
-            log_fn("[JA-Consistency] VC neighbor 보정 비활성화(언어 옵션).")
-        return stats
-    if not _cvn_mfa_gate_allows(runtime_report):
-        if callable(log_fn):
-            if _cvn_low_conf_only_enabled():
-                log_fn("[JA-Consistency] CVN low_conf_only gate: MFA 신뢰도 기준 미충족으로 VC neighbor 보정을 건너뜁니다.")
-            else:
-                log_fn("[JA-Consistency] CVN gate OFF: VC neighbor 보정을 건너뜁니다.")
         return stats
 
     text = read_text_with_fallback(oto_path)

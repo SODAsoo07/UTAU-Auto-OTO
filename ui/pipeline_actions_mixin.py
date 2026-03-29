@@ -2408,7 +2408,7 @@ class PipelineActionsMixin:
                 no_mfa_auto_mode = (
                     aligner_engine == "none"
                     and lang != "english"
-                    and not (lang == "korean" and selected_format == "cmpx")
+                    and not (lang == "korean" and selected_format in {"cmpx", "c_plus_v"})
                 )
                 no_mfa_mode_code = (
                     self._get_no_mfa_oto_mode_code()
@@ -2561,6 +2561,69 @@ class PipelineActionsMixin:
                         out_path=out_path,
                         source_oto_path=source_oto,
                         alias_suffix=self.alias_suffix_var.get().strip(),
+                        callback=_make_stage_callback("oto"),
+                    )
+                    if _total:
+                        _set_stage_progress("oto", float(_processed) / float(_total))
+                    _set_stage_progress("oto", 1.0)
+
+                    _set_stage_progress("validate", 0.05)
+                    self._set_status("5/5 - OTO 자동 검증 중...")
+                    self._run_auto_validation(wav_dir, textgrid_dir, out_path, callback=_make_stage_callback("validate"))
+                    _set_stage_progress("validate", 1.0)
+                    if oto_errors:
+                        self._append_log(f"⚠ OTO 생성 중 오류가 있습니다. ({len(oto_errors)}건)")
+                        for err in oto_errors:
+                            self._append_log(f"  - {err}")
+                    else:
+                        self._cleanup_generated_output_artifacts(out_path, snapshot=cleanup_snapshot)
+
+                    self._set_status("✅ 전체 파이프라인 완료")
+                    self._append_log("\n" + "=" * 50)
+                    self._append_log("✅ 모든 작업이 정상적으로 완료되었습니다!")
+                    self._append_log("=" * 50)
+                    return
+
+                if lang == "korean" and selected_format == "c_plus_v":
+                    if not getattr(self, "_is_preview_channel", lambda: False)():
+                        self._append_log("❌ 한국어 C+V 모드는 Preview 채널에서만 사용할 수 있습니다.")
+                        self._set_status("❌ Preview 전용 기능")
+                        return
+                    if not out_path:
+                        self._append_log("❌ 출력 경로를 먼저 지정해 주세요.")
+                        self._set_status("❌ 출력 경로 누락")
+                        return
+                    if self.no_base_oto_var.get():
+                        self._append_log("❌ 한국어 C+V 모드는 베이스 OTO(템플릿 ini)가 필수입니다.")
+                        self._set_status("❌ 베이스 OTO 필요")
+                        return
+                    source_oto = resolve_no_mfa_source_oto(
+                        wav_dir=wav_dir,
+                        source_hint=tpl_path_preflight,
+                    )
+                    if not source_oto:
+                        self._append_log("❌ 한국어 C+V 모드용 베이스 OTO를 찾지 못했습니다.")
+                        self._append_log("   템플릿 OTO에 baseoto.ini 또는 oto.ini를 지정해 주세요.")
+                        self._set_status("❌ 베이스 OTO 필요")
+                        return
+
+                    self._append_log("ℹ 한국어 C+V 모드: Lab/사전/정렬 단계를 건너뜁니다.")
+                    self._append_log("ℹ 베이스 OTO가 0값(별칭 전용)이어도 remap 보정으로 파라미터를 자동 추정합니다.")
+                    self._append_log(f"[KR-C+V] base oto: {source_oto}")
+                    _set_stage_progress("lab", 1.0)
+                    _set_stage_progress("dict", 1.0)
+                    _set_stage_progress("align", 1.0)
+
+                    _set_stage_progress("oto", 0.03)
+                    self._set_status("4/5 - KR C+V OTO 생성 중...")
+                    _processed, _total, oto_errors = generate_no_mfa_auto_oto(
+                        wav_dir=wav_dir,
+                        out_path=out_path,
+                        source_oto_path=source_oto,
+                        alias_suffix=self.alias_suffix_var.get().strip(),
+                        language=lang,
+                        stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
+                        generation_mode="remap",
                         callback=_make_stage_callback("oto"),
                     )
                     if _total:

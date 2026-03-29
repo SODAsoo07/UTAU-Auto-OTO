@@ -50,16 +50,16 @@ def normalize_aligner_name(value, default: str = "mfa") -> str:
     text = str(value or "").strip().lower()
     if not text:
         return default
-    if text in {"none", "nomfa", "no-mfa", "no_mfa", "no mfa", "off", "skip", "disabled", "disable", "no_align"}:
-        return default or "mfa"
+    if text in {"none", "nomfa", "no-mfa", "no_mfa", "no mfa", "off", "skip"}:
+        return "none"
     if text in {"mfa", "montreal"}:
         return "mfa"
     if text in {"ctc", "mms", "mms-fa", "mms_fa", "torchaudio-ctc", "torchaudio_ctc"}:
         return "ctc"
     if text in {"domino", "pydomino", "domino (jp)", "domino(jp)", "jp_domino", "jp-domino"}:
         return "domino"
-    if "no-mfa" in text or "nomfa" in text or "no_mfa" in text:
-        return default or "mfa"
+    if "no-mfa" in text or "nomfa" in text:
+        return "none"
     if "ctc" in text:
         return "ctc"
     if "domino" in text:
@@ -104,11 +104,11 @@ def classify_alignment_error(engine: str, message: str) -> str:
     eng = normalize_aligner_name(engine, default="")
     if not text:
         return ALIGN_RUN_FAILED
-    if "textgrid" in lowered and ("찾지 못" in text or "not found" in lowered or "missing" in lowered):
+    if "textgrid" in lowered and ("not found" in lowered or "missing" in lowered):
         return ALIGN_OUTPUT_EMPTY
-    if "dictionary" in lowered or "사전" in text:
+    if "dictionary" in lowered:
         return ALIGN_DICT_MISSING
-    if "checkpoint" in lowered or ".ckpt" in lowered or "모델" in text:
+    if "checkpoint" in lowered or ".ckpt" in lowered:
         return ALIGN_MODEL_MISSING
     if ".onnx" in lowered or "onnx" in lowered:
         return ALIGN_MODEL_MISSING
@@ -123,9 +123,9 @@ def classify_alignment_error(engine: str, message: str) -> str:
         return ALIGN_NOT_READY
     if "japanese only" in lowered:
         return ALIGN_NOT_READY
-    if "executable not found" in lowered or "infer.py" in lowered or "python 또는 infer.py" in text:
+    if "executable not found" in lowered or "infer.py" in lowered:
         return ALIGN_EXEC_MISSING
-    if eng == "mfa" and ("mfa executable" in lowered or "mfa 실행 파일" in text):
+    if eng == "mfa" and "mfa executable" in lowered:
         return ALIGN_EXEC_MISSING
     if eng == "domino" and ("pydomino" in lowered or "domino executable" in lowered):
         return ALIGN_EXEC_MISSING
@@ -180,3 +180,4 @@ __all__ = [
     "normalize_ml_policy",
     "resolve_aligner_chain",
 ]
+

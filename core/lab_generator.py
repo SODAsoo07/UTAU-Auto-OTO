@@ -17,6 +17,7 @@ from core.conversion_tables import load_korean_conversion_table
 logger = logging.getLogger(__name__)
 _KR_FILENAME_SPLIT_RE = re.compile(r"[^0-9A-Za-z가-힣]+")
 _KR_BREATH_TOKEN_RE = re.compile(r"(?i)^breath\d*$")
+_JA_KANA_RE = re.compile(r"[\u3041-\u3096\u30A1-\u30FA\u30FC]")
 
 # ==============================================================================
 # 로마자 <-> 한글 자모 매핑 테이블
@@ -564,6 +565,9 @@ def generate_labs(wav_dir, reclist_file='', convert_to_hangul=True, custom_phone
         msg = f"WAV 폴더를 찾을 수 없습니다: {wav_dir}"
         log(msg)
         return 0, 0, [msg]
+
+    if any(_JA_KANA_RE.search(str(name or "")) for name in targets):
+        log("⚠️ 경고: 한국어 모드인데 파일명에 일본어(가나) 문자가 포함되어 있습니다. 언어 설정을 확인하세요.")
 
     count = 0
     total = len(targets)

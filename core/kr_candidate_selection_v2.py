@@ -95,6 +95,16 @@ def select_kr_syllable_source(
         )
         return result
 
+    if low_phone_quality and used_words_based and alias_infos:
+        result.update(
+            {
+                "syllables_info": alias_infos,
+                "used_words_based": False,
+                "used_alias_based": True,
+                "mapping_reason_code": "alias_based_low_phone_quality",
+            }
+        )
+        return result
     if low_phone_quality and used_words_based:
         result["mapping_reason_code"] = "words_low_phone_quality"
         return result
@@ -109,7 +119,20 @@ def select_kr_syllable_source(
         )
         return result
 
-    if fmt != "cvvc" and used_words_based and base_score >= 58.0 and alt_score >= (base_score + 8.0):
+    if used_words_based and alias_infos:
+        # Encourage alias-based syllables when words-based scores are not clearly strong.
+        if base_score < 62.0 and alt_score >= (base_score - 2.0):
+            result.update(
+                {
+                    "syllables_info": alias_infos,
+                    "used_words_based": False,
+                    "used_alias_based": True,
+                    "mapping_reason_code": "alias_based_low_words_score",
+                }
+            )
+            return result
+
+    if fmt != "cvvc" and used_words_based and base_score >= 64.0 and alt_score >= (base_score + 12.0):
         result["mapping_reason_code"] = "words_keep_high_conf"
         return result
 

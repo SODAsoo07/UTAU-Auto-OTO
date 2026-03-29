@@ -721,6 +721,7 @@ def guard_ja_cv_head_offset_to_onset(
         base_lead = 34.0
         late_allow = 2.5
     if a_type == "cv":
+        # 일본어 CV는 과선행 오프셋이 누적되면 전체 타이밍이 밀리므로 허용폭을 더 보수적으로 제한.
         base_lead = max(14.0, base_lead - 10.0)
         if fmt == "cv":
             base_lead = min(base_lead, 18.0)
