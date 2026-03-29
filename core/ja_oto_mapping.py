@@ -12,6 +12,7 @@ import unicodedata
 from functools import lru_cache
 
 from core.alias_annotation_utils import strip_alias_annotation_suffixes
+from core.interval_lookup import build_interval_lookup, intervals_within_bounds
 from core.ja_lab_generator import parse_ja_filename, romaji_to_ipa, split_ja_romaji_syllable
 
 JA_CONSONANTS = [
@@ -410,6 +411,7 @@ def _build_ja_syllables_from_phone_nuclei(ph_intervals, cv_targets):
             selected_pos.append(pos)
         selected = [nuclei[pos] for pos in selected_pos]
     infos = []
+    phone_lookup = build_interval_lookup(ph_intervals)
     global_start = float(ph_intervals[0].minTime)
     global_end = float(ph_intervals[-1].maxTime)
     for i, n_idx in enumerate(selected):
@@ -423,7 +425,7 @@ def _build_ja_syllables_from_phone_nuclei(ph_intervals, cv_targets):
             e_t = (float(ph_intervals[n_idx].maxTime) + float(ph_intervals[next_n].minTime)) * 0.5
         else:
             e_t = global_end
-        phones = [p for p in ph_intervals if float(p.minTime) >= s_t - 1e-6 and float(p.maxTime) <= e_t + 1e-6]
+        phones = intervals_within_bounds(phone_lookup, s_t, e_t)
         if not phones:
             phones = [ph_intervals[n_idx]]
         tok = cv_targets[i] if i < len(cv_targets) else ''

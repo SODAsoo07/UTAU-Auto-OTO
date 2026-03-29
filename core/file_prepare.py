@@ -4,6 +4,13 @@ from dataclasses import dataclass, field
 from typing import Callable, Mapping, MutableMapping, Optional, Sequence
 
 
+def _norm_path_key(path: str) -> str:
+    try:
+        return str(path or "").strip().replace("\\", "/").lower()
+    except Exception:
+        return str(path or "")
+
+
 @dataclass
 class PreparedFileContext:
     fname: str
@@ -81,14 +88,19 @@ def load_named_tiers(
     context: PreparedFileContext,
     *,
     load_textgrid_fn: Callable[[str], object],
+    preloaded_tg_by_path: Optional[Mapping[str, object]] = None,
     phone_tier_name: str = "phones",
     word_tier_name: str = "words",
     tier_predicate: Optional[Callable[[object], bool]] = None,
 ) -> PreparedFileContext:
     if context.status != "ok":
         return context
+    tg = None
+    if preloaded_tg_by_path:
+        tg = preloaded_tg_by_path.get(_norm_path_key(context.tg_path))
     try:
-        tg = load_textgrid_fn(context.tg_path)
+        if tg is None:
+            tg = load_textgrid_fn(context.tg_path)
     except Exception as exc:
         context.status = "textgrid_load_failed"
         context.error_message = str(exc)

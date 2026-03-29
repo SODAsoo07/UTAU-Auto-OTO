@@ -65,6 +65,7 @@ from core.oto_candidate_selection import maybe_promote_alias_candidate, select_p
 from core.oto_diagnostics import MappingTraceCollector, SkippedEntryCollector
 from core.oto_diagnostics_adapter_v2 import GeneratorDiagnosticsAdapter
 from core.file_prepare import load_named_tiers, prepare_file_context
+from core.interval_lookup import build_interval_lookup, intervals_within_bounds
 from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
 from core.timing_anchor_profiles import is_anchor_lock_enabled
 from core.timing_anchor_runtime import append_timing_anchor_log
@@ -2757,6 +2758,13 @@ def generate_ja_oto(
     except Exception:
         pass
     mel_cache_for_signal = {}
+    single_vowel_span_by_tg_path = {}
+
+    def _norm_tg_path_key(path):
+        try:
+            return os.path.normcase(os.path.abspath(str(path or "")))
+        except Exception:
+            return str(path or "")
 
     for fname, lines in file_groups.items():
         file_ctx = prepare_file_context(
@@ -2881,6 +2889,15 @@ def generate_ja_oto(
             alignment_ingest = build_ja_alignment_ingest(file_ctx, loop_prep)
             wd_intervals = alignment_ingest.words
             ph_intervals = alignment_ingest.phones
+            if len(ph_intervals) == 1:
+                try:
+                    one = ph_intervals[0]
+                    single_vowel_span_by_tg_path[_norm_tg_path_key(file_ctx.tg_path)] = (
+                        float(one.minTime) * 1000.0,
+                        float(one.maxTime) * 1000.0,
+                    )
+                except Exception:
+                    pass
             filename_syllables = list(alignment_ingest.extra.get("filename_syllables") or [])
             cv_targets = list(alignment_ingest.extra.get("cv_targets") or [])
             sinsy_label_entries = list(alignment_ingest.extra.get("sinsy_label_entries") or [])
@@ -2981,10 +2998,15 @@ def generate_ja_oto(
                     })
             elif wd_intervals:
                 words_tier_based = []
+                words_phone_lookup = build_interval_lookup(ph_intervals)
                 for w in wd_intervals:
                     w_start = float(w.minTime)
                     w_end = float(w.maxTime)
-                    s_phones = [p for p in ph_intervals if p.minTime >= (w_start - 0.01) and p.maxTime <= (w_end + 0.01)]
+                    s_phones = intervals_within_bounds(
+                        words_phone_lookup,
+                        w_start - 0.01,
+                        w_end + 0.01,
+                    )
                     words_tier_based.append({
                         'word': w.mark.strip().lower(),
                         'start_time': w_start,
@@ -4860,7 +4882,7 @@ def generate_ja_oto(
         template_aliases = set()
         for lines in file_groups.values():
             for line in lines:
-                parts = line.split('=')
+                parts = line.split('=', 1)
                 if len(parts) > 1:
                     alias = parts[1].split(',')[0].strip().lower()
                     template_aliases.add(alias)
@@ -4879,34 +4901,41 @@ def generate_ja_oto(
                     break
 
             if detected_vowel and detected_vowel not in template_aliases:
+                v_span = single_vowel_span_by_tg_path.get(_norm_tg_path_key(tg_info.get("path")))
                 try:
-                    tg = textgrid.TextGrid.fromFile(tg_info['path'])
-                    phone_tier = next((t for t in tg if isinstance(t, textgrid.IntervalTier) and t.name == 'phones'), None)
-                    if not phone_tier:
-                        continue
-                    intervals = [i for i in phone_tier if i.mark.strip() not in ['', 'sil', 'spn', 'pau', 'sp']]
-
-                    if len(intervals) == 1:
+                    if v_span is None:
+                        tg = textgrid.TextGrid.fromFile(tg_info['path'])
+                        phone_tier = next((t for t in tg if isinstance(t, textgrid.IntervalTier) and t.name == 'phones'), None)
+                        if not phone_tier:
+                            continue
+                        intervals = [i for i in phone_tier if i.mark.strip() not in ['', 'sil', 'spn', 'pau', 'sp']]
+                        if len(intervals) != 1:
+                            continue
                         vowel = intervals[0]
-                        v_start = vowel.minTime * 1000
-                        v_end = vowel.maxTime * 1000
-                        v_len = v_end - v_start
+                        v_span = (
+                            float(vowel.minTime) * 1000.0,
+                            float(vowel.maxTime) * 1000.0,
+                        )
+                        single_vowel_span_by_tg_path[_norm_tg_path_key(tg_info.get("path"))] = v_span
 
-                        log(f"➕ 모음 추가 생성: {tg_info['real_name']} -> [{detected_vowel}]")
-                        offset = v_start
-                        pre = 0
-                        ovl = 0
-                        consonant = min(v_len * 0.25, 120)
-                        cutoff = -(v_len * 0.8)
+                    v_start, v_end = v_span
+                    v_len = v_end - v_start
 
-                        offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+                    log(f"➕ 모음 추가 생성: {tg_info['real_name']} -> [{detected_vowel}]")
+                    offset = v_start
+                    pre = 0
+                    ovl = 0
+                    consonant = min(v_len * 0.25, 120)
+                    cutoff = -(v_len * 0.8)
 
-                        aliases_to_write = generate_ja_openutau_aliases(detected_vowel) if generate_openutau else [detected_vowel]
-                        for a in aliases_to_write:
-                            a2 = _alias_out(a)
-                            new_line = f"{tg_info['real_name']}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
-                            final_lines.append(new_line)
-                except:
+                    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
+
+                    aliases_to_write = generate_ja_openutau_aliases(detected_vowel) if generate_openutau else [detected_vowel]
+                    for a in aliases_to_write:
+                        a2 = _alias_out(a)
+                        new_line = f"{tg_info['real_name']}={a2},{offset:.2f},{consonant:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
+                        final_lines.append(new_line)
+                except Exception:
                     continue
 
     finish_context = GeneratorFinishContext(

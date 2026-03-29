@@ -870,12 +870,12 @@ class LayoutMixin:
             values = [
                 "자동 감지 (권장)",
                 "CV/연단음",
-                "C+V (템플릿 전용)",
                 "CVC (한국어 전용)",
                 "CVVC",
                 "VCV (연속음)",
             ]
             if self._is_preview_channel():
+                values.append("C+V (템플릿 전용)")
                 values.append("CMPX (프리뷰)")
             return values
         if lang == "english":
@@ -902,6 +902,8 @@ class LayoutMixin:
         label = label_map.get(str(format_code or "").strip().lower(), "자동 감지 (권장)")
         if label not in values:
             if label in {"CVC (한국어 전용)", "C+V (템플릿 전용)"} and lang != "korean":
+                label = "CV/연단음"
+            elif label == "C+V (템플릿 전용)" and not self._is_preview_channel():
                 label = "CV/연단음"
             else:
                 label = "자동 감지 (권장)"
@@ -1059,6 +1061,12 @@ class LayoutMixin:
         try:
             lang = self._get_language()
             fmt = normalize_auto_format_value(lang, self.auto_format_var.get()) if hasattr(self, "auto_format_var") else ""
+            if lang == "korean" and fmt == "c_plus_v" and not self._is_preview_channel():
+                try:
+                    self.auto_format_var.set("CV/연단음")
+                    fmt = "cv"
+                except Exception:
+                    fmt = "cv"
             is_kr_template_only = (lang == "korean" and fmt in {"cmpx", "c_plus_v"})
         except Exception:
             is_kr_template_only = False

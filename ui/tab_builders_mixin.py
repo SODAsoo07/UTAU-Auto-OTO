@@ -5,6 +5,21 @@ import customtkinter as ctk
 
 from core.oto_generator import DEFAULT_PARAMS
 from ui.theme_tokens import PALETTE, TAB_OVERLAY_THEME
+from ui.ui_builders import (
+    ui_checkbox,
+    ui_help,
+    ui_inline_checkbox,
+    ui_row,
+    ui_section,
+)
+from ui.ui_declarative import build_declarative
+from ui.ui_layout_defs import (
+    ADVANCED_ML_SECTION_SUBTITLE,
+    ADVANCED_ML_SECTION_TITLE,
+    ADVANCED_WEAK_BOUNDARY_HELP,
+    ADVANCED_WEAK_BOUNDARY_OPTIONS,
+    PIPELINE_MODEL_QUICK_HELP,
+)
 
 
 def _style_blue_menu(widget):
@@ -63,6 +78,30 @@ class TabBuildersMixin:
         except Exception:
             pass
 
+    def _ui_checkbox(self, *args, **kwargs):
+        return ui_checkbox(*args, **kwargs)
+
+    def _ui_help(self, *args, **kwargs):
+        return ui_help(*args, **kwargs)
+
+    def _ui_section(self, *args, **kwargs):
+        return ui_section(*args, **kwargs)
+
+    def _ui_row(self, *args, **kwargs):
+        return ui_row(*args, **kwargs)
+
+    def _ui_inline_checkbox(self, *args, **kwargs):
+        return ui_inline_checkbox(*args, **kwargs)
+
+    def _style_primary_button(self, widget):
+        _style_primary_button(widget)
+
+    def _style_blue_menu(self, widget):
+        _style_blue_menu(widget)
+
+    def _layout_path(self) -> str:
+        return os.path.join(os.path.dirname(__file__), "ui_layout.json")
+
     def _build_pipeline_tab(self):
         tab_name = "파이프라인"
         tab = self._get_or_add_tab(tab_name)
@@ -73,36 +112,47 @@ class TabBuildersMixin:
 
         content = ctk.CTkScrollableFrame(root, fg_color=overlay)
         content.pack(side="top", fill="both", expand=True, padx=0, pady=0)
+        build_declarative(
+            self,
+            content,
+            layout_path=self._layout_path(),
+            tab_key="pipeline",
+            context={
+                "overlay": overlay,
+                "root": root,
+                "content": content,
+                "tab": tab,
+            },
+        )
+        if hasattr(self, "_sync_aligner_ui"):
+            self._sync_aligner_ui()
 
-        model_quick_frame = ctk.CTkFrame(content, fg_color=overlay, border_width=1, border_color=PALETTE.panel_border)
-        model_quick_frame.pack(fill="x", padx=10, pady=(5, 8))
-        model_quick_inner = ctk.CTkFrame(model_quick_frame, fg_color="transparent")
-        model_quick_inner.pack(fill="x", padx=10, pady=8)
+    def _pipeline_steps(self):
+        return [
+            (
+                "lab_dict",
+                "1. Lab+사전 생성",
+                "WAV 파일에서 Lab을 생성하고, 이어서 발음 사전 파일까지 한 번에 생성합니다.",
+                self._run_lab_dict_gen,
+            ),
+            (
+                "align",
+                "2. 음성 정렬",
+                "MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.",
+                self._run_mfa,
+            ),
+            (
+                "oto",
+                "3. OTO.ini 생성",
+                "TextGrid 기반으로 OTO 파라미터를 계산해 저장합니다.",
+                self._run_oto_gen,
+            ),
+        ]
 
-        ctk.CTkLabel(
-            model_quick_inner,
-            text="외부 모델 폴더",
-            font=("", 13, "bold"),
-            text_color=PALETTE.header_accent,
-        ).pack(side="left")
-
-        if hasattr(self, "_browse_and_apply_downloaded_model_root"):
-            model_quick_btn = ctk.CTkButton(
-                model_quick_inner,
-                text="다운받은 모델 경로 설정",
-                width=190,
-                command=self._browse_and_apply_downloaded_model_root,
-            )
-            _style_primary_button(model_quick_btn)
-            model_quick_btn.pack(side="right")
-
-        ctk.CTkLabel(
-            model_quick_frame,
-            text="상위 폴더를 선택하면 하위 폴더를 자동 탐색해 KR/JA 모델 경로를 적용합니다.",
-            text_color=PALETTE.hint_text,
-            wraplength=760,
-            justify="left",
-        ).pack(anchor="w", padx=12, pady=(0, 8))
+    def _slot_pipeline_action_panel(self, parent, layout_root, _node):
+        overlay = layout_root.get("_overlay", PALETTE.panel_bg)
+        ctx = layout_root.get("_context", {}) if isinstance(layout_root, dict) else {}
+        root = ctx.get("root", parent)
 
         action_parent = getattr(self, "pipeline_action_host", root)
         if action_parent is root:
@@ -124,67 +174,6 @@ class TabBuildersMixin:
 
         right_actions = ctk.CTkFrame(action_panel, fg_color="transparent")
         right_actions.grid(row=0, column=1, sticky="nsew", padx=(6, 12), pady=6)
-
-        mfa_frame = ctk.CTkFrame(content, fg_color=overlay, border_width=1, border_color=PALETTE.panel_border)
-        mfa_frame.pack(fill="x", padx=10, pady=(5, 10))
-        mfa_inner = ctk.CTkFrame(mfa_frame, fg_color="transparent")
-        mfa_inner.pack(fill="x", padx=10, pady=8)
-
-        status_group = ctk.CTkFrame(mfa_inner, fg_color="transparent")
-        status_group.pack(side="left")
-
-        mfa_ready = bool(getattr(self, "_mfa_ui_ready", False))
-        if getattr(self, "_mfa_install_in_progress", False):
-            self.mfa_status_label = ctk.CTkLabel(
-                status_group, text="🔧 MFA 설치 중...", font=("", 13, "bold"), text_color="#C27803"
-            )
-        elif getattr(self, "_mfa_path_probe_pending", False):
-            self.mfa_status_label = ctk.CTkLabel(
-                status_group, text="⏳ MFA 확인 중...", font=("", 13, "bold"), text_color=PALETTE.hint_text
-            )
-        elif mfa_ready:
-            self.mfa_status_label = ctk.CTkLabel(
-                status_group, text="✅ MFA 설치됨", font=("", 13, "bold"), text_color="#4F8F61"
-            )
-        else:
-            self.mfa_status_label = ctk.CTkLabel(
-                status_group, text="⚪ MFA 미완료", font=("", 13, "bold"), text_color="#90A4AE"
-            )
-        self.mfa_status_label.pack(side="left")
-
-        pipeline_intro_label = ctk.CTkLabel(
-            content,
-            text=(
-                "처음 설치나 'MFA 진단/복구'는 환경 구성과 현재 언어 모델 다운로드 때문에 10~20분 이상 걸릴 수 있습니다.\n"
-                "문제가 생기면 먼저 'MFA 진단/복구'를 눌러 자동 복구를 시도한 뒤 정렬을 다시 실행하세요."
-            ),
-            text_color=PALETTE.neutral_text,
-            wraplength=760,
-            justify="left",
-        )
-        pipeline_intro_label.pack(fill="x", padx=20, pady=(0, 8))
-        self._bind_wraplength_to_container(content, [pipeline_intro_label], padding=48, min_wrap=280)
-
-        steps = [
-            (
-                "lab_dict",
-                "1. Lab+사전 생성",
-                "WAV 파일에서 Lab을 생성하고, 이어서 발음 사전 파일까지 한 번에 생성합니다.",
-                self._run_lab_dict_gen,
-            ),
-            (
-                "align",
-                "2. 음성 정렬",
-                "MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.",
-                self._run_mfa,
-            ),
-            (
-                "oto",
-                "3. OTO.ini 생성",
-                "TextGrid 기반으로 OTO 파라미터를 계산해 저장합니다.",
-                self._run_oto_gen,
-            ),
-        ]
 
         ctk.CTkLabel(
             left_actions,
@@ -218,6 +207,7 @@ class TabBuildersMixin:
             text_color="black",
             command=self._run_mfa_setup,
         )
+        mfa_ready = bool(getattr(self, "_mfa_ui_ready", False))
         if getattr(self, "_mfa_install_in_progress", False):
             self.mfa_install_btn.configure(text="🔧 설치 중...", state="disabled", fg_color="#B0BEC5")
         elif getattr(self, "_mfa_path_probe_pending", False):
@@ -237,6 +227,7 @@ class TabBuildersMixin:
         steps_grid.pack(anchor="w")
         steps_grid.grid_columnconfigure(0, weight=1)
 
+        steps = self._pipeline_steps()
         self.pipeline_step_buttons = {}
         self.pipeline_step_align_btn = None
         for idx, (step_key, title, _desc, cmd) in enumerate(steps):
@@ -247,7 +238,7 @@ class TabBuildersMixin:
                 width=190,
                 command=cmd,
             )
-            _style_primary_button(step_btn)
+            self._style_primary_button(step_btn)
             step_btn.grid(row=idx * 2, column=0, padx=(0, 8), pady=1, sticky="w")
             if idx < len(steps) - 1:
                 ctk.CTkLabel(
@@ -261,8 +252,54 @@ class TabBuildersMixin:
             if step_key == "align":
                 self.pipeline_step_align_btn = step_btn
 
-        for step_key, title, desc, cmd in steps:
-            frame = ctk.CTkFrame(content, fg_color=overlay, border_width=1, border_color=PALETTE.panel_border)
+        return action_panel
+
+    def _slot_pipeline_mfa_status(self, parent, _layout_root, _node):
+        mfa_inner = ctk.CTkFrame(parent, fg_color="transparent")
+        mfa_inner.pack(fill="x", padx=10, pady=8)
+
+        status_group = ctk.CTkFrame(mfa_inner, fg_color="transparent")
+        status_group.pack(side="left")
+
+        mfa_ready = bool(getattr(self, "_mfa_ui_ready", False))
+        if getattr(self, "_mfa_install_in_progress", False):
+            self.mfa_status_label = ctk.CTkLabel(
+                status_group, text="🔧 MFA 설치 중...", font=("", 13, "bold"), text_color="#C27803"
+            )
+        elif getattr(self, "_mfa_path_probe_pending", False):
+            self.mfa_status_label = ctk.CTkLabel(
+                status_group, text="⏳ MFA 확인 중...", font=("", 13, "bold"), text_color=PALETTE.hint_text
+            )
+        elif mfa_ready:
+            self.mfa_status_label = ctk.CTkLabel(
+                status_group, text="✅ MFA 설치됨", font=("", 13, "bold"), text_color="#4F8F61"
+            )
+        else:
+            self.mfa_status_label = ctk.CTkLabel(
+                status_group, text="⚪ MFA 미완료", font=("", 13, "bold"), text_color="#90A4AE"
+            )
+        self.mfa_status_label.pack(side="left")
+        return mfa_inner
+
+    def _slot_pipeline_intro(self, parent, _layout_root, _node):
+        intro_label = ctk.CTkLabel(
+            parent,
+            text=(
+                "처음 설치나 'MFA 진단/복구'는 환경 구성과 현재 언어 모델 다운로드 때문에 10~20분 이상 걸릴 수 있습니다.\n"
+                "문제가 생기면 먼저 'MFA 진단/복구'를 눌러 자동 복구를 시도한 뒤 정렬을 다시 실행하세요."
+            ),
+            text_color=PALETTE.neutral_text,
+            wraplength=760,
+            justify="left",
+        )
+        intro_label.pack(fill="x", padx=20, pady=(0, 8))
+        self._bind_wraplength_to_container(parent, [intro_label], padding=48, min_wrap=280)
+        return intro_label
+
+    def _slot_pipeline_steps(self, parent, layout_root, _node):
+        overlay = layout_root.get("_overlay", PALETTE.panel_bg)
+        for step_key, title, desc, _cmd in self._pipeline_steps():
+            frame = ctk.CTkFrame(parent, fg_color=overlay, border_width=1, border_color=PALETTE.panel_border)
             frame.pack(fill="x", padx=10, pady=4)
             left = ctk.CTkFrame(frame, fg_color="transparent")
             left.pack(side="left", fill="x", expand=True, padx=10, pady=6)
@@ -308,8 +345,7 @@ class TabBuildersMixin:
                     text="ML 보정은 자동으로 적용되며 모델이 없으면 자동으로 건너뜁니다.",
                     text_color=PALETTE.hint_text,
                 ).pack(anchor="w", pady=(6, 0))
-        if hasattr(self, "_sync_aligner_ui"):
-            self._sync_aligner_ui()
+        return None
 
     def _build_params_tab(self):
         tab_name = "파라미터 조정"
@@ -518,13 +554,14 @@ class TabBuildersMixin:
             justify="left",
         ).pack(fill="x", padx=10, pady=(12, 6))
 
-    def _build_advanced_settings_tab(self):
+    def _build_advanced_settings_tab_legacy(self):
         tab_name = "고급 설정"
         tab = self._get_or_add_tab(tab_name)
         overlay = self._tab_overlay_color(tab_name)
         tab.configure(fg_color=overlay)
         container = ctk.CTkScrollableFrame(tab, fg_color=overlay)
         container.pack(fill="both", expand=True, padx=10, pady=10)
+        self._ensure_advanced_setting_vars()
 
         adv_intro_label = ctk.CTkLabel(
             container,
@@ -835,64 +872,32 @@ class TabBuildersMixin:
         mapping_strict_help_label.pack(anchor="w", padx=34, pady=(0, 8))
         self._bind_wraplength_to_container(basic_toggle_frame, [mapping_strict_help_label], padding=64, min_wrap=260)
 
-        weak_boundary_row = ctk.CTkFrame(basic_toggle_frame, fg_color="transparent")
-        weak_boundary_row.pack(fill="x", padx=12, pady=(0, 2))
-        ctk.CTkLabel(
-            weak_boundary_row,
-            text="약경계 자음(m/n/l/r/j/y/w/ng) 강화",
-            text_color=PALETTE.neutral_text,
-            width=200,
-            anchor="w",
-        ).pack(side="left")
-        ctk.CTkCheckBox(
-            weak_boundary_row,
-            text="발음 누락 줄이기",
-            variable=self.weak_boundary_reduce_missing_var,
-            command=self._save_config,
-        ).pack(side="left", padx=(10, 6))
-        ctk.CTkCheckBox(
-            weak_boundary_row,
-            text="오매핑 차단",
-            variable=self.weak_boundary_block_mismap_var,
-            command=self._save_config,
-        ).pack(side="left", padx=(4, 0))
-        weak_boundary_help = ctk.CTkLabel(
-            basic_toggle_frame,
-            text="기본값은 OFF입니다. OFF여도 약경계 자음에는 약한 점프 제한/모음 고정이 기본 적용되며, 체크 시 각각 더 엄격하게 강화됩니다.",
-            text_color=PALETTE.hint_text,
-            justify="left",
-            wraplength=730,
-        )
-        weak_boundary_help.pack(anchor="w", padx=34, pady=(0, 8))
+        weak_boundary_row = self._ui_row(basic_toggle_frame, padx=12, pady=(0, 2))
+        for option in ADVANCED_WEAK_BOUNDARY_OPTIONS:
+            var = getattr(self, option["var"])
+            self._ui_inline_checkbox(
+                weak_boundary_row,
+                text=option["text"],
+                variable=var,
+                command=self._save_config,
+                padx=option.get("padx", (0, 0)),
+            )
+        weak_boundary_help = self._ui_help(basic_toggle_frame, ADVANCED_WEAK_BOUNDARY_HELP)
         self._bind_wraplength_to_container(basic_toggle_frame, [weak_boundary_help], padding=64, min_wrap=260)
 
         dev_container = ctk.CTkFrame(container, fg_color="transparent")
         dev_container.pack(fill="x", padx=0, pady=(0, 0))
         self.advanced_developer_frame = dev_container
 
-        ml_frame = ctk.CTkFrame(
+        ml_frame = self._ui_section(
             dev_container,
-            fg_color=PALETTE.panel_bg,
-            border_width=1,
-            border_color=PALETTE.panel_border,
+            ADVANCED_ML_SECTION_TITLE,
+            ADVANCED_ML_SECTION_SUBTITLE,
         )
-        ml_frame.pack(fill="x", padx=10, pady=5)
-        ctk.CTkLabel(
-            ml_frame,
-            text="ML 보정 옵션",
-            font=("", 14, "bold"),
-            text_color=PALETTE.header_accent,
-        ).pack(anchor="w", padx=12, pady=(10, 6))
-
-        ctk.CTkLabel(
-            ml_frame,
-            text="OFF 시 ML 보정(자동/No-MFA/v1/v2) 단계를 건너뜁니다.",
-            text_color=PALETTE.hint_text,
-        ).pack(anchor="w", padx=12, pady=(0, 6))
         if not hasattr(self, "mapping_supervised_enable_var"):
             self.mapping_supervised_enable_var = ctk.BooleanVar(value=True)
 
-        self.cvn_correction_enable_checkbox = ctk.CTkCheckBox(
+        self.cvn_correction_enable_checkbox = self._ui_checkbox(
             ml_frame,
             text="자음 구분기(C/V) 보정 사용",
             text_color="#5F8C87",
@@ -903,16 +908,16 @@ class TabBuildersMixin:
                 else self._save_config
             ),
         )
-        self.cvn_correction_enable_checkbox.pack(anchor="w", padx=12, pady=(2, 2))
 
-        self.cvn_low_conf_only_checkbox = ctk.CTkCheckBox(
+        self.cvn_low_conf_only_checkbox = self._ui_checkbox(
             ml_frame,
             text="정렬 저신뢰 샘플에만 C/V 후보정 적용",
             text_color=PALETTE.neutral_text,
             variable=self.cvn_low_conf_only_var,
             command=self._save_config,
+            padx=34,
+            pady=(0, 4),
         )
-        self.cvn_low_conf_only_checkbox.pack(anchor="w", padx=34, pady=(0, 4))
 
         self.mapping_supervised_enable_checkbox = ctk.CTkCheckBox(
             ml_frame,
@@ -1286,21 +1291,11 @@ class TabBuildersMixin:
         if hasattr(self, "_refresh_ml_backend_status"):
             self._refresh_ml_backend_status()
 
-        vc_frame = ctk.CTkFrame(dev_container)
-        vc_frame.pack(fill="x", padx=10, pady=5)
-        ctk.CTkLabel(
-            vc_frame,
-            text="VC 보정",
-            font=("", 14, "bold"),
-            text_color=PALETTE.header_accent,
-        ).pack(anchor="w", padx=12, pady=(10, 6))
-        ctk.CTkLabel(
-            vc_frame,
-            text="기본 UI에서는 보정 사용 여부만 선택합니다. 세부 슬라이더는 개발자 설정 ON일 때만 활성화됩니다.",
-            text_color=PALETTE.hint_text,
-            wraplength=740,
-            justify="left",
-        ).pack(anchor="w", padx=12, pady=(0, 6))
+        vc_frame = self._ui_section(
+            dev_container,
+            "VC 보정",
+            "기본 UI에서는 보정 사용 여부만 선택합니다. 세부 슬라이더는 개발자 설정 ON일 때만 활성화됩니다.",
+        )
 
         self.vc_neighbor_detail_controls = []
         self.vc_neighbor_detail_frames = []
@@ -1524,5 +1519,1051 @@ class TabBuildersMixin:
     def _build_profile_tune_tab(self):
         # VC 보정값 조절 UI는 고급 설정 탭으로 통합되었습니다.
         return
+
+    def _ensure_advanced_setting_vars(self) -> None:
+        if hasattr(self, "_advanced_setting_vars_ready"):
+            return
+        self._advanced_setting_vars_ready = True
+        defaults = {
+            "enable_ml_correction_var": ("bool", True),
+            "vc_correction_enable_var": ("bool", True),
+            "kr_continuity_enable_var": ("bool", True),
+            "cvn_correction_enable_var": ("bool", True),
+            "cvn_low_conf_only_var": ("bool", False),
+            "mapping_supervised_enable_var": ("bool", True),
+            "cv_order_prior_enable_var": ("bool", True),
+            "kr_vc_neighbor_enable_var": ("bool", True),
+            "ja_vc_neighbor_enable_var": ("bool", True),
+            "soft_bank_mode_var": ("bool", False),
+            "low_rms_gain_enable_var": ("bool", False),
+            "weak_voice_assist_enable_var": ("bool", True),
+            "weak_boundary_reduce_missing_var": ("bool", False),
+            "weak_boundary_block_mismap_var": ("bool", False),
+            "ml_coupled_enable_var": ("bool", True),
+            "ml_coupled_min_conf_use_model_meta_var": ("bool", True),
+            "ml_coupled_strict_constraint_var": ("bool", True),
+            "ml_batch_inference_enable_var": ("bool", True),
+            "ml_legacy_fallback_enable_var": ("bool", False),
+            "ml_hybrid_routing_enable_var": ("bool", True),
+            "kr_continuity_max_offset_adj_var": ("str", ""),
+            "weak_voice_assist_strength_var": ("str", ""),
+            "mapping_strict_mode_var": ("str", "적당히 엄격(누락 행은 폴백)"),
+            "mapping_supervised_mode_var": ("str", "자동(권장)"),
+            "cv_order_prior_strength_var": ("str", ""),
+            "kr_mapping_confidence_threshold_var": ("str", ""),
+            "ml_route_var": ("str", "자동(자동 라우팅)"),
+            "ml_selector_mode_var": ("str", "델타+셀렉터"),
+            "ml_coupled_min_conf_var": ("str", ""),
+            "ml_coupled_min_conf_model_offset_var": ("str", ""),
+            "ml_coupled_min_conf_kr_cv_var": ("str", ""),
+            "ml_coupled_min_conf_kr_cvc_var": ("str", ""),
+            "ml_coupled_min_conf_kr_cvvc_var": ("str", ""),
+            "ml_coupled_min_conf_kr_vcv_var": ("str", ""),
+            "ml_coupled_min_conf_ja_cv_var": ("str", ""),
+            "ml_coupled_min_conf_ja_cvc_var": ("str", ""),
+            "ml_coupled_min_conf_ja_cvvc_var": ("str", ""),
+            "ml_coupled_min_conf_ja_vcv_var": ("str", ""),
+            "ml_coupled_device_var": ("str", "auto"),
+            "ml_coupled_backend_var": ("str", "auto"),
+            "ml_batch_inference_size_var": ("str", "256"),
+            "ml_anchor_mel_gamma_var": ("str", "1.2"),
+            "kr_vc_neighbor_blend_var": ("str", ""),
+            "kr_vc_neighbor_max_shift_var": ("str", ""),
+            "kr_vc_neighbor_lead_ms_var": ("str", ""),
+            "kr_vc_neighbor_tail_ms_var": ("str", ""),
+            "kr_vc_neighbor_min_len_var": ("str", ""),
+            "ja_vc_neighbor_blend_var": ("str", ""),
+            "ja_vc_neighbor_max_shift_var": ("str", ""),
+            "ja_vc_neighbor_lead_ms_var": ("str", ""),
+            "ja_vc_neighbor_tail_ms_var": ("str", ""),
+            "ja_vc_neighbor_min_len_var": ("str", ""),
+        }
+        for name, (kind, default) in defaults.items():
+            if hasattr(self, name):
+                continue
+            if kind == "bool":
+                setattr(self, name, ctk.BooleanVar(value=bool(default)))
+            else:
+                setattr(self, name, ctk.StringVar(value=str(default)))
+
+    def _get_or_create_advanced_dev_container(self, parent):
+        frame = getattr(self, "advanced_developer_frame", None)
+        if frame is not None:
+            try:
+                if frame.winfo_exists():
+                    return frame
+            except Exception:
+                pass
+        dev_container = ctk.CTkFrame(parent, fg_color="transparent")
+        dev_container.pack(fill="x", padx=0, pady=(0, 0))
+        self.advanced_developer_frame = dev_container
+        return dev_container
+
+    def _build_advanced_settings_tab(self):
+        tab_name = "고급 설정"
+        tab = self._get_or_add_tab(tab_name)
+        overlay = self._tab_overlay_color(tab_name)
+        tab.configure(fg_color=overlay)
+        container = ctk.CTkScrollableFrame(tab, fg_color=overlay)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+        self._ensure_advanced_setting_vars()
+        self.advanced_tuning_slider_bindings = {}
+
+        build_declarative(
+            self,
+            container,
+            layout_path=self._layout_path(),
+            tab_key="advanced_settings",
+            context={
+                "overlay": overlay,
+                "root": tab,
+                "content": container,
+                "tab": tab,
+            },
+        )
+        if hasattr(self, "_sync_vc_correction_toggle"):
+            self._sync_vc_correction_toggle()
+        if hasattr(self, "_sync_advanced_tuning_slider_controls"):
+            self._sync_advanced_tuning_slider_controls()
+
+    def _slot_advanced_basic_toggles(self, parent, _layout_root, _node):
+        basic_toggle_frame = ctk.CTkFrame(
+            parent,
+            fg_color=PALETTE.panel_bg,
+            border_width=1,
+            border_color=PALETTE.panel_border,
+        )
+        basic_toggle_frame.pack(fill="x", padx=10, pady=(0, 8))
+        self.advanced_basic_frame = basic_toggle_frame
+        ctk.CTkLabel(
+            basic_toggle_frame,
+            text="핵심 옵션",
+            font=("", 14, "bold"),
+            text_color=PALETTE.header_accent,
+        ).pack(anchor="w", padx=12, pady=(10, 6))
+
+        self.enable_ml_correction_checkbox = ctk.CTkCheckBox(
+            basic_toggle_frame,
+            text="ML 보정 사용",
+            text_color="#9A8250",
+            variable=self.enable_ml_correction_var,
+            command=self._save_config,
+        )
+        self.enable_ml_correction_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
+
+        self.kr_continuity_enable_checkbox = ctk.CTkCheckBox(
+            basic_toggle_frame,
+            text="연속성/파일 일관성 보정 사용",
+            text_color="#64866F",
+            variable=self.vc_correction_enable_var,
+            command=self._on_vc_correction_toggle,
+        )
+        self.kr_continuity_enable_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
+        continuity_help_label = ctk.CTkLabel(
+            basic_toggle_frame,
+            text="형식 변경 시 추천값이 자동 적용됩니다. 필요한 경우 아래 개발자 슬라이더에서 세부값만 미세 조정하세요.",
+            text_color=PALETTE.hint_text,
+            justify="left",
+            wraplength=730,
+        )
+        continuity_help_label.pack(anchor="w", padx=34, pady=(0, 6))
+        self._bind_wraplength_to_container(basic_toggle_frame, [continuity_help_label], padding=64, min_wrap=260)
+
+        post_frame = ctk.CTkFrame(
+            parent,
+            fg_color=PALETTE.panel_bg,
+            border_width=1,
+            border_color=PALETTE.panel_border,
+        )
+        post_frame.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkLabel(
+            post_frame,
+            text="후처리(연속성) 옵션",
+            font=("", 14, "bold"),
+            text_color=PALETTE.header_accent,
+        ).pack(anchor="w", padx=12, pady=(10, 6))
+
+        cont_row = ctk.CTkFrame(post_frame, fg_color="transparent")
+        cont_row.pack(anchor="w", padx=12, pady=(0, 8), fill="x")
+        ctk.CTkLabel(
+            cont_row,
+            text="연속성 offset 보정 상한 (ms)",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+        cont_entry = ctk.CTkEntry(
+            cont_row,
+            width=90,
+            textvariable=self.kr_continuity_max_offset_adj_var,
+            placeholder_text="기본값(180)",
+        )
+        cont_entry.pack(side="left", padx=(10, 8))
+        cont_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(
+            cont_row,
+            text="크게 잡을수록 연속성 보정이 강해지고, 작게 잡을수록 보정이 약해집니다.",
+            text_color=PALETTE.hint_text,
+        ).pack(side="left", padx=(4, 0))
+
+        bank_preset_frame = ctk.CTkFrame(basic_toggle_frame, fg_color="transparent")
+        bank_preset_frame.pack(fill="x", padx=12, pady=(0, 8))
+        ctk.CTkLabel(
+            bank_preset_frame,
+            text="보이스뱅크 튜닝 프리셋",
+            text_color=PALETTE.neutral_text,
+            font=("", 13, "bold"),
+        ).pack(anchor="w", pady=(0, 4))
+        bank_preset_help_label = ctk.CTkLabel(
+            bank_preset_frame,
+            text="soft/일반 뱅크용 프리셋을 한 번에 적용합니다. 민감형은 보정을 강하게, 일반은 안정적으로 동작합니다.",
+            text_color=PALETTE.hint_text,
+            wraplength=730,
+            justify="left",
+        )
+        bank_preset_help_label.pack(anchor="w", pady=(0, 6))
+        self._bind_wraplength_to_container(bank_preset_frame, [bank_preset_help_label], padding=30, min_wrap=240)
+
+        preset_grid = ctk.CTkFrame(bank_preset_frame, fg_color="transparent")
+        preset_grid.pack(anchor="w")
+        preset_grid.grid_columnconfigure(0, weight=1)
+        preset_grid.grid_columnconfigure(1, weight=1)
+
+        self.voicebank_preset_buttons = {}
+
+        btn_soft_agg = ctk.CTkButton(
+            preset_grid,
+            text="soft 뱅크 · 민감형",
+            width=170,
+            command=lambda: self._on_voicebank_preset_button("soft", "aggressive"),
+        )
+        self._style_primary_button(btn_soft_agg)
+        btn_soft_agg.grid(row=0, column=0, padx=(0, 8), pady=2, sticky="w")
+
+        btn_soft_cons = ctk.CTkButton(
+            preset_grid,
+            text="soft 뱅크 · 일반",
+            width=170,
+            command=lambda: self._on_voicebank_preset_button("soft", "conservative"),
+        )
+        self._style_primary_button(btn_soft_cons)
+        btn_soft_cons.grid(row=0, column=1, padx=(0, 8), pady=2, sticky="w")
+
+        btn_normal_agg = ctk.CTkButton(
+            preset_grid,
+            text="일반 뱅크 · 민감형",
+            width=170,
+            command=lambda: self._on_voicebank_preset_button("normal", "aggressive"),
+        )
+        self._style_primary_button(btn_normal_agg)
+        btn_normal_agg.grid(row=1, column=0, padx=(0, 8), pady=2, sticky="w")
+
+        btn_normal_cons = ctk.CTkButton(
+            preset_grid,
+            text="일반 뱅크 · 일반",
+            width=170,
+            command=lambda: self._on_voicebank_preset_button("normal", "conservative"),
+        )
+        self._style_primary_button(btn_normal_cons)
+        btn_normal_cons.grid(row=1, column=1, padx=(0, 8), pady=2, sticky="w")
+
+        self.voicebank_preset_buttons = {
+            "soft:aggressive": btn_soft_agg,
+            "soft:conservative": btn_soft_cons,
+            "normal:aggressive": btn_normal_agg,
+            "normal:conservative": btn_normal_cons,
+        }
+        if hasattr(self, "_sync_voicebank_preset_button_styles"):
+            self._sync_voicebank_preset_button_styles()
+
+        self.soft_bank_mode_checkbox = ctk.CTkCheckBox(
+            basic_toggle_frame,
+            text="발음 누락 줄이기 추천",
+            text_color="#6F819A",
+            variable=self.soft_bank_mode_var,
+            command=self._save_config,
+        )
+        self.soft_bank_mode_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
+        soft_bank_help_label = ctk.CTkLabel(
+            basic_toggle_frame,
+            text="숨소리가 많이 섞이거나 발성이 약한 음원에서 발음 누락과 공백 오검출을 줄일 때 켜는 옵션입니다.",
+            text_color=PALETTE.hint_text,
+            justify="left",
+            wraplength=730,
+        )
+        soft_bank_help_label.pack(anchor="w", padx=34, pady=(0, 8))
+        self._bind_wraplength_to_container(basic_toggle_frame, [soft_bank_help_label], padding=64, min_wrap=260)
+
+        self.low_rms_gain_enable_checkbox = ctk.CTkCheckBox(
+            basic_toggle_frame,
+            text="저볼륨 WAV 자동 증폭/정규화 (RMS 기반, 원본 보존)",
+            text_color="#6F819A",
+            variable=self.low_rms_gain_enable_var,
+            command=self._save_config,
+        )
+        self.low_rms_gain_enable_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
+        low_rms_help_label = ctk.CTkLabel(
+            basic_toggle_frame,
+            text="정렬 단계에서만 임시 작업 복사본에 볼륨 보정을 적용합니다. 원본 WAV 파일은 절대 변경하지 않습니다.",
+            text_color=PALETTE.hint_text,
+            justify="left",
+            wraplength=730,
+        )
+        low_rms_help_label.pack(anchor="w", padx=34, pady=(0, 8))
+        self._bind_wraplength_to_container(basic_toggle_frame, [low_rms_help_label], padding=64, min_wrap=260)
+
+        self.weak_voice_assist_enable_checkbox = ctk.CTkCheckBox(
+            basic_toggle_frame,
+            text="발음이 흐린 음원에 추천 (자모 구분 강화)",
+            text_color="#6F819A",
+            variable=self.weak_voice_assist_enable_var,
+            command=(
+                self._on_weak_voice_assist_toggle
+                if hasattr(self, "_on_weak_voice_assist_toggle")
+                else self._save_config
+            ),
+        )
+        self.weak_voice_assist_enable_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
+        weak_voice_help_label = ctk.CTkLabel(
+            basic_toggle_frame,
+            text="웅얼거림처럼 들리거나 자음/모음 구분이 흐린 음원에서 정렬 정확도를 높이기 위한 추천 옵션입니다. (원본 WAV 보존)",
+            text_color=PALETTE.hint_text,
+            justify="left",
+            wraplength=730,
+        )
+        weak_voice_help_label.pack(anchor="w", padx=34, pady=(0, 8))
+        self._bind_wraplength_to_container(basic_toggle_frame, [weak_voice_help_label], padding=64, min_wrap=260)
+
+        weak_voice_strength_row = ctk.CTkFrame(basic_toggle_frame, fg_color="transparent")
+        weak_voice_strength_row.pack(fill="x", padx=34, pady=(0, 10))
+        self.weak_voice_strength_title_label = ctk.CTkLabel(
+            weak_voice_strength_row,
+            text="자모 대비 강도",
+            width=130,
+            anchor="w",
+            text_color=PALETTE.neutral_text,
+        )
+        self.weak_voice_strength_title_label.pack(side="left")
+        try:
+            _raw_strength = (
+                str(self.weak_voice_assist_strength_var.get() or "")
+                if hasattr(self, "weak_voice_assist_strength_var")
+                else ""
+            ).strip()
+            _strength_current = float(_raw_strength) if _raw_strength else 0.35
+        except Exception:
+            _strength_current = 0.35
+        _strength_current = max(0.0, min(1.0, _strength_current))
+        weak_voice_strength_dvar = ctk.DoubleVar(value=_strength_current)
+        weak_voice_strength_value_label = ctk.CTkLabel(
+            weak_voice_strength_row,
+            text=f"{_strength_current:.2f}",
+            width=46,
+        )
+        weak_voice_strength_value_label.pack(side="right", padx=(6, 0))
+        self.weak_voice_strength_value_label = weak_voice_strength_value_label
+
+        def _on_weak_voice_strength_change(value):
+            try:
+                val = max(0.0, min(1.0, float(value)))
+            except Exception:
+                return
+            weak_voice_strength_value_label.configure(text=f"{val:.2f}")
+            if hasattr(self, "weak_voice_assist_strength_var"):
+                self.weak_voice_assist_strength_var.set(f"{val:.3f}".rstrip("0").rstrip("."))
+            self._save_config()
+
+        weak_voice_strength_slider = ctk.CTkSlider(
+            weak_voice_strength_row,
+            from_=0.0,
+            to=1.0,
+            number_of_steps=100,
+            variable=weak_voice_strength_dvar,
+            command=_on_weak_voice_strength_change,
+        )
+        weak_voice_strength_slider.pack(side="right", fill="x", expand=True, padx=8)
+        self.weak_voice_strength_slider = weak_voice_strength_slider
+        self.advanced_tuning_slider_bindings["UTOA_MFA_WEAK_VOICE_PREEMPH_MIX"] = {
+            "var": getattr(self, "weak_voice_assist_strength_var", None),
+            "dvar": weak_voice_strength_dvar,
+            "label": weak_voice_strength_value_label,
+            "fmt": "{:.2f}",
+            "default": 0.35,
+            "min": 0.0,
+            "max": 1.0,
+        }
+        if hasattr(self, "_sync_weak_voice_assist_controls"):
+            self._sync_weak_voice_assist_controls()
+
+        mapping_strict_row = ctk.CTkFrame(basic_toggle_frame, fg_color="transparent")
+        mapping_strict_row.pack(fill="x", padx=12, pady=(0, 4))
+        ctk.CTkLabel(
+            mapping_strict_row,
+            text="음절 오매핑 차단",
+            text_color=PALETTE.neutral_text,
+            width=130,
+            anchor="w",
+        ).pack(side="left")
+        mapping_strict_menu = ctk.CTkOptionMenu(
+            mapping_strict_row,
+            values=(
+                self._get_mapping_strict_mode_option_labels()
+                if hasattr(self, "_get_mapping_strict_mode_option_labels")
+                else ["완전 엄격", "적당히 엄격(누락 행은 폴백)", "off"]
+            ),
+            variable=self.mapping_strict_mode_var,
+            width=260,
+            command=lambda _v: self._save_config(),
+        )
+        self._style_blue_menu(mapping_strict_menu)
+        mapping_strict_menu.pack(side="left", padx=(10, 0))
+        mapping_strict_help_label = ctk.CTkLabel(
+            basic_toggle_frame,
+            text="음절을 틀릴 가능성을 줄이는 대신, 자동 설정에서 스킵되는 에일리어스가 늘어날 수 있습니다.",
+            text_color=PALETTE.hint_text,
+            justify="left",
+            wraplength=730,
+        )
+        mapping_strict_help_label.pack(anchor="w", padx=34, pady=(0, 8))
+        self._bind_wraplength_to_container(basic_toggle_frame, [mapping_strict_help_label], padding=64, min_wrap=260)
+
+        weak_boundary_row = self._ui_row(basic_toggle_frame, padx=12, pady=(0, 2))
+        for option in ADVANCED_WEAK_BOUNDARY_OPTIONS:
+            var = getattr(self, option["var"])
+            self._ui_inline_checkbox(
+                weak_boundary_row,
+                text=option["text"],
+                variable=var,
+                command=self._save_config,
+                padx=option.get("padx", (0, 0)),
+            )
+        weak_boundary_help = self._ui_help(basic_toggle_frame, ADVANCED_WEAK_BOUNDARY_HELP)
+        self._bind_wraplength_to_container(basic_toggle_frame, [weak_boundary_help], padding=64, min_wrap=260)
+        return basic_toggle_frame
+
+    def _slot_advanced_ml_section(self, parent, _layout_root, _node):
+        dev_container = self._get_or_create_advanced_dev_container(parent)
+
+        ml_frame = self._ui_section(
+            dev_container,
+            ADVANCED_ML_SECTION_TITLE,
+            ADVANCED_ML_SECTION_SUBTITLE,
+        )
+        if not hasattr(self, "mapping_supervised_enable_var"):
+            self.mapping_supervised_enable_var = ctk.BooleanVar(value=True)
+
+        self.cvn_correction_enable_checkbox = self._ui_checkbox(
+            ml_frame,
+            text="자음 구분기(C/V) 보정 사용",
+            text_color="#5F8C87",
+            variable=self.cvn_correction_enable_var,
+            command=(
+                self._on_cvn_correction_toggle
+                if hasattr(self, "_on_cvn_correction_toggle")
+                else self._save_config
+            ),
+        )
+
+        self.cvn_low_conf_only_checkbox = self._ui_checkbox(
+            ml_frame,
+            text="정렬 저신뢰 샘플에만 C/V 후보정 적용",
+            text_color=PALETTE.neutral_text,
+            variable=self.cvn_low_conf_only_var,
+            command=self._save_config,
+            padx=34,
+            pady=(0, 4),
+        )
+
+        self.mapping_supervised_enable_checkbox = ctk.CTkCheckBox(
+            ml_frame,
+            text="Syllable 후보정 사용 (정렬 기반 멜 앵커)",
+            text_color="#5F8C87",
+            variable=self.mapping_supervised_enable_var,
+            command=self._save_config,
+        )
+        self.mapping_supervised_enable_checkbox.pack(anchor="w", padx=12, pady=(4, 0))
+
+        mapping_supervised_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        mapping_supervised_row.pack(anchor="w", padx=12, pady=(4, 8), fill="x")
+        ctk.CTkLabel(
+            mapping_supervised_row,
+            text="Syllable 후보정 모드",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+        self.mapping_supervised_mode_menu = ctk.CTkOptionMenu(
+            mapping_supervised_row,
+            values=(
+                self._get_mapping_supervised_mode_option_labels()
+                if hasattr(self, "_get_mapping_supervised_mode_option_labels")
+                else ["자동(권장)", "멜 앵커 중심", "mel+aic", "mel+align"]
+            ),
+            variable=self.mapping_supervised_mode_var,
+            width=200,
+            command=lambda _v: self._save_config(),
+        )
+        self._style_blue_menu(self.mapping_supervised_mode_menu)
+        self.mapping_supervised_mode_menu.pack(side="left", padx=(10, 0))
+
+        cv_order_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        cv_order_row.pack(anchor="w", padx=12, pady=(0, 8), fill="x")
+        self.cv_order_prior_enable_checkbox = ctk.CTkCheckBox(
+            cv_order_row,
+            text="CV 순서 prior 보정 사용",
+            text_color="#5F8C87",
+            variable=self.cv_order_prior_enable_var,
+            command=self._save_config,
+        )
+        self.cv_order_prior_enable_checkbox.pack(side="left")
+        ctk.CTkLabel(
+            cv_order_row,
+            text="강도",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left", padx=(10, 4))
+        cv_prior_entry = ctk.CTkEntry(
+            cv_order_row,
+            width=70,
+            textvariable=self.cv_order_prior_strength_var,
+            placeholder_text="기본값",
+        )
+        cv_prior_entry.pack(side="left", padx=(0, 6))
+        cv_prior_entry.bind("<FocusOut>", lambda _e: self._save_config())
+
+        threshold_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        threshold_row.pack(anchor="w", padx=12, pady=(0, 8), fill="x")
+        ctk.CTkLabel(
+            threshold_row,
+            text="Syllable 후보정 임계값",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+        threshold_entry = ctk.CTkEntry(
+            threshold_row,
+            width=70,
+            textvariable=self.kr_mapping_confidence_threshold_var,
+            placeholder_text="기본값",
+        )
+        threshold_entry.pack(side="left", padx=(10, 6))
+        threshold_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(
+            threshold_row,
+            text="값이 높을수록 후보정 적용 범위를 좁힙니다.",
+            text_color=PALETTE.hint_text,
+        ).pack(side="left", padx=(4, 0))
+
+        route_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        route_row.pack(anchor="w", padx=12, pady=(4, 8), fill="x")
+        ctk.CTkLabel(
+            route_row,
+            text="ML 라우팅",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+        route_menu = ctk.CTkOptionMenu(
+            route_row,
+            values=(
+                self._get_ml_route_option_labels()
+                if hasattr(self, "_get_ml_route_option_labels")
+                else ["자동(자동 라우팅)", "No-MFA", "v1", "v2"]
+            ),
+            variable=self.ml_route_var,
+            width=180,
+            command=self._on_ml_route_change if hasattr(self, "_on_ml_route_change") else (lambda _v: self._save_config()),
+        )
+        self.ml_route_menu = route_menu
+        self._style_blue_menu(route_menu)
+        route_menu.pack(side="left", padx=(10, 8))
+        ctk.CTkLabel(
+            route_row,
+            text="자동=환경 기반 라우팅, No-MFA=정렬 없이 보정, v1=기존, v2=확장",
+            text_color=PALETTE.hint_text,
+        ).pack(side="left", padx=(4, 0))
+
+        coupled_enable_checkbox = ctk.CTkCheckBox(
+            ml_frame,
+            text="Coupled mel+oto 보정 사용",
+            text_color="#5F8C87",
+            variable=self.ml_coupled_enable_var,
+            command=self._save_config,
+        )
+        coupled_enable_checkbox.pack(anchor="w", padx=12, pady=(8, 0))
+
+        coupled_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        coupled_row.pack(anchor="w", padx=12, pady=(6, 0), fill="x")
+        ctk.CTkLabel(
+            coupled_row,
+            text="Coupled 최소 신뢰도",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+        coupled_conf_entry = ctk.CTkEntry(
+            coupled_row,
+            width=70,
+            textvariable=self.ml_coupled_min_conf_var,
+            placeholder_text="기본값",
+        )
+        coupled_conf_entry.pack(side="left", padx=(10, 8))
+        coupled_conf_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(
+            coupled_row,
+            text="device",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left", padx=(6, 4))
+        coupled_device_menu = ctk.CTkOptionMenu(
+            coupled_row,
+            values=["auto", "cpu", "cuda"],
+            variable=self.ml_coupled_device_var,
+            width=90,
+            command=lambda _v: self._save_config(),
+        )
+        self._style_blue_menu(coupled_device_menu)
+        coupled_device_menu.pack(side="left", padx=(0, 8))
+        ctk.CTkCheckBox(
+            coupled_row,
+            text="Strict 제약",
+            text_color=PALETTE.neutral_text,
+            variable=self.ml_coupled_strict_constraint_var,
+            command=self._save_config,
+        ).pack(side="left")
+
+        model_conf_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        model_conf_row.pack(anchor="w", padx=12, pady=(4, 0), fill="x")
+        ctk.CTkCheckBox(
+            model_conf_row,
+            text="Model-aware min_conf (model_meta) 사용",
+            text_color="#5F8C87",
+            variable=self.ml_coupled_min_conf_use_model_meta_var,
+            command=self._save_config,
+        ).pack(side="left")
+        ctk.CTkLabel(
+            model_conf_row,
+            text="offset",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left", padx=(10, 4))
+        model_conf_offset_entry = ctk.CTkEntry(
+            model_conf_row,
+            width=70,
+            textvariable=self.ml_coupled_min_conf_model_offset_var,
+            placeholder_text="0.00",
+        )
+        model_conf_offset_entry.pack(side="left", padx=(0, 8))
+        model_conf_offset_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(
+            model_conf_row,
+            text="(range: -0.30 ~ +0.30)",
+            text_color=PALETTE.hint_text,
+        ).pack(side="left", padx=(2, 0))
+
+        model_conf_grid = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        model_conf_grid.pack(anchor="w", padx=12, pady=(4, 0), fill="x")
+
+        def _add_min_conf_field(parent, label, var, placeholder):
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(side="left", padx=(0, 10))
+            ctk.CTkLabel(row, text=label, text_color=PALETTE.neutral_text).pack(side="left")
+            ent = ctk.CTkEntry(row, width=78, textvariable=var, placeholder_text=placeholder)
+            ent.pack(side="left", padx=(6, 0))
+            ent.bind("<FocusOut>", lambda _e: self._save_config())
+            return ent
+
+        kr_row = ctk.CTkFrame(model_conf_grid, fg_color="transparent")
+        kr_row.pack(anchor="w", fill="x", pady=(0, 2))
+        ctk.CTkLabel(kr_row, text="KR", text_color="#5F8C87", width=26, anchor="w").pack(side="left")
+        _add_min_conf_field(kr_row, "CV", self.ml_coupled_min_conf_kr_cv_var, "0.55")
+        _add_min_conf_field(kr_row, "CVC", self.ml_coupled_min_conf_kr_cvc_var, "0.75")
+        _add_min_conf_field(kr_row, "CVVC", self.ml_coupled_min_conf_kr_cvvc_var, "0.78")
+        _add_min_conf_field(kr_row, "VCV", self.ml_coupled_min_conf_kr_vcv_var, "0.72")
+
+        ja_row = ctk.CTkFrame(model_conf_grid, fg_color="transparent")
+        ja_row.pack(anchor="w", fill="x", pady=(0, 2))
+        ctk.CTkLabel(ja_row, text="JA", text_color="#5F8C87", width=26, anchor="w").pack(side="left")
+        _add_min_conf_field(ja_row, "CV", self.ml_coupled_min_conf_ja_cv_var, "0.40")
+        _add_min_conf_field(ja_row, "CVC", self.ml_coupled_min_conf_ja_cvc_var, "0.50")
+        _add_min_conf_field(ja_row, "CVVC", self.ml_coupled_min_conf_ja_cvvc_var, "0.72")
+        _add_min_conf_field(ja_row, "VCV", self.ml_coupled_min_conf_ja_vcv_var, "0.65")
+
+        backend_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        backend_row.pack(anchor="w", padx=12, pady=(6, 8), fill="x")
+        ctk.CTkLabel(
+            backend_row,
+            text="Coupled backend",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+        backend_menu = ctk.CTkOptionMenu(
+            backend_row,
+            values=["auto", "ensemble"],
+            variable=self.ml_coupled_backend_var,
+            width=90,
+            command=lambda _v: self._on_ml_backend_change(),
+        )
+        self._style_blue_menu(backend_menu)
+        backend_menu.pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(
+            backend_row,
+            text="(auto=ensemble 우선)",
+            text_color=PALETTE.hint_text,
+        ).pack(side="left", padx=(8, 0))
+
+        batch_enable_checkbox = ctk.CTkCheckBox(
+            ml_frame,
+            text="Batch inference (coupled v2) 사용",
+            text_color="#5F8C87",
+            variable=self.ml_batch_inference_enable_var,
+            command=self._save_config,
+        )
+        batch_enable_checkbox.pack(anchor="w", padx=12, pady=(4, 0))
+
+        batch_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        batch_row.pack(anchor="w", padx=12, pady=(4, 0), fill="x")
+        ctk.CTkLabel(
+            batch_row,
+            text="Batch size",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+        batch_size_entry = ctk.CTkEntry(
+            batch_row,
+            width=90,
+            textvariable=self.ml_batch_inference_size_var,
+            placeholder_text="256",
+        )
+        batch_size_entry.pack(side="left", padx=(10, 8))
+        batch_size_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(
+            batch_row,
+            text="(권장 128~512, 최소 32)",
+            text_color=PALETTE.hint_text,
+        ).pack(side="left", padx=(4, 0))
+
+        legacy_fallback_checkbox = ctk.CTkCheckBox(
+            ml_frame,
+            text="v1 fallback(lightgbm) 체인 사용",
+            text_color=PALETTE.neutral_text,
+            variable=self.ml_legacy_fallback_enable_var,
+            command=self._save_config,
+        )
+        legacy_fallback_checkbox.pack(anchor="w", padx=12, pady=(4, 0))
+
+        hybrid_routing_checkbox = ctk.CTkCheckBox(
+            ml_frame,
+            text="하이브리드 라우팅(가중치 게이트) 사용",
+            text_color="#5F8C87",
+            variable=self.ml_hybrid_routing_enable_var,
+            command=self._save_config,
+        )
+        hybrid_routing_checkbox.pack(anchor="w", padx=12, pady=(4, 0))
+
+        gamma_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        gamma_row.pack(anchor="w", padx=12, pady=(2, 6), fill="x")
+        ctk.CTkLabel(
+            gamma_row,
+            text="Anchor mel gamma",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+        gamma_entry = ctk.CTkEntry(
+            gamma_row,
+            width=80,
+            textvariable=self.ml_anchor_mel_gamma_var,
+            placeholder_text="1.0",
+        )
+        gamma_entry.pack(side="left", padx=(10, 8))
+        gamma_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(
+            gamma_row,
+            text="(>1.0: stronger shrink on low mel reliability)",
+            text_color=PALETTE.hint_text,
+        ).pack(side="left", padx=(4, 0))
+
+        detail_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        detail_row.pack(anchor="w", padx=12, pady=(2, 0), fill="x")
+        if not hasattr(self, "ml_coupled_status_detail_var"):
+            self.ml_coupled_status_detail_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            detail_row,
+            text="자세히 보기 (경로/버전/생성일)",
+            text_color=PALETTE.neutral_text,
+            variable=self.ml_coupled_status_detail_var,
+            command=lambda: self._on_ml_backend_detail_toggle(),
+        ).pack(side="left")
+
+        def _model_root_row(label, var):
+            row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+            row.pack(fill="x", padx=12, pady=(6, 0))
+            ctk.CTkLabel(row, text=label, width=150, anchor="w", text_color=PALETTE.neutral_text).pack(side="left")
+            ent = ctk.CTkEntry(row, textvariable=var, width=360)
+            ent.pack(side="left", fill="x", expand=True, padx=(5, 6))
+            ent.bind("<FocusOut>", lambda _e: self._on_ml_model_root_change())
+            btn_row = ctk.CTkFrame(row, fg_color="transparent")
+            btn_row.pack(side="right", padx=(6, 0))
+            btn_width = 90
+            browse_btn = ctk.CTkButton(
+                btn_row,
+                text="찾아보기",
+                width=btn_width,
+                command=lambda v=var: (
+                    self._browse_folder_by_var(v, initial_dir=self._preferred_ml_model_browse_dir(v)),
+                    self._on_ml_model_root_change(),
+                ),
+            )
+            self._style_primary_button(browse_btn)
+            browse_btn.pack(side="right")
+            open_btn = ctk.CTkButton(
+                btn_row,
+                text="열기",
+                width=btn_width,
+                command=lambda v=var: os.startfile(str(v.get()).strip()) if os.path.isdir(str(v.get()).strip()) else None,
+            )
+            self._style_primary_button(open_btn)
+            open_btn.pack(side="right", padx=(0, 6))
+            return ent
+
+        if hasattr(self, "ml_model_root_kr_var"):
+            _model_root_row("모델 경로 (한국어)", self.ml_model_root_kr_var)
+        if hasattr(self, "ml_model_root_ja_var"):
+            _model_root_row("모델 경로 (일본어)", self.ml_model_root_ja_var)
+        ctk.CTkLabel(
+            ml_frame,
+            text="경로는 모델 폴더(내부에 model_meta.json) 또는 상위 루트를 지정할 수 있습니다.",
+            text_color=PALETTE.hint_text,
+            wraplength=740,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(2, 6))
+
+        self.ml_coupled_status_label = ctk.CTkLabel(
+            ml_frame,
+            text="",
+            text_color=PALETTE.hint_text,
+            wraplength=720,
+            justify="left",
+        )
+        self.ml_coupled_status_label.pack(anchor="w", padx=12, pady=(4, 8))
+        self.ml_coupled_status_detail_label = ctk.CTkLabel(
+            ml_frame,
+            text="",
+            text_color=PALETTE.hint_text,
+            wraplength=760,
+            justify="left",
+        )
+        self.ml_coupled_status_detail_label.pack(anchor="w", padx=12, pady=(0, 8))
+        if hasattr(self, "_refresh_ml_backend_status"):
+            self._refresh_ml_backend_status()
+        return ml_frame
+
+    def _slot_advanced_vc_section(self, parent, _layout_root, _node):
+        dev_container = self._get_or_create_advanced_dev_container(parent)
+
+        vc_frame = self._ui_section(
+            dev_container,
+            "VC 보정",
+            "기본 UI에서는 보정 사용 여부만 선택합니다. 세부 슬라이더는 개발자 설정 ON일 때만 활성화됩니다.",
+        )
+
+        self.vc_neighbor_detail_controls = []
+        self.vc_neighbor_detail_frames = []
+
+        def _on_env_slider_change(value, var, label_widget, fmt):
+            try:
+                val = float(value)
+            except Exception:
+                return
+            label_widget.configure(text=fmt.format(val))
+            var.set(f"{val:.3f}".rstrip("0").rstrip("."))
+            self._save_config()
+
+        def _add_env_slider(parent, label, env_key, var, *, min_val, max_val, step, default_val, fmt):
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", padx=15, pady=2)
+            ctk.CTkLabel(row, text=label, width=230, anchor="w").pack(side="left")
+            try:
+                raw = str(var.get() or "").strip()
+                current = float(raw) if raw else float(default_val)
+            except Exception:
+                current = float(default_val)
+            dvar = ctk.DoubleVar(value=current)
+            val_label = ctk.CTkLabel(row, text=fmt.format(current), width=60)
+            val_label.pack(side="right", padx=(6, 0))
+            slider = ctk.CTkSlider(
+                row,
+                from_=min_val,
+                to=max_val,
+                number_of_steps=int(round((max_val - min_val) / step)),
+                variable=dvar,
+                command=lambda v, lbl=val_label: _on_env_slider_change(v, var, lbl, fmt),
+            )
+            slider.pack(side="right", fill="x", expand=True, padx=8)
+            ctk.CTkLabel(
+                row,
+                text=f"환경변수: {env_key}",
+                text_color=PALETTE.hint_text,
+                anchor="w",
+            ).pack(side="left", padx=(6, 0))
+            self.vc_neighbor_detail_controls.append(slider)
+            self.advanced_tuning_slider_bindings[str(env_key)] = {
+                "var": var,
+                "dvar": dvar,
+                "label": val_label,
+                "fmt": fmt,
+                "default": float(default_val),
+                "min": float(min_val),
+                "max": float(max_val),
+            }
+            return slider
+
+        kr_box = ctk.CTkFrame(vc_frame)
+        kr_box.pack(fill="x", padx=10, pady=(2, 8))
+        ctk.CTkLabel(kr_box, text="한국어 (KR)", font=("", 13, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
+        ctk.CTkCheckBox(
+            kr_box,
+            text="VC 이웃 보정 사용",
+            variable=self.kr_vc_neighbor_enable_var,
+            command=self._on_vc_neighbor_language_toggle,
+        ).pack(anchor="w", padx=15, pady=(0, 4))
+        kr_detail = ctk.CTkFrame(kr_box, fg_color="transparent")
+        self.vc_neighbor_detail_frames.append(kr_detail)
+        _add_env_slider(
+            kr_detail,
+            "보정 강도(Blend)",
+            "UTOA_KR_VC_NEIGHBOR_BLEND",
+            self.kr_vc_neighbor_blend_var,
+            min_val=0.0,
+            max_val=1.0,
+            step=0.01,
+            default_val=0.35,
+            fmt="{:.2f}",
+        )
+        _add_env_slider(
+            kr_detail,
+            "최대 이동(ms)",
+            "UTOA_KR_VC_NEIGHBOR_MAX_SHIFT",
+            self.kr_vc_neighbor_max_shift_var,
+            min_val=0.0,
+            max_val=200.0,
+            step=1.0,
+            default_val=45.0,
+            fmt="{:.0f}",
+        )
+        _add_env_slider(
+            kr_detail,
+            "이전 컷오프 기준 여유(ms)",
+            "UTOA_KR_VC_NEIGHBOR_LEAD_MS",
+            self.kr_vc_neighbor_lead_ms_var,
+            min_val=0.0,
+            max_val=80.0,
+            step=1.0,
+            default_val=6.0,
+            fmt="{:.0f}",
+        )
+        _add_env_slider(
+            kr_detail,
+            "다음 오프셋 기준 여유(ms)",
+            "UTOA_KR_VC_NEIGHBOR_TAIL_MS",
+            self.kr_vc_neighbor_tail_ms_var,
+            min_val=0.0,
+            max_val=80.0,
+            step=1.0,
+            default_val=8.0,
+            fmt="{:.0f}",
+        )
+        _add_env_slider(
+            kr_detail,
+            "최소 VC 길이(ms)",
+            "UTOA_KR_VC_NEIGHBOR_MIN_LEN",
+            self.kr_vc_neighbor_min_len_var,
+            min_val=0.0,
+            max_val=200.0,
+            step=1.0,
+            default_val=35.0,
+            fmt="{:.0f}",
+        )
+
+        ja_box = ctk.CTkFrame(vc_frame)
+        ja_box.pack(fill="x", padx=10, pady=(2, 8))
+        ctk.CTkLabel(ja_box, text="일본어 (JA)", font=("", 13, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
+        ctk.CTkCheckBox(
+            ja_box,
+            text="VC 이웃 보정 사용",
+            variable=self.ja_vc_neighbor_enable_var,
+            command=self._on_vc_neighbor_language_toggle,
+        ).pack(anchor="w", padx=15, pady=(0, 4))
+        ja_detail = ctk.CTkFrame(ja_box, fg_color="transparent")
+        self.vc_neighbor_detail_frames.append(ja_detail)
+        _add_env_slider(
+            ja_detail,
+            "보정 강도(Blend)",
+            "UTOA_JA_VC_NEIGHBOR_BLEND",
+            self.ja_vc_neighbor_blend_var,
+            min_val=0.0,
+            max_val=1.0,
+            step=0.01,
+            default_val=0.35,
+            fmt="{:.2f}",
+        )
+        _add_env_slider(
+            ja_detail,
+            "최대 이동(ms)",
+            "UTOA_JA_VC_NEIGHBOR_MAX_SHIFT",
+            self.ja_vc_neighbor_max_shift_var,
+            min_val=0.0,
+            max_val=200.0,
+            step=1.0,
+            default_val=45.0,
+            fmt="{:.0f}",
+        )
+        _add_env_slider(
+            ja_detail,
+            "이전 컷오프 기준 여유(ms)",
+            "UTOA_JA_VC_NEIGHBOR_LEAD_MS",
+            self.ja_vc_neighbor_lead_ms_var,
+            min_val=0.0,
+            max_val=80.0,
+            step=1.0,
+            default_val=6.0,
+            fmt="{:.0f}",
+        )
+        _add_env_slider(
+            ja_detail,
+            "다음 오프셋 기준 여유(ms)",
+            "UTOA_JA_VC_NEIGHBOR_TAIL_MS",
+            self.ja_vc_neighbor_tail_ms_var,
+            min_val=0.0,
+            max_val=80.0,
+            step=1.0,
+            default_val=8.0,
+            fmt="{:.0f}",
+        )
+        _add_env_slider(
+            ja_detail,
+            "최소 VC 길이(ms)",
+            "UTOA_JA_VC_NEIGHBOR_MIN_LEN",
+            self.ja_vc_neighbor_min_len_var,
+            min_val=0.0,
+            max_val=200.0,
+            step=1.0,
+            default_val=35.0,
+            fmt="{:.0f}",
+        )
+
+        aligner_frame = ctk.CTkFrame(
+            dev_container,
+            fg_color=PALETTE.panel_bg,
+            border_width=1,
+            border_color=PALETTE.panel_border,
+        )
+        aligner_frame.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(
+            aligner_frame,
+            text="고급 정렬 엔진 옵션은 현재 제공하지 않습니다.",
+            text_color=PALETTE.neutral_text,
+            wraplength=740,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(10, 10))
+
+        dev_reset_row = ctk.CTkFrame(dev_container, fg_color="transparent")
+        dev_reset_row.pack(fill="x", padx=10, pady=(8, 10))
+        reset_btn = ctk.CTkButton(
+            dev_reset_row,
+            text="개발자 설정 초기화",
+            width=170,
+            height=28,
+            fg_color=PALETTE.danger_button_bg,
+            hover_color=PALETTE.danger_button_hover,
+            text_color=PALETTE.primary_button_text,
+            command=lambda: self._reset_developer_settings_defaults(),
+        )
+        reset_btn.pack(side="left")
+        return vc_frame
 
 
