@@ -2,23 +2,27 @@
 
 A tool for automatic Otoing in Utau VoiceBank. It currently supports Korean and Japanese.
 
----
+### 지원 형식:
+한국어 Korean
+- CV (단음/연단음)
+- CVC
+- CVVC
+- VCV (한연음)
+
+일본어 Japanese
+- CV (단음/연단음)
+- CVVC
+- VCV (연속음)
+
+--- 
+**이 프로그램은 64비트 윈도우 환경에서만 실행 가능하며, 해당 툴 실행에는 Microsoft Visual C++ 2015-2022 (x64) 런타임이 필요합니다. 꼭 설치해주세요. 미설치 시 프로그램이 아예 실행되지 않을 수 있습니다.
+ 마이크로소프트 공식 다운로드 링크: https://aka.ms/vs/17/release/vc_redist.x64.exe**
+
+**64bit Windows environment and Microsoft Visual C++ 2015-2022 (x64) runtime is required to run the tool. Make sure to install it. If not, the program may not run at all.
+Microsoft Official Download Link: https://aka.ms/vs/17/release/vc_redist.x64.exe**
 
 가이드 작성 중...
 
-</br>
-
-이 툴의 소스코드는 AI를 이용해 생성했으며, 인간이 검수 후 일부 수정을 거쳤습니다.
-이 프로그램은 '있는 그대로' 제공되며, 제작자는 이 프로그램을 사용하여 입은 손해에 대해 어떤 것도 책임지지 않습니다.
-
 ---
-
-## 개발 현황 (2026-03-28 동기화)
-
-- 한국어 `C+V`는 Preview 채널에서만 노출/실행됩니다.
-- 일본어 `CVVC` 매핑/보정 로직 개선이 반영되었습니다.
-- 음절 탐지/경계 보정 관련 코어 로직(한국어/일본어)이 백포트되었습니다.
-- 접미사 파싱 강화가 반영되었습니다(영문/숫자 접미사, 한자 접미사 처리, 호흡성 한자 예외).
-- CTC/MFA 생성 파이프라인 관련 코어 변경이 반영되었습니다.
-
-세부 현황과 ML 관련 메모는 `ml/README.md`를 기준 문서로 유지합니다.
+이 툴의 소스코드는 AI를 이용해 생성했으며, 인간이 검수 후 일부 수정을 거쳤습니다.
+</br>이 프로그램은 '있는 그대로' 제공되며, 제작자는 이 프로그램을 사용하여 입은 손해에 대해 어떤 것도 책임지지 않습니다.
