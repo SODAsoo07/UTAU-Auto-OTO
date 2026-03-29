@@ -559,6 +559,10 @@ class AppRuntimeMixin:
             "UTOA_CVN_CORRECTION_ENABLE",
             "UTOA_CVN_LOW_CONF_ONLY",
             "UTOA_CVN_C_THRESHOLD",
+            "UTOA_MAPPING_SUPERVISED_ENABLE",
+            "UTOA_MAPPING_SUPERVISED_MODE",
+            "UTOA_CV_ORDER_PRIOR_ENABLE",
+            "UTOA_CV_ORDER_PRIOR_STRENGTH",
             "UTOA_SOFT_BANK_MODE",
             "UTOA_MFA_SOFT_BANK_MODE",
             "UTOA_MEL_SOUND_DB_MARGIN",
@@ -653,6 +657,30 @@ class AppRuntimeMixin:
         )
         os.environ["UTOA_CVN_LOW_CONF_ONLY"] = "1" if cvn_low_conf_only else "0"
         os.environ["UTOA_CVN_C_THRESHOLD"] = "0.4"
+        mapping_supervised_enabled = (
+            bool(self.mapping_supervised_enable_var.get())
+            if hasattr(self, "mapping_supervised_enable_var")
+            else True
+        )
+        os.environ["UTOA_MAPPING_SUPERVISED_ENABLE"] = "1" if mapping_supervised_enabled else "0"
+        mapping_mode_code = (
+            self._get_mapping_supervised_mode_code()
+            if hasattr(self, "_get_mapping_supervised_mode_code")
+            else "auto"
+        )
+        os.environ["UTOA_MAPPING_SUPERVISED_MODE"] = str(mapping_mode_code or "auto").strip().lower()
+        cv_order_prior_enabled = (
+            bool(self.cv_order_prior_enable_var.get())
+            if hasattr(self, "cv_order_prior_enable_var")
+            else True
+        )
+        os.environ["UTOA_CV_ORDER_PRIOR_ENABLE"] = "1" if cv_order_prior_enabled else "0"
+        _set_float_env(
+            "cv_order_prior_strength_var",
+            "UTOA_CV_ORDER_PRIOR_STRENGTH",
+            min_value=0.0,
+            max_value=1.0,
+        )
 
         _set_float_env("kr_vc_neighbor_blend_var", "UTOA_KR_VC_NEIGHBOR_BLEND", min_value=0.0, max_value=1.0)
         _set_float_env("kr_vc_neighbor_max_shift_var", "UTOA_KR_VC_NEIGHBOR_MAX_SHIFT", min_value=0.0)
@@ -1184,6 +1212,10 @@ class AppRuntimeMixin:
             "vc_correction_enable_var": True,
             "cvn_correction_enable_var": True,
             "cvn_low_conf_only_var": False,
+            "mapping_supervised_enable_var": True,
+            "mapping_supervised_mode_var": "자동(권장)",
+            "cv_order_prior_enable_var": True,
+            "cv_order_prior_strength_var": "",
             "kr_vc_neighbor_enable_var": True,
             "kr_vc_neighbor_blend_var": "",
             "kr_vc_neighbor_max_shift_var": "",
@@ -1261,6 +1293,59 @@ class AppRuntimeMixin:
         if "적당히엄격" in compact:
             return "soft"
         return "soft"
+
+    @staticmethod
+    def _normalize_mapping_supervised_mode_code(value: str) -> str:
+        raw = str(value or "").strip().lower()
+        compact = raw.replace(" ", "").replace("_", "").replace("-", "")
+        if raw in {"global_first", "global-first", "global", "전역우선"} or "전역우선" in compact:
+            return "global_first"
+        if raw in {"format_first", "format-first", "format", "포맷우선"} or "포맷우선" in compact:
+            return "format_first"
+        return "auto"
+
+    @staticmethod
+    def _mapping_supervised_mode_label_from_code(code: str) -> str:
+        normalized = AppRuntimeMixin._normalize_mapping_supervised_mode_code(code)
+        table = {
+            "auto": "자동(권장)",
+            "format_first": "포맷 우선",
+            "global_first": "전역 우선",
+        }
+        return table.get(normalized, "자동(권장)")
+
+    def _set_mapping_supervised_mode_from_code(self, code: str) -> str:
+        normalized = self._normalize_mapping_supervised_mode_code(code)
+        label = self._mapping_supervised_mode_label_from_code(normalized)
+        if hasattr(self, "mapping_supervised_mode_var"):
+            try:
+                self.mapping_supervised_mode_var.set(label)
+            except Exception:
+                pass
+        return normalized
+
+    def _get_mapping_supervised_mode_code(self) -> str:
+        if not hasattr(self, "mapping_supervised_mode_var"):
+            return "auto"
+        try:
+            raw = self.mapping_supervised_mode_var.get()
+        except Exception:
+            return "auto"
+        normalized = self._normalize_mapping_supervised_mode_code(raw)
+        normalized_label = self._mapping_supervised_mode_label_from_code(normalized)
+        if str(raw or "").strip() != normalized_label:
+            try:
+                self.mapping_supervised_mode_var.set(normalized_label)
+            except Exception:
+                pass
+        return normalized
+
+    def _get_mapping_supervised_mode_option_labels(self) -> list[str]:
+        return [
+            self._mapping_supervised_mode_label_from_code("auto"),
+            self._mapping_supervised_mode_label_from_code("format_first"),
+            self._mapping_supervised_mode_label_from_code("global_first"),
+        ]
 
     @staticmethod
     def _mapping_strict_mode_label_from_code(code: str) -> str:
@@ -2818,6 +2903,14 @@ class ConfigMixin:
             "ml_model_root_ja": self.ml_model_root_ja_var.get() if hasattr(self, "ml_model_root_ja_var") else "",
             "cvn_correction_enable": self.cvn_correction_enable_var.get() if hasattr(self, "cvn_correction_enable_var") else True,
             "cvn_low_conf_only": self.cvn_low_conf_only_var.get() if hasattr(self, "cvn_low_conf_only_var") else False,
+            "mapping_supervised_enable": self.mapping_supervised_enable_var.get() if hasattr(self, "mapping_supervised_enable_var") else True,
+            "mapping_supervised_mode": (
+                self._get_mapping_supervised_mode_code()
+                if hasattr(self, "_get_mapping_supervised_mode_code")
+                else "auto"
+            ),
+            "cv_order_prior_enable": self.cv_order_prior_enable_var.get() if hasattr(self, "cv_order_prior_enable_var") else True,
+            "cv_order_prior_strength": self.cv_order_prior_strength_var.get() if hasattr(self, "cv_order_prior_strength_var") else "",
             "vc_correction_enable": self.vc_correction_enable_var.get() if hasattr(self, "vc_correction_enable_var") else True,
             "kr_vc_neighbor_enable": self.kr_vc_neighbor_enable_var.get() if hasattr(self, "kr_vc_neighbor_enable_var") else True,
             "kr_vc_neighbor_blend": self.kr_vc_neighbor_blend_var.get() if hasattr(self, "kr_vc_neighbor_blend_var") else "",
@@ -2973,6 +3066,17 @@ class ConfigMixin:
                 self.cvn_correction_enable_var.set(bool(config.get("cvn_correction_enable", True)))
             if hasattr(self, "cvn_low_conf_only_var"):
                 self.cvn_low_conf_only_var.set(bool(config.get("cvn_low_conf_only", False)))
+            if hasattr(self, "mapping_supervised_enable_var"):
+                self.mapping_supervised_enable_var.set(bool(config.get("mapping_supervised_enable", True)))
+            if hasattr(self, "mapping_supervised_mode_var"):
+                if hasattr(self, "_set_mapping_supervised_mode_from_code"):
+                    self._set_mapping_supervised_mode_from_code(config.get("mapping_supervised_mode", "auto"))
+                else:
+                    self.mapping_supervised_mode_var.set(str(config.get("mapping_supervised_mode", "auto") or "auto"))
+            if hasattr(self, "cv_order_prior_enable_var"):
+                self.cv_order_prior_enable_var.set(bool(config.get("cv_order_prior_enable", True)))
+            if hasattr(self, "cv_order_prior_strength_var"):
+                self.cv_order_prior_strength_var.set(str(config.get("cv_order_prior_strength", "") or ""))
             if "ml_route" in config and hasattr(self, "ml_route_var"):
                 saved_route = self._normalize_ml_route_code(config.get("ml_route", "auto"))
                 if hasattr(self, "_set_ml_route_from_code"):

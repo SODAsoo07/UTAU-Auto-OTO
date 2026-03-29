@@ -23,6 +23,35 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
+def _cv_order_prior_enabled() -> bool:
+    if not _env_bool("UTOA_CV_ORDER_PRIOR_ENABLE", True):
+        return False
+    return _env_bool("UTOA_KR_CV_ORDER_PRIOR_ENABLE", True)
+
+
+def _cv_order_prior_strength() -> float:
+    return max(
+        0.0,
+        min(
+            1.0,
+            _env_float(
+                "UTOA_KR_CV_ORDER_PRIOR_STRENGTH",
+                _env_float("UTOA_CV_ORDER_PRIOR_STRENGTH", 0.56),
+            ),
+        ),
+    )
+
+
 def _resolve_low_tier_forward_window(file_format: str, fallback: int = 1) -> int:
     fmt = str(file_format or "").strip().lower()
     if fmt:
@@ -189,6 +218,10 @@ def _global_plan_guard_idx(
     syllable_blank_confidences,
     cv_match_score_fn,
 ):
+    if not _cv_order_prior_enabled():
+        return selected_idx, False
+
+    prior_strength = _cv_order_prior_strength()
     a_type = str(alias_type or "").strip().lower()
     fmt = str(file_format or "").strip().lower()
     if a_type not in {"cv", "cv_head", "vcv"}:
@@ -224,15 +257,17 @@ def _global_plan_guard_idx(
             planned_score = -1.0
 
     # 저신뢰/고공백 상황에서는 전역 monotonic planner를 사실상 고정점으로 사용한다.
-    strong_lock = bool(file_mapping_low_conf) or (selected_blank >= 0.58) or (planned_blank >= 0.58)
-    if conf < max(conf_th + 0.05, 0.66):
+    blank_gate = max(0.52, 0.60 - (0.06 * prior_strength))
+    strong_lock = bool(file_mapping_low_conf) or (selected_blank >= blank_gate) or (planned_blank >= blank_gate)
+    if conf < max(conf_th + (0.04 + (0.05 * prior_strength)), 0.62 + (0.05 * prior_strength)):
         strong_lock = True
 
     if strong_lock:
         return p_idx, True
 
     # 고신뢰에서도 planner 대비 과도한 전진 점프는 제한한다.
-    allowed_forward = 1 if (a_type != "cv_head" and conf >= max(conf_th + 0.16, 0.80)) else 0
+    forward_th = max(conf_th + (0.18 + (0.08 * prior_strength)), 0.78 + (0.06 * prior_strength))
+    allowed_forward = 1 if (a_type != "cv_head" and conf >= forward_th and prior_strength < 0.90) else 0
     max_idx = min(n - 1, p_idx + allowed_forward)
     if s_idx > max_idx:
         return max_idx, True
@@ -241,11 +276,13 @@ def _global_plan_guard_idx(
 
     # planner와의 차이가 작으면 안정성을 우선한다.
     score_gain = selected_score - planned_score
-    if (selected_blank >= (planned_blank + 0.08)) or (score_gain < 10.0):
+    if (selected_blank >= (planned_blank + (0.05 + (0.05 * prior_strength)))) or (
+        score_gain < (8.0 + (7.0 * prior_strength))
+    ):
         return p_idx, True
     if abs(s_idx - p_idx) >= 2:
         return p_idx, True
-    if abs(s_idx - expected_idx) > abs(p_idx - expected_idx) and score_gain < 16.0:
+    if abs(s_idx - expected_idx) > abs(p_idx - expected_idx) and score_gain < (13.0 + (7.0 * prior_strength)):
         return p_idx, True
     return s_idx, False
 

@@ -26,6 +26,35 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return bool(default)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
+def _cv_order_prior_enabled() -> bool:
+    if not _env_bool("UTOA_CV_ORDER_PRIOR_ENABLE", True):
+        return False
+    return _env_bool("UTOA_JA_CV_ORDER_PRIOR_ENABLE", True)
+
+
+def _cv_order_prior_strength() -> float:
+    return max(
+        0.0,
+        min(
+            1.0,
+            _env_float(
+                "UTOA_JA_CV_ORDER_PRIOR_STRENGTH",
+                _env_float("UTOA_CV_ORDER_PRIOR_STRENGTH", 0.56),
+            ),
+        ),
+    )
+
+
 def _normalize_ja_syllable_token_strict(token):
     raw = str(token or "").strip()
     if not raw:
@@ -107,6 +136,8 @@ def clamp_ja_cv_index_to_order(
     m = max(0, min(int(mapped_idx), len(syllables_info) - 1))
     if m <= e:
         return e if m < e else m
+    order_prior_enabled = _cv_order_prior_enabled()
+    prior_strength = _cv_order_prior_strength()
 
     target_norm = _normalize_ja_syllable_token(target_tok)
     expected_raw = _syllable_info_raw_token(syllables_info[e])
@@ -141,6 +172,16 @@ def clamp_ja_cv_index_to_order(
             mapped_raw or mapped_norm,
         )
     )
+    if allow_forward and order_prior_enabled:
+        # 순서 prior 강화 시, +1 전진은 target 토큰 정합과 soft-match 개선이
+        # 동시에 확인될 때만 허용한다.
+        if mapped_norm != target_norm and expected_norm == target_norm:
+            return e
+        min_gain = 1 if prior_strength < 0.45 else 2
+        if mapped_level < max(2, expected_level + min_gain):
+            return e
+        if prior_strength >= 0.72 and mapped_level < 3:
+            return e
     if allow_forward:
         if mapped_norm == target_norm and expected_norm != target_norm:
             return m

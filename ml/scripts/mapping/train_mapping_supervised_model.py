@@ -22,6 +22,18 @@ def main() -> int:
     ap.add_argument("--format", required=True, help="Format type (cv/cvc/cvvc/vcv)")
     ap.add_argument("--num-boost-round", type=int, default=700)
     ap.add_argument("--early-stopping-rounds", type=int, default=60)
+    ap.add_argument(
+        "--negative-sample-ratio",
+        type=float,
+        default=0.0,
+        help="Keep up to ratio * positives negatives per group (0=disabled).",
+    )
+    ap.add_argument(
+        "--hard-negative-topk",
+        type=int,
+        default=0,
+        help="Always keep top-K hard negatives per group and boost their weight.",
+    )
     args = ap.parse_args()
 
     meta = train_mapping_supervised_model(
@@ -31,6 +43,8 @@ def main() -> int:
         format_type=args.format,
         num_boost_round=int(args.num_boost_round),
         early_stopping_rounds=int(args.early_stopping_rounds),
+        negative_sample_ratio=float(args.negative_sample_ratio),
+        hard_negative_topk=int(args.hard_negative_topk),
     )
     print(json.dumps(meta, ensure_ascii=False, indent=2))
     return 0

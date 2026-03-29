@@ -238,6 +238,17 @@ def _ensure_feature_row(row: Dict[str, object]) -> Dict[str, float]:
     return out
 
 
+def _default_monotonic_prior_weight(format_type: str) -> float:
+    fmt = str(format_type or "").strip().lower()
+    table = {
+        "vcv": 14.0,
+        "cvc": 11.0,
+        "cvvc": 8.0,
+        "cv": 6.0,
+    }
+    return float(table.get(fmt, 8.0))
+
+
 def build_mapping_supervised_dataset(
     *,
     dataset_root: str,
@@ -246,6 +257,7 @@ def build_mapping_supervised_dataset(
     format_types: Optional[Sequence[str]] = None,
     max_voicebanks: int = 0,
     auto_oto_policy: str = "generate-temp",
+    monotonic_prior_weight: float = -1.0,
 ) -> Dict[str, object]:
     lang = str(language or "").strip().lower()
     if lang not in {"korean", "japanese"}:
@@ -336,15 +348,25 @@ def build_mapping_supervised_dataset(
 
             manual_score_rows: List[List[float]] = []
             cand_tokens_rows: List[List[str]] = []
+            fmt_for_prior = str(cand.format_type or "")
+            mono_prior = float(monotonic_prior_weight)
+            if mono_prior < 0.0:
+                mono_prior = _default_monotonic_prior_weight(fmt_for_prior)
             for i, rec in enumerate(records):
                 target_tok = str(rec.get("target_token", "") or "")
                 manual_anchor_ms = _safe_float(rec.get("manual_anchor_ms"), 0.0)
                 row_scores: List[float] = []
                 row_tokens: List[str] = []
+                ideal = 0.0 if len(records) <= 1 else (float(i) * float(max(len(syllables_info) - 1, 0)) / float(len(records) - 1))
                 for syl in syllables_info:
                     s, cand_tok = _manual_target_score(lang, target_tok, syl, manual_anchor_ms)
                     row_scores.append(float(s))
                     row_tokens.append(cand_tok)
+                if mono_prior > 0.0 and row_scores:
+                    row_scores = [
+                        float(sc) - (abs(float(j) - float(ideal)) * float(mono_prior))
+                        for j, sc in enumerate(row_scores)
+                    ]
                 manual_score_rows.append(row_scores)
                 cand_tokens_rows.append(row_tokens)
 
@@ -404,6 +426,7 @@ def build_mapping_supervised_dataset(
         for r in rows_out:
             writer.writerow(r)
     stats["out_csv"] = out_csv
+    stats["monotonic_prior_weight"] = float(monotonic_prior_weight)
     return stats
 
 
@@ -416,6 +439,69 @@ def _group_split(df):
     tr_idx = list(range(split_at))
     va_idx = list(range(split_at, len(df))) or list(range(max(0, split_at - 1), len(df)))
     return tr_idx, va_idx
+
+
+def _apply_negative_sampling(df, *, negative_ratio: float, hard_negative_topk: int):
+    ratio = float(max(0.0, negative_ratio))
+    hard_k = int(max(0, hard_negative_topk))
+    if ratio <= 0.0 and hard_k <= 0:
+        out = df.copy()
+        out["_sample_weight"] = 1.0
+        return out, {"enabled": False, "rows_before": int(len(df)), "rows_after": int(len(out))}
+    if "group_id" not in df.columns:
+        out = df.copy()
+        out["_sample_weight"] = 1.0
+        return out, {"enabled": False, "reason": "missing_group_id", "rows_before": int(len(df)), "rows_after": int(len(out))}
+
+    frames = []
+    total_pos = 0
+    total_neg = 0
+    kept_neg = 0
+    for _, g in df.groupby("group_id", sort=False):
+        gg = g.copy()
+        gg["label"] = pd.to_numeric(gg.get("label"), errors="coerce").fillna(0.0)
+        pos = gg[gg["label"] >= 0.5].copy()
+        neg = gg[gg["label"] < 0.5].copy()
+        total_pos += int(len(pos))
+        total_neg += int(len(neg))
+        if len(neg) <= 0:
+            pos["_sample_weight"] = 1.0
+            frames.append(pos)
+            continue
+        neg["_heur"] = pd.to_numeric(neg.get("heuristic_score"), errors="coerce").fillna(0.0)
+        neg["_manual"] = pd.to_numeric(neg.get("manual_score"), errors="coerce").fillna(0.0)
+        neg = neg.sort_values(["_heur", "_manual"], ascending=[False, False])
+        keep_n = int(len(neg))
+        if ratio > 0.0:
+            keep_n = min(keep_n, max(int(round(len(pos) * ratio)), hard_k, 1))
+        elif hard_k > 0:
+            keep_n = min(keep_n, hard_k)
+        keep_neg = neg.head(max(1, keep_n)).copy()
+        kept_neg += int(len(keep_neg))
+        pos["_sample_weight"] = 1.0
+        keep_neg["_sample_weight"] = 1.0
+        if hard_k > 0:
+            hard_count = min(int(hard_k), int(len(keep_neg)))
+            if hard_count > 0:
+                keep_neg.iloc[:hard_count, keep_neg.columns.get_loc("_sample_weight")] = 1.35
+        keep_neg = keep_neg.drop(columns=["_heur", "_manual"], errors="ignore")
+        frames.append(pos)
+        frames.append(keep_neg)
+
+    out = pd.concat(frames, axis=0, ignore_index=True) if frames else df.copy()
+    if "_sample_weight" not in out.columns:
+        out["_sample_weight"] = 1.0
+    meta = {
+        "enabled": True,
+        "rows_before": int(len(df)),
+        "rows_after": int(len(out)),
+        "positive_rows_before": int(total_pos),
+        "negative_rows_before": int(total_neg),
+        "negative_rows_after": int(kept_neg),
+        "negative_ratio": float(ratio),
+        "hard_negative_topk": int(hard_k),
+    }
+    return out, meta
 
 
 def _top1_hit_rate(df, pred_col: str) -> float:
@@ -439,6 +525,8 @@ def train_mapping_supervised_model(
     format_type: str,
     num_boost_round: int = 700,
     early_stopping_rounds: int = 60,
+    negative_sample_ratio: float = 0.0,
+    hard_negative_topk: int = 0,
 ) -> Dict[str, object]:
     if lgb is None:
         raise RuntimeError("lightgbm is required")
@@ -459,6 +547,14 @@ def train_mapping_supervised_model(
     df["label"] = pd.to_numeric(df["label"], errors="coerce").fillna(0.0).clip(lower=0.0, upper=1.0)
     if float(df["label"].sum()) <= 0.0:
         raise RuntimeError("Dataset has no positive samples.")
+    sampled_df, sampling_meta = _apply_negative_sampling(
+        df,
+        negative_ratio=float(negative_sample_ratio),
+        hard_negative_topk=int(hard_negative_topk),
+    )
+    df = sampled_df
+    if len(df) < 16:
+        raise RuntimeError("Not enough rows after negative sampling.")
 
     tr_idx, va_idx = _group_split(df)
     tr = df.iloc[tr_idx].copy()
@@ -470,6 +566,8 @@ def train_mapping_supervised_model(
     x_va = va[MAPPING_SUPERVISED_FEATURE_NAMES]
     y_tr = tr["label"].astype(float)
     y_va = va["label"].astype(float)
+    w_tr = pd.to_numeric(tr.get("_sample_weight", 1.0), errors="coerce").fillna(1.0).astype(float)
+    w_va = pd.to_numeric(va.get("_sample_weight", 1.0), errors="coerce").fillna(1.0).astype(float)
 
     pos = float(max(1.0, float(y_tr.sum())))
     neg = float(max(1.0, float(len(y_tr) - y_tr.sum())))
@@ -488,8 +586,8 @@ def train_mapping_supervised_model(
         "verbosity": -1,
         "scale_pos_weight": scale_pos_weight,
     }
-    tr_ds = lgb.Dataset(x_tr, label=y_tr)
-    va_ds = lgb.Dataset(x_va, label=y_va, reference=tr_ds)
+    tr_ds = lgb.Dataset(x_tr, label=y_tr, weight=w_tr)
+    va_ds = lgb.Dataset(x_va, label=y_va, weight=w_va, reference=tr_ds)
 
     booster = lgb.train(
         params,
@@ -539,6 +637,7 @@ def train_mapping_supervised_model(
         "num_boost_round": int(num_boost_round),
         "early_stopping_rounds": int(early_stopping_rounds),
         "best_iteration": int(getattr(booster, "best_iteration", 0) or 0),
+        "negative_sampling": sampling_meta,
         "valid_top1_model": float(top1_model),
         "valid_top1_heuristic": float(top1_heur),
         "valid_top1_manual_proxy": float(top1_manual_proxy),

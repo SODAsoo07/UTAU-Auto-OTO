@@ -22,6 +22,12 @@ def main() -> int:
     ap.add_argument("--formats", default="", help="Comma-separated format filter (e.g. cv,cvc,cvvc,vcv)")
     ap.add_argument("--max-voicebanks", type=int, default=0, help="0 = no limit")
     ap.add_argument(
+        "--monotonic-prior-weight",
+        type=float,
+        default=-1.0,
+        help="Negative value uses format default. Higher = stronger monotonic label prior.",
+    )
+    ap.add_argument(
         "--auto-oto-policy",
         default="generate-temp",
         choices=["require", "generate-temp", "generate-persist"],
@@ -36,6 +42,7 @@ def main() -> int:
         format_types=formats,
         max_voicebanks=int(args.max_voicebanks),
         auto_oto_policy=str(args.auto_oto_policy or "generate-temp"),
+        monotonic_prior_weight=float(args.monotonic_prior_weight),
     )
     print(json.dumps(stats, ensure_ascii=False, indent=2))
     return 0

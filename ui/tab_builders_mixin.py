@@ -889,6 +889,8 @@ class TabBuildersMixin:
             text="OFF 시 ML 보정(자동/No-MFA/v1/v2) 단계를 건너뜁니다.",
             text_color=PALETTE.hint_text,
         ).pack(anchor="w", padx=12, pady=(0, 6))
+        if not hasattr(self, "mapping_supervised_enable_var"):
+            self.mapping_supervised_enable_var = ctk.BooleanVar(value=True)
 
         self.cvn_correction_enable_checkbox = ctk.CTkCheckBox(
             ml_frame,
@@ -911,6 +913,69 @@ class TabBuildersMixin:
             command=self._save_config,
         )
         self.cvn_low_conf_only_checkbox.pack(anchor="w", padx=34, pady=(0, 4))
+
+        self.mapping_supervised_enable_checkbox = ctk.CTkCheckBox(
+            ml_frame,
+            text="매핑 모델(단조 디코딩 리스코어) 사용",
+            text_color=PALETTE.neutral_text,
+            variable=self.mapping_supervised_enable_var,
+            command=self._save_config,
+        )
+        self.mapping_supervised_enable_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
+
+        mapping_mode_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        mapping_mode_row.pack(anchor="w", padx=12, pady=(0, 4), fill="x")
+        ctk.CTkLabel(
+            mapping_mode_row,
+            text="매핑 모델 모드",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+        mapping_mode_menu = ctk.CTkOptionMenu(
+            mapping_mode_row,
+            values=(
+                self._get_mapping_supervised_mode_option_labels()
+                if hasattr(self, "_get_mapping_supervised_mode_option_labels")
+                else ["자동(권장)", "포맷 우선", "전역 우선"]
+            ),
+            variable=self.mapping_supervised_mode_var,
+            width=220,
+            command=lambda _v: self._save_config(),
+        )
+        _style_blue_menu(mapping_mode_menu)
+        mapping_mode_menu.pack(side="left", padx=(10, 0))
+        if not hasattr(self, "cv_order_prior_enable_var"):
+            self.cv_order_prior_enable_var = ctk.BooleanVar(value=True)
+        if not hasattr(self, "cv_order_prior_strength_var"):
+            self.cv_order_prior_strength_var = ctk.StringVar(value="")
+
+        cv_order_prior_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        cv_order_prior_row.pack(anchor="w", padx=12, pady=(2, 0), fill="x")
+        self.cv_order_prior_enable_checkbox = ctk.CTkCheckBox(
+            cv_order_prior_row,
+            text="CV 파일 순서 기반 매핑 결합 사용",
+            text_color=PALETTE.neutral_text,
+            variable=self.cv_order_prior_enable_var,
+            command=self._save_config,
+        )
+        self.cv_order_prior_enable_checkbox.pack(side="left")
+        ctk.CTkLabel(
+            cv_order_prior_row,
+            text="강도",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left", padx=(12, 4))
+        cv_order_prior_strength_entry = ctk.CTkEntry(
+            cv_order_prior_row,
+            width=72,
+            textvariable=self.cv_order_prior_strength_var,
+            placeholder_text="기본값",
+        )
+        cv_order_prior_strength_entry.pack(side="left")
+        cv_order_prior_strength_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(
+            cv_order_prior_row,
+            text="(0.0~1.0, 높을수록 순서 prior 강화)",
+            text_color=PALETTE.hint_text,
+        ).pack(side="left", padx=(8, 0))
 
         selector_mode_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
         selector_mode_row.pack(anchor="w", padx=12, pady=(4, 0), fill="x")
