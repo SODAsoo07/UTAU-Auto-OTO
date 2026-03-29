@@ -10,6 +10,7 @@ import os
 import re
 import unicodedata
 import logging
+from functools import lru_cache
 from typing import Any
 
 from core.conversion_tables import load_korean_conversion_table
@@ -47,6 +48,9 @@ FINAL_MAP = {
     'l': 8, 'r': 8, 'lg': 9, 'lm': 10, 'lb': 11, 'ls': 12, 'lt': 13, 'lp': 14, 'lh': 15,
     'm': 16, 'b': 17, 'p': 17, 'bs': 18, 's': 19, 'ss': 20, 'ng': 21, 'j': 22, 'ch': 23,
 }
+_KR_VALID_ONSETS = sorted({str(k or "").lower() for k in INITIAL_MAP.keys()}, key=len, reverse=True)
+_KR_VALID_VOWELS = sorted({str(k or "").lower() for k in VOWEL_MAP.keys()}, key=len, reverse=True)
+_KR_VALID_CODAS = {str(k or "").lower() for k in FINAL_MAP.keys()}
 
 # 로마자 -> IPA
 KO_IPA_MAP = {
@@ -256,6 +260,68 @@ def parse_romaji_syllable(text):
     return compose_hangul(initial, vowel, final)
 
 
+def _split_kr_romaji_syllable_parts(token):
+    text = str(token or "").strip().lower()
+    if not text:
+        return "", "", ""
+    for onset in _KR_VALID_ONSETS:
+        if not text.startswith(onset):
+            continue
+        rest = text[len(onset):]
+        if not rest:
+            continue
+        for vowel in _KR_VALID_VOWELS:
+            if not rest.startswith(vowel):
+                continue
+            coda = rest[len(vowel):]
+            if coda in _KR_VALID_CODAS:
+                return onset, vowel, coda
+    return "", "", ""
+
+
+@lru_cache(maxsize=65536)
+def _segment_kr_roman_chain(token_text):
+    text = str(token_text or "").strip().lower()
+    if not text or not re.fullmatch(r"[a-z]+", text):
+        return (text,) if text else tuple()
+
+    max_probe = 10
+
+    @lru_cache(maxsize=None)
+    def _walk(start_idx):
+        if start_idx >= len(text):
+            return tuple(), (0, 0)
+
+        best_tokens = None
+        best_score = None
+        max_end = min(len(text), start_idx + max_probe)
+        for end_idx in range(start_idx + 1, max_end + 1):
+            cand = text[start_idx:end_idx]
+            onset, vowel, coda = _split_kr_romaji_syllable_parts(cand)
+            if not vowel or f"{onset}{vowel}{coda}" != cand:
+                continue
+            rest = _walk(end_idx)
+            if rest is None:
+                continue
+            rest_tokens, rest_score = rest
+            tokens = (cand,) + rest_tokens
+            score = (
+                1 + int(rest_score[0]),
+                len(coda) + int(rest_score[1]),
+            )
+            if best_score is None or score < best_score:
+                best_tokens = tokens
+                best_score = score
+        if best_tokens is None:
+            return None
+        return best_tokens, best_score
+
+    result = _walk(0)
+    if result is None:
+        return (text,)
+    return tuple(result[0])
+
+
 def _split_kr_filename_tokens(name_or_base):
     """한국어 파일명 문자열을 음절 토큰 단위로 정규화합니다."""
     base = unicodedata.normalize('NFC', os.path.splitext(str(name_or_base or ''))[0])
@@ -311,6 +377,15 @@ def _split_kr_filename_tokens(name_or_base):
         parts = _split_kr_filename_tokens_generic(base)
 
     parts = [token for token in parts if token]
+    segmented = []
+    for token in parts:
+        tok = str(token or "").strip()
+        if re.fullmatch(r"[a-z]+", tok):
+            segs = [seg for seg in _segment_kr_roman_chain(tok) if seg]
+            segmented.extend(segs or [tok])
+        else:
+            segmented.append(tok)
+    parts = segmented
     if re.search(r'[가-힣]', base):
         if len(parts) <= 1:
             return [ch for ch in base if re.match(r'[가-힣]', ch)]
@@ -329,7 +404,7 @@ def _split_kr_lab_content_tokens(content):
         return []
 
     joined = "".join(ws_tokens)
-    if re.fullmatch(r"[A-Za-z0-9'`~-]+", joined):
+    if re.fullmatch(r"[A-Za-z0-9'`~+\-_.]+", joined):
         return _split_kr_filename_tokens(joined)
     if len(ws_tokens) == 1 and re.fullmatch(r'[가-힣]+', ws_tokens[0]):
         return list(ws_tokens[0])

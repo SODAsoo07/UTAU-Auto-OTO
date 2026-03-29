@@ -24,7 +24,7 @@ def _env_flag(name: str, default: bool) -> bool:
 
 # Staged rollout flags
 ENABLE_ANCHOR_LOCK_JA_VCV = _env_flag("UTOA_ENABLE_ANCHOR_LOCK_JA_VCV", True)
-ENABLE_ANCHOR_LOCK_JA_CVVC = _env_flag("UTOA_ENABLE_ANCHOR_LOCK_JA_CVVC", False)
+ENABLE_ANCHOR_LOCK_JA_CVVC = _env_flag("UTOA_ENABLE_ANCHOR_LOCK_JA_CVVC", True)
 ENABLE_ANCHOR_LOCK_KR = _env_flag("UTOA_ENABLE_ANCHOR_LOCK_KR", True)
 
 

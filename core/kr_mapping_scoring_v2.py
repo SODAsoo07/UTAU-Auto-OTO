@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 from core.kr_oto_rules import _cv_match_score, _is_kr_glide_vowel, _split_kr_syllable_parts
@@ -13,6 +14,20 @@ def _split_parts_cached(token):
 @lru_cache(maxsize=65536)
 def _cv_match_score_cached(target, token):
     return _cv_match_score(target, token)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
+def _kr_coda_mismatch_penalty() -> float:
+    return max(0.0, _env_float("UTOA_KR_CODA_MISMATCH_PENALTY", 8.0))
 
 
 def resolve_cv_syllable_index(
@@ -46,9 +61,17 @@ def resolve_cv_syllable_index(
     best_score = -1
     scan_start = max(cv_seq_idx - 1, 0)
     scan_end = min(cv_seq_idx + 4, len(romaji_syllables))
+    _target_onset, _target_vowel, target_coda = _split_parts_cached(target_clean)
+    coda_mismatch_penalty = _kr_coda_mismatch_penalty()
     for i in range(scan_start, scan_end):
         score = _cv_match_score_cached(target_clean, romaji_syllables[i])
         score -= abs(i - cv_seq_idx) * 4
+        _cand_onset, _cand_vowel, cand_coda = _split_parts_cached(romaji_syllables[i])
+        if target_coda != cand_coda:
+            penalty = float(coda_mismatch_penalty)
+            if (not target_coda) != (not cand_coda):
+                penalty += 2.0
+            score -= penalty
         if score > best_score:
             best_score = score
             name_match_idx = i

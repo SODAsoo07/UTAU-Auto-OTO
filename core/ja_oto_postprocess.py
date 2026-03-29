@@ -696,6 +696,15 @@ def guard_ja_cv_head_offset_to_onset(
     alias_type: str = "cv_head",
     format_type: str = "",
 ) -> Tuple[float, float, float, float, float]:
+    def _to_ms_maybe(value):
+        try:
+            raw = float(value)
+        except Exception:
+            return None
+        if raw <= 0.0:
+            return None
+        return raw * 1000.0 if raw < 32.0 else raw
+
     if syll_idx is None or syll_idx < 0 or syll_idx >= len(syllables_info):
         return offset, consonant, cutoff, pre, 0.0
     curr_syl = syllables_info[syll_idx]
@@ -730,7 +739,32 @@ def guard_ja_cv_head_offset_to_onset(
             late_allow = min(late_allow, 2.0)
     c_len = max(0.0, float(c_end) - float(c_start))
     lead_cap = min(base_lead, max(20.0, c_len + 16.0))
+    if a_type == "cv":
+        short_onset = c_len <= 8.0
+        if fmt == "cvvc":
+            lead_cap = min(lead_cap, 11.0 if short_onset else 13.0)
+        elif fmt == "cv":
+            lead_cap = min(lead_cap, 12.0 if short_onset else 15.0)
+        else:
+            lead_cap = min(lead_cap, 14.0 if short_onset else 16.0)
     offset_floor = max(0.0, float(c_start) - lead_cap)
+    if a_type == "cv" and syll_idx > 0:
+        prev_syl = syllables_info[syll_idx - 1] if 0 <= (syll_idx - 1) < len(syllables_info) else None
+        prev_end_ms = None
+        if isinstance(prev_syl, dict):
+            prev_end_ms = _to_ms_maybe(prev_syl.get("end_time"))
+            if prev_end_ms is None:
+                prev_phones = prev_syl.get("phones") or []
+                if prev_phones:
+                    try:
+                        prev_end_ms = float(prev_phones[-1].maxTime) * 1000.0
+                    except Exception:
+                        prev_end_ms = None
+        if prev_end_ms is not None:
+            prev_tail_allow = 2.0 if fmt == "cvvc" else 4.0 if fmt == "cv" else 6.0
+            offset_floor = max(offset_floor, float(prev_end_ms) - prev_tail_allow)
+    if offset_floor > (float(c_start) + float(late_allow)):
+        offset_floor = float(c_start)
     new_offset = float(offset)
     new_pre = float(pre)
     new_consonant = float(consonant)

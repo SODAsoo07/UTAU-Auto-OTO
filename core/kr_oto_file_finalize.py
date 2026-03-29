@@ -18,6 +18,7 @@ from core.kr_oto_rules import (
 )
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 from core.kr_oto_file_consistency import apply_file_consistency_to_oto_file
+from core.oto_continuity_clamp import apply_continuity_clamp_to_oto_file
 from core.mel_safety_clamp import apply_mel_safety_clamp_to_oto_file
 from core.post_file_pipeline import (
     log_changed_lines,
@@ -499,7 +500,9 @@ def _apply_kr_bank_autocalibration_to_oto_file(
 
 
 def _normalize_ml_route(value: str) -> str:
-    _ = str(value or "").strip().lower()
+    raw = str(value or "").strip().lower()
+    if raw in {"e2e_hybrid", "e2e", "hybrid"}:
+        return "e2e_hybrid"
     return "legacy"
 
 
@@ -1047,6 +1050,28 @@ def run_kr_post_file_pipeline(context: KrPostFilePipelineContext):
         safety_changed,
         "wav-duration safety changed",
     )
+
+    try:
+        cont_stats = apply_continuity_clamp_to_oto_file(
+            context.out_path,
+            classify_alias_fn=lambda alias_text, custom_map=None: classify_alias(alias_text, custom_map),
+            validate_fn=context.validate_fn,
+            custom_map=context.custom_map,
+            env_prefix="UTOA_KR",
+            language="korean",
+            format_type=(context.auto_gen_format or "cvvc"),
+            log_fn=context.log_fn,
+            log_tag="[KR-Continuity]",
+        )
+        log_changed_lines(
+            context.log_fn,
+            "[KR-Continuity]",
+            int(cont_stats.get("rows_adjusted", 0)),
+            "continuity clamp changed",
+        )
+    except Exception as exc:
+        if callable(context.log_fn):
+            context.log_fn(f"[KR-Continuity] clamp failed: {exc}")
 
 
 __all__ = [

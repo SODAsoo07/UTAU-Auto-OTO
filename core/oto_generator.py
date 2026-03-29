@@ -1,4 +1,4 @@
-﻿"""
+"""
 TextGrid를 기반으로 한국어 OTO.ini를 생성합니다.
 - phones/words tier를 이용해 OTO 파라미터를 계산합니다.
 - CV/VC/VCV/VV/단모음/숨소리(br) 케이스를 처리합니다.
@@ -4904,6 +4904,7 @@ def generate_oto(
                     forced_cvvc_idx = _resolve_kr_cv_head_forced_index_v2(
                         alias=alias,
                         alias_type=alias_type,
+                        file_format=file_format,
                         cv_seq_idx=cv_seq_idx,
                         target_clean=target_clean,
                         romaji_syllables=romaji_syllables,
@@ -4981,6 +4982,7 @@ def generate_oto(
                         alias_type,
                         kr_cvvc_occurrence_map or {},
                         kr_cvvc_occurrence_state,
+                        expected_idx=cv_seq_idx,
                     )
                     expected_cv_idx = cv_seq_idx
                     planned_cv_idx = None

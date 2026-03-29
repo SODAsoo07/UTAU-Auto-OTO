@@ -358,9 +358,9 @@ class LayoutMixin:
         build_left_label(self.row_align_extra, "MFA 정렬 프로필:").pack(side="left")
         self.mfa_align_profile_menu = ctk.CTkOptionMenu(
             self.row_align_extra,
-            values=["기본", "정밀", "빠름"],
+            values=["기본", "정밀", "정밀 + 화자 적응", "빠름"],
             variable=self.mfa_align_profile_var,
-            width=190,
+            width=220,
             command=lambda _v: self._save_config(),
         )
         _style_blue_menu(self.mfa_align_profile_menu)
@@ -1140,7 +1140,15 @@ class LayoutMixin:
         profile = str(self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "").strip()
         if profile in {"빠름", "빠름 (저사양 추천)", "fast"}:
             return "fast"
-        if profile in {"정밀", "정확도 우선", "정확도 우선 (정밀)", "accurate", "accurate_adapted", "speaker_adapted"}:
+        if profile in {
+            "정밀 + 화자 적응",
+            "정확도 우선 + 화자 적응",
+            "accurate_adapted",
+            "speaker_adapted",
+            "speaker_adaptation",
+        }:
+            return "accurate_adapted"
+        if profile in {"정밀", "정확도 우선", "정확도 우선 (정밀)", "accurate"}:
             return "accurate"
         if profile in {"기본", "default", "정확도 우선 (기본)"}:
             return "default"
@@ -1200,7 +1208,7 @@ class LayoutMixin:
         route_values = (
             self._get_ml_route_option_labels(no_mfa_only=limit_ml_routes_for_no_mfa)
             if hasattr(self, "_get_ml_route_option_labels")
-            else ["자동(자동 라우팅)", "No-MFA", "v1", "v2"]
+            else ["자동(자동 라우팅)", "No-MFA", "v1", "v2", "E2E 하이브리드(실험)"]
         )
         route_label = (
             self._ml_route_label_from_code(current_route_code)

@@ -45,7 +45,10 @@ def normalize_format_type(language: str, format_type: str) -> str:
     if lang == "japanese":
         if "rentan" in fmt or "연단음" in raw:
             return "cv"
-        if fmt in {"mono", "cv", "cvc"}:
+        if fmt == "cvc":
+            # Japanese path never uses dedicated CVC; treat as CVVC-compatible.
+            return "cvvc"
+        if fmt in {"mono", "cv"}:
             return "cv"
         if fmt.startswith("cvvc"):
             return "cvvc"
@@ -82,6 +85,11 @@ def normalize_auto_format_value(language: str, auto_format: str) -> str:
             return "cvc"
         if normalized.startswith("cvc(한국어전용)") or raw.strip() == "CVC (한국어 전용)":
             return "cvc"
+        if normalized.startswith("cv/") or normalized == "cv" or normalized.startswith("cv("):
+            return "cv"
+    elif lang == "japanese":
+        if normalized.startswith("cvc/") or normalized.startswith("cvc(") or normalized == "cvc":
+            return "cvvc"
         if normalized.startswith("cv/") or normalized == "cv" or normalized.startswith("cv("):
             return "cv"
     else:

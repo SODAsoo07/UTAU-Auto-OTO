@@ -2115,6 +2115,10 @@ class PipelineActionsMixin:
                     self._append_log("ℹ 영어 Preview CVVC 모드에서는 Lab/사전 생성 단계를 사용하지 않습니다.")
                     self._set_status("✅ Lab+사전 단계 건너뜀 (영어 Preview)")
                     return
+                if hasattr(self, "_confirm_language_script_mismatch"):
+                    if not self._confirm_language_script_mismatch(lang, wav_dir, stage_name="Lab+사전 생성"):
+                        self._set_status("취소됨: 언어 설정 확인")
+                        return
 
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
 
@@ -2214,6 +2218,10 @@ class PipelineActionsMixin:
                     self._append_log("ℹ 영어 Preview CVVC 모드에서는 사전 생성 단계를 사용하지 않습니다.")
                     self._set_status("✅ 사전 단계 건너뜀 (영어 Preview)")
                     return
+                if hasattr(self, "_confirm_language_script_mismatch"):
+                    if not self._confirm_language_script_mismatch(lang, wav_dir, stage_name="사전 생성"):
+                        self._set_status("취소됨: 언어 설정 확인")
+                        return
                 if lang == 'japanese':
                     dict_filename = "japanese_dict.txt"
                 else:
@@ -2388,6 +2396,10 @@ class PipelineActionsMixin:
                 self._append_log(
                     f"ℹ 현재 언어: {'일본어' if lang == 'japanese' else '한국어' if lang == 'korean' else '영어'}"
                 )
+                if lang in {"korean", "japanese"} and hasattr(self, "_confirm_language_script_mismatch"):
+                    if not self._confirm_language_script_mismatch(lang, wav_dir, stage_name="전체 파이프라인"):
+                        self._set_status("취소됨: 언어 설정 확인")
+                        return
                 selected_format = normalize_auto_format_value(
                     lang,
                     self.auto_format_var.get() if hasattr(self, "auto_format_var") else "",

@@ -41,6 +41,8 @@ from core.oto_ml_reliability import (
     mel_patch_is_fallback,
 )
 from core.oto_ml_selector import select_best_candidate
+from core.oto_e2e_runtime import build_e2e_runtime_context, predict_e2e_params
+from core.oto_e2e_selector import E2ESelectorConfig, select_e2e_or_legacy
 from core.format_type_utils import normalize_format_type
 from core.silence_profile_runtime import (
     apply_reliability_hysteresis,
@@ -91,8 +93,9 @@ def _ensemble_enabled() -> bool:
 
 
 def _ml_route(value: Optional[str] = None) -> str:
-    # Runtime route is fixed to legacy.
-    _ = str(value or os.environ.get("UTOA_ML_ROUTE", "legacy") or "legacy").strip().lower()
+    raw = str(value or os.environ.get("UTOA_ML_ROUTE", "legacy") or "legacy").strip().lower()
+    if raw in {"e2e_hybrid", "e2e", "hybrid"}:
+        return "e2e_hybrid"
     return "legacy"
 
 
@@ -2177,6 +2180,13 @@ def apply_oto_ml_to_oto_file(
         blank_confidence=0.0,
         constraint_adjust_count=0,
         reliability_metrics={},
+        e2e_enabled=False,
+        e2e_mode="",
+        e2e_model_dirs=[],
+        e2e_selected_counts={},
+        e2e_fallback_count=0,
+        e2e_fallback_reasons=[],
+        e2e_model_confidence=0.0,
     )
     ml_report["policy"] = policy_name
 
@@ -2258,6 +2268,13 @@ def apply_oto_ml_to_oto_file(
         "proxy_fn_count": 0,
         "proxy_fn_denom": 0,
     }
+    e2e_ctx_cache: Dict[str, object] = {}
+    e2e_selected_counts: Dict[str, int] = {}
+    e2e_fallback_reasons: Dict[str, int] = {}
+    e2e_conf_values: List[float] = []
+    e2e_enabled_runtime = route_name == "e2e_hybrid"
+    validate_oto_params = _get_validate_func(language)
+    ml_report["e2e_enabled"] = bool(e2e_enabled_runtime)
     with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
         raw_lines = [line.rstrip("\n") for line in f]
 
@@ -2677,6 +2694,57 @@ def apply_oto_ml_to_oto_file(
                 route_name = "selector_only"
             else:
                 continue
+
+            if e2e_enabled_runtime and format_type == "cv" and alias_type_for_row in {"cv", "cv_head"}:
+                ctx_key = str(format_type or "general")
+                e2e_ctx = e2e_ctx_cache.get(ctx_key)
+                if e2e_ctx is None:
+                    e2e_ctx = build_e2e_runtime_context(language, ctx_key, "e2e_hybrid")
+                    e2e_ctx_cache[ctx_key] = e2e_ctx
+                    ml_report["e2e_mode"] = str(getattr(getattr(e2e_ctx, "config", None), "mode", "") or "")
+                    if getattr(e2e_ctx, "bundle", None) is not None:
+                        model_dir = str(getattr(e2e_ctx.bundle, "model_dir", "") or "")
+                        if model_dir:
+                            model_dirs = list(ml_report.get("e2e_model_dirs", []) or [])
+                            if model_dir not in model_dirs:
+                                model_dirs.append(model_dir)
+                                ml_report["e2e_model_dirs"] = model_dirs
+
+                e2e_pred = predict_e2e_params(e2e_ctx, feat)
+                if bool(e2e_pred.get("ok", False)):
+                    e2e_params = e2e_pred.get("params")
+                    if isinstance(e2e_params, tuple) and len(e2e_params) == 5:
+                        score = float(e2e_pred.get("confidence", 0.0) or 0.0)
+                        e2e_conf_values.append(score)
+                        select_result = select_e2e_or_legacy(
+                            legacy_params=(float(o2), float(c2), float(ct2), float(p2), float(ov2)),
+                            e2e_params=(
+                                float(e2e_params[0]),
+                                float(e2e_params[1]),
+                                float(e2e_params[2]),
+                                float(e2e_params[3]),
+                                float(e2e_params[4]),
+                            ),
+                            score=score,
+                            config=E2ESelectorConfig(
+                                mode=str(getattr(getattr(e2e_ctx, "config", None), "mode", "hybrid") or "hybrid"),
+                                t_low=float(getattr(getattr(e2e_ctx, "config", None), "t_low", 0.52) or 0.52),
+                                t_high=float(getattr(getattr(e2e_ctx, "config", None), "t_high", 0.72) or 0.72),
+                                blend_alpha=float(getattr(getattr(e2e_ctx, "config", None), "blend_alpha", 0.60) or 0.60),
+                            ),
+                            validate_fn=validate_oto_params,
+                            alias_type=alias_type_for_row,
+                        )
+                        o2, c2, ct2, p2, ov2 = select_result.params
+                        selected_mode = str(select_result.selected or "legacy")
+                        e2e_selected_counts[selected_mode] = int(e2e_selected_counts.get(selected_mode, 0)) + 1
+                        route_name = f"e2e_hybrid:{selected_mode}"
+                    else:
+                        reason = "predict_invalid_shape"
+                        e2e_fallback_reasons[reason] = int(e2e_fallback_reasons.get(reason, 0)) + 1
+                else:
+                    reason = str(e2e_pred.get("code", "predict_failed") or "predict_failed")
+                    e2e_fallback_reasons[reason] = int(e2e_fallback_reasons.get(reason, 0)) + 1
             route_counts[route_name] = int(route_counts.get(route_name, 0)) + 1
         except CoupledLowConfidenceError as e:
             if fallback_bundle is not None:
@@ -2770,6 +2838,11 @@ def apply_oto_ml_to_oto_file(
     ml_report["invalid_routes"] = list(ml_report["invalid_routes"])
     ml_report["loaded_models"] = list(dict.fromkeys(ml_report["loaded_models"]))
     ml_report["constraint_adjust_count"] = int(constraint_stats.get("constraint_adjust_count", 0))
+    ml_report["e2e_selected_counts"] = dict(e2e_selected_counts)
+    ml_report["e2e_fallback_count"] = int(sum(int(v) for v in e2e_fallback_reasons.values()))
+    ml_report["e2e_fallback_reasons"] = [f"{k}:{int(v)}" for k, v in sorted(e2e_fallback_reasons.items())]
+    if e2e_conf_values:
+        ml_report["e2e_model_confidence"] = float(sum(e2e_conf_values) / float(len(e2e_conf_values)))
     if blank_conf_values:
         ml_report["blank_confidence"] = float(sum(blank_conf_values) / float(len(blank_conf_values)))
     if confidence_values:
@@ -2809,11 +2882,15 @@ def apply_oto_ml_to_oto_file(
     if fallback_reasons:
         uniq_reasons = list(dict.fromkeys(str(r) for r in fallback_reasons if str(r).strip()))
         ml_report["fallback_reason"] = "; ".join(uniq_reasons[:5])
+    elif e2e_fallback_reasons:
+        e2e_reason_tokens = [f"{k}:{int(v)}" for k, v in sorted(e2e_fallback_reasons.items())]
+        ml_report["fallback_reason"] = "; ".join(e2e_reason_tokens[:5])
     if route_counts:
         route_sorted = sorted(route_counts.items(), key=lambda item: item[1], reverse=True)
         ml_report["route"] = str(route_sorted[0][0])
     fallback_used_runtime = bool(
         fallback_reasons
+        or (e2e_enabled_runtime and int(sum(int(v) for v in e2e_fallback_reasons.values())) > 0)
         or any(
             str(name).startswith("coupled_nn_v1->")
             or str(name).startswith("coupled_nn_v2_rawmel->")

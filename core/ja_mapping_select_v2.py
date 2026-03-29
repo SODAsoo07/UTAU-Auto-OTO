@@ -3,7 +3,11 @@ from __future__ import annotations
 import os
 import re
 
-from core.ja_oto_mapping import _ja_soft_cv_match_level
+from core.ja_oto_mapping import (
+    _ja_soft_cv_match_level,
+    _ja_special_mora_class,
+    _normalize_ja_syllable_token,
+)
 
 
 def _blank_conf_at(syllables_info, idx):
@@ -47,15 +51,83 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
 def _resolve_ja_low_tier_forward_window(format_type: str, fallback: int = 1) -> int:
     fmt = str(format_type or "").strip().lower()
     if fmt:
         fmt_key = "UTOA_JA_LOW_TIER_FORWARD_MAX_" + re.sub(r"[^a-z0-9]+", "_", fmt).strip("_").upper()
         fmt_val = _env_int(fmt_key, -1)
-        if fmt_val >= 1:
+        if fmt_val >= 0:
             return int(fmt_val)
     global_val = _env_int("UTOA_JA_LOW_TIER_FORWARD_MAX", int(fallback))
-    return max(1, int(global_val))
+    return max(0, int(global_val))
+
+
+def _strict_ja_cvvc_occurrence_expected() -> bool:
+    return _env_bool("UTOA_JA_CVVC_OCCURRENCE_STRICT_EXPECTED", True)
+
+
+def _plan_occ_double_guard_enabled() -> bool:
+    return _env_bool("UTOA_PLAN_OCCURRENCE_DOUBLE_GUARD_ENABLE", True)
+
+
+def _plan_occ_blank_improve_delta() -> float:
+    return max(
+        0.0,
+        min(
+            0.30,
+            _env_float("UTOA_PLAN_OCCURRENCE_BLANK_IMPROVE_DELTA", 0.02),
+        ),
+    )
+
+
+def _syllable_info_token(syl_info):
+    if not isinstance(syl_info, dict):
+        return ""
+    for key in ("roman_cv", "roman", "word", "kana"):
+        raw = syl_info.get(key, "")
+        if raw:
+            return str(raw).strip()
+    return ""
+
+
+def _guard_plan_occurrence_candidate_ja(
+    *,
+    target_tok,
+    expected_idx,
+    candidate_idx,
+    syllables_info,
+):
+    if not syllables_info:
+        return False, "no_syllables"
+    n = len(syllables_info)
+    if n <= 0:
+        return False, "no_syllables"
+    e_idx = int(max(0, min(int(expected_idx), n - 1)))
+    c_idx = int(max(0, min(int(candidate_idx), n - 1)))
+    if c_idx == e_idx:
+        return True, "same_as_expected"
+
+    target_norm = _normalize_ja_syllable_token(target_tok)
+    cand_norm = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[c_idx]))
+    if not target_norm or cand_norm != target_norm:
+        return False, f"token_mismatch({cand_norm or '-'}!={target_norm or '-'})"
+
+    expected_blank = _blank_conf_at(syllables_info, e_idx)
+    candidate_blank = _blank_conf_at(syllables_info, c_idx)
+    min_delta = _plan_occ_blank_improve_delta()
+    if candidate_blank > max(0.0, expected_blank - min_delta):
+        return False, f"blank_not_improved({candidate_blank:.2f}>={expected_blank:.2f}-{min_delta:.2f})"
+    return True, "accepted"
 
 
 def _token_alpha(tok):
@@ -180,6 +252,8 @@ def _mel_guided_ja_cvvc_adjustment(
     target_norm = normalize_syllable_token_fn(target_tok)
     if not target_norm:
         return selected_idx, False
+    target_cls = _ja_special_mora_class(target_norm)
+    target_youon = target_cls in {"youon", "inserted"}
 
     local_conf = None
     if syllable_confidence_by_idx:
@@ -236,8 +310,9 @@ def _mel_guided_ja_cvvc_adjustment(
     hi = min(n - 1, expected_idx + int(max(1, max_search_fwd)))
     low_tier = bool(conf < max(conf_th, 0.62) or selected_blank >= 0.58)
     if low_tier:
-        low_cap = _resolve_ja_low_tier_forward_window(fmt, fallback=1)
-        hi = min(hi, expected_idx + int(max(1, low_cap)))
+        low_cap_default = 0 if fmt == "cvvc" else 1
+        low_cap = _resolve_ja_low_tier_forward_window(fmt, fallback=low_cap_default)
+        hi = min(hi, expected_idx + int(max(0, low_cap)))
     if order_locked:
         lo = expected_idx
         hi = min(hi, expected_idx + 1)
@@ -263,6 +338,8 @@ def _mel_guided_ja_cvvc_adjustment(
 
     def _score(idx):
         cand_tok = normalize_syllable_token_fn(syllable_info_token_fn(syllables_info[idx]))
+        cand_cls = _ja_special_mora_class(cand_tok)
+        cand_youon = cand_cls in {"youon", "inserted"}
         soft = int(_ja_soft_cv_match_level(target_norm, cand_tok) or 0) if cand_tok else 0
         cand_onset, cand_vowel = _split_ja_token_parts(cand_tok)
         text = (soft * 40.0) + (40.0 if cand_tok == target_norm else 0.0)
@@ -301,6 +378,12 @@ def _mel_guided_ja_cvvc_adjustment(
             mismatch_penalty += 46.0 if a_type in {"cv", "cv_head"} else 34.0
         elif soft == 1:
             mismatch_penalty += 12.0 if a_type in {"cv", "cv_head"} else 6.0
+        if target_youon != cand_youon and cand_tok != target_norm:
+            mismatch_penalty += 52.0 if a_type in {"cv", "cv_head"} else 38.0
+        if target_youon and cand_tok != target_norm and soft < 3:
+            mismatch_penalty += 22.0
+        if (not target_youon) and cand_youon and cand_tok != target_norm:
+            mismatch_penalty += 16.0
         if target_vowel:
             if cand_vowel == target_vowel:
                 core_bonus += 8.0 if weak_target else 5.0
@@ -351,10 +434,21 @@ def _mel_guided_ja_cvvc_adjustment(
             if expected_soft > 0 and selected_blank >= 0.62 and expected_blank + 0.06 < selected_blank:
                 return int(expected_idx), bool(int(expected_idx) != int(selected_idx))
         return selected_idx, False
+
     selected_tok = normalize_syllable_token_fn(syllable_info_token_fn(syllables_info[int(selected_idx)]))
+    selected_cls = _ja_special_mora_class(selected_tok)
     best_tok = normalize_syllable_token_fn(syllable_info_token_fn(syllables_info[int(best_idx)]))
+    best_cls = _ja_special_mora_class(best_tok)
     selected_soft = int(_ja_soft_cv_match_level(target_norm, selected_tok) or 0) if selected_tok else 0
     best_soft = int(_ja_soft_cv_match_level(target_norm, best_tok) or 0) if best_tok else 0
+
+    if target_youon and best_cls not in {"youon", "inserted"} and best_tok != target_norm:
+        return selected_idx, False
+    if (not target_youon) and best_cls in {"youon", "inserted"} and best_tok != target_norm:
+        return selected_idx, False
+    if target_youon and best_tok != target_norm and best_soft < 3:
+        return selected_idx, False
+
     if best_soft <= 0:
         return selected_idx, False
     if selected_soft >= 2 and best_soft < selected_soft:
@@ -366,11 +460,15 @@ def _mel_guided_ja_cvvc_adjustment(
         _exp_on, exp_vowel = _split_ja_token_parts(expected_tok_now)
         if exp_vowel == target_vowel and best_vowel != target_vowel:
             return selected_idx, False
+    if target_youon:
+        if selected_tok == target_norm and best_tok != target_norm:
+            return selected_idx, False
+        if selected_cls in {"youon", "inserted"} and best_cls not in {"youon", "inserted"}:
+            return selected_idx, False
     expected_blank = _blank_conf_at(syllables_info, expected_idx)
     if _blank_conf_at(syllables_info, best_idx) >= 0.72 and expected_blank <= 0.60:
         return selected_idx, False
     return best_idx, True
-
 def select_ja_vcv_mapping(
     *,
     alias,
@@ -412,6 +510,43 @@ def select_ja_vcv_mapping(
     else:
         expected_idx = len(syllables_info) - 1
 
+    force_lock_mode = _env_bool("UTOA_LOW_CONF_FORCE_LOCK_MODE", False)
+    if force_lock_mode:
+        lock_conf_floor = max(
+            float(mapping_conf_threshold or 0.0),
+            _env_float("UTOA_LOW_CONF_FORCE_LOCK_THRESHOLD", 0.62),
+        )
+        lock_blank_floor = _env_float("UTOA_LOW_CONF_FORCE_LOCK_BLANK", 0.58)
+        expected_blank = _blank_conf_at(syllables_info, expected_idx)
+        if (
+            float(mapping_confidence_base or 0.0) < lock_conf_floor
+            or expected_blank >= lock_blank_floor
+        ):
+            target_tok_vcv_norm = normalize_syllable_token_fn(extract_target_syllable_fn(alias))
+            if debug_logging:
+                log_fn(
+                    f"[JA] {fname}: VCV 저신뢰 강제 고정 "
+                    f"({expected_idx + 1}, conf={float(mapping_confidence_base or 0.0):.2f}, blank={expected_blank:.2f})"
+                )
+            row_abstain = decide_cv_row_abstain_fn(
+                alias_type="cv",
+                format_type=format_type,
+                candidate_idx=expected_idx,
+                candidate_count=len(syllables_info),
+                candidate_active=(
+                    is_cv_syllable_active_fn(syllables_info[expected_idx], require_vowel=True)
+                    if 0 <= expected_idx < len(syllables_info)
+                    else False
+                ),
+                active_only_formats={"cvvc", "cv"},
+            )
+            return {
+                "expected_idx": int(expected_idx),
+                "mapped_idx": int(expected_idx),
+                "target_tok": target_tok_vcv_norm,
+                "row_abstain": row_abstain,
+            }
+
     target_tok_vcv_raw = extract_target_syllable_fn(alias)
     planned_idx_vcv = resolve_planned_cv_index_fn(
         ja_planned_cv_indices,
@@ -420,11 +555,25 @@ def select_ja_vcv_mapping(
         syllables_info,
         alias_type="vcv",
     )
+    if planned_idx_vcv is not None and _plan_occ_double_guard_enabled():
+        plan_ok, plan_reason = _guard_plan_occurrence_candidate_ja(
+            target_tok=target_tok_vcv_raw,
+            expected_idx=expected_idx,
+            candidate_idx=int(planned_idx_vcv),
+            syllables_info=syllables_info,
+        )
+        if not plan_ok:
+            if debug_logging:
+                log_fn(
+                    f"[JA] {fname}: VCV planned index rejected "
+                    f"({expected_idx + 1}->{int(planned_idx_vcv) + 1}, {plan_reason}, {alias})"
+                )
+            planned_idx_vcv = None
     if planned_idx_vcv is not None:
         mapped_idx = int(planned_idx_vcv)
         if debug_logging and mapped_idx != expected_idx:
             log_fn(
-                f"🧭 {fname}: VCV 전역 anchor plan 적용 "
+                f"[JA] {fname}: VCV anchor plan applied "
                 f"{expected_idx + 1}->{mapped_idx + 1} ({alias})"
             )
     else:
@@ -450,7 +599,7 @@ def select_ja_vcv_mapping(
         resync_idx_vcv = None
     if resync_idx_vcv is not None and resync_idx_vcv != mapped_idx:
         log_fn(
-            f"🧭 {fname}: VCV 순서 드리프트 복구 "
+            f"[JA] {fname}: VCV order drift recovered "
             f"{expected_idx + 1}->{resync_idx_vcv + 1} ({alias})"
         )
         mapped_idx = int(resync_idx_vcv)
@@ -472,13 +621,13 @@ def select_ja_vcv_mapping(
         )
         if fixed_idx_vcv is not None and fixed_idx_vcv != mapped_idx:
             log_fn(
-                f"🧭 {fname}: VCV 모음 불일치 보정 "
+                f"[JA] {fname}: VCV vowel mismatch fixed "
                 f"{mapped_idx + 1}->{fixed_idx_vcv + 1} ({alias})"
             )
             mapped_idx = int(fixed_idx_vcv)
         elif expected_vowel_vcv == target_vowel_vcv:
             log_fn(
-                f"🛡️ {fname}: VCV 모음 불일치 차단 "
+                f"[JA] {fname}: VCV vowel mismatch blocked "
                 f"({mapped_idx + 1}->{expected_idx + 1}, {alias})"
             )
             mapped_idx = expected_idx
@@ -498,14 +647,14 @@ def select_ja_vcv_mapping(
     if last_vcv_mapped_idx >= 0:
         if mapped_idx < last_vcv_mapped_idx:
             log_fn(
-                f"🛡️ {fname}: VCV 역행 점프 차단 "
+                f"[JA] {fname}: VCV backward jump blocked "
                 f"{mapped_idx + 1}->{last_vcv_mapped_idx + 1} ({alias})"
             )
             mapped_idx = last_vcv_mapped_idx
         elif mapped_idx > (last_vcv_mapped_idx + 2):
             clamped_idx = last_vcv_mapped_idx + 1
             log_fn(
-                f"🛡️ {fname}: VCV 과도 점프 차단 "
+                f"[JA] {fname}: VCV over-jump blocked "
                 f"{mapped_idx + 1}->{clamped_idx + 1} ({alias})"
             )
             mapped_idx = clamped_idx
@@ -529,7 +678,7 @@ def select_ja_vcv_mapping(
     if mel_adjusted and mel_idx != mapped_idx:
         if debug_logging:
             log_fn(
-                f"🧭 {fname}: VCV mel-guided remap "
+                f"[JA] {fname}: VCV mel-guided remap "
                 f"({mapped_idx + 1}->{mel_idx + 1}, {alias})"
             )
         mapped_idx = int(mel_idx)
@@ -551,7 +700,7 @@ def select_ja_vcv_mapping(
             and abs(retry_idx_vcv - expected_idx) <= 2
         ):
             log_fn(
-                f"🧭 {fname}: VCV 최종 재탐색 "
+                f"[JA] {fname}: VCV final re-search "
                 f"{mapped_idx + 1}->{retry_idx_vcv + 1} ({alias})"
             )
             mapped_idx = int(retry_idx_vcv)
@@ -560,7 +709,7 @@ def select_ja_vcv_mapping(
             )
         if mapped_tok_final != target_tok_vcv_norm:
             log_fn(
-                f"🛡️ {fname}: VCV 토큰 불일치 되돌림 "
+                f"[JA] {fname}: VCV token mismatch rollback "
                 f"({mapped_idx + 1}->{expected_idx + 1}, {alias})"
             )
             mapped_idx = expected_idx
@@ -576,7 +725,7 @@ def select_ja_vcv_mapping(
             )
         )
     if mapped_idx != expected_idx and abs(mapped_idx - expected_idx) <= 1:
-        log_fn(f"🧭 {fname}: VCV 음절 정렬 보정 {expected_idx + 1}->{mapped_idx + 1} ({alias})")
+        log_fn(f"[JA] {fname}: VCV syllable alignment adjusted {expected_idx + 1}->{mapped_idx + 1} ({alias})")
 
     expected_tok_trace = syllable_info_token_fn(syllables_info[expected_idx])
     mapped_tok_trace = syllable_info_token_fn(syllables_info[mapped_idx])
@@ -637,6 +786,7 @@ def resolve_ja_forced_cv_index(
     target_tok,
     expected_seq_idx,
     expected_idx,
+    format_type,
     syllables_info,
     planned_indices,
     occurrence_map,
@@ -648,6 +798,7 @@ def resolve_ja_forced_cv_index(
     debug_logging,
     fname,
 ):
+    forced_source = "planned"
     planned_idx = resolve_planned_cv_index_fn(
         planned_indices,
         expected_seq_idx,
@@ -657,25 +808,64 @@ def resolve_ja_forced_cv_index(
     )
     forced_idx = planned_idx
     if forced_idx is None:
-        forced_idx = resolve_cvvc_occurrence_index_fn(
-            alias,
-            alias_type,
-            occurrence_map or {},
-            occurrence_state,
-        )
+        forced_source = "occurrence"
+        try:
+            forced_idx = resolve_cvvc_occurrence_index_fn(
+                alias,
+                alias_type,
+                occurrence_map or {},
+                occurrence_state,
+                expected_idx=expected_idx,
+            )
+        except TypeError:
+            forced_idx = resolve_cvvc_occurrence_index_fn(
+                alias,
+                alias_type,
+                occurrence_map or {},
+                occurrence_state,
+            )
     elif debug_logging and forced_idx != expected_idx:
         alias_label = "CV_HEAD" if str(alias_type or "").strip().lower() == "cv_head" else "CV"
         log_fn(
-            f"🧭 {fname}: {alias_label} 전역 anchor plan 적용 "
+            f"[JA] {fname}: {alias_label} anchor plan applied "
             f"{expected_idx + 1}->{int(forced_idx) + 1} ({alias})"
         )
+    if forced_idx is not None:
+        fmt = str(format_type or "").strip().lower()
+        if (
+            fmt in {"cvvc", "cv"}
+            and _strict_ja_cvvc_occurrence_expected()
+            and int(forced_idx) > int(expected_idx)
+        ):
+            if debug_logging:
+                alias_label = "CV_HEAD" if str(alias_type or "").strip().lower() == "cv_head" else "CV"
+                log_fn(
+                    f"[JA] {fname}: {alias_label} occurrence forward clamp "
+                    f"({int(forced_idx) + 1}->{int(expected_idx) + 1}, {alias})"
+                )
+            forced_idx = int(expected_idx)
+    if forced_idx is not None and _plan_occ_double_guard_enabled():
+        guard_ok, guard_reason = _guard_plan_occurrence_candidate_ja(
+            target_tok=target_tok,
+            expected_idx=expected_idx,
+            candidate_idx=int(forced_idx),
+            syllables_info=syllables_info,
+        )
+        if not guard_ok:
+            if debug_logging:
+                alias_label = "CV_HEAD" if str(alias_type or "").strip().lower() == "cv_head" else "CV"
+                log_fn(
+                    f"[JA] {fname}: {alias_label} {forced_source} index rejected "
+                    f"({expected_idx + 1}->{int(forced_idx) + 1}, {guard_reason}, {alias})"
+                )
+            forced_idx = None
     if forced_idx is not None and not (0 <= int(forced_idx) < len(syllables_info)):
         remapped_idx = remap_forced_cv_index_fn(target_tok, expected_idx, syllables_info)
         if remapped_idx is not None:
             if debug_logging:
                 alias_label = "CV_HEAD" if str(alias_type or "").strip().lower() == "cv_head" else "CV"
                 log_fn(
-                    f"🧭 {fname}: {alias_label} occurrence 범위 보정 "
+                    f"[JA] {fname}: {alias_label} occurrence range remap "
                     f"({int(forced_idx) + 1}->{int(remapped_idx) + 1}, {alias})"
                 )
             forced_idx = int(remapped_idx)
@@ -683,7 +873,7 @@ def resolve_ja_forced_cv_index(
             if debug_logging:
                 alias_label = "CV_HEAD" if str(alias_type or "").strip().lower() == "cv_head" else "CV"
                 log_fn(
-                    f"🛡️ {fname}: {alias_label} occurrence 무효화 "
+                    f"[JA] {fname}: {alias_label} occurrence invalidated "
                     f"(idx={int(forced_idx) + 1}, {alias})"
                 )
             forced_idx = None

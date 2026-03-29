@@ -870,7 +870,28 @@ class TabBuildersMixin:
             wraplength=730,
         )
         mapping_strict_help_label.pack(anchor="w", padx=34, pady=(0, 8))
-        self._bind_wraplength_to_container(basic_toggle_frame, [mapping_strict_help_label], padding=64, min_wrap=260)
+        self.low_conf_force_lock_mode_checkbox = ctk.CTkCheckBox(
+            basic_toggle_frame,
+            text="저신뢰 구간 강제 고정 모드",
+            text_color=PALETTE.neutral_text,
+            variable=self.low_conf_force_lock_mode_var,
+            command=self._save_config,
+        )
+        self.low_conf_force_lock_mode_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
+        low_conf_force_lock_help_label = ctk.CTkLabel(
+            basic_toggle_frame,
+            text="저신뢰/고공백 구간에서 planned·occurrence 후보의 점프 보정을 막고 기대 인덱스에 고정합니다.",
+            text_color=PALETTE.hint_text,
+            justify="left",
+            wraplength=730,
+        )
+        low_conf_force_lock_help_label.pack(anchor="w", padx=34, pady=(0, 8))
+        self._bind_wraplength_to_container(
+            basic_toggle_frame,
+            [mapping_strict_help_label, low_conf_force_lock_help_label],
+            padding=64,
+            min_wrap=260,
+        )
 
         weak_boundary_row = self._ui_row(basic_toggle_frame, padx=12, pady=(0, 2))
         for option in ADVANCED_WEAK_BOUNDARY_OPTIONS:
@@ -1009,7 +1030,7 @@ class TabBuildersMixin:
             values=(
                 self._get_ml_route_option_labels(no_mfa_only=False)
                 if hasattr(self, "_get_ml_route_option_labels")
-                else ["자동(자동 라우팅)", "No-MFA", "v1", "v2"]
+                else ["자동(자동 라우팅)", "No-MFA", "v1", "v2", "E2E 하이브리드(실험)"]
             ),
             variable=self.ml_route_var,
             width=180,
@@ -1020,7 +1041,7 @@ class TabBuildersMixin:
         route_menu.pack(side="left", padx=(10, 8))
         ctk.CTkLabel(
             route_row,
-            text="자동=환경 기반 라우팅, No-MFA=정렬 없이 보정, v1=기존, v2=확장",
+            text="자동=환경 기반 라우팅, No-MFA=정렬 없이 보정, v1=기존, v2=확장, E2E=실험",
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(4, 0))
 
@@ -1195,6 +1216,67 @@ class TabBuildersMixin:
             command=self._save_config,
         )
         hybrid_routing_checkbox.pack(anchor="w", padx=12, pady=(4, 0))
+
+        e2e_toggle_checkbox = ctk.CTkCheckBox(
+            ml_frame,
+            text="E2E 하이브리드(실험) 활성화",
+            text_color="#5F8C87",
+            variable=self.ml_e2e_enable_var,
+            command=self._save_config,
+        )
+        e2e_toggle_checkbox.pack(anchor="w", padx=12, pady=(4, 0))
+
+        e2e_mode_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        e2e_mode_row.pack(anchor="w", padx=12, pady=(2, 0), fill="x")
+        ctk.CTkLabel(
+            e2e_mode_row,
+            text="E2E 모드",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+        e2e_mode_menu = ctk.CTkOptionMenu(
+            e2e_mode_row,
+            values=["hybrid", "legacy_only", "e2e_only"],
+            variable=self.ml_e2e_mode_var,
+            width=120,
+            command=lambda _v: self._save_config(),
+        )
+        _style_blue_menu(e2e_mode_menu)
+        e2e_mode_menu.pack(side="left", padx=(10, 8))
+        ctk.CTkLabel(
+            e2e_mode_row,
+            text="(권장: hybrid)",
+            text_color=PALETTE.hint_text,
+        ).pack(side="left", padx=(2, 0))
+
+        e2e_threshold_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        e2e_threshold_row.pack(anchor="w", padx=12, pady=(2, 4), fill="x")
+        ctk.CTkLabel(e2e_threshold_row, text="T_low", text_color=PALETTE.neutral_text).pack(side="left")
+        e2e_t_low_entry = ctk.CTkEntry(
+            e2e_threshold_row,
+            width=68,
+            textvariable=self.ml_e2e_t_low_var,
+            placeholder_text="0.52",
+        )
+        e2e_t_low_entry.pack(side="left", padx=(6, 8))
+        e2e_t_low_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(e2e_threshold_row, text="T_high", text_color=PALETTE.neutral_text).pack(side="left", padx=(2, 0))
+        e2e_t_high_entry = ctk.CTkEntry(
+            e2e_threshold_row,
+            width=68,
+            textvariable=self.ml_e2e_t_high_var,
+            placeholder_text="0.72",
+        )
+        e2e_t_high_entry.pack(side="left", padx=(6, 8))
+        e2e_t_high_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(e2e_threshold_row, text="blend", text_color=PALETTE.neutral_text).pack(side="left", padx=(2, 0))
+        e2e_blend_entry = ctk.CTkEntry(
+            e2e_threshold_row,
+            width=68,
+            textvariable=self.ml_e2e_blend_alpha_var,
+            placeholder_text="0.60",
+        )
+        e2e_blend_entry.pack(side="left", padx=(6, 8))
+        e2e_blend_entry.bind("<FocusOut>", lambda _e: self._save_config())
 
         gamma_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
         gamma_row.pack(anchor="w", padx=12, pady=(2, 6), fill="x")
@@ -1545,6 +1627,8 @@ class TabBuildersMixin:
             "ml_batch_inference_enable_var": ("bool", True),
             "ml_legacy_fallback_enable_var": ("bool", False),
             "ml_hybrid_routing_enable_var": ("bool", True),
+            "ml_e2e_enable_var": ("bool", False),
+            "low_conf_force_lock_mode_var": ("bool", False),
             "kr_continuity_max_offset_adj_var": ("str", ""),
             "weak_voice_assist_strength_var": ("str", ""),
             "mapping_strict_mode_var": ("str", "적당히 엄격(누락 행은 폴백)"),
@@ -1553,6 +1637,10 @@ class TabBuildersMixin:
             "kr_mapping_confidence_threshold_var": ("str", ""),
             "ml_route_var": ("str", "자동(자동 라우팅)"),
             "ml_selector_mode_var": ("str", "델타+셀렉터"),
+            "ml_e2e_mode_var": ("str", "hybrid"),
+            "ml_e2e_t_low_var": ("str", ""),
+            "ml_e2e_t_high_var": ("str", ""),
+            "ml_e2e_blend_alpha_var": ("str", ""),
             "ml_coupled_min_conf_var": ("str", ""),
             "ml_coupled_min_conf_model_offset_var": ("str", ""),
             "ml_coupled_min_conf_kr_cv_var": ("str", ""),
@@ -1923,7 +2011,28 @@ class TabBuildersMixin:
             wraplength=730,
         )
         mapping_strict_help_label.pack(anchor="w", padx=34, pady=(0, 8))
-        self._bind_wraplength_to_container(basic_toggle_frame, [mapping_strict_help_label], padding=64, min_wrap=260)
+        self.low_conf_force_lock_mode_checkbox = ctk.CTkCheckBox(
+            basic_toggle_frame,
+            text="저신뢰 구간 강제 고정 모드",
+            text_color=PALETTE.neutral_text,
+            variable=self.low_conf_force_lock_mode_var,
+            command=self._save_config,
+        )
+        self.low_conf_force_lock_mode_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
+        low_conf_force_lock_help_label = ctk.CTkLabel(
+            basic_toggle_frame,
+            text="저신뢰/고공백 구간에서 planned·occurrence 후보의 점프 보정을 막고 기대 인덱스에 고정합니다.",
+            text_color=PALETTE.hint_text,
+            justify="left",
+            wraplength=730,
+        )
+        low_conf_force_lock_help_label.pack(anchor="w", padx=34, pady=(0, 8))
+        self._bind_wraplength_to_container(
+            basic_toggle_frame,
+            [mapping_strict_help_label, low_conf_force_lock_help_label],
+            padding=64,
+            min_wrap=260,
+        )
 
         weak_boundary_row = self._ui_row(basic_toggle_frame, padx=12, pady=(0, 2))
         for option in ADVANCED_WEAK_BOUNDARY_OPTIONS:
@@ -2059,7 +2168,7 @@ class TabBuildersMixin:
             values=(
                 self._get_ml_route_option_labels()
                 if hasattr(self, "_get_ml_route_option_labels")
-                else ["자동(자동 라우팅)", "No-MFA", "v1", "v2"]
+                else ["자동(자동 라우팅)", "No-MFA", "v1", "v2", "E2E 하이브리드(실험)"]
             ),
             variable=self.ml_route_var,
             width=180,
@@ -2070,7 +2179,7 @@ class TabBuildersMixin:
         route_menu.pack(side="left", padx=(10, 8))
         ctk.CTkLabel(
             route_row,
-            text="자동=환경 기반 라우팅, No-MFA=정렬 없이 보정, v1=기존, v2=확장",
+            text="자동=환경 기반 라우팅, No-MFA=정렬 없이 보정, v1=기존, v2=확장, E2E=실험",
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(4, 0))
 
@@ -2245,6 +2354,67 @@ class TabBuildersMixin:
             command=self._save_config,
         )
         hybrid_routing_checkbox.pack(anchor="w", padx=12, pady=(4, 0))
+
+        e2e_toggle_checkbox = ctk.CTkCheckBox(
+            ml_frame,
+            text="E2E 하이브리드(실험) 활성화",
+            text_color="#5F8C87",
+            variable=self.ml_e2e_enable_var,
+            command=self._save_config,
+        )
+        e2e_toggle_checkbox.pack(anchor="w", padx=12, pady=(4, 0))
+
+        e2e_mode_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        e2e_mode_row.pack(anchor="w", padx=12, pady=(2, 0), fill="x")
+        ctk.CTkLabel(
+            e2e_mode_row,
+            text="E2E 모드",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+        e2e_mode_menu = ctk.CTkOptionMenu(
+            e2e_mode_row,
+            values=["hybrid", "legacy_only", "e2e_only"],
+            variable=self.ml_e2e_mode_var,
+            width=120,
+            command=lambda _v: self._save_config(),
+        )
+        _style_blue_menu(e2e_mode_menu)
+        e2e_mode_menu.pack(side="left", padx=(10, 8))
+        ctk.CTkLabel(
+            e2e_mode_row,
+            text="(권장: hybrid)",
+            text_color=PALETTE.hint_text,
+        ).pack(side="left", padx=(2, 0))
+
+        e2e_threshold_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
+        e2e_threshold_row.pack(anchor="w", padx=12, pady=(2, 4), fill="x")
+        ctk.CTkLabel(e2e_threshold_row, text="T_low", text_color=PALETTE.neutral_text).pack(side="left")
+        e2e_t_low_entry = ctk.CTkEntry(
+            e2e_threshold_row,
+            width=68,
+            textvariable=self.ml_e2e_t_low_var,
+            placeholder_text="0.52",
+        )
+        e2e_t_low_entry.pack(side="left", padx=(6, 8))
+        e2e_t_low_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(e2e_threshold_row, text="T_high", text_color=PALETTE.neutral_text).pack(side="left", padx=(2, 0))
+        e2e_t_high_entry = ctk.CTkEntry(
+            e2e_threshold_row,
+            width=68,
+            textvariable=self.ml_e2e_t_high_var,
+            placeholder_text="0.72",
+        )
+        e2e_t_high_entry.pack(side="left", padx=(6, 8))
+        e2e_t_high_entry.bind("<FocusOut>", lambda _e: self._save_config())
+        ctk.CTkLabel(e2e_threshold_row, text="blend", text_color=PALETTE.neutral_text).pack(side="left", padx=(2, 0))
+        e2e_blend_entry = ctk.CTkEntry(
+            e2e_threshold_row,
+            width=68,
+            textvariable=self.ml_e2e_blend_alpha_var,
+            placeholder_text="0.60",
+        )
+        e2e_blend_entry.pack(side="left", padx=(6, 8))
+        e2e_blend_entry.bind("<FocusOut>", lambda _e: self._save_config())
 
         gamma_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
         gamma_row.pack(anchor="w", padx=12, pady=(2, 6), fill="x")

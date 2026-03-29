@@ -1942,7 +1942,7 @@ def dataset_fieldnames() -> List[str]:
         "voicebank_id", "wav", "alias", "wav_norm", "alias_norm", "occurrence_index", "line_index", "source_oto_id", "source_row_id",
         "mel_patch_key", "mel_patch_debug_key", "mel_onset_anchor_ms", "mel_tail_anchor_ms", "mel_patch_source",
         *FEATURE_NAMES,
-        "manual_offset", "manual_cons", "manual_cutoff", "manual_pre", "manual_ovl",
+        "manual_offset", "manual_cons", "manual_cutoff", "manual_cutoff_abs", "manual_cutoff_mode", "manual_pre", "manual_ovl",
         *TARGET_NAMES,
         *AUX_TARGET_NAMES,
         "label_source", "sample_weight", "blank_risk_score", "blank_risk_flag",

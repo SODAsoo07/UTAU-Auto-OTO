@@ -60,7 +60,9 @@ def _log_ml_report_summary(log_fn: Optional[Callable[[str], None]], ml_report: o
 
 
 def _normalize_ml_route(value: str) -> str:
-    _ = str(value or "").strip().lower()
+    raw = str(value or "").strip().lower()
+    if raw in {"e2e_hybrid", "e2e", "hybrid"}:
+        return "e2e_hybrid"
     return "legacy"
 
 
@@ -82,7 +84,7 @@ def _compose_combined_ml_report(
     combined: dict = {
         "stage": "ml",
         "ml_route": route_name,
-        "route": "legacy",
+        "route": str(legacy_report.get("route", "legacy") or "legacy"),
         "status": "skipped",
         "fallback_used": False,
         "policy": str(legacy_report.get("policy", "") or ""),
@@ -95,6 +97,17 @@ def _compose_combined_ml_report(
         "fallback_reason": str(legacy_report.get("fallback_reason", "") or ""),
         "legacy_report": dict(legacy_report),
     }
+    for key in (
+        "e2e_enabled",
+        "e2e_mode",
+        "e2e_model_dirs",
+        "e2e_selected_counts",
+        "e2e_fallback_count",
+        "e2e_fallback_reasons",
+        "e2e_model_confidence",
+    ):
+        if key in legacy_report:
+            combined[key] = legacy_report.get(key)
     combined["fallback_used"] = bool(combined.get("fallback_used", False)) or bool(legacy_report.get("fallback_used", False))
 
     if combined["changed_lines"] > 0:
@@ -159,7 +172,7 @@ def run_ml_post_stage(
                 format_override=format_override,
                 policy=ml_policy,
                 report=legacy_report,
-                ml_route="legacy",
+                ml_route=route_name,
             )
             or 0
         )
