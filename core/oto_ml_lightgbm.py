@@ -70,10 +70,25 @@ DEFAULT_LGB_PARAMS = {
 }
 
 SELECTOR_RANKING_MIN_GROUPS_DEFAULT = 120
+SELECTOR_OBJECTIVE_CHOICES = {"pointwise", "ranking", "pairwise"}
+SELECTOR_RANKING_BACKEND_CHOICES = {"lambdarank", "pairwise"}
+
+
+def _selector_ranking_backend_default() -> str:
+    raw = str(os.environ.get("UTOA_SELECTOR_RANKING_BACKEND", "lambdarank") or "").strip().lower()
+    if raw in {"pairwise", "rank_xendcg", "xendcg"}:
+        raw = "pairwise"
+    if raw not in SELECTOR_RANKING_BACKEND_CHOICES:
+        raw = "lambdarank"
+    return raw
 
 
 def _resolve_selector_objective(objective: str, df) -> str:
     obj = str(objective or "auto").strip().lower()
+    if obj in {"rank", "lambdarank", "ranking_lambdarank"}:
+        obj = "ranking"
+    elif obj in {"rank_pairwise", "pair", "rank_xendcg", "xendcg"}:
+        obj = "pairwise"
     if obj == "auto":
         try:
             min_groups = int(
@@ -83,9 +98,9 @@ def _resolve_selector_objective(objective: str, df) -> str:
             min_groups = SELECTOR_RANKING_MIN_GROUPS_DEFAULT
         group_count = int(df["selector_group_id"].nunique()) if "selector_group_id" in df.columns else 0
         if group_count >= max(2, min_groups) and "selector_rank_label" in df.columns:
-            return "ranking"
+            return "pairwise" if _selector_ranking_backend_default() == "pairwise" else "ranking"
         return "pointwise"
-    if obj == "ranking":
+    if obj in {"ranking", "pairwise"}:
         if "selector_group_id" not in df.columns or "selector_rank_label" not in df.columns:
             return "pointwise"
     return obj
@@ -183,29 +198,61 @@ def _group_sizes_from_series(series):
     return groups
 
 
-def _selector_top1_hit_rate(df, pred):
-    if "selector_group_id" not in df.columns or "selector_is_best" not in df.columns or len(df) == 0:
-        return 0.0
+def _selector_pick_top1_rows(df, pred=None):
+    if "selector_group_id" not in df.columns or len(df) == 0:
+        return df.iloc[0:0].copy()
     tmp = df.copy()
-    tmp["_pred"] = pred
-    picked = tmp.sort_values(["selector_group_id", "_pred"], ascending=[True, False]).groupby("selector_group_id", as_index=False).head(1)
+    if pred is None:
+        if "candidate_mode" in tmp.columns:
+            tmp["_rank_score"] = (tmp["candidate_mode"].astype(str).str.lower() == "base").astype(float)
+        else:
+            tmp["_rank_score"] = 0.0
+    else:
+        tmp["_rank_score"] = pred
+    return (
+        tmp.sort_values(["selector_group_id", "_rank_score"], ascending=[True, False])
+        .groupby("selector_group_id", as_index=False)
+        .head(1)
+    )
+
+
+def _selector_top1_hit_rate(df, pred):
+    if "selector_is_best" not in df.columns:
+        return 0.0
+    picked = _selector_pick_top1_rows(df, pred=pred)
     if len(picked) == 0:
         return 0.0
     return float(pd.to_numeric(picked["selector_is_best"], errors="coerce").fillna(0).mean())
 
 
 def _selector_baseline_top1_hit_rate(df):
-    if "selector_group_id" not in df.columns or "selector_is_best" not in df.columns or len(df) == 0:
+    if "selector_is_best" not in df.columns:
         return 0.0
-    tmp = df.copy()
-    if "candidate_mode" in tmp.columns:
-        tmp["_base_pref"] = (tmp["candidate_mode"].astype(str).str.lower() == "base").astype(int)
-    else:
-        tmp["_base_pref"] = 0
-    picked = tmp.sort_values(["selector_group_id", "_base_pref"], ascending=[True, False]).groupby("selector_group_id", as_index=False).head(1)
+    picked = _selector_pick_top1_rows(df, pred=None)
     if len(picked) == 0:
         return 0.0
     return float(pd.to_numeric(picked["selector_is_best"], errors="coerce").fillna(0).mean())
+
+
+def _selector_top1_blank_attach_rate(df, pred=None) -> float:
+    if len(df) == 0:
+        return 0.0
+    picked = _selector_pick_top1_rows(df, pred=pred)
+    if len(picked) == 0:
+        return 0.0
+    if "cand_blank_attach_risk" in picked.columns:
+        risk = pd.to_numeric(picked["cand_blank_attach_risk"], errors="coerce").fillna(0.0)
+    else:
+        risk = pd.Series([0.0] * len(picked), index=picked.index, dtype=float)
+    alias = picked.get("alias_type")
+    if alias is None:
+        head_mask = pd.Series([True] * len(picked), index=picked.index)
+    else:
+        alias_norm = alias.astype(str).str.strip().str.lower()
+        head_mask = alias_norm.isin({"cv", "cv_head", "v", "vv", "mono"})
+    risk_th = float(_env_float("UTOA_SELECTOR_TOP1_BLANK_ATTACH_TH", 0.55))
+    flagged = (risk >= risk_th) & head_mask
+    return float(pd.to_numeric(flagged, errors="coerce").fillna(0.0).mean())
 
 
 def _split_train_valid(df, group_column: str):
@@ -571,6 +618,42 @@ def train_lightgbm_bundle(
     return meta
 
 
+def _selector_sample_weight(df):
+    if len(df) == 0:
+        return pd.Series([], dtype=float)
+    weights = pd.Series([1.0] * len(df), index=df.index, dtype=float)
+
+    if "cand_blank_attach_risk" in df.columns:
+        risk = pd.to_numeric(df["cand_blank_attach_risk"], errors="coerce").fillna(0.0).clip(lower=0.0, upper=1.0)
+    else:
+        risk = pd.Series([0.0] * len(df), index=df.index, dtype=float)
+    strength = max(1.0, float(_env_float("UTOA_SELECTOR_BLANK_ATTACH_WEIGHT", 1.35)))
+    floor = max(0.0, min(1.0, float(_env_float("UTOA_SELECTOR_BLANK_ATTACH_WEIGHT_FLOOR", 0.25))))
+    if strength > 1.0:
+        scale = 1.0 + (strength - 1.0) * (floor + (1.0 - floor) * risk)
+        weights = weights * scale
+
+    if "selector_is_best" in df.columns:
+        pos_mask = pd.to_numeric(df["selector_is_best"], errors="coerce").fillna(0.0) > 0.5
+        pos_weight = max(1.0, float(_env_float("UTOA_SELECTOR_POS_WEIGHT", 1.15)))
+        if pos_weight > 1.0:
+            weights = weights * (1.0 + (pos_weight - 1.0) * pos_mask.astype(float))
+    return weights.clip(lower=0.10, upper=8.0)
+
+
+def _selector_ranking_params(objective: str, max_label: int) -> Dict[str, Any]:
+    if objective == "pairwise":
+        return {
+            "objective": "rank_xendcg",
+            "metric": "ndcg",
+        }
+    return {
+        "objective": "lambdarank",
+        "metric": "ndcg",
+        "label_gain": _make_label_gain(max_label),
+    }
+
+
 def train_lightgbm_selector_bundle(
     language: str,
     format_type: str,
@@ -591,7 +674,7 @@ def train_lightgbm_selector_bundle(
     format_type = normalize_format_type(language, format_type)
     alias_family = normalize_alias_family(alias_family)
     objective = _resolve_selector_objective(objective, df)
-    if objective not in {"pointwise", "ranking"}:
+    if objective not in SELECTOR_OBJECTIVE_CHOICES:
         raise ValueError(f"Unsupported selector objective: {objective}")
 
     if "language" in df.columns:
@@ -612,27 +695,32 @@ def train_lightgbm_selector_bundle(
     valid_df = df.iloc[valid_idx].copy()
     X_train = frame.iloc[train_idx].copy()
     X_valid = frame.iloc[valid_idx].copy()
+    w_train = _selector_sample_weight(train_df)
+    w_valid = _selector_sample_weight(valid_df)
 
     params = dict(DEFAULT_LGB_PARAMS)
-    if objective == "ranking":
+    ranking_backend = ""
+    if objective in {"ranking", "pairwise"}:
+        ranking_backend = objective
         y_train = pd.to_numeric(train_df["selector_rank_label"], errors="coerce").fillna(0).astype(int)
         y_valid = pd.to_numeric(valid_df["selector_rank_label"], errors="coerce").fillna(0).astype(int)
         max_label = int(max(y_train.max() if len(y_train) else 0, y_valid.max() if len(y_valid) else 0, 0))
-        params.update({
-            "objective": "lambdarank",
-            "metric": "ndcg",
-            "label_gain": _make_label_gain(max_label),
-        })
+        params.update(_selector_ranking_params(objective, max_label))
         train_order = train_df.sort_values(["selector_group_id", "candidate_index"]).index
         valid_order = valid_df.sort_values(["selector_group_id", "candidate_index"]).index
         train_df = train_df.loc[train_order]
         valid_df = valid_df.loc[valid_order]
         X_train = X_train.loc[train_order]
         X_valid = X_valid.loc[valid_order]
+        y_train = y_train.loc[train_order]
+        y_valid = y_valid.loc[valid_order]
+        w_train = w_train.loc[train_order]
+        w_valid = w_valid.loc[valid_order]
         dtrain = lgb.Dataset(
             X_train,
             label=y_train,
             group=_group_sizes_from_series(train_df["selector_group_id"]),
+            weight=w_train,
             categorical_feature=categorical_features,
             free_raw_data=False,
         )
@@ -640,6 +728,7 @@ def train_lightgbm_selector_bundle(
             X_valid,
             label=y_valid,
             group=_group_sizes_from_series(valid_df["selector_group_id"]),
+            weight=w_valid,
             categorical_feature=categorical_features,
             free_raw_data=False,
         )
@@ -650,12 +739,14 @@ def train_lightgbm_selector_bundle(
         dtrain = lgb.Dataset(
             X_train,
             label=y_train,
+            weight=w_train,
             categorical_feature=categorical_features,
             free_raw_data=False,
         )
         dvalid = lgb.Dataset(
             X_valid,
             label=y_valid,
+            weight=w_valid,
             categorical_feature=categorical_features,
             free_raw_data=False,
         )
@@ -674,11 +765,17 @@ def train_lightgbm_selector_bundle(
     pred = booster.predict(X_valid)
     selector_summary = {
         "objective": objective,
+        "ranking_backend": ranking_backend,
         "rows": int(len(df)),
         "groups": int(df["selector_group_id"].nunique()) if "selector_group_id" in df.columns else 0,
         "top1_baseline": float(_selector_baseline_top1_hit_rate(valid_df)),
         "top1_model": float(_selector_top1_hit_rate(valid_df, pred)),
+        "top1_blank_attach_baseline": float(_selector_top1_blank_attach_rate(valid_df, pred=None)),
+        "top1_blank_attach_model": float(_selector_top1_blank_attach_rate(valid_df, pred=pred)),
     }
+    selector_summary["top1_blank_attach_delta"] = float(
+        selector_summary["top1_blank_attach_model"] - selector_summary["top1_blank_attach_baseline"]
+    )
     if objective == "pointwise":
         selector_summary["score_mae"] = float(
             mean_absolute_error(
@@ -696,6 +793,7 @@ def train_lightgbm_selector_bundle(
         "feature_names": feature_names,
         "categorical_features": categorical_features,
         "selector_objective": objective,
+        "selector_ranking_backend": ranking_backend,
         "alias_family": alias_family,
         "selector_default_enabled": bool(selector_enabled_by_default(language, format_type, alias_family=alias_family)),
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -758,9 +856,15 @@ def evaluate_lightgbm_selector_bundle(model_dir: str, selector_dataset_csv: str,
         "rows": int(len(df)),
         "groups": int(df["selector_group_id"].nunique()) if "selector_group_id" in df.columns else 0,
         "objective": str(meta.get("selector_objective", "") or ""),
+        "ranking_backend": str(meta.get("selector_ranking_backend", "") or ""),
         "top1_baseline": float(_selector_baseline_top1_hit_rate(df)),
         "top1_model": float(_selector_top1_hit_rate(df, pred)),
+        "top1_blank_attach_baseline": float(_selector_top1_blank_attach_rate(df, pred=None)),
+        "top1_blank_attach_model": float(_selector_top1_blank_attach_rate(df, pred=pred)),
     }
+    summary["top1_blank_attach_delta"] = float(
+        summary["top1_blank_attach_model"] - summary["top1_blank_attach_baseline"]
+    )
     if "selector_quality_score" in df.columns:
         truth = pd.to_numeric(df["selector_quality_score"], errors="coerce").fillna(0.0)
         summary["score_mae"] = float(mean_absolute_error(truth, pred))

@@ -41,7 +41,7 @@ def prepare_file_context(
     mel_cache_for_signal: MutableMapping[str, object],
     find_wav_path_fn: Callable[[str, str, Mapping[str, str]], str],
     read_wav_fn: Callable[[str], tuple[object, int]],
-    mel_envelope_fn: Callable[[object, int], object],
+    mel_envelope_fn: Callable[..., object],
     wav_duration_fn: Optional[Callable[[str], float]] = None,
 ) -> PreparedFileContext:
     context = PreparedFileContext(fname=fname, lines=lines)
@@ -70,7 +70,15 @@ def prepare_file_context(
     mel_ctx = mel_cache_for_signal.get(context.wav_path_for_signal)
     if mel_ctx is None:
         audio_sig, sr_sig = read_wav_fn(context.wav_path_for_signal)
-        mel_ctx = mel_envelope_fn(audio_sig, sr_sig)
+        try:
+            mel_ctx = mel_envelope_fn(
+                audio_sig,
+                sr_sig,
+                wav_name_hint=(context.output_wav_name or context.real_wav_name),
+                wav_path_hint=context.wav_path_for_signal,
+            )
+        except TypeError:
+            mel_ctx = mel_envelope_fn(audio_sig, sr_sig)
         mel_cache_for_signal[context.wav_path_for_signal] = mel_ctx
         if sr_sig:
             context.wav_duration_ms = (len(audio_sig) / float(sr_sig)) * 1000.0

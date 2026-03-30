@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import ctypes
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.oto_ml.coupled.model import (
@@ -53,11 +54,26 @@ def _load_json(path: str) -> Dict[str, Any]:
 def _select_onnx_providers(ort, device: str = "auto") -> Tuple[List[str], str]:
     req = str(device or "auto").strip().lower()
     available = set(ort.get_available_providers() or [])
-    if req in {"auto", "cuda"} and "CUDAExecutionProvider" in available:
+    if req in {"auto", "cuda"} and "CUDAExecutionProvider" in available and _onnx_cuda_runtime_ready():
         return ["CUDAExecutionProvider", "CPUExecutionProvider"], "cuda"
+    if req == "cuda":
+        logger.warning("[OTO-ML] CUDA requested but runtime dependencies are unavailable. Falling back to CPU.")
     if req == "dml" and "DmlExecutionProvider" in available:
         return ["DmlExecutionProvider", "CPUExecutionProvider"], "dml"
     return ["CPUExecutionProvider"], "cpu"
+
+
+def _onnx_cuda_runtime_ready() -> bool:
+    if str(os.name).strip().lower() != "nt":
+        return True
+    required = ["cudnn64_9.dll"]
+    for dll_name in required:
+        try:
+            ctypes.WinDLL(dll_name)
+        except Exception:
+            logger.info("[OTO-ML] ONNX CUDA dependency missing: %s", dll_name)
+            return False
+    return True
 
 
 def _resolve_onnx_io(session, sidecar: Dict[str, Any]) -> Dict[str, Any]:
@@ -178,6 +194,11 @@ def _load_coupled_bundle_onnx(
         "categorical_bucket_sizes": categorical_bucket_sizes,
         "patch_features": patch_features,
         "head_mode": head_mode,
+        "alias_branch_mode": str(sidecar.get("alias_branch_mode", "shared") or "shared"),
+        "alias_branch_experts": int(sidecar.get("alias_branch_experts", 4) or 4),
+        "alias_type_cat_index": int(sidecar.get("alias_type_cat_index", -1) or -1),
+        "alias_type_bucket_size": int(sidecar.get("alias_type_bucket_size", 0) or 0),
+        "alias_fallback_ids": [int(v) for v in (sidecar.get("alias_fallback_ids", []) or [])],
         "anchor_targets": list(sidecar.get("anchor_targets") or ANCHOR_TARGET_NAMES),
         "delta_targets": list(sidecar.get("delta_targets") or DELTA_TARGET_NAMES),
         "rawmel_enabled": rawmel_enabled,
@@ -227,6 +248,11 @@ def _load_coupled_bundle_torch(
             aux_dim=aux_dim,
             categorical_bucket_sizes=categorical_bucket_sizes,
             head_mode=head_mode,
+            alias_branch_mode=str(payload.get("alias_branch_mode", "shared") or "shared"),
+            alias_branch_experts=int(payload.get("alias_branch_experts", 4) or 4),
+            alias_type_cat_index=int(payload.get("alias_type_cat_index", -1) or -1),
+            alias_type_bucket_size=int(payload.get("alias_type_bucket_size", 0) or 0),
+            alias_fallback_ids=list(payload.get("alias_fallback_ids", []) or []),
         )
     else:
         model = _build_model(
@@ -238,6 +264,11 @@ def _load_coupled_bundle_torch(
             aux_dim=aux_dim,
             categorical_bucket_sizes=categorical_bucket_sizes,
             head_mode=head_mode,
+            alias_branch_mode=str(payload.get("alias_branch_mode", "shared") or "shared"),
+            alias_branch_experts=int(payload.get("alias_branch_experts", 4) or 4),
+            alias_type_cat_index=int(payload.get("alias_type_cat_index", -1) or -1),
+            alias_type_bucket_size=int(payload.get("alias_type_bucket_size", 0) or 0),
+            alias_fallback_ids=list(payload.get("alias_fallback_ids", []) or []),
         )
     model.load_state_dict(payload["state_dict"])
     run_device = _resolve_device(torch, device)
@@ -253,6 +284,11 @@ def _load_coupled_bundle_torch(
         "categorical_bucket_sizes": categorical_bucket_sizes,
         "patch_features": patch_features,
         "head_mode": head_mode,
+        "alias_branch_mode": str(payload.get("alias_branch_mode", "shared") or "shared"),
+        "alias_branch_experts": int(payload.get("alias_branch_experts", 4) or 4),
+        "alias_type_cat_index": int(payload.get("alias_type_cat_index", -1) or -1),
+        "alias_type_bucket_size": int(payload.get("alias_type_bucket_size", 0) or 0),
+        "alias_fallback_ids": [int(v) for v in (payload.get("alias_fallback_ids", []) or [])],
         "anchor_targets": list(payload.get("anchor_targets") or ANCHOR_TARGET_NAMES),
         "delta_targets": list(payload.get("delta_targets") or DELTA_TARGET_NAMES),
         "rawmel_enabled": rawmel_enabled,

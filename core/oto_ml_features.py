@@ -21,6 +21,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import math
 import os
 import re
 import hashlib
@@ -50,8 +51,8 @@ from core.oto_ml.features.mel_patches import (
 
 logger = logging.getLogger(__name__)
 
-FEATURE_VERSION = "v12"
-TRAIN_ROW_MATCH_VERSION = "v12"
+FEATURE_VERSION = "v17"
+TRAIN_ROW_MATCH_VERSION = "v17"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
 ANCHOR_TARGET_NAMES = ["delta_offset", "delta_pre", "delta_cutoff"]
 DELTA_TARGET_NAMES = ["delta_cons", "delta_ovl"]
@@ -72,11 +73,13 @@ FEATURE_NAMES = [
     "base_cutoff_to_next_anchor_ms", "energy_mean", "energy_min", "energy_max",
     "energy_slope_pre", "energy_slope_post", "valley_energy", "valley_dist_from_cutoff_ms",
     "db_mean", "db_min", "db_silence_ratio", "f0_voicing_mean", "f0_voicing_near_pre",
+    "f0_valid_ratio", "f0_gap_ratio", "f0_continuity", "rms_norm_wav", "rms_norm_vb",
     "zcr_mean", "spectral_flux_mean", "onset_class", "voicing_class", "is_tense",
     "is_diphthong", "coda_type", "vowel_class", "mora_position", "bridge_type",
     "is_nasal_or_sonorant", "prev_alias_type", "next_alias_type", "prev_base_pre",
     "next_base_pre", "prev_base_offset", "next_base_offset", "prev_base_cutoff_abs",
     "next_base_cutoff_abs",
+    "m_map_ok", "m_offset_hint_abs", "m_cutoff_hint_abs", "m_hint_rank",
     "mapping_confidence", "used_alias_occurrence_mapping", "used_exact_vowel_fix",
     "used_nuclei_fallback", "used_alias_based_syllables", "words_vs_alias_score_margin",
     "jump_blocked_flag", "mapping_reason_code",
@@ -793,7 +796,8 @@ def _compute_segment_stats(mel_ctx, offset_ms: float, pre_abs: float, cut_abs: f
         "energy_mean": 0.0, "energy_min": 0.0, "energy_max": 0.0, "energy_slope_pre": 0.0,
         "energy_slope_post": 0.0, "valley_energy": 0.0, "valley_dist_from_cutoff_ms": 0.0,
         "db_mean": 0.0, "db_min": 0.0, "db_silence_ratio": 0.0, "f0_voicing_mean": 0.0,
-        "f0_voicing_near_pre": 0.0, "zcr_mean": 0.0, "spectral_flux_mean": 0.0,
+        "f0_voicing_near_pre": 0.0, "f0_valid_ratio": 0.0, "f0_gap_ratio": 0.0,
+        "f0_continuity": 0.0, "zcr_mean": 0.0, "spectral_flux_mean": 0.0,
         "mel_voiced_formant_ratio": 0.0,
         "mel_silence_sparse_ratio": 0.0,
         "mel_unvoiced_diffuse_ratio": 0.0,
@@ -846,7 +850,26 @@ def _compute_segment_stats(mel_ctx, offset_ms: float, pre_abs: float, cut_abs: f
             silence_th = float(mel_ctx.get("db_silence_th", -42.0))
             stats["db_silence_ratio"] = float(np.mean(local_db <= silence_th))
         if f0_arr is not None and len(f0_arr) == len(en):
-            stats["f0_voicing_mean"] = _window_mean(f0_arr[seg_mask])
+            local_f0 = np.clip(np.asarray(f0_arr)[seg_mask], 0.0, 1.0)
+            stats["f0_voicing_mean"] = _window_mean(local_f0)
+            valid_th = float(os.environ.get("UTOA_ML_F0_VALID_TH", "0.50") or 0.50)
+            valid_mask = local_f0 >= valid_th
+            stats["f0_valid_ratio"] = float(np.mean(valid_mask)) if len(valid_mask) else 0.0
+            stats["f0_gap_ratio"] = float(1.0 - stats["f0_valid_ratio"])
+            cont_scope_mask = np.ones((len(seg_mask),), dtype=bool)
+            if cls_unvoiced is not None and len(cls_unvoiced) == len(en):
+                cont_scope_mask &= (np.asarray(cls_unvoiced)[seg_mask] < 0.5)
+            if cls_breath is not None and len(cls_breath) == len(en):
+                cont_scope_mask &= (np.asarray(cls_breath)[seg_mask] < 0.5)
+            scoped_valid = valid_mask[cont_scope_mask]
+            if len(scoped_valid) >= 2:
+                transitions = float(np.sum(scoped_valid[1:] != scoped_valid[:-1]))
+                trans_ratio = transitions / float(max(1, len(scoped_valid) - 1))
+                cont = max(0.0, 1.0 - trans_ratio)
+                cont *= float(np.mean(scoped_valid))
+                stats["f0_continuity"] = max(0.0, min(1.0, cont))
+            elif len(scoped_valid) == 1:
+                stats["f0_continuity"] = float(scoped_valid[0])
         stats["mel_voiced_formant_ratio"] = _ratio(cls_voiced, seg_mask)
         stats["mel_silence_sparse_ratio"] = _ratio(cls_silence, seg_mask)
         stats["mel_unvoiced_diffuse_ratio"] = _ratio(cls_unvoiced, seg_mask)
@@ -942,6 +965,44 @@ def _safe_ratio(a: float, b: float) -> float:
     if abs(float(b)) < 1e-9:
         return 0.0
     return float(a) / float(b)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "on", "y"}
+
+
+def _compute_audio_rms(audio) -> float:
+    if np is None or audio is None:
+        return 0.0
+    try:
+        arr = np.asarray(audio, dtype=np.float64).reshape(-1)
+    except Exception:
+        return 0.0
+    if arr.size <= 0:
+        return 0.0
+    return float(np.sqrt(np.mean(np.square(arr))))
+
+
+def _compute_segment_rms(audio, sr: int, start_ms: float, end_ms: float) -> float:
+    if np is None or audio is None or not sr or sr <= 0:
+        return 0.0
+    try:
+        arr = np.asarray(audio, dtype=np.float64).reshape(-1)
+    except Exception:
+        return 0.0
+    if arr.size <= 0:
+        return 0.0
+    s = int(max(0.0, float(start_ms)) * float(sr) / 1000.0)
+    e = int(max(float(start_ms), float(end_ms)) * float(sr) / 1000.0)
+    s = max(0, min(s, int(arr.size)))
+    e = max(s + 1, min(e, int(arr.size)))
+    seg = arr[s:e]
+    if seg.size <= 0:
+        return 0.0
+    return float(np.sqrt(np.mean(np.square(seg))))
 
 
 def _lazy_wav_helpers():
@@ -1232,6 +1293,11 @@ def _feature_row_from_context(language: str, format_type: str, row: Dict[str, ob
     feat["base_cutoff_to_next_anchor_ms"] = next_anchor_ms - cut_abs if next_anchor_ms else 0.0
 
     feat.update(_compute_segment_stats(mel_ctx, offset, pre_abs, cut_abs, audio, sr))
+    seg_rms = _compute_segment_rms(audio, sr, max(0.0, offset), max(cut_abs, pre_abs + 12.0))
+    wav_rms = float(file_stats.get("wav_rms_linear", 0.0) or 0.0) if file_stats else 0.0
+    vb_rms = float(file_stats.get("voicebank_rms_linear", 0.0) or 0.0) if file_stats else 0.0
+    feat["rms_norm_wav"] = _safe_ratio(seg_rms, max(wav_rms, 1e-8)) if wav_rms > 0.0 else 0.0
+    feat["rms_norm_vb"] = _safe_ratio(seg_rms, max(vb_rms, 1e-8)) if vb_rms > 0.0 else feat["rms_norm_wav"]
     mel_safety = 0.0
     if alias_type in {"cv", "cv_head", "vcv"}:
         blank_conf = float(feat.get("blank_span_confidence", 0.0) or 0.0)
@@ -1303,8 +1369,17 @@ def _compute_file_context_stats(alias_types: List[str]) -> Dict[str, float]:
     }
 
 
-def _compute_mel_file_stats(mel_ctx, phones: List[object], language: str) -> Dict[str, float]:
+def _compute_mel_file_stats(
+    mel_ctx,
+    phones: List[object],
+    language: str,
+    *,
+    wav_rms_linear: float = 0.0,
+    voicebank_rms_linear: float = 0.0,
+) -> Dict[str, float]:
     stats: Dict[str, float] = {}
+    stats["wav_rms_linear"] = float(max(0.0, wav_rms_linear))
+    stats["voicebank_rms_linear"] = float(max(0.0, voicebank_rms_linear))
     if mel_ctx:
         en = mel_ctx.get("energy")
         f0v = mel_ctx.get("f0_voicing")
@@ -1338,10 +1413,340 @@ def _compute_mel_file_stats(mel_ctx, phones: List[object], language: str) -> Dic
     return stats
 
 
+def _build_mapping_syllables_info(language: str, words: List[object], phones: List[object], mel_ctx) -> List[Dict[str, object]]:
+    out: List[Dict[str, object]] = []
+    lang = str(language or "").strip().lower()
+    if not words:
+        words = []
+    try:
+        from core.oto_generator import (
+            _estimate_kr_blank_confidence_at_time,
+            _estimate_kr_mel_class_scores_at_time,
+        )
+    except Exception:
+        _estimate_kr_blank_confidence_at_time = None
+        _estimate_kr_mel_class_scores_at_time = None
+
+    for w in words:
+        mark = str(getattr(w, "mark", "") or "").strip()
+        if not mark:
+            continue
+        w_start = float(getattr(w, "minTime", 0.0) or 0.0)
+        w_end = float(getattr(w, "maxTime", 0.0) or 0.0)
+        if w_end <= w_start:
+            continue
+        s_phones: List[object] = []
+        for p in phones or []:
+            p_start = float(getattr(p, "minTime", 0.0) or 0.0)
+            p_end = float(getattr(p, "maxTime", 0.0) or 0.0)
+            if p_start >= (w_start - 0.01) and p_end <= (w_end + 0.01):
+                s_phones.append(p)
+
+        row: Dict[str, object] = {
+            "word": mark,
+            "start_time": float(w_start),
+            "end_time": float(w_end),
+            "phones": s_phones,
+        }
+        if lang == "korean":
+            try:
+                from core.lab_generator import decompose_hangul_to_roman
+                from core.kr_oto_rules import _kr_cv_kernel
+
+                roman_parts: List[str] = []
+                for ch in mark:
+                    roman_parts.extend(decompose_hangul_to_roman(ch))
+                roman_raw = "".join(roman_parts).lower()
+                row["roman"] = roman_raw
+                row["roman_cv"] = _kr_cv_kernel(roman_raw)
+            except Exception:
+                row["roman"] = mark.lower()
+                row["roman_cv"] = mark.lower()
+        else:
+            try:
+                from core.ja_oto_mapping import _normalize_ja_syllable_token
+
+                row["roman"] = _normalize_ja_syllable_token(mark)
+            except Exception:
+                row["roman"] = mark.lower()
+
+        if mel_ctx and _estimate_kr_blank_confidence_at_time is not None and _estimate_kr_mel_class_scores_at_time is not None:
+            t_ms = float(w_start * 1000.0)
+            try:
+                row["blank_confidence"] = float(_estimate_kr_blank_confidence_at_time(mel_ctx, t_ms))
+                mel_scores = _estimate_kr_mel_class_scores_at_time(mel_ctx, t_ms)
+                row["mel_voiced_formant_conf"] = float(mel_scores.get("mel_voiced_formant_conf", 0.0) or 0.0)
+                row["mel_silence_sparse_conf"] = float(mel_scores.get("mel_silence_sparse_conf", 0.0) or 0.0)
+                row["mel_unvoiced_diffuse_conf"] = float(mel_scores.get("mel_unvoiced_diffuse_conf", 0.0) or 0.0)
+                row["mel_breath_like_conf"] = float(mel_scores.get("mel_breath_like_conf", 0.0) or 0.0)
+            except Exception:
+                row["blank_confidence"] = 0.0
+        out.append(row)
+    if len(out) <= 1 and phones:
+        fallback: List[Dict[str, object]] = []
+        for p in phones:
+            mark = str(getattr(p, "mark", "") or "").strip()
+            if not mark:
+                continue
+            clean = _clean_mark(mark)
+            if clean in {"", "sil", "sp", "spn", "pau"}:
+                continue
+            p_start = float(getattr(p, "minTime", 0.0) or 0.0)
+            p_end = float(getattr(p, "maxTime", 0.0) or 0.0)
+            if p_end <= p_start:
+                continue
+            row: Dict[str, object] = {
+                "word": mark,
+                "start_time": float(p_start),
+                "end_time": float(p_end),
+                "phones": [p],
+            }
+            if lang == "korean":
+                try:
+                    from core.kr_oto_rules import _kr_cv_kernel
+
+                    row["roman"] = clean
+                    row["roman_cv"] = _kr_cv_kernel(clean)
+                except Exception:
+                    row["roman"] = clean
+                    row["roman_cv"] = clean
+            else:
+                try:
+                    from core.ja_oto_mapping import _normalize_ja_syllable_token
+
+                    row["roman"] = _normalize_ja_syllable_token(clean)
+                except Exception:
+                    row["roman"] = clean
+            if mel_ctx and _estimate_kr_blank_confidence_at_time is not None and _estimate_kr_mel_class_scores_at_time is not None:
+                t_ms = float(p_start * 1000.0)
+                try:
+                    row["blank_confidence"] = float(_estimate_kr_blank_confidence_at_time(mel_ctx, t_ms))
+                    mel_scores = _estimate_kr_mel_class_scores_at_time(mel_ctx, t_ms)
+                    row["mel_voiced_formant_conf"] = float(mel_scores.get("mel_voiced_formant_conf", 0.0) or 0.0)
+                    row["mel_silence_sparse_conf"] = float(mel_scores.get("mel_silence_sparse_conf", 0.0) or 0.0)
+                    row["mel_unvoiced_diffuse_conf"] = float(mel_scores.get("mel_unvoiced_diffuse_conf", 0.0) or 0.0)
+                    row["mel_breath_like_conf"] = float(mel_scores.get("mel_breath_like_conf", 0.0) or 0.0)
+                except Exception:
+                    row["blank_confidence"] = 0.0
+            fallback.append(row)
+        if len(fallback) > len(out):
+            out = fallback
+    return out
+
+
+def _candidate_anchor_ms_from_syllable(language: str, syl: Dict[str, object]) -> float:
+    phones = list((syl or {}).get("phones") or [])
+    start_ms = float((syl or {}).get("start_time", 0.0) or 0.0) * 1000.0
+    if not phones:
+        return float(start_ms)
+    first_any = None
+    first_vowel = None
+    lang = str(language or "").strip().lower()
+    for p in phones:
+        mark = str(getattr(p, "mark", "") or "")
+        clean = _clean_mark(mark)
+        p_start = float(getattr(p, "minTime", 0.0) or 0.0) * 1000.0
+        if first_any is None and clean not in {"", "sil", "sp", "spn", "pau"}:
+            first_any = p_start
+        if first_vowel is None:
+            if lang == "japanese":
+                try:
+                    from core.ja_oto_mapping import _is_nucleus_phone
+
+                    if _is_nucleus_phone(clean):
+                        first_vowel = p_start
+                except Exception:
+                    pass
+            else:
+                if _is_vowel_mark(language, clean):
+                    first_vowel = p_start
+    if first_vowel is not None:
+        return float(first_vowel)
+    if first_any is not None:
+        return float(first_any)
+    return float(start_ms)
+
+
+def _extract_wav_mapping_hints(
+    language: str,
+    format_type: str,
+    wav_rows: List[Dict[str, object]],
+    alias_types: List[str],
+    words: List[object],
+    phones: List[object],
+    mel_ctx,
+) -> Dict[int, Dict[str, float]]:
+    hints: Dict[int, Dict[str, float]] = {}
+    if not wav_rows:
+        return hints
+    lang = str(language or "").strip().lower()
+    mapping_rows: List[Tuple[int, str, str]] = []
+
+    for idx, row in enumerate(wav_rows):
+        alias = str(row.get("alias", "") or "")
+        alias_type = str(alias_types[idx] if idx < len(alias_types) else "").strip().lower()
+        if alias_type not in {"cv", "cv_head", "vcv", "mono"}:
+            continue
+        token = ""
+        try:
+            if lang == "japanese":
+                from core.ja_oto_mapping import _alias_to_ja_cv_target
+
+                token = str(_alias_to_ja_cv_target(alias, alias_type) or "")
+            else:
+                from core.kr_oto_mapping import _alias_to_cv_target
+
+                token = str(_alias_to_cv_target(alias, alias_type) or "")
+        except Exception:
+            token = ""
+        if token:
+            mapping_rows.append((idx, alias_type, token))
+
+    if not mapping_rows:
+        return hints
+
+    def _fallback_hint_for_row(row_idx: int) -> Dict[str, float]:
+        row = wav_rows[row_idx] if 0 <= int(row_idx) < len(wav_rows) else {}
+        try:
+            base_offset = float(row.get("offset", 0.0) or 0.0)
+        except Exception:
+            base_offset = 0.0
+        try:
+            base_cutoff = abs(float(row.get("cutoff", 0.0) or 0.0))
+        except Exception:
+            base_cutoff = 0.0
+        cutoff_abs = max(base_offset + 24.0, base_offset + base_cutoff)
+        return {
+            "m_map_ok": 0.50,
+            "m_offset_hint_abs": float(base_offset),
+            "m_cutoff_hint_abs": float(cutoff_abs),
+            "m_hint_rank": 1.0,
+        }
+
+    syllables_info = _build_mapping_syllables_info(lang, words, phones, mel_ctx)
+    if not syllables_info:
+        return hints
+
+    expected_tokens = [tok for _idx, _alias_type, tok in mapping_rows]
+    try:
+        if lang == "japanese":
+            from core.ja_mapping_v2 import build_ja_cv_anchor_plan
+
+            plan = build_ja_cv_anchor_plan(expected_tokens, syllables_info, use_mel=True, format_type=format_type)
+        else:
+            from core.kr_mapping_v2 import build_kr_cv_anchor_plan
+
+            plan = build_kr_cv_anchor_plan(expected_tokens, syllables_info, use_mel=True, format_type=format_type)
+    except Exception:
+        plan = {}
+
+    indices = list((plan or {}).get("indices") or [])
+    score_rows = list((plan or {}).get("score_rows") or [])
+    feature_rows = list((plan or {}).get("feature_rows") or [])
+    if not indices or len(indices) != len(mapping_rows):
+        for row_idx, _alias_type, _tok in mapping_rows:
+            hints[int(row_idx)] = _fallback_hint_for_row(int(row_idx))
+        return hints
+
+    topk_rows = []
+    top1_indices = []
+    if feature_rows and len(feature_rows) == len(score_rows):
+        try:
+            from core.oto_ml_mapping_runtime import predict_mapping_hint_topk
+
+            hint_payload = predict_mapping_hint_topk(
+                language=lang,
+                format_type=format_type,
+                score_rows=score_rows,
+                feature_rows=feature_rows,
+                top_k=3,
+            )
+            if bool(((hint_payload or {}).get("meta") or {}).get("applied", False)):
+                topk_rows = list((hint_payload or {}).get("topk_rows") or [])
+                top1_indices = list((hint_payload or {}).get("top1_indices") or [])
+        except Exception:
+            topk_rows = []
+            top1_indices = []
+
+    for target_idx, (row_idx, _alias_type, _tok) in enumerate(mapping_rows):
+        cand_idx = int(indices[target_idx]) if target_idx < len(indices) else -1
+        model_top = None
+        if target_idx < len(topk_rows):
+            cand_rows = list(topk_rows[target_idx] or [])
+            if cand_rows:
+                model_top = dict(cand_rows[0])
+                if target_idx < len(top1_indices):
+                    cand_idx = int(top1_indices[target_idx])
+                else:
+                    cand_idx = int(model_top.get("cand_idx", cand_idx))
+        if not (0 <= cand_idx < len(syllables_info)):
+            hints[int(row_idx)] = _fallback_hint_for_row(int(row_idx))
+            continue
+        syl = syllables_info[cand_idx]
+        anchor_ms = _candidate_anchor_ms_from_syllable(lang, syl)
+        syl_start_ms = float((syl or {}).get("start_time", 0.0) or 0.0) * 1000.0
+        syl_end_ms = float((syl or {}).get("end_time", 0.0) or 0.0) * 1000.0
+        syl_dur_ms = max(16.0, syl_end_ms - syl_start_ms)
+        try:
+            pre = float(wav_rows[row_idx].get("pre", 0.0) or 0.0)
+        except Exception:
+            pre = 0.0
+        offset_hint_abs = max(0.0, anchor_ms - pre)
+        cutoff_hint_abs = max(syl_end_ms, offset_hint_abs + max(28.0, syl_dur_ms * 0.70))
+
+        rank = 1
+        p_map_ok = 0.0
+        if target_idx < len(score_rows):
+            row_scores = list(score_rows[target_idx] or [])
+            if row_scores and 0 <= cand_idx < len(row_scores):
+                ranked = sorted(range(len(row_scores)), key=lambda idx_: row_scores[idx_], reverse=True)
+                try:
+                    rank = ranked.index(cand_idx) + 1
+                except Exception:
+                    rank = 1
+                best = float(row_scores[cand_idx])
+                second = max(
+                    (float(v) for j, v in enumerate(row_scores) if j != cand_idx),
+                    default=(best - 12.0),
+                )
+                gap = float(best - second)
+                p_map_ok = 1.0 / (1.0 + math.exp(-max(-20.0, min(20.0, gap / 18.0))))
+        if isinstance(model_top, dict):
+            try:
+                p_map_ok = float(model_top.get("p_map_ok", p_map_ok) or p_map_ok)
+            except Exception:
+                pass
+            try:
+                rank = int(model_top.get("m_rank", rank) or rank)
+            except Exception:
+                pass
+            try:
+                pred_off = float(model_top.get("m_offset_hint", 0.0) or 0.0)
+                if pred_off > 0.0:
+                    offset_hint_abs = float(pred_off)
+            except Exception:
+                pass
+            try:
+                pred_cut = float(model_top.get("m_cutoff_hint", 0.0) or 0.0)
+                if pred_cut > (offset_hint_abs + 4.0):
+                    cutoff_hint_abs = float(pred_cut)
+            except Exception:
+                pass
+
+        hints[int(row_idx)] = {
+            "m_map_ok": float(max(0.0, min(1.0, p_map_ok))),
+            "m_offset_hint_abs": float(offset_hint_abs),
+            "m_cutoff_hint_abs": float(cutoff_hint_abs),
+            "m_hint_rank": float(rank),
+        }
+    return hints
+
+
 def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str, custom_phonemes_path: str = "", voicebank_id: str = "", format_type_override: str = "") -> List[Dict[str, object]]:
     lang = str(language).strip().lower()
     custom_map = load_custom_map(custom_phonemes_path)
     fmt_tag = normalize_format_type(lang, str(format_type_override or "").strip().lower())
+    m_hint_toggle = "on" if _env_bool("UTOA_M_HINT_ENABLE", True) else "off"
     prefix_map_path = find_prefix_map_path(oto_path, wav_dir, tg_dir)
     cache_path = _feature_cache_path(
         lang,
@@ -1349,7 +1754,7 @@ def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str
         tg_dir,
         wav_dir,
         custom_phonemes_path,
-        f"{voicebank_id}|fmt={fmt_tag}",
+        f"{voicebank_id}|fmt={fmt_tag}|m_hint={m_hint_toggle}",
         prefix_map_path,
     )
     cached_rows = _load_feature_cache(cache_path)
@@ -1382,6 +1787,29 @@ def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str
     vb_id = infer_voicebank_id(oto_path, tg_dir=tg_dir, wav_dir=wav_dir, voicebank_id=voicebank_id)
     mel_cache: Dict[str, object] = {}
     audio_cache: Dict[str, Tuple[object, int]] = {}
+    wav_rms_by_name: Dict[str, float] = {}
+
+    for wav_name in rows_by_wav.keys():
+        wav_path = find_wav_path_for_name(wav_name, wav_dir, wav_index)
+        if not wav_path:
+            continue
+        if wav_path not in audio_cache:
+            audio_cache[wav_path] = read_wav_mono_np(wav_path)
+        audio, sr = audio_cache[wav_path]
+        wav_rms_by_name[wav_name] = _compute_audio_rms(audio)
+        if wav_path not in mel_cache:
+            mel_cache[wav_path] = mel_envelope(audio, sr)
+
+    vb_rms_vals = [float(v) for v in wav_rms_by_name.values() if float(v) > 0.0]
+    if vb_rms_vals:
+        if np is not None:
+            voicebank_rms_ref = float(np.median(np.asarray(vb_rms_vals, dtype=np.float64)))
+        else:
+            vs = sorted(vb_rms_vals)
+            mid = len(vs) // 2
+            voicebank_rms_ref = float(vs[mid])
+    else:
+        voicebank_rms_ref = 0.0
 
     for wav_name, wav_rows in rows_by_wav.items():
         aliases = [str(r["alias"]) for r in wav_rows]
@@ -1407,8 +1835,30 @@ def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str
             alias_type = classify_alias_type(lang, alias, custom_map=custom_map)
             row["alias_type"] = alias_type
             alias_types.append(alias_type)
+        mapping_hint_enabled = _env_bool("UTOA_M_HINT_ENABLE", True)
+        mapping_hints_by_idx = (
+            _extract_wav_mapping_hints(
+                lang,
+                format_type,
+                wav_rows,
+                alias_types,
+                words,
+                phones,
+                mel_ctx,
+            )
+            if mapping_hint_enabled
+            else {}
+        )
         file_stats = _compute_file_context_stats(alias_types)
-        file_stats.update(_compute_mel_file_stats(mel_ctx, phones, lang))
+        file_stats.update(
+            _compute_mel_file_stats(
+                mel_ctx,
+                phones,
+                lang,
+                wav_rms_linear=float(wav_rms_by_name.get(wav_name, 0.0) or 0.0),
+                voicebank_rms_linear=float(voicebank_rms_ref),
+            )
+        )
 
         for idx, row in enumerate(wav_rows):
             alias_type = alias_types[idx]
@@ -1419,6 +1869,39 @@ def extract_feature_rows(language: str, oto_path: str, tg_dir: str, wav_dir: str
                 wav_rows[idx + 1] if idx + 1 < len(wav_rows) else None,
                 file_stats,
             )
+            hint = mapping_hints_by_idx.get(int(idx), {}) if mapping_hint_enabled else {}
+            if mapping_hint_enabled:
+                m_map_ok = float(hint.get("m_map_ok", feat.get("mapping_confidence", 0.0)) or 0.0)
+                m_offset_hint_abs = float(
+                    hint.get(
+                        "m_offset_hint_abs",
+                        feat.get("mel_offset_candidate_ms", feat.get("base_offset", 0.0)),
+                    )
+                    or 0.0
+                )
+                m_cutoff_hint_abs = float(
+                    hint.get(
+                        "m_cutoff_hint_abs",
+                        feat.get("mel_cutoff_candidate_ms", feat.get("base_cutoff_abs", 0.0)),
+                    )
+                    or 0.0
+                )
+                if m_offset_hint_abs <= 0.0:
+                    m_offset_hint_abs = float(feat.get("base_offset", 0.0) or 0.0)
+                if m_cutoff_hint_abs <= (m_offset_hint_abs + 4.0):
+                    m_cutoff_hint_abs = max(
+                        float(feat.get("base_cutoff_abs", 0.0) or 0.0),
+                        m_offset_hint_abs + 24.0,
+                    )
+                feat["m_map_ok"] = float(max(0.0, min(1.0, m_map_ok)))
+                feat["m_offset_hint_abs"] = float(m_offset_hint_abs)
+                feat["m_cutoff_hint_abs"] = float(m_cutoff_hint_abs)
+                feat["m_hint_rank"] = float(hint.get("m_hint_rank", 99.0) or 99.0)
+            else:
+                feat["m_map_ok"] = 0.0
+                feat["m_offset_hint_abs"] = float(feat.get("base_offset", 0.0) or 0.0)
+                feat["m_cutoff_hint_abs"] = float(feat.get("base_cutoff_abs", 0.0) or 0.0)
+                feat["m_hint_rank"] = 99.0
             if "mapping_confidence" in row:
                 try:
                     feat["mapping_confidence"] = float(row.get("mapping_confidence", feat.get("mapping_confidence", 0.0)))
@@ -1942,7 +2425,7 @@ def dataset_fieldnames() -> List[str]:
         "voicebank_id", "wav", "alias", "wav_norm", "alias_norm", "occurrence_index", "line_index", "source_oto_id", "source_row_id",
         "mel_patch_key", "mel_patch_debug_key", "mel_onset_anchor_ms", "mel_tail_anchor_ms", "mel_patch_source",
         *FEATURE_NAMES,
-        "manual_offset", "manual_cons", "manual_cutoff", "manual_pre", "manual_ovl",
+        "manual_offset", "manual_cons", "manual_cutoff", "manual_cutoff_abs", "manual_cutoff_mode", "manual_pre", "manual_ovl",
         *TARGET_NAMES,
         *AUX_TARGET_NAMES,
         "label_source", "sample_weight", "blank_risk_score", "blank_risk_flag",
