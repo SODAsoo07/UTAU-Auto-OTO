@@ -236,7 +236,7 @@ logger = logging.getLogger(__name__)
 # ==============================================================================
 
 APP_NAME = "UTAU Auto OTO Generator"
-APP_VERSION = "2.1.3"
+APP_VERSION = "3.0.0"
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 760
 SUPPORTED_RELEASE_CHANNELS = {"stable", "preview"}

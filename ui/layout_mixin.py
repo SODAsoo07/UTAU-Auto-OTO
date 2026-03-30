@@ -1425,6 +1425,7 @@ class LayoutMixin:
         for container in (
             getattr(self, "advanced_dev_runtime_controls_frame", None),
             getattr(self, "advanced_ml_section_frame", None),
+            getattr(self, "advanced_ml_public_frame", None),
         ):
             self._set_suboption_container_enabled(container, enabled)
 

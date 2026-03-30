@@ -145,6 +145,7 @@ function Test-LauncherFailureText {
 $setupExeAbs = ""
 $installExitCode = $null
 $appExe = Join-Path $InstallRoot "UTAU_Auto_OTO\UTAU_Auto_OTO.exe"
+$appUiLayout = Join-Path $InstallRoot "UTAU_Auto_OTO\ui\ui_layout.json"
 $setupMfaInInstall = Join-Path $InstallRoot "setup_mfa.bat"
 $runtimeEnvDir = Join-Path $RuntimeRoot ".env"
 $runtimePythonExe = Join-Path $runtimeEnvDir "python.exe"
@@ -188,6 +189,7 @@ if (-not $SkipInstall) {
 }
 
 Add-Check -Name "installed_app_exe_exists" -Passed (Test-Path -LiteralPath $appExe) -Value $appExe -Required $true
+Add-Check -Name "installed_ui_layout_exists" -Passed (Test-Path -LiteralPath $appUiLayout) -Value $appUiLayout -Required $true
 Add-Check -Name "installed_setup_mfa_exists" -Passed (Test-Path -LiteralPath $setupMfaInInstall) -Value $setupMfaInInstall -Required $true
 
 Add-Check -Name "runtime_root_exists" -Passed (Test-Path -LiteralPath $RuntimeRoot) -Value $RuntimeRoot -Required $true
@@ -233,23 +235,27 @@ if (Test-Path -LiteralPath $runtimeMfaBat) {
     $mfaLauncherPath = $runtimeMfaExe
 }
 
-if (-not [string]::IsNullOrWhiteSpace($mfaLauncherPath)) {
-    $probe = Invoke-LauncherHelp -LauncherPath $mfaLauncherPath
-    $launcherFailed = Test-LauncherFailureText -Text $probe.Output
-    $probeOk = ($probe.ExitCode -eq 0) -and (-not $launcherFailed)
-    $probeDetail = if ($probeOk) { "launcher help ok" } else { ($probe.Output | Out-String).Trim() }
-    Add-Check -Name "runtime_mfa_launcher_help_ok" -Passed $probeOk -Value $mfaLauncherPath -Detail $probeDetail -Required $true
-}
-
-$pythonForCheck = if (Test-Path -LiteralPath $runtimePythonExe) { $runtimePythonExe } elseif (Test-Path -LiteralPath $runtimePythonExeScripts) { $runtimePythonExeScripts } else { "" }
-if (-not [string]::IsNullOrWhiteSpace($pythonForCheck)) {
-    try {
-        & $pythonForCheck -c "import importlib.util,sys; sys.exit(0 if (importlib.util.find_spec('montreal_forced_aligner.command_line.mfa') or importlib.util.find_spec('montreal_forced_aligner')) else 1)" 2>$null
-        $moduleRc = $LASTEXITCODE
-        Add-Check -Name "runtime_mfa_python_module_importable" -Passed ($moduleRc -eq 0) -Value $pythonForCheck -Required $true
-    } catch {
-        Add-Check -Name "runtime_mfa_python_module_importable" -Passed $false -Value $pythonForCheck -Detail $_.Exception.Message -Required $true
+if (-not $SkipSetupMfa) {
+    if (-not [string]::IsNullOrWhiteSpace($mfaLauncherPath)) {
+        $probe = Invoke-LauncherHelp -LauncherPath $mfaLauncherPath
+        $launcherFailed = Test-LauncherFailureText -Text $probe.Output
+        $probeOk = ($probe.ExitCode -eq 0) -and (-not $launcherFailed)
+        $probeDetail = if ($probeOk) { "launcher help ok" } else { ($probe.Output | Out-String).Trim() }
+        Add-Check -Name "runtime_mfa_launcher_help_ok" -Passed $probeOk -Value $mfaLauncherPath -Detail $probeDetail -Required $true
     }
+
+    $pythonForCheck = if (Test-Path -LiteralPath $runtimePythonExe) { $runtimePythonExe } elseif (Test-Path -LiteralPath $runtimePythonExeScripts) { $runtimePythonExeScripts } else { "" }
+    if (-not [string]::IsNullOrWhiteSpace($pythonForCheck)) {
+        try {
+            & $pythonForCheck -c "import importlib.util,sys; sys.exit(0 if (importlib.util.find_spec('montreal_forced_aligner.command_line.mfa') or importlib.util.find_spec('montreal_forced_aligner')) else 1)" 2>$null
+            $moduleRc = $LASTEXITCODE
+            Add-Check -Name "runtime_mfa_python_module_importable" -Passed ($moduleRc -eq 0) -Value $pythonForCheck -Required $true
+        } catch {
+            Add-Check -Name "runtime_mfa_python_module_importable" -Passed $false -Value $pythonForCheck -Detail $_.Exception.Message -Required $true
+        }
+    }
+} else {
+    Add-Warn "SkipSetupMfa enabled. Skipping MFA launcher/module checks."
 }
 
 if (-not $SkipLaunch) {

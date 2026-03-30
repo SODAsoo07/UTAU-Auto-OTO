@@ -884,7 +884,7 @@ class TabBuildersMixin:
         self.low_conf_force_lock_mode_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
         low_conf_force_lock_help_label = ctk.CTkLabel(
             basic_toggle_frame,
-            text="저신뢰/고공백 구간에서 planned·occurrence 후보의 점프 보정을 막고 기대 인덱스에 고정합니다.",
+            text="정렬 신뢰가 낮은 구간에서는 후보 점프를 막고 예상 위치에 고정합니다.",
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=730,
@@ -1022,7 +1022,7 @@ class TabBuildersMixin:
         ).pack(side="left")
         self.ml_selector_mode_segment = ctk.CTkSegmentedButton(
             selector_mode_row,
-            values=["기본 정책", "델타만", "델타+셀렉터"],
+            values=["상대적 보정", "+셀렉터"],
             variable=self.ml_selector_mode_var,
             command=lambda _value: self._save_config(),
         )
@@ -1057,7 +1057,7 @@ class TabBuildersMixin:
 
         coupled_enable_checkbox = ctk.CTkCheckBox(
             ml_frame,
-            text="Coupled mel+oto 보정 사용",
+            text="멜+OTO 보정 사용",
             text_color="#5F8C87",
             variable=self.ml_coupled_enable_var,
             command=self._save_config,
@@ -1650,7 +1650,7 @@ class TabBuildersMixin:
             "ml_coupled_min_conf_use_model_meta_var": ("bool", True),
             "ml_coupled_strict_constraint_var": ("bool", True),
             "ml_batch_inference_enable_var": ("bool", True),
-            "ml_legacy_fallback_enable_var": ("bool", False),
+            "ml_legacy_fallback_enable_var": ("bool", True),
             "ml_hybrid_routing_enable_var": ("bool", True),
             "ml_e2e_enable_var": ("bool", False),
             "low_conf_force_lock_mode_var": ("bool", False),
@@ -1661,7 +1661,7 @@ class TabBuildersMixin:
             "cv_order_prior_strength_var": ("str", ""),
             "kr_mapping_confidence_threshold_var": ("str", ""),
             "ml_route_var": ("str", "자동(자동 라우팅)"),
-            "ml_selector_mode_var": ("str", "델타+셀렉터"),
+            "ml_selector_mode_var": ("str", "+셀렉터"),
             "ml_e2e_mode_var": ("str", "hybrid"),
             "ml_e2e_t_low_var": ("str", ""),
             "ml_e2e_t_high_var": ("str", ""),
@@ -1763,26 +1763,6 @@ class TabBuildersMixin:
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(2, 0))
 
-        mode_row = ctk.CTkFrame(frame, fg_color="transparent")
-        mode_row.pack(anchor="w", padx=12, pady=(2, 10), fill="x")
-        ctk.CTkLabel(mode_row, text="ML 보정 모드", text_color=PALETTE.neutral_text).pack(side="left")
-
-        mode_code = "selector"
-        if hasattr(self, "_normalize_ml_selector_mode"):
-            mode_code = self._normalize_ml_selector_mode(
-                self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "selector"
-            )
-        mode_label = "델타만" if mode_code == "delta" else "델타+셀렉터"
-        if hasattr(self, "ml_selector_mode_var"):
-            self.ml_selector_mode_var.set(mode_label)
-
-        self.ml_selector_mode_segment = ctk.CTkSegmentedButton(
-            mode_row,
-            values=["델타만", "델타+셀렉터"],
-            variable=self.ml_selector_mode_var,
-            command=lambda _value: self._save_config(),
-        )
-        self.ml_selector_mode_segment.pack(side="left", padx=(10, 0))
         return frame
 
     def _build_advanced_settings_tab(self):
@@ -1970,17 +1950,40 @@ class TabBuildersMixin:
         if hasattr(self, "_sync_voicebank_preset_button_styles"):
             self._sync_voicebank_preset_button_styles()
 
+        def _sync_pronunciation_missing_reduce_state():
+            enabled = False
+            if hasattr(self, "soft_bank_mode_var"):
+                enabled = bool(self.soft_bank_mode_var.get()) or enabled
+            if hasattr(self, "weak_voice_assist_enable_var"):
+                enabled = bool(self.weak_voice_assist_enable_var.get()) or enabled
+            if hasattr(self, "soft_bank_mode_var"):
+                self.soft_bank_mode_var.set(enabled)
+            if hasattr(self, "weak_voice_assist_enable_var"):
+                self.weak_voice_assist_enable_var.set(enabled)
+
+        def _on_pronunciation_missing_reduce_toggle():
+            enabled = bool(self.soft_bank_mode_var.get()) if hasattr(self, "soft_bank_mode_var") else False
+            if hasattr(self, "weak_voice_assist_enable_var"):
+                self.weak_voice_assist_enable_var.set(enabled)
+            if hasattr(self, "_on_weak_voice_assist_toggle"):
+                self._on_weak_voice_assist_toggle()
+            else:
+                if hasattr(self, "_sync_weak_voice_assist_controls"):
+                    self._sync_weak_voice_assist_controls()
+                self._save_config()
+
+        _sync_pronunciation_missing_reduce_state()
         self.soft_bank_mode_checkbox = ctk.CTkCheckBox(
             basic_toggle_frame,
-            text="발음 누락 줄이기 추천",
+            text="발음 누락 줄이기",
             text_color="#6F819A",
             variable=self.soft_bank_mode_var,
-            command=self._save_config,
+            command=_on_pronunciation_missing_reduce_toggle,
         )
         self.soft_bank_mode_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
         soft_bank_help_label = ctk.CTkLabel(
             basic_toggle_frame,
-            text="숨소리가 많이 섞이거나 발성이 약한 음원에서 발음 누락과 공백 오검출을 줄일 때 켜는 옵션입니다.",
+            text="숨소리/약한 발성에서 누락·공백 오검출을 줄입니다. (soft 뱅크 + 자모 대비 보정 함께 적용)",
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=730,
@@ -2005,28 +2008,6 @@ class TabBuildersMixin:
         )
         low_rms_help_label.pack(anchor="w", padx=34, pady=(0, 8))
         self._bind_wraplength_to_container(basic_toggle_frame, [low_rms_help_label], padding=64, min_wrap=260)
-
-        self.weak_voice_assist_enable_checkbox = ctk.CTkCheckBox(
-            basic_toggle_frame,
-            text="발음이 흐린 음원에 추천 (자모 구분 강화)",
-            text_color="#6F819A",
-            variable=self.weak_voice_assist_enable_var,
-            command=(
-                self._on_weak_voice_assist_toggle
-                if hasattr(self, "_on_weak_voice_assist_toggle")
-                else self._save_config
-            ),
-        )
-        self.weak_voice_assist_enable_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
-        weak_voice_help_label = ctk.CTkLabel(
-            basic_toggle_frame,
-            text="웅얼거림처럼 들리거나 자음/모음 구분이 흐린 음원에서 정렬 정확도를 높이기 위한 추천 옵션입니다. (원본 WAV 보존)",
-            text_color=PALETTE.hint_text,
-            justify="left",
-            wraplength=730,
-        )
-        weak_voice_help_label.pack(anchor="w", padx=34, pady=(0, 8))
-        self._bind_wraplength_to_container(basic_toggle_frame, [weak_voice_help_label], padding=64, min_wrap=260)
 
         weak_voice_strength_row = ctk.CTkFrame(basic_toggle_frame, fg_color="transparent")
         weak_voice_strength_row.pack(fill="x", padx=34, pady=(0, 10))
@@ -2129,7 +2110,7 @@ class TabBuildersMixin:
         self.low_conf_force_lock_mode_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
         low_conf_force_lock_help_label = ctk.CTkLabel(
             basic_toggle_frame,
-            text="저신뢰/고공백 구간에서 planned·occurrence 후보의 점프 보정을 막고 기대 인덱스에 고정합니다.",
+            text="정렬 신뢰가 낮은 구간에서는 후보 점프를 막고 예상 위치에 고정합니다.",
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=730,
@@ -2157,6 +2138,57 @@ class TabBuildersMixin:
         return basic_toggle_frame
 
     def _slot_advanced_ml_section(self, parent, _layout_root, _node):
+        public_ml_frame = self._ui_section(
+            parent,
+            "ML 보정 옵션",
+            "기본 보정 모드와 멜+OTO 보정을 빠르게 조절합니다.",
+        )
+        self.advanced_ml_public_frame = public_ml_frame
+
+        selector_row = ctk.CTkFrame(public_ml_frame, fg_color="transparent")
+        selector_row.pack(anchor="w", padx=12, pady=(2, 6), fill="x")
+        ctk.CTkLabel(
+            selector_row,
+            text="ML 보정 모드",
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+
+        mode_code = "selector"
+        if hasattr(self, "_normalize_ml_selector_mode"):
+            mode_code = self._normalize_ml_selector_mode(
+                self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "selector"
+            )
+        mode_label = "상대적 보정" if mode_code == "delta" else "+셀렉터"
+        if hasattr(self, "ml_selector_mode_var"):
+            self.ml_selector_mode_var.set(mode_label)
+
+        self.ml_selector_mode_segment = ctk.CTkSegmentedButton(
+            selector_row,
+            values=["상대적 보정", "+셀렉터"],
+            variable=self.ml_selector_mode_var,
+            command=lambda _value: self._save_config(),
+        )
+        self.ml_selector_mode_segment.pack(side="left", padx=(10, 0))
+
+        selector_help = ctk.CTkLabel(
+            public_ml_frame,
+            text="상대적 보정=델타 기반, +셀렉터=후보 비교로 안정 보정",
+            text_color=PALETTE.hint_text,
+            justify="left",
+            wraplength=720,
+        )
+        selector_help.pack(anchor="w", padx=34, pady=(0, 6))
+        self._bind_wraplength_to_container(public_ml_frame, [selector_help], padding=64, min_wrap=240)
+
+        self.ml_coupled_enable_checkbox = ctk.CTkCheckBox(
+            public_ml_frame,
+            text="멜+OTO 보정 사용",
+            text_color="#5F8C87",
+            variable=self.ml_coupled_enable_var,
+            command=self._save_config,
+        )
+        self.ml_coupled_enable_checkbox.pack(anchor="w", padx=12, pady=(4, 8))
+
         dev_container = self._get_or_create_advanced_dev_container(parent)
         self._ensure_advanced_dev_runtime_controls(dev_container)
 
@@ -2301,15 +2333,6 @@ class TabBuildersMixin:
             text="자동=환경 기반 라우팅, No-MFA=정렬 없이 보정, v1=기존, v2=확장, E2E=실험",
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(4, 0))
-
-        coupled_enable_checkbox = ctk.CTkCheckBox(
-            ml_frame,
-            text="Coupled mel+oto 보정 사용",
-            text_color="#5F8C87",
-            variable=self.ml_coupled_enable_var,
-            command=self._save_config,
-        )
-        coupled_enable_checkbox.pack(anchor="w", padx=12, pady=(8, 0))
 
         coupled_row = ctk.CTkFrame(ml_frame, fg_color="transparent")
         coupled_row.pack(anchor="w", padx=12, pady=(6, 0), fill="x")

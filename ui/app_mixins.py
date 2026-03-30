@@ -542,6 +542,9 @@ class AppRuntimeMixin:
             "delta-only",
             "델타",
             "델타만",
+            "상대적 보정",
+            "상대적보정",
+            "상대 보정",
         }:
             return "delta"
         if mode in {
@@ -551,6 +554,9 @@ class AppRuntimeMixin:
             "델타+셀렉터",
             "델타 + 셀렉터",
             "셀렉터",
+            "+셀렉터",
+            "플러스셀렉터",
+            "플러스 셀렉터",
         }:
             return "selector"
         if mode in {"기본 정책", "기본정책", "policy"}:
@@ -1272,7 +1278,7 @@ class AppRuntimeMixin:
             "developer_mode_enabled_var": False,
             "enable_ml_correction_var": True,
             "ml_route_var": "자동(자동 라우팅)",
-            "ml_selector_mode_var": "델타+셀렉터",
+            "ml_selector_mode_var": "+셀렉터",
             "ml_coupled_enable_var": True,
             "ml_coupled_min_conf_var": "",
             "ml_coupled_min_conf_use_model_meta_var": True,
@@ -1290,7 +1296,7 @@ class AppRuntimeMixin:
             "ml_coupled_strict_constraint_var": True,
             "ml_batch_inference_enable_var": True,
             "ml_batch_inference_size_var": "256",
-            "ml_legacy_fallback_enable_var": False,
+            "ml_legacy_fallback_enable_var": True,
             "ml_hybrid_routing_enable_var": True,
             "ml_e2e_enable_var": False,
             "ml_e2e_mode_var": "hybrid",
@@ -1667,7 +1673,7 @@ class AppRuntimeMixin:
         selector_mode = (
             self.ml_selector_mode_var.get()
             if hasattr(self, "ml_selector_mode_var")
-            else "델타+셀렉터"
+            else "+셀렉터"
         )
 
         if lang not in {"korean", "japanese"}:
@@ -1721,7 +1727,7 @@ class AppRuntimeMixin:
         selector_mode = (
             self.ml_selector_mode_var.get()
             if hasattr(self, "ml_selector_mode_var")
-            else "델타+셀렉터"
+            else "+셀렉터"
         )
 
         if lang not in {"korean", "japanese"}:
@@ -1860,7 +1866,12 @@ class AppRuntimeMixin:
             if hasattr(self, "_set_ml_route_from_code"):
                 self._set_ml_route_from_code("auto")
 
-        enable_ml = bool(enable_ml_default and has_coupled)
+        coupled_enabled = (
+            bool(self.ml_coupled_enable_var.get())
+            if hasattr(self, "ml_coupled_enable_var")
+            else True
+        )
+        enable_ml = bool(enable_ml_default and has_coupled and coupled_enabled)
         e2e_route_allowed = bool(enable_ml and e2e_requested and fmt == "cv" and has_e2e_model)
         if route_selected == "auto":
             if e2e_route_allowed:
@@ -1896,7 +1907,14 @@ class AppRuntimeMixin:
         os.environ["UTOA_ML_COUPLED_ONNX_ENABLE"] = "1"
         os.environ["UTOA_ML_BATCH_INFERENCE_ENABLE"] = "1" if enable_ml else "0"
         os.environ["UTOA_ML_BATCH_INFERENCE_SIZE"] = "256"
-        os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = "0"
+        legacy_fallback_enabled = (
+            bool(self.ml_legacy_fallback_enable_var.get())
+            if hasattr(self, "ml_legacy_fallback_enable_var")
+            else True
+        )
+        os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = (
+            "1" if (enable_ml and legacy_fallback_enabled) else "0"
+        )
         os.environ["UTOA_ML_GATED_ENSEMBLE_ENABLE"] = "1" if (enable_ml and hybrid_routing_enabled) else "0"
         os.environ.setdefault("UTOA_MEL_WEIGHT_MODE", "mel_first")
         os.environ["UTOA_ML_ROUTE"] = route_internal
@@ -3218,7 +3236,7 @@ class ConfigMixin:
             "recursive_voicebank_scan": self.recursive_voicebank_scan_var.get() if hasattr(self, "recursive_voicebank_scan_var") else False,
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
             "ml_route": self._get_ml_route_code() if hasattr(self, "_get_ml_route_code") else "auto",
-            "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "델타+셀렉터",
+            "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "+셀렉터",
             "ml_coupled_enable": self.ml_coupled_enable_var.get() if hasattr(self, "ml_coupled_enable_var") else True,
             "ml_coupled_min_conf": self.ml_coupled_min_conf_var.get() if hasattr(self, "ml_coupled_min_conf_var") else "",
             "ml_coupled_min_conf_use_model_meta": self.ml_coupled_min_conf_use_model_meta_var.get() if hasattr(self, "ml_coupled_min_conf_use_model_meta_var") else True,
@@ -3559,11 +3577,11 @@ class ConfigMixin:
                 saved_selector_mode = str(config.get("ml_selector_mode", "selector") or "").strip()
                 normalized_mode = self._normalize_ml_selector_mode(saved_selector_mode)
                 label_map = {
-                    "policy": "기본 정책",
-                    "delta": "델타만",
-                    "selector": "델타+셀렉터",
+                    "policy": "+셀렉터",
+                    "delta": "상대적 보정",
+                    "selector": "+셀렉터",
                 }
-                self.ml_selector_mode_var.set(label_map.get(normalized_mode, "델타+셀렉터"))
+                self.ml_selector_mode_var.set(label_map.get(normalized_mode, "+셀렉터"))
             if "ml_coupled_enable" in config and hasattr(self, "ml_coupled_enable_var"):
                 self.ml_coupled_enable_var.set(bool(config.get("ml_coupled_enable", True)))
             if "ml_coupled_min_conf" in config and hasattr(self, "ml_coupled_min_conf_var"):
@@ -3645,7 +3663,7 @@ class ConfigMixin:
                     except Exception:
                         self.ml_batch_inference_size_var.set("256")
             if "ml_legacy_fallback_enable" in config and hasattr(self, "ml_legacy_fallback_enable_var"):
-                self.ml_legacy_fallback_enable_var.set(bool(config.get("ml_legacy_fallback_enable", False)))
+                self.ml_legacy_fallback_enable_var.set(bool(config.get("ml_legacy_fallback_enable", True)))
             if "ml_hybrid_routing_enable" in config and hasattr(self, "ml_hybrid_routing_enable_var"):
                 self.ml_hybrid_routing_enable_var.set(bool(config.get("ml_hybrid_routing_enable", True)))
             if "ml_e2e_enable" in config and hasattr(self, "ml_e2e_enable_var"):

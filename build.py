@@ -51,6 +51,7 @@ RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "bootstrap", "get-pip.py"), "assets/bootstrap"),
     (os.path.join(APP_DIR, "ml", "configs"), "ml/configs"),
     (os.path.join(APP_DIR, "config.json"), "."),
+    (os.path.join(APP_DIR, "ui", "ui_layout.json"), "ui"),
 ]
 RELEASE_AUX_FILES = [
     os.path.join(APP_DIR, "setup_mfa.bat"),
