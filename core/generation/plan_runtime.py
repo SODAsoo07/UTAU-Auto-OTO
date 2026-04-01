@@ -396,13 +396,14 @@ def log_sinsy_plan_guard(
     runtime_policy,
     fname: str,
     log_fn: Callable[[str], None],
+    log_prefix: str = "[MAP]",
 ) -> None:
     if not sinsy_label_entries:
         return
     plan_source = str((cv_plan or {}).get("source") or "")
     if plan_source != "sinsy_labels":
         log_fn(
-            f"🛡️ {fname}: sinsy 라벨이 있지만 planner에 적용되지 않음 "
+            f"{log_prefix} {fname}: Sinsy 라벨은 있으나 planner source가 fallback으로 선택됨 "
             f"(source={plan_source or 'fallback'})"
         )
         return
@@ -410,6 +411,6 @@ def log_sinsy_plan_guard(
     row_margin_floor = float((runtime_policy or {}).get("row_margin_floor", 6.0))
     if plan_margin < row_margin_floor:
         log_fn(
-            f"🛡️ {fname}: sinsy planner margin 낮음 "
+            f"{log_prefix} {fname}: Sinsy planner margin 낮음 "
             f"(margin={plan_margin:.1f} < {row_margin_floor:.1f})"
         )

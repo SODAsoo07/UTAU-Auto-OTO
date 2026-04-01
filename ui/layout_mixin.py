@@ -1355,19 +1355,6 @@ class LayoutMixin:
                     self.advanced_developer_frame.pack_forget()
                 except Exception:
                     pass
-        compare_row = getattr(self, "alignment_compare_btn_row", None)
-        if compare_row is not None:
-            if enabled:
-                try:
-                    if not compare_row.winfo_ismapped():
-                        compare_row.pack(anchor="w", pady=(6, 0))
-                except Exception:
-                    pass
-            else:
-                try:
-                    compare_row.pack_forget()
-                except Exception:
-                    pass
         detail_frames = getattr(self, "vc_neighbor_detail_frames", [])
         for frame in detail_frames:
             if frame is None:

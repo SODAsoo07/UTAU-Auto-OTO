@@ -216,19 +216,6 @@ class TabBuildersMixin:
             self.mfa_install_btn.configure(text="✅ 설치 완료", state="disabled", fg_color="#388E3C")
         self.mfa_install_btn.grid(row=0, column=1, padx=(6, 0), pady=1, sticky="w")
 
-        self.alignment_compare_btn_row = ctk.CTkFrame(left_actions, fg_color="transparent")
-        self.alignment_compare_btn_row.pack(anchor="w", pady=(6, 0))
-        self.alignment_compare_btn = ctk.CTkButton(
-            self.alignment_compare_btn_row,
-            text="📊 정렬 비교 리포트(MFA/SEQ/CTC)",
-            width=222,
-            fg_color="#BFCBDA",
-            hover_color="#AABBCD",
-            text_color="#1F2D3D",
-            command=self._run_alignment_compare_visual,
-        )
-        self.alignment_compare_btn.pack(side="left")
-
         ctk.CTkLabel(
             right_actions,
             text="순서대로 실행",

@@ -127,8 +127,13 @@ from core.generation.file_stages import (
 from core.generation.plan_runtime import (
     build_common_plan_context,
     extract_ja_alignment_ingest_state,
+    log_sinsy_plan_guard,
     recompute_common_plan_runtime_state,
     update_single_vowel_span_by_first_phone,
+)
+from core.generation.mapping_runtime import (
+    compute_runtime_low_conf_state,
+    update_ja_mapping_runtime_report,
 )
 
 logger = logging.getLogger(__name__)
@@ -3428,21 +3433,14 @@ def generate_ja_oto(
             runtime_policy = dict(ja_runtime_state.get("runtime_policy") or {})
             mapping_confidence_base = float(ja_runtime_state.get("mapping_confidence", mapping_confidence_base) or 0.0)
             mapping_margin = float(ja_runtime_state.get("mapping_margin", mapping_margin) or 0.0)
-            if sinsy_label_entries:
-                plan_source = str(ja_cv_plan.get("source") or "")
-                if plan_source != "sinsy_labels":
-                    log(
-                        f"🛡️ {fname}: sinsy 라벨이 있지만 planner에 적용되지 않음 "
-                        f"(source={plan_source or 'fallback'})"
-                    )
-                else:
-                    plan_margin = float((ja_cv_plan.get("meta") or {}).get("margin", 0.0) or 0.0)
-                    row_margin_floor = float(runtime_policy.get("row_margin_floor", 6.0))
-                    if plan_margin < row_margin_floor:
-                        log(
-                            f"🛡️ {fname}: sinsy planner margin 낮음 "
-                            f"(margin={plan_margin:.1f} < {row_margin_floor:.1f})"
-                        )
+            log_sinsy_plan_guard(
+                sinsy_label_entries=sinsy_label_entries,
+                cv_plan=ja_cv_plan,
+                runtime_policy=runtime_policy,
+                fname=fname,
+                log_fn=log,
+                log_prefix="[MAP]",
+            )
             mapping_confidence_base = float(runtime_policy.get("mapping_confidence", mapping_confidence_base))
             mapping_tier = str(runtime_policy.get("mapping_tier", "low"))
 
@@ -3659,6 +3657,40 @@ def generate_ja_oto(
                 log(
                     f"🧭 {fname}: JA 매핑 신뢰도 낮음(conf={mapping_confidence_base:.2f}, "
                     f"tier={mapping_tier}, margin={mapping_margin:+.1f}, reason={mapping_reason_code})"
+                )
+            if isinstance(runtime_report, dict):
+                low_conf_state = compute_runtime_low_conf_state(
+                    runtime_policy=runtime_policy,
+                    mapping_confidence=mapping_confidence_base,
+                    conf_floor=float(conf_th),
+                    blank_confidence_mean=blank_conf_mean,
+                    conf_below_reason="conf_below_threshold",
+                    row_conf_floor_default=float(conf_th),
+                )
+                update_ja_mapping_runtime_report(
+                    runtime_report,
+                    format_type=str(format_type or ""),
+                    mapping_confidence=float(mapping_confidence_base),
+                    mapping_margin=float(mapping_margin),
+                    mapping_tier=str(mapping_tier or ""),
+                    trust_score=float(textgrid_trust_score),
+                    trust_tier=str(textgrid_trust_tier or ""),
+                    conf_threshold=float(conf_th),
+                    row_conf_floor=float(low_conf_state.get("row_conf_floor", conf_th) or conf_th),
+                    row_margin_floor=float(low_conf_state.get("row_margin_floor", 6.0) or 6.0),
+                    file_low_conf=bool(low_conf_state.get("file_low_conf")),
+                    low_conf_reasons=list(low_conf_state.get("low_conf_reasons") or []),
+                    blank_confidence_mean=float(blank_conf_mean),
+                    plan_source=str(ja_cv_plan.get("source") or ""),
+                    plan_margin=float((ja_cv_plan.get("meta") or {}).get("margin", 0.0) or 0.0),
+                    plan_coverage=float(ja_plan_policy.get("coverage", 0.0) or 0.0),
+                    mapping_reason_code=str(mapping_reason_code or ""),
+                    filename_order_locked=bool(filename_order_locked),
+                    forced_words_mapping=bool(forced_words_mapping),
+                    extra_fields={
+                        "alignment_weight": float(alignment_weight),
+                        "anchor_lock_lite": bool(anchor_lock_lite),
+                    },
                 )
 
             if syllables_info and alias_candidate and cv_targets:

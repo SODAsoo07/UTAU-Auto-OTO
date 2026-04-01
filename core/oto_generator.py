@@ -184,8 +184,13 @@ from core.generation.file_stages import (
 from core.generation.plan_runtime import (
     build_common_plan_context,
     extract_kr_alignment_ingest_state,
+    log_sinsy_plan_guard,
     recompute_common_plan_runtime_state,
     update_single_vowel_span_by_first_phone,
+)
+from core.generation.mapping_runtime import (
+    compute_runtime_low_conf_state,
+    update_kr_mapping_runtime_report,
 )
 
 logger = logging.getLogger(__name__)
@@ -5197,21 +5202,14 @@ def generate_oto(
             runtime_policy = dict(kr_runtime_state.get("runtime_policy") or {})
             mapping_confidence_base = float(kr_runtime_state.get("mapping_confidence", mapping_confidence_base) or 0.0)
             mapping_margin = float(kr_runtime_state.get("mapping_margin", mapping_margin) or 0.0)
-            if sinsy_label_entries:
-                plan_source = str(kr_cv_plan.get("source") or "")
-                if plan_source != "sinsy_labels":
-                    log(
-                        f"[MAP] {fname}: Sinsy 라벨은 있으나 planner 소스가 fallback으로 선택됨 "
-                        f"(source={plan_source or 'fallback'})"
-                    )
-                else:
-                    plan_margin = float((kr_cv_plan.get("meta") or {}).get("margin", 0.0) or 0.0)
-                    row_margin_floor = float(runtime_policy.get("row_margin_floor", 6.0))
-                    if plan_margin < row_margin_floor:
-                        log(
-                            f"[MAP] {fname}: Sinsy planner margin 낮음 "
-                            f"(margin={plan_margin:.1f} < {row_margin_floor:.1f})"
-                        )
+            log_sinsy_plan_guard(
+                sinsy_label_entries=sinsy_label_entries,
+                cv_plan=kr_cv_plan,
+                runtime_policy=runtime_policy,
+                fname=fname,
+                log_fn=log,
+                log_prefix="[MAP]",
+            )
             mapping_confidence_base = float(runtime_policy.get("mapping_confidence", mapping_confidence_base))
             if syllable_blank_confidences:
                 if blank_conf_mean >= 0.55:
@@ -5225,12 +5223,19 @@ def generate_oto(
                     f"margin={mapping_margin:+.1f}, reason={mapping_reason_code})"
                 )
 
-            file_mapping_low_conf = bool(runtime_policy.get("is_low_conf"))
             file_conf_floor = float(runtime_policy.get("file_conf_floor", file_mapping_conf_th))
-            if mapping_confidence_base < file_conf_floor:
-                file_mapping_low_conf = True
-            row_conf_floor = float(runtime_policy.get("row_conf_floor", file_mapping_conf_th))
-            row_margin_floor = float(runtime_policy.get("row_margin_floor", 6.0))
+            low_conf_state = compute_runtime_low_conf_state(
+                runtime_policy=runtime_policy,
+                mapping_confidence=mapping_confidence_base,
+                conf_floor=file_conf_floor,
+                blank_confidence_mean=blank_conf_mean,
+                conf_below_reason="conf_below_floor",
+                row_conf_floor_default=float(file_mapping_conf_th),
+            )
+            file_mapping_low_conf = bool(low_conf_state.get("file_low_conf"))
+            row_conf_floor = float(low_conf_state.get("row_conf_floor", file_mapping_conf_th) or file_mapping_conf_th)
+            row_margin_floor = float(low_conf_state.get("row_margin_floor", 6.0) or 6.0)
+            low_conf_reasons = list(low_conf_state.get("low_conf_reasons") or [])
             pitch_zone_for_file = str(mel_ctx_for_file.get("f0_pitch_zone", "") if mel_ctx_for_file else "").strip().lower()
             note_hint_hz_for_file = float(mel_ctx_for_file.get("f0_note_hint_hz", 0.0) or 0.0) if mel_ctx_for_file else 0.0
             f0_max_hz_for_file = float(mel_ctx_for_file.get("f0_max_hz", 0.0) or 0.0) if mel_ctx_for_file else 0.0
@@ -5271,44 +5276,42 @@ def generate_oto(
                 f"delta_clamp_scale={delta_clamp_scale:.2f}"
             )
             if isinstance(runtime_report, dict):
-                low_conf_reasons = list(runtime_policy.get("low_conf_reasons") or [])
-                if blank_conf_mean >= 0.55 and "blank_confidence_high" not in low_conf_reasons:
-                    low_conf_reasons.append("blank_confidence_high")
-                if mapping_confidence_base < file_conf_floor and "conf_below_floor" not in low_conf_reasons:
-                    low_conf_reasons.append("conf_below_floor")
-                runtime_report["mapping"] = {
-                    "format": str(file_format or ""),
-                    "mapping_confidence": float(mapping_confidence_base),
-                    "mapping_margin": float(mapping_margin),
-                    "mapping_tier": str(runtime_policy.get("mapping_tier") or ""),
-                    "trust_score": float(textgrid_trust_score),
-                    "trust_tier": str(textgrid_trust_tier or ""),
-                    "routing_profile": str(routing_profile_code),
-                    "alignment_weight_base": float(alignment_weight_base),
-                    "alignment_weight": float(alignment_weight),
-                    "file_conf_floor": float(file_conf_floor),
-                    "row_conf_floor": float(row_conf_floor),
-                    "row_margin_floor": float(row_margin_floor),
-                    "file_low_conf": bool(file_mapping_low_conf),
-                    "low_conf_reasons": list(low_conf_reasons),
-                    "blank_confidence_mean": float(blank_conf_mean),
-                    "mel_reliability_score": float(mel_reliability_score),
-                    "mel_reliability_floor": float(mel_reliability_floor),
-                    "mel_weight_mode": str(mel_weight_mode),
-                    "force_mel_branch": bool(force_mel_branch),
-                    "anchor_lock_lite": bool(anchor_lock_lite),
-                    "delta_clamp_scale": float(delta_clamp_scale),
-                    "high_pitch_mode": bool(routing_profile.get("high_pitch_mode", False)),
-                    "row_blank_floor": (
+                update_kr_mapping_runtime_report(
+                    runtime_report,
+                    file_format=str(file_format or ""),
+                    mapping_confidence=float(mapping_confidence_base),
+                    mapping_margin=float(mapping_margin),
+                    mapping_tier=str(runtime_policy.get("mapping_tier") or ""),
+                    trust_score=float(textgrid_trust_score),
+                    trust_tier=str(textgrid_trust_tier or ""),
+                    file_conf_floor=float(file_conf_floor),
+                    row_conf_floor=float(row_conf_floor),
+                    row_margin_floor=float(row_margin_floor),
+                    file_low_conf=bool(file_mapping_low_conf),
+                    low_conf_reasons=list(low_conf_reasons),
+                    blank_confidence_mean=float(blank_conf_mean),
+                    plan_source=str(kr_cv_plan.get("source") or ""),
+                    plan_margin=float((kr_cv_plan.get("meta") or {}).get("margin", 0.0) or 0.0),
+                    plan_coverage=float(kr_plan_policy.get("coverage", 0.0) or 0.0),
+                    mapping_reason_code=str(mapping_reason_code or ""),
+                    row_blank_floor=(
                         float(row_blank_floor)
                         if row_blank_floor is not None
                         else None
                     ),
-                    "plan_source": str(kr_cv_plan.get("source") or ""),
-                    "plan_margin": float((kr_cv_plan.get("meta") or {}).get("margin", 0.0) or 0.0),
-                    "plan_coverage": float(kr_plan_policy.get("coverage", 0.0) or 0.0),
-                    "mapping_reason_code": str(mapping_reason_code or ""),
-                }
+                    extra_fields={
+                        "routing_profile": str(routing_profile_code),
+                        "alignment_weight_base": float(alignment_weight_base),
+                        "alignment_weight": float(alignment_weight),
+                        "mel_reliability_score": float(mel_reliability_score),
+                        "mel_reliability_floor": float(mel_reliability_floor),
+                        "mel_weight_mode": str(mel_weight_mode),
+                        "force_mel_branch": bool(force_mel_branch),
+                        "anchor_lock_lite": bool(anchor_lock_lite),
+                        "delta_clamp_scale": float(delta_clamp_scale),
+                        "high_pitch_mode": bool(routing_profile.get("high_pitch_mode", False)),
+                    },
+                )
 
             if (not syllables_info) or any(len(s['phones']) == 0 for s in syllables_info):
                 log(f"[WARN] {fname}: 음절 경계 해석 실패로 원본 행을 유지합니다.")

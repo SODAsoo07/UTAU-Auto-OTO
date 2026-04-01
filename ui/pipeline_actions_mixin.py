@@ -571,6 +571,8 @@ class PipelineActionsMixin:
         system_root = os.environ.get("SystemRoot", r"C:\Windows")
         vc_runtime_markers = [
             os.path.join(system_root, "System32", "msvcp140.dll"),
+            os.path.join(system_root, "System32", "msvcp140_1.dll"),
+            os.path.join(system_root, "System32", "vcruntime140.dll"),
             os.path.join(system_root, "System32", "vcruntime140_1.dll"),
         ]
         archive_url = 'https://micro.mamba.pm/api/micromamba/win-64/latest'
@@ -589,6 +591,7 @@ class PipelineActionsMixin:
             msg = str(text or "").lower()
             return (
                 "msvcp140.dll" in msg
+                or "msvcp140_1.dll" in msg
                 or "vcruntime140.dll" in msg
                 or "vcruntime140_1.dll" in msg
                 or "side-by-side configuration is incorrect" in msg

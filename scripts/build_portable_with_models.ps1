@@ -99,6 +99,63 @@ function Sync-ReleaseFileIfNeeded {
     }
 }
 
+function Remove-InternalTestScriptsFromPayload {
+    param(
+        [Parameter(Mandatory = $true)][string]$RootDir
+    )
+
+    $blockedNames = @(
+        "build_alignment_test_folder.py",
+        "compare_alignment_visual.py",
+        "export_textgrid_to_sinsy_lab.py",
+        "preprocess_oto_cv_for_sequence_training.py",
+        "preprocess_sinsy_labels_for_sequence_training.py",
+        "train_sequence_aligner_profile_from_sinsy.py",
+        "sandbox_smoke_check.ps1"
+    ) | ForEach-Object { $_.ToLowerInvariant() }
+    $allowedScriptNames = @(
+        "runtime_recovery.ps1",
+        "startup_diagnose.ps1",
+        "startup_diagnose.bat"
+    ) | ForEach-Object { $_.ToLowerInvariant() }
+    $scriptExts = @(".py", ".ps1", ".bat", ".cmd")
+
+    $roots = @($RootDir, (Join-Path $RootDir "UTAU_Auto_OTO")) | Where-Object { Test-Path -LiteralPath $_ }
+    $removed = @()
+    foreach ($base in $roots) {
+        $files = Get-ChildItem -LiteralPath $base -Recurse -File -ErrorAction SilentlyContinue
+        foreach ($f in $files) {
+            $name = $f.Name.ToLowerInvariant()
+            $rel = $f.FullName.Substring($base.Length).TrimStart('\')
+            $ext = [System.IO.Path]::GetExtension($name).ToLowerInvariant()
+            $isRootLevel = -not $rel.Contains('\')
+            $isScriptsChild = $rel.StartsWith("scripts\", [System.StringComparison]::OrdinalIgnoreCase)
+            $remove = $false
+            if ($isRootLevel -and ($blockedNames -contains $name)) {
+                $remove = $true
+            } elseif ($isScriptsChild -and ($scriptExts -contains $ext) -and ($allowedScriptNames -notcontains $name)) {
+                $remove = $true
+            }
+            if (-not $remove) {
+                continue
+            }
+            Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+            $removed += $f.FullName
+        }
+        $scriptsDir = Join-Path $base "scripts"
+        if ((Test-Path -LiteralPath $scriptsDir) -and ((Get-ChildItem -LiteralPath $scriptsDir -Force -ErrorAction SilentlyContinue | Measure-Object).Count -eq 0)) {
+            Remove-Item -LiteralPath $scriptsDir -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($removed.Count -gt 0) {
+        Write-Host "Pruned internal/test scripts from portable payload:"
+        foreach ($path in $removed) {
+            Write-Host "  - $path"
+        }
+    }
+}
+
 if (-not (Test-Path $sourceAbs)) {
     throw "Release folder not found: $sourceAbs"
 }
@@ -158,6 +215,7 @@ if (Test-Path $stageRoot) {
 New-Item -ItemType Directory -Path $workAbs -Force | Out-Null
 Copy-Item -Path $sourceAbs -Destination $stageRoot -Recurse -Force
 Copy-Item -Path $modelsAbs -Destination (Join-Path $appDir "ML_models") -Recurse -Force
+Remove-InternalTestScriptsFromPayload -RootDir $stageRoot
 
 $shortcutPath = New-PortableTopShortcut -RootDir $stageRoot
 Write-Host "Created top-level shortcut: $shortcutPath"

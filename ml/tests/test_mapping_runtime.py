@@ -66,6 +66,40 @@ def test_update_kr_mapping_runtime_report_sets_payload():
     assert mapping.get("mapping_reason_stage") == "candidate_select"
 
 
+def test_update_kr_mapping_runtime_report_accepts_extra_fields():
+    report = {}
+    update_kr_mapping_runtime_report(
+        report,
+        file_format="cvvc",
+        mapping_confidence=0.72,
+        mapping_margin=8.2,
+        mapping_tier="mid",
+        trust_score=0.61,
+        trust_tier="mid",
+        file_conf_floor=0.64,
+        row_conf_floor=0.60,
+        row_margin_floor=6.0,
+        file_low_conf=False,
+        low_conf_reasons=["a"],
+        blank_confidence_mean=0.12,
+        plan_source="sinsy_labels",
+        plan_margin=7.2,
+        plan_coverage=0.95,
+        mapping_reason_code="filename_token",
+        extra_fields={
+            "routing_profile": "hybrid_soft",
+            "alignment_weight": 0.77,
+            "flags": {"anchor_lock_lite": True},
+            "levels": [0.1, 0.2],
+        },
+    )
+    mapping = report.get("mapping") or {}
+    assert mapping.get("routing_profile") == "hybrid_soft"
+    assert mapping.get("alignment_weight") == 0.77
+    assert (mapping.get("flags") or {}).get("anchor_lock_lite") is True
+    assert mapping.get("levels") == [0.1, 0.2]
+
+
 def test_update_ja_mapping_runtime_report_sets_payload():
     report = {}
     update_ja_mapping_runtime_report(
@@ -95,6 +129,38 @@ def test_update_ja_mapping_runtime_report_sets_payload():
     assert mapping.get("mapping_reason_code") == "alias_recover"
     assert mapping.get("mapping_reason_known") is True
     assert mapping.get("mapping_reason_stage") == "candidate_select"
+
+
+def test_update_ja_mapping_runtime_report_accepts_extra_fields():
+    report = {}
+    update_ja_mapping_runtime_report(
+        report,
+        format_type="cvvc",
+        mapping_confidence=0.67,
+        mapping_margin=5.1,
+        mapping_tier="low",
+        trust_score=0.54,
+        trust_tier="low",
+        conf_threshold=0.62,
+        row_conf_floor=0.58,
+        row_margin_floor=5.5,
+        file_low_conf=True,
+        low_conf_reasons=["conf_below_threshold"],
+        blank_confidence_mean=0.44,
+        plan_source="fallback",
+        plan_margin=3.0,
+        plan_coverage=0.66,
+        mapping_reason_code="alias_recover",
+        filename_order_locked=False,
+        forced_words_mapping=False,
+        extra_fields={
+            "alignment_weight": 0.55,
+            "anchor_lock_lite": True,
+        },
+    )
+    mapping = report.get("mapping") or {}
+    assert mapping.get("alignment_weight") == 0.55
+    assert mapping.get("anchor_lock_lite") is True
 
 
 def test_format_mapping_summary():

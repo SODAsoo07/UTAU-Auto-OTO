@@ -64,18 +64,28 @@ function Add-Note {
 $appExe = Join-Path $AppRoot "UTAU_Auto_OTO\UTAU_Auto_OTO.exe"
 $vcDllA = "msvcp140.dll"
 $vcDllB = "msvcp140_1.dll"
+$vcDllC = "vcruntime140.dll"
+$vcDllD = "vcruntime140_1.dll"
 
 Add-Check -Name "app_exe_exists" -Passed (Test-Path -LiteralPath $appExe) -Value $appExe -Required $true
 
 $localVcA = Join-Path $AppRoot $vcDllA
 $localVcB = Join-Path $AppRoot $vcDllB
+$localVcC = Join-Path $AppRoot $vcDllC
+$localVcD = Join-Path $AppRoot $vcDllD
 $sysVcA = Join-Path $env:WINDIR "System32\$vcDllA"
 $sysVcB = Join-Path $env:WINDIR "System32\$vcDllB"
+$sysVcC = Join-Path $env:WINDIR "System32\$vcDllC"
+$sysVcD = Join-Path $env:WINDIR "System32\$vcDllD"
 
 $vcAOk = (Test-Path -LiteralPath $localVcA) -or (Test-Path -LiteralPath $sysVcA)
 $vcBOk = (Test-Path -LiteralPath $localVcB) -or (Test-Path -LiteralPath $sysVcB)
+$vcCOk = (Test-Path -LiteralPath $localVcC) -or (Test-Path -LiteralPath $sysVcC)
+$vcDOk = (Test-Path -LiteralPath $localVcD) -or (Test-Path -LiteralPath $sysVcD)
 Add-Check -Name "vc_runtime_msvcp140_available" -Passed $vcAOk -Value $vcDllA -Detail ("local={0}; system={1}" -f (Test-Path -LiteralPath $localVcA), (Test-Path -LiteralPath $sysVcA)) -Required $true
 Add-Check -Name "vc_runtime_msvcp140_1_available" -Passed $vcBOk -Value $vcDllB -Detail ("local={0}; system={1}" -f (Test-Path -LiteralPath $localVcB), (Test-Path -LiteralPath $sysVcB)) -Required $true
+Add-Check -Name "vc_runtime_vcruntime140_available" -Passed $vcCOk -Value $vcDllC -Detail ("local={0}; system={1}" -f (Test-Path -LiteralPath $localVcC), (Test-Path -LiteralPath $sysVcC)) -Required $true
+Add-Check -Name "vc_runtime_vcruntime140_1_available" -Passed $vcDOk -Value $vcDllD -Detail ("local={0}; system={1}" -f (Test-Path -LiteralPath $localVcD), (Test-Path -LiteralPath $sysVcD)) -Required $true
 
 $envDir = Join-Path $AppRoot ".env"
 $mambaDir = Join-Path $AppRoot "micromamba"

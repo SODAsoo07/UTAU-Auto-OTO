@@ -26,10 +26,12 @@
   #define ExcludeMfaRuntimeBundle "0"
 #endif
 
+#define InternalTestScriptExcludes "scripts\\*.py,scripts\\*.ps1,scripts\\*.bat,scripts\\*.cmd,build_alignment_test_folder.py,compare_alignment_visual.py,export_textgrid_to_sinsy_lab.py,preprocess_oto_cv_for_sequence_training.py,preprocess_sinsy_labels_for_sequence_training.py,train_sequence_aligner_profile_from_sinsy.py,sandbox_smoke_check.ps1"
+
 #if ExcludeMfaRuntimeBundle == "1"
-  #define ReleaseFileExcludes "config.json,.mfa_startup_repair_state.json,.cuda_startup_check_state.json,logs\\*,mfa_runtime_bundle\\*"
+  #define ReleaseFileExcludes "config.json,.mfa_startup_repair_state.json,.cuda_startup_check_state.json,logs\\*,mfa_runtime_bundle\\*,{#InternalTestScriptExcludes}"
 #else
-  #define ReleaseFileExcludes "config.json,.mfa_startup_repair_state.json,.cuda_startup_check_state.json,logs\\*"
+  #define ReleaseFileExcludes "config.json,.mfa_startup_repair_state.json,.cuda_startup_check_state.json,logs\\*,{#InternalTestScriptExcludes}"
 #endif
 
 #ifdef SetupIconFilePath
@@ -105,10 +107,14 @@ function HasRequiredVCRuntime(): Boolean;
 var
   HasMsvcp140: Boolean;
   HasMsvcp140_1: Boolean;
+  HasVcruntime140: Boolean;
+  HasVcruntime140_1: Boolean;
 begin
   HasMsvcp140 := FileExists(ExpandConstant('{app}\msvcp140.dll')) or FileExists(ExpandConstant('{sys}\msvcp140.dll'));
   HasMsvcp140_1 := FileExists(ExpandConstant('{app}\msvcp140_1.dll')) or FileExists(ExpandConstant('{sys}\msvcp140_1.dll'));
-  Result := HasMsvcp140 and HasMsvcp140_1;
+  HasVcruntime140 := FileExists(ExpandConstant('{app}\vcruntime140.dll')) or FileExists(ExpandConstant('{sys}\vcruntime140.dll'));
+  HasVcruntime140_1 := FileExists(ExpandConstant('{app}\vcruntime140_1.dll')) or FileExists(ExpandConstant('{sys}\vcruntime140_1.dll'));
+  Result := HasMsvcp140 and HasMsvcp140_1 and HasVcruntime140 and HasVcruntime140_1;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
