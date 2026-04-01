@@ -309,6 +309,8 @@ def _ja_onset_class(onset):
         return "other"
     if o in JA_NASAL_ONSETS or o.startswith("m"):
         return "nasal"
+    if o in JA_LIQUID_ONSETS or o.startswith("r") or o.startswith("l"):
+        return "liquid"
     if o in JA_VOICED_ONSETS:
         return "voiced"
     if o in JA_VOICELESS_ONSETS:
@@ -421,6 +423,20 @@ def _ja_mark_to_vowel(mark):
     return clean if clean in {"a", "i", "u", "e", "o"} else ""
 
 
+def _is_ja_silence_phone_mark(mark):
+    raw = str(mark or "").strip().lower()
+    if not raw:
+        return True
+    clean = re.sub(r"[0-9]", "", raw).strip()
+    if not clean:
+        return True
+    if clean in {"sil", "sp", "pau", "br", "bre", "spn", "_", "-", "silence"}:
+        return True
+    if clean.startswith("sil") or clean.startswith("pau"):
+        return True
+    return False
+
+
 def _ja_target_vowel_from_alias(alias_text, alias_type="cv"):
     tok = _extract_ja_cv_target_syllable(alias_text, alias_type=alias_type)
     if not tok:
@@ -454,26 +470,56 @@ def _ja_extract_cv_bounds(curr_phones, alias_text="", alias_type="cv"):
     if not phones:
         return 0.0, 0.0, 0.0, 0.0
 
+    active = []
+    for idx, ph in enumerate(phones):
+        if _is_ja_silence_phone_mark(getattr(ph, "mark", "")):
+            continue
+        active.append((idx, ph))
+    if not active:
+        active = [(idx, ph) for idx, ph in enumerate(phones)]
+
+    active_phones = [ph for _, ph in active]
+    first_active = active_phones[0]
+    c_start_floor = float(first_active.minTime) * 1000.0
+
     target_vowel = _ja_target_vowel_from_alias(alias_text, alias_type=alias_type)
-    v_phone, v_idx = _ja_pick_vowel_phone(phones, target_vowel=target_vowel)
-    c_start = float(phones[0].minTime) * 1000.0
+    v_phone, v_idx = _ja_pick_vowel_phone(active_phones, target_vowel=target_vowel)
+    c_start = c_start_floor
 
     if v_phone is not None:
         c_end = float(v_phone.minTime) * 1000.0
         n_start = c_end
         n_end = float(v_phone.maxTime) * 1000.0
+        cls, _onset = _ja_cv_onset_class(
+            alias_text,
+            c_hint=getattr(first_active, "mark", ""),
+            alias_type=alias_type,
+        )
         if v_idx > 0:
-            prev = phones[v_idx - 1]
-            prev_v = _ja_mark_to_vowel(getattr(prev, "mark", ""))
-            if not prev_v:
-                c_start = float(prev.minTime) * 1000.0
-            else:
-                c_start = c_end
+            cons_start = c_start_floor
+            for j in range(v_idx - 1, -1, -1):
+                prev = active_phones[j]
+                prev_v = _ja_mark_to_vowel(getattr(prev, "mark", ""))
+                if prev_v:
+                    continue
+                cons_start = float(prev.minTime) * 1000.0
+                if cls in {"nasal", "liquid"}:
+                    prev_len = (float(prev.maxTime) - float(prev.minTime)) * 1000.0
+                    if prev_len < 16.0 and j > 0:
+                        prev2 = active_phones[j - 1]
+                        prev2_v = _ja_mark_to_vowel(getattr(prev2, "mark", ""))
+                        if not prev2_v:
+                            cons_start = float(prev2.minTime) * 1000.0
+                break
+            c_start = min(max(cons_start, c_start_floor), c_end)
+            if (c_end - c_start) < 8.0:
+                short_pad = 14.0 if cls in {"nasal", "liquid"} else 10.0
+                c_start = max(c_end - short_pad, c_start_floor)
     else:
-        c_start = float(phones[0].minTime) * 1000.0
-        c_end = float(phones[-1].minTime) * 1000.0
+        c_start = c_start_floor
+        c_end = float(active_phones[-1].minTime) * 1000.0
         n_start = c_end
-        n_end = float(phones[-1].maxTime) * 1000.0
+        n_end = float(active_phones[-1].maxTime) * 1000.0
 
     if c_end < c_start:
         c_start = c_end

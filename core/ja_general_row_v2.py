@@ -74,8 +74,8 @@ def run_ja_general_row(
             c_floor = max(p + 6.0 + o, next_on - 14.0)
             c_cap = next_on - 2.5
         elif strict_cvvc and son_cls:
-            c_floor = max(next_on - 4.0, p + 10.0 + o)
-            c_cap = next_on + 3.0
+            c_floor = max(next_on - 6.0, p + 9.0 + o)
+            c_cap = next_on + 1.5
         elif strict_cvvc:
             c_floor = max(next_on - 6.0, p + 9.0 + o)
             c_cap = next_on + 2.0
@@ -97,8 +97,8 @@ def run_ja_general_row(
             cut_floor = max(c_abs + 4.0, next_on - 2.0)
             cut_cap = next_on + 0.8
         elif strict_cvvc and son_cls:
-            cut_floor = max(c_abs + 8.0, next_on + 1.0)
-            cut_cap = min(next_end + 3.0, next_on + 8.0)
+            cut_floor = max(c_abs + 8.0, next_on + 0.4)
+            cut_cap = min(next_end + 2.0, next_on + 5.0)
         elif strict_cvvc:
             cut_floor = max(c_abs + 7.0, next_on + 0.6)
             cut_cap = min(next_end + 2.0, next_on + 6.0)
@@ -139,19 +139,26 @@ def run_ja_general_row(
         ratio_cap = 0.66 if alias_type == "cv_head" else 0.62
         if onset_cls == "voiceless":
             ratio_cap -= 0.07
-        elif onset_cls in {"voiced", "nasal"}:
+        elif onset_cls == "liquid":
+            ratio_cap += 0.03
+        elif onset_cls == "nasal":
             ratio_cap += 0.02
+        elif onset_cls == "voiced":
+            ratio_cap += 0.01
         if hard_cls:
             ratio_cap -= 0.03
         if vowel_len < 90.0:
             ratio_cap -= 0.05
         elif vowel_len > 220.0:
             ratio_cap += 0.02
-        ratio_cap = min(max(ratio_cap, 0.46), 0.72)
+        max_ratio_cap = 0.75 if onset_cls == "liquid" else 0.73 if onset_cls == "nasal" else 0.72
+        ratio_cap = min(max(ratio_cap, 0.46), max_ratio_cap)
 
         min_gap = 8.0 if alias_type == "cv_head" else 10.0
         if onset_cls == "voiceless" or hard_cls:
             min_gap += 2.0
+        elif onset_cls == "liquid":
+            min_gap -= 1.0
         if vowel_len < 80.0:
             min_gap += 2.0
         min_gap = min(max(min_gap, 6.0), 20.0)
@@ -267,8 +274,28 @@ def run_ja_general_row(
             if mapping_tier == "high":
                 max_shift = 34.0
             onset_cls = onset_class_fn(c_char)
-            if onset_cls in {"voiced", "nasal"}:
-                max_shift += 4.0
+            if onset_cls == "liquid":
+                max_shift += 5.0
+            elif onset_cls in {"voiced", "nasal"}:
+                max_shift += 3.0
+            # Low-confidence CVVC sonorant bridges tend to drift into blank tails.
+            # Keep pre-anchor movement tighter to preserve local syllable timing.
+            if (
+                str(format_type or "").strip().lower() == "cvvc"
+                and str(mapping_tier or "").strip().lower() == "low"
+                and onset_cls in {"nasal", "liquid"}
+            ):
+                max_shift = min(max_shift, 14.0)
+            if (
+                str(format_type or "").strip().lower() == "cvvc"
+                and onset_cls in {"nasal", "liquid"}
+            ):
+                # Sonorants (n/m/r/l family) are easy to snap to a previous syllable.
+                # Keep local pre-anchor movement tighter in CVVC to avoid 1-step misplacement.
+                if str(mapping_tier or "").strip().lower() == "high":
+                    max_shift = min(max_shift, 14.0)
+                else:
+                    max_shift = min(max_shift, 10.0)
             if is_n_bridge_fn(alias, "vc"):
                 max_shift = min(max_shift, 22.0)
             (
@@ -296,8 +323,24 @@ def run_ja_general_row(
                 )
         if format_type == "cvvc" and float(n_start) > 0.0:
             onset_cls = onset_class_fn(c_char)
-            late_allow = 3.5 if onset_cls in {"voiced", "nasal"} else 2.0
+            if onset_cls == "liquid":
+                late_allow = 2.8
+            elif onset_cls in {"voiced", "nasal"}:
+                late_allow = 1.8
+            else:
+                late_allow = 2.0
+            if onset_cls == "liquid":
+                early_allow = 3.5
+            elif onset_cls == "nasal":
+                early_allow = 3.0
+            else:
+                early_allow = 5.0
+            pre_abs_floor = float(n_start) - early_allow
             pre_abs_cap = float(n_start) + late_allow
+            if pre_abs_after < pre_abs_floor:
+                offset = max(float(offset) + (pre_abs_floor - pre_abs_after), 0.0)
+                offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
+                pre_abs_after = offset + pre
             if pre_abs_after > pre_abs_cap:
                 offset = max(float(offset) - (pre_abs_after - pre_abs_cap), 0.0)
                 offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)

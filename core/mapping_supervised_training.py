@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import json
 import os
+import tempfile
+from collections import defaultdict
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -132,10 +134,51 @@ def _extract_tiers(tg_path: str):
     return word_tier, phone_tier
 
 
+def _build_phone_fallback_syllables(language: str, phone_tier) -> List[Dict[str, object]]:
+    out: List[Dict[str, object]] = []
+    if phone_tier is None:
+        return out
+    lang = str(language or "").strip().lower()
+    for p in list(phone_tier or []):
+        mark = str(getattr(p, "mark", "") or "").strip()
+        if not mark:
+            continue
+        clean = _clean_phone_mark(mark) if lang == "japanese" else str(mark).strip().lower()
+        if clean in {"", "sil", "sp", "spn", "pau"}:
+            continue
+        p_start = _safe_float(getattr(p, "minTime", 0.0), 0.0)
+        p_end = _safe_float(getattr(p, "maxTime", 0.0), 0.0)
+        if p_end <= p_start:
+            continue
+        if lang == "korean":
+            roman = clean
+            out.append(
+                {
+                    "word": mark,
+                    "roman": roman,
+                    "roman_cv": _kr_cv_kernel(roman),
+                    "start_time": p_start,
+                    "end_time": p_end,
+                    "phones": [p],
+                }
+            )
+        else:
+            out.append(
+                {
+                    "word": mark,
+                    "roman": _normalize_ja_syllable_token(clean),
+                    "start_time": p_start,
+                    "end_time": p_end,
+                    "phones": [p],
+                }
+            )
+    return out
+
+
 def _build_syllables_info(language: str, word_tier, phone_tier) -> List[Dict[str, object]]:
     out: List[Dict[str, object]] = []
     if word_tier is None:
-        return out
+        return _build_phone_fallback_syllables(language, phone_tier)
     ph_intervals = list(phone_tier or [])
     lang = str(language or "").strip().lower()
     for w in word_tier:
@@ -175,6 +218,12 @@ def _build_syllables_info(language: str, word_tier, phone_tier) -> List[Dict[str
                     "phones": s_phones,
                 }
             )
+    # 일부 TextGrid는 word tier가 한 덩어리라 후보 다양성이 사라진다.
+    # 이 경우 phone tier 기반 pseudo-syllable 후보로 확장해 negative를 확보한다.
+    if len(out) <= 1:
+        fallback = _build_phone_fallback_syllables(language, phone_tier)
+        if len(fallback) > len(out):
+            out = fallback
     return out
 
 
@@ -651,8 +700,395 @@ def train_mapping_supervised_model(
     return meta
 
 
+def train_mapping_hint_model(
+    *,
+    dataset_csv: str,
+    out_dir: str,
+    language: str,
+    format_type: str,
+    num_boost_round: int = 700,
+    early_stopping_rounds: int = 60,
+) -> Dict[str, object]:
+    if lgb is None:
+        raise RuntimeError("lightgbm is required")
+    if pd is None:
+        raise RuntimeError("pandas is required")
+    if not os.path.isfile(dataset_csv):
+        raise FileNotFoundError(dataset_csv)
+
+    df = pd.read_csv(dataset_csv, low_memory=False)
+    if len(df) < 16:
+        raise RuntimeError("Not enough rows to train mapping hint model (need >= 16 rows).")
+
+    if "p_map_ok" not in df.columns:
+        if "label" in df.columns:
+            df["p_map_ok"] = pd.to_numeric(df["label"], errors="coerce").fillna(0.0).clip(lower=0.0, upper=1.0)
+        else:
+            raise RuntimeError("Dataset is missing p_map_ok/label column.")
+    else:
+        df["p_map_ok"] = pd.to_numeric(df["p_map_ok"], errors="coerce").fillna(0.0).clip(lower=0.0, upper=1.0)
+
+    for col in ("m_offset_hint", "m_cutoff_hint"):
+        if col not in df.columns:
+            raise RuntimeError(f"Dataset is missing required hint column: {col}")
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    for name in MAPPING_SUPERVISED_FEATURE_NAMES:
+        if name not in df.columns:
+            df[name] = 0.0
+        df[name] = pd.to_numeric(df[name], errors="coerce").fillna(0.0)
+
+    tr_idx, va_idx = _group_split(df)
+    tr = df.iloc[tr_idx].copy()
+    va = df.iloc[va_idx].copy()
+    if len(tr) <= 0 or len(va) <= 0:
+        raise RuntimeError("Train/valid split failed.")
+
+    x_tr = tr[MAPPING_SUPERVISED_FEATURE_NAMES]
+    x_va = va[MAPPING_SUPERVISED_FEATURE_NAMES]
+
+    y_map_tr = tr["p_map_ok"].astype(float)
+    y_map_va = va["p_map_ok"].astype(float)
+
+    pos = float(max(1.0, float(y_map_tr.sum())))
+    neg = float(max(1.0, float(len(y_map_tr) - y_map_tr.sum())))
+    scale_pos_weight = float(neg / pos)
+
+    params_map = {
+        "objective": "binary",
+        "metric": "binary_logloss",
+        "boosting_type": "gbdt",
+        "num_leaves": 63,
+        "learning_rate": 0.05,
+        "feature_fraction": 0.9,
+        "bagging_fraction": 0.9,
+        "bagging_freq": 1,
+        "min_data_in_leaf": 40,
+        "verbosity": -1,
+        "scale_pos_weight": scale_pos_weight,
+    }
+    map_tr_ds = lgb.Dataset(x_tr, label=y_map_tr)
+    map_va_ds = lgb.Dataset(x_va, label=y_map_va, reference=map_tr_ds)
+    map_booster = lgb.train(
+        params_map,
+        map_tr_ds,
+        num_boost_round=int(max(20, num_boost_round)),
+        valid_sets=[map_va_ds],
+        valid_names=["valid"],
+        callbacks=[lgb.early_stopping(int(max(10, early_stopping_rounds)), verbose=False)],
+    )
+
+    tr_hint_weight = 1.0 + (2.0 * y_map_tr)
+    va_hint_weight = 1.0 + (2.0 * y_map_va)
+    params_reg = {
+        "objective": "regression_l1",
+        "metric": "l1",
+        "boosting_type": "gbdt",
+        "num_leaves": 63,
+        "learning_rate": 0.05,
+        "feature_fraction": 0.9,
+        "bagging_fraction": 0.9,
+        "bagging_freq": 1,
+        "min_data_in_leaf": 32,
+        "verbosity": -1,
+    }
+
+    off_tr_ds = lgb.Dataset(x_tr, label=tr["m_offset_hint"].astype(float), weight=tr_hint_weight.astype(float))
+    off_va_ds = lgb.Dataset(
+        x_va, label=va["m_offset_hint"].astype(float), weight=va_hint_weight.astype(float), reference=off_tr_ds
+    )
+    offset_booster = lgb.train(
+        params_reg,
+        off_tr_ds,
+        num_boost_round=int(max(20, num_boost_round)),
+        valid_sets=[off_va_ds],
+        valid_names=["valid"],
+        callbacks=[lgb.early_stopping(int(max(10, early_stopping_rounds)), verbose=False)],
+    )
+
+    cut_tr_ds = lgb.Dataset(x_tr, label=tr["m_cutoff_hint"].astype(float), weight=tr_hint_weight.astype(float))
+    cut_va_ds = lgb.Dataset(
+        x_va, label=va["m_cutoff_hint"].astype(float), weight=va_hint_weight.astype(float), reference=cut_tr_ds
+    )
+    cutoff_booster = lgb.train(
+        params_reg,
+        cut_tr_ds,
+        num_boost_round=int(max(20, num_boost_round)),
+        valid_sets=[cut_va_ds],
+        valid_names=["valid"],
+        callbacks=[lgb.early_stopping(int(max(10, early_stopping_rounds)), verbose=False)],
+    )
+
+    va_eval = va.copy()
+    va_eval["_map_pred"] = map_booster.predict(x_va, num_iteration=map_booster.best_iteration)
+    va_eval["label"] = y_map_va
+    top1_map = _top1_hit_rate(va_eval, "_map_pred")
+
+    va_offset_pred = offset_booster.predict(x_va, num_iteration=offset_booster.best_iteration)
+    va_cutoff_pred = cutoff_booster.predict(x_va, num_iteration=cutoff_booster.best_iteration)
+    pos_mask = (y_map_va >= 0.5).to_numpy()
+    if pos_mask.any():
+        off_mae = float(
+            (
+                abs(va_offset_pred[pos_mask] - va["m_offset_hint"].astype(float).to_numpy()[pos_mask]).mean()
+            )
+        )
+        cut_mae = float(
+            (
+                abs(va_cutoff_pred[pos_mask] - va["m_cutoff_hint"].astype(float).to_numpy()[pos_mask]).mean()
+            )
+        )
+    else:
+        off_mae = float(abs(va_offset_pred - va["m_offset_hint"].astype(float).to_numpy()).mean())
+        cut_mae = float(abs(va_cutoff_pred - va["m_cutoff_hint"].astype(float).to_numpy()).mean())
+
+    os.makedirs(out_dir, exist_ok=True)
+    model_map_txt = os.path.join(out_dir, "model_map_ok.txt")
+    model_offset_txt = os.path.join(out_dir, "model_offset_hint.txt")
+    model_cutoff_txt = os.path.join(out_dir, "model_cutoff_hint.txt")
+    map_booster.save_model(model_map_txt)
+    offset_booster.save_model(model_offset_txt)
+    cutoff_booster.save_model(model_cutoff_txt)
+
+    schema = {
+        "feature_version": MAPPING_SUPERVISED_FEATURE_VERSION,
+        "feature_names": list(MAPPING_SUPERVISED_FEATURE_NAMES),
+        "targets": ["p_map_ok", "m_offset_hint", "m_cutoff_hint"],
+    }
+    schema_path = os.path.join(out_dir, "feature_schema.json")
+    with open(schema_path, "w", encoding="utf-8") as f:
+        json.dump(schema, f, ensure_ascii=False, indent=2)
+
+    meta = {
+        "backend": "mapping_hint_lightgbm_v1",
+        "language": str(language or "").strip().lower(),
+        "format_type": str(format_type or "").strip().lower(),
+        "feature_version": MAPPING_SUPERVISED_FEATURE_VERSION,
+        "feature_names": list(MAPPING_SUPERVISED_FEATURE_NAMES),
+        "dataset_csv": dataset_csv,
+        "train_rows": int(len(tr)),
+        "valid_rows": int(len(va)),
+        "groups_train": int(tr["group_id"].nunique()) if "group_id" in tr.columns else 0,
+        "groups_valid": int(va["group_id"].nunique()) if "group_id" in va.columns else 0,
+        "positive_train": float(y_map_tr.sum()),
+        "positive_valid": float(y_map_va.sum()),
+        "scale_pos_weight": float(scale_pos_weight),
+        "num_boost_round": int(num_boost_round),
+        "early_stopping_rounds": int(early_stopping_rounds),
+        "best_iteration_map_ok": int(getattr(map_booster, "best_iteration", 0) or 0),
+        "best_iteration_offset_hint": int(getattr(offset_booster, "best_iteration", 0) or 0),
+        "best_iteration_cutoff_hint": int(getattr(cutoff_booster, "best_iteration", 0) or 0),
+        "valid_top1_map_ok": float(top1_map),
+        "valid_offset_hint_mae": float(off_mae),
+        "valid_cutoff_hint_mae": float(cut_mae),
+        "model_map_ok_txt": model_map_txt,
+        "model_offset_hint_txt": model_offset_txt,
+        "model_cutoff_hint_txt": model_cutoff_txt,
+        "feature_schema_json": schema_path,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    meta_path = os.path.join(out_dir, "meta.json")
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    return meta
+
+
+MAPPING_HINT_EXTRA_COLUMNS = [
+    "m_candidate_id",
+    "m_rank",
+    "p_map_ok",
+    "m_offset_hint",
+    "m_cutoff_hint",
+    "blank_attach_label",
+]
+
+
+def _estimate_mapping_hint_values(row: Dict[str, object]) -> Tuple[float, float]:
+    manual_anchor_ms = _safe_float(row.get("manual_anchor_ms"), 0.0)
+    pos_delta = _safe_float(row.get("pos_delta"), 0.0)
+    cand_duration_ms = _safe_float(row.get("cand_duration_ms"), 0.0)
+    cand_duration_ms = max(12.0, min(260.0, cand_duration_ms if cand_duration_ms > 0.0 else 58.0))
+
+    # pos_delta(ideal 대비 후보 위치 차이)를 시간 오프셋으로 변환해 anchor hint를 근사.
+    anchor_hint = max(0.0, manual_anchor_ms + (pos_delta * cand_duration_ms))
+    offset_hint = float(anchor_hint)
+    cutoff_hint = float(max(offset_hint + max(28.0, cand_duration_ms * 0.80), manual_anchor_ms + 24.0))
+    return offset_hint, cutoff_hint
+
+
+def _rank_candidates_by_group(rows: Sequence[Dict[str, object]]) -> Dict[Tuple[str, int], int]:
+    grouped: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        group_id = str(row.get("group_id", "") or "")
+        if not group_id:
+            continue
+        grouped[group_id].append(row)
+    rank_map: Dict[Tuple[str, int], int] = {}
+    for group_id, group_rows in grouped.items():
+        ranked = sorted(
+            group_rows,
+            key=lambda r: (
+                -_safe_float(r.get("heuristic_score"), 0.0),
+                -_safe_float(r.get("manual_score"), 0.0),
+                _safe_float(r.get("cand_idx"), 0.0),
+            ),
+        )
+        for rank, row in enumerate(ranked, start=1):
+            cand_idx = int(_safe_float(row.get("cand_idx"), 0.0))
+            rank_map[(group_id, cand_idx)] = int(rank)
+    return rank_map
+
+
+def _collect_topk_recall(rows: Sequence[Dict[str, object]], k_values: Sequence[int]) -> Dict[str, float]:
+    grouped: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        group_id = str(row.get("group_id", "") or "")
+        if not group_id:
+            continue
+        grouped[group_id].append(row)
+    total_groups = len(grouped)
+    out: Dict[str, float] = {}
+    if total_groups <= 0:
+        for k in k_values:
+            out[f"top{k}_recall"] = 0.0
+        return out
+    for k in k_values:
+        k_n = max(1, int(k))
+        hit = 0
+        for _gid, group_rows in grouped.items():
+            top_rows = [
+                r
+                for r in group_rows
+                if int(_safe_float(r.get("m_rank"), 9_999.0)) <= k_n
+            ]
+            if any(int(_safe_float(r.get("p_map_ok"), 0.0)) > 0 for r in top_rows):
+                hit += 1
+        out[f"top{k_n}_recall"] = float(hit) / float(max(1, total_groups))
+    return out
+
+
+def build_mapping_hint_dataset(
+    *,
+    dataset_root: str,
+    out_csv: str,
+    language: str,
+    format_types: Optional[Sequence[str]] = None,
+    max_voicebanks: int = 0,
+    auto_oto_policy: str = "generate-temp",
+    monotonic_prior_weight: float = -1.0,
+    source_csv: str = "",
+    blank_attach_threshold: float = 0.58,
+) -> Dict[str, object]:
+    """
+    P1용 mapping hint 데이터셋을 생성한다.
+    - base candidate dataset(build_mapping_supervised_dataset)을 기반으로
+      m_rank / p_map_ok / m_offset_hint / m_cutoff_hint / blank_attach_label 컬럼을 추가한다.
+    """
+    source_path = str(source_csv or "").strip()
+    base_stats: Dict[str, object] = {}
+    temp_csv_path = ""
+    if source_path and os.path.isfile(source_path):
+        base_csv = source_path
+    else:
+        os.makedirs(os.path.dirname(os.path.abspath(out_csv)), exist_ok=True)
+        fd, temp_csv_path = tempfile.mkstemp(prefix="mapping_supervised_base_", suffix=".csv")
+        os.close(fd)
+        base_csv = temp_csv_path
+        base_stats = build_mapping_supervised_dataset(
+            dataset_root=dataset_root,
+            out_csv=base_csv,
+            language=language,
+            format_types=format_types,
+            max_voicebanks=max_voicebanks,
+            auto_oto_policy=auto_oto_policy,
+            monotonic_prior_weight=monotonic_prior_weight,
+        )
+
+    try:
+        with open(base_csv, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            base_rows = [dict(r) for r in reader]
+            base_fieldnames = list(reader.fieldnames or [])
+
+        if not base_rows:
+            os.makedirs(os.path.dirname(os.path.abspath(out_csv)), exist_ok=True)
+            fieldnames = list(dict.fromkeys(base_fieldnames + MAPPING_HINT_EXTRA_COLUMNS))
+            with open(out_csv, "w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+                writer.writeheader()
+            return {
+                "language": str(language or "").strip().lower(),
+                "rows_total": 0,
+                "groups_total": 0,
+                "out_csv": out_csv,
+                "base_csv": base_csv,
+                "base_stats": base_stats,
+                "top1_recall": 0.0,
+                "top3_recall": 0.0,
+                "top5_recall": 0.0,
+            }
+
+        rank_map = _rank_candidates_by_group(base_rows)
+        alias_blank_types = {"cv", "cv_head", "v", "vv"}
+        hint_rows: List[Dict[str, object]] = []
+        for row in base_rows:
+            out_row = dict(row)
+            group_id = str(row.get("group_id", "") or "")
+            cand_idx = int(_safe_float(row.get("cand_idx"), 0.0))
+            rank = int(rank_map.get((group_id, cand_idx), 9_999))
+            p_map_ok = 1 if int(_safe_float(row.get("label"), 0.0)) > 0 else 0
+            offset_hint, cutoff_hint = _estimate_mapping_hint_values(row)
+            alias_type = str(row.get("alias_type", "") or "").strip().lower()
+            blank_conf = max(0.0, min(1.0, _safe_float(row.get("blank_conf"), 0.0)))
+            blank_attach_label = 1 if (alias_type in alias_blank_types and blank_conf >= float(blank_attach_threshold)) else 0
+
+            out_row["m_candidate_id"] = f"{group_id}|{cand_idx}"
+            out_row["m_rank"] = int(rank)
+            out_row["p_map_ok"] = int(p_map_ok)
+            out_row["m_offset_hint"] = float(offset_hint)
+            out_row["m_cutoff_hint"] = float(cutoff_hint)
+            out_row["blank_attach_label"] = int(blank_attach_label)
+            hint_rows.append(out_row)
+
+        fieldnames = list(dict.fromkeys(base_fieldnames + MAPPING_HINT_EXTRA_COLUMNS))
+        os.makedirs(os.path.dirname(os.path.abspath(out_csv)), exist_ok=True)
+        with open(out_csv, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for row in hint_rows:
+                writer.writerow(row)
+
+        group_ids = {str(r.get("group_id", "") or "") for r in hint_rows if str(r.get("group_id", "") or "")}
+        topk = _collect_topk_recall(hint_rows, (1, 3, 5))
+        out_stats = {
+            "language": str(language or "").strip().lower(),
+            "dataset_root": dataset_root,
+            "rows_total": int(len(hint_rows)),
+            "groups_total": int(len(group_ids)),
+            "positive_rows": int(sum(int(_safe_float(r.get("p_map_ok"), 0.0)) for r in hint_rows)),
+            "blank_attach_positive_rows": int(
+                sum(int(_safe_float(r.get("blank_attach_label"), 0.0)) for r in hint_rows)
+            ),
+            "blank_attach_threshold": float(blank_attach_threshold),
+            "out_csv": out_csv,
+            "base_csv": base_csv,
+            "base_stats": base_stats,
+        }
+        out_stats.update(topk)
+        return out_stats
+    finally:
+        if temp_csv_path:
+            try:
+                os.remove(temp_csv_path)
+            except Exception:
+                pass
+
+
 __all__ = [
     "DATASET_FIELDNAMES",
+    "MAPPING_HINT_EXTRA_COLUMNS",
+    "build_mapping_hint_dataset",
     "build_mapping_supervised_dataset",
+    "train_mapping_hint_model",
     "train_mapping_supervised_model",
 ]

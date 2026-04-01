@@ -64,6 +64,7 @@ SELECTOR_FEATURE_NAMES = [
     "cand_leak_risk",
     "cand_silence_risk",
     "cand_jump_risk",
+    "cand_blank_attach_risk",
 ]
 
 SELECTOR_CATEGORICAL_FEATURES = [
@@ -123,6 +124,68 @@ def _to_float(value: object, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return float(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
+def _blank_attach_risk_from_feature(feature_row: Dict[str, object]) -> float:
+    alias_type = str(feature_row.get("alias_type", "") or "").strip().lower()
+    blank_like = max(
+        _to_float(feature_row.get("blank_span_confidence"), 0.0),
+        _to_float(feature_row.get("syllable_blank_confidence"), 0.0),
+        _to_float(feature_row.get("cand_silence_risk"), 0.0),
+        _to_float(feature_row.get("mel_window_silence_ratio"), 0.0),
+        _to_float(feature_row.get("db_silence_ratio"), 0.0),
+    )
+    lead_ms = max(0.0, -_to_float(feature_row.get("cand_pre_to_expected_ms"), 0.0))
+    lead_norm = min(1.0, lead_ms / max(1e-6, _env_float("UTOA_SELECTOR_BLANK_ATTACH_LEAD_MS", 24.0)))
+    risk = max(0.0, min(1.0, blank_like * lead_norm))
+    if alias_type in {"cv", "cv_head", "v", "vv"}:
+        risk *= _env_float("UTOA_SELECTOR_BLANK_ATTACH_ALIAS_BOOST", 1.15)
+    return max(0.0, min(1.0, risk))
+
+
+def _selector_score_adjustment(feature_row: Dict[str, object]) -> Tuple[float, Dict[str, float]]:
+    blank_risk = _blank_attach_risk_from_feature(feature_row)
+    silence_risk = max(
+        _to_float(feature_row.get("cand_silence_risk"), 0.0),
+        _to_float(feature_row.get("mel_window_silence_ratio"), 0.0),
+        _to_float(feature_row.get("db_silence_ratio"), 0.0),
+    )
+    jump_risk = _to_float(feature_row.get("cand_jump_risk"), 0.0)
+    leak_ms = max(0.0, _to_float(feature_row.get("cand_leak_risk"), 0.0))
+    leak_norm = min(1.0, leak_ms / max(1e-6, _env_float("UTOA_SELECTOR_LEAK_MS_NORM", 20.0)))
+
+    penalty = (
+        _env_float("UTOA_SELECTOR_W_BLANK_ATTACH", 0.72) * blank_risk
+        + _env_float("UTOA_SELECTOR_W_SILENCE", 0.18) * silence_risk
+        + _env_float("UTOA_SELECTOR_W_JUMP", 0.15) * jump_risk
+        + _env_float("UTOA_SELECTOR_W_LEAK", 0.12) * leak_norm
+    )
+    return -float(penalty), {
+        "blank_attach_risk": float(blank_risk),
+        "silence_risk": float(silence_risk),
+        "jump_risk": float(jump_risk),
+        "leak_risk_norm": float(leak_norm),
+        "score_penalty": float(penalty),
+    }
+
+
+def _selector_hard_reject(feature_row: Dict[str, object]) -> bool:
+    alias_type = str(feature_row.get("alias_type", "") or "").strip().lower()
+    if alias_type not in {"cv", "cv_head", "v", "vv"}:
+        return False
+    blank_risk = _blank_attach_risk_from_feature(feature_row)
+    hard_th = _env_float("UTOA_SELECTOR_HARD_REJECT_BLANK_ATTACH", 0.86)
+    return blank_risk >= float(hard_th)
 
 
 def _get_validate_func(language: str):
@@ -748,6 +811,7 @@ def build_selector_feature_row(language: str, base_row: Dict[str, object], candi
     jump_blocked = _to_float(base_row.get("jump_blocked_flag"), 0.0) > 0.0
     anchor_jump = abs(_to_float(out.get("cand_pre_to_expected_ms"), 0.0))
     out["cand_jump_risk"] = 1.0 if jump_blocked or anchor_jump >= 28.0 else 0.0
+    out["cand_blank_attach_risk"] = _blank_attach_risk_from_feature(out)
     return canonicalize_selector_feature_row(out)
 
 
@@ -945,24 +1009,47 @@ def select_best_candidate(
     candidates = build_selector_candidates(language, base_row)
     if not candidates:
         return None
-    scored: List[Tuple[float, Dict[str, object], Dict[str, object]]] = []
+    scored: List[Tuple[float, Dict[str, object], Dict[str, object], float, float, Dict[str, float]]] = []
+    rejected: List[Dict[str, object]] = []
     for candidate in candidates:
         feature_row = build_selector_feature_row(language, base_row, candidate)
-        score = float(score_callback(feature_row))
-        scored.append((score, candidate, feature_row))
+        raw_score = float(score_callback(feature_row))
+        score_delta, detail = _selector_score_adjustment(feature_row)
+        final_score = float(raw_score + score_delta)
+        if _selector_hard_reject(feature_row):
+            rejected.append(
+                {
+                    "candidate_mode": str(candidate.get("candidate_mode", "") or ""),
+                    "raw_score": float(raw_score),
+                    "score": float(final_score),
+                    "hard_reject": True,
+                    **detail,
+                }
+            )
+            continue
+        scored.append((final_score, candidate, feature_row, raw_score, score_delta, detail))
+    if not scored:
+        return None
     scored.sort(key=lambda item: item[0], reverse=True)
-    best_score, best_candidate, best_feature_row = scored[0]
+    best_score, best_candidate, best_feature_row, best_raw_score, best_delta, best_detail = scored[0]
     return {
         "score": float(best_score),
+        "raw_score": float(best_raw_score),
+        "score_adjustment": float(best_delta),
         "candidate": dict(best_candidate),
         "feature_row": dict(best_feature_row),
+        "score_components": dict(best_detail),
         "scores": [
             {
                 "candidate_mode": str(candidate.get("candidate_mode", "") or ""),
+                "raw_score": float(raw_score),
+                "score_adjustment": float(score_delta),
                 "score": float(score),
+                **detail,
             }
-            for score, candidate, _feature in scored
+            for score, candidate, _feature, raw_score, score_delta, detail in scored
         ],
+        "rejected": rejected,
     }
 
 

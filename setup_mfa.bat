@@ -9,6 +9,7 @@ chcp 65001 >nul
 title UTAU Auto OTO - MFA Setup and Recovery
 
 set "INSTALL_ML=0"
+set "DISABLE_ML=0"
 
 set "DELETE_OLD_AFTER_INSTALL=0"
 
@@ -27,6 +28,8 @@ set "FORCE_MENU=0"
 set "REQUESTED_MODE="
 
 set "WRAPPER_MODE="
+
+set "REQUESTED_LANGUAGE="
 
 set "RECOVERY_LANGUAGE=korean"
 
@@ -60,16 +63,28 @@ if "%~1"=="" goto :args_done
 if /i "%~1"=="--help" goto :show_help
 
 if /i "%~1"=="--runtime-root" goto :capture_runtime_root
-if /i "%~1"=="--language" goto :capture_language
 
 set "ARG_RAW=%~1"
 
 if /i "%ARG_RAW:~0,15%"=="--runtime-root=" goto :capture_runtime_root_inline
+
+if /i "%~1"=="--language" goto :capture_language
+
 if /i "%ARG_RAW:~0,11%"=="--language=" goto :capture_language_inline
 
 if /i "%~1"=="--with-ml" set "INSTALL_ML=1"
 
 if /i "%~1"=="--install-ml" set "INSTALL_ML=1"
+
+if /i "%~1"=="--without-ml" (
+    set "DISABLE_ML=1"
+    set "INSTALL_ML=0"
+)
+
+if /i "%~1"=="--skip-ml" (
+    set "DISABLE_ML=1"
+    set "INSTALL_ML=0"
+)
 
 if /i "%~1"=="--non-interactive" set "NON_INTERACTIVE=1"
 
@@ -131,15 +146,11 @@ shift
 
 if "%~1"=="" goto :missing_language
 
-set "LANG_CANDIDATE=%~1"
+set "LANGUAGE_CANDIDATE=%~1"
 
-if /i "%LANG_CANDIDATE:~0,2%"=="--" goto :missing_language
+if /i "%LANGUAGE_CANDIDATE:~0,2%"=="--" goto :missing_language
 
-set "RECOVERY_LANGUAGE=%~1"
-
-call :normalize_recovery_language
-
-if errorlevel 1 exit /b 1
+set "REQUESTED_LANGUAGE=%~1"
 
 shift
 
@@ -147,25 +158,13 @@ goto :parse_args
 
 :capture_language_inline
 
-set "RECOVERY_LANGUAGE=%ARG_RAW:~11%"
+set "REQUESTED_LANGUAGE=%ARG_RAW:~11%"
 
-if "%RECOVERY_LANGUAGE%"=="" goto :missing_language
-
-call :normalize_recovery_language
-
-if errorlevel 1 exit /b 1
+if "%REQUESTED_LANGUAGE%"=="" goto :missing_language
 
 shift
 
 goto :parse_args
-
-:missing_language
-
-echo [FAILED] --language requires a value: korean or japanese.
-
-echo          Example: --language japanese
-
-exit /b 1
 
 :missing_runtime_root
 
@@ -175,12 +174,21 @@ echo          Example: --runtime-root "C:\Users\%USERNAME%\AppData\Local\UTAU_Au
 
 exit /b 1
 
+:missing_language
+
+echo [FAILED] --language requires a value ^(korean or japanese^).
+
+echo          Example: --language japanese
+
+exit /b 1
+
 :show_help
 
-echo Usage: setup_mfa.bat [--install ^| --recovery ^| --menu] [--runtime-root PATH] [--with-ml] [--non-interactive]
+echo Usage: setup_mfa.bat [--install ^| --recovery ^| --menu] [--runtime-root PATH] [--with-ml ^| --without-ml] [--non-interactive]
 
 echo Installs or repairs MFA runtime ^(.env^), micromamba packages, and language/model dependencies.
 echo For CTC runtime ^(.env_ctc^) use setup_ctc.bat.
+echo ML dependencies are installed by default during install mode.
 
 echo.
 
@@ -194,11 +202,12 @@ echo   --runtime-root PATH       Explicit runtime root path
 
 echo   --runtime-root=PATH       Same as above ^(inline form^)
 
-echo   --language LANG           Recovery language: korean ^| japanese
+echo   --language NAME           Recovery language ^(korean or japanese^)
 
-echo   --language=LANG           Same as above ^(inline form^)
+echo   --language=NAME           Same as above ^(inline form^)
 
 echo   --with-ml / --install-ml  Install ML dependencies ^(pandas/pyarrow/lightgbm/onnxruntime^)
+echo   --without-ml / --skip-ml  Skip ML dependency install
 
 echo   --non-interactive         Run without prompts ^(requires valid runtime root^)
 
@@ -211,6 +220,28 @@ echo   --clean                   Force-clean MFA env before install
 exit /b 0
 
 :args_done
+
+if not defined REQUESTED_LANGUAGE if defined UTOA_MFA_RECOVERY_LANGUAGE set "REQUESTED_LANGUAGE=%UTOA_MFA_RECOVERY_LANGUAGE%"
+
+if defined REQUESTED_LANGUAGE (
+
+    if /i "%REQUESTED_LANGUAGE%"=="japanese" (
+
+        set "RECOVERY_LANGUAGE=japanese"
+
+    ) else if /i "%REQUESTED_LANGUAGE%"=="korean" (
+
+        set "RECOVERY_LANGUAGE=korean"
+
+    ) else (
+
+        echo [WARN] Unsupported recovery language "%REQUESTED_LANGUAGE%". Falling back to korean.
+
+        set "RECOVERY_LANGUAGE=korean"
+
+    )
+
+)
 
 for %%I in ("%SETUP_MFA_DIR%") do set "SETUP_MFA_DIR_NORM=%%~fI"
 
@@ -281,6 +312,12 @@ if not defined WRAPPER_MODE set "WRAPPER_MODE=menu"
 if /i "%WRAPPER_MODE%"=="menu" call :select_start_mode
 
 if /i "%WRAPPER_MODE%"=="exit" exit /b 2
+
+if /i "%WRAPPER_MODE%"=="install" if "%INSTALL_ML%"=="0" if "%DISABLE_ML%"=="0" (
+    echo [INFO] Initial install defaults to ML dependency install.
+    echo [INFO] Use --without-ml to skip ML packages.
+    set "INSTALL_ML=1"
+)
 
 :wrapper_dispatch
 
@@ -704,22 +741,6 @@ set "WRAPPER_MODE=install"
 
 goto :eof
 
-:normalize_recovery_language
-
-set "RECOVERY_LANGUAGE=%RECOVERY_LANGUAGE:"=%"
-
-if /i "%RECOVERY_LANGUAGE%"=="ko" set "RECOVERY_LANGUAGE=korean"
-if /i "%RECOVERY_LANGUAGE%"=="kr" set "RECOVERY_LANGUAGE=korean"
-if /i "%RECOVERY_LANGUAGE%"=="ja" set "RECOVERY_LANGUAGE=japanese"
-if /i "%RECOVERY_LANGUAGE%"=="jp" set "RECOVERY_LANGUAGE=japanese"
-
-if /i "%RECOVERY_LANGUAGE%"=="korean" exit /b 0
-if /i "%RECOVERY_LANGUAGE%"=="japanese" exit /b 0
-
-echo [FAILED] Invalid --language value: %RECOVERY_LANGUAGE%
-echo          Allowed values: korean, japanese
-exit /b 1
-
 :preflight_install_tools
 
 set "HAS_CERTUTIL=1"
@@ -759,6 +780,11 @@ goto :eof
 call :preflight_install_tools
 
 if errorlevel 1 exit /b 1
+
+if "%INSTALL_ML%"=="0" if "%DISABLE_ML%"=="0" (
+    echo [INFO] Enabling ML dependency install for setup.
+    set "INSTALL_ML=1"
+)
 
 echo ====================================================
 
@@ -934,7 +960,11 @@ call :install_audio_deps
 
 if errorlevel 1 exit /b 1
 
-call :install_selected_language_support
+call :install_korean_support
+
+if errorlevel 1 exit /b 1
+
+call :install_japanese_support
 
 if errorlevel 1 exit /b 1
 
@@ -954,7 +984,15 @@ echo.
 
 echo ..
 
-call :download_selected_acoustic_models
+call :download_acoustic_model korean_mfa
+
+if errorlevel 1 exit /b 1
+
+echo.
+
+echo ..
+
+call :download_acoustic_model japanese_mfa
 
 if errorlevel 1 exit /b 1
 
@@ -1161,7 +1199,11 @@ if errorlevel 1 exit /b 1
 
 echo [4/5] Installing language and audio dependencies...
 
-call :install_selected_language_support
+call :install_korean_support
+
+if errorlevel 1 exit /b 1
+
+call :install_japanese_support
 
 if errorlevel 1 exit /b 1
 
@@ -1191,7 +1233,11 @@ echo.
 
 echo [ / .. ^( 1~2 )
 
-call :download_selected_acoustic_models
+call :download_acoustic_model korean_mfa
+
+if errorlevel 1 exit /b 1
+
+call :download_acoustic_model japanese_mfa
 
 if errorlevel 1 exit /b 1
 
@@ -1321,8 +1367,7 @@ taskkill /F /IM micromamba.exe >nul 2>nul
 
 taskkill /F /IM UTAU_Auto_OTO.exe >nul 2>nul
 
-timeout /t 2 /nobreak >nul 2>nul
-ver >nul
+timeout /t 2 /nobreak >nul
 
 goto :eof
 
@@ -1557,52 +1602,6 @@ if exist "%ENV_DIR%\python.exe" (
 )
 
 goto :eof
-
-:install_selected_language_support
-
-if /i "%RECOVERY_LANGUAGE%"=="japanese" (
-
-    call :install_japanese_support
-    exit /b %ERRORLEVEL%
-
-)
-
-if /i "%RECOVERY_LANGUAGE%"=="korean" (
-
-    call :install_korean_support
-    exit /b %ERRORLEVEL%
-
-)
-
-call :install_korean_support
-if errorlevel 1 exit /b 1
-call :install_japanese_support
-exit /b %ERRORLEVEL%
-
-:download_selected_acoustic_models
-
-echo.
-
-echo ..
-
-if /i "%RECOVERY_LANGUAGE%"=="japanese" (
-
-    call :download_acoustic_model japanese_mfa
-    exit /b %ERRORLEVEL%
-
-)
-
-if /i "%RECOVERY_LANGUAGE%"=="korean" (
-
-    call :download_acoustic_model korean_mfa
-    exit /b %ERRORLEVEL%
-
-)
-
-call :download_acoustic_model korean_mfa
-if errorlevel 1 exit /b 1
-call :download_acoustic_model japanese_mfa
-exit /b %ERRORLEVEL%
 
 :install_audio_deps
 
@@ -2144,7 +2143,7 @@ set "KOREAN_TOKENIZER_OK=0"
 
 if not exist "%ENV_DIR%\python.exe" goto :eof
 
-call :run_env_python -c "import sys,jamo,subprocess; cmds=['from mecab import MeCab','from mecab import MeCab; MeCab()','from mecab import Tagger','from mecab import Tagger; Tagger()','import MeCab as M','import MeCab as M; M.Tagger()','import mecab_ko']; ok=any(subprocess.run([sys.executable,'-c',c],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0 for c in cmds); sys.exit(0 if ok else 1)" >nul 2>nul
+call :run_env_python -c "import importlib.util as u,sys; has_jamo=u.find_spec('jamo') is not None; backends=('mecab','mecab_ko','MeCab'); has_backend=any(u.find_spec(name) is not None for name in backends); sys.exit(0 if (has_jamo and has_backend) else 1)" >nul 2>nul
 
 if not errorlevel 1 set "KOREAN_TOKENIZER_OK=1"
 
@@ -2638,7 +2637,7 @@ if exist "%ENV_DIR%" (
 
     call :release_env_lock_processes
 
-    timeout /t 2 /nobreak >nul 2>nul
+    timeout /t 2 /nobreak >nul
 
     goto :remove_env_retry_loop
 

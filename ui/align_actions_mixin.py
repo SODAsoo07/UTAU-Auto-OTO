@@ -7,9 +7,27 @@ from core.pipeline_status import normalize_aligner_name
 
 class AlignActionsMixin:
     def _run_mfa(self):
+        active_worker = getattr(self, "_active_worker_thread", None)
+        if bool(getattr(self, "is_running", False)) and active_worker is not None and active_worker.is_alive():
+            self._set_status("다른 작업 진행 중")
+            self._append_log("ℹ 다른 작업이 진행 중이라 정렬을 시작하지 않습니다.")
+            return
+
         wav_dir_for_prompt = str(self.wav_entry.get() or "").strip()
         overwrite_existing_textgrids = False
         lang_for_prompt = self._get_language() if hasattr(self, "_get_language") else ""
+        if (
+            wav_dir_for_prompt
+            and lang_for_prompt in {"korean", "japanese"}
+            and hasattr(self, "_confirm_language_script_mismatch")
+        ):
+            if not self._confirm_language_script_mismatch(
+                lang_for_prompt,
+                wav_dir_for_prompt,
+                stage_name="정렬",
+            ):
+                self._set_status("정렬 취소됨")
+                return
         primary_engine_for_prompt = normalize_aligner_name(
             self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
             default="mfa",

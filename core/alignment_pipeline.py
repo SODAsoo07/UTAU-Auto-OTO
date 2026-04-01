@@ -51,11 +51,11 @@ def _should_retry_mfa_with_fallback(message: str) -> bool:
 def _mfa_profile_chain(language: str, requested_profile: str) -> List[str]:
     _ = str(language or "").strip().lower()
     req = str(requested_profile or "").strip().lower()
-    valid = ["default", "accurate", "fast"]
+    valid = ["default", "accurate", "accurate_adapted", "fast"]
     if req not in valid:
         req = "default"
     fallback = "fast"
-    if req in {"fast", "accurate"}:
+    if req in {"fast", "accurate", "accurate_adapted"}:
         fallback = "default"
     if fallback == req:
         return [req]

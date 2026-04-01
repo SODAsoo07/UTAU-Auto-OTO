@@ -138,7 +138,13 @@ def _is_kr_order_locked_cv_format(file_format):
     return fmt in {"cvvc", "cvc"}
 
 
-def _resolve_kr_cvvc_occurrence_index(alias, alias_type, occurrence_map, occurrence_state):
+def _resolve_kr_cvvc_occurrence_index(
+    alias,
+    alias_type,
+    occurrence_map,
+    occurrence_state,
+    expected_idx=None,
+):
     """한국어 CVVC에서 같은 CV 토큰의 등장 순서대로 CV/CV_HEAD를 직접 매핑합니다."""
     if alias_type not in {"cv", "cv_head"}:
         return None
@@ -155,6 +161,9 @@ def _resolve_kr_cvvc_occurrence_index(alias, alias_type, occurrence_map, occurre
     if used >= len(idxs):
         used = len(idxs) - 1
     occurrence_state[state_key] = used + 1
+    # expected_idx는 호출부 호환을 위한 힌트 인자입니다.
+    # 현재는 기존 순서 기반 정책을 유지하므로 직접 사용하지 않습니다.
+    _ = expected_idx
     return idxs[used]
 
 

@@ -37,10 +37,13 @@ from core.oto_ml_policy import (
 from core.oto_ml_reliability import (
     compute_blank_risk_score,
     compute_mel_reliability_score,
+    evaluate_voiced_approval,
     is_mel_unreliable,
     mel_patch_is_fallback,
 )
 from core.oto_ml_selector import select_best_candidate
+from core.oto_e2e_runtime import build_e2e_runtime_context, predict_e2e_params
+from core.oto_e2e_selector import E2ESelectorConfig, select_e2e_or_legacy
 from core.format_type_utils import normalize_format_type
 from core.silence_profile_runtime import (
     apply_reliability_hysteresis,
@@ -91,8 +94,9 @@ def _ensemble_enabled() -> bool:
 
 
 def _ml_route(value: Optional[str] = None) -> str:
-    # Runtime route is fixed to legacy.
-    _ = str(value or os.environ.get("UTOA_ML_ROUTE", "legacy") or "legacy").strip().lower()
+    raw = str(value or os.environ.get("UTOA_ML_ROUTE", "legacy") or "legacy").strip().lower()
+    if raw in {"e2e_hybrid", "e2e", "hybrid"}:
+        return "e2e_hybrid"
     return "legacy"
 
 
@@ -2177,6 +2181,13 @@ def apply_oto_ml_to_oto_file(
         blank_confidence=0.0,
         constraint_adjust_count=0,
         reliability_metrics={},
+        e2e_enabled=False,
+        e2e_mode="",
+        e2e_model_dirs=[],
+        e2e_selected_counts={},
+        e2e_fallback_count=0,
+        e2e_fallback_reasons=[],
+        e2e_model_confidence=0.0,
     )
     ml_report["policy"] = policy_name
 
@@ -2250,6 +2261,9 @@ def apply_oto_ml_to_oto_file(
         "blank_flag_rows": 0,
         "mel_unreliable_rows": 0,
         "mel_fallback_rows": 0,
+        "voiced_gate_required_rows": 0,
+        "voiced_gate_block_rows": 0,
+        "voiced_gate_forced_blank_rows": 0,
         "abstain_rows": 0,
         "blank_hys_switches": 0,
         "mel_hys_switches": 0,
@@ -2258,6 +2272,13 @@ def apply_oto_ml_to_oto_file(
         "proxy_fn_count": 0,
         "proxy_fn_denom": 0,
     }
+    e2e_ctx_cache: Dict[str, object] = {}
+    e2e_selected_counts: Dict[str, int] = {}
+    e2e_fallback_reasons: Dict[str, int] = {}
+    e2e_conf_values: List[float] = []
+    e2e_enabled_runtime = route_name == "e2e_hybrid"
+    validate_oto_params = _get_validate_func(language)
+    ml_report["e2e_enabled"] = bool(e2e_enabled_runtime)
     with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
         raw_lines = [line.rstrip("\n") for line in f]
 
@@ -2307,16 +2328,46 @@ def apply_oto_ml_to_oto_file(
             profile=reliability_profile,
             prev_state=reliability_state.get(state_key),
         )
+        voiced_gate = evaluate_voiced_approval(feat, profile=reliability_profile)
+        voiced_required = bool(voiced_gate.get("required", False))
+        voiced_approved = bool(voiced_gate.get("approved", True))
+        voiced_forced_blank = False
+        if int(reliability_decision.get("blank_flag", 0)) <= 0 and voiced_required and (not voiced_approved):
+            voiced_forced_blank = True
+            reliability_decision = dict(reliability_decision)
+            reliability_decision["blank_flag"] = 1
+            reliability_decision["blank_forced_by_voiced_gate"] = True
+            state = dict(reliability_decision.get("state") or {})
+            blank_state = dict(state.get("blank") or {})
+            blank_state["active"] = True
+            blank_state["pending"] = 0
+            state["blank"] = blank_state
+            reliability_decision["state"] = state
         reliability_state[state_key] = dict(reliability_decision.get("state") or {})
         feat["_runtime_blank_risk_score"] = float(blank_risk_score)
         feat["_runtime_blank_risk_flag"] = int(reliability_decision.get("blank_flag", 0))
         feat["_runtime_mel_reliability_score"] = float(mel_reliability_score)
         feat["_runtime_mel_unreliable"] = bool(reliability_decision.get("mel_unreliable", False))
+        feat["_runtime_voiced_gate_enabled"] = int(1 if bool(voiced_gate.get("enabled", False)) else 0)
+        feat["_runtime_voiced_gate_required"] = int(1 if voiced_required else 0)
+        feat["_runtime_voiced_approved"] = int(1 if voiced_approved else 0)
+        feat["_runtime_voiced_gate_reason"] = str(voiced_gate.get("reason", "") or "")
+        feat["_runtime_voiced_conf"] = float(_to_float(voiced_gate.get("voiced_conf"), 0.0))
+        feat["_runtime_voiced_gate_rms"] = float(_to_float(voiced_gate.get("rms_norm"), 0.0))
+        feat["_runtime_voiced_gate_f0_continuity"] = float(_to_float(voiced_gate.get("f0_continuity"), 0.0))
         feat["_runtime_blank_threshold"] = float(reliability_decision.get("blank_threshold", 0.55))
         feat["_runtime_blank_risky_threshold"] = float(reliability_decision.get("blank_risky_threshold", 0.44))
         feat["_runtime_blank_severe_threshold"] = float(reliability_decision.get("blank_severe_threshold", 0.58))
         feat["_runtime_mel_threshold"] = float(reliability_decision.get("mel_threshold", 0.42))
         reliability_stats["rows"] = int(reliability_stats["rows"]) + 1
+        if voiced_required:
+            reliability_stats["voiced_gate_required_rows"] = int(reliability_stats.get("voiced_gate_required_rows", 0)) + 1
+            if not voiced_approved:
+                reliability_stats["voiced_gate_block_rows"] = int(reliability_stats.get("voiced_gate_block_rows", 0)) + 1
+        if voiced_forced_blank:
+            reliability_stats["voiced_gate_forced_blank_rows"] = int(
+                reliability_stats.get("voiced_gate_forced_blank_rows", 0)
+            ) + 1
         if int(feat["_runtime_blank_risk_flag"]) > 0:
             reliability_stats["blank_flag_rows"] = int(reliability_stats["blank_flag_rows"]) + 1
         if bool(feat["_runtime_mel_unreliable"]):
@@ -2550,6 +2601,26 @@ def apply_oto_ml_to_oto_file(
                 selector_mode_counts = ml_report.get("selector_mode_counts", {})
                 selector_mode_counts[mode] = int(selector_mode_counts.get(mode, 0)) + 1
                 ml_report["selector_mode_counts"] = selector_mode_counts
+                comp = selected.get("score_components") if isinstance(selected, dict) else None
+                if isinstance(comp, dict):
+                    score_stats = dict(ml_report.get("selector_score_stats", {}) or {})
+                    score_stats["rows"] = int(score_stats.get("rows", 0)) + 1
+                    score_stats["blank_attach_risk_sum"] = float(score_stats.get("blank_attach_risk_sum", 0.0)) + float(
+                        comp.get("blank_attach_risk", 0.0) or 0.0
+                    )
+                    score_stats["silence_risk_sum"] = float(score_stats.get("silence_risk_sum", 0.0)) + float(
+                        comp.get("silence_risk", 0.0) or 0.0
+                    )
+                    score_stats["jump_risk_sum"] = float(score_stats.get("jump_risk_sum", 0.0)) + float(
+                        comp.get("jump_risk", 0.0) or 0.0
+                    )
+                    score_stats["leak_risk_norm_sum"] = float(score_stats.get("leak_risk_norm_sum", 0.0)) + float(
+                        comp.get("leak_risk_norm", 0.0) or 0.0
+                    )
+                    score_stats["penalty_sum"] = float(score_stats.get("penalty_sum", 0.0)) + float(
+                        comp.get("score_penalty", 0.0) or 0.0
+                    )
+                    ml_report["selector_score_stats"] = score_stats
                 if log_selector_hard_negative(
                     feat,
                     selected,
@@ -2677,6 +2748,57 @@ def apply_oto_ml_to_oto_file(
                 route_name = "selector_only"
             else:
                 continue
+
+            if e2e_enabled_runtime and format_type == "cv" and alias_type_for_row in {"cv", "cv_head"}:
+                ctx_key = str(format_type or "general")
+                e2e_ctx = e2e_ctx_cache.get(ctx_key)
+                if e2e_ctx is None:
+                    e2e_ctx = build_e2e_runtime_context(language, ctx_key, "e2e_hybrid")
+                    e2e_ctx_cache[ctx_key] = e2e_ctx
+                    ml_report["e2e_mode"] = str(getattr(getattr(e2e_ctx, "config", None), "mode", "") or "")
+                    if getattr(e2e_ctx, "bundle", None) is not None:
+                        model_dir = str(getattr(e2e_ctx.bundle, "model_dir", "") or "")
+                        if model_dir:
+                            model_dirs = list(ml_report.get("e2e_model_dirs", []) or [])
+                            if model_dir not in model_dirs:
+                                model_dirs.append(model_dir)
+                                ml_report["e2e_model_dirs"] = model_dirs
+
+                e2e_pred = predict_e2e_params(e2e_ctx, feat)
+                if bool(e2e_pred.get("ok", False)):
+                    e2e_params = e2e_pred.get("params")
+                    if isinstance(e2e_params, tuple) and len(e2e_params) == 5:
+                        score = float(e2e_pred.get("confidence", 0.0) or 0.0)
+                        e2e_conf_values.append(score)
+                        select_result = select_e2e_or_legacy(
+                            legacy_params=(float(o2), float(c2), float(ct2), float(p2), float(ov2)),
+                            e2e_params=(
+                                float(e2e_params[0]),
+                                float(e2e_params[1]),
+                                float(e2e_params[2]),
+                                float(e2e_params[3]),
+                                float(e2e_params[4]),
+                            ),
+                            score=score,
+                            config=E2ESelectorConfig(
+                                mode=str(getattr(getattr(e2e_ctx, "config", None), "mode", "hybrid") or "hybrid"),
+                                t_low=float(getattr(getattr(e2e_ctx, "config", None), "t_low", 0.52) or 0.52),
+                                t_high=float(getattr(getattr(e2e_ctx, "config", None), "t_high", 0.72) or 0.72),
+                                blend_alpha=float(getattr(getattr(e2e_ctx, "config", None), "blend_alpha", 0.60) or 0.60),
+                            ),
+                            validate_fn=validate_oto_params,
+                            alias_type=alias_type_for_row,
+                        )
+                        o2, c2, ct2, p2, ov2 = select_result.params
+                        selected_mode = str(select_result.selected or "legacy")
+                        e2e_selected_counts[selected_mode] = int(e2e_selected_counts.get(selected_mode, 0)) + 1
+                        route_name = f"e2e_hybrid:{selected_mode}"
+                    else:
+                        reason = "predict_invalid_shape"
+                        e2e_fallback_reasons[reason] = int(e2e_fallback_reasons.get(reason, 0)) + 1
+                else:
+                    reason = str(e2e_pred.get("code", "predict_failed") or "predict_failed")
+                    e2e_fallback_reasons[reason] = int(e2e_fallback_reasons.get(reason, 0)) + 1
             route_counts[route_name] = int(route_counts.get(route_name, 0)) + 1
         except CoupledLowConfidenceError as e:
             if fallback_bundle is not None:
@@ -2760,7 +2882,8 @@ def apply_oto_ml_to_oto_file(
             f"rows={int(reliability_stats.get('rows', 0))}, "
             f"blank_flags={int(reliability_stats.get('blank_flag_rows', 0))}, "
             f"mel_unreliable={int(reliability_stats.get('mel_unreliable_rows', 0))}, "
-            f"mel_fallback={int(reliability_stats.get('mel_fallback_rows', 0))}",
+            f"mel_fallback={int(reliability_stats.get('mel_fallback_rows', 0))}, "
+            f"voiced_gate_blocked={int(reliability_stats.get('voiced_gate_block_rows', 0))}",
         )
 
     ml_report["anchor_stats"] = dict(anchor_stats)
@@ -2770,10 +2893,31 @@ def apply_oto_ml_to_oto_file(
     ml_report["invalid_routes"] = list(ml_report["invalid_routes"])
     ml_report["loaded_models"] = list(dict.fromkeys(ml_report["loaded_models"]))
     ml_report["constraint_adjust_count"] = int(constraint_stats.get("constraint_adjust_count", 0))
+    ml_report["e2e_selected_counts"] = dict(e2e_selected_counts)
+    ml_report["e2e_fallback_count"] = int(sum(int(v) for v in e2e_fallback_reasons.values()))
+    ml_report["e2e_fallback_reasons"] = [f"{k}:{int(v)}" for k, v in sorted(e2e_fallback_reasons.items())]
+    if e2e_conf_values:
+        ml_report["e2e_model_confidence"] = float(sum(e2e_conf_values) / float(len(e2e_conf_values)))
     if blank_conf_values:
         ml_report["blank_confidence"] = float(sum(blank_conf_values) / float(len(blank_conf_values)))
     if confidence_values:
         ml_report["model_confidence"] = float(sum(confidence_values) / float(len(confidence_values)))
+    selector_score_stats = ml_report.get("selector_score_stats")
+    if isinstance(selector_score_stats, dict):
+        rows_n = int(selector_score_stats.get("rows", 0))
+        if rows_n > 0:
+            selector_score_stats["blank_attach_risk_mean"] = float(
+                selector_score_stats.get("blank_attach_risk_sum", 0.0)
+            ) / float(rows_n)
+            selector_score_stats["silence_risk_mean"] = float(selector_score_stats.get("silence_risk_sum", 0.0)) / float(
+                rows_n
+            )
+            selector_score_stats["jump_risk_mean"] = float(selector_score_stats.get("jump_risk_sum", 0.0)) / float(rows_n)
+            selector_score_stats["leak_risk_norm_mean"] = float(
+                selector_score_stats.get("leak_risk_norm_sum", 0.0)
+            ) / float(rows_n)
+            selector_score_stats["penalty_mean"] = float(selector_score_stats.get("penalty_sum", 0.0)) / float(rows_n)
+            ml_report["selector_score_stats"] = selector_score_stats
     rel_rows = int(reliability_stats.get("rows", 0))
     rel_fp_denom = int(reliability_stats.get("proxy_fp_denom", 0))
     rel_fn_denom = int(reliability_stats.get("proxy_fn_denom", 0))
@@ -2782,6 +2926,9 @@ def apply_oto_ml_to_oto_file(
         "blank_flag_rows": int(reliability_stats.get("blank_flag_rows", 0)),
         "mel_unreliable_rows": int(reliability_stats.get("mel_unreliable_rows", 0)),
         "mel_fallback_rows": int(reliability_stats.get("mel_fallback_rows", 0)),
+        "voiced_gate_required_rows": int(reliability_stats.get("voiced_gate_required_rows", 0)),
+        "voiced_gate_block_rows": int(reliability_stats.get("voiced_gate_block_rows", 0)),
+        "voiced_gate_forced_blank_rows": int(reliability_stats.get("voiced_gate_forced_blank_rows", 0)),
         "abstain_rows": int(reliability_stats.get("abstain_rows", 0)),
         "abstain_rate": (
             float(reliability_stats.get("abstain_rows", 0)) / float(rel_rows)
@@ -2809,11 +2956,15 @@ def apply_oto_ml_to_oto_file(
     if fallback_reasons:
         uniq_reasons = list(dict.fromkeys(str(r) for r in fallback_reasons if str(r).strip()))
         ml_report["fallback_reason"] = "; ".join(uniq_reasons[:5])
+    elif e2e_fallback_reasons:
+        e2e_reason_tokens = [f"{k}:{int(v)}" for k, v in sorted(e2e_fallback_reasons.items())]
+        ml_report["fallback_reason"] = "; ".join(e2e_reason_tokens[:5])
     if route_counts:
         route_sorted = sorted(route_counts.items(), key=lambda item: item[1], reverse=True)
         ml_report["route"] = str(route_sorted[0][0])
     fallback_used_runtime = bool(
         fallback_reasons
+        or (e2e_enabled_runtime and int(sum(int(v) for v in e2e_fallback_reasons.values())) > 0)
         or any(
             str(name).startswith("coupled_nn_v1->")
             or str(name).startswith("coupled_nn_v2_rawmel->")

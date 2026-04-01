@@ -818,14 +818,14 @@ def _align_nuclei_positions_to_targets(nuclei, nucleus_vowels, target_vowels):
 
 def _is_vowel_chain_syllables(syllables):
     """
-    파일명이 순수 모음 연속음(예: a a i a u e a)인지 판별.
+    파일명이 모음열(순수 모음 + 반모음 y/w 계열) 연속음인지 판별.
     CVVC 강제 선택 시에도 VCV 방식으로 처리하기 위한 예외 규칙.
     """
     if not syllables or len(syllables) < 3:
         return False
     for syl in syllables:
         onset, vowel = split_ja_romaji_syllable(syl)
-        if onset:
+        if onset and onset not in {"y", "w"}:
             return False
         if vowel not in JA_VOWELS:
             return False
@@ -1350,11 +1350,19 @@ def _should_force_alias_for_ja_cvvc(
     selected_len = len(selected_infos)
     target_len = len(target_tokens)
     youon_mismatch_ratio = _compute_ja_youon_mismatch_ratio(selected_infos, target_tokens)
+    mismatch_force_threshold = max(
+        0.05,
+        min(0.80, float(_env_float("UTOA_JA_CVVC_YOUON_MISMATCH_FORCE", 0.20))),
+    )
+    mismatch_force_min_len = max(
+        2,
+        int(round(float(_env_float("UTOA_JA_CVVC_YOUON_MISMATCH_FORCE_MINLEN", 2.0)))),
+    )
 
     if selected_len and target_len and selected_len != target_len:
         return True, "alias_cvvc_length_mismatch", youon_mismatch_ratio
 
-    if max(selected_len, target_len) >= 3 and youon_mismatch_ratio >= 0.34:
+    if max(selected_len, target_len) >= mismatch_force_min_len and youon_mismatch_ratio >= mismatch_force_threshold:
         return True, "alias_cvvc_youon_mismatch", youon_mismatch_ratio
 
     if bool(low_phone_quality) and not bool(selected_candidate.get("order_preserving")):
@@ -1432,12 +1440,96 @@ def _remap_ja_cvvc_inactive_cv_index(
 
     e = max(0, min(int(expected_idx), n - 1))
     m = max(0, min(int(mapped_idx), n - 1))
-    require_vowel = str(alias_type or "").strip().lower() in {"cv", "cv_head"}
+    a_type = str(alias_type or "").strip().lower()
+    require_vowel = a_type in {"cv", "cv_head"}
+    target_norm = _normalize_ja_syllable_token(target_tok)
+    target_onset = ""
+    try:
+        target_onset, _target_vowel = split_ja_romaji_syllable(target_norm)
+    except Exception:
+        target_onset = ""
+    target_onset = str(target_onset or "").strip().lower()
+    weak_target = bool(
+        target_onset in JA_NASAL_ONSETS
+        or target_onset in JA_LIQUID_ONSETS
+        or target_onset in JA_GLIDE_ONSETS
+    )
 
-    if _is_ja_cv_syllable_active(syllables_info[m], require_vowel=require_vowel):
+    def _blank_conf(syl):
+        try:
+            return max(0.0, min(1.0, float((syl or {}).get("blank_confidence", 0.0) or 0.0)))
+        except Exception:
+            return 0.0
+
+    def _mel_conf(syl, key):
+        try:
+            return max(0.0, min(1.0, float((syl or {}).get(key, 0.0) or 0.0)))
+        except Exception:
+            return 0.0
+
+    def _soft(target, syl):
+        cand_tok = _syllable_info_token(syl)
+        return int(_ja_soft_cv_match_level(target, cand_tok) or 0) if target else 0
+
+    mapped_syl = syllables_info[m]
+    mapped_active = _is_ja_cv_syllable_active(mapped_syl, require_vowel=require_vowel)
+    mapped_blank = _blank_conf(mapped_syl)
+    mapped_sil = _mel_conf(mapped_syl, "mel_silence_sparse_conf")
+    mapped_voiced = _mel_conf(mapped_syl, "mel_voiced_formant_conf")
+    mapped_soft = _soft(target_norm, mapped_syl)
+    mapped_edge = bool(m == 0 or m == (n - 1))
+    strict_edge_blank = 0.52 if a_type == "cv_head" else 0.58
+    hard_blank = 0.74 if a_type == "cv_head" else 0.78
+    leading_blank_guard = _env_bool("UTOA_JA_CVVC_LEADING_BLANK_GUARD", True)
+    edge_soft_blank = max(
+        0.0,
+        min(
+            1.0,
+            _env_float(
+                "UTOA_JA_CVVC_EDGE_SOFT_BLANK",
+                0.46 if a_type == "cv_head" else (0.50 if a_type in {"cv", "vv"} else 0.54),
+            ),
+        ),
+    )
+    edge_silence_th = max(0.0, min(1.0, _env_float("UTOA_JA_CVVC_EDGE_SILENCE_TH", 0.56)))
+    edge_voiced_cap = max(0.0, min(1.0, _env_float("UTOA_JA_CVVC_EDGE_VOICED_CAP", 0.16)))
+    if weak_target:
+        strict_edge_blank -= 0.08
+        hard_blank -= 0.06
+    mapped_leading_blank_like = bool(
+        leading_blank_guard
+        and m == 0
+        and (
+            (mapped_blank >= edge_soft_blank and mapped_sil >= edge_silence_th and mapped_voiced <= edge_voiced_cap)
+            or (mapped_sil >= min(1.0, edge_silence_th + 0.20) and mapped_voiced <= max(0.10, edge_voiced_cap - 0.04))
+        )
+    )
+    mapped_needs_remap = bool(
+        (not mapped_active)
+        or (mapped_blank >= hard_blank)
+        or (mapped_blank >= 0.72 and mapped_soft <= 1)
+        or (mapped_edge and mapped_blank >= strict_edge_blank)
+        or mapped_leading_blank_like
+        or (weak_target and mapped_edge and mapped_blank >= (strict_edge_blank - 0.04))
+    )
+    if not mapped_needs_remap:
         return m
 
-    target_norm = _normalize_ja_syllable_token(target_tok)
+    expected_syl = syllables_info[e]
+    expected_active = _is_ja_cv_syllable_active(expected_syl, require_vowel=require_vowel)
+    expected_blank = _blank_conf(expected_syl)
+    expected_soft = _soft(target_norm, expected_syl)
+    if expected_active:
+        better_soft = expected_soft >= mapped_soft
+        much_less_blank = expected_blank <= (mapped_blank - 0.12)
+        weak_expected_bias = bool(
+            weak_target
+            and expected_soft >= 1
+            and expected_blank <= (mapped_blank + 0.05)
+        )
+        if better_soft or much_less_blank or weak_expected_bias:
+            return e
+
     seen = set()
     scan_order = []
 
@@ -1458,17 +1550,35 @@ def _remap_ja_cvvc_inactive_cv_index(
 
     best_idx = None
     best_key = None
+    prefer_non_edge = bool(
+        (a_type == "cv_head" and mapped_edge and mapped_blank >= strict_edge_blank)
+        or mapped_leading_blank_like
+        or (weak_target and mapped_edge)
+    )
     for i in scan_order:
         syl = syllables_info[i]
         active_ms, vowel_ms, _cnt = _ja_syllable_activity_metrics(syl)
         if not _is_ja_cv_syllable_active(syl, require_vowel=require_vowel):
             continue
-        cand_tok = _syllable_info_token(syl)
-        soft_match = int(_ja_soft_cv_match_level(target_norm, cand_tok) or 0) if target_norm else 0
+        soft_match = _soft(target_norm, syl)
+        blank = _blank_conf(syl)
+        sil = _mel_conf(syl, "mel_silence_sparse_conf")
+        is_edge = bool(i == 0 or i == (n - 1))
+        if mapped_leading_blank_like and i == 0:
+            # When index 0 is likely silence/blank, force a forward escape unless
+            # token+mel evidence is clearly stronger than silence.
+            if soft_match < 3 or blank >= max(0.40, edge_soft_blank - 0.06) or sil >= edge_silence_th:
+                continue
+        if weak_target and is_edge and blank >= (strict_edge_blank - 0.04):
+            continue
+        edge_rank = 1 if (not prefer_non_edge or not is_edge) else 0
+        dist_from_expected = abs(i - e)
         key = (
             soft_match,
+            edge_rank,
             1 if i >= e else 0,
-            -abs(i - e),
+            (-dist_from_expected * (2 if weak_target else 1)),
+            -blank,
             active_ms,
             vowel_ms,
             -abs(i - m),
@@ -1476,7 +1586,16 @@ def _remap_ja_cvvc_inactive_cv_index(
         if best_key is None or key > best_key:
             best_key = key
             best_idx = i
-    return int(best_idx) if best_idx is not None else m
+    if best_idx is not None:
+        return int(best_idx)
+    if expected_active:
+        return int(e)
+    return m
+
+
+def _is_ja_vv_tail_dash_alias(alias):
+    parts = [p for p in str(alias or "").strip().split() if p]
+    return bool(len(parts) >= 2 and parts[1].strip() == "-")
 
 
 def _find_ja_vv_pair_prev_index(alias, expected_prev_idx, syllables_info, search_back=2, search_fwd=3):
@@ -1956,7 +2075,7 @@ def _refine_ja_vc_with_adjacent_cv(
     if hard_cls:
         pre_lead = 5.0
     elif son_cls:
-        pre_lead = 8.0
+        pre_lead = 7.0
     else:
         pre_lead = 6.0
     target_pre_abs = onset_abs - pre_lead
@@ -1992,11 +2111,13 @@ def _refine_ja_vc_with_adjacent_cv(
         cut_allow_after_vowel = -8.0
         cut_allow_after_onset = -1.0
     elif son_cls:
-        cons_abs_target = onset_abs + 6.0
-        cons_allow_after_onset = 14.0
-        cut_gap_target = 18.0
-        cut_allow_after_vowel = 6.0
-        cut_allow_after_onset = 18.0
+        # Sonorants (nasal/liquid/glide): keep boundary near next onset to avoid
+        # drifting into blank tails while preserving enough transition length.
+        cons_abs_target = onset_abs + 3.0
+        cons_allow_after_onset = 10.0
+        cut_gap_target = 16.0
+        cut_allow_after_vowel = 3.0
+        cut_allow_after_onset = 12.0
     else:
         cons_abs_target = onset_abs + 2.0
         cons_allow_after_onset = 10.0
@@ -2456,9 +2577,16 @@ def generate_ja_oto(
         from core.format_type_utils import normalize_auto_format_value
 
         normalized_auto_format = normalize_auto_format_value("japanese", auto_format)
-        if normalized_auto_format:
+        if normalized_auto_format in {"cv", "cvvc", "vcv"}:
             forced_format = normalized_auto_format
             fallback_format = normalized_auto_format
+        elif normalized_auto_format:
+            log_msg = (
+                f"[JA] unsupported auto_format value ignored: "
+                f"{normalized_auto_format!r} (raw={str(auto_format)!r})"
+            )
+            if callback:
+                callback(log_msg)
 
     auto_gen_format = (fallback_format or "cvvc").strip().lower()
     if auto_gen_format not in {"cv", "cvvc", "vcv"}:
@@ -2901,8 +3029,20 @@ def generate_ja_oto(
             filename_syllables = list(alignment_ingest.extra.get("filename_syllables") or [])
             cv_targets = list(alignment_ingest.extra.get("cv_targets") or [])
             sinsy_label_entries = list(alignment_ingest.extra.get("sinsy_label_entries") or [])
-            detected_format = str(alignment_ingest.extra.get("detected_format") or "")
-            format_type = str(alignment_ingest.extra.get("format_type") or "")
+            from core.format_type_utils import normalize_format_type as _normalize_format_type
+
+            detected_format_raw = str(alignment_ingest.extra.get("detected_format") or "")
+            format_type_raw = str(alignment_ingest.extra.get("format_type") or "")
+            detected_format = _normalize_format_type("japanese", detected_format_raw)
+            format_type = _normalize_format_type("japanese", format_type_raw)
+            if format_type not in {"cv", "cvvc", "vcv", "vc_only", "br"}:
+                fallback_fmt = str(fallback_format or "").strip().lower()
+                if detected_format in {"cv", "cvvc", "vcv", "vc_only", "br"}:
+                    format_type = detected_format
+                elif fallback_fmt in {"cv", "cvvc", "vcv"}:
+                    format_type = fallback_fmt
+                else:
+                    format_type = "cvvc"
             ja_style_profile = alignment_ingest.extra.get("ja_style_profile")
             phone_quality = alignment_ingest.phone_quality
             low_quality_reasons = alignment_ingest.low_quality_reasons
@@ -3686,6 +3826,13 @@ def generate_ja_oto(
             post_ctx.syllables_info = syllables_info
 
             local_conf_lock_threshold = max(0.46, min(conf_th - 0.08, 0.62))
+            low_conf_force_lock_mode = _env_bool("UTOA_LOW_CONF_FORCE_LOCK_MODE", False)
+            low_conf_force_lock_threshold = max(
+                float(conf_th or 0.0),
+                _env_float("UTOA_LOW_CONF_FORCE_LOCK_THRESHOLD", 0.62),
+            )
+            if low_conf_force_lock_mode:
+                local_conf_lock_threshold = max(local_conf_lock_threshold, low_conf_force_lock_threshold)
             local_low_conf_lock_logged = set()
 
             # CV 순서 카운터로 리스트 순서 우선 매핑
@@ -3694,7 +3841,14 @@ def generate_ja_oto(
             vc_seq_idx = 0
             last_vcv_mapped_idx = -1
             stable_vcv_seq_idx = 0
+            cv_head_pending_cv_rewind = False
+            cv_head_rewind_target_tok = ""
             ja_order_locked_format = format_type in {"cvvc", "cv"}
+            ja_allow_soft_forward_in_lock = bool(
+                (not use_template)
+                and (not low_conf_force_lock_mode)
+                and _allow_ja_cvvc_soft_forward_in_lock()
+            )
             ja_cvvc_occurrence_source = (
                 filename_syllables
                 if (ja_order_locked_format and filename_syllables)
@@ -3706,6 +3860,7 @@ def generate_ja_oto(
                 else None
             )
             ja_cvvc_occurrence_state = {}
+
             for line_num, line in enumerate(lines_for_mapping):
                 parts = line.split('=', 1)
                 if len(parts) < 2:
@@ -3871,6 +4026,7 @@ def generate_ja_oto(
                         filename_order_locked
                         and format_type in {"cvvc", "cv"}
                         and mapping_tier != "low"
+                        and (not low_conf_force_lock_mode)
                     )
                     skip_cv_align = bool(
                         filename_order_locked
@@ -3899,6 +4055,7 @@ def generate_ja_oto(
                         target_tok=target_tok,
                         expected_seq_idx=expected_seq_idx,
                         expected_idx=expected_idx,
+                        format_type=format_type,
                         syllables_info=syllables_info,
                         planned_indices=ja_planned_cv_indices,
                         occurrence_map=ja_cvvc_occurrence_map or {},
@@ -3960,7 +4117,7 @@ def generate_ja_oto(
                                 mapped_tok_trace = _syllable_info_token(syllables_info[resync_idx])
                                 if (
                                     format_type != "cvvc"
-                                    or _allow_ja_cvvc_soft_forward_in_lock()
+                                    or ja_allow_soft_forward_in_lock
                                 ) and _should_allow_ja_soft_forward_shift(target_tok, expected_tok_trace, mapped_tok_trace):
                                     mapped_idx = resync_idx
                                     log(
@@ -4040,7 +4197,7 @@ def generate_ja_oto(
                                     )
                                     if (
                                         format_type != "cvvc"
-                                        or _allow_ja_cvvc_soft_forward_in_lock()
+                                        or ja_allow_soft_forward_in_lock
                                     ):
                                         allow_forward = _should_allow_ja_soft_forward_shift(
                                             target_norm,
@@ -4109,7 +4266,7 @@ def generate_ja_oto(
                     if (
                         format_type == "cvvc"
                         and mapped_idx > expected_idx
-                        and not _allow_ja_cvvc_soft_forward_in_lock()
+                        and not ja_allow_soft_forward_in_lock
                     ):
                         if ja_mapping_debug_reason_logging:
                             log(
@@ -4180,13 +4337,30 @@ def generate_ja_oto(
                             line,
                             meta={"diag_hint": row_abstain.get("diag_hint", "")},
                         )
+                        if filename_order_locked and format_type in {"cvvc", "cv"}:
+                            # Even when CV_HEAD row is skipped, consume one sequence slot
+                            # to avoid the following CV rows drifting one mora backward.
+                            cv_seq_idx = min(int(expected_seq_idx) + 1, len(syllables_info))
+                            cv_head_pending_cv_rewind = False
+                            cv_head_rewind_target_tok = ""
+                            if ja_mapping_debug_reason_logging:
+                                log(
+                                    f"[JA] {fname}: CV_HEAD skip consumes sequence "
+                                    f"(next_seq={int(cv_seq_idx) + 1}, {alias})"
+                                )
                         continue
                     current_w_idx = mapped_idx
                     if format_type == "vcv":
                         stable_vcv_seq_idx = min(stable_vcv_seq_idx + 1, max(len(syllables_info) - 1, 0))
                         cv_seq_idx = stable_vcv_seq_idx
                     else:
-                        cv_seq_idx = current_w_idx + 1
+                        if filename_order_locked and format_type in {"cvvc", "cv"}:
+                            cv_seq_idx = min(int(expected_seq_idx) + 1, len(syllables_info))
+                        else:
+                            cv_seq_idx = current_w_idx + 1
+                        if format_type in {"cvvc", "cv"}:
+                            cv_head_pending_cv_rewind = True
+                            cv_head_rewind_target_tok = _normalize_ja_syllable_token(target_tok)
                     if current_w_idx >= len(syllables_info):
                         current_w_idx = len(syllables_info) - 1
                         
@@ -4243,6 +4417,30 @@ def generate_ja_oto(
                 if not is_vc:
                     # CV 에일리어스: 순서대로 다음 음절에 매핑
                     expected_seq_idx = stable_vcv_seq_idx if format_type == "vcv" else cv_seq_idx
+                    if format_type in {"cvvc", "cv"} and cv_head_pending_cv_rewind and int(expected_seq_idx) > 0:
+                        cv_target_for_rewind = _normalize_ja_syllable_token(
+                            _extract_ja_cv_target_syllable(alias, alias_type="cv")
+                        )
+                        should_rewind = bool(
+                            cv_head_rewind_target_tok
+                            and cv_target_for_rewind
+                            and cv_target_for_rewind == cv_head_rewind_target_tok
+                        )
+                        if should_rewind:
+                            expected_seq_idx = int(expected_seq_idx) - 1
+                            if ja_mapping_debug_reason_logging:
+                                log(
+                                    f"[JA] {fname}: CV expected rewind after CV_HEAD "
+                                    f"(seq={int(expected_seq_idx) + 1}, {alias})"
+                                )
+                        elif ja_mapping_debug_reason_logging:
+                            log(
+                                f"[JA] {fname}: CV rewind skipped (token mismatch: "
+                                f"head={cv_head_rewind_target_tok or '?'} "
+                                f"cv={cv_target_for_rewind or '?'}, {alias})"
+                            )
+                        cv_head_pending_cv_rewind = False
+                        cv_head_rewind_target_tok = ""
                     if expected_seq_idx < len(syllables_info):
                         expected_idx = expected_seq_idx
                     else:
@@ -4251,6 +4449,7 @@ def generate_ja_oto(
                         filename_order_locked
                         and format_type in {"cvvc", "cv"}
                         and mapping_tier != "low"
+                        and (not low_conf_force_lock_mode)
                     )
                     skip_cv_align = bool(
                         filename_order_locked
@@ -4279,6 +4478,7 @@ def generate_ja_oto(
                         target_tok=target_tok,
                         expected_seq_idx=expected_seq_idx,
                         expected_idx=expected_idx,
+                        format_type=format_type,
                         syllables_info=syllables_info,
                         planned_indices=ja_planned_cv_indices,
                         occurrence_map=ja_cvvc_occurrence_map or {},
@@ -4340,7 +4540,7 @@ def generate_ja_oto(
                                 mapped_tok_trace = _syllable_info_token(syllables_info[resync_idx])
                                 if (
                                     format_type != "cvvc"
-                                    or _allow_ja_cvvc_soft_forward_in_lock()
+                                    or ja_allow_soft_forward_in_lock
                                 ) and _should_allow_ja_soft_forward_shift(target_tok, expected_tok_trace, mapped_tok_trace):
                                     mapped_idx = resync_idx
                                     log(
@@ -4420,7 +4620,7 @@ def generate_ja_oto(
                                     )
                                     if (
                                         format_type != "cvvc"
-                                        or _allow_ja_cvvc_soft_forward_in_lock()
+                                        or ja_allow_soft_forward_in_lock
                                     ):
                                         allow_forward = _should_allow_ja_soft_forward_shift(
                                             target_norm,
@@ -4465,7 +4665,7 @@ def generate_ja_oto(
                     if (
                         format_type == "cvvc"
                         and mapped_idx > expected_idx
-                        and not _allow_ja_cvvc_soft_forward_in_lock()
+                        and not ja_allow_soft_forward_in_lock
                     ):
                         if ja_mapping_debug_reason_logging:
                             log(
@@ -4509,7 +4709,10 @@ def generate_ja_oto(
                         stable_vcv_seq_idx = min(stable_vcv_seq_idx + 1, max(len(syllables_info) - 1, 0))
                         cv_seq_idx = stable_vcv_seq_idx
                     else:
-                        cv_seq_idx = current_w_idx + 1
+                        if filename_order_locked and format_type in {"cvvc", "cv"}:
+                            cv_seq_idx = min(int(expected_seq_idx) + 1, len(syllables_info))
+                        else:
+                            cv_seq_idx = current_w_idx + 1
 
                     if current_w_idx >= len(syllables_info):
                         current_w_idx = len(syllables_info) - 1
@@ -4549,24 +4752,108 @@ def generate_ja_oto(
                     if local_bridge_prev_idx >= len(syllables_info):
                         local_bridge_prev_idx = len(syllables_info) - 1
                     local_bridge_next_idx = local_bridge_prev_idx + 1
-                    bridge_pair = resolve_bridge_anchor_pair(
-                        ja_anchor_graph,
-                        vc_seq_idx,
-                        realized_anchor_by_idx=realized_cv_anchor_by_idx,
-                        estimated_anchor_by_idx=cv_anchor_by_idx,
-                        local_prev_idx=local_bridge_prev_idx,
-                        local_next_idx=local_bridge_next_idx,
+                    vc_cons_hint = ""
+                    vc_onset_cls_hint = ""
+                    if alias_type == "vc":
+                        try:
+                            vc_cons_hint = str(get_vc_consonant(alias) or "").strip().lower()
+                        except Exception:
+                            vc_cons_hint = ""
+                        vc_onset_cls_hint = _ja_onset_class(vc_cons_hint)
+                    prefer_local_vc_bridge = bool(
+                        alias_type == "vc"
+                        and format_type == "cvvc"
+                        and filename_order_locked
+                        and str(mapping_tier or "").strip().lower() == "low"
+                        and vc_onset_cls_hint in {"nasal", "liquid"}
                     )
-                    bridge_prev_idx = (
-                        int(bridge_pair["prev_idx"])
-                        if bridge_pair.get("prev_idx") is not None
-                        else local_bridge_prev_idx
-                    )
-                    bridge_next_idx = (
-                        int(bridge_pair["next_idx"])
-                        if bridge_pair.get("next_idx") is not None
-                        else local_bridge_next_idx
-                    )
+                    if prefer_local_vc_bridge:
+                        bridge_prev_idx = int(local_bridge_prev_idx)
+                        bridge_next_idx = int(local_bridge_next_idx)
+                        bridge_pair = {
+                            "prev_idx": bridge_prev_idx,
+                            "next_idx": bridge_next_idx,
+                            "prev_anchor": realized_cv_anchor_by_idx.get(bridge_prev_idx) or cv_anchor_by_idx.get(bridge_prev_idx),
+                            "next_anchor": realized_cv_anchor_by_idx.get(bridge_next_idx) or cv_anchor_by_idx.get(bridge_next_idx),
+                            "source": "local_sonorant_low",
+                        }
+                        if ja_mapping_debug_reason_logging:
+                            log(
+                                f"[JA] {fname}: VC sonorant local-bridge lock "
+                                f"({bridge_prev_idx + 1}->{bridge_next_idx + 1}, {alias})"
+                            )
+                    else:
+                        bridge_pair = resolve_bridge_anchor_pair(
+                            ja_anchor_graph,
+                            vc_seq_idx,
+                            realized_anchor_by_idx=realized_cv_anchor_by_idx,
+                            estimated_anchor_by_idx=cv_anchor_by_idx,
+                            local_prev_idx=local_bridge_prev_idx,
+                            local_next_idx=local_bridge_next_idx,
+                        )
+                        bridge_prev_idx = (
+                            int(bridge_pair["prev_idx"])
+                            if bridge_pair.get("prev_idx") is not None
+                            else local_bridge_prev_idx
+                        )
+                        bridge_next_idx = (
+                            int(bridge_pair["next_idx"])
+                            if bridge_pair.get("next_idx") is not None
+                            else local_bridge_next_idx
+                        )
+                    if format_type == "cvvc" and 0 <= bridge_next_idx < len(syllables_info):
+                        if alias_type == "vc":
+                            remap_next_idx = _remap_ja_cvvc_inactive_cv_index(
+                                _syllable_info_token(syllables_info[bridge_next_idx]),
+                                bridge_next_idx,
+                                bridge_next_idx,
+                                syllables_info,
+                                alias_type="vc",
+                            )
+                            if remap_next_idx != bridge_next_idx:
+                                if ja_mapping_debug_reason_logging:
+                                    log(
+                                        f"[JA] {fname}: VC next-syllable inactive remap "
+                                        f"({bridge_next_idx + 1}->{int(remap_next_idx) + 1}, {alias})"
+                                    )
+                                bridge_next_idx = int(remap_next_idx)
+                                bridge_prev_idx = min(max(0, bridge_next_idx - 1), max(len(syllables_info) - 1, 0))
+                                bridge_pair = dict(bridge_pair or {})
+                                bridge_pair["prev_idx"] = bridge_prev_idx
+                                bridge_pair["next_idx"] = bridge_next_idx
+                                bridge_pair["prev_anchor"] = (
+                                    realized_cv_anchor_by_idx.get(bridge_prev_idx) or cv_anchor_by_idx.get(bridge_prev_idx)
+                                )
+                                bridge_pair["next_anchor"] = (
+                                    realized_cv_anchor_by_idx.get(bridge_next_idx) or cv_anchor_by_idx.get(bridge_next_idx)
+                                )
+                        elif alias_type == "vv":
+                            vv_parts = [p for p in str(alias or "").split() if p]
+                            vv_left = vv_parts[0] if vv_parts else _syllable_info_token(syllables_info[bridge_prev_idx])
+                            remap_prev_idx = _remap_ja_cvvc_inactive_cv_index(
+                                vv_left,
+                                bridge_prev_idx,
+                                bridge_prev_idx,
+                                syllables_info,
+                                alias_type="vv",
+                            )
+                            if remap_prev_idx != bridge_prev_idx:
+                                if ja_mapping_debug_reason_logging:
+                                    log(
+                                        f"[JA] {fname}: VV leading-blank remap "
+                                        f"({bridge_prev_idx + 1}->{int(remap_prev_idx) + 1}, {alias})"
+                                    )
+                                bridge_prev_idx = int(remap_prev_idx)
+                                bridge_next_idx = min(max(0, bridge_prev_idx + 1), max(len(syllables_info) - 1, 0))
+                                bridge_pair = dict(bridge_pair or {})
+                                bridge_pair["prev_idx"] = bridge_prev_idx
+                                bridge_pair["next_idx"] = bridge_next_idx
+                                bridge_pair["prev_anchor"] = (
+                                    realized_cv_anchor_by_idx.get(bridge_prev_idx) or cv_anchor_by_idx.get(bridge_prev_idx)
+                                )
+                                bridge_pair["next_anchor"] = (
+                                    realized_cv_anchor_by_idx.get(bridge_next_idx) or cv_anchor_by_idx.get(bridge_next_idx)
+                                )
                     if alias_type == "vv":
                         vv_back = 1 if str(mapping_tier or "").strip().lower() == "low" else 2
                         vv_fwd = 1 if str(mapping_tier or "").strip().lower() == "low" else 3
@@ -4604,6 +4891,7 @@ def generate_ja_oto(
                         n_start = v_end
                         n_end = v_end + 100
 
+                    tail_dash_vv = bool(alias_type == "vv" and _is_ja_vv_tail_dash_alias(alias))
                     vc_target = n_start if alias_type == 'vc' else n_end
                     boundary = min(vc_target, c_end + 260)
                     v_len = c_end - c_start
@@ -4625,6 +4913,10 @@ def generate_ja_oto(
                             pre_lead_max = 14.0 if onset_cls in {"voiced", "nasal"} else 18.0
                         pre_lead = min(max(transition_gap * pre_lead_mul, pre_lead_min), pre_lead_max)
                         boundary = max(c_end + (2.0 if n_bridge else 8.0), boundary - pre_lead)
+                    elif tail_dash_vv:
+                        # `X -` tail VV aliases should not be pushed into trailing silence.
+                        tail_pad = min(max(v_len * 0.12, 12.0), 28.0)
+                        boundary = min(boundary, c_end + tail_pad)
 
                     if alias_type == 'vc' and bridge_profile:
                         base_pad = bridge_profile.get('offset_pad', 86.0)

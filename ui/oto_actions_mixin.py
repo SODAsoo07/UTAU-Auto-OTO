@@ -231,6 +231,10 @@ class OtoActionsMixin:
                     lang,
                     self.auto_format_var.get() if hasattr(self, "auto_format_var") else "",
                 )
+                if lang in {"korean", "japanese"} and hasattr(self, "_confirm_language_script_mismatch"):
+                    if not self._confirm_language_script_mismatch(lang, root_wav_dir, stage_name="OTO 생성"):
+                        self._set_status("취소됨: 언어 설정 확인")
+                        return
 
                 if not root_wav_dir:
                     self._append_log("오류: WAV 폴더를 입력해 주세요.")

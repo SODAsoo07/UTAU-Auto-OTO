@@ -75,6 +75,7 @@ KR_CODA_PLOSIVE_MAP = {
 }
 
 HIRAGANA_RE = re.compile(r"[\u3041-\u3096\u309d-\u309f]")
+KATAKANA_RE = re.compile(r"[\u30a1-\u30fa\u30fd-\u30ff\u31f0-\u31ff\uff66-\uff9d]")
 
 
 def clean_phone_mark(mark):
@@ -85,7 +86,8 @@ def should_ignore_korean_alias(alias):
     """
     한국어 OTO에서 히라가나 alias는 잘못 섞인 일본어 데이터로 간주하고 무시한다.
     """
-    return bool(HIRAGANA_RE.search(str(alias or "")))
+    txt = str(alias or "")
+    return bool(HIRAGANA_RE.search(txt) or KATAKANA_RE.search(txt))
 
 
 def _normalize_custom_alias_lookup(alias):
@@ -507,11 +509,28 @@ def detect_alias_format(alias_list, custom_map=None):
             type_cache[alias] = a_type
         types.append(a_type)
     type_set = set(types)
+    has_japanese_script = any(should_ignore_korean_alias(alias) for alias in (alias_list or []))
 
     if type_set == {"br"}:
         return "br"
     if type_set <= {"mono", "cv_head", "cv"}:
         return "cv"
+    if has_japanese_script:
+        # Safety fallback when JP aliases are processed in KR path:
+        # - never return CVC
+        # - prefer VCV for VV-heavy (vowel chain) banks
+        non_br = type_set - {"br"}
+        if "vcv" in non_br:
+            return "vcv"
+        if "vv" in non_br and "vc" not in non_br:
+            return "vcv"
+        if {"cv_head", "cv", "vc"} <= non_br:
+            return "cvvc"
+        if "vc" in non_br or "vv" in non_br:
+            return "cvvc"
+        if non_br <= {"cv", "mono", "cv_head"}:
+            return "cv"
+        return "cvvc"
     if "vcv" in type_set:
         return "vcv"
     if {"cv_head", "cv", "vc"} <= type_set:

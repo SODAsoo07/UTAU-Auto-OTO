@@ -11,8 +11,8 @@ import json
 import os
 from typing import Dict, List, Optional
 
-FEATURE_VERSION = "v12"
-TRAIN_ROW_MATCH_VERSION = "v12"
+FEATURE_VERSION = "v17"
+TRAIN_ROW_MATCH_VERSION = "v17"
 TARGET_NAMES = ["delta_offset", "delta_cons", "delta_cutoff", "delta_pre", "delta_ovl"]
 ANCHOR_TARGET_NAMES = ["delta_offset", "delta_pre", "delta_cutoff"]
 DELTA_TARGET_NAMES = ["delta_cons", "delta_ovl"]
@@ -33,11 +33,13 @@ FEATURE_NAMES = [
     "base_cutoff_to_next_anchor_ms", "energy_mean", "energy_min", "energy_max",
     "energy_slope_pre", "energy_slope_post", "valley_energy", "valley_dist_from_cutoff_ms",
     "db_mean", "db_min", "db_silence_ratio", "f0_voicing_mean", "f0_voicing_near_pre",
+    "f0_valid_ratio", "f0_gap_ratio", "f0_continuity", "rms_norm_wav", "rms_norm_vb",
     "zcr_mean", "spectral_flux_mean", "onset_class", "voicing_class", "is_tense",
     "is_diphthong", "coda_type", "vowel_class", "mora_position", "bridge_type",
     "is_nasal_or_sonorant", "prev_alias_type", "next_alias_type", "prev_base_pre",
     "next_base_pre", "prev_base_offset", "next_base_offset", "prev_base_cutoff_abs",
     "next_base_cutoff_abs",
+    "m_map_ok", "m_offset_hint_abs", "m_cutoff_hint_abs", "m_hint_rank",
     "mapping_confidence", "used_alias_occurrence_mapping", "used_exact_vowel_fix",
     "used_nuclei_fallback", "used_alias_based_syllables", "words_vs_alias_score_margin",
     "jump_blocked_flag", "mapping_reason_code",

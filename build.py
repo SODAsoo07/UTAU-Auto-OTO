@@ -51,9 +51,11 @@ RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "bootstrap", "get-pip.py"), "assets/bootstrap"),
     (os.path.join(APP_DIR, "ml", "configs"), "ml/configs"),
     (os.path.join(APP_DIR, "config.json"), "."),
+    (os.path.join(APP_DIR, "ui", "ui_layout.json"), "ui"),
 ]
 RELEASE_AUX_FILES = [
     os.path.join(APP_DIR, "setup_mfa.bat"),
+    os.path.join(APP_DIR, "setup_ctc.bat"),
     os.path.join(APP_DIR, "requirements.txt"),
     os.path.join(APP_DIR, "requirements-ml.txt"),
     os.path.join(APP_DIR, "scripts", "runtime_recovery.ps1"),
@@ -742,7 +744,7 @@ def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, o
         print(f"   -> created portable launcher: {os.path.basename(launcher_path)}")
 
         shortcut_path = os.path.join(release_dir, f"{app_name}.lnk")
-        create_lnk = str(os.environ.get("UTOA_CREATE_BUILD_SHORTCUT", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        create_lnk = str(os.environ.get("UTOA_CREATE_BUILD_SHORTCUT", "1")).strip().lower() in {"1", "true", "yes", "on"}
         if create_lnk:
             _create_windows_shortcut(
                 shortcut_path=shortcut_path,
@@ -752,9 +754,84 @@ def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, o
             )
             print(f"   -> created shortcut: {os.path.basename(shortcut_path)}")
         else:
-            print("   -> skipped .lnk creation (portable-safe default).")
-            print("      set UTOA_CREATE_BUILD_SHORTCUT=1 to keep build-time .lnk output.")
+            print("   -> skipped .lnk creation (UTOA_CREATE_BUILD_SHORTCUT disabled).")
+            print("      set UTOA_CREATE_BUILD_SHORTCUT=1 to enable build-time .lnk output.")
     return release_dir
+
+
+def _resolve_validated_mfa_runtime_bundle_source(runtime_root, require_models=False):
+    runtime_root_abs = os.path.abspath(runtime_root or APP_DIR)
+    env_dir = os.path.join(runtime_root_abs, ".env")
+    mfa_entry = ""
+    for candidate in (
+        os.path.join(env_dir, "Scripts", "mfa.bat"),
+        os.path.join(env_dir, "Scripts", "mfa.exe"),
+        os.path.join(env_dir, "Scripts", "mfa.cmd"),
+    ):
+        if os.path.isfile(candidate):
+            mfa_entry = candidate
+            break
+
+    candidate_model_roots = [
+        os.path.join(runtime_root_abs, ".mfa_root_ascii"),
+        os.path.join(runtime_root_abs, "mfa_root_ascii"),
+    ]
+    model_roots = [path for path in candidate_model_roots if os.path.isdir(path)]
+    if require_models and not model_roots:
+        raise FileNotFoundError(f"MFA model root not found under runtime root: {runtime_root_abs}")
+
+    model_status = {}
+    for root in model_roots:
+        acoustic_dir = os.path.join(root, "acoustic")
+        if not os.path.isdir(acoustic_dir):
+            continue
+        for file_name in os.listdir(acoustic_dir):
+            low = str(file_name).strip().lower()
+            if not low.endswith(".zip"):
+                continue
+            model_name = low[:-4]
+            model_status[model_name] = os.path.join(acoustic_dir, file_name)
+
+    return runtime_root_abs, env_dir, mfa_entry, model_status, model_roots
+
+
+def _copy_mfa_model_bundle(release_dir, runtime_root, require_models=False):
+    (
+        runtime_root_abs,
+        _env_dir,
+        mfa_entry,
+        model_status,
+        model_roots,
+    ) = _resolve_validated_mfa_runtime_bundle_source(runtime_root, require_models=require_models)
+
+    bundle_dir = os.path.join(os.path.abspath(release_dir), "mfa_runtime_bundle")
+    if os.path.isdir(bundle_dir):
+        _safe_rmtree(bundle_dir)
+    os.makedirs(bundle_dir, exist_ok=True)
+
+    copied_roots = []
+    for src_root in model_roots:
+        root_name = os.path.basename(os.path.normpath(src_root))
+        if not root_name:
+            continue
+        dst_root = os.path.join(bundle_dir, root_name)
+        if os.path.exists(dst_root):
+            _safe_rmtree(dst_root)
+        shutil.copytree(src_root, dst_root)
+        copied_roots.append(root_name)
+
+    manifest = {
+        "bundle_kind": "models_only",
+        "runtime_root": runtime_root_abs,
+        "mfa_entry": mfa_entry,
+        "require_models": bool(require_models),
+        "copied_model_roots": copied_roots,
+        "model_status": dict(model_status or {}),
+    }
+    manifest_path = os.path.join(bundle_dir, "bundle_manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    return bundle_dir
 
 
 def _install_build_dependencies(backend, target_channels=None):
