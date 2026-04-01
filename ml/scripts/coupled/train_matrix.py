@@ -12,10 +12,13 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.format_type_utils import normalize_format_type, normalize_language_name
+from core.oto_ml_policy import alias_family_to_alias_types, normalize_alias_family
 from core.oto_ml.features.mel_patches import resolve_rawmel_cache_dir
 from core.oto_ml_collection import build_datasets_from_candidates
 from core.oto_ml_collection_discovery import discover_training_candidates_from_dataset_root
 from core.oto_ml_coupled import evaluate_coupled_bundle, train_coupled_bundle, train_coupled_bundle_rawmel
+from core.oto_ml_lightgbm import evaluate_lightgbm_selector_bundle, train_lightgbm_selector_bundle
+from core.oto_ml_selector import build_selector_dataset_csv_from_delta_dataset
 from core.runtime_encoding import bootstrap_utf8_runtime
 
 
@@ -164,11 +167,51 @@ def _as_bool(value) -> bool:
 
 def _blank_attach_rates(eval_summary: Dict[str, object]) -> Dict[str, float]:
     kpi = dict((eval_summary or {}).get("blank_attach_kpi") or {})
+    zones = dict((eval_summary or {}).get("blank_attach_kpi_pitch_zones") or {})
+    high_zone = dict(zones.get("high") or {})
     return {
         "overall": _as_float(kpi.get("pred_attach_rate"), 0.0),
         "head": _as_float(kpi.get("head_pred_attach_rate"), 0.0),
         "vv": _as_float(kpi.get("vv_pred_attach_rate"), 0.0),
+        "delta": _as_float(kpi.get("pred_minus_gold_rate"), 0.0),
+        "high_pitch_head": _as_float(high_zone.get("head_pred_attach_rate"), 0.0),
     }
+
+
+def _blank_attach_delta_rate(eval_summary: Dict[str, object]) -> float:
+    kpi = dict((eval_summary or {}).get("blank_attach_kpi") or {})
+    return _as_float(kpi.get("pred_minus_gold_rate"), 0.0)
+
+
+def _blank_attach_high_pitch_head_rate(eval_summary: Dict[str, object]) -> float:
+    zones = dict((eval_summary or {}).get("blank_attach_kpi_pitch_zones") or {})
+    high = dict(zones.get("high") or {})
+    return _as_float(high.get("head_pred_attach_rate"), 0.0)
+
+
+def _ensure_blank_attach_eval_fields(eval_summary: Dict[str, object]) -> Dict[str, object]:
+    out = dict(eval_summary or {})
+    kpi = dict(out.get("blank_attach_kpi") or {})
+    kpi.setdefault("enabled", False)
+    kpi.setdefault("pred_attach_rate", 0.0)
+    kpi.setdefault("head_pred_attach_rate", 0.0)
+    kpi.setdefault("vv_pred_attach_rate", 0.0)
+    kpi.setdefault("primary_kpi_name", "head_pred_attach_rate")
+    kpi.setdefault("primary_kpi_value", float(kpi.get("head_pred_attach_rate", 0.0) or 0.0))
+    out["blank_attach_kpi"] = kpi
+    if not isinstance(out.get("kpi_primary"), dict):
+        out["kpi_primary"] = {
+            "name": str(kpi.get("primary_kpi_name", "head_pred_attach_rate")),
+            "value": float(kpi.get("primary_kpi_value", 0.0) or 0.0),
+        }
+    zone_kpi = dict(out.get("blank_attach_kpi_pitch_zones") or {})
+    high_zone = dict(zone_kpi.get("high") or {})
+    high_zone.setdefault("enabled", False)
+    high_zone.setdefault("head_pred_attach_rate", 0.0)
+    high_zone.setdefault("pred_minus_gold_rate", 0.0)
+    zone_kpi["high"] = high_zone
+    out["blank_attach_kpi_pitch_zones"] = zone_kpi
+    return out
 
 
 def _check_blank_attach_gate(
@@ -177,8 +220,12 @@ def _check_blank_attach_gate(
     max_overall: float,
     max_head: float,
     max_vv: float,
+    max_delta_rate: float = -1.0,
+    max_high_pitch_head: float = -1.0,
 ) -> Tuple[bool, List[str], Dict[str, float]]:
     rates = _blank_attach_rates(eval_summary or {})
+    delta_rate = _blank_attach_delta_rate(eval_summary or {})
+    high_pitch_head_rate = _blank_attach_high_pitch_head_rate(eval_summary or {})
     reasons: List[str] = []
     if float(max_overall) >= 0.0 and rates["overall"] > float(max_overall):
         reasons.append(
@@ -192,7 +239,200 @@ def _check_blank_attach_gate(
         reasons.append(
             f"vv_blank_attach_rate {rates['vv']:.4f} > {float(max_vv):.4f}"
         )
+    if float(max_delta_rate) >= 0.0 and delta_rate > float(max_delta_rate):
+        reasons.append(
+            f"blank_attach_pred_minus_gold_rate {delta_rate:.4f} > {float(max_delta_rate):.4f}"
+        )
+    if float(max_high_pitch_head) >= 0.0 and high_pitch_head_rate > float(max_high_pitch_head):
+        reasons.append(
+            f"high_pitch_head_blank_attach_rate {high_pitch_head_rate:.4f} > {float(max_high_pitch_head):.4f}"
+        )
     return len(reasons) == 0, reasons, rates
+
+
+def _parse_gate_value(payload: Dict[str, object], keys: Sequence[str]) -> Optional[float]:
+    for key in keys:
+        if key not in payload:
+            continue
+        try:
+            return float(payload.get(key))
+        except Exception:
+            continue
+    return None
+
+
+def _normalize_gate_entry(payload: object) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    if not isinstance(payload, dict):
+        return out
+    overall = _parse_gate_value(payload, ("max_blank_attach_rate", "max_overall", "overall"))
+    head = _parse_gate_value(payload, ("max_head_blank_attach_rate", "max_head", "head"))
+    vv = _parse_gate_value(payload, ("max_vv_blank_attach_rate", "max_vv", "vv"))
+    delta = _parse_gate_value(payload, ("max_blank_attach_delta_rate", "max_delta", "delta"))
+    high_head = _parse_gate_value(
+        payload,
+        ("max_high_pitch_head_blank_attach_rate", "max_high_pitch_head", "high_pitch_head"),
+    )
+    if overall is not None:
+        out["max_blank_attach_rate"] = float(overall)
+    if head is not None:
+        out["max_head_blank_attach_rate"] = float(head)
+    if vv is not None:
+        out["max_vv_blank_attach_rate"] = float(vv)
+    if delta is not None:
+        out["max_blank_attach_delta_rate"] = float(delta)
+    if high_head is not None:
+        out["max_high_pitch_head_blank_attach_rate"] = float(high_head)
+    return out
+
+
+def _load_blank_attach_gate_profile(path: str) -> Dict[str, object]:
+    raw_path = str(path or "").strip()
+    if not raw_path:
+        return {"path": "", "default": {}, "overrides": {}}
+    profile_path = os.path.abspath(raw_path)
+    if not os.path.isfile(profile_path):
+        raise FileNotFoundError(profile_path)
+    with open(profile_path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    if not isinstance(raw, dict):
+        raise RuntimeError(f"Invalid gate profile JSON (expected object): {profile_path}")
+    default_entry = _normalize_gate_entry(raw.get("default", raw.get("defaults", {})))
+    overrides: Dict[Tuple[str, str], Dict[str, float]] = {}
+    for key, value in dict(raw.get("overrides") or {}).items():
+        token = str(key or "").strip().lower()
+        if "/" not in token:
+            continue
+        lang_raw, fmt_raw = token.split("/", 1)
+        lang = normalize_language_name(lang_raw)
+        fmt = normalize_format_type(lang, fmt_raw) or str(fmt_raw).strip().lower()
+        if not lang or not fmt:
+            continue
+        overrides[(lang, fmt)] = _normalize_gate_entry(value)
+    return {"path": profile_path, "default": default_entry, "overrides": overrides}
+
+
+def _resolve_blank_attach_gate_thresholds(
+    *,
+    language: str,
+    format_type: str,
+    cli_overall: float,
+    cli_head: float,
+    cli_vv: float,
+    cli_delta: float,
+    cli_high_pitch_head: float,
+    profile: Dict[str, object],
+) -> Dict[str, float]:
+    out = {
+        "max_blank_attach_rate": float(cli_overall),
+        "max_head_blank_attach_rate": float(cli_head),
+        "max_vv_blank_attach_rate": float(cli_vv),
+        "max_blank_attach_delta_rate": float(cli_delta),
+        "max_high_pitch_head_blank_attach_rate": float(cli_high_pitch_head),
+    }
+
+    default_entry = dict((profile or {}).get("default") or {})
+    for key in out.keys():
+        default_value = default_entry.get(key)
+        if default_value is None:
+            continue
+        try:
+            out[key] = float(default_value)
+        except Exception:
+            continue
+
+    overrides = dict((profile or {}).get("overrides") or {})
+    override_entry = dict(overrides.get((str(language or "").strip().lower(), str(format_type or "").strip().lower())) or {})
+    for key in out.keys():
+        override_value = override_entry.get(key)
+        if override_value is None:
+            continue
+        try:
+            out[key] = float(override_value)
+        except Exception:
+            continue
+    return out
+
+
+def _read_backend_from_model_meta(model_dir: str) -> str:
+    meta_path = os.path.join(str(model_dir or ""), "model_meta.json")
+    if not os.path.isfile(meta_path):
+        return ""
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return str(payload.get("backend", "") or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _discover_lightgbm_model_dir(model_root: str, language: str, format_type: str) -> str:
+    root = os.path.join(str(model_root or ""), str(language or "").strip().lower(), str(format_type or "").strip().lower())
+    if not os.path.isdir(root):
+        return ""
+    preferred: List[str] = []
+    fallback: List[str] = []
+    for name in sorted(os.listdir(root)):
+        path = os.path.join(root, name)
+        if not os.path.isdir(path):
+            continue
+        backend = _read_backend_from_model_meta(path)
+        if backend == "lightgbm":
+            preferred.append(path)
+        elif backend == "":
+            fallback.append(path)
+    if preferred:
+        for path in preferred:
+            if "lightgbm" in os.path.basename(path).lower():
+                return path
+        return preferred[0]
+    if fallback:
+        for path in fallback:
+            if "lightgbm" in os.path.basename(path).lower():
+                return path
+        return fallback[0]
+    return ""
+
+
+def _selector_dataset_path(model_root: str, language: str, format_type: str, dataset_csv: str) -> str:
+    base = os.path.splitext(os.path.basename(str(dataset_csv or "")))[0] or "dataset"
+    file_name = f"{base}.{str(language).lower()}.{str(format_type).lower()}.selector.csv"
+    out_dir = os.path.join(str(model_root or ""), "_selector_datasets")
+    os.makedirs(out_dir, exist_ok=True)
+    return os.path.join(out_dir, file_name)
+
+
+def _selector_family_dataset_path(
+    model_root: str,
+    language: str,
+    format_type: str,
+    dataset_csv: str,
+    alias_family: str,
+) -> str:
+    base = os.path.splitext(os.path.basename(str(dataset_csv or "")))[0] or "dataset"
+    fam = normalize_alias_family(alias_family) or "general"
+    file_name = f"{base}.{str(language).lower()}.{str(format_type).lower()}.selector.{fam}.csv"
+    out_dir = os.path.join(str(model_root or ""), "_selector_datasets")
+    os.makedirs(out_dir, exist_ok=True)
+    return os.path.join(out_dir, file_name)
+
+
+def _parse_selector_families(raw: str) -> List[str]:
+    out: List[str] = []
+    for token in _split_csv_tokens(raw):
+        fam = normalize_alias_family(token)
+        if fam:
+            out.append(fam)
+    if not out:
+        out = ["cv", "vc", "vcv", "vowel"]
+    seen = set()
+    dedup: List[str] = []
+    for fam in out:
+        if fam in seen:
+            continue
+        seen.add(fam)
+        dedup.append(fam)
+    return dedup
 
 
 def _subset_suffix(min_conf: float, max_blank_risk: float, require_blank_flag_clear: bool) -> str:
@@ -351,6 +591,60 @@ def main():
         default=-1.0,
         help="If >=0, fail job when eval blank_attach_kpi.vv_pred_attach_rate exceeds this value.",
     )
+    ap.add_argument(
+        "--max-blank-attach-delta-rate",
+        type=float,
+        default=-1.0,
+        help="If >=0, fail job when eval blank_attach_kpi.pred_minus_gold_rate exceeds this value.",
+    )
+    ap.add_argument(
+        "--max-high-pitch-head-blank-attach-rate",
+        type=float,
+        default=-1.0,
+        help="If >=0, fail job when eval blank_attach_kpi_pitch_zones.high.head_pred_attach_rate exceeds this value.",
+    )
+    ap.add_argument(
+        "--blank-attach-gate-profile",
+        default="",
+        help="Optional JSON profile for per-language/format gate thresholds.",
+    )
+    ap.add_argument(
+        "--train-selector",
+        action="store_true",
+        help="Train selector bundle per job from the coupled delta dataset.",
+    )
+    ap.add_argument(
+        "--selector-objective",
+        default="auto",
+        choices=["auto", "pointwise", "ranking", "pairwise"],
+        help="Selector objective mode.",
+    )
+    ap.add_argument("--selector-group-column", default="voicebank_id")
+    ap.add_argument("--selector-num-boost-round", type=int, default=400)
+    ap.add_argument("--selector-early-stopping-rounds", type=int, default=40)
+    ap.add_argument(
+        "--selector-model-root",
+        default="",
+        help="Optional root path for selector model outputs. Empty=existing lightgbm route if found, else current job model dir.",
+    )
+    ap.add_argument(
+        "--selector-min-mapping-confidence",
+        type=float,
+        default=-1.0,
+        help="If >=0, selector dataset rows are filtered by mapping_confidence >= value. If <0, uses job min_mapping_confidence.",
+    )
+    ap.add_argument("--selector-require-train-keep", action="store_true")
+    ap.add_argument("--selector-exclude-nuclei-fallback", action="store_true")
+    ap.add_argument(
+        "--selector-split-by-alias-family",
+        action="store_true",
+        help="Train selector bundles per alias_family (cv/vc/vcv/vowel) under families/<family>.",
+    )
+    ap.add_argument(
+        "--selector-families",
+        default="cv,vc,vcv,vowel",
+        help="Comma list for --selector-split-by-alias-family (default: cv,vc,vcv,vowel).",
+    )
     ap.add_argument("--require-all", action="store_true", help="Fail if any selected language/format job fails or missing")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -431,6 +725,44 @@ def main():
     max_blank_attach = float(args.max_blank_attach_rate)
     max_head_blank_attach = float(args.max_head_blank_attach_rate)
     max_vv_blank_attach = float(args.max_vv_blank_attach_rate)
+    max_blank_attach_delta = float(args.max_blank_attach_delta_rate)
+    max_high_pitch_head_blank_attach = float(args.max_high_pitch_head_blank_attach_rate)
+    selector_enabled = bool(args.train_selector)
+    selector_objective = str(args.selector_objective or "auto").strip().lower()
+    selector_group_column = str(args.selector_group_column or "voicebank_id").strip()
+    selector_num_boost_round = int(args.selector_num_boost_round)
+    selector_early_stopping_rounds = int(args.selector_early_stopping_rounds)
+    selector_model_root = os.path.abspath(str(args.selector_model_root).strip()) if str(args.selector_model_root or "").strip() else ""
+    selector_min_mapping_confidence = float(args.selector_min_mapping_confidence)
+    selector_require_train_keep = bool(args.selector_require_train_keep)
+    selector_exclude_nuclei_fallback = bool(args.selector_exclude_nuclei_fallback)
+    selector_split_by_alias_family = bool(args.selector_split_by_alias_family)
+    selector_families = _parse_selector_families(str(args.selector_families or ""))
+    gate_profile = _load_blank_attach_gate_profile(str(args.blank_attach_gate_profile or ""))
+    summary["blank_attach_gate_profile"] = {
+        "path": str(gate_profile.get("path", "") or ""),
+        "default": dict(gate_profile.get("default") or {}),
+        "override_keys": sorted(
+            [
+                f"{lang}/{fmt}"
+                for (lang, fmt) in dict(gate_profile.get("overrides") or {}).keys()
+            ]
+        ),
+    }
+    summary["selector"] = {
+        "enabled": selector_enabled,
+        "objective": selector_objective,
+        "group_column": selector_group_column,
+        "num_boost_round": selector_num_boost_round,
+        "early_stopping_rounds": selector_early_stopping_rounds,
+        "model_root": selector_model_root,
+        "min_mapping_confidence": selector_min_mapping_confidence,
+        "require_train_keep": selector_require_train_keep,
+        "exclude_nuclei_fallback": selector_exclude_nuclei_fallback,
+        "split_by_alias_family": selector_split_by_alias_family,
+        "families": list(selector_families),
+        "pipeline_mode": "two_stage_per_format",
+    }
 
     for lang, fmt, dataset_csv, built_rows in jobs:
         job = {
@@ -465,6 +797,17 @@ def main():
             )
             job["subset"] = subset_meta
         job["dataset_csv_used"] = dataset_for_job
+        gate_thresholds = _resolve_blank_attach_gate_thresholds(
+            language=lang,
+            format_type=fmt,
+            cli_overall=max_blank_attach,
+            cli_head=max_head_blank_attach,
+            cli_vv=max_vv_blank_attach,
+            cli_delta=max_blank_attach_delta,
+            cli_high_pitch_head=max_high_pitch_head_blank_attach,
+            profile=gate_profile,
+        )
+        job["blank_attach_gate_thresholds"] = gate_thresholds
 
         if args.dry_run:
             job["status"] = "dry_run"
@@ -536,21 +879,217 @@ def main():
                     device=args.device,
                     rawmel_cache_dir=str(job.get("rawmel_cache", "") or ""),
                 )
+                eval_summary = _ensure_blank_attach_eval_fields(eval_summary)
                 os.makedirs(os.path.dirname(eval_report), exist_ok=True)
                 with open(eval_report, "w", encoding="utf-8") as f:
                     json.dump(eval_summary, f, ensure_ascii=False, indent=2)
                 job["eval_summary"] = eval_summary
                 gate_ok, gate_reasons, gate_rates = _check_blank_attach_gate(
                     eval_summary,
-                    max_overall=max_blank_attach,
-                    max_head=max_head_blank_attach,
-                    max_vv=max_vv_blank_attach,
+                    max_overall=float(gate_thresholds.get("max_blank_attach_rate", -1.0)),
+                    max_head=float(gate_thresholds.get("max_head_blank_attach_rate", -1.0)),
+                    max_vv=float(gate_thresholds.get("max_vv_blank_attach_rate", -1.0)),
+                    max_delta_rate=float(gate_thresholds.get("max_blank_attach_delta_rate", -1.0)),
+                    max_high_pitch_head=float(gate_thresholds.get("max_high_pitch_head_blank_attach_rate", -1.0)),
                 )
                 job["blank_attach_rates"] = gate_rates
                 if gate_reasons:
                     job["blank_attach_gate"] = {"ok": bool(gate_ok), "reasons": gate_reasons}
                 if not gate_ok:
                     raise RuntimeError("blank-attach gate failed: " + "; ".join(gate_reasons))
+
+            if selector_enabled:
+                selector_min_conf = (
+                    float(selector_min_mapping_confidence)
+                    if float(selector_min_mapping_confidence) >= 0.0
+                    else float(mmc)
+                )
+                auto_lightgbm_dir = _discover_lightgbm_model_dir(model_root, lang, fmt)
+                selector_model_dir = ""
+                selector_model_dir_reason = ""
+                if selector_model_root:
+                    selector_model_dir = os.path.join(selector_model_root, lang, fmt, "v1_selector")
+                    selector_model_dir_reason = "selector_model_root"
+                elif auto_lightgbm_dir:
+                    selector_model_dir = auto_lightgbm_dir
+                    selector_model_dir_reason = "auto_detected_lightgbm_route"
+                else:
+                    selector_model_dir = out_dir
+                    selector_model_dir_reason = "fallback_job_model_dir"
+                os.makedirs(selector_model_dir, exist_ok=True)
+
+                runtime_notice = ""
+                if selector_model_dir_reason == "fallback_job_model_dir":
+                    runtime_notice = (
+                        "No lightgbm route detected. Selector model was saved in coupled model dir; "
+                        "runtime auto-load may skip it unless a lightgbm route is configured."
+                    )
+
+                if selector_split_by_alias_family:
+                    family_reports: List[Dict[str, object]] = []
+                    trained_family_count = 0
+                    for family in selector_families:
+                        family_alias_types = [v for v in alias_family_to_alias_types(family) if str(v).strip()]
+                        if alias_types:
+                            alias_type_filter = {str(v).strip().lower() for v in alias_types if str(v).strip()}
+                            family_alias_types = [
+                                v for v in family_alias_types if str(v).strip().lower() in alias_type_filter
+                            ]
+                        family_report: Dict[str, object] = {
+                            "alias_family": str(family),
+                            "alias_types": list(family_alias_types),
+                            "status": "pending",
+                            "train_meta": {},
+                            "eval_summary": {},
+                        }
+                        if not family_alias_types:
+                            family_report["status"] = "skipped"
+                            family_report["skip_reason"] = "no_alias_types_for_family"
+                            family_reports.append(family_report)
+                            continue
+
+                        family_dataset_csv = _selector_family_dataset_path(
+                            model_root=model_root,
+                            language=lang,
+                            format_type=fmt,
+                            dataset_csv=dataset_for_job,
+                            alias_family=family,
+                        )
+                        family_dataset_summary = build_selector_dataset_csv_from_delta_dataset(
+                            delta_dataset_csv=dataset_for_job,
+                            out_csv=family_dataset_csv,
+                            language=lang,
+                            format_type=fmt,
+                            alias_types=family_alias_types,
+                            require_train_keep=selector_require_train_keep,
+                            min_mapping_confidence=float(selector_min_conf),
+                            exclude_nuclei_fallback=selector_exclude_nuclei_fallback,
+                        )
+                        family_rows = int(family_dataset_summary.get("rows", 0) or 0)
+                        family_report["dataset_csv"] = family_dataset_csv
+                        family_report["dataset_rows"] = family_rows
+                        family_report["dataset_groups"] = int(family_dataset_summary.get("groups", 0) or 0)
+                        if family_rows < 16:
+                            family_report["status"] = "skipped"
+                            family_report["skip_reason"] = "dataset_too_small"
+                            family_reports.append(family_report)
+                            continue
+
+                        family_model_dir = os.path.join(selector_model_dir, "families", str(family))
+                        os.makedirs(family_model_dir, exist_ok=True)
+                        family_report["model_dir"] = family_model_dir
+                        try:
+                            if not args.skip_train:
+                                selector_train_meta = train_lightgbm_selector_bundle(
+                                    language=lang,
+                                    format_type=fmt,
+                                    selector_dataset_csv=family_dataset_csv,
+                                    out_dir=family_model_dir,
+                                    group_column=selector_group_column,
+                                    objective=selector_objective,
+                                    num_boost_round=selector_num_boost_round,
+                                    early_stopping_rounds=selector_early_stopping_rounds,
+                                    alias_family=str(family),
+                                )
+                                family_report["train_meta"] = selector_train_meta
+                            if not args.skip_eval:
+                                selector_eval_summary = evaluate_lightgbm_selector_bundle(
+                                    model_dir=family_model_dir,
+                                    selector_dataset_csv=family_dataset_csv,
+                                    language=lang,
+                                    format_type=fmt,
+                                )
+                                family_report["eval_summary"] = selector_eval_summary
+                                selector_eval_report = os.path.join(family_model_dir, "selector_eval_summary.json")
+                                with open(selector_eval_report, "w", encoding="utf-8") as f:
+                                    json.dump(selector_eval_summary, f, ensure_ascii=False, indent=2)
+                                family_report["eval_report"] = selector_eval_report
+                            family_report["status"] = "ok"
+                            trained_family_count += 1
+                        except Exception as family_exc:
+                            family_report["status"] = "failed"
+                            family_report["error"] = str(family_exc)
+                        family_reports.append(family_report)
+
+                    if trained_family_count <= 0:
+                        raise RuntimeError(
+                            f"selector family split produced no trainable families for {lang}/{fmt} "
+                            f"(required rows>=16)."
+                        )
+
+                    selector_report = {
+                        "enabled": True,
+                        "objective": selector_objective,
+                        "split_by_alias_family": True,
+                        "model_dir": selector_model_dir,
+                        "model_dir_reason": selector_model_dir_reason,
+                        "families": family_reports,
+                        "families_ok": int(sum(1 for it in family_reports if str(it.get('status')) == "ok")),
+                        "families_failed": int(sum(1 for it in family_reports if str(it.get('status')) == "failed")),
+                        "families_skipped": int(sum(1 for it in family_reports if str(it.get('status')) == "skipped")),
+                    }
+                    if runtime_notice:
+                        selector_report["runtime_notice"] = runtime_notice
+                else:
+                    selector_dataset_csv = _selector_dataset_path(
+                        model_root=model_root,
+                        language=lang,
+                        format_type=fmt,
+                        dataset_csv=dataset_for_job,
+                    )
+                    selector_dataset_summary = build_selector_dataset_csv_from_delta_dataset(
+                        delta_dataset_csv=dataset_for_job,
+                        out_csv=selector_dataset_csv,
+                        language=lang,
+                        format_type=fmt,
+                        require_train_keep=selector_require_train_keep,
+                        min_mapping_confidence=float(selector_min_conf),
+                        exclude_nuclei_fallback=selector_exclude_nuclei_fallback,
+                    )
+                    selector_dataset_rows = int(selector_dataset_summary.get("rows", 0) or 0)
+                    if selector_dataset_rows < 16:
+                        raise RuntimeError(
+                            f"selector dataset too small for {lang}/{fmt}: rows={selector_dataset_rows} (<16)"
+                        )
+                    selector_report = {
+                        "enabled": True,
+                        "objective": selector_objective,
+                        "dataset_csv": selector_dataset_csv,
+                        "dataset_rows": selector_dataset_rows,
+                        "dataset_groups": int(selector_dataset_summary.get("groups", 0) or 0),
+                        "model_dir": selector_model_dir,
+                        "model_dir_reason": selector_model_dir_reason,
+                        "train_meta": {},
+                        "eval_summary": {},
+                    }
+                    if runtime_notice:
+                        selector_report["runtime_notice"] = runtime_notice
+                    if not args.skip_train:
+                        selector_train_meta = train_lightgbm_selector_bundle(
+                            language=lang,
+                            format_type=fmt,
+                            selector_dataset_csv=selector_dataset_csv,
+                            out_dir=selector_model_dir,
+                            group_column=selector_group_column,
+                            objective=selector_objective,
+                            num_boost_round=selector_num_boost_round,
+                            early_stopping_rounds=selector_early_stopping_rounds,
+                            alias_family=str(args.alias_family or ""),
+                        )
+                        selector_report["train_meta"] = selector_train_meta
+                    if not args.skip_eval:
+                        selector_eval_summary = evaluate_lightgbm_selector_bundle(
+                            model_dir=selector_model_dir,
+                            selector_dataset_csv=selector_dataset_csv,
+                            language=lang,
+                            format_type=fmt,
+                        )
+                        selector_report["eval_summary"] = selector_eval_summary
+                        selector_eval_report = os.path.join(selector_model_dir, "selector_eval_summary.json")
+                        with open(selector_eval_report, "w", encoding="utf-8") as f:
+                            json.dump(selector_eval_summary, f, ensure_ascii=False, indent=2)
+                        selector_report["eval_report"] = selector_eval_report
+                job["selector"] = selector_report
 
             job["status"] = "ok"
         except Exception as exc:

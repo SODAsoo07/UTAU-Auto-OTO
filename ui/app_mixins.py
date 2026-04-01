@@ -141,6 +141,56 @@ class FileDialogMixin:
             return repo_root
         return ""
 
+    def _recommended_e2e_model_root(self):
+        base_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        primary_root = os.path.join(base_dir, "models", "oto_e2e")
+        fallback_root = os.path.join(base_dir, "assets", "models", "oto_e2e")
+
+        for candidate in (primary_root, fallback_root):
+            if self._dir_has_model_meta(candidate):
+                return candidate
+        for candidate in (primary_root, fallback_root):
+            if os.path.isdir(candidate):
+                return candidate
+        return ""
+
+    def _clear_e2e_model_envs(self):
+        for key in (
+            "UTOA_E2E_MODEL_DIR",
+            "UTOA_E2E_ALIAS_MODEL_DIR",
+            "UTOA_KR_E2E_MODEL_DIR",
+            "UTOA_JA_E2E_MODEL_DIR",
+            "UTOA_KR_E2E_ALIAS_MODEL_DIR",
+            "UTOA_JA_E2E_ALIAS_MODEL_DIR",
+        ):
+            os.environ.pop(key, None)
+
+    def _apply_e2e_model_env(self, language):
+        self._clear_e2e_model_envs()
+        lang = str(language or "").strip().lower()
+        if lang not in {"korean", "japanese"}:
+            return {"model_root": "", "alias_root": "", "has_models": False}
+
+        model_root = str(self._recommended_e2e_model_root() or "").strip()
+        if not model_root or not os.path.isdir(model_root):
+            return {"model_root": "", "alias_root": "", "has_models": False}
+
+        os.environ["UTOA_E2E_MODEL_DIR"] = model_root
+
+        alias_root = os.path.join(model_root, lang, "by_alias")
+        if os.path.isdir(alias_root):
+            os.environ["UTOA_E2E_ALIAS_MODEL_DIR"] = alias_root
+            alias_key = "UTOA_JA_E2E_ALIAS_MODEL_DIR" if lang == "japanese" else "UTOA_KR_E2E_ALIAS_MODEL_DIR"
+            os.environ[alias_key] = alias_root
+        else:
+            alias_root = ""
+
+        return {
+            "model_root": model_root,
+            "alias_root": alias_root,
+            "has_models": bool(self._dir_has_model_meta(model_root)),
+        }
+
     def _language_has_ensemble_bundle(self, language):
         lang_root = self._ml_model_language_root(language)
         if not os.path.isdir(lang_root):
@@ -485,10 +535,32 @@ class AppRuntimeMixin:
 
     def _normalize_ml_selector_mode(self, value: str) -> str:
         mode = str(value or "").strip().lower()
-        if mode in {"delta", "delta_only", "delta only", "delta-only"}:
+        if mode in {
+            "delta",
+            "delta_only",
+            "delta only",
+            "delta-only",
+            "델타",
+            "델타만",
+            "상대적 보정",
+            "상대적보정",
+            "상대 보정",
+        }:
             return "delta"
-        if mode in {"selector", "delta+selector", "delta + selector"}:
+        if mode in {
+            "selector",
+            "delta+selector",
+            "delta + selector",
+            "델타+셀렉터",
+            "델타 + 셀렉터",
+            "셀렉터",
+            "+셀렉터",
+            "플러스셀렉터",
+            "플러스 셀렉터",
+        }:
             return "selector"
+        if mode in {"기본 정책", "기본정책", "policy"}:
+            return "policy"
         return "policy"
 
     def _describe_ml_selector_mode(self, value: str) -> str:
@@ -543,6 +615,12 @@ class AppRuntimeMixin:
             "UTOA_E2E_T_LOW",
             "UTOA_E2E_T_HIGH",
             "UTOA_E2E_BLEND_ALPHA",
+            "UTOA_E2E_MODEL_DIR",
+            "UTOA_E2E_ALIAS_MODEL_DIR",
+            "UTOA_KR_E2E_MODEL_DIR",
+            "UTOA_JA_E2E_MODEL_DIR",
+            "UTOA_KR_E2E_ALIAS_MODEL_DIR",
+            "UTOA_JA_E2E_ALIAS_MODEL_DIR",
         ):
             os.environ.pop(key, None)
 
@@ -1200,7 +1278,7 @@ class AppRuntimeMixin:
             "developer_mode_enabled_var": False,
             "enable_ml_correction_var": True,
             "ml_route_var": "자동(자동 라우팅)",
-            "ml_selector_mode_var": "델타+셀렉터",
+            "ml_selector_mode_var": "+셀렉터",
             "ml_coupled_enable_var": True,
             "ml_coupled_min_conf_var": "",
             "ml_coupled_min_conf_use_model_meta_var": True,
@@ -1218,7 +1296,7 @@ class AppRuntimeMixin:
             "ml_coupled_strict_constraint_var": True,
             "ml_batch_inference_enable_var": True,
             "ml_batch_inference_size_var": "256",
-            "ml_legacy_fallback_enable_var": False,
+            "ml_legacy_fallback_enable_var": True,
             "ml_hybrid_routing_enable_var": True,
             "ml_e2e_enable_var": False,
             "ml_e2e_mode_var": "hybrid",
@@ -1595,7 +1673,7 @@ class AppRuntimeMixin:
         selector_mode = (
             self.ml_selector_mode_var.get()
             if hasattr(self, "ml_selector_mode_var")
-            else "델타+셀렉터"
+            else "+셀렉터"
         )
 
         if lang not in {"korean", "japanese"}:
@@ -1606,6 +1684,8 @@ class AppRuntimeMixin:
                 "UTOA_JA_AUTOFREE_ML_DIR",
             ):
                 os.environ.pop(key, None)
+            if hasattr(self, "_clear_e2e_model_envs"):
+                self._clear_e2e_model_envs()
 
             self._apply_ml_selector_runtime_mode("policy")
             self._clear_ml_override_envs()
@@ -1647,7 +1727,7 @@ class AppRuntimeMixin:
         selector_mode = (
             self.ml_selector_mode_var.get()
             if hasattr(self, "ml_selector_mode_var")
-            else "델타+셀렉터"
+            else "+셀렉터"
         )
 
         if lang not in {"korean", "japanese"}:
@@ -1658,6 +1738,8 @@ class AppRuntimeMixin:
                 "UTOA_JA_AUTOFREE_ML_DIR",
             ):
                 os.environ.pop(key, None)
+            if hasattr(self, "_clear_e2e_model_envs"):
+                self._clear_e2e_model_envs()
 
             self._apply_ml_selector_runtime_mode("policy")
             self._clear_ml_override_envs()
@@ -1721,6 +1803,14 @@ class AppRuntimeMixin:
                 os.environ.pop("UTOA_KR_OTO_ML_DIR", None)
                 os.environ.pop("UTOA_KR_AUTOFREE_ML_DIR", None)
 
+        e2e_env_info = self._apply_e2e_model_env(lang) if hasattr(self, "_apply_e2e_model_env") else {
+            "model_root": "",
+            "alias_root": "",
+            "has_models": False,
+        }
+        e2e_model_root = str(e2e_env_info.get("model_root", "") or "")
+        e2e_alias_root = str(e2e_env_info.get("alias_root", "") or "")
+
         has_ensemble = False
         has_coupled = False
         try:
@@ -1743,6 +1833,18 @@ class AppRuntimeMixin:
         except Exception:
             has_autofree = False
 
+        has_e2e_model = bool(e2e_env_info.get("has_models", False))
+        e2e_model_dir = ""
+        try:
+            from core.oto_e2e_runtime import resolve_e2e_alias_model_root, resolve_e2e_model_dir
+
+            e2e_model_dir = str(resolve_e2e_model_dir(lang, fmt) or "").strip()
+            if not e2e_alias_root:
+                e2e_alias_root = str(resolve_e2e_alias_model_root(lang, fmt) or "").strip()
+            has_e2e_model = bool(e2e_model_dir) or bool(e2e_alias_root and self._dir_has_model_meta(e2e_alias_root))
+        except Exception:
+            has_e2e_model = bool(has_e2e_model)
+
         hybrid_routing_enabled = (
             bool(self.ml_hybrid_routing_enable_var.get())
             if hasattr(self, "ml_hybrid_routing_enable_var")
@@ -1764,8 +1866,13 @@ class AppRuntimeMixin:
             if hasattr(self, "_set_ml_route_from_code"):
                 self._set_ml_route_from_code("auto")
 
-        enable_ml = bool(enable_ml_default and has_coupled)
-        e2e_route_allowed = bool(enable_ml and e2e_requested and fmt == "cv")
+        coupled_enabled = (
+            bool(self.ml_coupled_enable_var.get())
+            if hasattr(self, "ml_coupled_enable_var")
+            else True
+        )
+        enable_ml = bool(enable_ml_default and has_coupled and coupled_enabled)
+        e2e_route_allowed = bool(enable_ml and e2e_requested and fmt == "cv" and has_e2e_model)
         if route_selected == "auto":
             if e2e_route_allowed:
                 route = "e2e_hybrid"
@@ -1789,6 +1896,8 @@ class AppRuntimeMixin:
 
         self._apply_ml_selector_runtime_mode(selector_mode)
         self._clear_ml_override_envs()
+        if hasattr(self, "_apply_e2e_model_env"):
+            self._apply_e2e_model_env(lang)
 
         os.environ["UTOA_ML_COUPLED_ENABLE"] = "1" if enable_ml else "0"
         os.environ["UTOA_ML_ENSEMBLE_ENABLE"] = "1" if (enable_ml and has_ensemble) else "0"
@@ -1798,7 +1907,14 @@ class AppRuntimeMixin:
         os.environ["UTOA_ML_COUPLED_ONNX_ENABLE"] = "1"
         os.environ["UTOA_ML_BATCH_INFERENCE_ENABLE"] = "1" if enable_ml else "0"
         os.environ["UTOA_ML_BATCH_INFERENCE_SIZE"] = "256"
-        os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = "0"
+        legacy_fallback_enabled = (
+            bool(self.ml_legacy_fallback_enable_var.get())
+            if hasattr(self, "ml_legacy_fallback_enable_var")
+            else True
+        )
+        os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = (
+            "1" if (enable_ml and legacy_fallback_enabled) else "0"
+        )
         os.environ["UTOA_ML_GATED_ENSEMBLE_ENABLE"] = "1" if (enable_ml and hybrid_routing_enabled) else "0"
         os.environ.setdefault("UTOA_MEL_WEIGHT_MODE", "mel_first")
         os.environ["UTOA_ML_ROUTE"] = route_internal
@@ -1818,6 +1934,8 @@ class AppRuntimeMixin:
             "language": lang,
             "format_type": fmt,
             "model_root": model_root,
+            "e2e_model_root": e2e_model_root,
+            "e2e_model_dir": e2e_model_dir,
             "enable_ml": enable_ml,
             "route": route,
             "route_selected": route_selected,
@@ -1825,6 +1943,7 @@ class AppRuntimeMixin:
             "has_coupled": has_coupled,
             "has_ensemble": has_ensemble,
             "has_autofree": has_autofree,
+            "has_e2e_model": has_e2e_model,
             "hybrid_routing": bool(enable_ml and hybrid_routing_enabled),
             "e2e_enabled": bool(e2e_runtime_enabled),
             "e2e_mode": str(e2e_mode),
@@ -3117,7 +3236,7 @@ class ConfigMixin:
             "recursive_voicebank_scan": self.recursive_voicebank_scan_var.get() if hasattr(self, "recursive_voicebank_scan_var") else False,
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
             "ml_route": self._get_ml_route_code() if hasattr(self, "_get_ml_route_code") else "auto",
-            "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "델타+셀렉터",
+            "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "+셀렉터",
             "ml_coupled_enable": self.ml_coupled_enable_var.get() if hasattr(self, "ml_coupled_enable_var") else True,
             "ml_coupled_min_conf": self.ml_coupled_min_conf_var.get() if hasattr(self, "ml_coupled_min_conf_var") else "",
             "ml_coupled_min_conf_use_model_meta": self.ml_coupled_min_conf_use_model_meta_var.get() if hasattr(self, "ml_coupled_min_conf_use_model_meta_var") else True,
@@ -3458,11 +3577,11 @@ class ConfigMixin:
                 saved_selector_mode = str(config.get("ml_selector_mode", "selector") or "").strip()
                 normalized_mode = self._normalize_ml_selector_mode(saved_selector_mode)
                 label_map = {
-                    "policy": "기본 정책",
-                    "delta": "델타만",
-                    "selector": "델타+셀렉터",
+                    "policy": "+셀렉터",
+                    "delta": "상대적 보정",
+                    "selector": "+셀렉터",
                 }
-                self.ml_selector_mode_var.set(label_map.get(normalized_mode, "델타+셀렉터"))
+                self.ml_selector_mode_var.set(label_map.get(normalized_mode, "+셀렉터"))
             if "ml_coupled_enable" in config and hasattr(self, "ml_coupled_enable_var"):
                 self.ml_coupled_enable_var.set(bool(config.get("ml_coupled_enable", True)))
             if "ml_coupled_min_conf" in config and hasattr(self, "ml_coupled_min_conf_var"):
@@ -3544,7 +3663,7 @@ class ConfigMixin:
                     except Exception:
                         self.ml_batch_inference_size_var.set("256")
             if "ml_legacy_fallback_enable" in config and hasattr(self, "ml_legacy_fallback_enable_var"):
-                self.ml_legacy_fallback_enable_var.set(bool(config.get("ml_legacy_fallback_enable", False)))
+                self.ml_legacy_fallback_enable_var.set(bool(config.get("ml_legacy_fallback_enable", True)))
             if "ml_hybrid_routing_enable" in config and hasattr(self, "ml_hybrid_routing_enable_var"):
                 self.ml_hybrid_routing_enable_var.set(bool(config.get("ml_hybrid_routing_enable", True)))
             if "ml_e2e_enable" in config and hasattr(self, "ml_e2e_enable_var"):

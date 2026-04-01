@@ -37,6 +37,7 @@ from core.oto_ml_policy import (
 from core.oto_ml_reliability import (
     compute_blank_risk_score,
     compute_mel_reliability_score,
+    evaluate_voiced_approval,
     is_mel_unreliable,
     mel_patch_is_fallback,
 )
@@ -2260,6 +2261,9 @@ def apply_oto_ml_to_oto_file(
         "blank_flag_rows": 0,
         "mel_unreliable_rows": 0,
         "mel_fallback_rows": 0,
+        "voiced_gate_required_rows": 0,
+        "voiced_gate_block_rows": 0,
+        "voiced_gate_forced_blank_rows": 0,
         "abstain_rows": 0,
         "blank_hys_switches": 0,
         "mel_hys_switches": 0,
@@ -2324,16 +2328,46 @@ def apply_oto_ml_to_oto_file(
             profile=reliability_profile,
             prev_state=reliability_state.get(state_key),
         )
+        voiced_gate = evaluate_voiced_approval(feat, profile=reliability_profile)
+        voiced_required = bool(voiced_gate.get("required", False))
+        voiced_approved = bool(voiced_gate.get("approved", True))
+        voiced_forced_blank = False
+        if int(reliability_decision.get("blank_flag", 0)) <= 0 and voiced_required and (not voiced_approved):
+            voiced_forced_blank = True
+            reliability_decision = dict(reliability_decision)
+            reliability_decision["blank_flag"] = 1
+            reliability_decision["blank_forced_by_voiced_gate"] = True
+            state = dict(reliability_decision.get("state") or {})
+            blank_state = dict(state.get("blank") or {})
+            blank_state["active"] = True
+            blank_state["pending"] = 0
+            state["blank"] = blank_state
+            reliability_decision["state"] = state
         reliability_state[state_key] = dict(reliability_decision.get("state") or {})
         feat["_runtime_blank_risk_score"] = float(blank_risk_score)
         feat["_runtime_blank_risk_flag"] = int(reliability_decision.get("blank_flag", 0))
         feat["_runtime_mel_reliability_score"] = float(mel_reliability_score)
         feat["_runtime_mel_unreliable"] = bool(reliability_decision.get("mel_unreliable", False))
+        feat["_runtime_voiced_gate_enabled"] = int(1 if bool(voiced_gate.get("enabled", False)) else 0)
+        feat["_runtime_voiced_gate_required"] = int(1 if voiced_required else 0)
+        feat["_runtime_voiced_approved"] = int(1 if voiced_approved else 0)
+        feat["_runtime_voiced_gate_reason"] = str(voiced_gate.get("reason", "") or "")
+        feat["_runtime_voiced_conf"] = float(_to_float(voiced_gate.get("voiced_conf"), 0.0))
+        feat["_runtime_voiced_gate_rms"] = float(_to_float(voiced_gate.get("rms_norm"), 0.0))
+        feat["_runtime_voiced_gate_f0_continuity"] = float(_to_float(voiced_gate.get("f0_continuity"), 0.0))
         feat["_runtime_blank_threshold"] = float(reliability_decision.get("blank_threshold", 0.55))
         feat["_runtime_blank_risky_threshold"] = float(reliability_decision.get("blank_risky_threshold", 0.44))
         feat["_runtime_blank_severe_threshold"] = float(reliability_decision.get("blank_severe_threshold", 0.58))
         feat["_runtime_mel_threshold"] = float(reliability_decision.get("mel_threshold", 0.42))
         reliability_stats["rows"] = int(reliability_stats["rows"]) + 1
+        if voiced_required:
+            reliability_stats["voiced_gate_required_rows"] = int(reliability_stats.get("voiced_gate_required_rows", 0)) + 1
+            if not voiced_approved:
+                reliability_stats["voiced_gate_block_rows"] = int(reliability_stats.get("voiced_gate_block_rows", 0)) + 1
+        if voiced_forced_blank:
+            reliability_stats["voiced_gate_forced_blank_rows"] = int(
+                reliability_stats.get("voiced_gate_forced_blank_rows", 0)
+            ) + 1
         if int(feat["_runtime_blank_risk_flag"]) > 0:
             reliability_stats["blank_flag_rows"] = int(reliability_stats["blank_flag_rows"]) + 1
         if bool(feat["_runtime_mel_unreliable"]):
@@ -2567,6 +2601,26 @@ def apply_oto_ml_to_oto_file(
                 selector_mode_counts = ml_report.get("selector_mode_counts", {})
                 selector_mode_counts[mode] = int(selector_mode_counts.get(mode, 0)) + 1
                 ml_report["selector_mode_counts"] = selector_mode_counts
+                comp = selected.get("score_components") if isinstance(selected, dict) else None
+                if isinstance(comp, dict):
+                    score_stats = dict(ml_report.get("selector_score_stats", {}) or {})
+                    score_stats["rows"] = int(score_stats.get("rows", 0)) + 1
+                    score_stats["blank_attach_risk_sum"] = float(score_stats.get("blank_attach_risk_sum", 0.0)) + float(
+                        comp.get("blank_attach_risk", 0.0) or 0.0
+                    )
+                    score_stats["silence_risk_sum"] = float(score_stats.get("silence_risk_sum", 0.0)) + float(
+                        comp.get("silence_risk", 0.0) or 0.0
+                    )
+                    score_stats["jump_risk_sum"] = float(score_stats.get("jump_risk_sum", 0.0)) + float(
+                        comp.get("jump_risk", 0.0) or 0.0
+                    )
+                    score_stats["leak_risk_norm_sum"] = float(score_stats.get("leak_risk_norm_sum", 0.0)) + float(
+                        comp.get("leak_risk_norm", 0.0) or 0.0
+                    )
+                    score_stats["penalty_sum"] = float(score_stats.get("penalty_sum", 0.0)) + float(
+                        comp.get("score_penalty", 0.0) or 0.0
+                    )
+                    ml_report["selector_score_stats"] = score_stats
                 if log_selector_hard_negative(
                     feat,
                     selected,
@@ -2828,7 +2882,8 @@ def apply_oto_ml_to_oto_file(
             f"rows={int(reliability_stats.get('rows', 0))}, "
             f"blank_flags={int(reliability_stats.get('blank_flag_rows', 0))}, "
             f"mel_unreliable={int(reliability_stats.get('mel_unreliable_rows', 0))}, "
-            f"mel_fallback={int(reliability_stats.get('mel_fallback_rows', 0))}",
+            f"mel_fallback={int(reliability_stats.get('mel_fallback_rows', 0))}, "
+            f"voiced_gate_blocked={int(reliability_stats.get('voiced_gate_block_rows', 0))}",
         )
 
     ml_report["anchor_stats"] = dict(anchor_stats)
@@ -2847,6 +2902,22 @@ def apply_oto_ml_to_oto_file(
         ml_report["blank_confidence"] = float(sum(blank_conf_values) / float(len(blank_conf_values)))
     if confidence_values:
         ml_report["model_confidence"] = float(sum(confidence_values) / float(len(confidence_values)))
+    selector_score_stats = ml_report.get("selector_score_stats")
+    if isinstance(selector_score_stats, dict):
+        rows_n = int(selector_score_stats.get("rows", 0))
+        if rows_n > 0:
+            selector_score_stats["blank_attach_risk_mean"] = float(
+                selector_score_stats.get("blank_attach_risk_sum", 0.0)
+            ) / float(rows_n)
+            selector_score_stats["silence_risk_mean"] = float(selector_score_stats.get("silence_risk_sum", 0.0)) / float(
+                rows_n
+            )
+            selector_score_stats["jump_risk_mean"] = float(selector_score_stats.get("jump_risk_sum", 0.0)) / float(rows_n)
+            selector_score_stats["leak_risk_norm_mean"] = float(
+                selector_score_stats.get("leak_risk_norm_sum", 0.0)
+            ) / float(rows_n)
+            selector_score_stats["penalty_mean"] = float(selector_score_stats.get("penalty_sum", 0.0)) / float(rows_n)
+            ml_report["selector_score_stats"] = selector_score_stats
     rel_rows = int(reliability_stats.get("rows", 0))
     rel_fp_denom = int(reliability_stats.get("proxy_fp_denom", 0))
     rel_fn_denom = int(reliability_stats.get("proxy_fn_denom", 0))
@@ -2855,6 +2926,9 @@ def apply_oto_ml_to_oto_file(
         "blank_flag_rows": int(reliability_stats.get("blank_flag_rows", 0)),
         "mel_unreliable_rows": int(reliability_stats.get("mel_unreliable_rows", 0)),
         "mel_fallback_rows": int(reliability_stats.get("mel_fallback_rows", 0)),
+        "voiced_gate_required_rows": int(reliability_stats.get("voiced_gate_required_rows", 0)),
+        "voiced_gate_block_rows": int(reliability_stats.get("voiced_gate_block_rows", 0)),
+        "voiced_gate_forced_blank_rows": int(reliability_stats.get("voiced_gate_forced_blank_rows", 0)),
         "abstain_rows": int(reliability_stats.get("abstain_rows", 0)),
         "abstain_rate": (
             float(reliability_stats.get("abstain_rows", 0)) / float(rel_rows)

@@ -12,6 +12,7 @@ RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "models", "oto_ml"), "assets/models/oto_ml"),
     (os.path.join(APP_DIR, "ml", "configs"), "ml/configs"),
     (os.path.join(APP_DIR, "config.json"), "."),
+    (os.path.join(APP_DIR, "ui", "ui_layout.json"), "ui"),
 ]
 
 datas = [

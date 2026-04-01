@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import re
@@ -70,7 +70,7 @@ def _extract_cv_targets_from_lines(lines, custom_map=None):
 
 
 def _extract_kr_cv_targets_from_filename(filename):
-    """甯護攵・・乱・・﨑懋ｵｭ・ｴ CV ・・龍 ・護・奝增ｰ・・・肥ｶ懦鮒・壱共."""
+    """파일명에서 한국어 CV 계열 음절 토큰을 추출합니다."""
     out = []
     for tok in expand_kr_filename_alias_tokens(
         os.path.basename(filename or ""),
@@ -107,9 +107,9 @@ def _iter_kr_cvvc_tokens(token_source):
 
 def _iter_kr_cvvc_cv_slots(token_source):
     """
-    CVVC token source・川・ "CV occurrence ・ｬ・ｯ" ・ｸ・ｱ・､・ｼ ・誤働・壱共.
-    - vowel・ｴ ・壱株 ・ｨ・ ・護溢揆 ・ｬ・ｯ・ｼ・・・滝ｳ・鮒・壱共.
-    - ・幗ｹｨ(coda)・ｴ ・溢牟・・CV kernel(onset+vowel)・・嶹們寳﨑ｴ 尞ｬ﨑ｨ﨑ｩ・壱共.
+    CVVC token source에서 "CV occurrence 슬롯" 인덱스를 만듭니다.
+    - vowel이 있는 모든 음절을 슬롯으로 집계합니다.
+    - 받침(coda)이 있어도 CV kernel(onset+vowel)로 환원해 포함합니다.
     """
     out = []
     cv_slot = 0
@@ -126,7 +126,7 @@ def _iter_kr_cvvc_cv_slots(token_source):
 
 
 def _build_kr_cvvc_occurrence_map(token_source):
-    """CVVC 甯護攵・・filename ・ｰ・・・護・・懍・・川・ CV/CV_HEAD occurrence map・・・誤働・壱共."""
+    """CVVC 파일의 filename 기반 음절 순서에서 CV/CV_HEAD occurrence map을 만듭니다."""
     occ = {}
     for _raw_idx, cv_slot, _tok, kernel, _onset, _vowel, _coda in _iter_kr_cvvc_cv_slots(token_source):
         occ.setdefault(kernel, []).append(cv_slot)
@@ -138,8 +138,14 @@ def _is_kr_order_locked_cv_format(file_format):
     return fmt in {"cvvc", "cvc"}
 
 
-def _resolve_kr_cvvc_occurrence_index(alias, alias_type, occurrence_map, occurrence_state, *, expected_idx=None):
-    """CV/CV_HEAD occurrence index resolver for Korean CVVC/CVC."""
+def _resolve_kr_cvvc_occurrence_index(
+    alias,
+    alias_type,
+    occurrence_map,
+    occurrence_state,
+    expected_idx=None,
+):
+    """한국어 CVVC에서 같은 CV 토큰의 등장 순서대로 CV/CV_HEAD를 직접 매핑합니다."""
     if alias_type not in {"cv", "cv_head"}:
         return None
     tok = _extract_kr_cv_alias_token(alias)
@@ -148,42 +154,21 @@ def _resolve_kr_cvvc_occurrence_index(alias, alias_type, occurrence_map, occurre
     idxs = occurrence_map.get(tok) or []
     if not idxs:
         return None
-    idxs = sorted(int(v) for v in idxs)
-
-    # Prefer deterministic expected-index mapping when caller provides expected slot.
-    # This reduces +-1 drift when repeated tokens exist in long continuous recordings.
-    if expected_idx is not None:
-        try:
-            e = max(0, int(expected_idx))
-        except Exception:
-            e = 0
-        if e in idxs:
-            chosen = e
-        else:
-            left = [v for v in idxs if v <= e]
-            right = [v for v in idxs if v > e]
-            if left and right:
-                l = left[-1]
-                r = right[0]
-                chosen = l if abs(l - e) <= abs(r - e) else r
-            elif left:
-                chosen = left[-1]
-            else:
-                chosen = right[0]
-        if occurrence_state is not None:
-            occurrence_state[(str(alias_type), tok, "expected")] = int(chosen)
-        return int(chosen)
-
+    # CV와 CV_HEAD는 보통 같은 음절 인덱스를 함께 참조하므로,
+    # 카운터를 분리하지 않으면 한쪽이 다른 쪽의 매핑 순서를 밀어버릴 수 있습니다.
     state_key = (str(alias_type), tok)
     used = int(occurrence_state.get(state_key, 0))
     if used >= len(idxs):
         used = len(idxs) - 1
     occurrence_state[state_key] = used + 1
-    return int(idxs[used])
+    # expected_idx는 호출부 호환을 위한 힌트 인자입니다.
+    # 현재는 기존 순서 기반 정책을 유지하므로 직접 사용하지 않습니다.
+    _ = expected_idx
+    return idxs[used]
 
 
 def _extract_kr_vv_pair_key(alias):
-    """﨑懋ｵｭ・ｴ VV alias・ｼ filename pair occurrence ・､﨑卓圸 墲､・・・嶹倆鮒・壱共."""
+    """한국어 VV alias를 filename pair occurrence 매핑용 키로 변환합니다."""
     parts = [p for p in re.split(r"\s+", (alias or "").strip().lower()) if p]
     if len(parts) != 2:
         return ""
@@ -199,7 +184,7 @@ def _extract_kr_vv_pair_key(alias):
 
 
 def _build_kr_cvvc_vv_occurrence_map(token_source):
-    """CVVC 甯護攵・・・懍・ ・ｨ・・・ｨ・・・ｰ・ｰ(VV) ・ｱ・･ ・懍・・ｼ ・ｵ・ｼ・・・誤働・壱共."""
+    """CVVC 파일의 순수 모음-모음 연결(VV) 등장 순서를 맵으로 만듭니다."""
     occ = {}
     slot_by_raw = {}
     for raw_idx, cv_slot, tok, _kernel, onset, vowel, coda in _iter_kr_cvvc_cv_slots(token_source):
@@ -225,7 +210,7 @@ def _build_kr_cvvc_vv_occurrence_map(token_source):
 
 
 def _resolve_kr_cvvc_vv_index(alias, occurrence_map, occurrence_state):
-    """﨑懋ｵｭ・ｴ CVVC・・VV alias・ｼ filename pair occurrence ・ｰ・・ｼ・・・､﨑啄鮒・壱共."""
+    """한국어 CVVC의 VV alias를 filename pair occurrence 기준으로 매핑합니다."""
     key = _extract_kr_vv_pair_key(alias)
     if not key:
         return None
@@ -241,8 +226,8 @@ def _resolve_kr_cvvc_vv_index(alias, occurrence_map, occurrence_state):
 
 def _find_kr_cv_vowel_match_index(target_clean, romaji_syllables, expected_idx, search_back=1, search_fwd=2):
     """
-    CV ・ｩ岺・・ｨ・語ｳｼ ・ｼ・倆葺・・・護溢揆 ・ｰ・ ・ｸ・ｱ・､ ・ｼ・ｩ・川・ ・ｬ夋川ラ﨑ｩ・壱共.
-    﨑・・護・・・ｼ(孖ｹ德・・ｴ・瀧ｪｨ・・・俯ｪｨ・・ ・ｴ・菩圸 ・溢・棗・們桿・壱共.
+    CV 목표 모음과 일치하는 음절을 기대 인덱스 근방에서 재탐색합니다.
+    한 음절 밀림(특히 이중모음/반모음) 보정용 안전장치입니다.
     """
     if not target_clean or not romaji_syllables:
         return None
@@ -288,11 +273,11 @@ def _should_allow_kr_exact_vowel_fix(
     severe_vowel_mismatch=False,
 ):
     """
-    﨑懋ｵｭ・ｴ CVVC・川・ filename occurrence・・・ｴ・ｸ ・菩・・､﨑瀧頗 CV/CV_HEAD・・
-    ・､・・・ｨ・・・ｬ夋川ラ・ｴ ・､・・・ｮ・ｴ・ｰ・ ・危巡・・・餓慣・壱共.
+    한국어 CVVC에서 filename occurrence로 이미 강제 매핑된 CV/CV_HEAD는
+    뒤의 모음 재탐색이 다시 덮어쓰지 않도록 막습니다.
 
-    ・ｨ, CV_HEAD・川・ ・菩・・､﨑・・ｰ・ｼ・ ・ｩ岺・・ｨ・語ｳｼ 增ｬ・・・ｴ・躯・ ・ｽ・ｰ・尖株
-    1・ｸ ・ｴ ・ｬ夋川ラ ・ｴ・菩揆 嵭溢圸﨑ｩ・壱共.
+    단, CV_HEAD에서 강제 매핑 결과가 목표 모음과 크게 어긋난 경우에는
+    1칸 내 재탐색 보정을 허용합니다.
     """
     fmt = str(file_format or "").strip().lower()
     if _is_kr_order_locked_cv_format(fmt) and forced_selected_idx is not None:
@@ -304,7 +289,7 @@ def _should_allow_kr_exact_vowel_fix(
 
 
 def _score_kr_syllable_mapping(candidate_infos, cv_targets):
-    """candidate ・護溢龍・ｴ alias ・ｰ・・cv_targets・ ・ｼ・壱ｘ ・ｼ・倆葺・肥ｧ ・川・嶹・"""
+    """candidate 음절열이 alias 기반 cv_targets와 얼마나 일치하는지 점수화."""
     if not candidate_infos or not cv_targets:
         return -1.0
 
@@ -353,7 +338,7 @@ def _is_kr_glide_vowel(vowel):
 
 
 def _compute_kr_glide_mismatch_ratio(candidate_infos, cv_targets):
-    """candidate 奝增ｰ・ｼ target 奝增ｰ・・嶹懍搆(・ｴ・瀧ｪｨ・・ ・溢攵・・・・惠・・・倆劍﨑ｩ・壱共."""
+    """candidate 토큰과 target 토큰의 활음(이중모음) 불일치 비율을 반환합니다."""
     if not candidate_infos or not cv_targets:
         return 0.0
 
@@ -388,7 +373,7 @@ def _compute_kr_glide_mismatch_ratio(candidate_infos, cv_targets):
 
 
 def _should_prefer_alias_based_syllables(file_format, used_words_based, base_score, alt_score):
-    """﨑懋ｵｭ・ｴ ・護溢龍 弡・ｳｴ ・・alias/filename ・ｰ・・・ｰ・ｼ・ｼ ・・・﨑・ ・ｰ・倣鮒・壱共."""
+    """한국어 음절열 후보 중 alias/filename 기반 결과를 채택할지 결정합니다."""
     fmt = str(file_format or "").strip().lower()
     base_score = float(base_score)
     alt_score = float(alt_score)
@@ -403,8 +388,8 @@ def _should_prefer_alias_based_syllables(file_format, used_words_based, base_sco
         return alt_score >= 60.0 and alt_score >= (base_score - 2.0)
 
     if fmt == "vcv":
-        # VCV・・・護・・ｽ・・ｰ 﨑・・ｸ・・・・､・・・ｴ・・・､・俾ｰ ・､・・
-        # alias ・ｰ・・・川・・ words ・ｰ・俯ｳｴ・､ 嶹菩共德・・ｰ・ｸ﨑俯ｩｴ ・・・・ｷｹ・・愍・・・・劍﨑罹共.
+        # VCV는 음절 경계가 한 칸만 밀려도 체감 오류가 커서,
+        # alias 기반 점수가 words 기반보다 확실히 우세하면 더 적극적으로 전환한다.
         if alt_score >= max(base_score + 4.0, 62.0):
             return True
         return base_score < 48.0 and alt_score >= 56.0
@@ -469,4 +454,3 @@ __all__ = [
     "_should_allow_kr_exact_vowel_fix",
     "_should_prefer_alias_based_syllables",
 ]
-

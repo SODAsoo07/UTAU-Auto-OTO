@@ -10,9 +10,11 @@ import csv
 import json
 import logging
 import os
+import re
 import time
+import wave
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import numpy as np
@@ -76,6 +78,19 @@ from core.oto_ml.pairing.vc_cv_pairing import _batch_pair_positions, _build_vc_c
 
 logger = logging.getLogger(__name__)
 
+_PITCH_NOTE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])([A-Ga-g])([#b]?)(-?[0-8])(?![A-Za-z0-9])")
+_NOTE_PITCH_CLASS = {
+    "c": 0,
+    "d": 2,
+    "e": 4,
+    "f": 5,
+    "g": 7,
+    "a": 9,
+    "b": 11,
+}
+_WAV_DIR_INDEX_CACHE: Dict[str, Dict[Tuple[str, str, str], List[str]]] = {}
+_WAV_PITCH_HZ_CACHE: Dict[str, float] = {}
+
 
 def _env_flag(name: str, default: bool) -> bool:
     raw = str(os.environ.get(name, "") or "").strip().lower()
@@ -98,6 +113,11 @@ def _export_coupled_onnx(
     categorical_bucket_sizes: List[int],
     patch_features: List[str],
     head_mode: str,
+    alias_branch_mode: str,
+    alias_branch_experts: int,
+    alias_type_cat_index: int,
+    alias_type_bucket_size: int,
+    alias_fallback_ids: Optional[List[int]],
     anchor_targets: List[str],
     delta_targets: List[str],
     rawmel_enabled: bool = False,
@@ -165,11 +185,10 @@ def _export_coupled_onnx(
                 z = self.base_model.joint(torch.cat(pieces, dim=1))
                 conf = self.base_model.conf_head(z)
                 if self.mode == "split":
-                    anchor = self.base_model.anchor_head(z)
-                    delta = self.base_model.delta_head(z)
+                    anchor, delta = self.base_model._predict_heads(z, cat)
                     out = (anchor, delta, conf)
                 else:
-                    deltas = self.base_model.delta_head(z)
+                    deltas = self.base_model._predict_heads(z, cat)
                     out = (deltas, conf)
             else:
                 cat = inputs[idx] if self.use_cat else None
@@ -246,6 +265,11 @@ def _export_coupled_onnx(
             "categorical_bucket_sizes": [int(v) for v in categorical_bucket_sizes],
             "patch_features": list(patch_features),
             "head_mode": head_mode_norm if head_mode_norm in {"single", "split"} else "single",
+            "alias_branch_mode": str(alias_branch_mode or "shared").strip().lower(),
+            "alias_branch_experts": int(alias_branch_experts),
+            "alias_type_cat_index": int(alias_type_cat_index),
+            "alias_type_bucket_size": int(alias_type_bucket_size),
+            "alias_fallback_ids": [int(v) for v in (alias_fallback_ids or [])],
             "anchor_targets": list(anchor_targets),
             "delta_targets": list(delta_targets),
             "rawmel_enabled": bool(rawmel_enabled),
@@ -303,6 +327,86 @@ def _resolve_head_mode(raw_value: str, default: str = "split") -> str:
     if mode in {"single", "split"}:
         return mode
     return str(default).strip().lower() or "split"
+
+
+def _resolve_alias_branch_mode(raw_value: str, default: str = "shared") -> str:
+    mode = str(raw_value or default).strip().lower()
+    if mode in {"shared", "shared_heads", "moe"}:
+        return mode
+    return str(default or "shared").strip().lower() or "shared"
+
+
+def _resolve_alias_branch_settings(
+    *,
+    mode_env: str,
+    experts_env: str,
+    min_rows_env: str,
+    categorical_features: List[str],
+    categorical_bucket_sizes: List[int],
+    cat_matrix: "np.ndarray",
+    train_idx: "np.ndarray",
+) -> Dict[str, Any]:
+    requested_mode = _resolve_alias_branch_mode(_env_str(mode_env, "shared"), default="shared")
+    experts = max(2, _env_int(experts_env, 4))
+    min_rows = max(1, _env_int(min_rows_env, 80))
+    alias_type_cat_index = -1
+    alias_type_bucket_size = 0
+    active_alias_ids = 0
+    strong_alias_ids = 0
+    fallback_ids: List[int] = []
+    reason = "ok"
+    applied_mode = requested_mode
+
+    if "alias_type" in categorical_features:
+        alias_type_cat_index = int(categorical_features.index("alias_type"))
+        if 0 <= alias_type_cat_index < len(categorical_bucket_sizes):
+            alias_type_bucket_size = max(2, int(categorical_bucket_sizes[alias_type_cat_index] or 0))
+
+    if requested_mode != "shared":
+        if alias_type_cat_index < 0 or alias_type_bucket_size <= 1:
+            applied_mode = "shared"
+            reason = "alias_type_unavailable"
+        elif cat_matrix is None or len(cat_matrix) <= 0 or len(train_idx) <= 0:
+            applied_mode = "shared"
+            reason = "empty_cat_matrix"
+        else:
+            try:
+                alias_vals = np.asarray(cat_matrix[train_idx, alias_type_cat_index], dtype=np.int64).reshape(-1)
+            except Exception:
+                alias_vals = np.asarray([], dtype=np.int64)
+            if alias_vals.size <= 0:
+                applied_mode = "shared"
+                reason = "empty_alias_values"
+            else:
+                counts: Dict[int, int] = {}
+                for v in alias_vals.tolist():
+                    key = int(v)
+                    counts[key] = int(counts.get(key, 0)) + 1
+                active_alias_ids = int(sum(1 for _k, c in counts.items() if c > 0))
+                strong_alias = [int(k) for k, c in counts.items() if int(c) >= int(min_rows)]
+                strong_alias_ids = int(len(strong_alias))
+                if requested_mode == "shared_heads":
+                    fallback_ids = [int(k) for k, c in counts.items() if int(c) < int(min_rows)]
+                    if strong_alias_ids < 2:
+                        applied_mode = "shared"
+                        reason = "insufficient_strong_alias_types"
+                elif requested_mode == "moe":
+                    if active_alias_ids < 2:
+                        applied_mode = "shared"
+                        reason = "insufficient_alias_types"
+
+    return {
+        "requested_mode": str(requested_mode),
+        "applied_mode": str(applied_mode),
+        "experts": int(experts),
+        "min_rows": int(min_rows),
+        "alias_type_cat_index": int(alias_type_cat_index),
+        "alias_type_bucket_size": int(alias_type_bucket_size),
+        "active_alias_ids": int(active_alias_ids),
+        "strong_alias_ids": int(strong_alias_ids),
+        "fallback_ids": [int(v) for v in fallback_ids],
+        "reason": str(reason),
+    }
 
 
 def _resolve_min_mapping_confidence(lang: str, fmt: str, min_mapping_confidence: float) -> float:
@@ -515,6 +619,282 @@ def _safe_numeric_np(df, col: str, default: float = 0.0) -> "np.ndarray":
     return pd.to_numeric(df[col], errors="coerce").fillna(float(default)).to_numpy(dtype=np.float64)
 
 
+def _note_token_to_hz(note: str, accidental: str, octave: str) -> Optional[float]:
+    key = str(note or "").strip().lower()
+    if key not in _NOTE_PITCH_CLASS:
+        return None
+    semitone = int(_NOTE_PITCH_CLASS[key])
+    acc = str(accidental or "").strip()
+    if acc == "#":
+        semitone += 1
+    elif acc == "b":
+        semitone -= 1
+    semitone %= 12
+    try:
+        octave_i = int(str(octave or "").strip())
+    except Exception:
+        return None
+    midi = (octave_i + 1) * 12 + semitone
+    return float(440.0 * (2.0 ** ((float(midi) - 69.0) / 12.0)))
+
+
+def _extract_note_hz_from_text(text: str) -> Optional[float]:
+    token = str(text or "").strip()
+    if not token:
+        return None
+    for m in _PITCH_NOTE_TOKEN_RE.finditer(token):
+        hz = _note_token_to_hz(m.group(1), m.group(2), m.group(3))
+        if hz is not None and np.isfinite(hz) and hz > 0.0:
+            return float(hz)
+    return None
+
+
+def _workspace_root_from_dataset_csv(dataset_csv: str) -> str:
+    path = os.path.abspath(str(dataset_csv or "").strip())
+    if not path:
+        return ""
+    base = os.path.dirname(os.path.dirname(path))
+    if os.path.basename(base).strip().lower() == "datasets":
+        return os.path.dirname(base)
+    return base
+
+
+def _load_wav_dir_index(dataset_csv: str) -> Dict[Tuple[str, str, str], List[str]]:
+    workspace_root = _workspace_root_from_dataset_csv(dataset_csv)
+    if not workspace_root:
+        return {}
+    if workspace_root in _WAV_DIR_INDEX_CACHE:
+        return _WAV_DIR_INDEX_CACHE[workspace_root]
+    index: Dict[Tuple[str, str, str], List[str]] = {}
+    manifest_csv = os.path.join(workspace_root, "_manifest", "training_candidates.csv")
+    if not os.path.isfile(manifest_csv):
+        _WAV_DIR_INDEX_CACHE[workspace_root] = index
+        return index
+    try:
+        with open(manifest_csv, "r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                lang = str(row.get("language", "") or "").strip().lower()
+                fmt_raw = str(row.get("format_type", "") or "").strip().lower()
+                fmt = normalize_format_type(lang, fmt_raw) or fmt_raw
+                voicebank_id = str(row.get("voicebank_id", "") or "").strip()
+                wav_dir = os.path.abspath(str(row.get("wav_dir", "") or "").strip())
+                if not (lang and fmt and voicebank_id and wav_dir):
+                    continue
+                key = (lang, fmt, voicebank_id)
+                bucket = index.setdefault(key, [])
+                if wav_dir not in bucket:
+                    bucket.append(wav_dir)
+    except Exception:
+        index = {}
+    _WAV_DIR_INDEX_CACHE[workspace_root] = index
+    return index
+
+
+def _resolve_wav_path_from_row(
+    row: Dict[str, object],
+    *,
+    language: str,
+    format_type: str,
+    wav_dir_index: Dict[Tuple[str, str, str], List[str]],
+) -> str:
+    wav_name = str(row.get("wav", "") or "").strip()
+    voicebank_id = str(row.get("voicebank_id", "") or "").strip()
+    if not (wav_name and voicebank_id):
+        return ""
+    fmt = normalize_format_type(language, format_type) or str(format_type or "").strip().lower()
+    candidates = list(wav_dir_index.get((str(language).strip().lower(), fmt, voicebank_id), []))
+    for wav_dir in candidates:
+        cand = os.path.abspath(os.path.join(wav_dir, wav_name))
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def _read_wav_mono_float64(wav_path: str) -> Tuple[Optional["np.ndarray"], int]:
+    if not wav_path or not os.path.isfile(wav_path):
+        return None, 0
+    try:
+        with wave.open(wav_path, "rb") as wf:
+            sr = int(wf.getframerate())
+            n_channels = int(wf.getnchannels())
+            sampwidth = int(wf.getsampwidth())
+            n_frames = int(wf.getnframes())
+            raw = wf.readframes(n_frames)
+    except Exception:
+        return None, 0
+    if not raw or sr <= 0:
+        return None, 0
+    if sampwidth == 1:
+        arr = (np.frombuffer(raw, dtype=np.uint8).astype(np.float64) - 128.0) / 128.0
+    elif sampwidth == 2:
+        arr = np.frombuffer(raw, dtype=np.int16).astype(np.float64) / 32768.0
+    elif sampwidth == 4:
+        arr = np.frombuffer(raw, dtype=np.int32).astype(np.float64) / 2147483648.0
+    else:
+        return None, 0
+    if n_channels > 1:
+        frame_count = int(len(arr) // n_channels)
+        if frame_count <= 0:
+            return None, 0
+        arr = arr[: frame_count * n_channels].reshape(frame_count, n_channels).mean(axis=1)
+    return arr.astype(np.float64), sr
+
+
+def _estimate_pitch_hz_from_wav(wav_path: str) -> float:
+    cache_key = os.path.abspath(str(wav_path or "").strip())
+    if not cache_key:
+        return float("nan")
+    if cache_key in _WAV_PITCH_HZ_CACHE:
+        return float(_WAV_PITCH_HZ_CACHE[cache_key])
+    audio, sr = _read_wav_mono_float64(cache_key)
+    if audio is None or sr <= 0 or len(audio) < int(sr * 0.08):
+        _WAV_PITCH_HZ_CACHE[cache_key] = float("nan")
+        return float("nan")
+
+    min_hz = max(40.0, float(_env_float("UTOA_ML_BLANK_ATTACH_WAV_PITCH_MIN_HZ", 70.0)))
+    max_hz = max(min_hz + 30.0, float(_env_float("UTOA_ML_BLANK_ATTACH_WAV_PITCH_MAX_HZ", 1100.0)))
+    min_lag = max(2, int(sr / max_hz))
+    max_lag = min(int(sr / min_hz), int(sr * 0.06))
+    if max_lag <= min_lag + 1:
+        _WAV_PITCH_HZ_CACHE[cache_key] = float("nan")
+        return float("nan")
+
+    frame_len = max(int(sr * 0.05), max_lag + 2)
+    hop = max(1, int(sr * 0.01))
+    if len(audio) < frame_len:
+        _WAV_PITCH_HZ_CACHE[cache_key] = float("nan")
+        return float("nan")
+
+    max_frames = max(4, int(_env_int("UTOA_ML_BLANK_ATTACH_WAV_PITCH_TOP_FRAMES", 10)))
+    rms_list: List[Tuple[float, int]] = []
+    for start in range(0, len(audio) - frame_len + 1, hop):
+        fr = audio[start : start + frame_len]
+        rms = float(np.sqrt(np.mean(fr * fr) + 1e-12))
+        rms_list.append((rms, int(start)))
+    if not rms_list:
+        _WAV_PITCH_HZ_CACHE[cache_key] = float("nan")
+        return float("nan")
+    rms_list.sort(key=lambda x: x[0], reverse=True)
+
+    min_clarity = float(_env_float("UTOA_ML_BLANK_ATTACH_WAV_PITCH_MIN_CLARITY", 0.22))
+    max_zcr = float(_env_float("UTOA_ML_BLANK_ATTACH_WAV_PITCH_MAX_ZCR", 0.26))
+    f0_candidates: List[float] = []
+    for _rms, start in rms_list[:max_frames]:
+        fr = audio[start : start + frame_len].astype(np.float64)
+        fr = fr - float(np.mean(fr))
+        if np.max(np.abs(fr)) <= 1e-6:
+            continue
+        zcr = float(np.mean((fr[:-1] * fr[1:]) < 0.0)) if len(fr) >= 2 else 1.0
+        if zcr > max_zcr:
+            continue
+        ac = np.correlate(fr, fr, mode="full")
+        ac = ac[len(fr) - 1 :]
+        if len(ac) <= max_lag:
+            continue
+        ac0 = float(ac[0])
+        if ac0 <= 1e-9:
+            continue
+        seg = ac[min_lag : max_lag + 1]
+        rel_idx = int(np.argmax(seg))
+        lag = int(min_lag + rel_idx)
+        peak = float(seg[rel_idx])
+        clarity = float(peak / (ac0 + 1e-9))
+        if clarity < min_clarity:
+            continue
+        f0 = float(sr) / float(max(1, lag))
+        if min_hz <= f0 <= max_hz and np.isfinite(f0):
+            f0_candidates.append(float(f0))
+    if len(f0_candidates) < 2:
+        hz = float("nan")
+    else:
+        hz = float(np.median(np.asarray(f0_candidates, dtype=np.float64)))
+    _WAV_PITCH_HZ_CACHE[cache_key] = float(hz)
+    return float(hz)
+
+
+def _estimate_pitch_hz_np(
+    df,
+    *,
+    language: str = "",
+    format_type: str = "",
+    dataset_csv: str = "",
+) -> "np.ndarray":
+    n = 0 if df is None else len(df)
+    out = np.full((n,), np.nan, dtype=np.float64)
+    if df is None or n <= 0:
+        return out
+    for col in ("f0_note_hint_hz", "note_hint_hz", "note_hz"):
+        if col in df.columns:
+            val = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=np.float64)
+            ok = np.isfinite(val) & (val > 0.0)
+            out[ok] = val[ok]
+    text_cols = [col for col in ("wav", "wav_norm", "voicebank_id", "alias") if col in df.columns]
+    if text_cols:
+        unresolved = np.where(~np.isfinite(out))[0]
+        for idx in unresolved.tolist():
+            hz = None
+            for col in text_cols:
+                hz = _extract_note_hz_from_text(df.iloc[idx][col])
+                if hz is not None:
+                    break
+            if hz is not None:
+                out[idx] = float(hz)
+
+    use_wav_pitch = _env_flag("UTOA_ML_BLANK_ATTACH_WAV_PITCH_ENABLE", True)
+    if use_wav_pitch and np.any(~np.isfinite(out)) and dataset_csv:
+        wav_dir_index = _load_wav_dir_index(dataset_csv)
+        unresolved = np.where(~np.isfinite(out))[0]
+        for idx in unresolved.tolist():
+            row = df.iloc[idx].to_dict()
+            wav_path = _resolve_wav_path_from_row(
+                row,
+                language=str(language or "").strip().lower(),
+                format_type=str(format_type or "").strip().lower(),
+                wav_dir_index=wav_dir_index,
+            )
+            if not wav_path:
+                continue
+            wav_hint_hz = _extract_note_hz_from_text(wav_path)
+            if wav_hint_hz is not None:
+                out[idx] = float(wav_hint_hz)
+                continue
+            wav_hz = _estimate_pitch_hz_from_wav(wav_path)
+            if np.isfinite(wav_hz) and float(wav_hz) > 0.0:
+                out[idx] = float(wav_hz)
+    return out
+
+
+def _blank_attach_high_pitch_mask(
+    df,
+    *,
+    language: str = "",
+    format_type: str = "",
+    dataset_csv: str = "",
+) -> "np.ndarray":
+    n = 0 if df is None else len(df)
+    mask = np.zeros((n,), dtype=bool)
+    if df is None or n <= 0:
+        return mask
+    high_zone_tokens = {"high", "upper", "upper_mid", "upper-mid", "hi"}
+    if "f0_pitch_zone" in df.columns:
+        zone = df["f0_pitch_zone"].astype(str).str.strip().str.lower().to_numpy()
+        mask |= np.isin(zone, list(high_zone_tokens))
+    pitch_hz = _estimate_pitch_hz_np(
+        df,
+        language=language,
+        format_type=format_type,
+        dataset_csv=dataset_csv,
+    )
+    hz_th = float(_env_float("UTOA_ML_BLANK_ATTACH_HIGH_PITCH_HZ", 500.0))
+    mask |= np.isfinite(pitch_hz) & (pitch_hz >= hz_th)
+    if "f0_max_hz" in df.columns:
+        f0_max_hz = pd.to_numeric(df["f0_max_hz"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        hard_high = float(_env_float("UTOA_ML_BLANK_ATTACH_HIGH_F0MAX_HZ", 860.0))
+        mask |= (f0_max_hz >= hard_high)
+    return mask
+
+
 def _blank_like_score_np(df) -> "np.ndarray":
     if df is None:
         return np.zeros((0,), dtype=np.float64)
@@ -626,6 +1006,7 @@ def _compute_blank_attach_kpi(
     truth_delta_offset=None,
     language: str = "",
     format_type: str = "",
+    row_mask=None,
 ):
     if df is None or len(df) == 0:
         return {
@@ -636,9 +1017,18 @@ def _compute_blank_attach_kpi(
             "pred_attach_rate": 0.0,
             "head_pred_attach_rate": 0.0,
             "vv_pred_attach_rate": 0.0,
+            "head_gold_attach_rate": 0.0,
+            "gold_attach_rows": 0,
+            "pred_minus_gold_rate": 0.0,
             "primary_kpi_name": "head_pred_attach_rate",
             "primary_kpi_value": 0.0,
             "has_gold_labels": False,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
         }
     n = len(df)
     pred_delta = np.asarray(pred_delta_offset, dtype=np.float64).reshape(-1)
@@ -668,6 +1058,13 @@ def _compute_blank_attach_kpi(
     blank_th = float(_env_float("UTOA_ML_BLANK_ATTACH_RISK_TH", 0.55))
     margin_ms = float(_env_float("UTOA_ML_BLANK_ATTACH_MARGIN_MS", 14.0))
     scope_mask, head_scope, vv_scope = _blank_attach_scope_masks(df, language=language, format_type=format_type)
+    if row_mask is not None:
+        row_mask_np = np.asarray(row_mask, dtype=bool).reshape(-1)
+        if row_mask_np.shape[0] != n:
+            row_mask_np = np.resize(row_mask_np, n)
+        scope_mask = scope_mask & row_mask_np
+        head_scope = head_scope & row_mask_np
+        vv_scope = vv_scope & row_mask_np
     finite_pred = np.isfinite(expected_anchor) & np.isfinite(pred_offset_abs)
     pred_attach = finite_pred & head_scope & (blank_like >= blank_th) & ((expected_anchor - pred_offset_abs) >= margin_ms)
 
@@ -729,6 +1126,36 @@ def _compute_blank_attach_kpi(
         "fp": int(fp),
         "fn": int(fn),
     }
+
+
+def _compute_blank_attach_kpi_pitch_zones(
+    df,
+    *,
+    pred_delta_offset,
+    truth_delta_offset=None,
+    language: str = "",
+    format_type: str = "",
+    dataset_csv: str = "",
+) -> Dict[str, Dict[str, object]]:
+    if df is None or len(df) == 0:
+        return {"high": {"enabled": False, "zone": "high", "scope_rows": 0, "head_rows": 0, "vv_rows": 0}}
+    high_mask = _blank_attach_high_pitch_mask(
+        df,
+        language=language,
+        format_type=format_type,
+        dataset_csv=dataset_csv,
+    )
+    high_kpi = _compute_blank_attach_kpi(
+        df,
+        pred_delta_offset=pred_delta_offset,
+        truth_delta_offset=truth_delta_offset,
+        language=language,
+        format_type=format_type,
+        row_mask=high_mask,
+    )
+    high_kpi["zone"] = "high"
+    high_kpi["pitch_hz_threshold"] = float(_env_float("UTOA_ML_BLANK_ATTACH_HIGH_PITCH_HZ", 500.0))
+    return {"high": high_kpi}
 
 
 def _resolve_sampling_group_values(df, train_idx, preferred_column: str = ""):
@@ -1196,6 +1623,15 @@ def train_coupled_bundle(
 
     aux_dim = len(AUX_TARGET_NAMES) if use_aux else 0
     head_mode = _resolve_head_mode(_env_str("UTOA_ML_COUPLED_HEAD_MODE", "split"), default="split")
+    alias_branch = _resolve_alias_branch_settings(
+        mode_env="UTOA_ML_COUPLED_ALIAS_BRANCH_MODE",
+        experts_env="UTOA_ML_COUPLED_ALIAS_BRANCH_EXPERTS",
+        min_rows_env="UTOA_ML_COUPLED_ALIAS_BRANCH_MIN_ROWS",
+        categorical_features=categorical_features,
+        categorical_bucket_sizes=categorical_bucket_sizes,
+        cat_matrix=C,
+        train_idx=train_idx,
+    )
     model = _build_model(
         torch,
         nn,
@@ -1204,6 +1640,11 @@ def train_coupled_bundle(
         aux_dim=aux_dim,
         categorical_bucket_sizes=categorical_bucket_sizes,
         head_mode=head_mode,
+        alias_branch_mode=str(alias_branch.get("applied_mode", "shared")),
+        alias_branch_experts=int(alias_branch.get("experts", 4)),
+        alias_type_cat_index=int(alias_branch.get("alias_type_cat_index", -1)),
+        alias_type_bucket_size=int(alias_branch.get("alias_type_bucket_size", 0)),
+        alias_fallback_ids=list(alias_branch.get("fallback_ids", []) or []),
     )
     run_device = _resolve_device(torch, requested=device)
     if isinstance(run_device, str):
@@ -1577,6 +2018,14 @@ def train_coupled_bundle(
         language=str(language or "").strip().lower(),
         format_type=normalize_format_type(language, format_type) or str(format_type or "").strip().lower(),
     )
+    blank_attach_kpi_pitch_zones = _compute_blank_attach_kpi_pitch_zones(
+        df_valid,
+        pred_delta_offset=pred_valid_np[:, 0],
+        truth_delta_offset=truth_valid_np[:, 0],
+        language=str(language or "").strip().lower(),
+        format_type=normalize_format_type(language, format_type) or str(format_type or "").strip().lower(),
+        dataset_csv=str(dataset_csv or ""),
+    )
 
     metrics = {}
     for col_i, target in enumerate(TARGET_NAMES):
@@ -1616,6 +2065,13 @@ def train_coupled_bundle(
             "patch_dim": int(P.shape[1]),
             "hidden_dim": 160,
             "head_mode": str(head_mode),
+            "alias_branch_mode": str(alias_branch.get("applied_mode", "shared")),
+            "alias_branch_requested_mode": str(alias_branch.get("requested_mode", "shared")),
+            "alias_branch_experts": int(alias_branch.get("experts", 4)),
+            "alias_branch_min_rows": int(alias_branch.get("min_rows", 80)),
+            "alias_type_cat_index": int(alias_branch.get("alias_type_cat_index", -1)),
+            "alias_type_bucket_size": int(alias_branch.get("alias_type_bucket_size", 0)),
+            "alias_fallback_ids": [int(v) for v in (alias_branch.get("fallback_ids", []) or [])],
             "anchor_dim": int(len(ANCHOR_TARGET_NAMES)),
             "delta_dim": int(len(DELTA_TARGET_NAMES)),
             "aux_dim": int(aux_dim),
@@ -1633,6 +2089,11 @@ def train_coupled_bundle(
         categorical_bucket_sizes=[int(v) for v in categorical_bucket_sizes],
         patch_features=list(PATCH_FEATURES),
         head_mode=str(head_mode),
+        alias_branch_mode=str(alias_branch.get("applied_mode", "shared")),
+        alias_branch_experts=int(alias_branch.get("experts", 4)),
+        alias_type_cat_index=int(alias_branch.get("alias_type_cat_index", -1)),
+        alias_type_bucket_size=int(alias_branch.get("alias_type_bucket_size", 0)),
+        alias_fallback_ids=[int(v) for v in (alias_branch.get("fallback_ids", []) or [])],
         anchor_targets=list(ANCHOR_TARGET_NAMES),
         delta_targets=list(DELTA_TARGET_NAMES),
         rawmel_enabled=False,
@@ -1655,6 +2116,18 @@ def train_coupled_bundle(
         "anchor_targets": list(ANCHOR_TARGET_NAMES),
         "delta_targets": list(DELTA_TARGET_NAMES),
         "head_mode": str(head_mode),
+        "alias_branch": {
+            "requested_mode": str(alias_branch.get("requested_mode", "shared")),
+            "applied_mode": str(alias_branch.get("applied_mode", "shared")),
+            "experts": int(alias_branch.get("experts", 4)),
+            "min_rows": int(alias_branch.get("min_rows", 80)),
+            "alias_type_cat_index": int(alias_branch.get("alias_type_cat_index", -1)),
+            "alias_type_bucket_size": int(alias_branch.get("alias_type_bucket_size", 0)),
+            "active_alias_ids": int(alias_branch.get("active_alias_ids", 0)),
+            "strong_alias_ids": int(alias_branch.get("strong_alias_ids", 0)),
+            "fallback_ids": [int(v) for v in (alias_branch.get("fallback_ids", []) or [])],
+            "reason": str(alias_branch.get("reason", "ok")),
+        },
         "aux_targets": list(AUX_TARGET_NAMES) if use_aux else [],
         "mel_patch_spec": list(PATCH_FEATURES),
         "onnx_export": onnx_export,
@@ -1704,6 +2177,7 @@ def train_coupled_bundle(
         "holdout_metrics": metrics,
         "aux_holdout_metrics": aux_metrics,
         "blank_attach_kpi": blank_attach_kpi,
+        "blank_attach_kpi_pitch_zones": blank_attach_kpi_pitch_zones,
         "holdout_confidence_mean": float(np.mean(conf_valid_np)) if len(conf_valid_np) else 0.0,
         "device_used": str(run_device),
     }
@@ -1718,6 +2192,7 @@ def train_coupled_bundle(
                 "confidence_min": float(np.min(conf_valid_np)) if len(conf_valid_np) else 0.0,
                 "confidence_max": float(np.max(conf_valid_np)) if len(conf_valid_np) else 0.0,
                 "blank_attach_kpi": blank_attach_kpi,
+                "blank_attach_kpi_pitch_zones": blank_attach_kpi_pitch_zones,
                 "kpi_primary": {
                     "name": str(blank_attach_kpi.get("primary_kpi_name", "head_pred_attach_rate")),
                     "value": float(blank_attach_kpi.get("primary_kpi_value", 0.0)),
@@ -1855,8 +2330,11 @@ def train_coupled_bundle_rawmel(
     missing_sample_n = max(1, int(_env_int("UTOA_ML_RAWMEL_MISSING_KEYS_SAMPLE", 20) or 20))
     missing_count = 0
     missing_sample: List[str] = []
+    key_exists_mask: List[bool] = []
     for key in keys:
-        if cache_index.has_key(key):
+        has_key = cache_index.has_key(key)
+        key_exists_mask.append(bool(has_key))
+        if has_key:
             continue
         missing_count += 1
         if len(missing_sample) < missing_sample_n:
@@ -1876,10 +2354,34 @@ def train_coupled_bundle_rawmel(
                 ensure_ascii=False,
                 indent=2,
             )
-        raise RuntimeError(
-            f"Raw mel cache missing keys (count={int(missing_count)}). "
-            f"sample_report={missing_report}"
-        )
+        missing_policy = str(os.environ.get("UTOA_ML_RAWMEL_MISSING_KEYS_POLICY", "error") or "error").strip().lower()
+        max_drop_ratio = float(_env_float("UTOA_ML_RAWMEL_MISSING_KEYS_MAX_RATIO", 0.01) or 0.01)
+        total_keys = max(1, len(keys))
+        missing_ratio = float(missing_count) / float(total_keys)
+        if missing_policy in {"drop", "warn"} and missing_ratio <= max_drop_ratio:
+            keep_mask_np = np.asarray(key_exists_mask, dtype=bool)
+            dropped = int((~keep_mask_np).sum())
+            df = df.loc[keep_mask_np].reset_index(drop=True)
+            print(
+                (
+                    f"[TRAIN] rawmel missing keys drop enabled: dropped={dropped}, "
+                    f"kept={len(df)}, missing_ratio={missing_ratio:.6f}, "
+                    f"max_ratio={max_drop_ratio:.6f}, report={missing_report}"
+                ),
+                flush=True,
+            )
+            if len(df) == 0:
+                raise RuntimeError(
+                    "Raw mel cache missing-key drop removed all rows. "
+                    f"sample_report={missing_report}"
+                )
+        else:
+            raise RuntimeError(
+                f"Raw mel cache missing keys (count={int(missing_count)}, ratio={missing_ratio:.6f}). "
+                f"sample_report={missing_report}. "
+                "Set UTOA_ML_RAWMEL_MISSING_KEYS_POLICY=drop and "
+                "UTOA_ML_RAWMEL_MISSING_KEYS_MAX_RATIO (default 0.01) to allow small drops."
+            )
 
     schema = get_feature_schema()
     feature_names = list(schema.get("feature_names") or FEATURE_NAMES)
@@ -2045,6 +2547,15 @@ def train_coupled_bundle_rawmel(
 
     aux_dim = len(AUX_TARGET_NAMES) if use_aux else 0
     head_mode = _resolve_head_mode(_env_str("UTOA_ML_RAWMEL_HEAD_MODE", "split"), default="split")
+    alias_branch = _resolve_alias_branch_settings(
+        mode_env="UTOA_ML_RAWMEL_ALIAS_BRANCH_MODE",
+        experts_env="UTOA_ML_RAWMEL_ALIAS_BRANCH_EXPERTS",
+        min_rows_env="UTOA_ML_RAWMEL_ALIAS_BRANCH_MIN_ROWS",
+        categorical_features=categorical_features,
+        categorical_bucket_sizes=categorical_bucket_sizes,
+        cat_matrix=C,
+        train_idx=train_idx,
+    )
     model = _build_model_rawmel(
         torch,
         nn,
@@ -2056,6 +2567,11 @@ def train_coupled_bundle_rawmel(
         aux_dim=aux_dim,
         categorical_bucket_sizes=categorical_bucket_sizes,
         head_mode=head_mode,
+        alias_branch_mode=str(alias_branch.get("applied_mode", "shared")),
+        alias_branch_experts=int(alias_branch.get("experts", 4)),
+        alias_type_cat_index=int(alias_branch.get("alias_type_cat_index", -1)),
+        alias_type_bucket_size=int(alias_branch.get("alias_type_bucket_size", 0)),
+        alias_fallback_ids=list(alias_branch.get("fallback_ids", []) or []),
     )
     run_device = _resolve_device(torch, requested=device)
     if isinstance(run_device, str):
@@ -2547,6 +3063,22 @@ def train_coupled_bundle_rawmel(
     pred_valid_np = pred_valid.detach().cpu().numpy()
     conf_valid_np = conf_valid.detach().cpu().numpy().reshape(-1)
     truth_valid_np = Y[valid_idx]
+    df_valid = df.iloc[valid_idx].reset_index(drop=True)
+    blank_attach_kpi = _compute_blank_attach_kpi(
+        df_valid,
+        pred_delta_offset=pred_valid_np[:, 0],
+        truth_delta_offset=truth_valid_np[:, 0],
+        language=str(language or "").strip().lower(),
+        format_type=normalize_format_type(language, format_type) or str(format_type or "").strip().lower(),
+    )
+    blank_attach_kpi_pitch_zones = _compute_blank_attach_kpi_pitch_zones(
+        df_valid,
+        pred_delta_offset=pred_valid_np[:, 0],
+        truth_delta_offset=truth_valid_np[:, 0],
+        language=str(language or "").strip().lower(),
+        format_type=normalize_format_type(language, format_type) or str(format_type or "").strip().lower(),
+        dataset_csv=str(dataset_csv or ""),
+    )
 
     metrics = {}
     for col_i, target in enumerate(TARGET_NAMES):
@@ -2586,6 +3118,13 @@ def train_coupled_bundle_rawmel(
             "patch_dim": int(P.shape[1]),
             "hidden_dim": 160,
             "head_mode": str(head_mode),
+            "alias_branch_mode": str(alias_branch.get("applied_mode", "shared")),
+            "alias_branch_requested_mode": str(alias_branch.get("requested_mode", "shared")),
+            "alias_branch_experts": int(alias_branch.get("experts", 4)),
+            "alias_branch_min_rows": int(alias_branch.get("min_rows", 80)),
+            "alias_type_cat_index": int(alias_branch.get("alias_type_cat_index", -1)),
+            "alias_type_bucket_size": int(alias_branch.get("alias_type_bucket_size", 0)),
+            "alias_fallback_ids": [int(v) for v in (alias_branch.get("fallback_ids", []) or [])],
             "anchor_dim": int(len(ANCHOR_TARGET_NAMES)),
             "delta_dim": int(len(DELTA_TARGET_NAMES)),
             "aux_dim": int(aux_dim),
@@ -2609,6 +3148,11 @@ def train_coupled_bundle_rawmel(
         categorical_bucket_sizes=[int(v) for v in categorical_bucket_sizes],
         patch_features=list(PATCH_FEATURES),
         head_mode=str(head_mode),
+        alias_branch_mode=str(alias_branch.get("applied_mode", "shared")),
+        alias_branch_experts=int(alias_branch.get("experts", 4)),
+        alias_type_cat_index=int(alias_branch.get("alias_type_cat_index", -1)),
+        alias_type_bucket_size=int(alias_branch.get("alias_type_bucket_size", 0)),
+        alias_fallback_ids=[int(v) for v in (alias_branch.get("fallback_ids", []) or [])],
         anchor_targets=list(ANCHOR_TARGET_NAMES),
         delta_targets=list(DELTA_TARGET_NAMES),
         rawmel_enabled=True,
@@ -2634,6 +3178,18 @@ def train_coupled_bundle_rawmel(
         "anchor_targets": list(ANCHOR_TARGET_NAMES),
         "delta_targets": list(DELTA_TARGET_NAMES),
         "head_mode": str(head_mode),
+        "alias_branch": {
+            "requested_mode": str(alias_branch.get("requested_mode", "shared")),
+            "applied_mode": str(alias_branch.get("applied_mode", "shared")),
+            "experts": int(alias_branch.get("experts", 4)),
+            "min_rows": int(alias_branch.get("min_rows", 80)),
+            "alias_type_cat_index": int(alias_branch.get("alias_type_cat_index", -1)),
+            "alias_type_bucket_size": int(alias_branch.get("alias_type_bucket_size", 0)),
+            "active_alias_ids": int(alias_branch.get("active_alias_ids", 0)),
+            "strong_alias_ids": int(alias_branch.get("strong_alias_ids", 0)),
+            "fallback_ids": [int(v) for v in (alias_branch.get("fallback_ids", []) or [])],
+            "reason": str(alias_branch.get("reason", "ok")),
+        },
         "aux_targets": list(AUX_TARGET_NAMES) if use_aux else [],
         "mel_patch_spec": dict(patch_spec),
         "mel_patch_spec_hash": patch_hash,
@@ -2699,6 +3255,7 @@ def train_coupled_bundle_rawmel(
         "holdout_metrics": metrics,
         "aux_holdout_metrics": aux_metrics,
         "blank_attach_kpi": blank_attach_kpi,
+        "blank_attach_kpi_pitch_zones": blank_attach_kpi_pitch_zones,
         "holdout_confidence_mean": float(np.mean(conf_valid_np)) if len(conf_valid_np) else 0.0,
         "device_used": str(run_device),
     }
@@ -2713,6 +3270,7 @@ def train_coupled_bundle_rawmel(
                 "confidence_min": float(np.min(conf_valid_np)) if len(conf_valid_np) else 0.0,
                 "confidence_max": float(np.max(conf_valid_np)) if len(conf_valid_np) else 0.0,
                 "blank_attach_kpi": blank_attach_kpi,
+                "blank_attach_kpi_pitch_zones": blank_attach_kpi_pitch_zones,
                 "kpi_primary": {
                     "name": str(blank_attach_kpi.get("primary_kpi_name", "head_pred_attach_rate")),
                     "value": float(blank_attach_kpi.get("primary_kpi_value", 0.0)),
@@ -2789,7 +3347,16 @@ def evaluate_coupled_bundle(
         language=lang,
         format_type=fmt,
     )
+    blank_attach_kpi_pitch_zones = _compute_blank_attach_kpi_pitch_zones(
+        df.reset_index(drop=True),
+        pred_delta_offset=pred_delta_offset_np,
+        truth_delta_offset=truth_delta_offset_np,
+        language=lang,
+        format_type=fmt,
+        dataset_csv=str(dataset_csv or ""),
+    )
     summary["blank_attach_kpi"] = blank_attach_kpi
+    summary["blank_attach_kpi_pitch_zones"] = blank_attach_kpi_pitch_zones
     summary["kpi_primary"] = {
         "name": str(blank_attach_kpi.get("primary_kpi_name", "head_pred_attach_rate")),
         "value": float(blank_attach_kpi.get("primary_kpi_value", 0.0)),

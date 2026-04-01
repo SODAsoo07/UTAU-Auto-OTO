@@ -169,7 +169,7 @@ def build_ja_cv_anchor_plan(expected_tokens, syllables_info, *, use_mel=False, f
     meta = evaluate_index_plan(used_rows, indices or [])
     if isinstance(model_meta, dict):
         meta["mapping_supervised"] = dict(model_meta)
-    return {"indices": indices, "score_rows": used_rows, "meta": meta}
+    return {"indices": indices, "score_rows": used_rows, "feature_rows": feature_rows, "meta": meta}
 
 
 def resolve_ja_planned_cv_index(planned_indices, expected_seq_idx, target_tok, syllables_info, *, alias_type="cv"):

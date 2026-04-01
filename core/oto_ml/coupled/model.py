@@ -184,6 +184,13 @@ def _embedding_dim_for_bucket_size(bucket_size: int) -> int:
     return max(4, min(16, size // 4))
 
 
+def _resolve_alias_branch_mode(raw_value: str, default: str = "shared") -> str:
+    mode = str(raw_value or default).strip().lower()
+    if mode in {"shared", "shared_heads", "moe"}:
+        return mode
+    return str(default or "shared").strip().lower() or "shared"
+
+
 def _build_model(
     torch,
     nn,
@@ -193,6 +200,11 @@ def _build_model(
     aux_dim: int = 0,
     categorical_bucket_sizes: Optional[List[int]] = None,
     head_mode: str = "single",
+    alias_branch_mode: str = "shared",
+    alias_branch_experts: int = 4,
+    alias_type_cat_index: int = -1,
+    alias_type_bucket_size: int = 0,
+    alias_fallback_ids: Optional[List[int]] = None,
 ):
     class _CoupledModel(nn.Module):
         def __init__(self):
@@ -222,12 +234,51 @@ def _build_model(
             )
             mode = str(head_mode or "single").strip().lower()
             self.head_mode = mode
+            self.alias_branch_mode = _resolve_alias_branch_mode(alias_branch_mode, default="shared")
+            self.alias_branch_experts = max(2, int(alias_branch_experts or 0))
+            self.alias_type_cat_index = int(alias_type_cat_index)
+            self.alias_type_bucket_size = max(2, int(alias_type_bucket_size or 0)) if int(alias_type_bucket_size or 0) > 0 else 0
+            self.alias_fallback_ids = sorted({int(v) for v in (alias_fallback_ids or []) if int(v) >= 0})
+
+            self.anchor_head = None
+            self.delta_head = None
+            self.anchor_heads = None
+            self.delta_heads = None
+            self.anchor_experts = None
+            self.delta_experts = None
+            self.gate_head = None
+
             if mode == "split":
-                self.anchor_head = nn.Linear(hidden_dim // 2, len(ANCHOR_TARGET_NAMES))
-                self.delta_head = nn.Linear(hidden_dim // 2, len(DELTA_TARGET_NAMES))
+                if self.alias_branch_mode == "shared_heads" and self.alias_type_bucket_size > 0:
+                    self.anchor_heads = nn.ModuleList(
+                        [nn.Linear(hidden_dim // 2, len(ANCHOR_TARGET_NAMES)) for _ in range(self.alias_type_bucket_size)]
+                    )
+                    self.delta_heads = nn.ModuleList(
+                        [nn.Linear(hidden_dim // 2, len(DELTA_TARGET_NAMES)) for _ in range(self.alias_type_bucket_size)]
+                    )
+                elif self.alias_branch_mode == "moe":
+                    self.anchor_experts = nn.ModuleList(
+                        [nn.Linear(hidden_dim // 2, len(ANCHOR_TARGET_NAMES)) for _ in range(self.alias_branch_experts)]
+                    )
+                    self.delta_experts = nn.ModuleList(
+                        [nn.Linear(hidden_dim // 2, len(DELTA_TARGET_NAMES)) for _ in range(self.alias_branch_experts)]
+                    )
+                    self.gate_head = nn.Linear(hidden_dim // 2, self.alias_branch_experts)
+                else:
+                    self.anchor_head = nn.Linear(hidden_dim // 2, len(ANCHOR_TARGET_NAMES))
+                    self.delta_head = nn.Linear(hidden_dim // 2, len(DELTA_TARGET_NAMES))
             else:
-                self.anchor_head = None
-                self.delta_head = nn.Linear(hidden_dim // 2, len(TARGET_NAMES))
+                if self.alias_branch_mode == "shared_heads" and self.alias_type_bucket_size > 0:
+                    self.delta_heads = nn.ModuleList(
+                        [nn.Linear(hidden_dim // 2, len(TARGET_NAMES)) for _ in range(self.alias_type_bucket_size)]
+                    )
+                elif self.alias_branch_mode == "moe":
+                    self.delta_experts = nn.ModuleList(
+                        [nn.Linear(hidden_dim // 2, len(TARGET_NAMES)) for _ in range(self.alias_branch_experts)]
+                    )
+                    self.gate_head = nn.Linear(hidden_dim // 2, self.alias_branch_experts)
+                else:
+                    self.delta_head = nn.Linear(hidden_dim // 2, len(TARGET_NAMES))
             self.conf_head = nn.Sequential(nn.Linear(hidden_dim // 2, 1), nn.Sigmoid())
             self.aux_dim = int(aux_dim)
             if self.aux_dim > 0:
@@ -250,6 +301,57 @@ def _build_model(
                 parts.append(embedding(idx))
             return torch.cat(parts, dim=1)
 
+        def _alias_indices(self, z, cat_idx):
+            if (
+                cat_idx is None
+                or self.alias_type_cat_index < 0
+                or self.alias_type_cat_index >= int(cat_idx.shape[1])
+            ):
+                return torch.zeros((int(z.shape[0]),), dtype=torch.long, device=z.device)
+            idx = cat_idx[:, self.alias_type_cat_index].long()
+            if self.alias_type_bucket_size > 0:
+                idx = idx.clamp(min=0, max=self.alias_type_bucket_size - 1)
+            if self.alias_fallback_ids:
+                mask = torch.zeros_like(idx, dtype=torch.bool)
+                for fallback_id in self.alias_fallback_ids:
+                    mask |= (idx == int(fallback_id))
+                idx = torch.where(mask, torch.zeros_like(idx), idx)
+            return idx
+
+        def _select_shared_heads(self, z, heads, cat_idx):
+            if heads is None or len(heads) <= 0:
+                return torch.zeros((int(z.shape[0]), 0), dtype=z.dtype, device=z.device)
+            stacked = torch.stack([head(z) for head in heads], dim=1)
+            idx = self._alias_indices(z, cat_idx)
+            dim = int(stacked.shape[2])
+            gather_idx = idx.view(-1, 1, 1).expand(-1, 1, dim)
+            return torch.gather(stacked, 1, gather_idx).squeeze(1)
+
+        def _select_moe(self, z, experts):
+            if experts is None or len(experts) <= 0:
+                return torch.zeros((int(z.shape[0]), 0), dtype=z.dtype, device=z.device)
+            stacked = torch.stack([head(z) for head in experts], dim=1)
+            gate_logits = self.gate_head(z)
+            gate = torch.softmax(gate_logits, dim=1).unsqueeze(-1)
+            return torch.sum(stacked * gate, dim=1)
+
+        def _predict_heads(self, z, cat_idx):
+            if self.head_mode == "split":
+                if self.alias_branch_mode == "shared_heads" and self.anchor_heads is not None and self.delta_heads is not None:
+                    anchor = self._select_shared_heads(z, self.anchor_heads, cat_idx)
+                    delta = self._select_shared_heads(z, self.delta_heads, cat_idx)
+                    return anchor, delta
+                if self.alias_branch_mode == "moe" and self.anchor_experts is not None and self.delta_experts is not None:
+                    anchor = self._select_moe(z, self.anchor_experts)
+                    delta = self._select_moe(z, self.delta_experts)
+                    return anchor, delta
+                return self.anchor_head(z), self.delta_head(z)
+            if self.alias_branch_mode == "shared_heads" and self.delta_heads is not None:
+                return self._select_shared_heads(z, self.delta_heads, cat_idx)
+            if self.alias_branch_mode == "moe" and self.delta_experts is not None:
+                return self._select_moe(z, self.delta_experts)
+            return self.delta_head(z)
+
         def forward(self, x, patch, cat_idx=None):
             xf = self.feature_net(x)
             xp = self.patch_net(patch)
@@ -260,13 +362,12 @@ def _build_model(
             z = self.joint(torch.cat(pieces, dim=1))
             conf = self.conf_head(z)
             if self.head_mode == "split":
-                anchor = self.anchor_head(z)
-                delta = self.delta_head(z)
+                anchor, delta = self._predict_heads(z, cat_idx)
                 if self.aux_head is not None:
                     aux = self.aux_head(z)
                     return anchor, delta, conf, aux
                 return anchor, delta, conf
-            deltas = self.delta_head(z)
+            deltas = self._predict_heads(z, cat_idx)
             if self.aux_head is not None:
                 aux = self.aux_head(z)
                 return deltas, conf, aux
@@ -288,6 +389,11 @@ def _build_model_rawmel(
     aux_dim: int = 0,
     categorical_bucket_sizes: Optional[List[int]] = None,
     head_mode: str = "single",
+    alias_branch_mode: str = "shared",
+    alias_branch_experts: int = 4,
+    alias_type_cat_index: int = -1,
+    alias_type_bucket_size: int = 0,
+    alias_fallback_ids: Optional[List[int]] = None,
 ):
     class _RawMelEncoder(nn.Module):
         def __init__(self, in_bins: int, in_frames: int):
@@ -345,12 +451,51 @@ def _build_model_rawmel(
             )
             mode = str(head_mode or "single").strip().lower()
             self.head_mode = mode
+            self.alias_branch_mode = _resolve_alias_branch_mode(alias_branch_mode, default="shared")
+            self.alias_branch_experts = max(2, int(alias_branch_experts or 0))
+            self.alias_type_cat_index = int(alias_type_cat_index)
+            self.alias_type_bucket_size = max(2, int(alias_type_bucket_size or 0)) if int(alias_type_bucket_size or 0) > 0 else 0
+            self.alias_fallback_ids = sorted({int(v) for v in (alias_fallback_ids or []) if int(v) >= 0})
+
+            self.anchor_head = None
+            self.delta_head = None
+            self.anchor_heads = None
+            self.delta_heads = None
+            self.anchor_experts = None
+            self.delta_experts = None
+            self.gate_head = None
+
             if mode == "split":
-                self.anchor_head = nn.Linear(hidden_dim // 2, len(ANCHOR_TARGET_NAMES))
-                self.delta_head = nn.Linear(hidden_dim // 2, len(DELTA_TARGET_NAMES))
+                if self.alias_branch_mode == "shared_heads" and self.alias_type_bucket_size > 0:
+                    self.anchor_heads = nn.ModuleList(
+                        [nn.Linear(hidden_dim // 2, len(ANCHOR_TARGET_NAMES)) for _ in range(self.alias_type_bucket_size)]
+                    )
+                    self.delta_heads = nn.ModuleList(
+                        [nn.Linear(hidden_dim // 2, len(DELTA_TARGET_NAMES)) for _ in range(self.alias_type_bucket_size)]
+                    )
+                elif self.alias_branch_mode == "moe":
+                    self.anchor_experts = nn.ModuleList(
+                        [nn.Linear(hidden_dim // 2, len(ANCHOR_TARGET_NAMES)) for _ in range(self.alias_branch_experts)]
+                    )
+                    self.delta_experts = nn.ModuleList(
+                        [nn.Linear(hidden_dim // 2, len(DELTA_TARGET_NAMES)) for _ in range(self.alias_branch_experts)]
+                    )
+                    self.gate_head = nn.Linear(hidden_dim // 2, self.alias_branch_experts)
+                else:
+                    self.anchor_head = nn.Linear(hidden_dim // 2, len(ANCHOR_TARGET_NAMES))
+                    self.delta_head = nn.Linear(hidden_dim // 2, len(DELTA_TARGET_NAMES))
             else:
-                self.anchor_head = None
-                self.delta_head = nn.Linear(hidden_dim // 2, len(TARGET_NAMES))
+                if self.alias_branch_mode == "shared_heads" and self.alias_type_bucket_size > 0:
+                    self.delta_heads = nn.ModuleList(
+                        [nn.Linear(hidden_dim // 2, len(TARGET_NAMES)) for _ in range(self.alias_type_bucket_size)]
+                    )
+                elif self.alias_branch_mode == "moe":
+                    self.delta_experts = nn.ModuleList(
+                        [nn.Linear(hidden_dim // 2, len(TARGET_NAMES)) for _ in range(self.alias_branch_experts)]
+                    )
+                    self.gate_head = nn.Linear(hidden_dim // 2, self.alias_branch_experts)
+                else:
+                    self.delta_head = nn.Linear(hidden_dim // 2, len(TARGET_NAMES))
             self.conf_head = nn.Sequential(nn.Linear(hidden_dim // 2, 1), nn.Sigmoid())
             self.aux_dim = int(aux_dim)
             if self.aux_dim > 0:
@@ -373,6 +518,57 @@ def _build_model_rawmel(
                 parts.append(embedding(idx))
             return torch.cat(parts, dim=1)
 
+        def _alias_indices(self, z, cat_idx):
+            if (
+                cat_idx is None
+                or self.alias_type_cat_index < 0
+                or self.alias_type_cat_index >= int(cat_idx.shape[1])
+            ):
+                return torch.zeros((int(z.shape[0]),), dtype=torch.long, device=z.device)
+            idx = cat_idx[:, self.alias_type_cat_index].long()
+            if self.alias_type_bucket_size > 0:
+                idx = idx.clamp(min=0, max=self.alias_type_bucket_size - 1)
+            if self.alias_fallback_ids:
+                mask = torch.zeros_like(idx, dtype=torch.bool)
+                for fallback_id in self.alias_fallback_ids:
+                    mask |= (idx == int(fallback_id))
+                idx = torch.where(mask, torch.zeros_like(idx), idx)
+            return idx
+
+        def _select_shared_heads(self, z, heads, cat_idx):
+            if heads is None or len(heads) <= 0:
+                return torch.zeros((int(z.shape[0]), 0), dtype=z.dtype, device=z.device)
+            stacked = torch.stack([head(z) for head in heads], dim=1)
+            idx = self._alias_indices(z, cat_idx)
+            dim = int(stacked.shape[2])
+            gather_idx = idx.view(-1, 1, 1).expand(-1, 1, dim)
+            return torch.gather(stacked, 1, gather_idx).squeeze(1)
+
+        def _select_moe(self, z, experts):
+            if experts is None or len(experts) <= 0:
+                return torch.zeros((int(z.shape[0]), 0), dtype=z.dtype, device=z.device)
+            stacked = torch.stack([head(z) for head in experts], dim=1)
+            gate_logits = self.gate_head(z)
+            gate = torch.softmax(gate_logits, dim=1).unsqueeze(-1)
+            return torch.sum(stacked * gate, dim=1)
+
+        def _predict_heads(self, z, cat_idx):
+            if self.head_mode == "split":
+                if self.alias_branch_mode == "shared_heads" and self.anchor_heads is not None and self.delta_heads is not None:
+                    anchor = self._select_shared_heads(z, self.anchor_heads, cat_idx)
+                    delta = self._select_shared_heads(z, self.delta_heads, cat_idx)
+                    return anchor, delta
+                if self.alias_branch_mode == "moe" and self.anchor_experts is not None and self.delta_experts is not None:
+                    anchor = self._select_moe(z, self.anchor_experts)
+                    delta = self._select_moe(z, self.delta_experts)
+                    return anchor, delta
+                return self.anchor_head(z), self.delta_head(z)
+            if self.alias_branch_mode == "shared_heads" and self.delta_heads is not None:
+                return self._select_shared_heads(z, self.delta_heads, cat_idx)
+            if self.alias_branch_mode == "moe" and self.delta_experts is not None:
+                return self._select_moe(z, self.delta_experts)
+            return self.delta_head(z)
+
         def forward(self, x, patch, onset, tail, cat_idx=None):
             xf = self.feature_net(x)
             xp = self.patch_net(patch)
@@ -385,13 +581,12 @@ def _build_model_rawmel(
             z = self.joint(torch.cat(pieces, dim=1))
             conf = self.conf_head(z)
             if self.head_mode == "split":
-                anchor = self.anchor_head(z)
-                delta = self.delta_head(z)
+                anchor, delta = self._predict_heads(z, cat_idx)
                 if self.aux_head is not None:
                     aux = self.aux_head(z)
                     return anchor, delta, conf, aux
                 return anchor, delta, conf
-            deltas = self.delta_head(z)
+            deltas = self._predict_heads(z, cat_idx)
             if self.aux_head is not None:
                 aux = self.aux_head(z)
                 return deltas, conf, aux

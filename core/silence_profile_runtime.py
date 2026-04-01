@@ -20,6 +20,16 @@ DEFAULT_PROFILE: Dict[str, object] = {
         "score_scale": 1.0,
         "score_bias": 0.0,
         "fallback_boost": 0.0,
+        # 2-stage gate: blank risk pass 이후 voiced 승인 조건.
+        "voiced_gate_enable": True,
+        "voiced_conf_min": 0.56,
+        "voiced_rms_min": 0.18,
+        "voiced_f0_continuity_min": 0.16,
+        # RMS 저에너지 구간에서는 F0 검출이 있어도 blank 판정을 우선한다.
+        "rms_low_priority_floor": 0.26,
+        "rms_low_priority_f0_min": 0.08,
+        "rms_low_priority_boost": 0.34,
+        "rms_low_voiced_penalty_scale_min": 0.25,
     },
     "mel": {
         "threshold": 0.42,
@@ -258,6 +268,38 @@ def _apply_env_overrides(profile: Dict[str, object]) -> Dict[str, object]:
     blank["fallback_boost"] = _env_float(
         "UTOA_ML_BLANK_FALLBACK_BOOST",
         _to_float(blank.get("fallback_boost"), 0.0),
+    )
+    blank["voiced_gate_enable"] = _env_flag(
+        "UTOA_ML_TWO_STAGE_VOICED_GATE_ENABLE",
+        bool(blank.get("voiced_gate_enable", True)),
+    )
+    blank["voiced_conf_min"] = _env_float(
+        "UTOA_ML_TWO_STAGE_VOICED_CONF_MIN",
+        _to_float(blank.get("voiced_conf_min"), 0.56),
+    )
+    blank["voiced_rms_min"] = _env_float(
+        "UTOA_ML_TWO_STAGE_VOICED_RMS_MIN",
+        _to_float(blank.get("voiced_rms_min"), 0.18),
+    )
+    blank["voiced_f0_continuity_min"] = _env_float(
+        "UTOA_ML_TWO_STAGE_VOICED_F0_CONTINUITY_MIN",
+        _to_float(blank.get("voiced_f0_continuity_min"), 0.16),
+    )
+    blank["rms_low_priority_floor"] = _env_float(
+        "UTOA_ML_BLANK_RMS_LOW_PRIORITY_FLOOR",
+        _to_float(blank.get("rms_low_priority_floor"), 0.26),
+    )
+    blank["rms_low_priority_f0_min"] = _env_float(
+        "UTOA_ML_BLANK_RMS_LOW_PRIORITY_F0_MIN",
+        _to_float(blank.get("rms_low_priority_f0_min"), 0.08),
+    )
+    blank["rms_low_priority_boost"] = _env_float(
+        "UTOA_ML_BLANK_RMS_LOW_PRIORITY_BOOST",
+        _to_float(blank.get("rms_low_priority_boost"), 0.34),
+    )
+    blank["rms_low_voiced_penalty_scale_min"] = _env_float(
+        "UTOA_ML_BLANK_RMS_LOW_VOICED_PENALTY_SCALE_MIN",
+        _to_float(blank.get("rms_low_voiced_penalty_scale_min"), 0.25),
     )
 
     mel["threshold"] = _env_float("UTOA_ML_MEL_UNRELIABLE_THRESHOLD", _to_float(mel.get("threshold"), 0.42))

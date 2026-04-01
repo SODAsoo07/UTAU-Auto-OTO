@@ -709,6 +709,12 @@ class LayoutMixin:
                 self._sync_vc_correction_toggle()
             if hasattr(self, "_sync_cvn_correction_toggle"):
                 self._sync_cvn_correction_toggle()
+            if hasattr(self, "_sync_ml_correction_ui"):
+                self._sync_ml_correction_ui()
+            if hasattr(self, "_sync_mapping_supervised_ui"):
+                self._sync_mapping_supervised_ui()
+            if hasattr(self, "_sync_ml_e2e_controls"):
+                self._sync_ml_e2e_controls()
             if hasattr(self, "_sync_advanced_tuning_slider_controls"):
                 self._sync_advanced_tuning_slider_controls()
             if hasattr(self, "_refresh_ml_backend_status"):
@@ -1362,8 +1368,115 @@ class LayoutMixin:
                 widget.configure(state="normal" if enabled else "disabled")
             except Exception:
                 pass
+        if hasattr(self, "_sync_ml_correction_ui"):
+            self._sync_ml_correction_ui()
+        if hasattr(self, "_sync_mapping_supervised_ui"):
+            self._sync_mapping_supervised_ui()
+        if hasattr(self, "_sync_ml_e2e_controls"):
+            self._sync_ml_e2e_controls()
         if hasattr(self, "_sync_vc_correction_toggle"):
             self._sync_vc_correction_toggle()
+
+    def _set_suboption_container_enabled(self, container, enabled: bool):
+        if container is None:
+            return
+        muted_text_color = "#AEB7C6"
+        default_text_color = PALETTE.neutral_text
+        stack = [container]
+        visited = set()
+        while stack:
+            widget = stack.pop()
+            if widget is None:
+                continue
+            marker = id(widget)
+            if marker in visited:
+                continue
+            visited.add(marker)
+            try:
+                children = list(widget.winfo_children())
+            except Exception:
+                children = []
+            stack.extend(children)
+            try:
+                widget.configure(state="normal" if enabled else "disabled")
+            except Exception:
+                pass
+            try:
+                current_text_color = widget.cget("text_color")
+            except Exception:
+                continue
+            try:
+                if not hasattr(widget, "_utoa_enabled_text_color"):
+                    base_color = current_text_color
+                    if base_color in (None, "", "transparent"):
+                        base_color = default_text_color
+                    setattr(widget, "_utoa_enabled_text_color", base_color)
+                base_color = getattr(widget, "_utoa_enabled_text_color", default_text_color)
+                widget.configure(text_color=base_color if enabled else muted_text_color)
+            except Exception:
+                pass
+
+    def _sync_ml_correction_ui(self):
+        enabled = (
+            bool(self.enable_ml_correction_var.get())
+            if hasattr(self, "enable_ml_correction_var")
+            else True
+        )
+        for container in (
+            getattr(self, "advanced_dev_runtime_controls_frame", None),
+            getattr(self, "advanced_ml_section_frame", None),
+            getattr(self, "advanced_ml_public_frame", None),
+        ):
+            self._set_suboption_container_enabled(container, enabled)
+
+    def _on_enable_ml_correction_toggle(self):
+        if hasattr(self, "_sync_ml_correction_ui"):
+            self._sync_ml_correction_ui()
+        if hasattr(self, "_sync_mapping_supervised_ui"):
+            self._sync_mapping_supervised_ui()
+        if hasattr(self, "_sync_ml_e2e_controls"):
+            self._sync_ml_e2e_controls()
+        self._save_config()
+
+    def _sync_mapping_supervised_ui(self):
+        enabled = (
+            bool(self.mapping_supervised_enable_var.get())
+            if hasattr(self, "mapping_supervised_enable_var")
+            else True
+        )
+        ml_master_enabled = (
+            bool(self.enable_ml_correction_var.get())
+            if hasattr(self, "enable_ml_correction_var")
+            else True
+        )
+        enabled = bool(enabled and ml_master_enabled)
+        for frame in getattr(self, "mapping_supervised_dependent_frames", []):
+            self._set_suboption_container_enabled(frame, enabled)
+
+    def _on_mapping_supervised_toggle(self):
+        if hasattr(self, "_sync_mapping_supervised_ui"):
+            self._sync_mapping_supervised_ui()
+        self._save_config()
+
+    def _sync_ml_e2e_controls(self):
+        e2e_enabled = (
+            bool(self.ml_e2e_enable_var.get())
+            if hasattr(self, "ml_e2e_enable_var")
+            else False
+        )
+        ml_master_enabled = (
+            bool(self.enable_ml_correction_var.get())
+            if hasattr(self, "enable_ml_correction_var")
+            else True
+        )
+        enabled = bool(e2e_enabled and ml_master_enabled)
+        for frame in getattr(self, "ml_e2e_dependent_frames", []):
+            self._set_suboption_container_enabled(frame, enabled)
+
+    def _on_ml_e2e_toggle(self):
+        if hasattr(self, "_sync_ml_e2e_controls"):
+            self._sync_ml_e2e_controls()
+        self._save_config()
 
     def _sync_vc_correction_toggle(self):
         if not hasattr(self, "vc_correction_enable_var"):
@@ -1384,6 +1497,18 @@ class LayoutMixin:
             else True
         )
         self.vc_correction_enable_var.set(bool(continuity_enabled and kr_enabled and ja_enabled))
+        developer_enabled = (
+            bool(self.developer_mode_enabled_var.get())
+            if hasattr(self, "developer_mode_enabled_var")
+            else False
+        )
+        frame_by_lang = getattr(self, "vc_neighbor_detail_frame_by_lang", None)
+        if isinstance(frame_by_lang, dict) and frame_by_lang:
+            self._set_suboption_container_enabled(frame_by_lang.get("kr"), bool(developer_enabled and kr_enabled))
+            self._set_suboption_container_enabled(frame_by_lang.get("ja"), bool(developer_enabled and ja_enabled))
+        else:
+            for frame in getattr(self, "vc_neighbor_detail_frames", []):
+                self._set_suboption_container_enabled(frame, developer_enabled)
         if hasattr(self, "_sync_cvn_correction_toggle"):
             self._sync_cvn_correction_toggle()
 
@@ -1395,10 +1520,7 @@ class LayoutMixin:
         )
         checkbox = getattr(self, "cvn_low_conf_only_checkbox", None)
         if checkbox is not None:
-            try:
-                checkbox.configure(state="normal" if enabled else "disabled")
-            except Exception:
-                pass
+            self._set_suboption_container_enabled(checkbox, enabled)
         if not enabled and hasattr(self, "cvn_low_conf_only_var"):
             try:
                 self.cvn_low_conf_only_var.set(False)

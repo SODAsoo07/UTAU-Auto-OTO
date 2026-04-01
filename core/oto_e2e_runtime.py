@@ -267,14 +267,19 @@ def resolve_e2e_model_dir(language: str, format_type: str) -> str:
                 return picked
 
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for candidate in (
-        os.path.join(project_root, "assets", "models", "oto_e2e", lang, "general"),
-        os.path.join(project_root, "assets", "models", "oto_e2e", lang, fmt),
-        os.path.join(project_root, "assets", "models", "oto_e2e", lang, "cv"),
-    ):
-        picked = _pick_latest_model_dir(candidate)
-        if picked:
-            return picked
+    default_roots = (
+        os.path.join(project_root, "models", "oto_e2e"),
+        os.path.join(project_root, "assets", "models", "oto_e2e"),
+    )
+    for root in default_roots:
+        for candidate in (
+            os.path.join(root, lang, "general"),
+            os.path.join(root, lang, fmt),
+            os.path.join(root, lang, "cv"),
+        ):
+            picked = _pick_latest_model_dir(candidate)
+            if picked:
+                return picked
     return ""
 
 
@@ -295,12 +300,17 @@ def resolve_e2e_alias_model_root(language: str, format_type: str) -> str:
         return _norm_path_key(shared)
 
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for candidate in (
-        os.path.join(project_root, "assets", "models", "oto_e2e", lang, "by_alias"),
-        os.path.join(project_root, "assets", "models", "oto_e2e", lang, fmt, "by_alias"),
-    ):
-        if os.path.isdir(candidate):
-            return _norm_path_key(candidate)
+    default_roots = (
+        os.path.join(project_root, "models", "oto_e2e"),
+        os.path.join(project_root, "assets", "models", "oto_e2e"),
+    )
+    for root in default_roots:
+        for candidate in (
+            os.path.join(root, lang, "by_alias"),
+            os.path.join(root, lang, fmt, "by_alias"),
+        ):
+            if os.path.isdir(candidate):
+                return _norm_path_key(candidate)
     return ""
 
 
