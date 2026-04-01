@@ -55,6 +55,25 @@ _VOICED_ONSETS = {
 }
 _SONORANT_ONSETS = {"m", "my", "n", "ny", "r", "ry", "w", "y", "l", "ly"}
 _JP_NASAL_G_ONSETS = {"g", "gy", "gw"}
+_PLOSIVE_ONSETS = {
+    "k",
+    "ky",
+    "g",
+    "gy",
+    "gw",
+    "t",
+    "d",
+    "ts",
+    "dz",
+    "ch",
+    "j",
+    "p",
+    "py",
+    "b",
+    "by",
+    "q",
+    "c",
+}
 
 
 def _emit(callback, message: str) -> None:
@@ -121,6 +140,18 @@ def _profile_int(profile: Dict[str, object], key: str, default: int) -> int:
         return int(float(profile.get(key, default)))
     except Exception:
         return int(default)
+
+
+def _profile_bool(profile: Dict[str, object], key: str, default: bool) -> bool:
+    raw = profile.get(key, default)
+    if isinstance(raw, bool):
+        return bool(raw)
+    text = str(raw or "").strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
 
 
 def _seq_cvn_enabled() -> bool:
@@ -327,6 +358,109 @@ def _build_frame_voicing_mask(
     )
 
 
+def _build_ap_sp_mask(
+    rms: np.ndarray,
+    *,
+    silence_threshold: float,
+    zcr: np.ndarray | None = None,
+    hf_ratio: np.ndarray | None = None,
+    flux: np.ndarray | None = None,
+    min_run_frames: int = 2,
+    max_gap_frames: int = 1,
+) -> np.ndarray:
+    r = np.asarray(rms, dtype=np.float32).reshape(-1)
+    n = int(r.size)
+    if n <= 0:
+        return np.zeros((0,), dtype=bool)
+    if zcr is None or hf_ratio is None or flux is None:
+        return np.zeros((n,), dtype=bool)
+
+    z = np.asarray(zcr, dtype=np.float32).reshape(-1)
+    h = np.asarray(hf_ratio, dtype=np.float32).reshape(-1)
+    f = np.asarray(flux, dtype=np.float32).reshape(-1)
+    if z.size != n or h.size != n or f.size != n:
+        return np.zeros((n,), dtype=bool)
+
+    sil = float(max(1e-7, silence_threshold))
+    z_hi = float(np.quantile(z, 0.68))
+    h_hi = float(np.quantile(h, 0.66))
+    f_mid = float(np.quantile(f, 0.55))
+
+    ap = np.zeros((n,), dtype=bool)
+    for i in range(n):
+        hard_sil = bool(r[i] <= sil * 0.78)
+        low_energy = bool(r[i] <= sil * 1.10)
+        breath_like = bool(
+            low_energy
+            and z[i] >= z_hi * 0.90
+            and h[i] >= h_hi * 0.86
+            and f[i] >= f_mid * 0.92
+        )
+        ap[i] = bool(hard_sil or breath_like)
+
+    # Fill tiny gaps in AP/SP regions.
+    gap = max(0, int(max_gap_frames))
+    if gap > 0 and n >= 3:
+        i = 0
+        while i < n:
+            if ap[i]:
+                i += 1
+                continue
+            s = i
+            while i < n and (not ap[i]):
+                i += 1
+            e = i
+            if s > 0 and e < n and ap[s - 1] and ap[e] and (e - s) <= gap:
+                ap[s:e] = True
+
+    # Remove tiny blips.
+    min_run = max(1, int(min_run_frames))
+    if min_run > 1:
+        i = 0
+        while i < n:
+            if not ap[i]:
+                i += 1
+                continue
+            s = i
+            while i < n and ap[i]:
+                i += 1
+            e = i
+            if (e - s) < min_run:
+                ap[s:e] = False
+
+    return ap
+
+
+def _inject_ap_labels(
+    labels: Sequence[str],
+    *,
+    ap_mask: np.ndarray | None,
+    rms: np.ndarray,
+    silence_threshold: float,
+) -> List[str]:
+    out = [str(x or "").strip().lower() for x in (labels or [])]
+    if ap_mask is None:
+        return out
+    ap = np.asarray(ap_mask, dtype=bool).reshape(-1)
+    r = np.asarray(rms, dtype=np.float32).reshape(-1)
+    n = len(out)
+    if ap.size != n or r.size != n:
+        return out
+
+    sil = float(max(1e-7, silence_threshold))
+    for i in range(n):
+        if not bool(ap[i]):
+            continue
+        cur = out[i]
+        if cur in {"unvoiced_onset", "voiced_onset"}:
+            continue
+        if float(r[i]) <= sil * 0.82:
+            out[i] = "sil"
+        else:
+            out[i] = "breath"
+    return out
+
+
 def _split_ascii_tokens(text: str) -> List[str]:
     return [m.group(0).lower() for m in _ASCII_TOKEN_RE.finditer(str(text or ""))]
 
@@ -388,19 +522,23 @@ def _normalize_transcript_words(language: str, raw_text: str) -> List[str]:
     return [w for w in out if w and w not in _PAUSE_MARKERS]
 
 
-def _load_transcript_words(wav_path: str, language: str) -> Tuple[List[str], str]:
+def _filename_words_for_wav(wav_path: str, language: str) -> List[str]:
     wav_abs = os.path.abspath(str(wav_path or "").strip())
     base = os.path.splitext(os.path.basename(wav_abs))[0]
-    lab_path = os.path.splitext(wav_abs)[0] + ".lab"
     lang = str(language or "").strip().lower()
-
     if lang == "japanese":
         filename_words = _normalize_japanese_token(base)
     elif lang == "korean":
         filename_words = _normalize_korean_token(base)
     else:
         filename_words = _split_ascii_tokens(base)
-    filename_words = [w for w in filename_words if w and w not in _PAUSE_MARKERS]
+    return [w for w in filename_words if w and w not in _PAUSE_MARKERS]
+
+
+def _load_transcript_words(wav_path: str, language: str) -> Tuple[List[str], str]:
+    wav_abs = os.path.abspath(str(wav_path or "").strip())
+    lab_path = os.path.splitext(wav_abs)[0] + ".lab"
+    filename_words = _filename_words_for_wav(wav_abs, language)
 
     if os.path.isfile(lab_path):
         content, _enc, err = read_text_auto(lab_path)
@@ -1049,6 +1187,7 @@ def _insert_internal_pause_rows(
     zcr: np.ndarray | None = None,
     hf_ratio: np.ndarray | None = None,
     flux: np.ndarray | None = None,
+    ap_mask: np.ndarray | None = None,
     hop_sec: float,
     silence_threshold: float,
     min_pause_ms: float = 20.0,
@@ -1090,6 +1229,8 @@ def _insert_internal_pause_rows(
         z_mid = float(np.quantile(z, 0.52))
     else:
         z_hi = h_hi = f_hi = z_mid = 0.0
+    ap = np.asarray(ap_mask, dtype=bool).reshape(-1) if ap_mask is not None else np.zeros((0,), dtype=bool)
+    has_ap = bool(ap.size == n)
 
     def _looks_unvoiced_like(idx: int) -> bool:
         if (not has_spec) or idx < 0 or idx >= n:
@@ -1110,6 +1251,8 @@ def _insert_internal_pause_rows(
     def _is_pause_frame(idx: int) -> bool:
         if idx < 0 or idx >= n:
             return False
+        if has_ap and bool(ap[idx]):
+            return True
         lb = label_seq[idx]
         if lb in silence_like:
             return True
@@ -1230,6 +1373,42 @@ def _insert_internal_pause_rows(
     return _sanitize_rows(updated, duration_sec=float(duration_sec), filler_mark="spn", merge_same_mark=False)
 
 
+def _apply_uniform_boundary_advance(
+    word_rows: Sequence[Tuple[float, float, str]],
+    *,
+    duration_sec: float,
+    advance_ms: float,
+    min_side_ms: float = 8.0,
+) -> List[Tuple[float, float, str]]:
+    rows = [(float(s), float(e), str(m or "")) for s, e, m in (word_rows or [])]
+    if len(rows) <= 1:
+        return rows
+    adv = float(max(0.0, advance_ms)) / 1000.0
+    if adv <= 1e-7:
+        return rows
+
+    min_side_sec = max(0.004, float(min_side_ms) / 1000.0)
+    updated = list(rows)
+    for i in range(len(updated) - 1):
+        left_start, left_end, left_mark = updated[i]
+        right_start, right_end, right_mark = updated[i + 1]
+        if right_end <= left_start + (min_side_sec * 2.0):
+            continue
+        if str(left_mark).strip().lower() in _PAUSE_MARKERS or str(right_mark).strip().lower() in _PAUSE_MARKERS:
+            continue
+        cur_boundary = float(left_end)
+        low = float(left_start) + min_side_sec
+        high = float(right_end) - min_side_sec
+        if high <= low:
+            continue
+        new_boundary = min(high, max(low, cur_boundary - adv))
+        if abs(new_boundary - cur_boundary) < 1e-7:
+            continue
+        updated[i] = (float(left_start), float(new_boundary), left_mark)
+        updated[i + 1] = (max(float(right_start), float(new_boundary)), float(right_end), right_mark)
+    return _sanitize_rows(updated, duration_sec=float(duration_sec), filler_mark="spn", merge_same_mark=False)
+
+
 def _refine_word_boundaries_with_onset_cues(
     word_rows: Sequence[Tuple[float, float, str]],
     *,
@@ -1246,6 +1425,13 @@ def _refine_word_boundaries_with_onset_cues(
     search_ms: float = 42.0,
     drift_guard_level: int = 1,
     drift_guard_max_shift_ms: float = 28.0,
+    onset_snap_right_bias: float = 0.0008,
+    plosive_onset_lookback_ms: float = 56.0,
+    plosive_left_bias_ms: float = 4.0,
+    filename_soft_lock: bool = False,
+    soft_lock_conf_threshold: float = 0.46,
+    soft_lock_max_shift_ms: float = 22.0,
+    soft_lock_release_run: int = 3,
     cvn_c_prob: np.ndarray | None = None,
     cvn_assist_mix: float = 0.55,
 ) -> List[Tuple[float, float, str]]:
@@ -1290,6 +1476,129 @@ def _refine_word_boundaries_with_onset_cues(
         1,
         int(round((max(2.0, float(drift_guard_max_shift_ms)) / 1000.0) / max(float(hop_sec), 1e-4))),
     )
+    plosive_lookback_frames = max(
+        1,
+        int(round((max(6.0, float(plosive_onset_lookback_ms)) / 1000.0) / max(float(hop_sec), 1e-4))),
+    )
+    plosive_left_bias_frames = max(
+        0,
+        int(round((max(0.0, float(plosive_left_bias_ms)) / 1000.0) / max(float(hop_sec), 1e-4))),
+    )
+    onset_snap_right_bias = float(np.clip(float(onset_snap_right_bias), -0.004, 0.004))
+    soft_lock_enabled = bool(filename_soft_lock and has_label_seq)
+    soft_lock_conf_threshold = float(np.clip(float(soft_lock_conf_threshold), 0.05, 0.95))
+    soft_lock_max_shift_frames = max(
+        1,
+        int(round((max(4.0, float(soft_lock_max_shift_ms)) / 1000.0) / max(float(hop_sec), 1e-4))),
+    )
+    soft_lock_release_run = max(1, int(soft_lock_release_run))
+    base_boundaries = [float(row[1]) for row in rows[:-1]]
+    soft_lock_active = bool(soft_lock_enabled)
+    soft_lock_mismatch_run = 0
+
+    def _boundary_confidence_idx(
+        idx: int,
+        *,
+        right_bucket: str,
+        left_limit: int,
+        right_limit: int,
+    ) -> float:
+        i0 = max(0, min(n - 1, int(idx)))
+        w0 = max(left_limit, i0 - 2)
+        w1 = min(right_limit, i0 + 2)
+        if w1 < w0:
+            w0, w1 = i0, i0
+        onset_labels = {"unvoiced_onset", "voiced_onset"}
+        onset_hit = 0.0
+        if has_label_seq:
+            onset_hit = 1.0 if any(label_seq[t] in onset_labels for t in range(w0, w1 + 1)) else 0.0
+
+        spec_peak = max(
+            float(np.max(z[w0 : w1 + 1]) / max(z_hi, 1e-6)) if w1 >= w0 else 0.0,
+            float(np.max(h[w0 : w1 + 1]) / max(h_mid, 1e-6)) if w1 >= w0 else 0.0,
+            float(np.max(f[w0 : w1 + 1]) / max(f_mid, 1e-6)) if w1 >= w0 else 0.0,
+        )
+        spec_score = float(np.clip(spec_peak / 1.35, 0.0, 1.0))
+        prev_idx = max(0, i0 - 1)
+        next_idx = min(n - 1, i0 + 1)
+        local_ref = max(1e-6, float(np.median(r[w0 : w1 + 1])) if w1 >= w0 else float(r[i0]))
+        rise = float(r[next_idx] - r[prev_idx])
+        rise_score = float(np.clip(rise / max(0.001, local_ref * 0.12), 0.0, 1.0))
+        if has_cvn:
+            cvn_score = float(np.clip(float(np.max(cvn[w0 : w1 + 1])) if w1 >= w0 else float(cvn[i0]), 0.0, 1.0))
+        else:
+            cvn_score = onset_hit
+
+        conf = (
+            0.34 * onset_hit
+            + 0.28 * spec_score
+            + 0.18 * rise_score
+            + 0.20 * cvn_score
+        )
+        if right_bucket == "voiceless":
+            conf += 0.10 * onset_hit + 0.08 * cvn_score
+        elif right_bucket == "voiced":
+            conf += 0.05 * cvn_score
+        if r[i0] <= float(silence_threshold) * 0.94 and spec_score < 0.35:
+            conf *= 0.82
+        return float(np.clip(conf, 0.0, 1.0))
+
+    def _apply_boundary_candidate(
+        i: int,
+        *,
+        left_start: float,
+        right_end: float,
+        left_mark: str,
+        right_mark: str,
+        left_limit: int,
+        right_limit: int,
+        right_bucket: str,
+        new_boundary: float,
+    ) -> Tuple[bool, float, int]:
+        nonlocal soft_lock_active, soft_lock_mismatch_run
+
+        candidate = float(new_boundary)
+        candidate = min(float(right_end) - min_side_sec, max(float(left_start) + min_side_sec, candidate))
+        if candidate <= float(left_start) + min_side_sec or candidate >= float(right_end) - min_side_sec:
+            return False, float(left_start), max(0, min(n - 2, int(np.floor(float(left_start) / float(hop_sec)))))
+
+        cand_idx = int(np.floor(candidate / float(hop_sec)))
+        cand_idx = max(0, min(n - 2, cand_idx))
+
+        if soft_lock_active:
+            conf = _boundary_confidence_idx(
+                cand_idx,
+                right_bucket=right_bucket,
+                left_limit=left_limit,
+                right_limit=right_limit,
+            )
+            if conf < soft_lock_conf_threshold and i < len(base_boundaries):
+                anchor_idx = int(np.floor(float(base_boundaries[i]) / float(hop_sec)))
+                anchor_idx = max(0, min(n - 2, anchor_idx))
+                lo_idx = max(left_limit, anchor_idx - soft_lock_max_shift_frames)
+                hi_idx = min(right_limit, anchor_idx + soft_lock_max_shift_frames)
+                if lo_idx <= hi_idx:
+                    clamped_idx = min(hi_idx, max(lo_idx, cand_idx))
+                    if clamped_idx != cand_idx:
+                        soft_lock_mismatch_run += 1
+                        if soft_lock_mismatch_run >= soft_lock_release_run:
+                            soft_lock_active = False
+                            soft_lock_mismatch_run = 0
+                        else:
+                            cand_idx = clamped_idx
+                    else:
+                        soft_lock_mismatch_run = 0
+            else:
+                soft_lock_mismatch_run = 0
+
+        candidate = float(cand_idx) * float(hop_sec)
+        candidate = min(float(right_end) - min_side_sec, max(float(left_start) + min_side_sec, candidate))
+        if candidate <= float(left_start) + min_side_sec or candidate >= float(right_end) - min_side_sec:
+            return False, float(left_start), max(0, min(n - 2, int(np.floor(float(left_start) / float(hop_sec)))))
+
+        updated[i] = (float(left_start), float(candidate), left_mark)
+        updated[i + 1] = (float(candidate), float(right_end), right_mark)
+        return True, float(candidate), int(max(0, min(n - 2, np.floor(float(candidate) / float(hop_sec)))))
 
     updated = list(rows)
     for i in range(len(updated) - 1):
@@ -1305,6 +1614,7 @@ def _refine_word_boundaries_with_onset_cues(
 
         right_onset = _token_onset(language, str(right_mark))
         right_bucket = _onset_bucket(right_onset)
+        is_plosive_onset = _is_plosive_onset(right_onset)
         is_h_family = bool(right_onset in {"h", "hy", "f"})
         is_sonorant_onset = bool(right_bucket == "sonorant")
         is_nasalized_g_onset = bool(
@@ -1324,7 +1634,7 @@ def _refine_word_boundaries_with_onset_cues(
         # Drift guard:
         # If boundary lands inside a decaying vowel tail (low novelty, low rise),
         # move boundary right by the continuation run to avoid cumulative early shift.
-        if has_label_seq and guard_level > 0:
+        if has_label_seq and guard_level > 0 and (not is_plosive_onset):
             cont_labels = {"tail", "stable_vowel", "vowel_transition"}
             max_t = min(right_limit, boundary_idx + search_frames)
             cont_run = 0
@@ -1372,13 +1682,22 @@ def _refine_word_boundaries_with_onset_cues(
                     max(float(left_start) + min_side_sec, drift_boundary),
                 )
                 if float(left_start) + min_side_sec < drift_boundary < float(right_end) - min_side_sec:
-                    updated[i] = (float(left_start), float(drift_boundary), left_mark)
-                    updated[i + 1] = (float(drift_boundary), float(right_end), right_mark)
-                    left_end = float(drift_boundary)
-                    boundary_idx = int(np.floor(float(drift_boundary) / float(hop_sec)))
-                    boundary_idx = max(0, min(n - 2, boundary_idx))
+                    moved, left_end_new, boundary_idx_new = _apply_boundary_candidate(
+                        i,
+                        left_start=float(left_start),
+                        right_end=float(right_end),
+                        left_mark=left_mark,
+                        right_mark=right_mark,
+                        left_limit=left_limit,
+                        right_limit=right_limit,
+                        right_bucket=right_bucket,
+                        new_boundary=float(drift_boundary),
+                    )
+                    if moved:
+                        left_end = float(left_end_new)
+                        boundary_idx = int(boundary_idx_new)
 
-        if guard_level >= 2:
+        if guard_level >= 2 and (not is_plosive_onset):
             # Tail guard:
             # If the right side still looks like decaying continuation (not a real onset),
             # delay boundary to the first reliable onset cue to avoid early drift.
@@ -1422,11 +1741,20 @@ def _refine_word_boundaries_with_onset_cues(
                         max(float(left_start) + min_side_sec, delayed_boundary),
                     )
                     if float(left_start) + min_side_sec < delayed_boundary < float(right_end) - min_side_sec:
-                        updated[i] = (float(left_start), float(delayed_boundary), left_mark)
-                        updated[i + 1] = (float(delayed_boundary), float(right_end), right_mark)
-                        left_end = float(delayed_boundary)
-                        boundary_idx = int(np.floor(float(delayed_boundary) / float(hop_sec)))
-                        boundary_idx = max(0, min(n - 2, boundary_idx))
+                        moved, left_end_new, boundary_idx_new = _apply_boundary_candidate(
+                            i,
+                            left_start=float(left_start),
+                            right_end=float(right_end),
+                            left_mark=left_mark,
+                            right_mark=right_mark,
+                            left_limit=left_limit,
+                            right_limit=right_limit,
+                            right_bucket=right_bucket,
+                            new_boundary=float(delayed_boundary),
+                        )
+                        if moved:
+                            left_end = float(left_end_new)
+                            boundary_idx = int(boundary_idx_new)
 
         # For voiceless CV onset, snap boundary to the start of unvoiced onset
         # so previous vowel does not swallow the consonant span.
@@ -1466,11 +1794,89 @@ def _refine_word_boundaries_with_onset_cues(
                             max(float(left_start) + min_side_sec, new_boundary),
                         )
                         if float(left_start) + min_side_sec < new_boundary < float(right_end) - min_side_sec:
-                            updated[i] = (float(left_start), float(new_boundary), left_mark)
-                            updated[i + 1] = (float(new_boundary), float(right_end), right_mark)
-                            left_end = float(new_boundary)
-                            boundary_idx = int(np.floor(float(new_boundary) / float(hop_sec)))
-                            boundary_idx = max(0, min(n - 2, boundary_idx))
+                            moved, left_end_new, boundary_idx_new = _apply_boundary_candidate(
+                                i,
+                                left_start=float(left_start),
+                                right_end=float(right_end),
+                                left_mark=left_mark,
+                                right_mark=right_mark,
+                                left_limit=left_limit,
+                                right_limit=right_limit,
+                                right_bucket=right_bucket,
+                                new_boundary=float(new_boundary),
+                            )
+                            if moved:
+                                left_end = float(left_end_new)
+                                boundary_idx = int(boundary_idx_new)
+
+        # Plosive CV onset:
+        # pull boundary slightly earlier to closure/burst onset so the previous vowel
+        # does not absorb the next syllable's consonant.
+        if is_plosive_onset and has_label_seq:
+            pre_frames = max(search_frames, plosive_lookback_frames)
+            post_frames = max(1, int(round((float(search_ms) * 0.70 / 1000.0) / max(float(hop_sec), 1e-4))))
+            scan_start = max(left_limit, boundary_idx - pre_frames)
+            scan_end = min(right_limit, boundary_idx + post_frames)
+            if scan_end > scan_start:
+                lookahead = max(2, int(round(0.028 / max(float(hop_sec), 1e-4))))
+                onset_labels = {"unvoiced_onset", "voiced_onset"}
+                candidates: List[int] = []
+                cvn_thr = max(0.52, cvn_hi * 0.92)
+                for k in range(scan_start, scan_end + 1):
+                    onset_like = bool(label_seq[k] in onset_labels)
+                    cvn_onset_like = bool(has_cvn and cvn[k] >= cvn_thr)
+                    burst_like = bool(
+                        f[k] >= f_mid * 0.97
+                        or z[k] >= z_hi * 0.93
+                        or h[k] >= h_mid * 1.06
+                    )
+                    if not (onset_like or cvn_onset_like or burst_like):
+                        continue
+                    if k > scan_start:
+                        prev_onset_like = bool(label_seq[k - 1] in onset_labels)
+                        prev_cvn_onset_like = bool(has_cvn and cvn[k - 1] >= cvn_thr)
+                        if prev_onset_like or prev_cvn_onset_like:
+                            continue
+                    tail = min(n - 1, k + lookahead)
+                    has_vowel_like = any(
+                        label_seq[t] in {"vowel_transition", "stable_vowel", "tail"}
+                        for t in range(k, tail + 1)
+                    )
+                    if (not has_vowel_like) and has_cvn:
+                        has_vowel_like = bool(np.min(cvn[k : tail + 1]) <= max(0.44, cvn_v * 1.08))
+                    if not has_vowel_like:
+                        continue
+                    candidates.append(k)
+                if candidates:
+                    target_idx = max(scan_start, boundary_idx - plosive_left_bias_frames)
+                    best_k = min(
+                        candidates,
+                        key=lambda k: (
+                            0 if k <= boundary_idx else 1,
+                            abs(int(k) - int(target_idx)),
+                            abs(int(k) - int(boundary_idx)),
+                        ),
+                    )
+                    plosive_boundary = float(best_k) * float(hop_sec)
+                    plosive_boundary = min(
+                        float(right_end) - min_side_sec,
+                        max(float(left_start) + min_side_sec, plosive_boundary),
+                    )
+                    if float(left_start) + min_side_sec < plosive_boundary < float(right_end) - min_side_sec:
+                        moved, left_end_new, boundary_idx_new = _apply_boundary_candidate(
+                            i,
+                            left_start=float(left_start),
+                            right_end=float(right_end),
+                            left_mark=left_mark,
+                            right_mark=right_mark,
+                            left_limit=left_limit,
+                            right_limit=right_limit,
+                            right_bucket=right_bucket,
+                            new_boundary=float(plosive_boundary),
+                        )
+                        if moved:
+                            left_end = float(left_end_new)
+                            boundary_idx = int(boundary_idx_new)
 
         # Legato vowel-vowel transition:
         # avoid onset-biased snapping and prefer a local spectral/energy valley near the prior boundary.
@@ -1505,9 +1911,19 @@ def _refine_word_boundaries_with_onset_cues(
                         max(float(left_start) + min_side_sec, vv_boundary),
                     )
                     if float(left_start) + min_side_sec < vv_boundary < float(right_end) - min_side_sec:
-                        updated[i] = (float(left_start), float(vv_boundary), left_mark)
-                        updated[i + 1] = (float(vv_boundary), float(right_end), right_mark)
-                        continue
+                        moved, _left_end_new, _boundary_idx_new = _apply_boundary_candidate(
+                            i,
+                            left_start=float(left_start),
+                            right_end=float(right_end),
+                            left_mark=left_mark,
+                            right_mark=right_mark,
+                            left_limit=left_limit,
+                            right_limit=right_limit,
+                            right_bucket=right_bucket,
+                            new_boundary=float(vv_boundary),
+                        )
+                        if moved:
+                            continue
 
         # h/f-like weak unvoiced onset:
         # detect a subtle fricative rise (zcr/hf) even when waveform is continuous.
@@ -1553,11 +1969,20 @@ def _refine_word_boundaries_with_onset_cues(
                         max(float(left_start) + min_side_sec, h_boundary),
                     )
                     if float(left_start) + min_side_sec < h_boundary < float(right_end) - min_side_sec:
-                        updated[i] = (float(left_start), float(h_boundary), left_mark)
-                        updated[i + 1] = (float(h_boundary), float(right_end), right_mark)
-                        left_end = float(h_boundary)
-                        boundary_idx = int(np.floor(float(h_boundary) / float(hop_sec)))
-                        boundary_idx = max(0, min(n - 2, boundary_idx))
+                        moved, left_end_new, boundary_idx_new = _apply_boundary_candidate(
+                            i,
+                            left_start=float(left_start),
+                            right_end=float(right_end),
+                            left_mark=left_mark,
+                            right_mark=right_mark,
+                            left_limit=left_limit,
+                            right_limit=right_limit,
+                            right_bucket=right_bucket,
+                            new_boundary=float(h_boundary),
+                        )
+                        if moved:
+                            left_end = float(left_end_new)
+                            boundary_idx = int(boundary_idx_new)
 
         # m/n-like sonorant onset (and JP nasalized g/gy):
         # prefer a local low-novelty valley near the current boundary.
@@ -1612,11 +2037,20 @@ def _refine_word_boundaries_with_onset_cues(
                         max(float(left_start) + min_side_sec, sn_boundary),
                     )
                     if float(left_start) + min_side_sec < sn_boundary < float(right_end) - min_side_sec:
-                        updated[i] = (float(left_start), float(sn_boundary), left_mark)
-                        updated[i + 1] = (float(sn_boundary), float(right_end), right_mark)
-                        left_end = float(sn_boundary)
-                        boundary_idx = int(np.floor(float(sn_boundary) / float(hop_sec)))
-                        boundary_idx = max(0, min(n - 2, boundary_idx))
+                        moved, left_end_new, boundary_idx_new = _apply_boundary_candidate(
+                            i,
+                            left_start=float(left_start),
+                            right_end=float(right_end),
+                            left_mark=left_mark,
+                            right_mark=right_mark,
+                            left_limit=left_limit,
+                            right_limit=right_limit,
+                            right_bucket=right_bucket,
+                            new_boundary=float(sn_boundary),
+                        )
+                        if moved:
+                            left_end = float(left_end_new)
+                            boundary_idx = int(boundary_idx_new)
 
         # If boundary lies in a low-energy valley, pull it right to onset region.
         if not (
@@ -1652,7 +2086,7 @@ def _refine_word_boundaries_with_onset_cues(
                 + 0.22 * float(z[k])
                 + 0.18 * float(h[k] >= h_mid)
                 + cvn_bonus
-                + 0.002 * float(k - boundary_idx)
+                + onset_snap_right_bias * float(k - boundary_idx)
             )
             if score > best_score:
                 best_score = score
@@ -1665,8 +2099,17 @@ def _refine_word_boundaries_with_onset_cues(
         if new_boundary <= float(left_start) + min_side_sec or new_boundary >= float(right_end) - min_side_sec:
             continue
 
-        updated[i] = (float(left_start), float(new_boundary), left_mark)
-        updated[i + 1] = (float(new_boundary), float(right_end), right_mark)
+        _apply_boundary_candidate(
+            i,
+            left_start=float(left_start),
+            right_end=float(right_end),
+            left_mark=left_mark,
+            right_mark=right_mark,
+            left_limit=left_limit,
+            right_limit=right_limit,
+            right_bucket=right_bucket,
+            new_boundary=float(new_boundary),
+        )
 
     return _sanitize_rows(updated, duration_sec=float(duration_sec), filler_mark="spn", merge_same_mark=False)
 
@@ -1714,6 +2157,10 @@ def _token_onset(language: str, token: str) -> str:
     if len(parts) >= 2:
         return str(parts[0] or "").strip().lower()
     return ""
+
+
+def _is_plosive_onset(onset: str) -> bool:
+    return str(onset or "").strip().lower() in _PLOSIVE_ONSETS
 
 
 def _is_vowel_only_token(language: str, token: str) -> bool:
@@ -1877,6 +2324,12 @@ def _write_textgrid(
     for start, end, mark in word_rows:
         word_tier.add(max(0.0, float(start)), max(float(start), float(end)), str(mark or "").strip())
     tg.append(word_tier)
+
+    # Metadata tier used by downstream OTO mapping to auto-detect sequence aligner output.
+    meta_max_t = max(float(max_t), 0.001)
+    meta_tier = textgrid_mod.IntervalTier(name="utoa_meta", minTime=0.0, maxTime=meta_max_t)
+    meta_tier.add(0.0, meta_max_t, "aligner=sequence")
+    tg.append(meta_tier)
 
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     tg.write(path)
@@ -2057,6 +2510,30 @@ def run_sequence_align(
         min_value=4.0,
         max_value=90.0,
     )
+    onset_snap_right_bias = _env_float(
+        "UTOA_SEQUENCE_ALIGN_ONSET_SNAP_RIGHT_BIAS",
+        _profile_float(profile, "onset_snap_right_bias", 0.0008),
+        min_value=-0.004,
+        max_value=0.004,
+    )
+    plosive_onset_lookback_ms = _env_float(
+        "UTOA_SEQUENCE_ALIGN_PLOSIVE_ONSET_LOOKBACK_MS",
+        _profile_float(profile, "plosive_onset_lookback_ms", 56.0),
+        min_value=6.0,
+        max_value=220.0,
+    )
+    plosive_left_bias_ms = _env_float(
+        "UTOA_SEQUENCE_ALIGN_PLOSIVE_LEFT_BIAS_MS",
+        _profile_float(profile, "plosive_left_bias_ms", 4.0),
+        min_value=0.0,
+        max_value=24.0,
+    )
+    boundary_advance_ms = _env_float(
+        "UTOA_SEQUENCE_ALIGN_BOUNDARY_ADVANCE_MS",
+        _profile_float(profile, "boundary_advance_ms", 0.0),
+        min_value=0.0,
+        max_value=20.0,
+    )
     pause_min_ms = _env_float(
         "UTOA_SEQUENCE_ALIGN_PAUSE_MIN_MS",
         _profile_float(profile, "pause_min_ms", 20.0),
@@ -2086,6 +2563,44 @@ def run_sequence_align(
         _profile_float(profile, "pause_unvoiced_guard_scale", 0.62),
         min_value=0.45,
         max_value=0.95,
+    )
+    ap_detect_enable = _env_bool(
+        "UTOA_SEQUENCE_ALIGN_AP_DETECT_ENABLE",
+        default=_profile_bool(profile, "ap_detect_enable", True),
+    )
+    ap_min_run_ms = _env_float(
+        "UTOA_SEQUENCE_ALIGN_AP_MIN_RUN_MS",
+        _profile_float(profile, "ap_min_run_ms", 12.0),
+        min_value=2.0,
+        max_value=120.0,
+    )
+    ap_max_gap_ms = _env_float(
+        "UTOA_SEQUENCE_ALIGN_AP_MAX_GAP_MS",
+        _profile_float(profile, "ap_max_gap_ms", 6.0),
+        min_value=0.0,
+        max_value=48.0,
+    )
+    filename_soft_lock_enable = _env_bool(
+        "UTOA_SEQUENCE_ALIGN_FILENAME_SOFT_LOCK_ENABLE",
+        default=_profile_bool(profile, "filename_soft_lock_enable", True),
+    )
+    filename_soft_lock_conf_threshold = _env_float(
+        "UTOA_SEQUENCE_ALIGN_FILENAME_SOFT_LOCK_CONF_TH",
+        _profile_float(profile, "filename_soft_lock_conf_threshold", 0.46),
+        min_value=0.05,
+        max_value=0.95,
+    )
+    filename_soft_lock_max_shift_ms = _env_float(
+        "UTOA_SEQUENCE_ALIGN_FILENAME_SOFT_LOCK_MAX_SHIFT_MS",
+        _profile_float(profile, "filename_soft_lock_max_shift_ms", 22.0),
+        min_value=4.0,
+        max_value=120.0,
+    )
+    filename_soft_lock_release_run = _env_int(
+        "UTOA_SEQUENCE_ALIGN_FILENAME_SOFT_LOCK_RELEASE_RUN",
+        _profile_int(profile, "filename_soft_lock_release_run", 3),
+        min_value=1,
+        max_value=8,
     )
     cvn_assist_mix = _env_float(
         "UTOA_SEQUENCE_CVN_ASSIST_MIX",
@@ -2135,6 +2650,7 @@ def run_sequence_align(
             if not words:
                 words = ["spn"]
                 source = "fallback"
+            filename_words = _filename_words_for_wav(wav_path, lang)
             token_count = max(1, len(words))
             local_min_active_ratio = float(min_active_ratio)
             local_max_active_ratio = float(max_active_ratio)
@@ -2204,6 +2720,17 @@ def run_sequence_align(
                 flux=flux,
                 lookback_frames=max(1, int(round((float(onset_lookback_ms) / 1000.0) / max(hop_sec, 1e-4)))),
             )
+            ap_mask = None
+            if bool(ap_detect_enable):
+                ap_mask = _build_ap_sp_mask(
+                    rms,
+                    silence_threshold=float(silence_threshold),
+                    zcr=zcr,
+                    hf_ratio=hf_ratio,
+                    flux=flux,
+                    min_run_frames=max(1, int(round((float(ap_min_run_ms) / 1000.0) / max(hop_sec, 1e-4)))),
+                    max_gap_frames=max(0, int(round((float(ap_max_gap_ms) / 1000.0) / max(hop_sec, 1e-4)))),
+                )
             labels = _estimate_sequence_labels(
                 rms,
                 silence_threshold=silence_threshold,
@@ -2211,6 +2738,12 @@ def run_sequence_align(
                 zcr=zcr,
                 hf_ratio=hf_ratio,
                 flux=flux,
+            )
+            labels = _inject_ap_labels(
+                labels,
+                ap_mask=ap_mask,
+                rms=rms,
+                silence_threshold=float(silence_threshold),
             )
             cvn_c_prob, cvn_backend = _compute_sequence_cvn_consonant_prob(
                 wav_path=wav_path,
@@ -2233,6 +2766,15 @@ def run_sequence_align(
                 hop_sec=hop_sec,
                 min_span_ms=min_span_ms,
             )
+            soft_lock_ready = False
+            if bool(filename_soft_lock_enable) and filename_words and len(words) >= 2:
+                common = min(len(words), len(filename_words))
+                match_count = sum(
+                    1 for idx in range(common)
+                    if str(words[idx] or "").strip().lower() == str(filename_words[idx] or "").strip().lower()
+                )
+                order_match_ratio = float(match_count) / float(max(common, 1))
+                soft_lock_ready = bool(source == "filename" or order_match_ratio >= 0.70)
             word_rows = _refine_word_boundaries_with_onset_cues(
                 word_rows,
                 duration_sec=duration_sec,
@@ -2246,6 +2788,13 @@ def run_sequence_align(
                 silence_threshold=float(silence_threshold),
                 drift_guard_level=int(drift_guard_level),
                 drift_guard_max_shift_ms=float(drift_guard_max_shift_ms),
+                onset_snap_right_bias=float(onset_snap_right_bias),
+                plosive_onset_lookback_ms=float(plosive_onset_lookback_ms),
+                plosive_left_bias_ms=float(plosive_left_bias_ms),
+                filename_soft_lock=bool(soft_lock_ready),
+                soft_lock_conf_threshold=float(filename_soft_lock_conf_threshold),
+                soft_lock_max_shift_ms=float(filename_soft_lock_max_shift_ms),
+                soft_lock_release_run=int(filename_soft_lock_release_run),
                 cvn_c_prob=cvn_c_prob,
                 cvn_assist_mix=float(cvn_assist_mix),
             )
@@ -2257,6 +2806,7 @@ def run_sequence_align(
                 zcr=zcr,
                 hf_ratio=hf_ratio,
                 flux=flux,
+                ap_mask=ap_mask,
                 hop_sec=hop_sec,
                 silence_threshold=float(silence_threshold),
                 min_pause_ms=float(pause_min_ms),
@@ -2264,6 +2814,11 @@ def run_sequence_align(
                 energy_pause_scale=float(pause_energy_scale),
                 hard_silence_scale=float(pause_hard_silence_scale),
                 unvoiced_guard_scale=float(pause_unvoiced_guard_scale),
+            )
+            word_rows = _apply_uniform_boundary_advance(
+                word_rows,
+                duration_sec=duration_sec,
+                advance_ms=float(boundary_advance_ms),
             )
             phone_rows = _build_phone_rows(
                 word_rows,
@@ -2286,7 +2841,8 @@ def run_sequence_align(
             dist = _label_distribution(labels)
             _emit(
                 callback,
-                f"[SEQ] aligned file={wav_name} words={len(words)} source={source} stable={dist.get('stable_vowel', 0)} cvn={cvn_backend}",
+                f"[SEQ] aligned file={wav_name} words={len(words)} source={source} stable={dist.get('stable_vowel', 0)} cvn={cvn_backend}"
+                f" lock={'on' if soft_lock_ready else 'off'}",
             )
             ok_count += 1
         except Exception as exc:

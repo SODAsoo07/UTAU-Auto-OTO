@@ -10,7 +10,10 @@ if ROOT not in sys.path:
 
 from core.pipeline_status import ALIGN_NOT_READY
 from core.sequence_aligner import (
+    _apply_uniform_boundary_advance,
+    _build_ap_sp_mask,
     _build_frame_voicing_mask,
+    _inject_ap_labels,
     _insert_internal_pause_rows,
     _prepare_analysis_signal,
     _refine_word_boundaries_with_onset_cues,
@@ -101,6 +104,56 @@ def test_build_frame_voicing_mask_respects_consonant_cues():
     )
     assert bool(mask[3])
     assert bool(mask[2])
+
+
+def test_build_ap_sp_mask_detects_low_energy_breath_band():
+    n = 64
+    rms = np.full((n,), 0.08, dtype=np.float32)
+    zcr = np.full((n,), 0.04, dtype=np.float32)
+    hf = np.full((n,), 0.05, dtype=np.float32)
+    flux = np.full((n,), 0.04, dtype=np.float32)
+    rms[28:34] = 0.016
+    zcr[28:34] = 0.25
+    hf[28:34] = 0.31
+    flux[28:34] = 0.22
+    ap = _build_ap_sp_mask(
+        rms,
+        silence_threshold=0.02,
+        zcr=zcr,
+        hf_ratio=hf,
+        flux=flux,
+        min_run_frames=2,
+        max_gap_frames=1,
+    )
+    assert bool(np.any(ap[28:34]))
+
+
+def test_inject_ap_labels_overrides_to_breath_or_sil():
+    labels = ["stable_vowel"] * 8
+    rms = np.array([0.03, 0.03, 0.015, 0.021, 0.03, 0.03, 0.03, 0.03], dtype=np.float32)
+    ap = np.array([False, False, True, True, False, False, False, False], dtype=bool)
+    out = _inject_ap_labels(
+        labels,
+        ap_mask=ap,
+        rms=rms,
+        silence_threshold=0.02,
+    )
+    assert out[2] == "sil"
+    assert out[3] == "breath"
+
+
+def test_apply_uniform_boundary_advance_moves_non_pause_boundary_left():
+    rows = [
+        (0.00, 0.50, "a"),
+        (0.50, 1.00, "ka"),
+    ]
+    updated = _apply_uniform_boundary_advance(
+        rows,
+        duration_sec=1.0,
+        advance_ms=5.0,
+    )
+    assert float(updated[0][1]) < 0.50
+    assert float(updated[1][0]) < 0.50
 
 
 def test_check_sequence_ready_rejects_unsupported_language(tmp_path):
@@ -345,3 +398,124 @@ def test_refine_voiceless_onset_uses_cvn_candidates():
     assert base_boundary >= 0.495
     assert cvn_boundary < base_boundary
     assert cvn_boundary <= 0.495
+
+
+def test_refine_plosive_onset_bias_pulls_boundary_earlier():
+    rows = [
+        (0.00, 0.50, "a"),
+        (0.50, 1.00, "ka"),
+    ]
+    n = 200
+    hop = 0.005
+    rms = np.full((n,), 0.10, dtype=np.float32)
+    zcr = np.full((n,), 0.07, dtype=np.float32)
+    hf = np.full((n,), 0.10, dtype=np.float32)
+    flux = np.full((n,), 0.08, dtype=np.float32)
+    labels = ["stable_vowel"] * n
+    for idx in range(95, 100):
+        labels[idx] = "unvoiced_onset"
+
+    refined = _refine_word_boundaries_with_onset_cues(
+        rows,
+        duration_sec=1.0,
+        rms=rms,
+        zcr=zcr,
+        hf_ratio=hf,
+        flux=flux,
+        labels=labels,
+        language="japanese",
+        hop_sec=hop,
+        silence_threshold=0.04,
+        plosive_onset_lookback_ms=42.0,
+        plosive_left_bias_ms=8.0,
+    )
+    boundary = float(refined[0][1])
+    assert boundary <= 0.490
+
+
+def test_refine_voiced_plosive_onset_is_shifted_left():
+    rows = [
+        (0.00, 0.50, "a"),
+        (0.50, 1.00, "ga"),
+    ]
+    n = 200
+    hop = 0.005
+    rms = np.full((n,), 0.11, dtype=np.float32)
+    zcr = np.full((n,), 0.06, dtype=np.float32)
+    hf = np.full((n,), 0.09, dtype=np.float32)
+    flux = np.full((n,), 0.07, dtype=np.float32)
+    labels = ["stable_vowel"] * n
+    for idx in range(96, 100):
+        labels[idx] = "voiced_onset"
+    labels[100:106] = ["vowel_transition"] * 6
+
+    refined = _refine_word_boundaries_with_onset_cues(
+        rows,
+        duration_sec=1.0,
+        rms=rms,
+        zcr=zcr,
+        hf_ratio=hf,
+        flux=flux,
+        labels=labels,
+        language="japanese",
+        hop_sec=hop,
+        silence_threshold=0.04,
+        plosive_onset_lookback_ms=42.0,
+        plosive_left_bias_ms=8.0,
+    )
+    boundary = float(refined[0][1])
+    assert boundary < 0.500
+
+
+def test_refine_filename_soft_lock_clamps_low_conf_shift():
+    rows = [
+        (0.00, 0.50, "a"),
+        (0.50, 1.00, "ga"),
+    ]
+    n = 200
+    hop = 0.01
+    rms = np.full((n,), 0.08, dtype=np.float32)
+    zcr = np.full((n,), 0.01, dtype=np.float32)
+    hf = np.full((n,), 0.01, dtype=np.float32)
+    flux = np.full((n,), 0.01, dtype=np.float32)
+    labels = ["stable_vowel"] * n
+    rms[50:53] = 0.018
+    rms[54] = 0.030
+    rms[55] = 0.040
+    zcr[54] = 0.02
+    hf[54] = 0.02
+    flux[54] = 0.02
+
+    refined_free = _refine_word_boundaries_with_onset_cues(
+        rows,
+        duration_sec=1.0,
+        rms=rms,
+        zcr=zcr,
+        hf_ratio=hf,
+        flux=flux,
+        labels=labels,
+        language="japanese",
+        hop_sec=hop,
+        silence_threshold=0.02,
+        filename_soft_lock=False,
+    )
+    refined_locked = _refine_word_boundaries_with_onset_cues(
+        rows,
+        duration_sec=1.0,
+        rms=rms,
+        zcr=zcr,
+        hf_ratio=hf,
+        flux=flux,
+        labels=labels,
+        language="japanese",
+        hop_sec=hop,
+        silence_threshold=0.02,
+        filename_soft_lock=True,
+        soft_lock_conf_threshold=0.90,
+        soft_lock_max_shift_ms=10.0,
+        soft_lock_release_run=3,
+    )
+    free_boundary = float(refined_free[0][1])
+    lock_boundary = float(refined_locked[0][1])
+    assert free_boundary >= 0.53
+    assert lock_boundary <= 0.51

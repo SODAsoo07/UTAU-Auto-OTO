@@ -118,6 +118,18 @@ from core.ja_anchor_lock_v2 import (
     build_ja_anchor_lock_stats_delta as _build_ja_anchor_lock_stats_delta_v2,
     retune_ja_anchor_profile as _retune_ja_anchor_profile_v2,
 )
+from core.generation.file_stages import (
+    handle_ja_file_context_status,
+    handle_ja_loop_prep_status,
+    load_named_tiers_for_generation,
+    prepare_file_context_with_sinsy,
+)
+from core.generation.plan_runtime import (
+    build_common_plan_context,
+    extract_ja_alignment_ingest_state,
+    recompute_common_plan_runtime_state,
+    update_single_vowel_span_by_first_phone,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2895,63 +2907,56 @@ def generate_ja_oto(
             return str(path or "")
 
     for fname, lines in file_groups.items():
-        file_ctx = prepare_file_context(
+        file_ctx = prepare_file_context_with_sinsy(
             fname=fname,
             lines=lines,
-            resolve_tg_info_fn=_resolve_tg_info,
-            missing_diagnostics_fn=_textgrid_missing_diagnostics,
-            wav_root_for_signal=wav_root_for_signal,
-            wav_index_for_signal=wav_index_for_signal,
-            mel_cache_for_signal=mel_cache_for_signal,
-            find_wav_path_fn=_find_wav_path_for_name,
-            read_wav_fn=_read_wav_mono_np,
-            mel_envelope_fn=_mel_envelope,
-            wav_duration_fn=_wav_duration_ms,
+            prepare_file_context_fn=prepare_file_context,
+            prepare_kwargs={
+                "resolve_tg_info_fn": _resolve_tg_info,
+                "missing_diagnostics_fn": _textgrid_missing_diagnostics,
+                "wav_root_for_signal": wav_root_for_signal,
+                "wav_index_for_signal": wav_index_for_signal,
+                "mel_cache_for_signal": mel_cache_for_signal,
+                "find_wav_path_fn": _find_wav_path_for_name,
+                "read_wav_fn": _read_wav_mono_np,
+                "mel_envelope_fn": _mel_envelope,
+                "wav_duration_fn": _wav_duration_ms,
+            },
+            use_sinsy_labels=bool(use_sinsy_labels),
+            load_sinsy_label_entries_fn=load_sinsy_label_entries,
+            sinsy_label_path=sinsy_label_path,
         )
-        file_ctx.sinsy_label_entries = []
-        file_ctx.sinsy_label_path = ""
-        if use_sinsy_labels:
-            try:
-                file_ctx.sinsy_label_entries = load_sinsy_label_entries(
-                    tg_path=file_ctx.tg_path,
-                    real_wav_name=file_ctx.real_wav_name,
-                    explicit_path=sinsy_label_path,
-                )
-                if file_ctx.sinsy_label_entries:
-                    file_ctx.sinsy_label_path = sinsy_label_path or ""
-            except Exception:
-                file_ctx.sinsy_label_entries = []
-                file_ctx.sinsy_label_path = ""
-
-        if file_ctx.status == "textgrid_missing":
-            miss_diag = file_ctx.diagnostics
-            log(
-                f"📝 {fname}: TextGrid 없음 → 원본 유지 "
-                f"(norm={miss_diag['lookup_norm']}, 후보={len(miss_diag['norm_candidates'])})"
-            )
-            if ja_mapping_debug_reason_logging:
-                for p in miss_diag.get("candidate_paths", [])[:3]:
-                    log(f"   ㄴ 후보 경로: {p}")
-            _record_unset_lines("textgrid_missing", fname, lines, meta=miss_diag)
-            final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
+        if handle_ja_file_context_status(
+            file_ctx=file_ctx,
+            fname=fname,
+            lines=lines,
+            final_lines=final_lines,
+            alias_suffix=alias_suffix,
+            log_fn=log,
+            record_unset_lines_fn=_record_unset_lines,
+            apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
+            debug_reason_logging=ja_mapping_debug_reason_logging,
+        ):
             processed += 1
             continue
 
-        file_ctx = load_named_tiers(
-            file_ctx,
+        file_ctx = load_named_tiers_for_generation(
+            file_ctx=file_ctx,
+            load_named_tiers_fn=load_named_tiers,
             load_textgrid_fn=textgrid.TextGrid.fromFile,
             tier_predicate=lambda _tier: True,
         )
-        if file_ctx.status == "textgrid_load_failed":
-            log(f"⚠️ {fname}: TextGrid 로드 실패 → 원본 유지 ({file_ctx.error_message})")
-            _record_unset_lines("textgrid_load_failed", fname, lines)
-            final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
-            processed += 1
-            continue
-        if file_ctx.status == "tier_missing":
-            log(f"⚠️ {fname}: phones 티어 없음 → 원본 유지")
-            _record_unset_lines("tier_missing", fname, lines)
-            final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
+        if handle_ja_file_context_status(
+            file_ctx=file_ctx,
+            fname=fname,
+            lines=lines,
+            final_lines=final_lines,
+            alias_suffix=alias_suffix,
+            log_fn=log,
+            record_unset_lines_fn=_record_unset_lines,
+            apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
+            debug_reason_logging=ja_mapping_debug_reason_logging,
+        ):
             processed += 1
             continue
 
@@ -2992,73 +2997,57 @@ def generate_ja_oto(
                 collect_phone_quality_fn=_collect_phone_tier_quality,
                 build_words_synth_phones_fn=_build_words_synth_phones,
                 resolve_conf_threshold_fn=_resolve_ja_mapping_conf_threshold,
+                alignment_source=str(getattr(file_ctx, "alignment_source", "") or ""),
+                alignment_source_reason=str(getattr(file_ctx, "alignment_source_reason", "") or ""),
+                alignment_source_meta=dict(getattr(file_ctx, "alignment_source_meta", {}) or {}),
             )
-            if loop_prep.status == "no_valid_alias":
-                log(f"⚠️ {fname}: 유효한 에일리어스가 없어 원본 유지")
-                _record_unset_lines("no_valid_alias", fname, lines)
-                final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
-                processed += 1
-                continue
-            if loop_prep.status == "empty_intervals":
-                low_quality_reasons = list(loop_prep.low_quality_reasons)
-                reason = "mapping_failed_empty_intervals"
-                if loop_prep.low_phone_quality and "spn_heavy" in low_quality_reasons:
-                    reason = "mapping_failed_spn_heavy"
-                elif loop_prep.low_phone_quality and any(r in {"insufficient_phones", "insufficient_vowel_phones"} for r in low_quality_reasons):
-                    reason = "mapping_failed_insufficient_phones"
-                if loop_prep.low_phone_quality and not loop_prep.wd_intervals:
-                    reason = "mapping_failed_no_words_support"
-                log(f"⚠️ {fname}: 음소 정보 없음 → 원본 유지")
-                _record_unset_lines(reason, fname, lines, meta=loop_prep.meta)
-                final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
+            if handle_ja_loop_prep_status(
+                loop_prep=loop_prep,
+                fname=fname,
+                lines=lines,
+                final_lines=final_lines,
+                alias_suffix=alias_suffix,
+                log_fn=log,
+                record_unset_lines_fn=_record_unset_lines,
+                apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
+            ):
                 processed += 1
                 continue
 
             alignment_ingest = build_ja_alignment_ingest(file_ctx, loop_prep)
-            wd_intervals = alignment_ingest.words
-            ph_intervals = alignment_ingest.phones
-            if len(ph_intervals) == 1:
-                try:
-                    one = ph_intervals[0]
-                    single_vowel_span_by_tg_path[_norm_tg_path_key(file_ctx.tg_path)] = (
-                        float(one.minTime) * 1000.0,
-                        float(one.maxTime) * 1000.0,
-                    )
-                except Exception:
-                    pass
-            filename_syllables = list(alignment_ingest.extra.get("filename_syllables") or [])
-            cv_targets = list(alignment_ingest.extra.get("cv_targets") or [])
-            sinsy_label_entries = list(alignment_ingest.extra.get("sinsy_label_entries") or [])
             from core.format_type_utils import normalize_format_type as _normalize_format_type
-
-            detected_format_raw = str(alignment_ingest.extra.get("detected_format") or "")
-            format_type_raw = str(alignment_ingest.extra.get("format_type") or "")
-            detected_format = _normalize_format_type("japanese", detected_format_raw)
-            format_type = _normalize_format_type("japanese", format_type_raw)
-            if format_type not in {"cv", "cvvc", "vcv", "vc_only", "br"}:
-                fallback_fmt = str(fallback_format or "").strip().lower()
-                if detected_format in {"cv", "cvvc", "vcv", "vc_only", "br"}:
-                    format_type = detected_format
-                elif fallback_fmt in {"cv", "cvvc", "vcv"}:
-                    format_type = fallback_fmt
-                else:
-                    format_type = "cvvc"
-            ja_style_profile = alignment_ingest.extra.get("ja_style_profile")
-            phone_quality = alignment_ingest.phone_quality
-            low_quality_reasons = alignment_ingest.low_quality_reasons
-            low_phone_quality = alignment_ingest.low_phone_quality
-            forced_words_mapping = bool(alignment_ingest.extra.get("forced_words_mapping"))
-            timeline_start_ms = float(alignment_ingest.timeline_meta.get("timeline_start_ms", 0.0) or 0.0)
-            effective_end_ms = float(alignment_ingest.timeline_meta.get("effective_end_ms", 0.0) or 0.0)
-            phone_spans_ms = list(alignment_ingest.timeline_meta.get("phone_spans_ms") or [])
-            conf_th = float(alignment_ingest.extra.get("conf_th", 0.0) or 0.0)
-            textgrid_trust_score = float(alignment_ingest.textgrid_trust_score or 0.0)
-            textgrid_trust_tier = str(alignment_ingest.textgrid_trust_tier or "low")
-            prefer_filename_sequence = bool(alignment_ingest.prefer_filename_sequence)
-            spn_ratio = float(phone_quality.get("spn_ratio_in_phone_tier", 0.0) or 0.0)
-            alignment_weight = _clamp01(textgrid_trust_score * 0.85)
-            if filename_syllables and alignment_weight < 0.55:
-                prefer_filename_sequence = True
+            ingest_state = extract_ja_alignment_ingest_state(
+                alignment_ingest=alignment_ingest,
+                fallback_format=fallback_format,
+                normalize_format_type_fn=_normalize_format_type,
+            )
+            wd_intervals = ingest_state["wd_intervals"]
+            ph_intervals = ingest_state["ph_intervals"]
+            update_single_vowel_span_by_first_phone(
+                phone_intervals=ph_intervals,
+                tg_path=file_ctx.tg_path,
+                single_vowel_span_by_tg_path=single_vowel_span_by_tg_path,
+                norm_tg_path_key_fn=_norm_tg_path_key,
+            )
+            filename_syllables = ingest_state["filename_syllables"]
+            cv_targets = ingest_state["cv_targets"]
+            sinsy_label_entries = ingest_state["sinsy_label_entries"]
+            detected_format = ingest_state["detected_format"]
+            format_type = ingest_state["format_type"]
+            ja_style_profile = ingest_state["ja_style_profile"]
+            phone_quality = ingest_state["phone_quality"]
+            low_quality_reasons = ingest_state["low_quality_reasons"]
+            low_phone_quality = ingest_state["low_phone_quality"]
+            forced_words_mapping = bool(ingest_state["forced_words_mapping"])
+            timeline_start_ms = float(ingest_state["timeline_start_ms"])
+            effective_end_ms = float(ingest_state["effective_end_ms"])
+            phone_spans_ms = list(ingest_state["phone_spans_ms"])
+            conf_th = float(ingest_state["conf_th"])
+            textgrid_trust_score = float(ingest_state["textgrid_trust_score"])
+            textgrid_trust_tier = str(ingest_state["textgrid_trust_tier"])
+            prefer_filename_sequence = bool(ingest_state["prefer_filename_sequence"])
+            spn_ratio = float(ingest_state["spn_ratio"])
+            alignment_weight = float(ingest_state["alignment_weight"])
 
             post_ctx = build_ja_postprocess_context(
                 phone_spans_ms=phone_spans_ms,
@@ -3361,52 +3350,45 @@ def generate_ja_oto(
                 )
 
             planned_cv_source = list(filename_syllables or cv_targets or [])
-            ja_cv_plan = {"indices": None, "meta": {}, "source": ""}
-            if planned_cv_source and sinsy_label_entries:
-                ja_cv_plan = build_sinsy_guided_anchor_plan(
-                    expected_tokens=planned_cv_source,
-                    syllables_info=syllables_info,
-                    label_entries=sinsy_label_entries,
-                    normalize_expected_fn=_normalize_ja_syllable_token,
-                    normalize_label_fn=_normalize_ja_syllable_token,
-                    label_match_score_fn=lambda target, label: float(int(_ja_soft_cv_match_level(target, label) or 0) * 42.0),
-                )
-            if not ja_cv_plan.get("indices"):
-                use_mel_plan = False
-                if (
+            def _should_enable_ja_mel_plan() -> bool:
+                if not (
                     format_type == "cvvc"
                     and mel_ctx_for_file
                     and syllables_info
                 ):
-                    if (
-                        textgrid_trust_tier != "high"
-                        or low_phone_quality
-                        or blank_conf_mean >= 0.45
-                        or alignment_weight < 0.65
-                    ):
-                        use_mel_plan = _env_bool("UTOA_JA_CVVC_MEL_PLAN", True)
-                    else:
-                        mean_conf, min_conf, low_ratio = _summarize_ja_syllable_confidences(
-                            syllable_confidence_by_idx
-                        )
-                        if min_conf < 0.54 or low_ratio > 0.30 or blank_conf_mean >= 0.45:
-                            use_mel_plan = _env_bool("UTOA_JA_CVVC_MEL_PLAN", True)
-                ja_cv_plan = _build_ja_cv_anchor_plan_v2(
-                    planned_cv_source,
-                    syllables_info,
-                    use_mel=bool(use_mel_plan),
-                    format_type=format_type,
-                ) if planned_cv_source else {"indices": None, "meta": {}}
-            ja_planned_cv_indices = ja_cv_plan.get("indices")
-            ja_anchor_graph = build_adjacent_anchor_graph(ja_planned_cv_indices)
-            ja_plan_policy = resolve_plan_policy(
-                alignment_trust=alignment_weight,
-                plan_meta=ja_cv_plan.get("meta"),
-                expected_count=len(planned_cv_source),
-                planned_count=len(ja_planned_cv_indices or []),
-                format_type=format_type,
-                prefer_sequence=prefer_filename_sequence,
-            )
+                    return False
+                if (
+                    textgrid_trust_tier != "high"
+                    or low_phone_quality
+                    or blank_conf_mean >= 0.45
+                    or alignment_weight < 0.65
+                ):
+                    return bool(_env_bool("UTOA_JA_CVVC_MEL_PLAN", True))
+                mean_conf, min_conf, low_ratio = _summarize_ja_syllable_confidences(
+                    syllable_confidence_by_idx
+                )
+                if min_conf < 0.54 or low_ratio > 0.30 or blank_conf_mean >= 0.45:
+                    return bool(_env_bool("UTOA_JA_CVVC_MEL_PLAN", True))
+                return False
+
+            ja_plan_context_kwargs = {
+                "planned_cv_source": planned_cv_source,
+                "syllables_info": syllables_info,
+                "sinsy_label_entries": sinsy_label_entries,
+                "format_type": format_type,
+                "alignment_weight": alignment_weight,
+                "prefer_sequence": prefer_filename_sequence,
+                "normalize_expected_fn": _normalize_ja_syllable_token,
+                "normalize_label_fn": _normalize_ja_syllable_token,
+                "label_match_score_fn": (
+                    lambda target, label: float(int(_ja_soft_cv_match_level(target, label) or 0) * 42.0)
+                ),
+                "should_enable_mel_plan_fn": _should_enable_ja_mel_plan,
+                "build_cv_anchor_plan_fn": _build_ja_cv_anchor_plan_v2,
+                "build_sinsy_guided_anchor_plan_fn": build_sinsy_guided_anchor_plan,
+                "build_adjacent_anchor_graph_fn": build_adjacent_anchor_graph,
+                "resolve_plan_policy_fn": resolve_plan_policy,
+            }
 
             alt_score = float(alias_candidate.get("score", -1.0)) if alias_candidate else (-1.0 if cv_targets else 0.0)
             if not cv_targets and base_score < 0.0:
@@ -3423,9 +3405,10 @@ def generate_ja_oto(
                 words_align_score=(selected_candidate.get("words_align_score") if selected_candidate else None),
                 words_tier_confidence=words_tier_confidence,
             )
-            runtime_policy = resolve_runtime_mapping_policy(
+            ja_runtime_state = recompute_common_plan_runtime_state(
+                build_plan_context_fn=build_common_plan_context,
+                plan_context_kwargs=ja_plan_context_kwargs,
                 ingest_snapshot=alignment_ingest,
-                plan_policy=ja_plan_policy,
                 mapping_confidence=mapping_confidence_base,
                 mapping_margin=mapping_margin,
                 conf_threshold=conf_th,
@@ -3436,7 +3419,15 @@ def generate_ja_oto(
                 abstain_formats={"cvvc", "vcv", "cv"},
                 prefer_sequence=prefer_filename_sequence,
                 alignment_trust=alignment_weight,
+                resolve_runtime_mapping_policy_fn=resolve_runtime_mapping_policy,
             )
+            ja_cv_plan = dict(ja_runtime_state.get("cv_plan") or {})
+            ja_planned_cv_indices = ja_runtime_state.get("planned_indices")
+            ja_anchor_graph = ja_runtime_state.get("anchor_graph")
+            ja_plan_policy = dict(ja_runtime_state.get("plan_policy") or {})
+            runtime_policy = dict(ja_runtime_state.get("runtime_policy") or {})
+            mapping_confidence_base = float(ja_runtime_state.get("mapping_confidence", mapping_confidence_base) or 0.0)
+            mapping_margin = float(ja_runtime_state.get("mapping_margin", mapping_margin) or 0.0)
             if sinsy_label_entries:
                 plan_source = str(ja_cv_plan.get("source") or "")
                 if plan_source != "sinsy_labels":
@@ -3500,55 +3491,49 @@ def generate_ja_oto(
                         words_align_score=selected_candidate.get("words_align_score"),
                         words_tier_confidence=words_tier_confidence,
                     )
-                    ja_cv_plan = {"indices": None, "meta": {}, "source": ""}
-                    if planned_cv_source and sinsy_label_entries:
-                        ja_cv_plan = build_sinsy_guided_anchor_plan(
-                            expected_tokens=planned_cv_source,
-                            syllables_info=syllables_info,
-                            label_entries=sinsy_label_entries,
-                            normalize_expected_fn=_normalize_ja_syllable_token,
-                            normalize_label_fn=_normalize_ja_syllable_token,
-                            label_match_score_fn=lambda target, label: float(int(_ja_soft_cv_match_level(target, label) or 0) * 42.0),
-                        )
-                    if not ja_cv_plan.get("indices"):
-                        use_mel_plan = False
-                        if (
+                    def _should_enable_ja_mel_plan_refit() -> bool:
+                        if not (
                             format_type == "cvvc"
                             and mel_ctx_for_file
                             and syllables_info
                         ):
-                            if (
-                                textgrid_trust_tier != "high"
-                                or low_phone_quality
-                                or blank_conf_mean >= 0.45
-                                or alignment_weight < 0.65
-                            ):
-                                use_mel_plan = _env_bool("UTOA_JA_CVVC_MEL_PLAN", True)
-                            else:
-                                mean_conf, min_conf, low_ratio = _summarize_ja_syllable_confidences(
-                                    syllable_confidence_by_idx
-                                )
-                                if min_conf < 0.54 or low_ratio > 0.30 or blank_conf_mean >= 0.45:
-                                    use_mel_plan = _env_bool("UTOA_JA_CVVC_MEL_PLAN", True)
-                        ja_cv_plan = _build_ja_cv_anchor_plan_v2(
-                            planned_cv_source,
-                            syllables_info,
-                            use_mel=bool(use_mel_plan),
-                            format_type=format_type,
-                        ) if planned_cv_source else {"indices": None, "meta": {}}
-                    ja_planned_cv_indices = ja_cv_plan.get("indices")
-                    ja_anchor_graph = build_adjacent_anchor_graph(ja_planned_cv_indices)
-                    ja_plan_policy = resolve_plan_policy(
-                        alignment_trust=alignment_weight,
-                        plan_meta=ja_cv_plan.get("meta"),
-                        expected_count=len(planned_cv_source),
-                        planned_count=len(ja_planned_cv_indices or []),
-                        format_type=format_type,
-                        prefer_sequence=True,
-                    )
-                    runtime_policy = resolve_runtime_mapping_policy(
+                            return False
+                        if (
+                            textgrid_trust_tier != "high"
+                            or low_phone_quality
+                            or blank_conf_mean >= 0.45
+                            or alignment_weight < 0.65
+                        ):
+                            return bool(_env_bool("UTOA_JA_CVVC_MEL_PLAN", True))
+                        mean_conf, min_conf, low_ratio = _summarize_ja_syllable_confidences(
+                            syllable_confidence_by_idx
+                        )
+                        if min_conf < 0.54 or low_ratio > 0.30 or blank_conf_mean >= 0.45:
+                            return bool(_env_bool("UTOA_JA_CVVC_MEL_PLAN", True))
+                        return False
+
+                    ja_refit_plan_context_kwargs = {
+                        "planned_cv_source": planned_cv_source,
+                        "syllables_info": syllables_info,
+                        "sinsy_label_entries": sinsy_label_entries,
+                        "format_type": format_type,
+                        "alignment_weight": alignment_weight,
+                        "prefer_sequence": True,
+                        "normalize_expected_fn": _normalize_ja_syllable_token,
+                        "normalize_label_fn": _normalize_ja_syllable_token,
+                        "label_match_score_fn": (
+                            lambda target, label: float(int(_ja_soft_cv_match_level(target, label) or 0) * 42.0)
+                        ),
+                        "should_enable_mel_plan_fn": _should_enable_ja_mel_plan_refit,
+                        "build_cv_anchor_plan_fn": _build_ja_cv_anchor_plan_v2,
+                        "build_sinsy_guided_anchor_plan_fn": build_sinsy_guided_anchor_plan,
+                        "build_adjacent_anchor_graph_fn": build_adjacent_anchor_graph,
+                        "resolve_plan_policy_fn": resolve_plan_policy,
+                    }
+                    ja_refit_runtime_state = recompute_common_plan_runtime_state(
+                        build_plan_context_fn=build_common_plan_context,
+                        plan_context_kwargs=ja_refit_plan_context_kwargs,
                         ingest_snapshot=alignment_ingest,
-                        plan_policy=ja_plan_policy,
                         mapping_confidence=mapping_confidence_base,
                         mapping_margin=mapping_margin,
                         conf_threshold=conf_th,
@@ -3559,7 +3544,17 @@ def generate_ja_oto(
                         abstain_formats={"cvvc", "vcv", "cv"},
                         prefer_sequence=True,
                         alignment_trust=alignment_weight,
+                        resolve_runtime_mapping_policy_fn=resolve_runtime_mapping_policy,
                     )
+                    ja_cv_plan = dict(ja_refit_runtime_state.get("cv_plan") or {})
+                    ja_planned_cv_indices = ja_refit_runtime_state.get("planned_indices")
+                    ja_anchor_graph = ja_refit_runtime_state.get("anchor_graph")
+                    ja_plan_policy = dict(ja_refit_runtime_state.get("plan_policy") or {})
+                    runtime_policy = dict(ja_refit_runtime_state.get("runtime_policy") or {})
+                    mapping_confidence_base = float(
+                        ja_refit_runtime_state.get("mapping_confidence", mapping_confidence_base) or 0.0
+                    )
+                    mapping_margin = float(ja_refit_runtime_state.get("mapping_margin", mapping_margin) or 0.0)
                     mapping_confidence_base = float(runtime_policy.get("mapping_confidence", mapping_confidence_base))
                     mapping_tier = str(runtime_policy.get("mapping_tier", "low"))
                     log(

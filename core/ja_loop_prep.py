@@ -33,6 +33,9 @@ class JaLoopPrepResult:
     textgrid_trust_score: float = 0.0
     textgrid_trust_tier: str = "low"
     prefer_filename_sequence: bool = False
+    alignment_source: str = ""
+    alignment_source_reason: str = ""
+    alignment_source_meta: dict[str, object] = field(default_factory=dict)
 
 
 def _estimate_ja_textgrid_trust(
@@ -108,6 +111,9 @@ def prepare_ja_loop_state(
     collect_phone_quality_fn: Callable[..., dict],
     build_words_synth_phones_fn: Callable[[list, list[str]], list],
     resolve_conf_threshold_fn: Callable[..., float],
+    alignment_source: str = "",
+    alignment_source_reason: str = "",
+    alignment_source_meta: dict[str, object] | None = None,
 ) -> JaLoopPrepResult:
     result = JaLoopPrepResult()
     silence_marks = {"", "sil", "spn", "pau", "sp"}
@@ -171,6 +177,9 @@ def prepare_ja_loop_state(
         wd_intervals=result.wd_intervals,
         format_type=result.format_type,
     )
+    result.alignment_source = str(alignment_source or "").strip().lower()
+    result.alignment_source_reason = str(alignment_source_reason or "").strip().lower()
+    result.alignment_source_meta = dict(alignment_source_meta or {})
     result.prefer_filename_sequence = bool(
         result.format_type in {"cvvc", "cv"}
         and result.filename_syllables
@@ -179,6 +188,13 @@ def prepare_ja_loop_state(
             or (result.textgrid_trust_tier == "mid" and result.low_phone_quality)
         )
     )
+    if result.alignment_source == "sequence" and result.format_type in {"cvvc", "cv"} and result.filename_syllables:
+        result.prefer_filename_sequence = True
+        if debug_reason_logging:
+            log_fn(
+                f"🧭 {fname}: sequence 정렬 TextGrid 감지 "
+                f"(reason={result.alignment_source_reason or 'unknown'}) → sequence 분기 사용"
+            )
 
     if (
         result.format_type in {"vcv", "cvvc", "cv"}

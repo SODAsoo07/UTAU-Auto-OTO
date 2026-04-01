@@ -175,6 +175,18 @@ from core.oto_mapping_policy import resolve_plan_policy
 from core.oto_row_abstain import decide_cv_row_abstain
 from core.oto_row_policy import apply_row_confidence_penalty
 from core.oto_runtime_policy import resolve_runtime_mapping_policy
+from core.generation.file_stages import (
+    handle_kr_file_context_status,
+    handle_kr_loop_prep_status,
+    load_named_tiers_for_generation,
+    prepare_file_context_with_sinsy,
+)
+from core.generation.plan_runtime import (
+    build_common_plan_context,
+    extract_kr_alignment_ingest_state,
+    recompute_common_plan_runtime_state,
+    update_single_vowel_span_by_first_phone,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -4813,67 +4825,59 @@ def generate_oto(
             return str(path or "")
 
     for fname, lines in file_groups.items():
-        file_ctx = prepare_file_context(
+        file_ctx = prepare_file_context_with_sinsy(
             fname=fname,
             lines=lines,
-            resolve_tg_info_fn=_resolve_tg_info,
-            wav_root_for_signal=wav_root_for_signal,
-            wav_index_for_signal=wav_index_for_signal,
-            mel_cache_for_signal=mel_cache_for_signal,
-            find_wav_path_fn=_find_wav_path_for_name,
-            read_wav_fn=_read_wav_mono_np,
-            mel_envelope_fn=_mel_envelope,
-            wav_duration_fn=_wav_duration_ms,
+            prepare_file_context_fn=prepare_file_context,
+            prepare_kwargs={
+                "resolve_tg_info_fn": _resolve_tg_info,
+                "wav_root_for_signal": wav_root_for_signal,
+                "wav_index_for_signal": wav_index_for_signal,
+                "mel_cache_for_signal": mel_cache_for_signal,
+                "find_wav_path_fn": _find_wav_path_for_name,
+                "read_wav_fn": _read_wav_mono_np,
+                "mel_envelope_fn": _mel_envelope,
+                "wav_duration_fn": _wav_duration_ms,
+            },
+            use_sinsy_labels=bool(use_sinsy_labels),
+            load_sinsy_label_entries_fn=load_sinsy_label_entries,
+            sinsy_label_path=sinsy_label_path,
         )
-        file_ctx.sinsy_label_entries = []
-        file_ctx.sinsy_label_path = ""
         output_wav_name = str(getattr(file_ctx, "output_wav_name", "") or "")
         if output_wav_name:
             wav_name_map.setdefault(fname, output_wav_name)
             if file_ctx.real_wav_name and file_ctx.real_wav_name != fname:
                 wav_name_map.setdefault(file_ctx.real_wav_name, output_wav_name)
-        if use_sinsy_labels:
-            try:
-                file_ctx.sinsy_label_entries = load_sinsy_label_entries(
-                    tg_path=file_ctx.tg_path,
-                    real_wav_name=file_ctx.real_wav_name,
-                    explicit_path=sinsy_label_path,
-                )
-                if file_ctx.sinsy_label_entries:
-                    file_ctx.sinsy_label_path = sinsy_label_path or ""
-            except Exception:
-                file_ctx.sinsy_label_entries = []
-                file_ctx.sinsy_label_path = ""
-
-        if file_ctx.status == "textgrid_missing":
-            log(f"[WARN] {fname}: TextGrid를 찾지 못해 해당 파일은 원본 행을 유지합니다.")
-            _record_unset_lines("textgrid_missing", fname, lines)
-            final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
+        if handle_kr_file_context_status(
+            file_ctx=file_ctx,
+            fname=fname,
+            lines=lines,
+            final_lines=final_lines,
+            alias_suffix=alias_suffix,
+            log_fn=log,
+            record_unset_lines_fn=_record_unset_lines,
+            apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
+        ):
             processed += 1
             continue
 
-        file_ctx = load_named_tiers(
-            file_ctx,
+        file_ctx = load_named_tiers_for_generation(
+            file_ctx=file_ctx,
+            load_named_tiers_fn=load_named_tiers,
             load_textgrid_fn=textgrid.TextGrid.fromFile,
             preloaded_tg_by_path=preloaded_tg_by_path if not use_template else None,
             tier_predicate=lambda tier: isinstance(tier, textgrid.IntervalTier),
         )
-        if file_ctx.status == "textgrid_load_failed":
-            log(f"[WARN] {fname}: TextGrid 로드 실패로 원본 행을 유지합니다. ({file_ctx.error_message})")
-            _record_unset_lines("textgrid_load_failed", fname, lines)
-            final_lines.extend([
-                apply_suffix_to_oto_line(l, alias_suffix)
-                for l in lines
-            ])
-            processed += 1
-            continue
-        if file_ctx.status == "tier_missing":
-            log(f"[WARN] {fname}: phones tier가 없어 원본 행을 유지합니다.")
-            _record_unset_lines("tier_missing", fname, lines)
-            final_lines.extend([
-                apply_suffix_to_oto_line(l, alias_suffix)
-                for l in lines
-            ])
+        if handle_kr_file_context_status(
+            file_ctx=file_ctx,
+            fname=fname,
+            lines=lines,
+            final_lines=final_lines,
+            alias_suffix=alias_suffix,
+            log_fn=log,
+            record_unset_lines_fn=_record_unset_lines,
+            apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
+        ):
             processed += 1
             continue
 
@@ -4923,58 +4927,47 @@ def generate_oto(
                 resolve_mapping_conf_threshold_fn=_resolve_kr_mapping_conf_threshold,
                 preferred_format=auto_gen_format,
             )
-            if loop_prep.status == "empty_intervals":
-                log(f"[WARN] {fname}: 유효한 음소 구간이 없어 원본 행을 유지합니다.")
-                _record_unset_lines("mapping_failed_empty_intervals", fname, lines)
-                final_lines.extend([
-                    apply_suffix_to_oto_line(l, alias_suffix)
-                    for l in lines
-                ])
-                processed += 1
-                continue
-            if loop_prep.status == "no_valid_alias":
-                log(f"[WARN] {fname}: 유효한 alias를 해석하지 못해 원본 행을 유지합니다.")
-                _record_unset_lines("no_valid_alias", fname, lines)
-                final_lines.extend([
-                    apply_suffix_to_oto_line(l, alias_suffix)
-                    for l in lines
-                ])
+            if handle_kr_loop_prep_status(
+                loop_prep=loop_prep,
+                fname=fname,
+                lines=lines,
+                final_lines=final_lines,
+                alias_suffix=alias_suffix,
+                log_fn=log,
+                record_unset_lines_fn=_record_unset_lines,
+                apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
+            ):
                 processed += 1
                 continue
 
             alignment_ingest = build_kr_alignment_ingest(file_ctx, loop_prep)
-            ph_intervals_all = alignment_ingest.phones_all
-            ph_intervals = alignment_ingest.phones
-            wd_intervals = alignment_ingest.words
-            if len(ph_intervals) == 1:
-                try:
-                    one = ph_intervals[0]
-                    single_vowel_span_by_tg_path[_norm_tg_path_key(file_ctx.tg_path)] = (
-                        float(one.minTime) * 1000.0,
-                        float(one.maxTime) * 1000.0,
-                    )
-                except Exception:
-                    pass
-            wav_duration_ms = float(alignment_ingest.wav_duration_ms or 0.0)
-            timeline_start_ms = float(alignment_ingest.timeline_meta.get("timeline_start_ms", 0.0) or 0.0)
-            timeline_end_ms = float(alignment_ingest.timeline_meta.get("timeline_end_ms", 0.0) or 0.0)
-            file_format = str(alignment_ingest.extra.get("file_format") or "")
-            file_mapping_conf_th = float(alignment_ingest.extra.get("file_mapping_conf_th", 0.0) or 0.0)
-            filename_cv_targets = list(alignment_ingest.extra.get("filename_cv_targets") or [])
-            targets_for_build = list(alignment_ingest.extra.get("targets_for_build") or [])
-            sinsy_label_entries = list(alignment_ingest.extra.get("sinsy_label_entries") or [])
-            phone_quality = alignment_ingest.phone_quality
-            low_quality_reasons = alignment_ingest.low_quality_reasons
-            low_phone_quality = alignment_ingest.low_phone_quality
-            force_words_phone_fill = bool(alignment_ingest.extra.get("force_words_phone_fill"))
-            textgrid_trust_score = float(alignment_ingest.textgrid_trust_score or 0.0)
-            textgrid_trust_tier = str(alignment_ingest.textgrid_trust_tier or "low")
-            prefer_filename_sequence = bool(alignment_ingest.prefer_filename_sequence)
-            spn_ratio = float(phone_quality.get("spn_ratio_in_phone_tier", 0.0))
-            alignment_weight = max(0.0, min(1.0, textgrid_trust_score * 0.85))
-            if filename_cv_targets and alignment_weight < 0.55:
-                prefer_filename_sequence = True
-                targets_for_build = list(filename_cv_targets)
+            ingest_state = extract_kr_alignment_ingest_state(alignment_ingest=alignment_ingest)
+            ph_intervals_all = ingest_state["ph_intervals_all"]
+            ph_intervals = ingest_state["ph_intervals"]
+            wd_intervals = ingest_state["wd_intervals"]
+            update_single_vowel_span_by_first_phone(
+                phone_intervals=ph_intervals,
+                tg_path=file_ctx.tg_path,
+                single_vowel_span_by_tg_path=single_vowel_span_by_tg_path,
+                norm_tg_path_key_fn=_norm_tg_path_key,
+            )
+            wav_duration_ms = float(ingest_state["wav_duration_ms"])
+            timeline_start_ms = float(ingest_state["timeline_start_ms"])
+            timeline_end_ms = float(ingest_state["timeline_end_ms"])
+            file_format = str(ingest_state["file_format"])
+            file_mapping_conf_th = float(ingest_state["file_mapping_conf_th"])
+            filename_cv_targets = list(ingest_state["filename_cv_targets"])
+            targets_for_build = list(ingest_state["targets_for_build"])
+            sinsy_label_entries = list(ingest_state["sinsy_label_entries"])
+            phone_quality = ingest_state["phone_quality"]
+            low_quality_reasons = ingest_state["low_quality_reasons"]
+            low_phone_quality = ingest_state["low_phone_quality"]
+            force_words_phone_fill = bool(ingest_state["force_words_phone_fill"])
+            textgrid_trust_score = float(ingest_state["textgrid_trust_score"])
+            textgrid_trust_tier = str(ingest_state["textgrid_trust_tier"])
+            prefer_filename_sequence = bool(ingest_state["prefer_filename_sequence"])
+            spn_ratio = float(ingest_state["spn_ratio"])
+            alignment_weight = float(ingest_state["alignment_weight"])
 
             if try_handle_kr_single_vowel_file(
                 fname=fname,
@@ -5138,18 +5131,7 @@ def generate_oto(
                 or [s.get('roman_cv') or s.get('roman', '') for s in (syllables_info or [])]
                 or []
             )
-            kr_cv_plan = {"indices": None, "meta": {}, "source": ""}
-            if plan_candidate_source and sinsy_label_entries:
-                kr_cv_plan = build_sinsy_guided_anchor_plan(
-                    expected_tokens=plan_candidate_source,
-                    syllables_info=syllables_info,
-                    label_entries=sinsy_label_entries,
-                    normalize_expected_fn=_normalize_cv_match_token,
-                    normalize_label_fn=_normalize_cv_match_token,
-                    label_match_score_fn=lambda target, label: float(_cv_match_score(target, label)),
-                )
-            if not kr_cv_plan.get("indices"):
-                use_mel_plan = False
+            def _should_enable_kr_mel_plan() -> bool:
                 fmt = str(file_format or "").strip().lower()
                 mel_plan_env = {
                     "cvvc": "UTOA_KR_CVVC_MEL_PLAN",
@@ -5164,23 +5146,25 @@ def generate_oto(
                         or blank_conf_mean >= 0.45
                         or alignment_weight < 0.65
                     ):
-                        use_mel_plan = _env_bool(mel_plan_env[fmt], True)
-                kr_cv_plan = _build_kr_cv_anchor_plan_v2(
-                    plan_candidate_source,
-                    syllables_info,
-                    use_mel=bool(use_mel_plan),
-                    format_type=file_format,
-                ) if plan_candidate_source else {"indices": None, "meta": {}}
-            kr_planned_cv_indices = kr_cv_plan.get("indices")
-            kr_anchor_graph = build_adjacent_anchor_graph(kr_planned_cv_indices)
-            kr_plan_policy = resolve_plan_policy(
-                alignment_trust=alignment_weight,
-                plan_meta=kr_cv_plan.get("meta"),
-                expected_count=len(plan_candidate_source),
-                planned_count=len(kr_planned_cv_indices or []),
-                format_type=file_format,
-                prefer_sequence=prefer_filename_sequence,
-            )
+                        return bool(_env_bool(mel_plan_env[fmt], True))
+                return False
+
+            kr_plan_context_kwargs = {
+                "planned_cv_source": plan_candidate_source,
+                "syllables_info": syllables_info,
+                "sinsy_label_entries": sinsy_label_entries,
+                "format_type": file_format,
+                "alignment_weight": alignment_weight,
+                "prefer_sequence": prefer_filename_sequence,
+                "normalize_expected_fn": _normalize_cv_match_token,
+                "normalize_label_fn": _normalize_cv_match_token,
+                "label_match_score_fn": (lambda target, label: float(_cv_match_score(target, label))),
+                "should_enable_mel_plan_fn": _should_enable_kr_mel_plan,
+                "build_cv_anchor_plan_fn": _build_kr_cv_anchor_plan_v2,
+                "build_sinsy_guided_anchor_plan_fn": build_sinsy_guided_anchor_plan,
+                "build_adjacent_anchor_graph_fn": build_adjacent_anchor_graph,
+                "resolve_plan_policy_fn": resolve_plan_policy,
+            }
 
             mapping_confidence_base, mapping_margin = _estimate_kr_mapping_confidence(
                 phone_quality,
@@ -5189,9 +5173,10 @@ def generate_oto(
                 used_words_based=used_words_based,
                 used_alias_based=used_alias_based,
             )
-            runtime_policy = resolve_runtime_mapping_policy(
+            kr_runtime_state = recompute_common_plan_runtime_state(
+                build_plan_context_fn=build_common_plan_context,
+                plan_context_kwargs=kr_plan_context_kwargs,
                 ingest_snapshot=alignment_ingest,
-                plan_policy=kr_plan_policy,
                 mapping_confidence=mapping_confidence_base,
                 mapping_margin=mapping_margin,
                 conf_threshold=file_mapping_conf_th,
@@ -5203,7 +5188,15 @@ def generate_oto(
                 strict_formats={"cvvc"},
                 prefer_sequence=prefer_filename_sequence,
                 alignment_trust=alignment_weight,
+                resolve_runtime_mapping_policy_fn=resolve_runtime_mapping_policy,
             )
+            kr_cv_plan = dict(kr_runtime_state.get("cv_plan") or {})
+            kr_planned_cv_indices = kr_runtime_state.get("planned_indices")
+            kr_anchor_graph = kr_runtime_state.get("anchor_graph")
+            kr_plan_policy = dict(kr_runtime_state.get("plan_policy") or {})
+            runtime_policy = dict(kr_runtime_state.get("runtime_policy") or {})
+            mapping_confidence_base = float(kr_runtime_state.get("mapping_confidence", mapping_confidence_base) or 0.0)
+            mapping_margin = float(kr_runtime_state.get("mapping_margin", mapping_margin) or 0.0)
             if sinsy_label_entries:
                 plan_source = str(kr_cv_plan.get("source") or "")
                 if plan_source != "sinsy_labels":

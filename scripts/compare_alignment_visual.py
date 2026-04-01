@@ -158,6 +158,38 @@ def _pairwise_delta_ms(a: Sequence[Interval], b: Sequence[Interval]) -> float:
     return float(statistics.mean(vals)) if vals else 999999.0
 
 
+def _sofa_style_boundary_metrics(a: Sequence[Interval], b: Sequence[Interval]) -> Dict[str, float]:
+    if (not a) or (not b) or len(a) != len(b):
+        return {}
+
+    err_sec: List[float] = []
+    iou_vals: List[float] = []
+    total_ref_duration = 0.0
+    for left, right in zip(a, b):
+        ls = float(left.start)
+        le = float(left.end)
+        rs = float(right.start)
+        re = float(right.end)
+        err_sec.append(abs(ls - rs))
+        err_sec.append(abs(le - re))
+        total_ref_duration += max(0.0, le - ls)
+        inter = max(0.0, min(le, re) - max(ls, rs))
+        union = max(1e-7, max(le, re) - min(ls, rs))
+        iou_vals.append(float(inter / union))
+
+    if not err_sec:
+        return {}
+    total_ref_duration = max(1e-7, float(total_ref_duration))
+    err_sum = float(np.sum(np.asarray(err_sec, dtype=np.float64)))
+    return {
+        "boundary_edit_ratio": float(err_sum / total_ref_duration),
+        "ber_10ms": float(np.mean([1.0 if x > 0.010 else 0.0 for x in err_sec])),
+        "ber_20ms": float(np.mean([1.0 if x > 0.020 else 0.0 for x in err_sec])),
+        "ber_50ms": float(np.mean([1.0 if x > 0.050 else 0.0 for x in err_sec])),
+        "interval_iou": float(np.mean(iou_vals)) if iou_vals else 0.0,
+    }
+
+
 def _read_truth_lab_intervals(lab_path: str) -> List[Interval]:
     if not os.path.isfile(lab_path):
         return []
@@ -435,6 +467,7 @@ def _collect_comparison_rows(
         if (not ref_words) or (not tgt_words):
             continue
         delta_ms = _pairwise_delta_ms(ref_words, tgt_words)
+        sofa_metrics = _sofa_style_boundary_metrics(ref_words, tgt_words)
         rows.append(
             {
                 "file": base,
@@ -443,6 +476,7 @@ def _collect_comparison_rows(
                 "target_words": len(tgt_words),
                 "delta_ms": float(delta_ms),
                 "mismatch": int(len(ref_words) != len(tgt_words)),
+                **sofa_metrics,
             }
         )
     return rows
@@ -513,6 +547,21 @@ def _build_target_report(
         "mean_delta_ms": float(statistics.mean(deltas)) if deltas else 0.0,
         "p90_delta_ms": float(_percentile(deltas, 0.9)) if deltas else 0.0,
     }
+    sofa_rows = [r for r in rows if "boundary_edit_ratio" in r]
+    if sofa_rows:
+        stats.update(
+            {
+                "boundary_edit_ratio": float(
+                    statistics.mean([float(r.get("boundary_edit_ratio", 0.0) or 0.0) for r in sofa_rows])
+                ),
+                "ber_10ms": float(statistics.mean([float(r.get("ber_10ms", 0.0) or 0.0) for r in sofa_rows])),
+                "ber_20ms": float(statistics.mean([float(r.get("ber_20ms", 0.0) or 0.0) for r in sofa_rows])),
+                "ber_50ms": float(statistics.mean([float(r.get("ber_50ms", 0.0) or 0.0) for r in sofa_rows])),
+                "interval_iou": float(
+                    statistics.mean([float(r.get("interval_iou", 0.0) or 0.0) for r in sofa_rows])
+                ),
+            }
+        )
 
     return {
         "target": target,
@@ -552,6 +601,12 @@ def _write_summary_md(path: str, payload: Dict[str, object]) -> None:
         lines.append(f"- token_count_match_rate: `{float(stats.get('token_count_match_rate', 0.0)):.3f}`")
         lines.append(f"- mean_delta_ms: `{float(stats.get('mean_delta_ms', 0.0)):.2f}`")
         lines.append(f"- p90_delta_ms: `{float(stats.get('p90_delta_ms', 0.0)):.2f}`")
+        if "boundary_edit_ratio" in stats:
+            lines.append(f"- boundary_edit_ratio: `{float(stats.get('boundary_edit_ratio', 0.0)):.3f}`")
+            lines.append(f"- ber_10ms: `{float(stats.get('ber_10ms', 0.0)):.3f}`")
+            lines.append(f"- ber_20ms: `{float(stats.get('ber_20ms', 0.0)):.3f}`")
+            lines.append(f"- ber_50ms: `{float(stats.get('ber_50ms', 0.0)):.3f}`")
+            lines.append(f"- interval_iou: `{float(stats.get('interval_iou', 0.0)):.3f}`")
         lines.append("")
         lines.append("| file | delta(ms) | mfa_words | target_words | plot |")
         lines.append("|---|---:|---:|---:|---|")
