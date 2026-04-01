@@ -9,6 +9,7 @@ chcp 65001 >nul
 title UTAU Auto OTO - MFA Setup and Recovery
 
 set "INSTALL_ML=0"
+set "DISABLE_ML=0"
 
 set "DELETE_OLD_AFTER_INSTALL=0"
 
@@ -74,6 +75,16 @@ if /i "%ARG_RAW:~0,11%"=="--language=" goto :capture_language_inline
 if /i "%~1"=="--with-ml" set "INSTALL_ML=1"
 
 if /i "%~1"=="--install-ml" set "INSTALL_ML=1"
+
+if /i "%~1"=="--without-ml" (
+    set "DISABLE_ML=1"
+    set "INSTALL_ML=0"
+)
+
+if /i "%~1"=="--skip-ml" (
+    set "DISABLE_ML=1"
+    set "INSTALL_ML=0"
+)
 
 if /i "%~1"=="--non-interactive" set "NON_INTERACTIVE=1"
 
@@ -173,10 +184,11 @@ exit /b 1
 
 :show_help
 
-echo Usage: setup_mfa.bat [--install ^| --recovery ^| --menu] [--runtime-root PATH] [--with-ml] [--non-interactive]
+echo Usage: setup_mfa.bat [--install ^| --recovery ^| --menu] [--runtime-root PATH] [--with-ml ^| --without-ml] [--non-interactive]
 
 echo Installs or repairs MFA runtime ^(.env^), micromamba packages, and language/model dependencies.
 echo For CTC runtime ^(.env_ctc^) use setup_ctc.bat.
+echo ML dependencies are installed by default during install mode.
 
 echo.
 
@@ -195,6 +207,7 @@ echo   --language NAME           Recovery language ^(korean or japanese^)
 echo   --language=NAME           Same as above ^(inline form^)
 
 echo   --with-ml / --install-ml  Install ML dependencies ^(pandas/pyarrow/lightgbm/onnxruntime^)
+echo   --without-ml / --skip-ml  Skip ML dependency install
 
 echo   --non-interactive         Run without prompts ^(requires valid runtime root^)
 
@@ -299,6 +312,12 @@ if not defined WRAPPER_MODE set "WRAPPER_MODE=menu"
 if /i "%WRAPPER_MODE%"=="menu" call :select_start_mode
 
 if /i "%WRAPPER_MODE%"=="exit" exit /b 2
+
+if /i "%WRAPPER_MODE%"=="install" if "%INSTALL_ML%"=="0" if "%DISABLE_ML%"=="0" (
+    echo [INFO] Initial install defaults to ML dependency install.
+    echo [INFO] Use --without-ml to skip ML packages.
+    set "INSTALL_ML=1"
+)
 
 :wrapper_dispatch
 
@@ -761,6 +780,11 @@ goto :eof
 call :preflight_install_tools
 
 if errorlevel 1 exit /b 1
+
+if "%INSTALL_ML%"=="0" if "%DISABLE_ML%"=="0" (
+    echo [INFO] Enabling ML dependency install for setup.
+    set "INSTALL_ML=1"
+)
 
 echo ====================================================
 

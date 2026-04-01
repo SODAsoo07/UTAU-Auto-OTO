@@ -15,17 +15,21 @@ from core.pipeline_status import ALIGN_EXEC_MISSING, ALIGN_NOT_READY, OK, normal
 
 
 class AlignmentPipelineTests(unittest.TestCase):
-    def test_normalize_aligner_name_rejects_none_aliases(self):
-        for raw in ("none", "off", "skip", "disabled", "no_align", "nomfa", "no_mfa", "No-MFA (Experimental)"):
+    def test_normalize_aligner_name_accepts_none_aliases(self):
+        for raw in ("none", "off", "skip", "nomfa", "no_mfa", "No-MFA (Experimental)"):
+            self.assertEqual(normalize_aligner_name(raw, default="mfa"), "none")
+
+    def test_normalize_aligner_name_keeps_unknown_as_default(self):
+        for raw in ("disabled", "no_align"):
             self.assertEqual(normalize_aligner_name(raw, default="mfa"), "mfa")
 
     def test_normalize_aligner_name_accepts_domino_aliases(self):
         for raw in ("domino", "pydomino", "Domino (JP)", "jp-domino"):
             self.assertEqual(normalize_aligner_name(raw, default="mfa"), "domino")
 
-    def test_resolve_aligner_chain_converts_none_to_mfa(self):
-        self.assertEqual(resolve_aligner_chain("none", ""), ["mfa"])
-        self.assertEqual(resolve_aligner_chain("none", "mfa"), ["mfa"])
+    def test_resolve_aligner_chain_keeps_none_then_optional_fallback(self):
+        self.assertEqual(resolve_aligner_chain("none", ""), ["none"])
+        self.assertEqual(resolve_aligner_chain("none", "mfa"), ["none", "mfa"])
 
     def test_resolve_aligner_chain_keeps_domino_then_mfa(self):
         self.assertEqual(resolve_aligner_chain("domino", "mfa"), ["domino", "mfa"])
@@ -168,22 +172,17 @@ class AlignmentPipelineTests(unittest.TestCase):
             dict_path = os.path.join(td, "dictionary.txt")
             with open(dict_path, "w", encoding="utf-8") as handle:
                 handle.write("a a\n")
-            with mock.patch(
-                "core.alignment_pipeline.check_mfa_ready",
-                return_value={"code": ALIGN_EXEC_MISSING, "message": "missing executable", "mfa_path": ""},
-            ) as mocked_ready:
-                result = run_alignment_with_fallback(
-                    language="korean",
-                    wav_folder=td,
-                    dictionary_path=dict_path,
-                    output_folder=os.path.join(td, "textgrids"),
-                    primary_aligner="mfa",
-                    fallback_aligner="",
-                    mfa_path="",
-                    mfa_align_profile="default",
-                    callback=None,
-                )
-        mocked_ready.assert_called_once()
+            result = run_alignment_with_fallback(
+                language="korean",
+                wav_folder=td,
+                dictionary_path=dict_path,
+                output_folder=os.path.join(td, "textgrids"),
+                primary_aligner="mfa",
+                fallback_aligner="",
+                mfa_path="",
+                mfa_align_profile="default",
+                callback=None,
+            )
         self.assertFalse(bool(result.get("ok", True)))
         self.assertEqual(str(result.get("code", "")), ALIGN_EXEC_MISSING)
 

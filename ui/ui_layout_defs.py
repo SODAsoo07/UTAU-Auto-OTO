@@ -14,13 +14,15 @@ ADVANCED_WEAK_BOUNDARY_OPTIONS = [
 ]
 
 ADVANCED_WEAK_BOUNDARY_HELP = (
-    "발음 누락 줄이기: 발음 경계가 흐릿한 음원에서 자음/모음 누락을 줄이기 위한 보정입니다.\n"
-    "오매핑 차단: 음절 경계가 섞여 잘못 매핑되는 경우를 줄이기 위한 보정입니다."
+    "발음 누락 줄이기: 경계가 약한 음원에서 자음/모음 누락을 줄이기 위한 보정입니다.\n"
+    "오매핑 차단: 경계가 불분명한 구간에서 잘못된 음절 연결을 줄입니다."
 )
 
-ADVANCED_ML_SECTION_TITLE = "ML 보정"
-ADVANCED_ML_SECTION_SUBTITLE = "OFF 시 ML 보정은 자동으로 생략되며, No-MFA/v1/v2 라우팅 설정은 유지됩니다."
+ADVANCED_ML_SECTION_TITLE = "ML 고급 옵션"
+ADVANCED_ML_SECTION_SUBTITLE = (
+    "OFF면 ML 보정이 비활성화됩니다. No-MFA/v1/v2는 설치된 모델 상태에 따라 동작합니다."
+)
 
 PIPELINE_MODEL_QUICK_HELP = (
-    "모델이 설치된 폴더 또는 상위 루트를 지정하면 KR/JA 모델을 자동 탐색합니다."
+    "모델이 이미 다운로드되어 있다면 경로를 지정해 주세요. KR/JA 모델이 자동 인식됩니다."
 )

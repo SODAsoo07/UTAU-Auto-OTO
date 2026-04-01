@@ -159,6 +159,11 @@ def load_oto_model_bundle(model_dir: str) -> Optional[OtoModelBundle]:
                 schema=schema,
                 device=coupled_device,
             )
+        elif backend in {"e2e_hybrid_v1", "e2e_linear_v1", "e2e_stub_v1"}:
+            from core.oto_e2e_runtime import load_e2e_bundle
+
+            e2e_bundle, _, _ = load_e2e_bundle(abs_model_dir)
+            payload = e2e_bundle
         else:
             logger.warning("Unsupported OTO ML backend: %s", backend)
             return None
@@ -225,6 +230,17 @@ def predict_oto_deltas(bundle: OtoModelBundle, feature_row: Dict[str, Any]) -> O
         confidence = result.get("confidence")
         route = str(result.get("route", route) or route)
         route_backend = str(result.get("route_backend", route_backend) or route_backend)
+    elif bundle.backend in {"e2e_hybrid_v1", "e2e_linear_v1", "e2e_stub_v1"}:
+        from core.oto_e2e_runtime import predict_e2e_deltas_from_bundle
+
+        runtime_bundle = bundle.payload
+        if runtime_bundle is None:
+            raise RuntimeError("E2E runtime bundle is missing")
+        result = predict_e2e_deltas_from_bundle(runtime_bundle, feature_row)
+        deltas = dict(result.get("deltas") or {})
+        confidence = result.get("confidence")
+        route = "e2e_hybrid"
+        route_backend = str(bundle.backend)
     else:
         raise RuntimeError(f"Unsupported OTO ML backend: {bundle.backend}")
     return OtoDeltaResult(

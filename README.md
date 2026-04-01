@@ -1,28 +1,56 @@
-우타우 보이스뱅크의 자동 원음설정을 위한 툴입니다. 현재 한국어와 일본어를 지원합니다.
+# Auto OTO
 
-A tool for automatic Otoing in Utau VoiceBank. It currently supports Korean and Japanese.
+Auto OTO is a source-available freeware tool for automatic oto setup and related
+voicebank preparation workflows.
 
-### 지원 형식:
-한국어 Korean
-- CV (단음/연단음)
-- CVC
-- CVVC
-- VCV (한연음)
+## Default Encoding
 
-일본어 Japanese
-- CV (단음/연단음)
-- CVVC
-- VCV (연속음)
+- The app default text/file encoding is **UTF-8**.
 
---- 
-**이 프로그램은 64비트 윈도우 환경에서만 실행 가능하며, 해당 툴 실행에는 Microsoft Visual C++ 2015-2022 (x64) 런타임이 필요합니다. 꼭 설치해주세요. 미설치 시 프로그램이 아예 실행되지 않을 수 있습니다.
- 마이크로소프트 공식 다운로드 링크: https://aka.ms/vs/17/release/vc_redist.x64.exe**
+## License Summary
 
-**64bit Windows environment and Microsoft Visual C++ 2015-2022 (x64) runtime is required to run the tool. Make sure to install it. If not, the program may not run at all.
-Microsoft Official Download Link: https://aka.ms/vs/17/release/vc_redist.x64.exe**
+This repository is not an open-source project in the OSI sense.
 
-가이드 작성 중...
+- The source code is published under the source-available freeware terms in
+  [LICENSE](./LICENSE).
+- The official bundled models are licensed separately under
+  [MODEL_LICENSE.md](./MODEL_LICENSE.md).
+- Output created with the official models, such as generated oto settings,
+  prepared voicebanks, and songs created with those voicebanks, may be used
+  commercially under the terms described in `MODEL_LICENSE.md`.
 
----
-이 툴의 소스코드는 AI를 이용해 생성했으며, 인간이 검수 후 일부 수정을 거쳤습니다.
-</br>이 프로그램은 '있는 그대로' 제공되며, 제작자는 이 프로그램을 사용하여 입은 손해에 대해 어떤 것도 책임지지 않습니다.
+## What You Can Do
+
+- Use the software for free.
+- Read and modify the source code.
+- Share original or modified copies for free with the license notices kept
+  intact.
+- Use the generated outputs in commercial creative work.
+
+## What You Cannot Do
+
+- Sell the software itself or modified versions of the software.
+- Charge for access to the software.
+- Sell, host, or otherwise commercially exploit the official bundled models.
+
+## Important Notes
+
+- Third-party dependencies remain under their own licenses.
+- The official model package and the source code are licensed separately.
+- This repository may contain model files and metadata that are covered by
+  `MODEL_LICENSE.md`, not by `LICENSE`.
+- If you use your own models or your own data, you remain responsible for the
+  rights to those materials.
+
+## Draft Status
+
+The files `LICENSE` and `MODEL_LICENSE.md` are project drafts intended to define
+the distribution policy of this repository. Review and adjust them before public
+release if you want tighter wording for contributor, data, or jurisdiction-
+specific issues.
+
+## UI Design Workflow (Pencil MCP)
+
+- Integration workflow draft: `plan/pencil_integration_workflow.md`
+- Design asset folder: `design/`
+- Shared UI token module: `ui/theme_tokens.py`

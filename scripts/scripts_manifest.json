@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "description": "Script usage and ownership registry for safe cleanup/refactoring.",
+  "entries": [
+    {
+      "path": "scripts/audit_script_usage.py",
+      "status": "protected",
+      "owner": "infra",
+      "note": "Script usage audit CLI for safe cleanup checks."
+    },
+    {
+      "path": "scripts/auto_classify_training_data.py",
+      "status": "manual",
+      "owner": "ml",
+      "note": "Manual helper for staged data auto-classification."
+    },
+    {
+      "path": "scripts/build_alignment_test_folder.py",
+      "status": "manual",
+      "owner": "align",
+      "note": "Manual helper to assemble alignment sample/test folders."
+    },
+    {
+      "path": "scripts/build_installer.ps1",
+      "status": "protected",
+      "owner": "release",
+      "note": "Called by CI workflows."
+    },
+    {
+      "path": "scripts/build_portable_with_models.ps1",
+      "status": "protected",
+      "owner": "release",
+      "note": "Called by CI workflows."
+    },
+    {
+      "path": "scripts/compare_alignment_visual.py",
+      "status": "manual",
+      "owner": "align",
+      "note": "Manual alignment visualization/comparison helper."
+    },
+    {
+      "path": "scripts/export_coupled_onnx.py",
+      "status": "manual",
+      "owner": "ml",
+      "note": "Manual ONNX export helper."
+    },
+    {
+      "path": "scripts/export_textgrid_to_sinsy_lab.py",
+      "status": "manual",
+      "owner": "align",
+      "note": "Manual TextGrid-to-Sinsy LAB conversion helper."
+    },
+    {
+      "path": "scripts/generate_shared_oto_profiles.py",
+      "status": "manual",
+      "owner": "ml",
+      "note": "Manual utility to generate shared OTO timing profiles."
+    },
+    {
+      "path": "scripts/preprocess_oto_cv_for_sequence_training.py",
+      "status": "manual",
+      "owner": "ml",
+      "note": "Manual preprocessing helper for CV-based sequence aligner training data."
+    },
+    {
+      "path": "scripts/preprocess_sinsy_labels_for_sequence_training.py",
+      "status": "manual",
+      "owner": "ml",
+      "note": "Manual preprocessing helper for Sinsy label sequence training data."
+    },
+    {
+      "path": "scripts/run_coupled_experiment_matrix.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Called by run_coupled_two_stage_tune.py."
+    },
+    {
+      "path": "scripts/run_coupled_two_stage_tune.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Documented tuning entrypoint."
+    },
+    {
+      "path": "scripts/run_kr_regression_suite.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Documented regression entrypoint."
+    },
+    {
+      "path": "scripts/run_oto_generation_batch.py",
+      "status": "protected",
+      "owner": "pipeline",
+      "note": "Batch generation runtime entrypoint."
+    },
+    {
+      "path": "scripts/runtime_recovery.ps1",
+      "status": "protected",
+      "owner": "runtime",
+      "note": "Referenced by setup_mfa.bat and packaging."
+    },
+    {
+      "path": "scripts/sandbox_smoke_check.ps1",
+      "status": "manual",
+      "owner": "test",
+      "note": "Internal smoke-check script; intentionally excluded from release build payload."
+    },
+    {
+      "path": "scripts/startup_diagnose.bat",
+      "status": "protected",
+      "owner": "runtime",
+      "note": "Bundled into installer/release."
+    },
+    {
+      "path": "scripts/startup_diagnose.ps1",
+      "status": "protected",
+      "owner": "runtime",
+      "note": "Bundled into installer/release."
+    },
+    {
+      "path": "scripts/train_cvn_backend.py",
+      "status": "protected",
+      "owner": "ml",
+      "note": "Primary CVN training entrypoint used in real workflow."
+    },
+    {
+      "path": "scripts/train_ensemble_bundle.py",
+      "status": "manual",
+      "owner": "ml",
+      "note": "Manual ensemble model training helper."
+    },
+    {
+      "path": "scripts/train_sequence_aligner_profile_from_sinsy.py",
+      "status": "manual",
+      "owner": "ml",
+      "note": "Manual sequence aligner profile training helper from corrected Sinsy labels."
+    }
+  ]
+}

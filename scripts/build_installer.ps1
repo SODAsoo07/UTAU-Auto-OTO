@@ -93,10 +93,6 @@ $setupMfaSrc = Join-Path $repoRoot "setup_mfa.bat"
 $setupMfaDst = Join-Path $sourceAbs "setup_mfa.bat"
 Sync-FileIfNeeded -SourcePath $setupMfaSrc -DestinationPath $setupMfaDst -Label "setup_mfa.bat"
 
-$setupCtcSrc = Join-Path $repoRoot "setup_ctc.bat"
-$setupCtcDst = Join-Path $sourceAbs "setup_ctc.bat"
-Sync-FileIfNeeded -SourcePath $setupCtcSrc -DestinationPath $setupCtcDst -Label "setup_ctc.bat"
-
 $runtimeRecoverySrc = Join-Path $repoRoot "scripts\runtime_recovery.ps1"
 $runtimeRecoveryDst = Join-Path $sourceAbs "runtime_recovery.ps1"
 Sync-FileIfNeeded -SourcePath $runtimeRecoverySrc -DestinationPath $runtimeRecoveryDst -Label "runtime_recovery.ps1"
@@ -128,7 +124,6 @@ Sync-FileIfNeeded -SourcePath $requirementsMlSrc -DestinationPath $requirementsM
 $requiredPayload = @(
     @{ Name = "Main executable"; Path = (Join-Path $sourceAbs "UTAU_Auto_OTO\\UTAU_Auto_OTO.exe") },
     @{ Name = "MFA setup script"; Path = (Join-Path $sourceAbs "setup_mfa.bat") },
-    @{ Name = "CTC setup script"; Path = (Join-Path $sourceAbs "setup_ctc.bat") },
     @{ Name = "Runtime recovery script"; Path = (Join-Path $sourceAbs "runtime_recovery.ps1") },
     @{ Name = "Startup diagnose script"; Path = (Join-Path $sourceAbs "startup_diagnose.ps1") },
     @{ Name = "Startup diagnose launcher"; Path = (Join-Path $sourceAbs "startup_diagnose.bat") },

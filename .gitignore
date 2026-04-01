@@ -85,9 +85,9 @@ models_installed/
 *.tar.gz
 /micromamba
 /.env_ctc
-/.venv_build
-/_tmp_smoke_check
-README.md
-/ml/wfl_asr
-/installer_output_online
-README.md
+/temp
+/.code-review-graph
+/code-review-graph
+/.venv310
+.github/workflows/build-windows-preview.yml
+.github/workflows/build-windows-preview.yml

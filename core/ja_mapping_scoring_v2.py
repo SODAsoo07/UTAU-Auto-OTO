@@ -6,15 +6,16 @@ import re
 from core.ja_lab_generator import split_ja_romaji_syllable
 from core.ja_oto_mapping import (
     _extract_ja_onset_token,
+    _is_kana_token as _ja_is_kana_token,
     _ja_soft_cv_match_level,
     _ja_special_mora_class,
     _ja_syllable_tail,
     _normalize_ja_syllable_token,
+    _normalize_ja_syllable_token_strict as _ja_normalize_syllable_token_strict,
     _syllable_info_token,
 )
 
 JA_VOWELS = {"a", "i", "u", "e", "o"}
-_JA_KANA_RE = re.compile(r"[ぁ-ゖァ-ヺー]")
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -55,17 +56,17 @@ def _cv_order_prior_strength() -> float:
     )
 
 
+def _allow_ja_cvvc_forward_any_tier() -> bool:
+    # Safety-first default:
+    # For Japanese CVVC, accidental +1/+2 forward mapping is usually worse than
+    # conservative lock-to-expected behavior.
+    return _env_bool("UTOA_JA_CVVC_ALLOW_FORWARD_ANY_TIER", False)
+
+
 def _normalize_ja_syllable_token_strict(token):
-    raw = str(token or "").strip()
-    if not raw:
-        return ""
-    return raw.lower().replace("'", "").strip("-_ ")
-
-
+    return _ja_normalize_syllable_token_strict(token)
 def _is_kana_token(token):
-    return bool(_JA_KANA_RE.search(str(token or "")))
-
-
+    return bool(_ja_is_kana_token(token))
 def _syllable_info_raw_token(syl_info):
     if not isinstance(syl_info, dict):
         return ""
@@ -83,6 +84,7 @@ def should_allow_ja_soft_forward_shift(target_tok, expected_tok, mapped_tok):
     if not target_norm or not mapped_norm:
         return False
     target_strict = _normalize_ja_syllable_token_strict(target_tok)
+    expected_strict = _normalize_ja_syllable_token_strict(expected_tok)
     mapped_strict = _normalize_ja_syllable_token_strict(mapped_tok)
     target_special = _ja_special_mora_class(target_tok)
     expected_special = _ja_special_mora_class(expected_tok)
@@ -105,17 +107,25 @@ def should_allow_ja_soft_forward_shift(target_tok, expected_tok, mapped_tok):
             and not (_is_kana_token(target_tok) or _is_kana_token(mapped_tok))
         ):
             return False
+        if mapped_level < 3 and mapped_norm != target_norm:
+            return False
         if mapped_special not in {"youon", "inserted"} and mapped_level < 3:
             return False
         if expected_special in {"youon", "inserted"} and mapped_special not in {"youon", "inserted"}:
+            return False
+        if (
+            expected_strict
+            and mapped_strict
+            and expected_strict == target_strict
+            and mapped_strict != expected_strict
+            and not (_is_kana_token(expected_tok) or _is_kana_token(mapped_tok))
+        ):
             return False
     if mapped_level >= 3 and expected_level < 3:
         return True
     if mapped_level >= 2 and expected_level <= 1:
         return True
     return False
-
-
 def clamp_ja_cv_index_to_order(
     target_tok,
     expected_idx,
@@ -148,16 +158,18 @@ def clamp_ja_cv_index_to_order(
     mapped_level = int(_ja_soft_cv_match_level(target_norm, mapped_norm) or 0) if target_norm else 0
 
     if fmt == "cv":
-        # CV는 파일명/순서 정합을 최우선으로 두고 전진 매핑(+1)도 차단한다.
+        # For CV, prioritize filename/order consistency and block +1 forward shift.
         return e
 
-    # CVVC에서 CV/CV_HEAD 전방 이동은 오매핑을 유발하기 쉬우므로
-    # 기본값은 저티어/순서잠금 상황에서 차단한다.
-    # 필요 시 `UTOA_JA_CVVC_STRICT_CV_FORWARD=0`으로 이전 동작을 복원 가능.
+    # In CVVC, forward move of CV/CV_HEAD is high-risk for mismatch.
+    # Set UTOA_JA_CVVC_STRICT_CV_FORWARD=0 to restore legacy permissive behavior.
     strict_cvvc_forward = _env_bool("UTOA_JA_CVVC_STRICT_CV_FORWARD", True)
     tier = str(mapping_tier or "").strip().lower()
-    if fmt == "cvvc" and strict_cvvc_forward and (filename_order_locked or tier != "high"):
-        return e
+    if fmt == "cvvc" and strict_cvvc_forward:
+        if not _allow_ja_cvvc_forward_any_tier():
+            return e
+        if filename_order_locked or tier != "high":
+            return e
 
     if m > (e + 1):
         return e
@@ -173,8 +185,8 @@ def clamp_ja_cv_index_to_order(
         )
     )
     if allow_forward and order_prior_enabled:
-        # 순서 prior 강화 시, +1 전진은 target 토큰 정합과 soft-match 개선이
-        # 동시에 확인될 때만 허용한다.
+        # Under stronger order-prior, allow +1 only with clear token and soft-match gain.
+        # This avoids accepting tiny score changes that often create forward drift.
         if mapped_norm != target_norm and expected_norm == target_norm:
             return e
         min_gain = 1 if prior_strength < 0.45 else 2

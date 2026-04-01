@@ -24,7 +24,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.10"
           cache: "pip"
           cache-dependency-path: |
             requirements.txt
@@ -36,10 +36,10 @@ jobs:
         with:
           path: |
             ~\AppData\Local\Nuitka\Nuitka\Cache
-          key: nuitka-${{ runner.os }}-py311-preview-${{ hashFiles('requirements.txt', 'requirements-ml.txt', 'requirements-preview.txt', 'build.py', 'main.py') }}
+          key: nuitka-${{ runner.os }}-py310-preview-${{ hashFiles('requirements.txt', 'requirements-ml.txt', 'requirements-preview.txt', 'build.py', 'main.py') }}
           restore-keys: |
-            nuitka-${{ runner.os }}-py311-preview-
-            nuitka-${{ runner.os }}-py311-
+            nuitka-${{ runner.os }}-py310-preview-
+            nuitka-${{ runner.os }}-py310-
 
       - name: Cache FFmpeg Runtime
         uses: actions/cache@v4

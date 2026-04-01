@@ -74,6 +74,12 @@ def validate_runtime_preflight(
     no_mfa_without_textgrid = align_name == "none" and (not has_textgrid_files(tg_dir))
     template_checked_in_no_mfa_path = False
     if no_mfa_without_textgrid:
+        errors.append(
+            _issue(
+                "PRE_TEXTGRID_REQUIRED",
+                "No-MFA 모드에서 TextGrid가 없어 템플릿 OTO 기반 자동설정 경로로만 진행할 수 있습니다.",
+            )
+        )
         if no_base_oto:
             errors.append(
                 _issue(

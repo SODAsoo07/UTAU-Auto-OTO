@@ -571,6 +571,8 @@ class PipelineActionsMixin:
         system_root = os.environ.get("SystemRoot", r"C:\Windows")
         vc_runtime_markers = [
             os.path.join(system_root, "System32", "msvcp140.dll"),
+            os.path.join(system_root, "System32", "msvcp140_1.dll"),
+            os.path.join(system_root, "System32", "vcruntime140.dll"),
             os.path.join(system_root, "System32", "vcruntime140_1.dll"),
         ]
         archive_url = 'https://micro.mamba.pm/api/micromamba/win-64/latest'
@@ -589,6 +591,7 @@ class PipelineActionsMixin:
             msg = str(text or "").lower()
             return (
                 "msvcp140.dll" in msg
+                or "msvcp140_1.dll" in msg
                 or "vcruntime140.dll" in msg
                 or "vcruntime140_1.dll" in msg
                 or "side-by-side configuration is incorrect" in msg
@@ -2115,6 +2118,10 @@ class PipelineActionsMixin:
                     self._append_log("ℹ 영어 Preview CVVC 모드에서는 Lab/사전 생성 단계를 사용하지 않습니다.")
                     self._set_status("✅ Lab+사전 단계 건너뜀 (영어 Preview)")
                     return
+                if hasattr(self, "_confirm_language_script_mismatch"):
+                    if not self._confirm_language_script_mismatch(lang, wav_dir, stage_name="Lab+사전 생성"):
+                        self._set_status("취소됨: 언어 설정 확인")
+                        return
 
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
 
@@ -2214,6 +2221,10 @@ class PipelineActionsMixin:
                     self._append_log("ℹ 영어 Preview CVVC 모드에서는 사전 생성 단계를 사용하지 않습니다.")
                     self._set_status("✅ 사전 단계 건너뜀 (영어 Preview)")
                     return
+                if hasattr(self, "_confirm_language_script_mismatch"):
+                    if not self._confirm_language_script_mismatch(lang, wav_dir, stage_name="사전 생성"):
+                        self._set_status("취소됨: 언어 설정 확인")
+                        return
                 if lang == 'japanese':
                     dict_filename = "japanese_dict.txt"
                 else:
@@ -2388,6 +2399,10 @@ class PipelineActionsMixin:
                 self._append_log(
                     f"ℹ 현재 언어: {'일본어' if lang == 'japanese' else '한국어' if lang == 'korean' else '영어'}"
                 )
+                if lang in {"korean", "japanese"} and hasattr(self, "_confirm_language_script_mismatch"):
+                    if not self._confirm_language_script_mismatch(lang, wav_dir, stage_name="전체 파이프라인"):
+                        self._set_status("취소됨: 언어 설정 확인")
+                        return
                 selected_format = normalize_auto_format_value(
                     lang,
                     self.auto_format_var.get() if hasattr(self, "auto_format_var") else "",
@@ -2761,6 +2776,8 @@ class PipelineActionsMixin:
                     self._set_status("3/5 - 정렬 건너뛰기(no-MFA)")
                 elif primary_engine == "ctc":
                     self._set_status("3/5 - CTC 정렬 준비 중...")
+                elif primary_engine == "sequence":
+                    self._set_status("3/5 - 전용 시퀀스 정렬 준비 중...")
                 else:
                     self._set_status("3/5 - MFA 정렬 준비 중...")
                     if not self._ensure_mfa_ready_for_language(lang):
@@ -2778,6 +2795,8 @@ class PipelineActionsMixin:
                     self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
                 elif primary_engine == "ctc":
                     self._append_log("ℹ 정렬 엔진: CTC (MMS)")
+                elif primary_engine == "sequence":
+                    self._append_log("ℹ 정렬 엔진: 전용 시퀀스 baseline")
                 else:
                     self._append_log("ℹ 정렬 엔진: none (MFA 비사용)")
                 if hasattr(self, "_apply_advanced_tuning_envs"):

@@ -51,13 +51,33 @@ MFA_ALIGN_PROFILE_PRESETS = {
         "num_jobs": 1,
         "speaker_adaptation": False,
     },
-    # Accuracy-first profile with speaker adaptation when supported by MFA.
+    # Accuracy-first profile without explicit speaker adaptation.
     "accurate": {
         "clean": True,
         "fine_tune": True,
         "textgrid_cleanup": True,
         "beam": 1400,
         "retry_beam": 5600,
+        "num_jobs": 1,
+        "speaker_adaptation": False,
+    },
+    # Accuracy + speaker adaptation profile.
+    "accurate_adapted": {
+        "clean": True,
+        "fine_tune": True,
+        "textgrid_cleanup": True,
+        "beam": 1400,
+        "retry_beam": 5600,
+        "num_jobs": 1,
+        "speaker_adaptation": True,
+    },
+    # High-register stabilization profile (C5+ conservative settings).
+    "high_pitch_accurate": {
+        "clean": True,
+        "fine_tune": True,
+        "textgrid_cleanup": True,
+        "beam": 1700,
+        "retry_beam": 6800,
         "num_jobs": 1,
         "speaker_adaptation": True,
     },
@@ -1468,7 +1488,26 @@ def _normalize_mfa_align_profile(profile):
     p = str(profile or "").strip().lower()
     if p in {"fast", "quick", "lite", "speed"}:
         return "fast"
-    if p in {"accurate", "accuracy", "acc", "adapted", "speaker_adapted", "speaker_adaptation"}:
+    if p in {
+        "high_pitch_accurate",
+        "high-pitch-accurate",
+        "high_pitch",
+        "high-pitch",
+        "high_register",
+        "high-register",
+        "c5",
+    }:
+        return "high_pitch_accurate"
+    if p in {
+        "accurate_adapted",
+        "adapted",
+        "speaker_adapted",
+        "speaker_adaptation",
+        "accurate+speaker",
+        "accurate_adapt",
+    }:
+        return "accurate_adapted"
+    if p in {"accurate", "accuracy", "acc"}:
         return "accurate"
     if p in {"default", "basic", "base", "legacy", ""}:
         return "default"
@@ -2245,7 +2284,8 @@ def _resolve_mfa_runtime_options(
             callback(msg)
 
     raw = dict(runtime_options or {})
-    constrained_mode = _normalize_alignment_strict_mode(raw.get("constrained_mode", "off"))
+    default_constrained = "moderate" if resolved_profile == "high_pitch_accurate" else "off"
+    constrained_mode = _normalize_alignment_strict_mode(raw.get("constrained_mode", default_constrained))
     recursive_requested = bool(raw.get("recursive_mfa", True))
     recursive_enabled = recursive_requested and constrained_mode in {"strict", "moderate"}
     recursive_skip_reason = ""
@@ -2259,7 +2299,12 @@ def _resolve_mfa_runtime_options(
             recursive_skip_reason = "default profile"
         recursive_enabled = False
 
-    chunk_size_default = 72 if resolved_profile == "accurate" else 96
+    if resolved_profile == "high_pitch_accurate":
+        chunk_size_default = 60
+    elif resolved_profile in {"accurate", "accurate_adapted"}:
+        chunk_size_default = 72
+    else:
+        chunk_size_default = 96
     chunk_size = chunk_size_default
     raw_chunk_size = str(raw.get("recursive_chunk_size", "") or "").strip()
     if raw_chunk_size:

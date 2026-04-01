@@ -20,7 +20,12 @@ FFMPEG_DIR = os.path.join(BUILD_ASSET_DIR, "ffmpeg")
 FFMPEG_BIN_DIR = os.path.join(FFMPEG_DIR, "bin")
 FFMPEG_RELEASE_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 REQUIRED_FFMPEG_BINARIES = ("ffmpeg.exe", "ffprobe.exe")
-REQUIRED_MSVC_RUNTIME_DLLS = ("msvcp140.dll", "msvcp140_1.dll")
+REQUIRED_MSVC_RUNTIME_DLLS = (
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+)
 MICROMAMBA_EXE_URL = "https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-win-64"
 
 DEFAULT_APP_NAME = "UTAU_Auto_OTO"
@@ -64,6 +69,21 @@ RELEASE_AUX_FILES = [
     os.path.join(APP_DIR, "release_assets", "설치_도우미.bat"),
     os.path.join(APP_DIR, "scripts", "startup_diagnose.bat"),
 ]
+RELEASE_INTERNAL_TEST_SCRIPT_BASENAMES = {
+    "build_alignment_test_folder.py",
+    "compare_alignment_visual.py",
+    "export_textgrid_to_sinsy_lab.py",
+    "preprocess_oto_cv_for_sequence_training.py",
+    "preprocess_sinsy_labels_for_sequence_training.py",
+    "train_sequence_aligner_profile_from_sinsy.py",
+    "sandbox_smoke_check.ps1",
+}
+RELEASE_SCRIPT_FOLDER_ALLOWLIST = {
+    "runtime_recovery.ps1",
+    "startup_diagnose.ps1",
+    "startup_diagnose.bat",
+}
+RELEASE_SCRIPT_EXTENSIONS = {".py", ".ps1", ".bat", ".cmd"}
 APP_ICON_CANDIDATES = [
     os.path.join(APP_DIR, "release_assets", "AutoOTO-icon.ico"),
     os.path.join(APP_DIR, "AutoOTO-icon.ico"),
@@ -690,6 +710,51 @@ def _write_portable_launcher_cmd(release_dir, app_name, target_path):
     return launcher_path
 
 
+def _prune_internal_test_scripts_from_release(release_dir, app_name):
+    if not os.path.isdir(release_dir):
+        return []
+    roots = [release_dir]
+    app_root = os.path.join(release_dir, app_name)
+    if os.path.isdir(app_root):
+        roots.append(app_root)
+
+    blocked = {str(name).strip().lower() for name in RELEASE_INTERNAL_TEST_SCRIPT_BASENAMES if str(name).strip()}
+    allowed_scripts = {str(name).strip().lower() for name in RELEASE_SCRIPT_FOLDER_ALLOWLIST if str(name).strip()}
+    removed = []
+    for root in roots:
+        for dirpath, _, filenames in os.walk(root):
+            for filename in filenames:
+                low_name = str(filename).strip().lower()
+                full_path = os.path.join(dirpath, filename)
+                rel_path = os.path.relpath(full_path, root).replace("\\", "/")
+                rel_dir = rel_path.rsplit("/", 1)[0].strip().lower() if "/" in rel_path else ""
+                ext = os.path.splitext(low_name)[1].strip().lower()
+
+                should_remove = False
+                # Explicit root-level deny list (defensive cleanup for stale release folders).
+                if ("/" not in rel_path) and (low_name in blocked):
+                    should_remove = True
+                # scripts/ 폴더 내부 스크립트는 allowlist만 유지.
+                elif rel_dir == "scripts" and ext in RELEASE_SCRIPT_EXTENSIONS and low_name not in allowed_scripts:
+                    should_remove = True
+
+                if not should_remove:
+                    continue
+                try:
+                    os.remove(full_path)
+                    removed.append((root, rel_path))
+                except OSError:
+                    pass
+        scripts_dir = os.path.join(root, "scripts")
+        if os.path.isdir(scripts_dir):
+            try:
+                if not os.listdir(scripts_dir):
+                    os.rmdir(scripts_dir)
+            except OSError:
+                pass
+    return removed
+
+
 def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, onefile=False):
     release_dir = _get_release_dir(channel)
     if os.path.exists(release_dir):
@@ -729,6 +794,12 @@ def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, o
     if os.path.exists(micromamba_src):
         shutil.copy(micromamba_src, os.path.join(release_dir, "micromamba.exe"))
         print("   -> copied: micromamba.exe")
+
+    removed_internal_scripts = _prune_internal_test_scripts_from_release(release_dir, app_name)
+    if removed_internal_scripts:
+        print("   -> pruned internal/test scripts from release payload:")
+        for root, rel_path in removed_internal_scripts:
+            print(f"      {os.path.relpath(root, release_dir) or '.'}/{rel_path}")
 
     if os.name == "nt":
         release_exe = _resolve_release_executable_path(release_dir, app_name, onefile=onefile)
