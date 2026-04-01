@@ -1362,6 +1362,85 @@ class AppRuntimeMixin:
             self._refresh_ml_backend_status()
         self._append_log("개발자 설정을 기본값으로 초기화했습니다.")
 
+    def _reset_all_settings_defaults(self):
+        ask_fn = getattr(self, "_ask_yes_no_dialog_sync", None)
+        if callable(ask_fn):
+            confirm = bool(
+                ask_fn(
+                    "전체 초기화",
+                    "모든 설정을 기본값으로 초기화할까요?",
+                    default=False,
+                )
+            )
+        else:
+            confirm = bool(
+                messagebox.askyesno(
+                    "전체 초기화",
+                    "모든 설정을 기본값으로 초기화할까요?",
+                )
+            )
+        if not confirm:
+            return False
+
+        keep_paths = True
+        if callable(ask_fn):
+            keep_paths = bool(
+                ask_fn(
+                    "경로 유지",
+                    "현재 경로(wav/base oto/output oto)를 유지할까요?",
+                    default=True,
+                )
+            )
+        else:
+            keep_paths = bool(
+                messagebox.askyesno(
+                    "경로 유지",
+                    "현재 경로(wav/base oto/output oto)를 유지할까요?",
+                    default="yes",
+                )
+            )
+
+        if hasattr(self, "_reset_developer_settings_defaults"):
+            try:
+                self._reset_developer_settings_defaults()
+            except Exception:
+                pass
+
+        if hasattr(self, "openutau_var"):
+            try:
+                self.openutau_var.set(False)
+            except Exception:
+                pass
+
+        if not keep_paths:
+            for entry_name in ("wav_entry", "tpl_entry", "out_entry"):
+                entry = getattr(self, entry_name, None)
+                if entry is None:
+                    continue
+                try:
+                    entry.configure(state="normal")
+                except Exception:
+                    pass
+                try:
+                    entry.delete(0, "end")
+                except Exception:
+                    pass
+
+        if hasattr(self, "_save_config"):
+            try:
+                self._save_config()
+            except Exception:
+                pass
+        if hasattr(self, "_append_log"):
+            try:
+                if keep_paths:
+                    self._append_log("전체 설정을 기본값으로 초기화했습니다. 경로는 유지했습니다.")
+                else:
+                    self._append_log("전체 설정을 기본값으로 초기화했습니다. 경로를 함께 초기화했습니다.")
+            except Exception:
+                pass
+        return True
+
     @staticmethod
     def _normalize_mapping_strict_mode_code(value: str) -> str:
         raw = str(value or "").strip().lower()

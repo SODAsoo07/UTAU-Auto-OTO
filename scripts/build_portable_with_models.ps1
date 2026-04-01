@@ -29,10 +29,30 @@ if ([string]::IsNullOrWhiteSpace($OutputZip)) {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$sourceAbs = Join-Path $repoRoot $SourceDir
-$modelsAbs = Join-Path $repoRoot $ModelDir
-$workAbs = Join-Path $repoRoot $WorkDir
-$outputAbs = Join-Path $repoRoot $OutputZip
+function Resolve-AbsolutePath {
+    param(
+        [string]$InputPath,
+        [string]$BasePath
+    )
+    if ([string]::IsNullOrWhiteSpace($InputPath)) {
+        return ""
+    }
+    $candidate = if ([System.IO.Path]::IsPathRooted($InputPath)) {
+        $InputPath
+    } else {
+        Join-Path $BasePath $InputPath
+    }
+    $resolved = Resolve-Path -LiteralPath $candidate -ErrorAction SilentlyContinue
+    if ($resolved) {
+        return $resolved.Path
+    }
+    return [System.IO.Path]::GetFullPath($candidate)
+}
+
+$sourceAbs = Resolve-AbsolutePath -InputPath $SourceDir -BasePath $repoRoot
+$modelsAbs = Resolve-AbsolutePath -InputPath $ModelDir -BasePath $repoRoot
+$workAbs = Resolve-AbsolutePath -InputPath $WorkDir -BasePath $repoRoot
+$outputAbs = Resolve-AbsolutePath -InputPath $OutputZip -BasePath $repoRoot
 
 function New-PortableTopShortcut {
     param(
