@@ -86,3 +86,5 @@ models_installed/
 /micromamba
 /.env_ctc
 /temp
+/.code-review-graph
+/code-review-graph

@@ -2773,6 +2773,8 @@ class PipelineActionsMixin:
                     self._set_status("3/5 - 정렬 건너뛰기(no-MFA)")
                 elif primary_engine == "ctc":
                     self._set_status("3/5 - CTC 정렬 준비 중...")
+                elif primary_engine == "sequence":
+                    self._set_status("3/5 - 전용 시퀀스 정렬 준비 중...")
                 else:
                     self._set_status("3/5 - MFA 정렬 준비 중...")
                     if not self._ensure_mfa_ready_for_language(lang):
@@ -2790,6 +2792,8 @@ class PipelineActionsMixin:
                     self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
                 elif primary_engine == "ctc":
                     self._append_log("ℹ 정렬 엔진: CTC (MMS)")
+                elif primary_engine == "sequence":
+                    self._append_log("ℹ 정렬 엔진: 전용 시퀀스 baseline")
                 else:
                     self._append_log("ℹ 정렬 엔진: none (MFA 비사용)")
                 if hasattr(self, "_apply_advanced_tuning_envs"):

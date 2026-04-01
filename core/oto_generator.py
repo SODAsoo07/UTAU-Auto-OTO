@@ -14,7 +14,7 @@ from dataclasses import replace
 import logging
 from functools import lru_cache
 from types import SimpleNamespace
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 
 try:
     import numpy as np
@@ -118,6 +118,7 @@ from core.kr_generator_setup import prepare_kr_profile_setup
 from core.generator_finish import (
     GeneratorFinishContext,
     finalize_generator_finish,
+    write_jsonl_records,
     write_oto_lines,
 )
 from core.alignment_ingest import build_kr_alignment_ingest
@@ -4122,6 +4123,241 @@ def _normalize_alias_for_profile(alias):
     return canonicalize_alias_for_matching("korean", alias)
 
 
+def _is_high_pitch_context(
+    *,
+    pitch_zone: str = "",
+    note_hint_hz: float = 0.0,
+    f0_max_hz: float = 0.0,
+) -> bool:
+    zone = str(pitch_zone or "").strip().lower()
+    note_hz = float(note_hint_hz or 0.0)
+    f0_hi = float(f0_max_hz or 0.0)
+    high_note_hz = float(_env_float("UTOA_HIGH_PITCH_NOTE_HZ", 523.25))
+    return bool(
+        zone in {"high", "ultra_high"}
+        or note_hz >= high_note_hz
+        or f0_hi >= 860.0
+    )
+
+
+def resolve_file_routing_profile(
+    *,
+    file_format: str,
+    pitch_zone: str,
+    note_hint_hz: float,
+    f0_max_hz: float,
+    textgrid_trust_score: float,
+    textgrid_trust_tier: str,
+    mapping_confidence_base: float,
+    blank_conf_mean: float,
+    mel_reliability_score: float,
+    mel_reliability_floor: float,
+    file_mapping_low_conf: bool,
+    alignment_weight_base: float,
+    mel_weight_mode: str,
+    file_mapping_conf_th: float,
+) -> Dict[str, object]:
+    high_pitch_mode = _is_high_pitch_context(
+        pitch_zone=pitch_zone,
+        note_hint_hz=note_hint_hz,
+        f0_max_hz=f0_max_hz,
+    )
+    force_mel_branch = _should_force_mel_branch(
+        textgrid_trust_tier,
+        trust_score=textgrid_trust_score,
+        alignment_weight=alignment_weight_base,
+        mapping_confidence=mapping_confidence_base,
+        mel_reliability=mel_reliability_score,
+        mel_reliability_floor=mel_reliability_floor,
+    )
+    mode = str(mel_weight_mode or "")
+    if force_mel_branch:
+        mode = "mel_boost"
+    align_final = float(alignment_weight_base or 0.0)
+    if mode == "mel_boost":
+        align_final = _apply_mel_boost_alignment_scale(align_final, textgrid_trust_tier)
+    align_final = float(_clamp(align_final, 0.0, 1.0))
+
+    if high_pitch_mode:
+        profile_code = "high_pitch_safe"
+    elif str(textgrid_trust_tier or "").strip().lower() == "high" and mapping_confidence_base >= 0.72 and blank_conf_mean < 0.45:
+        profile_code = "alignment_strong"
+    elif str(textgrid_trust_tier or "").strip().lower() == "low" or file_mapping_low_conf or blank_conf_mean >= 0.58:
+        profile_code = "acoustic_safe"
+    else:
+        profile_code = "hybrid_soft"
+
+    delta_clamp_scale = 1.0
+    if profile_code == "acoustic_safe":
+        delta_clamp_scale = min(delta_clamp_scale, 0.85)
+    if high_pitch_mode:
+        delta_clamp_scale = min(
+            delta_clamp_scale,
+            float(_env_float("UTOA_HIGH_PITCH_DELTA_CLAMP_SCALE", 0.55)),
+        )
+    delta_clamp_scale = float(_clamp(delta_clamp_scale, 0.20, 1.00))
+
+    anchor_lock_lite_default = bool(
+        align_final < 0.58
+        or blank_conf_mean >= 0.55
+        or mapping_confidence_base < float(file_mapping_conf_th)
+        or mel_reliability_score < float(mel_reliability_floor)
+        or high_pitch_mode
+    )
+
+    row_blank_floor = None
+    fmt_norm = str(file_format or "").strip().lower()
+    if fmt_norm in {"cvvc", "cvc", "cv"}:
+        need_blank_gate = bool(file_mapping_low_conf or blank_conf_mean >= 0.45)
+        if profile_code in {"acoustic_safe", "high_pitch_safe"}:
+            need_blank_gate = True
+        if need_blank_gate:
+            env_key_by_fmt = {
+                "cvvc": "UTOA_KR_CVVC_ROW_BLANK_FLOOR",
+                "cvc": "UTOA_KR_CVC_ROW_BLANK_FLOOR",
+                "cv": "UTOA_KR_CV_ROW_BLANK_FLOOR",
+            }
+            default_floor_by_fmt = {
+                "cvvc": 0.64,
+                "cvc": 0.62,
+                "cv": 0.60,
+            }
+            row_blank_floor = _env_float(
+                env_key_by_fmt.get(fmt_norm, "UTOA_KR_CVVC_ROW_BLANK_FLOOR"),
+                default_floor_by_fmt.get(fmt_norm, 0.64),
+            )
+            if high_pitch_mode:
+                row_blank_floor += float(_env_float("UTOA_HIGH_PITCH_ROW_BLANK_FLOOR_BONUS", 0.04))
+            row_blank_floor = float(_clamp(row_blank_floor, 0.30, 0.95))
+
+    return {
+        "profile_code": str(profile_code),
+        "alignment_weight_base": float(alignment_weight_base),
+        "alignment_weight_final": float(align_final),
+        "force_mel_branch": bool(force_mel_branch),
+        "anchor_lock_lite_default": bool(anchor_lock_lite_default),
+        "row_blank_floor": row_blank_floor,
+        "delta_clamp_scale": float(delta_clamp_scale),
+        "high_pitch_mode": bool(high_pitch_mode),
+        "mel_weight_mode": str(mode),
+    }
+
+
+def _apply_mode_rank(mode: str) -> int:
+    key = str(mode or "").strip().lower()
+    order = {
+        "full_apply": 0,
+        "conservative_apply": 1,
+        "template_preserve": 2,
+        "review_required": 3,
+    }
+    return int(order.get(key, 0))
+
+
+def decide_row_application(
+    *,
+    routing_profile: str,
+    pitch_zone: str,
+    row_mapping_confidence: float,
+    row_conf_floor: float,
+    row_blank_confidence: Optional[float],
+    row_blank_floor: Optional[float],
+    row_jump_blocked: int,
+    forced_selected: bool,
+    file_mapping_low_conf: bool,
+    row_abstain_skip: bool,
+    row_abstain_reason: str = "",
+) -> Dict[str, object]:
+    reasons = []
+    mode = "full_apply"
+
+    if row_abstain_skip:
+        reason = str(row_abstain_reason or "row_abstain").strip().lower() or "row_abstain"
+        return {
+            "mode": "review_required",
+            "reason_code": reason,
+            "reasons": [reason],
+        }
+
+    if file_mapping_low_conf or float(row_mapping_confidence) < float(row_conf_floor):
+        mode = "conservative_apply"
+        reasons.append("low_model_conf")
+    if (
+        row_blank_floor is not None
+        and row_blank_confidence is not None
+        and float(row_blank_confidence) >= float(row_blank_floor)
+    ):
+        mode = "conservative_apply"
+        reasons.append("blank_conf_high")
+    if int(row_jump_blocked or 0) > 0:
+        mode = "conservative_apply"
+        reasons.append("jump_blocked")
+    if bool(forced_selected) and mode in {"full_apply", "conservative_apply"}:
+        mode = "template_preserve"
+        reasons.append("plan_mismatch")
+
+    high_pitch_mode = _is_high_pitch_context(
+        pitch_zone=pitch_zone,
+        note_hint_hz=0.0,
+        f0_max_hz=0.0,
+    )
+    if high_pitch_mode and mode != "review_required":
+        if float(row_mapping_confidence) < max(0.0, float(row_conf_floor) - 0.06):
+            mode = "review_required"
+            reasons.append("high_pitch_unstable")
+
+    if str(routing_profile or "").strip().lower() == "high_pitch_safe" and mode == "full_apply":
+        mode = "conservative_apply"
+        reasons.append("high_pitch_unstable")
+
+    reason_code = str(reasons[0]) if reasons else ""
+    return {
+        "mode": str(mode),
+        "reason_code": reason_code,
+        "reasons": list(reasons),
+    }
+
+
+def _apply_conservative_delta_clamp(
+    *,
+    mode: str,
+    delta_clamp_scale: float,
+    pitch_zone: str,
+    base_shape: Optional[Dict[str, float]],
+    offset: float,
+    consonant: float,
+    cutoff: float,
+    pre: float,
+    ovl: float,
+) -> Tuple[float, float, float, float, float]:
+    m = str(mode or "").strip().lower()
+    if m not in {"conservative_apply", "template_preserve"}:
+        return float(offset), float(consonant), float(cutoff), float(pre), float(ovl)
+    if not isinstance(base_shape, dict):
+        return float(offset), float(consonant), float(cutoff), float(pre), float(ovl)
+
+    base_offset = float(base_shape.get("offset", offset) or offset)
+    base_cons = float(base_shape.get("cons", consonant) or consonant)
+    base_cutoff = float(base_shape.get("cutoff", cutoff) or cutoff)
+    base_pre = float(base_shape.get("pre", pre) or pre)
+    base_ovl = float(base_shape.get("ovl", ovl) or ovl)
+
+    scale = float(_clamp(delta_clamp_scale if delta_clamp_scale is not None else 0.75, 0.20, 1.00))
+    off = base_offset + ((float(offset) - base_offset) * scale)
+    cons = base_cons + ((float(consonant) - base_cons) * scale)
+    cut = base_cutoff + ((float(cutoff) - base_cutoff) * scale)
+    p = base_pre + ((float(pre) - base_pre) * scale)
+    o = base_ovl + ((float(ovl) - base_ovl) * scale)
+
+    if _is_high_pitch_context(pitch_zone=pitch_zone, note_hint_hz=0.0, f0_max_hz=0.0):
+        off_cap = float(_env_float("UTOA_HIGH_PITCH_OFFSET_CLAMP_MS", 12.0))
+        cut_cap = float(_env_float("UTOA_HIGH_PITCH_CUTOFF_CLAMP_MS", 10.0))
+        off = base_offset + float(_clamp(off - base_offset, -off_cap, off_cap))
+        cut = base_cutoff + float(_clamp(cut - base_cutoff, -cut_cap, cut_cap))
+
+    return validate_oto_params(off, cons, cut, p, o)
+
+
 def generate_oto(
     tg_folder,
     tpl_path,
@@ -4279,6 +4515,18 @@ def generate_oto(
     _record_unset = diagnostics.record_unset
     _record_unset_lines = diagnostics.record_unset_lines
     _log_unset_summary = diagnostics.log_unset_summary
+    row_apply_decisions = []
+    row_apply_mode_counts = {
+        "full_apply": 0,
+        "conservative_apply": 0,
+        "template_preserve": 0,
+        "review_required": 0,
+    }
+    review_queue_export = _env_bool("UTOA_REVIEW_QUEUE_EXPORT", True)
+    review_queue_path = os.path.join(
+        _anchor_log_dir,
+        f"review_queue_kr_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl",
+    )
 
     def _apply_kr_anchor_lock(
         *,
@@ -4984,63 +5232,51 @@ def generate_oto(
                     f"margin={mapping_margin:+.1f}, reason={mapping_reason_code})"
                 )
 
-            force_mel_branch = _should_force_mel_branch(
-                textgrid_trust_tier,
-                trust_score=textgrid_trust_score,
-                alignment_weight=alignment_weight_base,
-                mapping_confidence=mapping_confidence_base,
-                mel_reliability=mel_reliability_score,
-                mel_reliability_floor=mel_reliability_floor,
-            )
-            if force_mel_branch:
-                mel_weight_mode = "mel_boost"
-            alignment_weight = float(alignment_weight_base)
-            if mel_weight_mode == "mel_boost":
-                alignment_weight = _apply_mel_boost_alignment_scale(alignment_weight, textgrid_trust_tier)
-            alignment_weight = float(_clamp(alignment_weight, 0.0, 1.0))
-            anchor_lock_lite = bool(
-                alignment_weight < 0.58
-                or blank_conf_mean >= 0.55
-                or mapping_confidence_base < float(file_mapping_conf_th)
-                or mel_reliability_score < float(mel_reliability_floor)
-            )
-            log(
-                f"[MAP] {fname}: align_base={alignment_weight_base:.2f}, align_final={alignment_weight:.2f}, "
-                f"blank_mean={blank_conf_mean:.2f}, map_conf={mapping_confidence_base:.2f}, "
-                f"mel_rel={mel_reliability_score:.2f}/{mel_reliability_floor:.2f}, "
-                f"anchor_lock_lite={anchor_lock_lite}, "
-                f"mel_weight_mode={mel_weight_mode}, force_mel_branch={force_mel_branch}"
-            )
-
             file_mapping_low_conf = bool(runtime_policy.get("is_low_conf"))
             file_conf_floor = float(runtime_policy.get("file_conf_floor", file_mapping_conf_th))
             if mapping_confidence_base < file_conf_floor:
                 file_mapping_low_conf = True
             row_conf_floor = float(runtime_policy.get("row_conf_floor", file_mapping_conf_th))
             row_margin_floor = float(runtime_policy.get("row_margin_floor", 6.0))
-            row_blank_floor = None
-            fmt_norm = str(file_format or "").strip().lower()
-            if fmt_norm in {"cvvc", "cvc", "cv"}:
-                # CV ・・龍・ blank ・ｬ・・・､・､﨑卓擽 ・懍・﨑俯ｩｴ ・ｴ弡・ML ・ｴ・菩擽 ・ｼ・ｴ・簿摺 ・・・溢牟
-                # ・・・ｰ 甯護攵・川・ row-level blank gate・ｼ ・・・・ｲｩ﨑俾ｲ・・ｴ・､.
-                apply_blank_gate = bool(runtime_policy.get("strict_mode")) or bool(file_mapping_low_conf)
-                if blank_conf_mean >= 0.45 or file_mapping_low_conf:
-                    apply_blank_gate = True
-                if apply_blank_gate:
-                    env_key_by_fmt = {
-                        "cvvc": "UTOA_KR_CVVC_ROW_BLANK_FLOOR",
-                        "cvc": "UTOA_KR_CVC_ROW_BLANK_FLOOR",
-                        "cv": "UTOA_KR_CV_ROW_BLANK_FLOOR",
-                    }
-                    default_floor_by_fmt = {
-                        "cvvc": 0.64,
-                        "cvc": 0.62,
-                        "cv": 0.60,
-                    }
-                    row_blank_floor = _env_float(
-                        env_key_by_fmt.get(fmt_norm, "UTOA_KR_CVVC_ROW_BLANK_FLOOR"),
-                        default_floor_by_fmt.get(fmt_norm, 0.64),
-                    )
+            pitch_zone_for_file = str(mel_ctx_for_file.get("f0_pitch_zone", "") if mel_ctx_for_file else "").strip().lower()
+            note_hint_hz_for_file = float(mel_ctx_for_file.get("f0_note_hint_hz", 0.0) or 0.0) if mel_ctx_for_file else 0.0
+            f0_max_hz_for_file = float(mel_ctx_for_file.get("f0_max_hz", 0.0) or 0.0) if mel_ctx_for_file else 0.0
+            routing_profile = resolve_file_routing_profile(
+                file_format=str(file_format or ""),
+                pitch_zone=pitch_zone_for_file,
+                note_hint_hz=note_hint_hz_for_file,
+                f0_max_hz=f0_max_hz_for_file,
+                textgrid_trust_score=float(textgrid_trust_score),
+                textgrid_trust_tier=str(textgrid_trust_tier or ""),
+                mapping_confidence_base=float(mapping_confidence_base),
+                blank_conf_mean=float(blank_conf_mean),
+                mel_reliability_score=float(mel_reliability_score),
+                mel_reliability_floor=float(mel_reliability_floor),
+                file_mapping_low_conf=bool(file_mapping_low_conf),
+                alignment_weight_base=float(alignment_weight_base),
+                mel_weight_mode=str(mel_weight_mode or ""),
+                file_mapping_conf_th=float(file_mapping_conf_th),
+            )
+            force_mel_branch = bool(routing_profile.get("force_mel_branch"))
+            mel_weight_mode = str(routing_profile.get("mel_weight_mode") or mel_weight_mode)
+            alignment_weight = float(routing_profile.get("alignment_weight_final", alignment_weight_base))
+            anchor_lock_lite = bool(routing_profile.get("anchor_lock_lite_default", False))
+            row_blank_floor = routing_profile.get("row_blank_floor")
+            delta_clamp_scale = float(routing_profile.get("delta_clamp_scale", 1.0))
+            routing_profile_code = str(routing_profile.get("profile_code") or "hybrid_soft")
+            log(
+                f"[ROUTING] file={fname} profile={routing_profile_code} "
+                f"trust={textgrid_trust_score:.2f} blank={blank_conf_mean:.2f} "
+                f"mel_rel={mel_reliability_score:.2f} align={alignment_weight:.2f}"
+            )
+            log(
+                f"[MAP] {fname}: align_base={alignment_weight_base:.2f}, align_final={alignment_weight:.2f}, "
+                f"blank_mean={blank_conf_mean:.2f}, map_conf={mapping_confidence_base:.2f}, "
+                f"mel_rel={mel_reliability_score:.2f}/{mel_reliability_floor:.2f}, "
+                f"anchor_lock_lite={anchor_lock_lite}, "
+                f"mel_weight_mode={mel_weight_mode}, force_mel_branch={force_mel_branch}, "
+                f"delta_clamp_scale={delta_clamp_scale:.2f}"
+            )
             if isinstance(runtime_report, dict):
                 low_conf_reasons = list(runtime_policy.get("low_conf_reasons") or [])
                 if blank_conf_mean >= 0.55 and "blank_confidence_high" not in low_conf_reasons:
@@ -5054,6 +5290,7 @@ def generate_oto(
                     "mapping_tier": str(runtime_policy.get("mapping_tier") or ""),
                     "trust_score": float(textgrid_trust_score),
                     "trust_tier": str(textgrid_trust_tier or ""),
+                    "routing_profile": str(routing_profile_code),
                     "alignment_weight_base": float(alignment_weight_base),
                     "alignment_weight": float(alignment_weight),
                     "file_conf_floor": float(file_conf_floor),
@@ -5067,6 +5304,13 @@ def generate_oto(
                     "mel_weight_mode": str(mel_weight_mode),
                     "force_mel_branch": bool(force_mel_branch),
                     "anchor_lock_lite": bool(anchor_lock_lite),
+                    "delta_clamp_scale": float(delta_clamp_scale),
+                    "high_pitch_mode": bool(routing_profile.get("high_pitch_mode", False)),
+                    "row_blank_floor": (
+                        float(row_blank_floor)
+                        if row_blank_floor is not None
+                        else None
+                    ),
                     "plan_source": str(kr_cv_plan.get("source") or ""),
                     "plan_margin": float((kr_cv_plan.get("meta") or {}).get("margin", 0.0) or 0.0),
                     "plan_coverage": float(kr_plan_policy.get("coverage", 0.0) or 0.0),
@@ -5206,6 +5450,8 @@ def generate_oto(
                 base_shape = _extract_base_timing_shape(line)
                 row_mapping_confidence = float(mapping_confidence_base)
                 row_jump_blocked = 0
+                row_apply_mode = "full_apply"
+                row_apply_reason_code = ""
 
 
                 alias_type = _classify_alias_cached(alias)
@@ -5541,6 +5787,7 @@ def generate_oto(
                         if row_blank_floor is not None
                         else 0.62
                     )
+                    row_blank_conf = _blank_conf_at(syllable_blank_confidences, selected_w_idx)
                     row_abstain = decide_cv_row_abstain(
                         alias_type=alias_type,
                         alias_text=alias,
@@ -5556,7 +5803,7 @@ def generate_oto(
                         min_confidence_margin=row_margin_floor,
                         row_confidence=row_mapping_confidence,
                         min_row_confidence=row_conf_floor,
-                        blank_confidence=_blank_conf_at(syllable_blank_confidences, selected_w_idx),
+                        blank_confidence=row_blank_conf,
                         max_blank_confidence=row_blank_floor_safe,
                         # CVC・・甯護攵/・護・孖ｹ・ｱ・・margin ・・呷擽 ・､ CV ・・龍・ｴ ・ｼ・・・､墲ｵ・ ・・・溢牟
                         # row-level abstain ・護擽孖ｸ・ｼ CV/CVVC・尖ｧ・・・圸﨑罹共.
@@ -5570,23 +5817,66 @@ def generate_oto(
                             "vcv": max(0.0, row_blank_floor_safe - 0.02),
                         },
                     )
-                    if row_abstain.get("should_skip"):
+                    row_apply = decide_row_application(
+                        routing_profile=routing_profile_code,
+                        pitch_zone=pitch_zone_for_file,
+                        row_mapping_confidence=row_mapping_confidence,
+                        row_conf_floor=row_conf_floor,
+                        row_blank_confidence=row_blank_conf,
+                        row_blank_floor=row_blank_floor,
+                        row_jump_blocked=row_jump_blocked,
+                        forced_selected=forced_selected_idx is not None,
+                        file_mapping_low_conf=file_mapping_low_conf,
+                        row_abstain_skip=bool(row_abstain.get("should_skip")),
+                        row_abstain_reason=str(row_abstain.get("reason") or ""),
+                    )
+                    row_apply_mode = str(row_apply.get("mode") or "full_apply")
+                    row_apply_reason_code = str(row_apply.get("reason_code") or "")
+                    if row_apply_mode in row_apply_mode_counts:
+                        row_apply_mode_counts[row_apply_mode] = int(row_apply_mode_counts[row_apply_mode]) + 1
+                    else:
+                        row_apply_mode_counts[row_apply_mode] = 1
+                    row_apply_decisions.append(
+                        {
+                            "file": str(fname),
+                            "alias": str(alias),
+                            "alias_type": str(alias_type),
+                            "format_type": str(file_format or ""),
+                            "selected_w_idx": int(selected_w_idx) if selected_w_idx is not None else -1,
+                            "mapping_confidence": float(row_mapping_confidence),
+                            "blank_confidence": float(row_blank_conf) if row_blank_conf is not None else None,
+                            "row_blank_floor": float(row_blank_floor_safe),
+                            "apply_mode": str(row_apply_mode),
+                            "reason_code": str(row_apply_reason_code),
+                            "reasons": list(row_apply.get("reasons") or []),
+                            "routing_profile": str(routing_profile_code),
+                            "pitch_zone": str(pitch_zone_for_file),
+                        }
+                    )
+                    if row_apply_mode == "review_required":
                         if kr_mapping_debug_reason_logging:
                             log(
                                 f"[WARN] {fname}: KR 행 보정 스킵 "
-                                f"({row_abstain.get('reason')}, {alias})"
+                                f"({row_apply_reason_code or row_abstain.get('reason')}, {alias})"
                             )
                         _record_unset(
-                            str(row_abstain.get("reason") or "row_abstain"),
+                            str(row_apply_reason_code or row_abstain.get("reason") or "review_required"),
                             fname,
                             line,
-                            meta={"diag_hint": row_abstain.get("diag_hint", "")},
+                            meta={
+                                "diag_hint": str(row_abstain.get("diag_hint", "") or ""),
+                                "apply_mode": str(row_apply_mode),
+                                "routing_profile": str(routing_profile_code),
+                            },
                         )
                         if use_template:
                             # 奛懦伯・ｿ ・ｨ・懍乱・罹株 ・､﨑卓擽 ・逸剳・､﨑・嵂餓擽・ｼ・・・ｰ・ｴ alias・ｼ ・ｴ・ｴ﨑罹共.
                             final_lines.append(
                                 apply_suffix_to_oto_line(line, alias_suffix)
                             )
+                        continue
+                    if row_apply_mode == "template_preserve" and use_template:
+                        final_lines.append(apply_suffix_to_oto_line(line, alias_suffix))
                         continue
                     current_w_idx = max(current_w_idx, selected_w_idx)
                     selected_w_idx, curr_phones, c_start, c_end, n_start, n_end = _prepare_cv_bounds_from_syllable(
@@ -5829,6 +6119,23 @@ def generate_oto(
                             f"[MAP] {fname}: CV 포커스 가드 적용 "
                             f"(offset -{cv_offset_pulled:.1f}ms, cutoff -{cv_cutoff_trimmed:.1f}ms) [{alias}]"
                         )
+                if row_apply_mode in {"conservative_apply", "template_preserve"}:
+                    offset, consonant, cutoff, pre, ovl = _apply_conservative_delta_clamp(
+                        mode=row_apply_mode,
+                        delta_clamp_scale=delta_clamp_scale,
+                        pitch_zone=pitch_zone_for_file,
+                        base_shape=base_shape,
+                        offset=offset,
+                        consonant=consonant,
+                        cutoff=cutoff,
+                        pre=pre,
+                        ovl=ovl,
+                    )
+                    if kr_mapping_debug_reason_logging:
+                        log(
+                            f"[ROW] {fname}: mode={row_apply_mode} reason={row_apply_reason_code or '-'} "
+                            f"delta_scale={delta_clamp_scale:.2f} alias={alias}"
+                        )
                 _run_kr_general_row_v2(
                     final_lines=final_lines,
                     real_wav_name=output_wav_name,
@@ -6014,6 +6321,31 @@ def generate_oto(
         err = f"OTO 저장 실패: {e}"
         logger.error(err)
         errors.append(err)
+
+    if review_queue_export:
+        try:
+            review_rows = [
+                row
+                for row in row_apply_decisions
+                if str(row.get("apply_mode", "")).strip().lower() in {
+                    "conservative_apply",
+                    "template_preserve",
+                    "review_required",
+                }
+            ]
+            if review_rows:
+                written = write_jsonl_records(review_queue_path, review_rows)
+                log(f"[REVIEW] review queue exported: {written} rows -> {review_queue_path}")
+        except Exception as e:
+            log(f"[REVIEW] review queue export failed: {e}")
+
+    if isinstance(runtime_report, dict):
+        runtime_report["row_apply_mode_counts"] = {
+            str(k): int(v)
+            for k, v in dict(row_apply_mode_counts).items()
+        }
+        if review_queue_export and row_apply_decisions:
+            runtime_report["review_queue_path"] = str(review_queue_path)
 
     finalize_generator_finish(finish_context)
 
