@@ -128,13 +128,18 @@ def _convert_ja_internal_cutoff_to_oto_field(oto_path, wav_dir):
     """
     from core.ja_oto_generator import _parse_oto_line_profile, normalize_key
     from core.ja_oto_mapping import classify_ja_alias
+    from core.oto_encoding import normalize_shift_jis_encoding, write_oto_lines_with_encoding
     from core.oto_generator import _find_wav_path_for_name, _wav_duration_ms
+    from core.textio_utils import read_text_auto
 
     if not oto_path or not os.path.exists(oto_path) or not os.path.isdir(wav_dir):
         return 0
 
-    with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
-        lines = f.read().splitlines()
+    raw_text, detected_encoding, _read_err = read_text_auto(oto_path)
+    if raw_text is None:
+        return 0
+    lines = str(raw_text).splitlines()
+    preferred_encoding = normalize_shift_jis_encoding(detected_encoding)
 
     wav_index = {}
     try:
@@ -205,8 +210,12 @@ def _convert_ja_internal_cutoff_to_oto_field(oto_path, wav_dir):
         out_lines.append(new_line)
 
     if changed:
-        with open(oto_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(out_lines).rstrip() + "\n")
+        write_oto_lines_with_encoding(
+            oto_path,
+            out_lines,
+            language="japanese",
+            preferred_encoding=preferred_encoding,
+        )
     return changed
 
 

@@ -55,6 +55,13 @@ def build_ja_alignment_ingest(file_ctx, loop_prep):
         "cv_targets": list(getattr(loop_prep, "cv_targets", []) or []),
         "detected_format": str(getattr(loop_prep, "detected_format", "") or ""),
         "format_type": str(getattr(loop_prep, "format_type", "") or ""),
+        "alignment_source": str(getattr(loop_prep, "alignment_source", getattr(file_ctx, "alignment_source", "")) or ""),
+        "alignment_source_reason": str(
+            getattr(loop_prep, "alignment_source_reason", getattr(file_ctx, "alignment_source_reason", "")) or ""
+        ),
+        "alignment_source_meta": dict(
+            getattr(loop_prep, "alignment_source_meta", getattr(file_ctx, "alignment_source_meta", {})) or {}
+        ),
         "ja_style_profile": getattr(loop_prep, "ja_style_profile", None),
         "forced_words_mapping": bool(getattr(loop_prep, "forced_words_mapping", False)),
         "conf_th": float(getattr(loop_prep, "conf_th", 0.0) or 0.0),
@@ -79,6 +86,9 @@ def build_kr_alignment_ingest(file_ctx, loop_prep):
         "filename_cv_targets": list(getattr(loop_prep, "filename_cv_targets", []) or []),
         "targets_for_build": list(getattr(loop_prep, "targets_for_build", []) or []),
         "force_words_phone_fill": bool(getattr(loop_prep, "force_words_phone_fill", False)),
+        "alignment_source": str(getattr(file_ctx, "alignment_source", "") or ""),
+        "alignment_source_reason": str(getattr(file_ctx, "alignment_source_reason", "") or ""),
+        "alignment_source_meta": dict(getattr(file_ctx, "alignment_source_meta", {}) or {}),
         "sinsy_label_entries": list(getattr(file_ctx, "sinsy_label_entries", []) or []),
         "sinsy_label_path": str(getattr(file_ctx, "sinsy_label_path", "") or ""),
     }

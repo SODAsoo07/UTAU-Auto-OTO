@@ -20,6 +20,7 @@ from core.format_type_utils import normalize_auto_format_value
 from core.log_events import classify_log_message, log_with_event
 from core.mfa_runner import ALERT_MFA_PERMISSION_DENIED, ALERT_MSVC_REQUIRED
 from core.oto_validator import validate_oto_timing
+from core.runtime_paths import resolve_setup_mfa_script_path
 from ui.theme_tokens import DEFAULT_THEME_PROFILE, PALETTE, normalize_theme_profile_name
 
 _HANGUL_CHAR_RE = re.compile(r"[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7A3]")
@@ -1361,6 +1362,85 @@ class AppRuntimeMixin:
             self._refresh_ml_backend_status()
         self._append_log("개발자 설정을 기본값으로 초기화했습니다.")
 
+    def _reset_all_settings_defaults(self):
+        ask_fn = getattr(self, "_ask_yes_no_dialog_sync", None)
+        if callable(ask_fn):
+            confirm = bool(
+                ask_fn(
+                    "전체 초기화",
+                    "모든 설정을 기본값으로 초기화할까요?",
+                    default=False,
+                )
+            )
+        else:
+            confirm = bool(
+                messagebox.askyesno(
+                    "전체 초기화",
+                    "모든 설정을 기본값으로 초기화할까요?",
+                )
+            )
+        if not confirm:
+            return False
+
+        keep_paths = True
+        if callable(ask_fn):
+            keep_paths = bool(
+                ask_fn(
+                    "경로 유지",
+                    "현재 경로(wav/base oto/output oto)를 유지할까요?",
+                    default=True,
+                )
+            )
+        else:
+            keep_paths = bool(
+                messagebox.askyesno(
+                    "경로 유지",
+                    "현재 경로(wav/base oto/output oto)를 유지할까요?",
+                    default="yes",
+                )
+            )
+
+        if hasattr(self, "_reset_developer_settings_defaults"):
+            try:
+                self._reset_developer_settings_defaults()
+            except Exception:
+                pass
+
+        if hasattr(self, "openutau_var"):
+            try:
+                self.openutau_var.set(False)
+            except Exception:
+                pass
+
+        if not keep_paths:
+            for entry_name in ("wav_entry", "tpl_entry", "out_entry"):
+                entry = getattr(self, entry_name, None)
+                if entry is None:
+                    continue
+                try:
+                    entry.configure(state="normal")
+                except Exception:
+                    pass
+                try:
+                    entry.delete(0, "end")
+                except Exception:
+                    pass
+
+        if hasattr(self, "_save_config"):
+            try:
+                self._save_config()
+            except Exception:
+                pass
+        if hasattr(self, "_append_log"):
+            try:
+                if keep_paths:
+                    self._append_log("전체 설정을 기본값으로 초기화했습니다. 경로는 유지했습니다.")
+                else:
+                    self._append_log("전체 설정을 기본값으로 초기화했습니다. 경로를 함께 초기화했습니다.")
+            except Exception:
+                pass
+        return True
+
     @staticmethod
     def _normalize_mapping_strict_mode_code(value: str) -> str:
         raw = str(value or "").strip().lower()
@@ -2270,41 +2350,13 @@ class AppRuntimeMixin:
         )
 
     def _resolve_setup_mfa_script_path(self):
-        candidates = []
-        app_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if app_dir:
-            candidates.append(os.path.join(app_dir, "setup_mfa.bat"))
-            candidates.append(os.path.join(os.path.dirname(app_dir), "setup_mfa.bat"))
-        exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", ""))) if getattr(sys, "frozen", False) else ""
-        if exe_dir:
-            candidates.append(os.path.join(exe_dir, "setup_mfa.bat"))
-            candidates.append(os.path.join(os.path.dirname(exe_dir), "setup_mfa.bat"))
-        local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
-        if local_app_data:
-            candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO", "setup_mfa.bat"))
-            candidates.append(os.path.join(local_app_data, "UTAU_Auto_OTO_v3", "setup_mfa.bat"))
-        try:
-            candidates.append(os.path.join(os.getcwd(), "setup_mfa.bat"))
-        except Exception:
-            pass
-        app_data_dir = str(getattr(self, "app_data_dir", "") or "").strip()
-        if app_data_dir:
-            candidates.append(os.path.join(app_data_dir, "setup_mfa.bat"))
-        writable_data_dir = str(getattr(self, "writable_data_dir", "") or "").strip()
-        if writable_data_dir:
-            candidates.append(os.path.join(writable_data_dir, "setup_mfa.bat"))
-
-        seen = set()
-        for candidate in candidates:
-            if not candidate:
-                continue
-            norm = os.path.normcase(os.path.abspath(candidate))
-            if norm in seen:
-                continue
-            seen.add(norm)
-            if os.path.isfile(candidate):
-                return candidate
-        return ""
+        return resolve_setup_mfa_script_path(
+            app_dir=str(getattr(self, "app_dir", "") or ""),
+            app_data_dir=str(getattr(self, "app_data_dir", "") or ""),
+            writable_data_dir=str(getattr(self, "writable_data_dir", "") or ""),
+            frozen=bool(getattr(sys, "frozen", False)),
+            executable_path=str(getattr(sys, "executable", "") or ""),
+        )
 
     def _build_setup_mfa_recovery_guide(self):
         script_path = self._resolve_setup_mfa_script_path()
@@ -3499,8 +3551,9 @@ class ConfigMixin:
                 except Exception:
                     saved_aligner = "mfa"
                 aligner_label_map = {
-                    "none": "No-MFA",
+                    "none": "MFA",
                     "ctc": "CTC",
+                    "sequence": "전용(시퀀스)",
                     "mfa": "MFA",
                 }
                 self.aligner_var.set(aligner_label_map.get(saved_aligner, "MFA"))
@@ -3534,6 +3587,16 @@ class ConfigMixin:
                     "speed",
                 }:
                     self.mfa_align_profile_var.set("\ube60\ub984")
+                elif compact in {
+                    "\uace0\uc5ed\ub300\uc548\uc815".replace(" ", ""),
+                    "\uace0\uc5ed\ub300".replace(" ", ""),
+                    "high_pitch_accurate",
+                    "highpitchaccurate",
+                    "high_pitch",
+                    "high-pitch",
+                    "c5",
+                }:
+                    self.mfa_align_profile_var.set("\uace0\uc5ed\ub300 \uc548\uc815")
                 elif compact in {
                     "\uc815\ubc00+\ud654\uc790\uc801\uc751".replace(" ", ""),
                     "\uc815\ud655\ub3c4\uc6b0\uc120+\ud654\uc790\uc801\uc751".replace(" ", ""),

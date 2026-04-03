@@ -56,12 +56,29 @@ def normalize_aligner_name(value, default: str = "mfa") -> str:
         return "mfa"
     if text in {"ctc", "mms", "mms-fa", "mms_fa", "torchaudio-ctc", "torchaudio_ctc"}:
         return "ctc"
+    if text in {
+        "sequence",
+        "seq",
+        "sequence_label",
+        "sequence-label",
+        "sequence_labeling",
+        "시퀀스",
+        "전용(시퀀스)",
+        "전용시퀀스",
+        "dedicated",
+        "dedicated_aligner",
+        "utau-sequence",
+        "utau_sequence",
+    }:
+        return "sequence"
     if text in {"domino", "pydomino", "domino (jp)", "domino(jp)", "jp_domino", "jp-domino"}:
         return "domino"
     if "no-mfa" in text or "nomfa" in text:
         return "none"
     if "ctc" in text:
         return "ctc"
+    if "sequence" in text or "dedicated" in text or "시퀀스" in text:
+        return "sequence"
     if "domino" in text:
         return "domino"
     return default
@@ -135,6 +152,8 @@ def classify_alignment_error(engine: str, message: str) -> str:
         or "ctc runtime import failed" in lowered
     ):
         return ALIGN_EXEC_MISSING
+    if eng == "sequence" and ("python-textgrid" in lowered or "textgrid import" in lowered):
+        return ALIGN_NOT_READY
     if eng == "ctc" and ("mms" in lowered or "bundle" in lowered or "model" in lowered):
         return ALIGN_MODEL_MISSING
     return ALIGN_RUN_FAILED
@@ -180,4 +199,3 @@ __all__ = [
     "normalize_ml_policy",
     "resolve_aligner_chain",
 ]
-

@@ -67,14 +67,15 @@ class AlignActionsMixin:
                 dict_filename = "japanese_dict.txt" if lang == "japanese" else "korean_dict.txt"
                 dict_path = os.path.join(wav_dir, dict_filename)
                 output_dir = os.path.join(wav_dir, "textgrids")
-                if hasattr(self, "_validate_alignment_input_files"):
-                    if not self._validate_alignment_input_files(wav_dir, dict_path):
-                        return
-
                 primary_engine = normalize_aligner_name(
                     self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
                     default="mfa",
                 )
+                if hasattr(self, "_validate_alignment_input_files"):
+                    needs_lab_dict = primary_engine in {"mfa", "ctc"}
+                    if needs_lab_dict and (not self._validate_alignment_input_files(wav_dir, dict_path)):
+                        return
+
                 mfa_profile = (
                     self._get_mfa_align_profile_code()
                     if hasattr(self, "_get_mfa_align_profile_code")
@@ -99,11 +100,15 @@ class AlignActionsMixin:
                             return
                 elif primary_engine == "ctc":
                     self._append_log("ℹ CTC 엔진 선택: torchaudio MMS 백엔드로 실행합니다.")
+                elif primary_engine == "sequence":
+                    self._append_log("ℹ 전용 시퀀스 aligner 엔진 선택: frame-hop 라벨 기반 정렬을 실행합니다.")
 
                 if primary_engine == "mfa":
                     self._append_log(f"MFA profile: {mfa_profile}")
                 elif primary_engine == "ctc":
                     self._append_log("Alignment engine: CTC (MMS)")
+                elif primary_engine == "sequence":
+                    self._append_log("Alignment engine: Dedicated Sequence")
                 else:
                     self._append_log("Alignment engine: none (MFA bypass)")
                 if hasattr(self, "_apply_advanced_tuning_envs"):
@@ -160,3 +165,4 @@ class AlignActionsMixin:
                 self._set_running(False)
 
         self._run_in_thread(task)
+

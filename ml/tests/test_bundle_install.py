@@ -144,11 +144,8 @@ class BundleInstallTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             model_dir = self._make_coupled_bundle(td)
             export_root = os.path.join(td, "exports")
-            manifest = export_model_bundle(model_dir, export_root, create_zip=True)
-            result = install_exported_bundle(manifest["zip_path"], install_root=os.path.join(td, "installed"))
-            self.assertTrue(os.path.isdir(result["installed_dir"]))
-            self.assertTrue(os.path.isfile(os.path.join(result["installed_dir"], "coupled_model.pt")))
-            self.assertTrue(result["installed_dir"].endswith(os.path.join("korean", "vcv", "v2")))
+            with self.assertRaisesRegex(ValueError, "no longer supported"):
+                export_model_bundle(model_dir, export_root, create_zip=True)
 
     def test_install_exported_ensemble_bundle(self):
         with tempfile.TemporaryDirectory() as td:

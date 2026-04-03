@@ -252,6 +252,11 @@ class TabBuildersMixin:
             if step_key == "align":
                 self.pipeline_step_align_btn = step_btn
 
+        if hasattr(self, "_sync_aligner_ui"):
+            self._sync_aligner_ui()
+        if hasattr(self, "_sync_developer_mode_ui"):
+            self._sync_developer_mode_ui()
+
         return action_panel
 
     def _slot_pipeline_mfa_status(self, parent, _layout_root, _node):

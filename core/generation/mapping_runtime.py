@@ -30,6 +30,59 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _sanitize_payload_value(value: Any):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return float(value)
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, tuple):
+        out = []
+        for item in value:
+            safe_item = _sanitize_payload_value(item)
+            if safe_item is not None:
+                out.append(safe_item)
+        return out
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            safe_item = _sanitize_payload_value(item)
+            if safe_item is not None:
+                out.append(safe_item)
+        return out
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key or "").strip()
+            if not key_text:
+                continue
+            safe_item = _sanitize_payload_value(item)
+            if safe_item is not None:
+                out[key_text] = safe_item
+        return out
+    return None
+
+
+def _sanitize_runtime_mapping_extras(extra_fields: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    extras = dict(extra_fields or {})
+    if not extras:
+        return {}
+    out: Dict[str, Any] = {}
+    for key, value in extras.items():
+        key_text = str(key or "").strip()
+        if not key_text:
+            continue
+        safe_value = _sanitize_payload_value(value)
+        if safe_value is not None:
+            out[key_text] = safe_value
+    return out
+
+
 def _sanitize_vc_bridge_tuning_payload(bridge_tuning: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     tuning = dict(bridge_tuning or {})
     if not tuning:
@@ -130,6 +183,7 @@ def update_kr_mapping_runtime_report(
     row_blank_floor: Optional[float] = None,
     vc_bridge_tuning: Optional[Dict[str, Any]] = None,
     vc_bridge_ab_summary: Optional[Dict[str, Any]] = None,
+    extra_fields: Optional[Dict[str, Any]] = None,
 ) -> None:
     report = _safe_report(runtime_report)
     if report is None:
@@ -163,6 +217,9 @@ def update_kr_mapping_runtime_report(
     ab_payload = _sanitize_vc_bridge_ab_payload(vc_bridge_ab_summary)
     if ab_payload:
         payload["vc_bridge_ab"] = ab_payload
+    extra_payload = _sanitize_runtime_mapping_extras(extra_fields)
+    if extra_payload:
+        payload.update(extra_payload)
     report["mapping"] = payload
 
 
@@ -189,6 +246,7 @@ def update_ja_mapping_runtime_report(
     forced_words_mapping: bool,
     vc_bridge_tuning: Optional[Dict[str, Any]] = None,
     vc_bridge_ab_summary: Optional[Dict[str, Any]] = None,
+    extra_fields: Optional[Dict[str, Any]] = None,
 ) -> None:
     report = _safe_report(runtime_report)
     if report is None:
@@ -222,6 +280,9 @@ def update_ja_mapping_runtime_report(
     ab_payload = _sanitize_vc_bridge_ab_payload(vc_bridge_ab_summary)
     if ab_payload:
         payload["vc_bridge_ab"] = ab_payload
+    extra_payload = _sanitize_runtime_mapping_extras(extra_fields)
+    if extra_payload:
+        payload.update(extra_payload)
     report["mapping"] = payload
 
 
