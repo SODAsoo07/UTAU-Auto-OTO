@@ -775,16 +775,43 @@ def run_ctc_align(
                 f"[CTC] aligned file={wav_name} words={len(words)} source={source}{extra}",
             )
         except Exception as exc:
-            err = f"{wav_name}: {exc}"
+            err_msg = str(exc)
+            err = f"{wav_name}: {err_msg}"
             errors.append(err)
             _emit(callback, f"[CTC] failed: {err}")
+            # TICKET-002: Abort immediately on fatal access-violation / memory errors
+            # that leave the process in an undefined state.
+            _fatal_markers = (
+                "code: 3221225477",
+                "code: -1073741819",
+                "access violation",
+            )
+            if any(m in err_msg.lower() for m in _fatal_markers):
+                _emit(callback, f"[CTC] fatal crash detected ({wav_name}), aborting CTC run")
+                return False, f"CTC fatal crash: access violation ({wav_name})"
 
+    total_files = len(wav_files)
     if ok_count <= 0:
         if errors:
             return False, f"CTC alignment failed: {errors[0]}"
         return False, "CTC alignment failed."
 
-    summary = f"ctc alignment complete ({ok_count}/{len(wav_files)})"
+    import os as _os
+    _min_ok_ratio = float(str(_os.environ.get("UTOA_CTC_MIN_OK_RATIO", "0.80")).strip() or "0.80")
+    try:
+        _min_ok_ratio = max(0.0, min(1.0, float(_min_ok_ratio)))
+    except Exception:
+        _min_ok_ratio = 0.80
+    ok_ratio = ok_count / max(total_files, 1)
+    if ok_ratio < _min_ok_ratio:
+        summary_partial = (
+            f"CTC partial failure: {ok_count}/{total_files} files succeeded "
+            f"(ok_ratio={ok_ratio:.2f} < min={_min_ok_ratio:.2f})"
+        )
+        _emit(callback, f"[CTC] {summary_partial}")
+        return False, summary_partial
+
+    summary = f"ctc alignment complete ({ok_count}/{total_files}, ok_ratio={ok_ratio:.2f})"
     if errors:
         summary += f"; {len(errors)} file(s) failed"
     return True, summary

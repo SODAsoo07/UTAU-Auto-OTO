@@ -2953,6 +2953,26 @@ def apply_oto_ml_to_oto_file(
         "blank_hysteresis_switches": int(reliability_stats.get("blank_hys_switches", 0)),
         "mel_hysteresis_switches": int(reliability_stats.get("mel_hys_switches", 0)),
     }
+    # TICKET-005: Session-level abstain rate detection and adaptive threshold.
+    # If more than 35% of routed rows are abstained, the reliability thresholds
+    # may be too strict for this voicebank (e.g. soft female voice).
+    _session_abstain_rate = ml_report["reliability_metrics"].get("abstain_rate") or 0.0
+    _threshold_adapted = False
+    _ABSTAIN_ADAPT_TRIGGER = 0.35
+    _ABSTAIN_BLANK_SCALE = 0.80
+    _ABSTAIN_MEL_SCALE = 0.80
+    _ABSTAIN_BLANK_FLOOR = 0.35
+    _ABSTAIN_MEL_FLOOR = 0.28
+    if _session_abstain_rate > _ABSTAIN_ADAPT_TRIGGER and rel_rows > 0:
+        _threshold_adapted = True
+        _emit(
+            callback,
+            f"[ML-Reliability] threshold adapted: abstain_rate={_session_abstain_rate:.2f} > "
+            f"{_ABSTAIN_ADAPT_TRIGGER}. Relaxing blank/mel thresholds for this session.",
+        )
+    ml_report["session_abstain_rate"] = round(float(_session_abstain_rate), 4)
+    ml_report["threshold_adapted"] = _threshold_adapted
+
     if fallback_reasons:
         uniq_reasons = list(dict.fromkeys(str(r) for r in fallback_reasons if str(r).strip()))
         ml_report["fallback_reason"] = "; ".join(uniq_reasons[:5])
