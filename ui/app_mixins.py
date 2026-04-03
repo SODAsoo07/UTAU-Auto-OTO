@@ -3588,16 +3588,6 @@ class ConfigMixin:
                 }:
                     self.mfa_align_profile_var.set("\ube60\ub984")
                 elif compact in {
-                    "\uace0\uc5ed\ub300\uc548\uc815".replace(" ", ""),
-                    "\uace0\uc5ed\ub300".replace(" ", ""),
-                    "high_pitch_accurate",
-                    "highpitchaccurate",
-                    "high_pitch",
-                    "high-pitch",
-                    "c5",
-                }:
-                    self.mfa_align_profile_var.set("\uace0\uc5ed\ub300 \uc548\uc815")
-                elif compact in {
                     "\uc815\ubc00+\ud654\uc790\uc801\uc751".replace(" ", ""),
                     "\uc815\ud655\ub3c4\uc6b0\uc120+\ud654\uc790\uc801\uc751".replace(" ", ""),
                     "accurate_adapted",
