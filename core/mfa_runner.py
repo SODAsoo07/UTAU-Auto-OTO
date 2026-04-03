@@ -71,16 +71,6 @@ MFA_ALIGN_PROFILE_PRESETS = {
         "num_jobs": 1,
         "speaker_adaptation": True,
     },
-    # High-register stabilization profile (C5+ conservative settings).
-    "high_pitch_accurate": {
-        "clean": True,
-        "fine_tune": True,
-        "textgrid_cleanup": True,
-        "beam": 1700,
-        "retry_beam": 6800,
-        "num_jobs": 1,
-        "speaker_adaptation": True,
-    },
     # Low-load profile for slower hardware.
     "fast": {
         "clean": True,
@@ -1489,16 +1479,6 @@ def _normalize_mfa_align_profile(profile):
     if p in {"fast", "quick", "lite", "speed"}:
         return "fast"
     if p in {
-        "high_pitch_accurate",
-        "high-pitch-accurate",
-        "high_pitch",
-        "high-pitch",
-        "high_register",
-        "high-register",
-        "c5",
-    }:
-        return "high_pitch_accurate"
-    if p in {
         "accurate_adapted",
         "adapted",
         "speaker_adapted",
@@ -2299,12 +2279,7 @@ def _resolve_mfa_runtime_options(
             recursive_skip_reason = "default profile"
         recursive_enabled = False
 
-    if resolved_profile == "high_pitch_accurate":
-        chunk_size_default = 60
-    elif resolved_profile in {"accurate", "accurate_adapted"}:
-        chunk_size_default = 72
-    else:
-        chunk_size_default = 96
+    chunk_size_default = 72 if resolved_profile in {"accurate", "accurate_adapted"} else 96
     chunk_size = chunk_size_default
     raw_chunk_size = str(raw.get("recursive_chunk_size", "") or "").strip()
     if raw_chunk_size:
