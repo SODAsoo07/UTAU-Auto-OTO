@@ -3020,39 +3020,50 @@ def generate_ja_oto(
                 continue
 
             alignment_ingest = build_ja_alignment_ingest(file_ctx, loop_prep)
+            wd_intervals = alignment_ingest.words
+            ph_intervals = alignment_ingest.phones
+            if len(ph_intervals) == 1:
+                try:
+                    one = ph_intervals[0]
+                    single_vowel_span_by_tg_path[_norm_tg_path_key(file_ctx.tg_path)] = (
+                        float(one.minTime) * 1000.0,
+                        float(one.maxTime) * 1000.0,
+                    )
+                except Exception:
+                    pass
+            filename_syllables = list(alignment_ingest.extra.get("filename_syllables") or [])
+            cv_targets = list(alignment_ingest.extra.get("cv_targets") or [])
+            sinsy_label_entries = list(alignment_ingest.extra.get("sinsy_label_entries") or [])
             from core.format_type_utils import normalize_format_type as _normalize_format_type
-            ingest_state = extract_ja_alignment_ingest_state(
-                alignment_ingest=alignment_ingest,
-                fallback_format=fallback_format,
-                normalize_format_type_fn=_normalize_format_type,
-            )
-            wd_intervals = ingest_state["wd_intervals"]
-            ph_intervals = ingest_state["ph_intervals"]
-            update_single_vowel_span_by_first_phone(
-                phone_intervals=ph_intervals,
-                tg_path=file_ctx.tg_path,
-                single_vowel_span_by_tg_path=single_vowel_span_by_tg_path,
-                norm_tg_path_key_fn=_norm_tg_path_key,
-            )
-            filename_syllables = ingest_state["filename_syllables"]
-            cv_targets = ingest_state["cv_targets"]
-            sinsy_label_entries = ingest_state["sinsy_label_entries"]
-            detected_format = ingest_state["detected_format"]
-            format_type = ingest_state["format_type"]
-            ja_style_profile = ingest_state["ja_style_profile"]
-            phone_quality = ingest_state["phone_quality"]
-            low_quality_reasons = ingest_state["low_quality_reasons"]
-            low_phone_quality = ingest_state["low_phone_quality"]
-            forced_words_mapping = bool(ingest_state["forced_words_mapping"])
-            timeline_start_ms = float(ingest_state["timeline_start_ms"])
-            effective_end_ms = float(ingest_state["effective_end_ms"])
-            phone_spans_ms = list(ingest_state["phone_spans_ms"])
-            conf_th = float(ingest_state["conf_th"])
-            textgrid_trust_score = float(ingest_state["textgrid_trust_score"])
-            textgrid_trust_tier = str(ingest_state["textgrid_trust_tier"])
-            prefer_filename_sequence = bool(ingest_state["prefer_filename_sequence"])
-            spn_ratio = float(ingest_state["spn_ratio"])
-            alignment_weight = float(ingest_state["alignment_weight"])
+
+            detected_format_raw = str(alignment_ingest.extra.get("detected_format") or "")
+            format_type_raw = str(alignment_ingest.extra.get("format_type") or "")
+            detected_format = _normalize_format_type("japanese", detected_format_raw)
+            format_type = _normalize_format_type("japanese", format_type_raw)
+            if format_type not in {"cv", "cvvc", "vcv", "vc_only", "br"}:
+                fallback_fmt = str(fallback_format or "").strip().lower()
+                if detected_format in {"cv", "cvvc", "vcv", "vc_only", "br"}:
+                    format_type = detected_format
+                elif fallback_fmt in {"cv", "cvvc", "vcv"}:
+                    format_type = fallback_fmt
+                else:
+                    format_type = "cvvc"
+            ja_style_profile = alignment_ingest.extra.get("ja_style_profile")
+            phone_quality = alignment_ingest.phone_quality
+            low_quality_reasons = alignment_ingest.low_quality_reasons
+            low_phone_quality = alignment_ingest.low_phone_quality
+            forced_words_mapping = bool(alignment_ingest.extra.get("forced_words_mapping"))
+            timeline_start_ms = float(alignment_ingest.timeline_meta.get("timeline_start_ms", 0.0) or 0.0)
+            effective_end_ms = float(alignment_ingest.timeline_meta.get("effective_end_ms", 0.0) or 0.0)
+            phone_spans_ms = list(alignment_ingest.timeline_meta.get("phone_spans_ms") or [])
+            conf_th = float(alignment_ingest.extra.get("conf_th", 0.0) or 0.0)
+            textgrid_trust_score = float(alignment_ingest.textgrid_trust_score or 0.0)
+            textgrid_trust_tier = str(alignment_ingest.textgrid_trust_tier or "low")
+            prefer_filename_sequence = bool(alignment_ingest.prefer_filename_sequence)
+            spn_ratio = float(phone_quality.get("spn_ratio_in_phone_tier", 0.0) or 0.0)
+            alignment_weight = _clamp01(textgrid_trust_score * 0.85)
+            if filename_syllables and alignment_weight < 0.55:
+                prefer_filename_sequence = True
 
             post_ctx = build_ja_postprocess_context(
                 phone_spans_ms=phone_spans_ms,
