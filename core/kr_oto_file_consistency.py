@@ -182,6 +182,9 @@ def enforce_adjacent_continuity(
         max_offset_adj = _max_offset_adj_ms()
         prev_row = rows[i]
         next_row = rows[i + 1]
+        # TICKET-004: Skip pair if either row is locked by TextGrid-anchored timing.
+        if prev_row.get("consistency_locked") or next_row.get("consistency_locked"):
+            continue
         prev_type = row_types[i]
         next_type = row_types[i + 1]
 
@@ -221,10 +224,15 @@ def enforce_adjacent_continuity(
                         changed += 1
 
         elif overlap_ms < min_overlap:
+            # TICKET-004: Check consistency_locked before extending cutoff.
+            if prev_row.get("consistency_locked"):
+                continue
             prev_offset = float(prev_row["offset"])
             curr_cut_abs = abs(float(prev_row["cutoff"]))
             target_cut_abs = next_offset + float(min_overlap) - prev_offset
-            max_extend = 160.0
+            # TICKET-004: max_extend now defaults to 80ms (halved from 160ms)
+            # to reduce risk of overextending into intentional inter-syllable gaps.
+            max_extend = _env_float("UTOA_KR_CONTINUITY_MAX_EXTEND", 80.0)
             new_cut_abs = min(max(curr_cut_abs, target_cut_abs), curr_cut_abs + max_extend)
             if new_cut_abs > curr_cut_abs + 1e-6:
                 before_state = _row_state(prev_row)
@@ -359,9 +367,24 @@ def _get_consonant_group(alias: str) -> str:
     return "other"
 
 
-def _smoothing_threshold_for_row(row_type: str) -> float:
+_FORTIS_PLOSIVES = {"kk", "tt", "pp", "gg", "dd", "bb"}
+
+
+def _smoothing_threshold_for_row(row_type: str, alias: str = "") -> float:
+    """Return the smoothing jump threshold for the given row type.
+
+    TICKET-004: Fortis/tense plosive CV rows use a higher threshold (0.65)
+    so that legitimate sharp onset transitions are not blended away.
+    """
     row_norm = str(row_type or "").strip().lower()
     if row_norm in _CV_LIKE_TYPES:
+        # TICKET-004: Raise threshold for fortis plosives to preserve sharp onset.
+        if alias:
+            import re as _re
+            clean = _re.sub(r"[^a-z]", "", str(alias).lower().split()[0] if " " in alias else str(alias).lower())
+            for length in range(min(3, len(clean)), 0, -1):
+                if clean[:length] in _FORTIS_PLOSIVES:
+                    return _env_float("UTOA_KR_SMOOTHING_THRESHOLD_FORTIS", 0.65)
         return _env_float("UTOA_KR_SMOOTHING_THRESHOLD_CVLIKE", 0.45)
     if row_norm == "vc":
         return _env_float("UTOA_KR_SMOOTHING_THRESHOLD_VC", 0.30)
@@ -386,13 +409,17 @@ def smooth_abrupt_changes(
     params_to_smooth = ["pre", "cons", "ovl", "cutoff_abs"]
 
     for i in range(1, len(rows)):
+        # TICKET-004: Skip rows that are locked by TextGrid-anchored timing.
+        if rows[i].get("consistency_locked"):
+            continue
         row_type = str(row_types[i] or "").strip().lower()
         if row_type != str(row_types[i - 1] or "").strip().lower():
             continue
         if _get_consonant_group(rows[i]["alias"]) != _get_consonant_group(rows[i - 1]["alias"]):
             continue
 
-        threshold_ratio = _smoothing_threshold_for_row(row_type)
+        # TICKET-004: Pass alias to get fortis-aware threshold.
+        threshold_ratio = _smoothing_threshold_for_row(row_type, alias=str(rows[i].get("alias", "")))
         blend_weight = _smoothing_blend_for_row(row_type)
         if row_type in _CV_LIKE_TYPES:
             params = ("pre", "ovl")

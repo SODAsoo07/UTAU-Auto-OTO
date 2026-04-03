@@ -3700,6 +3700,36 @@ def _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx):
         syl["blank_confidence"] = _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms)
         mel_scores = _estimate_kr_mel_class_scores_at_time(mel_ctx, t_ms)
         syl.update(mel_scores)
+        # TICKET-008: Annotate onset energy and onset-distance for candidate scoring.
+        syl["mel_onset_energy"] = 0.0
+        syl["mel_onset_distance_ms"] = 999.0
+        if mel_ctx and np is not None:
+            try:
+                times_ms = mel_ctx.get("times_ms")
+                en = mel_ctx.get("energy")
+                if times_ms is not None and en is not None and len(times_ms) > 0:
+                    _window = 25.0
+                    _mask = [
+                        i for i, tm in enumerate(times_ms)
+                        if t_ms <= tm <= t_ms + _window
+                    ]
+                    if _mask:
+                        syl["mel_onset_energy"] = float(max(en[i] for i in _mask))
+                    # Distance to nearest flux-based onset within ±50ms
+                    en_arr = np.asarray(en, dtype=np.float64)
+                    times_arr = np.asarray(times_ms, dtype=np.float64)
+                    flux = np.diff(en_arr, prepend=en_arr[0])
+                    p85 = np.percentile(flux, 85)
+                    onset_frames = np.where(
+                        (flux >= p85)
+                        & (times_arr >= t_ms - 50.0)
+                        & (times_arr <= t_ms + 50.0)
+                    )[0]
+                    if len(onset_frames) > 0:
+                        closest = min(abs(float(times_arr[fi]) - t_ms) for fi in onset_frames)
+                        syl["mel_onset_distance_ms"] = float(closest)
+            except Exception:
+                pass
     return syllables_info
 
 

@@ -205,7 +205,9 @@ def _pick_kr_mapping_only_idx(
                 text_score = 0.0
         blank = _blank_conf_at(syllable_blank_confidences, cand)
         sil = _mel_conf_at(syllables_info, cand, "mel_silence_sparse_conf", fallback=blank)
-        score = text_score - (abs(cand - expected) * 10.0) - (blank * 22.0) - (sil * 14.0)
+        # TICKET-008: Onset proximity bonus rewards candidates near a strong mel onset.
+        onset_bonus = _mel_onset_bonus(syllables_info, cand)
+        score = text_score - (abs(cand - expected) * 10.0) - (blank * 22.0) - (sil * 14.0) + onset_bonus
         if score > best_score:
             best_score = score
             best_idx = cand
@@ -381,6 +383,36 @@ def _is_blank_risky_idx(syllables_info, syllable_blank_confidences, idx):
     return bool(blank >= 0.70 or (sil >= 0.68 and (voiced + unvoiced) <= 0.18))
 
 
+def _mel_onset_bonus(syllables_info, idx) -> float:
+    """TICKET-008: Reward candidates whose syllable start sits near a strong mel onset.
+
+    Bonus = mel_onset_energy * 6.0 - mel_onset_distance_ms * 0.05
+    Only fires when mel_onset_energy >= UTOA_KR_ONSET_BONUS_MIN_ENERGY (default 0.15).
+    """
+    import os as _os
+    try:
+        min_energy = float(str(_os.environ.get("UTOA_KR_ONSET_BONUS_MIN_ENERGY", "0.15")).strip() or "0.15")
+    except Exception:
+        min_energy = 0.15
+
+    if not syllables_info or idx is None:
+        return 0.0
+    try:
+        if idx < 0 or idx >= len(syllables_info):
+            return 0.0
+        row = syllables_info[idx] or {}
+        onset_energy = float(row.get("mel_onset_energy", 0.0) or 0.0)
+        if onset_energy < min_energy:
+            return 0.0
+        onset_dist_ms = float(row.get("mel_onset_distance_ms", 999.0) or 999.0)
+        # Reject candidates whose nearest onset is > 40ms away even if energy passes.
+        if onset_dist_ms > 40.0:
+            return 0.0
+        return onset_energy * 6.0 - onset_dist_ms * 0.05
+    except Exception:
+        return 0.0
+
+
 def _find_nonblank_fallback_idx(
     *,
     expected_idx,
@@ -406,7 +438,9 @@ def _find_nonblank_fallback_idx(
         text_score = float(cv_match_score_fn(target_clean, romaji_syllables[idx])) if target_clean else 0.0
         blank = _blank_conf_at(syllable_blank_confidences, idx)
         sil = _mel_conf_at(syllables_info, idx, "mel_silence_sparse_conf", fallback=blank)
-        score = text_score - (abs(idx - e) * 8.0) - (blank * 20.0) - (sil * 16.0)
+        # TICKET-008: Onset proximity bonus rewards candidates near a strong mel onset.
+        onset_bonus = _mel_onset_bonus(syllables_info, idx)
+        score = text_score - (abs(idx - e) * 8.0) - (blank * 20.0) - (sil * 16.0) + onset_bonus
         if score > best_score:
             best_score = score
             best_idx = int(idx)
