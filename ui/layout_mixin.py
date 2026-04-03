@@ -321,7 +321,7 @@ class LayoutMixin:
         build_left_label(self.row_aligner, "정렬 엔진:").pack(side="left")
         self.aligner_menu = ctk.CTkOptionMenu(
             self.row_aligner,
-            values=["MFA", "CTC", "No-MFA"],
+            values=["MFA", "CTC", "전용(시퀀스)"],
             variable=self.aligner_var,
             width=190,
             command=self._on_aligner_change,
@@ -358,7 +358,7 @@ class LayoutMixin:
         build_left_label(self.row_align_extra, "MFA 정렬 프로필:").pack(side="left")
         self.mfa_align_profile_menu = ctk.CTkOptionMenu(
             self.row_align_extra,
-            values=["기본", "정밀", "정밀 + 화자 적응", "빠름"],
+            values=["기본", "정밀", "고역대 안정", "정밀 + 화자 적응", "빠름"],
             variable=self.mfa_align_profile_var,
             width=220,
             command=lambda _v: self._save_config(),
@@ -984,7 +984,7 @@ class LayoutMixin:
             if hasattr(self, "ja_alias_style_menu"):
                 self.ja_alias_style_menu.configure(state="disabled")
             if hasattr(self, "aligner_var"):
-                self.aligner_var.set("No-MFA")
+                self.aligner_var.set("MFA")
         current_code = normalize_auto_format_value(self._get_language(), self.auto_format_var.get())
         self._set_auto_format_from_code(current_code, self._get_language())
         if hasattr(self, "_apply_recommended_ml_model_defaults"):
@@ -1146,6 +1146,8 @@ class LayoutMixin:
         profile = str(self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "").strip()
         if profile in {"빠름", "빠름 (저사양 추천)", "fast"}:
             return "fast"
+        if profile in {"고역대 안정", "고역대", "high_pitch_accurate", "high_pitch"}:
+            return "high_pitch_accurate"
         if profile in {
             "정밀 + 화자 적응",
             "정확도 우선 + 화자 적응",
@@ -1175,15 +1177,16 @@ class LayoutMixin:
         self._save_config()
 
     def _sync_aligner_ui(self):
-        options = ["MFA", "CTC", "No-MFA"]
+        options = ["MFA", "CTC", "전용(시퀀스)"]
         lang = self._get_language()
         current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA").strip()
         fmt = normalize_auto_format_value(lang, self.auto_format_var.get()) if hasattr(self, "auto_format_var") else ""
         is_kr_template_only = (lang == "korean" and fmt in {"cmpx", "c_plus_v"})
-        if current == "No-MFA (Experimental)":
-            current = "No-MFA"
-        if lang == "english" or is_kr_template_only:
-            current = "No-MFA"
+        forced_no_mfa = bool(lang == "english" or is_kr_template_only)
+        if current in {"No-MFA (Experimental)", "No-MFA"}:
+            current = "MFA"
+        if forced_no_mfa:
+            current = "MFA"
         if current not in options:
             current = "MFA"
         if hasattr(self, "aligner_var"):
@@ -1194,8 +1197,9 @@ class LayoutMixin:
                 self.aligner_menu.set(current)
             except Exception:
                 pass
-        use_no_mfa = current == "No-MFA"
+        use_no_mfa = forced_no_mfa
         use_ctc = current == "CTC"
+        use_sequence = current == "전용(시퀀스)"
         is_cmpx_preview = (lang == "korean" and fmt == "cmpx")
         is_c_plus_v_mode = (lang == "korean" and fmt == "c_plus_v")
         limit_ml_routes_for_no_mfa = use_no_mfa and not (
@@ -1240,7 +1244,7 @@ class LayoutMixin:
             else "베이스 OTO 재매핑 + 보정"
         )
         if hasattr(self, "mfa_align_profile_menu"):
-            self.mfa_align_profile_menu.configure(state="disabled" if (use_no_mfa or use_ctc) else "normal")
+            self.mfa_align_profile_menu.configure(state="disabled" if (use_no_mfa or use_ctc or use_sequence) else "normal")
         show_no_mfa_mode_row = use_no_mfa and not (
             lang == "english" or is_kr_template_only
         )
@@ -1270,6 +1274,8 @@ class LayoutMixin:
                     )
             elif use_ctc:
                 self.aligner_help_label.configure(text="(CTC(MMS) 기반 정렬 + C/V 어댑터를 사용합니다.)")
+            elif use_sequence:
+                self.aligner_help_label.configure(text="(시퀀스 라벨 기반 전용 aligner baseline을 사용합니다.)")
             else:
                 self.aligner_help_label.configure(text="(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)")
         if hasattr(self, "pipeline_step_align_btn") and self.pipeline_step_align_btn is not None:
@@ -1315,6 +1321,9 @@ class LayoutMixin:
                 if use_ctc:
                     self.align_step_title_label.configure(text="2. 음성 정렬 (CTC)")
                     self.align_step_desc_label.configure(text="torchaudio MMS CTC로 TextGrid를 생성하고 C/V 어댑터를 적용합니다.")
+                elif use_sequence:
+                    self.align_step_title_label.configure(text="2. 음성 정렬 (전용 시퀀스)")
+                    self.align_step_desc_label.configure(text="frame-hop 시퀀스 라벨 기반으로 TextGrid를 생성합니다. 실패 시 MFA fallback을 사용합니다.")
                 else:
                     self.align_step_title_label.configure(text="2. 음성 정렬")
                     self.align_step_desc_label.configure(text="MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.")

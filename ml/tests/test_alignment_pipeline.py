@@ -15,17 +15,21 @@ from core.pipeline_status import ALIGN_EXEC_MISSING, ALIGN_NOT_READY, OK, normal
 
 
 class AlignmentPipelineTests(unittest.TestCase):
-    def test_normalize_aligner_name_rejects_none_aliases(self):
-        for raw in ("none", "off", "skip", "disabled", "no_align", "nomfa", "no_mfa", "No-MFA (Experimental)"):
+    def test_normalize_aligner_name_accepts_none_aliases(self):
+        for raw in ("none", "off", "skip", "nomfa", "no_mfa", "No-MFA (Experimental)"):
+            self.assertEqual(normalize_aligner_name(raw, default="mfa"), "none")
+
+    def test_normalize_aligner_name_keeps_unknown_as_default(self):
+        for raw in ("disabled", "no_align"):
             self.assertEqual(normalize_aligner_name(raw, default="mfa"), "mfa")
 
     def test_normalize_aligner_name_accepts_domino_aliases(self):
         for raw in ("domino", "pydomino", "Domino (JP)", "jp-domino"):
             self.assertEqual(normalize_aligner_name(raw, default="mfa"), "domino")
 
-    def test_resolve_aligner_chain_converts_none_to_mfa(self):
-        self.assertEqual(resolve_aligner_chain("none", ""), ["mfa"])
-        self.assertEqual(resolve_aligner_chain("none", "mfa"), ["mfa"])
+    def test_resolve_aligner_chain_keeps_none_then_optional_fallback(self):
+        self.assertEqual(resolve_aligner_chain("none", ""), ["none"])
+        self.assertEqual(resolve_aligner_chain("none", "mfa"), ["none", "mfa"])
 
     def test_resolve_aligner_chain_keeps_domino_then_mfa(self):
         self.assertEqual(resolve_aligner_chain("domino", "mfa"), ["domino", "mfa"])

@@ -153,20 +153,69 @@ where py >nul 2>nul
 if not errorlevel 1 (
     py -3.11 -m venv "%ENV_DIR%" >nul 2>nul
 )
-if not exist "%ENV_PY%" (
-    where python >nul 2>nul
-    if errorlevel 1 (
-        echo [FAILED] Python launcher not found. Install Python 3.10+ or use py.exe.
-        if not "%NON_INTERACTIVE%"=="1" pause
-        exit /b 1
-    )
+if exist "%ENV_PY%" goto :eof
+
+where python >nul 2>nul
+if not errorlevel 1 (
     python -m venv "%ENV_DIR%"
 )
-if not exist "%ENV_PY%" (
-    echo [FAILED] Failed to create CTC venv: %ENV_DIR%
-    if not "%NON_INTERACTIVE%"=="1" pause
+if exist "%ENV_PY%" goto :eof
+
+call :resolve_base_python_fallback
+if defined BASE_PY (
+    echo [INFO] Using base runtime python fallback: %BASE_PY%
+    "%BASE_PY%" -m venv "%ENV_DIR%"
+)
+if exist "%ENV_PY%" goto :eof
+
+call :bootstrap_base_python_via_setup_mfa
+if not errorlevel 1 (
+    call :resolve_base_python_fallback
+    if defined BASE_PY (
+        echo [INFO] Retrying CTC venv creation with bootstrapped MFA python...
+        "%BASE_PY%" -m venv "%ENV_DIR%"
+    )
+)
+if exist "%ENV_PY%" goto :eof
+
+echo [FAILED] Failed to create CTC venv: %ENV_DIR%
+echo        No usable Python runtime was found.
+echo        Try running setup_mfa.bat first, then retry setup_ctc.bat.
+if not "%NON_INTERACTIVE%"=="1" pause
+exit /b 1
+goto :eof
+
+:resolve_base_python_fallback
+set "BASE_PY="
+if exist "%APP_DIR%\.env\python.exe" set "BASE_PY=%APP_DIR%\.env\python.exe"
+if not defined BASE_PY if exist "%APP_DIR%\.env\Scripts\python.exe" set "BASE_PY=%APP_DIR%\.env\Scripts\python.exe"
+if not defined BASE_PY if exist "%APP_DIR%\UTAU_Auto_OTO\.env\python.exe" set "BASE_PY=%APP_DIR%\UTAU_Auto_OTO\.env\python.exe"
+if not defined BASE_PY if exist "%APP_DIR%\UTAU_Auto_OTO\.env\Scripts\python.exe" set "BASE_PY=%APP_DIR%\UTAU_Auto_OTO\.env\Scripts\python.exe"
+goto :eof
+
+:resolve_setup_mfa_script
+set "SETUP_MFA_PATH="
+if exist "%APP_DIR%\setup_mfa.bat" set "SETUP_MFA_PATH=%APP_DIR%\setup_mfa.bat"
+if not defined SETUP_MFA_PATH if exist "%APP_CODE_DIR%\setup_mfa.bat" set "SETUP_MFA_PATH=%APP_CODE_DIR%\setup_mfa.bat"
+if not defined SETUP_MFA_PATH if exist "%APP_CODE_DIR%\..\setup_mfa.bat" set "SETUP_MFA_PATH=%APP_CODE_DIR%\..\setup_mfa.bat"
+if not defined SETUP_MFA_PATH if exist "%APP_DIR%\UTAU_Auto_OTO\setup_mfa.bat" set "SETUP_MFA_PATH=%APP_DIR%\UTAU_Auto_OTO\setup_mfa.bat"
+if not defined SETUP_MFA_PATH if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\UTAU_Auto_OTO_v3\setup_mfa.bat" set "SETUP_MFA_PATH=%LOCALAPPDATA%\UTAU_Auto_OTO_v3\setup_mfa.bat"
+if not defined SETUP_MFA_PATH if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\UTAU_Auto_OTO\setup_mfa.bat" set "SETUP_MFA_PATH=%LOCALAPPDATA%\UTAU_Auto_OTO\setup_mfa.bat"
+goto :eof
+
+:bootstrap_base_python_via_setup_mfa
+call :resolve_setup_mfa_script
+if not defined SETUP_MFA_PATH (
+    echo [WARN] setup_mfa.bat not found. Cannot bootstrap Python runtime automatically.
     exit /b 1
 )
+echo [INFO] Python launcher missing. Attempting MFA runtime bootstrap first...
+call "%SETUP_MFA_PATH%" --install --without-ml --non-interactive --runtime-root "%APP_DIR%"
+if errorlevel 1 (
+    echo [FAILED] setup_mfa bootstrap failed.
+    exit /b 1
+)
+exit /b 0
 goto :eof
 
 :bootstrap_pip
@@ -220,4 +269,3 @@ if errorlevel 1 (
 )
 set "UTOA_CODE_ROOT="
 goto :eof
-

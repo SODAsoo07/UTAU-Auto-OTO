@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Mapping, MutableMapping, Optional, Sequence
 
@@ -9,6 +11,54 @@ def _norm_path_key(path: str) -> str:
         return str(path or "").strip().replace("\\", "/").lower()
     except Exception:
         return str(path or "")
+
+
+def _guess_alignment_source_from_path(tg_path: str) -> tuple[str, str]:
+    norm = _norm_path_key(tg_path)
+    if not norm:
+        return "", ""
+    parts = [p for p in re.split(r"[\\/]+", norm) if p]
+    if any(p in {"sequence", "sequence_words", "sequence_aligner", "seq_align", "seq_aligner"} for p in parts):
+        return "sequence", "path_hint"
+    if any(p in {"mfa", "montreal", "montreal_forced_aligner", "montreal-forced-aligner"} for p in parts):
+        return "mfa", "path_hint"
+    if any(p in {"ctc", "ctc_align", "ctc_aligner"} for p in parts):
+        return "ctc", "path_hint"
+    return "", ""
+
+
+def _probe_alignment_source_sidecar(tg_path: str) -> tuple[str, str, dict[str, object]]:
+    base, _ = os.path.splitext(os.path.abspath(str(tg_path or "").strip()))
+    if not base:
+        return "", "", {}
+    seq_conf = base + ".seqconf.json"
+    if os.path.isfile(seq_conf):
+        return "sequence", "sidecar", {"path": seq_conf}
+    return "", "", {}
+
+
+def _detect_alignment_source_from_tg(tg) -> tuple[str, str, dict[str, object]]:
+    if tg is None:
+        return "", "", {}
+    for tier in tg:
+        tier_name = str(getattr(tier, "name", "") or "").strip().lower()
+        if tier_name not in {"utoa_meta", "aligner_meta", "meta", "metadata"}:
+            continue
+        try:
+            intervals = list(tier)
+        except Exception:
+            intervals = []
+        for interval in intervals[:4]:
+            mark = str(getattr(interval, "mark", "") or "").strip().lower()
+            if not mark:
+                continue
+            if ("aligner=sequence" in mark) or ("source=sequence" in mark) or (mark == "sequence"):
+                return "sequence", "meta_tier", {"tier": tier_name, "mark": mark}
+            if ("aligner=mfa" in mark) or ("source=mfa" in mark) or (mark == "mfa"):
+                return "mfa", "meta_tier", {"tier": tier_name, "mark": mark}
+            if ("aligner=ctc" in mark) or ("source=ctc" in mark) or (mark == "ctc"):
+                return "ctc", "meta_tier", {"tier": tier_name, "mark": mark}
+    return "", "", {}
 
 
 @dataclass
@@ -28,6 +78,9 @@ class PreparedFileContext:
     tg: object = None
     phone_tier: object = None
     word_tier: object = None
+    alignment_source: str = ""
+    alignment_source_reason: str = ""
+    alignment_source_meta: dict[str, object] = field(default_factory=dict)
 
 
 def prepare_file_context(
@@ -59,6 +112,21 @@ def prepare_file_context(
     context.tg_path = str(tg_info.get("path", "") or "")
     context.real_wav_name = str(tg_info.get("real_name", "") or "")
     context.output_wav_name = str(tg_info.get("output_name", context.real_wav_name) or context.real_wav_name)
+    source_from_info = str(tg_info.get("alignment_source", tg_info.get("source", "")) or "").strip().lower()
+    if source_from_info in {"sequence", "mfa", "ctc"}:
+        context.alignment_source = source_from_info
+        context.alignment_source_reason = "tg_info"
+    else:
+        source_hint, reason_hint = _guess_alignment_source_from_path(context.tg_path)
+        if source_hint:
+            context.alignment_source = source_hint
+            context.alignment_source_reason = reason_hint
+        sidecar_source, sidecar_reason, sidecar_meta = _probe_alignment_source_sidecar(context.tg_path)
+        if sidecar_source:
+            context.alignment_source = sidecar_source
+            context.alignment_source_reason = sidecar_reason
+            context.alignment_source_meta = dict(sidecar_meta or {})
+
     context.wav_path_for_signal = find_wav_path_fn(
         context.output_wav_name or context.real_wav_name,
         wav_root_for_signal,
@@ -115,6 +183,11 @@ def load_named_tiers(
         return context
 
     context.tg = tg
+    src, reason, meta = _detect_alignment_source_from_tg(tg)
+    if src:
+        context.alignment_source = src
+        context.alignment_source_reason = reason
+        context.alignment_source_meta = dict(meta or {})
     for tier in tg:
         if tier_predicate and not tier_predicate(tier):
             continue
