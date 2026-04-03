@@ -14,6 +14,7 @@ from core.pipeline_status import (
     ALIGN_USING_EXISTING,
     OK,
     classify_alignment_error,
+    compute_alignment_quality_score,
     has_textgrid_files,
     make_runtime_report,
     normalize_aligner_name,
@@ -440,6 +441,9 @@ def run_alignment_with_fallback(
             fallback_notes.insert(0, f"engine:{primary}->{used_engine}")
         fallback_path = ",".join(fallback_notes)
         fallback_used = bool(fallback_notes)
+        # TICKET-001: Compute and attach a quality score so downstream stages
+        # (OTO generation, UI) can calibrate based on alignment confidence.
+        alignment_quality_score = compute_alignment_quality_score(used_engine, fallback_notes)
         message = "alignment complete"
         if fallback_used:
             message = f"alignment complete (fallback: {fallback_path})"
@@ -454,6 +458,7 @@ def run_alignment_with_fallback(
             fallback_used=fallback_used,
             attempt_count=max(run_attempt_count, 1),
             fallback_path=fallback_path,
+            alignment_quality_score=alignment_quality_score,
         )
 
     return make_runtime_report(
