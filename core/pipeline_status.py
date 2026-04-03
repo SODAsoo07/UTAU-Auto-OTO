@@ -5,6 +5,34 @@ from typing import Dict, List
 
 OK = "OK"
 
+# TICKET-001: Per-engine baseline quality tier (0.0 = unusable, 1.0 = best).
+# A profile downgrade (e.g. accurate→fast) subtracts an additional 0.10.
+ALIGNER_QUALITY_TIER: Dict[str, float] = {
+    "mfa": 1.0,
+    "ctc": 0.75,
+    "sequence": 0.55,
+    "domino": 0.80,
+    "none": 0.0,
+    "existing": 0.85,
+}
+
+
+def compute_alignment_quality_score(
+    used_engine: str,
+    fallback_notes: List[str],
+) -> float:
+    """Return an alignment quality score in [0.0, 1.0].
+
+    Base score comes from ALIGNER_QUALITY_TIER.  Each fallback event
+    (engine downgrade OR profile downgrade) reduces the score by 0.10,
+    clamped to 0.0 at minimum.
+    """
+    eng = str(used_engine or "").strip().lower()
+    base = ALIGNER_QUALITY_TIER.get(eng, 0.5)
+    penalty = len(fallback_notes) * 0.10
+    return max(0.0, round(base - penalty, 4))
+
+
 ALIGN_USING_EXISTING = "ALIGN_USING_EXISTING"
 ALIGN_EXEC_MISSING = "ALIGN_EXEC_MISSING"
 ALIGN_MODEL_MISSING = "ALIGN_MODEL_MISSING"
@@ -176,6 +204,7 @@ __all__ = [
     "ALIGN_RUN_FAILED",
     "ALIGN_SKIPPED",
     "ALIGN_USING_EXISTING",
+    "ALIGNER_QUALITY_TIER",
     "EXCEPTION",
     "GENERATOR_ERROR",
     "ML_APPLIED",
@@ -192,6 +221,7 @@ __all__ = [
     "UNSUPPORTED_LANGUAGE",
     "VOICEBANK_MISSING",
     "classify_alignment_error",
+    "compute_alignment_quality_score",
     "first_non_ok_code",
     "has_textgrid_files",
     "make_runtime_report",

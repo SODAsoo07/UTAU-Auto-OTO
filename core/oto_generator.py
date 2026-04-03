@@ -3109,6 +3109,188 @@ def _estimate_mel_vowel_nucleus(mel_ctx, onset_ms: Optional[float], search_after
     return float(times_ms[start_idx]), float(times_ms[end_idx])
 
 
+def _compute_energy_centroid(mel_ctx, start_ms: float, end_ms: float) -> Optional[float]:
+    if np is None or not mel_ctx:
+        return None
+    try:
+        s_ms = float(start_ms)
+        e_ms = float(end_ms)
+    except Exception:
+        return None
+    if e_ms <= s_ms:
+        return None
+
+    times_ms = mel_ctx.get("times_ms")
+    en = mel_ctx.get("energy")
+    if times_ms is None or en is None or len(times_ms) == 0 or len(en) != len(times_ms):
+        return None
+
+    times_arr = np.asarray(times_ms, dtype=np.float64)
+    en_arr = np.asarray(en, dtype=np.float64)
+    mask = np.where((times_arr >= s_ms) & (times_arr <= e_ms))[0]
+    if len(mask) < 2:
+        return None
+
+    weights = np.clip(en_arr[mask], 0.0, None)
+    w_sum = float(np.sum(weights))
+    if w_sum <= 1e-8:
+        return None
+    centroid = float(np.sum(times_arr[mask] * weights) / w_sum)
+    if centroid < s_ms or centroid > e_ms:
+        return None
+    return centroid
+
+
+def _estimate_onset_rise_time(
+    mel_ctx,
+    c_start_ms: float,
+    vowel_start_ms: float,
+    vowel_end_ms: float,
+) -> Optional[float]:
+    if np is None or not mel_ctx:
+        return None
+    try:
+        c_start = float(c_start_ms)
+        v_start = float(vowel_start_ms)
+        v_end = float(vowel_end_ms)
+    except Exception:
+        return None
+    if v_end <= v_start:
+        return None
+
+    times_ms = mel_ctx.get("times_ms")
+    en = mel_ctx.get("energy")
+    if times_ms is None or en is None or len(times_ms) == 0 or len(en) != len(times_ms):
+        return None
+
+    times_arr = np.asarray(times_ms, dtype=np.float64)
+    en_arr = np.asarray(en, dtype=np.float64)
+
+    peak_end = min(v_end, v_start + 260.0)
+    peak_mask = np.where((times_arr >= v_start) & (times_arr <= peak_end))[0]
+    if len(peak_mask) == 0:
+        return None
+
+    peak_rel = int(np.argmax(en_arr[peak_mask]))
+    peak_idx = int(peak_mask[peak_rel])
+    peak_ms = float(times_arr[peak_idx])
+    rise_ms = max(0.0, peak_ms - c_start)
+    if rise_ms <= 0.0:
+        return None
+    return rise_ms
+
+
+def _estimate_context_avg_f0_hz(mel_ctx) -> float:
+    if not mel_ctx:
+        return 0.0
+    note_hz = float(mel_ctx.get("f0_note_hint_hz", 0.0) or 0.0)
+    f0_max_hz = float(mel_ctx.get("f0_max_hz", 0.0) or 0.0)
+    if note_hz > 0.0 and f0_max_hz > 0.0:
+        f0_cap = min(f0_max_hz, max(note_hz * 1.8, note_hz))
+        return float((note_hz * 0.72) + (f0_cap * 0.28))
+    if note_hz > 0.0:
+        return float(note_hz)
+    if f0_max_hz > 0.0:
+        return float(f0_max_hz * 0.72)
+    return 0.0
+
+
+def _apply_kr_mel_naturalness_adjustments(
+    offset,
+    consonant,
+    cutoff,
+    pre,
+    ovl,
+    *,
+    alias_type: str,
+    c_start_ms: float,
+    c_end_ms: float,
+    vowel_start_ms: float,
+    vowel_end_ms: float,
+    mel_ctx=None,
+):
+    if np is None or not mel_ctx:
+        return offset, consonant, cutoff, pre, ovl, {}
+
+    alias_key = str(alias_type or "").strip().lower()
+    if alias_key not in {"cv", "cv_head", "vcv"}:
+        return offset, consonant, cutoff, pre, ovl, {}
+
+    info = {}
+    offset, consonant, cutoff, pre, ovl = validate_oto_params(
+        offset, consonant, cutoff, pre, ovl, alias_type=alias_key
+    )
+
+    # (7) VCV: align preutterance toward consonant energy centroid.
+    if alias_key == "vcv" and not _env_bool("UTOA_DISABLE_VCV_CENTROID_ALIGN", False):
+        centroid_ms = _compute_energy_centroid(mel_ctx, c_start_ms, c_end_ms)
+        if centroid_ms is not None:
+            midpoint = (float(c_start_ms) + float(c_end_ms)) * 0.5
+            pre_shift = _clamp(float(centroid_ms) - midpoint, -15.0, 15.0)
+            if abs(pre_shift) >= 0.5:
+                prev_pre = float(pre)
+                ovl_gap = max(float(prev_pre) - float(ovl), 4.0)
+                cons_gap = max(float(consonant) - float(prev_pre), 10.0)
+                cut_gap = max(abs(float(cutoff)) - float(consonant), 12.0)
+                pre = max(6.0, float(prev_pre) + float(pre_shift))
+                ovl = max(0.0, float(pre) - ovl_gap)
+                consonant = float(pre) + cons_gap
+                cutoff = -(float(consonant) + cut_gap)
+                offset, consonant, cutoff, pre, ovl = validate_oto_params(
+                    offset, consonant, cutoff, pre, ovl, alias_type=alias_key
+                )
+                info["vcv_centroid_ms"] = float(centroid_ms)
+                info["vcv_pre_shift_ms"] = float(pre_shift)
+
+    # (8) Consonant velocity correction by onset rise time.
+    if not _env_bool("UTOA_DISABLE_KR_RISE_TIME_CORRECTION", False):
+        rise_ms = _estimate_onset_rise_time(mel_ctx, c_start_ms, vowel_start_ms, vowel_end_ms)
+        if rise_ms is not None:
+            rise_ref_ms = _env_float("UTOA_KR_RISE_REF_MS", 70.0)
+            rise_mul = _env_float("UTOA_KR_RISE_CORR_PER_MS", 0.15)
+            rise_corr = _clamp((float(rise_ms) - float(rise_ref_ms)) * float(rise_mul), -12.0, 12.0)
+            if abs(rise_corr) >= 0.25:
+                cons_gap = max(float(consonant) - float(pre), 10.0)
+                cut_gap = max(abs(float(cutoff)) - float(consonant), 10.0)
+                gap_min = 14.0 if alias_key == "vcv" else 16.0
+                gap_max = 220.0 if alias_key == "vcv" else 200.0
+                new_cons_gap = _clamp(cons_gap + float(rise_corr), gap_min, gap_max)
+                consonant = float(pre) + float(new_cons_gap)
+                cutoff = -(float(consonant) + cut_gap)
+                offset, consonant, cutoff, pre, ovl = validate_oto_params(
+                    offset, consonant, cutoff, pre, ovl, alias_type=alias_key
+                )
+                info["rise_time_ms"] = float(rise_ms)
+                info["rise_corr_ms"] = float(rise_corr)
+
+    # (9) High-F0: reduce cutoff span to avoid over-tail in high register.
+    if alias_key in {"cv", "cv_head"} and not _env_bool("UTOA_DISABLE_KR_HIGH_F0_CUTOFF_COMPRESS", False):
+        pitch_zone = str(mel_ctx.get("f0_pitch_zone", "") or "").strip().lower()
+        note_hz = float(mel_ctx.get("f0_note_hint_hz", 0.0) or 0.0)
+        f0_max_hz = float(mel_ctx.get("f0_max_hz", 0.0) or 0.0)
+        avg_f0_hz = _estimate_context_avg_f0_hz(mel_ctx)
+        high_ctx = _is_high_pitch_context(
+            pitch_zone=pitch_zone,
+            note_hint_hz=note_hz,
+            f0_max_hz=f0_max_hz,
+        )
+        if high_ctx and avg_f0_hz >= 500.0:
+            cut_abs = abs(float(cutoff))
+            cut_gap = max(cut_abs - float(consonant), 10.0)
+            scaled_gap = max(8.0, cut_gap * 0.85)
+            if scaled_gap <= (cut_gap - 0.8):
+                reduction = min(cut_gap - scaled_gap, 24.0)
+                new_cut_abs = float(consonant) + max(8.0, cut_gap - reduction)
+                cutoff = -new_cut_abs
+                offset, consonant, cutoff, pre, ovl = validate_oto_params(
+                    offset, consonant, cutoff, pre, ovl, alias_type=alias_key
+                )
+                info["high_f0_avg_hz"] = float(avg_f0_hz)
+                info["high_f0_cut_reduced_ms"] = float(cut_abs - abs(float(cutoff)))
+
+    return offset, consonant, cutoff, pre, ovl, info
+
+
 def _resolve_mel_weight_mode(raw_value: str) -> str:
     mode = str(raw_value or "").strip().lower()
     if mode in {"mel_boost", "mel-boost", "melboost", "boost", "mel"}:
@@ -3683,9 +3865,99 @@ def _guard_kr_blank_region_span(
     return (base, True) if base_score >= cand_score else (cand, False)
 
 
+def _resolve_kr_mel_flux_percentile(syllables_info, mel_ctx):
+    if np is None or not mel_ctx:
+        return 85.0
+
+    cached = mel_ctx.get("_kr_flux_percentile")
+    if cached is not None:
+        try:
+            return float(cached)
+        except Exception:
+            pass
+
+    times_ms = mel_ctx.get("times_ms")
+    en = mel_ctx.get("energy")
+    if times_ms is None or en is None:
+        mel_ctx["_kr_flux_percentile"] = 85.0
+        return 85.0
+
+    try:
+        en_arr = np.asarray(en, dtype=np.float64)
+        times_arr = np.asarray(times_ms, dtype=np.float64)
+    except Exception:
+        mel_ctx["_kr_flux_percentile"] = 85.0
+        return 85.0
+
+    if len(en_arr) < 8 or len(times_arr) != len(en_arr):
+        mel_ctx["_kr_flux_percentile"] = 85.0
+        return 85.0
+
+    wav_rms = float(np.sqrt(np.mean(np.square(en_arr))))
+    if wav_rms <= 1e-9:
+        mel_ctx["_kr_flux_percentile"] = 85.0
+        return 85.0
+
+    feature_rows = []
+    for syl in (syllables_info or []):
+        start_s = float((syl or {}).get("start_time", 0.0) or 0.0)
+        phones = (syl or {}).get("phones") or []
+        if start_s <= 0.0 and phones:
+            try:
+                start_s = float(phones[0].minTime)
+            except Exception:
+                start_s = 0.0
+        t_ms = max(0.0, start_s * 1000.0)
+        idx = np.where((times_arr >= t_ms) & (times_arr <= t_ms + 40.0))[0]
+        if len(idx) == 0:
+            continue
+        seg = en_arr[idx]
+        seg_rms = float(np.sqrt(np.mean(np.square(seg))))
+        feature_rows.append({"rms_norm_wav": float(seg_rms / max(wav_rms, 1e-8))})
+
+    if len(feature_rows) < 4:
+        mel_ctx["_kr_flux_percentile"] = 85.0
+        return 85.0
+
+    try:
+        from core.oto_ml_features import compute_session_rms_percentile
+
+        rms_p25 = float(compute_session_rms_percentile(feature_rows))
+    except Exception:
+        rms_p25 = -1.0
+
+    flux_percentile = 85.0
+    if rms_p25 >= 0.0:
+        flux_percentile = 85.0 if rms_p25 > 0.20 else 90.0
+
+    mel_ctx["_kr_flux_percentile"] = float(flux_percentile)
+    mel_ctx["_kr_rms_p25"] = float(rms_p25)
+    return float(flux_percentile)
+
+
 def _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx):
     if not syllables_info:
         return syllables_info
+    times_arr = None
+    en_arr = None
+    flux = None
+    flux_threshold = None
+    if mel_ctx and np is not None:
+        try:
+            times_ms = mel_ctx.get("times_ms")
+            en = mel_ctx.get("energy")
+            if times_ms is not None and en is not None and len(times_ms) > 0 and len(en) == len(times_ms):
+                times_arr = np.asarray(times_ms, dtype=np.float64)
+                en_arr = np.asarray(en, dtype=np.float64)
+                flux = np.diff(en_arr, prepend=en_arr[0])
+                flux_percentile = _resolve_kr_mel_flux_percentile(syllables_info, mel_ctx)
+                flux_threshold = float(np.percentile(flux, flux_percentile))
+        except Exception:
+            times_arr = None
+            en_arr = None
+            flux = None
+            flux_threshold = None
+
     for syl in syllables_info:
         start_s = float(syl.get("start_time", 0.0) or 0.0)
         phones = syl.get("phones") or []
@@ -3700,6 +3972,27 @@ def _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx):
         syl["blank_confidence"] = _estimate_kr_blank_confidence_at_time(mel_ctx, t_ms)
         mel_scores = _estimate_kr_mel_class_scores_at_time(mel_ctx, t_ms)
         syl.update(mel_scores)
+        # TICKET-008: Annotate onset energy and onset-distance for candidate scoring.
+        syl["mel_onset_energy"] = 0.0
+        syl["mel_onset_distance_ms"] = 999.0
+        if times_arr is not None and en_arr is not None:
+            try:
+                _window = 25.0
+                _mask = np.where((times_arr >= t_ms) & (times_arr <= t_ms + _window))[0]
+                if len(_mask) > 0:
+                    syl["mel_onset_energy"] = float(np.max(en_arr[_mask]))
+                # Distance to nearest flux-based onset within ±50ms
+                if flux is not None and flux_threshold is not None:
+                    onset_frames = np.where(
+                        (flux >= flux_threshold)
+                        & (times_arr >= t_ms - 50.0)
+                        & (times_arr <= t_ms + 50.0)
+                    )[0]
+                    if len(onset_frames) > 0:
+                        closest = float(np.min(np.abs(times_arr[onset_frames] - t_ms)))
+                        syl["mel_onset_distance_ms"] = float(closest)
+            except Exception:
+                pass
     return syllables_info
 
 
@@ -4006,6 +4299,36 @@ def _blend(a, b, w):
 
 def _clamp(v, lo, hi):
     return max(float(lo), min(float(hi), float(v)))
+
+
+def _compute_kr_session_vowel_baseline_ms(syllables_info):
+    vals = []
+    for syl in (syllables_info or []):
+        v_len = (syl or {}).get("cv_vowel_len")
+        if v_len is None:
+            phones = (syl or {}).get("phones") or []
+            if phones:
+                try:
+                    _v_idx, v_phone = find_vowel_phone(phones)
+                    v_len = (float(v_phone.maxTime) - float(v_phone.minTime)) * 1000.0
+                except Exception:
+                    v_len = None
+        try:
+            fv = float(v_len)
+            if fv > 0.0:
+                vals.append(fv)
+                syl["cv_vowel_len"] = fv
+        except Exception:
+            continue
+
+    if not vals:
+        return 130.0
+
+    if np is not None:
+        med = float(np.median(np.asarray(vals, dtype=np.float64)))
+    else:
+        med = _median(vals)
+    return _clamp(med * 0.80, 80.0, 160.0)
 
 
 def _default_kr_profile_cache_path(format_type="general"):
@@ -5402,12 +5725,16 @@ def generate_oto(
                 kr_cv_timing_mode = "vcv_context" if _format_norm == "vcv" else "vc_context"
             else:
                 kr_cv_timing_mode = "standalone"
+            kr_cv_v_ref_baseline = _compute_kr_session_vowel_baseline_ms(syllables_info)
+            for _syl in (syllables_info or []):
+                _syl["v_ref_baseline_ms"] = float(kr_cv_v_ref_baseline)
             if kr_mapping_debug_reason_logging:
                 log(
                     f"[MAP] {fname}: KR CV timing mode={kr_cv_timing_mode} "
                     f"(format={_format_norm or 'unknown'}, "
                     f"vc_alias={'yes' if file_has_explicit_vc_alias else 'no'}, "
-                    f"cv_family={'yes' if file_has_cv_family_alias else 'no'})"
+                    f"cv_family={'yes' if file_has_cv_family_alias else 'no'}, "
+                    f"v_ref={kr_cv_v_ref_baseline:.1f}ms)"
                 )
             cv_anchor_by_idx = {
                 i: _estimate_cv_anchor_from_syllable(
@@ -5923,6 +6250,7 @@ def generate_oto(
                     cv_vowel_len = n_end - n_start
                     onset_slice_hint = _select_kr_cv_onset_slice(curr_phones) if curr_phones else None
                     onset_idx_hint = int(onset_slice_hint[0]) if onset_slice_hint is not None else 0
+                    glide_dur_hint_ms = float(onset_slice_hint[5]) if onset_slice_hint is not None and len(onset_slice_hint) >= 6 else 0.0
                     if onset_idx_hint < 0 or onset_idx_hint >= len(curr_phones or []):
                         onset_idx_hint = 0
                     c_hint = curr_phones[onset_idx_hint].mark if curr_phones else ""
@@ -5937,6 +6265,8 @@ def generate_oto(
                             alias_onset,
                             True,
                             False,
+                            glide_dur_ms=glide_dur_hint_ms,
+                            v_ref_baseline=kr_cv_v_ref_baseline,
                             cv_mode=kr_cv_timing_mode,
                         )
 
@@ -5976,6 +6306,7 @@ def generate_oto(
                             alias_onset,
                             False,
                             is_plosive,
+                            v_ref_baseline=kr_cv_v_ref_baseline,
                             cv_mode=kr_cv_timing_mode,
                         )
 
@@ -6021,6 +6352,13 @@ def generate_oto(
                                 after,
                                 extra=f"mel={row_mel_voiced_onset_ms:.1f}",
                             )
+                if alias_type == "cv" and selected_w_idx is not None and 0 <= int(selected_w_idx) < len(syllables_info):
+                    row_syl = syllables_info[int(selected_w_idx)] or {}
+                    onset_dist = float(row_syl.get("mel_onset_distance_ms", 999.0) or 999.0)
+                    onset_energy = float(row_syl.get("mel_onset_energy", 0.0) or 0.0)
+                    if onset_dist < 40.0 and onset_energy > 0.20:
+                        ovl_cap = max(0.0, float(pre) - onset_dist - 8.0)
+                        ovl = max(0.0, min(float(ovl), ovl_cap))
 
                 before_post = (offset, pre, consonant, cutoff)
                 (
@@ -6114,6 +6452,43 @@ def generate_oto(
                         log(
                             f"[MAP] {fname}: CV 포커스 가드 적용 "
                             f"(offset -{cv_offset_pulled:.1f}ms, cutoff -{cv_cutoff_trimmed:.1f}ms) [{alias}]"
+                        )
+                if row_apply_mode != "template_preserve":
+                    before_nat = (offset, pre, consonant, cutoff)
+                    (
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                        nat_info,
+                    ) = _apply_kr_mel_naturalness_adjustments(
+                        offset,
+                        consonant,
+                        cutoff,
+                        pre,
+                        ovl,
+                        alias_type=alias_type,
+                        c_start_ms=c_start,
+                        c_end_ms=c_end,
+                        vowel_start_ms=n_start,
+                        vowel_end_ms=n_end,
+                        mel_ctx=mel_ctx_for_file,
+                    )
+                    if nat_info:
+                        detail = ", ".join(
+                            f"{k}={float(v):.1f}"
+                            for k, v in nat_info.items()
+                            if isinstance(v, (int, float))
+                        )
+                        _debug_offset_trace(
+                            log,
+                            "mel_naturalness",
+                            fname,
+                            alias,
+                            before_nat,
+                            (offset, pre, consonant, cutoff),
+                            extra=detail,
                         )
                 if row_apply_mode in {"conservative_apply", "template_preserve"}:
                     offset, consonant, cutoff, pre, ovl = _apply_conservative_delta_clamp(

@@ -2446,3 +2446,43 @@ def write_dataset_csv(path: str, rows: List[Dict[str, object]], append: bool = F
             merged.update(canonicalize_feature_row(row))
             writer.writerow(merged)
     return path
+
+
+# ---------------------------------------------------------------------------
+# TICKET-005: Session-level RMS percentile for adaptive reliability thresholds
+# ---------------------------------------------------------------------------
+
+def compute_session_rms_percentile(
+    feature_rows: "List[Dict[str, object]]",
+    percentile: float = 25.0,
+) -> float:
+    """Return the p-th percentile of ``rms_norm_wav`` across feature rows.
+
+    Used by TICKET-005 to detect soft-voiced voicebanks and lower reliability
+    thresholds proportionally so that valid rows are not over-rejected.
+
+    Returns ``-1.0`` if no valid RMS values are found.
+    """
+    rms_values = []
+    for row in (feature_rows or []):
+        v = row.get("rms_norm_wav")
+        if v is None:
+            v = row.get("rms_norm_vb")
+        try:
+            fv = float(v)
+            if fv >= 0.0:
+                rms_values.append(fv)
+        except (TypeError, ValueError):
+            pass
+
+    if not rms_values:
+        return -1.0
+
+    try:
+        import numpy as _np
+        return float(_np.percentile(rms_values, percentile))
+    except Exception:
+        import statistics as _st
+        sorted_vals = sorted(rms_values)
+        k = max(0, min(len(sorted_vals) - 1, int(len(sorted_vals) * percentile / 100.0)))
+        return float(sorted_vals[k])

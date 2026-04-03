@@ -22,11 +22,21 @@ except Exception:  # pragma: no cover
 
 from core.textio_utils import read_text_auto
 from core.ja_lab_generator import parse_ja_filename
-from core.kr_oto_rules import should_ignore_korean_alias
+from core.kr_oto_rules import should_ignore_korean_alias, classify_alias as _classify_kr_alias
 from core.oto_normalization import normalize_wav_key
 
 
 SIL_MARKS = {"", "sil", "sp", "spn", "pau"}
+
+# TICKET-007: Module-level filterbank cache to avoid recomputing per file.
+_FB_CACHE: Dict[Tuple[int, int, int], "np.ndarray"] = {}
+
+
+def _cached_mel_filterbank(sr: int, n_fft: int, n_mels: int = 40) -> "np.ndarray":
+    key = (sr, n_fft, n_mels)
+    if key not in _FB_CACHE:
+        _FB_CACHE[key] = _mel_filterbank(sr, n_fft, n_mels)
+    return _FB_CACHE[key]
 
 
 def _build_textgrid_index(tg_folder: str) -> Dict[str, str]:
@@ -110,6 +120,17 @@ def _read_wav_mono(wav_path: str) -> Tuple[Optional[np.ndarray], Optional[int], 
 
 
 def _mel_activity(audio: np.ndarray, sr: int) -> Dict[str, float]:
+    # TICKET-007: Apply duration cap to avoid O(N) overhead on long files.
+    import os as _os
+    _max_dur_s = float(str(_os.environ.get("UTOA_VALIDATOR_MAX_DURATION_S", "30")).strip() or "30")
+    try:
+        _max_dur_s = max(1.0, float(_max_dur_s))
+    except Exception:
+        _max_dur_s = 30.0
+    _max_samples = int(_max_dur_s * sr)
+    if len(audio) > _max_samples:
+        audio = audio[:_max_samples]
+
     if len(audio) == 0:
         return {
             "active_start_ms": 0.0,
@@ -124,24 +145,58 @@ def _mel_activity(audio: np.ndarray, sr: int) -> Dict[str, float]:
     hop = max(1, int(sr * 0.005))
     win = min(n_fft, max(256, int(sr * 0.025)))
     window = np.hanning(win).astype(np.float64)
-    fb = _mel_filterbank(sr, n_fft, n_mels=40)
+    # TICKET-007: Use cached filterbank — avoids recomputing per file.
+    fb = _cached_mel_filterbank(sr, n_fft, n_mels=40)
 
-    frames = []
-    for st in range(0, max(len(audio) - win + 1, 1), hop):
-        fr = audio[st:st + win]
-        if len(fr) < win:
-            pad = np.zeros(win - len(fr), dtype=np.float32)
-            fr = np.concatenate([fr, pad], axis=0)
-        fr = fr.astype(np.float64) * window
+    # TICKET-007: Vectorized framing via stride_tricks instead of Python loop.
+    audio_f64 = audio.astype(np.float64)
+    n_audio = len(audio_f64)
+    # Pad audio so the last frame is complete.
+    pad_len = win + (n_fft - win) if n_fft > win else win
+    audio_padded = np.concatenate([audio_f64, np.zeros(pad_len, dtype=np.float64)])
+    n_frames_possible = max((n_audio - win) // hop + 1, 1)
+    # Build strided view: shape (n_frames, win)
+    try:
+        shape = (n_frames_possible, win)
+        strides = (audio_padded.strides[0] * hop, audio_padded.strides[0])
+        frames_2d = np.lib.stride_tricks.as_strided(audio_padded, shape=shape, strides=strides)
+        # Apply window and zero-pad to n_fft
+        frames_win = frames_2d * window[np.newaxis, :]
         if n_fft > win:
-            fr = np.pad(fr, (0, n_fft - win))
-        spec = np.fft.rfft(fr)
-        power = (spec.real ** 2 + spec.imag ** 2)
-        mel = fb @ power
-        frames.append(np.log1p(np.maximum(mel, 0.0)))
+            frames_win = np.pad(frames_win, ((0, 0), (0, n_fft - win)))
+        # Batch FFT
+        specs = np.fft.rfft(frames_win, n=n_fft, axis=1)
+        power_2d = specs.real ** 2 + specs.imag ** 2
+        mel_2d = power_2d @ fb.T
+        mel_e = np.log1p(np.maximum(mel_2d, 0.0)).mean(axis=1)
+    except Exception:
+        # Fallback to scalar loop if stride tricks fail (e.g., non-contiguous array).
+        frames = []
+        for st in range(0, max(n_audio - win + 1, 1), hop):
+            fr = audio_f64[st:st + win]
+            if len(fr) < win:
+                fr = np.concatenate([fr, np.zeros(win - len(fr), dtype=np.float64)])
+            fr = fr * window
+            if n_fft > win:
+                fr = np.pad(fr, (0, n_fft - win))
+            spec = np.fft.rfft(fr)
+            power = spec.real ** 2 + spec.imag ** 2
+            mel = fb @ power
+            frames.append(np.log1p(np.maximum(mel, 0.0)))
+        if not frames:
+            duration_ms = n_audio * 1000.0 / sr
+            return {
+                "active_start_ms": 0.0,
+                "active_end_ms": duration_ms,
+                "duration_ms": duration_ms,
+                "onset_ms": 0.0,
+                "frame_times_ms": np.array([], dtype=np.float64),
+                "active_mask": np.array([], dtype=bool),
+            }
+        mel_e = np.array(frames, dtype=np.float64).mean(axis=1)
 
-    if not frames:
-        duration_ms = len(audio) * 1000.0 / sr
+    if len(mel_e) == 0:
+        duration_ms = n_audio * 1000.0 / sr
         return {
             "active_start_ms": 0.0,
             "active_end_ms": duration_ms,
@@ -151,8 +206,7 @@ def _mel_activity(audio: np.ndarray, sr: int) -> Dict[str, float]:
             "active_mask": np.array([], dtype=bool),
         }
 
-    mel_e = np.array(frames, dtype=np.float64).mean(axis=1)
-    duration_ms = len(audio) * 1000.0 / sr
+    duration_ms = n_audio * 1000.0 / sr
 
     p20 = np.percentile(mel_e, 20)
     p95 = np.percentile(mel_e, 95)
@@ -613,7 +667,9 @@ def validate_oto_timing(
     pre_before_margin_ms = 60.0 if is_japanese else 40.0
     pre_after_margin_ms = 220.0 if is_japanese else 100.0
     cutoff_after_margin_ms = 320.0 if is_japanese else 260.0
-    boundary_dist_warn_ms = 260.0 if is_japanese else 180.0
+    # TICKET-003: Tightened Korean threshold from 180ms to 120ms to better
+    # reflect MFA resolution and catch boundary drift earlier.
+    boundary_dist_warn_ms = 260.0 if is_japanese else 120.0
 
     for wav_name, rows in by_wav.items():
         wav_path = _resolve_wav_path(wav_name, wav_dir, wav_idx)
@@ -807,3 +863,288 @@ def validate_oto_timing(
         log(f"⚠ 검증 리포트 저장 실패: {e}")
 
     return summary
+
+
+# ---------------------------------------------------------------------------
+# TICKET-003: Pre-generation TextGrid coverage validation
+# ---------------------------------------------------------------------------
+
+def _count_phone_intervals(tg_path: str) -> int:
+    """Count non-silence phone intervals in a TextGrid file."""
+    try:
+        text = read_text_auto(tg_path)
+    except Exception:
+        return 0
+    count = 0
+    in_phones = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if "phones" in stripped.lower() or "phone" in stripped.lower():
+            in_phones = True
+        if not in_phones:
+            continue
+        if stripped.startswith("text ="):
+            val = stripped[len("text ="):].strip().strip('"')
+            if val and val.lower() not in SIL_MARKS:
+                count += 1
+    return count
+
+
+def validate_textgrid_coverage(
+    tg_folder: str,
+    language: str = "korean",
+    callback=None,
+    coverage_warn_threshold: float = 0.60,
+) -> Dict[str, object]:
+    """TICKET-003: Validate that TextGrid files contain a reasonable phone count.
+
+    Scans all TextGrid files and computes the ratio of files that have at
+    least one non-silence phone interval.  A median coverage below
+    ``coverage_warn_threshold`` (default 0.60) is reported as drift.
+
+    Returns a dict with keys:
+    - ``coverage_ok`` (bool)
+    - ``drift_detected`` (bool)
+    - ``median_phone_count`` (float)
+    - ``files_with_phones`` (int)
+    - ``total_tg_files`` (int)
+    - ``coverage_ratio`` (float)
+    - ``message`` (str)
+    """
+
+    def _log(msg: str) -> None:
+        if callback:
+            try:
+                callback(msg)
+            except Exception:
+                pass
+
+    result: Dict[str, object] = {
+        "coverage_ok": True,
+        "drift_detected": False,
+        "median_phone_count": 0.0,
+        "files_with_phones": 0,
+        "total_tg_files": 0,
+        "coverage_ratio": 1.0,
+        "message": "",
+    }
+
+    if not tg_folder or not os.path.isdir(tg_folder):
+        result["coverage_ok"] = False
+        result["message"] = f"TextGrid folder not found: {tg_folder}"
+        return result
+
+    tg_paths = []
+    for dirpath, _dirs, filenames in os.walk(tg_folder):
+        for fn in filenames:
+            if fn.lower().endswith(".textgrid"):
+                tg_paths.append(os.path.join(dirpath, fn))
+
+    if not tg_paths:
+        result["coverage_ok"] = False
+        result["message"] = "No TextGrid files found."
+        return result
+
+    phone_counts = []
+    for tp in tg_paths:
+        phone_counts.append(_count_phone_intervals(tp))
+
+    if np is None:
+        import statistics
+        median_count = statistics.median(phone_counts) if phone_counts else 0.0
+    else:
+        median_count = float(np.median(phone_counts)) if phone_counts else 0.0
+
+    files_with_phones = sum(1 for c in phone_counts if c > 0)
+    total = len(phone_counts)
+    coverage_ratio = files_with_phones / max(total, 1)
+    drift = coverage_ratio < float(coverage_warn_threshold)
+
+    result["median_phone_count"] = float(median_count)
+    result["files_with_phones"] = files_with_phones
+    result["total_tg_files"] = total
+    result["coverage_ratio"] = round(coverage_ratio, 4)
+    result["drift_detected"] = drift
+    result["coverage_ok"] = not drift
+
+    if drift:
+        msg = (
+            f"[TextGrid Coverage] DRIFT DETECTED: only {files_with_phones}/{total} files "
+            f"have phone intervals (ratio={coverage_ratio:.2f} < threshold={coverage_warn_threshold:.2f}). "
+            f"Median phone count per file: {median_count:.1f}. "
+            "Consider re-running alignment with a higher-quality aligner."
+        )
+        result["message"] = msg
+        _log(f"⚠ {msg}")
+    else:
+        msg = (
+            f"[TextGrid Coverage] OK: {files_with_phones}/{total} files with phones "
+            f"(ratio={coverage_ratio:.2f}, median_phones={median_count:.1f})"
+        )
+        result["message"] = msg
+        _log(msg)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# TICKET-006: Post-generation alias coverage audit
+# ---------------------------------------------------------------------------
+
+# Minimum expected counts per alias family per format.
+# Override individual minimums via environment variables.
+_ALIAS_MIN_COUNTS_KR_CVVC = {
+    "cv": ("UTOA_MIN_CV_COUNT", 10),
+    "vc": ("UTOA_MIN_VC_COUNT", 10),
+    "vv": ("UTOA_MIN_VV_COUNT", 5),
+}
+_ALIAS_MIN_COUNTS_JA_VCV = {
+    "vcv": ("UTOA_MIN_VCV_COUNT", 20),
+    "cv": ("UTOA_MIN_CV_COUNT", 10),
+}
+_ALIAS_MIN_COUNTS_KR_CV = {
+    "cv": ("UTOA_MIN_CV_COUNT", 10),
+}
+_ALIAS_MIN_COUNTS_JA_CV = {
+    "cv": ("UTOA_MIN_CV_COUNT", 10),
+}
+
+
+def _resolve_min_count(env_name: str, default: int) -> int:
+    raw = str(os.environ.get(env_name, "")).strip()
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except Exception:
+        return default
+
+
+def audit_alias_coverage(
+    oto_path: str,
+    language: str = "korean",
+    format_type: str = "cvvc",
+    callback=None,
+) -> Dict[str, object]:
+    """TICKET-006: Audit alias family coverage in a generated OTO file.
+
+    Classifies each alias and compares per-family counts against minimum
+    expected thresholds for the given format type.
+
+    Returns a dict with keys:
+    - ``coverage_ok`` (bool)
+    - ``missing_families`` (List[str])
+    - ``low_count_families`` (Dict[str, int])  # family -> actual count
+    - ``family_counts`` (Dict[str, int])
+    - ``message`` (str)
+    """
+
+    def _log(msg: str) -> None:
+        if callback:
+            try:
+                callback(msg)
+            except Exception:
+                pass
+
+    result: Dict[str, object] = {
+        "coverage_ok": True,
+        "missing_families": [],
+        "low_count_families": {},
+        "family_counts": {},
+        "message": "",
+    }
+
+    if not oto_path or not os.path.isfile(oto_path):
+        result["coverage_ok"] = False
+        result["message"] = f"OTO file not found: {oto_path}"
+        return result
+
+    lang = str(language or "korean").strip().lower()
+    fmt = str(format_type or "cvvc").strip().lower()
+
+    # Determine minimum count table for this format.
+    if lang in {"japanese", "ja", "jp"}:
+        if "vcv" in fmt:
+            min_table = _ALIAS_MIN_COUNTS_JA_VCV
+        else:
+            min_table = _ALIAS_MIN_COUNTS_JA_CV
+        classify_fn = None  # lazy import below
+    else:
+        if "cvvc" in fmt or "cvc" in fmt:
+            min_table = _ALIAS_MIN_COUNTS_KR_CVVC
+        else:
+            min_table = _ALIAS_MIN_COUNTS_KR_CV
+        classify_fn = _classify_kr_alias
+
+    # Lazy import for Japanese classifier to avoid circular imports.
+    if classify_fn is None:
+        try:
+            from core.ja_oto_mapping import classify_ja_alias as _cj
+            classify_fn = _cj
+        except Exception:
+            classify_fn = _classify_kr_alias
+
+    family_counts: Dict[str, int] = {}
+    try:
+        lines = read_text_auto(oto_path).splitlines()
+    except Exception as exc:
+        result["coverage_ok"] = False
+        result["message"] = f"Failed to read OTO file: {exc}"
+        return result
+
+    for line in lines:
+        line = line.strip()
+        if not line or "=" not in line or "," not in line:
+            continue
+        left, right = line.split("=", 1)
+        parts = right.split(",")
+        if not parts:
+            continue
+        alias = parts[0].strip()
+        if not alias:
+            continue
+        try:
+            family = classify_fn(alias)
+        except Exception:
+            family = "general"
+        family_counts[family] = family_counts.get(family, 0) + 1
+
+    result["family_counts"] = dict(family_counts)
+
+    missing = []
+    low_count = {}
+    for family, (env_name, default_min) in min_table.items():
+        required = _resolve_min_count(env_name, default_min)
+        actual = family_counts.get(family, 0)
+        if actual == 0:
+            missing.append(family)
+        elif actual < required:
+            low_count[family] = actual
+
+    result["missing_families"] = missing
+    result["low_count_families"] = low_count
+    coverage_ok = not missing and not low_count
+    result["coverage_ok"] = coverage_ok
+
+    if not coverage_ok:
+        parts_msg = []
+        if missing:
+            parts_msg.append(f"missing families: {missing}")
+        if low_count:
+            parts_msg.append(f"low-count families: {low_count}")
+        msg = (
+            f"[Alias Coverage] ⚠ Coverage issues detected ({fmt} {lang}): "
+            + "; ".join(parts_msg)
+            + ". Consider using a higher-quality aligner or checking LAB files."
+        )
+        result["message"] = msg
+        _log(f"⚠ {msg}")
+    else:
+        msg = (
+            f"[Alias Coverage] OK ({fmt} {lang}): "
+            + ", ".join(f"{k}={v}" for k, v in sorted(family_counts.items()))
+        )
+        result["message"] = msg
+        _log(msg)
+
+    return result

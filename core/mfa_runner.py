@@ -308,8 +308,19 @@ def _resolve_default_mfa_runtime_root() -> str:
             continue
     for candidate in candidates:
         if os.path.isdir(candidate):
+            logger.warning(
+                "[MFA] All writable paths failed; using existing directory '%s'. "
+                "MFA environment setup may fail if this path is read-only.",
+                candidate,
+            )
             return candidate
-    return candidates[0] if candidates else os.path.join(r"C:\Users\Public", "UTAU_Auto_OTO_v3")
+    fallback = candidates[0] if candidates else os.path.join(r"C:\Users\Public", "UTAU_Auto_OTO_v3")
+    logger.warning(
+        "[MFA] No writable or existing runtime root found; falling back to '%s'. "
+        "MFA setup will likely fail. Check that LOCALAPPDATA is set and writable.",
+        fallback,
+    )
+    return fallback
 
 
 def get_default_mfa_env_dir():
@@ -1554,7 +1565,12 @@ def find_mfa_executable():
     conda_paths = [
         os.path.expanduser('~/miniconda3/envs/aligner/Scripts/mfa.exe'),
         os.path.expanduser('~/anaconda3/envs/aligner/Scripts/mfa.exe'),
+        os.path.expanduser('~/mambaforge/envs/aligner/Scripts/mfa.exe'),
+        os.path.expanduser('~/miniforge3/envs/aligner/Scripts/mfa.exe'),
         os.path.expanduser('~/miniconda3/Scripts/mfa.exe'),
+        os.path.expanduser('~/anaconda3/Scripts/mfa.exe'),
+        os.path.expanduser('~/mambaforge/Scripts/mfa.exe'),
+        os.path.expanduser('~/miniforge3/Scripts/mfa.exe'),
     ]
     for p in conda_paths:
         if os.path.exists(p):
@@ -1994,6 +2010,11 @@ def ensure_korean_support(mfa_path, callback=None):
         log('[MFA] Failed to prepare Korean tokenizer deps (jamo, python-mecab-ko, mecab-python3)')
         if last_err:
             log(f"   last error: {last_err[:500]}")
+        log(
+            '[MFA] Hint: installing mecab-python3 from source requires Microsoft C++ Build Tools. '
+            'If no binary wheel is available for your platform, download Build Tools from: '
+            'https://visualstudio.microsoft.com/visual-cpp-build-tools/'
+        )
         return False
     except Exception as e:
         log(f"[MFA] Korean dependency setup error: {e}")

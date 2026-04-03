@@ -19,6 +19,7 @@ from core.ja_oto_mapping import (
     _extract_vcv_target_syllable,
     get_vc_consonant,
 )
+from core.vc_timing_profiles import JA_YOUON_COMPOUND_ONSETS
 
 JA_SIBILANT_ONSETS = {
     "s", "z", "sh", "j", "ch", "ts", "dz", "ss", "zz", "jj",
@@ -31,6 +32,23 @@ JA_PLOSIVE_ONSETS = {
 JA_LIQUID_ONSETS = {"r", "ry", "l"}
 JA_GLIDE_ONSETS = {"y", "w"}
 JA_FRICATIVE_ONSETS = {"h", "f", "v", "hy", "s", "z", "sh"}
+
+
+def _ja_youon_group(onset):
+    o = (onset or "").strip().lower()
+    if o not in JA_YOUON_COMPOUND_ONSETS:
+        return ""
+    if o in {"sy", "shy", "zy", "jy", "chy", "tsy"}:
+        return "sibilant"
+    if o in {"ny", "my"}:
+        return "nasal"
+    if o == "ry":
+        return "liquid"
+    if o in {"hy", "fy", "vy"}:
+        return "fricative"
+    if o == "wy":
+        return "glide"
+    return "plosive"
 
 
 def _safe_validate_oto_params(offset, consonant, cutoff, pre, ovl):
@@ -56,19 +74,23 @@ def _safe_validate_oto_params(offset, consonant, cutoff, pre, ovl):
 def _ja_bridge_overlap_window(pre, consonant_hint="", mode="vc"):
     p = max(float(pre), 0.0)
     c = _clean_phone_mark(consonant_hint)
+    youon_group = _ja_youon_group(c)
     hard = {"k", "g", "t", "d", "p", "b", "q", "c", "ch", "ts", "dz", "ky", "gy", "ty", "dy", "py", "by"}
     fric = {"s", "z", "sh", "h", "f", "v", "hy"}
     sonorant = {"m", "n", "ny", "r", "l", "ry", "w", "y"}
+    is_hard_like = c in hard or youon_group == "plosive"
+    is_fric_like = c in fric or youon_group in {"sibilant", "fricative"}
+    is_sonorant_like = c in sonorant or youon_group in {"nasal", "liquid", "glide"}
 
     mode = str(mode or "vc").strip().lower()
     if mode == "vv":
         gap_min, gap_max, gap_target = 4.0, 10.0, 7.0
-    elif c in hard or c in fric:
+    elif is_hard_like or is_fric_like:
         if mode == "vcv":
             gap_min, gap_max, gap_target = 8.0, 16.0, 11.0
         else:
             gap_min, gap_max, gap_target = 10.0, 20.0, 14.0
-    elif c in sonorant:
+    elif is_sonorant_like:
         if mode == "vcv":
             gap_min, gap_max, gap_target = 5.0, 12.0, 8.0
         else:
@@ -79,11 +101,14 @@ def _ja_bridge_overlap_window(pre, consonant_hint="", mode="vc"):
         else:
             gap_min, gap_max, gap_target = 7.0, 15.0, 10.0
 
-    gap_target = _clamp_range(gap_target, gap_min, gap_max)
     if p <= 0:
+        gap_target = _clamp_range(gap_target, gap_min, gap_max)
         return gap_min, gap_max, gap_target
+
+    adaptive_gap_floor = max(0.0, p * 0.12)
+    gap_target = max(gap_target, adaptive_gap_floor)
     gap_max = min(gap_max, max(p - 1.0, gap_min))
-    gap_min = min(gap_min, gap_max)
+    gap_min = min(max(gap_min, min(adaptive_gap_floor, gap_max)), gap_max)
     gap_target = _clamp_range(gap_target, gap_min, gap_max)
     return gap_min, gap_max, gap_target
 
@@ -123,11 +148,25 @@ def _ja_precenter_gap_targets(alias_type, alias_text=""):
             }
 
         hint = _ja_overlap_consonant_hint(alias_text, alias_type=alias_type)
+        youon_group = _ja_youon_group(hint)
         og_lo, og_hi, og_t = _ja_bridge_overlap_window(120.0, hint, mode=("vcv" if alias_type == "vcv" else "vc"))
-        if hint in JA_PLOSIVE_ONSETS or hint in JA_SIBILANT_ONSETS or hint in JA_FRICATIVE_ONSETS:
+        if (
+            hint in JA_PLOSIVE_ONSETS
+            or hint in JA_SIBILANT_ONSETS
+            or hint in JA_FRICATIVE_ONSETS
+            or youon_group in {"plosive", "sibilant", "fricative"}
+        ):
             cons_gap = (20.0, 60.0, 34.0) if alias_type == "vc" else (58.0, 150.0, 92.0)
             cut_gap = (12.0, 46.0, 25.0) if alias_type == "vc" else (34.0, 92.0, 54.0)
-        elif hint in JA_NASAL_ONSETS or hint in JA_LIQUID_ONSETS or hint in JA_GLIDE_ONSETS:
+            if youon_group in {"sibilant", "fricative"}:
+                cons_gap = (24.0, 72.0, 40.0) if alias_type == "vc" else (68.0, 158.0, 100.0)
+                cut_gap = (14.0, 52.0, 30.0) if alias_type == "vc" else (36.0, 96.0, 60.0)
+        elif (
+            hint in JA_NASAL_ONSETS
+            or hint in JA_LIQUID_ONSETS
+            or hint in JA_GLIDE_ONSETS
+            or youon_group in {"nasal", "liquid", "glide"}
+        ):
             cons_gap = (28.0, 96.0, 52.0) if alias_type == "vc" else (74.0, 180.0, 116.0)
             cut_gap = (18.0, 74.0, 40.0) if alias_type == "vc" else (42.0, 122.0, 70.0)
         else:
@@ -305,16 +344,19 @@ def _adaptive_ja_overlap(pre, consonant_hint="", mode="cv"):
 
 def _ja_onset_class(onset):
     o = (onset or "").strip().lower()
+    youon_group = _ja_youon_group(o)
     if not o:
         return "other"
-    if o in JA_NASAL_ONSETS or o.startswith("m"):
+    if o in JA_NASAL_ONSETS or o.startswith("m") or youon_group == "nasal":
         return "nasal"
-    if o in JA_LIQUID_ONSETS or o.startswith("r") or o.startswith("l"):
+    if o in JA_LIQUID_ONSETS or o.startswith("r") or o.startswith("l") or youon_group == "liquid":
         return "liquid"
     if o in JA_VOICED_ONSETS:
         return "voiced"
     if o in JA_VOICELESS_ONSETS:
         return "voiceless"
+    if youon_group in {"plosive", "sibilant", "fricative"}:
+        return "voiced" if o[:1] in {"g", "z", "j", "d", "b", "v"} else "voiceless"
     return "other"
 
 
@@ -352,6 +394,7 @@ def _ja_cv_offset_and_pre(
     vowel_end=None,
 ):
     cls, onset = _ja_cv_onset_class(alias_text, c_hint=c_hint, alias_type=alias_type)
+    youon_group = _ja_youon_group(onset)
     is_head = alias_type == "cv_head"
 
     lead = 30.0
@@ -363,6 +406,12 @@ def _ja_cv_offset_and_pre(
         lead = 34.0
     if onset in JA_SIBILANT_ONSETS or onset in JA_FRICATIVE_ONSETS:
         lead += 6.0
+    if youon_group in {"sibilant", "fricative"}:
+        lead += 5.0
+    elif youon_group == "plosive":
+        lead += 2.0
+    elif youon_group in {"nasal", "liquid", "glide"}:
+        lead -= 2.0
     if onset in {"m", "n", "ny", "r", "l", "ry"}:
         lead -= 4.0
     if is_head:

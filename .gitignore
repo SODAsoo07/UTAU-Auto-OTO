@@ -55,6 +55,7 @@ ml/notebooks/**
 __pycache__/
 logs/
 build_assets/
+bundle_info.json
 installer_output/
 UTAU_Auto_OTO_Release*/
 release_assets/
@@ -88,6 +89,5 @@ models_installed/
 /temp
 /.code-review-graph
 /code-review-graph
+/.claude
 /.venv310
-.github/workflows/build-windows-preview.yml
-.github/workflows/build-windows-preview.yml
