@@ -57,6 +57,8 @@ RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "ml", "configs"), "ml/configs"),
     (os.path.join(APP_DIR, "config.json"), "."),
     (os.path.join(APP_DIR, "ui", "ui_layout.json"), "ui"),
+    # bundle_info.json is generated at build time; included when present.
+    (os.path.join(APP_DIR, "bundle_info.json"), "."),
 ]
 RELEASE_AUX_FILES = [
     os.path.join(APP_DIR, "setup_mfa.bat"),
@@ -233,7 +235,13 @@ def _ensure_micromamba_exe():
         print(f"Micromamba prepared: {target_path}")
         return True
     except Exception as exc:
-        print(f"[WARN] Failed to download micromamba.exe: {exc}")
+        print(
+            f"[WARN] Failed to download micromamba.exe: {exc}\n"
+            "[WARN] Users running setup_mfa.bat without internet access will be unable to\n"
+            "[WARN] install MFA automatically. To fix: ensure network access during build,\n"
+            "[WARN] or manually place micromamba.exe at:\n"
+            f"[WARN]   {target_path}"
+        )
         return False
 
 
@@ -297,11 +305,38 @@ def _iter_msvc_runtime_files():
         print(f"[INFO] Bundling MSVC runtime DLLs: {names}")
     if missing_required:
         missing = ", ".join(missing_required)
-        print(
-            "[WARN] Required MSVC runtime DLLs were not found on build machine: "
-            f"{missing}. Target machine may require VC++ Redistributable."
-        )
+        # C-1: DLL 누락 시 빌드 중단 — 클린 윈도우에서 0xc0000135 방지
+        if not os.environ.get("UTOA_SKIP_DLL_CHECK"):
+            raise SystemExit(
+                f"[ERROR] Required MSVC runtime DLLs not found on build machine: {missing}\n"
+                "Install 'Microsoft Visual C++ Redistributable' on the build machine,\n"
+                "or set UTOA_SKIP_DLL_CHECK=1 to bypass this check (unsafe for distribution).\n"
+                "Hint: run 'where msvcp140.dll' in a cmd to verify presence."
+            )
+        print(f"[WARN] MSVC DLL check bypassed via UTOA_SKIP_DLL_CHECK: {missing}")
     return found
+
+
+def _inject_msvc_runtime_files(dist_dir, runtime_files):
+    """
+    Copy MSVC runtime DLLs into built app directory post-build.
+    This avoids Nuitka include-data-file name collisions with auto-detected DLLs.
+    """
+    if not dist_dir or not os.path.isdir(dist_dir):
+        return
+    copied = []
+    skipped = []
+    for src, name in (runtime_files or []):
+        dst = os.path.join(dist_dir, name)
+        if os.path.isfile(dst):
+            skipped.append(name)
+            continue
+        shutil.copy2(src, dst)
+        copied.append(name)
+    if copied:
+        print(f"[INFO] Injected MSVC runtime DLLs into dist: {', '.join(copied)}")
+    if skipped:
+        print(f"[INFO] MSVC runtime DLLs already present (skip): {', '.join(skipped)}")
 
 
 def _has_preview_channel(target_channels) -> bool:
@@ -350,6 +385,23 @@ def _parse_args():
         "--skip-deps",
         action="store_true",
         help="Skip dependency installation step (useful in CI when already installed).",
+    )
+    parser.add_argument(
+        "--bundle-mode",
+        default="offline",
+        choices=["online", "offline"],
+        help=(
+            "online: slim build without bundled FFmpeg/micromamba (downloaded at runtime). "
+            "offline: full build with all heavy assets bundled (default)."
+        ),
+    )
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help=(
+            "Dev/local build: enables ccache, disables LTO, skips --remove-output for "
+            "faster incremental rebuilds. Not for distribution."
+        ),
     )
     return parser.parse_args()
 
@@ -435,6 +487,20 @@ def _safe_rmtree(path, retries=3):
     raise RuntimeError(f"Failed to remove directory after retries: {path}\nCause: {last_err}")
 
 
+def _write_bundle_info(app_version: str, bundle_mode: str) -> None:
+    """Write build-time metadata to bundle_info.json for runtime detection."""
+    info = {
+        "bundle_mode": bundle_mode,
+        "app_version": app_version,
+        "ffmpeg_bundled": bundle_mode == "offline",
+        "micromamba_bundled": bundle_mode == "offline",
+    }
+    path = os.path.join(APP_DIR, "bundle_info.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(info, f, ensure_ascii=False, indent=2)
+    print(f"[INFO] bundle_info.json written: {info}")
+
+
 def _iter_runtime_data_entries():
     entries = []
     for src, dst in RUNTIME_DATA_PATHS:
@@ -464,7 +530,10 @@ def _build_pyinstaller_args(app_name, ffmpeg_bin, app_icon_path="", onefile=Fals
         "--clean",
         "--onefile" if onefile else "--onedir",
         f"--add-data={ctk_path};customtkinter/",
-        f"--add-data={ffmpeg_bin};ffmpeg/bin",
+    ]
+    if ffmpeg_bin:
+        pyinstaller_args.append(f"--add-data={ffmpeg_bin};ffmpeg/bin")
+    pyinstaller_args += [
         "--hidden-import=textgrid",
         "--hidden-import=customtkinter",
         "--hidden-import=onnxruntime",
@@ -505,12 +574,13 @@ def _run_pyinstaller_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False
         raise FileNotFoundError(f"Built app directory not found: {dist_dir}")
     return dist_dir
 
-def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, include_domino_module=False):
+def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, include_domino_module=False, dev=False):
     import customtkinter
 
     ctk_path = os.path.dirname(customtkinter.__file__)
     output_root = os.path.join(APP_DIR, "dist_nuitka")
-    if os.path.exists(output_root):
+    # In dev mode keep existing output dir for incremental compilation.
+    if not dev and os.path.exists(output_root):
         shutil.rmtree(output_root)
     os.makedirs(output_root, exist_ok=True)
 
@@ -530,14 +600,21 @@ def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, inc
         "--include-module=textgrid",
         "--include-package=customtkinter",
         "--include-package=onnxruntime",
-        "--remove-output",
         f"--jobs={cpu_jobs}",
         f"--nofollow-import-to={','.join(EXCLUDED_MODULES + EXCLUDED_TRAINING_MODULES)}",
     ]
+    if dev:
+        # Dev mode: ccache for incremental recompilation, no LTO, no source cleanup.
+        cmd += ["--enable-ccache", "--lto=no"]
+        print("[INFO] --dev mode: ccache enabled, LTO disabled, incremental build active.")
+    else:
+        # Release mode: clean C source tree after build to save disk space.
+        cmd.append("--remove-output")
     if include_domino_module:
         cmd.append("--include-package=pydomino")
 
-    _validate_ffmpeg_bin(ffmpeg_bin)
+    if ffmpeg_bin:
+        _validate_ffmpeg_bin(ffmpeg_bin)
     include_entries = [(ctk_path, "customtkinter")]
     include_entries.extend(_iter_runtime_data_entries())
     for src, dst in include_entries:
@@ -549,11 +626,11 @@ def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, inc
             cmd.append(f"--include-data-files={src}={target_path}")
         else:
             print(f"[WARN] Runtime include source missing (skip): {src}")
-    ffmpeg_runtime_files = _iter_ffmpeg_runtime_files(ffmpeg_bin)
-    for src, name in ffmpeg_runtime_files:
-        cmd.append(f"--include-data-files={src}=ffmpeg/bin/{name}")
-    for src, name in _iter_msvc_runtime_files():
-        cmd.append(f"--include-data-files={src}={name}")
+    if ffmpeg_bin:
+        ffmpeg_runtime_files = _iter_ffmpeg_runtime_files(ffmpeg_bin)
+        for src, name in ffmpeg_runtime_files:
+            cmd.append(f"--include-data-files={src}=ffmpeg/bin/{name}")
+    runtime_dlls = _iter_msvc_runtime_files()
     if app_icon_path:
         cmd.append(f"--windows-icon-from-ico={app_icon_path}")
 
@@ -576,7 +653,9 @@ def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, inc
 
     expected_dist = os.path.join(output_root, f"{app_name}.dist")
     if os.path.isdir(expected_dist):
-        _validate_packaged_ffmpeg(expected_dist)
+        _inject_msvc_runtime_files(expected_dist, runtime_dlls)
+        if ffmpeg_bin:
+            _validate_packaged_ffmpeg(expected_dist)
         return expected_dist
 
     dist_candidates = [
@@ -585,7 +664,9 @@ def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, inc
         if n.lower().endswith(".dist") and os.path.isdir(os.path.join(output_root, n))
     ]
     if len(dist_candidates) == 1:
-        _validate_packaged_ffmpeg(dist_candidates[0])
+        _inject_msvc_runtime_files(dist_candidates[0], runtime_dlls)
+        if ffmpeg_bin:
+            _validate_packaged_ffmpeg(dist_candidates[0])
         return dist_candidates[0]
 
     raise FileNotFoundError(f"Nuitka standalone directory not found in: {output_root}")
@@ -970,8 +1051,9 @@ def main():
     app_version = _detect_app_version()
     mode_text = "onefile" if args.onefile else "onedir"
 
+    bundle_mode = str(getattr(args, "bundle_mode", "offline") or "offline").strip().lower()
     channel_text = ",".join(target_channels)
-    print(f"[INFO] channels={channel_text}, backend={args.backend}, version={app_version}")
+    print(f"[INFO] channels={channel_text}, backend={args.backend}, version={app_version}, bundle_mode={bundle_mode}")
     if args.skip_deps:
         print("[1/5] Skipping dependency install (--skip-deps).")
     else:
@@ -983,18 +1065,41 @@ def main():
         print("[WARN] Domino runtime module will not be bundled in this build.")
         include_domino_module = False
 
-    print("[2/5] Preparing FFmpeg runtime...")
-    ffmpeg_bin = _ensure_ffmpeg_bin()
-    _ensure_micromamba_exe()
+    print("[2/5] Preparing runtime assets...")
+    if bundle_mode == "online":
+        print("[INFO] bundle-mode=online: skipping FFmpeg/micromamba bundling (downloaded at runtime).")
+        ffmpeg_bin = ""
+    else:
+        try:
+            ffmpeg_bin = _ensure_ffmpeg_bin()
+        except RuntimeError as _ffmpeg_err:
+            if os.environ.get("UTOA_SKIP_FFMPEG_CHECK"):
+                print(f"[WARN] FFmpeg preparation failed (UTOA_SKIP_FFMPEG_CHECK set): {_ffmpeg_err}")
+                ffmpeg_bin = FFMPEG_BIN_DIR
+            else:
+                raise SystemExit(
+                    f"[ERROR] FFmpeg runtime preparation failed: {_ffmpeg_err}\n"
+                    "FFmpeg is required for CTC audio processing in the portable build.\n"
+                    "Options:\n"
+                    "  1. Ensure network access during build (FFmpeg is downloaded automatically)\n"
+                    "  2. Pre-place ffmpeg.exe + ffprobe.exe in build_assets/ffmpeg/bin/\n"
+                    "  3. Set UTOA_SKIP_FFMPEG_CHECK=1 to skip (unsafe for distribution)\n"
+                    "  4. Use --bundle-mode online to build without bundled FFmpeg"
+                ) from _ffmpeg_err
+        _ensure_micromamba_exe()
     app_icon_path = _resolve_app_icon_path()
     if app_icon_path:
         print(f"[INFO] app_icon={app_icon_path}")
     else:
         print("[WARN] app icon not found; executable will use default icon.")
 
+    # Write bundle_info.json so the app can detect its bundle mode at runtime.
+    _write_bundle_info(app_version, bundle_mode)
+
+    dev_build = bool(getattr(args, "dev", False))
     print(f"[3/5] Building app with {args.backend}...")
     if args.backend == "nuitka":
-        built_artifact = _run_nuitka_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile, include_domino_module=include_domino_module)
+        built_artifact = _run_nuitka_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile, include_domino_module=include_domino_module, dev=dev_build)
     else:
         built_artifact = _run_pyinstaller_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile, include_domino_module=include_domino_module)
 

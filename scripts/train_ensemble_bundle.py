@@ -7,6 +7,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.oto_ml_ensemble import train_ensemble_bundle
+from core.oto_ml.features.mel_patches import resolve_rawmel_cache_dir
 
 
 def _parse_args():
@@ -29,14 +30,53 @@ def _parse_args():
     return parser.parse_args()
 
 
+def _resolve_cache_leaf(language: str, format_type: str, cache_hint: str) -> str:
+    hint = os.path.abspath(str(cache_hint or "").strip())
+    if not hint:
+        return ""
+    manifest_here = os.path.join(hint, "manifest.json")
+    if os.path.isfile(manifest_here):
+        return hint
+
+    lang = str(language or "").strip().lower()
+    fmt = str(format_type or "").strip().lower()
+    direct_candidates = [
+        os.path.join(hint, f"{lang}_{fmt}", "rawmel_cache"),
+        os.path.join(hint, lang, fmt, "v1"),
+        os.path.join(hint, lang, fmt),
+    ]
+    for candidate in direct_candidates:
+        if os.path.isfile(os.path.join(candidate, "manifest.json")):
+            return candidate
+
+    resolved = resolve_rawmel_cache_dir(
+        language=lang,
+        format_type=fmt,
+        root_hint=hint,
+    )
+    if resolved and os.path.isfile(os.path.join(resolved, "manifest.json")):
+        return resolved
+    return ""
+
+
 def main():
     args = _parse_args()
+    resolved_cache_dir = _resolve_cache_leaf(args.language, args.format_type, args.rawmel_cache_dir)
+    if not resolved_cache_dir:
+        raise FileNotFoundError(
+            "rawmel cache could not be resolved. "
+            f"hint={args.rawmel_cache_dir}, language={args.language}, format={args.format_type}"
+        )
+    if os.path.normcase(os.path.normpath(resolved_cache_dir)) != os.path.normcase(
+        os.path.normpath(str(args.rawmel_cache_dir or ""))
+    ):
+        print(f"[INFO] rawmel cache resolved: {args.rawmel_cache_dir} -> {resolved_cache_dir}")
     meta = train_ensemble_bundle(
         language=args.language,
         format_type=args.format_type,
         dataset_csv=args.dataset_csv,
         out_dir=args.out_dir,
-        rawmel_cache_dir=args.rawmel_cache_dir,
+        rawmel_cache_dir=resolved_cache_dir,
         group_column=args.group_column,
         alias_types=args.alias_types,
         min_mapping_confidence=float(args.min_mapping_confidence),

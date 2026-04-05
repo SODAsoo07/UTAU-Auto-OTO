@@ -3,13 +3,14 @@
 from core.alignment_pipeline import run_alignment_with_fallback
 from core.mfa_runner import check_mfa_model, download_mfa_model
 from core.pipeline_status import normalize_aligner_name
+from ui.i18n import t
 
 
 class AlignActionsMixin:
     def _run_mfa(self):
         active_worker = getattr(self, "_active_worker_thread", None)
         if bool(getattr(self, "is_running", False)) and active_worker is not None and active_worker.is_alive():
-            self._set_status("다른 작업 진행 중")
+            self._set_status(t("다른 작업 진행 중"))
             self._append_log("ℹ 다른 작업이 진행 중이라 정렬을 시작하지 않습니다.")
             return
 
@@ -24,9 +25,9 @@ class AlignActionsMixin:
             if not self._confirm_language_script_mismatch(
                 lang_for_prompt,
                 wav_dir_for_prompt,
-                stage_name="정렬",
+                stage_name=t("정렬"),
             ):
-                self._set_status("정렬 취소됨")
+                self._set_status(t("정렬 취소됨"))
                 return
         primary_engine_for_prompt = normalize_aligner_name(
             self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
@@ -38,7 +39,7 @@ class AlignActionsMixin:
                 ask_fn = getattr(self, "_ask_yes_no_dialog_sync", None)
                 if callable(ask_fn):
                     proceed = ask_fn(
-                        "기존 TextGrid 덮어쓰기 확인",
+                        t("기존 TextGrid 덮어쓰기 확인"),
                         (
                             "textgrids 폴더에 기존 정렬 결과가 있습니다.\n"
                             "기존 폴더를 덮어씌워 재생성하겠습니까?"
@@ -49,7 +50,7 @@ class AlignActionsMixin:
                     proceed = False
                 if not proceed:
                     self._append_log("ℹ 사용자가 기존 textgrids 덮어쓰기를 취소했습니다. 정렬을 중단합니다.")
-                    self._set_status("정렬 취소됨")
+                    self._set_status(t("정렬 취소됨"))
                     return
                 overwrite_existing_textgrids = True
 

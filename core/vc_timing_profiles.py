@@ -40,6 +40,28 @@ JA_NASAL_ONSETS = {"m", "n", "ny", "ng", "ngy"}
 JA_LIQUID_ONSETS = {"r", "ry", "l"}
 JA_GLIDE_ONSETS = {"y", "w"}
 JA_FRICATIVE_ONSETS = {"h", "f", "v", "hy", "s", "z", "sh"}
+JA_YOUON_COMPOUND_ONSETS = {
+    "ky",
+    "gy",
+    "sy",
+    "shy",
+    "zy",
+    "jy",
+    "ty",
+    "dy",
+    "ny",
+    "hy",
+    "fy",
+    "vy",
+    "by",
+    "py",
+    "my",
+    "ry",
+    "wy",
+    "qy",
+    "chy",
+    "tsy",
+}
 
 
 JA_CVVC_BRIDGE_TIMING = {
@@ -171,6 +193,18 @@ JA_CVVC_BRIDGE_TIMING = {
 
 def classify_ja_cvvc_bridge_group(onset: str) -> str:
     o = str(onset or "").strip().lower()
+    if o in JA_YOUON_COMPOUND_ONSETS:
+        if o in {"sy", "shy", "zy", "jy", "chy", "tsy"}:
+            return "sibilant"
+        if o in {"ny", "my"}:
+            return "nasal"
+        if o in {"ry"}:
+            return "liquid"
+        if o in {"hy", "fy", "vy"}:
+            return "fricative"
+        if o in {"wy"}:
+            return "glide"
+        return "plosive"
     if o in JA_SIBILANT_ONSETS:
         return "sibilant"
     if o in JA_PLOSIVE_ONSETS:
@@ -179,7 +213,7 @@ def classify_ja_cvvc_bridge_group(onset: str) -> str:
         return "nasal"
     if o in JA_LIQUID_ONSETS:
         return "liquid"
-    if o in JA_GLIDE_ONSETS:
+    if o in JA_GLIDE_ONSETS or o in JA_YOUON_COMPOUND_ONSETS:
         return "glide"
     if o in JA_FRICATIVE_ONSETS:
         return "fricative"
@@ -472,9 +506,11 @@ __all__ = [
     "JA_FRICATIVE_ONSETS",
     "JA_GLIDE_ONSETS",
     "JA_LIQUID_ONSETS",
+    "JA_YOUON_COMPOUND_ONSETS",
     "JA_NASAL_ONSETS",
     "JA_PLOSIVE_ONSETS",
     "JA_SIBILANT_ONSETS",
+    "JA_YOUON_COMPOUND_ONSETS",
     "KR_FRICATIVE_BRIDGE_TOKENS",
     "KR_SONORANT_CODA_TOKENS",
     "KR_STOPLIKE_BRIDGE_TOKENS",

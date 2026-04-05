@@ -1,4 +1,4 @@
-﻿import datetime
+import datetime
 import glob
 import json
 import logging
@@ -22,6 +22,7 @@ from core.mfa_runner import ALERT_MFA_PERMISSION_DENIED, ALERT_MSVC_REQUIRED
 from core.oto_validator import validate_oto_timing
 from core.runtime_paths import resolve_setup_mfa_script_path
 from ui.theme_tokens import DEFAULT_THEME_PROFILE, PALETTE, normalize_theme_profile_name
+from ui.i18n import t
 
 _HANGUL_CHAR_RE = re.compile(r"[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7A3]")
 _KANA_CHAR_RE = re.compile(r"[\u3041-\u3096\u309D-\u309F\u30A1-\u30FA\u30FC\u30FD-\u30FF\u31F0-\u31FF\uFF66-\uFF9D]")
@@ -504,6 +505,12 @@ class AppRuntimeMixin:
             if isinstance(exc_value, KeyboardInterrupt):
                 return
             tb = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+            if self._is_transient_tk_callback_error(exc_value, tb):
+                self.logger.warning(
+                    "[UI Callback] transient TclError suppressed during rebuild: %s",
+                    self._mask_sensitive_text(str(exc_value or "")),
+                )
+                return
             self._handle_error("UI Callback", exc_value, traceback_text=tb, auto_popup=True)
 
         self.report_callback_exception = _tk_exception_handler
@@ -515,6 +522,12 @@ class AppRuntimeMixin:
                 if args is None or args.exc_type is KeyboardInterrupt:
                     return
                 tb = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+                if self._is_transient_tk_callback_error(args.exc_value, tb):
+                    self.logger.warning(
+                        "[Thread Callback] transient TclError suppressed during rebuild: %s",
+                        self._mask_sensitive_text(str(args.exc_value or "")),
+                    )
+                    return
                 thread_name = getattr(getattr(args, "thread", None), "name", "") or "worker"
                 self._after_safe(
                     lambda step=f"Thread:{thread_name}", err=args.exc_value, trace=tb: self._handle_error(
@@ -533,6 +546,48 @@ class AppRuntimeMixin:
 
         if callable(previous_thread_hook):
             threading.excepthook = _thread_exception_handler
+
+    def _is_transient_tk_callback_error(self, exception, traceback_text=""):
+        if not isinstance(exception, tk.TclError):
+            return False
+        msg = str(exception or "").strip().lower()
+        during_theme_rebuild = bool(getattr(self, "_theme_rebuild_pending", False)) or bool(
+            getattr(self, "_suppress_ui_callback_errors", False)
+        )
+        transient_tokens = (
+            "invalid command name",
+            "application has been destroyed",
+            "can't invoke",
+            "bad window path name",
+        )
+        if any(token in msg for token in transient_tokens):
+            return True
+        if during_theme_rebuild and "image" in msg and "doesn't exist" in msg:
+            return True
+        if during_theme_rebuild and ("theme" in msg or "appearance" in msg):
+            return True
+        if during_theme_rebuild and "tclerror" in str(traceback_text or "").lower():
+            return True
+        return False
+
+    def _should_show_error_popup(self, step_name: str, exception_text: str) -> bool:
+        now = float(time.monotonic())
+        signature = f"{str(step_name or '').strip()}::{str(exception_text or '').strip()}"
+        last_signature = str(getattr(self, "_last_error_popup_signature", "") or "")
+        last_time = float(getattr(self, "_last_error_popup_time", 0.0) or 0.0)
+        if signature and signature == last_signature and (now - last_time) < 2.0:
+            repeat_count = int(getattr(self, "_last_error_popup_repeat_count", 0) or 0) + 1
+            self._last_error_popup_repeat_count = repeat_count
+            if repeat_count == 1:
+                try:
+                    self._append_log("[UI] Repeated identical error popups suppressed.")
+                except Exception:
+                    pass
+            return False
+        self._last_error_popup_signature = signature
+        self._last_error_popup_time = now
+        self._last_error_popup_repeat_count = 0
+        return True
 
     def _normalize_ml_selector_mode(self, value: str) -> str:
         mode = str(value or "").strip().lower()
@@ -2452,11 +2507,11 @@ class AppRuntimeMixin:
                 except Exception:
                     pass
 
-        ctk.CTkButton(btns, text="복사", width=90, command=_copy_text).pack(side="right")
+        ctk.CTkButton(btns, text=t("복사"), width=90, command=_copy_text).pack(side="right")
         if link_url:
-            ctk.CTkButton(btns, text="링크 복사", width=100, command=_copy_link).pack(side="right", padx=(0, 8))
+            ctk.CTkButton(btns, text=t("링크 복사"), width=100, command=_copy_link).pack(side="right", padx=(0, 8))
             ctk.CTkButton(btns, text=link_label, width=120, command=_open_link).pack(side="right", padx=(0, 8))
-        ctk.CTkButton(btns, text="닫기", width=90, command=win.destroy).pack(side="right", padx=(0, 8))
+        ctk.CTkButton(btns, text=t("닫기"), width=90, command=win.destroy).pack(side="right", padx=(0, 8))
 
     def _ask_yes_no_dialog_sync(self, title: str, message: str, default: bool = False) -> bool:
         safe_title = self._normalize_ui_message(str(title or "안내"))
@@ -2543,8 +2598,8 @@ class AppRuntimeMixin:
         if not mismatch:
             return True
 
-        lang_text = "한국어" if lang == "korean" else "일본어"
-        mismatch_text = "히라가나/가타카나" if lang == "korean" else "한글"
+        lang_text = t("한국어") if lang == "korean" else "일본어"
+        mismatch_text = t("히라가나/가타카나") if lang == "korean" else "한글"
         examples = scan.get("kana_examples", []) if lang == "korean" else scan.get("hangul_examples", [])
         example_text = ", ".join(examples[:3]) if examples else "(예시 없음)"
         message = (
@@ -3173,7 +3228,7 @@ class AppRuntimeMixin:
             self._append_log("   리포트 자동 복사에 실패했습니다. 아래 내용을 수동으로 복사해 주세요.")
         self._append_log(f"{'=' * 50}\n")
         self._set_status(f"오류 발생: {safe_step}")
-        if auto_popup:
+        if auto_popup and self._should_show_error_popup(safe_step, exc_text):
             self._after_safe(
                 lambda payload=report_text: self._show_copyable_alert(
                     title="오류 리포트",
@@ -3264,7 +3319,9 @@ class ConfigMixin:
 
     def _save_config(self, *_args):
         params = self._get_params()
+        from ui.i18n import get_language as _get_ui_lang
         config = {
+            "ui_language": _get_ui_lang(),
             "ui_theme_profile": (
                 normalize_theme_profile_name(self.ui_theme_var.get(), default=DEFAULT_THEME_PROFILE)
                 if hasattr(self, "ui_theme_var")
@@ -3413,6 +3470,10 @@ class ConfigMixin:
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
+
+            if "ui_language" in config:
+                from ui.i18n import set_language as _set_ui_lang
+                _set_ui_lang(str(config.get("ui_language", "ko") or "ko"))
 
             if "ui_theme_profile" in config and hasattr(self, "ui_theme_var") and hasattr(self, "_apply_ui_theme_profile"):
                 saved_theme = normalize_theme_profile_name(

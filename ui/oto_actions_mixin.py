@@ -1,6 +1,7 @@
 import os
 import re
 
+from ui.i18n import t
 from core.en_cvvc_builder import generate_en_cvvc_oto
 from core.format_type_utils import normalize_auto_format_value
 from core.ja_oto_generator import generate_ja_oto
@@ -199,10 +200,10 @@ class OtoActionsMixin:
                         return
                     scaled = _batch_ratio(batch_index, batch_total, ratio)
                     if stage == "oto":
-                        detail = "생성 진행" if batch_total <= 1 else f"생성 진행 ({batch_index + 1}/{batch_total})"
+                        detail = t("생성 진행") if batch_total <= 1 else f"{t('생성 진행')} ({batch_index + 1}/{batch_total})"
                         _update_oto_stage(detail, scaled)
                     else:
-                        detail = "검증 진행" if batch_total <= 1 else f"검증 진행 ({batch_index + 1}/{batch_total})"
+                        detail = t("검증 진행") if batch_total <= 1 else f"{t('검증 진행')} ({batch_index + 1}/{batch_total})"
                         _update_validate_stage(detail, scaled)
                 return _cb
 
@@ -214,7 +215,7 @@ class OtoActionsMixin:
                     return -1
 
             try:
-                _update_oto_stage("입력 검사", 0.02, force=True)
+                _update_oto_stage(t("입력 검사"), 0.02, force=True)
                 root_wav_dir = str(self.wav_entry.get() or "").strip()
                 base_tpl_path = "" if self.no_base_oto_var.get() else str(self.tpl_entry.get() or "").strip()
                 base_out_path = str(self.out_entry.get() or "").strip()
@@ -257,7 +258,7 @@ class OtoActionsMixin:
                     self._append_log(f"ℹ 하위 폴더 자동 탐색 활성화: 총 {target_count}개 보이스 폴더를 순차 처리합니다.")
                 elif batch_scan_enabled:
                     self._append_log("ℹ 하위 폴더 자동 탐색 활성화: 처리 대상 1개를 찾았습니다.")
-                _update_oto_stage("입력 경로 확인 완료", 0.07, force=True)
+                _update_oto_stage(t("입력 경로 확인 완료"), 0.07, force=True)
 
                 if batch_scan_enabled:
                     target_wav_dirs = self._discover_recursive_voicebank_dirs(root_wav_dir)
@@ -273,7 +274,7 @@ class OtoActionsMixin:
                     self._append_log(f"ℹ 하위 폴더 자동 탐색 활성화: 총 {target_count}개 보이스 폴더를 순차 처리합니다.")
                 elif batch_scan_enabled:
                     self._append_log("ℹ 하위 폴더 자동 탐색 활성화: 처리 대상 1개를 찾았습니다.")
-                _update_oto_stage("입력 경로 확인 완료", 0.07, force=True)
+                _update_oto_stage(t("입력 경로 확인 완료"), 0.07, force=True)
 
                 # 일반 OTO 경로에서는 파이프라인과 동일한 사전 점검을 먼저 수행합니다.
                 # (영어 Preview / 한국어 템플릿 전용 포맷은 별도 전용 분기에서 검사)
@@ -416,7 +417,7 @@ class OtoActionsMixin:
                     def _update_validate_local(detail: str, ratio: float, *, force: bool = False):
                         _update_validate_stage(detail, _batch_ratio(batch_index, batch_total, ratio), force=force)
 
-                    _update_oto_local("생성 준비 완료", 0.18, force=True)
+                    _update_oto_local(t("생성 준비 완료"), 0.18, force=True)
                     tpl_path = "" if self.no_base_oto_var.get() else base_tpl_path
                     cleanup_snapshot = self._snapshot_output_tree_for_cleanup(target_out_path)
                     tg_folder = os.path.join(target_wav_dir, "textgrids")
@@ -667,8 +668,8 @@ class OtoActionsMixin:
                         )
 
                     if total:
-                        _update_oto_local("생성 결과 정리", float(processed) / float(total))
-                    _update_oto_local("생성 결과 정리", 0.92, force=True)
+                        _update_oto_local(t("생성 결과 정리"), float(processed) / float(total))
+                    _update_oto_local(t("생성 결과 정리"), 0.92, force=True)
 
                     out_exists = os.path.isfile(target_out_path)
                     out_lines = _read_oto_line_count(target_out_path) if out_exists else -1
@@ -689,14 +690,14 @@ class OtoActionsMixin:
                         self._set_status("오류: OTO 생성 결과 없음")
                         return False, False, int(processed or 0), int(total or 0)
 
-                    _update_validate_local("검증 준비", 0.05, force=True)
+                    _update_validate_local(t("검증 준비"), 0.05, force=True)
                     self._run_auto_validation(
                         target_wav_dir,
                         tg_folder,
                         target_out_path,
                         callback=_make_progress_callback("validate", batch_index=batch_index, batch_total=batch_total),
                     )
-                    _update_validate_local("검증 완료", 1.0, force=True)
+                    _update_validate_local(t("검증 완료"), 1.0, force=True)
                     if not errors:
                         self._cleanup_generated_output_artifacts(target_out_path, snapshot=cleanup_snapshot)
                     if errors:

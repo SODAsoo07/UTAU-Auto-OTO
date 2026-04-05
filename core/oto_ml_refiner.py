@@ -2400,13 +2400,21 @@ def apply_oto_ml_to_oto_file(
         if cache_key not in bundle_cache:
             ensemble_dir = _resolve_ensemble_model_dir(language, format_type, alias_family=alias_family) if _ensemble_enabled() else None
             lightgbm_dir = _resolve_lightgbm_model_dir(language, format_type, alias_family=alias_family)
-            primary_dir = ensemble_dir or lightgbm_dir
+            coupled_dir = _resolve_coupled_model_dir(language, format_type, alias_family=alias_family)
+            # Keep existing preference (ensemble -> lightgbm) but allow coupled-only setups.
+            primary_dir = ensemble_dir or lightgbm_dir or coupled_dir
             fallback_dir = ""
             primary_backend = _read_bundle_backend(primary_dir) if primary_dir else ""
             route_primary_backend[cache_key] = str(primary_backend or "lightgbm")
             if primary_dir and primary_backend == "ensemble_v1":
-                if legacy_fallback_enabled and lightgbm_dir and lightgbm_dir != primary_dir:
-                    fallback_dir = lightgbm_dir
+                if legacy_fallback_enabled:
+                    if lightgbm_dir and lightgbm_dir != primary_dir:
+                        fallback_dir = lightgbm_dir
+                    elif coupled_dir and coupled_dir != primary_dir:
+                        fallback_dir = coupled_dir
+            elif primary_dir and primary_backend == "lightgbm":
+                if legacy_fallback_enabled and coupled_dir and coupled_dir != primary_dir:
+                    fallback_dir = coupled_dir
 
             if not primary_dir:
                 route_status[cache_key] = ML_MODEL_MISSING

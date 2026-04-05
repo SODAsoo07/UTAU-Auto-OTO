@@ -54,6 +54,76 @@ $modelsAbs = Resolve-AbsolutePath -InputPath $ModelDir -BasePath $repoRoot
 $workAbs = Resolve-AbsolutePath -InputPath $WorkDir -BasePath $repoRoot
 $outputAbs = Resolve-AbsolutePath -InputPath $OutputZip -BasePath $repoRoot
 
+function Resolve-ReleaseSourcePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$InitialSourcePath,
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$ChannelNorm
+    )
+
+    if (Test-Path -LiteralPath $InitialSourcePath) {
+        return (Resolve-Path -LiteralPath $InitialSourcePath).Path
+    }
+
+    $candidateDirs = @()
+    $preferred = Join-Path $RepoRoot "UTAU_Auto_OTO_Release_$ChannelNorm"
+    if (Test-Path -LiteralPath $preferred) {
+        $candidateDirs += (Resolve-Path -LiteralPath $preferred).Path
+    }
+
+    $globbed = Get-ChildItem -LiteralPath $RepoRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "UTAU_Auto_OTO_Release*" }
+    foreach ($d in $globbed) {
+        if ($candidateDirs -notcontains $d.FullName) {
+            $candidateDirs += $d.FullName
+        }
+    }
+
+    if ($candidateDirs.Count -eq 0) {
+        return ""
+    }
+
+    $scored = foreach ($dir in $candidateDirs) {
+        $score = 0
+        $releaseJson = Join-Path $dir "release_channel.json"
+        if (Test-Path -LiteralPath $releaseJson) {
+            try {
+                $meta = Get-Content -LiteralPath $releaseJson -Raw | ConvertFrom-Json
+                if ([string]::Equals([string]$meta.channel, $ChannelNorm, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $score += 50
+                }
+            } catch {
+                # ignore malformed metadata
+            }
+        }
+        if (Test-Path -LiteralPath (Join-Path $dir "UTAU_Auto_OTO\\UTAU_Auto_OTO.exe")) {
+            $score += 20
+        }
+        $item = Get-Item -LiteralPath $dir -ErrorAction SilentlyContinue
+        [pscustomobject]@{
+            dir = $dir
+            score = $score
+            lastWriteUtc = if ($item) { $item.LastWriteTimeUtc } else { [datetime]::MinValue }
+        }
+    }
+
+    $pick = $scored |
+        Sort-Object -Property @{ Expression = 'score'; Descending = $true }, @{ Expression = 'lastWriteUtc'; Descending = $true } |
+        Select-Object -First 1
+    if ($pick) {
+        return [string]$pick.dir
+    }
+    return ""
+}
+
+if (-not (Test-Path -LiteralPath $sourceAbs)) {
+    $resolvedSource = Resolve-ReleaseSourcePath -InitialSourcePath $sourceAbs -RepoRoot $repoRoot -ChannelNorm $channelNorm
+    if (-not [string]::IsNullOrWhiteSpace($resolvedSource)) {
+        Write-Host "[INFO] Auto-detected release source: $resolvedSource"
+        $sourceAbs = $resolvedSource
+    }
+}
+
 function New-PortableTopShortcut {
     param(
         [Parameter(Mandatory = $true)][string]$RootDir,
@@ -176,8 +246,8 @@ function Remove-InternalTestScriptsFromPayload {
     }
 }
 
-if (-not (Test-Path $sourceAbs)) {
-    throw "Release folder not found: $sourceAbs"
+if (-not (Test-Path -LiteralPath $sourceAbs)) {
+    throw "Release folder not found: $sourceAbs`nHint: run build.py first, or pass -SourceDir explicitly."
 }
 
 if (-not (Test-Path $modelsAbs)) {
