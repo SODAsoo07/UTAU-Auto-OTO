@@ -121,3 +121,4 @@ MANIFEST
 *.dist/
 *.build/
 *.onefile-build/
+/.venv310
