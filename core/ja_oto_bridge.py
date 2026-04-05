@@ -32,6 +32,12 @@ JA_PLOSIVE_ONSETS = {
 JA_LIQUID_ONSETS = {"r", "ry", "l"}
 JA_GLIDE_ONSETS = {"y", "w"}
 JA_FRICATIVE_ONSETS = {"h", "f", "v", "hy", "s", "z", "sh"}
+# 요음 복합 onset: 활음(y/w)이 자음에 내포된 형태 — plosive보다 넓은 gap 필요.
+# ny, ry는 이미 nasal/liquid 처리되므로 제외.
+JA_YOUON_COMPOUND_ONSETS = frozenset({
+    "ky", "gy", "ty", "dy", "hy", "by", "py",
+    "tw", "kw", "gw",
+})
 
 
 def _ja_youon_group(onset):
@@ -150,7 +156,11 @@ def _ja_precenter_gap_targets(alias_type, alias_text=""):
         hint = _ja_overlap_consonant_hint(alias_text, alias_type=alias_type)
         youon_group = _ja_youon_group(hint)
         og_lo, og_hi, og_t = _ja_bridge_overlap_window(120.0, hint, mode=("vcv" if alias_type == "vcv" else "vc"))
-        if (
+        if hint in JA_YOUON_COMPOUND_ONSETS and youon_group not in {"sibilant", "fricative"}:
+            # 요음 복합 onset: 활음 전환 구간 때문에 nasal/liquid 수준의 넓은 gap 필요
+            cons_gap = (28.0, 96.0, 52.0) if alias_type == "vc" else (74.0, 180.0, 116.0)
+            cut_gap = (18.0, 74.0, 40.0) if alias_type == "vc" else (42.0, 122.0, 70.0)
+        elif (
             hint in JA_PLOSIVE_ONSETS
             or hint in JA_SIBILANT_ONSETS
             or hint in JA_FRICATIVE_ONSETS

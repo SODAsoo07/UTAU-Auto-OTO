@@ -1,9 +1,4 @@
-﻿# Public-source publishing profile (additional ignore file)
-#
-# IMPORTANT
-# - This file is NOT applied automatically by Git.
-# - Use it as a temporary publish profile (e.g. copy to .gitignore on a publish branch,
-#   or use with core.excludesFile for export-only workflows).
+﻿# Git ignore rules for Auto_OTO
 #
 # Goal: include source code only, exclude datasets/docs/venv/cache/build/runtime artifacts.
 
@@ -80,6 +75,10 @@ models_installed/
 *.pt
 *.pth
 *.onnx
+*.npz
+*.joblib
+*.pkl
+*.pickle
 *.zip
 *.7z
 *.tar
@@ -90,4 +89,35 @@ models_installed/
 /.code-review-graph
 /code-review-graph
 /.claude
-/.venv310
+
+# 8) IDE / editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+*.orig
+
+# 9) OS-generated files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# 10) Python build & test artifacts
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+*.egg
+MANIFEST
+
+# 11) Nuitka build output
+*.dist/
+*.build/
+*.onefile-build/

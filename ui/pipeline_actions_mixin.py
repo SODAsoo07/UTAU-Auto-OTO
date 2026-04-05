@@ -52,6 +52,7 @@ from core.generation.mapping_runtime import (
     format_mapping_reason_schema_summary,
     format_mapping_summary,
 )
+from ui.i18n import t
 
 
 
@@ -162,7 +163,7 @@ class PipelineActionsMixin:
             self._append_log(f"   - 딕셔너리 파일 미존재: {dict_path}")
         self._after_safe(
             lambda: self._show_copyable_alert(
-                title="정렬 입력 파일 누락",
+                title=t("정렬 입력 파일 누락"),
                 message=guide,
                 alert_key="align_lab_dict_missing",
             )
@@ -174,7 +175,7 @@ class PipelineActionsMixin:
         if has_lab and has_dict:
             return True
         self._notify_lab_or_dict_missing(wav_dir, dict_path)
-        self._set_status("❌ 정렬 입력 파일 누락")
+        self._set_status(f"❌ {t('정렬 입력 파일 누락')}")
         return False
 
     @staticmethod
@@ -2222,7 +2223,7 @@ class PipelineActionsMixin:
                     self._set_status("✅ 사전 단계 건너뜀 (영어 Preview)")
                     return
                 if hasattr(self, "_confirm_language_script_mismatch"):
-                    if not self._confirm_language_script_mismatch(lang, wav_dir, stage_name="사전 생성"):
+                    if not self._confirm_language_script_mismatch(lang, wav_dir, stage_name=t("사전 생성")):
                         self._set_status("취소됨: 언어 설정 확인")
                         return
                 if lang == 'japanese':
@@ -2241,7 +2242,7 @@ class PipelineActionsMixin:
                 self._append_log(f"📝 사전 저장 경로: {dict_path}")
                 self._set_status(f"✅ 사전 생성 완료 ({entries}개 항목)")
             except Exception as e:
-                self._handle_error("사전 생성", e)
+                self._handle_error(t("사전 생성"), e)
             finally:
                 self._set_running(False)
         self._run_in_thread(task)
@@ -2400,7 +2401,7 @@ class PipelineActionsMixin:
                     f"ℹ 현재 언어: {'일본어' if lang == 'japanese' else '한국어' if lang == 'korean' else '영어'}"
                 )
                 if lang in {"korean", "japanese"} and hasattr(self, "_confirm_language_script_mismatch"):
-                    if not self._confirm_language_script_mismatch(lang, wav_dir, stage_name="전체 파이프라인"):
+                    if not self._confirm_language_script_mismatch(lang, wav_dir, stage_name=t("전체 파이프라인")):
                         self._set_status("취소됨: 언어 설정 확인")
                         return
                 selected_format = normalize_auto_format_value(
@@ -3133,7 +3134,7 @@ class PipelineActionsMixin:
                 self._append_log("=" * 50)
 
             except Exception as e:
-                self._handle_error("전체 파이프라인", e)
+                self._handle_error(t("전체 파이프라인"), e)
             finally:
                 self._set_running(False)
         self._run_in_thread(task)

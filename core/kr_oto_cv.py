@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from core.kr_oto_rules import (
     _extract_alias_onset,
     _is_sonorant_consonant,
@@ -127,9 +129,9 @@ def _compute_kr_cv_timing(
         glide_lead = _clamp(glide_dur_ms, 0.0, 120.0) * 0.60
         target_pre = max(64.0, min(136.0, c_len + glide_lead + 14.0))
         if is_tense_cv:
-            target_pre = _clamp(target_pre + 3.0, 66.0, 146.0)
+            target_pre = _clamp(target_pre + 3.0, 66.0, 154.0)
         elif is_sonorant_cv:
-            target_pre = min(150.0, target_pre + 10.0)
+            target_pre = min(160.0, target_pre + 10.0)
         offset = max(boundary - target_pre, 0.0)
         pre = boundary - offset
         ovl = adaptive_overlap(pre, c_hint, mode="cv")
@@ -258,15 +260,15 @@ def _select_kr_cv_onset_slice(curr_phones):
     glide_dur_ms = 0.0
     last_mark = (curr_phones[onset_idx].mark or "").strip().lower()
     from core.kr_oto_rules import is_glide as _is_glide
-    if _is_glide(last_mark):
-        glide_start = float(curr_phones[onset_idx].minTime) * 1000.0
-        glide_end = float(curr_phones[onset_idx].maxTime) * 1000.0
-        glide_dur_ms = max(0.0, glide_end - glide_start)
+    if onset_idx - 1 >= 0 and _is_glide(last_mark):
+        glide_phone_idx = onset_idx  # save before overwriting
         prev_idx = onset_idx - 1
         while prev_idx >= 0 and _is_silence_like_phone_mark(curr_phones[prev_idx].mark):
             prev_idx -= 1
         if prev_idx >= 0:
             onset_idx = prev_idx
+            glide_start_ms = float(curr_phones[glide_phone_idx].minTime) * 1000.0
+            glide_dur_ms = max(0.0, n_start - glide_start_ms)
 
     c_start = float(curr_phones[onset_idx].minTime) * 1000.0
     c_end = n_start
@@ -291,6 +293,7 @@ def _estimate_cv_anchor_from_syllable(syl, ph_intervals, *, cv_mode="standalone"
         c_end = c_start
         n_start = c_start
         n_end = curr_phones[0].maxTime * 1000
+        glide_dur_ms = 0.0
 
     c_hint = curr_phones[onset_idx].mark if curr_phones and 0 <= onset_idx < len(curr_phones) else ""
     alias_onset = _extract_alias_onset(roman_tok)

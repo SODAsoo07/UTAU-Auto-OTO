@@ -213,7 +213,7 @@ def classify_ja_cvvc_bridge_group(onset: str) -> str:
         return "nasal"
     if o in JA_LIQUID_ONSETS:
         return "liquid"
-    if o in JA_GLIDE_ONSETS:
+    if o in JA_GLIDE_ONSETS or o in JA_YOUON_COMPOUND_ONSETS:
         return "glide"
     if o in JA_FRICATIVE_ONSETS:
         return "fricative"
@@ -506,6 +506,7 @@ __all__ = [
     "JA_FRICATIVE_ONSETS",
     "JA_GLIDE_ONSETS",
     "JA_LIQUID_ONSETS",
+    "JA_YOUON_COMPOUND_ONSETS",
     "JA_NASAL_ONSETS",
     "JA_PLOSIVE_ONSETS",
     "JA_SIBILANT_ONSETS",
