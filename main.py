@@ -231,6 +231,47 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _load_bundle_info(app_dir: str) -> dict:
+    try:
+        path = os.path.join(app_dir, "bundle_info.json")
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _startup_runtime_preflight(app_dir: str) -> None:
+    """Log warnings for missing runtime assets (FFmpeg, DLLs) on frozen builds."""
+    if not getattr(sys, "frozen", False):
+        return
+    bundle_info = _load_bundle_info(app_dir)
+    bundle_mode = str(bundle_info.get("bundle_mode", "offline") or "offline").strip().lower()
+    ffmpeg_exe = os.path.join(app_dir, "ffmpeg", "bin", "ffmpeg.exe")
+    if not os.path.isfile(ffmpeg_exe):
+        if bundle_mode == "online":
+            logger.info(
+                "[Preflight] FFmpeg not bundled (online build). "
+                "CTC alignment requires running setup_ctc.bat first."
+            )
+        else:
+            logger.warning(
+                "[Preflight] FFmpeg not found at '%s'. "
+                "CTC alignment will be unavailable. "
+                "Rebuild the app to include FFmpeg or place ffmpeg.exe manually.",
+                ffmpeg_exe,
+            )
+    required_dlls = ["msvcp140.dll", "vcruntime140.dll"]
+    for dll in required_dlls:
+        dll_path = os.path.join(app_dir, dll)
+        if not os.path.isfile(dll_path):
+            logger.warning(
+                "[Preflight] Runtime DLL '%s' not found in app directory '%s'. "
+                "The app may crash on machines without Visual C++ Redistributable installed.",
+                dll, app_dir,
+            )
+
+
 # ==============================================================================
 # 앱 상수
 # ==============================================================================
@@ -272,7 +313,8 @@ def _load_startup_theme_profile(app_dir, data_dir):
             candidate = normalize_theme_profile_name(payload.get("ui_theme_profile", DEFAULT_THEME_PROFILE))
             if candidate in THEME_PROFILE_OPTIONS:
                 return candidate
-        except Exception:
+        except Exception as _cfg_exc:
+            logger.warning("[Config] Failed to parse config file %s: %s", config_path, _cfg_exc)
             continue
     return DEFAULT_THEME_PROFILE
 
@@ -299,6 +341,7 @@ class App(
 ):
     def __init__(self):
         super().__init__()
+        _startup_runtime_preflight(APP_DIR)
 
         self.title(f"{APP_NAME} v{APP_VERSION}{CHANNEL_TITLE_SUFFIX}")
         self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")

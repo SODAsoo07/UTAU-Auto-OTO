@@ -156,7 +156,18 @@ def resolve_recommended_cuda_index(cuda_version: str = "") -> Dict[str, str]:
 def build_recommended_torch_install_command(
     *, python_exe: str = "", cuda_version: str = ""
 ) -> List[str]:
-    py = str(python_exe or sys.executable).strip() or sys.executable
+    py = str(python_exe or "").strip()
+    if not py:
+        _se = str(sys.executable or "").strip()
+        _base = os.path.basename(_se).lower()
+        if not _base.startswith("python"):
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "build_recommended_torch_install_command: python_exe not provided and "
+                "sys.executable does not appear to be a Python interpreter (%s); "
+                "pass python_exe explicitly when calling from a compiled binary.", _se,
+            )
+        py = _se
     index = resolve_recommended_cuda_index(cuda_version)
     return [
         py,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from core.kr_oto_rules import (
     _extract_alias_onset,
     _is_sonorant_consonant,
@@ -106,20 +108,30 @@ def _compute_kr_cv_timing(
     is_diph,
     is_plosive,
     *,
+    glide_dur_ms=0.0,
+    v_ref_baseline=None,
     cv_mode="standalone",
 ):
     boundary = c_end
     cv_vowel_len = max(float(cv_vowel_len), 20.0)
+    glide_dur_ms = max(float(glide_dur_ms or 0.0), 0.0)
     is_tense_cv = _is_tense_consonant(c_hint, alias_onset)
     is_sonorant_cv = _is_sonorant_consonant(c_hint, alias_onset)
+    baseline = 130.0
+    try:
+        if v_ref_baseline is not None:
+            baseline = _clamp(float(v_ref_baseline), 80.0, 160.0)
+    except Exception:
+        baseline = 130.0
 
     if is_diph:
         c_len = max(c_end - c_start, 10.0)
-        target_pre = max(64.0, min(136.0, c_len + 14.0))
+        glide_lead = _clamp(glide_dur_ms, 0.0, 120.0) * 0.60
+        target_pre = max(64.0, min(136.0, c_len + glide_lead + 14.0))
         if is_tense_cv:
-            target_pre = _clamp(target_pre + 3.0, 66.0, 146.0)
+            target_pre = _clamp(target_pre + 3.0, 66.0, 154.0)
         elif is_sonorant_cv:
-            target_pre = min(150.0, target_pre + 10.0)
+            target_pre = min(160.0, target_pre + 10.0)
         offset = max(boundary - target_pre, 0.0)
         pre = boundary - offset
         ovl = adaptive_overlap(pre, c_hint, mode="cv")
@@ -128,7 +140,8 @@ def _compute_kr_cv_timing(
         elif is_sonorant_cv:
             ovl = max(ovl, min(pre * 0.50, max(pre - 8.0, 0.0)))
 
-        v_ref = max(cv_vowel_len, 140.0)
+        diph_baseline = _clamp(max(baseline * 1.08, 92.0), 92.0, 172.0)
+        v_ref = max(cv_vowel_len, diph_baseline)
         if is_tense_cv:
             added_cons = min(max(v_ref * 0.52, 86.0), 196.0)
         elif is_sonorant_cv:
@@ -194,7 +207,7 @@ def _compute_kr_cv_timing(
         pre = boundary - offset
         ovl = adaptive_overlap(pre, c_hint, mode="cv")
 
-    v_ref = max(cv_vowel_len, 130.0)
+    v_ref = max(cv_vowel_len, baseline)
     if is_tense_cv:
         added_cons = min(max(v_ref * 0.42, 68.0), 162.0)
     elif is_fricative_cv:
@@ -228,7 +241,7 @@ def _select_kr_cv_onset_slice(curr_phones):
     if len(curr_phones) == 1:
         ph = curr_phones[0]
         t = float(ph.minTime) * 1000.0
-        return 0, t, t, t, float(ph.maxTime) * 1000.0
+        return 0, t, t, t, float(ph.maxTime) * 1000.0, 0.0
 
     v_idx, v_phone = find_vowel_phone(curr_phones)
     v_idx = max(0, int(v_idx))
@@ -236,26 +249,30 @@ def _select_kr_cv_onset_slice(curr_phones):
     n_end = float(v_phone.maxTime) * 1000.0
 
     if v_idx <= 0:
-        return 0, n_start, n_start, n_start, n_end
+        return 0, n_start, n_start, n_start, n_end, 0.0
 
     onset_idx = v_idx - 1
     while onset_idx >= 0 and _is_silence_like_phone_mark(curr_phones[onset_idx].mark):
         onset_idx -= 1
     if onset_idx < 0:
-        return 0, n_start, n_start, n_start, n_end
+        return 0, n_start, n_start, n_start, n_end, 0.0
 
+    glide_dur_ms = 0.0
     last_mark = (curr_phones[onset_idx].mark or "").strip().lower()
     from core.kr_oto_rules import is_glide as _is_glide
     if onset_idx - 1 >= 0 and _is_glide(last_mark):
+        glide_phone_idx = onset_idx  # save before overwriting
         prev_idx = onset_idx - 1
         while prev_idx >= 0 and _is_silence_like_phone_mark(curr_phones[prev_idx].mark):
             prev_idx -= 1
         if prev_idx >= 0:
             onset_idx = prev_idx
+            glide_start_ms = float(curr_phones[glide_phone_idx].minTime) * 1000.0
+            glide_dur_ms = max(0.0, n_start - glide_start_ms)
 
     c_start = float(curr_phones[onset_idx].minTime) * 1000.0
     c_end = n_start
-    return onset_idx, c_start, c_end, n_start, n_end
+    return onset_idx, c_start, c_end, n_start, n_end, glide_dur_ms
 
 
 def _estimate_cv_anchor_from_syllable(syl, ph_intervals, *, cv_mode="standalone"):
@@ -267,14 +284,16 @@ def _estimate_cv_anchor_from_syllable(syl, ph_intervals, *, cv_mode="standalone"
 
     roman_tok = (syl.get("roman_cv") or syl.get("roman") or "")
     onset_slice = _select_kr_cv_onset_slice(curr_phones)
+    glide_dur_ms = 0.0
     if onset_slice is not None:
-        onset_idx, c_start, c_end, n_start, n_end = onset_slice
+        onset_idx, c_start, c_end, n_start, n_end, glide_dur_ms = onset_slice
     else:
         onset_idx = 0
         c_start = curr_phones[0].minTime * 1000
         c_end = c_start
         n_start = c_start
         n_end = curr_phones[0].maxTime * 1000
+        glide_dur_ms = 0.0
 
     c_hint = curr_phones[onset_idx].mark if curr_phones and 0 <= onset_idx < len(curr_phones) else ""
     alias_onset = _extract_alias_onset(roman_tok)
@@ -282,6 +301,7 @@ def _estimate_cv_anchor_from_syllable(syl, ph_intervals, *, cv_mode="standalone"
     cv_vowel_len = max(n_end - n_start, 20.0)
     first_phone_plosive = len(curr_phones) >= 2 and is_plosive_ipa(curr_phones[0].mark)
     is_plosive = (first_phone_plosive or is_plosive_roman(alias_onset)) if alias_onset else first_phone_plosive
+    v_ref_baseline = (syl or {}).get("v_ref_baseline_ms")
     offset, consonant, cutoff, pre, ovl = _compute_kr_cv_timing(
         c_start,
         c_end,
@@ -290,6 +310,8 @@ def _estimate_cv_anchor_from_syllable(syl, ph_intervals, *, cv_mode="standalone"
         alias_onset,
         is_diph_syl,
         is_plosive,
+        glide_dur_ms=glide_dur_ms,
+        v_ref_baseline=v_ref_baseline,
         cv_mode=cv_mode,
     )
 
@@ -331,7 +353,7 @@ def _prepare_cv_head_syllable_timing(syllables_info, current_w_idx, cv_seq_idx, 
 
     onset_slice = _select_kr_cv_onset_slice(curr_phones)
     if onset_slice is not None:
-        onset_idx, c_start, c_end, n_start, n_end = onset_slice
+        onset_idx, c_start, c_end, n_start, n_end, _glide_dur_ms = onset_slice
     else:
         onset_idx = 0
         c_start = curr_phones[0].minTime * 1000
@@ -386,7 +408,7 @@ def _prepare_cv_bounds_from_syllable(syllables_info, current_w_idx):
 
     onset_slice = _select_kr_cv_onset_slice(curr_phones)
     if onset_slice is not None:
-        _onset_idx, c_start, c_end, n_start, n_end = onset_slice
+        _onset_idx, c_start, c_end, n_start, n_end, _glide_dur_ms = onset_slice
     else:
         c_start = curr_phones[0].minTime * 1000
         c_end = c_start

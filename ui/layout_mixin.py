@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import json
 import os
 
@@ -14,6 +14,7 @@ from ui.theme_tokens import (
     apply_theme_profile,
     get_theme_appearance_mode,
 )
+from ui.i18n import t
 
 EN_CVVC_UI_ENABLED = False
 
@@ -110,6 +111,42 @@ class LayoutMixin:
             text_color=PALETTE.header_accent,
         ).pack(side="left")
 
+        # Machine-translation notice — shown only when UI language is English or Japanese
+        from ui.i18n import get_language as _get_ui_lang_now
+        _mt_notice_texts = {
+            "en": "Some translations are machine-generated and may contain errors.",
+            "ja": "一部の翻訳は機械翻訳であり、誤りが含まれる場合があります。",
+        }
+        _mt_text = _mt_notice_texts.get(_get_ui_lang_now(), "")
+        if _mt_text:
+            ctk.CTkLabel(
+                header_row,
+                text=f"  ⚠ {_mt_text}",
+                font=("", 11),
+                text_color=PALETTE.neutral_text,
+                anchor="w",
+            ).pack(side="left", fill="x", expand=True)
+
+        # UI language selector (left panel top)
+        from ui.i18n import get_language as _get_ui_lang
+        ui_lang_top_row = ctk.CTkFrame(path_frame, fg_color="transparent")
+        ui_lang_top_row.pack(fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(ui_lang_top_row, text=t("UI 언어 (UI Language"), width=115, anchor="w").pack(side="left")
+        if not hasattr(self, "ui_lang_var"):
+            _cur_lang = _get_ui_lang()
+            _ui_lang_display = "English" if _cur_lang == "en" else ("日本語" if _cur_lang == "ja" else "한국어")
+            self.ui_lang_var = ctk.StringVar(value=_ui_lang_display)
+        self.ui_lang_dropdown = ctk.CTkOptionMenu(
+            ui_lang_top_row,
+            values=["한국어", "English", "日本語"],
+            variable=self.ui_lang_var,
+            command=self._on_ui_language_change,
+            width=200,
+        )
+        self.ui_lang_dropdown.pack(side="left", padx=(6, 12))
+        self._ui_lang_hint_label = ctk.CTkLabel(ui_lang_top_row, text="", text_color=PALETTE.neutral_text)
+        self._ui_lang_hint_label.pack(side="left")
+
         self.lang_notice_label = ctk.CTkLabel(
             path_frame,
             text="",
@@ -135,7 +172,7 @@ class LayoutMixin:
             return ctk.CTkLabel(parent, text=text, width=width, anchor="w")
 
         lang_row = build_form_row(form_body)
-        build_left_label(lang_row, "언어", width=115).pack(side="left")
+        build_left_label(lang_row, t("언어"), width=115).pack(side="left")
         if not hasattr(self, "lang_var"):
             self.lang_var = ctk.StringVar(value="Korean (한국어)")
         language_values = ["Korean (한국어)", "Japanese (日本語)"]
@@ -162,11 +199,11 @@ class LayoutMixin:
         self.lang_info_label.pack(side="left", fill="x", expand=True)
 
         row1 = build_form_row(form_body)
-        build_left_label(row1, "WAV 폴더:").pack(side="left")
-        self.wav_entry = ctk.CTkEntry(row1, placeholder_text="WAV 파일이 있는 폴더 경로")
+        build_left_label(row1, t("WAV 폴더:")).pack(side="left")
+        self.wav_entry = ctk.CTkEntry(row1, placeholder_text=t("WAV 파일이 있는 폴더 경로"))
         self.wav_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.wav_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
-        wav_browse_btn = ctk.CTkButton(row1, text="찾아보기", width=90, command=lambda: self._browse_folder(self.wav_entry))
+        wav_browse_btn = ctk.CTkButton(row1, text=t("찾아보기"), width=90, command=lambda: self._browse_folder(self.wav_entry))
         _style_primary_button(wav_browse_btn)
         wav_browse_btn.pack(side="right")
 
@@ -174,20 +211,20 @@ class LayoutMixin:
         ctk.CTkLabel(row1b, text="", width=115).pack(side="left")
         self.recursive_voicebank_scan_checkbox = ctk.CTkCheckBox(
             row1b,
-            text="하위 폴더 자동 탐색(배치 처리)",
+            text=t("하위 폴더 자동 탐색(배치 처리)"),
             variable=self.recursive_voicebank_scan_var,
             command=self._save_config,
         )
         self.recursive_voicebank_scan_checkbox.pack(side="left", padx=(6, 0))
 
         row2 = build_form_row(form_body)
-        build_left_label(row2, "템플릿 OTO:").pack(side="left")
-        self.tpl_entry = ctk.CTkEntry(row2, placeholder_text="선택 사항 (없을 시 파일명/라벨 기반 자동 생성)")
+        build_left_label(row2, t("템플릿 OTO:")).pack(side="left")
+        self.tpl_entry = ctk.CTkEntry(row2, placeholder_text=t("선택 사항 (없을 시 파일명/라벨 기반 자동 생성)"))
         self.tpl_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.tpl_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
         self.tpl_browse_btn = ctk.CTkButton(
             row2,
-            text="찾아보기",
+            text=t("찾아보기"),
             width=90,
             command=lambda: self._browse_file(self.tpl_entry, [("OTO 파일", "*.ini")]),
         )
@@ -198,7 +235,7 @@ class LayoutMixin:
         ctk.CTkLabel(row2b, text="", width=115).pack(side="left")
         self.no_base_oto_checkbox = ctk.CTkCheckBox(
             row2b,
-            text="템플릿 OTO 없음 (OpenUtau 호환 에일리어스 자동 생성)",
+            text=t("템플릿 OTO 없음 (OpenUtau 호환 에일리어스 자동 생성)"),
             variable=self.no_base_oto_var,
             command=self._on_no_base_oto_toggle,
             text_color=PALETTE.success_text,
@@ -206,13 +243,13 @@ class LayoutMixin:
         self.no_base_oto_checkbox.pack(side="left", padx=(6, 0))
 
         row3 = build_form_row(form_body)
-        build_left_label(row3, "출력 경로:").pack(side="left")
-        self.out_entry = ctk.CTkEntry(row3, placeholder_text="생성된 oto.ini 저장 경로")
+        build_left_label(row3, t("출력 경로:")).pack(side="left")
+        self.out_entry = ctk.CTkEntry(row3, placeholder_text=t("생성된 oto.ini 저장 경로"))
         self.out_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.out_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
         out_save_btn = ctk.CTkButton(
             row3,
-            text="저장",
+            text=t("저장"),
             width=90,
             command=lambda: self._browser_save(self.out_entry, [("OTO 파일", "*.ini")]),
         )
@@ -220,7 +257,7 @@ class LayoutMixin:
         out_save_btn.pack(side="right")
 
         row_format = build_form_row(form_body)
-        build_left_label(row_format, "형식 지정:").pack(side="left")
+        build_left_label(row_format, t("형식 지정:")).pack(side="left")
         format_options = self._get_auto_format_options("korean")
         self.format_dropdown = ctk.CTkOptionMenu(
             row_format,
@@ -233,11 +270,11 @@ class LayoutMixin:
         self.format_dropdown.pack(side="left", padx=(6, 8))
         ctk.CTkLabel(
             row_format,
-            text="(템플릿 유무와 무관하게 우선 적용)",
+            text=t("(템플릿 유무와 무관하게 우선 적용)"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left", fill="x", expand=True)
         self.ja_alias_row = build_form_row(form_body)
-        build_left_label(self.ja_alias_row, "JP 에일리어스:").pack(side="left")
+        build_left_label(self.ja_alias_row, t("JP 에일리어스:")).pack(side="left")
         self.ja_alias_style_menu = ctk.CTkOptionMenu(
             self.ja_alias_row,
             values=["원본 그대로", "히라가나", "로마자"],
@@ -249,7 +286,7 @@ class LayoutMixin:
         self.ja_alias_style_menu.pack(side="left", padx=(6, 8))
         self.ja_alias_hint_label = ctk.CTkLabel(
             self.ja_alias_row,
-            text="(일본어 OTO 적용)",
+            text=t("(일본어 OTO 적용)"),
             text_color=PALETTE.neutral_text,
         )
         self.ja_alias_hint_label.pack(side="left", fill="x", expand=True)
@@ -290,7 +327,7 @@ class LayoutMixin:
 
             self.en_cvvc_list_fallback_checkbox = ctk.CTkCheckBox(
                 self.en_cvvc_row,
-                text="List-only 합성(실험)",
+                text=t("List-only 합성(실험)"),
                 variable=self.en_cvvc_list_fallback_var,
                 command=self._save_config,
                 width=140,
@@ -299,7 +336,7 @@ class LayoutMixin:
 
             self.en_cvvc_hint_label = ctk.CTkLabel(
                 self.en_cvvc_row,
-                text="(Preview: 기본 OTO + 옵션 시 list-only(vv/cc/alt) 합성)",
+                text=t("(Preview: 기본 OTO + 옵션 시 list-only(vv/cc/alt) 합성)"),
                 text_color=PALETTE.neutral_text,
             )
             self.en_cvvc_hint_label.pack(side="left", fill="x", expand=True)
@@ -318,7 +355,7 @@ class LayoutMixin:
 
         self.row_aligner = ctk.CTkFrame(row_align, fg_color="transparent")
         self.row_aligner.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        build_left_label(self.row_aligner, "정렬 엔진:").pack(side="left")
+        build_left_label(self.row_aligner, t("정렬 엔진:")).pack(side="left")
         self.aligner_menu = ctk.CTkOptionMenu(
             self.row_aligner,
             values=["MFA", "CTC", "전용(시퀀스)"],
@@ -330,12 +367,12 @@ class LayoutMixin:
         self.aligner_menu.pack(side="left", padx=(6, 8))
         self.aligner_help_label = ctk.CTkLabel(
             self.row_aligner,
-            text="(기본은 MFA입니다. 필요 시 자동 설치됩니다.)",
+            text=t("(기본은 MFA입니다. 필요 시 자동 설치됩니다.)"),
             text_color=PALETTE.neutral_text,
         )
         self.aligner_help_label.pack(side="left", fill="x", expand=True)
         self.row_no_mfa_oto_mode = build_form_row(form_body)
-        build_left_label(self.row_no_mfa_oto_mode, "No-MFA 생성:").pack(side="left")
+        build_left_label(self.row_no_mfa_oto_mode, t("No-MFA 생성:")).pack(side="left")
         self.no_mfa_oto_mode_menu = ctk.CTkOptionMenu(
             self.row_no_mfa_oto_mode,
             values=[
@@ -350,12 +387,12 @@ class LayoutMixin:
         self.no_mfa_oto_mode_menu.pack(side="left", padx=(6, 8))
         self.no_mfa_oto_mode_hint_label = ctk.CTkLabel(
             self.row_no_mfa_oto_mode,
-            text="(No-MFA 자동설정 모드에서만 적용)",
+            text=t("(No-MFA 자동설정 모드에서만 적용)"),
             text_color=PALETTE.neutral_text,
         )
         self.no_mfa_oto_mode_hint_label.pack(side="left", fill="x", expand=True)
         self.row_align_extra = build_form_row(form_body)
-        build_left_label(self.row_align_extra, "MFA 정렬 프로필:").pack(side="left")
+        build_left_label(self.row_align_extra, t("MFA 정렬 프로필:")).pack(side="left")
         self.mfa_align_profile_menu = ctk.CTkOptionMenu(
             self.row_align_extra,
             values=["기본", "정밀", "정밀 + 화자 적응", "빠름"],
@@ -367,7 +404,7 @@ class LayoutMixin:
         self.mfa_align_profile_menu.pack(side="left", padx=(6, 8))
         ctk.CTkLabel(
             self.row_align_extra,
-            text="(기본=정확도 균형)",
+            text=t("(기본=정확도 균형)"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left", fill="x", expand=True)
 
@@ -378,7 +415,7 @@ class LayoutMixin:
         self.row_aligner_advanced = build_form_row(form_body)
         ctk.CTkLabel(
             self.row_aligner_advanced,
-            text="정렬 고급 옵션은 자동으로 조정됩니다.",
+            text=t("정렬 고급 옵션은 자동으로 조정됩니다."),
             text_color=PALETTE.neutral_text,
             anchor="w",
         ).pack(side="left", padx=(121, 0))
@@ -386,7 +423,7 @@ class LayoutMixin:
         advanced_row = build_form_row(path_frame)
         self.advanced_toggle_btn = ctk.CTkButton(
             advanced_row,
-            text="▶ 추가 옵션 (특수 발음/접미사)",
+            text=t("▶ 추가 옵션 (특수 발음/접미사)"),
             width=260,
             fg_color=PALETTE.advanced_toggle_bg,
             hover_color=PALETTE.advanced_toggle_hover,
@@ -398,7 +435,7 @@ class LayoutMixin:
         self.advanced_toggle_btn.pack(side="right", padx=(0, 12), pady=(0, 4))
         self.advanced_hint_label = ctk.CTkLabel(
             path_frame,
-            text="필요한 경우에만 사용하세요.",
+            text=t("필요한 경우에만 사용하세요."),
             text_color=PALETTE.hint_text,
             anchor="e",
         )
@@ -408,18 +445,18 @@ class LayoutMixin:
 
         row0 = ctk.CTkFrame(self.advanced_options_frame, fg_color="transparent")
         row0.pack(fill="x", padx=0, pady=3)
-        ctk.CTkLabel(row0, text="특수 발음 (선택):", width=120, anchor="w").pack(side="left")
-        self.custom_entry = ctk.CTkEntry(row0, placeholder_text="커스텀 매핑 규칙 파일 (.txt)", textvariable=self.custom_phoneme_var)
+        ctk.CTkLabel(row0, text=t("특수 발음 (선택):"), width=120, anchor="w").pack(side="left")
+        self.custom_entry = ctk.CTkEntry(row0, placeholder_text=t("커스텀 매핑 규칙 파일 (.txt)"), textvariable=self.custom_phoneme_var)
         self.custom_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.custom_entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
-        custom_browse_btn = ctk.CTkButton(row0, text="찾아보기", width=90, command=lambda: self._browse_file(self.custom_entry, [("Text 파일", "*.txt")]))
+        custom_browse_btn = ctk.CTkButton(row0, text=t("찾아보기"), width=90, command=lambda: self._browse_file(self.custom_entry, [("Text 파일", "*.txt")]))
         _style_primary_button(custom_browse_btn)
         custom_browse_btn.pack(side="right")
 
         row0b = ctk.CTkFrame(self.advanced_options_frame, fg_color="transparent")
         row0b.pack(fill="x", padx=0, pady=3)
-        ctk.CTkLabel(row0b, text="접미사 (선택):", width=120, anchor="w").pack(side="left")
-        self.suffix_entry = ctk.CTkEntry(row0b, placeholder_text="예: C4 (모든 에일리어스 끝에 _C4 형태로 부여)", textvariable=self.alias_suffix_var)
+        ctk.CTkLabel(row0b, text=t("접미사 (선택):"), width=120, anchor="w").pack(side="left")
+        self.suffix_entry = ctk.CTkEntry(row0b, placeholder_text=t("예: C4 (모든 에일리어스 끝에 _C4 형태로 부여)"), textvariable=self.alias_suffix_var)
         self.suffix_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.suffix_entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
 
@@ -438,7 +475,7 @@ class LayoutMixin:
         tab_header.pack(fill="x", padx=0, pady=(0, 4))
         self.dev_mode_btn = ctk.CTkButton(
             tab_header,
-            text="개발자 설정 OFF",
+            text=t("개발자 설정 OFF"),
             width=110,
             height=24,
             corner_radius=6,
@@ -503,7 +540,7 @@ class LayoutMixin:
         status_group.pack(side="left", fill="x", expand=True, padx=(10, 6))
         self.bottom_status_group = status_group
 
-        self.status_label = ctk.CTkLabel(status_group, text="대기 중", anchor="w", text_color=PALETTE.neutral_text)
+        self.status_label = ctk.CTkLabel(status_group, text=t("대기 중"), anchor="w", text_color=PALETTE.neutral_text)
         self.status_label.pack(fill="x")
 
         progress_row = ctk.CTkFrame(status_group, fg_color="transparent")
@@ -520,7 +557,7 @@ class LayoutMixin:
 
         self.run_btn = ctk.CTkButton(
             actions_group,
-            text="▶ 전체 실행",
+            text=t("▶ 전체 실행"),
             font=("", 14, "bold"),
             width=150,
             height=40,
@@ -530,7 +567,7 @@ class LayoutMixin:
 
         self.report_btn = ctk.CTkButton(
             actions_group,
-            text="🐛 제보 리포트 복사",
+            text=t("🐛 제보 리포트 복사"),
             width=120,
             height=40,
             fg_color=PALETTE.danger_button_bg,
@@ -765,6 +802,7 @@ class LayoutMixin:
         if bool(getattr(self, "_theme_rebuild_pending", False)):
             return
         self._theme_rebuild_pending = True
+        self._suppress_ui_callback_errors = True
 
         snapshot = self._snapshot_ui_state_for_theme_change()
 
@@ -781,6 +819,10 @@ class LayoutMixin:
                 self._restore_ui_state_after_theme_change(snapshot)
             finally:
                 self._theme_rebuild_pending = False
+                try:
+                    self.after(600, lambda: setattr(self, "_suppress_ui_callback_errors", False))
+                except Exception:
+                    self._suppress_ui_callback_errors = False
 
         try:
             self.after_idle(_do_rebuild)
@@ -842,9 +884,9 @@ class LayoutMixin:
         if hint is not None:
             try:
                 if not show:
-                    hint.configure(text="(영어 선택 시 표시되는 Preview 전용 설정)")
+                    hint.configure(text=t("(영어 선택 시 표시되는 Preview 전용 설정)"))
                 else:
-                    hint.configure(text="(Preview: 기본 OTO + 옵션 시 list-only(vv/cc/alt) 합성)")
+                    hint.configure(text=t("(Preview: 기본 OTO + 옵션 시 list-only(vv/cc/alt) 합성)"))
             except Exception:
                 pass
 
@@ -915,10 +957,27 @@ class LayoutMixin:
                 label = "자동 감지 (권장)"
         self.auto_format_var.set(label)
 
+    def _on_ui_language_change(self, value: str) -> None:
+        from ui.i18n import set_language as _set_lang
+        normalized = str(value or "").strip()
+        lowered = normalized.lower()
+        if lowered in {"english", "en"}:
+            lang_code = "en"
+        elif lowered in {"japanese", "ja"} or ("日" in normalized):
+            lang_code = "ja"
+        else:
+            lang_code = "ko"
+        _set_lang(lang_code)
+        if hasattr(self, "_save_config"):
+            self._save_config()
+        if hasattr(self, "_ui_lang_hint_label"):
+            from ui.i18n import t as _t
+            self._ui_lang_hint_label.configure(text=_t("재시작 후 적용됩니다."))
+
     def _on_language_change(self, value):
         lang = self._get_language()
         if lang == "korean":
-            self.lang_info_label.configure(text="한국어 단위(a, k, ga 등) 에일리어스를 기준으로 생성합니다.")
+            self.lang_info_label.configure(text=t("한국어 단위(a, k, ga 등) 에일리어스를 기준으로 생성합니다."))
             self.lang_notice_label.configure(
                 text=(
                     "현재 언어: 한국어\n"
@@ -940,7 +999,7 @@ class LayoutMixin:
             if hasattr(self, "ja_alias_style_menu"):
                 self.ja_alias_style_menu.configure(state="disabled")
         elif lang == "japanese":
-            self.lang_info_label.configure(text="일본어 단위(a, k, ka 등) 에일리어스를 기준으로 생성합니다.")
+            self.lang_info_label.configure(text=t("일본어 단위(a, k, ka 등) 에일리어스를 기준으로 생성합니다."))
             self.lang_notice_label.configure(
                 text=(
                     "현재 언어: 일본어\n"
@@ -962,7 +1021,7 @@ class LayoutMixin:
             if hasattr(self, "ja_alias_style_menu"):
                 self.ja_alias_style_menu.configure(state="normal")
         else:
-            self.lang_info_label.configure(text="영어 CVVC base OTO를 불러와 생성합니다. (프리뷰 전용)")
+            self.lang_info_label.configure(text=t("영어 CVVC base OTO를 불러와 생성합니다. (프리뷰 전용)"))
             self.lang_notice_label.configure(
                 text=(
                     "현재 언어: 영어(프리뷰)\n"
@@ -1005,11 +1064,11 @@ class LayoutMixin:
             return
         lang = self._get_language() if hasattr(self, "_get_language") else "korean"
         if lang == "japanese":
-            text = "일관성 보정 사용"
+            text = t("일관성 보정 사용")
         elif lang == "korean":
-            text = "연속성 보정 사용"
+            text = t("연속성 보정 사용")
         else:
-            text = "연속성/파일 일관성 보정 사용"
+            text = t("연속성/파일 일관성 보정 사용")
         try:
             checkbox.configure(text=text)
         except Exception:
@@ -1261,21 +1320,21 @@ class LayoutMixin:
         if hasattr(self, "aligner_help_label"):
             if use_no_mfa:
                 if lang == "english":
-                    self.aligner_help_label.configure(text="(영어 Preview CVVC 모드에서는 정렬을 사용하지 않습니다.)")
+                    self.aligner_help_label.configure(text=t("(영어 Preview CVVC 모드에서는 정렬을 사용하지 않습니다.)"))
                 elif lang == "korean" and fmt == "cmpx":
-                    self.aligner_help_label.configure(text="(CMPX Preview 모드에서는 정렬을 사용하지 않습니다.)")
+                    self.aligner_help_label.configure(text=t("(CMPX Preview 모드에서는 정렬을 사용하지 않습니다.)"))
                 elif is_c_plus_v_mode:
-                    self.aligner_help_label.configure(text="(한국어 C+V 모드는 템플릿 기반 생성으로 정렬을 사용하지 않습니다.)")
+                    self.aligner_help_label.configure(text=t("(한국어 C+V 모드는 템플릿 기반 생성으로 정렬을 사용하지 않습니다.)"))
                 else:
                     self.aligner_help_label.configure(
                         text=f"(No-MFA 생성 방식: {no_mfa_mode_desc})"
                     )
             elif use_ctc:
-                self.aligner_help_label.configure(text="(CTC(MMS) 기반 정렬 + C/V 어댑터를 사용합니다.)")
+                self.aligner_help_label.configure(text=t("(CTC(MMS) 기반 정렬 + C/V 어댑터를 사용합니다.)"))
             elif use_sequence:
-                self.aligner_help_label.configure(text="(시퀀스 라벨 기반 전용 aligner baseline을 사용합니다.)")
+                self.aligner_help_label.configure(text=t("(시퀀스 라벨 기반 전용 aligner baseline을 사용합니다.)"))
             else:
-                self.aligner_help_label.configure(text="(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)")
+                self.aligner_help_label.configure(text=t("(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)"))
         if hasattr(self, "pipeline_step_align_btn") and self.pipeline_step_align_btn is not None:
             try:
                 if use_no_mfa:
@@ -1297,34 +1356,34 @@ class LayoutMixin:
         if hasattr(self, "align_step_title_label") and hasattr(self, "align_step_desc_label"):
             if use_no_mfa:
                 if lang == "english":
-                    self.align_step_title_label.configure(text="2. 정렬 단계 건너뜀 (영어 Preview)")
-                    self.align_step_desc_label.configure(text="영어 CVVC Preview 모드는 Lab/사전/MFA 없이 base OTO 목록으로 생성합니다.")
+                    self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (영어 Preview)"))
+                    self.align_step_desc_label.configure(text=t("영어 CVVC Preview 모드는 Lab/사전/MFA 없이 base OTO 목록으로 생성합니다."))
                 elif lang == "korean" and fmt == "cmpx":
-                    self.align_step_title_label.configure(text="2. 정렬 단계 건너뜀 (CMPX Preview)")
-                    self.align_step_desc_label.configure(text="한국어 CMPX Preview 모드는 Lab/사전/MFA 없이 base OTO를 WAV에 재매핑해 생성합니다.")
+                    self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (CMPX Preview)"))
+                    self.align_step_desc_label.configure(text=t("한국어 CMPX Preview 모드는 Lab/사전/MFA 없이 base OTO를 WAV에 재매핑해 생성합니다."))
                 elif is_c_plus_v_mode:
-                    self.align_step_title_label.configure(text="2. 정렬 단계 건너뜀 (한국어 C+V)")
-                    self.align_step_desc_label.configure(text="한국어 C+V 모드는 템플릿 OTO를 WAV에 재매핑하는 방식으로 생성합니다.")
+                    self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (한국어 C+V)"))
+                    self.align_step_desc_label.configure(text=t("한국어 C+V 모드는 템플릿 OTO를 WAV에 재매핑하는 방식으로 생성합니다."))
                 else:
-                    self.align_step_title_label.configure(text="2. 정렬 단계 건너뜀 (No-MFA)")
+                    self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (No-MFA)"))
                     if no_mfa_mode_code == "alias_auto":
                         self.align_step_desc_label.configure(
-                            text="MFA 정렬 없이 진행합니다. 에일리어스만 있는 빈 OTO 기준으로 WAV 경계/프로필 기반 값을 자동 생성합니다."
+                            text=t("MFA 정렬 없이 진행합니다. 에일리어스만 있는 빈 OTO 기준으로 WAV 경계/프로필 기반 값을 자동 생성합니다.")
                         )
                     else:
                         self.align_step_desc_label.configure(
-                            text="MFA 정렬 없이 진행합니다. 베이스 OTO를 WAV에 재매핑하고 0값 라인은 경계 추정으로 보정합니다."
+                            text=t("MFA 정렬 없이 진행합니다. 베이스 OTO를 WAV에 재매핑하고 0값 라인은 경계 추정으로 보정합니다.")
                         )
             else:
                 if use_ctc:
-                    self.align_step_title_label.configure(text="2. 음성 정렬 (CTC)")
-                    self.align_step_desc_label.configure(text="torchaudio MMS CTC로 TextGrid를 생성하고 C/V 어댑터를 적용합니다.")
+                    self.align_step_title_label.configure(text=t("2. 음성 정렬 (CTC)"))
+                    self.align_step_desc_label.configure(text=t("torchaudio MMS CTC로 TextGrid를 생성하고 C/V 어댑터를 적용합니다."))
                 elif use_sequence:
-                    self.align_step_title_label.configure(text="2. 음성 정렬 (전용 시퀀스)")
-                    self.align_step_desc_label.configure(text="frame-hop 시퀀스 라벨 기반으로 TextGrid를 생성합니다. 실패 시 MFA fallback을 사용합니다.")
+                    self.align_step_title_label.configure(text=t("2. 음성 정렬 (전용 시퀀스)"))
+                    self.align_step_desc_label.configure(text=t("frame-hop 시퀀스 라벨 기반으로 TextGrid를 생성합니다. 실패 시 MFA fallback을 사용합니다."))
                 else:
-                    self.align_step_title_label.configure(text="2. 음성 정렬")
-                    self.align_step_desc_label.configure(text="MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.")
+                    self.align_step_title_label.configure(text=t("2. 음성 정렬"))
+                    self.align_step_desc_label.configure(text=t("MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다."))
 
     def _toggle_developer_mode(self):
         if not hasattr(self, "developer_mode_enabled_var"):
@@ -1337,7 +1396,7 @@ class LayoutMixin:
         enabled = bool(self.developer_mode_enabled_var.get()) if hasattr(self, "developer_mode_enabled_var") else False
         if hasattr(self, "dev_mode_btn"):
             self.dev_mode_btn.configure(
-                text="개발자 설정 ON" if enabled else "개발자 설정 OFF",
+                text=t("개발자 설정 ON") if enabled else "개발자 설정 OFF",
                 fg_color="#7E91AD" if enabled else "#C2CFDF",
                 text_color=PALETTE.primary_button_text if enabled else "#2A3A50",
             )
@@ -1609,7 +1668,7 @@ class LayoutMixin:
         if hasattr(self, "auto_format_var"):
             fmt = normalize_auto_format_value(lang, self.auto_format_var.get())
         if lang == "english":
-            self.ml_coupled_status_label.configure(text="현재 포맷: cvvc | 영어 Preview 모드에서는 ML 보정을 사용하지 않습니다.")
+            self.ml_coupled_status_label.configure(text=t("현재 포맷: cvvc | 영어 Preview 모드에서는 ML 보정을 사용하지 않습니다."))
             if hasattr(self, "ml_coupled_status_detail_label"):
                 self.ml_coupled_status_detail_label.configure(text="")
             return
@@ -1617,7 +1676,7 @@ class LayoutMixin:
         if hasattr(self, "auto_format_var"):
             fmt = normalize_auto_format_value(lang, self.auto_format_var.get())
         if lang == "english":
-            self.ml_coupled_status_label.configure(text="현재 포맷: cvvc | 영어 Preview 모드에서는 ML 보정을 사용하지 않습니다.")
+            self.ml_coupled_status_label.configure(text=t("현재 포맷: cvvc | 영어 Preview 모드에서는 ML 보정을 사용하지 않습니다."))
             if hasattr(self, "ml_coupled_status_detail_label"):
                 self.ml_coupled_status_detail_label.configure(text="")
             return
@@ -1720,10 +1779,10 @@ class LayoutMixin:
             self.advanced_options_expanded = bool(force)
 
         if self.advanced_options_expanded:
-            self.advanced_toggle_btn.configure(text="▼ 고급 옵션 (특수 발음/접미사)")
+            self.advanced_toggle_btn.configure(text=t("▼ 고급 옵션 (특수 발음/접미사)"))
             self.advanced_options_frame.pack(fill="x", padx=10, pady=(0, 3))
         else:
-            self.advanced_toggle_btn.configure(text="▶ 고급 옵션 (특수 발음/접미사)")
+            self.advanced_toggle_btn.configure(text=t("▶ 고급 옵션 (특수 발음/접미사)"))
             self.advanced_options_frame.pack_forget()
 
     def _get_params(self):

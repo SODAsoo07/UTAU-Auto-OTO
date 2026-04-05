@@ -571,7 +571,16 @@ def main():
         help="If <0, use per-language/format defaults",
     )
     ap.add_argument("--skip-build", action="store_true", help="Skip dataset build; train from existing CSVs only")
-    ap.add_argument("--skip-train", action="store_true", help="Build datasets only")
+    ap.add_argument(
+        "--skip-train",
+        action="store_true",
+        help="Skip coupled model training step (use existing model_dir for eval/selector).",
+    )
+    ap.add_argument(
+        "--skip-selector-train",
+        action="store_true",
+        help="Skip selector model training step (dataset build/eval only for selector path).",
+    )
     ap.add_argument("--skip-eval", action="store_true", help="Skip evaluation step")
     ap.add_argument(
         "--max-blank-attach-rate",
@@ -761,6 +770,7 @@ def main():
         "exclude_nuclei_fallback": selector_exclude_nuclei_fallback,
         "split_by_alias_family": selector_split_by_alias_family,
         "families": list(selector_families),
+        "skip_selector_train": bool(args.skip_selector_train),
         "pipeline_mode": "two_stage_per_format",
     }
 
@@ -815,25 +825,32 @@ def main():
 
         try:
             os.makedirs(out_dir, exist_ok=True)
+            if backend == "coupled_nn_v2_rawmel":
+                rawmel_cache_hint = str(args.rawmel_cache or "").strip()
+                if not rawmel_cache_hint:
+                    rawmel_cache_hint = os.path.join(workspace_root, "rawmel_cache_noml_auto")
+                if rawmel_cache_hint and not os.path.isdir(rawmel_cache_hint):
+                    rawmel_cache_hint = ""
+                rawmel_cache = resolve_rawmel_cache_dir(
+                    language=lang,
+                    format_type=fmt,
+                    root_hint=rawmel_cache_hint,
+                    extra_roots=[
+                        os.path.join(workspace_root, "rawmel_cache_noml_auto"),
+                        os.path.join(workspace_root, "rawmel_cache"),
+                    ],
+                )
+                if rawmel_cache:
+                    job["rawmel_cache"] = rawmel_cache
+                # rawmel backend eval requires cache even when coupled training is skipped.
+                if (not rawmel_cache) and ((not args.skip_train) or (not args.skip_eval)):
+                    raise RuntimeError(f"rawmel cache not found for {lang}/{fmt}")
+
             if not args.skip_train:
                 if backend == "coupled_nn_v2_rawmel":
-                    rawmel_cache_hint = str(args.rawmel_cache or "").strip()
-                    if not rawmel_cache_hint:
-                        rawmel_cache_hint = os.path.join(workspace_root, "rawmel_cache_noml_auto")
-                    if rawmel_cache_hint and not os.path.isdir(rawmel_cache_hint):
-                        rawmel_cache_hint = ""
-                    rawmel_cache = resolve_rawmel_cache_dir(
-                        language=lang,
-                        format_type=fmt,
-                        root_hint=rawmel_cache_hint,
-                        extra_roots=[
-                            os.path.join(workspace_root, "rawmel_cache_noml_auto"),
-                            os.path.join(workspace_root, "rawmel_cache"),
-                        ],
-                    )
+                    rawmel_cache = str(job.get("rawmel_cache", "") or "")
                     if not rawmel_cache:
                         raise RuntimeError(f"rawmel cache not found for {lang}/{fmt}")
-                    job["rawmel_cache"] = rawmel_cache
                     train_meta = train_coupled_bundle_rawmel(
                         language=lang,
                         format_type=fmt,
@@ -979,7 +996,7 @@ def main():
                         os.makedirs(family_model_dir, exist_ok=True)
                         family_report["model_dir"] = family_model_dir
                         try:
-                            if not args.skip_train:
+                            if not args.skip_selector_train:
                                 selector_train_meta = train_lightgbm_selector_bundle(
                                     language=lang,
                                     format_type=fmt,
@@ -1064,7 +1081,7 @@ def main():
                     }
                     if runtime_notice:
                         selector_report["runtime_notice"] = runtime_notice
-                    if not args.skip_train:
+                    if not args.skip_selector_train:
                         selector_train_meta = train_lightgbm_selector_bundle(
                             language=lang,
                             format_type=fmt,
