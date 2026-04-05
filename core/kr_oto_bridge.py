@@ -510,13 +510,17 @@ def _refine_kr_bridge_with_adjacent_cv(
     return _validate_oto_params(offset_new, cons_new, cutoff_new, pre_new, ovl_new, alias_type=a_type)
 
 
-def _compute_kr_cvvc_vc_timing_direct(alias, *args):
+def _compute_kr_cvvc_vc_timing_direct(alias, *args, next_mel_voiced_onset_ms=None):
     """
     CVVC VC direct timing helper.
 
     Backward-compatible call forms:
     - _compute_kr_cvvc_vc_timing_direct(alias, c_start, c_end, n_start, n_end)
     - _compute_kr_cvvc_vc_timing_direct(alias, alias_type, c_start, c_end, n_start, n_end)
+
+    Optional keyword argument:
+    - next_mel_voiced_onset_ms: mel-detected voiced onset of next CV (ms, absolute).
+      When provided, bridge_abs is pulled back toward this onset for more accurate VC placement.
     """
     if len(args) == 4:
         c_start, c_end, n_start, n_end = args
@@ -545,14 +549,29 @@ def _compute_kr_cvvc_vc_timing_direct(alias, *args):
 
     bridge_abs = float(n_start)
     if is_hard:
-        stop_lead = _clamp(transition_gap * 0.24, 6.0, 18.0)
+        # lead 하한을 8ms로 높여 stop 자음 앞 공간을 충분히 확보한다.
+        stop_lead = _clamp(transition_gap * 0.24, 8.0, 20.0)
         bridge_abs = max(float(c_end) + 4.0, float(n_start) - stop_lead)
     elif is_nasal:
-        nasal_lead = _clamp(transition_gap * 0.16, 4.0, 12.0)
+        # 비음의 경우 선행 모음에서 비음 진입까지 약간 넉넉한 공간을 준다.
+        nasal_lead = _clamp(transition_gap * 0.16, 6.0, 14.0)
         bridge_abs = max(float(c_end) + 5.0, float(n_start) - nasal_lead)
     else:
-        soft_lead = _clamp(transition_gap * 0.12, 3.0, 8.0)
+        soft_lead = _clamp(transition_gap * 0.12, 5.0, 10.0)
         bridge_abs = max(float(c_end) + 6.0, float(n_start) - soft_lead)
+
+    # voiced_onset_lookback: mel로 감지된 다음 CV의 유성음 시작점이 있으면
+    # bridge_abs를 해당 위치 기준으로 보정하여 VC가 실제 유성음 onset에 더 가깝게 정렬되도록 한다.
+    if next_mel_voiced_onset_ms is not None:
+        try:
+            v_onset = float(next_mel_voiced_onset_ms)
+            if v_onset > float(c_end) + 2.0:
+                voiced_lead = _clamp(transition_gap * 0.18, 6.0, 16.0)
+                bridge_from_voiced = max(float(c_end) + 4.0, v_onset - voiced_lead)
+                # TextGrid와 mel onset 사이의 절충값으로 부드럽게 blending.
+                bridge_abs = bridge_abs * 0.60 + bridge_from_voiced * 0.40
+        except Exception:
+            pass
     if is_hard:
         tail_keep = _clamp(prev_vowel_len * 0.42, 56.0, 118.0)
         ovl_gap = _clamp(prev_vowel_len * 0.52, 78.0, 122.0)

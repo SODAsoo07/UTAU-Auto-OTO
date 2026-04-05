@@ -632,6 +632,7 @@ def _refine_remap_timing_for_slot(
     slot_total: int,
     language: str,
     blend_weight: float,
+    format_type: str = "",
 ) -> tuple[str, bool]:
     if not parsed:
         return "", False
@@ -657,6 +658,10 @@ def _refine_remap_timing_for_slot(
         "br": (0.30, 0.25, 0.45, 0.24, 0.05),
         "other": (0.50, 0.38, 0.72, 0.36, 0.10),
     }.get(str(alias_type or "").strip().lower(), (0.50, 0.38, 0.72, 0.36, 0.10))
+    # CVVC 포맷에서 VC alias는 앞 CV와 바로 맞닿으므로 offset을 더 타이트하게 설정한다.
+    fmt = str(format_type or "").strip().lower()
+    if fmt == "cvvc" and str(alias_type or "").strip().lower() == "vc":
+        off_ratio = 0.04
 
     seg_len = max(28.0, seg_end - seg_start)
     target_offset = max(0.0, seg_start - (seg_len * off_ratio))
@@ -735,6 +740,23 @@ def generate_no_mfa_auto_oto(
     source_rows = _load_oto_lines(source)
     if not source_rows:
         return 0, 0, [f"No-MFA 자동설정용 베이스 OTO를 읽지 못했습니다: {source}"]
+
+    # 소스 OTO 에서 format_type을 자동 감지한다 (CVVC VC offset 비율 조정에 사용).
+    _detected_format = ""
+    try:
+        lang_lower = str(language or "").strip().lower() or "korean"
+        if lang_lower == "korean":
+            from core.kr_oto_rules import detect_alias_format
+            _src_aliases = []
+            for _row in source_rows:
+                if "=" in _row:
+                    _right = _row.split("=", 1)[1]
+                    _parts = _right.split(",", 1)
+                    _src_aliases.append(str(_parts[0]).strip())
+            if _src_aliases:
+                _detected_format = str(detect_alias_format(_src_aliases) or "").strip().lower()
+    except Exception:
+        _detected_format = ""
 
     timing_profile = None
     timing_zero_only = mode == "alias_auto"
@@ -850,6 +872,7 @@ def generate_no_mfa_auto_oto(
                     slot_total=slot_total,
                     language=language,
                     blend_weight=remap_blend_weight,
+                    format_type=_detected_format,
                 )
                 if remapped:
                     candidate = remapped

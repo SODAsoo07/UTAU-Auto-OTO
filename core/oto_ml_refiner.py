@@ -1041,7 +1041,11 @@ def _apply_korean_delta_policy(row_context: Dict[str, object], deltas: Dict[str,
 
     elif alias_type == "vc":
         # VC는 연결 안정성을 위해 offset/pre 이동을 기본적으로 억제한다.
-        deltas["delta_offset"] = _scale_signed(deltas.get("delta_offset", 0.0), neg_scale=0.35, pos_scale=0.46)
+        # CVVC에서는 VC offset이 앞 CV의 끝점과 직접 연동되므로 더 강하게 제한한다.
+        if format_type == "cvvc":
+            deltas["delta_offset"] = _scale_signed(deltas.get("delta_offset", 0.0), neg_scale=0.18, pos_scale=0.28)
+        else:
+            deltas["delta_offset"] = _scale_signed(deltas.get("delta_offset", 0.0), neg_scale=0.35, pos_scale=0.46)
         if coda_type == "stop":
             deltas["delta_pre"] = _scale_signed(deltas.get("delta_pre", 0.0), neg_scale=0.44, pos_scale=0.62)
             deltas["delta_cons"] = _scale_signed(deltas.get("delta_cons", 0.0), neg_scale=0.58, pos_scale=0.84)
