@@ -26,5 +26,7 @@ Microsoft Official Download Link: https://aka.ms/vs/17/release/vc_redist.x64.exe
 - 모든 형식/언어에서 생성된 oto는 정확함을 보증할 수 없습니다. 음성인식의 한계로, 음절 단위로 에일리어스와 실제 발음이 불일치하는 현상이 자주 발생합니다.
 
 ---
-이 툴의 소스코드는 AI를 이용해 생성했으며, 인간이 검수 후 일부 수정을 거쳤습니다.
-</br>이 프로그램은 '있는 그대로' 제공되며, 제작자는 이 프로그램을 사용하여 입은 손해에 대해 어떤 것도 책임지지 않습니다.
+**이 툴의 소스코드는 AI를 이용해 생성했으며**, 인간이 검수 후 일부 수정을 거쳤습니다.</br>
+**The source code of this tool was created using AI**, and it was modified by humans after inspection.
+</br>이 프로그램은 '있는 그대로' 제공되며, 제작자는 이 프로그램을 사용하여 입은 손해에 대해 어떤 것도 책임지지 않습니다.</br>
+This program is provided 'as it is' and the producer is not responsible for any damages incurred using this program.
