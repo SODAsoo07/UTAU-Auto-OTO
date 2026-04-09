@@ -46,6 +46,7 @@ ml/notebooks/**
 # 6) Explicitly exclude local artifacts and private/training data roots
 .cache/
 .venv/
+.venv310/
 .env/
 __pycache__/
 logs/
@@ -121,4 +122,3 @@ MANIFEST
 *.dist/
 *.build/
 *.onefile-build/
-/.venv310

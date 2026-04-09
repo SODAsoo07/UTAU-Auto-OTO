@@ -220,7 +220,21 @@ def _compute_kr_vc_timing(
         return offset, consonant, cutoff, pre, ovl, True
 
     if file_format == "cvvc":
-        direct_params = _compute_kr_cvvc_vc_timing_direct(alias, c_start, c_end, n_start, n_end)
+        # voiced_onset_lookback: 다음 CV anchor에서 mel 유성음 onset을 추출해 bridge 위치 보정에 활용한다.
+        _next_w = next_w_idx if next_w_idx is not None else (current_w_idx + 1)
+        _next_anchor = next_cv_anchor or cv_anchor_by_idx.get(_next_w)
+        _next_voiced_onset = None
+        if _next_anchor is not None:
+            try:
+                _v = float(_next_anchor.get("mel_voiced_onset_abs", 0.0) or 0.0)
+                if _v > 0.0:
+                    _next_voiced_onset = _v
+            except Exception:
+                pass
+        direct_params = _compute_kr_cvvc_vc_timing_direct(
+            alias, c_start, c_end, n_start, n_end,
+            next_mel_voiced_onset_ms=_next_voiced_onset,
+        )
         if direct_params is not None:
             offset, consonant, cutoff, pre, ovl = direct_params
             offset, consonant, cutoff, pre, ovl = _apply_vc_sharp_cutoff_guard(

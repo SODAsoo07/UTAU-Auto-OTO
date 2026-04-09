@@ -54,7 +54,11 @@ RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "profiles"), "assets/profiles"),
     (os.path.join(APP_DIR, "assets", "models", "oto_ml"), "assets/models/oto_ml"),
     (os.path.join(APP_DIR, "assets", "bootstrap", "get-pip.py"), "assets/bootstrap"),
-    (os.path.join(APP_DIR, "ml", "configs"), "ml/configs"),
+    # ml/configs: include only the two files that are actually read at runtime.
+    # training-only files (dataset_build_default.yaml, lightgbm_default.yaml,
+    # training_data_roots.yaml) are intentionally excluded from the runtime bundle.
+    (os.path.join(APP_DIR, "ml", "configs", "silence_reliability_profile.json"), "ml/configs"),
+    (os.path.join(APP_DIR, "ml", "configs", "kr_vcv_anchor_profile.yaml"), "ml/configs"),
     (os.path.join(APP_DIR, "config.json"), "."),
     (os.path.join(APP_DIR, "ui", "ui_layout.json"), "ui"),
     # bundle_info.json is generated at build time; included when present.

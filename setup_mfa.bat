@@ -1673,7 +1673,17 @@ if exist "%ENV_DIR%\Scripts\conda.exe" (
 
 if exist "%ENV_DIR%\python.exe" (
 
-    call :run_env_python -m pip install --upgrade soundfile
+    REM soundfile>=0.12.1 bundles libsndfile-1.dll on Windows; no separate DLL download needed.
+    call :run_env_python -m pip install --upgrade "soundfile>=0.12.1"
+
+    call :verify_audio_deps
+
+    if not errorlevel 1 goto :eof
+
+    REM cffi is required on some Python 3.10 builds; retry after ensuring it is present.
+    echo [INFO] soundfile verify failed. Retrying after installing cffi...
+
+    call :run_env_python -m pip install --upgrade cffi "soundfile>=0.12.1"
 
     call :verify_audio_deps
 
@@ -1681,7 +1691,8 @@ if exist "%ENV_DIR%\python.exe" (
 
 )
 
-echo [WARN] micromamba/conda/pip
+echo [WARN] libsndfile/soundfile could not be verified. Audio I/O features may be limited.
+echo        Re-run setup_mfa.bat --recovery after confirming network access to retry.
 
 goto :eof
 
@@ -2082,40 +2093,31 @@ if not errorlevel 1 (
 
 )
 
-if /i "%UTOA_ENABLE_MECAB_PYTHON3_FALLBACK%"=="1" (
+REM Always attempt mecab-python3 as an automatic fallback — no env var gate needed.
+echo [INFO] Installing Korean tokenizer backend fallback: mecab-python3 ^(wheel-only^)
 
-    echo [INFO] Installing Korean tokenizer backend fallback: mecab-python3 ^(wheel-only^)
+call :run_env_python -m pip uninstall -y python-mecab-ko python-mecab-ko-dic >nul 2>nul
 
-    call :run_env_python -m pip uninstall -y python-mecab-ko python-mecab-ko-dic >nul 2>nul
+call :run_env_python -m pip install --upgrade --only-binary=:all: mecab-python3
 
-    call :run_env_python -m pip install --upgrade --only-binary=:all: mecab-python3
+if not errorlevel 1 (
 
-    if not errorlevel 1 (
+    call :check_korean_tokenizer_ready
 
-        call :check_korean_tokenizer_ready
-
-        if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
-
-    ) else (
-
-        echo [WARN] mecab-python3 install failed or wheel unavailable.
-
-    )
+    if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
 
 ) else (
 
-    echo [INFO] Skipping mecab-python3 fallback by default.
-    echo [INFO] Set UTOA_ENABLE_MECAB_PYTHON3_FALLBACK=1 to enable fallback.
+    echo [WARN] mecab-python3 install failed or wheel unavailable.
 
 )
 
-echo [FAILED] Korean tokenizer backend install failed.
+REM Both backends failed — degrade gracefully so the rest of setup can continue.
+echo [WARN] Korean tokenizer backend install failed.
 echo        Tried: python-mecab-ko ^(wheel-only^), mecab-python3 ^(wheel-only^).
-echo        No source build is attempted on Windows.
-
-if not "%NON_INTERACTIVE%"=="1" pause
-
-exit /b 1
+echo        Korean VB alignment support will be limited.
+echo        Re-run setup_mfa.bat --recovery after confirming network access to retry.
+exit /b 0
 
 :ensure_mecab_module_shim
 
