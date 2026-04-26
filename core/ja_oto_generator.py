@@ -3053,6 +3053,11 @@ def generate_ja_oto(
             prefer_filename_sequence = bool(ingest_state["prefer_filename_sequence"])
             spn_ratio = float(ingest_state["spn_ratio"])
             alignment_weight = float(ingest_state["alignment_weight"])
+            if bool(ingest_state.get("syllable_order_guard_applied", False)):
+                log(
+                    f"[MAP] {fname}: syllable order guard applied "
+                    f"(reason={ingest_state.get('syllable_order_guard_reason', 'sequence_guard')})"
+                )
 
             post_ctx = build_ja_postprocess_context(
                 phone_spans_ms=phone_spans_ms,
