@@ -919,6 +919,7 @@ class LayoutMixin:
                 "자동 감지 (권장)",
                 "CV/연단음",
                 "CVC (한국어 전용)",
+                "COC (한국어 CVC 파생형)",
                 "CVVC",
                 "VCV (연속음)",
             ]
@@ -943,13 +944,14 @@ class LayoutMixin:
             "cv": "CV/연단음",
             "c_plus_v": "C+V (템플릿 전용)",
             "cvc": "CVC (한국어 전용)",
+            "coc": "COC (한국어 파생형)",
             "cvvc": "CVVC",
             "vcv": "VCV (연속음)",
             "cmpx": "CMPX (프리뷰)",
         }
         label = label_map.get(str(format_code or "").strip().lower(), "자동 감지 (권장)")
         if label not in values:
-            if label in {"CVC (한국어 전용)", "C+V (템플릿 전용)"} and lang != "korean":
+            if label in {"CVC (한국어 전용)", "COC (한국어 파생형)", "C+V (템플릿 전용)"} and lang != "korean":
                 label = "CV/연단음"
             elif label == "C+V (템플릿 전용)" and not self._is_preview_channel():
                 label = "CV/연단음"

@@ -147,8 +147,15 @@ def prepare_kr_loop_state(
     result.detected_format = detect_alias_format_fn(result.alias_names, custom_map)
     result.file_format = result.detected_format
     pref = str(preferred_format or "").strip().lower()
+    if pref == "coc":
+        pref = "cvc"
     if pref in {"cvc", "cvvc"} and result.detected_format == "cv":
         result.file_format = pref
+    elif pref == "cvc" and result.detected_format == "vcv":
+        result.file_format = pref
+        debug_log_fn(
+            f"ℹ 포맷 고정: {real_wav_name}: 자동 감지 {result.detected_format.upper()} -> 수동 지정 {pref.upper()}"
+        )
     debug_log_fn(f"처리: {real_wav_name}: 형식 감지 -> {result.file_format.upper()}")
     result.file_mapping_conf_th = float(
         resolve_mapping_conf_threshold_fn(
