@@ -268,6 +268,37 @@ function Resolve-PythonInEnv {
     return ""
 }
 
+function Resolve-CtcEnvDir {
+    param([string]$RuntimeRootPath)
+    $defaultDir = Join-Path $RuntimeRootPath ".env_ctc"
+    if (Test-Path -LiteralPath $defaultDir -PathType Container) {
+        return $defaultDir
+    }
+
+    $pathFile = Join-Path $RuntimeRootPath ".ctc_env_path"
+    if (Test-Path -LiteralPath $pathFile -PathType Leaf) {
+        try {
+            $candidate = (Get-Content -LiteralPath $pathFile -TotalCount 1 -ErrorAction Stop | Select-Object -First 1)
+            $candidate = [string]$candidate
+            if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+                $candidateAbs = [System.IO.Path]::GetFullPath($candidate.Trim())
+                if (Test-Path -LiteralPath $candidateAbs -PathType Container) {
+                    return $candidateAbs
+                }
+            }
+        } catch {
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $fallback = Join-Path $env:LOCALAPPDATA "UTAU_Auto_OTO_v3\ctc_env"
+        if (Test-Path -LiteralPath $fallback -PathType Container) {
+            return $fallback
+        }
+    }
+    return $defaultDir
+}
+
 function Wait-ProcessWithTimeout {
     param(
         [System.Diagnostics.Process]$Process,
@@ -620,7 +651,7 @@ $runtimeRootAbs = Resolve-RuntimeRootPath -RuntimeRootHint $RuntimeRoot -Resolve
 $runtimeRootAbs = [System.IO.Path]::GetFullPath($runtimeRootAbs)
 
 $mfaEnvDir = Join-Path $runtimeRootAbs ".env"
-$ctcEnvDir = Join-Path $runtimeRootAbs ".env_ctc"
+$ctcEnvDir = Resolve-CtcEnvDir -RuntimeRootPath $runtimeRootAbs
 $pythonExeMfa = Resolve-PythonInEnv -EnvDir $mfaEnvDir
 $pythonExeCtc = Resolve-PythonInEnv -EnvDir $ctcEnvDir
 $launcherPath = Resolve-MfaLauncher -EnvDir $mfaEnvDir
@@ -635,6 +666,7 @@ Add-Action "target=$targetNorm"
 Add-Action "language=$Language"
 Add-Action "runtime_root=$runtimeRootAbs"
 Add-Action "profile=$recoveryProfile"
+Add-Action "ctc_env_dir=$ctcEnvDir"
 if ($recoverMfa) {
     if ($setupScriptMfa) { Add-Action "setup_script_mfa=$setupScriptMfa" } else { Add-Warn "setup_mfa.bat was not found." }
 }
@@ -685,6 +717,7 @@ if (-not $SkipSetup) {
 }
 
 $pythonExeMfa = Resolve-PythonInEnv -EnvDir $mfaEnvDir
+$ctcEnvDir = Resolve-CtcEnvDir -RuntimeRootPath $runtimeRootAbs
 $pythonExeCtc = Resolve-PythonInEnv -EnvDir $ctcEnvDir
 $launcherPath = Resolve-MfaLauncher -EnvDir $mfaEnvDir
 

@@ -154,6 +154,17 @@ def _load_oto_lines(source_oto_path: str) -> list[str]:
     return []
 
 
+def _normalize_output_oto_path(out_path: str) -> str:
+    raw = str(out_path or "").strip()
+    if not raw:
+        return ""
+    if raw.endswith(("\\", "/")):
+        return os.path.join(os.path.abspath(raw), "oto.ini")
+    if os.path.isdir(raw):
+        return os.path.join(os.path.abspath(raw), "oto.ini")
+    return raw
+
+
 def _env_int(name: str, default: int) -> int:
     raw = str(os.environ.get(name, "")).strip()
     if not raw:
@@ -720,6 +731,7 @@ def generate_no_mfa_auto_oto(
     generation_mode: str = "remap",
     callback: Callable[[str], None] | None = None,
 ) -> tuple[int, int, list[str]]:
+    normalized_out_path = _normalize_output_oto_path(out_path)
     mode = _normalize_generation_mode(generation_mode)
     _log(
         callback,
@@ -933,11 +945,16 @@ def generate_no_mfa_auto_oto(
             msg = f"{msg} (예시: {sample})"
         return 0, total, [msg]
 
-    out_dir = os.path.dirname(os.path.abspath(out_path))
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(out_lines).rstrip() + "\n")
+    if not normalized_out_path:
+        return 0, total, ["출력 OTO 경로가 비어 있습니다."]
+    out_dir = os.path.dirname(os.path.abspath(normalized_out_path))
+    try:
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(normalized_out_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(out_lines).rstrip() + "\n")
+    except OSError as exc:
+        return 0, total, [f"출력 OTO 파일 저장 실패: {normalized_out_path} ({exc})"]
 
     missing_count = max(total - (exact_hits + norm_hits), 0)
     _log(

@@ -263,9 +263,22 @@ $requirementsMlSrc = Join-Path $repoRoot "requirements-ml.txt"
 $requirementsMlDst = Join-Path $sourceAbs "requirements-ml.txt"
 Sync-ReleaseFileIfNeeded -SourcePath $requirementsMlSrc -DestinationPath $requirementsMlDst -Label "requirements-ml.txt"
 
+$releaseOverlayFiles = @(
+    @{ Source = (Join-Path $repoRoot "setup_mfa.bat"); Destination = (Join-Path $sourceAbs "setup_mfa.bat"); Label = "setup_mfa.bat" },
+    @{ Source = (Join-Path $repoRoot "setup_ctc.bat"); Destination = (Join-Path $sourceAbs "setup_ctc.bat"); Label = "setup_ctc.bat" },
+    @{ Source = (Join-Path $repoRoot "scripts\runtime_recovery.ps1"); Destination = (Join-Path $sourceAbs "runtime_recovery.ps1"); Label = "runtime_recovery.ps1" },
+    @{ Source = (Join-Path $repoRoot "scripts\startup_diagnose.ps1"); Destination = (Join-Path $sourceAbs "startup_diagnose.ps1"); Label = "startup_diagnose.ps1" },
+    @{ Source = (Join-Path $repoRoot "scripts\startup_diagnose.bat"); Destination = (Join-Path $sourceAbs "startup_diagnose.bat"); Label = "startup_diagnose.bat" },
+    @{ Source = (Join-Path $repoRoot "release_channel.json"); Destination = (Join-Path $sourceAbs "release_channel.json"); Label = "release_channel.json" }
+)
+foreach ($overlay in $releaseOverlayFiles) {
+    Sync-ReleaseFileIfNeeded -SourcePath $overlay.Source -DestinationPath $overlay.Destination -Label $overlay.Label
+}
+
 $requiredReleaseFiles = @(
     "release_channel.json",
     "setup_mfa.bat",
+    "setup_ctc.bat",
     "requirements.txt",
     "requirements-ml.txt",
     "runtime_recovery.ps1",

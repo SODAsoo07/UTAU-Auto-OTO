@@ -109,6 +109,8 @@ class OtoActionsMixin:
         out_raw = str(base_out_path or "").strip()
         if target_count <= 1:
             if out_raw:
+                if os.path.isdir(out_raw) or out_raw.endswith(("\\", "/")):
+                    return os.path.join(os.path.abspath(out_raw), "oto.ini")
                 return out_raw
             return os.path.join(target_abs, "oto.ini")
 
