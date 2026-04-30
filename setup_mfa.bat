@@ -206,7 +206,7 @@ echo   --language NAME           Recovery language ^(korean or japanese^)
 
 echo   --language=NAME           Same as above ^(inline form^)
 
-echo   --with-ml / --install-ml  Install ML dependencies ^(pandas/pyarrow/lightgbm/onnxruntime^)
+echo   --with-ml / --install-ml  Install ML dependencies ^(pandas/lightgbm/onnxruntime^)
 echo   --without-ml / --skip-ml  Skip ML dependency install
 
 echo   --non-interactive         Run without prompts ^(requires valid runtime root^)
@@ -2101,7 +2101,7 @@ if exist "%MICROMAMBA_EXE%" (
 
     echo [INFO] micromamba ML
 
-    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas pyarrow lightgbm onnxruntime
+    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas lightgbm onnxruntime
 
     if errorlevel 1 (
 
@@ -2171,7 +2171,7 @@ if exist "%MICROMAMBA_EXE%" (
 
     echo [INFO] requirements-ml.txt missing. Installing minimal ML packages via pip.
 
-    call :run_env_python -m pip install --upgrade pandas pyarrow lightgbm onnxruntime
+    call :run_env_python -m pip install --upgrade pandas lightgbm onnxruntime
 
     if errorlevel 1 (
 
@@ -2205,15 +2205,15 @@ if not exist "%ENV_DIR%\python.exe" (
 
 )
 
-call :run_env_python -c "import pandas, pyarrow, lightgbm, onnxruntime" >nul 2>nul
+call :run_env_python -c "import pandas, lightgbm, onnxruntime" >nul 2>nul
 
 if errorlevel 1 (
 
-    echo [FAILED] ML import . pandas/pyarrow/lightgbm/onnxruntime
+    echo [FAILED] ML import . pandas/lightgbm/onnxruntime
 
     if exist "%MICROMAMBA_EXE%" (
 
-        echo : "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas pyarrow lightgbm onnxruntime
+        echo : "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas lightgbm onnxruntime
 
     ) else (
 

@@ -3005,9 +3005,252 @@ def _select_time_mask(times_ms, start_ms: float, end_ms: float):
     return np.where((times_ms >= float(start_ms)) & (times_ms <= float(end_ms)))[0]
 
 
-def _estimate_mel_voiced_onset(mel_ctx, anchor_ms: float, window_ms: float = 80.0) -> Optional[float]:
+def _mel_prob_array(mel_ctx, key, n, fallback=0.0):
+    if np is None:
+        return None
+    try:
+        arr = mel_ctx.get(key) if mel_ctx else None
+        if arr is None or len(arr) != int(n):
+            return np.full(int(n), float(fallback), dtype=np.float64)
+        return np.asarray(arr, dtype=np.float64)
+    except Exception:
+        return np.full(int(n), float(fallback), dtype=np.float64)
+
+
+def _mel_edge_unvoiced_penalty(mel_ctx, times_arr, *, edge_ms: float = 180.0):
+    if np is None or not mel_ctx or times_arr is None or len(times_arr) == 0:
+        return None
+    times = np.asarray(times_arr, dtype=np.float64)
+    n = len(times)
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+
+    voiced = _mel_prob_array(mel_ctx, "cls_voiced_formant", n, 0.0)
+    silence = _mel_prob_array(mel_ctx, "cls_silence_sparse", n, 0.0)
+    unvoiced = _mel_prob_array(mel_ctx, "cls_unvoiced_diffuse", n, 0.0)
+    breath = _mel_prob_array(mel_ctx, "cls_breath_like", n, 0.0)
+    f0_gap = _mel_prob_array(mel_ctx, "f0_gap_local", n, float(mel_ctx.get("f0_gap_ratio", 0.0) or 0.0))
+    f0_sparse = _mel_prob_array(mel_ctx, "f0_sparse_local", n, 0.0)
+    db_arr = mel_ctx.get("db_db")
+    db_sil_th = float(mel_ctx.get("db_silence_th", -42.0) or -42.0)
+    if db_arr is not None and len(db_arr) == n:
+        db_sparse = (np.asarray(db_arr, dtype=np.float64) <= (db_sil_th + 0.8)).astype(np.float64)
+    else:
+        db_sparse = np.zeros(n, dtype=np.float64)
+
+    nonvocal = np.clip(
+        (0.38 * unvoiced)
+        + (0.30 * silence)
+        + (0.18 * breath)
+        + (0.16 * f0_gap)
+        + (0.12 * f0_sparse)
+        + (0.14 * db_sparse)
+        - (0.46 * voiced),
+        0.0,
+        1.0,
+    )
+
+    edge_window = max(40.0, float(edge_ms))
+    threshold = _env_float("UTOA_MEL_EDGE_UNVOICED_PENALTY_MIN", 0.46)
+    voiced_block = _env_float("UTOA_MEL_EDGE_UNVOICED_VOICED_MAX", 0.42)
+    penalty = np.zeros(n, dtype=np.float64)
+
+    start_t = float(times[0])
+    end_t = float(times[-1])
+    lead = times <= (start_t + edge_window)
+    if np.any(lead):
+        lead_nonvocal = float(np.percentile(nonvocal[lead], 72))
+        lead_voiced = float(np.mean(voiced[lead]))
+        if lead_nonvocal >= threshold and lead_voiced <= voiced_block:
+            ramp = np.clip(1.0 - ((times - start_t) / edge_window), 0.0, 1.0)
+            penalty = np.maximum(penalty, nonvocal * lead_nonvocal * ramp)
+
+    tail = times >= (end_t - edge_window)
+    if np.any(tail):
+        tail_nonvocal = float(np.percentile(nonvocal[tail], 72))
+        tail_voiced = float(np.mean(voiced[tail]))
+        if tail_nonvocal >= threshold and tail_voiced <= voiced_block:
+            ramp = np.clip(1.0 - ((end_t - times) / edge_window), 0.0, 1.0)
+            penalty = np.maximum(penalty, nonvocal * tail_nonvocal * ramp)
+
+    return np.clip(penalty, 0.0, 1.0)
+
+
+def _estimate_mel_vowel_activity_span(
+    mel_ctx,
+    start_ms: float,
+    end_ms: float,
+    *,
+    search_pad_ms: float = 90.0,
+    min_span_ms: float = 18.0,
+):
     if np is None or not mel_ctx:
         return None
+    try:
+        start = float(start_ms)
+        end = float(end_ms)
+    except Exception:
+        return None
+    if end <= start:
+        return None
+
+    times_ms = mel_ctx.get("times_ms")
+    en = mel_ctx.get("energy")
+    if times_ms is None or en is None or len(times_ms) == 0 or len(en) != len(times_ms):
+        return None
+
+    times_arr = np.asarray(times_ms, dtype=np.float64)
+    en_arr = np.asarray(en, dtype=np.float64)
+    en_ma = mel_ctx.get("energy_ma")
+    if en_ma is None or len(en_ma) != len(en_arr):
+        en_ma_arr = en_arr
+    else:
+        en_ma_arr = np.asarray(en_ma, dtype=np.float64)
+
+    f0v = mel_ctx.get("f0_voicing")
+    if f0v is None or len(f0v) != len(en_arr):
+        f0_arr = np.zeros_like(en_arr, dtype=np.float64)
+    else:
+        f0_arr = np.asarray(f0v, dtype=np.float64)
+
+    cls_voiced = mel_ctx.get("cls_voiced_formant")
+    if cls_voiced is None or len(cls_voiced) != len(en_arr):
+        f2_arr = mel_ctx.get("f2_ratio")
+        f3_arr = mel_ctx.get("f3_ratio")
+        if f2_arr is None or len(f2_arr) != len(en_arr):
+            f2_arr = np.zeros_like(en_arr, dtype=np.float64)
+        if f3_arr is None or len(f3_arr) != len(en_arr):
+            f3_arr = np.zeros_like(en_arr, dtype=np.float64)
+        voiced_formant = (
+            (f0_arr >= 0.38)
+            | ((np.asarray(f2_arr, dtype=np.float64) >= 0.075) & (np.asarray(f3_arr, dtype=np.float64) >= 0.055))
+        )
+    else:
+        voiced_formant = np.asarray(cls_voiced, dtype=np.float64) >= 0.5
+
+    cls_silence = mel_ctx.get("cls_silence_sparse")
+    if cls_silence is None or len(cls_silence) != len(en_arr):
+        silence_mask = np.zeros_like(en_arr, dtype=bool)
+    else:
+        silence_mask = np.asarray(cls_silence, dtype=np.float64) >= 0.5
+
+    cls_unvoiced = mel_ctx.get("cls_unvoiced_diffuse")
+    if cls_unvoiced is None or len(cls_unvoiced) != len(en_arr):
+        unvoiced_mask = np.zeros_like(en_arr, dtype=bool)
+    else:
+        unvoiced_mask = np.asarray(cls_unvoiced, dtype=np.float64) >= 0.65
+
+    db_arr = mel_ctx.get("db_db")
+    db_sil_th = float(mel_ctx.get("db_silence_th", -42.0) or -42.0)
+    if db_arr is None or len(db_arr) != len(en_arr):
+        db_sound = np.ones_like(en_arr, dtype=bool)
+    else:
+        db_sound = np.asarray(db_arr, dtype=np.float64) > (db_sil_th + 0.8)
+    edge_penalty = _mel_edge_unvoiced_penalty(mel_ctx, times_arr)
+    if edge_penalty is None or len(edge_penalty) != len(en_arr):
+        edge_penalty = np.zeros_like(en_arr, dtype=np.float64)
+    edge_bad = edge_penalty >= _env_float("UTOA_MEL_EDGE_VOWEL_REJECT_MIN", 0.42)
+
+    search_start = max(0.0, start - float(search_pad_ms))
+    search_end = end + float(search_pad_ms)
+    probe = _select_time_mask(times_arr, search_start, search_end)
+    if len(probe) == 0:
+        return None
+
+    energy_floor = max(0.055, min(0.16, float(np.percentile(en_ma_arr[probe], 62)) * 0.72))
+    vowel_mask = (
+        voiced_formant
+        & db_sound
+        & (en_ma_arr >= energy_floor)
+        & ~silence_mask
+        & ~(unvoiced_mask & (f0_arr < 0.30))
+        & ~(edge_bad & (f0_arr < 0.62))
+    )
+    if not np.any(vowel_mask[probe]):
+        vowel_mask = (
+            (f0_arr >= 0.44)
+            & db_sound
+            & (en_ma_arr >= max(0.045, energy_floor * 0.78))
+            & ~silence_mask
+            & ~(edge_bad & (f0_arr < 0.70))
+        )
+    if not np.any(vowel_mask[probe]):
+        return None
+
+    runs = []
+    i = 0
+    max_gap = 1
+    while i < len(probe):
+        idx = int(probe[i])
+        if not vowel_mask[idx]:
+            i += 1
+            continue
+        start_pos = i
+        end_pos = i
+        gap = 0
+        j = i + 1
+        while j < len(probe):
+            idx_j = int(probe[j])
+            if vowel_mask[idx_j]:
+                end_pos = j
+                gap = 0
+            else:
+                gap += 1
+                if gap > max_gap:
+                    break
+            j += 1
+        run_start_idx = int(probe[start_pos])
+        run_end_idx = int(probe[end_pos])
+        run_start_ms = float(times_arr[run_start_idx])
+        run_end_ms = float(times_arr[run_end_idx])
+        if run_end_ms - run_start_ms >= float(min_span_ms):
+            overlap = max(0.0, min(run_end_ms, end) - max(run_start_ms, start))
+            center = (run_start_ms + run_end_ms) * 0.5
+            expected_center = (start + end) * 0.5
+            center_penalty = abs(center - expected_center) * 0.18
+            energy_score = float(np.mean(en_ma_arr[run_start_idx:run_end_idx + 1])) * 22.0
+            run_edge_penalty = float(np.mean(edge_penalty[run_start_idx:run_end_idx + 1])) * 130.0
+            run_unvoiced_penalty = float(np.mean(unvoiced_mask[run_start_idx:run_end_idx + 1])) * 52.0
+            score = (
+                (overlap * 1.8)
+                + (run_end_ms - run_start_ms)
+                + energy_score
+                - center_penalty
+                - run_edge_penalty
+                - run_unvoiced_penalty
+            )
+            runs.append((score, run_start_ms, run_end_ms))
+        i = max(j, i + 1)
+
+    if not runs:
+        return None
+    runs.sort(key=lambda item: item[0], reverse=True)
+    _score, out_start, out_end = runs[0]
+    if out_end <= out_start:
+        return None
+    return float(out_start), float(out_end)
+
+
+def _estimate_mel_voiced_onset(
+    mel_ctx,
+    anchor_ms: float,
+    window_ms: float = 80.0,
+    *,
+    prefer_vowel_activity: bool = False,
+) -> Optional[float]:
+    if np is None or not mel_ctx:
+        return None
+    if prefer_vowel_activity:
+        activity = _estimate_mel_vowel_activity_span(
+            mel_ctx,
+            float(anchor_ms) - float(window_ms),
+            float(anchor_ms) + float(window_ms),
+            search_pad_ms=0.0,
+            min_span_ms=14.0,
+        )
+        if activity is not None:
+            return float(activity[0])
+
     times_ms = mel_ctx.get("times_ms")
     en = mel_ctx.get("energy")
     f0v = mel_ctx.get("f0_voicing")
@@ -3057,12 +3300,43 @@ def _estimate_mel_voiced_onset(mel_ctx, anchor_ms: float, window_ms: float = 80.
 def _estimate_mel_vowel_nucleus(mel_ctx, onset_ms: Optional[float], search_after_ms: float = 220.0):
     if np is None or not mel_ctx or onset_ms is None:
         return None, None
+    activity = _estimate_mel_vowel_activity_span(
+        mel_ctx,
+        float(onset_ms),
+        float(onset_ms) + float(search_after_ms),
+        search_pad_ms=18.0,
+        min_span_ms=16.0,
+    )
     times_ms = mel_ctx.get("times_ms")
     en = mel_ctx.get("energy")
     f0v = mel_ctx.get("f0_voicing")
     cls_voiced = mel_ctx.get("cls_voiced_formant")
     if times_ms is None or en is None or len(times_ms) == 0:
         return None, None
+
+    if activity is not None:
+        act_start, act_end = activity
+        mask_act = _select_time_mask(times_ms, act_start, act_end)
+        if len(mask_act) >= 2:
+            en_arr = np.asarray(en, dtype=np.float64)
+            peak_idx = int(mask_act[int(np.argmax(en_arr[mask_act]))])
+            peak_energy = max(float(en_arr[peak_idx]), 0.0)
+            energy_floor = max(0.06, peak_energy * 0.58)
+            start_idx = peak_idx
+            end_idx = peak_idx
+            for idx in range(peak_idx, int(mask_act[0]) - 1, -1):
+                if float(en_arr[idx]) < energy_floor:
+                    break
+                start_idx = idx
+            for idx in range(peak_idx, int(mask_act[-1]) + 1):
+                if float(en_arr[idx]) < energy_floor:
+                    break
+                end_idx = idx
+            nuc_start = max(float(act_start), float(times_ms[start_idx]))
+            nuc_end = min(float(act_end), float(times_ms[end_idx]))
+            if nuc_end - nuc_start >= 8.0:
+                return float(nuc_start), float(nuc_end)
+        return float(act_start), float(act_end)
 
     if f0v is None or len(f0v) != len(en):
         f0v = np.zeros_like(en, dtype=np.float64)
@@ -4102,6 +4376,15 @@ def _apply_soft_mel_offset_cutoff_guard(
     silence_mask = hard_silence_mask | (((db_arr <= db_sil_th) | (en <= soft_sil_energy)) & weak_spec_mask)
     if cls_silence is not None and len(cls_silence) == len(en):
         silence_mask = silence_mask | (np.asarray(cls_silence, dtype=np.float64) >= 0.5)
+    edge_penalty = _mel_edge_unvoiced_penalty(mel_ctx, t_ms)
+    if edge_penalty is None or len(edge_penalty) != len(en):
+        edge_penalty = np.zeros_like(en, dtype=np.float64)
+    edge_nonvocal_mask = edge_penalty >= _env_float("UTOA_MEL_EDGE_PARAM_REJECT_MIN", 0.42)
+    vocal_sound_mask = (
+        (sound_mask & ~edge_nonvocal_mask & ~(noisy_unvoiced_mask & (f0v_arr < 0.35)))
+        | voiced_formant_mask
+        | ((f0v_arr >= 0.52) & (db_arr > (db_sil_th + 0.8)) & ~silence_mask)
+    )
     # onset ・ｴ・ｰ 夋川ｧ: ・尖ц・ ・ｴ・呰初・ + 1・ｨ ・ｰ・ｸ・ｰ・・・巐ｨ onset 弡・ｳｴ・ｼ ・誤蕩・､.
     if len(en) >= 5:
         kernel = np.ones(5, dtype=np.float64) / 5.0
@@ -4188,9 +4471,37 @@ def _apply_soft_mel_offset_cutoff_guard(
         and not allow_order_locked_cv
     )
     if not skip_offset_soft_guard and not low_energy_voiced:
-        off_silent = bool(silence_mask[off_idx])
-        pre_sound = bool(sound_mask[pre_idx] or (en[pre_idx] > 0.20))
-        if off_silent and pre_sound:
+        edge_offset_shifted = False
+        if bool(edge_nonvocal_mask[off_idx]):
+            hi = _nearest_time_index(t_ms, min(cut_abs, pre_abs + 140.0))
+            if hi < 0:
+                hi = pre_idx
+            hi = max(hi, off_idx)
+            seg = vocal_sound_mask[off_idx:hi + 1]
+            if np.any(seg):
+                first_vocal_idx = int(off_idx + np.where(seg)[0][0])
+                edge_lead_ms = _env_float("UTOA_MEL_EDGE_OFFSET_LEAD_MS", 10.0)
+                edge_pre_guard_ms = _env_float("UTOA_MEL_EDGE_OFFSET_PRE_GUARD_MS", 16.0)
+                if is_sibilant_like or is_fricative_like:
+                    edge_lead_ms = _env_float("UTOA_MEL_EDGE_OFFSET_LEAD_SIBILANT_MS", 22.0)
+                    edge_pre_guard_ms = _env_float("UTOA_MEL_EDGE_OFFSET_PRE_GUARD_SIBILANT_MS", 20.0)
+                elif is_plosive_like:
+                    edge_lead_ms = _env_float("UTOA_MEL_EDGE_OFFSET_LEAD_PLOSIVE_MS", 18.0)
+                    edge_pre_guard_ms = _env_float("UTOA_MEL_EDGE_OFFSET_PRE_GUARD_PLOSIVE_MS", 20.0)
+                target_offset = float(t_ms[first_vocal_idx]) - edge_lead_ms
+                target_offset = max(0.0, min(pre_abs - edge_pre_guard_ms, target_offset))
+                if target_offset > float(offset) + _env_float("UTOA_MEL_EDGE_MIN_OFFSET_SHIFT_MS", 6.0):
+                    new_offset = _blend(offset, target_offset, _env_float("UTOA_MEL_EDGE_OFFSET_BLEND", 0.50))
+                    offset_shift_ms = float(new_offset - offset)
+                    offset = new_offset
+                    pre = max(pre_abs - offset, 0.0)
+                    consonant = max(cons_abs - offset, pre + 8.0)
+                    off_idx = _nearest_time_index(t_ms, offset)
+                    edge_offset_shifted = True
+
+        off_silent = bool(silence_mask[off_idx] or edge_nonvocal_mask[off_idx])
+        pre_sound = bool(vocal_sound_mask[pre_idx] or ((en[pre_idx] > 0.20) and not edge_nonvocal_mask[pre_idx]))
+        if not edge_offset_shifted and off_silent and pre_sound:
             lo = max(0, pre_idx - 120)
             sound_start_idx = None
             if is_sibilant_like or is_plosive_like:
@@ -4207,7 +4518,7 @@ def _apply_soft_mel_offset_cutoff_guard(
                     rel = int(np.where(onset_seg)[0][0])
                     sound_start_idx = lo + rel
                 else:
-                    seg = sound_mask[lo:pre_idx + 1]
+                    seg = vocal_sound_mask[lo:pre_idx + 1]
                     if np.any(seg):
                         rel = int(np.where(seg)[0][0])
                         sound_start_idx = lo + rel
@@ -4230,7 +4541,30 @@ def _apply_soft_mel_offset_cutoff_guard(
 
     # ---- soft cutoff guard ----
     cut_idx = _nearest_time_index(t_ms, cut_abs)
-    cut_sound = bool(sound_mask[cut_idx] or (en[cut_idx] > 0.22))
+    cut_edge_nonvocal = bool(edge_nonvocal_mask[cut_idx])
+    if cut_edge_nonvocal:
+        start_idx = _nearest_time_index(t_ms, pre_abs + 16.0)
+        if start_idx < 0:
+            start_idx = 0
+        if start_idx < cut_idx:
+            seg = np.where(vocal_sound_mask[start_idx:cut_idx + 1])[0]
+            if len(seg) > 0:
+                last_vocal_idx = int(start_idx + seg[-1])
+                edge_tail_pad = _env_float("UTOA_MEL_EDGE_CUTOFF_TAIL_PAD_MS", 18.0)
+                min_cut_abs_margin = _env_float("UTOA_MEL_CUTOFF_MIN_FROM_PRE_MS", 20.0)
+                target_cut_abs = float(t_ms[last_vocal_idx]) + edge_tail_pad
+                target_cut_abs = max(pre_abs + min_cut_abs_margin, min(target_cut_abs, cut_abs))
+                if target_cut_abs < cut_abs - _env_float("UTOA_MEL_EDGE_MIN_CUT_REDUCTION_MS", 8.0):
+                    blend_w = _env_float("UTOA_MEL_EDGE_CUTOFF_BLEND", 0.55)
+                    new_cut_abs = _blend(cut_abs, target_cut_abs, blend_w)
+                    cutoff_shift_ms = float(cut_abs - new_cut_abs)
+                    cut_abs = new_cut_abs
+                    cutoff = -(cut_abs - offset)
+                    consonant = min(consonant, (cut_abs - offset) - 10.0)
+                    consonant = max(consonant, pre + 8.0)
+
+    cut_idx = _nearest_time_index(t_ms, cut_abs)
+    cut_sound = bool((sound_mask[cut_idx] and not edge_nonvocal_mask[cut_idx]) or vocal_sound_mask[cut_idx] or (en[cut_idx] > 0.22))
     if cut_sound:
         start_idx = _nearest_time_index(t_ms, pre_abs + 16.0)
         if start_idx < 0:
@@ -5426,6 +5760,8 @@ def generate_oto(
                 apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
                 generate_openutau=generate_openutau,
                 alias_suffix=alias_suffix,
+                mel_ctx_for_file=mel_ctx_for_file,
+                refine_vowel_span_fn=_estimate_mel_vowel_activity_span,
             ):
                 processed += 1
                 continue
@@ -6398,6 +6734,28 @@ def generate_oto(
                         )
 
                     elif _looks_like_vv_alias(alias):
+                        if mel_ctx_for_file:
+                            try:
+                                refined = _estimate_mel_vowel_activity_span(
+                                    mel_ctx_for_file,
+                                    n_start,
+                                    n_end,
+                                    search_pad_ms=120.0,
+                                    min_span_ms=20.0,
+                                )
+                                if refined is not None:
+                                    rv_start, rv_end = refined
+                                    if rv_end > rv_start and (
+                                        abs(float(rv_start) - float(n_start)) >= 8.0
+                                        or abs(float(rv_end) - float(n_end)) >= 16.0
+                                    ):
+                                        log(
+                                            f"🛡️ {fname}: 모음-only alias 모음 핵 기준 보정 "
+                                            f"({n_start:.1f}-{n_end:.1f}ms -> {rv_start:.1f}-{rv_end:.1f}ms) [{alias}]"
+                                        )
+                                        n_start, n_end = float(rv_start), float(rv_end)
+                            except Exception:
+                                pass
                         vv_direct = None
                         if file_format == "cvvc":
                             vv_direct = _compute_kr_cvvc_vv_timing_direct(

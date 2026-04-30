@@ -48,7 +48,16 @@ EXCLUDED_MODULES = [
     "librosa",
 ]
 EXCLUDED_TRAINING_MODULES = [
+    "core.cvn_training",
+    "core.mapping_supervised_training",
     "core.oto_ml.coupled.training",
+    "core.oto_ml_collection",
+    "core.oto_ml_collection_build",
+    "core.oto_ml_collection_discovery",
+    "core.oto_ml_collection_types",
+    "core.oto_ml_dataset",
+    "core.oto_ml_export",
+    "core.oto_ml_staging",
 ]
 RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "profiles"), "assets/profiles"),
@@ -90,6 +99,48 @@ RELEASE_SCRIPT_FOLDER_ALLOWLIST = {
     "startup_diagnose.bat",
 }
 RELEASE_SCRIPT_EXTENSIONS = {".py", ".ps1", ".bat", ".cmd"}
+RELEASE_FORBIDDEN_DIR_NAMES = {
+    ".cache",
+    ".env",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".svn",
+    ".venv",
+    ".venv310",
+    "__pycache__",
+    "_build_model_profiles",
+    "_selector_datasets",
+    "dataset_staged",
+    "dataset_workspace",
+    "dist",
+    "dist_nuitka",
+    "logs",
+    "ml_workspace",
+    "portable_output",
+    "test_wavs",
+}
+RELEASE_FORBIDDEN_FILE_NAMES = {
+    "nuitka-crash-report.xml",
+    "requirements-train.md",
+    "requirements-train.txt",
+    "selector_dataset.csv",
+}
+RELEASE_FORBIDDEN_FILE_EXTENSIONS = {
+    ".feather",
+    ".parquet",
+}
+RELEASE_MODEL_PRUNE_FILE_NAMES = {
+    "eval_summary.json",
+    "selector_dataset.csv",
+}
+RELEASE_MODEL_PRUNE_FILE_EXTENSIONS = {
+    ".ckpt",
+    ".pth",
+    ".pt",
+}
 APP_ICON_CANDIDATES = [
     os.path.join(APP_DIR, "release_assets", "AutoOTO-icon.ico"),
     os.path.join(APP_DIR, "AutoOTO-icon.ico"),
@@ -840,6 +891,103 @@ def _prune_internal_test_scripts_from_release(release_dir, app_name):
     return removed
 
 
+def _release_relpath(root_dir: str, path: str) -> str:
+    return os.path.relpath(path, root_dir).replace("\\", "/").strip("/")
+
+
+def _release_path_parts(rel_path: str) -> list[str]:
+    return [part.strip().lower() for part in str(rel_path or "").replace("\\", "/").split("/") if part.strip()]
+
+
+def _is_model_payload_path(parts: list[str]) -> bool:
+    joined = "/".join(parts)
+    return (
+        "assets/models/oto_ml" in joined
+        or "models_installed/oto_ml" in joined
+        or "ml_models" in parts
+    )
+
+
+def _is_forbidden_release_file(rel_path: str) -> bool:
+    parts = _release_path_parts(rel_path)
+    if not parts:
+        return False
+    filename = parts[-1]
+    stem, ext = os.path.splitext(filename)
+    if any(part in RELEASE_FORBIDDEN_DIR_NAMES for part in parts[:-1]):
+        return True
+    if filename in RELEASE_FORBIDDEN_FILE_NAMES:
+        return True
+    if ext in RELEASE_FORBIDDEN_FILE_EXTENSIONS:
+        return True
+    if _is_model_payload_path(parts):
+        if filename in RELEASE_MODEL_PRUNE_FILE_NAMES:
+            return True
+        if ext in RELEASE_MODEL_PRUNE_FILE_EXTENSIONS:
+            return True
+        if stem.lower().endswith("_dataset"):
+            return True
+    return False
+
+
+def _prune_forbidden_release_payload(release_dir: str) -> list[str]:
+    if not os.path.isdir(release_dir):
+        return []
+    removed: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(release_dir, topdown=True):
+        kept_dirs = []
+        for dirname in dirnames:
+            full_dir = os.path.join(dirpath, dirname)
+            rel_dir = _release_relpath(release_dir, full_dir)
+            parts = _release_path_parts(rel_dir)
+            if parts and parts[-1] in RELEASE_FORBIDDEN_DIR_NAMES:
+                try:
+                    _safe_rmtree(full_dir)
+                    removed.append(rel_dir + "/")
+                except Exception:
+                    kept_dirs.append(dirname)
+                continue
+            kept_dirs.append(dirname)
+        dirnames[:] = kept_dirs
+
+        for filename in filenames:
+            full_path = os.path.join(dirpath, filename)
+            rel_path = _release_relpath(release_dir, full_path)
+            if not _is_forbidden_release_file(rel_path):
+                continue
+            try:
+                os.remove(full_path)
+                removed.append(rel_path)
+            except OSError:
+                pass
+    return removed
+
+
+def _validate_release_payload_no_training_data(release_dir: str) -> None:
+    if not os.path.isdir(release_dir):
+        return
+    offenders = []
+    for dirpath, dirnames, filenames in os.walk(release_dir):
+        rel_dir = _release_relpath(release_dir, dirpath)
+        parts = _release_path_parts(rel_dir)
+        if parts and any(part in RELEASE_FORBIDDEN_DIR_NAMES for part in parts):
+            offenders.append(rel_dir + "/")
+            dirnames[:] = []
+            continue
+        for filename in filenames:
+            rel_path = _release_relpath(release_dir, os.path.join(dirpath, filename))
+            if _is_forbidden_release_file(rel_path):
+                offenders.append(rel_path)
+        if len(offenders) >= 20:
+            break
+    if offenders:
+        lines = "\n".join(f"  - {path}" for path in offenders[:20])
+        raise RuntimeError(
+            "Release payload contains training/data/dev artifacts and was not packaged.\n"
+            f"{lines}"
+        )
+
+
 def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, onefile=False):
     release_dir = _get_release_dir(channel)
     if os.path.exists(release_dir):
@@ -885,6 +1033,15 @@ def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, o
         print("   -> pruned internal/test scripts from release payload:")
         for root, rel_path in removed_internal_scripts:
             print(f"      {os.path.relpath(root, release_dir) or '.'}/{rel_path}")
+
+    removed_forbidden = _prune_forbidden_release_payload(release_dir)
+    if removed_forbidden:
+        print("   -> pruned training/data/dev artifacts from release payload:")
+        for rel_path in removed_forbidden[:40]:
+            print(f"      {rel_path}")
+        if len(removed_forbidden) > 40:
+            print(f"      ... and {len(removed_forbidden) - 40} more")
+    _validate_release_payload_no_training_data(release_dir)
 
     if os.name == "nt":
         release_exe = _resolve_release_executable_path(release_dir, app_name, onefile=onefile)

@@ -2584,6 +2584,7 @@ def generate_ja_oto(
         _find_wav_path_for_name,
         _wav_duration_ms,
         _apply_soft_mel_offset_cutoff_guard,
+        _estimate_mel_vowel_activity_span,
     )
 
     # GUI 형식 지정:
@@ -3198,6 +3199,8 @@ def generate_ja_oto(
                 generate_openutau=generate_openutau,
                 generate_openutau_aliases_fn=generate_ja_openutau_aliases,
                 alias_suffix=alias_suffix,
+                mel_ctx_for_file=mel_ctx_for_file,
+                refine_vowel_span_fn=_estimate_mel_vowel_activity_span,
             ):
                 processed += 1
                 continue
@@ -5048,6 +5051,29 @@ def generate_ja_oto(
                     else:
                         n_start = v_end
                         n_end = v_end + 100
+
+                    if alias_type == "vv" and mel_ctx_for_file:
+                        try:
+                            refined = _estimate_mel_vowel_activity_span(
+                                mel_ctx_for_file,
+                                n_start,
+                                n_end,
+                                search_pad_ms=120.0,
+                                min_span_ms=20.0,
+                            )
+                            if refined is not None:
+                                rv_start, rv_end = refined
+                                if rv_end > rv_start and (
+                                    abs(float(rv_start) - float(n_start)) >= 8.0
+                                    or abs(float(rv_end) - float(n_end)) >= 16.0
+                                ):
+                                    log(
+                                        f"🛡️ {fname}: 모음-only alias 모음 핵 기준 보정 "
+                                        f"({n_start:.1f}-{n_end:.1f}ms -> {rv_start:.1f}-{rv_end:.1f}ms) [{alias}]"
+                                    )
+                                    n_start, n_end = float(rv_start), float(rv_end)
+                        except Exception:
+                            pass
 
                     tail_dash_vv = bool(alias_type == "vv" and _is_ja_vv_tail_dash_alias(alias))
                     vc_target = n_start if alias_type == 'vc' else n_end

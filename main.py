@@ -277,7 +277,7 @@ def _startup_runtime_preflight(app_dir: str) -> None:
 # ==============================================================================
 
 APP_NAME = "UTAU Auto OTO Generator"
-APP_VERSION = "3.2.0"
+APP_VERSION = "3.2.1"
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 760
 SUPPORTED_RELEASE_CHANNELS = {"stable", "preview"}
