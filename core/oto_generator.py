@@ -5138,6 +5138,65 @@ def generate_oto(
             textgrid_cache_by_path=preloaded_tg_by_path,
         )
 
+    placeholder_block_errors = []
+
+    def _is_zero_placeholder_line(line):
+        if not line or "=" not in line:
+            return False
+        try:
+            parts = line.split("=", 1)[1].split(",")
+            if len(parts) < 6:
+                return False
+            values = [float(str(parts[i]).strip()) for i in range(1, 6)]
+            return all(abs(v) < 1e-6 for v in values)
+        except Exception:
+            return False
+
+    def _lines_are_zero_placeholders(lines):
+        parsed = [line for line in (lines or []) if line and "=" in line]
+        return bool(parsed) and all(_is_zero_placeholder_line(line) for line in parsed)
+
+    def _drop_auto_placeholder_fallback(prev_final_len, fname, lines, reason):
+        if use_template or not _lines_are_zero_placeholders(lines):
+            return False
+        del final_lines[prev_final_len:]
+        err = (
+            f"[ERROR] {fname}: 자동 생성 CVC/CV 계열 placeholder OTO가 보정되지 않아 저장을 중단했습니다. "
+            f"reason={reason}. TextGrid의 phones/words tier 이름, 정렬 결과, WAV-TextGrid 파일명 매칭을 확인하세요."
+        )
+        log(err)
+        errors.append(err)
+        placeholder_block_errors.append(err)
+        return True
+
+    def _offset_zero_collapse_error(lines):
+        total_rows = 0
+        zero_offset_rows = 0
+        for line in lines or []:
+            if not line or "=" not in line:
+                continue
+            try:
+                parts = line.split("=", 1)[1].split(",")
+                if len(parts) < 6:
+                    continue
+                offset_value = float(str(parts[1]).strip())
+            except Exception:
+                continue
+            total_rows += 1
+            if abs(offset_value) < 1e-6:
+                zero_offset_rows += 1
+        if total_rows < 5:
+            return ""
+        ratio = zero_offset_rows / float(total_rows)
+        if ratio < 0.90:
+            return ""
+        return (
+            f"[ERROR] OTO 생성 결과의 offset이 비정상적으로 0에 몰려 저장을 중단했습니다 "
+            f"(zero_offset_rows={zero_offset_rows}/{total_rows}, ratio={ratio:.1%}, format={auto_gen_format}). "
+            "자동 alias placeholder가 보정되지 않았을 가능성이 큽니다. TextGrid phones tier, 정렬 품질, "
+            "WAV-TextGrid 파일명 매칭을 확인하세요."
+        )
+
     processed = 0
     total = len(file_groups)
     mel_cache_for_signal = {}
@@ -5173,6 +5232,7 @@ def generate_oto(
             wav_name_map.setdefault(fname, output_wav_name)
             if file_ctx.real_wav_name and file_ctx.real_wav_name != fname:
                 wav_name_map.setdefault(file_ctx.real_wav_name, output_wav_name)
+        prev_final_len = len(final_lines)
         if handle_kr_file_context_status(
             file_ctx=file_ctx,
             fname=fname,
@@ -5183,6 +5243,7 @@ def generate_oto(
             record_unset_lines_fn=_record_unset_lines,
             apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
         ):
+            _drop_auto_placeholder_fallback(prev_final_len, fname, lines, getattr(file_ctx, "status", "file_context"))
             processed += 1
             continue
 
@@ -5193,6 +5254,7 @@ def generate_oto(
             preloaded_tg_by_path=preloaded_tg_by_path if not use_template else None,
             tier_predicate=lambda tier: isinstance(tier, textgrid.IntervalTier),
         )
+        prev_final_len = len(final_lines)
         if handle_kr_file_context_status(
             file_ctx=file_ctx,
             fname=fname,
@@ -5203,6 +5265,7 @@ def generate_oto(
             record_unset_lines_fn=_record_unset_lines,
             apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
         ):
+            _drop_auto_placeholder_fallback(prev_final_len, fname, lines, getattr(file_ctx, "status", "file_context"))
             processed += 1
             continue
 
@@ -5218,10 +5281,12 @@ def generate_oto(
             if not phone_tier:
                 log(f"[WARN] {fname}: phones tier가 없어 원본 행을 유지합니다.")
                 _record_unset_lines("tier_missing", fname, lines)
+                prev_final_len = len(final_lines)
                 final_lines.extend([
                     apply_suffix_to_oto_line(l, alias_suffix)
                     for l in lines
                 ])
+                _drop_auto_placeholder_fallback(prev_final_len, fname, lines, "tier_missing")
                 processed += 1
                 continue
 
@@ -5252,6 +5317,7 @@ def generate_oto(
                 resolve_mapping_conf_threshold_fn=_resolve_kr_mapping_conf_threshold,
                 preferred_format=auto_gen_format,
             )
+            prev_final_len = len(final_lines)
             if handle_kr_loop_prep_status(
                 loop_prep=loop_prep,
                 fname=fname,
@@ -5262,6 +5328,7 @@ def generate_oto(
                 record_unset_lines_fn=_record_unset_lines,
                 apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
             ):
+                _drop_auto_placeholder_fallback(prev_final_len, fname, lines, getattr(loop_prep, "status", "loop_prep"))
                 processed += 1
                 continue
 
@@ -5659,10 +5726,12 @@ def generate_oto(
                         "mapping_reason_code": mapping_reason_code,
                     },
                 )
+                prev_final_len = len(final_lines)
                 final_lines.extend([
                     apply_suffix_to_oto_line(l, alias_suffix)
                     for l in lines
                 ])
+                _drop_auto_placeholder_fallback(prev_final_len, fname, lines, fail_reason)
                 processed += 1
                 continue
 
@@ -5683,10 +5752,12 @@ def generate_oto(
                         "plan_policy": dict(kr_plan_policy or {}),
                     },
                 )
+                prev_final_len = len(final_lines)
                 final_lines.extend([
                     apply_suffix_to_oto_line(l, alias_suffix)
                     for l in lines
                 ])
+                _drop_auto_placeholder_fallback(prev_final_len, fname, lines, "mapping_v2_abstain")
                 processed += 1
                 continue
 
@@ -6574,10 +6645,12 @@ def generate_oto(
             logger.error(err_msg)
             errors.append(err_msg)
             _record_unset_lines("file_exception", fname, lines)
+            prev_final_len = len(final_lines)
             final_lines.extend([
                 apply_suffix_to_oto_line(l, alias_suffix)
                 for l in lines
             ])
+            _drop_auto_placeholder_fallback(prev_final_len, fname, lines, "file_exception")
             processed += 1
 
         if callback and total > 0 and (processed % 5 == 0 or processed == total):
@@ -6666,6 +6739,29 @@ def generate_oto(
         cleanup_timing_jsonl=cleanup_timing_jsonl,
         timing_jsonl_prefix="timing_anchor_kr_",
     )
+
+    if placeholder_block_errors:
+        summary_err = (
+            f"[ERROR] 자동 생성 placeholder OTO가 보정되지 않은 파일이 있어 OTO 저장을 중단했습니다 "
+            f"(blocked_files={len(placeholder_block_errors)}, format={auto_gen_format})."
+        )
+        log(summary_err)
+        errors.append(summary_err)
+        if isinstance(runtime_report, dict):
+            runtime_report["auto_placeholder_block_errors"] = list(placeholder_block_errors)
+        finalize_generator_finish(finish_context)
+        _log_unset_summary()
+        return processed, total, errors
+
+    zero_collapse_err = _offset_zero_collapse_error(final_lines)
+    if zero_collapse_err:
+        log(zero_collapse_err)
+        errors.append(zero_collapse_err)
+        if isinstance(runtime_report, dict):
+            runtime_report["offset_zero_collapse_error"] = zero_collapse_err
+        finalize_generator_finish(finish_context)
+        _log_unset_summary()
+        return processed, total, errors
 
     try:
         write_oto_lines(out_path, final_lines)

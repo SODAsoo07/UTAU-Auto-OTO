@@ -947,6 +947,24 @@ def generate_no_mfa_auto_oto(
 
     if not normalized_out_path:
         return 0, total, ["출력 OTO 경로가 비어 있습니다."]
+
+    zero_placeholder_rows = []
+    for line in out_lines:
+        parsed_line = parse_oto_line(line)
+        if parsed_line and _timing_row_is_zeroish(parsed_line):
+            zero_placeholder_rows.append(line)
+    if zero_placeholder_rows:
+        sample = "; ".join(zero_placeholder_rows[:3])
+        suffix = " ..." if len(zero_placeholder_rows) > 3 else ""
+        msg = (
+            "[ERROR] No-MFA 자동설정 placeholder OTO가 보정되지 않아 저장을 중단했습니다 "
+            f"(zero_placeholder_rows={len(zero_placeholder_rows)}/{len(out_lines)}). "
+            "WAV 파일 길이 읽기, 베이스 OTO 매칭, stats/reference OTO 설정을 확인하세요. "
+            f"sample={sample}{suffix}"
+        )
+        _log(callback, msg)
+        return 0, total, [msg]
+
     out_dir = os.path.dirname(os.path.abspath(normalized_out_path))
     try:
         if out_dir:

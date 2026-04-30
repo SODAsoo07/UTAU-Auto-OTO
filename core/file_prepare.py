@@ -188,13 +188,15 @@ def load_named_tiers(
         context.alignment_source = src
         context.alignment_source_reason = reason
         context.alignment_source_meta = dict(meta or {})
+    phone_tier_key = str(phone_tier_name or "").strip().lower()
+    word_tier_key = str(word_tier_name or "").strip().lower()
     for tier in tg:
         if tier_predicate and not tier_predicate(tier):
             continue
-        tier_name = getattr(tier, "name", None)
-        if tier_name == phone_tier_name:
+        tier_name = str(getattr(tier, "name", "") or "").strip().lower()
+        if tier_name == phone_tier_key:
             context.phone_tier = tier
-        elif tier_name == word_tier_name:
+        elif tier_name == word_tier_key:
             context.word_tier = tier
     if context.phone_tier is None:
         context.status = "tier_missing"
