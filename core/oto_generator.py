@@ -125,12 +125,12 @@ from core.alignment_ingest import build_kr_alignment_ingest
 from core.kr_candidate_selection_v2 import select_kr_syllable_source
 from core.oto_diagnostics import SkippedEntryCollector
 from core.oto_diagnostics_adapter_v2 import GeneratorDiagnosticsAdapter
-from core.file_prepare import load_named_tiers, prepare_file_context
+from core.file_prepare import coerce_interval_tier, is_interval_like_tier, load_named_tiers, prepare_file_context
 from core.interval_lookup import build_interval_lookup, intervals_within_bounds
 from core.timing_anchor_profiles import is_anchor_lock_enabled
 from core.timing_anchor_runtime import append_timing_anchor_log
 from core.anchor_lock_adapter_v2 import apply_language_anchor_lock
-from core.textio_utils import load_template_oto_lines
+from core.textio_utils import load_template_oto_lines, strip_template_alias_suffixes
 from core.oto_profile_presets import get_kr_profile_preset
 from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
 from core.format_type_utils import normalize_format_type
@@ -4610,6 +4610,16 @@ def decide_row_application(
 
     if row_abstain_skip:
         reason = str(row_abstain_reason or "row_abstain").strip().lower() or "row_abstain"
+        if reason in {
+            "row_low_confidence",
+            "row_low_margin_candidate",
+            "row_high_blank_confidence",
+        }:
+            return {
+                "mode": "conservative_apply",
+                "reason_code": reason,
+                "reasons": [reason, "low_conf_force_auto"],
+            }
         return {
             "mode": "review_required",
             "reason_code": reason,
@@ -4630,7 +4640,7 @@ def decide_row_application(
         mode = "conservative_apply"
         reasons.append("jump_blocked")
     if bool(forced_selected) and mode in {"full_apply", "conservative_apply"}:
-        mode = "template_preserve"
+        mode = "conservative_apply"
         reasons.append("plan_mismatch")
 
     high_pitch_mode = _is_high_pitch_context(
@@ -4640,7 +4650,7 @@ def decide_row_application(
     )
     if high_pitch_mode and mode != "review_required":
         if float(row_mapping_confidence) < max(0.0, float(row_conf_floor) - 0.06):
-            mode = "review_required"
+            mode = "conservative_apply"
             reasons.append("high_pitch_unstable")
 
     if str(routing_profile or "").strip().lower() == "high_pitch_safe" and mode == "full_apply":
@@ -5016,6 +5026,15 @@ def generate_oto(
         if warning:
             log(warning)
         template_lines = lines or []
+        template_lines, stripped_suffix, stripped_count = strip_template_alias_suffixes(
+            template_lines,
+            alias_suffix=alias_suffix,
+        )
+        if stripped_count > 0:
+            log(
+                f"[WARN] 베이스 OTO alias에 접미사 _{stripped_suffix}가 포함되어 있어 "
+                f"내부 매핑용으로 {stripped_count}개 alias에서 제거했습니다."
+            )
 
 
     wav_root_for_signal = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
@@ -5157,10 +5176,31 @@ def generate_oto(
         return bool(parsed) and all(_is_zero_placeholder_line(line) for line in parsed)
 
     def _drop_auto_placeholder_fallback(prev_final_len, fname, lines, reason):
-        if not _lines_are_zero_placeholders(lines):
+        reason_key = str(reason or "").strip().lower()
+        fatal_reasons = {
+            "textgrid_missing",
+            "textgrid_load_failed",
+            "tier_missing",
+            "empty_intervals",
+            "mapping_failed_empty_intervals",
+            "no_valid_alias",
+            "mapping_failed",
+            "mapping_failed_spn_heavy",
+            "mapping_failed_insufficient_phones",
+            "mapping_failed_no_words_support",
+            "file_exception",
+        }
+        is_zero_placeholder = _lines_are_zero_placeholders(lines)
+        is_fatal_generation_failure = reason_key in fatal_reasons
+        if not is_zero_placeholder and not is_fatal_generation_failure:
             return False
         del final_lines[prev_final_len:]
-        if use_template:
+        if is_fatal_generation_failure:
+            err = (
+                f"[ERROR] {fname}: 자동 설정에 필요한 TextGrid/tier/interval/mapping 정보를 확보하지 못해 저장을 중단했습니다. "
+                f"reason={reason}. TextGrid의 phones/words tier 이름, 정렬 결과, WAV-TextGrid 파일명 매칭을 확인하세요."
+            )
+        elif use_template:
             err = (
                 f"[ERROR] {fname}: 0값 템플릿 OTO를 보정하지 못해 저장을 중단했습니다. "
                 f"reason={reason}. TextGrid의 phones/words tier 이름, 정렬 결과, WAV-TextGrid 파일명 매칭을 확인하세요."
@@ -5258,7 +5298,7 @@ def generate_oto(
             load_named_tiers_fn=load_named_tiers,
             load_textgrid_fn=textgrid.TextGrid.fromFile,
             preloaded_tg_by_path=preloaded_tg_by_path if not use_template else None,
-            tier_predicate=lambda tier: isinstance(tier, textgrid.IntervalTier),
+            tier_predicate=is_interval_like_tier,
         )
         prev_final_len = len(final_lines)
         if handle_kr_file_context_status(
@@ -5285,7 +5325,7 @@ def generate_oto(
 
         try:
             if not phone_tier:
-                log(f"[WARN] {fname}: phones tier가 없어 원본 행을 유지합니다.")
+                log(f"[ERROR] {fname}: phones tier가 없어 자동 설정을 중단합니다.")
                 _record_unset_lines("tier_missing", fname, lines)
                 prev_final_len = len(final_lines)
                 final_lines.extend([
@@ -5712,7 +5752,7 @@ def generate_oto(
                 )
 
             if (not syllables_info) or any(len(s['phones']) == 0 for s in syllables_info):
-                log(f"[WARN] {fname}: 음절 경계 해석 실패로 원본 행을 유지합니다.")
+                log(f"[ERROR] {fname}: 음절 경계 해석 실패로 자동 설정을 중단합니다.")
                 fail_reason = "mapping_failed"
                 if "spn_heavy" in low_quality_reasons:
                     fail_reason = "mapping_failed_spn_heavy"
@@ -5743,29 +5783,17 @@ def generate_oto(
 
             if bool(runtime_policy.get("should_abstain")):
                 log(
-                    f"[WARN] {fname}: KR v2 planner abstain "
+                    f"[WARN] {fname}: KR v2 planner 저신뢰 "
                     f"(trust={textgrid_trust_score:.2f}, weight={alignment_weight:.2f}, "
                     f"coverage={float(kr_plan_policy.get('coverage', 0.0)):.2f}, "
-                    f"margin={float(kr_plan_policy.get('margin', 0.0)):.1f}) -> 원본행 유지"
+                    f"margin={float(kr_plan_policy.get('margin', 0.0)):.1f}) -> 순서 잠금 보수 자동설정"
                 )
-                _record_unset_lines(
-                    "mapping_v2_abstain",
-                    fname,
-                    lines,
-                    meta={
-                        "mapping_confidence": mapping_confidence_base,
-                        "mapping_reason_code": mapping_reason_code,
-                        "plan_policy": dict(kr_plan_policy or {}),
-                    },
+                runtime_policy["should_abstain"] = False
+                runtime_policy["force_sequence_lock"] = True
+                runtime_policy["low_conf_force_auto"] = True
+                runtime_policy["low_conf_reasons"] = sorted(
+                    set(list(runtime_policy.get("low_conf_reasons") or []) + ["planner_abstain_forced_auto"])
                 )
-                prev_final_len = len(final_lines)
-                final_lines.extend([
-                    apply_suffix_to_oto_line(l, alias_suffix)
-                    for l in lines
-                ])
-                _drop_auto_placeholder_fallback(prev_final_len, fname, lines, "mapping_v2_abstain")
-                processed += 1
-                continue
 
             romaji_syllables = [s.get('roman_cv') or s.get('roman', '') for s in syllables_info]
             current_w_idx = 0
@@ -6722,7 +6750,15 @@ def generate_oto(
                 if v_span is None:
                     try:
                         tg = textgrid.TextGrid.fromFile(tg_info['path'])
-                        phone_tier = next((t for t in tg if isinstance(t, textgrid.IntervalTier) and t.name == 'phones'), None)
+                        phone_tier = next(
+                            (
+                                coerce_interval_tier(t)
+                                for t in tg
+                                if str(getattr(t, "name", "") or "").strip().lower() == "phones"
+                                and is_interval_like_tier(t)
+                            ),
+                            None,
+                        )
                         if not phone_tier:
                             continue
                         intervals = [i for i in phone_tier if i.mark.strip() not in ['', 'sil', 'spn', 'pau']]
@@ -6768,13 +6804,14 @@ def generate_oto(
 
     if placeholder_block_errors:
         summary_err = (
-            f"[ERROR] 자동 생성 placeholder OTO가 보정되지 않은 파일이 있어 OTO 저장을 중단했습니다 "
+            f"[ERROR] 자동 설정을 완료할 수 없는 파일이 있어 OTO 저장을 중단했습니다 "
             f"(blocked_files={len(placeholder_block_errors)}, format={auto_gen_format})."
         )
         log(summary_err)
         errors.append(summary_err)
         if isinstance(runtime_report, dict):
             runtime_report["auto_placeholder_block_errors"] = list(placeholder_block_errors)
+            runtime_report["auto_generation_block_errors"] = list(placeholder_block_errors)
         finalize_generator_finish(finish_context)
         _log_unset_summary()
         return processed, total, errors

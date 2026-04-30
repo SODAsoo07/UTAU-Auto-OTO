@@ -64,13 +64,13 @@ from core.alignment_ingest import build_ja_alignment_ingest
 from core.oto_candidate_selection import maybe_promote_alias_candidate, select_primary_mapping_candidate
 from core.oto_diagnostics import MappingTraceCollector, SkippedEntryCollector
 from core.oto_diagnostics_adapter_v2 import GeneratorDiagnosticsAdapter
-from core.file_prepare import load_named_tiers, prepare_file_context
+from core.file_prepare import coerce_interval_tier, is_interval_like_tier, load_named_tiers, prepare_file_context
 from core.interval_lookup import build_interval_lookup, intervals_within_bounds
 from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
 from core.timing_anchor_profiles import is_anchor_lock_enabled
 from core.timing_anchor_runtime import append_timing_anchor_log
 from core.anchor_lock_adapter_v2 import apply_language_anchor_lock
-from core.textio_utils import load_template_oto_lines
+from core.textio_utils import load_template_oto_lines, strip_template_alias_suffixes
 from core.oto_profile_presets import get_ja_profile_preset
 from core.ja_mapping_v2 import (
     build_ja_cv_anchor_plan as _build_ja_cv_anchor_plan_v2,
@@ -2870,6 +2870,20 @@ def generate_ja_oto(
     tg_entries = ja_setup.tg_index.tg_entries
     file_groups = dict(ja_setup.file_groups)
     use_template = bool(ja_setup.use_template)
+    if use_template:
+        normalized_template_lines, stripped_suffix, stripped_count = strip_template_alias_suffixes(
+            list(ja_setup.template_lines or []),
+            alias_suffix=alias_suffix,
+        )
+        if stripped_count > 0:
+            log(
+                f"[WARN] 베이스 OTO alias에 접미사 _{stripped_suffix}가 포함되어 있어 "
+                f"내부 매핑용으로 {stripped_count}개 alias에서 제거했습니다."
+            )
+            file_groups = {}
+            for line in normalized_template_lines:
+                fname = line.split("=", 1)[0]
+                file_groups.setdefault(fname, []).append(line)
 
     def _resolve_tg_info(fname):
         return ja_setup.tg_index.resolve_tg_info(fname, log_fn=log)
@@ -2909,10 +2923,31 @@ def generate_ja_oto(
         return bool(parsed) and all(_is_zero_placeholder_line(line) for line in parsed)
 
     def _drop_auto_placeholder_fallback(prev_final_len, fname, lines, reason):
-        if not _lines_are_zero_placeholders(lines):
+        reason_key = str(reason or "").strip().lower()
+        fatal_reasons = {
+            "textgrid_missing",
+            "textgrid_load_failed",
+            "tier_missing",
+            "empty_intervals",
+            "mapping_failed_empty_intervals",
+            "no_valid_alias",
+            "mapping_failed",
+            "mapping_failed_spn_heavy",
+            "mapping_failed_insufficient_phones",
+            "mapping_failed_no_words_support",
+            "file_exception",
+        }
+        is_zero_placeholder = _lines_are_zero_placeholders(lines)
+        is_fatal_generation_failure = reason_key in fatal_reasons
+        if not is_zero_placeholder and not is_fatal_generation_failure:
             return False
         del final_lines[prev_final_len:]
-        if use_template:
+        if is_fatal_generation_failure:
+            err = (
+                f"[ERROR] {fname}: 일본어 자동 설정에 필요한 TextGrid/tier/interval/mapping 정보를 확보하지 못해 저장을 중단했습니다. "
+                f"reason={reason}. TextGrid의 phones/words tier 이름, 정렬 결과, WAV-TextGrid 파일명 매칭을 확인하세요."
+            )
+        elif use_template:
             err = (
                 f"[ERROR] {fname}: 일본어 0값 템플릿 OTO를 보정하지 못해 저장을 중단했습니다. "
                 f"reason={reason}. TextGrid의 phones/words tier 이름, 정렬 결과, WAV-TextGrid 파일명 매칭을 확인하세요."
@@ -3016,7 +3051,7 @@ def generate_ja_oto(
             file_ctx=file_ctx,
             load_named_tiers_fn=load_named_tiers,
             load_textgrid_fn=textgrid.TextGrid.fromFile,
-            tier_predicate=lambda _tier: True,
+            tier_predicate=is_interval_like_tier,
         )
         prev_final_len = len(final_lines)
         if handle_ja_file_context_status(
@@ -3043,7 +3078,7 @@ def generate_ja_oto(
 
         try:
             if not ph_tier:
-                log(f"⚠️ {fname}: phones 티어 없음 → 원본 유지")
+                log(f"❌ {fname}: phones 티어 없음 → 자동 설정 중단")
                 _record_unset_lines("tier_missing", fname, lines)
                 prev_final_len = len(final_lines)
                 final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
@@ -3830,7 +3865,7 @@ def generate_ja_oto(
                     fail_reason = "mapping_failed_no_words_support"
                 elif not ph_intervals:
                     fail_reason = "mapping_failed_empty_intervals"
-                log(f"⚠️ {fname}: 음소-음절 매핑 실패 → 원본 유지")
+                log(f"❌ {fname}: 음소-음절 매핑 실패 → 자동 설정 중단")
                 _record_unset_lines(
                     fail_reason,
                     fname,
@@ -3855,27 +3890,17 @@ def generate_ja_oto(
 
             if bool(runtime_policy.get("should_abstain")):
                 log(
-                    f"⚠️ {fname}: JA v2 planner abstain "
+                    f"⚠️ {fname}: JA v2 planner 저신뢰 "
                     f"(trust={textgrid_trust_score:.2f}, weight={alignment_weight:.2f}, "
                     f"coverage={float(ja_plan_policy.get('coverage', 0.0)):.2f}, "
-                    f"margin={float(ja_plan_policy.get('margin', 0.0)):.1f}) → 원본 유지"
+                    f"margin={float(ja_plan_policy.get('margin', 0.0)):.1f}) → 순서 잠금 보수 자동설정"
                 )
-                _record_unset_lines(
-                    "mapping_v2_abstain",
-                    fname,
-                    lines,
-                    meta={
-                        "mapping_confidence": mapping_confidence_base,
-                        "mapping_reason_code": mapping_reason_code,
-                        "mapping_tier": mapping_tier,
-                        "plan_policy": dict(ja_plan_policy or {}),
-                    },
+                runtime_policy["should_abstain"] = False
+                runtime_policy["force_sequence_lock"] = True
+                runtime_policy["low_conf_force_auto"] = True
+                runtime_policy["low_conf_reasons"] = sorted(
+                    set(list(runtime_policy.get("low_conf_reasons") or []) + ["planner_abstain_forced_auto"])
                 )
-                prev_final_len = len(final_lines)
-                final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
-                _drop_auto_placeholder_fallback(prev_final_len, fname, lines, "mapping_v2_abstain")
-                processed += 1
-                continue
 
             lines_for_mapping = lines
             if format_type in ('cvvc', 'cv'):
@@ -4072,18 +4097,30 @@ def generate_ja_oto(
                     mapped_idx = int(vcv_mapping["mapped_idx"])
                     row_abstain = dict(vcv_mapping["row_abstain"])
                     if row_abstain.get("should_skip"):
-                        if ja_mapping_debug_reason_logging:
-                            log(
-                                f"🛡️ {fname}: JA 행 생성 스킵 "
-                                f"({row_abstain.get('reason')}, {alias})"
+                        row_abstain_reason = str(row_abstain.get("reason") or "")
+                        if row_abstain_reason in {
+                            "row_low_confidence",
+                            "row_low_margin_candidate",
+                            "row_high_blank_confidence",
+                        }:
+                            if ja_mapping_debug_reason_logging:
+                                log(
+                                    f"🛡️ {fname}: JA 저신뢰 VCV 행을 스킵하지 않고 보수 계산 "
+                                    f"({row_abstain_reason}, {alias})"
+                                )
+                        else:
+                            if ja_mapping_debug_reason_logging:
+                                log(
+                                    f"🛡️ {fname}: JA 행 생성 스킵 "
+                                    f"({row_abstain.get('reason')}, {alias})"
+                                )
+                            _record_unset(
+                                str(row_abstain.get("reason") or "row_abstain"),
+                                fname,
+                                line,
+                                meta={"diag_hint": row_abstain.get("diag_hint", "")},
                             )
-                        _record_unset(
-                            str(row_abstain.get("reason") or "row_abstain"),
-                            fname,
-                            line,
-                            meta={"diag_hint": row_abstain.get("diag_hint", "")},
-                        )
-                        continue
+                            continue
 
                     (
                         current_w_idx,
@@ -4435,29 +4472,41 @@ def generate_ja_oto(
                         min_row_confidence_by_alias_type={"cv_head": float(runtime_policy.get("row_conf_floor", 0.0) or 0.0) + 0.02},
                     )
                     if row_abstain.get("should_skip"):
-                        if ja_mapping_debug_reason_logging:
-                            log(
-                                f"🛡️ {fname}: JA 행 생성 스킵 "
-                                f"({row_abstain.get('reason')}, {alias})"
-                            )
-                        _record_unset(
-                            str(row_abstain.get("reason") or "row_abstain"),
-                            fname,
-                            line,
-                            meta={"diag_hint": row_abstain.get("diag_hint", "")},
-                        )
-                        if filename_order_locked and format_type in {"cvvc", "cv"}:
-                            # Even when CV_HEAD row is skipped, consume one sequence slot
-                            # to avoid the following CV rows drifting one mora backward.
-                            cv_seq_idx = min(int(expected_seq_idx) + 1, len(syllables_info))
-                            cv_head_pending_cv_rewind = False
-                            cv_head_rewind_target_tok = ""
+                        row_abstain_reason = str(row_abstain.get("reason") or "")
+                        if row_abstain_reason in {
+                            "row_low_confidence",
+                            "row_low_margin_candidate",
+                            "row_high_blank_confidence",
+                        }:
                             if ja_mapping_debug_reason_logging:
                                 log(
-                                    f"[JA] {fname}: CV_HEAD skip consumes sequence "
-                                    f"(next_seq={int(cv_seq_idx) + 1}, {alias})"
+                                    f"🛡️ {fname}: JA 저신뢰 CV_HEAD 행을 스킵하지 않고 보수 계산 "
+                                    f"({row_abstain_reason}, {alias})"
                                 )
-                        continue
+                        else:
+                            if ja_mapping_debug_reason_logging:
+                                log(
+                                    f"🛡️ {fname}: JA 행 생성 스킵 "
+                                    f"({row_abstain.get('reason')}, {alias})"
+                                )
+                            _record_unset(
+                                str(row_abstain.get("reason") or "row_abstain"),
+                                fname,
+                                line,
+                                meta={"diag_hint": row_abstain.get("diag_hint", "")},
+                            )
+                            if filename_order_locked and format_type in {"cvvc", "cv"}:
+                                # Even when CV_HEAD row is skipped, consume one sequence slot
+                                # to avoid the following CV rows drifting one mora backward.
+                                cv_seq_idx = min(int(expected_seq_idx) + 1, len(syllables_info))
+                                cv_head_pending_cv_rewind = False
+                                cv_head_rewind_target_tok = ""
+                                if ja_mapping_debug_reason_logging:
+                                    log(
+                                        f"[JA] {fname}: CV_HEAD skip consumes sequence "
+                                        f"(next_seq={int(cv_seq_idx) + 1}, {alias})"
+                                    )
+                            continue
                     current_w_idx = mapped_idx
                     if format_type == "vcv":
                         stable_vcv_seq_idx = min(stable_vcv_seq_idx + 1, max(len(syllables_info) - 1, 0))
@@ -5308,7 +5357,15 @@ def generate_ja_oto(
                 try:
                     if v_span is None:
                         tg = textgrid.TextGrid.fromFile(tg_info['path'])
-                        phone_tier = next((t for t in tg if isinstance(t, textgrid.IntervalTier) and t.name == 'phones'), None)
+                        phone_tier = next(
+                            (
+                                coerce_interval_tier(t)
+                                for t in tg
+                                if str(getattr(t, "name", "") or "").strip().lower() == "phones"
+                                and is_interval_like_tier(t)
+                            ),
+                            None,
+                        )
                         if not phone_tier:
                             continue
                         intervals = [i for i in phone_tier if i.mark.strip() not in ['', 'sil', 'spn', 'pau', 'sp']]
@@ -5352,13 +5409,14 @@ def generate_ja_oto(
 
     if placeholder_block_errors:
         summary_err = (
-            f"[ERROR] 일본어 자동 생성 placeholder OTO가 보정되지 않은 파일이 있어 OTO 저장을 중단했습니다 "
+            f"[ERROR] 일본어 자동 설정을 완료할 수 없는 파일이 있어 OTO 저장을 중단했습니다 "
             f"(blocked_files={len(placeholder_block_errors)}, format={auto_gen_format})."
         )
         log(summary_err)
         errors.append(summary_err)
         if isinstance(runtime_report, dict):
             runtime_report["auto_placeholder_block_errors"] = list(placeholder_block_errors)
+            runtime_report["auto_generation_block_errors"] = list(placeholder_block_errors)
         finalize_generator_finish(finish_context)
         _log_unset_summary()
         return processed, total, errors
