@@ -5157,13 +5157,19 @@ def generate_oto(
         return bool(parsed) and all(_is_zero_placeholder_line(line) for line in parsed)
 
     def _drop_auto_placeholder_fallback(prev_final_len, fname, lines, reason):
-        if use_template or not _lines_are_zero_placeholders(lines):
+        if not _lines_are_zero_placeholders(lines):
             return False
         del final_lines[prev_final_len:]
-        err = (
-            f"[ERROR] {fname}: 자동 생성 CVC/CV 계열 placeholder OTO가 보정되지 않아 저장을 중단했습니다. "
-            f"reason={reason}. TextGrid의 phones/words tier 이름, 정렬 결과, WAV-TextGrid 파일명 매칭을 확인하세요."
-        )
+        if use_template:
+            err = (
+                f"[ERROR] {fname}: 0값 템플릿 OTO를 보정하지 못해 저장을 중단했습니다. "
+                f"reason={reason}. TextGrid의 phones/words tier 이름, 정렬 결과, WAV-TextGrid 파일명 매칭을 확인하세요."
+            )
+        else:
+            err = (
+                f"[ERROR] {fname}: 자동 생성 CVC/CV 계열 placeholder OTO가 보정되지 않아 저장을 중단했습니다. "
+                f"reason={reason}. TextGrid의 phones/words tier 이름, 정렬 결과, WAV-TextGrid 파일명 매칭을 확인하세요."
+            )
         log(err)
         errors.append(err)
         placeholder_block_errors.append(err)
@@ -6228,6 +6234,26 @@ def generate_oto(
                     )
                     row_apply_mode = str(row_apply.get("mode") or "full_apply")
                     row_apply_reason_code = str(row_apply.get("reason_code") or "")
+                    if (
+                        use_template
+                        and _is_zero_placeholder_line(line)
+                        and row_apply_mode in {"template_preserve", "review_required"}
+                    ):
+                        prev_row_apply_mode = row_apply_mode
+                        row_apply_mode = "conservative_apply"
+                        row_apply_reason_code = (
+                            f"{row_apply_reason_code or prev_row_apply_mode}_zero_template_compute"
+                        )
+                        row_apply["mode"] = row_apply_mode
+                        row_apply["reason_code"] = row_apply_reason_code
+                        reasons = list(row_apply.get("reasons") or [])
+                        reasons.append("zero_template_compute")
+                        row_apply["reasons"] = reasons
+                        if kr_mapping_debug_reason_logging:
+                            log(
+                                f"[WARN] {fname}: 0값 템플릿 행은 원본 보존 대신 계산값을 적용합니다 "
+                                f"({prev_row_apply_mode} -> {row_apply_mode}, {alias})"
+                            )
                     if row_apply_mode in row_apply_mode_counts:
                         row_apply_mode_counts[row_apply_mode] = int(row_apply_mode_counts[row_apply_mode]) + 1
                     else:

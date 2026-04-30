@@ -2909,13 +2909,19 @@ def generate_ja_oto(
         return bool(parsed) and all(_is_zero_placeholder_line(line) for line in parsed)
 
     def _drop_auto_placeholder_fallback(prev_final_len, fname, lines, reason):
-        if use_template or not _lines_are_zero_placeholders(lines):
+        if not _lines_are_zero_placeholders(lines):
             return False
         del final_lines[prev_final_len:]
-        err = (
-            f"[ERROR] {fname}: 일본어 자동 생성 placeholder OTO가 보정되지 않아 저장을 중단했습니다. "
-            f"reason={reason}. TextGrid의 phones/words tier 이름, 정렬 결과, WAV-TextGrid 파일명 매칭을 확인하세요."
-        )
+        if use_template:
+            err = (
+                f"[ERROR] {fname}: 일본어 0값 템플릿 OTO를 보정하지 못해 저장을 중단했습니다. "
+                f"reason={reason}. TextGrid의 phones/words tier 이름, 정렬 결과, WAV-TextGrid 파일명 매칭을 확인하세요."
+            )
+        else:
+            err = (
+                f"[ERROR] {fname}: 일본어 자동 생성 placeholder OTO가 보정되지 않아 저장을 중단했습니다. "
+                f"reason={reason}. TextGrid의 phones/words tier 이름, 정렬 결과, WAV-TextGrid 파일명 매칭을 확인하세요."
+            )
         log(err)
         errors.append(err)
         placeholder_block_errors.append(err)
