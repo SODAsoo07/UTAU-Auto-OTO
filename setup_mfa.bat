@@ -187,7 +187,6 @@ exit /b 1
 echo Usage: setup_mfa.bat [--install ^| --recovery ^| --menu] [--runtime-root PATH] [--with-ml ^| --without-ml] [--non-interactive]
 
 echo Installs or repairs MFA runtime ^(.env^), micromamba packages, and language/model dependencies.
-echo For CTC runtime ^(.env_ctc^) use setup_ctc.bat.
 echo ML dependencies are installed by default during install mode.
 
 echo.

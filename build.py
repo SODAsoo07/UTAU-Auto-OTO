@@ -75,7 +75,6 @@ RUNTIME_DATA_PATHS = [
 ]
 RELEASE_AUX_FILES = [
     os.path.join(APP_DIR, "setup_mfa.bat"),
-    os.path.join(APP_DIR, "setup_ctc.bat"),
     os.path.join(APP_DIR, "requirements.txt"),
     os.path.join(APP_DIR, "requirements-ml.txt"),
     os.path.join(APP_DIR, "scripts", "runtime_recovery.ps1"),
@@ -446,7 +445,7 @@ def _parse_args():
         default="offline",
         choices=["online", "offline"],
         help=(
-            "online: slim build without bundled FFmpeg/micromamba (downloaded at runtime). "
+            "online: slim build without bundled micromamba (downloaded at runtime). "
             "offline: full build with all heavy assets bundled (default)."
         ),
     )
@@ -547,7 +546,7 @@ def _write_bundle_info(app_version: str, bundle_mode: str) -> None:
     info = {
         "bundle_mode": bundle_mode,
         "app_version": app_version,
-        "ffmpeg_bundled": bundle_mode == "offline",
+        "ffmpeg_bundled": False,
         "micromamba_bundled": bundle_mode == "offline",
     }
     path = os.path.join(APP_DIR, "bundle_info.json")
@@ -1228,26 +1227,10 @@ def main():
 
     print("[2/5] Preparing runtime assets...")
     if bundle_mode == "online":
-        print("[INFO] bundle-mode=online: skipping FFmpeg/micromamba bundling (downloaded at runtime).")
-        ffmpeg_bin = ""
+        print("[INFO] bundle-mode=online: skipping bundled runtime assets (downloaded at runtime).")
     else:
-        try:
-            ffmpeg_bin = _ensure_ffmpeg_bin()
-        except RuntimeError as _ffmpeg_err:
-            if os.environ.get("UTOA_SKIP_FFMPEG_CHECK"):
-                print(f"[WARN] FFmpeg preparation failed (UTOA_SKIP_FFMPEG_CHECK set): {_ffmpeg_err}")
-                ffmpeg_bin = FFMPEG_BIN_DIR
-            else:
-                raise SystemExit(
-                    f"[ERROR] FFmpeg runtime preparation failed: {_ffmpeg_err}\n"
-                    "FFmpeg is required for CTC audio processing in the portable build.\n"
-                    "Options:\n"
-                    "  1. Ensure network access during build (FFmpeg is downloaded automatically)\n"
-                    "  2. Pre-place ffmpeg.exe + ffprobe.exe in build_assets/ffmpeg/bin/\n"
-                    "  3. Set UTOA_SKIP_FFMPEG_CHECK=1 to skip (unsafe for distribution)\n"
-                    "  4. Use --bundle-mode online to build without bundled FFmpeg"
-                ) from _ffmpeg_err
         _ensure_micromamba_exe()
+    ffmpeg_bin = ""
     app_icon_path = _resolve_app_icon_path()
     if app_icon_path:
         print(f"[INFO] app_icon={app_icon_path}")

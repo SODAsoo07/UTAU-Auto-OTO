@@ -26,6 +26,19 @@ def _safe_name(text: str) -> str:
     return "".join(out).strip("_") or "eval"
 
 
+def _infer_format_label_from_score_dir(score_dir: str, fallback: str) -> str:
+    parts = [
+        part.lower()
+        for part in os.path.abspath(str(score_dir or "")).replace("\\", "/").split("/")
+        if part
+    ]
+    for part in reversed(parts):
+        for fmt in ("cvvc", "vcv", "cvc"):
+            if part == fmt or part.startswith(f"{fmt}_") or part.endswith(f"_{fmt}") or f"_{fmt}_" in part:
+                return fmt
+    return fallback
+
+
 def _float(row: Dict[str, object], key: str, default: float = 0.0) -> float:
     try:
         return float(row.get(key, default) or default)
@@ -135,11 +148,12 @@ def _summary_table(summary_rows: List[Dict[str, object]]) -> str:
         "format",
         "cases",
         "matched",
+        "manual 0 rows",
         "match",
         "pre median",
         "pre >50ms",
         "cutoff median",
-        "zeroish",
+        "generated 0-ish",
     ]
     rows = [
         "<table><thead><tr>"
@@ -154,6 +168,7 @@ def _summary_table(summary_rows: List[Dict[str, object]]) -> str:
             f"<td>{html.escape(fmt)}</td>"
             f"<td>{int(float(s.get('case_count', 0) or 0))}</td>"
             f"<td>{int(float(s.get('matched_rows', 0) or 0))}</td>"
+            f"<td>{int(float(s.get('manual_zeroish_skipped', 0) or 0))}</td>"
             f"<td>{float(s.get('match_rate', 0.0) or 0.0):.3f}</td>"
             f"<td>{float(s.get('pre_abs_median_ms', 0.0) or 0.0):.1f}ms</td>"
             f"<td>{float(s.get('pre_abs_gt_50ms_rate', 0.0) or 0.0):.1%}</td>"
@@ -163,6 +178,82 @@ def _summary_table(summary_rows: List[Dict[str, object]]) -> str:
         )
     rows.append("</tbody></table>")
     return "\n".join(rows)
+
+
+def _alias_type_tables(summary_rows: List[Dict[str, object]]) -> str:
+    blocks: List[str] = ["<h2>Alias Type Summary</h2>"]
+    for item in summary_rows:
+        fmt = str(item.get("format", ""))
+        by_alias = item.get("by_alias_type", {})
+        if not isinstance(by_alias, dict) or not by_alias:
+            blocks.append(f"<h3>{html.escape(fmt)}</h3><p>No alias type summary.</p>")
+            continue
+        rows = sorted(
+            by_alias.items(),
+            key=lambda kv: float((kv[1] or {}).get("pre_abs_median_ms", 0.0) or 0.0),
+            reverse=True,
+        )
+        blocks.append(f"<h3>{html.escape(fmt)}</h3>")
+        blocks.append(
+            "<table class=\"compact\"><thead><tr>"
+            "<th>alias type</th><th>matched</th><th>pre med</th><th>pre mae</th>"
+            "<th>pre &gt;50ms</th><th>cutoff med</th><th>offset med</th><th>zeroish</th>"
+            "</tr></thead><tbody>"
+        )
+        for alias_type, raw_stats in rows:
+            stats = raw_stats if isinstance(raw_stats, dict) else {}
+            blocks.append(
+                "<tr>"
+                f"<td>{html.escape(str(alias_type))}</td>"
+                f"<td>{int(float(stats.get('matched_rows', 0) or 0))}</td>"
+                f"<td>{float(stats.get('pre_abs_median_ms', 0.0) or 0.0):.1f}ms</td>"
+                f"<td>{float(stats.get('pre_abs_mae_ms', 0.0) or 0.0):.1f}ms</td>"
+                f"<td>{float(stats.get('pre_abs_gt_50ms_rate', 0.0) or 0.0):.1%}</td>"
+                f"<td>{float(stats.get('cutoff_abs_median_ms', 0.0) or 0.0):.1f}ms</td>"
+                f"<td>{float(stats.get('offset_median_ms', 0.0) or 0.0):.1f}ms</td>"
+                f"<td>{float(stats.get('candidate_zeroish_rate', 0.0) or 0.0):.1%}</td>"
+                "</tr>"
+            )
+        blocks.append("</tbody></table>")
+    return "\n".join(blocks)
+
+
+def _group_summary_tables(
+    summary_rows: List[Dict[str, object]],
+    *,
+    title: str,
+    payload_key: str,
+    label: str,
+) -> str:
+    blocks: List[str] = [f"<h2>{html.escape(title)}</h2>"]
+    for item in summary_rows:
+        fmt = str(item.get("format", ""))
+        grouped = item.get(payload_key, {})
+        if not isinstance(grouped, dict) or not grouped:
+            blocks.append(f"<h3>{html.escape(fmt)}</h3><p>No grouped summary.</p>")
+            continue
+        blocks.append(f"<h3>{html.escape(fmt)}</h3>")
+        blocks.append(
+            "<table class=\"compact\"><thead><tr>"
+            f"<th>{html.escape(label)}</th><th>matched</th><th>pre med</th><th>pre mae</th>"
+            "<th>pre &gt;50ms</th><th>offset med</th><th>cutoff med</th>"
+            "</tr></thead><tbody>"
+        )
+        for group_key, raw_stats in sorted(grouped.items(), key=lambda kv: str(kv[0])):
+            stats = raw_stats if isinstance(raw_stats, dict) else {}
+            blocks.append(
+                "<tr>"
+                f"<td>{html.escape(str(group_key))}</td>"
+                f"<td>{int(float(stats.get('matched_rows', 0) or 0))}</td>"
+                f"<td>{float(stats.get('pre_abs_median_ms', 0.0) or 0.0):.1f}ms</td>"
+                f"<td>{float(stats.get('pre_abs_mae_ms', 0.0) or 0.0):.1f}ms</td>"
+                f"<td>{float(stats.get('pre_abs_gt_50ms_rate', 0.0) or 0.0):.1%}</td>"
+                f"<td>{float(stats.get('offset_median_ms', 0.0) or 0.0):.1f}ms</td>"
+                f"<td>{float(stats.get('cutoff_abs_median_ms', 0.0) or 0.0):.1f}ms</td>"
+                "</tr>"
+            )
+        blocks.append("</tbody></table>")
+    return "\n".join(blocks)
 
 
 def _detail_cards(format_label: str, details: List[Dict[str, object]], *, worst_rows: int) -> str:
@@ -175,7 +266,10 @@ def _detail_cards(format_label: str, details: List[Dict[str, object]], *, worst_
         err = _row_error_score(row)
         meta = (
             f"{row.get('case_id', '')} / {row.get('wav', '')} = "
-            f"{row.get('alias', '')} [{row.get('alias_type', '')}]"
+            f"{row.get('alias', '')} [{row.get('alias_type', '')}, "
+            f"{row.get('file_position_bucket', '?')}, "
+            f"row {row.get('file_order_no', '?')}/{row.get('file_order_count', '?')}, "
+            f"occ {row.get('occurrence_no', '?')}]"
         )
         out.append('<section class="card">')
         out.append(
@@ -198,8 +292,37 @@ def _write_visual_report(score_infos: List[Dict[str, object]], *, out_path: str,
         score_dir = str(info.get("score_dir", ""))
         summary_payload = _load_json(os.path.join(score_dir, "summary.json"))
         summary = summary_payload.get("summary", {}) if isinstance(summary_payload.get("summary"), dict) else {}
+        by_alias_type = (
+            summary_payload.get("by_alias_type", {})
+            if isinstance(summary_payload.get("by_alias_type", {}), dict)
+            else {}
+        )
+        by_file_position = (
+            summary_payload.get("by_file_position", {})
+            if isinstance(summary_payload.get("by_file_position", {}), dict)
+            else {}
+        )
+        by_alias_type_position = (
+            summary_payload.get("by_alias_type_position", {})
+            if isinstance(summary_payload.get("by_alias_type_position", {}), dict)
+            else {}
+        )
+        by_occurrence_index = (
+            summary_payload.get("by_occurrence_index", {})
+            if isinstance(summary_payload.get("by_occurrence_index", {}), dict)
+            else {}
+        )
         details = _load_details(os.path.join(score_dir, "details.csv"))
-        summary_rows.append({"format": fmt, "summary": summary})
+        summary_rows.append(
+            {
+                "format": fmt,
+                "summary": summary,
+                "by_alias_type": by_alias_type,
+                "by_file_position": by_file_position,
+                "by_alias_type_position": by_alias_type_position,
+                "by_occurrence_index": by_occurrence_index,
+            }
+        )
         detail_blocks.append(_detail_cards(fmt, details, worst_rows=worst_rows))
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -215,6 +338,8 @@ def _write_visual_report(score_infos: List[Dict[str, object]], *, out_path: str,
     table {{ border-collapse: collapse; background: white; width: 100%; margin: 12px 0 22px; }}
     th, td {{ border: 1px solid #d8dde6; padding: 8px 10px; text-align: left; font-size: 13px; }}
     th {{ background: #eef2f6; }}
+    h3 {{ font-size: 16px; margin: 16px 0 6px; }}
+    .compact th, .compact td {{ padding: 6px 8px; font-size: 12px; }}
     .card {{ background: white; border: 1px solid #d8dde6; border-radius: 6px; padding: 12px; margin: 12px 0; }}
     .card h3 {{ font-size: 14px; margin: 0 0 4px; }}
     .err {{ margin: 0 0 8px; color: #6b2737; font-size: 13px; }}
@@ -231,6 +356,10 @@ def _write_visual_report(score_infos: List[Dict[str, object]], *, out_path: str,
 <body>
   <h1>Korean CVC/CVVC/VCV OTO Evaluation</h1>
   {_summary_table(summary_rows)}
+  {_alias_type_tables(summary_rows)}
+  {_group_summary_tables(summary_rows, title="File Position Summary", payload_key="by_file_position", label="position")}
+  {_group_summary_tables(summary_rows, title="Alias Type x Position Summary", payload_key="by_alias_type_position", label="alias/position")}
+  {_group_summary_tables(summary_rows, title="Occurrence Summary", payload_key="by_occurrence_index", label="occurrence")}
   {"".join(detail_blocks)}
 </body>
 </html>
@@ -274,7 +403,13 @@ def main() -> int:
 
     if args.visual_only:
         for idx, score_dir in enumerate(args.score_dir or []):
-            score_infos.append({"format": f"score_{idx + 1}", "score_dir": os.path.abspath(score_dir)})
+            fallback = f"score_{idx + 1}"
+            score_infos.append(
+                {
+                    "format": _infer_format_label_from_score_dir(score_dir, fallback),
+                    "score_dir": os.path.abspath(score_dir),
+                }
+            )
         if not score_infos:
             raise SystemExit("--visual-only requires at least one --score-dir")
     else:

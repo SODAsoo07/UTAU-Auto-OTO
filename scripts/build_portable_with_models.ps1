@@ -356,7 +356,6 @@ Sync-ReleaseFileIfNeeded -SourcePath $requirementsMlSrc -DestinationPath $requir
 
 $releaseOverlayFiles = @(
     @{ Source = (Join-Path $repoRoot "setup_mfa.bat"); Destination = (Join-Path $sourceAbs "setup_mfa.bat"); Label = "setup_mfa.bat" },
-    @{ Source = (Join-Path $repoRoot "setup_ctc.bat"); Destination = (Join-Path $sourceAbs "setup_ctc.bat"); Label = "setup_ctc.bat" },
     @{ Source = (Join-Path $repoRoot "scripts\runtime_recovery.ps1"); Destination = (Join-Path $sourceAbs "runtime_recovery.ps1"); Label = "runtime_recovery.ps1" },
     @{ Source = (Join-Path $repoRoot "scripts\startup_diagnose.ps1"); Destination = (Join-Path $sourceAbs "startup_diagnose.ps1"); Label = "startup_diagnose.ps1" },
     @{ Source = (Join-Path $repoRoot "scripts\startup_diagnose.bat"); Destination = (Join-Path $sourceAbs "startup_diagnose.bat"); Label = "startup_diagnose.bat" },
@@ -369,7 +368,6 @@ foreach ($overlay in $releaseOverlayFiles) {
 $requiredReleaseFiles = @(
     "release_channel.json",
     "setup_mfa.bat",
-    "setup_ctc.bat",
     "requirements.txt",
     "requirements-ml.txt",
     "runtime_recovery.ps1",

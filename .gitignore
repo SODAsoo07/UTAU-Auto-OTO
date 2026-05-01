@@ -20,7 +20,6 @@
 !requirements.txt
 !requirements-ml.txt
 !setup_mfa.bat
-!setup_ctc.bat
 !setup_mfa_beta.bat
 !run_prepare_pairs.ps1
 !UTAU_Auto_OTO.spec
@@ -84,7 +83,6 @@ models_installed/
 *.tar
 *.tar.gz
 /micromamba
-/.env_ctc
 /temp
 /.code-review-graph
 /code-review-graph

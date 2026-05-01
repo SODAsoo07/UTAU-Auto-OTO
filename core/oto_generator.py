@@ -5962,9 +5962,9 @@ def generate_oto(
                 format_type=file_format,
                 score_a=base_score,
                 score_b=alt_score,
-                sequence_lock_formats={"cvvc", "cvc"},
+                sequence_lock_formats={"cvvc", "cvc", "vcv"},
                 abstain_formats={"cvvc", "vcv", "cvc", "cv"},
-                strict_formats={"cvvc"},
+                strict_formats={"cvvc", "vcv"},
                 prefer_sequence=prefer_filename_sequence,
                 alignment_trust=alignment_weight,
                 resolve_runtime_mapping_policy_fn=resolve_runtime_mapping_policy,
@@ -6143,7 +6143,11 @@ def generate_oto(
             kr_cvvc_occurrence_source = filename_cv_targets if (kr_order_locked_format and filename_cv_targets) else syllables_info
             kr_cvvc_occurrence_map = _build_kr_cvvc_occurrence_map(kr_cvvc_occurrence_source) if kr_order_locked_format else None
             kr_cvvc_occurrence_state = {}
-            kr_cvvc_vv_occurrence_map = _build_kr_cvvc_vv_occurrence_map(kr_cvvc_occurrence_source) if file_format == "cvvc" else None
+            kr_cvvc_vv_occurrence_map = (
+                _build_kr_cvvc_vv_occurrence_map(kr_cvvc_occurrence_source)
+                if file_format in {"cvvc", "vcv"}
+                else None
+            )
             kr_cvvc_vv_occurrence_state = {}
             file_has_explicit_vc_alias = False
             file_has_cv_family_alias = False
@@ -6480,7 +6484,7 @@ def generate_oto(
                     selected_w_idx = current_w_idx
                     forced_vv_idx = None
                     planned_vv_idx = None
-                    if file_format == "cvvc" and alias_type == "vv":
+                    if file_format in {"cvvc", "vcv"} and alias_type == "vv":
                         forced_vv_idx = _resolve_kr_cvvc_vv_index(
                             alias,
                             kr_cvvc_vv_occurrence_map or {},

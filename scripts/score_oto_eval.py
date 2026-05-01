@@ -7,6 +7,7 @@ import math
 import os
 import statistics
 import sys
+import wave
 from collections import defaultdict
 from typing import Callable, Dict, Iterable, List, Tuple
 
@@ -74,7 +75,22 @@ def _p95(values: Iterable[float]) -> float:
     return float(vals[max(0, min(idx, len(vals) - 1))])
 
 
-def _abs_fields(row: Dict[str, object]) -> Dict[str, float]:
+def _resolve_cutoff_end_abs(offset: float, cutoff: float, wav_duration_ms: float = 0.0) -> float:
+    """Resolve oto cutoff to an absolute end position in milliseconds.
+
+    Positive cutoff values are treated as offset-relative spans. Negative cutoff
+    values are UTAU-style right blanks measured back from the wav end.
+    """
+    try:
+        dur = float(wav_duration_ms or 0.0)
+    except Exception:
+        dur = 0.0
+    if float(cutoff) < 0.0 and dur > 0.0:
+        return max(0.0, dur + float(cutoff))
+    return float(offset) + abs(float(cutoff))
+
+
+def _abs_fields(row: Dict[str, object], *, wav_duration_ms: float = 0.0) -> Dict[str, float]:
     offset = float(row.get("offset", 0.0) or 0.0)
     cons = float(row.get("cons", 0.0) or 0.0)
     cutoff = float(row.get("cutoff", 0.0) or 0.0)
@@ -88,7 +104,7 @@ def _abs_fields(row: Dict[str, object]) -> Dict[str, float]:
         "ovl": ovl,
         "pre_abs": offset + pre,
         "cons_abs": offset + cons,
-        "cutoff_abs": offset + abs(cutoff),
+        "cutoff_abs": _resolve_cutoff_end_abs(offset, cutoff, wav_duration_ms),
         "ovl_abs": offset + ovl,
     }
 
@@ -106,6 +122,53 @@ def _load_rows(path: str, *, strip_suffix: str = "") -> List[Dict[str, object]]:
     )
 
 
+def _skipped_wav_keys(case: Dict[str, object]) -> set[str]:
+    values = case.get("skipped_wavs", [])
+    if not isinstance(values, list):
+        return set()
+    return {
+        normalize_wav_key(os.path.basename(str(name or "")))
+        for name in values
+        if str(name or "").strip()
+    }
+
+
+def _filter_skipped_rows(rows: List[Dict[str, object]], skipped_keys: set[str]) -> List[Dict[str, object]]:
+    if not skipped_keys:
+        return rows
+    return [row for row in rows if normalize_wav_key(os.path.basename(str(row.get("wav", "") or ""))) not in skipped_keys]
+
+
+def _wav_duration_ms(path: str) -> float:
+    try:
+        with wave.open(path, "rb") as handle:
+            return (float(handle.getnframes()) * 1000.0) / float(handle.getframerate())
+    except Exception:
+        return 0.0
+
+
+def _build_wav_duration_map(*oto_paths: str) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for oto_path in oto_paths:
+        base = os.path.dirname(os.path.abspath(str(oto_path or "")))
+        if not base or not os.path.isdir(base):
+            continue
+        try:
+            names = os.listdir(base)
+        except Exception:
+            continue
+        for name in names:
+            if not str(name).lower().endswith(".wav"):
+                continue
+            key = normalize_wav_key(os.path.basename(str(name)))
+            if key in out and out[key] > 0.0:
+                continue
+            dur = _wav_duration_ms(os.path.join(base, name))
+            if dur > 0.0:
+                out[key] = float(dur)
+    return out
+
+
 def _case_from_manifest_row(row: Dict[str, object]) -> Dict[str, object]:
     return {
         "id": row.get("id") or row.get("name") or "",
@@ -113,6 +176,7 @@ def _case_from_manifest_row(row: Dict[str, object]) -> Dict[str, object]:
         "format": row.get("format", ""),
         "manual_oto": row.get("manual_oto", ""),
         "candidate_oto": row.get("candidate_oto", ""),
+        "skipped_wavs": row.get("skipped_wavs", []),
     }
 
 
@@ -155,15 +219,91 @@ def _summarize_deltas(rows: List[Dict[str, object]]) -> Dict[str, float]:
     return out
 
 
-def _compare_case(case: Dict[str, object], *, strip_suffix: str = "") -> tuple[Dict[str, object], List[Dict[str, object]]]:
+def _position_bucket(ratio: float) -> str:
+    try:
+        r = max(0.0, min(1.0, float(ratio)))
+    except Exception:
+        r = 0.0
+    if r < 0.20:
+        return "00-20%"
+    if r < 0.40:
+        return "20-40%"
+    if r < 0.60:
+        return "40-60%"
+    if r < 0.80:
+        return "60-80%"
+    return "80-100%"
+
+
+def _occurrence_bucket(index: object) -> str:
+    try:
+        idx = int(index)
+    except Exception:
+        idx = 0
+    if idx < 0:
+        idx = 0
+    if idx >= 7:
+        return "occ_8+"
+    return f"occ_{idx + 1}"
+
+
+def _annotate_file_positions(rows: List[Dict[str, object]]) -> None:
+    by_wav: Dict[tuple[str, str], List[Dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        by_wav[(str(row.get("case_id", "")), str(row.get("wav", "")))].append(row)
+    for (_case_id, _wav), wav_rows in by_wav.items():
+        ordered = sorted(
+            wav_rows,
+            key=lambda item: (
+                float(item.get("pre_abs_manual", item.get("offset_manual", 0.0)) or 0.0),
+                str(item.get("alias", "")),
+                int(item.get("occurrence_index", 0) or 0),
+            ),
+        )
+        total = len(ordered)
+        for idx, row in enumerate(ordered):
+            duration = float(row.get("wav_duration_ms", 0.0) or 0.0)
+            pre_abs = float(row.get("pre_abs_manual", row.get("offset_manual", 0.0)) or 0.0)
+            time_ratio = (pre_abs / duration) if duration > 0.0 else 0.0
+            order_ratio = (float(idx) / float(total - 1)) if total > 1 else time_ratio
+            row["file_order_index"] = int(idx)
+            row["file_order_no"] = int(idx + 1)
+            row["file_order_count"] = int(total)
+            row["file_order_ratio"] = float(order_ratio)
+            row["file_time_ratio"] = float(time_ratio)
+            row["file_position_bucket"] = _position_bucket(order_ratio)
+
+
+def _compare_case(
+    case: Dict[str, object],
+    *,
+    strip_suffix: str = "",
+    include_manual_zeroish: bool = False,
+) -> tuple[Dict[str, object], List[Dict[str, object]]]:
     manual_path = os.path.abspath(str(case.get("manual_oto", "") or ""))
     candidate_path = os.path.abspath(str(case.get("candidate_oto", "") or ""))
     language = str(case.get("language", "") or "")
     fmt = str(case.get("format", "") or "")
     case_id = str(case.get("id", "") or os.path.basename(os.path.dirname(manual_path)))
 
-    manual_rows = _load_rows(manual_path)
-    candidate_rows = _load_rows(candidate_path, strip_suffix=strip_suffix) if os.path.isfile(candidate_path) else []
+    skipped_keys = _skipped_wav_keys(case)
+    manual_rows_raw = _filter_skipped_rows(_load_rows(manual_path), skipped_keys)
+    manual_zeroish_skipped = 0
+    if include_manual_zeroish:
+        manual_rows = manual_rows_raw
+    else:
+        manual_rows = []
+        for row in manual_rows_raw:
+            if _is_zeroish(row):
+                manual_zeroish_skipped += 1
+                continue
+            manual_rows.append(row)
+    candidate_rows = (
+        _filter_skipped_rows(_load_rows(candidate_path, strip_suffix=strip_suffix), skipped_keys)
+        if os.path.isfile(candidate_path)
+        else []
+    )
+    wav_durations = _build_wav_duration_map(candidate_path, manual_path)
     manual_map = build_occurrence_map(manual_rows)
     candidate_map = build_occurrence_map(candidate_rows)
 
@@ -174,8 +314,10 @@ def _compare_case(case: Dict[str, object], *, strip_suffix: str = "") -> tuple[D
         if not candidate:
             continue
         matched += 1
-        m_abs = _abs_fields(manual)
-        c_abs = _abs_fields(candidate)
+        wav_key = normalize_wav_key(os.path.basename(str(manual.get("wav", "") or "")))
+        wav_duration_ms = float(wav_durations.get(wav_key, 0.0) or 0.0)
+        m_abs = _abs_fields(manual, wav_duration_ms=wav_duration_ms)
+        c_abs = _abs_fields(candidate, wav_duration_ms=wav_duration_ms)
         alias = str(manual.get("alias", ""))
         detail = {
             "case_id": case_id,
@@ -184,6 +326,10 @@ def _compare_case(case: Dict[str, object], *, strip_suffix: str = "") -> tuple[D
             "alias_type": _classify_alias(language, alias),
             "wav": manual.get("wav", ""),
             "alias": alias,
+            "occurrence_index": int(key[2]),
+            "occurrence_no": int(key[2]) + 1,
+            "occurrence_bucket": _occurrence_bucket(key[2]),
+            "wav_duration_ms": wav_duration_ms,
             "candidate_zeroish": _is_zeroish(candidate),
         }
         for field in ("offset", "pre_abs", "cons_abs", "cutoff_abs", "ovl_abs", "pre", "cons", "cutoff", "ovl"):
@@ -191,6 +337,8 @@ def _compare_case(case: Dict[str, object], *, strip_suffix: str = "") -> tuple[D
             detail[f"{field}_candidate"] = float(c_abs[field])
             detail[f"{field}_err_ms"] = float(c_abs[field] - m_abs[field])
         detail_rows.append(detail)
+
+    _annotate_file_positions(detail_rows)
 
     missing = max(0, len(manual_map) - matched)
     extra = max(0, len(candidate_map) - matched)
@@ -206,6 +354,8 @@ def _compare_case(case: Dict[str, object], *, strip_suffix: str = "") -> tuple[D
         "matched_rows": matched,
         "missing_rows": missing,
         "extra_rows": extra,
+        "skipped_wavs": len(skipped_keys),
+        "manual_zeroish_skipped": int(manual_zeroish_skipped),
         "match_rate": float(matched / max(len(manual_map), 1)),
     }
     case_summary.update(_summarize_deltas(detail_rows))
@@ -225,6 +375,11 @@ def main() -> int:
     parser.add_argument("--dataset-root", default=os.path.join(ROOT_DIR, "dataset_staged"))
     parser.add_argument("--candidate-name", default="", help="Candidate filename inside each manual OTO folder.")
     parser.add_argument("--strip-alias-suffix", default="")
+    parser.add_argument(
+        "--include-manual-zeroish",
+        action="store_true",
+        help="Include manual oto rows whose timing values are all zero. By default they are treated as unset rows.",
+    )
     parser.add_argument("--out-dir", default="")
     parser.add_argument("--limit", type=int, default=0)
     args = parser.parse_args()
@@ -251,7 +406,11 @@ def main() -> int:
     case_summaries: List[Dict[str, object]] = []
     detail_rows: List[Dict[str, object]] = []
     for case in cases:
-        summary, details = _compare_case(case, strip_suffix=args.strip_alias_suffix)
+        summary, details = _compare_case(
+            case,
+            strip_suffix=args.strip_alias_suffix,
+            include_manual_zeroish=args.include_manual_zeroish,
+        )
         case_summaries.append(summary)
         detail_rows.extend(details)
 
@@ -263,6 +422,9 @@ def main() -> int:
             "manual_rows": sum(int(row.get("manual_rows", 0) or 0) for row in case_summaries),
             "candidate_rows": sum(int(row.get("candidate_rows", 0) or 0) for row in case_summaries),
             "matched_rows": sum(int(row.get("matched_rows", 0) or 0) for row in case_summaries),
+            "manual_zeroish_skipped": sum(
+                int(row.get("manual_zeroish_skipped", 0) or 0) for row in case_summaries
+            ),
         }
     )
     global_summary["match_rate"] = float(
@@ -276,6 +438,21 @@ def main() -> int:
             lambda row: f"{row.get('language', '')}/{row.get('format', '')}",
         ),
         "by_alias_type": _group_summary(detail_rows, lambda row: str(row.get("alias_type", "unknown") or "unknown")),
+        "by_file_position": _group_summary(
+            detail_rows,
+            lambda row: str(row.get("file_position_bucket", "unknown") or "unknown"),
+        ),
+        "by_alias_type_position": _group_summary(
+            detail_rows,
+            lambda row: (
+                f"{row.get('alias_type', 'unknown')}/"
+                f"{row.get('file_position_bucket', 'unknown')}"
+            ),
+        ),
+        "by_occurrence_index": _group_summary(
+            detail_rows,
+            lambda row: str(row.get("occurrence_bucket", "occ_1") or "occ_1"),
+        ),
         "cases": case_summaries,
     }
 

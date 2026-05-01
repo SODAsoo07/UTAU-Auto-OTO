@@ -242,25 +242,9 @@ def _load_bundle_info(app_dir: str) -> dict:
 
 
 def _startup_runtime_preflight(app_dir: str) -> None:
-    """Log warnings for missing runtime assets (FFmpeg, DLLs) on frozen builds."""
+    """Log warnings for missing runtime DLLs on frozen builds."""
     if not getattr(sys, "frozen", False):
         return
-    bundle_info = _load_bundle_info(app_dir)
-    bundle_mode = str(bundle_info.get("bundle_mode", "offline") or "offline").strip().lower()
-    ffmpeg_exe = os.path.join(app_dir, "ffmpeg", "bin", "ffmpeg.exe")
-    if not os.path.isfile(ffmpeg_exe):
-        if bundle_mode == "online":
-            logger.info(
-                "[Preflight] FFmpeg not bundled (online build). "
-                "CTC alignment requires running setup_ctc.bat first."
-            )
-        else:
-            logger.warning(
-                "[Preflight] FFmpeg not found at '%s'. "
-                "CTC alignment will be unavailable. "
-                "Rebuild the app to include FFmpeg or place ffmpeg.exe manually.",
-                ffmpeg_exe,
-            )
     required_dlls = ["msvcp140.dll", "vcruntime140.dll"]
     for dll in required_dlls:
         dll_path = os.path.join(app_dir, dll)

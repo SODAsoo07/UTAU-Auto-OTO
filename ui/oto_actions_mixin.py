@@ -443,21 +443,7 @@ class OtoActionsMixin:
                         if hasattr(self, "_get_no_mfa_oto_mode_code")
                         else "remap"
                     )
-                    no_mfa_mode_text = (
-                        "에일리어스 기반 자동 생성(빈 OTO 기준)"
-                        if no_mfa_mode_code == "alias_auto"
-                        else "베이스 OTO 재매핑 + 보정"
-                    )
-                    no_mfa_mode_code = (
-                        self._get_no_mfa_oto_mode_code()
-                        if hasattr(self, "_get_no_mfa_oto_mode_code")
-                        else "remap"
-                    )
-                    no_mfa_mode_text = (
-                        "에일리어스 기반 자동 생성(빈 OTO 기준)"
-                        if no_mfa_mode_code == "alias_auto"
-                        else "베이스 OTO 재매핑 + 보정"
-                    )
+                    no_mfa_mode_text = "베이스 OTO 재매핑 + 보정"
                     no_mfa_source_oto = ""
                     if no_mfa_auto_mode:
                         if bool(self.no_base_oto_var.get()):

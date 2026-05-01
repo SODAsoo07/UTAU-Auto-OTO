@@ -22,8 +22,6 @@ def _guess_alignment_source_from_path(tg_path: str) -> tuple[str, str]:
         return "sequence", "path_hint"
     if any(p in {"mfa", "montreal", "montreal_forced_aligner", "montreal-forced-aligner"} for p in parts):
         return "mfa", "path_hint"
-    if any(p in {"ctc", "ctc_align", "ctc_aligner"} for p in parts):
-        return "ctc", "path_hint"
     return "", ""
 
 
@@ -56,8 +54,6 @@ def _detect_alignment_source_from_tg(tg) -> tuple[str, str, dict[str, object]]:
                 return "sequence", "meta_tier", {"tier": tier_name, "mark": mark}
             if ("aligner=mfa" in mark) or ("source=mfa" in mark) or (mark == "mfa"):
                 return "mfa", "meta_tier", {"tier": tier_name, "mark": mark}
-            if ("aligner=ctc" in mark) or ("source=ctc" in mark) or (mark == "ctc"):
-                return "ctc", "meta_tier", {"tier": tier_name, "mark": mark}
     return "", "", {}
 
 
@@ -205,7 +201,7 @@ def prepare_file_context(
     context.real_wav_name = str(tg_info.get("real_name", "") or "")
     context.output_wav_name = str(tg_info.get("output_name", context.real_wav_name) or context.real_wav_name)
     source_from_info = str(tg_info.get("alignment_source", tg_info.get("source", "")) or "").strip().lower()
-    if source_from_info in {"sequence", "mfa", "ctc"}:
+    if source_from_info in {"sequence", "mfa"}:
         context.alignment_source = source_from_info
         context.alignment_source_reason = "tg_info"
     else:

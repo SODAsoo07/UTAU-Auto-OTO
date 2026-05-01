@@ -5,11 +5,36 @@ import datetime as dt
 import json
 import os
 import re
+import shutil
 from typing import Dict, Iterable, List
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 _OTO_ENCODINGS = ("utf-8-sig", "cp932", "cp949", "euc-kr", "utf-8", "latin-1")
+_DEFAULT_SPECIAL_WAV_STEMS = {
+    "_breath",
+    "breath",
+    "breaths",
+    "inhale",
+    "_inhale",
+    "exhale",
+    "_exhale",
+    "sil",
+    "_sil",
+    "silence",
+    "_silence",
+    "pau",
+    "_pau",
+    "pause",
+    "_pause",
+    "rest",
+    "_rest",
+    "noise",
+    "_noise",
+    "noisefile",
+    "sample",
+    "_sample",
+}
 
 
 def _safe_name(text: str) -> str:
@@ -35,6 +60,15 @@ def _read_oto_lines(path: str) -> List[str]:
     return []
 
 
+def _wav_stem(path_or_name: str) -> str:
+    return os.path.splitext(os.path.basename(str(path_or_name or "").strip()))[0].strip().lower()
+
+
+def _is_special_wav_name(path_or_name: str, special_stems: set[str]) -> bool:
+    stem = _wav_stem(path_or_name)
+    return bool(stem and stem in special_stems)
+
+
 def _quote_yaml(value: object) -> str:
     text = str(value if value is not None else "")
     return json.dumps(text, ensure_ascii=False)
@@ -54,6 +88,37 @@ def _has_wav(root: str) -> bool:
     return False
 
 
+def _iter_wavs(root: str) -> Iterable[str]:
+    for base, _dirs, files in os.walk(root):
+        for name in files:
+            if str(name).lower().endswith(".wav"):
+                yield os.path.join(base, str(name))
+
+
+def _copy_or_link_file(src: str, dst: str) -> None:
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if os.path.exists(dst):
+        return
+    try:
+        os.link(src, dst)
+    except Exception:
+        shutil.copy2(src, dst)
+
+
+def _prepare_eval_voicebank(source_dir: str, out_dir: str, special_stems: set[str]) -> Dict[str, object]:
+    copied = 0
+    skipped: List[str] = []
+    os.makedirs(out_dir, exist_ok=True)
+    for wav_path in _iter_wavs(source_dir):
+        rel = os.path.relpath(wav_path, source_dir)
+        if _is_special_wav_name(rel, special_stems):
+            skipped.append(rel.replace("\\", "/"))
+            continue
+        _copy_or_link_file(wav_path, os.path.join(out_dir, rel))
+        copied += 1
+    return {"voicebank_dir": os.path.abspath(out_dir), "copied_wavs": copied, "skipped_wavs": skipped}
+
+
 def _infer_lang_format(dataset_root: str, oto_path: str) -> tuple[str, str]:
     rel = os.path.relpath(os.path.abspath(oto_path), os.path.abspath(dataset_root))
     parts = rel.split(os.sep)
@@ -68,7 +133,13 @@ def _matches_filter(value: str, allowed: List[str]) -> bool:
     return str(value or "").strip().lower() in {x.strip().lower() for x in allowed if x.strip()}
 
 
-def _write_zero_base_oto(source_oto: str, out_path: str) -> int:
+def _write_base_oto(
+    source_oto: str,
+    out_path: str,
+    *,
+    zero_timing: bool,
+    special_stems: set[str],
+) -> int:
     rows = _read_oto_lines(source_oto)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     written = 0
@@ -77,10 +148,15 @@ def _write_zero_base_oto(source_oto: str, out_path: str) -> int:
             if "=" not in line:
                 continue
             left, right = line.split("=", 1)
+            if _is_special_wav_name(left, special_stems):
+                continue
             alias = right.split(",", 1)[0].strip()
             if not alias:
                 continue
-            handle.write(f"{left.strip()}={alias},0,0,0,0,0\n")
+            if zero_timing:
+                handle.write(f"{left.strip()}={alias},0,0,0,0,0\n")
+            else:
+                handle.write(line.rstrip() + "\n")
             written += 1
     return written
 
@@ -102,6 +178,7 @@ def _write_batch_yaml(path: str, cases: List[Dict[str, object]], *, aligner: str
             [
                 f"  - name: {_quote_yaml(case['name'])}",
                 f"    language: {_quote_yaml(case['language'])}",
+                f"    auto_format: {_quote_yaml(case['format'])}",
                 f"    voicebank_dir: {_quote_yaml(case['voicebank_dir'])}",
                 f"    textgrid_dir: {_quote_yaml(case['textgrid_dir'])}",
                 f"    out_dir: {_quote_yaml(case['out_dir'])}",
@@ -128,6 +205,17 @@ def main() -> int:
     parser.add_argument("--aligner", default="sequence")
     parser.add_argument("--fallback-aligner", default="")
     parser.add_argument(
+        "--include-special-files",
+        action="store_true",
+        help="Do not filter non-phonated/special WAV files such as _breath.wav during evaluation.",
+    )
+    parser.add_argument(
+        "--skip-wav-name",
+        action="append",
+        default=[],
+        help="Additional exact WAV stem/name to skip during evaluation. Repeatable.",
+    )
+    parser.add_argument(
         "--base-mode",
         choices=("zero", "manual"),
         default="zero",
@@ -142,9 +230,14 @@ def main() -> int:
     run_name = _safe_name(args.run_name or f"{args.aligner}_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}")
     out_root = os.path.abspath(os.path.join(args.out_dir, run_name))
     base_root = os.path.join(out_root, "base_oto")
+    eval_voicebank_root = os.path.join(out_root, "eval_voicebanks")
     generated_root = os.path.join(out_root, "generated")
     textgrid_root = os.path.join(out_root, "textgrids")
     os.makedirs(out_root, exist_ok=True)
+    special_stems = set()
+    if not args.include_special_files:
+        special_stems.update(_DEFAULT_SPECIAL_WAV_STEMS)
+    special_stems.update(_wav_stem(name) for name in args.skip_wav_name if _wav_stem(name))
 
     cases: List[Dict[str, object]] = []
     seen_names: Dict[str, int] = {}
@@ -162,12 +255,20 @@ def main() -> int:
         count = seen_names.get(base_name, 0)
         seen_names[base_name] = count + 1
         case_id = base_name if count == 0 else f"{base_name}_{count:02d}"
+        eval_voicebank = _prepare_eval_voicebank(
+            voicebank_dir,
+            os.path.join(eval_voicebank_root, case_id),
+            special_stems,
+        )
+        eval_voicebank_dir = str(eval_voicebank["voicebank_dir"])
+        if int(eval_voicebank.get("copied_wavs", 0) or 0) <= 0:
+            continue
         if args.base_mode == "zero":
             base_oto = os.path.join(base_root, case_id + ".ini")
-            row_count = _write_zero_base_oto(oto_path, base_oto)
+            row_count = _write_base_oto(oto_path, base_oto, zero_timing=True, special_stems=special_stems)
         else:
-            base_oto = os.path.abspath(oto_path)
-            row_count = len(_read_oto_lines(oto_path))
+            base_oto = os.path.join(base_root, case_id + ".ini")
+            row_count = _write_base_oto(oto_path, base_oto, zero_timing=False, special_stems=special_stems)
         if row_count <= 0:
             continue
         case_out_dir = os.path.join(generated_root, case_id)
@@ -176,7 +277,8 @@ def main() -> int:
             "name": case_id,
             "language": language,
             "format": fmt,
-            "voicebank_dir": os.path.abspath(voicebank_dir),
+            "source_voicebank_dir": os.path.abspath(voicebank_dir),
+            "voicebank_dir": os.path.abspath(eval_voicebank_dir),
             "manual_oto": os.path.abspath(oto_path),
             "base_oto": os.path.abspath(base_oto),
             "textgrid_dir": os.path.join(textgrid_root, case_id),
@@ -184,6 +286,7 @@ def main() -> int:
             "output_name": f"oto.{args.aligner}.ini",
             "candidate_oto": os.path.join(case_out_dir, f"oto.{args.aligner}.ini"),
             "manual_rows": row_count,
+            "skipped_wavs": eval_voicebank.get("skipped_wavs", []),
         }
         cases.append(case)
         if args.limit and len(cases) >= int(args.limit):

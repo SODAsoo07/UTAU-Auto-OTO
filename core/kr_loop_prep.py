@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from typing import Callable, Sequence
 
 from core.loop_prep_models import LoopPrepCommonResult
@@ -24,6 +25,13 @@ class KrLoopPrepResult(LoopPrepCommonResult):
     expected_syllables: int = 0
     force_words_phone_fill: bool = False
     wav_duration_ms: float = 0.0
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "on", "y"}
 
 
 def _estimate_kr_textgrid_trust(
@@ -149,9 +157,11 @@ def prepare_kr_loop_state(
     pref = str(preferred_format or "").strip().lower()
     if pref == "coc":
         pref = "cvc"
-    if pref in {"cvc", "cvvc"} and result.detected_format == "cv":
-        result.file_format = pref
-    elif pref == "cvc" and result.detected_format == "vcv":
+    if (
+        pref in {"cvc", "cvvc", "vcv"}
+        and pref != result.detected_format
+        and result.detected_format in {"cv", "cvc", "cvvc", "vcv", "vc_only", "vv_only"}
+    ):
         result.file_format = pref
         debug_log_fn(
             f"ℹ 포맷 고정: {real_wav_name}: 자동 감지 {result.detected_format.upper()} -> 수동 지정 {pref.upper()}"
@@ -168,7 +178,8 @@ def prepare_kr_loop_state(
     result.cv_targets = list(extract_cv_targets_from_lines_fn(lines, custom_map) or [])
     result.filename_cv_targets = list(extract_cv_targets_from_filename_fn(real_wav_name) or [])
     result.targets_for_build = list(result.cv_targets)
-    if result.file_format == "cvvc" and result.filename_cv_targets:
+    filename_lock_enabled = _env_bool("UTOA_KR_FORMAT_FILENAME_LOCK_ENABLE", True)
+    if filename_lock_enabled and result.file_format in {"cvc", "cvvc", "vcv"} and result.filename_cv_targets:
         result.targets_for_build = list(result.filename_cv_targets)
     elif (not result.targets_for_build) and result.filename_cv_targets:
         result.targets_for_build = list(result.filename_cv_targets)
@@ -194,14 +205,17 @@ def prepare_kr_loop_state(
         wd_intervals=result.wd_intervals,
         file_format=result.file_format,
     )
-    result.prefer_filename_sequence = bool(
-        result.file_format in {"cvc", "cvvc"}
-        and result.filename_cv_targets
-        and (
-            result.textgrid_trust_tier == "low"
-            or (result.textgrid_trust_tier == "mid" and result.low_phone_quality)
+    if filename_lock_enabled and result.file_format in {"cvc", "cvvc", "vcv"} and result.filename_cv_targets:
+        result.prefer_filename_sequence = True
+    else:
+        result.prefer_filename_sequence = bool(
+            result.file_format in {"cvc", "cvvc", "vcv"}
+            and result.filename_cv_targets
+            and (
+                result.textgrid_trust_tier == "low"
+                or (result.textgrid_trust_tier == "mid" and result.low_phone_quality)
+            )
         )
-    )
     if result.prefer_filename_sequence:
         result.targets_for_build = list(result.filename_cv_targets)
     result.force_words_phone_fill = bool(

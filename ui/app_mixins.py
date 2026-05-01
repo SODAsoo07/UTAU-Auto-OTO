@@ -1332,6 +1332,7 @@ class AppRuntimeMixin:
     def _reset_developer_settings_defaults(self) -> None:
         defaults = {
             "developer_mode_enabled_var": False,
+            "aligner_var": "MFA",
             "enable_ml_correction_var": True,
             "ml_route_var": "자동(자동 라우팅)",
             "ml_selector_mode_var": "+셀렉터",
@@ -3615,8 +3616,7 @@ class ConfigMixin:
                 except Exception:
                     saved_aligner = "mfa"
                 aligner_label_map = {
-                    "none": "MFA",
-                    "ctc": "CTC",
+                    "none": "No-MFA",
                     "sequence": "전용(시퀀스)",
                     "mfa": "MFA",
                 }

@@ -135,7 +135,7 @@ def _build_kr_cvvc_occurrence_map(token_source):
 
 def _is_kr_order_locked_cv_format(file_format):
     fmt = str(file_format or "").strip().lower()
-    return fmt in {"cvvc", "cvc"}
+    return fmt in {"cvvc", "cvc", "vcv"}
 
 
 def _resolve_kr_cvvc_occurrence_index(
