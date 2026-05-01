@@ -19,6 +19,7 @@ if _REPO_ROOT not in sys.path:
 
 
 TARGETS = ["delta_offset", "delta_pre", "delta_cons", "delta_cutoff", "delta_ovl"]
+PRE_CONS_OVL_TARGETS = ["delta_pre", "delta_cons", "delta_ovl"]
 
 CATEGORICAL_FEATURES = [
     "language",
@@ -41,6 +42,12 @@ NUMERIC_FEATURES = [
     "anchor_end_ms",
     "anchor_mid_ms",
     "anchor_len_ms",
+    "anchor_confidence",
+    "active_start_ms",
+    "active_end_ms",
+    "active_len_ms",
+    "next_anchor_start_ms",
+    "next_anchor_gap_ms",
     "wav_duration_ms",
     "base_offset",
     "base_pre",
@@ -95,6 +102,53 @@ def _load_rows(paths: Sequence[str]) -> List[Dict[str, object]]:
                     continue
                 rows.append(row)
     return rows
+
+
+def _resolve_targets(scope: str) -> List[str]:
+    scope_norm = str(scope or "all").strip().lower()
+    if scope_norm in {"pre_cons_ovl", "pco", "relative"}:
+        return list(PRE_CONS_OVL_TARGETS)
+    return list(TARGETS)
+
+
+def _normalized_target_name(target: str) -> str:
+    if target in {"delta_offset", "delta_cutoff"}:
+        return f"{target}_active_ratio"
+    return f"{target}_anchor_ratio"
+
+
+def _target_mode_for_target(mode: str, target: str) -> str:
+    mode_norm = str(mode or "raw").strip().lower()
+    if mode_norm == "hybrid":
+        return "normalized" if target in {"delta_offset", "delta_cutoff"} else "raw"
+    return mode_norm
+
+
+def _target_scale(row: Dict[str, object], target: str, mode: str) -> float:
+    if _target_mode_for_target(mode, target) != "normalized":
+        return 1.0
+    if target in {"delta_offset", "delta_cutoff"}:
+        return max(1.0, _safe_float(row.get("active_len_ms", 1.0), 1.0))
+    return max(1.0, _safe_float(row.get("anchor_len_ms", 1.0), 1.0))
+
+
+def _target_values(rows: Sequence[Dict[str, object]], target: str, mode: str) -> np.ndarray:
+    if _target_mode_for_target(mode, target) == "normalized":
+        name = _normalized_target_name(target)
+        return np.asarray([_safe_float(row.get(name, 0.0)) for row in rows], dtype=np.float64)
+    return np.asarray([_safe_float(row.get(target, 0.0)) for row in rows], dtype=np.float64)
+
+
+def _target_values_ms(rows: Sequence[Dict[str, object]], target: str) -> np.ndarray:
+    return np.asarray([_safe_float(row.get(target, 0.0)) for row in rows], dtype=np.float64)
+
+
+def _prediction_to_ms(rows: Sequence[Dict[str, object]], target: str, mode: str, pred: np.ndarray) -> np.ndarray:
+    values = np.asarray(pred, dtype=np.float64)
+    if _target_mode_for_target(mode, target) != "normalized":
+        return values
+    scales = np.asarray([_target_scale(row, target, mode) for row in rows], dtype=np.float64)
+    return values * scales
 
 
 def _split_rows(rows: Sequence[Dict[str, object]], test_ratio: float) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
@@ -211,6 +265,8 @@ def train_baseline(
     ridge: float = 10.0,
     test_ratio: float = 0.20,
     max_categories: int = 32,
+    target_mode: str = "raw",
+    target_scope: str = "all",
 ) -> Dict[str, object]:
     rows = _load_rows(dataset_paths)
     if not rows:
@@ -220,19 +276,23 @@ def train_baseline(
     x_train, feature_names, scalers = _matrix(train_rows, categories)
     x_test = _apply_matrix(test_rows, feature_names, scalers) if test_rows else np.zeros((0, x_train.shape[1]), dtype=np.float64)
 
+    target_names = _resolve_targets(target_scope)
     targets: Dict[str, object] = {}
-    for target in TARGETS:
-        y_train = np.asarray([_safe_float(row.get(target, 0.0)) for row in train_rows], dtype=np.float64)
+    for target in target_names:
+        y_train = _target_values(train_rows, target, target_mode)
         weights = _fit_ridge(x_train, y_train, ridge=float(ridge))
         train_pred = _predict(x_train, weights)
+        train_pred_ms = _prediction_to_ms(train_rows, target, target_mode, train_pred)
+        y_train_ms = _target_values_ms(train_rows, target)
         target_meta: Dict[str, object] = {
             "weights": [float(x) for x in weights],
-            "train": _metrics(y_train, train_pred),
+            "train": _metrics(y_train_ms, train_pred_ms),
         }
         if test_rows:
-            y_test = np.asarray([_safe_float(row.get(target, 0.0)) for row in test_rows], dtype=np.float64)
+            y_test_ms = _target_values_ms(test_rows, target)
             test_pred = _predict(x_test, weights)
-            target_meta["test"] = _metrics(y_test, test_pred)
+            test_pred_ms = _prediction_to_ms(test_rows, target, target_mode, test_pred)
+            target_meta["test"] = _metrics(y_test_ms, test_pred_ms)
         targets[target] = target_meta
 
     alias_counts = Counter(str(row.get("alias_type", "unknown") or "unknown") for row in rows)
@@ -243,6 +303,8 @@ def train_baseline(
         "train_count": len(train_rows),
         "test_count": len(test_rows),
         "ridge": float(ridge),
+        "target_mode": str(target_mode or "raw"),
+        "target_scope": str(target_scope or "all"),
         "feature_names": feature_names,
         "feature_scalers": {k: [float(v[0]), float(v[1])] for k, v in scalers.items()},
         "categories": categories,
@@ -260,6 +322,8 @@ def train_baseline(
         "row_count": len(rows),
         "train_count": len(train_rows),
         "test_count": len(test_rows),
+        "target_mode": str(target_mode or "raw"),
+        "target_scope": str(target_scope or "all"),
         "targets": {
             target: {
                 key: value
@@ -282,6 +346,8 @@ def main() -> int:
     parser.add_argument("--ridge", type=float, default=10.0)
     parser.add_argument("--test-ratio", type=float, default=0.20)
     parser.add_argument("--max-categories", type=int, default=32)
+    parser.add_argument("--target-mode", choices=["raw", "normalized", "hybrid"], default="raw")
+    parser.add_argument("--target-scope", choices=["all", "pre_cons_ovl"], default="all")
     args = parser.parse_args()
 
     result = train_baseline(
@@ -290,6 +356,8 @@ def main() -> int:
         ridge=float(args.ridge),
         test_ratio=float(args.test_ratio),
         max_categories=int(args.max_categories),
+        target_mode=args.target_mode,
+        target_scope=args.target_scope,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

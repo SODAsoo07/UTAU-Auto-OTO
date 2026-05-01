@@ -44,6 +44,7 @@ from core.sequence_aligner import (
 
 PAUSE_ALIAS_TYPES = {"br", "sil", "pau", "sp", "breath"}
 ENDBREATH_ALIAS_TYPE = "endbreath"
+TARGET_EPS_MS = 1e-6
 
 
 @dataclass(frozen=True)
@@ -104,12 +105,22 @@ def _safe_float(value: object, default: float = 0.0) -> float:
     return float(default)
 
 
-def _safe_cutoff_abs_ms(offset_ms: float, cutoff: float, wav_duration_ms: float) -> float:
+def _safe_cutoff_abs_ms(
+    offset_ms: float,
+    cutoff: float,
+    wav_duration_ms: float,
+    *,
+    convention: str = "auto",
+) -> float:
     off = max(0.0, _safe_float(offset_ms))
     cut = _safe_float(cutoff)
     dur = max(0.0, _safe_float(wav_duration_ms))
     if cut < 0.0:
         resolved = off + abs(cut)
+    elif convention == "positive_tail" and dur > 1.0:
+        resolved = dur - cut
+    elif convention == "positive_relative":
+        resolved = off + cut
     elif dur > 1.0 and cut > max(300.0, dur * 0.45):
         resolved = dur - cut
     else:
@@ -262,6 +273,53 @@ def _build_wav_index(voicebank_dir: str) -> Dict[str, str]:
                 if key and key not in index:
                     index[key] = path
     return index
+
+
+def _wav_duration_ms(path: str) -> float:
+    try:
+        _signal, _sr, duration_sec = _read_pcm_as_float_mono(path)
+        return max(0.0, float(duration_sec) * 1000.0)
+    except Exception:
+        return 0.0
+
+
+def _resolve_voicebank_cutoff_convention(
+    rows_by_wav: Dict[str, List[ManualOtoRow]],
+    wav_index: Dict[str, str],
+) -> str:
+    counts: Counter[str] = Counter()
+    for wav_norm, rows in rows_by_wav.items():
+        wav_path = wav_index.get(wav_norm)
+        dur = _wav_duration_ms(wav_path) if wav_path else 0.0
+        if dur <= 1.0:
+            continue
+        for row in rows:
+            cut = float(row.cutoff)
+            if cut < 0.0:
+                counts["negative_relative"] += 1
+                continue
+            if cut <= 0.0:
+                continue
+            rel_abs = float(row.offset_ms) + cut
+            tail_abs = dur - cut
+            rel_valid = rel_abs <= dur + 2.0 and rel_abs > float(row.offset_ms) + 0.5
+            tail_valid = tail_abs >= float(row.offset_ms) + 0.5 and tail_abs <= dur + 2.0
+            if tail_valid and (not rel_valid or cut > max(300.0, dur * 0.45)):
+                counts["positive_tail"] += 1
+            elif rel_valid:
+                counts["positive_relative"] += 1
+            else:
+                counts["positive_unknown"] += 1
+    positive_total = counts["positive_tail"] + counts["positive_relative"] + counts["positive_unknown"]
+    if positive_total > 0:
+        tail_ratio = float(counts["positive_tail"]) / float(max(1, positive_total))
+        rel_ratio = float(counts["positive_relative"]) / float(max(1, positive_total))
+        if tail_ratio >= 0.62:
+            return "positive_tail"
+        if rel_ratio >= 0.62:
+            return "positive_relative"
+        return "mixed_auto"
+    return "negative_relative"
 
 
 def _load_sequence_runtime_config(language: str, profile: Dict[str, object]) -> Dict[str, object]:
@@ -515,15 +573,22 @@ def _non_pause_word_rows(analysis: SequenceAnalysis) -> List[Tuple[float, float,
     return out
 
 
-def _pick_anchor(
+def _pick_teacher_anchor(
     row: ManualOtoRow,
     wav_rows: Sequence[ManualOtoRow],
     analysis: SequenceAnalysis,
+    *,
+    cutoff_convention: str,
 ) -> Tuple[float, float, str, int, str]:
     anchors = _non_pause_word_rows(analysis)
     if not anchors:
         return 0.0, analysis.duration_ms, "fallback_full_file", 0, "spn"
-    manual_cutoff_abs = _safe_cutoff_abs_ms(row.offset_ms, row.cutoff, analysis.duration_ms)
+    manual_cutoff_abs = _safe_cutoff_abs_ms(
+        row.offset_ms,
+        row.cutoff,
+        analysis.duration_ms,
+        convention=cutoff_convention,
+    )
     if _manual_timing_looks_configured(
         offset_ms=row.offset_ms,
         cons_ms=row.cons_ms,
@@ -554,6 +619,100 @@ def _pick_anchor(
     idx = max(0, min(len(anchors) - 1, idx))
     start, end, token = anchors[idx]
     return float(start), float(end), "file_order_ratio", idx, str(token)
+
+
+def _compact_alias_text(alias: str) -> str:
+    text = str(alias or "").strip().lower()
+    text = re.sub(r"^-\s*", "", text)
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[^0-9a-z\uac00-\ud7a3]+", "", text)
+    return text
+
+
+def _token_match_score(language: str, alias_token: str, seq_token: str) -> float:
+    alias_clean = _compact_alias_text(alias_token)
+    seq_clean = _compact_alias_text(seq_token)
+    if not alias_clean or not seq_clean:
+        return 0.0
+    if alias_clean == seq_clean:
+        return 1.0
+    if alias_clean.endswith(seq_clean) or seq_clean.endswith(alias_clean):
+        return 0.74
+    if alias_clean in seq_clean or seq_clean in alias_clean:
+        return 0.58
+    if str(language or "").strip().lower() == "korean":
+        try:
+            from core.sequence_aligner import _canonical_kr_order_token
+
+            a_can = _canonical_kr_order_token(alias_clean)
+            s_can = _canonical_kr_order_token(seq_clean)
+            if a_can and s_can:
+                if a_can == s_can:
+                    return 0.96
+                if a_can.endswith(s_can) or s_can.endswith(a_can):
+                    return 0.70
+                if a_can in s_can or s_can in a_can:
+                    return 0.55
+        except Exception:
+            pass
+    return 0.0
+
+
+def _alias_target_tokens(row: ManualOtoRow) -> List[str]:
+    alias = str(row.alias or "").strip()
+    a_type = str(row.alias_type or "").strip().lower()
+    if not alias:
+        return []
+    if a_type == ENDBREATH_ALIAS_TYPE:
+        return []
+    parts = [p for p in re.split(r"\s+", alias) if p.strip()]
+    if a_type in {"cv", "cv_head", "mono"}:
+        return [parts[-1] if parts else alias]
+    if a_type == "vcv":
+        return [parts[-1] if parts else alias]
+    if a_type in {"vc", "vv"}:
+        if len(parts) >= 2:
+            return [parts[-1], "".join(parts)]
+        return [alias]
+    return [alias]
+
+
+def _pick_inference_anchor(
+    row: ManualOtoRow,
+    wav_rows: Sequence[ManualOtoRow],
+    analysis: SequenceAnalysis,
+    *,
+    language: str,
+) -> Tuple[float, float, str, int, str, float]:
+    anchors = _non_pause_word_rows(analysis)
+    if not anchors:
+        return 0.0, analysis.duration_ms, "fallback_full_file", 0, "spn", 0.0
+    a_type = str(row.alias_type or "").strip().lower()
+    if a_type == ENDBREATH_ALIAS_TYPE:
+        idx = max(0, len(anchors) - 1)
+        start, end, token = anchors[idx]
+        return float(start), float(end), "endbreath_tail", idx, str(token), 0.90
+
+    tokens = _alias_target_tokens(row)
+    best_idx = -1
+    best_score = 0.0
+    for idx, (_start, _end, token) in enumerate(anchors):
+        score = max((_token_match_score(language, cand, token) for cand in tokens), default=0.0)
+        if score > best_score:
+            best_idx = idx
+            best_score = score
+    if best_idx >= 0 and best_score >= 0.54:
+        start, end, token = anchors[best_idx]
+        return float(start), float(end), "alias_token_match", best_idx, str(token), float(best_score)
+
+    if len(wav_rows) <= 1:
+        idx = 0
+    else:
+        ratio = float(row.wav_row_index) / float(max(1, len(wav_rows) - 1))
+        idx = int(round(ratio * float(max(0, len(anchors) - 1))))
+    idx = max(0, min(len(anchors) - 1, idx))
+    start, end, token = anchors[idx]
+    return float(start), float(end), "file_order_ratio", idx, str(token), 0.28
 
 
 def _baseline_params_from_anchor(start_ms: float, end_ms: float, alias_type: str) -> Dict[str, float]:
@@ -631,10 +790,27 @@ def _row_to_record(
     voicebank_id: str,
     language: str,
     format_type: str,
+    cutoff_convention: str,
 ) -> Dict[str, object]:
-    anchor_start, anchor_end, anchor_strategy, anchor_index, anchor_token = _pick_anchor(row, wav_rows, analysis)
+    teacher_start, teacher_end, teacher_strategy, teacher_index, teacher_token = _pick_teacher_anchor(
+        row,
+        wav_rows,
+        analysis,
+        cutoff_convention=cutoff_convention,
+    )
+    anchor_start, anchor_end, anchor_strategy, anchor_index, anchor_token, anchor_conf = _pick_inference_anchor(
+        row,
+        wav_rows,
+        analysis,
+        language=language,
+    )
     base = _baseline_params_from_anchor(anchor_start, anchor_end, row.alias_type)
-    manual_cutoff_abs = _safe_cutoff_abs_ms(row.offset_ms, row.cutoff, analysis.duration_ms)
+    manual_cutoff_abs = _safe_cutoff_abs_ms(
+        row.offset_ms,
+        row.cutoff,
+        analysis.duration_ms,
+        convention=cutoff_convention,
+    )
     manual_timing_valid = _manual_timing_looks_configured(
         offset_ms=row.offset_ms,
         cons_ms=row.cons_ms,
@@ -661,11 +837,28 @@ def _row_to_record(
 
     row_count = max(1, len(wav_rows))
     word_count = max(1, len(_non_pause_word_rows(analysis)))
+    active_rows = _non_pause_word_rows(analysis)
+    active_start_ms = float(active_rows[0][0]) if active_rows else 0.0
+    active_end_ms = float(active_rows[-1][1]) if active_rows else analysis.duration_ms
+    active_len_ms = max(1.0, active_end_ms - active_start_ms)
+    anchor_len_ms = max(1.0, anchor_end - anchor_start)
+    next_anchor_start_ms = analysis.duration_ms
+    if active_rows and anchor_index + 1 < len(active_rows):
+        next_anchor_start_ms = float(active_rows[anchor_index + 1][0])
+    next_anchor_gap_ms = max(1.0, next_anchor_start_ms - anchor_start)
+    teacher_mid = (teacher_start + teacher_end) * 0.5
+    anchor_mid_error_ms = anchor_mid - teacher_mid
+    delta_offset = row.offset_ms - float(base["base_offset"])
+    delta_pre = row.pre_ms - float(base["base_pre"])
+    delta_cons = row.cons_ms - float(base["base_cons"])
+    delta_cutoff = manual_cutoff_abs - float(base["base_cutoff_abs"])
+    delta_ovl = row.ovl_ms - float(base["base_ovl"])
     return {
-        "schema": "sequence_residual_preprocessor_v1",
+        "schema": "sequence_residual_preprocessor_v2",
         "voicebank_id": voicebank_id,
         "language": language,
         "format_type": format_type,
+        "cutoff_convention": cutoff_convention,
         "wav": row.wav,
         "wav_norm": row.wav_norm,
         "wav_path": analysis.wav_path,
@@ -684,13 +877,26 @@ def _row_to_record(
         "sequence_cvn_backend": analysis.cvn_backend,
         "filename_words": analysis.filename_words,
         "sequence_words": analysis.words,
+        "teacher_anchor_match_strategy": teacher_strategy,
+        "teacher_anchor_index": teacher_index,
+        "teacher_anchor_token": teacher_token,
+        "teacher_anchor_start_ms": teacher_start,
+        "teacher_anchor_end_ms": teacher_end,
+        "teacher_anchor_mid_ms": teacher_mid,
         "anchor_match_strategy": anchor_strategy,
         "anchor_index": anchor_index,
         "anchor_token": anchor_token,
+        "anchor_confidence": anchor_conf,
+        "anchor_mid_error_ms": anchor_mid_error_ms,
         "anchor_start_ms": anchor_start,
         "anchor_end_ms": anchor_end,
         "anchor_mid_ms": anchor_mid,
         "anchor_len_ms": max(0.0, anchor_end - anchor_start),
+        "active_start_ms": active_start_ms,
+        "active_end_ms": active_end_ms,
+        "active_len_ms": active_len_ms,
+        "next_anchor_start_ms": next_anchor_start_ms,
+        "next_anchor_gap_ms": next_anchor_gap_ms,
         "wav_duration_ms": analysis.duration_ms,
         "base_offset": base["base_offset"],
         "base_pre": base["base_pre"],
@@ -704,11 +910,24 @@ def _row_to_record(
         "manual_cutoff": row.cutoff,
         "manual_cutoff_abs": manual_cutoff_abs,
         "manual_ovl": row.ovl_ms,
-        "delta_offset": row.offset_ms - float(base["base_offset"]),
-        "delta_pre": row.pre_ms - float(base["base_pre"]),
-        "delta_cons": row.cons_ms - float(base["base_cons"]),
-        "delta_cutoff": manual_cutoff_abs - float(base["base_cutoff_abs"]),
-        "delta_ovl": row.ovl_ms - float(base["base_ovl"]),
+        "delta_offset": delta_offset,
+        "delta_pre": delta_pre,
+        "delta_cons": delta_cons,
+        "delta_cutoff": delta_cutoff,
+        "delta_ovl": delta_ovl,
+        "target_offset_active_ratio": (row.offset_ms - active_start_ms) / active_len_ms,
+        "target_cutoff_active_ratio": (manual_cutoff_abs - active_start_ms) / active_len_ms,
+        "target_pre_anchor_ratio": row.pre_ms / anchor_len_ms,
+        "target_cons_anchor_ratio": row.cons_ms / anchor_len_ms,
+        "target_ovl_anchor_ratio": row.ovl_ms / anchor_len_ms,
+        "delta_offset_anchor_ratio": delta_offset / anchor_len_ms,
+        "delta_offset_active_ratio": delta_offset / active_len_ms,
+        "delta_pre_anchor_ratio": delta_pre / anchor_len_ms,
+        "delta_cons_anchor_ratio": delta_cons / anchor_len_ms,
+        "delta_cutoff_anchor_ratio": delta_cutoff / anchor_len_ms,
+        "delta_cutoff_next_gap_ratio": delta_cutoff / next_anchor_gap_ms,
+        "delta_cutoff_active_ratio": delta_cutoff / active_len_ms,
+        "delta_ovl_anchor_ratio": delta_ovl / anchor_len_ms,
         "rms_local_mean": rms_all["mean"],
         "rms_local_max": rms_all["max"],
         "rms_local_std": rms_all["std"],
@@ -737,6 +956,8 @@ def _summarize_records(records: Sequence[Dict[str, object]], errors: Sequence[st
     alias_counter = Counter(str(r.get("alias_type", "unknown") or "unknown") for r in records)
     source_counter = Counter(str(r.get("sequence_source", "unknown") or "unknown") for r in records)
     lock_counter = Counter("on" if bool(r.get("sequence_soft_lock")) else "off" for r in records)
+    anchor_counter = Counter(str(r.get("anchor_match_strategy", "unknown") or "unknown") for r in records)
+    cutoff_counter = Counter(str(r.get("cutoff_convention", "unknown") or "unknown") for r in records)
 
     def _abs_stats(name: str) -> Dict[str, float]:
         vals = [abs(_safe_float(r.get(name, 0.0))) for r in usable]
@@ -762,6 +983,8 @@ def _summarize_records(records: Sequence[Dict[str, object]], errors: Sequence[st
         "skip_reason_counts": dict(Counter(str(r.get("skip_reason", "") or "usable") for r in records)),
         "sequence_source_counts": dict(source_counter),
         "sequence_soft_lock_counts": dict(lock_counter),
+        "anchor_match_strategy_counts": dict(anchor_counter),
+        "cutoff_convention_counts": dict(cutoff_counter),
         "residual_abs": {
             "offset": _abs_stats("delta_offset"),
             "pre": _abs_stats("delta_pre"),
@@ -792,6 +1015,7 @@ def build_sequence_residual_dataset(
     for row in rows:
         grouped[row.wav_norm].append(row)
 
+    cutoff_convention = _resolve_voicebank_cutoff_convention(grouped, wav_index)
     profile = _load_sequence_profile(lang, callback=callback)
     records: List[Dict[str, object]] = []
     errors: List[str] = []
@@ -820,6 +1044,7 @@ def build_sequence_residual_dataset(
                         voicebank_id=voicebank_id,
                         language=lang,
                         format_type=fmt,
+                        cutoff_convention=cutoff_convention,
                     )
                 )
             processed_files += 1
@@ -835,6 +1060,7 @@ def build_sequence_residual_dataset(
             "manual_oto_path": oto_abs,
             "language": lang,
             "format_type": fmt,
+            "cutoff_convention": cutoff_convention,
             "processed_files": processed_files,
             "manual_wav_groups": len(grouped),
         }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import audioop
 import contextlib
+import json
 import math
 import os
 import wave
@@ -541,6 +542,370 @@ def _apply_no_mfa_ml_correction(
         f"confidence={confidence:.3f}, code={code or 'n/a'}",
     )
     return int(changed)
+
+
+def _no_mfa_sequence_residual_default_model_path() -> str:
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    candidates = [
+        os.path.join(root, "models", "korean", "no_mfa_sequence_residual_hybrid.json"),
+        os.path.join(
+            root,
+            "eval_runs",
+            "sequence_residual_benchmark_v2",
+            "hybrid_baseline_model",
+            "sequence_residual_baseline_model.json",
+        ),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return ""
+
+
+def _load_no_mfa_sequence_residual_model(callback: Callable[[str], None] | None = None) -> dict[str, object] | None:
+    if not _env_bool("UTOA_NO_MFA_SEQUENCE_RESIDUAL_ENABLE", False):
+        return None
+    model_path = str(os.environ.get("UTOA_NO_MFA_SEQUENCE_RESIDUAL_MODEL", "") or "").strip()
+    if not model_path:
+        model_path = _no_mfa_sequence_residual_default_model_path()
+    if not model_path or not os.path.isfile(model_path):
+        _log(callback, "[No-MFA] sequence residual correction skipped: model file not found.")
+        return None
+    try:
+        with open(model_path, "r", encoding="utf-8") as handle:
+            model = json.load(handle)
+    except Exception as exc:
+        _log(callback, f"[No-MFA] sequence residual correction skipped: failed to load model ({exc}).")
+        return None
+    if not isinstance(model, dict) or not isinstance(model.get("targets"), dict):
+        _log(callback, "[No-MFA] sequence residual correction skipped: invalid model schema.")
+        return None
+    model["_runtime_model_path"] = os.path.abspath(model_path)
+    return model
+
+
+def _no_mfa_safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        out = float(value)
+        if math.isfinite(out):
+            return out
+    except Exception:
+        pass
+    return float(default)
+
+
+def _no_mfa_mean(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return float(sum(values)) / float(len(values))
+
+
+def _no_mfa_stats_for_window(
+    profile: dict[str, object] | None,
+    key: str,
+    start_ms: float,
+    end_ms: float,
+) -> tuple[float, float, float]:
+    if not profile:
+        return 0.0, 0.0, 0.0
+    values = profile.get(key)
+    if not isinstance(values, list) or not values:
+        return 0.0, 0.0, 0.0
+    lo = _time_to_frame(profile, start_ms)
+    hi = _time_to_frame(profile, end_ms)
+    if hi < lo:
+        lo, hi = hi, lo
+    window = []
+    for value in values[lo : hi + 1]:
+        try:
+            window.append(float(value))
+        except Exception:
+            pass
+    if not window:
+        return 0.0, 0.0, 0.0
+    mean_value = _no_mfa_mean(window)
+    variance = _no_mfa_mean([(value - mean_value) ** 2.0 for value in window])
+    return mean_value, max(window), math.sqrt(max(0.0, variance))
+
+
+def _no_mfa_min_for_window(
+    profile: dict[str, object] | None,
+    key: str,
+    start_ms: float,
+    end_ms: float,
+) -> float:
+    if not profile:
+        return 0.0
+    values = profile.get(key)
+    if not isinstance(values, list) or not values:
+        return 0.0
+    lo = _time_to_frame(profile, start_ms)
+    hi = _time_to_frame(profile, end_ms)
+    if hi < lo:
+        lo, hi = hi, lo
+    window = []
+    for value in values[lo : hi + 1]:
+        try:
+            window.append(float(value))
+        except Exception:
+            pass
+    return min(window) if window else 0.0
+
+
+def _no_mfa_alias_group(alias_type: str, alias: str) -> str:
+    alias_key = str(alias_type or "").strip().lower()
+    alias_text = str(alias or "").strip()
+    if alias_key == "endbreath":
+        return "endbreath"
+    if alias_key in {"vc", "vcv", "vv"} or " " in alias_text:
+        return "bridge"
+    return "cv"
+
+
+def _no_mfa_is_endbreath_alias(alias: str) -> bool:
+    text = str(alias or "").strip()
+    compact = text.replace(" ", "")
+    return bool(
+        text.endswith("'R")
+        or text.endswith(" R")
+        or compact.endswith("*R")
+        or text in {"R", "br", "breath", "Breath"}
+    )
+
+
+def _no_mfa_sequence_row_features(
+    *,
+    parsed: dict[str, object],
+    boundaries_ms: list[float],
+    activity_profile: dict[str, object] | None,
+    slot_index: int,
+    slot_total: int,
+    language: str,
+    format_type: str,
+    quality: dict[str, object] | None,
+) -> dict[str, object]:
+    total = max(1, int(slot_total or 1))
+    idx = max(0, min(int(slot_index or 0), total - 1))
+    duration_ms = _no_mfa_safe_float(
+        (activity_profile or {}).get("duration_ms", 0.0),
+        _no_mfa_safe_float(boundaries_ms[-1] if boundaries_ms else 0.0, 0.0),
+    )
+    if duration_ms <= 0.0 and boundaries_ms:
+        duration_ms = _no_mfa_safe_float(boundaries_ms[-1], 0.0)
+    if len(boundaries_ms) >= idx + 2:
+        anchor_start = _no_mfa_safe_float(boundaries_ms[idx], 0.0)
+        anchor_end = _no_mfa_safe_float(boundaries_ms[idx + 1], anchor_start)
+    else:
+        anchor_start = 0.0
+        anchor_end = max(0.0, duration_ms)
+    anchor_len = max(1.0, anchor_end - anchor_start)
+    next_anchor_start = _no_mfa_safe_float(boundaries_ms[idx + 2], anchor_end) if len(boundaries_ms) >= idx + 3 else anchor_end
+    active_start = _no_mfa_safe_float((activity_profile or {}).get("active_start_ms", 0.0), 0.0)
+    active_end = _no_mfa_safe_float((activity_profile or {}).get("active_end_ms", duration_ms), duration_ms)
+    active_len = max(1.0, active_end - active_start)
+    alias = str(parsed.get("alias", "") or "")
+    alias_type = str((quality or {}).get("alias_type", "") or "").strip().lower()
+    if _no_mfa_is_endbreath_alias(alias):
+        alias_type = "endbreath"
+    if not alias_type:
+        alias_type = _classify_alias_type(language, alias)
+    rms_local_mean, rms_local_max, rms_local_std = _no_mfa_stats_for_window(
+        activity_profile,
+        "smooth",
+        anchor_start,
+        anchor_end,
+    )
+    rms_onset_mean, rms_onset_max, _rms_onset_std = _no_mfa_stats_for_window(
+        activity_profile,
+        "smooth",
+        max(active_start, anchor_start - 35.0),
+        min(active_end, anchor_start + 55.0),
+    )
+    rms_tail_mean, _rms_tail_max, _rms_tail_std = _no_mfa_stats_for_window(
+        activity_profile,
+        "smooth",
+        max(active_start, anchor_end - 65.0),
+        min(active_end, anchor_end + 45.0),
+    )
+    flux_onset_mean, flux_onset_max, _flux_onset_std = _no_mfa_stats_for_window(
+        activity_profile,
+        "flux",
+        max(active_start, anchor_start - 35.0),
+        min(active_end, anchor_start + 55.0),
+    )
+    return {
+        "language": str(language or "").strip().lower() or "korean",
+        "format_type": str(format_type or "").strip().lower(),
+        "alias_type": alias_type,
+        "alias_group": _no_mfa_alias_group(alias_type, alias),
+        "sequence_source": "filename",
+        "sequence_soft_lock": "True",
+        "sequence_cvn_backend": "runtime/no_mfa",
+        "anchor_match_strategy": "file_order_ratio",
+        "row_index_in_wav": float(idx),
+        "row_ratio_in_wav": float(idx) / float(max(1, total - 1)),
+        "file_row_count": float(total),
+        "sequence_word_count": float(total),
+        "anchor_index": float(idx),
+        "anchor_start_ms": anchor_start,
+        "anchor_end_ms": anchor_end,
+        "anchor_mid_ms": (anchor_start + anchor_end) * 0.5,
+        "anchor_len_ms": anchor_len,
+        "anchor_confidence": _no_mfa_safe_float((quality or {}).get("confidence", 0.0), 0.0),
+        "active_start_ms": active_start,
+        "active_end_ms": active_end,
+        "active_len_ms": active_len,
+        "next_anchor_start_ms": next_anchor_start,
+        "next_anchor_gap_ms": max(0.0, next_anchor_start - anchor_end),
+        "wav_duration_ms": duration_ms,
+        "base_offset": _no_mfa_safe_float(parsed.get("offset", 0.0), 0.0),
+        "base_pre": _no_mfa_safe_float(parsed.get("pre", 0.0), 0.0),
+        "base_cons": _no_mfa_safe_float(parsed.get("cons", 0.0), 0.0),
+        "base_cutoff_abs": abs(_no_mfa_safe_float(parsed.get("cutoff", 0.0), 0.0)),
+        "base_ovl": _no_mfa_safe_float(parsed.get("ovl", 0.0), 0.0),
+        "rms_local_mean": rms_local_mean,
+        "rms_local_max": rms_local_max,
+        "rms_local_std": rms_local_std,
+        "rms_onset_mean": rms_onset_mean,
+        "rms_onset_max": rms_onset_max,
+        "rms_tail_mean": rms_tail_mean,
+        "rms_tail_min": _no_mfa_min_for_window(activity_profile, "smooth", max(active_start, anchor_end - 65.0), min(active_end, anchor_end + 45.0)),
+        "zcr_onset_mean": 0.0,
+        "zcr_onset_max": 0.0,
+        "hf_onset_mean": 0.0,
+        "hf_onset_max": 0.0,
+        "flux_onset_mean": flux_onset_mean,
+        "flux_onset_max": flux_onset_max,
+        "label_silence_ratio": 0.0,
+        "label_vowel_ratio": 0.0,
+        "label_onset_ratio": 0.0,
+        "label_breath_ratio": 1.0 if alias_type == "endbreath" else 0.0,
+    }
+
+
+def _no_mfa_model_feature_value(name: str, row: dict[str, object], scalers: dict[str, object]) -> float:
+    if "=" in name:
+        base, expected = name.split("=", 1)
+        return 1.0 if str(row.get(base, "") or "") == expected else 0.0
+    scaler = scalers.get(name, [0.0, 1.0]) if isinstance(scalers, dict) else [0.0, 1.0]
+    try:
+        mean = float(scaler[0])
+        std = max(1e-8, float(scaler[1]))
+    except Exception:
+        mean = 0.0
+        std = 1.0
+    return (_no_mfa_safe_float(row.get(name, 0.0), 0.0) - mean) / std
+
+
+def _no_mfa_prediction_scale(model: dict[str, object], row: dict[str, object], target: str) -> float:
+    mode = str(model.get("target_mode", "raw") or "raw").strip().lower()
+    target_mode = "normalized" if mode == "normalized" else "raw"
+    if mode == "hybrid":
+        target_mode = "normalized" if target in {"delta_offset", "delta_cutoff"} else "raw"
+    if target_mode != "normalized":
+        return 1.0
+    if target in {"delta_offset", "delta_cutoff"}:
+        return max(1.0, _no_mfa_safe_float(row.get("active_len_ms", 1.0), 1.0))
+    return max(1.0, _no_mfa_safe_float(row.get("anchor_len_ms", 1.0), 1.0))
+
+
+def _no_mfa_sequence_scope_allows(target: str, format_type: str) -> bool:
+    scope = str(os.environ.get("UTOA_NO_MFA_SEQUENCE_RESIDUAL_SCOPE", "vcv_pco") or "vcv_pco").strip().lower()
+    if scope in {"all", "*"}:
+        return True
+    if scope in {"pre_cons_ovl", "pco"}:
+        return target in {"delta_pre", "delta_cons", "delta_ovl"}
+    if scope in {"vcv", "vcv_pco"}:
+        return str(format_type or "").strip().lower() == "vcv" and target in {"delta_pre", "delta_cons", "delta_ovl"}
+    if scope in {"offset_cutoff", "oc"}:
+        return target in {"delta_offset", "delta_cutoff"}
+    if target in {"delta_pre", "delta_cons", "delta_ovl"}:
+        return True
+    return str(format_type or "").strip().lower() in {"cv", "cvc"}
+
+
+def _apply_no_mfa_sequence_residual_to_line(
+    *,
+    line: str,
+    model: dict[str, object] | None,
+    boundaries_ms: list[float],
+    activity_profile: dict[str, object] | None,
+    slot_index: int,
+    slot_total: int,
+    language: str,
+    format_type: str,
+    quality: dict[str, object] | None,
+) -> tuple[str, bool]:
+    if not model:
+        return line, False
+    parsed = parse_oto_line(line)
+    if not parsed:
+        return line, False
+    row = _no_mfa_sequence_row_features(
+        parsed=parsed,
+        boundaries_ms=boundaries_ms,
+        activity_profile=activity_profile,
+        slot_index=slot_index,
+        slot_total=slot_total,
+        language=language,
+        format_type=format_type,
+        quality=quality,
+    )
+    min_conf = max(0.0, min(1.0, _env_float("UTOA_NO_MFA_SEQUENCE_RESIDUAL_MIN_CONF", 0.0)))
+    if min_conf > 0.0 and _no_mfa_safe_float(row.get("anchor_confidence", 0.0), 0.0) < min_conf:
+        return line, False
+    feature_names = model.get("feature_names", [])
+    scalers = model.get("feature_scalers", {})
+    targets = model.get("targets", {})
+    if not isinstance(feature_names, list) or not isinstance(targets, dict):
+        return line, False
+    features = [_no_mfa_model_feature_value(str(name), row, scalers if isinstance(scalers, dict) else {}) for name in feature_names]
+    blend = max(0.0, min(1.0, _env_float("UTOA_NO_MFA_SEQUENCE_RESIDUAL_BLEND", 0.35)))
+
+    offset = _no_mfa_safe_float(parsed.get("offset", 0.0), 0.0)
+    pre = _no_mfa_safe_float(parsed.get("pre", 0.0), 0.0)
+    cons = _no_mfa_safe_float(parsed.get("cons", 0.0), 0.0)
+    cutoff_abs = abs(_no_mfa_safe_float(parsed.get("cutoff", 0.0), 0.0))
+    ovl = _no_mfa_safe_float(parsed.get("ovl", 0.0), 0.0)
+    values = {
+        "delta_offset": 0.0,
+        "delta_pre": 0.0,
+        "delta_cons": 0.0,
+        "delta_cutoff": 0.0,
+        "delta_ovl": 0.0,
+    }
+    for target, payload in targets.items():
+        target_name = str(target)
+        if target_name not in values or not _no_mfa_sequence_scope_allows(target_name, format_type):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        weights = payload.get("weights", [])
+        if not isinstance(weights, list) or len(weights) != len(features) + 1:
+            continue
+        pred = _no_mfa_safe_float(weights[0], 0.0)
+        for feature, weight in zip(features, weights[1:]):
+            pred += float(feature) * _no_mfa_safe_float(weight, 0.0)
+        pred_ms = pred * _no_mfa_prediction_scale(model, row, target_name)
+        values[target_name] = max(-260.0, min(260.0, pred_ms)) * blend
+
+    if all(abs(value) <= 1e-6 for value in values.values()):
+        return line, False
+    o2 = offset + values["delta_offset"]
+    pr2 = pre + values["delta_pre"]
+    c2 = cons + values["delta_cons"]
+    ct2 = -(cutoff_abs + values["delta_cutoff"])
+    ov2 = ovl + values["delta_ovl"]
+    o2, c2, ct2, pr2, ov2 = _fallback_validate_oto_params(o2, c2, ct2, pr2, ov2)
+
+    active_start = _no_mfa_safe_float(row.get("active_start_ms", 0.0), 0.0)
+    active_end = _no_mfa_safe_float(row.get("active_end_ms", row.get("wav_duration_ms", 0.0)), 0.0)
+    anchor_end = _no_mfa_safe_float(row.get("anchor_end_ms", active_end), active_end)
+    duration = max(active_end, _no_mfa_safe_float(row.get("wav_duration_ms", active_end), active_end))
+    o2 = max(max(0.0, active_start - 20.0), min(max(0.0, duration - 1.0), min(anchor_end, active_end + 15.0), o2))
+    rewritten = f"{parsed['wav']}={parsed['alias']},{o2:.2f},{c2:.2f},{ct2:.2f},{pr2:.2f},{ov2:.2f}"
+    return rewritten, rewritten != line
 
 
 def _read_wav_duration_ms(path: str) -> float:
@@ -1149,6 +1514,16 @@ def generate_no_mfa_auto_oto(
     wav_boundary_cache: dict[tuple[str, int], list[float]] = {}
     wav_activity_cache: dict[str, dict[str, object]] = {}
     wav_root = os.path.abspath(str(wav_dir or "").strip())
+    sequence_residual_model = _load_no_mfa_sequence_residual_model(callback)
+    sequence_residual_changed = 0
+    if sequence_residual_model:
+        _log(
+            callback,
+            "[No-MFA] sequence residual correction enabled: "
+            f"model={sequence_residual_model.get('_runtime_model_path', 'unknown')}, "
+            f"scope={str(os.environ.get('UTOA_NO_MFA_SEQUENCE_RESIDUAL_SCOPE', 'vcv_pco') or 'vcv_pco')}, "
+            f"blend={_env_float('UTOA_NO_MFA_SEQUENCE_RESIDUAL_BLEND', 0.35):.2f}",
+        )
 
     for mapped_wav, right in prepared_entries:
         candidate = f"{mapped_wav}={right}"
@@ -1158,6 +1533,9 @@ def generate_no_mfa_auto_oto(
         parsed_candidate = parse_oto_line(candidate)
         timing_applied = False
         slot_total = int(per_wav_total.get(mapped_wav, 1) or 1)
+        activity_profile: dict[str, object] | None = None
+        boundaries: list[float] = []
+        quality: dict[str, object] = {}
 
         if mode == "remap" and parsed_candidate:
             wav_abs = os.path.join(wav_root, mapped_wav.replace("/", os.sep))
@@ -1230,6 +1608,21 @@ def generate_no_mfa_auto_oto(
             if changed:
                 timing_replaced += 1
                 profile_fallback_refined += 1
+        if sequence_residual_model:
+            seq_line, seq_changed = _apply_no_mfa_sequence_residual_to_line(
+                line=candidate,
+                model=sequence_residual_model,
+                boundaries_ms=boundaries,
+                activity_profile=activity_profile,
+                slot_index=slot_idx,
+                slot_total=slot_total,
+                language=language,
+                format_type=_detected_format,
+                quality=quality,
+            )
+            if seq_changed:
+                candidate = seq_line
+                sequence_residual_changed += 1
         candidate = _apply_suffix_to_oto_line(candidate, alias_suffix)
         if "=" not in candidate:
             continue
@@ -1299,6 +1692,8 @@ def generate_no_mfa_auto_oto(
             f"[No-MFA] acoustic candidate scoring: confidence_mean={conf_mean:.2f}, "
             f"low_confidence_rows={low_confidence_refined}, offset_sources={source_desc or 'n/a'}",
         )
+    if sequence_residual_model:
+        _log(callback, f"[No-MFA] sequence residual correction rows changed: {sequence_residual_changed}")
     if missing_wavs:
         sample = ", ".join(sorted(missing_wavs)[:5])
         suffix = "..." if len(missing_wavs) > 5 else ""
