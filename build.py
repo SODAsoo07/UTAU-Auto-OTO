@@ -1,6 +1,5 @@
 ﻿import argparse
 import datetime
-import importlib.util
 import json
 import os
 import re
@@ -34,7 +33,6 @@ SUPPORTED_CHANNELS = ("stable", "preview")
 CHANNEL_ALIASES = {"default": "stable"}
 SUPPORTED_CHANNEL_INPUTS = ("stable", "preview", "default")
 PREVIEW_REQUIREMENTS_FILE = "requirements-preview.txt"
-PYDOMINO_PACKAGE = "pydomino"
 DEFAULT_BACKEND = "nuitka"
 SUPPORTED_BACKENDS = ("nuitka", "pyinstaller")
 
@@ -45,7 +43,12 @@ EXCLUDED_MODULES = [
     "torchaudio",
     "torchvision",
     "ml",
+    "ml.scripts",
+    "ml.tests",
+    "pytest",
     "librosa",
+    "scripts",
+    "tests",
 ]
 EXCLUDED_TRAINING_MODULES = [
     "core.cvn_training",
@@ -56,9 +59,32 @@ EXCLUDED_TRAINING_MODULES = [
     "core.oto_ml_collection_discovery",
     "core.oto_ml_collection_types",
     "core.oto_ml_dataset",
+    "core.oto_ml_ensemble",
     "core.oto_ml_export",
+    "core.oto_ml_prepare_discovery",
+    "core.oto_ml_prepare_steps",
+    "core.oto_ml_prepare_types",
     "core.oto_ml_staging",
+    "core.sequence_residual_preprocessor",
 ]
+EXCLUDED_BUILD_ONLY_MODULES = [
+    "build",
+    "core.mapping_supervised_training",
+    "ml.tests.test_alignment_pipeline",
+]
+
+
+def _excluded_build_modules() -> list[str]:
+    seen = set()
+    out = []
+    for name in EXCLUDED_MODULES + EXCLUDED_TRAINING_MODULES + EXCLUDED_BUILD_ONLY_MODULES:
+        normalized = str(name or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
 RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "profiles"), "assets/profiles"),
     (os.path.join(APP_DIR, "assets", "models", "oto_ml"), "assets/models/oto_ml"),
@@ -100,8 +126,11 @@ RELEASE_SCRIPT_FOLDER_ALLOWLIST = {
 RELEASE_SCRIPT_EXTENSIONS = {".py", ".ps1", ".bat", ".cmd"}
 RELEASE_FORBIDDEN_DIR_NAMES = {
     ".cache",
+    ".claude",
+    ".code-review-graph",
     ".env",
     ".git",
+    ".github",
     ".hg",
     ".mypy_cache",
     ".pytest_cache",
@@ -112,24 +141,45 @@ RELEASE_FORBIDDEN_DIR_NAMES = {
     "__pycache__",
     "_build_model_profiles",
     "_selector_datasets",
+    "aligner_sample",
     "dataset_staged",
     "dataset_workspace",
+    "docs",
     "dist",
     "dist_nuitka",
+    "eval_runs",
+    "installer",
     "logs",
+    "ml_models",
+    "ml_models_noml_auto",
+    "ml_models_old",
     "ml_workspace",
+    "plan",
     "portable_output",
     "test_wavs",
+    "tests",
+}
+RELEASE_FORBIDDEN_PATH_PREFIXES = {
+    "ml/scripts",
+    "ml/tests",
 }
 RELEASE_FORBIDDEN_FILE_NAMES = {
+    "coverage.xml",
     "nuitka-crash-report.xml",
+    "pytest.ini",
     "requirements-train.md",
     "requirements-train.txt",
     "selector_dataset.csv",
 }
 RELEASE_FORBIDDEN_FILE_EXTENSIONS = {
+    ".ckpt",
+    ".csv",
     ".feather",
+    ".jsonl",
     ".parquet",
+    ".pth",
+    ".pt",
+    ".tsv",
 }
 RELEASE_MODEL_PRUNE_FILE_NAMES = {
     "eval_summary.json",
@@ -397,14 +447,6 @@ def _has_preview_channel(target_channels) -> bool:
     return any(str(ch).strip().lower() == "preview" for ch in (target_channels or []))
 
 
-def _is_module_available(module_name: str) -> bool:
-    if not module_name:
-        return False
-    try:
-        return importlib.util.find_spec(module_name) is not None
-    except Exception:
-        return False
-
 def _parse_args():
     parser = argparse.ArgumentParser(description="Build UTAU Auto OTO distributables.")
     parser.add_argument("--onefile", action="store_true", help="Build onefile executable (unsafe/experimental).")
@@ -572,7 +614,7 @@ def _resolve_app_icon_path():
     return ""
 
 
-def _build_pyinstaller_args(app_name, ffmpeg_bin, app_icon_path="", onefile=False, include_domino_module=False):
+def _build_pyinstaller_args(app_name, ffmpeg_bin, app_icon_path="", onefile=False):
     import customtkinter
 
     ctk_path = os.path.dirname(customtkinter.__file__)
@@ -594,17 +636,15 @@ def _build_pyinstaller_args(app_name, ffmpeg_bin, app_icon_path="", onefile=Fals
     ]
     for src, name in _iter_msvc_runtime_files():
         pyinstaller_args.append(f"--add-binary={src};.")
-    if include_domino_module:
-        pyinstaller_args.append("--hidden-import=pydomino")
     for src, dst in _iter_runtime_data_entries():
         pyinstaller_args.append(f"--add-data={src};{dst}")
     if app_icon_path:
         pyinstaller_args.append(f"--icon={app_icon_path}")
-    for module_name in EXCLUDED_MODULES + EXCLUDED_TRAINING_MODULES:
+    for module_name in _excluded_build_modules():
         pyinstaller_args.append(f"--exclude-module={module_name}")
     return pyinstaller_args
 
-def _run_pyinstaller_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, include_domino_module=False):
+def _run_pyinstaller_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False):
     print("Loading PyInstaller...")
     import PyInstaller.__main__
 
@@ -613,7 +653,6 @@ def _run_pyinstaller_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False
         ffmpeg_bin=ffmpeg_bin,
         app_icon_path=app_icon_path,
         onefile=onefile,
-        include_domino_module=include_domino_module,
     )
     PyInstaller.__main__.run(pyinstaller_args)
 
@@ -628,7 +667,7 @@ def _run_pyinstaller_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False
         raise FileNotFoundError(f"Built app directory not found: {dist_dir}")
     return dist_dir
 
-def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, include_domino_module=False, dev=False):
+def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, dev=False):
     import customtkinter
 
     ctk_path = os.path.dirname(customtkinter.__file__)
@@ -655,7 +694,7 @@ def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, inc
         "--include-package=customtkinter",
         "--include-package=onnxruntime",
         f"--jobs={cpu_jobs}",
-        f"--nofollow-import-to={','.join(EXCLUDED_MODULES + EXCLUDED_TRAINING_MODULES)}",
+        f"--nofollow-import-to={','.join(_excluded_build_modules())}",
     ]
     if dev:
         # Dev mode: ccache for incremental recompilation, no LTO, no source cleanup.
@@ -664,9 +703,6 @@ def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, inc
     else:
         # Release mode: clean C source tree after build to save disk space.
         cmd.append("--remove-output")
-    if include_domino_module:
-        cmd.append("--include-package=pydomino")
-
     if ffmpeg_bin:
         _validate_ffmpeg_bin(ffmpeg_bin)
     include_entries = [(ctk_path, "customtkinter")]
@@ -907,12 +943,39 @@ def _is_model_payload_path(parts: list[str]) -> bool:
     )
 
 
+def _has_forbidden_release_prefix(parts: list[str]) -> bool:
+    joined = "/".join(parts)
+    for prefix in RELEASE_FORBIDDEN_PATH_PREFIXES:
+        normalized = str(prefix or "").strip().lower().strip("/")
+        if not normalized:
+            continue
+        if joined == normalized or joined.endswith("/" + normalized) or ("/" + normalized + "/") in ("/" + joined + "/"):
+            return True
+    return False
+
+
+def _is_forbidden_script_payload(parts: list[str], filename: str) -> bool:
+    if not parts or len(parts) < 2:
+        return False
+    if parts[-2] != "scripts":
+        return False
+    ext = os.path.splitext(filename)[1].strip().lower()
+    if ext not in RELEASE_SCRIPT_EXTENSIONS:
+        return False
+    allowed = {str(name).strip().lower() for name in RELEASE_SCRIPT_FOLDER_ALLOWLIST if str(name).strip()}
+    return filename not in allowed
+
+
 def _is_forbidden_release_file(rel_path: str) -> bool:
     parts = _release_path_parts(rel_path)
     if not parts:
         return False
     filename = parts[-1]
     stem, ext = os.path.splitext(filename)
+    if _has_forbidden_release_prefix(parts):
+        return True
+    if _is_forbidden_script_payload(parts, filename):
+        return True
     if any(part in RELEASE_FORBIDDEN_DIR_NAMES for part in parts[:-1]):
         return True
     if filename in RELEASE_FORBIDDEN_FILE_NAMES:
@@ -939,7 +1002,7 @@ def _prune_forbidden_release_payload(release_dir: str) -> list[str]:
             full_dir = os.path.join(dirpath, dirname)
             rel_dir = _release_relpath(release_dir, full_dir)
             parts = _release_path_parts(rel_dir)
-            if parts and parts[-1] in RELEASE_FORBIDDEN_DIR_NAMES:
+            if parts and (parts[-1] in RELEASE_FORBIDDEN_DIR_NAMES or _has_forbidden_release_prefix(parts)):
                 try:
                     _safe_rmtree(full_dir)
                     removed.append(rel_dir + "/")
@@ -969,7 +1032,7 @@ def _validate_release_payload_no_training_data(release_dir: str) -> None:
     for dirpath, dirnames, filenames in os.walk(release_dir):
         rel_dir = _release_relpath(release_dir, dirpath)
         parts = _release_path_parts(rel_dir)
-        if parts and any(part in RELEASE_FORBIDDEN_DIR_NAMES for part in parts):
+        if parts and (any(part in RELEASE_FORBIDDEN_DIR_NAMES for part in parts) or _has_forbidden_release_prefix(parts)):
             offenders.append(rel_dir + "/")
             dirnames[:] = []
             continue
@@ -1162,19 +1225,11 @@ def _install_build_dependencies(backend, target_channels=None):
     elif backend == "pyinstaller":
         subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
 
-    if not _has_preview_channel(target_channels):
-        print("[INFO] Preview channel not selected; skipping pydomino dependency install.")
-        return
-
     preview_req = os.path.join(APP_DIR, PREVIEW_REQUIREMENTS_FILE)
-    if not os.path.isfile(preview_req):
-        print(
-            f"[WARN] Preview channel selected but {PREVIEW_REQUIREMENTS_FILE} was not found. "
-            "Skipping pydomino install."
-        )
+    if not (_has_preview_channel(target_channels) and os.path.isfile(preview_req)):
         return
 
-    print("[INFO] Preview channel selected; installing preview-only dependencies (pydomino)...")
+    print("[INFO] Preview channel selected; installing preview-only dependencies...")
     subprocess.check_call(
         [
             sys.executable,
@@ -1196,7 +1251,6 @@ def main():
 
     target_channels = _parse_channels(args.channel, args.channels)
     args.channel = target_channels[0]
-    include_domino_module = _has_preview_channel(target_channels)
 
     _assert_build_python_version()
 
@@ -1220,11 +1274,6 @@ def main():
         print("[1/5] Installing build dependencies...")
         _install_build_dependencies(args.backend, target_channels=target_channels)
 
-    if include_domino_module and not _is_module_available(PYDOMINO_PACKAGE):
-        print("[WARN] Preview channel selected but pydomino is unavailable in this Python env.")
-        print("[WARN] Domino runtime module will not be bundled in this build.")
-        include_domino_module = False
-
     print("[2/5] Preparing runtime assets...")
     if bundle_mode == "online":
         print("[INFO] bundle-mode=online: skipping bundled runtime assets (downloaded at runtime).")
@@ -1243,9 +1292,9 @@ def main():
     dev_build = bool(getattr(args, "dev", False))
     print(f"[3/5] Building app with {args.backend}...")
     if args.backend == "nuitka":
-        built_artifact = _run_nuitka_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile, include_domino_module=include_domino_module, dev=dev_build)
+        built_artifact = _run_nuitka_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile, dev=dev_build)
     else:
-        built_artifact = _run_pyinstaller_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile, include_domino_module=include_domino_module)
+        built_artifact = _run_pyinstaller_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile)
 
     print(f"[4/5] Packaging release folder ({mode_text})...")
     release_dirs = []

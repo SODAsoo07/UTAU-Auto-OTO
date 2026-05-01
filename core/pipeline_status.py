@@ -10,7 +10,6 @@ OK = "OK"
 ALIGNER_QUALITY_TIER: Dict[str, float] = {
     "mfa": 1.0,
     "sequence": 0.55,
-    "domino": 0.80,
     "none": 0.0,
     "existing": 0.85,
 }
@@ -96,14 +95,10 @@ def normalize_aligner_name(value, default: str = "mfa") -> str:
         "utau_sequence",
     }:
         return "sequence"
-    if text in {"domino", "pydomino", "domino (jp)", "domino(jp)", "jp_domino", "jp-domino"}:
-        return "domino"
     if "no-mfa" in text or "nomfa" in text:
         return "none"
     if "sequence" in text or "dedicated" in text or "시퀀스" in text:
         return "sequence"
-    if "domino" in text:
-        return "domino"
     return default
 
 
@@ -166,8 +161,6 @@ def classify_alignment_error(engine: str, message: str) -> str:
     if "executable not found" in lowered or "infer.py" in lowered:
         return ALIGN_EXEC_MISSING
     if eng == "mfa" and "mfa executable" in lowered:
-        return ALIGN_EXEC_MISSING
-    if eng == "domino" and ("pydomino" in lowered or "domino executable" in lowered):
         return ALIGN_EXEC_MISSING
     if eng == "sequence" and ("python-textgrid" in lowered or "textgrid import" in lowered):
         return ALIGN_NOT_READY
