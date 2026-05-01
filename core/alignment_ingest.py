@@ -3,6 +3,65 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+def _seq_seg_log_enabled() -> bool:
+    import os
+    return str(os.environ.get("UTOA_SEQ_SEGMENT_LOG", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _apply_viterbi_correction(phones: list, file_ctx, loop_prep) -> list:
+    """Apply sequence-segment Viterbi boundary correction when alignment trust is low/mid."""
+    wav_path = str(getattr(file_ctx, "wav_path_for_signal", "") or "")
+    if not wav_path or not phones:
+        return phones
+    trust_tier = str(getattr(loop_prep, "textgrid_trust_tier", "low") or "low")
+    prefer_seq = bool(getattr(loop_prep, "prefer_filename_sequence", False))
+    try:
+        from core.sequence_segment import correct_phone_intervals_by_viterbi
+        corrected = correct_phone_intervals_by_viterbi(
+            phones,
+            wav_path,
+            trust_tier=trust_tier,
+            prefer_sequence=prefer_seq,
+        )
+    except Exception:
+        return phones
+
+    if corrected is phones or corrected == phones:
+        return phones
+
+    if _seq_seg_log_enabled() and len(phones) == len(corrected):
+        wav_name = str(getattr(file_ctx, "real_wav_name", "") or "")
+        shifts = []
+        for orig, corr in zip(phones, corrected):
+            orig_start = float(getattr(orig, "minTime", 0.0)) * 1000.0
+            corr_start = float(getattr(corr, "minTime", 0.0)) * 1000.0
+            orig_end = float(getattr(orig, "maxTime", 0.0)) * 1000.0
+            corr_end = float(getattr(corr, "maxTime", 0.0)) * 1000.0
+            shifts.append(abs(corr_start - orig_start) + abs(corr_end - orig_end))
+        avg_shift = sum(shifts) / len(shifts) if shifts else 0.0
+        max_shift = max(shifts) if shifts else 0.0
+        print(
+            f"[SeqSeg] {wav_name} trust={trust_tier} prefer_seq={prefer_seq}"
+            f" phones={len(phones)} avg_shift={avg_shift:.1f}ms max_shift={max_shift:.1f}ms"
+        )
+        if max_shift > 5.0:
+            details = []
+            for orig, corr in zip(phones, corrected):
+                os_ms = float(getattr(orig, "minTime", 0.0)) * 1000.0
+                cs_ms = float(getattr(corr, "minTime", 0.0)) * 1000.0
+                oe_ms = float(getattr(orig, "maxTime", 0.0)) * 1000.0
+                ce_ms = float(getattr(corr, "maxTime", 0.0)) * 1000.0
+                shift = abs(cs_ms - os_ms) + abs(ce_ms - oe_ms)
+                if shift > 5.0:
+                    details.append(
+                        f"  [{orig.mark}] {os_ms:.0f}-{oe_ms:.0f}ms → {cs_ms:.0f}-{ce_ms:.0f}ms"
+                    )
+            for line in details:
+                print(line)
+
+    return corrected
+
+
 @dataclass
 class AlignmentIngestSnapshot:
     language: str
@@ -41,7 +100,8 @@ def _base_snapshot(language, file_ctx, loop_prep):
 
 def build_ja_alignment_ingest(file_ctx, loop_prep):
     snapshot = _base_snapshot("japanese", file_ctx, loop_prep)
-    snapshot.phones = list(getattr(loop_prep, "ph_intervals", []) or [])
+    phones = list(getattr(loop_prep, "ph_intervals", []) or [])
+    snapshot.phones = _apply_viterbi_correction(phones, file_ctx, loop_prep)
     snapshot.words = list(getattr(loop_prep, "wd_intervals", []) or [])
     snapshot.timeline_meta = {
         "timeline_start_ms": float(getattr(loop_prep, "timeline_start_ms", 0.0) or 0.0),
@@ -73,7 +133,8 @@ def build_ja_alignment_ingest(file_ctx, loop_prep):
 
 def build_kr_alignment_ingest(file_ctx, loop_prep):
     snapshot = _base_snapshot("korean", file_ctx, loop_prep)
-    snapshot.phones = list(getattr(loop_prep, "ph_intervals", []) or [])
+    phones = list(getattr(loop_prep, "ph_intervals", []) or [])
+    snapshot.phones = _apply_viterbi_correction(phones, file_ctx, loop_prep)
     snapshot.phones_all = list(getattr(loop_prep, "ph_intervals_all", []) or [])
     snapshot.words = list(getattr(loop_prep, "wd_intervals", []) or [])
     snapshot.timeline_meta = {

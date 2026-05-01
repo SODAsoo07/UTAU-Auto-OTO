@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from typing import Dict, List
 
-from core.domino_runner import check_domino_ready, run_domino_align
 from core.mfa_runner import check_mfa_ready, run_mfa_align
 from core.sequence_aligner import check_sequence_aligner_ready, run_sequence_align
 from core.pipeline_status import (
@@ -52,13 +51,11 @@ def _should_retry_mfa_with_fallback(message: str) -> bool:
 def _mfa_profile_chain(language: str, requested_profile: str) -> List[str]:
     _ = str(language or "").strip().lower()
     req = str(requested_profile or "").strip().lower()
-    valid = ["default", "accurate", "accurate_adapted", "high_pitch_accurate", "fast"]
+    valid = ["default", "accurate", "accurate_adapted", "fast"]
     if req not in valid:
         req = "default"
     fallback = "fast"
-    if req == "high_pitch_accurate":
-        fallback = "accurate_adapted"
-    elif req in {"fast", "accurate", "accurate_adapted"}:
+    if req in {"fast", "accurate", "accurate_adapted"}:
         fallback = "default"
     if fallback == req:
         return [req]
@@ -104,9 +101,6 @@ def run_alignment_with_fallback(
 
     normalized_primary = normalize_aligner_name(primary_aligner, default="mfa")
     resolved_fallback = fallback_aligner
-    if normalized_primary == "domino" and not str(fallback_aligner or "").strip():
-        # Domino is Japanese-only and optional. Keep MFA as implicit fallback.
-        resolved_fallback = "mfa"
     if normalized_primary == "sequence" and not str(fallback_aligner or "").strip():
         # Dedicated sequence aligner is heuristic-first; keep MFA fallback for runtime safety.
         resolved_fallback = "mfa"
@@ -218,61 +212,6 @@ def run_alignment_with_fallback(
             last_err = str(err or "")
             last_code = str(code or ALIGN_RUN_FAILED)
             _emit(callback, f"[Align] failed engine=sequence code={code} message={err}")
-            continue
-
-        if engine == "domino":
-            ready = check_domino_ready(
-                language=lang,
-                wav_folder=wav_folder,
-                callback=callback,
-            )
-            ready["engine"] = "domino"
-            ready["attempt_index"] = len(attempts) + 1
-            attempts.append(dict(ready))
-            if str(ready.get("code", OK)).upper() != OK:
-                _emit(
-                    callback,
-                    f"[Align] not ready engine=domino code={ready.get('code')} message={ready.get('message', '')}",
-                )
-                last_err = str(ready.get("message", "") or "domino not ready")
-                last_code = str(ready.get("code", ALIGN_RUN_FAILED) or ALIGN_RUN_FAILED)
-                continue
-
-            run_attempt_count += 1
-            _emit(callback, "[Align] start engine=domino attempt=1/1")
-            ok, err = run_domino_align(
-                "",
-                wav_folder,
-                dictionary_path,
-                output_folder,
-                language=lang,
-                callback=callback,
-            )
-            if ok and not has_textgrid_files(output_folder):
-                ok = False
-                err = "TextGrid output missing after alignment."
-                code = ALIGN_OUTPUT_EMPTY
-            else:
-                code = OK if ok else classify_alignment_error("domino", err)
-
-            attempts.append(
-                make_runtime_report(
-                    "align",
-                    code,
-                    err or ("alignment complete" if ok else ""),
-                    engine="domino",
-                    attempt_index=len(attempts) + 1,
-                    ready=True,
-                    ok=bool(ok),
-                )
-            )
-            if ok:
-                used_engine = "domino"
-                break
-
-            last_err = str(err or "")
-            last_code = str(code or ALIGN_RUN_FAILED)
-            _emit(callback, f"[Align] failed engine=domino code={code} message={err}")
             continue
 
         # default: MFA
