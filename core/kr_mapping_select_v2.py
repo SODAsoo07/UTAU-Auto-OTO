@@ -1405,7 +1405,7 @@ def select_kr_general_cv_index(
         alias_norm = str(alias_type or "").strip().lower()
         forced_blank_gate = 0.66
         forced_blank_margin = 0.08
-        if fmt_norm in {"cvvc", "cvc"} and alias_norm in {"cv", "cv_head"}:
+        if fmt_norm in {"cvvc", "cvc", "vcv"} and alias_norm in {"cv", "cv_head"}:
             forced_blank_gate = 0.60
             forced_blank_margin = 0.06
         if forced_blank_conf >= forced_blank_gate and (expected_blank_conf + forced_blank_margin) < forced_blank_conf:
@@ -1673,7 +1673,7 @@ def select_kr_general_cv_index(
     if (
         selected_w_idx is not None
         and alias_type in {"cv", "cv_head"}
-        and str(file_format or "").strip().lower() in {"cvvc", "cvc"}
+        and str(file_format or "").strip().lower() in {"cvvc", "cvc", "vcv"}
         and _env_bool("UTOA_KR_CVVC_FORWARD_ONE_STEP_GUARD", True)
         and romaji_syllables
     ):
@@ -1798,7 +1798,7 @@ def resolve_kr_cv_head_forced_index(
 
     if (
         forced_cvvc_idx is not None
-        and str(file_format or "").strip().lower() in {"cvvc", "cvc"}
+        and str(file_format or "").strip().lower() in {"cvvc", "cvc", "vcv"}
         and _env_bool("UTOA_KR_CVVC_OCCURRENCE_STRICT_EXPECTED", True)
         and int(forced_cvvc_idx) > int(cv_seq_idx)
     ):

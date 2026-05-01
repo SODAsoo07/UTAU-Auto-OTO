@@ -102,13 +102,7 @@ def resolve_setup_mfa_script_path(**kwargs) -> str:
     return resolve_setup_script_path("setup_mfa.bat", **kwargs)
 
 
-def resolve_setup_ctc_script_path(**kwargs) -> str:
-    return resolve_setup_script_path("setup_ctc.bat", **kwargs)
-
-
 __all__ = [
     "resolve_setup_script_path",
     "resolve_setup_mfa_script_path",
-    "resolve_setup_ctc_script_path",
 ]
-

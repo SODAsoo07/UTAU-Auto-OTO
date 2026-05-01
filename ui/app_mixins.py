@@ -1332,6 +1332,7 @@ class AppRuntimeMixin:
     def _reset_developer_settings_defaults(self) -> None:
         defaults = {
             "developer_mode_enabled_var": False,
+            "aligner_var": "MFA",
             "enable_ml_correction_var": True,
             "ml_route_var": "자동(자동 라우팅)",
             "ml_selector_mode_var": "+셀렉터",
@@ -2413,10 +2414,13 @@ class AppRuntimeMixin:
             executable_path=str(getattr(sys, "executable", "") or ""),
         )
 
-    def _build_setup_mfa_recovery_guide(self):
+    def _build_setup_mfa_recovery_guide(self, language="korean"):
+        lang = str(language or "korean").strip().lower()
+        if lang not in {"korean", "japanese"}:
+            lang = "korean"
         script_path = self._resolve_setup_mfa_script_path()
         if script_path:
-            command = f'cmd /c ""{script_path}" --recovery --non-interactive"'
+            command = f'cmd /c ""{script_path}" --recovery --non-interactive --language {lang}"'
             return (
                 "자동 복구를 위해 setup_mfa.bat를 수동 실행해 주세요.\n"
                 f"- 스크립트 경로: {script_path}\n"
@@ -2426,9 +2430,9 @@ class AppRuntimeMixin:
         return (
             "자동 복구를 위해 setup_mfa.bat를 수동 실행해 주세요.\n"
             "- 실행 명령:\n"
-            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO_v3\\setup_mfa.bat\" --recovery --non-interactive\"\n"
+            f"cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO_v3\\setup_mfa.bat\" --recovery --non-interactive --language {lang}\"\n"
             "또는\n"
-            "cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --recovery --non-interactive\""
+            f"cmd /c \"\"%LOCALAPPDATA%\\UTAU_Auto_OTO\\setup_mfa.bat\" --recovery --non-interactive --language {lang}\""
         )
 
     def _show_msvc_required_alert(self):
@@ -3612,8 +3616,7 @@ class ConfigMixin:
                 except Exception:
                     saved_aligner = "mfa"
                 aligner_label_map = {
-                    "none": "MFA",
-                    "ctc": "CTC",
+                    "none": "No-MFA",
                     "sequence": "전용(시퀀스)",
                     "mfa": "MFA",
                 }

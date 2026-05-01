@@ -6,7 +6,6 @@ import customtkinter
 
 
 APP_DIR = os.path.abspath(os.path.dirname(__file__))
-FFMPEG_BIN = os.path.join(APP_DIR, "build_assets", "ffmpeg", "bin")
 RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "profiles"), "assets/profiles"),
     (os.path.join(APP_DIR, "assets", "models", "oto_ml"), "assets/models/oto_ml"),
@@ -18,8 +17,6 @@ RUNTIME_DATA_PATHS = [
 datas = [
     (os.path.dirname(customtkinter.__file__), "customtkinter/"),
 ]
-if os.path.isdir(FFMPEG_BIN):
-    datas.append((FFMPEG_BIN, "ffmpeg/bin"))
 
 for src, dst in RUNTIME_DATA_PATHS:
     if os.path.exists(src):

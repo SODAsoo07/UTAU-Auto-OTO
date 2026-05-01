@@ -586,6 +586,7 @@ def _run_one_case(
                     wav_folder=voicebank_dir,
                     dictionary_path=dict_path,
                     output_folder=tg_folder,
+                    format_hint=str(case_info.get("auto_format", "") or case_info.get("format_type", "") or ""),
                     primary_aligner=primary_aligner,
                     fallback_aligner=fallback_aligner,
                     mfa_path=str(case_info.get("mfa_path", "") or ""),

@@ -40,15 +40,6 @@ jobs:
             nuitka-${{ runner.os }}-py310-stable-
             nuitka-${{ runner.os }}-py310-
 
-      - name: Cache FFmpeg Runtime
-        uses: actions/cache@v4
-        with:
-          path: |
-            build_assets\ffmpeg
-          key: ffmpeg-runtime-${{ runner.os }}-${{ hashFiles('build.py') }}
-          restore-keys: |
-            ffmpeg-runtime-${{ runner.os }}-
-
       - name: Install Dependencies
         shell: pwsh
         run: |

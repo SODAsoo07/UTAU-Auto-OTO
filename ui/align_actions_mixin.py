@@ -1,6 +1,7 @@
 ﻿import os
 
 from core.alignment_pipeline import run_alignment_with_fallback
+from core.format_type_utils import normalize_auto_format_value
 from core.mfa_runner import check_mfa_model, download_mfa_model
 from core.pipeline_status import normalize_aligner_name
 from ui.i18n import t
@@ -60,6 +61,10 @@ class AlignActionsMixin:
             try:
                 wav_dir = self.wav_entry.get()
                 lang = self._get_language()
+                selected_format = normalize_auto_format_value(
+                    lang,
+                    self.auto_format_var.get() if hasattr(self, "auto_format_var") else "",
+                )
                 if lang == "english":
                     self._append_log("ℹ 영어 Preview CVVC 모드에서는 정렬 단계를 건너뜁니다.")
                     self._set_status("Alignment skipped (English Preview CVVC)")
@@ -73,7 +78,7 @@ class AlignActionsMixin:
                     default="mfa",
                 )
                 if hasattr(self, "_validate_alignment_input_files"):
-                    needs_lab_dict = primary_engine in {"mfa", "ctc"}
+                    needs_lab_dict = primary_engine == "mfa"
                     if needs_lab_dict and (not self._validate_alignment_input_files(wav_dir, dict_path)):
                         return
 
@@ -99,15 +104,11 @@ class AlignActionsMixin:
                         ):
                             self._set_status("MFA model missing")
                             return
-                elif primary_engine == "ctc":
-                    self._append_log("ℹ CTC 엔진 선택: torchaudio MMS 백엔드로 실행합니다.")
                 elif primary_engine == "sequence":
                     self._append_log("ℹ 전용 시퀀스 aligner 엔진 선택: frame-hop 라벨 기반 정렬을 실행합니다.")
 
                 if primary_engine == "mfa":
                     self._append_log(f"MFA profile: {mfa_profile}")
-                elif primary_engine == "ctc":
-                    self._append_log("Alignment engine: CTC (MMS)")
                 elif primary_engine == "sequence":
                     self._append_log("Alignment engine: Dedicated Sequence")
                 else:
@@ -124,6 +125,7 @@ class AlignActionsMixin:
                     fallback_aligner="",
                     mfa_path=self.mfa_path or "",
                     mfa_align_profile=mfa_profile,
+                    format_hint=selected_format,
                     overwrite_existing_textgrids=bool(overwrite_existing_textgrids),
                     callback=self._append_log,
                 )
@@ -135,18 +137,6 @@ class AlignActionsMixin:
                     err = str(result.get("message", "") or "alignment failed")
                     code = str(result.get("code", "") or "")
                     self._append_log(f"Alignment failed: {err} ({code})")
-                    if (
-                        primary_engine == "ctc"
-                        and hasattr(self, "_is_ctc_runtime_missing_error")
-                        and self._is_ctc_runtime_missing_error(code, err)
-                    ):
-                        recovered = False
-                        if hasattr(self, "_run_setup_ctc_script_fallback"):
-                            recovered = bool(self._run_setup_ctc_script_fallback(reason="align_runtime_missing"))
-                        if recovered:
-                            self._append_log("ℹ CTC 런타임 복구 완료. 정렬을 다시 시도해 주세요.")
-                        elif hasattr(self, "_notify_ctc_runtime_missing"):
-                            self._notify_ctc_runtime_missing(detail=err)
                     if hasattr(self, "_is_lab_or_dict_missing_alignment_error") and hasattr(self, "_notify_lab_or_dict_missing"):
                         if self._is_lab_or_dict_missing_alignment_error(code, err):
                             self._notify_lab_or_dict_missing(wav_dir, dict_path)

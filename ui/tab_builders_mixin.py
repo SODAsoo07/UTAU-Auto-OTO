@@ -540,6 +540,7 @@ class TabBuildersMixin:
             "도살 BUTCHER_TUNING",
             "펜촉 ianharuesaone",
             "다유 DAU_Multiverse",
+            "집냥 Blue",
         ]
 
         for line in credit_lines:

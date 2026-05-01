@@ -22,8 +22,6 @@ def _guess_alignment_source_from_path(tg_path: str) -> tuple[str, str]:
         return "sequence", "path_hint"
     if any(p in {"mfa", "montreal", "montreal_forced_aligner", "montreal-forced-aligner"} for p in parts):
         return "mfa", "path_hint"
-    if any(p in {"ctc", "ctc_align", "ctc_aligner"} for p in parts):
-        return "ctc", "path_hint"
     return "", ""
 
 
@@ -56,9 +54,99 @@ def _detect_alignment_source_from_tg(tg) -> tuple[str, str, dict[str, object]]:
                 return "sequence", "meta_tier", {"tier": tier_name, "mark": mark}
             if ("aligner=mfa" in mark) or ("source=mfa" in mark) or (mark == "mfa"):
                 return "mfa", "meta_tier", {"tier": tier_name, "mark": mark}
-            if ("aligner=ctc" in mark) or ("source=ctc" in mark) or (mark == "ctc"):
-                return "ctc", "meta_tier", {"tier": tier_name, "mark": mark}
     return "", "", {}
+
+
+@dataclass(frozen=True)
+class NormalizedInterval:
+    minTime: float
+    maxTime: float
+    mark: str
+
+
+class NormalizedIntervalTier:
+    def __init__(self, source_tier: object, intervals: Sequence[NormalizedInterval]):
+        self.source_tier = source_tier
+        self.name = str(getattr(source_tier, "name", "") or "")
+        self.intervals = list(intervals or [])
+
+    def __iter__(self):
+        return iter(self.intervals)
+
+    def __len__(self):
+        return len(self.intervals)
+
+    def __getitem__(self, index):
+        return self.intervals[index]
+
+
+def _iter_tier_entries(tier: object):
+    for attr in ("intervals", "_intervals", "entries", "items"):
+        entries = getattr(tier, attr, None)
+        if entries is not None and not callable(entries):
+            try:
+                return list(entries)
+            except Exception:
+                pass
+    try:
+        return list(tier)
+    except Exception:
+        return []
+
+
+def _get_first_existing_attr(obj: object, names: Sequence[str]):
+    for name in names:
+        if hasattr(obj, name):
+            value = getattr(obj, name)
+            if not callable(value):
+                return value
+    return None
+
+
+def _normalize_interval_entry(entry: object) -> Optional[NormalizedInterval]:
+    start = _get_first_existing_attr(entry, ("minTime", "xmin", "start", "start_time", "min_time"))
+    end = _get_first_existing_attr(entry, ("maxTime", "xmax", "end", "end_time", "max_time"))
+    mark = _get_first_existing_attr(entry, ("mark", "text", "label", "name"))
+    if start is None or end is None:
+        if isinstance(entry, (tuple, list)) and len(entry) >= 3:
+            start, end, mark = entry[0], entry[1], entry[2]
+        else:
+            return None
+    try:
+        start_f = float(start)
+        end_f = float(end)
+    except Exception:
+        return None
+    if end_f < start_f:
+        return None
+    return NormalizedInterval(start_f, end_f, str(mark or ""))
+
+
+def coerce_interval_tier(tier: object):
+    entries = _iter_tier_entries(tier)
+    if not entries:
+        return None
+    intervals = []
+    for entry in entries:
+        normalized = _normalize_interval_entry(entry)
+        if normalized is None:
+            return None
+        intervals.append(normalized)
+    if not intervals:
+        return None
+    first = entries[0]
+    if (
+        hasattr(first, "minTime")
+        and hasattr(first, "maxTime")
+        and hasattr(first, "mark")
+        and hasattr(tier, "__iter__")
+    ):
+        return tier
+    return NormalizedIntervalTier(tier, intervals)
+
+
+def is_interval_like_tier(tier: object) -> bool:
+    return coerce_interval_tier(tier) is not None
 
 
 @dataclass
@@ -113,7 +201,7 @@ def prepare_file_context(
     context.real_wav_name = str(tg_info.get("real_name", "") or "")
     context.output_wav_name = str(tg_info.get("output_name", context.real_wav_name) or context.real_wav_name)
     source_from_info = str(tg_info.get("alignment_source", tg_info.get("source", "")) or "").strip().lower()
-    if source_from_info in {"sequence", "mfa", "ctc"}:
+    if source_from_info in {"sequence", "mfa"}:
         context.alignment_source = source_from_info
         context.alignment_source_reason = "tg_info"
     else:
@@ -188,21 +276,27 @@ def load_named_tiers(
         context.alignment_source = src
         context.alignment_source_reason = reason
         context.alignment_source_meta = dict(meta or {})
+    phone_tier_key = str(phone_tier_name or "").strip().lower()
+    word_tier_key = str(word_tier_name or "").strip().lower()
     for tier in tg:
         if tier_predicate and not tier_predicate(tier):
             continue
-        tier_name = getattr(tier, "name", None)
-        if tier_name == phone_tier_name:
-            context.phone_tier = tier
-        elif tier_name == word_tier_name:
-            context.word_tier = tier
+        tier_name = str(getattr(tier, "name", "") or "").strip().lower()
+        if tier_name == phone_tier_key:
+            context.phone_tier = coerce_interval_tier(tier)
+        elif tier_name == word_tier_key:
+            context.word_tier = coerce_interval_tier(tier)
     if context.phone_tier is None:
         context.status = "tier_missing"
     return context
 
 
 __all__ = [
+    "NormalizedInterval",
+    "NormalizedIntervalTier",
     "PreparedFileContext",
+    "coerce_interval_tier",
+    "is_interval_like_tier",
     "load_named_tiers",
     "prepare_file_context",
 ]

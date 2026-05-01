@@ -358,7 +358,7 @@ class LayoutMixin:
         build_left_label(self.row_aligner, t("정렬 엔진:")).pack(side="left")
         self.aligner_menu = ctk.CTkOptionMenu(
             self.row_aligner,
-            values=["MFA", "CTC", "전용(시퀀스)"],
+            values=["MFA", "전용(시퀀스)"],
             variable=self.aligner_var,
             width=190,
             command=self._on_aligner_change,
@@ -376,7 +376,6 @@ class LayoutMixin:
         self.no_mfa_oto_mode_menu = ctk.CTkOptionMenu(
             self.row_no_mfa_oto_mode,
             values=[
-                "에일리어스 기반 자동 생성(빈 OTO 기준)",
                 "베이스 OTO 재매핑 + 보정",
             ],
             variable=self.no_mfa_oto_mode_var,
@@ -387,7 +386,7 @@ class LayoutMixin:
         self.no_mfa_oto_mode_menu.pack(side="left", padx=(6, 8))
         self.no_mfa_oto_mode_hint_label = ctk.CTkLabel(
             self.row_no_mfa_oto_mode,
-            text=t("(No-MFA 자동설정 모드에서만 적용)"),
+            text=t("(베이스 OTO 필수, TextGrid 없이 음향 후보 점수로 보정)"),
             text_color=PALETTE.neutral_text,
         )
         self.no_mfa_oto_mode_hint_label.pack(side="left", fill="x", expand=True)
@@ -919,6 +918,7 @@ class LayoutMixin:
                 "자동 감지 (권장)",
                 "CV/연단음",
                 "CVC (한국어 전용)",
+                "COC (한국어 CVC 파생형)",
                 "CVVC",
                 "VCV (연속음)",
             ]
@@ -943,13 +943,14 @@ class LayoutMixin:
             "cv": "CV/연단음",
             "c_plus_v": "C+V (템플릿 전용)",
             "cvc": "CVC (한국어 전용)",
+            "coc": "COC (한국어 파생형)",
             "cvvc": "CVVC",
             "vcv": "VCV (연속음)",
             "cmpx": "CMPX (프리뷰)",
         }
         label = label_map.get(str(format_code or "").strip().lower(), "자동 감지 (권장)")
         if label not in values:
-            if label in {"CVC (한국어 전용)", "C+V (템플릿 전용)"} and lang != "korean":
+            if label in {"CVC (한국어 전용)", "COC (한국어 파생형)", "C+V (템플릿 전용)"} and lang != "korean":
                 label = "CV/연단음"
             elif label == "C+V (템플릿 전용)" and not self._is_preview_channel():
                 label = "CV/연단음"
@@ -1159,24 +1160,16 @@ class LayoutMixin:
     @staticmethod
     def _normalize_no_mfa_oto_mode_code(value):
         raw = str(value or "").strip().lower()
-        if raw in {"alias_auto", "alias-only", "alias_only", "blank_auto", "blank"}:
-            return "alias_auto"
         if raw in {"remap", "base_remap", "base"}:
             return "remap"
         text = str(value or "").strip()
-        if text == "에일리어스 기반 자동 생성(빈 OTO 기준)":
-            return "alias_auto"
         if text == "베이스 OTO 재매핑 + 보정":
             return "remap"
         return "remap"
 
     def _set_no_mfa_oto_mode_from_code(self, code):
         normalized = self._normalize_no_mfa_oto_mode_code(code)
-        label = (
-            "에일리어스 기반 자동 생성(빈 OTO 기준)"
-            if normalized == "alias_auto"
-            else "베이스 OTO 재매핑 + 보정"
-        )
+        label = "베이스 OTO 재매핑 + 보정"
         if hasattr(self, "no_mfa_oto_mode_var"):
             try:
                 self.no_mfa_oto_mode_var.set(label)
@@ -1234,14 +1227,21 @@ class LayoutMixin:
         self._save_config()
 
     def _sync_aligner_ui(self):
-        options = ["MFA", "CTC", "전용(시퀀스)"]
+        developer_enabled = (
+            bool(self.developer_mode_enabled_var.get())
+            if hasattr(self, "developer_mode_enabled_var")
+            else False
+        )
+        options = ["MFA", "전용(시퀀스)"]
+        if developer_enabled:
+            options.append("No-MFA")
         lang = self._get_language()
         current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA").strip()
         fmt = normalize_auto_format_value(lang, self.auto_format_var.get()) if hasattr(self, "auto_format_var") else ""
         is_kr_template_only = (lang == "korean" and fmt in {"cmpx", "c_plus_v"})
         forced_no_mfa = bool(lang == "english" or is_kr_template_only)
-        if current in {"No-MFA (Experimental)", "No-MFA"}:
-            current = "MFA"
+        if current == "No-MFA (Experimental)":
+            current = "No-MFA"
         if forced_no_mfa:
             current = "MFA"
         if current not in options:
@@ -1254,8 +1254,7 @@ class LayoutMixin:
                 self.aligner_menu.set(current)
             except Exception:
                 pass
-        use_no_mfa = forced_no_mfa
-        use_ctc = current == "CTC"
+        use_no_mfa = forced_no_mfa or current == "No-MFA"
         use_sequence = current == "전용(시퀀스)"
         is_cmpx_preview = (lang == "korean" and fmt == "cmpx")
         is_c_plus_v_mode = (lang == "korean" and fmt == "c_plus_v")
@@ -1295,13 +1294,9 @@ class LayoutMixin:
                 pass
 
         no_mfa_mode_code = self._get_no_mfa_oto_mode_code()
-        no_mfa_mode_desc = (
-            "에일리어스 기반 자동 생성(빈 OTO 기준)"
-            if no_mfa_mode_code == "alias_auto"
-            else "베이스 OTO 재매핑 + 보정"
-        )
+        no_mfa_mode_desc = "베이스 OTO 재매핑 + 보정"
         if hasattr(self, "mfa_align_profile_menu"):
-            self.mfa_align_profile_menu.configure(state="disabled" if (use_no_mfa or use_ctc or use_sequence) else "normal")
+            self.mfa_align_profile_menu.configure(state="disabled" if (use_no_mfa or use_sequence) else "normal")
         show_no_mfa_mode_row = use_no_mfa and not (
             lang == "english" or is_kr_template_only
         )
@@ -1329,8 +1324,6 @@ class LayoutMixin:
                     self.aligner_help_label.configure(
                         text=f"(No-MFA 생성 방식: {no_mfa_mode_desc})"
                     )
-            elif use_ctc:
-                self.aligner_help_label.configure(text=t("(CTC(MMS) 기반 정렬 + C/V 어댑터를 사용합니다.)"))
             elif use_sequence:
                 self.aligner_help_label.configure(text=t("(시퀀스 라벨 기반 전용 aligner baseline을 사용합니다.)"))
             else:
@@ -1366,19 +1359,11 @@ class LayoutMixin:
                     self.align_step_desc_label.configure(text=t("한국어 C+V 모드는 템플릿 OTO를 WAV에 재매핑하는 방식으로 생성합니다."))
                 else:
                     self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (No-MFA)"))
-                    if no_mfa_mode_code == "alias_auto":
-                        self.align_step_desc_label.configure(
-                            text=t("MFA 정렬 없이 진행합니다. 에일리어스만 있는 빈 OTO 기준으로 WAV 경계/프로필 기반 값을 자동 생성합니다.")
-                        )
-                    else:
-                        self.align_step_desc_label.configure(
-                            text=t("MFA 정렬 없이 진행합니다. 베이스 OTO를 WAV에 재매핑하고 0값 라인은 경계 추정으로 보정합니다.")
-                        )
+                    self.align_step_desc_label.configure(
+                        text=t("MFA 정렬 없이 진행합니다. 베이스 OTO를 WAV에 재매핑하고 저신뢰 라인은 음향 후보 점수로 보정합니다.")
+                    )
             else:
-                if use_ctc:
-                    self.align_step_title_label.configure(text=t("2. 음성 정렬 (CTC)"))
-                    self.align_step_desc_label.configure(text=t("torchaudio MMS CTC로 TextGrid를 생성하고 C/V 어댑터를 적용합니다."))
-                elif use_sequence:
+                if use_sequence:
                     self.align_step_title_label.configure(text=t("2. 음성 정렬 (전용 시퀀스)"))
                     self.align_step_desc_label.configure(text=t("frame-hop 시퀀스 라벨 기반으로 TextGrid를 생성합니다. 실패 시 MFA fallback을 사용합니다."))
                 else:
@@ -1442,6 +1427,8 @@ class LayoutMixin:
             self._sync_ml_e2e_controls()
         if hasattr(self, "_sync_vc_correction_toggle"):
             self._sync_vc_correction_toggle()
+        if hasattr(self, "_sync_aligner_ui"):
+            self._sync_aligner_ui()
 
     def _set_suboption_container_enabled(self, container, enabled: bool):
         if container is None:

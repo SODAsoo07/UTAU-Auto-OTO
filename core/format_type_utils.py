@@ -30,6 +30,8 @@ def normalize_format_type(language: str, format_type: str) -> str:
     if lang == "korean":
         if fmt.startswith("c+v") or fmt.startswith("c_plus_v") or fmt.startswith("cplusv"):
             return "c_plus_v"
+        if fmt.startswith("coc"):
+            return "cvc"
         if fmt.startswith("cvc"):
             return "cvc"
         if "rentan" in fmt or "연단음" in raw:
@@ -81,7 +83,11 @@ def normalize_auto_format_value(language: str, auto_format: str) -> str:
             or normalized.startswith("cplusv")
         ):
             return "c_plus_v"
+        if normalized == "coc" or normalized.startswith("coc/") or normalized.startswith("coc("):
+            return "cvc"
         if normalized == "cvc" or normalized.startswith("cvc/") or normalized.startswith("cvc("):
+            return "cvc"
+        if normalized.startswith("coc(한국어파생형)") or raw.strip() == "COC (한국어 파생형)":
             return "cvc"
         if normalized.startswith("cvc(한국어전용)") or raw.strip() == "CVC (한국어 전용)":
             return "cvc"

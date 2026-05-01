@@ -4,6 +4,7 @@ Text I/O helpers for encoding-aware reads.
 
 from __future__ import annotations
 
+import re
 from typing import List, Optional, Tuple
 
 
@@ -73,4 +74,89 @@ def load_template_oto_lines(
             lines.append(line)
 
     return lines, enc, warning, None
+
+
+def _normalize_alias_suffix_token(suffix: str) -> str:
+    text = str(suffix or "").strip()
+    if not text:
+        return ""
+    return text[1:] if text.startswith("_") else text
+
+
+def _split_oto_line_alias(line: str) -> tuple[str, str, str] | None:
+    if not line or "=" not in line:
+        return None
+    left, right = line.split("=", 1)
+    if "," in right:
+        alias, rest = right.split(",", 1)
+        return left, alias.strip(), rest
+    return left, right.strip(), ""
+
+
+def _replace_oto_line_alias(line: str, alias: str) -> str:
+    split = _split_oto_line_alias(line)
+    if split is None:
+        return line
+    left, _old_alias, rest = split
+    if rest:
+        return f"{left}={alias},{rest}"
+    return f"{left}={alias}"
+
+
+def strip_template_alias_suffixes(
+    lines: List[str],
+    *,
+    alias_suffix: str = "",
+) -> tuple[List[str], str, int]:
+    """
+    Strip pitch/style suffixes from template aliases for internal matching.
+    Returns: (normalized_lines, stripped_suffix, changed_count)
+    """
+    suffix = _normalize_alias_suffix_token(alias_suffix)
+    if suffix:
+        suffixes = [suffix]
+    else:
+        found: dict[str, int] = {}
+        suffix_pattern = re.compile(r"_(?P<suffix>[A-Ga-g][#b]?\d)$")
+        for line in lines or []:
+            split = _split_oto_line_alias(line)
+            if split is None:
+                continue
+            _left, alias, _rest = split
+            match = suffix_pattern.search(alias)
+            if not match:
+                continue
+            key = match.group("suffix")
+            found[key] = int(found.get(key, 0)) + 1
+        total_aliases = max(1, sum(1 for line in (lines or []) if _split_oto_line_alias(line) is not None))
+        suffixes = [
+            key for key, count in found.items()
+            if count >= 1 and (count / float(total_aliases)) >= 0.10
+        ]
+        suffixes.sort(key=len, reverse=True)
+    if not suffixes:
+        return list(lines or []), "", 0
+
+    out: List[str] = []
+    changed = 0
+    stripped_label = suffixes[0]
+    for line in lines or []:
+        split = _split_oto_line_alias(line)
+        if split is None:
+            out.append(line)
+            continue
+        _left, alias, _rest = split
+        new_alias = alias
+        for suffix_item in suffixes:
+            needle = "_" + suffix_item
+            if new_alias.endswith(needle) and len(new_alias) > len(needle):
+                new_alias = new_alias[: -len(needle)].rstrip()
+                stripped_label = suffix_item
+                break
+        if new_alias != alias:
+            out.append(_replace_oto_line_alias(line, new_alias))
+            changed += 1
+        else:
+            out.append(line)
+    return out, stripped_label, changed
 

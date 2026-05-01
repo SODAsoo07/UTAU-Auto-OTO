@@ -123,11 +123,8 @@ def _resolve_c_threshold(raw: object, default: float = 0.5) -> float:
 
 
 def _resolve_env_c_threshold(default: float) -> float:
-    keys = ("UTOA_CVN_C_THRESHOLD", "UTOA_CTC_CVN_C_THRESHOLD")
-    for key in keys:
-        raw = str(os.environ.get(key, "") or "").strip()
-        if not raw:
-            continue
+    raw = str(os.environ.get("UTOA_CVN_C_THRESHOLD", "") or "").strip()
+    if raw:
         return _resolve_c_threshold(raw, default=default)
     return float(default)
 

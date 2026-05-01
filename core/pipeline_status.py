@@ -9,7 +9,6 @@ OK = "OK"
 # A profile downgrade (e.g. accurate→fast) subtracts an additional 0.10.
 ALIGNER_QUALITY_TIER: Dict[str, float] = {
     "mfa": 1.0,
-    "ctc": 0.75,
     "sequence": 0.55,
     "domino": 0.80,
     "none": 0.0,
@@ -82,8 +81,6 @@ def normalize_aligner_name(value, default: str = "mfa") -> str:
         return "none"
     if text in {"mfa", "montreal"}:
         return "mfa"
-    if text in {"ctc", "mms", "mms-fa", "mms_fa", "torchaudio-ctc", "torchaudio_ctc"}:
-        return "ctc"
     if text in {
         "sequence",
         "seq",
@@ -103,8 +100,6 @@ def normalize_aligner_name(value, default: str = "mfa") -> str:
         return "domino"
     if "no-mfa" in text or "nomfa" in text:
         return "none"
-    if "ctc" in text:
-        return "ctc"
     if "sequence" in text or "dedicated" in text or "시퀀스" in text:
         return "sequence"
     if "domino" in text:
@@ -174,16 +169,8 @@ def classify_alignment_error(engine: str, message: str) -> str:
         return ALIGN_EXEC_MISSING
     if eng == "domino" and ("pydomino" in lowered or "domino executable" in lowered):
         return ALIGN_EXEC_MISSING
-    if eng == "ctc" and (
-        "torch" in lowered
-        or "torchaudio" in lowered
-        or "ctc runtime import failed" in lowered
-    ):
-        return ALIGN_EXEC_MISSING
     if eng == "sequence" and ("python-textgrid" in lowered or "textgrid import" in lowered):
         return ALIGN_NOT_READY
-    if eng == "ctc" and ("mms" in lowered or "bundle" in lowered or "model" in lowered):
-        return ALIGN_MODEL_MISSING
     return ALIGN_RUN_FAILED
 
 

@@ -29,7 +29,6 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from core.alignment_pipeline import run_alignment_with_fallback
-from core.ctc_runner import run_ctc_align
 from core.sequence_aligner import run_sequence_align
 from core.sinsy_label_ingest import load_sinsy_label_entries
 
@@ -411,8 +410,6 @@ def _target_label(target: str) -> str:
     t = str(target or "").strip().lower()
     if t == "mfa":
         return "MFA"
-    if t == "ctc":
-        return "CTC"
     if t == "sequence":
         return "Sequence"
     return t.upper() or "Target"
@@ -429,15 +426,6 @@ def _run_target_align(
     t = str(target or "").strip().lower()
     if t == "sequence":
         return run_sequence_align(
-            "",
-            voicebank,
-            dictionary_path,
-            out_dir,
-            language=language,
-            callback=_log,
-        )
-    if t == "ctc":
-        return run_ctc_align(
             "",
             voicebank,
             dictionary_path,
@@ -628,12 +616,8 @@ def _write_summary_md(path: str, payload: Dict[str, object]) -> None:
 
 
 def _resolve_targets(raw_target: str) -> List[str]:
-    v = str(raw_target or "both").strip().lower()
-    if v == "sequence":
-        return ["sequence"]
-    if v == "ctc":
-        return ["ctc"]
-    return ["sequence", "ctc"]
+    _ = str(raw_target or "sequence").strip().lower()
+    return ["sequence"]
 
 
 def _resolve_reference_mode(raw_mode: str) -> str:
@@ -644,10 +628,10 @@ def _resolve_reference_mode(raw_mode: str) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Compare MFA with Sequence/CTC alignments visually.")
+    parser = argparse.ArgumentParser(description="Compare MFA with Sequence alignments visually.")
     parser.add_argument("--voicebank", default=_DEFAULT_SODA_D4, help="Voicebank wav root folder")
     parser.add_argument("--language", default="japanese", choices=["japanese", "korean"], help="Alignment language")
-    parser.add_argument("--target", default="both", choices=["sequence", "ctc", "both"], help="Target engine to compare against MFA")
+    parser.add_argument("--target", default="sequence", choices=["sequence"], help="Target engine to compare against MFA")
     parser.add_argument(
         "--reference",
         default="truth",
@@ -682,7 +666,7 @@ def main() -> int:
     _safe_mkdir(out_root)
 
     ref_dir = _safe_mkdir(os.path.join(out_root, "mfa_textgrids"))
-    target_dirs = {"sequence": _safe_mkdir(os.path.join(out_root, "sequence_textgrids")), "ctc": _safe_mkdir(os.path.join(out_root, "ctc_textgrids"))}
+    target_dirs = {"sequence": _safe_mkdir(os.path.join(out_root, "sequence_textgrids"))}
 
     dictionary_path = os.path.join(
         voicebank,

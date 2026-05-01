@@ -64,13 +64,13 @@ from core.alignment_ingest import build_ja_alignment_ingest
 from core.oto_candidate_selection import maybe_promote_alias_candidate, select_primary_mapping_candidate
 from core.oto_diagnostics import MappingTraceCollector, SkippedEntryCollector
 from core.oto_diagnostics_adapter_v2 import GeneratorDiagnosticsAdapter
-from core.file_prepare import load_named_tiers, prepare_file_context
+from core.file_prepare import coerce_interval_tier, is_interval_like_tier, load_named_tiers, prepare_file_context
 from core.interval_lookup import build_interval_lookup, intervals_within_bounds
 from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
 from core.timing_anchor_profiles import is_anchor_lock_enabled
 from core.timing_anchor_runtime import append_timing_anchor_log
 from core.anchor_lock_adapter_v2 import apply_language_anchor_lock
-from core.textio_utils import load_template_oto_lines
+from core.textio_utils import load_template_oto_lines, strip_template_alias_suffixes
 from core.oto_profile_presets import get_ja_profile_preset
 from core.ja_mapping_v2 import (
     build_ja_cv_anchor_plan as _build_ja_cv_anchor_plan_v2,
@@ -925,7 +925,7 @@ def _collect_phone_tier_quality(ph_tier, expected_syllables, min_vowel_phone_rat
         float(phone_count_non_sil) / float(max(1, expected))
         if expected > 0 else 0.0
     )
-    min_vowel_needed = max(2, int(math.ceil(expected * max(0.1, float(min_vowel_phone_ratio or 0.5)))))
+    min_vowel_needed = max(min(2, expected), int(math.ceil(expected * max(0.1, float(min_vowel_phone_ratio or 0.5)))))
 
     reasons = []
     if expected > 0 and phone_count_non_sil < expected:
@@ -2584,6 +2584,7 @@ def generate_ja_oto(
         _find_wav_path_for_name,
         _wav_duration_ms,
         _apply_soft_mel_offset_cutoff_guard,
+        _estimate_mel_vowel_activity_span,
     )
 
     # GUI 형식 지정:
@@ -2840,7 +2841,12 @@ def generate_ja_oto(
     elif ja_style_profile and not ja_style_enabled:
         log("[JA-Profile] 추상 프리셋 적용 비활성화(환경변수 설정)")
 
-    wav_root_for_signal = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
+    _tg_abs = os.path.abspath(tg_folder.rstrip("\\/"))
+    try:
+        _has_wavs_in_tg = any(f.lower().endswith(".wav") for f in os.listdir(_tg_abs) if os.path.isfile(os.path.join(_tg_abs, f)))
+    except Exception:
+        _has_wavs_in_tg = False
+    wav_root_for_signal = _tg_abs if _has_wavs_in_tg else os.path.dirname(_tg_abs)
     existing_wav_names: set[str] = set()
     try:
         if os.path.isdir(wav_root_for_signal):
@@ -2870,6 +2876,20 @@ def generate_ja_oto(
     tg_entries = ja_setup.tg_index.tg_entries
     file_groups = dict(ja_setup.file_groups)
     use_template = bool(ja_setup.use_template)
+    if use_template:
+        normalized_template_lines, stripped_suffix, stripped_count = strip_template_alias_suffixes(
+            list(ja_setup.template_lines or []),
+            alias_suffix=alias_suffix,
+        )
+        if stripped_count > 0:
+            log(
+                f"[WARN] 베이스 OTO alias에 접미사 _{stripped_suffix}가 포함되어 있어 "
+                f"내부 매핑용으로 {stripped_count}개 alias에서 제거했습니다."
+            )
+            file_groups = {}
+            for line in normalized_template_lines:
+                fname = line.split("=", 1)[0]
+                file_groups.setdefault(fname, []).append(line)
 
     def _resolve_tg_info(fname):
         return ja_setup.tg_index.resolve_tg_info(fname, log_fn=log)
@@ -2888,6 +2908,92 @@ def generate_ja_oto(
             parse_filename_fn=parse_ja_filename,
             split_syllable_fn=split_ja_romaji_syllable,
             is_vowel_chain_fn=_is_vowel_chain_syllables,
+        )
+
+    placeholder_block_errors = []
+
+    def _is_zero_placeholder_line(line):
+        if not line or "=" not in line:
+            return False
+        try:
+            parts = line.split("=", 1)[1].split(",")
+            if len(parts) < 6:
+                return False
+            values = [float(str(parts[i]).strip()) for i in range(1, 6)]
+            return all(abs(v) < 1e-6 for v in values)
+        except Exception:
+            return False
+
+    def _lines_are_zero_placeholders(lines):
+        parsed = [line for line in (lines or []) if line and "=" in line]
+        return bool(parsed) and all(_is_zero_placeholder_line(line) for line in parsed)
+
+    def _drop_auto_placeholder_fallback(prev_final_len, fname, lines, reason):
+        reason_key = str(reason or "").strip().lower()
+        fatal_reasons = {
+            "textgrid_missing",
+            "textgrid_load_failed",
+            "tier_missing",
+            "empty_intervals",
+            "mapping_failed_empty_intervals",
+            "no_valid_alias",
+            "mapping_failed",
+            "mapping_failed_spn_heavy",
+            "mapping_failed_insufficient_phones",
+            "mapping_failed_no_words_support",
+            "file_exception",
+        }
+        is_zero_placeholder = _lines_are_zero_placeholders(lines)
+        is_fatal_generation_failure = reason_key in fatal_reasons
+        if not is_zero_placeholder and not is_fatal_generation_failure:
+            return False
+        del final_lines[prev_final_len:]
+        if is_fatal_generation_failure:
+            err = (
+                f"[ERROR] {fname}: 일본어 자동 설정에 필요한 TextGrid/tier/interval/mapping 정보를 확보하지 못해 저장을 중단했습니다. "
+                f"reason={reason}. TextGrid의 phones/words tier 이름, 정렬 결과, WAV-TextGrid 파일명 매칭을 확인하세요."
+            )
+        elif use_template:
+            err = (
+                f"[ERROR] {fname}: 일본어 0값 템플릿 OTO를 보정하지 못해 저장을 중단했습니다. "
+                f"reason={reason}. TextGrid의 phones/words tier 이름, 정렬 결과, WAV-TextGrid 파일명 매칭을 확인하세요."
+            )
+        else:
+            err = (
+                f"[ERROR] {fname}: 일본어 자동 생성 placeholder OTO가 보정되지 않아 저장을 중단했습니다. "
+                f"reason={reason}. TextGrid의 phones/words tier 이름, 정렬 결과, WAV-TextGrid 파일명 매칭을 확인하세요."
+            )
+        log(err)
+        errors.append(err)
+        placeholder_block_errors.append(err)
+        return True
+
+    def _offset_zero_collapse_error(lines):
+        total_rows = 0
+        zero_offset_rows = 0
+        for line in lines or []:
+            if not line or "=" not in line:
+                continue
+            try:
+                parts = line.split("=", 1)[1].split(",")
+                if len(parts) < 6:
+                    continue
+                offset_value = float(str(parts[1]).strip())
+            except Exception:
+                continue
+            total_rows += 1
+            if abs(offset_value) < 1e-6:
+                zero_offset_rows += 1
+        if total_rows < 5:
+            return ""
+        ratio = zero_offset_rows / float(total_rows)
+        if ratio < 0.90:
+            return ""
+        return (
+            f"[ERROR] 일본어 OTO 생성 결과의 offset이 비정상적으로 0에 몰려 저장을 중단했습니다 "
+            f"(zero_offset_rows={zero_offset_rows}/{total_rows}, ratio={ratio:.1%}, format={auto_gen_format}). "
+            "자동 alias placeholder가 보정되지 않았을 가능성이 큽니다. TextGrid phones tier, 정렬 품질, "
+            "WAV-TextGrid 파일명 매칭을 확인하세요."
         )
 
     processed = 0
@@ -2931,6 +3037,7 @@ def generate_ja_oto(
             load_sinsy_label_entries_fn=load_sinsy_label_entries,
             sinsy_label_path=sinsy_label_path,
         )
+        prev_final_len = len(final_lines)
         if handle_ja_file_context_status(
             file_ctx=file_ctx,
             fname=fname,
@@ -2942,6 +3049,7 @@ def generate_ja_oto(
             apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
             debug_reason_logging=ja_mapping_debug_reason_logging,
         ):
+            _drop_auto_placeholder_fallback(prev_final_len, fname, lines, getattr(file_ctx, "status", "file_context"))
             processed += 1
             continue
 
@@ -2949,8 +3057,9 @@ def generate_ja_oto(
             file_ctx=file_ctx,
             load_named_tiers_fn=load_named_tiers,
             load_textgrid_fn=textgrid.TextGrid.fromFile,
-            tier_predicate=lambda _tier: True,
+            tier_predicate=is_interval_like_tier,
         )
+        prev_final_len = len(final_lines)
         if handle_ja_file_context_status(
             file_ctx=file_ctx,
             fname=fname,
@@ -2962,6 +3071,7 @@ def generate_ja_oto(
             apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
             debug_reason_logging=ja_mapping_debug_reason_logging,
         ):
+            _drop_auto_placeholder_fallback(prev_final_len, fname, lines, getattr(file_ctx, "status", "file_context"))
             processed += 1
             continue
 
@@ -2974,9 +3084,11 @@ def generate_ja_oto(
 
         try:
             if not ph_tier:
-                log(f"⚠️ {fname}: phones 티어 없음 → 원본 유지")
+                log(f"❌ {fname}: phones 티어 없음 → 자동 설정 중단")
                 _record_unset_lines("tier_missing", fname, lines)
+                prev_final_len = len(final_lines)
                 final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
+                _drop_auto_placeholder_fallback(prev_final_len, fname, lines, "tier_missing")
                 processed += 1
                 continue
             
@@ -3006,6 +3118,7 @@ def generate_ja_oto(
                 alignment_source_reason=str(getattr(file_ctx, "alignment_source_reason", "") or ""),
                 alignment_source_meta=dict(getattr(file_ctx, "alignment_source_meta", {}) or {}),
             )
+            prev_final_len = len(final_lines)
             if handle_ja_loop_prep_status(
                 loop_prep=loop_prep,
                 fname=fname,
@@ -3016,6 +3129,7 @@ def generate_ja_oto(
                 record_unset_lines_fn=_record_unset_lines,
                 apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
             ):
+                _drop_auto_placeholder_fallback(prev_final_len, fname, lines, getattr(loop_prep, "status", "loop_prep"))
                 processed += 1
                 continue
 
@@ -3035,35 +3149,43 @@ def generate_ja_oto(
             cv_targets = list(alignment_ingest.extra.get("cv_targets") or [])
             sinsy_label_entries = list(alignment_ingest.extra.get("sinsy_label_entries") or [])
             from core.format_type_utils import normalize_format_type as _normalize_format_type
-
-            detected_format_raw = str(alignment_ingest.extra.get("detected_format") or "")
-            format_type_raw = str(alignment_ingest.extra.get("format_type") or "")
-            detected_format = _normalize_format_type("japanese", detected_format_raw)
-            format_type = _normalize_format_type("japanese", format_type_raw)
-            if format_type not in {"cv", "cvvc", "vcv", "vc_only", "br"}:
-                fallback_fmt = str(fallback_format or "").strip().lower()
-                if detected_format in {"cv", "cvvc", "vcv", "vc_only", "br"}:
-                    format_type = detected_format
-                elif fallback_fmt in {"cv", "cvvc", "vcv"}:
-                    format_type = fallback_fmt
-                else:
-                    format_type = "cvvc"
-            ja_style_profile = alignment_ingest.extra.get("ja_style_profile")
-            phone_quality = alignment_ingest.phone_quality
-            low_quality_reasons = alignment_ingest.low_quality_reasons
-            low_phone_quality = alignment_ingest.low_phone_quality
-            forced_words_mapping = bool(alignment_ingest.extra.get("forced_words_mapping"))
-            timeline_start_ms = float(alignment_ingest.timeline_meta.get("timeline_start_ms", 0.0) or 0.0)
-            effective_end_ms = float(alignment_ingest.timeline_meta.get("effective_end_ms", 0.0) or 0.0)
-            phone_spans_ms = list(alignment_ingest.timeline_meta.get("phone_spans_ms") or [])
-            conf_th = float(alignment_ingest.extra.get("conf_th", 0.0) or 0.0)
-            textgrid_trust_score = float(alignment_ingest.textgrid_trust_score or 0.0)
-            textgrid_trust_tier = str(alignment_ingest.textgrid_trust_tier or "low")
-            prefer_filename_sequence = bool(alignment_ingest.prefer_filename_sequence)
-            spn_ratio = float(phone_quality.get("spn_ratio_in_phone_tier", 0.0) or 0.0)
-            alignment_weight = _clamp01(textgrid_trust_score * 0.85)
-            if filename_syllables and alignment_weight < 0.55:
-                prefer_filename_sequence = True
+            ingest_state = extract_ja_alignment_ingest_state(
+                alignment_ingest=alignment_ingest,
+                fallback_format=fallback_format,
+                normalize_format_type_fn=_normalize_format_type,
+            )
+            wd_intervals = ingest_state["wd_intervals"]
+            ph_intervals = ingest_state["ph_intervals"]
+            update_single_vowel_span_by_first_phone(
+                phone_intervals=ph_intervals,
+                tg_path=file_ctx.tg_path,
+                single_vowel_span_by_tg_path=single_vowel_span_by_tg_path,
+                norm_tg_path_key_fn=_norm_tg_path_key,
+            )
+            filename_syllables = ingest_state["filename_syllables"]
+            cv_targets = ingest_state["cv_targets"]
+            sinsy_label_entries = ingest_state["sinsy_label_entries"]
+            detected_format = ingest_state["detected_format"]
+            format_type = ingest_state["format_type"]
+            ja_style_profile = ingest_state["ja_style_profile"]
+            phone_quality = ingest_state["phone_quality"]
+            low_quality_reasons = ingest_state["low_quality_reasons"]
+            low_phone_quality = ingest_state["low_phone_quality"]
+            forced_words_mapping = bool(ingest_state["forced_words_mapping"])
+            timeline_start_ms = float(ingest_state["timeline_start_ms"])
+            effective_end_ms = float(ingest_state["effective_end_ms"])
+            phone_spans_ms = list(ingest_state["phone_spans_ms"])
+            conf_th = float(ingest_state["conf_th"])
+            textgrid_trust_score = float(ingest_state["textgrid_trust_score"])
+            textgrid_trust_tier = str(ingest_state["textgrid_trust_tier"])
+            prefer_filename_sequence = bool(ingest_state["prefer_filename_sequence"])
+            spn_ratio = float(ingest_state["spn_ratio"])
+            alignment_weight = float(ingest_state["alignment_weight"])
+            if bool(ingest_state.get("syllable_order_guard_applied", False)):
+                log(
+                    f"[MAP] {fname}: syllable order guard applied "
+                    f"(reason={ingest_state.get('syllable_order_guard_reason', 'sequence_guard')})"
+                )
 
             post_ctx = build_ja_postprocess_context(
                 phone_spans_ms=phone_spans_ms,
@@ -3096,6 +3218,8 @@ def generate_ja_oto(
                 generate_openutau=generate_openutau,
                 generate_openutau_aliases_fn=generate_ja_openutau_aliases,
                 alias_suffix=alias_suffix,
+                mel_ctx_for_file=mel_ctx_for_file,
+                refine_vowel_span_fn=_estimate_mel_vowel_activity_span,
             ):
                 processed += 1
                 continue
@@ -3763,7 +3887,7 @@ def generate_ja_oto(
                     fail_reason = "mapping_failed_no_words_support"
                 elif not ph_intervals:
                     fail_reason = "mapping_failed_empty_intervals"
-                log(f"⚠️ {fname}: 음소-음절 매핑 실패 → 원본 유지")
+                log(f"❌ {fname}: 음소-음절 매핑 실패 → 자동 설정 중단")
                 _record_unset_lines(
                     fail_reason,
                     fname,
@@ -3780,31 +3904,25 @@ def generate_ja_oto(
                         "mapping_tier": mapping_tier,
                     },
                 )
+                prev_final_len = len(final_lines)
                 final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
+                _drop_auto_placeholder_fallback(prev_final_len, fname, lines, fail_reason)
                 processed += 1
                 continue
 
             if bool(runtime_policy.get("should_abstain")):
                 log(
-                    f"⚠️ {fname}: JA v2 planner abstain "
+                    f"⚠️ {fname}: JA v2 planner 저신뢰 "
                     f"(trust={textgrid_trust_score:.2f}, weight={alignment_weight:.2f}, "
                     f"coverage={float(ja_plan_policy.get('coverage', 0.0)):.2f}, "
-                    f"margin={float(ja_plan_policy.get('margin', 0.0)):.1f}) → 원본 유지"
+                    f"margin={float(ja_plan_policy.get('margin', 0.0)):.1f}) → 순서 잠금 보수 자동설정"
                 )
-                _record_unset_lines(
-                    "mapping_v2_abstain",
-                    fname,
-                    lines,
-                    meta={
-                        "mapping_confidence": mapping_confidence_base,
-                        "mapping_reason_code": mapping_reason_code,
-                        "mapping_tier": mapping_tier,
-                        "plan_policy": dict(ja_plan_policy or {}),
-                    },
+                runtime_policy["should_abstain"] = False
+                runtime_policy["force_sequence_lock"] = True
+                runtime_policy["low_conf_force_auto"] = True
+                runtime_policy["low_conf_reasons"] = sorted(
+                    set(list(runtime_policy.get("low_conf_reasons") or []) + ["planner_abstain_forced_auto"])
                 )
-                final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
-                processed += 1
-                continue
 
             lines_for_mapping = lines
             if format_type in ('cvvc', 'cv'):
@@ -4001,18 +4119,30 @@ def generate_ja_oto(
                     mapped_idx = int(vcv_mapping["mapped_idx"])
                     row_abstain = dict(vcv_mapping["row_abstain"])
                     if row_abstain.get("should_skip"):
-                        if ja_mapping_debug_reason_logging:
-                            log(
-                                f"🛡️ {fname}: JA 행 생성 스킵 "
-                                f"({row_abstain.get('reason')}, {alias})"
+                        row_abstain_reason = str(row_abstain.get("reason") or "")
+                        if row_abstain_reason in {
+                            "row_low_confidence",
+                            "row_low_margin_candidate",
+                            "row_high_blank_confidence",
+                        }:
+                            if ja_mapping_debug_reason_logging:
+                                log(
+                                    f"🛡️ {fname}: JA 저신뢰 VCV 행을 스킵하지 않고 보수 계산 "
+                                    f"({row_abstain_reason}, {alias})"
+                                )
+                        else:
+                            if ja_mapping_debug_reason_logging:
+                                log(
+                                    f"🛡️ {fname}: JA 행 생성 스킵 "
+                                    f"({row_abstain.get('reason')}, {alias})"
+                                )
+                            _record_unset(
+                                str(row_abstain.get("reason") or "row_abstain"),
+                                fname,
+                                line,
+                                meta={"diag_hint": row_abstain.get("diag_hint", "")},
                             )
-                        _record_unset(
-                            str(row_abstain.get("reason") or "row_abstain"),
-                            fname,
-                            line,
-                            meta={"diag_hint": row_abstain.get("diag_hint", "")},
-                        )
-                        continue
+                            continue
 
                     (
                         current_w_idx,
@@ -4364,29 +4494,41 @@ def generate_ja_oto(
                         min_row_confidence_by_alias_type={"cv_head": float(runtime_policy.get("row_conf_floor", 0.0) or 0.0) + 0.02},
                     )
                     if row_abstain.get("should_skip"):
-                        if ja_mapping_debug_reason_logging:
-                            log(
-                                f"🛡️ {fname}: JA 행 생성 스킵 "
-                                f"({row_abstain.get('reason')}, {alias})"
-                            )
-                        _record_unset(
-                            str(row_abstain.get("reason") or "row_abstain"),
-                            fname,
-                            line,
-                            meta={"diag_hint": row_abstain.get("diag_hint", "")},
-                        )
-                        if filename_order_locked and format_type in {"cvvc", "cv"}:
-                            # Even when CV_HEAD row is skipped, consume one sequence slot
-                            # to avoid the following CV rows drifting one mora backward.
-                            cv_seq_idx = min(int(expected_seq_idx) + 1, len(syllables_info))
-                            cv_head_pending_cv_rewind = False
-                            cv_head_rewind_target_tok = ""
+                        row_abstain_reason = str(row_abstain.get("reason") or "")
+                        if row_abstain_reason in {
+                            "row_low_confidence",
+                            "row_low_margin_candidate",
+                            "row_high_blank_confidence",
+                        }:
                             if ja_mapping_debug_reason_logging:
                                 log(
-                                    f"[JA] {fname}: CV_HEAD skip consumes sequence "
-                                    f"(next_seq={int(cv_seq_idx) + 1}, {alias})"
+                                    f"🛡️ {fname}: JA 저신뢰 CV_HEAD 행을 스킵하지 않고 보수 계산 "
+                                    f"({row_abstain_reason}, {alias})"
                                 )
-                        continue
+                        else:
+                            if ja_mapping_debug_reason_logging:
+                                log(
+                                    f"🛡️ {fname}: JA 행 생성 스킵 "
+                                    f"({row_abstain.get('reason')}, {alias})"
+                                )
+                            _record_unset(
+                                str(row_abstain.get("reason") or "row_abstain"),
+                                fname,
+                                line,
+                                meta={"diag_hint": row_abstain.get("diag_hint", "")},
+                            )
+                            if filename_order_locked and format_type in {"cvvc", "cv"}:
+                                # Even when CV_HEAD row is skipped, consume one sequence slot
+                                # to avoid the following CV rows drifting one mora backward.
+                                cv_seq_idx = min(int(expected_seq_idx) + 1, len(syllables_info))
+                                cv_head_pending_cv_rewind = False
+                                cv_head_rewind_target_tok = ""
+                                if ja_mapping_debug_reason_logging:
+                                    log(
+                                        f"[JA] {fname}: CV_HEAD skip consumes sequence "
+                                        f"(next_seq={int(cv_seq_idx) + 1}, {alias})"
+                                    )
+                            continue
                     current_w_idx = mapped_idx
                     if format_type == "vcv":
                         stable_vcv_seq_idx = min(stable_vcv_seq_idx + 1, max(len(syllables_info) - 1, 0))
@@ -4929,6 +5071,29 @@ def generate_ja_oto(
                         n_start = v_end
                         n_end = v_end + 100
 
+                    if alias_type == "vv" and mel_ctx_for_file:
+                        try:
+                            refined = _estimate_mel_vowel_activity_span(
+                                mel_ctx_for_file,
+                                n_start,
+                                n_end,
+                                search_pad_ms=120.0,
+                                min_span_ms=20.0,
+                            )
+                            if refined is not None:
+                                rv_start, rv_end = refined
+                                if rv_end > rv_start and (
+                                    abs(float(rv_start) - float(n_start)) >= 8.0
+                                    or abs(float(rv_end) - float(n_end)) >= 16.0
+                                ):
+                                    log(
+                                        f"🛡️ {fname}: 모음-only alias 모음 핵 기준 보정 "
+                                        f"({n_start:.1f}-{n_end:.1f}ms -> {rv_start:.1f}-{rv_end:.1f}ms) [{alias}]"
+                                    )
+                                    n_start, n_end = float(rv_start), float(rv_end)
+                        except Exception:
+                            pass
+
                     tail_dash_vv = bool(alias_type == "vv" and _is_ja_vv_tail_dash_alias(alias))
                     vc_target = n_start if alias_type == 'vc' else n_end
                     boundary = min(vc_target, c_end + 260)
@@ -5200,7 +5365,9 @@ def generate_ja_oto(
             logger.error(err_msg)
             errors.append(err_msg)
             _record_unset_lines("file_exception", fname, lines)
+            prev_final_len = len(final_lines)
             final_lines.extend([apply_suffix_to_oto_line(l, alias_suffix) for l in lines])
+            _drop_auto_placeholder_fallback(prev_final_len, fname, lines, "file_exception")
             processed += 1
 
         if callback and (processed % 5 == 0 or processed == total):
@@ -5235,7 +5402,15 @@ def generate_ja_oto(
                 try:
                     if v_span is None:
                         tg = textgrid.TextGrid.fromFile(tg_info['path'])
-                        phone_tier = next((t for t in tg if isinstance(t, textgrid.IntervalTier) and t.name == 'phones'), None)
+                        phone_tier = next(
+                            (
+                                coerce_interval_tier(t)
+                                for t in tg
+                                if str(getattr(t, "name", "") or "").strip().lower() == "phones"
+                                and is_interval_like_tier(t)
+                            ),
+                            None,
+                        )
                         if not phone_tier:
                             continue
                         intervals = [i for i in phone_tier if i.mark.strip() not in ['', 'sil', 'spn', 'pau', 'sp']]
@@ -5276,6 +5451,30 @@ def generate_ja_oto(
         cleanup_timing_jsonl=cleanup_timing_jsonl,
         timing_jsonl_prefix="timing_anchor_ja_",
     )
+
+    if placeholder_block_errors:
+        summary_err = (
+            f"[ERROR] 일본어 자동 설정을 완료할 수 없는 파일이 있어 OTO 저장을 중단했습니다 "
+            f"(blocked_files={len(placeholder_block_errors)}, format={auto_gen_format})."
+        )
+        log(summary_err)
+        errors.append(summary_err)
+        if isinstance(runtime_report, dict):
+            runtime_report["auto_placeholder_block_errors"] = list(placeholder_block_errors)
+            runtime_report["auto_generation_block_errors"] = list(placeholder_block_errors)
+        finalize_generator_finish(finish_context)
+        _log_unset_summary()
+        return processed, total, errors
+
+    zero_collapse_err = _offset_zero_collapse_error(final_lines)
+    if zero_collapse_err:
+        log(zero_collapse_err)
+        errors.append(zero_collapse_err)
+        if isinstance(runtime_report, dict):
+            runtime_report["offset_zero_collapse_error"] = zero_collapse_err
+        finalize_generator_finish(finish_context)
+        _log_unset_summary()
+        return processed, total, errors
 
     # 저장
     try:

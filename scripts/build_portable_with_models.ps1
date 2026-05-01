@@ -49,6 +49,97 @@ function Resolve-AbsolutePath {
     return [System.IO.Path]::GetFullPath($candidate)
 }
 
+$forbiddenReleaseDirNames = @(
+    ".cache", ".env", ".git", ".hg", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".svn",
+    ".venv", ".venv310", "__pycache__", "_build_model_profiles", "_selector_datasets",
+    "dataset_staged", "dataset_workspace", "dist", "dist_nuitka", "logs", "ml_workspace",
+    "portable_output", "test_wavs"
+)
+$forbiddenReleaseFileNames = @(
+    "nuitka-crash-report.xml", "requirements-train.md", "requirements-train.txt", "selector_dataset.csv"
+)
+$forbiddenReleaseExtensions = @(".feather", ".parquet")
+$modelPruneFileNames = @("eval_summary.json", "selector_dataset.csv")
+$modelPruneExtensions = @(".ckpt", ".pth", ".pt")
+
+function Get-ReleaseRelativePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$RootDir,
+        [Parameter(Mandatory = $true)][string]$FullPath
+    )
+    $rootFull = [System.IO.Path]::GetFullPath($RootDir).TrimEnd("\", "/")
+    $pathFull = [System.IO.Path]::GetFullPath($FullPath)
+    if ($pathFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $pathFull.Substring($rootFull.Length).TrimStart("\", "/").Replace("\", "/")
+    }
+    return $pathFull.Replace("\", "/")
+}
+
+function Test-ForbiddenReleasePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$RootDir,
+        [Parameter(Mandatory = $true)][string]$FullPath,
+        [Parameter(Mandatory = $true)][bool]$IsFile
+    )
+    $rel = Get-ReleaseRelativePath -RootDir $RootDir -FullPath $FullPath
+    $parts = @($rel.Split("/") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.ToLowerInvariant() })
+    if ($parts.Count -eq 0) { return $false }
+    $dirParts = if ($IsFile) { @($parts | Select-Object -First ($parts.Count - 1)) } else { $parts }
+    foreach ($part in $dirParts) {
+        if ($forbiddenReleaseDirNames -contains $part) { return $true }
+    }
+    if (-not $IsFile) { return $false }
+    $fileName = $parts[-1]
+    $ext = [System.IO.Path]::GetExtension($fileName).ToLowerInvariant()
+    if ($forbiddenReleaseFileNames -contains $fileName) { return $true }
+    if ($forbiddenReleaseExtensions -contains $ext) { return $true }
+    $joined = ($parts -join "/")
+    $isModelPayload = $joined.Contains("assets/models/oto_ml") -or $joined.Contains("models_installed/oto_ml") -or ($parts -contains "ml_models")
+    if ($isModelPayload) {
+        if ($modelPruneFileNames -contains $fileName) { return $true }
+        if ($modelPruneExtensions -contains $ext) { return $true }
+        if ([System.IO.Path]::GetFileNameWithoutExtension($fileName).ToLowerInvariant().EndsWith("_dataset")) { return $true }
+    }
+    return $false
+}
+
+function Remove-ForbiddenReleasePayload {
+    param([Parameter(Mandatory = $true)][string]$RootDir)
+    $removed = New-Object System.Collections.Generic.List[string]
+    if (-not (Test-Path -LiteralPath $RootDir)) { return @() }
+    $dirs = @(Get-ChildItem -LiteralPath $RootDir -Recurse -Directory -Force -ErrorAction SilentlyContinue |
+        Sort-Object { $_.FullName.Length } -Descending)
+    foreach ($dir in $dirs) {
+        if (Test-ForbiddenReleasePath -RootDir $RootDir -FullPath $dir.FullName -IsFile:$false) {
+            $removed.Add((Get-ReleaseRelativePath -RootDir $RootDir -FullPath $dir.FullName) + "/")
+            Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $files = @(Get-ChildItem -LiteralPath $RootDir -Recurse -File -Force -ErrorAction SilentlyContinue)
+    foreach ($file in $files) {
+        if (Test-ForbiddenReleasePath -RootDir $RootDir -FullPath $file.FullName -IsFile:$true) {
+            $removed.Add((Get-ReleaseRelativePath -RootDir $RootDir -FullPath $file.FullName))
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+    return @($removed)
+}
+
+function Assert-NoForbiddenReleasePayload {
+    param([Parameter(Mandatory = $true)][string]$RootDir)
+    $offenders = New-Object System.Collections.Generic.List[string]
+    $items = @(Get-ChildItem -LiteralPath $RootDir -Recurse -Force -ErrorAction SilentlyContinue)
+    foreach ($item in $items) {
+        if (Test-ForbiddenReleasePath -RootDir $RootDir -FullPath $item.FullName -IsFile:(-not $item.PSIsContainer)) {
+            $offenders.Add((Get-ReleaseRelativePath -RootDir $RootDir -FullPath $item.FullName))
+            if ($offenders.Count -ge 20) { break }
+        }
+    }
+    if ($offenders.Count -gt 0) {
+        throw "Portable payload contains training/data/dev artifacts:`n$($offenders -join "`n")"
+    }
+}
+
 $sourceAbs = Resolve-AbsolutePath -InputPath $SourceDir -BasePath $repoRoot
 $modelsAbs = Resolve-AbsolutePath -InputPath $ModelDir -BasePath $repoRoot
 $workAbs = Resolve-AbsolutePath -InputPath $WorkDir -BasePath $repoRoot
@@ -263,6 +354,17 @@ $requirementsMlSrc = Join-Path $repoRoot "requirements-ml.txt"
 $requirementsMlDst = Join-Path $sourceAbs "requirements-ml.txt"
 Sync-ReleaseFileIfNeeded -SourcePath $requirementsMlSrc -DestinationPath $requirementsMlDst -Label "requirements-ml.txt"
 
+$releaseOverlayFiles = @(
+    @{ Source = (Join-Path $repoRoot "setup_mfa.bat"); Destination = (Join-Path $sourceAbs "setup_mfa.bat"); Label = "setup_mfa.bat" },
+    @{ Source = (Join-Path $repoRoot "scripts\runtime_recovery.ps1"); Destination = (Join-Path $sourceAbs "runtime_recovery.ps1"); Label = "runtime_recovery.ps1" },
+    @{ Source = (Join-Path $repoRoot "scripts\startup_diagnose.ps1"); Destination = (Join-Path $sourceAbs "startup_diagnose.ps1"); Label = "startup_diagnose.ps1" },
+    @{ Source = (Join-Path $repoRoot "scripts\startup_diagnose.bat"); Destination = (Join-Path $sourceAbs "startup_diagnose.bat"); Label = "startup_diagnose.bat" },
+    @{ Source = (Join-Path $repoRoot "release_channel.json"); Destination = (Join-Path $sourceAbs "release_channel.json"); Label = "release_channel.json" }
+)
+foreach ($overlay in $releaseOverlayFiles) {
+    Sync-ReleaseFileIfNeeded -SourcePath $overlay.Source -DestinationPath $overlay.Destination -Label $overlay.Label
+}
+
 $requiredReleaseFiles = @(
     "release_channel.json",
     "setup_mfa.bat",
@@ -306,6 +408,15 @@ New-Item -ItemType Directory -Path $workAbs -Force | Out-Null
 Copy-Item -Path $sourceAbs -Destination $stageRoot -Recurse -Force
 Copy-Item -Path $modelsAbs -Destination (Join-Path $appDir "ML_models") -Recurse -Force
 Remove-InternalTestScriptsFromPayload -RootDir $stageRoot
+$removedForbiddenPayload = Remove-ForbiddenReleasePayload -RootDir $stageRoot
+if ($removedForbiddenPayload.Count -gt 0) {
+    Write-Host "[INFO] Pruned training/data/dev artifacts from portable payload:"
+    $removedForbiddenPayload | Select-Object -First 40 | ForEach-Object { Write-Host "  - $_" }
+    if ($removedForbiddenPayload.Count -gt 40) {
+        Write-Host ("  ... and {0} more" -f ($removedForbiddenPayload.Count - 40))
+    }
+}
+Assert-NoForbiddenReleasePayload -RootDir $stageRoot
 
 $shortcutPath = New-PortableTopShortcut -RootDir $stageRoot
 Write-Host "Created top-level shortcut: $shortcutPath"

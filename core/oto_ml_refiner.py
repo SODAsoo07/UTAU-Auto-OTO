@@ -67,6 +67,8 @@ from core.pipeline_status import (
 from core.timing_anchor_profiles import get_anchor_profile, is_anchor_lock_enabled
 from core.timing_anchor_runtime import AnchorTimingContext, apply_anchor_lock
 from core.selector_hard_negative import log_selector_hard_negative
+from core.runtime_config import get_ml_config
+from core.model_resolver import get_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -89,53 +91,57 @@ def _env_flag(name: str, default: bool) -> bool:
     return bool(default)
 
 
+# ---------------------------------------------------------------------------
+# Config-delegating accessors
+# These thin wrappers forward to the centralised MLRuntimeConfig so callers
+# throughout this module can be migrated incrementally.
+# ---------------------------------------------------------------------------
+
 def _ensemble_enabled() -> bool:
-    return _env_flag("UTOA_ML_ENSEMBLE_ENABLE", True)
+    return get_ml_config().ensemble_enabled
 
 
 def _ml_route(value: Optional[str] = None) -> str:
-    raw = str(value or os.environ.get("UTOA_ML_ROUTE", "legacy") or "legacy").strip().lower()
-    if raw in {"e2e_hybrid", "e2e", "hybrid"}:
-        return "e2e_hybrid"
-    return "legacy"
+    if value:
+        raw = str(value).strip().lower()
+        if raw in {"e2e_hybrid", "e2e", "hybrid"}:
+            return "e2e_hybrid"
+        return "legacy"
+    return get_ml_config().route
 
 
 def _gated_ensemble_enabled() -> bool:
-    # Default OFF to keep runtime stable: coupled is primary, LightGBM is fallback.
-    return _env_flag("UTOA_ML_GATED_ENSEMBLE_ENABLE", False)
+    return get_ml_config().gated_ensemble_enabled
 
 
 def _selector_runtime_enabled() -> bool:
-    # Runtime 기본은 델타 보정 단일 모드(속도 우선). 필요 시 env로 명시적으로 켠다.
-    return _env_flag("UTOA_ML_SELECTOR_ENABLE", False)
+    return get_ml_config().selector_enabled
 
 
 def _legacy_fallback_enabled() -> bool:
-    # Coupled/Ensemble의 내부 게이팅을 우선 사용하고, 구형 fallback 체인은 기본 비활성.
-    return _env_flag("UTOA_ML_LEGACY_FALLBACK_ENABLE", False)
+    return get_ml_config().legacy_fallback_enabled
 
 
 def _batch_inference_enabled() -> bool:
-    return _env_flag("UTOA_ML_BATCH_INFERENCE_ENABLE", True)
+    return get_ml_config().batch_inference_enabled
 
 
 def _batch_inference_size() -> int:
-    return max(32, _env_int("UTOA_ML_BATCH_INFERENCE_SIZE", 256))
+    return get_ml_config().batch_inference_size
 
 
 def _two_stage_model_enabled() -> bool:
-    return _env_flag("UTOA_ML_TWO_STAGE_MODEL_ENABLE", True)
+    return get_ml_config().two_stage_model_enabled
 
 
 def _auto_select_vbest_enabled() -> bool:
-    # Keep runtime routing stable: do not auto-pick experimental "vbest_*"
-    # unless explicitly opted in.
-    return _env_flag("UTOA_ML_AUTO_SELECT_VBEST", False)
+    return get_ml_config().auto_select_vbest
 
 
 def _looks_like_two_stage_model_name(name: str) -> bool:
-    token = str(name or "").strip().lower()
-    return token.startswith("v2") or "two_stage" in token or "twostage" in token
+    # Kept for backward compat; logic lives in model_resolver._looks_like_two_stage.
+    from core.model_resolver import _looks_like_two_stage
+    return _looks_like_two_stage(name)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -146,10 +152,8 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _coupled_min_confidence() -> float:
-    try:
-        return max(0.0, min(float(os.environ.get("UTOA_ML_COUPLED_MIN_CONF", "0.42")), 1.0))
-    except Exception:
-        return 0.42
+    cfg = get_ml_config()
+    return float(cfg.coupled_min_conf) if cfg.coupled_min_conf is not None else 0.42
 
 
 def _read_bounded_conf_env(name: str) -> Optional[float]:
@@ -163,18 +167,11 @@ def _read_bounded_conf_env(name: str) -> Optional[float]:
 
 
 def _coupled_min_conf_use_model_meta() -> bool:
-    # 운영 기본은 모델 메타(min_confidence) 기반 분리 게이트를 사용한다.
-    return _env_flag("UTOA_ML_COUPLED_MIN_CONF_USE_MODEL_META", True)
+    return get_ml_config().coupled_min_conf_use_model_meta
 
 
 def _coupled_min_conf_model_offset() -> float:
-    raw = str(os.environ.get("UTOA_ML_COUPLED_MIN_CONF_MODEL_OFFSET", "")).strip()
-    if not raw:
-        return 0.0
-    try:
-        return max(-0.30, min(float(raw), 0.30))
-    except Exception:
-        return 0.0
+    return get_ml_config().coupled_min_conf_model_offset
 
 
 def _bounded_conf(value) -> Optional[float]:
@@ -234,10 +231,7 @@ def _route_model_min_confidence(bundle: Optional[object], model_dir: str) -> Opt
 
 
 def _ml_anchor_lock_min_conf() -> float:
-    env_val = _read_bounded_conf_env("UTOA_ML_ANCHOR_LOCK_MIN_CONF")
-    if env_val is None:
-        return 0.45
-    return float(env_val)
+    return get_ml_config().anchor_lock_min_conf
 
 
 def _ml_anchor_blank_floor(language: str, format_type: str) -> Optional[float]:
@@ -245,22 +239,7 @@ def _ml_anchor_blank_floor(language: str, format_type: str) -> Optional[float]:
     if lang != "korean":
         return None
     fmt = normalize_format_type(lang, format_type) or str(format_type or "").strip().lower()
-    if fmt not in {"cvvc", "cvc", "cv"}:
-        return None
-    env_key_by_fmt = {
-        "cvvc": "UTOA_KR_CVVC_ROW_BLANK_FLOOR",
-        "cvc": "UTOA_KR_CVC_ROW_BLANK_FLOOR",
-        "cv": "UTOA_KR_CV_ROW_BLANK_FLOOR",
-    }
-    default_floor_by_fmt = {
-        "cvvc": 0.64,
-        "cvc": 0.62,
-        "cv": 0.60,
-    }
-    env_val = _read_bounded_conf_env(env_key_by_fmt.get(fmt, "UTOA_KR_CVVC_ROW_BLANK_FLOOR"))
-    if env_val is None:
-        return float(default_floor_by_fmt.get(fmt, 0.64))
-    return float(env_val)
+    return get_ml_config().blank_floor_for_format(fmt)
 
 
 def _coupled_min_confidence_for_alias(
@@ -326,79 +305,47 @@ def _coupled_min_confidence_for_alias(
 
 
 def _coupled_strict_constraint() -> bool:
-    return _env_flag("UTOA_ML_COUPLED_STRICT_CONSTRAINT", True)
+    return get_ml_config().coupled_strict_constraint
 
 
 def _kr_cv_keep_base_location_enabled() -> bool:
-    return _env_flag("UTOA_ML_KR_CV_KEEP_BASE_LOCATION", True)
+    return get_ml_config().kr_cv_keep_base_location
 
 
 def _head_zero_offset_guard_enabled() -> bool:
-    return _env_flag("UTOA_ML_HEAD_ZERO_OFFSET_GUARD", True)
+    return get_ml_config().head_zero_offset_guard
 
 
 def _read_bundle_backend(model_dir: str) -> str:
-    try:
-        import json
+    return get_resolver().read_backend(model_dir)
 
-        meta_path = os.path.join(model_dir, "model_meta.json")
-        if not os.path.isfile(meta_path):
-            return ""
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f) or {}
-        return str(meta.get("backend", "") or "").strip().lower()
-    except Exception:
-        return ""
 
+# ---------------------------------------------------------------------------
+# Path helpers — delegate to ModelResolver (kept for backward compatibility)
+# ---------------------------------------------------------------------------
 
 def _has_explicit_model_override(language: str) -> bool:
-    lang = str(language).strip().lower()
-    env_key = "UTOA_JA_OTO_ML_DIR" if lang == "japanese" else "UTOA_KR_OTO_ML_DIR"
-    return bool(os.environ.get(env_key, "").strip())
+    return get_resolver().has_explicit_override(language)
 
 
 def _model_root_for_language(language: str) -> str:
-    lang = str(language).strip().lower()
-    env_key = "UTOA_JA_OTO_ML_DIR" if lang == "japanese" else "UTOA_KR_OTO_ML_DIR"
-    env_path = os.environ.get(env_key, "").strip()
-    if env_path:
-        return env_path
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_dir, "assets", "models", "oto_ml", lang)
+    return get_resolver().model_root(language)
 
 
 def _workspace_model_root_for_language(language: str) -> str:
-    lang = str(language).strip().lower()
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    workspace_root = os.environ.get("UTOA_OTO_ML_WORKSPACE_ROOT", "").strip()
-    if workspace_root:
-        return os.path.join(workspace_root, lang)
-    # Prefer the repo-local ml_workspace if present (newer training output),
-    # otherwise fall back to logs/ml_workspace for legacy runs.
-    local_root = os.path.join(base_dir, "ml_workspace", "models")
-    if os.path.isdir(local_root):
-        return os.path.join(local_root, lang)
-    return os.path.join(base_dir, "logs", "ml_workspace", "models", lang)
+    return get_resolver().workspace_root(language)
 
 
 def _export_model_root() -> str:
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    configured = os.environ.get("UTOA_OTO_ML_EXPORT_ROOT", "").strip()
-    if configured:
-        return configured
-    noml_auto_root = os.path.join(base_dir, "ML_models_noml_auto")
-    if os.path.isdir(noml_auto_root):
-        return noml_auto_root
-    return os.path.join(base_dir, "ML_models")
+    return get_resolver().export_root()
 
 
 def _structured_export_model_root_for_language(language: str) -> str:
-    return os.path.join(_export_model_root(), str(language).strip().lower())
+    return get_resolver().structured_export_root(language)
 
 
 def _ml_same_language_borrow_only() -> bool:
-    raw = str(os.environ.get("UTOA_ML_SAME_LANGUAGE_BORROW_ONLY", "1")).strip().lower()
-    return raw not in {"0", "false", "off", "no"}
+    return get_ml_config().same_language_borrow_only
 
 
 def _installed_model_root_for_language(language: str) -> str:
@@ -408,6 +355,11 @@ def _installed_model_root_for_language(language: str) -> str:
 
 
 def _collect_model_dir_candidates(language: str, format_type: str, alias_family: str = "") -> List[str]:
+    """Return ordered model-dir candidates.  Delegates to ModelResolver unless
+    ``UTOA_ML_RESOLVER_DISABLE=1`` is set (legacy fallback path)."""
+    if not get_resolver().is_disabled():
+        return get_resolver().collect_candidates(language, format_type, alias_family=alias_family)
+    # --- legacy inline path (kept for rollback) ---
     fmt = normalize_format_type(language, format_type) or "general"
     family = normalize_alias_family(alias_family)
     lang = str(language or "").strip().lower()
@@ -556,28 +508,28 @@ def _resolve_backend_model_dir(
 
 
 def _resolve_lightgbm_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
+    if not get_resolver().is_disabled():
+        return get_resolver().resolve_lightgbm(language, format_type, alias_family=alias_family)
     return _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="lightgbm")
 
 
 def _resolve_ensemble_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
+    if not get_resolver().is_disabled():
+        return get_resolver().resolve_ensemble(language, format_type, alias_family=alias_family)
     return _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="ensemble_v1")
 
 
 def _resolve_coupled_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
-    # Prefer v2 rawmel when present; fallback to v1 coupled.
+    if not get_resolver().is_disabled():
+        return get_resolver().resolve_coupled(language, format_type, alias_family=alias_family)
+    # Legacy inline path
     coupled_v2 = _resolve_backend_model_dir(
-        language,
-        format_type,
-        alias_family=alias_family,
-        backend="coupled_nn_v2_rawmel",
+        language, format_type, alias_family=alias_family, backend="coupled_nn_v2_rawmel",
     )
     if coupled_v2:
         return coupled_v2
     return _resolve_backend_model_dir(
-        language,
-        format_type,
-        alias_family=alias_family,
-        backend="coupled_nn_v1",
+        language, format_type, alias_family=alias_family, backend="coupled_nn_v1",
     )
 
 
@@ -640,15 +592,11 @@ def _ensure_report(report: Optional[Dict[str, object]], **defaults) -> Dict[str,
 
 
 def _selector_runtime_guard_enabled() -> bool:
-    raw = str(os.environ.get("UTOA_DISABLE_SELECTOR_RUNTIME_GUARD", "")).strip().lower()
-    return raw not in {"1", "true", "yes", "on"}
+    return not get_ml_config().selector_runtime_guard_disabled
 
 
 def _selector_top1_min_gain() -> float:
-    try:
-        return float(os.environ.get("UTOA_SELECTOR_TOP1_MIN_GAIN", "0.0"))
-    except Exception:
-        return 0.0
+    return get_ml_config().selector_top1_min_gain
 
 
 def _selector_passes_runtime_guard(selector_payload: Optional[Dict[str, object]]) -> Tuple[bool, str]:
@@ -1303,20 +1251,7 @@ def _apply_korean_cv_destination_guard(
 
 
 def _read_cv_overlap_cap_ratio_env(language: str) -> Optional[float]:
-    lang = str(language or "").strip().lower()
-    if lang == "korean":
-        key = "UTOA_ML_KR_CV_OVL_CAP_RATIO"
-    elif lang == "japanese":
-        key = "UTOA_ML_JA_CV_OVL_CAP_RATIO"
-    else:
-        return None
-    raw = str(os.environ.get(key, "")).strip()
-    if not raw:
-        return None
-    try:
-        return max(0.40, min(float(raw), 0.92))
-    except Exception:
-        return None
+    return get_ml_config().cv_ovl_cap_ratio_for_language(language)
 
 
 def _cv_overlap_cap_ratio(language: str, row_context: Dict[str, object]) -> float:
@@ -2051,18 +1986,12 @@ def _apply_anchor_lock_lite_after_ml(
 
 
 def _should_skip_ml_for_high_confidence_row(row_context: Dict[str, object]) -> bool:
-    if not _env_flag("UTOA_ML_SKIP_HIGH_CONF_RULE_ROWS", True):
+    cfg = get_ml_config()
+    if not cfg.skip_high_conf_rule_rows:
         return False
-    conf_floor = _read_bounded_conf_env("UTOA_ML_SKIP_HIGH_CONF_MIN")
-    blank_max = _read_bounded_conf_env("UTOA_ML_SKIP_HIGH_CONF_MAX_BLANK")
-    try:
-        margin_floor = float(os.environ.get("UTOA_ML_SKIP_HIGH_CONF_MIN_MARGIN", "12.0") or 12.0)
-    except Exception:
-        margin_floor = 12.0
-    if conf_floor is None:
-        conf_floor = 0.90
-    if blank_max is None:
-        blank_max = 0.18
+    conf_floor = cfg.skip_high_conf_min if cfg.skip_high_conf_min is not None else 0.90
+    blank_max = cfg.skip_high_conf_max_blank if cfg.skip_high_conf_max_blank is not None else 0.18
+    margin_floor = cfg.skip_high_conf_min_margin
     mapping_conf = _to_float(row_context.get("mapping_confidence"), 0.0)
     mapping_margin = _to_float(row_context.get("mapping_margin"), 0.0)
     blank_conf = max(
@@ -2200,7 +2129,7 @@ def apply_oto_ml_to_oto_file(
         ml_report["status"] = "skipped"
         return 0
 
-    if os.environ.get("UTOA_DISABLE_OTO_ML", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if get_ml_config().ml_disabled:
         ml_report.update(make_runtime_report("ml", ML_DISABLED_ENV, "환경변수로 OTO ML이 비활성화되었습니다."))
         ml_report["status"] = "skipped"
         return 0
@@ -2291,7 +2220,7 @@ def apply_oto_ml_to_oto_file(
     wav_index = build_wav_index(wav_dir) if wav_dir else {}
     rawmel_cache: Dict[str, object] = {}
     total_features = int(len(feature_rows))
-    progress_every = max(20, _env_int("UTOA_ML_PROGRESS_EVERY", 80))
+    progress_every = get_ml_config().progress_every
     loop_started_at = time.perf_counter()
     if total_features > progress_every:
         _emit(

@@ -1,6 +1,18 @@
+"""
+OTO-ML policy — single source of truth for per-language / per-format defaults.
+
+All behavioural constants (confidence floors, selector margins, error weights,
+delta defaults, family splits) live here as Python dicts.  Runtime env-var
+overrides are read via ``MLRuntimeConfig``; code outside this module should
+never read ``UTOA_DISABLE_OTO_DELTA`` / ``UTOA_FORCE_OTO_SELECTOR`` etc.
+directly — use the functions below instead.
+
+To add a new preset/language variant, edit the ``_*`` constant dicts at the
+top of this file.  No JSON files, no code duplication.
+"""
+
 from __future__ import annotations
 
-import os
 from typing import Dict, List
 
 from core.format_type_utils import normalize_format_type
@@ -197,9 +209,11 @@ def default_coupled_min_conf(language: str, format_type: str) -> float:
 
 
 def delta_enabled_by_default(language: str, format_type: str, alias_family: str = "") -> bool:
-    if str(os.environ.get("UTOA_DISABLE_OTO_DELTA", "")).strip().lower() in {"1", "true", "yes", "on"}:
+    from core.runtime_config import get_ml_config
+    cfg = get_ml_config()
+    if cfg.delta_disabled:
         return False
-    if str(os.environ.get("UTOA_FORCE_OTO_DELTA", "")).strip().lower() in {"1", "true", "yes", "on"}:
+    if cfg.delta_forced:
         return True
     lang = str(language or "").strip().lower()
     fmt = normalize_format_type(lang, format_type) or "general"
@@ -212,9 +226,11 @@ def delta_enabled_by_default(language: str, format_type: str, alias_family: str 
 
 
 def selector_enabled_by_default(language: str, format_type: str, alias_family: str = "") -> bool:
-    if str(os.environ.get("UTOA_DISABLE_OTO_SELECTOR", "")).strip().lower() in {"1", "true", "yes", "on"}:
+    from core.runtime_config import get_ml_config
+    cfg = get_ml_config()
+    if cfg.selector_disabled:
         return False
-    if str(os.environ.get("UTOA_FORCE_OTO_SELECTOR", "")).strip().lower() in {"1", "true", "yes", "on"}:
+    if cfg.selector_forced:
         return True
     lang = str(language or "").strip().lower()
     fmt = normalize_format_type(lang, format_type) or "general"
@@ -226,12 +242,10 @@ def selector_enabled_by_default(language: str, format_type: str, alias_family: s
 
 
 def selector_min_margin(language: str, format_type: str, alias_family: str = "") -> float:
-    override = str(os.environ.get("UTOA_SELECTOR_MIN_MARGIN", "")).strip()
-    if override:
-        try:
-            return max(0.0, float(override))
-        except Exception:
-            return 0.0
+    from core.runtime_config import get_ml_config
+    override = get_ml_config().selector_margin_override
+    if override is not None:
+        return float(max(0.0, override))
     lang = str(language or "").strip().lower()
     fmt = normalize_format_type(lang, format_type) or "general"
     family = normalize_alias_family(alias_family)
@@ -264,11 +278,32 @@ def selector_error_weights(language: str, format_type: str, alias_family: str = 
     return dict(_SELECTOR_ERROR_WEIGHTS[("default", "general", "")])
 
 
+def get_policy_snapshot(language: str, format_type: str, alias_family: str = "") -> Dict[str, object]:
+    """Return a single dict with every policy value for the given context.
+
+    Useful for logging/debugging and for tests that want to assert on the
+    complete policy without calling each function individually.
+    """
+    return {
+        "language": language,
+        "format_type": format_type,
+        "alias_family": alias_family,
+        "delta_enabled": delta_enabled_by_default(language, format_type, alias_family),
+        "selector_enabled": selector_enabled_by_default(language, format_type, alias_family),
+        "selector_min_margin": selector_min_margin(language, format_type, alias_family),
+        "selector_error_weights": selector_error_weights(language, format_type, alias_family),
+        "default_coupled_min_conf": default_coupled_min_conf(language, format_type),
+        "training_filters": default_training_filters(language, format_type, alias_family),
+        "recommended_family_splits": recommended_alias_family_splits(language, format_type),
+    }
+
+
 __all__ = [
     "alias_family_to_alias_types",
     "default_training_filters",
     "default_coupled_min_conf",
     "delta_enabled_by_default",
+    "get_policy_snapshot",
     "infer_alias_family",
     "normalize_alias_family",
     "recommended_alias_family_splits",
