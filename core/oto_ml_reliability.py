@@ -170,7 +170,7 @@ def evaluate_voiced_approval(
         )
     )
 
-    voiced_conf_min = _clamp01(_to_float(blank_cfg.get("voiced_conf_min"), 0.56))
+    voiced_conf_min = _clamp01(_to_float(blank_cfg.get("voiced_conf_min"), 0.58))
     rms_min = max(0.0, _to_float(blank_cfg.get("voiced_rms_min"), 0.18))
     f0_cont_min = _clamp01(_to_float(blank_cfg.get("voiced_f0_continuity_min"), 0.16))
 

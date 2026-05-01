@@ -47,6 +47,8 @@ def try_handle_kr_single_vowel_file(
     apply_suffix_to_oto_line_fn,
     generate_openutau: bool,
     alias_suffix: str,
+    mel_ctx_for_file=None,
+    refine_vowel_span_fn=None,
 ) -> bool:
     if not (len(ph_intervals) == 1 and len(wd_intervals) == 1):
         return False
@@ -55,6 +57,26 @@ def try_handle_kr_single_vowel_file(
     vowel = ph_intervals[0]
     v_start = vowel.minTime * 1000
     v_end = vowel.maxTime * 1000
+    if refine_vowel_span_fn is not None and mel_ctx_for_file:
+        try:
+            refined = refine_vowel_span_fn(
+                mel_ctx_for_file,
+                v_start,
+                v_end,
+                search_pad_ms=140.0,
+                min_span_ms=24.0,
+            )
+            if refined is not None:
+                rv_start, rv_end = refined
+                if rv_end > rv_start:
+                    if abs(float(rv_start) - float(v_start)) >= 8.0 or abs(float(rv_end) - float(v_end)) >= 14.0:
+                        log_fn(
+                            f"🛡️ {fname}: 단모음 모음 핵 기준 보정 "
+                            f"({v_start:.1f}-{v_end:.1f}ms -> {rv_start:.1f}-{rv_end:.1f}ms)"
+                        )
+                    v_start, v_end = float(rv_start), float(rv_end)
+        except Exception:
+            pass
     v_len = v_end - v_start
     for line in lines:
         parts = line.split("=", 1)

@@ -15,9 +15,50 @@ from core.pipeline_status import ALIGN_NOT_READY, ALIGN_RUN_FAILED, OK, make_run
 from core.textio_utils import read_text_auto
 
 _PAUSE_MARKERS = {"", "pau", "sil", "sp", "spn", "br", "bre", "breath", "r"}
-_ASCII_TOKEN_RE = re.compile(r"[A-Za-z']+")
+_ASCII_TOKEN_RE = re.compile(r"[A-Za-z]+")
 _HANGUL_RE = re.compile(r"[가-힣]")
 _JAPANESE_RE = re.compile(r"[\u3040-\u30ff]")
+_KR_ORDER_INITIAL_CANON = {
+    "k": "g",
+    "gg": "kk",
+    "t": "d",
+    "dd": "tt",
+    "p": "b",
+    "bb": "pp",
+    "z": "j",
+    "zz": "jj",
+    "c": "ch",
+    "q": "k",
+    "kh": "k",
+    "tx": "t",
+    "th": "t",
+    "ph": "p",
+    "f": "p",
+    "sh": "s",
+}
+_KR_ORDER_CODA_CANON = {
+    "g": "k",
+    "t": "d",
+    "p": "b",
+    "r": "l",
+    "gg": "kk",
+    "bb": "pp",
+    "dd": "tt",
+    "zz": "jj",
+    "c": "ch",
+    "q": "k",
+    "kh": "k",
+    "tx": "t",
+    "th": "t",
+    "ph": "p",
+    "f": "p",
+    "sh": "s",
+}
+_KR_ORDER_VOWEL_CANON = {
+    "eui": "ui",
+    "yi": "ui",
+    "weo": "wo",
+}
 _VOICELESS_ONSETS = {
     "k",
     "ky",
@@ -465,6 +506,41 @@ def _split_ascii_tokens(text: str) -> List[str]:
     return [m.group(0).lower() for m in _ASCII_TOKEN_RE.finditer(str(text or ""))]
 
 
+def _canonical_kr_order_token(token: str) -> str:
+    text = str(token or "").strip().lower()
+    if not text:
+        return ""
+    onset, vowel, coda = _split_kr_syllable_parts(text)
+    if vowel:
+        onset = _KR_ORDER_INITIAL_CANON.get(str(onset or "").lower(), str(onset or "").lower())
+        vowel = _KR_ORDER_VOWEL_CANON.get(str(vowel or "").lower(), str(vowel or "").lower())
+        coda = _KR_ORDER_CODA_CANON.get(str(coda or "").lower(), str(coda or "").lower())
+        return f"{onset}{vowel}{coda}"
+    return _KR_ORDER_CODA_CANON.get(text, _KR_ORDER_INITIAL_CANON.get(text, _KR_ORDER_VOWEL_CANON.get(text, text)))
+
+
+def _order_tokens_match(language: str, left: str, right: str) -> bool:
+    lval = str(left or "").strip().lower()
+    rval = str(right or "").strip().lower()
+    if lval == rval:
+        return True
+    if str(language or "").strip().lower() == "korean":
+        return _canonical_kr_order_token(lval) == _canonical_kr_order_token(rval)
+    return False
+
+
+def _order_match_ratio(language: str, words: Sequence[str], filename_words: Sequence[str]) -> float:
+    common = min(len(words or []), len(filename_words or []))
+    if common <= 0:
+        return 0.0
+    match_count = sum(
+        1
+        for idx in range(common)
+        if _order_tokens_match(language, str((words or [])[idx] or ""), str((filename_words or [])[idx] or ""))
+    )
+    return float(match_count) / float(common)
+
+
 def _normalize_korean_token(token: str) -> List[str]:
     raw = str(token or "").strip()
     if not raw:
@@ -545,6 +621,13 @@ def _load_transcript_words(wav_path: str, language: str) -> Tuple[List[str], str
         if not err:
             words = _normalize_transcript_words(language, str(content or ""))
             if words:
+                if (
+                    str(language or "").strip().lower() == "korean"
+                    and filename_words
+                    and len(words) == len(filename_words)
+                    and _order_match_ratio(language, words, filename_words) >= 0.98
+                ):
+                    return filename_words, "filename"
                 return words, "lab"
 
     if filename_words:
@@ -1096,6 +1179,50 @@ def _sanitize_rows(
     return compact
 
 
+def _normalize_sequence_format_hint(format_hint: str) -> str:
+    raw = str(format_hint or "").strip().lower()
+    if not raw:
+        return ""
+    compact = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    parts = {part for part in compact.split("_") if part}
+    parts.add(compact)
+    if "cvvc" in parts or compact.endswith("cvvc"):
+        return "cvvc"
+    if "vcv" in parts or compact.endswith("vcv"):
+        return "vcv"
+    if "cvc" in parts or compact.endswith("cvc"):
+        return "cvc"
+    if "cv" in parts or compact.endswith("cv"):
+        return "cv"
+    return compact
+
+
+def _sequence_word_weight(language: str, token: str, format_hint: str = "") -> float:
+    text = str(token or "").strip().lower()
+    if not text:
+        return 1.0
+    lang = str(language or "").strip().lower()
+    if lang == "korean":
+        onset, vowel, coda = _split_kr_syllable_parts(text)
+        if vowel:
+            weight = 1.0
+            if coda:
+                weight += 0.08
+            if vowel in {"ya", "yae", "yeo", "ye", "wa", "wae", "wo", "we", "wi", "yu", "ui", "eui", "yi", "weo"}:
+                weight += 0.04
+            if onset in {"ch", "jj", "kk", "tt", "pp", "ss", "gg", "dd", "bb"}:
+                weight += 0.03
+            return float(np.clip(weight, 0.82, 1.18))
+        return 0.72 if text in {"m", "n", "ng", "l", "r"} else 0.85
+    if lang == "japanese":
+        onset, vowel = split_ja_romaji_syllable(text)
+        if vowel:
+            return 1.05 if onset in {"ky", "gy", "sh", "ch", "ny", "hy", "my", "ry", "by", "py"} else 1.0
+        return 0.82
+    compact = re.sub(r"[^A-Za-z0-9]+", "", text)
+    return max(1.0, float(len(compact) if compact else len(text)))
+
+
 def _resolve_word_rows(
     words: Sequence[str],
     *,
@@ -1103,6 +1230,8 @@ def _resolve_word_rows(
     labels: Sequence[str],
     hop_sec: float,
     min_span_ms: float,
+    language: str = "",
+    format_hint: str = "",
 ) -> List[Tuple[float, float, str]]:
     duration = max(float(duration_sec or 0.0), 0.0)
     if duration <= 0.0:
@@ -1115,8 +1244,7 @@ def _resolve_word_rows(
 
     weights: List[float] = []
     for token in clean_words:
-        compact = re.sub(r"[^A-Za-z0-9]+", "", token)
-        weights.append(max(1.0, float(len(compact) if compact else len(token))))
+        weights.append(float(_sequence_word_weight(language, token, format_hint=format_hint)))
     total_weight = max(float(np.sum(np.asarray(weights, dtype=np.float32))), 1.0)
 
     active_segments: List[Tuple[float, float]] = []
@@ -1143,6 +1271,33 @@ def _resolve_word_rows(
     span_total = max(min_span_sec, float(span_total))
 
     count = max(1, len(clean_words))
+    lang = str(language or "").strip().lower()
+    fmt = _normalize_sequence_format_hint(format_hint)
+    if lang in {"korean", "japanese"} and fmt in {"vcv", "cvvc"} and count >= 4 and active_end > active_start:
+        tail_trim_ratio = _env_float(
+            "UTOA_SEQUENCE_ALIGN_MULTI_TAIL_TRIM_RATIO",
+            0.90,
+            min_value=0.72,
+            max_value=1.0,
+        )
+        span_width = float(active_end) - float(active_start)
+        min_keep_end = float(active_start) + max(float(min_span_sec) * float(count), span_width * 0.70)
+        tempo_end = max(min_keep_end, float(active_start) + (span_width * float(tail_trim_ratio)))
+        tempo_end = min(float(active_end), float(tempo_end))
+        if tempo_end < float(active_end) - max(0.030, span_width * 0.025):
+            clipped_segments: List[Tuple[float, float]] = []
+            for seg_start, seg_end in active_segments:
+                if float(seg_start) >= tempo_end:
+                    break
+                clipped_end = min(float(seg_end), tempo_end)
+                if clipped_end > float(seg_start) + 1e-6:
+                    clipped_segments.append((float(seg_start), float(clipped_end)))
+            if clipped_segments:
+                active_segments = clipped_segments
+                active_end = float(clipped_segments[-1][1])
+                span_total = float(np.sum([end - start for start, end in active_segments], dtype=np.float64))
+                span_total = max(min_span_sec, float(span_total))
+
     min_step_sec = min(min_span_sec, max(0.004, span_total / (float(count) * 3.0)))
     raw = np.asarray(weights, dtype=np.float64) / float(total_weight) * float(span_total)
     spans = np.maximum(raw, float(min_step_sec))
@@ -2403,6 +2558,7 @@ def run_sequence_align(
     output_folder: str,
     *,
     language: str = "korean",
+    format_hint: str = "",
     callback=None,
 ) -> Tuple[bool, str]:
     lang = str(language or "").strip().lower() or "korean"
@@ -2413,6 +2569,9 @@ def run_sequence_align(
     wav_files = _list_top_level_wavs(wav_folder)
     if not wav_files:
         return False, f"No WAV files found: {wav_folder}"
+
+    format_norm = _normalize_sequence_format_hint(format_hint)
+    _emit(callback, f"[SEQ] start: wav_files={len(wav_files)} format={format_norm or '-'}")
 
     profile = _load_sequence_profile(lang, callback=callback)
 
@@ -2765,15 +2924,12 @@ def run_sequence_align(
                 labels=labels,
                 hop_sec=hop_sec,
                 min_span_ms=min_span_ms,
+                language=lang,
+                format_hint=format_hint,
             )
             soft_lock_ready = False
             if bool(filename_soft_lock_enable) and filename_words and len(words) >= 2:
-                common = min(len(words), len(filename_words))
-                match_count = sum(
-                    1 for idx in range(common)
-                    if str(words[idx] or "").strip().lower() == str(filename_words[idx] or "").strip().lower()
-                )
-                order_match_ratio = float(match_count) / float(max(common, 1))
+                order_match_ratio = _order_match_ratio(lang, words, filename_words)
                 soft_lock_ready = bool(source == "filename" or order_match_ratio >= 0.70)
             word_rows = _refine_word_boundaries_with_onset_cues(
                 word_rows,

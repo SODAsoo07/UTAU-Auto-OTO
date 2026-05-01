@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterable, Mapping, Sequence
 
+from core.syllable_order_guard import evaluate_syllable_order_guard
+
 
 def _clip01(value: float) -> float:
     try:
@@ -59,6 +61,16 @@ def extract_ja_alignment_ingest_state(
     prefer_filename_sequence = bool(alignment_ingest.prefer_filename_sequence)
     if filename_syllables and alignment_weight < float(low_conf_lock_threshold):
         prefer_filename_sequence = True
+    order_guard = evaluate_syllable_order_guard(
+        language="japanese",
+        format_type=format_type,
+        expected_tokens=(filename_syllables or cv_targets),
+        alignment_weight=alignment_weight,
+        low_phone_quality=bool(alignment_ingest.low_phone_quality),
+        textgrid_trust_tier=str(alignment_ingest.textgrid_trust_tier or "low"),
+    )
+    if order_guard.applied:
+        prefer_filename_sequence = True
 
     return {
         "wd_intervals": alignment_ingest.words,
@@ -80,6 +92,8 @@ def extract_ja_alignment_ingest_state(
         "textgrid_trust_score": textgrid_trust_score,
         "textgrid_trust_tier": str(alignment_ingest.textgrid_trust_tier or "low"),
         "prefer_filename_sequence": prefer_filename_sequence,
+        "syllable_order_guard_applied": bool(order_guard.applied),
+        "syllable_order_guard_reason": str(order_guard.reason or ""),
         "spn_ratio": float(phone_quality.get("spn_ratio_in_phone_tier", 0.0) or 0.0),
         "alignment_weight": alignment_weight,
     }
@@ -97,6 +111,17 @@ def extract_kr_alignment_ingest_state(
     alignment_weight = _clip01(textgrid_trust_score * 0.85)
     prefer_filename_sequence = bool(alignment_ingest.prefer_filename_sequence)
     if filename_cv_targets and alignment_weight < float(low_conf_lock_threshold):
+        prefer_filename_sequence = True
+        targets_for_build = list(filename_cv_targets)
+    order_guard = evaluate_syllable_order_guard(
+        language="korean",
+        format_type=str(alignment_ingest.extra.get("file_format") or ""),
+        expected_tokens=filename_cv_targets,
+        alignment_weight=alignment_weight,
+        low_phone_quality=bool(alignment_ingest.low_phone_quality),
+        textgrid_trust_tier=str(alignment_ingest.textgrid_trust_tier or "low"),
+    )
+    if order_guard.applied:
         prefer_filename_sequence = True
         targets_for_build = list(filename_cv_targets)
 
@@ -119,6 +144,8 @@ def extract_kr_alignment_ingest_state(
         "textgrid_trust_score": textgrid_trust_score,
         "textgrid_trust_tier": str(alignment_ingest.textgrid_trust_tier or "low"),
         "prefer_filename_sequence": prefer_filename_sequence,
+        "syllable_order_guard_applied": bool(order_guard.applied),
+        "syllable_order_guard_reason": str(order_guard.reason or ""),
         "spn_ratio": float(phone_quality.get("spn_ratio_in_phone_tier", 0.0) or 0.0),
         "alignment_weight": alignment_weight,
     }

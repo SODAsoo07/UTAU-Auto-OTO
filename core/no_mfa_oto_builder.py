@@ -154,6 +154,17 @@ def _load_oto_lines(source_oto_path: str) -> list[str]:
     return []
 
 
+def _normalize_output_oto_path(out_path: str) -> str:
+    raw = str(out_path or "").strip()
+    if not raw:
+        return ""
+    if raw.endswith(("\\", "/")):
+        return os.path.join(os.path.abspath(raw), "oto.ini")
+    if os.path.isdir(raw):
+        return os.path.join(os.path.abspath(raw), "oto.ini")
+    return raw
+
+
 def _env_int(name: str, default: int) -> int:
     raw = str(os.environ.get(name, "")).strip()
     if not raw:
@@ -184,7 +195,7 @@ def _env_float(name: str, default: float) -> float:
 def _normalize_generation_mode(value: str) -> str:
     raw = str(value or "").strip().lower()
     if raw in {"alias_auto", "alias-only", "alias_only", "blank_auto", "blank"}:
-        return "alias_auto"
+        return "remap"
     if raw in {"remap", "base_remap", "base"}:
         return "remap"
     return "remap"
@@ -481,6 +492,57 @@ def _build_wav_lookup(wav_dir: str) -> tuple[dict[str, str], dict[str, str]]:
     return exact, normalized
 
 
+def _apply_no_mfa_ml_correction(
+    *,
+    language: str,
+    oto_path: str,
+    wav_dir: str,
+    format_type: str,
+    callback: Callable[[str], None] | None = None,
+) -> int:
+    if not _env_bool("UTOA_NO_MFA_ML_ENABLE", True):
+        _log(callback, "[No-MFA] existing OTO-ML correction disabled by UTOA_NO_MFA_ML_ENABLE.")
+        return 0
+    if not oto_path or not os.path.isfile(oto_path):
+        return 0
+
+    policy = str(os.environ.get("UTOA_NO_MFA_ML_POLICY", "auto") or "auto").strip().lower() or "auto"
+    route = str(os.environ.get("UTOA_NO_MFA_ML_ROUTE", os.environ.get("UTOA_ML_ROUTE", "legacy")) or "legacy").strip()
+    report: dict[str, object] = {}
+    try:
+        from core.oto_ml_refiner import apply_oto_ml_to_oto_file
+
+        changed = int(
+            apply_oto_ml_to_oto_file(
+                str(language or "").strip().lower() or "korean",
+                oto_path,
+                tg_dir="",
+                wav_dir=wav_dir,
+                custom_phonemes_path="",
+                callback=callback,
+                enabled=True,
+                format_override=str(format_type or "").strip().lower(),
+                policy=policy,
+                report=report,
+                ml_route=route,
+            )
+            or 0
+        )
+    except Exception as exc:
+        _log(callback, f"[No-MFA] existing OTO-ML correction skipped: {exc}")
+        return 0
+
+    status = str(report.get("status", "") or "").strip() or "unknown"
+    code = str(report.get("code", "") or "").strip()
+    confidence = float(report.get("model_confidence", 0.0) or 0.0)
+    _log(
+        callback,
+        f"[No-MFA] existing OTO-ML correction: status={status}, changed={changed}, "
+        f"confidence={confidence:.3f}, code={code or 'n/a'}",
+    )
+    return int(changed)
+
+
 def _read_wav_duration_ms(path: str) -> float:
     try:
         with wave.open(path, "rb") as wav_handle:
@@ -532,11 +594,7 @@ def _estimate_slot_timing(
     return _fallback_validate_oto_params(offset, consonant, cutoff, pre, overlap)
 
 
-def _estimate_segment_boundaries_ms(wav_path: str, segment_count: int) -> list[float]:
-    seg = int(segment_count or 0)
-    if seg <= 1:
-        duration_ms = _read_wav_duration_ms(wav_path)
-        return [0.0, max(0.0, duration_ms)]
+def _analyze_wav_activity(wav_path: str) -> dict[str, object]:
     try:
         with contextlib.closing(wave.open(wav_path, "rb")) as wav_file:
             channels = int(wav_file.getnchannels() or 1)
@@ -548,52 +606,274 @@ def _estimate_segment_boundaries_ms(wav_path: str, segment_count: int) -> list[f
             raw = wav_file.readframes(nframes)
     except Exception:
         duration_ms = _read_wav_duration_ms(wav_path)
-        if duration_ms <= 0.0:
-            return [0.0] * (seg + 1)
-        return [duration_ms * float(i) / float(seg) for i in range(seg + 1)]
+        return {
+            "duration_ms": duration_ms,
+            "step_ms": 10.0,
+            "smooth": [],
+            "flux": [],
+            "threshold": 0.0,
+            "active_start_ms": 0.0,
+            "active_end_ms": max(0.0, duration_ms),
+        }
 
+    frame_bytes = max(1, channels * sampwidth)
+    window_frames = max(1, int(framerate * 0.01))
+    step_frames = window_frames
+    total_windows = int(math.ceil(float(nframes) / float(step_frames)))
+    energy: list[float] = []
+    for wi in range(total_windows):
+        start_f = wi * step_frames
+        end_f = min(nframes, start_f + window_frames)
+        if end_f <= start_f:
+            energy.append(0.0)
+            continue
+        start_b = start_f * frame_bytes
+        end_b = end_f * frame_bytes
+        chunk = raw[start_b:end_b]
+        if channels > 1:
+            chunk = audioop.tomono(chunk, sampwidth, 0.5, 0.5)
+        energy.append(float(audioop.rms(chunk, sampwidth)))
+
+    duration_ms = float(nframes) * 1000.0 / float(framerate)
+    step_ms = float(step_frames) * 1000.0 / float(framerate)
+    if not energy:
+        return {
+            "duration_ms": duration_ms,
+            "step_ms": step_ms,
+            "smooth": [],
+            "flux": [],
+            "threshold": 0.0,
+            "active_start_ms": 0.0,
+            "active_end_ms": duration_ms,
+        }
+
+    smooth: list[float] = []
+    radius = 2
+    n = len(energy)
+    for i in range(n):
+        lo = max(0, i - radius)
+        hi = min(n - 1, i + radius)
+        smooth.append(sum(energy[lo : hi + 1]) / float(hi - lo + 1))
+
+    sorted_smooth = sorted(smooth)
+    floor_idx = max(0, min(len(sorted_smooth) - 1, int(round((len(sorted_smooth) - 1) * 0.18))))
+    ceil_idx = max(0, min(len(sorted_smooth) - 1, int(round((len(sorted_smooth) - 1) * 0.92))))
+    floor = float(sorted_smooth[floor_idx])
+    ceiling = float(sorted_smooth[ceil_idx])
+    threshold = max(floor + 18.0, floor + ((ceiling - floor) * 0.18), ceiling * 0.08)
+
+    flux = [0.0]
+    for i in range(1, len(smooth)):
+        flux.append(max(0.0, smooth[i] - smooth[i - 1]))
+
+    active = [i for i, value in enumerate(smooth) if value >= threshold]
+    if active:
+        active_start_idx = max(0, active[0] - 1)
+        active_end_idx = min(len(smooth) - 1, active[-1] + 2)
+        active_start_ms = max(0.0, float(active_start_idx) * step_ms)
+        active_end_ms = min(duration_ms, float(active_end_idx + 1) * step_ms)
+    else:
+        active_start_ms = 0.0
+        active_end_ms = duration_ms
+
+    min_active_ms = min(duration_ms, max(80.0, duration_ms * 0.18))
+    if active_end_ms - active_start_ms < min_active_ms:
+        active_start_ms = 0.0
+        active_end_ms = duration_ms
+
+    return {
+        "duration_ms": duration_ms,
+        "step_ms": step_ms,
+        "smooth": smooth,
+        "flux": flux,
+        "threshold": threshold,
+        "active_start_ms": active_start_ms,
+        "active_end_ms": active_end_ms,
+    }
+
+
+def _frame_value(profile: dict[str, object] | None, key: str, time_ms: float) -> float:
+    if not profile:
+        return 0.0
+    values = profile.get(key)
+    if not isinstance(values, list) or not values:
+        return 0.0
+    step_ms = max(1e-6, float(profile.get("step_ms", 10.0) or 10.0))
+    idx = max(0, min(len(values) - 1, int(round(float(time_ms) / step_ms))))
     try:
-        frame_bytes = max(1, channels * sampwidth)
-        window_frames = max(1, int(framerate * 0.01))
-        step_frames = window_frames
-        total_windows = int(math.ceil(float(nframes) / float(step_frames)))
-        if total_windows <= 0:
-            raise ValueError("no windows")
+        return float(values[idx])
+    except Exception:
+        return 0.0
 
-        energy: list[float] = []
-        for wi in range(total_windows):
-            start_f = wi * step_frames
-            end_f = min(nframes, start_f + window_frames)
-            if end_f <= start_f:
-                energy.append(0.0)
-                continue
-            start_b = start_f * frame_bytes
-            end_b = end_f * frame_bytes
-            chunk = raw[start_b:end_b]
-            if channels > 1:
-                chunk = audioop.tomono(chunk, sampwidth, 0.5, 0.5)
-            energy.append(float(audioop.rms(chunk, sampwidth)))
-        if not energy:
+
+def _time_to_frame(profile: dict[str, object], time_ms: float) -> int:
+    values = profile.get("smooth")
+    n = len(values) if isinstance(values, list) else 0
+    if n <= 0:
+        return 0
+    step_ms = max(1e-6, float(profile.get("step_ms", 10.0) or 10.0))
+    return max(0, min(n - 1, int(round(float(time_ms) / step_ms))))
+
+
+def _best_local_time(
+    profile: dict[str, object] | None,
+    *,
+    start_ms: float,
+    end_ms: float,
+    key: str,
+    prefer_max: bool,
+    default_ms: float,
+) -> float:
+    if not profile:
+        return float(default_ms)
+    values = profile.get(key)
+    if not isinstance(values, list) or not values:
+        return float(default_ms)
+    lo = _time_to_frame(profile, start_ms)
+    hi = _time_to_frame(profile, end_ms)
+    if hi < lo:
+        lo, hi = hi, lo
+    if hi <= lo:
+        return float(default_ms)
+    window = values[lo : hi + 1]
+    if not window:
+        return float(default_ms)
+    target_value = max(window) if prefer_max else min(window)
+    local_idx = window.index(target_value)
+    step_ms = max(1e-6, float(profile.get("step_ms", 10.0) or 10.0))
+    return float(lo + local_idx) * step_ms
+
+
+def _alias_is_vowel_only(alias: str) -> bool:
+    text = str(alias or "").strip().lower()
+    if not text or " " in text or text.startswith("- "):
+        return False
+    return text in {
+        "a", "i", "u", "e", "o", "eu", "eo", "ui", "wi", "wa", "we", "wo", "ya", "ye", "yo", "yu",
+        "아", "이", "우", "에", "오", "어", "으", "애", "외", "위", "와", "왜", "워", "여", "야", "요", "유",
+        "あ", "い", "う", "え", "お", "ん",
+    }
+
+
+def _candidate_penalty_for_activity(
+    profile: dict[str, object] | None,
+    *,
+    candidate_ms: float,
+    target_ms: float,
+    active_lead_ms: float,
+    active_tail_ms: float,
+) -> float:
+    score = abs(float(candidate_ms) - float(target_ms))
+    if not profile:
+        return score
+    threshold = float(profile.get("threshold", 0.0) or 0.0)
+    rms = _frame_value(profile, "smooth", candidate_ms)
+    active_start = float(profile.get("active_start_ms", 0.0) or 0.0)
+    active_end = float(profile.get("active_end_ms", profile.get("duration_ms", 0.0)) or 0.0)
+    if candidate_ms < active_start - active_lead_ms:
+        score += 200.0 + ((active_start - active_lead_ms) - candidate_ms) * 1.8
+    if active_end > 0.0 and candidate_ms > active_end + active_tail_ms:
+        score += 220.0 + (candidate_ms - (active_end + active_tail_ms)) * 1.8
+    if threshold > 0.0 and rms < threshold * 0.55:
+        score += 90.0
+    elif threshold > 0.0 and rms < threshold * 0.85:
+        score += 34.0
+    return score
+
+
+def _pick_scored_offset(
+    *,
+    profile: dict[str, object] | None,
+    alias: str,
+    alias_type: str,
+    seg_start: float,
+    seg_end: float,
+    expected_offset: float,
+    base_offset: float,
+    seg_len: float,
+) -> tuple[float, float, bool, str]:
+    alias_key = str(alias_type or "").strip().lower()
+    lead_ms = 18.0 if alias_key in {"cv_head", "cv", "mono"} else 10.0
+    if _alias_is_vowel_only(alias):
+        lead_ms = 6.0
+    search_start = max(0.0, seg_start - max(50.0, seg_len * 0.18))
+    search_end = max(search_start + 5.0, min(seg_end, seg_start + max(60.0, seg_len * 0.62)))
+    onset_ms = _best_local_time(
+        profile,
+        start_ms=search_start,
+        end_ms=search_end,
+        key="flux",
+        prefer_max=True,
+        default_ms=seg_start,
+    )
+    rms_peak_ms = _best_local_time(
+        profile,
+        start_ms=seg_start,
+        end_ms=seg_end,
+        key="smooth",
+        prefer_max=True,
+        default_ms=seg_start + (seg_len * 0.45),
+    )
+    candidates: list[tuple[str, float, float]] = [
+        ("expected", max(0.0, expected_offset), 0.0),
+        ("onset", max(0.0, onset_ms - lead_ms), 8.0),
+    ]
+    if _alias_is_vowel_only(alias):
+        candidates.append(("vowel_peak", max(0.0, rms_peak_ms - min(24.0, seg_len * 0.14)), 0.0))
+    if base_offset > 0.0:
+        candidates.append(("base", float(base_offset), 18.0))
+
+    active_lead = max(8.0, min(28.0, lead_ms + 6.0))
+    best = ("expected", max(0.0, expected_offset), float("inf"))
+    second = float("inf")
+    for name, cand, bias in candidates:
+        score = bias + _candidate_penalty_for_activity(
+            profile,
+            candidate_ms=cand,
+            target_ms=expected_offset,
+            active_lead_ms=active_lead,
+            active_tail_ms=20.0,
+        )
+        if score < best[2]:
+            second = best[2]
+            best = (name, cand, score)
+        elif score < second:
+            second = score
+    margin = max(0.0, second - best[2]) if math.isfinite(second) else 999.0
+    confidence = max(0.0, min(1.0, (margin / 55.0) + (1.0 - min(best[2], 120.0) / 150.0) * 0.55))
+    low_conf = bool(confidence < 0.48 or best[2] > 82.0)
+    return float(best[1]), float(confidence), low_conf, str(best[0])
+
+
+def _estimate_segment_boundaries_ms(wav_path: str, segment_count: int, profile: dict[str, object] | None = None) -> list[float]:
+    seg = int(segment_count or 0)
+    if seg <= 1:
+        duration_ms = _read_wav_duration_ms(wav_path)
+        return [0.0, max(0.0, duration_ms)]
+    analysis = profile if profile else _analyze_wav_activity(wav_path)
+    try:
+        smooth = list(analysis.get("smooth") or [])
+        if not smooth:
             raise ValueError("empty energy")
-
-        smooth: list[float] = []
-        radius = 2
-        n = len(energy)
-        for i in range(n):
-            lo = max(0, i - radius)
-            hi = min(n - 1, i + radius)
-            smooth.append(sum(energy[lo : hi + 1]) / float(hi - lo + 1))
-
-        duration_ms = float(nframes) * 1000.0 / float(framerate)
+        n = len(smooth)
+        duration_ms = float(analysis.get("duration_ms", 0.0) or 0.0)
+        step_ms = max(1e-6, float(analysis.get("step_ms", 10.0) or 10.0))
+        active_start_ms = max(0.0, float(analysis.get("active_start_ms", 0.0) or 0.0))
+        active_end_ms = min(duration_ms, float(analysis.get("active_end_ms", duration_ms) or duration_ms))
+        active_lo = _time_to_frame(analysis, active_start_ms)
+        active_hi = _time_to_frame(analysis, active_end_ms)
+        if active_hi <= active_lo + seg:
+            active_lo = 0
+            active_hi = n - 1
         boundary_idx = [0]
-        prev = 0
+        prev = active_lo
         for i in range(1, seg):
-            target = int(round(float(i) * float(n) / float(seg)))
-            search_radius = max(3, int(round(float(n) / float(seg * 3))))
+            target = int(round(active_lo + (float(i) * float(active_hi - active_lo) / float(seg))))
+            search_radius = max(3, int(round(float(max(1, active_hi - active_lo)) / float(seg * 3))))
             lo = max(prev + 1, target - search_radius)
-            hi = min(n - 2, target + search_radius)
+            hi = min(active_hi - 1, target + search_radius)
             if hi < lo:
-                cut = max(prev + 1, min(n - 2, target))
+                cut = max(prev + 1, min(max(prev + 1, active_hi - 1), target))
             else:
                 local = smooth[lo : hi + 1]
                 cut = lo + local.index(min(local))
@@ -601,11 +881,10 @@ def _estimate_segment_boundaries_ms(wav_path: str, segment_count: int) -> list[f
             prev = cut
         boundary_idx.append(n - 1)
 
-        step_ms = float(step_frames) * 1000.0 / float(framerate)
-        out = [0.0]
+        out = [active_start_ms]
         for i in range(1, len(boundary_idx) - 1):
             out.append(max(0.0, min(duration_ms, float(boundary_idx[i]) * step_ms)))
-        out.append(duration_ms)
+        out.append(active_end_ms if active_end_ms > active_start_ms else duration_ms)
         if len(out) != seg + 1:
             raise ValueError("boundary count mismatch")
         for i in range(1, len(out)):
@@ -628,35 +907,37 @@ def _refine_remap_timing_for_slot(
     *,
     parsed: dict[str, float],
     boundaries_ms: list[float],
+    activity_profile: dict[str, object] | None = None,
     slot_index: int,
     slot_total: int,
     language: str,
     blend_weight: float,
     format_type: str = "",
-) -> tuple[str, bool]:
+) -> tuple[str, bool, dict[str, object]]:
     if not parsed:
-        return "", False
+        return "", False, {}
     total_slots = max(int(slot_total), 1)
     idx = max(0, min(int(slot_index), total_slots - 1))
     if len(boundaries_ms) < total_slots + 1:
-        return "", False
+        return "", False, {}
 
     seg_start = float(boundaries_ms[idx])
     seg_end = float(boundaries_ms[idx + 1])
     wav_duration_ms = float(boundaries_ms[-1]) if boundaries_ms else 0.0
     if wav_duration_ms <= 0.0 or seg_end <= seg_start + 2.0:
-        return "", False
+        return "", False, {}
 
-    alias_type = _classify_alias_type(language, str(parsed.get("alias", "")))
+    alias_text = str(parsed.get("alias", ""))
+    alias_type = _classify_alias_type(language, alias_text)
     pre_ratio, cons_ratio, cut_ratio, ovl_ratio, off_ratio = {
-        "cv_head": (0.56, 0.46, 0.82, 0.42, 0.22),
-        "cv": (0.48, 0.40, 0.78, 0.38, 0.10),
+        "cv_head": (0.56, 0.46, 0.82, 0.42, 0.12),
+        "cv": (0.48, 0.40, 0.78, 0.38, 0.08),
         "vcv": (0.58, 0.36, 0.66, 0.52, 0.08),
         "vc": (0.62, 0.30, 0.56, 0.55, 0.08),
-        "vv": (0.66, 0.36, 0.70, 0.58, 0.06),
-        "mono": (0.50, 0.40, 0.74, 0.40, 0.10),
+        "vv": (0.66, 0.36, 0.70, 0.58, 0.04),
+        "mono": (0.50, 0.40, 0.74, 0.40, 0.04),
         "br": (0.30, 0.25, 0.45, 0.24, 0.05),
-        "other": (0.50, 0.38, 0.72, 0.36, 0.10),
+        "other": (0.50, 0.38, 0.72, 0.36, 0.08),
     }.get(str(alias_type or "").strip().lower(), (0.50, 0.38, 0.72, 0.36, 0.10))
     # CVVC 포맷에서 VC alias는 앞 CV와 바로 맞닿으므로 offset을 더 타이트하게 설정한다.
     fmt = str(format_type or "").strip().lower()
@@ -664,18 +945,47 @@ def _refine_remap_timing_for_slot(
         off_ratio = 0.04
 
     seg_len = max(28.0, seg_end - seg_start)
-    target_offset = max(0.0, seg_start - (seg_len * off_ratio))
+    expected_offset = max(0.0, seg_start - (seg_len * off_ratio))
+    base_offset = float(parsed.get("offset", 0.0))
+    target_offset, offset_conf, low_confidence, offset_source = _pick_scored_offset(
+        profile=activity_profile,
+        alias=alias_text,
+        alias_type=alias_type,
+        seg_start=seg_start,
+        seg_end=seg_end,
+        expected_offset=expected_offset,
+        base_offset=base_offset,
+        seg_len=seg_len,
+    )
     target_pre = max(24.0, min(260.0, seg_len * pre_ratio))
+    if activity_profile and str(alias_type or "").strip().lower() in {"cv_head", "cv", "mono", "vv"}:
+        vowel_peak_ms = _best_local_time(
+            activity_profile,
+            start_ms=max(seg_start, target_offset),
+            end_ms=seg_end,
+            key="smooth",
+            prefer_max=True,
+            default_ms=target_offset + target_pre,
+        )
+        peak_pre = max(18.0, min(280.0, vowel_peak_ms - target_offset))
+        peak_weight = 0.65 if (_alias_is_vowel_only(alias_text) or str(alias_type).strip().lower() == "cv_head") else 0.38
+        target_pre = _blend_value(target_pre, peak_pre, peak_weight)
     target_cons = target_pre + max(16.0, min(250.0, seg_len * cons_ratio))
     right_blank_struct = target_cons + max(30.0, min(360.0, seg_len * cut_ratio))
-    right_blank_boundary = max(6.0, wav_duration_ms - seg_end + (seg_len * 0.08))
+    active_end = (
+        float(activity_profile.get("active_end_ms", wav_duration_ms) or wav_duration_ms)
+        if activity_profile
+        else wav_duration_ms
+    )
+    right_blank_boundary = max(6.0, min(wav_duration_ms, active_end) - seg_end + (seg_len * 0.08))
     target_cutoff = -max(right_blank_struct, right_blank_boundary)
     target_ovl = max(0.0, min(target_pre * 0.86, target_pre * ovl_ratio))
 
     row_is_zero = _timing_row_is_zeroish(parsed)
     base_weight = 1.0 if row_is_zero else max(0.05, min(0.95, float(blend_weight)))
+    if low_confidence:
+        base_weight = max(base_weight, 0.74)
 
-    base_offset = float(parsed.get("offset", 0.0))
     base_cons = float(parsed.get("cons", 0.0))
     base_cutoff = float(parsed.get("cutoff", 0.0))
     base_pre = float(parsed.get("pre", 0.0))
@@ -684,6 +994,8 @@ def _refine_remap_timing_for_slot(
     offset_weight = 1.0 if abs(base_offset) <= 1e-6 else base_weight
     if base_offset > seg_end + 2.0 or base_offset < max(0.0, seg_start - seg_len):
         offset_weight = max(offset_weight, 0.70)
+    if low_confidence or offset_source != "base":
+        offset_weight = max(offset_weight, 0.82)
     pre_weight = 1.0 if abs(base_pre) <= 1e-6 else base_weight
     cons_weight = 1.0 if abs(base_cons) <= 1e-6 else base_weight
     cutoff_weight = 1.0 if abs(base_cutoff) <= 1e-6 else base_weight
@@ -696,8 +1008,19 @@ def _refine_remap_timing_for_slot(
     ov2 = _blend_value(base_ovl, target_ovl, ovl_weight)
     o2, c2, ct2, pr2, ov2 = _fallback_validate_oto_params(o2, c2, ct2, pr2, ov2)
 
-    max_offset = max(0.0, min(wav_duration_ms - 1.0, seg_end - 2.0))
-    o2 = max(0.0, min(max_offset, o2))
+    active_start = (
+        float(activity_profile.get("active_start_ms", 0.0) or 0.0)
+        if activity_profile
+        else 0.0
+    )
+    active_end = (
+        float(activity_profile.get("active_end_ms", wav_duration_ms) or wav_duration_ms)
+        if activity_profile
+        else wav_duration_ms
+    )
+    min_offset = max(0.0, active_start - (18.0 if str(alias_type).strip().lower() in {"cv_head", "cv"} else 10.0))
+    max_offset = max(0.0, min(wav_duration_ms - 1.0, active_end + 12.0, seg_end - 2.0))
+    o2 = max(min_offset, min(max_offset, o2))
     rewritten = f"{parsed['wav']}={parsed['alias']},{o2:.2f},{c2:.2f},{ct2:.2f},{pr2:.2f},{ov2:.2f}"
     changed = (
         abs(float(o2) - base_offset) > 1e-6
@@ -706,7 +1029,13 @@ def _refine_remap_timing_for_slot(
         or abs(float(pr2) - base_pre) > 1e-6
         or abs(float(ov2) - base_ovl) > 1e-6
     )
-    return rewritten, changed
+    quality = {
+        "confidence": float(offset_conf),
+        "low_confidence": bool(low_confidence),
+        "offset_source": offset_source,
+        "alias_type": str(alias_type or ""),
+    }
+    return rewritten, changed, quality
 
 
 def generate_no_mfa_auto_oto(
@@ -720,15 +1049,11 @@ def generate_no_mfa_auto_oto(
     generation_mode: str = "remap",
     callback: Callable[[str], None] | None = None,
 ) -> tuple[int, int, list[str]]:
+    normalized_out_path = _normalize_output_oto_path(out_path)
     mode = _normalize_generation_mode(generation_mode)
     _log(
         callback,
-        "[No-MFA] generation mode: "
-        + (
-            "alias_auto (blank-alias template -> auto timing)"
-            if mode == "alias_auto"
-            else "remap (base timing remap + correction)"
-        ),
+        "[No-MFA] generation mode: remap (base OTO timing remap + acoustic correction)",
     )
     source = resolve_no_mfa_source_oto(
         wav_dir=wav_dir,
@@ -759,25 +1084,8 @@ def generate_no_mfa_auto_oto(
         _detected_format = ""
 
     timing_profile = None
-    timing_zero_only = mode == "alias_auto"
+    timing_zero_only = False
     remap_blend_weight = max(0.05, min(0.95, _env_float("UTOA_NO_MFA_REMAP_BLEND", 0.38)))
-    stats_source = resolve_no_mfa_stats_oto(stats_hint=stats_oto_path)
-    if not stats_source and str(stats_oto_path or "").strip():
-        _log(callback, f"[No-MFA] stats oto not found: {stats_oto_path}")
-    if stats_source:
-        timing_profile = _build_no_mfa_timing_profile(
-            language=language,
-            reference_oto_path=stats_source,
-        )
-        if timing_profile:
-            bucket_count = len((timing_profile.get("buckets") or {}))
-            sample_count = int(float(timing_profile.get("rows", 0.0) or 0.0))
-            _log(
-                callback,
-                f"[No-MFA] stats timing enabled: source={stats_source} rows={sample_count} buckets={bucket_count}",
-            )
-        else:
-            _log(callback, f"[No-MFA] stats timing skipped: insufficient usable rows ({stats_source})")
     if timing_profile is None:
         timing_profile = _build_builtin_timing_profile(language=language)
         if timing_profile:
@@ -787,19 +1095,13 @@ def generate_no_mfa_auto_oto(
                 f"[No-MFA] zero-timing fallback enabled: source={timing_profile.get('source', 'builtin')} "
                 "(0,0,0,0,0 rows -> wav slot boundary timing; profile fallback on failure)",
             )
-    if mode == "remap":
-        _log(
-            callback,
-            f"[No-MFA] remap acoustic refine enabled (blend={remap_blend_weight:.2f}; 0-values use full auto correction)",
-        )
-    force_boundary_timing = bool(mode == "alias_auto")
-    if not force_boundary_timing:
-        force_boundary_timing = bool(timing_zero_only and _env_bool("UTOA_NO_MFA_FORCE_BOUNDARY_TIMING", False))
+    _log(
+        callback,
+        f"[No-MFA] remap acoustic refine enabled (blend={remap_blend_weight:.2f}; 0-values use full auto correction)",
+    )
+    force_boundary_timing = bool(timing_zero_only and _env_bool("UTOA_NO_MFA_FORCE_BOUNDARY_TIMING", False))
     if force_boundary_timing:
-        if mode == "alias_auto":
-            _log(callback, "[No-MFA] alias-auto timing mode enabled (blank OTO base with boundary estimation).")
-        else:
-            _log(callback, "[No-MFA] forced boundary timing mode enabled (ignoring base OTO timing values).")
+        _log(callback, "[No-MFA] forced boundary timing mode enabled (ignoring base OTO timing values).")
 
     exact_lookup, norm_lookup = _build_wav_lookup(wav_dir)
     if not exact_lookup and not norm_lookup:
@@ -814,6 +1116,9 @@ def generate_no_mfa_auto_oto(
     remap_refined = 0
     boundary_refined = 0
     profile_fallback_refined = 0
+    low_confidence_refined = 0
+    offset_source_counts: dict[str, int] = {}
+    confidence_values: list[float] = []
     total = 0
     prepared_entries: list[tuple[str, str]] = []
 
@@ -842,6 +1147,7 @@ def generate_no_mfa_auto_oto(
     per_wav_index: dict[str, int] = {}
     wav_duration_cache: dict[str, float] = {}
     wav_boundary_cache: dict[tuple[str, int], list[float]] = {}
+    wav_activity_cache: dict[str, dict[str, object]] = {}
     wav_root = os.path.abspath(str(wav_dir or "").strip())
 
     for mapped_wav, right in prepared_entries:
@@ -850,24 +1156,25 @@ def generate_no_mfa_auto_oto(
         per_wav_index[mapped_wav] = slot_idx + 1
 
         parsed_candidate = parse_oto_line(candidate)
-        if mode == "alias_auto" and parsed_candidate:
-            candidate = f"{parsed_candidate['wav']}={parsed_candidate['alias']},0,0,0,0,0"
-            parsed_candidate = parse_oto_line(candidate) or parsed_candidate
-
         timing_applied = False
         slot_total = int(per_wav_total.get(mapped_wav, 1) or 1)
 
         if mode == "remap" and parsed_candidate:
             wav_abs = os.path.join(wav_root, mapped_wav.replace("/", os.sep))
+            activity_profile = wav_activity_cache.get(wav_abs)
+            if activity_profile is None:
+                activity_profile = _analyze_wav_activity(wav_abs)
+                wav_activity_cache[wav_abs] = activity_profile
             boundary_key = (wav_abs, slot_total)
             boundaries = wav_boundary_cache.get(boundary_key)
             if boundaries is None:
-                boundaries = _estimate_segment_boundaries_ms(wav_abs, slot_total)
+                boundaries = _estimate_segment_boundaries_ms(wav_abs, slot_total, activity_profile)
                 wav_boundary_cache[boundary_key] = boundaries
             if boundaries and len(boundaries) >= slot_total + 1:
-                remapped, changed = _refine_remap_timing_for_slot(
+                remapped, changed, quality = _refine_remap_timing_for_slot(
                     parsed=parsed_candidate,
                     boundaries_ms=boundaries,
+                    activity_profile=activity_profile,
                     slot_index=slot_idx,
                     slot_total=slot_total,
                     language=language,
@@ -880,6 +1187,14 @@ def generate_no_mfa_auto_oto(
                     timing_replaced += 1
                     remap_refined += 1
                     timing_applied = True
+                    if bool((quality or {}).get("low_confidence")):
+                        low_confidence_refined += 1
+                    source_key = str((quality or {}).get("offset_source", "") or "unknown")
+                    offset_source_counts[source_key] = int(offset_source_counts.get(source_key, 0)) + 1
+                    try:
+                        confidence_values.append(float((quality or {}).get("confidence", 0.0) or 0.0))
+                    except Exception:
+                        pass
 
         if timing_zero_only and not timing_applied:
             should_estimate = bool(parsed_candidate and (force_boundary_timing or _timing_row_is_zeroish(parsed_candidate)))
@@ -933,11 +1248,34 @@ def generate_no_mfa_auto_oto(
             msg = f"{msg} (예시: {sample})"
         return 0, total, [msg]
 
-    out_dir = os.path.dirname(os.path.abspath(out_path))
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(out_lines).rstrip() + "\n")
+    if not normalized_out_path:
+        return 0, total, ["출력 OTO 경로가 비어 있습니다."]
+
+    zero_placeholder_rows = []
+    for line in out_lines:
+        parsed_line = parse_oto_line(line)
+        if parsed_line and _timing_row_is_zeroish(parsed_line):
+            zero_placeholder_rows.append(line)
+    if zero_placeholder_rows:
+        sample = "; ".join(zero_placeholder_rows[:3])
+        suffix = " ..." if len(zero_placeholder_rows) > 3 else ""
+        msg = (
+            "[ERROR] No-MFA 자동설정 placeholder OTO가 보정되지 않아 저장을 중단했습니다 "
+            f"(zero_placeholder_rows={len(zero_placeholder_rows)}/{len(out_lines)}). "
+            "WAV 파일 길이 읽기, 베이스 OTO 매칭, stats/reference OTO 설정을 확인하세요. "
+            f"sample={sample}{suffix}"
+        )
+        _log(callback, msg)
+        return 0, total, [msg]
+
+    out_dir = os.path.dirname(os.path.abspath(normalized_out_path))
+    try:
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(normalized_out_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(out_lines).rstrip() + "\n")
+    except OSError as exc:
+        return 0, total, [f"출력 OTO 파일 저장 실패: {normalized_out_path} ({exc})"]
 
     missing_count = max(total - (exact_hits + norm_hits), 0)
     _log(
@@ -951,10 +1289,27 @@ def generate_no_mfa_auto_oto(
             f"[No-MFA] timing rows replaced: {timing_replaced} "
             f"(remap={remap_refined}, boundary={boundary_refined}, profile_fallback={profile_fallback_refined})",
         )
+    if remap_refined:
+        conf_mean = (sum(confidence_values) / float(len(confidence_values))) if confidence_values else 0.0
+        source_desc = ", ".join(
+            f"{key}:{value}" for key, value in sorted(offset_source_counts.items(), key=lambda item: item[0])
+        )
+        _log(
+            callback,
+            f"[No-MFA] acoustic candidate scoring: confidence_mean={conf_mean:.2f}, "
+            f"low_confidence_rows={low_confidence_refined}, offset_sources={source_desc or 'n/a'}",
+        )
     if missing_wavs:
         sample = ", ".join(sorted(missing_wavs)[:5])
         suffix = "..." if len(missing_wavs) > 5 else ""
         _log(callback, f"[No-MFA] 매칭 실패 wav: {sample}{suffix}")
+    _apply_no_mfa_ml_correction(
+        language=language,
+        oto_path=normalized_out_path,
+        wav_dir=wav_dir,
+        format_type=_detected_format,
+        callback=callback,
+    )
     return len(out_lines), total, []
 
 

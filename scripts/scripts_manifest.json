@@ -21,6 +21,12 @@
       "note": "Manual helper to assemble alignment sample/test folders."
     },
     {
+      "path": "scripts/build_dataset_eval_cases.py",
+      "status": "manual",
+      "owner": "eval",
+      "note": "Build dataset_staged batch-generation cases for manual OTO evaluation."
+    },
+    {
       "path": "scripts/build_installer.ps1",
       "status": "protected",
       "owner": "release",
@@ -87,10 +93,22 @@
       "note": "Documented regression entrypoint."
     },
     {
+      "path": "scripts/run_kr_sequence_oto_eval.py",
+      "status": "manual",
+      "owner": "eval",
+      "note": "Run Korean CVC/CVVC/VCV sequence OTO evaluation and generate an HTML timing visual report."
+    },
+    {
       "path": "scripts/run_oto_generation_batch.py",
       "status": "protected",
       "owner": "pipeline",
       "note": "Batch generation runtime entrypoint."
+    },
+    {
+      "path": "scripts/score_oto_eval.py",
+      "status": "manual",
+      "owner": "eval",
+      "note": "Score generated OTO files against manual dataset_staged oto.ini references."
     },
     {
       "path": "scripts/runtime_recovery.ps1",

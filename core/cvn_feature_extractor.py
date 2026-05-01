@@ -176,6 +176,58 @@ def _build_mel_filterbank(sample_rate: int, n_fft: int, n_mels: int) -> np.ndarr
     return fb
 
 
+def _estimate_f0_pyin_full(
+    sig: np.ndarray,
+    sr: int,
+    f0_min: float,
+    f0_max: float,
+    frame_len: int,
+    hop_len: int,
+    times_ms: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """
+    Runs librosa.pyin on the whole signal and returns (f0_hz, voiced_probs)
+    aligned to times_ms via linear interpolation.
+    voiced_probs is continuous [0, 1] — more informative than a binary flag.
+    Returns None if librosa is unavailable or an error occurs.
+    """
+    try:
+        import librosa as _librosa
+    except ImportError:
+        return None
+    try:
+        fmax_safe = min(float(f0_max), float(sr) * 0.5 - 1.0)
+        # pyin needs ≥ 2 periods of fmin to fit in the frame.
+        # Use a longer analysis window than the feature hop window if necessary.
+        pyin_frame_len = max(int(frame_len), int(math.ceil(2.5 / float(max(f0_min, 1.0)) * float(sr))))
+        f0_raw, _voiced_flag, voiced_probs = _librosa.pyin(
+            sig.astype(np.float32),
+            fmin=float(max(f0_min, 1.0)),
+            fmax=float(max(fmax_safe, float(f0_min) + 1.0)),
+            sr=int(sr),
+            frame_length=int(pyin_frame_len),
+            hop_length=int(hop_len),
+            fill_na=0.0,
+            center=True,
+        )
+        n_pyin = len(f0_raw)
+        if n_pyin == 0:
+            return None
+
+        f0_raw = np.nan_to_num(np.asarray(f0_raw, dtype=np.float32), nan=0.0)
+        voiced_probs = np.clip(np.asarray(voiced_probs, dtype=np.float32), 0.0, 1.0)
+
+        # pyin frame centers (center=True): frame k is centered at k * hop_len samples
+        pyin_times_sec = (np.arange(n_pyin, dtype=np.float64) * float(hop_len)) / float(sr)
+        my_times_sec = np.asarray(times_ms, dtype=np.float64) / 1000.0
+
+        f0_aligned = np.interp(my_times_sec, pyin_times_sec, f0_raw).astype(np.float32)
+        vp_aligned = np.interp(my_times_sec, pyin_times_sec, voiced_probs).astype(np.float32)
+        return f0_aligned, vp_aligned
+    except Exception:
+        return None
+
+
 def _estimate_f0_autocorr(
     frame: np.ndarray,
     sample_rate: int,
@@ -244,7 +296,13 @@ def extract_frame_features_from_audio(
     centroid = np.zeros((n_frames,), dtype=np.float32)
     flatness = np.zeros((n_frames,), dtype=np.float32)
     f0_hz = np.zeros((n_frames,), dtype=np.float32)
-    voiced = np.zeros((n_frames,), dtype=bool)
+    # voiced_mask stores continuous voiced probability [0, 1] when pyin is available,
+    # or binary 0.0/1.0 from autocorrelation as fallback.
+    voiced = np.zeros((n_frames,), dtype=np.float32)
+
+    # Attempt whole-signal pyin F0 extraction before the per-frame loop.
+    pyin_result = _estimate_f0_pyin_full(sig, sr, f0_min, f0_max, frame_len, hop_len, times_ms)
+    use_pyin = pyin_result is not None
 
     for i in range(n_frames):
         frame = frames[i]
@@ -265,9 +323,13 @@ def extract_frame_features_from_audio(
         centroid[i] = float(np.sum(freqs * mag) / mag_sum)
         flatness[i] = float(np.exp(np.mean(np.log(np.maximum(mag, _EPS)))) / (np.mean(mag) + _EPS))
 
-        f0, is_voiced = _estimate_f0_autocorr(frame, sr, f0_min=f0_min, f0_max=f0_max)
-        f0_hz[i] = float(f0)
-        voiced[i] = bool(is_voiced)
+        if not use_pyin:
+            f0, is_voiced = _estimate_f0_autocorr(frame, sr, f0_min=f0_min, f0_max=f0_max)
+            f0_hz[i] = float(f0)
+            voiced[i] = 1.0 if is_voiced else 0.0
+
+    if use_pyin:
+        f0_hz, voiced = pyin_result  # both float32, aligned to times_ms
 
     return FrameFeatures(
         sample_rate=sr,
@@ -276,7 +338,7 @@ def extract_frame_features_from_audio(
         times_ms=times_ms.astype(np.float32),
         log_mel=log_mel.astype(np.float32),
         f0_hz=f0_hz.astype(np.float32),
-        voiced_mask=voiced.astype(bool),
+        voiced_mask=voiced.astype(np.float32),
         rms=rms.astype(np.float32),
         zcr=zcr.astype(np.float32),
         spectral_centroid=centroid.astype(np.float32),

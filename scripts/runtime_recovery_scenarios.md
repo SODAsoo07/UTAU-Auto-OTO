@@ -16,8 +16,7 @@ UTAU Auto OTO 실행 시 발생할 수 있는 대표 문제 상황과 복구 방
 
 이 프로젝트의 Windows 런타임 복구는 **시스템 전역 Python/pip**보다 **앱이 관리하는 엔진별 환경**을 우선 기준으로 삼는다.
 - MFA: `.env` + `setup_mfa.bat`
-- CTC: `.env_ctc` + `setup_ctc.bat`
-- 통합 복구: `runtime_recovery.ps1 -Target both`
+- 통합 복구: `runtime_recovery.ps1 -Target mfa`
 
 따라서 사용자가 “Python이 없다”, “pip가 안 잡힌다”고 느끼는 경우도 실제로는 아래 중 하나일 가능성이 크다.
 
