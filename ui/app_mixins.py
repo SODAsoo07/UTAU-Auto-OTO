@@ -1333,6 +1333,9 @@ class AppRuntimeMixin:
         defaults = {
             "developer_mode_enabled_var": False,
             "aligner_var": "MFA",
+            "no_mfa_oto_mode_var": "베이스 OTO 재매핑 + 보정",
+            "oto_crnn_model_path_var": "",
+            "oto_crnn_device_var": "auto",
             "enable_ml_correction_var": True,
             "ml_route_var": "자동(자동 라우팅)",
             "ml_selector_mode_var": "+셀렉터",
@@ -3377,6 +3380,8 @@ class ConfigMixin:
             "ml_anchor_mel_gamma": self.ml_anchor_mel_gamma_var.get() if hasattr(self, "ml_anchor_mel_gamma_var") else "",
             "ml_model_root_kr": self.ml_model_root_kr_var.get() if hasattr(self, "ml_model_root_kr_var") else "",
             "ml_model_root_ja": self.ml_model_root_ja_var.get() if hasattr(self, "ml_model_root_ja_var") else "",
+            "oto_crnn_model_path": self.oto_crnn_model_path_var.get() if hasattr(self, "oto_crnn_model_path_var") else "",
+            "oto_crnn_device": self.oto_crnn_device_var.get() if hasattr(self, "oto_crnn_device_var") else "auto",
             "cvn_correction_enable": self.cvn_correction_enable_var.get() if hasattr(self, "cvn_correction_enable_var") else True,
             "cvn_low_conf_only": self.cvn_low_conf_only_var.get() if hasattr(self, "cvn_low_conf_only_var") else False,
             "mapping_supervised_enable": self.mapping_supervised_enable_var.get() if hasattr(self, "mapping_supervised_enable_var") else True,
@@ -3962,6 +3967,11 @@ class ConfigMixin:
                 self.ml_model_root_kr_var.set(str(config.get("ml_model_root_kr", "") or ""))
             if "ml_model_root_ja" in config and hasattr(self, "ml_model_root_ja_var"):
                 self.ml_model_root_ja_var.set(str(config.get("ml_model_root_ja", "") or ""))
+            if "oto_crnn_model_path" in config and hasattr(self, "oto_crnn_model_path_var"):
+                self.oto_crnn_model_path_var.set(str(config.get("oto_crnn_model_path", "") or ""))
+            if "oto_crnn_device" in config and hasattr(self, "oto_crnn_device_var"):
+                device = str(config.get("oto_crnn_device", "auto") or "auto").strip().lower()
+                self.oto_crnn_device_var.set(device if device in {"auto", "cpu", "cuda"} else "auto")
 
             if hasattr(self, "tune_auto_oto_var"):
                 self.tune_auto_oto_var.set(config.get("tune_auto_oto", ""))
