@@ -22,9 +22,13 @@ class OtoCrnnConfig:
     enable_format_residual_heads: bool = False
     enable_vcv_target_window: bool = True
     vcv_target_window_frames: int = 240
-    target_window_formats: tuple[str, ...] = ("vcv", "cvvc")
-    target_window_frame_overrides: tuple[str, ...] = ("vcv=240", "cvvc=360")
-    cvvc_target_window_alias_types: tuple[str, ...] = ("vc", "vv")
+    # cvvc is excluded from windowing: cvvc vc/vv aliases are NOT uniformly
+    # distributed across the audio (CV rows come first, VC rows later), so
+    # row_ratio-based window centering produces 1000–2500 ms offset errors.
+    # Full-audio heatmap finds the correct position reliably instead.
+    target_window_formats: tuple[str, ...] = ("vcv",)
+    target_window_frame_overrides: tuple[str, ...] = ("vcv=240",)
+    cvvc_target_window_alias_types: tuple[str, ...] = ()
     anchor_heatmap_blend: float = 0.70
     vcv_window_heatmap_blend: float = 0.30
     scalar_target_mode: str = "relative_params"
