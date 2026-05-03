@@ -610,6 +610,16 @@ class OtoActionsMixin:
                     elif no_mfa_auto_mode:
                         if no_mfa_mode_code == "crnn":
                             _update_oto_local("CRNN OTO 예측 생성", 0.22, force=True)
+                            _crnn_special_raw = (
+                                self.oto_crnn_special_aliases_var.get()
+                                if hasattr(self, "oto_crnn_special_aliases_var")
+                                else ""
+                            )
+                            _crnn_special_aliases: set[str] = {
+                                item.strip()
+                                for item in str(_crnn_special_raw or "").split(",")
+                                if item.strip()
+                            }
                             processed, total, errors = generate_oto_with_crnn_predictor(
                                 wav_dir=target_wav_dir,
                                 out_path=target_out_path,
@@ -627,6 +637,7 @@ class OtoActionsMixin:
                                     if hasattr(self, "oto_crnn_device_var")
                                     else "auto"
                                 ),
+                                special_aliases=_crnn_special_aliases or None,
                                 callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                             )
                         else:
