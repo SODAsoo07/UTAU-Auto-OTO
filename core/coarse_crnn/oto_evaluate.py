@@ -8,7 +8,7 @@ from typing import Any
 
 from core.coarse_crnn.oto_inference import predict_oto_with_model
 from core.coarse_crnn.oto_model import load_oto_checkpoint
-from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES, OtoAnchors, anchors_to_oto_params
+from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES, OtoAnchors, anchors_to_oto_params, extract_alias_features
 from core.coarse_crnn.training import resolve_torch_device
 
 
@@ -118,9 +118,7 @@ def _evaluate_one(row: dict[str, Any], config: OtoEvalConfig, *, model, model_co
         "format_type": str(row.get("format_type", "") or ""),
         "alias_type": str(row.get("alias_type", "") or "other"),
         "transition_type": str(row.get("transition_type", "") or "other"),
-        "alias_role": str(row.get("alias_role", "") or "other"),
-        "is_diphthong": bool(float(row.get("is_diphthong", 0.0) or 0.0) >= 0.5),
-        "is_special": bool(float(row.get("is_special", 0.0) or 0.0) >= 0.5),
+        **_resolve_alias_role_fields(row),
         "duration_ms": float(row.get("duration_ms", prediction.duration_ms) or prediction.duration_ms),
         "confidence": float(prediction.confidence),
         "anchor_abs_errors_ms": anchor_errors,
@@ -213,6 +211,29 @@ def _aggregate_by_alias_role(files: list[dict[str, Any]]) -> dict[str, Any]:
             "overlap_mae_ms": _mean([float(row["param_abs_errors_ms"]["overlap"]) for row in rows]),
         }
     return out
+
+
+def _resolve_alias_role_fields(row: dict[str, Any]) -> dict[str, Any]:
+    """Return alias_role, is_diphthong, is_special for an eval result row.
+
+    Falls back to extract_alias_features() when the manifest was built before
+    the alias_role feature was added (values are None rather than a string).
+    """
+    if row.get("alias_role") is not None:
+        return {
+            "alias_role": str(row["alias_role"] or "other"),
+            "is_diphthong": bool(float(row.get("is_diphthong", 0.0) or 0.0) >= 0.5),
+            "is_special": bool(float(row.get("is_special", 0.0) or 0.0) >= 0.5),
+        }
+    feats = extract_alias_features(
+        str(row.get("alias", "") or ""),
+        language=str(row.get("language", "") or ""),
+    )
+    return {
+        "alias_role": str(feats.get("alias_role", "") or "other"),
+        "is_diphthong": bool(float(feats.get("is_diphthong", 0.0) or 0.0) >= 0.5),
+        "is_special": bool(float(feats.get("is_special", 0.0) or 0.0) >= 0.5),
+    }
 
 
 def _mean(values: list[float]) -> float | None:
