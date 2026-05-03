@@ -17,7 +17,7 @@ def main() -> int:
     parser.add_argument("--transcript", default="")
     parser.add_argument("--model", default="")
     parser.add_argument("--out", required=True)
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:0. auto prefers CUDA when available.")
     args = parser.parse_args()
 
     model_path = resolve_coarse_crnn_model_path(args.model)

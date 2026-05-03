@@ -7,12 +7,18 @@ import numpy as np
 
 
 def load_wav_mono(path: str, *, target_sr: int = 16000) -> tuple[np.ndarray, int, float]:
-    with wave.open(str(path), "rb") as wf:
-        channels = int(wf.getnchannels() or 1)
-        sampwidth = int(wf.getsampwidth() or 2)
-        sr = int(wf.getframerate() or target_sr)
-        frames = int(wf.getnframes() or 0)
-        raw = wf.readframes(frames)
+    try:
+        with wave.open(str(path), "rb") as wf:
+            channels = int(wf.getnchannels() or 1)
+            sampwidth = int(wf.getsampwidth() or 2)
+            sr = int(wf.getframerate() or target_sr)
+            frames = int(wf.getnframes() or 0)
+            raw = wf.readframes(frames)
+    except wave.Error as exc:
+        # Some public singing datasets store IEEE-float WAV (format tag 3) or
+        # WAVE_FORMAT_EXTENSIBLE files. Python's stdlib wave reader only handles
+        # PCM, so fall back to scipy when available.
+        return _load_wav_mono_scipy(path, target_sr=target_sr, reason=str(exc))
 
     if frames <= 0:
         return np.zeros((0,), dtype=np.float32), int(target_sr), 0.0
@@ -42,6 +48,40 @@ def load_wav_mono(path: str, *, target_sr: int = 16000) -> tuple[np.ndarray, int
         sr = int(target_sr)
     duration = float(data.shape[0]) / float(max(1, sr))
     return data.astype(np.float32), int(sr), float(duration)
+
+
+def _load_wav_mono_scipy(path: str, *, target_sr: int, reason: str = "") -> tuple[np.ndarray, int, float]:
+    try:
+        from scipy.io import wavfile  # type: ignore
+    except Exception as exc:
+        raise wave.Error(f"{reason}; scipy fallback unavailable: {exc}") from exc
+    sr, data = wavfile.read(str(path))
+    arr = np.asarray(data)
+    if arr.ndim > 1:
+        arr = arr.mean(axis=1)
+    if arr.size <= 0:
+        return np.zeros((0,), dtype=np.float32), int(target_sr), 0.0
+    if np.issubdtype(arr.dtype, np.floating):
+        x = arr.astype(np.float32)
+    elif arr.dtype == np.uint8:
+        x = (arr.astype(np.float32) - 128.0) / 128.0
+    elif arr.dtype == np.int16:
+        x = arr.astype(np.float32) / 32768.0
+    elif arr.dtype == np.int32:
+        x = arr.astype(np.float32) / float(1 << 31)
+    else:
+        max_abs = float(np.max(np.abs(arr.astype(np.float64)))) or 1.0
+        x = arr.astype(np.float32) / max_abs
+    x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    peak = float(np.max(np.abs(x))) if x.size else 0.0
+    if peak > 1.0:
+        x = x / peak
+    x = np.clip(x.astype(np.float32), -1.0, 1.0)
+    if int(sr) != int(target_sr) and x.size > 1:
+        x = _linear_resample(x, int(sr), int(target_sr))
+        sr = int(target_sr)
+    duration = float(x.shape[0]) / float(max(1, int(sr)))
+    return x.astype(np.float32), int(sr), float(duration)
 
 
 def _linear_resample(samples: np.ndarray, sr: int, target_sr: int) -> np.ndarray:
@@ -121,4 +161,72 @@ def log_mel_spectrogram(
     return ((logmel - mean) / std).astype(np.float32), float(hop) / float(sr)
 
 
-__all__ = ["load_wav_mono", "log_mel_spectrogram", "mel_filterbank"]
+def estimate_active_region_seconds(
+    samples: np.ndarray,
+    sr: int,
+    *,
+    frame_ms: float = 25.0,
+    hop_ms: float = 10.0,
+    pad_sec: float = 0.080,
+) -> tuple[float, float] | None:
+    x = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if x.size <= 0 or sr <= 0:
+        return None
+    win = max(16, int(round(float(sr) * float(frame_ms) / 1000.0)))
+    hop = max(1, int(round(float(sr) * float(hop_ms) / 1000.0)))
+    if x.size < win:
+        return (0.0, float(x.size) / float(sr))
+    frame_count = 1 + int((x.size - win) // hop)
+    rms = np.zeros((frame_count,), dtype=np.float32)
+    for idx in range(frame_count):
+        start = idx * hop
+        frame = x[start : start + win]
+        rms[idx] = float(np.sqrt(np.mean(np.square(frame), dtype=np.float64) + 1e-12))
+    if not np.any(rms > 0.0):
+        return None
+    p20 = float(np.quantile(rms, 0.20))
+    p80 = float(np.quantile(rms, 0.80))
+    p95 = float(np.quantile(rms, 0.95))
+    threshold = max(p20 + (p95 - p20) * 0.12, p80 * 0.35, 1e-5)
+    active = rms >= threshold
+    max_gap = max(0, int(round(0.080 / (float(hop) / float(sr)))))
+    if max_gap > 0:
+        i = 0
+        while i < active.size:
+            if active[i]:
+                i += 1
+                continue
+            s = i
+            while i < active.size and not active[i]:
+                i += 1
+            e = i
+            if s > 0 and e < active.size and active[s - 1] and active[e] and (e - s) <= max_gap:
+                active[s:e] = True
+    min_run = max(1, int(round(0.030 / (float(hop) / float(sr)))))
+    i = 0
+    while i < active.size:
+        if not active[i]:
+            i += 1
+            continue
+        s = i
+        while i < active.size and active[i]:
+            i += 1
+        e = i
+        if e - s < min_run:
+            active[s:e] = False
+    idxs = np.where(active)[0]
+    if idxs.size <= 0:
+        return None
+    start_sec = max(0.0, (float(idxs[0]) * float(hop) / float(sr)) - float(pad_sec))
+    end_sec = min(float(x.size) / float(sr), (float(idxs[-1] + 1) * float(hop) / float(sr)) + float(pad_sec))
+    if end_sec <= start_sec:
+        return None
+    return start_sec, end_sec
+
+
+def estimate_active_region_for_wav(path: str, *, target_sr: int = 16000) -> tuple[float, float] | None:
+    samples, sr, _duration = load_wav_mono(path, target_sr=target_sr)
+    return estimate_active_region_seconds(samples, sr)
+
+
+__all__ = ["estimate_active_region_for_wav", "estimate_active_region_seconds", "load_wav_mono", "log_mel_spectrogram", "mel_filterbank"]

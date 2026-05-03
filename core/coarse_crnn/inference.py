@@ -5,12 +5,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from core.coarse_crnn.audio import load_wav_mono, log_mel_spectrogram
+from core.coarse_crnn.audio import estimate_active_region_for_wav, load_wav_mono, log_mel_spectrogram
 from core.coarse_crnn.decode import greedy_segments, viterbi_align_phones
 from core.coarse_crnn.export import write_debug_json, write_phone_lab, write_textgrid
 from core.coarse_crnn.lang import normalize_language, phones_from_text, phones_from_wav_name
 from core.coarse_crnn.lab_io import read_transcript_for_wav
 from core.coarse_crnn.model import load_checkpoint
+from core.coarse_crnn.reclist import estimate_reclist_phone_bounds
+from core.coarse_crnn.training import resolve_torch_device
 from core.coarse_crnn.types import PhoneSegment, Segment
 
 
@@ -26,8 +28,9 @@ class CoarseCrnnAlignmentResult:
     error: str = ""
 
 
-def predict_posteriors(model, config, wav_path: str, *, device: str = "cpu") -> tuple[np.ndarray, float, float]:
+def predict_outputs(model, config, wav_path: str, *, device: str = "cpu") -> tuple[np.ndarray, np.ndarray | None, float, float]:
     torch = __import__("torch")
+    torch_device = resolve_torch_device(torch, device)
     samples, sr, duration_sec = load_wav_mono(wav_path, target_sr=int(config.sample_rate))
     features, hop_sec = log_mel_spectrogram(
         samples,
@@ -37,12 +40,28 @@ def predict_posteriors(model, config, wav_path: str, *, device: str = "cpu") -> 
         hop_ms=float(config.hop_ms),
     )
     if features.shape[0] <= 0:
-        return np.zeros((0, len(config.labels)), dtype=np.float32), float(hop_sec), float(duration_sec)
+        return np.zeros((0, len(config.labels)), dtype=np.float32), None, float(hop_sec), float(duration_sec)
     with torch.no_grad():
-        x = torch.from_numpy(features).unsqueeze(0).to(device)
-        logits = model.to(device)(x)
+        x = torch.from_numpy(features).unsqueeze(0).to(torch_device)
+        if hasattr(model, "forward_all"):
+            outputs = model.to(torch_device).forward_all(x)
+            logits = outputs["logits"]
+            boundary_logits = outputs.get("boundary_logits")
+        else:
+            logits = model.to(torch_device)(x)
+            boundary_logits = None
         probs = torch.softmax(logits, dim=-1).squeeze(0).detach().cpu().numpy().astype(np.float32)
-    return probs, float(hop_sec), float(duration_sec)
+        boundary_probs = (
+            torch.sigmoid(boundary_logits).squeeze(0).detach().cpu().numpy().astype(np.float32)
+            if boundary_logits is not None
+            else None
+        )
+    return probs, boundary_probs, float(hop_sec), float(duration_sec)
+
+
+def predict_posteriors(model, config, wav_path: str, *, device: str = "cpu") -> tuple[np.ndarray, float, float]:
+    probs, _boundary_probs, hop_sec, duration_sec = predict_outputs(model, config, wav_path, device=device)
+    return probs, hop_sec, duration_sec
 
 
 def align_wav(
@@ -64,8 +83,10 @@ def align_wav(
         if not os.path.isfile(model_path):
             return CoarseCrnnAlignmentResult(False, wav_path, "", "", "", 0.0, [], f"coarse_crnn model not found: {model_path}")
 
-        model, config, meta = load_checkpoint(model_path, map_location=device)
-        probs, hop_sec, duration_sec = predict_posteriors(model, config, wav_path, device=device)
+        torch = __import__("torch")
+        torch_device = resolve_torch_device(torch, device)
+        model, config, meta = load_checkpoint(model_path, map_location=str(torch_device))
+        probs, boundary_probs, hop_sec, duration_sec = predict_outputs(model, config, wav_path, device=str(torch_device))
         if probs.shape[0] <= 0 or duration_sec <= 0.0:
             return CoarseCrnnAlignmentResult(False, wav_path, "", "", "", 0.0, [], "empty model output")
 
@@ -80,6 +101,13 @@ def align_wav(
         coarse_segments = greedy_segments(probs, labels=list(config.labels), hop_sec=hop_sec)
         phone_segments: list[PhoneSegment] = []
         if phones:
+            active_region = estimate_active_region_for_wav(wav_path, target_sr=int(config.sample_rate))
+            boundary_priors = estimate_reclist_phone_bounds(
+                wav_path,
+                phones,
+                language=lang,
+                active_range_sec=active_region,
+            )
             phone_segments = viterbi_align_phones(
                 probs,
                 phones,
@@ -87,6 +115,9 @@ def align_wav(
                 hop_sec=hop_sec,
                 language=lang,
                 duration_sec=duration_sec,
+                active_range_sec=active_region,
+                boundary_priors_sec=boundary_priors,
+                boundary_probs=boundary_probs,
             )
 
         os.makedirs(output_dir, exist_ok=True)
@@ -143,4 +174,4 @@ def _overall_confidence(phone_segments: list[PhoneSegment], coarse_segments: lis
     return 0.0
 
 
-__all__ = ["CoarseCrnnAlignmentResult", "align_wav", "predict_posteriors"]
+__all__ = ["CoarseCrnnAlignmentResult", "align_wav", "predict_outputs", "predict_posteriors"]

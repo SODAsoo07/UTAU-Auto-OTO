@@ -16,6 +16,7 @@ class CoarseCrnnConfig:
     sample_rate: int = 16000
     frame_ms: float = 25.0
     hop_ms: float = 10.0
+    enable_boundary_head: bool = False
     labels: tuple[str, ...] = tuple(COARSE_LABELS)
 
     @classmethod
@@ -64,13 +65,24 @@ def build_model(config: CoarseCrnnConfig):
                 dropout=float(cfg.dropout) if int(cfg.rnn_layers) > 1 else 0.0,
             )
             self.head = nn.Linear(int(cfg.hidden) * 2, len(cfg.labels))
+            self.boundary_head = nn.Linear(int(cfg.hidden) * 2, 1) if bool(cfg.enable_boundary_head) else None
 
-        def forward(self, x):
+        def encode(self, x):
             # x: [batch, frames, mel]
             y = x.transpose(1, 2)
             y = self.net(y).transpose(1, 2)
             y, _ = self.rnn(y)
-            return self.head(y)
+            return y
+
+        def forward(self, x):
+            return self.head(self.encode(x))
+
+        def forward_all(self, x):
+            encoded = self.encode(x)
+            out = {"logits": self.head(encoded)}
+            if self.boundary_head is not None:
+                out["boundary_logits"] = self.boundary_head(encoded).squeeze(-1)
+            return out
 
     return CoarseCRNN(config)
 

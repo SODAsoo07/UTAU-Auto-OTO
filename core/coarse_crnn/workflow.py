@@ -143,7 +143,7 @@ def run_coarse_crnn_align(
             model_path=resolved_model,
             language=lang,
             transcript="",
-            device=str(os.environ.get("UTOA_COARSE_CRNN_DEVICE", "cpu") or "cpu"),
+            device=str(os.environ.get("UTOA_COARSE_CRNN_DEVICE", "auto") or "auto"),
             export_debug=str(os.environ.get("UTOA_COARSE_CRNN_DEBUG", "1") or "1").lower() not in {"0", "false", "no"},
         )
         if result.success and os.path.isfile(result.textgrid_path):

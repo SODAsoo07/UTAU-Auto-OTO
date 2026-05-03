@@ -79,7 +79,7 @@ def parse_textgrid(path: str, *, tier_names: tuple[str, ...] = ("phones", "phone
             continue
         if end <= start:
             continue
-        out.append(Segment(label=label or "sil", start=start, end=end))
+        out.append(Segment(label=label, start=start, end=end))
     return out
 
 

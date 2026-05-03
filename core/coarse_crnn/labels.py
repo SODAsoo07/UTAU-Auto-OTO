@@ -46,6 +46,16 @@ _VOWELS = {
     "uu",
     "ee",
     "oo",
+    "ɑ",
+    "ɐ",
+    "ʌ",
+    "ə",
+    "ɨ",
+    "ɯ",
+    "ɪ",
+    "ɛ",
+    "æ",
+    "ɔ",
 }
 _OBS = {
     "k",
@@ -73,7 +83,7 @@ _OBS = {
     "q",
 }
 _FR = {"s", "ss", "sh", "z", "f", "h", "hy", "v"}
-_SON = {"m", "n", "ng", "l", "r", "y", "w", "my", "ny", "ry", "ly"}
+_SON = {"m", "n", "ng", "ŋ", "l", "ɾ", "r", "y", "w", "my", "ny", "ry", "ly"}
 
 _TOKEN_RE = re.compile(r"[A-Za-z가-힣ぁ-ゖァ-ヺー]+")
 
@@ -104,6 +114,7 @@ def split_label_tokens(label: object) -> list[str]:
 def coarse_for_phone(phone: object, *, language: str = "") -> str:
     raw = normalize_phone(phone)
     lowered = raw.lower()
+    lang = str(language or "").strip().lower()
     if lowered in _SIL:
         return "SIL"
     if lowered in _BR:
@@ -112,6 +123,8 @@ def coarse_for_phone(phone: object, *, language: str = "") -> str:
         return "SP"
     if lowered in _VOWELS:
         return "V"
+    if lowered == "j" and lang in {"korean", "ko", "kor"}:
+        return "C_SON"
     if lowered in _OBS:
         return "C_OBS"
     if lowered in _FR:
