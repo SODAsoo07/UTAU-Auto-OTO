@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from core.format_type_utils import normalize_format_type
+from core.coarse_crnn.alias_role import classify_alias_role, is_diphthong as _is_diphthong
 from core.coarse_crnn.labels import coarse_for_phone
 from core.coarse_crnn.lang import phones_from_text
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
@@ -253,17 +254,24 @@ def _apply_neighbor_alias(row: dict[str, Any], prefix: str, neighbor: dict[str, 
         row[f"{prefix}_alias"] = ""
         row[f"{prefix}_alias_type"] = "other"
         row[f"{prefix}_transition_type"] = "other"
+        row[f"{prefix}_alias_role"] = "other"
         row[f"{prefix}_alias_starts_vowel"] = 0.0
         row[f"{prefix}_alias_ends_vowel"] = 0.0
         return
     row[f"{prefix}_alias"] = str(neighbor.get("alias", "") or "")
     row[f"{prefix}_alias_type"] = str(neighbor.get("alias_type", "") or "other")
     row[f"{prefix}_transition_type"] = str(neighbor.get("transition_type", "") or "other")
+    row[f"{prefix}_alias_role"] = str(neighbor.get("alias_role", "") or "other")
     row[f"{prefix}_alias_starts_vowel"] = float(neighbor.get("alias_starts_vowel", 0.0) or 0.0)
     row[f"{prefix}_alias_ends_vowel"] = float(neighbor.get("alias_ends_vowel", 0.0) or 0.0)
 
 
-def extract_alias_features(alias: str, *, language: str) -> dict[str, object]:
+def extract_alias_features(
+    alias: str,
+    *,
+    language: str,
+    is_special: bool = False,
+) -> dict[str, object]:
     text = str(alias or "").strip()
     try:
         alias_type = str(classify_alias_type(language, text) or "other").strip().lower()
@@ -274,9 +282,20 @@ def extract_alias_features(alias: str, *, language: str) -> dict[str, object]:
     starts_vowel = bool(coarse and coarse[0] == "V")
     ends_vowel = bool(coarse and coarse[-1] == "V")
     transition_type = _transition_type(coarse, alias_type=alias_type)
+    diphthong = bool(_is_diphthong(language, text))
+    role = classify_alias_role(
+        language,
+        text,
+        alias_type=alias_type,
+        transition_type=transition_type,
+        is_special=bool(is_special),
+    )
     return {
         "alias_type": alias_type or "other",
         "transition_type": transition_type,
+        "alias_role": role,
+        "is_diphthong": 1.0 if diphthong else 0.0,
+        "is_special": 1.0 if bool(is_special) else 0.0,
         "alias_phone_count": len(phones),
         "alias_starts_vowel": 1.0 if starts_vowel else 0.0,
         "alias_ends_vowel": 1.0 if ends_vowel else 0.0,

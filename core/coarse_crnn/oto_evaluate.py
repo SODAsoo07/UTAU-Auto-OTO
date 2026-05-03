@@ -72,6 +72,7 @@ def evaluate_oto_manifest(rows: list[dict[str, Any]], config: OtoEvalConfig) -> 
         "by_language": _aggregate_by(files, "language"),
         "by_format": _aggregate_by(files, "format_type"),
         "by_alias_context": _aggregate_by_alias_context(files),
+        "by_alias_role": _aggregate_by_alias_role(files),
         "failures": failures[:20],
         "files": files,
     }
@@ -117,6 +118,9 @@ def _evaluate_one(row: dict[str, Any], config: OtoEvalConfig, *, model, model_co
         "format_type": str(row.get("format_type", "") or ""),
         "alias_type": str(row.get("alias_type", "") or "other"),
         "transition_type": str(row.get("transition_type", "") or "other"),
+        "alias_role": str(row.get("alias_role", "") or "other"),
+        "is_diphthong": bool(float(row.get("is_diphthong", 0.0) or 0.0) >= 0.5),
+        "is_special": bool(float(row.get("is_special", 0.0) or 0.0) >= 0.5),
         "duration_ms": float(row.get("duration_ms", prediction.duration_ms) or prediction.duration_ms),
         "confidence": float(prediction.confidence),
         "anchor_abs_errors_ms": anchor_errors,
@@ -174,6 +178,33 @@ def _aggregate_by_alias_context(files: list[dict[str, Any]]) -> dict[str, Any]:
             "format_type": group.split("|", 2)[0],
             "alias_type": group.split("|", 2)[1],
             "transition_type": group.split("|", 2)[2],
+            "preutterance_mae_ms": _mean(pre_errors),
+            "preutterance_acc_50ms": _hit_rate(pre_errors, 50.0),
+            "offset_mae_ms": _mean([float(row["param_abs_errors_ms"]["offset"]) for row in rows]),
+            "consonant_mae_ms": _mean([float(row["param_abs_errors_ms"]["consonant"]) for row in rows]),
+            "cutoff_abs_mae_ms": _mean([float(row["param_abs_errors_ms"]["cutoff_abs"]) for row in rows]),
+            "overlap_mae_ms": _mean([float(row["param_abs_errors_ms"]["overlap"]) for row in rows]),
+        }
+    return out
+
+
+def _aggregate_by_alias_role(files: list[dict[str, Any]]) -> dict[str, Any]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in files:
+        role = str(row.get("alias_role", "") or "other")
+        diphthong = "diph" if bool(row.get("is_diphthong", False)) else "mono"
+        special = "special" if bool(row.get("is_special", False)) else "normal"
+        key = "|".join([role, diphthong, special])
+        groups.setdefault(key, []).append(row)
+    out: dict[str, Any] = {}
+    for group, rows in sorted(groups.items()):
+        role, diph_flag, special_flag = group.split("|", 2)
+        pre_errors = [float(row["param_abs_errors_ms"]["preutterance"]) for row in rows]
+        out[group] = {
+            "files": len(rows),
+            "alias_role": role,
+            "is_diphthong": diph_flag == "diph",
+            "is_special": special_flag == "special",
             "preutterance_mae_ms": _mean(pre_errors),
             "preutterance_acc_50ms": _hit_rate(pre_errors, 50.0),
             "offset_mae_ms": _mean([float(row["param_abs_errors_ms"]["offset"]) for row in rows]),

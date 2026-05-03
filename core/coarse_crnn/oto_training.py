@@ -10,6 +10,7 @@ import numpy as np
 from core.coarse_crnn.audio import load_wav_mono, log_mel_spectrogram
 from core.coarse_crnn.oto_model import (
     OtoCrnnConfig,
+    alias_role_id,
     alias_type_id,
     build_oto_model,
     format_id,
@@ -108,6 +109,9 @@ class OtoAnchorDataset:
             hop_sec=float(hop_sec),
             sigma_frames=float(self.train_config.heatmap_sigma_frames),
         )
+        is_diphthong = bool(float(row.get("is_diphthong", 0.0) or 0.0) >= 0.5)
+        is_special = bool(float(row.get("is_special", 0.0) or 0.0) >= 0.5)
+        alias_role_text = str(row.get("alias_role", "") or "")
         if uses_relative_param_head(self.model_config):
             scalar = np.asarray(
                 normalize_relative_oto_target(
@@ -116,6 +120,9 @@ class OtoAnchorDataset:
                     format_type=row.get("format_type", ""),
                     alias_type=row.get("alias_type", ""),
                     transition_type=row.get("transition_type", ""),
+                    alias_role=alias_role_text,
+                    is_diphthong=is_diphthong,
+                    is_special=is_special,
                 ),
                 dtype=np.float32,
             )
@@ -129,6 +136,13 @@ class OtoAnchorDataset:
         next_alias_id = alias_type_id(self.model_config, row.get("next_alias_type", ""))
         prev_transition_id = transition_type_id(self.model_config, row.get("prev_transition_type", ""))
         next_transition_id = transition_type_id(self.model_config, row.get("next_transition_type", ""))
+        role_id = alias_role_id(self.model_config, alias_role_text)
+        prev_role_id = alias_role_id(self.model_config, row.get("prev_alias_role", ""))
+        next_role_id = alias_role_id(self.model_config, row.get("next_alias_role", ""))
+        extra_flags = np.asarray(
+            [1.0 if is_diphthong else 0.0, 1.0 if is_special else 0.0],
+            dtype=np.float32,
+        )
         context = _context_array_from_row(row)
         weight = float(row.get("sample_weight", row.get("weight", 1.0)) or 1.0)
         weight *= _format_loss_multiplier(row, self.train_config)
@@ -147,6 +161,10 @@ class OtoAnchorDataset:
             int(next_alias_id),
             int(prev_transition_id),
             int(next_transition_id),
+            int(role_id),
+            int(prev_role_id),
+            int(next_role_id),
+            extra_flags,
             max(0.05, min(2.0, weight)),
         )
 
@@ -220,7 +238,28 @@ def train_oto_from_manifest(
         loss_sum = 0.0
         row_sum = 0
         for batch_idx, batch in enumerate(train_loader, start=1):
-            x, heat, scalar, _anchors_ms, _duration_ms, lang, fmt, context, alias_id, transition_id, prev_alias_id, next_alias_id, prev_transition_id, next_transition_id, weight, mask = _move_batch(batch, device)
+            (
+                x,
+                heat,
+                scalar,
+                _anchors_ms,
+                _duration_ms,
+                lang,
+                fmt,
+                context,
+                alias_id,
+                transition_id,
+                prev_alias_id,
+                next_alias_id,
+                prev_transition_id,
+                next_transition_id,
+                role_id,
+                prev_role_id,
+                next_role_id,
+                extra_flags,
+                weight,
+                mask,
+            ) = _move_batch(batch, device)
             optimizer.zero_grad(set_to_none=True)
             with _autocast(torch, enabled=use_amp):
                 outputs = model(
@@ -234,6 +273,10 @@ def train_oto_from_manifest(
                     next_alias_id,
                     prev_transition_id,
                     next_transition_id,
+                    alias_role_ids=role_id,
+                    prev_alias_role_ids=prev_role_id,
+                    next_alias_role_ids=next_role_id,
+                    extra_alias_flags=extra_flags,
                 )
                 loss = _oto_loss(outputs, heat, scalar, weight, mask, nn, cfg, relative_scalar=uses_relative_param_head(model_cfg))
             if scaler is not None:
@@ -301,7 +344,28 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
     mae_values: list[float] = []
     with torch.no_grad():
         for batch in loader:
-            x, heat, scalar, anchors_ms, duration_ms, lang, fmt, context, alias_id, transition_id, prev_alias_id, next_alias_id, prev_transition_id, next_transition_id, weight, mask = _move_batch(batch, device)
+            (
+                x,
+                heat,
+                scalar,
+                anchors_ms,
+                duration_ms,
+                lang,
+                fmt,
+                context,
+                alias_id,
+                transition_id,
+                prev_alias_id,
+                next_alias_id,
+                prev_transition_id,
+                next_transition_id,
+                role_id,
+                prev_role_id,
+                next_role_id,
+                extra_flags,
+                weight,
+                mask,
+            ) = _move_batch(batch, device)
             outputs = model(
                 x,
                 lang,
@@ -313,6 +377,10 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
                 next_alias_id,
                 prev_transition_id,
                 next_transition_id,
+                alias_role_ids=role_id,
+                prev_alias_role_ids=prev_role_id,
+                next_alias_role_ids=next_role_id,
+                extra_alias_flags=extra_flags,
             )
             relative_scalar = uses_relative_param_head(model_cfg)
             loss = _oto_loss(outputs, heat, scalar, weight, mask, nn, cfg, relative_scalar=relative_scalar)
@@ -325,6 +393,8 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
                         fmt.detach().cpu().numpy(),
                         alias_id.detach().cpu().numpy(),
                         transition_id.detach().cpu().numpy(),
+                        role_id.detach().cpu().numpy(),
+                        extra_flags.detach().cpu().numpy(),
                         anchors_ms.detach().cpu().numpy(),
                         model_cfg,
                     )
@@ -372,18 +442,37 @@ def _relative_order_penalty(pred):
     return torch.relu(pred[:, 1] - pred[:, 2]).mean()
 
 
-def _relative_anchor_mae_values(pred_scalar, duration_ms, format_ids, alias_ids, transition_ids, anchors_ms, model_cfg: OtoCrnnConfig) -> list[float]:
+def _relative_anchor_mae_values(
+    pred_scalar,
+    duration_ms,
+    format_ids,
+    alias_ids,
+    transition_ids,
+    role_ids,
+    extra_flags,
+    anchors_ms,
+    model_cfg: OtoCrnnConfig,
+) -> list[float]:
     values: list[float] = []
     formats = list(model_cfg.format_types)
     aliases = list(model_cfg.alias_types)
     transitions = list(model_cfg.transition_types)
-    for scalar_row, duration, fmt_idx, alias_idx, transition_idx, anchor_row in zip(pred_scalar, duration_ms, format_ids, alias_ids, transition_ids, anchors_ms):
+    roles = list(model_cfg.alias_roles)
+    use_role = bool(getattr(model_cfg, "enable_alias_role_embedding", False)) and len(roles) > 1
+    for scalar_row, duration, fmt_idx, alias_idx, transition_idx, role_idx, flags_row, anchor_row in zip(
+        pred_scalar, duration_ms, format_ids, alias_ids, transition_ids, role_ids, extra_flags, anchors_ms
+    ):
         fmt_i = int(fmt_idx)
         alias_i = int(alias_idx)
         transition_i = int(transition_idx)
+        role_i = int(role_idx)
         format_type = formats[fmt_i] if 0 <= fmt_i < len(formats) else "other"
         alias_type = aliases[alias_i] if 0 <= alias_i < len(aliases) else "other"
         transition_type = transitions[transition_i] if 0 <= transition_i < len(transitions) else "other"
+        role_text = roles[role_i] if (use_role and 0 <= role_i < len(roles)) else ""
+        flags_arr = np.asarray(flags_row, dtype=np.float32)
+        is_diphthong = bool(flags_arr.shape[0] > 0 and flags_arr[0] >= 0.5)
+        is_special = bool(flags_arr.shape[0] > 1 and flags_arr[1] >= 0.5)
         params = decode_relative_oto_params(
             scalar_row,
             duration_ms=float(duration),
@@ -391,6 +480,9 @@ def _relative_anchor_mae_values(pred_scalar, duration_ms, format_ids, alias_ids,
             alias_type=alias_type,
             transition_type=transition_type,
             prior_blend=right_boundary_prior_blend_for(model_cfg, format_type),
+            alias_role=role_text,
+            is_diphthong=is_diphthong,
+            is_special=is_special,
         )
         pred_anchors = np.asarray(relative_params_to_anchors(params, duration_ms=float(duration)), dtype=np.float32)
         values.append(float(np.abs(pred_anchors - np.asarray(anchor_row, dtype=np.float32)).mean()))
@@ -417,6 +509,10 @@ def _collate(batch):
     next_alias_ids = np.zeros((len(batch),), dtype=np.int64)
     prev_transition_ids = np.zeros((len(batch),), dtype=np.int64)
     next_transition_ids = np.zeros((len(batch),), dtype=np.int64)
+    role_ids = np.zeros((len(batch),), dtype=np.int64)
+    prev_role_ids = np.zeros((len(batch),), dtype=np.int64)
+    next_role_ids = np.zeros((len(batch),), dtype=np.int64)
+    extra_flags = np.zeros((len(batch), 2), dtype=np.float32)
     weights = np.ones((len(batch),), dtype=np.float32)
     for idx, (
         features,
@@ -433,6 +529,10 @@ def _collate(batch):
         next_alias_id,
         prev_transition_id,
         next_transition_id,
+        role_id,
+        prev_role_id,
+        next_role_id,
+        flags,
         weight,
     ) in enumerate(batch):
         n = int(features.shape[0])
@@ -451,6 +551,12 @@ def _collate(batch):
         next_alias_ids[idx] = int(next_alias_id)
         prev_transition_ids[idx] = int(prev_transition_id)
         next_transition_ids[idx] = int(next_transition_id)
+        role_ids[idx] = int(role_id)
+        prev_role_ids[idx] = int(prev_role_id)
+        next_role_ids[idx] = int(next_role_id)
+        flags_arr = np.asarray(flags, dtype=np.float32)
+        if flags_arr.shape[0] >= 2:
+            extra_flags[idx] = flags_arr[:2]
         weights[idx] = float(weight)
     return (
         torch.from_numpy(xs),
@@ -467,6 +573,10 @@ def _collate(batch):
         torch.from_numpy(next_alias_ids),
         torch.from_numpy(prev_transition_ids),
         torch.from_numpy(next_transition_ids),
+        torch.from_numpy(role_ids),
+        torch.from_numpy(prev_role_ids),
+        torch.from_numpy(next_role_ids),
+        torch.from_numpy(extra_flags),
         torch.from_numpy(weights),
         torch.from_numpy(masks),
     )

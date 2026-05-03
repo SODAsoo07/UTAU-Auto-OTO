@@ -47,6 +47,18 @@ def main() -> int:
     )
     parser.add_argument("--right-boundary-prior-blend", type=float, default=0.45)
     parser.add_argument("--right-boundary-prior-blends", default="vcv=0.45,cvvc=0.25,cv=0.10,cvc=0.10,other=0.10")
+    parser.add_argument(
+        "--alias-role-embedding",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Add alias_role embeddings (-CV/CV/CV-/V/V-/VC/VV/V-CV/EndBR/BR/OTHER/special) to the model conditioning. New checkpoint architecture; not loadable by older inference paths without role plumbing.",
+    )
+    parser.add_argument(
+        "--extra-alias-flags",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Add a small projection that ingests is_diphthong and is_special as scalar conditioning features.",
+    )
     args = parser.parse_args()
 
     rows = read_jsonl(args.manifest)
@@ -70,6 +82,8 @@ def main() -> int:
         scalar_target_mode=str(args.scalar_target_mode),
         right_boundary_prior_blend=float(args.right_boundary_prior_blend),
         right_boundary_prior_blends=tuple(item.strip().lower() for item in str(args.right_boundary_prior_blends).split(",") if item.strip()),
+        enable_alias_role_embedding=bool(args.alias_role_embedding),
+        enable_extra_alias_flags=bool(args.extra_alias_flags),
     )
     train_cfg = OtoTrainConfig(
         epochs=int(args.epochs),

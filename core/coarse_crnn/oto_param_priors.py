@@ -2,6 +2,81 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.coarse_crnn.alias_role import normalize_role
+
+
+# Role-based prior table. Numbers chosen from the empirical CV/CVC/CVVC/VCV
+# tuning that lives in `oto_timing_prior` below, but indexed on a single
+# alias-role axis so the same row gets the same prior regardless of the
+# voicebank format wrapper.
+_ROLE_PRIOR_TABLE: dict[str, dict[str, float]] = {
+    "-cv": dict(cons_gap=58.0, tail=96.0, min_cons_gap=18.0, min_tail=36.0, max_cons_gap=92.0, max_tail=150.0),
+    "cv":  dict(cons_gap=48.0, tail=82.0, min_cons_gap=16.0, min_tail=34.0, max_cons_gap=78.0, max_tail=130.0),
+    "cv-": dict(cons_gap=34.0, tail=70.0, min_cons_gap=10.0, min_tail=24.0, max_cons_gap=60.0, max_tail=110.0),
+    "v":   dict(cons_gap=18.0, tail=48.0, min_cons_gap=4.0,  min_tail=14.0, max_cons_gap=36.0, max_tail=92.0),
+    "v-":  dict(cons_gap=18.0, tail=58.0, min_cons_gap=4.0,  min_tail=18.0, max_cons_gap=36.0, max_tail=104.0),
+    "vc":  dict(cons_gap=28.0, tail=52.0, min_cons_gap=10.0, min_tail=22.0, max_cons_gap=48.0, max_tail=82.0),
+    "vv":  dict(cons_gap=42.0, tail=72.0, min_cons_gap=14.0, min_tail=26.0, max_cons_gap=72.0, max_tail=116.0),
+    "v-cv":dict(cons_gap=48.0, tail=74.0, min_cons_gap=16.0, min_tail=30.0, max_cons_gap=82.0, max_tail=118.0),
+    "endbr":dict(cons_gap=20.0, tail=44.0, min_cons_gap=6.0, min_tail=16.0, max_cons_gap=40.0, max_tail=78.0),
+    "br":  dict(cons_gap=16.0, tail=36.0, min_cons_gap=4.0,  min_tail=12.0, max_cons_gap=34.0, max_tail=64.0),
+    "other":dict(cons_gap=48.0, tail=82.0, min_cons_gap=14.0, min_tail=30.0, max_cons_gap=82.0, max_tail=128.0),
+    # Special phonemes are user-tagged. Treat the special token as a
+    # consonant — same range as a generic CV until per-bank tuning lands.
+    "special":dict(cons_gap=52.0, tail=86.0, min_cons_gap=18.0, min_tail=32.0, max_cons_gap=88.0, max_tail=134.0),
+}
+
+# Diphthongs lengthen the onset region. Multipliers are mild on purpose so
+# guarded models don't lurch on edge cases.
+_DIPHTHONG_CONS_GAIN = 1.30
+_DIPHTHONG_TAIL_GAIN = 1.20
+
+
+def oto_role_prior(
+    alias_role: object,
+    *,
+    is_diphthong: bool = False,
+    is_special: bool = False,
+) -> dict[str, float]:
+    """Return prior timing values keyed on the role axis.
+
+    The returned dict has the same keys as `oto_timing_prior` so downstream
+    decode/clamp code can swap in either source.
+    """
+    role = "special" if bool(is_special) else normalize_role(alias_role)
+    base = _ROLE_PRIOR_TABLE.get(role, _ROLE_PRIOR_TABLE["other"])
+    prior = dict(base)
+    if bool(is_diphthong) and role in {"cv", "-cv", "cv-", "v-cv", "vv"}:
+        prior["cons_gap"] = prior["cons_gap"] * _DIPHTHONG_CONS_GAIN
+        prior["tail"] = prior["tail"] * _DIPHTHONG_TAIL_GAIN
+        prior["max_cons_gap"] = prior["max_cons_gap"] * _DIPHTHONG_CONS_GAIN
+        prior["max_tail"] = prior["max_tail"] * _DIPHTHONG_TAIL_GAIN
+    if bool(is_special) and role in {"v", "v-"}:
+        cv_prior = _ROLE_PRIOR_TABLE["cv"]
+        prior["cons_gap"] = max(prior["cons_gap"], cv_prior["cons_gap"])
+        prior["min_cons_gap"] = max(prior["min_cons_gap"], cv_prior["min_cons_gap"])
+        prior["max_cons_gap"] = max(prior["max_cons_gap"], cv_prior["max_cons_gap"])
+    return prior
+
+
+def _resolve_prior(
+    *,
+    alias_role: object,
+    is_diphthong: bool,
+    is_special: bool,
+    format_type: object,
+    alias_type: object,
+    transition_type: object,
+) -> dict[str, float]:
+    """Pick the role-based prior when the caller supplies a role; otherwise
+    fall back to the legacy format/alias prior so existing callers keep
+    their behavior.
+    """
+    role_text = str(alias_role or "").strip().lower()
+    if role_text or bool(is_special):
+        return oto_role_prior(alias_role, is_diphthong=is_diphthong, is_special=is_special)
+    return oto_timing_prior(format_type=format_type, alias_type=alias_type, transition_type=transition_type)
+
 
 def oto_timing_prior(
     *,
@@ -71,11 +146,21 @@ def normalize_relative_oto_target(
     alias_type: object,
     format_type: object = "",
     transition_type: object = "",
+    alias_role: object = "",
+    is_diphthong: bool = False,
+    is_special: bool = False,
 ) -> list[float]:
     values = [float(v) for v in anchors_ms]
     duration = max(1.0, float(duration_ms))
     offset, overlap, pre, consonant, cutoff = values[:5]
-    prior = oto_timing_prior(format_type=format_type, alias_type=alias_type, transition_type=transition_type)
+    prior = _resolve_prior(
+        alias_role=alias_role,
+        is_diphthong=is_diphthong,
+        is_special=is_special,
+        format_type=format_type,
+        alias_type=alias_type,
+        transition_type=transition_type,
+    )
     overlap_delta = max(0.0, min(max(pre - offset, 1.0), overlap - offset))
     pre_delta = max(overlap_delta, pre - offset)
     cons_gap = _clamp(consonant - pre, prior["min_cons_gap"], prior["max_cons_gap"])
@@ -97,10 +182,20 @@ def decode_relative_oto_params(
     format_type: object = "",
     transition_type: object = "",
     prior_blend: float = 0.45,
+    alias_role: object = "",
+    is_diphthong: bool = False,
+    is_special: bool = False,
 ) -> dict[str, float]:
     values = [max(0.0, min(1.0, float(v))) for v in scalar_values]
     duration = max(1.0, float(duration_ms))
-    prior = oto_timing_prior(format_type=format_type, alias_type=alias_type, transition_type=transition_type)
+    prior = _resolve_prior(
+        alias_role=alias_role,
+        is_diphthong=is_diphthong,
+        is_special=is_special,
+        format_type=format_type,
+        alias_type=alias_type,
+        transition_type=transition_type,
+    )
     offset = values[0] * duration
     overlap_delta = values[1] * duration
     pre_delta = max(overlap_delta, values[2] * duration)
@@ -168,6 +263,7 @@ __all__ = [
     "alias_timing_prior",
     "decode_relative_oto_params",
     "normalize_relative_oto_target",
+    "oto_role_prior",
     "oto_timing_prior",
     "relative_params_to_anchors",
 ]
