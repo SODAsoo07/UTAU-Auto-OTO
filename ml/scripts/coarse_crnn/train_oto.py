@@ -34,9 +34,12 @@ def main() -> int:
     parser.add_argument("--format-residual-heads", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--vcv-target-window", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--vcv-window-frames", type=int, default=240)
-    parser.add_argument("--target-window-formats", default="vcv,cvvc")
-    parser.add_argument("--target-window-frame-overrides", default="vcv=240,cvvc=360")
-    parser.add_argument("--cvvc-target-window-alias-types", default="vc,vv")
+    # cvvc excluded: vc/vv aliases are not uniformly distributed across audio
+    # (CV rows come first, VC rows later), so row_ratio-based windowing yields
+    # 1000-2500 ms offset errors. The heatmap finds the correct position instead.
+    parser.add_argument("--target-window-formats", default="vcv")
+    parser.add_argument("--target-window-frame-overrides", default="vcv=240")
+    parser.add_argument("--cvvc-target-window-alias-types", default="")
     parser.add_argument("--anchor-heatmap-blend", type=float, default=0.70)
     parser.add_argument("--vcv-window-heatmap-blend", type=float, default=0.30)
     parser.add_argument(
