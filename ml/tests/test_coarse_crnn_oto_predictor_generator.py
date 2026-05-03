@@ -66,8 +66,11 @@ def test_crnn_oto_generator_preserves_aliases_and_replaces_params(tmp_path, monk
     assert errors == []
     assert processed == 2
     assert total == 2
+    # `a` resolves to alias_role=v which has a tighter cutoff cap (max 92ms past
+    # consonant) than the old alias_type=mono fallback. `a k` stays on the vc
+    # role with the same 82ms cutoff cap as before.
     assert out_path.read_text(encoding="utf-8").splitlines() == [
-        "a.wav=a_C4,10.000,90.000,-218.000,70.000,30.000",
+        "a.wav=a_C4,10.000,90.000,-182.000,70.000,30.000",
         "a.wav=a k_C4,10.000,90.000,-172.000,70.000,30.000",
     ]
     assert calls[0]["alias"] == "a"
@@ -99,3 +102,40 @@ def test_crnn_right_boundary_guard_shortens_overlong_cutoff():
     assert params["overlap"] == 42.0
     assert params["consonant"] == 128.0
     assert params["cutoff"] == -210.0
+
+
+def test_role_guard_limits_diphthong_lengthens_cv_cap():
+    from core.coarse_crnn.oto_predictor_generator import _right_guard_limits_for_role
+
+    base = _right_guard_limits_for_role("cv", alias_type="cv")
+    diph = _right_guard_limits_for_role("cv", alias_type="cv", is_diphthong=True)
+
+    # max_cons_gap, min_cons_gap, max_cut_gap, min_cut_gap
+    assert diph[0] > base[0]
+    assert diph[2] > base[2]
+
+
+def test_role_guard_limits_special_v_borrows_cv_floor():
+    from core.coarse_crnn.oto_predictor_generator import _right_guard_limits_for_role
+
+    pure_v = _right_guard_limits_for_role("v", alias_type="vowel")
+    special_v = _right_guard_limits_for_role("v", alias_type="vowel", is_special=True)
+
+    # Special-V should not be looser than CV on the consonant cap.
+    cv = _right_guard_limits_for_role("cv", alias_type="cv")
+    assert special_v[0] >= cv[0]
+    assert special_v[1] >= cv[1]
+    assert special_v[0] > pure_v[0]
+
+
+def test_normalize_special_aliases_handles_iterables():
+    from core.coarse_crnn.oto_predictor_generator import _alias_is_special, _normalize_special_aliases
+
+    special = _normalize_special_aliases({"tt", "Pf"})
+
+    assert "tt" in special
+    assert "pf" in special  # case-insensitive
+    assert _alias_is_special("a tt", special)
+    assert _alias_is_special("Tt", special)
+    assert not _alias_is_special("a k", special)
+    assert not _alias_is_special("", special)

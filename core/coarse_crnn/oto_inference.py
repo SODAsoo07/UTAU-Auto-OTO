@@ -8,7 +8,16 @@ from typing import Any
 import numpy as np
 
 from core.coarse_crnn.audio import load_wav_mono, log_mel_spectrogram
-from core.coarse_crnn.oto_model import alias_type_id, format_id, language_id, load_oto_checkpoint, right_boundary_prior_blend_for, transition_type_id, uses_relative_param_head
+from core.coarse_crnn.oto_model import (
+    alias_role_id,
+    alias_type_id,
+    format_id,
+    language_id,
+    load_oto_checkpoint,
+    right_boundary_prior_blend_for,
+    transition_type_id,
+    uses_relative_param_head,
+)
 from core.coarse_crnn.oto_param_priors import decode_relative_oto_params, relative_params_to_anchors
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES, OtoAnchors, anchors_to_oto_params, extract_alias_features, repair_anchors
 from core.coarse_crnn.oto_windowing import crop_oto_target_window, should_use_vcv_target_window, target_window_frames_for
@@ -36,6 +45,9 @@ def predict_oto(
     row_index_in_wav: int = 0,
     file_row_count: int = 1,
     device: str = "auto",
+    is_special: bool = False,
+    prev_is_special: bool = False,
+    next_is_special: bool = False,
 ) -> OtoPrediction:
     torch = __import__("torch")
     torch_device = resolve_torch_device(torch, device)
@@ -53,6 +65,9 @@ def predict_oto(
         row_index_in_wav=row_index_in_wav,
         file_row_count=file_row_count,
         device=str(torch_device),
+        is_special=is_special,
+        prev_is_special=prev_is_special,
+        next_is_special=next_is_special,
     )
 
 
@@ -69,6 +84,9 @@ def predict_oto_with_model(
     row_index_in_wav: int = 0,
     file_row_count: int = 1,
     device: str = "cpu",
+    is_special: bool = False,
+    prev_is_special: bool = False,
+    next_is_special: bool = False,
 ) -> OtoPrediction:
     torch = __import__("torch")
     torch_device = resolve_torch_device(torch, device)
@@ -87,7 +105,7 @@ def predict_oto_with_model(
     prediction_duration_ms = full_duration_ms
     crop_start_ms = 0.0
     using_vcv_window = False
-    alias_features = extract_alias_features(alias, language=language)
+    alias_features = extract_alias_features(alias, language=language, is_special=bool(is_special))
     if should_use_vcv_target_window(
         format_type,
         enabled=bool(getattr(config, "enable_vcv_target_window", False)),
@@ -108,8 +126,8 @@ def predict_oto_with_model(
         crop_start_ms = float(start_frame) * max(float(hop_sec) * 1000.0, 1e-3)
     lang = torch.tensor([language_id(config, language)], dtype=torch.long, device=torch_device)
     fmt = torch.tensor([format_id(config, format_type)], dtype=torch.long, device=torch_device)
-    prev_alias_features = extract_alias_features(prev_alias, language=language)
-    next_alias_features = extract_alias_features(next_alias, language=language)
+    prev_alias_features = extract_alias_features(prev_alias, language=language, is_special=bool(prev_is_special))
+    next_alias_features = extract_alias_features(next_alias, language=language, is_special=bool(next_is_special))
     alias_id = torch.tensor([alias_type_id(config, alias_features.get("alias_type", ""))], dtype=torch.long, device=torch_device)
     transition_id = torch.tensor(
         [transition_type_id(config, alias_features.get("transition_type", ""))],
@@ -126,6 +144,19 @@ def predict_oto_with_model(
     next_transition_id = torch.tensor(
         [transition_type_id(config, next_alias_features.get("transition_type", ""))],
         dtype=torch.long,
+        device=torch_device,
+    )
+    role_text = str(alias_features.get("alias_role", "") or "")
+    prev_role_text = str(prev_alias_features.get("alias_role", "") or "")
+    next_role_text = str(next_alias_features.get("alias_role", "") or "")
+    is_diphthong_flag = bool(float(alias_features.get("is_diphthong", 0.0) or 0.0) >= 0.5)
+    is_special_flag = bool(float(alias_features.get("is_special", 0.0) or 0.0) >= 0.5) or bool(is_special)
+    role_tensor = torch.tensor([alias_role_id(config, role_text)], dtype=torch.long, device=torch_device)
+    prev_role_tensor = torch.tensor([alias_role_id(config, prev_role_text)], dtype=torch.long, device=torch_device)
+    next_role_tensor = torch.tensor([alias_role_id(config, next_role_text)], dtype=torch.long, device=torch_device)
+    extra_flags_tensor = torch.tensor(
+        [[1.0 if is_diphthong_flag else 0.0, 1.0 if is_special_flag else 0.0]],
+        dtype=torch.float32,
         device=torch_device,
     )
     context = torch.tensor(
@@ -161,6 +192,10 @@ def predict_oto_with_model(
             next_alias_id,
             prev_transition_id,
             next_transition_id,
+            alias_role_ids=role_tensor,
+            prev_alias_role_ids=prev_role_tensor,
+            next_alias_role_ids=next_role_tensor,
+            extra_alias_flags=extra_flags_tensor,
         )
         heat = torch.sigmoid(outputs["heatmap_logits"]).squeeze(0).detach().cpu().numpy().astype(np.float32)
         scalar = torch.sigmoid(outputs["scalar_logits"]).squeeze(0).detach().cpu().numpy().astype(np.float32)
@@ -176,6 +211,9 @@ def predict_oto_with_model(
             transition_type=alias_features.get("transition_type", ""),
             heatmap_blend=heatmap_blend,
             prior_blend=right_boundary_prior_blend_for(config, format_type),
+            alias_role=role_text,
+            is_diphthong=is_diphthong_flag,
+            is_special=is_special_flag,
         ) + float(crop_start_ms)
     else:
         scalar_ms = scalar * max(float(prediction_duration_ms), 1.0)
@@ -253,6 +291,9 @@ def _relative_scalar_to_anchor_ms(
     transition_type: object,
     heatmap_blend: float,
     prior_blend: float,
+    alias_role: object = "",
+    is_diphthong: bool = False,
+    is_special: bool = False,
 ) -> np.ndarray:
     params = decode_relative_oto_params(
         scalar,
@@ -261,6 +302,9 @@ def _relative_scalar_to_anchor_ms(
         alias_type=alias_type,
         transition_type=transition_type,
         prior_blend=float(prior_blend),
+        alias_role=alias_role,
+        is_diphthong=is_diphthong,
+        is_special=is_special,
     )
     anchors = np.asarray(relative_params_to_anchors(params, duration_ms=float(duration_ms)), dtype=np.float32)
     blend = max(0.0, min(1.0, float(heatmap_blend)))

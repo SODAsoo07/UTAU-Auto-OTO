@@ -43,17 +43,32 @@ def test_extract_alias_features_marks_vc_transition():
     assert features["alias_ends_vowel"] == 0.0
 
 
+def test_extract_alias_features_emits_role_and_diphthong_flags():
+    head = extract_alias_features("- ka", language="japanese")
+    diphthong = extract_alias_features("야", language="korean")
+    pure = extract_alias_features("아", language="korean")
+    special = extract_alias_features("tt", language="korean", is_special=True)
+
+    assert head["alias_role"] == "-cv"
+    assert diphthong["is_diphthong"] == 1.0
+    assert pure["is_diphthong"] == 0.0
+    assert special["alias_role"] == "special"
+    assert special["is_special"] == 1.0
+
+
 def test_apply_row_context_adds_neighbor_aliases():
     rows = [
-        {"oto_path": "x/oto.ini", "wav": "a.wav", "line_index": 0, "alias": "a", "alias_type": "vowel", "transition_type": "vowel", "alias_starts_vowel": 1.0, "alias_ends_vowel": 1.0},
-        {"oto_path": "x/oto.ini", "wav": "a.wav", "line_index": 1, "alias": "a k", "alias_type": "vc", "transition_type": "vc", "alias_starts_vowel": 1.0, "alias_ends_vowel": 0.0},
-        {"oto_path": "x/oto.ini", "wav": "a.wav", "line_index": 2, "alias": "ka", "alias_type": "cv", "transition_type": "cv", "alias_starts_vowel": 0.0, "alias_ends_vowel": 1.0},
+        {"oto_path": "x/oto.ini", "wav": "a.wav", "line_index": 0, "alias": "a", "alias_type": "vowel", "transition_type": "vowel", "alias_role": "v", "alias_starts_vowel": 1.0, "alias_ends_vowel": 1.0},
+        {"oto_path": "x/oto.ini", "wav": "a.wav", "line_index": 1, "alias": "a k", "alias_type": "vc", "transition_type": "vc", "alias_role": "vc", "alias_starts_vowel": 1.0, "alias_ends_vowel": 0.0},
+        {"oto_path": "x/oto.ini", "wav": "a.wav", "line_index": 2, "alias": "ka", "alias_type": "cv", "transition_type": "cv", "alias_role": "cv", "alias_starts_vowel": 0.0, "alias_ends_vowel": 1.0},
     ]
 
     _apply_row_context(rows)
 
     assert rows[1]["prev_alias"] == "a"
     assert rows[1]["next_alias"] == "ka"
+    assert rows[1]["prev_alias_role"] == "v"
+    assert rows[1]["next_alias_role"] == "cv"
     assert rows[1]["is_head_row"] == 0.0
     assert rows[1]["is_tail_row"] == 0.0
 

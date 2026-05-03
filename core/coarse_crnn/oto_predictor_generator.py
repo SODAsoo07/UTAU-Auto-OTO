@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from typing import Callable, Any
 
+from core.coarse_crnn.alias_role import classify_alias_role, is_diphthong as _is_diphthong, normalize_role
 from core.coarse_crnn.oto_inference import predict_oto_with_model
 from core.coarse_crnn.oto_model import load_oto_checkpoint
 from core.coarse_crnn.training import resolve_torch_device
@@ -25,6 +26,9 @@ class _PredictRow:
     next_alias: str
     row_index: int
     row_count: int
+    is_special: bool = False
+    prev_is_special: bool = False
+    next_is_special: bool = False
 
 
 def generate_oto_with_crnn_predictor(
@@ -38,6 +42,7 @@ def generate_oto_with_crnn_predictor(
     device: str = "auto",
     alias_suffix: str = "",
     callback: Callable[[str], None] | None = None,
+    special_aliases: set[str] | list[str] | tuple[str, ...] | None = None,
 ) -> tuple[int, int, list[str]]:
     source = resolve_no_mfa_source_oto(wav_dir=wav_dir, source_hint=source_oto_path)
     if not source:
@@ -49,7 +54,11 @@ def generate_oto_with_crnn_predictor(
     if not output_file:
         return 0, 0, ["출력 OTO 경로가 비어 있습니다."]
 
-    rows, total, missing = _prepare_prediction_rows(wav_dir=wav_dir, source_oto_path=source)
+    rows, total, missing = _prepare_prediction_rows(
+        wav_dir=wav_dir,
+        source_oto_path=source,
+        special_aliases=_normalize_special_aliases(special_aliases),
+    )
     if not rows:
         if missing:
             sample = ", ".join(sorted(missing)[:5])
@@ -88,6 +97,9 @@ def generate_oto_with_crnn_predictor(
                 row_index_in_wav=row.row_index,
                 file_row_count=row.row_count,
                 device=str(torch_device),
+                is_special=row.is_special,
+                prev_is_special=row.prev_is_special,
+                next_is_special=row.next_is_special,
             )
             alias = _apply_alias_suffix(row.alias, suffix)
             params, changed = _apply_conservative_right_boundary_guard(
@@ -95,6 +107,7 @@ def generate_oto_with_crnn_predictor(
                 language=lang,
                 alias=row.alias,
                 duration_ms=float(getattr(pred, "duration_ms", 0.0) or 0.0),
+                is_special=row.is_special,
             )
             guard_changed += 1 if changed else 0
             out_lines.append(
@@ -153,7 +166,12 @@ def resolve_oto_crnn_model_path(path_hint: str = "") -> str:
     return ""
 
 
-def _prepare_prediction_rows(*, wav_dir: str, source_oto_path: str) -> tuple[list[_PredictRow], int, set[str]]:
+def _prepare_prediction_rows(
+    *,
+    wav_dir: str,
+    source_oto_path: str,
+    special_aliases: frozenset[str] | None = None,
+) -> tuple[list[_PredictRow], int, set[str]]:
     wav_root = os.path.abspath(str(wav_dir or "").strip())
     exact, normalized = _build_wav_lookup(wav_root)
     raw_rows = []
@@ -179,6 +197,8 @@ def _prepare_prediction_rows(*, wav_dir: str, source_oto_path: str) -> tuple[lis
             }
         )
 
+    special_set: frozenset[str] = special_aliases or frozenset()
+
     per_wav: dict[str, list[dict[str, str]]] = {}
     for row in raw_rows:
         per_wav.setdefault(row["wav_rel"], []).append(row)
@@ -189,18 +209,51 @@ def _prepare_prediction_rows(*, wav_dir: str, source_oto_path: str) -> tuple[lis
         for idx, row in enumerate(items):
             prev_alias = str(items[idx - 1].get("alias", "") or "") if idx > 0 else ""
             next_alias = str(items[idx + 1].get("alias", "") or "") if idx + 1 < count else ""
+            alias_text = str(row["alias"])
             out.append(
                 _PredictRow(
                     wav_rel=wav_rel,
                     wav_abs=str(row["wav_abs"]),
-                    alias=str(row["alias"]),
+                    alias=alias_text,
                     prev_alias=prev_alias,
                     next_alias=next_alias,
                     row_index=idx,
                     row_count=count,
+                    is_special=_alias_is_special(alias_text, special_set),
+                    prev_is_special=_alias_is_special(prev_alias, special_set),
+                    next_is_special=_alias_is_special(next_alias, special_set),
                 )
             )
     return out, total, missing
+
+
+def _normalize_special_aliases(
+    special_aliases: set[str] | list[str] | tuple[str, ...] | None,
+) -> frozenset[str]:
+    if not special_aliases:
+        return frozenset()
+    cleaned: set[str] = set()
+    for item in special_aliases:
+        text = str(item or "").strip().lower()
+        if text:
+            cleaned.add(text)
+    return frozenset(cleaned)
+
+
+def _alias_is_special(alias: str, special_set: frozenset[str]) -> bool:
+    if not special_set:
+        return False
+    text = str(alias or "").strip().lower()
+    if not text:
+        return False
+    if text in special_set:
+        return True
+    # Match by individual token so a single special phoneme like "tt" tags
+    # any alias that contains it (e.g. "a tt", "tt a", "a tt a").
+    for token in text.split():
+        if token in special_set:
+            return True
+    return False
 
 
 def _build_wav_lookup(wav_dir: str) -> tuple[dict[str, str], dict[str, str]]:
@@ -227,6 +280,7 @@ def _apply_conservative_right_boundary_guard(
     language: str,
     alias: str,
     duration_ms: float,
+    is_special: bool = False,
 ) -> tuple[dict[str, float], bool]:
     if str(os.environ.get("UTOA_OTO_CRNN_RIGHT_GUARD_ENABLE", "1")).strip().lower() in {"0", "false", "off", "no"}:
         return dict(params), False
@@ -237,7 +291,14 @@ def _apply_conservative_right_boundary_guard(
     out["overlap"] = ovl
 
     alias_type = _safe_alias_type(language, alias)
-    max_cons_gap, min_cons_gap, max_cut_gap, min_cut_gap = _right_guard_limits(alias_type)
+    role = _safe_alias_role(language, alias, alias_type=alias_type, is_special=bool(is_special))
+    diphthong = _safe_is_diphthong(language, alias)
+    max_cons_gap, min_cons_gap, max_cut_gap, min_cut_gap = _right_guard_limits_for_role(
+        role,
+        alias_type=alias_type,
+        is_diphthong=diphthong,
+        is_special=bool(is_special),
+    )
     max_cons_gap = _env_float("UTOA_OTO_CRNN_MAX_CONS_GAP_MS", max_cons_gap)
     max_cut_gap = _env_float("UTOA_OTO_CRNN_MAX_CUTOFF_GAP_MS", max_cut_gap)
 
@@ -282,6 +343,49 @@ def _right_guard_limits(alias_type: str) -> tuple[float, float, float, float]:
     return 82.0, 14.0, 128.0, 30.0
 
 
+# Role-axis right-boundary limits. Mirrors `_right_guard_limits` shape but
+# branches on alias_role so the same row gets the same guard regardless of
+# voicebank format wrapper.
+_ROLE_GUARD_LIMITS: dict[str, tuple[float, float, float, float]] = {
+    "-cv":  (92.0, 18.0, 150.0, 36.0),
+    "cv":   (78.0, 16.0, 130.0, 34.0),
+    "cv-":  (60.0, 10.0, 110.0, 24.0),
+    "v":    (36.0,  4.0,  92.0, 14.0),
+    "v-":   (36.0,  4.0, 104.0, 18.0),
+    "vc":   (48.0, 10.0,  82.0, 22.0),
+    "vv":   (72.0, 14.0, 116.0, 26.0),
+    "v-cv": (82.0, 16.0, 118.0, 30.0),
+    "endbr":(40.0,  6.0,  78.0, 16.0),
+    "br":   (34.0,  4.0,  64.0, 12.0),
+    "other":(82.0, 14.0, 128.0, 30.0),
+    "special":(88.0, 18.0, 134.0, 32.0),
+}
+
+
+def _right_guard_limits_for_role(
+    role: str,
+    *,
+    alias_type: str = "",
+    is_diphthong: bool = False,
+    is_special: bool = False,
+) -> tuple[float, float, float, float]:
+    role_text = "special" if bool(is_special) else normalize_role(role)
+    if role_text in _ROLE_GUARD_LIMITS:
+        max_cons, min_cons, max_cut, min_cut = _ROLE_GUARD_LIMITS[role_text]
+    else:
+        # Fall back to the legacy alias_type table for any role this code
+        # path hasn't enumerated yet — keeps unknown rows under the old guard.
+        max_cons, min_cons, max_cut, min_cut = _right_guard_limits(alias_type)
+    if bool(is_diphthong) and role_text in {"cv", "-cv", "cv-", "v-cv", "vv"}:
+        max_cons *= 1.30
+        max_cut *= 1.20
+    if bool(is_special) and role_text in {"v", "v-"}:
+        cv_max, cv_min, _cut_max, _cut_min = _ROLE_GUARD_LIMITS["cv"]
+        max_cons = max(max_cons, cv_max)
+        min_cons = max(min_cons, cv_min)
+    return max_cons, min_cons, max_cut, min_cut
+
+
 def _safe_alias_type(language: str, alias: str) -> str:
     try:
         return str(classify_alias_type(language, alias) or "other").strip().lower() or "other"
@@ -292,6 +396,31 @@ def _safe_alias_type(language: str, alias: str) -> str:
         if " " in text:
             return "vcv"
         return "cv" if text else "other"
+
+
+def _safe_alias_role(
+    language: str,
+    alias: str,
+    *,
+    alias_type: str = "",
+    is_special: bool = False,
+) -> str:
+    try:
+        return classify_alias_role(
+            language,
+            alias,
+            alias_type=alias_type,
+            is_special=bool(is_special),
+        )
+    except Exception:
+        return "special" if bool(is_special) else "other"
+
+
+def _safe_is_diphthong(language: str, alias: str) -> bool:
+    try:
+        return bool(_is_diphthong(language, alias))
+    except Exception:
+        return False
 
 
 def _env_float(name: str, default: float) -> float:

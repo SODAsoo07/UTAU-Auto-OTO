@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from core.coarse_crnn.alias_role import ALIAS_ROLES, DEFAULT_ROLE, normalize_role
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES
 
 
@@ -45,6 +46,9 @@ class OtoCrnnConfig:
         "other",
     )
     transition_types: tuple[str, ...] = ("cv", "vc", "vv", "cc", "vowel", "consonant", "br", "multi", "other")
+    alias_roles: tuple[str, ...] = tuple(ALIAS_ROLES)
+    enable_alias_role_embedding: bool = False
+    enable_extra_alias_flags: bool = False
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> "OtoCrnnConfig":
@@ -73,12 +77,21 @@ class OtoCrnnConfig:
             data["right_boundary_prior_blend"] = 0.0
         if payload is not None and "right_boundary_prior_blends" not in data:
             data["right_boundary_prior_blends"] = ()
+        # Old checkpoints predate the alias_role axis. Default the new fields to
+        # disabled so loading them keeps the original architecture.
+        if payload is not None and "alias_roles" not in data:
+            data["alias_roles"] = ()
+        if payload is not None and "enable_alias_role_embedding" not in data:
+            data["enable_alias_role_embedding"] = False
+        if payload is not None and "enable_extra_alias_flags" not in data:
+            data["enable_extra_alias_flags"] = False
         for key in (
             "anchor_names",
             "languages",
             "format_types",
             "alias_types",
             "transition_types",
+            "alias_roles",
             "target_window_formats",
             "target_window_frame_overrides",
             "cvvc_target_window_alias_types",
@@ -96,6 +109,7 @@ class OtoCrnnConfig:
         data["format_types"] = list(self.format_types)
         data["alias_types"] = list(self.alias_types)
         data["transition_types"] = list(self.transition_types)
+        data["alias_roles"] = list(self.alias_roles)
         data["target_window_formats"] = list(self.target_window_formats)
         data["target_window_frame_overrides"] = list(self.target_window_frame_overrides)
         data["cvvc_target_window_alias_types"] = list(self.cvvc_target_window_alias_types)
@@ -139,6 +153,7 @@ def build_oto_model(config: OtoCrnnConfig):
             fmt_count = max(1, len(cfg.format_types))
             alias_count = max(1, len(cfg.alias_types))
             transition_count = max(1, len(cfg.transition_types))
+            role_count = max(1, len(cfg.alias_roles))
             self.language_emb = nn.Embedding(lang_count, int(cfg.cond_dim))
             self.format_emb = nn.Embedding(fmt_count, int(cfg.cond_dim))
             self.alias_emb = nn.Embedding(alias_count, int(cfg.cond_dim))
@@ -147,12 +162,40 @@ def build_oto_model(config: OtoCrnnConfig):
             self.next_alias_emb = nn.Embedding(alias_count, int(cfg.cond_dim))
             self.prev_transition_emb = nn.Embedding(transition_count, int(cfg.cond_dim))
             self.next_transition_emb = nn.Embedding(transition_count, int(cfg.cond_dim))
+            # New role-based embeddings — instantiated only when the flag is on.
+            # Old checkpoints saved with the flag off omit these modules and
+            # therefore round-trip cleanly through `load_state_dict`.
+            self.use_role_embedding = bool(cfg.enable_alias_role_embedding) and role_count > 1
+            if self.use_role_embedding:
+                self.alias_role_emb = nn.Embedding(role_count, int(cfg.cond_dim))
+                self.prev_alias_role_emb = nn.Embedding(role_count, int(cfg.cond_dim))
+                self.next_alias_role_emb = nn.Embedding(role_count, int(cfg.cond_dim))
+            else:
+                self.alias_role_emb = None
+                self.prev_alias_role_emb = None
+                self.next_alias_role_emb = None
+            self.use_extra_alias_flags = bool(cfg.enable_extra_alias_flags)
+            if self.use_extra_alias_flags:
+                # Two scalars: is_diphthong, is_special.
+                self.extra_flags_proj = nn.Sequential(
+                    nn.Linear(2, int(cfg.cond_dim)),
+                    nn.Tanh(),
+                )
+            else:
+                self.extra_flags_proj = None
             self.context_proj = (
                 nn.Sequential(nn.Linear(int(cfg.numeric_context_dim), int(cfg.cond_dim)), nn.Tanh())
                 if int(cfg.numeric_context_dim) > 0
                 else None
             )
-            cond_in = int(cfg.cond_dim) * (9 if self.context_proj is not None else 8)
+            cond_count = 8
+            if self.context_proj is not None:
+                cond_count += 1
+            if self.use_role_embedding:
+                cond_count += 3
+            if self.use_extra_alias_flags:
+                cond_count += 1
+            cond_in = int(cfg.cond_dim) * cond_count
             self.cond_proj = nn.Sequential(
                 nn.Linear(cond_in, hidden2),
                 nn.Tanh(),
@@ -203,6 +246,10 @@ def build_oto_model(config: OtoCrnnConfig):
             next_alias_type_ids=None,
             prev_transition_type_ids=None,
             next_transition_type_ids=None,
+            alias_role_ids=None,
+            prev_alias_role_ids=None,
+            next_alias_role_ids=None,
+            extra_alias_flags=None,
         ):
             torch = __import__("torch")
             encoded = self.encode(x)
@@ -242,6 +289,27 @@ def build_oto_model(config: OtoCrnnConfig):
                 self.prev_transition_emb(prev_transition_type_ids),
                 self.next_transition_emb(next_transition_type_ids),
             ]
+            if self.use_role_embedding and self.alias_role_emb is not None:
+                role_max = max(0, len(config.alias_roles) - 1)
+                if alias_role_ids is None:
+                    alias_role_ids = torch.zeros((batch,), dtype=torch.long, device=device)
+                if prev_alias_role_ids is None:
+                    prev_alias_role_ids = torch.zeros((batch,), dtype=torch.long, device=device)
+                if next_alias_role_ids is None:
+                    next_alias_role_ids = torch.zeros((batch,), dtype=torch.long, device=device)
+                alias_role_ids = alias_role_ids.to(device=device, dtype=torch.long).clamp(0, role_max)
+                prev_alias_role_ids = prev_alias_role_ids.to(device=device, dtype=torch.long).clamp(0, role_max)
+                next_alias_role_ids = next_alias_role_ids.to(device=device, dtype=torch.long).clamp(0, role_max)
+                cond_parts.append(self.alias_role_emb(alias_role_ids))
+                cond_parts.append(self.prev_alias_role_emb(prev_alias_role_ids))
+                cond_parts.append(self.next_alias_role_emb(next_alias_role_ids))
+            if self.use_extra_alias_flags and self.extra_flags_proj is not None:
+                if extra_alias_flags is None:
+                    extra_alias_flags = torch.zeros((batch, 2), dtype=torch.float32, device=device)
+                extra_alias_flags = extra_alias_flags.to(device=device, dtype=torch.float32)
+                if extra_alias_flags.dim() != 2 or int(extra_alias_flags.shape[-1]) != 2:
+                    extra_alias_flags = torch.zeros((batch, 2), dtype=torch.float32, device=device)
+                cond_parts.append(self.extra_flags_proj(extra_alias_flags))
             if self.context_proj is not None:
                 if context is None:
                     context = torch.zeros((batch, int(config.numeric_context_dim)), dtype=torch.float32, device=device)
@@ -308,6 +376,17 @@ def transition_type_id(config: OtoCrnnConfig, transition_type: object) -> int:
         return list(config.transition_types).index("other") if "other" in config.transition_types else 0
 
 
+def alias_role_id(config: OtoCrnnConfig, alias_role: object) -> int:
+    text = normalize_role(alias_role)
+    roles = list(config.alias_roles)
+    if not roles:
+        return 0
+    try:
+        return roles.index(text)
+    except ValueError:
+        return roles.index(DEFAULT_ROLE) if DEFAULT_ROLE in roles else 0
+
+
 def uses_relative_param_head(config: OtoCrnnConfig) -> bool:
     mode = str(getattr(config, "scalar_target_mode", "") or "").strip().lower()
     return mode in {"relative", "relative_params", "oto_params", "params"}
@@ -367,6 +446,7 @@ def load_oto_checkpoint(path: str, *, map_location: str = "cpu"):
 
 __all__ = [
     "OtoCrnnConfig",
+    "alias_role_id",
     "alias_type_id",
     "build_oto_model",
     "format_id",
