@@ -420,6 +420,16 @@ class LayoutMixin:
         _style_primary_button(self.oto_crnn_model_browse_btn)
         self.oto_crnn_model_browse_btn.pack(side="right")
         self.row_oto_crnn_model.pack_forget()
+        self.row_oto_crnn_special_aliases = build_form_row(form_body)
+        build_left_label(self.row_oto_crnn_special_aliases, t("특수 에일리어스:")).pack(side="left")
+        self.oto_crnn_special_aliases_entry = ctk.CTkEntry(
+            self.row_oto_crnn_special_aliases,
+            textvariable=self.oto_crnn_special_aliases_var,
+            placeholder_text="쉼표로 구분 (예: Sp, br, cl)",
+        )
+        self.oto_crnn_special_aliases_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
+        self.oto_crnn_special_aliases_entry.pack(side="left", fill="x", expand=True, padx=(6, 6))
+        self.row_oto_crnn_special_aliases.pack_forget()
         self.row_align_extra = build_form_row(form_body)
         build_left_label(self.row_align_extra, t("MFA 정렬 프로필:")).pack(side="left")
         self.mfa_align_profile_menu = ctk.CTkOptionMenu(
@@ -1374,6 +1384,18 @@ class LayoutMixin:
                         self.row_oto_crnn_model.pack(**pack_kwargs)
                 else:
                     self.row_oto_crnn_model.pack_forget()
+            except Exception:
+                pass
+        if hasattr(self, "row_oto_crnn_special_aliases") and self.row_oto_crnn_special_aliases is not None:
+            try:
+                if show_crnn_model_row:
+                    if not self.row_oto_crnn_special_aliases.winfo_ismapped():
+                        pack_kwargs = {"fill": "x", "pady": 4}
+                        if hasattr(self, "row_align_extra") and self.row_align_extra is not None:
+                            pack_kwargs["before"] = self.row_align_extra
+                        self.row_oto_crnn_special_aliases.pack(**pack_kwargs)
+                else:
+                    self.row_oto_crnn_special_aliases.pack_forget()
             except Exception:
                 pass
         if hasattr(self, "aligner_help_label"):
