@@ -31,6 +31,10 @@ def main() -> int:
     parser.add_argument("--vcv-loss-weight", type=float, default=1.35)
     parser.add_argument("--cvvc-loss-weight", type=float, default=1.15)
     parser.add_argument("--cvc-loss-weight", type=float, default=1.05)
+    parser.add_argument("--vc-role-loss-weight", type=float, default=2.5,
+                        help="Loss multiplier for vc-role aliases (hard to predict in cvvc voicebanks).")
+    parser.add_argument("--vv-role-loss-weight", type=float, default=2.0,
+                        help="Loss multiplier for vv-role aliases.")
     parser.add_argument("--format-residual-heads", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--vcv-target-window", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--vcv-window-frames", type=int, default=240)
@@ -101,6 +105,8 @@ def main() -> int:
         vcv_loss_weight=float(args.vcv_loss_weight),
         cvvc_loss_weight=float(args.cvvc_loss_weight),
         cvc_loss_weight=float(args.cvc_loss_weight),
+        vc_role_loss_weight=float(args.vc_role_loss_weight),
+        vv_role_loss_weight=float(args.vv_role_loss_weight),
     )
     result = train_oto_from_manifest(rows, args.out, val_rows=val_rows, train_config=train_cfg, model_config=model_cfg)
     print(json.dumps(result, ensure_ascii=False, indent=2))
