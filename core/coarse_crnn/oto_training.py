@@ -21,7 +21,7 @@ from core.coarse_crnn.oto_model import (
     right_boundary_prior_blend_for,
 )
 from core.coarse_crnn.oto_param_priors import decode_relative_oto_params, normalize_relative_oto_target, relative_params_to_anchors
-from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES
+from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES, extract_alias_features
 from core.coarse_crnn.oto_windowing import crop_oto_target_window, row_window_args, should_use_vcv_target_window, target_window_frames_for
 from core.coarse_crnn.training import _autocast, _make_grad_scaler, _pin_memory_enabled, resolve_torch_device
 
@@ -109,9 +109,21 @@ class OtoAnchorDataset:
             hop_sec=float(hop_sec),
             sigma_frames=float(self.train_config.heatmap_sigma_frames),
         )
-        is_diphthong = bool(float(row.get("is_diphthong", 0.0) or 0.0) >= 0.5)
-        is_special = bool(float(row.get("is_special", 0.0) or 0.0) >= 0.5)
         alias_role_text = str(row.get("alias_role", "") or "")
+        # If manifest lacks alias_role (old manifests built before alias_role feature),
+        # compute it on-the-fly from the alias text so role embeddings train correctly.
+        _manifest_has_role = row.get("alias_role") is not None
+        if not _manifest_has_role:
+            _feats = extract_alias_features(
+                str(row.get("alias", "") or ""),
+                language=str(row.get("language", "") or ""),
+            )
+            alias_role_text = str(_feats.get("alias_role", "") or "")
+            is_diphthong = bool(float(_feats.get("is_diphthong", 0.0) or 0.0) >= 0.5)
+            is_special = bool(float(_feats.get("is_special", 0.0) or 0.0) >= 0.5)
+        else:
+            is_diphthong = bool(float(row.get("is_diphthong", 0.0) or 0.0) >= 0.5)
+            is_special = bool(float(row.get("is_special", 0.0) or 0.0) >= 0.5)
         if uses_relative_param_head(self.model_config):
             scalar = np.asarray(
                 normalize_relative_oto_target(
@@ -137,8 +149,23 @@ class OtoAnchorDataset:
         prev_transition_id = transition_type_id(self.model_config, row.get("prev_transition_type", ""))
         next_transition_id = transition_type_id(self.model_config, row.get("next_transition_type", ""))
         role_id = alias_role_id(self.model_config, alias_role_text)
-        prev_role_id = alias_role_id(self.model_config, row.get("prev_alias_role", ""))
-        next_role_id = alias_role_id(self.model_config, row.get("next_alias_role", ""))
+        # Compute neighbor roles on-the-fly if manifest lacks them (old manifests).
+        prev_role_text = str(row.get("prev_alias_role", "") or "")
+        if not prev_role_text or row.get("prev_alias_role") is None:
+            _prev_feats = extract_alias_features(
+                str(row.get("prev_alias", "") or ""),
+                language=str(row.get("language", "") or ""),
+            )
+            prev_role_text = str(_prev_feats.get("alias_role", "") or "")
+        next_role_text = str(row.get("next_alias_role", "") or "")
+        if not next_role_text or row.get("next_alias_role") is None:
+            _next_feats = extract_alias_features(
+                str(row.get("next_alias", "") or ""),
+                language=str(row.get("language", "") or ""),
+            )
+            next_role_text = str(_next_feats.get("alias_role", "") or "")
+        prev_role_id = alias_role_id(self.model_config, prev_role_text)
+        next_role_id = alias_role_id(self.model_config, next_role_text)
         extra_flags = np.asarray(
             [1.0 if is_diphthong else 0.0, 1.0 if is_special else 0.0],
             dtype=np.float32,
