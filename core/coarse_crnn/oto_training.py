@@ -45,6 +45,10 @@ class OtoTrainConfig:
     vcv_loss_weight: float = 1.35
     cvvc_loss_weight: float = 1.15
     cvc_loss_weight: float = 1.05
+    # Role-based loss weights. vc and vv are the hardest to predict
+    # (vc in cvvc voicebanks has the highest MAE) so they get upweighted.
+    vc_role_loss_weight: float = 2.5
+    vv_role_loss_weight: float = 2.0
 
 
 class OtoAnchorDataset:
@@ -173,6 +177,7 @@ class OtoAnchorDataset:
         context = _context_array_from_row(row)
         weight = float(row.get("sample_weight", row.get("weight", 1.0)) or 1.0)
         weight *= _format_loss_multiplier(row, self.train_config)
+        weight *= _role_loss_multiplier(alias_role_text, self.train_config)
         return (
             features.astype(np.float32),
             heatmap.astype(np.float32),
@@ -658,6 +663,21 @@ def _format_loss_multiplier(row: dict[str, Any], cfg: OtoTrainConfig) -> float:
         return max(0.05, float(cfg.cvvc_loss_weight))
     if fmt == "cvc":
         return max(0.05, float(cfg.cvc_loss_weight))
+    return 1.0
+
+
+def _role_loss_multiplier(alias_role: str, cfg: OtoTrainConfig) -> float:
+    """Upweight hard-to-predict alias roles during training.
+
+    vc aliases in cvvc voicebanks have the highest MAE in evaluation (often
+    5-10x the preutterance MAE of cv aliases).  vv aliases are also hard.
+    All other roles use the default multiplier of 1.0.
+    """
+    role = str(alias_role or "").strip().lower()
+    if role == "vc":
+        return max(0.05, float(cfg.vc_role_loss_weight))
+    if role == "vv":
+        return max(0.05, float(cfg.vv_role_loss_weight))
     return 1.0
 
 
