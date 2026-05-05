@@ -4,10 +4,6 @@ import os
 import re
 
 from core.kr_auto_alias_setup import expand_kr_filename_alias_tokens
-from core.mapping_format_policy import (
-    is_kr_order_locked_timing_format,
-    is_kr_sequence_locked_format,
-)
 from core.kr_oto_rules import (
     KR_CONSONANTS,
     KR_VOWELS,
@@ -138,18 +134,17 @@ def _build_kr_cvvc_occurrence_map(token_source):
 
 
 def _is_kr_order_locked_cv_format(file_format):
-    return bool(is_kr_order_locked_timing_format(file_format))
+    fmt = str(file_format or "").strip().lower()
+    return fmt in {"cvvc", "cvc", "vcv"}
 
 
-def _is_kr_sequence_locked_mapping_format(file_format):
-    """
-    매핑 단계에서 filename-음절 순서를 강하게 유지할 포맷 집합.
-    기존의 CVVC/CVC에 더해 CV/VCV도 순서 고정 가드를 적용한다.
-    """
-    return bool(is_kr_sequence_locked_format(file_format))
-
-
-def _resolve_kr_cvvc_occurrence_index(alias, alias_type, occurrence_map, occurrence_state):
+def _resolve_kr_cvvc_occurrence_index(
+    alias,
+    alias_type,
+    occurrence_map,
+    occurrence_state,
+    expected_idx=None,
+):
     """한국어 CVVC에서 같은 CV 토큰의 등장 순서대로 CV/CV_HEAD를 직접 매핑합니다."""
     if alias_type not in {"cv", "cv_head"}:
         return None
@@ -166,6 +161,9 @@ def _resolve_kr_cvvc_occurrence_index(alias, alias_type, occurrence_map, occurre
     if used >= len(idxs):
         used = len(idxs) - 1
     occurrence_state[state_key] = used + 1
+    # expected_idx는 호출부 호환을 위한 힌트 인자입니다.
+    # 현재는 기존 순서 기반 정책을 유지하므로 직접 사용하지 않습니다.
+    _ = expected_idx
     return idxs[used]
 
 
@@ -282,7 +280,7 @@ def _should_allow_kr_exact_vowel_fix(
     1칸 내 재탐색 보정을 허용합니다.
     """
     fmt = str(file_format or "").strip().lower()
-    if _is_kr_sequence_locked_mapping_format(fmt) and forced_selected_idx is not None:
+    if _is_kr_order_locked_cv_format(fmt) and forced_selected_idx is not None:
         a_type = str(alias_type or "").strip().lower()
         if a_type == "cv_head" and bool(severe_vowel_mismatch):
             return True
@@ -410,7 +408,7 @@ def _clamp_kr_cv_index_to_order(
     mapped_idx,
 ):
     fmt = str(file_format or "").strip().lower()
-    if not _is_kr_sequence_locked_mapping_format(fmt):
+    if not _is_kr_order_locked_cv_format(fmt):
         return int(mapped_idx)
     if not romaji_syllables:
         return int(expected_idx)
@@ -426,16 +424,13 @@ def _clamp_kr_cv_index_to_order(
     expected_score = float(_cv_match_score(target_norm, expected_tok))
     mapped_score = float(_cv_match_score(target_norm, mapped_tok))
 
-    if fmt in {"cvc", "vcv"}:
+    if fmt == "cvc":
         return e
 
     if m > (e + 1):
         return e
     if mapped_tok == target_norm and expected_tok != target_norm:
         return m
-    if fmt == "cv":
-        # CV는 순서 안정성을 우선: exact 일치가 아니면 기대 인덱스를 고정한다.
-        return e
     if mapped_score >= max(expected_score + 18.0, 92.0):
         return m
     return e
@@ -452,7 +447,6 @@ __all__ = [
     "_extract_kr_vv_pair_key",
     "_find_kr_cv_vowel_match_index",
     "_is_kr_order_locked_cv_format",
-    "_is_kr_sequence_locked_mapping_format",
     "_iter_kr_cvvc_tokens",
     "_resolve_kr_cvvc_occurrence_index",
     "_resolve_kr_cvvc_vv_index",

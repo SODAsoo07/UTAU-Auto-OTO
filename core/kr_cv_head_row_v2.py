@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from core.mapping_format_policy import is_kr_order_locked_timing_format
-
 
 def run_kr_cv_head_row(
     *,
@@ -43,9 +41,6 @@ def run_kr_cv_head_row(
     alignment_weight=0.0,
     textgrid_trust_tier="",
 ):
-    order_locked = bool(is_kr_order_locked_timing_format(file_format))
-    min_keep_from_pre_ms = 112.0 if order_locked else 96.0
-
     (
         selected_w_idx,
         cv_seq_idx,
@@ -64,6 +59,31 @@ def run_kr_cv_head_row(
         forced_w_idx=forced_w_idx,
     )
     current_w_idx = max(current_w_idx, selected_w_idx)
+    refined_vowel_span = None
+    if mel_ctx_for_file:
+        try:
+            from core.oto_generator import _estimate_mel_vowel_activity_span
+
+            refined_vowel_span = _estimate_mel_vowel_activity_span(
+                mel_ctx_for_file,
+                n_start,
+                n_end,
+                search_pad_ms=120.0,
+                min_span_ms=20.0,
+            )
+            if refined_vowel_span is not None:
+                rv_start, rv_end = refined_vowel_span
+                if rv_end > rv_start and (
+                    abs(float(rv_start) - float(n_start)) >= 10.0
+                    or abs(float(rv_end) - float(n_end)) >= 18.0
+                ):
+                    log_fn(
+                        f"🛡️ {fname}: 어두 alias 모음 핵 기준 보정 "
+                        f"({n_start:.1f}-{n_end:.1f}ms -> {rv_start:.1f}-{rv_end:.1f}ms) [{alias}]"
+                    )
+                    n_start, n_end = float(rv_start), float(rv_end)
+        except Exception:
+            refined_vowel_span = None
     mel_voiced_onset_ms = None
     if mel_ctx_for_file:
         from core.oto_generator import (
@@ -74,7 +94,15 @@ def run_kr_cv_head_row(
         pre_abs = float(offset) + float(pre)
         mel_weight = _resolve_mel_onset_weight(alignment_weight, textgrid_trust_tier)
         if mel_weight > 0.0:
-            mel_onset = _estimate_mel_voiced_onset(mel_ctx_for_file, pre_abs)
+            mel_onset = _estimate_mel_voiced_onset(
+                mel_ctx_for_file,
+                pre_abs,
+                prefer_vowel_activity=True,
+            )
+            if refined_vowel_span is not None:
+                rv_start, _rv_end = refined_vowel_span
+                if mel_onset is None or abs(float(rv_start) - pre_abs) < abs(float(mel_onset) - pre_abs):
+                    mel_onset = float(rv_start)
             if mel_onset is not None and abs(float(mel_onset) - pre_abs) <= 120.0:
                 (
                     offset,
@@ -133,7 +161,6 @@ def run_kr_cv_head_row(
         pre,
         selected_w_idx,
         syllables_info,
-        file_format=file_format,
     )
     (
         offset,
@@ -148,7 +175,6 @@ def run_kr_cv_head_row(
         pre,
         n_start,
         n_end,
-        file_format=file_format,
     )
     (
         offset,
@@ -163,8 +189,6 @@ def run_kr_cv_head_row(
         pre,
         selected_w_idx,
         syllables_info,
-        alias_type="cv_head",
-        min_keep_from_pre_ms=min_keep_from_pre_ms,
     )
     cutoff_reduced += cutoff_reduced_after_offset
 
@@ -209,42 +233,8 @@ def run_kr_cv_head_row(
             pre,
             selected_w_idx,
             syllables_info,
-            file_format=file_format,
         )
         offset_reduced += offset_reduced_after_anchor
-        (
-            offset,
-            consonant,
-            cutoff,
-            pre,
-            cutoff_extended_after_anchor,
-        ) = ensure_cv_head_min_vowel_coverage_fn(
-            offset,
-            consonant,
-            cutoff,
-            pre,
-            n_start,
-            n_end,
-            file_format=file_format,
-        )
-        cutoff_extended += cutoff_extended_after_anchor
-        (
-            offset,
-            consonant,
-            cutoff,
-            pre,
-            cutoff_reduced_after_anchor,
-        ) = guard_cv_cutoff_to_next_onset_fn(
-            offset,
-            consonant,
-            cutoff,
-            pre,
-            selected_w_idx,
-            syllables_info,
-            alias_type="cv_head",
-            min_keep_from_pre_ms=min_keep_from_pre_ms,
-        )
-        cutoff_reduced += cutoff_reduced_after_anchor
     anchor_record = build_anchor_record_fn(
         selected_w_idx,
         offset=offset,

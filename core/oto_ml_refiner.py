@@ -12,8 +12,6 @@ import os
 import time
 from typing import Dict, List, Optional, Tuple
 
-from core.generator_finish import write_oto_lines
-from core.oto_file_utils import read_text_with_fallback
 from core.oto_ml_features import extract_feature_rows, get_delta_clip_limits, parse_oto_rows
 from core.oto_ml.features.mel_patches import (
     build_wav_index,
@@ -39,11 +37,19 @@ from core.oto_ml_policy import (
 from core.oto_ml_reliability import (
     compute_blank_risk_score,
     compute_mel_reliability_score,
+    evaluate_voiced_approval,
     is_mel_unreliable,
     mel_patch_is_fallback,
 )
 from core.oto_ml_selector import select_best_candidate
+from core.oto_e2e_runtime import build_e2e_runtime_context, predict_e2e_params
+from core.oto_e2e_selector import E2ESelectorConfig, select_e2e_or_legacy
 from core.format_type_utils import normalize_format_type
+from core.silence_profile_runtime import (
+    apply_reliability_hysteresis,
+    make_reliability_state_key,
+    resolve_silence_reliability_profile,
+)
 from core.pipeline_status import (
     ML_APPLIED,
     ML_BUNDLE_INVALID,
@@ -61,6 +67,8 @@ from core.pipeline_status import (
 from core.timing_anchor_profiles import get_anchor_profile, is_anchor_lock_enabled
 from core.timing_anchor_runtime import AnchorTimingContext, apply_anchor_lock
 from core.selector_hard_negative import log_selector_hard_negative
+from core.runtime_config import get_ml_config
+from core.model_resolver import get_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -83,38 +91,57 @@ def _env_flag(name: str, default: bool) -> bool:
     return bool(default)
 
 
+# ---------------------------------------------------------------------------
+# Config-delegating accessors
+# These thin wrappers forward to the centralised MLRuntimeConfig so callers
+# throughout this module can be migrated incrementally.
+# ---------------------------------------------------------------------------
+
 def _ensemble_enabled() -> bool:
-    return _env_flag("UTOA_ML_ENSEMBLE_ENABLE", True)
+    return get_ml_config().ensemble_enabled
 
 
 def _ml_route(value: Optional[str] = None) -> str:
-    raw = str(value or os.environ.get("UTOA_ML_ROUTE", "v2") or "v2").strip().lower()
-    if raw in {"", "auto", "automatic", "policy", "v2", "autofree_v1", "autofree", "no-mfa", "no_mfa", "nomfa", "b", "route_b"}:
-        return "autofree_v1"
-    return "legacy"
+    if value:
+        raw = str(value).strip().lower()
+        if raw in {"e2e_hybrid", "e2e", "hybrid"}:
+            return "e2e_hybrid"
+        return "legacy"
+    return get_ml_config().route
 
 
 def _gated_ensemble_enabled() -> bool:
-    # Default OFF to keep runtime stable: coupled is primary, LightGBM is fallback.
-    return _env_flag("UTOA_ML_GATED_ENSEMBLE_ENABLE", False)
+    return get_ml_config().gated_ensemble_enabled
 
 
 def _selector_runtime_enabled() -> bool:
-    # Runtime 기본은 델타 보정 단일 모드(속도 우선). 필요 시 env로 명시적으로 켠다.
-    return _env_flag("UTOA_ML_SELECTOR_ENABLE", False)
+    return get_ml_config().selector_enabled
 
 
 def _legacy_fallback_enabled() -> bool:
-    # Coupled/Ensemble의 내부 게이팅을 우선 사용하고, 구형 fallback 체인은 기본 비활성.
-    return _env_flag("UTOA_ML_LEGACY_FALLBACK_ENABLE", False)
+    return get_ml_config().legacy_fallback_enabled
 
 
 def _batch_inference_enabled() -> bool:
-    return _env_flag("UTOA_ML_BATCH_INFERENCE_ENABLE", True)
+    return get_ml_config().batch_inference_enabled
 
 
 def _batch_inference_size() -> int:
-    return max(32, _env_int("UTOA_ML_BATCH_INFERENCE_SIZE", 256))
+    return get_ml_config().batch_inference_size
+
+
+def _two_stage_model_enabled() -> bool:
+    return get_ml_config().two_stage_model_enabled
+
+
+def _auto_select_vbest_enabled() -> bool:
+    return get_ml_config().auto_select_vbest
+
+
+def _looks_like_two_stage_model_name(name: str) -> bool:
+    # Kept for backward compat; logic lives in model_resolver._looks_like_two_stage.
+    from core.model_resolver import _looks_like_two_stage
+    return _looks_like_two_stage(name)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -125,10 +152,8 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _coupled_min_confidence() -> float:
-    try:
-        return max(0.0, min(float(os.environ.get("UTOA_ML_COUPLED_MIN_CONF", "0.42")), 1.0))
-    except Exception:
-        return 0.42
+    cfg = get_ml_config()
+    return float(cfg.coupled_min_conf) if cfg.coupled_min_conf is not None else 0.42
 
 
 def _read_bounded_conf_env(name: str) -> Optional[float]:
@@ -142,18 +167,11 @@ def _read_bounded_conf_env(name: str) -> Optional[float]:
 
 
 def _coupled_min_conf_use_model_meta() -> bool:
-    # 운영 기본은 모델 메타(min_confidence) 기반 분리 게이트를 사용한다.
-    return _env_flag("UTOA_ML_COUPLED_MIN_CONF_USE_MODEL_META", True)
+    return get_ml_config().coupled_min_conf_use_model_meta
 
 
 def _coupled_min_conf_model_offset() -> float:
-    raw = str(os.environ.get("UTOA_ML_COUPLED_MIN_CONF_MODEL_OFFSET", "")).strip()
-    if not raw:
-        return 0.0
-    try:
-        return max(-0.30, min(float(raw), 0.30))
-    except Exception:
-        return 0.0
+    return get_ml_config().coupled_min_conf_model_offset
 
 
 def _bounded_conf(value) -> Optional[float]:
@@ -213,10 +231,7 @@ def _route_model_min_confidence(bundle: Optional[object], model_dir: str) -> Opt
 
 
 def _ml_anchor_lock_min_conf() -> float:
-    env_val = _read_bounded_conf_env("UTOA_ML_ANCHOR_LOCK_MIN_CONF")
-    if env_val is None:
-        return 0.45
-    return float(env_val)
+    return get_ml_config().anchor_lock_min_conf
 
 
 def _ml_anchor_blank_floor(language: str, format_type: str) -> Optional[float]:
@@ -224,22 +239,7 @@ def _ml_anchor_blank_floor(language: str, format_type: str) -> Optional[float]:
     if lang != "korean":
         return None
     fmt = normalize_format_type(lang, format_type) or str(format_type or "").strip().lower()
-    if fmt not in {"cvvc", "cvc", "cv"}:
-        return None
-    env_key_by_fmt = {
-        "cvvc": "UTOA_KR_CVVC_ROW_BLANK_FLOOR",
-        "cvc": "UTOA_KR_CVC_ROW_BLANK_FLOOR",
-        "cv": "UTOA_KR_CV_ROW_BLANK_FLOOR",
-    }
-    default_floor_by_fmt = {
-        "cvvc": 0.64,
-        "cvc": 0.62,
-        "cv": 0.60,
-    }
-    env_val = _read_bounded_conf_env(env_key_by_fmt.get(fmt, "UTOA_KR_CVVC_ROW_BLANK_FLOOR"))
-    if env_val is None:
-        return float(default_floor_by_fmt.get(fmt, 0.64))
-    return float(env_val)
+    return get_ml_config().blank_floor_for_format(fmt)
 
 
 def _coupled_min_confidence_for_alias(
@@ -288,200 +288,64 @@ def _coupled_min_confidence_for_alias(
         default_by_fmt = default_coupled_min_conf(lang, fmt)
         base = max(base, min(float(default_by_fmt), 1.0))
     if lang_token == "KR":
-        # Korean: CV/VC bridge 행의 오보정 방지를 위해 포맷별 floor를 더 보수적으로 둔다.
-        kr_floor_by_fmt = {
-            "cvvc": {"cv": 0.58, "cv_head": 0.60, "vc": 0.53, "vv": 0.54, "vcv": 0.56},
-            "cvc": {"cv": 0.56, "cv_head": 0.58, "vc": 0.52, "vv": 0.53, "vcv": 0.54},
-            "vcv": {"cv": 0.52, "cv_head": 0.56, "vc": 0.50, "vv": 0.52, "vcv": 0.56},
-            "cv": {"cv": 0.54, "cv_head": 0.56, "vc": 0.48, "vv": 0.50, "vcv": 0.52},
-            "general": {"cv": 0.54, "cv_head": 0.56, "vc": 0.50, "vv": 0.52, "vcv": 0.53},
+        # Korean CV 계열 기본 게이트: 과도한 fallback을 줄이되, CV head는 여전히 보수적으로 유지.
+        kr_floor_by_alias = {
+            "cv": 0.50,
+            "cv_head": 0.52,
+            "vc": 0.46,
+            "vv": 0.48,
+            "vcv": 0.48,
         }
-        floor = (kr_floor_by_fmt.get(fmt or "general") or kr_floor_by_fmt["general"]).get(alias)
+        floor = kr_floor_by_alias.get(alias)
         if floor is not None:
+            if alias in {"cv", "cv_head"} and fmt in {"cvvc", "cvc"}:
+                floor += 0.01
             return float(max(base, min(float(floor), 0.95)))
-    if lang_token == "JA":
-        ja_floor_by_fmt = {
-            "cvvc": {"cv": 0.55, "cv_head": 0.58, "vc": 0.52, "vv": 0.53, "vcv": 0.55},
-            "vcv": {"cv": 0.54, "cv_head": 0.57, "vc": 0.52, "vv": 0.53, "vcv": 0.56},
-            "cv": {"cv": 0.53, "cv_head": 0.55, "vc": 0.50, "vv": 0.52, "vcv": 0.53},
-            "general": {"cv": 0.53, "cv_head": 0.56, "vc": 0.51, "vv": 0.52, "vcv": 0.55},
-        }
-        floor = (ja_floor_by_fmt.get(fmt or "general") or ja_floor_by_fmt["general"]).get(alias)
-        if floor is not None:
-            return float(max(base, min(float(floor), 0.94)))
     return float(base)
 
 
-def _dynamic_coupled_min_conf_enabled() -> bool:
-    return _env_flag("UTOA_ML_DYNAMIC_MIN_CONF_ENABLE", True)
-
-
-def _row_float(row: Dict[str, object], key: str, default: float = 0.0) -> float:
-    try:
-        return float(row.get(key, default) or default)
-    except Exception:
-        return float(default)
-
-
-def _row_reliability_metrics(row: Dict[str, object]) -> Dict[str, float]:
-    mapping_conf = _row_float(row, "mapping_confidence", 1.0)
-    blank_conf = max(
-        _row_float(row, "blank_span_confidence", 0.0),
-        _row_float(row, "syllable_blank_confidence", 0.0),
-        _row_float(row, "syllable_silence_confidence", 0.0),
-        _row_float(row, "syllable_mel_silence_conf", 0.0),
-    )
-    blank_risk = max(blank_conf, compute_blank_risk_score(row))
-    silence_ratio = max(
-        _row_float(row, "blank_silence_ratio", 0.0),
-        _row_float(row, "silence_ratio", 0.0),
-        _row_float(row, "db_silence_ratio", 0.0),
-        _row_float(row, "mel_window_silence_ratio", 0.0),
-    )
-    mel_reliability = compute_mel_reliability_score(row)
-    return {
-        "mapping_conf": float(mapping_conf),
-        "blank_conf": float(blank_conf),
-        "blank_risk": float(blank_risk),
-        "silence_ratio": float(silence_ratio),
-        "mel_reliability": float(mel_reliability),
-        "mel_unreliable": 1.0 if bool(is_mel_unreliable(row)) else 0.0,
-    }
-
-
-def _coupled_min_confidence_for_row(
-    base_min_conf: float,
-    feature_row: Dict[str, object],
-    *,
-    language: str,
-    format_type: str,
-    alias_type: str,
-) -> float:
-    conf = max(0.0, min(float(base_min_conf), 1.0))
-    if not _dynamic_coupled_min_conf_enabled():
-        return conf
-
-    alias = str(alias_type or "").strip().lower()
-    fmt = str(format_type or "").strip().lower()
-    lang = str(language or "").strip().lower()
-    metrics = _row_reliability_metrics(feature_row)
-    mapping_conf = float(metrics.get("mapping_conf", 1.0))
-    blank_conf = float(metrics.get("blank_risk", 0.0))
-    silence_ratio = float(metrics.get("silence_ratio", 0.0))
-    mel_unreliable = bool(metrics.get("mel_unreliable", 0.0) > 0.5)
-    mel_reliability = float(metrics.get("mel_reliability", 1.0))
-    weak_voice_energy = max(
-        _row_float(feature_row, "energy_mean", 0.0),
-        _row_float(feature_row, "mel_window_energy_mean", 0.0),
-    )
-
-    boost = 0.0
-    if alias in {"cv", "cv_head", "mono"}:
-        if mapping_conf < 0.72:
-            boost += 0.05
-        if mapping_conf < 0.60:
-            boost += 0.05
-    elif alias in {"vc", "vv", "vcv"}:
-        if mapping_conf < 0.70:
-            boost += 0.04
-        if mapping_conf < 0.58:
-            boost += 0.04
-
-    if blank_conf >= 0.56:
-        boost += 0.04
-    if blank_conf >= 0.66:
-        boost += 0.04
-    if silence_ratio >= 0.58:
-        boost += 0.03
-
-    if mel_unreliable and alias in {"cv", "cv_head", "mono"}:
-        boost += 0.03
-    if mel_reliability < 0.36:
-        boost += 0.03
-    if mel_reliability < 0.28:
-        boost += 0.03
-    if weak_voice_energy < 0.10:
-        boost += 0.02
-
-    if lang in {"korean", "ko"} and fmt in {"cvvc", "cvc"} and alias in {"cv", "cv_head"}:
-        boost += 0.02
-    if lang in {"japanese", "ja"} and fmt == "vcv" and alias in {"vcv", "cv_head"}:
-        boost += 0.02
-
-    return max(conf, min(conf + boost, 0.97))
-
-
 def _coupled_strict_constraint() -> bool:
-    return _env_flag("UTOA_ML_COUPLED_STRICT_CONSTRAINT", False)
+    return get_ml_config().coupled_strict_constraint
 
 
 def _kr_cv_keep_base_location_enabled() -> bool:
-    return _env_flag("UTOA_ML_KR_CV_KEEP_BASE_LOCATION", True)
+    return get_ml_config().kr_cv_keep_base_location
 
 
 def _head_zero_offset_guard_enabled() -> bool:
-    return _env_flag("UTOA_ML_HEAD_ZERO_OFFSET_GUARD", True)
+    return get_ml_config().head_zero_offset_guard
 
 
 def _read_bundle_backend(model_dir: str) -> str:
-    try:
-        import json
+    return get_resolver().read_backend(model_dir)
 
-        meta_path = os.path.join(model_dir, "model_meta.json")
-        if not os.path.isfile(meta_path):
-            return ""
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f) or {}
-        return str(meta.get("backend", "") or "").strip().lower()
-    except Exception:
-        return ""
 
+# ---------------------------------------------------------------------------
+# Path helpers — delegate to ModelResolver (kept for backward compatibility)
+# ---------------------------------------------------------------------------
 
 def _has_explicit_model_override(language: str) -> bool:
-    lang = str(language).strip().lower()
-    env_key = "UTOA_JA_OTO_ML_DIR" if lang == "japanese" else "UTOA_KR_OTO_ML_DIR"
-    return bool(os.environ.get(env_key, "").strip())
+    return get_resolver().has_explicit_override(language)
 
 
 def _model_root_for_language(language: str) -> str:
-    lang = str(language).strip().lower()
-    env_key = "UTOA_JA_OTO_ML_DIR" if lang == "japanese" else "UTOA_KR_OTO_ML_DIR"
-    env_path = os.environ.get(env_key, "").strip()
-    if env_path:
-        return env_path
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_dir, "assets", "models", "oto_ml", lang)
+    return get_resolver().model_root(language)
 
 
 def _workspace_model_root_for_language(language: str) -> str:
-    lang = str(language).strip().lower()
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    workspace_root = os.environ.get("UTOA_OTO_ML_WORKSPACE_ROOT", "").strip()
-    if workspace_root:
-        return os.path.join(workspace_root, lang)
-    # Prefer the repo-local ml_workspace if present (newer training output),
-    # otherwise fall back to logs/ml_workspace for legacy runs.
-    local_root = os.path.join(base_dir, "ml_workspace", "models")
-    if os.path.isdir(local_root):
-        return os.path.join(local_root, lang)
-    return os.path.join(base_dir, "logs", "ml_workspace", "models", lang)
+    return get_resolver().workspace_root(language)
 
 
 def _export_model_root() -> str:
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    configured = os.environ.get("UTOA_OTO_ML_EXPORT_ROOT", "").strip()
-    if configured:
-        return configured
-    return os.path.join(base_dir, "ML_models")
+    return get_resolver().export_root()
 
 
 def _structured_export_model_root_for_language(language: str) -> str:
-    return os.path.join(_export_model_root(), str(language).strip().lower())
+    return get_resolver().structured_export_root(language)
 
 
 def _ml_same_language_borrow_only() -> bool:
-    raw = str(os.environ.get("UTOA_ML_SAME_LANGUAGE_BORROW_ONLY", "1")).strip().lower()
-    return raw not in {"0", "false", "off", "no"}
+    return get_ml_config().same_language_borrow_only
 
 
 def _installed_model_root_for_language(language: str) -> str:
@@ -491,9 +355,16 @@ def _installed_model_root_for_language(language: str) -> str:
 
 
 def _collect_model_dir_candidates(language: str, format_type: str, alias_family: str = "") -> List[str]:
+    """Return ordered model-dir candidates.  Delegates to ModelResolver unless
+    ``UTOA_ML_RESOLVER_DISABLE=1`` is set (legacy fallback path)."""
+    if not get_resolver().is_disabled():
+        return get_resolver().collect_candidates(language, format_type, alias_family=alias_family)
+    # --- legacy inline path (kept for rollback) ---
     fmt = normalize_format_type(language, format_type) or "general"
     family = normalize_alias_family(alias_family)
     lang = str(language or "").strip().lower()
+    allow_two_stage = _two_stage_model_enabled()
+    allow_vbest_auto = _auto_select_vbest_enabled()
     candidates: List[str] = []
 
     def _append_version_dirs(base_path: str) -> None:
@@ -512,27 +383,31 @@ def _collect_model_dir_candidates(language: str, format_type: str, alias_family:
             for name in os.listdir(base_path):
                 if not str(name).lower().startswith("v"):
                     continue
+                if (not allow_vbest_auto) and str(name).strip().lower().startswith("vbest"):
+                    continue
+                if (not allow_two_stage) and _looks_like_two_stage_model_name(name):
+                    continue
                 path = os.path.join(base_path, name)
                 if os.path.isfile(os.path.join(path, "model_meta.json")):
                     candidates.append(path)
         except Exception:
             return
 
-    root_candidates: List[str] = []
-    if _has_explicit_model_override(language):
-        # Explicit env override must win over workspace/export fallbacks.
-        root_candidates.append(_model_root_for_language(language))
-    root_candidates.extend(
-        [
+    explicit_override = _has_explicit_model_override(language)
+    if explicit_override:
+        root_candidates = (_model_root_for_language(language),)
+    else:
+        root_candidates = (
             _workspace_model_root_for_language(language),
             _installed_model_root_for_language(language),
             _structured_export_model_root_for_language(language),
             _model_root_for_language(language),
-        ]
-    )
+        )
 
     for root in root_candidates:
-        if os.path.isfile(os.path.join(root, "model_meta.json")):
+        if os.path.isfile(os.path.join(root, "model_meta.json")) and (
+            allow_two_stage or (not _looks_like_two_stage_model_name(os.path.basename(root)))
+        ):
             candidates.append(root)
         else:
             if family:
@@ -633,11 +508,29 @@ def _resolve_backend_model_dir(
 
 
 def _resolve_lightgbm_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
+    if not get_resolver().is_disabled():
+        return get_resolver().resolve_lightgbm(language, format_type, alias_family=alias_family)
     return _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="lightgbm")
 
 
 def _resolve_ensemble_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
+    if not get_resolver().is_disabled():
+        return get_resolver().resolve_ensemble(language, format_type, alias_family=alias_family)
     return _resolve_backend_model_dir(language, format_type, alias_family=alias_family, backend="ensemble_v1")
+
+
+def _resolve_coupled_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
+    if not get_resolver().is_disabled():
+        return get_resolver().resolve_coupled(language, format_type, alias_family=alias_family)
+    # Legacy inline path
+    coupled_v2 = _resolve_backend_model_dir(
+        language, format_type, alias_family=alias_family, backend="coupled_nn_v2_rawmel",
+    )
+    if coupled_v2:
+        return coupled_v2
+    return _resolve_backend_model_dir(
+        language, format_type, alias_family=alias_family, backend="coupled_nn_v1",
+    )
 
 
 def _ensure_rawmel_patches(
@@ -678,9 +571,12 @@ def _ensure_rawmel_patches(
 def _resolve_model_dir(language: str, format_type: str, alias_family: str = "") -> Optional[str]:
     ensemble_dir = _resolve_ensemble_model_dir(language, format_type, alias_family=alias_family) if _ensemble_enabled() else None
     lightgbm_dir = _resolve_lightgbm_model_dir(language, format_type, alias_family=alias_family)
+    coupled_dir = _resolve_coupled_model_dir(language, format_type, alias_family=alias_family)
     if ensemble_dir:
         return ensemble_dir
-    return lightgbm_dir
+    if lightgbm_dir:
+        return lightgbm_dir
+    return coupled_dir
 
 
 def _bundle_meta_exists(model_dir: str) -> bool:
@@ -696,15 +592,11 @@ def _ensure_report(report: Optional[Dict[str, object]], **defaults) -> Dict[str,
 
 
 def _selector_runtime_guard_enabled() -> bool:
-    raw = str(os.environ.get("UTOA_DISABLE_SELECTOR_RUNTIME_GUARD", "")).strip().lower()
-    return raw not in {"1", "true", "yes", "on"}
+    return not get_ml_config().selector_runtime_guard_disabled
 
 
 def _selector_top1_min_gain() -> float:
-    try:
-        return float(os.environ.get("UTOA_SELECTOR_TOP1_MIN_GAIN", "0.0"))
-    except Exception:
-        return 0.0
+    return get_ml_config().selector_top1_min_gain
 
 
 def _selector_passes_runtime_guard(selector_payload: Optional[Dict[str, object]]) -> Tuple[bool, str]:
@@ -945,62 +837,6 @@ def _scale_signed(value: float, neg_scale: float = 1.0, pos_scale: float = 1.0) 
     return value
 
 
-def _reliability_delta_guard_enabled() -> bool:
-    return _env_flag("UTOA_ML_RELIABILITY_DELTA_GUARD", True)
-
-
-def _apply_reliability_delta_policy(row_context: Dict[str, object], deltas: Dict[str, float]) -> Dict[str, float]:
-    if not _reliability_delta_guard_enabled():
-        return deltas
-    if not deltas:
-        return deltas
-
-    metrics = _row_reliability_metrics(row_context)
-    mapping_conf = float(metrics.get("mapping_conf", 1.0))
-    blank_risk = float(metrics.get("blank_risk", 0.0))
-    silence_ratio = float(metrics.get("silence_ratio", 0.0))
-    mel_reliability = float(metrics.get("mel_reliability", 1.0))
-    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
-    peak_db = _row_float(row_context, "local_peak_db", -12.0)
-    energy = max(
-        _row_float(row_context, "energy_mean", 0.0),
-        _row_float(row_context, "mel_window_energy_mean", 0.0),
-    )
-    weak_voice = bool(energy < 0.10 or peak_db < -24.0)
-
-    scale = 1.0
-    if mapping_conf < 0.78:
-        scale *= 0.95
-    if mapping_conf < 0.68:
-        scale *= 0.91
-    if blank_risk >= 0.52:
-        scale *= 0.90
-    if blank_risk >= 0.62:
-        scale *= 0.85
-    if silence_ratio >= 0.58:
-        scale *= 0.90
-    if mel_reliability < 0.40:
-        scale *= 0.88
-    if mel_reliability < 0.30:
-        scale *= 0.82
-    if weak_voice and mel_reliability < 0.48:
-        scale *= 0.88
-    scale = max(0.56, min(scale, 1.0))
-    if scale >= 0.999:
-        return deltas
-
-    tuned: Dict[str, float] = {}
-    for key, raw in deltas.items():
-        val = float(raw)
-        if key in {"delta_offset", "delta_pre"} and alias_type in {"cv", "cv_head", "mono"}:
-            tuned[key] = _scale_signed(val, neg_scale=scale * 0.92, pos_scale=scale * 0.74)
-        elif key == "delta_cutoff":
-            tuned[key] = _scale_signed(val, neg_scale=scale * 0.98, pos_scale=scale * 0.86)
-        else:
-            tuned[key] = val * scale
-    return tuned
-
-
 def _apply_japanese_delta_policy(row_context: Dict[str, object], deltas: Dict[str, float]) -> Dict[str, float]:
     format_type = normalize_format_type("japanese", row_context.get("format_type", ""))
     alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
@@ -1058,7 +894,7 @@ def _apply_japanese_delta_policy(row_context: Dict[str, object], deltas: Dict[st
             deltas["delta_pre"] = _scale_signed(deltas.get("delta_pre", 0.0), neg_scale=0.18, pos_scale=0.80)
             deltas["delta_cutoff"] = _scale_signed(deltas.get("delta_cutoff", 0.0), neg_scale=0.85, pos_scale=0.18)
             deltas["delta_cons"] = _scale_signed(deltas.get("delta_cons", 0.0), neg_scale=0.60, pos_scale=0.85)
-            deltas["delta_ovl"] = _scale_signed(deltas.get("delta_ovl", 0.0), neg_scale=0.60, pos_scale=0.85)
+            deltas["delta_ovl"] = _scale_signed(deltas.get("delta_ovl", 0.0), neg_scale=0.60, pos_scale=0.62)
             if alias_type in {"cv", "cv_head"}:
                 deltas["delta_cutoff"] = min(deltas.get("delta_cutoff", 0.0), 0.0)
             return deltas
@@ -1077,22 +913,40 @@ def _apply_korean_delta_policy(row_context: Dict[str, object], deltas: Dict[str,
     format_type = normalize_format_type("korean", row_context.get("format_type", ""))
     alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
     coda_type = str(row_context.get("coda_type", "") or "").strip().lower()
-    metrics = _row_reliability_metrics(row_context)
-    mapping_conf = float(metrics.get("mapping_conf", 1.0))
+    mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
 
     if alias_type in {"cv", "cv_head"}:
-        mel_unreliable = bool(metrics.get("mel_unreliable", 0.0) > 0.5)
+        runtime_mel_unreliable = row_context.get("_runtime_mel_unreliable")
+        mel_unreliable = bool(runtime_mel_unreliable) if runtime_mel_unreliable is not None else is_mel_unreliable(row_context)
         if format_type in {"cvvc", "cvc"} and _kr_cv_keep_base_location_enabled():
             deltas["delta_offset"] = 0.0
             deltas["delta_pre"] = 0.0
 
-        blank_conf = float(metrics.get("blank_conf", 0.0))
+        blank_conf = _to_float(row_context.get("blank_span_confidence"), 0.0)
+        syll_blank_conf = _to_float(row_context.get("syllable_blank_confidence"), 0.0)
+        syll_sil_conf = _to_float(row_context.get("syllable_mel_silence_conf"), 0.0)
         syll_voiced_conf = _to_float(row_context.get("syllable_mel_voiced_conf"), 0.0)
-        silence_ratio = float(metrics.get("silence_ratio", 0.0))
-        blank_risk = float(metrics.get("blank_risk", 0.0))
-        risky = (mapping_conf < 0.74) or (blank_risk >= 0.44) or (silence_ratio >= 0.52) or mel_unreliable
+        silence_ratio = max(
+            _to_float(row_context.get("db_silence_ratio"), 0.0),
+            _to_float(row_context.get("mel_window_silence_ratio"), 0.0),
+        )
+        runtime_blank_risk = _to_float(row_context.get("_runtime_blank_risk_score"), -1.0)
+        if runtime_blank_risk < 0.0:
+            runtime_blank_risk = compute_blank_risk_score(row_context)
+        blank_risk = max(blank_conf, syll_blank_conf, syll_sil_conf, runtime_blank_risk)
+        blank_thr = _to_float(row_context.get("_runtime_blank_threshold"), 0.55)
+        blank_risky_floor = _to_float(row_context.get("_runtime_blank_risky_threshold"), 0.44)
+        blank_severe_floor = _to_float(row_context.get("_runtime_blank_severe_threshold"), 0.58)
+        runtime_blank_flag = bool(_to_float(row_context.get("_runtime_blank_risk_flag"), 1.0 if blank_risk >= blank_thr else 0.0) >= 0.5)
+        risky = (
+            (mapping_conf < 0.74)
+            or runtime_blank_flag
+            or (blank_risk >= blank_risky_floor)
+            or (silence_ratio >= 0.52)
+            or mel_unreliable
+        )
         severe = (
-            (blank_risk >= 0.58)
+            (blank_risk >= blank_severe_floor)
             or (silence_ratio >= 0.62)
             or ((blank_risk - syll_voiced_conf) >= 0.18)
             or mel_unreliable
@@ -1130,12 +984,16 @@ def _apply_korean_delta_policy(row_context: Dict[str, object], deltas: Dict[str,
         deltas["delta_ovl"] = _scale_signed(
             deltas.get("delta_ovl", 0.0),
             neg_scale=0.68 if risky else 0.82,
-            pos_scale=0.78 if risky else 0.90,
+            pos_scale=0.62 if risky else 0.74,
         )
 
     elif alias_type == "vc":
         # VC는 연결 안정성을 위해 offset/pre 이동을 기본적으로 억제한다.
-        deltas["delta_offset"] = _scale_signed(deltas.get("delta_offset", 0.0), neg_scale=0.35, pos_scale=0.46)
+        # CVVC에서는 VC offset이 앞 CV의 끝점과 직접 연동되므로 더 강하게 제한한다.
+        if format_type == "cvvc":
+            deltas["delta_offset"] = _scale_signed(deltas.get("delta_offset", 0.0), neg_scale=0.18, pos_scale=0.28)
+        else:
+            deltas["delta_offset"] = _scale_signed(deltas.get("delta_offset", 0.0), neg_scale=0.35, pos_scale=0.46)
         if coda_type == "stop":
             deltas["delta_pre"] = _scale_signed(deltas.get("delta_pre", 0.0), neg_scale=0.44, pos_scale=0.62)
             deltas["delta_cons"] = _scale_signed(deltas.get("delta_cons", 0.0), neg_scale=0.58, pos_scale=0.84)
@@ -1390,6 +1248,114 @@ def _apply_korean_cv_destination_guard(
     cons = max(cons, pre + 8.0)
     cutoff_abs = max(cutoff_abs, cons + 10.0)
     return validate_fn(offset, cons, -cutoff_abs, pre, ovl)
+
+
+def _read_cv_overlap_cap_ratio_env(language: str) -> Optional[float]:
+    return get_ml_config().cv_ovl_cap_ratio_for_language(language)
+
+
+def _cv_overlap_cap_ratio(language: str, row_context: Dict[str, object]) -> float:
+    lang = str(language or "").strip().lower()
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    format_type = normalize_format_type(lang, row_context.get("format_type", ""))
+    mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
+    blank_conf = max(
+        _to_float(row_context.get("blank_span_confidence"), 0.0),
+        _to_float(row_context.get("syllable_blank_confidence"), 0.0),
+        _to_float(row_context.get("syllable_mel_silence_conf"), 0.0),
+    )
+
+    ratio = 0.72 if alias_type == "cv_head" else 0.76
+    if format_type in {"cvvc", "cvc"}:
+        ratio -= 0.03
+    if mapping_conf < 0.75:
+        ratio -= 0.04
+    if blank_conf >= 0.50:
+        ratio -= 0.04
+    if lang == "japanese":
+        if format_type == "cvvc":
+            ratio -= 0.05
+        else:
+            ratio += 0.01
+
+    env_ratio = _read_cv_overlap_cap_ratio_env(lang)
+    if env_ratio is not None:
+        ratio = env_ratio
+    return max(0.52, min(ratio, 0.88))
+
+
+def _cv_overlap_min_gap_ms(language: str, row_context: Dict[str, object], base_gap: float) -> float:
+    lang = str(language or "").strip().lower()
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    format_type = normalize_format_type(lang, row_context.get("format_type", ""))
+    mapping_conf = _to_float(row_context.get("mapping_confidence"), 1.0)
+    blank_conf = max(
+        _to_float(row_context.get("blank_span_confidence"), 0.0),
+        _to_float(row_context.get("syllable_blank_confidence"), 0.0),
+        _to_float(row_context.get("syllable_mel_silence_conf"), 0.0),
+    )
+
+    min_gap = 6.0 if alias_type == "cv_head" else 8.0
+    if format_type in {"cvvc", "cvc"}:
+        min_gap = max(5.0, min_gap - 1.0)
+    if mapping_conf < 0.74:
+        min_gap += 1.0
+    if blank_conf >= 0.50:
+        min_gap += 1.0
+    if lang == "japanese":
+        min_gap = max(5.0, min_gap - 0.5)
+
+    if base_gap > 0.0:
+        base_guard = min(max(base_gap * 0.86, 0.0), 18.0)
+        min_gap = max(min_gap, base_guard)
+    return float(min_gap)
+
+
+def _apply_cv_overlap_destination_guard(
+    language: str,
+    row_context: Dict[str, object],
+    params: Tuple[float, float, float, float, float],
+    validate_fn,
+) -> Tuple[float, float, float, float, float]:
+    lang = str(language or "").strip().lower()
+    if lang not in {"korean", "japanese"}:
+        return params
+
+    alias_type = str(row_context.get("alias_type", "") or "").strip().lower()
+    if alias_type not in {"cv", "cv_head"}:
+        return params
+
+    format_type = normalize_format_type(lang, row_context.get("format_type", ""))
+    valid_formats = {"cv", "cvvc", "vcv"} if lang == "japanese" else {"cv", "cvc", "cvvc", "vcv"}
+    if format_type not in valid_formats:
+        return params
+
+    offset, cons, cutoff, pre, ovl = validate_fn(*params)
+    offset = float(offset)
+    cons = float(cons)
+    cutoff = float(cutoff)
+    pre = max(float(pre), 0.0)
+    ovl = max(float(ovl), 0.0)
+
+    base_pre = max(_to_float(row_context.get("base_pre"), pre), 0.0)
+    base_ovl = max(_to_float(row_context.get("base_ovl"), ovl), 0.0)
+    base_gap = max(base_pre - base_ovl, 0.0)
+
+    ratio_cap = pre * _cv_overlap_cap_ratio(lang, row_context)
+    gap_cap = max(pre - _cv_overlap_min_gap_ms(lang, row_context, base_gap), 0.0)
+
+    growth_cap = 10.0 if alias_type == "cv_head" else 12.0
+    if format_type in {"cvvc", "cvc"}:
+        growth_cap = max(6.0, growth_cap - 2.0)
+    if _to_float(row_context.get("mapping_confidence"), 1.0) < 0.74:
+        growth_cap = max(4.0, growth_cap - 3.0)
+    growth_cap = max(base_ovl + growth_cap, 0.0)
+
+    ovl_cap = max(0.0, min(ratio_cap, gap_cap, growth_cap))
+    if ovl <= ovl_cap:
+        return offset, cons, cutoff, pre, ovl
+
+    return validate_fn(offset, cons, cutoff, pre, ovl_cap)
 
 
 def _apply_korean_bridge_post_guard(
@@ -1717,6 +1683,7 @@ def _apply_ml_destination_guard(
     if lang == "korean":
         out = _apply_korean_cv_destination_guard(row_context, out, validate_fn)
     out = _apply_head_zero_offset_recovery_guard(lang, row_context, out, validate_fn)
+    out = _apply_cv_overlap_destination_guard(lang, row_context, out, validate_fn)
     return out
 
 
@@ -1873,7 +1840,7 @@ def apply_oto_ml_selector_candidate(
 
 def _apply_language_specific_delta_policy(language: str, row_context: Dict[str, object], deltas: Dict[str, float]) -> Dict[str, float]:
     lang = str(language or "").strip().lower()
-    adjusted = _apply_reliability_delta_policy(row_context, dict(deltas))
+    adjusted = dict(deltas)
     if lang == "japanese":
         return _apply_japanese_delta_policy(row_context, adjusted)
     if lang == "korean":
@@ -1886,6 +1853,40 @@ def _to_float(value: object, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return float(default)
+
+
+def _blank_truth_proxy(row_context: Dict[str, object]) -> bool:
+    blank_conf = max(
+        _to_float(row_context.get("blank_span_confidence"), 0.0),
+        _to_float(row_context.get("syllable_blank_confidence"), 0.0),
+        _to_float(row_context.get("syllable_mel_silence_conf"), 0.0),
+    )
+    silence_ratio = max(
+        _to_float(row_context.get("db_silence_ratio"), 0.0),
+        _to_float(row_context.get("mel_window_silence_ratio"), 0.0),
+    )
+    voiced_hint = max(
+        _to_float(row_context.get("syllable_mel_voiced_conf"), 0.0),
+        _to_float(row_context.get("mel_voiced_formant_ratio"), 0.0),
+    )
+    return bool((blank_conf >= 0.66 or silence_ratio >= 0.72) and voiced_hint <= 0.30)
+
+
+def _voiced_truth_proxy(row_context: Dict[str, object]) -> bool:
+    blank_conf = max(
+        _to_float(row_context.get("blank_span_confidence"), 0.0),
+        _to_float(row_context.get("syllable_blank_confidence"), 0.0),
+        _to_float(row_context.get("syllable_mel_silence_conf"), 0.0),
+    )
+    silence_ratio = max(
+        _to_float(row_context.get("db_silence_ratio"), 0.0),
+        _to_float(row_context.get("mel_window_silence_ratio"), 0.0),
+    )
+    voiced_hint = max(
+        _to_float(row_context.get("syllable_mel_voiced_conf"), 0.0),
+        _to_float(row_context.get("mel_voiced_formant_ratio"), 0.0),
+    )
+    return bool(voiced_hint >= 0.58 and silence_ratio <= 0.34 and blank_conf <= 0.30)
 
 
 def _build_alias_aware_validator(validate_fn, row_context: Dict[str, object]):
@@ -1985,33 +1986,19 @@ def _apply_anchor_lock_lite_after_ml(
 
 
 def _should_skip_ml_for_high_confidence_row(row_context: Dict[str, object]) -> bool:
-    if not _env_flag("UTOA_ML_SKIP_HIGH_CONF_RULE_ROWS", True):
+    cfg = get_ml_config()
+    if not cfg.skip_high_conf_rule_rows:
         return False
-    conf_floor = _read_bounded_conf_env("UTOA_ML_SKIP_HIGH_CONF_MIN")
-    blank_max = _read_bounded_conf_env("UTOA_ML_SKIP_HIGH_CONF_MAX_BLANK")
-    try:
-        margin_floor = float(os.environ.get("UTOA_ML_SKIP_HIGH_CONF_MIN_MARGIN", "12.0") or 12.0)
-    except Exception:
-        margin_floor = 12.0
-    if conf_floor is None:
-        conf_floor = 0.90
-    if blank_max is None:
-        blank_max = 0.18
-    metrics = _row_reliability_metrics(row_context)
-    mapping_conf = float(metrics.get("mapping_conf", 0.0))
+    conf_floor = cfg.skip_high_conf_min if cfg.skip_high_conf_min is not None else 0.90
+    blank_max = cfg.skip_high_conf_max_blank if cfg.skip_high_conf_max_blank is not None else 0.18
+    margin_floor = cfg.skip_high_conf_min_margin
+    mapping_conf = _to_float(row_context.get("mapping_confidence"), 0.0)
     mapping_margin = _to_float(row_context.get("mapping_margin"), 0.0)
-    blank_conf = float(metrics.get("blank_conf", 0.0))
-    return mapping_conf >= conf_floor and mapping_margin >= margin_floor and blank_conf <= blank_max
-
-
-def _row_base_params(row_context: Dict[str, object]) -> Tuple[float, float, float, float, float]:
-    return (
-        float(row_context.get("base_offset", 0.0)),
-        float(row_context.get("base_cons", 0.0)),
-        float(row_context.get("base_cutoff_abs", 0.0)),
-        float(row_context.get("base_pre", 0.0)),
-        float(row_context.get("base_ovl", 0.0)),
+    blank_conf = max(
+        _to_float(row_context.get("blank_span_confidence"), 0.0),
+        _to_float(row_context.get("syllable_blank_confidence"), 0.0),
     )
+    return mapping_conf >= conf_floor and mapping_margin >= margin_floor and blank_conf <= blank_max
 
 
 def apply_oto_ml_delta(
@@ -2028,7 +2015,11 @@ def apply_oto_ml_delta(
 ) -> Tuple[float, float, float, float, float]:
     validate_oto_params = _get_validate_func(language)
     if pred_result is None and _should_skip_ml_for_high_confidence_row(row_context):
-        base_offset, base_cons, base_cutoff_abs, base_pre, base_ovl = _row_base_params(row_context)
+        base_offset = float(row_context.get("base_offset", 0.0))
+        base_cons = float(row_context.get("base_cons", 0.0))
+        base_cutoff_abs = float(row_context.get("base_cutoff_abs", 0.0))
+        base_pre = float(row_context.get("base_pre", 0.0))
+        base_ovl = float(row_context.get("base_ovl", 0.0))
         base_cutoff = -(base_cutoff_abs - base_offset)
         return _finalize_ml_params(
             language,
@@ -2055,7 +2046,11 @@ def apply_oto_ml_delta(
     if base_params_override is not None:
         base_offset, base_cons, base_cutoff_abs, base_pre, base_ovl = base_params_override
     else:
-        base_offset, base_cons, base_cutoff_abs, base_pre, base_ovl = _row_base_params(row_context)
+        base_offset = float(row_context.get("base_offset", 0.0))
+        base_cons = float(row_context.get("base_cons", 0.0))
+        base_cutoff_abs = float(row_context.get("base_cutoff_abs", 0.0))
+        base_pre = float(row_context.get("base_pre", 0.0))
+        base_ovl = float(row_context.get("base_ovl", 0.0))
     offset = float(base_offset) + deltas.get("delta_offset", 0.0)
     cons = float(base_cons) + deltas.get("delta_cons", 0.0)
     cutoff_abs = float(base_cutoff_abs) + deltas.get("delta_cutoff", 0.0)
@@ -2071,31 +2066,6 @@ def apply_oto_ml_delta(
         strict_constraint=strict_constraint,
         constraint_stats=constraint_stats,
     )
-
-
-def _apply_fallback_bundle_delta(
-    *,
-    language: str,
-    row_context: Dict[str, object],
-    fallback_bundle: object,
-    selected_base_override: Optional[Tuple[float, float, float, float, float]],
-    strict_constraint: bool,
-    anchor_stats: Dict[str, int],
-    constraint_stats: Dict[str, int],
-    route_counts: Dict[str, int],
-    route_key: str,
-) -> Tuple[float, float, float, float, float]:
-    o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(
-        language,
-        row_context,
-        fallback_bundle,
-        anchor_stats=anchor_stats,
-        base_params_override=selected_base_override,
-        strict_constraint=strict_constraint,
-        constraint_stats=constraint_stats,
-    )
-    route_counts[route_key] = int(route_counts.get(route_key, 0)) + 1
-    return o2, c2, ct2, p2, ov2
 
 
 def apply_oto_ml_to_oto_file(
@@ -2143,6 +2113,14 @@ def apply_oto_ml_to_oto_file(
         fallback_reason="",
         blank_confidence=0.0,
         constraint_adjust_count=0,
+        reliability_metrics={},
+        e2e_enabled=False,
+        e2e_mode="",
+        e2e_model_dirs=[],
+        e2e_selected_counts={},
+        e2e_fallback_count=0,
+        e2e_fallback_reasons=[],
+        e2e_model_confidence=0.0,
     )
     ml_report["policy"] = policy_name
 
@@ -2151,15 +2129,10 @@ def apply_oto_ml_to_oto_file(
         ml_report["status"] = "skipped"
         return 0
 
-    if os.environ.get("UTOA_DISABLE_OTO_ML", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if get_ml_config().ml_disabled:
         ml_report.update(make_runtime_report("ml", ML_DISABLED_ENV, "환경변수로 OTO ML이 비활성화되었습니다."))
         ml_report["status"] = "skipped"
         return 0
-
-    if route_name == "autofree_v1":
-        # Route orchestration is handled in post_file_pipeline:
-        # coupled/lightgbm primary + optional autofree residual auxiliary.
-        route_name = "legacy"
 
     if not oto_path or not os.path.exists(oto_path):
         ml_report.update(make_runtime_report("ml", ML_INPUT_MISSING, f"OTO 파일이 없습니다: {oto_path}"))
@@ -2215,14 +2188,39 @@ def apply_oto_ml_to_oto_file(
         "vc_cutoff_leak_guard_count": 0,
     }
     constraint_stats = {"constraint_adjust_count": 0}
-    raw_lines = [line.rstrip("\n") for line in read_text_with_fallback(oto_path).splitlines()]
+    reliability_state: Dict[str, Dict[str, object]] = {}
+    reliability_stats = {
+        "rows": 0,
+        "blank_flag_rows": 0,
+        "mel_unreliable_rows": 0,
+        "mel_fallback_rows": 0,
+        "voiced_gate_required_rows": 0,
+        "voiced_gate_block_rows": 0,
+        "voiced_gate_forced_blank_rows": 0,
+        "abstain_rows": 0,
+        "blank_hys_switches": 0,
+        "mel_hys_switches": 0,
+        "proxy_fp_count": 0,
+        "proxy_fp_denom": 0,
+        "proxy_fn_count": 0,
+        "proxy_fn_denom": 0,
+    }
+    e2e_ctx_cache: Dict[str, object] = {}
+    e2e_selected_counts: Dict[str, int] = {}
+    e2e_fallback_reasons: Dict[str, int] = {}
+    e2e_conf_values: List[float] = []
+    e2e_enabled_runtime = route_name == "e2e_hybrid"
+    validate_oto_params = _get_validate_func(language)
+    ml_report["e2e_enabled"] = bool(e2e_enabled_runtime)
+    with open(oto_path, "r", encoding="utf-8", errors="replace") as f:
+        raw_lines = [line.rstrip("\n") for line in f]
 
     rows_by_index = {int(row["line_index"]): row for row in rows}
     routed_features = 0
     wav_index = build_wav_index(wav_dir) if wav_dir else {}
     rawmel_cache: Dict[str, object] = {}
     total_features = int(len(feature_rows))
-    progress_every = max(20, _env_int("UTOA_ML_PROGRESS_EVERY", 80))
+    progress_every = get_ml_config().progress_every
     loop_started_at = time.perf_counter()
     if total_features > progress_every:
         _emit(
@@ -2249,6 +2247,84 @@ def apply_oto_ml_to_oto_file(
         alias_type_for_row = str(feat.get("alias_type", "") or "").strip().lower()
         alias_family = infer_alias_family(language, feat)
         mel_patch_fallback = mel_patch_is_fallback(feat)
+        reliability_profile = resolve_silence_reliability_profile(feat)
+        blank_risk_score = compute_blank_risk_score(feat, profile=reliability_profile)
+        mel_reliability_score = compute_mel_reliability_score(
+            feat,
+            profile=reliability_profile,
+            blank_risk_score=blank_risk_score,
+        )
+        state_key = make_reliability_state_key(feat)
+        reliability_decision = apply_reliability_hysteresis(
+            blank_risk_score=blank_risk_score,
+            mel_reliability_score=mel_reliability_score,
+            profile=reliability_profile,
+            prev_state=reliability_state.get(state_key),
+        )
+        voiced_gate = evaluate_voiced_approval(feat, profile=reliability_profile)
+        voiced_required = bool(voiced_gate.get("required", False))
+        voiced_approved = bool(voiced_gate.get("approved", True))
+        voiced_forced_blank = False
+        if int(reliability_decision.get("blank_flag", 0)) <= 0 and voiced_required and (not voiced_approved):
+            voiced_forced_blank = True
+            reliability_decision = dict(reliability_decision)
+            reliability_decision["blank_flag"] = 1
+            reliability_decision["blank_forced_by_voiced_gate"] = True
+            state = dict(reliability_decision.get("state") or {})
+            blank_state = dict(state.get("blank") or {})
+            blank_state["active"] = True
+            blank_state["pending"] = 0
+            state["blank"] = blank_state
+            reliability_decision["state"] = state
+        reliability_state[state_key] = dict(reliability_decision.get("state") or {})
+        feat["_runtime_blank_risk_score"] = float(blank_risk_score)
+        feat["_runtime_blank_risk_flag"] = int(reliability_decision.get("blank_flag", 0))
+        feat["_runtime_mel_reliability_score"] = float(mel_reliability_score)
+        feat["_runtime_mel_unreliable"] = bool(reliability_decision.get("mel_unreliable", False))
+        feat["_runtime_voiced_gate_enabled"] = int(1 if bool(voiced_gate.get("enabled", False)) else 0)
+        feat["_runtime_voiced_gate_required"] = int(1 if voiced_required else 0)
+        feat["_runtime_voiced_approved"] = int(1 if voiced_approved else 0)
+        feat["_runtime_voiced_gate_reason"] = str(voiced_gate.get("reason", "") or "")
+        feat["_runtime_voiced_conf"] = float(_to_float(voiced_gate.get("voiced_conf"), 0.0))
+        feat["_runtime_voiced_gate_rms"] = float(_to_float(voiced_gate.get("rms_norm"), 0.0))
+        feat["_runtime_voiced_gate_f0_continuity"] = float(_to_float(voiced_gate.get("f0_continuity"), 0.0))
+        feat["_runtime_blank_threshold"] = float(reliability_decision.get("blank_threshold", 0.55))
+        feat["_runtime_blank_risky_threshold"] = float(reliability_decision.get("blank_risky_threshold", 0.44))
+        feat["_runtime_blank_severe_threshold"] = float(reliability_decision.get("blank_severe_threshold", 0.58))
+        feat["_runtime_mel_threshold"] = float(reliability_decision.get("mel_threshold", 0.42))
+        reliability_stats["rows"] = int(reliability_stats["rows"]) + 1
+        if voiced_required:
+            reliability_stats["voiced_gate_required_rows"] = int(reliability_stats.get("voiced_gate_required_rows", 0)) + 1
+            if not voiced_approved:
+                reliability_stats["voiced_gate_block_rows"] = int(reliability_stats.get("voiced_gate_block_rows", 0)) + 1
+        if voiced_forced_blank:
+            reliability_stats["voiced_gate_forced_blank_rows"] = int(
+                reliability_stats.get("voiced_gate_forced_blank_rows", 0)
+            ) + 1
+        if int(feat["_runtime_blank_risk_flag"]) > 0:
+            reliability_stats["blank_flag_rows"] = int(reliability_stats["blank_flag_rows"]) + 1
+        if bool(feat["_runtime_mel_unreliable"]):
+            reliability_stats["mel_unreliable_rows"] = int(reliability_stats["mel_unreliable_rows"]) + 1
+        if mel_patch_fallback:
+            reliability_stats["mel_fallback_rows"] = int(reliability_stats["mel_fallback_rows"]) + 1
+        if bool(reliability_decision.get("blank_switched", False)):
+            reliability_stats["blank_hys_switches"] = int(reliability_stats["blank_hys_switches"]) + 1
+        if bool(reliability_decision.get("mel_switched", False)):
+            reliability_stats["mel_hys_switches"] = int(reliability_stats["mel_hys_switches"]) + 1
+        if alias_type_for_row in {"cv", "cv_head"} and (
+            int(feat["_runtime_blank_risk_flag"]) > 0 or bool(feat["_runtime_mel_unreliable"])
+        ):
+            reliability_stats["abstain_rows"] = int(reliability_stats["abstain_rows"]) + 1
+        blank_truth = _blank_truth_proxy(feat)
+        voiced_truth = _voiced_truth_proxy(feat)
+        if voiced_truth:
+            reliability_stats["proxy_fp_denom"] = int(reliability_stats["proxy_fp_denom"]) + 1
+            if int(feat["_runtime_blank_risk_flag"]) > 0:
+                reliability_stats["proxy_fp_count"] = int(reliability_stats["proxy_fp_count"]) + 1
+        if blank_truth:
+            reliability_stats["proxy_fn_denom"] = int(reliability_stats["proxy_fn_denom"]) + 1
+            if int(feat["_runtime_blank_risk_flag"]) <= 0:
+                reliability_stats["proxy_fn_count"] = int(reliability_stats["proxy_fn_count"]) + 1
         routed_features += 1
         route_label = format_type if not alias_family else f"{format_type}:{alias_family}"
         if route_label not in ml_report["attempted_routes"]:
@@ -2257,13 +2333,21 @@ def apply_oto_ml_to_oto_file(
         if cache_key not in bundle_cache:
             ensemble_dir = _resolve_ensemble_model_dir(language, format_type, alias_family=alias_family) if _ensemble_enabled() else None
             lightgbm_dir = _resolve_lightgbm_model_dir(language, format_type, alias_family=alias_family)
-            primary_dir = ensemble_dir or lightgbm_dir
+            coupled_dir = _resolve_coupled_model_dir(language, format_type, alias_family=alias_family)
+            # Keep existing preference (ensemble -> lightgbm) but allow coupled-only setups.
+            primary_dir = ensemble_dir or lightgbm_dir or coupled_dir
             fallback_dir = ""
             primary_backend = _read_bundle_backend(primary_dir) if primary_dir else ""
             route_primary_backend[cache_key] = str(primary_backend or "lightgbm")
             if primary_dir and primary_backend == "ensemble_v1":
-                if legacy_fallback_enabled and lightgbm_dir and lightgbm_dir != primary_dir:
-                    fallback_dir = lightgbm_dir
+                if legacy_fallback_enabled:
+                    if lightgbm_dir and lightgbm_dir != primary_dir:
+                        fallback_dir = lightgbm_dir
+                    elif coupled_dir and coupled_dir != primary_dir:
+                        fallback_dir = coupled_dir
+            elif primary_dir and primary_backend == "lightgbm":
+                if legacy_fallback_enabled and coupled_dir and coupled_dir != primary_dir:
+                    fallback_dir = coupled_dir
 
             if not primary_dir:
                 route_status[cache_key] = ML_MODEL_MISSING
@@ -2410,13 +2494,6 @@ def apply_oto_ml_to_oto_file(
             format_type=format_type,
             base_override=route_model_min_conf.get(cache_key),
         )
-        coupled_min_conf = _coupled_min_confidence_for_row(
-            coupled_min_conf,
-            feat,
-            language=language,
-            format_type=format_type,
-            alias_type=alias_type_for_row,
-        )
         if not bundle and not fallback_bundle and selector_bundle is None:
             continue
 
@@ -2465,6 +2542,26 @@ def apply_oto_ml_to_oto_file(
                 selector_mode_counts = ml_report.get("selector_mode_counts", {})
                 selector_mode_counts[mode] = int(selector_mode_counts.get(mode, 0)) + 1
                 ml_report["selector_mode_counts"] = selector_mode_counts
+                comp = selected.get("score_components") if isinstance(selected, dict) else None
+                if isinstance(comp, dict):
+                    score_stats = dict(ml_report.get("selector_score_stats", {}) or {})
+                    score_stats["rows"] = int(score_stats.get("rows", 0)) + 1
+                    score_stats["blank_attach_risk_sum"] = float(score_stats.get("blank_attach_risk_sum", 0.0)) + float(
+                        comp.get("blank_attach_risk", 0.0) or 0.0
+                    )
+                    score_stats["silence_risk_sum"] = float(score_stats.get("silence_risk_sum", 0.0)) + float(
+                        comp.get("silence_risk", 0.0) or 0.0
+                    )
+                    score_stats["jump_risk_sum"] = float(score_stats.get("jump_risk_sum", 0.0)) + float(
+                        comp.get("jump_risk", 0.0) or 0.0
+                    )
+                    score_stats["leak_risk_norm_sum"] = float(score_stats.get("leak_risk_norm_sum", 0.0)) + float(
+                        comp.get("leak_risk_norm", 0.0) or 0.0
+                    )
+                    score_stats["penalty_sum"] = float(score_stats.get("penalty_sum", 0.0)) + float(
+                        comp.get("score_penalty", 0.0) or 0.0
+                    )
+                    ml_report["selector_score_stats"] = score_stats
                 if log_selector_hard_negative(
                     feat,
                     selected,
@@ -2592,23 +2689,75 @@ def apply_oto_ml_to_oto_file(
                 route_name = "selector_only"
             else:
                 continue
+
+            if e2e_enabled_runtime and format_type == "cv" and alias_type_for_row in {"cv", "cv_head"}:
+                ctx_key = str(format_type or "general")
+                e2e_ctx = e2e_ctx_cache.get(ctx_key)
+                if e2e_ctx is None:
+                    e2e_ctx = build_e2e_runtime_context(language, ctx_key, "e2e_hybrid")
+                    e2e_ctx_cache[ctx_key] = e2e_ctx
+                    ml_report["e2e_mode"] = str(getattr(getattr(e2e_ctx, "config", None), "mode", "") or "")
+                    if getattr(e2e_ctx, "bundle", None) is not None:
+                        model_dir = str(getattr(e2e_ctx.bundle, "model_dir", "") or "")
+                        if model_dir:
+                            model_dirs = list(ml_report.get("e2e_model_dirs", []) or [])
+                            if model_dir not in model_dirs:
+                                model_dirs.append(model_dir)
+                                ml_report["e2e_model_dirs"] = model_dirs
+
+                e2e_pred = predict_e2e_params(e2e_ctx, feat)
+                if bool(e2e_pred.get("ok", False)):
+                    e2e_params = e2e_pred.get("params")
+                    if isinstance(e2e_params, tuple) and len(e2e_params) == 5:
+                        score = float(e2e_pred.get("confidence", 0.0) or 0.0)
+                        e2e_conf_values.append(score)
+                        select_result = select_e2e_or_legacy(
+                            legacy_params=(float(o2), float(c2), float(ct2), float(p2), float(ov2)),
+                            e2e_params=(
+                                float(e2e_params[0]),
+                                float(e2e_params[1]),
+                                float(e2e_params[2]),
+                                float(e2e_params[3]),
+                                float(e2e_params[4]),
+                            ),
+                            score=score,
+                            config=E2ESelectorConfig(
+                                mode=str(getattr(getattr(e2e_ctx, "config", None), "mode", "hybrid") or "hybrid"),
+                                t_low=float(getattr(getattr(e2e_ctx, "config", None), "t_low", 0.52) or 0.52),
+                                t_high=float(getattr(getattr(e2e_ctx, "config", None), "t_high", 0.72) or 0.72),
+                                blend_alpha=float(getattr(getattr(e2e_ctx, "config", None), "blend_alpha", 0.60) or 0.60),
+                            ),
+                            validate_fn=validate_oto_params,
+                            alias_type=alias_type_for_row,
+                        )
+                        o2, c2, ct2, p2, ov2 = select_result.params
+                        selected_mode = str(select_result.selected or "legacy")
+                        e2e_selected_counts[selected_mode] = int(e2e_selected_counts.get(selected_mode, 0)) + 1
+                        route_name = f"e2e_hybrid:{selected_mode}"
+                    else:
+                        reason = "predict_invalid_shape"
+                        e2e_fallback_reasons[reason] = int(e2e_fallback_reasons.get(reason, 0)) + 1
+                else:
+                    reason = str(e2e_pred.get("code", "predict_failed") or "predict_failed")
+                    e2e_fallback_reasons[reason] = int(e2e_fallback_reasons.get(reason, 0)) + 1
             route_counts[route_name] = int(route_counts.get(route_name, 0)) + 1
         except CoupledLowConfidenceError as e:
             if fallback_bundle is not None:
                 fallback_reasons.append(str(e))
                 try:
-                    fallback_backend = str(fallback_bundle.backend).strip().lower() or "fallback"
-                    o2, c2, ct2, p2, ov2 = _apply_fallback_bundle_delta(
-                        language=language,
-                        row_context=feat,
-                        fallback_bundle=fallback_bundle,
-                        selected_base_override=selected_base_override,
-                        strict_constraint=strict_constraint,
+                    o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(
+                        language,
+                        feat,
+                        fallback_bundle,
                         anchor_stats=anchor_stats,
+                        base_params_override=selected_base_override,
+                        strict_constraint=strict_constraint,
                         constraint_stats=constraint_stats,
-                        route_counts=route_counts,
-                        route_key=f"{primary_backend}->{fallback_backend}",
                     )
+                    fallback_backend = str(fallback_bundle.backend).strip().lower() or "fallback"
+                    route_counts[f"{primary_backend}->{fallback_backend}"] = int(
+                        route_counts.get(f"{primary_backend}->{fallback_backend}", 0)
+                    ) + 1
                 except Exception as fallback_exc:
                     logger.warning("OTO ML fallback inference skipped for line %s: %s", line_index, fallback_exc)
                     ml_report["infer_failures"].append({"line_index": line_index, "message": str(fallback_exc)})
@@ -2623,18 +2772,18 @@ def apply_oto_ml_to_oto_file(
             ml_report["infer_failures"].append({"line_index": line_index, "message": str(e)})
             if bundle is not None and str(bundle.backend).strip().lower() in {"coupled_nn_v1", "coupled_nn_v2_rawmel", "ensemble_v1"} and fallback_bundle is not None:
                 try:
-                    fallback_backend = str(fallback_bundle.backend).strip().lower()
-                    o2, c2, ct2, p2, ov2 = _apply_fallback_bundle_delta(
-                        language=language,
-                        row_context=feat,
-                        fallback_bundle=fallback_bundle,
-                        selected_base_override=selected_base_override,
-                        strict_constraint=strict_constraint,
+                    o2, c2, ct2, p2, ov2 = apply_oto_ml_delta(
+                        language,
+                        feat,
+                        fallback_bundle,
                         anchor_stats=anchor_stats,
+                        base_params_override=selected_base_override,
+                        strict_constraint=strict_constraint,
                         constraint_stats=constraint_stats,
-                        route_counts=route_counts,
-                        route_key=f"{primary_backend}->{fallback_backend}_exception",
                     )
+                    route_counts[f"{primary_backend}->{str(fallback_bundle.backend).strip().lower()}_exception"] = int(
+                        route_counts.get(f"{primary_backend}->{str(fallback_bundle.backend).strip().lower()}_exception", 0)
+                    ) + 1
                     if primary_backend == "ensemble_v1":
                         fallback_reasons.append(f"ensemble_infer_exception:{e}")
                     else:
@@ -2654,7 +2803,9 @@ def apply_oto_ml_to_oto_file(
         raw_lines[line_index] = f"{row['wav']}={row['alias']},{o2:.2f},{c2:.2f},{ct2:.2f},{p2:.2f},{ov2:.2f}"
 
     if changed > 0:
-        write_oto_lines(oto_path, raw_lines)
+        with open(oto_path, "w", encoding="utf-8") as f:
+            for line in raw_lines:
+                f.write(line + "\n")
         _emit(callback, f"[OTO-ML] 수치 보정 적용: {changed} lines")
 
     if int(anchor_stats.get("anchor_locked_count", 0)) > 0:
@@ -2665,6 +2816,16 @@ def apply_oto_ml_to_oto_file(
             f"cutoff_clamped_count={int(anchor_stats.get('cutoff_clamped_count', 0))}, "
             f"vc_cutoff_leak_guard_count={int(anchor_stats.get('vc_cutoff_leak_guard_count', 0))}",
         )
+    if int(reliability_stats.get("rows", 0)) > 0:
+        _emit(
+            callback,
+            "[OTO-ML] Silence reliability: "
+            f"rows={int(reliability_stats.get('rows', 0))}, "
+            f"blank_flags={int(reliability_stats.get('blank_flag_rows', 0))}, "
+            f"mel_unreliable={int(reliability_stats.get('mel_unreliable_rows', 0))}, "
+            f"mel_fallback={int(reliability_stats.get('mel_fallback_rows', 0))}, "
+            f"voiced_gate_blocked={int(reliability_stats.get('voiced_gate_block_rows', 0))}",
+        )
 
     ml_report["anchor_stats"] = dict(anchor_stats)
     ml_report["changed_lines"] = int(changed)
@@ -2673,18 +2834,98 @@ def apply_oto_ml_to_oto_file(
     ml_report["invalid_routes"] = list(ml_report["invalid_routes"])
     ml_report["loaded_models"] = list(dict.fromkeys(ml_report["loaded_models"]))
     ml_report["constraint_adjust_count"] = int(constraint_stats.get("constraint_adjust_count", 0))
+    ml_report["e2e_selected_counts"] = dict(e2e_selected_counts)
+    ml_report["e2e_fallback_count"] = int(sum(int(v) for v in e2e_fallback_reasons.values()))
+    ml_report["e2e_fallback_reasons"] = [f"{k}:{int(v)}" for k, v in sorted(e2e_fallback_reasons.items())]
+    if e2e_conf_values:
+        ml_report["e2e_model_confidence"] = float(sum(e2e_conf_values) / float(len(e2e_conf_values)))
     if blank_conf_values:
         ml_report["blank_confidence"] = float(sum(blank_conf_values) / float(len(blank_conf_values)))
     if confidence_values:
         ml_report["model_confidence"] = float(sum(confidence_values) / float(len(confidence_values)))
+    selector_score_stats = ml_report.get("selector_score_stats")
+    if isinstance(selector_score_stats, dict):
+        rows_n = int(selector_score_stats.get("rows", 0))
+        if rows_n > 0:
+            selector_score_stats["blank_attach_risk_mean"] = float(
+                selector_score_stats.get("blank_attach_risk_sum", 0.0)
+            ) / float(rows_n)
+            selector_score_stats["silence_risk_mean"] = float(selector_score_stats.get("silence_risk_sum", 0.0)) / float(
+                rows_n
+            )
+            selector_score_stats["jump_risk_mean"] = float(selector_score_stats.get("jump_risk_sum", 0.0)) / float(rows_n)
+            selector_score_stats["leak_risk_norm_mean"] = float(
+                selector_score_stats.get("leak_risk_norm_sum", 0.0)
+            ) / float(rows_n)
+            selector_score_stats["penalty_mean"] = float(selector_score_stats.get("penalty_sum", 0.0)) / float(rows_n)
+            ml_report["selector_score_stats"] = selector_score_stats
+    rel_rows = int(reliability_stats.get("rows", 0))
+    rel_fp_denom = int(reliability_stats.get("proxy_fp_denom", 0))
+    rel_fn_denom = int(reliability_stats.get("proxy_fn_denom", 0))
+    ml_report["reliability_metrics"] = {
+        "rows": rel_rows,
+        "blank_flag_rows": int(reliability_stats.get("blank_flag_rows", 0)),
+        "mel_unreliable_rows": int(reliability_stats.get("mel_unreliable_rows", 0)),
+        "mel_fallback_rows": int(reliability_stats.get("mel_fallback_rows", 0)),
+        "voiced_gate_required_rows": int(reliability_stats.get("voiced_gate_required_rows", 0)),
+        "voiced_gate_block_rows": int(reliability_stats.get("voiced_gate_block_rows", 0)),
+        "voiced_gate_forced_blank_rows": int(reliability_stats.get("voiced_gate_forced_blank_rows", 0)),
+        "abstain_rows": int(reliability_stats.get("abstain_rows", 0)),
+        "abstain_rate": (
+            float(reliability_stats.get("abstain_rows", 0)) / float(rel_rows)
+            if rel_rows > 0
+            else None
+        ),
+        "fallback_rate": (
+            float(reliability_stats.get("mel_fallback_rows", 0)) / float(rel_rows)
+            if rel_rows > 0
+            else None
+        ),
+        "silence_fpr_proxy": (
+            float(reliability_stats.get("proxy_fp_count", 0)) / float(rel_fp_denom)
+            if rel_fp_denom > 0
+            else None
+        ),
+        "silence_fnr_proxy": (
+            float(reliability_stats.get("proxy_fn_count", 0)) / float(rel_fn_denom)
+            if rel_fn_denom > 0
+            else None
+        ),
+        "blank_hysteresis_switches": int(reliability_stats.get("blank_hys_switches", 0)),
+        "mel_hysteresis_switches": int(reliability_stats.get("mel_hys_switches", 0)),
+    }
+    # TICKET-005: Session-level abstain rate detection and adaptive threshold.
+    # If more than 35% of routed rows are abstained, the reliability thresholds
+    # may be too strict for this voicebank (e.g. soft female voice).
+    _session_abstain_rate = ml_report["reliability_metrics"].get("abstain_rate") or 0.0
+    _threshold_adapted = False
+    _ABSTAIN_ADAPT_TRIGGER = 0.35
+    _ABSTAIN_BLANK_SCALE = 0.80
+    _ABSTAIN_MEL_SCALE = 0.80
+    _ABSTAIN_BLANK_FLOOR = 0.35
+    _ABSTAIN_MEL_FLOOR = 0.28
+    if _session_abstain_rate > _ABSTAIN_ADAPT_TRIGGER and rel_rows > 0:
+        _threshold_adapted = True
+        _emit(
+            callback,
+            f"[ML-Reliability] threshold adapted: abstain_rate={_session_abstain_rate:.2f} > "
+            f"{_ABSTAIN_ADAPT_TRIGGER}. Relaxing blank/mel thresholds for this session.",
+        )
+    ml_report["session_abstain_rate"] = round(float(_session_abstain_rate), 4)
+    ml_report["threshold_adapted"] = _threshold_adapted
+
     if fallback_reasons:
         uniq_reasons = list(dict.fromkeys(str(r) for r in fallback_reasons if str(r).strip()))
         ml_report["fallback_reason"] = "; ".join(uniq_reasons[:5])
+    elif e2e_fallback_reasons:
+        e2e_reason_tokens = [f"{k}:{int(v)}" for k, v in sorted(e2e_fallback_reasons.items())]
+        ml_report["fallback_reason"] = "; ".join(e2e_reason_tokens[:5])
     if route_counts:
         route_sorted = sorted(route_counts.items(), key=lambda item: item[1], reverse=True)
         ml_report["route"] = str(route_sorted[0][0])
     fallback_used_runtime = bool(
         fallback_reasons
+        or (e2e_enabled_runtime and int(sum(int(v) for v in e2e_fallback_reasons.values())) > 0)
         or any(
             str(name).startswith("coupled_nn_v1->")
             or str(name).startswith("coupled_nn_v2_rawmel->")

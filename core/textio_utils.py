@@ -4,7 +4,7 @@ Text I/O helpers for encoding-aware reads.
 
 from __future__ import annotations
 
-import unicodedata
+import re
 from typing import List, Optional, Tuple
 
 
@@ -18,56 +18,6 @@ ENCODING_CANDIDATES = (
 )
 
 
-def _looks_east_asian(ch: str) -> bool:
-    code = ord(ch)
-    return (
-        0x3040 <= code <= 0x30FF  # Hiragana/Katakana
-        or 0x4E00 <= code <= 0x9FFF  # CJK
-        or 0xAC00 <= code <= 0xD7A3  # Hangul syllables
-        or 0x1100 <= code <= 0x11FF  # Hangul jamo
-    )
-
-
-def _text_quality_score(text: str) -> float:
-    score = 0.0
-    east_asian = 0
-    suspicious = 0
-    for ch in text:
-        if ch in "\r\n\t":
-            continue
-        if ch == "\ufffd":
-            score -= 8.0
-            suspicious += 1
-            continue
-        cat = unicodedata.category(ch)
-        if cat.startswith("C"):
-            score -= 5.0
-            suspicious += 1
-            continue
-        if _looks_east_asian(ch):
-            east_asian += 1
-            score += 2.2
-            continue
-        code = ord(ch)
-        if 0x80 <= code <= 0x024F:
-            suspicious += 1
-            score -= 0.8
-
-    line_bonus = 0.0
-    for line in text.splitlines():
-        s = line.strip()
-        if not s:
-            continue
-        if "=" in s and s.count(",") >= 5:
-            line_bonus += 1.5
-        elif "=" in s:
-            line_bonus += 0.6
-    score += line_bonus
-    score += min(east_asian, 20) * 0.1
-    score -= min(suspicious, 40) * 0.05
-    return score
-
-
 def read_text_auto(path: str, encodings=ENCODING_CANDIDATES) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Read text file with fallback encodings.
@@ -79,42 +29,13 @@ def read_text_auto(path: str, encodings=ENCODING_CANDIDATES) -> Tuple[Optional[s
     except Exception as e:
         return None, None, f"파일 읽기 실패: {e}"
 
-    if raw.startswith(b"\xef\xbb\xbf"):
-        try:
-            return raw.decode("utf-8-sig"), "utf-8-sig", None
-        except UnicodeDecodeError:
-            pass
-
-    decoded_candidates = []
     for enc in encodings:
         try:
-            decoded_candidates.append((enc, raw.decode(enc)))
+            return raw.decode(enc), enc, None
         except UnicodeDecodeError:
             continue
 
-    if not decoded_candidates:
-        return None, None, "지원 인코딩(UTF-8/CP932/CP949)으로 해석할 수 없습니다."
-
-    if len(decoded_candidates) == 1:
-        enc, text = decoded_candidates[0]
-        return text, enc, None
-
-    if any(b >= 0x80 for b in raw):
-        utf8_text = None
-        cp932_text = None
-        for enc, text in decoded_candidates:
-            if enc == "utf-8":
-                utf8_text = text
-            elif enc == "cp932":
-                cp932_text = text
-        if utf8_text is not None and cp932_text is not None:
-            utf8_score = _text_quality_score(utf8_text)
-            cp932_score = _text_quality_score(cp932_text)
-            if cp932_score >= utf8_score + 2.0:
-                return cp932_text, "cp932", None
-
-    best_enc, best_text = max(decoded_candidates, key=lambda item: _text_quality_score(item[1]))
-    return best_text, best_enc, None
+    return None, None, "지원 인코딩(UTF-8/CP932/CP949)으로 해석할 수 없습니다."
 
 
 def load_template_oto_lines(
@@ -153,3 +74,89 @@ def load_template_oto_lines(
             lines.append(line)
 
     return lines, enc, warning, None
+
+
+def _normalize_alias_suffix_token(suffix: str) -> str:
+    text = str(suffix or "").strip()
+    if not text:
+        return ""
+    return text[1:] if text.startswith("_") else text
+
+
+def _split_oto_line_alias(line: str) -> tuple[str, str, str] | None:
+    if not line or "=" not in line:
+        return None
+    left, right = line.split("=", 1)
+    if "," in right:
+        alias, rest = right.split(",", 1)
+        return left, alias.strip(), rest
+    return left, right.strip(), ""
+
+
+def _replace_oto_line_alias(line: str, alias: str) -> str:
+    split = _split_oto_line_alias(line)
+    if split is None:
+        return line
+    left, _old_alias, rest = split
+    if rest:
+        return f"{left}={alias},{rest}"
+    return f"{left}={alias}"
+
+
+def strip_template_alias_suffixes(
+    lines: List[str],
+    *,
+    alias_suffix: str = "",
+) -> tuple[List[str], str, int]:
+    """
+    Strip pitch/style suffixes from template aliases for internal matching.
+    Returns: (normalized_lines, stripped_suffix, changed_count)
+    """
+    suffix = _normalize_alias_suffix_token(alias_suffix)
+    if suffix:
+        suffixes = [suffix]
+    else:
+        found: dict[str, int] = {}
+        suffix_pattern = re.compile(r"_(?P<suffix>[A-Ga-g][#b]?\d)$")
+        for line in lines or []:
+            split = _split_oto_line_alias(line)
+            if split is None:
+                continue
+            _left, alias, _rest = split
+            match = suffix_pattern.search(alias)
+            if not match:
+                continue
+            key = match.group("suffix")
+            found[key] = int(found.get(key, 0)) + 1
+        total_aliases = max(1, sum(1 for line in (lines or []) if _split_oto_line_alias(line) is not None))
+        suffixes = [
+            key for key, count in found.items()
+            if count >= 1 and (count / float(total_aliases)) >= 0.10
+        ]
+        suffixes.sort(key=len, reverse=True)
+    if not suffixes:
+        return list(lines or []), "", 0
+
+    out: List[str] = []
+    changed = 0
+    stripped_label = suffixes[0]
+    for line in lines or []:
+        split = _split_oto_line_alias(line)
+        if split is None:
+            out.append(line)
+            continue
+        _left, alias, _rest = split
+        new_alias = alias
+        for suffix_item in suffixes:
+            needle = "_" + suffix_item
+            if new_alias.endswith(needle) and len(new_alias) > len(needle):
+                new_alias = new_alias[: -len(needle)].rstrip()
+                stripped_label = suffix_item
+                break
+        if new_alias != alias:
+            out.append(_replace_oto_line_alias(line, new_alias))
+            changed += 1
+        else:
+            out.append(line)
+    return out, stripped_label, changed
+

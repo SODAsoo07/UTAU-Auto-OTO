@@ -5,6 +5,33 @@ from typing import Dict, List
 
 OK = "OK"
 
+# TICKET-001: Per-engine baseline quality tier (0.0 = unusable, 1.0 = best).
+# A profile downgrade (e.g. accurate→fast) subtracts an additional 0.10.
+ALIGNER_QUALITY_TIER: Dict[str, float] = {
+    "mfa": 1.0,
+    "coarse_crnn": 0.70,
+    "sequence": 0.55,
+    "none": 0.0,
+    "existing": 0.85,
+}
+
+
+def compute_alignment_quality_score(
+    used_engine: str,
+    fallback_notes: List[str],
+) -> float:
+    """Return an alignment quality score in [0.0, 1.0].
+
+    Base score comes from ALIGNER_QUALITY_TIER.  Each fallback event
+    (engine downgrade OR profile downgrade) reduces the score by 0.10,
+    clamped to 0.0 at minimum.
+    """
+    eng = str(used_engine or "").strip().lower()
+    base = ALIGNER_QUALITY_TIER.get(eng, 0.5)
+    penalty = len(fallback_notes) * 0.10
+    return max(0.0, round(base - penalty, 4))
+
+
 ALIGN_USING_EXISTING = "ALIGN_USING_EXISTING"
 ALIGN_EXEC_MISSING = "ALIGN_EXEC_MISSING"
 ALIGN_MODEL_MISSING = "ALIGN_MODEL_MISSING"
@@ -50,14 +77,42 @@ def normalize_aligner_name(value, default: str = "mfa") -> str:
     text = str(value or "").strip().lower()
     if not text:
         return default
-    if (
-        text in {"none", "off", "skip", "disabled", "disable", "no_align", "nomfa", "no_mfa"}
-        or "no-mfa" in text
-        or "no mfa" in text
-    ):
+    if text in {"none", "nomfa", "no-mfa", "no_mfa", "no mfa", "off", "skip"}:
         return "none"
     if text in {"mfa", "montreal"}:
         return "mfa"
+    if text in {
+        "coarse_crnn",
+        "coarse-crnn",
+        "coarse",
+        "crnn",
+        "constrained",
+        "constrained_crnn",
+        "utau-coarse",
+        "utau_coarse",
+    }:
+        return "coarse_crnn"
+    if text in {
+        "sequence",
+        "seq",
+        "sequence_label",
+        "sequence-label",
+        "sequence_labeling",
+        "시퀀스",
+        "전용(시퀀스)",
+        "전용시퀀스",
+        "dedicated",
+        "dedicated_aligner",
+        "utau-sequence",
+        "utau_sequence",
+    }:
+        return "sequence"
+    if "no-mfa" in text or "nomfa" in text:
+        return "none"
+    if "coarse" in text or "crnn" in text or "constrained" in text:
+        return "coarse_crnn"
+    if "sequence" in text or "dedicated" in text or "시퀀스" in text:
+        return "sequence"
     return default
 
 
@@ -98,18 +153,33 @@ def classify_alignment_error(engine: str, message: str) -> str:
     eng = normalize_aligner_name(engine, default="")
     if not text:
         return ALIGN_RUN_FAILED
-    if "textgrid" in lowered and ("찾지 못" in text or "not found" in lowered):
+    if "textgrid" in lowered and ("not found" in lowered or "missing" in lowered):
         return ALIGN_OUTPUT_EMPTY
-    if "dictionary" in lowered or "사전" in text:
+    if "dictionary" in lowered:
         return ALIGN_DICT_MISSING
-    if "checkpoint" in lowered or ".ckpt" in lowered or "모델" in text:
+    if "checkpoint" in lowered or ".ckpt" in lowered or ".pt" in lowered:
         return ALIGN_MODEL_MISSING
-    if "dependency" in lowered or "tokenizer" in lowered or "의존성" in text:
+    if ".onnx" in lowered or "onnx" in lowered:
+        return ALIGN_MODEL_MISSING
+    tokenizer_markers = (
+        "missing korean tokenizer dependencies",
+        "missing japanese tokenizer dependencies",
+        "japanese tokenizer readiness is uncertain",
+        "korean tokenizer dependencies (jamo + mecab backend) are missing",
+        "please install korean support",
+    )
+    if any(marker in lowered for marker in tokenizer_markers):
         return ALIGN_NOT_READY
-    if "executable not found" in lowered or "infer.py" in lowered or "python 또는 infer.py" in text:
+    if "japanese only" in lowered:
+        return ALIGN_NOT_READY
+    if "executable not found" in lowered or "infer.py" in lowered:
         return ALIGN_EXEC_MISSING
-    if eng == "mfa" and ("mfa executable" in lowered or "mfa 실행 파일" in text):
+    if eng == "mfa" and "mfa executable" in lowered:
         return ALIGN_EXEC_MISSING
+    if eng == "sequence" and ("python-textgrid" in lowered or "textgrid import" in lowered):
+        return ALIGN_NOT_READY
+    if eng == "coarse_crnn" and ("model not found" in lowered or "pytorch import" in lowered):
+        return ALIGN_MODEL_MISSING if "model not found" in lowered else ALIGN_NOT_READY
     return ALIGN_RUN_FAILED
 
 
@@ -130,6 +200,7 @@ __all__ = [
     "ALIGN_RUN_FAILED",
     "ALIGN_SKIPPED",
     "ALIGN_USING_EXISTING",
+    "ALIGNER_QUALITY_TIER",
     "EXCEPTION",
     "GENERATOR_ERROR",
     "ML_APPLIED",
@@ -146,6 +217,7 @@ __all__ = [
     "UNSUPPORTED_LANGUAGE",
     "VOICEBANK_MISSING",
     "classify_alignment_error",
+    "compute_alignment_quality_score",
     "first_non_ok_code",
     "has_textgrid_files",
     "make_runtime_report",

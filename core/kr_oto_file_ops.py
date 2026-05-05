@@ -6,14 +6,9 @@ import os
 import wave
 from statistics import median
 
-from core.generator_finish import write_oto_lines
 from core.kr_oto_bridge import _apply_kr_consonant_timing_shaping
 from core.kr_oto_rules import (
-    KR_PLOSIVE_ONSETS,
-    KR_SIBILANT_ONSETS,
-    KR_SONORANT_CONSONANTS,
     _canonicalize_kr_coda,
-    _extract_alias_onset,
     _extract_vc_right_token,
     classify_alias,
     should_ignore_korean_alias,
@@ -27,7 +22,6 @@ from core.oto_file_utils import (
     read_text_with_fallback as _read_text_with_fallback_common,
 )
 from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
-from core.distribution_guard import is_training_paths_enabled
 
 
 def _median(vals):
@@ -91,129 +85,6 @@ def _normalize_alias_for_profile(alias):
     return canonicalize_alias_for_matching("korean", alias)
 
 
-_KR_DIPHTHONG_TOKENS = {
-    "ya", "yeo", "yo", "yu", "ye",
-    "wa", "wo", "we", "weo", "wi",
-    "ui", "eui", "wae",
-}
-_KR_ASPIRATE_ONSETS = {"k", "t", "p", "ch", "h"}
-
-
-def _extract_alias_tokens(alias_text):
-    import re
-
-    text = str(alias_text or "").strip().lower()
-    if not text:
-        return []
-    return [tok for tok in re.findall(r"[a-z]+", text) if tok]
-
-
-def _is_kr_diphthong_alias(alias_text):
-    tokens = _extract_alias_tokens(alias_text)
-    if not tokens:
-        return False
-    for token in tokens:
-        for diph in _KR_DIPHTHONG_TOKENS:
-            if diph in token:
-                return True
-    return False
-
-
-def _kr_onset_group(alias_text):
-    onset = str(_extract_alias_onset(str(alias_text or "")) or "").strip().lower()
-    if not onset:
-        return "none"
-    if onset in _KR_ASPIRATE_ONSETS:
-        return "aspirate"
-    if onset in KR_SIBILANT_ONSETS:
-        return "sibilant"
-    if onset in KR_PLOSIVE_ONSETS:
-        return "plosive"
-    if onset in KR_SONORANT_CONSONANTS or onset in {"y", "w", "ry", "ly"}:
-        return "sonorant"
-    return "other"
-
-
-def _kr_coda_group(alias_text):
-    coda = _canonicalize_kr_coda(_extract_vc_right_token(str(alias_text or "")))
-    if coda in {"k", "t", "p", "h"}:
-        return "stop"
-    if coda in {"n", "m", "ng"}:
-        return "nasal"
-    if coda in {"l", "r"}:
-        return "liquid"
-    if coda in {"s", "ss", "sh", "z", "f"}:
-        return "fricative"
-    if coda:
-        return "other"
-    return "none"
-
-
-def _build_kr_profile_bucket_keys(alias_text, alias_type):
-    alias_kind = str(alias_type or "").strip().lower()
-    if not alias_kind:
-        return []
-    onset_group = _kr_onset_group(alias_text)
-    diph = "1" if _is_kr_diphthong_alias(alias_text) else "0"
-    coda_group = _kr_coda_group(alias_text) if alias_kind == "vc" else "none"
-
-    keys = []
-    if alias_kind in {"cv", "cv_head", "vcv", "mono"}:
-        keys.extend(
-            [
-                f"{alias_kind}|onset={onset_group}|diph={diph}",
-                f"{alias_kind}|onset={onset_group}",
-                f"{alias_kind}|diph={diph}",
-            ]
-        )
-    elif alias_kind == "vc":
-        keys.extend(
-            [
-                f"vc|coda={coda_group}|diph={diph}",
-                f"vc|coda={coda_group}",
-                f"vc|diph={diph}",
-            ]
-        )
-    elif alias_kind == "vv":
-        keys.extend(
-            [
-                f"vv|diph={diph}",
-                f"vv|onset={onset_group}",
-            ]
-        )
-    keys.append(alias_kind)
-
-    out = []
-    seen = set()
-    for key in keys:
-        token = str(key or "").strip()
-        if not token or token in seen:
-            continue
-        out.append(token)
-        seen.add(token)
-    return out
-
-
-def _resolve_kr_profile_bucket_stat(buckets, alias_text, alias_type, *, min_samples=1):
-    if not isinstance(buckets, dict):
-        return "", None
-    try:
-        min_n = max(1, int(min_samples))
-    except Exception:
-        min_n = 1
-    for key in _build_kr_profile_bucket_keys(alias_text, alias_type):
-        stat = buckets.get(key)
-        if not isinstance(stat, dict):
-            continue
-        try:
-            n = float(stat.get("n", 0) or 0)
-        except Exception:
-            n = 0.0
-        if n >= float(min_n):
-            return key, stat
-    return "", None
-
-
 def _read_text_with_fallback(path):
     return _read_text_with_fallback_common(path)
 
@@ -240,8 +111,6 @@ def _occurrence_map(rows):
 
 
 def train_kr_autotune_profile(auto_oto_path, manual_oto_path, custom_phonemes_path=""):
-    if not is_training_paths_enabled():
-        raise RuntimeError("Distribution build does not support autotune profile training.")
     auto_rows = _read_kr_oto_rows_for_profile(auto_oto_path)
     manual_rows = _read_kr_oto_rows_for_profile(manual_oto_path)
     if not auto_rows or not manual_rows:
@@ -269,13 +138,9 @@ def train_kr_autotune_profile(auto_oto_path, manual_oto_path, custom_phonemes_pa
         if not manual_row:
             continue
         alias_type = _classify_alias_cached(auto_row["alias"])
-        bucket_keys = _build_kr_profile_bucket_keys(auto_row["alias"], alias_type)
-        if not bucket_keys:
-            continue
-        for bucket_key in bucket_keys:
-            bucket = buckets.setdefault(bucket_key, {field: [] for field in fields})
-            for field in fields:
-                bucket[field].append(float(manual_row[field]) - float(auto_row[field]))
+        bucket = buckets.setdefault(alias_type, {field: [] for field in fields})
+        for field in fields:
+            bucket[field].append(float(manual_row[field]) - float(auto_row[field]))
         matched += 1
 
     if matched < 8:
@@ -309,8 +174,6 @@ def train_kr_autotune_profile(auto_oto_path, manual_oto_path, custom_phonemes_pa
 
 
 def save_kr_autotune_profile(path, profile):
-    if not is_training_paths_enabled():
-        raise RuntimeError("Distribution build does not support autotune profile training.")
     if not path or not profile:
         return False
     try:
@@ -335,8 +198,6 @@ def load_kr_autotune_profile(path):
 
 
 def apply_kr_autotune_profile_to_oto(oto_path, profile, custom_phonemes_path=""):
-    if not is_training_paths_enabled():
-        raise RuntimeError("Distribution build does not support autotune profile training.")
     if not oto_path or not os.path.exists(oto_path):
         return 0
     if isinstance(profile, str):
@@ -366,18 +227,16 @@ def apply_kr_autotune_profile_to_oto(oto_path, profile, custom_phonemes_path="")
             out_lines.append(raw.rstrip("\n"))
             continue
 
-        alias_type = _classify_cached(row["alias"])
-        _bucket_key, stat = _resolve_kr_profile_bucket_stat(
-            buckets,
-            row["alias"],
-            alias_type,
-            min_samples=3,
-        )
+        stat = buckets.get(_classify_cached(row["alias"]))
         if not stat:
             out_lines.append(raw.rstrip("\n"))
             continue
 
         n = float(stat.get("n", 0))
+        if n < 3:
+            out_lines.append(raw.rstrip("\n"))
+            continue
+
         weight = min(1.0, max(0.25, n / 24.0))
         offset = row["offset"] + _clamp(stat.get("offset", 0.0), -140.0, 140.0) * weight
         cons = row["cons"] + _clamp(stat.get("cons", 0.0), -160.0, 160.0) * weight
@@ -398,7 +257,9 @@ def apply_kr_autotune_profile_to_oto(oto_path, profile, custom_phonemes_path="")
             f"{row['wav']}={row['alias']},{offset:.2f},{cons:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
         )
 
-    write_oto_lines(oto_path, out_lines)
+    with open(oto_path, "w", encoding="utf-8") as f:
+        for line in out_lines:
+            f.write(line + "\n")
     return changed
 
 
@@ -442,13 +303,7 @@ def _apply_kr_profile_to_oto_file(oto_path, wav_dir, profile, custom_map=None):
     for wav_name, rows in rows_by_wav.items():
         dur_ms = _wav_duration_ms(os.path.join(wav_dir, wav_name))
         for idx, row in enumerate(rows):
-            alias_type = _classify_cached(row["alias"])
-            _bucket_key, stat = _resolve_kr_profile_bucket_stat(
-                buckets,
-                row["alias"],
-                alias_type,
-                min_samples=3,
-            )
+            stat = buckets.get(_classify_cached(row["alias"]))
             if not stat:
                 out_lines.append(
                     f"{row['wav']}={row['alias']},{row['offset']:.2f},{row['cons']:.2f},{row['cutoff']:.2f},{row['pre']:.2f},{row['ovl']:.2f}"
@@ -492,7 +347,9 @@ def _apply_kr_profile_to_oto_file(oto_path, wav_dir, profile, custom_map=None):
                 f"{row['wav']}={row['alias']},{offset:.2f},{cons:.2f},{cutoff:.2f},{pre:.2f},{ovl:.2f}"
             )
 
-    write_oto_lines(oto_path, out_lines)
+    with open(oto_path, "w", encoding="utf-8") as f:
+        for line in out_lines:
+            f.write(line + "\n")
     return changed
 
 
@@ -660,30 +517,27 @@ def _apply_kr_bridge_coherence_to_oto_file(oto_path, custom_map=None):
     if changed <= 0:
         return 0
 
-    out_lines = []
-    for item in line_order:
-        if item[0] == "raw":
-            out_lines.append(item[1])
-            continue
-        row = rows_by_wav[item[1]][item[2]]
-        out_lines.append(
-            f"{row['wav']}={row['alias']},{row['offset']:.2f},{row['cons']:.2f},{row['cutoff']:.2f},{row['pre']:.2f},{row['ovl']:.2f}"
-        )
-    write_oto_lines(oto_path, out_lines)
+    with open(oto_path, "w", encoding="utf-8") as f:
+        for item in line_order:
+            if item[0] == "raw":
+                f.write(item[1] + "\n")
+                continue
+            row = rows_by_wav[item[1]][item[2]]
+            f.write(
+                f"{row['wav']}={row['alias']},{row['offset']:.2f},{row['cons']:.2f},{row['cutoff']:.2f},{row['pre']:.2f},{row['ovl']:.2f}\n"
+            )
     return changed
 
 
 __all__ = [
     "_apply_kr_bridge_coherence_to_oto_file",
     "_apply_kr_profile_to_oto_file",
-    "_build_kr_profile_bucket_keys",
     "_extract_base_timing_shape",
     "_occurrence_map",
     "_parse_oto_line_profile",
     "_read_kr_oto_rows_for_profile",
     "_read_text_with_fallback",
     "_resolve_kr_reference_dirs",
-    "_resolve_kr_profile_bucket_stat",
     "_retarget_kr_bridge_to_next_cv",
     "apply_kr_autotune_profile_to_oto",
     "load_kr_autotune_profile",

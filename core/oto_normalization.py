@@ -47,9 +47,6 @@ def _classify_alias_for_normalization(language: str, alias: str, custom_map: Opt
 def _normalize_ja_alias_token(token: str) -> str:
     raw = repair_japanese_mojibake_text(str(token or ""))
     text = _katakana_to_hiragana(unicodedata.normalize("NFKC", raw).strip())
-    for marker in ("\u30fb", "\u00b7", "\uff65", "\u2022", "\u2019", "\u02bc", "\u0294", "\u02c0", "`"):
-        text = text.replace(marker, " ")
-    text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return ""
     if text in {"-", "r", "h"}:
@@ -70,7 +67,7 @@ def _strip_attached_pitch_suffix_token(token: str) -> str:
     text = str(token or "").strip()
     if not text:
         return ""
-    stripped = re.sub(r"([A-G](?:[#♯]|[b♭])?[0-8])$", "", text, flags=re.IGNORECASE).strip()
+    stripped = re.sub(r"([A-G](?:#|b)?[0-8])$", "", text).strip()
     stripped = stripped.rstrip("_- ").strip()
     if stripped:
         return stripped

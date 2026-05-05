@@ -4,16 +4,11 @@ import os
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
-from core.mapping_format_policy import (
-    is_ja_filename_sequence_format,
-    is_ja_sequence_locked_format,
-)
+from core.loop_prep_models import LoopPrepCommonResult
 
 
 @dataclass
-class JaLoopPrepResult:
-    status: str = "ok"
-    meta: dict[str, object] = field(default_factory=dict)
+class JaLoopPrepResult(LoopPrepCommonResult):
     wd_intervals: list = field(default_factory=list)
     ph_intervals_raw: list = field(default_factory=list)
     ph_intervals: list = field(default_factory=list)
@@ -25,19 +20,11 @@ class JaLoopPrepResult:
     format_type: str = ""
     ja_style_profile: dict | None = None
     expected_syllables: int = 0
-    phone_quality: dict[str, object] = field(default_factory=dict)
-    low_quality_reasons: list[str] = field(default_factory=list)
-    low_phone_quality: bool = False
     forced_words_mapping: bool = False
-    timeline_start_ms: float = 0.0
-    timeline_end_ms: float = 0.0
     effective_end_ms: float = 0.0
     boundary_points_ms: list[float] = field(default_factory=list)
     phone_spans_ms: list[tuple[float, float]] = field(default_factory=list)
     conf_th: float = 0.0
-    textgrid_trust_score: float = 0.0
-    textgrid_trust_tier: str = "low"
-    prefer_filename_sequence: bool = False
 
 
 def _estimate_ja_textgrid_trust(
@@ -68,7 +55,7 @@ def _estimate_ja_textgrid_trust(
             conf -= min(abs(words_count - filename_count) / float(max(filename_count, 1)) * 0.18, 0.18)
         if alias_count:
             conf -= min(abs(alias_count - filename_count) / float(max(filename_count, 1)) * 0.12, 0.12)
-        if is_ja_filename_sequence_format(format_type):
+        if str(format_type or "").strip().lower() in {"cvvc", "cv"}:
             conf += 0.06
     elif max(alias_count, words_count) >= 2:
         conf -= 0.08
@@ -113,6 +100,9 @@ def prepare_ja_loop_state(
     collect_phone_quality_fn: Callable[..., dict],
     build_words_synth_phones_fn: Callable[[list, list[str]], list],
     resolve_conf_threshold_fn: Callable[..., float],
+    alignment_source: str = "",
+    alignment_source_reason: str = "",
+    alignment_source_meta: dict[str, object] | None = None,
 ) -> JaLoopPrepResult:
     result = JaLoopPrepResult()
     silence_marks = {"", "sil", "spn", "pau", "sp"}
@@ -140,14 +130,16 @@ def prepare_ja_loop_state(
 
     detected_format = detect_alias_format_fn(alias_names, custom_map)
     result.detected_format = detected_format
-    result.format_type = forced_format or detected_format
+    forced_norm = str(forced_format or "").strip().lower()
+    forced_explicit = bool(forced_norm and forced_norm not in {"auto", "detect", "detected"})
+    result.format_type = forced_norm if forced_explicit else detected_format
     result.ja_style_profile = get_profile_fn(result.format_type)
-    if result.is_vowel_chain:
+    if result.is_vowel_chain and (not forced_explicit or forced_norm == "vcv"):
         prev_format = result.format_type
         result.format_type = "vcv"
         result.ja_style_profile = get_profile_fn(result.format_type)
-        log_fn(f"🎵 {fname}: 모음 연속음 파일 감지 → VCV 강제 적용 (기존: {prev_format.upper()})")
-    elif forced_format:
+        log_fn(f"🎵 {fname}: 모음 연속음 파일 감지 → VCV 강제 적용 (기존: {str(prev_format or '').upper()})")
+    elif forced_explicit:
         log_fn(f"🎵 {fname}: 포맷 수동 지정 → {result.format_type.upper()} (자동 감지: {detected_format.upper()})")
     else:
         log_fn(f"🎵 {fname}: 포맷 감지 → {result.format_type.upper()}")
@@ -174,17 +166,27 @@ def prepare_ja_loop_state(
         wd_intervals=result.wd_intervals,
         format_type=result.format_type,
     )
+    result.alignment_source = str(alignment_source or "").strip().lower()
+    result.alignment_source_reason = str(alignment_source_reason or "").strip().lower()
+    result.alignment_source_meta = dict(alignment_source_meta or {})
     result.prefer_filename_sequence = bool(
-        is_ja_filename_sequence_format(result.format_type)
+        result.format_type in {"cvvc", "cv"}
         and result.filename_syllables
         and (
             result.textgrid_trust_tier == "low"
             or (result.textgrid_trust_tier == "mid" and result.low_phone_quality)
         )
     )
+    if result.alignment_source == "sequence" and result.format_type in {"cvvc", "cv"} and result.filename_syllables:
+        result.prefer_filename_sequence = True
+        if debug_reason_logging:
+            log_fn(
+                f"🧭 {fname}: sequence 정렬 TextGrid 감지 "
+                f"(reason={result.alignment_source_reason or 'unknown'}) → sequence 분기 사용"
+            )
 
     if (
-        is_ja_sequence_locked_format(result.format_type)
+        result.format_type in {"vcv", "cvvc", "cv"}
         and ja_mapping_words_fallback_enabled
         and result.low_phone_quality
     ):

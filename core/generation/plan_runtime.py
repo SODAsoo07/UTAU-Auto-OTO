@@ -2,6 +2,154 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterable, Mapping, Sequence
 
+from core.syllable_order_guard import evaluate_syllable_order_guard
+
+
+def _clip01(value: float) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except Exception:
+        return 0.0
+
+
+def update_single_vowel_span_by_first_phone(
+    *,
+    phone_intervals: Sequence[Any],
+    tg_path: str,
+    single_vowel_span_by_tg_path: Dict[str, tuple[float, float]],
+    norm_tg_path_key_fn: Callable[[str], str],
+) -> bool:
+    if len(phone_intervals or []) != 1:
+        return False
+    try:
+        one = list(phone_intervals)[0]
+        key = norm_tg_path_key_fn(str(tg_path or ""))
+        single_vowel_span_by_tg_path[key] = (
+            float(one.minTime) * 1000.0,
+            float(one.maxTime) * 1000.0,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def extract_ja_alignment_ingest_state(
+    *,
+    alignment_ingest,
+    fallback_format: str,
+    normalize_format_type_fn: Callable[[str, str], str],
+    low_conf_lock_threshold: float = 0.55,
+) -> Dict[str, Any]:
+    filename_syllables = list(alignment_ingest.extra.get("filename_syllables") or [])
+    cv_targets = list(alignment_ingest.extra.get("cv_targets") or [])
+    detected_format_raw = str(alignment_ingest.extra.get("detected_format") or "")
+    format_type_raw = str(alignment_ingest.extra.get("format_type") or "")
+    detected_format = normalize_format_type_fn("japanese", detected_format_raw)
+    format_type = normalize_format_type_fn("japanese", format_type_raw)
+    if format_type not in {"cv", "cvvc", "vcv", "vc_only", "br"}:
+        fallback_fmt = str(fallback_format or "").strip().lower()
+        if detected_format in {"cv", "cvvc", "vcv", "vc_only", "br"}:
+            format_type = detected_format
+        elif fallback_fmt in {"cv", "cvvc", "vcv"}:
+            format_type = fallback_fmt
+        else:
+            format_type = "cvvc"
+
+    phone_quality = alignment_ingest.phone_quality
+    textgrid_trust_score = float(alignment_ingest.textgrid_trust_score or 0.0)
+    alignment_weight = _clip01(textgrid_trust_score * 0.85)
+    prefer_filename_sequence = bool(alignment_ingest.prefer_filename_sequence)
+    if filename_syllables and alignment_weight < float(low_conf_lock_threshold):
+        prefer_filename_sequence = True
+    order_guard = evaluate_syllable_order_guard(
+        language="japanese",
+        format_type=format_type,
+        expected_tokens=(filename_syllables or cv_targets),
+        alignment_weight=alignment_weight,
+        low_phone_quality=bool(alignment_ingest.low_phone_quality),
+        textgrid_trust_tier=str(alignment_ingest.textgrid_trust_tier or "low"),
+    )
+    if order_guard.applied:
+        prefer_filename_sequence = True
+
+    return {
+        "wd_intervals": alignment_ingest.words,
+        "ph_intervals": alignment_ingest.phones,
+        "filename_syllables": filename_syllables,
+        "cv_targets": cv_targets,
+        "sinsy_label_entries": list(alignment_ingest.extra.get("sinsy_label_entries") or []),
+        "detected_format": detected_format,
+        "format_type": format_type,
+        "ja_style_profile": alignment_ingest.extra.get("ja_style_profile"),
+        "phone_quality": phone_quality,
+        "low_quality_reasons": alignment_ingest.low_quality_reasons,
+        "low_phone_quality": alignment_ingest.low_phone_quality,
+        "forced_words_mapping": bool(alignment_ingest.extra.get("forced_words_mapping")),
+        "timeline_start_ms": float(alignment_ingest.timeline_meta.get("timeline_start_ms", 0.0) or 0.0),
+        "effective_end_ms": float(alignment_ingest.timeline_meta.get("effective_end_ms", 0.0) or 0.0),
+        "phone_spans_ms": list(alignment_ingest.timeline_meta.get("phone_spans_ms") or []),
+        "conf_th": float(alignment_ingest.extra.get("conf_th", 0.0) or 0.0),
+        "textgrid_trust_score": textgrid_trust_score,
+        "textgrid_trust_tier": str(alignment_ingest.textgrid_trust_tier or "low"),
+        "prefer_filename_sequence": prefer_filename_sequence,
+        "syllable_order_guard_applied": bool(order_guard.applied),
+        "syllable_order_guard_reason": str(order_guard.reason or ""),
+        "spn_ratio": float(phone_quality.get("spn_ratio_in_phone_tier", 0.0) or 0.0),
+        "alignment_weight": alignment_weight,
+    }
+
+
+def extract_kr_alignment_ingest_state(
+    *,
+    alignment_ingest,
+    low_conf_lock_threshold: float = 0.55,
+) -> Dict[str, Any]:
+    phone_quality = alignment_ingest.phone_quality
+    filename_cv_targets = list(alignment_ingest.extra.get("filename_cv_targets") or [])
+    targets_for_build = list(alignment_ingest.extra.get("targets_for_build") or [])
+    textgrid_trust_score = float(alignment_ingest.textgrid_trust_score or 0.0)
+    alignment_weight = _clip01(textgrid_trust_score * 0.85)
+    prefer_filename_sequence = bool(alignment_ingest.prefer_filename_sequence)
+    if filename_cv_targets and alignment_weight < float(low_conf_lock_threshold):
+        prefer_filename_sequence = True
+        targets_for_build = list(filename_cv_targets)
+    order_guard = evaluate_syllable_order_guard(
+        language="korean",
+        format_type=str(alignment_ingest.extra.get("file_format") or ""),
+        expected_tokens=filename_cv_targets,
+        alignment_weight=alignment_weight,
+        low_phone_quality=bool(alignment_ingest.low_phone_quality),
+        textgrid_trust_tier=str(alignment_ingest.textgrid_trust_tier or "low"),
+    )
+    if order_guard.applied:
+        prefer_filename_sequence = True
+        targets_for_build = list(filename_cv_targets)
+
+    return {
+        "ph_intervals_all": alignment_ingest.phones_all,
+        "ph_intervals": alignment_ingest.phones,
+        "wd_intervals": alignment_ingest.words,
+        "wav_duration_ms": float(alignment_ingest.wav_duration_ms or 0.0),
+        "timeline_start_ms": float(alignment_ingest.timeline_meta.get("timeline_start_ms", 0.0) or 0.0),
+        "timeline_end_ms": float(alignment_ingest.timeline_meta.get("timeline_end_ms", 0.0) or 0.0),
+        "file_format": str(alignment_ingest.extra.get("file_format") or ""),
+        "file_mapping_conf_th": float(alignment_ingest.extra.get("file_mapping_conf_th", 0.0) or 0.0),
+        "filename_cv_targets": filename_cv_targets,
+        "targets_for_build": targets_for_build,
+        "sinsy_label_entries": list(alignment_ingest.extra.get("sinsy_label_entries") or []),
+        "phone_quality": phone_quality,
+        "low_quality_reasons": alignment_ingest.low_quality_reasons,
+        "low_phone_quality": alignment_ingest.low_phone_quality,
+        "force_words_phone_fill": bool(alignment_ingest.extra.get("force_words_phone_fill")),
+        "textgrid_trust_score": textgrid_trust_score,
+        "textgrid_trust_tier": str(alignment_ingest.textgrid_trust_tier or "low"),
+        "prefer_filename_sequence": prefer_filename_sequence,
+        "syllable_order_guard_applied": bool(order_guard.applied),
+        "syllable_order_guard_reason": str(order_guard.reason or ""),
+        "spn_ratio": float(phone_quality.get("spn_ratio_in_phone_tier", 0.0) or 0.0),
+        "alignment_weight": alignment_weight,
+    }
+
 
 def build_common_plan_context(
     *,
@@ -33,15 +181,22 @@ def build_common_plan_context(
         )
     if not cv_plan.get("indices"):
         use_mel_plan = bool(should_enable_mel_plan_fn())
-        cv_plan = (
-            build_cv_anchor_plan_fn(
-                source_tokens,
-                syllables_info,
-                use_mel=bool(use_mel_plan),
-            )
-            if source_tokens
-            else {"indices": None, "meta": {}}
-        )
+        if source_tokens:
+            try:
+                cv_plan = build_cv_anchor_plan_fn(
+                    source_tokens,
+                    syllables_info,
+                    use_mel=bool(use_mel_plan),
+                    format_type=str(format_type or ""),
+                )
+            except TypeError:
+                cv_plan = build_cv_anchor_plan_fn(
+                    source_tokens,
+                    syllables_info,
+                    use_mel=bool(use_mel_plan),
+                )
+        else:
+            cv_plan = {"indices": None, "meta": {}}
     planned_indices = cv_plan.get("indices")
     return {
         "cv_plan": cv_plan,
@@ -268,13 +423,14 @@ def log_sinsy_plan_guard(
     runtime_policy,
     fname: str,
     log_fn: Callable[[str], None],
+    log_prefix: str = "[MAP]",
 ) -> None:
     if not sinsy_label_entries:
         return
     plan_source = str((cv_plan or {}).get("source") or "")
     if plan_source != "sinsy_labels":
         log_fn(
-            f"🛡️ {fname}: sinsy 라벨이 있지만 planner에 적용되지 않음 "
+            f"{log_prefix} {fname}: Sinsy 라벨은 있으나 planner source가 fallback으로 선택됨 "
             f"(source={plan_source or 'fallback'})"
         )
         return
@@ -282,6 +438,6 @@ def log_sinsy_plan_guard(
     row_margin_floor = float((runtime_policy or {}).get("row_margin_floor", 6.0))
     if plan_margin < row_margin_floor:
         log_fn(
-            f"🛡️ {fname}: sinsy planner margin 낮음 "
+            f"{log_prefix} {fname}: Sinsy planner margin 낮음 "
             f"(margin={plan_margin:.1f} < {row_margin_floor:.1f})"
         )

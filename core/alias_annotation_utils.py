@@ -10,20 +10,6 @@ _SUFFIX_SCRIPT_RE = re.compile(r"[가-힣ぁ-んァ-ヶ一-龯]")
 _TRAILING_DIGITS_RE = re.compile(r"^(.*?)(\d{1,3})$")
 _TRAILING_ROMAN_SUFFIX_RE = re.compile(r"^(.*?)([A-Z]{1,4}\d{1,3})$")
 _TRAILING_ROMAN_V_RE = re.compile(r"^(.*?)([A-Za-z]{1,8}?)(V\d{0,3})$")
-_TRAILING_STYLE_TAG_RE = re.compile(
-    r"^(.*?)(?:[_\-\s]+)"
-    r"(?:eng(?:lish)?|en|us|uk|ko|kr|ja|jp|style|alt|soft|hard|ver(?:sion)?)"
-    r"(?:\d{0,3})$",
-    re.IGNORECASE,
-)
-_PITCH_SUFFIX_PATTERNS = (
-    re.compile(r"(?:[_\-\s]+)(?:[A-G](?:[#♯]|[b♭])?[0-8])$", flags=re.IGNORECASE),
-    re.compile(r"(?:[_\-\s]+)(?:[A-G](?:sharp|flat)?[0-8])$", flags=re.IGNORECASE),
-    re.compile(
-        r"(?:[_\-\s]+)(?:note|pitch|key)(?:[_\-\s]*)(?:[A-G](?:[#♯]|[b♭])?[0-8])$",
-        flags=re.IGNORECASE,
-    ),
-)
 _DEGENERATE_ALIAS_MARKERS = {"-", "r", "h", "R", "H", "'", "."}
 
 
@@ -43,15 +29,9 @@ def _is_degenerate_alias_candidate(text: str) -> bool:
 
 
 def strip_known_pitch_suffix(text: str) -> str:
-    current = str(text or "").strip()
-    if not current:
-        return ""
-    prev = None
-    while current and current != prev:
-        prev = current
-        for pattern in _PITCH_SUFFIX_PATTERNS:
-            current = pattern.sub("", current).strip()
-    return current
+    stripped = re.sub(r"(?:[_\-\s]+)(?:[A-G](?:#|b)?[0-8])$", "", text)
+    stripped = re.sub(r"(?:[_\-\s]+)(?:[A-G](?:sharp|flat)?[0-8])$", "", stripped)
+    return stripped.strip()
 
 
 def strip_bracket_suffix(text: str) -> str:
@@ -147,23 +127,6 @@ def _try_strip_trailing_roman_numeric_suffix(
     return text
 
 
-def _try_strip_trailing_style_suffix(
-    text: str,
-    classifier: Callable[[str], str],
-    base_type: str,
-) -> str:
-    match = _TRAILING_STYLE_TAG_RE.match(text)
-    if not match:
-        return text
-    candidate = str(match.group(1) or "").rstrip(" _-").strip()
-    if not candidate or _is_degenerate_alias_candidate(candidate):
-        return text
-    candidate_type = str(classifier(candidate) or "")
-    if not _accept_candidate_type(base_type, candidate_type, require_same_type=bool(base_type)):
-        return text
-    return candidate
-
-
 def _try_strip_attached_suffix(
     text: str,
     classifier: Callable[[str], str],
@@ -205,7 +168,6 @@ def strip_alias_annotation_suffixes(text: str, classifier: Callable[[str], str])
         previous = current
         current = strip_known_pitch_suffix(current)
         current = strip_bracket_suffix(current)
-        current = _try_strip_trailing_style_suffix(current, classifier, base_type)
         current = _try_strip_trailing_roman_numeric_suffix(current, classifier, base_type)
         current = _try_strip_trailing_separator_suffix(current, classifier, base_type)
         current = _try_strip_attached_suffix(current, classifier, base_type)

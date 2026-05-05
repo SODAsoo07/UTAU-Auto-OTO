@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 from typing import Callable, Dict, List, Optional, Tuple
 
-from core.generator_finish import write_oto_lines
 from core.ja_oto_mapping import classify_ja_alias
 from core.oto_file_utils import read_text_with_fallback
 
@@ -81,8 +80,18 @@ def _classify_cached(
         cache[key] = classify_ja_alias(key, custom_map)
     return cache[key]
 
+def _cvn_correction_enabled() -> bool:
+    return str(os.environ.get("UTOA_CVN_CORRECTION_ENABLE", "1")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
 
 def _vc_neighbor_enabled() -> bool:
+    if not _cvn_correction_enabled():
+        return False
     return str(os.environ.get("UTOA_JA_VC_NEIGHBOR_ENABLE", "1")).strip().lower() not in {
         "0",
         "false",
@@ -252,14 +261,13 @@ def apply_ja_vc_neighbor_to_oto_file(
     if stats["total_changed"] <= 0:
         return stats
 
-    out_lines = []
-    for item in line_order:
-        if item[0] == "raw":
-            out_lines.append(str(item[1]))
-            continue
-        row = rows_by_wav[str(item[1])][int(item[2])]
-        out_lines.append(_format_oto_line(row))
-    write_oto_lines(oto_path, out_lines)
+    with open(oto_path, "w", encoding="utf-8") as f:
+        for item in line_order:
+            if item[0] == "raw":
+                f.write(str(item[1]) + "\n")
+                continue
+            row = rows_by_wav[str(item[1])][int(item[2])]
+            f.write(_format_oto_line(row) + "\n")
 
     if callable(log_fn):
         log_fn(

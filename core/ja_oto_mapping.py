@@ -12,6 +12,7 @@ import unicodedata
 from functools import lru_cache
 
 from core.alias_annotation_utils import strip_alias_annotation_suffixes
+from core.interval_lookup import build_interval_lookup, intervals_within_bounds
 from core.ja_lab_generator import parse_ja_filename, romaji_to_ipa, split_ja_romaji_syllable
 
 JA_CONSONANTS = [
@@ -20,28 +21,10 @@ JA_CONSONANTS = [
     'sh', 'ch', 'ts', 'dz', 'hy', 'ky', 'gy', 'ny', 'my', 'ry', 'by', 'py',
     'dy', 'ty', 'ss', 'kk', 'tt', 'pp', 'dd', 'gg', 'bb', 'zz', 'jj',
 ]
-for _extra_cons in ("th", "dh", "zh", "tr", "dr", "tsh"):
-    if _extra_cons not in JA_CONSONANTS:
-        JA_CONSONANTS.append(_extra_cons)
 JA_VOWELS = ['a', 'i', 'u', 'e', 'o']
-JA_U_PHONE_MARKS = {'u', '\u026f', '\u0289'}
-JA_N_PHONE_MARKS = {'n', '\u0274', '\u014b', 'm', 'nn', 'xn', 'ng', 'ngy', 'ﾉｴ'}
-JA_KANA_VOWELS = {'?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?'}
-JA_EDGE_CANON = "\u30fb"
-JA_EDGE_MARKS = {
-    JA_EDGE_CANON,
-    "\u00b7",
-    "\uff65",
-    "\u2022",
-    "'",
-    "\u2019",
-    "\u02bc",
-    "\u0294",
-    "\u02c0",
-    ".",
-    "`",
-}
+JA_KANA_VOWELS = {'あ', 'い', 'う', 'え', 'お', 'ぁ', 'ぃ', 'ぅ', 'ぇ', 'ぉ', 'を', 'ん'}
 JA_NASAL_ONSETS = {'m', 'n', 'ny', 'ng', 'ngy'}
+JA_LIQUID_ONSETS = {'r', 'ry', 'l', 'ly'}
 JA_VOICED_ONSETS = {
     'g', 'z', 'd', 'b', 'j', 'dz', 'v',
     'm', 'n', 'ny', 'r', 'l', 'ry', 'w', 'y',
@@ -51,28 +34,54 @@ JA_VOICELESS_ONSETS = {
     'q', 'c', 'ky', 'ty', 'py', 'hy', 'ss', 'kk', 'tt', 'pp',
 }
 _JA_KANA_RE = re.compile(r"[\u3041-\u3096\u30A1-\u30FA\u30FC]")
-_JA_EDGE_SPLIT_RE = re.compile(
-    "|".join(re.escape(ch) for ch in sorted(JA_EDGE_MARKS, key=len, reverse=True))
-)
-_JA_TAIL_BREATH_MARKERS = {
-    "r",
-    "h",
-    "息",
-    "吸",
-    "吐",
-    "吸い",
-    "吐き",
-    "息継ぎ",
-    "bre",
-    "breath",
-    "breathy",
-    "inhale",
-    "exhale",
-    "asp",
-    "aspirate",
-    "air",
+_JA_YOUON_ROMAJI_CANONICAL = {
+    "sya": "sha", "syu": "shu", "syo": "sho", "sye": "she",
+    "shya": "sha", "shyu": "shu", "shyo": "sho", "shye": "she",
+    "zya": "ja", "zyu": "ju", "zyo": "jo", "zye": "je",
+    "jya": "ja", "jyu": "ju", "jyo": "jo", "jye": "je",
+    "cya": "cha", "cyu": "chu", "cyo": "cho", "cye": "che",
+    "chya": "cha", "chyu": "chu", "chyo": "cho", "chye": "che",
 }
-_JA_TAIL_BREATH_HINTS = ("息", "吸", "吐", "breath", "inhale", "exhale", "asp", "air")
+_JA_YOUON_CORE_SET = frozenset({
+    "kya", "kyu", "kyo", "kye",
+    "gya", "gyu", "gyo", "gye",
+    "sha", "shu", "sho", "she",
+    "ja", "ju", "jo", "je",
+    "cha", "chu", "cho", "che",
+    "nya", "nyu", "nyo", "nye",
+    "hya", "hyu", "hyo", "hye",
+    "mya", "myu", "myo", "mye",
+    "rya", "ryu", "ryo", "rye",
+    "bya", "byu", "byo", "bye",
+    "pya", "pyu", "pyo", "pye",
+    "tya", "tyu", "tyo", "tye",
+    "dya", "dyu", "dyo", "dye",
+    "fya", "fyu", "fyo", "fye",
+    "vya", "vyu", "vyo", "vye",
+    "lya", "lyu", "lyo", "lye",
+    "xya", "xyu", "xyo", "xye",
+})
+
+
+@lru_cache(maxsize=65536)
+def _canonicalize_ja_cv_core(core):
+    c = str(core or "").strip().lower()
+    if not c:
+        return ""
+    return _JA_YOUON_ROMAJI_CANONICAL.get(c, c)
+
+
+@lru_cache(maxsize=65536)
+def _is_ja_youon_core(core):
+    c = _canonicalize_ja_cv_core(core)
+    if not c:
+        return False
+    if c in _JA_YOUON_CORE_SET:
+        return True
+    onset, vowel = split_ja_romaji_syllable(c)
+    if vowel in JA_VOWELS and onset and any(ch in {"y", "w"} for ch in onset[1:]):
+        return True
+    return False
 
 
 def _normalize_custom_alias_lookup(alias):
@@ -81,9 +90,9 @@ def _normalize_custom_alias_lookup(alias):
     if not text:
         return []
     variants = [text, text.lower()]
-    stripped = re.sub(r"(?:[_\-\s]*)(?:[a-g](?:[#♯]|[b♭])?[0-8])$", "", text, flags=re.IGNORECASE)
-    stripped = re.sub(r"(?:[_\-\s]*)(?:[a-g](?:sharp|flat)?[0-8])$", "", stripped, flags=re.IGNORECASE)
-    stripped = re.sub(r"\s*[\(\[\{（【].*?[\)\]\}）】]\s*$", "", stripped).strip()
+    stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:#|b)?[0-8])$", "", text, flags=re.IGNORECASE)
+    stripped = re.sub(r"(?:[_\-\s]+)(?:[a-g](?:sharp|flat)?[0-8])$", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"\s*[\(\[\{\uFF08\u3010].*?[\)\]\}\uFF09\u3011]\s*$", "", stripped).strip()
     if stripped:
         variants.extend([stripped, stripped.lower()])
     out = []
@@ -108,70 +117,16 @@ def _clean_phone_mark(mark):
     return re.sub(r"[0-9]", "", (mark or "").strip().lower())
 
 
-def _is_ja_edge_token(token: str) -> bool:
-    t = unicodedata.normalize("NFKC", str(token or "")).strip()
-    return bool(t and t in JA_EDGE_MARKS)
-
-
-def _split_ja_alias_parts(text: str) -> list[str]:
-    normalized = unicodedata.normalize("NFKC", str(text or "")).strip()
-    if not normalized:
-        return []
-    normalized = _JA_EDGE_SPLIT_RE.sub(f" {JA_EDGE_CANON} ", normalized)
-    return [part for part in re.split(r"\s+", normalized) if part]
-
-
-def _is_ja_tail_breath_marker(token: str) -> bool:
-    raw = unicodedata.normalize("NFKC", str(token or "")).strip()
-    if not raw:
-        return False
-    if raw.upper() in {"R", "H"}:
-        return True
-    low = raw.lower()
-    if low in _JA_TAIL_BREATH_MARKERS:
-        return True
-    if any(hint in low for hint in _JA_TAIL_BREATH_HINTS):
-        return True
-    return False
-
-
-def is_ja_tail_breath_alias(alias: str) -> bool:
-    text = unicodedata.normalize("NFKC", str(alias or "")).strip()
-    if not text:
-        return False
-
-    parts = [p for p in re.split(r"\s+", text) if p]
-    if len(parts) >= 2:
-        left = parts[0].strip()
-        if (_is_ja_vowel_token(left) or bool(_JA_KANA_RE.search(left))) and _is_ja_tail_breath_marker(parts[-1]):
-            return True
-
-    compact = re.sub(r"[\s_\-]+", "", text)
-    if len(compact) >= 2 and compact[-1].upper() in {"R", "H"}:
-        stem = compact[:-1].strip().lower()
-        if stem in JA_VOWELS:
-            return True
-
-    if re.fullmatch(r"[\u3041-\u3096\u30A1-\u30FA\u30FC]+(?:息|吸|吐|吸い|吐き|息継ぎ)", text):
-        return True
-    return False
-
-
 def is_breath(alias):
     clean = unicodedata.normalize("NFKC", str(alias or "")).strip().lower()
     if not clean:
         return False
-    # `a R`, `i H`, `あ 吸い` 등 tail breath는 VC 계열 특수 음소로 취급한다.
-    if is_ja_tail_breath_alias(clean):
-        return False
     if re.match(r'^br\d*$', clean):
         return True
-    if re.match(r"^(?:bre|breath|breathy|inhale|exhale|air|asp|aspirate)(?:[_\-\s]?[a-z0-9]{0,4})?$", clean):
+    if clean in {"bre", "breath", "\u606f", "\u5438", "\u5410", "\u5438\u3044", "\u5410\u304d", "\u606f\u7d99\u304e"}:
         return True
-    if clean in {"bre", "breath", "息", "吸", "吐", "吸い", "吐き", "息継ぎ"}:
-        return True
-    # Some banks annotate inhale/exhale variants like 吸こ吐, 吸き吐.
-    if any(ch in clean for ch in ("吸", "吐", "息")):
+    # Some banks annotate inhale/exhale variants with mixed scripts (e.g., inhale/exhale combos).
+    if any(ch in clean for ch in ("\u5438", "\u5410", "\u606f")):
         return True
     return False
 
@@ -183,10 +138,6 @@ def _is_ja_vowel_token(token):
     if t_raw in JA_KANA_VOWELS:
         return True
     t = t_raw.lower()
-    for edge in JA_EDGE_MARKS:
-        t = t.replace(edge, "")
-    if not t:
-        return False
     if t in JA_VOWELS or t in ['n', 'nn', 'xn']:
         return True
     onset, vowel = split_ja_romaji_syllable(t)
@@ -202,15 +153,9 @@ def _classify_ja_alias_core(clean, custom_map=None):
         if mapped_val in ['r', 'h', 'sil', 'br', 'pau', 'sp']:
             return 'br'
         ipa = romaji_to_ipa(mapped_val)
-        if ipa and (ipa in ['a', 'i', '?', 'e', 'o'] or _is_ja_vowel_token(mapped_val)):
+        if ipa and (ipa in ['a', 'i', '\u026f', 'u', 'e', 'o'] or _is_ja_vowel_token(mapped_val)):
             return 'mono'
         return 'cv'
-    parts_norm = _split_ja_alias_parts(clean)
-    if parts_norm and any(_is_ja_edge_token(token) for token in parts_norm):
-        edge_idx = next((idx for idx, token in enumerate(parts_norm) if _is_ja_edge_token(token)), -1)
-        if edge_idx == 0 and len(parts_norm) >= 2:
-            return "cv_head"
-        return "vc"
     if ' ' in clean:
         parts = clean.split()
         left = parts[0]
@@ -218,12 +163,10 @@ def _classify_ja_alias_core(clean, custom_map=None):
         if left == '-':
             return 'cv_head'
         left_is_vowel = _is_ja_vowel_token(left)
-        if left_is_vowel and is_ja_tail_breath_alias(clean):
-            return "vc"
         if left_is_vowel:
             if right.strip() == '-':
                 return 'vv'
-            if re.fullmatch(r"^[^0-9A-Za-z぀-ヿㇰ-ㇿ]+$", right.strip()):
+            if re.fullmatch(r"^[^0-9A-Za-z\u3040-\u30FF\u31F0-\u31FF]+$", right.strip()):
                 return 'vc'
             if right.lower() in JA_CONSONANTS:
                 return 'vc'
@@ -272,17 +215,47 @@ def detect_ja_alias_format(alias_list, custom_map=None):
             type_cache[a] = t
         types.append(t)
     type_set = set(types)
+    type_counts = {}
+    for t in types:
+        type_counts[t] = int(type_counts.get(t, 0)) + 1
+    non_br_total = int(sum(v for k, v in type_counts.items() if k != "br"))
+    vcv_count = int(type_counts.get("vcv", 0))
+    vc_count = int(type_counts.get("vc", 0))
+    vv_count = int(type_counts.get("vv", 0))
+    cv_like_count = int(
+        type_counts.get("cv", 0)
+        + type_counts.get("cv_head", 0)
+        + type_counts.get("mono", 0)
+    )
     if type_set == {'br'}:
         return 'br'
     if type_set <= {'mono', 'cv_head', 'cv'}:
         return 'cv'
-    if 'vcv' in type_set:
-        return 'vcv'
-    if 'vc' in type_set or 'vv' in type_set:
-        return 'cvvc'
     non_br = type_set - {'br'}
     if non_br <= {'vc', 'vv'}:
         return 'vc_only'
+    if vc_count > 0:
+        # Explicit VC links indicate CVVC-style bridging.
+        return 'cvvc'
+    if vv_count > 0:
+        # Vowel-to-vowel links without VC are usually vowel-chain/VCV-like banks.
+        # Keep CV only for tiny mono-like sets.
+        if vcv_count > 0 or vv_count >= 2:
+            return 'vcv'
+        if non_br_total <= max(2, cv_like_count):
+            return 'cv'
+        return 'vcv'
+    if vcv_count > 0:
+        # Avoid classifying as VCV from sparse VCV aliases only.
+        # Only classify as VCV when VCV aliases are dominant enough.
+        if non_br_total <= 0:
+            return 'vcv'
+        vcv_ratio = float(vcv_count) / float(non_br_total)
+        if vcv_count >= 2 and (vcv_ratio >= 0.55 or vcv_count > cv_like_count):
+            return 'vcv'
+        if cv_like_count > 0:
+            return 'cv'
+        return 'vcv'
     return 'cv'
 
 
@@ -305,11 +278,7 @@ def _normalize_ja_syllable_token(token):
     if not t_raw:
         return ''
     t = t_raw.lower()
-    for edge in JA_EDGE_MARKS:
-        t = t.replace(edge, "")
-    if not t:
-        return ""
-    if re.search(r'[ぁ-ゖァ-ヺー]', t_raw):
+    if _is_kana_token(t_raw):
         syls = parse_ja_filename(t_raw)
         if syls:
             t = syls[0].lower()
@@ -320,21 +289,29 @@ def _normalize_ja_syllable_token(token):
         return 'n'
     onset, vowel = split_ja_romaji_syllable(t)
     if vowel in JA_VOWELS:
-        return f"{onset}{vowel}" if onset else vowel
-    return t
-
-
+        core = f"{onset}{vowel}" if onset else vowel
+        return _canonicalize_ja_cv_core(core)
+    return _canonicalize_ja_cv_core(t)
 @lru_cache(maxsize=65536)
 def _normalize_ja_syllable_token_strict(token):
     raw = str(token or "").strip()
     if not raw:
         return ""
-    text = raw.lower()
-    for edge in JA_EDGE_MARKS:
-        text = text.replace(edge, "")
-    return text.replace("'", "").strip("-_ ")
-
-
+    if _is_kana_token(raw):
+        norm = _normalize_ja_syllable_token(raw)
+        if norm:
+            return norm
+    txt = raw.lower().replace("'", "").strip("-_ ")
+    if not txt:
+        return ""
+    parts = txt.split()
+    core = parts[-1] if parts else txt
+    if core in {'n', 'nn', 'xn', 'm'}:
+        return 'n'
+    onset, vowel = split_ja_romaji_syllable(core)
+    if vowel in JA_VOWELS:
+        return _canonicalize_ja_cv_core(f"{onset}{vowel}" if onset else vowel)
+    return _canonicalize_ja_cv_core(core)
 def _is_kana_token(token):
     return bool(_JA_KANA_RE.search(str(token or "")))
 
@@ -380,8 +357,8 @@ def _syllable_info_token(syl_info):
     onset = ''
     vowel = ''
     for m in marks:
-        if m in {'a', 'i', 'u', '?', 'e', 'o', '?', 'n'}:
-            vowel = 'u' if m == '?' else ('n' if m in {'?', 'n'} else m)
+        if m in {'a', 'i', 'u', '\u026f', 'e', 'o', 'n', '\u0274'}:
+            vowel = 'u' if m == '\u026f' else ('n' if m in {'n', '\u0274'} else m)
             break
         if not onset:
             onset = m
@@ -465,14 +442,14 @@ def _extract_ja_cv_targets_from_lines(lines, custom_map=None):
         if tok:
             targets.append(tok)
     # IMPORTANT:
-    # VCV/CVVC에서는 연속 중복 음절(예: ma ma mi..., ra ra ri...) 자체가
-    # 실제 매핑 순서를 결정하므로, 여기서 중복을 제거하면 1칸 밀림이 발생한다.
+    # IMPORTANT: keep duplicate syllables for VCV/CVVC order fidelity.
+    # Removing duplicates here can cause +1 forward drift in sequence lock mode.
     return targets if targets else []
 
 
 def _is_nucleus_phone(mark):
-    vowel = _ja_mark_to_vowel(mark)
-    return vowel in {'a', 'i', 'u', 'e', 'o', 'n'}
+    m = _clean_phone_mark(mark)
+    return m in {'a', 'i', '\u026f', 'u', 'e', 'o', 'n', '\u0274'}
 
 
 def _build_ja_syllables_from_phone_nuclei(ph_intervals, cv_targets):
@@ -484,9 +461,6 @@ def _build_ja_syllables_from_phone_nuclei(ph_intervals, cv_targets):
         return None
     target_vowels = [_target_vowel_from_filename_syllable(s) for s in cv_targets]
     nucleus_vowels = [_ja_mark_to_vowel(getattr(ph_intervals[i], 'mark', '')) for i in nuclei]
-    nuclei, nucleus_vowels = _filter_nasal_nuclei_for_targets(nuclei, nucleus_vowels, target_vowels)
-    if len(nuclei) < target_n:
-        return None
     aligned = _align_nuclei_positions_to_targets(nuclei, nucleus_vowels, target_vowels)
     if aligned and len(aligned) == target_n:
         selected = aligned
@@ -505,6 +479,7 @@ def _build_ja_syllables_from_phone_nuclei(ph_intervals, cv_targets):
             selected_pos.append(pos)
         selected = [nuclei[pos] for pos in selected_pos]
     infos = []
+    phone_lookup = build_interval_lookup(ph_intervals)
     global_start = float(ph_intervals[0].minTime)
     global_end = float(ph_intervals[-1].maxTime)
     for i, n_idx in enumerate(selected):
@@ -518,7 +493,7 @@ def _build_ja_syllables_from_phone_nuclei(ph_intervals, cv_targets):
             e_t = (float(ph_intervals[n_idx].maxTime) + float(ph_intervals[next_n].minTime)) * 0.5
         else:
             e_t = global_end
-        phones = [p for p in ph_intervals if float(p.minTime) >= s_t - 1e-6 and float(p.maxTime) <= e_t + 1e-6]
+        phones = intervals_within_bounds(phone_lookup, s_t, e_t)
         if not phones:
             phones = [ph_intervals[n_idx]]
         tok = cv_targets[i] if i < len(cv_targets) else ''
@@ -545,7 +520,7 @@ def _score_ja_syllable_mapping(candidate_infos, cv_targets):
             x = float(v)
         except Exception:
             return None
-        # TextGrid sec 기반이면 ms로 변환
+        # Convert TextGrid seconds to milliseconds when needed.
         return x * 1000.0 if abs(x) < 60.0 else x
 
     anchor_ms = []
@@ -571,7 +546,7 @@ def _score_ja_syllable_mapping(candidate_infos, cv_targets):
                 cur = _vcv_syllable_match_score(tgt, cand[j])
                 vals.append(cur)
                 idxs.append(j)
-                # 이웃보다 현재 점수가 많이 낮으면 한 칸 밀림 가능성이 높다.
+                # If current score is much lower than neighbors, count as potential +1 drift.
                 neighbor_best = cur
                 if j > 0:
                     neighbor_best = max(neighbor_best, _vcv_syllable_match_score(tgt, cand[j - 1]))
@@ -586,7 +561,7 @@ def _score_ja_syllable_mapping(candidate_infos, cv_targets):
         length_penalty = abs(len(cand) - len(targets)) * 4.0
         shift_penalty = abs(int(shift)) * 7.0
 
-        # 순서 일관성 패널티: 시간축 역행/급점프를 감점.
+        # Order consistency penalty: discourage time-axis reversal and large jumps.
         order_penalty = 0.0
         if idxs:
             prev_t = None
@@ -634,10 +609,6 @@ def _vowel_match_score(target_vowel, nucleus_vowel):
         return -1.2
     if tv == nv:
         return 4.0
-    if tv == 'n' and nv != 'n':
-        return -4.5
-    if nv == 'n' and tv != 'n':
-        return -6.0
     if {tv, nv} <= {'i', 'u'}:
         return 1.0
     if {tv, nv} <= {'e', 'i'}:
@@ -647,32 +618,6 @@ def _vowel_match_score(target_vowel, nucleus_vowel):
     if tv == 'n' or nv == 'n':
         return -2.0
     return -1.5
-
-
-def _filter_nasal_nuclei_for_targets(nuclei, nucleus_vowels, target_vowels):
-    """
-    Remove extra standalone nasal nuclei when targets do not need them.
-
-    This stabilizes CV/CVVC index mapping when an inserted mid-row nasal
-    phone appears in MFA phone tier.
-    """
-    if not nuclei or not nucleus_vowels or not target_vowels:
-        return list(nuclei or []), list(nucleus_vowels or [])
-
-    pairs = list(zip(nuclei, nucleus_vowels))
-    target_n = len(target_vowels)
-    target_nasal_n = sum(1 for v in target_vowels if v == 'n')
-
-    non_nasal_pairs = [(idx, v) for idx, v in pairs if v != 'n']
-
-    if target_nasal_n <= 0:
-        if len(non_nasal_pairs) >= target_n:
-            return [idx for idx, _ in non_nasal_pairs], [v for _, v in non_nasal_pairs]
-        return list(nuclei), list(nucleus_vowels)
-
-    # If nasal targets are explicitly expected, keep original candidates to avoid
-    # trimming needed mora in edge banks.
-    return list(nuclei), list(nucleus_vowels)
 
 
 def _align_nuclei_positions_to_targets(nuclei, nucleus_vowels, target_vowels):
@@ -733,11 +678,11 @@ def _ja_mark_to_vowel(mark):
     clean = re.sub(r"[0-9]", "", (mark or "").strip().lower())
     if not clean:
         return ""
-    if clean in JA_N_PHONE_MARKS:
+    if clean in {"n", "\u0274", "m", "nn", "xn", "ng", "ngy"}:
         return "n"
     if clean in {"a", "i", "e", "o"}:
         return clean
-    if clean in JA_U_PHONE_MARKS or clean in {"?", "?"}:
+    if clean in {"u", "\u026f"}:
         return "u"
     if _is_ja_vowel_token(clean):
         onset, vowel = split_ja_romaji_syllable(clean)
@@ -757,9 +702,6 @@ def _build_syllables_from_filename(ph_intervals, filename_syllables):
         return None
     target_vowels = [_target_vowel_from_filename_syllable(s) for s in filename_syllables]
     nucleus_vowels = [_ja_mark_to_vowel(getattr(ph_intervals[i], 'mark', '')) for i in nuclei]
-    nuclei, nucleus_vowels = _filter_nasal_nuclei_for_targets(nuclei, nucleus_vowels, target_vowels)
-    if len(nuclei) < target_n:
-        return None
     aligned = _align_nuclei_positions_to_targets(nuclei, nucleus_vowels, target_vowels)
     if aligned and len(aligned) == target_n:
         selected = aligned
@@ -840,22 +782,74 @@ def _build_ja_cvvc_occurrence_map(token_source):
     return occ
 
 
-def _resolve_ja_cvvc_occurrence_index(alias, alias_type, occurrence_map, occurrence_state):
+@lru_cache(maxsize=8192)
+def _ja_occurrence_token_variants(token):
+    tok = _normalize_ja_syllable_token(token)
+    if not tok:
+        return ()
+    variants = [tok]
+    onset, vowel = split_ja_romaji_syllable(tok)
+    # Many banks mix di/du/ti/tu with de/do/te/to spellings for the same mora.
+    # Add conservative fallback variants only when exact token is unavailable.
+    if onset in {"d", "t"} and vowel in {"i", "e", "u", "o"}:
+        if vowel == "i":
+            variants.append(f"{onset}e")
+        elif vowel == "e":
+            variants.append(f"{onset}i")
+        elif vowel == "u":
+            variants.append(f"{onset}o")
+        elif vowel == "o":
+            variants.append(f"{onset}u")
+    out = []
+    seen = set()
+    for item in variants:
+        if item and item not in seen:
+            out.append(item)
+            seen.add(item)
+    return tuple(out)
+
+
+def _resolve_ja_cvvc_occurrence_index(alias, alias_type, occurrence_map, occurrence_state, *, expected_idx=None):
     """
     Resolve deterministic CV/CV_HEAD index by token occurrence for Japanese CV/CVVC.
     """
+    alias_type = str(alias_type or "").strip().lower()
     if alias_type not in {"cv", "cv_head"}:
         return None
     tok = _extract_ja_cv_target_syllable(alias, alias_type=alias_type)
     if not tok:
         return None
-    idxs = (occurrence_map or {}).get(tok) or []
+    occ_map = occurrence_map or {}
+    resolved_tok = tok
+    idxs = []
+    for cand in _ja_occurrence_token_variants(tok):
+        cand_idxs = occ_map.get(cand) or []
+        if cand_idxs:
+            resolved_tok = cand
+            idxs = [int(v) for v in cand_idxs]
+            break
     if not idxs:
         return None
+    idxs = sorted(idxs)
+
+    if expected_idx is not None:
+        try:
+            e = max(0, int(expected_idx))
+        except Exception:
+            e = 0
+        if e in idxs:
+            chosen = e
+        else:
+            left = [v for v in idxs if v <= e]
+            chosen = left[-1] if left else idxs[0]
+        if occurrence_state is not None:
+            occurrence_state[(str(alias_type), resolved_tok, "expected")] = int(chosen)
+        return int(chosen)
+
     if occurrence_state is None:
         return idxs[0]
 
-    state_key = (str(alias_type), tok)
+    state_key = (str(alias_type), resolved_tok)
     used = int(occurrence_state.get(state_key, 0))
     if used >= len(idxs):
         used = len(idxs) - 1
@@ -919,16 +913,20 @@ def _ja_soft_cv_match_level(target_token, candidate_token):
     co, cv = split_ja_romaji_syllable(c)
     if tv not in JA_VOWELS or cv != tv:
         return 0
+    t_youon = _is_ja_youon_core(t)
+    c_youon = _is_ja_youon_core(c)
+    if t_youon != c_youon:
+        return 0
 
     t_sig = _ja_onset_signature(to)
     c_sig = _ja_onset_signature(co)
     if t_sig and c_sig and t_sig == c_sig:
-        t_has_glide = len(to) > 1 and any(ch in {'y', 'w'} for ch in to[1:])
-        c_has_glide = len(co) > 1 and any(ch in {'y', 'w'} for ch in co[1:])
+        t_has_glide = t_youon
+        c_has_glide = c_youon
         t_tail = _ja_syllable_tail(t)
         c_tail = _ja_syllable_tail(c)
         if t_has_glide != c_has_glide:
-            return 1
+            return 0
         if t_tail == c_tail:
             return 2
         if (not t_tail) or (not c_tail):
@@ -936,14 +934,14 @@ def _ja_soft_cv_match_level(target_token, candidate_token):
     if to and co and to[:1] == co[:1]:
         return 1
     return 0
-
-
 def _ja_onset_class(onset):
     o = (onset or '').strip().lower()
     if not o:
         return 'other'
     if o in JA_NASAL_ONSETS or o.startswith('m'):
         return 'nasal'
+    if o in JA_LIQUID_ONSETS or o.startswith('r') or o.startswith('l'):
+        return 'liquid'
     if o in JA_VOICED_ONSETS:
         return 'voiced'
     if o in JA_VOICELESS_ONSETS:
@@ -963,16 +961,15 @@ def _ja_special_mora_class(token):
         return "geminate"
     if raw in {"-", "ー", "long"}:
         return "long"
+    raw_norm = _normalize_ja_syllable_token(raw)
     onset, vowel = split_ja_romaji_syllable(norm)
-    if onset and any(ch in {"y", "w"} for ch in onset[1:]):
+    if _is_ja_youon_core(norm) or _is_ja_youon_core(raw):
         return "youon"
-    if norm != raw and _ja_soft_cv_match_level(norm, raw) >= 2:
+    if norm != raw_norm and _ja_soft_cv_match_level(norm, raw_norm) >= 2:
         return "inserted"
     if (not onset) and vowel in JA_VOWELS and raw.endswith(vowel * 2):
         return "long"
     return "plain"
-
-
 def _select_vcv_syllable_index(alias, expected_idx, syllables_info):
     if not syllables_info:
         return 0
@@ -990,14 +987,19 @@ def _select_vcv_syllable_index(alias, expected_idx, syllables_info):
     _to, target_vowel = split_ja_romaji_syllable(target)
     target_tail = _ja_syllable_tail(target)
     target_cls = _ja_onset_class(target_onset)
-    dist_penalty = 8 if target_cls in {'nasal', 'voiced'} else 7
+    dist_penalty = 9 if target_cls in {'nasal', 'liquid'} else 8 if target_cls == 'voiced' else 7
     def _score_idx(i):
         cand = _syllable_info_token(syllables_info[i])
         cand_onset = _extract_ja_onset_token(cand)
         _co, cand_vowel = split_ja_romaji_syllable(cand)
         cand_tail = _ja_syllable_tail(cand)
+        cand_cls = _ja_onset_class(cand_onset)
         soft_match = _ja_soft_cv_match_level(target, cand)
         score = _vcv_syllable_match_score(target, cand) - abs(i - e) * dist_penalty
+        if target_cls == 'nasal' and cand_cls != 'nasal':
+            score -= 12
+        elif target_cls == 'liquid' and cand_cls != 'liquid':
+            score -= 12
         if target_vowel and cand_vowel and target_vowel != cand_vowel:
             score -= 26
         if target_onset and cand_onset:
@@ -1035,8 +1037,8 @@ def _select_vcv_syllable_index(alias, expected_idx, syllables_info):
     best_gain = best_score - expected_score
     if best_gain < 20:
         return e
-    # VCV는 한 칸 전진을 매우 보수적으로 허용한다.
-    # 다음 칸이 "정확히 target 토큰"이고 현재 expected가 target이 아닐 때만 전진.
+    # VCV forward shift is allowed very conservatively.
+    # Only move when next slot is exact target and expected slot is not target.
     cand_tok = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[best_idx]))
     exp_tok = _normalize_ja_syllable_token(_syllable_info_token(syllables_info[e]))
     tgt_tok = _normalize_ja_syllable_token(target)
@@ -1067,7 +1069,7 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
     target_tail = _ja_syllable_tail(target)
     target_cls = _ja_onset_class(target_onset)
     target_special = _ja_special_mora_class(target)
-    dist_penalty = 7 if target_cls in {'nasal', 'voiced'} else 6
+    dist_penalty = 8 if target_cls in {'nasal', 'liquid'} else 7 if target_cls == 'voiced' else 6
     expected_soft_match = _ja_soft_cv_match_level(target, _syllable_info_token(syllables_info[e]))
     def _score_idx(i):
         cand = _syllable_info_token(syllables_info[i])
@@ -1080,10 +1082,14 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
         score = _vcv_syllable_match_score(target, cand) - abs(i - e) * dist_penalty
         if target_cls == 'nasal' and cand_cls != 'nasal':
             score -= 18
+        elif target_cls == 'liquid' and cand_cls != 'liquid':
+            score -= 16
         elif target_cls == 'voiced' and cand_cls == 'voiceless':
             score -= 12
         elif target_cls == 'voiceless' and cand_cls == 'voiced':
             score -= 8
+        if target_cls in {'nasal', 'liquid'} and cand_cls == 'voiceless':
+            score -= 6
         if target_onset and cand_onset and target_onset[:1] == cand_onset[:1]:
             score += 4
         elif target_onset and cand_onset:
@@ -1126,7 +1132,7 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
             best_score = score
             best_idx = i
     if best_score >= 54:
-        hold_margin = 14 if target_cls in {'nasal', 'voiced'} else 16
+        hold_margin = 20 if target_cls in {'nasal', 'liquid'} else 14 if target_cls == 'voiced' else 16
         best_gain = best_score - expected_score
         expected_tok = _syllable_info_token(syllables_info[e])
         best_tok = _syllable_info_token(syllables_info[best_idx])
@@ -1148,6 +1154,14 @@ def _select_ja_cv_syllable_index(alias, expected_idx, syllables_info, alias_type
         if target_onset and best_onset != target_onset and expected_onset == target_onset and best_gain < 24:
             if best_soft < 2:
                 return e
+        if (
+            target_cls in {'nasal', 'liquid'}
+            and target_onset
+            and expected_onset == target_onset
+            and best_onset != target_onset
+            and best_gain < 32
+        ):
+            return e
         if (not target_tail) and best_tail and not expected_tail and best_gain < 22:
             return e
         if target_special in {"nasal", "geminate", "long"}:

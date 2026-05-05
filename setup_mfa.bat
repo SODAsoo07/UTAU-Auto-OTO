@@ -1,1243 +1,3244 @@
 @echo off
-setlocal EnableExtensions DisableDelayedExpansion
-chcp 65001 >nul
-title UTAU Auto OTO - MFA Setup
+
 @echo off
 
-set "INSTALL_ML=0"
-set "INSTALL_CUDA_RUNTIME=0"
-set "DELETE_OLD_AFTER_INSTALL=0"
-set "AUTO_ML=0"
-set "INTERACTIVE=1"
-set "PREFER_BUNDLED_RUNTIME=1"
-set "ALLOW_DEGRADED_KO=1"
-set "RETRY_COUNT_NETWORK=3"
-set "RETRY_COUNT_PIP=3"
-set "RETRY_COUNT_CREATE=2"
-set "RETRY_COUNT_MODEL=2"
-set "RETRY_WAIT_SECONDS=5"
-set "MIN_FREE_SPACE_MB=4096"
+setlocal EnableExtensions DisableDelayedExpansion
 
+chcp 65001 >nul
+
+title UTAU Auto OTO - MFA Setup and Recovery
+
+set "INSTALL_ML=0"
+set "DISABLE_ML=0"
+
+set "DELETE_OLD_AFTER_INSTALL=0"
+
+set "AUTO_ML=0"
+
+set "NON_INTERACTIVE=0"
+
+set "DIRECT_SETUP=0"
+
+set "NO_RECOVERY_SHIM=0"
+
+set "FORCE_CLEAN=0"
+
+set "FORCE_MENU=0"
+
+set "REQUESTED_MODE="
+
+set "WRAPPER_MODE="
+
+set "REQUESTED_LANGUAGE="
+
+set "RECOVERY_LANGUAGE=korean"
+
+set "RUNTIME_ROOT_OVERRIDE="
+
+set "SETUP_MFA_SELF=%~f0"
+
+set "SETUP_MFA_DIR=%~dp0"
+
+set "MFA_RUNTIME_BUNDLE_DIR="
+
+set "HAS_CERTUTIL=1"
+
+set "HAS_TAR=1"
+
+REM Clean host Python environment to avoid python311.dll conflicts.
+set "PYTHONHOME="
+set "PYTHONPATH="
+set "PYTHONEXECUTABLE="
+set "__PYVENV_LAUNCHER__="
+set "VIRTUAL_ENV="
+set "CONDA_DEFAULT_ENV="
+set "CONDA_PROMPT_MODIFIER="
+set "PYTHONNOUSERSITE=1"
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 :parse_args
+
 if "%~1"=="" goto :args_done
+
 if /i "%~1"=="--help" goto :show_help
-if /i "%~1"=="--non-interactive" set "INTERACTIVE=0"
-if /i "%~1"=="--yes" set "INTERACTIVE=0"
+
+if /i "%~1"=="--runtime-root" goto :capture_runtime_root
+
+set "ARG_RAW=%~1"
+
+if /i "%ARG_RAW:~0,15%"=="--runtime-root=" goto :capture_runtime_root_inline
+
+if /i "%~1"=="--language" goto :capture_language
+
+if /i "%ARG_RAW:~0,11%"=="--language=" goto :capture_language_inline
+
 if /i "%~1"=="--with-ml" set "INSTALL_ML=1"
+
 if /i "%~1"=="--install-ml" set "INSTALL_ML=1"
-if /i "%~1"=="--with-cuda" (
-    set "INSTALL_ML=1"
-    set "INSTALL_CUDA_RUNTIME=1"
+
+if /i "%~1"=="--without-ml" (
+    set "DISABLE_ML=1"
+    set "INSTALL_ML=0"
 )
-if /i "%~1"=="--install-cuda" (
-    set "INSTALL_ML=1"
-    set "INSTALL_CUDA_RUNTIME=1"
+
+if /i "%~1"=="--skip-ml" (
+    set "DISABLE_ML=1"
+    set "INSTALL_ML=0"
 )
-if /i "%~1"=="--skip-bundled-runtime" set "PREFER_BUNDLED_RUNTIME=0"
-if /i "%~1"=="--strict-korean-deps" set "ALLOW_DEGRADED_KO=0"
+
+if /i "%~1"=="--non-interactive" set "NON_INTERACTIVE=1"
+
+if /i "%~1"=="--yes" set "NON_INTERACTIVE=1"
+
+if /i "%~1"=="--menu" set "FORCE_MENU=1"
+
+if /i "%~1"=="--install" set "REQUESTED_MODE=install"
+
+if /i "%~1"=="--recovery" set "REQUESTED_MODE=recovery"
+
+if /i "%~1"=="--recover" set "REQUESTED_MODE=recovery"
+
+if /i "%~1"=="--mode=install" set "REQUESTED_MODE=install"
+
+if /i "%~1"=="--mode=recovery" set "REQUESTED_MODE=recovery"
+
+if /i "%~1"=="--mode=menu" set "FORCE_MENU=1"
+
+if /i "%~1"=="--direct-setup" set "DIRECT_SETUP=1"
+
+if /i "%~1"=="--no-recovery-shim" set "NO_RECOVERY_SHIM=1"
+
+if /i "%~1"=="--clean" set "FORCE_CLEAN=1"
+
 shift
+
 goto :parse_args
 
+:capture_runtime_root
+
+shift
+
+if "%~1"=="" goto :missing_runtime_root
+
+set "RUNTIME_ROOT_CANDIDATE=%~1"
+
+if /i "%RUNTIME_ROOT_CANDIDATE:~0,2%"=="--" goto :missing_runtime_root
+
+set "RUNTIME_ROOT_OVERRIDE=%~1"
+
+shift
+
+goto :parse_args
+
+:capture_runtime_root_inline
+
+set "RUNTIME_ROOT_OVERRIDE=%ARG_RAW:~15%"
+
+if "%RUNTIME_ROOT_OVERRIDE%"=="" goto :missing_runtime_root
+
+shift
+
+goto :parse_args
+
+:capture_language
+
+shift
+
+if "%~1"=="" goto :missing_language
+
+set "LANGUAGE_CANDIDATE=%~1"
+
+if /i "%LANGUAGE_CANDIDATE:~0,2%"=="--" goto :missing_language
+
+set "REQUESTED_LANGUAGE=%~1"
+
+shift
+
+goto :parse_args
+
+:capture_language_inline
+
+set "REQUESTED_LANGUAGE=%ARG_RAW:~11%"
+
+if "%REQUESTED_LANGUAGE%"=="" goto :missing_language
+
+shift
+
+goto :parse_args
+
+:missing_runtime_root
+
+echo [FAILED] --runtime-root requires a valid path value.
+
+echo          Example: --runtime-root "C:\Users\%USERNAME%\AppData\Local\UTAU_Auto_OTO"
+
+exit /b 1
+
+:missing_language
+
+echo [FAILED] --language requires a value ^(korean or japanese^).
+
+echo          Example: --language japanese
+
+exit /b 1
+
 :show_help
-echo Usage: setup_mfa.bat [--with-ml] [--with-cuda] [--non-interactive] [--skip-bundled-runtime] [--strict-korean-deps]
-echo Installs a local MFA environment using Micromamba.
-echo Default runtime root: %%LOCALAPPDATA%%\UTAU_Auto_OTO_v3
-echo Optional:
-echo   --with-ml / --install-ml  Install ML dependencies (pandas/sklearn/lightgbm/pytorch).
-echo   --with-cuda / --install-cuda  Also force CUDA-enabled torch runtime check/install.
-echo   --non-interactive / --yes  Do not wait for key input ^(for installer automation^).
-echo   --skip-bundled-runtime  Ignore bundled MFA runtime payload and force online bootstrap.
-echo   --strict-korean-deps  Fail setup when Korean tokenizer deps are unavailable ^(default: degraded continue^).
+
+echo Usage: setup_mfa.bat [--install ^| --recovery ^| --menu] [--runtime-root PATH] [--with-ml ^| --without-ml] [--non-interactive]
+
+echo Installs or repairs MFA runtime ^(.env^), micromamba packages, and language/model dependencies.
+echo ML dependencies are installed by default during install mode.
+
+echo.
+
+echo   --install                 Run full install flow
+
+echo   --recovery / --recover    Run runtime recovery flow
+
+echo   --menu                    Show mode selection menu
+
+echo   --runtime-root PATH       Explicit runtime root path
+
+echo   --runtime-root=PATH       Same as above ^(inline form^)
+
+echo   --language NAME           Recovery language ^(korean or japanese^)
+
+echo   --language=NAME           Same as above ^(inline form^)
+
+echo   --with-ml / --install-ml  Install ML dependencies ^(pandas/lightgbm/onnxruntime^)
+echo   --without-ml / --skip-ml  Skip ML dependency install
+
+echo   --non-interactive         Run without prompts ^(requires valid runtime root^)
+
+echo   --direct-setup            Skip wrapper and run install flow directly
+
+echo   --no-recovery-shim        Disable runtime_recovery.ps1 wrapper
+
+echo   --clean                   Force-clean MFA env before install
+
 exit /b 0
 
 :args_done
 
-echo ====================================================
-echo   UTAU Auto OTO - MFA Lightweight Environment Setup
-echo   This script only needs to run once.
-echo ====================================================
-echo.
-echo [INFO] Initial install/recovery can take a while depending on network speed.
-echo.
-echo [INFO] First-time setup or repair can take 10-20 minutes.
-echo [INFO] Keep this window open until setup is complete.
-echo [INFO] Acoustic model download for Korean/Japanese may continue after base install.
-echo.
+if not defined REQUESTED_LANGUAGE if defined UTOA_MFA_RECOVERY_LANGUAGE set "REQUESTED_LANGUAGE=%UTOA_MFA_RECOVERY_LANGUAGE%"
 
-set "APP_DIR=%~dp0"
-set "APP_DIR=%APP_DIR:~0,-1%"
-set "RUNTIME_ROOT_FROM_USER=0"
-set "RUNTIME_ROOT=%UTOA_MFA_SHARED_ROOT%"
-if defined RUNTIME_ROOT set "RUNTIME_ROOT_FROM_USER=1"
-if not defined RUNTIME_ROOT (
-    if defined LOCALAPPDATA (
-        set "RUNTIME_ROOT=%LOCALAPPDATA%\UTAU_Auto_OTO_v3"
+if defined REQUESTED_LANGUAGE (
+
+    if /i "%REQUESTED_LANGUAGE%"=="japanese" (
+
+        set "RECOVERY_LANGUAGE=japanese"
+
+    ) else if /i "%REQUESTED_LANGUAGE%"=="korean" (
+
+        set "RECOVERY_LANGUAGE=korean"
+
     ) else (
-        set "RUNTIME_ROOT=%USERPROFILE%\AppData\Local\UTAU_Auto_OTO_v3"
-    )
-)
-set "ASCII_RUNTIME_FALLBACK=%PUBLIC%\UTAU_Auto_OTO_v3"
-if not defined ASCII_RUNTIME_FALLBACK set "ASCII_RUNTIME_FALLBACK=%SystemDrive%\Users\Public\UTAU_Auto_OTO_v3"
-if not defined ASCII_RUNTIME_FALLBACK set "ASCII_RUNTIME_FALLBACK=C:\Users\Public\UTAU_Auto_OTO_v3"
-if "%RUNTIME_ROOT_FROM_USER%"=="0" (
-    call :path_requires_ascii_fallback "%RUNTIME_ROOT%"
-    if not errorlevel 1 (
-        echo [WARN] Auto-selected runtime path contains non-ASCII or shell-sensitive characters.
-        echo        Falling back to ASCII-safe path: %ASCII_RUNTIME_FALLBACK%
-        set "RUNTIME_ROOT=%ASCII_RUNTIME_FALLBACK%"
-    )
-) else (
-    call :path_requires_ascii_fallback "%RUNTIME_ROOT%"
-    if not errorlevel 1 (
-        echo [WARN] User-provided runtime path may be unstable for MFA launcher:
-        echo        %RUNTIME_ROOT%
-        echo        Recommended ASCII path: %ASCII_RUNTIME_FALLBACK%
-    )
-)
-if not exist "%RUNTIME_ROOT%" mkdir "%RUNTIME_ROOT%" >nul 2>nul
-set "OLD_ENV_DIR="
-set "OLD_MICROMAMBA_ROOT="
-set "OLD_APP_ENV_DIR=%APP_DIR%\.env"
-set "OLD_APP_MICROMAMBA_ROOT=%APP_DIR%\micromamba"
-if exist "%OLD_APP_ENV_DIR%" (
-    if /i not "%OLD_APP_ENV_DIR%"=="%RUNTIME_ROOT%\.env" (
-        set "OLD_ENV_DIR=%OLD_APP_ENV_DIR%"
-        set "OLD_MICROMAMBA_ROOT=%OLD_APP_MICROMAMBA_ROOT%"
-    )
-)
-set "OLD_PUBLIC_ROOT=%PUBLIC%"
-if not defined OLD_PUBLIC_ROOT set "OLD_PUBLIC_ROOT=%SystemDrive%\Users\Public"
-if not defined OLD_PUBLIC_ROOT set "OLD_PUBLIC_ROOT=C:\Users\Public"
-if not defined OLD_ENV_DIR set "OLD_ENV_DIR=%OLD_PUBLIC_ROOT%\UTAU_Auto_OTO_v3\.env"
-if not defined OLD_MICROMAMBA_ROOT set "OLD_MICROMAMBA_ROOT=%OLD_PUBLIC_ROOT%\UTAU_Auto_OTO_v3\micromamba"
-set "ENV_DIR=%RUNTIME_ROOT%\.env"
-set "MICROMAMBA_ROOT=%RUNTIME_ROOT%\micromamba"
-set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\Library\bin\micromamba.exe"
-set "MICROMAMBA_ARCHIVE=%RUNTIME_ROOT%\micromamba-win-64-latest.tar.bz2"
-set "MFA_EXE=%ENV_DIR%\Scripts\mfa.exe"
-set "KO_WHEEL_DIR=%APP_DIR%\mfa_ko_wheels"
-set "BUNDLED_RUNTIME_ROOT=%APP_DIR%\mfa_runtime_bundle"
-set "BUNDLED_ENV_DIR=%BUNDLED_RUNTIME_ROOT%\.env"
-set "BUNDLED_MICROMAMBA_ROOT=%BUNDLED_RUNTIME_ROOT%\micromamba"
-set "BUNDLED_MFA_EXE=%BUNDLED_ENV_DIR%\Scripts\mfa.exe"
-if not exist "%BUNDLED_MFA_EXE%" if exist "%BUNDLED_ENV_DIR%\Scripts\mfa.bat" set "BUNDLED_MFA_EXE=%BUNDLED_ENV_DIR%\Scripts\mfa.bat"
-if not exist "%BUNDLED_MFA_EXE%" if exist "%BUNDLED_ENV_DIR%\Scripts\mfa.cmd" set "BUNDLED_MFA_EXE=%BUNDLED_ENV_DIR%\Scripts\mfa.cmd"
-set "MFA_PYTHON_VERSION=3.10"
-set "VC_REDIST_EXE=%RUNTIME_ROOT%\vc_redist.x64.exe"
-set "MICROMAMBA_URL_API=https://micro.mamba.pm/api/micromamba/win-64/latest"
-set "MICROMAMBA_URL_GITHUB_EXE=https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-win-64"
 
-echo [INFO] MFA runtime root: %RUNTIME_ROOT%
-echo [INFO] MFA environment path: %ENV_DIR%
-echo [INFO] MFA Micromamba path: %MICROMAMBA_ROOT%
-if exist "%KO_WHEEL_DIR%" echo [INFO] Korean offline wheel bundle path: %KO_WHEEL_DIR%
-echo [INFO] Setup options: ML=%INSTALL_ML%, CUDA=%INSTALL_CUDA_RUNTIME%, INTERACTIVE=%INTERACTIVE%, PREFER_BUNDLED_RUNTIME=%PREFER_BUNDLED_RUNTIME%, ALLOW_DEGRADED_KO=%ALLOW_DEGRADED_KO%
-if exist "%BUNDLED_MFA_EXE%" (
-    echo [INFO] Bundled MFA runtime payload detected: %BUNDLED_RUNTIME_ROOT%
+        echo [WARN] Unsupported recovery language "%REQUESTED_LANGUAGE%". Falling back to korean.
+
+        set "RECOVERY_LANGUAGE=korean"
+
+    )
+
 )
-call :run_step "Preflight checks (writable path + disk space)" :preflight_checks
+
+for %%I in ("%SETUP_MFA_DIR%") do set "SETUP_MFA_DIR_NORM=%%~fI"
+
+if defined SETUP_MFA_DIR_NORM if "%SETUP_MFA_DIR_NORM:~-1%"=="\" set "SETUP_MFA_DIR_NORM=%SETUP_MFA_DIR_NORM:~0,-1%"
+
+if defined RUNTIME_ROOT_OVERRIDE (
+
+    for %%I in ("%RUNTIME_ROOT_OVERRIDE%") do set "APP_DIR=%%~fI"
+
+) else (
+
+    for %%I in ("%SETUP_MFA_SELF%") do set "APP_DIR=%%~dpI"
+
+)
+
+if defined APP_DIR if "%APP_DIR:~-1%"=="\" set "APP_DIR=%APP_DIR:~0,-1%"
+
+if not defined APP_DIR set "APP_DIR=%CD%"
+
+if not defined RUNTIME_ROOT_OVERRIDE if /i "%APP_DIR%"=="%WINDIR%\System32" (
+
+    echo [WARN] setup_mfa.bat was launched from System32. Falling back to LOCALAPPDATA runtime root.
+
+    echo        If this is unintended, run setup_mfa.bat from the installed app folder.
+
+    set "APP_DIR=%LOCALAPPDATA%\UTAU_Auto_OTO_v3"
+
+)
+
+if defined RUNTIME_ROOT_OVERRIDE (
+
+    echo [INFO] runtime-root override: %APP_DIR%
+
+)
+
+call :ensure_runtime_root_layout
+
 if errorlevel 1 exit /b 1
 
-if exist "%APP_DIR%\ML_models" set "AUTO_ML=1"
-if exist "%APP_DIR%\models_installed\oto_ml" set "AUTO_ML=1"
-if "%AUTO_ML%"=="1" if "%INSTALL_ML%"=="0" (
-    echo [INFO] ML bundle assets detected. Enabling ML dependencies.
+call :resolve_runtime_state_root
+
+if "%DIRECT_SETUP%"=="1" goto :direct_setup_start
+
+if "%NO_RECOVERY_SHIM%"=="1" set "REQUESTED_MODE=install"
+
+call :resolve_runtime_recovery_script
+
+if "%FORCE_MENU%"=="1" set "WRAPPER_MODE=menu"
+
+if not defined WRAPPER_MODE if defined REQUESTED_MODE set "WRAPPER_MODE=%REQUESTED_MODE%"
+
+if not defined WRAPPER_MODE if "%INSTALL_ML%"=="1" set "WRAPPER_MODE=install"
+
+if not defined WRAPPER_MODE if "%NON_INTERACTIVE%"=="1" (
+
+    if defined RUNTIME_RECOVERY_SCRIPT if exist "%RUNTIME_STATE_ROOT%\.env" (
+
+        set "WRAPPER_MODE=recovery"
+
+    ) else (
+
+        set "WRAPPER_MODE=install"
+
+    )
+
+)
+
+if not defined WRAPPER_MODE set "WRAPPER_MODE=menu"
+
+if /i "%WRAPPER_MODE%"=="menu" call :select_start_mode
+
+if /i "%WRAPPER_MODE%"=="exit" exit /b 2
+
+if /i "%WRAPPER_MODE%"=="install" if "%INSTALL_ML%"=="0" if "%DISABLE_ML%"=="0" (
+    echo [INFO] Initial install defaults to ML dependency install.
+    echo [INFO] Use --without-ml to skip ML packages.
     set "INSTALL_ML=1"
 )
-if "%INSTALL_ML%"=="1" (
-    where /q nvidia-smi
-    if not errorlevel 1 (
-        if "%INSTALL_CUDA_RUNTIME%"=="0" (
-            echo [INFO] NVIDIA GPU detected. CUDA runtime bootstrap will be checked automatically.
-            set "INSTALL_CUDA_RUNTIME=1"
-        )
-    )
-)
-if defined OLD_ENV_DIR if exist "%OLD_ENV_DIR%" (
-    if /i not "%OLD_ENV_DIR%"=="%ENV_DIR%" (
-        call :run_step "Legacy environment decision" :handle_old_env
-        if errorlevel 1 exit /b 1
-    )
+
+:wrapper_dispatch
+
+if /i "%WRAPPER_MODE%"=="install" goto :wrapper_install
+
+if /i "%WRAPPER_MODE%"=="recovery" goto :wrapper_recovery
+
+echo [WARN] : %WRAPPER_MODE%
+
+set "WRAPPER_MODE=install"
+
+goto :wrapper_install
+
+:wrapper_install
+
+call :preflight_install_tools
+
+if errorlevel 1 exit /b 1
+
+set "WRAPPER_ARGS=--direct-setup --no-recovery-shim"
+
+if "%INSTALL_ML%"=="1" set "WRAPPER_ARGS=%WRAPPER_ARGS% --with-ml"
+
+if "%NON_INTERACTIVE%"=="1" set "WRAPPER_ARGS=%WRAPPER_ARGS% --non-interactive"
+
+set "WRAPPER_RUNTIME_ARG="
+
+if defined RUNTIME_ROOT_OVERRIDE set "WRAPPER_RUNTIME_ARG=--runtime-root ""%APP_DIR%"""
+
+if "%FORCE_CLEAN%"=="1" set "WRAPPER_ARGS=%WRAPPER_ARGS% --clean"
+
+echo [INFO] %WRAPPER_ARGS%
+
+if defined RUNTIME_ROOT_OVERRIDE (
+    call "%SETUP_MFA_SELF%" %WRAPPER_ARGS% --runtime-root "%APP_DIR%"
+) else (
+    call "%SETUP_MFA_SELF%" %WRAPPER_ARGS%
 )
 
-if "%PREFER_BUNDLED_RUNTIME%"=="1" (
-    call :run_step "Bundled runtime restore check" :try_restore_bundled_runtime
-    if errorlevel 1 exit /b 1
+exit /b %ERRORLEVEL%
+
+:wrapper_recovery
+
+if not defined RUNTIME_RECOVERY_SCRIPT (
+
+    echo [WARN] runtime_recovery.ps1
+
+    if "%NON_INTERACTIVE%"=="1" (
+
+        echo [FAILED] setup_mfa.bat --install
+
+        exit /b 1
+
+    )
+
+    echo [INFO] Processing...
+
+    set "WRAPPER_MODE=install"
+
+    goto :wrapper_install
+
 )
+
+echo [INFO] %RUNTIME_RECOVERY_SCRIPT%
+
+if "%NON_INTERACTIVE%"=="1" (
+
+    if "%INSTALL_ML%"=="1" (
+
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language %RECOVERY_LANGUAGE% -NonInteractive -WithMl
+
+    ) else (
+
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language %RECOVERY_LANGUAGE% -NonInteractive
+
+    )
+
+) else (
+
+    if "%INSTALL_ML%"=="1" (
+
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language %RECOVERY_LANGUAGE% -WithMl
+
+    ) else (
+
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNTIME_RECOVERY_SCRIPT%" -SetupScriptPath "%SETUP_MFA_SELF%" -RuntimeRoot "%APP_DIR%" -Language %RECOVERY_LANGUAGE%
+
+    )
+
+)
+
+set "RECOVERY_RC=%ERRORLEVEL%"
+
+if not "%RECOVERY_RC%"=="0" (
+
+    echo [FAILED] runtime_recovery.ps1 ^(code=%RECOVERY_RC%^)
+
+)
+
+if not "%RECOVERY_RC%"=="0" if not "%NON_INTERACTIVE%"=="1" pause
+
+exit /b %RECOVERY_RC%
+
+:resolve_runtime_recovery_script
+
+set "RUNTIME_RECOVERY_SCRIPT="
+
+if exist "%APP_DIR%\runtime_recovery.ps1" (
+
+    set "RUNTIME_RECOVERY_SCRIPT=%APP_DIR%\runtime_recovery.ps1"
+
+)
+
+if not defined RUNTIME_RECOVERY_SCRIPT if exist "%APP_DIR%\scripts\runtime_recovery.ps1" (
+
+    set "RUNTIME_RECOVERY_SCRIPT=%APP_DIR%\scripts\runtime_recovery.ps1"
+
+)
+
+if not defined RUNTIME_RECOVERY_SCRIPT if defined SETUP_MFA_DIR_NORM if exist "%SETUP_MFA_DIR_NORM%\runtime_recovery.ps1" (
+
+    set "RUNTIME_RECOVERY_SCRIPT=%SETUP_MFA_DIR_NORM%\runtime_recovery.ps1"
+
+)
+
+if not defined RUNTIME_RECOVERY_SCRIPT if defined SETUP_MFA_DIR_NORM if exist "%SETUP_MFA_DIR_NORM%\scripts\runtime_recovery.ps1" (
+
+    set "RUNTIME_RECOVERY_SCRIPT=%SETUP_MFA_DIR_NORM%\scripts\runtime_recovery.ps1"
+
+)
+
+goto :eof
+
+:resolve_runtime_state_root
+
+set "RUNTIME_STATE_ROOT=%APP_DIR%"
+set "RUNTIME_STATE_RELOCATED=0"
+set "RUNTIME_STATE_REASON="
+set "RUNTIME_STATE_CANDIDATE="
+set "LONG_PATH_PROBE_LEN="
+set "LONG_PATH_PROBE_LEN_NUM=0"
+
+if not defined LOCALAPPDATA goto :eof
+
+set "RUNTIME_STATE_CANDIDATE=%LOCALAPPDATA%\UTAU_Auto_OTO_v3"
+
+if /i "%RUNTIME_STATE_CANDIDATE%"=="%APP_DIR%" goto :eof
+
+for /f "usebackq delims=" %%L in (`powershell -NoProfile -Command "$p=[System.IO.Path]::GetFullPath($args[0]); [Console]::Write($p.Length)" -- "%APP_DIR%\micromamba\pkgs\numpy-2.2.6-py310h4987827_0\Lib\site-packages\numpy\typing\tests\data\pass\__pycache__\ndarray_shape_manipulation.cpython-310.pyc" 2^>nul`) do set "LONG_PATH_PROBE_LEN=%%L"
+
+if not defined LONG_PATH_PROBE_LEN goto :eof
+
+set /a LONG_PATH_PROBE_LEN_NUM=%LONG_PATH_PROBE_LEN% >nul 2>nul
+
+if %LONG_PATH_PROBE_LEN_NUM% LSS 240 goto :eof
+
+set "RUNTIME_STATE_ROOT=%RUNTIME_STATE_CANDIDATE%"
+set "RUNTIME_STATE_RELOCATED=1"
+set "RUNTIME_STATE_REASON=projected package path length %LONG_PATH_PROBE_LEN_NUM%"
+
+goto :eof
+
+:ensure_runtime_root_layout
+
+set "RUNTIME_PAYLOAD_OK=0"
+
+call :is_valid_runtime_root "%APP_DIR%"
+
+if "%CHECK_VALID%"=="1" set "RUNTIME_PAYLOAD_OK=1"
+
+if "%RUNTIME_PAYLOAD_OK%"=="1" exit /b 0
+
+if defined RUNTIME_ROOT_OVERRIDE (
+
+    echo [FAILED] runtime-root is missing required files:
+
+    echo         "%APP_DIR%\UTAU_Auto_OTO\UTAU_Auto_OTO.exe" ^(release layout^)
+
+    echo         OR "%APP_DIR%\requirements.txt" + "%APP_DIR%\requirements-ml.txt" ^(source layout^)
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
+)
+
+call :auto_detect_runtime_root
+
+if defined DETECTED_RUNTIME_ROOT (
+
+    echo [INFO] Detected runtime root: %DETECTED_RUNTIME_ROOT%
+
+    if "%NON_INTERACTIVE%"=="1" (
+
+        set "APP_DIR=%DETECTED_RUNTIME_ROOT%"
+
+        exit /b 0
+
+    )
+
+    choice /C YN /N /M "Use this detected path for setup/recovery? [Y/N]: "
+
+    if errorlevel 2 (
+
+        echo [INFO] Detected path was not selected.
+
+    ) else (
+
+        set "APP_DIR=%DETECTED_RUNTIME_ROOT%"
+
+        exit /b 0
+
+    )
+
+)
+
+echo [WARN] setup_mfa.bat is not running from the runtime folder.
+
+echo        Run it from the installed folder or pass --runtime-root.
+
+if "%NON_INTERACTIVE%"=="1" (
+
+    echo [FAILED] Non-interactive mode requires --runtime-root when current folder is not valid.
+
+    exit /b 1
+
+)
+
+set "RUNTIME_ROOT_INPUT="
+
+set /p RUNTIME_ROOT_INPUT=Enter runtime root path [empty to cancel]: 
+
+if not defined RUNTIME_ROOT_INPUT (
+
+    echo [FAILED] Runtime root not provided.
+
+    pause
+
+    exit /b 1
+
+)
+
+for %%I in ("%RUNTIME_ROOT_INPUT%") do set "APP_DIR=%%~fI"
+
+call :is_valid_runtime_root "%APP_DIR%"
+
+if "%CHECK_VALID%"=="1" exit /b 0
+
+echo [FAILED] Invalid runtime root: %APP_DIR%
+
+echo         Required marker not found:
+
+echo         "%APP_DIR%\UTAU_Auto_OTO\UTAU_Auto_OTO.exe" ^(release layout^)
+
+echo         OR requirements.txt + requirements-ml.txt ^(source layout^)
+
+pause
+
+exit /b 1
+
+:auto_detect_runtime_root
+
+set "DETECTED_RUNTIME_ROOT="
+
+call :try_runtime_candidate "%APP_DIR%"
+
+if defined DETECTED_RUNTIME_ROOT goto :eof
+
+if defined SETUP_MFA_DIR_NORM (
+
+    call :try_runtime_candidate "%SETUP_MFA_DIR_NORM%"
+
+    if defined DETECTED_RUNTIME_ROOT goto :eof
+
+)
+
+call :try_runtime_candidate "%CD%"
+
+if defined DETECTED_RUNTIME_ROOT goto :eof
+
+if defined LOCALAPPDATA (
+
+    call :try_runtime_candidate "%LOCALAPPDATA%\UTAU_Auto_OTO_v3"
+
+    if defined DETECTED_RUNTIME_ROOT goto :eof
+
+    call :try_runtime_candidate "%LOCALAPPDATA%\UTAU_Auto_OTO"
+
+    if defined DETECTED_RUNTIME_ROOT goto :eof
+
+)
+
+if defined USERPROFILE (
+
+    call :scan_parent_for_runtime "%USERPROFILE%\Desktop"
+
+    if defined DETECTED_RUNTIME_ROOT goto :eof
+
+    call :scan_parent_for_runtime "%USERPROFILE%\Downloads"
+
+    if defined DETECTED_RUNTIME_ROOT goto :eof
+
+)
+
+if defined PUBLIC (
+
+    call :scan_parent_for_runtime "%PUBLIC%\Desktop"
+
+    if defined DETECTED_RUNTIME_ROOT goto :eof
+
+)
+
+goto :eof
+
+:scan_parent_for_runtime
+
+set "SCAN_PARENT=%~1"
+
+if "%SCAN_PARENT%"=="" goto :eof
+
+if not exist "%SCAN_PARENT%" goto :eof
+
+for /f "delims=" %%D in ('dir /b /ad "%SCAN_PARENT%" 2^>nul') do (
+
+    if not defined DETECTED_RUNTIME_ROOT call :try_runtime_candidate "%SCAN_PARENT%\%%D"
+
+)
+
+goto :eof
+
+:try_runtime_candidate
+
+set "TRY_CANDIDATE=%~1"
+
+if "%TRY_CANDIDATE%"=="" goto :eof
+
+for %%I in ("%TRY_CANDIDATE%") do set "TRY_CANDIDATE=%%~fI"
+
+if not exist "%TRY_CANDIDATE%" goto :eof
+
+call :is_valid_runtime_root "%TRY_CANDIDATE%"
+
+if "%CHECK_VALID%"=="1" (
+
+    set "DETECTED_RUNTIME_ROOT=%TRY_CANDIDATE%"
+
+    goto :eof
+
+)
+
+for %%P in ("%TRY_CANDIDATE%\..") do set "TRY_PARENT=%%~fP"
+
+if not defined TRY_PARENT goto :eof
+
+if /i "%TRY_PARENT%"=="%TRY_CANDIDATE%" goto :eof
+
+call :is_valid_runtime_root "%TRY_PARENT%"
+
+if "%CHECK_VALID%"=="1" (
+
+    set "DETECTED_RUNTIME_ROOT=%TRY_PARENT%"
+
+)
+
+goto :eof
+
+:is_valid_runtime_root
+
+set "CHECK_PATH=%~1"
+
+set "CHECK_VALID=0"
+
+if "%CHECK_PATH%"=="" goto :eof
+
+if not exist "%CHECK_PATH%" goto :eof
+
+if exist "%CHECK_PATH%\UTAU_Auto_OTO\UTAU_Auto_OTO.exe" set "CHECK_VALID=1"
+
+if "%CHECK_VALID%"=="0" if exist "%CHECK_PATH%\requirements.txt" if exist "%CHECK_PATH%\requirements-ml.txt" set "CHECK_VALID=1"
+
+goto :eof
+
+:select_start_mode
+
+echo.
+
+echo ====================================================
+
+echo UTAU Auto OTO - Setup Launcher
+
+echo ====================================================
+
+echo [1] Install MFA runtime (basic)
+
+echo [2] Install MFA runtime + ML packages
+
+echo [3] Recovery mode (interactive)
+
+echo [4] Recovery mode (non-interactive)
+
+echo [0] Exit
+
+choice /C 12340 /N /M "Select mode (1/2/3/4/0): "
+
+if errorlevel 5 (
+
+    set "WRAPPER_MODE=exit"
+
+    goto :eof
+
+)
+
+if errorlevel 4 (
+
+    set "WRAPPER_MODE=recovery"
+
+    set "NON_INTERACTIVE=1"
+
+    goto :eof
+
+)
+
+if errorlevel 3 (
+
+    set "WRAPPER_MODE=recovery"
+
+    set "NON_INTERACTIVE=0"
+
+    goto :eof
+
+)
+
+if errorlevel 2 (
+
+    set "WRAPPER_MODE=install"
+
+    set "INSTALL_ML=1"
+
+    goto :eof
+
+)
+
+if errorlevel 1 (
+
+    set "WRAPPER_MODE=install"
+
+    goto :eof
+
+)
+
+set "WRAPPER_MODE=install"
+
+goto :eof
+
+:preflight_install_tools
+
+set "HAS_CERTUTIL=1"
+
+set "HAS_TAR=1"
+
+where powershell >nul 2>nul
+if errorlevel 1 (
+
+    echo [FAILED] powershell
+    exit /b 1
+
+)
+
+where certutil >nul 2>nul
+
+if errorlevel 1 (
+
+    set "HAS_CERTUTIL=0"
+
+    echo [WARN] certutil was not found. MD5 verification will be skipped.
+)
+
+where tar >nul 2>nul
+
+if errorlevel 1 (
+
+    set "HAS_TAR=0"
+
+    echo [WARN] tar was not found. Online micromamba extraction may fail.
+)
+
+goto :eof
+
+:direct_setup_start
+
+call :preflight_install_tools
+
+if errorlevel 1 exit /b 1
+
+if "%INSTALL_ML%"=="0" if "%DISABLE_ML%"=="0" (
+    echo [INFO] Enabling ML dependency install for setup.
+    set "INSTALL_ML=1"
+)
+
+echo ====================================================
+
+echo UTAU Auto OTO - MFA
+
+echo Step 1/5: Runtime bootstrap
+
+echo ====================================================
+
+echo.
+
+echo [INFO] This process can take 10-20 minutes on first install.
+
+echo [INFO] Please keep this window open until setup completes.
+
+echo.
+
+echo [INFO] MFA runtime preparation started...
+
+echo.
+
+call :resolve_runtime_state_root
+
+if "%RUNTIME_STATE_RELOCATED%"=="1" (
+    echo [WARN] runtime-root is valid, but MFA state will be stored in a shorter LOCALAPPDATA path.
+    echo        payload-root: %APP_DIR%
+    echo        state-root  : %RUNTIME_STATE_ROOT%
+    echo        reason      : %RUNTIME_STATE_REASON%
+)
+
+if not exist "%RUNTIME_STATE_ROOT%" mkdir "%RUNTIME_STATE_ROOT%" >nul 2>nul
+
+pushd "%RUNTIME_STATE_ROOT%" >nul 2>nul
+
+set "OLD_PUBLIC_ROOT=%PUBLIC%"
+
+if not defined OLD_PUBLIC_ROOT set "OLD_PUBLIC_ROOT=C:\Users\Public"
+
+set "OLD_ENV_DIR=%OLD_PUBLIC_ROOT%\UTAU_Auto_OTO_v3\.env"
+
+set "OLD_MICROMAMBA_ROOT=%OLD_PUBLIC_ROOT%\UTAU_Auto_OTO_v3\micromamba"
+
+set "MFA_SHARED_ROOT=%OLD_PUBLIC_ROOT%\UTAU_Auto_OTO_v3\.mfa_root_ascii"
+
+set "ENV_DIR=%RUNTIME_STATE_ROOT%\.env"
+
+set "MICROMAMBA_ROOT=%RUNTIME_STATE_ROOT%\micromamba"
+
+set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\Library\bin\micromamba.exe"
+set "MICROMAMBA_PORTABLE_EXE=%RUNTIME_STATE_ROOT%\micromamba.exe"
+set "PAYLOAD_MICROMAMBA_PORTABLE_EXE=%APP_DIR%\micromamba.exe"
+
+if exist "%MICROMAMBA_PORTABLE_EXE%" (
+    set "MICROMAMBA_EXE=%MICROMAMBA_PORTABLE_EXE%"
+)
+
+if not exist "%MICROMAMBA_PORTABLE_EXE%" if exist "%PAYLOAD_MICROMAMBA_PORTABLE_EXE%" (
+    set "MICROMAMBA_EXE=%PAYLOAD_MICROMAMBA_PORTABLE_EXE%"
+)
+
+set "MICROMAMBA_ARCHIVE=%TEMP%\utau_auto_oto_micromamba-win-64-latest.tar.bz2"
+
+set "MICROMAMBA_LATEST_URL=https://micro.mamba.pm/api/micromamba/win-64/latest"
+set "MICROMAMBA_EXE_URL=https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-win-64"
+
+set "MICROMAMBA_MD5_EXPECTED="
+
+set "MICROMAMBA_MD5_ACTUAL="
+
+set "MFA_EXE=%ENV_DIR%\Scripts\mfa.exe"
+
+set "MFA_PYTHON_VERSION=3.10"
+
+set "BUNDLE_RESTORED=0"
+
+set "AUTO_CLEAN_DONE=0"
+
+set "SETUP_LOG_DIR=%RUNTIME_STATE_ROOT%\setup_logs"
+
+set "SETUP_DIAG_LOG="
+
+call :init_setup_diagnostics
+
+call :resolve_runtime_bundle_dir
+
+if defined MFA_RUNTIME_BUNDLE_DIR (
+
+    echo [INFO] MFA runtime bundle detected: %MFA_RUNTIME_BUNDLE_DIR%
+
+)
+echo [INFO] MFA env path: %ENV_DIR%
+
+echo [INFO] MFA micromamba path: %MICROMAMBA_ROOT%
+
+if "%FORCE_CLEAN%"=="1" (
+
+    echo [INFO] --clean option detected. Running pre-install clean...
+
+    call :run_clean_recovery
+
+    if errorlevel 1 exit /b 1
+
+)
+
+if exist "%APP_DIR%\ML_models" set "AUTO_ML=1"
+
+if exist "%APP_DIR%\models_installed\oto_ml" set "AUTO_ML=1"
+
+if exist "%APP_DIR%\requirements-ml.txt" set "AUTO_ML=1"
+
+if exist "%APP_DIR%\UTAU_Auto_OTO\pandas" set "AUTO_ML=1"
+
+if exist "%APP_DIR%\UTAU_Auto_OTO\onnxruntime" set "AUTO_ML=1"
+
+if exist "%APP_DIR%\UTAU_Auto_OTO\lightgbm" set "AUTO_ML=1"
+
+if "%AUTO_ML%"=="1" if "%INSTALL_ML%"=="0" (
+
+    echo [INFO] ML runtime hints detected. Enabling ML dependency install.
+
+    set "INSTALL_ML=1"
+
+)
+
+if exist "%OLD_ENV_DIR%" (
+
+    if /i not "%OLD_ENV_DIR%"=="%ENV_DIR%" (
+
+        call :handle_old_env
+
+    )
+
+)
+
+call :restore_from_runtime_bundle
 
 if not exist "%MFA_EXE%" if exist "%ENV_DIR%\Scripts\mfa.bat" set "MFA_EXE=%ENV_DIR%\Scripts\mfa.bat"
-
 if exist "%MFA_EXE%" (
-    call :check_existing_python_version
+
+    call :evaluate_existing_env_python
+
     if errorlevel 1 exit /b 1
+
 )
 
 if exist "%MFA_EXE%" (
-    call :resolve_env_python_exe
-    if not errorlevel 1 (
-        call :run_step "Validate MFA launcher entrypoint" :ensure_mfa_entrypoint
-        if errorlevel 1 (
-            echo [WARN] Existing MFA launcher is not healthy. Rebuilding the local MFA env...
-            call :run_step "Remove broken MFA env" :remove_env_dir
-            if errorlevel 1 exit /b 1
-            set "MFA_EXE=%ENV_DIR%\Scripts\mfa.exe"
-        )
-    )
-)
-call :resolve_env_python_exe
-if not errorlevel 1 (
-    call :run_step "Verify MFA python package import" :check_mfa_python_module
-    if errorlevel 1 (
-        echo [WARN] Existing MFA python package is not importable. Rebuilding the local MFA env...
-        call :run_step "Remove non-importable MFA env" :remove_env_dir
-        if errorlevel 1 exit /b 1
-        set "MFA_EXE=%ENV_DIR%\Scripts\mfa.exe"
-    )
+
+    call :verify_existing_mfa_runtime
+
+    if errorlevel 1 exit /b 1
+
 )
 
-if exist "%MFA_EXE%" (
-    call :resolve_env_python_exe
-    if not errorlevel 1 goto :existing_env_ready
-)
-call :run_step "Ensure VC++ runtime prerequisite" :ensure_vc_runtime
-if errorlevel 1 exit /b 1
+if exist "%MFA_EXE%" goto :existing_env_ready
+
 goto :install_micromamba
 
-:check_existing_python_version
+:evaluate_existing_env_python
+
 call :get_env_python_version "%ENV_DIR%" MFA_ENV_PYTHON
+
 if not defined MFA_ENV_PYTHON goto :eof
-echo [INFO] Existing MFA Python version: %MFA_ENV_PYTHON%
+
+echo [INFO] MFA Python %MFA_ENV_PYTHON%
+
 call :python_requires_rebuild "%MFA_ENV_PYTHON%" MFA_ENV_REBUILD
-if "%MFA_ENV_REBUILD%"=="1" (
-    echo [WARN] Python %MFA_ENV_PYTHON% is not compatible with the Windows MFA dependency flow.
-    echo        Rebuilding the environment with Python %MFA_PYTHON_VERSION%...
-    call :run_step "Remove incompatible MFA env" :remove_env_dir
+
+if not "%MFA_ENV_REBUILD%"=="1" goto :eof
+
+echo [WARN] Python %MFA_ENV_PYTHON% Windows MFA
+
+echo Python %MFA_PYTHON_VERSION% ...
+
+call :remove_env_dir
+
+if errorlevel 1 exit /b 1
+
+goto :eof
+
+:verify_existing_mfa_runtime
+
+if not exist "%ENV_DIR%\python.exe" (
+
+    echo [WARN] Existing MFA env is missing python.exe. Rebuilding...
+
+    call :remove_env_dir
+
     if errorlevel 1 exit /b 1
+
+    goto :eof
+
 )
+
+call :run_env_python -c "import montreal_forced_aligner" >nul 2>nul
+
+if not errorlevel 1 goto :eof
+
+echo [WARN] Existing MFA env is incomplete or corrupted. Rebuilding...
+
+call :remove_env_dir
+
+if errorlevel 1 exit /b 1
+
 goto :eof
 
 :existing_env_ready
-echo [OK] MFA is already installed.
-echo      Path: %MFA_EXE%
+
+echo [OK] MFA
+
+echo %MFA_EXE%
+
 echo.
-call :run_step "Bootstrap Python package tools" :bootstrap_python_tools
+
+call :bootstrap_python_tools
+
 if errorlevel 1 exit /b 1
-call :run_step "Install textgrid module" :install_textgrid
+
+call :install_textgrid
+
 if errorlevel 1 exit /b 1
-call :run_step "Verify textgrid import" :verify_textgrid
+
+call :verify_textgrid
+
 if errorlevel 1 exit /b 1
-call :run_step "Install audio runtime dependencies" :install_audio_deps
+
+call :install_audio_deps
+
 if errorlevel 1 exit /b 1
-call :run_step "Install Korean tokenizer support" :install_korean_support
+
+call :install_korean_support
+
 if errorlevel 1 exit /b 1
-call :run_step "Install Japanese tokenizer support" :install_japanese_support
+
+call :install_japanese_support
+
 if errorlevel 1 exit /b 1
+
 if "%INSTALL_ML%"=="1" (
-    call :run_step "Install optional ML dependencies" :install_ml_requirements
+
+    call :install_ml_requirements
+
     if errorlevel 1 exit /b 1
-    call :run_step "Verify optional ML runtime imports" :verify_ml_runtime
+
+    call :verify_ml_runtime
+
     if errorlevel 1 exit /b 1
-    call :run_step "Check CUDA runtime bootstrap for NVIDIA" :ensure_cuda_runtime_for_nvidia
+
 )
+
 echo.
-echo Checking Korean acoustic model...
-call :run_step "Download Korean acoustic model" :download_acoustic_model korean_mfa
+
+echo ..
+
+call :download_acoustic_model korean_mfa
+
 if errorlevel 1 exit /b 1
+
 echo.
-echo Checking Japanese acoustic model...
-call :run_step "Download Japanese acoustic model" :download_acoustic_model japanese_mfa
+
+echo ..
+
+call :download_acoustic_model japanese_mfa
+
 if errorlevel 1 exit /b 1
-call :run_step "Cleanup legacy environment (if requested)" :cleanup_old_env_if_requested
+
+call :cleanup_env_caches
+
+if errorlevel 1 exit /b 1
+
+call :cleanup_mfa_root_artifacts
+
+if errorlevel 1 exit /b 1
+
+call :cleanup_old_env_if_requested
+
 echo.
-echo Done. You can now launch UTAU_Auto_OTO.exe.
-call :maybe_pause
+
+echo . UTAU_Auto_OTO.exe .
+
+if not "%NON_INTERACTIVE%"=="1" pause
+
 exit /b 0
 
 :install_micromamba
-echo [INFO] Using Micromamba bootstrap to reduce installation cost.
+
+echo [INFO] Micromamba
+
 echo.
-echo [1/5] Downloading Micromamba... ^(about 15MB^)
-if not exist "%MICROMAMBA_ARCHIVE%" (
-    call :run_step_with_retry "Download Micromamba payload" %RETRY_COUNT_NETWORK% :download_micromamba
+
+echo [1/5] Preparing micromamba bootstrap... ^(~15MB^)
+
+if "%HAS_CERTUTIL%"=="1" (
+
+    call :resolve_micromamba_expected_md5
+
     if errorlevel 1 (
-        echo [FAILED] Micromamba download failed.
-        call :maybe_pause
-        exit /b 1
+
+        echo [WARN] Could not resolve micromamba expected MD5 metadata. Continuing without strict checksum matching.
+
+        set "MICROMAMBA_MD5_EXPECTED="
+
     )
+
 ) else (
-    echo    Already downloaded. Skipping.
-)
-echo [OK] Download complete.
-echo.
 
-echo [2/5] Extracting Micromamba...
-if not exist "%MICROMAMBA_EXE%" (
-    if exist "%MICROMAMBA_ROOT%" (
-        echo [INFO] Removing previous Micromamba root...
-        rmdir /s /q "%MICROMAMBA_ROOT%" >nul 2>nul
-    )
-    mkdir "%MICROMAMBA_ROOT%" >nul 2>nul
-    tar -xjf "%MICROMAMBA_ARCHIVE%" -C "%MICROMAMBA_ROOT%"
+    echo [WARN] certutil unavailable; skipping micromamba checksum metadata lookup.
+
+    set "MICROMAMBA_MD5_EXPECTED="
+
+)
+
+
+set "MICROMAMBA_ARCHIVE_LOG=%SETUP_LOG_DIR%\micromamba_archive_download_%RANDOM%_%RANDOM%.log"
+
+if not exist "%MICROMAMBA_ARCHIVE%" (
+
+    powershell -NoProfile -Command "& {$ErrorActionPreference='Stop'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}; Invoke-WebRequest -Uri '%MICROMAMBA_LATEST_URL%' -OutFile '%MICROMAMBA_ARCHIVE%'}" >"%MICROMAMBA_ARCHIVE_LOG%" 2>&1
+
     if errorlevel 1 (
-        echo [WARN] Micromamba extraction failed.
-        echo [INFO] Falling back to direct micromamba.exe download...
-        if not exist "%MICROMAMBA_ROOT%\Library\bin" mkdir "%MICROMAMBA_ROOT%\Library\bin" >nul 2>nul
-        call :run_step_with_retry "Download Micromamba executable fallback" %RETRY_COUNT_NETWORK% :download_micromamba_exe_only
+
+        call :record_blocked_failure "%MICROMAMBA_ARCHIVE_LOG%" "micromamba archive download"
+
+        echo [WARN] Failed to download micromamba archive from latest URL. Trying direct micromamba.exe download...
+
+        call :download_micromamba_exe
+
         if errorlevel 1 (
-            echo [FAILED] Micromamba executable fallback download failed.
-            call :maybe_pause
+
+            echo [FAILED] Micromamba
+
+            if not "%NON_INTERACTIVE%"=="1" pause
+
             exit /b 1
+
         )
+
+        goto :install_micromamba_ready
+
     )
-    if not exist "%MICROMAMBA_EXE%" if exist "%MICROMAMBA_ROOT%\bin\micromamba.exe" (
-        set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\bin\micromamba.exe"
-    )
-    if not exist "%MICROMAMBA_EXE%" if exist "%MICROMAMBA_ROOT%\micromamba.exe" (
-        set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\micromamba.exe"
-    )
+
+) else (
+
+    echo .
+
 )
-if not exist "%MICROMAMBA_EXE%" (
-    echo [FAILED] Micromamba executable was not found after extraction.
-    call :maybe_pause
-    exit /b 1
+
+if exist "%MICROMAMBA_ARCHIVE%" (
+
+    call :verify_micromamba_archive
+
+    if errorlevel 1 (
+
+        echo [WARN] Micromamba archive verification failed. Trying direct micromamba.exe download...
+
+        call :download_micromamba_exe
+
+        if errorlevel 1 (
+
+            echo [FAILED] Micromamba
+
+            if not "%NON_INTERACTIVE%"=="1" pause
+
+            exit /b 1
+
+        )
+
+        goto :install_micromamba_ready
+
+    )
+
+) else (
+
+    echo [WARN] Micromamba archive is missing; continuing with direct micromamba.exe bootstrap.
+
 )
-echo [OK] Micromamba ready.
+
+echo [OK] Completed.
+
 echo.
 
-echo [3/5] Installing Montreal Forced Aligner... ^(3-10 min^)
-call :run_step "Create MFA base environment (python + mfa)" :install_base_mfa_env
-if errorlevel 1 exit /b 1
-call :run_step "Ensure MFA launcher entrypoint" :ensure_mfa_entrypoint
-if errorlevel 1 exit /b 1
-call :run_step "Bootstrap Python package tools" :bootstrap_python_tools
-if errorlevel 1 exit /b 1
-call :run_step "Install textgrid module" :install_textgrid
-if errorlevel 1 exit /b 1
-call :run_step "Verify textgrid import" :verify_textgrid
-if errorlevel 1 exit /b 1
+echo [2/5] Installing and validating micromamba...
 
-echo [4/5] Installing Korean/Japanese tokenizer dependencies...
-call :run_step "Install Korean tokenizer support" :install_korean_support
-if errorlevel 1 exit /b 1
-call :run_step "Install Japanese tokenizer support" :install_japanese_support
-if errorlevel 1 exit /b 1
-call :run_step "Install audio runtime dependencies" :install_audio_deps
-if errorlevel 1 exit /b 1
-if "%INSTALL_ML%"=="1" (
-    call :run_step "Install optional ML dependencies" :install_ml_requirements
-    if errorlevel 1 exit /b 1
-    call :run_step "Verify optional ML runtime imports" :verify_ml_runtime
-    if errorlevel 1 exit /b 1
-    call :run_step "Check CUDA runtime bootstrap for NVIDIA" :ensure_cuda_runtime_for_nvidia
+if not exist "%MICROMAMBA_EXE%" (
+
+    if exist "%MICROMAMBA_ROOT%" (
+
+        echo [INFO] Micromamba
+
+        rmdir /s /q "%MICROMAMBA_ROOT%" >nul 2>nul
+
+    )
+
+    if "%HAS_TAR%"=="0" (
+
+        echo [WARN] tar was not found. Attempting to download micromamba.exe directly.
+
+        call :download_micromamba_exe
+
+        if errorlevel 1 (
+
+            echo [FAILED] Micromamba
+
+            if not "%NON_INTERACTIVE%"=="1" pause
+
+            exit /b 1
+
+        )
+
+        goto :install_micromamba_ready
+
+    )
+
+    mkdir "%MICROMAMBA_ROOT%" >nul 2>nul
+
+    tar -xjf "%MICROMAMBA_ARCHIVE%" -C "%MICROMAMBA_ROOT%"
+
+    if errorlevel 1 (
+
+        echo [WARN] micromamba archive extraction failed. Attempting to download micromamba.exe directly.
+
+        call :download_micromamba_exe
+
+        if errorlevel 1 (
+
+            echo [FAILED] Micromamba
+
+            if not "%NON_INTERACTIVE%"=="1" pause
+
+            exit /b 1
+
+        )
+
+        goto :install_micromamba_ready
+
+    )
+
+    if not exist "%MICROMAMBA_EXE%" if exist "%MICROMAMBA_ROOT%\bin\micromamba.exe" (
+
+        set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\bin\micromamba.exe"
+
+    )
+
+    if not exist "%MICROMAMBA_EXE%" if exist "%MICROMAMBA_ROOT%\micromamba.exe" (
+
+        set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\micromamba.exe"
+
+    )
+
 )
 
-echo Cleaning up installer cache...
+:install_micromamba_ready
+
+if not exist "%MICROMAMBA_EXE%" (
+
+    echo [FAILED] Micromamba
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
+    exit /b 1
+
+)
+
+call :validate_micromamba_exe
+
+if errorlevel 1 (
+
+    call :repair_micromamba_bootstrap
+
+    if errorlevel 1 (
+
+        echo [FAILED] Micromamba
+
+        if not "%NON_INTERACTIVE%"=="1" pause
+
+        exit /b 1
+
+    )
+
+)
+
+echo [OK] Micromamba
+
+echo.
+
+echo [3/5] Installing Montreal Forced Aligner... ^(~3-10 min^)
+
+if exist "%ENV_DIR%" if not exist "%MFA_EXE%" call :remove_env_dir
+
+set "MAMBA_ROOT_PREFIX=%MICROMAMBA_ROOT%"
+
+call :run_mfa_create_with_recovery
+
+if errorlevel 1 (
+
+    echo [FAILED] MFA
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
+    exit /b 1
+
+)
+
+call :ensure_mfa_entrypoint
+
+if errorlevel 1 exit /b 1
+
+call :bootstrap_python_tools
+
+if errorlevel 1 exit /b 1
+
+call :install_textgrid
+
+if errorlevel 1 exit /b 1
+
+call :verify_textgrid
+
+if errorlevel 1 exit /b 1
+
+echo [4/5] Installing language and audio dependencies...
+
+call :install_korean_support
+
+if errorlevel 1 exit /b 1
+
+call :install_japanese_support
+
+if errorlevel 1 exit /b 1
+
+call :install_audio_deps
+
+if errorlevel 1 exit /b 1
+
+if "%INSTALL_ML%"=="1" (
+
+    call :install_ml_requirements
+
+    if errorlevel 1 exit /b 1
+
+    call :verify_ml_runtime
+
+    if errorlevel 1 exit /b 1
+
+)
+
+echo ..
+
 if exist "%MICROMAMBA_ARCHIVE%" del "%MICROMAMBA_ARCHIVE%" >nul 2>nul
 
-echo [OK] MFA installed successfully.
+echo [OK] MFA
+
 echo.
-echo [Final] Downloading Korean/Japanese acoustic models... ^(1-2 min^)
-call :run_step "Download Korean acoustic model" :download_acoustic_model korean_mfa
+
+echo [ / .. ^( 1~2 )
+
+call :download_acoustic_model korean_mfa
+
 if errorlevel 1 exit /b 1
-call :run_step "Download Japanese acoustic model" :download_acoustic_model japanese_mfa
+
+call :download_acoustic_model japanese_mfa
+
 if errorlevel 1 exit /b 1
-call :run_step "Cleanup legacy environment (if requested)" :cleanup_old_env_if_requested
+
+call :cleanup_env_caches
+
+if errorlevel 1 exit /b 1
+
+call :cleanup_mfa_root_artifacts
+
+if errorlevel 1 exit /b 1
+
+call :cleanup_old_env_if_requested
+
 echo.
+
 echo ====================================================
-echo   Setup complete.
-echo   Next step:
-echo   1) Launch UTAU_Auto_OTO.exe ^(release build^)
-echo   2) Or run run.bat ^(source checkout^)
-echo   3) Then click "3. Voice Alignment" to continue
-echo ====================================================
+
+echo .
+
 echo.
-call :maybe_pause
+
+echo 1) UTAU_Auto_OTO.exe ^( )
+
+echo 2) run.bat ^( )
+
+echo 3) "3. Voice Alignment"
+
+echo ====================================================
+
+echo.
+
+if not "%NON_INTERACTIVE%"=="1" pause
+
 exit /b 0
 
-:preflight_checks
-call :check_writable_path "%RUNTIME_ROOT%"
-if errorlevel 1 (
-    echo [FAILED] Runtime root is not writable: %RUNTIME_ROOT%
-    echo        Check folder permissions or choose another path via UTOA_MFA_SHARED_ROOT.
-    call :maybe_pause
-    exit /b 1
-)
-call :check_free_space_mb "%RUNTIME_ROOT%" %MIN_FREE_SPACE_MB%
-if errorlevel 1 (
-    echo [FAILED] Not enough free disk space on runtime drive.
-    echo        Required at least %MIN_FREE_SPACE_MB% MB free.
-    call :maybe_pause
-    exit /b 1
-)
+:run_mfa_create_with_recovery
+
+set "MFA_CREATE_LOG1=%TEMP%\utau_auto_oto_mfa_create_1_%RANDOM%_%RANDOM%.log"
+
+set "MFA_CREATE_LOG2=%TEMP%\utau_auto_oto_mfa_create_2_%RANDOM%_%RANDOM%.log"
+
+set "MFA_CREATE_LOG3=%TEMP%\utau_auto_oto_mfa_create_3_%RANDOM%_%RANDOM%.log"
+
+call :run_mfa_create_once "%MFA_CREATE_LOG1%"
+
+if not errorlevel 1 exit /b 0
+
+set "RECOVERY_MODE="
+
+call :is_mfa_lock_error "%MFA_CREATE_LOG1%" LOCK_ERR_1
+
+call :is_mfa_cache_error "%MFA_CREATE_LOG1%" CACHE_ERR_1
+
+if "%LOCK_ERR_1%"=="1" set "RECOVERY_MODE=lock_retry"
+
+if "%CACHE_ERR_1%"=="1" set "RECOVERY_MODE=hard"
+
+if "%RECOVERY_MODE%"=="lock_retry" goto :mfa_create_retry_after_lock
+
+if "%RECOVERY_MODE%"=="hard" goto :mfa_create_clean_recovery
+
+exit /b 1
+
+:mfa_create_retry_after_lock
+
+echo [WARN] Detected MFA env lock during micromamba create.
+
+call :release_env_lock_processes
+
+echo [INFO] Retrying MFA create after lock cleanup...
+
+call :run_mfa_create_once "%MFA_CREATE_LOG2%"
+
+if not errorlevel 1 exit /b 0
+
+set "RECOVERY_MODE="
+
+call :is_mfa_lock_error "%MFA_CREATE_LOG2%" LOCK_ERR_2
+
+call :is_mfa_cache_error "%MFA_CREATE_LOG2%" CACHE_ERR_2
+
+if "%LOCK_ERR_2%"=="1" set "RECOVERY_MODE=soft"
+
+if "%CACHE_ERR_2%"=="1" set "RECOVERY_MODE=hard"
+
+if defined RECOVERY_MODE goto :mfa_create_clean_recovery
+
+exit /b 1
+
+:mfa_create_clean_recovery
+
+if "%AUTO_CLEAN_DONE%"=="1" exit /b 1
+
+echo [WARN] Micromamba create failed with a recoverable env/cache issue. Running automatic clean recovery...
+
+if not defined RECOVERY_MODE set "RECOVERY_MODE=soft"
+
+call :run_clean_recovery "%RECOVERY_MODE%"
+
+if errorlevel 1 exit /b 1
+
+set "RECOVERY_MODE="
+
+set "AUTO_CLEAN_DONE=1"
+
+echo [INFO] Retrying MFA create after clean recovery...
+
+call :run_mfa_create_once "%MFA_CREATE_LOG3%"
+
+if not errorlevel 1 exit /b 0
+
+exit /b 1
+
+:run_mfa_create_once
+
+set "MFA_CREATE_LOG=%~1"
+
+if exist "%MFA_CREATE_LOG%" del "%MFA_CREATE_LOG%" >nul 2>nul
+
+"%MICROMAMBA_EXE%" create -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge python=%MFA_PYTHON_VERSION% montreal-forced-aligner colorama >"%MFA_CREATE_LOG%" 2>&1
+
+set "MFA_CREATE_RC=%ERRORLEVEL%"
+
+type "%MFA_CREATE_LOG%"
+
+if "%MFA_CREATE_RC%"=="0" exit /b 0
+
+call :record_blocked_failure "%MFA_CREATE_LOG%" "micromamba create MFA env"
+
+exit /b 1
+
+:is_mfa_lock_error
+
+set "%~2=0"
+
+if "%~1"=="" goto :eof
+
+if not exist "%~1" goto :eof
+
+findstr /I /C:"remove_all" /C:"being used by another process" /C:"The process cannot access the file because it is being used by another process" /C:"access is denied" "%~1" >nul 2>nul
+
+if not errorlevel 1 set "%~2=1"
+
 goto :eof
 
-:check_writable_path
-set "CHECK_PATH=%~1"
-if "%CHECK_PATH%"=="" exit /b 1
-if not exist "%CHECK_PATH%" mkdir "%CHECK_PATH%" >nul 2>nul
-if not exist "%CHECK_PATH%" exit /b 1
-set "WRITE_PROBE=%CHECK_PATH%\.__utoa_write_probe_%RANDOM%%RANDOM%.tmp"
->"%WRITE_PROBE%" echo probe 2>nul
-if not errorlevel 1 if exist "%WRITE_PROBE%" (
-    del "%WRITE_PROBE%" >nul 2>nul
-    exit /b 0
-)
-set "UTOA_WRITABLE_PATH=%CHECK_PATH%"
-powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $p=$env:UTOA_WRITABLE_PATH; if([string]::IsNullOrWhiteSpace($p)){exit 1}; if(!(Test-Path -LiteralPath $p)){New-Item -ItemType Directory -Path $p -Force | Out-Null}; $probe = Join-Path $p ('.__utoa_write_probe_' + [guid]::NewGuid().ToString('N') + '.tmp'); Set-Content -LiteralPath $probe -Value 'probe' -Encoding Ascii -NoNewline; Remove-Item -LiteralPath $probe -Force; exit 0" >nul 2>nul
-set "UTOA_WRITABLE_PATH="
-if errorlevel 1 exit /b 1
-exit /b 0
+:is_mfa_cache_error
 
-:check_free_space_mb
-set "CHECK_SPACE_PATH=%~1"
-set "REQUIRED_MB=%~2"
-if "%CHECK_SPACE_PATH%"=="" exit /b 1
-if "%REQUIRED_MB%"=="" set "REQUIRED_MB=1024"
-for %%I in ("%CHECK_SPACE_PATH%") do set "CHECK_DRIVE=%%~dI"
-if not defined CHECK_DRIVE exit /b 0
-set "FREE_MB="
-for /f "usebackq delims=" %%F in (`powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $d='%CHECK_DRIVE:~0,1%'; $free=(Get-PSDrive -Name $d).Free; [int][math]::Floor($free/1MB)" 2^>nul`) do set "FREE_MB=%%F"
-if not defined FREE_MB (
-    echo [WARN] Could not determine free disk space. Continuing without strict check.
-    exit /b 0
-)
-echo %FREE_MB% | findstr /r "^[0-9][0-9]*$" >nul
-if errorlevel 1 (
-    echo [WARN] Free disk space probe returned non-numeric output. Continuing without strict check.
-    exit /b 0
-)
-echo [INFO] Free disk space on %CHECK_DRIVE%: %FREE_MB% MB
-if %FREE_MB% LSS %REQUIRED_MB% exit /b 1
-exit /b 0
+set "%~2=0"
 
-:install_base_mfa_env
+if "%~1"=="" goto :eof
+
+if not exist "%~1" goto :eof
+
+findstr /I /C:"Invalid package cache" /C:"Cannot find a valid extracted directory cache" /C:"Package cache error" /C:"corrupted package tarball" "%~1" >nul 2>nul
+
+if not errorlevel 1 set "%~2=1"
+
+goto :eof
+
+:release_env_lock_processes
+
+echo [INFO] Attempting to release MFA env lock...
+
+set "UTOA_ENV_DIR_LOCK_TARGET=%ENV_DIR%"
+
+powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $target=[Regex]::Escape($env:UTOA_ENV_DIR_LOCK_TARGET); $names=@('python.exe','pythonw.exe','mfa.exe','micromamba.exe','conda.exe','UTAU_Auto_OTO.exe'); Get-CimInstance Win32_Process | Where-Object { $_.Name -in $names -and ((($_.CommandLine) -and $_.CommandLine -match $target) -or (($_.ExecutablePath) -and $_.ExecutablePath -match $target)) } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; Write-Host ('[INFO] Stopped lock process: ' + $_.Name + ' pid=' + $_.ProcessId) } catch {} }; Start-Sleep -Seconds 3"
+
+set "UTOA_ENV_DIR_LOCK_TARGET="
+
+taskkill /F /IM mfa.exe >nul 2>nul
+
+taskkill /F /IM micromamba.exe >nul 2>nul
+
+taskkill /F /IM UTAU_Auto_OTO.exe >nul 2>nul
+
+timeout /t 2 /nobreak >nul
+
+goto :eof
+
+:run_clean_recovery
+
+set "CLEAN_RECOVERY_MODE=%~1"
+if not defined CLEAN_RECOVERY_MODE set "CLEAN_RECOVERY_MODE=soft"
+
+if /I "%CLEAN_RECOVERY_MODE%"=="hard" (
+    echo [INFO] Running hard clean recovery for MFA runtime...
+) else (
+    echo [INFO] Running clean recovery for MFA runtime...
+)
+
+call :release_env_lock_processes
+
 if exist "%ENV_DIR%" (
-    echo [INFO] Existing MFA env directory detected. Recreating from clean state...
-    call :run_step "Remove existing env before recreate" :remove_env_dir
-    if errorlevel 1 exit /b 1
-)
-set "MAMBA_ROOT_PREFIX=%MICROMAMBA_ROOT%"
-set /a "CREATE_TRY=1"
-:install_base_mfa_env_retry
-"%MICROMAMBA_EXE%" create -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge python=%MFA_PYTHON_VERSION% montreal-forced-aligner colorama
-if not errorlevel 1 goto :install_base_mfa_env_ok
-if %CREATE_TRY% GEQ %RETRY_COUNT_CREATE% (
-    echo [FAILED] MFA install failed after %CREATE_TRY% attempts.
-    call :maybe_pause
-    exit /b 1
-)
-set /a "CREATE_TRY+=1"
-echo [WARN] MFA base environment creation failed. Retrying ^(%CREATE_TRY%/%RETRY_COUNT_CREATE%^)...
-call :sleep_seconds %RETRY_WAIT_SECONDS%
-goto :install_base_mfa_env_retry
-:install_base_mfa_env_ok
-exit /b 0
 
-:try_restore_bundled_runtime
-if "%PREFER_BUNDLED_RUNTIME%"=="0" exit /b 0
-if exist "%MFA_EXE%" exit /b 0
-if not exist "%BUNDLED_RUNTIME_ROOT%" exit /b 0
-if not exist "%BUNDLED_ENV_DIR%" exit /b 0
-call :resolve_python_in_dir "%BUNDLED_ENV_DIR%" BUNDLED_ENV_PYTHON_EXE
-if errorlevel 1 (
-    echo [INFO] Bundled runtime payload is not complete. Falling back to online bootstrap.
-    exit /b 0
-)
-if not exist "%BUNDLED_MFA_EXE%" (
-    echo [WARN] Bundled runtime folder exists but MFA entrypoint is missing. Skipping bundled restore.
-    exit /b 0
-)
-echo [INFO] Restoring MFA runtime from bundled payload...
-call :run_step "Copy bundled runtime payload to local runtime root" :copy_tree "%BUNDLED_RUNTIME_ROOT%" "%RUNTIME_ROOT%"
-if errorlevel 1 (
-    echo [FAILED] Bundled runtime restore failed.
-    call :maybe_pause
-    exit /b 1
-)
-set "MFA_EXE=%ENV_DIR%\Scripts\mfa.exe"
-if not exist "%MFA_EXE%" if exist "%ENV_DIR%\Scripts\mfa.bat" set "MFA_EXE=%ENV_DIR%\Scripts\mfa.bat"
-if not exist "%MFA_EXE%" if exist "%ENV_DIR%\Scripts\mfa.cmd" set "MFA_EXE=%ENV_DIR%\Scripts\mfa.cmd"
-if not exist "%MFA_EXE%" (
-    echo [WARN] Bundled runtime restore completed but MFA entrypoint is still missing.
-    echo        Falling back to online Micromamba bootstrap.
-    exit /b 0
-)
-if exist "%MICROMAMBA_ROOT%\Library\bin\micromamba.exe" set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\Library\bin\micromamba.exe"
-if not exist "%MICROMAMBA_EXE%" if exist "%MICROMAMBA_ROOT%\bin\micromamba.exe" set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\bin\micromamba.exe"
-if not exist "%MICROMAMBA_EXE%" if exist "%MICROMAMBA_ROOT%\micromamba.exe" set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\micromamba.exe"
-echo [OK] Bundled MFA runtime restored.
-exit /b 0
+    call :remove_env_dir
 
-:copy_tree
-set "SRC_DIR=%~1"
-set "DST_DIR=%~2"
-if "%SRC_DIR%"=="" exit /b 1
-if "%DST_DIR%"=="" exit /b 1
-if not exist "%SRC_DIR%" exit /b 1
-if not exist "%DST_DIR%" mkdir "%DST_DIR%" >nul 2>nul
-where /q robocopy.exe
-if not errorlevel 1 (
-    robocopy "%SRC_DIR%" "%DST_DIR%" /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP >nul
-    if errorlevel 8 exit /b 1
-    exit /b 0
-)
-xcopy "%SRC_DIR%\*" "%DST_DIR%\" /E /I /Y /Q >nul
-if errorlevel 1 exit /b 1
-exit /b 0
+    if errorlevel 1 (
 
-:ensure_vc_runtime
-set "VC_DLL_MSVCP=%SystemRoot%\System32\msvcp140.dll"
-set "VC_DLL_VCRUNTIME=%SystemRoot%\System32\vcruntime140_1.dll"
-set "VC_REDIST_URL=https://aka.ms/vs/17/release/vc_redist.x64.exe"
-if exist "%VC_DLL_MSVCP%" if exist "%VC_DLL_VCRUNTIME%" (
-    echo [OK] VC++ runtime detected.
-    exit /b 0
-)
-echo [INFO] VC++ runtime is missing. Installing Microsoft VC++ 2015-2022 x64...
-if not exist "%VC_REDIST_EXE%" (
-    set "VC_DL_OK=0"
-    call :download_with_powershell "%VC_REDIST_URL%" "%VC_REDIST_EXE%"
-    if not errorlevel 1 if exist "%VC_REDIST_EXE%" (
-        for %%I in ("%VC_REDIST_EXE%") do if %%~zI GTR 0 set "VC_DL_OK=1"
-    )
-    if "%VC_DL_OK%"=="0" (
-        echo [WARN] PowerShell VC++ runtime download failed. Trying curl...
-        where /q curl.exe
-        if not errorlevel 1 (
-            curl.exe -L --fail --retry 2 --retry-delay 2 -o "%VC_REDIST_EXE%" "%VC_REDIST_URL%"
-            if not errorlevel 1 if exist "%VC_REDIST_EXE%" (
-                for %%I in ("%VC_REDIST_EXE%") do if %%~zI GTR 0 set "VC_DL_OK=1"
-            )
-        )
-    )
-    if "%VC_DL_OK%"=="0" (
-        echo [FAILED] VC++ runtime download failed.
-        echo        Network/DNS issue may be blocking aka.ms.
-        echo        Install manually: %VC_REDIST_URL%
-        call :maybe_pause
+        echo [FAILED] Could not remove locked MFA env during clean recovery.
+
+        if not "%NON_INTERACTIVE%"=="1" pause
+
         exit /b 1
+
     )
+
 )
-if not exist "%VC_REDIST_EXE%" (
-    echo [FAILED] VC++ runtime installer file was not found: %VC_REDIST_EXE%
-    call :maybe_pause
-    exit /b 1
+
+if /I "%CLEAN_RECOVERY_MODE%"=="hard" (
+
+    echo [INFO] Removing micromamba root for hard recovery...
+
+    call :remove_dir "%MICROMAMBA_ROOT%"
+
+    if errorlevel 1 (
+
+        echo [FAILED] Could not remove micromamba root during hard clean recovery.
+
+        if not "%NON_INTERACTIVE%"=="1" pause
+
+        exit /b 1
+
+    )
+
+    if exist "%MICROMAMBA_ARCHIVE%" del "%MICROMAMBA_ARCHIVE%" >nul 2>nul
+
+    if exist "%MICROMAMBA_PORTABLE_EXE%" (
+        set "MICROMAMBA_EXE=%MICROMAMBA_PORTABLE_EXE%"
+    ) else (
+        set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\micromamba.exe"
+    )
+
+    if exist "%MICROMAMBA_EXE%" (
+
+        call :validate_micromamba_exe
+
+        if errorlevel 1 (
+
+            call :repair_micromamba_bootstrap
+
+            if errorlevel 1 (
+
+                echo [FAILED] Could not repair micromamba after hard clean recovery.
+
+                if not "%NON_INTERACTIVE%"=="1" pause
+
+                exit /b 1
+
+            )
+
+        )
+
+    )
+
+    if not exist "%MICROMAMBA_EXE%" (
+
+        echo [INFO] Rebootstrapping micromamba after hard clean recovery...
+
+        call :download_micromamba_exe
+
+        if errorlevel 1 (
+
+            echo [FAILED] Could not rebootstrap micromamba after hard clean recovery.
+
+            if not "%NON_INTERACTIVE%"=="1" pause
+
+            exit /b 1
+
+        )
+
+    )
+
+    set "MAMBA_ROOT_PREFIX=%MICROMAMBA_ROOT%"
+
+) else (
+
+    if exist "%MICROMAMBA_EXE%" (
+
+        "%MICROMAMBA_EXE%" clean -a -y -r "%MICROMAMBA_ROOT%" >nul 2>nul
+
+    )
+
+    call :remove_dir "%MICROMAMBA_ROOT%\pkgs"
+
+    if errorlevel 1 (
+
+        echo [FAILED] Could not clear micromamba package cache during clean recovery.
+
+        if not "%NON_INTERACTIVE%"=="1" pause
+
+        exit /b 1
+
+    )
+
 )
-for %%I in ("%VC_REDIST_EXE%") do set "VC_REDIST_SIZE=%%~zI"
-if "%VC_REDIST_SIZE%"=="0" (
-    echo [FAILED] VC++ runtime installer file is empty: %VC_REDIST_EXE%
-    call :maybe_pause
-    exit /b 1
-)
-if %VC_REDIST_SIZE% LSS 1000000 (
-    echo [FAILED] VC++ runtime installer file looks invalid ^(too small^): %VC_REDIST_EXE%
-    echo        This often means download was blocked or replaced by an error page.
-    del "%VC_REDIST_EXE%" >nul 2>nul
-    echo        Retry with network enabled or install manually: https://aka.ms/vs/17/release/vc_redist.x64.exe
-    call :maybe_pause
-    exit /b 1
-)
-"%VC_REDIST_EXE%" /install /quiet /norestart
-set "VC_REDIST_RC=%errorlevel%"
-if not "%VC_REDIST_RC%"=="0" if not "%VC_REDIST_RC%"=="1638" if not "%VC_REDIST_RC%"=="3010" (
-    echo [WARN] Silent VC++ runtime install failed with code %VC_REDIST_RC%. Retrying with passive mode...
-    "%VC_REDIST_EXE%" /install /passive /norestart
-    set "VC_REDIST_RC=%errorlevel%"
-)
-if not "%VC_REDIST_RC%"=="0" if not "%VC_REDIST_RC%"=="1638" if not "%VC_REDIST_RC%"=="3010" (
-    echo [FAILED] VC++ runtime install failed. exit code=%VC_REDIST_RC%
-    echo        Install manually: https://aka.ms/vs/17/release/vc_redist.x64.exe
-    call :maybe_pause
-    exit /b 1
-)
-if not exist "%VC_DLL_MSVCP%" (
-    echo [FAILED] VC++ runtime install finished but msvcp140.dll is still missing.
-    call :maybe_pause
-    exit /b 1
-)
-if not exist "%VC_DLL_VCRUNTIME%" (
-    echo [FAILED] VC++ runtime install finished but vcruntime140_1.dll is still missing.
-    call :maybe_pause
-    exit /b 1
-)
-echo [OK] VC++ runtime installed.
+
+echo [OK] Clean recovery complete.
+
 exit /b 0
-
-:download_micromamba
-if exist "%MICROMAMBA_ARCHIVE%" (
-    for %%I in ("%MICROMAMBA_ARCHIVE%") do if %%~zI GTR 0 exit /b 0
-)
-if exist "%MICROMAMBA_EXE%" (
-    for %%I in ("%MICROMAMBA_EXE%") do if %%~zI GTR 0 exit /b 0
-)
-echo [INFO] Download source: micro.mamba.pm
-call :download_with_powershell "%MICROMAMBA_URL_API%" "%MICROMAMBA_ARCHIVE%"
-if not errorlevel 1 if exist "%MICROMAMBA_ARCHIVE%" (
-    for %%I in ("%MICROMAMBA_ARCHIVE%") do if %%~zI GTR 0 exit /b 0
-)
-echo [WARN] PowerShell download from micro.mamba.pm failed. Trying curl...
-where /q curl.exe
-if not errorlevel 1 (
-    curl.exe -L --fail --retry 2 --retry-delay 2 -o "%MICROMAMBA_ARCHIVE%" "%MICROMAMBA_URL_API%"
-    if not errorlevel 1 if exist "%MICROMAMBA_ARCHIVE%" (
-        for %%I in ("%MICROMAMBA_ARCHIVE%") do if %%~zI GTR 0 exit /b 0
-    )
-)
-echo [WARN] micro.mamba.pm download failed. Trying GitHub mirror...
-call :download_micromamba_exe_only
-if not errorlevel 1 exit /b 0
-exit /b 1
-
-:download_micromamba_exe_only
-if not exist "%MICROMAMBA_ROOT%\Library\bin" mkdir "%MICROMAMBA_ROOT%\Library\bin" >nul 2>nul
-if exist "%MICROMAMBA_EXE%" (
-    for %%I in ("%MICROMAMBA_EXE%") do if %%~zI GTR 0 exit /b 0
-)
-call :download_with_powershell "%MICROMAMBA_URL_GITHUB_EXE%" "%MICROMAMBA_EXE%"
-if not errorlevel 1 if exist "%MICROMAMBA_EXE%" (
-    for %%I in ("%MICROMAMBA_EXE%") do if %%~zI GTR 0 exit /b 0
-)
-where /q curl.exe
-if not errorlevel 1 (
-    curl.exe -L --fail --retry 2 --retry-delay 2 -o "%MICROMAMBA_EXE%" "%MICROMAMBA_URL_GITHUB_EXE%"
-    if not errorlevel 1 if exist "%MICROMAMBA_EXE%" (
-        for %%I in ("%MICROMAMBA_EXE%") do if %%~zI GTR 0 exit /b 0
-    )
-)
-exit /b 1
 
 :bootstrap_python_tools
-echo Checking MFA Python package tools...
-call :resolve_env_python_exe
-if errorlevel 1 (
-    echo [FAILED] MFA Python runtime was not found.
-    call :maybe_pause
+
+echo MFA Python ..
+
+if not exist "%ENV_DIR%\python.exe" (
+
+    echo [FAILED] MFA Python
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
     exit /b 1
+
 )
-"%ENV_PYTHON_EXE%" -c "import importlib.util as u; import pip, wheel, sys; sys.exit(0 if u.find_spec('setuptools') else 1)" >nul 2>nul
+
+call :run_env_python -c "import pip, pkg_resources, wheel" >nul 2>nul
+
 if not errorlevel 1 (
-    echo [OK] pip/setuptools/wheel are ready.
+
+    echo [OK] pip/setuptools/wheel
+
+    call :ensure_seaborn_dependency
+
     goto :eof
+
 )
-echo [INFO] Repairing pip/setuptools/wheel...
-"%ENV_DIR%\Scripts\conda.exe" install -y --solver classic -p "%ENV_DIR%" pip setuptools wheel >nul 2>nul
-"%ENV_PYTHON_EXE%" -m ensurepip --upgrade
+
+echo [INFO] pip/setuptools/wheel
+
+call :run_env_python -m ensurepip --upgrade
+
 if errorlevel 1 (
-    echo [WARN] ensurepip did not complete cleanly. Trying pip repair anyway...
+
+    echo [WARN] ensurepip . pip
+
 )
-call :run_env_pip install --upgrade setuptools wheel
+
+echo [INFO] pip module availability check...
+
+call :run_env_python -m pip --version >nul 2>nul
+
 if errorlevel 1 (
-    echo [FAILED] pip/setuptools/wheel repair failed.
-    call :maybe_pause
+
+    echo [WARN] python -m pip failed. Retrying ensurepip with --default-pip...
+
+    call :run_env_python -m ensurepip --upgrade --default-pip
+
+)
+
+call :ensure_seaborn_dependency
+
+set "PYTOOLS_REPAIR_OK=0"
+
+call :run_env_python -m pip install --upgrade --force-reinstall "setuptools<81" wheel
+
+if not errorlevel 1 set "PYTOOLS_REPAIR_OK=1"
+
+if "%PYTOOLS_REPAIR_OK%"=="0" (
+
+    echo [WARN] force-reinstall path failed. Retrying with normal upgrade...
+
+    call :run_env_python -m pip install --upgrade "setuptools<81" wheel
+
+    if not errorlevel 1 set "PYTOOLS_REPAIR_OK=1"
+
+)
+
+if "%PYTOOLS_REPAIR_OK%"=="0" (
+
+    echo [FAILED] pip/setuptools/wheel
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
     exit /b 1
+
 )
-"%ENV_PYTHON_EXE%" -c "import importlib.util as u; import pip, wheel, sys; sys.exit(0 if u.find_spec('setuptools') else 1)" >nul 2>nul
+
+call :run_env_python -c "import pip, pkg_resources, wheel" >nul 2>nul
+
 if errorlevel 1 (
-    echo [FAILED] Python package tools are still unavailable after repair.
-    call :maybe_pause
+
+    echo [FAILED] Python
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
     exit /b 1
+
 )
-echo [OK] pip/setuptools/wheel repair complete.
+
+echo [OK] pip/setuptools/wheel
+
+goto :eof
+
+:ensure_seaborn_dependency
+
+if not exist "%ENV_DIR%\python.exe" goto :eof
+
+call :run_env_python -c "import seaborn" >nul 2>nul
+
+if not errorlevel 1 (
+
+    echo [OK] seaborn
+
+    goto :eof
+
+)
+
+echo [INFO] Installing MFA dependency: seaborn
+
+if exist "%MICROMAMBA_EXE%" (
+
+    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge seaborn >nul 2>nul
+
+    if not errorlevel 1 (
+
+        call :run_env_python -c "import seaborn" >nul 2>nul
+
+        if not errorlevel 1 (
+
+            echo [OK] seaborn
+
+            goto :eof
+
+        )
+
+    ) else (
+
+        echo [WARN] micromamba seaborn install failed. Falling back to pip...
+
+    )
+
+)
+
+call :run_env_python -m pip install --upgrade seaborn >nul 2>nul
+
+call :run_env_python -c "import seaborn" >nul 2>nul
+
+if errorlevel 1 (
+
+    echo [WARN] seaborn install failed. Continuing without seaborn.
+
+) else (
+
+    echo [OK] seaborn
+
+)
+
 goto :eof
 
 :install_japanese_support
-echo Checking Japanese tokenizer dependencies...
+
+echo ..
+
 set "MAMBA_ROOT_PREFIX=%MICROMAMBA_ROOT%"
+
 call :ensure_mfa_entrypoint
+
 if errorlevel 1 exit /b 1
+
+set "JAPANESE_INSTALL_LOG=%SETUP_LOG_DIR%\japanese_deps_%RANDOM%_%RANDOM%.log"
+
 if exist "%MICROMAMBA_EXE%" (
-    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge spacy sudachipy sudachidict-core
+
+    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge spacy sudachipy sudachidict-core >"%JAPANESE_INSTALL_LOG%" 2>&1
+
     if errorlevel 1 (
-        echo [FAILED] Japanese tokenizer dependency install failed.
-        call :maybe_pause
+
+        type "%JAPANESE_INSTALL_LOG%"
+
+        call :record_blocked_failure "%JAPANESE_INSTALL_LOG%" "Japanese tokenizer dependency install"
+
+        echo [FAILED] Operation failed. Check the log output.
+
+        if not "%NON_INTERACTIVE%"=="1" pause
+
         exit /b 1
+
     )
+
+    type "%JAPANESE_INSTALL_LOG%"
+
     goto :eof
+
 )
-echo [WARN] Micromamba command was not found. Skipping Japanese tokenizer dependency install.
+
+echo [WARN] Micromamba
+
+if exist "%ENV_DIR%\python.exe" (
+
+    echo [INFO] Micromamba 繝ｻ・ｸ螟句ｷ晢ｽｧﾂ: pip fallback繝ｻ・ｼ繝ｻ繝ｻ繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ tokenizer 繝ｻ蛟托ｽ｡・ｴ繝ｻ・ｱ 繝ｻ・､繝ｻ菫ｯ・･・ｼ 繝ｻ鄂ｹ蟾｡・托ｽｩ繝ｻ螢ｱ蜈ｱ.
+
+    call :run_env_python -m pip install --upgrade spacy sudachipy sudachidict-core
+
+    if errorlevel 1 (
+
+        echo [WARN] pip fallback 繝ｻ・､繝ｻ菫ｯ蟾｡ 繝ｻ・､逕ｯ・ｨ蠏よｺ｢諷｣繝ｻ螢ｱ蜈ｱ. 繝ｻ・ｼ繝ｻ・ｸ繝ｻ・ｴ 繝ｻ邁ｿ・ｰ・ｬ 繝ｻ繝ｻ繝ｻ・ｰ螟仰繝ｻ繝ｻ荵ｱ繝ｻ繝ｻ繝ｻ・ｬ繝ｻ鄂ｹ蟾｡繝ｻ・ｩ繝ｻ螢ｱ蜈ｱ.
+
+    ) else (
+
+        echo [OK] Japanese tokenizer deps installed via pip fallback.
+
+    )
+
+)
+
 goto :eof
 
 :install_audio_deps
-if exist "%ENV_DIR%\Library\bin\libsndfile.dll" goto :eof
-echo Checking audio runtime dependencies ^(libsndfile^)...
+
+echo ^(libsndfile^)...
+
+call :verify_audio_deps
+
+if not errorlevel 1 goto :eof
+
+set "AUDIO_INSTALL_LOG=%SETUP_LOG_DIR%\audio_deps_%RANDOM%_%RANDOM%.log"
+
 if exist "%MICROMAMBA_EXE%" (
-    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge libsndfile pysoundfile
+
+    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge libsndfile pysoundfile >"%AUDIO_INSTALL_LOG%" 2>&1
+
     if errorlevel 1 (
-        echo [FAILED] Audio dependency install failed.
-        call :maybe_pause
+
+        type "%AUDIO_INSTALL_LOG%"
+
+        call :record_blocked_failure "%AUDIO_INSTALL_LOG%" "audio dependency install"
+
+        echo [FAILED] Operation failed. Check the log output.
+
+        if not "%NON_INTERACTIVE%"=="1" pause
+
         exit /b 1
+
     )
+
+    type "%AUDIO_INSTALL_LOG%"
+
+    call :verify_audio_deps
+
+    if errorlevel 1 (
+
+        echo [FAILED] libsndfile/soundfile verification failed after micromamba install.
+
+        if not "%NON_INTERACTIVE%"=="1" pause
+
+        exit /b 1
+
+    )
+
     goto :eof
+
 )
+
+set "AUDIO_INSTALL_LOG=%SETUP_LOG_DIR%\audio_deps_conda_%RANDOM%_%RANDOM%.log"
+
 if exist "%ENV_DIR%\Scripts\conda.exe" (
-    "%ENV_DIR%\Scripts\conda.exe" install -y --solver classic -p "%ENV_DIR%" -c conda-forge libsndfile pysoundfile
+
+    "%ENV_DIR%\Scripts\conda.exe" install -y --solver classic -p "%ENV_DIR%" -c conda-forge libsndfile pysoundfile >"%AUDIO_INSTALL_LOG%" 2>&1
+
     if errorlevel 1 (
-        echo [FAILED] Audio dependency install failed.
-        call :maybe_pause
+
+        type "%AUDIO_INSTALL_LOG%"
+
+        call :record_blocked_failure "%AUDIO_INSTALL_LOG%" "audio dependency install via conda"
+
+        echo [FAILED] Operation failed. Check the log output.
+
+        if not "%NON_INTERACTIVE%"=="1" pause
+
         exit /b 1
+
     )
+
+    type "%AUDIO_INSTALL_LOG%"
+
+    call :verify_audio_deps
+
+    if errorlevel 1 (
+
+        echo [FAILED] libsndfile/soundfile verification failed after conda install.
+
+        if not "%NON_INTERACTIVE%"=="1" pause
+
+        exit /b 1
+
+    )
+
     goto :eof
+
 )
-echo [WARN] No micromamba/conda found. Skipping audio dependency install.
+
+if exist "%ENV_DIR%\python.exe" (
+
+    REM soundfile>=0.12.1 bundles libsndfile-1.dll on Windows; no separate DLL download needed.
+    call :run_env_python -m pip install --upgrade "soundfile>=0.12.1"
+
+    call :verify_audio_deps
+
+    if not errorlevel 1 goto :eof
+
+    REM cffi is required on some Python 3.10 builds; retry after ensuring it is present.
+    echo [INFO] soundfile verify failed. Retrying after installing cffi...
+
+    call :run_env_python -m pip install --upgrade cffi "soundfile>=0.12.1"
+
+    call :verify_audio_deps
+
+    if not errorlevel 1 goto :eof
+
+)
+
+echo [WARN] libsndfile/soundfile could not be verified. Audio I/O features may be limited.
+echo        Re-run setup_mfa.bat --recovery after confirming network access to retry.
+
 goto :eof
 
+:verify_audio_deps
+
+if not exist "%ENV_DIR%\python.exe" exit /b 1
+
+setlocal EnableExtensions DisableDelayedExpansion
+
+set "OLD_PATH=%PATH%"
+
+set "PATH=%ENV_DIR%;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\bin;%ENV_DIR%\Scripts;%ENV_DIR%\bin;%OLD_PATH%"
+
+call :run_env_python -c "import soundfile" >nul 2>nul
+
+set "VERIFY_RC=%ERRORLEVEL%"
+
+endlocal & set "VERIFY_RC=%VERIFY_RC%"
+
+if "%VERIFY_RC%"=="0" exit /b 0
+
+exit /b 1
+
 :install_textgrid
-echo Checking textgrid module...
-call :resolve_env_python_exe
-if errorlevel 1 (
-    echo [FAILED] MFA Python runtime was not found.
-    call :maybe_pause
+
+echo textgrid ..
+
+if not exist "%ENV_DIR%\python.exe" (
+
+    echo [FAILED] MFA Python
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
     exit /b 1
+
 )
-"%ENV_PYTHON_EXE%" -c "import textgrid" >nul 2>nul
+
+call :run_env_python -c "import textgrid" >nul 2>nul
+
 if not errorlevel 1 goto :eof
-echo [INFO] Installing textgrid module...
-call :run_env_pip install --upgrade "textgrid>=1.5"
+
+echo [INFO] textgrid
+
+set "TEXTGRID_INSTALL_LOG=%SETUP_LOG_DIR%\textgrid_%RANDOM%_%RANDOM%.log"
+
+call :run_env_python -m pip install --upgrade "textgrid>=1.5" >"%TEXTGRID_INSTALL_LOG%" 2>&1
+
 if errorlevel 1 (
-    echo [FAILED] textgrid install failed.
-    call :maybe_pause
+
+    type "%TEXTGRID_INSTALL_LOG%"
+
+    call :record_blocked_failure "%TEXTGRID_INSTALL_LOG%" "textgrid pip install"
+
+    echo [FAILED] textgrid
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
     exit /b 1
+
 )
+
+type "%TEXTGRID_INSTALL_LOG%"
+
 goto :eof
 
 :verify_textgrid
-call :resolve_env_python_exe
-if errorlevel 1 (
-    echo [FAILED] MFA Python runtime was not found.
-    call :maybe_pause
+
+if not exist "%ENV_DIR%\python.exe" (
+
+    echo [FAILED] MFA Python
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
     exit /b 1
+
 )
-"%ENV_PYTHON_EXE%" -c "import textgrid" >nul 2>nul
+
+call :run_env_python -c "import textgrid" >nul 2>nul
+
 if errorlevel 1 (
-    echo [FAILED] textgrid import failed.
-    echo        Re-run setup_mfa.bat to repair the environment.
-    call :maybe_pause
+
+    echo [FAILED] textgrid import
+
+    echo setup_mfa.bat
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
     exit /b 1
+
 )
+
 goto :eof
 
 :install_ml_requirements
-echo Installing optional ML dependencies...
-call :resolve_env_python_exe
-if errorlevel 1 (
-    echo [FAILED] MFA Python runtime was not found.
-    call :maybe_pause
+
+echo ML ..
+
+if not exist "%ENV_DIR%\python.exe" (
+
+    echo [FAILED] MFA Python
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
     exit /b 1
+
 )
-if not exist "%APP_DIR%\requirements.txt" (
-    echo [FAILED] requirements.txt not found in %APP_DIR%
-    call :maybe_pause
-    exit /b 1
-)
-if not exist "%APP_DIR%\requirements-ml.txt" (
-    echo [FAILED] requirements-ml.txt not found in %APP_DIR%
-    call :maybe_pause
-    exit /b 1
-)
+
+set "REQ_BASE=%APP_DIR%\requirements.txt"
+set "REQ_ML=%APP_DIR%\requirements-ml.txt"
+
 if exist "%MICROMAMBA_EXE%" (
-    echo [INFO] Installing ML runtime packages via micromamba...
-    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas scikit-learn lightgbm pytorch
+
+    echo [INFO] micromamba ML
+
+    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas lightgbm onnxruntime
+
     if errorlevel 1 (
-        echo [WARN] Micromamba ML install failed. Falling back to pip.
+
+        echo [WARN] micromamba ML . pip
+
     ) else (
-        echo [OK] Micromamba ML packages installed.
+
+        echo [OK] micromamba ML
+
     )
+
 )
-echo [INFO] Installing from requirements.txt
-call :run_env_pip install --upgrade -r "%APP_DIR%\requirements.txt"
-if errorlevel 1 (
-    echo [FAILED] requirements.txt install failed.
-    call :maybe_pause
-    exit /b 1
-)
-if not exist "%MICROMAMBA_EXE%" (
-    echo [INFO] Installing from requirements-ml.txt via pip (micromamba not found)
-    call :run_env_pip install --upgrade -r "%APP_DIR%\requirements-ml.txt"
+
+if exist "%REQ_BASE%" (
+
+    echo [INFO] requirements.txt
+
+    call :run_env_python -m pip install --upgrade -r "%REQ_BASE%"
+
     if errorlevel 1 (
-        echo [FAILED] ML dependency install failed.
-        echo        You may need Microsoft Visual C++ Build Tools for lightgbm.
-        call :maybe_pause
-        exit /b 1
+
+        echo [WARN] requirements.txt install failed. Continuing to ML runtime verification.
+
     )
+
+) else (
+
+    echo [WARN] requirements.txt not found at "%REQ_BASE%". Skipping optional base pip sync.
+
 )
-echo [OK] ML dependencies installed.
+
+if exist "%REQ_ML%" (
+
+    echo [INFO] requirements-ml.txt
+
+    call :run_env_python -m pip install --upgrade -r "%REQ_ML%"
+
+    if errorlevel 1 (
+
+        if exist "%MICROMAMBA_EXE%" (
+
+            echo [WARN] requirements-ml.txt pip install failed after micromamba ML install. Continuing to verification.
+
+        ) else (
+
+            echo [FAILED] ML
+
+            echo lightgbm Microsoft Visual C++ Build Tools .
+
+            if not "%NON_INTERACTIVE%"=="1" pause
+
+            exit /b 1
+
+        )
+
+    )
+
+    goto :ml_install_done
+
+)
+
+if exist "%MICROMAMBA_EXE%" (
+
+    echo [WARN] requirements-ml.txt not found at "%REQ_ML%". Using micromamba-installed ML packages only.
+
+) else (
+
+    echo [INFO] requirements-ml.txt missing. Installing minimal ML packages via pip.
+
+    call :run_env_python -m pip install --upgrade pandas lightgbm onnxruntime
+
+    if errorlevel 1 (
+
+        echo [FAILED] ML
+
+        echo lightgbm Microsoft Visual C++ Build Tools .
+
+        if not "%NON_INTERACTIVE%"=="1" pause
+
+        exit /b 1
+
+    )
+
+)
+
+:ml_install_done
+
+echo [OK] ML
+
 goto :eof
 
 :verify_ml_runtime
-call :resolve_env_python_exe
-if errorlevel 1 (
-    echo [FAILED] MFA Python runtime was not found.
-    call :maybe_pause
+
+if not exist "%ENV_DIR%\python.exe" (
+
+    echo [FAILED] MFA Python
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
     exit /b 1
+
 )
-"%ENV_PYTHON_EXE%" -c "import pandas, sklearn, lightgbm, torch" >nul 2>nul
+
+call :run_env_python -c "import pandas, lightgbm, onnxruntime" >nul 2>nul
+
 if errorlevel 1 (
-    echo [FAILED] ML runtime import failed. Missing pandas/sklearn/lightgbm/torch.
+
+    echo [FAILED] ML import . pandas/lightgbm/onnxruntime
+
     if exist "%MICROMAMBA_EXE%" (
-        echo        Try: "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas scikit-learn lightgbm pytorch
+
+        echo : "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge pandas lightgbm onnxruntime
+
     ) else (
-        echo        Re-run setup_mfa.bat --with-ml
+
+        echo setup_mfa.bat --with-ml
+
     )
-    call :maybe_pause
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
     exit /b 1
+
 )
+
 goto :eof
 
-:ensure_cuda_runtime_for_nvidia
-if not "%INSTALL_ML%"=="1" goto :eof
-if not "%INSTALL_CUDA_RUNTIME%"=="1" goto :eof
-call :resolve_env_python_exe
-if errorlevel 1 goto :eof
-where /q nvidia-smi
-if errorlevel 1 goto :eof
+:cleanup_env_caches
 
-echo Checking CUDA runtime for NVIDIA GPU...
-set "PYTHONPATH=%APP_DIR%;%PYTHONPATH%"
-"%ENV_PYTHON_EXE%" -m core.cuda_runtime_bootstrap --auto-install --python-exe "%ENV_PYTHON_EXE%" --quiet
-set "CUDA_BOOTSTRAP_RC=%errorlevel%"
-if "%CUDA_BOOTSTRAP_RC%"=="0" (
-    echo [OK] CUDA runtime check complete.
-    goto :eof
+echo ..
+
+if exist "%MICROMAMBA_EXE%" (
+
+    "%MICROMAMBA_EXE%" clean -a -y -r "%MICROMAMBA_ROOT%" >nul 2>nul
+
 )
-echo [WARN] CUDA runtime bootstrap returned code %CUDA_BOOTSTRAP_RC%.
-echo        MFA/ML setup can continue, but GPU inference may still use CPU.
-echo        Re-run setup_mfa.bat --with-cuda after network/pip issues are resolved.
+
+if exist "%ENV_DIR%\python.exe" (
+
+    call :run_env_python -m pip cache purge >nul 2>nul
+
+)
+
+echo [OK] Completed.
+
+goto :eof
+
+:cleanup_mfa_root_artifacts
+
+echo [INFO] Cleaning stale MFA root artifacts...
+
+if not defined MFA_SHARED_ROOT goto :cleanup_mfa_root_artifacts_done
+
+if not exist "%MFA_SHARED_ROOT%" mkdir "%MFA_SHARED_ROOT%" >nul 2>nul
+
+if exist "%ENV_DIR%\.mfa_root_ascii\pretrained_models" (
+
+    call :sync_bundle_tree "%ENV_DIR%\.mfa_root_ascii\pretrained_models" "%MFA_SHARED_ROOT%\pretrained_models"
+
+)
+
+if exist "%ENV_DIR%\.mfa_root_ascii\extracted_models" if not exist "%MFA_SHARED_ROOT%\extracted_models" (
+
+    call :sync_bundle_tree "%ENV_DIR%\.mfa_root_ascii\extracted_models" "%MFA_SHARED_ROOT%\extracted_models"
+
+)
+
+if exist "%ENV_DIR%\.mfa_root_ascii" (
+
+    rmdir /s /q "%ENV_DIR%\.mfa_root_ascii" >nul 2>nul
+
+    if exist "%ENV_DIR%\.mfa_root_ascii" (
+
+        echo [WARN] Failed to remove legacy MFA root from env: "%ENV_DIR%\.mfa_root_ascii"
+
+    ) else (
+
+        echo [OK] Removed legacy MFA root from env.
+
+    )
+
+)
+
+if exist "%ENV_DIR%\.mfa_root_ascii_p*" for /d %%D in ("%ENV_DIR%\.mfa_root_ascii_p*") do (
+
+    rmdir /s /q "%%~fD" >nul 2>nul
+
+)
+
+if exist "%RUNTIME_STATE_ROOT%\.mfa_root_ascii_p*" for /d %%D in ("%RUNTIME_STATE_ROOT%\.mfa_root_ascii_p*") do (
+
+    rmdir /s /q "%%~fD" >nul 2>nul
+
+)
+
+call :prune_mfa_shared_root_cache_dirs
+
+:cleanup_mfa_root_artifacts_done
+
+echo [OK] MFA root artifact cleanup completed.
+
+goto :eof
+
+:prune_mfa_shared_root_cache_dirs
+
+if not defined MFA_SHARED_ROOT goto :eof
+
+if not exist "%MFA_SHARED_ROOT%" goto :eof
+
+setlocal EnableDelayedExpansion
+
+for /d %%D in ("%MFA_SHARED_ROOT%\*") do (
+
+    set "MFA_ROOT_NAME=%%~nxD"
+    set "MFA_ROOT_KEEP=0"
+    if /I "!MFA_ROOT_NAME!"=="pretrained_models" set "MFA_ROOT_KEEP=1"
+    if /I "!MFA_ROOT_NAME!"=="extracted_models" set "MFA_ROOT_KEEP=1"
+    if /I "!MFA_ROOT_KEEP!"=="0" (
+
+        rmdir /s /q "%%~fD" >nul 2>nul
+
+    )
+
+)
+
+endlocal
+
 goto :eof
 
 :install_korean_support
-echo Checking Korean tokenizer dependencies...
+
+echo ..
+
 call :ensure_mfa_entrypoint
+
 if errorlevel 1 exit /b 1
-call :resolve_env_python_exe
-if errorlevel 1 (
-    echo [FAILED] MFA Python runtime was not found.
-    call :maybe_pause
+
+if not exist "%ENV_DIR%\python.exe" (
+
+    echo [FAILED] MFA Python
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
     exit /b 1
+
 )
-call :check_korean_tokenizer_deps
-if not errorlevel 1 goto :patch_korean_support
-echo [INFO] Installing Korean tokenizer dependencies...
-if exist "%KO_WHEEL_DIR%" (
-    dir /b "%KO_WHEEL_DIR%\*.whl" >nul 2>nul
-    if not errorlevel 1 (
-        echo [INFO] Trying bundled Korean wheels first ^(offline mode^)...
-        call :run_env_pip install --upgrade --no-index --find-links "%KO_WHEEL_DIR%" python-mecab-ko jamo python-mecab-ko-dic
-        call :check_korean_tokenizer_deps
-        if not errorlevel 1 goto :patch_korean_support
-        echo [WARN] Bundled Korean wheel install failed. Falling back to online channels...
-    ) else (
-        echo [INFO] Korean wheel bundle folder exists but no wheel files were found.
-    )
-)
-if exist "%MICROMAMBA_EXE%" (
-    echo [INFO] Trying conda-forge packages first ^(python-mecab-ko, jamo^)...
-    "%MICROMAMBA_EXE%" install -y -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" -c conda-forge python-mecab-ko jamo
-    call :check_korean_tokenizer_deps
-    if not errorlevel 1 goto :patch_korean_support
-)
-echo [INFO] Trying pip wheel packages first ^(python-mecab-ko, jamo; no source build^)...
-call :run_env_pip install --upgrade --only-binary=:all: python-mecab-ko jamo
-call :check_korean_tokenizer_deps
-if not errorlevel 1 goto :patch_korean_support
+
+call :check_korean_tokenizer_ready
+
+if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
+
+echo [INFO] Installing Korean tokenizer dependency: jamo
+
+call :run_env_python -m pip install --upgrade jamo
+
 if errorlevel 1 (
-    if "%ALLOW_DEGRADED_KO%"=="1" (
-        echo [WARN] Korean tokenizer dependency install failed ^(python-mecab-ko/jamo^). Continuing in degraded mode.
-        echo        Alignment can run, but Korean accuracy may be lower.
-        echo        Manual Build Tools install link: https://visualstudio.microsoft.com/visual-cpp-build-tools/
-        exit /b 0
-    )
-    echo [FAILED] Korean tokenizer dependency install failed ^(python-mecab-ko/jamo^).
-    echo        Build Tools auto-install is intentionally not included.
-    echo        Reason: very large package size, admin elevation, and unstable silent provisioning.
-    echo        Try:
-    echo        1^) Re-run with network access and conda-forge available ^(recommended^)
-    echo        2^) Manual install: https://visualstudio.microsoft.com/visual-cpp-build-tools/
-    call :maybe_pause
+
+    echo [FAILED] Korean tokenizer dependency install failed: jamo
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
     exit /b 1
+
 )
-:patch_korean_support
-set "PYTHONPATH=%APP_DIR%"
-call :resolve_env_python_exe
-if errorlevel 1 exit /b 1
-"%ENV_PYTHON_EXE%" -c "from core.mfa_runner import patch_mfa_korean_support; patch_mfa_korean_support(r'%MFA_EXE%')" >nul 2>nul
-if errorlevel 1 (
-    echo [WARN] Korean MFA patch step failed. Alignment may still run, but Korean tokenizer support could be incomplete.
-    exit /b 0
+
+call :check_korean_tokenizer_ready
+
+if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
+
+echo [INFO] Installing Korean tokenizer backend: python-mecab-ko ^(wheel-only^)
+
+call :run_env_python -m pip uninstall -y mecab-python3 >nul 2>nul
+
+call :run_env_python -m pip install --upgrade --force-reinstall --only-binary=:all: python-mecab-ko python-mecab-ko-dic
+
+if not errorlevel 1 (
+
+    call :check_korean_tokenizer_ready
+
+    if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
+
+    call :ensure_mecab_module_shim
+
+    call :check_korean_tokenizer_ready
+
+    if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
+
+) else (
+
+    echo [WARN] python-mecab-ko install failed or wheel unavailable.
+
 )
+
+REM Always attempt mecab-python3 as an automatic fallback — no env var gate needed.
+echo [INFO] Installing Korean tokenizer backend fallback: mecab-python3 ^(wheel-only^)
+
+call :run_env_python -m pip uninstall -y python-mecab-ko python-mecab-ko-dic >nul 2>nul
+
+call :run_env_python -m pip install --upgrade --only-binary=:all: mecab-python3
+
+if not errorlevel 1 (
+
+    call :check_korean_tokenizer_ready
+
+    if "%KOREAN_TOKENIZER_OK%"=="1" goto :patch_korean_support
+
+) else (
+
+    echo [WARN] mecab-python3 install failed or wheel unavailable.
+
+)
+
+REM Both backends failed — degrade gracefully so the rest of setup can continue.
+echo [WARN] Korean tokenizer backend install failed.
+echo        Tried: python-mecab-ko ^(wheel-only^), mecab-python3 ^(wheel-only^).
+echo        Korean VB alignment support will be limited.
+echo        Re-run setup_mfa.bat --recovery after confirming network access to retry.
 exit /b 0
 
-:check_korean_tokenizer_deps
-call :resolve_env_python_exe
-if errorlevel 1 exit /b 1
-"%ENV_PYTHON_EXE%" -c "import jamo" >nul 2>nul
-if errorlevel 1 exit /b 1
-"%ENV_PYTHON_EXE%" -c "import eunjeon" >nul 2>nul
-if not errorlevel 1 exit /b 0
-"%ENV_PYTHON_EXE%" -c "from mecab import MeCab" >nul 2>nul
-if not errorlevel 1 exit /b 0
-exit /b 1
+:ensure_mecab_module_shim
 
-:check_mfa_python_module
-call :resolve_env_python_exe
+if not exist "%ENV_DIR%\python.exe" goto :eof
+
+call :run_env_python -c "import importlib.util as u, pathlib, sysconfig; has_mecab=u.find_spec('mecab') is not None; has_mecab_caps=u.find_spec('MeCab') is not None; purelib=sysconfig.get_paths().get('purelib'); target=pathlib.Path(purelib) / 'mecab.py' if purelib else None; (not has_mecab and has_mecab_caps and target and not target.exists()) and target.write_text('from MeCab import *\\n', encoding='utf-8')" >nul 2>nul
+
+goto :eof
+
+:patch_korean_support
+
+set "UTOA_APP_DIR=%APP_DIR%"
+set "UTOA_MFA_EXE=%MFA_EXE%"
+
+call :run_env_python -c "import os,sys; app=os.environ.get('UTOA_APP_DIR',''); cand=[os.path.join(app,'UTAU_Auto_OTO'), app]; [sys.path.insert(0,p) for p in cand if p and p not in sys.path]; from core.mfa_runner import patch_mfa_korean_support; patch_mfa_korean_support(os.environ.get('UTOA_MFA_EXE',''))" >nul 2>nul
+
+if not errorlevel 1 exit /b 0
+
+echo [WARN] MFA Korean patch step failed. Continuing.
+exit /b 0
+
+:check_korean_tokenizer_ready
+
+set "KOREAN_TOKENIZER_OK=0"
+
+if not exist "%ENV_DIR%\python.exe" goto :eof
+
+call :run_env_python -c "import importlib.util as u,sys; has_jamo=u.find_spec('jamo') is not None; backends=('mecab','mecab_ko','MeCab'); has_backend=any(u.find_spec(name) is not None for name in backends); sys.exit(0 if (has_jamo and has_backend) else 1)" >nul 2>nul
+
+if not errorlevel 1 set "KOREAN_TOKENIZER_OK=1"
+
+goto :eof
+
+:init_setup_diagnostics
+
+if not defined SETUP_LOG_DIR goto :eof
+
+if not exist "%SETUP_LOG_DIR%" mkdir "%SETUP_LOG_DIR%" >nul 2>nul
+
+if not exist "%SETUP_LOG_DIR%" (
+
+    echo [WARN] Could not create setup log directory: %SETUP_LOG_DIR%
+
+    goto :eof
+
+)
+
+set "SETUP_DIAG_LOG=%SETUP_LOG_DIR%\mfa_setup_diagnostics_%RANDOM%_%RANDOM%.log"
+
+> "%SETUP_DIAG_LOG%" echo UTAU Auto OTO MFA setup diagnostics
+>>"%SETUP_DIAG_LOG%" echo timestamp=%DATE% %TIME%
+>>"%SETUP_DIAG_LOG%" echo app_dir=%APP_DIR%
+>>"%SETUP_DIAG_LOG%" echo runtime_state_root=%RUNTIME_STATE_ROOT%
+>>"%SETUP_DIAG_LOG%" echo env_dir=%ENV_DIR%
+>>"%SETUP_DIAG_LOG%" echo micromamba_root=%MICROMAMBA_ROOT%
+>>"%SETUP_DIAG_LOG%" echo temp=%TEMP%
+>>"%SETUP_DIAG_LOG%" echo.
+
+echo [INFO] Setup diagnostics log: %SETUP_DIAG_LOG%
+
+goto :eof
+
+:record_blocked_failure
+
+set "FAIL_LOG=%~1"
+set "FAIL_CONTEXT=%~2"
+set "FAIL_MATCHED=0"
+
+if not defined SETUP_DIAG_LOG goto :eof
+
+>>"%SETUP_DIAG_LOG%" echo.
+>>"%SETUP_DIAG_LOG%" echo === failure context: %FAIL_CONTEXT% ===
+>>"%SETUP_DIAG_LOG%" echo timestamp=%DATE% %TIME%
+
+if "%FAIL_LOG%"=="" (
+
+    >>"%SETUP_DIAG_LOG%" echo source_log=missing
+
+    goto :record_blocked_failure_done
+
+)
+
+>>"%SETUP_DIAG_LOG%" echo source_log=%FAIL_LOG%
+
+if exist "%FAIL_LOG%" (
+
+    for %%I in ("%FAIL_LOG%") do (
+
+        copy /Y "%FAIL_LOG%" "%SETUP_LOG_DIR%\%%~nxI" >nul 2>nul
+
+        if exist "%SETUP_LOG_DIR%\%%~nxI" >>"%SETUP_DIAG_LOG%" echo saved_log=%SETUP_LOG_DIR%\%%~nxI
+
+    )
+
+    findstr /I /C:"Could not resolve host" /C:"Failed to connect" /C:"Connection timed out" /C:"Read timed out" /C:"SSL" /C:"certificate" /C:"ProxyError" /C:"CondaHTTPError" /C:"HTTP 000" /C:"Invoke-WebRequest" /C:"The remote name could not be resolved" /C:"Unable to connect" /C:"NameResolutionFailure" "%FAIL_LOG%" >nul 2>nul
+
+    if not errorlevel 1 (
+
+        >>"%SETUP_DIAG_LOG%" echo suspected_cause=NETWORK_OR_PROXY
+
+        set "FAIL_MATCHED=1"
+
+    )
+
+    findstr /I /C:"access is denied" /C:"PermissionError" /C:"WinError 5" /C:"UnauthorizedAccessException" /C:"being used by another process" /C:"The process cannot access the file" /C:"blocked" /C:"quarantine" "%FAIL_LOG%" >nul 2>nul
+
+    if not errorlevel 1 (
+
+        >>"%SETUP_DIAG_LOG%" echo suspected_cause=PERMISSION_OR_SECURITY_SOFTWARE
+
+        set "FAIL_MATCHED=1"
+
+    )
+
+    findstr /I /C:"Invalid package cache" /C:"Cannot find a valid extracted directory cache" /C:"Package cache error" /C:"corrupted package tarball" /C:"CondaVerificationError" /C:"SafetyError" "%FAIL_LOG%" >nul 2>nul
+
+    if not errorlevel 1 (
+
+        >>"%SETUP_DIAG_LOG%" echo suspected_cause=CACHE_OR_PARTIAL_DOWNLOAD
+
+        set "FAIL_MATCHED=1"
+
+    )
+
+) else (
+
+    >>"%SETUP_DIAG_LOG%" echo source_log_status=not_found
+
+)
+
+:record_blocked_failure_done
+
+if "%FAIL_MATCHED%"=="0" >>"%SETUP_DIAG_LOG%" echo suspected_cause=UNCLASSIFIED_CHECK_SAVED_LOG
+
+echo [INFO] Failure diagnostics saved: %SETUP_DIAG_LOG%
+
+goto :eof
+
+:validate_micromamba_exe
+
+if not exist "%MICROMAMBA_EXE%" exit /b 1
+
+set "MICROMAMBA_VALIDATE_LOG=%SETUP_LOG_DIR%\micromamba_validate_%RANDOM%_%RANDOM%.log"
+
+"%MICROMAMBA_EXE%" --version >"%MICROMAMBA_VALIDATE_LOG%" 2>&1
+
+if errorlevel 1 (
+
+    call :record_blocked_failure "%MICROMAMBA_VALIDATE_LOG%" "micromamba executable validation"
+
+    echo [WARN] Micromamba executable is present but not runnable: %MICROMAMBA_EXE%
+
+    exit /b 1
+
+)
+
+exit /b 0
+
+:repair_micromamba_bootstrap
+
+echo [INFO] Rebuilding micromamba bootstrap...
+
+call :release_env_lock_processes
+
+if /I not "%MICROMAMBA_EXE%"=="%PAYLOAD_MICROMAMBA_PORTABLE_EXE%" (
+
+    if exist "%MICROMAMBA_EXE%" del "%MICROMAMBA_EXE%" >nul 2>nul
+
+) else (
+
+    echo [WARN] Payload micromamba is not runnable. Using downloaded runtime copy instead.
+
+)
+
+if exist "%MICROMAMBA_ARCHIVE%" del "%MICROMAMBA_ARCHIVE%" >nul 2>nul
+
+call :remove_dir "%MICROMAMBA_ROOT%"
+
 if errorlevel 1 exit /b 1
-"%ENV_PYTHON_EXE%" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('montreal_forced_aligner.command_line.mfa') else 1)" >nul 2>nul
-if not errorlevel 1 exit /b 0
-"%ENV_PYTHON_EXE%" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('montreal_forced_aligner') else 1)" >nul 2>nul
-if not errorlevel 1 exit /b 0
-exit /b 1
+
+set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\micromamba.exe"
+
+call :download_micromamba_exe
+
+if errorlevel 1 exit /b 1
+
+call :validate_micromamba_exe
+
+if errorlevel 1 exit /b 1
+
+exit /b 0
+
+:resolve_micromamba_expected_md5
+
+set "MICROMAMBA_MD5_EXPECTED="
+
+set "MICROMAMBA_MD5_FILE=%TEMP%\utau_auto_oto_micromamba_expected_md5.txt"
+
+if exist "%MICROMAMBA_MD5_FILE%" del "%MICROMAMBA_MD5_FILE%" >nul 2>nul
+
+powershell -NoProfile -Command ^
+
+ "$ErrorActionPreference='Stop';" ^
+
+ " try { [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12 } catch {};" ^
+
+ " $latest='%MICROMAMBA_LATEST_URL%';" ^
+
+ " $resp=$null;" ^
+
+ " $redirect=$null;" ^
+
+ " try { $resp=Invoke-WebRequest -Uri $latest -MaximumRedirection 0 -UseBasicParsing -TimeoutSec 30 } catch { if ($_.Exception.Response) { $resp=$_.Exception.Response } };" ^
+
+ " if ($resp -and $resp.Headers) { $redirect=$resp.Headers['Location'] };" ^
+
+ " if (-not $redirect) { throw 'redirect location not found' };" ^
+
+ " if ($redirect.StartsWith('//')) { $redirect='https:' + $redirect };" ^
+
+ " $leaf=Split-Path $redirect -Leaf;" ^
+
+ " $target='win-64/' + $leaf;" ^
+
+ " $files=Invoke-RestMethod -Uri 'https://api.anaconda.org/package/conda-forge/micromamba/files' -TimeoutSec 60;" ^
+
+ " $hit=$files | Where-Object { $_.basename -eq $target } | Select-Object -First 1;" ^
+
+ " if (-not $hit) { throw ('metadata not found: ' + $target) };" ^
+
+ " if (-not $hit.md5) { throw 'metadata md5 is empty' };" ^
+
+ " Set-Content -LiteralPath '%MICROMAMBA_MD5_FILE%' -Value ($hit.md5.ToLowerInvariant()) -Encoding ASCII;"
+
+if errorlevel 1 (
+
+    if exist "%MICROMAMBA_MD5_FILE%" del "%MICROMAMBA_MD5_FILE%" >nul 2>nul
+
+    exit /b 1
+
+)
+
+if not exist "%MICROMAMBA_MD5_FILE%" exit /b 1
+
+set /p MICROMAMBA_MD5_EXPECTED=<"%MICROMAMBA_MD5_FILE%"
+
+if exist "%MICROMAMBA_MD5_FILE%" del "%MICROMAMBA_MD5_FILE%" >nul 2>nul
+
+if not defined MICROMAMBA_MD5_EXPECTED exit /b 1
+
+echo [INFO] Micromamba MD5 : %MICROMAMBA_MD5_EXPECTED%
+
+exit /b 0
+
+:download_micromamba_exe
+
+if not exist "%MICROMAMBA_ROOT%" mkdir "%MICROMAMBA_ROOT%" >nul 2>nul
+
+set "MICROMAMBA_EXE_DOWNLOAD_LOG=%SETUP_LOG_DIR%\micromamba_exe_download_%RANDOM%_%RANDOM%.log"
+
+powershell -NoProfile -Command ^
+
+ "$ErrorActionPreference='Stop';" ^
+
+ " try { [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12 } catch {};" ^
+
+ " $url='%MICROMAMBA_EXE_URL%';" ^
+
+ " $dst=Join-Path '%MICROMAMBA_ROOT%' 'micromamba.exe';" ^
+
+ " Invoke-WebRequest -Uri $url -OutFile $dst -TimeoutSec 120 -UseBasicParsing;" ^
+
+ " if (-not (Test-Path -LiteralPath $dst)) { throw 'micromamba.exe download failed' }" >"%MICROMAMBA_EXE_DOWNLOAD_LOG%" 2>&1
+
+if errorlevel 1 (
+
+    call :record_blocked_failure "%MICROMAMBA_EXE_DOWNLOAD_LOG%" "micromamba.exe download"
+
+    exit /b 1
+
+)
+
+if not exist "%MICROMAMBA_ROOT%\micromamba.exe" (
+
+    call :record_blocked_failure "%MICROMAMBA_EXE_DOWNLOAD_LOG%" "micromamba.exe missing after download"
+
+    exit /b 1
+
+)
+
+set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\micromamba.exe"
+
+exit /b 0
+
+:verify_micromamba_archive
+
+if not exist "%MICROMAMBA_ARCHIVE%" (
+
+    echo [FAILED] Micromamba : %MICROMAMBA_ARCHIVE%
+
+    exit /b 1
+
+)
+
+set "MICROMAMBA_MD5_ACTUAL="
+
+if "%HAS_CERTUTIL%"=="0" (
+
+    echo [WARN] certutil unavailable. Skipping micromamba archive MD5 verification.
+
+    exit /b 0
+
+)
+
+for /f "tokens=1" %%h in ('certutil -hashfile "%MICROMAMBA_ARCHIVE%" MD5 ^| findstr /R /I "^[0-9A-F][0-9A-F]"') do (
+
+    if not defined MICROMAMBA_MD5_ACTUAL set "MICROMAMBA_MD5_ACTUAL=%%h"
+
+)
+
+if not defined MICROMAMBA_MD5_ACTUAL (
+
+    echo [FAILED] Micromamba MD5
+
+    exit /b 1
+
+)
+
+echo [INFO] Micromamba MD5: %MICROMAMBA_MD5_ACTUAL%
+
+if defined MICROMAMBA_MD5_EXPECTED (
+
+    if /I not "%MICROMAMBA_MD5_ACTUAL%"=="%MICROMAMBA_MD5_EXPECTED%" (
+
+        echo [FAILED] Micromamba
+
+        echo %MICROMAMBA_MD5_EXPECTED%
+
+        echo %MICROMAMBA_MD5_ACTUAL%
+
+        del "%MICROMAMBA_ARCHIVE%" >nul 2>nul
+
+        exit /b 1
+
+    )
+
+    echo [OK] Micromamba
+
+) else (
+
+    echo [WARN] Expected micromamba MD5 was not resolved. Proceeding without strict checksum comparison.
+
+)
+
+exit /b 0
 
 :handle_old_env
+
 echo.
-echo [WARN] Legacy MFA environment detected:
+
+echo [WARN] Legacy shared MFA environment was found:
+
 echo        %OLD_ENV_DIR%
+
 echo.
+
 echo Choose how to handle the legacy environment:
-echo   [M] Migrate ^(rebuild local env, then delete old^)
-echo   [D] Delete old now
-echo   [K] Keep old ^(no deletion^)
-if "%INTERACTIVE%"=="0" (
-    echo [INFO] Non-interactive mode: keeping legacy env and continuing.
-    goto :keep_old_env
-)
-choice /C MDK /N /M "Select M/D/K: "
+
+echo [M] Migrate: keep now, delete after successful install
+
+echo [D] Delete now
+
+echo [K] Keep as-is (recommended only for troubleshooting)
+
+choice /C MDK /N /M "Select action (M/D/K): "
+
 if errorlevel 3 goto :keep_old_env
+
 if errorlevel 2 goto :delete_old_env_now
+
 if errorlevel 1 goto :migrate_old_env
+
 goto :eof
 
 :migrate_old_env
+
 set "DELETE_OLD_AFTER_INSTALL=1"
-echo [INFO] Will delete legacy env after successful local install.
+
+echo [INFO] Legacy environment will be removed after successful install.
+
 goto :eof
 
 :delete_old_env_now
+
 call :remove_dir "%OLD_ENV_DIR%"
+
 call :remove_dir "%OLD_MICROMAMBA_ROOT%"
+
 goto :eof
 
 :keep_old_env
-echo [INFO] Keeping legacy env. Local install will continue.
+
+echo [INFO] Keeping legacy environment unchanged.
+
 goto :eof
 
 :cleanup_old_env_if_requested
+
 if not "%DELETE_OLD_AFTER_INSTALL%"=="1" goto :eof
+
 if /i "%OLD_ENV_DIR%"=="%ENV_DIR%" goto :eof
+
 call :remove_dir "%OLD_ENV_DIR%"
+
 call :remove_dir "%OLD_MICROMAMBA_ROOT%"
-echo [OK] Legacy MFA environment removed.
+
+echo [OK] MFA
+
 goto :eof
 
 :remove_dir
+
 set "TARGET_DIR=%~1"
-if "%TARGET_DIR%"=="" goto :eof
-if not exist "%TARGET_DIR%" goto :eof
-echo [INFO] Removing %TARGET_DIR%
+
+if "%TARGET_DIR%"=="" exit /b 0
+
+if not exist "%TARGET_DIR%" exit /b 0
+
+echo [INFO] %TARGET_DIR%
+
 rmdir /s /q "%TARGET_DIR%" >nul 2>nul
+
 if exist "%TARGET_DIR%" (
-    echo [WARN] Failed to remove %TARGET_DIR%
+
+    echo [WARN] : %TARGET_DIR%
+
+    exit /b 1
+
 )
-goto :eof
+
+exit /b 0
 
 :ensure_mfa_entrypoint
-if defined MFA_EXE if exist "%MFA_EXE%" (
-    call :probe_mfa_entrypoint "%MFA_EXE%"
-    if not errorlevel 1 goto :eof
-    echo [WARN] Existing MFA launcher is broken: %MFA_EXE%
-)
+
+if exist "%MFA_EXE%" goto :eof
 
 if exist "%ENV_DIR%\Scripts\mfa.bat" (
-    call :probe_mfa_entrypoint "%ENV_DIR%\Scripts\mfa.bat"
-    if not errorlevel 1 (
-        set "MFA_EXE=%ENV_DIR%\Scripts\mfa.bat"
-        goto :eof
-    )
+
+    set "MFA_EXE=%ENV_DIR%\Scripts\mfa.bat"
+
+    goto :eof
+
 )
+
 if exist "%ENV_DIR%\Scripts\mfa.cmd" (
-    call :probe_mfa_entrypoint "%ENV_DIR%\Scripts\mfa.cmd"
-    if not errorlevel 1 (
-        set "MFA_EXE=%ENV_DIR%\Scripts\mfa.cmd"
-        goto :eof
-    )
+
+    set "MFA_EXE=%ENV_DIR%\Scripts\mfa.cmd"
+
+    goto :eof
+
 )
 
-call :resolve_env_python_exe
-if errorlevel 1 (
-    echo [FAILED] MFA Python runtime was not found.
-    call :maybe_pause
-    exit /b 1
+if exist "%MICROMAMBA_EXE%" (
+
+    if not exist "%ENV_DIR%\Scripts" mkdir "%ENV_DIR%\Scripts" >nul 2>nul
+
+    >"%ENV_DIR%\Scripts\mfa.bat" echo @echo off
+
+    >>"%ENV_DIR%\Scripts\mfa.bat" echo set "CONDA_PREFIX=%ENV_DIR%"
+
+    >>"%ENV_DIR%\Scripts\mfa.bat" echo set "PATH=%ENV_DIR%;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\bin;%ENV_DIR%\Scripts;%ENV_DIR%\bin;%%PATH%%"
+
+    >>"%ENV_DIR%\Scripts\mfa.bat" echo "%ENV_DIR%\python.exe" -m montreal_forced_aligner.command_line.mfa %%*
+
+    set "MFA_EXE=%ENV_DIR%\Scripts\mfa.bat"
+
+    goto :eof
+
 )
 
-if not exist "%ENV_DIR%\Scripts" mkdir "%ENV_DIR%\Scripts" >nul 2>nul
-set "MFA_BAT_PATH=%ENV_DIR%\Scripts\mfa.bat"
-set "MFA_SCRIPT_PATH=%ENV_DIR%\Scripts\mfa-script.py"
-set "MFA_ALT_SCRIPT_PATH=%ENV_DIR%\Scripts\mfa.py"
->"%MFA_BAT_PATH%" echo @echo off
->>"%MFA_BAT_PATH%" echo set "SCRIPT_DIR=%%~dp0"
->>"%MFA_BAT_PATH%" echo set "ENV_DIR=%%SCRIPT_DIR%%.."
->>"%MFA_BAT_PATH%" echo for %%%%I in ("%%ENV_DIR%%") do set "ENV_DIR=%%%%~fI"
->>"%MFA_BAT_PATH%" echo set "CONDA_PREFIX=%%ENV_DIR%%"
->>"%MFA_BAT_PATH%" echo set "PATH=%%ENV_DIR%%;%%ENV_DIR%%\Library\mingw-w64\bin;%%ENV_DIR%%\Library\usr\bin;%%ENV_DIR%%\Library\bin;%%ENV_DIR%%\Scripts;%%ENV_DIR%%\bin;%%PATH%%"
->>"%MFA_BAT_PATH%" echo set "MFA_SCRIPT_PATH=%%SCRIPT_DIR%%mfa-script.py"
->>"%MFA_BAT_PATH%" echo set "MFA_ALT_SCRIPT_PATH=%%SCRIPT_DIR%%mfa.py"
->>"%MFA_BAT_PATH%" echo set "ENV_PY=%%ENV_DIR%%\python.exe"
->>"%MFA_BAT_PATH%" echo if not exist "%%ENV_PY%%" set "ENV_PY=%%ENV_DIR%%\Scripts\python.exe"
->>"%MFA_BAT_PATH%" echo if not exist "%%ENV_PY%%" set "ENV_PY=%%ENV_DIR%%\bin\python"
->>"%MFA_BAT_PATH%" echo set "_UTOA_MFA_EXIT=1"
->>"%MFA_BAT_PATH%" echo if exist "%%MFA_SCRIPT_PATH%%" ^(
->>"%MFA_BAT_PATH%" echo   "%%ENV_PY%%" "%%MFA_SCRIPT_PATH%%" %%*
->>"%MFA_BAT_PATH%" echo   set "_UTOA_MFA_EXIT=%%ERRORLEVEL%%"
->>"%MFA_BAT_PATH%" echo ^) else if exist "%%MFA_ALT_SCRIPT_PATH%%" ^(
->>"%MFA_BAT_PATH%" echo   "%%ENV_PY%%" "%%MFA_ALT_SCRIPT_PATH%%" %%*
->>"%MFA_BAT_PATH%" echo   set "_UTOA_MFA_EXIT=%%ERRORLEVEL%%"
->>"%MFA_BAT_PATH%" echo ^)
->>"%MFA_BAT_PATH%" echo if not "%%_UTOA_MFA_EXIT%%"=="0" ^(
->>"%MFA_BAT_PATH%" echo   "%%ENV_PY%%" -m montreal_forced_aligner.command_line.mfa %%*
->>"%MFA_BAT_PATH%" echo   set "_UTOA_MFA_EXIT=%%ERRORLEVEL%%"
->>"%MFA_BAT_PATH%" echo ^)
->>"%MFA_BAT_PATH%" echo if not "%%_UTOA_MFA_EXIT%%"=="0" ^(
->>"%MFA_BAT_PATH%" echo   "%%ENV_PY%%" -m montreal_forced_aligner %%*
->>"%MFA_BAT_PATH%" echo   set "_UTOA_MFA_EXIT=%%ERRORLEVEL%%"
->>"%MFA_BAT_PATH%" echo ^)
->>"%MFA_BAT_PATH%" echo exit /b %%_UTOA_MFA_EXIT%%
-set "MFA_EXE=%MFA_BAT_PATH%"
-call :probe_mfa_entrypoint "%MFA_EXE%"
-if errorlevel 1 (
-    echo [FAILED] MFA wrapper creation failed.
-    call :maybe_pause
-    exit /b 1
-)
-echo [OK] MFA wrapper generated: %MFA_EXE%
-goto :eof
+echo [FAILED] MFA
 
-:probe_mfa_entrypoint
-set "MFA_PROBE_TARGET=%~1"
-if "%MFA_PROBE_TARGET%"=="" exit /b 1
-if not exist "%MFA_PROBE_TARGET%" exit /b 1
-set "MFA_PROBE_LOG=%TEMP%\utoa_mfa_probe_%RANDOM%%RANDOM%.log"
-cmd /c ""%MFA_PROBE_TARGET%" --help >"%MFA_PROBE_LOG%" 2>&1"
-set "MFA_PROBE_RC=%errorlevel%"
-if exist "%MFA_PROBE_LOG%" (
-    findstr /I /C:"failed to create process" /C:"unable to create process" /C:"fatal error in launcher" /C:"no python at" "%MFA_PROBE_LOG%" >nul
-    if not errorlevel 1 (
-        del "%MFA_PROBE_LOG%" >nul 2>nul
-        exit /b 1
-    )
-    del "%MFA_PROBE_LOG%" >nul 2>nul
-)
-if "%MFA_PROBE_RC%"=="0" exit /b 0
+if not "%NON_INTERACTIVE%"=="1" pause
+
 exit /b 1
 
 :download_acoustic_model
+
 set "MODEL_NAME=%~1"
+
 if not defined MODEL_NAME (
-    echo [FAILED] Acoustic model name is missing.
-    call :maybe_pause
+
+    echo [FAILED] Operation failed. Check the log output.
+
+    if not "%NON_INTERACTIVE%"=="1" pause
+
     exit /b 1
+
 )
-call :resolve_env_python_exe
-if errorlevel 1 goto :download_acoustic_model_mamba_entry
-set "CONDA_PREFIX=%ENV_DIR%"
-set "MFA_ROOT_DIR=%RUNTIME_ROOT%\.mfa_root_ascii"
-set "PATH=%ENV_DIR%;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\bin;%ENV_DIR%\Scripts;%ENV_DIR%\bin;%PATH%"
-set /a "MODEL_TRY=1"
-:download_acoustic_model_python_retry
-"%ENV_PYTHON_EXE%" -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME% --ignore_cache
-if not errorlevel 1 exit /b 0
-"%ENV_PYTHON_EXE%" -m montreal_forced_aligner model download acoustic %MODEL_NAME% --ignore_cache
-if not errorlevel 1 exit /b 0
-if %MODEL_TRY% GEQ %RETRY_COUNT_MODEL% goto :download_acoustic_model_mamba_entry
-set /a "MODEL_TRY+=1"
-echo [WARN] Acoustic model download failed. Retrying ^(%MODEL_TRY%/%RETRY_COUNT_MODEL%^)...
-call :sleep_seconds %RETRY_WAIT_SECONDS%
-goto :download_acoustic_model_python_retry
 
-:download_acoustic_model_mamba_entry
-if not exist "%MICROMAMBA_EXE%" goto :download_acoustic_model_fail
-set "MAMBA_ROOT_PREFIX=%MICROMAMBA_ROOT%"
-set "MFA_ROOT_DIR=%RUNTIME_ROOT%\.mfa_root_ascii"
-set /a "MODEL_TRY=1"
-:download_acoustic_model_mamba_retry
-"%MICROMAMBA_EXE%" run -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" python -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME% --ignore_cache
-if not errorlevel 1 exit /b 0
-"%MICROMAMBA_EXE%" run -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" python -m montreal_forced_aligner model download acoustic %MODEL_NAME% --ignore_cache
-if not errorlevel 1 exit /b 0
-if %MODEL_TRY% GEQ %RETRY_COUNT_MODEL% goto :download_acoustic_model_fail
-set /a "MODEL_TRY+=1"
-echo [WARN] Acoustic model download failed via micromamba run. Retrying ^(%MODEL_TRY%/%RETRY_COUNT_MODEL%^)...
-call :sleep_seconds %RETRY_WAIT_SECONDS%
-goto :download_acoustic_model_mamba_retry
+set "MODEL_CACHE_PATH=%MFA_SHARED_ROOT%\pretrained_models\acoustic\%MODEL_NAME%.zip"
 
-:download_acoustic_model_fail
-echo [FAILED] No runnable MFA environment was found for model download.
-call :maybe_pause
+if exist "%MODEL_CACHE_PATH%" (
+
+    echo [INFO] Acoustic model already cached: %MODEL_NAME%
+
+    exit /b 0
+
+)
+
+set "MODEL_DOWNLOAD_LOG=%SETUP_LOG_DIR%\mfa_model_%MODEL_NAME%_%RANDOM%_%RANDOM%.log"
+
+if exist "%ENV_DIR%\python.exe" (
+
+    set "CONDA_PREFIX=%ENV_DIR%"
+
+    set "MFA_ROOT_DIR=%MFA_SHARED_ROOT%"
+
+    set "PATH=%ENV_DIR%;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\bin;%ENV_DIR%\Scripts;%ENV_DIR%\bin;%PATH%"
+
+    call :run_env_python -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME% >"%MODEL_DOWNLOAD_LOG%" 2>&1
+
+    if errorlevel 1 (
+
+        echo [WARN] Model download failed once. Retrying with --ignore_cache...
+
+        call :run_env_python -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME% --ignore_cache >>"%MODEL_DOWNLOAD_LOG%" 2>&1
+
+        if errorlevel 1 (
+
+            type "%MODEL_DOWNLOAD_LOG%"
+
+            call :record_blocked_failure "%MODEL_DOWNLOAD_LOG%" "MFA acoustic model download: %MODEL_NAME%"
+
+            exit /b 1
+
+        )
+
+    )
+
+    type "%MODEL_DOWNLOAD_LOG%"
+
+    exit /b 0
+
+)
+
+if exist "%MICROMAMBA_EXE%" (
+
+    set "MAMBA_ROOT_PREFIX=%MICROMAMBA_ROOT%"
+
+    set "MFA_ROOT_DIR=%MFA_SHARED_ROOT%"
+
+    "%MICROMAMBA_EXE%" run -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" python -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME% >"%MODEL_DOWNLOAD_LOG%" 2>&1
+
+    if errorlevel 1 (
+
+        echo [WARN] Model download failed once. Retrying with --ignore_cache...
+
+        "%MICROMAMBA_EXE%" run -r "%MICROMAMBA_ROOT%" -p "%ENV_DIR%" python -m montreal_forced_aligner.command_line.mfa model download acoustic %MODEL_NAME% --ignore_cache >>"%MODEL_DOWNLOAD_LOG%" 2>&1
+
+        if errorlevel 1 (
+
+            type "%MODEL_DOWNLOAD_LOG%"
+
+            call :record_blocked_failure "%MODEL_DOWNLOAD_LOG%" "MFA acoustic model download: %MODEL_NAME%"
+
+            exit /b 1
+
+        )
+
+    )
+
+    type "%MODEL_DOWNLOAD_LOG%"
+
+    exit /b 0
+
+)
+
+echo [FAILED] MFA
+
+if not "%NON_INTERACTIVE%"=="1" pause
+
 exit /b 1
+
+:resolve_runtime_bundle_dir
+
+set "MFA_RUNTIME_BUNDLE_DIR="
+
+if exist "%APP_DIR%\mfa_runtime_bundle\bundle_manifest.json" set "MFA_RUNTIME_BUNDLE_DIR=%APP_DIR%\mfa_runtime_bundle"
+
+if not defined MFA_RUNTIME_BUNDLE_DIR if exist "%APP_DIR%\UTAU_Auto_OTO\mfa_runtime_bundle\bundle_manifest.json" set "MFA_RUNTIME_BUNDLE_DIR=%APP_DIR%\UTAU_Auto_OTO\mfa_runtime_bundle"
+
+if not defined MFA_RUNTIME_BUNDLE_DIR if defined SETUP_MFA_DIR_NORM if exist "%SETUP_MFA_DIR_NORM%\mfa_runtime_bundle\bundle_manifest.json" set "MFA_RUNTIME_BUNDLE_DIR=%SETUP_MFA_DIR_NORM%\mfa_runtime_bundle"
+
+if not defined MFA_RUNTIME_BUNDLE_DIR if defined SETUP_MFA_DIR_NORM if exist "%SETUP_MFA_DIR_NORM%\..\mfa_runtime_bundle\bundle_manifest.json" (
+
+    for %%I in ("%SETUP_MFA_DIR_NORM%\..\mfa_runtime_bundle") do set "MFA_RUNTIME_BUNDLE_DIR=%%~fI"
+
+)
+
+goto :eof
+
+:restore_from_runtime_bundle
+
+if not defined MFA_RUNTIME_BUNDLE_DIR goto :eof
+
+if not exist "%MFA_RUNTIME_BUNDLE_DIR%\bundle_manifest.json" goto :eof
+
+if not exist "%MFA_EXE%" if exist "%MFA_RUNTIME_BUNDLE_DIR%\.env\Scripts\mfa.exe" (
+
+    echo [INFO] Restoring bundled MFA environment...
+
+    call :sync_bundle_tree "%MFA_RUNTIME_BUNDLE_DIR%\.env" "%ENV_DIR%"
+
+    if errorlevel 1 (
+
+        echo [WARN] Failed to restore bundled MFA environment. Falling back to online install.
+
+    ) else (
+
+        set "BUNDLE_RESTORED=1"
+
+    )
+
+)
+
+if not exist "%MICROMAMBA_EXE%" if exist "%MFA_RUNTIME_BUNDLE_DIR%\micromamba\Library\bin\micromamba.exe" (
+
+    echo [INFO] Restoring bundled micromamba runtime...
+
+    call :sync_bundle_tree "%MFA_RUNTIME_BUNDLE_DIR%\micromamba" "%MICROMAMBA_ROOT%"
+
+    if errorlevel 1 (
+
+        echo [WARN] Failed to restore bundled micromamba runtime.
+
+    ) else (
+
+        set "BUNDLE_RESTORED=1"
+
+    )
+
+)
+
+if not exist "%MFA_SHARED_ROOT%\pretrained_models\acoustic" if exist "%MFA_RUNTIME_BUNDLE_DIR%\.mfa_root_ascii\pretrained_models\acoustic" (
+
+    echo [INFO] Restoring bundled MFA acoustic model cache...
+
+    call :sync_bundle_tree "%MFA_RUNTIME_BUNDLE_DIR%\.mfa_root_ascii" "%MFA_SHARED_ROOT%"
+
+    if not errorlevel 1 set "BUNDLE_RESTORED=1"
+
+)
+
+if not exist "%MFA_EXE%" if exist "%ENV_DIR%\Scripts\mfa.exe" set "MFA_EXE=%ENV_DIR%\Scripts\mfa.exe"
+
+if not exist "%MFA_EXE%" if exist "%ENV_DIR%\Scripts\mfa.bat" set "MFA_EXE=%ENV_DIR%\Scripts\mfa.bat"
+
+if not exist "%MFA_EXE%" if exist "%ENV_DIR%\Scripts\mfa.cmd" set "MFA_EXE=%ENV_DIR%\Scripts\mfa.cmd"
+
+if not exist "%MICROMAMBA_EXE%" if exist "%MICROMAMBA_ROOT%\Library\bin\micromamba.exe" set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\Library\bin\micromamba.exe"
+
+if not exist "%MICROMAMBA_EXE%" if exist "%MICROMAMBA_ROOT%\bin\micromamba.exe" set "MICROMAMBA_EXE=%MICROMAMBA_ROOT%\bin\micromamba.exe"
+
+if "%BUNDLE_RESTORED%"=="1" echo [OK] Bundled MFA runtime restore completed.
+
+goto :eof
+
+:sync_bundle_tree
+
+set "BUNDLE_SRC=%~1"
+
+set "BUNDLE_DST=%~2"
+
+if "%BUNDLE_SRC%"=="" exit /b 1
+
+if "%BUNDLE_DST%"=="" exit /b 1
+
+if not exist "%BUNDLE_SRC%" exit /b 1
+
+if exist "%BUNDLE_DST%" rmdir /s /q "%BUNDLE_DST%" >nul 2>nul
+
+mkdir "%BUNDLE_DST%" >nul 2>nul
+
+robocopy "%BUNDLE_SRC%" "%BUNDLE_DST%" /E /COPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP >nul
+
+set "ROBOCOPY_RC=%ERRORLEVEL%"
+
+if %ROBOCOPY_RC% GEQ 8 exit /b 1
+
+exit /b 0
 
 :remove_env_dir
+
 if not exist "%ENV_DIR%" goto :eof
-echo [INFO] Removing existing env: %ENV_DIR%
-rmdir /s /q "%ENV_DIR%" >nul 2>nul
-if exist "%ENV_DIR%" (
-    echo [FAILED] Could not remove the old MFA environment.
-    call :maybe_pause
-    exit /b 1
-)
-goto :eof
 
-:resolve_env_python_exe
-call :resolve_python_in_dir "%ENV_DIR%" ENV_PYTHON_EXE
-if not errorlevel 1 exit /b 0
-set "ENV_PYTHON_EXE=%ENV_DIR%\python.exe"
-exit /b 1
+echo [INFO] %ENV_DIR%
 
-:resolve_python_in_dir
-set "%~2="
-if "%~1"=="" exit /b 1
-if exist "%~1\python.exe" (
-    set "%~2=%~1\python.exe"
-    exit /b 0
-)
-if exist "%~1\Scripts\python.exe" (
-    set "%~2=%~1\Scripts\python.exe"
-    exit /b 0
-)
-if exist "%~1\bin\python" (
-    set "%~2=%~1\bin\python"
-    exit /b 0
-)
-exit /b 1
-
-:path_requires_ascii_fallback
-set "UTOA_PATH_CHECK=%~1"
-if "%UTOA_PATH_CHECK%"=="" exit /b 1
-powershell -NoProfile -Command "$p=$env:UTOA_PATH_CHECK; if([string]::IsNullOrWhiteSpace($p)){exit 1}; $unsafe=($p -match '[^\x00-\x7F]') -or ($p -match '[!&|<>()^]'); if($unsafe){exit 0}else{exit 1}" >nul 2>nul
-set "UTOA_PATH_CHECK="
-exit /b %errorlevel%
-
-:download_with_powershell
-set "UTOA_PS_DL_URL=%~1"
-set "UTOA_PS_DL_OUT=%~2"
-if "%UTOA_PS_DL_URL%"=="" exit /b 1
-if "%UTOA_PS_DL_OUT%"=="" exit /b 1
-set "UTOA_PS_DL_RC=1"
-set /a "UTOA_PS_DL_TRY=1"
-:download_with_powershell_retry
-powershell -NoProfile -Command "& {$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri $env:UTOA_PS_DL_URL -OutFile $env:UTOA_PS_DL_OUT -ErrorAction Stop; exit 0 }"
-set "UTOA_PS_DL_RC=%errorlevel%"
-if "%UTOA_PS_DL_RC%"=="0" goto :download_with_powershell_done
-if %UTOA_PS_DL_TRY% GEQ %RETRY_COUNT_NETWORK% goto :download_with_powershell_done
-set /a "UTOA_PS_DL_TRY+=1"
-echo [WARN] Download failed via PowerShell. Retrying ^(%UTOA_PS_DL_TRY%/%RETRY_COUNT_NETWORK%^)...
-call :sleep_seconds %RETRY_WAIT_SECONDS%
-goto :download_with_powershell_retry
-:download_with_powershell_done
-set "UTOA_PS_DL_URL="
-set "UTOA_PS_DL_OUT="
-exit /b %UTOA_PS_DL_RC%
-
-:run_env_pip
-call :resolve_env_python_exe
-if errorlevel 1 exit /b 1
-set "RUN_ENV_PIP_RC=1"
-set /a "RUN_ENV_PIP_TRY=1"
-:run_env_pip_python_retry
-"%ENV_PYTHON_EXE%" -m pip %*
-set "RUN_ENV_PIP_RC=%errorlevel%"
-if "%RUN_ENV_PIP_RC%"=="0" exit /b 0
-if %RUN_ENV_PIP_TRY% GEQ %RETRY_COUNT_PIP% goto :run_env_pip_python_done
-set /a "RUN_ENV_PIP_TRY+=1"
-echo [WARN] pip command failed via python -m pip. Retrying ^(%RUN_ENV_PIP_TRY%/%RETRY_COUNT_PIP%^)...
-call :sleep_seconds %RETRY_WAIT_SECONDS%
-goto :run_env_pip_python_retry
-:run_env_pip_python_done
-if not exist "%ENV_DIR%\Scripts\pip.exe" exit /b %RUN_ENV_PIP_RC%
-set /a "RUN_ENV_PIP_EXE_TRY=1"
-:run_env_pip_exe_retry
-"%ENV_DIR%\Scripts\pip.exe" %*
-set "RUN_ENV_PIP_RC=%errorlevel%"
-if "%RUN_ENV_PIP_RC%"=="0" exit /b 0
-if %RUN_ENV_PIP_EXE_TRY% GEQ %RETRY_COUNT_PIP% exit /b %RUN_ENV_PIP_RC%
-set /a "RUN_ENV_PIP_EXE_TRY+=1"
-echo [WARN] pip.exe command failed. Retrying ^(%RUN_ENV_PIP_EXE_TRY%/%RETRY_COUNT_PIP%^)...
-call :sleep_seconds %RETRY_WAIT_SECONDS%
-goto :run_env_pip_exe_retry
-exit /b %RUN_ENV_PIP_RC%
-
-:sleep_seconds
-set "WAIT_SECONDS=%~1"
-if "%WAIT_SECONDS%"=="" set "WAIT_SECONDS=1"
-if "%WAIT_SECONDS%"=="0" goto :eof
-timeout /t %WAIT_SECONDS% /nobreak >nul 2>nul
-goto :eof
-
-:run_step_with_retry
-set "RETRY_STEP_TITLE=%~1"
-set "RETRY_STEP_MAX=%~2"
-if "%RETRY_STEP_MAX%"=="" set "RETRY_STEP_MAX=1"
-if %RETRY_STEP_MAX% LSS 1 set "RETRY_STEP_MAX=1"
-shift
-shift
-if "%~1"=="" exit /b 1
-set /a "RETRY_STEP_TRY=1"
-:run_step_with_retry_loop
-call :run_step "%RETRY_STEP_TITLE% ^(attempt %RETRY_STEP_TRY%/%RETRY_STEP_MAX%^) " %1 %2 %3 %4 %5 %6 %7 %8 %9
-if not errorlevel 1 exit /b 0
-if %RETRY_STEP_TRY% GEQ %RETRY_STEP_MAX% exit /b 1
-set /a "RETRY_STEP_TRY+=1"
-echo [WARN] Step failed. Retrying: %RETRY_STEP_TITLE% ^(%RETRY_STEP_TRY%/%RETRY_STEP_MAX%^)...
-call :sleep_seconds %RETRY_WAIT_SECONDS%
-goto :run_step_with_retry_loop
-
-:run_step
 setlocal EnableDelayedExpansion
-set "STEP_TITLE=%~1"
-shift
-if "%~1"=="" (
-    endlocal
-    exit /b 0
-)
-echo [STEP][%TIME%] START: !STEP_TITLE!
-call %1 %2 %3 %4 %5 %6 %7 %8 %9
-set "STEP_RC=!errorlevel!"
-if "!STEP_RC!"=="0" (
-    echo [STEP][%TIME%] DONE : !STEP_TITLE!
-) else (
-    echo [STEP][%TIME%] FAIL : !STEP_TITLE! ^(code=!STEP_RC!^)
-)
-for %%R in (!STEP_RC!) do (
-    endlocal
-    exit /b %%R
+set "REMOVE_RETRY=0"
+:remove_env_retry_loop
+rmdir /s /q "%ENV_DIR%" >nul 2>nul
+
+if exist "%ENV_DIR%" (
+
+    set /a REMOVE_RETRY+=1
+
+    if !REMOVE_RETRY! GEQ 4 (
+
+        endlocal
+        echo [FAILED] MFA
+
+        if not "%NON_INTERACTIVE%"=="1" pause
+
+        exit /b 1
+
+    )
+
+    echo [WARN] MFA env delete retry !REMOVE_RETRY!/3 ...
+
+    call :release_env_lock_processes
+
+    timeout /t 2 /nobreak >nul
+
+    goto :remove_env_retry_loop
+
+
 )
 
-:maybe_pause
-if "%INTERACTIVE%"=="0" goto :eof
-pause
+endlocal
 goto :eof
+
+:run_env_python
+
+if not exist "%ENV_DIR%\python.exe" exit /b 1
+
+setlocal EnableExtensions DisableDelayedExpansion
+
+set "OLD_PATH=%PATH%"
+set "PATH=%ENV_DIR%;%ENV_DIR%\Scripts;%ENV_DIR%\Library\bin;%ENV_DIR%\Library\usr\bin;%ENV_DIR%\Library\mingw-w64\bin;%ENV_DIR%\bin;%OLD_PATH%"
+set "PYTHONHOME="
+set "PYTHONPATH="
+set "PYTHONEXECUTABLE="
+set "__PYVENV_LAUNCHER__="
+set "PYTHONNOUSERSITE=1"
+
+"%ENV_DIR%\python.exe" %*
+
+set "RUN_RC=%ERRORLEVEL%"
+
+endlocal & exit /b %RUN_RC%
 
 :get_env_python_version
+
 set "%~2="
+
 if exist "%~1\python.exe" (
-    for /f "usebackq delims=" %%i in (`"%~1\python.exe" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2^>nul`) do set "%~2=%%i"
+
+    setlocal EnableExtensions DisableDelayedExpansion
+    set "OLD_PATH=%PATH%"
+    set "PATH=%~1;%~1\Scripts;%~1\Library\bin;%~1\Library\usr\bin;%~1\Library\mingw-w64\bin;%~1\bin;%OLD_PATH%"
+    for /f "usebackq delims=" %%i in (`"%~1\python.exe" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2^>nul`) do set "PY_VER=%%i"
+    endlocal & set "%~2=%PY_VER%"
+
     goto :eof
+
 )
+
 if exist "%~1\Scripts\python.exe" (
-    for /f "usebackq delims=" %%i in (`"%~1\Scripts\python.exe" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2^>nul`) do set "%~2=%%i"
+
+    setlocal EnableExtensions DisableDelayedExpansion
+    set "OLD_PATH=%PATH%"
+    set "PATH=%~1;%~1\Scripts;%~1\Library\bin;%~1\Library\usr\bin;%~1\Library\mingw-w64\bin;%~1\bin;%OLD_PATH%"
+    for /f "usebackq delims=" %%i in (`"%~1\Scripts\python.exe" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2^>nul`) do set "PY_VER=%%i"
+    endlocal & set "%~2=%PY_VER%"
+
 )
+
 goto :eof
 
 :python_requires_rebuild
+
 set "%~2=0"
+
 set "PY_CHECK=%~1"
+
 set "PY_MAJOR="
+
 set "PY_MINOR="
+
 for /f "tokens=1,2 delims=." %%a in ("%PY_CHECK%") do (
+
     set /a PY_MAJOR=%%a
+
     set /a PY_MINOR=%%b
+
 )
+
 if not defined PY_MAJOR goto :eof
-if %PY_MAJOR% GTR 3 (
+
+set "REQ_MAJOR="
+set "REQ_MINOR="
+for /f "tokens=1,2 delims=." %%a in ("%MFA_PYTHON_VERSION%") do (
+    set /a REQ_MAJOR=%%a
+    set /a REQ_MINOR=%%b
+)
+
+if not defined REQ_MAJOR (
+    if %PY_MAJOR% GTR 3 (
+        set "%~2=1"
+        goto :eof
+    )
+    if %PY_MAJOR% EQU 3 if %PY_MINOR% GEQ 13 set "%~2=1"
+    goto :eof
+)
+
+if not "%PY_MAJOR%"=="%REQ_MAJOR%" (
     set "%~2=1"
     goto :eof
 )
-if %PY_MAJOR% EQU 3 if %PY_MINOR% GEQ 13 set "%~2=1"
-goto :eof
+if not "%PY_MINOR%"=="%REQ_MINOR%" set "%~2=1"
 
+goto :eof

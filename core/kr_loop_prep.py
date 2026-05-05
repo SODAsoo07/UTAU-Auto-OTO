@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from typing import Callable, Sequence
 
-from core.mapping_format_policy import is_kr_filename_sequence_format
+from core.loop_prep_models import LoopPrepCommonResult
 
 
 @dataclass
-class KrLoopPrepResult:
-    status: str = "ok"
-    meta: dict[str, object] = field(default_factory=dict)
+class KrLoopPrepResult(LoopPrepCommonResult):
     ph_intervals_raw: list = field(default_factory=list)
     ph_intervals_all: list = field(default_factory=list)
     ph_intervals: list = field(default_factory=list)
@@ -24,16 +23,15 @@ class KrLoopPrepResult:
     filename_cv_targets: list = field(default_factory=list)
     targets_for_build: list = field(default_factory=list)
     expected_syllables: int = 0
-    phone_quality: dict[str, object] = field(default_factory=dict)
-    low_quality_reasons: list[str] = field(default_factory=list)
-    low_phone_quality: bool = False
     force_words_phone_fill: bool = False
-    textgrid_trust_score: float = 0.0
-    textgrid_trust_tier: str = "low"
-    prefer_filename_sequence: bool = False
-    timeline_start_ms: float = 0.0
-    timeline_end_ms: float = 0.0
     wav_duration_ms: float = 0.0
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "on", "y"}
 
 
 def _estimate_kr_textgrid_trust(
@@ -64,7 +62,7 @@ def _estimate_kr_textgrid_trust(
             conf -= min(abs(words_count - filename_count) / float(max(filename_count, 1)) * 0.18, 0.18)
         if alias_count:
             conf -= min(abs(alias_count - filename_count) / float(max(filename_count, 1)) * 0.14, 0.14)
-        if is_kr_filename_sequence_format(file_format):
+        if file_format in {"cvc", "cvvc"}:
             conf += 0.05
     elif max(alias_count, words_count) >= 2:
         conf -= 0.08
@@ -157,8 +155,17 @@ def prepare_kr_loop_state(
     result.detected_format = detect_alias_format_fn(result.alias_names, custom_map)
     result.file_format = result.detected_format
     pref = str(preferred_format or "").strip().lower()
-    if pref in {"cvc", "cvvc"} and result.detected_format == "cv":
+    if pref == "coc":
+        pref = "cvc"
+    if (
+        pref in {"cvc", "cvvc", "vcv"}
+        and pref != result.detected_format
+        and result.detected_format in {"cv", "cvc", "cvvc", "vcv", "vc_only", "vv_only"}
+    ):
         result.file_format = pref
+        debug_log_fn(
+            f"ℹ 포맷 고정: {real_wav_name}: 자동 감지 {result.detected_format.upper()} -> 수동 지정 {pref.upper()}"
+        )
     debug_log_fn(f"처리: {real_wav_name}: 형식 감지 -> {result.file_format.upper()}")
     result.file_mapping_conf_th = float(
         resolve_mapping_conf_threshold_fn(
@@ -171,7 +178,8 @@ def prepare_kr_loop_state(
     result.cv_targets = list(extract_cv_targets_from_lines_fn(lines, custom_map) or [])
     result.filename_cv_targets = list(extract_cv_targets_from_filename_fn(real_wav_name) or [])
     result.targets_for_build = list(result.cv_targets)
-    if result.file_format == "cvvc" and result.filename_cv_targets:
+    filename_lock_enabled = _env_bool("UTOA_KR_FORMAT_FILENAME_LOCK_ENABLE", True)
+    if filename_lock_enabled and result.file_format in {"cvc", "cvvc", "vcv"} and result.filename_cv_targets:
         result.targets_for_build = list(result.filename_cv_targets)
     elif (not result.targets_for_build) and result.filename_cv_targets:
         result.targets_for_build = list(result.filename_cv_targets)
@@ -197,14 +205,17 @@ def prepare_kr_loop_state(
         wd_intervals=result.wd_intervals,
         file_format=result.file_format,
     )
-    result.prefer_filename_sequence = bool(
-        is_kr_filename_sequence_format(result.file_format)
-        and result.filename_cv_targets
-        and (
-            result.textgrid_trust_tier == "low"
-            or (result.textgrid_trust_tier == "mid" and result.low_phone_quality)
+    if filename_lock_enabled and result.file_format in {"cvc", "cvvc", "vcv"} and result.filename_cv_targets:
+        result.prefer_filename_sequence = True
+    else:
+        result.prefer_filename_sequence = bool(
+            result.file_format in {"cvc", "cvvc", "vcv"}
+            and result.filename_cv_targets
+            and (
+                result.textgrid_trust_tier == "low"
+                or (result.textgrid_trust_tier == "mid" and result.low_phone_quality)
+            )
         )
-    )
     if result.prefer_filename_sequence:
         result.targets_for_build = list(result.filename_cv_targets)
     result.force_words_phone_fill = bool(

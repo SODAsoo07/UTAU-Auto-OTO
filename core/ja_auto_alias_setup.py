@@ -29,7 +29,9 @@ def build_ja_auto_file_groups(
         real_name = tg_info["real_name"]
 
         try:
-            load_textgrid_fn(tg_path)
+            # 일본어 자동 alias는 파일명 기반이므로 TextGrid 전체 파싱은 생략해 I/O를 줄인다.
+            if not os.path.isfile(tg_path):
+                continue
             base_name = os.path.splitext(real_name)[0]
             syllables = parse_filename_fn(base_name)
             if not syllables:

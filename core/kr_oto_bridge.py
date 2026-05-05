@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from core.kr_oto_rules import (
     KR_PLOSIVE_ONSETS,
     KR_SIBILANT_ONSETS,
@@ -12,11 +14,6 @@ from core.kr_oto_rules import (
     _extract_vc_right_token,
 )
 from core.kr_oto_vv import _compute_kr_vowel_stable_anchor
-from core.cv_anchor_adaptation import resolve_bridge_tuning_scales
-from core.vc_timing_profiles import (
-    classify_kr_cvvc_direct_group,
-    get_kr_cvvc_direct_profile,
-)
 
 
 def _clamp(v, lo, hi):
@@ -32,6 +29,16 @@ def _safe_ratio(num, den, fallback=0.0):
 def _blend(a, b, w):
     w2 = max(0.0, min(1.0, float(w)))
     return (1.0 - w2) * float(a) + w2 * float(b)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
 
 
 def _enforce_stoplike_vc_before_next_onset(
@@ -260,89 +267,47 @@ def _recenter_kr_params_around_pre(offset, consonant, cutoff, pre, ovl, alias_ty
     return _validate_oto_params(offset, cons_new, cutoff_new, pre_v, ovl_new)
 
 
-def _compute_vc_from_adjacent_cv(
-    prev_cv,
-    next_cv,
-    alias_type,
-    is_plosive_sibilant,
-    bridge_tuning=None,
-):
+def _compute_vc_from_adjacent_cv(prev_cv, next_cv, alias_type, is_plosive_sibilant):
     if not prev_cv or not next_cv:
         return None
-
-    tempo_scale, release_scale, noise_scale = resolve_bridge_tuning_scales(bridge_tuning)
-    tempo_floor = max(0.90, min(1.18, tempo_scale * (1.0 - noise_scale * 0.12)))
-    tempo_ceil = max(0.88, min(1.22, tempo_scale * (1.0 + noise_scale * 0.10)))
-    release_adj = max(0.84, min(1.28, release_scale * (1.0 + noise_scale * 0.08)))
 
     if alias_type == "vc":
         next_onset_abs = float(next_cv["onset_abs"])
         boundary_abs = next_onset_abs
         if is_plosive_sibilant:
-            raw_transition = max(next_onset_abs - float(prev_cv["vowel_end_abs"]), 12.0 * tempo_floor)
-            onset_lead = _clamp(raw_transition * 0.28, 8.0 * tempo_floor, 20.0 * tempo_ceil)
+            raw_transition = max(next_onset_abs - float(prev_cv["vowel_end_abs"]), 12.0)
+            onset_lead = _clamp(raw_transition * 0.28, 8.0, 20.0)
             boundary_abs = max(float(prev_cv["vowel_end_abs"]) + 4.0, next_onset_abs - onset_lead)
     else:
         boundary_abs = _compute_kr_vowel_stable_anchor(
             next_cv.get("vowel_start_abs", next_cv.get("pre_abs", 0.0)),
             next_cv.get("vowel_end_abs", next_cv.get("pre_abs", 0.0)),
         )
-    transition_len = max(boundary_abs - prev_cv["vowel_end_abs"], 14.0 * tempo_floor)
+    transition_len = max(boundary_abs - prev_cv["vowel_end_abs"], 14.0)
     if alias_type == "vc":
         if is_plosive_sibilant:
-            pre_floor, pre_ceil = 34.0 * tempo_floor, 108.0 * tempo_ceil
+            pre_floor, pre_ceil = 34.0, 108.0
             pre_target = _clamp(transition_len * 0.82, pre_floor, pre_ceil)
         else:
-            pre_floor, pre_ceil = 42.0 * tempo_floor, 126.0 * tempo_ceil
-            pre_target = _clamp(transition_len * 0.92, pre_floor, pre_ceil)
-        pre_target = _blend(pre_target, min(next_cv["pre"], pre_ceil), 0.22 * (1.0 - noise_scale * 0.32))
+            pre_floor, pre_ceil = 40.0, 118.0
+            pre_target = _clamp(transition_len * 0.86, pre_floor, pre_ceil)
+        pre_target = _blend(pre_target, min(next_cv["pre"], pre_ceil), 0.22)
         if is_plosive_sibilant:
-            transition_cap = _clamp(
-                (transition_len * 0.82) + (56.0 * tempo_floor),
-                78.0 * tempo_floor,
-                112.0 * tempo_ceil,
-            )
+            transition_cap = _clamp((transition_len * 0.82) + 56.0, 78.0, 112.0)
         else:
-            transition_cap = _clamp(
-                (transition_len * 0.92) + (62.0 * tempo_floor),
-                92.0 * tempo_floor,
-                148.0 * tempo_ceil,
-            )
+            transition_cap = _clamp((transition_len * 0.84) + 54.0, 82.0, 132.0)
         pre_target = min(pre_target, transition_cap)
     else:
-        pre_target = _clamp(
-            _blend(prev_cv["pre"], next_cv["pre"], 0.28 * (1.0 - noise_scale * 0.24)),
-            40.0 * tempo_floor,
-            180.0 * tempo_ceil,
-        )
+        pre_target = _clamp(_blend(prev_cv["pre"], next_cv["pre"], 0.28), 40.0, 180.0)
     offset = max(boundary_abs - pre_target, 0.0)
     pre = boundary_abs - offset
     if pre <= 0:
         return None
-    next_pre = max(float(next_cv.get("pre", 0.0) or 0.0), 0.0)
-    next_offset_abs = float(next_cv.get("pre_abs", next_cv.get("onset_abs", 0.0)) or next_cv.get("onset_abs", 0.0)) - next_pre
-    if next_offset_abs <= 0.0:
-        next_offset_abs = float(next_cv.get("onset_abs", 0.0) or 0.0)
-    if alias_type == "vc":
-        pre_abs = offset + pre
-        if is_plosive_sibilant:
-            pre_abs = _clamp(
-                pre_abs,
-                next_offset_abs - (7.0 * tempo_floor),
-                next_offset_abs + (8.0 * tempo_ceil),
-            )
-        else:
-            pre_abs = _clamp(
-                pre_abs,
-                next_offset_abs - (6.0 * tempo_floor),
-                next_offset_abs + (12.0 * tempo_ceil),
-            )
-        offset = max(pre_abs - pre, 0.0)
 
     ovl_tail = _clamp(
         prev_cv["vowel_len"] * (0.05 if alias_type == "vc" else 0.08),
-        (2.0 if alias_type == "vc" else 4.0) * tempo_floor,
-        (14.0 if alias_type == "vc" else 18.0) * tempo_ceil,
+        2.0 if alias_type == "vc" else 4.0,
+        14.0 if alias_type == "vc" else 18.0,
     )
     target_ovl_abs = prev_cv["vowel_end_abs"] - ovl_tail
     ovl = target_ovl_abs - offset
@@ -351,15 +316,11 @@ def _compute_vc_from_adjacent_cv(
     else:
         ovl = _clamp(ovl, max(pre - 14.0, pre * 0.74), max(pre - 6.0, 0.0))
 
-    cons_gap = _clamp(
-        _blend(prev_cv["cons_gap"], next_cv["cons_gap"], 0.32),
-        14.0 * tempo_floor,
-        (92.0 if alias_type == "vc" else 120.0) * release_adj,
-    )
+    cons_gap = _clamp(_blend(prev_cv["cons_gap"], next_cv["cons_gap"], 0.32), 14.0, 92.0 if alias_type == "vc" else 120.0)
     consonant = pre + cons_gap
-    next_onset_rel = max(next_cv["onset_abs"] - offset, pre + 10.0 * tempo_floor)
-    next_pre_rel = max(next_cv["pre_abs"] - offset, pre + 16.0 * tempo_floor)
-    next_cons_rel = max(next_cv["cons_abs"] - offset, next_pre_rel + 10.0 * tempo_floor)
+    next_onset_rel = max(next_cv["onset_abs"] - offset, pre + 10.0)
+    next_pre_rel = max(next_cv["pre_abs"] - offset, pre + 16.0)
+    next_cons_rel = max(next_cv["cons_abs"] - offset, next_pre_rel + 10.0)
 
     if alias_type == "vc":
         if is_plosive_sibilant:
@@ -377,10 +338,10 @@ def _compute_vc_from_adjacent_cv(
                 min_cut_gap=8.0,
             )
         else:
-            consonant = min(consonant, min(next_onset_rel + 12.0, next_pre_rel + 10.0))
+            consonant = min(consonant, min(next_onset_rel + 8.0, next_pre_rel + 8.0))
             consonant = max(consonant, pre + 12.0)
-            cutoff_abs = max(consonant + 10.0, min(next_cons_rel + 12.0, next_pre_rel + 20.0))
-        max_gap = (16.0 if is_plosive_sibilant else 34.0) * release_adj
+            cutoff_abs = max(consonant + 8.0, min(next_cons_rel + 8.0, next_pre_rel + 14.0))
+        max_gap = 16.0 if is_plosive_sibilant else 28.0
         cutoff_abs = min(cutoff_abs, consonant + max_gap)
     else:
         consonant = min(max(consonant, pre + 24.0), next_pre_rel + 48.0)
@@ -405,7 +366,6 @@ def _refine_kr_bridge_with_adjacent_cv(
     format_type="",
     mel_cutoff_candidate_ms=None,
     next_mel_voiced_onset_ms=None,
-    bridge_tuning=None,
 ):
     """
     VC/VV를 인접 CV 앵커 기준으로 2차 보정합니다.
@@ -413,29 +373,17 @@ def _refine_kr_bridge_with_adjacent_cv(
     - 다음 onset을 넘는 cutoff 과연장을 억제
     """
     a_type = str(alias_type or "").strip().lower()
-    tempo_scale, release_scale, noise_scale = resolve_bridge_tuning_scales(bridge_tuning)
-    tempo_floor = max(0.90, min(1.18, tempo_scale * (1.0 - noise_scale * 0.12)))
-    tempo_ceil = max(0.88, min(1.22, tempo_scale * (1.0 + noise_scale * 0.10)))
-    release_adj = max(0.84, min(1.28, release_scale * (1.0 + noise_scale * 0.08)))
     if a_type not in {"vc", "vv"}:
         return _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=a_type)
     if not prev_cv or not next_cv:
         return _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=a_type)
 
-    right_tok = str(_extract_vc_right_token(alias_text) or "").strip().lower()
-    coda = _canonicalize_kr_coda(right_tok)
-    is_stop = right_tok in {"g", "k", "kk", "gg", "d", "t", "tt", "dd", "b", "p", "bb", "pp"} or (not right_tok and coda in {"k", "t", "p"})
-    is_fricative = right_tok in {"s", "ss", "h", "j", "jj", "ch", "c", "ts"}
+    coda = _canonicalize_kr_coda(_extract_vc_right_token(alias_text))
+    is_stop = coda in {"k", "t", "p", "h"}
     is_sonorant = coda in {"n", "m", "ng", "l", "r"}
 
     is_plosive_sibilant = is_stop
-    cand = _compute_vc_from_adjacent_cv(
-        prev_cv,
-        next_cv,
-        a_type,
-        is_plosive_sibilant,
-        bridge_tuning=bridge_tuning,
-    )
+    cand = _compute_vc_from_adjacent_cv(prev_cv, next_cv, a_type, is_plosive_sibilant)
     if cand is None:
         return _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type=a_type)
     c_off, c_cons, c_cut, c_pre, c_ovl = cand
@@ -443,40 +391,38 @@ def _refine_kr_bridge_with_adjacent_cv(
     if a_type == "vc":
         if is_stop:
             w_anchor, w_shape = 0.68, 0.64
-            pre_lo, pre_hi = 32.0 * tempo_floor, 154.0 * tempo_ceil
+            pre_lo, pre_hi = 32.0, 154.0
             ovl_gap_lo, ovl_gap_hi = 8.0, 20.0
             cons_gap_lo, cons_gap_hi = 14.0, 56.0
             cut_gap_lo, cut_gap_hi = 10.0, 26.0
             cut_allow_ms = 10.0
-        elif is_fricative:
-            w_anchor, w_shape = 0.62, 0.58
-            pre_lo, pre_hi = 36.0 * tempo_floor, 170.0 * tempo_ceil
-            ovl_gap_lo, ovl_gap_hi = 6.0, 18.0
-            cons_gap_lo, cons_gap_hi = 16.0, 64.0
-            cut_gap_lo, cut_gap_hi = 10.0, 30.0
-            cut_allow_ms = 16.0
         elif is_sonorant:
             w_anchor, w_shape = 0.58, 0.54
-            pre_lo, pre_hi = 46.0 * tempo_floor, 196.0 * tempo_ceil
+            pre_lo, pre_hi = 46.0, 196.0
             ovl_gap_lo, ovl_gap_hi = 5.0, 16.0
             cons_gap_lo, cons_gap_hi = 24.0, 84.0
             cut_gap_lo, cut_gap_hi = 14.0, 40.0
             cut_allow_ms = 28.0
         else:
             w_anchor, w_shape = 0.60, 0.56
-            pre_lo, pre_hi = 38.0 * tempo_floor, 176.0 * tempo_ceil
+            pre_lo, pre_hi = 38.0, 176.0
             ovl_gap_lo, ovl_gap_hi = 6.0, 18.0
             cons_gap_lo, cons_gap_hi = 18.0, 70.0
             cut_gap_lo, cut_gap_hi = 12.0, 34.0
             cut_allow_ms = 20.0
     else:
         w_anchor, w_shape = 0.56, 0.48
-        pre_lo, pre_hi = 34.0 * tempo_floor, 196.0 * tempo_ceil
+        pre_lo, pre_hi = 34.0, 196.0
         ovl_gap_lo, ovl_gap_hi = 3.0, 10.0
         cons_gap_lo, cons_gap_hi = 52.0, 148.0
         cut_gap_lo, cut_gap_hi = 16.0, 88.0
         cut_allow_ms = 28.0
-    cut_allow_ms *= release_adj
+
+    if a_type == "vc":
+        boost = max(0.0, _env_float("UTOA_KR_VC_ANCHOR_WEIGHT_BOOST", 0.08))
+        if boost > 0.0:
+            w_anchor = _clamp(w_anchor + boost, 0.0, 0.90)
+            w_shape = _clamp(w_shape + (boost * 0.9), 0.0, 0.88)
 
     curr_pre_abs = float(offset) + float(pre)
     cand_pre_abs = float(c_off) + float(c_pre)
@@ -495,19 +441,17 @@ def _refine_kr_bridge_with_adjacent_cv(
     curr_cons_gap = max(float(consonant) - float(pre), 8.0)
     cand_cons_gap = max(float(c_cons) - float(c_pre), 8.0)
     cons_gap_new = _blend(curr_cons_gap, cand_cons_gap, w_shape)
-    cons_gap_new = _clamp(cons_gap_new, cons_gap_lo, cons_gap_hi * release_adj)
+    cons_gap_new = _clamp(cons_gap_new, cons_gap_lo, cons_gap_hi)
     cons_new = pre_new + cons_gap_new
 
     curr_cut_gap = max(abs(float(cutoff)) - float(consonant), 10.0)
     cand_cut_gap = max(abs(float(c_cut)) - float(c_cons), 10.0)
     cut_gap_new = _blend(curr_cut_gap, cand_cut_gap, w_shape)
-    cut_gap_new = _clamp(cut_gap_new, cut_gap_lo, cut_gap_hi * release_adj)
+    cut_gap_new = _clamp(cut_gap_new, cut_gap_lo, cut_gap_hi)
     cutoff_abs_new = cons_new + cut_gap_new
     if a_type == "vc":
         if is_stop:
             max_gap = 24.0
-        elif is_fricative:
-            max_gap = 30.0
         elif is_sonorant:
             max_gap = 42.0
         else:
@@ -516,6 +460,7 @@ def _refine_kr_bridge_with_adjacent_cv(
 
     next_onset_abs = float(next_cv.get("onset_abs", 0.0) or 0.0)
     next_pre_abs = float(next_cv.get("pre_abs", next_onset_abs) or next_onset_abs)
+    next_vowel_abs = float(next_cv.get("vowel_start_abs", 0.0) or 0.0)
     if next_onset_abs > 0.0:
         next_onset_rel = max(next_onset_abs - offset_new, pre_new + 10.0)
         next_pre_rel = max(next_pre_abs - offset_new, next_onset_rel)
@@ -533,6 +478,11 @@ def _refine_kr_bridge_with_adjacent_cv(
         else:
             cap = min(next_onset_rel + cut_allow_ms, next_pre_rel + max(8.0, cut_allow_ms * 0.75))
             cutoff_abs_new = min(cutoff_abs_new, max(cons_new + cut_gap_lo, cap))
+    if a_type == "vc" and next_vowel_abs > 0.0:
+        margin = max(2.0, _env_float("UTOA_KR_VC_NEXT_VOWEL_MARGIN_MS", 6.0))
+        next_vowel_rel = max(next_vowel_abs - offset_new, pre_new + 12.0)
+        vowel_cap = max(next_vowel_rel - margin, cons_new + max(6.0, cut_gap_lo))
+        cutoff_abs_new = min(cutoff_abs_new, vowel_cap)
 
     cutoff_new = -cutoff_abs_new
     if (mel_cutoff_candidate_ms is not None) or (next_mel_voiced_onset_ms is not None):
@@ -560,13 +510,17 @@ def _refine_kr_bridge_with_adjacent_cv(
     return _validate_oto_params(offset_new, cons_new, cutoff_new, pre_new, ovl_new, alias_type=a_type)
 
 
-def _compute_kr_cvvc_vc_timing_direct(alias, *args, bridge_tuning=None):
+def _compute_kr_cvvc_vc_timing_direct(alias, *args, next_mel_voiced_onset_ms=None):
     """
     CVVC VC direct timing helper.
 
     Backward-compatible call forms:
     - _compute_kr_cvvc_vc_timing_direct(alias, c_start, c_end, n_start, n_end)
     - _compute_kr_cvvc_vc_timing_direct(alias, alias_type, c_start, c_end, n_start, n_end)
+
+    Optional keyword argument:
+    - next_mel_voiced_onset_ms: mel-detected voiced onset of next CV (ms, absolute).
+      When provided, bridge_abs is pulled back toward this onset for more accurate VC placement.
     """
     if len(args) == 4:
         c_start, c_end, n_start, n_end = args
@@ -580,102 +534,108 @@ def _compute_kr_cvvc_vc_timing_direct(alias, *args, bridge_tuning=None):
     if not alias:
         return None
 
-    tempo_scale, release_scale, noise_scale = resolve_bridge_tuning_scales(bridge_tuning)
-    tempo_floor = max(0.90, min(1.18, tempo_scale * (1.0 - noise_scale * 0.12)))
-    tempo_ceil = max(0.88, min(1.22, tempo_scale * (1.0 + noise_scale * 0.10)))
-    release_adj = max(0.84, min(1.28, release_scale * (1.0 + noise_scale * 0.08)))
-
     prev_vowel_len = max(float(c_end) - float(c_start), 24.0)
     next_seg_len = max(float(n_end) - float(n_start), 18.0)
     transition_gap = max(float(n_start) - float(c_end), 10.0)
 
-    right_tok = str(_extract_vc_right_token(alias) or "").strip().lower()
+    right_tok = _extract_vc_right_token(alias)
     coda_canon = _canonicalize_kr_coda(right_tok)
-    coda_group = classify_kr_cvvc_direct_group(right_tok, coda_canon)
-    profile = get_kr_cvvc_direct_profile(coda_group)
-    is_stop = coda_group == "stop"
-    is_fricative = coda_group == "fricative"
+    is_nasal = coda_canon in {"m", "n", "ng"}
+    is_liquid = coda_canon in {"l", "r"}
+    is_hard = right_tok in {
+        "g", "k", "kk", "gg", "d", "t", "tt", "dd", "b", "p", "bb", "pp",
+        "s", "ss", "h", "j", "jj", "ch",
+    }
 
     bridge_abs = float(n_start)
-    tail_keep = _clamp(
-        prev_vowel_len * float(profile.get("tail_keep_mul", 0.50)),
-        float(profile.get("tail_keep_min", 72.0)) * tempo_floor,
-        float(profile.get("tail_keep_max", 136.0)) * release_adj,
-    )
-    # Keep the carried vowel tail around one-third to two-fifths to avoid sluggish VC entries.
-    tail_keep_floor = _clamp(
-        prev_vowel_len * 0.32,
-        32.0 * tempo_floor,
-        88.0 * release_adj,
-    )
-    tail_keep_ceil = _clamp(
-        prev_vowel_len * 0.42,
-        46.0 * tempo_floor,
-        120.0 * release_adj,
-    )
+    if is_hard:
+        # lead 하한을 8ms로 높여 stop 자음 앞 공간을 충분히 확보한다.
+        stop_lead = _clamp(transition_gap * 0.24, 8.0, 20.0)
+        bridge_abs = max(float(c_end) + 4.0, float(n_start) - stop_lead)
+    elif is_nasal:
+        # 비음의 경우 선행 모음에서 비음 진입까지 약간 넉넉한 공간을 준다.
+        nasal_lead = _clamp(transition_gap * 0.16, 6.0, 14.0)
+        bridge_abs = max(float(c_end) + 5.0, float(n_start) - nasal_lead)
+    else:
+        soft_lead = _clamp(transition_gap * 0.12, 5.0, 10.0)
+        bridge_abs = max(float(c_end) + 6.0, float(n_start) - soft_lead)
+
+    # voiced_onset_lookback: mel로 감지된 다음 CV의 유성음 시작점이 있으면
+    # bridge_abs를 해당 위치 기준으로 보정하여 VC가 실제 유성음 onset에 더 가깝게 정렬되도록 한다.
+    if next_mel_voiced_onset_ms is not None:
+        try:
+            v_onset = float(next_mel_voiced_onset_ms)
+            if v_onset > float(c_end) + 2.0:
+                voiced_lead = _clamp(transition_gap * 0.18, 6.0, 16.0)
+                bridge_from_voiced = max(float(c_end) + 4.0, v_onset - voiced_lead)
+                # TextGrid와 mel onset 사이의 절충값으로 부드럽게 blending.
+                bridge_abs = bridge_abs * 0.60 + bridge_from_voiced * 0.40
+        except Exception:
+            pass
+    if is_hard:
+        tail_keep = _clamp(prev_vowel_len * 0.42, 56.0, 118.0)
+        ovl_gap = _clamp(prev_vowel_len * 0.52, 78.0, 122.0)
+        cons_gap = _clamp(next_seg_len * 0.44, 34.0, 74.0)
+        cut_gap = _clamp(next_seg_len * 0.58, 30.0, 64.0)
+        cutoff_margin = 16.0
+    elif is_nasal:
+        tail_keep = _clamp(prev_vowel_len * 0.54, 82.0, 142.0)
+        ovl_gap = _clamp(prev_vowel_len * 0.58, 92.0, 138.0)
+        cons_gap = _clamp(next_seg_len * 0.52, 42.0, 88.0)
+        cut_gap = _clamp(next_seg_len * 0.72, 38.0, 86.0)
+        cutoff_margin = 26.0
+    elif is_liquid:
+        tail_keep = _clamp(prev_vowel_len * 0.62, 96.0, 166.0)
+        ovl_gap = _clamp(prev_vowel_len * 0.64, 104.0, 152.0)
+        cons_gap = _clamp(next_seg_len * 0.96, 82.0, 158.0)
+        cut_gap = _clamp(next_seg_len * 0.88, 52.0, 118.0)
+        cutoff_margin = 42.0
+    else:
+        tail_keep = _clamp(prev_vowel_len * 0.50, 72.0, 136.0)
+        ovl_gap = _clamp(prev_vowel_len * 0.56, 88.0, 132.0)
+        cons_gap = _clamp(next_seg_len * 0.58, 40.0, 96.0)
+        cut_gap = _clamp(next_seg_len * 0.74, 36.0, 92.0)
+        cutoff_margin = 28.0
+    tail_keep_floor = _clamp(prev_vowel_len * 0.33, 32.0, 88.0)
+    tail_keep_ceil = _clamp(prev_vowel_len * 0.40, 46.0, 120.0)
     if tail_keep_ceil <= tail_keep_floor:
-        tail_keep_ceil = tail_keep_floor + (2.0 * tempo_floor)
+        tail_keep_ceil = tail_keep_floor + 2.0
     tail_keep = _clamp(tail_keep, tail_keep_floor, tail_keep_ceil)
-    ovl_gap = _clamp(
-        prev_vowel_len * float(profile.get("ovl_gap_mul", 0.56)),
-        float(profile.get("ovl_gap_min", 88.0)) * tempo_floor,
-        float(profile.get("ovl_gap_max", 132.0)) * release_adj,
-    )
-    cons_gap = _clamp(
-        next_seg_len * float(profile.get("cons_gap_mul", 0.58)),
-        float(profile.get("cons_gap_min", 40.0)) * tempo_floor,
-        float(profile.get("cons_gap_max", 96.0)) * release_adj,
-    )
-    cut_gap = _clamp(
-        next_seg_len * float(profile.get("cut_gap_mul", 0.74)),
-        float(profile.get("cut_gap_min", 36.0)) * tempo_floor,
-        float(profile.get("cut_gap_max", 92.0)) * release_adj,
-    )
-    cutoff_margin = min(float(profile.get("cutoff_margin", 28.0)), 24.0) * release_adj
+    cutoff_margin = min(cutoff_margin, 18.0 if is_hard else (24.0 if is_nasal else 24.0))
+
     offset = max(float(c_end) - tail_keep, 0.0)
-    pre_floor = float(profile.get("pre_floor", 128.0)) * tempo_floor
-    pre_ceil = float(profile.get("pre_ceil", 232.0)) * tempo_ceil
+    pre_floor = 112.0 if is_hard else (168.0 if is_liquid else 138.0 if is_nasal else 128.0)
+    pre_ceil = 214.0 if is_hard else (286.0 if is_liquid else 248.0 if is_nasal else 232.0)
     pre_target = _clamp(transition_gap + tail_keep, pre_floor, pre_ceil)
-    pre_target = min(
-        pre_target,
-        _clamp(
-            (transition_gap * 0.96) + (88.0 * tempo_floor),
-            102.0 * tempo_floor,
-            198.0 * tempo_ceil,
-        ),
-    )
+    pre_target = min(pre_target, _clamp((transition_gap * 0.88) + 72.0, 92.0, 178.0))
     pre = max(bridge_abs - offset, pre_target)
     ovl = max(0.0, pre - ovl_gap)
     consonant = pre + cons_gap
     cutoff_abs = consonant + cut_gap
-    next_onset_rel = max(float(n_start) - offset, pre + (12.0 * tempo_floor))
-    next_seg_end_rel = max(float(n_end) - offset, next_onset_rel + (8.0 * tempo_floor))
-    cons_cap_after_onset = min(float(profile.get("cons_cap_after_onset", 28.0)), 24.0)
-    consonant = min(consonant, next_onset_rel + (cons_cap_after_onset * release_adj))
-    min_cons_gap = float(profile.get("min_cons_gap", 16.0)) * tempo_floor
+    next_onset_rel = max(float(n_start) - offset, pre + 12.0)
+    next_seg_end_rel = max(float(n_end) - offset, next_onset_rel + 8.0)
+    cons_cap_after_onset = 8.0 if is_hard else 22.0 if is_nasal else 42.0 if is_liquid else 28.0
+    if is_hard:
+        cons_cap_after_onset = min(cons_cap_after_onset, 14.0)
+    consonant = min(consonant, next_onset_rel + cons_cap_after_onset)
+    min_cons_gap = 28.0 if is_liquid else 18.0 if is_nasal else 16.0
     consonant = max(consonant, pre + min_cons_gap)
     cutoff_cap = min(
         next_onset_rel + cutoff_margin,
-        next_seg_end_rel - (float(profile.get("next_seg_end_margin", 12.0)) * tempo_floor),
+        next_seg_end_rel - (8.0 if is_hard else 10.0 if is_nasal else 14.0 if is_liquid else 12.0),
     )
-    min_cut_tail = float(profile.get("min_cut_tail", 12.0)) * tempo_floor
-    if is_stop:
+    min_cut_tail = 8.0 if is_hard else 10.0 if is_nasal else 14.0 if is_liquid else 12.0
+    if is_hard:
         consonant, cutoff_abs = _enforce_stoplike_vc_before_next_onset(
             pre,
             consonant,
             cutoff_abs,
             next_onset_rel,
-            cons_margin=6.0 * tempo_floor,
-            cut_margin=max(0.8, 1.0 * tempo_floor),
+            cons_margin=6.0,
+            cut_margin=1.0,
             min_cons_gap=max(8.0, float(min_cons_gap)),
             min_cut_gap=max(6.0, float(min_cut_tail)),
         )
-    elif is_fricative:
-        consonant = min(consonant, next_onset_rel + 8.0)
-        consonant = max(consonant, pre + min_cons_gap)
-        if cutoff_cap <= consonant + min_cut_tail:
-            cutoff_cap = consonant + min_cut_tail + 0.8
-        cutoff_abs = min(max(cutoff_abs, consonant + min_cut_tail), cutoff_cap)
     else:
         if cutoff_cap <= consonant + min_cut_tail:
             consonant = max(pre + min_cons_gap, cutoff_cap - min_cut_tail)
@@ -763,10 +723,8 @@ def _apply_kr_vc_reference_guard(
     if next_pre_abs <= 0.0:
         return _validate_oto_params(offset, consonant, cutoff, pre, ovl, alias_type="vc")
 
-    right_tok = str(_extract_vc_right_token(alias_text) or "").strip().lower()
-    coda = _canonicalize_kr_coda(right_tok)
-    is_stop = right_tok in {"g", "k", "kk", "gg", "d", "t", "tt", "dd", "b", "p", "bb", "pp"} or (not right_tok and coda in {"k", "t", "p"})
-    is_fricative = right_tok in {"s", "ss", "h", "j", "jj", "ch", "c", "ts"}
+    coda = _canonicalize_kr_coda(_extract_vc_right_token(alias_text))
+    is_stop = coda in {"k", "t", "p", "h"}
     is_sonorant = coda in {"n", "m", "ng", "l", "r"}
 
     pre_abs = float(offset) + float(pre)
@@ -776,8 +734,6 @@ def _apply_kr_vc_reference_guard(
             pre_abs = _clamp(pre_abs, next_offset_abs - 6.0, next_offset_abs + 10.0)
         elif is_sonorant:
             pre_abs = _clamp(pre_abs, next_offset_abs - 4.0, next_offset_abs + 18.0)
-        elif is_fricative:
-            pre_abs = _clamp(pre_abs, next_offset_abs - 5.0, next_offset_abs + 14.0)
         else:
             pre_abs = _clamp(pre_abs, next_offset_abs - 5.0, next_offset_abs + 14.0)
 
@@ -800,18 +756,6 @@ def _apply_kr_vc_reference_guard(
         cut_cap = next_onset_abs - 0.8
         if cut_cap <= cut_floor:
             cut_cap = cut_floor + 0.8
-        cut_abs = _clamp(cut_abs, cut_floor, cut_cap)
-    elif is_fricative:
-        cons_floor = max(pre_abs + 10.0, next_onset_abs + 1.0)
-        cons_cap = min(next_cons_abs - 2.0, next_pre_abs + 14.0)
-        if cons_cap <= cons_floor:
-            cons_cap = cons_floor + 2.0
-        cons_abs = _clamp(cons_abs, cons_floor, cons_cap)
-
-        cut_floor = cons_abs + 8.0
-        cut_cap = min(next_pre_abs + 2.0, next_cons_abs + 4.0)
-        if cut_cap <= cut_floor:
-            cut_cap = cut_floor + 1.0
         cut_abs = _clamp(cut_abs, cut_floor, cut_cap)
     else:
         cons_floor = max(pre_abs + (14.0 if is_sonorant else 12.0), next_onset_abs + (4.0 if is_sonorant else 2.0))

@@ -6,10 +6,9 @@ on:
 jobs:
   build-windows-stable:
     runs-on: windows-latest
-    timeout-minutes: 180
+    timeout-minutes: 90
     env:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      UTOA_NUITKA_JOBS: "1"
 
     steps:
       - name: Checkout
@@ -25,7 +24,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.10"
           cache: "pip"
           cache-dependency-path: |
             requirements.txt
@@ -36,19 +35,10 @@ jobs:
         with:
           path: |
             ~\AppData\Local\Nuitka\Nuitka\Cache
-          key: nuitka-${{ runner.os }}-py311-stable-${{ hashFiles('requirements.txt', 'requirements-ml.txt', 'build.py', 'main.py') }}
+          key: nuitka-${{ runner.os }}-py310-stable-${{ hashFiles('requirements.txt', 'requirements-ml.txt', 'build.py', 'main.py') }}
           restore-keys: |
-            nuitka-${{ runner.os }}-py311-stable-
-            nuitka-${{ runner.os }}-py311-
-
-      - name: Cache FFmpeg Runtime
-        uses: actions/cache@v4
-        with:
-          path: |
-            build_assets\ffmpeg
-          key: ffmpeg-runtime-${{ runner.os }}-${{ hashFiles('build.py') }}
-          restore-keys: |
-            ffmpeg-runtime-${{ runner.os }}-
+            nuitka-${{ runner.os }}-py310-stable-
+            nuitka-${{ runner.os }}-py310-
 
       - name: Install Dependencies
         shell: pwsh
@@ -60,7 +50,7 @@ jobs:
 
       - name: Build App (stable)
         shell: pwsh
-        timeout-minutes: 140
+        timeout-minutes: 70
         run: |
           $suppress = 'Nuitka-Inclusion: Writing cache for dependencies of .* ignoring\.'
           python -u build.py --name UTAU_Auto_OTO --backend nuitka --skip-deps --channel "stable" 2>&1 |

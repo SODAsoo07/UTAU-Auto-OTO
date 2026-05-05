@@ -11,6 +11,7 @@ import logging
 import tempfile
 import threading
 import traceback
+import tkinter as tk
 
 
 def _suppress_windows_loader_popup():
@@ -41,6 +42,28 @@ def _suppress_windows_loader_popup():
 
 
 _suppress_windows_loader_popup()
+
+def _sanitize_python_env_for_children() -> None:
+    """
+    Prevent host Python (e.g., 3.11) env leakage into subprocesses.
+    This avoids mixed DLL/site-packages conflicts when MFA env is Python 3.10.
+    """
+    for key in (
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONEXECUTABLE",
+        "__PYVENV_LAUNCHER__",
+        "VIRTUAL_ENV",
+        "CONDA_DEFAULT_ENV",
+        "CONDA_PROMPT_MODIFIER",
+    ):
+        os.environ.pop(key, None)
+    os.environ.setdefault("PYTHONNOUSERSITE", "1")
+    os.environ.setdefault("PYTHONUTF8", "1")
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+
+
+_sanitize_python_env_for_children()
 
 try:
     import customtkinter as ctk
@@ -208,12 +231,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _load_bundle_info(app_dir: str) -> dict:
+    try:
+        path = os.path.join(app_dir, "bundle_info.json")
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _startup_runtime_preflight(app_dir: str) -> None:
+    """Log warnings for missing runtime DLLs on frozen builds."""
+    if not getattr(sys, "frozen", False):
+        return
+    required_dlls = ["msvcp140.dll", "vcruntime140.dll"]
+    for dll in required_dlls:
+        dll_path = os.path.join(app_dir, dll)
+        if not os.path.isfile(dll_path):
+            logger.warning(
+                "[Preflight] Runtime DLL '%s' not found in app directory '%s'. "
+                "The app may crash on machines without Visual C++ Redistributable installed.",
+                dll, app_dir,
+            )
+
+
 # ==============================================================================
 # 앱 상수
 # ==============================================================================
 
 APP_NAME = "UTAU Auto OTO Generator"
-APP_VERSION = "2.1.0"
+APP_VERSION = "3.2.1"
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 760
 SUPPORTED_RELEASE_CHANNELS = {"stable", "preview"}
@@ -249,7 +297,8 @@ def _load_startup_theme_profile(app_dir, data_dir):
             candidate = normalize_theme_profile_name(payload.get("ui_theme_profile", DEFAULT_THEME_PROFILE))
             if candidate in THEME_PROFILE_OPTIONS:
                 return candidate
-        except Exception:
+        except Exception as _cfg_exc:
+            logger.warning("[Config] Failed to parse config file %s: %s", config_path, _cfg_exc)
             continue
     return DEFAULT_THEME_PROFILE
 
@@ -276,6 +325,7 @@ class App(
 ):
     def __init__(self):
         super().__init__()
+        _startup_runtime_preflight(APP_DIR)
 
         self.title(f"{APP_NAME} v{APP_VERSION}{CHANNEL_TITLE_SUFFIX}")
         self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
@@ -290,6 +340,10 @@ class App(
         self.mfa_path = ""
         self._mfa_path_probe_pending = True
         self._mfa_path_probe_started = False
+        self._mfa_install_in_progress = False
+        self._startup_loading_win = None
+        self._startup_loading_label = None
+        self._show_startup_loading_window()
         
         # OpenUtau 호환 에일리어스 생성 여부
         self.openutau_var = ctk.BooleanVar(value=False)
@@ -345,11 +399,19 @@ class App(
         self.kr_continuity_enable_var = ctk.BooleanVar(value=True)
         self.kr_continuity_max_offset_adj_var = ctk.StringVar(value="")
         self.vc_correction_enable_var = ctk.BooleanVar(value=True)
+        self.cvn_correction_enable_var = ctk.BooleanVar(value=True)
+        self.cvn_low_conf_only_var = ctk.BooleanVar(value=False)
+        self.mapping_supervised_enable_var = ctk.BooleanVar(value=True)
+        self.mapping_supervised_mode_var = ctk.StringVar(value="자동(권장)")
+        self.cv_order_prior_enable_var = ctk.BooleanVar(value=True)
+        self.cv_order_prior_strength_var = ctk.StringVar(value="")
         self.soft_bank_mode_var = ctk.BooleanVar(value=False)
         self.low_rms_gain_enable_var = ctk.BooleanVar(value=True)
         self.weak_voice_assist_enable_var = ctk.BooleanVar(value=True)
         self.weak_voice_assist_strength_var = ctk.StringVar(value="")
         self.mapping_strict_mode_var = ctk.StringVar(value="적당히 엄격 모드(누락 행은 폴백)")
+        self.weak_boundary_reduce_missing_var = ctk.BooleanVar(value=False)
+        self.weak_boundary_block_mismap_var = ctk.BooleanVar(value=False)
         self.ml_same_language_borrow_only_var = ctk.BooleanVar(value=True)
         self.developer_mode_enabled_var = ctk.BooleanVar(value=False)
         self.advanced_options_expanded = False
@@ -372,6 +434,9 @@ class App(
         self.en_cvvc_list_fallback_var = ctk.BooleanVar(value=True)
         self.aligner_var = ctk.StringVar(value="MFA")
         self.no_mfa_oto_mode_var = ctk.StringVar(value="베이스 OTO 재매핑 + 보정")
+        self.oto_crnn_model_path_var = ctk.StringVar(value="")
+        self.oto_crnn_device_var = ctk.StringVar(value="auto")
+        self.oto_crnn_special_aliases_var = ctk.StringVar(value="")
         self.mfa_align_profile_var = ctk.StringVar(value="기본")
         # WhisperX 런타임 옵션(고급): UI에서 직접 노출하지 않아도 config.json으로 제어 가능
         self.whisperx_profile_var = ctk.StringVar(value="balanced")
@@ -390,16 +455,10 @@ class App(
         self.logger = logger
         self.app_version = APP_VERSION
         self.release_channel = RELEASE_CHANNEL
-        self._build_ui()
-        self._start_async_mfa_path_probe()
-        if hasattr(self, "_install_adaptive_ui_scaling"):
-            self._install_adaptive_ui_scaling()
-        if hasattr(self, "_install_global_exception_hooks"):
-            self._install_global_exception_hooks()
-        self._load_config()
         self.protocol("WM_DELETE_WINDOW", self._on_close_request)
-        self._schedule_startup_mfa_auto_repair()
-        self._schedule_startup_cuda_runtime_check()
+        self._post_ui_startup_done = False
+        self._ui_bootstrap_done = False
+        self.after(0, self._bootstrap_ui)
 
         logger.info(f"{APP_NAME} v{APP_VERSION} 시작")
         logger.info(f"릴리스 채널: {RELEASE_CHANNEL}")
@@ -411,6 +470,96 @@ class App(
             logger.info(f"MFA 경로: {self.mfa_path}")
         else:
             logger.warning("MFA를 찾을 수 없습니다.")
+
+    def _bootstrap_ui(self):
+        if bool(getattr(self, "_ui_bootstrap_done", False)):
+            return
+        self._ui_bootstrap_done = True
+
+        try:
+            self._build_ui()
+            self._start_async_mfa_path_probe()
+            if hasattr(self, "_install_adaptive_ui_scaling"):
+                self._install_adaptive_ui_scaling()
+            if hasattr(self, "_install_global_exception_hooks"):
+                self._install_global_exception_hooks()
+            self.after(0, self._run_post_ui_startup_tasks)
+        finally:
+            self._hide_startup_loading_window()
+
+    def _show_startup_loading_window(self):
+        if getattr(self, "_startup_loading_win", None) is not None:
+            return
+        try:
+            self.withdraw()
+        except Exception:
+            pass
+        win = tk.Toplevel(self)
+        win.title(f"{APP_NAME} 로딩 중")
+        win.resizable(False, False)
+        width, height = 420, 220
+        win.geometry(f"{width}x{height}")
+        try:
+            win.attributes("-topmost", True)
+        except Exception:
+            pass
+        try:
+            win.update_idletasks()
+            screen_w = win.winfo_screenwidth()
+            screen_h = win.winfo_screenheight()
+            x = max(0, int((screen_w - width) / 2))
+            y = max(0, int((screen_h - height) / 2))
+            win.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception:
+            pass
+
+        frame = tk.Frame(win, bg="white")
+        frame.pack(fill="both", expand=True)
+        label = tk.Label(
+            frame,
+            text="로딩 중... 잠시만 기다려 주세요.",
+            font=("Segoe UI", 12, "bold"),
+            bg="white",
+        )
+        label.pack(expand=True)
+
+        self._startup_loading_win = win
+        self._startup_loading_label = label
+
+    def _hide_startup_loading_window(self):
+        win = getattr(self, "_startup_loading_win", None)
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+        self._startup_loading_win = None
+        self._startup_loading_label = None
+        try:
+            self.deiconify()
+            self.lift()
+        except Exception:
+            pass
+
+    def _run_post_ui_startup_tasks(self):
+        if bool(getattr(self, "_post_ui_startup_done", False)):
+            return
+        self._post_ui_startup_done = True
+
+        try:
+            self._load_config()
+        except Exception:
+            logger.exception("초기 설정 로드 중 예외가 발생했습니다.")
+
+        try:
+            self._schedule_startup_mfa_auto_repair()
+        except Exception:
+            logger.exception("초기 MFA 자동 복구 예약 중 예외가 발생했습니다.")
+
+        try:
+            self._schedule_startup_cuda_runtime_check()
+        except Exception:
+            logger.exception("초기 CUDA 런타임 점검 예약 중 예외가 발생했습니다.")
 
     def _start_async_mfa_path_probe(self):
         if bool(getattr(self, "_mfa_path_probe_started", False)):

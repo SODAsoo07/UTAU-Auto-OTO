@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 from functools import lru_cache
 from typing import Callable
 
@@ -115,6 +114,7 @@ def build_kr_auto_file_groups(
     split_syllable_parts_fn: Callable[[str], tuple[str, str, str]],
     kr_vowels: set[str],
     kr_consonants: set[str],
+    textgrid_cache_by_path: dict[str, object] | None = None,
 ) -> dict[str, list[str]]:
     file_groups: dict[str, list[str]] = {}
     coda_alias_map = {
@@ -145,98 +145,42 @@ def build_kr_auto_file_groups(
 
     def _is_low_trust_word_mark(mark: str) -> bool:
         text = str(mark or "").strip().lower()
-        if text in {
-            "",
-            "sil",
-            "spn",
-            "pau",
-            "<unk>",
-            "unk",
-            "noise",
-            "br",
-            "breath",
-            "cl",
-            "sp",
-            "silence",
-        }:
-            return True
-        if text.replace("-", "").replace("_", "").isdigit():
-            return True
-        if re.fullmatch(r"[\W_]+", text):
-            return True
-        return False
-
-    def _normalize_alias_tokens(raw_tokens: list[str]) -> list[str]:
-        out: list[str] = []
-        seen: set[str] = set()
-        for token in raw_tokens or []:
-            txt = str(token or "").strip().lower()
-            if not txt:
-                continue
-            onset, vowel, coda = split_syllable_parts_fn(txt)
-            rebuilt = f"{onset}{vowel}{coda}".lower()
-            if not vowel or rebuilt != txt:
-                continue
-            if len(txt) == 1 and txt not in kr_vowels:
-                continue
-            if txt in seen:
-                continue
-            if out and out[-1] == txt:
-                continue
-            seen.add(txt)
-            out.append(txt)
-        return out
+        return text in {"", "sil", "spn", "pau", "<unk>", "unk"}
 
     def _select_alias_tokens(real_name: str, word_marks: list[str]) -> list[str]:
-        filename_tokens = _normalize_alias_tokens(
-            expand_kr_filename_alias_tokens(
-                real_name,
-                split_syllable_parts_fn=split_syllable_parts_fn,
-                kr_vowels=kr_vowels,
-                kr_consonants=kr_consonants,
-            )
+        filename_tokens = expand_kr_filename_alias_tokens(
+            real_name,
+            split_syllable_parts_fn=split_syllable_parts_fn,
+            kr_vowels=kr_vowels,
+            kr_consonants=kr_consonants,
         )
-        trusted_marks = [mark for mark in word_marks if not _is_low_trust_word_mark(mark)]
-        word_tokens = _normalize_alias_tokens(
-            _expand_kr_alias_tokens(
-                [_word_to_roman(mark) for mark in trusted_marks],
-                split_syllable_parts_fn=split_syllable_parts_fn,
-                kr_vowels=kr_vowels,
-                kr_consonants=kr_consonants,
-            )
+        word_tokens = _expand_kr_alias_tokens(
+            [_word_to_roman(mark) for mark in word_marks if not _is_low_trust_word_mark(mark)],
+            split_syllable_parts_fn=split_syllable_parts_fn,
+            kr_vowels=kr_vowels,
+            kr_consonants=kr_consonants,
         )
 
-        if filename_tokens and not word_tokens:
+        low_trust = any(_is_low_trust_word_mark(mark) for mark in word_marks)
+        if filename_tokens and (
+            low_trust
+            or not word_tokens
+            or len(word_marks) <= 1 < len(filename_tokens)
+            or len(word_tokens) < len(filename_tokens)
+        ):
             return filename_tokens
-        if word_tokens and not filename_tokens:
-            return word_tokens
-        if not filename_tokens and not word_tokens:
-            return []
-
-        low_trust_count = sum(1 for mark in word_marks if _is_low_trust_word_mark(mark))
-        expected = len(trusted_marks)
-        prefer_filename = (
-            low_trust_count > 0
-            and (expected <= 1 or len(word_tokens) < max(1, expected // 2))
-        )
-        if prefer_filename:
-            return filename_tokens or word_tokens
-
-        merged = list(word_tokens)
-        target_len = max(len(word_tokens), len(filename_tokens), expected)
-        for token in filename_tokens:
-            if token in merged:
-                continue
-            merged.append(token)
-            if len(merged) >= target_len:
-                break
-        return merged or filename_tokens or word_tokens
+        return word_tokens or filename_tokens
 
     for tg_info in tg_entries:
         tg_path = tg_info["path"]
         real_name = tg_info["real_name"]
         try:
             tg = load_textgrid_fn(tg_path)
+            if textgrid_cache_by_path is not None:
+                try:
+                    textgrid_cache_by_path[str(tg_path or "").strip().replace("\\", "/").lower()] = tg
+                except Exception:
+                    pass
             word_tier = None
             for tier in tg:
                 if hasattr(tier, "name") and tier.name == "words":
@@ -277,15 +221,16 @@ def build_kr_auto_file_groups(
                                 lines.append(f"{real_name}={(prev_vowel or 'a')} {roman},0,0,0,0,0")
                     elif auto_gen_format in {"cv", "cvc", "cvvc"}:
                         current_alias = roman
+                        if idx > 0 and auto_gen_format in {"cvc", "cvvc"}:
+                            prev_roman = alias_tokens[idx - 1]
+                            _, _prev_vowel, prev_coda = split_syllable_parts_fn(prev_roman)
+                            if not onset and vowel and prev_coda:
+                                current_alias = f"{prev_coda.lower()}{vowel}"
                         lines.append(f"{real_name}={current_alias},0,0,0,0,0")
                         if idx > 0 and auto_gen_format in {"cvc", "cvvc"}:
                             prev_roman = alias_tokens[idx - 1]
                             _, prev_vowel, prev_coda = split_syllable_parts_fn(prev_roman)
                             prev_vowel = prev_vowel or "a"
-                            if not onset and vowel and prev_coda:
-                                coda_vowel_alias = f"{prev_coda.lower()}{vowel}"
-                                if coda_vowel_alias != current_alias:
-                                    lines.append(f"{real_name}={coda_vowel_alias},0,0,0,0,0")
                             prev_coda_alias = coda_alias_map.get((prev_coda or "").lower(), "")
                             if prev_coda_alias:
                                 bridge_right = onset or vowel or roman
@@ -296,16 +241,7 @@ def build_kr_auto_file_groups(
                                 lines.append(f"{real_name}={prev_vowel} {(vowel or 'a')},0,0,0,0,0")
 
             if lines:
-                deduped_lines: list[str] = []
-                seen_lines: set[str] = set()
-                for line in lines:
-                    key = str(line or "").strip()
-                    if not key or key in seen_lines:
-                        continue
-                    seen_lines.add(key)
-                    deduped_lines.append(key)
-                if deduped_lines:
-                    file_groups[real_name] = deduped_lines
+                file_groups[real_name] = lines
         except Exception as exc:
             log_fn(f"경고: {real_name} 자동 템플릿 생성 실패 ({exc})")
 

@@ -1,0 +1,62 @@
+{
+  "tabs": {
+    "pipeline": {
+      "nodes": [
+        {
+          "type": "section",
+          "title": "모델 다운로드",
+          "fg_color": "overlay",
+          "border_color": "panel_border",
+          "children": [
+            {
+              "type": "row",
+              "children": [
+                {
+                  "type": "button",
+                  "text": "다운로드한 모델 경로 적용",
+                  "handler": "_browse_and_apply_downloaded_model_root",
+                  "style": "primary",
+                  "optional": true,
+                  "width": 190,
+                  "pack": { "side": "right" }
+                }
+              ]
+            },
+            {
+              "type": "help",
+              "text": "모델이 이미 다운로드되어 있다면 이 버튼으로 경로를 적용하세요. KR/JA 모델이 자동 인식됩니다.",
+              "wraplength": 760,
+              "padx": 12
+            }
+          ]
+        },
+        { "type": "slot", "name": "_slot_pipeline_action_panel" },
+        {
+          "type": "section",
+          "title": "MFA 상태",
+          "fg_color": "overlay",
+          "border_color": "panel_border",
+          "children": [
+            { "type": "slot", "name": "_slot_pipeline_mfa_status" }
+          ]
+        },
+        { "type": "slot", "name": "_slot_pipeline_intro" },
+        { "type": "slot", "name": "_slot_pipeline_steps" }
+      ]
+    },
+    "advanced_settings": {
+      "nodes": [
+        {
+          "type": "label",
+          "text": "고급 설정은 결과에 직접 영향을 줍니다. 필요한 경우에만 조정하고, 모르겠으면 기본값을 유지하세요.",
+          "text_color": "neutral_text",
+          "wraplength": 760,
+          "pack": { "fill": "x", "padx": 10, "pady": [8, 12] }
+        },
+        { "type": "slot", "name": "_slot_advanced_basic_toggles" },
+        { "type": "slot", "name": "_slot_advanced_ml_section" },
+        { "type": "slot", "name": "_slot_advanced_vc_section" }
+      ]
+    }
+  }
+}

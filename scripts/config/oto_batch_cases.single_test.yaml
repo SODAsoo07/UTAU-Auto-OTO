@@ -1,0 +1,21 @@
+defaults:
+  enabled: true
+  no_base_oto: false
+  base_oto: ""
+  output_name_template: "oto.ini"
+  generate_openutau: false
+  gen_missing_vowels: false
+  enable_ml_correction: true
+  validation: true
+  alias_suffix: ""
+  custom_phonemes_path: ""
+  alias_style: "original"
+
+cases:
+  # Korean CVC
+  - name: "SODAsoo CVC"
+    language: "korean"
+    voicebank_dir: 'C:/Users/oyh57/SODAsoo1/VocalSynth/OpenUtau/Singer/SODAsoo KR CVC'
+    textgrid_dir: "textgrids"
+    auto_format: "cvc"
+    base_oto: "oto_8mora.ini"

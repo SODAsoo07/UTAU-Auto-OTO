@@ -23,7 +23,6 @@ try:
 except Exception:  # pragma: no cover
     np = None
 
-from core.generator_finish import write_oto_lines
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 from core.oto_normalization import normalize_wav_key
 
@@ -59,72 +58,6 @@ def _clamp01(v: float) -> float:
     return x
 
 
-def _resolve_rms_views(mel_ctx: Dict[str, object], n_frames: int):
-    """Resolve per-frame RMS arrays and adaptive thresholds from mel context."""
-    if np is None or n_frames <= 0:
-        z = np.zeros(max(int(n_frames), 0), dtype=np.float64)
-        return z, z, 1e-8, 1e-8, 0.10, 0.20
-
-    rms_arr = mel_ctx.get("rms") if isinstance(mel_ctx, dict) else None
-    if rms_arr is None or len(rms_arr) != n_frames:
-        db_arr = mel_ctx.get("db_db") if isinstance(mel_ctx, dict) else None
-        if db_arr is not None and len(db_arr) == n_frames:
-            rms_arr = np.power(10.0, np.asarray(db_arr, dtype=np.float64) / 20.0)
-        else:
-            rms_arr = np.zeros(n_frames, dtype=np.float64)
-    else:
-        rms_arr = np.asarray(rms_arr, dtype=np.float64)
-    rms_arr = np.clip(rms_arr, 1e-8, 1.0)
-
-    rms_norm_arr = mel_ctx.get("rms_norm") if isinstance(mel_ctx, dict) else None
-    if rms_norm_arr is None or len(rms_norm_arr) != n_frames:
-        p10 = float(np.percentile(rms_arr, 10)) if len(rms_arr) else 0.0
-        p90 = float(np.percentile(rms_arr, 90)) if len(rms_arr) else 1.0
-        span = max(p90 - p10, 1e-9)
-        rms_norm_arr = np.clip((rms_arr - p10) / span, 0.0, 1.0)
-    else:
-        rms_norm_arr = np.clip(np.asarray(rms_norm_arr, dtype=np.float64), 0.0, 1.0)
-
-    rms_sil_th = float(mel_ctx.get("rms_silence_th", 0.0) or 0.0) if isinstance(mel_ctx, dict) else 0.0
-    rms_sound_th = float(mel_ctx.get("rms_sound_th", 0.0) or 0.0) if isinstance(mel_ctx, dict) else 0.0
-    rms_norm_sil_th = float(mel_ctx.get("rms_norm_silence_th", 0.0) or 0.0) if isinstance(mel_ctx, dict) else 0.0
-    rms_norm_sound_th = float(mel_ctx.get("rms_norm_sound_th", 0.0) or 0.0) if isinstance(mel_ctx, dict) else 0.0
-
-    if rms_sil_th <= 0.0 or rms_sound_th <= 0.0:
-        rms_p10 = float(np.percentile(rms_arr, 10)) if len(rms_arr) else 1e-8
-        rms_p20 = float(np.percentile(rms_arr, 20)) if len(rms_arr) else rms_p10
-        rms_p60 = float(np.percentile(rms_arr, 60)) if len(rms_arr) else rms_p20
-        rms_p85 = float(np.percentile(rms_arr, 85)) if len(rms_arr) else rms_p60
-        rms_sil_th = max(1e-8, min(0.30, (0.78 * rms_p20) + (0.22 * rms_p10)))
-        rms_sound_th = max(rms_sil_th + 1e-8, (0.74 * rms_p60) + (0.26 * rms_p85))
-        if rms_sound_th < (rms_sil_th * 1.35):
-            rms_sound_th = rms_sil_th * 1.35
-    else:
-        rms_sil_th = max(1e-8, min(1.0, rms_sil_th))
-        rms_sound_th = max(rms_sil_th + 1e-8, min(1.0, rms_sound_th))
-
-    if rms_norm_sil_th <= 0.0 or rms_norm_sound_th <= 0.0:
-        rms_norm_sil_th = max(0.05, min(0.42, float(np.percentile(rms_norm_arr, 22)) + 0.03))
-        rms_norm_sound_th = max(
-            rms_norm_sil_th + 0.08,
-            min(0.95, float(np.percentile(rms_norm_arr, 64)) - 0.02),
-        )
-        if rms_norm_sound_th <= rms_norm_sil_th:
-            rms_norm_sound_th = min(0.95, rms_norm_sil_th + 0.08)
-    else:
-        rms_norm_sil_th = max(0.0, min(1.0, rms_norm_sil_th))
-        rms_norm_sound_th = max(rms_norm_sil_th + 1e-6, min(1.0, rms_norm_sound_th))
-
-    return (
-        rms_arr,
-        rms_norm_arr,
-        float(rms_sil_th),
-        float(rms_sound_th),
-        float(rms_norm_sil_th),
-        float(rms_norm_sound_th),
-    )
-
-
 def _frame_blank_confidence(
     *,
     e_v: float,
@@ -134,12 +67,6 @@ def _frame_blank_confidence(
     voiced_v: float,
     unvoiced_v: float,
     db_sil_th: float,
-    rms_v: float = 0.0,
-    rms_norm_v: float = 0.0,
-    rms_sil_th: float = 1e-8,
-    rms_sound_th: float = 1e-8,
-    rms_norm_sil_th: float = 0.10,
-    rms_norm_sound_th: float = 0.20,
 ) -> float:
     db_low = _clamp01((float(db_sil_th) + 3.0 - float(db_v)) / 8.0)
     en_low = _clamp01((0.12 - float(e_v)) / 0.12)
@@ -147,17 +74,6 @@ def _frame_blank_confidence(
     voiced_high = _clamp01(float(voiced_v))
     unvoiced_high = _clamp01(float(unvoiced_v))
     sil_high = _clamp01(float(sil_v))
-    rms_blank = 0.0
-    if float(rms_sil_th) > 1e-8:
-        rms_blank = _clamp01(((float(rms_sil_th) * 1.15) - float(rms_v)) / max(float(rms_sil_th) * 1.15, 1e-8))
-    rms_blank_norm = _clamp01(((float(rms_norm_sil_th) + 0.04) - float(rms_norm_v)) / max(float(rms_norm_sil_th) + 0.04, 1e-8))
-    if float(rms_sound_th) > float(rms_sil_th):
-        rms_sound = _clamp01((float(rms_v) - (float(rms_sound_th) * 0.85)) / max(float(rms_sound_th) - float(rms_sil_th), float(rms_sound_th) * 0.50, 1e-8))
-    else:
-        rms_sound = _clamp01((float(rms_norm_v) - 0.35) / 0.55)
-    rms_sound_norm = _clamp01((float(rms_norm_v) - (float(rms_norm_sound_th) - 0.05)) / max(1.0 - (float(rms_norm_sound_th) - 0.05), 1e-8))
-    rms_blank_mix = _clamp01((0.55 * rms_blank) + (0.45 * rms_blank_norm))
-    rms_sound_mix = _clamp01((0.55 * rms_sound) + (0.45 * rms_sound_norm))
 
     # Blank if silence/dB/energy are all weak, with low F0 as auxiliary cue.
     # Unvoiced confidence is a negative term to avoid treating fricative/plosive onset as blank.
@@ -166,10 +82,8 @@ def _frame_blank_confidence(
         + (0.24 * db_low)
         + (0.20 * en_low)
         + (0.10 * f0_low)
-        + (0.24 * rms_blank_mix)
         - (0.24 * voiced_high)
         - (0.14 * unvoiced_high)
-        - (0.16 * rms_sound_mix)
     )
     return _clamp01(score)
 
@@ -183,12 +97,6 @@ def _frame_sound_confidence(
     voiced_v: float,
     unvoiced_v: float,
     db_sil_th: float,
-    rms_v: float = 0.0,
-    rms_norm_v: float = 0.0,
-    rms_sil_th: float = 1e-8,
-    rms_sound_th: float = 1e-8,
-    rms_norm_sil_th: float = 0.10,
-    rms_norm_sound_th: float = 0.20,
 ) -> float:
     db_sound = _clamp01((float(db_v) - (float(db_sil_th) + 0.8)) / 10.0)
     en_sound = _clamp01((float(e_v) - 0.06) / 0.22)
@@ -196,26 +104,13 @@ def _frame_sound_confidence(
     voiced_high = _clamp01(float(voiced_v))
     unvoiced_high = _clamp01(float(unvoiced_v))
     sil_high = _clamp01(float(sil_v))
-    if float(rms_sound_th) > float(rms_sil_th):
-        rms_sound = _clamp01((float(rms_v) - (float(rms_sound_th) * 0.85)) / max(float(rms_sound_th) - float(rms_sil_th), float(rms_sound_th) * 0.50, 1e-8))
-    else:
-        rms_sound = _clamp01((float(rms_norm_v) - 0.35) / 0.55)
-    rms_sound_norm = _clamp01((float(rms_norm_v) - (float(rms_norm_sound_th) - 0.05)) / max(1.0 - (float(rms_norm_sound_th) - 0.05), 1e-8))
-    rms_blank = 0.0
-    if float(rms_sil_th) > 1e-8:
-        rms_blank = _clamp01(((float(rms_sil_th) * 1.15) - float(rms_v)) / max(float(rms_sil_th) * 1.15, 1e-8))
-    rms_blank_norm = _clamp01(((float(rms_norm_sil_th) + 0.04) - float(rms_norm_v)) / max(float(rms_norm_sil_th) + 0.04, 1e-8))
-    rms_sound_mix = _clamp01((0.55 * rms_sound) + (0.45 * rms_sound_norm))
-    rms_blank_mix = _clamp01((0.55 * rms_blank) + (0.45 * rms_blank_norm))
     score = (
         (0.34 * voiced_high)
         + (0.28 * unvoiced_high)
         + (0.20 * db_sound)
         + (0.14 * en_sound)
         + (0.04 * f0_sound)
-        + (0.16 * rms_sound_mix)
         - (0.30 * sil_high)
-        - (0.14 * rms_blank_mix)
     )
     return _clamp01(score)
 
@@ -235,13 +130,6 @@ def _find_first_sound_frame(
     db_sil_th: float,
     search_start_ms: float,
     search_end_ms: float,
-    *,
-    rms_arr=None,
-    rms_norm_arr=None,
-    rms_sil_th: float = 1e-8,
-    rms_sound_th: float = 1e-8,
-    rms_norm_sil_th: float = 0.10,
-    rms_norm_sound_th: float = 0.20,
 ) -> Optional[float]:
     """Find the first mel frame that looks like audible sound in [start, end]."""
     if t_ms is None or len(t_ms) == 0:
@@ -249,8 +137,8 @@ def _find_first_sound_frame(
     mask = np.where((t_ms >= search_start_ms) & (t_ms <= search_end_ms))[0]
     if len(mask) == 0:
         return None
-    sound_frame_th = _env_float("UTOA_SAFETY_CLAMP_SOUND_FRAME_TH", 0.40)
-    blank_frame_th = _env_float("UTOA_SAFETY_CLAMP_BLANK_FRAME_TH", 0.58)
+    sound_frame_th = _env_float("UTOA_SAFETY_CLAMP_SOUND_FRAME_TH", 0.36)
+    blank_frame_th = _env_float("UTOA_SAFETY_CLAMP_BLANK_FRAME_TH", 0.62)
     for idx in mask:
         voiced_v = float(cls_voiced[idx]) if cls_voiced is not None and len(cls_voiced) == len(en) else 0.0
         unvoiced_v = float(cls_unvoiced[idx]) if cls_unvoiced is not None and len(cls_unvoiced) == len(en) else 0.0
@@ -258,8 +146,6 @@ def _find_first_sound_frame(
         db_v = float(db_arr[idx]) if db_arr is not None and len(db_arr) == len(en) else -60.0
         e_v = float(en[idx])
         f0_v = float(f0_arr[idx]) if f0_arr is not None and len(f0_arr) == len(en) else 0.0
-        rms_v = float(rms_arr[idx]) if rms_arr is not None and len(rms_arr) == len(en) else 0.0
-        rms_norm_v = float(rms_norm_arr[idx]) if rms_norm_arr is not None and len(rms_norm_arr) == len(en) else 0.0
         sound_conf = _frame_sound_confidence(
             e_v=e_v,
             db_v=db_v,
@@ -268,12 +154,6 @@ def _find_first_sound_frame(
             voiced_v=voiced_v,
             unvoiced_v=unvoiced_v,
             db_sil_th=db_sil_th,
-            rms_v=rms_v,
-            rms_norm_v=rms_norm_v,
-            rms_sil_th=rms_sil_th,
-            rms_sound_th=rms_sound_th,
-            rms_norm_sil_th=rms_norm_sil_th,
-            rms_norm_sound_th=rms_norm_sound_th,
         )
         blank_conf = _frame_blank_confidence(
             e_v=e_v,
@@ -283,20 +163,10 @@ def _find_first_sound_frame(
             voiced_v=voiced_v,
             unvoiced_v=unvoiced_v,
             db_sil_th=db_sil_th,
-            rms_v=rms_v,
-            rms_norm_v=rms_norm_v,
-            rms_sil_th=rms_sil_th,
-            rms_sound_th=rms_sound_th,
-            rms_norm_sil_th=rms_norm_sil_th,
-            rms_norm_sound_th=rms_norm_sound_th,
         )
         if sound_conf >= sound_frame_th and blank_conf <= blank_frame_th:
             return float(t_ms[idx])
-        rms_sound_gate = (
-            (rms_v >= max(float(rms_sound_th) * 0.82, float(rms_sil_th) * 1.08))
-            or (rms_norm_v >= max(0.40, float(rms_norm_sound_th) * 0.74))
-        )
-        if (db_v > (db_sil_th + 1.2) and e_v > 0.10 and silence_v < 0.62) or (rms_sound_gate and blank_conf <= (blank_frame_th + 0.08)):
+        if db_v > (db_sil_th + 1.2) and e_v > 0.10 and silence_v < 0.62:
             return float(t_ms[idx])
     return None
 
@@ -312,13 +182,6 @@ def _find_last_sound_frame(
     db_sil_th: float,
     search_start_ms: float,
     search_end_ms: float,
-    *,
-    rms_arr=None,
-    rms_norm_arr=None,
-    rms_sil_th: float = 1e-8,
-    rms_sound_th: float = 1e-8,
-    rms_norm_sil_th: float = 0.10,
-    rms_norm_sound_th: float = 0.20,
 ) -> Optional[float]:
     """Find the last mel frame that looks like audible sound in [start, end]."""
     if t_ms is None or len(t_ms) == 0:
@@ -326,8 +189,8 @@ def _find_last_sound_frame(
     mask = np.where((t_ms >= search_start_ms) & (t_ms <= search_end_ms))[0]
     if len(mask) == 0:
         return None
-    sound_frame_th = _env_float("UTOA_SAFETY_CLAMP_SOUND_FRAME_TH", 0.40)
-    blank_frame_th = _env_float("UTOA_SAFETY_CLAMP_BLANK_FRAME_TH", 0.58)
+    sound_frame_th = _env_float("UTOA_SAFETY_CLAMP_SOUND_FRAME_TH", 0.36)
+    blank_frame_th = _env_float("UTOA_SAFETY_CLAMP_BLANK_FRAME_TH", 0.62)
     for idx in reversed(mask):
         voiced_v = float(cls_voiced[idx]) if cls_voiced is not None and len(cls_voiced) == len(en) else 0.0
         unvoiced_v = float(cls_unvoiced[idx]) if cls_unvoiced is not None and len(cls_unvoiced) == len(en) else 0.0
@@ -335,8 +198,6 @@ def _find_last_sound_frame(
         db_v = float(db_arr[idx]) if db_arr is not None and len(db_arr) == len(en) else -60.0
         e_v = float(en[idx])
         f0_v = float(f0_arr[idx]) if f0_arr is not None and len(f0_arr) == len(en) else 0.0
-        rms_v = float(rms_arr[idx]) if rms_arr is not None and len(rms_arr) == len(en) else 0.0
-        rms_norm_v = float(rms_norm_arr[idx]) if rms_norm_arr is not None and len(rms_norm_arr) == len(en) else 0.0
         sound_conf = _frame_sound_confidence(
             e_v=e_v,
             db_v=db_v,
@@ -345,12 +206,6 @@ def _find_last_sound_frame(
             voiced_v=voiced_v,
             unvoiced_v=unvoiced_v,
             db_sil_th=db_sil_th,
-            rms_v=rms_v,
-            rms_norm_v=rms_norm_v,
-            rms_sil_th=rms_sil_th,
-            rms_sound_th=rms_sound_th,
-            rms_norm_sil_th=rms_norm_sil_th,
-            rms_norm_sound_th=rms_norm_sound_th,
         )
         blank_conf = _frame_blank_confidence(
             e_v=e_v,
@@ -360,20 +215,10 @@ def _find_last_sound_frame(
             voiced_v=voiced_v,
             unvoiced_v=unvoiced_v,
             db_sil_th=db_sil_th,
-            rms_v=rms_v,
-            rms_norm_v=rms_norm_v,
-            rms_sil_th=rms_sil_th,
-            rms_sound_th=rms_sound_th,
-            rms_norm_sil_th=rms_norm_sil_th,
-            rms_norm_sound_th=rms_norm_sound_th,
         )
         if sound_conf >= sound_frame_th and blank_conf <= blank_frame_th:
             return float(t_ms[idx])
-        rms_sound_gate = (
-            (rms_v >= max(float(rms_sound_th) * 0.82, float(rms_sil_th) * 1.08))
-            or (rms_norm_v >= max(0.40, float(rms_norm_sound_th) * 0.74))
-        )
-        if (db_v > (db_sil_th + 1.2) and e_v > 0.10 and silence_v < 0.62) or (rms_sound_gate and blank_conf <= (blank_frame_th + 0.08)):
+        if db_v > (db_sil_th + 1.2) and e_v > 0.10 and silence_v < 0.62:
             return float(t_ms[idx])
     return None
 
@@ -389,13 +234,6 @@ def _compute_silence_ratio(
     db_sil_th: float,
     start_ms: float,
     end_ms: float,
-    *,
-    rms_arr=None,
-    rms_norm_arr=None,
-    rms_sil_th: float = 1e-8,
-    rms_sound_th: float = 1e-8,
-    rms_norm_sil_th: float = 0.10,
-    rms_norm_sound_th: float = 0.20,
 ) -> float:
     """Fraction of frames in [start, end] that are classified as silence."""
     if t_ms is None or len(t_ms) == 0:
@@ -403,7 +241,7 @@ def _compute_silence_ratio(
     mask = np.where((t_ms >= start_ms) & (t_ms <= end_ms))[0]
     if len(mask) == 0:
         return 0.0
-    blank_frame_th = _env_float("UTOA_SAFETY_CLAMP_BLANK_FRAME_TH", 0.58)
+    blank_frame_th = _env_float("UTOA_SAFETY_CLAMP_BLANK_FRAME_TH", 0.62)
     flags = []
     for idx in mask:
         voiced_v = float(cls_voiced[idx]) if cls_voiced is not None and len(cls_voiced) == len(en) else 0.0
@@ -412,8 +250,6 @@ def _compute_silence_ratio(
         db_v = float(db_arr[idx]) if db_arr is not None and len(db_arr) == len(en) else -60.0
         e_v = float(en[idx])
         f0_v = float(f0_arr[idx]) if f0_arr is not None and len(f0_arr) == len(en) else 0.0
-        rms_v = float(rms_arr[idx]) if rms_arr is not None and len(rms_arr) == len(en) else 0.0
-        rms_norm_v = float(rms_norm_arr[idx]) if rms_norm_arr is not None and len(rms_norm_arr) == len(en) else 0.0
         blank_conf = _frame_blank_confidence(
             e_v=e_v,
             db_v=db_v,
@@ -422,12 +258,6 @@ def _compute_silence_ratio(
             voiced_v=voiced_v,
             unvoiced_v=unvoiced_v,
             db_sil_th=db_sil_th,
-            rms_v=rms_v,
-            rms_norm_v=rms_norm_v,
-            rms_sil_th=rms_sil_th,
-            rms_sound_th=rms_sound_th,
-            rms_norm_sil_th=rms_norm_sil_th,
-            rms_norm_sound_th=rms_norm_sound_th,
         )
         flags.append(blank_conf >= blank_frame_th)
     if flags:
@@ -448,12 +278,6 @@ def _find_head_pause_end(
     search_end_ms: float,
     *,
     language: str = "",
-    rms_arr=None,
-    rms_norm_arr=None,
-    rms_sil_th: float = 1e-8,
-    rms_sound_th: float = 1e-8,
-    rms_norm_sil_th: float = 0.10,
-    rms_norm_sound_th: float = 0.20,
 ) -> Optional[float]:
     """Detect a short head-side pause run and return its end time (ms)."""
     if t_ms is None or len(t_ms) == 0:
@@ -485,8 +309,6 @@ def _find_head_pause_end(
         db_v = float(db_arr[idx]) if db_arr is not None and len(db_arr) == len(en) else -60.0
         e_v = float(en[idx])
         f0_v = float(f0_arr[idx]) if f0_arr is not None and len(f0_arr) == len(en) else 0.0
-        rms_v = float(rms_arr[idx]) if rms_arr is not None and len(rms_arr) == len(en) else 0.0
-        rms_norm_v = float(rms_norm_arr[idx]) if rms_norm_arr is not None and len(rms_norm_arr) == len(en) else 0.0
         blank_conf = _frame_blank_confidence(
             e_v=e_v,
             db_v=db_v,
@@ -495,12 +317,6 @@ def _find_head_pause_end(
             voiced_v=voiced_v,
             unvoiced_v=unvoiced_v,
             db_sil_th=db_sil_th,
-            rms_v=rms_v,
-            rms_norm_v=rms_norm_v,
-            rms_sil_th=rms_sil_th,
-            rms_sound_th=rms_sound_th,
-            rms_norm_sil_th=rms_norm_sil_th,
-            rms_norm_sound_th=rms_norm_sound_th,
         )
         sound_conf = _frame_sound_confidence(
             e_v=e_v,
@@ -510,12 +326,6 @@ def _find_head_pause_end(
             voiced_v=voiced_v,
             unvoiced_v=unvoiced_v,
             db_sil_th=db_sil_th,
-            rms_v=rms_v,
-            rms_norm_v=rms_norm_v,
-            rms_sil_th=rms_sil_th,
-            rms_sound_th=rms_sound_th,
-            rms_norm_sil_th=rms_norm_sil_th,
-            rms_norm_sound_th=rms_norm_sound_th,
         )
         is_blank = (blank_conf >= blank_th) and (sound_conf <= sound_guard_th)
 
@@ -564,14 +374,6 @@ def _clamp_row(
 
     if t_ms is None or en is None or len(t_ms) < 8:
         return False
-    (
-        rms_arr,
-        rms_norm_arr,
-        rms_sil_th,
-        rms_sound_th,
-        rms_norm_sil_th,
-        rms_norm_sound_th,
-    ) = _resolve_rms_views(mel_ctx, len(t_ms))
 
     off = float(row["offset"])
     pre_rel = float(row["pre"])
@@ -592,11 +394,11 @@ def _clamp_row(
     lang = str(language or "").strip().lower()
     offset_margin_ms = _env_float(
         "UTOA_SAFETY_CLAMP_OFFSET_MARGIN_MS",
-        12.0 if lang == "korean" else 11.0,
+        14.0 if lang == "korean" else 12.0,
     )
     offset_sil_threshold = _env_float(
         "UTOA_SAFETY_CLAMP_OFFSET_SIL_THRESHOLD",
-        0.64 if lang == "korean" else 0.68,
+        0.68 if lang == "korean" else 0.72,
     )
 
     if alias_type in {"cv", "cv_head", "vcv"}:
@@ -613,12 +415,6 @@ def _clamp_row(
             db_sil_th,
             off,
             check_end,
-            rms_arr=rms_arr,
-            rms_norm_arr=rms_norm_arr,
-            rms_sil_th=rms_sil_th,
-            rms_sound_th=rms_sound_th,
-            rms_norm_sil_th=rms_norm_sil_th,
-            rms_norm_sound_th=rms_norm_sound_th,
         )
         if sil_ratio >= offset_sil_threshold:
             pause_end = _find_head_pause_end(
@@ -633,18 +429,12 @@ def _clamp_row(
                 off,
                 check_end,
                 language=lang,
-                rms_arr=rms_arr,
-                rms_norm_arr=rms_norm_arr,
-                rms_sil_th=rms_sil_th,
-                rms_sound_th=rms_sound_th,
-                rms_norm_sil_th=rms_norm_sil_th,
-                rms_norm_sound_th=rms_norm_sound_th,
             )
             # Without a head-pause run, require a much stronger silence gate
             # to avoid trimming away weak unvoiced consonant onsets.
             sil_gate = offset_sil_threshold
             if pause_end is None:
-                sil_gate = max(offset_sil_threshold, 0.80)
+                sil_gate = max(offset_sil_threshold, 0.84)
             if sil_ratio >= sil_gate:
                 search_start_for_sound = max(0.0, off)
                 if pause_end is not None:
@@ -652,12 +442,6 @@ def _clamp_row(
                 first_sound = _find_first_sound_frame(
                     t_ms, en, db_arr, f0_arr, cls_voiced, cls_unvoiced, cls_silence, db_sil_th,
                     search_start_for_sound, pre_abs + 20.0,
-                    rms_arr=rms_arr,
-                    rms_norm_arr=rms_norm_arr,
-                    rms_sil_th=rms_sil_th,
-                    rms_sound_th=rms_sound_th,
-                    rms_norm_sil_th=rms_norm_sil_th,
-                    rms_norm_sound_th=rms_norm_sound_th,
                 )
                 if first_sound is not None and first_sound > off + offset_margin_ms:
                     new_off = max(0.0, first_sound - offset_margin_ms)
@@ -678,7 +462,7 @@ def _clamp_row(
     # --- Cutoff clamp: pull cutoff back if tail is deep silence ---
     cutoff_sil_threshold = _env_float(
         "UTOA_SAFETY_CLAMP_CUTOFF_SIL_THRESHOLD",
-        0.64 if lang == "korean" else 0.68,
+        0.66 if lang == "korean" else 0.70,
     )
     cutoff_margin_ms = _env_float("UTOA_SAFETY_CLAMP_CUTOFF_MARGIN_MS", 8.0)
     min_active_ms = _env_float("UTOA_SAFETY_CLAMP_MIN_ACTIVE_MS", 20.0)
@@ -703,23 +487,11 @@ def _clamp_row(
             db_sil_th,
             tail_start,
             cut_abs,
-            rms_arr=rms_arr,
-            rms_norm_arr=rms_norm_arr,
-            rms_sil_th=rms_sil_th,
-            rms_sound_th=rms_sound_th,
-            rms_norm_sil_th=rms_norm_sil_th,
-            rms_norm_sound_th=rms_norm_sound_th,
         )
         if sil_ratio >= cutoff_sil_threshold:
             last_sound = _find_last_sound_frame(
                 t_ms, en, db_arr, f0_arr, cls_voiced, cls_unvoiced, cls_silence, db_sil_th,
                 pre_abs, cut_abs,
-                rms_arr=rms_arr,
-                rms_norm_arr=rms_norm_arr,
-                rms_sil_th=rms_sil_th,
-                rms_sound_th=rms_sound_th,
-                rms_norm_sil_th=rms_norm_sil_th,
-                rms_norm_sound_th=rms_norm_sound_th,
             )
             if last_sound is not None:
                 new_cut_abs = last_sound + cutoff_margin_ms
@@ -860,7 +632,9 @@ def apply_mel_safety_clamp_to_oto_file(
         ov = float(row["ovl"])
         out_lines.append(f"{row['wav']}={row['alias']},{o:.2f},{c:.2f},{ct:.2f},{p:.2f},{ov:.2f}")
 
-    write_oto_lines(oto_path, out_lines)
+    with open(oto_path, "w", encoding="utf-8") as f:
+        for line in out_lines:
+            f.write(line + "\n")
     return changed
 
 

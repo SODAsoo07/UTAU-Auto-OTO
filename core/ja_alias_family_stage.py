@@ -1,42 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
-import unicodedata
-
-
-_JA_KANA_ONLY_RE = re.compile(r"^[\u3041-\u3096\u30A1-\u30FA\u30FC]+$")
-_JA_TAIL_BREATH_HINTS = ("息", "吸", "吐", "breath", "inhale", "exhale", "asp", "air")
-_JA_TAIL_BREATH_WORDS = {
-    "r",
-    "h",
-    "息",
-    "吸",
-    "吐",
-    "吸い",
-    "吐き",
-    "息継ぎ",
-    "bre",
-    "breath",
-    "breathy",
-    "inhale",
-    "exhale",
-    "asp",
-    "aspirate",
-    "air",
-}
-
-
-def _is_ja_tail_breath_marker(token: str) -> bool:
-    raw = unicodedata.normalize("NFKC", str(token or "")).strip()
-    if not raw:
-        return False
-    if raw.upper() in {"R", "H"}:
-        return True
-    low = raw.lower()
-    if low in _JA_TAIL_BREATH_WORDS:
-        return True
-    return any(hint in low for hint in _JA_TAIL_BREATH_HINTS)
 
 
 @dataclass(frozen=True)
@@ -75,17 +39,8 @@ def build_ja_alias_family_state(
                 alias_type_norm = "vcv"
 
     tail_breath = ""
-    if len(parts) >= 2:
-        left = parts[0].strip()
-        right = parts[-1].strip()
-        if (is_vowel_token_fn(left) or bool(_JA_KANA_ONLY_RE.fullmatch(left))) and _is_ja_tail_breath_marker(right):
-            tail_breath = right
-    if not tail_breath:
-        compact = re.sub(r"[\s_\-]+", "", str(alias or ""))
-        if len(compact) >= 2 and compact[-1].upper() in {"R", "H"} and compact[:-1].lower() in {"a", "i", "u", "e", "o"}:
-            tail_breath = compact[-1].upper()
-    if not tail_breath and re.fullmatch(r"[\u3041-\u3096\u30A1-\u30FA\u30FC]+(?:息|吸|吐|吸い|吐き|息継ぎ)", str(alias or "")):
-        tail_breath = "BREATH"
+    if len(parts) >= 2 and is_vowel_token_fn(parts[0]) and parts[1].upper() in {"R", "H"}:
+        tail_breath = parts[1].upper()
 
     return JaAliasFamilyState(
         alias_type=alias_type_norm,
@@ -164,58 +119,27 @@ def try_handle_ja_tail_breath_alias(
         current_w_idx = len(syllables_info) - 1
 
     curr_syl = syllables_info[current_w_idx]
-    curr_phones = list(curr_syl.get("phones") or [])
-    if not curr_phones:
-        return False, current_w_idx
+    curr_phones = curr_syl["phones"]
+    v_phone = curr_phones[-1]
+    v_end = v_phone.maxTime * 1000
+    v_start = v_phone.minTime * 1000
+    v_len = max(v_end - v_start, 80)
 
-    def _clean_mark(mark: str) -> str:
-        return re.sub(r"[0-9]", "", str(mark or "").strip().lower()).replace(":", "")
-
-    def _is_vowel_mark(mark: str) -> bool:
-        m = _clean_mark(mark)
-        return m in {"a", "i", "u", "e", "o", "ɯ", "ə", "ɨ", "ɴ", "n"}
-
-    vowel_idx = -1
-    for idx, ph in enumerate(curr_phones):
-        if _is_vowel_mark(getattr(ph, "mark", "")):
-            vowel_idx = idx
-    if vowel_idx < 0:
-        vowel_idx = max(len(curr_phones) - 1, 0)
-
-    v_phone = curr_phones[vowel_idx]
-    v_start = float(getattr(v_phone, "minTime", 0.0)) * 1000.0
-    v_end = float(getattr(v_phone, "maxTime", 0.0)) * 1000.0
-    v_len = max(v_end - v_start, 60.0)
-    syllable_end = max(float(curr_syl.get("end_time", 0.0)) * 1000.0, float(getattr(curr_phones[-1], "maxTime", 0.0)) * 1000.0)
-
-    breath_start = v_end
-    if vowel_idx + 1 < len(curr_phones):
-        next_phone = curr_phones[vowel_idx + 1]
-        breath_start = max(v_end, float(getattr(next_phone, "minTime", 0.0)) * 1000.0)
-    breath_end = max(syllable_end, float(getattr(curr_phones[-1], "maxTime", 0.0)) * 1000.0)
-
-    if breath_end <= breath_start + 8.0:
-        fallback_tail = max(min(v_len * 0.40, 100.0), 40.0)
-        breath_start = max(v_end - min(fallback_tail * 0.45, 26.0), 0.0)
-        breath_end = max(v_end + fallback_tail, breath_start + 40.0)
-
-    breath_len = max(breath_end - breath_start, 35.0)
-    lead = min(max(breath_len * 0.35, 18.0), 70.0)
-    offset = max(breath_start - lead, 0.0)
-    pre = max(breath_start - offset, 12.0)
-    ovl = min(pre * 0.42, max(pre - 10.0, 0.0))
-    consonant = pre + min(max(breath_len * 0.62, 36.0), 170.0)
-    cutoff = -(consonant + min(max(breath_len * 0.78, 48.0), 240.0))
+    offset = max(v_end - min(max(v_len * 0.8, 120), 260), 0)
+    pre = max(v_end - offset, 40)
+    ovl = min(pre * 0.3, max(pre - 16, 0))
+    consonant = pre + min(max(v_len * 0.2, 22), 55)
+    cutoff = -(consonant + 38)
     offset, consonant, cutoff, pre, ovl = post_ctx.post_adjust(
         offset,
         consonant,
         cutoff,
         pre,
         ovl,
-        alias_type="vc",
+        alias_type="mono",
         alias_text=alias,
-        local_end_ms=breath_end,
-        local_cut_allow_ms=92.0,
+        local_end_ms=v_end,
+        local_cut_allow_ms=36.0,
     )
     aliases_to_write = generate_openutau_aliases_fn(alias) if generate_openutau else [alias]
     for item in aliases_to_write:

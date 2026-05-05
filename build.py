@@ -1,16 +1,16 @@
-import argparse
+﻿import argparse
 import datetime
-import glob
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
-from typing import Optional
 
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -19,27 +19,20 @@ FFMPEG_DIR = os.path.join(BUILD_ASSET_DIR, "ffmpeg")
 FFMPEG_BIN_DIR = os.path.join(FFMPEG_DIR, "bin")
 FFMPEG_RELEASE_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 REQUIRED_FFMPEG_BINARIES = ("ffmpeg.exe", "ffprobe.exe")
-# Nuitka often collects vcruntime140*.dll automatically; forcing them can cause duplicate conflicts.
-# Keep explicit bundling focused on msvcp140.dll, which is commonly reported as missing.
-REQUIRED_MSVC_RUNTIME_DLLS = ("msvcp140.dll",)
-REQUIRED_MFA_ACOUSTIC_MODELS = ("korean_mfa", "japanese_mfa")
-KOREAN_WHEEL_BUNDLE_DIRNAME = "mfa_ko_wheels"
-KOREAN_WHEEL_PACKAGES = ("python-mecab-ko", "jamo", "python-mecab-ko-dic")
-KOREAN_WHEEL_NAME_HINTS = ("python_mecab_ko-", "python_mecab_ko_dic-", "jamo-")
-KOREAN_WHEEL_TARGET_PYTHON = "310"
-MFA_LAUNCHER_FAILURE_MARKERS = (
-    "failed to create process",
-    "unable to create process",
-    "fatal error in launcher",
-    "no python at",
+REQUIRED_MSVC_RUNTIME_DLLS = (
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
 )
+MICROMAMBA_EXE_URL = "https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-win-64"
 
 DEFAULT_APP_NAME = "UTAU_Auto_OTO"
 DEFAULT_CHANNEL = "stable"
 SUPPORTED_CHANNELS = ("stable", "preview")
 CHANNEL_ALIASES = {"default": "stable"}
 SUPPORTED_CHANNEL_INPUTS = ("stable", "preview", "default")
-
+PREVIEW_REQUIREMENTS_FILE = "requirements-preview.txt"
 DEFAULT_BACKEND = "nuitka"
 SUPPORTED_BACKENDS = ("nuitka", "pyinstaller")
 
@@ -50,22 +43,170 @@ EXCLUDED_MODULES = [
     "torchaudio",
     "torchvision",
     "ml",
+    "ml.scripts",
+    "ml.tests",
+    "pytest",
+    "librosa",
+    "scripts",
+    "tests",
 ]
 EXCLUDED_TRAINING_MODULES = [
-    "core.ja_oto_autotune",
+    "core.cvn_training",
+    "core.mapping_supervised_training",
     "core.oto_ml.coupled.training",
+    "core.oto_ml_collection",
+    "core.oto_ml_collection_build",
+    "core.oto_ml_collection_discovery",
+    "core.oto_ml_collection_types",
+    "core.oto_ml_dataset",
+    "core.oto_ml_ensemble",
+    "core.oto_ml_export",
+    "core.oto_ml_prepare_discovery",
+    "core.oto_ml_prepare_steps",
+    "core.oto_ml_prepare_types",
+    "core.oto_ml_staging",
+    "core.sequence_residual_preprocessor",
 ]
-RUNTIME_DATA_BASE_PATHS = [
+EXCLUDED_BUILD_ONLY_MODULES = [
+    "build",
+    "core.mapping_supervised_training",
+    "ml.tests.test_alignment_pipeline",
+]
+
+
+def _excluded_build_modules() -> list[str]:
+    seen = set()
+    out = []
+    for name in EXCLUDED_MODULES + EXCLUDED_TRAINING_MODULES + EXCLUDED_BUILD_ONLY_MODULES:
+        normalized = str(name or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
+RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "profiles"), "assets/profiles"),
-    (os.path.join(APP_DIR, "ml", "configs"), "ml/configs"),
+    (
+        os.path.join(APP_DIR, "models", "_build_included_oto_correction_models", "assets", "models", "oto_ml"),
+        "assets/models/oto_ml",
+    ),
+    (
+        os.path.join(
+            APP_DIR,
+            "models",
+            "_build_included_oto_correction_models",
+            "models",
+            "coarse_crnn",
+            "oto_anchor_crnn_role_v2.pt",
+        ),
+        "models/coarse_crnn",
+    ),
+    (os.path.join(APP_DIR, "assets", "bootstrap", "get-pip.py"), "assets/bootstrap"),
+    # ml/configs: include only the two files that are actually read at runtime.
+    # training-only files (dataset_build_default.yaml, lightgbm_default.yaml,
+    # training_data_roots.yaml) are intentionally excluded from the runtime bundle.
+    (os.path.join(APP_DIR, "ml", "configs", "silence_reliability_profile.json"), "ml/configs"),
+    (os.path.join(APP_DIR, "ml", "configs", "kr_vcv_anchor_profile.yaml"), "ml/configs"),
+    (os.path.join(APP_DIR, "config.json"), "."),
+    (os.path.join(APP_DIR, "ui", "ui_layout.json"), "ui"),
+    # bundle_info.json is generated at build time; included when present.
+    (os.path.join(APP_DIR, "bundle_info.json"), "."),
 ]
 RELEASE_AUX_FILES = [
     os.path.join(APP_DIR, "setup_mfa.bat"),
     os.path.join(APP_DIR, "requirements.txt"),
     os.path.join(APP_DIR, "requirements-ml.txt"),
+    os.path.join(APP_DIR, "scripts", "runtime_recovery.ps1"),
+    os.path.join(APP_DIR, "scripts", "startup_diagnose.ps1"),
     os.path.join(APP_DIR, "release_assets", "먼저 실행.txt"),
     os.path.join(APP_DIR, "release_assets", "설치_도우미.bat"),
+    os.path.join(APP_DIR, "scripts", "startup_diagnose.bat"),
 ]
+RELEASE_INTERNAL_TEST_SCRIPT_BASENAMES = {
+    "build_alignment_test_folder.py",
+    "compare_alignment_visual.py",
+    "export_textgrid_to_sinsy_lab.py",
+    "preprocess_oto_cv_for_sequence_training.py",
+    "preprocess_sinsy_labels_for_sequence_training.py",
+    "train_sequence_aligner_profile_from_sinsy.py",
+    "sandbox_smoke_check.ps1",
+}
+RELEASE_SCRIPT_FOLDER_ALLOWLIST = {
+    "runtime_recovery.ps1",
+    "startup_diagnose.ps1",
+    "startup_diagnose.bat",
+}
+RELEASE_SCRIPT_EXTENSIONS = {".py", ".ps1", ".bat", ".cmd"}
+RELEASE_FORBIDDEN_DIR_NAMES = {
+    ".cache",
+    ".claude",
+    ".code-review-graph",
+    ".env",
+    ".git",
+    ".github",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".svn",
+    ".venv",
+    ".venv310",
+    "__pycache__",
+    "_build_model_profiles",
+    "_selector_datasets",
+    "aligner_sample",
+    "dataset_staged",
+    "dataset_workspace",
+    "docs",
+    "dist",
+    "dist_nuitka",
+    "eval_runs",
+    "installer",
+    "logs",
+    "ml_models",
+    "ml_models_noml_auto",
+    "ml_models_old",
+    "ml_workspace",
+    "plan",
+    "portable_output",
+    "test_wavs",
+    "tests",
+}
+RELEASE_FORBIDDEN_PATH_PREFIXES = {
+    "ml/scripts",
+    "ml/tests",
+}
+RELEASE_FORBIDDEN_FILE_NAMES = {
+    "coverage.xml",
+    "nuitka-crash-report.xml",
+    "pytest.ini",
+    "requirements-train.md",
+    "requirements-train.txt",
+    "selector_dataset.csv",
+}
+RELEASE_FORBIDDEN_FILE_EXTENSIONS = {
+    ".ckpt",
+    ".csv",
+    ".feather",
+    ".jsonl",
+    ".parquet",
+    ".pth",
+    ".pt",
+    ".tsv",
+}
+RELEASE_MODEL_PRUNE_FILE_NAMES = {
+    "eval_summary.json",
+    "selector_dataset.csv",
+}
+RELEASE_MODEL_PRUNE_FILE_EXTENSIONS = {
+    ".ckpt",
+    ".pth",
+    ".pt",
+}
+RELEASE_ALLOWED_MODEL_FILE_PATHS = {
+    "models/coarse_crnn/oto_anchor_crnn_role_v2.pt",
+}
 APP_ICON_CANDIDATES = [
     os.path.join(APP_DIR, "release_assets", "AutoOTO-icon.ico"),
     os.path.join(APP_DIR, "AutoOTO-icon.ico"),
@@ -79,11 +220,9 @@ args = argparse.Namespace(
     channels="",
     backend=DEFAULT_BACKEND,
     skip_deps=False,
-    bundle_mfa_runtime=False,
-    skip_ml_model_bundle=False,
-    mfa_runtime_root="",
-    require_mfa_models=False,
 )
+
+EXPECTED_BUILD_PYTHON = (3, 10)
 
 
 def _configure_console_encoding():
@@ -92,6 +231,19 @@ def _configure_console_encoding():
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
+
+
+def _assert_build_python_version(expected=EXPECTED_BUILD_PYTHON):
+    major, minor = expected
+    if os.environ.get("UTOA_ALLOW_NON_310_BUILD", "").strip().lower() in {"1", "true", "yes", "on"}:
+        print("[WARN] UTOA_ALLOW_NON_310_BUILD enabled; skipping build Python version check.")
+        return
+    if (sys.version_info.major, sys.version_info.minor) != (major, minor):
+        raise SystemExit(
+            f"Build Python must be {major}.{minor}. "
+            f"Current={sys.version_info.major}.{sys.version_info.minor} "
+            f"({sys.executable})."
+        )
 
 
 def _normalize_channel(channel: str) -> str:
@@ -180,6 +332,40 @@ def _validate_ffmpeg_bin(ffmpeg_bin):
         raise RuntimeError(f"Required FFmpeg runtime files are missing:\n{lines}")
 
 
+def _ensure_micromamba_exe():
+    """
+    Download micromamba.exe for portable builds so setup_mfa.bat can skip tar/bzip2 extraction.
+    Best-effort: warn and continue if download fails.
+    """
+    if os.name != "nt":
+        return False
+    target_dir = os.path.join(BUILD_ASSET_DIR, "micromamba")
+    target_path = os.path.join(target_dir, "micromamba.exe")
+    if os.path.isfile(target_path) and os.path.getsize(target_path) > 0:
+        print(f"Micromamba reuse: {target_path}")
+        return True
+    os.makedirs(target_dir, exist_ok=True)
+    try:
+        print("Downloading micromamba.exe for portable bundle...")
+        with urllib.request.urlopen(MICROMAMBA_EXE_URL, timeout=120) as resp:
+            payload = resp.read()
+        if not payload or len(payload) < 1024 * 512:
+            raise RuntimeError("Downloaded micromamba.exe payload is too small.")
+        with open(target_path, "wb") as f:
+            f.write(payload)
+        print(f"Micromamba prepared: {target_path}")
+        return True
+    except Exception as exc:
+        print(
+            f"[WARN] Failed to download micromamba.exe: {exc}\n"
+            "[WARN] Users running setup_mfa.bat without internet access will be unable to\n"
+            "[WARN] install MFA automatically. To fix: ensure network access during build,\n"
+            "[WARN] or manually place micromamba.exe at:\n"
+            f"[WARN]   {target_path}"
+        )
+        return False
+
+
 def _iter_ffmpeg_runtime_files(ffmpeg_bin):
     if not os.path.isdir(ffmpeg_bin):
         return []
@@ -194,60 +380,88 @@ def _iter_ffmpeg_runtime_files(ffmpeg_bin):
     return files
 
 
-def _resolve_msvc_runtime_dlls() -> list[str]:
-    # Search common system and VC redist locations without expensive full recursion.
-    search_dirs: list[str] = []
-    env_candidates = [
-        os.environ.get("SystemRoot", ""),
-        os.environ.get("windir", ""),
-        os.environ.get("VCToolsRedistDir", ""),
-        os.environ.get("VCINSTALLDIR", ""),
-        os.environ.get("VSINSTALLDIR", ""),
-    ]
-    for base in env_candidates:
-        b = str(base or "").strip()
-        if not b:
-            continue
-        search_dirs.extend(
-            [
-                b,
-                os.path.join(b, "System32"),
-                os.path.join(b, "SysWOW64"),
-            ]
-        )
-        search_dirs.extend(
-            glob.glob(os.path.join(b, "VC", "Redist", "MSVC", "*", "x64", "Microsoft.VC*.CRT"))
-        )
-        search_dirs.extend(
-            glob.glob(os.path.join(b, "Redist", "MSVC", "*", "x64", "Microsoft.VC*.CRT"))
-        )
+def _iter_msvc_runtime_files():
+    """
+    Collect MSVC runtime DLLs for app-local bundling.
+    This avoids target-machine startup failures when VC++ redistributable is absent.
+    """
+    candidates = []
+    windir = os.environ.get("WINDIR", r"C:\Windows")
+    if windir:
+        candidates.append(os.path.join(windir, "System32"))
+    candidates.append(os.path.join(sys.base_prefix, "DLLs"))
+    candidates.append(sys.base_prefix)
 
-    # Keep order and remove duplicates.
-    dedup_dirs = []
-    seen_dirs = set()
-    for d in search_dirs:
-        norm = os.path.normcase(os.path.abspath(d))
-        if norm in seen_dirs:
+    search_roots = []
+    seen = set()
+    for root in candidates:
+        norm = os.path.normcase(os.path.abspath(str(root or "")))
+        if not root or norm in seen or not os.path.isdir(root):
             continue
-        seen_dirs.add(norm)
-        dedup_dirs.append(d)
+        seen.add(norm)
+        search_roots.append(root)
 
-    found = {}
+    if not search_roots:
+        print("[WARN] MSVC runtime search roots were not found.")
+        return []
+
+    found = []
+    found_names = set()
+    missing_required = []
     for dll_name in REQUIRED_MSVC_RUNTIME_DLLS:
-        for d in dedup_dirs:
-            direct = os.path.join(d, dll_name)
-            if os.path.isfile(direct):
-                found[dll_name.lower()] = direct
+        located_path = ""
+        for root in search_roots:
+            probe = os.path.join(root, dll_name)
+            if os.path.isfile(probe):
+                located_path = probe
                 break
+        if located_path:
+            found.append((located_path, dll_name))
+            found_names.add(dll_name.lower())
+        else:
+            missing_required.append(dll_name)
 
-    missing = [name for name in REQUIRED_MSVC_RUNTIME_DLLS if name.lower() not in found]
-    if missing:
-        print(
-            "[WARN] Some VC++ runtime DLLs were not found for bundling: "
-            + ", ".join(missing)
-            + " (target PC may require VC++ Redistributable 2015-2022 x64)."
-        )
-    return [found[k.lower()] for k in REQUIRED_MSVC_RUNTIME_DLLS if k.lower() in found]
+    if found:
+        names = ", ".join(name for _, name in found)
+        print(f"[INFO] Bundling MSVC runtime DLLs: {names}")
+    if missing_required:
+        missing = ", ".join(missing_required)
+        # C-1: DLL 누락 시 빌드 중단 — 클린 윈도우에서 0xc0000135 방지
+        if not os.environ.get("UTOA_SKIP_DLL_CHECK"):
+            raise SystemExit(
+                f"[ERROR] Required MSVC runtime DLLs not found on build machine: {missing}\n"
+                "Install 'Microsoft Visual C++ Redistributable' on the build machine,\n"
+                "or set UTOA_SKIP_DLL_CHECK=1 to bypass this check (unsafe for distribution).\n"
+                "Hint: run 'where msvcp140.dll' in a cmd to verify presence."
+            )
+        print(f"[WARN] MSVC DLL check bypassed via UTOA_SKIP_DLL_CHECK: {missing}")
+    return found
+
+
+def _inject_msvc_runtime_files(dist_dir, runtime_files):
+    """
+    Copy MSVC runtime DLLs into built app directory post-build.
+    This avoids Nuitka include-data-file name collisions with auto-detected DLLs.
+    """
+    if not dist_dir or not os.path.isdir(dist_dir):
+        return
+    copied = []
+    skipped = []
+    for src, name in (runtime_files or []):
+        dst = os.path.join(dist_dir, name)
+        if os.path.isfile(dst):
+            skipped.append(name)
+            continue
+        shutil.copy2(src, dst)
+        copied.append(name)
+    if copied:
+        print(f"[INFO] Injected MSVC runtime DLLs into dist: {', '.join(copied)}")
+    if skipped:
+        print(f"[INFO] MSVC runtime DLLs already present (skip): {', '.join(skipped)}")
+
+
+def _has_preview_channel(target_channels) -> bool:
+    return any(str(ch).strip().lower() == "preview" for ch in (target_channels or []))
 
 
 def _parse_args():
@@ -286,24 +500,21 @@ def _parse_args():
         help="Skip dependency installation step (useful in CI when already installed).",
     )
     parser.add_argument(
-        "--bundle-mfa-runtime",
-        action="store_true",
-        help="Bundle a preinstalled local MFA runtime into the release payload for offline first-run setup.",
+        "--bundle-mode",
+        default="offline",
+        choices=["online", "offline"],
+        help=(
+            "online: slim build without bundled micromamba (downloaded at runtime). "
+            "offline: full build with all heavy assets bundled (default)."
+        ),
     )
     parser.add_argument(
-        "--skip-ml-model-bundle",
+        "--dev",
         action="store_true",
-        help="Do not bundle runtime ML model folders into the release payload.",
-    )
-    parser.add_argument(
-        "--mfa-runtime-root",
-        default="",
-        help="Path to MFA runtime root (default: %%LOCALAPPDATA%%\\UTAU_Auto_OTO_v3 when --bundle-mfa-runtime is set).",
-    )
-    parser.add_argument(
-        "--require-mfa-models",
-        action="store_true",
-        help="Require bundled MFA runtime to already contain korean_mfa and japanese_mfa acoustic models.",
+        help=(
+            "Dev/local build: enables ccache, disables LTO, skips --remove-output for "
+            "faster incremental rebuilds. Not for distribution."
+        ),
     )
     return parser.parse_args()
 
@@ -328,6 +539,8 @@ def _write_release_channel_metadata(target_path, app_name, app_version, channel)
         "app_name": app_name,
         "app_version": app_version,
         "channel": channel,
+        "build_python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "build_python_executable": os.path.abspath(sys.executable),
         "built_at_utc": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
     }
     os.makedirs(os.path.dirname(target_path), exist_ok=True)
@@ -339,397 +552,75 @@ def _get_release_dir(channel):
     return os.path.join(APP_DIR, f"{RELEASE_DIR_PREFIX}_{channel}")
 
 
-def _is_valid_mfa_runtime_root(root_path: str) -> bool:
-    env_dir = os.path.join(root_path, ".env")
-    return bool(_find_mfa_python(env_dir) and _find_mfa_entrypoint(env_dir))
+def _on_rmtree_error(func, path, exc_info):
+    """
+    Windows can leave read-only bits on copied directories/files.
+    Try removing read-only and retry the failing operation.
+    """
+    try:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    except OSError:
+        pass
+    func(path)
 
 
-def _is_valid_mfa_env_dir(path: str) -> bool:
-    return bool(_find_mfa_python(path) and _find_mfa_entrypoint(path))
-
-
-def _build_mfa_runtime_candidates(runtime_root: str) -> list[str]:
-    candidates: list[str] = []
-    seen: set[str] = set()
-
-    def _add(path: str) -> None:
-        p = str(path or "").strip()
-        if not p:
-            return
-        abs_path = os.path.abspath(p)
-        key = abs_path.lower()
-        if key in seen:
-            return
-        seen.add(key)
-        candidates.append(abs_path)
-
-    explicit = str(runtime_root or "").strip()
-    if explicit:
-        explicit_abs = os.path.abspath(explicit)
-        _add(explicit_abs)
-        _add(os.path.join(explicit_abs, ".env"))
-        return candidates
-
-    local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
-    default_root = (
-        os.path.join(local_app_data, "UTAU_Auto_OTO_v3")
-        if local_app_data
-        else os.path.join(os.path.expanduser("~"), "AppData", "Local", "UTAU_Auto_OTO_v3")
-    )
-
-    # Auto fallback order (when --mfa-runtime-root is not explicitly passed):
-    # 1) shared runtime root (%LOCALAPPDATA%\UTAU_Auto_OTO_v3)
-    # 2) source checkout local env (./.env)
-    # 3) pre-bundled runtime layout (./mfa_runtime_bundle)
-    _add(default_root)
-    _add(os.path.join(default_root, ".env"))
-    _add(os.path.join(APP_DIR, ".env"))
-    _add(os.path.join(APP_DIR, ".venv"))
-    _add(os.path.join(APP_DIR, "mfa_runtime_bundle"))
-    _add(os.path.join(APP_DIR, "mfa_runtime_bundle", ".env"))
-    return candidates
-
-
-def _resolve_mfa_runtime_root(runtime_root: str) -> str:
-    candidates = _build_mfa_runtime_candidates(runtime_root)
-
-    for candidate in candidates:
-        if not os.path.isdir(candidate):
-            continue
-        if _is_valid_mfa_runtime_root(candidate) or _is_valid_mfa_env_dir(candidate):
-            return candidate
-
-    # No healthy candidate found: return the first existing path for clearer validation error.
-    for candidate in candidates:
-        if os.path.isdir(candidate):
-            return candidate
-
-    # Last fallback: keep previous default semantics.
-    if candidates:
-        return candidates[0]
-    return os.path.join(os.path.expanduser("~"), "AppData", "Local", "UTAU_Auto_OTO_v3")
-
-
-def _find_mfa_entrypoint(env_dir: str) -> str:
-    candidates = [
-        os.path.join(env_dir, "Scripts", "mfa.exe"),
-        os.path.join(env_dir, "Scripts", "mfa.bat"),
-        os.path.join(env_dir, "Scripts", "mfa.cmd"),
-    ]
-    for candidate in candidates:
-        if os.path.isfile(candidate):
-            return candidate
-    return ""
-
-
-def _find_mfa_python(env_dir: str) -> str:
-    candidates = [
-        os.path.join(env_dir, "python.exe"),
-        os.path.join(env_dir, "Scripts", "python.exe"),
-    ]
-    for candidate in candidates:
-        if os.path.isfile(candidate):
-            return candidate
-    return ""
-
-
-def _mfa_runtime_subprocess_env(env_dir: str) -> dict:
-    env = os.environ.copy()
-    env_prefixes = [
-        env_dir,
-        os.path.join(env_dir, "Library", "mingw-w64", "bin"),
-        os.path.join(env_dir, "Library", "usr", "bin"),
-        os.path.join(env_dir, "Library", "bin"),
-        os.path.join(env_dir, "Scripts"),
-        os.path.join(env_dir, "bin"),
-    ]
-    env["CONDA_PREFIX"] = env_dir
-    env["PATH"] = os.pathsep.join(env_prefixes + [env.get("PATH", "")])
-    return env
-
-
-def _check_mfa_python_health(env_dir: str, python_exe: str) -> None:
-    commands = [
-        [python_exe, "-m", "montreal_forced_aligner.command_line.mfa", "--help"],
-        [python_exe, "-m", "montreal_forced_aligner", "--help"],
-    ]
-    env = _mfa_runtime_subprocess_env(env_dir)
-    failure_notes = []
-    for cmd in commands:
+def _clear_readonly_recursive(root_path):
+    if not os.path.exists(root_path):
+        return
+    for dirpath, _, filenames in os.walk(root_path):
         try:
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=25,
-                check=False,
-                env=env,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
-        except Exception as exc:
-            failure_notes.append(f"{' '.join(cmd)} -> {exc}")
-            continue
-        combined = (result.stdout or "") + "\n" + (result.stderr or "")
-        lowered = combined.lower()
-        if result.returncode == 0 and not any(marker in lowered for marker in MFA_LAUNCHER_FAILURE_MARKERS):
-            return
-        snippet = "\n".join(line for line in combined.splitlines()[:12] if line.strip())
-        failure_notes.append(
-            f"{' '.join(cmd)} -> exit={result.returncode}\n{snippet}"
-        )
-    details = "\n\n".join(failure_notes) if failure_notes else "unknown error"
-    raise RuntimeError(
-        "MFA runtime python health check failed. "
-        "Run setup_mfa.bat on the build machine and retry.\n\n"
-        f"{details}"
-    )
+            os.chmod(dirpath, stat.S_IWRITE | stat.S_IREAD)
+        except OSError:
+            pass
+        for name in filenames:
+            file_path = os.path.join(dirpath, name)
+            try:
+                os.chmod(file_path, stat.S_IWRITE | stat.S_IREAD)
+            except OSError:
+                pass
 
 
-def _collect_mfa_acoustic_models(runtime_root_abs: str, env_dir: str = "") -> tuple[dict, list[str]]:
-    root_candidates = [
-        os.path.join(runtime_root_abs, ".mfa_root_ascii"),
-        os.path.join(runtime_root_abs, ".mfa_root"),
-        os.path.join(runtime_root_abs, ".mfa"),
-    ]
-    if env_dir:
-        root_candidates.extend(
-            [
-                os.path.join(env_dir, ".mfa_root_ascii"),
-                os.path.join(env_dir, ".mfa_root"),
-                os.path.join(env_dir, ".mfa"),
-            ]
-        )
-    existing_roots = [path for path in root_candidates if os.path.isdir(path)]
-    status = {}
-    for model_name in REQUIRED_MFA_ACOUSTIC_MODELS:
-        found = ""
-        for root in existing_roots:
-            patterns = [
-                os.path.join(root, "acoustic", f"{model_name}*"),
-                os.path.join(root, "extracted_models", "acoustic", f"{model_name}*"),
-            ]
-            hits = []
-            for pattern in patterns:
-                hits.extend([p for p in glob.glob(pattern) if os.path.exists(p)])
-            if hits:
-                found = os.path.abspath(hits[0])
-                break
-        status[model_name] = found
-    return status, existing_roots
-
-
-def _validate_mfa_runtime_bundle_source(
-    runtime_root: str,
-    require_models: bool = False,
-) -> tuple[str, str, str, dict, list[str]]:
-    runtime_root_abs = os.path.abspath(runtime_root)
-    env_dir = os.path.join(runtime_root_abs, ".env")
-    # Accept both layouts:
-    # 1) runtime root containing .env
-    # 2) direct env dir path itself
-    if not os.path.isdir(env_dir):
-        if _find_mfa_python(runtime_root_abs) and _find_mfa_entrypoint(runtime_root_abs):
-            env_dir = runtime_root_abs
-            runtime_root_abs = os.path.dirname(runtime_root_abs)
-
-    python_exe = _find_mfa_python(env_dir)
-    mfa_entry = _find_mfa_entrypoint(env_dir)
-    if not os.path.isdir(env_dir):
-        raise FileNotFoundError(
-            "MFA runtime env directory was not found. "
-            f"Expected: {os.path.join(runtime_root_abs, '.env')} "
-            f"or direct env dir: {os.path.abspath(runtime_root)}"
-        )
-    if not python_exe:
-        raise FileNotFoundError(
-            "MFA runtime python was not found under: "
-            f"{os.path.join(env_dir, 'python.exe')} or {os.path.join(env_dir, 'Scripts', 'python.exe')}"
-        )
-    if not mfa_entry:
-        raise FileNotFoundError(
-            f"MFA entrypoint was not found under: {os.path.join(env_dir, 'Scripts')}"
-        )
-    _check_mfa_python_health(env_dir, python_exe)
-
-    model_status, model_roots = _collect_mfa_acoustic_models(runtime_root_abs, env_dir=env_dir)
-    if require_models:
-        missing = [name for name, path in model_status.items() if not path]
-        if missing:
-            roots_text = ", ".join(model_roots) if model_roots else "(no model root folder found)"
-            raise FileNotFoundError(
-                "Required MFA acoustic models are missing from runtime root.\n"
-                f"runtime_root={runtime_root_abs}\n"
-                f"missing={', '.join(missing)}\n"
-                f"searched_roots={roots_text}"
-            )
-    return runtime_root_abs, env_dir, mfa_entry, model_status, model_roots
-
-
-def _resolve_validated_mfa_runtime_bundle_source(
-    runtime_root: str,
-    *,
-    require_models: bool = False,
-) -> tuple[str, str, str, dict, list[str]]:
-    explicit = str(runtime_root or "").strip()
-    candidates = _build_mfa_runtime_candidates(runtime_root)
-    if explicit:
-        # For explicit paths, preserve deterministic behavior and fail fast on that source.
-        return _validate_mfa_runtime_bundle_source(
-            candidates[0] if candidates else runtime_root,
-            require_models=require_models,
-        )
-
-    issues: list[str] = []
-    for candidate in candidates:
-        if not os.path.isdir(candidate):
-            issues.append(f"{candidate} -> path not found")
-            continue
+def _safe_rmtree(path, retries=3):
+    if not os.path.exists(path):
+        return
+    last_err = None
+    for attempt in range(1, retries + 1):
         try:
-            return _validate_mfa_runtime_bundle_source(candidate, require_models=require_models)
-        except Exception as exc:
-            first_line = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
-            issues.append(f"{candidate} -> {first_line}")
+            shutil.rmtree(path, onerror=_on_rmtree_error)
+            return
+        except PermissionError as e:
+            last_err = e
+            _clear_readonly_recursive(path)
+            if attempt < retries:
+                time.sleep(0.4 * attempt)
+        except OSError as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(0.4 * attempt)
+    raise RuntimeError(f"Failed to remove directory after retries: {path}\nCause: {last_err}")
 
-    detail_text = "\n".join(f"  - {line}" for line in issues) if issues else "  - no candidates were generated"
-    raise FileNotFoundError(
-        "Unable to find a valid MFA runtime source for bundling.\n"
-        "Checked candidates:\n"
-        f"{detail_text}\n"
-        "Run setup_mfa.bat once on this build machine or pass --mfa-runtime-root explicitly."
-    )
 
-
-def _copy_mfa_runtime_bundle(
-    release_dir: str,
-    runtime_root: str,
-    *,
-    require_models: bool = False,
-) -> Optional[str]:
-    runtime_root_abs, env_dir, _mfa_entry, model_status, model_roots = _resolve_validated_mfa_runtime_bundle_source(
-        runtime_root,
-        require_models=require_models,
-    )
-    bundle_dst = os.path.join(release_dir, "mfa_runtime_bundle")
-    if os.path.exists(bundle_dst):
-        shutil.rmtree(bundle_dst)
-    os.makedirs(bundle_dst, exist_ok=True)
-
-    ignore = shutil.ignore_patterns("logs", "__pycache__", "*.log", "*.tmp", "*.temp", "*.pid")
-
-    # Always stage env into bundle/.env so setup_mfa.bat can restore with a fixed structure.
-    shutil.copytree(env_dir, os.path.join(bundle_dst, ".env"), dirs_exist_ok=True, ignore=ignore)
-
-    # Optional runtime manager payload.
-    micromamba_src = os.path.join(runtime_root_abs, "micromamba")
-    if os.path.isdir(micromamba_src):
-        shutil.copytree(micromamba_src, os.path.join(bundle_dst, "micromamba"), dirs_exist_ok=True, ignore=ignore)
-
-    # Copy discovered MFA model roots into bundle root (.mfa_root_ascii / .mfa_root / .mfa).
-    copied_model_root_names = set()
-    for root in model_roots:
-        base_name = os.path.basename(os.path.abspath(root))
-        if not base_name:
-            continue
-        dst = os.path.join(bundle_dst, base_name)
-        shutil.copytree(root, dst, dirs_exist_ok=True, ignore=ignore)
-        copied_model_root_names.add(base_name)
-
-    copied_env_dir = os.path.join(bundle_dst, ".env")
-    copied_mfa_entry = _find_mfa_entrypoint(copied_env_dir)
-    copied_python = _find_mfa_python(copied_env_dir)
-    if (not copied_python) or (not copied_mfa_entry):
-        raise RuntimeError(
-            "Copied MFA runtime bundle is invalid (missing python.exe or MFA entrypoint)."
-        )
-
-    manifest = {
-        "source_runtime_root": runtime_root_abs,
-        "source_env_dir": env_dir,
-        "copied_at_utc": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-        "mfa_entrypoint": os.path.relpath(copied_mfa_entry, bundle_dst).replace("\\", "/"),
-        "acoustic_models": model_status,
-        "copied_model_roots": sorted(copied_model_root_names),
-        "require_models": bool(require_models),
+def _write_bundle_info(app_version: str, bundle_mode: str) -> None:
+    """Write build-time metadata to bundle_info.json for runtime detection."""
+    info = {
+        "bundle_mode": bundle_mode,
+        "app_version": app_version,
+        "ffmpeg_bundled": False,
+        "micromamba_bundled": bundle_mode == "offline",
     }
-    with open(os.path.join(bundle_dst, "bundle_manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
-    return bundle_dst
+    path = os.path.join(APP_DIR, "bundle_info.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(info, f, ensure_ascii=False, indent=2)
+    print(f"[INFO] bundle_info.json written: {info}")
 
 
 def _iter_runtime_data_entries():
     entries = []
-    for src, dst in RUNTIME_DATA_BASE_PATHS:
+    for src, dst in RUNTIME_DATA_PATHS:
         if os.path.exists(src):
             entries.append((src, dst))
         else:
             print(f"[WARN] Runtime data missing (skip): {src}")
-
-    def _latest_model_meta_mtime(model_root: str) -> float:
-        newest = 0.0
-        try:
-            for root, _dirs, files in os.walk(model_root):
-                if "model_meta.json" not in files:
-                    continue
-                meta_path = os.path.join(root, "model_meta.json")
-                try:
-                    newest = max(newest, os.path.getmtime(meta_path))
-                except OSError:
-                    continue
-        except Exception:
-            newest = 0.0
-        if newest > 0.0:
-            return newest
-        try:
-            return float(os.path.getmtime(model_root))
-        except OSError:
-            return 0.0
-
-    if bool(getattr(args, "skip_ml_model_bundle", False)):
-        print("[INFO] Runtime ML model bundle step skipped (--skip-ml-model-bundle).")
-        return entries
-
-    model_override = str(os.environ.get("UTOA_BUILD_MODEL_DIR", "") or "").strip()
-    model_candidates = []
-    if model_override:
-        if os.path.isabs(model_override):
-            model_candidates.append(model_override)
-        else:
-            model_candidates.append(os.path.join(APP_DIR, model_override))
-    channel_norm = _normalize_channel(getattr(args, "channel", DEFAULT_CHANNEL))
-    model_candidates.extend(
-        [
-            os.path.join(APP_DIR, "ML_models_latest"),
-            os.path.join(APP_DIR, f"ML_models_{channel_norm}"),
-            os.path.join(APP_DIR, "ML_models"),
-        ]
-    )
-
-    selected_model_source = ""
-    existing_candidates = [(idx, path) for idx, path in enumerate(model_candidates) if os.path.isdir(path)]
-    if existing_candidates:
-        if model_override:
-            selected_model_source = existing_candidates[0][1]
-        else:
-            ranked = [
-                (_latest_model_meta_mtime(path), -idx, path)
-                for idx, path in existing_candidates
-            ]
-            ranked.sort(reverse=True)
-            selected_model_source = ranked[0][2]
-
-    if selected_model_source:
-        entries.append((selected_model_source, "ML_models"))
-        print(f"[INFO] Runtime ML models source: {selected_model_source} -> ML_models")
-    else:
-        print("[WARN] Runtime ML model directory not found (ML_models*).")
-
-    legacy_asset_models = os.path.join(APP_DIR, "assets", "models", "oto_ml")
-    if os.path.isdir(legacy_asset_models):
-        entries.append((legacy_asset_models, "assets/models/oto_ml"))
-    else:
-        print(f"[WARN] Runtime data missing (skip): {legacy_asset_models}")
     return entries
 
 
@@ -752,18 +643,23 @@ def _build_pyinstaller_args(app_name, ffmpeg_bin, app_icon_path="", onefile=Fals
         "--clean",
         "--onefile" if onefile else "--onedir",
         f"--add-data={ctk_path};customtkinter/",
-        f"--add-data={ffmpeg_bin};ffmpeg/bin",
+    ]
+    if ffmpeg_bin:
+        pyinstaller_args.append(f"--add-data={ffmpeg_bin};ffmpeg/bin")
+    pyinstaller_args += [
         "--hidden-import=textgrid",
         "--hidden-import=customtkinter",
+        "--hidden-import=onnxruntime",
     ]
+    for src, name in _iter_msvc_runtime_files():
+        pyinstaller_args.append(f"--add-binary={src};.")
     for src, dst in _iter_runtime_data_entries():
         pyinstaller_args.append(f"--add-data={src};{dst}")
     if app_icon_path:
         pyinstaller_args.append(f"--icon={app_icon_path}")
-    for module_name in EXCLUDED_MODULES + EXCLUDED_TRAINING_MODULES:
+    for module_name in _excluded_build_modules():
         pyinstaller_args.append(f"--exclude-module={module_name}")
     return pyinstaller_args
-
 
 def _run_pyinstaller_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False):
     print("Loading PyInstaller...")
@@ -788,23 +684,17 @@ def _run_pyinstaller_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False
         raise FileNotFoundError(f"Built app directory not found: {dist_dir}")
     return dist_dir
 
-
-def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False):
+def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, dev=False):
     import customtkinter
 
     ctk_path = os.path.dirname(customtkinter.__file__)
     output_root = os.path.join(APP_DIR, "dist_nuitka")
-    if os.path.exists(output_root):
+    # In dev mode keep existing output dir for incremental compilation.
+    if not dev and os.path.exists(output_root):
         shutil.rmtree(output_root)
     os.makedirs(output_root, exist_ok=True)
 
-    env_jobs = str(os.environ.get("UTOA_NUITKA_JOBS", "") or "").strip()
     cpu_jobs = os.cpu_count() or 1
-    if env_jobs:
-        try:
-            cpu_jobs = int(env_jobs)
-        except ValueError:
-            print(f"[WARN] Invalid UTOA_NUITKA_JOBS={env_jobs!r}; fallback to auto.")
     cpu_jobs = max(1, int(cpu_jobs))
     cmd = [
         sys.executable,
@@ -819,33 +709,35 @@ def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False):
         f"--output-filename={app_name}.exe",
         "--include-module=textgrid",
         "--include-package=customtkinter",
-        "--remove-output",
+        "--include-package=onnxruntime",
         f"--jobs={cpu_jobs}",
-        f"--nofollow-import-to={','.join(EXCLUDED_MODULES + EXCLUDED_TRAINING_MODULES)}",
+        f"--nofollow-import-to={','.join(_excluded_build_modules())}",
     ]
-
-    _validate_ffmpeg_bin(ffmpeg_bin)
+    if dev:
+        # Dev mode: ccache for incremental recompilation, no LTO, no source cleanup.
+        cmd += ["--enable-ccache", "--lto=no"]
+        print("[INFO] --dev mode: ccache enabled, LTO disabled, incremental build active.")
+    else:
+        # Release mode: clean C source tree after build to save disk space.
+        cmd.append("--remove-output")
+    if ffmpeg_bin:
+        _validate_ffmpeg_bin(ffmpeg_bin)
     include_entries = [(ctk_path, "customtkinter")]
     include_entries.extend(_iter_runtime_data_entries())
     for src, dst in include_entries:
         if os.path.isdir(src):
             cmd.append(f"--include-data-dir={src}={dst}")
-        else:
-            dst_norm = str(dst or "").replace("\\", "/").strip()
-            if dst_norm in {"", "."}:
-                target_path = os.path.basename(src)
-            else:
-                target_path = f"{dst_norm.rstrip('/')}/{os.path.basename(src)}"
+        elif os.path.isfile(src):
+            file_name = os.path.basename(src)
+            target_path = f"{dst}/{file_name}" if str(dst).strip() not in {"", "."} else file_name
             cmd.append(f"--include-data-files={src}={target_path}")
-    ffmpeg_runtime_files = _iter_ffmpeg_runtime_files(ffmpeg_bin)
-    for src, name in ffmpeg_runtime_files:
-        cmd.append(f"--include-data-files={src}=ffmpeg/bin/{name}")
-
-    msvc_runtime_dlls = _resolve_msvc_runtime_dlls()
-    for dll_path in msvc_runtime_dlls:
-        dll_name = os.path.basename(dll_path)
-        cmd.append(f"--include-data-files={dll_path}={dll_name}")
-
+        else:
+            print(f"[WARN] Runtime include source missing (skip): {src}")
+    if ffmpeg_bin:
+        ffmpeg_runtime_files = _iter_ffmpeg_runtime_files(ffmpeg_bin)
+        for src, name in ffmpeg_runtime_files:
+            cmd.append(f"--include-data-files={src}=ffmpeg/bin/{name}")
+    runtime_dlls = _iter_msvc_runtime_files()
     if app_icon_path:
         cmd.append(f"--windows-icon-from-ico={app_icon_path}")
 
@@ -868,7 +760,9 @@ def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False):
 
     expected_dist = os.path.join(output_root, f"{app_name}.dist")
     if os.path.isdir(expected_dist):
-        _validate_packaged_ffmpeg(expected_dist)
+        _inject_msvc_runtime_files(expected_dist, runtime_dlls)
+        if ffmpeg_bin:
+            _validate_packaged_ffmpeg(expected_dist)
         return expected_dist
 
     dist_candidates = [
@@ -877,11 +771,12 @@ def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False):
         if n.lower().endswith(".dist") and os.path.isdir(os.path.join(output_root, n))
     ]
     if len(dist_candidates) == 1:
-        _validate_packaged_ffmpeg(dist_candidates[0])
+        _inject_msvc_runtime_files(dist_candidates[0], runtime_dlls)
+        if ffmpeg_bin:
+            _validate_packaged_ffmpeg(dist_candidates[0])
         return dist_candidates[0]
 
     raise FileNotFoundError(f"Nuitka standalone directory not found in: {output_root}")
-
 
 def _validate_packaged_ffmpeg(dist_dir):
     ffmpeg_bin = os.path.join(dist_dir, "ffmpeg", "bin")
@@ -895,130 +790,294 @@ def _validate_packaged_ffmpeg(dist_dir):
         raise RuntimeError(f"Nuitka output is missing required FFmpeg files:\n{lines}")
 
 
-def _collect_korean_wheels(wheel_dir: str) -> list[str]:
-    if not os.path.isdir(wheel_dir):
+def _resolve_release_executable_path(release_dir, app_name, onefile=False):
+    if onefile:
+        preferred = os.path.join(release_dir, f"{app_name}.exe")
+        if os.path.isfile(preferred):
+            return preferred
+        exe_candidates = [
+            os.path.join(release_dir, name)
+            for name in os.listdir(release_dir)
+            if str(name).lower().endswith(".exe")
+            and os.path.isfile(os.path.join(release_dir, name))
+        ]
+        if len(exe_candidates) == 1:
+            return exe_candidates[0]
+        return ""
+
+    app_dir = os.path.join(release_dir, app_name)
+    preferred = os.path.join(app_dir, f"{app_name}.exe")
+    if os.path.isfile(preferred):
+        return preferred
+    if os.path.isdir(app_dir):
+        exe_candidates = [
+            os.path.join(app_dir, name)
+            for name in os.listdir(app_dir)
+            if str(name).lower().endswith(".exe")
+            and os.path.isfile(os.path.join(app_dir, name))
+        ]
+        if len(exe_candidates) == 1:
+            return exe_candidates[0]
+    return ""
+
+
+def _create_windows_shortcut(shortcut_path, target_path, working_dir="", description=""):
+    if os.name != "nt":
+        return False
+    if not os.path.isfile(target_path):
+        raise FileNotFoundError(f"Shortcut target not found: {target_path}")
+
+    def _ps_quote(value):
+        return "'" + str(value).replace("'", "''") + "'"
+
+    target_abs = os.path.abspath(target_path)
+    shortcut_abs = os.path.abspath(shortcut_path)
+    working_abs = os.path.abspath(working_dir or os.path.dirname(target_abs))
+    os.makedirs(os.path.dirname(shortcut_abs), exist_ok=True)
+    if os.path.exists(shortcut_abs):
+        os.remove(shortcut_abs)
+
+    ps_script = "\n".join(
+        [
+            "$wsh = New-Object -ComObject WScript.Shell",
+            f"$shortcut = $wsh.CreateShortcut({_ps_quote(shortcut_abs)})",
+            f"$shortcut.TargetPath = {_ps_quote(target_abs)}",
+            f"$shortcut.WorkingDirectory = {_ps_quote(working_abs)}",
+            f"$shortcut.IconLocation = {_ps_quote(f'{target_abs},0')}",
+            f"$shortcut.Description = {_ps_quote(description or 'Launch app')}",
+            "$shortcut.Save()",
+        ]
+    )
+    subprocess.check_call(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            ps_script,
+        ]
+    )
+    if not os.path.isfile(shortcut_abs):
+        raise RuntimeError(f"Failed to create shortcut: {shortcut_abs}")
+    return True
+
+
+def _write_portable_launcher_cmd(release_dir, app_name, target_path):
+    """
+    Create a path-relocatable launcher script in the release root.
+    This is robust across different machines/path roots unlike build-time .lnk files.
+    """
+    target_abs = os.path.abspath(target_path)
+    release_abs = os.path.abspath(release_dir)
+    try:
+        rel_target = os.path.relpath(target_abs, release_abs)
+    except Exception:
+        rel_target = os.path.basename(target_abs)
+    rel_target = str(rel_target).replace("/", "\\")
+
+    launcher_name = f"Launch_{app_name}.cmd"
+    launcher_path = os.path.join(release_abs, launcher_name)
+    lines = [
+        "@echo off",
+        "setlocal EnableExtensions DisableDelayedExpansion",
+        "set \"ROOT=%~dp0\"",
+        f"set \"TARGET=%ROOT%{rel_target}\"",
+        "if not exist \"%TARGET%\" (",
+        "  echo [FAILED] App executable not found:",
+        "  echo          %TARGET%",
+        "  pause",
+        "  exit /b 1",
+        ")",
+        "start \"\" \"%TARGET%\" %*",
+        "exit /b %ERRORLEVEL%",
+        "",
+    ]
+    with open(launcher_path, "w", encoding="utf-8", newline="\r\n") as f:
+        f.write("\r\n".join(lines))
+    return launcher_path
+
+
+def _prune_internal_test_scripts_from_release(release_dir, app_name):
+    if not os.path.isdir(release_dir):
         return []
-    wheels = [
-        os.path.join(wheel_dir, name)
-        for name in sorted(os.listdir(wheel_dir))
-        if name.lower().endswith(".whl") and os.path.isfile(os.path.join(wheel_dir, name))
-    ]
-    return wheels
+    roots = [release_dir]
+    app_root = os.path.join(release_dir, app_name)
+    if os.path.isdir(app_root):
+        roots.append(app_root)
+
+    blocked = {str(name).strip().lower() for name in RELEASE_INTERNAL_TEST_SCRIPT_BASENAMES if str(name).strip()}
+    allowed_scripts = {str(name).strip().lower() for name in RELEASE_SCRIPT_FOLDER_ALLOWLIST if str(name).strip()}
+    removed = []
+    for root in roots:
+        for dirpath, _, filenames in os.walk(root):
+            for filename in filenames:
+                low_name = str(filename).strip().lower()
+                full_path = os.path.join(dirpath, filename)
+                rel_path = os.path.relpath(full_path, root).replace("\\", "/")
+                rel_dir = rel_path.rsplit("/", 1)[0].strip().lower() if "/" in rel_path else ""
+                ext = os.path.splitext(low_name)[1].strip().lower()
+
+                should_remove = False
+                # Explicit root-level deny list (defensive cleanup for stale release folders).
+                if ("/" not in rel_path) and (low_name in blocked):
+                    should_remove = True
+                # scripts/ 폴더 내부 스크립트는 allowlist만 유지.
+                elif rel_dir == "scripts" and ext in RELEASE_SCRIPT_EXTENSIONS and low_name not in allowed_scripts:
+                    should_remove = True
+
+                if not should_remove:
+                    continue
+                try:
+                    os.remove(full_path)
+                    removed.append((root, rel_path))
+                except OSError:
+                    pass
+        scripts_dir = os.path.join(root, "scripts")
+        if os.path.isdir(scripts_dir):
+            try:
+                if not os.listdir(scripts_dir):
+                    os.rmdir(scripts_dir)
+            except OSError:
+                pass
+    return removed
 
 
-def _has_required_korean_wheels(wheel_dir: str) -> bool:
-    wheels = _collect_korean_wheels(wheel_dir)
-    if not wheels:
-        return False
-    names = [os.path.basename(path).lower() for path in wheels]
-    if not all(any(hint in name for name in names) for hint in KOREAN_WHEEL_NAME_HINTS):
-        return False
-    mecab_wheels = [name for name in names if name.startswith("python_mecab_ko-")]
-    if not mecab_wheels:
-        return False
-    return any(f"cp{KOREAN_WHEEL_TARGET_PYTHON}" in name for name in mecab_wheels)
+def _release_relpath(root_dir: str, path: str) -> str:
+    return os.path.relpath(path, root_dir).replace("\\", "/").strip("/")
 
 
-def _prepare_korean_wheel_bundle() -> str:
-    preferred_dir = os.path.join(APP_DIR, KOREAN_WHEEL_BUNDLE_DIRNAME)
-    if _has_required_korean_wheels(preferred_dir):
-        return preferred_dir
+def _release_path_parts(rel_path: str) -> list[str]:
+    return [part.strip().lower() for part in str(rel_path or "").replace("\\", "/").split("/") if part.strip()]
 
-    wheel_dir = os.path.join(BUILD_ASSET_DIR, KOREAN_WHEEL_BUNDLE_DIRNAME)
-    if _has_required_korean_wheels(wheel_dir):
-        return wheel_dir
 
-    os.makedirs(wheel_dir, exist_ok=True)
-    for stale in glob.glob(os.path.join(wheel_dir, "*.whl")):
-        try:
-            os.remove(stale)
-        except OSError:
-            pass
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "pip",
-        "download",
-        "--platform",
-        "win_amd64",
-        "--implementation",
-        "cp",
-        "--python-version",
-        KOREAN_WHEEL_TARGET_PYTHON,
-        "--only-binary=:all:",
-        "--dest",
-        wheel_dir,
-        *KOREAN_WHEEL_PACKAGES,
-    ]
-    print("Preparing Korean tokenizer offline wheel bundle...")
-    print(" ".join(cmd))
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+def _is_model_payload_path(parts: list[str]) -> bool:
+    joined = "/".join(parts)
+    return (
+        "assets/models/oto_ml" in joined
+        or "models_installed/oto_ml" in joined
+        or "ml_models" in parts
     )
-    if result.returncode != 0:
-        tail = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
-        tail_lines = "\n".join(line for line in tail.splitlines()[-8:] if line.strip())
-        print("[WARN] Failed to download Korean wheel bundle; installer will use online fallback.")
-        if tail_lines:
-            print(tail_lines)
-        return ""
-    if not _has_required_korean_wheels(wheel_dir):
-        print(
-            "[WARN] Korean wheel bundle download completed but required wheels are missing. "
-            "Installer will use online fallback."
+
+
+def _has_forbidden_release_prefix(parts: list[str]) -> bool:
+    joined = "/".join(parts)
+    for prefix in RELEASE_FORBIDDEN_PATH_PREFIXES:
+        normalized = str(prefix or "").strip().lower().strip("/")
+        if not normalized:
+            continue
+        if joined == normalized or joined.endswith("/" + normalized) or ("/" + normalized + "/") in ("/" + joined + "/"):
+            return True
+    return False
+
+
+def _is_forbidden_script_payload(parts: list[str], filename: str) -> bool:
+    if not parts or len(parts) < 2:
+        return False
+    if parts[-2] != "scripts":
+        return False
+    ext = os.path.splitext(filename)[1].strip().lower()
+    if ext not in RELEASE_SCRIPT_EXTENSIONS:
+        return False
+    allowed = {str(name).strip().lower() for name in RELEASE_SCRIPT_FOLDER_ALLOWLIST if str(name).strip()}
+    return filename not in allowed
+
+
+def _is_allowed_release_model_file(parts: list[str]) -> bool:
+    joined = "/".join(parts).strip().lower()
+    return joined in RELEASE_ALLOWED_MODEL_FILE_PATHS
+
+
+def _is_forbidden_release_file(rel_path: str) -> bool:
+    parts = _release_path_parts(rel_path)
+    if not parts:
+        return False
+    filename = parts[-1]
+    stem, ext = os.path.splitext(filename)
+    if _has_forbidden_release_prefix(parts):
+        return True
+    if _is_forbidden_script_payload(parts, filename):
+        return True
+    if any(part in RELEASE_FORBIDDEN_DIR_NAMES for part in parts[:-1]):
+        return True
+    if filename in RELEASE_FORBIDDEN_FILE_NAMES:
+        return True
+    if _is_allowed_release_model_file(parts):
+        return False
+    if ext in RELEASE_FORBIDDEN_FILE_EXTENSIONS:
+        return True
+    if _is_model_payload_path(parts):
+        if filename in RELEASE_MODEL_PRUNE_FILE_NAMES:
+            return True
+        if ext in RELEASE_MODEL_PRUNE_FILE_EXTENSIONS:
+            return True
+        if stem.lower().endswith("_dataset"):
+            return True
+    return False
+
+
+def _prune_forbidden_release_payload(release_dir: str) -> list[str]:
+    if not os.path.isdir(release_dir):
+        return []
+    removed: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(release_dir, topdown=True):
+        kept_dirs = []
+        for dirname in dirnames:
+            full_dir = os.path.join(dirpath, dirname)
+            rel_dir = _release_relpath(release_dir, full_dir)
+            parts = _release_path_parts(rel_dir)
+            if parts and (parts[-1] in RELEASE_FORBIDDEN_DIR_NAMES or _has_forbidden_release_prefix(parts)):
+                try:
+                    _safe_rmtree(full_dir)
+                    removed.append(rel_dir + "/")
+                except Exception:
+                    kept_dirs.append(dirname)
+                continue
+            kept_dirs.append(dirname)
+        dirnames[:] = kept_dirs
+
+        for filename in filenames:
+            full_path = os.path.join(dirpath, filename)
+            rel_path = _release_relpath(release_dir, full_path)
+            if not _is_forbidden_release_file(rel_path):
+                continue
+            try:
+                os.remove(full_path)
+                removed.append(rel_path)
+            except OSError:
+                pass
+    return removed
+
+
+def _validate_release_payload_no_training_data(release_dir: str) -> None:
+    if not os.path.isdir(release_dir):
+        return
+    offenders = []
+    for dirpath, dirnames, filenames in os.walk(release_dir):
+        rel_dir = _release_relpath(release_dir, dirpath)
+        parts = _release_path_parts(rel_dir)
+        if parts and (any(part in RELEASE_FORBIDDEN_DIR_NAMES for part in parts) or _has_forbidden_release_prefix(parts)):
+            offenders.append(rel_dir + "/")
+            dirnames[:] = []
+            continue
+        for filename in filenames:
+            rel_path = _release_relpath(release_dir, os.path.join(dirpath, filename))
+            if _is_forbidden_release_file(rel_path):
+                offenders.append(rel_path)
+        if len(offenders) >= 20:
+            break
+    if offenders:
+        lines = "\n".join(f"  - {path}" for path in offenders[:20])
+        raise RuntimeError(
+            "Release payload contains training/data/dev artifacts and was not packaged.\n"
+            f"{lines}"
         )
-        return ""
-    return wheel_dir
 
 
-def _copy_korean_wheel_bundle(release_dir: str) -> Optional[str]:
-    source_dir = _prepare_korean_wheel_bundle()
-    if not source_dir:
-        return None
-    wheels = _collect_korean_wheels(source_dir)
-    if not wheels:
-        return None
-
-    dst_dir = os.path.join(release_dir, KOREAN_WHEEL_BUNDLE_DIRNAME)
-    if os.path.exists(dst_dir):
-        shutil.rmtree(dst_dir)
-    os.makedirs(dst_dir, exist_ok=True)
-
-    total_size = 0
-    for wheel_path in wheels:
-        dst_path = os.path.join(dst_dir, os.path.basename(wheel_path))
-        shutil.copy2(wheel_path, dst_path)
-        try:
-            total_size += os.path.getsize(dst_path)
-        except OSError:
-            pass
-    print(
-        "   -> copied Korean offline wheels: "
-        f"{len(wheels)} files ({total_size / (1024 * 1024):.1f} MiB)"
-    )
-    return dst_dir
-
-
-def _copy_release_outputs(
-    app_name,
-    channel,
-    app_version,
-    built_artifact_path,
-    onefile=False,
-    bundle_mfa_runtime=False,
-    mfa_runtime_root="",
-    require_mfa_models=False,
-):
+def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, onefile=False):
     release_dir = _get_release_dir(channel)
     if os.path.exists(release_dir):
-        shutil.rmtree(release_dir)
+        _safe_rmtree(release_dir)
     os.makedirs(release_dir, exist_ok=True)
 
     _write_release_channel_metadata(
@@ -1050,21 +1109,131 @@ def _copy_release_outputs(
         if os.path.exists(extra_path):
             shutil.copy(extra_path, release_dir)
             print(f"   -> copied: {os.path.basename(extra_path)}")
-    _copy_korean_wheel_bundle(release_dir)
-    if bundle_mfa_runtime:
-        resolved_runtime_root = _resolve_mfa_runtime_root(mfa_runtime_root)
-        print(f"   -> bundling MFA runtime from: {resolved_runtime_root}")
-        bundle_dir = _copy_mfa_runtime_bundle(
-            release_dir,
-            resolved_runtime_root,
-            require_models=require_mfa_models,
+    micromamba_src = os.path.join(BUILD_ASSET_DIR, "micromamba", "micromamba.exe")
+    if os.path.exists(micromamba_src):
+        shutil.copy(micromamba_src, os.path.join(release_dir, "micromamba.exe"))
+        print("   -> copied: micromamba.exe")
+
+    removed_internal_scripts = _prune_internal_test_scripts_from_release(release_dir, app_name)
+    if removed_internal_scripts:
+        print("   -> pruned internal/test scripts from release payload:")
+        for root, rel_path in removed_internal_scripts:
+            print(f"      {os.path.relpath(root, release_dir) or '.'}/{rel_path}")
+
+    removed_forbidden = _prune_forbidden_release_payload(release_dir)
+    if removed_forbidden:
+        print("   -> pruned training/data/dev artifacts from release payload:")
+        for rel_path in removed_forbidden[:40]:
+            print(f"      {rel_path}")
+        if len(removed_forbidden) > 40:
+            print(f"      ... and {len(removed_forbidden) - 40} more")
+    _validate_release_payload_no_training_data(release_dir)
+
+    if os.name == "nt":
+        release_exe = _resolve_release_executable_path(release_dir, app_name, onefile=onefile)
+        if not release_exe:
+            raise RuntimeError(
+                f"Failed to locate release executable for shortcut creation: release_dir={release_dir}, app={app_name}"
+            )
+        launcher_path = _write_portable_launcher_cmd(
+            release_dir=release_dir,
+            app_name=app_name,
+            target_path=release_exe,
         )
-        if bundle_dir:
-            print(f"   -> bundled MFA runtime: {bundle_dir}")
+        print(f"   -> created portable launcher: {os.path.basename(launcher_path)}")
+
+        shortcut_path = os.path.join(release_dir, f"{app_name}.lnk")
+        create_lnk = str(os.environ.get("UTOA_CREATE_BUILD_SHORTCUT", "1")).strip().lower() in {"1", "true", "yes", "on"}
+        if create_lnk:
+            _create_windows_shortcut(
+                shortcut_path=shortcut_path,
+                target_path=release_exe,
+                working_dir=os.path.dirname(release_exe),
+                description=f"Launch {app_name}",
+            )
+            print(f"   -> created shortcut: {os.path.basename(shortcut_path)}")
+        else:
+            print("   -> skipped .lnk creation (UTOA_CREATE_BUILD_SHORTCUT disabled).")
+            print("      set UTOA_CREATE_BUILD_SHORTCUT=1 to enable build-time .lnk output.")
     return release_dir
 
 
-def _install_build_dependencies(backend):
+def _resolve_validated_mfa_runtime_bundle_source(runtime_root, require_models=False):
+    runtime_root_abs = os.path.abspath(runtime_root or APP_DIR)
+    env_dir = os.path.join(runtime_root_abs, ".env")
+    mfa_entry = ""
+    for candidate in (
+        os.path.join(env_dir, "Scripts", "mfa.bat"),
+        os.path.join(env_dir, "Scripts", "mfa.exe"),
+        os.path.join(env_dir, "Scripts", "mfa.cmd"),
+    ):
+        if os.path.isfile(candidate):
+            mfa_entry = candidate
+            break
+
+    candidate_model_roots = [
+        os.path.join(runtime_root_abs, ".mfa_root_ascii"),
+        os.path.join(runtime_root_abs, "mfa_root_ascii"),
+    ]
+    model_roots = [path for path in candidate_model_roots if os.path.isdir(path)]
+    if require_models and not model_roots:
+        raise FileNotFoundError(f"MFA model root not found under runtime root: {runtime_root_abs}")
+
+    model_status = {}
+    for root in model_roots:
+        acoustic_dir = os.path.join(root, "acoustic")
+        if not os.path.isdir(acoustic_dir):
+            continue
+        for file_name in os.listdir(acoustic_dir):
+            low = str(file_name).strip().lower()
+            if not low.endswith(".zip"):
+                continue
+            model_name = low[:-4]
+            model_status[model_name] = os.path.join(acoustic_dir, file_name)
+
+    return runtime_root_abs, env_dir, mfa_entry, model_status, model_roots
+
+
+def _copy_mfa_model_bundle(release_dir, runtime_root, require_models=False):
+    (
+        runtime_root_abs,
+        _env_dir,
+        mfa_entry,
+        model_status,
+        model_roots,
+    ) = _resolve_validated_mfa_runtime_bundle_source(runtime_root, require_models=require_models)
+
+    bundle_dir = os.path.join(os.path.abspath(release_dir), "mfa_runtime_bundle")
+    if os.path.isdir(bundle_dir):
+        _safe_rmtree(bundle_dir)
+    os.makedirs(bundle_dir, exist_ok=True)
+
+    copied_roots = []
+    for src_root in model_roots:
+        root_name = os.path.basename(os.path.normpath(src_root))
+        if not root_name:
+            continue
+        dst_root = os.path.join(bundle_dir, root_name)
+        if os.path.exists(dst_root):
+            _safe_rmtree(dst_root)
+        shutil.copytree(src_root, dst_root)
+        copied_roots.append(root_name)
+
+    manifest = {
+        "bundle_kind": "models_only",
+        "runtime_root": runtime_root_abs,
+        "mfa_entry": mfa_entry,
+        "require_models": bool(require_models),
+        "copied_model_roots": copied_roots,
+        "model_status": dict(model_status or {}),
+    }
+    manifest_path = os.path.join(bundle_dir, "bundle_manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    return bundle_dir
+
+
+def _install_build_dependencies(backend, target_channels=None):
     subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
 
     req_candidates = [
@@ -1080,6 +1249,22 @@ def _install_build_dependencies(backend):
     elif backend == "pyinstaller":
         subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
 
+    preview_req = os.path.join(APP_DIR, PREVIEW_REQUIREMENTS_FILE)
+    if not (_has_preview_channel(target_channels) and os.path.isfile(preview_req)):
+        return
+
+    print("[INFO] Preview channel selected; installing preview-only dependencies...")
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--no-build-isolation",
+            "-r",
+            preview_req,
+        ]
+    )
 
 def main():
     _configure_console_encoding()
@@ -1091,44 +1276,47 @@ def main():
     target_channels = _parse_channels(args.channel, args.channels)
     args.channel = target_channels[0]
 
+    _assert_build_python_version()
+
     if args.onefile and not args.allow_unsafe_onefile:
         raise SystemExit(
             "onefile builds are disabled by default. Use --allow-unsafe-onefile to proceed."
         )
     if args.allow_unsafe_onefile and not args.onefile:
         print("[INFO] --allow-unsafe-onefile is ignored when --onefile is not used.")
-    if args.require_mfa_models and not args.bundle_mfa_runtime:
-        print("[WARN] --require-mfa-models is ignored unless --bundle-mfa-runtime is set.")
 
     os.chdir(APP_DIR)
     app_version = _detect_app_version()
     mode_text = "onefile" if args.onefile else "onedir"
 
+    bundle_mode = str(getattr(args, "bundle_mode", "offline") or "offline").strip().lower()
     channel_text = ",".join(target_channels)
-    print(f"[INFO] channels={channel_text}, backend={args.backend}, version={app_version}")
-    if args.bundle_mfa_runtime:
-        resolved_runtime_root = _resolve_mfa_runtime_root(args.mfa_runtime_root)
-        print(f"[INFO] bundle_mfa_runtime=1, runtime_root={resolved_runtime_root}")
-        print(f"[INFO] require_mfa_models={1 if args.require_mfa_models else 0}")
-    else:
-        print("[INFO] bundle_mfa_runtime=0")
+    print(f"[INFO] channels={channel_text}, backend={args.backend}, version={app_version}, bundle_mode={bundle_mode}")
     if args.skip_deps:
         print("[1/5] Skipping dependency install (--skip-deps).")
     else:
         print("[1/5] Installing build dependencies...")
-        _install_build_dependencies(args.backend)
+        _install_build_dependencies(args.backend, target_channels=target_channels)
 
-    print("[2/5] Preparing FFmpeg runtime...")
-    ffmpeg_bin = _ensure_ffmpeg_bin()
+    print("[2/5] Preparing runtime assets...")
+    if bundle_mode == "online":
+        print("[INFO] bundle-mode=online: skipping bundled runtime assets (downloaded at runtime).")
+    else:
+        _ensure_micromamba_exe()
+    ffmpeg_bin = ""
     app_icon_path = _resolve_app_icon_path()
     if app_icon_path:
         print(f"[INFO] app_icon={app_icon_path}")
     else:
         print("[WARN] app icon not found; executable will use default icon.")
 
+    # Write bundle_info.json so the app can detect its bundle mode at runtime.
+    _write_bundle_info(app_version, bundle_mode)
+
+    dev_build = bool(getattr(args, "dev", False))
     print(f"[3/5] Building app with {args.backend}...")
     if args.backend == "nuitka":
-        built_artifact = _run_nuitka_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile)
+        built_artifact = _run_nuitka_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile, dev=dev_build)
     else:
         built_artifact = _run_pyinstaller_build(args.name, ffmpeg_bin, app_icon_path=app_icon_path, onefile=args.onefile)
 
@@ -1143,9 +1331,6 @@ def main():
             app_version=app_version,
             built_artifact_path=built_artifact,
             onefile=args.onefile,
-            bundle_mfa_runtime=args.bundle_mfa_runtime,
-            mfa_runtime_root=args.mfa_runtime_root,
-            require_mfa_models=args.require_mfa_models,
         )
         release_dirs.append(release_dir)
 

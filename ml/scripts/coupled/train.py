@@ -9,35 +9,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.a
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from core.format_type_utils import normalize_format_type
 from core.oto_ml_coupled import train_coupled_bundle, train_coupled_bundle_rawmel
-from core.oto_ml.features.mel_patches import MEL_PATCH_CACHE_VERSION, default_patch_cache_root
+from core.oto_ml.features.mel_patches import resolve_rawmel_cache_dir
 from core.runtime_encoding import bootstrap_utf8_runtime
-
-
-def _auto_rawmel_cache_dir(language: str, format_type: str) -> str:
-    lang = str(language or "").strip().lower()
-    fmt = normalize_format_type(lang, format_type) or str(format_type or "").strip().lower()
-    root = default_patch_cache_root()
-    base = os.path.join(root, lang, fmt, str(MEL_PATCH_CACHE_VERSION))
-    if not os.path.isdir(base):
-        return ""
-    candidates = []
-    for name in os.listdir(base):
-        path = os.path.join(base, name)
-        if not os.path.isdir(path):
-            continue
-        manifest = os.path.join(path, "manifest.json")
-        if os.path.isfile(manifest):
-            try:
-                mtime = os.path.getmtime(manifest)
-            except Exception:
-                mtime = 0.0
-            candidates.append((mtime, path))
-    if not candidates:
-        return ""
-    candidates.sort(reverse=True, key=lambda v: v[0])
-    return candidates[0][1]
 
 
 def main():
@@ -76,15 +50,22 @@ def main():
         os.environ[f"{env_prefix}HARD_MINING_STRENGTH"] = str(float(args.hard_mining_strength))
     if int(args.pair_warmup_epochs) >= 0:
         os.environ[f"{env_prefix}PAIR_WARMUP_EPOCHS"] = str(int(args.pair_warmup_epochs))
-    rawmel_cache = str(args.rawmel_cache or "").strip()
+    rawmel_cache_hint = str(args.rawmel_cache or "").strip()
     if backend == "coupled_nn_v2_rawmel":
-        if rawmel_cache and not os.path.isdir(rawmel_cache):
-            print(f"[TRAIN] rawmel_cache not found: {rawmel_cache}")
-            rawmel_cache = ""
-        if not rawmel_cache:
-            rawmel_cache = _auto_rawmel_cache_dir(args.lang, args.format)
-            if rawmel_cache:
-                print(f"[TRAIN] rawmel_cache auto-selected: {rawmel_cache}")
+        if rawmel_cache_hint and not os.path.isdir(rawmel_cache_hint):
+            print(f"[TRAIN] rawmel_cache not found: {rawmel_cache_hint}")
+            rawmel_cache_hint = ""
+        rawmel_cache = resolve_rawmel_cache_dir(
+            language=args.lang,
+            format_type=args.format,
+            root_hint=rawmel_cache_hint,
+            extra_roots=[
+                os.path.join(ROOT, "ml_workspace", "rawmel_cache_noml_auto"),
+                os.path.join(ROOT, "ml_workspace", "rawmel_cache"),
+            ],
+        )
+        if rawmel_cache:
+            print(f"[TRAIN] rawmel_cache auto-selected: {rawmel_cache}")
         if not rawmel_cache:
             raise SystemExit("--rawmel-cache is required for coupled_nn_v2_rawmel (no auto cache found)")
         meta = train_coupled_bundle_rawmel(

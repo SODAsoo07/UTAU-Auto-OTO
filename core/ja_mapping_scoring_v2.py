@@ -1,32 +1,72 @@
 from __future__ import annotations
 
+import os
 import re
 
 from core.ja_lab_generator import split_ja_romaji_syllable
 from core.ja_oto_mapping import (
     _extract_ja_onset_token,
+    _is_kana_token as _ja_is_kana_token,
     _ja_soft_cv_match_level,
     _ja_special_mora_class,
     _ja_syllable_tail,
     _normalize_ja_syllable_token,
+    _normalize_ja_syllable_token_strict as _ja_normalize_syllable_token_strict,
     _syllable_info_token,
 )
 
 JA_VOWELS = {"a", "i", "u", "e", "o"}
-_JA_KANA_RE = re.compile(r"[ぁ-ゖァ-ヺー]")
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
+def _cv_order_prior_enabled() -> bool:
+    if not _env_bool("UTOA_CV_ORDER_PRIOR_ENABLE", True):
+        return False
+    return _env_bool("UTOA_JA_CV_ORDER_PRIOR_ENABLE", True)
+
+
+def _cv_order_prior_strength() -> float:
+    return max(
+        0.0,
+        min(
+            1.0,
+            _env_float(
+                "UTOA_JA_CV_ORDER_PRIOR_STRENGTH",
+                _env_float("UTOA_CV_ORDER_PRIOR_STRENGTH", 0.56),
+            ),
+        ),
+    )
+
+
+def _allow_ja_cvvc_forward_any_tier() -> bool:
+    # Safety-first default:
+    # For Japanese CVVC, accidental +1/+2 forward mapping is usually worse than
+    # conservative lock-to-expected behavior.
+    return _env_bool("UTOA_JA_CVVC_ALLOW_FORWARD_ANY_TIER", False)
 
 
 def _normalize_ja_syllable_token_strict(token):
-    raw = str(token or "").strip()
-    if not raw:
-        return ""
-    return raw.lower().replace("'", "").strip("-_ ")
-
-
+    return _ja_normalize_syllable_token_strict(token)
 def _is_kana_token(token):
-    return bool(_JA_KANA_RE.search(str(token or "")))
-
-
+    return bool(_ja_is_kana_token(token))
 def _syllable_info_raw_token(syl_info):
     if not isinstance(syl_info, dict):
         return ""
@@ -44,6 +84,7 @@ def should_allow_ja_soft_forward_shift(target_tok, expected_tok, mapped_tok):
     if not target_norm or not mapped_norm:
         return False
     target_strict = _normalize_ja_syllable_token_strict(target_tok)
+    expected_strict = _normalize_ja_syllable_token_strict(expected_tok)
     mapped_strict = _normalize_ja_syllable_token_strict(mapped_tok)
     target_special = _ja_special_mora_class(target_tok)
     expected_special = _ja_special_mora_class(expected_tok)
@@ -66,17 +107,25 @@ def should_allow_ja_soft_forward_shift(target_tok, expected_tok, mapped_tok):
             and not (_is_kana_token(target_tok) or _is_kana_token(mapped_tok))
         ):
             return False
+        if mapped_level < 3 and mapped_norm != target_norm:
+            return False
         if mapped_special not in {"youon", "inserted"} and mapped_level < 3:
             return False
         if expected_special in {"youon", "inserted"} and mapped_special not in {"youon", "inserted"}:
+            return False
+        if (
+            expected_strict
+            and mapped_strict
+            and expected_strict == target_strict
+            and mapped_strict != expected_strict
+            and not (_is_kana_token(expected_tok) or _is_kana_token(mapped_tok))
+        ):
             return False
     if mapped_level >= 3 and expected_level < 3:
         return True
     if mapped_level >= 2 and expected_level <= 1:
         return True
     return False
-
-
 def clamp_ja_cv_index_to_order(
     target_tok,
     expected_idx,
@@ -90,13 +139,15 @@ def clamp_ja_cv_index_to_order(
     if not syllables_info:
         return int(expected_idx)
     fmt = str(format_type or "").strip().lower()
-    if fmt not in {"cvvc", "cv", "vcv"}:
+    if fmt not in {"cvvc", "cv"}:
         return int(mapped_idx)
 
     e = max(0, min(int(expected_idx), len(syllables_info) - 1))
     m = max(0, min(int(mapped_idx), len(syllables_info) - 1))
     if m <= e:
         return e if m < e else m
+    order_prior_enabled = _cv_order_prior_enabled()
+    prior_strength = _cv_order_prior_strength()
 
     target_norm = _normalize_ja_syllable_token(target_tok)
     expected_raw = _syllable_info_raw_token(syllables_info[e])
@@ -107,29 +158,18 @@ def clamp_ja_cv_index_to_order(
     mapped_level = int(_ja_soft_cv_match_level(target_norm, mapped_norm) or 0) if target_norm else 0
 
     if fmt == "cv":
-        return min(m, e + 1)
-    if fmt == "vcv":
-        if m > (e + 1):
-            return e
-        if not target_norm:
-            return e
-        allow_forward = bool(
-            m == (e + 1)
-            and should_allow_ja_soft_forward_shift(
-                target_tok,
-                expected_raw or expected_norm,
-                mapped_raw or mapped_norm,
-            )
-        )
-        if not allow_forward:
-            return e
-        if mapped_norm == target_norm and expected_norm != target_norm:
-            return m
-        if mapped_level >= 2 and expected_level <= 1:
-            return m
-        if not filename_order_locked and str(mapping_tier or "").strip().lower() == "high" and mapped_level >= 3:
-            return m
+        # For CV, prioritize filename/order consistency and block +1 forward shift.
         return e
+
+    # In CVVC, forward move of CV/CV_HEAD is high-risk for mismatch.
+    # Set UTOA_JA_CVVC_STRICT_CV_FORWARD=0 to restore legacy permissive behavior.
+    strict_cvvc_forward = _env_bool("UTOA_JA_CVVC_STRICT_CV_FORWARD", True)
+    tier = str(mapping_tier or "").strip().lower()
+    if fmt == "cvvc" and strict_cvvc_forward:
+        if not _allow_ja_cvvc_forward_any_tier():
+            return e
+        if filename_order_locked or tier != "high":
+            return e
 
     if m > (e + 1):
         return e
@@ -144,6 +184,16 @@ def clamp_ja_cv_index_to_order(
             mapped_raw or mapped_norm,
         )
     )
+    if allow_forward and order_prior_enabled:
+        # Under stronger order-prior, allow +1 only with clear token and soft-match gain.
+        # This avoids accepting tiny score changes that often create forward drift.
+        if mapped_norm != target_norm and expected_norm == target_norm:
+            return e
+        min_gain = 1 if prior_strength < 0.45 else 2
+        if mapped_level < max(2, expected_level + min_gain):
+            return e
+        if prior_strength >= 0.72 and mapped_level < 3:
+            return e
     if allow_forward:
         if mapped_norm == target_norm and expected_norm != target_norm:
             return m

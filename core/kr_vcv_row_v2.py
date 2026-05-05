@@ -104,7 +104,7 @@ def run_kr_vcv_row(
         current_w_idx=current_w_idx,
         syllables_info=syllables_info,
         is_vc_plosive_coda=False,
-        enable_stabilize=False,
+        enable_stabilize=True,
         enable_cutoff_guard=False,
         post_ctx=kr_post_ctx,
     )

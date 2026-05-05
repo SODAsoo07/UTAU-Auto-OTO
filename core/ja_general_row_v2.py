@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from core.mapping_format_policy import is_ja_sequence_locked_format
-
 
 def run_ja_general_row(
     *,
@@ -65,38 +63,23 @@ def run_ja_general_row(
             return _offset, _consonant, _cutoff, _pre, _ovl
         hard_cls = bool(c_char in {"k", "g", "t", "d", "b", "p", "q", "c", "ch", "ts", "dz", "s", "z", "sh", "j", "h", "f", "v", "hy"})
         son_cls = bool(c_char in {"m", "n", "ny", "r", "l", "ry", "w", "y"})
+        strict_cvvc = str(format_type or "").strip().lower() == "cvvc"
 
         o = float(_offset)
         p = float(_pre)
-        ovl_abs = o + max(float(_ovl), 0.0)
         c_abs = o + float(_consonant)
         cut_abs = o + abs(float(_cutoff))
-        next_pre_abs = next_on
-        next_pre = 0.0
-        if isinstance(vc_next_anchor, dict):
-            try:
-                next_pre_abs = float(vc_next_anchor.get("pre_abs", next_on) or next_on)
-                next_pre = max(float(vc_next_anchor.get("pre", 0.0) or 0.0), 0.0)
-            except Exception:
-                next_pre_abs = next_on
-                next_pre = 0.0
-        next_offset_abs = next_pre_abs - next_pre
-        if next_offset_abs <= 0.0:
-            next_offset_abs = next_on
 
-        pre_abs = o + p
-        if hard_cls:
-            pre_abs = min(max(pre_abs, next_offset_abs - 7.0), next_offset_abs + 8.0)
-        elif son_cls:
-            pre_abs = min(max(pre_abs, next_offset_abs - 5.0), next_offset_abs + 12.0)
-        else:
-            pre_abs = min(max(pre_abs, next_offset_abs - 6.0), next_offset_abs + 10.0)
-        o = max(pre_abs - p, 0.0)
-        c_abs = o + float(_consonant)
-        cut_abs = o + abs(float(_cutoff))
-        ovl = max(0.0, min(p, ovl_abs - o))
-
-        if hard_cls:
+        if strict_cvvc and hard_cls:
+            c_floor = max(p + 6.0 + o, next_on - 14.0)
+            c_cap = next_on - 2.5
+        elif strict_cvvc and son_cls:
+            c_floor = max(next_on - 6.0, p + 9.0 + o)
+            c_cap = next_on + 1.5
+        elif strict_cvvc:
+            c_floor = max(next_on - 6.0, p + 9.0 + o)
+            c_cap = next_on + 2.0
+        elif hard_cls:
             # Stop/fricative-like VC should terminate before next onset.
             c_floor = max(p + 6.0 + o, next_on - 12.0)
             c_cap = next_on - 2.0
@@ -110,7 +93,16 @@ def run_ja_general_row(
             c_cap = c_floor + 2.0
         c_abs = min(max(c_abs, c_floor), c_cap)
 
-        if hard_cls:
+        if strict_cvvc and hard_cls:
+            cut_floor = max(c_abs + 4.0, next_on - 2.0)
+            cut_cap = next_on + 0.8
+        elif strict_cvvc and son_cls:
+            cut_floor = max(c_abs + 8.0, next_on + 0.4)
+            cut_cap = min(next_end + 2.0, next_on + 5.0)
+        elif strict_cvvc:
+            cut_floor = max(c_abs + 7.0, next_on + 0.6)
+            cut_cap = min(next_end + 2.0, next_on + 6.0)
+        elif hard_cls:
             cut_floor = max(c_abs + 4.0, next_on - 2.0)
             cut_cap = next_on - 0.7
         elif son_cls:
@@ -123,7 +115,58 @@ def run_ja_general_row(
             cut_cap = cut_floor + 1.0
         cut_abs = min(max(cut_abs, cut_floor), cut_cap)
 
-        return validate_fn(o, c_abs - o, -(cut_abs - o), p, ovl)
+        return validate_fn(o, c_abs - o, -(cut_abs - o), p, float(_ovl))
+
+    def _tighten_cv_overlap_for_cvvc(
+        _offset: float,
+        _consonant: float,
+        _cutoff: float,
+        _pre: float,
+        _ovl: float,
+    ):
+        if str(format_type or "").strip().lower() != "cvvc":
+            return validate_fn(_offset, _consonant, _cutoff, _pre, _ovl)
+
+        o, c, cut, p, v = validate_fn(_offset, _consonant, _cutoff, _pre, _ovl)
+        p = max(float(p), 0.0)
+        if p <= 0.0:
+            return o, c, cut, p, 0.0
+
+        onset_cls = str(onset_class_fn(c_char) or "").strip().lower()
+        vowel_len = max(float(n_end) - float(n_start), 20.0)
+        hard_cls = bool(c_char in {"k", "g", "t", "d", "b", "p", "q", "c", "ch", "ts", "dz", "s", "z", "sh", "j", "h", "f", "v", "hy"})
+
+        ratio_cap = 0.66 if alias_type == "cv_head" else 0.62
+        if onset_cls == "voiceless":
+            ratio_cap -= 0.07
+        elif onset_cls == "liquid":
+            ratio_cap += 0.03
+        elif onset_cls == "nasal":
+            ratio_cap += 0.02
+        elif onset_cls == "voiced":
+            ratio_cap += 0.01
+        if hard_cls:
+            ratio_cap -= 0.03
+        if vowel_len < 90.0:
+            ratio_cap -= 0.05
+        elif vowel_len > 220.0:
+            ratio_cap += 0.02
+        max_ratio_cap = 0.75 if onset_cls == "liquid" else 0.73 if onset_cls == "nasal" else 0.72
+        ratio_cap = min(max(ratio_cap, 0.46), max_ratio_cap)
+
+        min_gap = 8.0 if alias_type == "cv_head" else 10.0
+        if onset_cls == "voiceless" or hard_cls:
+            min_gap += 2.0
+        elif onset_cls == "liquid":
+            min_gap -= 1.0
+        if vowel_len < 80.0:
+            min_gap += 2.0
+        min_gap = min(max(min_gap, 6.0), 20.0)
+
+        ovl_cap = min(p * ratio_cap, max(p - min_gap, 0.0))
+        if float(v) > ovl_cap:
+            v = ovl_cap
+        return validate_fn(o, c, cut, p, v)
 
     soft_off_shift = 0.0
     soft_cut_shift = 0.0
@@ -206,6 +249,7 @@ def run_ja_general_row(
             current_w_idx,
             alias_text=alias,
             alias_type="cv",
+            format_type=format_type,
         )
         offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
 
@@ -225,13 +269,33 @@ def run_ja_general_row(
             next_c_end_abs=n_end,
         )
         pre_abs_after = offset + pre
-        if is_ja_sequence_locked_format(format_type):
+        if format_type in {"cvvc", "cv"}:
             max_shift = 26.0
             if mapping_tier == "high":
                 max_shift = 34.0
             onset_cls = onset_class_fn(c_char)
-            if onset_cls in {"voiced", "nasal"}:
-                max_shift += 4.0
+            if onset_cls == "liquid":
+                max_shift += 5.0
+            elif onset_cls in {"voiced", "nasal"}:
+                max_shift += 3.0
+            # Low-confidence CVVC sonorant bridges tend to drift into blank tails.
+            # Keep pre-anchor movement tighter to preserve local syllable timing.
+            if (
+                str(format_type or "").strip().lower() == "cvvc"
+                and str(mapping_tier or "").strip().lower() == "low"
+                and onset_cls in {"nasal", "liquid"}
+            ):
+                max_shift = min(max_shift, 14.0)
+            if (
+                str(format_type or "").strip().lower() == "cvvc"
+                and onset_cls in {"nasal", "liquid"}
+            ):
+                # Sonorants (n/m/r/l family) are easy to snap to a previous syllable.
+                # Keep local pre-anchor movement tighter in CVVC to avoid 1-step misplacement.
+                if str(mapping_tier or "").strip().lower() == "high":
+                    max_shift = min(max_shift, 14.0)
+                else:
+                    max_shift = min(max_shift, 10.0)
             if is_n_bridge_fn(alias, "vc"):
                 max_shift = min(max_shift, 22.0)
             (
@@ -257,6 +321,30 @@ def run_ja_general_row(
                     f"🛡️ {fname}: VC-CV 앵커 이동 제한 "
                     f"({pre_abs_before:.1f}->{pre_abs_after:.1f}ms, {alias})"
                 )
+        if format_type == "cvvc" and float(n_start) > 0.0:
+            onset_cls = onset_class_fn(c_char)
+            if onset_cls == "liquid":
+                late_allow = 2.8
+            elif onset_cls in {"voiced", "nasal"}:
+                late_allow = 1.8
+            else:
+                late_allow = 2.0
+            if onset_cls == "liquid":
+                early_allow = 3.5
+            elif onset_cls == "nasal":
+                early_allow = 3.0
+            else:
+                early_allow = 5.0
+            pre_abs_floor = float(n_start) - early_allow
+            pre_abs_cap = float(n_start) + late_allow
+            if pre_abs_after < pre_abs_floor:
+                offset = max(float(offset) + (pre_abs_floor - pre_abs_after), 0.0)
+                offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
+                pre_abs_after = offset + pre
+            if pre_abs_after > pre_abs_cap:
+                offset = max(float(offset) - (pre_abs_after - pre_abs_cap), 0.0)
+                offset, consonant, cutoff, pre, ovl = validate_fn(offset, consonant, cutoff, pre, ovl)
+                pre_abs_after = offset + pre
         if abs(pre_abs_after - pre_abs_before) >= 6.0:
             log_fn(
                 f"🧭 {fname}: VC-CV 앵커 재정렬 "
@@ -338,6 +426,13 @@ def run_ja_general_row(
             ovl,
         )
     if alias_type in {"cv", "cv_head"}:
+        offset, consonant, cutoff, pre, ovl = _tighten_cv_overlap_for_cvvc(
+            offset,
+            consonant,
+            cutoff,
+            pre,
+            ovl,
+        )
         offset, consonant, cutoff, pre, cutoff_reduced = post_ctx.guard_cv_cutoff_to_next_onset(
             offset,
             consonant,

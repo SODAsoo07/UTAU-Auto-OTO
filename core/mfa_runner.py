@@ -1,7 +1,7 @@
 ﻿"""
-MFA (Montreal Forced Aligner) 실행 모듈
-- 로컬 또는 포터블 Conda 환경에서 MFA 실행
-- 실시간 로그 스트리밍
+MFA (Montreal Forced Aligner) runtime helpers.
+- Locate MFA executable in portable/runtime/Conda environments.
+- Validate and repair dependency/runtime issues before alignment.
 """
 
 import os
@@ -13,17 +13,14 @@ import shutil
 import hashlib
 import tempfile
 import locale
-import math
+import time
 import wave
-import audioop
-from typing import Sequence
+import importlib.util
+import urllib.error
+import urllib.request
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
-from core.pipeline_status import (
-    ALIGN_EXEC_MISSING,
-    ALIGN_MODEL_MISSING,
-    OK,
-    make_runtime_report,
-)
+import numpy as np
 
 from core.pipeline_status import (
     ALIGN_EXEC_MISSING,
@@ -38,63 +35,10 @@ ALERT_MSVC_REQUIRED = "__ALERT__MSVC_REQUIRED__"
 ALERT_MFA_PERMISSION_DENIED = "__ALERT__MFA_PERMISSION_DENIED__"
 MSVC_REQUIRED_TEXT = "microsoft visual c++ 14.0 or greater is required"
 MFA_PORTABLE_PYTHON_VERSION = "3.10"
-KOREAN_WHEEL_DIRNAME = "mfa_ko_wheels"
 _MFA_SINGLE_SPEAKER_FLAG_CACHE = {}
 _MFA_SPEAKER_ADAPT_FLAG_CACHE = {}
 _MFA_BREATH_WORD_RE = re.compile(r"(?i)^breath\d*$")
-_PACKAGING_STACK_IMPORT_EXPR = (
-    "import importlib.util as _u; import pip; import wheel; "
-    "import sys; sys.exit(0 if _u.find_spec('setuptools') else 1)"
-)
-_KOREAN_NATIVE_RUNTIME_CHECK_EXPR = (
-    "ok=False\n"
-    "try:\n"
-    "    from mecab import MeCab as _PyMecab\n"
-    "    _tok = _PyMecab()\n"
-    "    _out = _tok.parse('테스트')\n"
-    "    ok = isinstance(_out, list)\n"
-    "except Exception:\n"
-    "    ok = False\n"
-    "if not ok:\n"
-    "    try:\n"
-    "        import MeCab as _MeCabMod\n"
-    "        _tagger = _MeCabMod.Tagger()\n"
-    "        _tagger.parse('테스트')\n"
-    "        ok = True\n"
-    "    except Exception:\n"
-    "        ok = False\n"
-    "import sys\n"
-    "sys.exit(0 if ok else 1)\n"
-)
-_KOREAN_TOKENIZER_IMPORT_CHECK_EXPR = (
-    "import jamo\n"
-    "ok=False\n"
-    "try:\n"
-    "    from mecab import MeCab as _PyMecab\n"
-    "    _tok = _PyMecab()\n"
-    "    _out = _tok.parse('테스트')\n"
-    "    ok = isinstance(_out, list)\n"
-    "except Exception:\n"
-    "    ok = False\n"
-    "if not ok:\n"
-    "    try:\n"
-    "        import MeCab as _MeCabMod\n"
-    "        _tagger = _MeCabMod.Tagger()\n"
-    "        _tagger.parse('테스트')\n"
-    "        ok = True\n"
-    "    except Exception:\n"
-    "        ok = False\n"
-    "if not ok:\n"
-    "    try:\n"
-    "        import eunjeon\n"
-    "        _tok = eunjeon.Mecab()\n"
-    "        _m = _tok.morphs('테스트')\n"
-    "        ok = isinstance(_m, list)\n"
-    "    except Exception:\n"
-    "        ok = False\n"
-    "import sys\n"
-    "sys.exit(0 if ok else 1)\n"
-)
+_MFA_PERMISSION_SOFT_RETRY_CACHE: Dict[str, int] = {}
 
 MFA_ALIGN_PROFILE_PRESETS = {
     # Stable default profile (legacy accurate behavior).
@@ -107,8 +51,18 @@ MFA_ALIGN_PROFILE_PRESETS = {
         "num_jobs": 1,
         "speaker_adaptation": False,
     },
-    # Accuracy-first profile with speaker adaptation when supported by MFA.
+    # Accuracy-first profile without explicit speaker adaptation.
     "accurate": {
+        "clean": True,
+        "fine_tune": True,
+        "textgrid_cleanup": True,
+        "beam": 1400,
+        "retry_beam": 5600,
+        "num_jobs": 1,
+        "speaker_adaptation": False,
+    },
+    # Accuracy + speaker adaptation profile.
+    "accurate_adapted": {
         "clean": True,
         "fine_tune": True,
         "textgrid_cleanup": True,
@@ -138,20 +92,21 @@ def _preferred_subprocess_encoding():
 
 
 def _subprocess_decode_candidates() -> list[str]:
+    # Prefer UTF-8 first to prevent locale-dependent mojibake in logs.
     candidates: list[str] = []
     for enc in (
+        "utf-8-sig",
         "utf-8",
+        _preferred_subprocess_encoding(),
+        getattr(locale, "getencoding", lambda: "")() or "",
         "cp949",
         "cp932",
         "mbcs",
-        _preferred_subprocess_encoding(),
-        getattr(locale, "getencoding", lambda: "")() or "",
     ):
         enc = str(enc or "").strip()
         if enc and enc not in candidates:
             candidates.append(enc)
     return candidates
-
 
 def _score_decoded_subprocess_text(text: str) -> int:
     score = 0
@@ -180,58 +135,39 @@ def _decode_subprocess_output(data) -> str:
     if isinstance(data, str):
         return data
     raw = bytes(data)
-    best_text = ""
-    best_score = None
-    for enc in _subprocess_decode_candidates():
+
+    # Hard-fix UTF-8 first. If it succeeds, do not attempt locale fallback.
+    for enc in ("utf-8-sig", "utf-8"):
         try:
-            decoded = raw.decode(enc)
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            pass
+
+    for enc in _subprocess_decode_candidates():
+        if enc in {"utf-8", "utf-8-sig"}:
+            continue
+        try:
+            return raw.decode(enc)
         except (LookupError, UnicodeDecodeError):
             continue
-        score = _score_decoded_subprocess_text(decoded)
-        if best_score is None or score > best_score:
-            best_text = decoded
-            best_score = score
-    if best_score is not None:
-        return best_text
+
     return raw.decode("utf-8", errors="replace")
 
-
-def _subprocess_window_kwargs() -> dict:
-    """Hide helper console windows on Windows GUI runs."""
-    if os.name != "nt":
-        return {}
-    kwargs: dict = {}
-    try:
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 0
-        kwargs["startupinfo"] = startupinfo
-    except Exception:
-        pass
-    try:
-        kwargs["creationflags"] = int(kwargs.get("creationflags", 0)) | int(
-            getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        )
-    except Exception:
-        pass
-    return kwargs
-
-
 def _run_subprocess_text(args: Sequence[str], **kwargs):
-    window_kwargs = _subprocess_window_kwargs()
-    for key, value in window_kwargs.items():
-        kwargs.setdefault(key, value)
     completed = subprocess.run(args, capture_output=True, text=False, **kwargs)
     completed.stdout = _decode_subprocess_output(getattr(completed, "stdout", b""))
     completed.stderr = _decode_subprocess_output(getattr(completed, "stderr", b""))
     return completed
 
 
-def _popen_subprocess(args: Sequence[str], **kwargs):
-    window_kwargs = _subprocess_window_kwargs()
-    for key, value in window_kwargs.items():
-        kwargs.setdefault(key, value)
-    return subprocess.Popen(args, **kwargs)
+def _safe_env_subprocess_cwd(env_dir: str) -> Optional[str]:
+    path = str(env_dir or "").strip()
+    if not path:
+        return None
+    abs_path = os.path.abspath(path)
+    if os.path.isdir(abs_path):
+        return abs_path
+    return None
 
 
 def _contains_non_ascii(text):
@@ -241,24 +177,25 @@ def _contains_non_ascii(text):
         return False
 
 
-def _path_requires_ascii_fallback(path: str) -> bool:
-    value = str(path or "")
-    if not value:
-        return False
-    if _contains_non_ascii(value):
-        return True
-    # cmd.exe launcher wrappers are fragile with these characters in root paths.
-    return any(ch in value for ch in "!&|<>()^")
-
-
 def _default_mfa_root_dir(mfa_path="", per_process: bool = False):
     if getattr(sys, 'frozen', False):
         app_dir = os.path.dirname(sys.executable)
     elif mfa_path:
         app_dir = os.path.dirname(os.path.dirname(os.path.abspath(mfa_path)))
+        # mfa_path often points to "<runtime>\\.env\\Scripts\\mfa.exe".
+        # Store MFA_ROOT_DIR under runtime root, not inside .env, to prevent
+        # cache bloat in the virtual environment directory.
+        base_name = os.path.basename(os.path.normpath(app_dir)).strip().lower()
+        if base_name in {".env", "env"}:
+            app_dir = os.path.dirname(app_dir)
     else:
         app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     root = os.path.join(app_dir, ".mfa_root_ascii")
+    if sys.platform == "win32" and (
+        _contains_non_ascii(root) or "!" in root or "%" in root
+    ):
+        public_root = str(os.environ.get("PUBLIC", r"C:\Users\Public") or r"C:\Users\Public").strip()
+        root = os.path.join(public_root, "UTAU_Auto_OTO_v3", ".mfa_root_ascii")
     if per_process:
         root = f"{root}_p{os.getpid()}"
     os.makedirs(root, exist_ok=True)
@@ -299,1009 +236,93 @@ def _resolve_env_python_exe(env_dir: str) -> str:
     return ""
 
 
-def _is_env_scripts_path(path: str) -> bool:
-    norm = str(path or "").replace("/", "\\").lower()
-    return "\\scripts\\" in norm
-
-
-def _candidate_shared_mfa_roots() -> list[str]:
-    roots: list[str] = []
-    env_override = str(os.environ.get("UTOA_MFA_SHARED_ROOT", "") or "").strip()
-    if env_override:
-        roots.append(env_override)
-    local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
-    if local_app_data:
-        roots.append(os.path.join(local_app_data, "UTAU_Auto_OTO_v3"))
-    else:
-        roots.append(os.path.join(os.path.expanduser("~"), "AppData", "Local", "UTAU_Auto_OTO_v3"))
-    public_base = str(os.environ.get("PUBLIC", "") or "").strip()
-    if not public_base:
-        system_drive = str(os.environ.get("SystemDrive", "C:") or "C:").strip() or "C:"
-        public_base = os.path.join(system_drive, "Users", "Public")
-    public_root = os.path.join(public_base, "UTAU_Auto_OTO_v3")
-    roots.append(public_root)
-
-    dedup: list[str] = []
+def _candidate_mfa_runtime_roots() -> List[str]:
+    roots: List[str] = []
     seen = set()
-    for root in roots:
-        normalized = os.path.normcase(os.path.abspath(str(root or "")))
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        dedup.append(root)
-    return dedup
 
-
-def _is_writable_directory(path: str) -> bool:
-    try:
-        os.makedirs(path, exist_ok=True)
-        fd, probe = tempfile.mkstemp(prefix=".utoa_write_probe_", dir=path)
-        os.close(fd)
-        os.remove(probe)
-        return True
-    except Exception:
-        return False
-
-
-def _resolve_shared_mfa_root() -> str:
-    candidates = _candidate_shared_mfa_roots()
-    env_override = str(os.environ.get("UTOA_MFA_SHARED_ROOT", "") or "").strip()
-    if not env_override and len(candidates) >= 2:
-        local_candidate = candidates[0]
-        if _path_requires_ascii_fallback(local_candidate):
-            logger.info(
-                "[MFA] LOCALAPPDATA runtime path contains non-ASCII/shell-sensitive characters; "
-                "preferring ASCII-safe shared root."
-            )
-            candidates = candidates[1:] + [local_candidate]
-    for root in candidates:
-        if _is_writable_directory(root):
-            return root
-    return candidates[0] if candidates else os.path.join(os.path.expanduser("~"), "UTAU_Auto_OTO_v3")
-
-
-def _candidate_korean_wheel_dirs(mfa_path: str = "") -> list[str]:
-    candidates: list[str] = []
-    env_override = str(os.environ.get("UTOA_KO_WHEEL_DIR", "") or "").strip()
-    if env_override:
-        candidates.append(env_override)
-
-    if getattr(sys, 'frozen', False):
-        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-        candidates.extend(
-            [
-                os.path.join(exe_dir, KOREAN_WHEEL_DIRNAME),
-                os.path.join(os.path.dirname(exe_dir), KOREAN_WHEEL_DIRNAME),
-            ]
-        )
-
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    candidates.extend(
-        [
-            os.path.join(repo_root, KOREAN_WHEEL_DIRNAME),
-            os.path.join(repo_root, "build_assets", KOREAN_WHEEL_DIRNAME),
-        ]
-    )
-
-    if _is_env_scripts_path(mfa_path):
-        try:
-            env_dir = os.path.dirname(os.path.dirname(os.path.abspath(mfa_path)))
-            runtime_root = os.path.dirname(env_dir)
-            candidates.append(os.path.join(runtime_root, KOREAN_WHEEL_DIRNAME))
-        except Exception:
-            pass
-
-    dedup: list[str] = []
-    seen = set()
-    for path in candidates:
+    def _add(path: str) -> None:
         norm = os.path.normcase(os.path.abspath(str(path or "")))
         if not norm or norm in seen:
-            continue
+            return
         seen.add(norm)
-        dedup.append(path)
-    return dedup
+        roots.append(os.path.abspath(path))
 
+    shared_root = str(os.environ.get("UTOA_MFA_SHARED_ROOT", "") or "").strip()
+    explicit_runtime_root = str(os.environ.get("UTOA_RUNTIME_ROOT", "") or "").strip()
+    if explicit_runtime_root:
+        _add(explicit_runtime_root)
 
-def _resolve_korean_wheel_dir(mfa_path: str = "") -> str:
-    for path in _candidate_korean_wheel_dirs(mfa_path):
-        if not os.path.isdir(path):
-            continue
-        try:
-            if any(name.lower().endswith(".whl") for name in os.listdir(path)):
-                return os.path.abspath(path)
-        except Exception:
-            continue
-    return ""
+    if shared_root:
+        _add(shared_root)
 
-
-def get_default_mfa_env_dir():
-    return os.path.join(_resolve_shared_mfa_root(), ".env")
-
-
-def get_default_mfa_conda_root():
-    return os.path.join(_resolve_shared_mfa_root(), "miniconda")
-
-
-def get_default_mfa_micromamba_root():
-    return os.path.join(_resolve_shared_mfa_root(), "micromamba")
-
-
-def get_default_mfa_micromamba_exe():
-    root = get_default_mfa_micromamba_root()
-    candidates = [
-        os.path.join(root, "Library", "bin", "micromamba.exe"),
-        os.path.join(root, "bin", "micromamba.exe"),
-        os.path.join(root, "micromamba.exe"),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return candidates[0]
-
-
-def _candidate_mfa_executable_paths():
     if getattr(sys, 'frozen', False):
         app_dir = os.path.dirname(sys.executable)
-    else:
-        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    shared_env_dirs = [os.path.join(root, ".env") for root in _candidate_shared_mfa_roots()]
-    candidates = [
-        os.path.join(app_dir, '.env', 'Scripts', 'mfa.exe'),
-        os.path.join(app_dir, '.env', 'Scripts', 'mfa.bat'),
-        os.path.join(app_dir, '.env', 'Scripts', 'mfa.cmd'),
-        os.path.join(app_dir, '.env', 'bin', 'mfa'),
-        os.path.join(app_dir, 'env', 'Scripts', 'mfa.exe'),
-        os.path.join(app_dir, 'env', 'Scripts', 'mfa.bat'),
-        os.path.join(app_dir, 'env', 'Scripts', 'mfa.cmd'),
-    ]
-    for shared_env_dir in shared_env_dirs:
-        candidates.extend(
-            [
-                os.path.join(shared_env_dir, 'Scripts', 'mfa.exe'),
-                os.path.join(shared_env_dir, 'Scripts', 'mfa.bat'),
-                os.path.join(shared_env_dir, 'Scripts', 'mfa.cmd'),
-                os.path.join(shared_env_dir, 'bin', 'mfa'),
-            ]
-        )
-    seen = set()
-    unique = []
-    for path in candidates:
-        key = os.path.normcase(os.path.normpath(path))
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(path)
-    return unique
-
-
-def _is_mfa_launcher_failure_text(text: str) -> bool:
-    lowered = str(text or "").strip().lower()
-    if not lowered:
-        return False
-    failure_markers = (
-        "failed to create process",
-        "unable to create process",
-        "fatal error in launcher",
-        "could not import runpy",
-        "no python at",
-        "is not recognized as an internal or external command",
-    )
-    return any(marker in lowered for marker in failure_markers)
-
-
-def _probe_mfa_launcher(mfa_path: str) -> tuple[bool, str]:
-    path = os.path.abspath(str(mfa_path or "").strip())
-    if not path or not os.path.exists(path):
-        return False, "mfa launcher missing"
-    try:
-        env = _get_conda_env(path)
-        result = _run_subprocess_text(
-            [path, "--help"],
-            env=env,
-            timeout=30,
-        )
-        combined = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
-        if _is_mfa_launcher_failure_text(combined):
-            return False, combined
-        if result.returncode == 0:
-            return True, combined
-        lowered = combined.lower()
-        if "usage" in lowered and "mfa" in lowered:
-            return True, combined
-        return False, combined
-    except subprocess.TimeoutExpired as exc:
-        # Some sandbox/AV environments can make the launcher help probe very slow.
-        # Fall back to python module probe before marking launcher as broken.
-        msg = str(exc or "").strip() or "launcher probe timed out"
-        lowered = path.lower()
-        if "\\scripts\\" in lowered:
-            env_dir = os.path.dirname(os.path.dirname(path))
-            python_exe = _resolve_env_python_exe(env_dir)
-            if python_exe and os.path.exists(python_exe):
-                env = _get_conda_env(path)
-                probe_cmds = [
-                    [python_exe, "-m", "montreal_forced_aligner.command_line.mfa", "--help"],
-                    [python_exe, "-m", "montreal_forced_aligner", "--help"],
-                ]
-                for cmd in probe_cmds:
-                    try:
-                        py_res = _run_subprocess_text(cmd, env=env, timeout=25)
-                    except Exception:
-                        continue
-                    combined = f"{py_res.stdout or ''}\n{py_res.stderr or ''}".strip()
-                    if _is_mfa_launcher_failure_text(combined):
-                        continue
-                    if py_res.returncode == 0:
-                        return True, f"{msg}; python-module probe ok"
-                    low = combined.lower()
-                    if "usage" in low and "mfa" in low:
-                        return True, f"{msg}; python-module usage probe ok"
-        return False, msg
-    except Exception as exc:
-        msg = str(exc or "").strip()
-        return False, msg or "launcher probe failed"
-
-
-def _ensure_mfa_batch_wrapper(env_dir: str) -> str:
-    if sys.platform != "win32":
-        return ""
-    root = os.path.abspath(str(env_dir or "").strip())
-    if not root:
-        return ""
-    python_exe = _resolve_env_python_exe(root)
-    if not python_exe or not os.path.exists(python_exe):
-        return ""
-
-    wrapper_path = os.path.join(root, "Scripts", "mfa.bat")
-    try:
-        os.makedirs(os.path.dirname(wrapper_path), exist_ok=True)
-        with open(wrapper_path, "w", encoding="utf-8", newline="") as wf:
-            wf.write("@echo off\r\n")
-            # Keep wrapper ASCII-only and resolve env path relatively at runtime.
-            # This avoids launcher breakage on non-ASCII install roots.
-            wf.write('set "SCRIPT_DIR=%~dp0"\r\n')
-            wf.write('set "ENV_DIR=%SCRIPT_DIR%.."\r\n')
-            wf.write('for %%I in ("%ENV_DIR%") do set "ENV_DIR=%%~fI"\r\n')
-            wf.write('set "CONDA_PREFIX=%ENV_DIR%"\r\n')
-            wf.write(
-                'set "PATH=%ENV_DIR%;%ENV_DIR%\\Library\\mingw-w64\\bin;'
-                '%ENV_DIR%\\Library\\usr\\bin;%ENV_DIR%\\Library\\bin;'
-                '%ENV_DIR%\\Scripts;%ENV_DIR%\\bin;%PATH%"\r\n'
-            )
-            wf.write('set "MFA_SCRIPT_PATH=%SCRIPT_DIR%mfa-script.py"\r\n')
-            wf.write('set "MFA_ALT_SCRIPT_PATH=%SCRIPT_DIR%mfa.py"\r\n')
-            wf.write('set "ENV_PY=%ENV_DIR%\\python.exe"\r\n')
-            wf.write('if not exist "%ENV_PY%" set "ENV_PY=%ENV_DIR%\\Scripts\\python.exe"\r\n')
-            wf.write('if not exist "%ENV_PY%" set "ENV_PY=%ENV_DIR%\\bin\\python"\r\n')
-            wf.write("set \"_UTOA_MFA_EXIT=1\"\r\n")
-            wf.write('if exist "%MFA_SCRIPT_PATH%" (\r\n')
-            wf.write('  "%ENV_PY%" "%MFA_SCRIPT_PATH%" %*\r\n')
-            wf.write('  set "_UTOA_MFA_EXIT=%ERRORLEVEL%"\r\n')
-            wf.write(') else if exist "%MFA_ALT_SCRIPT_PATH%" (\r\n')
-            wf.write('  "%ENV_PY%" "%MFA_ALT_SCRIPT_PATH%" %*\r\n')
-            wf.write('  set "_UTOA_MFA_EXIT=%ERRORLEVEL%"\r\n')
-            wf.write(')\r\n')
-            wf.write("if not \"%_UTOA_MFA_EXIT%\"==\"0\" (\r\n")
-            wf.write('  "%ENV_PY%" -m montreal_forced_aligner.command_line.mfa %*\r\n')
-            wf.write("  set \"_UTOA_MFA_EXIT=%ERRORLEVEL%\"\r\n")
-            wf.write(")\r\n")
-            wf.write("if not \"%_UTOA_MFA_EXIT%\"==\"0\" (\r\n")
-            wf.write('  "%ENV_PY%" -m montreal_forced_aligner %*\r\n')
-            wf.write("  set \"_UTOA_MFA_EXIT=%ERRORLEVEL%\"\r\n")
-            wf.write(")\r\n")
-            wf.write("exit /b %_UTOA_MFA_EXIT%\r\n")
-        return wrapper_path
-    except Exception:
-        return ""
-
-
-def resolve_working_mfa_executable(mfa_path: str, callback=None) -> str:
-    path = os.path.abspath(str(mfa_path or "").strip())
-    if not path or not os.path.exists(path):
-        return path
-
-    def _emit(msg: str):
-        logger.info(msg)
-        if callback:
-            callback(msg)
-
-    healthy, detail = _probe_mfa_launcher(path)
-    if healthy:
-        detail_text = str(detail or "").strip()
-        if detail_text and "python-module probe ok" in detail_text.lower():
-            _emit(f"[MFA] launcher health check recovered via python module probe: {detail_text[:280]}")
-        lowered = path.lower()
-        # If launcher health was recovered only via python module probe,
-        # prefer the local batch wrapper to avoid fragile native launcher paths.
-        if (
-            sys.platform == "win32"
-            and lowered.endswith("mfa.exe")
-            and "\\scripts\\" in lowered
-            and "python-module probe ok" in str(detail or "").lower()
-        ):
-            env_dir = os.path.dirname(os.path.dirname(path))
-            wrapper = _ensure_mfa_batch_wrapper(env_dir)
-            if wrapper and os.path.exists(wrapper):
-                _emit(f"[MFA] launcher fallback switched to python wrapper: {wrapper}")
-                return wrapper
-        return path
-
-    if detail:
-        _emit(f"[MFA] launcher health check failed: {detail[:280]}")
-
-    lowered = path.lower()
-    if sys.platform == "win32" and lowered.endswith("mfa.exe") and "\\scripts\\" in lowered:
-        env_dir = os.path.dirname(os.path.dirname(path))
-        wrapper = _ensure_mfa_batch_wrapper(env_dir)
-        if wrapper and os.path.exists(wrapper):
-            wrapper_ok, wrapper_detail = _probe_mfa_launcher(wrapper)
-            if wrapper_ok:
-                _emit(f"[MFA] mfa.exe launcher fallback enabled: {wrapper}")
-                return wrapper
-            if wrapper_detail:
-                _emit(f"[MFA] mfa.bat launcher check failed: {wrapper_detail[:280]}")
-
-    return path
-
-
-def _link_or_copy(src, dst):
-    os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
-    if os.path.exists(dst):
-        return
-    try:
-        os.link(src, dst)
-    except Exception:
-        shutil.copy2(src, dst)
-
-
-def _parse_bool_env(name: str, default: bool) -> bool:
-    raw = str(os.environ.get(name, "") or "").strip().lower()
-    if not raw:
-        return bool(default)
-    if raw in {"1", "true", "yes", "on", "y"}:
-        return True
-    if raw in {"0", "false", "no", "off", "n"}:
-        return False
-    return bool(default)
-
-
-def _parse_float_env(name: str, default: float) -> float:
-    raw = str(os.environ.get(name, "") or "").strip()
-    if not raw:
-        return float(default)
-    try:
-        return float(raw)
-    except Exception:
-        return float(default)
-
-
-def _resolve_low_rms_gain_config() -> dict:
-    enabled = _parse_bool_env("UTOA_MFA_LOW_RMS_GAIN_ENABLE", True)
-    threshold_db = _parse_float_env("UTOA_MFA_LOW_RMS_THRESHOLD_DB", -24.0)
-    target_db = _parse_float_env("UTOA_MFA_LOW_RMS_TARGET_DB", -16.0)
-    max_gain_db = _parse_float_env("UTOA_MFA_LOW_RMS_MAX_GAIN_DB", 18.0)
-    peak_ceiling_db = _parse_float_env("UTOA_MFA_LOW_RMS_PEAK_CEILING_DB", -1.0)
-    weak_voice_assist_enabled = _parse_bool_env("UTOA_MFA_WEAK_VOICE_ASSIST_ENABLE", True)
-    weak_voice_trigger_db = _parse_float_env("UTOA_MFA_WEAK_VOICE_TRIGGER_DB", -23.0)
-    weak_voice_alpha = _parse_float_env("UTOA_MFA_WEAK_VOICE_PREEMPH_ALPHA", 0.92)
-    weak_voice_mix = _parse_float_env("UTOA_MFA_WEAK_VOICE_PREEMPH_MIX", 0.35)
-
-    threshold_db = max(-80.0, min(0.0, threshold_db))
-    target_db = max(-40.0, min(-1.0, target_db))
-    max_gain_db = max(0.0, min(24.0, max_gain_db))
-    peak_ceiling_db = max(-12.0, min(-0.1, peak_ceiling_db))
-    weak_voice_trigger_db = max(-80.0, min(-6.0, weak_voice_trigger_db))
-    weak_voice_alpha = max(0.0, min(0.99, weak_voice_alpha))
-    weak_voice_mix = max(0.0, min(1.0, weak_voice_mix))
-
-    return {
-        "enabled": bool(enabled),
-        "threshold_db": float(threshold_db),
-        "target_db": float(target_db),
-        "max_gain_db": float(max_gain_db),
-        "peak_ceiling_db": float(peak_ceiling_db),
-        "weak_voice_assist_enabled": bool(weak_voice_assist_enabled),
-        "weak_voice_trigger_db": float(weak_voice_trigger_db),
-        "weak_voice_alpha": float(weak_voice_alpha),
-        "weak_voice_mix": float(weak_voice_mix),
-    }
-
-
-def _dbfs(value: float, floor: float = 1e-8) -> float:
-    return 20.0 * math.log10(max(float(value), float(floor)))
-
-
-def _pcm_full_scale(sampwidth: int) -> float:
-    if sampwidth <= 1:
-        return 127.0
-    return float((1 << ((int(sampwidth) * 8) - 1)) - 1)
-
-
-def _apply_pcm_gain(raw: bytes, sampwidth: int, gain_lin: float) -> bytes:
-    gain = float(gain_lin)
-    if abs(gain - 1.0) < 1e-6:
-        return raw
-    if sampwidth == 1:
-        centered = audioop.bias(raw, 1, -128)
-        scaled = audioop.mul(centered, 1, gain)
-        return audioop.bias(scaled, 1, 128)
-    return audioop.mul(raw, int(sampwidth), gain)
-
-
-def _pcm_sample_bounds(sampwidth: int) -> tuple[int, int]:
-    if sampwidth == 1:
-        return -128, 127
-    bits = int(sampwidth) * 8
-    hi = (1 << (bits - 1)) - 1
-    lo = -(1 << (bits - 1))
-    return lo, hi
-
-
-def _apply_preemphasis_pcm(raw: bytes, sampwidth: int, n_channels: int, alpha: float, mix: float) -> tuple[bytes, bool]:
-    if not raw or sampwidth <= 0 or n_channels <= 0:
-        return raw, False
-    frame_bytes = int(sampwidth) * int(n_channels)
-    if frame_bytes <= 0 or len(raw) % frame_bytes != 0:
-        return raw, False
-    lo, hi = _pcm_sample_bounds(sampwidth)
-    prev = [0.0] * int(n_channels)
-    out = bytearray()
-    try:
-        mv = memoryview(raw)
-        for frame_start in range(0, len(raw), frame_bytes):
-            for ch in range(int(n_channels)):
-                pos = frame_start + (ch * int(sampwidth))
-                if sampwidth == 1:
-                    x = int(mv[pos]) - 128
-                else:
-                    x = int.from_bytes(bytes(mv[pos:pos + int(sampwidth)]), "little", signed=True)
-                y = float(x) - (float(alpha) * prev[ch])
-                prev[ch] = float(x)
-                z = ((1.0 - float(mix)) * float(x)) + (float(mix) * y)
-                iv = int(round(z))
-                if iv < lo:
-                    iv = lo
-                elif iv > hi:
-                    iv = hi
-                if sampwidth == 1:
-                    out.append(iv + 128)
-                else:
-                    out.extend(int(iv).to_bytes(int(sampwidth), "little", signed=True))
-        return bytes(out), True
-    except Exception:
-        return raw, False
-
-
-def _copy_wav_with_low_rms_gain(src: str, dst: str, cfg: dict) -> dict:
-    result = {
-        "ok": False,
-        "boosted": False,
-        "weak_assist": False,
-        "reason": "",
-        "rms_db_before": None,
-        "gain_db_applied": 0.0,
-    }
-    try:
-        src_abs = os.path.normcase(os.path.abspath(str(src or "")))
-        dst_abs = os.path.normcase(os.path.abspath(str(dst or "")))
-    except Exception:
-        src_abs = str(src or "")
-        dst_abs = str(dst or "")
-    if src_abs and dst_abs and src_abs == dst_abs:
-        # Safety guard: never write gain-processed audio back to original source path.
-        result["ok"] = True
-        result["reason"] = "src_equals_dst_blocked"
-        return result
-    try:
-        with wave.open(src, "rb") as rf:
-            params = rf.getparams()
-            n_channels = int(params.nchannels or 0)
-            sampwidth = int(params.sampwidth or 0)
-            comptype = str(params.comptype or "NONE").upper()
-            raw = rf.readframes(int(params.nframes or 0))
-    except Exception:
-        _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "wav_read_failed_passthrough"
-        return result
-
-    if comptype != "NONE" or sampwidth <= 0 or sampwidth > 4 or n_channels <= 0:
-        _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "unsupported_wav_passthrough"
-        return result
-    if not raw:
-        _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "empty_wav_passthrough"
-        return result
-
-    try:
-        if n_channels == 1:
-            mono = raw
-        elif n_channels == 2:
-            mono = audioop.tomono(raw, sampwidth, 0.5, 0.5)
+        parent_dir = os.path.dirname(app_dir)
+        # Portable release layout:
+        # <payload_root>\UTAU_Auto_OTO\UTAU_Auto_OTO.exe
+        # setup_mfa/runtime env are created in <payload_root>\.env.
+        # Prefer payload_root first to avoid selecting stale bundled env.
+        if os.path.basename(app_dir).lower() in {"utau_auto_oto", "auto_oto"}:
+            _add(parent_dir)
+            _add(app_dir)
         else:
-            _link_or_copy(src, dst)
-            result["ok"] = True
-            result["reason"] = "multichannel_passthrough"
-            return result
-        rms = float(audioop.rms(mono, sampwidth))
-    except Exception:
-        _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "rms_probe_failed_passthrough"
-        return result
-
-    if rms <= 0.0:
-        _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "silent_passthrough"
-        return result
-
-    full_scale = _pcm_full_scale(sampwidth)
-    rms_db = _dbfs(rms / full_scale)
-    result["rms_db_before"] = float(rms_db)
-
-    threshold_db = float(cfg.get("threshold_db", -24.0))
-    target_db = float(cfg.get("target_db", -16.0))
-    max_gain_db = float(cfg.get("max_gain_db", 18.0))
-    peak_ceiling_db = float(cfg.get("peak_ceiling_db", -1.0))
-    weak_voice_assist_enabled = bool(cfg.get("weak_voice_assist_enabled", True))
-    weak_voice_trigger_db = float(cfg.get("weak_voice_trigger_db", -23.0))
-    weak_voice_alpha = float(cfg.get("weak_voice_alpha", 0.92))
-    weak_voice_mix = float(cfg.get("weak_voice_mix", 0.35))
-
-    if rms_db >= threshold_db:
-        _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "above_threshold_passthrough"
-        return result
-
-    gain_db = min(max_gain_db, max(0.0, target_db - rms_db))
-    if gain_db <= 1e-4:
-        _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "no_gain_needed_passthrough"
-        return result
-
-    try:
-        processed = _apply_pcm_gain(raw, sampwidth, 10.0 ** (gain_db / 20.0))
-        if weak_voice_assist_enabled and rms_db <= weak_voice_trigger_db:
-            processed, assisted = _apply_preemphasis_pcm(
-                processed,
-                sampwidth,
-                n_channels,
-                alpha=weak_voice_alpha,
-                mix=weak_voice_mix,
-            )
-            if assisted:
-                result["weak_assist"] = True
-        peak = float(audioop.max(processed, sampwidth))
-        peak_db = _dbfs(peak / full_scale) if peak > 0 else -120.0
-        if peak_db > peak_ceiling_db:
-            reduce_db = peak_ceiling_db - peak_db
-            processed = _apply_pcm_gain(processed, sampwidth, 10.0 ** (reduce_db / 20.0))
-            gain_db += reduce_db
-
-        os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
-        with wave.open(dst, "wb") as wf:
-            wf.setparams(params)
-            wf.writeframes(processed)
-        result["ok"] = True
-        result["boosted"] = True
-        result["reason"] = "boosted"
-        result["gain_db_applied"] = float(gain_db)
-        return result
-    except Exception:
-        _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "gain_apply_failed_passthrough"
-        return result
-
-
-def _prepare_ascii_safe_alignment_workspace(wav_folder, dict_path, output_folder, *, wav_gain_config=None):
-    token_src = "|".join([
-        os.path.abspath(wav_folder or ""),
-        os.path.abspath(dict_path or ""),
-        os.path.abspath(output_folder or ""),
-    ])
-    token = hashlib.sha1(token_src.encode("utf-8", errors="replace")).hexdigest()[:12]
-    base = os.path.join(tempfile.gettempdir(), "utoa_mfa_ascii", token)
-    if os.path.isdir(base):
-        shutil.rmtree(base, ignore_errors=True)
-    corpus_dir = os.path.join(base, "corpus")
-    dict_dir = os.path.join(base, "dict")
-    out_dir = os.path.join(base, "out")
-    os.makedirs(corpus_dir, exist_ok=True)
-    os.makedirs(dict_dir, exist_ok=True)
-    os.makedirs(out_dir, exist_ok=True)
-
-    wav_gain_enabled = bool((wav_gain_config or {}).get("enabled", False))
-    wav_gain_stats = {
-        "enabled": wav_gain_enabled,
-        "scanned": 0,
-        "boosted": 0,
-        "weak_assist": 0,
-        "passthrough": 0,
-    }
-
-    for fn in os.listdir(wav_folder):
-        low = fn.lower()
-        src = os.path.join(wav_folder, fn)
-        if not os.path.isfile(src):
-            continue
-        if low.endswith(".wav"):
-            dst = os.path.join(corpus_dir, fn)
-            if wav_gain_enabled:
-                wav_gain_stats["scanned"] += 1
-                outcome = _copy_wav_with_low_rms_gain(src, dst, wav_gain_config or {})
-                if outcome.get("boosted"):
-                    wav_gain_stats["boosted"] += 1
-                else:
-                    wav_gain_stats["passthrough"] += 1
-                if outcome.get("weak_assist"):
-                    wav_gain_stats["weak_assist"] += 1
-            else:
-                _link_or_copy(src, dst)
-        elif low.endswith(".lab") or low.endswith(".txt"):
-            if os.path.isfile(src):
-                _link_or_copy(src, os.path.join(corpus_dir, fn))
-
-    ext = os.path.splitext(dict_path)[1] or ".txt"
-    safe_dict_path = os.path.join(dict_dir, f"dictionary{ext}")
-    shutil.copy2(dict_path, safe_dict_path)
-    return {
-        "base": base,
-        "corpus_dir": corpus_dir,
-        "dict_path": safe_dict_path,
-        "output_dir": out_dir,
-        "wav_gain_stats": wav_gain_stats,
-    }
-
-
-def _copy_back_textgrids(safe_output_dir, output_folder):
-    os.makedirs(output_folder, exist_ok=True)
-    copied = 0
-    for dp, dns, fns in os.walk(safe_output_dir):
-        rel = os.path.relpath(dp, safe_output_dir)
-        dst_dir = output_folder if rel == "." else os.path.join(output_folder, rel)
-        os.makedirs(dst_dir, exist_ok=True)
-        for fn in fns:
-            if not fn.lower().endswith(".textgrid"):
-                continue
-            shutil.copy2(os.path.join(dp, fn), os.path.join(dst_dir, fn))
-            copied += 1
-    return copied
-
-MFA_ALIGN_PROFILE_PRESETS = {
-    # Stable default profile (legacy accurate behavior).
-    "default": {
-        "clean": True,
-        "fine_tune": True,
-        "textgrid_cleanup": True,
-        "beam": 1000,
-        "retry_beam": 4000,
-        "num_jobs": 1,
-        "speaker_adaptation": False,
-    },
-    # Accuracy-first profile with speaker adaptation when supported by MFA.
-    "accurate": {
-        "clean": True,
-        "fine_tune": True,
-        "textgrid_cleanup": True,
-        "beam": 1400,
-        "retry_beam": 5600,
-        "num_jobs": 1,
-        "speaker_adaptation": True,
-    },
-    # Low-load profile for slower hardware.
-    "fast": {
-        "clean": True,
-        "fine_tune": False,
-        "textgrid_cleanup": True,
-        "beam": 320,
-        "retry_beam": 960,
-        "num_jobs": 1,
-        "speaker_adaptation": False,
-    },
-}
-
-
-def _preferred_subprocess_encoding():
-    try:
-        return locale.getpreferredencoding(False) or "utf-8"
-    except Exception:
-        return "utf-8"
-
-
-def _subprocess_decode_candidates() -> list[str]:
-    candidates: list[str] = []
-    for enc in (
-        "utf-8",
-        "cp949",
-        "cp932",
-        "mbcs",
-        _preferred_subprocess_encoding(),
-        getattr(locale, "getencoding", lambda: "")() or "",
-    ):
-        enc = str(enc or "").strip()
-        if enc and enc not in candidates:
-            candidates.append(enc)
-    return candidates
-
-
-def _score_decoded_subprocess_text(text: str) -> int:
-    score = 0
-    for ch in str(text or ""):
-        code = ord(ch)
-        if ch == "\ufffd":
-            score -= 20
-        elif 0x20 <= code <= 0x7E or ch in "\r\n\t":
-            score += 1
-        elif 0xAC00 <= code <= 0xD7A3:  # Hangul syllables
-            score += 4
-        elif 0x3040 <= code <= 0x30FF or 0x4E00 <= code <= 0x9FFF:  # Kana/CJK
-            score += 3
-        elif 0xFF61 <= code <= 0xFF9F:  # Halfwidth katakana mojibake hotspot
-            score -= 6
-        elif code < 0x20:
-            score -= 10
-        else:
-            score += 0
-    return score
-
-
-def _decode_subprocess_output(data) -> str:
-    if data is None:
-        return ""
-    if isinstance(data, str):
-        return data
-    raw = bytes(data)
-    best_text = ""
-    best_score = None
-    for enc in _subprocess_decode_candidates():
-        try:
-            decoded = raw.decode(enc)
-        except (LookupError, UnicodeDecodeError):
-            continue
-        score = _score_decoded_subprocess_text(decoded)
-        if best_score is None or score > best_score:
-            best_text = decoded
-            best_score = score
-    if best_score is not None:
-        return best_text
-    return raw.decode("utf-8", errors="replace")
-
-
-def _subprocess_window_kwargs() -> dict:
-    """Hide helper console windows on Windows GUI runs."""
-    if os.name != "nt":
-        return {}
-    kwargs: dict = {}
-    try:
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 0
-        kwargs["startupinfo"] = startupinfo
-    except Exception:
-        pass
-    try:
-        kwargs["creationflags"] = int(kwargs.get("creationflags", 0)) | int(
-            getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        )
-    except Exception:
-        pass
-    return kwargs
-
-
-def _run_subprocess_text(args: Sequence[str], **kwargs):
-    window_kwargs = _subprocess_window_kwargs()
-    for key, value in window_kwargs.items():
-        kwargs.setdefault(key, value)
-    completed = subprocess.run(args, capture_output=True, text=False, **kwargs)
-    completed.stdout = _decode_subprocess_output(getattr(completed, "stdout", b""))
-    completed.stderr = _decode_subprocess_output(getattr(completed, "stderr", b""))
-    return completed
-
-
-def _popen_subprocess(args: Sequence[str], **kwargs):
-    window_kwargs = _subprocess_window_kwargs()
-    for key, value in window_kwargs.items():
-        kwargs.setdefault(key, value)
-    return subprocess.Popen(args, **kwargs)
-
-
-def _contains_non_ascii(text):
-    try:
-        return any(ord(ch) > 127 for ch in str(text or ""))
-    except Exception:
-        return False
-
-
-def _path_requires_ascii_fallback(path: str) -> bool:
-    value = str(path or "")
-    if not value:
-        return False
-    if _contains_non_ascii(value):
-        return True
-    # cmd.exe launcher wrappers are fragile with these characters in root paths.
-    return any(ch in value for ch in "!&|<>()^")
-
-
-def _default_mfa_root_dir(mfa_path="", per_process: bool = False):
-    if getattr(sys, 'frozen', False):
-        app_dir = os.path.dirname(sys.executable)
-    elif mfa_path:
-        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(mfa_path)))
+            _add(app_dir)
+            _add(parent_dir)
     else:
-        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    root = os.path.join(app_dir, ".mfa_root_ascii")
-    if per_process:
-        root = f"{root}_p{os.getpid()}"
-    os.makedirs(root, exist_ok=True)
-    return root
+        source_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        _add(source_root)
+
+    local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
+    if local_app_data:
+        _add(os.path.join(local_app_data, "UTAU_Auto_OTO_v3"))
+        _add(os.path.join(local_app_data, "UTAU_Auto_OTO"))
+    else:
+        _add(os.path.join(os.path.expanduser("~"), "AppData", "Local", "UTAU_Auto_OTO_v3"))
+        _add(os.path.join(os.path.expanduser("~"), "AppData", "Local", "UTAU_Auto_OTO"))
+
+    public_root = str(os.environ.get("PUBLIC", r"C:\Users\Public") or r"C:\Users\Public").strip()
+    _add(os.path.join(public_root, "UTAU_Auto_OTO_v3"))
+    return roots
 
 
-def _seed_mfa_pretrained_models(dst_root: str, src_root: str) -> None:
-    """Ensure per-process MFA root contains pretrained_models copied from shared root."""
-    if not dst_root or not src_root:
-        return
-    try:
-        dst_root = os.path.abspath(dst_root)
-        src_root = os.path.abspath(src_root)
-        if dst_root == src_root:
-            return
-        src_models = os.path.join(src_root, "pretrained_models")
-        dst_models = os.path.join(dst_root, "pretrained_models")
-        if not os.path.isdir(src_models):
-            return
-        dst_acoustic = os.path.join(dst_models, "acoustic")
-        if os.path.isdir(dst_models) and os.path.isdir(dst_acoustic):
-            return
-        os.makedirs(dst_root, exist_ok=True)
-        shutil.copytree(src_models, dst_models, dirs_exist_ok=True)
-    except Exception as exc:
-        logger.warning(f"[MFA] Failed to seed pretrained_models: {exc}")
-
-
-def _resolve_env_python_exe(env_dir: str) -> str:
-    candidates = [
-        os.path.join(env_dir, "python.exe"),
-        os.path.join(env_dir, "Scripts", "python.exe"),
-        os.path.join(env_dir, "bin", "python"),
-    ]
+def _resolve_default_mfa_runtime_root() -> str:
+    candidates = _candidate_mfa_runtime_roots()
     for candidate in candidates:
-        if os.path.exists(candidate):
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            fd, probe = tempfile.mkstemp(prefix=".utoa_mfa_probe_", dir=candidate)
+            os.close(fd)
+            os.remove(probe)
             return candidate
-    return ""
-
-
-def _is_env_scripts_path(path: str) -> bool:
-    norm = str(path or "").replace("/", "\\").lower()
-    return "\\scripts\\" in norm
-
-
-def _candidate_shared_mfa_roots() -> list[str]:
-    roots: list[str] = []
-    env_override = str(os.environ.get("UTOA_MFA_SHARED_ROOT", "") or "").strip()
-    if env_override:
-        roots.append(env_override)
-    local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
-    if local_app_data:
-        roots.append(os.path.join(local_app_data, "UTAU_Auto_OTO_v3"))
-    else:
-        roots.append(os.path.join(os.path.expanduser("~"), "AppData", "Local", "UTAU_Auto_OTO_v3"))
-    public_base = str(os.environ.get("PUBLIC", "") or "").strip()
-    if not public_base:
-        system_drive = str(os.environ.get("SystemDrive", "C:") or "C:").strip() or "C:"
-        public_base = os.path.join(system_drive, "Users", "Public")
-    public_root = os.path.join(public_base, "UTAU_Auto_OTO_v3")
-    roots.append(public_root)
-
-    dedup: list[str] = []
-    seen = set()
-    for root in roots:
-        normalized = os.path.normcase(os.path.abspath(str(root or "")))
-        if not normalized or normalized in seen:
+        except Exception:
             continue
-        seen.add(normalized)
-        dedup.append(root)
-    return dedup
-
-
-def _is_writable_directory(path: str) -> bool:
-    try:
-        os.makedirs(path, exist_ok=True)
-        fd, probe = tempfile.mkstemp(prefix=".utoa_write_probe_", dir=path)
-        os.close(fd)
-        os.remove(probe)
-        return True
-    except Exception:
-        return False
-
-
-def _resolve_shared_mfa_root() -> str:
-    candidates = _candidate_shared_mfa_roots()
-    env_override = str(os.environ.get("UTOA_MFA_SHARED_ROOT", "") or "").strip()
-    if not env_override and len(candidates) >= 2:
-        local_candidate = candidates[0]
-        if _path_requires_ascii_fallback(local_candidate):
-            logger.info(
-                "[MFA] LOCALAPPDATA runtime path contains non-ASCII/shell-sensitive characters; "
-                "preferring ASCII-safe shared root."
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            logger.warning(
+                "[MFA] All writable paths failed; using existing directory '%s'. "
+                "MFA environment setup may fail if this path is read-only.",
+                candidate,
             )
-            candidates = candidates[1:] + [local_candidate]
-    for root in candidates:
-        if _is_writable_directory(root):
-            return root
-    return candidates[0] if candidates else os.path.join(os.path.expanduser("~"), "UTAU_Auto_OTO_v3")
-
-
-def _candidate_korean_wheel_dirs(mfa_path: str = "") -> list[str]:
-    candidates: list[str] = []
-    env_override = str(os.environ.get("UTOA_KO_WHEEL_DIR", "") or "").strip()
-    if env_override:
-        candidates.append(env_override)
-
-    if getattr(sys, 'frozen', False):
-        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-        candidates.extend(
-            [
-                os.path.join(exe_dir, KOREAN_WHEEL_DIRNAME),
-                os.path.join(os.path.dirname(exe_dir), KOREAN_WHEEL_DIRNAME),
-            ]
-        )
-
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    candidates.extend(
-        [
-            os.path.join(repo_root, KOREAN_WHEEL_DIRNAME),
-            os.path.join(repo_root, "build_assets", KOREAN_WHEEL_DIRNAME),
-        ]
+            return candidate
+    fallback = candidates[0] if candidates else os.path.join(r"C:\Users\Public", "UTAU_Auto_OTO_v3")
+    logger.warning(
+        "[MFA] No writable or existing runtime root found; falling back to '%s'. "
+        "MFA setup will likely fail. Check that LOCALAPPDATA is set and writable.",
+        fallback,
     )
-
-    if _is_env_scripts_path(mfa_path):
-        try:
-            env_dir = os.path.dirname(os.path.dirname(os.path.abspath(mfa_path)))
-            runtime_root = os.path.dirname(env_dir)
-            candidates.append(os.path.join(runtime_root, KOREAN_WHEEL_DIRNAME))
-        except Exception:
-            pass
-
-    dedup: list[str] = []
-    seen = set()
-    for path in candidates:
-        norm = os.path.normcase(os.path.abspath(str(path or "")))
-        if not norm or norm in seen:
-            continue
-        seen.add(norm)
-        dedup.append(path)
-    return dedup
-
-
-def _resolve_korean_wheel_dir(mfa_path: str = "") -> str:
-    for path in _candidate_korean_wheel_dirs(mfa_path):
-        if not os.path.isdir(path):
-            continue
-        try:
-            if any(name.lower().endswith(".whl") for name in os.listdir(path)):
-                return os.path.abspath(path)
-        except Exception:
-            continue
-    return ""
+    return fallback
 
 
 def get_default_mfa_env_dir():
-    return os.path.join(_resolve_shared_mfa_root(), ".env")
+    return os.path.join(_resolve_default_mfa_runtime_root(), ".env")
 
 
 def get_default_mfa_conda_root():
-    return os.path.join(_resolve_shared_mfa_root(), "miniconda")
+    return os.path.join(_resolve_default_mfa_runtime_root(), "miniconda")
 
 
 def get_default_mfa_micromamba_root():
-    return os.path.join(_resolve_shared_mfa_root(), "micromamba")
+    return os.path.join(_resolve_default_mfa_runtime_root(), "micromamba")
 
 
 def get_default_mfa_micromamba_exe():
@@ -1322,25 +343,34 @@ def _candidate_mfa_executable_paths():
         app_dir = os.path.dirname(sys.executable)
     else:
         app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    shared_env_dirs = [os.path.join(root, ".env") for root in _candidate_shared_mfa_roots()]
-    candidates = [
-        os.path.join(app_dir, '.env', 'Scripts', 'mfa.exe'),
-        os.path.join(app_dir, '.env', 'Scripts', 'mfa.bat'),
-        os.path.join(app_dir, '.env', 'Scripts', 'mfa.cmd'),
-        os.path.join(app_dir, '.env', 'bin', 'mfa'),
-        os.path.join(app_dir, 'env', 'Scripts', 'mfa.exe'),
-        os.path.join(app_dir, 'env', 'Scripts', 'mfa.bat'),
-        os.path.join(app_dir, 'env', 'Scripts', 'mfa.cmd'),
-    ]
-    for shared_env_dir in shared_env_dirs:
-        candidates.extend(
-            [
-                os.path.join(shared_env_dir, 'Scripts', 'mfa.exe'),
-                os.path.join(shared_env_dir, 'Scripts', 'mfa.bat'),
-                os.path.join(shared_env_dir, 'Scripts', 'mfa.cmd'),
-                os.path.join(shared_env_dir, 'bin', 'mfa'),
-            ]
-        )
+    parent_dir = os.path.dirname(app_dir)
+    shared_env_dir = get_default_mfa_env_dir()
+    env_candidates = [shared_env_dir]
+    # Prefer payload-root env in portable frozen layout.
+    if getattr(sys, 'frozen', False) and os.path.basename(app_dir).lower() in {"utau_auto_oto", "auto_oto"}:
+        env_candidates.extend([
+            os.path.join(parent_dir, '.env'),
+            os.path.join(parent_dir, 'env'),
+            os.path.join(app_dir, '.env'),
+            os.path.join(app_dir, 'env'),
+        ])
+    else:
+        env_candidates.extend([
+            os.path.join(app_dir, '.env'),
+            os.path.join(app_dir, 'env'),
+            os.path.join(parent_dir, '.env'),
+            os.path.join(parent_dir, 'env'),
+        ])
+    candidates = []
+    for env_dir in env_candidates:
+        if not env_dir:
+            continue
+        candidates.extend([
+            os.path.join(env_dir, 'Scripts', 'mfa.exe'),
+            os.path.join(env_dir, 'Scripts', 'mfa.bat'),
+            os.path.join(env_dir, 'Scripts', 'mfa.cmd'),
+            os.path.join(env_dir, 'bin', 'mfa'),
+        ])
     seen = set()
     unique = []
     for path in candidates:
@@ -1350,178 +380,6 @@ def _candidate_mfa_executable_paths():
         seen.add(key)
         unique.append(path)
     return unique
-
-
-def _is_mfa_launcher_failure_text(text: str) -> bool:
-    lowered = str(text or "").strip().lower()
-    if not lowered:
-        return False
-    failure_markers = (
-        "failed to create process",
-        "unable to create process",
-        "fatal error in launcher",
-        "could not import runpy",
-        "no python at",
-        "is not recognized as an internal or external command",
-    )
-    return any(marker in lowered for marker in failure_markers)
-
-
-def _probe_mfa_launcher(mfa_path: str) -> tuple[bool, str]:
-    path = os.path.abspath(str(mfa_path or "").strip())
-    if not path or not os.path.exists(path):
-        return False, "mfa launcher missing"
-    try:
-        env = _get_conda_env(path)
-        result = _run_subprocess_text(
-            [path, "--help"],
-            env=env,
-            timeout=30,
-        )
-        combined = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
-        if _is_mfa_launcher_failure_text(combined):
-            return False, combined
-        if result.returncode == 0:
-            return True, combined
-        lowered = combined.lower()
-        if "usage" in lowered and "mfa" in lowered:
-            return True, combined
-        return False, combined
-    except subprocess.TimeoutExpired as exc:
-        # Some sandbox/AV environments can make the launcher help probe very slow.
-        # Fall back to python module probe before marking launcher as broken.
-        msg = str(exc or "").strip() or "launcher probe timed out"
-        lowered = path.lower()
-        if "\\scripts\\" in lowered:
-            env_dir = os.path.dirname(os.path.dirname(path))
-            python_exe = _resolve_env_python_exe(env_dir)
-            if python_exe and os.path.exists(python_exe):
-                env = _get_conda_env(path)
-                probe_cmds = [
-                    [python_exe, "-m", "montreal_forced_aligner.command_line.mfa", "--help"],
-                    [python_exe, "-m", "montreal_forced_aligner", "--help"],
-                ]
-                for cmd in probe_cmds:
-                    try:
-                        py_res = _run_subprocess_text(cmd, env=env, timeout=25)
-                    except Exception:
-                        continue
-                    combined = f"{py_res.stdout or ''}\n{py_res.stderr or ''}".strip()
-                    if _is_mfa_launcher_failure_text(combined):
-                        continue
-                    if py_res.returncode == 0:
-                        return True, f"{msg}; python-module probe ok"
-                    low = combined.lower()
-                    if "usage" in low and "mfa" in low:
-                        return True, f"{msg}; python-module usage probe ok"
-        return False, msg
-    except Exception as exc:
-        msg = str(exc or "").strip()
-        return False, msg or "launcher probe failed"
-
-
-def _ensure_mfa_batch_wrapper(env_dir: str) -> str:
-    if sys.platform != "win32":
-        return ""
-    root = os.path.abspath(str(env_dir or "").strip())
-    if not root:
-        return ""
-    python_exe = _resolve_env_python_exe(root)
-    if not python_exe or not os.path.exists(python_exe):
-        return ""
-
-    wrapper_path = os.path.join(root, "Scripts", "mfa.bat")
-    try:
-        os.makedirs(os.path.dirname(wrapper_path), exist_ok=True)
-        with open(wrapper_path, "w", encoding="utf-8", newline="") as wf:
-            wf.write("@echo off\r\n")
-            # Keep wrapper ASCII-only and resolve env path relatively at runtime.
-            # This avoids launcher breakage on non-ASCII install roots.
-            wf.write('set "SCRIPT_DIR=%~dp0"\r\n')
-            wf.write('set "ENV_DIR=%SCRIPT_DIR%.."\r\n')
-            wf.write('for %%I in ("%ENV_DIR%") do set "ENV_DIR=%%~fI"\r\n')
-            wf.write('set "CONDA_PREFIX=%ENV_DIR%"\r\n')
-            wf.write(
-                'set "PATH=%ENV_DIR%;%ENV_DIR%\\Library\\mingw-w64\\bin;'
-                '%ENV_DIR%\\Library\\usr\\bin;%ENV_DIR%\\Library\\bin;'
-                '%ENV_DIR%\\Scripts;%ENV_DIR%\\bin;%PATH%"\r\n'
-            )
-            wf.write('set "MFA_SCRIPT_PATH=%SCRIPT_DIR%mfa-script.py"\r\n')
-            wf.write('set "MFA_ALT_SCRIPT_PATH=%SCRIPT_DIR%mfa.py"\r\n')
-            wf.write('set "ENV_PY=%ENV_DIR%\\python.exe"\r\n')
-            wf.write('if not exist "%ENV_PY%" set "ENV_PY=%ENV_DIR%\\Scripts\\python.exe"\r\n')
-            wf.write('if not exist "%ENV_PY%" set "ENV_PY=%ENV_DIR%\\bin\\python"\r\n')
-            wf.write("set \"_UTOA_MFA_EXIT=1\"\r\n")
-            wf.write('if exist "%MFA_SCRIPT_PATH%" (\r\n')
-            wf.write('  "%ENV_PY%" "%MFA_SCRIPT_PATH%" %*\r\n')
-            wf.write('  set "_UTOA_MFA_EXIT=%ERRORLEVEL%"\r\n')
-            wf.write(') else if exist "%MFA_ALT_SCRIPT_PATH%" (\r\n')
-            wf.write('  "%ENV_PY%" "%MFA_ALT_SCRIPT_PATH%" %*\r\n')
-            wf.write('  set "_UTOA_MFA_EXIT=%ERRORLEVEL%"\r\n')
-            wf.write(')\r\n')
-            wf.write("if not \"%_UTOA_MFA_EXIT%\"==\"0\" (\r\n")
-            wf.write('  "%ENV_PY%" -m montreal_forced_aligner.command_line.mfa %*\r\n')
-            wf.write("  set \"_UTOA_MFA_EXIT=%ERRORLEVEL%\"\r\n")
-            wf.write(")\r\n")
-            wf.write("if not \"%_UTOA_MFA_EXIT%\"==\"0\" (\r\n")
-            wf.write('  "%ENV_PY%" -m montreal_forced_aligner %*\r\n')
-            wf.write("  set \"_UTOA_MFA_EXIT=%ERRORLEVEL%\"\r\n")
-            wf.write(")\r\n")
-            wf.write("exit /b %_UTOA_MFA_EXIT%\r\n")
-        return wrapper_path
-    except Exception:
-        return ""
-
-
-def resolve_working_mfa_executable(mfa_path: str, callback=None) -> str:
-    path = os.path.abspath(str(mfa_path or "").strip())
-    if not path or not os.path.exists(path):
-        return path
-
-    def _emit(msg: str):
-        logger.info(msg)
-        if callback:
-            callback(msg)
-
-    healthy, detail = _probe_mfa_launcher(path)
-    if detail:
-        _emit(f"[MFA] launcher health check failed: {detail[:280]}")
-    if healthy:
-        detail_text = str(detail or "").strip()
-        if detail_text and "python-module probe ok" in detail_text.lower():
-            _emit(f"[MFA] launcher health check recovered via python module probe: {detail_text[:280]}")
-        lowered = path.lower()
-        # If launcher health was recovered only via python module probe,
-        # prefer the local batch wrapper to avoid fragile native launcher paths.
-        if (
-            sys.platform == "win32"
-            and lowered.endswith("mfa.exe")
-            and "\\scripts\\" in lowered
-            and "python-module probe ok" in str(detail or "").lower()
-        ):
-            env_dir = os.path.dirname(os.path.dirname(path))
-            wrapper = _ensure_mfa_batch_wrapper(env_dir)
-            if wrapper and os.path.exists(wrapper):
-                _emit(f"[MFA] launcher fallback switched to python wrapper: {wrapper}")
-                return wrapper
-        return path
-
-    if detail:
-        _emit(f"[MFA] launcher health check failed: {detail[:280]}")
-
-    lowered = path.lower()
-    if sys.platform == "win32" and lowered.endswith("mfa.exe") and "\\scripts\\" in lowered:
-        env_dir = os.path.dirname(os.path.dirname(path))
-        wrapper = _ensure_mfa_batch_wrapper(env_dir)
-        if wrapper and os.path.exists(wrapper):
-            wrapper_ok, wrapper_detail = _probe_mfa_launcher(wrapper)
-            if wrapper_ok:
-                _emit(f"[MFA] mfa.exe launcher fallback enabled: {wrapper}")
-                return wrapper
-            if wrapper_detail:
-                _emit(f"[MFA] mfa.bat launcher check failed: {wrapper_detail[:280]}")
-
-    return path
 
 
 def _link_or_copy(src, dst):
@@ -1534,260 +392,214 @@ def _link_or_copy(src, dst):
         shutil.copy2(src, dst)
 
 
-def _parse_bool_env(name: str, default: bool) -> bool:
+def _env_bool(name: str, default: bool = False) -> bool:
     raw = str(os.environ.get(name, "") or "").strip().lower()
     if not raw:
         return bool(default)
-    if raw in {"1", "true", "yes", "on", "y"}:
+    if raw in {"1", "true", "yes", "on"}:
         return True
-    if raw in {"0", "false", "no", "off", "n"}:
+    if raw in {"0", "false", "no", "off"}:
         return False
     return bool(default)
 
 
-def _parse_float_env(name: str, default: float) -> float:
+def _env_float(name: str, default: float) -> float:
     raw = str(os.environ.get(name, "") or "").strip()
     if not raw:
         return float(default)
     try:
-        return float(raw)
+        value = float(raw)
     except Exception:
         return float(default)
+    if not np.isfinite(value):
+        return float(default)
+    return float(value)
 
 
-def _resolve_low_rms_gain_config() -> dict:
-    enabled = _parse_bool_env("UTOA_MFA_LOW_RMS_GAIN_ENABLE", True)
-    threshold_db = _parse_float_env("UTOA_MFA_LOW_RMS_THRESHOLD_DB", -24.0)
-    target_db = _parse_float_env("UTOA_MFA_LOW_RMS_TARGET_DB", -16.0)
-    max_gain_db = _parse_float_env("UTOA_MFA_LOW_RMS_MAX_GAIN_DB", 18.0)
-    peak_ceiling_db = _parse_float_env("UTOA_MFA_LOW_RMS_PEAK_CEILING_DB", -1.0)
-    weak_voice_assist_enabled = _parse_bool_env("UTOA_MFA_WEAK_VOICE_ASSIST_ENABLE", True)
-    weak_voice_trigger_db = _parse_float_env("UTOA_MFA_WEAK_VOICE_TRIGGER_DB", -23.0)
-    weak_voice_alpha = _parse_float_env("UTOA_MFA_WEAK_VOICE_PREEMPH_ALPHA", 0.92)
-    weak_voice_mix = _parse_float_env("UTOA_MFA_WEAK_VOICE_PREEMPH_MIX", 0.35)
-
-    threshold_db = max(-80.0, min(0.0, threshold_db))
-    target_db = max(-40.0, min(-1.0, target_db))
-    max_gain_db = max(0.0, min(24.0, max_gain_db))
-    peak_ceiling_db = max(-12.0, min(-0.1, peak_ceiling_db))
-    weak_voice_trigger_db = max(-80.0, min(-6.0, weak_voice_trigger_db))
-    weak_voice_alpha = max(0.0, min(0.99, weak_voice_alpha))
-    weak_voice_mix = max(0.0, min(1.0, weak_voice_mix))
-
-    return {
-        "enabled": bool(enabled),
-        "threshold_db": float(threshold_db),
-        "target_db": float(target_db),
-        "max_gain_db": float(max_gain_db),
-        "peak_ceiling_db": float(peak_ceiling_db),
-        "weak_voice_assist_enabled": bool(weak_voice_assist_enabled),
-        "weak_voice_trigger_db": float(weak_voice_trigger_db),
-        "weak_voice_alpha": float(weak_voice_alpha),
-        "weak_voice_mix": float(weak_voice_mix),
-    }
+def _mfa_audio_preprocess_required() -> bool:
+    low_rms = _env_bool("UTOA_MFA_LOW_RMS_GAIN_ENABLE", default=False)
+    weak = _env_bool("UTOA_MFA_WEAK_VOICE_ASSIST_ENABLE", default=False)
+    return bool(low_rms or weak)
 
 
-def _dbfs(value: float, floor: float = 1e-8) -> float:
-    return 20.0 * math.log10(max(float(value), float(floor)))
+def _read_wav_float(path: str) -> tuple[np.ndarray, dict]:
+    with wave.open(path, "rb") as wf:
+        channels = int(wf.getnchannels() or 1)
+        sampwidth = int(wf.getsampwidth() or 2)
+        framerate = int(wf.getframerate() or 44100)
+        comptype = str(wf.getcomptype() or "NONE")
+        compname = str(wf.getcompname() or "not compressed")
+        nframes = int(wf.getnframes() or 0)
+        raw = wf.readframes(nframes)
 
+    if nframes <= 0:
+        meta = {
+            "channels": channels,
+            "sampwidth": sampwidth,
+            "framerate": framerate,
+            "comptype": comptype,
+            "compname": compname,
+        }
+        return np.zeros((0, max(1, channels)), dtype=np.float32), meta
 
-def _pcm_full_scale(sampwidth: int) -> float:
-    if sampwidth <= 1:
-        return 127.0
-    return float((1 << ((int(sampwidth) * 8) - 1)) - 1)
-
-
-def _apply_pcm_gain(raw: bytes, sampwidth: int, gain_lin: float) -> bytes:
-    gain = float(gain_lin)
-    if abs(gain - 1.0) < 1e-6:
-        return raw
     if sampwidth == 1:
-        centered = audioop.bias(raw, 1, -128)
-        scaled = audioop.mul(centered, 1, gain)
-        return audioop.bias(scaled, 1, 128)
-    return audioop.mul(raw, int(sampwidth), gain)
+        data = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
+        data = (data - 128.0) / 128.0
+    elif sampwidth == 2:
+        data = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    elif sampwidth == 3:
+        data_u8 = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3)
+        data_i32 = (
+            data_u8[:, 0].astype(np.int32)
+            | (data_u8[:, 1].astype(np.int32) << 8)
+            | (data_u8[:, 2].astype(np.int32) << 16)
+        )
+        sign_bit = 1 << 23
+        data_i32 = (data_i32 ^ sign_bit) - sign_bit
+        data = data_i32.astype(np.float32) / float(1 << 23)
+    elif sampwidth == 4:
+        data = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / float(1 << 31)
+    else:
+        raise ValueError(f"Unsupported WAV sample width: {sampwidth}")
 
+    if channels > 1:
+        usable = (data.shape[0] // channels) * channels
+        data = data[:usable].reshape(-1, channels)
+    else:
+        data = data.reshape(-1, 1)
 
-def _pcm_sample_bounds(sampwidth: int) -> tuple[int, int]:
-    if sampwidth == 1:
-        return -128, 127
-    bits = int(sampwidth) * 8
-    hi = (1 << (bits - 1)) - 1
-    lo = -(1 << (bits - 1))
-    return lo, hi
-
-
-def _apply_preemphasis_pcm(raw: bytes, sampwidth: int, n_channels: int, alpha: float, mix: float) -> tuple[bytes, bool]:
-    if not raw or sampwidth <= 0 or n_channels <= 0:
-        return raw, False
-    frame_bytes = int(sampwidth) * int(n_channels)
-    if frame_bytes <= 0 or len(raw) % frame_bytes != 0:
-        return raw, False
-    lo, hi = _pcm_sample_bounds(sampwidth)
-    prev = [0.0] * int(n_channels)
-    out = bytearray()
-    try:
-        mv = memoryview(raw)
-        for frame_start in range(0, len(raw), frame_bytes):
-            for ch in range(int(n_channels)):
-                pos = frame_start + (ch * int(sampwidth))
-                if sampwidth == 1:
-                    x = int(mv[pos]) - 128
-                else:
-                    x = int.from_bytes(bytes(mv[pos:pos + int(sampwidth)]), "little", signed=True)
-                y = float(x) - (float(alpha) * prev[ch])
-                prev[ch] = float(x)
-                z = ((1.0 - float(mix)) * float(x)) + (float(mix) * y)
-                iv = int(round(z))
-                if iv < lo:
-                    iv = lo
-                elif iv > hi:
-                    iv = hi
-                if sampwidth == 1:
-                    out.append(iv + 128)
-                else:
-                    out.extend(int(iv).to_bytes(int(sampwidth), "little", signed=True))
-        return bytes(out), True
-    except Exception:
-        return raw, False
-
-
-def _copy_wav_with_low_rms_gain(src: str, dst: str, cfg: dict) -> dict:
-    result = {
-        "ok": False,
-        "boosted": False,
-        "weak_assist": False,
-        "reason": "",
-        "rms_db_before": None,
-        "gain_db_applied": 0.0,
+    meta = {
+        "channels": channels,
+        "sampwidth": sampwidth,
+        "framerate": framerate,
+        "comptype": comptype,
+        "compname": compname,
     }
-    try:
-        src_abs = os.path.normcase(os.path.abspath(str(src or "")))
-        dst_abs = os.path.normcase(os.path.abspath(str(dst or "")))
-    except Exception:
-        src_abs = str(src or "")
-        dst_abs = str(dst or "")
-    if src_abs and dst_abs and src_abs == dst_abs:
-        # Safety guard: never write gain-processed audio back to original source path.
-        result["ok"] = True
-        result["reason"] = "src_equals_dst_blocked"
-        return result
-    try:
-        with wave.open(src, "rb") as rf:
-            params = rf.getparams()
-            n_channels = int(params.nchannels or 0)
-            sampwidth = int(params.sampwidth or 0)
-            comptype = str(params.comptype or "NONE").upper()
-            raw = rf.readframes(int(params.nframes or 0))
-    except Exception:
-        _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "wav_read_failed_passthrough"
-        return result
+    return np.clip(data.astype(np.float32), -1.0, 1.0), meta
 
-    if comptype != "NONE" or sampwidth <= 0 or sampwidth > 4 or n_channels <= 0:
-        _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "unsupported_wav_passthrough"
-        return result
-    if not raw:
-        _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "empty_wav_passthrough"
-        return result
 
-    try:
-        if n_channels == 1:
-            mono = raw
-        elif n_channels == 2:
-            mono = audioop.tomono(raw, sampwidth, 0.5, 0.5)
+def _write_wav_float(path: str, audio: np.ndarray, meta: dict) -> None:
+    arr = np.asarray(audio, dtype=np.float32)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    arr = np.clip(arr, -1.0, 1.0)
+
+    channels = int(meta.get("channels", 1) or 1)
+    sampwidth = int(meta.get("sampwidth", 2) or 2)
+    framerate = int(meta.get("framerate", 44100) or 44100)
+    comptype = str(meta.get("comptype", "NONE") or "NONE")
+    compname = str(meta.get("compname", "not compressed") or "not compressed")
+
+    if arr.shape[1] != channels:
+        if channels <= 1:
+            arr = np.mean(arr, axis=1, keepdims=True)
+            channels = 1
         else:
-            _link_or_copy(src, dst)
-            result["ok"] = True
-            result["reason"] = "multichannel_passthrough"
-            return result
-        rms = float(audioop.rms(mono, sampwidth))
-    except Exception:
+            arr = np.tile(np.mean(arr, axis=1, keepdims=True), (1, channels))
+
+    flat = arr.reshape(-1)
+    if sampwidth == 1:
+        pcm = np.clip(np.round((flat * 128.0) + 128.0), 0, 255).astype(np.uint8).tobytes()
+    elif sampwidth == 2:
+        pcm = np.clip(np.round(flat * 32768.0), -32768, 32767).astype(np.int16).tobytes()
+    elif sampwidth == 3:
+        ints = np.clip(np.round(flat * float(1 << 23)), -(1 << 23), (1 << 23) - 1).astype(np.int32)
+        packed = np.empty((ints.size, 3), dtype=np.uint8)
+        packed[:, 0] = (ints & 0xFF).astype(np.uint8)
+        packed[:, 1] = ((ints >> 8) & 0xFF).astype(np.uint8)
+        packed[:, 2] = ((ints >> 16) & 0xFF).astype(np.uint8)
+        pcm = packed.tobytes()
+    elif sampwidth == 4:
+        pcm = np.clip(np.round(flat * float(1 << 31)), -(1 << 31), (1 << 31) - 1).astype(np.int32).tobytes()
+    else:
+        raise ValueError(f"Unsupported WAV sample width: {sampwidth}")
+
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(int(channels))
+        wf.setsampwidth(int(sampwidth))
+        wf.setframerate(int(framerate))
+        try:
+            wf.setcomptype(comptype, compname)
+        except Exception:
+            pass
+        wf.writeframes(pcm)
+
+
+def _preprocess_alignment_wav(src: str, dst: str) -> tuple[bool, str]:
+    low_rms = _env_bool("UTOA_MFA_LOW_RMS_GAIN_ENABLE", default=False)
+    weak_assist = _env_bool("UTOA_MFA_WEAK_VOICE_ASSIST_ENABLE", default=False)
+    if not (low_rms or weak_assist):
         _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "rms_probe_failed_passthrough"
-        return result
-
-    if rms <= 0.0:
-        _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "silent_passthrough"
-        return result
-
-    full_scale = _pcm_full_scale(sampwidth)
-    rms_db = _dbfs(rms / full_scale)
-    result["rms_db_before"] = float(rms_db)
-
-    threshold_db = float(cfg.get("threshold_db", -24.0))
-    target_db = float(cfg.get("target_db", -16.0))
-    max_gain_db = float(cfg.get("max_gain_db", 18.0))
-    peak_ceiling_db = float(cfg.get("peak_ceiling_db", -1.0))
-    weak_voice_assist_enabled = bool(cfg.get("weak_voice_assist_enabled", True))
-    weak_voice_trigger_db = float(cfg.get("weak_voice_trigger_db", -23.0))
-    weak_voice_alpha = float(cfg.get("weak_voice_alpha", 0.92))
-    weak_voice_mix = float(cfg.get("weak_voice_mix", 0.35))
-
-    if rms_db >= threshold_db:
-        _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "above_threshold_passthrough"
-        return result
-
-    gain_db = min(max_gain_db, max(0.0, target_db - rms_db))
-    if gain_db <= 1e-4:
-        _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "no_gain_needed_passthrough"
-        return result
+        return True, "copied"
 
     try:
-        processed = _apply_pcm_gain(raw, sampwidth, 10.0 ** (gain_db / 20.0))
-        if weak_voice_assist_enabled and rms_db <= weak_voice_trigger_db:
-            processed, assisted = _apply_preemphasis_pcm(
-                processed,
-                sampwidth,
-                n_channels,
-                alpha=weak_voice_alpha,
-                mix=weak_voice_mix,
-            )
-            if assisted:
-                result["weak_assist"] = True
-        peak = float(audioop.max(processed, sampwidth))
-        peak_db = _dbfs(peak / full_scale) if peak > 0 else -120.0
-        if peak_db > peak_ceiling_db:
-            reduce_db = peak_ceiling_db - peak_db
-            processed = _apply_pcm_gain(processed, sampwidth, 10.0 ** (reduce_db / 20.0))
-            gain_db += reduce_db
-
-        os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
-        with wave.open(dst, "wb") as wf:
-            wf.setparams(params)
-            wf.writeframes(processed)
-        result["ok"] = True
-        result["boosted"] = True
-        result["reason"] = "boosted"
-        result["gain_db_applied"] = float(gain_db)
-        return result
-    except Exception:
+        audio, meta = _read_wav_float(src)
+    except Exception as exc:
         _link_or_copy(src, dst)
-        result["ok"] = True
-        result["reason"] = "gain_apply_failed_passthrough"
-        return result
+        return False, f"read failed: {exc}"
+
+    if audio.size <= 0:
+        try:
+            _write_wav_float(dst, audio, meta)
+            return True, "empty"
+        except Exception as exc:
+            _link_or_copy(src, dst)
+            return False, f"write empty failed: {exc}"
+
+    x = np.asarray(audio, dtype=np.float32)
+    mono = np.mean(x, axis=1)
+    base_rms = float(np.sqrt(np.mean(np.square(mono), dtype=np.float64)))
+
+    if low_rms and base_rms > 1e-8:
+        target_rms = _env_float("UTOA_MFA_LOW_RMS_TARGET", 0.11)
+        target_rms = max(0.02, min(0.30, target_rms))
+        max_gain_db = _env_float("UTOA_MFA_LOW_RMS_MAX_GAIN_DB", 14.0)
+        max_gain = 10.0 ** (max(0.0, min(30.0, max_gain_db)) / 20.0)
+        if base_rms < target_rms:
+            gain = min(target_rms / max(base_rms, 1e-8), max_gain)
+            x = x * float(gain)
+
+    if weak_assist:
+        mix = _env_float("UTOA_MFA_WEAK_VOICE_PREEMPH_MIX", 0.35)
+        mix = max(0.0, min(1.0, mix))
+        coeff = _env_float("UTOA_MFA_WEAK_VOICE_PREEMPH_COEFF", 0.97)
+        coeff = max(0.0, min(0.99, coeff))
+        if mix > 1e-6:
+            pre = x.copy()
+            pre[1:, :] = x[1:, :] - (coeff * x[:-1, :])
+            pre[0, :] = x[0, :]
+            x = ((1.0 - mix) * x) + (mix * pre)
+            # Keep RMS stable after spectral tilt.
+            out_rms = float(np.sqrt(np.mean(np.square(np.mean(x, axis=1)), dtype=np.float64)))
+            if out_rms > 1e-8 and base_rms > 1e-8:
+                x = x * float(base_rms / out_rms)
+
+    x = np.clip(x, -1.0, 1.0).astype(np.float32)
+    try:
+        _write_wav_float(dst, x, meta)
+        return True, "processed"
+    except Exception as exc:
+        _link_or_copy(src, dst)
+        return False, f"write failed: {exc}"
 
 
-def _prepare_ascii_safe_alignment_workspace(wav_folder, dict_path, output_folder, *, wav_gain_config=None):
+def _prepare_ascii_safe_alignment_workspace(
+    wav_folder,
+    dict_path,
+    output_folder,
+    temp_root: str = "",
+    callback=None,
+):
     token_src = "|".join([
         os.path.abspath(wav_folder or ""),
         os.path.abspath(dict_path or ""),
         os.path.abspath(output_folder or ""),
+        "prep=1" if _mfa_audio_preprocess_required() else "prep=0",
     ])
     token = hashlib.sha1(token_src.encode("utf-8", errors="replace")).hexdigest()[:12]
-    base = os.path.join(tempfile.gettempdir(), "utoa_mfa_ascii", token)
+    root_dir = str(temp_root or tempfile.gettempdir())
+    base = os.path.join(root_dir, "utoa_mfa_ascii", token)
     if os.path.isdir(base):
         shutil.rmtree(base, ignore_errors=True)
     corpus_dir = os.path.join(base, "corpus")
@@ -1797,36 +609,30 @@ def _prepare_ascii_safe_alignment_workspace(wav_folder, dict_path, output_folder
     os.makedirs(dict_dir, exist_ok=True)
     os.makedirs(out_dir, exist_ok=True)
 
-    wav_gain_enabled = bool((wav_gain_config or {}).get("enabled", False))
-    wav_gain_stats = {
-        "enabled": wav_gain_enabled,
-        "scanned": 0,
-        "boosted": 0,
-        "weak_assist": 0,
-        "passthrough": 0,
-    }
-
+    preprocess_enabled = _mfa_audio_preprocess_required()
+    wav_total = 0
+    wav_processed = 0
+    wav_failed = 0
     for fn in os.listdir(wav_folder):
         low = fn.lower()
-        src = os.path.join(wav_folder, fn)
-        if not os.path.isfile(src):
-            continue
-        if low.endswith(".wav"):
-            dst = os.path.join(corpus_dir, fn)
-            if wav_gain_enabled:
-                wav_gain_stats["scanned"] += 1
-                outcome = _copy_wav_with_low_rms_gain(src, dst, wav_gain_config or {})
-                if outcome.get("boosted"):
-                    wav_gain_stats["boosted"] += 1
-                else:
-                    wav_gain_stats["passthrough"] += 1
-                if outcome.get("weak_assist"):
-                    wav_gain_stats["weak_assist"] += 1
-            else:
-                _link_or_copy(src, dst)
-        elif low.endswith(".lab") or low.endswith(".txt"):
+        if low.endswith(".wav") or low.endswith(".lab") or low.endswith(".txt"):
+            src = os.path.join(wav_folder, fn)
             if os.path.isfile(src):
-                _link_or_copy(src, os.path.join(corpus_dir, fn))
+                dst = os.path.join(corpus_dir, fn)
+                if low.endswith(".wav") and preprocess_enabled:
+                    wav_total += 1
+                    ok, reason = _preprocess_alignment_wav(src, dst)
+                    if ok and reason == "processed":
+                        wav_processed += 1
+                    elif not ok:
+                        wav_failed += 1
+                        if callback:
+                            try:
+                                callback(f"[MFA][AudioPrep] fallback copy: {fn} ({reason})")
+                            except Exception:
+                                pass
+                else:
+                    _link_or_copy(src, dst)
 
     ext = os.path.splitext(dict_path)[1] or ".txt"
     safe_dict_path = os.path.join(dict_dir, f"dictionary{ext}")
@@ -1836,7 +642,10 @@ def _prepare_ascii_safe_alignment_workspace(wav_folder, dict_path, output_folder
         "corpus_dir": corpus_dir,
         "dict_path": safe_dict_path,
         "output_dir": out_dir,
-        "wav_gain_stats": wav_gain_stats,
+        "audio_preprocess_enabled": preprocess_enabled,
+        "audio_preprocess_total": wav_total,
+        "audio_preprocess_applied": wav_processed,
+        "audio_preprocess_failed": wav_failed,
     }
 
 
@@ -1869,7 +678,7 @@ def _stderr_has_msvc_requirement(text):
 def _emit_msvc_required_notice(callback, log_fn):
     if callback:
         callback(ALERT_MSVC_REQUIRED)
-    log_fn("⚠ 일부 의존성 설치에 실패했습니다. 사용은 가능하지만 정확도에 영향이 있을 수 있으니 C++ 툴을 설치해주세요.")
+    log_fn("오류: Microsoft Visual C++ 14.0+ (C++ Build Tools)가 필요합니다.")
     log_fn("   설치 링크: https://visualstudio.microsoft.com/visual-cpp-build-tools/")
 
 
@@ -1894,6 +703,18 @@ def get_mfa_env_python_version(mfa_path: str) -> str:
         return ""
     try:
         env = _get_conda_env(mfa_path)
+        pip_common_args = ['--no-cache-dir', '--disable-pip-version-check', '--retries', '5', '--timeout', '120']
+        trusted_hosts = [
+            '--trusted-host', 'pypi.org',
+            '--trusted-host', 'files.pythonhosted.org',
+            '--trusted-host', 'pypi.python.org',
+        ]
+
+        def _looks_like_tls_error(msg):
+            text = (msg or '').lower()
+            return (
+                'ssl' in text and ('certificate' in text or 'secure channel' in text or 'tls' in text)
+            ) or ('certificate verify failed' in text)
         result = _run_subprocess_text(
             [
                 python_exe,
@@ -1915,32 +736,53 @@ def mfa_env_requires_python_downgrade(mfa_path: str) -> bool:
 
 
 def _preflight_compute_mfcc(mfa_path, callback=None):
-    """MFA 정렬 시작 전에 compute-mfcc-feats 실행 가능 여부를 점검합니다."""
+    """MFA 정렬 전에 compute-mfcc-feats 실행 가능 여부를 점검한다."""
     def log(msg):
         logger.info(msg)
         if callback:
             callback(msg)
 
     if not mfa_path:
-        return False, "MFA 실행 파일 경로가 비어 있습니다."
+        return False, "MFA 실행 파일을 찾을 수 없습니다."
 
     env = _get_conda_env(mfa_path)
     candidates = []
-    if sys.platform == 'win32' and _is_env_scripts_path(mfa_path):
+    if sys.platform == 'win32' and 'Scripts' in mfa_path:
         env_dir = os.path.dirname(os.path.dirname(mfa_path))
         candidates.append(os.path.join(env_dir, 'Library', 'bin', 'compute-mfcc-feats.exe'))
         candidates.append('compute-mfcc-feats.exe')
     candidates.append('compute-mfcc-feats')
 
+    strict_preflight_gate = str(os.environ.get("UTOA_STRICT_MFA_PREFLIGHT", "0") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    soft_permission_gate = str(os.environ.get("UTOA_MFA_SOFT_PERMISSION", "1") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    try:
+        soft_permission_retry_limit = max(0, int(str(os.environ.get("UTOA_MFA_SOFT_PERMISSION_RETRY_LIMIT", "1") or "1")))
+    except Exception:
+        soft_permission_retry_limit = 1
     last_not_found = None
     for candidate in candidates:
         try:
-            # Windows + Python 3.13 조합에서는 확장자 없는 실행명 검색이 실패할 수 있다.
-            _run_subprocess_text(
+            # Windows 환경에서는 실행 파일 존재/권한을 우선 점검한다.
+            subprocess.run(
                 [candidate, '--help'],
+                capture_output=True,
+                text=False,
                 timeout=15,
                 env=env,
             )
+            cache_key = os.path.normcase(os.path.abspath(str(mfa_path or "")))
+            if cache_key in _MFA_PERMISSION_SOFT_RETRY_CACHE:
+                _MFA_PERMISSION_SOFT_RETRY_CACHE.pop(cache_key, None)
             return True, ""
         except FileNotFoundError as e:
             last_not_found = e
@@ -1949,25 +791,44 @@ def _preflight_compute_mfcc(mfa_path, callback=None):
             if callback:
                 callback(ALERT_MFA_PERMISSION_DENIED)
             err = (
-                "compute-mfcc-feats 실행 권한이 없어 MFA 정렬을 시작할 수 없습니다. "
+                "compute-mfcc-feats 실행 권한이 없어 MFA 정렬을 진행할 수 없습니다. "
                 "(WinError 5: Access denied)"
             )
-            log(f"❌ {err}")
-            log("   보안 프로그램/권한 정책/파일 차단 여부를 확인해 주세요.")
+            log(f"오류: {err}")
+            log("   백신/보안 정책 또는 폴더 권한을 확인한 뒤 다시 시도해 주세요.")
+            if not strict_preflight_gate and soft_permission_gate:
+                cache_key = os.path.normcase(os.path.abspath(str(mfa_path or "")))
+                retry_count = int(_MFA_PERMISSION_SOFT_RETRY_CACHE.get(cache_key, 0)) + 1
+                _MFA_PERMISSION_SOFT_RETRY_CACHE[cache_key] = retry_count
+                if retry_count <= soft_permission_retry_limit:
+                    log(
+                        f"[MFA] preflight soft-gate: 권한 오류를 경고로 전환하고 정렬 실행을 시도합니다. "
+                        f"(soft retry {retry_count}/{soft_permission_retry_limit})"
+                    )
+                    return True, ""
+                log(
+                    f"[MFA] preflight soft-gate limit exceeded: 동일 권한 오류가 반복되어 하드 실패로 전환합니다. "
+                    f"(limit={soft_permission_retry_limit})"
+                )
             return False, f"{err}: {e}"
         except Exception as e:
-            err = f"compute-mfcc-feats 사전 점검 중 오류: {e}"
-            log(f"❌ {err}")
-            return False, err
+            err = f"compute-mfcc-feats 점검 중 예외가 발생했습니다: {e}"
+            log(f"오류: {err}")
+            if strict_preflight_gate:
+                return False, err
+            log("[MFA] preflight soft-gate: 점검 예외를 경고로 전환하고 정렬 실행을 시도합니다.")
+            return True, ""
 
-    err = "compute-mfcc-feats를 찾지 못했습니다. MFA 환경이 손상되었을 수 있습니다."
-    log(f"❌ {err}")
+    err = "compute-mfcc-feats를 찾지 못했습니다. MFA 환경 복구 또는 재설치를 시도해 주세요."
+    log(f"오류: {err}")
+    if not strict_preflight_gate:
+        log("[MFA] preflight soft-gate: compute-mfcc-feats 미탐지 상태로 정렬 실행을 시도합니다.")
+        return True, ""
     if last_not_found:
         return False, f"{err}: {last_not_found}"
     return False, err
 
-
-def _validate_alignment_dictionary(dict_path: str, callback=None):
+def _validate_alignment_dictionary(dict_path: str, callback=None, soft: bool = False):
     """Validate MFA dictionary rows before native graph compilation."""
     def log(msg):
         logger.info(msg)
@@ -1985,25 +846,47 @@ def _validate_alignment_dictionary(dict_path: str, callback=None):
         return False, f"Failed to read dictionary: {e}"
 
     bad_lines = []
+    valid_lines = []
     total = 0
     for idx, line in enumerate(str(text or "").splitlines(), start=1):
         row = str(line or "").strip()
         if not row or row.startswith("#"):
+            valid_lines.append(line)
             continue
         total += 1
         parts = row.split()
         # Expected: <word> <phone1> [phone2 ...]
         if len(parts) < 2 or "\ufffd" in row:
             bad_lines.append((idx, row))
+            continue
+        valid_lines.append(line)
 
     if bad_lines:
+        valid_count = max(total - len(bad_lines), 0)
         samples = "; ".join(f"{ln}:{txt[:40]}" for ln, txt in bad_lines[:5])
         err = (
             f"Dictionary malformed rows detected ({len(bad_lines)}/{max(total, 1)}). "
             f"examples={samples}"
         )
-        log(err)
-        return False, err
+        if (not soft) or valid_count <= 0:
+            log(err)
+            if valid_count <= 0:
+                log("[MFA] 해결 방법: 사전을 다시 생성하거나, 각 행이 '<word> <phone...>' 형식인지 확인해 주세요.")
+            return False, err
+        try:
+            backup_path = f"{dict_path}.bak"
+            if not os.path.exists(backup_path):
+                shutil.copy2(dict_path, backup_path)
+                log(f"[MFA] dictionary backup saved: {backup_path}")
+            with open(dict_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write("\n".join(valid_lines).rstrip() + "\n")
+            log(f"[MFA] soft dictionary validation applied: dropped={len(bad_lines)}/{max(total, 1)} rows")
+            log(f"[MFA] dropped row samples: {samples}")
+            log("[MFA] 해결 방법: Lab/사전 생성 단계를 다시 실행하거나 인코딩(UTF-8) 및 발음 열 형식을 점검해 주세요.")
+            return True, f"Dictionary had malformed rows; dropped {len(bad_lines)} row(s) in soft mode."
+        except Exception as e:
+            log(f"{err} | soft repair failed: {e}")
+            return False, f"{err} | soft repair failed: {e}"
     return True, ""
 
 
@@ -2048,26 +931,28 @@ def _sanitize_alignment_dictionary_for_mfa(dict_path: str, callback=None):
 
 def _get_conda_env(mfa_path):
     """
-    Windows 환경에서 Conda 활성화 없이 mfa.exe를 직접 호출할 때 
-    DLL 로드 에러(코드 3228369023)가 발생하는 것을 막기 위해 환경 변수에 PATH를 주입합니다.
+    Build subprocess environment for MFA runtime.
+    On Windows, prepend env-specific binary directories to PATH to avoid DLL load errors.
     """
     env = os.environ.copy()
-    # Avoid inheriting parent interpreter settings that can break env-local python imports.
-    for key in (
-        'PYTHONHOME',
-        'PYTHONPATH',
-        'PYTHONSTARTUP',
-        'PYTHONUSERBASE',
-        'VIRTUAL_ENV',
-        '__PYVENV_LAUNCHER__',
+    # Frozen launcher state can leak host Python vars into subprocesses and
+    # break ensurepip/pip module resolution inside the MFA env.
+    for leaked_key in (
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONEXECUTABLE",
+        "__PYVENV_LAUNCHER__",
+        "VIRTUAL_ENV",
+        "CONDA_DEFAULT_ENV",
+        "CONDA_PROMPT_MODIFIER",
     ):
-        env.pop(key, None)
-    env.setdefault('PYTHONNOUSERSITE', '1')
-    if sys.platform == 'win32' and _is_env_scripts_path(mfa_path):
+        env.pop(leaked_key, None)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    if sys.platform == 'win32' and mfa_path and 'Scripts' in mfa_path:
         mfa_path = os.path.abspath(mfa_path)
         env_dir = os.path.abspath(os.path.dirname(os.path.dirname(mfa_path)))
         site_packages = os.path.join(env_dir, 'Lib', 'site-packages')
-        eunjeon_data = os.path.join(site_packages, 'eunjeon', 'data')
         mecabrc = os.path.join(site_packages, 'mecabrc')
         new_paths = [
             env_dir,
@@ -2079,8 +964,6 @@ def _get_conda_env(mfa_path):
         ]
         if os.path.isdir(site_packages):
             new_paths.append(site_packages)
-        if os.path.isdir(eunjeon_data):
-            new_paths.append(eunjeon_data)
         current_path = env.get('PATH', '')
         env['PATH'] = os.pathsep.join(new_paths) + os.pathsep + current_path
         env['CONDA_PREFIX'] = env_dir
@@ -2096,94 +979,359 @@ def _get_conda_env(mfa_path):
     return env
 
 
-def _safe_env_subprocess_cwd(env_dir: str) -> str | None:
-    candidate = os.path.abspath(str(env_dir or "").strip())
-    if candidate and os.path.isdir(candidate):
-        return candidate
-    return None
-
-
-def _check_env_imports(python_exe: str, env: dict, import_expr: str, env_dir: str = ""):
-    res = _run_subprocess_text(
-        [python_exe, '-c', import_expr],
-        env=env,
-        cwd=_safe_env_subprocess_cwd(env_dir),
-    )
+def _check_env_imports(python_exe: str, env: dict, import_expr: str):
+    res = _run_subprocess_text([python_exe, '-c', import_expr], env=env)
     if res.returncode == 0:
         return True, ''
     detail = (res.stderr or res.stdout or '').strip()
     return False, detail
 
 
-def _check_packaging_stack(python_exe: str, env: dict):
-    return _check_env_imports(python_exe, env, _PACKAGING_STACK_IMPORT_EXPR)
+def _korean_tokenizer_import_expr() -> str:
+    # Korean path is ready when jamo is importable and one mecab backend is importable.
+    # Accept both python-mecab-ko ("mecab") and mecab-python3 ("MeCab") module styles.
+    return (
+        "import sys\n"
+        "import jamo\n"
+        "ok=False\n"
+        "try:\n"
+        "    from mecab import MeCab\n"
+        "    _m=MeCab()\n"
+        "    _items=_m.parse('가')\n"
+        "    ok=bool(_items)\n"
+        "except Exception:\n"
+        "    try:\n"
+        "        from mecab import Tagger\n"
+        "        _t=Tagger()\n"
+        "        _n=_t.parseToNode('가')\n"
+        "        ok=(_n is not None)\n"
+        "    except Exception:\n"
+        "        try:\n"
+        "            import MeCab\n"
+        "            _t=MeCab.Tagger()\n"
+        "            _n=_t.parseToNode('가')\n"
+        "            ok=(_n is not None)\n"
+        "        except Exception:\n"
+        "            try:\n"
+        "                import mecab_ko\n"
+        "                ok=True\n"
+        "            except Exception:\n"
+        "                ok=False\n"
+        "sys.exit(0 if ok else 1)\n"
+    )
+
+
+def _resolve_get_pip_script() -> str:
+    env_override = str(os.environ.get("UTOA_GET_PIP_PATH", "") or "").strip()
+    if env_override and os.path.isfile(env_override):
+        return env_override
+
+    if getattr(sys, "frozen", False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    meipass_dir = str(getattr(sys, "_MEIPASS", "") or "").strip()
+
+    candidates = [
+        os.path.join(base_dir, "assets", "bootstrap", "get-pip.py"),
+        os.path.join(base_dir, "UTAU_Auto_OTO", "assets", "bootstrap", "get-pip.py"),
+        os.path.join(base_dir, "get-pip.py"),
+        os.path.join(os.getcwd(), "assets", "bootstrap", "get-pip.py"),
+        os.path.join(os.getcwd(), "get-pip.py"),
+    ]
+    if meipass_dir:
+        candidates.extend([
+            os.path.join(meipass_dir, "assets", "bootstrap", "get-pip.py"),
+            os.path.join(meipass_dir, "get-pip.py"),
+        ])
+
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return ""
 
 
 def ensure_mfa_python_packaging_stack(mfa_path, callback=None):
     """
-    Ensure pip/setuptools/wheel are available inside the MFA env.
+    Ensure pip/setuptools/pkg_resources/wheel are available inside the MFA env.
     This is a prerequisite for language-specific dependency repair on native Windows.
     """
+
     def log(msg):
         logger.info(msg)
         if callback:
             callback(msg)
 
-    if not mfa_path or not _is_env_scripts_path(mfa_path):
+    if not mfa_path or "Scripts" not in mfa_path:
         return True
 
     env_dir = os.path.dirname(os.path.dirname(mfa_path))
     python_exe = _resolve_env_python_exe(env_dir)
-    pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
-    conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
+    pip_exe = os.path.join(env_dir, "Scripts", "pip.exe")
+    conda_exe = os.path.join(env_dir, "Scripts", "conda.exe")
     if not os.path.exists(python_exe):
         return False
 
     env = _get_conda_env(mfa_path)
-    ok, _detail = _check_packaging_stack(python_exe, env)
+
+    def _check_stack_ready() -> tuple[bool, str]:
+        ok, detail = _check_env_imports(
+            python_exe,
+            env,
+            "import setuptools; import pip; import wheel",
+        )
+        return bool(ok), detail or ""
+
+    ok, detail = _check_stack_ready()
     if ok:
         return True
 
-    log('[MFA] Python 패키지 도구(pip/setuptools/wheel) 복구 중...')
-    repair_cmds = []
-    if os.path.exists(conda_exe):
-        repair_cmds.append([
-            conda_exe, 'install', '-y', '--solver', 'classic', '-p', env_dir,
-            'pip', 'setuptools', 'wheel'
-        ])
-    system_conda = shutil.which('conda')
-    if system_conda:
-        repair_cmds.append([
-            system_conda, 'install', '-y', '--solver', 'classic', '-p', env_dir,
-            'pip', 'setuptools', 'wheel'
-        ])
-    repair_cmds.extend([
-        [python_exe, '-m', 'ensurepip', '--upgrade'],
-        [python_exe, '-m', 'pip', 'install', '--upgrade', 'setuptools', 'wheel'],
-    ])
-    if os.path.exists(pip_exe):
-        repair_cmds.append([pip_exe, 'install', '--upgrade', 'setuptools', 'wheel'])
+    pip_common_args = [
+        "--no-cache-dir",
+        "--disable-pip-version-check",
+        "--retries",
+        "5",
+        "--timeout",
+        "120",
+    ]
+    trusted_hosts = [
+        "--trusted-host", "pypi.org",
+        "--trusted-host", "files.pythonhosted.org",
+        "--trusted-host", "pypi.python.org",
+    ]
 
-    last_err = ""
-    for repair_cmd in repair_cmds:
-        log(f"   -> repair cmd: {' '.join(repair_cmd)}")
-        result = _run_subprocess_text(repair_cmd, env=env)
+    index_args = []
+    index_url = str(os.environ.get("UTOA_PIP_INDEX_URL", "") or "").strip()
+    extra_index_url = str(os.environ.get("UTOA_PIP_EXTRA_INDEX_URL", "") or "").strip()
+    if index_url:
+        index_args.extend(["--index-url", index_url])
+    if extra_index_url:
+        index_args.extend(["--extra-index-url", extra_index_url])
+
+    def _looks_like_tls_error(text):
+        msg = (text or "").lower()
+        return (
+            ("ssl" in msg and ("certificate" in msg or "secure channel" in msg or "tls" in msg))
+            or ("certificate verify failed" in msg)
+            or ("trust relationship" in msg)
+        )
+
+    def _looks_like_connectivity_error(text):
+        msg = (text or "").lower()
+        return (
+            "timed out" in msg
+            or "connection reset" in msg
+            or "name or service not known" in msg
+            or "temporary failure in name resolution" in msg
+            or "nodename nor servname provided" in msg
+            or "failed to establish a new connection" in msg
+        )
+
+    def _run_repair(cmd, env_override=None):
+        log(f"   -> repair cmd: {' '.join(cmd)}")
+        result = _run_subprocess_text(cmd, env=(env_override or env))
         if result.returncode != 0:
-            err_txt = (result.stderr or result.stdout or '').strip()
-            if err_txt:
-                log(f"   [warn] repair failed: {err_txt[:500]}")
-                last_err = err_txt
+            tail = (result.stderr or result.stdout or "").strip()
+            if tail:
+                log(f"[MFA] repair failed: {tail[:500]}")
+        return result
+
+    def _download_online_get_pip() -> str:
+        if str(os.environ.get("UTOA_DISABLE_ONLINE_GET_PIP", "") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            return ""
+        url_candidates = []
+        env_url = str(os.environ.get("UTOA_GET_PIP_URL", "") or "").strip()
+        if env_url:
+            url_candidates.append(env_url)
+        url_candidates.append("https://bootstrap.pypa.io/get-pip.py")
+
+        for url in url_candidates:
+            try:
+                with urllib.request.urlopen(url, timeout=90) as resp:
+                    payload = resp.read()
+                if not payload or len(payload) < 8192:
+                    continue
+                target = os.path.join(tempfile.gettempdir(), f"utoa_get_pip_{int(time.time())}.py")
+                with open(target, "wb") as fp:
+                    fp.write(payload)
+                if os.path.isfile(target):
+                    log(f"[MFA] Downloaded online get-pip.py: {target}")
+                    return target
+            except Exception as e:
+                log(f"[MFA] online get-pip download failed: {url} ({e})")
+                continue
+        return ""
+
+    log("[MFA] Python packaging tools (pip/setuptools/wheel) repair started...")
+
+    saw_tls_error = False
+    saw_connectivity_error = False
+
+    pip_targets = ["pip", "setuptools<81", "wheel"]
+    setuptools_wheel_targets = ["setuptools<81", "wheel"]
+
+    is_conda_managed_env = bool(
+        os.path.isdir(os.path.join(env_dir, "conda-meta")) or os.path.exists(conda_exe)
+    )
+    stage_cmds = []
+    if not is_conda_managed_env:
+        stage_cmds.extend([
+            [python_exe, "-m", "ensurepip", "--upgrade"],
+            [python_exe, "-m", "ensurepip", "--default-pip"],
+        ])
+    else:
+        log("[MFA] Conda-managed Python detected; skipping ensurepip stage.")
+
+    stage_cmds.append(
+        [python_exe, "-m", "pip", "install", "--upgrade", *pip_common_args, *index_args, *pip_targets]
+    )
+    if os.path.exists(pip_exe):
+        # pip.exe cannot reliably self-upgrade pip on Windows.
+        stage_cmds.append([pip_exe, "install", "--upgrade", *pip_common_args, *index_args, *setuptools_wheel_targets])
+    if os.path.exists(conda_exe):
+        stage_cmds.append([
+            conda_exe,
+            "install",
+            "-y",
+            "--solver",
+            "classic",
+            "-p",
+            env_dir,
+            "pip",
+            "setuptools",
+            "wheel",
+        ])
+    system_conda = shutil.which("conda")
+    if system_conda:
+        stage_cmds.append([
+            system_conda,
+            "install",
+            "-y",
+            "--solver",
+            "classic",
+            "-p",
+            env_dir,
+            "pip",
+            "setuptools",
+            "wheel",
+        ])
+
+    for repair_cmd in stage_cmds:
+        result = _run_repair(repair_cmd)
+        if result.returncode != 0:
+            err_txt = (result.stderr or result.stdout or "").strip()
+            saw_tls_error = saw_tls_error or _looks_like_tls_error(err_txt)
+            saw_connectivity_error = saw_connectivity_error or _looks_like_connectivity_error(err_txt)
             continue
-        ok, detail = _check_packaging_stack(python_exe, env)
+        ok, detail = _check_stack_ready()
         if ok:
             return True
         if detail:
-            last_err = detail
-            log(f"   [warn] import check failed after repair: {detail[:500]}")
+            log(f"[MFA] packaging import still failing: {detail[:500]}")
 
-    log('[MFA] Failed to restore pip/setuptools/wheel')
-    if last_err:
-        log(f"   last error: {last_err[:500]}")
+    if saw_tls_error or saw_connectivity_error:
+        tls_cmds = [
+            [python_exe, "-m", "pip", "install", "--upgrade", *pip_common_args, *index_args, *trusted_hosts, *pip_targets],
+        ]
+        if os.path.exists(pip_exe):
+            tls_cmds.append([pip_exe, "install", "--upgrade", *pip_common_args, *index_args, *trusted_hosts, *setuptools_wheel_targets])
+        for repair_cmd in tls_cmds:
+            result = _run_repair(repair_cmd)
+            if result.returncode != 0:
+                continue
+            ok, detail = _check_stack_ready()
+            if ok:
+                return True
+            if detail:
+                log(f"[MFA] packaging import still failing: {detail[:500]}")
+
+    force_cmds = [
+        [python_exe, "-m", "pip", "install", "--upgrade", "--force-reinstall", *pip_common_args, *index_args, *trusted_hosts, *pip_targets],
+    ]
+    if os.path.exists(pip_exe):
+        force_cmds.append([pip_exe, "install", "--upgrade", "--force-reinstall", *pip_common_args, *index_args, *trusted_hosts, *setuptools_wheel_targets])
+    for repair_cmd in force_cmds:
+        result = _run_repair(repair_cmd)
+        if result.returncode != 0:
+            continue
+        ok, detail = _check_stack_ready()
+        if ok:
+            return True
+        if detail:
+            log(f"[MFA] packaging import still failing: {detail[:500]}")
+
+    get_pip_path = _resolve_get_pip_script()
+    if not get_pip_path:
+        get_pip_path = _download_online_get_pip()
+
+    if get_pip_path:
+        log(f"[MFA] Falling back to get-pip.py: {get_pip_path}")
+        env_boot = dict(env or {})
+        env_boot.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+        env_boot.setdefault("PIP_NO_CACHE_DIR", "1")
+        env_boot.setdefault("PIP_DEFAULT_TIMEOUT", "120")
+        env_boot.setdefault("PIP_RETRIES", "5")
+
+        get_pip_cmds = [
+            [
+                python_exe,
+                get_pip_path,
+                "--disable-pip-version-check",
+                "--no-cache-dir",
+                "--retries",
+                "5",
+                "--timeout",
+                "120",
+                "pip",
+                "setuptools<81",
+                "wheel",
+            ],
+            [
+                python_exe,
+                get_pip_path,
+                "--disable-pip-version-check",
+                "--no-cache-dir",
+                "--retries",
+                "5",
+                "--timeout",
+                "120",
+                *trusted_hosts,
+                "pip",
+                "setuptools<81",
+                "wheel",
+            ],
+        ]
+
+        for repair_cmd in get_pip_cmds:
+            result = _run_repair(repair_cmd, env_override=env_boot)
+            if result.returncode != 0:
+                continue
+            post_cmd = [
+                python_exe,
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "--force-reinstall",
+                *pip_common_args,
+                *index_args,
+                *trusted_hosts,
+                "pip",
+                "setuptools<81",
+                "wheel",
+            ]
+            _run_repair(post_cmd, env_override=env_boot)
+            ok, detail = _check_stack_ready()
+            if ok:
+                return True
+            if detail:
+                log(f"[MFA] packaging import still failing: {detail[:500]}")
+    else:
+        log("[MFA] Bundled/online get-pip.py could not be resolved.")
+
+    if detail:
+        log(f"[MFA] packaging import failed after repairs: {detail[:500]}")
+    log("[MFA] Failed to restore pip/setuptools/wheel")
     return False
 
 
@@ -2199,7 +1347,6 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
 
     lang = str(language or 'korean').strip().lower()
     resolved = mfa_path or find_mfa_executable() or ""
-    resolved = resolve_working_mfa_executable(resolved, callback=callback) if resolved else ""
     report = {
         "language": lang,
         "mfa_path": resolved,
@@ -2214,24 +1361,17 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
             "python_rebuild_required": False,
             "packaging_stack": None,
             "language_support": None,
-            "language_support_mode": "",
             "model_ready": False,
         },
     }
 
     if not resolved or not os.path.exists(resolved):
         report["issues"].append("mfa_missing")
-        log("[MFA] 진단: MFA 실행 파일을 찾지 못했습니다.")
+        log("[MFA] MFA executable was not found.")
         return report
 
-    launcher_ok, launcher_detail = _probe_mfa_launcher(resolved)
-    report["checks"]["mfa_executable"] = bool(launcher_ok)
-    if not launcher_ok:
-        report["issues"].append("mfa_launcher_broken")
-        if launcher_detail:
-            log(f"[MFA] 진단: launcher broken - {launcher_detail[:280]}")
-        return report
-    if _is_env_scripts_path(resolved):
+    report["checks"]["mfa_executable"] = True
+    if 'Scripts' in resolved:
         env_dir = os.path.dirname(os.path.dirname(resolved))
         python_exe = _resolve_env_python_exe(env_dir)
         pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
@@ -2246,45 +1386,19 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
             report["issues"].append("python_rebuild_required")
         if report["checks"]["python_exe"]:
             env = _get_conda_env(resolved)
-            ok, _detail = _check_packaging_stack(python_exe, env)
+            ok, _detail = _check_env_imports(python_exe, env, 'import setuptools; import pip; import wheel')
             report["checks"]["packaging_stack"] = ok
             if not ok:
                 report["issues"].append("packaging_stack_missing")
-            if lang == 'korean':
-                lang_ok, _detail = _check_env_imports(
-                    python_exe,
-                    env,
-                    _KOREAN_NATIVE_RUNTIME_CHECK_EXPR,
-                )
-                lang_mode = "native" if lang_ok else ""
-                if not lang_ok:
-                    legacy_ok, _legacy_detail = _check_env_imports(
-                        python_exe,
-                        env,
-                        "import jamo; import eunjeon; tok=eunjeon.Mecab(); tok.morphs('테스트')",
-                    )
-                    if legacy_ok:
-                        lang_ok = True
-                        lang_mode = "legacy"
-                    fallback_ok, _fb_detail = _check_env_imports(
-                        python_exe,
-                        env,
-                        'from mecab import MeCab; tok=MeCab(); tok.parse("테스트")',
-                    )
-                    if not lang_ok and fallback_ok:
-                        lang_ok = True
-                        lang_mode = "fallback"
-                        report["issues"].append("korean_deps_degraded")
-                    if not lang_ok:
-                        report["issues"].append(f"{lang}_deps_missing")
-                report["checks"]["language_support"] = lang_ok
-                report["checks"]["language_support_mode"] = lang_mode
-            else:
-                lang_ok, _detail = _check_env_imports(python_exe, env, 'import spacy; import sudachipy; import sudachidict_core')
-                report["checks"]["language_support"] = lang_ok
-                report["checks"]["language_support_mode"] = "native" if lang_ok else ""
-                if not lang_ok:
-                    report["issues"].append(f"{lang}_deps_missing")
+            import_expr = (
+                _korean_tokenizer_import_expr()
+                if lang == 'korean'
+                else 'import spacy; import sudachipy; import sudachidict_core'
+            )
+            lang_ok, _detail = _check_env_imports(python_exe, env, import_expr)
+            report["checks"]["language_support"] = lang_ok
+            if not lang_ok:
+                report["issues"].append(f"{lang}_deps_missing")
 
     has_model, _msg = check_mfa_model(resolved, language=lang)
     report["checks"]["model_ready"] = bool(has_model)
@@ -2303,8 +1417,8 @@ def diagnose_mfa_runtime(mfa_path="", language='korean', callback=None):
 
 def _resolve_single_speaker_flag(mfa_path, env=None):
     """
-    MFA 버전에 따라 단일 화자 옵션 표기가 다를 수 있어(--single-speaker / --single_speaker)
-    help 출력을 보고 지원되는 표기를 선택합니다.
+    Detect which single-speaker flag is supported by current MFA version.
+    Uses `mfa align --help` and picks `--single-speaker` or `--single_speaker`.
     """
     key = os.path.abspath(mfa_path or "")
     cached = _MFA_SINGLE_SPEAKER_FLAG_CACHE.get(key)
@@ -2313,8 +1427,10 @@ def _resolve_single_speaker_flag(mfa_path, env=None):
 
     candidates = ["--single-speaker", "--single_speaker"]
     try:
-        res = _run_subprocess_text(
+        res = subprocess.run(
             [mfa_path, "align", "--help"],
+            capture_output=True,
+            text=False,
             timeout=20,
             env=env,
         )
@@ -2329,7 +1445,7 @@ def _resolve_single_speaker_flag(mfa_path, env=None):
     except Exception:
         pass
 
-    # 기본값은 요청에 맞춰 하이픈 표기 우선
+    # Safe fallback for old MFA versions when help probing fails.
     _MFA_SINGLE_SPEAKER_FLAG_CACHE[key] = "--single-speaker"
     return "--single-speaker"
 
@@ -2347,8 +1463,10 @@ def _resolve_speaker_adaptation_flag(mfa_path, env=None):
         "--speaker-adaptation",
     ]
     try:
-        res = _run_subprocess_text(
+        res = subprocess.run(
             [mfa_path, "align", "--help"],
+            capture_output=True,
+            text=False,
             timeout=20,
             env=env,
         )
@@ -2371,7 +1489,16 @@ def _normalize_mfa_align_profile(profile):
     p = str(profile or "").strip().lower()
     if p in {"fast", "quick", "lite", "speed"}:
         return "fast"
-    if p in {"accurate", "accuracy", "acc", "adapted", "speaker_adapted", "speaker_adaptation"}:
+    if p in {
+        "accurate_adapted",
+        "adapted",
+        "speaker_adapted",
+        "speaker_adaptation",
+        "accurate+speaker",
+        "accurate_adapt",
+    }:
+        return "accurate_adapted"
+    if p in {"accurate", "accuracy", "acc"}:
         return "accurate"
     if p in {"default", "basic", "base", "legacy", ""}:
         return "default"
@@ -2391,110 +1518,163 @@ def _resolve_mfa_align_options(align_profile):
                 opts["num_jobs"] = j
         except Exception:
             pass
-
-    soft_mode = str(os.environ.get("UTOA_MFA_SOFT_BANK_MODE", "")).strip().lower() in {
-        "1", "true", "yes", "on", "y"
-    }
-    if soft_mode:
-        base_beam = int(opts.get("beam", 1000) or 1000)
-        base_retry = int(opts.get("retry_beam", 4000) or 4000)
-        opts["beam"] = max(base_beam, int(round(base_beam * 1.35)))
-        opts["retry_beam"] = max(base_retry, int(round(base_retry * 1.45)))
-        opts["fine_tune"] = True
-        if profile != "fast":
-            opts["speaker_adaptation"] = True
-        opts["soft_bank_mode"] = True
     return profile, opts
 
 
 def find_mfa_executable():
     """
-    시스템에 설치된 MFA 실행 파일을 탐색합니다.
-    포터블 환경 -> Conda 환경 -> 시스템 PATH 순서로 검색합니다.
-    
+    현재 실행 환경에서 MFA 실행 파일 경로를 탐색한다.
+    검색 순서: 후보 경로 -> PATH -> Conda 후보 경로
+
     Returns:
         MFA 실행 파일 경로 또는 None
     """
-    # 1. 공유/레거시 포터블 환경
+    # 1) Portable/로컬 후보 경로
     for p in _candidate_mfa_executable_paths():
-        if not os.path.exists(p):
-            continue
-        resolved = resolve_working_mfa_executable(p)
-        ok, _detail = _probe_mfa_launcher(resolved)
-        if ok:
-            logger.info(f"포터블 MFA 발견: {resolved}")
-            return resolved
+        if os.path.exists(p):
+            logger.info(f"기본 후보 경로에서 MFA 실행 파일 발견: {p}")
+            return p
 
-    # 2. 시스템 PATH
+    # 2) PATH
     mfa_path = shutil.which('mfa')
     if mfa_path:
-        resolved = resolve_working_mfa_executable(mfa_path)
-        ok, _detail = _probe_mfa_launcher(resolved)
-        if ok:
-            logger.info(f"시스템 MFA 발견: {resolved}")
-            return resolved
+        logger.info(f"PATH에서 MFA 실행 파일 발견: {mfa_path}")
+        return mfa_path
 
-    # 3. Conda 환경 기본 경로
+    # 3) Conda 후보 경로
     conda_paths = [
         os.path.expanduser('~/miniconda3/envs/aligner/Scripts/mfa.exe'),
         os.path.expanduser('~/anaconda3/envs/aligner/Scripts/mfa.exe'),
+        os.path.expanduser('~/mambaforge/envs/aligner/Scripts/mfa.exe'),
+        os.path.expanduser('~/miniforge3/envs/aligner/Scripts/mfa.exe'),
         os.path.expanduser('~/miniconda3/Scripts/mfa.exe'),
+        os.path.expanduser('~/anaconda3/Scripts/mfa.exe'),
+        os.path.expanduser('~/mambaforge/Scripts/mfa.exe'),
+        os.path.expanduser('~/miniforge3/Scripts/mfa.exe'),
     ]
     for p in conda_paths:
-        if not os.path.exists(p):
-            continue
-        resolved = resolve_working_mfa_executable(p)
-        ok, _detail = _probe_mfa_launcher(resolved)
-        if ok:
-            logger.info(f"Conda MFA 발견: {resolved}")
-            return resolved
+        if os.path.exists(p):
+            logger.info(f"Conda 후보 경로에서 MFA 실행 파일 발견: {p}")
+            return p
 
     return None
 
-
 def check_mfa_model(mfa_path, language='korean'):
     """
-    MFA 음향 모델이 다운로드되어 있는지 확인합니다.
-    
+    Check whether MFA acoustic model is available for selected language.
+
     Args:
-        mfa_path: MFA 실행 파일 경로
-        language: 'korean' 또는 'japanese'
-    
+        mfa_path: MFA executable path
+        language: 'korean' or 'japanese'
+
     Returns:
-        (설치 여부: bool, 메시지: str)
+        (is_ready: bool, message: str)
     """
     if not mfa_path:
-        return False, "MFA 실행 파일을 찾을 수 없습니다."
-    mfa_path = resolve_working_mfa_executable(mfa_path)
-    if not mfa_path or not os.path.exists(mfa_path):
-        return False, "MFA 실행 파일을 찾을 수 없습니다."
-    launcher_ok, launcher_detail = _probe_mfa_launcher(mfa_path)
-    if not launcher_ok:
-        detail = (launcher_detail or "").strip()
-        if detail:
-            return False, f"MFA launcher 오류: {detail[:220]}"
-        return False, "MFA launcher 오류가 발생했습니다."
+        return False, "MFA executable not found."
 
     model_name = 'japanese_mfa' if language == 'japanese' else 'korean_mfa'
-    lang_label = '일본어' if language == 'japanese' else '한국어'
+    lang_label = 'Japanese' if language == 'japanese' else 'Korean'
 
     try:
         env = _get_conda_env(mfa_path)
-        result = _run_subprocess_text(
+        result = subprocess.run(
             [mfa_path, 'model', 'list', 'acoustic'],
-            timeout=30,
-            env=env,
+            capture_output=True, text=False, timeout=30, env=env
         )
-        combined = f"{_decode_subprocess_output(result.stdout)}\n{_decode_subprocess_output(result.stderr)}"
-        if _is_mfa_launcher_failure_text(combined):
-            return False, "MFA launcher 오류(프로세스 생성 실패)로 모델 상태를 확인할 수 없습니다."
         stdout_text = _decode_subprocess_output(result.stdout)
-        if model_name in stdout_text:
-            return True, f"{lang_label} MFA 모델이 설치되어 있습니다."
-        else:
-            return False, f"{lang_label} MFA 모델이 설치되어 있지 않습니다. 다운로드가 필요합니다."
+        stderr_text = _decode_subprocess_output(result.stderr)
+        combined_text = f"{stdout_text}\n{stderr_text}"
+        if model_name in combined_text:
+            return True, f"{lang_label} MFA model is available."
+        if _has_local_acoustic_model_artifact(mfa_path, model_name, env=env):
+            return True, f"{lang_label} MFA model is available (local artifact found)."
+        if result.returncode != 0:
+            return False, (
+                f"{lang_label} MFA model check failed (code={result.returncode}). "
+                "Please re-download the model."
+            )
+        return False, f"{lang_label} MFA model is missing. Please run model download."
     except Exception as e:
-        return False, f"MFA 모델 확인 실패: {e}"
+        return False, f"MFA model check failed: {e}"
+
+
+def _candidate_mfa_root_dirs(mfa_path: str, env: Optional[dict] = None) -> List[str]:
+    roots: List[str] = []
+
+    def _add(path: str):
+        p = os.path.abspath(str(path or "").strip())
+        if p and p not in roots:
+            roots.append(p)
+
+    try:
+        env_root = str((env or {}).get("MFA_ROOT_DIR", "")).strip()
+        if env_root:
+            _add(env_root)
+    except Exception:
+        pass
+
+    try:
+        _add(_default_mfa_root_dir(mfa_path, per_process=False))
+    except Exception:
+        pass
+
+    try:
+        for runtime_root in _candidate_mfa_runtime_roots():
+            _add(os.path.join(runtime_root, ".mfa_root_ascii"))
+    except Exception:
+        pass
+
+    try:
+        if mfa_path:
+            app_dir = os.path.dirname(os.path.dirname(os.path.abspath(mfa_path)))
+            if os.path.isdir(app_dir):
+                for name in os.listdir(app_dir):
+                    if name.startswith(".mfa_root_ascii_p"):
+                        _add(os.path.join(app_dir, name))
+    except Exception:
+        pass
+
+    # Legacy shared MFA root (still checked for compatibility).
+    _add(os.path.expanduser("~/Documents/MFA"))
+    return roots
+
+
+def _find_local_acoustic_model_artifact(mfa_path: str, model_name: str, env: Optional[dict] = None) -> str:
+    if not model_name:
+        return ""
+    for root in _candidate_mfa_root_dirs(mfa_path, env=env):
+        acoustic_dir = os.path.join(root, "pretrained_models", "acoustic")
+        candidates = [
+            os.path.join(acoustic_dir, model_name),
+            os.path.join(acoustic_dir, f"{model_name}.zip"),
+            os.path.join(acoustic_dir, f"{model_name}.yaml"),
+            os.path.join(acoustic_dir, f"{model_name}.yml"),
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+    return ""
+
+
+def _has_local_acoustic_model_artifact(mfa_path: str, model_name: str, env: Optional[dict] = None) -> bool:
+    return bool(_find_local_acoustic_model_artifact(mfa_path, model_name, env=env))
+
+
+def _resolve_acoustic_model_reference(mfa_path: str, model_name: str, env: Optional[dict] = None) -> str:
+    if not mfa_path or not model_name:
+        return model_name
+    try:
+        result = _run_subprocess_text([mfa_path, "model", "list", "acoustic"], env=env)
+        combined = f"{result.stdout}\n{result.stderr}"
+        if model_name in combined:
+            return model_name
+    except Exception:
+        pass
+    local_artifact = _find_local_acoustic_model_artifact(mfa_path, model_name, env=env)
+    if local_artifact:
+        return local_artifact
+    return model_name
 
 
 def check_mfa_ready(language='korean', mfa_path=''):
@@ -2503,7 +1683,7 @@ def check_mfa_ready(language='korean', mfa_path=''):
         return make_runtime_report(
             "align",
             ALIGN_EXEC_MISSING,
-            "MFA 실행 파일을 찾을 수 없습니다.",
+            "MFA executable not found.",
             engine="mfa",
             language=str(language or "korean").strip().lower(),
             mfa_path=str(resolved_mfa or ""),
@@ -2515,7 +1695,7 @@ def check_mfa_ready(language='korean', mfa_path=''):
         return make_runtime_report(
             "align",
             ALIGN_MODEL_MISSING,
-            msg or "MFA 모델을 찾을 수 없습니다.",
+            msg or "MFA model is missing.",
             engine="mfa",
             language=str(language or "korean").strip().lower(),
             mfa_path=str(resolved_mfa or ""),
@@ -2525,7 +1705,7 @@ def check_mfa_ready(language='korean', mfa_path=''):
     return make_runtime_report(
         "align",
         OK,
-        "MFA 정렬 준비 완료",
+        "MFA runtime is ready.",
         engine="mfa",
         language=str(language or "korean").strip().lower(),
         mfa_path=str(resolved_mfa or ""),
@@ -2536,9 +1716,8 @@ def check_mfa_ready(language='korean', mfa_path=''):
 def ensure_korean_support(mfa_path, callback=None):
     """
     Ensure Korean MFA tokenizer dependencies are available:
-    - bundled offline wheels (when present)
-    - python-mecab-ko (native MeCab binding)
     - jamo
+    - python-mecab-ko or mecab-python3
     """
     def log(msg):
         logger.info(msg)
@@ -2546,77 +1725,42 @@ def ensure_korean_support(mfa_path, callback=None):
             callback(msg)
     if not mfa_path:
         return False
-    if not _is_env_scripts_path(mfa_path):
+    if 'Scripts' not in mfa_path:
         # System MFA path; skip env-local auto install here.
         return True
     env_dir = os.path.dirname(os.path.dirname(mfa_path))
     python_exe = _resolve_env_python_exe(env_dir)
     pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
+    safe_cwd = _safe_env_subprocess_cwd(env_dir)
+    pip_common_args = [
+        '--no-cache-dir',
+        '--disable-pip-version-check',
+        '--retries',
+        '5',
+        '--timeout',
+        '120',
+    ]
+    trusted_hosts = [
+        '--trusted-host', 'pypi.org',
+        '--trusted-host', 'files.pythonhosted.org',
+        '--trusted-host', 'pypi.python.org',
+    ]
+    index_args = []
+    index_url = str(os.environ.get("UTOA_PIP_INDEX_URL", "") or "").strip()
+    extra_index_url = str(os.environ.get("UTOA_PIP_EXTRA_INDEX_URL", "") or "").strip()
+    if index_url:
+        index_args.extend(['--index-url', index_url])
+    if extra_index_url:
+        index_args.extend(['--extra-index-url', extra_index_url])
     if not os.path.exists(python_exe):
         return False
     if not ensure_mfa_python_packaging_stack(mfa_path, callback=callback):
         log('[MFA] Failed to prepare base Python packaging tools before Korean dependency install')
         return False
-    pkg_check_cmd = [python_exe, '-c', _PACKAGING_STACK_IMPORT_EXPR]
-    native_tokenizer_check_cmd = [
-        python_exe,
-        '-c',
-        _KOREAN_NATIVE_RUNTIME_CHECK_EXPR,
-    ]
-    check_cmd = [
-        python_exe,
-        '-c',
-        _KOREAN_TOKENIZER_IMPORT_CHECK_EXPR,
-    ]
-    fallback_runtime_check_cmd = [
-        python_exe,
-        '-c',
-        (
-            "ok=False\n"
-            "try:\n"
-            "    from mecab import MeCab\n"
-            "    tok = MeCab()\n"
-            "    out = tok.parse('테스트 fallback')\n"
-            "    ok = isinstance(out, list)\n"
-            "except Exception:\n"
-            "    ok = False\n"
-            "import sys\n"
-            "sys.exit(0 if ok else 1)\n"
-        ),
-    ]
-    fallback_runtime_check_cmd = [
-        python_exe,
-        '-c',
-        (
-            "ok=False\n"
-            "try:\n"
-            "    from mecab import MeCab\n"
-            "    tok = MeCab()\n"
-            "    out = tok.parse('테스트 fallback')\n"
-            "    ok = isinstance(out, list)\n"
-            "except Exception:\n"
-            "    ok = False\n"
-            "import sys\n"
-            "sys.exit(0 if ok else 1)\n"
-        ),
-    ]
+    pkg_check_cmd = [python_exe, '-c', 'import setuptools, pip, wheel']
+    check_cmd = [python_exe, '-c', _korean_tokenizer_import_expr()]
     try:
         env = _get_conda_env(mfa_path)
-        allow_degraded = str(os.environ.get("UTOA_KO_DEGRADED_ALLOW", "1")).strip().lower() not in {"0", "false", "no", "off"}
-        degraded_notice_emitted = False
-        msvc_notice_emitted = False
-
-        def _emit_degraded_notice_once(require_msvc: bool = False):
-            nonlocal degraded_notice_emitted, msvc_notice_emitted
-            if require_msvc and not msvc_notice_emitted:
-                _emit_msvc_required_notice(callback, log)
-                msvc_notice_emitted = True
-                degraded_notice_emitted = True
-                return
-            if degraded_notice_emitted:
-                return
-            log('[MFA] Korean tokenizer running in degraded fallback mode (native tokenizer unavailable).')
-            degraded_notice_emitted = True
 
         def _ensure_mecab_dictionary():
             site_packages = os.path.join(env_dir, 'Lib', 'site-packages')
@@ -2644,223 +1788,32 @@ def ensure_korean_support(mfa_path, callback=None):
             mecab_dir = os.path.join(site_packages, 'mecab')
             mecab_init = os.path.join(mecab_dir, '__init__.py')
             try:
-                if not os.path.isdir(mecab_dir):
-                    os.makedirs(mecab_dir, exist_ok=True)
-                    content = ""
-                else:
-                    with open(mecab_init, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                # Keep shim idempotent while allowing migration from buggy V2.
-                if 'UTOA_MECAB_SHIM_V3' in content:
+                if not os.path.isfile(mecab_init):
                     return
-                content = re.sub(r"\n?# UTOA_MECAB_SHIM_V2[\s\S]*$", "", content)
-                shim = """
-
-# UTOA_MECAB_SHIM_V3
-import re as _utoa_re
-try:
-    import MeCab as _MeCabMod
-except Exception:
-    _MeCabMod = None
-
-class _UtoaMecabNode:
-    def __init__(self, surface, pos):
-        self.surface = surface
-        self.pos = pos
-
-def _utoa_simple_tokenize(text):
-    text = str(text or "")
-    tokens = _utoa_re.findall(r"[가-힣]+|[A-Za-z]+|[0-9]+|[^\s]", text)
-    return tokens or [text]
-
-class MeCab:
-    def __init__(self):
-        self._native = None
-        if _MeCabMod is not None:
-            try:
-                self._native = _MeCabMod.Tagger()
-            except Exception:
-                self._native = None
-
-    def parse(self, text):
-        if self._native is not None:
-            node = self._native.parseToNode(text)
-            items = []
-            while node is not None:
-                surface = getattr(node, "surface", "") or ""
-                if surface:
-                    feature = getattr(node, "feature", "") or ""
-                    pos = feature.split(",", 1)[0] if feature else ""
-                    items.append(_UtoaMecabNode(surface, pos))
-                node = getattr(node, "next", None)
-            return items
-        # Pure-Python fallback tokenizer for environments without native mecab/eunjeon.
-        return [_UtoaMecabNode(tok, "NNG") for tok in _utoa_simple_tokenize(text)]
-"""
-                with open(mecab_init, 'w', encoding='utf-8') as f:
-                    f.write(content + shim)
+                with open(mecab_init, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                marker = "\n# UTOA_MECAB_SHIM"
+                if marker not in content:
+                    return
+                repaired = content.split(marker, 1)[0].rstrip() + "\n"
+                if repaired != content:
+                    with open(mecab_init, 'w', encoding='utf-8', newline='\n') as f:
+                        f.write(repaired)
+                    log('[MFA] Removed legacy mecab shim from mecab package (__init__.py).')
             except Exception as e:
                 log(f"[MFA] Failed to patch mecab shim: {e}")
-
-        def _ensure_jamo_shim():
-            site_packages = os.path.join(env_dir, 'Lib', 'site-packages')
-            jamo_dir = os.path.join(site_packages, 'jamo')
-            jamo_init = os.path.join(jamo_dir, '__init__.py')
-            # Do not overwrite a real jamo package.
-            if os.path.isfile(jamo_init):
-                try:
-                    with open(jamo_init, 'r', encoding='utf-8') as f:
-                        existing = f.read()
-                    if "UTOA_JAMO_SHIM_V1" in existing:
-                        return
-                    if "def hangul_to_jamo" in existing or "class Jamo" in existing:
-                        return
-                except Exception:
-                    return
-            try:
-                os.makedirs(jamo_dir, exist_ok=True)
-                shim = (
-                    "# UTOA_JAMO_SHIM_V1\n"
-                    "def hangul_to_jamo(text):\n"
-                    "    txt = '' if text is None else str(text)\n"
-                    "    for ch in txt:\n"
-                    "        yield ch\n\n"
-                    "def h2j(text):\n"
-                    "    return ''.join(list(hangul_to_jamo(text)))\n\n"
-                    "def j2hcj(text):\n"
-                    "    return '' if text is None else str(text)\n\n"
-                    "def is_jamo(_ch):\n"
-                    "    return False\n"
-                )
-                with open(jamo_init, 'w', encoding='utf-8') as f:
-                    f.write(shim)
-                log('[MFA] jamo shim injected for degraded Korean fallback mode.')
-            except Exception as e:
-                log(f"[MFA] Failed to create jamo shim: {e}")
-
-        def _ensure_mecab_dictionary():
-            site_packages = os.path.join(env_dir, 'Lib', 'site-packages')
-            mecabrc = os.path.join(site_packages, 'mecabrc')
-            dic_src = os.path.join(site_packages, 'mecab_ko_dic', 'dictionary')
-            dic_dst = os.path.join(site_packages, 'mecab-ko-dic')
-            if os.path.exists(dic_dst):
-                return
-            if not (os.path.exists(mecabrc) and os.path.isdir(dic_src)):
-                return
-            try:
-                os.makedirs(dic_dst, exist_ok=True)
-                for name in os.listdir(dic_src):
-                    src = os.path.join(dic_src, name)
-                    dst = os.path.join(dic_dst, name)
-                    if os.path.isdir(src):
-                        shutil.copytree(src, dst, dirs_exist_ok=True)
-                    else:
-                        shutil.copy2(src, dst)
-            except Exception as e:
-                log(f"[MFA] Failed to seed mecab-ko-dic: {e}")
-
-        def _ensure_mecab_shim():
-            site_packages = os.path.join(env_dir, 'Lib', 'site-packages')
-            mecab_dir = os.path.join(site_packages, 'mecab')
-            mecab_init = os.path.join(mecab_dir, '__init__.py')
-            try:
-                if not os.path.isdir(mecab_dir):
-                    os.makedirs(mecab_dir, exist_ok=True)
-                    content = ""
-                else:
-                    with open(mecab_init, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                # Keep shim idempotent while allowing migration from buggy V2.
-                if 'UTOA_MECAB_SHIM_V3' in content:
-                    return
-                content = re.sub(r"\n?# UTOA_MECAB_SHIM_V2[\s\S]*$", "", content)
-                shim = """
-
-# UTOA_MECAB_SHIM_V3
-import re as _utoa_re
-try:
-    import MeCab as _MeCabMod
-except Exception:
-    _MeCabMod = None
-
-class _UtoaMecabNode:
-    def __init__(self, surface, pos):
-        self.surface = surface
-        self.pos = pos
-
-def _utoa_simple_tokenize(text):
-    text = str(text or "")
-    tokens = _utoa_re.findall(r"[가-힣]+|[A-Za-z]+|[0-9]+|[^\s]", text)
-    return tokens or [text]
-
-class MeCab:
-    def __init__(self):
-        self._native = None
-        if _MeCabMod is not None:
-            try:
-                self._native = _MeCabMod.Tagger()
-            except Exception:
-                self._native = None
-
-    def parse(self, text):
-        if self._native is not None:
-            node = self._native.parseToNode(text)
-            items = []
-            while node is not None:
-                surface = getattr(node, "surface", "") or ""
-                if surface:
-                    feature = getattr(node, "feature", "") or ""
-                    pos = feature.split(",", 1)[0] if feature else ""
-                    items.append(_UtoaMecabNode(surface, pos))
-                node = getattr(node, "next", None)
-            return items
-        # Pure-Python fallback tokenizer for environments without native mecab/eunjeon.
-        return [_UtoaMecabNode(tok, "NNG") for tok in _utoa_simple_tokenize(text)]
-"""
-                with open(mecab_init, 'w', encoding='utf-8') as f:
-                    f.write(content + shim)
-            except Exception as e:
-                log(f"[MFA] Failed to patch mecab shim: {e}")
-
-        def _ensure_jamo_shim():
-            site_packages = os.path.join(env_dir, 'Lib', 'site-packages')
-            jamo_dir = os.path.join(site_packages, 'jamo')
-            jamo_init = os.path.join(jamo_dir, '__init__.py')
-            # Do not overwrite a real jamo package.
-            if os.path.isfile(jamo_init):
-                try:
-                    with open(jamo_init, 'r', encoding='utf-8') as f:
-                        existing = f.read()
-                    if "UTOA_JAMO_SHIM_V1" in existing:
-                        return
-                    if "def hangul_to_jamo" in existing or "class Jamo" in existing:
-                        return
-                except Exception:
-                    return
-            try:
-                os.makedirs(jamo_dir, exist_ok=True)
-                shim = (
-                    "# UTOA_JAMO_SHIM_V1\n"
-                    "def hangul_to_jamo(text):\n"
-                    "    txt = '' if text is None else str(text)\n"
-                    "    for ch in txt:\n"
-                    "        yield ch\n\n"
-                    "def h2j(text):\n"
-                    "    return ''.join(list(hangul_to_jamo(text)))\n\n"
-                    "def j2hcj(text):\n"
-                    "    return '' if text is None else str(text)\n\n"
-                    "def is_jamo(_ch):\n"
-                    "    return False\n"
-                )
-                with open(jamo_init, 'w', encoding='utf-8') as f:
-                    f.write(shim)
-                log('[MFA] jamo shim injected for degraded Korean fallback mode.')
-            except Exception as e:
-                log(f"[MFA] Failed to create jamo shim: {e}")
 
         def _looks_like_pyexpat_dll_issue(msg):
             s = (msg or '').lower()
             return ('pyexpat' in s and 'dll load failed' in s) or ('libexpat' in s and 'not found' in s)
+
+        def _looks_like_tls_error(msg):
+            s = (msg or '').lower()
+            return (
+                ('ssl' in s and ('certificate' in s or 'secure channel' in s or 'tls' in s))
+                or ('certificate verify failed' in s)
+                or ('trust relationship' in s)
+            )
 
         def _try_repair_pyexpat():
             conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
@@ -2872,183 +1825,176 @@ class MeCab:
                 cmds.append([system_conda, 'install', '-y', '--solver', 'classic', '-p', env_dir, 'libexpat'])
             for cmd in cmds:
                 log(f"   -> repair cmd: {' '.join(cmd)}")
-                res = _run_subprocess_text(cmd, env=env)
+                res = _run_subprocess_text(cmd, env=env, cwd=safe_cwd)
                 if res.returncode == 0:
                     return True
             return False
 
         def _check_imports():
-            res = _run_subprocess_text(check_cmd, env=env)
+            res = _run_subprocess_text(check_cmd, env=env, cwd=safe_cwd)
             if res.returncode == 0:
                 return True, ''
             detail = (res.stderr or res.stdout or '').strip()
             return False, detail
 
-        def _ensure_packaging_stack():
-            res = _run_subprocess_text(pkg_check_cmd, env=env)
+        def _ensure_pkg_resources():
+            res = _run_subprocess_text(pkg_check_cmd, env=env, cwd=safe_cwd)
             if res.returncode == 0:
                 return True
-            log('[MFA] pip/setuptools/wheel 상태를 복구합니다')
+            err_detail = (res.stderr or res.stdout or "").strip()
+            if err_detail:
+                log(f"[MFA] pkg_resources import failed: {err_detail[:500]}")
+            log('[MFA] pkg_resources is missing; repairing setuptools first')
             install_cmds = [
-                [python_exe, '-m', 'pip', 'install', '--upgrade', 'setuptools', 'wheel'],
+                [python_exe, '-m', 'pip', 'install', '--upgrade', 'setuptools<81'],
             ]
             if os.path.exists(pip_exe):
-                install_cmds.append([pip_exe, 'install', '--upgrade', 'setuptools', 'wheel'])
+                install_cmds.append([pip_exe, 'install', '--upgrade', 'setuptools<81'])
             conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
             if os.path.exists(conda_exe):
-                install_cmds.append([
-                    conda_exe, 'install', '-y', '--solver', 'classic', '-p', env_dir,
-                    'pip', 'setuptools', 'wheel'
-                ])
+                install_cmds.append([conda_exe, 'install', '-y', '--solver', 'classic', '-p', env_dir, 'setuptools'])
             system_conda = shutil.which('conda')
             if system_conda:
-                install_cmds.append([
-                    system_conda, 'install', '-y', '--solver', 'classic', '-p', env_dir,
-                    'pip', 'setuptools', 'wheel'
-                ])
+                install_cmds.append([system_conda, 'install', '-y', '--solver', 'classic', '-p', env_dir, 'setuptools'])
             for install_cmd in install_cmds:
                 log(f"   -> repair cmd: {' '.join(install_cmd)}")
-                result = _run_subprocess_text(install_cmd, env=env)
+                result = _run_subprocess_text(install_cmd, env=env, cwd=safe_cwd)
                 if result.returncode != 0:
-                    err_txt = (result.stderr or result.stdout or '').strip()
-                    if err_txt:
-                        log(f"   [warn] repair failed: {err_txt[:500]}")
                     continue
-                verify = _run_subprocess_text(pkg_check_cmd, env=env)
+                verify = _run_subprocess_text(pkg_check_cmd, env=env, cwd=safe_cwd)
                 if verify.returncode == 0:
                     return True
             return False
 
-        if not _ensure_packaging_stack():
-            log('[MFA] Failed to restore pip/setuptools/wheel')
+        if not _ensure_pkg_resources():
+            log('[MFA] Failed to restore pkg_resources/setuptools')
             return False
 
         _ensure_mecab_dictionary()
         _ensure_mecab_shim()
-        if allow_degraded:
-            _ensure_jamo_shim()
         ok, detail = _check_imports()
         if (not ok) and _looks_like_pyexpat_dll_issue(detail):
             log('[MFA] Detected pyexpat/libexpat DLL issue; trying repair...')
             if _try_repair_pyexpat():
                 ok, detail = _check_imports()
         if ok:
-            native_check = _run_subprocess_text(native_tokenizer_check_cmd, env=env)
-            if native_check.returncode != 0:
-                log('[MFA] Korean tokenizer running in degraded fallback mode (native MeCab not available).')
-                _emit_degraded_notice_once(require_msvc=False)
+            patch_mfa_korean_support(mfa_path, callback)
             return True
-        conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
-        system_conda = shutil.which('conda')
-        install_plans: list[tuple[str, list[list[str]]]] = []
 
-        wheel_dir = _resolve_korean_wheel_dir(mfa_path)
-        if wheel_dir:
-            log(f"[MFA] Found bundled Korean wheels: {wheel_dir}")
-            offline_cmds: list[list[str]] = [
-                [
-                    python_exe, '-m', 'pip', 'install', '--upgrade',
-                    '--no-index', '--find-links', wheel_dir,
-                    'python-mecab-ko', 'jamo', 'python-mecab-ko-dic',
-                ]
-            ]
+        def _run_uninstall_stage(packages):
+            pkgs = [str(p).strip() for p in packages if str(p).strip()]
+            if not pkgs:
+                return True
+            args = ['uninstall', '-y', *pkgs]
+            cmds = [[python_exe, '-m', 'pip', *args]]
             if os.path.exists(pip_exe):
-                offline_cmds.append(
-                    [
-                        pip_exe, 'install', '--upgrade',
-                        '--no-index', '--find-links', wheel_dir,
-                        'python-mecab-ko', 'jamo', 'python-mecab-ko-dic',
-                    ]
-                )
-            if system_conda:
-                offline_cmds.append(
-                    [
-                        system_conda, 'run', '-p', env_dir, 'python', '-m', 'pip', 'install',
-                        '--upgrade', '--no-index', '--find-links', wheel_dir,
-                        'python-mecab-ko', 'jamo', 'python-mecab-ko-dic',
-                    ]
-                )
-            install_plans.append(('bundled Korean wheels (offline)', offline_cmds))
+                cmds.append([pip_exe, *args])
+            for uninstall_cmd in cmds:
+                log(f"   -> cleanup cmd: {' '.join(uninstall_cmd)}")
+                result = _run_subprocess_text(uninstall_cmd, env=env, cwd=safe_cwd)
+                if result.returncode == 0:
+                    return True
+            return False
 
-        primary_cmds: list[list[str]] = []
-        if os.path.exists(conda_exe):
-            primary_cmds.append([
-                conda_exe, 'install', '-y', '--solver', 'classic', '-p', env_dir,
-                '-c', 'conda-forge', '--override-channels',
-                'python-mecab-ko', 'jamo'
-            ])
-        if system_conda:
-            primary_cmds.append([
-                system_conda, 'install', '-y', '--solver', 'classic', '-p', env_dir,
-                '-c', 'conda-forge', '--override-channels',
-                'python-mecab-ko', 'jamo'
-            ])
-        primary_cmds.append([
-            python_exe, '-m', 'pip', 'install', '--upgrade', '--only-binary=:all:',
-            'python-mecab-ko', 'jamo'
-        ])
-        if os.path.exists(pip_exe):
-            primary_cmds.append([
-                pip_exe, 'install', '--upgrade', '--only-binary=:all:', 'python-mecab-ko', 'jamo'
-            ])
-        if system_conda:
-            primary_cmds.append([
-                system_conda, 'run', '-p', env_dir, 'python', '-m', 'pip', 'install',
-                '--upgrade', '--only-binary=:all:', 'python-mecab-ko', 'jamo'
-            ])
-        install_plans.append(('python-mecab-ko, jamo (binary preferred)', primary_cmds))
+        def _run_install_stage(packages, *, pip_extra_args=None):
+            extra_args = list(pip_extra_args or [])
+            stage_last_err = ''
+
+            def _build_cmds(extra):
+                args = ['install', '--upgrade', *pip_common_args, *index_args, *extra, *packages]
+                cmds = [[python_exe, '-m', 'pip', *args]]
+                if os.path.exists(pip_exe):
+                    cmds.append([pip_exe, *args])
+                system_conda = shutil.which('conda')
+                if system_conda:
+                    cmds.append([
+                        system_conda, 'run', '-p', env_dir, 'python', '-m', 'pip',
+                        *args
+                    ])
+                return cmds
+
+            for pass_idx in range(2):
+                use_trusted = pass_idx == 1
+                trusted_extra = trusted_hosts if use_trusted else []
+                stage_cmds = _build_cmds(extra_args + trusted_extra)
+                saw_tls = False
+                for install_cmd in stage_cmds:
+                    log(f"   -> cmd: {' '.join(install_cmd)}")
+                    result = _run_subprocess_text(install_cmd, env=env, cwd=safe_cwd)
+                    if result.returncode != 0:
+                        err_txt = (result.stderr or result.stdout or '').strip()
+                        if err_txt:
+                            log(f"   [warn] install failed: {err_txt[:500]}")
+                        stage_last_err = err_txt or stage_last_err
+                        if _looks_like_tls_error(err_txt):
+                            saw_tls = True
+                        continue
+                    if not _ensure_pkg_resources():
+                        stage_last_err = 'pkg_resources/setuptools repair failed after install'
+                        continue
+                    ok_local, detail_local = _check_imports()
+                    if (not ok_local) and _looks_like_pyexpat_dll_issue(detail_local):
+                        log('[MFA] Detected pyexpat/libexpat DLL issue after install; trying repair...')
+                        if _try_repair_pyexpat():
+                            ok_local, detail_local = _check_imports()
+                    if ok_local:
+                        return True, stage_last_err
+                    if detail_local:
+                        log(f"   [warn] import check failed after install: {detail_local[:500]}")
+                        stage_last_err = detail_local
+                if not saw_tls:
+                    break
+
+            return False, stage_last_err
 
         last_err = detail
-        for dep_label, install_cmds in install_plans:
-            log(f"[MFA] Installing Korean tokenizer deps: {dep_label}")
-            for install_cmd in install_cmds:
-                log(f"   -> cmd: {' '.join(install_cmd)}")
-                result = _run_subprocess_text(install_cmd, env=env)
-                if result.returncode != 0:
-                    err_txt = (result.stderr or result.stdout or '').strip()
-                    if err_txt:
-                        log(f"   [warn] install failed: {err_txt[:500]}")
-                    if _stderr_has_msvc_requirement(err_txt):
-                        _emit_degraded_notice_once(require_msvc=True)
-                    last_err = err_txt or last_err
-                    continue
-                if not _ensure_packaging_stack():
-                    last_err = 'pip/setuptools/wheel repair failed after install'
-                    continue
-                _ensure_mecab_dictionary()
-                _ensure_mecab_shim()
-                if allow_degraded:
-                    _ensure_jamo_shim()
-                ok, detail = _check_imports()
-                if (not ok) and _looks_like_pyexpat_dll_issue(detail):
-                    log('[MFA] Detected pyexpat/libexpat DLL issue after install; trying repair...')
-                    if _try_repair_pyexpat():
-                        ok, detail = _check_imports()
-                if ok:
-                    log('[MFA] Korean tokenizer deps are ready')
-                    native_check = _run_subprocess_text(native_tokenizer_check_cmd, env=env)
-                    if native_check.returncode != 0:
-                        log('[MFA] Korean tokenizer running in degraded fallback mode (native MeCab not available).')
-                        _emit_degraded_notice_once(require_msvc=False)
-                    return True
-                if detail:
-                    log(f"   [warn] import check failed after install: {detail[:500]}")
-                    last_err = detail
-        _ensure_mecab_shim()
-        if allow_degraded:
-            _ensure_jamo_shim()
-        fallback_runtime = _run_subprocess_text(fallback_runtime_check_cmd, env=env)
-        if fallback_runtime.returncode == 0 and allow_degraded:
-            log('[MFA] Korean tokenizer deps fallback enabled; continuing with reduced-accuracy mode.')
-            _emit_degraded_notice_once(require_msvc=_stderr_has_msvc_requirement(last_err))
+
+        # Stage 1: install jamo first (pure Python).
+        log('[MFA] Installing Korean tokenizer deps: jamo')
+        ok, stage_err = _run_install_stage(['jamo'])
+        if stage_err:
+            last_err = stage_err
+        if ok:
+            log('[MFA] Korean tokenizer deps are ready (jamo + mecab backend)')
+            patch_mfa_korean_support(mfa_path, callback)
             return True
-        log('[MFA] Failed to prepare Korean tokenizer deps (python-mecab-ko/jamo)')
-        if _stderr_has_msvc_requirement(last_err):
-            _emit_msvc_required_notice(callback, log)
-        else:
-            log('[MFA] Native Korean tokenizer dependencies are unavailable; check wheel/network compatibility.')
+
+        # Stage 2: python-mecab-ko wheels only (avoid source-build toolchain on Windows).
+        log('[MFA] Installing Korean tokenizer deps: python-mecab-ko + dictionary')
+        _run_uninstall_stage(['mecab-python3'])
+        ok, stage_err = _run_install_stage(
+            ['python-mecab-ko', 'python-mecab-ko-dic'],
+            pip_extra_args=['--only-binary=:all:', '--force-reinstall'],
+        )
+        if stage_err:
+            last_err = stage_err
+        if ok:
+            log('[MFA] Korean tokenizer deps are ready')
+            patch_mfa_korean_support(mfa_path, callback)
+            return True
+
+        # Stage 3: fallback to mecab-python3 wheels only.
+        log('[MFA] Installing Korean tokenizer deps fallback: mecab-python3')
+        _run_uninstall_stage(['python-mecab-ko', 'python-mecab-ko-dic'])
+        ok, stage_err = _run_install_stage(
+            ['mecab-python3'],
+            pip_extra_args=['--only-binary=:all:'],
+        )
+        if stage_err:
+            last_err = stage_err
+        if ok:
+            log('[MFA] Korean tokenizer deps are ready')
+            patch_mfa_korean_support(mfa_path, callback)
+            return True
+
+        log('[MFA] Failed to prepare Korean tokenizer deps (jamo, python-mecab-ko, mecab-python3)')
         if last_err:
             log(f"   last error: {last_err[:500]}")
+        log(
+            '[MFA] Hint: installing mecab-python3 from source requires Microsoft C++ Build Tools. '
+            'If no binary wheel is available for your platform, download Build Tools from: '
+            'https://visualstudio.microsoft.com/visual-cpp-build-tools/'
+        )
         return False
     except Exception as e:
         log(f"[MFA] Korean dependency setup error: {e}")
@@ -3056,37 +2002,97 @@ class MeCab:
 
 def ensure_japanese_support(mfa_path, callback=None):
     """
-    MFA 일본어 정렬에 필요한 spacy/sudachipy/sudachidict-core가 있는지 확인하고,
-    누락 시 자동 설치를 시도합니다.
+    Prepare Japanese tokenizer/runtime dependencies for MFA.
+    Installs spacy/sudachipy/sudachidict-core and verifies imports.
     """
     def log(msg):
         logger.info(msg)
         if callback:
             callback(msg)
 
-    if not mfa_path or not _is_env_scripts_path(mfa_path):
-        return True
+    if not mfa_path:
+        log("[MFA] Japanese dependency check skipped: mfa_path is empty.")
+        return False
+    if 'Scripts' not in mfa_path:
+        log("[MFA] Japanese dependency check is uncertain: non-portable MFA path (Scripts missing).")
+        return False
 
     env_dir = os.path.dirname(os.path.dirname(mfa_path))
     python_exe = _resolve_env_python_exe(env_dir)
     pip_exe = os.path.join(env_dir, 'Scripts', 'pip.exe')
     conda_exe = os.path.join(env_dir, 'Scripts', 'conda.exe')
+    safe_cwd = _safe_env_subprocess_cwd(env_dir)
+    pip_common_args = [
+        '--no-cache-dir',
+        '--disable-pip-version-check',
+        '--retries',
+        '5',
+        '--timeout',
+        '120',
+    ]
+    trusted_hosts = [
+        '--trusted-host', 'pypi.org',
+        '--trusted-host', 'files.pythonhosted.org',
+        '--trusted-host', 'pypi.python.org',
+    ]
+    index_args = []
+    index_url = str(os.environ.get("UTOA_PIP_INDEX_URL", "") or "").strip()
+    extra_index_url = str(os.environ.get("UTOA_PIP_EXTRA_INDEX_URL", "") or "").strip()
+    if index_url:
+        index_args.extend(['--index-url', index_url])
+    if extra_index_url:
+        index_args.extend(['--extra-index-url', extra_index_url])
 
     if not os.path.exists(python_exe):
-        return True
+        log("[MFA] Japanese dependency check is uncertain: env python.exe not found.")
+        return False
     if not ensure_mfa_python_packaging_stack(mfa_path, callback=callback):
-        log("⚠️ MFA Python 패키지 도구 복구에 실패해 일본어 의존성 설치를 계속할 수 없습니다.")
+        log("[MFA] Failed to prepare Python packaging tools before Japanese dependency install.")
         return False
 
     check_cmd = [python_exe, '-c', 'import spacy; import sudachipy; import sudachidict_core']
-    safe_cwd = _safe_env_subprocess_cwd(env_dir)
     try:
         env = _get_conda_env(mfa_path)
+
+        def _looks_like_tls_error(msg):
+            s = (msg or '').lower()
+            return (
+                ('ssl' in s and ('certificate' in s or 'secure channel' in s or 'tls' in s))
+                or ('certificate verify failed' in s)
+                or ('trust relationship' in s)
+            )
+
+        def _run_pip_install(packages):
+            last_err = ""
+            for pass_idx in range(2):
+                use_trusted = pass_idx == 1
+                extra = trusted_hosts if use_trusted else []
+                cmds = [
+                    [python_exe, '-m', 'pip', 'install', '--upgrade', *pip_common_args, *index_args, *extra, *packages]
+                ]
+                if os.path.exists(pip_exe):
+                    cmds.append([pip_exe, 'install', '--upgrade', *pip_common_args, *index_args, *extra, *packages])
+                saw_tls = False
+                for pip_cmd in cmds:
+                    log(f"   -> fallback pip cmd: {' '.join(pip_cmd)}")
+                    pip_result = _run_subprocess_text(pip_cmd, env=env, cwd=safe_cwd)
+                    if pip_result.returncode == 0:
+                        return True, last_err
+                    err_txt = (pip_result.stderr or pip_result.stdout or '').strip()
+                    if err_txt:
+                        log(f"   pip stderr/stdout: {err_txt[:500]}")
+                    last_err = err_txt or last_err
+                    if _looks_like_tls_error(err_txt):
+                        saw_tls = True
+                if not saw_tls:
+                    break
+            return False, last_err
+
         result = _run_subprocess_text(check_cmd, env=env, cwd=safe_cwd)
         if result.returncode == 0:
             return True
 
-        log("📦 MFA 일본어 토크나이저 의존성(spacy, sudachipy, sudachidict-core) 설치/확인 중...")
+        log("[MFA] Installing Japanese tokenizer dependencies (spacy, sudachipy, sudachidict-core)...")
 
         install_cmd = None
         if os.path.exists(conda_exe):
@@ -3107,203 +2113,411 @@ def ensure_japanese_support(mfa_path, callback=None):
                 install_cmd = [pip_exe, 'install', 'spacy', 'sudachipy', 'sudachidict-core']
 
         if not install_cmd:
-            log("⚠️ 일본어 의존성 자동 설치 경로를 찾지 못했습니다.")
+            log("[MFA] No conda/pip installer is available for Japanese dependency setup.")
             return False
 
-        log(f"   -> 실행 명령어: {' '.join(install_cmd)}")
+        log(f"   -> install cmd: {' '.join(install_cmd)}")
         install_result = _run_subprocess_text(install_cmd, env=env, cwd=safe_cwd)
         if install_result.returncode != 0:
             if install_result.stderr:
-                log(f"   ⚠️ 설치 stderr: {install_result.stderr[:500]}")
+                log(f"   install stderr: {install_result.stderr[:500]}")
             if install_result.stdout:
-                log(f"   ⚠️ 설치 stdout: {install_result.stdout[:500]}")
-            if os.path.exists(pip_exe):
-                pip_cmd = [pip_exe, 'install', 'spacy', 'sudachipy', 'sudachidict-core']
-                log(f"   -> 대체 설치 명령어(pip): {' '.join(pip_cmd)}")
-                pip_result = _run_subprocess_text(pip_cmd, env=env, cwd=safe_cwd)
-                if pip_result.returncode != 0:
-                    if pip_result.stderr:
-                        log(f"   ⚠️ pip stderr: {pip_result.stderr[:500]}")
-                    if pip_result.stdout:
-                        log(f"   ⚠️ pip stdout: {pip_result.stdout[:500]}")
-                    return False
-            else:
+                log(f"   install stdout: {install_result.stdout[:500]}")
+            pip_ok, pip_err = _run_pip_install(['spacy', 'sudachipy', 'sudachidict-core'])
+            if not pip_ok:
+                if pip_err:
+                    log(f"   pip fallback failed: {pip_err[:500]}")
                 return False
 
         verify = _run_subprocess_text(check_cmd, env=env, cwd=safe_cwd)
         if verify.returncode == 0:
-            log("✅ 일본어 토크나이저 의존성 설치 확인 완료")
+            log("[MFA] Japanese tokenizer dependencies are ready.")
             return True
 
-        log("⚠️ 일본어 의존성 설치 후에도 import 검증에 실패했습니다.")
+        log("[MFA] Japanese dependency install completed, but import verification still failed.")
         if verify.stderr:
-            log(f"   상세 stderr: {verify.stderr[:500]}")
+            log(f"   verify stderr: {verify.stderr[:500]}")
         return False
     except Exception as e:
-        log(f"⚠️ 일본어 의존성 자동 확인/설치 중 오류 발생: {e}")
+        log(f"[MFA] Japanese dependency setup error: {e}")
         return False
 
 
 def download_mfa_model(mfa_path, language='korean', callback=None):
     """Download MFA acoustic model for selected language."""
-    def log(msg):
+    interval_raw = str(os.environ.get("UTOA_MFA_MODEL_LOG_INTERVAL_SEC", "30") or "").strip()
+    try:
+        interval_sec = float(interval_raw)
+    except Exception:
+        interval_sec = 30.0
+    interval_sec = max(5.0, min(600.0, interval_sec))
+
+    last_emit = {"ts": 0.0, "pending": ""}
+
+    def _emit_throttled(msg, force=False):
+        if not callback:
+            return
+        now = time.monotonic()
+        if force or (now - last_emit["ts"]) >= interval_sec:
+            last_emit["ts"] = now
+            last_emit["pending"] = ""
+            callback(msg)
+        else:
+            last_emit["pending"] = msg
+
+    def _flush_pending():
+        pending = str(last_emit.get("pending", "") or "").strip()
+        if not pending or not callback:
+            return
+        last_emit["pending"] = ""
+        last_emit["ts"] = time.monotonic()
+        callback(pending)
+
+    def log(msg, stream=False):
         logger.info(msg)
         if callback:
-            callback(msg)
+            _emit_throttled(msg, force=not stream)
     if not mfa_path:
         log('MFA executable not found.')
         return False
-    mfa_path = resolve_working_mfa_executable(mfa_path, callback=callback)
-    if not mfa_path or not os.path.exists(mfa_path):
-        log('MFA executable not found.')
-        return False
-    launcher_ok, launcher_detail = _probe_mfa_launcher(mfa_path)
-    if not launcher_ok:
-        log(f"[MFA] launcher is not healthy: {launcher_detail[:280] if launcher_detail else 'unknown error'}")
-        return False
     model_name = 'japanese_mfa' if language == 'japanese' else 'korean_mfa'
     lang_label = 'Japanese' if language == 'japanese' else 'Korean'
-    if language == 'korean':
-        if not ensure_korean_support(mfa_path, callback):
-            log('Failed to prepare Korean dependencies (python-mecab-ko/jamo).')
-            return False
-    elif language == 'japanese':
-        if not ensure_japanese_support(mfa_path, callback):
-            log('Failed to prepare Japanese dependencies (spacy, sudachipy, sudachidict-core).')
-            return False
-    elif language == 'japanese':
-        if not ensure_japanese_support(mfa_path, callback):
-            log('Failed to prepare Japanese dependencies (spacy, sudachipy, sudachidict-core).')
-            return False
+
+    has_model, msg = check_mfa_model(mfa_path, language=language)
+    if has_model:
+        if msg:
+            log(msg)
+        return True
+
+    # Dependency preparation is best-effort: continue model download even when it fails.
+    # Import verification runs again after download in the regular readiness checks.
+    try:
+        if language == 'korean':
+            if not ensure_korean_support(mfa_path, callback):
+                log('[MFA] Korean dependency prepare failed, but model download will continue.')
+        elif language == 'japanese':
+            if not ensure_japanese_support(mfa_path, callback):
+                log('[MFA] Japanese dependency prepare failed, but model download will continue.')
+    except Exception as dep_exc:
+        log(f'[MFA] Dependency prepare check raised error, but model download will continue: {dep_exc}')
+
     log(f'Downloading {lang_label} MFA model...')
     try:
         env = _get_conda_env(mfa_path)
-        process = _popen_subprocess(
+        attempts = [
             [mfa_path, 'model', 'download', 'acoustic', model_name, '--ignore_cache'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=False,
-            env=env,
-        )
-        launcher_failed = False
-        if process.stdout:
-            for raw_line in iter(process.stdout.readline, b""):
-                line = _decode_subprocess_output(raw_line).strip()
-                if line:
-                    log(line)
-                    if _is_mfa_launcher_failure_text(line):
-                        launcher_failed = True
-        process.wait()
-        if launcher_failed:
-            log('[MFA] Model download failed due to launcher process creation error.')
-            return False
-        if process.returncode == 0:
-            log(f'{lang_label} MFA model download completed.')
-            return True
-        log(f'Model download failed (code: {process.returncode})')
+            [mfa_path, 'model', 'download', 'acoustic', model_name],
+        ]
+        for idx, cmd in enumerate(attempts, start=1):
+            log(f"[MFA] model download attempt {idx}/{len(attempts)}: {' '.join(cmd)}")
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=False,
+                env=env,
+            )
+            seen_lines: List[str] = []
+            if process.stdout:
+                for raw_line in iter(process.stdout.readline, b""):
+                    line = _decode_subprocess_output(raw_line).strip()
+                    if line:
+                        seen_lines.append(line)
+                        log(line, stream=True)
+            process.wait()
+            _flush_pending()
+            if process.returncode == 0:
+                log(f'{lang_label} MFA model download completed.')
+                return True
+
+            has_model, _msg = check_mfa_model(mfa_path, language=language)
+            if has_model:
+                log(f'{lang_label} MFA model is present despite non-zero downloader exit code. Continuing.')
+                return True
+
+            tail = " | ".join(seen_lines[-6:])[:500]
+            if tail:
+                log(f"[MFA] download attempt {idx} failed (code={process.returncode}): {tail}")
+            else:
+                log(f"[MFA] download attempt {idx} failed (code={process.returncode})")
+
+        log('Model download failed after retries.')
         return False
     except Exception as e:
         log(f'Model download error: {e}')
         return False
-def run_mfa_align(
-    mfa_path,
-    wav_folder,
-    dict_path,
-    output_folder,
-    language='korean',
+
+
+def _normalize_alignment_strict_mode(value) -> str:
+    text = str(value or "").strip().lower()
+    compact = text.replace(" ", "").replace("-", "_")
+    if "strict mode" in text:
+        return "strict"
+    if ("moderate mode" in text or "balanced mode" in text or "soft strict" in text):
+        return "moderate"
+    if compact in {
+        "strict",
+        "full_strict",
+        "hard",
+        "hard_strict",
+    }:
+        return "strict"
+    if compact in {
+        "moderate",
+        "medium",
+        "balanced",
+        "soft_strict",
+        "fallback",
+    }:
+        return "moderate"
+    return "off"
+
+
+def _resolve_mfa_runtime_options(
+    *,
+    resolved_profile: str,
+    runtime_options: Optional[Dict[str, object]] = None,
     callback=None,
-    align_profile='accurate',
-):
-    """Run MFA forced alignment."""
+) -> Dict[str, object]:
     def log(msg):
         logger.info(msg)
         if callback:
             callback(msg)
-    if not mfa_path:
-        return False, 'MFA executable not found.'
-    mfa_path = resolve_working_mfa_executable(mfa_path, callback=callback)
-    if not mfa_path or not os.path.exists(mfa_path):
-        return False, 'MFA executable not found.'
-    launcher_ok, launcher_detail = _probe_mfa_launcher(mfa_path)
-    if not launcher_ok:
-        if launcher_detail:
-            return False, f'MFA launcher error: {launcher_detail[:220]}'
-        return False, 'MFA launcher error'
-    if not os.path.exists(wav_folder):
-        return False, f'WAV folder not found: {wav_folder}'
-    if not os.path.exists(dict_path):
-        return False, f'Dictionary not found: {dict_path}'
-    model_name = 'japanese_mfa' if language == 'japanese' else 'korean_mfa'
-    lang_label = 'Japanese' if language == 'japanese' else 'Korean'
-    log(f'Checking MFA prerequisites... ({lang_label})')
-    if language == 'korean':
-        if not ensure_korean_support(mfa_path, callback):
-            err = 'Missing Korean tokenizer dependencies (python-mecab-ko/jamo).'
-            log(err)
-            return False, err
-    elif language == 'japanese':
-        if not ensure_japanese_support(mfa_path, callback):
-            err = 'Missing Japanese tokenizer dependencies.'
-            log(err)
-            return False, err
-    os.makedirs(output_folder, exist_ok=True)
-    env = _get_conda_env(mfa_path)
-    ok, preflight_err = _preflight_compute_mfcc(mfa_path, callback=callback)
-    if not ok:
-        return False, preflight_err
-    work_wav_folder = wav_folder
-    work_dict_path = dict_path
-    work_output_folder = output_folder
-    safe_workspace = None
-    low_rms_gain_cfg = _resolve_low_rms_gain_config()
-    low_rms_gain_enabled = bool(low_rms_gain_cfg.get("enabled", False))
-    needs_ascii_safe_workspace = any(_contains_non_ascii(p) for p in (wav_folder, dict_path, output_folder))
-    if needs_ascii_safe_workspace or low_rms_gain_enabled:
+
+    raw = dict(runtime_options or {})
+    default_constrained = "moderate" if resolved_profile == "high_pitch_accurate" else "off"
+    constrained_mode = _normalize_alignment_strict_mode(raw.get("constrained_mode", default_constrained))
+    recursive_requested = bool(raw.get("recursive_mfa", True))
+    recursive_enabled = recursive_requested and constrained_mode in {"strict", "moderate"}
+    recursive_skip_reason = ""
+    if resolved_profile == "fast":
+        if recursive_enabled:
+            recursive_skip_reason = "fast profile"
+        recursive_enabled = False
+    elif resolved_profile == "default" and constrained_mode != "strict":
+        # Keep default profile responsive unless user explicitly requests strict behavior.
+        if recursive_enabled:
+            recursive_skip_reason = "default profile"
+        recursive_enabled = False
+
+    chunk_size_default = 72 if resolved_profile in {"accurate", "accurate_adapted"} else 96
+    chunk_size = chunk_size_default
+    raw_chunk_size = str(raw.get("recursive_chunk_size", "") or "").strip()
+    if raw_chunk_size:
         try:
-            safe_workspace = _prepare_ascii_safe_alignment_workspace(
-                wav_folder,
-                dict_path,
-                output_folder,
-                wav_gain_config=low_rms_gain_cfg,
+            chunk_size = max(12, min(240, int(float(raw_chunk_size))))
+        except Exception:
+            chunk_size = chunk_size_default
+
+    max_depth = 8
+    raw_max_depth = str(raw.get("recursive_max_depth", "") or "").strip()
+    if raw_max_depth:
+        try:
+            max_depth = max(2, min(12, int(float(raw_max_depth))))
+        except Exception:
+            max_depth = 8
+
+    beam_scale = 1.0
+    if constrained_mode == "strict":
+        beam_scale = 0.72
+    elif constrained_mode == "moderate":
+        beam_scale = 0.84
+
+    if constrained_mode in {"strict", "moderate"}:
+        log(
+            f"[MFA][constrained] mode={constrained_mode}, "
+            f"recursive={'on' if recursive_enabled else 'off'}, "
+            f"profile={resolved_profile}"
+        )
+        if recursive_skip_reason:
+            log(f"[MFA][recursive] skipped by profile policy ({recursive_skip_reason}).")
+
+    return {
+        "constrained_mode": constrained_mode,
+        "recursive_mfa": recursive_enabled,
+        "recursive_chunk_size": int(chunk_size),
+        "recursive_max_depth": int(max_depth),
+        "beam_scale": float(beam_scale),
+    }
+
+
+def _collect_alignment_token_sequence(corpus_dir: str) -> List[str]:
+    tokens: List[str] = []
+    seen: Set[str] = set()
+    if not os.path.isdir(corpus_dir):
+        return tokens
+    for filename in sorted(os.listdir(corpus_dir)):
+        low = filename.lower()
+        if not (low.endswith(".lab") or low.endswith(".txt")):
+            continue
+        path = os.path.join(corpus_dir, filename)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+        except Exception:
+            continue
+        for tok in str(text or "").replace("\n", " ").replace("\t", " ").split():
+            token = str(tok or "").strip()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            tokens.append(token)
+    return tokens
+
+
+def _build_constrained_dictionary(
+    base_dict_path: str,
+    corpus_dir: str,
+    *,
+    mode: str = "moderate",
+    callback=None,
+) -> Tuple[bool, str, str, Dict[str, int]]:
+    def log(msg):
+        logger.info(msg)
+        if callback:
+            callback(msg)
+
+    stats = {
+        "token_total": 0,
+        "selected": 0,
+        "missing": 0,
+        "duplicates": 0,
+    }
+    mode_code = _normalize_alignment_strict_mode(mode)
+    tokens = _collect_alignment_token_sequence(corpus_dir)
+    stats["token_total"] = len(tokens)
+    if not tokens:
+        return False, "No lab tokens found for constrained dictionary build.", "", stats
+
+    entries: Dict[str, str] = {}
+    duplicate_count = 0
+    try:
+        with open(base_dict_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except Exception as exc:
+        return False, f"Failed to read dictionary: {exc}", "", stats
+
+    for raw_line in lines:
+        stripped = str(raw_line or "").strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        if len(parts) < 2:
+            continue
+        key = parts[0]
+        pron = " ".join(parts[1:])
+        if key in entries:
+            duplicate_count += 1
+            continue
+        entries[key] = pron
+    stats["duplicates"] = int(duplicate_count)
+
+    selected_lines: List[str] = []
+    missing_tokens: List[str] = []
+    for token in tokens:
+        pron = entries.get(token)
+        if not pron:
+            missing_tokens.append(token)
+            continue
+        selected_lines.append(f"{token} {pron}")
+
+    stats["selected"] = len(selected_lines)
+    stats["missing"] = len(missing_tokens)
+    if not selected_lines:
+        return False, "Constrained dictionary became empty.", "", stats
+
+    dict_dir = os.path.dirname(os.path.abspath(base_dict_path))
+    dict_ext = os.path.splitext(base_dict_path)[1] or ".txt"
+    constrained_path = os.path.join(dict_dir, f"dictionary_constrained{dict_ext}")
+    try:
+        with open(constrained_path, "w", encoding="utf-8", newline="\n") as f:
+            for line in selected_lines:
+                f.write(f"{line}\n")
+    except Exception as exc:
+        return False, f"Failed to write constrained dictionary: {exc}", "", stats
+
+    log(
+        f"[MFA][constrained] dictionary selected={stats['selected']}/{stats['token_total']} "
+        f"missing={stats['missing']} duplicate_skipped={stats['duplicates']}"
+    )
+
+    if missing_tokens:
+        preview = ", ".join(missing_tokens[:10])
+        if mode_code == "strict":
+            return (
+                False,
+                f"Strict constrained dictionary missing {len(missing_tokens)} tokens: {preview}",
+                constrained_path,
+                stats,
             )
-            work_wav_folder = safe_workspace["corpus_dir"]
-            work_dict_path = safe_workspace["dict_path"]
-            work_output_folder = safe_workspace["output_dir"]
-            if needs_ascii_safe_workspace and low_rms_gain_enabled:
-                log(f"[MFA] Using staging workspace (non-ASCII path + low-RMS gain): {safe_workspace['base']}")
-            elif needs_ascii_safe_workspace:
-                log(f"[MFA] Non-ASCII path detected, using staging workspace: {safe_workspace['base']}")
-            else:
-                log(f"[MFA] Using staging workspace for low-RMS gain: {safe_workspace['base']}")
-            if low_rms_gain_enabled:
-                stats = dict(safe_workspace.get("wav_gain_stats") or {})
-                scanned = int(stats.get("scanned", 0) or 0)
-                boosted = int(stats.get("boosted", 0) or 0)
-                passthrough = int(stats.get("passthrough", 0) or 0)
-                log(
-                    "[MFA] Low-RMS staging summary: "
-                    f"boosted={boosted}/{scanned}, weak_assist={int(stats.get('weak_assist', 0) or 0)}, "
-                    f"passthrough={passthrough}, "
-                    f"threshold={low_rms_gain_cfg.get('threshold_db', -24.0)}dB, "
-                    f"target={low_rms_gain_cfg.get('target_db', -16.0)}dB, "
-                    f"max_gain={low_rms_gain_cfg.get('max_gain_db', 18.0)}dB, "
-                    f"weak_trigger={low_rms_gain_cfg.get('weak_voice_trigger_db', -23.0)}dB"
-                )
-        except Exception as e:
-            err = f"Failed to prepare MFA staging workspace: {e}"
-            log(err)
-            return False, err
-    dict_sanitize_ok, dict_sanitize_err = _sanitize_alignment_dictionary_for_mfa(work_dict_path, callback=callback)
-    if not dict_sanitize_ok:
-        return False, dict_sanitize_err
-    dict_ok, dict_err = _validate_alignment_dictionary(work_dict_path, callback=callback)
-    if not dict_ok:
-        return False, dict_err
-    single_speaker_flag = _resolve_single_speaker_flag(mfa_path, env=env)
-    resolved_profile, align_opts = _resolve_mfa_align_options(align_profile)
+        log(
+            f"[MFA][constrained] moderate mode missing tokens={len(missing_tokens)} "
+            f"(sample: {preview})"
+        )
+
+    return True, "", constrained_path, stats
+
+
+def _collect_alignment_units(corpus_dir: str) -> List[Dict[str, str]]:
+    units: List[Dict[str, str]] = []
+    if not os.path.isdir(corpus_dir):
+        return units
+    wav_map: Dict[str, str] = {}
+    for filename in os.listdir(corpus_dir):
+        if not filename.lower().endswith(".wav"):
+            continue
+        path = os.path.join(corpus_dir, filename)
+        if not os.path.isfile(path):
+            continue
+        stem = os.path.splitext(filename)[0]
+        wav_map[stem] = path
+    for stem in sorted(wav_map.keys()):
+        lab_path = os.path.join(corpus_dir, f"{stem}.lab")
+        txt_path = os.path.join(corpus_dir, f"{stem}.txt")
+        label_path = ""
+        if os.path.isfile(lab_path):
+            label_path = lab_path
+        elif os.path.isfile(txt_path):
+            label_path = txt_path
+        if not label_path:
+            continue
+        units.append(
+            {
+                "stem": stem,
+                "wav": wav_map[stem],
+                "label": label_path,
+            }
+        )
+    return units
+
+
+def _build_mfa_align_command(
+    *,
+    mfa_path: str,
+    corpus_dir: str,
+    dict_path: str,
+    model_name: str,
+    output_dir: str,
+    single_speaker_flag: str,
+    align_opts: Dict[str, object],
+    profile_label: str,
+    env=None,
+    callback=None,
+) -> Tuple[List[str], bool]:
+    def log(msg):
+        logger.info(msg)
+        if callback:
+            callback(msg)
+
     cmd = [
-        mfa_path, 'align',
-        work_wav_folder, work_dict_path, model_name, work_output_folder,
+        mfa_path,
+        "align",
+        corpus_dir,
+        dict_path,
+        model_name,
+        output_dir,
         single_speaker_flag,
     ]
     speaker_adapt_enabled = bool(align_opts.get("speaker_adaptation", False))
@@ -3314,118 +2528,474 @@ def run_mfa_align(
         else:
             speaker_adapt_enabled = False
             log("[MFA] Speaker adaptation flag not supported by this MFA version; skipped.")
+
     if align_opts.get("clean", True):
         cmd.append("--clean")
     if align_opts.get("fine_tune", False):
         cmd.append("--fine_tune")
     if align_opts.get("textgrid_cleanup", True):
         cmd.append("--textgrid_cleanup")
-    cmd.extend([
-        "--beam", str(int(align_opts.get("beam", 1000))),
-        "--retry_beam", str(int(align_opts.get("retry_beam", 4000))),
-        "--num_jobs", str(int(align_opts.get("num_jobs", 1))),
-    ])
+
+    cmd.extend(
+        [
+            "--beam",
+            str(int(align_opts.get("beam", 1000))),
+            "--retry_beam",
+            str(int(align_opts.get("retry_beam", 4000))),
+            "--num_jobs",
+            str(int(align_opts.get("num_jobs", 1))),
+        ]
+    )
+    return cmd, speaker_adapt_enabled
+
+
+def _run_mfa_align_command(
+    *,
+    mfa_path: str,
+    corpus_dir: str,
+    dict_path: str,
+    model_name: str,
+    output_dir: str,
+    single_speaker_flag: str,
+    align_opts: Dict[str, object],
+    profile_label: str,
+    env=None,
+    callback=None,
+    pass_tag: str = "",
+) -> Tuple[bool, str, List[str]]:
+    def log(msg):
+        logger.info(msg)
+        if callback:
+            callback(msg)
+
+    cmd, speaker_adapt_enabled = _build_mfa_align_command(
+        mfa_path=mfa_path,
+        corpus_dir=corpus_dir,
+        dict_path=dict_path,
+        model_name=model_name,
+        output_dir=output_dir,
+        single_speaker_flag=single_speaker_flag,
+        align_opts=align_opts,
+        profile_label=profile_label,
+        env=env,
+        callback=callback,
+    )
+    tag = f" [{pass_tag}]" if pass_tag else ""
     log(
-        "Starting MFA alignment... "
-        f"({single_speaker_flag}, profile={resolved_profile}, "
+        "Starting MFA alignment"
+        f"{tag}... ({single_speaker_flag}, profile={profile_label}, "
         f"speaker_adapt={'on' if speaker_adapt_enabled else 'off'}, "
         f"fine_tune={'on' if align_opts.get('fine_tune') else 'off'}, "
         f"beam={align_opts.get('beam')}, retry_beam={align_opts.get('retry_beam')}, "
-        f"num_jobs={align_opts.get('num_jobs')}, "
-        f"soft_bank={'on' if align_opts.get('soft_bank_mode') else 'off'})"
+        f"num_jobs={align_opts.get('num_jobs')})"
     )
+
+    tail_lines: List[str] = []
     try:
-        process = _popen_subprocess(
+        process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=False,
             env=env,
         )
-        tail_lines = []
-        launcher_failed = False
         if process.stdout:
             for raw_line in iter(process.stdout.readline, b""):
                 stripped = _decode_subprocess_output(raw_line).strip()
-                if stripped:
-                    log(stripped)
-                    if _is_mfa_launcher_failure_text(stripped):
-                        launcher_failed = True
-                    tail_lines.append(stripped)
-                    if len(tail_lines) > 120:
-                        tail_lines.pop(0)
+                if not stripped:
+                    continue
+                log(stripped)
+                tail_lines.append(stripped)
+                if len(tail_lines) > 120:
+                    tail_lines.pop(0)
         process.wait()
-        if launcher_failed:
-            err = 'MFA launcher failed to create process. Rebuild or repair MFA launcher.'
-            log(err)
-            return False, err
-        if process.returncode == 0:
-            if safe_workspace is not None:
-                copied = _copy_back_textgrids(work_output_folder, output_folder)
-                log(f"[MFA] Copied back {copied} TextGrid files from staging workspace.")
-            log('MFA alignment completed successfully.')
-            return True, ''
-        joined_tail = '\n'.join(tail_lines[-40:])
-        lowered_tail = joined_tail.lower()
-        if (
-            'please install korean support' in lowered_tail
-            or ('importerror' in lowered_tail and 'eunjeon' in lowered_tail and 'jamo' in lowered_tail)
-            or ('importerror' in lowered_tail and 'mecab' in lowered_tail and 'jamo' in lowered_tail)
-        ):
-            err = 'Korean tokenizer dependencies are missing in MFA env. (python-mecab-ko/jamo)'
-            log(err)
-            return False, err
-        err = f'MFA alignment failed (code: {process.returncode})'
-        if tail_lines:
-            err += f' | tail: {tail_lines[-1][:180]}'
-        if process.returncode in {3221225477, -1073741819}:
-            err += (
-                " | hint: access_violation(0xC0000005), likely native kaldi crash "
-                "(env binary mismatch or corpus/lexicon edge-case), retry with lower-load profile(fast/default)"
-            )
-        log(err)
-        return False, err
     except FileNotFoundError:
-        err = 'MFA executable not found. Check MFA installation.'
-        log(err)
-        return False, err
-    except Exception as e:
-        err = f'Unexpected MFA error: {e}'
-        log(err)
-        return False, err
-    finally:
+        return False, "MFA executable not found. Check MFA installation.", tail_lines
+    except Exception as exc:
+        return False, f"Unexpected MFA error: {exc}", tail_lines
+
+    if process.returncode == 0:
+        return True, "", tail_lines
+
+    joined_tail = "\n".join(tail_lines[-40:]).lower()
+    if (
+        "please install korean support" in joined_tail
+        or ("importerror" in joined_tail and "jamo" in joined_tail and "mecab" in joined_tail)
+    ):
+        return False, "Korean tokenizer dependencies (jamo + mecab backend) are missing in MFA env.", tail_lines
+
+    err = f"MFA alignment failed (code: {process.returncode})"
+    if tail_lines:
+        err += f" | tail: {tail_lines[-1][:180]}"
+    if process.returncode in {3221225477, -1073741819}:
+        err += (
+            " | hint: access_violation(0xC0000005), likely native kaldi crash "
+            "(env binary mismatch or corpus/lexicon edge-case), retry with lower-load profile(fast/default)"
+        )
+    return False, err, tail_lines
+
+
+def _run_recursive_mfa_align(
+    *,
+    mfa_path: str,
+    corpus_dir: str,
+    dict_path: str,
+    model_name: str,
+    output_dir: str,
+    single_speaker_flag: str,
+    align_opts: Dict[str, object],
+    profile_label: str,
+    env=None,
+    callback=None,
+    chunk_size: int = 96,
+    max_depth: int = 8,
+) -> Tuple[bool, str, int, List[str]]:
+    def log(msg):
+        logger.info(msg)
+        if callback:
+            callback(msg)
+
+    units = _collect_alignment_units(corpus_dir)
+    if not units:
+        return False, "No wav/lab pairs found for recursive MFA.", 0, []
+
+    merged_count = 0
+
+    def _split_and_align(sub_units: List[Dict[str, str]], depth: int) -> Tuple[bool, List[str]]:
+        nonlocal merged_count
+        if not sub_units:
+            return True, []
+
+        if len(sub_units) > int(chunk_size) and depth < int(max_depth):
+            mid = max(1, len(sub_units) // 2)
+            left_ok, left_fail = _split_and_align(sub_units[:mid], depth + 1)
+            right_ok, right_fail = _split_and_align(sub_units[mid:], depth + 1)
+            return left_ok and right_ok, left_fail + right_fail
+
+        tmp_root = tempfile.mkdtemp(prefix="utoa_mfa_recursive_")
+        try:
+            sub_corpus = os.path.join(tmp_root, "corpus")
+            sub_out = os.path.join(tmp_root, "out")
+            os.makedirs(sub_corpus, exist_ok=True)
+            os.makedirs(sub_out, exist_ok=True)
+            for unit in sub_units:
+                wav_dst = os.path.join(sub_corpus, os.path.basename(unit["wav"]))
+                label_dst = os.path.join(sub_corpus, os.path.basename(unit["label"]))
+                _link_or_copy(unit["wav"], wav_dst)
+                _link_or_copy(unit["label"], label_dst)
+
+            ok, _err, _tail = _run_mfa_align_command(
+                mfa_path=mfa_path,
+                corpus_dir=sub_corpus,
+                dict_path=dict_path,
+                model_name=model_name,
+                output_dir=sub_out,
+                single_speaker_flag=single_speaker_flag,
+                align_opts=align_opts,
+                profile_label=profile_label,
+                env=env,
+                callback=callback,
+                pass_tag=f"recursive depth={depth} size={len(sub_units)}",
+            )
+            if ok:
+                merged_count += _copy_back_textgrids(sub_out, output_dir)
+                return True, []
+
+            if len(sub_units) <= 1 or depth >= int(max_depth):
+                failed = [str(unit.get("stem", "")) for unit in sub_units]
+                return False, failed
+
+            mid = max(1, len(sub_units) // 2)
+            left_ok, left_fail = _split_and_align(sub_units[:mid], depth + 1)
+            right_ok, right_fail = _split_and_align(sub_units[mid:], depth + 1)
+            return left_ok and right_ok, left_fail + right_fail
+        finally:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    log(
+        f"[MFA][recursive] start chunk_size={chunk_size}, max_depth={max_depth}, "
+        f"items={len(units)}"
+    )
+    ok, failed = _split_and_align(units, 0)
+    if ok:
+        log(f"[MFA][recursive] complete merged_textgrids={merged_count}")
+        return True, "", merged_count, []
+    preview = ", ".join(failed[:15])
+    err = f"Recursive MFA failed for {len(failed)} item(s): {preview}"
+    log(f"[MFA][recursive] {err}")
+    return False, err, merged_count, failed
+
+
+def run_mfa_align(
+    mfa_path,
+    wav_folder,
+    dict_path,
+    output_folder,
+    language='korean',
+    callback=None,
+    align_profile='accurate',
+    runtime_options: Optional[Dict[str, object]] = None,
+):
+    """Run MFA forced alignment."""
+    def log(msg):
+        logger.info(msg)
+        if callback:
+            callback(msg)
+    if not mfa_path:
+        return False, 'MFA executable not found.'
+    if not os.path.exists(wav_folder):
+        return False, f'WAV folder not found: {wav_folder}'
+    if not os.path.exists(dict_path):
+        return False, f'Dictionary not found: {dict_path}'
+    model_name = 'japanese_mfa' if language == 'japanese' else 'korean_mfa'
+    lang_label = 'Japanese' if language == 'japanese' else 'Korean'
+    log(f'Checking MFA prerequisites... ({lang_label})')
+    strict_tokenizer_gate = str(os.environ.get("UTOA_STRICT_TOKENIZER_GATE", "0") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if language == 'korean':
+        if not ensure_korean_support(mfa_path, callback):
+            err = 'Missing Korean tokenizer dependencies (jamo + mecab backend).'
+            if strict_tokenizer_gate:
+                log(err)
+                return False, err
+            log(f"[MFA] {err} Proceeding because strict tokenizer gate is disabled.")
+    elif language == 'japanese':
+        if not ensure_japanese_support(mfa_path, callback):
+            err = 'Japanese tokenizer readiness is uncertain or dependencies are missing.'
+            if strict_tokenizer_gate:
+                log(err)
+                return False, err
+            log(f"[MFA] {err} Proceeding because strict tokenizer gate is disabled.")
+    os.makedirs(output_folder, exist_ok=True)
+    env = _get_conda_env(mfa_path)
+    model_reference = _resolve_acoustic_model_reference(mfa_path, model_name, env=env)
+    if model_reference != model_name:
+        log(f"[MFA] Using local acoustic model artifact: {model_reference}")
+    ok, preflight_err = _preflight_compute_mfcc(mfa_path, callback=callback)
+    if not ok:
+        return False, preflight_err
+    work_wav_folder = wav_folder
+    work_dict_path = dict_path
+    work_output_folder = output_folder
+    safe_workspace = None
+    needs_audio_prep = _mfa_audio_preprocess_required()
+    needs_ascii_safe = any(_contains_non_ascii(p) for p in (wav_folder, dict_path, output_folder))
+    if needs_ascii_safe or needs_audio_prep:
+        try:
+            safe_workspace = _prepare_ascii_safe_alignment_workspace(
+                wav_folder,
+                dict_path,
+                output_folder,
+                callback=callback,
+            )
+            work_wav_folder = safe_workspace["corpus_dir"]
+            work_dict_path = safe_workspace["dict_path"]
+            work_output_folder = safe_workspace["output_dir"]
+            reason_tokens = []
+            if needs_ascii_safe:
+                reason_tokens.append("ascii-safe")
+            if needs_audio_prep:
+                reason_tokens.append("audio-prep")
+            reason_text = "+".join(reason_tokens) if reason_tokens else "workspace"
+            log(f"[MFA] Using temporary alignment workspace ({reason_text}): {safe_workspace['base']}")
+            if safe_workspace.get("audio_preprocess_enabled"):
+                log(
+                    "[MFA][AudioPrep] applied="
+                    f"{int(safe_workspace.get('audio_preprocess_applied', 0))}/"
+                    f"{int(safe_workspace.get('audio_preprocess_total', 0))}, "
+                    f"fallback_copy={int(safe_workspace.get('audio_preprocess_failed', 0))}"
+                )
+        except Exception as e:
+            log(f"[MFA] Temporary workspace primary prepare failed: {e}")
+            try:
+                retry_root = tempfile.mkdtemp(prefix="utoa_mfa_retry_")
+                safe_workspace = _prepare_ascii_safe_alignment_workspace(
+                    wav_folder,
+                    dict_path,
+                    output_folder,
+                    temp_root=retry_root,
+                    callback=callback,
+                )
+                work_wav_folder = safe_workspace["corpus_dir"]
+                work_dict_path = safe_workspace["dict_path"]
+                work_output_folder = safe_workspace["output_dir"]
+                log(f"[MFA] Temporary workspace retry succeeded: {safe_workspace['base']}")
+                if safe_workspace.get("audio_preprocess_enabled"):
+                    log(
+                        "[MFA][AudioPrep] applied="
+                        f"{int(safe_workspace.get('audio_preprocess_applied', 0))}/"
+                        f"{int(safe_workspace.get('audio_preprocess_total', 0))}, "
+                        f"fallback_copy={int(safe_workspace.get('audio_preprocess_failed', 0))}"
+                    )
+            except Exception as retry_exc:
+                err = f"Failed to prepare temporary MFA workspace: {retry_exc}"
+                log(err)
+                return False, err
+    dict_sanitize_ok, dict_sanitize_err = _sanitize_alignment_dictionary_for_mfa(work_dict_path, callback=callback)
+    if not dict_sanitize_ok:
+        return False, dict_sanitize_err
+    strict_dict_gate = str(os.environ.get("UTOA_STRICT_DICT_VALIDATION", "0") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    dict_ok, dict_err = _validate_alignment_dictionary(
+        work_dict_path,
+        callback=callback,
+        soft=(not strict_dict_gate),
+    )
+    if not dict_ok:
+        return False, dict_err
+    single_speaker_flag = _resolve_single_speaker_flag(mfa_path, env=env)
+    resolved_profile, align_opts = _resolve_mfa_align_options(align_profile)
+    runtime_ctx = _resolve_mfa_runtime_options(
+        resolved_profile=resolved_profile,
+        runtime_options=runtime_options,
+        callback=callback,
+    )
+    constrained_mode = str(runtime_ctx.get("constrained_mode", "off"))
+    recursive_enabled = bool(runtime_ctx.get("recursive_mfa", False))
+    recursive_chunk_size = int(runtime_ctx.get("recursive_chunk_size", 96))
+    recursive_max_depth = int(runtime_ctx.get("recursive_max_depth", 8))
+    beam_scale = float(runtime_ctx.get("beam_scale", 1.0))
+    if constrained_mode in {"strict", "moderate"} and beam_scale > 0:
+        base_beam = int(align_opts.get("beam", 1000))
+        base_retry = int(align_opts.get("retry_beam", 4000))
+        align_opts["beam"] = max(120, int(round(base_beam * beam_scale)))
+        align_opts["retry_beam"] = max(320, int(round(base_retry * beam_scale)))
+        log(
+            f"[MFA][constrained] beam {base_beam}->{align_opts['beam']}, "
+            f"retry_beam {base_retry}->{align_opts['retry_beam']}"
+        )
+
+    attempt_dict_path = work_dict_path
+    constrained_active = False
+    if constrained_mode in {"strict", "moderate"}:
+        c_ok, c_err, constrained_dict_path, _c_stats = _build_constrained_dictionary(
+            work_dict_path,
+            work_wav_folder,
+            mode=constrained_mode,
+            callback=callback,
+        )
+        if c_ok and constrained_dict_path:
+            constrained_active = True
+            attempt_dict_path = constrained_dict_path
+            c_sanitize_ok, c_sanitize_err = _sanitize_alignment_dictionary_for_mfa(
+                attempt_dict_path,
+                callback=callback,
+            )
+            if not c_sanitize_ok:
+                if constrained_mode == "strict":
+                    return False, c_sanitize_err
+                log(f"[MFA][constrained] sanitize failed, fallback to base dictionary: {c_sanitize_err}")
+                constrained_active = False
+                attempt_dict_path = work_dict_path
+            c_dict_ok, c_dict_err = _validate_alignment_dictionary(
+                attempt_dict_path,
+                callback=callback,
+                soft=(not strict_dict_gate),
+            )
+            if not c_dict_ok:
+                if constrained_mode == "strict":
+                    return False, c_dict_err
+                log(f"[MFA][constrained] validation failed, fallback to base dictionary: {c_dict_err}")
+                constrained_active = False
+                attempt_dict_path = work_dict_path
+        else:
+            if constrained_mode == "strict":
+                return False, c_err or "Strict constrained mode failed."
+            log(f"[MFA][constrained] disabled in moderate mode: {c_err}")
+
+    def _run_once_with_optional_recursive(current_dict_path: str, pass_tag: str, allow_recursive: bool):
+        ok_run, err_run, _tail = _run_mfa_align_command(
+            mfa_path=mfa_path,
+            corpus_dir=work_wav_folder,
+            dict_path=current_dict_path,
+            model_name=model_reference,
+            output_dir=work_output_folder,
+            single_speaker_flag=single_speaker_flag,
+            align_opts=align_opts,
+            profile_label=resolved_profile,
+            env=env,
+            callback=callback,
+            pass_tag=pass_tag,
+        )
+        if ok_run:
+            return True, ""
+        if not allow_recursive:
+            return False, err_run
+        log("[MFA][recursive] primary alignment failed; starting segmented fallback.")
+        rec_ok, rec_err, _merged_count, _failed = _run_recursive_mfa_align(
+            mfa_path=mfa_path,
+            corpus_dir=work_wav_folder,
+            dict_path=current_dict_path,
+            model_name=model_reference,
+            output_dir=work_output_folder,
+            single_speaker_flag=single_speaker_flag,
+            align_opts=align_opts,
+            profile_label=resolved_profile,
+            env=env,
+            callback=callback,
+            chunk_size=recursive_chunk_size,
+            max_depth=recursive_max_depth,
+        )
+        if rec_ok:
+            return True, ""
+        return False, f"{err_run} | recursive: {rec_err}"
+
+    ok, err = _run_once_with_optional_recursive(
+        attempt_dict_path,
+        "constrained" if constrained_active else "primary",
+        recursive_enabled,
+    )
+    if (not ok) and constrained_active and constrained_mode == "moderate":
+        log("[MFA][constrained] moderate fallback: retry with base dictionary.")
+        ok, err = _run_once_with_optional_recursive(
+            work_dict_path,
+            "moderate-fallback",
+            False,
+        )
+
+    if ok:
         if safe_workspace is not None:
-            base_dir = str(safe_workspace.get("base", "") or "").strip()
-            if base_dir:
-                try:
-                    shutil.rmtree(base_dir, ignore_errors=True)
-                    log(f"[MFA] Cleaned staging workspace: {base_dir}")
-                except Exception as cleanup_exc:
-                    log(f"[MFA] Failed to clean staging workspace: {cleanup_exc}")
+            copied = _copy_back_textgrids(work_output_folder, output_folder)
+            log(f"[MFA] Copied back {copied} TextGrid files from ASCII-safe workspace.")
+        log('MFA alignment completed successfully.')
+        return True, ''
+
+    log(str(err or "MFA alignment failed"))
+    return False, str(err or "MFA alignment failed")
 
 def patch_mfa_korean_support(mfa_path, callback=None):
     """
-    Keep MFA Korean tokenizer files in python-mecab-ko-friendly state.
-    This also reverts older local patches that force eunjeon.
+    Patch MFA Korean tokenization modules for mecab-only backend usage.
     """
     def log(msg):
         logger.info(msg)
         if callback:
             callback(msg)
 
-    if sys.platform != 'win32' or not mfa_path or not _is_env_scripts_path(mfa_path):
+    if sys.platform != "win32" or not mfa_path or "Scripts" not in mfa_path:
         return True
-        
+
     try:
         env_dir = os.path.dirname(os.path.dirname(mfa_path))
-        site_packages = os.path.join(env_dir, 'Lib', 'site-packages', 'montreal_forced_aligner')
-        
-        spacy_py = os.path.join(site_packages, 'tokenization', 'spacy.py')
-        korean_py = os.path.join(site_packages, 'tokenization', 'korean.py')
+        tokenization_dir = os.path.join(
+            env_dir,
+            "Lib",
+            "site-packages",
+            "montreal_forced_aligner",
+            "tokenization",
+        )
+        spacy_py = os.path.join(tokenization_dir, "spacy.py")
+        korean_py = os.path.join(tokenization_dir, "korean.py")
 
-        def _ensure_writable_copy(path: str):
-            # Conda/micromamba often hardlinks site-packages to pkgs cache.
-            # Break hardlinks before patching to avoid corrupting the package cache.
+        def _ensure_writable_copy(path: str) -> None:
             if not os.path.exists(path):
                 return
             try:
@@ -3437,60 +3007,129 @@ def patch_mfa_korean_support(mfa_path, callback=None):
             except Exception:
                 return
 
-        def _file_empty(path: str) -> bool:
+        def _read_file(path: str) -> Optional[str]:
+            if not os.path.exists(path):
+                return None
             try:
-                return os.path.exists(path) and os.path.getsize(path) == 0
+                if os.path.getsize(path) == 0:
+                    return None
+                with open(path, "r", encoding="utf-8") as f:
+                    return f.read()
             except Exception:
-                return False
-        
-        # 1) spacy.py: keep error/help text and import checks aligned with python-mecab-ko.
-        if os.path.exists(spacy_py):
-            _ensure_writable_copy(spacy_py)
-            if _file_empty(spacy_py):
-                log("⚠️ spacy.py is empty. Reinstall MFA package before patching.")
-                return False
-            with open(spacy_py, 'r', encoding='utf-8') as f:
-                content = f.read()
-            original = content
-            content = content.replace("pip install eunjeon jamo", "pip install python-mecab-ko jamo")
-            if "import eunjeon" in content and "import mecab" not in content:
-                content = content.replace("import eunjeon", "import mecab")
-            if content != original:
-                with open(spacy_py, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                log("   [Patch] spacy.py Korean dependency hints restored to python-mecab-ko")
+                return None
 
-        # 2) korean.py: remove old EunjeonWrapper injections and restore MeCab path.
-        if os.path.exists(korean_py):
-            _ensure_writable_copy(korean_py)
-            if _file_empty(korean_py):
-                log("⚠️ korean.py is empty. Reinstall MFA package before patching.")
-                return False
-            with open(korean_py, 'r', encoding='utf-8') as f:
-                content = f.read()
-            original = content
-            content = content.replace("from eunjeon import Mecab as MeCab", "from mecab import MeCab")
-            content = content.replace("self.tokenizer = EunjeonWrapper()", "self.tokenizer = MeCab()")
-            if "class EunjeonWrapper" in content and "class KoreanTokenizer:" in content:
-                content = re.sub(
-                    r"\nclass EunjeonNode:.*?\nclass KoreanTokenizer:",
-                    "\nclass KoreanTokenizer:",
-                    content,
-                    flags=re.S,
+        def _write_if_changed(path: str, old: str, new: str, label: str) -> None:
+            if new == old:
+                return
+            _ensure_writable_copy(path)
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(new)
+            log(f"[MFA] Patched {label} for mecab compatibility.")
+
+        spacy_content = _read_file(spacy_py)
+        if spacy_content:
+            spacy_new = spacy_content
+            spacy_new = spacy_new.replace(
+                "pip install python-mecab-ko jamo",
+                "pip install python-mecab-ko jamo mecab-python3",
+            )
+            _write_if_changed(spacy_py, spacy_content, spacy_new, "spacy.py")
+
+        korean_content = _read_file(korean_py)
+        if korean_content:
+            korean_new = korean_content
+
+            compat_block = """
+# UTOA_KOREAN_IMPORT_COMPAT
+try:
+    import jamo
+    _utoa_has_backend = False
+
+    try:
+        from mecab import MeCab as _NativeMeCab
+        MeCab = _NativeMeCab
+        _utoa_has_backend = True
+    except Exception:
+        try:
+            from mecab import Tagger as _MecabTagger
+
+            class _UtoaMecabNode:
+                def __init__(self, surface, pos):
+                    self.surface = surface
+                    self.pos = pos
+
+            class MeCab:
+                def __init__(self):
+                    self._tagger = _MecabTagger()
+
+                def parse(self, text):
+                    node = self._tagger.parseToNode(text)
+                    items = []
+                    while node is not None:
+                        surface = getattr(node, "surface", "") or ""
+                        if surface:
+                            feature = getattr(node, "feature", "") or ""
+                            if not isinstance(feature, str):
+                                feature = str(feature)
+                            pos = feature.split(",", 1)[0] if feature else ""
+                            items.append(_UtoaMecabNode(surface, pos))
+                        node = getattr(node, "next", None)
+                    return items
+
+            _utoa_has_backend = True
+        except Exception:
+            try:
+                import MeCab as _MeCabModule
+
+                class _UtoaMecabNode:
+                    def __init__(self, surface, pos):
+                        self.surface = surface
+                        self.pos = pos
+
+                class MeCab:
+                    def __init__(self):
+                        self._tagger = _MeCabModule.Tagger()
+
+                    def parse(self, text):
+                        node = self._tagger.parseToNode(text)
+                        items = []
+                        while node is not None:
+                            surface = getattr(node, "surface", "") or ""
+                            if surface:
+                                feature = getattr(node, "feature", "") or ""
+                                if not isinstance(feature, str):
+                                    feature = str(feature)
+                                pos = feature.split(",", 1)[0] if feature else ""
+                                items.append(_UtoaMecabNode(surface, pos))
+                            node = getattr(node, "next", None)
+                        return items
+
+                _utoa_has_backend = True
+            except Exception:
+                MeCab = None
+
+    KO_AVAILABLE = _utoa_has_backend
+except (ImportError, ModuleNotFoundError):
+    KO_AVAILABLE = False
+    MeCab = None
+    jamo = None
+"""
+            if "UTOA_KOREAN_IMPORT_COMPAT" not in korean_new:
+                korean_new = re.sub(
+                    r"try:\s*[\s\S]*?KO_AVAILABLE\s*=\s*False\s*[\s\S]*?jamo\s*=\s*None\s*",
+                    compat_block + "\n",
+                    korean_new,
+                    count=1,
                 )
-            content = re.sub(r'try:\s+try:\s+from mecab import MeCab', 'from mecab import MeCab', content)
-            content = re.sub(r'try:\s+from mecab import MeCab', 'from mecab import MeCab', content)
-            if content != original:
-                with open(korean_py, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                log("   [Patch] korean.py tokenizer wiring restored to MeCab-first")
-                
+            korean_new = re.sub(
+                r"self\.tokenizer\s*=\s*\w+Wrapper\(\)",
+                "self.tokenizer = MeCab()",
+                korean_new,
+            )
+
+            _write_if_changed(korean_py, korean_content, korean_new, "korean.py")
+
         return True
     except Exception as e:
-        log(f"⚠️ MFA 한국어 패치 중 오류 발생: {e}")
+        log(f"[MFA] Korean patch error: {e}")
         return False
-
-
-
-
-

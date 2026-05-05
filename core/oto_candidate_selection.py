@@ -2,13 +2,6 @@ from __future__ import annotations
 
 import os
 
-from core.generation.mapping_reason_codes import (
-    JA_REASON_ALIAS_WORDS_FALLBACK,
-    JA_REASON_FILENAME_WORDS_LINEAR_LOCK,
-    JA_REASON_FILENAME_WORDS_LOCK,
-)
-from core.mapping_format_policy import ORDER_PRESERVING_CANDIDATE_FORMATS, normalize_format
-
 
 def build_candidate_index(candidates):
     return {
@@ -38,20 +31,19 @@ def select_primary_mapping_candidate(
     if forced_words_mapping:
         if candidate_by_name.get("filename_token"):
             selected_candidate = candidate_by_name["filename_token"]
-            mapping_reason_code = JA_REASON_FILENAME_WORDS_LOCK
+            mapping_reason_code = "filename_words_lock"
         elif candidate_by_name.get("filename_linear_fallback"):
             selected_candidate = candidate_by_name["filename_linear_fallback"]
-            mapping_reason_code = JA_REASON_FILENAME_WORDS_LINEAR_LOCK
+            mapping_reason_code = "filename_words_linear_lock"
         elif alias_candidate:
             selected_candidate = alias_candidate
-            mapping_reason_code = JA_REASON_ALIAS_WORDS_FALLBACK
+            mapping_reason_code = "alias_words_fallback"
         else:
             selected_candidate = max(candidates, key=lambda c: c.get("objective", -10**9))
             mapping_reason_code = str(selected_candidate.get("name", ""))
     else:
         stage1_pool = list(candidates)
-        order_sensitive = fmt in ORDER_PRESERVING_CANDIDATE_FORMATS
-        if order_sensitive:
+        if fmt in {"cvvc", "cv", "vcv"}:
             order_pool = [c for c in candidates if c.get("order_preserving")]
             if order_pool:
                 # Relax order-preserving lock if the best ordered candidate is low quality
@@ -84,7 +76,7 @@ def select_primary_mapping_candidate(
             stage1_pool,
             key=lambda c: (
                 c.get("objective", -10**9)
-                + (3.0 if (order_sensitive and c.get("order_preserving")) else 0.0)
+                + (3.0 if (fmt in {"cvvc", "cv", "vcv"} and c.get("order_preserving")) else 0.0)
             ),
         )
         mapping_reason_code = str(selected_candidate.get("name", ""))
@@ -100,12 +92,10 @@ def maybe_promote_alias_candidate(
     conf_threshold,
     format_type="",
 ):
-    fmt = normalize_format(format_type)
-    order_sensitive = fmt in ORDER_PRESERVING_CANDIDATE_FORMATS
     if (
         not alias_candidate
         or alias_candidate is selected_candidate
-        or (order_sensitive and selected_candidate and selected_candidate.get("lock_order"))
+        or (str(format_type or "").strip().lower() in {"cvvc", "cv"} and selected_candidate and selected_candidate.get("lock_order"))
         or float(provisional_conf or 0.0) < float(conf_threshold or 0.0)
     ):
         return selected_candidate, False
@@ -113,7 +103,7 @@ def maybe_promote_alias_candidate(
     objective_gain = alias_candidate.get("objective", -10**9) - selected_candidate.get("objective", -10**9)
     score_gain = alias_candidate.get("score", -10**9) - selected_candidate.get("score", -10**9)
     conf_gain = alias_candidate.get("mean_syll_conf", 0.0) - selected_candidate.get("mean_syll_conf", 0.0)
-    gain_th = 7.0 if order_sensitive else 5.0
+    gain_th = 7.0 if str(format_type or "").strip().lower() in {"cvvc", "cv"} else 5.0
     if (
         alias_candidate.get("score", 0.0) >= 70.0
         and objective_gain >= gain_th

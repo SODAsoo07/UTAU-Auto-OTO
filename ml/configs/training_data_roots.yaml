@@ -1,20 +1,20 @@
 japanese:
   cv:
-    - './data/japanese/cv'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\dataset\japanese\cv'
   vcv:
-    - './data/japanese/vcv'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\dataset\japanese\vcv'
   cvvc:
-    - './data/japanese/cvvc'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\dataset\japanese\cvvc'
 
 korean:
   cv:
-    - './data/korean/cv'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\dataset\korean\cv'
   cvc:
-    - './data/korean/cvc'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\dataset\korean\cvc'
   cvvc:
-    - './data/korean/cvvc'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\dataset\korean\cvvc'
   vcv:
-    - './data/korean/vcv'
+    - 'C:\Users\oyh57\SODAsoo1\Devs\UTAU_Auto_OTO_v3\Auto_OTO\dataset\korean\vcv'
 
 notes:
   recursive_oto_search: true
