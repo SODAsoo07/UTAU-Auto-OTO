@@ -88,6 +88,7 @@ def _excluded_build_modules() -> list[str]:
 RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "profiles"), "assets/profiles"),
     (os.path.join(APP_DIR, "assets", "models", "oto_ml"), "assets/models/oto_ml"),
+    (os.path.join(APP_DIR, "assets", "models", "coarse_crnn"), "assets/models/coarse_crnn"),
     (os.path.join(APP_DIR, "assets", "bootstrap", "get-pip.py"), "assets/bootstrap"),
     # ml/configs: include only the two files that are actually read at runtime.
     # training-only files (dataset_build_default.yaml, lightgbm_default.yaml,

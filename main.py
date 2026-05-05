@@ -65,6 +65,107 @@ def _sanitize_python_env_for_children() -> None:
 
 _sanitize_python_env_for_children()
 
+
+def _clear_ui_managed_utoa_envs() -> None:
+    """
+    앱 기동 시, UI가 각 실행마다 설정하는 UTOA_ 계열 환경변수를
+    외부 환경(셸, 래퍼 스크립트 등)에서 미리 설정된 값으로부터 격리합니다.
+
+    _clear_ml_override_envs / _clear_advanced_tuning_envs 와 동일한
+    변수 목록을 시작 시점에 한 번 지웁니다. 이후 각 실행 직전에도
+    동일한 정리가 수행되므로 이중 보호가 됩니다.
+    """
+    # prefix 기반 삭제 (UTOA_ML_COUPLED_MIN_CONF_KR_CV 등)
+    for key in list(os.environ.keys()):
+        if key.startswith("UTOA_ML_COUPLED_MIN_CONF_"):
+            os.environ.pop(key, None)
+
+    _UI_MANAGED_UTOA_KEYS = (
+        # ML 오버라이드 / E2E
+        "UTOA_ML_COUPLED_MIN_CONF",
+        "UTOA_ML_COUPLED_MIN_CONF_MODEL_OFFSET",
+        "UTOA_ML_GATED_ENSEMBLE_ENABLE",
+        "UTOA_ML_ANCHOR_MEL_GAMMA",
+        "UTOA_E2E_ENABLE",
+        "UTOA_E2E_MODE",
+        "UTOA_E2E_T_LOW",
+        "UTOA_E2E_T_HIGH",
+        "UTOA_E2E_BLEND_ALPHA",
+        "UTOA_E2E_MODEL_DIR",
+        "UTOA_E2E_ALIAS_MODEL_DIR",
+        "UTOA_KR_E2E_MODEL_DIR",
+        "UTOA_JA_E2E_MODEL_DIR",
+        "UTOA_KR_E2E_ALIAS_MODEL_DIR",
+        "UTOA_JA_E2E_ALIAS_MODEL_DIR",
+        # 고급 튜닝
+        "UTOA_KR_MAPPING_CONF_THRESHOLD",
+        "UTOA_KR_MAPPING_ONLY_ENABLE",
+        "UTOA_KR_CONTINUITY_ENABLE",
+        "UTOA_KR_CONTINUITY_MAX_OFFSET_ADJ",
+        "UTOA_KR_VC_NEIGHBOR_ENABLE",
+        "UTOA_KR_VC_NEIGHBOR_BLEND",
+        "UTOA_KR_VC_NEIGHBOR_MAX_SHIFT",
+        "UTOA_KR_VC_NEIGHBOR_LEAD_MS",
+        "UTOA_KR_VC_NEIGHBOR_TAIL_MS",
+        "UTOA_KR_VC_NEIGHBOR_MIN_LEN",
+        "UTOA_JA_VC_NEIGHBOR_ENABLE",
+        "UTOA_JA_VC_NEIGHBOR_BLEND",
+        "UTOA_JA_VC_NEIGHBOR_MAX_SHIFT",
+        "UTOA_JA_VC_NEIGHBOR_LEAD_MS",
+        "UTOA_JA_VC_NEIGHBOR_TAIL_MS",
+        "UTOA_JA_VC_NEIGHBOR_MIN_LEN",
+        "UTOA_CVN_CORRECTION_ENABLE",
+        "UTOA_CVN_LOW_CONF_ONLY",
+        "UTOA_CVN_C_THRESHOLD",
+        "UTOA_MAPPING_SUPERVISED_ENABLE",
+        "UTOA_MAPPING_SUPERVISED_MODE",
+        "UTOA_CV_ORDER_PRIOR_ENABLE",
+        "UTOA_CV_ORDER_PRIOR_STRENGTH",
+        "UTOA_SOFT_BANK_MODE",
+        "UTOA_MFA_SOFT_BANK_MODE",
+        "UTOA_MEL_SOUND_DB_MARGIN",
+        "UTOA_MEL_SOUND_ENERGY_MIN",
+        "UTOA_MEL_HARD_SILENCE_ENERGY_MAX",
+        "UTOA_MEL_SOFT_SILENCE_ENERGY_MAX",
+        "UTOA_MEL_WEAK_F2_MAX",
+        "UTOA_MEL_WEAK_F3_MAX",
+        "UTOA_MEL_WEAK_HIGH_MAX",
+        "UTOA_MEL_ONSET_SLOPE_BASE",
+        "UTOA_MEL_ONSET_ENERGY_BASE",
+        "UTOA_MEL_ONSET_DB_MARGIN_BASE",
+        "UTOA_MEL_ONSET_ENERGY_SIBILANT",
+        "UTOA_MEL_ONSET_DB_MARGIN_SIBILANT",
+        "UTOA_MFA_LOW_RMS_GAIN_ENABLE",
+        "UTOA_MFA_WEAK_VOICE_ASSIST_ENABLE",
+        "UTOA_MFA_WEAK_VOICE_PREEMPH_MIX",
+        "UTOA_SYLLABLE_STRICT_MODE",
+        "UTOA_LOW_CONF_FORCE_LOCK_MODE",
+        "UTOA_WEAK_BOUNDARY_MISSING_REDUCTION_ENABLE",
+        "UTOA_WEAK_BOUNDARY_ANTIMISMAP_ENABLE",
+        # 실행 시 모드 설정
+        "UTOA_ML_COUPLED_ENABLE",
+        "UTOA_ML_ENSEMBLE_ENABLE",
+        "UTOA_ML_COUPLED_MIN_CONF_USE_MODEL_META",
+        "UTOA_ML_COUPLED_DEVICE",
+        "UTOA_ML_COUPLED_BACKEND",
+        "UTOA_ML_COUPLED_ONNX_ENABLE",
+        "UTOA_ML_BATCH_INFERENCE_ENABLE",
+        "UTOA_ML_BATCH_INFERENCE_SIZE",
+        "UTOA_ML_LEGACY_FALLBACK_ENABLE",
+        "UTOA_ML_ROUTE",
+        "UTOA_ML_AUTOFREE_AUX_ENABLE",
+        "UTOA_ENABLE_HEAD_TAIL_DASH_ALIAS",
+        "UTOA_DISABLE_OTO_ML",
+        "UTOA_DISABLE_OTO_SELECTOR",
+        "UTOA_ML_SELECTOR_ENABLE",
+        "UTOA_FORCE_OTO_SELECTOR",
+    )
+    for key in _UI_MANAGED_UTOA_KEYS:
+        os.environ.pop(key, None)
+
+
+_clear_ui_managed_utoa_envs()
+
 try:
     import customtkinter as ctk
 except ImportError:
@@ -434,6 +535,9 @@ class App(
         self.en_cvvc_list_fallback_var = ctk.BooleanVar(value=True)
         self.aligner_var = ctk.StringVar(value="MFA")
         self.no_mfa_oto_mode_var = ctk.StringVar(value="베이스 OTO 재매핑 + 보정")
+        self.oto_crnn_model_path_var = ctk.StringVar(value="")
+        self.oto_crnn_device_var = ctk.StringVar(value="auto")
+        self.oto_crnn_special_aliases_var = ctk.StringVar(value="")
         self.mfa_align_profile_var = ctk.StringVar(value="기본")
         # WhisperX 런타임 옵션(고급): UI에서 직접 노출하지 않아도 config.json으로 제어 가능
         self.whisperx_profile_var = ctk.StringVar(value="balanced")

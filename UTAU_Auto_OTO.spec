@@ -13,6 +13,7 @@ APP_DIR = os.path.abspath(os.path.dirname(__file__))
 RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "profiles"), "assets/profiles"),
     (os.path.join(APP_DIR, "assets", "models", "oto_ml"), "assets/models/oto_ml"),
+    (os.path.join(APP_DIR, "assets", "models", "coarse_crnn"), "assets/models/coarse_crnn"),
     (os.path.join(APP_DIR, "assets", "bootstrap", "get-pip.py"), "assets/bootstrap"),
     (os.path.join(APP_DIR, "ml", "configs", "silence_reliability_profile.json"), "ml/configs"),
     (os.path.join(APP_DIR, "ml", "configs", "kr_vcv_anchor_profile.yaml"), "ml/configs"),
