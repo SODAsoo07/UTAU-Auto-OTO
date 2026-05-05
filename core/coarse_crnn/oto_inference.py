@@ -308,8 +308,13 @@ def predict_oto_with_model(
         )
     else:
         confidence = float(max(0.0, min(1.0, (heat_confidence * 0.55) + (conf_head * 0.45))))
-    low_confidence = bool(confidence < 0.58)
-    if predicted_error_ms is not None and predicted_error_ms > 80.0:
+    cal_scale = float(getattr(config, "confidence_calibration_scale", 1.0) or 1.0)
+    cal_bias = float(getattr(config, "confidence_calibration_bias", 0.0) or 0.0)
+    confidence = float(max(0.0, min(1.0, (confidence * cal_scale) + cal_bias)))
+    low_conf_threshold = float(getattr(config, "confidence_low_threshold", 0.58) or 0.58)
+    pred_err_threshold = float(getattr(config, "predicted_error_low_threshold_ms", 80.0) or 80.0)
+    low_confidence = bool(confidence < low_conf_threshold)
+    if predicted_error_ms is not None and predicted_error_ms > pred_err_threshold:
         low_confidence = True
     components = {
         "heatmap": float(heat_confidence),

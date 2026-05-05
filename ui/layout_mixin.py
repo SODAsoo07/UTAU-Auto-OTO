@@ -257,6 +257,21 @@ class LayoutMixin:
         _style_primary_button(out_save_btn)
         out_save_btn.pack(side="right")
 
+        row_suffix = build_form_row(form_body)
+        build_left_label(row_suffix, t("접미사:")).pack(side="left")
+        self.suffix_entry = ctk.CTkEntry(
+            row_suffix,
+            placeholder_text=t("선택 사항: 예: C4 (모든 에일리어스 끝에 _C4 형태로 부여)"),
+            textvariable=self.alias_suffix_var,
+        )
+        self.suffix_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
+        self.suffix_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
+        ctk.CTkLabel(
+            row_suffix,
+            text=t("(출력 alias 접미사)"),
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+
         row_format = build_form_row(form_body)
         build_left_label(row_format, t("형식 지정:")).pack(side="left")
         format_options = self._get_auto_format_options("korean")
@@ -463,7 +478,7 @@ class LayoutMixin:
         advanced_row = build_form_row(path_frame)
         self.advanced_toggle_btn = ctk.CTkButton(
             advanced_row,
-            text=t("▶ 추가 옵션 (특수 발음/접미사)"),
+            text=t("▶ 추가 옵션 (특수 발음)"),
             width=260,
             fg_color=PALETTE.advanced_toggle_bg,
             hover_color=PALETTE.advanced_toggle_hover,
@@ -492,13 +507,6 @@ class LayoutMixin:
         custom_browse_btn = ctk.CTkButton(row0, text=t("찾아보기"), width=90, command=lambda: self._browse_file(self.custom_entry, [("Text 파일", "*.txt")]))
         _style_primary_button(custom_browse_btn)
         custom_browse_btn.pack(side="right")
-
-        row0b = ctk.CTkFrame(self.advanced_options_frame, fg_color="transparent")
-        row0b.pack(fill="x", padx=0, pady=3)
-        ctk.CTkLabel(row0b, text=t("접미사 (선택):"), width=120, anchor="w").pack(side="left")
-        self.suffix_entry = ctk.CTkEntry(row0b, placeholder_text=t("예: C4 (모든 에일리어스 끝에 _C4 형태로 부여)"), textvariable=self.alias_suffix_var)
-        self.suffix_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
-        self.suffix_entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
 
         self._toggle_advanced_options(force=False)
 
@@ -1863,10 +1871,10 @@ class LayoutMixin:
             self.advanced_options_expanded = bool(force)
 
         if self.advanced_options_expanded:
-            self.advanced_toggle_btn.configure(text=t("▼ 고급 옵션 (특수 발음/접미사)"))
+            self.advanced_toggle_btn.configure(text=t("▼ 고급 옵션 (특수 발음)"))
             self.advanced_options_frame.pack(fill="x", padx=10, pady=(0, 3))
         else:
-            self.advanced_toggle_btn.configure(text=t("▶ 고급 옵션 (특수 발음/접미사)"))
+            self.advanced_toggle_btn.configure(text=t("▶ 고급 옵션 (특수 발음)"))
             self.advanced_options_frame.pack_forget()
 
     def _get_params(self):

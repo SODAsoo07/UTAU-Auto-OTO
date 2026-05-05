@@ -73,16 +73,32 @@ def main() -> int:
     parser.add_argument("--confidence-target-error-scale", type=float, default=0.08)
     parser.add_argument("--balanced-sampling", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--voicebank-balance-power", type=float, default=0.55)
-    parser.add_argument("--role-balance-power", type=float, default=0.35)
-    parser.add_argument("--format-balance-power", type=float, default=0.20)
+    parser.add_argument("--role-balance-power", type=float, default=0.30)
+    parser.add_argument("--format-balance-power", type=float, default=0.35)
     parser.add_argument("--hard-case-mining", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hard-case-top-ratio", type=float, default=0.25)
     parser.add_argument("--hard-case-boost", type=float, default=2.5)
     parser.add_argument("--early-stop-patience", type=int, default=0)
-    parser.add_argument("--selection-val-loss-weight", type=float, default=1.0)
+    parser.add_argument("--selection-val-loss-weight", type=float, default=0.15)
+    parser.add_argument("--selection-anchor-mae-weight", type=float, default=0.90)
+    parser.add_argument("--selection-preutterance-gap-weight", type=float, default=2.0)
     parser.add_argument("--selection-hard-failure-weight", type=float, default=2.5)
     parser.add_argument("--selection-worst-voicebank-weight", type=float, default=1.5)
+    parser.add_argument("--selection-worst-voicebank-hard-failure-weight", type=float, default=2.0)
+    parser.add_argument("--selection-preutterance-target-acc50", type=float, default=0.55)
     parser.add_argument("--selection-worst-voicebank-target-acc50", type=float, default=0.50)
+    parser.add_argument("--activity-quality-filter", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--activity-leading-silence-max-ratio", type=float, default=0.42)
+    parser.add_argument("--activity-min-active-span-ratio", type=float, default=0.16)
+    parser.add_argument("--activity-quality-outside-penalty", type=float, default=0.35)
+    parser.add_argument("--activity-quality-min-multiplier", type=float, default=0.10)
+    parser.add_argument("--activity-quality-drop-low-weight", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--activity-quality-drop-threshold", type=float, default=0.08)
+    parser.add_argument("--activity-quality-sample-rate", type=int, default=16000)
+    parser.add_argument("--confidence-calibration", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--confidence-calibration-good-error-ms", type=float, default=50.0)
+    parser.add_argument("--confidence-calibration-low-conf-target", type=float, default=0.58)
+    parser.add_argument("--confidence-calibration-error-gate-ms", type=float, default=80.0)
     parser.add_argument("--checkpoint-save-every-epochs", type=int, default=0, help=">0이면 N epoch마다 중간 체크포인트 저장")
     parser.add_argument("--two-stage-refine", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--two-stage-refine-window-frames", type=int, default=320)
@@ -125,6 +141,10 @@ def main() -> int:
         right_boundary_prior_blends=tuple(item.strip().lower() for item in str(args.right_boundary_prior_blends).split(",") if item.strip()),
         right_boundary_prior_role_blends=tuple(item.strip().lower() for item in str(args.right_boundary_prior_role_blends).split(",") if item.strip()),
         enable_uncertainty_head=bool(args.uncertainty_head),
+        confidence_calibration_scale=1.0,
+        confidence_calibration_bias=0.0,
+        confidence_low_threshold=float(args.confidence_calibration_low_conf_target),
+        predicted_error_low_threshold_ms=float(args.confidence_calibration_error_gate_ms),
         enable_two_stage_refine=bool(args.two_stage_refine),
         two_stage_refine_window_frames=int(args.two_stage_refine_window_frames),
         enable_alias_role_embedding=bool(args.alias_role_embedding),
@@ -164,9 +184,25 @@ def main() -> int:
         hard_case_boost=float(args.hard_case_boost),
         early_stop_patience=int(args.early_stop_patience),
         selection_val_loss_weight=float(args.selection_val_loss_weight),
+        selection_anchor_mae_weight=float(args.selection_anchor_mae_weight),
+        selection_preutterance_gap_weight=float(args.selection_preutterance_gap_weight),
         selection_hard_failure_weight=float(args.selection_hard_failure_weight),
         selection_worst_voicebank_weight=float(args.selection_worst_voicebank_weight),
+        selection_worst_voicebank_hard_failure_weight=float(args.selection_worst_voicebank_hard_failure_weight),
+        selection_preutterance_target_acc50=float(args.selection_preutterance_target_acc50),
         selection_worst_voicebank_target_acc50=float(args.selection_worst_voicebank_target_acc50),
+        enable_activity_quality_filter=bool(args.activity_quality_filter),
+        activity_leading_silence_max_ratio=float(args.activity_leading_silence_max_ratio),
+        activity_min_active_span_ratio=float(args.activity_min_active_span_ratio),
+        activity_quality_outside_penalty=float(args.activity_quality_outside_penalty),
+        activity_quality_min_multiplier=float(args.activity_quality_min_multiplier),
+        activity_quality_drop_low_weight=bool(args.activity_quality_drop_low_weight),
+        activity_quality_drop_threshold=float(args.activity_quality_drop_threshold),
+        activity_quality_sample_rate=int(args.activity_quality_sample_rate),
+        enable_confidence_calibration=bool(args.confidence_calibration),
+        confidence_calibration_good_error_ms=float(args.confidence_calibration_good_error_ms),
+        confidence_calibration_low_conf_target=float(args.confidence_calibration_low_conf_target),
+        confidence_calibration_error_gate_ms=float(args.confidence_calibration_error_gate_ms),
         checkpoint_save_every_epochs=max(0, int(args.checkpoint_save_every_epochs)),
     )
     result = train_oto_from_manifest(rows, args.out, val_rows=val_rows, train_config=train_cfg, model_config=model_cfg)
