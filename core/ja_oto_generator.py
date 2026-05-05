@@ -124,6 +124,7 @@ from core.generation.file_stages import (
     load_named_tiers_for_generation,
     prepare_file_context_with_sinsy,
 )
+from core.generation.file_index import build_wav_index, has_direct_wav_files, list_wav_names
 from core.generation.plan_runtime import (
     build_common_plan_context,
     extract_ja_alignment_ingest_state,
@@ -2842,19 +2843,9 @@ def generate_ja_oto(
         log("[JA-Profile] 추상 프리셋 적용 비활성화(환경변수 설정)")
 
     _tg_abs = os.path.abspath(tg_folder.rstrip("\\/"))
-    try:
-        _has_wavs_in_tg = any(f.lower().endswith(".wav") for f in os.listdir(_tg_abs) if os.path.isfile(os.path.join(_tg_abs, f)))
-    except Exception:
-        _has_wavs_in_tg = False
+    _has_wavs_in_tg = has_direct_wav_files(_tg_abs)
     wav_root_for_signal = _tg_abs if _has_wavs_in_tg else os.path.dirname(_tg_abs)
-    existing_wav_names: set[str] = set()
-    try:
-        if os.path.isdir(wav_root_for_signal):
-            for fn in os.listdir(wav_root_for_signal):
-                if fn.lower().endswith(".wav"):
-                    existing_wav_names.add(fn)
-    except Exception:
-        existing_wav_names = set()
+    existing_wav_names: set[str] = list_wav_names(wav_root_for_signal, recursive=False)
 
     ja_setup = prepare_ja_generation_setup(
         tg_folder=tg_folder,
@@ -2998,16 +2989,11 @@ def generate_ja_oto(
 
     processed = 0
     total = len(file_groups)
-    wav_index_for_signal = {}
-    try:
-        if os.path.isdir(wav_root_for_signal):
-            for fn in os.listdir(wav_root_for_signal):
-                if fn.lower().endswith(".wav"):
-                    nkey = normalize_key(fn)
-                    if nkey:
-                        wav_index_for_signal[nkey] = os.path.join(wav_root_for_signal, fn)
-    except Exception:
-        pass
+    wav_index_for_signal = build_wav_index(
+        wav_root_for_signal,
+        normalize_key_fn=normalize_key,
+        recursive=False,
+    )
     mel_cache_for_signal = {}
     single_vowel_span_by_tg_path = {}
 

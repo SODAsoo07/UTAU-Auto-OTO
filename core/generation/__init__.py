@@ -27,6 +27,14 @@ from .file_stages import (
     resolve_mapping_line_alias,
     resolve_mapping_failure_reason,
 )
+from .file_index import (
+    build_wav_index,
+    has_direct_wav_files,
+    iter_files_with_suffix,
+    iter_textgrid_files,
+    iter_wav_files,
+    list_wav_names,
+)
 from .mapping_runtime import (
     build_common_mapping_runtime_payload,
     compute_runtime_low_conf_state,
@@ -76,6 +84,7 @@ __all__ = [
     "JapaneseNormalizedOptions",
     "attach_request_metadata",
     "append_preserved_lines",
+    "build_wav_index",
     "handle_mapping_abstain_fallback",
     "handle_mapping_failure_fallback",
     "finalize_runtime_report",
@@ -83,7 +92,12 @@ __all__ = [
     "handle_ja_loop_prep_status",
     "handle_kr_file_context_status",
     "handle_kr_loop_prep_status",
+    "has_direct_wav_files",
     "initialize_runtime_report",
+    "iter_files_with_suffix",
+    "iter_textgrid_files",
+    "iter_wav_files",
+    "list_wav_names",
     "persist_japanese_generation_output",
     "persist_korean_generation_output",
     "build_common_mapping_runtime_payload",
