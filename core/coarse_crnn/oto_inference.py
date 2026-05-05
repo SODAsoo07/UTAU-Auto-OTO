@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 
+from core.coarse_crnn.alias_role import normalize_role
 from core.coarse_crnn.audio import load_wav_mono, log_mel_spectrogram
 from core.coarse_crnn.oto_model import (
     alias_role_id,
@@ -14,7 +15,7 @@ from core.coarse_crnn.oto_model import (
     format_id,
     language_id,
     load_oto_checkpoint,
-    right_boundary_prior_blend_for,
+    right_boundary_prior_blend_for_context,
     transition_type_id,
     uses_relative_param_head,
 )
@@ -31,6 +32,9 @@ class OtoPrediction:
     confidence: float
     duration_ms: float
     heatmap_confidence: dict[str, float]
+    predicted_error_ms: float | None = None
+    low_confidence: bool = False
+    confidence_components: dict[str, float] | None = None
 
 
 def predict_oto(
@@ -111,7 +115,9 @@ def predict_oto_with_model(
         enabled=bool(getattr(config, "enable_vcv_target_window", False)),
         formats=tuple(getattr(config, "target_window_formats", ("vcv",))),
         alias_type=alias_features.get("alias_type", ""),
+        alias_role=alias_features.get("alias_role", ""),
         cvvc_alias_types=tuple(getattr(config, "cvvc_target_window_alias_types", ("vc", "vv"))),
+        cvvc_alias_roles=tuple(getattr(config, "cvvc_target_window_alias_roles", ("vc", "vv"))),
     ):
         using_vcv_window = True
         features, _anchors, prediction_duration_ms, start_frame = crop_oto_target_window(
@@ -121,7 +127,12 @@ def predict_oto_with_model(
             duration_ms=full_duration_ms,
             row_index_in_wav=int(row_index_in_wav),
             file_row_count=int(file_row_count),
-            window_frames=target_window_frames_for(config, format_type, int(getattr(config, "vcv_target_window_frames", 0))),
+            window_frames=target_window_frames_for(
+                config,
+                format_type,
+                int(getattr(config, "vcv_target_window_frames", 0)),
+                alias_role=alias_features.get("alias_role", ""),
+            ),
         )
         crop_start_ms = float(start_frame) * max(float(hop_sec) * 1000.0, 1e-3)
     lang = torch.tensor([language_id(config, language)], dtype=torch.long, device=torch_device)
@@ -151,6 +162,8 @@ def predict_oto_with_model(
     next_role_text = str(next_alias_features.get("alias_role", "") or "")
     is_diphthong_flag = bool(float(alias_features.get("is_diphthong", 0.0) or 0.0) >= 0.5)
     is_special_flag = bool(float(alias_features.get("is_special", 0.0) or 0.0) >= 0.5) or bool(is_special)
+    if normalize_role(role_text) == "special":
+        is_special_flag = True
     role_tensor = torch.tensor([alias_role_id(config, role_text)], dtype=torch.long, device=torch_device)
     prev_role_tensor = torch.tensor([alias_role_id(config, prev_role_text)], dtype=torch.long, device=torch_device)
     next_role_tensor = torch.tensor([alias_role_id(config, next_role_text)], dtype=torch.long, device=torch_device)
@@ -179,26 +192,64 @@ def predict_oto_with_model(
         dtype=torch.float32,
         device=torch_device,
     )
-    with torch.no_grad():
-        x = torch.from_numpy(features.astype(np.float32)).unsqueeze(0).to(torch_device)
-        outputs = model(
-            x,
-            lang,
-            fmt,
-            context,
-            alias_id,
-            transition_id,
-            prev_alias_id,
-            next_alias_id,
-            prev_transition_id,
-            next_transition_id,
-            alias_role_ids=role_tensor,
-            prev_alias_role_ids=prev_role_tensor,
-            next_alias_role_ids=next_role_tensor,
-            extra_alias_flags=extra_flags_tensor,
-        )
-        heat = torch.sigmoid(outputs["heatmap_logits"]).squeeze(0).detach().cpu().numpy().astype(np.float32)
-        scalar = torch.sigmoid(outputs["scalar_logits"]).squeeze(0).detach().cpu().numpy().astype(np.float32)
+    pass1 = _run_oto_forward_pass(
+        model=model,
+        features=features,
+        torch_device=torch_device,
+        lang=lang,
+        fmt=fmt,
+        context=context,
+        alias_id=alias_id,
+        transition_id=transition_id,
+        prev_alias_id=prev_alias_id,
+        next_alias_id=next_alias_id,
+        prev_transition_id=prev_transition_id,
+        next_transition_id=next_transition_id,
+        role_tensor=role_tensor,
+        prev_role_tensor=prev_role_tensor,
+        next_role_tensor=next_role_tensor,
+        extra_flags_tensor=extra_flags_tensor,
+    )
+    heat = pass1["heat"]
+    scalar = pass1["scalar"]
+    scalar_logvar = pass1["scalar_logvar"]
+    conf_head = float(pass1["conf_head"])
+    if bool(getattr(config, "enable_two_stage_refine", False)):
+        refine_frames = int(getattr(config, "two_stage_refine_window_frames", 0) or 0)
+        if refine_frames > 0:
+            heat_ms_pass1, _heat_conf_pass1 = _heatmap_to_anchor_ms(heat, hop_sec=float(hop_sec))
+            refine = _two_stage_crop_from_heatmap(
+                features=features,
+                heat_ms=heat_ms_pass1,
+                hop_sec=float(hop_sec),
+                window_frames=refine_frames,
+            )
+            if refine is not None:
+                refined_features, refine_start_ms, refine_duration_ms = refine
+                pass2 = _run_oto_forward_pass(
+                    model=model,
+                    features=refined_features,
+                    torch_device=torch_device,
+                    lang=lang,
+                    fmt=fmt,
+                    context=context,
+                    alias_id=alias_id,
+                    transition_id=transition_id,
+                    prev_alias_id=prev_alias_id,
+                    next_alias_id=next_alias_id,
+                    prev_transition_id=prev_transition_id,
+                    next_transition_id=next_transition_id,
+                    role_tensor=role_tensor,
+                    prev_role_tensor=prev_role_tensor,
+                    next_role_tensor=next_role_tensor,
+                    extra_flags_tensor=extra_flags_tensor,
+                )
+                heat = pass2["heat"]
+                scalar = pass2["scalar"]
+                scalar_logvar = pass2["scalar_logvar"]
+                conf_head = float(pass2["conf_head"])
+                crop_start_ms = float(crop_start_ms) + float(refine_start_ms)
+                prediction_duration_ms = float(refine_duration_ms)
     heat_ms, heat_conf = _heatmap_to_anchor_ms(heat, hop_sec=float(hop_sec))
     heatmap_blend = _prediction_heatmap_blend(config, using_vcv_window=using_vcv_window)
     if uses_relative_param_head(config):
@@ -210,7 +261,12 @@ def predict_oto_with_model(
             alias_type=alias_features.get("alias_type", ""),
             transition_type=alias_features.get("transition_type", ""),
             heatmap_blend=heatmap_blend,
-            prior_blend=right_boundary_prior_blend_for(config, format_type),
+            prior_blend=right_boundary_prior_blend_for_context(
+                config,
+                format_type,
+                alias_role=role_text,
+                is_special=is_special_flag,
+            ),
             alias_role=role_text,
             is_diphthong=is_diphthong_flag,
             is_special=is_special_flag,
@@ -230,8 +286,125 @@ def predict_oto_with_model(
     )
     params = anchors_to_oto_params(anchors, duration_ms=full_duration_ms)
     conf_map = {name: float(heat_conf[idx]) for idx, name in enumerate(OTO_ANCHOR_NAMES)}
-    confidence = float(sum(conf_map.values()) / max(1, len(conf_map)))
-    return OtoPrediction(anchors=anchors, params=params, confidence=confidence, duration_ms=full_duration_ms, heatmap_confidence=conf_map)
+    heat_confidence = float(sum(conf_map.values()) / max(1, len(conf_map)))
+    predicted_error_ms = None
+    uncertainty_confidence = None
+    if scalar_logvar is not None:
+        scalar_std = np.sqrt(np.exp(np.asarray(scalar_logvar, dtype=np.float32)))
+        predicted_error_ms = float(np.mean(scalar_std) * max(float(prediction_duration_ms), 1.0))
+        error_scale = max(1.0, float(getattr(config, "confidence_error_scale_ms", 75.0)))
+        uncertainty_confidence = float(np.exp(-predicted_error_ms / error_scale))
+    if uncertainty_confidence is not None:
+        confidence = float(
+            max(
+                0.0,
+                min(
+                    1.0,
+                    (heat_confidence * 0.30)
+                    + (conf_head * 0.35)
+                    + (uncertainty_confidence * 0.35),
+                ),
+            )
+        )
+    else:
+        confidence = float(max(0.0, min(1.0, (heat_confidence * 0.55) + (conf_head * 0.45))))
+    low_confidence = bool(confidence < 0.58)
+    if predicted_error_ms is not None and predicted_error_ms > 80.0:
+        low_confidence = True
+    components = {
+        "heatmap": float(heat_confidence),
+        "confidence_head": float(conf_head),
+    }
+    if uncertainty_confidence is not None:
+        components["uncertainty"] = float(uncertainty_confidence)
+    return OtoPrediction(
+        anchors=anchors,
+        params=params,
+        confidence=confidence,
+        duration_ms=full_duration_ms,
+        heatmap_confidence=conf_map,
+        predicted_error_ms=predicted_error_ms,
+        low_confidence=low_confidence,
+        confidence_components=components,
+    )
+
+
+def _run_oto_forward_pass(
+    *,
+    model,
+    features: np.ndarray,
+    torch_device,
+    lang,
+    fmt,
+    context,
+    alias_id,
+    transition_id,
+    prev_alias_id,
+    next_alias_id,
+    prev_transition_id,
+    next_transition_id,
+    role_tensor,
+    prev_role_tensor,
+    next_role_tensor,
+    extra_flags_tensor,
+) -> dict[str, Any]:
+    torch = __import__("torch")
+    with torch.no_grad():
+        x = torch.from_numpy(features.astype(np.float32)).unsqueeze(0).to(torch_device)
+        outputs = model(
+            x,
+            lang,
+            fmt,
+            context,
+            alias_id,
+            transition_id,
+            prev_alias_id,
+            next_alias_id,
+            prev_transition_id,
+            next_transition_id,
+            alias_role_ids=role_tensor,
+            prev_alias_role_ids=prev_role_tensor,
+            next_alias_role_ids=next_role_tensor,
+            extra_alias_flags=extra_flags_tensor,
+        )
+    heat = torch.sigmoid(outputs["heatmap_logits"]).squeeze(0).detach().cpu().numpy().astype(np.float32)
+    scalar = torch.sigmoid(outputs["scalar_logits"]).squeeze(0).detach().cpu().numpy().astype(np.float32)
+    scalar_logvar = outputs.get("scalar_logvar")
+    if scalar_logvar is not None:
+        scalar_logvar = scalar_logvar.squeeze(0).detach().cpu().numpy().astype(np.float32)
+    conf_logits = outputs.get("confidence_logits")
+    conf_head = float(torch.sigmoid(conf_logits).squeeze(0).detach().cpu().item()) if conf_logits is not None else 0.0
+    return {
+        "heat": heat,
+        "scalar": scalar,
+        "scalar_logvar": scalar_logvar,
+        "conf_head": conf_head,
+    }
+
+
+def _two_stage_crop_from_heatmap(
+    *,
+    features: np.ndarray,
+    heat_ms: np.ndarray,
+    hop_sec: float,
+    window_frames: int,
+) -> tuple[np.ndarray, float, float] | None:
+    frame_count = int(features.shape[0])
+    width = max(1, min(int(window_frames), frame_count))
+    if frame_count <= width + 8:
+        return None
+    heat_arr = np.asarray(heat_ms, dtype=np.float32)
+    pre_ms = float(heat_arr[2]) if heat_arr.shape[0] > 2 else float(np.median(heat_arr))
+    cons_ms = float(heat_arr[3]) if heat_arr.shape[0] > 3 else pre_ms
+    center_ms = max(0.0, (pre_ms + cons_ms) * 0.5)
+    hop_ms = max(float(hop_sec) * 1000.0, 1e-3)
+    center_frame = int(round(center_ms / hop_ms))
+    start = max(0, min(frame_count - width, center_frame - (width // 2)))
+    end = start + width
+    cropped = features[start:end]
+    start_ms = float(start) * hop_ms
+    duration_ms = float(width) * hop_ms
+    return cropped, start_ms, duration_ms
 
 
 def write_prediction_json(path: str, prediction: OtoPrediction, *, meta: dict[str, Any] | None = None) -> None:
@@ -240,6 +413,11 @@ def write_prediction_json(path: str, prediction: OtoPrediction, *, meta: dict[st
         "meta": dict(meta or {}),
         "duration_ms": float(prediction.duration_ms),
         "confidence": float(prediction.confidence),
+        "predicted_error_ms": (
+            float(prediction.predicted_error_ms) if prediction.predicted_error_ms is not None else None
+        ),
+        "low_confidence": bool(prediction.low_confidence),
+        "confidence_components": dict(prediction.confidence_components or {}),
         "heatmap_confidence": dict(prediction.heatmap_confidence),
         "anchors": prediction.anchors.to_dict(),
         "oto_params": dict(prediction.params),

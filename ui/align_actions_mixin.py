@@ -34,7 +34,11 @@ class AlignActionsMixin:
             self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
             default="mfa",
         )
-        if wav_dir_for_prompt and primary_engine_for_prompt != "none" and lang_for_prompt != "english":
+        if (
+            wav_dir_for_prompt
+            and primary_engine_for_prompt not in {"none", "coarse_crnn"}
+            and lang_for_prompt != "english"
+        ):
             textgrid_dir_for_prompt = os.path.join(wav_dir_for_prompt, "textgrids")
             if os.path.isdir(textgrid_dir_for_prompt):
                 ask_fn = getattr(self, "_ask_yes_no_dialog_sync", None)
@@ -77,6 +81,10 @@ class AlignActionsMixin:
                     self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
                     default="mfa",
                 )
+                if primary_engine == "coarse_crnn":
+                    self._append_log("ℹ CRNN(실험적): 정렬 단계는 건너뛰고 OTO 단계에서 직접 예측 모델을 사용합니다.")
+                    self._set_status("CRNN OTO 직접 예측은 OTO 생성 단계에서 실행됩니다")
+                    return
                 if hasattr(self, "_validate_alignment_input_files"):
                     needs_lab_dict = primary_engine == "mfa"
                     if needs_lab_dict and (not self._validate_alignment_input_files(wav_dir, dict_path)):
@@ -106,11 +114,15 @@ class AlignActionsMixin:
                             return
                 elif primary_engine == "sequence":
                     self._append_log("ℹ 전용 시퀀스 aligner 엔진 선택: frame-hop 라벨 기반 정렬을 실행합니다.")
+                elif primary_engine == "coarse_crnn":
+                    self._append_log("ℹ CRNN aligner 엔진 선택: SIL/C/V 경계 정렬을 실행합니다.")
 
                 if primary_engine == "mfa":
                     self._append_log(f"MFA profile: {mfa_profile}")
                 elif primary_engine == "sequence":
                     self._append_log("Alignment engine: Dedicated Sequence")
+                elif primary_engine == "coarse_crnn":
+                    self._append_log("Alignment engine: CRNN (experimental)")
                 else:
                     self._append_log("Alignment engine: none (MFA bypass)")
                 if hasattr(self, "_apply_advanced_tuning_envs"):

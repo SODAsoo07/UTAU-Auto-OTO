@@ -15,16 +15,16 @@
       "note": "Manual helper for staged data auto-classification."
     },
     {
+      "path": "scripts/benchmark_sequence_residual_datasets.py",
+      "status": "manual",
+      "owner": "ml",
+      "note": "Leave-one-voicebank-out benchmark for sequence residual JSONL datasets."
+    },
+    {
       "path": "scripts/build_alignment_test_folder.py",
       "status": "manual",
       "owner": "align",
       "note": "Manual helper to assemble alignment sample/test folders."
-    },
-    {
-      "path": "scripts/build_dataset_eval_cases.py",
-      "status": "manual",
-      "owner": "eval",
-      "note": "Build dataset_staged batch-generation cases for manual OTO evaluation."
     },
     {
       "path": "scripts/build_installer.ps1",
@@ -37,6 +37,12 @@
       "status": "protected",
       "owner": "release",
       "note": "Called by CI workflows."
+    },
+    {
+      "path": "scripts/build_sequence_residual_dataset.py",
+      "status": "manual",
+      "owner": "ml",
+      "note": "Build sequence residual JSONL rows for No-MFA sequence residual correction experiments."
     },
     {
       "path": "scripts/compare_alignment_visual.py",
@@ -93,22 +99,10 @@
       "note": "Documented regression entrypoint."
     },
     {
-      "path": "scripts/run_kr_sequence_oto_eval.py",
-      "status": "manual",
-      "owner": "eval",
-      "note": "Run Korean CVC/CVVC/VCV sequence OTO evaluation and generate an HTML timing visual report."
-    },
-    {
       "path": "scripts/run_oto_generation_batch.py",
       "status": "protected",
       "owner": "pipeline",
       "note": "Batch generation runtime entrypoint."
-    },
-    {
-      "path": "scripts/score_oto_eval.py",
-      "status": "manual",
-      "owner": "eval",
-      "note": "Score generated OTO files against manual dataset_staged oto.ini references."
     },
     {
       "path": "scripts/runtime_recovery.ps1",
@@ -151,6 +145,12 @@
       "status": "manual",
       "owner": "ml",
       "note": "Manual sequence aligner profile training helper from corrected Sinsy labels."
+    },
+    {
+      "path": "scripts/train_sequence_residual_baseline.py",
+      "status": "manual",
+      "owner": "ml",
+      "note": "Train lightweight ridge baseline model for sequence residual correction."
     }
   ]
 }
