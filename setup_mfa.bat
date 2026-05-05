@@ -970,7 +970,64 @@ if exist "%MFA_EXE%" (
 
 if exist "%MFA_EXE%" goto :existing_env_ready
 
+REM --- 이전 배포본 가상환경 재사용 감지 ---
+call :scan_for_reusable_env
+if defined REUSABLE_ENV_DIR (
+    echo.
+    echo [INFO] 이전 설치에서 생성된 가상환경이 감지되었습니다:
+    echo        %REUSABLE_ENV_DIR%
+    echo.
+    if "%NON_INTERACTIVE%"=="1" (
+        set "USE_REUSABLE=Y"
+    ) else (
+        choice /C YN /N /M "이 환경을 재사용하시겠습니까? (재다운로드 불필요) [Y/N]: "
+        if errorlevel 2 (set "USE_REUSABLE=N") else (set "USE_REUSABLE=Y")
+    )
+    if /i "%USE_REUSABLE%"=="Y" (
+        set "ENV_DIR=%REUSABLE_ENV_DIR%"
+        if exist "%REUSABLE_ENV_DIR%\Scripts\mfa.exe" (
+            set "MFA_EXE=%REUSABLE_ENV_DIR%\Scripts\mfa.exe"
+        ) else (
+            set "MFA_EXE=%REUSABLE_ENV_DIR%\Scripts\mfa.bat"
+        )
+        echo [INFO] 기존 가상환경 재사용: %ENV_DIR%
+        call :evaluate_existing_env_python
+        if not errorlevel 1 (
+            call :verify_existing_mfa_runtime
+            if not errorlevel 1 goto :existing_env_ready
+        )
+        echo [WARN] 기존 환경 검증 실패. 새로 설치합니다.
+        set "ENV_DIR=%RUNTIME_STATE_ROOT%\.env"
+        set "MFA_EXE=%ENV_DIR%\Scripts\mfa.exe"
+    )
+)
+
 goto :install_micromamba
+
+:scan_for_reusable_env
+set "REUSABLE_ENV_DIR="
+if defined LOCALAPPDATA (
+    call :probe_reusable_env_candidate "%LOCALAPPDATA%\UTAU_Auto_OTO_v3\.env"
+    if defined REUSABLE_ENV_DIR goto :eof
+    call :probe_reusable_env_candidate "%LOCALAPPDATA%\UTAU_Auto_OTO\.env"
+    if defined REUSABLE_ENV_DIR goto :eof
+)
+if defined PUBLIC (
+    call :probe_reusable_env_candidate "%PUBLIC%\UTAU_Auto_OTO_v3\.env"
+    if defined REUSABLE_ENV_DIR goto :eof
+    call :probe_reusable_env_candidate "%PUBLIC%\UTAU_Auto_OTO\.env"
+    if defined REUSABLE_ENV_DIR goto :eof
+)
+goto :eof
+
+:probe_reusable_env_candidate
+set "PROBE_RENV=%~1"
+if "%PROBE_RENV%"=="" goto :eof
+if /i "%PROBE_RENV%"=="%ENV_DIR%" goto :eof
+if not exist "%PROBE_RENV%\python.exe" goto :eof
+if not exist "%PROBE_RENV%\Scripts\mfa.exe" if not exist "%PROBE_RENV%\Scripts\mfa.bat" goto :eof
+set "REUSABLE_ENV_DIR=%PROBE_RENV%"
+goto :eof
 
 :evaluate_existing_env_python
 

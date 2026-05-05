@@ -377,6 +377,7 @@ class LayoutMixin:
             self.row_no_mfa_oto_mode,
             values=[
                 "베이스 OTO 재매핑 + 보정",
+                "CRNN(실험적)",
             ],
             variable=self.no_mfa_oto_mode_var,
             width=280,
@@ -390,11 +391,51 @@ class LayoutMixin:
             text_color=PALETTE.neutral_text,
         )
         self.no_mfa_oto_mode_hint_label.pack(side="left", fill="x", expand=True)
+        self.row_oto_crnn_model = build_form_row(form_body)
+        build_left_label(self.row_oto_crnn_model, t("CRNN 모델:")).pack(side="left")
+        self.oto_crnn_model_entry = ctk.CTkEntry(
+            self.row_oto_crnn_model,
+            textvariable=self.oto_crnn_model_path_var,
+            placeholder_text="비워두면 기본 학습 모델 사용",
+        )
+        self.oto_crnn_model_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
+        self.oto_crnn_model_entry.pack(side="left", fill="x", expand=True, padx=(6, 6))
+        self.oto_crnn_device_menu = ctk.CTkOptionMenu(
+            self.row_oto_crnn_model,
+            values=["auto", "cuda", "cpu"],
+            variable=self.oto_crnn_device_var,
+            width=80,
+            command=lambda _v: self._save_config(),
+        )
+        _style_blue_menu(self.oto_crnn_device_menu)
+        self.oto_crnn_device_menu.pack(side="left", padx=(0, 6))
+        self.oto_crnn_model_browse_btn = ctk.CTkButton(
+            self.row_oto_crnn_model,
+            text=t("찾아보기"),
+            width=90,
+            command=lambda: self._browse_file_by_var(
+                self.oto_crnn_model_path_var,
+                [("PyTorch checkpoint", "*.pt"), ("All files", "*.*")],
+            ),
+        )
+        _style_primary_button(self.oto_crnn_model_browse_btn)
+        self.oto_crnn_model_browse_btn.pack(side="right")
+        self.row_oto_crnn_model.pack_forget()
+        self.row_oto_crnn_special_aliases = build_form_row(form_body)
+        build_left_label(self.row_oto_crnn_special_aliases, t("특수 에일리어스:")).pack(side="left")
+        self.oto_crnn_special_aliases_entry = ctk.CTkEntry(
+            self.row_oto_crnn_special_aliases,
+            textvariable=self.oto_crnn_special_aliases_var,
+            placeholder_text="쉼표로 구분 (예: Sp, br, cl)",
+        )
+        self.oto_crnn_special_aliases_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
+        self.oto_crnn_special_aliases_entry.pack(side="left", fill="x", expand=True, padx=(6, 6))
+        self.row_oto_crnn_special_aliases.pack_forget()
         self.row_align_extra = build_form_row(form_body)
         build_left_label(self.row_align_extra, t("MFA 정렬 프로필:")).pack(side="left")
         self.mfa_align_profile_menu = ctk.CTkOptionMenu(
             self.row_align_extra,
-            values=["기본", "정밀", "고역대 안정", "정밀 + 화자 적응", "빠름"],
+            values=["기본", "정밀", "정밀 + 화자 적응", "빠름"],
             variable=self.mfa_align_profile_var,
             width=220,
             command=lambda _v: self._save_config(),
@@ -1160,16 +1201,20 @@ class LayoutMixin:
     @staticmethod
     def _normalize_no_mfa_oto_mode_code(value):
         raw = str(value or "").strip().lower()
+        if raw in {"crnn", "oto_crnn", "oto-crnn", "crnn_oto", "crnn-oto"}:
+            return "crnn"
         if raw in {"remap", "base_remap", "base"}:
             return "remap"
         text = str(value or "").strip()
+        if text in {"CRNN OTO 예측기(실험)", "CRNN(실험적)"}:
+            return "crnn"
         if text == "베이스 OTO 재매핑 + 보정":
             return "remap"
         return "remap"
 
     def _set_no_mfa_oto_mode_from_code(self, code):
         normalized = self._normalize_no_mfa_oto_mode_code(code)
-        label = "베이스 OTO 재매핑 + 보정"
+        label = "CRNN(실험적)" if normalized == "crnn" else "베이스 OTO 재매핑 + 보정"
         if hasattr(self, "no_mfa_oto_mode_var"):
             try:
                 self.no_mfa_oto_mode_var.set(label)
@@ -1198,8 +1243,6 @@ class LayoutMixin:
         profile = str(self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "").strip()
         if profile in {"빠름", "빠름 (저사양 추천)", "fast"}:
             return "fast"
-        if profile in {"고역대 안정", "고역대", "high_pitch_accurate", "high_pitch"}:
-            return "high_pitch_accurate"
         if profile in {
             "정밀 + 화자 적응",
             "정확도 우선 + 화자 적응",
@@ -1296,7 +1339,20 @@ class LayoutMixin:
                 pass
 
         no_mfa_mode_code = self._get_no_mfa_oto_mode_code()
-        no_mfa_mode_desc = "베이스 OTO 재매핑 + 보정"
+        no_mfa_values = ["베이스 OTO 재매핑 + 보정", "CRNN(실험적)"]
+        if hasattr(self, "no_mfa_oto_mode_menu"):
+            try:
+                self.no_mfa_oto_mode_menu.configure(values=no_mfa_values)
+                self.no_mfa_oto_mode_menu.set(
+                    "CRNN(실험적)" if no_mfa_mode_code == "crnn" else "베이스 OTO 재매핑 + 보정"
+                )
+            except Exception:
+                pass
+        no_mfa_mode_desc = (
+            "CRNN(실험적)"
+            if no_mfa_mode_code == "crnn"
+            else "베이스 OTO 재매핑 + 보정"
+        )
         if hasattr(self, "mfa_align_profile_menu"):
             self.mfa_align_profile_menu.configure(state="disabled" if (use_no_mfa or use_sequence) else "normal")
         show_no_mfa_mode_row = use_no_mfa and not (
@@ -1312,6 +1368,31 @@ class LayoutMixin:
                         self.row_no_mfa_oto_mode.pack(**pack_kwargs)
                 else:
                     self.row_no_mfa_oto_mode.pack_forget()
+            except Exception:
+                pass
+        show_crnn_model_row = bool(show_no_mfa_mode_row and no_mfa_mode_code == "crnn")
+        if hasattr(self, "row_oto_crnn_model") and self.row_oto_crnn_model is not None:
+            try:
+                if show_crnn_model_row:
+                    if not self.row_oto_crnn_model.winfo_ismapped():
+                        pack_kwargs = {"fill": "x", "pady": 4}
+                        if hasattr(self, "row_align_extra") and self.row_align_extra is not None:
+                            pack_kwargs["before"] = self.row_align_extra
+                        self.row_oto_crnn_model.pack(**pack_kwargs)
+                else:
+                    self.row_oto_crnn_model.pack_forget()
+            except Exception:
+                pass
+        if hasattr(self, "row_oto_crnn_special_aliases") and self.row_oto_crnn_special_aliases is not None:
+            try:
+                if show_crnn_model_row:
+                    if not self.row_oto_crnn_special_aliases.winfo_ismapped():
+                        pack_kwargs = {"fill": "x", "pady": 4}
+                        if hasattr(self, "row_align_extra") and self.row_align_extra is not None:
+                            pack_kwargs["before"] = self.row_align_extra
+                        self.row_oto_crnn_special_aliases.pack(**pack_kwargs)
+                else:
+                    self.row_oto_crnn_special_aliases.pack_forget()
             except Exception:
                 pass
         if hasattr(self, "aligner_help_label"):
