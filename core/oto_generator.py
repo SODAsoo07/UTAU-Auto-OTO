@@ -20,7 +20,6 @@ try:
     import numpy as np
 except Exception:  # pragma: no cover
     np = None
-from core.lab_generator import load_custom_phonemes
 from core.kr_oto_rules import (
     IPA_VOWELS,
     KR_CONSONANTS,
@@ -115,9 +114,9 @@ from core.kr_oto_file_ops import (
 )
 from core.kr_oto_file_finalize import KrPostFilePipelineContext, run_kr_post_file_pipeline
 from core.kr_generator_setup import (
-    build_kr_textgrid_preparation,
     build_wav_index as _build_wav_index_for_generation,
     iter_textgrid_files as _iter_textgrid_files_for_generation,
+    prepare_kr_generation_setup,
     prepare_kr_profile_setup,
 )
 from core.generator_finish import (
@@ -5328,57 +5327,40 @@ def generate_oto(
     )
     kr_profile = kr_profile_setup.profile
 
-    if tpl_path and not os.path.exists(tpl_path):
-        log(f"笞 奛懦伯・ｿ 甯護攵・・・ｾ・・・・・・慣・壱共: {tpl_path}")
-        log(f"笞｡ OpenUtau 嶸ｸ嶹・{auto_gen_format.upper()} ・尖徐 ・川攵・ｬ・ｴ・､ ・晧┳・ｼ・・・・劍﨑ｩ・壱共.")
-        tpl_path = ""
-
     DIPHTHONG_CV_CONSONANT_RATIO = params.get('DIPHTHONG_CV_CONSONANT_RATIO', 0.6) if params else 0.6
-
-
-    template_lines = []
-    if tpl_path:
-        lines, detected_enc, warning, err = load_template_oto_lines(
-            tpl_path,
-            require_utf8=True,
-            mode_label="﨑懋ｵｭ・ｴ OTO",
-        )
-        if err:
-            log(err)
-            log(f"笞｡ 奛懦伯・ｿ ・罹糖 ・､甯ｨ・・OpenUtau 嶸ｸ嶹・{auto_gen_format.upper()} ・尖徐 ・川攵・ｬ・ｴ・､ ・晧┳・ｼ・・・・劍﨑ｩ・壱共.")
-            lines = []
-        if warning:
-            log(warning)
-        template_lines = lines or []
-        template_lines, stripped_suffix, stripped_count = strip_template_alias_suffixes(
-            template_lines,
-            alias_suffix=alias_suffix,
-        )
-        if stripped_count > 0:
-            log(
-                f"[WARN] 베이스 OTO alias에 접미사 _{stripped_suffix}가 포함되어 있어 "
-                f"내부 매핑용으로 {stripped_count}개 alias에서 제거했습니다."
-            )
-
 
     wav_root_for_signal = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
     wav_index_for_signal = _build_wav_index(wav_root_for_signal)
 
-    kr_tg_setup = build_kr_textgrid_preparation(
+    kr_generation_setup = prepare_kr_generation_setup(
         tg_folder=tg_folder,
+        tpl_path=tpl_path,
+        auto_gen_format=auto_gen_format,
+        custom_phonemes_path=custom_phonemes_path,
+        alias_suffix=alias_suffix,
         wav_root_for_signal=wav_root_for_signal,
         wav_index_for_signal=wav_index_for_signal,
         normalize_key_fn=normalize_key,
         find_wav_path_fn=_find_wav_path_for_name,
         log_fn=log,
+        load_template_lines_fn=lambda path: load_template_oto_lines(
+            path,
+            require_utf8=True,
+            mode_label="한국어 OTO",
+        ),
+        strip_template_alias_suffixes_fn=strip_template_alias_suffixes,
     )
+    kr_tg_setup = kr_generation_setup.tg_index
     tg_entries = kr_tg_setup.tg_entries
+    template_lines = kr_generation_setup.template_lines
+    custom_map = kr_generation_setup.custom_map
+    use_template = kr_generation_setup.use_template
+    file_groups = dict(kr_generation_setup.file_groups)
 
     final_lines = []
     wav_name_map = {}
 
 
-    custom_map = load_custom_phonemes(custom_phonemes_path)
     alias_type_cache = {}
 
     def _classify_alias_cached(alias_text):
@@ -5389,17 +5371,6 @@ def generate_oto(
         return t
 
 
-    use_template = bool(template_lines)
-    if use_template:
-        t_match, t_total, t_ratio = kr_tg_setup.template_match_stats(template_lines)
-        if t_total == 0 or t_match == 0 or t_ratio < 0.25:
-            log(
-                f"[WARN] 템플릿-TextGrid 매칭률 낮음 ({t_match}/{t_total}, {t_ratio:.1%}) "
-                f"-> OpenUtau {auto_gen_format.upper()} 자동 생성으로 전환"
-            )
-            use_template = False
-        else:
-            log(f"[INFO] 템플릿 매칭 OTO 사용 ({t_match}/{t_total}, {t_ratio:.1%})")
     if _should_keep_template_alias_set_exact(
         use_template=use_template,
         generate_openutau=generate_openutau,
@@ -5408,14 +5379,7 @@ def generate_oto(
         log("[INFO] 템플릿 alias 유지 모드: 누락 alias를 추가해도 기존 alias는 보존합니다.")
 
     preloaded_tg_by_path = {}
-    if use_template:
-        file_groups = {}
-        for line in template_lines:
-            fname = line.split('=', 1)[0]
-            if fname not in file_groups:
-                file_groups[fname] = []
-            file_groups[fname].append(line)
-    else:
+    if not use_template:
         log(f"[INFO] 템플릿 미사용/불가 -> OpenUtau {auto_gen_format.upper()} 자동 생성으로 진행합니다.")
         try:
             from core.lab_generator import decompose_hangul_to_roman

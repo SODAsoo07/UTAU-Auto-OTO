@@ -104,15 +104,15 @@ def test_crnn_right_boundary_guard_shortens_overlong_cutoff():
     assert params["cutoff"] == -210.0
 
 
-def test_role_guard_limits_diphthong_lengthens_cv_cap():
+def test_role_guard_limits_diphthong_tightens_cv_cap():
     from core.coarse_crnn.oto_predictor_generator import _right_guard_limits_for_role
 
     base = _right_guard_limits_for_role("cv", alias_type="cv")
     diph = _right_guard_limits_for_role("cv", alias_type="cv", is_diphthong=True)
 
     # max_cons_gap, min_cons_gap, max_cut_gap, min_cut_gap
-    assert diph[0] > base[0]
-    assert diph[2] > base[2]
+    assert diph[0] < base[0]
+    assert diph[2] < base[2]
 
 
 def test_role_guard_limits_special_v_borrows_cv_floor():
@@ -126,6 +126,26 @@ def test_role_guard_limits_special_v_borrows_cv_floor():
     assert special_v[0] >= cv[0]
     assert special_v[1] >= cv[1]
     assert special_v[0] > pure_v[0]
+
+
+def test_role_guard_limits_japanese_n_are_tighter_than_regular_vc():
+    from core.coarse_crnn.oto_predictor_generator import _right_guard_limits_for_role
+
+    regular = _right_guard_limits_for_role(
+        "vc",
+        alias_type="vc",
+        language="japanese",
+        alias="a k",
+    )
+    nasal_n = _right_guard_limits_for_role(
+        "vc",
+        alias_type="vc",
+        language="japanese",
+        alias="a N",
+    )
+
+    assert nasal_n[0] <= regular[0]
+    assert nasal_n[2] <= regular[2]
 
 
 def test_normalize_special_aliases_handles_iterables():
