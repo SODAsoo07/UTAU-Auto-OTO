@@ -1,4 +1,4 @@
-batch_config: "scripts/oto_batch_cases.yaml"
+batch_config: "scripts/config/oto_batch_cases.yaml"
 output_root: "logs/oto_tune"
 run_tag: "mel_env_tune_kr"
 skip_validation: true

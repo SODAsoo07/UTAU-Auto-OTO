@@ -87,9 +87,19 @@ def _excluded_build_modules() -> list[str]:
 
 RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "profiles"), "assets/profiles"),
-    (os.path.join(APP_DIR, "assets", "models", "oto_ml"), "assets/models/oto_ml"),
     (
-        os.path.join(APP_DIR, "models", "coarse_crnn", "oto_anchor_crnn_role_v2.pt"),
+        os.path.join(APP_DIR, "models", "_build_included_oto_correction_models", "assets", "models", "oto_ml"),
+        "assets/models/oto_ml",
+    ),
+    (
+        os.path.join(
+            APP_DIR,
+            "models",
+            "_build_included_oto_correction_models",
+            "models",
+            "coarse_crnn",
+            "oto_anchor_crnn_role_v2.pt",
+        ),
         "models/coarse_crnn",
     ),
     (os.path.join(APP_DIR, "assets", "bootstrap", "get-pip.py"), "assets/bootstrap"),

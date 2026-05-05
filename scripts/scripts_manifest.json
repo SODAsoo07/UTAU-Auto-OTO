@@ -9,19 +9,19 @@
       "note": "Script usage audit CLI for safe cleanup checks."
     },
     {
-      "path": "scripts/auto_classify_training_data.py",
+      "path": "scripts/ml/data/auto_classify_training_data.py",
       "status": "manual",
       "owner": "ml",
       "note": "Manual helper for staged data auto-classification."
     },
     {
-      "path": "scripts/benchmark_sequence_residual_datasets.py",
+      "path": "scripts/ml/sequence/benchmark_sequence_residual_datasets.py",
       "status": "manual",
       "owner": "ml",
       "note": "Leave-one-voicebank-out benchmark for sequence residual JSONL datasets."
     },
     {
-      "path": "scripts/build_alignment_test_folder.py",
+      "path": "scripts/alignment/tools/build_alignment_test_folder.py",
       "status": "manual",
       "owner": "align",
       "note": "Manual helper to assemble alignment sample/test folders."
@@ -39,43 +39,43 @@
       "note": "Called by CI workflows."
     },
     {
-      "path": "scripts/build_sequence_residual_dataset.py",
+      "path": "scripts/ml/sequence/build_sequence_residual_dataset.py",
       "status": "manual",
       "owner": "ml",
       "note": "Build sequence residual JSONL rows for No-MFA sequence residual correction experiments."
     },
     {
-      "path": "scripts/compare_alignment_visual.py",
+      "path": "scripts/alignment/tools/compare_alignment_visual.py",
       "status": "manual",
       "owner": "align",
       "note": "Manual alignment visualization/comparison helper."
     },
     {
-      "path": "scripts/export_coupled_onnx.py",
+      "path": "scripts/ml/coupled/export_coupled_onnx.py",
       "status": "manual",
       "owner": "ml",
       "note": "Manual ONNX export helper."
     },
     {
-      "path": "scripts/export_textgrid_to_sinsy_lab.py",
+      "path": "scripts/alignment/tools/export_textgrid_to_sinsy_lab.py",
       "status": "manual",
       "owner": "align",
       "note": "Manual TextGrid-to-Sinsy LAB conversion helper."
     },
     {
-      "path": "scripts/generate_shared_oto_profiles.py",
+      "path": "scripts/ml/data/generate_shared_oto_profiles.py",
       "status": "manual",
       "owner": "ml",
       "note": "Manual utility to generate shared OTO timing profiles."
     },
     {
-      "path": "scripts/preprocess_oto_cv_for_sequence_training.py",
+      "path": "scripts/ml/sequence/preprocess_oto_cv_for_sequence_training.py",
       "status": "manual",
       "owner": "ml",
       "note": "Manual preprocessing helper for CV-based sequence aligner training data."
     },
     {
-      "path": "scripts/preprocess_sinsy_labels_for_sequence_training.py",
+      "path": "scripts/alignment/tools/preprocess_sinsy_labels_for_sequence_training.py",
       "status": "manual",
       "owner": "ml",
       "note": "Manual preprocessing helper for Sinsy label sequence training data."
@@ -111,7 +111,7 @@
       "note": "Referenced by setup_mfa.bat and packaging."
     },
     {
-      "path": "scripts/sandbox_smoke_check.ps1",
+      "path": "scripts/testing/sandbox_smoke_check.ps1",
       "status": "manual",
       "owner": "test",
       "note": "Internal smoke-check script; intentionally excluded from release build payload."
@@ -135,19 +135,19 @@
       "note": "Primary CVN training entrypoint used in real workflow."
     },
     {
-      "path": "scripts/train_ensemble_bundle.py",
+      "path": "scripts/ml/coupled/train_ensemble_bundle.py",
       "status": "manual",
       "owner": "ml",
       "note": "Manual ensemble model training helper."
     },
     {
-      "path": "scripts/train_sequence_aligner_profile_from_sinsy.py",
+      "path": "scripts/alignment/tools/train_sequence_aligner_profile_from_sinsy.py",
       "status": "manual",
       "owner": "ml",
       "note": "Manual sequence aligner profile training helper from corrected Sinsy labels."
     },
     {
-      "path": "scripts/train_sequence_residual_baseline.py",
+      "path": "scripts/ml/sequence/train_sequence_residual_baseline.py",
       "status": "manual",
       "owner": "ml",
       "note": "Train lightweight ridge baseline model for sequence residual correction."
