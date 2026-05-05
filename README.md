@@ -1,7 +1,39 @@
 # UTAU Auto OTO
 
-한국어 · 일본어 UTAU 음원을 위한 **자동 OTO 생성 / 음원 준비 워크플로우** 도구입니다.  
+한국어 · 일본어 UTAU 음원을 위한 **자동 OTO 생성** 도구입니다.  
 Windows 독립 실행형 GUI 프로그램 (CustomTkinter 기반, Python 3.10+)
+
+---
+**이 툴의 소스코드는 AI를 이용해 생성했으며**, 인간이 검수 후 일부 수정을 거쳤습니다.</br>
+**The source code of this tool was created using AI**, and it was modified by humans after inspection.
+
+</br>이 프로그램은 '있는 그대로' 제공되며, 제작자는 이 프로그램을 사용하여 입은 손해에 대해 어떤 것도 책임지지 않습니다.</br>
+This program is provided 'as it is' and the producer is not responsible for any damages incurred using this program.
+
+---
+
+### 지원 형식:
+한국어 Korean
+- CV (단음/연단음)
+- CVC
+- CVVC
+- VCV (한연음)
+
+일본어 Japanese
+- CV (단음/연단음)
+- CVVC
+- VCV (연속음)
+
+
+(모든 형식/언어에서 생성된 oto는 정확함을 보증할 수 없습니다. 음성인식의 한계로, 음절 단위로 에일리어스와 실제 발음이 불일치하는 현상이 자주 발생합니다.)
+
+---
+
+**이 프로그램은 64비트 윈도우 환경에서만 실행 가능하며, 해당 툴 실행에는 Microsoft Visual C++ 2015-2022 (x64) 런타임이 필요합니다. 꼭 설치해주세요. 미설치 시 프로그램이 아예 실행되지 않을 수 있습니다.
+ 마이크로소프트 공식 다운로드 링크: https://aka.ms/vs/17/release/vc_redist.x64.exe**
+
+**64bit Windows environment and Microsoft Visual C++ 2015-2022 (x64) runtime is required to run the tool. Make sure to install it. If not, the program may not run at all.
+Microsoft Official Download Link: https://aka.ms/vs/17/release/vc_redist.x64.exe**
 
 ---
 
@@ -113,58 +145,11 @@ setup_mfa.bat
 
 ---
 
-## 최근 변경사항
-
-### v3.2.1
-
-- **CRNN(실험적) 모드 항상 표시**: 개발자 설정 활성화 없이도 CRNN 모드를 선택할 수 있습니다
-- **CRNN 저장 안정성 개선**: 일부 예측 실패 시에도 생성된 OTO 라인을 파일에 저장하고 실패 내역만 로그로 출력합니다
-- **micromamba 환경 재사용**: 이전 배포본의 가상환경을 감지하여 재사용 여부를 선택할 수 있습니다
-- **빌드 파일 목록 정리**: 존재하지 않는 릴리즈 파일 항목 제거, ml/configs 런타임 필요 파일만 선택적 포함
-- **CRNN 에일리어스 롤 분류 시스템**: VC · VV 에일리어스 역할 기반 손실 가중치 적용 (학습 개선)
-- **CVVC 품질 개선**: VC/VV 롤 Prior 조정, 타겟 윈도우 비활성화
-
----
-
 ## 기본 인코딩
 
 앱의 기본 텍스트/파일 인코딩은 **UTF-8**입니다.
 
 ---
-
-## License Summary
-
-This repository is not an open-source project in the OSI sense.
-
-- The source code is published under the source-available freeware terms in
-  [LICENSE](./LICENSE).
-- The official bundled models are licensed separately under
-  [MODEL_LICENSE.md](./MODEL_LICENSE.md).
-- Output created with the official models, such as generated oto settings,
-  prepared voicebanks, and songs created with those voicebanks, may be used
-  commercially under the terms described in `MODEL_LICENSE.md`.
-
-### What You Can Do
-
-- Use the software for free.
-- Read and modify the source code.
-- Share original or modified copies for free with the license notices kept intact.
-- Use the generated outputs in commercial creative work.
-
-### What You Cannot Do
-
-- Sell the software itself or modified versions of the software.
-- Charge for access to the software.
-- Sell, host, or otherwise commercially exploit the official bundled models.
-
-### Important Notes
-
-- Third-party dependencies remain under their own licenses.
-- The official model package and the source code are licensed separately.
-- This repository may contain model files and metadata that are covered by
-  `MODEL_LICENSE.md`, not by `LICENSE`.
-- If you use your own models or your own data, you remain responsible for the
-  rights to those materials.
 
 ---
 
