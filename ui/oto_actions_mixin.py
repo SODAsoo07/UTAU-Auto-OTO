@@ -435,7 +435,7 @@ class OtoActionsMixin:
                         default="mfa",
                     )
                     no_mfa_auto_mode = (
-                        aligner_engine == "none"
+                        aligner_engine in {"none", "coarse_crnn"}
                         and lang != "english"
                         and selected_format not in {"cmpx", "c_plus_v"}
                     )
@@ -444,6 +444,8 @@ class OtoActionsMixin:
                         if hasattr(self, "_get_no_mfa_oto_mode_code")
                         else "remap"
                     )
+                    if aligner_engine == "coarse_crnn":
+                        no_mfa_mode_code = "crnn"
                     no_mfa_mode_text = (
                         "CRNN OTO 예측기(실험)"
                         if no_mfa_mode_code == "crnn"

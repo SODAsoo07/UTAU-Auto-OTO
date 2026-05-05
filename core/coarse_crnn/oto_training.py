@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import os
 import random
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any
+import hashlib
+import json
 
 import numpy as np
 
+from core.coarse_crnn.alias_role import normalize_role
 from core.coarse_crnn.audio import load_wav_mono, log_mel_spectrogram
 from core.coarse_crnn.oto_model import (
     OtoCrnnConfig,
@@ -18,7 +22,7 @@ from core.coarse_crnn.oto_model import (
     save_oto_checkpoint,
     transition_type_id,
     uses_relative_param_head,
-    right_boundary_prior_blend_for,
+    right_boundary_prior_blend_for_context,
 )
 from core.coarse_crnn.oto_param_priors import decode_relative_oto_params, normalize_relative_oto_target, relative_params_to_anchors
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES, extract_alias_features
@@ -35,7 +39,15 @@ class OtoTrainConfig:
     seed: int = 1337
     device: str = "auto"
     amp: bool = True
+    # num_workers <= 0 means auto-resolve from CPU cores.
     num_workers: int = 0
+    dataloader_prefetch_factor: int = 2
+    dataloader_persistent_workers: bool = True
+    enable_tf32: bool = False
+    enable_cudnn_benchmark: bool = False
+    enable_feature_cache: bool = True
+    feature_cache_dir: str = os.path.join("ml_workspace", "coarse_crnn", "feature_cache")
+    feature_cache_readonly: bool = False
     log_every: int = 100
     val_ratio: float = 0.08
     heatmap_sigma_frames: float = 2.0
@@ -49,6 +61,26 @@ class OtoTrainConfig:
     # (vc in cvvc voicebanks has the highest MAE) so they get upweighted.
     vc_role_loss_weight: float = 2.5
     vv_role_loss_weight: float = 2.0
+    uncertainty_loss_weight: float = 0.30
+    confidence_loss_weight: float = 0.10
+    confidence_target_error_scale: float = 0.08
+    min_confidence_target: float = 0.02
+    max_confidence_target: float = 0.98
+    enable_balanced_sampling: bool = True
+    balanced_sampling_replacement: bool = True
+    balanced_sampling_size_factor: float = 1.0
+    voicebank_balance_power: float = 0.55
+    role_balance_power: float = 0.35
+    format_balance_power: float = 0.20
+    enable_hard_case_mining: bool = True
+    hard_case_top_ratio: float = 0.25
+    hard_case_boost: float = 2.5
+    early_stop_patience: int = 0
+    selection_val_loss_weight: float = 1.0
+    selection_hard_failure_weight: float = 2.5
+    selection_worst_voicebank_weight: float = 1.5
+    selection_worst_voicebank_target_acc50: float = 0.50
+    checkpoint_save_every_epochs: int = 0
 
 
 class OtoAnchorDataset:
@@ -57,6 +89,15 @@ class OtoAnchorDataset:
         self.model_config = model_config
         self.train_config = train_config
         self.train = bool(train)
+        self.feature_cache_enabled = bool(getattr(train_config, "enable_feature_cache", False))
+        self.feature_cache_readonly = bool(getattr(train_config, "feature_cache_readonly", False))
+        self.feature_cache_dir = os.path.abspath(str(getattr(train_config, "feature_cache_dir", "")))
+        if self.feature_cache_enabled and self.feature_cache_dir and (not self.feature_cache_readonly):
+            os.makedirs(self.feature_cache_dir, exist_ok=True)
+        self.voicebank_vocab = sorted(
+            {str(row.get("voicebank_id", "") or "unknown_voicebank") for row in self.rows}
+        )
+        self.voicebank_to_id = {name: idx for idx, name in enumerate(self.voicebank_vocab)}
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -64,14 +105,22 @@ class OtoAnchorDataset:
     def __getitem__(self, idx: int):
         row = self.rows[int(idx)]
         wav_path = str(row.get("audio", "") or "")
-        samples, sr, duration_sec = load_wav_mono(wav_path, target_sr=int(self.model_config.sample_rate))
-        features, hop_sec = log_mel_spectrogram(
-            samples,
-            sr,
-            n_mels=int(self.model_config.n_mels),
-            frame_ms=float(self.model_config.frame_ms),
-            hop_ms=float(self.model_config.hop_ms),
-        )
+        alias_text = str(row.get("alias", "") or "")
+        language_text = str(row.get("language", "") or "")
+        alias_features = extract_alias_features(alias_text, language=language_text)
+        alias_role_text = str(row.get("alias_role", "") or "")
+        manifest_has_role = row.get("alias_role") is not None
+        if not alias_role_text:
+            alias_role_text = str(alias_features.get("alias_role", "") or "")
+        if manifest_has_role:
+            is_diphthong = bool(float(row.get("is_diphthong", 0.0) or 0.0) >= 0.5)
+            is_special = bool(float(row.get("is_special", 0.0) or 0.0) >= 0.5)
+        else:
+            is_diphthong = bool(float(alias_features.get("is_diphthong", 0.0) or 0.0) >= 0.5)
+            is_special = bool(float(alias_features.get("is_special", 0.0) or 0.0) >= 0.5)
+        if normalize_role(alias_role_text) == "special":
+            is_special = True
+        features, hop_sec, duration_sec = self._load_or_compute_features(wav_path)
         if features.shape[0] <= 0:
             features = np.zeros((1, int(self.model_config.n_mels)), dtype=np.float32)
         anchors_ms = _anchor_array_from_row(row)
@@ -81,7 +130,9 @@ class OtoAnchorDataset:
             enabled=bool(self.model_config.enable_vcv_target_window),
             formats=tuple(getattr(self.model_config, "target_window_formats", ("vcv",))),
             alias_type=row.get("alias_type", ""),
+            alias_role=alias_role_text,
             cvvc_alias_types=tuple(getattr(self.model_config, "cvvc_target_window_alias_types", ("vc", "vv"))),
+            cvvc_alias_roles=tuple(getattr(self.model_config, "cvvc_target_window_alias_roles", ("vc", "vv"))),
         ):
             row_index, row_count = row_window_args(row)
             features, anchors_ms_or_none, duration_ms, _start_frame = crop_oto_target_window(
@@ -95,6 +146,7 @@ class OtoAnchorDataset:
                     self.model_config,
                     row.get("format_type", ""),
                     int(self.model_config.vcv_target_window_frames),
+                    alias_role=alias_role_text,
                 ),
             )
             anchors_ms = np.asarray(anchors_ms_or_none, dtype=np.float32)
@@ -113,21 +165,6 @@ class OtoAnchorDataset:
             hop_sec=float(hop_sec),
             sigma_frames=float(self.train_config.heatmap_sigma_frames),
         )
-        alias_role_text = str(row.get("alias_role", "") or "")
-        # If manifest lacks alias_role (old manifests built before alias_role feature),
-        # compute it on-the-fly from the alias text so role embeddings train correctly.
-        _manifest_has_role = row.get("alias_role") is not None
-        if not _manifest_has_role:
-            _feats = extract_alias_features(
-                str(row.get("alias", "") or ""),
-                language=str(row.get("language", "") or ""),
-            )
-            alias_role_text = str(_feats.get("alias_role", "") or "")
-            is_diphthong = bool(float(_feats.get("is_diphthong", 0.0) or 0.0) >= 0.5)
-            is_special = bool(float(_feats.get("is_special", 0.0) or 0.0) >= 0.5)
-        else:
-            is_diphthong = bool(float(row.get("is_diphthong", 0.0) or 0.0) >= 0.5)
-            is_special = bool(float(row.get("is_special", 0.0) or 0.0) >= 0.5)
         if uses_relative_param_head(self.model_config):
             scalar = np.asarray(
                 normalize_relative_oto_target(
@@ -178,6 +215,10 @@ class OtoAnchorDataset:
         weight = float(row.get("sample_weight", row.get("weight", 1.0)) or 1.0)
         weight *= _format_loss_multiplier(row, self.train_config)
         weight *= _role_loss_multiplier(alias_role_text, self.train_config)
+        voicebank_id = self.voicebank_to_id.get(
+            str(row.get("voicebank_id", "") or "unknown_voicebank"),
+            0,
+        )
         return (
             features.astype(np.float32),
             heatmap.astype(np.float32),
@@ -198,7 +239,35 @@ class OtoAnchorDataset:
             int(next_role_id),
             extra_flags,
             max(0.05, min(2.0, weight)),
+            int(voicebank_id),
+            int(idx),
         )
+
+    def _load_or_compute_features(self, wav_path: str) -> tuple[np.ndarray, float, float]:
+        if self.feature_cache_enabled and self.feature_cache_dir:
+            cache_path = _feature_cache_path(
+                self.feature_cache_dir,
+                wav_path,
+                sample_rate=int(self.model_config.sample_rate),
+                n_mels=int(self.model_config.n_mels),
+                frame_ms=float(self.model_config.frame_ms),
+                hop_ms=float(self.model_config.hop_ms),
+            )
+            cached = _load_feature_cache(cache_path)
+            if cached is not None:
+                return cached
+        samples, sr, duration_sec = load_wav_mono(wav_path, target_sr=int(self.model_config.sample_rate))
+        features, hop_sec = log_mel_spectrogram(
+            samples,
+            sr,
+            n_mels=int(self.model_config.n_mels),
+            frame_ms=float(self.model_config.frame_ms),
+            hop_ms=float(self.model_config.hop_ms),
+        )
+        out = (features.astype(np.float32), float(hop_sec), float(duration_sec))
+        if self.feature_cache_enabled and self.feature_cache_dir and (not self.feature_cache_readonly):
+            _save_feature_cache(cache_path, out[0], out[1], out[2])
+        return out
 
 
 def train_oto_from_manifest(
@@ -235,21 +304,17 @@ def train_oto_from_manifest(
 
     train_ds = OtoAnchorDataset(train_rows, model_cfg, train_config=cfg, train=True)
     val_ds = OtoAnchorDataset(val_rows_final, model_cfg, train_config=cfg, train=False) if val_rows_final else None
-    train_loader = torch.utils.data.DataLoader(
-        train_ds,
-        batch_size=int(cfg.batch_size),
-        shuffle=True,
-        collate_fn=_collate,
-        num_workers=max(0, int(cfg.num_workers)),
-        pin_memory=_pin_memory_enabled(torch, cfg.device),
-    )
+    hard_case_boosts = np.ones((len(train_ds),), dtype=np.float32)
+    loader_workers = _resolve_num_workers(int(cfg.num_workers))
     val_loader = (
         torch.utils.data.DataLoader(
             val_ds,
             batch_size=max(1, min(8, int(cfg.batch_size))),
             shuffle=False,
             collate_fn=_collate,
-            num_workers=max(0, int(cfg.num_workers)),
+            num_workers=loader_workers,
+            persistent_workers=bool(cfg.dataloader_persistent_workers) and loader_workers > 0,
+            prefetch_factor=int(cfg.dataloader_prefetch_factor) if loader_workers > 0 else None,
             pin_memory=_pin_memory_enabled(torch, cfg.device),
         )
         if val_ds
@@ -257,6 +322,14 @@ def train_oto_from_manifest(
     )
 
     device = resolve_torch_device(torch, str(cfg.device))
+    if device.type == "cuda":
+        if bool(getattr(cfg, "enable_tf32", True)):
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision("high")
+        if bool(getattr(cfg, "enable_cudnn_benchmark", True)):
+            torch.backends.cudnn.benchmark = True
     use_amp = bool(cfg.amp and device.type == "cuda")
     scaler = _make_grad_scaler(torch, enabled=use_amp)
     model = build_oto_model(model_cfg).to(device)
@@ -264,11 +337,22 @@ def train_oto_from_manifest(
 
     history: list[dict[str, float]] = []
     best_val = None
+    best_selection_score = None
     best_state = None
+    latest_state = None
+    stagnant_epochs = 0
     for epoch in range(1, int(cfg.epochs) + 1):
+        train_loader = _build_train_loader(
+            torch=torch,
+            dataset=train_ds,
+            cfg=cfg,
+            hard_case_boosts=hard_case_boosts,
+            loader_workers=loader_workers,
+        )
         model.train()
         loss_sum = 0.0
         row_sum = 0
+        epoch_hard_scores: dict[int, float] = {}
         for batch_idx, batch in enumerate(train_loader, start=1):
             (
                 x,
@@ -290,6 +374,8 @@ def train_oto_from_manifest(
                 next_role_id,
                 extra_flags,
                 weight,
+                _voicebank_ids,
+                sample_indices,
                 mask,
             ) = _move_batch(batch, device)
             optimizer.zero_grad(set_to_none=True)
@@ -311,6 +397,13 @@ def train_oto_from_manifest(
                     extra_alias_flags=extra_flags,
                 )
                 loss = _oto_loss(outputs, heat, scalar, weight, mask, nn, cfg, relative_scalar=uses_relative_param_head(model_cfg))
+                if bool(getattr(cfg, "enable_hard_case_mining", False)):
+                    _collect_epoch_hard_scores(
+                        outputs=outputs,
+                        scalar_target=scalar,
+                        sample_indices=sample_indices,
+                        store=epoch_hard_scores,
+                    )
             if scaler is not None:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
@@ -333,17 +426,62 @@ def train_oto_from_manifest(
                     flush=True,
                 )
         row = {"epoch": float(epoch), "train_loss": float(loss_sum / max(1, row_sum))}
+        if bool(getattr(cfg, "enable_hard_case_mining", False)):
+            hard_case_boosts = _build_hard_case_boosts(
+                size=len(train_ds),
+                score_by_index=epoch_hard_scores,
+                top_ratio=float(getattr(cfg, "hard_case_top_ratio", 0.25)),
+                boost=float(getattr(cfg, "hard_case_boost", 2.5)),
+            )
+            row["hard_case_count"] = float(int(np.sum(hard_case_boosts > 1.0)))
         if val_loader is not None:
             val_metrics = _evaluate(model, val_loader, device, nn, cfg, model_cfg)
             row.update(val_metrics)
             val_loss = float(val_metrics["val_loss"])
-            if best_val is None or val_loss < best_val:
+            selection_score = _selection_score(val_metrics, cfg)
+            row["val_selection_score"] = float(selection_score)
+            if best_selection_score is None or selection_score < best_selection_score:
+                best_selection_score = selection_score
                 best_val = val_loss
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                stagnant_epochs = 0
+            else:
+                stagnant_epochs += 1
+        else:
+            latest_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         history.append(row)
+        save_every = int(getattr(cfg, "checkpoint_save_every_epochs", 0) or 0)
+        if save_every > 0 and (epoch % save_every == 0):
+            epoch_output_path = _epoch_checkpoint_path(output_path, epoch)
+            save_oto_checkpoint(
+                epoch_output_path,
+                model.cpu(),
+                model_cfg,
+                meta={
+                    "train_rows": len(train_rows),
+                    "val_rows": len(val_rows_final),
+                    "fixed_val_manifest": bool(fixed_val_rows),
+                    "history": history,
+                    "device": str(device),
+                    "amp": bool(use_amp),
+                    "best_val_loss": best_val,
+                    "best_selection_score": best_selection_score,
+                    "checkpoint_type": "periodic_epoch",
+                    "epoch": int(epoch),
+                },
+            )
+            model = model.to(device)
+        if int(getattr(cfg, "early_stop_patience", 0) or 0) > 0 and stagnant_epochs >= int(cfg.early_stop_patience):
+            print(
+                f"[oto_anchor][train] early-stop epoch={epoch} stagnant={stagnant_epochs} patience={int(cfg.early_stop_patience)}",
+                flush=True,
+            )
+            break
 
     if best_state is not None:
         model.load_state_dict(best_state)
+    elif latest_state is not None:
+        model.load_state_dict(latest_state)
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     save_oto_checkpoint(
         output_path,
@@ -356,6 +494,8 @@ def train_oto_from_manifest(
             "history": history,
             "device": str(device),
             "amp": bool(use_amp),
+            "best_val_loss": best_val,
+            "best_selection_score": best_selection_score,
         },
     )
     return {
@@ -374,6 +514,11 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
     loss_sum = 0.0
     row_sum = 0
     mae_values: list[float] = []
+    pre_errors_all: list[float] = []
+    hard_failure_count = 0
+    voicebank_pre_errors: dict[int, list[float]] = defaultdict(list)
+    voicebank_hard_counts: dict[int, int] = defaultdict(int)
+    voicebank_counts: dict[int, int] = defaultdict(int)
     with torch.no_grad():
         for batch in loader:
             (
@@ -396,6 +541,8 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
                 next_role_id,
                 extra_flags,
                 weight,
+                voicebank_ids,
+                _sample_indices,
                 mask,
             ) = _move_batch(batch, device)
             outputs = model(
@@ -418,30 +565,62 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
             loss = _oto_loss(outputs, heat, scalar, weight, mask, nn, cfg, relative_scalar=relative_scalar)
             pred_scalar = torch.sigmoid(outputs["scalar_logits"])
             if relative_scalar:
-                mae_values.extend(
-                    _relative_anchor_mae_values(
-                        pred_scalar.detach().cpu().numpy(),
-                        duration_ms.detach().cpu().numpy(),
-                        fmt.detach().cpu().numpy(),
-                        alias_id.detach().cpu().numpy(),
-                        transition_id.detach().cpu().numpy(),
-                        role_id.detach().cpu().numpy(),
-                        extra_flags.detach().cpu().numpy(),
-                        anchors_ms.detach().cpu().numpy(),
-                        model_cfg,
-                    )
+                pred_anchors = _relative_anchor_predictions(
+                    pred_scalar.detach().cpu().numpy(),
+                    duration_ms.detach().cpu().numpy(),
+                    fmt.detach().cpu().numpy(),
+                    alias_id.detach().cpu().numpy(),
+                    transition_id.detach().cpu().numpy(),
+                    role_id.detach().cpu().numpy(),
+                    extra_flags.detach().cpu().numpy(),
+                    model_cfg,
                 )
+                target_anchors = anchors_ms.detach().cpu().numpy().astype(np.float32)
+                batch_mae = np.abs(pred_anchors - target_anchors).mean(axis=1).tolist()
+                mae_values.extend(float(v) for v in batch_mae)
+                pre_errors = np.abs(pred_anchors[:, 2] - target_anchors[:, 2]).tolist()
+                pre_errors_all.extend(float(v) for v in pre_errors)
+                hard_flags = _hard_failure_flags_from_anchors(pred_anchors, duration_ms.detach().cpu().numpy())
             else:
                 pred_ms = pred_scalar * duration_ms[:, None]
                 mae = torch.abs(pred_ms - anchors_ms).mean(dim=1)
                 mae_values.extend(float(v) for v in mae.detach().cpu().tolist())
+                pred_anchors = pred_ms.detach().cpu().numpy().astype(np.float32)
+                target_anchors = anchors_ms.detach().cpu().numpy().astype(np.float32)
+                pre_errors = np.abs(pred_anchors[:, 2] - target_anchors[:, 2]).tolist()
+                pre_errors_all.extend(float(v) for v in pre_errors)
+                hard_flags = _hard_failure_flags_from_anchors(pred_anchors, duration_ms.detach().cpu().numpy())
+            vb_arr = voicebank_ids.detach().cpu().numpy()
+            for i, vb in enumerate(vb_arr.tolist()):
+                vb_i = int(vb)
+                voicebank_counts[vb_i] += 1
+                p_err = float(pre_errors[i]) if i < len(pre_errors) else 0.0
+                voicebank_pre_errors[vb_i].append(p_err)
+                if bool(hard_flags[i]):
+                    voicebank_hard_counts[vb_i] += 1
+                    hard_failure_count += 1
             rows_in_batch = int(x.shape[0])
             loss_sum += float(loss.detach().cpu().item()) * rows_in_batch
             row_sum += rows_in_batch
+    pre_acc50 = _hit_rate_np(pre_errors_all, 50.0)
+    worst_vb_acc50 = _worst_voicebank_acc50(voicebank_pre_errors)
+    worst_vb_hard_failure = _worst_voicebank_hard_failure_rate(voicebank_hard_counts, voicebank_counts)
     return {
         "val_loss": float(loss_sum / max(1, row_sum)),
         "val_anchor_mae_ms": float(sum(mae_values) / max(1, len(mae_values))),
+        "val_preutterance_acc_50ms": float(pre_acc50),
+        "val_hard_failure_rate": float(hard_failure_count) / float(max(1, row_sum)),
+        "val_worst_voicebank_preutterance_acc_50ms": float(worst_vb_acc50),
+        "val_worst_voicebank_hard_failure_rate": float(worst_vb_hard_failure),
     }
+
+
+def _epoch_checkpoint_path(output_path: str, epoch: int) -> str:
+    root, ext = os.path.splitext(str(output_path))
+    suffix = f".e{int(epoch):03d}"
+    if not ext:
+        return f"{root}{suffix}"
+    return f"{root}{suffix}{ext}"
 
 
 def _oto_loss(outputs, heat, scalar, weight, mask, nn, cfg: OtoTrainConfig, *, relative_scalar: bool = False):
@@ -453,10 +632,32 @@ def _oto_loss(outputs, heat, scalar, weight, mask, nn, cfg: OtoTrainConfig, *, r
     scalar_pred = torch.sigmoid(outputs["scalar_logits"])
     scalar_loss_raw = nn.functional.smooth_l1_loss(scalar_pred, scalar, reduction="none")
     scalar_loss = (scalar_loss_raw.mean(dim=1) * weight).sum() / torch.clamp(weight.sum(), min=1.0)
+    scalar_logvar = outputs.get("scalar_logvar")
+    if scalar_logvar is not None:
+        residual_sq = (scalar_pred - scalar) ** 2
+        inv_var = torch.exp(-scalar_logvar)
+        uncertainty_nll = 0.5 * ((residual_sq * inv_var) + scalar_logvar)
+        uncertainty_loss = (uncertainty_nll.mean(dim=1) * weight).sum() / torch.clamp(weight.sum(), min=1.0)
+    else:
+        uncertainty_loss = scalar_pred.new_tensor(0.0)
+    conf_logits = outputs.get("confidence_logits")
+    if conf_logits is not None:
+        error_scale = max(1e-4, float(getattr(cfg, "confidence_target_error_scale", 0.08)))
+        conf_target = torch.exp(-torch.abs(scalar_pred.detach() - scalar).mean(dim=1) / error_scale)
+        conf_target = conf_target.clamp(
+            min=float(getattr(cfg, "min_confidence_target", 0.02)),
+            max=float(getattr(cfg, "max_confidence_target", 0.98)),
+        )
+        conf_loss_raw = nn.functional.binary_cross_entropy_with_logits(conf_logits, conf_target, reduction="none")
+        conf_loss = (conf_loss_raw * weight).sum() / torch.clamp(weight.sum(), min=1.0)
+    else:
+        conf_loss = scalar_pred.new_tensor(0.0)
     order_loss = _relative_order_penalty(scalar_pred) if relative_scalar else _order_penalty(scalar_pred)
     return (
         heat_loss * float(cfg.heatmap_loss_weight)
         + scalar_loss * float(cfg.scalar_loss_weight)
+        + uncertainty_loss * float(getattr(cfg, "uncertainty_loss_weight", 0.0))
+        + conf_loss * float(getattr(cfg, "confidence_loss_weight", 0.0))
         + order_loss * float(cfg.order_loss_weight)
     )
 
@@ -511,7 +712,12 @@ def _relative_anchor_mae_values(
             format_type=format_type,
             alias_type=alias_type,
             transition_type=transition_type,
-            prior_blend=right_boundary_prior_blend_for(model_cfg, format_type),
+            prior_blend=right_boundary_prior_blend_for_context(
+                model_cfg,
+                format_type,
+                alias_role=role_text,
+                is_special=bool(is_special),
+            ),
             alias_role=role_text,
             is_diphthong=is_diphthong,
             is_special=is_special,
@@ -546,6 +752,8 @@ def _collate(batch):
     next_role_ids = np.zeros((len(batch),), dtype=np.int64)
     extra_flags = np.zeros((len(batch), 2), dtype=np.float32)
     weights = np.ones((len(batch),), dtype=np.float32)
+    voicebank_ids = np.zeros((len(batch),), dtype=np.int64)
+    sample_indices = np.zeros((len(batch),), dtype=np.int64)
     for idx, (
         features,
         heatmap,
@@ -566,6 +774,8 @@ def _collate(batch):
         next_role_id,
         flags,
         weight,
+        voicebank_id,
+        sample_index,
     ) in enumerate(batch):
         n = int(features.shape[0])
         xs[idx, :n] = features
@@ -590,6 +800,8 @@ def _collate(batch):
         if flags_arr.shape[0] >= 2:
             extra_flags[idx] = flags_arr[:2]
         weights[idx] = float(weight)
+        voicebank_ids[idx] = int(voicebank_id)
+        sample_indices[idx] = int(sample_index)
     return (
         torch.from_numpy(xs),
         torch.from_numpy(heats),
@@ -610,6 +822,8 @@ def _collate(batch):
         torch.from_numpy(next_role_ids),
         torch.from_numpy(extra_flags),
         torch.from_numpy(weights),
+        torch.from_numpy(voicebank_ids),
+        torch.from_numpy(sample_indices),
         torch.from_numpy(masks),
     )
 
@@ -723,6 +937,275 @@ def _make_anchor_heatmap(anchors_ms: np.ndarray, *, frame_count: int, hop_sec: f
         center = float(anchor_ms) / hop_ms
         out[:, idx] = np.exp(-0.5 * ((frames - center) / sigma) ** 2)
     return out
+
+
+def _build_train_loader(
+    *,
+    torch,
+    dataset: OtoAnchorDataset,
+    cfg: OtoTrainConfig,
+    hard_case_boosts: np.ndarray,
+    loader_workers: int,
+):
+    sampler = None
+    shuffle = True
+    if bool(getattr(cfg, "enable_balanced_sampling", False)):
+        weights = _build_train_sampling_weights(dataset.rows, cfg, hard_case_boosts=hard_case_boosts)
+        if weights.size > 0:
+            sample_count = max(1, int(round(len(dataset) * max(0.25, float(getattr(cfg, "balanced_sampling_size_factor", 1.0))))))
+            sampler = torch.utils.data.WeightedRandomSampler(
+                weights=torch.from_numpy(weights.astype(np.float64)),
+                num_samples=sample_count,
+                replacement=bool(getattr(cfg, "balanced_sampling_replacement", True)),
+            )
+            shuffle = False
+    return torch.utils.data.DataLoader(
+        dataset,
+        batch_size=int(cfg.batch_size),
+        shuffle=shuffle if sampler is None else False,
+        sampler=sampler,
+        collate_fn=_collate,
+        num_workers=max(0, int(loader_workers)),
+        persistent_workers=bool(cfg.dataloader_persistent_workers) and int(loader_workers) > 0,
+        prefetch_factor=int(cfg.dataloader_prefetch_factor) if int(loader_workers) > 0 else None,
+        pin_memory=_pin_memory_enabled(torch, cfg.device),
+    )
+
+
+def _resolve_num_workers(requested: int) -> int:
+    if int(requested) >= 0:
+        return int(requested)
+    cpu_total = int(os.cpu_count() or 4)
+    # Keep 1-2 cores free for UI/OS and cap worker fan-out on Windows.
+    resolved = max(2, min(8, cpu_total - 2))
+    return int(resolved)
+
+
+def _build_train_sampling_weights(rows: list[dict[str, Any]], cfg: OtoTrainConfig, *, hard_case_boosts: np.ndarray) -> np.ndarray:
+    if not rows:
+        return np.zeros((0,), dtype=np.float32)
+    vb_counter = Counter(str(row.get("voicebank_id", "") or "unknown_voicebank") for row in rows)
+    role_counter = Counter(str(row.get("alias_role", "") or "other").strip().lower() or "other" for row in rows)
+    fmt_counter = Counter(str(row.get("format_type", "") or "other").strip().lower() or "other" for row in rows)
+    vb_power = float(getattr(cfg, "voicebank_balance_power", 0.55))
+    role_power = float(getattr(cfg, "role_balance_power", 0.35))
+    fmt_power = float(getattr(cfg, "format_balance_power", 0.20))
+    out = np.ones((len(rows),), dtype=np.float32)
+    for idx, row in enumerate(rows):
+        vb = str(row.get("voicebank_id", "") or "unknown_voicebank")
+        role = str(row.get("alias_role", "") or "other").strip().lower() or "other"
+        fmt = str(row.get("format_type", "") or "other").strip().lower() or "other"
+        w = float(row.get("sample_weight", row.get("weight", 1.0)) or 1.0)
+        w /= float(max(1, vb_counter.get(vb, 1))) ** vb_power
+        w /= float(max(1, role_counter.get(role, 1))) ** role_power
+        w /= float(max(1, fmt_counter.get(fmt, 1))) ** fmt_power
+        if idx < int(hard_case_boosts.shape[0]):
+            w *= float(max(1.0, hard_case_boosts[idx]))
+        out[idx] = max(1e-5, float(w))
+    return out
+
+
+def _collect_epoch_hard_scores(*, outputs, scalar_target, sample_indices, store: dict[int, float]) -> None:
+    scalar_pred = outputs.get("scalar_logits")
+    if scalar_pred is None:
+        return
+    torch = __import__("torch")
+    pred = torch.sigmoid(scalar_pred).detach()
+    err = torch.abs(pred - scalar_target).mean(dim=1).detach().cpu().numpy()
+    idx_arr = sample_indices.detach().cpu().numpy()
+    for s_idx, score in zip(idx_arr.tolist(), err.tolist()):
+        i = int(s_idx)
+        value = float(score)
+        prev = store.get(i)
+        if prev is None or value > prev:
+            store[i] = value
+
+
+def _build_hard_case_boosts(*, size: int, score_by_index: dict[int, float], top_ratio: float, boost: float) -> np.ndarray:
+    out = np.ones((max(0, int(size)),), dtype=np.float32)
+    if not score_by_index or size <= 0:
+        return out
+    ratio = max(0.01, min(0.90, float(top_ratio)))
+    top_k = max(1, int(round(float(size) * ratio)))
+    ranked = sorted(score_by_index.items(), key=lambda item: float(item[1]), reverse=True)
+    picked = ranked[:top_k]
+    boost_value = max(1.0, float(boost))
+    for idx, _score in picked:
+        if 0 <= int(idx) < size:
+            out[int(idx)] = boost_value
+    return out
+
+
+def _selection_score(val_metrics: dict[str, float], cfg: OtoTrainConfig) -> float:
+    val_loss = float(val_metrics.get("val_loss", 0.0) or 0.0)
+    hard_fail = float(val_metrics.get("val_hard_failure_rate", 0.0) or 0.0)
+    worst_acc = float(val_metrics.get("val_worst_voicebank_preutterance_acc_50ms", 0.0) or 0.0)
+    target_acc = float(getattr(cfg, "selection_worst_voicebank_target_acc50", 0.50))
+    acc_gap = max(0.0, target_acc - worst_acc)
+    return (
+        val_loss * float(getattr(cfg, "selection_val_loss_weight", 1.0))
+        + hard_fail * float(getattr(cfg, "selection_hard_failure_weight", 2.5))
+        + acc_gap * float(getattr(cfg, "selection_worst_voicebank_weight", 1.5))
+    )
+
+
+def _relative_anchor_predictions(
+    pred_scalar,
+    duration_ms,
+    format_ids,
+    alias_ids,
+    transition_ids,
+    role_ids,
+    extra_flags,
+    model_cfg: OtoCrnnConfig,
+) -> np.ndarray:
+    formats = list(model_cfg.format_types)
+    aliases = list(model_cfg.alias_types)
+    transitions = list(model_cfg.transition_types)
+    roles = list(model_cfg.alias_roles)
+    use_role = bool(getattr(model_cfg, "enable_alias_role_embedding", False)) and len(roles) > 1
+    out = np.zeros((len(pred_scalar), len(OTO_ANCHOR_NAMES)), dtype=np.float32)
+    for idx, (scalar_row, duration, fmt_idx, alias_idx, transition_idx, role_idx, flags_row) in enumerate(
+        zip(pred_scalar, duration_ms, format_ids, alias_ids, transition_ids, role_ids, extra_flags)
+    ):
+        fmt_i = int(fmt_idx)
+        alias_i = int(alias_idx)
+        transition_i = int(transition_idx)
+        role_i = int(role_idx)
+        format_type = formats[fmt_i] if 0 <= fmt_i < len(formats) else "other"
+        alias_type = aliases[alias_i] if 0 <= alias_i < len(aliases) else "other"
+        transition_type = transitions[transition_i] if 0 <= transition_i < len(transitions) else "other"
+        role_text = roles[role_i] if (use_role and 0 <= role_i < len(roles)) else ""
+        flags_arr = np.asarray(flags_row, dtype=np.float32)
+        is_diphthong = bool(flags_arr.shape[0] > 0 and flags_arr[0] >= 0.5)
+        is_special = bool(flags_arr.shape[0] > 1 and flags_arr[1] >= 0.5)
+        params = decode_relative_oto_params(
+            scalar_row,
+            duration_ms=float(duration),
+            format_type=format_type,
+            alias_type=alias_type,
+            transition_type=transition_type,
+            prior_blend=right_boundary_prior_blend_for_context(
+                model_cfg,
+                format_type,
+                alias_role=role_text,
+                is_special=bool(is_special),
+            ),
+            alias_role=role_text,
+            is_diphthong=is_diphthong,
+            is_special=is_special,
+        )
+        out[idx] = np.asarray(relative_params_to_anchors(params, duration_ms=float(duration)), dtype=np.float32)
+    return out
+
+
+def _hard_failure_flags_from_anchors(pred_anchors: np.ndarray, durations_ms: np.ndarray) -> list[bool]:
+    flags: list[bool] = []
+    for anchor_row, duration in zip(pred_anchors, durations_ms):
+        dur = max(1.0, float(duration))
+        offset = float(anchor_row[0])
+        cutoff = float(anchor_row[4])
+        bad = False
+        if cutoff <= offset + 5.0:
+            bad = True
+        if offset >= dur * 0.90:
+            bad = True
+        if cutoff <= dur * 0.08:
+            bad = True
+        flags.append(bool(bad))
+    return flags
+
+
+def _hit_rate_np(values: list[float], threshold: float) -> float:
+    if not values:
+        return 0.0
+    t = float(threshold)
+    return float(sum(1 for value in values if float(value) <= t)) / float(len(values))
+
+
+def _worst_voicebank_acc50(voicebank_pre_errors: dict[int, list[float]]) -> float:
+    if not voicebank_pre_errors:
+        return 0.0
+    worst = 1.0
+    for errors in voicebank_pre_errors.values():
+        acc = _hit_rate_np([float(v) for v in errors], 50.0) if errors else 0.0
+        worst = min(worst, float(acc))
+    return float(worst)
+
+
+def _worst_voicebank_hard_failure_rate(voicebank_hard_counts: dict[int, int], voicebank_counts: dict[int, int]) -> float:
+    if not voicebank_counts:
+        return 0.0
+    worst = 0.0
+    for vb, count in voicebank_counts.items():
+        denom = max(1, int(count))
+        rate = float(voicebank_hard_counts.get(vb, 0)) / float(denom)
+        worst = max(worst, rate)
+    return float(worst)
+
+
+def _feature_cache_path(
+    cache_root: str,
+    wav_path: str,
+    *,
+    sample_rate: int,
+    n_mels: int,
+    frame_ms: float,
+    hop_ms: float,
+) -> str:
+    abs_wav = os.path.abspath(str(wav_path))
+    try:
+        st = os.stat(abs_wav)
+        size = int(st.st_size)
+        mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)))
+    except Exception:
+        size = -1
+        mtime_ns = -1
+    key_src = {
+        "v": 1,
+        "wav": abs_wav.lower(),
+        "size": size,
+        "mtime_ns": mtime_ns,
+        "sample_rate": int(sample_rate),
+        "n_mels": int(n_mels),
+        "frame_ms": float(frame_ms),
+        "hop_ms": float(hop_ms),
+    }
+    packed = json.dumps(key_src, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    digest = hashlib.sha1(packed).hexdigest()
+    sub = digest[:2]
+    return os.path.join(cache_root, sub, f"{digest}.npz")
+
+
+def _load_feature_cache(path: str) -> tuple[np.ndarray, float, float] | None:
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as obj:
+            features = np.asarray(obj["features"], dtype=np.float32)
+            hop_sec = float(np.asarray(obj["hop_sec"]).reshape(-1)[0])
+            duration_sec = float(np.asarray(obj["duration_sec"]).reshape(-1)[0])
+        return features, hop_sec, duration_sec
+    except Exception:
+        return None
+
+
+def _save_feature_cache(path: str, features: np.ndarray, hop_sec: float, duration_sec: float) -> None:
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp = f"{path}.tmp.{os.getpid()}.npz"
+        np.savez_compressed(
+            tmp,
+            features=np.asarray(features, dtype=np.float32),
+            hop_sec=np.asarray([float(hop_sec)], dtype=np.float32),
+            duration_sec=np.asarray([float(duration_sec)], dtype=np.float32),
+        )
+        if os.path.exists(tmp):
+            os.replace(tmp, path)
+    except Exception:
+        return None
 
 
 __all__ = ["OtoAnchorDataset", "OtoTrainConfig", "train_oto_from_manifest"]

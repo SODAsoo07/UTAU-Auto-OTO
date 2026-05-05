@@ -28,12 +28,21 @@ class OtoCrnnConfig:
     # Full-audio heatmap finds the correct position reliably instead.
     target_window_formats: tuple[str, ...] = ("vcv",)
     target_window_frame_overrides: tuple[str, ...] = ("vcv=240",)
+    target_window_role_frame_overrides: tuple[str, ...] = ()
     cvvc_target_window_alias_types: tuple[str, ...] = ()
+    cvvc_target_window_alias_roles: tuple[str, ...] = ("vc", "vv")
     anchor_heatmap_blend: float = 0.70
     vcv_window_heatmap_blend: float = 0.30
     scalar_target_mode: str = "relative_params"
     right_boundary_prior_blend: float = 0.45
     right_boundary_prior_blends: tuple[str, ...] = ("vcv=0.45", "cvvc=0.25", "cv=0.10", "cvc=0.10", "other=0.10")
+    right_boundary_prior_role_blends: tuple[str, ...] = ("-cv=0.35", "cv=0.30", "cv-=0.25", "v=0.18", "v-=0.22", "vc=0.20", "vv=0.24", "v-cv=0.32", "endbr=0.18", "br=0.15", "special=0.28", "other=0.30")
+    enable_uncertainty_head: bool = True
+    uncertainty_min_logvar: float = -6.0
+    uncertainty_max_logvar: float = 4.0
+    confidence_error_scale_ms: float = 75.0
+    enable_two_stage_refine: bool = True
+    two_stage_refine_window_frames: int = 320
     anchor_names: tuple[str, ...] = tuple(OTO_ANCHOR_NAMES)
     languages: tuple[str, ...] = ("korean", "japanese")
     format_types: tuple[str, ...] = ("cv", "cvc", "cvvc", "vcv", "c_plus_v", "general", "other")
@@ -73,14 +82,32 @@ class OtoCrnnConfig:
             data["target_window_formats"] = ("vcv",)
         if payload is not None and "target_window_frame_overrides" not in data:
             data["target_window_frame_overrides"] = ()
+        if payload is not None and "target_window_role_frame_overrides" not in data:
+            data["target_window_role_frame_overrides"] = ()
         if payload is not None and "cvvc_target_window_alias_types" not in data:
             data["cvvc_target_window_alias_types"] = ("cv", "cv_head", "vc", "vv", "vcv", "mono", "br", "other")
+        if payload is not None and "cvvc_target_window_alias_roles" not in data:
+            data["cvvc_target_window_alias_roles"] = ("vc", "vv")
         if payload is not None and "scalar_target_mode" not in data:
             data["scalar_target_mode"] = "absolute_anchors"
         if payload is not None and "right_boundary_prior_blend" not in data:
             data["right_boundary_prior_blend"] = 0.0
         if payload is not None and "right_boundary_prior_blends" not in data:
             data["right_boundary_prior_blends"] = ()
+        if payload is not None and "right_boundary_prior_role_blends" not in data:
+            data["right_boundary_prior_role_blends"] = ()
+        if payload is not None and "enable_uncertainty_head" not in data:
+            data["enable_uncertainty_head"] = False
+        if payload is not None and "uncertainty_min_logvar" not in data:
+            data["uncertainty_min_logvar"] = -6.0
+        if payload is not None and "uncertainty_max_logvar" not in data:
+            data["uncertainty_max_logvar"] = 4.0
+        if payload is not None and "confidence_error_scale_ms" not in data:
+            data["confidence_error_scale_ms"] = 75.0
+        if payload is not None and "enable_two_stage_refine" not in data:
+            data["enable_two_stage_refine"] = False
+        if payload is not None and "two_stage_refine_window_frames" not in data:
+            data["two_stage_refine_window_frames"] = 0
         # Old checkpoints predate the alias_role axis. Default the new fields to
         # disabled so loading them keeps the original architecture.
         if payload is not None and "alias_roles" not in data:
@@ -98,8 +125,11 @@ class OtoCrnnConfig:
             "alias_roles",
             "target_window_formats",
             "target_window_frame_overrides",
+            "target_window_role_frame_overrides",
             "cvvc_target_window_alias_types",
+            "cvvc_target_window_alias_roles",
             "right_boundary_prior_blends",
+            "right_boundary_prior_role_blends",
         ):
             if key in data and not isinstance(data[key], tuple):
                 data[key] = tuple(data[key] or getattr(cls, key))
@@ -116,8 +146,11 @@ class OtoCrnnConfig:
         data["alias_roles"] = list(self.alias_roles)
         data["target_window_formats"] = list(self.target_window_formats)
         data["target_window_frame_overrides"] = list(self.target_window_frame_overrides)
+        data["target_window_role_frame_overrides"] = list(self.target_window_role_frame_overrides)
         data["cvvc_target_window_alias_types"] = list(self.cvvc_target_window_alias_types)
+        data["cvvc_target_window_alias_roles"] = list(self.cvvc_target_window_alias_roles)
         data["right_boundary_prior_blends"] = list(self.right_boundary_prior_blends)
+        data["right_boundary_prior_role_blends"] = list(self.right_boundary_prior_role_blends)
         return data
 
 
@@ -216,6 +249,16 @@ def build_oto_model(config: OtoCrnnConfig):
                 nn.Dropout(float(cfg.dropout)),
                 nn.Linear(hidden2, len(cfg.anchor_names)),
             )
+            self.use_uncertainty_head = bool(getattr(cfg, "enable_uncertainty_head", False))
+            if self.use_uncertainty_head:
+                self.scalar_logvar_head = nn.Sequential(
+                    nn.Linear(hidden2 * 2, hidden2),
+                    nn.ReLU(),
+                    nn.Dropout(float(cfg.dropout)),
+                    nn.Linear(hidden2, len(cfg.anchor_names)),
+                )
+            else:
+                self.scalar_logvar_head = None
             if bool(cfg.enable_format_residual_heads):
                 self.format_heatmap_heads = nn.ModuleList(
                     [nn.Linear(hidden2, len(cfg.anchor_names)) for _ in range(fmt_count)]
@@ -339,10 +382,19 @@ def build_oto_model(config: OtoCrnnConfig):
                 heatmap_logits = heatmap_logits + 0.35 * heatmap_residual
                 scalar_logits = scalar_logits + 0.35 * scalar_residual
             confidence_logits = self.confidence_head(pooled).squeeze(-1)
+            scalar_logvar = None
+            if self.use_uncertainty_head and self.scalar_logvar_head is not None:
+                scalar_logvar = self.scalar_logvar_head(pooled)
+                scalar_logvar = torch.clamp(
+                    scalar_logvar,
+                    min=float(getattr(config, "uncertainty_min_logvar", -6.0)),
+                    max=float(getattr(config, "uncertainty_max_logvar", 4.0)),
+                )
             return {
                 "heatmap_logits": heatmap_logits,
                 "scalar_logits": scalar_logits,
                 "confidence_logits": confidence_logits,
+                "scalar_logvar": scalar_logvar,
             }
 
     return OtoAnchorCRNN(config)
@@ -397,6 +449,26 @@ def uses_relative_param_head(config: OtoCrnnConfig) -> bool:
 
 
 def right_boundary_prior_blend_for(config: OtoCrnnConfig, format_type: object) -> float:
+    return right_boundary_prior_blend_for_context(config, format_type, alias_role="")
+
+
+def right_boundary_prior_blend_for_context(
+    config: OtoCrnnConfig,
+    format_type: object,
+    *,
+    alias_role: object = "",
+    is_special: bool = False,
+) -> float:
+    role = "special" if bool(is_special) else normalize_role(alias_role)
+    role_table = _parse_key_value_tuple(getattr(config, "right_boundary_prior_role_blends", ()))
+    if role:
+        role_value = role_table.get(role)
+        if role_value is not None:
+            return max(0.0, min(1.0, float(role_value)))
+    if bool(is_special):
+        special_value = role_table.get("special")
+        if special_value is not None:
+            return max(0.0, min(1.0, float(special_value)))
     fmt = str(format_type or "").strip().lower() or "other"
     table = _parse_key_value_tuple(getattr(config, "right_boundary_prior_blends", ()))
     value = table.get(fmt, table.get("other"))
@@ -457,6 +529,7 @@ __all__ = [
     "language_id",
     "load_oto_checkpoint",
     "right_boundary_prior_blend_for",
+    "right_boundary_prior_blend_for_context",
     "save_oto_checkpoint",
     "transition_type_id",
     "uses_relative_param_head",

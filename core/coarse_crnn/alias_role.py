@@ -155,6 +155,11 @@ def normalize_role(role: object) -> str:
         "tail": "cv-",
         "vowel": "v",
         "mono": "v",
+        "special_phoneme": "special",
+        "special-phoneme": "special",
+        "special_phone": "special",
+        "special-phone": "special",
+        "spcl": "special",
     }
     return aliases.get(text, DEFAULT_ROLE)
 

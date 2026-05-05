@@ -6,6 +6,7 @@ import tkinter as tk
 import customtkinter as ctk
 
 from core.format_type_utils import normalize_auto_format_value
+from core.pipeline_status import normalize_aligner_name
 from ui.theme_tokens import (
     LANGUAGE_DROPDOWN_THEME,
     LANGUAGE_NOTICE_THEME,
@@ -1278,14 +1279,14 @@ class LayoutMixin:
         )
         options = ["MFA", "전용(시퀀스)"]
         if developer_enabled:
-            options.append("No-MFA")
+            options.append("CRNN(실험적)")
         lang = self._get_language()
         current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA").strip()
         fmt = normalize_auto_format_value(lang, self.auto_format_var.get()) if hasattr(self, "auto_format_var") else ""
         is_kr_template_only = (lang == "korean" and fmt in {"cmpx", "c_plus_v"})
         forced_no_mfa = bool(lang == "english" or is_kr_template_only)
-        if current == "No-MFA (Experimental)":
-            current = "No-MFA"
+        if current in {"No-MFA", "No-MFA (Experimental)"}:
+            current = "MFA"
         if forced_no_mfa:
             current = "MFA"
         if current not in options:
@@ -1298,8 +1299,9 @@ class LayoutMixin:
                 self.aligner_menu.set(current)
             except Exception:
                 pass
-        use_no_mfa = forced_no_mfa or current == "No-MFA"
+        use_no_mfa = forced_no_mfa
         use_sequence = current == "전용(시퀀스)"
+        use_coarse_crnn = normalize_aligner_name(current, default="mfa") == "coarse_crnn"
         is_cmpx_preview = (lang == "korean" and fmt == "cmpx")
         is_c_plus_v_mode = (lang == "korean" and fmt == "c_plus_v")
         limit_ml_routes_for_no_mfa = use_no_mfa and not (
@@ -1357,7 +1359,9 @@ class LayoutMixin:
             else "베이스 OTO 재매핑 + 보정"
         )
         if hasattr(self, "mfa_align_profile_menu"):
-            self.mfa_align_profile_menu.configure(state="disabled" if (use_no_mfa or use_sequence) else "normal")
+            self.mfa_align_profile_menu.configure(
+                state="disabled" if (use_no_mfa or use_sequence or use_coarse_crnn) else "normal"
+            )
         show_no_mfa_mode_row = use_no_mfa and not (
             lang == "english" or is_kr_template_only
         )
@@ -1373,7 +1377,9 @@ class LayoutMixin:
                     self.row_no_mfa_oto_mode.pack_forget()
             except Exception:
                 pass
-        show_crnn_model_row = bool(show_no_mfa_mode_row and developer_enabled and no_mfa_mode_code == "crnn")
+        show_crnn_model_row = bool(
+            developer_enabled and (use_coarse_crnn or (show_no_mfa_mode_row and no_mfa_mode_code == "crnn"))
+        )
         if hasattr(self, "row_oto_crnn_model") and self.row_oto_crnn_model is not None:
             try:
                 if show_crnn_model_row:
@@ -1412,6 +1418,8 @@ class LayoutMixin:
                     )
             elif use_sequence:
                 self.aligner_help_label.configure(text=t("(시퀀스 라벨 기반 전용 aligner baseline을 사용합니다.)"))
+            elif use_coarse_crnn:
+                self.aligner_help_label.configure(text=t("(CRNN OTO 직접 예측을 사용합니다. TextGrid 정렬 단계는 건너뜁니다.)"))
             else:
                 self.aligner_help_label.configure(text=t("(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)"))
         if hasattr(self, "pipeline_step_align_btn") and self.pipeline_step_align_btn is not None:
@@ -1452,6 +1460,9 @@ class LayoutMixin:
                 if use_sequence:
                     self.align_step_title_label.configure(text=t("2. 음성 정렬 (전용 시퀀스)"))
                     self.align_step_desc_label.configure(text=t("frame-hop 시퀀스 라벨 기반으로 TextGrid를 생성합니다. 실패 시 MFA fallback을 사용합니다."))
+                elif use_coarse_crnn:
+                    self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (CRNN OTO)"))
+                    self.align_step_desc_label.configure(text=t("OTO 생성 단계에서 CRNN 직접 예측 모델로 oto.ini를 생성합니다."))
                 else:
                     self.align_step_title_label.configure(text=t("2. 음성 정렬"))
                     self.align_step_desc_label.configure(text=t("MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다."))

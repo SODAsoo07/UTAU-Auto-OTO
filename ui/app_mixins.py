@@ -3623,8 +3623,9 @@ class ConfigMixin:
                 except Exception:
                     saved_aligner = "mfa"
                 aligner_label_map = {
-                    "none": "No-MFA",
+                    "none": "MFA",
                     "sequence": "전용(시퀀스)",
+                    "coarse_crnn": "CRNN(실험적)",
                     "mfa": "MFA",
                 }
                 self.aligner_var.set(aligner_label_map.get(saved_aligner, "MFA"))
