@@ -1,8 +1,9 @@
 import argparse
 import os
 import sys
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = str(Path(__file__).resolve().parents[3])
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 

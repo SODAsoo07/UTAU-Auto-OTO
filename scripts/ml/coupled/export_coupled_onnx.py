@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-APP_DIR = str(Path(__file__).resolve().parents[1])
+APP_DIR = str(Path(__file__).resolve().parents[3])
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
