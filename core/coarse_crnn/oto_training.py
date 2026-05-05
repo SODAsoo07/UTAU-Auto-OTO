@@ -70,16 +70,37 @@ class OtoTrainConfig:
     balanced_sampling_replacement: bool = True
     balanced_sampling_size_factor: float = 1.0
     voicebank_balance_power: float = 0.55
-    role_balance_power: float = 0.35
-    format_balance_power: float = 0.20
+    # Keep role upweighting, but avoid drowning out format identity on OOD banks.
+    role_balance_power: float = 0.30
+    format_balance_power: float = 0.35
     enable_hard_case_mining: bool = True
     hard_case_top_ratio: float = 0.25
     hard_case_boost: float = 2.5
     early_stop_patience: int = 0
-    selection_val_loss_weight: float = 1.0
+    # OOD-first model selection: prioritize worst voicebank and hard-failure tail
+    # over raw val_loss.
+    selection_val_loss_weight: float = 0.15
+    selection_anchor_mae_weight: float = 0.90
+    selection_preutterance_gap_weight: float = 2.0
     selection_hard_failure_weight: float = 2.5
     selection_worst_voicebank_weight: float = 1.5
+    selection_worst_voicebank_hard_failure_weight: float = 2.0
+    selection_preutterance_target_acc50: float = 0.55
     selection_worst_voicebank_target_acc50: float = 0.50
+    # Data-quality filter for strong leading-silence / weak-activity OOD cases.
+    enable_activity_quality_filter: bool = True
+    activity_leading_silence_max_ratio: float = 0.42
+    activity_min_active_span_ratio: float = 0.16
+    activity_quality_outside_penalty: float = 0.35
+    activity_quality_min_multiplier: float = 0.10
+    activity_quality_drop_low_weight: bool = True
+    activity_quality_drop_threshold: float = 0.08
+    activity_quality_sample_rate: int = 16000
+    # Confidence calibration derived from validation predictions.
+    enable_confidence_calibration: bool = True
+    confidence_calibration_good_error_ms: float = 50.0
+    confidence_calibration_low_conf_target: float = 0.58
+    confidence_calibration_error_gate_ms: float = 80.0
     checkpoint_save_every_epochs: int = 0
 
 
@@ -286,6 +307,12 @@ def train_oto_from_manifest(
     fixed_val_rows = [row for row in (val_rows or []) if str(row.get("audio", "") or "")]
     cfg = train_config or OtoTrainConfig()
     model_cfg = model_config or OtoCrnnConfig()
+    if bool(getattr(cfg, "enable_activity_quality_filter", True)):
+        data = _apply_activity_quality_filter(data, cfg, stage_label="train")
+        if fixed_val_rows:
+            fixed_val_rows = _apply_activity_quality_filter(fixed_val_rows, cfg, stage_label="val")
+        if not data:
+            raise ValueError("OTO manifest has no rows after activity-quality filter")
     random.seed(int(cfg.seed))
     np.random.seed(int(cfg.seed))
     torch.manual_seed(int(cfg.seed))
@@ -340,6 +367,12 @@ def train_oto_from_manifest(
     best_selection_score = None
     best_state = None
     latest_state = None
+    best_conf_calibration = {
+        "scale": float(getattr(model_cfg, "confidence_calibration_scale", 1.0) or 1.0),
+        "bias": float(getattr(model_cfg, "confidence_calibration_bias", 0.0) or 0.0),
+        "low_threshold": float(getattr(model_cfg, "confidence_low_threshold", 0.58) or 0.58),
+        "error_threshold_ms": float(getattr(model_cfg, "predicted_error_low_threshold_ms", 80.0) or 80.0),
+    }
     stagnant_epochs = 0
     for epoch in range(1, int(cfg.epochs) + 1):
         train_loader = _build_train_loader(
@@ -444,6 +477,16 @@ def train_oto_from_manifest(
                 best_selection_score = selection_score
                 best_val = val_loss
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                best_conf_calibration = {
+                    "scale": float(val_metrics.get("val_conf_calibration_scale", best_conf_calibration["scale"])),
+                    "bias": float(val_metrics.get("val_conf_calibration_bias", best_conf_calibration["bias"])),
+                    "low_threshold": float(
+                        val_metrics.get("val_confidence_low_threshold", best_conf_calibration["low_threshold"])
+                    ),
+                    "error_threshold_ms": float(
+                        val_metrics.get("val_predicted_error_low_threshold_ms", best_conf_calibration["error_threshold_ms"])
+                    ),
+                }
                 stagnant_epochs = 0
             else:
                 stagnant_epochs += 1
@@ -466,6 +509,7 @@ def train_oto_from_manifest(
                     "amp": bool(use_amp),
                     "best_val_loss": best_val,
                     "best_selection_score": best_selection_score,
+                    "best_confidence_calibration": dict(best_conf_calibration),
                     "checkpoint_type": "periodic_epoch",
                     "epoch": int(epoch),
                 },
@@ -482,6 +526,10 @@ def train_oto_from_manifest(
         model.load_state_dict(best_state)
     elif latest_state is not None:
         model.load_state_dict(latest_state)
+    model_cfg.confidence_calibration_scale = float(best_conf_calibration["scale"])
+    model_cfg.confidence_calibration_bias = float(best_conf_calibration["bias"])
+    model_cfg.confidence_low_threshold = float(best_conf_calibration["low_threshold"])
+    model_cfg.predicted_error_low_threshold_ms = float(best_conf_calibration["error_threshold_ms"])
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     save_oto_checkpoint(
         output_path,
@@ -496,6 +544,7 @@ def train_oto_from_manifest(
             "amp": bool(use_amp),
             "best_val_loss": best_val,
             "best_selection_score": best_selection_score,
+            "best_confidence_calibration": dict(best_conf_calibration),
         },
     )
     return {
@@ -519,6 +568,7 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
     voicebank_pre_errors: dict[int, list[float]] = defaultdict(list)
     voicebank_hard_counts: dict[int, int] = defaultdict(int)
     voicebank_counts: dict[int, int] = defaultdict(int)
+    confidence_raw_all: list[float] = []
     with torch.no_grad():
         for batch in loader:
             (
@@ -590,6 +640,13 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
                 pre_errors = np.abs(pred_anchors[:, 2] - target_anchors[:, 2]).tolist()
                 pre_errors_all.extend(float(v) for v in pre_errors)
                 hard_flags = _hard_failure_flags_from_anchors(pred_anchors, duration_ms.detach().cpu().numpy())
+            confidence_raw_all.extend(
+                _confidence_raw_scores(
+                    outputs=outputs,
+                    duration_ms_np=duration_ms.detach().cpu().numpy(),
+                    error_scale_ms=float(getattr(model_cfg, "confidence_error_scale_ms", 75.0) or 75.0),
+                )
+            )
             vb_arr = voicebank_ids.detach().cpu().numpy()
             for i, vb in enumerate(vb_arr.tolist()):
                 vb_i = int(vb)
@@ -605,6 +662,11 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
     pre_acc50 = _hit_rate_np(pre_errors_all, 50.0)
     worst_vb_acc50 = _worst_voicebank_acc50(voicebank_pre_errors)
     worst_vb_hard_failure = _worst_voicebank_hard_failure_rate(voicebank_hard_counts, voicebank_counts)
+    conf_cal = _derive_confidence_calibration(
+        confidence_raw=confidence_raw_all,
+        pre_errors_ms=pre_errors_all,
+        cfg=cfg,
+    )
     return {
         "val_loss": float(loss_sum / max(1, row_sum)),
         "val_anchor_mae_ms": float(sum(mae_values) / max(1, len(mae_values))),
@@ -612,6 +674,12 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
         "val_hard_failure_rate": float(hard_failure_count) / float(max(1, row_sum)),
         "val_worst_voicebank_preutterance_acc_50ms": float(worst_vb_acc50),
         "val_worst_voicebank_hard_failure_rate": float(worst_vb_hard_failure),
+        "val_conf_calibration_scale": float(conf_cal["scale"]),
+        "val_conf_calibration_bias": float(conf_cal["bias"]),
+        "val_confidence_low_threshold": float(conf_cal["low_threshold"]),
+        "val_predicted_error_low_threshold_ms": float(conf_cal["error_threshold_ms"]),
+        "val_conf_good_mean": float(conf_cal["good_mean"]),
+        "val_conf_bad_mean": float(conf_cal["bad_mean"]),
     }
 
 
@@ -1037,16 +1105,97 @@ def _build_hard_case_boosts(*, size: int, score_by_index: dict[int, float], top_
 
 
 def _selection_score(val_metrics: dict[str, float], cfg: OtoTrainConfig) -> float:
-    val_loss = float(val_metrics.get("val_loss", 0.0) or 0.0)
+    val_loss = max(0.0, float(val_metrics.get("val_loss", 0.0) or 0.0))
+    val_anchor_mae = max(0.0, float(val_metrics.get("val_anchor_mae_ms", 0.0) or 0.0))
+    pre_acc = float(val_metrics.get("val_preutterance_acc_50ms", 0.0) or 0.0)
     hard_fail = float(val_metrics.get("val_hard_failure_rate", 0.0) or 0.0)
     worst_acc = float(val_metrics.get("val_worst_voicebank_preutterance_acc_50ms", 0.0) or 0.0)
+    worst_hard_fail = float(val_metrics.get("val_worst_voicebank_hard_failure_rate", 0.0) or 0.0)
     target_acc = float(getattr(cfg, "selection_worst_voicebank_target_acc50", 0.50))
+    target_pre_acc = float(getattr(cfg, "selection_preutterance_target_acc50", 0.55))
     acc_gap = max(0.0, target_acc - worst_acc)
+    pre_gap = max(0.0, target_pre_acc - pre_acc)
     return (
         val_loss * float(getattr(cfg, "selection_val_loss_weight", 1.0))
+        + (val_anchor_mae / 1000.0) * float(getattr(cfg, "selection_anchor_mae_weight", 0.0))
         + hard_fail * float(getattr(cfg, "selection_hard_failure_weight", 2.5))
         + acc_gap * float(getattr(cfg, "selection_worst_voicebank_weight", 1.5))
+        + worst_hard_fail * float(getattr(cfg, "selection_worst_voicebank_hard_failure_weight", 0.0))
+        + pre_gap * float(getattr(cfg, "selection_preutterance_gap_weight", 0.0))
     )
+
+
+def _confidence_raw_scores(*, outputs, duration_ms_np: np.ndarray, error_scale_ms: float) -> list[float]:
+    torch = __import__("torch")
+    heat_probs = torch.sigmoid(outputs["heatmap_logits"]).detach()
+    # Per-anchor peak confidence across time, then averaged.
+    heat_anchor_peak = torch.amax(heat_probs, dim=1)
+    heat_conf = heat_anchor_peak.mean(dim=1).detach().cpu().numpy().astype(np.float32)
+    conf_logits = outputs.get("confidence_logits")
+    if conf_logits is not None:
+        conf_head = torch.sigmoid(conf_logits).detach().cpu().numpy().astype(np.float32)
+    else:
+        conf_head = np.zeros((heat_conf.shape[0],), dtype=np.float32)
+    scalar_logvar = outputs.get("scalar_logvar")
+    if scalar_logvar is not None:
+        std = np.sqrt(np.exp(scalar_logvar.detach().cpu().numpy().astype(np.float32)))
+        pred_err_ms = std.mean(axis=1) * np.maximum(duration_ms_np.astype(np.float32), 1.0)
+        uncertainty = np.exp(-pred_err_ms / max(1.0, float(error_scale_ms)))
+        raw = (heat_conf * 0.30) + (conf_head * 0.35) + (uncertainty * 0.35)
+    else:
+        raw = (heat_conf * 0.55) + (conf_head * 0.45)
+    return [float(np.clip(v, 0.0, 1.0)) for v in raw.tolist()]
+
+
+def _derive_confidence_calibration(
+    *,
+    confidence_raw: list[float],
+    pre_errors_ms: list[float],
+    cfg: OtoTrainConfig,
+) -> dict[str, float]:
+    target_thr = float(getattr(cfg, "confidence_calibration_low_conf_target", 0.58))
+    err_gate = float(getattr(cfg, "confidence_calibration_error_gate_ms", 80.0))
+    good_err = float(getattr(cfg, "confidence_calibration_good_error_ms", 50.0))
+    out = {
+        "scale": 1.0,
+        "bias": 0.0,
+        "low_threshold": target_thr,
+        "error_threshold_ms": err_gate,
+        "good_mean": 0.0,
+        "bad_mean": 0.0,
+    }
+    if (
+        not bool(getattr(cfg, "enable_confidence_calibration", True))
+        or len(confidence_raw) <= 24
+        or len(confidence_raw) != len(pre_errors_ms)
+    ):
+        return out
+    conf = np.asarray(confidence_raw, dtype=np.float32)
+    errs = np.asarray(pre_errors_ms, dtype=np.float32)
+    good_mask = errs <= float(good_err)
+    bad_mask = np.logical_not(good_mask)
+    if int(np.sum(good_mask)) < 20 or int(np.sum(bad_mask)) < 20:
+        return out
+    good_conf = conf[good_mask]
+    bad_conf = conf[bad_mask]
+    mu_good = float(np.mean(good_conf))
+    mu_bad = float(np.mean(bad_conf))
+    out["good_mean"] = mu_good
+    out["bad_mean"] = mu_bad
+    sep = max(0.02, mu_good - mu_bad)
+    scale = _clamp(0.50 / sep, 0.50, 3.00)
+    mid = (mu_good + mu_bad) * 0.5
+    bias = target_thr - (scale * mid)
+    cal_conf = np.clip((conf * scale) + bias, 0.0, 1.0)
+    high_err_conf = cal_conf[errs >= float(err_gate)]
+    low_thr = float(target_thr)
+    if high_err_conf.size >= 20:
+        low_thr = float(np.quantile(high_err_conf, 0.80))
+        low_thr = _clamp(low_thr, max(0.40, target_thr), 0.88)
+    out["scale"] = float(scale)
+    out["bias"] = float(bias)
+    out["low_threshold"] = float(low_thr)
+    return out
 
 
 def _relative_anchor_predictions(
@@ -1142,6 +1291,181 @@ def _worst_voicebank_hard_failure_rate(voicebank_hard_counts: dict[int, int], vo
         rate = float(voicebank_hard_counts.get(vb, 0)) / float(denom)
         worst = max(worst, rate)
     return float(worst)
+
+
+def _apply_activity_quality_filter(rows: list[dict[str, Any]], cfg: OtoTrainConfig, *, stage_label: str) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    cache: dict[str, dict[str, float]] = {}
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    weakened = 0
+    for row in rows:
+        row2 = dict(row)
+        weight_mult = _row_activity_quality_multiplier(row2, cfg, cache)
+        base_weight = float(row2.get("sample_weight", row2.get("weight", 1.0)) or 1.0)
+        new_weight = max(0.01, base_weight * float(weight_mult))
+        row2["sample_weight"] = float(new_weight)
+        if new_weight < base_weight - 1e-6:
+            weakened += 1
+        if bool(getattr(cfg, "activity_quality_drop_low_weight", True)) and new_weight < float(
+            getattr(cfg, "activity_quality_drop_threshold", 0.08)
+        ):
+            dropped += 1
+            continue
+        kept.append(row2)
+    print(
+        f"[oto_anchor][data] {stage_label}: rows={len(rows)} kept={len(kept)} dropped={dropped} "
+        f"reweighted={weakened}",
+        flush=True,
+    )
+    return kept
+
+
+def _row_activity_quality_multiplier(
+    row: dict[str, Any],
+    cfg: OtoTrainConfig,
+    cache: dict[str, dict[str, float]],
+) -> float:
+    wav_path = str(row.get("audio", "") or "")
+    if not wav_path:
+        return 1.0
+    profile = _activity_profile_for_wav(
+        wav_path,
+        sample_rate=int(getattr(cfg, "activity_quality_sample_rate", 16000)),
+        cache=cache,
+    )
+    if not profile:
+        return 1.0
+    duration = max(
+        1.0,
+        float(row.get("duration_ms", 0.0) or 0.0),
+        float(profile.get("duration_ms", 0.0) or 0.0),
+    )
+    active_start = _clamp(float(profile.get("active_start_ms", 0.0) or 0.0), 0.0, duration)
+    active_end = _clamp(float(profile.get("active_end_ms", duration) or duration), active_start, duration)
+    lead_ratio = active_start / duration
+    span_ratio = max(0.0, active_end - active_start) / duration
+    mult = 1.0
+    max_lead = float(getattr(cfg, "activity_leading_silence_max_ratio", 0.42))
+    if lead_ratio > max_lead:
+        tail = max(1e-4, 1.0 - max_lead)
+        excess = min(1.0, (lead_ratio - max_lead) / tail)
+        mult *= (1.0 - (0.70 * excess))
+    min_span = float(getattr(cfg, "activity_min_active_span_ratio", 0.16))
+    if span_ratio < min_span:
+        mult *= max(0.10, span_ratio / max(min_span, 1e-4))
+    # Penalize rows whose anchor midpoint lands outside the sustained active zone.
+    pre = float(row.get("anchor_preutterance_ms", row.get("target_preutterance_ms", 0.0)) or 0.0)
+    cons = float(row.get("anchor_consonant_ms", row.get("target_consonant_ms", 0.0)) or 0.0)
+    offset = float(row.get("anchor_offset_ms", row.get("target_offset_ms", 0.0)) or 0.0)
+    cutoff = float(row.get("anchor_cutoff_ms", row.get("target_cutoff_abs_ms", 0.0)) or 0.0)
+    mid = (pre + cons) * 0.5
+    outside = bool(
+        mid < (active_start - 100.0)
+        or mid > (active_end + 100.0)
+        or cutoff < (active_start - 60.0)
+        or offset > (active_end + 60.0)
+    )
+    if outside:
+        mult *= float(getattr(cfg, "activity_quality_outside_penalty", 0.35))
+    return _clamp(mult, float(getattr(cfg, "activity_quality_min_multiplier", 0.10)), 1.0)
+
+
+def _activity_profile_for_wav(
+    wav_path: str,
+    *,
+    sample_rate: int,
+    cache: dict[str, dict[str, float]],
+) -> dict[str, float]:
+    key = os.path.abspath(str(wav_path or "")).lower()
+    hit = cache.get(key)
+    if hit is not None:
+        return dict(hit)
+    try:
+        samples, sr, duration_sec = load_wav_mono(str(wav_path), target_sr=int(sample_rate))
+    except Exception:
+        cache[key] = {}
+        return {}
+    duration_ms = max(1.0, float(duration_sec) * 1000.0)
+    if samples is None or int(getattr(samples, "shape", [0])[0]) <= 0 or sr <= 0:
+        profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
+        cache[key] = profile
+        return dict(profile)
+    arr = np.asarray(samples, dtype=np.float32)
+    if arr.size <= 0:
+        profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
+        cache[key] = profile
+        return dict(profile)
+    abs_arr = np.abs(arr)
+    peak = float(np.max(abs_arr))
+    if peak <= 1e-7:
+        profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
+        cache[key] = profile
+        return dict(profile)
+    # Breath-robust energy envelope: short frame RMS + minimum run detection.
+    frame = max(80, int(round(float(sr) * 0.008)))
+    hop = max(40, int(round(float(sr) * 0.004)))
+    if arr.size < frame:
+        profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
+        cache[key] = profile
+        return dict(profile)
+    frames = []
+    for start in range(0, int(arr.size) - frame + 1, hop):
+        seg = arr[start : start + frame]
+        frames.append(float(np.sqrt(np.mean(np.square(seg), dtype=np.float32))))
+    env = np.asarray(frames, dtype=np.float32)
+    if env.size <= 0:
+        profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
+        cache[key] = profile
+        return dict(profile)
+    noise = float(np.percentile(env, 35.0))
+    strong = float(np.percentile(env, 92.0))
+    thr = max(noise * 2.8, strong * 0.28, 1e-5)
+    active = env >= thr
+    min_run_frames = max(4, int(round(0.028 / max(float(hop) / float(sr), 1e-5))))
+    active = _enforce_min_run(active, min_run_frames)
+    idx = np.flatnonzero(active)
+    if idx.size <= 0:
+        profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
+        cache[key] = profile
+        return dict(profile)
+    start_ms = (float(idx[0]) * float(hop) / float(sr)) * 1000.0
+    end_ms = ((float(idx[-1]) * float(hop) + float(frame)) / float(sr)) * 1000.0
+    pad_ms = 20.0
+    active_start = _clamp(start_ms - pad_ms, 0.0, duration_ms)
+    active_end = _clamp(end_ms + pad_ms, active_start, duration_ms)
+    if active_end - active_start < 45.0:
+        active_start = 0.0
+        active_end = duration_ms
+    profile = {
+        "active_start_ms": float(active_start),
+        "active_end_ms": float(active_end),
+        "duration_ms": float(duration_ms),
+    }
+    cache[key] = profile
+    return dict(profile)
+
+
+def _enforce_min_run(flags: np.ndarray, min_run_frames: int) -> np.ndarray:
+    arr = np.asarray(flags, dtype=bool).copy()
+    if arr.size <= 0 or int(min_run_frames) <= 1:
+        return arr
+    run_start = None
+    for idx, on in enumerate(arr.tolist() + [False]):
+        if on and run_start is None:
+            run_start = idx
+            continue
+        if (not on) and run_start is not None:
+            run_len = idx - run_start
+            if run_len < int(min_run_frames):
+                arr[run_start:idx] = False
+            run_start = None
+    return arr
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(float(lo), min(float(hi), float(value)))
 
 
 def _feature_cache_path(

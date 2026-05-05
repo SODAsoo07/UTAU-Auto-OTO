@@ -41,6 +41,10 @@ class OtoCrnnConfig:
     uncertainty_min_logvar: float = -6.0
     uncertainty_max_logvar: float = 4.0
     confidence_error_scale_ms: float = 75.0
+    confidence_calibration_scale: float = 1.0
+    confidence_calibration_bias: float = 0.0
+    confidence_low_threshold: float = 0.58
+    predicted_error_low_threshold_ms: float = 80.0
     enable_two_stage_refine: bool = True
     two_stage_refine_window_frames: int = 320
     anchor_names: tuple[str, ...] = tuple(OTO_ANCHOR_NAMES)
@@ -104,6 +108,14 @@ class OtoCrnnConfig:
             data["uncertainty_max_logvar"] = 4.0
         if payload is not None and "confidence_error_scale_ms" not in data:
             data["confidence_error_scale_ms"] = 75.0
+        if payload is not None and "confidence_calibration_scale" not in data:
+            data["confidence_calibration_scale"] = 1.0
+        if payload is not None and "confidence_calibration_bias" not in data:
+            data["confidence_calibration_bias"] = 0.0
+        if payload is not None and "confidence_low_threshold" not in data:
+            data["confidence_low_threshold"] = 0.58
+        if payload is not None and "predicted_error_low_threshold_ms" not in data:
+            data["predicted_error_low_threshold_ms"] = 80.0
         if payload is not None and "enable_two_stage_refine" not in data:
             data["enable_two_stage_refine"] = False
         if payload is not None and "two_stage_refine_window_frames" not in data:

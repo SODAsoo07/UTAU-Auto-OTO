@@ -10,6 +10,7 @@ from core.coarse_crnn.alias_role import classify_alias_role, is_diphthong as _is
 from core.coarse_crnn.audio import load_wav_mono
 from core.coarse_crnn.oto_inference import predict_oto_with_model
 from core.coarse_crnn.oto_model import load_oto_checkpoint
+from core.coarse_crnn.oto_targets import anchors_to_oto_params, oto_params_to_anchors
 from core.coarse_crnn.training import resolve_torch_device
 from core.no_mfa_oto_builder import resolve_no_mfa_source_oto
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
@@ -92,6 +93,7 @@ def generate_oto_with_crnn_predictor(
     guard_changed = 0
     low_conf_fallback_count = 0
     activity_fallback_count = 0
+    silence_window_clamp_count = 0
     activity_profile_cache: dict[str, dict[str, float]] = {}
     lang = str(language or "").strip().lower() or "korean"
     suffix = _normalize_alias_suffix(alias_suffix)
@@ -149,6 +151,18 @@ def generate_oto_with_crnn_predictor(
             )
             if activity_reason:
                 activity_fallback_count += 1
+            params, clamp_reason = _apply_silence_window_clamp(
+                predicted_params=params,
+                wav_path=row.wav_abs,
+                sample_rate=16000,
+                cache=activity_profile_cache,
+                duration_ms=float(getattr(pred, "duration_ms", 0.0) or 0.0),
+                language=lang,
+                alias=row.alias,
+                is_special=row.is_special,
+            )
+            if clamp_reason:
+                silence_window_clamp_count += 1
             guard_changed += 1 if changed else 0
             out_lines.append(
                 f"{row.wav_rel}={alias},"
@@ -185,6 +199,8 @@ def generate_oto_with_crnn_predictor(
         _log(callback, f"[OTO-CRNN] low-confidence fallback rows={low_conf_fallback_count}/{len(out_lines)}")
     if activity_fallback_count:
         _log(callback, f"[OTO-CRNN] activity-window fallback rows={activity_fallback_count}/{len(out_lines)}")
+    if silence_window_clamp_count:
+        _log(callback, f"[OTO-CRNN] silence-window clamp rows={silence_window_clamp_count}/{len(out_lines)}")
     _log(callback, f"[OTO-CRNN] written={len(out_lines)} total={total}")
     return len(out_lines), total, []
 
@@ -594,6 +610,72 @@ def _apply_activity_window_fallback(
     return {key: float(value) for key, value in dict(base_params).items()}, "activity_outlier"
 
 
+def _apply_silence_window_clamp(
+    *,
+    predicted_params: dict[str, float],
+    wav_path: str,
+    sample_rate: int,
+    cache: dict[str, dict[str, float]],
+    duration_ms: float,
+    language: str,
+    alias: str,
+    is_special: bool,
+) -> tuple[dict[str, float], str]:
+    if not _env_bool("UTOA_OTO_CRNN_SILENCE_CLAMP_ENABLE", True):
+        return dict(predicted_params), ""
+    profile = _analyze_activity_profile(wav_path, sample_rate=sample_rate, cache=cache)
+    if not profile:
+        return dict(predicted_params), ""
+    active_start = float(profile.get("active_start_ms", 0.0) or 0.0)
+    active_end = float(profile.get("active_end_ms", 0.0) or 0.0)
+    total_ms = max(1.0, float(duration_ms) or float(profile.get("duration_ms", 0.0) or 0.0))
+    if active_end <= active_start + 25.0 or total_ms <= 1.0:
+        return dict(predicted_params), ""
+
+    params = {key: float(value) for key, value in dict(predicted_params).items()}
+    anchors = oto_params_to_anchors(
+        offset=params.get("offset", 0.0),
+        consonant=params.get("consonant", 0.0),
+        cutoff=params.get("cutoff", 0.0),
+        preutterance=params.get("preutterance", 0.0),
+        overlap=params.get("overlap", 0.0),
+        duration_ms=total_ms,
+    ).to_dict()
+    if not _is_anchor_outside_activity(anchors, profile):
+        return params, ""
+
+    left_margin = _env_float("UTOA_OTO_CRNN_SILENCE_CLAMP_LEFT_MARGIN_MS", 35.0)
+    right_margin = _env_float("UTOA_OTO_CRNN_SILENCE_CLAMP_RIGHT_MARGIN_MS", 45.0)
+    max_shift = _env_float("UTOA_OTO_CRNN_SILENCE_CLAMP_MAX_SHIFT_MS", 280.0)
+    lo = max(0.0, active_start - max(0.0, left_margin))
+    hi = min(total_ms, active_end + max(0.0, right_margin))
+    if hi <= lo + 30.0:
+        return params, ""
+
+    mid = (float(anchors["preutterance"]) + float(anchors["consonant"])) * 0.5
+    target_mid = _clamp(mid, lo + 12.0, hi - 12.0)
+    shift = _clamp(target_mid - mid, -abs(max_shift), abs(max_shift))
+    if abs(shift) < 1e-3:
+        return params, ""
+
+    shifted = {
+        "offset": float(anchors["offset"]) + shift,
+        "overlap": float(anchors["overlap"]) + shift,
+        "preutterance": float(anchors["preutterance"]) + shift,
+        "consonant": float(anchors["consonant"]) + shift,
+        "cutoff": float(anchors["cutoff"]) + shift,
+    }
+    clamped = anchors_to_oto_params(shifted, duration_ms=total_ms)
+    guarded, _ = _apply_conservative_right_boundary_guard(
+        clamped,
+        language=language,
+        alias=alias,
+        duration_ms=total_ms,
+        is_special=is_special,
+    )
+    return guarded, "silence_window_clamp"
+
+
 def _analyze_activity_profile(
     wav_path: str,
     *,
@@ -613,25 +695,42 @@ def _analyze_activity_profile(
         profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
         cache[key] = profile
         return dict(profile)
-    abs_samples = np.abs(np.asarray(samples, dtype=np.float32))
+    arr = np.asarray(samples, dtype=np.float32)
+    abs_samples = np.abs(arr)
     peak = float(np.max(abs_samples)) if abs_samples.size else 0.0
     if peak <= 1e-6:
         profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
         cache[key] = profile
         return dict(profile)
-    noise_floor = float(np.percentile(abs_samples, 60.0)) if abs_samples.size else 0.0
-    threshold = max(peak * 0.08, noise_floor * 2.2, 1e-4)
-    active_idx = np.flatnonzero(abs_samples >= threshold)
-    if active_idx.size < 8:
-        threshold = max(peak * 0.04, 1e-5)
-        active_idx = np.flatnonzero(abs_samples >= threshold)
+    frame = max(80, int(round(float(sr) * 0.008)))
+    hop = max(40, int(round(float(sr) * 0.004)))
+    if arr.size < frame:
+        profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
+        cache[key] = profile
+        return dict(profile)
+    frames = []
+    for start in range(0, int(arr.size) - frame + 1, hop):
+        seg = arr[start : start + frame]
+        frames.append(float(np.sqrt(np.mean(np.square(seg), dtype=np.float32))))
+    env = np.asarray(frames, dtype=np.float32)
+    if env.size <= 0:
+        profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
+        cache[key] = profile
+        return dict(profile)
+    noise_floor = float(np.percentile(env, 35.0))
+    strong_floor = float(np.percentile(env, 92.0))
+    threshold = max(noise_floor * 2.8, strong_floor * 0.28, 1e-5)
+    active_frames = env >= threshold
+    min_run_frames = max(4, int(round(0.028 / max(float(hop) / float(sr), 1e-5))))
+    active_frames = _enforce_min_run(active_frames, min_run_frames)
+    active_idx = np.flatnonzero(active_frames)
     if active_idx.size <= 0:
         profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
         cache[key] = profile
         return dict(profile)
-    start_ms = (float(active_idx[0]) / float(sr)) * 1000.0
-    end_ms = (float(active_idx[-1]) / float(sr)) * 1000.0
-    pad_ms = 25.0
+    start_ms = (float(active_idx[0]) * float(hop) / float(sr)) * 1000.0
+    end_ms = ((float(active_idx[-1]) * float(hop) + float(frame)) / float(sr)) * 1000.0
+    pad_ms = 20.0
     active_start = max(0.0, start_ms - pad_ms)
     active_end = min(duration_ms, end_ms + pad_ms)
     if active_end - active_start < 40.0:
@@ -644,6 +743,23 @@ def _analyze_activity_profile(
     }
     cache[key] = profile
     return dict(profile)
+
+
+def _enforce_min_run(flags: np.ndarray, min_run_frames: int) -> np.ndarray:
+    arr = np.asarray(flags, dtype=bool).copy()
+    if arr.size <= 0 or int(min_run_frames) <= 1:
+        return arr
+    run_start = None
+    for idx, on in enumerate(arr.tolist() + [False]):
+        if on and run_start is None:
+            run_start = idx
+            continue
+        if (not on) and run_start is not None:
+            run_len = idx - run_start
+            if run_len < int(min_run_frames):
+                arr[run_start:idx] = False
+            run_start = None
+    return arr
 
 
 def _is_anchor_outside_activity(predicted_anchors: dict[str, float], profile: dict[str, float]) -> bool:

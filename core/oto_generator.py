@@ -114,7 +114,12 @@ from core.kr_oto_file_ops import (
     train_kr_autotune_profile,
 )
 from core.kr_oto_file_finalize import KrPostFilePipelineContext, run_kr_post_file_pipeline
-from core.kr_generator_setup import prepare_kr_profile_setup
+from core.kr_generator_setup import (
+    build_kr_textgrid_preparation,
+    build_wav_index as _build_wav_index_for_generation,
+    iter_textgrid_files as _iter_textgrid_files_for_generation,
+    prepare_kr_profile_setup,
+)
 from core.generator_finish import (
     GeneratorFinishContext,
     finalize_generator_finish,
@@ -562,26 +567,11 @@ def normalize_key(name):
 
 
 def _iter_textgrid_files(tg_folder):
-    if not tg_folder or not os.path.exists(tg_folder):
-        return
-    for dirpath, _dirnames, filenames in os.walk(tg_folder):
-        for f_name in filenames:
-            if f_name.lower().endswith(".textgrid"):
-                yield dirpath, f_name
+    yield from _iter_textgrid_files_for_generation(tg_folder)
 
 
 def _build_wav_index(wav_root):
-    wav_index = {}
-    if not wav_root or not os.path.isdir(wav_root):
-        return wav_index
-    try:
-        for dirpath, _dirnames, filenames in os.walk(wav_root):
-            for fn in filenames:
-                if fn.lower().endswith(".wav"):
-                    wav_index.setdefault(normalize_key(fn), os.path.join(dirpath, fn))
-    except Exception:
-        return {}
-    return wav_index
+    return _build_wav_index_for_generation(wav_root, normalize_key_fn=normalize_key)
 
 
 def _resolve_real_wav_name_for_textgrid(textgrid_name, wav_root, wav_index):
@@ -5374,62 +5364,15 @@ def generate_oto(
     wav_root_for_signal = os.path.dirname(os.path.abspath(tg_folder.rstrip("\\/")))
     wav_index_for_signal = _build_wav_index(wav_root_for_signal)
 
-    tg_entries = []
-    tg_exact_map = {}
-    tg_norm_map = {}
-    if os.path.exists(tg_folder):
-        for dirpath, f_name in _iter_textgrid_files(tg_folder):
-            base = os.path.splitext(f_name)[0]
-            output_wav_name = _resolve_real_wav_name_for_textgrid(
-                f_name,
-                wav_root_for_signal,
-                wav_index_for_signal,
-            )
-            info = {
-                'path': os.path.join(dirpath, f_name),
-                'real_name': base + '.wav',
-                'output_name': output_wav_name,
-                'base_lower': base.lower(),
-                'norm_key': normalize_key(f_name),
-            }
-            tg_entries.append(info)
-            if info['base_lower'] not in tg_exact_map:
-                tg_exact_map[info['base_lower']] = info
-            tg_norm_map.setdefault(info['norm_key'], []).append(info)
-
-    def _resolve_tg_info(fname):
-        wav_name = os.path.basename((fname or '').strip())
-        base_lower = os.path.splitext(wav_name)[0].lower()
-        if base_lower in tg_exact_map:
-            return tg_exact_map[base_lower]
-
-        norm_name = normalize_key(wav_name)
-        candidates = tg_norm_map.get(norm_name, [])
-        if len(candidates) == 1:
-            return candidates[0]
-        if len(candidates) > 1:
-            exact_name = wav_name.lower()
-            same_name = [c for c in candidates if c['real_name'].lower() == exact_name]
-            if len(same_name) == 1:
-                return same_name[0]
-            log(f"甯護攵・・・､﨑・・ｩ・・ {wav_name} (・母ｷ懦剩 墲､ {norm_name}, 弡・ｳｴ {len(candidates)}・・ -> ・尖ｳｸ 甯護攵・・揆 ・・﨑ｩ・壱共.")
-            return None
-        return None
-
-    def _template_match_stats(lines):
-        file_names = set()
-        for line in (lines or []):
-            if "=" not in line:
-                continue
-            file_names.add(line.split("=", 1)[0].strip())
-        total = len(file_names)
-        if total == 0:
-            return 0, 0, 0.0
-        matched = 0
-        for fname in file_names:
-            if _resolve_tg_info(fname):
-                matched += 1
-        return matched, total, (matched / float(total))
+    kr_tg_setup = build_kr_textgrid_preparation(
+        tg_folder=tg_folder,
+        wav_root_for_signal=wav_root_for_signal,
+        wav_index_for_signal=wav_index_for_signal,
+        normalize_key_fn=normalize_key,
+        find_wav_path_fn=_find_wav_path_for_name,
+        log_fn=log,
+    )
+    tg_entries = kr_tg_setup.tg_entries
 
     final_lines = []
     wav_name_map = {}
@@ -5448,7 +5391,7 @@ def generate_oto(
 
     use_template = bool(template_lines)
     if use_template:
-        t_match, t_total, t_ratio = _template_match_stats(template_lines)
+        t_match, t_total, t_ratio = kr_tg_setup.template_match_stats(template_lines)
         if t_total == 0 or t_match == 0 or t_ratio < 0.25:
             log(
                 f"[WARN] 템플릿-TextGrid 매칭률 낮음 ({t_match}/{t_total}, {t_ratio:.1%}) "
@@ -5594,7 +5537,7 @@ def generate_oto(
             lines=lines,
             prepare_file_context_fn=prepare_file_context,
             prepare_kwargs={
-                "resolve_tg_info_fn": _resolve_tg_info,
+                "resolve_tg_info_fn": kr_tg_setup.resolve_tg_info,
                 "wav_root_for_signal": wav_root_for_signal,
                 "wav_index_for_signal": wav_index_for_signal,
                 "mel_cache_for_signal": mel_cache_for_signal,
