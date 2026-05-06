@@ -134,6 +134,7 @@ def evaluate_oto_manifest(rows: list[dict[str, Any]], config: OtoEvalConfig) -> 
         "by_voicebank": _aggregate_by(files, "voicebank_id"),
         "by_alias_context": _aggregate_by_alias_context(files),
         "by_alias_role": _aggregate_by_alias_role(files),
+        "by_language_format_role": _aggregate_by_language_format_role(files),
         "worst_voicebank": _worst_voicebank_summary(files),
         "failures": failures[:20],
         "files": files,
@@ -355,6 +356,51 @@ def _aggregate_by_alias_role(files: list[dict[str, Any]]) -> dict[str, Any]:
             "consonant_mae_ms": _mean([float(row["param_abs_errors_ms"]["consonant"]) for row in rows]),
             "cutoff_abs_mae_ms": _mean([float(row["param_abs_errors_ms"]["cutoff_abs"]) for row in rows]),
             "overlap_mae_ms": _mean([float(row["param_abs_errors_ms"]["overlap"]) for row in rows]),
+        }
+    return out
+
+
+def _aggregate_by_language_format_role(files: list[dict[str, Any]]) -> dict[str, Any]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in files:
+        key = "|".join(
+            [
+                str(row.get("language", "") or "unknown"),
+                str(row.get("format_type", "") or "unknown"),
+                str(row.get("alias_role", "") or "other"),
+            ]
+        )
+        groups.setdefault(key, []).append(row)
+    out: dict[str, Any] = {}
+    for group, rows in sorted(groups.items()):
+        language, format_type, alias_role = group.split("|", 2)
+        pre_errors = [float(row["param_abs_errors_ms"]["preutterance"]) for row in rows]
+        out[group] = {
+            "files": len(rows),
+            "language": language,
+            "format_type": format_type,
+            "alias_role": alias_role,
+            "preutterance_mae_ms": _mean(pre_errors),
+            "preutterance_acc_50ms": _hit_rate(pre_errors, 50.0),
+            "offset_mae_ms": _mean([float(row["param_abs_errors_ms"]["offset"]) for row in rows]),
+            "consonant_mae_ms": _mean([float(row["param_abs_errors_ms"]["consonant"]) for row in rows]),
+            "cutoff_abs_mae_ms": _mean([float(row["param_abs_errors_ms"]["cutoff_abs"]) for row in rows]),
+            "overlap_mae_ms": _mean([float(row["param_abs_errors_ms"]["overlap"]) for row in rows]),
+            "hard_failure_rate": (
+                float(sum(1 for row in rows if bool(row.get("hard_failure", False)))) / float(len(rows))
+                if rows
+                else None
+            ),
+            "fn_voiced_miss_rate": (
+                float(sum(1 for row in rows if bool(row.get("fn_voiced_miss", False)))) / float(len(rows))
+                if rows
+                else None
+            ),
+            "syllable_shift_rate": (
+                float(sum(1 for row in rows if bool(row.get("syllable_shift_flag", False)))) / float(len(rows))
+                if rows
+                else None
+            ),
         }
     return out
 

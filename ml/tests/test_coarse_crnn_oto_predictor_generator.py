@@ -159,3 +159,213 @@ def test_normalize_special_aliases_handles_iterables():
     assert _alias_is_special("Tt", special)
     assert not _alias_is_special("a k", special)
     assert not _alias_is_special("", special)
+
+
+def test_korean_cvvc_role_fallback_blends_vc_toward_base(monkeypatch):
+    from core.coarse_crnn import oto_predictor_generator as gen
+
+    monkeypatch.setenv("UTOA_OTO_CRNN_KR_CVVC_ROLE_BASE_WEIGHT_VC", "0.80")
+    monkeypatch.setattr(
+        gen,
+        "_analyze_activity_profile",
+        lambda *_args, **_kwargs: {
+            "active_start_ms": 80.0,
+            "active_end_ms": 360.0,
+            "active_core_start_ms": 120.0,
+            "active_core_end_ms": 300.0,
+            "duration_ms": 1000.0,
+        },
+    )
+    predicted = {
+        "offset": 100.0,
+        "consonant": 830.0,
+        "cutoff": -880.0,
+        "preutterance": 820.0,
+        "overlap": 790.0,
+    }
+    base = {
+        "offset": 720.0,
+        "consonant": 130.0,
+        "cutoff": -260.0,
+        "preutterance": 115.0,
+        "overlap": 80.0,
+    }
+
+    out, reason = gen._apply_korean_cvvc_role_fallback(
+        predicted_anchors={
+            "offset": 100.0,
+            "preutterance": 920.0,
+            "consonant": 930.0,
+            "cutoff": 980.0,
+        },
+        predicted_params=predicted,
+        base_params=base,
+        wav_path="dummy.wav",
+        sample_rate=16000,
+        cache={},
+        voicebank_profile={},
+        predicted_confidence=0.9,
+        predicted_error_ms=None,
+        predicted_low_confidence=False,
+        language="korean",
+        format_type="cvvc",
+        alias="a k",
+        duration_ms=1000.0,
+        is_special=False,
+    )
+
+    assert "korean_cvvc_vc_role" in reason
+    assert "syllable_shift_guard" in reason
+    assert out["offset"] == predicted["offset"]
+    assert out["preutterance"] < predicted["preutterance"]
+    assert out["consonant"] < predicted["consonant"]
+    assert out["offset"] != base["offset"]
+
+
+def test_korean_cvvc_role_fallback_rejects_unusable_source_shape(monkeypatch):
+    from core.coarse_crnn import oto_predictor_generator as gen
+
+    monkeypatch.setattr(
+        gen,
+        "_analyze_activity_profile",
+        lambda *_args, **_kwargs: {
+            "active_start_ms": 250.0,
+            "active_end_ms": 520.0,
+            "active_core_start_ms": 300.0,
+            "active_core_end_ms": 470.0,
+            "duration_ms": 1000.0,
+        },
+    )
+    predicted = {
+        "offset": 880.0,
+        "consonant": 910.0,
+        "cutoff": -90.0,
+        "preutterance": 900.0,
+        "overlap": 850.0,
+    }
+    source_default = {
+        "offset": 0.0,
+        "consonant": 8.0,
+        "cutoff": -15.0,
+        "preutterance": 4.0,
+        "overlap": 1.0,
+    }
+
+    out, reason = gen._apply_korean_cvvc_role_fallback(
+        predicted_anchors={
+            "offset": 880.0,
+            "preutterance": 900.0,
+            "consonant": 910.0,
+            "cutoff": 970.0,
+        },
+        predicted_params=predicted,
+        base_params=source_default,
+        wav_path="dummy.wav",
+        sample_rate=16000,
+        cache={},
+        voicebank_profile={},
+        predicted_confidence=0.1,
+        predicted_error_ms=300.0,
+        predicted_low_confidence=True,
+        language="korean",
+        format_type="cvvc",
+        alias="a k",
+        duration_ms=1000.0,
+        is_special=False,
+    )
+
+    assert reason == ""
+    assert out == predicted
+
+
+def test_source_shape_prior_can_keep_model_cutoff(monkeypatch):
+    from core.coarse_crnn.oto_predictor_generator import _blend_with_source_oto_shape
+
+    predicted = {
+        "offset": 100.0,
+        "consonant": 820.0,
+        "cutoff": -900.0,
+        "preutterance": 780.0,
+        "overlap": 760.0,
+    }
+    base = {
+        "offset": 500.0,
+        "consonant": 130.0,
+        "cutoff": -260.0,
+        "preutterance": 115.0,
+        "overlap": 80.0,
+    }
+
+    out = _blend_with_source_oto_shape(
+        predicted_params=predicted,
+        base_params=base,
+        shape_weight=0.80,
+        cutoff_weight=0.0,
+        duration_ms=1000.0,
+    )
+
+    assert out["offset"] == predicted["offset"]
+    assert out["preutterance"] < predicted["preutterance"]
+    assert out["consonant"] < predicted["consonant"]
+    assert abs(abs(out["cutoff"]) - abs(predicted["cutoff"])) <= 1.0
+
+
+def test_korean_cvvc_source_shape_cutoff_factor_is_role_specific(monkeypatch):
+    from core.coarse_crnn.oto_predictor_generator import _source_shape_cutoff_weight
+
+    monkeypatch.setenv("UTOA_OTO_CRNN_KR_CVVC_SOURCE_SHAPE_CUTOFF_FACTOR_V_CV", "0.10")
+
+    weight = _source_shape_cutoff_weight(
+        shape_weight=0.80,
+        language="korean",
+        format_type="cvvc",
+        alias="a k",
+        is_special=False,
+        role="v-cv",
+    )
+
+    assert abs(weight - 0.08) < 1e-9
+
+
+def test_korean_cvvc_role_fallback_ignores_japanese():
+    from core.coarse_crnn.oto_predictor_generator import _apply_korean_cvvc_role_fallback
+
+    predicted = {
+        "offset": 900.0,
+        "consonant": 930.0,
+        "cutoff": -120.0,
+        "preutterance": 920.0,
+        "overlap": 880.0,
+    }
+
+    out, reason = _apply_korean_cvvc_role_fallback(
+        predicted_anchors={
+            "offset": 900.0,
+            "preutterance": 920.0,
+            "consonant": 930.0,
+            "cutoff": 980.0,
+        },
+        predicted_params=predicted,
+        base_params={
+            "offset": 100.0,
+            "consonant": 130.0,
+            "cutoff": -260.0,
+            "preutterance": 115.0,
+            "overlap": 80.0,
+        },
+        wav_path="dummy.wav",
+        sample_rate=16000,
+        cache={},
+        voicebank_profile={},
+        predicted_confidence=0.0,
+        predicted_error_ms=500.0,
+        predicted_low_confidence=True,
+        language="japanese",
+        format_type="cvvc",
+        alias="a k",
+        duration_ms=1000.0,
+        is_special=False,
+    )
+
+    assert reason == ""
+    assert out == predicted

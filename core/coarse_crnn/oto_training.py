@@ -70,13 +70,20 @@ class OtoTrainConfig:
     balanced_sampling_replacement: bool = True
     balanced_sampling_size_factor: float = 1.0
     voicebank_balance_power: float = 0.55
+    # Explicit language balancing is separate from voicebank balancing. This
+    # keeps Korean/Japanese CVVC from being hidden behind voicebank counts.
+    language_balance_power: float = 0.25
     # Keep role upweighting, but avoid drowning out format identity on OOD banks.
     role_balance_power: float = 0.30
     format_balance_power: float = 0.35
+    # Optional slash-pattern boosts: "korean/cvvc/*=1.8,korean/cvvc/vc=2.2".
+    language_format_role_sampling_boosts: tuple[str, ...] = ()
     # Direct sampling boost for sparse/high-error CVVC contexts.
     # `cvvc|vc|*` = cvvc format with vc alias-role or vc alias-type.
     cvvc_vc_sampling_boost: float = 1.0
     cvvc_vv_sampling_boost: float = 1.0
+    # Extra narrow boost: only cvvc|vc|multi rows.
+    cvvc_vc_multi_sampling_boost: float = 1.0
     enable_hard_case_mining: bool = True
     hard_case_top_ratio: float = 0.25
     hard_case_boost: float = 2.5
@@ -304,6 +311,7 @@ def train_oto_from_manifest(
     train_config: OtoTrainConfig | None = None,
     model_config: OtoCrnnConfig | None = None,
     init_state_dict: dict[str, Any] | None = None,
+    init_state_strict: bool = True,
     init_tag: str = "",
 ) -> dict[str, Any]:
     torch = __import__("torch")
@@ -367,12 +375,36 @@ def train_oto_from_manifest(
     use_amp = bool(cfg.amp and device.type == "cuda")
     scaler = _make_grad_scaler(torch, enabled=use_amp)
     model = build_oto_model(model_cfg).to(device)
+    init_load_summary: dict[str, Any] = {}
     if init_state_dict:
-        model.load_state_dict(init_state_dict, strict=True)
-        if str(init_tag or "").strip():
-            print(f"[oto_anchor][train] loaded init_state from {init_tag}", flush=True)
+        if bool(init_state_strict):
+            model.load_state_dict(init_state_dict, strict=True)
+            init_load_summary = {
+                "strategy": "strict",
+                "loaded": int(len(init_state_dict)),
+                "skipped": 0,
+            }
         else:
-            print("[oto_anchor][train] loaded init_state", flush=True)
+            compatible_state, init_load_summary = _filter_compatible_init_state(init_state_dict, model.state_dict())
+            missing, unexpected = model.load_state_dict(compatible_state, strict=False)
+            init_load_summary["missing_after_load"] = int(len(missing))
+            init_load_summary["unexpected_after_load"] = int(len(unexpected))
+        if str(init_tag or "").strip():
+            print(
+                f"[oto_anchor][train] loaded init_state from {init_tag} "
+                f"strategy={init_load_summary.get('strategy', 'strict')} "
+                f"loaded={init_load_summary.get('loaded', 0)} "
+                f"skipped={init_load_summary.get('skipped', 0)}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[oto_anchor][train] loaded init_state "
+                f"strategy={init_load_summary.get('strategy', 'strict')} "
+                f"loaded={init_load_summary.get('loaded', 0)} "
+                f"skipped={init_load_summary.get('skipped', 0)}",
+                flush=True,
+            )
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg.lr), weight_decay=1e-4)
 
     history: list[dict[str, float]] = []
@@ -553,6 +585,7 @@ def train_oto_from_manifest(
             "val_rows": len(val_rows_final),
             "fixed_val_manifest": bool(fixed_val_rows),
             "init_tag": str(init_tag or ""),
+            "init_load_summary": dict(init_load_summary),
             "history": history,
             "device": str(device),
             "amp": bool(use_amp),
@@ -567,9 +600,40 @@ def train_oto_from_manifest(
         "train_rows": len(train_rows),
         "val_rows": len(val_rows_final),
         "init_tag": str(init_tag or ""),
+        "init_load_summary": init_load_summary,
         "device": str(device),
         "amp": bool(use_amp),
     }
+
+
+def _filter_compatible_init_state(
+    source_state: dict[str, Any],
+    target_state: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    compatible: dict[str, Any] = {}
+    skipped_missing: list[str] = []
+    skipped_shape: list[str] = []
+    for key, value in dict(source_state or {}).items():
+        target_value = target_state.get(key)
+        if target_value is None:
+            skipped_missing.append(str(key))
+            continue
+        source_shape = tuple(getattr(value, "shape", ()))
+        target_shape = tuple(getattr(target_value, "shape", ()))
+        if source_shape != target_shape:
+            skipped_shape.append(str(key))
+            continue
+        compatible[key] = value
+    summary = {
+        "strategy": "compatible",
+        "loaded": int(len(compatible)),
+        "skipped": int(len(skipped_missing) + len(skipped_shape)),
+        "skipped_missing": skipped_missing[:25],
+        "skipped_shape": skipped_shape[:25],
+        "skipped_missing_count": int(len(skipped_missing)),
+        "skipped_shape_count": int(len(skipped_shape)),
+    }
+    return compatible, summary
 
 
 def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnnConfig) -> dict[str, float]:
@@ -1068,25 +1132,39 @@ def _build_train_sampling_weights(rows: list[dict[str, Any]], cfg: OtoTrainConfi
     if not rows:
         return np.zeros((0,), dtype=np.float32)
     vb_counter = Counter(str(row.get("voicebank_id", "") or "unknown_voicebank") for row in rows)
+    lang_counter = Counter(str(row.get("language", "") or "unknown").strip().lower() or "unknown" for row in rows)
     role_counter = Counter(str(row.get("alias_role", "") or "other").strip().lower() or "other" for row in rows)
     fmt_counter = Counter(str(row.get("format_type", "") or "other").strip().lower() or "other" for row in rows)
     vb_power = float(getattr(cfg, "voicebank_balance_power", 0.55))
+    lang_power = float(getattr(cfg, "language_balance_power", 0.25))
     role_power = float(getattr(cfg, "role_balance_power", 0.35))
     fmt_power = float(getattr(cfg, "format_balance_power", 0.20))
+    slice_boosts = _parse_slice_sampling_boosts(getattr(cfg, "language_format_role_sampling_boosts", ()))
     cvvc_vc_boost = max(1.0, float(getattr(cfg, "cvvc_vc_sampling_boost", 1.0) or 1.0))
     cvvc_vv_boost = max(1.0, float(getattr(cfg, "cvvc_vv_sampling_boost", 1.0) or 1.0))
+    cvvc_vc_multi_boost = max(1.0, float(getattr(cfg, "cvvc_vc_multi_sampling_boost", 1.0) or 1.0))
+    boosted_slices: Counter[str] = Counter()
     boosted_vc = 0
     boosted_vv = 0
+    boosted_vc_multi = 0
     out = np.ones((len(rows),), dtype=np.float32)
     for idx, row in enumerate(rows):
         vb = str(row.get("voicebank_id", "") or "unknown_voicebank")
+        language = str(row.get("language", "") or "unknown").strip().lower() or "unknown"
         role = str(row.get("alias_role", "") or "other").strip().lower() or "other"
         alias_type = str(row.get("alias_type", "") or "other").strip().lower() or "other"
+        transition = str(row.get("transition_type", "") or "other").strip().lower() or "other"
         fmt = str(row.get("format_type", "") or "other").strip().lower() or "other"
         w = float(row.get("sample_weight", row.get("weight", 1.0)) or 1.0)
         w /= float(max(1, vb_counter.get(vb, 1))) ** vb_power
+        w /= float(max(1, lang_counter.get(language, 1))) ** lang_power
         w /= float(max(1, role_counter.get(role, 1))) ** role_power
         w /= float(max(1, fmt_counter.get(fmt, 1))) ** fmt_power
+        slice_key = _language_format_role_key(language, fmt, role)
+        for pattern, boost in slice_boosts:
+            if _matches_slice_pattern(slice_key, pattern):
+                w *= boost
+                boosted_slices[pattern] += 1
         if fmt == "cvvc":
             if role == "vc" or alias_type == "vc":
                 w *= cvvc_vc_boost
@@ -1094,16 +1172,65 @@ def _build_train_sampling_weights(rows: list[dict[str, Any]], cfg: OtoTrainConfi
             elif role == "vv" or alias_type == "vv":
                 w *= cvvc_vv_boost
                 boosted_vv += 1
+            if cvvc_vc_multi_boost > 1.0 and (role == "vc" or alias_type == "vc") and transition == "multi":
+                w *= cvvc_vc_multi_boost
+                boosted_vc_multi += 1
         if idx < int(hard_case_boosts.shape[0]):
             w *= float(max(1.0, hard_case_boosts[idx]))
         out[idx] = max(1e-5, float(w))
-    if cvvc_vc_boost > 1.0 or cvvc_vv_boost > 1.0:
+    if cvvc_vc_boost > 1.0 or cvvc_vv_boost > 1.0 or cvvc_vc_multi_boost > 1.0:
         print(
             f"[oto_anchor][sampling] cvvc_vc_boost={cvvc_vc_boost:.2f} rows={boosted_vc} "
-            f"cvvc_vv_boost={cvvc_vv_boost:.2f} rows={boosted_vv}",
+            f"cvvc_vv_boost={cvvc_vv_boost:.2f} rows={boosted_vv} "
+            f"cvvc_vc_multi_boost={cvvc_vc_multi_boost:.2f} rows={boosted_vc_multi}",
             flush=True,
         )
+    if slice_boosts:
+        summary = ", ".join(f"{pattern}={boost:.2f} rows={int(boosted_slices.get(pattern, 0))}" for pattern, boost in slice_boosts)
+        print(f"[oto_anchor][sampling] slice_boosts {summary}", flush=True)
     return out
+
+
+def _parse_slice_sampling_boosts(items: object) -> tuple[tuple[str, float], ...]:
+    out: list[tuple[str, float]] = []
+    if isinstance(items, str):
+        raw_items = [item.strip() for item in items.split(",")]
+    else:
+        raw_items = list(items or ())
+    for item in raw_items:
+        text = str(item or "").strip().lower()
+        if not text or "=" not in text:
+            continue
+        pattern, raw_boost = text.split("=", 1)
+        pattern = pattern.strip().replace("|", "/")
+        if len(pattern.split("/")) != 3:
+            continue
+        try:
+            boost = float(raw_boost)
+        except Exception:
+            continue
+        if boost <= 0.0:
+            continue
+        out.append((pattern, float(boost)))
+    return tuple(out)
+
+
+def _language_format_role_key(language: object, format_type: object, alias_role: object) -> str:
+    return "/".join(
+        [
+            str(language or "unknown").strip().lower() or "unknown",
+            str(format_type or "other").strip().lower() or "other",
+            normalize_role(alias_role),
+        ]
+    )
+
+
+def _matches_slice_pattern(key: str, pattern: str) -> bool:
+    key_parts = str(key or "").split("/")
+    pattern_parts = str(pattern or "").split("/")
+    if len(key_parts) != 3 or len(pattern_parts) != 3:
+        return False
+    return all(pattern_part == "*" or key_part == pattern_part for key_part, pattern_part in zip(key_parts, pattern_parts))
 
 
 def _collect_epoch_hard_scores(*, outputs, scalar_target, sample_indices, store: dict[int, float]) -> None:
