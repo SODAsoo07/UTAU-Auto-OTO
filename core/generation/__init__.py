@@ -58,14 +58,24 @@ from .kr_mapping_fallback import (
 from .kr_missing_vowels import append_kr_missing_single_vowel_aliases
 from .kr_finish_guards import maybe_block_kr_generation_output
 from .kr_output_finish import persist_kr_generation_output
+from .kr_pipeline_finish import finalize_kr_generation_pipeline
 from .kr_post_timing import run_kr_general_post_timing_adjustments
+from .kr_row_prep import (
+    prepare_kr_alias_row_start,
+    resolve_kr_row_jump_limits,
+    try_append_kr_br_alias_row,
+)
 from .kr_row_context import prepare_kr_general_row_bounds
+from .kr_row_selection import prepare_kr_general_cv_selection_context
 from .row_apply import (
     apply_zero_template_compute_policy,
     build_review_required_unset,
     decide_row_application,
+    evaluate_row_apply_policy,
     record_row_apply_decision,
 )
+from .kr_syllable_source import prepare_kr_syllable_source_context
+from .kr_runtime_policy import prepare_kr_mapping_runtime_context
 from .mapping_runtime import (
     build_common_mapping_runtime_payload,
     compute_runtime_low_conf_state,
@@ -147,11 +157,19 @@ __all__ = [
     "list_wav_names",
     "maybe_block_kr_generation_output",
     "persist_kr_generation_output",
+    "finalize_kr_generation_pipeline",
+    "prepare_kr_alias_row_start",
+    "prepare_kr_general_cv_selection_context",
     "prepare_kr_general_row_bounds",
     "prepare_kr_row_iteration_context",
+    "prepare_kr_syllable_source_context",
+    "prepare_kr_mapping_runtime_context",
     "rollback_auto_placeholder_fallback",
+    "resolve_kr_row_jump_limits",
+    "evaluate_row_apply_policy",
     "record_row_apply_decision",
     "run_kr_general_post_timing_adjustments",
+    "try_append_kr_br_alias_row",
     "build_common_mapping_runtime_payload",
     "compute_runtime_low_conf_state",
     "format_alignment_guard_summary",

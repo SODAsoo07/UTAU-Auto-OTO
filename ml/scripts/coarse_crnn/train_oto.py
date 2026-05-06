@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 
-from core.coarse_crnn.oto_model import OtoCrnnConfig
+from core.coarse_crnn.oto_model import OtoCrnnConfig, load_oto_checkpoint
 from core.coarse_crnn.oto_targets import read_jsonl
 from core.coarse_crnn.oto_training import OtoTrainConfig, train_oto_from_manifest
 
@@ -14,6 +14,7 @@ def main() -> int:
     parser.add_argument("--manifest", default=os.path.join("ml_workspace", "coarse_crnn", "oto_manifest.jsonl"))
     parser.add_argument("--val-manifest", default="", help="Optional fixed validation manifest, preferably voicebank-held-out.")
     parser.add_argument("--out", default=os.path.join("ml_workspace", "models", "coarse_crnn", "oto_anchor_crnn.pt"))
+    parser.add_argument("--resume-model", default="", help="Optional checkpoint path to continue fine-tuning from.")
     parser.add_argument("--epochs", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-frames", type=int, default=1200)
@@ -75,6 +76,10 @@ def main() -> int:
     parser.add_argument("--voicebank-balance-power", type=float, default=0.55)
     parser.add_argument("--role-balance-power", type=float, default=0.30)
     parser.add_argument("--format-balance-power", type=float, default=0.35)
+    parser.add_argument("--cvvc-vc-sampling-boost", type=float, default=1.0,
+                        help="Weighted sampler boost for cvvc|vc|* rows.")
+    parser.add_argument("--cvvc-vv-sampling-boost", type=float, default=1.0,
+                        help="Weighted sampler boost for cvvc|vv|* rows.")
     parser.add_argument("--hard-case-mining", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hard-case-top-ratio", type=float, default=0.25)
     parser.add_argument("--hard-case-boost", type=float, default=2.5)
@@ -180,6 +185,8 @@ def main() -> int:
         voicebank_balance_power=float(args.voicebank_balance_power),
         role_balance_power=float(args.role_balance_power),
         format_balance_power=float(args.format_balance_power),
+        cvvc_vc_sampling_boost=float(args.cvvc_vc_sampling_boost),
+        cvvc_vv_sampling_boost=float(args.cvvc_vv_sampling_boost),
         enable_hard_case_mining=bool(args.hard_case_mining),
         hard_case_top_ratio=float(args.hard_case_top_ratio),
         hard_case_boost=float(args.hard_case_boost),
@@ -207,7 +214,21 @@ def main() -> int:
         confidence_calibration_error_gate_ms=float(args.confidence_calibration_error_gate_ms),
         checkpoint_save_every_epochs=max(0, int(args.checkpoint_save_every_epochs)),
     )
-    result = train_oto_from_manifest(rows, args.out, val_rows=val_rows, train_config=train_cfg, model_config=model_cfg)
+    init_state = None
+    init_tag = ""
+    if str(args.resume_model or "").strip():
+        init_model, _init_cfg, _meta = load_oto_checkpoint(str(args.resume_model), map_location="cpu")
+        init_state = {k: v.detach().cpu().clone() for k, v in init_model.state_dict().items()}
+        init_tag = os.path.abspath(str(args.resume_model))
+    result = train_oto_from_manifest(
+        rows,
+        args.out,
+        val_rows=val_rows,
+        train_config=train_cfg,
+        model_config=model_cfg,
+        init_state_dict=init_state,
+        init_tag=init_tag,
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

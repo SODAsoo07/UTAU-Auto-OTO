@@ -177,9 +177,122 @@ def build_review_required_unset(
     }
 
 
+def evaluate_row_apply_policy(
+    *,
+    row_apply_mode_counts: MutableMapping[str, int],
+    row_apply_decisions: list[Dict[str, Any]],
+    routing_profile: str,
+    pitch_zone: str,
+    row_mapping_confidence: float,
+    row_conf_floor: float,
+    row_blank_confidence: Optional[float],
+    row_blank_floor: Optional[float],
+    row_blank_floor_for_report: float,
+    row_jump_blocked: int,
+    forced_selected: bool,
+    file_mapping_low_conf: bool,
+    row_abstain: MutableMapping[str, Any],
+    line: str,
+    use_template: bool,
+    is_zero_placeholder_line_fn: Callable[[str], bool],
+    fname: str,
+    alias: str,
+    alias_type: str,
+    file_format: str,
+    selected_w_idx: Optional[int],
+    debug_logging: bool,
+    log_fn: Callable[[str], None],
+    log_review_required_fn: Optional[Callable[[str], None]],
+    record_unset_fn: Callable[..., None],
+    final_lines: list[str],
+    apply_suffix_to_oto_line_fn: Callable[[str, str], str],
+    alias_suffix: str,
+) -> Dict[str, Any]:
+    row_apply = decide_row_application(
+        routing_profile=routing_profile,
+        pitch_zone=pitch_zone,
+        row_mapping_confidence=row_mapping_confidence,
+        row_conf_floor=row_conf_floor,
+        row_blank_confidence=row_blank_confidence,
+        row_blank_floor=row_blank_floor,
+        row_jump_blocked=row_jump_blocked,
+        forced_selected=forced_selected,
+        file_mapping_low_conf=file_mapping_low_conf,
+        row_abstain_skip=bool(row_abstain.get("should_skip")),
+        row_abstain_reason=str(row_abstain.get("reason") or ""),
+    )
+    apply_zero_template_compute_policy(
+        row_apply,
+        line=line,
+        use_template=use_template,
+        is_zero_placeholder_line_fn=is_zero_placeholder_line_fn,
+        fname=fname,
+        alias=alias,
+        debug_logging=debug_logging,
+        log_fn=log_fn,
+    )
+    row_apply_mode, row_apply_reason_code = record_row_apply_decision(
+        row_apply_mode_counts=row_apply_mode_counts,
+        row_apply_decisions=row_apply_decisions,
+        row_apply=row_apply,
+        fname=fname,
+        alias=alias,
+        alias_type=alias_type,
+        file_format=file_format,
+        selected_w_idx=selected_w_idx,
+        row_mapping_confidence=row_mapping_confidence,
+        row_blank_confidence=row_blank_confidence,
+        row_blank_floor=row_blank_floor_for_report,
+        routing_profile=routing_profile,
+        pitch_zone=pitch_zone,
+    )
+
+    if row_apply_mode == "review_required":
+        review_reason, review_meta = build_review_required_unset(
+            row_apply=row_apply,
+            row_abstain=row_abstain,
+            routing_profile=routing_profile,
+        )
+        if debug_logging and log_review_required_fn is not None:
+            log_review_required_fn(review_reason)
+        record_unset_fn(
+            review_reason,
+            fname,
+            line,
+            meta=review_meta,
+        )
+        if use_template:
+            final_lines.append(
+                apply_suffix_to_oto_line_fn(line, alias_suffix)
+            )
+        return {
+            "should_continue": True,
+            "row_apply": row_apply,
+            "row_apply_mode": row_apply_mode,
+            "row_apply_reason_code": row_apply_reason_code,
+        }
+
+    if row_apply_mode == "template_preserve" and use_template:
+        final_lines.append(apply_suffix_to_oto_line_fn(line, alias_suffix))
+        return {
+            "should_continue": True,
+            "row_apply": row_apply,
+            "row_apply_mode": row_apply_mode,
+            "row_apply_reason_code": row_apply_reason_code,
+        }
+
+    return {
+        "should_continue": False,
+        "row_apply": row_apply,
+        "row_apply_mode": row_apply_mode,
+        "row_apply_reason_code": row_apply_reason_code,
+    }
+
+
 __all__ = [
     "apply_zero_template_compute_policy",
     "build_review_required_unset",
     "decide_row_application",
+    "evaluate_row_apply_policy",
     "record_row_apply_decision",
 ]

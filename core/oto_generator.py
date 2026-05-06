@@ -117,8 +117,6 @@ from core.kr_generator_setup import (
     prepare_kr_profile_setup,
 )
 from core.generator_finish import (
-    GeneratorFinishContext,
-    finalize_generator_finish,
     write_oto_lines,
 )
 from core.alignment_ingest import build_kr_alignment_ingest
@@ -187,28 +185,27 @@ from core.generation.kr_file_loop import (
 )
 from core.generation.kr_file_runtime import prepare_kr_row_iteration_context
 from core.generation.kr_base_timing import compute_kr_general_base_timing
-from core.generation.kr_finish_guards import maybe_block_kr_generation_output
 from core.generation.kr_mapping_fallback import (
     force_kr_runtime_abstain_to_sequence_lock,
     handle_kr_mapping_failure_with_guard,
 )
-from core.generation.kr_missing_vowels import append_kr_missing_single_vowel_aliases
-from core.generation.kr_output_finish import persist_kr_generation_output
+from core.generation.kr_pipeline_finish import finalize_kr_generation_pipeline
 from core.generation.placeholder_guards import (
     is_zero_placeholder_line,
 )
 from core.generation.kr_post_timing import run_kr_general_post_timing_adjustments
+from core.generation.kr_row_prep import (
+    prepare_kr_alias_row_start,
+    resolve_kr_row_jump_limits,
+    try_append_kr_br_alias_row,
+)
 from core.generation.kr_row_context import prepare_kr_general_row_bounds
-from core.generation.review_queue import (
-    export_review_queue_if_enabled,
-    update_review_queue_runtime_report,
-)
+from core.generation.kr_row_selection import prepare_kr_general_cv_selection_context
 from core.generation.row_apply import (
-    apply_zero_template_compute_policy,
-    build_review_required_unset,
-    decide_row_application,
-    record_row_apply_decision,
+    evaluate_row_apply_policy,
 )
+from core.generation.kr_syllable_source import prepare_kr_syllable_source_context
+from core.generation.kr_runtime_policy import prepare_kr_mapping_runtime_context
 from core.generation.plan_runtime import (
     build_common_plan_context,
     extract_kr_alignment_ingest_state,
@@ -5549,73 +5546,36 @@ def generate_oto(
             ):
                 processed += 1
                 continue
-            syllables_info = []
-            used_words_based = False
-            used_alias_based = False
-            base_score = 0.0
-            alt_score = 0.0
-            mapping_reason_code = "filename_token"
-            if wd_intervals:
-                words_phone_lookup = build_interval_lookup(ph_intervals)
-                for w in wd_intervals:
-                    w_start = w.minTime
-                    w_end = w.maxTime
-
-                    s_phones = intervals_within_bounds(
-                        words_phone_lookup,
-                        float(w_start) - 0.01,
-                        float(w_end) + 0.01,
-                    )
-                    if force_words_phone_fill and not s_phones:
-                        s_phones = _synthesize_kr_word_phones(
-                            w.mark,
-                            float(w_start),
-                            float(w_end),
-                            decompose_hangul_to_roman,
-                        )
-                    roman_parts = []
-                    for ch in w.mark:
-                        roman_parts.extend(decompose_hangul_to_roman(ch))
-                    roman_raw = "".join(roman_parts).lower()
-                    roman_cv = _kr_cv_kernel(roman_raw)
-
-                    syllables_info.append({
-                        'word': w.mark,
-                        'roman': roman_raw,
-                        'roman_cv': roman_cv,
-                        'start_time': w_start,
-                        'end_time': w_end,
-                        'phones': s_phones
-                    })
-                used_words_based = len(syllables_info) > 0
-
-            alias_based = _build_kr_syllables_from_phone_nuclei(ph_intervals, targets_for_build) if targets_for_build else None
-            if mel_ctx_for_file:
-                _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx_for_file)
-                _annotate_kr_syllable_blank_confidence(alias_based, mel_ctx_for_file)
-            kr_source_pick = select_kr_syllable_source(
+            syllable_context = prepare_kr_syllable_source_context(
+                phone_intervals=ph_intervals,
+                word_intervals=wd_intervals,
+                targets_for_build=targets_for_build,
                 file_format=file_format,
                 prefer_filename_sequence=prefer_filename_sequence,
                 low_phone_quality=low_phone_quality,
-                used_words_based=used_words_based,
-                words_syllables=syllables_info,
-                alias_syllables=alias_based,
-                targets_for_build=targets_for_build,
+                force_words_phone_fill=force_words_phone_fill,
+                mel_ctx_for_file=mel_ctx_for_file,
+                fname=fname,
+                textgrid_trust_tier=textgrid_trust_tier,
+                textgrid_trust_score=textgrid_trust_score,
+                low_quality_reasons=low_quality_reasons,
+                log_fn=log,
+                build_interval_lookup_fn=build_interval_lookup,
+                intervals_within_bounds_fn=intervals_within_bounds,
+                synthesize_word_phones_fn=_synthesize_kr_word_phones,
+                decompose_hangul_to_roman_fn=decompose_hangul_to_roman,
+                kr_cv_kernel_fn=_kr_cv_kernel,
+                build_syllables_from_phone_nuclei_fn=_build_kr_syllables_from_phone_nuclei,
+                annotate_blank_confidence_fn=_annotate_kr_syllable_blank_confidence,
+                select_syllable_source_fn=select_kr_syllable_source,
                 score_mapping_fn=_score_kr_syllable_mapping,
                 should_prefer_alias_fn=_should_prefer_alias_based_syllables,
                 compute_glide_mismatch_fn=_compute_kr_glide_mismatch_ratio,
                 is_order_locked_format_fn=_is_kr_order_locked_cv_format,
             )
-            syllables_info = list(kr_source_pick.get("syllables_info") or [])
-            if mel_ctx_for_file:
-                _annotate_kr_syllable_blank_confidence(syllables_info, mel_ctx_for_file)
-            syllable_blank_confidences = [
-                float((s or {}).get("blank_confidence", 0.0) or 0.0)
-                for s in (syllables_info or [])
-            ]
-            blank_conf_mean = 0.0
-            if syllable_blank_confidences:
-                blank_conf_mean = float(sum(syllable_blank_confidences) / float(len(syllable_blank_confidences)))
+            syllables_info = list(syllable_context["syllables_info"])
+            syllable_blank_confidences = list(syllable_context["syllable_blank_confidences"])
+            blank_conf_mean = float(syllable_context["blank_conf_mean"])
             alignment_weight_base = max(
                 0.0,
                 min(
@@ -5635,53 +5595,11 @@ def generate_oto(
             mel_weight_mode = _resolve_mel_weight_mode(os.environ.get("UTOA_MEL_WEIGHT_MODE", "auto"))
             force_mel_branch = False
             anchor_lock_lite = False
-            used_words_based = bool(kr_source_pick.get("used_words_based"))
-            used_alias_based = bool(kr_source_pick.get("used_alias_based"))
-            mapping_reason_code = str(kr_source_pick.get("mapping_reason_code") or mapping_reason_code)
-            base_score = float(kr_source_pick.get("base_score", 0.0) or 0.0)
-            alt_score = float(kr_source_pick.get("alt_score", 0.0) or 0.0)
-            words_glide_mismatch_ratio = float(kr_source_pick.get("words_glide_mismatch_ratio", 0.0) or 0.0)
-
-            if mapping_reason_code == "filename_sequence_lock":
-                log(
-                    f"[MAP] {fname}: TextGrid 신뢰도 {textgrid_trust_tier.upper()} "
-                    f"(trust={textgrid_trust_score:.2f}) sequence lock kept"
-                )
-            elif mapping_reason_code == "alias_based_empty_words":
-                log(f"[MAP] {fname}: words 기반 phone 매핑 실패 -> alias/phone 기반으로 대체")
-            elif mapping_reason_code == "alias_phone_minimal":
-                log(f"[MAP] {fname}: words 정보가 부족해 phones 기반으로 보강 매핑")
-            elif mapping_reason_code in {"order_locked_length_mismatch", "order_locked_glide_mismatch", "order_locked_low_phone_quality"}:
-                log(
-                    f"[MAP] {fname}: CV 순서 잠금 유지 "
-                    f"(reason={mapping_reason_code}, words={base_score:.1f}, alias={alt_score:.1f}, "
-                    f"glide_mismatch={words_glide_mismatch_ratio:.2f})"
-                )
-            elif mapping_reason_code == "words_low_phone_quality":
-                log(
-                    f"[MAP] {fname}: phones 신뢰도 낮음({','.join(low_quality_reasons)}) -> words 보강 매핑 사용 "
-                    f"(words={base_score:.1f}, alias={alt_score:.1f})"
-                )
-            elif mapping_reason_code == "alias_based_cvvc":
-                log(
-                    f"[MAP] {fname}: CVVC에서 alias 기반 매핑 우선 "
-                    f"(words={base_score:.1f}, alias={alt_score:.1f})"
-                )
-            elif mapping_reason_code == "alias_based_recover":
-                log(
-                    f"[MAP] {fname}: 매핑 점수 보정 적용 "
-                    f"(base={base_score:.1f}, corrected={alt_score:.1f})"
-                )
-            elif mapping_reason_code == "words_keep_high_conf":
-                log(
-                    f"[MAP] {fname}: words 매핑 신뢰도 높음 -> words 결과 유지 "
-                    f"(base={base_score:.1f}, corrected={alt_score:.1f})"
-                )
-            elif alias_based and targets_for_build:
-                log(
-                    f"[MAP] {fname}: TextGrid(words) 기반 재매핑 "
-                    f"(base={base_score:.1f}, corrected={alt_score:.1f})"
-                )
+            used_words_based = bool(syllable_context["used_words_based"])
+            used_alias_based = bool(syllable_context["used_alias_based"])
+            mapping_reason_code = str(syllable_context["mapping_reason_code"])
+            base_score = float(syllable_context["base_score"])
+            alt_score = float(syllable_context["alt_score"])
             file_anchor_adapt_stats = _compute_file_anchor_adapt_stats(
                 mel_ctx_for_file,
                 syllables_info,
@@ -5689,187 +5607,71 @@ def generate_oto(
             )
             file_anchor_profile_cache = {}
 
-            plan_candidate_source = list(
-                filename_cv_targets
-                or [s.get('roman_cv') or s.get('roman', '') for s in (syllables_info or [])]
-                or []
-            )
-            def _should_enable_kr_mel_plan() -> bool:
-                fmt = str(file_format or "").strip().lower()
-                mel_plan_env = {
-                    "cvvc": "UTOA_KR_CVVC_MEL_PLAN",
-                    "cvc": "UTOA_KR_CVC_MEL_PLAN",
-                    "vcv": "UTOA_KR_VCV_MEL_PLAN",
-                    "cv": "UTOA_KR_CV_MEL_PLAN",
-                }
-                if fmt in mel_plan_env and mel_ctx_for_file and syllables_info:
-                    if (
-                        textgrid_trust_tier != "high"
-                        or low_phone_quality
-                        or blank_conf_mean >= 0.45
-                        or alignment_weight < 0.65
-                    ):
-                        return bool(_env_bool(mel_plan_env[fmt], True))
-                return False
-
-            kr_plan_context_kwargs = {
-                "planned_cv_source": plan_candidate_source,
-                "syllables_info": syllables_info,
-                "sinsy_label_entries": sinsy_label_entries,
-                "format_type": file_format,
-                "alignment_weight": alignment_weight,
-                "prefer_sequence": prefer_filename_sequence,
-                "normalize_expected_fn": _normalize_cv_match_token,
-                "normalize_label_fn": _normalize_cv_match_token,
-                "label_match_score_fn": (lambda target, label: float(_cv_match_score(target, label))),
-                "should_enable_mel_plan_fn": _should_enable_kr_mel_plan,
-                "build_cv_anchor_plan_fn": _build_kr_cv_anchor_plan_v2,
-                "build_sinsy_guided_anchor_plan_fn": build_sinsy_guided_anchor_plan,
-                "build_adjacent_anchor_graph_fn": build_adjacent_anchor_graph,
-                "resolve_plan_policy_fn": resolve_plan_policy,
-            }
-
-            mapping_confidence_base, mapping_margin = _estimate_kr_mapping_confidence(
-                phone_quality,
-                words_score=base_score,
-                alias_score=alt_score,
+            mapping_runtime_context = prepare_kr_mapping_runtime_context(
+                syllables_info=syllables_info,
+                sinsy_label_entries=sinsy_label_entries,
+                filename_cv_targets=filename_cv_targets,
+                file_format=file_format,
+                alignment_ingest=alignment_ingest,
+                prefer_filename_sequence=prefer_filename_sequence,
+                alignment_weight=alignment_weight_base,
+                phone_quality=phone_quality,
                 used_words_based=used_words_based,
                 used_alias_based=used_alias_based,
-            )
-            kr_runtime_state = recompute_common_plan_runtime_state(
-                build_plan_context_fn=build_common_plan_context,
-                plan_context_kwargs=kr_plan_context_kwargs,
-                ingest_snapshot=alignment_ingest,
-                mapping_confidence=mapping_confidence_base,
-                mapping_margin=mapping_margin,
-                conf_threshold=file_mapping_conf_th,
-                format_type=file_format,
-                score_a=base_score,
-                score_b=alt_score,
-                sequence_lock_formats={"cvvc", "cvc", "vcv"},
-                abstain_formats={"cvvc", "vcv", "cvc", "cv"},
-                strict_formats={"cvvc", "vcv"},
-                prefer_sequence=prefer_filename_sequence,
-                alignment_trust=alignment_weight,
-                resolve_runtime_mapping_policy_fn=resolve_runtime_mapping_policy,
-            )
-            kr_cv_plan = dict(kr_runtime_state.get("cv_plan") or {})
-            kr_planned_cv_indices = kr_runtime_state.get("planned_indices")
-            kr_anchor_graph = kr_runtime_state.get("anchor_graph")
-            kr_plan_policy = dict(kr_runtime_state.get("plan_policy") or {})
-            runtime_policy = dict(kr_runtime_state.get("runtime_policy") or {})
-            mapping_confidence_base = float(kr_runtime_state.get("mapping_confidence", mapping_confidence_base) or 0.0)
-            mapping_margin = float(kr_runtime_state.get("mapping_margin", mapping_margin) or 0.0)
-            log_sinsy_plan_guard(
-                sinsy_label_entries=sinsy_label_entries,
-                cv_plan=kr_cv_plan,
-                runtime_policy=runtime_policy,
+                base_score=base_score,
+                alt_score=alt_score,
+                file_mapping_conf_th=file_mapping_conf_th,
+                textgrid_trust_score=textgrid_trust_score,
+                textgrid_trust_tier=textgrid_trust_tier,
+                low_phone_quality=low_phone_quality,
+                blank_conf_mean=blank_conf_mean,
+                syllable_blank_confidences=syllable_blank_confidences,
+                mel_ctx_for_file=mel_ctx_for_file,
+                mel_reliability_score=mel_reliability_score,
+                mel_reliability_floor=mel_reliability_floor,
+                mel_weight_mode=mel_weight_mode,
+                mapping_reason_code=mapping_reason_code,
+                runtime_report=runtime_report,
                 fname=fname,
+                debug_logging=kr_mapping_debug_reason_logging,
+                estimate_mapping_confidence_fn=_estimate_kr_mapping_confidence,
+                recompute_common_plan_runtime_state_fn=recompute_common_plan_runtime_state,
+                build_common_plan_context_fn=build_common_plan_context,
+                resolve_runtime_mapping_policy_fn=resolve_runtime_mapping_policy,
+                log_sinsy_plan_guard_fn=log_sinsy_plan_guard,
+                compute_runtime_low_conf_state_fn=compute_runtime_low_conf_state,
+                resolve_file_routing_profile_fn=resolve_file_routing_profile,
+                update_kr_mapping_runtime_report_fn=update_kr_mapping_runtime_report,
                 log_fn=log,
-                log_prefix="[MAP]",
+                normalize_expected_fn=_normalize_cv_match_token,
+                normalize_label_fn=_normalize_cv_match_token,
+                cv_match_score_fn=lambda target, label: float(_cv_match_score(target, label)),
+                build_cv_anchor_plan_fn=_build_kr_cv_anchor_plan_v2,
+                build_sinsy_guided_anchor_plan_fn=build_sinsy_guided_anchor_plan,
+                build_adjacent_anchor_graph_fn=build_adjacent_anchor_graph,
+                resolve_plan_policy_fn=resolve_plan_policy,
+                env_bool_fn=_env_bool,
             )
-            mapping_confidence_base = float(runtime_policy.get("mapping_confidence", mapping_confidence_base))
-            if syllable_blank_confidences:
-                if blank_conf_mean >= 0.55:
-                    mapping_confidence_base = max(
-                        0.0,
-                        mapping_confidence_base - min(0.22, (blank_conf_mean - 0.55) * 0.45 + 0.04),
-                    )
-            if kr_mapping_debug_reason_logging and mapping_confidence_base < float(file_mapping_conf_th):
-                log(
-                    f"[MAP] {fname}: KR 매핑 신뢰도 낮음(conf={mapping_confidence_base:.2f}, "
-                    f"margin={mapping_margin:+.1f}, reason={mapping_reason_code})"
-                )
-
-            file_conf_floor = float(runtime_policy.get("file_conf_floor", file_mapping_conf_th))
-            low_conf_state = compute_runtime_low_conf_state(
-                runtime_policy=runtime_policy,
-                mapping_confidence=mapping_confidence_base,
-                conf_floor=file_conf_floor,
-                blank_confidence_mean=blank_conf_mean,
-                conf_below_reason="conf_below_floor",
-                row_conf_floor_default=float(file_mapping_conf_th),
-            )
-            file_mapping_low_conf = bool(low_conf_state.get("file_low_conf"))
-            row_conf_floor = float(low_conf_state.get("row_conf_floor", file_mapping_conf_th) or file_mapping_conf_th)
-            row_margin_floor = float(low_conf_state.get("row_margin_floor", 6.0) or 6.0)
-            low_conf_reasons = list(low_conf_state.get("low_conf_reasons") or [])
-            pitch_zone_for_file = str(mel_ctx_for_file.get("f0_pitch_zone", "") if mel_ctx_for_file else "").strip().lower()
-            note_hint_hz_for_file = float(mel_ctx_for_file.get("f0_note_hint_hz", 0.0) or 0.0) if mel_ctx_for_file else 0.0
-            f0_max_hz_for_file = float(mel_ctx_for_file.get("f0_max_hz", 0.0) or 0.0) if mel_ctx_for_file else 0.0
-            routing_profile = resolve_file_routing_profile(
-                file_format=str(file_format or ""),
-                pitch_zone=pitch_zone_for_file,
-                note_hint_hz=note_hint_hz_for_file,
-                f0_max_hz=f0_max_hz_for_file,
-                textgrid_trust_score=float(textgrid_trust_score),
-                textgrid_trust_tier=str(textgrid_trust_tier or ""),
-                mapping_confidence_base=float(mapping_confidence_base),
-                blank_conf_mean=float(blank_conf_mean),
-                mel_reliability_score=float(mel_reliability_score),
-                mel_reliability_floor=float(mel_reliability_floor),
-                file_mapping_low_conf=bool(file_mapping_low_conf),
-                alignment_weight_base=float(alignment_weight_base),
-                mel_weight_mode=str(mel_weight_mode or ""),
-                file_mapping_conf_th=float(file_mapping_conf_th),
-            )
-            force_mel_branch = bool(routing_profile.get("force_mel_branch"))
-            mel_weight_mode = str(routing_profile.get("mel_weight_mode") or mel_weight_mode)
-            alignment_weight = float(routing_profile.get("alignment_weight_final", alignment_weight_base))
-            anchor_lock_lite = bool(routing_profile.get("anchor_lock_lite_default", False))
-            row_blank_floor = routing_profile.get("row_blank_floor")
-            delta_clamp_scale = float(routing_profile.get("delta_clamp_scale", 1.0))
-            routing_profile_code = str(routing_profile.get("profile_code") or "hybrid_soft")
-            log(
-                f"[ROUTING] file={fname} profile={routing_profile_code} "
-                f"trust={textgrid_trust_score:.2f} blank={blank_conf_mean:.2f} "
-                f"mel_rel={mel_reliability_score:.2f} align={alignment_weight:.2f}"
-            )
-            log(
-                f"[MAP] {fname}: align_base={alignment_weight_base:.2f}, align_final={alignment_weight:.2f}, "
-                f"blank_mean={blank_conf_mean:.2f}, map_conf={mapping_confidence_base:.2f}, "
-                f"mel_rel={mel_reliability_score:.2f}/{mel_reliability_floor:.2f}, "
-                f"anchor_lock_lite={anchor_lock_lite}, "
-                f"mel_weight_mode={mel_weight_mode}, force_mel_branch={force_mel_branch}, "
-                f"delta_clamp_scale={delta_clamp_scale:.2f}"
-            )
-            if isinstance(runtime_report, dict):
-                update_kr_mapping_runtime_report(
-                    runtime_report,
-                    file_format=str(file_format or ""),
-                    mapping_confidence=float(mapping_confidence_base),
-                    mapping_margin=float(mapping_margin),
-                    mapping_tier=str(runtime_policy.get("mapping_tier") or ""),
-                    trust_score=float(textgrid_trust_score),
-                    trust_tier=str(textgrid_trust_tier or ""),
-                    file_conf_floor=float(file_conf_floor),
-                    row_conf_floor=float(row_conf_floor),
-                    row_margin_floor=float(row_margin_floor),
-                    file_low_conf=bool(file_mapping_low_conf),
-                    low_conf_reasons=list(low_conf_reasons),
-                    blank_confidence_mean=float(blank_conf_mean),
-                    plan_source=str(kr_cv_plan.get("source") or ""),
-                    plan_margin=float((kr_cv_plan.get("meta") or {}).get("margin", 0.0) or 0.0),
-                    plan_coverage=float(kr_plan_policy.get("coverage", 0.0) or 0.0),
-                    mapping_reason_code=str(mapping_reason_code or ""),
-                    row_blank_floor=(
-                        float(row_blank_floor)
-                        if row_blank_floor is not None
-                        else None
-                    ),
-                    extra_fields={
-                        "routing_profile": str(routing_profile_code),
-                        "alignment_weight_base": float(alignment_weight_base),
-                        "alignment_weight": float(alignment_weight),
-                        "mel_reliability_score": float(mel_reliability_score),
-                        "mel_reliability_floor": float(mel_reliability_floor),
-                        "mel_weight_mode": str(mel_weight_mode),
-                        "force_mel_branch": bool(force_mel_branch),
-                        "anchor_lock_lite": bool(anchor_lock_lite),
-                        "delta_clamp_scale": float(delta_clamp_scale),
-                        "high_pitch_mode": bool(routing_profile.get("high_pitch_mode", False)),
-                    },
-                )
+            kr_cv_plan = dict(mapping_runtime_context["kr_cv_plan"])
+            kr_planned_cv_indices = mapping_runtime_context["kr_planned_cv_indices"]
+            kr_anchor_graph = mapping_runtime_context["kr_anchor_graph"]
+            kr_plan_policy = dict(mapping_runtime_context["kr_plan_policy"])
+            runtime_policy = dict(mapping_runtime_context["runtime_policy"])
+            mapping_confidence_base = float(mapping_runtime_context["mapping_confidence_base"])
+            mapping_margin = float(mapping_runtime_context["mapping_margin"])
+            file_mapping_low_conf = bool(mapping_runtime_context["file_mapping_low_conf"])
+            row_conf_floor = float(mapping_runtime_context["row_conf_floor"])
+            row_margin_floor = float(mapping_runtime_context["row_margin_floor"])
+            low_conf_reasons = list(mapping_runtime_context["low_conf_reasons"])
+            pitch_zone_for_file = str(mapping_runtime_context["pitch_zone_for_file"])
+            routing_profile = dict(mapping_runtime_context["routing_profile"])
+            force_mel_branch = bool(mapping_runtime_context["force_mel_branch"])
+            mel_weight_mode = str(mapping_runtime_context["mel_weight_mode"])
+            alignment_weight = float(mapping_runtime_context["alignment_weight"])
+            anchor_lock_lite = bool(mapping_runtime_context["anchor_lock_lite"])
+            row_blank_floor = mapping_runtime_context["row_blank_floor"]
+            delta_clamp_scale = float(mapping_runtime_context["delta_clamp_scale"])
+            routing_profile_code = str(mapping_runtime_context["routing_profile_code"])
 
             if handle_kr_mapping_failure_with_guard(
                 syllables_info=syllables_info,
@@ -5948,81 +5750,52 @@ def generate_oto(
             )
 
             for line_num, line in enumerate(lines):
-                parts = line.split('=', 1)
-                if len(parts) < 2:
-                    _record_unset("malformed_line", fname, line)
-                    final_lines.append(apply_suffix_to_oto_line(line, alias_suffix))
+                row_start = prepare_kr_alias_row_start(
+                    line=line,
+                    fname=fname,
+                    real_wav_name=real_wav_name,
+                    alias_suffix=alias_suffix,
+                    final_lines=final_lines,
+                    mapping_confidence_base=mapping_confidence_base,
+                    record_unset_fn=_record_unset,
+                    apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
+                    extract_base_timing_shape_fn=_extract_base_timing_shape,
+                    classify_alias_fn=_classify_alias_cached,
+                )
+                if bool(row_start["should_continue"]):
                     continue
-                alias = parts[1].split(',', 1)[0].strip()
-                if not alias:
-                    _record_unset("empty_alias", fname, line)
-                    preserved = f"{real_wav_name}={parts[1]}"
-                    final_lines.append(apply_suffix_to_oto_line(preserved, alias_suffix))
-                    continue
-                base_shape = _extract_base_timing_shape(line)
-                row_mapping_confidence = float(mapping_confidence_base)
-                row_jump_blocked = 0
-                row_apply_mode = "full_apply"
-                row_apply_reason_code = ""
+                alias = str(row_start["alias"])
+                base_shape = row_start["base_shape"]
+                row_mapping_confidence = float(row_start["row_mapping_confidence"])
+                row_jump_blocked = int(row_start["row_jump_blocked"])
+                row_apply_mode = str(row_start["row_apply_mode"])
+                row_apply_reason_code = str(row_start["row_apply_reason_code"])
+                alias_type = str(row_start["alias_type"])
 
+                jump_limits = resolve_kr_row_jump_limits(
+                    alias_type=alias_type,
+                    mapping_only_enabled=kr_mapping_only_enable,
+                    order_locked_format=kr_order_locked_format,
+                    textgrid_trust_tier=textgrid_trust_tier,
+                    file_mapping_low_conf=file_mapping_low_conf,
+                    max_index_jump_default=kr_mapping_max_index_jump_default,
+                    max_index_jump_high_conf=kr_mapping_max_index_jump_high_conf,
+                )
+                row_jump_default = int(jump_limits["row_jump_default"])
+                row_jump_high_conf = int(jump_limits["row_jump_high_conf"])
 
-                alias_type = _classify_alias_cached(alias)
-                row_jump_default = int(max(0, kr_mapping_max_index_jump_default))
-                row_jump_high_conf = int(max(row_jump_default, kr_mapping_max_index_jump_high_conf))
-                if kr_mapping_only_enable and alias_type in {"cv", "cv_head", "vcv", "vv", "mono"}:
-                    row_jump_default = 0
-                    row_jump_high_conf = 0
-                if kr_order_locked_format and textgrid_trust_tier == "low":
-                    row_jump_default = 0
-                    row_jump_high_conf = max(0, min(row_jump_high_conf, 1))
-                elif kr_order_locked_format and textgrid_trust_tier == "mid":
-                    row_jump_high_conf = max(row_jump_default, min(row_jump_high_conf, 1))
-                if file_mapping_low_conf:
-                    row_jump_high_conf = int(max(0, min(row_jump_high_conf, row_jump_default)))
-                    if kr_order_locked_format:
-                        row_jump_default = 0
-                    else:
-                        row_jump_default = int(max(0, row_jump_default - 1))
-                if alias_type == "cv_head":
-                    row_jump_default = int(max(0, row_jump_default - 1))
-                    row_jump_high_conf = int(max(row_jump_default, row_jump_high_conf - 1))
-                elif alias_type == "vv":
-                    row_jump_default = int(max(row_jump_default, kr_mapping_max_index_jump_default + 1))
-                    row_jump_high_conf = int(max(row_jump_high_conf, row_jump_default + 1))
-
-                if alias_type == 'br':
-
-                    first_ph = ph_intervals[0] if ph_intervals else None
-                    last_ph = ph_intervals[-1] if ph_intervals else None
-                    if first_ph and last_ph:
-                        br_start = first_ph.minTime * 1000
-                        br_end = last_ph.maxTime * 1000
-                        br_len = br_end - br_start
-                    else:
-                        br_start = 0
-                        br_len = 500
-                    offset = max(br_start - 30, 0)
-                    pre = 0
-                    ovl = 0
-                    consonant = min(br_len * 0.3, 100)
-                    cutoff = -(br_len * 0.85)
-                    offset, consonant, cutoff, pre, ovl = validate_oto_params(offset, consonant, cutoff, pre, ovl)
-
-                    _append_alias_rows(
-                        final_lines,
-                        real_wav_name,
-                        alias,
-                        offset,
-                        consonant,
-                        cutoff,
-                        pre,
-                        ovl,
-                        generate_openutau=generate_openutau,
-                        alias_suffix=alias_suffix,
-                        alias_type=alias_type,
-                        wav_duration_ms=wav_duration_ms,
-                        validate_fn=validate_oto_params,
-                    )
+                if try_append_kr_br_alias_row(
+                    alias_type=alias_type,
+                    ph_intervals=ph_intervals,
+                    final_lines=final_lines,
+                    real_wav_name=real_wav_name,
+                    alias=alias,
+                    generate_openutau=generate_openutau,
+                    alias_suffix=alias_suffix,
+                    wav_duration_ms=wav_duration_ms,
+                    validate_fn=validate_oto_params,
+                    append_alias_rows_fn=_append_alias_rows,
+                ):
                     continue
 
                 family_state = build_kr_alias_family_state(
@@ -6223,40 +5996,7 @@ def generate_oto(
 
 
                 if not is_vc:
-                    selected_w_idx = current_w_idx
-                    forced_vv_idx = None
-                    planned_vv_idx = None
-                    if file_format in {"cvvc", "vcv"} and alias_type == "vv":
-                        forced_vv_idx = _resolve_kr_cvvc_vv_index(
-                            alias,
-                            kr_cvvc_vv_occurrence_map or {},
-                            kr_cvvc_vv_occurrence_state,
-                        )
-                    if alias_type == "vv" and bridge_pair.get("next_idx") is not None:
-                        planned_vv_idx = int(bridge_pair["next_idx"])
-                    forced_cvvc_idx = _resolve_kr_cvvc_occurrence_index(
-                        alias,
-                        alias_type,
-                        kr_cvvc_occurrence_map or {},
-                        kr_cvvc_occurrence_state,
-                        expected_idx=cv_seq_idx,
-                    )
-                    expected_cv_idx = cv_seq_idx
-                    planned_cv_idx = None
-                    if alias_type == "cv":
-                        planned_cv_idx = _resolve_kr_planned_cv_index(
-                            kr_planned_cv_indices,
-                            expected_cv_idx,
-                            target_clean,
-                            syllables_info,
-                            alias_type="cv",
-                        )
-                        if planned_cv_idx is not None and kr_mapping_debug_reason_logging and planned_cv_idx != expected_cv_idx:
-                            log(
-                                f"[MAP] {fname}: KR CV 앵커 계획 보정 "
-                                f"({expected_cv_idx + 1}->{planned_cv_idx + 1}, {alias})"
-                            )
-                    general_cv_selection = _select_kr_general_cv_index_v2(
+                    selection_context = prepare_kr_general_cv_selection_context(
                         alias=alias,
                         alias_type=alias_type,
                         fname=fname,
@@ -6270,10 +6010,23 @@ def generate_oto(
                         file_mapping_conf_th=file_mapping_conf_th,
                         file_mapping_low_conf=file_mapping_low_conf,
                         romaji_syllables=romaji_syllables,
-                        forced_vv_idx=forced_vv_idx,
-                        planned_vv_idx=planned_vv_idx,
-                        planned_cv_idx=planned_cv_idx,
-                        forced_cvvc_idx=forced_cvvc_idx,
+                        kr_planned_cv_indices=kr_planned_cv_indices,
+                        kr_cvvc_occurrence_map=kr_cvvc_occurrence_map or {},
+                        kr_cvvc_occurrence_state=kr_cvvc_occurrence_state,
+                        kr_cvvc_vv_occurrence_map=kr_cvvc_vv_occurrence_map or {},
+                        kr_cvvc_vv_occurrence_state=kr_cvvc_vv_occurrence_state,
+                        syllable_blank_confidences=syllable_blank_confidences,
+                        syllables_info=syllables_info,
+                        mapping_margin=mapping_margin,
+                        row_margin_floor=row_margin_floor,
+                        row_conf_floor=row_conf_floor,
+                        row_blank_floor=row_blank_floor,
+                        debug_logging=kr_mapping_debug_reason_logging,
+                        log_fn=log,
+                        resolve_vv_index_fn=_resolve_kr_cvvc_vv_index,
+                        resolve_cvvc_occurrence_index_fn=_resolve_kr_cvvc_occurrence_index,
+                        resolve_planned_cv_index_fn=_resolve_kr_planned_cv_index,
+                        select_general_cv_index_fn=_select_kr_general_cv_index_v2,
                         remap_forced_cv_index_fn=_remap_kr_forced_cv_index,
                         cv_match_score_fn=_cv_match_score,
                         split_syllable_parts_fn=_split_kr_syllable_parts,
@@ -6282,54 +6035,21 @@ def generate_oto(
                         should_allow_exact_vowel_fix_fn=_should_allow_kr_exact_vowel_fix,
                         find_cv_vowel_match_index_fn=_find_kr_cv_vowel_match_index,
                         clamp_cv_index_to_order_fn=_clamp_kr_cv_index_to_order,
-                        syllable_blank_confidences=syllable_blank_confidences,
-                        syllables_info=syllables_info,
-                        log_fn=log,
-                        debug_logging=kr_mapping_debug_reason_logging,
+                        blank_conf_at_fn=_blank_conf_at,
+                        is_cv_syllable_active_fn=_is_kr_cv_syllable_active,
+                        decide_cv_row_abstain_fn=decide_cv_row_abstain,
                     )
-                    expected_cv_idx = int(general_cv_selection["expected_cv_idx"])
-                    selected_w_idx = int(general_cv_selection["selected_w_idx"])
-                    cv_seq_idx = int(general_cv_selection["cv_seq_idx"])
-                    row_mapping_confidence = float(general_cv_selection["row_mapping_confidence"])
-                    resolve_meta = dict(general_cv_selection["resolve_meta"])
-                    row_jump_blocked = int(general_cv_selection["row_jump_blocked"])
-                    forced_selected_idx = general_cv_selection["forced_selected_idx"]
-                    row_blank_floor_safe = (
-                        float(row_blank_floor)
-                        if row_blank_floor is not None
-                        else 0.62
-                    )
-                    row_blank_conf = _blank_conf_at(syllable_blank_confidences, selected_w_idx)
-                    row_abstain = decide_cv_row_abstain(
-                        alias_type=alias_type,
-                        alias_text=alias,
-                        format_type=file_format,
-                        candidate_idx=selected_w_idx,
-                        candidate_count=len(syllables_info),
-                        candidate_active=(
-                            _is_kr_cv_syllable_active(syllables_info[selected_w_idx], require_vowel=True)
-                            if selected_w_idx is not None and 0 <= selected_w_idx < len(syllables_info)
-                            else False
-                        ),
-                        confidence_margin=mapping_margin,
-                        min_confidence_margin=row_margin_floor,
-                        row_confidence=row_mapping_confidence,
-                        min_row_confidence=row_conf_floor,
-                        blank_confidence=row_blank_conf,
-                        max_blank_confidence=row_blank_floor_safe,
-                        # CVC・・甯護攵/・護・孖ｹ・ｱ・・margin ・・呷擽 ・､ CV ・・龍・ｴ ・ｼ・・・､墲ｵ・ ・・・溢牟
-                        # row-level abstain ・護擽孖ｸ・ｼ CV/CVVC・尖ｧ・・・圸﨑罹共.
-                        active_only_formats={"cvvc", "cv"},
-                        margin_formats={"cvvc", "cv"},
-                        blank_formats={"cvvc", "cvc", "cv"},
-                        min_confidence_margin_by_alias_type={"cv_head": row_margin_floor + 1.5, "vcv": row_margin_floor + 1.0},
-                        min_row_confidence_by_alias_type={"cv_head": row_conf_floor + 0.03, "vcv": row_conf_floor + 0.02},
-                        max_blank_confidence_by_alias_type={
-                            "cv_head": max(0.0, row_blank_floor_safe - 0.03),
-                            "vcv": max(0.0, row_blank_floor_safe - 0.02),
-                        },
-                    )
-                    row_apply = decide_row_application(
+                    selected_w_idx = int(selection_context["selected_w_idx"])
+                    cv_seq_idx = int(selection_context["cv_seq_idx"])
+                    row_mapping_confidence = float(selection_context["row_mapping_confidence"])
+                    row_jump_blocked = int(selection_context["row_jump_blocked"])
+                    forced_selected_idx = selection_context["forced_selected_idx"]
+                    row_blank_floor_safe = float(selection_context["row_blank_floor_safe"])
+                    row_blank_conf = selection_context["row_blank_conf"]
+                    row_abstain = dict(selection_context["row_abstain"])
+                    row_apply_context = evaluate_row_apply_policy(
+                        row_apply_mode_counts=row_apply_mode_counts,
+                        row_apply_decisions=row_apply_decisions,
                         routing_profile=routing_profile_code,
                         pitch_zone=pitch_zone_for_file,
                         row_mapping_confidence=row_mapping_confidence,
@@ -6339,59 +6059,30 @@ def generate_oto(
                         row_jump_blocked=row_jump_blocked,
                         forced_selected=forced_selected_idx is not None,
                         file_mapping_low_conf=file_mapping_low_conf,
-                        row_abstain_skip=bool(row_abstain.get("should_skip")),
-                        row_abstain_reason=str(row_abstain.get("reason") or ""),
-                    )
-                    apply_zero_template_compute_policy(
-                        row_apply,
+                        row_abstain=row_abstain,
                         line=line,
                         use_template=use_template,
                         is_zero_placeholder_line_fn=is_zero_placeholder_line,
                         fname=fname,
                         alias=alias,
-                        debug_logging=kr_mapping_debug_reason_logging,
-                        log_fn=log,
-                    )
-                    row_apply_mode, row_apply_reason_code = record_row_apply_decision(
-                        row_apply_mode_counts=row_apply_mode_counts,
-                        row_apply_decisions=row_apply_decisions,
-                        row_apply=row_apply,
-                        fname=fname,
-                        alias=alias,
                         alias_type=alias_type,
                         file_format=file_format,
                         selected_w_idx=selected_w_idx,
-                        row_mapping_confidence=row_mapping_confidence,
-                        row_blank_confidence=row_blank_conf,
-                        row_blank_floor=row_blank_floor_safe,
-                        routing_profile=routing_profile_code,
-                        pitch_zone=pitch_zone_for_file,
+                        debug_logging=kr_mapping_debug_reason_logging,
+                        log_fn=log,
+                        log_review_required_fn=lambda review_reason: log(
+                            f"[WARN] {fname}: KR 행 보정 스킵 "
+                            f"({review_reason}, {alias})"
+                        ),
+                        record_unset_fn=_record_unset,
+                        final_lines=final_lines,
+                        apply_suffix_to_oto_line_fn=apply_suffix_to_oto_line,
+                        alias_suffix=alias_suffix,
+                        row_blank_floor_for_report=row_blank_floor_safe,
                     )
-                    if row_apply_mode == "review_required":
-                        review_reason, review_meta = build_review_required_unset(
-                            row_apply=row_apply,
-                            row_abstain=row_abstain,
-                            routing_profile=routing_profile_code,
-                        )
-                        if kr_mapping_debug_reason_logging:
-                            log(
-                                f"[WARN] {fname}: KR 행 보정 스킵 "
-                                f"({review_reason}, {alias})"
-                            )
-                        _record_unset(
-                            review_reason,
-                            fname,
-                            line,
-                            meta=review_meta,
-                        )
-                        if use_template:
-                            # 奛懦伯・ｿ ・ｨ・懍乱・罹株 ・､﨑卓擽 ・逸剳・､﨑・嵂餓擽・ｼ・・・ｰ・ｴ alias・ｼ ・ｴ・ｴ﨑罹共.
-                            final_lines.append(
-                                apply_suffix_to_oto_line(line, alias_suffix)
-                            )
-                        continue
-                    if row_apply_mode == "template_preserve" and use_template:
-                        final_lines.append(apply_suffix_to_oto_line(line, alias_suffix))
+                    row_apply_mode = str(row_apply_context["row_apply_mode"])
+                    row_apply_reason_code = str(row_apply_context["row_apply_reason_code"])
+                    if bool(row_apply_context["should_continue"]):
                         continue
                     row_bounds = prepare_kr_general_row_bounds(
                         is_vc=False,
@@ -6591,87 +6282,48 @@ def generate_oto(
             callback(f"OTO 생성 중... ({processed}/{total})")
 
 
-    if gen_missing_vowels:
-        log("누락된 단모음 alias 자동 생성을 시작합니다...")
-        append_kr_missing_single_vowel_aliases(
-            final_lines=final_lines,
-            file_groups=file_groups,
-            tg_entries=tg_entries,
-            single_vowel_span_by_tg_path=single_vowel_span_by_tg_path,
-            norm_tg_path_key_fn=_norm_tg_path_key,
-            load_textgrid_fn=textgrid.TextGrid.fromFile,
-            coerce_interval_tier_fn=coerce_interval_tier,
-            is_interval_like_tier_fn=is_interval_like_tier,
-            compute_noninitial_vowel_timing_fn=_compute_kr_noninitial_vowel_timing,
-            validate_fn=validate_oto_params,
-            append_alias_rows_fn=_append_alias_rows,
-            generate_openutau=generate_openutau,
-            alias_suffix=alias_suffix,
-            log_added_fn=lambda tg_info, alias: log(
-                f"추가: 단모음 alias 생성 -> {tg_info['real_name']} [{alias}]"
-            ),
-        )
-
-    finish_context = GeneratorFinishContext(
+    return finalize_kr_generation_pipeline(
+        processed=processed,
+        total=total,
+        errors=errors,
+        gen_missing_vowels=gen_missing_vowels,
+        final_lines=final_lines,
+        file_groups=file_groups,
+        tg_entries=tg_entries,
+        single_vowel_span_by_tg_path=single_vowel_span_by_tg_path,
+        norm_tg_path_key_fn=_norm_tg_path_key,
+        load_textgrid_fn=textgrid.TextGrid.fromFile,
+        coerce_interval_tier_fn=coerce_interval_tier,
+        is_interval_like_tier_fn=is_interval_like_tier,
+        compute_noninitial_vowel_timing_fn=_compute_kr_noninitial_vowel_timing,
+        validate_fn=validate_oto_params,
+        append_alias_rows_fn=_append_alias_rows,
+        generate_openutau=generate_openutau,
+        alias_suffix=alias_suffix,
         log_fn=log,
+        placeholder_block_errors=placeholder_block_errors,
+        auto_gen_format=auto_gen_format,
+        runtime_report=runtime_report,
         anchor_stats=anchor_stats,
         anchor_log_path=anchor_log_path,
         anchor_log_dir=_anchor_log_dir,
         cleanup_timing_jsonl=cleanup_timing_jsonl,
-        timing_jsonl_prefix="timing_anchor_kr_",
-    )
-
-    if maybe_block_kr_generation_output(
-        placeholder_block_errors=placeholder_block_errors,
-        final_lines=final_lines,
-        auto_gen_format=auto_gen_format,
-        runtime_report=runtime_report,
-        errors=errors,
-        log_fn=log,
-        finish_context=finish_context,
         log_unset_summary_fn=_log_unset_summary,
-    ):
-        return processed, total, errors
-
-    persist_kr_generation_output(
         out_path=out_path,
-        final_lines=final_lines,
         tg_folder=tg_folder,
         kr_profile=kr_profile,
         custom_map=custom_map,
         custom_phonemes_path=custom_phonemes_path,
         enable_ml_correction=enable_ml_correction,
-        auto_gen_format=auto_gen_format,
         ml_policy=ml_policy,
-        runtime_report=runtime_report,
-        log_fn=log,
-        validate_fn=validate_oto_params,
         normalize_key_fn=normalize_key,
         wav_name_map=wav_name_map,
         apply_output_wav_name_map_fn=apply_output_wav_name_map,
-        errors=errors,
-    )
-
-    export_review_queue_if_enabled(
         review_queue_export=review_queue_export,
         review_queue_path=review_queue_path,
         row_apply_decisions=row_apply_decisions,
-        log_fn=log,
+        row_apply_mode_counts=row_apply_mode_counts,
     )
-
-    if isinstance(runtime_report, dict):
-        update_review_queue_runtime_report(
-            runtime_report,
-            row_apply_mode_counts=row_apply_mode_counts,
-            review_queue_export=review_queue_export,
-            row_apply_decisions=row_apply_decisions,
-            review_queue_path=review_queue_path,
-        )
-
-    finalize_generator_finish(finish_context)
-
-    _log_unset_summary()
-    return processed, total, errors
 
 
 
