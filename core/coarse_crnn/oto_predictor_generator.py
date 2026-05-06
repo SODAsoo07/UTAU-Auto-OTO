@@ -97,6 +97,11 @@ def generate_oto_with_crnn_predictor(
     span_cap_count = 0
     onset_snap_count = 0
     activity_profile_cache: dict[str, dict[str, float]] = {}
+    voicebank_activity_profile = _analyze_voicebank_activity_baseline(
+        wav_dir=wav_dir,
+        sample_rate=16000,
+        cache=activity_profile_cache,
+    )
     lang = str(language or "").strip().lower() or "korean"
     suffix = _normalize_alias_suffix(alias_suffix)
     for idx, row in enumerate(rows):
@@ -152,6 +157,7 @@ def generate_oto_with_crnn_predictor(
                 wav_path=row.wav_abs,
                 sample_rate=16000,
                 cache=activity_profile_cache,
+                voicebank_profile=voicebank_activity_profile,
                 language=lang,
                 format_type=fmt,
                 alias=row.alias,
@@ -165,6 +171,7 @@ def generate_oto_with_crnn_predictor(
                 wav_path=row.wav_abs,
                 sample_rate=16000,
                 cache=activity_profile_cache,
+                voicebank_profile=voicebank_activity_profile,
                 duration_ms=pred_duration_ms,
                 language=lang,
                 alias=row.alias,
@@ -177,6 +184,7 @@ def generate_oto_with_crnn_predictor(
                 wav_path=row.wav_abs,
                 sample_rate=16000,
                 cache=activity_profile_cache,
+                voicebank_profile=voicebank_activity_profile,
                 duration_ms=pred_duration_ms,
                 language=lang,
                 alias=row.alias,
@@ -688,6 +696,7 @@ def _apply_activity_window_fallback(
     wav_path: str,
     sample_rate: int,
     cache: dict[str, dict[str, float]],
+    voicebank_profile: dict[str, float],
     language: str,
     format_type: str,
     alias: str,
@@ -698,7 +707,12 @@ def _apply_activity_window_fallback(
         return dict(predicted_params), ""
     if not _base_params_fallback_usable(base_params):
         return dict(predicted_params), ""
-    profile = _analyze_activity_profile(wav_path, sample_rate=sample_rate, cache=cache)
+    profile = _analyze_activity_profile(
+        wav_path,
+        sample_rate=sample_rate,
+        cache=cache,
+        voicebank_profile=voicebank_profile,
+    )
     if not profile:
         return dict(predicted_params), ""
     if not _is_anchor_outside_activity(predicted_anchors, profile):
@@ -738,6 +752,7 @@ def _apply_silence_window_clamp(
     wav_path: str,
     sample_rate: int,
     cache: dict[str, dict[str, float]],
+    voicebank_profile: dict[str, float],
     duration_ms: float,
     language: str,
     alias: str,
@@ -745,7 +760,12 @@ def _apply_silence_window_clamp(
 ) -> tuple[dict[str, float], str]:
     if not _env_bool("UTOA_OTO_CRNN_SILENCE_CLAMP_ENABLE", True):
         return dict(predicted_params), ""
-    profile = _analyze_activity_profile(wav_path, sample_rate=sample_rate, cache=cache)
+    profile = _analyze_activity_profile(
+        wav_path,
+        sample_rate=sample_rate,
+        cache=cache,
+        voicebank_profile=voicebank_profile,
+    )
     if not profile:
         return dict(predicted_params), ""
     active_start = float(profile.get("active_start_ms", 0.0) or 0.0)
@@ -804,6 +824,7 @@ def _apply_onset_voiced_snap(
     wav_path: str,
     sample_rate: int,
     cache: dict[str, dict[str, float]],
+    voicebank_profile: dict[str, float],
     duration_ms: float,
     language: str,
     alias: str,
@@ -811,7 +832,12 @@ def _apply_onset_voiced_snap(
 ) -> tuple[dict[str, float], str]:
     if not _env_bool("UTOA_OTO_CRNN_ONSET_VOICED_SNAP_ENABLE", True):
         return dict(predicted_params), ""
-    profile = _analyze_activity_profile(wav_path, sample_rate=sample_rate, cache=cache)
+    profile = _analyze_activity_profile(
+        wav_path,
+        sample_rate=sample_rate,
+        cache=cache,
+        voicebank_profile=voicebank_profile,
+    )
     if not profile:
         return dict(predicted_params), ""
     onset_ms = float(profile.get("onset_ms", -1.0) or -1.0)
@@ -887,11 +913,81 @@ def _apply_onset_voiced_snap(
     return guarded, "onset_voiced_snap"
 
 
+def _analyze_voicebank_activity_baseline(
+    *,
+    wav_dir: str,
+    sample_rate: int,
+    cache: dict[str, dict[str, float]],
+) -> dict[str, float]:
+    root = os.path.abspath(str(wav_dir or "").strip())
+    if not root or not os.path.isdir(root):
+        return {}
+    key = f"__voicebank_profile__::{root.lower()}::{int(sample_rate)}"
+    cached = cache.get(key)
+    if isinstance(cached, dict) and cached:
+        return dict(cached)
+
+    max_files = int(max(8, _env_float("UTOA_OTO_CRNN_VB_PROFILE_MAX_WAVS", 64)))
+    allow_noise_mult = _env_float("UTOA_OTO_CRNN_VB_ALLOW_NOISE_MULT", 2.5)
+    allow_speech_mult = _env_float("UTOA_OTO_CRNN_VB_ALLOW_SPEECH_MULT", 0.24)
+    reject_noise_mult = _env_float("UTOA_OTO_CRNN_VB_REJECT_NOISE_MULT", 3.4)
+    reject_speech_mult = _env_float("UTOA_OTO_CRNN_VB_REJECT_SPEECH_MULT", 0.30)
+
+    wav_paths: list[str] = []
+    for current_root, _dirs, files in os.walk(root):
+        for name in files:
+            if str(name).lower().endswith(".wav"):
+                wav_paths.append(os.path.join(current_root, name))
+                if len(wav_paths) >= max_files:
+                    break
+        if len(wav_paths) >= max_files:
+            break
+    if not wav_paths:
+        cache[key] = {}
+        return {}
+
+    rms_values: list[float] = []
+    for wav_path in wav_paths:
+        try:
+            samples, sr, _dur = load_wav_mono(str(wav_path), target_sr=int(sample_rate))
+        except Exception:
+            continue
+        if samples is None or sr <= 0:
+            continue
+        arr = np.asarray(samples, dtype=np.float32)
+        frame = max(80, int(round(float(sr) * 0.008)))
+        hop = max(40, int(round(float(sr) * 0.004)))
+        if arr.size < frame:
+            continue
+        for start in range(0, int(arr.size) - frame + 1, hop):
+            seg = arr[start : start + frame]
+            rms_values.append(float(np.sqrt(np.mean(np.square(seg), dtype=np.float32))))
+    if not rms_values:
+        cache[key] = {}
+        return {}
+
+    rms = np.asarray(rms_values, dtype=np.float32)
+    noise_floor = float(np.percentile(rms, 30.0))
+    speech_ref = float(np.percentile(rms, 92.0))
+    allow_thr = max(noise_floor * allow_noise_mult, speech_ref * allow_speech_mult, 1e-6)
+    reject_thr = max(noise_floor * reject_noise_mult, speech_ref * reject_speech_mult, allow_thr + 1e-7)
+    profile = {
+        "noise_floor_rms": float(noise_floor),
+        "speech_ref_rms": float(speech_ref),
+        "allow_rms_threshold": float(allow_thr),
+        "reject_rms_threshold": float(reject_thr),
+        "sampled_wavs": int(len(wav_paths)),
+    }
+    cache[key] = profile
+    return dict(profile)
+
+
 def _analyze_activity_profile(
     wav_path: str,
     *,
     sample_rate: int,
     cache: dict[str, dict[str, float]],
+    voicebank_profile: dict[str, float] | None = None,
 ) -> dict[str, float]:
     key = os.path.abspath(str(wav_path or "")).lower()
     if key in cache:
@@ -940,9 +1036,14 @@ def _analyze_activity_profile(
         profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
         cache[key] = profile
         return dict(profile)
-    noise_floor = float(np.percentile(env, 35.0))
-    strong_floor = float(np.percentile(env, 92.0))
-    threshold = max(noise_floor * 2.8, strong_floor * 0.28, 1e-5)
+    noise_floor_local = float(np.percentile(env, 35.0))
+    strong_floor_local = float(np.percentile(env, 92.0))
+    vb = dict(voicebank_profile or {})
+    noise_floor = max(noise_floor_local, float(vb.get("noise_floor_rms", 0.0) or 0.0))
+    strong_floor = max(strong_floor_local, float(vb.get("speech_ref_rms", 0.0) or 0.0))
+    allow_thr = float(vb.get("allow_rms_threshold", 0.0) or 0.0)
+    reject_thr = float(vb.get("reject_rms_threshold", 0.0) or 0.0)
+    threshold = max(noise_floor * 2.8, strong_floor * 0.28, allow_thr, 1e-5)
     active_frames = env >= threshold
     min_run_frames = max(4, int(round(0.028 / max(float(hop) / float(sr), 1e-5))))
     active_frames = _enforce_min_run(active_frames, min_run_frames)
@@ -975,7 +1076,7 @@ def _analyze_activity_profile(
     if active_end - active_start < 40.0:
         active_start = 0.0
         active_end = duration_ms
-    core_env_thr = max(noise_floor * 2.2, strong_floor * 0.30, 1e-6)
+    core_env_thr = max(noise_floor * 2.2, strong_floor * 0.30, reject_thr, 1e-6)
     core_flags = env >= core_env_thr
     core_flags = _enforce_min_run(core_flags, max(3, min_run_frames - 1))
     core_idx = np.flatnonzero(core_flags)

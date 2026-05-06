@@ -30,6 +30,11 @@ def main() -> int:
     parser.add_argument("--gate-max-hard-failure-rate", type=float, default=0.08)
     parser.add_argument("--gate-min-worst-voicebank-preutterance-acc-50ms", type=float, default=0.45)
     parser.add_argument("--gate-max-worst-voicebank-hard-failure-rate", type=float, default=0.22)
+    parser.add_argument("--gate-max-fp-breath-include-rate", type=float, default=0.20)
+    parser.add_argument("--gate-max-fn-voiced-miss-rate", type=float, default=0.55)
+    parser.add_argument("--gate-max-s-family-leak-rate", type=float, default=0.25)
+    parser.add_argument("--gate-max-onset-lag-p90-ms", type=float, default=380.0)
+    parser.add_argument("--gate-max-syllable-shift-rate", type=float, default=0.45)
     args = parser.parse_args()
 
     rows = read_jsonl(args.manifest)
@@ -51,6 +56,11 @@ def main() -> int:
         gate_max_hard_failure_rate=float(args.gate_max_hard_failure_rate),
         gate_min_worst_voicebank_preutterance_acc_50ms=float(args.gate_min_worst_voicebank_preutterance_acc_50ms),
         gate_max_worst_voicebank_hard_failure_rate=float(args.gate_max_worst_voicebank_hard_failure_rate),
+        gate_max_fp_breath_include_rate=float(args.gate_max_fp_breath_include_rate),
+        gate_max_fn_voiced_miss_rate=float(args.gate_max_fn_voiced_miss_rate),
+        gate_max_s_family_leak_rate=float(args.gate_max_s_family_leak_rate),
+        gate_max_onset_lag_p90_ms=float(args.gate_max_onset_lag_p90_ms),
+        gate_max_syllable_shift_rate=float(args.gate_max_syllable_shift_rate),
     )
     result = evaluate_oto_manifest(rows, cfg)
     write_oto_eval_json(args.out, result)

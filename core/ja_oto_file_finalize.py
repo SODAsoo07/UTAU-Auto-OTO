@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
+from core.generation.file_index import build_wav_index as build_generation_wav_index
 from core.ja_oto_finalize import _convert_ja_internal_cutoff_to_oto_field
 from core.ja_oto_file_consistency import apply_ja_vc_neighbor_to_oto_file
 from core.oto_continuity_clamp import apply_continuity_clamp_to_oto_file
@@ -367,15 +368,11 @@ def apply_ja_mel_refine_to_oto_file(
     if not parsed:
         return 0
 
-    wav_index = {}
-    try:
-        for fn in os.listdir(wav_dir):
-            if fn.lower().endswith(".wav"):
-                nkey = normalize_wav_key(fn)
-                if nkey:
-                    wav_index[nkey] = os.path.join(wav_dir, fn)
-    except Exception:
-        pass
+    wav_index = build_generation_wav_index(
+        wav_dir,
+        normalize_key_fn=normalize_wav_key,
+        recursive=False,
+    )
 
     by_wav = {}
     for line_idx, row in parsed:

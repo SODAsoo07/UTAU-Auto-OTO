@@ -23,6 +23,7 @@ try:
 except Exception:  # pragma: no cover
     np = None
 
+from core.generation.file_index import build_wav_index as build_generation_wav_index
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 from core.oto_normalization import normalize_wav_key
 
@@ -561,16 +562,11 @@ def apply_mel_safety_clamp_to_oto_file(
     if not parsed:
         return 0
 
-    # Build wav index
-    wav_index: Dict[str, str] = {}
-    try:
-        for fn in os.listdir(wav_dir):
-            if fn.lower().endswith(".wav"):
-                key = norm_key(fn)
-                if key:
-                    wav_index[key] = os.path.join(wav_dir, fn)
-    except Exception:
-        pass
+    wav_index = build_generation_wav_index(
+        wav_dir,
+        normalize_key_fn=norm_key,
+        recursive=False,
+    )
 
     by_wav: Dict[str, List[tuple]] = {}
     for line_idx, row in parsed:
