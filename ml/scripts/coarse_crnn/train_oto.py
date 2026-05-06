@@ -1,12 +1,58 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import json
 import os
+from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8")
 
 from core.coarse_crnn.oto_model import OtoCrnnConfig, load_oto_checkpoint
 from core.coarse_crnn.oto_targets import read_jsonl
 from core.coarse_crnn.oto_training import OtoTrainConfig, train_oto_from_manifest
+
+
+def _row_cap_key(row: dict) -> tuple[str, str, str]:
+    language = str(row.get("language") or row.get("lang") or "unknown").strip().lower() or "unknown"
+    format_type = str(row.get("format_type") or row.get("format") or "unknown").strip().lower() or "unknown"
+    role = str(row.get("alias_role") or row.get("alias_type") or "other").strip().lower() or "other"
+    return language, format_type, role
+
+
+def _cap_rows_stratified(rows: list[dict], limit: int) -> list[dict]:
+    """Deterministically cap sorted manifests without losing later language/role slices."""
+    if limit <= 0 or len(rows) <= limit:
+        return list(rows)
+
+    buckets: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for row in rows:
+        buckets[_row_cap_key(row)].append(row)
+
+    keys = sorted(buckets.keys())
+    positions = {key: 0 for key in keys}
+    selected: list[dict] = []
+    active = list(keys)
+    while active and len(selected) < limit:
+        next_active: list[tuple[str, str, str]] = []
+        for key in active:
+            position = positions[key]
+            bucket = buckets[key]
+            if position < len(bucket):
+                selected.append(bucket[position])
+                positions[key] = position + 1
+                if positions[key] < len(bucket):
+                    next_active.append(key)
+                if len(selected) >= limit:
+                    break
+        active = next_active
+    return selected
 
 
 def main() -> int:
@@ -15,6 +61,12 @@ def main() -> int:
     parser.add_argument("--val-manifest", default="", help="Optional fixed validation manifest, preferably voicebank-held-out.")
     parser.add_argument("--out", default=os.path.join("ml_workspace", "models", "coarse_crnn", "oto_anchor_crnn.pt"))
     parser.add_argument("--resume-model", default="", help="Optional checkpoint path to continue fine-tuning from.")
+    parser.add_argument(
+        "--resume-strategy",
+        choices=("strict", "compatible"),
+        default="strict",
+        help="strict requires identical checkpoint architecture; compatible loads only same-name/same-shape tensors.",
+    )
     parser.add_argument("--epochs", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-frames", type=int, default=1200)
@@ -34,8 +86,8 @@ def main() -> int:
     parser.add_argument("--hidden", type=int, default=96)
     parser.add_argument("--conv-channels", type=int, default=96)
     parser.add_argument("--val-ratio", type=float, default=0.08)
-    parser.add_argument("--max-rows", type=int, default=0, help="Optional deterministic cap for smoke tests.")
-    parser.add_argument("--max-val-rows", type=int, default=0, help="Optional deterministic cap for fixed validation rows.")
+    parser.add_argument("--max-rows", type=int, default=0, help="Optional stratified deterministic cap for smoke tests.")
+    parser.add_argument("--max-val-rows", type=int, default=0, help="Optional stratified deterministic cap for fixed validation rows.")
     parser.add_argument("--vcv-loss-weight", type=float, default=1.35)
     parser.add_argument("--cvvc-loss-weight", type=float, default=1.15)
     parser.add_argument("--cvc-loss-weight", type=float, default=1.05)
@@ -74,12 +126,18 @@ def main() -> int:
     parser.add_argument("--confidence-target-error-scale", type=float, default=0.08)
     parser.add_argument("--balanced-sampling", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--voicebank-balance-power", type=float, default=0.55)
+    parser.add_argument("--language-balance-power", type=float, default=0.25,
+                        help="Weighted sampler language balancing power. Use >0 to keep Korean/Japanese mix explicit.")
     parser.add_argument("--role-balance-power", type=float, default=0.30)
     parser.add_argument("--format-balance-power", type=float, default=0.35)
+    parser.add_argument("--language-format-role-sampling-boosts", default="",
+                        help="Comma-separated slash-pattern sampler boosts, e.g. korean/cvvc/*=1.8,korean/cvvc/vc=2.2.")
     parser.add_argument("--cvvc-vc-sampling-boost", type=float, default=1.0,
                         help="Weighted sampler boost for cvvc|vc|* rows.")
     parser.add_argument("--cvvc-vv-sampling-boost", type=float, default=1.0,
                         help="Weighted sampler boost for cvvc|vv|* rows.")
+    parser.add_argument("--cvvc-vc-multi-sampling-boost", type=float, default=1.0,
+                        help="Extra weighted sampler boost for cvvc|vc|multi rows.")
     parser.add_argument("--hard-case-mining", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hard-case-top-ratio", type=float, default=0.25)
     parser.add_argument("--hard-case-boost", type=float, default=2.5)
@@ -124,10 +182,10 @@ def main() -> int:
 
     rows = read_jsonl(args.manifest)
     if int(args.max_rows) > 0:
-        rows = rows[: int(args.max_rows)]
+        rows = _cap_rows_stratified(rows, int(args.max_rows))
     val_rows = read_jsonl(args.val_manifest) if str(args.val_manifest or "").strip() else None
     if val_rows is not None and int(args.max_val_rows) > 0:
-        val_rows = val_rows[: int(args.max_val_rows)]
+        val_rows = _cap_rows_stratified(val_rows, int(args.max_val_rows))
     model_cfg = OtoCrnnConfig(
         n_mels=int(args.n_mels),
         hidden=int(args.hidden),
@@ -183,10 +241,17 @@ def main() -> int:
         confidence_target_error_scale=float(args.confidence_target_error_scale),
         enable_balanced_sampling=bool(args.balanced_sampling),
         voicebank_balance_power=float(args.voicebank_balance_power),
+        language_balance_power=float(args.language_balance_power),
         role_balance_power=float(args.role_balance_power),
         format_balance_power=float(args.format_balance_power),
+        language_format_role_sampling_boosts=tuple(
+            item.strip().lower()
+            for item in str(args.language_format_role_sampling_boosts or "").split(",")
+            if item.strip()
+        ),
         cvvc_vc_sampling_boost=float(args.cvvc_vc_sampling_boost),
         cvvc_vv_sampling_boost=float(args.cvvc_vv_sampling_boost),
+        cvvc_vc_multi_sampling_boost=float(args.cvvc_vc_multi_sampling_boost),
         enable_hard_case_mining=bool(args.hard_case_mining),
         hard_case_top_ratio=float(args.hard_case_top_ratio),
         hard_case_boost=float(args.hard_case_boost),
@@ -227,6 +292,7 @@ def main() -> int:
         train_config=train_cfg,
         model_config=model_cfg,
         init_state_dict=init_state,
+        init_state_strict=str(args.resume_strategy) == "strict",
         init_tag=init_tag,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))

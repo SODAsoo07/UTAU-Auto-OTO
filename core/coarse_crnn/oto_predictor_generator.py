@@ -93,6 +93,7 @@ def generate_oto_with_crnn_predictor(
     guard_changed = 0
     low_conf_fallback_count = 0
     activity_fallback_count = 0
+    kr_cvvc_role_fallback_count = 0
     silence_window_clamp_count = 0
     span_cap_count = 0
     onset_snap_count = 0
@@ -136,6 +137,10 @@ def generate_oto_with_crnn_predictor(
                 predicted_error_ms=getattr(pred, "predicted_error_ms", None),
                 predicted_low_confidence=bool(getattr(pred, "low_confidence", False)),
                 base_params=row.base_params,
+                wav_path=row.wav_abs,
+                sample_rate=16000,
+                cache=activity_profile_cache,
+                voicebank_profile=voicebank_activity_profile,
                 language=lang,
                 format_type=fmt,
                 alias=row.alias,
@@ -150,6 +155,30 @@ def generate_oto_with_crnn_predictor(
                 predicted_params=params,
                 duration_ms=pred_duration_ms,
             )
+            params, role_fallback_reason = _apply_korean_cvvc_role_fallback(
+                predicted_anchors=predicted_anchors,
+                predicted_params=params,
+                base_params=row.base_params,
+                wav_path=row.wav_abs,
+                sample_rate=16000,
+                cache=activity_profile_cache,
+                voicebank_profile=voicebank_activity_profile,
+                predicted_confidence=float(getattr(pred, "confidence", 0.0) or 0.0),
+                predicted_error_ms=getattr(pred, "predicted_error_ms", None),
+                predicted_low_confidence=bool(getattr(pred, "low_confidence", False)),
+                language=lang,
+                format_type=fmt,
+                alias=row.alias,
+                duration_ms=pred_duration_ms,
+                is_special=row.is_special,
+            )
+            if role_fallback_reason:
+                kr_cvvc_role_fallback_count += 1
+                predicted_anchors = _resolve_predicted_anchors(
+                    pred=pred,
+                    predicted_params=params,
+                    duration_ms=pred_duration_ms,
+                )
             params, activity_reason = _apply_activity_window_fallback(
                 predicted_anchors=predicted_anchors,
                 predicted_params=params,
@@ -236,6 +265,8 @@ def generate_oto_with_crnn_predictor(
         _log(callback, f"[OTO-CRNN] right-boundary guard adjusted rows={guard_changed}/{len(out_lines)}")
     if low_conf_fallback_count:
         _log(callback, f"[OTO-CRNN] low-confidence fallback rows={low_conf_fallback_count}/{len(out_lines)}")
+    if kr_cvvc_role_fallback_count:
+        _log(callback, f"[OTO-CRNN] korean-cvvc role fallback rows={kr_cvvc_role_fallback_count}/{len(out_lines)}")
     if activity_fallback_count:
         _log(callback, f"[OTO-CRNN] activity-window fallback rows={activity_fallback_count}/{len(out_lines)}")
     if silence_window_clamp_count:
@@ -588,6 +619,10 @@ def _apply_low_confidence_fallback(
     predicted_error_ms: float | None,
     predicted_low_confidence: bool,
     base_params: dict[str, float] | None,
+    wav_path: str,
+    sample_rate: int,
+    cache: dict[str, dict[str, float]],
+    voicebank_profile: dict[str, float],
     language: str,
     format_type: str,
     alias: str,
@@ -608,9 +643,9 @@ def _apply_low_confidence_fallback(
     trigger = bool(trigger_model or trigger_conf or trigger_err)
     if not trigger:
         return dict(predicted_params), ""
+    if not _source_oto_shape_usable(base_params, duration_ms=duration_ms):
+        return dict(predicted_params), ""
 
-    base = {key: float(value) for key, value in dict(base_params).items()}
-    model = {key: float(value) for key, value in dict(predicted_params).items()}
     conf_gap = max(0.0, float(min_conf) - float(predicted_confidence))
     conf_denom = max(float(min_conf), 1e-6)
     conf_strength = min(1.0, conf_gap / conf_denom)
@@ -630,13 +665,19 @@ def _apply_low_confidence_fallback(
         min_base_weight,
         max_base_weight,
     )
-    fused = {
-        "offset": (model["offset"] * (1.0 - base_weight)) + (base["offset"] * base_weight),
-        "consonant": (model["consonant"] * (1.0 - base_weight)) + (base["consonant"] * base_weight),
-        "cutoff": (model["cutoff"] * (1.0 - base_weight)) + (base["cutoff"] * base_weight),
-        "preutterance": (model["preutterance"] * (1.0 - base_weight)) + (base["preutterance"] * base_weight),
-        "overlap": (model["overlap"] * (1.0 - base_weight)) + (base["overlap"] * base_weight),
-    }
+    fused = _blend_with_source_oto_shape(
+        predicted_params=predicted_params,
+        base_params=base_params,
+        shape_weight=base_weight,
+        cutoff_weight=_source_shape_cutoff_weight(
+            shape_weight=base_weight,
+            language=lang,
+            format_type=format_type,
+            alias=alias,
+            is_special=is_special,
+        ),
+        duration_ms=duration_ms,
+    )
     guarded, _ = _apply_conservative_right_boundary_guard(
         fused,
         language=language,
@@ -717,17 +758,23 @@ def _apply_activity_window_fallback(
         return dict(predicted_params), ""
     if not _is_anchor_outside_activity(predicted_anchors, profile):
         return dict(predicted_params), ""
+    if not _source_oto_shape_usable(base_params, duration_ms=duration_ms):
+        return dict(predicted_params), ""
     lang = str(language or "").strip().lower()
-    model = {key: float(value) for key, value in dict(predicted_params).items()}
-    base = {key: float(value) for key, value in dict(base_params).items()}
     base_weight = _clamp(_env_float_lang("UTOA_OTO_CRNN_ACTIVITY_FALLBACK_BASE_WEIGHT", lang, 0.72), 0.20, 0.95)
-    fused = {
-        "offset": (model["offset"] * (1.0 - base_weight)) + (base["offset"] * base_weight),
-        "consonant": (model["consonant"] * (1.0 - base_weight)) + (base["consonant"] * base_weight),
-        "cutoff": (model["cutoff"] * (1.0 - base_weight)) + (base["cutoff"] * base_weight),
-        "preutterance": (model["preutterance"] * (1.0 - base_weight)) + (base["preutterance"] * base_weight),
-        "overlap": (model["overlap"] * (1.0 - base_weight)) + (base["overlap"] * base_weight),
-    }
+    fused = _blend_with_source_oto_shape(
+        predicted_params=predicted_params,
+        base_params=base_params,
+        shape_weight=base_weight,
+        cutoff_weight=_source_shape_cutoff_weight(
+            shape_weight=base_weight,
+            language=lang,
+            format_type=format_type,
+            alias=alias,
+            is_special=is_special,
+        ),
+        duration_ms=duration_ms,
+    )
     guarded, _ = _apply_conservative_right_boundary_guard(
         fused,
         language=lang,
@@ -744,6 +791,160 @@ def _apply_activity_window_fallback(
         is_special=bool(is_special),
     )
     return guarded, "activity_outlier"
+
+
+def _apply_korean_cvvc_role_fallback(
+    *,
+    predicted_anchors: dict[str, float],
+    predicted_params: dict[str, float],
+    base_params: dict[str, float] | None,
+    wav_path: str,
+    sample_rate: int,
+    cache: dict[str, dict[str, float]],
+    voicebank_profile: dict[str, float],
+    predicted_confidence: float,
+    predicted_error_ms: float | None,
+    predicted_low_confidence: bool,
+    language: str,
+    format_type: str,
+    alias: str,
+    duration_ms: float,
+    is_special: bool,
+) -> tuple[dict[str, float], str]:
+    if not _env_bool("UTOA_OTO_CRNN_KR_CVVC_ROLE_FALLBACK_ENABLE", True):
+        return dict(predicted_params), ""
+    if not _base_params_fallback_usable(base_params):
+        return dict(predicted_params), ""
+    lang = str(language or "").strip().lower()
+    fmt = str(format_type or "").strip().lower()
+    if not (lang.startswith("ko") or lang.startswith("kr") or lang == "korean"):
+        return dict(predicted_params), ""
+    if fmt != "cvvc":
+        return dict(predicted_params), ""
+
+    alias_type = _safe_alias_type(lang, alias)
+    role = _safe_alias_role(lang, alias, alias_type=alias_type, is_special=bool(is_special))
+    if role not in {"vc", "v-cv", "cv", "vv", "other", "-cv"}:
+        return dict(predicted_params), ""
+
+    profile = _analyze_activity_profile(
+        wav_path,
+        sample_rate=sample_rate,
+        cache=cache,
+        voicebank_profile=voicebank_profile,
+    )
+    activity_risk = bool(profile) and _is_anchor_outside_activity(predicted_anchors, profile)
+    shift_risk = bool(profile) and _is_korean_cvvc_syllable_shift_risk(
+        predicted_anchors=predicted_anchors,
+        profile=profile,
+        role=role,
+    )
+    min_conf = _env_float_lang("UTOA_OTO_CRNN_KR_CVVC_ROLE_MIN_CONFIDENCE", lang, 0.62)
+    max_error_ms = _env_float_lang("UTOA_OTO_CRNN_KR_CVVC_ROLE_MAX_PREDICTED_ERROR_MS", lang, 85.0)
+    trigger_conf = float(predicted_confidence) < float(min_conf)
+    trigger_err = predicted_error_ms is not None and float(predicted_error_ms) > float(max_error_ms)
+    use_model_flag = _env_bool("UTOA_OTO_CRNN_KR_CVVC_ROLE_USE_MODEL_FLAG", False)
+    trigger_model = bool(predicted_low_confidence) and bool(use_model_flag)
+    if not (activity_risk or shift_risk or trigger_conf or trigger_err or trigger_model):
+        return dict(predicted_params), ""
+    if not _source_oto_shape_usable(base_params, duration_ms=duration_ms):
+        return dict(predicted_params), ""
+
+    base_weight = _korean_cvvc_role_base_weight(role)
+    if shift_risk or activity_risk:
+        base_weight = max(
+            base_weight,
+            _env_float_lang("UTOA_OTO_CRNN_KR_CVVC_SHIFT_BASE_WEIGHT", lang, 0.88),
+        )
+    if trigger_err:
+        base_weight = max(base_weight, _env_float_lang("UTOA_OTO_CRNN_KR_CVVC_ERROR_BASE_WEIGHT", lang, 0.82))
+    base_weight = _clamp(base_weight, 0.35, 0.96)
+    fused = _blend_with_source_oto_shape(
+        predicted_params=predicted_params,
+        base_params=base_params,
+        shape_weight=base_weight,
+        cutoff_weight=_source_shape_cutoff_weight(
+            shape_weight=base_weight,
+            language=lang,
+            format_type=fmt,
+            alias=alias,
+            is_special=is_special,
+            role=role,
+        ),
+        duration_ms=duration_ms,
+    )
+    guarded, _ = _apply_conservative_right_boundary_guard(
+        fused,
+        language=lang,
+        alias=alias,
+        duration_ms=max(1.0, float(duration_ms)),
+        is_special=bool(is_special),
+    )
+    guarded, _ = _apply_duration_span_cap(
+        predicted_params=guarded,
+        duration_ms=max(1.0, float(duration_ms)),
+        language=lang,
+        format_type=fmt,
+        alias=alias,
+        is_special=bool(is_special),
+    )
+    reasons = [f"korean_cvvc_{role}_role"]
+    if shift_risk:
+        reasons.append("syllable_shift_guard")
+    if activity_risk:
+        reasons.append("activity_window_fallback")
+    if trigger_err:
+        reasons.append("high_predicted_error")
+    if trigger_conf:
+        reasons.append("low_confidence")
+    if trigger_model:
+        reasons.append("model_low_confidence")
+    return guarded, "+".join(reasons)
+
+
+def _korean_cvvc_role_base_weight(role: str) -> float:
+    role_key = str(role or "other").strip().lower()
+    defaults = {
+        "vc": 0.86,
+        "v-cv": 0.86,
+        "other": 0.90,
+        "cv": 0.76,
+        "vv": 0.80,
+        "-cv": 0.74,
+    }
+    env_name = "UTOA_OTO_CRNN_KR_CVVC_ROLE_BASE_WEIGHT_" + role_key.replace("-", "_").upper()
+    return _clamp(_env_float(env_name, defaults.get(role_key, 0.78)), 0.35, 0.96)
+
+
+def _is_korean_cvvc_syllable_shift_risk(
+    *,
+    predicted_anchors: dict[str, float],
+    profile: dict[str, float],
+    role: str,
+) -> bool:
+    start_ms = float(profile.get("active_start_ms", 0.0) or 0.0)
+    end_ms = float(profile.get("active_end_ms", 0.0) or 0.0)
+    if end_ms <= start_ms + 20.0:
+        return False
+    core_start = float(profile.get("active_core_start_ms", start_ms) or start_ms)
+    core_end = float(profile.get("active_core_end_ms", end_ms) or end_ms)
+    if core_end <= core_start + 20.0:
+        core_start, core_end = start_ms, end_ms
+    pre = float(predicted_anchors.get("preutterance", 0.0) or 0.0)
+    cons = float(predicted_anchors.get("consonant", 0.0) or 0.0)
+    cutoff = float(predicted_anchors.get("cutoff", 0.0) or 0.0)
+    mid = (pre + cons) * 0.5
+    role_key = str(role or "").strip().lower()
+    margin = _env_float("UTOA_OTO_CRNN_KR_CVVC_SHIFT_MARGIN_MS", 52.0)
+    if mid < core_start - margin or mid > core_end + margin:
+        return True
+    if role_key in {"vc", "v-cv"} and (pre > core_end - 14.0 or cons < core_start - 35.0):
+        return True
+    if role_key in {"cv", "other"} and pre > core_end - 20.0:
+        return True
+    if cutoff < core_start - 35.0:
+        return True
+    return False
 
 
 def _apply_silence_window_clamp(
@@ -1154,6 +1355,106 @@ def _base_params_fallback_usable(base_params: dict[str, float] | None) -> bool:
     if all(abs(v) < 1e-6 for v in values):
         return False
     return True
+
+
+def _source_oto_shape_usable(base_params: dict[str, float] | None, *, duration_ms: float) -> bool:
+    if not _base_params_fallback_usable(base_params):
+        return False
+    total_ms = max(1.0, float(duration_ms) or 0.0)
+    base = {key: float(value) for key, value in dict(base_params or {}).items()}
+    pre = max(0.0, float(base.get("preutterance", 0.0)))
+    cons = max(0.0, float(base.get("consonant", 0.0)))
+    ovl = max(0.0, float(base.get("overlap", 0.0)))
+    cutoff_span = abs(float(base.get("cutoff", 0.0)))
+    min_pre = _env_float("UTOA_OTO_CRNN_SOURCE_SHAPE_MIN_PRE_MS", 8.0)
+    min_cons = _env_float("UTOA_OTO_CRNN_SOURCE_SHAPE_MIN_CONS_MS", 20.0)
+    min_cutoff = _env_float("UTOA_OTO_CRNN_SOURCE_SHAPE_MIN_CUTOFF_SPAN_MS", 35.0)
+    if pre < min_pre or cons < min_cons or cutoff_span < min_cutoff:
+        return False
+    if ovl > pre + 40.0:
+        return False
+    if cons < pre + 1.0:
+        return False
+    if cutoff_span < cons + 1.0:
+        return False
+    if cons > total_ms * 0.98 or cutoff_span > total_ms * 1.20:
+        return False
+    return True
+
+
+def _blend_with_source_oto_shape(
+    *,
+    predicted_params: dict[str, float],
+    base_params: dict[str, float] | None,
+    shape_weight: float,
+    cutoff_weight: float | None = None,
+    duration_ms: float,
+) -> dict[str, float]:
+    model = {key: float(value) for key, value in dict(predicted_params).items()}
+    base = {key: float(value) for key, value in dict(base_params or {}).items()}
+    weight = _clamp(float(shape_weight), 0.0, 1.0)
+    tail_weight = _clamp(float(weight if cutoff_weight is None else cutoff_weight), 0.0, weight)
+    source_shape = {
+        "offset": float(model["offset"]),
+        "consonant": max(1.0, float(base.get("consonant", model["consonant"]))),
+        "cutoff": -max(1.0, abs(float(base.get("cutoff", model["cutoff"])))),
+        "preutterance": max(0.0, float(base.get("preutterance", model["preutterance"]))),
+        "overlap": max(0.0, float(base.get("overlap", model["overlap"]))),
+    }
+    fused = {
+        "offset": float(model["offset"]),
+        "consonant": (model["consonant"] * (1.0 - weight)) + (source_shape["consonant"] * weight),
+        "cutoff": (model["cutoff"] * (1.0 - tail_weight)) + (source_shape["cutoff"] * tail_weight),
+        "preutterance": (model["preutterance"] * (1.0 - weight)) + (source_shape["preutterance"] * weight),
+        "overlap": (model["overlap"] * (1.0 - weight)) + (source_shape["overlap"] * weight),
+    }
+    anchors = oto_params_to_anchors(
+        offset=fused["offset"],
+        consonant=fused["consonant"],
+        cutoff=fused["cutoff"],
+        preutterance=fused["preutterance"],
+        overlap=fused["overlap"],
+        duration_ms=max(1.0, float(duration_ms)),
+    )
+    return anchors_to_oto_params(anchors, duration_ms=max(1.0, float(duration_ms)))
+
+
+def _source_shape_cutoff_weight(
+    *,
+    shape_weight: float,
+    language: str,
+    format_type: str,
+    alias: str,
+    is_special: bool,
+    role: str | None = None,
+) -> float:
+    weight = _clamp(float(shape_weight), 0.0, 1.0)
+    lang = str(language or "").strip().lower()
+    fmt = str(format_type or "").strip().lower()
+    role_key = str(role or "").strip().lower()
+    if not role_key:
+        alias_type = _safe_alias_type(lang, alias)
+        role_key = _safe_alias_role(lang, alias, alias_type=alias_type, is_special=bool(is_special))
+
+    factor = _env_float_lang("UTOA_OTO_CRNN_SOURCE_SHAPE_CUTOFF_WEIGHT_FACTOR", lang, 0.45)
+    if (lang.startswith("ko") or lang.startswith("kr") or lang == "korean") and fmt == "cvvc":
+        defaults = {
+            "v-cv": 0.12,
+            "vv": 0.18,
+            "v": 0.14,
+            "vc": 0.34,
+            "other": 0.34,
+            "cv": 0.42,
+            "-cv": 0.42,
+            "br": 0.22,
+            "endbr": 0.22,
+        }
+        role_factor_name = (
+            "UTOA_OTO_CRNN_KR_CVVC_SOURCE_SHAPE_CUTOFF_FACTOR_"
+            + str(role_key or "other").replace("-", "_").upper()
+        )
+        factor = _env_float(role_factor_name, defaults.get(role_key, factor))
+    return _clamp(weight * _clamp(float(factor), 0.0, 1.0), 0.0, weight)
 
 
 def _resolve_predicted_anchors(*, pred: Any, predicted_params: dict[str, float], duration_ms: float) -> dict[str, float]:
