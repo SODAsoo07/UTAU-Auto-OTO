@@ -73,6 +73,10 @@ class OtoTrainConfig:
     # Keep role upweighting, but avoid drowning out format identity on OOD banks.
     role_balance_power: float = 0.30
     format_balance_power: float = 0.35
+    # Direct sampling boost for sparse/high-error CVVC contexts.
+    # `cvvc|vc|*` = cvvc format with vc alias-role or vc alias-type.
+    cvvc_vc_sampling_boost: float = 1.0
+    cvvc_vv_sampling_boost: float = 1.0
     enable_hard_case_mining: bool = True
     hard_case_top_ratio: float = 0.25
     hard_case_boost: float = 2.5
@@ -299,6 +303,8 @@ def train_oto_from_manifest(
     val_rows: list[dict[str, Any]] | None = None,
     train_config: OtoTrainConfig | None = None,
     model_config: OtoCrnnConfig | None = None,
+    init_state_dict: dict[str, Any] | None = None,
+    init_tag: str = "",
 ) -> dict[str, Any]:
     torch = __import__("torch")
     nn = __import__("torch.nn").nn
@@ -361,6 +367,12 @@ def train_oto_from_manifest(
     use_amp = bool(cfg.amp and device.type == "cuda")
     scaler = _make_grad_scaler(torch, enabled=use_amp)
     model = build_oto_model(model_cfg).to(device)
+    if init_state_dict:
+        model.load_state_dict(init_state_dict, strict=True)
+        if str(init_tag or "").strip():
+            print(f"[oto_anchor][train] loaded init_state from {init_tag}", flush=True)
+        else:
+            print("[oto_anchor][train] loaded init_state", flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg.lr), weight_decay=1e-4)
 
     history: list[dict[str, float]] = []
@@ -540,6 +552,7 @@ def train_oto_from_manifest(
             "train_rows": len(train_rows),
             "val_rows": len(val_rows_final),
             "fixed_val_manifest": bool(fixed_val_rows),
+            "init_tag": str(init_tag or ""),
             "history": history,
             "device": str(device),
             "amp": bool(use_amp),
@@ -553,6 +566,7 @@ def train_oto_from_manifest(
         "history": history,
         "train_rows": len(train_rows),
         "val_rows": len(val_rows_final),
+        "init_tag": str(init_tag or ""),
         "device": str(device),
         "amp": bool(use_amp),
     }
@@ -1059,18 +1073,36 @@ def _build_train_sampling_weights(rows: list[dict[str, Any]], cfg: OtoTrainConfi
     vb_power = float(getattr(cfg, "voicebank_balance_power", 0.55))
     role_power = float(getattr(cfg, "role_balance_power", 0.35))
     fmt_power = float(getattr(cfg, "format_balance_power", 0.20))
+    cvvc_vc_boost = max(1.0, float(getattr(cfg, "cvvc_vc_sampling_boost", 1.0) or 1.0))
+    cvvc_vv_boost = max(1.0, float(getattr(cfg, "cvvc_vv_sampling_boost", 1.0) or 1.0))
+    boosted_vc = 0
+    boosted_vv = 0
     out = np.ones((len(rows),), dtype=np.float32)
     for idx, row in enumerate(rows):
         vb = str(row.get("voicebank_id", "") or "unknown_voicebank")
         role = str(row.get("alias_role", "") or "other").strip().lower() or "other"
+        alias_type = str(row.get("alias_type", "") or "other").strip().lower() or "other"
         fmt = str(row.get("format_type", "") or "other").strip().lower() or "other"
         w = float(row.get("sample_weight", row.get("weight", 1.0)) or 1.0)
         w /= float(max(1, vb_counter.get(vb, 1))) ** vb_power
         w /= float(max(1, role_counter.get(role, 1))) ** role_power
         w /= float(max(1, fmt_counter.get(fmt, 1))) ** fmt_power
+        if fmt == "cvvc":
+            if role == "vc" or alias_type == "vc":
+                w *= cvvc_vc_boost
+                boosted_vc += 1
+            elif role == "vv" or alias_type == "vv":
+                w *= cvvc_vv_boost
+                boosted_vv += 1
         if idx < int(hard_case_boosts.shape[0]):
             w *= float(max(1.0, hard_case_boosts[idx]))
         out[idx] = max(1e-5, float(w))
+    if cvvc_vc_boost > 1.0 or cvvc_vv_boost > 1.0:
+        print(
+            f"[oto_anchor][sampling] cvvc_vc_boost={cvvc_vc_boost:.2f} rows={boosted_vc} "
+            f"cvvc_vv_boost={cvvc_vv_boost:.2f} rows={boosted_vv}",
+            flush=True,
+        )
     return out
 
 

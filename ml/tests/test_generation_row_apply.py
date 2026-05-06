@@ -2,6 +2,7 @@ from core.generation.row_apply import (
     apply_zero_template_compute_policy,
     build_review_required_unset,
     decide_row_application,
+    evaluate_row_apply_policy,
     record_row_apply_decision,
 )
 
@@ -139,3 +140,98 @@ def test_build_review_required_unset_returns_reason_and_meta():
         "apply_mode": "review_required",
         "routing_profile": "acoustic_safe",
     }
+
+
+def test_evaluate_row_apply_policy_handles_review_required_template_preserve():
+    counts = {}
+    decisions = []
+    final_lines = []
+    unset_calls = []
+    review_logs = []
+
+    out = evaluate_row_apply_policy(
+        row_apply_mode_counts=counts,
+        row_apply_decisions=decisions,
+        routing_profile="acoustic_safe",
+        pitch_zone="",
+        row_mapping_confidence=0.8,
+        row_conf_floor=0.62,
+        row_blank_confidence=0.1,
+        row_blank_floor=0.64,
+        row_blank_floor_for_report=0.64,
+        row_jump_blocked=0,
+        forced_selected=False,
+        file_mapping_low_conf=False,
+        row_abstain={
+            "should_skip": True,
+            "reason": "inactive_candidate",
+            "diag_hint": "candidate inactive",
+        },
+        line="a.wav=ka,1,2,3,4,5",
+        use_template=True,
+        is_zero_placeholder_line_fn=lambda _line: False,
+        fname="a.wav",
+        alias="ka",
+        alias_type="cv",
+        file_format="cvvc",
+        selected_w_idx=1,
+        debug_logging=True,
+        log_fn=lambda _msg: None,
+        log_review_required_fn=review_logs.append,
+        record_unset_fn=lambda *args, **kwargs: unset_calls.append((args, kwargs)),
+        final_lines=final_lines,
+        apply_suffix_to_oto_line_fn=lambda line, suffix: f"{line}{suffix}",
+        alias_suffix="_s",
+    )
+
+    assert out["should_continue"] is True
+    assert out["row_apply_mode"] == "review_required"
+    assert counts["review_required"] == 1
+    assert decisions[0]["reason_code"] == "inactive_candidate"
+    assert review_logs == ["inactive_candidate"]
+    assert unset_calls[0][0][:3] == ("inactive_candidate", "a.wav", "a.wav=ka,1,2,3,4,5")
+    assert unset_calls[0][1]["meta"]["diag_hint"] == "candidate inactive"
+    assert final_lines == ["a.wav=ka,1,2,3,4,5_s"]
+
+
+def test_evaluate_row_apply_policy_allows_compute_for_soft_low_confidence():
+    counts = {}
+    decisions = []
+    final_lines = []
+
+    out = evaluate_row_apply_policy(
+        row_apply_mode_counts=counts,
+        row_apply_decisions=decisions,
+        routing_profile="hybrid_soft",
+        pitch_zone="",
+        row_mapping_confidence=0.5,
+        row_conf_floor=0.62,
+        row_blank_confidence=0.1,
+        row_blank_floor=0.64,
+        row_blank_floor_for_report=0.64,
+        row_jump_blocked=0,
+        forced_selected=False,
+        file_mapping_low_conf=True,
+        row_abstain={"should_skip": False, "reason": ""},
+        line="a.wav=ka,1,2,3,4,5",
+        use_template=True,
+        is_zero_placeholder_line_fn=lambda _line: False,
+        fname="a.wav",
+        alias="ka",
+        alias_type="cv",
+        file_format="cvvc",
+        selected_w_idx=1,
+        debug_logging=False,
+        log_fn=lambda _msg: None,
+        log_review_required_fn=None,
+        record_unset_fn=lambda *args, **kwargs: None,
+        final_lines=final_lines,
+        apply_suffix_to_oto_line_fn=lambda line, suffix: f"{line}{suffix}",
+        alias_suffix="_s",
+    )
+
+    assert out["should_continue"] is False
+    assert out["row_apply_mode"] == "conservative_apply"
+    assert out["row_apply_reason_code"] == "low_model_conf"
+    assert final_lines == []
+    assert counts["conservative_apply"] == 1
