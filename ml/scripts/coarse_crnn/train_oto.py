@@ -92,8 +92,9 @@ def main() -> int:
     parser.add_argument("--activity-min-active-span-ratio", type=float, default=0.16)
     parser.add_argument("--activity-quality-outside-penalty", type=float, default=0.35)
     parser.add_argument("--activity-quality-min-multiplier", type=float, default=0.10)
-    parser.add_argument("--activity-quality-drop-low-weight", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--activity-quality-drop-low-weight", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--activity-quality-drop-threshold", type=float, default=0.08)
+    parser.add_argument("--activity-quality-max-drop-ratio", type=float, default=0.35)
     parser.add_argument("--activity-quality-sample-rate", type=int, default=16000)
     parser.add_argument("--confidence-calibration", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--confidence-calibration-good-error-ms", type=float, default=50.0)
@@ -198,6 +199,7 @@ def main() -> int:
         activity_quality_min_multiplier=float(args.activity_quality_min_multiplier),
         activity_quality_drop_low_weight=bool(args.activity_quality_drop_low_weight),
         activity_quality_drop_threshold=float(args.activity_quality_drop_threshold),
+        activity_quality_max_drop_ratio=float(args.activity_quality_max_drop_ratio),
         activity_quality_sample_rate=int(args.activity_quality_sample_rate),
         enable_confidence_calibration=bool(args.confidence_calibration),
         confidence_calibration_good_error_ms=float(args.confidence_calibration_good_error_ms),

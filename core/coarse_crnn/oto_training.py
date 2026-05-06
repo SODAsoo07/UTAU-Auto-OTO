@@ -93,8 +93,9 @@ class OtoTrainConfig:
     activity_min_active_span_ratio: float = 0.16
     activity_quality_outside_penalty: float = 0.35
     activity_quality_min_multiplier: float = 0.10
-    activity_quality_drop_low_weight: bool = True
+    activity_quality_drop_low_weight: bool = False
     activity_quality_drop_threshold: float = 0.08
+    activity_quality_max_drop_ratio: float = 0.35
     activity_quality_sample_rate: int = 16000
     # Confidence calibration derived from validation predictions.
     enable_confidence_calibration: bool = True
@@ -1297,6 +1298,7 @@ def _apply_activity_quality_filter(rows: list[dict[str, Any]], cfg: OtoTrainConf
     if not rows:
         return []
     cache: dict[str, dict[str, float]] = {}
+    prepared: list[tuple[dict[str, Any], bool]] = []
     kept: list[dict[str, Any]] = []
     dropped = 0
     weakened = 0
@@ -1308,12 +1310,27 @@ def _apply_activity_quality_filter(rows: list[dict[str, Any]], cfg: OtoTrainConf
         row2["sample_weight"] = float(new_weight)
         if new_weight < base_weight - 1e-6:
             weakened += 1
-        if bool(getattr(cfg, "activity_quality_drop_low_weight", True)) and new_weight < float(
+        should_drop = bool(getattr(cfg, "activity_quality_drop_low_weight", False)) and new_weight < float(
             getattr(cfg, "activity_quality_drop_threshold", 0.08)
-        ):
-            dropped += 1
-            continue
-        kept.append(row2)
+        )
+        prepared.append((row2, should_drop))
+
+    if bool(getattr(cfg, "activity_quality_drop_low_weight", False)):
+        dropped = int(sum(1 for _row, should_drop in prepared if should_drop))
+        drop_ratio = float(dropped) / float(max(1, len(rows)))
+        max_drop_ratio = float(getattr(cfg, "activity_quality_max_drop_ratio", 0.35) or 0.35)
+        if drop_ratio > max_drop_ratio:
+            print(
+                f"[oto_anchor][data] {stage_label}: requested_drop_ratio={drop_ratio:.3f} exceeds max_drop_ratio={max_drop_ratio:.3f}; keep-all fallback",
+                flush=True,
+            )
+            kept = [row2 for row2, _ in prepared]
+            dropped = 0
+        else:
+            kept = [row2 for row2, should_drop in prepared if not should_drop]
+    else:
+        kept = [row2 for row2, _ in prepared]
+
     print(
         f"[oto_anchor][data] {stage_label}: rows={len(rows)} kept={len(kept)} dropped={dropped} "
         f"reweighted={weakened}",
