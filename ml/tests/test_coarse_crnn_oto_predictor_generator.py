@@ -139,3 +139,68 @@ def test_normalize_special_aliases_handles_iterables():
     assert _alias_is_special("Tt", special)
     assert not _alias_is_special("a k", special)
     assert not _alias_is_special("", special)
+
+
+def test_crnn_generator_applies_fallback_blend_when_enabled(tmp_path, monkeypatch):
+    from core.coarse_crnn import oto_predictor_generator as gen
+
+    wav_dir = tmp_path / "bank"
+    wav_dir.mkdir()
+    _write_wav(wav_dir / "a.wav")
+    source_oto = wav_dir / "baseoto.ini"
+    source_oto.write_text("a.wav=a,10,80,-160,60,20\n", encoding="utf-8")
+    model_path = tmp_path / "model.pt"
+    model_path.write_bytes(b"fake")
+    out_path = tmp_path / "out.ini"
+
+    class FakeModel:
+        def to(self, _device):
+            return self
+
+        def eval(self):
+            return self
+
+    def fake_predict(**_kwargs):
+        return SimpleNamespace(
+            params={
+                "offset": 30.0,
+                "consonant": 120.0,
+                "cutoff": -220.0,
+                "preutterance": 90.0,
+                "overlap": 40.0,
+            },
+            duration_ms=1000.0,
+            confidence=0.20,
+            heatmap_confidence={
+                "offset": 0.15,
+                "overlap": 0.16,
+                "preutterance": 0.14,
+                "consonant": 0.18,
+                "cutoff": 0.17,
+            },
+        )
+
+    monkeypatch.setattr(gen, "load_oto_checkpoint", lambda *_a, **_k: (FakeModel(), SimpleNamespace(), {}))
+    monkeypatch.setattr(gen, "predict_oto_with_model", fake_predict)
+    monkeypatch.setenv("UTOA_OTO_CRNN_FALLBACK_ENABLE", "1")
+    monkeypatch.setenv("UTOA_OTO_CRNN_FALLBACK_SCORE_THRESHOLD", "0.2")
+    monkeypatch.setenv("UTOA_OTO_CRNN_FALLBACK_SOURCE_BLEND", "0.5")
+
+    processed, total, errors = gen.generate_oto_with_crnn_predictor(
+        wav_dir=str(wav_dir),
+        out_path=str(out_path),
+        source_oto_path=str(source_oto),
+        language="japanese",
+        format_type="vcv",
+        model_path=str(model_path),
+        device="cpu",
+    )
+
+    assert errors == []
+    assert processed == 1 and total == 1
+    line = out_path.read_text(encoding="utf-8").strip()
+    assert line.startswith("a.wav=a,")
+    # fallback 50% blend then right-boundary guard:
+    # offset (30->20), consonant (120->100), pre (90->75), overlap (40->30),
+    # cutoff (-220->-190) then capped to -186 by v-role guard.
+    assert ",20.000,100.000,-186.000,75.000,30.000" in line
