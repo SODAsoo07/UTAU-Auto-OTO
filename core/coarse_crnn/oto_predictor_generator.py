@@ -5,6 +5,13 @@ from dataclasses import dataclass
 from typing import Callable, Any
 
 from core.coarse_crnn.alias_role import classify_alias_role, is_diphthong as _is_diphthong, normalize_role
+from core.coarse_crnn.oto_confidence_calibration import apply_calibration, calibration_from_env
+from core.coarse_crnn.oto_fallback_policy import (
+    blend_with_source,
+    decide_fallback,
+    policy_from_env,
+    signals_from_prediction,
+)
 from core.coarse_crnn.oto_inference import predict_oto_with_model
 from core.coarse_crnn.oto_model import load_oto_checkpoint
 from core.coarse_crnn.training import resolve_torch_device
@@ -26,6 +33,7 @@ class _PredictRow:
     next_alias: str
     row_index: int
     row_count: int
+    source_params: dict[str, float]
     is_special: bool = False
     prev_is_special: bool = False
     next_is_special: bool = False
@@ -80,6 +88,10 @@ def generate_oto_with_crnn_predictor(
     out_lines: list[str] = []
     errors: list[str] = []
     guard_changed = 0
+    fallback_applied = 0
+    fallback_reason_counts: dict[str, int] = {}
+    fallback_policy = policy_from_env()
+    conf_calib = calibration_from_env()
     lang = str(language or "").strip().lower() or "korean"
     fmt = str(format_type or "").strip().lower() or "other"
     suffix = _normalize_alias_suffix(alias_suffix)
@@ -110,6 +122,37 @@ def generate_oto_with_crnn_predictor(
                 is_special=row.is_special,
             )
             guard_changed += 1 if changed else 0
+            if fallback_policy.enabled:
+                alias_type = _safe_alias_type(lang, row.alias)
+                transition_type = _safe_transition_type(alias_type)
+                alias_role = _safe_alias_role(lang, row.alias, alias_type=alias_type, is_special=row.is_special)
+                signals = signals_from_prediction(
+                    confidence=apply_calibration(float(getattr(pred, "confidence", 0.0) or 0.0), conf_calib),
+                    heatmap_confidence=getattr(pred, "heatmap_confidence", None),
+                    alias_type=alias_type,
+                    alias_role=alias_role,
+                    transition_type=transition_type,
+                    row_ratio=_row_ratio(row.row_index, row.row_count),
+                    is_special=bool(row.is_special),
+                )
+                decision = decide_fallback(signals, fallback_policy)
+                if decision.apply:
+                    params = blend_with_source(
+                        params,
+                        row.source_params,
+                        source_blend=float(fallback_policy.source_blend),
+                    )
+                    params, changed_after_blend = _apply_conservative_right_boundary_guard(
+                        params,
+                        language=lang,
+                        alias=row.alias,
+                        duration_ms=float(getattr(pred, "duration_ms", 0.0) or 0.0),
+                        is_special=row.is_special,
+                    )
+                    guard_changed += 1 if changed_after_blend else 0
+                    fallback_applied += 1
+                    for reason in decision.reasons:
+                        fallback_reason_counts[reason] = int(fallback_reason_counts.get(reason, 0)) + 1
             out_lines.append(
                 f"{row.wav_rel}={alias},"
                 f"{float(params['offset']):.3f},"
@@ -141,6 +184,16 @@ def generate_oto_with_crnn_predictor(
         _log(callback, f"[OTO-CRNN] 매칭 실패 wav: {sample}{suffix_text}")
     if guard_changed:
         _log(callback, f"[OTO-CRNN] right-boundary guard adjusted rows={guard_changed}/{len(out_lines)}")
+    if fallback_applied:
+        top_reasons = ", ".join(
+            f"{key}:{value}"
+            for key, value in sorted(fallback_reason_counts.items(), key=lambda item: item[1], reverse=True)[:4]
+        )
+        _log(
+            callback,
+            f"[OTO-CRNN] fallback blended rows={fallback_applied}/{len(out_lines)} "
+            f"(score>={fallback_policy.score_threshold:.2f}; {top_reasons})",
+        )
     _log(callback, f"[OTO-CRNN] written={len(out_lines)} total={total}")
     return len(out_lines), total, []
 
@@ -194,6 +247,7 @@ def _prepare_prediction_rows(
                 "wav_rel": mapped,
                 "wav_abs": os.path.join(wav_root, mapped.replace("/", os.sep)),
                 "alias": str(parsed.get("alias", "") or "").strip(),
+                "source_params": _source_params_from_parsed(parsed),
             }
         )
 
@@ -219,6 +273,7 @@ def _prepare_prediction_rows(
                     next_alias=next_alias,
                     row_index=idx,
                     row_count=count,
+                    source_params=dict(row.get("source_params", {}) or {}),
                     is_special=_alias_is_special(alias_text, special_set),
                     prev_is_special=_alias_is_special(prev_alias, special_set),
                     next_is_special=_alias_is_special(next_alias, special_set),
@@ -416,6 +471,21 @@ def _safe_alias_role(
         return "special" if bool(is_special) else "other"
 
 
+def _safe_transition_type(alias_type: str) -> str:
+    kind = str(alias_type or "").strip().lower()
+    if kind == "vc":
+        return "vc"
+    if kind == "vv":
+        return "vv"
+    if kind == "vcv":
+        return "multi"
+    if kind in {"cv", "cv_head"}:
+        return "cv"
+    if kind == "br":
+        return "br"
+    return "other"
+
+
 def _safe_is_diphthong(language: str, alias: str) -> bool:
     try:
         return bool(_is_diphthong(language, alias))
@@ -435,6 +505,23 @@ def _env_float(name: str, default: float) -> float:
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(float(lo), min(float(hi), float(value)))
+
+
+def _source_params_from_parsed(parsed: dict[str, float]) -> dict[str, float]:
+    return {
+        "offset": float(parsed.get("offset", 0.0) or 0.0),
+        "consonant": float(parsed.get("cons", 0.0) or 0.0),
+        "cutoff": float(parsed.get("cutoff", 0.0) or 0.0),
+        "preutterance": float(parsed.get("pre", 0.0) or 0.0),
+        "overlap": float(parsed.get("ovl", 0.0) or 0.0),
+    }
+
+
+def _row_ratio(row_index_in_wav: int, file_row_count: int) -> float:
+    count = max(1, int(file_row_count))
+    if count <= 1:
+        return 0.0
+    return max(0.0, min(1.0, float(int(row_index_in_wav)) / float(count - 1)))
 
 
 def _normalize_output_oto_path(out_path: str) -> str:

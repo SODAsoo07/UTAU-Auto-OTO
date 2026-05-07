@@ -21,6 +21,11 @@ def main() -> int:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--cpu-feature-cache-size", type=int, default=0, help="CPU RAM cache size by row count. 0 disables.")
+    parser.add_argument("--cuda-prefetch-batches", type=int, default=2, help="Number of batches to prefetch to CUDA. 0 disables.")
+    parser.add_argument("--cuda-prefetch-eval", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--loader-prefetch-factor", type=int, default=2)
+    parser.add_argument("--loader-persistent-workers", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--n-mels", type=int, default=64)
     parser.add_argument("--hidden", type=int, default=96)
@@ -31,12 +36,19 @@ def main() -> int:
     parser.add_argument("--vcv-loss-weight", type=float, default=1.35)
     parser.add_argument("--cvvc-loss-weight", type=float, default=1.15)
     parser.add_argument("--cvc-loss-weight", type=float, default=1.05)
+    parser.add_argument("--cvvc-vc-multi-loss-weight", type=float, default=2.50)
+    parser.add_argument("--cvvc-vv-loss-weight", type=float, default=2.00)
+    parser.add_argument("--korean-vcv-head-loss-weight", type=float, default=1.80)
+    parser.add_argument("--korean-vcv-vcv-loss-weight", type=float, default=1.35)
     parser.add_argument("--format-residual-heads", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--cvvc-specialist-head", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--cvvc-specialist-gain", type=float, default=0.25)
     parser.add_argument("--vcv-target-window", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--vcv-window-frames", type=int, default=240)
-    parser.add_argument("--target-window-formats", default="vcv,cvvc")
-    parser.add_argument("--target-window-frame-overrides", default="vcv=240,cvvc=360")
-    parser.add_argument("--cvvc-target-window-alias-types", default="vc,vv")
+    # Keep target windowing on VCV only by default; CVVC remains full-audio.
+    parser.add_argument("--target-window-formats", default="vcv")
+    parser.add_argument("--target-window-frame-overrides", default="vcv=240")
+    parser.add_argument("--cvvc-target-window-alias-types", default="")
     parser.add_argument("--anchor-heatmap-blend", type=float, default=0.70)
     parser.add_argument("--vcv-window-heatmap-blend", type=float, default=0.30)
     parser.add_argument(
@@ -72,6 +84,8 @@ def main() -> int:
         hidden=int(args.hidden),
         conv_channels=int(args.conv_channels),
         enable_format_residual_heads=bool(args.format_residual_heads),
+        enable_cvvc_specialist_head=bool(args.cvvc_specialist_head),
+        cvvc_specialist_gain=float(args.cvvc_specialist_gain),
         enable_vcv_target_window=bool(args.vcv_target_window),
         vcv_target_window_frames=int(args.vcv_window_frames),
         target_window_formats=tuple(item.strip().lower() for item in str(args.target_window_formats).split(",") if item.strip()),
@@ -93,11 +107,20 @@ def main() -> int:
         device=str(args.device),
         amp=bool(args.amp),
         num_workers=int(args.num_workers),
+        cpu_feature_cache_size=max(0, int(args.cpu_feature_cache_size)),
+        cuda_prefetch_batches=max(0, int(args.cuda_prefetch_batches)),
+        cuda_prefetch_eval=bool(args.cuda_prefetch_eval),
+        dataloader_prefetch_factor=max(2, int(args.loader_prefetch_factor)),
+        dataloader_persistent_workers=bool(args.loader_persistent_workers),
         log_every=int(args.log_every),
         val_ratio=float(args.val_ratio),
         vcv_loss_weight=float(args.vcv_loss_weight),
         cvvc_loss_weight=float(args.cvvc_loss_weight),
         cvc_loss_weight=float(args.cvc_loss_weight),
+        cvvc_vc_multi_loss_weight=float(args.cvvc_vc_multi_loss_weight),
+        cvvc_vv_loss_weight=float(args.cvvc_vv_loss_weight),
+        korean_vcv_head_loss_weight=float(args.korean_vcv_head_loss_weight),
+        korean_vcv_vcv_loss_weight=float(args.korean_vcv_vcv_loss_weight),
     )
     result = train_oto_from_manifest(rows, args.out, val_rows=val_rows, train_config=train_cfg, model_config=model_cfg)
     print(json.dumps(result, ensure_ascii=False, indent=2))

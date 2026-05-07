@@ -22,14 +22,19 @@ class OtoCrnnConfig:
     enable_format_residual_heads: bool = False
     enable_vcv_target_window: bool = True
     vcv_target_window_frames: int = 240
-    target_window_formats: tuple[str, ...] = ("vcv", "cvvc")
-    target_window_frame_overrides: tuple[str, ...] = ("vcv=240", "cvvc=360")
-    cvvc_target_window_alias_types: tuple[str, ...] = ("vc", "vv")
+    # Keep target windowing on VCV only. CVVC alias positions are often highly
+    # non-uniform within a file, so row-ratio cropping tends to miss true onsets.
+    target_window_formats: tuple[str, ...] = ("vcv",)
+    target_window_frame_overrides: tuple[str, ...] = ("vcv=240",)
+    cvvc_target_window_alias_types: tuple[str, ...] = ()
     anchor_heatmap_blend: float = 0.70
     vcv_window_heatmap_blend: float = 0.30
     scalar_target_mode: str = "relative_params"
     right_boundary_prior_blend: float = 0.45
     right_boundary_prior_blends: tuple[str, ...] = ("vcv=0.45", "cvvc=0.25", "cv=0.10", "cvc=0.10", "other=0.10")
+    # Optional specialist branch focused on CVVC hard cases.
+    enable_cvvc_specialist_head: bool = False
+    cvvc_specialist_gain: float = 0.25
     anchor_names: tuple[str, ...] = tuple(OTO_ANCHOR_NAMES)
     languages: tuple[str, ...] = ("korean", "japanese")
     format_types: tuple[str, ...] = ("cv", "cvc", "cvvc", "vcv", "c_plus_v", "general", "other")
@@ -77,6 +82,10 @@ class OtoCrnnConfig:
             data["right_boundary_prior_blend"] = 0.0
         if payload is not None and "right_boundary_prior_blends" not in data:
             data["right_boundary_prior_blends"] = ()
+        if payload is not None and "enable_cvvc_specialist_head" not in data:
+            data["enable_cvvc_specialist_head"] = False
+        if payload is not None and "cvvc_specialist_gain" not in data:
+            data["cvvc_specialist_gain"] = 0.0
         # Old checkpoints predate the alias_role axis. Default the new fields to
         # disabled so loading them keeps the original architecture.
         if payload is not None and "alias_roles" not in data:
@@ -212,6 +221,16 @@ def build_oto_model(config: OtoCrnnConfig):
                 nn.Dropout(float(cfg.dropout)),
                 nn.Linear(hidden2, len(cfg.anchor_names)),
             )
+            self.use_cvvc_specialist_head = bool(getattr(cfg, "enable_cvvc_specialist_head", False))
+            if self.use_cvvc_specialist_head:
+                self.cvvc_scalar_head = nn.Sequential(
+                    nn.Linear(hidden2 * 2, hidden2),
+                    nn.ReLU(),
+                    nn.Dropout(float(cfg.dropout)),
+                    nn.Linear(hidden2, len(cfg.anchor_names)),
+                )
+            else:
+                self.cvvc_scalar_head = None
             if bool(cfg.enable_format_residual_heads):
                 self.format_heatmap_heads = nn.ModuleList(
                     [nn.Linear(hidden2, len(cfg.anchor_names)) for _ in range(fmt_count)]
@@ -324,6 +343,16 @@ def build_oto_model(config: OtoCrnnConfig):
             pooled_max = encoded.max(dim=1).values
             pooled = torch.cat([pooled_mean, pooled_max], dim=-1)
             scalar_logits = self.scalar_head(pooled)
+            if self.use_cvvc_specialist_head and self.cvvc_scalar_head is not None:
+                cvvc_idx = list(config.format_types).index("cvvc") if "cvvc" in config.format_types else -1
+                if cvvc_idx >= 0:
+                    cvvc_mask = format_ids == int(cvvc_idx)
+                    if int(cvvc_mask.sum().item()) > 0:
+                        cvvc_gain = max(0.0, min(1.0, float(getattr(config, "cvvc_specialist_gain", 0.25))))
+                        scalar_logits = scalar_logits.clone()
+                        scalar_logits[cvvc_mask] = scalar_logits[cvvc_mask] + (
+                            cvvc_gain * self.cvvc_scalar_head(pooled[cvvc_mask])
+                        )
             if self.format_heatmap_heads is not None and self.format_scalar_heads is not None:
                 heatmap_residual = torch.zeros_like(heatmap_logits)
                 scalar_residual = torch.zeros_like(scalar_logits)

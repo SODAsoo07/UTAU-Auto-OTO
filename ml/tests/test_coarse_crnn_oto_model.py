@@ -87,11 +87,12 @@ def test_oto_model_config_defaults_to_relative_params_for_new_training():
     cfg = OtoCrnnConfig()
 
     assert cfg.scalar_target_mode == "relative_params"
-    assert cfg.target_window_formats == ("vcv", "cvvc")
-    assert cfg.target_window_frame_overrides == ("vcv=240", "cvvc=360")
-    assert cfg.cvvc_target_window_alias_types == ("vc", "vv")
+    assert cfg.target_window_formats == ("vcv",)
+    assert cfg.target_window_frame_overrides == ("vcv=240",)
+    assert cfg.cvvc_target_window_alias_types == ()
     assert "cvvc=0.25" in cfg.right_boundary_prior_blends
     assert uses_relative_param_head(cfg)
+    assert cfg.enable_cvvc_specialist_head is False
 
 
 def test_oto_model_config_keeps_old_checkpoints_absolute():
@@ -174,3 +175,26 @@ def test_oto_model_alias_role_id_normalizes_legacy_names():
     assert cv_idx == roles.index("cv")
     assert head_idx == roles.index("-cv")
     assert fallback_idx == roles.index("other")
+
+
+def test_oto_model_cvvc_specialist_head_branch_only_affects_cvvc_rows():
+    import torch
+
+    from core.coarse_crnn.oto_model import OtoCrnnConfig, build_oto_model
+
+    cfg = OtoCrnnConfig(
+        n_mels=8,
+        hidden=4,
+        conv_channels=6,
+        cond_dim=3,
+        enable_cvvc_specialist_head=True,
+        cvvc_specialist_gain=0.5,
+    )
+    model = build_oto_model(cfg)
+    x = torch.randn(2, 11, 8)
+    # First row: cvvc, second row: cvc (non-cvvc).
+    format_ids = torch.tensor([cfg.format_types.index("cvvc"), cfg.format_types.index("cvc")], dtype=torch.long)
+    out = model(x, torch.tensor([0, 0]), format_ids)
+
+    assert out["scalar_logits"].shape == (2, len(cfg.anchor_names))
+    assert model.cvvc_scalar_head is not None

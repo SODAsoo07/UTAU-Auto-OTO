@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import random
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,6 +46,19 @@ class OtoTrainConfig:
     vcv_loss_weight: float = 1.35
     cvvc_loss_weight: float = 1.15
     cvc_loss_weight: float = 1.05
+    cvvc_vc_multi_loss_weight: float = 2.50
+    cvvc_vv_loss_weight: float = 2.00
+    korean_vcv_head_loss_weight: float = 1.80
+    korean_vcv_vcv_loss_weight: float = 1.35
+    # CPU-side feature cache size (number of dataset rows). 0 disables.
+    cpu_feature_cache_size: int = 0
+    # Number of batches to prefetch to CUDA (H2D overlap). 0 disables.
+    cuda_prefetch_batches: int = 2
+    # Apply CUDA prefetch in evaluation loop as well.
+    cuda_prefetch_eval: bool = True
+    # DataLoader worker-side prefetch/persistence knobs.
+    dataloader_prefetch_factor: int = 2
+    dataloader_persistent_workers: bool = True
 
 
 class OtoAnchorDataset:
@@ -53,25 +67,18 @@ class OtoAnchorDataset:
         self.model_config = model_config
         self.train_config = train_config
         self.train = bool(train)
+        self._cache_size = max(0, int(getattr(train_config, "cpu_feature_cache_size", 0) or 0))
+        self._feature_cache: OrderedDict[int, tuple[np.ndarray, float, np.ndarray, float]] | None = (
+            OrderedDict() if self._cache_size > 0 else None
+        )
 
     def __len__(self) -> int:
         return len(self.rows)
 
     def __getitem__(self, idx: int):
-        row = self.rows[int(idx)]
-        wav_path = str(row.get("audio", "") or "")
-        samples, sr, duration_sec = load_wav_mono(wav_path, target_sr=int(self.model_config.sample_rate))
-        features, hop_sec = log_mel_spectrogram(
-            samples,
-            sr,
-            n_mels=int(self.model_config.n_mels),
-            frame_ms=float(self.model_config.frame_ms),
-            hop_ms=float(self.model_config.hop_ms),
-        )
-        if features.shape[0] <= 0:
-            features = np.zeros((1, int(self.model_config.n_mels)), dtype=np.float32)
-        anchors_ms = _anchor_array_from_row(row)
-        full_duration_ms = float(duration_sec) * 1000.0
+        index = int(idx)
+        row = self.rows[index]
+        features, hop_sec, anchors_ms, full_duration_ms = self._load_cached_or_fresh(index, row)
         if should_use_vcv_target_window(
             row.get("format_type", ""),
             enabled=bool(self.model_config.enable_vcv_target_window),
@@ -146,6 +153,7 @@ class OtoAnchorDataset:
         context = _context_array_from_row(row)
         weight = float(row.get("sample_weight", row.get("weight", 1.0)) or 1.0)
         weight *= _format_loss_multiplier(row, self.train_config)
+        weight *= _context_loss_multiplier(row, self.train_config)
         return (
             features.astype(np.float32),
             heatmap.astype(np.float32),
@@ -165,8 +173,34 @@ class OtoAnchorDataset:
             int(prev_role_id),
             int(next_role_id),
             extra_flags,
-            max(0.05, min(2.0, weight)),
+            max(0.05, min(3.5, weight)),
         )
+
+    def _load_cached_or_fresh(self, idx: int, row: dict[str, Any]) -> tuple[np.ndarray, float, np.ndarray, float]:
+        cache = self._feature_cache
+        if cache is not None and idx in cache:
+            features, hop_sec, anchors_ms, full_duration_ms = cache.pop(idx)
+            cache[idx] = (features, hop_sec, anchors_ms, full_duration_ms)
+            return features, hop_sec, anchors_ms, full_duration_ms
+        wav_path = str(row.get("audio", "") or "")
+        samples, sr, duration_sec = load_wav_mono(wav_path, target_sr=int(self.model_config.sample_rate))
+        features, hop_sec = log_mel_spectrogram(
+            samples,
+            sr,
+            n_mels=int(self.model_config.n_mels),
+            frame_ms=float(self.model_config.frame_ms),
+            hop_ms=float(self.model_config.hop_ms),
+        )
+        if features.shape[0] <= 0:
+            features = np.zeros((1, int(self.model_config.n_mels)), dtype=np.float32)
+        features = np.asarray(features, dtype=np.float32)
+        anchors_ms = _anchor_array_from_row(row)
+        full_duration_ms = float(duration_sec) * 1000.0
+        if cache is not None:
+            cache[idx] = (features, float(hop_sec), anchors_ms, float(full_duration_ms))
+            if len(cache) > self._cache_size:
+                cache.popitem(last=False)
+        return features, float(hop_sec), anchors_ms, float(full_duration_ms)
 
 
 def train_oto_from_manifest(
@@ -203,26 +237,31 @@ def train_oto_from_manifest(
 
     train_ds = OtoAnchorDataset(train_rows, model_cfg, train_config=cfg, train=True)
     val_ds = OtoAnchorDataset(val_rows_final, model_cfg, train_config=cfg, train=False) if val_rows_final else None
-    train_loader = torch.utils.data.DataLoader(
-        train_ds,
-        batch_size=int(cfg.batch_size),
-        shuffle=True,
-        collate_fn=_collate,
-        num_workers=max(0, int(cfg.num_workers)),
-        pin_memory=_pin_memory_enabled(torch, cfg.device),
-    )
-    val_loader = (
-        torch.utils.data.DataLoader(
-            val_ds,
-            batch_size=max(1, min(8, int(cfg.batch_size))),
-            shuffle=False,
-            collate_fn=_collate,
-            num_workers=max(0, int(cfg.num_workers)),
-            pin_memory=_pin_memory_enabled(torch, cfg.device),
-        )
-        if val_ds
-        else None
-    )
+    train_loader_kwargs: dict[str, Any] = {
+        "batch_size": int(cfg.batch_size),
+        "shuffle": True,
+        "collate_fn": _collate,
+        "num_workers": max(0, int(cfg.num_workers)),
+        "pin_memory": _pin_memory_enabled(torch, cfg.device),
+    }
+    if int(cfg.num_workers) > 0:
+        train_loader_kwargs["persistent_workers"] = bool(cfg.dataloader_persistent_workers)
+        train_loader_kwargs["prefetch_factor"] = max(2, int(cfg.dataloader_prefetch_factor))
+    train_loader = torch.utils.data.DataLoader(train_ds, **train_loader_kwargs)
+    if val_ds:
+        val_loader_kwargs: dict[str, Any] = {
+            "batch_size": max(1, min(8, int(cfg.batch_size))),
+            "shuffle": False,
+            "collate_fn": _collate,
+            "num_workers": max(0, int(cfg.num_workers)),
+            "pin_memory": _pin_memory_enabled(torch, cfg.device),
+        }
+        if int(cfg.num_workers) > 0:
+            val_loader_kwargs["persistent_workers"] = bool(cfg.dataloader_persistent_workers)
+            val_loader_kwargs["prefetch_factor"] = max(2, int(cfg.dataloader_prefetch_factor))
+        val_loader = torch.utils.data.DataLoader(val_ds, **val_loader_kwargs)
+    else:
+        val_loader = None
 
     device = resolve_torch_device(torch, str(cfg.device))
     use_amp = bool(cfg.amp and device.type == "cuda")
@@ -237,7 +276,13 @@ def train_oto_from_manifest(
         model.train()
         loss_sum = 0.0
         row_sum = 0
-        for batch_idx, batch in enumerate(train_loader, start=1):
+        train_batches = _iter_device_batches(
+            train_loader,
+            device,
+            torch=torch,
+            prefetch_batches=max(0, int(cfg.cuda_prefetch_batches)),
+        )
+        for batch_idx, batch in enumerate(train_batches, start=1):
             (
                 x,
                 heat,
@@ -259,7 +304,7 @@ def train_oto_from_manifest(
                 extra_flags,
                 weight,
                 mask,
-            ) = _move_batch(batch, device)
+            ) = batch
             optimizer.zero_grad(set_to_none=True)
             with _autocast(torch, enabled=use_amp):
                 outputs = model(
@@ -343,7 +388,8 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
     row_sum = 0
     mae_values: list[float] = []
     with torch.no_grad():
-        for batch in loader:
+        eval_prefetch = max(0, int(cfg.cuda_prefetch_batches)) if bool(cfg.cuda_prefetch_eval) else 0
+        for batch in _iter_device_batches(loader, device, torch=torch, prefetch_batches=eval_prefetch):
             (
                 x,
                 heat,
@@ -365,7 +411,7 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
                 extra_flags,
                 weight,
                 mask,
-            ) = _move_batch(batch, device)
+            ) = batch
             outputs = model(
                 x,
                 lang,
@@ -586,6 +632,37 @@ def _move_batch(batch, device):
     return tuple(item.to(device, non_blocking=True) for item in batch)
 
 
+def _iter_device_batches(loader, device, *, torch, prefetch_batches: int = 0):
+    prefetch_n = max(0, int(prefetch_batches))
+    if device.type != "cuda" or prefetch_n <= 0:
+        for raw in loader:
+            yield _move_batch(raw, device)
+        return
+    iterator = iter(loader)
+    stream = torch.cuda.Stream(device=device)
+    queued: deque[tuple[Any, ...]] = deque()
+
+    def _fill() -> None:
+        while len(queued) < prefetch_n:
+            try:
+                raw = next(iterator)
+            except StopIteration:
+                break
+            with torch.cuda.stream(stream):
+                queued.append(_move_batch(raw, device))
+
+    _fill()
+    while queued:
+        current_stream = torch.cuda.current_stream(device=device)
+        current_stream.wait_stream(stream)
+        batch = queued.popleft()
+        for item in batch:
+            if hasattr(item, "record_stream"):
+                item.record_stream(current_stream)
+        _fill()
+        yield batch
+
+
 def _anchor_array_from_row(row: dict[str, Any]) -> np.ndarray:
     return np.asarray(
         [
@@ -631,6 +708,23 @@ def _format_loss_multiplier(row: dict[str, Any], cfg: OtoTrainConfig) -> float:
         return max(0.05, float(cfg.cvvc_loss_weight))
     if fmt == "cvc":
         return max(0.05, float(cfg.cvc_loss_weight))
+    return 1.0
+
+
+def _context_loss_multiplier(row: dict[str, Any], cfg: OtoTrainConfig) -> float:
+    language = str(row.get("language", "") or "").strip().lower()
+    fmt = str(row.get("format_type", "") or "").strip().lower()
+    alias_type = str(row.get("alias_type", "") or "").strip().lower()
+    transition = str(row.get("transition_type", "") or "").strip().lower()
+    alias_role = str(row.get("alias_role", "") or "").strip().lower()
+    if fmt == "cvvc" and alias_type == "vc" and transition == "multi":
+        return max(0.05, float(cfg.cvvc_vc_multi_loss_weight))
+    if fmt == "cvvc" and alias_type == "vv":
+        return max(0.05, float(cfg.cvvc_vv_loss_weight))
+    if language == "korean" and fmt == "vcv" and alias_role == "-cv":
+        return max(0.05, float(cfg.korean_vcv_head_loss_weight))
+    if language == "korean" and fmt == "vcv" and alias_role == "v-cv":
+        return max(0.05, float(cfg.korean_vcv_vcv_loss_weight))
     return 1.0
 
 
