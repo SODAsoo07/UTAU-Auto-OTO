@@ -103,3 +103,22 @@ python -m ml.scripts.coarse_crnn.predict_oto `
   --format-type cv `
   --model ml_workspace\models\coarse_crnn\oto_anchor_crnn.pt
 ```
+
+Run a focused CVVC sampler sweep (train + eval + ranking report):
+
+```powershell
+$env:PYTHONPATH='.'
+$env:PYTHONIOENCODING='utf-8'
+python ml/scripts/coarse_crnn/sweep_oto_sampler_cvvc.py `
+  --run-name cvvc_sampler_sweep_quick `
+  --epochs 1 `
+  --max-eval-items 3000 `
+  --device cuda
+```
+
+Outputs:
+
+- `ml_workspace/coarse_crnn/sweeps/<run-name>/models/*.pt`
+- `ml_workspace/coarse_crnn/sweeps/<run-name>/evals/oto_eval_*.json`
+- `ml_workspace/coarse_crnn/sweeps/<run-name>/summary.json`
+- `ml_workspace/coarse_crnn/sweeps/<run-name>/summary.md`
