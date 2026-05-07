@@ -435,7 +435,7 @@ class OtoActionsMixin:
                         default="mfa",
                     )
                     no_mfa_auto_mode = (
-                        aligner_engine == "none"
+                        aligner_engine in {"none", "coarse_crnn"}
                         and lang != "english"
                         and selected_format not in {"cmpx", "c_plus_v"}
                     )
@@ -444,6 +444,8 @@ class OtoActionsMixin:
                         if hasattr(self, "_get_no_mfa_oto_mode_code")
                         else "remap"
                     )
+                    if aligner_engine == "coarse_crnn":
+                        no_mfa_mode_code = "crnn"
                     no_mfa_mode_text = (
                         "CRNN OTO 예측기(실험)"
                         if no_mfa_mode_code == "crnn"
@@ -610,6 +612,16 @@ class OtoActionsMixin:
                     elif no_mfa_auto_mode:
                         if no_mfa_mode_code == "crnn":
                             _update_oto_local("CRNN OTO 예측 생성", 0.22, force=True)
+                            _crnn_special_raw = (
+                                self.oto_crnn_special_aliases_var.get()
+                                if hasattr(self, "oto_crnn_special_aliases_var")
+                                else ""
+                            )
+                            _crnn_special_aliases: set[str] = {
+                                item.strip()
+                                for item in str(_crnn_special_raw or "").split(",")
+                                if item.strip()
+                            }
                             processed, total, errors = generate_oto_with_crnn_predictor(
                                 wav_dir=target_wav_dir,
                                 out_path=target_out_path,
@@ -627,6 +639,7 @@ class OtoActionsMixin:
                                     if hasattr(self, "oto_crnn_device_var")
                                     else "auto"
                                 ),
+                                special_aliases=_crnn_special_aliases or None,
                                 callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                             )
                         else:

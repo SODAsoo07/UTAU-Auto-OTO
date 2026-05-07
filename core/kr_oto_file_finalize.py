@@ -6,6 +6,7 @@ import wave
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+from core.generation.file_index import build_wav_index as build_generation_wav_index
 from core.kr_oto_file_ops import (
     _apply_kr_bridge_coherence_to_oto_file,
     _apply_kr_profile_to_oto_file,
@@ -640,13 +641,11 @@ def apply_kr_mel_refine_to_oto_file(
     if not parsed:
         return 0
 
-    wav_index = {}
-    try:
-        for fn in os.listdir(wav_dir):
-            if fn.lower().endswith(".wav"):
-                wav_index[normalize_key_fn(fn)] = os.path.join(wav_dir, fn)
-    except Exception:
-        pass
+    wav_index = build_generation_wav_index(
+        wav_dir,
+        normalize_key_fn=normalize_key_fn,
+        recursive=False,
+    )
 
     by_wav = {}
     for line_idx, row in parsed:
@@ -841,14 +840,11 @@ def apply_kr_wav_duration_safety_to_oto_file(
     if not lines:
         return 0
 
-    wav_index = {}
-    try:
-        for fn in os.listdir(wav_dir):
-            if fn.lower().endswith(".wav"):
-                key = normalize_key_fn(fn) if callable(normalize_key_fn) else fn.lower()
-                wav_index[str(key)] = os.path.join(wav_dir, fn)
-    except Exception:
-        return 0
+    wav_index = build_generation_wav_index(
+        wav_dir,
+        normalize_key_fn=normalize_key_fn if callable(normalize_key_fn) else lambda filename: filename.lower(),
+        recursive=False,
+    )
 
     dur_cache = {}
     out_lines = []

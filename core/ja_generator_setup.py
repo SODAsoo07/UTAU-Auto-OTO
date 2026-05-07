@@ -7,6 +7,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from core.generation.file_index import iter_textgrid_files
 from core.lab_generator import load_custom_phonemes
 from core.oto_normalization import normalize_wav_key
 
@@ -208,12 +209,10 @@ def build_ja_textgrid_preparation(
     tg_norm_map: dict[str, list[dict]] = {}
     tg_core_norm_map: dict[str, list[dict]] = {}
     if os.path.exists(tg_folder):
-        for f_name in os.listdir(tg_folder):
-            if not f_name.lower().endswith(".textgrid"):
-                continue
+        for dirpath, f_name in iter_textgrid_files(tg_folder, recursive=False):
             base = os.path.splitext(f_name)[0]
             info = {
-                "path": os.path.join(tg_folder, f_name),
+                "path": os.path.join(dirpath, f_name),
                 "real_name": base + ".wav",
                 "base_lower": base.lower(),
                 "norm_key": normalize_key_fn(f_name),

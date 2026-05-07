@@ -61,6 +61,9 @@ $forbiddenReleaseFileNames = @(
 $forbiddenReleaseExtensions = @(".feather", ".parquet")
 $modelPruneFileNames = @("eval_summary.json", "selector_dataset.csv")
 $modelPruneExtensions = @(".ckpt", ".pth", ".pt")
+$allowedModelFilePaths = @(
+    "models/coarse_crnn/oto_anchor_crnn_role_v2.pt"
+)
 
 function Get-ReleaseRelativePath {
     param(
@@ -92,8 +95,9 @@ function Test-ForbiddenReleasePath {
     $fileName = $parts[-1]
     $ext = [System.IO.Path]::GetExtension($fileName).ToLowerInvariant()
     if ($forbiddenReleaseFileNames -contains $fileName) { return $true }
-    if ($forbiddenReleaseExtensions -contains $ext) { return $true }
     $joined = ($parts -join "/")
+    if ($allowedModelFilePaths -contains $joined) { return $false }
+    if ($forbiddenReleaseExtensions -contains $ext) { return $true }
     $isModelPayload = $joined.Contains("assets/models/oto_ml") -or $joined.Contains("models_installed/oto_ml") -or ($parts -contains "ml_models")
     if ($isModelPayload) {
         if ($modelPruneFileNames -contains $fileName) { return $true }
