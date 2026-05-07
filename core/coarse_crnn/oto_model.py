@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from core.coarse_crnn.alias_role import ALIAS_ROLES, DEFAULT_ROLE, normalize_role
+from core.coarse_crnn.oto_ctc import CTC_VOCAB_SIZE
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES
 
 
@@ -22,19 +23,31 @@ class OtoCrnnConfig:
     enable_format_residual_heads: bool = False
     enable_vcv_target_window: bool = True
     vcv_target_window_frames: int = 240
-    # Keep target windowing on VCV only. CVVC alias positions are often highly
-    # non-uniform within a file, so row-ratio cropping tends to miss true onsets.
+    # cvvc is excluded from windowing: cvvc vc/vv aliases are NOT uniformly
+    # distributed across the audio (CV rows come first, VC rows later), so
+    # row_ratio-based window centering produces 1000–2500 ms offset errors.
+    # Full-audio heatmap finds the correct position reliably instead.
     target_window_formats: tuple[str, ...] = ("vcv",)
     target_window_frame_overrides: tuple[str, ...] = ("vcv=240",)
+    target_window_role_frame_overrides: tuple[str, ...] = ()
     cvvc_target_window_alias_types: tuple[str, ...] = ()
+    cvvc_target_window_alias_roles: tuple[str, ...] = ("vc", "vv")
     anchor_heatmap_blend: float = 0.70
     vcv_window_heatmap_blend: float = 0.30
     scalar_target_mode: str = "relative_params"
     right_boundary_prior_blend: float = 0.45
     right_boundary_prior_blends: tuple[str, ...] = ("vcv=0.45", "cvvc=0.25", "cv=0.10", "cvc=0.10", "other=0.10")
-    # Optional specialist branch focused on CVVC hard cases.
-    enable_cvvc_specialist_head: bool = False
-    cvvc_specialist_gain: float = 0.25
+    right_boundary_prior_role_blends: tuple[str, ...] = ("-cv=0.35", "cv=0.30", "cv-=0.25", "v=0.18", "v-=0.22", "vc=0.20", "vv=0.24", "v-cv=0.32", "endbr=0.18", "br=0.15", "special=0.28", "other=0.30")
+    enable_uncertainty_head: bool = True
+    uncertainty_min_logvar: float = -6.0
+    uncertainty_max_logvar: float = 4.0
+    confidence_error_scale_ms: float = 75.0
+    confidence_calibration_scale: float = 1.0
+    confidence_calibration_bias: float = 0.0
+    confidence_low_threshold: float = 0.58
+    predicted_error_low_threshold_ms: float = 80.0
+    enable_two_stage_refine: bool = True
+    two_stage_refine_window_frames: int = 320
     anchor_names: tuple[str, ...] = tuple(OTO_ANCHOR_NAMES)
     languages: tuple[str, ...] = ("korean", "japanese")
     format_types: tuple[str, ...] = ("cv", "cvc", "cvvc", "vcv", "c_plus_v", "general", "other")
@@ -54,6 +67,14 @@ class OtoCrnnConfig:
     alias_roles: tuple[str, ...] = tuple(ALIAS_ROLES)
     enable_alias_role_embedding: bool = False
     enable_extra_alias_flags: bool = False
+    # CTC alignment head (3-A in CRNN-정확도-개선-방안-v2). When False the
+    # model has no ctc_head module, so old checkpoints stay round-trippable.
+    enable_ctc_head: bool = False
+    # Phone vocabulary size used by the CTC head. Auto-synced to the static
+    # vocabulary defined in core.coarse_crnn.oto_ctc.CTC_PHONE_VOCAB so
+    # appending tokens there does not silently desync the head's output dim.
+    # Kept on the config so checkpoints record the resolved size explicitly.
+    ctc_phone_vocab_size: int = field(default_factory=lambda: int(CTC_VOCAB_SIZE))
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> "OtoCrnnConfig":
@@ -74,18 +95,40 @@ class OtoCrnnConfig:
             data["target_window_formats"] = ("vcv",)
         if payload is not None and "target_window_frame_overrides" not in data:
             data["target_window_frame_overrides"] = ()
+        if payload is not None and "target_window_role_frame_overrides" not in data:
+            data["target_window_role_frame_overrides"] = ()
         if payload is not None and "cvvc_target_window_alias_types" not in data:
             data["cvvc_target_window_alias_types"] = ("cv", "cv_head", "vc", "vv", "vcv", "mono", "br", "other")
+        if payload is not None and "cvvc_target_window_alias_roles" not in data:
+            data["cvvc_target_window_alias_roles"] = ("vc", "vv")
         if payload is not None and "scalar_target_mode" not in data:
             data["scalar_target_mode"] = "absolute_anchors"
         if payload is not None and "right_boundary_prior_blend" not in data:
             data["right_boundary_prior_blend"] = 0.0
         if payload is not None and "right_boundary_prior_blends" not in data:
             data["right_boundary_prior_blends"] = ()
-        if payload is not None and "enable_cvvc_specialist_head" not in data:
-            data["enable_cvvc_specialist_head"] = False
-        if payload is not None and "cvvc_specialist_gain" not in data:
-            data["cvvc_specialist_gain"] = 0.0
+        if payload is not None and "right_boundary_prior_role_blends" not in data:
+            data["right_boundary_prior_role_blends"] = ()
+        if payload is not None and "enable_uncertainty_head" not in data:
+            data["enable_uncertainty_head"] = False
+        if payload is not None and "uncertainty_min_logvar" not in data:
+            data["uncertainty_min_logvar"] = -6.0
+        if payload is not None and "uncertainty_max_logvar" not in data:
+            data["uncertainty_max_logvar"] = 4.0
+        if payload is not None and "confidence_error_scale_ms" not in data:
+            data["confidence_error_scale_ms"] = 75.0
+        if payload is not None and "confidence_calibration_scale" not in data:
+            data["confidence_calibration_scale"] = 1.0
+        if payload is not None and "confidence_calibration_bias" not in data:
+            data["confidence_calibration_bias"] = 0.0
+        if payload is not None and "confidence_low_threshold" not in data:
+            data["confidence_low_threshold"] = 0.58
+        if payload is not None and "predicted_error_low_threshold_ms" not in data:
+            data["predicted_error_low_threshold_ms"] = 80.0
+        if payload is not None and "enable_two_stage_refine" not in data:
+            data["enable_two_stage_refine"] = False
+        if payload is not None and "two_stage_refine_window_frames" not in data:
+            data["two_stage_refine_window_frames"] = 0
         # Old checkpoints predate the alias_role axis. Default the new fields to
         # disabled so loading them keeps the original architecture.
         if payload is not None and "alias_roles" not in data:
@@ -94,6 +137,14 @@ class OtoCrnnConfig:
             data["enable_alias_role_embedding"] = False
         if payload is not None and "enable_extra_alias_flags" not in data:
             data["enable_extra_alias_flags"] = False
+        # Old checkpoints predate the CTC alignment head (3-A). Default to off
+        # so loading them keeps the original architecture intact.
+        if payload is not None and "enable_ctc_head" not in data:
+            data["enable_ctc_head"] = False
+        if payload is not None and "ctc_phone_vocab_size" not in data:
+            # Old checkpoints predate the CTC head — fall back to the current
+            # static vocabulary size so a config without the field still works.
+            data["ctc_phone_vocab_size"] = int(CTC_VOCAB_SIZE)
         for key in (
             "anchor_names",
             "languages",
@@ -103,8 +154,11 @@ class OtoCrnnConfig:
             "alias_roles",
             "target_window_formats",
             "target_window_frame_overrides",
+            "target_window_role_frame_overrides",
             "cvvc_target_window_alias_types",
+            "cvvc_target_window_alias_roles",
             "right_boundary_prior_blends",
+            "right_boundary_prior_role_blends",
         ):
             if key in data and not isinstance(data[key], tuple):
                 data[key] = tuple(data[key] or getattr(cls, key))
@@ -121,8 +175,11 @@ class OtoCrnnConfig:
         data["alias_roles"] = list(self.alias_roles)
         data["target_window_formats"] = list(self.target_window_formats)
         data["target_window_frame_overrides"] = list(self.target_window_frame_overrides)
+        data["target_window_role_frame_overrides"] = list(self.target_window_role_frame_overrides)
         data["cvvc_target_window_alias_types"] = list(self.cvvc_target_window_alias_types)
+        data["cvvc_target_window_alias_roles"] = list(self.cvvc_target_window_alias_roles)
         data["right_boundary_prior_blends"] = list(self.right_boundary_prior_blends)
+        data["right_boundary_prior_role_blends"] = list(self.right_boundary_prior_role_blends)
         return data
 
 
@@ -221,16 +278,16 @@ def build_oto_model(config: OtoCrnnConfig):
                 nn.Dropout(float(cfg.dropout)),
                 nn.Linear(hidden2, len(cfg.anchor_names)),
             )
-            self.use_cvvc_specialist_head = bool(getattr(cfg, "enable_cvvc_specialist_head", False))
-            if self.use_cvvc_specialist_head:
-                self.cvvc_scalar_head = nn.Sequential(
+            self.use_uncertainty_head = bool(getattr(cfg, "enable_uncertainty_head", False))
+            if self.use_uncertainty_head:
+                self.scalar_logvar_head = nn.Sequential(
                     nn.Linear(hidden2 * 2, hidden2),
                     nn.ReLU(),
                     nn.Dropout(float(cfg.dropout)),
                     nn.Linear(hidden2, len(cfg.anchor_names)),
                 )
             else:
-                self.cvvc_scalar_head = None
+                self.scalar_logvar_head = None
             if bool(cfg.enable_format_residual_heads):
                 self.format_heatmap_heads = nn.ModuleList(
                     [nn.Linear(hidden2, len(cfg.anchor_names)) for _ in range(fmt_count)]
@@ -246,6 +303,14 @@ def build_oto_model(config: OtoCrnnConfig):
                 nn.ReLU(),
                 nn.Linear(hidden2 // 2, 1),
             )
+            # CTC alignment head (3-A). Activated only when the flag is on so
+            # that older checkpoints load cleanly.
+            self.use_ctc_head = bool(getattr(cfg, "enable_ctc_head", False))
+            if self.use_ctc_head:
+                ctc_vocab = max(2, int(getattr(cfg, "ctc_phone_vocab_size", 64)))
+                self.ctc_head = nn.Linear(hidden2, ctc_vocab)
+            else:
+                self.ctc_head = None
 
         def encode(self, x):
             y = x.transpose(1, 2)
@@ -343,16 +408,6 @@ def build_oto_model(config: OtoCrnnConfig):
             pooled_max = encoded.max(dim=1).values
             pooled = torch.cat([pooled_mean, pooled_max], dim=-1)
             scalar_logits = self.scalar_head(pooled)
-            if self.use_cvvc_specialist_head and self.cvvc_scalar_head is not None:
-                cvvc_idx = list(config.format_types).index("cvvc") if "cvvc" in config.format_types else -1
-                if cvvc_idx >= 0:
-                    cvvc_mask = format_ids == int(cvvc_idx)
-                    if int(cvvc_mask.sum().item()) > 0:
-                        cvvc_gain = max(0.0, min(1.0, float(getattr(config, "cvvc_specialist_gain", 0.25))))
-                        scalar_logits = scalar_logits.clone()
-                        scalar_logits[cvvc_mask] = scalar_logits[cvvc_mask] + (
-                            cvvc_gain * self.cvvc_scalar_head(pooled[cvvc_mask])
-                        )
             if self.format_heatmap_heads is not None and self.format_scalar_heads is not None:
                 heatmap_residual = torch.zeros_like(heatmap_logits)
                 scalar_residual = torch.zeros_like(scalar_logits)
@@ -364,10 +419,24 @@ def build_oto_model(config: OtoCrnnConfig):
                 heatmap_logits = heatmap_logits + 0.35 * heatmap_residual
                 scalar_logits = scalar_logits + 0.35 * scalar_residual
             confidence_logits = self.confidence_head(pooled).squeeze(-1)
+            scalar_logvar = None
+            if self.use_uncertainty_head and self.scalar_logvar_head is not None:
+                scalar_logvar = self.scalar_logvar_head(pooled)
+                scalar_logvar = torch.clamp(
+                    scalar_logvar,
+                    min=float(getattr(config, "uncertainty_min_logvar", -6.0)),
+                    max=float(getattr(config, "uncertainty_max_logvar", 4.0)),
+                )
+            ctc_logits = None
+            if self.use_ctc_head and self.ctc_head is not None:
+                # encoded shape: (B, T, hidden2). ctc_head: (B, T, vocab).
+                ctc_logits = self.ctc_head(encoded)
             return {
                 "heatmap_logits": heatmap_logits,
                 "scalar_logits": scalar_logits,
                 "confidence_logits": confidence_logits,
+                "scalar_logvar": scalar_logvar,
+                "ctc_logits": ctc_logits,
             }
 
     return OtoAnchorCRNN(config)
@@ -422,6 +491,26 @@ def uses_relative_param_head(config: OtoCrnnConfig) -> bool:
 
 
 def right_boundary_prior_blend_for(config: OtoCrnnConfig, format_type: object) -> float:
+    return right_boundary_prior_blend_for_context(config, format_type, alias_role="")
+
+
+def right_boundary_prior_blend_for_context(
+    config: OtoCrnnConfig,
+    format_type: object,
+    *,
+    alias_role: object = "",
+    is_special: bool = False,
+) -> float:
+    role = "special" if bool(is_special) else normalize_role(alias_role)
+    role_table = _parse_key_value_tuple(getattr(config, "right_boundary_prior_role_blends", ()))
+    if role:
+        role_value = role_table.get(role)
+        if role_value is not None:
+            return max(0.0, min(1.0, float(role_value)))
+    if bool(is_special):
+        special_value = role_table.get("special")
+        if special_value is not None:
+            return max(0.0, min(1.0, float(special_value)))
     fmt = str(format_type or "").strip().lower() or "other"
     table = _parse_key_value_tuple(getattr(config, "right_boundary_prior_blends", ()))
     value = table.get(fmt, table.get("other"))
@@ -482,6 +571,7 @@ __all__ = [
     "language_id",
     "load_oto_checkpoint",
     "right_boundary_prior_blend_for",
+    "right_boundary_prior_blend_for_context",
     "save_oto_checkpoint",
     "transition_type_id",
     "uses_relative_param_head",
