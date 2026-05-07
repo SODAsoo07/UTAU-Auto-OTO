@@ -1,0 +1,48 @@
+batch_config: "scripts/config/oto_batch_cases.yaml"
+output_root: "logs/oto_tune"
+run_tag: "mel_env_tune_kr"
+skip_validation: true
+stop_on_error: false
+trial_timeout_sec: 0
+
+# Fixed env values applied to every trial.
+fixed_env:
+  UTOA_MEL_WEIGHT_MODE: "auto"
+
+objective:
+  field_weights:
+    offset: 1.0
+    cons: 0.9
+    cutoff: 1.2
+    pre: 1.0
+    ovl: 0.7
+  missing_pair_penalty: 40.0
+  coverage_penalty: 220.0
+  failed_case_penalty: 6000.0
+
+search:
+  top_k: 5
+  max_trials: 0
+  shuffle: false
+  random_seed: 1234
+  parameters:
+    - name: "UTOA_MEL_FORCE_TRUST_MIN"
+      values: [0.78, 0.82, 0.86]
+    - name: "UTOA_MEL_FORCE_ALIGN_WEIGHT_MIN"
+      values: [0.62, 0.70, 0.78]
+    - name: "UTOA_ML_ANCHOR_MEL_GAMMA"
+      values: [1.0, 1.2, 1.4]
+
+# case name must match batch_config case name.
+# reference_oto can be absolute path or path relative to the voicebank dir.
+cases:
+  - name: "kr_cvvc_yeonu"
+    language: "korean"
+    reference_oto: "oto_manual.ini"
+    weight: 1.0
+
+  - name: "SODAsoo CVC"
+    language: "korean"
+    reference_oto: "oto_manual.ini"
+    weight: 1.1
+

@@ -87,7 +87,21 @@ def _excluded_build_modules() -> list[str]:
 
 RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "assets", "profiles"), "assets/profiles"),
-    (os.path.join(APP_DIR, "assets", "models", "oto_ml"), "assets/models/oto_ml"),
+    (
+        os.path.join(APP_DIR, "models", "_build_included_oto_correction_models", "assets", "models", "oto_ml"),
+        "assets/models/oto_ml",
+    ),
+    (
+        os.path.join(
+            APP_DIR,
+            "models",
+            "_build_included_oto_correction_models",
+            "models",
+            "coarse_crnn",
+            "oto_anchor_crnn_role_v2.pt",
+        ),
+        "models/coarse_crnn",
+    ),
     (os.path.join(APP_DIR, "assets", "bootstrap", "get-pip.py"), "assets/bootstrap"),
     # ml/configs: include only the two files that are actually read at runtime.
     # training-only files (dataset_build_default.yaml, lightgbm_default.yaml,
@@ -189,6 +203,9 @@ RELEASE_MODEL_PRUNE_FILE_EXTENSIONS = {
     ".ckpt",
     ".pth",
     ".pt",
+}
+RELEASE_ALLOWED_MODEL_FILE_PATHS = {
+    "models/coarse_crnn/oto_anchor_crnn_role_v2.pt",
 }
 APP_ICON_CANDIDATES = [
     os.path.join(APP_DIR, "release_assets", "AutoOTO-icon.ico"),
@@ -966,6 +983,11 @@ def _is_forbidden_script_payload(parts: list[str], filename: str) -> bool:
     return filename not in allowed
 
 
+def _is_allowed_release_model_file(parts: list[str]) -> bool:
+    joined = "/".join(parts).strip().lower()
+    return joined in RELEASE_ALLOWED_MODEL_FILE_PATHS
+
+
 def _is_forbidden_release_file(rel_path: str) -> bool:
     parts = _release_path_parts(rel_path)
     if not parts:
@@ -980,6 +1002,8 @@ def _is_forbidden_release_file(rel_path: str) -> bool:
         return True
     if filename in RELEASE_FORBIDDEN_FILE_NAMES:
         return True
+    if _is_allowed_release_model_file(parts):
+        return False
     if ext in RELEASE_FORBIDDEN_FILE_EXTENSIONS:
         return True
     if _is_model_payload_path(parts):

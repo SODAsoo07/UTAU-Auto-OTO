@@ -6,6 +6,7 @@ import tkinter as tk
 import customtkinter as ctk
 
 from core.format_type_utils import normalize_auto_format_value
+from core.pipeline_status import normalize_aligner_name
 from ui.theme_tokens import (
     LANGUAGE_DROPDOWN_THEME,
     LANGUAGE_NOTICE_THEME,
@@ -256,6 +257,21 @@ class LayoutMixin:
         _style_primary_button(out_save_btn)
         out_save_btn.pack(side="right")
 
+        row_suffix = build_form_row(form_body)
+        build_left_label(row_suffix, t("접미사:")).pack(side="left")
+        self.suffix_entry = ctk.CTkEntry(
+            row_suffix,
+            placeholder_text=t("선택 사항: 예: C4 (모든 에일리어스 끝에 _C4 형태로 부여)"),
+            textvariable=self.alias_suffix_var,
+        )
+        self.suffix_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
+        self.suffix_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
+        ctk.CTkLabel(
+            row_suffix,
+            text=t("(출력 alias 접미사)"),
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+
         row_format = build_form_row(form_body)
         build_left_label(row_format, t("형식 지정:")).pack(side="left")
         format_options = self._get_auto_format_options("korean")
@@ -420,6 +436,16 @@ class LayoutMixin:
         _style_primary_button(self.oto_crnn_model_browse_btn)
         self.oto_crnn_model_browse_btn.pack(side="right")
         self.row_oto_crnn_model.pack_forget()
+        self.row_oto_crnn_special_aliases = build_form_row(form_body)
+        build_left_label(self.row_oto_crnn_special_aliases, t("특수 에일리어스:")).pack(side="left")
+        self.oto_crnn_special_aliases_entry = ctk.CTkEntry(
+            self.row_oto_crnn_special_aliases,
+            textvariable=self.oto_crnn_special_aliases_var,
+            placeholder_text="쉼표로 구분 (예: Sp, br, cl)",
+        )
+        self.oto_crnn_special_aliases_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
+        self.oto_crnn_special_aliases_entry.pack(side="left", fill="x", expand=True, padx=(6, 6))
+        self.row_oto_crnn_special_aliases.pack_forget()
         self.row_align_extra = build_form_row(form_body)
         build_left_label(self.row_align_extra, t("MFA 정렬 프로필:")).pack(side="left")
         self.mfa_align_profile_menu = ctk.CTkOptionMenu(
@@ -452,7 +478,7 @@ class LayoutMixin:
         advanced_row = build_form_row(path_frame)
         self.advanced_toggle_btn = ctk.CTkButton(
             advanced_row,
-            text=t("▶ 추가 옵션 (특수 발음/접미사)"),
+            text=t("▶ 추가 옵션 (특수 발음)"),
             width=260,
             fg_color=PALETTE.advanced_toggle_bg,
             hover_color=PALETTE.advanced_toggle_hover,
@@ -481,13 +507,6 @@ class LayoutMixin:
         custom_browse_btn = ctk.CTkButton(row0, text=t("찾아보기"), width=90, command=lambda: self._browse_file(self.custom_entry, [("Text 파일", "*.txt")]))
         _style_primary_button(custom_browse_btn)
         custom_browse_btn.pack(side="right")
-
-        row0b = ctk.CTkFrame(self.advanced_options_frame, fg_color="transparent")
-        row0b.pack(fill="x", padx=0, pady=3)
-        ctk.CTkLabel(row0b, text=t("접미사 (선택):"), width=120, anchor="w").pack(side="left")
-        self.suffix_entry = ctk.CTkEntry(row0b, placeholder_text=t("예: C4 (모든 에일리어스 끝에 _C4 형태로 부여)"), textvariable=self.alias_suffix_var)
-        self.suffix_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
-        self.suffix_entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
 
         self._toggle_advanced_options(force=False)
 
@@ -1268,14 +1287,14 @@ class LayoutMixin:
         )
         options = ["MFA", "전용(시퀀스)"]
         if developer_enabled:
-            options.append("No-MFA")
+            options.append("CRNN(실험적)")
         lang = self._get_language()
         current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA").strip()
         fmt = normalize_auto_format_value(lang, self.auto_format_var.get()) if hasattr(self, "auto_format_var") else ""
         is_kr_template_only = (lang == "korean" and fmt in {"cmpx", "c_plus_v"})
         forced_no_mfa = bool(lang == "english" or is_kr_template_only)
-        if current == "No-MFA (Experimental)":
-            current = "No-MFA"
+        if current in {"No-MFA", "No-MFA (Experimental)"}:
+            current = "MFA"
         if forced_no_mfa:
             current = "MFA"
         if current not in options:
@@ -1288,8 +1307,9 @@ class LayoutMixin:
                 self.aligner_menu.set(current)
             except Exception:
                 pass
-        use_no_mfa = forced_no_mfa or current == "No-MFA"
+        use_no_mfa = forced_no_mfa
         use_sequence = current == "전용(시퀀스)"
+        use_coarse_crnn = normalize_aligner_name(current, default="mfa") == "coarse_crnn"
         is_cmpx_preview = (lang == "korean" and fmt == "cmpx")
         is_c_plus_v_mode = (lang == "korean" and fmt == "c_plus_v")
         limit_ml_routes_for_no_mfa = use_no_mfa and not (
@@ -1347,7 +1367,9 @@ class LayoutMixin:
             else "베이스 OTO 재매핑 + 보정"
         )
         if hasattr(self, "mfa_align_profile_menu"):
-            self.mfa_align_profile_menu.configure(state="disabled" if (use_no_mfa or use_sequence) else "normal")
+            self.mfa_align_profile_menu.configure(
+                state="disabled" if (use_no_mfa or use_sequence or use_coarse_crnn) else "normal"
+            )
         show_no_mfa_mode_row = use_no_mfa and not (
             lang == "english" or is_kr_template_only
         )
@@ -1363,7 +1385,9 @@ class LayoutMixin:
                     self.row_no_mfa_oto_mode.pack_forget()
             except Exception:
                 pass
-        show_crnn_model_row = bool(show_no_mfa_mode_row and developer_enabled and no_mfa_mode_code == "crnn")
+        show_crnn_model_row = bool(
+            developer_enabled and (use_coarse_crnn or (show_no_mfa_mode_row and no_mfa_mode_code == "crnn"))
+        )
         if hasattr(self, "row_oto_crnn_model") and self.row_oto_crnn_model is not None:
             try:
                 if show_crnn_model_row:
@@ -1374,6 +1398,18 @@ class LayoutMixin:
                         self.row_oto_crnn_model.pack(**pack_kwargs)
                 else:
                     self.row_oto_crnn_model.pack_forget()
+            except Exception:
+                pass
+        if hasattr(self, "row_oto_crnn_special_aliases") and self.row_oto_crnn_special_aliases is not None:
+            try:
+                if show_crnn_model_row:
+                    if not self.row_oto_crnn_special_aliases.winfo_ismapped():
+                        pack_kwargs = {"fill": "x", "pady": 4}
+                        if hasattr(self, "row_align_extra") and self.row_align_extra is not None:
+                            pack_kwargs["before"] = self.row_align_extra
+                        self.row_oto_crnn_special_aliases.pack(**pack_kwargs)
+                else:
+                    self.row_oto_crnn_special_aliases.pack_forget()
             except Exception:
                 pass
         if hasattr(self, "aligner_help_label"):
@@ -1390,6 +1426,8 @@ class LayoutMixin:
                     )
             elif use_sequence:
                 self.aligner_help_label.configure(text=t("(시퀀스 라벨 기반 전용 aligner baseline을 사용합니다.)"))
+            elif use_coarse_crnn:
+                self.aligner_help_label.configure(text=t("(CRNN OTO 직접 예측을 사용합니다. TextGrid 정렬 단계는 건너뜁니다.)"))
             else:
                 self.aligner_help_label.configure(text=t("(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)"))
         if hasattr(self, "pipeline_step_align_btn") and self.pipeline_step_align_btn is not None:
@@ -1430,6 +1468,9 @@ class LayoutMixin:
                 if use_sequence:
                     self.align_step_title_label.configure(text=t("2. 음성 정렬 (전용 시퀀스)"))
                     self.align_step_desc_label.configure(text=t("frame-hop 시퀀스 라벨 기반으로 TextGrid를 생성합니다. 실패 시 MFA fallback을 사용합니다."))
+                elif use_coarse_crnn:
+                    self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (CRNN OTO)"))
+                    self.align_step_desc_label.configure(text=t("OTO 생성 단계에서 CRNN 직접 예측 모델로 oto.ini를 생성합니다."))
                 else:
                     self.align_step_title_label.configure(text=t("2. 음성 정렬"))
                     self.align_step_desc_label.configure(text=t("MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다."))
@@ -1830,10 +1871,10 @@ class LayoutMixin:
             self.advanced_options_expanded = bool(force)
 
         if self.advanced_options_expanded:
-            self.advanced_toggle_btn.configure(text=t("▼ 고급 옵션 (특수 발음/접미사)"))
+            self.advanced_toggle_btn.configure(text=t("▼ 고급 옵션 (특수 발음)"))
             self.advanced_options_frame.pack(fill="x", padx=10, pady=(0, 3))
         else:
-            self.advanced_toggle_btn.configure(text=t("▶ 고급 옵션 (특수 발음/접미사)"))
+            self.advanced_toggle_btn.configure(text=t("▶ 고급 옵션 (특수 발음)"))
             self.advanced_options_frame.pack_forget()
 
     def _get_params(self):

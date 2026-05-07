@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+from core.coarse_crnn.alias_role import normalize_role
 
 
 def should_use_vcv_target_window(
@@ -11,21 +12,55 @@ def should_use_vcv_target_window(
     enabled: bool = True,
     formats: tuple[str, ...] | list[str] | None = None,
     alias_type: object = "",
+    alias_role: object = "",
     cvvc_alias_types: tuple[str, ...] | list[str] | None = None,
+    cvvc_alias_roles: tuple[str, ...] | list[str] | None = None,
 ) -> bool:
     fmt = str(format_type or "").strip().lower()
     allowed = tuple(str(item or "").strip().lower() for item in (formats or ("vcv",)))
     if not (bool(enabled) and fmt in allowed):
         return False
     if fmt == "cvvc":
+        role_allowed = tuple(normalize_role(item) for item in (cvvc_alias_roles or ()))
+        role_text = normalize_role(alias_role)
+        if role_allowed and role_text:
+            return role_text in role_allowed
         alias_allowed = tuple(str(item or "").strip().lower() for item in (cvvc_alias_types or ("vc", "vv")))
         return str(alias_type or "").strip().lower() in alias_allowed
     return True
 
 
-def target_window_frames_for(config: object, format_type: object, default_frames: int) -> int:
+def target_window_frames_for(
+    config: object,
+    format_type: object,
+    default_frames: int,
+    *,
+    alias_role: object = "",
+) -> int:
     fmt = str(format_type or "").strip().lower()
+    role_text = normalize_role(alias_role)
     frames = int(default_frames)
+    for item in getattr(config, "target_window_role_frame_overrides", ()) or ():
+        text = str(item or "").strip()
+        if "=" not in text:
+            continue
+        key, raw = text.split("=", 1)
+        key_text = key.strip().lower()
+        key_fmt = ""
+        key_role = ""
+        if "|" in key_text:
+            key_fmt, key_role = key_text.split("|", 1)
+            key_fmt = key_fmt.strip().lower()
+            key_role = normalize_role(key_role)
+        else:
+            key_fmt = fmt
+            key_role = normalize_role(key_text)
+        if key_fmt != fmt or key_role != role_text:
+            continue
+        try:
+            return max(1, int(float(raw)))
+        except Exception:
+            return max(1, frames)
     for item in getattr(config, "target_window_frame_overrides", ()) or ():
         text = str(item or "").strip()
         if "=" not in text:

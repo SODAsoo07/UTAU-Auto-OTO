@@ -20,6 +20,7 @@ from core.no_mfa_oto_builder import (
     generate_no_mfa_auto_oto,
     resolve_no_mfa_source_oto,
 )
+from core.coarse_crnn.oto_predictor_generator import generate_oto_with_crnn_predictor
 from core.mfa_runner import (
     ALERT_MSVC_REQUIRED,
     MFA_PORTABLE_PYTHON_VERSION,
@@ -2293,7 +2294,7 @@ class PipelineActionsMixin:
                     default="mfa",
                 )
                 no_mfa_auto_mode = (
-                    aligner_engine == "none"
+                    aligner_engine in {"none", "coarse_crnn"}
                     and lang != "english"
                     and not (lang == "korean" and selected_format in {"cmpx", "c_plus_v"})
                 )
@@ -2302,7 +2303,9 @@ class PipelineActionsMixin:
                     if hasattr(self, "_get_no_mfa_oto_mode_code")
                     else "remap"
                 )
-                no_mfa_mode_text = "베이스 OTO 재매핑 + 보정"
+                if aligner_engine == "coarse_crnn":
+                    no_mfa_mode_code = "crnn"
+                no_mfa_mode_text = "CRNN OTO 예측기(실험)" if no_mfa_mode_code == "crnn" else "베이스 OTO 재매핑 + 보정"
                 no_mfa_source_oto = ""
                 if no_mfa_auto_mode:
                     if bool(self.no_base_oto_var.get()):
@@ -2553,7 +2556,10 @@ class PipelineActionsMixin:
                     return
 
                 if no_mfa_auto_mode:
-                    self._append_log("ℹ No-MFA 모드: Lab/사전/정렬 단계를 건너뜁니다.")
+                    if no_mfa_mode_code == "crnn":
+                        self._append_log("ℹ CRNN(실험적): Lab/사전/정렬 단계를 건너뛰고 OTO를 직접 예측합니다.")
+                    else:
+                        self._append_log("ℹ No-MFA 모드: Lab/사전/정렬 단계를 건너뜁니다.")
                     if has_textgrid:
                         self._append_log("ℹ TextGrid가 있어도 No-MFA 선택 시에는 선택한 No-MFA 생성 방식으로 진행합니다.")
                     self._append_log(f"ℹ No-MFA 생성 방식: {no_mfa_mode_text}")
@@ -2563,17 +2569,50 @@ class PipelineActionsMixin:
                     _set_stage_progress("align", 1.0)
 
                     _set_stage_progress("oto", 0.03)
-                    self._set_status("4/5 - No-MFA 자동설정 OTO 생성 중...")
-                    _processed, _total, oto_errors = generate_no_mfa_auto_oto(
-                        wav_dir=wav_dir,
-                        out_path=out_path,
-                        source_oto_path=no_mfa_source_oto,
-                        alias_suffix=self.alias_suffix_var.get().strip(),
-                        language=lang,
-                        stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
-                        generation_mode=no_mfa_mode_code,
-                        callback=_make_stage_callback("oto"),
-                    )
+                    if no_mfa_mode_code == "crnn":
+                        self._set_status("4/5 - CRNN OTO 직접 예측 중...")
+                        _crnn_special_raw = (
+                            self.oto_crnn_special_aliases_var.get()
+                            if hasattr(self, "oto_crnn_special_aliases_var")
+                            else ""
+                        )
+                        _crnn_special_aliases = {
+                            item.strip()
+                            for item in str(_crnn_special_raw or "").split(",")
+                            if item.strip()
+                        }
+                        _processed, _total, oto_errors = generate_oto_with_crnn_predictor(
+                            wav_dir=wav_dir,
+                            out_path=out_path,
+                            source_oto_path=no_mfa_source_oto,
+                            alias_suffix=self.alias_suffix_var.get().strip(),
+                            language=lang,
+                            format_type=selected_format,
+                            model_path=(
+                                self.oto_crnn_model_path_var.get().strip()
+                                if hasattr(self, "oto_crnn_model_path_var")
+                                else ""
+                            ),
+                            device=(
+                                self.oto_crnn_device_var.get().strip()
+                                if hasattr(self, "oto_crnn_device_var")
+                                else "auto"
+                            ),
+                            special_aliases=_crnn_special_aliases or None,
+                            callback=_make_stage_callback("oto"),
+                        )
+                    else:
+                        self._set_status("4/5 - No-MFA 자동설정 OTO 생성 중...")
+                        _processed, _total, oto_errors = generate_no_mfa_auto_oto(
+                            wav_dir=wav_dir,
+                            out_path=out_path,
+                            source_oto_path=no_mfa_source_oto,
+                            alias_suffix=self.alias_suffix_var.get().strip(),
+                            language=lang,
+                            stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
+                            generation_mode=no_mfa_mode_code,
+                            callback=_make_stage_callback("oto"),
+                        )
                     if _total:
                         _set_stage_progress("oto", float(_processed) / float(_total))
                     _set_stage_progress("oto", 1.0)
@@ -2638,12 +2677,15 @@ class PipelineActionsMixin:
                 align_err = ""
                 align_engine = self.aligner_var.get()
                 primary_engine = normalize_aligner_name(align_engine, default="mfa")
+                use_oto_crnn_direct = primary_engine == "coarse_crnn"
                 fallback_engine = ""
                 _set_stage_progress("align", 0.05)
                 if primary_engine == "none":
                     self._set_status("3/5 - 정렬 건너뛰기(no-MFA)")
                 elif primary_engine == "sequence":
                     self._set_status("3/5 - 전용 시퀀스 정렬 준비 중...")
+                elif use_oto_crnn_direct:
+                    self._set_status("3/5 - 정렬 건너뛰기(CRNN OTO 직접 예측)")
                 else:
                     self._set_status("3/5 - MFA 정렬 준비 중...")
                     if not self._ensure_mfa_ready_for_language(lang):
@@ -2661,31 +2703,38 @@ class PipelineActionsMixin:
                     self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
                 elif primary_engine == "sequence":
                     self._append_log("ℹ 정렬 엔진: 전용 시퀀스 baseline")
+                elif use_oto_crnn_direct:
+                    self._append_log("ℹ CRNN(실험적): TextGrid 정렬 대신 OTO 직접 예측 모델을 사용합니다.")
                 else:
                     self._append_log("ℹ 정렬 엔진: none (MFA 비사용)")
                 if hasattr(self, "_apply_advanced_tuning_envs"):
                     self._apply_advanced_tuning_envs()
 
-                align_result = run_alignment_with_fallback(
-                    language=lang,
-                    wav_folder=wav_dir,
-                    dictionary_path=dict_path,
-                    output_folder=output_dir,
-                    primary_aligner=primary_engine,
-                    fallback_aligner=fallback_engine,
-                    mfa_path=self.mfa_path or "",
-                    mfa_align_profile=(
-                        self._get_mfa_align_profile_code()
-                        if hasattr(self, "_get_mfa_align_profile_code")
-                        else "accurate"
-                    ),
-                    format_hint=selected_format,
-                    callback=_make_stage_callback("align"),
-                )
-                align_ok = bool(align_result.get("ok", False))
-                align_err = str(align_result.get("message", "") or "")
-                if align_result.get("fallback_used"):
-                    self._append_log(f"ℹ 정렬 fallback 경로: {align_result.get('fallback_path', '')}")
+                if use_oto_crnn_direct:
+                    align_result = {"code": "OK", "message": "alignment skipped for CRNN OTO predictor", "ok": True}
+                    align_ok = True
+                    align_err = ""
+                else:
+                    align_result = run_alignment_with_fallback(
+                        language=lang,
+                        wav_folder=wav_dir,
+                        dictionary_path=dict_path,
+                        output_folder=output_dir,
+                        primary_aligner=primary_engine,
+                        fallback_aligner=fallback_engine,
+                        mfa_path=self.mfa_path or "",
+                        mfa_align_profile=(
+                            self._get_mfa_align_profile_code()
+                            if hasattr(self, "_get_mfa_align_profile_code")
+                            else "accurate"
+                        ),
+                        format_hint=selected_format,
+                        callback=_make_stage_callback("align"),
+                    )
+                    align_ok = bool(align_result.get("ok", False))
+                    align_err = str(align_result.get("message", "") or "")
+                    if align_result.get("fallback_used"):
+                        self._append_log(f"ℹ 정렬 fallback 경로: {align_result.get('fallback_path', '')}")
                 if primary_engine == "none":
                     has_textgrid = False
                     if os.path.isdir(output_dir):

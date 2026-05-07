@@ -15,8 +15,11 @@ _ROLE_PRIOR_TABLE: dict[str, dict[str, float]] = {
     "cv-": dict(cons_gap=34.0, tail=70.0, min_cons_gap=10.0, min_tail=24.0, max_cons_gap=60.0, max_tail=110.0),
     "v":   dict(cons_gap=18.0, tail=48.0, min_cons_gap=4.0,  min_tail=14.0, max_cons_gap=36.0, max_tail=92.0),
     "v-":  dict(cons_gap=18.0, tail=58.0, min_cons_gap=4.0,  min_tail=18.0, max_cons_gap=36.0, max_tail=104.0),
-    "vc":  dict(cons_gap=28.0, tail=52.0, min_cons_gap=10.0, min_tail=22.0, max_cons_gap=48.0, max_tail=82.0),
-    "vv":  dict(cons_gap=42.0, tail=72.0, min_cons_gap=14.0, min_tail=26.0, max_cons_gap=72.0, max_tail=116.0),
+    # vc/vv priors are set to the tighter cvvc-format values since most vc/vv
+    # aliases live in cvvc voicebanks. alias_timing_prior("vc") used 28/52 but
+    # oto_timing_prior(cvvc,vc) is 24/46, matching real-world cvvc data better.
+    "vc":  dict(cons_gap=24.0, tail=46.0, min_cons_gap=8.0,  min_tail=18.0, max_cons_gap=42.0, max_tail=70.0),
+    "vv":  dict(cons_gap=38.0, tail=62.0, min_cons_gap=12.0, min_tail=22.0, max_cons_gap=66.0, max_tail=100.0),
     "v-cv":dict(cons_gap=48.0, tail=74.0, min_cons_gap=16.0, min_tail=30.0, max_cons_gap=82.0, max_tail=118.0),
     "endbr":dict(cons_gap=20.0, tail=44.0, min_cons_gap=6.0, min_tail=16.0, max_cons_gap=40.0, max_tail=78.0),
     "br":  dict(cons_gap=16.0, tail=36.0, min_cons_gap=4.0,  min_tail=12.0, max_cons_gap=34.0, max_tail=64.0),

@@ -436,6 +436,7 @@ class App(
         self.no_mfa_oto_mode_var = ctk.StringVar(value="베이스 OTO 재매핑 + 보정")
         self.oto_crnn_model_path_var = ctk.StringVar(value="")
         self.oto_crnn_device_var = ctk.StringVar(value="auto")
+        self.oto_crnn_special_aliases_var = ctk.StringVar(value="")
         self.mfa_align_profile_var = ctk.StringVar(value="기본")
         # WhisperX 런타임 옵션(고급): UI에서 직접 노출하지 않아도 config.json으로 제어 가능
         self.whisperx_profile_var = ctk.StringVar(value="balanced")
