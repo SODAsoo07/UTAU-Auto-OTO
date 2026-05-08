@@ -181,3 +181,133 @@ def test_relative_oto_target_uses_format_alias_transition_context():
 
     assert round(target[3] * 1000.0, 3) == prior["max_cons_gap"]
     assert round(target[4] * 1000.0, 3) == prior["max_tail"]
+
+
+def test_classify_blank_alias_empty_returns_blank():
+    from core.coarse_crnn.oto_targets import _classify_blank_alias
+
+    assert _classify_blank_alias("") == "blank"
+    assert _classify_blank_alias("   ") == "blank"
+    assert _classify_blank_alias(None) == "blank"
+    assert _classify_blank_alias("-") == "blank"
+    assert _classify_blank_alias("- ") == "blank"
+
+
+def test_classify_blank_alias_silence_tokens_match_silence():
+    from core.coarse_crnn.oto_targets import _classify_blank_alias
+
+    # Single tokens
+    assert _classify_blank_alias("R") == "silence"
+    assert _classify_blank_alias("br") == "silence"
+    assert _classify_blank_alias("pau") == "silence"
+    assert _classify_blank_alias("sil") == "silence"
+    assert _classify_blank_alias("rest") == "silence"
+    # Hyphen-prefixed
+    assert _classify_blank_alias("- R") == "silence"
+    assert _classify_blank_alias("-R") == "silence"
+    assert _classify_blank_alias("- pau") == "silence"
+    # Combined silence tokens
+    assert _classify_blank_alias("R sil") == "silence"
+    assert _classify_blank_alias("br pau") == "silence"
+
+
+def test_classify_blank_alias_normal_alias_returns_empty():
+    from core.coarse_crnn.oto_targets import _classify_blank_alias
+
+    # Real CV / VCV / CVVC aliases must NOT be classified as blank/silence.
+    assert _classify_blank_alias("ka") == ""
+    assert _classify_blank_alias("- ka") == ""
+    assert _classify_blank_alias("a k") == ""
+    assert _classify_blank_alias("か") == ""
+    assert _classify_blank_alias("a ka") == ""
+    # Mixed silence + real phone is NOT silence-only.
+    assert _classify_blank_alias("ka R") == ""
+
+
+def test_compute_row_order_violation_score_zero_for_perfectly_aligned_row():
+    """If target_offset matches row_ratio*duration exactly, score is 0."""
+    from core.coarse_crnn.oto_targets import _compute_row_order_violation_score
+
+    s = _compute_row_order_violation_score(
+        target_offset_ms=500.0, row_ratio=0.5, duration_ms=1000.0
+    )
+    assert abs(s) < 1e-9
+
+
+def test_compute_row_order_violation_score_normalized_by_duration():
+    """Same absolute delta produces smaller score on longer audio."""
+    from core.coarse_crnn.oto_targets import _compute_row_order_violation_score
+
+    short = _compute_row_order_violation_score(
+        target_offset_ms=0.0, row_ratio=0.5, duration_ms=1000.0
+    )
+    long = _compute_row_order_violation_score(
+        target_offset_ms=0.0, row_ratio=0.5, duration_ms=4000.0
+    )
+    # row_ratio*duration = 500 vs 2000, delta = 500 vs 2000.
+    # Score = delta/duration = 0.5 vs 0.5 (same proportion!).
+    assert abs(short - long) < 1e-9
+    # But unequal absolute deltas distinguish them:
+    a = _compute_row_order_violation_score(
+        target_offset_ms=100.0, row_ratio=0.5, duration_ms=1000.0
+    )
+    b = _compute_row_order_violation_score(
+        target_offset_ms=400.0, row_ratio=0.5, duration_ms=1000.0
+    )
+    # delta a = 400 (offset 100 vs ratio*dur 500) → 0.4
+    # delta b = 100 (offset 400 vs ratio*dur 500) → 0.1
+    assert a > b
+
+
+def test_compute_row_order_violation_score_eps_protects_short_audio():
+    """duration < eps_ms must not blow the score up to infinity."""
+    from core.coarse_crnn.oto_targets import _compute_row_order_violation_score
+
+    # Very short duration; delta = 50 ms, eps = 200 ms → score = 50/200 = 0.25.
+    s = _compute_row_order_violation_score(
+        target_offset_ms=50.0, row_ratio=0.0, duration_ms=10.0, eps_ms=200.0
+    )
+    assert abs(s - 0.25) < 1e-9
+
+
+def test_compute_row_order_violation_score_zero_duration_returns_zero():
+    """Defensive: 0 or negative duration returns 0 instead of dividing."""
+    from core.coarse_crnn.oto_targets import _compute_row_order_violation_score
+
+    assert _compute_row_order_violation_score(
+        target_offset_ms=100.0, row_ratio=0.5, duration_ms=0.0
+    ) == 0.0
+    assert _compute_row_order_violation_score(
+        target_offset_ms=100.0, row_ratio=0.5, duration_ms=-50.0
+    ) == 0.0
+
+
+def test_apply_row_context_attaches_violation_score():
+    """The manifest pipeline must populate row_order_violation_score per row."""
+    from core.coarse_crnn.oto_targets import _apply_row_context
+
+    rows = [
+        {
+            "oto_path": "p1",
+            "wav": "a.wav",
+            "line_index": 0,
+            "target_offset_ms": 100.0,
+            "duration_ms": 1000.0,
+        },
+        {
+            "oto_path": "p1",
+            "wav": "a.wav",
+            "line_index": 1,
+            # Row 1 should sit at row_ratio=1.0 (count=2, idx=1) -> expected 1000.
+            # Real offset 200 ms -> very high violation.
+            "target_offset_ms": 200.0,
+            "duration_ms": 1000.0,
+        },
+    ]
+    _apply_row_context(rows)
+    assert "row_order_violation_score" in rows[0]
+    assert "row_order_violation_score" in rows[1]
+    # Row 0: row_ratio=0, expected=0, actual=100 → score = 100/1000 = 0.1.
+    assert abs(rows[0]["row_order_violation_score"] - 0.1) < 1e-9
+    # Row 1: row_ratio=1, expected=1000, actual=200 → score = 800/1000 = 0.8.
+    assert abs(rows[1]["row_order_violation_score"] - 0.8) < 1e-9

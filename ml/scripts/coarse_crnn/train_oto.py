@@ -95,6 +95,14 @@ def main() -> int:
     parser.add_argument("--num-workers", type=int, default=0, help="0 keeps single-process loading, -1 means auto worker count.")
     parser.add_argument("--dataloader-prefetch-factor", type=int, default=2)
     parser.add_argument("--dataloader-persistent-workers", action=argparse.BooleanOptionalAction, default=True)
+    # Compatibility aliases (older local command snippets).
+    parser.add_argument("--loader-prefetch-factor", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--loader-persistent-workers", action=argparse.BooleanOptionalAction, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--cpu-feature-cache-size", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--cuda-prefetch-batches", type=int, default=0,
+                        help="Number of batches to prefetch to CUDA on a side stream (0 disables).")
+    parser.add_argument("--cuda-prefetch-eval", action=argparse.BooleanOptionalAction, default=True,
+                        help="Apply CUDA prefetch in validation/evaluation loops as well.")
     parser.add_argument("--tf32", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--cudnn-benchmark", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--feature-cache", action=argparse.BooleanOptionalAction, default=True)
@@ -114,6 +122,15 @@ def main() -> int:
                         help="Loss multiplier for vc-role aliases (hard to predict in cvvc voicebanks).")
     parser.add_argument("--vv-role-loss-weight", type=float, default=2.0,
                         help="Loss multiplier for vv-role aliases.")
+    parser.add_argument(
+        "--row-order-violation-alpha",
+        type=float,
+        default=0.0,
+        help="Downweight rows whose row_ratio mismatches the actual target offset (v2 1-B). "
+             "0 disables the multiplier (legacy behaviour). Recommended starting value: 0.5; "
+             "compare 0.5 vs 1.0 after a 1-2 week run. Requires a manifest built with the "
+             "row_order_violation_score column populated.",
+    )
     parser.add_argument("--format-residual-heads", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--vcv-target-window", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--vcv-window-frames", type=int, default=240)
@@ -242,6 +259,15 @@ def main() -> int:
         # This branch does not expose a dedicated cvvc specialist head module.
         # Use the nearest available approximation: per-format residual heads.
         args.format_residual_heads = True
+    # Loader alias mapping.
+    if args.loader_prefetch_factor is not None:
+        args.dataloader_prefetch_factor = int(args.loader_prefetch_factor)
+    if args.loader_persistent_workers is not None:
+        args.dataloader_persistent_workers = bool(args.loader_persistent_workers)
+    # cpu-feature-cache-size was used for in-memory cache experiments in another
+    # branch. On this branch we use on-disk feature cache; map intent to enable.
+    if args.cpu_feature_cache_size is not None:
+        args.feature_cache = bool(int(args.cpu_feature_cache_size) > 0)
 
     rows = read_jsonl(args.manifest)
     if int(args.max_rows) > 0:
@@ -292,6 +318,8 @@ def main() -> int:
         num_workers=int(args.num_workers),
         dataloader_prefetch_factor=max(1, int(args.dataloader_prefetch_factor)),
         dataloader_persistent_workers=bool(args.dataloader_persistent_workers),
+        cuda_prefetch_batches=max(0, int(args.cuda_prefetch_batches)),
+        cuda_prefetch_eval=bool(args.cuda_prefetch_eval),
         enable_tf32=bool(args.tf32),
         enable_cudnn_benchmark=bool(args.cudnn_benchmark),
         enable_feature_cache=bool(args.feature_cache),
@@ -304,6 +332,7 @@ def main() -> int:
         cvc_loss_weight=float(args.cvc_loss_weight),
         vc_role_loss_weight=float(args.vc_role_loss_weight),
         vv_role_loss_weight=float(args.vv_role_loss_weight),
+        row_order_violation_alpha=float(args.row_order_violation_alpha),
         ctc_loss_weight=float(args.ctc_loss_weight),
         ctc_warmup_steps=int(args.ctc_warmup_steps),
         uncertainty_loss_weight=float(args.uncertainty_loss_weight),

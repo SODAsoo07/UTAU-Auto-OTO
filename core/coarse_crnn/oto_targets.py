@@ -151,6 +151,57 @@ def oto_row_quality(row: dict[str, Any], *, duration_ms: float) -> tuple[float, 
     return score, "ok"
 
 
+# v2 1-A: silence/breath alias 패턴 ([[CRNN-정확도-개선-방안-v2]] 1-A 참고).
+# SONG_CMYK_CVVC 분석에서 23.4%의 row가 alias=""인 blank로 확인됐고,
+# 이 row들은 학습 target으로 그대로 쓰이면 cvvc|cv|other slice를 통계적으로
+# 망친다 (preutterance MAE +60 ms, hard_failure_rate +1%p).
+# 분류 결과는 manifest의 ``blank_alias_kind`` 컬럼에 기록되며, 학습 단계에서
+# 학습 제외 (Plan B 기본) 또는 special/breath role 재분류 (ablation)로
+# 사용한다. 분류 자체는 row를 drop하지 않는다 — 평가 시점에서도 동일한
+# manifest로 by_blank_alias slice 집계가 가능해야 하기 때문.
+_BLANK_ALIAS_SILENCE_TOKENS: frozenset[str] = frozenset(
+    [
+        "r",         # UTAU 표준 표기
+        "br",        # breath
+        "breath",
+        "pau",
+        "sil",
+        "silence",
+        "rest",
+        "ng",        # 일부 보이스뱅크에서 nasal silence 표기
+        "息",         # 일본어 breath
+    ]
+)
+
+
+def _classify_blank_alias(alias: object) -> str:
+    """Return one of ``""``, ``"blank"``, ``"silence"``.
+
+    - ``"blank"``: alias 문자열이 비었거나 공백만 있음 (SONG_CMYK_CVVC 케이스).
+    - ``"silence"``: alias가 silence/breath 토큰만 포함 (R, pau, sil, br 등).
+      hyphen-prefixed (``- R``, ``-R``)와 single-token 모두 매칭.
+    - ``""``: 정상 alias.
+
+    Single-source-of-truth: 학습/평가 양쪽이 같은 함수를 호출해야 한다.
+    """
+    text = str(alias or "").strip()
+    if not text:
+        return "blank"
+    # Strip hyphen prefix used by some recipe naming conventions.
+    cleaned = text
+    while cleaned.startswith("-"):
+        cleaned = cleaned[1:].lstrip()
+    if not cleaned:
+        return "blank"
+    tokens = [tok for tok in cleaned.lower().replace("-", " ").split() if tok]
+    if not tokens:
+        return "blank"
+    silence_set = _BLANK_ALIAS_SILENCE_TOKENS
+    if all(tok in silence_set for tok in tokens):
+        return "silence"
+    return ""
+
+
 def iter_oto_manifest_rows(dataset_root: str) -> list[dict[str, Any]]:
     base = Path(dataset_root)
     if not base.exists():
@@ -189,6 +240,7 @@ def iter_oto_manifest_rows(dataset_root: str) -> list[dict[str, Any]]:
             )
             alias = str(parsed.get("alias", "") or "").strip()
             alias_features = extract_alias_features(alias, language=language)
+            blank_alias_kind = _classify_blank_alias(alias)
             rows.append(
                 {
                     "audio": os.path.abspath(wav_path),
@@ -217,6 +269,9 @@ def iter_oto_manifest_rows(dataset_root: str) -> list[dict[str, Any]]:
                     "sample_weight": round(float(quality), 4),
                     "quality_reason": reason,
                     "source": "oto_ini",
+                    # v2 1-A blank alias 분리: 학습 시 제외 또는 별도 처리.
+                    # ""=정상 alias, "blank"=빈 문자열, "silence"=R/pau/sil 패턴.
+                    "blank_alias_kind": blank_alias_kind,
                 }
             )
     _apply_row_context(rows)
@@ -231,6 +286,45 @@ def write_jsonl(path: str, rows: list[dict[str, Any]]) -> int:
     return len(rows)
 
 
+# v2 1-B: row-order violation score ([[CRNN-정확도-개선-방안-v2]] 1-B 참고).
+# SONG_CMYK_CVVC에서 row의 32.8%가 row_index 순서와 실제 target_offset
+# 순서가 어긋나, ``abs(offset - row_ratio*duration)``의 평균이 2202 ms에
+# 달한다 (Sato CVVC는 958 ms). 모델은 ``row_ratio_in_wav`` feature와 row
+# position embedding에 의존하기 때문에 이 미스매치 row는 학습 signal로
+# 그대로 들어가면 anchor regression을 흔든다. 분류 자체는 manifest에 컬럼
+# (``row_order_violation_score``)으로 기록만 하고, 학습 단계에서
+# ``OtoTrainConfig.row_order_violation_alpha``로 sample_weight 다운스케일.
+# 평가에서는 같은 컬럼을 slice 키로 써서 violation 큰 row 별도 집계 가능.
+_ROW_ORDER_VIOLATION_EPS_MS: float = 200.0
+
+
+def _compute_row_order_violation_score(
+    *,
+    target_offset_ms: float,
+    row_ratio: float,
+    duration_ms: float,
+    eps_ms: float = _ROW_ORDER_VIOLATION_EPS_MS,
+) -> float:
+    """Row-order violation score: ``|offset - row_ratio * duration| / max(duration, eps_ms)``.
+
+    Returns 0.0 for non-positive duration (defensive, prevents division by
+    zero). The ``eps_ms`` floor keeps very short / corrupted rows from
+    blowing the score up. Score is clipped to ``[0, 10]`` upstream — the
+    raw return is unbounded but typical values are 0.0–3.0.
+
+    Single source of truth: callers in :func:`_apply_row_context` and the
+    training-time weight reweighter (``oto_training._row_order_violation_multiplier``)
+    use this exact function so the manifest column and the runtime weight
+    cannot drift apart.
+    """
+    duration = max(0.0, float(duration_ms or 0.0))
+    if duration <= 0.0:
+        return 0.0
+    expected = float(row_ratio or 0.0) * duration
+    delta = abs(float(target_offset_ms or 0.0) - expected)
+    return float(delta) / max(duration, float(eps_ms))
+
+
 def _apply_row_context(rows: list[dict[str, Any]]) -> None:
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
@@ -242,9 +336,18 @@ def _apply_row_context(rows: list[dict[str, Any]]) -> None:
         for idx, row in enumerate(items):
             row["row_index_in_wav"] = idx
             row["file_row_count"] = count
-            row["row_ratio_in_wav"] = float(idx) / float(max(1, count - 1)) if count > 1 else 0.0
+            row_ratio = float(idx) / float(max(1, count - 1)) if count > 1 else 0.0
+            row["row_ratio_in_wav"] = row_ratio
             row["is_head_row"] = 1.0 if idx == 0 else 0.0
             row["is_tail_row"] = 1.0 if idx == count - 1 else 0.0
+            row["row_order_violation_score"] = round(
+                _compute_row_order_violation_score(
+                    target_offset_ms=float(row.get("target_offset_ms", 0.0) or 0.0),
+                    row_ratio=row_ratio,
+                    duration_ms=float(row.get("duration_ms", 0.0) or 0.0),
+                ),
+                4,
+            )
             _apply_neighbor_alias(row, "prev", items[idx - 1] if idx > 0 else None)
             _apply_neighbor_alias(row, "next", items[idx + 1] if idx + 1 < count else None)
 

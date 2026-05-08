@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from core.coarse_crnn.oto_training import OtoTrainConfig, _build_train_sampling_weights, _filter_compatible_init_state
+from core.coarse_crnn.oto_training import (
+    OtoTrainConfig,
+    _build_train_sampling_weights,
+    _filter_compatible_init_state,
+    _iter_device_batches,
+)
 from core.coarse_crnn.training import _boundary_targets_from_frame_targets
 
 
@@ -117,3 +122,66 @@ def test_compatible_init_state_skips_missing_and_shape_mismatch():
     assert summary["loaded"] == 1
     assert summary["skipped_missing_count"] == 1
     assert summary["skipped_shape_count"] == 1
+
+
+def test_iter_device_batches_cpu_path_keeps_batch_count():
+    import torch
+
+    loader = [
+        (torch.zeros((1, 2), dtype=torch.float32), torch.ones((1,), dtype=torch.float32)),
+        (torch.ones((1, 2), dtype=torch.float32), torch.zeros((1,), dtype=torch.float32)),
+    ]
+    batches = list(_iter_device_batches(loader, torch.device("cpu"), torch=torch, prefetch_batches=2))
+    assert len(batches) == 2
+    assert all(batch[0].device.type == "cpu" for batch in batches)
+
+
+def test_row_order_violation_multiplier_disabled_returns_one():
+    """alpha=0 (default) keeps the legacy behaviour for every row."""
+    from core.coarse_crnn.oto_training import _row_order_violation_multiplier
+
+    cfg = OtoTrainConfig(row_order_violation_alpha=0.0)
+    # High violation row should still get multiplier 1.0 when alpha is 0.
+    row = {"row_order_violation_score": 2.5}
+    assert abs(_row_order_violation_multiplier(row, cfg) - 1.0) < 1e-9
+
+
+def test_row_order_violation_multiplier_scales_high_score_down():
+    """alpha=0.5 + clipped score 1.0 should give multiplier 1/(1+0.5*1)=0.667."""
+    from core.coarse_crnn.oto_training import _row_order_violation_multiplier
+
+    cfg = OtoTrainConfig(row_order_violation_alpha=0.5)
+    row = {"row_order_violation_score": 1.0}
+    expected = 1.0 / (1.0 + 0.5 * 1.0)
+    assert abs(_row_order_violation_multiplier(row, cfg) - expected) < 1e-9
+
+
+def test_row_order_violation_multiplier_clips_extreme_score():
+    """Score above 3 must be clipped to keep weight from collapsing to 0."""
+    from core.coarse_crnn.oto_training import _row_order_violation_multiplier
+
+    cfg = OtoTrainConfig(row_order_violation_alpha=1.0)
+    # Without clip, score=10 would give 1/11 ≈ 0.09. With clip(0,3) → 1/(1+3) = 0.25.
+    row = {"row_order_violation_score": 10.0}
+    expected_clipped = 1.0 / (1.0 + 1.0 * 3.0)
+    assert abs(_row_order_violation_multiplier(row, cfg) - expected_clipped) < 1e-9
+
+
+def test_row_order_violation_multiplier_missing_column_falls_back_to_one():
+    """Older manifests without the score column should not break training."""
+    from core.coarse_crnn.oto_training import _row_order_violation_multiplier
+
+    cfg = OtoTrainConfig(row_order_violation_alpha=0.5)
+    # No row_order_violation_score key → 1.0 fallback.
+    assert abs(_row_order_violation_multiplier({}, cfg) - 1.0) < 1e-9
+    # Non-numeric also falls back.
+    assert abs(_row_order_violation_multiplier({"row_order_violation_score": "?"}, cfg) - 1.0) < 1e-9
+
+
+def test_row_order_violation_multiplier_zero_score_returns_one():
+    """A row whose order is perfectly aligned (score=0) gets unchanged weight."""
+    from core.coarse_crnn.oto_training import _row_order_violation_multiplier
+
+    cfg = OtoTrainConfig(row_order_violation_alpha=0.5)
+    row = {"row_order_violation_score": 0.0}
+    assert abs(_row_order_violation_multiplier(row, cfg) - 1.0) < 1e-9

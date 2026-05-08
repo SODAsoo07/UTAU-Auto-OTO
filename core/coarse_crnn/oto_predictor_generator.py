@@ -601,6 +601,43 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw not in {"0", "false", "off", "no"}
 
 
+def _is_multi_signal_required(language: object, format_type: object) -> bool:
+    """Plan B (0-order) slice-aware AND mode dispatcher.
+
+    Returns True for slices where ``_apply_low_confidence_fallback`` should
+    require BOTH a low-confidence signal AND a high-predicted-error signal
+    before firing (i.e. confidence alone is not enough). False for slices
+    where the legacy OR-trigger is preserved.
+
+    Slice patterns are read from ``UTOA_OTO_CRNN_LOW_CONF_AND_MODE_SLICES``
+    (comma-separated ``language/format`` pairs, ``*`` wildcard). Default
+    list reflects the v2 0-order Plan B exploration result on baseline
+    cvvcvcboost_e6: ``korean/cvc`` and ``japanese/cvvc`` are slices where
+    multi-signal AND mode preserves 25-33%% of model output rows without
+    breaching the effective preutterance accuracy floor. Korean CVVC stays
+    in OR mode because its bad_rate (>=93%) leaves no headroom.
+    """
+    raw = str(os.environ.get("UTOA_OTO_CRNN_LOW_CONF_AND_MODE_SLICES", "") or "").strip()
+    if raw == "":
+        raw = "korean/cvc,japanese/cvvc"
+    if raw.lower() in {"none", "off", "0", "false"}:
+        return False
+    lang = str(language or "").strip().lower()
+    fmt = str(format_type or "").strip().lower()
+    for pattern in raw.split(","):
+        text = pattern.strip().lower()
+        if not text:
+            continue
+        parts = text.split("/")
+        while len(parts) < 2:
+            parts.append("*")
+        match_lang = parts[0] in {"*", lang}
+        match_fmt = parts[1] in {"*", fmt}
+        if match_lang and match_fmt:
+            return True
+    return False
+
+
 def _normalize_base_params(parsed: dict[str, Any] | None) -> dict[str, float]:
     row = dict(parsed or {})
     return {
@@ -640,7 +677,19 @@ def _apply_low_confidence_fallback(
     trigger_conf = float(predicted_confidence) < float(min_conf)
     trigger_err = predicted_error_ms is not None and float(predicted_error_ms) > float(max_error_ms)
     trigger_model = bool(predicted_low_confidence) and bool(use_model_flag)
-    trigger = bool(trigger_model or trigger_conf or trigger_err)
+    # Plan B (0-order, [[CRNN-정확도-개선-방안-v2]]): in slice-AND mode, the
+    # confidence-only branch is suppressed. Fallback fires only when (a) the
+    # explicit model flag is on (rare; legacy override), (b) BOTH conf-low and
+    # err-high agree, or (c) err-high alone (since predicted_error is a
+    # learnt signal that already requires conf-head agreement implicitly via
+    # the uncertainty/error fusion). This converts confidence into a
+    # corroborating signal instead of a primary one for slices where the
+    # confidence head is collapsed (good_mean ≈ bad_mean). The OR-mode is
+    # preserved everywhere else for backward compatibility.
+    if _is_multi_signal_required(language, format_type):
+        trigger = bool(trigger_model or trigger_err or (trigger_conf and trigger_err))
+    else:
+        trigger = bool(trigger_model or trigger_conf or trigger_err)
     if not trigger:
         return dict(predicted_params), ""
     if not _source_oto_shape_usable(base_params, duration_ms=duration_ms):
@@ -702,6 +751,8 @@ def _apply_low_confidence_fallback(
         reason = "high_predicted_error"
     elif trigger_model:
         reason = "low_confidence_model_flag"
+    if _is_multi_signal_required(language, format_type):
+        reason = f"{reason}+slice_and_mode"
     return guarded, reason
 
 

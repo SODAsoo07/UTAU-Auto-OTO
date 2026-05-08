@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import random
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from typing import Any
 import hashlib
@@ -44,6 +44,11 @@ class OtoTrainConfig:
     num_workers: int = 0
     dataloader_prefetch_factor: int = 2
     dataloader_persistent_workers: bool = True
+    # Number of batches to prefetch to CUDA with a dedicated stream (H2D overlap).
+    # 0 disables CUDA-side prefetch.
+    cuda_prefetch_batches: int = 0
+    # Apply the same CUDA prefetching in validation/evaluation.
+    cuda_prefetch_eval: bool = True
     enable_tf32: bool = False
     enable_cudnn_benchmark: bool = False
     enable_feature_cache: bool = True
@@ -62,6 +67,12 @@ class OtoTrainConfig:
     # (vc in cvvc voicebanks has the highest MAE) so they get upweighted.
     vc_role_loss_weight: float = 2.5
     vv_role_loss_weight: float = 2.0
+    # v2 1-B: row-order violation row의 학습 weight 하향. SONG_CMYK_CVVC에서
+    # row_index 순서와 실제 target_offset 순서가 어긋난 row(전체의 32.8%)는
+    # row_ratio feature를 noise로 만든다. manifest의 ``row_order_violation_score``
+    # 와 결합해 ``weight *= 1.0 / (1.0 + alpha * clip(score, 0, 3))`` 로
+    # 다운스케일. alpha=0.0이면 비활성화 (legacy 호환). v2 권장 시작값 0.5.
+    row_order_violation_alpha: float = 0.0
     # CTC alignment auxiliary loss weight (3-A). 0.0 disables the loss even
     # if the model has the CTC head enabled, which is useful for ablation.
     ctc_loss_weight: float = 0.0
@@ -258,6 +269,7 @@ class OtoAnchorDataset:
         weight = float(row.get("sample_weight", row.get("weight", 1.0)) or 1.0)
         weight *= _format_loss_multiplier(row, self.train_config)
         weight *= _role_loss_multiplier(alias_role_text, self.train_config)
+        weight *= _row_order_violation_multiplier(row, self.train_config)
         voicebank_id = self.voicebank_to_id.get(
             str(row.get("voicebank_id", "") or "unknown_voicebank"),
             0,
@@ -456,7 +468,15 @@ def train_oto_from_manifest(
         loss_sum = 0.0
         row_sum = 0
         epoch_hard_scores: dict[int, float] = {}
-        for batch_idx, batch in enumerate(train_loader, start=1):
+        for batch_idx, batch in enumerate(
+            _iter_device_batches(
+                train_loader,
+                device,
+                torch=torch,
+                prefetch_batches=max(0, int(getattr(cfg, "cuda_prefetch_batches", 0) or 0)),
+            ),
+            start=1,
+        ):
             (
                 x,
                 heat,
@@ -482,7 +502,7 @@ def train_oto_from_manifest(
                 mask,
                 phone_targets,
                 phone_lengths,
-            ) = _move_batch(batch, device)
+            ) = batch
             optimizer.zero_grad(set_to_none=True)
             with _autocast(torch, enabled=use_amp):
                 outputs = model(
@@ -696,7 +716,12 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
     voicebank_counts: dict[int, int] = defaultdict(int)
     confidence_raw_all: list[float] = []
     with torch.no_grad():
-        for batch in loader:
+        eval_prefetch = (
+            max(0, int(getattr(cfg, "cuda_prefetch_batches", 0) or 0))
+            if bool(getattr(cfg, "cuda_prefetch_eval", True))
+            else 0
+        )
+        for batch in _iter_device_batches(loader, device, torch=torch, prefetch_batches=eval_prefetch):
             (
                 x,
                 heat,
@@ -722,7 +747,7 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
                 mask,
                 phone_targets,
                 phone_lengths,
-            ) = _move_batch(batch, device)
+            ) = batch
             outputs = model(
                 x,
                 lang,
@@ -1182,6 +1207,37 @@ def _move_batch(batch, device):
     return tuple(item.to(device, non_blocking=True) for item in batch)
 
 
+def _iter_device_batches(loader, device, *, torch, prefetch_batches: int = 0):
+    prefetch_n = max(0, int(prefetch_batches))
+    if device.type != "cuda" or prefetch_n <= 0:
+        for raw in loader:
+            yield _move_batch(raw, device)
+        return
+    iterator = iter(loader)
+    stream = torch.cuda.Stream(device=device)
+    queued: deque[tuple[Any, ...]] = deque()
+
+    def _fill() -> None:
+        while len(queued) < prefetch_n:
+            try:
+                raw = next(iterator)
+            except StopIteration:
+                break
+            with torch.cuda.stream(stream):
+                queued.append(_move_batch(raw, device))
+
+    _fill()
+    while queued:
+        current_stream = torch.cuda.current_stream(device=device)
+        current_stream.wait_stream(stream)
+        batch = queued.popleft()
+        for item in batch:
+            if hasattr(item, "record_stream"):
+                item.record_stream(current_stream)
+        _fill()
+        yield batch
+
+
 def _anchor_array_from_row(row: dict[str, Any]) -> np.ndarray:
     return np.asarray(
         [
@@ -1243,6 +1299,33 @@ def _role_loss_multiplier(alias_role: str, cfg: OtoTrainConfig) -> float:
     if role == "vv":
         return max(0.05, float(cfg.vv_role_loss_weight))
     return 1.0
+
+
+def _row_order_violation_multiplier(row: dict[str, Any], cfg: OtoTrainConfig) -> float:
+    """Downweight rows whose row_ratio_in_wav is far from where the actual
+    target_offset sits ([[CRNN-정확도-개선-방안-v2]] 1-B). Returns 1.0 when
+    alpha is 0 (disabled), otherwise ``1.0 / (1.0 + alpha * clip(score, 0, 3))``.
+
+    The score column is populated by ``oto_targets._compute_row_order_violation_score``;
+    if missing (older manifest), the multiplier silently falls back to 1.0.
+    """
+    alpha = float(getattr(cfg, "row_order_violation_alpha", 0.0) or 0.0)
+    if alpha <= 0.0:
+        return 1.0
+    raw = row.get("row_order_violation_score")
+    if raw is None:
+        return 1.0
+    try:
+        score = float(raw)
+    except (TypeError, ValueError):
+        return 1.0
+    if not (score == score):  # NaN guard
+        return 1.0
+    score = max(0.0, min(3.0, score))
+    denom = 1.0 + alpha * score
+    if denom <= 1e-6:
+        return 1.0
+    return float(1.0 / denom)
 
 
 def _crop_around_anchors(
