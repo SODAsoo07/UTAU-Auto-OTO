@@ -369,3 +369,136 @@ def test_korean_cvvc_role_fallback_ignores_japanese():
 
     assert reason == ""
     assert out == predicted
+
+
+def test_is_multi_signal_required_default_includes_korean_cvc_and_japanese_cvvc(monkeypatch):
+    """Plan B (0-order) default slice list activates AND mode for the two
+    slices where the baseline analysis showed user-facing headroom."""
+    from core.coarse_crnn.oto_predictor_generator import _is_multi_signal_required
+
+    monkeypatch.delenv("UTOA_OTO_CRNN_LOW_CONF_AND_MODE_SLICES", raising=False)
+    assert _is_multi_signal_required("korean", "cvc") is True
+    assert _is_multi_signal_required("japanese", "cvvc") is True
+    # OR mode for slices not in the default list.
+    assert _is_multi_signal_required("korean", "cvvc") is False
+    assert _is_multi_signal_required("japanese", "vcv") is False
+
+
+def test_is_multi_signal_required_respects_env_off(monkeypatch):
+    """Setting the env var to 'off' (or 'none', '0', 'false') reverts to
+    the legacy OR-trigger behaviour for every slice."""
+    from core.coarse_crnn.oto_predictor_generator import _is_multi_signal_required
+
+    for value in ("off", "none", "0", "false"):
+        monkeypatch.setenv("UTOA_OTO_CRNN_LOW_CONF_AND_MODE_SLICES", value)
+        assert _is_multi_signal_required("korean", "cvc") is False
+        assert _is_multi_signal_required("japanese", "cvvc") is False
+
+
+def test_is_multi_signal_required_supports_wildcards(monkeypatch):
+    from core.coarse_crnn.oto_predictor_generator import _is_multi_signal_required
+
+    monkeypatch.setenv("UTOA_OTO_CRNN_LOW_CONF_AND_MODE_SLICES", "korean/*")
+    assert _is_multi_signal_required("korean", "cvc") is True
+    assert _is_multi_signal_required("korean", "cvvc") is True
+    assert _is_multi_signal_required("japanese", "cvvc") is False
+
+    monkeypatch.setenv("UTOA_OTO_CRNN_LOW_CONF_AND_MODE_SLICES", "*/cvvc")
+    assert _is_multi_signal_required("korean", "cvvc") is True
+    assert _is_multi_signal_required("japanese", "cvvc") is True
+    assert _is_multi_signal_required("korean", "vcv") is False
+
+
+def test_low_confidence_fallback_and_mode_suppresses_conf_only(monkeypatch):
+    """In AND-mode slices, confidence-only trigger must NOT fire fallback.
+
+    Regression guard for Plan B: previously confidence < min_conf alone
+    would always fall back. With AND mode active for korean/cvc, only
+    confidence + high error agreement (or err alone) should trigger.
+    """
+    from core.coarse_crnn.oto_predictor_generator import _apply_low_confidence_fallback
+
+    monkeypatch.delenv("UTOA_OTO_CRNN_LOW_CONF_AND_MODE_SLICES", raising=False)
+
+    base_params = {
+        "offset": 100.0,
+        "consonant": 200.0,
+        "cutoff": -300.0,
+        "preutterance": 60.0,
+        "overlap": 30.0,
+    }
+    predicted = {
+        "offset": 110.0,
+        "consonant": 210.0,
+        "cutoff": -310.0,
+        "preutterance": 65.0,
+        "overlap": 32.0,
+    }
+
+    # Confidence is low, predicted_error is None → conf-only trigger.
+    out, reason = _apply_low_confidence_fallback(
+        predicted_params=predicted,
+        predicted_confidence=0.0,
+        predicted_error_ms=None,
+        predicted_low_confidence=False,
+        base_params=base_params,
+        wav_path="dummy.wav",
+        sample_rate=16000,
+        cache={},
+        voicebank_profile={},
+        language="korean",
+        format_type="cvc",
+        alias="a",
+        duration_ms=1000.0,
+        is_special=False,
+    )
+    # AND mode: conf-only must not fire.
+    assert reason == ""
+    assert out == predicted
+
+
+def test_low_confidence_fallback_or_mode_unchanged_for_korean_cvvc(monkeypatch):
+    """OR mode (legacy) should still fire on confidence-only as before.
+
+    korean/cvvc is intentionally NOT in the AND mode default list, so
+    the legacy behaviour is preserved.
+    """
+    from core.coarse_crnn.oto_predictor_generator import _apply_low_confidence_fallback
+
+    monkeypatch.delenv("UTOA_OTO_CRNN_LOW_CONF_AND_MODE_SLICES", raising=False)
+
+    base_params = {
+        "offset": 100.0,
+        "consonant": 200.0,
+        "cutoff": -300.0,
+        "preutterance": 60.0,
+        "overlap": 30.0,
+    }
+    predicted = {
+        "offset": 110.0,
+        "consonant": 210.0,
+        "cutoff": -310.0,
+        "preutterance": 65.0,
+        "overlap": 32.0,
+    }
+
+    out, reason = _apply_low_confidence_fallback(
+        predicted_params=predicted,
+        predicted_confidence=0.0,
+        predicted_error_ms=None,
+        predicted_low_confidence=False,
+        base_params=base_params,
+        wav_path="dummy.wav",
+        sample_rate=16000,
+        cache={},
+        voicebank_profile={},
+        language="korean",
+        format_type="cvvc",
+        alias="a k",
+        duration_ms=1000.0,
+        is_special=False,
+    )
+    # OR mode: conf-only fires; reason includes "low_confidence".
+    assert reason != ""
+    assert "low_confidence" in reason
+    assert "slice_and_mode" not in reason

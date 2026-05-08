@@ -63,15 +63,36 @@ def _is_bad_row(
     bad_pre_ms: float = 50.0,
     bad_offset_ms: float = 700.0,
     bad_cutoff_ms: float = 900.0,
+    mode: str = "errors_only",
 ) -> bool:
-    """Mirror the definition used in analyze_oto_fallback_candidates.py."""
-    return bool(
-        _param_error(row, "preutterance") > float(bad_pre_ms)
-        or _param_error(row, "offset") > float(bad_offset_ms)
-        or _param_error(row, "cutoff_abs") > float(bad_cutoff_ms)
-        or bool(row.get("hard_failure", False))
-        or bool(row.get("fn_voiced_miss", False))
-    )
+    """Decide whether a row counts as "bad" for trigger evaluation.
+
+    Two modes:
+
+    - ``errors_only`` (default, Plan B): only ms-level threshold breaches on
+      ``preutterance`` / ``offset`` / ``cutoff_abs`` mark the row as bad.
+      This avoids self-reference when ``fn_voiced_miss`` or
+      ``syllable_shift_flag`` are themselves used as triggers — without it
+      a trigger like ``fn_voiced_miss`` would always score 100% bad_recall
+      simply because being voiced-missed is the bad-label criterion.
+    - ``strict`` (legacy): adds ``hard_failure`` and ``fn_voiced_miss`` as
+      bad-row indicators. This mirrors
+      ``analyze_oto_fallback_candidates.py`` and is kept for backward
+      compatibility with earlier reports referenced in
+      [[14-Coarse-CRNN-OTO-모델]].
+    """
+    pre_bad = _param_error(row, "preutterance") > float(bad_pre_ms)
+    offset_bad = _param_error(row, "offset") > float(bad_offset_ms)
+    cutoff_bad = _param_error(row, "cutoff_abs") > float(bad_cutoff_ms)
+    if str(mode or "errors_only").strip().lower() == "strict":
+        return bool(
+            pre_bad
+            or offset_bad
+            or cutoff_bad
+            or bool(row.get("hard_failure", False))
+            or bool(row.get("fn_voiced_miss", False))
+        )
+    return bool(pre_bad or offset_bad or cutoff_bad)
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +237,7 @@ def evaluate_policy(
     bad_pre_ms: float = 50.0,
     bad_offset_ms: float = 700.0,
     bad_cutoff_ms: float = 900.0,
+    bad_mode: str = "errors_only",
 ) -> dict:
     """Apply ``trigger.fn`` to each row, return classifier-style metrics
     plus the "effective" eval metrics that result from substituting the
@@ -242,7 +264,13 @@ def evaluate_policy(
             "effective_cutoff_abs_mae_ms": 0.0,
         }
     bad_flags = [
-        _is_bad_row(row, bad_pre_ms=bad_pre_ms, bad_offset_ms=bad_offset_ms, bad_cutoff_ms=bad_cutoff_ms)
+        _is_bad_row(
+            row,
+            bad_pre_ms=bad_pre_ms,
+            bad_offset_ms=bad_offset_ms,
+            bad_cutoff_ms=bad_cutoff_ms,
+            mode=bad_mode,
+        )
         for row in rows
     ]
     triggered = [bool(trigger.fn(row)) for row in rows]
@@ -282,10 +310,13 @@ def evaluate_policy_grid(
     bad_pre_ms: float = 50.0,
     bad_offset_ms: float = 700.0,
     bad_cutoff_ms: float = 900.0,
+    bad_mode: str = "errors_only",
 ) -> list[dict]:
     """Evaluate every trigger in the grid (default: ``default_trigger_grid()``)
     and return the result list sorted by Plan B priority:
     higher bad_recall, then higher good_keep_rate, then lower fallback_rate.
+
+    ``bad_mode`` controls how rows are labelled bad — see ``_is_bad_row``.
     """
     triggers = list(grid) if grid is not None else default_trigger_grid()
     results = [
@@ -295,6 +326,7 @@ def evaluate_policy_grid(
             bad_pre_ms=bad_pre_ms,
             bad_offset_ms=bad_offset_ms,
             bad_cutoff_ms=bad_cutoff_ms,
+            bad_mode=bad_mode,
         )
         for trigger in triggers
     ]
