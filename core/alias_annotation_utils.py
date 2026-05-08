@@ -12,6 +12,10 @@ _TRAILING_ROMAN_SUFFIX_RE = re.compile(r"^(.*?)([A-Z]{1,4}\d{1,3})$")
 _TRAILING_ROMAN_V_RE = re.compile(r"^(.*?)([A-Za-z]{1,8}?)(V\d{0,3})$")
 _DEGENERATE_ALIAS_MARKERS = {"-", "r", "h", "R", "H", "'", "."}
 
+# Phonetically meaningful effect suffixes that must NOT be stripped even when
+# the prefix type matches: "ga_fry01" → "ga_fry" (strip "01"), keep "fry".
+_PROTECTED_SUFFIX_WORDS: frozenset[str] = frozenset({"fry", "vf"})
+
 
 def _accept_candidate_type(base_type: str, candidate_type: str, *, require_same_type: bool) -> bool:
     ctype = str(candidate_type or "")
@@ -52,6 +56,8 @@ def _try_strip_trailing_separator_suffix(
         prefix = parts[0].strip()
         suffix = parts[1].strip()
         if not prefix or not suffix:
+            continue
+        if suffix.lower() in _PROTECTED_SUFFIX_WORDS:
             continue
         if _is_degenerate_alias_candidate(prefix):
             continue

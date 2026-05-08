@@ -602,12 +602,16 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _is_multi_signal_required(language: object, format_type: object) -> bool:
-    """Plan B (0-order) slice-aware AND mode dispatcher.
+    """Plan B (0-order) multi_v2 slice dispatcher.
 
-    Returns True for slices where ``_apply_low_confidence_fallback`` should
-    require BOTH a low-confidence signal AND a high-predicted-error signal
-    before firing (i.e. confidence alone is not enough). False for slices
-    where the legacy OR-trigger is preserved.
+    Returns True for slices where ``_apply_low_confidence_fallback`` uses
+    the multi_v2 trigger: ``(conf_low OR err_high) AND activity_risk``.
+    False for slices where the legacy OR-trigger is preserved.
+
+    multi_v2 prevents spurious fallback in slices where the confidence head
+    has collapsed (good_mean ≈ bad_mean ≈ 0.35), making conf/err unreliable
+    primary signals. Corroboration with the audio activity profile (preutterance
+    outside the active window, or low continuity) is required before firing.
 
     Slice patterns are read from ``UTOA_OTO_CRNN_LOW_CONF_AND_MODE_SLICES``
     (comma-separated ``language/format`` pairs, ``*`` wildcard). Default
@@ -635,6 +639,37 @@ def _is_multi_signal_required(language: object, format_type: object) -> bool:
         match_fmt = parts[1] in {"*", fmt}
         if match_lang and match_fmt:
             return True
+    return False
+
+
+def _is_activity_risk_for_fallback(
+    predicted_params: dict[str, float],
+    profile: dict[str, float],
+) -> bool:
+    """Corroborating activity signal for multi_v2 fallback mode.
+
+    Returns True when audio activity evidence suggests the predicted
+    preutterance anchor is misaligned, OR the segment has low voiced
+    continuity (indicating the model may have latched onto noise).
+    An empty profile (WAV unreadable) is treated as risk=True so
+    that conf+err agreement still triggers fallback conservatively.
+    """
+    if not profile:
+        return True
+    active_start = float(profile.get("active_start_ms", 0.0) or 0.0)
+    active_end = float(profile.get("active_end_ms", 0.0) or 0.0)
+    continuity = float(profile.get("continuity_score", 1.0) or 1.0)
+    if active_end <= active_start + 20.0:
+        return False
+    offset_ms = float(predicted_params.get("offset", 0.0) or 0.0)
+    pre_ms = float(predicted_params.get("preutterance", 0.0) or 0.0)
+    pre_abs = offset_ms + pre_ms
+    margin = _env_float("UTOA_OTO_CRNN_MULTI_V2_ACTIVITY_MARGIN_MS", 60.0)
+    if pre_abs < active_start - margin or pre_abs > active_end + margin:
+        return True
+    cont_thr = _env_float("UTOA_OTO_CRNN_MULTI_V2_CONTINUITY_THRESHOLD", 0.30)
+    if continuity < cont_thr:
+        return True
     return False
 
 
@@ -677,17 +712,19 @@ def _apply_low_confidence_fallback(
     trigger_conf = float(predicted_confidence) < float(min_conf)
     trigger_err = predicted_error_ms is not None and float(predicted_error_ms) > float(max_error_ms)
     trigger_model = bool(predicted_low_confidence) and bool(use_model_flag)
-    # Plan B (0-order, [[CRNN-정확도-개선-방안-v2]]): in slice-AND mode, the
-    # confidence-only branch is suppressed. Fallback fires only when (a) the
-    # explicit model flag is on (rare; legacy override), (b) BOTH conf-low and
-    # err-high agree, or (c) err-high alone (since predicted_error is a
-    # learnt signal that already requires conf-head agreement implicitly via
-    # the uncertainty/error fusion). This converts confidence into a
-    # corroborating signal instead of a primary one for slices where the
-    # confidence head is collapsed (good_mean ≈ bad_mean). The OR-mode is
-    # preserved everywhere else for backward compatibility.
+    # Plan B (0-order, [[CRNN-정확도-개선-방안-v2]]) multi_v2: in AND-mode
+    # slices, confidence or error alone is not enough. Fallback fires only
+    # when the audio activity profile corroborates the signal (preutterance
+    # outside the active window, or low voiced continuity). This prevents
+    # spurious fallback in slices where the confidence head has collapsed
+    # (good_mean ≈ bad_mean ≈ 0.35). The OR-mode is preserved for all other
+    # slices for backward compatibility.
     if _is_multi_signal_required(language, format_type):
-        trigger = bool(trigger_model or trigger_err or (trigger_conf and trigger_err))
+        _fb_profile = _analyze_activity_profile(
+            wav_path, sample_rate=sample_rate, cache=cache, voicebank_profile=voicebank_profile
+        )
+        trigger_activity = _is_activity_risk_for_fallback(predicted_params, _fb_profile)
+        trigger = bool(trigger_model or ((trigger_conf or trigger_err) and trigger_activity))
     else:
         trigger = bool(trigger_model or trigger_conf or trigger_err)
     if not trigger:
@@ -752,7 +789,7 @@ def _apply_low_confidence_fallback(
     elif trigger_model:
         reason = "low_confidence_model_flag"
     if _is_multi_signal_required(language, format_type):
-        reason = f"{reason}+slice_and_mode"
+        reason = f"{reason}+multi_v2"
     return guarded, reason
 
 

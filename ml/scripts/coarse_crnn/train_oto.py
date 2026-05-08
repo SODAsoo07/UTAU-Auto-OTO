@@ -239,6 +239,24 @@ def main() -> int:
         default=0,
         help="During the first N global training steps, train ONLY the CTC alignment loss (anchor regression / heatmap / confidence losses are skipped). Lets a freshly initialized ctc_head stabilize before its random gradients knock the pretrained anchor heads off-distribution. 0 disables warmup. Suggested for warm-start smoke runs: ~150-300.",
     )
+    parser.add_argument(
+        "--enable-audio-onset-context",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Append onset_ratio, active_start_ratio, continuity_score (derived from mel energy) to the context vector, expanding it from 12→15 dims. Also sets numeric_context_dim=15 on the model config.",
+    )
+    parser.add_argument(
+        "--onset-loss-weight",
+        type=float,
+        default=0.50,
+        help="MSE loss weight for the onset regression auxiliary head. Only has an effect when --enable-onset-head is set.",
+    )
+    parser.add_argument(
+        "--enable-onset-head",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Add an onset regression head to the model that predicts onset_ratio from the spectrogram pooled representation. Old checkpoints load cleanly since the head is only created when this flag is on.",
+    )
     args = parser.parse_args()
     # Backward-compatible remapping of deprecated argument names.
     if args.cvvc_vc_multi_loss_weight is not None:
@@ -307,6 +325,8 @@ def main() -> int:
         # resolved value (matches OtoCrnnConfig default but guards against
         # future default drift).
         ctc_phone_vocab_size=int(CTC_VOCAB_SIZE),
+        numeric_context_dim=15 if bool(args.enable_audio_onset_context) else 12,
+        enable_onset_head=bool(args.enable_onset_head),
     )
     train_cfg = OtoTrainConfig(
         epochs=int(args.epochs),
@@ -377,6 +397,8 @@ def main() -> int:
         confidence_calibration_low_conf_target=float(args.confidence_calibration_low_conf_target),
         confidence_calibration_error_gate_ms=float(args.confidence_calibration_error_gate_ms),
         checkpoint_save_every_epochs=max(0, int(args.checkpoint_save_every_epochs)),
+        enable_audio_onset_context=bool(args.enable_audio_onset_context),
+        onset_loss_weight=float(args.onset_loss_weight),
     )
     init_state = None
     init_tag = ""
