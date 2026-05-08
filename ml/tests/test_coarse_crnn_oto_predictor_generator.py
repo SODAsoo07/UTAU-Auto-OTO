@@ -410,12 +410,14 @@ def test_is_multi_signal_required_supports_wildcards(monkeypatch):
 
 
 def test_low_confidence_fallback_and_mode_suppresses_conf_only(monkeypatch):
-    """In AND-mode slices, confidence-only trigger must NOT fire fallback.
+    """In multi_v2 AND-mode slices, conf-only must NOT fire when activity is aligned.
 
-    Regression guard for Plan B: previously confidence < min_conf alone
-    would always fall back. With AND mode active for korean/cvc, only
-    confidence + high error agreement (or err alone) should trigger.
+    Regression guard for Plan B multi_v2: confidence < min_conf alone is not
+    enough; the audio activity profile must also show misalignment. When the
+    preutterance anchor falls within the active window (no shift risk, high
+    continuity), trigger_activity=False and fallback is suppressed.
     """
+    import os
     from core.coarse_crnn.oto_predictor_generator import _apply_low_confidence_fallback
 
     monkeypatch.delenv("UTOA_OTO_CRNN_LOW_CONF_AND_MODE_SLICES", raising=False)
@@ -435,7 +437,23 @@ def test_low_confidence_fallback_and_mode_suppresses_conf_only(monkeypatch):
         "overlap": 32.0,
     }
 
-    # Confidence is low, predicted_error is None → conf-only trigger.
+    # Pre-populate the activity cache with an aligned profile.
+    # pre_abs = offset(110) + preutterance(65) = 175 ms, which is well
+    # inside [active_start=50, active_end=900] with margin=60.
+    wav_key = os.path.abspath("dummy.wav").lower()
+    aligned_profile = {
+        "active_start_ms": 50.0,
+        "active_end_ms": 900.0,
+        "active_core_start_ms": 80.0,
+        "active_core_end_ms": 870.0,
+        "onset_ms": 60.0,
+        "continuity_score": 0.9,
+        "duration_ms": 1000.0,
+    }
+    cache = {wav_key: aligned_profile}
+
+    # Confidence is low, predicted_error is None → conf-only trigger, but
+    # activity is aligned → trigger_activity=False → multi_v2 suppresses.
     out, reason = _apply_low_confidence_fallback(
         predicted_params=predicted,
         predicted_confidence=0.0,
@@ -444,7 +462,7 @@ def test_low_confidence_fallback_and_mode_suppresses_conf_only(monkeypatch):
         base_params=base_params,
         wav_path="dummy.wav",
         sample_rate=16000,
-        cache={},
+        cache=cache,
         voicebank_profile={},
         language="korean",
         format_type="cvc",
@@ -452,7 +470,7 @@ def test_low_confidence_fallback_and_mode_suppresses_conf_only(monkeypatch):
         duration_ms=1000.0,
         is_special=False,
     )
-    # AND mode: conf-only must not fire.
+    # multi_v2 AND mode: conf-only + aligned activity must not fire.
     assert reason == ""
     assert out == predicted
 
@@ -498,7 +516,119 @@ def test_low_confidence_fallback_or_mode_unchanged_for_korean_cvvc(monkeypatch):
         duration_ms=1000.0,
         is_special=False,
     )
-    # OR mode: conf-only fires; reason includes "low_confidence".
+    # OR mode: conf-only fires; reason includes "low_confidence" but NOT multi_v2.
     assert reason != ""
     assert "low_confidence" in reason
+    assert "slice_and_mode" not in reason
+    assert "multi_v2" not in reason
+
+
+def test_low_confidence_fallback_multi_v2_fires_on_activity_risk(monkeypatch):
+    """multi_v2: conf-only fires when the activity profile shows misalignment.
+
+    When preutterance falls far outside the active audio window the
+    activity corroboration signal is True, so (conf OR err) AND activity
+    evaluates to True and fallback fires. Reason must include 'multi_v2'.
+    """
+    import os
+    from core.coarse_crnn.oto_predictor_generator import _apply_low_confidence_fallback
+
+    monkeypatch.delenv("UTOA_OTO_CRNN_LOW_CONF_AND_MODE_SLICES", raising=False)
+
+    base_params = {
+        "offset": 10.0,
+        "consonant": 80.0,
+        "cutoff": -200.0,
+        "preutterance": 40.0,
+        "overlap": 20.0,
+    }
+    predicted = {
+        "offset": 10.0,
+        "consonant": 80.0,
+        "cutoff": -200.0,
+        "preutterance": 5.0,
+        "overlap": 20.0,
+    }
+
+    # pre_abs = offset(10) + preutterance(5) = 15 ms, but activity starts at
+    # 500 ms. 15 < 500 - 60 (margin) → shift risk → trigger_activity=True.
+    wav_key = os.path.abspath("shifted.wav").lower()
+    shifted_profile = {
+        "active_start_ms": 500.0,
+        "active_end_ms": 900.0,
+        "active_core_start_ms": 540.0,
+        "active_core_end_ms": 870.0,
+        "onset_ms": 510.0,
+        "continuity_score": 0.85,
+        "duration_ms": 1000.0,
+    }
+    cache = {wav_key: shifted_profile}
+
+    out, reason = _apply_low_confidence_fallback(
+        predicted_params=predicted,
+        predicted_confidence=0.0,
+        predicted_error_ms=None,
+        predicted_low_confidence=False,
+        base_params=base_params,
+        wav_path="shifted.wav",
+        sample_rate=16000,
+        cache=cache,
+        voicebank_profile={},
+        language="korean",
+        format_type="cvc",
+        alias="a",
+        duration_ms=1000.0,
+        is_special=False,
+    )
+    assert reason != "", "multi_v2 must fire when activity shows shift risk"
+    assert "multi_v2" in reason
+
+
+def test_low_confidence_fallback_multi_v2_reason_replaces_slice_and_mode(monkeypatch):
+    """Reason tag must be 'multi_v2', not the legacy 'slice_and_mode'."""
+    import os
+    from core.coarse_crnn.oto_predictor_generator import _apply_low_confidence_fallback
+
+    monkeypatch.delenv("UTOA_OTO_CRNN_LOW_CONF_AND_MODE_SLICES", raising=False)
+
+    base_params = {
+        "offset": 10.0,
+        "consonant": 80.0,
+        "cutoff": -200.0,
+        "preutterance": 40.0,
+        "overlap": 20.0,
+    }
+    predicted = {
+        "offset": 10.0,
+        "consonant": 80.0,
+        "cutoff": -200.0,
+        "preutterance": 5.0,
+        "overlap": 20.0,
+    }
+
+    wav_key = os.path.abspath("shifted2.wav").lower()
+    cache = {wav_key: {
+        "active_start_ms": 500.0,
+        "active_end_ms": 900.0,
+        "continuity_score": 0.85,
+        "duration_ms": 1000.0,
+    }}
+
+    _, reason = _apply_low_confidence_fallback(
+        predicted_params=predicted,
+        predicted_confidence=0.0,
+        predicted_error_ms=None,
+        predicted_low_confidence=False,
+        base_params=base_params,
+        wav_path="shifted2.wav",
+        sample_rate=16000,
+        cache=cache,
+        voicebank_profile={},
+        language="korean",
+        format_type="cvc",
+        alias="a",
+        duration_ms=1000.0,
+        is_special=False,
+    )
+    assert "multi_v2" in reason
     assert "slice_and_mode" not in reason

@@ -65,7 +65,15 @@ KR_CONSONANTS = {
 }
 
 KR_BATCHIM_MARKERS = {"N", "L", "M", "NG", "K", "T", "P", "H"}
-GLOTTAL_MARKS = {"'", "’", ".", "ʔ"}
+GLOTTAL_MARKS = {"’", "‘", ".", "ʔ"}
+
+# U+30FB KATAKANA MIDDLE DOT, U+00B7 MIDDLE DOT, U+2022 BULLET — used as edge
+# markers in some voicebanks (e.g. "a ・" = tail edge, "・ ka" = head edge).
+_KR_MIDDLE_DOT_CHARS: frozenset[str] = frozenset({"・", "·", "•"})
+
+# Vocal fry / voice effect tail tokens. Space-separated aliases ending with
+# these are VC-type (the vowel is the left token, the effect marks the tail).
+_KR_VOCAL_EFFECT_TAILS: frozenset[str] = frozenset({"fry", "vf"})
 
 KR_CODA_PLOSIVE_MAP = {
     "g": "k", "gg": "k", "k": "k", "kk": "k",
@@ -217,9 +225,15 @@ def is_breath(alias):
     clean = unicodedata.normalize("NFKC", str(alias or "")).strip().lower()
     if not clean:
         return False
+    # Tail-breath aliases like "a R", "i 吸" are vc-type, not br.
+    if " " in clean:
+        first_tok = clean.split()[0]
+        if first_tok in KR_VOWELS:
+            return False
     if re.match(r"^br\d*$", clean):
         return True
-    if clean in {"bre", "breath", "息", "吸", "吐", "흡", "호", "숨"}:
+    if clean in {"bre", "breath", "息", "吸", "吐", "흡", "호", "숨",
+                 "inhale", "exhale", "aspirate", "breathy", "息"}:
         return True
     if any(ch in clean for ch in ("吸", "吐", "息")):
         return True
@@ -427,6 +441,13 @@ def classify_alias(alias, custom_map=None):
 
         left_lower = left.lower()
         right_lower = right.lower().rstrip("-")
+
+        # Middle dot (・/·/•) as phonetic edge marker.
+        if left.strip() in _KR_MIDDLE_DOT_CHARS:
+            return "cv_head"
+        if right.strip() in _KR_MIDDLE_DOT_CHARS:
+            return "vc"
+
         if left in GLOTTAL_MARKS and right_lower in KR_VOWELS:
             return "cv_head"
         if left_lower in KR_VOWELS and right in GLOTTAL_MARKS:
@@ -446,6 +467,10 @@ def classify_alias(alias, custom_map=None):
 
         if left_lower in KR_VOWELS:
             if right_lower in KR_CONSONANTS or right.upper() in KR_BATCHIM_MARKERS or _is_kr_closure_token(right):
+                return "vc"
+            if is_breath(right):
+                return "vc"
+            if right_lower in _KR_VOCAL_EFFECT_TAILS:
                 return "vc"
             if right_lower in KR_VOWELS:
                 return "vv"

@@ -135,6 +135,11 @@ class OtoTrainConfig:
     confidence_calibration_low_conf_target: float = 0.58
     confidence_calibration_error_gate_ms: float = 80.0
     checkpoint_save_every_epochs: int = 0
+    # Onset context features: onset_ratio, active_start_ratio, continuity_score
+    # derived from mel energy. Expands context from 12→15 dims when enabled.
+    # OtoCrnnConfig.numeric_context_dim must be set to 15 in train_oto.py when this is True.
+    enable_audio_onset_context: bool = True
+    onset_loss_weight: float = 0.50
 
 
 class OtoAnchorDataset:
@@ -175,6 +180,12 @@ class OtoAnchorDataset:
         if normalize_role(alias_role_text) == "special":
             is_special = True
         features, hop_sec, duration_sec = self._load_or_compute_features(wav_path)
+        enable_onset_ctx = bool(getattr(self.train_config, "enable_audio_onset_context", False))
+        _hop_ms_raw = float(hop_sec) * 1000.0
+        if enable_onset_ctx and int(features.shape[0]) > 0:
+            _onset_ratio, _active_start_ratio, _continuity = _onset_from_mel(features, _hop_ms_raw)
+        else:
+            _onset_ratio, _active_start_ratio, _continuity = 0.0, 0.0, 1.0
         if features.shape[0] <= 0:
             features = np.zeros((1, int(self.model_config.n_mels)), dtype=np.float32)
         anchors_ms = _anchor_array_from_row(row)
@@ -265,7 +276,13 @@ class OtoAnchorDataset:
             [1.0 if is_diphthong else 0.0, 1.0 if is_special else 0.0],
             dtype=np.float32,
         )
-        context = _context_array_from_row(row)
+        context = _context_array_from_row(
+            row,
+            onset_ratio=_onset_ratio,
+            active_start_ratio=_active_start_ratio,
+            continuity_score=_continuity,
+            enable_onset_context=enable_onset_ctx,
+        )
         weight = float(row.get("sample_weight", row.get("weight", 1.0)) or 1.0)
         weight *= _format_loss_multiplier(row, self.train_config)
         weight *= _role_loss_multiplier(alias_role_text, self.train_config)
@@ -533,6 +550,7 @@ def train_oto_from_manifest(
                     phone_targets=phone_targets,
                     phone_lengths=phone_lengths,
                     global_step=global_train_step,
+                    context=context,
                 )
                 if bool(getattr(cfg, "enable_hard_case_mining", False)):
                     _collect_epoch_hard_scores(
@@ -776,6 +794,7 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
                 relative_scalar=relative_scalar,
                 phone_targets=phone_targets,
                 phone_lengths=phone_lengths,
+                context=context,
             )
             pred_scalar = torch.sigmoid(outputs["scalar_logits"])
             if relative_scalar:
@@ -867,6 +886,7 @@ def _oto_loss(
     relative_scalar: bool = False,
     phone_targets=None,
     phone_lengths=None,
+    context=None,
 ):
     torch = __import__("torch")
     pred_heat = torch.sigmoid(outputs["heatmap_logits"])
@@ -880,7 +900,8 @@ def _oto_loss(
     if scalar_logvar is not None:
         residual_sq = (scalar_pred - scalar) ** 2
         inv_var = torch.exp(-scalar_logvar)
-        uncertainty_nll = 0.5 * ((residual_sq * inv_var) + scalar_logvar)
+        log_2pi = scalar_logvar.new_tensor(np.log(2.0 * np.pi))
+        uncertainty_nll = torch.clamp(0.5 * ((residual_sq * inv_var) + scalar_logvar + log_2pi), min=0.0)
         uncertainty_loss = (uncertainty_nll.mean(dim=1) * weight).sum() / torch.clamp(weight.sum(), min=1.0)
     else:
         uncertainty_loss = scalar_pred.new_tensor(0.0)
@@ -905,6 +926,15 @@ def _oto_loss(
         nn,
         cfg,
     )
+    onset_loss_weight = float(getattr(cfg, "onset_loss_weight", 0.0))
+    onset_logit = outputs.get("onset_logit")
+    if onset_logit is not None and context is not None and onset_loss_weight > 0.0 and int(context.shape[-1]) > 12:
+        torch = __import__("torch")
+        onset_target = context[:, 12].clamp(0.0, 1.0)
+        onset_loss_raw = nn.functional.mse_loss(torch.sigmoid(onset_logit), onset_target, reduction="none")
+        onset_loss = (onset_loss_raw * weight).sum() / torch.clamp(weight.sum(), min=1.0)
+    else:
+        onset_loss = scalar_pred.new_tensor(0.0)
     return (
         heat_loss * float(cfg.heatmap_loss_weight)
         + scalar_loss * float(cfg.scalar_loss_weight)
@@ -912,6 +942,7 @@ def _oto_loss(
         + conf_loss * float(getattr(cfg, "confidence_loss_weight", 0.0))
         + order_loss * float(cfg.order_loss_weight)
         + ctc_loss * float(getattr(cfg, "ctc_loss_weight", 0.0))
+        + onset_loss * onset_loss_weight
     )
 
 
@@ -936,6 +967,7 @@ def _train_step_loss(
     phone_targets,
     phone_lengths,
     global_step: int,
+    context=None,
 ):
     """Dispatch between the warmup-only-CTC loss and the full multi-task loss.
 
@@ -965,6 +997,7 @@ def _train_step_loss(
         relative_scalar=relative_scalar,
         phone_targets=phone_targets,
         phone_lengths=phone_lengths,
+        context=context,
     )
 
 
@@ -1095,7 +1128,8 @@ def _collate(batch):
     durations = np.ones((len(batch),), dtype=np.float32)
     langs = np.zeros((len(batch),), dtype=np.int64)
     fmts = np.zeros((len(batch),), dtype=np.int64)
-    contexts = np.zeros((len(batch), 12), dtype=np.float32)
+    _ctx_dim = int(batch[0][7].shape[0]) if len(batch) > 0 else 12
+    contexts = np.zeros((len(batch), _ctx_dim), dtype=np.float32)
     alias_ids = np.zeros((len(batch),), dtype=np.int64)
     transition_ids = np.zeros((len(batch),), dtype=np.int64)
     prev_alias_ids = np.zeros((len(batch),), dtype=np.int64)
@@ -1251,28 +1285,66 @@ def _anchor_array_from_row(row: dict[str, Any]) -> np.ndarray:
     )
 
 
-def _context_array_from_row(row: dict[str, Any]) -> np.ndarray:
+def _onset_from_mel(features: np.ndarray, hop_ms: float) -> tuple[float, float, float]:
+    """Estimate (onset_ratio, active_start_ratio, continuity_score) from mel energy.
+
+    Returns values in [0, 1].  onset_ratio == active_start_ratio (first active frame
+    / total frames).  continuity_score == fraction of frames in [first, last] active.
+
+    Threshold uses mean-energy * 0.40 (robust to any voiced-frame ratio) with a
+    fallback floor at e_max * 0.03 for near-silence recordings.
+    """
+    n = int(features.shape[0])
+    if n <= 0:
+        return 0.0, 0.0, 1.0
+    energy = features.sum(axis=1)
+    mean_energy = float(np.mean(energy))
+    e_max = float(energy.max())
+    threshold = max(mean_energy * 0.40, e_max * 0.03, 1e-6)
+    active = energy >= threshold
+    active_idx = np.flatnonzero(active)
+    if len(active_idx) == 0:
+        return 0.0, 0.0, 0.0
+    first = int(active_idx[0])
+    last = int(active_idx[-1])
+    onset_ratio = float(first) / float(n)
+    continuity = float(np.mean(active[first : last + 1])) if last >= first else 1.0
+    return onset_ratio, onset_ratio, continuity
+
+
+def _context_array_from_row(
+    row: dict[str, Any],
+    *,
+    onset_ratio: float = 0.0,
+    active_start_ratio: float = 0.0,
+    continuity_score: float = 1.0,
+    enable_onset_context: bool = False,
+) -> np.ndarray:
     count = max(1.0, float(row.get("file_row_count", 1.0) or 1.0))
     ratio = float(row.get("row_ratio_in_wav", 0.0) or 0.0)
     count_norm = min(1.0, count / 64.0)
     phone_count = min(1.0, max(0.0, float(row.get("alias_phone_count", 0.0) or 0.0)) / 6.0)
-    return np.asarray(
-        [
-            max(0.0, min(1.0, ratio)),
-            count_norm,
-            phone_count,
-            max(0.0, min(1.0, float(row.get("alias_starts_vowel", 0.0) or 0.0))),
-            max(0.0, min(1.0, float(row.get("alias_ends_vowel", 0.0) or 0.0))),
-            max(0.0, min(1.0, float(row.get("alias_has_space", 0.0) or 0.0))),
-            max(0.0, min(1.0, float(row.get("alias_is_vc", 0.0) or 0.0))),
-            max(0.0, min(1.0, float(row.get("alias_is_cv", 0.0) or 0.0))),
-            max(0.0, min(1.0, float(row.get("alias_is_vv", 0.0) or 0.0))),
-            max(0.0, min(1.0, float(row.get("is_head_row", 0.0) or 0.0))),
-            max(0.0, min(1.0, float(row.get("is_tail_row", 0.0) or 0.0))),
-            max(0.0, min(1.0, float(row.get("prev_alias_ends_vowel", 0.0) or 0.0))),
-        ],
-        dtype=np.float32,
-    )
+    base: list[float] = [
+        max(0.0, min(1.0, ratio)),
+        count_norm,
+        phone_count,
+        max(0.0, min(1.0, float(row.get("alias_starts_vowel", 0.0) or 0.0))),
+        max(0.0, min(1.0, float(row.get("alias_ends_vowel", 0.0) or 0.0))),
+        max(0.0, min(1.0, float(row.get("alias_has_space", 0.0) or 0.0))),
+        max(0.0, min(1.0, float(row.get("alias_is_vc", 0.0) or 0.0))),
+        max(0.0, min(1.0, float(row.get("alias_is_cv", 0.0) or 0.0))),
+        max(0.0, min(1.0, float(row.get("alias_is_vv", 0.0) or 0.0))),
+        max(0.0, min(1.0, float(row.get("is_head_row", 0.0) or 0.0))),
+        max(0.0, min(1.0, float(row.get("is_tail_row", 0.0) or 0.0))),
+        max(0.0, min(1.0, float(row.get("prev_alias_ends_vowel", 0.0) or 0.0))),
+    ]
+    if enable_onset_context:
+        base += [
+            max(0.0, min(1.0, float(onset_ratio))),
+            max(0.0, min(1.0, float(active_start_ratio))),
+            max(0.0, min(1.0, float(continuity_score))),
+        ]
+    return np.asarray(base, dtype=np.float32)
 
 
 def _format_loss_multiplier(row: dict[str, Any], cfg: OtoTrainConfig) -> float:

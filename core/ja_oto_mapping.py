@@ -34,6 +34,9 @@ JA_VOICELESS_ONSETS = {
     'q', 'c', 'ky', 'ty', 'py', 'hy', 'ss', 'kk', 'tt', 'pp',
 }
 _JA_KANA_RE = re.compile(r"[\u3041-\u3096\u30A1-\u30FA\u30FC]")
+
+# U+30FB KATAKANA MIDDLE DOT, U+00B7 MIDDLE DOT, U+2022 BULLET \u2014 edge markers.
+_JA_MIDDLE_DOT_CHARS: frozenset[str] = frozenset({"\u30FB", "\u00B7", "\u2022"})
 _JA_YOUON_ROMAJI_CANONICAL = {
     "sya": "sha", "syu": "shu", "syo": "sho", "sye": "she",
     "shya": "sha", "shyu": "shu", "shyo": "sho", "shye": "she",
@@ -121,9 +124,18 @@ def is_breath(alias):
     clean = unicodedata.normalize("NFKC", str(alias or "")).strip().lower()
     if not clean:
         return False
+    # Tail-breath aliases like "\u3042 \u5438\u3044", "a H" are vc-type, not br.
+    if " " in clean:
+        first = clean.split()[0]
+        if first in JA_KANA_VOWELS or first in JA_VOWELS:
+            return False
+        _, first_vowel = split_ja_romaji_syllable(first)
+        if first_vowel in JA_VOWELS:
+            return False
     if re.match(r'^br\d*$', clean):
         return True
-    if clean in {"bre", "breath", "\u606f", "\u5438", "\u5410", "\u5438\u3044", "\u5410\u304d", "\u606f\u7d99\u304e"}:
+    if clean in {"bre", "breath", "inhale", "exhale", "breathy",
+                 "\u606f", "\u5438", "\u5410", "\u5438\u3044", "\u5410\u304d", "\u606f\u7d99\u304e"}:
         return True
     # Some banks annotate inhale/exhale variants with mixed scripts (e.g., inhale/exhale combos).
     if any(ch in clean for ch in ("\u5438", "\u5410", "\u606f")):
@@ -160,12 +172,14 @@ def _classify_ja_alias_core(clean, custom_map=None):
         parts = clean.split()
         left = parts[0]
         right = ' '.join(parts[1:])
-        if left == '-':
+        if left == '-' or left in _JA_MIDDLE_DOT_CHARS:
             return 'cv_head'
         left_is_vowel = _is_ja_vowel_token(left)
         if left_is_vowel:
             if right.strip() == '-':
                 return 'vv'
+            if is_breath(right):
+                return 'vc'
             if re.fullmatch(r"^[^0-9A-Za-z\u3040-\u30FF\u31F0-\u31FF]+$", right.strip()):
                 return 'vc'
             if right.lower() in JA_CONSONANTS:
@@ -181,6 +195,10 @@ def _classify_ja_alias_core(clean, custom_map=None):
     if _is_ja_vowel_token(clean) or clean == '-':
         return 'mono'
     clean_lower = clean.lower()
+    # Vowel + trailing middle dot (no space) → vc, e.g. "a·".
+    clean_no_dot = clean_lower.rstrip("・·•")
+    if clean_no_dot != clean_lower and _is_ja_vowel_token(clean_no_dot):
+        return 'vc'
     for v in JA_VOWELS:
         if clean_lower.startswith(v) and len(clean_lower) > len(v):
             tail = clean_lower[len(v):]
