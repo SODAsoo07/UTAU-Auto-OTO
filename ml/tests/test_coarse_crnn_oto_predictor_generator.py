@@ -46,11 +46,24 @@ def test_crnn_oto_generator_preserves_aliases_and_replaces_params(tmp_path, monk
                 "cutoff": -220.0,
                 "preutterance": 70.0,
                 "overlap": 30.0,
-            }
+            },
+            anchors=SimpleNamespace(
+                offset=10.0,
+                overlap=30.0,
+                preutterance=70.0,
+                consonant=90.0,
+                cutoff=-220.0,
+            ),
+            confidence=1.0,
+            low_confidence=False,
+            predicted_error_ms=None,
+            duration_ms=500.0,
         )
 
     monkeypatch.setattr(gen, "load_oto_checkpoint", lambda *_a, **_k: (FakeModel(), SimpleNamespace(), {}))
     monkeypatch.setattr(gen, "predict_oto_with_model", fake_predict)
+    monkeypatch.setenv("UTOA_OTO_CRNN_LOW_CONF_FALLBACK_ENABLE", "0")
+    monkeypatch.setenv("UTOA_OTO_CRNN_ACTIVITY_FALLBACK_ENABLE", "0")
 
     processed, total, errors = gen.generate_oto_with_crnn_predictor(
         wav_dir=str(wav_dir),

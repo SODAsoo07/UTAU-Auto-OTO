@@ -636,7 +636,8 @@ def _oto_loss(outputs, heat, scalar, weight, mask, nn, cfg: OtoTrainConfig, *, r
     if scalar_logvar is not None:
         residual_sq = (scalar_pred - scalar) ** 2
         inv_var = torch.exp(-scalar_logvar)
-        uncertainty_nll = 0.5 * ((residual_sq * inv_var) + scalar_logvar)
+        log_2pi = scalar_logvar.new_tensor(np.log(2.0 * np.pi))
+        uncertainty_nll = torch.clamp(0.5 * ((residual_sq * inv_var) + scalar_logvar + log_2pi), min=0.0)
         uncertainty_loss = (uncertainty_nll.mean(dim=1) * weight).sum() / torch.clamp(weight.sum(), min=1.0)
     else:
         uncertainty_loss = scalar_pred.new_tensor(0.0)
