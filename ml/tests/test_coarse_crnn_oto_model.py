@@ -87,9 +87,9 @@ def test_oto_model_config_defaults_to_relative_params_for_new_training():
     cfg = OtoCrnnConfig()
 
     assert cfg.scalar_target_mode == "relative_params"
-    assert cfg.target_window_formats == ("vcv", "cvvc")
-    assert cfg.target_window_frame_overrides == ("vcv=240", "cvvc=360")
-    assert cfg.cvvc_target_window_alias_types == ("vc", "vv")
+    assert cfg.target_window_formats == ("vcv",)         # cvvc 윈도잉 버그로 vcv만 사용
+    assert cfg.target_window_frame_overrides == ("vcv=240",)
+    assert cfg.cvvc_target_window_alias_types == ()       # cvvc 윈도잉 비활성화
     assert "cvvc=0.25" in cfg.right_boundary_prior_blends
     assert uses_relative_param_head(cfg)
 
