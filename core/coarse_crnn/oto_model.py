@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from core.coarse_crnn.alias_role import ALIAS_ROLES, DEFAULT_ROLE, normalize_role
-from core.coarse_crnn.oto_ctc import CTC_VOCAB_SIZE
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES
 
 
@@ -42,10 +41,6 @@ class OtoCrnnConfig:
     uncertainty_min_logvar: float = -6.0
     uncertainty_max_logvar: float = 4.0
     confidence_error_scale_ms: float = 75.0
-    confidence_calibration_scale: float = 1.0
-    confidence_calibration_bias: float = 0.0
-    confidence_low_threshold: float = 0.58
-    predicted_error_low_threshold_ms: float = 80.0
     enable_two_stage_refine: bool = True
     two_stage_refine_window_frames: int = 320
     anchor_names: tuple[str, ...] = tuple(OTO_ANCHOR_NAMES)
@@ -67,19 +62,6 @@ class OtoCrnnConfig:
     alias_roles: tuple[str, ...] = tuple(ALIAS_ROLES)
     enable_alias_role_embedding: bool = False
     enable_extra_alias_flags: bool = False
-    # CTC alignment head (3-A in CRNN-정확도-개선-방안-v2). When False the
-    # model has no ctc_head module, so old checkpoints stay round-trippable.
-    enable_ctc_head: bool = False
-    # Phone vocabulary size used by the CTC head. Auto-synced to the static
-    # vocabulary defined in core.coarse_crnn.oto_ctc.CTC_PHONE_VOCAB so
-    # appending tokens there does not silently desync the head's output dim.
-    # Kept on the config so checkpoints record the resolved size explicitly.
-    ctc_phone_vocab_size: int = field(default_factory=lambda: int(CTC_VOCAB_SIZE))
-    # Onset regression head — predicts normalized onset position from the
-    # spectrogram, forcing the encoder to use audio-anchored representations
-    # rather than relying solely on row_ratio metadata. Disabled by default so
-    # old checkpoints load cleanly.
-    enable_onset_head: bool = False
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> "OtoCrnnConfig":
@@ -122,14 +104,6 @@ class OtoCrnnConfig:
             data["uncertainty_max_logvar"] = 4.0
         if payload is not None and "confidence_error_scale_ms" not in data:
             data["confidence_error_scale_ms"] = 75.0
-        if payload is not None and "confidence_calibration_scale" not in data:
-            data["confidence_calibration_scale"] = 1.0
-        if payload is not None and "confidence_calibration_bias" not in data:
-            data["confidence_calibration_bias"] = 0.0
-        if payload is not None and "confidence_low_threshold" not in data:
-            data["confidence_low_threshold"] = 0.58
-        if payload is not None and "predicted_error_low_threshold_ms" not in data:
-            data["predicted_error_low_threshold_ms"] = 80.0
         if payload is not None and "enable_two_stage_refine" not in data:
             data["enable_two_stage_refine"] = False
         if payload is not None and "two_stage_refine_window_frames" not in data:
@@ -142,16 +116,6 @@ class OtoCrnnConfig:
             data["enable_alias_role_embedding"] = False
         if payload is not None and "enable_extra_alias_flags" not in data:
             data["enable_extra_alias_flags"] = False
-        # Old checkpoints predate the CTC alignment head (3-A). Default to off
-        # so loading them keeps the original architecture intact.
-        if payload is not None and "enable_ctc_head" not in data:
-            data["enable_ctc_head"] = False
-        if payload is not None and "enable_onset_head" not in data:
-            data["enable_onset_head"] = False
-        if payload is not None and "ctc_phone_vocab_size" not in data:
-            # Old checkpoints predate the CTC head — fall back to the current
-            # static vocabulary size so a config without the field still works.
-            data["ctc_phone_vocab_size"] = int(CTC_VOCAB_SIZE)
         for key in (
             "anchor_names",
             "languages",
@@ -310,24 +274,6 @@ def build_oto_model(config: OtoCrnnConfig):
                 nn.ReLU(),
                 nn.Linear(hidden2 // 2, 1),
             )
-            # CTC alignment head (3-A). Activated only when the flag is on so
-            # that older checkpoints load cleanly.
-            self.use_ctc_head = bool(getattr(cfg, "enable_ctc_head", False))
-            if self.use_ctc_head:
-                ctc_vocab = max(2, int(getattr(cfg, "ctc_phone_vocab_size", 64)))
-                self.ctc_head = nn.Linear(hidden2, ctc_vocab)
-            else:
-                self.ctc_head = None
-            # Onset regression head. Activated only when enable_onset_head is on.
-            self.use_onset_head = bool(getattr(cfg, "enable_onset_head", False))
-            if self.use_onset_head:
-                self.onset_head = nn.Sequential(
-                    nn.Linear(hidden2 * 2, hidden2 // 2),
-                    nn.ReLU(),
-                    nn.Linear(hidden2 // 2, 1),
-                )
-            else:
-                self.onset_head = None
 
         def encode(self, x):
             y = x.transpose(1, 2)
@@ -415,13 +361,8 @@ def build_oto_model(config: OtoCrnnConfig):
                 if context is None:
                     context = torch.zeros((batch, int(config.numeric_context_dim)), dtype=torch.float32, device=device)
                 context = context.to(device=device, dtype=torch.float32)
-                ctx_dim = int(context.shape[-1])
-                tgt_dim = int(config.numeric_context_dim)
-                if ctx_dim < tgt_dim:
-                    pad = torch.zeros((batch, tgt_dim - ctx_dim), dtype=torch.float32, device=device)
-                    context = torch.cat([context, pad], dim=-1)
-                elif ctx_dim > tgt_dim:
-                    context = context[:, :tgt_dim]
+                if int(context.shape[-1]) != int(config.numeric_context_dim):
+                    context = torch.zeros((batch, int(config.numeric_context_dim)), dtype=torch.float32, device=device)
                 cond_parts.append(self.context_proj(context))
             cond = self.cond_proj(torch.cat(cond_parts, dim=-1))
             encoded = encoded + cond[:, None, :]
@@ -449,20 +390,11 @@ def build_oto_model(config: OtoCrnnConfig):
                     min=float(getattr(config, "uncertainty_min_logvar", -6.0)),
                     max=float(getattr(config, "uncertainty_max_logvar", 4.0)),
                 )
-            ctc_logits = None
-            if self.use_ctc_head and self.ctc_head is not None:
-                # encoded shape: (B, T, hidden2). ctc_head: (B, T, vocab).
-                ctc_logits = self.ctc_head(encoded)
-            onset_logit = None
-            if self.use_onset_head and self.onset_head is not None:
-                onset_logit = self.onset_head(pooled).squeeze(-1)
             return {
                 "heatmap_logits": heatmap_logits,
                 "scalar_logits": scalar_logits,
                 "confidence_logits": confidence_logits,
                 "scalar_logvar": scalar_logvar,
-                "ctc_logits": ctc_logits,
-                "onset_logit": onset_logit,
             }
 
     return OtoAnchorCRNN(config)
