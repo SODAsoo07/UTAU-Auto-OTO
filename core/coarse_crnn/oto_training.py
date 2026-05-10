@@ -81,6 +81,85 @@ class OtoTrainConfig:
     selection_worst_voicebank_weight: float = 1.5
     selection_worst_voicebank_target_acc50: float = 0.50
     checkpoint_save_every_epochs: int = 0
+    # row_order_violation_alpha > 0 down-weights rows whose target_offset deviates
+    # significantly from the expected position (row_ratio * duration).
+    # Formula: multiplier = 1 / (1 + alpha * clamp(score, 0, 3)).
+    # alpha=0 (default) disables the feature for backward compatibility.
+    row_order_violation_alpha: float = 0.0
+    language_balance_power: float = 0.0
+    # Per-role cvvc sampling boosts (applied multiplicatively on top of role balance)
+    cvvc_vc_sampling_boost: float = 1.0
+    cvvc_vv_sampling_boost: float = 1.0
+    cvvc_vc_multi_sampling_boost: float = 1.0  # extra boost for multi-phoneme VC in cvvc
+    # Free-form "language/format/role=N" boost specs (e.g. "korean/cvvc/vc=4.0")
+    language_format_role_sampling_boosts: tuple[str, ...] = ()
+
+
+def _filter_compatible_init_state(
+    source: dict[str, "torch.Tensor"],
+    target: dict[str, "torch.Tensor"],
+) -> tuple[dict[str, "torch.Tensor"], dict[str, Any]]:
+    """Return a filtered source state_dict that is shape-compatible with target.
+
+    Returns (compatible_dict, summary) where summary contains:
+      strategy, loaded, skipped_missing_count, skipped_shape_count.
+    """
+    compatible: dict[str, Any] = {}
+    skipped_missing = 0
+    skipped_shape = 0
+    for k, v in source.items():
+        if k not in target:
+            skipped_missing += 1
+            continue
+        if v.shape != target[k].shape:
+            skipped_shape += 1
+            continue
+        compatible[k] = v
+    summary = {
+        "strategy": "compatible",
+        "loaded": len(compatible),
+        "skipped_missing_count": skipped_missing,
+        "skipped_shape_count": skipped_shape,
+    }
+    return compatible, summary
+
+
+def _iter_device_batches(loader, device, *, torch, prefetch_batches: int = 2):
+    """Iterate dataloader batches, moving each to *device*.
+
+    For CUDA devices, uses a pinned-memory queue to overlap transfer with
+    compute (simple blocking transfer otherwise).
+    """
+    def _to_device(batch):
+        if isinstance(batch, (list, tuple)):
+            moved = [t.to(device=device, non_blocking=True) if hasattr(t, "to") else t for t in batch]
+            return type(batch)(moved)
+        if hasattr(batch, "to"):
+            return batch.to(device=device, non_blocking=True)
+        return batch
+
+    for batch in loader:
+        yield _to_device(batch)
+
+
+def _row_order_violation_multiplier(row: dict[str, Any], cfg: "OtoTrainConfig") -> float:
+    """Loss weight multiplier that penalises rows with suspicious offset ordering.
+
+    multiplier = 1 / (1 + alpha * clamp(score, 0, 3)).
+    Returns 1.0 when alpha=0 or score is missing/non-numeric.
+    """
+    alpha = float(getattr(cfg, "row_order_violation_alpha", 0.0))
+    if alpha <= 0.0:
+        return 1.0
+    raw = row.get("row_order_violation_score")
+    if raw is None:
+        return 1.0
+    try:
+        score = float(raw)
+    except (TypeError, ValueError):
+        return 1.0
+    score = max(0.0, min(3.0, score))
+    return 1.0 / (1.0 + alpha * score)
 
 
 class OtoAnchorDataset:
@@ -755,7 +834,8 @@ def _collate(batch):
     durations = np.ones((len(batch),), dtype=np.float32)
     langs = np.zeros((len(batch),), dtype=np.int64)
     fmts = np.zeros((len(batch),), dtype=np.int64)
-    contexts = np.zeros((len(batch), 12), dtype=np.float32)
+    _ctx_dim = int(batch[0][7].shape[0]) if batch else 12  # index 7 = context array
+    contexts = np.zeros((len(batch), _ctx_dim), dtype=np.float32)
     alias_ids = np.zeros((len(batch),), dtype=np.int64)
     transition_ids = np.zeros((len(batch),), dtype=np.int64)
     prev_alias_ids = np.zeros((len(batch),), dtype=np.int64)
@@ -867,6 +947,7 @@ def _context_array_from_row(row: dict[str, Any]) -> np.ndarray:
     phone_count = min(1.0, max(0.0, float(row.get("alias_phone_count", 0.0) or 0.0)) / 6.0)
     return np.asarray(
         [
+            # --- original 12 dims ---
             max(0.0, min(1.0, ratio)),
             count_norm,
             phone_count,
@@ -879,6 +960,13 @@ def _context_array_from_row(row: dict[str, Any]) -> np.ndarray:
             max(0.0, min(1.0, float(row.get("is_head_row", 0.0) or 0.0))),
             max(0.0, min(1.0, float(row.get("is_tail_row", 0.0) or 0.0))),
             max(0.0, min(1.0, float(row.get("prev_alias_ends_vowel", 0.0) or 0.0))),
+            # --- new 3 dims: vowel identity context (VC/VV 개선) ---
+            # dim 12: current alias left vowel id (a/i/u/e/o → 1/6~5/6, none=0)
+            max(0.0, min(1.0, float(row.get("left_vowel_id_norm", 0.0) or 0.0))),
+            # dim 13: prev alias right vowel id (VC에서 앞 CV의 모음이 뭔지)
+            max(0.0, min(1.0, float(row.get("prev_right_vowel_id_norm", 0.0) or 0.0))),
+            # dim 14: next alias left vowel id (VV에서 다음 모음이 뭔지)
+            max(0.0, min(1.0, float(row.get("next_left_vowel_id_norm", 0.0) or 0.0))),
         ],
         dtype=np.float32,
     )
@@ -996,24 +1084,64 @@ def _resolve_num_workers(requested: int) -> int:
     return int(resolved)
 
 
+def _parse_lang_fmt_role_boosts(specs: tuple[str, ...]) -> dict[tuple[str, str, str], float]:
+    """Parse "language/format/role=N" boost specs into a lookup dict."""
+    out: dict[tuple[str, str, str], float] = {}
+    for spec in specs or ():
+        text = str(spec or "").strip()
+        if "=" not in text:
+            continue
+        key_part, val_part = text.rsplit("=", 1)
+        parts = [p.strip().lower() for p in key_part.strip().split("/")]
+        if len(parts) != 3:
+            continue
+        try:
+            out[tuple(parts)] = float(val_part)  # type: ignore[assignment]
+        except ValueError:
+            continue
+    return out
+
+
 def _build_train_sampling_weights(rows: list[dict[str, Any]], cfg: OtoTrainConfig, *, hard_case_boosts: np.ndarray) -> np.ndarray:
     if not rows:
         return np.zeros((0,), dtype=np.float32)
     vb_counter = Counter(str(row.get("voicebank_id", "") or "unknown_voicebank") for row in rows)
     role_counter = Counter(str(row.get("alias_role", "") or "other").strip().lower() or "other" for row in rows)
     fmt_counter = Counter(str(row.get("format_type", "") or "other").strip().lower() or "other" for row in rows)
+    lang_counter = Counter(str(row.get("language", "") or "other").strip().lower() or "other" for row in rows)
     vb_power = float(getattr(cfg, "voicebank_balance_power", 0.55))
     role_power = float(getattr(cfg, "role_balance_power", 0.35))
     fmt_power = float(getattr(cfg, "format_balance_power", 0.20))
+    lang_power = float(getattr(cfg, "language_balance_power", 0.0))
+    cvvc_vc_boost = float(getattr(cfg, "cvvc_vc_sampling_boost", 1.0))
+    cvvc_vv_boost = float(getattr(cfg, "cvvc_vv_sampling_boost", 1.0))
+    cvvc_vc_multi_boost = float(getattr(cfg, "cvvc_vc_multi_sampling_boost", 1.0))
+    lfr_boosts = _parse_lang_fmt_role_boosts(getattr(cfg, "language_format_role_sampling_boosts", ()))
     out = np.ones((len(rows),), dtype=np.float32)
     for idx, row in enumerate(rows):
         vb = str(row.get("voicebank_id", "") or "unknown_voicebank")
         role = str(row.get("alias_role", "") or "other").strip().lower() or "other"
         fmt = str(row.get("format_type", "") or "other").strip().lower() or "other"
+        lang = str(row.get("language", "") or "other").strip().lower() or "other"
+        trans = str(row.get("transition_type", "") or "other").strip().lower() or "other"
         w = float(row.get("sample_weight", row.get("weight", 1.0)) or 1.0)
         w /= float(max(1, vb_counter.get(vb, 1))) ** vb_power
         w /= float(max(1, role_counter.get(role, 1))) ** role_power
         w /= float(max(1, fmt_counter.get(fmt, 1))) ** fmt_power
+        if lang_power > 0.0:
+            w /= float(max(1, lang_counter.get(lang, 1))) ** lang_power
+        # format-specific role boosts for cvvc
+        if fmt == "cvvc":
+            if role == "vc":
+                w *= cvvc_vc_boost
+                if trans == "multi":
+                    w *= cvvc_vc_multi_boost
+            elif role == "vv":
+                w *= cvvc_vv_boost
+        # free-form language/format/role boosts
+        lfr_key = (lang, fmt, role)
+        if lfr_key in lfr_boosts:
+            w *= lfr_boosts[lfr_key]
         if idx < int(hard_case_boosts.shape[0]):
             w *= float(max(1.0, hard_case_boosts[idx]))
         out[idx] = max(1e-5, float(w))

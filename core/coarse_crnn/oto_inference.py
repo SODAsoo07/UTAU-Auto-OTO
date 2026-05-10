@@ -187,6 +187,12 @@ def predict_oto_with_model(
                 1.0 if int(row_index_in_wav) <= 0 else 0.0,
                 1.0 if int(row_index_in_wav) >= max(0, int(file_row_count) - 1) else 0.0,
                 float(prev_alias_features.get("alias_ends_vowel", 0.0) or 0.0),
+                # dim 12: current alias left vowel id (a/i/u/e/o → 1/6~5/6, none=0)
+                max(0.0, min(1.0, float(alias_features.get("left_vowel_id_norm", 0.0) or 0.0))),
+                # dim 13: prev alias right vowel id (VC context: what vowel precedes the consonant)
+                max(0.0, min(1.0, float(prev_alias_features.get("right_vowel_id_norm", 0.0) or 0.0))),
+                # dim 14: next alias left vowel id (VV context: what vowel comes next)
+                max(0.0, min(1.0, float(next_alias_features.get("left_vowel_id_norm", 0.0) or 0.0))),
             ]
         ],
         dtype=torch.float32,

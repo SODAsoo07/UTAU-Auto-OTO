@@ -231,6 +231,53 @@ def write_jsonl(path: str, rows: list[dict[str, Any]]) -> int:
     return len(rows)
 
 
+_SILENCE_TOKENS: frozenset[str] = frozenset({"r", "br", "pau", "sil", "rest"})
+
+
+def _classify_blank_alias(alias: str | None) -> str:
+    """Classify an alias string as 'blank', 'silence', or '' (real alias).
+
+    Returns:
+        "blank"   — empty / whitespace / bare hyphen
+        "silence" — consists solely of silence tokens (R, br, pau, sil, rest)
+        ""        — a real phonetic alias
+    """
+    if not alias:
+        return "blank"
+    stripped = str(alias).strip()
+    if not stripped or stripped == "-":
+        return "blank"
+    # Strip optional leading "- " or "-" prefix
+    text = re.sub(r"^-\s*", "", stripped).strip()
+    if not text:
+        return "blank"
+    tokens = text.lower().split()
+    if not tokens:
+        return "blank"
+    if all(t in _SILENCE_TOKENS for t in tokens):
+        return "silence"
+    return ""
+
+
+def _compute_row_order_violation_score(
+    target_offset_ms: float,
+    row_ratio: float,
+    duration_ms: float,
+    eps_ms: float = 200.0,
+) -> float:
+    """How far the alias's target offset deviates from its expected row position.
+
+    Expected position = row_ratio * duration_ms (e.g., first row at 0 ms, last at duration).
+    Score = abs(target - expected) / max(duration, eps_ms), in [0, 1].
+    Returns 0 for non-positive durations.
+    """
+    if duration_ms <= 0.0:
+        return 0.0
+    expected = float(row_ratio) * float(duration_ms)
+    delta = abs(float(target_offset_ms) - expected)
+    return float(delta / max(float(duration_ms), float(eps_ms)))
+
+
 def _apply_row_context(rows: list[dict[str, Any]]) -> None:
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
@@ -247,6 +294,16 @@ def _apply_row_context(rows: list[dict[str, Any]]) -> None:
             row["is_tail_row"] = 1.0 if idx == count - 1 else 0.0
             _apply_neighbor_alias(row, "prev", items[idx - 1] if idx > 0 else None)
             _apply_neighbor_alias(row, "next", items[idx + 1] if idx + 1 < count else None)
+            row["row_order_violation_score"] = _compute_row_order_violation_score(
+                target_offset_ms=float(row.get("target_offset_ms", 0.0) or 0.0),
+                row_ratio=float(row.get("row_ratio_in_wav", 0.0) or 0.0),
+                duration_ms=float(row.get("duration_ms", 0.0) or 0.0),
+            )
+            # Flat aliases used by _context_array_from_row (oto_training.py):
+            # prev alias's right vowel = what vowel the previous CV ends on (VC context)
+            row["prev_right_vowel_id_norm"] = float(row.get("prev_right_vowel_id_norm", 0.0) or 0.0)
+            # next alias's left vowel = what vowel the next alias starts on (VV context)
+            row["next_left_vowel_id_norm"] = float(row.get("next_left_vowel_id_norm", 0.0) or 0.0)
 
 
 def _apply_neighbor_alias(row: dict[str, Any], prefix: str, neighbor: dict[str, Any] | None) -> None:
@@ -257,6 +314,8 @@ def _apply_neighbor_alias(row: dict[str, Any], prefix: str, neighbor: dict[str, 
         row[f"{prefix}_alias_role"] = "other"
         row[f"{prefix}_alias_starts_vowel"] = 0.0
         row[f"{prefix}_alias_ends_vowel"] = 0.0
+        row[f"{prefix}_left_vowel_id_norm"] = 0.0
+        row[f"{prefix}_right_vowel_id_norm"] = 0.0
         return
     row[f"{prefix}_alias"] = str(neighbor.get("alias", "") or "")
     row[f"{prefix}_alias_type"] = str(neighbor.get("alias_type", "") or "other")
@@ -264,6 +323,9 @@ def _apply_neighbor_alias(row: dict[str, Any], prefix: str, neighbor: dict[str, 
     row[f"{prefix}_alias_role"] = str(neighbor.get("alias_role", "") or "other")
     row[f"{prefix}_alias_starts_vowel"] = float(neighbor.get("alias_starts_vowel", 0.0) or 0.0)
     row[f"{prefix}_alias_ends_vowel"] = float(neighbor.get("alias_ends_vowel", 0.0) or 0.0)
+    # neighbor's vowel IDs — stored with prefix so context_array can read them
+    row[f"{prefix}_left_vowel_id_norm"] = float(neighbor.get("left_vowel_id_norm", 0.0) or 0.0)
+    row[f"{prefix}_right_vowel_id_norm"] = float(neighbor.get("right_vowel_id_norm", 0.0) or 0.0)
 
 
 def extract_alias_features(
@@ -290,6 +352,7 @@ def extract_alias_features(
         transition_type=transition_type,
         is_special=bool(is_special),
     )
+    components = parse_alias_components(text, language=language)
     return {
         "alias_type": alias_type or "other",
         "transition_type": transition_type,
@@ -303,7 +366,85 @@ def extract_alias_features(
         "alias_is_vc": 1.0 if transition_type == "vc" else 0.0,
         "alias_is_cv": 1.0 if transition_type == "cv" else 0.0,
         "alias_is_vv": 1.0 if transition_type == "vv" else 0.0,
+        # Phoneme-level components for VC/VV context (Section 4.1 of design doc)
+        "left_vowel": components["left_vowel"] or "",
+        "right_vowel": components["right_vowel"] or "",
+        "right_consonant": components["right_consonant"] or "",
+        "left_vowel_id_norm": _vowel_id_norm(components["left_vowel_id"]),
+        "right_vowel_id_norm": _vowel_id_norm(components["right_vowel_id"]),
     }
+
+
+def parse_alias_components(alias: str, language: str) -> dict[str, str | None]:
+    """Extract left_vowel, right_vowel, right_consonant from a VC/VV/CV alias.
+
+    Returns a dict with keys:
+      left_vowel      : first vowel phone in the alias, or None
+      right_vowel     : last vowel phone (if alias ends with vowel), or None
+      right_consonant : consonant on the right side (for VC), or None
+      left_vowel_id   : canonical vowel class (a/i/u/e/o/other)
+      right_vowel_id  : canonical vowel class for right vowel, or None
+    """
+    text = str(alias or "").strip()
+    phones = _alias_phones(text, language=language)
+    coarse = [coarse_for_phone(p, language=language) for p in phones]
+
+    left_vowel: str | None = None
+    right_vowel: str | None = None
+    right_consonant: str | None = None
+
+    # Find first vowel (left)
+    for phone, cls in zip(phones, coarse):
+        if cls == "V":
+            left_vowel = phone.lower()
+            break
+
+    # Find last phone role
+    if phones:
+        last_cls = coarse[-1] if coarse else ""
+        last_phone = phones[-1].lower()
+        if last_cls == "V":
+            right_vowel = last_phone
+        elif last_cls.startswith("C_"):
+            right_consonant = last_phone
+
+    return {
+        "left_vowel": left_vowel,
+        "right_vowel": right_vowel,
+        "right_consonant": right_consonant,
+        "left_vowel_id": _canonical_vowel_id(left_vowel),
+        "right_vowel_id": _canonical_vowel_id(right_vowel) if right_vowel else None,
+    }
+
+
+# Canonical vowel classes: a/i/u/e/o/other mapped to 1-5, 0=none/other
+_VOWEL_CLASS_MAP: dict[str, str] = {
+    "a": "a", "ya": "a", "wa": "a",
+    "i": "i", "wi": "i", "yi": "i",
+    "u": "u", "wu": "u", "yu": "u", "wo": "u",
+    "e": "e", "ye": "e", "we": "e", "wae": "e", "ae": "e",
+    "o": "o", "yo": "o",
+    "eo": "eo", "yeo": "eo", "weo": "eo",
+    "eu": "eu", "ui": "eu",
+}
+_VOWEL_CLASS_NORM: dict[str, float] = {
+    "a": 1 / 6, "i": 2 / 6, "u": 3 / 6, "e": 4 / 6, "o": 5 / 6,
+    "eo": 4 / 6,  # map Korean eo → e class for model purposes
+    "eu": 3 / 6,  # map Korean eu → u class
+}
+
+
+def _canonical_vowel_id(vowel: str | None) -> str | None:
+    if not vowel:
+        return None
+    return _VOWEL_CLASS_MAP.get(str(vowel).lower(), "other")
+
+
+def _vowel_id_norm(vowel_id: str | None) -> float:
+    """Normalize a canonical vowel class to [0, 1]. 0.0 = none/other."""
+    if not vowel_id:
+        return 0.0
+    return _VOWEL_CLASS_NORM.get(str(vowel_id), 0.0)
 
 
 def _alias_phones(alias: str, *, language: str) -> list[str]:

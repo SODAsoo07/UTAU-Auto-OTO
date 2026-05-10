@@ -73,8 +73,14 @@ def main() -> int:
     parser.add_argument("--confidence-target-error-scale", type=float, default=0.08)
     parser.add_argument("--balanced-sampling", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--voicebank-balance-power", type=float, default=0.55)
+    parser.add_argument("--language-balance-power", type=float, default=0.0)
     parser.add_argument("--role-balance-power", type=float, default=0.35)
     parser.add_argument("--format-balance-power", type=float, default=0.20)
+    parser.add_argument("--cvvc-vc-sampling-boost", type=float, default=1.0)
+    parser.add_argument("--cvvc-vv-sampling-boost", type=float, default=1.0)
+    parser.add_argument("--cvvc-vc-multi-sampling-boost", type=float, default=1.0)
+    parser.add_argument("--language-format-role-sampling-boosts", default="", help="Comma-separated 'lang/fmt/role=N' boost specs")
+    parser.add_argument("--row-order-violation-alpha", type=float, default=0.0, help=">0이면 순서 이상 row의 loss를 down-weight")
     parser.add_argument("--hard-case-mining", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hard-case-top-ratio", type=float, default=0.25)
     parser.add_argument("--hard-case-boost", type=float, default=2.5)
@@ -158,8 +164,16 @@ def main() -> int:
         confidence_target_error_scale=float(args.confidence_target_error_scale),
         enable_balanced_sampling=bool(args.balanced_sampling),
         voicebank_balance_power=float(args.voicebank_balance_power),
+        language_balance_power=float(args.language_balance_power),
         role_balance_power=float(args.role_balance_power),
         format_balance_power=float(args.format_balance_power),
+        cvvc_vc_sampling_boost=float(args.cvvc_vc_sampling_boost),
+        cvvc_vv_sampling_boost=float(args.cvvc_vv_sampling_boost),
+        cvvc_vc_multi_sampling_boost=float(args.cvvc_vc_multi_sampling_boost),
+        language_format_role_sampling_boosts=tuple(
+            item.strip() for item in str(args.language_format_role_sampling_boosts or "").split(",") if item.strip()
+        ),
+        row_order_violation_alpha=float(args.row_order_violation_alpha),
         enable_hard_case_mining=bool(args.hard_case_mining),
         hard_case_top_ratio=float(args.hard_case_top_ratio),
         hard_case_boost=float(args.hard_case_boost),

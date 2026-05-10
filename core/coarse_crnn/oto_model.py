@@ -18,7 +18,7 @@ class OtoCrnnConfig:
     frame_ms: float = 25.0
     hop_ms: float = 10.0
     cond_dim: int = 24
-    numeric_context_dim: int = 12
+    numeric_context_dim: int = 15
     enable_format_residual_heads: bool = False
     enable_vcv_target_window: bool = True
     vcv_target_window_frames: int = 240
