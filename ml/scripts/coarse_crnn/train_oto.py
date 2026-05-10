@@ -84,6 +84,7 @@ def main() -> int:
     parser.add_argument("--selection-worst-voicebank-weight", type=float, default=1.5)
     parser.add_argument("--selection-worst-voicebank-target-acc50", type=float, default=0.50)
     parser.add_argument("--checkpoint-save-every-epochs", type=int, default=0, help=">0이면 N epoch마다 중간 체크포인트 저장")
+    parser.add_argument("--init-from", default="", help="기존 체크포인트에서 가중치를 불러와 fine-tune 시작 (compatible 전략)")
     parser.add_argument("--two-stage-refine", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--two-stage-refine-window-frames", type=int, default=320)
     parser.add_argument(
@@ -169,7 +170,7 @@ def main() -> int:
         selection_worst_voicebank_target_acc50=float(args.selection_worst_voicebank_target_acc50),
         checkpoint_save_every_epochs=max(0, int(args.checkpoint_save_every_epochs)),
     )
-    result = train_oto_from_manifest(rows, args.out, val_rows=val_rows, train_config=train_cfg, model_config=model_cfg)
+    result = train_oto_from_manifest(rows, args.out, val_rows=val_rows, train_config=train_cfg, model_config=model_cfg, init_checkpoint=str(args.init_from or ""))
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

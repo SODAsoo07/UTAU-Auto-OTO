@@ -277,6 +277,7 @@ def train_oto_from_manifest(
     val_rows: list[dict[str, Any]] | None = None,
     train_config: OtoTrainConfig | None = None,
     model_config: OtoCrnnConfig | None = None,
+    init_checkpoint: str = "",
 ) -> dict[str, Any]:
     torch = __import__("torch")
     nn = __import__("torch.nn").nn
@@ -333,6 +334,19 @@ def train_oto_from_manifest(
     use_amp = bool(cfg.amp and device.type == "cuda")
     scaler = _make_grad_scaler(torch, enabled=use_amp)
     model = build_oto_model(model_cfg).to(device)
+    if init_checkpoint and os.path.isfile(str(init_checkpoint)):
+        try:
+            ckpt = torch.load(str(init_checkpoint), map_location=device)
+            state = ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
+            if isinstance(state, dict) and any(k for k in state if "." in k):
+                incompatible = model.load_state_dict(state, strict=False)
+                loaded = len(state) - len(incompatible.missing_keys)
+                print(f"[oto_anchor][train] loaded init_state from {init_checkpoint} "
+                      f"strategy=compatible loaded={loaded} skipped={len(incompatible.unexpected_keys)}")
+            else:
+                print(f"[oto_anchor][train] init_checkpoint {init_checkpoint} has no recognizable state_dict — skipped")
+        except Exception as exc:
+            print(f"[oto_anchor][train] WARNING: init_checkpoint load failed ({exc}) — training from scratch")
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg.lr), weight_decay=1e-4)
 
     history: list[dict[str, float]] = []
