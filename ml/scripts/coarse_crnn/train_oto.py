@@ -105,6 +105,12 @@ def main() -> int:
         default=False,
         help="Add a small projection that ingests is_diphthong and is_special as scalar conditioning features.",
     )
+    parser.add_argument(
+        "--active-audio-context",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Append active_start/end/span ratios to numeric context for long-preroll and low-SNR experiments.",
+    )
     args = parser.parse_args()
 
     rows = read_jsonl(args.manifest)
@@ -136,6 +142,8 @@ def main() -> int:
         two_stage_refine_window_frames=int(args.two_stage_refine_window_frames),
         enable_alias_role_embedding=bool(args.alias_role_embedding),
         enable_extra_alias_flags=bool(args.extra_alias_flags),
+        enable_active_audio_context=bool(args.active_audio_context),
+        numeric_context_dim=18 if bool(args.active_audio_context) else 15,
     )
     train_cfg = OtoTrainConfig(
         epochs=int(args.epochs),
@@ -173,6 +181,7 @@ def main() -> int:
         language_format_role_sampling_boosts=tuple(
             item.strip() for item in str(args.language_format_role_sampling_boosts or "").split(",") if item.strip()
         ),
+        enable_active_audio_context=bool(args.active_audio_context),
         row_order_violation_alpha=float(args.row_order_violation_alpha),
         enable_hard_case_mining=bool(args.hard_case_mining),
         hard_case_top_ratio=float(args.hard_case_top_ratio),
