@@ -93,6 +93,9 @@ class OtoTrainConfig:
     cvvc_vc_multi_sampling_boost: float = 1.0  # extra boost for multi-phoneme VC in cvvc
     # Free-form "language/format/role=N" boost specs (e.g. "korean/cvvc/vc=4.0")
     language_format_role_sampling_boosts: tuple[str, ...] = ()
+    # Opt-in low-cost active-window context. Existing checkpoints keep the
+    # legacy 15-dim context; new experiments can use 18 dims.
+    enable_active_audio_context: bool = False
 
 
 def _filter_compatible_init_state(
@@ -177,6 +180,7 @@ class OtoAnchorDataset:
             {str(row.get("voicebank_id", "") or "unknown_voicebank") for row in self.rows}
         )
         self.voicebank_to_id = {name: idx for idx, name in enumerate(self.voicebank_vocab)}
+        self.active_profile_cache: dict[str, dict[str, float]] = {}
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -290,7 +294,22 @@ class OtoAnchorDataset:
             [1.0 if is_diphthong else 0.0, 1.0 if is_special else 0.0],
             dtype=np.float32,
         )
-        context = _context_array_from_row(row)
+        include_active_context = bool(getattr(self.model_config, "enable_active_audio_context", False)) or bool(
+            getattr(self.train_config, "enable_active_audio_context", False)
+        )
+        context = _context_array_from_row_with_active(
+            row,
+            active_context=(
+                _active_context_from_row(
+                    row,
+                    sample_rate=int(getattr(self.model_config, "sample_rate", 16000) or 16000),
+                    cache=self.active_profile_cache,
+                )
+                if include_active_context
+                else None
+            ),
+            expected_dim=int(getattr(self.model_config, "numeric_context_dim", 15) or 15),
+        )
         weight = float(row.get("sample_weight", row.get("weight", 1.0)) or 1.0)
         weight *= _format_loss_multiplier(row, self.train_config)
         weight *= _role_loss_multiplier(alias_role_text, self.train_config)
@@ -418,10 +437,14 @@ def train_oto_from_manifest(
             ckpt = torch.load(str(init_checkpoint), map_location=device)
             state = ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
             if isinstance(state, dict) and any(k for k in state if "." in k):
-                incompatible = model.load_state_dict(state, strict=False)
-                loaded = len(state) - len(incompatible.missing_keys)
+                compatible, init_summary = _filter_compatible_init_state(state, model.state_dict())
+                incompatible = model.load_state_dict(compatible, strict=False)
+                loaded = len(compatible)
                 print(f"[oto_anchor][train] loaded init_state from {init_checkpoint} "
-                      f"strategy=compatible loaded={loaded} skipped={len(incompatible.unexpected_keys)}")
+                      f"strategy=compatible loaded={loaded} "
+                      f"skipped_missing={init_summary['skipped_missing_count']} "
+                      f"skipped_shape={init_summary['skipped_shape_count']} "
+                      f"missing_after_load={len(incompatible.missing_keys)}")
             else:
                 print(f"[oto_anchor][train] init_checkpoint {init_checkpoint} has no recognizable state_dict — skipped")
         except Exception as exc:
@@ -970,6 +993,101 @@ def _context_array_from_row(row: dict[str, Any]) -> np.ndarray:
         ],
         dtype=np.float32,
     )
+
+
+def _context_array_from_row_with_active(
+    row: dict[str, Any],
+    *,
+    active_context: tuple[float, float, float] | None,
+    expected_dim: int,
+) -> np.ndarray:
+    base = _context_array_from_row(row).astype(np.float32)
+    values = base.tolist()
+    if active_context is not None:
+        values.extend(max(0.0, min(1.0, float(v))) for v in active_context[:3])
+    target_dim = max(len(values), int(expected_dim or len(values)))
+    if len(values) < target_dim:
+        values.extend([0.0] * (target_dim - len(values)))
+    elif len(values) > target_dim:
+        values = values[:target_dim]
+    return np.asarray(values, dtype=np.float32)
+
+
+def _active_context_from_row(
+    row: dict[str, Any],
+    *,
+    sample_rate: int,
+    cache: dict[str, dict[str, float]],
+) -> tuple[float, float, float]:
+    duration = max(1.0, float(row.get("duration_ms", 0.0) or 0.0))
+    if row.get("active_start_ms") is not None and row.get("active_end_ms") is not None:
+        try:
+            return _normalize_active_context(
+                float(row.get("active_start_ms", 0.0) or 0.0),
+                float(row.get("active_end_ms", duration) or duration),
+                duration,
+            )
+        except Exception:
+            pass
+    profile = _analyze_active_profile_for_context(
+        str(row.get("audio", "") or ""),
+        sample_rate=int(sample_rate),
+        cache=cache,
+    )
+    if profile:
+        duration = max(duration, float(profile.get("duration_ms", duration) or duration))
+    return _normalize_active_context(
+        float(profile.get("active_start_ms", 0.0) or 0.0),
+        float(profile.get("active_end_ms", duration) or duration),
+        duration,
+    )
+
+
+def _normalize_active_context(start_ms: float, end_ms: float, duration_ms: float) -> tuple[float, float, float]:
+    duration = max(1.0, float(duration_ms))
+    start = max(0.0, min(duration, float(start_ms)))
+    end = max(start, min(duration, float(end_ms)))
+    return start / duration, end / duration, max(0.0, end - start) / duration
+
+
+def _analyze_active_profile_for_context(
+    wav_path: str,
+    *,
+    sample_rate: int,
+    cache: dict[str, dict[str, float]],
+) -> dict[str, float]:
+    key = os.path.abspath(str(wav_path or "")).lower()
+    if key in cache:
+        return dict(cache[key])
+    try:
+        samples, sr, duration_sec = load_wav_mono(str(wav_path), target_sr=int(sample_rate))
+    except Exception:
+        cache[key] = {}
+        return {}
+    duration_ms = max(1.0, float(duration_sec) * 1000.0)
+    data = np.abs(np.asarray(samples, dtype=np.float32).reshape(-1))
+    if data.size <= 0:
+        profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
+        cache[key] = profile
+        return dict(profile)
+    peak = float(np.max(data))
+    if peak <= 1e-8:
+        profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
+        cache[key] = profile
+        return dict(profile)
+    threshold = max(peak * 0.04, float(np.percentile(data, 65.0)) * 2.0, 1e-5)
+    active_idx = np.flatnonzero(data >= threshold)
+    if active_idx.size <= 0:
+        profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
+        cache[key] = profile
+        return dict(profile)
+    profile = {
+        "active_start_ms": max(0.0, (float(active_idx[0]) / float(sr)) * 1000.0 - 25.0),
+        "active_end_ms": min(duration_ms, (float(active_idx[-1]) / float(sr)) * 1000.0 + 25.0),
+        "duration_ms": duration_ms,
+    }
+    cache[key] = profile
+    return dict(profile)
 
 
 def _format_loss_multiplier(row: dict[str, Any], cfg: OtoTrainConfig) -> float:

@@ -117,6 +117,15 @@ def test_oto_model_config_defaults_role_features_off_for_old_payloads():
     assert cfg.enable_extra_alias_flags is False
 
 
+def test_oto_model_config_expands_active_audio_context_dim():
+    from core.coarse_crnn.oto_model import OtoCrnnConfig
+
+    cfg = OtoCrnnConfig.from_dict({"enable_active_audio_context": True, "numeric_context_dim": 15})
+
+    assert cfg.enable_active_audio_context is True
+    assert cfg.numeric_context_dim == 18
+
+
 def test_oto_model_role_embedding_branch_only_when_enabled():
     import torch
 

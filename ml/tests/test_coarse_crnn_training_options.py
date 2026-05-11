@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from core.coarse_crnn.oto_training import (
     OtoTrainConfig,
     _build_train_sampling_weights,
+    _context_array_from_row_with_active,
     _filter_compatible_init_state,
     _iter_device_batches,
 )
@@ -134,6 +136,23 @@ def test_iter_device_batches_cpu_path_keeps_batch_count():
     batches = list(_iter_device_batches(loader, torch.device("cpu"), torch=torch, prefetch_batches=2))
     assert len(batches) == 2
     assert all(batch[0].device.type == "cpu" for batch in batches)
+
+
+def test_active_audio_context_extends_numeric_context_to_18_dims():
+    row = {
+        "file_row_count": 4,
+        "row_ratio_in_wav": 0.25,
+        "alias_phone_count": 2,
+    }
+
+    context = _context_array_from_row_with_active(
+        row,
+        active_context=(0.2, 0.9, 0.7),
+        expected_dim=18,
+    )
+
+    assert context.shape == (18,)
+    assert context[-3:].tolist() == pytest.approx([0.2, 0.9, 0.7])
 
 
 def test_row_order_violation_multiplier_disabled_returns_one():

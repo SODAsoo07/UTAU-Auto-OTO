@@ -152,3 +152,287 @@ def test_normalize_special_aliases_handles_iterables():
     assert _alias_is_special("Tt", special)
     assert not _alias_is_special("a k", special)
     assert not _alias_is_special("", special)
+
+
+def test_low_confidence_fallback_ignores_model_flag_by_default(monkeypatch):
+    from core.coarse_crnn.oto_predictor_generator import _apply_low_confidence_fallback
+
+    monkeypatch.delenv("UTOA_OTO_CRNN_LOW_CONF_USE_MODEL_FLAG", raising=False)
+    out, reason = _apply_low_confidence_fallback(
+        predicted_params={
+            "offset": 100.0,
+            "consonant": 80.0,
+            "cutoff": -160.0,
+            "preutterance": 55.0,
+            "overlap": 20.0,
+        },
+        predicted_confidence=0.42,
+        predicted_error_ms=390.0,
+        predicted_low_confidence=True,
+        confidence_components={"heatmap": 0.50},
+        base_params={
+            "offset": 0.0,
+            "consonant": 1.0,
+            "cutoff": -1.0,
+            "preutterance": 0.0,
+            "overlap": 0.0,
+        },
+        language="japanese",
+        alias="a",
+        duration_ms=1200.0,
+        is_special=False,
+    )
+
+    assert reason == ""
+    assert out["offset"] == 100.0
+
+
+def test_low_confidence_fallback_requires_low_heatmap_for_error(monkeypatch):
+    from core.coarse_crnn.oto_predictor_generator import _apply_low_confidence_fallback
+
+    monkeypatch.delenv("UTOA_OTO_CRNN_LOW_CONF_REQUIRE_LOW_HEATMAP_FOR_ERROR", raising=False)
+    out, reason = _apply_low_confidence_fallback(
+        predicted_params={
+            "offset": 100.0,
+            "consonant": 80.0,
+            "cutoff": -160.0,
+            "preutterance": 55.0,
+            "overlap": 20.0,
+        },
+        predicted_confidence=0.45,
+        predicted_error_ms=700.0,
+        predicted_low_confidence=False,
+        confidence_components={"heatmap": 0.55},
+        base_params={
+            "offset": 0.0,
+            "consonant": 1.0,
+            "cutoff": -1.0,
+            "preutterance": 0.0,
+            "overlap": 0.0,
+        },
+        language="japanese",
+        alias="a",
+        duration_ms=1200.0,
+        is_special=False,
+    )
+
+    assert reason == ""
+    assert out["offset"] == 100.0
+
+
+def test_shift_params_into_activity_window_moves_early_anchor():
+    from core.coarse_crnn.oto_predictor_generator import _shift_params_into_activity_window
+
+    out = _shift_params_into_activity_window(
+        predicted_anchors={
+            "offset": 10.0,
+            "overlap": 25.0,
+            "preutterance": 60.0,
+            "consonant": 95.0,
+            "cutoff": 180.0,
+        },
+        duration_ms=1600.0,
+        active_start_ms=700.0,
+        active_end_ms=1200.0,
+    )
+
+    assert out
+    # The model shape is preserved, but the absolute offset is moved near the
+    # detected activity window instead of falling back to the source OTO row.
+    assert 660.0 <= out["offset"] <= 680.0
+    assert out["preutterance"] == 50.0
+    assert out["consonant"] == 85.0
+
+
+def test_row_activity_shift_is_disabled_by_default(monkeypatch):
+    from core.coarse_crnn.oto_predictor_generator import _shift_params_into_row_activity_window
+
+    monkeypatch.delenv("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_ENABLE", raising=False)
+
+    out = _shift_params_into_row_activity_window(
+        predicted_anchors={
+            "offset": 520.0,
+            "overlap": 540.0,
+            "preutterance": 590.0,
+            "consonant": 625.0,
+            "cutoff": 720.0,
+        },
+        duration_ms=1600.0,
+        active_start_ms=100.0,
+        active_end_ms=1300.0,
+        row_index=0,
+        row_count=4,
+    )
+
+    assert out == {}
+
+
+def test_row_activity_shift_moves_first_row_back_from_next_syllable_when_enabled(monkeypatch):
+    from core.coarse_crnn.oto_predictor_generator import _shift_params_into_row_activity_window
+
+    monkeypatch.setenv("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_ENABLE", "1")
+
+    out = _shift_params_into_row_activity_window(
+        predicted_anchors={
+            "offset": 520.0,
+            "overlap": 540.0,
+            "preutterance": 590.0,
+            "consonant": 625.0,
+            "cutoff": 720.0,
+        },
+        duration_ms=1600.0,
+        active_start_ms=100.0,
+        active_end_ms=1300.0,
+        row_index=0,
+        row_count=4,
+    )
+
+    assert out
+    assert 110.0 <= out["offset"] <= 130.0
+    assert out["preutterance"] == 70.0
+    assert out["consonant"] == 105.0
+
+
+def test_audio_candidate_snap_moves_only_nearby_onset(tmp_path, monkeypatch):
+    from core.coarse_crnn.oto_predictor_generator import _apply_audio_candidate_snap
+
+    wav_path = tmp_path / "a.wav"
+    wav_path.write_bytes(b"fake")
+    key = str(wav_path.resolve()).lower()
+    cache = {
+        key: SimpleNamespace(
+            active_start_ms=0.0,
+            active_end_ms=500.0,
+            onset_peaks=[SimpleNamespace(time_ms=150.0, strength=0.80)],
+        )
+    }
+
+    monkeypatch.delenv("UTOA_OTO_CRNN_AUDIO_CANDIDATE_SNAP_ENABLE", raising=False)
+    monkeypatch.setenv("UTOA_OTO_CRNN_AUDIO_CANDIDATE_SEQUENCE_ENABLE", "0")
+    out, reason = _apply_audio_candidate_snap(
+        predicted_params={
+            "offset": 100.0,
+            "consonant": 80.0,
+            "cutoff": -170.0,
+            "preutterance": 40.0,
+            "overlap": 20.0,
+        },
+        wav_path=str(wav_path),
+        language="japanese",
+        alias="ka",
+        duration_ms=500.0,
+        cache=cache,
+    )
+
+    assert reason.startswith("candidate_onset:")
+    assert 105.0 <= out["offset"] <= 108.0
+    assert out["preutterance"] == 40.0
+    assert out["consonant"] == 80.0
+
+
+def test_audio_candidate_snap_uses_monotonic_sequence_state(tmp_path, monkeypatch):
+    from core.coarse_crnn.oto_predictor_generator import _apply_audio_candidate_snap
+
+    wav_path = tmp_path / "a.wav"
+    wav_path.write_bytes(b"fake")
+    key = str(wav_path.resolve()).lower()
+    cache = {
+        key: SimpleNamespace(
+            active_start_ms=0.0,
+            active_end_ms=500.0,
+            onset_peaks=[
+                SimpleNamespace(time_ms=150.0, strength=0.90),
+                SimpleNamespace(time_ms=190.0, strength=0.80),
+            ],
+        )
+    }
+    state = {key: 0}
+    monkeypatch.delenv("UTOA_OTO_CRNN_AUDIO_CANDIDATE_SEQUENCE_ENABLE", raising=False)
+
+    out, reason = _apply_audio_candidate_snap(
+        predicted_params={
+            "offset": 100.0,
+            "consonant": 80.0,
+            "cutoff": -170.0,
+            "preutterance": 40.0,
+            "overlap": 20.0,
+        },
+        wav_path=str(wav_path),
+        language="japanese",
+        alias="ka",
+        duration_ms=500.0,
+        cache=cache,
+        sequence_state=state,
+    )
+
+    assert reason.startswith("candidate_onset:")
+    assert state[key] == 1
+    assert 118.0 <= out["offset"] <= 122.0
+
+
+def test_audio_candidate_snap_ignores_far_onset(tmp_path):
+    from core.coarse_crnn.oto_predictor_generator import _apply_audio_candidate_snap
+
+    wav_path = tmp_path / "a.wav"
+    wav_path.write_bytes(b"fake")
+    key = str(wav_path.resolve()).lower()
+    cache = {
+        key: SimpleNamespace(
+            active_start_ms=0.0,
+            active_end_ms=500.0,
+            onset_peaks=[SimpleNamespace(time_ms=260.0, strength=0.95)],
+        )
+    }
+
+    out, reason = _apply_audio_candidate_snap(
+        predicted_params={
+            "offset": 100.0,
+            "consonant": 80.0,
+            "cutoff": -170.0,
+            "preutterance": 40.0,
+            "overlap": 20.0,
+        },
+        wav_path=str(wav_path),
+        language="japanese",
+        alias="ka",
+        duration_ms=500.0,
+        cache=cache,
+    )
+
+    assert reason == ""
+    assert out["offset"] == 100.0
+
+
+def test_audio_candidate_snap_blocks_regressive_format_role_pair(tmp_path, monkeypatch):
+    from core.coarse_crnn.oto_predictor_generator import _apply_audio_candidate_snap
+
+    wav_path = tmp_path / "a.wav"
+    wav_path.write_bytes(b"fake")
+    key = str(wav_path.resolve()).lower()
+    cache = {
+        key: SimpleNamespace(
+            active_start_ms=0.0,
+            active_end_ms=500.0,
+            onset_peaks=[SimpleNamespace(time_ms=150.0, strength=0.80)],
+        )
+    }
+    monkeypatch.delenv("UTOA_OTO_CRNN_AUDIO_CANDIDATE_SNAP_BLOCK_FORMAT_ROLES", raising=False)
+
+    out, reason = _apply_audio_candidate_snap(
+        predicted_params={
+            "offset": 100.0,
+            "consonant": 80.0,
+            "cutoff": -170.0,
+            "preutterance": 40.0,
+            "overlap": 20.0,
+        },
+        wav_path=str(wav_path),
+        language="japanese",
+        format_type="cvc",
+        alias="a ka",
+        duration_ms=500.0,
+        cache=cache,
+    )
+
+    assert reason == ""
+    assert out["offset"] == 100.0

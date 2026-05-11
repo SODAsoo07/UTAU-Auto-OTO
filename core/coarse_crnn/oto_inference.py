@@ -35,6 +35,7 @@ class OtoPrediction:
     predicted_error_ms: float | None = None
     low_confidence: bool = False
     confidence_components: dict[str, float] | None = None
+    skipped_audio_ms: float = 0.0
 
 
 def predict_oto(
@@ -52,6 +53,7 @@ def predict_oto(
     is_special: bool = False,
     prev_is_special: bool = False,
     next_is_special: bool = False,
+    skip_leading_silence: bool = True,
 ) -> OtoPrediction:
     torch = __import__("torch")
     torch_device = resolve_torch_device(torch, device)
@@ -72,6 +74,7 @@ def predict_oto(
         is_special=is_special,
         prev_is_special=prev_is_special,
         next_is_special=next_is_special,
+        skip_leading_silence=skip_leading_silence,
     )
 
 
@@ -91,11 +94,23 @@ def predict_oto_with_model(
     is_special: bool = False,
     prev_is_special: bool = False,
     next_is_special: bool = False,
+    skip_leading_silence: bool = True,
 ) -> OtoPrediction:
     torch = __import__("torch")
     torch_device = resolve_torch_device(torch, device)
     model = model.to(torch_device).eval()
     samples, sr, duration_sec = load_wav_mono(wav_path, target_sr=int(config.sample_rate))
+    original_duration_ms = max(1.0, float(duration_sec) * 1000.0)
+    original_samples = np.asarray(samples, dtype=np.float32).copy()
+    samples, skipped_audio_ms = _trim_leading_silence_for_inference(
+        samples,
+        sample_rate=int(sr),
+        enabled=bool(skip_leading_silence)
+        and _env_bool("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_ENABLE", True),
+    )
+    if skipped_audio_ms > 0.0:
+        duration_sec = float(len(samples)) / float(sr)
+
     features, hop_sec = log_mel_spectrogram(
         samples,
         sr,
@@ -105,6 +120,7 @@ def predict_oto_with_model(
     )
     if features.shape[0] <= 0:
         raise ValueError(f"empty audio features: {wav_path}")
+
     full_duration_ms = max(1.0, float(duration_sec) * 1000.0)
     prediction_duration_ms = full_duration_ms
     crop_start_ms = 0.0
@@ -198,6 +214,22 @@ def predict_oto_with_model(
         dtype=torch.float32,
         device=torch_device,
     )
+    expected_context_dim = int(getattr(config, "numeric_context_dim", int(context.shape[-1])) or int(context.shape[-1]))
+    if expected_context_dim != int(context.shape[-1]):
+        context_values = context.detach().cpu().numpy().reshape(-1).astype(np.float32).tolist()
+        if bool(getattr(config, "enable_active_audio_context", False)):
+            context_values.extend(
+                _active_context_from_samples(
+                    original_samples,
+                    sample_rate=int(sr),
+                    duration_ms=float(original_duration_ms),
+                )
+            )
+        if len(context_values) < expected_context_dim:
+            context_values.extend([0.0] * (expected_context_dim - len(context_values)))
+        elif len(context_values) > expected_context_dim:
+            context_values = context_values[:expected_context_dim]
+        context = torch.tensor([context_values], dtype=torch.float32, device=torch_device)
     pass1 = _run_oto_forward_pass(
         model=model,
         features=features,
@@ -280,6 +312,9 @@ def predict_oto_with_model(
     else:
         scalar_ms = scalar * max(float(prediction_duration_ms), 1.0)
         anchor_ms = ((heat_ms * heatmap_blend) + (scalar_ms * (1.0 - heatmap_blend))) + float(crop_start_ms)
+
+    anchor_ms = anchor_ms + skipped_audio_ms
+
     anchors = repair_anchors(
         OtoAnchors(
             offset=float(anchor_ms[0]),
@@ -288,9 +323,9 @@ def predict_oto_with_model(
             consonant=float(anchor_ms[3]),
             cutoff=float(anchor_ms[4]),
         ),
-        duration_ms=full_duration_ms,
+        duration_ms=original_duration_ms,
     )
-    params = anchors_to_oto_params(anchors, duration_ms=full_duration_ms)
+    params = anchors_to_oto_params(anchors, duration_ms=original_duration_ms)
     conf_map = {name: float(heat_conf[idx]) for idx, name in enumerate(OTO_ANCHOR_NAMES)}
     heat_confidence = float(sum(conf_map.values()) / max(1, len(conf_map)))
     predicted_error_ms = None
@@ -298,6 +333,7 @@ def predict_oto_with_model(
     if scalar_logvar is not None:
         scalar_std = np.sqrt(np.exp(np.asarray(scalar_logvar, dtype=np.float32)))
         predicted_error_ms = float(np.mean(scalar_std) * max(float(prediction_duration_ms), 1.0))
+        predicted_error_ms *= max(0.0, _env_float("UTOA_OTO_CRNN_PREDICTED_ERROR_SCALE", 1.0))
         error_scale = max(1.0, float(getattr(config, "confidence_error_scale_ms", 75.0)))
         uncertainty_confidence = float(np.exp(-predicted_error_ms / error_scale))
     if uncertainty_confidence is not None:
@@ -314,12 +350,15 @@ def predict_oto_with_model(
         )
     else:
         confidence = float(max(0.0, min(1.0, (heat_confidence * 0.55) + (conf_head * 0.45))))
-    low_confidence = bool(confidence < 0.58)
-    if predicted_error_ms is not None and predicted_error_ms > 80.0:
+    low_confidence = bool(confidence < _env_float("UTOA_OTO_CRNN_LOW_CONF_MIN_CONFIDENCE", 0.35))
+    max_predicted_error_ms = _env_float("UTOA_OTO_CRNN_LOW_CONF_MAX_PREDICTED_ERROR_MS", 450.0)
+    if predicted_error_ms is not None and predicted_error_ms > max_predicted_error_ms:
         low_confidence = True
     components = {
         "heatmap": float(heat_confidence),
         "confidence_head": float(conf_head),
+        "skipped_audio_ms": float(skipped_audio_ms),
+        "effective_duration_ms": float(full_duration_ms),
     }
     if uncertainty_confidence is not None:
         components["uncertainty"] = float(uncertainty_confidence)
@@ -327,11 +366,12 @@ def predict_oto_with_model(
         anchors=anchors,
         params=params,
         confidence=confidence,
-        duration_ms=full_duration_ms,
+        duration_ms=original_duration_ms,
         heatmap_confidence=conf_map,
         predicted_error_ms=predicted_error_ms,
         low_confidence=low_confidence,
         confidence_components=components,
+        skipped_audio_ms=float(skipped_audio_ms),
     )
 
 
@@ -418,6 +458,7 @@ def write_prediction_json(path: str, prediction: OtoPrediction, *, meta: dict[st
     payload = {
         "meta": dict(meta or {}),
         "duration_ms": float(prediction.duration_ms),
+        "skipped_audio_ms": float(prediction.skipped_audio_ms),
         "confidence": float(prediction.confidence),
         "predicted_error_ms": (
             float(prediction.predicted_error_ms) if prediction.predicted_error_ms is not None else None
@@ -522,6 +563,30 @@ def _row_ratio(row_index_in_wav: int, file_row_count: int) -> float:
     return max(0.0, min(1.0, float(int(row_index_in_wav)) / float(count - 1)))
 
 
+def _active_context_from_samples(
+    samples: np.ndarray,
+    *,
+    sample_rate: int,
+    duration_ms: float,
+) -> list[float]:
+    duration = max(1.0, float(duration_ms))
+    sr = int(sample_rate or 0)
+    data = np.abs(np.asarray(samples, dtype=np.float32).reshape(-1))
+    if sr <= 0 or data.size <= 0:
+        return [0.0, 1.0, 1.0]
+    peak = float(np.max(data))
+    if peak <= 1e-8:
+        return [0.0, 1.0, 1.0]
+    threshold = max(peak * 0.04, float(np.percentile(data, 65.0)) * 2.0, 1e-5)
+    active_idx = np.flatnonzero(data >= threshold)
+    if active_idx.size <= 0:
+        return [0.0, 1.0, 1.0]
+    start = max(0.0, (float(active_idx[0]) / float(sr)) * 1000.0 - 25.0)
+    end = min(duration, (float(active_idx[-1]) / float(sr)) * 1000.0 + 25.0)
+    end = max(start, end)
+    return [start / duration, end / duration, max(0.0, end - start) / duration]
+
+
 def _prediction_heatmap_blend(config, *, using_vcv_window: bool) -> float:
     key = "vcv_window_heatmap_blend" if using_vcv_window else "anchor_heatmap_blend"
     try:
@@ -529,6 +594,124 @@ def _prediction_heatmap_blend(config, *, using_vcv_window: bool) -> float:
     except Exception:
         value = 0.70
     return max(0.0, min(1.0, value))
+
+
+def _trim_leading_silence_for_inference(
+    samples: np.ndarray,
+    *,
+    sample_rate: int,
+    enabled: bool = True,
+) -> tuple[np.ndarray, float]:
+    """Trim long leading silence before CRNN inference and keep original timebase.
+
+    The model predicts absolute OTO anchors on the audio it sees. For voicebanks
+    with long pre-roll silence, feeding the full WAV can pull heatmap anchors into
+    the silent region. We therefore run inference on an active-window view, then
+    add the skipped offset back to the predicted anchors.
+    """
+    if not enabled:
+        return samples, 0.0
+    sr = int(sample_rate or 0)
+    if sr <= 0:
+        return samples, 0.0
+    data = np.asarray(samples, dtype=np.float32)
+    if data.size <= 0:
+        return samples, 0.0
+
+    keep_pad_ms = _env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_KEEP_MS", 150.0)
+    min_skip_ms = _env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_MIN_SKIP_MS", 80.0)
+    window_ms = _env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_WINDOW_MS", 15.0)
+    strong_ratio = _env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_STRONG_RATIO", 0.20)
+    active_ratio = _env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_ACTIVE_RATIO", 0.02)
+    noise_multiplier = _env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_NOISE_MULTIPLIER", 4.0)
+    abs_floor = _env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_ABS_FLOOR", 1e-4)
+
+    window_samples = max(1, int(round(float(sr) * max(1.0, float(window_ms)) / 1000.0)))
+    if data.size <= window_samples:
+        return samples, 0.0
+    stride_samples = max(1, window_samples // 2)
+    frame_count = 1 + int((data.size - window_samples) // stride_samples)
+    if frame_count <= 0:
+        return samples, 0.0
+
+    rms = np.empty((frame_count,), dtype=np.float32)
+    for idx in range(frame_count):
+        start = idx * stride_samples
+        frame = data[start : start + window_samples]
+        rms[idx] = float(np.sqrt(np.mean(frame * frame))) if frame.size else 0.0
+
+    peak = float(np.max(rms)) if rms.size else 0.0
+    if peak <= max(float(abs_floor), 1e-8):
+        return samples, 0.0
+
+    stride_ms = (float(stride_samples) / float(sr)) * 1000.0
+    noise_frames = max(1, min(frame_count, int(round(200.0 / max(stride_ms, 1e-6)))))
+    noise_floor = float(np.percentile(rms[:noise_frames], 80.0)) if noise_frames > 0 else 0.0
+    dynamic_threshold = noise_floor + ((peak - noise_floor) * _env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_DYNAMIC_RATIO", 0.35))
+    active_threshold = max(peak * max(0.0, float(active_ratio)), dynamic_threshold, float(abs_floor))
+    if peak >= noise_floor * max(1.0, float(noise_multiplier)):
+        active_threshold = max(active_threshold, noise_floor * max(0.0, float(noise_multiplier)))
+    strong_threshold = max(active_threshold, peak * max(0.0, float(strong_ratio)))
+
+    min_run = max(1, int(round(_env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_MIN_ACTIVE_MS", 30.0) / max(stride_ms, 1e-6))))
+    strong = _first_sustained_indices(rms >= strong_threshold, min_run)
+    if strong.size > 0:
+        first = int(strong[0])
+        start_frame = first
+        while start_frame > 0 and float(rms[start_frame - 1]) >= active_threshold:
+            start_frame -= 1
+    else:
+        active = _first_sustained_indices(rms >= active_threshold, min_run)
+        if active.size <= 0:
+            return samples, 0.0
+        start_frame = int(active[0])
+
+    active_start_ms = float(start_frame) * stride_ms
+    skip_ms = max(0.0, active_start_ms - max(0.0, float(keep_pad_ms)))
+    if skip_ms < max(0.0, float(min_skip_ms)):
+        return samples, 0.0
+
+    skip_samples = int(round(float(sr) * skip_ms / 1000.0))
+    if skip_samples <= 0 or skip_samples >= data.size - 1:
+        return samples, 0.0
+    return data[skip_samples:], (float(skip_samples) / float(sr)) * 1000.0
+
+
+def _first_sustained_indices(mask: np.ndarray, min_run: int) -> np.ndarray:
+    arr = np.asarray(mask, dtype=bool)
+    run = max(1, int(min_run))
+    if arr.size <= 0:
+        return np.asarray([], dtype=np.int64)
+    if run <= 1:
+        return np.flatnonzero(arr)
+    count = 0
+    for idx, value in enumerate(arr):
+        count = count + 1 if bool(value) else 0
+        if count >= run:
+            start = idx - run + 1
+            return np.arange(start, arr.size, dtype=np.int64)[arr[start:]]
+    return np.asarray([], dtype=np.int64)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.environ.get(name, "")).strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in {"0", "false", "off", "no"}:
+        return False
+    if raw in {"1", "true", "on", "yes"}:
+        return True
+    return bool(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "")).strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError:
+        return float(default)
 
 
 __all__ = ["OtoPrediction", "format_oto_line", "predict_oto", "predict_oto_with_model", "write_prediction_json"]

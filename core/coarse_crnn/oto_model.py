@@ -19,6 +19,7 @@ class OtoCrnnConfig:
     hop_ms: float = 10.0
     cond_dim: int = 24
     numeric_context_dim: int = 15
+    enable_active_audio_context: bool = False
     enable_format_residual_heads: bool = False
     enable_vcv_target_window: bool = True
     vcv_target_window_frames: int = 240
@@ -68,6 +69,10 @@ class OtoCrnnConfig:
         data = dict(payload or {})
         if payload is not None and "numeric_context_dim" not in data:
             data["numeric_context_dim"] = 0
+        if payload is not None and "enable_active_audio_context" not in data:
+            data["enable_active_audio_context"] = False
+        if bool(data.get("enable_active_audio_context", False)) and int(data.get("numeric_context_dim", 0) or 0) < 18:
+            data["numeric_context_dim"] = 18
         if payload is not None and "alias_types" not in data:
             data["alias_types"] = ("other",)
         if payload is not None and "transition_types" not in data:
