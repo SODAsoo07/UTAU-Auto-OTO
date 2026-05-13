@@ -103,6 +103,38 @@ def test_language_balance_and_slice_sampling_boosts_are_explicit():
     assert weights.tolist() == [2.0, 0.5, 1.0]
 
 
+def test_voicebank_sampling_boosts_apply_only_to_target_voicebank():
+    rows = [
+        {
+            "voicebank_id": "vb_focus",
+            "language": "korean",
+            "format_type": "vcv",
+            "alias_role": "v-cv",
+            "alias_type": "v-cv",
+            "transition_type": "other",
+        },
+        {
+            "voicebank_id": "vb_other",
+            "language": "korean",
+            "format_type": "vcv",
+            "alias_role": "v-cv",
+            "alias_type": "v-cv",
+            "transition_type": "other",
+        },
+    ]
+    cfg = OtoTrainConfig(
+        voicebank_balance_power=0.0,
+        language_balance_power=0.0,
+        role_balance_power=0.0,
+        format_balance_power=0.0,
+        voicebank_sampling_boosts=("vb_focus=3.0",),
+    )
+
+    weights = _build_train_sampling_weights(rows, cfg, hard_case_boosts=np.zeros((0,), dtype=np.float32))
+
+    assert weights.tolist() == [3.0, 1.0]
+
+
 def test_compatible_init_state_skips_missing_and_shape_mismatch():
     import torch
 
@@ -124,6 +156,27 @@ def test_compatible_init_state_skips_missing_and_shape_mismatch():
     assert summary["loaded"] == 1
     assert summary["skipped_missing_count"] == 1
     assert summary["skipped_shape_count"] == 1
+    assert summary["partial_shape_count"] == 0
+
+
+def test_compatible_init_state_partially_loads_expanded_linear_input():
+    import torch
+
+    source = {
+        "context_proj.0.weight": torch.arange(6, dtype=torch.float32).reshape(2, 3),
+    }
+    target = {
+        "context_proj.0.weight": torch.full((2, 5), -1.0, dtype=torch.float32),
+    }
+
+    compatible, summary = _filter_compatible_init_state(source, target)
+
+    assert set(compatible) == {"context_proj.0.weight"}
+    assert compatible["context_proj.0.weight"][:, :3].tolist() == source["context_proj.0.weight"].tolist()
+    assert compatible["context_proj.0.weight"][:, 3:].tolist() == [[0.0, 0.0], [0.0, 0.0]]
+    assert summary["loaded"] == 1
+    assert summary["skipped_shape_count"] == 0
+    assert summary["partial_shape_count"] == 1
 
 
 def test_iter_device_batches_cpu_path_keeps_batch_count():

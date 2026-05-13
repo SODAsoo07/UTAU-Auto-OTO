@@ -126,6 +126,38 @@ def test_oto_model_config_expands_active_audio_context_dim():
     assert cfg.numeric_context_dim == 18
 
 
+def test_oto_model_config_expands_slot_context_dim():
+    from core.coarse_crnn.oto_model import OtoCrnnConfig
+
+    cfg = OtoCrnnConfig.from_dict({"enable_slot_context": True, "numeric_context_dim": 15})
+
+    assert cfg.enable_slot_context is True
+    assert cfg.numeric_context_dim == 21
+
+
+def test_oto_model_config_expands_active_slot_context_dim():
+    from core.coarse_crnn.oto_model import OtoCrnnConfig
+
+    cfg = OtoCrnnConfig.from_dict(
+        {"enable_active_audio_context": True, "enable_slot_context": True, "numeric_context_dim": 15}
+    )
+
+    assert cfg.enable_active_audio_context is True
+    assert cfg.enable_slot_context is True
+    assert cfg.numeric_context_dim == 24
+
+
+def test_oto_model_active_relative_mode_forces_active_context():
+    from core.coarse_crnn.oto_model import OtoCrnnConfig, uses_active_relative_param_head, uses_relative_param_head
+
+    cfg = OtoCrnnConfig.from_dict({"scalar_target_mode": "active_relative_params", "numeric_context_dim": 15})
+
+    assert cfg.enable_active_audio_context is True
+    assert cfg.numeric_context_dim == 18
+    assert uses_relative_param_head(cfg)
+    assert uses_active_relative_param_head(cfg)
+
+
 def test_oto_model_role_embedding_branch_only_when_enabled():
     import torch
 

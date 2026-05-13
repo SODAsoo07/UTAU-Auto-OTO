@@ -152,6 +152,8 @@ def normalize_relative_oto_target(
     alias_role: object = "",
     is_diphthong: bool = False,
     is_special: bool = False,
+    active_origin_ms: float | None = None,
+    active_span_ms: float | None = None,
 ) -> list[float]:
     values = [float(v) for v in anchors_ms]
     duration = max(1.0, float(duration_ms))
@@ -168,8 +170,10 @@ def normalize_relative_oto_target(
     pre_delta = max(overlap_delta, pre - offset)
     cons_gap = _clamp(consonant - pre, prior["min_cons_gap"], prior["max_cons_gap"])
     tail = _clamp(cutoff - consonant, prior["min_tail"], prior["max_tail"])
+    offset_origin = max(0.0, float(active_origin_ms)) if active_origin_ms is not None else 0.0
+    offset_span = max(1.0, float(active_span_ms)) if active_span_ms is not None else duration
     return [
-        _unit(offset / duration),
+        _unit((offset - offset_origin) / offset_span),
         _unit(overlap_delta / duration),
         _unit(pre_delta / duration),
         _unit(cons_gap / duration),
@@ -188,6 +192,8 @@ def decode_relative_oto_params(
     alias_role: object = "",
     is_diphthong: bool = False,
     is_special: bool = False,
+    active_origin_ms: float | None = None,
+    active_span_ms: float | None = None,
 ) -> dict[str, float]:
     values = [max(0.0, min(1.0, float(v))) for v in scalar_values]
     duration = max(1.0, float(duration_ms))
@@ -199,7 +205,9 @@ def decode_relative_oto_params(
         alias_type=alias_type,
         transition_type=transition_type,
     )
-    offset = values[0] * duration
+    offset_origin = max(0.0, float(active_origin_ms)) if active_origin_ms is not None else 0.0
+    offset_span = max(1.0, float(active_span_ms)) if active_span_ms is not None else duration
+    offset = offset_origin + (values[0] * offset_span)
     overlap_delta = values[1] * duration
     pre_delta = max(overlap_delta, values[2] * duration)
     cons_gap_model = _clamp(values[3] * duration, prior["min_cons_gap"], prior["max_cons_gap"])

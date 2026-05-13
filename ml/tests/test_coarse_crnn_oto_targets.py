@@ -155,6 +155,31 @@ def test_relative_oto_decode_blends_right_boundary_with_alias_prior():
     assert round(params["cutoff"], 3) == round(-expected_cutoff_abs, 3)
 
 
+def test_active_relative_oto_target_normalizes_only_offset_origin():
+    from core.coarse_crnn.oto_param_priors import decode_relative_oto_params, normalize_relative_oto_target
+
+    target = normalize_relative_oto_target(
+        [520.0, 548.0, 580.0, 650.0, 750.0],
+        duration_ms=2000.0,
+        alias_type="cv",
+        active_origin_ms=400.0,
+        active_span_ms=800.0,
+    )
+    assert round(target[0] * 800.0 + 400.0, 3) == 520.0
+    assert round(target[2] * 2000.0, 3) == 60.0
+
+    params = decode_relative_oto_params(
+        target,
+        duration_ms=2000.0,
+        alias_type="cv",
+        prior_blend=0.0,
+        active_origin_ms=400.0,
+        active_span_ms=800.0,
+    )
+    assert round(params["offset"], 3) == 520.0
+    assert round(params["preutterance"], 3) == 60.0
+
+
 def test_context_timing_prior_separates_cvvc_vc_from_vcv_vcv():
     from core.coarse_crnn.oto_param_priors import oto_timing_prior
 

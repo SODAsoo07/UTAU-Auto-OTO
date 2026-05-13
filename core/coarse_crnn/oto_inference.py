@@ -17,10 +17,12 @@ from core.coarse_crnn.oto_model import (
     load_oto_checkpoint,
     right_boundary_prior_blend_for_context,
     transition_type_id,
+    uses_active_relative_param_head,
     uses_relative_param_head,
 )
 from core.coarse_crnn.oto_param_priors import decode_relative_oto_params, relative_params_to_anchors
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES, OtoAnchors, anchors_to_oto_params, extract_alias_features, repair_anchors
+from core.coarse_crnn.slot_graph import slot_context_from_role
 from core.coarse_crnn.oto_windowing import crop_oto_target_window, should_use_vcv_target_window, target_window_frames_for
 from core.coarse_crnn.training import resolve_torch_device
 
@@ -188,9 +190,7 @@ def predict_oto_with_model(
         dtype=torch.float32,
         device=torch_device,
     )
-    context = torch.tensor(
-        [
-            [
+    base_context_values = [
                 _row_ratio(row_index_in_wav, file_row_count),
                 min(1.0, max(1.0, float(file_row_count)) / 64.0),
                 min(1.0, max(0.0, float(alias_features.get("alias_phone_count", 0.0) or 0.0)) / 6.0),
@@ -209,20 +209,34 @@ def predict_oto_with_model(
                 max(0.0, min(1.0, float(prev_alias_features.get("right_vowel_id_norm", 0.0) or 0.0))),
                 # dim 14: next alias left vowel id (VV context: what vowel comes next)
                 max(0.0, min(1.0, float(next_alias_features.get("left_vowel_id_norm", 0.0) or 0.0))),
-            ]
-        ],
+    ]
+    active_context_values = (
+        _active_context_from_samples(
+            samples,
+            sample_rate=int(sr),
+            duration_ms=float(full_duration_ms),
+        )
+        if bool(getattr(config, "enable_active_audio_context", False)) or uses_active_relative_param_head(config)
+        else None
+    )
+    context = torch.tensor(
+        [base_context_values],
         dtype=torch.float32,
         device=torch_device,
     )
     expected_context_dim = int(getattr(config, "numeric_context_dim", int(context.shape[-1])) or int(context.shape[-1]))
     if expected_context_dim != int(context.shape[-1]):
         context_values = context.detach().cpu().numpy().reshape(-1).astype(np.float32).tolist()
-        if bool(getattr(config, "enable_active_audio_context", False)):
+        include_active = active_context_values is not None or expected_context_dim >= 24
+        if include_active:
+            context_values.extend(active_context_values if active_context_values is not None else [0.0, 0.0, 0.0])
+        slot_start_dim = 24 if include_active else 21
+        if expected_context_dim >= slot_start_dim:
             context_values.extend(
-                _active_context_from_samples(
-                    original_samples,
-                    sample_rate=int(sr),
-                    duration_ms=float(original_duration_ms),
+                slot_context_from_role(
+                    role_text,
+                    row_index_in_wav=int(row_index_in_wav),
+                    file_row_count=int(file_row_count),
                 )
             )
         if len(context_values) < expected_context_dim:
@@ -308,6 +322,10 @@ def predict_oto_with_model(
             alias_role=role_text,
             is_diphthong=is_diphthong_flag,
             is_special=is_special_flag,
+            active_context=active_context_values,
+            active_relative=uses_active_relative_param_head(config),
+            active_prepad_ms=float(getattr(config, "active_relative_prepad_ms", 150.0)),
+            active_min_span_ms=float(getattr(config, "active_relative_min_span_ms", 300.0)),
         ) + float(crop_start_ms)
     else:
         scalar_ms = scalar * max(float(prediction_duration_ms), 1.0)
@@ -350,10 +368,26 @@ def predict_oto_with_model(
         )
     else:
         confidence = float(max(0.0, min(1.0, (heat_confidence * 0.55) + (conf_head * 0.45))))
-    low_confidence = bool(confidence < _env_float("UTOA_OTO_CRNN_LOW_CONF_MIN_CONFIDENCE", 0.35))
+    min_conf = _env_float("UTOA_OTO_CRNN_LOW_CONF_MIN_CONFIDENCE", 0.35)
     max_predicted_error_ms = _env_float("UTOA_OTO_CRNN_LOW_CONF_MAX_PREDICTED_ERROR_MS", 450.0)
-    if predicted_error_ms is not None and predicted_error_ms > max_predicted_error_ms:
-        low_confidence = True
+    min_votes = max(1, int(round(_env_float("UTOA_OTO_CRNN_LOW_CONF_MIN_TRIGGER_VOTES", 2.0))))
+    min_conf, max_predicted_error_ms, min_votes = _role_adjusted_low_conf_thresholds(
+        min_conf=min_conf,
+        max_error_ms=max_predicted_error_ms,
+        min_votes=min_votes,
+        role_text=role_text,
+        is_special=bool(is_special_flag),
+    )
+    trigger_conf = bool(confidence < min_conf)
+    trigger_err = bool(predicted_error_ms is not None and predicted_error_ms > max_predicted_error_ms)
+    component_signal = False
+    if uncertainty_confidence is not None and _env_bool("UTOA_OTO_CRNN_LOW_CONF_COMPONENT_SIGNAL_ENABLE", True):
+        component_signal = bool(
+            float(heat_confidence) <= _env_float("UTOA_OTO_CRNN_LOW_CONF_MAX_HEATMAP", 0.32)
+            and float(uncertainty_confidence) <= _env_float("UTOA_OTO_CRNN_LOW_CONF_MAX_UNCERTAINTY", 0.014)
+        )
+    votes = int(trigger_conf) + int(trigger_err) + int(component_signal)
+    low_confidence = bool(votes >= min_votes)
     components = {
         "heatmap": float(heat_confidence),
         "confidence_head": float(conf_head),
@@ -362,6 +396,8 @@ def predict_oto_with_model(
     }
     if uncertainty_confidence is not None:
         components["uncertainty"] = float(uncertainty_confidence)
+    components["low_conf_votes"] = float(votes)
+    components["low_conf_component_signal"] = 1.0 if component_signal else 0.0
     return OtoPrediction(
         anchors=anchors,
         params=params,
@@ -519,7 +555,17 @@ def _relative_scalar_to_anchor_ms(
     alias_role: object = "",
     is_diphthong: bool = False,
     is_special: bool = False,
+    active_context: list[float] | tuple[float, ...] | None = None,
+    active_relative: bool = False,
+    active_prepad_ms: float = 150.0,
+    active_min_span_ms: float = 300.0,
 ) -> np.ndarray:
+    active_origin_ms, active_span_ms = _active_relative_origin_span(
+        active_context,
+        duration_ms=float(duration_ms),
+        prepad_ms=float(active_prepad_ms),
+        min_span_ms=float(active_min_span_ms),
+    ) if bool(active_relative) else (None, None)
     params = decode_relative_oto_params(
         scalar,
         duration_ms=float(duration_ms),
@@ -530,6 +576,8 @@ def _relative_scalar_to_anchor_ms(
         alias_role=alias_role,
         is_diphthong=is_diphthong,
         is_special=is_special,
+        active_origin_ms=active_origin_ms,
+        active_span_ms=active_span_ms,
     )
     anchors = np.asarray(relative_params_to_anchors(params, duration_ms=float(duration_ms)), dtype=np.float32)
     blend = max(0.0, min(1.0, float(heatmap_blend)))
@@ -585,6 +633,24 @@ def _active_context_from_samples(
     end = min(duration, (float(active_idx[-1]) / float(sr)) * 1000.0 + 25.0)
     end = max(start, end)
     return [start / duration, end / duration, max(0.0, end - start) / duration]
+
+
+def _active_relative_origin_span(
+    active_context: list[float] | tuple[float, ...] | None,
+    *,
+    duration_ms: float,
+    prepad_ms: float = 150.0,
+    min_span_ms: float = 300.0,
+) -> tuple[float, float]:
+    duration = max(1.0, float(duration_ms))
+    values = [] if active_context is None else list(active_context)
+    if len(values) < 2:
+        return 0.0, duration
+    start_ms = max(0.0, min(duration, float(values[0]) * duration))
+    end_ms = max(start_ms, min(duration, float(values[1]) * duration))
+    origin = max(0.0, start_ms - max(0.0, float(prepad_ms)))
+    span = max(float(min_span_ms), end_ms - origin, 1.0)
+    return origin, min(duration, span)
 
 
 def _prediction_heatmap_blend(config, *, using_vcv_window: bool) -> float:
@@ -654,17 +720,35 @@ def _trim_leading_silence_for_inference(
     strong_threshold = max(active_threshold, peak * max(0.0, float(strong_ratio)))
 
     min_run = max(1, int(round(_env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_MIN_ACTIVE_MS", 30.0) / max(stride_ms, 1e-6))))
-    strong = _first_sustained_indices(rms >= strong_threshold, min_run)
+    prefer_strongest = _env_bool("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_PICK_STRONGEST_RUN", True)
+    strong = _first_sustained_indices(
+        rms >= strong_threshold,
+        min_run,
+        values=rms,
+        prefer_strongest=prefer_strongest,
+    )
     if strong.size > 0:
         first = int(strong[0])
         start_frame = first
         while start_frame > 0 and float(rms[start_frame - 1]) >= active_threshold:
             start_frame -= 1
     else:
-        active = _first_sustained_indices(rms >= active_threshold, min_run)
-        if active.size <= 0:
-            return samples, 0.0
-        start_frame = int(active[0])
+        active = _first_sustained_indices(
+            rms >= active_threshold,
+            min_run,
+            values=rms,
+            prefer_strongest=prefer_strongest,
+        )
+        if active.size > 0:
+            start_frame = int(active[0])
+        else:
+            rise_start = _first_energy_rise_start_frame(
+                rms,
+                stride_ms=float(stride_ms),
+            )
+            if rise_start is None:
+                return samples, 0.0
+            start_frame = int(rise_start)
 
     active_start_ms = float(start_frame) * stride_ms
     skip_ms = max(0.0, active_start_ms - max(0.0, float(keep_pad_ms)))
@@ -677,20 +761,130 @@ def _trim_leading_silence_for_inference(
     return data[skip_samples:], (float(skip_samples) / float(sr)) * 1000.0
 
 
-def _first_sustained_indices(mask: np.ndarray, min_run: int) -> np.ndarray:
+def _first_sustained_indices(
+    mask: np.ndarray,
+    min_run: int,
+    *,
+    values: np.ndarray | None = None,
+    prefer_strongest: bool = False,
+) -> np.ndarray:
     arr = np.asarray(mask, dtype=bool)
     run = max(1, int(min_run))
     if arr.size <= 0:
         return np.asarray([], dtype=np.int64)
     if run <= 1:
-        return np.flatnonzero(arr)
+        idx = np.flatnonzero(arr)
+        if idx.size <= 0:
+            return np.asarray([], dtype=np.int64)
+        if not bool(prefer_strongest) or values is None:
+            return idx
+        vals = np.asarray(values, dtype=np.float32).reshape(-1)
+        if vals.size != arr.size:
+            return idx
+        best = int(idx[np.argmax(vals[idx])])
+        return np.arange(best, idx[-1] + 1, dtype=np.int64)[arr[best:]]
     count = 0
+    start = -1
+    runs: list[tuple[int, int]] = []
     for idx, value in enumerate(arr):
         count = count + 1 if bool(value) else 0
-        if count >= run:
+        if count == run:
             start = idx - run + 1
-            return np.arange(start, arr.size, dtype=np.int64)[arr[start:]]
-    return np.asarray([], dtype=np.int64)
+        if not bool(value) and start >= 0:
+            runs.append((start, idx - 1))
+            start = -1
+    if start >= 0:
+        runs.append((start, arr.size - 1))
+    if not runs:
+        return np.asarray([], dtype=np.int64)
+    if not bool(prefer_strongest) or values is None:
+        first, last = runs[0]
+        return np.arange(first, last + 1, dtype=np.int64)
+    vals = np.asarray(values, dtype=np.float32).reshape(-1)
+    if vals.size != arr.size:
+        first, last = runs[0]
+        return np.arange(first, last + 1, dtype=np.int64)
+    len_weight = _env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_STRONGEST_RUN_LENGTH_WEIGHT", 0.02)
+    best_score = None
+    best_run = runs[0]
+    for first, last in runs:
+        seg = vals[first : last + 1]
+        if seg.size <= 0:
+            continue
+        score = float(np.mean(seg)) + (float(seg.size) * float(len_weight))
+        if best_score is None or score > best_score:
+            best_score = score
+            best_run = (first, last)
+    first, last = best_run
+    return np.arange(first, last + 1, dtype=np.int64)
+
+
+def _role_adjusted_low_conf_thresholds(
+    *,
+    min_conf: float,
+    max_error_ms: float,
+    min_votes: int,
+    role_text: str,
+    is_special: bool,
+) -> tuple[float, float, int]:
+    if not _env_bool("UTOA_OTO_CRNN_LOW_CONF_ROLE_ADAPT_ENABLE", True):
+        return float(min_conf), float(max_error_ms), int(min_votes)
+    role = "special" if bool(is_special) else normalize_role(role_text)
+    relax_roles = _env_csv_set(
+        "UTOA_OTO_CRNN_LOW_CONF_ROLE_RELAX_ROLES",
+        {"vc", "v-cv", "vv"},
+    )
+    if role not in relax_roles:
+        return float(min_conf), float(max_error_ms), int(min_votes)
+    conf_delta = max(0.0, _env_float("UTOA_OTO_CRNN_LOW_CONF_ROLE_RELAX_CONF_DELTA", 0.04))
+    err_delta_ms = max(0.0, _env_float("UTOA_OTO_CRNN_LOW_CONF_ROLE_RELAX_ERROR_DELTA_MS", 90.0))
+    votes_delta = max(0, int(round(_env_float("UTOA_OTO_CRNN_LOW_CONF_ROLE_RELAX_EXTRA_VOTES", 1.0))))
+    return (
+        max(0.05, float(min_conf) - conf_delta),
+        float(max_error_ms) + err_delta_ms,
+        max(1, int(min_votes) + votes_delta),
+    )
+
+
+def _env_csv_set(name: str, default: set[str]) -> set[str]:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return set(default)
+    out = {normalize_role(item.strip()) for item in raw.split(",") if item.strip()}
+    return out or set(default)
+
+
+def _first_energy_rise_start_frame(rms: np.ndarray, *, stride_ms: float) -> int | None:
+    values = np.asarray(rms, dtype=np.float32).reshape(-1)
+    if values.size <= 3:
+        return None
+    smooth_win = max(1, int(round(_env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_RISE_SMOOTH_FRAMES", 5.0))))
+    if smooth_win > 1:
+        kernel = np.ones((smooth_win,), dtype=np.float32) / float(smooth_win)
+        smooth = np.convolve(values, kernel, mode="same").astype(np.float32)
+    else:
+        smooth = values
+    base_frames = max(3, min(len(smooth), int(round(_env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_RISE_BASELINE_MS", 280.0) / max(stride_ms, 1e-6)))))
+    baseline = smooth[:base_frames]
+    base_med = float(np.median(baseline))
+    base_mad = float(np.median(np.abs(baseline - base_med))) + 1e-8
+    peak = float(np.max(smooth))
+    if peak <= max(base_med * 1.10, 1e-7):
+        return None
+    z = (smooth - base_med) / base_mad
+    slope = np.diff(smooth, prepend=smooth[0])
+    rise_ratio = _env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_RISE_RATIO", 1.35)
+    rise_z = _env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_RISE_Z", 4.0)
+    min_run = max(1, int(round(_env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_RISE_MIN_ACTIVE_MS", 25.0) / max(stride_ms, 1e-6))))
+    mask = (smooth >= (base_med * rise_ratio)) & (z >= rise_z) & (slope >= 0.0)
+    idx = _first_sustained_indices(mask, min_run)
+    if idx.size <= 0:
+        return None
+    start = int(idx[0])
+    back_ratio = _env_float("UTOA_OTO_CRNN_SKIP_LEADING_SILENCE_RISE_BACKTRACK_RATIO", 1.10)
+    while start > 0 and float(smooth[start - 1]) >= (base_med * back_ratio):
+        start -= 1
+    return max(0, start)
 
 
 def _env_bool(name: str, default: bool) -> bool:
