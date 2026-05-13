@@ -14,6 +14,7 @@ from core.coarse_crnn.oto_inference import predict_oto_with_model
 from core.coarse_crnn.oto_model import load_oto_checkpoint
 from core.coarse_crnn.oto_predictor_generator import (
     _apply_audio_candidate_snap,
+    _apply_vc_candidate_matcher,
     _apply_conservative_right_boundary_guard,
     _apply_low_confidence_fallback,
     _apply_activity_window_fallback,
@@ -38,6 +39,12 @@ def main() -> int:
     parser.add_argument("--language", default="")
     parser.add_argument("--format-type", default="")
     parser.add_argument(
+        "--use-row-base-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use row OTO params as base_params for fallback (closer to real generator path).",
+    )
+    parser.add_argument(
         "--preserve-audio-groups",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -58,6 +65,7 @@ def main() -> int:
         selected,
         model_path=str(args.model),
         device=str(args.device),
+        use_row_base_fallback=bool(args.use_row_base_fallback),
     )
     result["manifest"] = os.path.abspath(str(args.manifest))
     result["model_path"] = os.path.abspath(str(args.model))
@@ -68,6 +76,7 @@ def main() -> int:
         "language": str(args.language or ""),
         "format_type": str(args.format_type or ""),
         "preserve_audio_groups": bool(args.preserve_audio_groups),
+        "use_row_base_fallback": bool(args.use_row_base_fallback),
     }
     os.makedirs(os.path.dirname(os.path.abspath(str(args.out))), exist_ok=True)
     with open(str(args.out), "w", encoding="utf-8") as handle:
@@ -79,7 +88,13 @@ def main() -> int:
     return 0 if int(result.get("evaluated_items", 0) or 0) > 0 else 2
 
 
-def evaluate_runtime_manifest(rows: list[dict[str, Any]], *, model_path: str, device: str = "auto") -> dict[str, Any]:
+def evaluate_runtime_manifest(
+    rows: list[dict[str, Any]],
+    *,
+    model_path: str,
+    device: str = "auto",
+    use_row_base_fallback: bool = False,
+) -> dict[str, Any]:
     torch = __import__("torch")
     torch_device = resolve_torch_device(torch, device)
     model, model_config, meta = load_oto_checkpoint(model_path, map_location=str(torch_device))
@@ -95,6 +110,7 @@ def evaluate_runtime_manifest(rows: list[dict[str, Any]], *, model_path: str, de
         "low_confidence_fallback": 0,
         "activity_fallback": 0,
         "candidate_snap": 0,
+        "vc_matcher": 0,
         "runtime_moved": 0,
         "offset_improved": 0,
         "offset_worse": 0,
@@ -114,6 +130,7 @@ def evaluate_runtime_manifest(rows: list[dict[str, Any]], *, model_path: str, de
                 activity_profile_cache=activity_profile_cache,
                 audio_candidate_cache=audio_candidate_cache,
                 audio_candidate_sequence_state=audio_candidate_sequence_state,
+                use_row_base_fallback=bool(use_row_base_fallback),
             )
         except Exception as exc:
             failures.append(f"{row.get('audio', '')}: {exc}")
@@ -124,6 +141,7 @@ def evaluate_runtime_manifest(rows: list[dict[str, Any]], *, model_path: str, de
             "low_confidence_fallback",
             "activity_fallback",
             "candidate_snap",
+            "vc_matcher",
             "runtime_moved",
         ):
             counters[key] += 1 if bool(item.get(key, False)) else 0
@@ -163,6 +181,7 @@ def _evaluate_one_runtime(
     activity_profile_cache: dict[str, dict[str, float]],
     audio_candidate_cache: dict[str, Any],
     audio_candidate_sequence_state: dict[str, int],
+    use_row_base_fallback: bool,
 ) -> dict[str, Any]:
     wav_path = str(row.get("audio", "") or "")
     language = str(row.get("language", "") or "")
@@ -194,6 +213,7 @@ def _evaluate_one_runtime(
         cutoff=float(row.get("anchor_cutoff_ms", row.get("target_cutoff_abs_ms", 0.0)) or 0.0),
     )
     target_params = anchors_to_oto_params(target_anchors, duration_ms=duration_ms)
+    base_params = dict(target_params) if bool(use_row_base_fallback) else None
     profile = _analyze_activity_profile(
         wav_path,
         sample_rate=int(getattr(model_config, "sample_rate", 16000) or 16000),
@@ -215,7 +235,7 @@ def _evaluate_one_runtime(
         predicted_error_ms=prediction.predicted_error_ms,
         predicted_low_confidence=bool(prediction.low_confidence),
         confidence_components=prediction.confidence_components,
-        base_params=None,
+        base_params=base_params,
         language=language,
         alias=alias,
         duration_ms=duration_ms,
@@ -224,13 +244,39 @@ def _evaluate_one_runtime(
     params, activity_reason = _apply_activity_window_fallback(
         predicted_anchors=prediction.anchors.to_dict(),
         predicted_params=params,
-        base_params=None,
+        base_params=base_params,
         wav_path=wav_path,
         sample_rate=int(getattr(model_config, "sample_rate", 16000) or 16000),
         cache=activity_profile_cache,
         row_index=int(row.get("row_index_in_wav", 0) or 0),
         row_count=int(row.get("file_row_count", 1) or 1),
+        language=language,
+        alias=alias,
+        is_special=bool(float(row.get("is_special", 0.0) or 0.0) >= 0.5),
     )
+    params, vc_reason = _apply_vc_candidate_matcher(
+        predicted_params=params,
+        wav_path=wav_path,
+        language=language,
+        alias=alias,
+        format_type=format_type,
+        duration_ms=duration_ms,
+        cache=audio_candidate_cache,
+        config=model_config,
+        is_special=bool(float(row.get("is_special", 0.0) or 0.0) >= 0.5),
+        predicted_confidence=float(prediction.confidence),
+        predicted_error_ms=prediction.predicted_error_ms,
+        predicted_low_confidence=bool(prediction.low_confidence),
+        confidence_components=prediction.confidence_components,
+    )
+    if vc_reason:
+        params, _ = _apply_conservative_right_boundary_guard(
+            params,
+            language=language,
+            alias=alias,
+            duration_ms=duration_ms,
+            is_special=bool(float(row.get("is_special", 0.0) or 0.0) >= 0.5),
+        )
     params, snap_reason = _apply_audio_candidate_snap(
         predicted_params=params,
         wav_path=wav_path,
@@ -287,8 +333,11 @@ def _evaluate_one_runtime(
         "low_confidence_reason": str(low_conf_reason),
         "activity_fallback": bool(activity_reason),
         "activity_reason": str(activity_reason),
+        "vc_matcher": bool(vc_reason),
+        "vc_matcher_reason": str(vc_reason),
         "candidate_snap": bool(snap_reason),
         "candidate_snap_reason": str(snap_reason),
+        "use_row_base_fallback": bool(use_row_base_fallback),
         "runtime_moved": bool(moved),
         "raw": raw,
         "runtime": runtime,
@@ -398,6 +447,7 @@ def _aggregate_by_language_format_role(files: list[dict[str, Any]]) -> dict[str,
             "deltas": _summary_delta(raw_files, runtime_files),
             "moved": sum(1 for row in rows if bool(row.get("runtime_moved"))),
             "candidate_snap": sum(1 for row in rows if bool(row.get("candidate_snap"))),
+            "vc_matcher": sum(1 for row in rows if bool(row.get("vc_matcher"))),
             "activity_fallback": sum(1 for row in rows if bool(row.get("activity_fallback"))),
         }
     return out

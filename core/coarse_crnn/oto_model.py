@@ -20,6 +20,7 @@ class OtoCrnnConfig:
     cond_dim: int = 24
     numeric_context_dim: int = 15
     enable_active_audio_context: bool = False
+    enable_slot_context: bool = False
     enable_format_residual_heads: bool = False
     enable_vcv_target_window: bool = True
     vcv_target_window_frames: int = 240
@@ -35,6 +36,8 @@ class OtoCrnnConfig:
     anchor_heatmap_blend: float = 0.70
     vcv_window_heatmap_blend: float = 0.30
     scalar_target_mode: str = "relative_params"
+    active_relative_prepad_ms: float = 150.0
+    active_relative_min_span_ms: float = 300.0
     right_boundary_prior_blend: float = 0.45
     right_boundary_prior_blends: tuple[str, ...] = ("vcv=0.45", "cvvc=0.25", "cv=0.10", "cvc=0.10", "other=0.10")
     right_boundary_prior_role_blends: tuple[str, ...] = ("-cv=0.35", "cv=0.30", "cv-=0.25", "v=0.18", "v-=0.22", "vc=0.20", "vv=0.24", "v-cv=0.32", "endbr=0.18", "br=0.15", "special=0.28", "other=0.30")
@@ -71,6 +74,8 @@ class OtoCrnnConfig:
             data["numeric_context_dim"] = 0
         if payload is not None and "enable_active_audio_context" not in data:
             data["enable_active_audio_context"] = False
+        if payload is not None and "enable_slot_context" not in data:
+            data["enable_slot_context"] = False
         if bool(data.get("enable_active_audio_context", False)) and int(data.get("numeric_context_dim", 0) or 0) < 18:
             data["numeric_context_dim"] = 18
         if payload is not None and "alias_types" not in data:
@@ -95,6 +100,19 @@ class OtoCrnnConfig:
             data["cvvc_target_window_alias_roles"] = ("vc", "vv")
         if payload is not None and "scalar_target_mode" not in data:
             data["scalar_target_mode"] = "absolute_anchors"
+        mode = str(data.get("scalar_target_mode", "") or "").strip().lower()
+        if mode in {"active_relative", "active_relative_params", "active_params"}:
+            data["enable_active_audio_context"] = True
+            if int(data.get("numeric_context_dim", 0) or 0) < 18:
+                data["numeric_context_dim"] = 18
+        if bool(data.get("enable_slot_context", False)):
+            min_dim = 24 if bool(data.get("enable_active_audio_context", False)) else 21
+            if int(data.get("numeric_context_dim", 0) or 0) < min_dim:
+                data["numeric_context_dim"] = min_dim
+        if payload is not None and "active_relative_prepad_ms" not in data:
+            data["active_relative_prepad_ms"] = 150.0
+        if payload is not None and "active_relative_min_span_ms" not in data:
+            data["active_relative_min_span_ms"] = 300.0
         if payload is not None and "right_boundary_prior_blend" not in data:
             data["right_boundary_prior_blend"] = 0.0
         if payload is not None and "right_boundary_prior_blends" not in data:
@@ -450,7 +468,12 @@ def alias_role_id(config: OtoCrnnConfig, alias_role: object) -> int:
 
 def uses_relative_param_head(config: OtoCrnnConfig) -> bool:
     mode = str(getattr(config, "scalar_target_mode", "") or "").strip().lower()
-    return mode in {"relative", "relative_params", "oto_params", "params"}
+    return mode in {"relative", "relative_params", "oto_params", "params", "active_relative", "active_relative_params", "active_params"}
+
+
+def uses_active_relative_param_head(config: OtoCrnnConfig) -> bool:
+    mode = str(getattr(config, "scalar_target_mode", "") or "").strip().lower()
+    return mode in {"active_relative", "active_relative_params", "active_params"}
 
 
 def right_boundary_prior_blend_for(config: OtoCrnnConfig, format_type: object) -> float:
@@ -537,5 +560,6 @@ __all__ = [
     "right_boundary_prior_blend_for_context",
     "save_oto_checkpoint",
     "transition_type_id",
+    "uses_active_relative_param_head",
     "uses_relative_param_head",
 ]

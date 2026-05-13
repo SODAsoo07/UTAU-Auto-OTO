@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 
 from core.coarse_crnn.oto_model import OtoCrnnConfig
 from core.coarse_crnn.oto_targets import read_jsonl
@@ -34,6 +35,18 @@ def main() -> int:
     parser.add_argument("--conv-channels", type=int, default=96)
     parser.add_argument("--val-ratio", type=float, default=0.08)
     parser.add_argument("--max-rows", type=int, default=0, help="Optional deterministic cap for smoke tests.")
+    parser.add_argument(
+        "--max-rows-random",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="If enabled, pick max-rows via deterministic random sample instead of head slice.",
+    )
+    parser.add_argument(
+        "--row-sample-seed",
+        type=int,
+        default=1337,
+        help="Seed for --max-rows-random sampling.",
+    )
     parser.add_argument("--max-val-rows", type=int, default=0, help="Optional deterministic cap for fixed validation rows.")
     parser.add_argument("--vcv-loss-weight", type=float, default=1.35)
     parser.add_argument("--cvvc-loss-weight", type=float, default=1.15)
@@ -57,9 +70,9 @@ def main() -> int:
     parser.add_argument("--vcv-window-heatmap-blend", type=float, default=0.30)
     parser.add_argument(
         "--scalar-target-mode",
-        choices=("relative_params", "absolute_anchors"),
+        choices=("relative_params", "active_relative_params", "absolute_anchors"),
         default="relative_params",
-        help="relative_params predicts offset/pre deltas plus constrained consonant/cutoff tail gaps.",
+        help="relative_params predicts offset/pre deltas plus constrained consonant/cutoff tail gaps; active_relative_params normalizes offset inside the detected active window.",
     )
     parser.add_argument("--right-boundary-prior-blend", type=float, default=0.45)
     parser.add_argument("--right-boundary-prior-blends", default="vcv=0.45,cvvc=0.25,cv=0.10,cvc=0.10,other=0.10")
@@ -80,6 +93,7 @@ def main() -> int:
     parser.add_argument("--cvvc-vv-sampling-boost", type=float, default=1.0)
     parser.add_argument("--cvvc-vc-multi-sampling-boost", type=float, default=1.0)
     parser.add_argument("--language-format-role-sampling-boosts", default="", help="Comma-separated 'lang/fmt/role=N' boost specs")
+    parser.add_argument("--voicebank-sampling-boosts", default="", help="Comma-separated 'voicebank_id=N' boost specs")
     parser.add_argument("--row-order-violation-alpha", type=float, default=0.0, help=">0이면 순서 이상 row의 loss를 down-weight")
     parser.add_argument("--hard-case-mining", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hard-case-top-ratio", type=float, default=0.25)
@@ -111,14 +125,29 @@ def main() -> int:
         default=False,
         help="Append active_start/end/span ratios to numeric context for long-preroll and low-SNR experiments.",
     )
+    parser.add_argument(
+        "--slot-context",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Append anchor/boundary/final slot graph scalars so VC/VV learn transition-edge context instead of raw row order.",
+    )
     args = parser.parse_args()
 
     rows = read_jsonl(args.manifest)
     if int(args.max_rows) > 0:
-        rows = rows[: int(args.max_rows)]
+        if bool(args.max_rows_random):
+            rng = random.Random(int(args.row_sample_seed))
+            count = min(int(args.max_rows), len(rows))
+            rows = rng.sample(rows, count)
+        else:
+            rows = rows[: int(args.max_rows)]
     val_rows = read_jsonl(args.val_manifest) if str(args.val_manifest or "").strip() else None
     if val_rows is not None and int(args.max_val_rows) > 0:
         val_rows = val_rows[: int(args.max_val_rows)]
+    enable_active_context = bool(args.active_audio_context) or str(args.scalar_target_mode) == "active_relative_params"
+    numeric_context_dim = 24 if (enable_active_context and bool(args.slot_context)) else (
+        21 if bool(args.slot_context) else (18 if enable_active_context else 15)
+    )
     model_cfg = OtoCrnnConfig(
         n_mels=int(args.n_mels),
         hidden=int(args.hidden),
@@ -142,8 +171,9 @@ def main() -> int:
         two_stage_refine_window_frames=int(args.two_stage_refine_window_frames),
         enable_alias_role_embedding=bool(args.alias_role_embedding),
         enable_extra_alias_flags=bool(args.extra_alias_flags),
-        enable_active_audio_context=bool(args.active_audio_context),
-        numeric_context_dim=18 if bool(args.active_audio_context) else 15,
+        enable_active_audio_context=enable_active_context,
+        enable_slot_context=bool(args.slot_context),
+        numeric_context_dim=numeric_context_dim,
     )
     train_cfg = OtoTrainConfig(
         epochs=int(args.epochs),
@@ -181,7 +211,10 @@ def main() -> int:
         language_format_role_sampling_boosts=tuple(
             item.strip() for item in str(args.language_format_role_sampling_boosts or "").split(",") if item.strip()
         ),
-        enable_active_audio_context=bool(args.active_audio_context),
+        voicebank_sampling_boosts=tuple(
+            item.strip() for item in str(args.voicebank_sampling_boosts or "").split(",") if item.strip()
+        ),
+        enable_active_audio_context=enable_active_context,
         row_order_violation_alpha=float(args.row_order_violation_alpha),
         enable_hard_case_mining=bool(args.hard_case_mining),
         hard_case_top_ratio=float(args.hard_case_top_ratio),

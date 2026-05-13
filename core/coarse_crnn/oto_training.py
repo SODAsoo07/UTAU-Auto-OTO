@@ -21,9 +21,11 @@ from core.coarse_crnn.oto_model import (
     language_id,
     save_oto_checkpoint,
     transition_type_id,
+    uses_active_relative_param_head,
     uses_relative_param_head,
     right_boundary_prior_blend_for_context,
 )
+from core.coarse_crnn.slot_graph import slot_context_from_row
 from core.coarse_crnn.oto_param_priors import decode_relative_oto_params, normalize_relative_oto_target, relative_params_to_anchors
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES, extract_alias_features
 from core.coarse_crnn.oto_windowing import crop_oto_target_window, row_window_args, should_use_vcv_target_window, target_window_frames_for
@@ -93,6 +95,8 @@ class OtoTrainConfig:
     cvvc_vc_multi_sampling_boost: float = 1.0  # extra boost for multi-phoneme VC in cvvc
     # Free-form "language/format/role=N" boost specs (e.g. "korean/cvvc/vc=4.0")
     language_format_role_sampling_boosts: tuple[str, ...] = ()
+    # Free-form "voicebank_id=N" boost specs.
+    voicebank_sampling_boosts: tuple[str, ...] = ()
     # Opt-in low-cost active-window context. Existing checkpoints keep the
     # legacy 15-dim context; new experiments can use 18 dims.
     enable_active_audio_context: bool = False
@@ -110,12 +114,18 @@ def _filter_compatible_init_state(
     compatible: dict[str, Any] = {}
     skipped_missing = 0
     skipped_shape = 0
+    partial_shape = 0
     for k, v in source.items():
         if k not in target:
             skipped_missing += 1
             continue
         if v.shape != target[k].shape:
-            skipped_shape += 1
+            patched = _partial_init_tensor(k, v, target[k])
+            if patched is None:
+                skipped_shape += 1
+                continue
+            compatible[k] = patched
+            partial_shape += 1
             continue
         compatible[k] = v
     summary = {
@@ -123,8 +133,33 @@ def _filter_compatible_init_state(
         "loaded": len(compatible),
         "skipped_missing_count": skipped_missing,
         "skipped_shape_count": skipped_shape,
+        "partial_shape_count": partial_shape,
     }
     return compatible, summary
+
+
+def _partial_init_tensor(key: str, source_tensor: Any, target_tensor: Any):
+    """Copy the overlapping part of safe shape-expanded tensors.
+
+    The main case is `context_proj.0.weight` when numeric context expands from
+    15 to 18 dims. We keep the learned 15 columns and zero-fill new columns so
+    the warm-started model starts from the old behavior.
+    """
+    if not str(key).endswith(".weight"):
+        return None
+    try:
+        if len(source_tensor.shape) != 2 or len(target_tensor.shape) != 2:
+            return None
+        if int(source_tensor.shape[0]) != int(target_tensor.shape[0]):
+            return None
+        if int(source_tensor.shape[1]) >= int(target_tensor.shape[1]):
+            return None
+        patched = target_tensor.clone()
+        patched.zero_()
+        patched[:, : int(source_tensor.shape[1])] = source_tensor
+        return patched
+    except Exception:
+        return None
 
 
 def _iter_device_batches(loader, device, *, torch, prefetch_batches: int = 2):
@@ -248,7 +283,25 @@ class OtoAnchorDataset:
             hop_sec=float(hop_sec),
             sigma_frames=float(self.train_config.heatmap_sigma_frames),
         )
+        include_active_context = bool(getattr(self.model_config, "enable_active_audio_context", False)) or bool(
+            getattr(self.train_config, "enable_active_audio_context", False)
+        ) or bool(uses_active_relative_param_head(self.model_config))
+        active_context = (
+            _active_context_from_row(
+                row,
+                sample_rate=int(getattr(self.model_config, "sample_rate", 16000) or 16000),
+                cache=self.active_profile_cache,
+            )
+            if include_active_context
+            else None
+        )
         if uses_relative_param_head(self.model_config):
+            active_origin_ms, active_span_ms = _active_relative_origin_span(
+                active_context,
+                duration_ms=float(duration_ms),
+                prepad_ms=float(getattr(self.model_config, "active_relative_prepad_ms", 150.0)),
+                min_span_ms=float(getattr(self.model_config, "active_relative_min_span_ms", 300.0)),
+            ) if uses_active_relative_param_head(self.model_config) else (None, None)
             scalar = np.asarray(
                 normalize_relative_oto_target(
                     anchors_ms,
@@ -259,6 +312,8 @@ class OtoAnchorDataset:
                     alias_role=alias_role_text,
                     is_diphthong=is_diphthong,
                     is_special=is_special,
+                    active_origin_ms=active_origin_ms,
+                    active_span_ms=active_span_ms,
                 ),
                 dtype=np.float32,
             )
@@ -294,20 +349,9 @@ class OtoAnchorDataset:
             [1.0 if is_diphthong else 0.0, 1.0 if is_special else 0.0],
             dtype=np.float32,
         )
-        include_active_context = bool(getattr(self.model_config, "enable_active_audio_context", False)) or bool(
-            getattr(self.train_config, "enable_active_audio_context", False)
-        )
         context = _context_array_from_row_with_active(
             row,
-            active_context=(
-                _active_context_from_row(
-                    row,
-                    sample_rate=int(getattr(self.model_config, "sample_rate", 16000) or 16000),
-                    cache=self.active_profile_cache,
-                )
-                if include_active_context
-                else None
-            ),
+            active_context=active_context,
             expected_dim=int(getattr(self.model_config, "numeric_context_dim", 15) or 15),
         )
         weight = float(row.get("sample_weight", row.get("weight", 1.0)) or 1.0)
@@ -444,6 +488,7 @@ def train_oto_from_manifest(
                       f"strategy=compatible loaded={loaded} "
                       f"skipped_missing={init_summary['skipped_missing_count']} "
                       f"skipped_shape={init_summary['skipped_shape_count']} "
+                      f"partial_shape={init_summary.get('partial_shape_count', 0)} "
                       f"missing_after_load={len(incompatible.missing_keys)}")
             else:
                 print(f"[oto_anchor][train] init_checkpoint {init_checkpoint} has no recognizable state_dict — skipped")
@@ -684,6 +729,7 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
                 pred_anchors = _relative_anchor_predictions(
                     pred_scalar.detach().cpu().numpy(),
                     duration_ms.detach().cpu().numpy(),
+                    context.detach().cpu().numpy(),
                     fmt.detach().cpu().numpy(),
                     alias_id.detach().cpu().numpy(),
                     transition_id.detach().cpu().numpy(),
@@ -795,6 +841,7 @@ def _relative_order_penalty(pred):
 def _relative_anchor_mae_values(
     pred_scalar,
     duration_ms,
+    contexts,
     format_ids,
     alias_ids,
     transition_ids,
@@ -809,8 +856,9 @@ def _relative_anchor_mae_values(
     transitions = list(model_cfg.transition_types)
     roles = list(model_cfg.alias_roles)
     use_role = bool(getattr(model_cfg, "enable_alias_role_embedding", False)) and len(roles) > 1
-    for scalar_row, duration, fmt_idx, alias_idx, transition_idx, role_idx, flags_row, anchor_row in zip(
-        pred_scalar, duration_ms, format_ids, alias_ids, transition_ids, role_ids, extra_flags, anchors_ms
+    active_relative = uses_active_relative_param_head(model_cfg)
+    for scalar_row, duration, context_row, fmt_idx, alias_idx, transition_idx, role_idx, flags_row, anchor_row in zip(
+        pred_scalar, duration_ms, contexts, format_ids, alias_ids, transition_ids, role_ids, extra_flags, anchors_ms
     ):
         fmt_i = int(fmt_idx)
         alias_i = int(alias_idx)
@@ -823,6 +871,12 @@ def _relative_anchor_mae_values(
         flags_arr = np.asarray(flags_row, dtype=np.float32)
         is_diphthong = bool(flags_arr.shape[0] > 0 and flags_arr[0] >= 0.5)
         is_special = bool(flags_arr.shape[0] > 1 and flags_arr[1] >= 0.5)
+        active_origin_ms, active_span_ms = _active_relative_origin_span(
+            np.asarray(context_row, dtype=np.float32)[15:18],
+            duration_ms=float(duration),
+            prepad_ms=float(getattr(model_cfg, "active_relative_prepad_ms", 150.0)),
+            min_span_ms=float(getattr(model_cfg, "active_relative_min_span_ms", 300.0)),
+        ) if active_relative else (None, None)
         params = decode_relative_oto_params(
             scalar_row,
             duration_ms=float(duration),
@@ -838,6 +892,8 @@ def _relative_anchor_mae_values(
             alias_role=role_text,
             is_diphthong=is_diphthong,
             is_special=is_special,
+            active_origin_ms=active_origin_ms,
+            active_span_ms=active_span_ms,
         )
         pred_anchors = np.asarray(relative_params_to_anchors(params, duration_ms=float(duration)), dtype=np.float32)
         values.append(float(np.abs(pred_anchors - np.asarray(anchor_row, dtype=np.float32)).mean()))
@@ -1003,9 +1059,14 @@ def _context_array_from_row_with_active(
 ) -> np.ndarray:
     base = _context_array_from_row(row).astype(np.float32)
     values = base.tolist()
-    if active_context is not None:
-        values.extend(max(0.0, min(1.0, float(v))) for v in active_context[:3])
     target_dim = max(len(values), int(expected_dim or len(values)))
+    include_active = active_context is not None or target_dim >= 24
+    if include_active:
+        active_values = list(active_context[:3]) if active_context is not None else [0.0, 0.0, 0.0]
+        values.extend(max(0.0, min(1.0, float(v))) for v in active_values[:3])
+    slot_start_dim = 24 if include_active else 21
+    if target_dim >= slot_start_dim:
+        values.extend(slot_context_from_row(row))
     if len(values) < target_dim:
         values.extend([0.0] * (target_dim - len(values)))
     elif len(values) > target_dim:
@@ -1048,6 +1109,24 @@ def _normalize_active_context(start_ms: float, end_ms: float, duration_ms: float
     start = max(0.0, min(duration, float(start_ms)))
     end = max(start, min(duration, float(end_ms)))
     return start / duration, end / duration, max(0.0, end - start) / duration
+
+
+def _active_relative_origin_span(
+    active_context: Any,
+    *,
+    duration_ms: float,
+    prepad_ms: float = 150.0,
+    min_span_ms: float = 300.0,
+) -> tuple[float, float]:
+    duration = max(1.0, float(duration_ms))
+    values = [] if active_context is None else list(active_context)
+    if len(values) < 2:
+        return 0.0, duration
+    start_ms = max(0.0, min(duration, float(values[0]) * duration))
+    end_ms = max(start_ms, min(duration, float(values[1]) * duration))
+    origin = max(0.0, start_ms - max(0.0, float(prepad_ms)))
+    span = max(float(min_span_ms), end_ms - origin, 1.0)
+    return origin, min(duration, span)
 
 
 def _analyze_active_profile_for_context(
@@ -1220,6 +1299,24 @@ def _parse_lang_fmt_role_boosts(specs: tuple[str, ...]) -> dict[tuple[str, str, 
     return out
 
 
+def _parse_voicebank_boosts(specs: tuple[str, ...]) -> dict[str, float]:
+    """Parse "voicebank_id=N" boost specs into a lookup dict."""
+    out: dict[str, float] = {}
+    for spec in specs or ():
+        text = str(spec or "").strip()
+        if "=" not in text:
+            continue
+        key_part, val_part = text.rsplit("=", 1)
+        key = str(key_part or "").strip()
+        if not key:
+            continue
+        try:
+            out[key] = float(val_part)
+        except ValueError:
+            continue
+    return out
+
+
 def _build_train_sampling_weights(rows: list[dict[str, Any]], cfg: OtoTrainConfig, *, hard_case_boosts: np.ndarray) -> np.ndarray:
     if not rows:
         return np.zeros((0,), dtype=np.float32)
@@ -1235,6 +1332,7 @@ def _build_train_sampling_weights(rows: list[dict[str, Any]], cfg: OtoTrainConfi
     cvvc_vv_boost = float(getattr(cfg, "cvvc_vv_sampling_boost", 1.0))
     cvvc_vc_multi_boost = float(getattr(cfg, "cvvc_vc_multi_sampling_boost", 1.0))
     lfr_boosts = _parse_lang_fmt_role_boosts(getattr(cfg, "language_format_role_sampling_boosts", ()))
+    vb_boosts = _parse_voicebank_boosts(getattr(cfg, "voicebank_sampling_boosts", ()))
     out = np.ones((len(rows),), dtype=np.float32)
     for idx, row in enumerate(rows):
         vb = str(row.get("voicebank_id", "") or "unknown_voicebank")
@@ -1260,6 +1358,8 @@ def _build_train_sampling_weights(rows: list[dict[str, Any]], cfg: OtoTrainConfi
         lfr_key = (lang, fmt, role)
         if lfr_key in lfr_boosts:
             w *= lfr_boosts[lfr_key]
+        if vb in vb_boosts:
+            w *= float(vb_boosts[vb])
         if idx < int(hard_case_boosts.shape[0]):
             w *= float(max(1.0, hard_case_boosts[idx]))
         out[idx] = max(1e-5, float(w))
@@ -1313,6 +1413,7 @@ def _selection_score(val_metrics: dict[str, float], cfg: OtoTrainConfig) -> floa
 def _relative_anchor_predictions(
     pred_scalar,
     duration_ms,
+    contexts,
     format_ids,
     alias_ids,
     transition_ids,
@@ -1326,8 +1427,9 @@ def _relative_anchor_predictions(
     roles = list(model_cfg.alias_roles)
     use_role = bool(getattr(model_cfg, "enable_alias_role_embedding", False)) and len(roles) > 1
     out = np.zeros((len(pred_scalar), len(OTO_ANCHOR_NAMES)), dtype=np.float32)
-    for idx, (scalar_row, duration, fmt_idx, alias_idx, transition_idx, role_idx, flags_row) in enumerate(
-        zip(pred_scalar, duration_ms, format_ids, alias_ids, transition_ids, role_ids, extra_flags)
+    active_relative = uses_active_relative_param_head(model_cfg)
+    for idx, (scalar_row, duration, context_row, fmt_idx, alias_idx, transition_idx, role_idx, flags_row) in enumerate(
+        zip(pred_scalar, duration_ms, contexts, format_ids, alias_ids, transition_ids, role_ids, extra_flags)
     ):
         fmt_i = int(fmt_idx)
         alias_i = int(alias_idx)
@@ -1340,6 +1442,12 @@ def _relative_anchor_predictions(
         flags_arr = np.asarray(flags_row, dtype=np.float32)
         is_diphthong = bool(flags_arr.shape[0] > 0 and flags_arr[0] >= 0.5)
         is_special = bool(flags_arr.shape[0] > 1 and flags_arr[1] >= 0.5)
+        active_origin_ms, active_span_ms = _active_relative_origin_span(
+            np.asarray(context_row, dtype=np.float32)[15:18],
+            duration_ms=float(duration),
+            prepad_ms=float(getattr(model_cfg, "active_relative_prepad_ms", 150.0)),
+            min_span_ms=float(getattr(model_cfg, "active_relative_min_span_ms", 300.0)),
+        ) if active_relative else (None, None)
         params = decode_relative_oto_params(
             scalar_row,
             duration_ms=float(duration),
@@ -1355,6 +1463,8 @@ def _relative_anchor_predictions(
             alias_role=role_text,
             is_diphthong=is_diphthong,
             is_special=is_special,
+            active_origin_ms=active_origin_ms,
+            active_span_ms=active_span_ms,
         )
         out[idx] = np.asarray(relative_params_to_anchors(params, duration_ms=float(duration)), dtype=np.float32)
     return out

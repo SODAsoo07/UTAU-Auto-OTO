@@ -12,6 +12,7 @@ from core.format_type_utils import normalize_format_type
 from core.coarse_crnn.alias_role import classify_alias_role, is_diphthong as _is_diphthong
 from core.coarse_crnn.labels import coarse_for_phone
 from core.coarse_crnn.lang import phones_from_text
+from core.coarse_crnn.slot_graph import apply_slot_context
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 from core.oto_ml_features import classify_alias_type
 from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
@@ -304,6 +305,7 @@ def _apply_row_context(rows: list[dict[str, Any]]) -> None:
             row["prev_right_vowel_id_norm"] = float(row.get("prev_right_vowel_id_norm", 0.0) or 0.0)
             # next alias's left vowel = what vowel the next alias starts on (VV context)
             row["next_left_vowel_id_norm"] = float(row.get("next_left_vowel_id_norm", 0.0) or 0.0)
+        apply_slot_context(items)
 
 
 def _apply_neighbor_alias(row: dict[str, Any], prefix: str, neighbor: dict[str, Any] | None) -> None:

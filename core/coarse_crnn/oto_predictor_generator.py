@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Callable, Any
 
@@ -8,10 +9,16 @@ import numpy as np
 
 from core.coarse_crnn.alias_role import classify_alias_role, is_diphthong as _is_diphthong, normalize_role
 from core.coarse_crnn.audio import load_wav_mono
-from core.coarse_crnn.oto_audio_candidates import AudioCandidates, compute_audio_candidates
+from core.coarse_crnn.oto_audio_candidates import (
+    AudioCandidates,
+    compute_audio_candidates,
+    find_best_vowel_segment,
+    find_nearest_onset_after,
+)
 from core.coarse_crnn.oto_inference import predict_oto_with_model
 from core.coarse_crnn.oto_model import load_oto_checkpoint
-from core.coarse_crnn.oto_targets import OtoAnchors, anchors_to_oto_params, oto_params_to_anchors
+from core.coarse_crnn.oto_targets import OtoAnchors, anchors_to_oto_params, oto_params_to_anchors, parse_alias_components
+from core.coarse_crnn.slot_graph import slot_type_for_role
 from core.coarse_crnn.training import resolve_torch_device
 from core.no_mfa_oto_builder import resolve_no_mfa_source_oto
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
@@ -20,6 +27,17 @@ from core.oto_normalization import normalize_wav_key
 
 
 DEFAULT_OTO_CRNN_MODEL_NAME = "oto_anchor_crnn_role_v2.pt"
+_ORDER_TOKEN_RE = re.compile(r"[A-Za-z0-9\uAC00-\uD7A3]+")
+_CODA_SUFFIXES = ("ng", "n", "m", "l", "h")
+_VOWEL_ID_NORM = {
+    "a": 1.0 / 6.0,
+    "i": 2.0 / 6.0,
+    "u": 3.0 / 6.0,
+    "eu": 3.0 / 6.0,
+    "e": 4.0 / 6.0,
+    "eo": 4.0 / 6.0,
+    "o": 5.0 / 6.0,
+}
 
 
 @dataclass(frozen=True)
@@ -35,6 +53,8 @@ class _PredictRow:
     prev_is_special: bool = False
     next_is_special: bool = False
     base_params: dict[str, float] | None = None
+    base_fallback_allowed: bool = True
+    base_fallback_order_ratio: float = 1.0
 
 
 def generate_oto_with_crnn_predictor(
@@ -90,14 +110,22 @@ def generate_oto_with_crnn_predictor(
         return 0, total, [f"CRNN OTO 모델 로드 실패: {exc}"]
 
     out_lines: list[str] = []
+    row_states: list[dict[str, Any]] = []
     errors: list[str] = []
     guard_changed = 0
     low_conf_fallback_count = 0
     activity_fallback_count = 0
     candidate_snap_count = 0
+    vc_matcher_count = 0
+    row_order_aligned_count = 0
+    row_order_hold_count = 0
+    base_fallback_blocked_rows = 0
+    base_fallback_blocked_wavs: set[str] = set()
     activity_profile_cache: dict[str, dict[str, float]] = {}
     audio_candidate_cache: dict[str, AudioCandidates | None] = {}
     audio_candidate_sequence_state: dict[str, int] = {}
+    use_base_oto_fallback = _env_bool("UTOA_OTO_CRNN_USE_BASE_OTO_FALLBACK", False)
+    row_order_align_enable = _env_bool("UTOA_OTO_CRNN_ROW_ORDER_ALIGN_ENABLE", True)
     lang = str(language or "").strip().lower() or "korean"
     suffix = _normalize_alias_suffix(alias_suffix)
     for idx, row in enumerate(rows):
@@ -126,13 +154,20 @@ def generate_oto_with_crnn_predictor(
                 duration_ms=float(getattr(pred, "duration_ms", 0.0) or 0.0),
                 is_special=row.is_special,
             )
+            base_params = None
+            if use_base_oto_fallback and row.base_params:
+                if row.base_fallback_allowed:
+                    base_params = dict(row.base_params)
+                else:
+                    base_fallback_blocked_rows += 1
+                    base_fallback_blocked_wavs.add(row.wav_rel.lower())
             params, fallback_reason = _apply_low_confidence_fallback(
                 predicted_params=params,
                 predicted_confidence=float(getattr(pred, "confidence", 0.0) or 0.0),
                 predicted_error_ms=getattr(pred, "predicted_error_ms", None),
                 predicted_low_confidence=bool(getattr(pred, "low_confidence", False)),
                 confidence_components=getattr(pred, "confidence_components", None),
-                base_params=row.base_params,
+                base_params=base_params,
                 language=lang,
                 alias=row.alias,
                 duration_ms=float(getattr(pred, "duration_ms", 0.0) or 0.0),
@@ -149,44 +184,32 @@ def generate_oto_with_crnn_predictor(
                     "cutoff": float(getattr(pred.anchors, "cutoff", 0.0)),
                 },
                 predicted_params=params,
-                base_params=row.base_params,
+                base_params=base_params,
                 wav_path=row.wav_abs,
                 sample_rate=16000,
                 cache=activity_profile_cache,
                 row_index=row.row_index,
                 row_count=row.row_count,
+                language=lang,
+                alias=row.alias,
+                is_special=row.is_special,
             )
             if activity_reason:
                 activity_fallback_count += 1
-            params, snap_reason = _apply_audio_candidate_snap(
-                predicted_params=params,
-                wav_path=row.wav_abs,
-                language=lang,
-                format_type=fmt,
-                alias=row.alias,
-                duration_ms=float(getattr(pred, "duration_ms", 0.0) or 0.0),
-                cache=audio_candidate_cache,
-                sequence_state=audio_candidate_sequence_state,
-                config=config,
-                is_special=row.is_special,
-            )
-            if snap_reason:
-                candidate_snap_count += 1
-                params, _snap_guard_changed = _apply_conservative_right_boundary_guard(
-                    params,
-                    language=lang,
-                    alias=row.alias,
-                    duration_ms=float(getattr(pred, "duration_ms", 0.0) or 0.0),
-                    is_special=row.is_special,
-                )
             guard_changed += 1 if changed else 0
-            out_lines.append(
-                f"{row.wav_rel}={alias},"
-                f"{float(params['offset']):.3f},"
-                f"{float(params['consonant']):.3f},"
-                f"{float(params['cutoff']):.3f},"
-                f"{float(params['preutterance']):.3f},"
-                f"{float(params['overlap']):.3f}"
+            row_states.append(
+                {
+                    "row": row,
+                    "alias": alias,
+                    "params": dict(params),
+                    "duration_ms": float(getattr(pred, "duration_ms", 0.0) or 0.0),
+                    "predicted_confidence": float(getattr(pred, "confidence", 0.0) or 0.0),
+                    "predicted_error_ms": getattr(pred, "predicted_error_ms", None),
+                    "predicted_low_confidence": bool(getattr(pred, "low_confidence", False)),
+                    "confidence_components": dict(getattr(pred, "confidence_components", None) or {}),
+                    "aligned_by_row_order": False,
+                    "row_order_hold": False,
+                }
             )
         except Exception as exc:
             errors.append(f"{row.wav_rel}={row.alias}: {exc}")
@@ -194,9 +217,82 @@ def generate_oto_with_crnn_predictor(
             _log(callback, f"[OTO-CRNN] rows={idx + 1}/{len(rows)}")
 
     if errors:
-        return len(out_lines), total, errors[:20]
-    if not out_lines:
+        return len(row_states), total, errors[:20]
+    if not row_states:
         return 0, total, ["CRNN OTO 예측 결과가 비었습니다."]
+
+    if row_order_align_enable:
+        aligned, held = _apply_monotonic_row_order_alignment(
+            row_states=row_states,
+            cache=audio_candidate_cache,
+            config=config,
+            language=lang,
+            callback=callback,
+        )
+        row_order_aligned_count += int(aligned)
+        row_order_hold_count += int(held)
+
+    for state in row_states:
+        row = state["row"]
+        params = dict(state["params"])
+        params, vc_reason = _apply_vc_candidate_matcher(
+            predicted_params=params,
+            wav_path=row.wav_abs,
+            language=lang,
+            alias=row.alias,
+            format_type=fmt,
+            duration_ms=float(state.get("duration_ms", 0.0) or 0.0),
+            cache=audio_candidate_cache,
+            config=config,
+            is_special=row.is_special,
+            predicted_confidence=float(state.get("predicted_confidence", 0.0) or 0.0),
+            predicted_error_ms=state.get("predicted_error_ms", None),
+            predicted_low_confidence=bool(state.get("predicted_low_confidence", False)),
+            confidence_components=state.get("confidence_components", None),
+        )
+        if vc_reason:
+            vc_matcher_count += 1
+            params, _ = _apply_conservative_right_boundary_guard(
+                params,
+                language=lang,
+                alias=row.alias,
+                duration_ms=float(state.get("duration_ms", 0.0) or 0.0),
+                is_special=row.is_special,
+            )
+        params, snap_reason = _apply_audio_candidate_snap(
+            predicted_params=params,
+            wav_path=row.wav_abs,
+            language=lang,
+            format_type=fmt,
+            alias=row.alias,
+            duration_ms=float(state.get("duration_ms", 0.0) or 0.0),
+            cache=audio_candidate_cache,
+            sequence_state=audio_candidate_sequence_state,
+            config=config,
+            is_special=row.is_special,
+            predicted_confidence=float(state.get("predicted_confidence", 0.0) or 0.0),
+            predicted_error_ms=state.get("predicted_error_ms", None),
+            predicted_low_confidence=bool(state.get("predicted_low_confidence", False)),
+            confidence_components=state.get("confidence_components", None),
+        )
+        if snap_reason:
+            candidate_snap_count += 1
+            params, _snap_guard_changed = _apply_conservative_right_boundary_guard(
+                params,
+                language=lang,
+                alias=row.alias,
+                duration_ms=float(state.get("duration_ms", 0.0) or 0.0),
+                is_special=row.is_special,
+            )
+        state["params"] = params
+        out_lines.append(
+            f"{row.wav_rel}={state['alias']},"
+            f"{float(params['offset']):.3f},"
+            f"{float(params['consonant']):.3f},"
+            f"{float(params['cutoff']):.3f},"
+            f"{float(params['preutterance']):.3f},"
+            f"{float(params['overlap']):.3f}"
+        )
 
     try:
         os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
@@ -217,6 +313,18 @@ def generate_oto_with_crnn_predictor(
         _log(callback, f"[OTO-CRNN] activity-window fallback rows={activity_fallback_count}/{len(out_lines)}")
     if candidate_snap_count:
         _log(callback, f"[OTO-CRNN] audio-candidate snap rows={candidate_snap_count}/{len(out_lines)}")
+    if vc_matcher_count:
+        _log(callback, f"[OTO-CRNN] vc-candidate matcher rows={vc_matcher_count}/{len(out_lines)}")
+    if row_order_aligned_count:
+        _log(callback, f"[OTO-CRNN] row-order aligned rows={row_order_aligned_count}/{len(out_lines)}")
+    if row_order_hold_count:
+        _log(callback, f"[OTO-CRNN] row-order hold rows={row_order_hold_count}/{len(out_lines)}")
+    if use_base_oto_fallback and base_fallback_blocked_rows > 0:
+        _log(
+            callback,
+            "[OTO-CRNN] base-fallback quality gate blocked "
+            f"rows={base_fallback_blocked_rows}/{len(out_lines)} wavs={len(base_fallback_blocked_wavs)}",
+        )
     _log(callback, f"[OTO-CRNN] written={len(out_lines)} total={total}")
     return len(out_lines), total, []
 
@@ -280,9 +388,32 @@ def _prepare_prediction_rows(
     for row in raw_rows:
         per_wav.setdefault(row["wav_rel"], []).append(row)
 
+    quality_gate_enable = _env_bool("UTOA_OTO_CRNN_BASE_FALLBACK_QUALITY_GATE_ENABLE", True)
+    quality_gate_min_ratio = _env_float("UTOA_OTO_CRNN_BASE_FALLBACK_MIN_ORDER_RATIO", 0.42)
+    quality_gate_min_ratio_cvvc = _env_float("UTOA_OTO_CRNN_BASE_FALLBACK_MIN_ORDER_RATIO_CVVC", 0.34)
+    quality_gate_min_expected_tokens = max(2, int(_env_float("UTOA_OTO_CRNN_BASE_FALLBACK_MIN_EXPECTED_TOKENS", 4.0)))
+    quality_gate_min_expected_tokens_cvvc = max(
+        2,
+        int(_env_float("UTOA_OTO_CRNN_BASE_FALLBACK_MIN_EXPECTED_TOKENS_CVVC", float(quality_gate_min_expected_tokens))),
+    )
+    per_wav_fallback_allowed: dict[str, bool] = {}
+    per_wav_fallback_ratio: dict[str, float] = {}
+    for wav_rel, items in per_wav.items():
+        aliases = [str(item.get("alias", "") or "") for item in items]
+        ratio, expected_count, is_cvvc_like = _estimate_filename_alias_order_ratio(wav_rel, aliases)
+        allow = True
+        min_expected = quality_gate_min_expected_tokens_cvvc if is_cvvc_like else quality_gate_min_expected_tokens
+        min_ratio = quality_gate_min_ratio_cvvc if is_cvvc_like else quality_gate_min_ratio
+        if quality_gate_enable and expected_count >= min_expected:
+            allow = ratio >= float(min_ratio)
+        per_wav_fallback_allowed[wav_rel] = bool(allow)
+        per_wav_fallback_ratio[wav_rel] = float(ratio)
+
     out: list[_PredictRow] = []
     for wav_rel, items in per_wav.items():
         count = len(items)
+        fallback_allowed = bool(per_wav_fallback_allowed.get(wav_rel, True))
+        fallback_ratio = float(per_wav_fallback_ratio.get(wav_rel, 1.0))
         for idx, row in enumerate(items):
             prev_alias = str(items[idx - 1].get("alias", "") or "") if idx > 0 else ""
             next_alias = str(items[idx + 1].get("alias", "") or "") if idx + 1 < count else ""
@@ -300,6 +431,8 @@ def _prepare_prediction_rows(
                     prev_is_special=_alias_is_special(prev_alias, special_set),
                     next_is_special=_alias_is_special(next_alias, special_set),
                     base_params=dict(row.get("base_params") or {}) or None,
+                    base_fallback_allowed=fallback_allowed,
+                    base_fallback_order_ratio=fallback_ratio,
                 )
             )
     return out, total, missing
@@ -501,6 +634,123 @@ def _safe_is_diphthong(language: str, alias: str) -> bool:
         return False
 
 
+def _normalize_order_token(token: str) -> str:
+    text = str(token or "").strip().lower().strip("*-")
+    if not text:
+        return ""
+    for suffix in _CODA_SUFFIXES:
+        if text.endswith(suffix) and len(text) > len(suffix):
+            text = text[: -len(suffix)]
+            break
+    return text
+
+
+def _extract_filename_tokens(wav_rel: str) -> list[str]:
+    stem = os.path.splitext(os.path.basename(str(wav_rel or "")))[0]
+    out: list[str] = []
+    for raw in _ORDER_TOKEN_RE.findall(stem):
+        token = _normalize_order_token(raw)
+        if token:
+            out.append(token)
+    return out
+
+
+def _extract_alias_head_tokens(aliases: list[str]) -> list[str]:
+    out: list[str] = []
+    for alias in aliases:
+        parts = _ORDER_TOKEN_RE.findall(str(alias or ""))
+        if not parts:
+            continue
+        token = _normalize_order_token(parts[0])
+        if not token:
+            continue
+        if not any(ch in token for ch in "aeiou"):
+            continue
+        out.append(token)
+    return out
+
+
+def _extract_alias_core_tokens(aliases: list[str]) -> list[str]:
+    out: list[str] = []
+    for alias in aliases:
+        text = str(alias or "").strip()
+        if not text or " " in text:
+            continue
+        parts = _ORDER_TOKEN_RE.findall(text)
+        if not parts:
+            continue
+        token = _normalize_order_token(parts[0])
+        if not token:
+            continue
+        if not any(ch in token for ch in "aeiou"):
+            continue
+        out.append(token)
+    return out
+
+
+def _ordered_ratio(expected: list[str], observed: list[str]) -> float:
+    if not expected:
+        return 1.0
+    cursor = 0
+    matched = 0
+    for token in observed:
+        if cursor >= len(expected):
+            break
+        if token == expected[cursor]:
+            matched += 1
+            cursor += 1
+    return float(matched) / float(len(expected))
+
+
+def _looks_like_cvvc_wav(wav_rel: str, aliases: list[str]) -> bool:
+    stem = os.path.splitext(os.path.basename(str(wav_rel or "")))[0].lower()
+    if "'" in stem:
+        return True
+    token_count = len(_extract_filename_tokens(wav_rel))
+    if token_count >= 6:
+        return True
+    if aliases:
+        space_count = sum(1 for alias in aliases if " " in str(alias or ""))
+        if (float(space_count) / float(len(aliases))) >= 0.35:
+            return True
+    return False
+
+
+def _best_order_ratio(expected: list[str], observed: list[str]) -> float:
+    if not observed:
+        return 0.0
+    expected_count = len(expected)
+    candidates: list[list[str]] = [expected]
+    if expected_count >= 3:
+        candidates.append(expected[1:])
+        candidates.append(expected[:-1])
+    if expected_count >= 4:
+        candidates.append(expected[1:-1])
+    return max(_ordered_ratio(candidate, observed) for candidate in candidates if candidate)
+
+
+def _estimate_filename_alias_order_ratio(wav_rel: str, aliases: list[str]) -> tuple[float, int, bool]:
+    expected = _extract_filename_tokens(wav_rel)
+    expected_count = len(expected)
+    if expected_count <= 0:
+        return 1.0, 0, False
+    is_cvvc_like = _looks_like_cvvc_wav(wav_rel, aliases)
+    observed_all = _extract_alias_head_tokens(aliases)
+    observed_core = _extract_alias_core_tokens(aliases)
+    if is_cvvc_like:
+        observed = observed_core or observed_all
+        if not observed:
+            return 0.0, expected_count, True
+        ratio = _best_order_ratio(expected, observed)
+        support = min(1.0, float(len(observed)) / float(max(1, expected_count)))
+        score = (float(ratio) * 0.80) + (float(support) * 0.20)
+        return float(score), expected_count, True
+    if not observed_all:
+        return 0.0, expected_count, False
+    ratio = _best_order_ratio(expected, observed_all)
+    return float(ratio), expected_count, False
+
+
 def _env_float(name: str, default: float) -> float:
     raw = str(os.environ.get(name, "") or "").strip()
     if not raw:
@@ -548,21 +798,44 @@ def _apply_low_confidence_fallback(
         return dict(predicted_params), ""
     min_conf = _env_float("UTOA_OTO_CRNN_LOW_CONF_MIN_CONFIDENCE", 0.35)
     max_error_ms = _env_float("UTOA_OTO_CRNN_LOW_CONF_MAX_PREDICTED_ERROR_MS", 450.0)
+    min_votes = max(1, int(round(_env_float("UTOA_OTO_CRNN_LOW_CONF_MIN_TRIGGER_VOTES", 2.0))))
+    min_conf, max_error_ms, min_votes = _role_adjusted_low_conf_thresholds(
+        min_conf=min_conf,
+        max_error_ms=max_error_ms,
+        min_votes=min_votes,
+        language=language,
+        alias=alias,
+        is_special=bool(is_special),
+    )
     trigger_conf = float(predicted_confidence) < float(min_conf)
     calibrated_error_ms = None
     if predicted_error_ms is not None:
         calibrated_error_ms = float(predicted_error_ms)
     trigger_err = calibrated_error_ms is not None and float(calibrated_error_ms) > float(max_error_ms)
-    if trigger_err and _env_bool("UTOA_OTO_CRNN_LOW_CONF_REQUIRE_LOW_HEATMAP_FOR_ERROR", True):
+    heatmap_conf = None
+    uncertainty_conf = None
+    try:
+        heatmap_conf = float(dict(confidence_components or {}).get("heatmap"))
+    except Exception:
         heatmap_conf = None
-        try:
-            heatmap_conf = float(dict(confidence_components or {}).get("heatmap"))
-        except Exception:
-            heatmap_conf = None
+    try:
+        raw_unc = dict(confidence_components or {}).get("uncertainty")
+        uncertainty_conf = float(raw_unc) if raw_unc is not None else None
+    except Exception:
+        uncertainty_conf = None
+    if trigger_err and _env_bool("UTOA_OTO_CRNN_LOW_CONF_REQUIRE_LOW_HEATMAP_FOR_ERROR", True):
         if heatmap_conf is not None and heatmap_conf >= _env_float("UTOA_OTO_CRNN_LOW_CONF_HEATMAP_MAX_FOR_ERROR", 0.35):
             trigger_err = False
     trigger_model = bool(predicted_low_confidence) and _env_bool("UTOA_OTO_CRNN_LOW_CONF_USE_MODEL_FLAG", False)
-    trigger = bool(trigger_model or trigger_conf or trigger_err)
+    component_signal = False
+    if _env_bool("UTOA_OTO_CRNN_LOW_CONF_COMPONENT_SIGNAL_ENABLE", True):
+        if heatmap_conf is not None and uncertainty_conf is not None:
+            component_signal = bool(
+                float(heatmap_conf) <= _env_float("UTOA_OTO_CRNN_LOW_CONF_MAX_HEATMAP", 0.32)
+                and float(uncertainty_conf) <= _env_float("UTOA_OTO_CRNN_LOW_CONF_MAX_UNCERTAINTY", 0.014)
+            )
+    votes = int(bool(trigger_conf)) + int(bool(trigger_err)) + int(bool(component_signal))
+    trigger = bool(trigger_model or votes >= min_votes)
     if not trigger:
         return dict(predicted_params), ""
 
@@ -571,7 +844,11 @@ def _apply_low_confidence_fallback(
     conf_gap = max(0.0, float(min_conf) - float(predicted_confidence))
     conf_denom = max(float(min_conf), 1e-6)
     strength = min(1.0, conf_gap / conf_denom)
-    base_weight = _clamp(0.70 + (0.30 * strength), 0.70, 1.00)
+    base_weight = _clamp(0.55 + (0.35 * strength), 0.45, 0.90)
+    if trigger_err:
+        base_weight = max(base_weight, 0.70)
+    if component_signal and trigger_conf:
+        base_weight = max(base_weight, 0.68)
     fused = {
         "offset": (model["offset"] * (1.0 - base_weight)) + (base["offset"] * base_weight),
         "consonant": (model["consonant"] * (1.0 - base_weight)) + (base["consonant"] * base_weight),
@@ -586,12 +863,280 @@ def _apply_low_confidence_fallback(
         duration_ms=duration_ms,
         is_special=is_special,
     )
-    reason = "low_confidence"
-    if trigger_err and trigger_conf:
-        reason = "low_confidence+high_error"
-    elif trigger_err:
-        reason = "high_predicted_error"
+    tags: list[str] = []
+    if trigger_conf:
+        tags.append("low_confidence")
+    if trigger_err:
+        tags.append("high_predicted_error")
+    if component_signal:
+        tags.append("component_low_quality")
+    if not tags:
+        tags.append("low_confidence")
+    reason = "+".join(tags)
     return guarded, reason
+
+
+def _apply_monotonic_row_order_alignment(
+    *,
+    row_states: list[dict[str, Any]],
+    cache: dict[str, AudioCandidates | None],
+    config: Any | None,
+    language: str,
+    callback: Callable[[str], None] | None = None,
+) -> tuple[int, int]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for state in row_states:
+        row = state.get("row")
+        if row is None:
+            continue
+        groups.setdefault(str(row.wav_rel), []).append(state)
+
+    aligned = 0
+    held = 0
+    for wav_rel, states in groups.items():
+        states.sort(key=lambda state: int(getattr(state.get("row"), "row_index", 0)))
+        allowed_roles = _env_csv_set(
+            "UTOA_OTO_CRNN_ROW_ORDER_ALIGN_ROLES",
+            {"-cv", "cv", "v", "special"},
+        )
+        scoped_states = []
+        for state in states:
+            row = state["row"]
+            role = normalize_role(
+                _safe_alias_role(
+                    language,
+                    row.alias,
+                    alias_type=_safe_alias_type(language, row.alias),
+                    is_special=bool(row.is_special),
+                )
+            )
+            if role in allowed_roles and slot_type_for_role(role) == "anchor":
+                scoped_states.append(state)
+        states = scoped_states
+        if len(states) <= 1:
+            continue
+        wav_path = str(states[0]["row"].wav_abs)
+        candidates = _get_audio_candidates(wav_path, cache=cache, config=config)
+        if candidates is None:
+            continue
+        onset_points = _select_alignment_onset_points(
+            candidates,
+            row_count=len(states),
+        )
+        if len(onset_points) < len(states):
+            continue
+        path = _monotonic_onset_path(states, onset_points, language=language)
+        if not path:
+            continue
+        prev_target = None
+        prev_peak_index = None
+        for row_idx, peak_idx in enumerate(path):
+            state = states[row_idx]
+            row = state["row"]
+            params = dict(state["params"])
+            duration_ms = float(state.get("duration_ms", 0.0) or 0.0)
+            try:
+                anchors = oto_params_to_anchors(
+                    offset=float(params.get("offset", 0.0) or 0.0),
+                    consonant=float(params.get("consonant", 0.0) or 0.0),
+                    cutoff=float(params.get("cutoff", 0.0) or 0.0),
+                    preutterance=float(params.get("preutterance", 0.0) or 0.0),
+                    overlap=float(params.get("overlap", 0.0) or 0.0),
+                    duration_ms=max(1.0, duration_ms),
+                )
+            except Exception:
+                continue
+            target_ms = float(onset_points[peak_idx][0])
+            pred_mid = float(anchors.preutterance + anchors.consonant) * 0.5
+            delta_ms = target_ms - pred_mid
+            role = normalize_role(
+                _safe_alias_role(
+                    language,
+                    row.alias,
+                    alias_type=_safe_alias_type(language, row.alias),
+                    is_special=bool(row.is_special),
+                )
+            )
+            min_gap_ms = _row_order_role_min_gap_ms(role)
+            max_shift_ms = max(0.0, _env_float("UTOA_OTO_CRNN_ROW_ORDER_MAX_SHIFT_MS", 260.0))
+            max_step_gap_ms = max(0.0, _env_float("UTOA_OTO_CRNN_ROW_ORDER_MAX_STEP_GAP_MS", 420.0))
+            max_skip_points = max(0, int(round(_env_float("UTOA_OTO_CRNN_ROW_ORDER_MAX_SKIP_POINTS", 2.0))))
+            if prev_target is not None and target_ms < float(prev_target) + float(min_gap_ms):
+                state["row_order_hold"] = True
+                held += 1
+                continue
+            if prev_target is not None and (target_ms - float(prev_target)) > max_step_gap_ms:
+                state["row_order_hold"] = True
+                held += 1
+                continue
+            if prev_peak_index is not None and (int(peak_idx) - int(prev_peak_index) - 1) > max_skip_points:
+                state["row_order_hold"] = True
+                held += 1
+                continue
+            if abs(delta_ms) > max_shift_ms:
+                state["row_order_hold"] = True
+                held += 1
+                continue
+            shifted = _shift_params_to_target_mid(
+                predicted_anchors={
+                    "offset": float(anchors.offset),
+                    "overlap": float(anchors.overlap),
+                    "preutterance": float(anchors.preutterance),
+                    "consonant": float(anchors.consonant),
+                    "cutoff": float(anchors.cutoff),
+                },
+                duration_ms=max(1.0, duration_ms),
+                target_mid_ms=target_ms,
+                max_shift_ms=max_shift_ms,
+            )
+            min_move = _env_float("UTOA_OTO_CRNN_ROW_ORDER_MIN_MOVE_MS", 3.0)
+            if shifted and abs(delta_ms) >= min_move:
+                guarded, _ = _apply_conservative_right_boundary_guard(
+                    dict(shifted),
+                    language=language,
+                    alias=row.alias,
+                    duration_ms=max(1.0, duration_ms),
+                    is_special=bool(row.is_special),
+                )
+                state["params"] = dict(guarded)
+                state["aligned_by_row_order"] = True
+                aligned += 1
+                prev_target = target_ms
+                prev_peak_index = int(peak_idx)
+            else:
+                prev_target = target_ms
+                prev_peak_index = int(peak_idx)
+        _log(callback, f"[OTO-CRNN] row-order pass wav={os.path.basename(wav_rel)} rows={len(states)}")
+    return aligned, held
+
+
+def _select_alignment_onset_points(
+    candidates: AudioCandidates,
+    *,
+    row_count: int,
+) -> list[tuple[float, float]]:
+    min_strength = _env_float("UTOA_OTO_CRNN_ROW_ORDER_MIN_PEAK_STRENGTH", 0.18)
+    active_pad = _env_float("UTOA_OTO_CRNN_ROW_ORDER_ACTIVE_PAD_MS", 120.0)
+    active_start = float(getattr(candidates, "active_start_ms", 0.0) or 0.0) - active_pad
+    active_end = float(getattr(candidates, "active_end_ms", 0.0) or 0.0) + active_pad
+    points: list[tuple[float, float]] = []
+    for peak in list(getattr(candidates, "onset_peaks", []) or []):
+        time_ms = float(getattr(peak, "time_ms", 0.0) or 0.0)
+        strength = float(getattr(peak, "strength", 0.0) or 0.0)
+        if strength < min_strength:
+            continue
+        if time_ms < active_start or time_ms > active_end:
+            continue
+        points.append((time_ms, strength))
+    points.sort(key=lambda item: item[0])
+    if len(points) >= row_count:
+        return points
+
+    seg_points = []
+    for seg in list(getattr(candidates, "stable_vowel_segments", []) or []):
+        center = float(getattr(seg, "center_ms", 0.0) or 0.0)
+        voiced = float(getattr(seg, "voiced_score", 0.0) or 0.0)
+        if center < active_start or center > active_end:
+            continue
+        seg_points.append((center, max(0.05, voiced)))
+    seg_points.sort(key=lambda item: item[0])
+    merged = points + [item for item in seg_points if item not in points]
+    merged.sort(key=lambda item: item[0])
+    return merged
+
+
+def _monotonic_onset_path(
+    states: list[dict[str, Any]],
+    onset_points: list[tuple[float, float]],
+    *,
+    language: str,
+) -> list[int]:
+    n_rows = len(states)
+    n_peaks = len(onset_points)
+    if n_rows <= 0 or n_peaks < n_rows:
+        return []
+    mids = []
+    for state in states:
+        params = dict(state.get("params") or {})
+        try:
+            anchors = oto_params_to_anchors(
+                offset=float(params.get("offset", 0.0) or 0.0),
+                consonant=float(params.get("consonant", 0.0) or 0.0),
+                cutoff=float(params.get("cutoff", 0.0) or 0.0),
+                preutterance=float(params.get("preutterance", 0.0) or 0.0),
+                overlap=float(params.get("overlap", 0.0) or 0.0),
+                duration_ms=max(1.0, float(state.get("duration_ms", 0.0) or 1.0)),
+            )
+            mids.append((float(anchors.preutterance) + float(anchors.consonant)) * 0.5)
+        except Exception:
+            mids.append(0.0)
+
+    inf = float("inf")
+    dp = np.full((n_rows, n_peaks), inf, dtype=np.float64)
+    prev = np.full((n_rows, n_peaks), -1, dtype=np.int32)
+    idx_penalty = _env_float("UTOA_OTO_CRNN_ROW_ORDER_INDEX_PENALTY", 40.0)
+    skip_penalty = _env_float("UTOA_OTO_CRNN_ROW_ORDER_SKIP_PENALTY", 35.0)
+    for j in range(n_peaks):
+        rel_i = 0.0
+        rel_j = float(j) / float(max(1, n_peaks - 1))
+        dp[0, j] = abs(float(onset_points[j][0]) - mids[0]) + (abs(rel_j - rel_i) * idx_penalty)
+    for i in range(1, n_rows):
+        row = states[i]["row"]
+        role = normalize_role(
+            _safe_alias_role(
+                language,
+                row.alias,
+                alias_type=_safe_alias_type(language, row.alias),
+                is_special=bool(row.is_special),
+            )
+        )
+        min_gap = _row_order_role_min_gap_ms(role)
+        rel_i = float(i) / float(max(1, n_rows - 1))
+        for j in range(i, n_peaks):
+            target = float(onset_points[j][0])
+            rel_j = float(j) / float(max(1, n_peaks - 1))
+            base = abs(target - mids[i]) + (abs(rel_j - rel_i) * idx_penalty)
+            best_score = inf
+            best_prev = -1
+            for k in range(i - 1, j):
+                prev_t = float(onset_points[k][0])
+                if target < prev_t + min_gap:
+                    continue
+                trans = float(dp[i - 1, k]) + base + (float(j - k - 1) * skip_penalty)
+                if trans < best_score:
+                    best_score = trans
+                    best_prev = k
+            if best_prev >= 0:
+                dp[i, j] = best_score
+                prev[i, j] = int(best_prev)
+    last_j = int(np.argmin(dp[n_rows - 1]))
+    if not np.isfinite(dp[n_rows - 1, last_j]):
+        return []
+    path = [0] * n_rows
+    j = last_j
+    for i in range(n_rows - 1, -1, -1):
+        path[i] = int(j)
+        j = int(prev[i, j]) if i > 0 else -1
+    if any(path[idx] <= path[idx - 1] for idx in range(1, len(path))):
+        return []
+    return path
+
+
+def _row_order_role_min_gap_ms(role_text: str) -> float:
+    role = normalize_role(role_text)
+    if role == "-cv":
+        return _env_float("UTOA_OTO_CRNN_ROW_ORDER_MIN_GAP_HEAD_MS", 26.0)
+    if role == "cv":
+        return _env_float("UTOA_OTO_CRNN_ROW_ORDER_MIN_GAP_CV_MS", 16.0)
+    if role == "cv-":
+        return _env_float("UTOA_OTO_CRNN_ROW_ORDER_MIN_GAP_CVTAIL_MS", 12.0)
+    if role == "vc":
+        return _env_float("UTOA_OTO_CRNN_ROW_ORDER_MIN_GAP_VC_MS", 14.0)
+    if role == "vv":
+        return _env_float("UTOA_OTO_CRNN_ROW_ORDER_MIN_GAP_VV_MS", 20.0)
+    if role == "v-cv":
+        return _env_float("UTOA_OTO_CRNN_ROW_ORDER_MIN_GAP_VCV_MS", 18.0)
+    return _env_float("UTOA_OTO_CRNN_ROW_ORDER_MIN_GAP_DEFAULT_MS", 14.0)
 
 
 def _resolve_effective_format(
@@ -628,6 +1173,9 @@ def _apply_activity_window_fallback(
     cache: dict[str, dict[str, float]],
     row_index: int = 0,
     row_count: int = 1,
+    language: str = "",
+    alias: str = "",
+    is_special: bool = False,
 ) -> tuple[dict[str, float], str]:
     if not _env_bool("UTOA_OTO_CRNN_ACTIVITY_FALLBACK_ENABLE", True):
         return dict(predicted_params), ""
@@ -641,6 +1189,10 @@ def _apply_activity_window_fallback(
         active_end_ms=float(profile.get("active_end_ms", 0.0) or 0.0),
         row_index=row_index,
         row_count=row_count,
+        low_snr=bool(float(profile.get("low_snr", 0.0) or 0.0) >= 0.5),
+        language=language,
+        alias=alias,
+        is_special=is_special,
     )
     if row_shifted:
         return row_shifted, "activity_row_shift"
@@ -671,6 +1223,10 @@ def _apply_audio_candidate_snap(
     sequence_state: dict[str, int] | None = None,
     config: Any | None = None,
     is_special: bool = False,
+    predicted_confidence: float | None = None,
+    predicted_error_ms: float | None = None,
+    predicted_low_confidence: bool = False,
+    confidence_components: dict[str, float] | None = None,
 ) -> tuple[dict[str, float], str]:
     if not _env_bool("UTOA_OTO_CRNN_AUDIO_CANDIDATE_SNAP_ENABLE", True):
         return dict(predicted_params), ""
@@ -711,9 +1267,32 @@ def _apply_audio_candidate_snap(
     target_ms = float(anchors.preutterance)
     max_delta = max(0.0, _env_float("UTOA_OTO_CRNN_AUDIO_CANDIDATE_SNAP_MAX_DELTA_MS", 55.0))
     min_strength = _env_float("UTOA_OTO_CRNN_AUDIO_CANDIDATE_SNAP_MIN_STRENGTH", 0.20)
+    forward_cap = float("inf")
+    backward_cap = float("inf")
+    if format_text == "cvvc":
+        if role_text == "-cv":
+            forward_cap = max(0.0, _env_float("UTOA_OTO_CRNN_AUDIO_CANDIDATE_CVVC_HEAD_MAX_FORWARD_DELTA_MS", 23.0))
+            backward_cap = max(0.0, _env_float("UTOA_OTO_CRNN_AUDIO_CANDIDATE_CVVC_HEAD_MAX_BACKWARD_DELTA_MS", 48.0))
+        elif role_text == "cv":
+            forward_cap = max(0.0, _env_float("UTOA_OTO_CRNN_AUDIO_CANDIDATE_CVVC_CV_MAX_FORWARD_DELTA_MS", 32.0))
+            backward_cap = max(0.0, _env_float("UTOA_OTO_CRNN_AUDIO_CANDIDATE_CVVC_CV_MAX_BACKWARD_DELTA_MS", 52.0))
+        elif role_text == "cv-":
+            forward_cap = max(0.0, _env_float("UTOA_OTO_CRNN_AUDIO_CANDIDATE_CVVC_CVTAIL_MAX_FORWARD_DELTA_MS", 19.0))
+            backward_cap = max(0.0, _env_float("UTOA_OTO_CRNN_AUDIO_CANDIDATE_CVVC_CVTAIL_MAX_BACKWARD_DELTA_MS", 36.0))
     active_start = float(getattr(candidates, "active_start_ms", 0.0) or 0.0)
     active_end = float(getattr(candidates, "active_end_ms", duration_ms) or duration_ms)
     active_pad = _env_float("UTOA_OTO_CRNN_AUDIO_CANDIDATE_SNAP_ACTIVE_PAD_MS", 80.0)
+    if _env_bool("UTOA_OTO_CRNN_AUDIO_CANDIDATE_REQUIRE_RISKY", True):
+        if not _is_snap_risky_prediction(
+            target_ms=target_ms,
+            active_start_ms=active_start,
+            active_end_ms=active_end,
+            predicted_confidence=predicted_confidence,
+            predicted_error_ms=predicted_error_ms,
+            predicted_low_confidence=predicted_low_confidence,
+            confidence_components=confidence_components,
+        ):
+            return dict(predicted_params), ""
     sequence_enabled = _env_bool("UTOA_OTO_CRNN_AUDIO_CANDIDATE_SEQUENCE_ENABLE", True)
     sequence_key = os.path.abspath(str(wav_path or "")).lower()
     min_peak_index = -1
@@ -732,6 +1311,10 @@ def _apply_audio_candidate_snap(
         if time_ms < active_start - active_pad or time_ms > active_end + active_pad:
             continue
         delta = time_ms - target_ms
+        if delta > forward_cap:
+            continue
+        if -delta > backward_cap:
+            continue
         if abs(delta) <= max_delta:
             if sequence_enabled:
                 skipped = max(0, int(peak_index) - int(min_peak_index) - 1)
@@ -762,6 +1345,204 @@ def _apply_audio_candidate_snap(
     if sequence_enabled and sequence_state is not None:
         sequence_state[sequence_key] = int(peak_index)
     return anchors_to_oto_params(shifted, duration_ms=float(duration_ms)), f"candidate_onset:{strength:.3f}"
+
+
+def _apply_vc_candidate_matcher(
+    *,
+    predicted_params: dict[str, float],
+    wav_path: str,
+    language: str,
+    alias: str,
+    format_type: str = "",
+    duration_ms: float,
+    cache: dict[str, AudioCandidates | None],
+    config: Any | None = None,
+    is_special: bool = False,
+    predicted_confidence: float | None = None,
+    predicted_error_ms: float | None = None,
+    predicted_low_confidence: bool = False,
+    confidence_components: dict[str, float] | None = None,
+) -> tuple[dict[str, float], str]:
+    if not _env_bool("UTOA_OTO_CRNN_VC_MATCHER_ENABLE", True):
+        return dict(predicted_params), ""
+    role = _safe_alias_role(language, alias, alias_type=_safe_alias_type(language, alias), is_special=bool(is_special))
+    role_text = "special" if bool(is_special) else normalize_role(role)
+    if role_text != "vc":
+        return dict(predicted_params), ""
+    format_text = _normalize_format_key(format_type) or _normalize_format_key(
+        _infer_alias_format_for_runtime(language=language, alias=alias)
+    )
+    allowed_pairs = _env_pair_set(
+        "UTOA_OTO_CRNN_VC_MATCHER_ALLOWED_FORMAT_ROLES",
+        {("cvvc", "vc")},
+    )
+    if (format_text, role_text) not in allowed_pairs:
+        return dict(predicted_params), ""
+
+    components = parse_alias_components(alias, language=language)
+    left_vowel_id = str(components.get("left_vowel_id", "") or "").strip().lower()
+    right_consonant = str(components.get("right_consonant", "") or "").strip().lower()
+    vowel_norm = float(_VOWEL_ID_NORM.get(left_vowel_id, 0.0))
+    if vowel_norm <= 0.0 or not right_consonant:
+        return dict(predicted_params), ""
+
+    candidates = _get_audio_candidates(wav_path, cache=cache, config=config)
+    if candidates is None:
+        return dict(predicted_params), ""
+
+    try:
+        anchors = oto_params_to_anchors(
+            offset=float(predicted_params.get("offset", 0.0) or 0.0),
+            consonant=float(predicted_params.get("consonant", 0.0) or 0.0),
+            cutoff=float(predicted_params.get("cutoff", 0.0) or 0.0),
+            preutterance=float(predicted_params.get("preutterance", 0.0) or 0.0),
+            overlap=float(predicted_params.get("overlap", 0.0) or 0.0),
+            duration_ms=float(duration_ms),
+        )
+    except Exception:
+        return dict(predicted_params), ""
+
+    target_ms = float(anchors.preutterance)
+    if float(predicted_params.get("preutterance", 0.0) or 0.0) <= _env_float("UTOA_OTO_CRNN_VC_MATCHER_MIN_PREUTTERANCE_MS", 2.0):
+        return dict(predicted_params), ""
+    active_start = float(getattr(candidates, "active_start_ms", 0.0) or 0.0)
+    active_end = float(getattr(candidates, "active_end_ms", duration_ms) or duration_ms)
+    active_tol = max(0.0, _env_float("UTOA_OTO_CRNN_VC_MATCHER_ACTIVE_TOLERANCE_MS", 70.0))
+    early_boundary_risk = target_ms < (active_start - active_tol)
+    late_boundary_risk = target_ms > (active_end + active_tol)
+    if _env_bool("UTOA_OTO_CRNN_VC_MATCHER_REQUIRE_BOUNDARY_RISK", True):
+        if not (early_boundary_risk or late_boundary_risk):
+            return dict(predicted_params), ""
+    if _env_bool("UTOA_OTO_CRNN_VC_MATCHER_REQUIRE_RISKY", True):
+        if not _is_snap_risky_prediction(
+            target_ms=target_ms,
+            active_start_ms=active_start,
+            active_end_ms=active_end,
+            predicted_confidence=predicted_confidence,
+            predicted_error_ms=predicted_error_ms,
+            predicted_low_confidence=predicted_low_confidence,
+            confidence_components=confidence_components,
+        ):
+            return dict(predicted_params), ""
+
+    hint_weight = _clamp(_env_float("UTOA_OTO_CRNN_VC_MATCHER_HINT_WEIGHT", 0.35), 0.0, 1.0)
+    seg = find_best_vowel_segment(
+        candidates,
+        vowel_norm,
+        hint_center_ms=target_ms,
+        hint_weight=hint_weight,
+    )
+    if seg is None:
+        return dict(predicted_params), ""
+
+    onset_window_ms = max(60.0, _env_float("UTOA_OTO_CRNN_VC_MATCHER_ONSET_WINDOW_MS", 420.0))
+    onset = find_nearest_onset_after(
+        candidates,
+        float(seg.end_ms),
+        search_window_ms=onset_window_ms,
+    )
+    if onset is None:
+        return dict(predicted_params), ""
+
+    target_pos = _clamp(_env_float("UTOA_OTO_CRNN_VC_MATCHER_TARGET_RATIO", 0.62), 0.0, 1.0)
+    onset_ms = float(getattr(onset, "time_ms", 0.0) or 0.0)
+    if onset_ms <= float(seg.end_ms) + 1e-3:
+        return dict(predicted_params), ""
+    candidate_pre = float(seg.end_ms) + ((onset_ms - float(seg.end_ms)) * target_pos)
+    raw_delta = candidate_pre - target_ms
+    if early_boundary_risk and raw_delta <= 0.0:
+        return dict(predicted_params), ""
+    if late_boundary_risk and raw_delta >= 0.0:
+        return dict(predicted_params), ""
+
+    max_delta = max(0.0, _env_float("UTOA_OTO_CRNN_VC_MATCHER_MAX_DELTA_MS", 220.0))
+    if abs(raw_delta) > max_delta:
+        return dict(predicted_params), ""
+
+    blend = _clamp(_env_float("UTOA_OTO_CRNN_VC_MATCHER_BLEND", 0.55), 0.0, 1.0)
+    delta = raw_delta * blend
+    max_move = max(0.0, _env_float("UTOA_OTO_CRNN_VC_MATCHER_MAX_MOVE_MS", 65.0))
+    if max_move > 0.0:
+        delta = _clamp(delta, -max_move, max_move)
+    if abs(delta) < _env_float("UTOA_OTO_CRNN_VC_MATCHER_MIN_MOVE_MS", 5.0):
+        return dict(predicted_params), ""
+
+    min_conf = _clamp(_env_float("UTOA_OTO_CRNN_VC_MATCHER_MIN_CANDIDATE_CONFIDENCE", 0.25), 0.0, 1.0)
+    candidate_conf = float(
+        (0.55 * float(getattr(seg, "vowel_confidence", 0.0) or 0.0))
+        + (0.45 * float(getattr(onset, "strength", 0.0) or 0.0))
+    )
+    if candidate_conf < min_conf:
+        return dict(predicted_params), ""
+
+    # VC matcher should affect transition timing itself. Keep offset fixed and
+    # move the right-side anchors so preutterance/consonant/cutoff can change
+    # in param space (plain anchor translation keeps preutterance param intact).
+    shifted = OtoAnchors(
+        offset=anchors.offset,
+        overlap=anchors.overlap + delta,
+        preutterance=anchors.preutterance + delta,
+        consonant=anchors.consonant + delta,
+        cutoff=anchors.cutoff + delta,
+    )
+    return anchors_to_oto_params(shifted, duration_ms=float(duration_ms)), f"vc_matcher:{candidate_conf:.3f}"
+
+
+def _is_snap_risky_prediction(
+    *,
+    target_ms: float,
+    active_start_ms: float,
+    active_end_ms: float,
+    predicted_confidence: float | None,
+    predicted_error_ms: float | None,
+    predicted_low_confidence: bool,
+    confidence_components: dict[str, float] | None,
+) -> bool:
+    early_tol = max(0.0, _env_float("UTOA_OTO_CRNN_AUDIO_CANDIDATE_RISK_ACTIVE_TOLERANCE_MS", 70.0))
+    if float(target_ms) < float(active_start_ms) - early_tol:
+        return True
+    if float(target_ms) > float(active_end_ms) + early_tol:
+        return True
+    if bool(predicted_low_confidence):
+        return True
+    conf_value = None
+    if predicted_confidence is not None:
+        try:
+            conf_value = float(predicted_confidence)
+        except Exception:
+            conf_value = None
+    if conf_value is not None and conf_value < _env_float("UTOA_OTO_CRNN_AUDIO_CANDIDATE_RISK_MAX_CONFIDENCE", 0.48):
+        return True
+    if predicted_error_ms is not None:
+        try:
+            err = float(predicted_error_ms)
+        except Exception:
+            err = None
+        if err is not None and err > _env_float("UTOA_OTO_CRNN_AUDIO_CANDIDATE_RISK_MIN_PREDICTED_ERROR_MS", 380.0):
+            return True
+    heatmap = None
+    uncertainty = None
+    try:
+        comp = dict(confidence_components or {})
+    except Exception:
+        comp = {}
+    try:
+        raw_heat = comp.get("heatmap")
+        heatmap = float(raw_heat) if raw_heat is not None else None
+    except Exception:
+        heatmap = None
+    try:
+        raw_unc = comp.get("uncertainty")
+        uncertainty = float(raw_unc) if raw_unc is not None else None
+    except Exception:
+        uncertainty = None
+    if heatmap is not None and uncertainty is not None:
+        if (
+            heatmap <= _env_float("UTOA_OTO_CRNN_AUDIO_CANDIDATE_RISK_MAX_HEATMAP", 0.34)
+            and uncertainty <= _env_float("UTOA_OTO_CRNN_AUDIO_CANDIDATE_RISK_MAX_UNCERTAINTY", 0.018)
+        ):
+            return True
+    return False
 
 
 def _get_audio_candidates(
@@ -818,6 +1599,42 @@ def _normalize_format_key(value: object) -> str:
     return str(value or "").strip().lower() or "unknown"
 
 
+def _role_adjusted_low_conf_thresholds(
+    *,
+    min_conf: float,
+    max_error_ms: float,
+    min_votes: int,
+    language: str,
+    alias: str,
+    is_special: bool,
+) -> tuple[float, float, int]:
+    if not _env_bool("UTOA_OTO_CRNN_LOW_CONF_ROLE_ADAPT_ENABLE", True):
+        return float(min_conf), float(max_error_ms), int(min_votes)
+    alias_type = _safe_alias_type(language, alias)
+    role_text = normalize_role(
+        _safe_alias_role(
+            language,
+            alias,
+            alias_type=alias_type,
+            is_special=bool(is_special),
+        )
+    )
+    relax_roles = _env_csv_set(
+        "UTOA_OTO_CRNN_LOW_CONF_ROLE_RELAX_ROLES",
+        {"vc", "v-cv", "vv"},
+    )
+    if role_text not in relax_roles:
+        return float(min_conf), float(max_error_ms), int(min_votes)
+    conf_delta = max(0.0, _env_float("UTOA_OTO_CRNN_LOW_CONF_ROLE_RELAX_CONF_DELTA", 0.04))
+    err_delta_ms = max(0.0, _env_float("UTOA_OTO_CRNN_LOW_CONF_ROLE_RELAX_ERROR_DELTA_MS", 90.0))
+    votes_delta = max(0, int(round(_env_float("UTOA_OTO_CRNN_LOW_CONF_ROLE_RELAX_EXTRA_VOTES", 1.0))))
+    return (
+        max(0.05, float(min_conf) - conf_delta),
+        float(max_error_ms) + err_delta_ms,
+        max(1, int(min_votes) + votes_delta),
+    )
+
+
 def _infer_alias_format_for_runtime(*, language: str, alias: str) -> str:
     # Runtime generation already resolved one format for the whole batch, but
     # snap risk is role-and-bank-format dependent. Alias text gives a useful
@@ -836,9 +1653,24 @@ def _shift_params_into_row_activity_window(
     active_end_ms: float,
     row_index: int,
     row_count: int,
+    low_snr: bool = False,
+    language: str = "",
+    alias: str = "",
+    is_special: bool = False,
 ) -> dict[str, float]:
     count = max(1, int(row_count))
-    if count <= 1 or not _env_bool("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_ENABLE", False):
+    mid = _anchor_mid_ms(predicted_anchors)
+    auto_early_margin_ms = max(0.0, _env_float("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_AUTO_EARLY_MARGIN_MS", 70.0))
+    front_early = mid < (max(0.0, float(active_start_ms)) - auto_early_margin_ms)
+    row_shift_enable = _env_bool("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_ENABLE", False)
+    low_snr_auto_enable = _env_bool("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_AUTO_LOW_SNR_ENABLE", False)
+    front_auto_enable = _env_bool("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_AUTO_FRONT_EARLY_ENABLE", False)
+    role = _safe_alias_role(language, alias, alias_type=_safe_alias_type(language, alias), is_special=bool(is_special))
+    role_text = "special" if bool(is_special) else normalize_role(role)
+    auto_roles = _env_csv_set("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_AUTO_ROLES", {"-cv", "cv", "special"})
+    auto_role_allowed = role_text in auto_roles
+    auto_trigger = auto_role_allowed and ((bool(low_snr) and low_snr_auto_enable) or (front_early and front_auto_enable))
+    if count <= 1 or not (row_shift_enable or auto_trigger):
         return {}
     duration = max(1.0, float(duration_ms))
     active_start = max(0.0, float(active_start_ms))
@@ -854,7 +1686,6 @@ def _shift_params_into_row_activity_window(
     row_start = active_start + (float(idx) * row_width)
     row_end = active_start + (float(idx + 1) * row_width)
     tolerance = _env_float("UTOA_OTO_CRNN_ACTIVITY_ROW_TOLERANCE_MS", 90.0)
-    mid = _anchor_mid_ms(predicted_anchors)
     if row_start - tolerance <= mid <= row_end + tolerance:
         return {}
 
@@ -952,12 +1783,24 @@ def _analyze_activity_profile(
         return {}
     duration_ms = max(1.0, float(duration_sec) * 1000.0)
     if samples is None or int(getattr(samples, "shape", [0])[0]) <= 0 or sr <= 0:
-        profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
+        profile = {
+            "active_start_ms": 0.0,
+            "active_end_ms": duration_ms,
+            "duration_ms": duration_ms,
+            "low_snr": 0.0,
+            "snr_proxy": 1.0,
+        }
         cache[key] = profile
         return dict(profile)
     data = np.asarray(samples, dtype=np.float32)
     if data.size <= 0:
-        profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
+        profile = {
+            "active_start_ms": 0.0,
+            "active_end_ms": duration_ms,
+            "duration_ms": duration_ms,
+            "low_snr": 0.0,
+            "snr_proxy": 1.0,
+        }
         cache[key] = profile
         return dict(profile)
 
@@ -978,24 +1821,55 @@ def _analyze_activity_profile(
 
     peak = float(np.max(rms)) if rms.size else 0.0
     if peak <= 1e-8:
-        profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
+        profile = {
+            "active_start_ms": 0.0,
+            "active_end_ms": duration_ms,
+            "duration_ms": duration_ms,
+            "low_snr": 0.0,
+            "snr_proxy": 1.0,
+        }
         cache[key] = profile
         return dict(profile)
     low = float(np.percentile(rms, _env_float("UTOA_OTO_CRNN_ACTIVITY_NOISE_PERCENTILE", 20.0)))
     high = float(np.percentile(rms, _env_float("UTOA_OTO_CRNN_ACTIVITY_SPEECH_PERCENTILE", 88.0)))
     dynamic = low + ((max(high, peak) - low) * _env_float("UTOA_OTO_CRNN_ACTIVITY_DYNAMIC_RATIO", 0.35))
     threshold = max(dynamic, peak * _env_float("UTOA_OTO_CRNN_ACTIVITY_PEAK_RATIO", 0.04), _env_float("UTOA_OTO_CRNN_ACTIVITY_ABS_FLOOR", 1e-5))
-    min_run = max(1, int(round(_env_float("UTOA_OTO_CRNN_ACTIVITY_MIN_ACTIVE_MS", 30.0) / ((float(stride_samples) / float(sr)) * 1000.0))))
-    active_frames = _sustained_frame_indices(rms >= threshold, min_run)
+    stride_ms = (float(stride_samples) / float(sr)) * 1000.0
+    min_run = max(1, int(round(_env_float("UTOA_OTO_CRNN_ACTIVITY_MIN_ACTIVE_MS", 30.0) / max(stride_ms, 1e-6))))
+    snr_proxy = (high - low) / max(peak, 1e-6)
+    low_snr = bool(snr_proxy < _env_float("UTOA_OTO_CRNN_ACTIVITY_LOW_SNR_PROXY_MAX", 0.18))
+    if low_snr and _env_bool("UTOA_OTO_CRNN_ACTIVITY_NOISE_ROBUST_ENABLE", True):
+        threshold = max(
+            threshold,
+            low + ((max(high, peak) - low) * _env_float("UTOA_OTO_CRNN_ACTIVITY_NOISE_ROBUST_DYNAMIC_RATIO", 0.52)),
+        )
+        robust_min_active_ms = _env_float("UTOA_OTO_CRNN_ACTIVITY_NOISE_ROBUST_MIN_ACTIVE_MS", 55.0)
+        min_run = max(min_run, max(1, int(round(robust_min_active_ms / max(stride_ms, 1e-6)))))
+    active_frames = _sustained_frame_indices(
+        rms >= threshold,
+        min_run,
+        values=rms,
+        prefer_strongest=_env_bool("UTOA_OTO_CRNN_ACTIVITY_PICK_STRONGEST_RUN", True),
+    )
     if active_frames.size <= 0:
         threshold = max(low + ((peak - low) * 0.20), _env_float("UTOA_OTO_CRNN_ACTIVITY_ABS_FLOOR", 1e-5))
-        active_frames = _sustained_frame_indices(rms >= threshold, min_run)
+        active_frames = _sustained_frame_indices(
+            rms >= threshold,
+            min_run,
+            values=rms,
+            prefer_strongest=_env_bool("UTOA_OTO_CRNN_ACTIVITY_PICK_STRONGEST_RUN", True),
+        )
     if active_frames.size <= 0:
-        profile = {"active_start_ms": 0.0, "active_end_ms": duration_ms, "duration_ms": duration_ms}
+        profile = {
+            "active_start_ms": 0.0,
+            "active_end_ms": duration_ms,
+            "duration_ms": duration_ms,
+            "low_snr": 1.0 if low_snr else 0.0,
+            "snr_proxy": float(snr_proxy),
+        }
         cache[key] = profile
         return dict(profile)
 
-    stride_ms = (float(stride_samples) / float(sr)) * 1000.0
     start_ms = float(active_frames[0]) * stride_ms
     end_ms = (float(active_frames[-1]) * stride_ms) + float(window_ms)
     pad_ms = 25.0
@@ -1008,36 +1882,83 @@ def _analyze_activity_profile(
         "active_start_ms": float(active_start),
         "active_end_ms": float(active_end),
         "duration_ms": float(duration_ms),
+        "low_snr": 1.0 if low_snr else 0.0,
+        "snr_proxy": float(snr_proxy),
     }
     cache[key] = profile
     return dict(profile)
 
 
-def _sustained_frame_indices(mask: np.ndarray, min_run: int) -> np.ndarray:
+def _sustained_frame_indices(
+    mask: np.ndarray,
+    min_run: int,
+    *,
+    values: np.ndarray | None = None,
+    prefer_strongest: bool = False,
+) -> np.ndarray:
+    return _sustained_frame_indices_impl(mask, min_run, values=values, prefer_strongest=prefer_strongest)
+
+
+def _sustained_frame_indices_impl(
+    mask: np.ndarray,
+    min_run: int,
+    *,
+    values: np.ndarray | None,
+    prefer_strongest: bool,
+) -> np.ndarray:
     arr = np.asarray(mask, dtype=bool)
     run = max(1, int(min_run))
     if arr.size <= 0:
         return np.asarray([], dtype=np.int64)
     if run <= 1:
-        return np.flatnonzero(arr)
+        idx = np.flatnonzero(arr)
+        if idx.size <= 0:
+            return np.asarray([], dtype=np.int64)
+        if not bool(prefer_strongest) or values is None:
+            return idx
+        vals = np.asarray(values, dtype=np.float32).reshape(-1)
+        if vals.size != arr.size:
+            return idx
+        best = int(idx[np.argmax(vals[idx])])
+        return np.arange(best, idx[-1] + 1, dtype=np.int64)[arr[best:]]
     count = 0
-    first = -1
-    last = -1
-    active = False
+    runs: list[tuple[int, int]] = []
+    start = -1
     for idx, value in enumerate(arr):
         if bool(value):
             count += 1
-            if count >= run and not active:
-                first = idx - run + 1
-                active = True
-            if active:
-                last = idx
+            if count == run:
+                start = idx - run + 1
         else:
+            if start >= 0:
+                runs.append((start, idx - 1))
+                start = -1
             count = 0
-            if active:
-                break
-    if first < 0 or last < first:
+    if start >= 0:
+        runs.append((start, arr.size - 1))
+    if not runs:
         return np.asarray([], dtype=np.int64)
+    if not bool(prefer_strongest) or values is None:
+        first, last = runs[0]
+        return np.arange(first, last + 1, dtype=np.int64)
+    vals = np.asarray(values, dtype=np.float32).reshape(-1)
+    if vals.size != arr.size:
+        first, last = runs[0]
+        return np.arange(first, last + 1, dtype=np.int64)
+    len_weight = _env_float("UTOA_OTO_CRNN_ACTIVITY_STRONGEST_RUN_LENGTH_WEIGHT", 0.02)
+    best_score = None
+    best_run = runs[0]
+    for first, last in runs:
+        seg = vals[first : last + 1]
+        if seg.size <= 0:
+            continue
+        mean_energy = float(np.mean(seg))
+        length_score = float(seg.size) * float(len_weight)
+        score = mean_energy + length_score
+        if best_score is None or score > best_score:
+            best_score = score
+            best_run = (first, last)
+    first, last = best_run
     return np.arange(first, last + 1, dtype=np.int64)
 
 
