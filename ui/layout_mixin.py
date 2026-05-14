@@ -407,6 +407,18 @@ class LayoutMixin:
         )
         self.no_mfa_oto_mode_hint_label.pack(side="left", fill="x", expand=True)
         self.row_oto_crnn_model = build_form_row(form_body)
+        self.oto_crnn_engine_menu = ctk.CTkOptionMenu(
+            self.row_oto_crnn_model,
+            values=[
+                "Legacy direct CRNN (deprecated)",
+                "Boundary scorer decoder (new)",
+            ],
+            variable=self.oto_crnn_engine_var,
+            width=230,
+            command=lambda _v: self._on_oto_crnn_engine_change(),
+        )
+        _style_blue_menu(self.oto_crnn_engine_menu)
+        self.oto_crnn_engine_menu.pack(side="left", padx=(6, 6))
         build_left_label(self.row_oto_crnn_model, t("CRNN 모델:")).pack(side="left")
         self.oto_crnn_model_entry = ctk.CTkEntry(
             self.row_oto_crnn_model,
@@ -1220,6 +1232,40 @@ class LayoutMixin:
             return "remap"
         return "remap"
 
+    @staticmethod
+    def _normalize_oto_crnn_engine_code(value):
+        raw = str(value or "").strip().lower()
+        if raw in {"boundary", "boundary_decoder", "boundary-scorer", "scorer", "new"}:
+            return "boundary_decoder"
+        if str(value or "").strip() == "Boundary scorer decoder (new)":
+            return "boundary_decoder"
+        return "legacy_direct"
+
+    def _set_oto_crnn_engine_from_code(self, code):
+        normalized = self._normalize_oto_crnn_engine_code(code)
+        label = "Boundary scorer decoder (new)" if normalized == "boundary_decoder" else "Legacy direct CRNN (deprecated)"
+        if hasattr(self, "oto_crnn_engine_var"):
+            try:
+                self.oto_crnn_engine_var.set(label)
+            except Exception:
+                pass
+        return normalized
+
+    def _get_oto_crnn_engine_code(self):
+        if not hasattr(self, "oto_crnn_engine_var"):
+            return "legacy_direct"
+        try:
+            current = self.oto_crnn_engine_var.get()
+        except Exception:
+            current = ""
+        return self._set_oto_crnn_engine_from_code(current)
+
+    def _on_oto_crnn_engine_change(self):
+        self._set_oto_crnn_engine_from_code(
+            self.oto_crnn_engine_var.get() if hasattr(self, "oto_crnn_engine_var") else ""
+        )
+        self._save_config()
+
     def _set_no_mfa_oto_mode_from_code(self, code):
         normalized = self._normalize_no_mfa_oto_mode_code(code)
         label = "CRNN OTO 예측기(실험)" if normalized == "crnn" else "베이스 OTO 재매핑 + 보정"
@@ -1348,6 +1394,11 @@ class LayoutMixin:
                 pass
 
         no_mfa_mode_code = self._get_no_mfa_oto_mode_code()
+        crnn_engine_code = (
+            self._get_oto_crnn_engine_code()
+            if hasattr(self, "_get_oto_crnn_engine_code")
+            else "legacy_direct"
+        )
         if no_mfa_mode_code == "crnn" and not developer_enabled:
             no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("remap")
         no_mfa_values = ["베이스 OTO 재매핑 + 보정"]
@@ -1358,6 +1409,21 @@ class LayoutMixin:
                 self.no_mfa_oto_mode_menu.configure(values=no_mfa_values)
                 self.no_mfa_oto_mode_menu.set(
                     "CRNN OTO 예측기(실험)" if no_mfa_mode_code == "crnn" else "베이스 OTO 재매핑 + 보정"
+                )
+            except Exception:
+                pass
+        if hasattr(self, "oto_crnn_engine_menu"):
+            try:
+                self.oto_crnn_engine_menu.configure(
+                    values=[
+                        "Legacy direct CRNN (deprecated)",
+                        "Boundary scorer decoder (new)",
+                    ]
+                )
+                self.oto_crnn_engine_menu.set(
+                    "Boundary scorer decoder (new)"
+                    if crnn_engine_code == "boundary_decoder"
+                    else "Legacy direct CRNN (deprecated)"
                 )
             except Exception:
                 pass
