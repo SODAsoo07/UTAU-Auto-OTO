@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from core.coarse_crnn.alias_role import normalize_role
-from core.coarse_crnn.audio import load_wav_mono, log_mel_spectrogram
+from core.coarse_crnn.audio import add_log_mel_deltas, load_wav_mono, log_mel_spectrogram
 from core.coarse_crnn.oto_model import (
     alias_role_id,
     alias_type_id,
@@ -21,6 +21,7 @@ from core.coarse_crnn.oto_model import (
     uses_relative_param_head,
 )
 from core.coarse_crnn.oto_param_priors import decode_relative_oto_params, relative_params_to_anchors
+from core.coarse_crnn.oto_sequence_alignment import SEQUENCE_BOUNDARY_KINDS
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES, OtoAnchors, anchors_to_oto_params, extract_alias_features, repair_anchors
 from core.coarse_crnn.slot_graph import slot_context_from_role
 from core.coarse_crnn.oto_windowing import crop_oto_target_window, should_use_vcv_target_window, target_window_frames_for
@@ -38,6 +39,9 @@ class OtoPrediction:
     low_confidence: bool = False
     confidence_components: dict[str, float] | None = None
     skipped_audio_ms: float = 0.0
+    sequence_candidate_times_ms: list[float] | None = None
+    sequence_candidate_scores: list[list[float]] | None = None
+    sequence_candidate_classes: list[str] | None = None
 
 
 def predict_oto(
@@ -122,6 +126,8 @@ def predict_oto_with_model(
     )
     if features.shape[0] <= 0:
         raise ValueError(f"empty audio features: {wav_path}")
+    if bool(getattr(config, "feature_deltas", False)):
+        features = add_log_mel_deltas(features)
 
     full_duration_ms = max(1.0, float(duration_sec) * 1000.0)
     prediction_duration_ms = full_duration_ms
@@ -134,8 +140,6 @@ def predict_oto_with_model(
         formats=tuple(getattr(config, "target_window_formats", ("vcv",))),
         alias_type=alias_features.get("alias_type", ""),
         alias_role=alias_features.get("alias_role", ""),
-        cvvc_alias_types=tuple(getattr(config, "cvvc_target_window_alias_types", ("vc", "vv"))),
-        cvvc_alias_roles=tuple(getattr(config, "cvvc_target_window_alias_roles", ("vc", "vv"))),
     ):
         using_vcv_window = True
         features, _anchors, prediction_duration_ms, start_frame = crop_oto_target_window(
@@ -185,11 +189,6 @@ def predict_oto_with_model(
     role_tensor = torch.tensor([alias_role_id(config, role_text)], dtype=torch.long, device=torch_device)
     prev_role_tensor = torch.tensor([alias_role_id(config, prev_role_text)], dtype=torch.long, device=torch_device)
     next_role_tensor = torch.tensor([alias_role_id(config, next_role_text)], dtype=torch.long, device=torch_device)
-    extra_flags_tensor = torch.tensor(
-        [[1.0 if is_diphthong_flag else 0.0, 1.0 if is_special_flag else 0.0]],
-        dtype=torch.float32,
-        device=torch_device,
-    )
     base_context_values = [
                 _row_ratio(row_index_in_wav, file_row_count),
                 min(1.0, max(1.0, float(file_row_count)) / 64.0),
@@ -260,12 +259,19 @@ def predict_oto_with_model(
         role_tensor=role_tensor,
         prev_role_tensor=prev_role_tensor,
         next_role_tensor=next_role_tensor,
-        extra_flags_tensor=extra_flags_tensor,
     )
     heat = pass1["heat"]
     scalar = pass1["scalar"]
     scalar_logvar = pass1["scalar_logvar"]
     conf_head = float(pass1["conf_head"])
+    sequence_candidate_scores = pass1.get("sequence_candidate_scores")
+    sequence_candidate_times_ms = _sequence_candidate_times_ms(
+        frame_count=int(features.shape[0]),
+        hop_sec=float(hop_sec),
+        crop_start_ms=float(crop_start_ms),
+        skipped_audio_ms=float(skipped_audio_ms),
+    ) if sequence_candidate_scores is not None else None
+    sequence_candidate_classes = list(getattr(config, "sequence_candidate_classes", SEQUENCE_BOUNDARY_KINDS))
     if bool(getattr(config, "enable_two_stage_refine", False)):
         refine_frames = int(getattr(config, "two_stage_refine_window_frames", 0) or 0)
         if refine_frames > 0:
@@ -290,12 +296,11 @@ def predict_oto_with_model(
                     prev_alias_id=prev_alias_id,
                     next_alias_id=next_alias_id,
                     prev_transition_id=prev_transition_id,
-                    next_transition_id=next_transition_id,
-                    role_tensor=role_tensor,
-                    prev_role_tensor=prev_role_tensor,
-                    next_role_tensor=next_role_tensor,
-                    extra_flags_tensor=extra_flags_tensor,
-                )
+                next_transition_id=next_transition_id,
+                role_tensor=role_tensor,
+                prev_role_tensor=prev_role_tensor,
+                next_role_tensor=next_role_tensor,
+            )
                 heat = pass2["heat"]
                 scalar = pass2["scalar"]
                 scalar_logvar = pass2["scalar_logvar"]
@@ -408,6 +413,13 @@ def predict_oto_with_model(
         low_confidence=low_confidence,
         confidence_components=components,
         skipped_audio_ms=float(skipped_audio_ms),
+        sequence_candidate_times_ms=sequence_candidate_times_ms,
+        sequence_candidate_scores=(
+            np.asarray(sequence_candidate_scores, dtype=np.float32).tolist()
+            if sequence_candidate_scores is not None
+            else None
+        ),
+        sequence_candidate_classes=sequence_candidate_classes if sequence_candidate_scores is not None else None,
     )
 
 
@@ -428,7 +440,6 @@ def _run_oto_forward_pass(
     role_tensor,
     prev_role_tensor,
     next_role_tensor,
-    extra_flags_tensor,
 ) -> dict[str, Any]:
     torch = __import__("torch")
     with torch.no_grad():
@@ -447,7 +458,6 @@ def _run_oto_forward_pass(
             alias_role_ids=role_tensor,
             prev_alias_role_ids=prev_role_tensor,
             next_alias_role_ids=next_role_tensor,
-            extra_alias_flags=extra_flags_tensor,
         )
     heat = torch.sigmoid(outputs["heatmap_logits"]).squeeze(0).detach().cpu().numpy().astype(np.float32)
     scalar = torch.sigmoid(outputs["scalar_logits"]).squeeze(0).detach().cpu().numpy().astype(np.float32)
@@ -456,12 +466,36 @@ def _run_oto_forward_pass(
         scalar_logvar = scalar_logvar.squeeze(0).detach().cpu().numpy().astype(np.float32)
     conf_logits = outputs.get("confidence_logits")
     conf_head = float(torch.sigmoid(conf_logits).squeeze(0).detach().cpu().item()) if conf_logits is not None else 0.0
+    sequence_candidate_logits = outputs.get("sequence_candidate_logits")
+    sequence_candidate_scores = None
+    if sequence_candidate_logits is not None:
+        sequence_candidate_scores = (
+            torch.sigmoid(sequence_candidate_logits)
+            .squeeze(0)
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32)
+        )
     return {
         "heat": heat,
         "scalar": scalar,
         "scalar_logvar": scalar_logvar,
         "conf_head": conf_head,
+        "sequence_candidate_scores": sequence_candidate_scores,
     }
+
+
+def _sequence_candidate_times_ms(
+    *,
+    frame_count: int,
+    hop_sec: float,
+    crop_start_ms: float,
+    skipped_audio_ms: float,
+) -> list[float]:
+    hop_ms = max(float(hop_sec) * 1000.0, 1e-3)
+    base = float(crop_start_ms) + float(skipped_audio_ms)
+    return [float(base + (idx * hop_ms)) for idx in range(max(0, int(frame_count)))]
 
 
 def _two_stage_crop_from_heatmap(
@@ -504,6 +538,9 @@ def write_prediction_json(path: str, prediction: OtoPrediction, *, meta: dict[st
         "heatmap_confidence": dict(prediction.heatmap_confidence),
         "anchors": prediction.anchors.to_dict(),
         "oto_params": dict(prediction.params),
+        "sequence_candidate_classes": list(prediction.sequence_candidate_classes or []),
+        "sequence_candidate_times_ms": list(prediction.sequence_candidate_times_ms or []),
+        "sequence_candidate_scores": list(prediction.sequence_candidate_scores or []),
     }
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
@@ -527,18 +564,38 @@ def _heatmap_to_anchor_ms(heat: np.ndarray, *, hop_sec: float) -> tuple[np.ndarr
     out = np.zeros((h.shape[1],), dtype=np.float32)
     conf = np.zeros((h.shape[1],), dtype=np.float32)
     hop_ms = max(float(hop_sec) * 1000.0, 1e-3)
+    n = int(h.shape[0])
     for idx in range(h.shape[1]):
         col = h[:, idx]
         center = int(np.argmax(col))
+        conf[idx] = float(col[center])
+        # Soft-argmax via parabolic interpolation through the 3-point peak
+        # neighbourhood. The model's heatmap target is a σ≈2-frame Gaussian, so
+        # argmax alone snaps to the 10 ms frame grid and leaves ±1-frame
+        # placement jitter. Fitting a parabola to (center-1, center, center+1)
+        # recovers a continuous sub-frame peak.
+        if 0 < center < n - 1:
+            y0 = float(col[center - 1])
+            y1 = float(col[center])
+            y2 = float(col[center + 1])
+            denom = y0 - (2.0 * y1) + y2
+            if denom < -1e-6:  # strictly concave → a real peak
+                delta = 0.5 * (y0 - y2) / denom
+                delta = max(-0.5, min(0.5, delta))
+                out[idx] = (float(center) + delta) * hop_ms
+                continue
+        # Fallback for plateau/edge peaks: baseline-subtracted local centroid so
+        # the sigmoid floor does not bias the estimate toward the window edges.
         lo = max(0, center - 2)
-        hi = min(h.shape[0], center + 3)
-        weights = col[lo:hi].astype(np.float64)
-        if float(np.sum(weights)) > 1e-8:
-            local = np.arange(lo, hi, dtype=np.float64)
-            out[idx] = float(np.sum(local * weights) / np.sum(weights)) * hop_ms
+        hi = min(n, center + 3)
+        local = col[lo:hi].astype(np.float64)
+        local = local - float(np.min(local))
+        total = float(np.sum(local))
+        if total > 1e-8:
+            positions = np.arange(lo, hi, dtype=np.float64)
+            out[idx] = float(np.sum(positions * local) / total) * hop_ms
         else:
             out[idx] = float(center) * hop_ms
-        conf[idx] = float(col[center])
     return out, conf
 
 

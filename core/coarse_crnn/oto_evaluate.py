@@ -30,6 +30,7 @@ class OtoEvalConfig:
     gate_alias_context_min_files: int = 25
     gate_alias_context_min_preutterance_acc_50ms: float = 0.55
     gate_max_hard_failure_rate: float = 0.08
+    gate_max_position_bad_rate_250ms: float = 0.30
     gate_min_worst_voicebank_preutterance_acc_50ms: float = 0.45
     gate_max_worst_voicebank_hard_failure_rate: float = 0.22
 
@@ -43,6 +44,7 @@ def evaluate_oto_manifest(rows: list[dict[str, Any]], config: OtoEvalConfig) -> 
     files: list[dict[str, Any]] = []
     failures: list[str] = []
     anchor_errors: dict[str, list[float]] = {name: [] for name in OTO_ANCHOR_NAMES}
+    anchor_signed: dict[str, list[float]] = {name: [] for name in OTO_ANCHOR_NAMES}
     param_errors: dict[str, list[float]] = {
         "offset": [],
         "consonant": [],
@@ -50,12 +52,15 @@ def evaluate_oto_manifest(rows: list[dict[str, Any]], config: OtoEvalConfig) -> 
         "preutterance": [],
         "overlap": [],
     }
+    param_signed: dict[str, list[float]] = {name: [] for name in param_errors}
     pre_hits_20 = 0
     pre_hits_50 = 0
     pre_count = 0
     low_conf_count = 0
     predicted_error_values: list[float] = []
     hard_failure_count = 0
+    position_bad_100_count = 0
+    position_bad_250_count = 0
     activity_profile_cache: dict[str, dict[str, float]] = {}
 
     for row in selected:
@@ -82,6 +87,8 @@ def evaluate_oto_manifest(rows: list[dict[str, Any]], config: OtoEvalConfig) -> 
         pre_count += 1
         low_conf_count += 1 if bool(result.get("low_confidence", False)) else 0
         hard_failure_count += 1 if bool(result.get("hard_failure", False)) else 0
+        position_bad_100_count += 1 if _is_position_bad(result["param_abs_errors_ms"], 100.0) else 0
+        position_bad_250_count += 1 if _is_position_bad(result["param_abs_errors_ms"], 250.0) else 0
         pred_err = result.get("predicted_error_ms")
         if pred_err is not None:
             predicted_error_values.append(float(pred_err))
@@ -99,6 +106,8 @@ def evaluate_oto_manifest(rows: list[dict[str, Any]], config: OtoEvalConfig) -> 
         "preutterance_acc_50ms": float(pre_hits_50) / float(pre_count) if pre_count else None,
         "low_confidence_rate": (float(low_conf_count) / float(pre_count)) if pre_count else None,
         "hard_failure_rate": (float(hard_failure_count) / float(pre_count)) if pre_count else None,
+        "position_bad_rate_100ms": (float(position_bad_100_count) / float(pre_count)) if pre_count else None,
+        "position_bad_rate_250ms": (float(position_bad_250_count) / float(pre_count)) if pre_count else None,
         "predicted_error_ms_mean": _mean(predicted_error_values),
         "by_language": _aggregate_by(files, "language"),
         "by_format": _aggregate_by(files, "format_type"),
@@ -145,14 +154,22 @@ def _evaluate_one(
     target_params = anchors_to_oto_params(target_anchors, duration_ms=float(row.get("duration_ms", prediction.duration_ms) or prediction.duration_ms))
     pred_anchor_dict = prediction.anchors.to_dict()
     target_anchor_dict = target_anchors.to_dict()
-    anchor_errors = {name: abs(float(pred_anchor_dict[name]) - float(target_anchor_dict[name])) for name in OTO_ANCHOR_NAMES}
-    param_errors = {
-        "offset": abs(float(prediction.params["offset"]) - float(target_params["offset"])),
-        "consonant": abs(float(prediction.params["consonant"]) - float(target_params["consonant"])),
-        "cutoff_abs": abs(float(prediction.anchors.cutoff) - float(target_anchors.cutoff)),
-        "preutterance": abs(float(prediction.params["preutterance"]) - float(target_params["preutterance"])),
-        "overlap": abs(float(prediction.params["overlap"]) - float(target_params["overlap"])),
+    # Signed error = pred - target. Positive means the model over-predicts
+    # (anchor placed later / region longer than ground truth). Averaged over
+    # the eval set this exposes systematic bias — e.g. a consistently positive
+    # consonant signed bias is the "dragged/stretched" symptom.
+    anchor_signed = {
+        name: float(pred_anchor_dict[name]) - float(target_anchor_dict[name]) for name in OTO_ANCHOR_NAMES
     }
+    param_signed = {
+        "offset": float(prediction.params["offset"]) - float(target_params["offset"]),
+        "consonant": float(prediction.params["consonant"]) - float(target_params["consonant"]),
+        "cutoff_abs": float(prediction.anchors.cutoff) - float(target_anchors.cutoff),
+        "preutterance": float(prediction.params["preutterance"]) - float(target_params["preutterance"]),
+        "overlap": float(prediction.params["overlap"]) - float(target_params["overlap"]),
+    }
+    anchor_errors = {name: abs(value) for name, value in anchor_signed.items()}
+    param_errors = {name: abs(value) for name, value in param_signed.items()}
     duration_ms = float(row.get("duration_ms", prediction.duration_ms) or prediction.duration_ms)
     profile = _analyze_activity_profile(
         str(row.get("audio", "") or ""),
@@ -184,6 +201,8 @@ def _evaluate_one(
         "confidence_components": dict(prediction.confidence_components or {}),
         "anchor_abs_errors_ms": anchor_errors,
         "param_abs_errors_ms": param_errors,
+        "anchor_signed_errors_ms": anchor_signed,
+        "param_signed_errors_ms": param_signed,
     }
 
 
@@ -214,6 +233,7 @@ def _aggregate_by(files: list[dict[str, Any]], key: str) -> dict[str, Any]:
             "preutterance_acc_50ms": _hit_rate(pre_errors, 50.0),
             "offset_mae_ms": _mean([float(row["param_abs_errors_ms"]["offset"]) for row in rows]),
             "cutoff_abs_mae_ms": _mean([float(row["param_abs_errors_ms"]["cutoff_abs"]) for row in rows]),
+            "position_bad_rate_250ms": _position_bad_rate(rows, 250.0),
             "hard_failure_rate": (
                 float(sum(1 for row in rows if bool(row.get("hard_failure", False)))) / float(len(rows))
                 if rows
@@ -248,6 +268,7 @@ def _aggregate_by_alias_context(files: list[dict[str, Any]]) -> dict[str, Any]:
             "consonant_mae_ms": _mean([float(row["param_abs_errors_ms"]["consonant"]) for row in rows]),
             "cutoff_abs_mae_ms": _mean([float(row["param_abs_errors_ms"]["cutoff_abs"]) for row in rows]),
             "overlap_mae_ms": _mean([float(row["param_abs_errors_ms"]["overlap"]) for row in rows]),
+            "position_bad_rate_250ms": _position_bad_rate(rows, 250.0),
         }
     return out
 
@@ -275,6 +296,7 @@ def _aggregate_by_alias_role(files: list[dict[str, Any]]) -> dict[str, Any]:
             "consonant_mae_ms": _mean([float(row["param_abs_errors_ms"]["consonant"]) for row in rows]),
             "cutoff_abs_mae_ms": _mean([float(row["param_abs_errors_ms"]["cutoff_abs"]) for row in rows]),
             "overlap_mae_ms": _mean([float(row["param_abs_errors_ms"]["overlap"]) for row in rows]),
+            "position_bad_rate_250ms": _position_bad_rate(rows, 250.0),
         }
     return out
 
@@ -309,6 +331,20 @@ def _mean(values: list[float]) -> float | None:
 
 def _hit_rate(values: list[float], threshold: float) -> float | None:
     return float(sum(1 for value in values if float(value) <= float(threshold))) / float(len(values)) if values else None
+
+
+def _is_position_bad(param_errors: dict[str, float], threshold_ms: float) -> bool:
+    return any(
+        float(param_errors.get(key, 0.0) or 0.0) > float(threshold_ms)
+        for key in ("offset", "consonant", "cutoff_abs", "preutterance")
+    )
+
+
+def _position_bad_rate(rows: list[dict[str, Any]], threshold_ms: float) -> float | None:
+    if not rows:
+        return None
+    bad = sum(1 for row in rows if _is_position_bad(dict(row.get("param_abs_errors_ms") or {}), threshold_ms))
+    return float(bad) / float(len(rows))
 
 
 def _worst_voicebank_summary(files: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -453,6 +489,20 @@ def _evaluate_gate(summary: dict[str, Any], config: OtoEvalConfig) -> dict[str, 
             ),
             "actual": hard_failure_rate,
             "threshold": float(config.gate_max_hard_failure_rate),
+            "operator": "<=",
+        }
+    )
+
+    position_bad_rate = _float_or_none(summary.get("position_bad_rate_250ms"))
+    checks.append(
+        {
+            "name": "position_bad_rate_250ms",
+            "passed": (
+                position_bad_rate is not None
+                and position_bad_rate <= float(config.gate_max_position_bad_rate_250ms)
+            ),
+            "actual": position_bad_rate,
+            "threshold": float(config.gate_max_position_bad_rate_250ms),
             "operator": "<=",
         }
     )

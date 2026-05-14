@@ -13,21 +13,12 @@ def should_use_vcv_target_window(
     formats: tuple[str, ...] | list[str] | None = None,
     alias_type: object = "",
     alias_role: object = "",
-    cvvc_alias_types: tuple[str, ...] | list[str] | None = None,
-    cvvc_alias_roles: tuple[str, ...] | list[str] | None = None,
 ) -> bool:
     fmt = str(format_type or "").strip().lower()
-    allowed = tuple(str(item or "").strip().lower() for item in (formats or ("vcv",)))
-    if not (bool(enabled) and fmt in allowed):
-        return False
     if fmt == "cvvc":
-        role_allowed = tuple(normalize_role(item) for item in (cvvc_alias_roles or ()))
-        role_text = normalize_role(alias_role)
-        if role_allowed and role_text:
-            return role_text in role_allowed
-        alias_allowed = tuple(str(item or "").strip().lower() for item in (cvvc_alias_types or ("vc", "vv")))
-        return str(alias_type or "").strip().lower() in alias_allowed
-    return True
+        return False
+    allowed = tuple(str(item or "").strip().lower() for item in (formats or ("vcv",)))
+    return bool(enabled) and fmt in allowed
 
 
 def target_window_frames_for(

@@ -4,12 +4,15 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from core.coarse_crnn.alias_role import ALIAS_ROLES, DEFAULT_ROLE, normalize_role
+from core.coarse_crnn.oto_boundary_decoding import BOUNDARY_SLOT_CLASSES
+from core.coarse_crnn.oto_sequence_alignment import SEQUENCE_BOUNDARY_KINDS
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES
 
 
 @dataclass
 class OtoCrnnConfig:
     n_mels: int = 64
+    feature_deltas: bool = True
     hidden: int = 96
     conv_channels: int = 96
     rnn_layers: int = 1
@@ -21,7 +24,6 @@ class OtoCrnnConfig:
     numeric_context_dim: int = 15
     enable_active_audio_context: bool = False
     enable_slot_context: bool = False
-    enable_format_residual_heads: bool = False
     enable_vcv_target_window: bool = True
     vcv_target_window_frames: int = 240
     # cvvc is excluded from windowing: cvvc vc/vv aliases are NOT uniformly
@@ -31,8 +33,6 @@ class OtoCrnnConfig:
     target_window_formats: tuple[str, ...] = ("vcv",)
     target_window_frame_overrides: tuple[str, ...] = ("vcv=240",)
     target_window_role_frame_overrides: tuple[str, ...] = ()
-    cvvc_target_window_alias_types: tuple[str, ...] = ()
-    cvvc_target_window_alias_roles: tuple[str, ...] = ("vc", "vv")
     anchor_heatmap_blend: float = 0.70
     vcv_window_heatmap_blend: float = 0.30
     scalar_target_mode: str = "relative_params"
@@ -45,6 +45,10 @@ class OtoCrnnConfig:
     uncertainty_min_logvar: float = -6.0
     uncertainty_max_logvar: float = 4.0
     confidence_error_scale_ms: float = 75.0
+    enable_boundary_slot_head: bool = False
+    boundary_slot_classes: tuple[str, ...] = tuple(BOUNDARY_SLOT_CLASSES)
+    enable_sequence_candidate_head: bool = False
+    sequence_candidate_classes: tuple[str, ...] = tuple(SEQUENCE_BOUNDARY_KINDS)
     enable_two_stage_refine: bool = True
     two_stage_refine_window_frames: int = 320
     anchor_names: tuple[str, ...] = tuple(OTO_ANCHOR_NAMES)
@@ -65,7 +69,6 @@ class OtoCrnnConfig:
     transition_types: tuple[str, ...] = ("cv", "vc", "vv", "cc", "vowel", "consonant", "br", "multi", "other")
     alias_roles: tuple[str, ...] = tuple(ALIAS_ROLES)
     enable_alias_role_embedding: bool = False
-    enable_extra_alias_flags: bool = False
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> "OtoCrnnConfig":
@@ -82,8 +85,6 @@ class OtoCrnnConfig:
             data["alias_types"] = ("other",)
         if payload is not None and "transition_types" not in data:
             data["transition_types"] = ("other",)
-        if payload is not None and "enable_format_residual_heads" not in data:
-            data["enable_format_residual_heads"] = False
         if payload is not None and "enable_vcv_target_window" not in data:
             data["enable_vcv_target_window"] = False
         if payload is not None and "vcv_target_window_frames" not in data:
@@ -94,10 +95,6 @@ class OtoCrnnConfig:
             data["target_window_frame_overrides"] = ()
         if payload is not None and "target_window_role_frame_overrides" not in data:
             data["target_window_role_frame_overrides"] = ()
-        if payload is not None and "cvvc_target_window_alias_types" not in data:
-            data["cvvc_target_window_alias_types"] = ("cv", "cv_head", "vc", "vv", "vcv", "mono", "br", "other")
-        if payload is not None and "cvvc_target_window_alias_roles" not in data:
-            data["cvvc_target_window_alias_roles"] = ("vc", "vv")
         if payload is not None and "scalar_target_mode" not in data:
             data["scalar_target_mode"] = "absolute_anchors"
         mode = str(data.get("scalar_target_mode", "") or "").strip().lower()
@@ -127,6 +124,14 @@ class OtoCrnnConfig:
             data["uncertainty_max_logvar"] = 4.0
         if payload is not None and "confidence_error_scale_ms" not in data:
             data["confidence_error_scale_ms"] = 75.0
+        if payload is not None and "enable_boundary_slot_head" not in data:
+            data["enable_boundary_slot_head"] = False
+        if payload is not None and "boundary_slot_classes" not in data:
+            data["boundary_slot_classes"] = tuple(BOUNDARY_SLOT_CLASSES)
+        if payload is not None and "enable_sequence_candidate_head" not in data:
+            data["enable_sequence_candidate_head"] = False
+        if payload is not None and "sequence_candidate_classes" not in data:
+            data["sequence_candidate_classes"] = tuple(SEQUENCE_BOUNDARY_KINDS)
         if payload is not None and "enable_two_stage_refine" not in data:
             data["enable_two_stage_refine"] = False
         if payload is not None and "two_stage_refine_window_frames" not in data:
@@ -137,8 +142,10 @@ class OtoCrnnConfig:
             data["alias_roles"] = ()
         if payload is not None and "enable_alias_role_embedding" not in data:
             data["enable_alias_role_embedding"] = False
-        if payload is not None and "enable_extra_alias_flags" not in data:
-            data["enable_extra_alias_flags"] = False
+        # Old checkpoints predate the Δ/Δ² channel stack. Default off so legacy
+        # state dicts keep their original Conv1d input width.
+        if payload is not None and "feature_deltas" not in data:
+            data["feature_deltas"] = False
         for key in (
             "anchor_names",
             "languages",
@@ -149,10 +156,10 @@ class OtoCrnnConfig:
             "target_window_formats",
             "target_window_frame_overrides",
             "target_window_role_frame_overrides",
-            "cvvc_target_window_alias_types",
-            "cvvc_target_window_alias_roles",
             "right_boundary_prior_blends",
             "right_boundary_prior_role_blends",
+            "boundary_slot_classes",
+            "sequence_candidate_classes",
         ):
             if key in data and not isinstance(data[key], tuple):
                 data[key] = tuple(data[key] or getattr(cls, key))
@@ -170,10 +177,10 @@ class OtoCrnnConfig:
         data["target_window_formats"] = list(self.target_window_formats)
         data["target_window_frame_overrides"] = list(self.target_window_frame_overrides)
         data["target_window_role_frame_overrides"] = list(self.target_window_role_frame_overrides)
-        data["cvvc_target_window_alias_types"] = list(self.cvvc_target_window_alias_types)
-        data["cvvc_target_window_alias_roles"] = list(self.cvvc_target_window_alias_roles)
         data["right_boundary_prior_blends"] = list(self.right_boundary_prior_blends)
         data["right_boundary_prior_role_blends"] = list(self.right_boundary_prior_role_blends)
+        data["boundary_slot_classes"] = list(self.boundary_slot_classes)
+        data["sequence_candidate_classes"] = list(self.sequence_candidate_classes)
         return data
 
 
@@ -192,8 +199,9 @@ def build_oto_model(config: OtoCrnnConfig):
             super().__init__()
             c = int(cfg.conv_channels)
             hidden2 = int(cfg.hidden) * 2
+            in_channels = int(cfg.n_mels) * (3 if bool(getattr(cfg, "feature_deltas", False)) else 1)
             self.net = nn.Sequential(
-                nn.Conv1d(int(cfg.n_mels), c, kernel_size=5, padding=2),
+                nn.Conv1d(in_channels, c, kernel_size=5, padding=2),
                 nn.BatchNorm1d(c),
                 nn.ReLU(),
                 nn.Dropout(float(cfg.dropout)),
@@ -234,15 +242,6 @@ def build_oto_model(config: OtoCrnnConfig):
                 self.alias_role_emb = None
                 self.prev_alias_role_emb = None
                 self.next_alias_role_emb = None
-            self.use_extra_alias_flags = bool(cfg.enable_extra_alias_flags)
-            if self.use_extra_alias_flags:
-                # Two scalars: is_diphthong, is_special.
-                self.extra_flags_proj = nn.Sequential(
-                    nn.Linear(2, int(cfg.cond_dim)),
-                    nn.Tanh(),
-                )
-            else:
-                self.extra_flags_proj = None
             self.context_proj = (
                 nn.Sequential(nn.Linear(int(cfg.numeric_context_dim), int(cfg.cond_dim)), nn.Tanh())
                 if int(cfg.numeric_context_dim) > 0
@@ -253,8 +252,6 @@ def build_oto_model(config: OtoCrnnConfig):
                 cond_count += 1
             if self.use_role_embedding:
                 cond_count += 3
-            if self.use_extra_alias_flags:
-                cond_count += 1
             cond_in = int(cfg.cond_dim) * cond_count
             self.cond_proj = nn.Sequential(
                 nn.Linear(cond_in, hidden2),
@@ -282,21 +279,31 @@ def build_oto_model(config: OtoCrnnConfig):
                 )
             else:
                 self.scalar_logvar_head = None
-            if bool(cfg.enable_format_residual_heads):
-                self.format_heatmap_heads = nn.ModuleList(
-                    [nn.Linear(hidden2, len(cfg.anchor_names)) for _ in range(fmt_count)]
-                )
-                self.format_scalar_heads = nn.ModuleList(
-                    [nn.Linear(hidden2 * 2, len(cfg.anchor_names)) for _ in range(fmt_count)]
-                )
-            else:
-                self.format_heatmap_heads = None
-                self.format_scalar_heads = None
             self.confidence_head = nn.Sequential(
                 nn.Linear(hidden2 * 2, hidden2 // 2),
                 nn.ReLU(),
                 nn.Linear(hidden2 // 2, 1),
             )
+            self.use_boundary_slot_head = bool(getattr(cfg, "enable_boundary_slot_head", False))
+            if self.use_boundary_slot_head:
+                self.boundary_slot_head = nn.Sequential(
+                    nn.Linear(hidden2 * 2, hidden2 // 2),
+                    nn.ReLU(),
+                    nn.Dropout(float(cfg.dropout)),
+                    nn.Linear(hidden2 // 2, max(1, len(cfg.boundary_slot_classes))),
+                )
+            else:
+                self.boundary_slot_head = None
+            self.use_sequence_candidate_head = bool(getattr(cfg, "enable_sequence_candidate_head", False))
+            if self.use_sequence_candidate_head:
+                self.sequence_candidate_head = nn.Sequential(
+                    nn.Linear(hidden2, hidden2),
+                    nn.ReLU(),
+                    nn.Dropout(float(cfg.dropout)),
+                    nn.Linear(hidden2, max(1, len(cfg.sequence_candidate_classes))),
+                )
+            else:
+                self.sequence_candidate_head = None
 
         def encode(self, x):
             y = x.transpose(1, 2)
@@ -319,7 +326,6 @@ def build_oto_model(config: OtoCrnnConfig):
             alias_role_ids=None,
             prev_alias_role_ids=None,
             next_alias_role_ids=None,
-            extra_alias_flags=None,
         ):
             torch = __import__("torch")
             encoded = self.encode(x)
@@ -373,13 +379,6 @@ def build_oto_model(config: OtoCrnnConfig):
                 cond_parts.append(self.alias_role_emb(alias_role_ids))
                 cond_parts.append(self.prev_alias_role_emb(prev_alias_role_ids))
                 cond_parts.append(self.next_alias_role_emb(next_alias_role_ids))
-            if self.use_extra_alias_flags and self.extra_flags_proj is not None:
-                if extra_alias_flags is None:
-                    extra_alias_flags = torch.zeros((batch, 2), dtype=torch.float32, device=device)
-                extra_alias_flags = extra_alias_flags.to(device=device, dtype=torch.float32)
-                if extra_alias_flags.dim() != 2 or int(extra_alias_flags.shape[-1]) != 2:
-                    extra_alias_flags = torch.zeros((batch, 2), dtype=torch.float32, device=device)
-                cond_parts.append(self.extra_flags_proj(extra_alias_flags))
             if self.context_proj is not None:
                 if context is None:
                     context = torch.zeros((batch, int(config.numeric_context_dim)), dtype=torch.float32, device=device)
@@ -390,21 +389,15 @@ def build_oto_model(config: OtoCrnnConfig):
             cond = self.cond_proj(torch.cat(cond_parts, dim=-1))
             encoded = encoded + cond[:, None, :]
             heatmap_logits = self.heatmap_head(encoded)
+            sequence_candidate_logits = (
+                self.sequence_candidate_head(encoded) if self.sequence_candidate_head is not None else None
+            )
             pooled_mean = encoded.mean(dim=1)
             pooled_max = encoded.max(dim=1).values
             pooled = torch.cat([pooled_mean, pooled_max], dim=-1)
             scalar_logits = self.scalar_head(pooled)
-            if self.format_heatmap_heads is not None and self.format_scalar_heads is not None:
-                heatmap_residual = torch.zeros_like(heatmap_logits)
-                scalar_residual = torch.zeros_like(scalar_logits)
-                for fmt_idx in torch.unique(format_ids).detach().cpu().tolist():
-                    fmt_i = int(fmt_idx)
-                    mask = format_ids == fmt_i
-                    heatmap_residual[mask] = self.format_heatmap_heads[fmt_i](encoded[mask])
-                    scalar_residual[mask] = self.format_scalar_heads[fmt_i](pooled[mask])
-                heatmap_logits = heatmap_logits + 0.35 * heatmap_residual
-                scalar_logits = scalar_logits + 0.35 * scalar_residual
             confidence_logits = self.confidence_head(pooled).squeeze(-1)
+            boundary_slot_logits = self.boundary_slot_head(pooled) if self.boundary_slot_head is not None else None
             scalar_logvar = None
             if self.use_uncertainty_head and self.scalar_logvar_head is not None:
                 scalar_logvar = self.scalar_logvar_head(pooled)
@@ -417,7 +410,9 @@ def build_oto_model(config: OtoCrnnConfig):
                 "heatmap_logits": heatmap_logits,
                 "scalar_logits": scalar_logits,
                 "confidence_logits": confidence_logits,
+                "boundary_slot_logits": boundary_slot_logits,
                 "scalar_logvar": scalar_logvar,
+                "sequence_candidate_logits": sequence_candidate_logits,
             }
 
     return OtoAnchorCRNN(config)

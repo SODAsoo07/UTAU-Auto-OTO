@@ -6,7 +6,7 @@ def test_oto_model_forward_shapes():
 
     from core.coarse_crnn.oto_model import OtoCrnnConfig, build_oto_model
 
-    cfg = OtoCrnnConfig(n_mels=8, hidden=4, conv_channels=6, cond_dim=3)
+    cfg = OtoCrnnConfig(n_mels=8, feature_deltas=False, hidden=4, conv_channels=6, cond_dim=3)
     model = build_oto_model(cfg)
     x = torch.randn(2, 11, 8)
     out = model(x, torch.tensor([0, 1]), torch.tensor([0, 2]))
@@ -21,7 +21,7 @@ def test_oto_model_forward_accepts_row_context():
 
     from core.coarse_crnn.oto_model import OtoCrnnConfig, build_oto_model
 
-    cfg = OtoCrnnConfig(n_mels=8, hidden=4, conv_channels=6, cond_dim=3, numeric_context_dim=2)
+    cfg = OtoCrnnConfig(n_mels=8, feature_deltas=False, hidden=4, conv_channels=6, cond_dim=3, numeric_context_dim=2)
     model = build_oto_model(cfg)
     x = torch.randn(2, 11, 8)
     context = torch.zeros((2, cfg.numeric_context_dim), dtype=torch.float32)
@@ -41,26 +41,6 @@ def test_oto_model_forward_accepts_row_context():
     assert out["heatmap_logits"].shape == (2, 11, len(cfg.anchor_names))
 
 
-def test_oto_model_forward_accepts_format_residual_heads():
-    import torch
-
-    from core.coarse_crnn.oto_model import OtoCrnnConfig, build_oto_model
-
-    cfg = OtoCrnnConfig(
-        n_mels=8,
-        hidden=4,
-        conv_channels=6,
-        cond_dim=3,
-        enable_format_residual_heads=True,
-    )
-    model = build_oto_model(cfg)
-    x = torch.randn(2, 11, 8)
-    out = model(x, torch.tensor([0, 1]), torch.tensor([0, 2]))
-
-    assert out["heatmap_logits"].shape == (2, 11, len(cfg.anchor_names))
-    assert out["scalar_logits"].shape == (2, len(cfg.anchor_names))
-
-
 def test_oto_model_forward_accepts_shared_heads_config():
     import torch
 
@@ -68,10 +48,10 @@ def test_oto_model_forward_accepts_shared_heads_config():
 
     cfg = OtoCrnnConfig(
         n_mels=8,
+        feature_deltas=False,
         hidden=4,
         conv_channels=6,
         cond_dim=3,
-        enable_format_residual_heads=False,
     )
     model = build_oto_model(cfg)
     x = torch.randn(2, 11, 8)
@@ -89,7 +69,6 @@ def test_oto_model_config_defaults_to_relative_params_for_new_training():
     assert cfg.scalar_target_mode == "relative_params"
     assert cfg.target_window_formats == ("vcv",)         # cvvc 윈도잉 버그로 vcv만 사용
     assert cfg.target_window_frame_overrides == ("vcv=240",)
-    assert cfg.cvvc_target_window_alias_types == ()       # cvvc 윈도잉 비활성화
     assert "cvvc=0.25" in cfg.right_boundary_prior_blends
     assert uses_relative_param_head(cfg)
 
@@ -102,7 +81,6 @@ def test_oto_model_config_keeps_old_checkpoints_absolute():
     assert cfg.scalar_target_mode == "absolute_anchors"
     assert cfg.target_window_formats == ("vcv",)
     assert cfg.target_window_frame_overrides == ()
-    assert "vc" in cfg.cvvc_target_window_alias_types
     assert cfg.right_boundary_prior_blends == ()
     assert not uses_relative_param_head(cfg)
 
@@ -114,7 +92,6 @@ def test_oto_model_config_defaults_role_features_off_for_old_payloads():
 
     assert cfg.alias_roles == ()
     assert cfg.enable_alias_role_embedding is False
-    assert cfg.enable_extra_alias_flags is False
 
 
 def test_oto_model_config_expands_active_audio_context_dim():
@@ -163,23 +140,21 @@ def test_oto_model_role_embedding_branch_only_when_enabled():
 
     from core.coarse_crnn.oto_model import OtoCrnnConfig, build_oto_model
 
-    cfg_off = OtoCrnnConfig(n_mels=8, hidden=4, conv_channels=6, cond_dim=3)
+    cfg_off = OtoCrnnConfig(n_mels=8, feature_deltas=False, hidden=4, conv_channels=6, cond_dim=3)
     cfg_on = OtoCrnnConfig(
         n_mels=8,
+        feature_deltas=False,
         hidden=4,
         conv_channels=6,
         cond_dim=3,
         enable_alias_role_embedding=True,
-        enable_extra_alias_flags=True,
     )
 
     model_off = build_oto_model(cfg_off)
     model_on = build_oto_model(cfg_on)
 
     assert model_off.alias_role_emb is None
-    assert model_off.extra_flags_proj is None
     assert model_on.alias_role_emb is not None
-    assert model_on.extra_flags_proj is not None
 
     x = torch.randn(2, 11, 8)
     out = model_on(
@@ -196,10 +171,53 @@ def test_oto_model_role_embedding_branch_only_when_enabled():
         alias_role_ids=torch.tensor([0, 5]),
         prev_alias_role_ids=torch.tensor([1, 2]),
         next_alias_role_ids=torch.tensor([3, 4]),
-        extra_alias_flags=torch.tensor([[1.0, 0.0], [0.0, 1.0]]),
     )
 
     assert out["scalar_logits"].shape == (2, len(cfg_on.anchor_names))
+
+
+def test_oto_model_boundary_slot_head_is_optional():
+    import torch
+
+    from core.coarse_crnn.oto_model import OtoCrnnConfig, build_oto_model
+
+    cfg_off = OtoCrnnConfig(n_mels=8, feature_deltas=False, hidden=4, conv_channels=6, cond_dim=3)
+    cfg_on = OtoCrnnConfig(
+        n_mels=8,
+        feature_deltas=False,
+        hidden=4,
+        conv_channels=6,
+        cond_dim=3,
+        enable_boundary_slot_head=True,
+    )
+
+    out_off = build_oto_model(cfg_off)(torch.randn(2, 11, 8))
+    out_on = build_oto_model(cfg_on)(torch.randn(2, 11, 8))
+
+    assert out_off["boundary_slot_logits"] is None
+    assert out_on["boundary_slot_logits"].shape == (2, len(cfg_on.boundary_slot_classes))
+
+
+def test_oto_model_sequence_candidate_head_is_optional():
+    import torch
+
+    from core.coarse_crnn.oto_model import OtoCrnnConfig, build_oto_model
+
+    cfg_off = OtoCrnnConfig(n_mels=8, feature_deltas=False, hidden=4, conv_channels=6, cond_dim=3)
+    cfg_on = OtoCrnnConfig(
+        n_mels=8,
+        feature_deltas=False,
+        hidden=4,
+        conv_channels=6,
+        cond_dim=3,
+        enable_sequence_candidate_head=True,
+    )
+
+    out_off = build_oto_model(cfg_off)(torch.randn(2, 11, 8))
+    out_on = build_oto_model(cfg_on)(torch.randn(2, 11, 8))
+
+    assert out_off["sequence_candidate_logits"] is None
+    assert out_on["sequence_candidate_logits"].shape == (2, 11, len(cfg_on.sequence_candidate_classes))
 
 
 def test_oto_model_alias_role_id_normalizes_legacy_names():
