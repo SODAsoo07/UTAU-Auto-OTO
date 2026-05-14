@@ -19,6 +19,14 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-frames", type=int, default=1200)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument(
+        "--lr-schedule",
+        choices=("cosine", "none"),
+        default="cosine",
+        help="cosine: short linear warmup then cosine decay to lr*lr-min-ratio. none: flat lr (legacy).",
+    )
+    parser.add_argument("--lr-warmup-ratio", type=float, default=0.03, help="Fraction of total steps spent in linear warmup.")
+    parser.add_argument("--lr-min-ratio", type=float, default=0.05, help="Final lr as a fraction of base lr at the end of cosine decay.")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--num-workers", type=int, default=0, help="0 keeps single-process loading, -1 means auto worker count.")
@@ -55,7 +63,6 @@ def main() -> int:
                         help="Loss multiplier for vc-role aliases (hard to predict in cvvc voicebanks).")
     parser.add_argument("--vv-role-loss-weight", type=float, default=2.0,
                         help="Loss multiplier for vv-role aliases.")
-    parser.add_argument("--format-residual-heads", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--vcv-target-window", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--vcv-window-frames", type=int, default=240)
     # cvvc excluded: vc/vv aliases are not uniformly distributed across audio
@@ -64,8 +71,6 @@ def main() -> int:
     parser.add_argument("--target-window-formats", default="vcv")
     parser.add_argument("--target-window-frame-overrides", default="vcv=240")
     parser.add_argument("--target-window-role-frame-overrides", default="")
-    parser.add_argument("--cvvc-target-window-alias-types", default="")
-    parser.add_argument("--cvvc-target-window-alias-roles", default="vc,vv")
     parser.add_argument("--anchor-heatmap-blend", type=float, default=0.70)
     parser.add_argument("--vcv-window-heatmap-blend", type=float, default=0.30)
     parser.add_argument(
@@ -83,6 +88,31 @@ def main() -> int:
     parser.add_argument("--uncertainty-head", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--uncertainty-loss-weight", type=float, default=0.30)
     parser.add_argument("--confidence-loss-weight", type=float, default=0.10)
+    parser.add_argument(
+        "--boundary-slot-head",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Add a boundary semantic classifier head for none/vowel-tail/vowel-transition/next-onset roles.",
+    )
+    parser.add_argument("--boundary-slot-loss-weight", type=float, default=0.15)
+    parser.add_argument(
+        "--boundary-ranking-loss-weight",
+        type=float,
+        default=0.18,
+        help="Hard-negative ranking loss for VC/VV/V-CV preutterance heatmap peaks.",
+    )
+    parser.add_argument(
+        "--sequence-candidate-head",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Add a frame-level boundary candidate kind head for the wav-level sequence aligner.",
+    )
+    parser.add_argument(
+        "--sequence-candidate-loss-weight",
+        type=float,
+        default=0.22,
+        help="BCE loss weight for the sequence candidate kind head.",
+    )
     parser.add_argument("--confidence-target-error-scale", type=float, default=0.08)
     parser.add_argument("--balanced-sampling", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--voicebank-balance-power", type=float, default=0.55)
@@ -112,12 +142,6 @@ def main() -> int:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Add alias_role embeddings (-CV/CV/CV-/V/V-/VC/VV/V-CV/EndBR/BR/OTHER/special) to the model conditioning. New checkpoint architecture; not loadable by older inference paths without role plumbing.",
-    )
-    parser.add_argument(
-        "--extra-alias-flags",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Add a small projection that ingests is_diphthong and is_special as scalar conditioning features.",
     )
     parser.add_argument(
         "--active-audio-context",
@@ -152,14 +176,11 @@ def main() -> int:
         n_mels=int(args.n_mels),
         hidden=int(args.hidden),
         conv_channels=int(args.conv_channels),
-        enable_format_residual_heads=bool(args.format_residual_heads),
         enable_vcv_target_window=bool(args.vcv_target_window),
         vcv_target_window_frames=int(args.vcv_window_frames),
         target_window_formats=tuple(item.strip().lower() for item in str(args.target_window_formats).split(",") if item.strip()),
         target_window_frame_overrides=tuple(item.strip().lower() for item in str(args.target_window_frame_overrides).split(",") if item.strip()),
         target_window_role_frame_overrides=tuple(item.strip().lower() for item in str(args.target_window_role_frame_overrides).split(",") if item.strip()),
-        cvvc_target_window_alias_types=tuple(item.strip().lower() for item in str(args.cvvc_target_window_alias_types).split(",") if item.strip()),
-        cvvc_target_window_alias_roles=tuple(item.strip().lower() for item in str(args.cvvc_target_window_alias_roles).split(",") if item.strip()),
         anchor_heatmap_blend=float(args.anchor_heatmap_blend),
         vcv_window_heatmap_blend=float(args.vcv_window_heatmap_blend),
         scalar_target_mode=str(args.scalar_target_mode),
@@ -167,10 +188,11 @@ def main() -> int:
         right_boundary_prior_blends=tuple(item.strip().lower() for item in str(args.right_boundary_prior_blends).split(",") if item.strip()),
         right_boundary_prior_role_blends=tuple(item.strip().lower() for item in str(args.right_boundary_prior_role_blends).split(",") if item.strip()),
         enable_uncertainty_head=bool(args.uncertainty_head),
+        enable_boundary_slot_head=bool(args.boundary_slot_head),
+        enable_sequence_candidate_head=bool(args.sequence_candidate_head),
         enable_two_stage_refine=bool(args.two_stage_refine),
         two_stage_refine_window_frames=int(args.two_stage_refine_window_frames),
         enable_alias_role_embedding=bool(args.alias_role_embedding),
-        enable_extra_alias_flags=bool(args.extra_alias_flags),
         enable_active_audio_context=enable_active_context,
         enable_slot_context=bool(args.slot_context),
         numeric_context_dim=numeric_context_dim,
@@ -178,6 +200,9 @@ def main() -> int:
     train_cfg = OtoTrainConfig(
         epochs=int(args.epochs),
         lr=float(args.lr),
+        lr_schedule=str(args.lr_schedule),
+        lr_warmup_ratio=float(args.lr_warmup_ratio),
+        lr_min_ratio=float(args.lr_min_ratio),
         batch_size=int(args.batch_size),
         max_frames=int(args.max_frames),
         device=str(args.device),
@@ -199,6 +224,9 @@ def main() -> int:
         vv_role_loss_weight=float(args.vv_role_loss_weight),
         uncertainty_loss_weight=float(args.uncertainty_loss_weight),
         confidence_loss_weight=float(args.confidence_loss_weight),
+        boundary_slot_loss_weight=float(args.boundary_slot_loss_weight),
+        boundary_ranking_loss_weight=float(args.boundary_ranking_loss_weight),
+        sequence_candidate_loss_weight=float(args.sequence_candidate_loss_weight),
         confidence_target_error_scale=float(args.confidence_target_error_scale),
         enable_balanced_sampling=bool(args.balanced_sampling),
         voicebank_balance_power=float(args.voicebank_balance_power),

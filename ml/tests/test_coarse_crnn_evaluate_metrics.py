@@ -38,3 +38,48 @@ def test_oto_anchor_metrics_focus_on_vowel_onsets_and_cv_transitions():
 
     assert [round(value * 1000.0) for value in vowel] == [20, 30]
     assert [round(value * 1000.0) for value in cv] == [20, 30]
+
+
+def test_oto_eval_position_bad_rate_uses_full_placement_params():
+    from core.coarse_crnn.oto_evaluate import _is_position_bad, _position_bad_rate
+    from ml.scripts.coarse_crnn.evaluate_oto_runtime import _summarize_variant
+
+    good = {
+        "param_abs_errors_ms": {
+            "offset": 20.0,
+            "consonant": 40.0,
+            "cutoff_abs": 30.0,
+            "preutterance": 25.0,
+            "overlap": 300.0,
+        },
+        "anchor_abs_errors_ms": {
+            "offset": 20.0,
+            "overlap": 300.0,
+            "preutterance": 25.0,
+            "consonant": 40.0,
+            "cutoff": 30.0,
+        },
+        "hard_failure": False,
+    }
+    bad = {
+        "param_abs_errors_ms": {
+            "offset": 260.0,
+            "consonant": 20.0,
+            "cutoff_abs": 20.0,
+            "preutterance": 20.0,
+            "overlap": 0.0,
+        },
+        "anchor_abs_errors_ms": {
+            "offset": 260.0,
+            "overlap": 0.0,
+            "preutterance": 20.0,
+            "consonant": 20.0,
+            "cutoff": 20.0,
+        },
+        "hard_failure": False,
+    }
+
+    assert not _is_position_bad(good["param_abs_errors_ms"], 250.0)
+    assert _is_position_bad(bad["param_abs_errors_ms"], 250.0)
+    assert _position_bad_rate([good, bad], 250.0) == 0.5
+    assert _summarize_variant([good, bad])["position_bad_rate_250ms"] == 0.5

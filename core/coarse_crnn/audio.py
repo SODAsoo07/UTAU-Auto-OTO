@@ -104,7 +104,7 @@ def _mel_to_hz(mel: float) -> float:
     return 700.0 * (10.0 ** (float(mel) / 2595.0) - 1.0)
 
 
-def mel_filterbank(*, sr: int, n_fft: int, n_mels: int, fmin: float = 30.0, fmax: float | None = None) -> np.ndarray:
+def mel_filterbank(*, sr: int, n_fft: int, n_mels: int, fmin: float = 60.0, fmax: float | None = None) -> np.ndarray:
     hi = float(fmax if fmax is not None else sr * 0.5)
     lo_mel = _hz_to_mel(float(fmin))
     hi_mel = _hz_to_mel(hi)
@@ -139,6 +139,12 @@ def log_mel_spectrogram(
     if x.size <= 0:
         return np.zeros((0, int(n_mels)), dtype=np.float32), float(hop_ms) / 1000.0
     x = x - float(np.mean(x, dtype=np.float64))
+    # Pre-STFT peak normalize so voicebank-level gain/mic differences are absorbed
+    # before mel computation. 95th-percentile target avoids being dragged by
+    # clipping spikes; -3 dBFS leaves headroom for residual peaks.
+    peak = float(np.quantile(np.abs(x), 0.95))
+    if peak > 1e-6:
+        x = (x * (0.7079457843841379 / peak)).astype(np.float32)
     win = max(16, int(round(float(sr) * float(frame_ms) / 1000.0)))
     hop = max(1, int(round(float(sr) * float(hop_ms) / 1000.0)))
     n_fft = 1
@@ -156,9 +162,85 @@ def log_mel_spectrogram(
     fb = mel_filterbank(sr=int(sr), n_fft=int(n_fft), n_mels=int(n_mels))
     mel = np.maximum(np.matmul(power, fb.T), 1e-10)
     logmel = np.log(mel).astype(np.float32)
-    mean = np.mean(logmel, axis=0, keepdims=True)
-    std = np.std(logmel, axis=0, keepdims=True) + 1e-5
-    return ((logmel - mean) / std).astype(np.float32), float(hop) / float(sr)
+    # Robust per-utterance CMVN: median + MAD instead of mean + std.
+    # MAD is insensitive to silence-dominated mean shifts and clipping outliers
+    # that would otherwise inflate std and flatten boundary signals. The 1.4826
+    # factor makes MAD an unbiased std estimator under a Gaussian assumption.
+    med = np.median(logmel, axis=0, keepdims=True)
+    mad = np.median(np.abs(logmel - med), axis=0, keepdims=True)
+    # Floor MAD well above zero. Silence-dominated clips have per-bin MAD ≈ 0,
+    # so a tiny epsilon floor would divide brief non-silent frames by ~1e-5 and
+    # explode the features to ~1e6 → fp16 overflow → NaN loss under AMP. 0.5 sits
+    # below the temporal MAD of any genuinely active mel bin, so normal clips are
+    # unaffected; the output clip is a hard safety net for residual edge cases.
+    mad = np.maximum(mad, 0.5)
+    normalized = (logmel - med) / (1.4826 * mad)
+    np.clip(normalized, -10.0, 10.0, out=normalized)
+    return normalized.astype(np.float32), float(hop) / float(sr)
+
+
+def add_log_mel_deltas(features: np.ndarray) -> np.ndarray:
+    arr = np.asarray(features, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[0] <= 0:
+        return arr
+    d1 = np.zeros_like(arr)
+    d2 = np.zeros_like(arr)
+    if arr.shape[0] >= 2:
+        d1[1:] = arr[1:] - arr[:-1]
+        d2[1:] = d1[1:] - d1[:-1]
+    return np.concatenate([arr, d1, d2], axis=1).astype(np.float32)
+
+
+def augment_log_mel(
+    features: np.ndarray,
+    *,
+    rng: np.random.Generator | None = None,
+    gain_db_range: float = 6.0,
+    pitch_shift_max_bins: int = 2,
+    freq_mask_count: int = 2,
+    freq_mask_max_bins: int = 8,
+    time_mask_count: int = 1,
+    time_mask_max_frames: int = 5,
+) -> np.ndarray:
+    arr = np.asarray(features, dtype=np.float32)
+    if arr.ndim != 2 or arr.size <= 0:
+        return arr
+    r = rng if rng is not None else np.random.default_rng()
+    out = arr.copy()
+    # Gain in log space: log(10**(g/20)) = g * ln(10)/20 ≈ g * 0.11513
+    if gain_db_range > 0.0:
+        g_db = float(r.uniform(-float(gain_db_range), float(gain_db_range)))
+        out = (out + np.float32(g_db * 0.11512925464970229)).astype(np.float32)
+    # Pitch shift approximation via mel-axis roll. Cheap surrogate; for finer
+    # control move to waveform-domain pitch_shift later.
+    if pitch_shift_max_bins > 0 and out.shape[1] > 2 * int(pitch_shift_max_bins):
+        shift = int(r.integers(-int(pitch_shift_max_bins), int(pitch_shift_max_bins) + 1))
+        if shift != 0:
+            out = np.roll(out, shift, axis=1)
+            if shift > 0:
+                out[:, :shift] = 0.0
+            else:
+                out[:, shift:] = 0.0
+    n_mels = int(out.shape[1])
+    for _ in range(max(0, int(freq_mask_count))):
+        if freq_mask_max_bins <= 0 or n_mels <= 2:
+            break
+        width = int(r.integers(0, int(freq_mask_max_bins) + 1))
+        if width <= 0:
+            continue
+        start = int(r.integers(0, max(1, n_mels - width)))
+        out[:, start : start + width] = 0.0
+    t_len = int(out.shape[0])
+    # Time-mask width capped tight (≈50 ms at 10 ms hop) so labels stay visible.
+    for _ in range(max(0, int(time_mask_count))):
+        if time_mask_max_frames <= 0 or t_len <= 2:
+            break
+        width = int(r.integers(0, int(time_mask_max_frames) + 1))
+        if width <= 0:
+            continue
+        start = int(r.integers(0, max(1, t_len - width)))
+        out[start : start + width, :] = 0.0
+    return out.astype(np.float32)
 
 
 def estimate_active_region_seconds(
@@ -229,4 +311,12 @@ def estimate_active_region_for_wav(path: str, *, target_sr: int = 16000) -> tupl
     return estimate_active_region_seconds(samples, sr)
 
 
-__all__ = ["estimate_active_region_for_wav", "estimate_active_region_seconds", "load_wav_mono", "log_mel_spectrogram", "mel_filterbank"]
+__all__ = [
+    "add_log_mel_deltas",
+    "augment_log_mel",
+    "estimate_active_region_for_wav",
+    "estimate_active_region_seconds",
+    "load_wav_mono",
+    "log_mel_spectrogram",
+    "mel_filterbank",
+]

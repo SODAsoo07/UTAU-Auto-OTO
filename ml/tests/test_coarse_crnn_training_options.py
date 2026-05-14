@@ -208,6 +208,98 @@ def test_active_audio_context_extends_numeric_context_to_18_dims():
     assert context[-3:].tolist() == pytest.approx([0.2, 0.9, 0.7])
 
 
+def test_boundary_slot_targets_follow_role_ids():
+    import torch
+
+    from core.coarse_crnn.oto_boundary_decoding import BOUNDARY_SLOT_CLASSES
+    from core.coarse_crnn.oto_model import OtoCrnnConfig, alias_role_id
+    from core.coarse_crnn.oto_training import _boundary_slot_targets_from_role_ids
+
+    cfg = OtoCrnnConfig()
+    role_ids = torch.tensor(
+        [
+            alias_role_id(cfg, "cv"),
+            alias_role_id(cfg, "vc"),
+            alias_role_id(cfg, "vv"),
+            alias_role_id(cfg, "v-cv"),
+        ],
+        dtype=torch.long,
+    )
+
+    targets = _boundary_slot_targets_from_role_ids(role_ids, cfg)
+
+    labels = [BOUNDARY_SLOT_CLASSES[int(idx)] for idx in targets.tolist()]
+    assert labels == ["none", "vowel_tail", "vowel_transition", "next_onset"]
+
+
+def test_sequence_candidate_heatmap_targets_role_boundary_kind():
+    from core.coarse_crnn.oto_sequence_alignment import SEQUENCE_BOUNDARY_KINDS
+    from core.coarse_crnn.oto_training import _make_sequence_candidate_heatmap
+
+    anchors = np.asarray([20.0, 40.0, 100.0, 140.0, 260.0], dtype=np.float32)
+
+    vc = _make_sequence_candidate_heatmap(
+        anchors,
+        "vc",
+        frame_count=40,
+        hop_sec=0.01,
+        sigma_frames=1.0,
+        classes=SEQUENCE_BOUNDARY_KINDS,
+    )
+    cv = _make_sequence_candidate_heatmap(
+        anchors,
+        "cv",
+        frame_count=40,
+        hop_sec=0.01,
+        sigma_frames=1.0,
+        classes=SEQUENCE_BOUNDARY_KINDS,
+    )
+
+    tail_idx = SEQUENCE_BOUNDARY_KINDS.index("vowel_tail")
+    onset_idx = SEQUENCE_BOUNDARY_KINDS.index("vowel_onset")
+    transition_idx = SEQUENCE_BOUNDARY_KINDS.index("vowel_transition")
+
+    assert int(np.argmax(vc[:, tail_idx])) == 10
+    assert int(np.argmax(vc[:, transition_idx])) == 14
+    assert int(np.argmax(cv[:, onset_idx])) == 10
+
+
+def test_collate_keeps_sequence_candidate_heatmap_after_anchor_heatmap():
+    from core.coarse_crnn.oto_training import _collate
+
+    item = (
+        np.zeros((3, 4), dtype=np.float32),  # features
+        np.ones((3, 5), dtype=np.float32),  # anchor heatmap
+        np.full((3, 4), 0.5, dtype=np.float32),  # sequence candidate heatmap
+        np.zeros((5,), dtype=np.float32),  # scalar
+        np.zeros((5,), dtype=np.float32),  # anchors
+        300.0,
+        0,
+        0,
+        np.zeros((15,), dtype=np.float32),
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        np.zeros((2,), dtype=np.float32),
+        1.0,
+        0,
+        0,
+    )
+
+    batch = _collate([item])
+
+    assert batch[1].shape == (1, 3, 5)
+    assert batch[2].shape == (1, 3, 4)
+    assert float(batch[2][0, 0, 0]) == 0.5
+    assert batch[-1].shape == (1, 3)
+
+
 def test_row_order_violation_multiplier_disabled_returns_one():
     """alpha=0 (default) keeps the legacy behaviour for every row."""
     from core.coarse_crnn.oto_training import _row_order_violation_multiplier

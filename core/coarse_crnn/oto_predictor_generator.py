@@ -15,10 +15,12 @@ from core.coarse_crnn.oto_audio_candidates import (
     find_best_vowel_segment,
     find_nearest_onset_after,
 )
+from core.coarse_crnn.oto_boundary_decoding import decode_boundary_slot_graph_for_states
 from core.coarse_crnn.oto_inference import predict_oto_with_model
 from core.coarse_crnn.oto_model import load_oto_checkpoint
+from core.coarse_crnn.oto_sequence_alignment import decode_sequence_alignment_for_states, parse_sequence_role_allowlist
 from core.coarse_crnn.oto_targets import OtoAnchors, anchors_to_oto_params, oto_params_to_anchors, parse_alias_components
-from core.coarse_crnn.slot_graph import slot_type_for_role
+from core.coarse_crnn.slot_graph import slot_role_order_norm, slot_type_for_role
 from core.coarse_crnn.training import resolve_torch_device
 from core.no_mfa_oto_builder import resolve_no_mfa_source_oto
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
@@ -27,7 +29,11 @@ from core.oto_normalization import normalize_wav_key
 
 
 DEFAULT_OTO_CRNN_MODEL_NAME = "oto_anchor_crnn_role_v2.pt"
-_ORDER_TOKEN_RE = re.compile(r"[A-Za-z0-9\uAC00-\uD7A3]+")
+_EXPERIMENTAL_OTO_CRNN_MODEL_MARKERS = ("boundary_slot",)
+_ORDER_TOKEN_RE = re.compile(r"[A-Za-z0-9\uAC00-\uD7A3\u3041-\u3096\u30A1-\u30FA\u30FC]+")
+_HANGUL_CHAR_RE = re.compile(r"[\uAC00-\uD7A3]")
+_KANA_RE = re.compile(r"[\u3041-\u3096\u30A1-\u30FA\u30FC]")
+_TOKEN_SEP_RE = re.compile(r"[\s,_\-/|']+")
 _CODA_SUFFIXES = ("ng", "n", "m", "l", "h")
 _VOWEL_ID_NORM = {
     "a": 1.0 / 6.0,
@@ -55,6 +61,8 @@ class _PredictRow:
     base_params: dict[str, float] | None = None
     base_fallback_allowed: bool = True
     base_fallback_order_ratio: float = 1.0
+    uses_filename_slots: bool = False
+    alias_role: str = ""
 
 
 def generate_oto_with_crnn_predictor(
@@ -80,9 +88,11 @@ def generate_oto_with_crnn_predictor(
     if not output_file:
         return 0, 0, ["출력 OTO 경로가 비어 있습니다."]
 
+    lang = str(language or "").strip().lower() or "korean"
     rows, total, missing = _prepare_prediction_rows(
         wav_dir=wav_dir,
         source_oto_path=source,
+        language=lang,
         special_aliases=_normalize_special_aliases(special_aliases),
     )
     if not rows:
@@ -105,6 +115,19 @@ def generate_oto_with_crnn_predictor(
     torch_device = resolve_torch_device(torch, device)
     try:
         model, config, _meta = load_oto_checkpoint(model_file, map_location=str(torch_device))
+        if _is_experimental_oto_crnn_model(model_file, config) and not _env_bool(
+            "UTOA_OTO_CRNN_ALLOW_EXPERIMENTAL_MODEL",
+            False,
+        ):
+            name = os.path.basename(str(model_file))
+            return (
+                0,
+                total,
+                [
+                    "CRNN OTO experimental model is blocked by default: "
+                    f"{name}. Set UTOA_OTO_CRNN_ALLOW_EXPERIMENTAL_MODEL=1 only for controlled tests."
+                ],
+            )
         model = model.to(torch_device).eval()
     except Exception as exc:
         return 0, total, [f"CRNN OTO 모델 로드 실패: {exc}"]
@@ -117,6 +140,13 @@ def generate_oto_with_crnn_predictor(
     activity_fallback_count = 0
     candidate_snap_count = 0
     vc_matcher_count = 0
+    final_right_guard_count = 0
+    boundary_slot_graph_count = 0
+    boundary_slot_graph_hold_count = 0
+    alias_slot_lock_count = 0
+    alias_slot_lock_hold_count = 0
+    sequence_aligned_count = 0
+    sequence_align_hold_count = 0
     row_order_aligned_count = 0
     row_order_hold_count = 0
     base_fallback_blocked_rows = 0
@@ -126,7 +156,6 @@ def generate_oto_with_crnn_predictor(
     audio_candidate_sequence_state: dict[str, int] = {}
     use_base_oto_fallback = _env_bool("UTOA_OTO_CRNN_USE_BASE_OTO_FALLBACK", False)
     row_order_align_enable = _env_bool("UTOA_OTO_CRNN_ROW_ORDER_ALIGN_ENABLE", True)
-    lang = str(language or "").strip().lower() or "korean"
     suffix = _normalize_alias_suffix(alias_suffix)
     for idx, row in enumerate(rows):
         try:
@@ -207,8 +236,19 @@ def generate_oto_with_crnn_predictor(
                     "predicted_error_ms": getattr(pred, "predicted_error_ms", None),
                     "predicted_low_confidence": bool(getattr(pred, "low_confidence", False)),
                     "confidence_components": dict(getattr(pred, "confidence_components", None) or {}),
+                    "sequence_candidate_times_ms": list(getattr(pred, "sequence_candidate_times_ms", None) or []),
+                    "sequence_candidate_scores": list(getattr(pred, "sequence_candidate_scores", None) or []),
+                    "sequence_candidate_classes": list(getattr(pred, "sequence_candidate_classes", None) or []),
                     "aligned_by_row_order": False,
                     "row_order_hold": False,
+                    "boundary_slot_graph": False,
+                    "boundary_slot_graph_reason": "",
+                    "alias_slot_locked": False,
+                    "alias_slot_lock_hold": False,
+                    "alias_slot_lock_reason": "",
+                    "sequence_aligned": False,
+                    "sequence_alignment_hold": False,
+                    "sequence_alignment_reason": "",
                 }
             )
         except Exception as exc:
@@ -221,7 +261,8 @@ def generate_oto_with_crnn_predictor(
     if not row_states:
         return 0, total, ["CRNN OTO 예측 결과가 비었습니다."]
 
-    if row_order_align_enable:
+    sequence_align_enable = _env_bool("UTOA_OTO_CRNN_SEQUENCE_ALIGN_ENABLE", True)
+    if row_order_align_enable and not sequence_align_enable:
         aligned, held = _apply_monotonic_row_order_alignment(
             row_states=row_states,
             cache=audio_candidate_cache,
@@ -232,59 +273,126 @@ def generate_oto_with_crnn_predictor(
         row_order_aligned_count += int(aligned)
         row_order_hold_count += int(held)
 
+    if _env_bool("UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_ENABLE", True):
+        moved, held = _apply_alias_slot_lock_alignment(
+            row_states=row_states,
+            cache=audio_candidate_cache,
+            config=config,
+            max_shift_ms=max(0.0, _env_float("UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_MAX_SHIFT_MS", 3000.0)),
+            min_move_ms=max(0.0, _env_float("UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_MIN_MOVE_MS", 30.0)),
+            mode=str(os.environ.get("UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_MODE", "direct") or "direct"),
+        )
+        alias_slot_lock_count += int(moved)
+        alias_slot_lock_hold_count += int(held)
+
+    if sequence_align_enable:
+        aligned, held = decode_sequence_alignment_for_states(
+            row_states=row_states,
+            language=lang,
+            role_resolver=lambda row: _safe_alias_role(
+                lang,
+                getattr(row, "alias", ""),
+                alias_type=_safe_alias_type(lang, getattr(row, "alias", "")),
+                is_special=bool(getattr(row, "is_special", False)),
+            ),
+            candidate_getter=lambda wav_abs: _get_audio_candidates(str(wav_abs), cache=audio_candidate_cache, config=config),
+            max_shift_ms=max(0.0, _env_float("UTOA_OTO_CRNN_SEQUENCE_ALIGN_MAX_SHIFT_MS", 220.0)),
+            anchor_blend=_clamp(_env_float("UTOA_OTO_CRNN_SEQUENCE_ALIGN_ANCHOR_BLEND", 0.60), 0.0, 1.0),
+            boundary_blend=_clamp(_env_float("UTOA_OTO_CRNN_SEQUENCE_ALIGN_BOUNDARY_BLEND", 0.45), 0.0, 1.0),
+            min_move_ms=max(0.0, _env_float("UTOA_OTO_CRNN_SEQUENCE_ALIGN_MIN_MOVE_MS", 8.0)),
+            model_score_blend=_clamp(_env_float("UTOA_OTO_CRNN_SEQUENCE_ALIGN_MODEL_SCORE_BLEND", 0.35), 0.0, 1.0),
+            allowed_roles=parse_sequence_role_allowlist(os.environ.get("UTOA_OTO_CRNN_SEQUENCE_ALIGN_ROLES", "vc,vv")),
+        )
+        sequence_aligned_count += int(aligned)
+        sequence_align_hold_count += int(held)
+
+    if _env_bool("UTOA_OTO_CRNN_BOUNDARY_SLOT_GRAPH_ENABLE", False):
+        moved, held = decode_boundary_slot_graph_for_states(
+            row_states=row_states,
+            language=lang,
+            role_resolver=lambda row: _safe_alias_role(
+                lang,
+                getattr(row, "alias", ""),
+                alias_type=_safe_alias_type(lang, getattr(row, "alias", "")),
+                is_special=bool(getattr(row, "is_special", False)),
+            ),
+            candidate_getter=lambda wav_abs: _get_audio_candidates(str(wav_abs), cache=audio_candidate_cache, config=config),
+            max_delta_ms=max(0.0, _env_float("UTOA_OTO_CRNN_BOUNDARY_SLOT_GRAPH_MAX_DELTA_MS", 260.0)),
+            blend=_clamp(_env_float("UTOA_OTO_CRNN_BOUNDARY_SLOT_GRAPH_BLEND", 0.72), 0.0, 1.0),
+        )
+        boundary_slot_graph_count += int(moved)
+        boundary_slot_graph_hold_count += int(held)
+
+    allow_legacy_candidate_postprocess = (not sequence_align_enable) or _env_bool(
+        "UTOA_OTO_CRNN_SEQUENCE_ALIGN_ALLOW_LEGACY_CANDIDATE_POSTPROCESS",
+        False,
+    )
     for state in row_states:
         row = state["row"]
         params = dict(state["params"])
-        params, vc_reason = _apply_vc_candidate_matcher(
-            predicted_params=params,
-            wav_path=row.wav_abs,
-            language=lang,
-            alias=row.alias,
-            format_type=fmt,
-            duration_ms=float(state.get("duration_ms", 0.0) or 0.0),
-            cache=audio_candidate_cache,
-            config=config,
-            is_special=row.is_special,
-            predicted_confidence=float(state.get("predicted_confidence", 0.0) or 0.0),
-            predicted_error_ms=state.get("predicted_error_ms", None),
-            predicted_low_confidence=bool(state.get("predicted_low_confidence", False)),
-            confidence_components=state.get("confidence_components", None),
-        )
-        if vc_reason:
-            vc_matcher_count += 1
-            params, _ = _apply_conservative_right_boundary_guard(
-                params,
+        if allow_legacy_candidate_postprocess:
+            params, vc_reason = _apply_vc_candidate_matcher(
+                predicted_params=params,
+                wav_path=row.wav_abs,
                 language=lang,
                 alias=row.alias,
+                format_type=fmt,
                 duration_ms=float(state.get("duration_ms", 0.0) or 0.0),
+                cache=audio_candidate_cache,
+                config=config,
                 is_special=row.is_special,
+                predicted_confidence=float(state.get("predicted_confidence", 0.0) or 0.0),
+                predicted_error_ms=state.get("predicted_error_ms", None),
+                predicted_low_confidence=bool(state.get("predicted_low_confidence", False)),
+                confidence_components=state.get("confidence_components", None),
             )
-        params, snap_reason = _apply_audio_candidate_snap(
-            predicted_params=params,
-            wav_path=row.wav_abs,
-            language=lang,
-            format_type=fmt,
-            alias=row.alias,
-            duration_ms=float(state.get("duration_ms", 0.0) or 0.0),
-            cache=audio_candidate_cache,
-            sequence_state=audio_candidate_sequence_state,
-            config=config,
-            is_special=row.is_special,
-            predicted_confidence=float(state.get("predicted_confidence", 0.0) or 0.0),
-            predicted_error_ms=state.get("predicted_error_ms", None),
-            predicted_low_confidence=bool(state.get("predicted_low_confidence", False)),
-            confidence_components=state.get("confidence_components", None),
-        )
-        if snap_reason:
-            candidate_snap_count += 1
-            params, _snap_guard_changed = _apply_conservative_right_boundary_guard(
-                params,
+            if vc_reason:
+                vc_matcher_count += 1
+                params, _ = _apply_conservative_right_boundary_guard(
+                    params,
+                    language=lang,
+                    alias=row.alias,
+                    duration_ms=float(state.get("duration_ms", 0.0) or 0.0),
+                    is_special=row.is_special,
+                )
+            params, snap_reason = _apply_audio_candidate_snap(
+                predicted_params=params,
+                wav_path=row.wav_abs,
                 language=lang,
+                format_type=fmt,
                 alias=row.alias,
                 duration_ms=float(state.get("duration_ms", 0.0) or 0.0),
+                cache=audio_candidate_cache,
+                sequence_state=audio_candidate_sequence_state,
+                config=config,
                 is_special=row.is_special,
+                predicted_confidence=float(state.get("predicted_confidence", 0.0) or 0.0),
+                predicted_error_ms=state.get("predicted_error_ms", None),
+                predicted_low_confidence=bool(state.get("predicted_low_confidence", False)),
+                confidence_components=state.get("confidence_components", None),
             )
+            if snap_reason:
+                candidate_snap_count += 1
+                params, _snap_guard_changed = _apply_conservative_right_boundary_guard(
+                    params,
+                    language=lang,
+                    alias=row.alias,
+                    duration_ms=float(state.get("duration_ms", 0.0) or 0.0),
+                    is_special=row.is_special,
+                )
         state["params"] = params
+        if _env_bool("UTOA_OTO_CRNN_FINAL_RIGHT_GUARD_ENABLE", True):
+            guarded, guard_changed = _apply_conservative_right_boundary_guard(
+                dict(state["params"]),
+                language=lang,
+                alias=row.alias,
+                duration_ms=float(state.get("duration_ms", 0.0) or 0.0),
+                is_special=row.is_special,
+            )
+            if guard_changed:
+                final_right_guard_count += 1
+                state["params"] = guarded
+                params = guarded
         out_lines.append(
             f"{row.wav_rel}={state['alias']},"
             f"{float(params['offset']):.3f},"
@@ -315,6 +423,20 @@ def generate_oto_with_crnn_predictor(
         _log(callback, f"[OTO-CRNN] audio-candidate snap rows={candidate_snap_count}/{len(out_lines)}")
     if vc_matcher_count:
         _log(callback, f"[OTO-CRNN] vc-candidate matcher rows={vc_matcher_count}/{len(out_lines)}")
+    if final_right_guard_count:
+        _log(callback, f"[OTO-CRNN] final right-boundary guarded rows={final_right_guard_count}/{len(out_lines)}")
+    if boundary_slot_graph_count:
+        _log(callback, f"[OTO-CRNN] boundary slot graph rows={boundary_slot_graph_count}/{len(out_lines)}")
+    if boundary_slot_graph_hold_count:
+        _log(callback, f"[OTO-CRNN] boundary slot graph held rows={boundary_slot_graph_hold_count}/{len(out_lines)}")
+    if alias_slot_lock_count:
+        _log(callback, f"[OTO-CRNN] alias slot locked rows={alias_slot_lock_count}/{len(out_lines)}")
+    if alias_slot_lock_hold_count:
+        _log(callback, f"[OTO-CRNN] alias slot lock held rows={alias_slot_lock_hold_count}/{len(out_lines)}")
+    if sequence_aligned_count:
+        _log(callback, f"[OTO-CRNN] sequence aligned rows={sequence_aligned_count}/{len(out_lines)}")
+    if sequence_align_hold_count:
+        _log(callback, f"[OTO-CRNN] sequence alignment held rows={sequence_align_hold_count}/{len(out_lines)}")
     if row_order_aligned_count:
         _log(callback, f"[OTO-CRNN] row-order aligned rows={row_order_aligned_count}/{len(out_lines)}")
     if row_order_hold_count:
@@ -350,10 +472,20 @@ def resolve_oto_crnn_model_path(path_hint: str = "") -> str:
     return ""
 
 
+def _is_experimental_oto_crnn_model(model_path: str, config: object) -> bool:
+    # NOTE: enable_boundary_slot_head used to gate here, but the boundary slot
+    # head became the train_oto default — every standard model now ships with
+    # it, so config-based gating blocked all of them. Experimental models are
+    # now flagged explicitly via a filename marker instead.
+    name = os.path.basename(str(model_path or "")).lower()
+    return any(marker in name for marker in _EXPERIMENTAL_OTO_CRNN_MODEL_MARKERS)
+
+
 def _prepare_prediction_rows(
     *,
     wav_dir: str,
     source_oto_path: str,
+    language: str = "",
     special_aliases: frozenset[str] | None = None,
 ) -> tuple[list[_PredictRow], int, set[str]]:
     wav_root = os.path.abspath(str(wav_dir or "").strip())
@@ -400,7 +532,7 @@ def _prepare_prediction_rows(
     per_wav_fallback_ratio: dict[str, float] = {}
     for wav_rel, items in per_wav.items():
         aliases = [str(item.get("alias", "") or "") for item in items]
-        ratio, expected_count, is_cvvc_like = _estimate_filename_alias_order_ratio(wav_rel, aliases)
+        ratio, expected_count, is_cvvc_like = _estimate_filename_alias_order_ratio(wav_rel, aliases, language=language)
         allow = True
         min_expected = quality_gate_min_expected_tokens_cvvc if is_cvvc_like else quality_gate_min_expected_tokens
         min_ratio = quality_gate_min_ratio_cvvc if is_cvvc_like else quality_gate_min_ratio
@@ -412,11 +544,16 @@ def _prepare_prediction_rows(
     out: list[_PredictRow] = []
     for wav_rel, items in per_wav.items():
         count = len(items)
+        sequenced_items = _assign_filename_slot_indices(
+            wav_rel=wav_rel,
+            items=items,
+            language=language,
+        )
+        sequence_neighbors = _sequence_neighbors(sequenced_items)
         fallback_allowed = bool(per_wav_fallback_allowed.get(wav_rel, True))
         fallback_ratio = float(per_wav_fallback_ratio.get(wav_rel, 1.0))
-        for idx, row in enumerate(items):
-            prev_alias = str(items[idx - 1].get("alias", "") or "") if idx > 0 else ""
-            next_alias = str(items[idx + 1].get("alias", "") or "") if idx + 1 < count else ""
+        for idx, row in enumerate(sequenced_items):
+            prev_alias, next_alias = sequence_neighbors.get(id(row), ("", ""))
             alias_text = str(row["alias"])
             out.append(
                 _PredictRow(
@@ -425,14 +562,16 @@ def _prepare_prediction_rows(
                     alias=alias_text,
                     prev_alias=prev_alias,
                     next_alias=next_alias,
-                    row_index=idx,
-                    row_count=count,
+                    row_index=int(row.get("model_row_index", idx) or 0),
+                    row_count=max(1, int(row.get("model_row_count", count) or count)),
                     is_special=_alias_is_special(alias_text, special_set),
                     prev_is_special=_alias_is_special(prev_alias, special_set),
                     next_is_special=_alias_is_special(next_alias, special_set),
                     base_params=dict(row.get("base_params") or {}) or None,
                     base_fallback_allowed=fallback_allowed,
                     base_fallback_order_ratio=fallback_ratio,
+                    uses_filename_slots=bool(row.get("uses_filename_slots", False)),
+                    alias_role=str(row.get("alias_role", "") or ""),
                 )
             )
     return out, total, missing
@@ -451,6 +590,275 @@ def _normalize_special_aliases(
     return frozenset(cleaned)
 
 
+def _apply_alias_slot_lock_alignment(
+    *,
+    row_states: list[dict[str, Any]],
+    cache: dict[str, AudioCandidates | None],
+    config: object,
+    max_shift_ms: float,
+    min_move_ms: float,
+    mode: str = "direct",
+) -> tuple[int, int]:
+    moved = 0
+    held = 0
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for state in row_states:
+        row = state.get("row")
+        if row is None or not bool(getattr(row, "uses_filename_slots", False)):
+            continue
+        groups.setdefault(str(getattr(row, "wav_abs", "")), []).append(state)
+
+    for wav_abs, states in groups.items():
+        if not states:
+            continue
+        slot_count = max(1, max(int(getattr(state.get("row"), "row_count", 1) or 1) for state in states))
+        if slot_count < 2:
+            continue
+        audio = _get_audio_candidates(str(wav_abs), cache=cache, config=config)
+        if audio is None:
+            held += len(states)
+            continue
+        slot_times = _pick_alias_slot_times(audio, slot_count=slot_count)
+        if len(slot_times) < slot_count:
+            held += len(states)
+            continue
+        for state in states:
+            row = state.get("row")
+            target_idx = max(0, min(slot_count - 1, int(getattr(row, "row_index", 0) or 0)))
+            role = normalize_role(str(getattr(row, "alias_role", "") or ""))
+            if not role:
+                role = normalize_role(
+                    _safe_alias_role(
+                        str(getattr(row, "language", "") or ""),
+                        str(getattr(row, "alias", "") or ""),
+                        alias_type=_safe_alias_type(str(getattr(row, "language", "") or ""), str(getattr(row, "alias", "") or "")),
+                        is_special=bool(getattr(row, "is_special", False)),
+                    )
+                )
+            target_time_ms = _alias_slot_lock_target_time(
+                audio,
+                role=role,
+                target_slot_idx=target_idx,
+                slot_times=slot_times,
+            )
+            changed = _translate_state_to_alias_slot(
+                state,
+                target_slot_idx=target_idx,
+                slot_times=slot_times,
+                target_time_ms=target_time_ms,
+                max_shift_ms=max_shift_ms,
+                min_move_ms=min_move_ms,
+                mode=mode,
+            )
+            if changed:
+                moved += 1
+            elif bool(state.get("alias_slot_lock_hold", False)):
+                held += 1
+    return moved, held
+
+
+def _alias_slot_lock_target_time(
+    audio: AudioCandidates,
+    *,
+    role: str,
+    target_slot_idx: int,
+    slot_times: list[float],
+) -> float:
+    idx = max(0, min(len(slot_times) - 1, int(target_slot_idx)))
+    slot_time = float(slot_times[idx])
+    if normalize_role(role) != "vc":
+        return slot_time
+
+    duration = max(1.0, float(getattr(audio, "duration_ms", 0.0) or 1.0))
+    active_end = min(duration, float(getattr(audio, "active_end_ms", duration) or duration))
+    right_slot = float(slot_times[idx + 1]) if idx + 1 < len(slot_times) else active_end
+    if right_slot <= slot_time:
+        right_slot = max(slot_time + 1.0, active_end)
+
+    best_seg = None
+    best_score = -1.0e9
+    for seg in list(getattr(audio, "stable_vowel_segments", []) or []):
+        start = float(getattr(seg, "start_ms", getattr(seg, "center_ms", 0.0)) or 0.0)
+        end = float(getattr(seg, "end_ms", getattr(seg, "center_ms", 0.0)) or 0.0)
+        center = float(getattr(seg, "center_ms", (start + end) * 0.5) or 0.0)
+        if end < slot_time - 35.0 or start > right_slot + 120.0:
+            continue
+        conf = float(getattr(seg, "vowel_confidence", 0.0) or 0.0)
+        voiced = float(getattr(seg, "voiced_score", 0.0) or 0.0)
+        stable = float(getattr(seg, "stability_score", 0.0) or 0.0)
+        quality = (0.45 * conf) + (0.35 * voiced) + (0.20 * stable)
+        distance_penalty = abs(center - slot_time) / max(1.0, right_slot - slot_time)
+        score = quality - (0.42 * distance_penalty)
+        if score > best_score:
+            best_score = score
+            best_seg = seg
+
+    fallback_ratio = _clamp(_env_float("UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_VC_FALLBACK_RATIO", 0.62), 0.0, 1.0)
+    if best_seg is None:
+        return slot_time + ((right_slot - slot_time) * fallback_ratio)
+
+    vowel_end = float(getattr(best_seg, "end_ms", getattr(best_seg, "center_ms", slot_time)) or slot_time)
+    onset_window = max(60.0, min(520.0, (right_slot - vowel_end) + 120.0))
+    onset = find_nearest_onset_after(audio, vowel_end, search_window_ms=onset_window)
+    transition_ratio = _clamp(_env_float("UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_VC_TARGET_RATIO", 0.62), 0.0, 1.0)
+    if onset is None:
+        return max(0.0, min(duration, vowel_end))
+    onset_ms = float(getattr(onset, "time_ms", 0.0) or 0.0)
+    if onset_ms <= vowel_end:
+        return max(0.0, min(duration, vowel_end))
+    target = vowel_end + ((onset_ms - vowel_end) * transition_ratio)
+    return max(0.0, min(duration, target))
+
+
+def _pick_alias_slot_times(audio: AudioCandidates, *, slot_count: int) -> list[float]:
+    count = max(1, int(slot_count))
+    duration = max(1.0, float(getattr(audio, "duration_ms", 0.0) or 1.0))
+    active_start = max(0.0, float(getattr(audio, "active_start_ms", 0.0) or 0.0))
+    active_end = max(active_start + 1.0, min(duration, float(getattr(audio, "active_end_ms", duration) or duration)))
+    raw: list[tuple[float, float]] = []
+    for peak in list(getattr(audio, "onset_peaks", []) or []):
+        t = float(getattr(peak, "time_ms", 0.0) or 0.0)
+        if active_start - 80.0 <= t <= active_end + 80.0:
+            raw.append((t, max(0.05, float(getattr(peak, "strength", 0.0) or 0.0))))
+    for seg in list(getattr(audio, "stable_vowel_segments", []) or []):
+        conf = float(getattr(seg, "vowel_confidence", 0.0) or 0.0)
+        voiced = float(getattr(seg, "voiced_score", 0.0) or 0.0)
+        stable = float(getattr(seg, "stability_score", 0.0) or 0.0)
+        score = max(0.05, min(1.0, (0.45 * conf) + (0.35 * voiced) + (0.20 * stable)))
+        t = float(getattr(seg, "start_ms", getattr(seg, "center_ms", 0.0)) or 0.0)
+        if active_start - 80.0 <= t <= active_end + 80.0:
+            raw.append((t, score * 0.85))
+    candidates = _merge_slot_time_candidates(raw, merge_ms=35.0)
+    if len(candidates) < count:
+        return _even_slot_times(active_start, active_end, count)
+    return _select_monotonic_slot_times(candidates, active_start=active_start, active_end=active_end, slot_count=count)
+
+
+def _merge_slot_time_candidates(candidates: list[tuple[float, float]], *, merge_ms: float) -> list[tuple[float, float]]:
+    out: list[tuple[float, float]] = []
+    for time_ms, score in sorted(candidates, key=lambda item: (float(item[0]), -float(item[1]))):
+        if out and abs(float(time_ms) - float(out[-1][0])) <= float(merge_ms):
+            prev_t, prev_s = out[-1]
+            total = max(1e-6, float(prev_s) + float(score))
+            merged_t = ((float(prev_t) * float(prev_s)) + (float(time_ms) * float(score))) / total
+            out[-1] = (merged_t, max(float(prev_s), float(score)))
+        else:
+            out.append((float(time_ms), float(score)))
+    return out
+
+
+def _even_slot_times(active_start: float, active_end: float, slot_count: int) -> list[float]:
+    count = max(1, int(slot_count))
+    if count == 1:
+        return [(float(active_start) + float(active_end)) * 0.5]
+    span = max(1.0, float(active_end) - float(active_start))
+    return [float(active_start) + (span * float(idx) / float(count - 1)) for idx in range(count)]
+
+
+def _select_monotonic_slot_times(
+    candidates: list[tuple[float, float]],
+    *,
+    active_start: float,
+    active_end: float,
+    slot_count: int,
+) -> list[float]:
+    count = max(1, int(slot_count))
+    n = len(candidates)
+    if n < count:
+        return _even_slot_times(active_start, active_end, count)
+    ideal = _even_slot_times(active_start, active_end, count)
+    inf = float("inf")
+    dp = np.full((count, n), inf, dtype=np.float64)
+    prev = np.full((count, n), -1, dtype=np.int32)
+    for j, (time_ms, score) in enumerate(candidates):
+        dp[0, j] = abs(float(time_ms) - ideal[0]) - (float(score) * 45.0)
+    for i in range(1, count):
+        for j, (time_ms, score) in enumerate(candidates):
+            if j < i:
+                continue
+            base = abs(float(time_ms) - ideal[i]) - (float(score) * 45.0)
+            best = inf
+            best_prev = -1
+            for k in range(i - 1, j):
+                gap = float(time_ms) - float(candidates[k][0])
+                if gap < 35.0:
+                    continue
+                skip_penalty = float(j - k - 1) * 8.0
+                value = float(dp[i - 1, k]) + base + skip_penalty
+                if value < best:
+                    best = value
+                    best_prev = k
+            if best_prev >= 0:
+                dp[i, j] = best
+                prev[i, j] = best_prev
+    last = int(np.argmin(dp[count - 1]))
+    if not np.isfinite(dp[count - 1, last]):
+        return _even_slot_times(active_start, active_end, count)
+    path = [0] * count
+    j = last
+    for i in range(count - 1, -1, -1):
+        path[i] = int(j)
+        j = int(prev[i, j]) if i > 0 else -1
+    return [float(candidates[idx][0]) for idx in path]
+
+
+def _translate_state_to_alias_slot(
+    state: dict[str, Any],
+    *,
+    target_slot_idx: int,
+    slot_times: list[float],
+    target_time_ms: float | None = None,
+    max_shift_ms: float,
+    min_move_ms: float,
+    mode: str = "direct",
+) -> bool:
+    params = dict(state.get("params") or {})
+    duration = max(1.0, float(state.get("duration_ms", 0.0) or 1.0))
+    try:
+        anchors = oto_params_to_anchors(
+            offset=float(params.get("offset", 0.0) or 0.0),
+            consonant=float(params.get("consonant", 0.0) or 0.0),
+            cutoff=float(params.get("cutoff", 0.0) or 0.0),
+            preutterance=float(params.get("preutterance", 0.0) or 0.0),
+            overlap=float(params.get("overlap", 0.0) or 0.0),
+            duration_ms=duration,
+        )
+    except Exception:
+        state["alias_slot_lock_hold"] = True
+        state["alias_slot_lock_reason"] = "hold:invalid_params"
+        return False
+    current = float(anchors.preutterance)
+    nearest_idx = min(range(len(slot_times)), key=lambda idx: abs(float(slot_times[idx]) - current))
+    target_idx = max(0, min(len(slot_times) - 1, int(target_slot_idx)))
+    lock_mode = str(mode or "direct").strip().lower()
+    target_time = float(slot_times[target_idx] if target_time_ms is None else target_time_ms)
+    if lock_mode in {"direct", "target", "target_preutterance", "absolute"}:
+        delta = target_time - current
+    else:
+        if nearest_idx == target_idx:
+            return False
+        delta = target_time - float(slot_times[nearest_idx])
+    if abs(delta) > float(max_shift_ms):
+        state["alias_slot_lock_hold"] = True
+        state["alias_slot_lock_reason"] = f"hold:max_shift:{lock_mode}:{nearest_idx}->{target_idx}:{delta:.1f}"
+        return False
+    if abs(delta) < float(min_move_ms):
+        state["alias_slot_lock_hold"] = True
+        state["alias_slot_lock_reason"] = f"hold:min_move:{lock_mode}:{nearest_idx}->{target_idx}:{delta:.1f}"
+        return False
+    shifted = OtoAnchors(
+        offset=float(anchors.offset) + delta,
+        overlap=float(anchors.overlap) + delta,
+        preutterance=float(anchors.preutterance) + delta,
+        consonant=float(anchors.consonant) + delta,
+        cutoff=float(anchors.cutoff) + delta,
+    )
+    state["params"] = anchors_to_oto_params(shifted, duration_ms=duration)
+    state["alias_slot_locked"] = True
+    state["alias_slot_lock_reason"] = f"{lock_mode}:{nearest_idx}->{target_idx}:{delta:.1f}"
+    return True
+
+
 def _alias_is_special(alias: str, special_set: frozenset[str]) -> bool:
     if not special_set:
         return False
@@ -465,6 +873,167 @@ def _alias_is_special(alias: str, special_set: frozenset[str]) -> bool:
         if token in special_set:
             return True
     return False
+
+
+def _assign_filename_slot_indices(
+    *,
+    wav_rel: str,
+    items: list[dict[str, str]],
+    language: str,
+) -> list[dict[str, str]]:
+    expected = _extract_filename_tokens(wav_rel, language=language)
+    if len(expected) < 2 or not _env_bool("UTOA_OTO_CRNN_FILENAME_SLOT_ENABLE", True):
+        for idx, row in enumerate(items):
+            row["source_row_index"] = idx
+            row["model_row_index"] = idx
+            row["model_row_count"] = len(items)
+            row["uses_filename_slots"] = False
+            row["alias_role"] = _safe_alias_role(
+                language,
+                str(row.get("alias", "") or ""),
+                alias_type=_safe_alias_type(language, str(row.get("alias", "") or "")),
+                is_special=False,
+            )
+        return items
+
+    cursors: dict[str, int] = {}
+    slot_count = len(expected)
+    source_count = max(1, len(items))
+    for idx, row in enumerate(items):
+        alias = str(row.get("alias", "") or "")
+        alias_type = _safe_alias_type(language, alias)
+        role = _safe_alias_role(language, alias, alias_type=alias_type, is_special=False)
+        token = _slot_token_for_alias(alias, role=role, language=language)
+        slot_idx = _find_slot_index_for_alias(expected, token, cursors, role=role, language=language)
+        if slot_idx is None:
+            if source_count <= 1:
+                slot_idx = 0
+            else:
+                slot_idx = int(round((float(idx) / float(source_count - 1)) * float(max(0, slot_count - 1))))
+        row["source_row_index"] = idx
+        row["model_row_index"] = max(0, min(slot_count - 1, int(slot_idx)))
+        row["model_row_count"] = slot_count
+        row["uses_filename_slots"] = True
+        row["alias_role"] = role
+    return items
+
+
+def _sequence_neighbors(items: list[dict[str, str]]) -> dict[int, tuple[str, str]]:
+    ordered = sorted(
+        items,
+        key=lambda row: (
+            int(row.get("model_row_index", row.get("source_row_index", 0)) or 0),
+            slot_role_order_norm(row.get("alias_role", "")),
+            int(row.get("source_row_index", 0) or 0),
+        ),
+    )
+    out: dict[int, tuple[str, str]] = {}
+    for idx, row in enumerate(ordered):
+        prev_alias = str(ordered[idx - 1].get("alias", "") or "") if idx > 0 else ""
+        next_alias = str(ordered[idx + 1].get("alias", "") or "") if idx + 1 < len(ordered) else ""
+        out[id(row)] = (prev_alias, next_alias)
+    return out
+
+
+def _slot_token_for_alias(alias: str, *, role: str, language: str = "") -> str:
+    tokens = _extract_alias_vowelish_tokens(alias, language=language)
+    if not tokens:
+        return ""
+    role_text = normalize_role(role)
+    if role_text in {"vv", "v-cv"} and len(tokens) >= 2:
+        return tokens[-1]
+    return tokens[0]
+
+
+def _extract_alias_vowelish_tokens(alias: str, *, language: str = "") -> list[str]:
+    out: list[str] = []
+    for raw in _extract_text_syllable_tokens(alias, language=language):
+        token = _normalize_order_token(raw)
+        if token and any(ch in token for ch in "aeiou"):
+            out.append(token)
+    return out
+
+
+def _find_slot_index(expected: list[str], token: str, cursors: dict[str, int]) -> int | None:
+    token_text = _normalize_order_token(token)
+    if not token_text:
+        return None
+    start = int(cursors.get(token_text, 0) or 0)
+    for idx in range(max(0, start), len(expected)):
+        if expected[idx] == token_text:
+            cursors[token_text] = idx + 1
+            return idx
+    for idx, candidate in enumerate(expected):
+        if candidate == token_text:
+            return idx
+    return None
+
+
+def _find_slot_index_for_alias(
+    expected: list[str],
+    token: str,
+    cursors: dict[str, int],
+    *,
+    role: str,
+    language: str = "",
+) -> int | None:
+    exact = _find_slot_index(expected, token, cursors)
+    if exact is not None:
+        return exact
+    lang = str(language or "").strip().lower()
+    role_text = normalize_role(role)
+    if lang != "korean" and not any(_roman_vowel_key(item) for item in expected):
+        return None
+    if role_text not in {"v", "v-", "vc", "vv", "v-cv"}:
+        return None
+    vowel = _roman_vowel_key(token)
+    if not vowel:
+        return None
+    cursor_key = f"vowel:{vowel}"
+    start = int(cursors.get(cursor_key, 0) or 0)
+    for idx in range(max(0, start), len(expected)):
+        if _roman_vowel_key(expected[idx]) == vowel:
+            cursors[cursor_key] = idx + 1
+            return idx
+    for idx, candidate in enumerate(expected):
+        if _roman_vowel_key(candidate) == vowel:
+            return idx
+    return None
+
+
+_ROMAN_VOWEL_KEYS = (
+    "yae",
+    "yeo",
+    "wae",
+    "weo",
+    "ae",
+    "eo",
+    "eu",
+    "ui",
+    "ya",
+    "ye",
+    "yo",
+    "yu",
+    "wa",
+    "we",
+    "wi",
+    "oe",
+    "a",
+    "e",
+    "i",
+    "o",
+    "u",
+)
+
+
+def _roman_vowel_key(token: str) -> str:
+    text = _normalize_order_token(token)
+    if not text:
+        return ""
+    for vowel in _ROMAN_VOWEL_KEYS:
+        if vowel in text:
+            return vowel
+    return ""
 
 
 def _build_wav_lookup(wav_dir: str) -> tuple[dict[str, str], dict[str, str]]:
@@ -645,8 +1214,11 @@ def _normalize_order_token(token: str) -> str:
     return text
 
 
-def _extract_filename_tokens(wav_rel: str) -> list[str]:
+def _extract_filename_tokens(wav_rel: str, *, language: str = "") -> list[str]:
     stem = os.path.splitext(os.path.basename(str(wav_rel or "")))[0]
+    tokens = _extract_text_syllable_tokens(stem, language=language)
+    if tokens:
+        return tokens
     out: list[str] = []
     for raw in _ORDER_TOKEN_RE.findall(stem):
         token = _normalize_order_token(raw)
@@ -655,10 +1227,10 @@ def _extract_filename_tokens(wav_rel: str) -> list[str]:
     return out
 
 
-def _extract_alias_head_tokens(aliases: list[str]) -> list[str]:
+def _extract_alias_head_tokens(aliases: list[str], *, language: str = "") -> list[str]:
     out: list[str] = []
     for alias in aliases:
-        parts = _ORDER_TOKEN_RE.findall(str(alias or ""))
+        parts = _extract_text_syllable_tokens(alias, language=language) or _ORDER_TOKEN_RE.findall(str(alias or ""))
         if not parts:
             continue
         token = _normalize_order_token(parts[0])
@@ -670,13 +1242,13 @@ def _extract_alias_head_tokens(aliases: list[str]) -> list[str]:
     return out
 
 
-def _extract_alias_core_tokens(aliases: list[str]) -> list[str]:
+def _extract_alias_core_tokens(aliases: list[str], *, language: str = "") -> list[str]:
     out: list[str] = []
     for alias in aliases:
         text = str(alias or "").strip()
         if not text or " " in text:
             continue
-        parts = _ORDER_TOKEN_RE.findall(text)
+        parts = _extract_text_syllable_tokens(text, language=language) or _ORDER_TOKEN_RE.findall(text)
         if not parts:
             continue
         token = _normalize_order_token(parts[0])
@@ -685,6 +1257,51 @@ def _extract_alias_core_tokens(aliases: list[str]) -> list[str]:
         if not any(ch in token for ch in "aeiou"):
             continue
         out.append(token)
+    return out
+
+
+def _extract_text_syllable_tokens(text: object, *, language: str = "") -> list[str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    lang = str(language or "").strip().lower()
+    if lang == "japanese" or _KANA_RE.search(raw):
+        try:
+            from core.ja_lab_generator import parse_ja_filename
+
+            return [_normalize_order_token(item) for item in (parse_ja_filename(raw) or []) if _normalize_order_token(item)]
+        except Exception:
+            pass
+    if lang == "korean" or _HANGUL_CHAR_RE.search(raw):
+        tokens: list[str] = []
+        for part in [item for item in _TOKEN_SEP_RE.split(raw) if item]:
+            if _HANGUL_CHAR_RE.search(part):
+                tokens.extend(_hangul_text_to_romaji_syllables(part))
+            else:
+                tokens.extend(_normalize_order_token(item) for item in _ORDER_TOKEN_RE.findall(part))
+        return [token for token in tokens if token]
+    return [_normalize_order_token(item) for item in _ORDER_TOKEN_RE.findall(raw) if _normalize_order_token(item)]
+
+
+def _hangul_text_to_romaji_syllables(text: str) -> list[str]:
+    try:
+        from core.lab_generator import decompose_hangul_to_roman
+    except Exception:
+        decompose_hangul_to_roman = None
+    out: list[str] = []
+    for ch in str(text or ""):
+        if _HANGUL_CHAR_RE.fullmatch(ch) and decompose_hangul_to_roman is not None:
+            try:
+                parts = [str(item or "").strip().lower() for item in decompose_hangul_to_roman(ch)]
+            except Exception:
+                parts = []
+            token = _normalize_order_token("".join(part for part in parts if part))
+            if token:
+                out.append(token)
+        else:
+            token = _normalize_order_token(ch)
+            if token:
+                out.append(token)
     return out
 
 
@@ -702,11 +1319,11 @@ def _ordered_ratio(expected: list[str], observed: list[str]) -> float:
     return float(matched) / float(len(expected))
 
 
-def _looks_like_cvvc_wav(wav_rel: str, aliases: list[str]) -> bool:
+def _looks_like_cvvc_wav(wav_rel: str, aliases: list[str], *, language: str = "") -> bool:
     stem = os.path.splitext(os.path.basename(str(wav_rel or "")))[0].lower()
     if "'" in stem:
         return True
-    token_count = len(_extract_filename_tokens(wav_rel))
+    token_count = len(_extract_filename_tokens(wav_rel, language=language))
     if token_count >= 6:
         return True
     if aliases:
@@ -729,14 +1346,14 @@ def _best_order_ratio(expected: list[str], observed: list[str]) -> float:
     return max(_ordered_ratio(candidate, observed) for candidate in candidates if candidate)
 
 
-def _estimate_filename_alias_order_ratio(wav_rel: str, aliases: list[str]) -> tuple[float, int, bool]:
-    expected = _extract_filename_tokens(wav_rel)
+def _estimate_filename_alias_order_ratio(wav_rel: str, aliases: list[str], *, language: str = "") -> tuple[float, int, bool]:
+    expected = _extract_filename_tokens(wav_rel, language=language)
     expected_count = len(expected)
     if expected_count <= 0:
         return 1.0, 0, False
-    is_cvvc_like = _looks_like_cvvc_wav(wav_rel, aliases)
-    observed_all = _extract_alias_head_tokens(aliases)
-    observed_core = _extract_alias_core_tokens(aliases)
+    is_cvvc_like = _looks_like_cvvc_wav(wav_rel, aliases, language=language)
+    observed_all = _extract_alias_head_tokens(aliases, language=language)
+    observed_core = _extract_alias_core_tokens(aliases, language=language)
     if is_cvvc_like:
         observed = observed_core or observed_all
         if not observed:

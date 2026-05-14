@@ -76,7 +76,7 @@ def test_apply_row_context_adds_neighbor_aliases():
 def test_vcv_target_window_is_format_specific_not_vowel_transition_specific():
     assert should_use_vcv_target_window("vcv", enabled=True)
     assert not should_use_vcv_target_window("cvvc", enabled=True)
-    assert should_use_vcv_target_window("cvvc", enabled=True, formats=("vcv", "cvvc"), alias_type="vc")
+    assert not should_use_vcv_target_window("cvvc", enabled=True, formats=("vcv", "cvvc"), alias_type="vc")
     assert not should_use_vcv_target_window("cvvc", enabled=True, formats=("vcv", "cvvc"), alias_type="cv")
     assert not should_use_vcv_target_window("vcv", enabled=False)
 

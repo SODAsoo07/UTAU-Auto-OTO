@@ -93,6 +93,22 @@ python -m ml.scripts.coarse_crnn.evaluate_oto `
   --out ml_workspace\coarse_crnn\oto_eval.json
 ```
 
+Train with the experimental sequence candidate scoring head:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m ml.scripts.coarse_crnn.train_oto `
+  --manifest ml_workspace\coarse_crnn\oto_splits\oto_train.jsonl `
+  --val-manifest ml_workspace\coarse_crnn\oto_splits\oto_val.jsonl `
+  --out ml_workspace\models\coarse_crnn\oto_sequence_candidate_crnn.pt `
+  --device cuda `
+  --batch-size 16 `
+  --max-frames 1200 `
+  --alias-role-embedding `
+  --sequence-candidate-head `
+  --sequence-candidate-loss-weight 0.22
+```
+
 Predict one `oto.ini` row:
 
 ```powershell
@@ -194,6 +210,89 @@ $env:UTOA_OTO_CRNN_ROW_ORDER_MAX_SKIP_POINTS='2'
 $env:UTOA_OTO_CRNN_ROW_ORDER_MAX_STEP_GAP_MS='420'
 ```
 
+Wav-level sequence boundary alignment (default runtime path):
+
+```powershell
+# New boundary-candidate alignment path. This is enabled by default in the
+# generator and bypasses the older raw row-order aligner.
+$env:UTOA_OTO_CRNN_SEQUENCE_ALIGN_ENABLE='1'
+
+# Conservative defaults verified on val1000 with ctx15_v3.
+$env:UTOA_OTO_CRNN_SEQUENCE_ALIGN_ROLES='vc,vv'
+$env:UTOA_OTO_CRNN_SEQUENCE_ALIGN_MAX_SHIFT_MS='220'
+$env:UTOA_OTO_CRNN_SEQUENCE_ALIGN_ANCHOR_BLEND='0.60'
+$env:UTOA_OTO_CRNN_SEQUENCE_ALIGN_BOUNDARY_BLEND='0.45'
+$env:UTOA_OTO_CRNN_SEQUENCE_ALIGN_MIN_MOVE_MS='8'
+$env:UTOA_OTO_CRNN_SEQUENCE_ALIGN_MODEL_SCORE_BLEND='0.35'
+
+# Keep legacy per-row candidate snap/matcher disabled while the sequence aligner
+# owns placement. Enable only for A/B debugging.
+$env:UTOA_OTO_CRNN_SEQUENCE_ALIGN_ALLOW_LEGACY_CANDIDATE_POSTPROCESS='0'
+```
+
+The default role allowlist intentionally excludes `cv`, `v`, `-cv`, and `v-cv`
+anchor-like rows. The current verified default only adjusts `vc`/`vv` boundary
+rows, so it can improve boundary timing without relocating the predicted file
+position. To test the broader aligner, set
+`UTOA_OTO_CRNN_SEQUENCE_ALIGN_ROLES='vc,vv,v-cv'` or `all`, but keep it as an
+A/B experiment until it beats the conservative default on a real voicebank.
+
+Filename-slot crop mapping is enabled by default:
+
+```powershell
+$env:UTOA_OTO_CRNN_FILENAME_SLOT_ENABLE='1'
+$env:UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_ENABLE='1'
+$env:UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_MODE='direct'
+$env:UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_MAX_SHIFT_MS='3000'
+$env:UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_MIN_MOVE_MS='30'
+$env:UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_VC_TARGET_RATIO='0.62'
+$env:UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_VC_FALLBACK_RATIO='0.62'
+$env:UTOA_OTO_CRNN_FINAL_RIGHT_GUARD_ENABLE='1'
+```
+
+This makes the inference crop use the syllable order parsed from the wav
+filename when at least two filename tokens are available. It prevents shuffled
+`oto.ini` row order from feeding the model the wrong syllable window while
+keeping the output `oto.ini` row order unchanged. VC rows are attached to the
+left vowel slot; VV and V-CV rows prefer the right vowel slot when both sides
+are visible. Japanese kana filenames and aliases are normalized through the
+Japanese filename parser, and Hangul filenames are split per syllable before
+slot matching. Korean boundary aliases can be vowel-only (`a k`) while the
+filename token is CV-shaped (`ga`), so Korean V/VC/VV/V-CV rows also support
+vowel-key slot matching.
+
+Alias-slot lock is the stronger pronunciation guard. If the model predicts an
+OTO row near the wrong syllable slot, the decoder moves the whole anchor set
+so the absolute `preutterance` lands on the filename slot required by the alias.
+This changes `offset` as well as `preutterance`, so it can actually change the
+rendered phoneme source instead of only nudging timing inside the same wrong
+audio region. `direct` is the production default; set
+`UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_MODE='relative'` only to reproduce the older
+nearest-slot translation behavior for A/B tests.
+
+VC rows use a role-specific target. A VC alias such as `a k` is not locked to
+the left syllable onset; it is locked near the transition from the left vowel
+tail to the next onset. The default target is
+`vowel_end + (next_onset - vowel_end) * 0.62`, with the same ratio used between
+neighboring filename slots when no stable vowel segment is available.
+
+Final right-boundary guard is enabled by default after all slot/sequence
+movement. It clamps `consonant` and `cutoff` by alias role so rows moved to the
+correct source syllable do not keep an overlong fixed/tail region that can sound
+stretched.
+
+Boundary-slot experimental model guard:
+
+```powershell
+# Boundary-slot/heavy models are blocked by default in the generator path.
+# Enable only for controlled A/B tests, not production generation.
+$env:UTOA_OTO_CRNN_ALLOW_EXPERIMENTAL_MODEL='1'
+
+# Boundary-slot graph postprocess is also default OFF after heavy real-bank
+# testing showed large parameter misplacement rates.
+$env:UTOA_OTO_CRNN_BOUNDARY_SLOT_GRAPH_ENABLE='0'
+```
+
 Filename vs alias order validation:
 
 ```powershell
@@ -263,3 +362,17 @@ Recommended next execution order:
 1. Run filename-order validator on the source oto and quarantine high-mismatch wav files.
 2. Regenerate OTO with row-order alignment on and base OTO fallback off.
 3. Re-run ON/OFF runtime eval on the same manifest/model and compare by role (`-cv`, `vv`, `cv-` first).
+
+Recent patch notes (2026-05-14):
+
+- Real-bank heavy boundary-slot test showed about 80% alias-level parameter misplacement, so this model family is no longer a deployment candidate.
+- Generator now blocks boundary-slot/heavy experimental checkpoints by default. Set `UTOA_OTO_CRNN_ALLOW_EXPERIMENTAL_MODEL=1` only for controlled A/B tests.
+- Boundary-slot graph postprocess default changed to OFF (`UTOA_OTO_CRNN_BOUNDARY_SLOT_GRAPH_ENABLE=0`) because it can move many rows when the learned slot ordering is wrong.
+- OTO eval reports now include `position_bad_rate_100ms` and `position_bad_rate_250ms`; the 250 ms rate is also part of the default gate via `--gate-max-position-bad-rate-250ms`.
+- `compare_oto_eval.py` now includes `position_bad_rate_250ms`, so a model that only improves `preutterance_acc` but misplaces full parameters is visible in A/B summaries.
+- Alias-slot lock default mode is now `direct`: instead of translating from the nearest predicted slot, it forces absolute `preutterance` onto the filename slot required by the alias. This is intentionally stronger because the previous relative mode still left many rows in the wrong audible syllable region.
+- Alias-slot lock now uses a VC-specific transition target. VC rows no longer land on the left syllable onset; they land near the vowel-tail-to-next-onset transition.
+- Korean filename-slot matching now has a vowel-key fallback for V/VC/VV/V-CV rows, so aliases like `a k` can map to filename syllables like `ga` instead of falling back to raw row order.
+- Final right-boundary guard now runs after slot/sequence movement by default to reduce overlong/stretched timing after relocation.
+
+Last edited: 2026-05-14 15:24 KST

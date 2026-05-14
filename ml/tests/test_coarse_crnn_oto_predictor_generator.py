@@ -94,6 +94,414 @@ def test_crnn_oto_generator_preserves_aliases_and_replaces_params(tmp_path, monk
     assert calls[1]["file_row_count"] == 2
 
 
+def test_crnn_oto_generator_uses_filename_slot_for_shuffled_alias_rows(tmp_path, monkeypatch):
+    from core.coarse_crnn import oto_predictor_generator as gen
+
+    wav_dir = tmp_path / "bank"
+    wav_dir.mkdir()
+    _write_wav(wav_dir / "ka_ki_ku.wav")
+    source_oto = wav_dir / "baseoto.ini"
+    source_oto.write_text(
+        "ka_ki_ku.wav=ku,0,0,0,0,0\n"
+        "ka_ki_ku.wav=ka,0,0,0,0,0\n"
+        "ka_ki_ku.wav=ki,0,0,0,0,0\n",
+        encoding="utf-8",
+    )
+    model_path = tmp_path / "model.pt"
+    model_path.write_bytes(b"fake")
+    out_path = tmp_path / "out.ini"
+
+    class FakeModel:
+        def to(self, _device):
+            return self
+
+        def eval(self):
+            return self
+
+    calls = []
+
+    def fake_predict(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            params={
+                "offset": 10.0,
+                "consonant": 90.0,
+                "cutoff": -220.0,
+                "preutterance": 70.0,
+                "overlap": 30.0,
+            },
+            anchors=SimpleNamespace(
+                offset=10.0,
+                overlap=30.0,
+                preutterance=70.0,
+                consonant=90.0,
+                cutoff=-220.0,
+            ),
+            confidence=1.0,
+            low_confidence=False,
+            predicted_error_ms=None,
+            duration_ms=500.0,
+        )
+
+    monkeypatch.setattr(gen, "load_oto_checkpoint", lambda *_a, **_k: (FakeModel(), SimpleNamespace(), {}))
+    monkeypatch.setattr(gen, "predict_oto_with_model", fake_predict)
+    monkeypatch.setenv("UTOA_OTO_CRNN_LOW_CONF_FALLBACK_ENABLE", "0")
+    monkeypatch.setenv("UTOA_OTO_CRNN_ACTIVITY_FALLBACK_ENABLE", "0")
+    monkeypatch.setenv("UTOA_OTO_CRNN_SEQUENCE_ALIGN_ENABLE", "0")
+
+    processed, total, errors = gen.generate_oto_with_crnn_predictor(
+        wav_dir=str(wav_dir),
+        out_path=str(out_path),
+        source_oto_path=str(source_oto),
+        language="japanese",
+        format_type="vcv",
+        model_path=str(model_path),
+        device="cpu",
+    )
+
+    assert errors == []
+    assert processed == 3
+    assert total == 3
+    assert [(call["alias"], call["row_index_in_wav"], call["file_row_count"]) for call in calls] == [
+        ("ku", 2, 3),
+        ("ka", 0, 3),
+        ("ki", 1, 3),
+    ]
+    assert calls[1]["prev_alias"] == ""
+    assert calls[1]["next_alias"] == "ki"
+
+
+def test_crnn_oto_generator_maps_korean_vc_aliases_by_vowel_slot(tmp_path, monkeypatch):
+    from core.coarse_crnn import oto_predictor_generator as gen
+
+    wav_dir = tmp_path / "bank"
+    wav_dir.mkdir()
+    _write_wav(wav_dir / "ga_gi_gu.wav")
+    source_oto = wav_dir / "baseoto.ini"
+    source_oto.write_text(
+        "ga_gi_gu.wav=u k,0,0,0,0,0\n"
+        "ga_gi_gu.wav=a k,0,0,0,0,0\n"
+        "ga_gi_gu.wav=i k,0,0,0,0,0\n",
+        encoding="utf-8",
+    )
+    model_path = tmp_path / "model.pt"
+    model_path.write_bytes(b"fake")
+    out_path = tmp_path / "out.ini"
+
+    class FakeModel:
+        def to(self, _device):
+            return self
+
+        def eval(self):
+            return self
+
+    calls = []
+
+    def fake_predict(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            params={
+                "offset": 10.0,
+                "consonant": 90.0,
+                "cutoff": -220.0,
+                "preutterance": 70.0,
+                "overlap": 30.0,
+            },
+            anchors=SimpleNamespace(
+                offset=10.0,
+                overlap=30.0,
+                preutterance=70.0,
+                consonant=90.0,
+                cutoff=-220.0,
+            ),
+            confidence=1.0,
+            low_confidence=False,
+            predicted_error_ms=None,
+            duration_ms=500.0,
+        )
+
+    monkeypatch.setattr(gen, "load_oto_checkpoint", lambda *_a, **_k: (FakeModel(), SimpleNamespace(), {}))
+    monkeypatch.setattr(gen, "predict_oto_with_model", fake_predict)
+    monkeypatch.setenv("UTOA_OTO_CRNN_LOW_CONF_FALLBACK_ENABLE", "0")
+    monkeypatch.setenv("UTOA_OTO_CRNN_ACTIVITY_FALLBACK_ENABLE", "0")
+    monkeypatch.setenv("UTOA_OTO_CRNN_SEQUENCE_ALIGN_ENABLE", "0")
+    monkeypatch.setenv("UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_ENABLE", "0")
+
+    processed, total, errors = gen.generate_oto_with_crnn_predictor(
+        wav_dir=str(wav_dir),
+        out_path=str(out_path),
+        source_oto_path=str(source_oto),
+        language="korean",
+        format_type="cvvc",
+        model_path=str(model_path),
+        device="cpu",
+    )
+
+    assert errors == []
+    assert processed == 3
+    assert total == 3
+    assert [(call["alias"], call["row_index_in_wav"], call["file_row_count"]) for call in calls] == [
+        ("u k", 2, 3),
+        ("a k", 0, 3),
+        ("i k", 1, 3),
+    ]
+
+
+def test_crnn_oto_generator_uses_kana_filename_slots(tmp_path, monkeypatch):
+    from core.coarse_crnn import oto_predictor_generator as gen
+
+    wav_dir = tmp_path / "bank"
+    wav_dir.mkdir()
+    _write_wav(wav_dir / "か_き_く.wav")
+    source_oto = wav_dir / "baseoto.ini"
+    source_oto.write_text(
+        "か_き_く.wav=く,0,0,0,0,0\n"
+        "か_き_く.wav=か,0,0,0,0,0\n"
+        "か_き_く.wav=き,0,0,0,0,0\n",
+        encoding="utf-8",
+    )
+    model_path = tmp_path / "model.pt"
+    model_path.write_bytes(b"fake")
+    out_path = tmp_path / "out.ini"
+
+    class FakeModel:
+        def to(self, _device):
+            return self
+
+        def eval(self):
+            return self
+
+    calls = []
+
+    def fake_predict(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            params={
+                "offset": 10.0,
+                "consonant": 90.0,
+                "cutoff": -220.0,
+                "preutterance": 70.0,
+                "overlap": 30.0,
+            },
+            anchors=SimpleNamespace(
+                offset=10.0,
+                overlap=30.0,
+                preutterance=70.0,
+                consonant=90.0,
+                cutoff=-220.0,
+            ),
+            confidence=1.0,
+            low_confidence=False,
+            predicted_error_ms=None,
+            duration_ms=500.0,
+        )
+
+    monkeypatch.setattr(gen, "load_oto_checkpoint", lambda *_a, **_k: (FakeModel(), SimpleNamespace(), {}))
+    monkeypatch.setattr(gen, "predict_oto_with_model", fake_predict)
+    monkeypatch.setenv("UTOA_OTO_CRNN_LOW_CONF_FALLBACK_ENABLE", "0")
+    monkeypatch.setenv("UTOA_OTO_CRNN_ACTIVITY_FALLBACK_ENABLE", "0")
+    monkeypatch.setenv("UTOA_OTO_CRNN_SEQUENCE_ALIGN_ENABLE", "0")
+
+    processed, total, errors = gen.generate_oto_with_crnn_predictor(
+        wav_dir=str(wav_dir),
+        out_path=str(out_path),
+        source_oto_path=str(source_oto),
+        language="japanese",
+        format_type="vcv",
+        model_path=str(model_path),
+        device="cpu",
+    )
+
+    assert errors == []
+    assert processed == 3
+    assert total == 3
+    assert [(call["alias"], call["row_index_in_wav"], call["file_row_count"]) for call in calls] == [
+        ("く", 2, 3),
+        ("か", 0, 3),
+        ("き", 1, 3),
+    ]
+
+
+def test_alias_slot_lock_translates_wrong_slot_params(tmp_path):
+    from core.coarse_crnn import oto_predictor_generator as gen
+    from core.coarse_crnn.oto_audio_candidates import AudioCandidates, OnsetPeak
+
+    wav_path = tmp_path / "ka_ki_ku.wav"
+    wav_path.write_bytes(b"fake")
+    wav_abs = str(wav_path.resolve())
+    state = {
+        "row": SimpleNamespace(
+            wav_abs=wav_abs,
+            row_index=2,
+            row_count=3,
+            uses_filename_slots=True,
+        ),
+        "params": {
+            "offset": 10.0,
+            "consonant": 90.0,
+            "cutoff": -520.0,
+            "preutterance": 50.0,
+            "overlap": 20.0,
+        },
+        "duration_ms": 800.0,
+        "alias_slot_locked": False,
+        "alias_slot_lock_hold": False,
+    }
+    audio = AudioCandidates(
+        wav_path=wav_abs,
+        duration_ms=800.0,
+        active_start_ms=60.0,
+        active_end_ms=540.0,
+        onset_peaks=[
+            OnsetPeak(time_ms=60.0, strength=0.95),
+            OnsetPeak(time_ms=300.0, strength=0.95),
+            OnsetPeak(time_ms=540.0, strength=0.95),
+        ],
+        stable_vowel_segments=[],
+        mel_delta_peaks=[],
+    )
+
+    moved, held = gen._apply_alias_slot_lock_alignment(
+        row_states=[state],
+        cache={wav_abs.lower(): audio},
+        config=SimpleNamespace(),
+        max_shift_ms=3000.0,
+        min_move_ms=30.0,
+    )
+
+    assert moved == 1
+    assert held == 0
+    assert state["alias_slot_locked"] is True
+    assert state["alias_slot_lock_reason"].startswith("direct:0->2:")
+    assert state["params"]["offset"] == 490.0
+    assert state["params"]["offset"] + state["params"]["preutterance"] == 540.0
+
+
+def test_alias_slot_lock_direct_mode_lands_preutterance_on_target_slot(tmp_path):
+    from core.coarse_crnn import oto_predictor_generator as gen
+    from core.coarse_crnn.oto_audio_candidates import AudioCandidates, OnsetPeak
+
+    wav_path = tmp_path / "ka_ki_ku.wav"
+    wav_path.write_bytes(b"fake")
+    wav_abs = str(wav_path.resolve())
+    state = {
+        "row": SimpleNamespace(
+            wav_abs=wav_abs,
+            row_index=2,
+            row_count=3,
+            uses_filename_slots=True,
+        ),
+        "params": {
+            "offset": 10.0,
+            "consonant": 120.0,
+            "cutoff": -500.0,
+            "preutterance": 80.0,
+            "overlap": 25.0,
+        },
+        "duration_ms": 800.0,
+        "alias_slot_locked": False,
+        "alias_slot_lock_hold": False,
+    }
+    audio = AudioCandidates(
+        wav_path=wav_abs,
+        duration_ms=800.0,
+        active_start_ms=60.0,
+        active_end_ms=540.0,
+        onset_peaks=[
+            OnsetPeak(time_ms=60.0, strength=0.95),
+            OnsetPeak(time_ms=300.0, strength=0.95),
+            OnsetPeak(time_ms=540.0, strength=0.95),
+        ],
+        stable_vowel_segments=[],
+        mel_delta_peaks=[],
+    )
+
+    moved, held = gen._apply_alias_slot_lock_alignment(
+        row_states=[state],
+        cache={wav_abs.lower(): audio},
+        config=SimpleNamespace(),
+        max_shift_ms=3000.0,
+        min_move_ms=30.0,
+        mode="direct",
+    )
+
+    assert moved == 1
+    assert held == 0
+    assert state["alias_slot_lock_reason"].startswith("direct:0->2:")
+    assert state["params"]["offset"] == 460.0
+    assert state["params"]["offset"] + state["params"]["preutterance"] == 540.0
+
+
+def test_alias_slot_lock_vc_uses_transition_target_instead_of_slot_onset(tmp_path, monkeypatch):
+    from core.coarse_crnn import oto_predictor_generator as gen
+    from core.coarse_crnn.oto_audio_candidates import AudioCandidates, OnsetPeak, VowelSegmentCandidate
+
+    wav_path = tmp_path / "a_ka.wav"
+    wav_path.write_bytes(b"fake")
+    wav_abs = str(wav_path.resolve())
+    state = {
+        "row": SimpleNamespace(
+            wav_abs=wav_abs,
+            alias="a k",
+            alias_role="vc",
+            row_index=0,
+            row_count=2,
+            uses_filename_slots=True,
+        ),
+        "params": {
+            "offset": 20.0,
+            "consonant": 85.0,
+            "cutoff": -460.0,
+            "preutterance": 40.0,
+            "overlap": 18.0,
+        },
+        "duration_ms": 620.0,
+        "alias_slot_locked": False,
+        "alias_slot_lock_hold": False,
+    }
+    audio = AudioCandidates(
+        wav_path=wav_abs,
+        duration_ms=620.0,
+        active_start_ms=60.0,
+        active_end_ms=540.0,
+        onset_peaks=[
+            OnsetPeak(time_ms=60.0, strength=0.95),
+            OnsetPeak(time_ms=300.0, strength=0.92),
+        ],
+        stable_vowel_segments=[
+            VowelSegmentCandidate(
+                segment_id=0,
+                start_ms=90.0,
+                end_ms=220.0,
+                center_ms=155.0,
+                vowel_id="a",
+                vowel_confidence=0.92,
+                voiced_score=0.90,
+                stability_score=0.88,
+                energy_mean=0.60,
+                mel_delta_mean=0.05,
+            )
+        ],
+        mel_delta_peaks=[],
+    )
+    monkeypatch.setenv("UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_VC_TARGET_RATIO", "0.50")
+
+    moved, held = gen._apply_alias_slot_lock_alignment(
+        row_states=[state],
+        cache={wav_abs.lower(): audio},
+        config=SimpleNamespace(),
+        max_shift_ms=3000.0,
+        min_move_ms=30.0,
+        mode="direct",
+    )
+
+    assert moved == 1
+    assert held == 0
+    # VC should land near the transition between vowel tail and next onset:
+    # 220 + (300 - 220) * 0.50 = 260, not the left slot onset at 60.
+    assert state["params"]["offset"] + state["params"]["preutterance"] == 260.0
+
+
 def test_crnn_oto_generator_does_not_use_base_oto_fallback_by_default(tmp_path, monkeypatch):
     from core.coarse_crnn import oto_predictor_generator as gen
 
@@ -141,6 +549,8 @@ def test_crnn_oto_generator_does_not_use_base_oto_fallback_by_default(tmp_path, 
     monkeypatch.delenv("UTOA_OTO_CRNN_LOW_CONF_FALLBACK_ENABLE", raising=False)
     monkeypatch.setenv("UTOA_OTO_CRNN_ACTIVITY_FALLBACK_ENABLE", "0")
     monkeypatch.setenv("UTOA_OTO_CRNN_AUDIO_CANDIDATE_SNAP_ENABLE", "0")
+    monkeypatch.setenv("UTOA_OTO_CRNN_SEQUENCE_ALIGN_ENABLE", "0")
+    monkeypatch.setenv("UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_ENABLE", "0")
 
     processed, total, errors = gen.generate_oto_with_crnn_predictor(
         wav_dir=str(wav_dir),
@@ -158,6 +568,48 @@ def test_crnn_oto_generator_does_not_use_base_oto_fallback_by_default(tmp_path, 
     assert out_path.read_text(encoding="utf-8").splitlines() == [
         "a.wav=a k,100.000,110.000,-170.000,80.000,30.000",
     ]
+
+
+def test_crnn_oto_generator_blocks_experimental_boundary_model_by_default(tmp_path, monkeypatch):
+    from core.coarse_crnn import oto_predictor_generator as gen
+
+    wav_dir = tmp_path / "bank"
+    wav_dir.mkdir()
+    _write_wav(wav_dir / "a.wav")
+    source_oto = wav_dir / "baseoto.ini"
+    source_oto.write_text("a.wav=a,0,0,0,0,0\n", encoding="utf-8")
+    model_path = tmp_path / "oto_anchor_crnn_boundary_slot_e2.pt"
+    model_path.write_bytes(b"fake")
+    out_path = tmp_path / "out.ini"
+
+    class FakeModel:
+        def to(self, _device):
+            return self
+
+        def eval(self):
+            return self
+
+    monkeypatch.setattr(
+        gen,
+        "load_oto_checkpoint",
+        lambda *_a, **_k: (FakeModel(), SimpleNamespace(enable_boundary_slot_head=True), {}),
+    )
+    monkeypatch.delenv("UTOA_OTO_CRNN_ALLOW_EXPERIMENTAL_MODEL", raising=False)
+
+    processed, total, errors = gen.generate_oto_with_crnn_predictor(
+        wav_dir=str(wav_dir),
+        out_path=str(out_path),
+        source_oto_path=str(source_oto),
+        language="japanese",
+        format_type="vcv",
+        model_path=str(model_path),
+        device="cpu",
+    )
+
+    assert processed == 0
+    assert total == 1
+    assert "experimental model is blocked" in errors[0]
+    assert not out_path.exists()
 
 
 def test_crnn_oto_generator_blocks_base_fallback_on_low_order_quality(tmp_path, monkeypatch):
@@ -208,6 +660,8 @@ def test_crnn_oto_generator_blocks_base_fallback_on_low_order_quality(tmp_path, 
     monkeypatch.delenv("UTOA_OTO_CRNN_BASE_FALLBACK_MIN_ORDER_RATIO", raising=False)
     monkeypatch.setenv("UTOA_OTO_CRNN_ACTIVITY_FALLBACK_ENABLE", "0")
     monkeypatch.setenv("UTOA_OTO_CRNN_AUDIO_CANDIDATE_SNAP_ENABLE", "0")
+    monkeypatch.setenv("UTOA_OTO_CRNN_SEQUENCE_ALIGN_ENABLE", "0")
+    monkeypatch.setenv("UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_ENABLE", "0")
 
     processed, total, errors = gen.generate_oto_with_crnn_predictor(
         wav_dir=str(wav_dir),

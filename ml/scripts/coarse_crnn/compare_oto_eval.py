@@ -56,6 +56,7 @@ def _compare_overall(base: dict[str, Any], candidate: dict[str, Any]) -> dict[st
         },
         "preutterance_acc_50ms": _metric_delta(base.get("preutterance_acc_50ms"), candidate.get("preutterance_acc_50ms")),
         "preutterance_acc_20ms": _metric_delta(base.get("preutterance_acc_20ms"), candidate.get("preutterance_acc_20ms")),
+        "position_bad_rate_250ms": _metric_delta(base.get("position_bad_rate_250ms"), candidate.get("position_bad_rate_250ms")),
         "param_mae_ms": {},
     }
     for key in PARAM_KEYS:
@@ -77,6 +78,7 @@ def _compare_group(base: dict[str, Any], candidate: dict[str, Any], *, min_files
             "preutterance_acc_50ms": _metric_delta(b.get("preutterance_acc_50ms"), c.get("preutterance_acc_50ms")),
             "offset_mae_ms": _metric_delta(b.get("offset_mae_ms"), c.get("offset_mae_ms")),
             "cutoff_abs_mae_ms": _metric_delta(b.get("cutoff_abs_mae_ms"), c.get("cutoff_abs_mae_ms")),
+            "position_bad_rate_250ms": _metric_delta(b.get("position_bad_rate_250ms"), c.get("position_bad_rate_250ms")),
         }
         if "consonant_mae_ms" in b or "consonant_mae_ms" in c:
             out[key]["consonant_mae_ms"] = _metric_delta(b.get("consonant_mae_ms"), c.get("consonant_mae_ms"))

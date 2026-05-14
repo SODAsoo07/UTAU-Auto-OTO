@@ -11,7 +11,7 @@ import json
 import numpy as np
 
 from core.coarse_crnn.alias_role import normalize_role
-from core.coarse_crnn.audio import load_wav_mono, log_mel_spectrogram
+from core.coarse_crnn.audio import add_log_mel_deltas, augment_log_mel, load_wav_mono, log_mel_spectrogram
 from core.coarse_crnn.oto_model import (
     OtoCrnnConfig,
     alias_role_id,
@@ -25,17 +25,26 @@ from core.coarse_crnn.oto_model import (
     uses_relative_param_head,
     right_boundary_prior_blend_for_context,
 )
+from core.coarse_crnn.oto_boundary_decoding import boundary_slot_target_id
 from core.coarse_crnn.slot_graph import slot_context_from_row
 from core.coarse_crnn.oto_param_priors import decode_relative_oto_params, normalize_relative_oto_target, relative_params_to_anchors
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES, extract_alias_features
 from core.coarse_crnn.oto_windowing import crop_oto_target_window, row_window_args, should_use_vcv_target_window, target_window_frames_for
 from core.coarse_crnn.training import _autocast, _make_grad_scaler, _pin_memory_enabled, resolve_torch_device
+from core.coarse_crnn.oto_sequence_alignment import SEQUENCE_BOUNDARY_KINDS
 
 
 @dataclass
 class OtoTrainConfig:
     epochs: int = 4
     lr: float = 1e-3
+    # LR schedule. "cosine" applies a short linear warmup then cosine decay to
+    # lr * lr_min_ratio over the whole run; "none" keeps lr flat (legacy).
+    # A flat 1e-3 across epochs let the model leave the generalizing basin after
+    # epoch 1 — train loss kept dropping while val collapsed.
+    lr_schedule: str = "cosine"
+    lr_warmup_ratio: float = 0.03
+    lr_min_ratio: float = 0.05
     batch_size: int = 8
     max_frames: int = 1200
     seed: int = 1337
@@ -65,6 +74,9 @@ class OtoTrainConfig:
     vv_role_loss_weight: float = 2.0
     uncertainty_loss_weight: float = 0.30
     confidence_loss_weight: float = 0.10
+    boundary_slot_loss_weight: float = 0.15
+    boundary_ranking_loss_weight: float = 0.18
+    sequence_candidate_loss_weight: float = 0.22
     confidence_target_error_scale: float = 0.08
     min_confidence_target: float = 0.02
     max_confidence_target: float = 0.98
@@ -82,6 +94,11 @@ class OtoTrainConfig:
     selection_hard_failure_weight: float = 2.5
     selection_worst_voicebank_weight: float = 1.5
     selection_worst_voicebank_target_acc50: float = 0.50
+    # The original selection score ignored overall preutterance accuracy and
+    # anchor MAE, so it could not rank epochs by the metrics that actually
+    # matter. These two terms fold them back in.
+    selection_preutterance_acc_weight: float = 2.0
+    selection_anchor_mae_weight: float = 0.0015
     checkpoint_save_every_epochs: int = 0
     # row_order_violation_alpha > 0 down-weights rows whose target_offset deviates
     # significantly from the expected position (row_ratio * duration).
@@ -241,6 +258,13 @@ class OtoAnchorDataset:
         features, hop_sec, duration_sec = self._load_or_compute_features(wav_path)
         if features.shape[0] <= 0:
             features = np.zeros((1, int(self.model_config.n_mels)), dtype=np.float32)
+        # Train-time SpecAugment / gain / pitch on the raw [T, n_mels] log-mel,
+        # before Δ/Δ² so the deltas reflect the perturbed signal.
+        # UTOA_OTO_DISABLE_AUGMENT=1 turns it off for A/C-only ablation runs.
+        if self.train and os.environ.get("UTOA_OTO_DISABLE_AUGMENT", "") != "1":
+            features = augment_log_mel(features)
+        if bool(getattr(self.model_config, "feature_deltas", False)):
+            features = add_log_mel_deltas(features)
         anchors_ms = _anchor_array_from_row(row)
         full_duration_ms = float(duration_sec) * 1000.0
         if should_use_vcv_target_window(
@@ -249,8 +273,6 @@ class OtoAnchorDataset:
             formats=tuple(getattr(self.model_config, "target_window_formats", ("vcv",))),
             alias_type=row.get("alias_type", ""),
             alias_role=alias_role_text,
-            cvvc_alias_types=tuple(getattr(self.model_config, "cvvc_target_window_alias_types", ("vc", "vv"))),
-            cvvc_alias_roles=tuple(getattr(self.model_config, "cvvc_target_window_alias_roles", ("vc", "vv"))),
         ):
             row_index, row_count = row_window_args(row)
             features, anchors_ms_or_none, duration_ms, _start_frame = crop_oto_target_window(
@@ -282,6 +304,14 @@ class OtoAnchorDataset:
             frame_count=int(features.shape[0]),
             hop_sec=float(hop_sec),
             sigma_frames=float(self.train_config.heatmap_sigma_frames),
+        )
+        sequence_candidate_heatmap = _make_sequence_candidate_heatmap(
+            anchors_ms,
+            alias_role_text,
+            frame_count=int(features.shape[0]),
+            hop_sec=float(hop_sec),
+            sigma_frames=float(self.train_config.heatmap_sigma_frames),
+            classes=tuple(getattr(self.model_config, "sequence_candidate_classes", SEQUENCE_BOUNDARY_KINDS)),
         )
         include_active_context = bool(getattr(self.model_config, "enable_active_audio_context", False)) or bool(
             getattr(self.train_config, "enable_active_audio_context", False)
@@ -364,6 +394,7 @@ class OtoAnchorDataset:
         return (
             features.astype(np.float32),
             heatmap.astype(np.float32),
+            sequence_candidate_heatmap.astype(np.float32),
             scalar,
             anchors_ms.astype(np.float32),
             float(duration_ms),
@@ -502,14 +533,31 @@ def train_oto_from_manifest(
     best_state = None
     latest_state = None
     stagnant_epochs = 0
-    for epoch in range(1, int(cfg.epochs) + 1):
-        train_loader = _build_train_loader(
-            torch=torch,
-            dataset=train_ds,
-            cfg=cfg,
-            hard_case_boosts=hard_case_boosts,
-            loader_workers=loader_workers,
+    train_loader = _build_train_loader(
+        torch=torch,
+        dataset=train_ds,
+        cfg=cfg,
+        hard_case_boosts=hard_case_boosts,
+        loader_workers=loader_workers,
+    )
+    total_steps = max(1, len(train_loader) * int(cfg.epochs))
+    scheduler = _build_lr_scheduler(torch, optimizer, cfg, total_steps)
+    if scheduler is not None:
+        print(
+            f"[oto_anchor][train] lr_schedule={cfg.lr_schedule} base_lr={float(cfg.lr):.2e} "
+            f"total_steps={total_steps} warmup_ratio={float(cfg.lr_warmup_ratio):.3f} "
+            f"min_ratio={float(cfg.lr_min_ratio):.3f}",
+            flush=True,
         )
+    for epoch in range(1, int(cfg.epochs) + 1):
+        if epoch > 1:
+            train_loader = _build_train_loader(
+                torch=torch,
+                dataset=train_ds,
+                cfg=cfg,
+                hard_case_boosts=hard_case_boosts,
+                loader_workers=loader_workers,
+            )
         model.train()
         loss_sum = 0.0
         row_sum = 0
@@ -518,6 +566,7 @@ def train_oto_from_manifest(
             (
                 x,
                 heat,
+                sequence_candidate_heat,
                 scalar,
                 _anchors_ms,
                 _duration_ms,
@@ -555,9 +604,20 @@ def train_oto_from_manifest(
                     alias_role_ids=role_id,
                     prev_alias_role_ids=prev_role_id,
                     next_alias_role_ids=next_role_id,
-                    extra_alias_flags=extra_flags,
                 )
-                loss = _oto_loss(outputs, heat, scalar, weight, mask, nn, cfg, relative_scalar=uses_relative_param_head(model_cfg))
+                loss = _oto_loss(
+                    outputs,
+                    heat,
+                    sequence_candidate_heat,
+                    scalar,
+                    weight,
+                    mask,
+                    nn,
+                    cfg,
+                    relative_scalar=uses_relative_param_head(model_cfg),
+                    role_ids=role_id,
+                    model_cfg=model_cfg,
+                )
                 if bool(getattr(cfg, "enable_hard_case_mining", False)):
                     _collect_epoch_hard_scores(
                         outputs=outputs,
@@ -569,12 +629,21 @@ def train_oto_from_manifest(
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                # GradScaler skips optimizer.step() when fp16 grads overflow
+                # (common during early-step scale calibration). A drop in the
+                # scale signals a skipped step — keep the LR schedule aligned by
+                # only advancing it when the optimizer actually stepped.
+                scale_before = scaler.get_scale()
                 scaler.step(optimizer)
                 scaler.update()
+                optimizer_stepped = scaler.get_scale() >= scale_before
             else:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
                 optimizer.step()
+                optimizer_stepped = True
+            if scheduler is not None and optimizer_stepped:
+                scheduler.step()
             rows_in_batch = int(x.shape[0])
             loss_sum += float(loss.detach().cpu().item()) * rows_in_batch
             row_sum += rows_in_batch
@@ -685,6 +754,7 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
             (
                 x,
                 heat,
+                sequence_candidate_heat,
                 scalar,
                 anchors_ms,
                 duration_ms,
@@ -720,10 +790,21 @@ def _evaluate(model, loader, device, nn, cfg: OtoTrainConfig, model_cfg: OtoCrnn
                 alias_role_ids=role_id,
                 prev_alias_role_ids=prev_role_id,
                 next_alias_role_ids=next_role_id,
-                extra_alias_flags=extra_flags,
             )
             relative_scalar = uses_relative_param_head(model_cfg)
-            loss = _oto_loss(outputs, heat, scalar, weight, mask, nn, cfg, relative_scalar=relative_scalar)
+            loss = _oto_loss(
+                outputs,
+                heat,
+                sequence_candidate_heat,
+                scalar,
+                weight,
+                mask,
+                nn,
+                cfg,
+                relative_scalar=relative_scalar,
+                role_ids=role_id,
+                model_cfg=model_cfg,
+            )
             pred_scalar = torch.sigmoid(outputs["scalar_logits"])
             if relative_scalar:
                 pred_anchors = _relative_anchor_predictions(
@@ -785,7 +866,20 @@ def _epoch_checkpoint_path(output_path: str, epoch: int) -> str:
     return f"{root}{suffix}{ext}"
 
 
-def _oto_loss(outputs, heat, scalar, weight, mask, nn, cfg: OtoTrainConfig, *, relative_scalar: bool = False):
+def _oto_loss(
+    outputs,
+    heat,
+    sequence_candidate_heat,
+    scalar,
+    weight,
+    mask,
+    nn,
+    cfg: OtoTrainConfig,
+    *,
+    relative_scalar: bool = False,
+    role_ids=None,
+    model_cfg: OtoCrnnConfig | None = None,
+):
     torch = __import__("torch")
     pred_heat = torch.sigmoid(outputs["heatmap_logits"])
     heat_loss_raw = (pred_heat - heat) ** 2
@@ -815,14 +909,100 @@ def _oto_loss(outputs, heat, scalar, weight, mask, nn, cfg: OtoTrainConfig, *, r
         conf_loss = (conf_loss_raw * weight).sum() / torch.clamp(weight.sum(), min=1.0)
     else:
         conf_loss = scalar_pred.new_tensor(0.0)
+    boundary_slot_loss = scalar_pred.new_tensor(0.0)
+    boundary_slot_logits = outputs.get("boundary_slot_logits")
+    if boundary_slot_logits is not None and role_ids is not None and model_cfg is not None:
+        targets = _boundary_slot_targets_from_role_ids(role_ids, model_cfg).to(
+            device=boundary_slot_logits.device,
+            dtype=torch.long,
+        )
+        raw = nn.functional.cross_entropy(boundary_slot_logits, targets, reduction="none")
+        boundary_mask = torch.where(targets > 0, torch.ones_like(raw), raw.new_full(raw.shape, 0.15))
+        boundary_slot_loss = (raw * boundary_mask * weight).sum() / torch.clamp((boundary_mask * weight).sum(), min=1.0)
+    boundary_ranking_loss = scalar_pred.new_tensor(0.0)
+    if role_ids is not None and model_cfg is not None:
+        boundary_ranking_loss = _boundary_hard_negative_ranking_loss(
+            outputs["heatmap_logits"],
+            heat,
+            mask,
+            role_ids,
+            model_cfg,
+        )
+    sequence_candidate_loss = scalar_pred.new_tensor(0.0)
+    sequence_candidate_logits = outputs.get("sequence_candidate_logits")
+    if sequence_candidate_logits is not None and sequence_candidate_heat is not None:
+        target = sequence_candidate_heat.to(
+            device=sequence_candidate_logits.device,
+            dtype=sequence_candidate_logits.dtype,
+        )
+        raw = nn.functional.binary_cross_entropy_with_logits(
+            sequence_candidate_logits,
+            target,
+            reduction="none",
+        )
+        denom = torch.clamp(mask[:, :, None].sum() * raw.shape[-1], min=1.0)
+        sequence_candidate_loss = (raw * mask[:, :, None] * weight[:, None, None]).sum() / denom
     order_loss = _relative_order_penalty(scalar_pred) if relative_scalar else _order_penalty(scalar_pred)
     return (
         heat_loss * float(cfg.heatmap_loss_weight)
         + scalar_loss * float(cfg.scalar_loss_weight)
         + uncertainty_loss * float(getattr(cfg, "uncertainty_loss_weight", 0.0))
         + conf_loss * float(getattr(cfg, "confidence_loss_weight", 0.0))
+        + boundary_slot_loss * float(getattr(cfg, "boundary_slot_loss_weight", 0.0))
+        + boundary_ranking_loss * float(getattr(cfg, "boundary_ranking_loss_weight", 0.0))
+        + sequence_candidate_loss * float(getattr(cfg, "sequence_candidate_loss_weight", 0.0))
         + order_loss * float(cfg.order_loss_weight)
     )
+
+
+def _boundary_slot_targets_from_role_ids(role_ids, model_cfg: OtoCrnnConfig):
+    torch = __import__("torch")
+    roles = list(getattr(model_cfg, "alias_roles", ()) or ())
+    ids = role_ids.detach().cpu().numpy().astype(np.int64).tolist()
+    targets = []
+    for idx in ids:
+        role = roles[int(idx)] if 0 <= int(idx) < len(roles) else "other"
+        targets.append(boundary_slot_target_id(role))
+    return torch.as_tensor(targets, dtype=torch.long, device=role_ids.device)
+
+
+def _boundary_hard_negative_ranking_loss(heatmap_logits, heat, mask, role_ids, model_cfg: OtoCrnnConfig):
+    torch = __import__("torch")
+    roles = list(getattr(model_cfg, "alias_roles", ()) or ())
+    boundary_role_ids = [
+        idx
+        for idx, role in enumerate(roles)
+        if str(role).strip().lower() in {"vc", "vv", "v-cv"}
+    ]
+    if not boundary_role_ids:
+        return heatmap_logits.new_tensor(0.0)
+    role_mask = torch.zeros_like(role_ids, dtype=torch.bool)
+    for idx in boundary_role_ids:
+        role_mask = role_mask | (role_ids == int(idx))
+    if not bool(role_mask.any()):
+        return heatmap_logits.new_tensor(0.0)
+    pre_logits = heatmap_logits[:, :, 2]
+    pre_heat = heat[:, :, 2]
+    losses = []
+    exclusion = 4
+    margin = 0.30
+    for i in torch.nonzero(role_mask, as_tuple=False).reshape(-1).tolist():
+        valid = mask[int(i)] > 0.5
+        if not bool(valid.any()):
+            continue
+        target_idx = int(torch.argmax(pre_heat[int(i)]).detach().cpu().item())
+        neg_mask = valid.clone()
+        lo = max(0, target_idx - exclusion)
+        hi = min(int(neg_mask.shape[0]), target_idx + exclusion + 1)
+        neg_mask[lo:hi] = False
+        if not bool(neg_mask.any()):
+            continue
+        pos = pre_logits[int(i), target_idx]
+        neg = torch.max(pre_logits[int(i)][neg_mask])
+        losses.append(torch.relu(neg - pos + margin))
+    if not losses:
+        return heatmap_logits.new_tensor(0.0)
+    return torch.stack(losses).mean()
 
 
 def _order_penalty(pred):
@@ -905,15 +1085,17 @@ def _collate(batch):
     max_len = max(int(item[0].shape[0]) for item in batch)
     n_mels = int(batch[0][0].shape[1])
     anchor_count = len(OTO_ANCHOR_NAMES)
+    candidate_count = int(batch[0][2].shape[1]) if batch else len(SEQUENCE_BOUNDARY_KINDS)
     xs = np.zeros((len(batch), max_len, n_mels), dtype=np.float32)
     heats = np.zeros((len(batch), max_len, anchor_count), dtype=np.float32)
+    sequence_candidate_heats = np.zeros((len(batch), max_len, candidate_count), dtype=np.float32)
     masks = np.zeros((len(batch), max_len), dtype=np.float32)
     scalars = np.zeros((len(batch), anchor_count), dtype=np.float32)
     anchors_ms = np.zeros((len(batch), anchor_count), dtype=np.float32)
     durations = np.ones((len(batch),), dtype=np.float32)
     langs = np.zeros((len(batch),), dtype=np.int64)
     fmts = np.zeros((len(batch),), dtype=np.int64)
-    _ctx_dim = int(batch[0][7].shape[0]) if batch else 12  # index 7 = context array
+    _ctx_dim = int(batch[0][8].shape[0]) if batch else 12  # index 8 = context array
     contexts = np.zeros((len(batch), _ctx_dim), dtype=np.float32)
     alias_ids = np.zeros((len(batch),), dtype=np.int64)
     transition_ids = np.zeros((len(batch),), dtype=np.int64)
@@ -931,6 +1113,7 @@ def _collate(batch):
     for idx, (
         features,
         heatmap,
+        sequence_candidate_heatmap,
         scalar,
         anchor_ms,
         duration_ms,
@@ -954,6 +1137,7 @@ def _collate(batch):
         n = int(features.shape[0])
         xs[idx, :n] = features
         heats[idx, :n] = heatmap
+        sequence_candidate_heats[idx, :n] = sequence_candidate_heatmap
         masks[idx, :n] = 1.0
         scalars[idx] = scalar
         anchors_ms[idx] = anchor_ms
@@ -979,6 +1163,7 @@ def _collate(batch):
     return (
         torch.from_numpy(xs),
         torch.from_numpy(heats),
+        torch.from_numpy(sequence_candidate_heats),
         torch.from_numpy(scalars),
         torch.from_numpy(anchors_ms),
         torch.from_numpy(durations),
@@ -1239,6 +1424,58 @@ def _make_anchor_heatmap(anchors_ms: np.ndarray, *, frame_count: int, hop_sec: f
     return out
 
 
+def _make_sequence_candidate_heatmap(
+    anchors_ms: np.ndarray,
+    role: object,
+    *,
+    frame_count: int,
+    hop_sec: float,
+    sigma_frames: float,
+    classes: tuple[str, ...] = tuple(SEQUENCE_BOUNDARY_KINDS),
+) -> np.ndarray:
+    """Build frame-level candidate-kind labels for the sequence aligner head.
+
+    The target is intentionally role-centered, not a direct copy of all OTO
+    parameters. It teaches the model which acoustic boundary kind the row should
+    attach to so the wav-level decoder can handle final parameter placement.
+    """
+    n = int(frame_count)
+    class_list = tuple(classes or SEQUENCE_BOUNDARY_KINDS)
+    out = np.zeros((n, max(1, len(class_list))), dtype=np.float32)
+    if n <= 0:
+        return out
+    role_text = normalize_role(role)
+    hop_ms = max(float(hop_sec) * 1000.0, 1e-3)
+    sigma = max(float(sigma_frames), 0.5)
+    frames = np.arange(n, dtype=np.float32)
+
+    def add(anchor_index: int, kind: str, strength: float) -> None:
+        if kind not in class_list or int(anchor_index) < 0 or int(anchor_index) >= int(len(anchors_ms)):
+            return
+        cls = class_list.index(kind)
+        center = float(anchors_ms[int(anchor_index)]) / hop_ms
+        curve = np.exp(-0.5 * ((frames - center) / sigma) ** 2) * max(0.0, min(1.0, float(strength)))
+        out[:, cls] = np.maximum(out[:, cls], curve.astype(np.float32))
+
+    if role_text in {"-cv", "cv", "v", "special"}:
+        add(2, "vowel_onset", 1.0)
+        add(0, "silence_boundary", 0.30 if role_text == "-cv" else 0.18)
+    elif role_text == "vc":
+        add(2, "vowel_tail", 1.0)
+        add(3, "vowel_transition", 0.70)
+    elif role_text in {"vv", "v-cv"}:
+        add(2, "vowel_transition", 1.0)
+        add(3, "vowel_tail", 0.45)
+    elif role_text in {"cv-", "v-", "endbr"}:
+        add(2, "vowel_tail", 0.85)
+        add(4, "silence_boundary", 0.75)
+    elif role_text == "br":
+        add(2, "silence_boundary", 1.0)
+    else:
+        add(2, "vowel_onset", 0.45)
+    return out
+
+
 def _build_train_loader(
     *,
     torch,
@@ -1397,16 +1634,44 @@ def _build_hard_case_boosts(*, size: int, score_by_index: dict[int, float], top_
     return out
 
 
+def _build_lr_scheduler(torch, optimizer, cfg: OtoTrainConfig, total_steps: int):
+    mode = str(getattr(cfg, "lr_schedule", "cosine") or "cosine").strip().lower()
+    if mode in ("", "none", "constant"):
+        return None
+    if mode != "cosine":
+        raise ValueError(f"unsupported lr_schedule: {mode!r} (expected 'cosine' or 'none')")
+    import math
+
+    total = max(1, int(total_steps))
+    warmup_steps = max(0, min(total - 1, int(round(total * float(getattr(cfg, "lr_warmup_ratio", 0.03))))))
+    min_ratio = max(0.0, min(1.0, float(getattr(cfg, "lr_min_ratio", 0.05))))
+
+    def lr_lambda(step: int) -> float:
+        if warmup_steps > 0 and step < warmup_steps:
+            return float(step + 1) / float(warmup_steps)
+        progress = float(step - warmup_steps) / float(max(1, total - warmup_steps))
+        progress = min(1.0, max(0.0, progress))
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_ratio + (1.0 - min_ratio) * cosine
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
 def _selection_score(val_metrics: dict[str, float], cfg: OtoTrainConfig) -> float:
     val_loss = float(val_metrics.get("val_loss", 0.0) or 0.0)
     hard_fail = float(val_metrics.get("val_hard_failure_rate", 0.0) or 0.0)
     worst_acc = float(val_metrics.get("val_worst_voicebank_preutterance_acc_50ms", 0.0) or 0.0)
+    overall_acc = float(val_metrics.get("val_preutterance_acc_50ms", 0.0) or 0.0)
+    anchor_mae = float(val_metrics.get("val_anchor_mae_ms", 0.0) or 0.0)
     target_acc = float(getattr(cfg, "selection_worst_voicebank_target_acc50", 0.50))
-    acc_gap = max(0.0, target_acc - worst_acc)
+    worst_gap = max(0.0, target_acc - worst_acc)
+    overall_gap = max(0.0, target_acc - overall_acc)
     return (
         val_loss * float(getattr(cfg, "selection_val_loss_weight", 1.0))
         + hard_fail * float(getattr(cfg, "selection_hard_failure_weight", 2.5))
-        + acc_gap * float(getattr(cfg, "selection_worst_voicebank_weight", 1.5))
+        + worst_gap * float(getattr(cfg, "selection_worst_voicebank_weight", 1.5))
+        + overall_gap * float(getattr(cfg, "selection_preutterance_acc_weight", 2.0))
+        + anchor_mae * float(getattr(cfg, "selection_anchor_mae_weight", 0.0015))
     )
 
 
@@ -1533,7 +1798,11 @@ def _feature_cache_path(
         size = -1
         mtime_ns = -1
     key_src = {
-        "v": 1,
+        # v2: log_mel_spectrogram normalization changed (peak-normalize + median/MAD,
+        # fmin 30→60). v3: MAD floored at 0.5 + output clip ±10 to stop silence-
+        # dominated clips from exploding to ~1e6 (fp16 overflow → NaN). Entries
+        # from earlier versions are not interchangeable and must be regenerated.
+        "v": 3,
         "wav": abs_wav.lower(),
         "size": size,
         "mtime_ns": mtime_ns,

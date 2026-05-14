@@ -5,11 +5,13 @@ import json
 import os
 import random
 from collections import defaultdict
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 
 from core.coarse_crnn.oto_evaluate import _analyze_activity_profile, _is_hard_failure, _resolve_alias_role_fields
+from core.coarse_crnn.oto_boundary_decoding import correct_boundary_params_from_candidates
 from core.coarse_crnn.oto_inference import predict_oto_with_model
 from core.coarse_crnn.oto_model import load_oto_checkpoint
 from core.coarse_crnn.oto_predictor_generator import (
@@ -18,7 +20,12 @@ from core.coarse_crnn.oto_predictor_generator import (
     _apply_conservative_right_boundary_guard,
     _apply_low_confidence_fallback,
     _apply_activity_window_fallback,
+    _get_audio_candidates,
+    _env_bool,
+    _env_float,
+    _clamp,
 )
+from core.coarse_crnn.oto_sequence_alignment import decode_sequence_alignment_for_states, parse_sequence_role_allowlist
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES, OtoAnchors, anchors_to_oto_params, oto_params_to_anchors, read_jsonl
 from core.coarse_crnn.training import resolve_torch_device
 
@@ -105,21 +112,6 @@ def evaluate_runtime_manifest(
     audio_candidate_sequence_state: dict[str, int] = {}
     files: list[dict[str, Any]] = []
     failures: list[str] = []
-    counters = {
-        "right_guard_changed": 0,
-        "low_confidence_fallback": 0,
-        "activity_fallback": 0,
-        "candidate_snap": 0,
-        "vc_matcher": 0,
-        "runtime_moved": 0,
-        "offset_improved": 0,
-        "offset_worse": 0,
-        "offset_same": 0,
-        "preutterance_improved": 0,
-        "preutterance_worse": 0,
-        "preutterance_same": 0,
-    }
-
     for row in _sort_for_runtime(rows):
         try:
             item = _evaluate_one_runtime(
@@ -136,24 +128,15 @@ def evaluate_runtime_manifest(
             failures.append(f"{row.get('audio', '')}: {exc}")
             continue
         files.append(item)
-        for key in (
-            "right_guard_changed",
-            "low_confidence_fallback",
-            "activity_fallback",
-            "candidate_snap",
-            "vc_matcher",
-            "runtime_moved",
-        ):
-            counters[key] += 1 if bool(item.get(key, False)) else 0
-        for field, prefix in (("offset", "offset"), ("preutterance", "preutterance")):
-            raw_err = float(item["raw"]["param_abs_errors_ms"][field])
-            runtime_err = float(item["runtime"]["param_abs_errors_ms"][field])
-            if runtime_err < raw_err - 1e-6:
-                counters[f"{prefix}_improved"] += 1
-            elif runtime_err > raw_err + 1e-6:
-                counters[f"{prefix}_worse"] += 1
-            else:
-                counters[f"{prefix}_same"] += 1
+
+    if _env_bool("UTOA_OTO_CRNN_SEQUENCE_ALIGN_ENABLE", False):
+        _apply_sequence_alignment_to_runtime_files(
+            files,
+            model_config=model_config,
+            audio_candidate_cache=audio_candidate_cache,
+        )
+
+    counters = _runtime_counters(files)
 
     raw_files = [{**item, **item["raw"]} for item in files]
     runtime_files = [{**item, **item["runtime"]} for item in files]
@@ -254,6 +237,18 @@ def _evaluate_one_runtime(
         alias=alias,
         is_special=bool(float(row.get("is_special", 0.0) or 0.0) >= 0.5),
     )
+    role_fields = _resolve_alias_role_fields(row)
+    role_text = str(role_fields.get("alias_role", "") or "")
+    boundary_reason = ""
+    if _env_bool("UTOA_OTO_CRNN_RUNTIME_BOUNDARY_CANDIDATE_ENABLE", False):
+        params, boundary_reason = correct_boundary_params_from_candidates(
+            predicted_params=params,
+            audio_candidates=_get_audio_candidates(wav_path, cache=audio_candidate_cache, config=model_config),
+            role=role_text,
+            duration_ms=duration_ms,
+            max_delta_ms=260.0,
+            blend=0.72,
+        )
     params, vc_reason = _apply_vc_candidate_matcher(
         predicted_params=params,
         wav_path=wav_path,
@@ -322,17 +317,25 @@ def _evaluate_one_runtime(
         "row_index_in_wav": int(row.get("row_index_in_wav", 0) or 0),
         "file_row_count": int(row.get("file_row_count", 1) or 1),
         "duration_ms": duration_ms,
+        "target_anchors": target_anchors.to_dict(),
+        "target_params": dict(target_params),
+        "activity_profile": dict(profile),
         "confidence": float(prediction.confidence),
         "predicted_error_ms": (
             float(prediction.predicted_error_ms) if prediction.predicted_error_ms is not None else None
         ),
         "low_confidence": bool(prediction.low_confidence),
         "confidence_components": dict(prediction.confidence_components or {}),
+        "sequence_candidate_times_ms": list(prediction.sequence_candidate_times_ms or []),
+        "sequence_candidate_scores": list(prediction.sequence_candidate_scores or []),
+        "sequence_candidate_classes": list(prediction.sequence_candidate_classes or []),
         "right_guard_changed": bool(guard_changed),
         "low_confidence_fallback": bool(low_conf_reason),
         "low_confidence_reason": str(low_conf_reason),
         "activity_fallback": bool(activity_reason),
         "activity_reason": str(activity_reason),
+        "boundary_slot_graph": bool(boundary_reason),
+        "boundary_slot_graph_reason": str(boundary_reason),
         "vc_matcher": bool(vc_reason),
         "vc_matcher_reason": str(vc_reason),
         "candidate_snap": bool(snap_reason),
@@ -342,6 +345,117 @@ def _evaluate_one_runtime(
         "raw": raw,
         "runtime": runtime,
     }
+
+
+def _apply_sequence_alignment_to_runtime_files(
+    files: list[dict[str, Any]],
+    *,
+    model_config,
+    audio_candidate_cache: dict[str, Any],
+) -> None:
+    states: list[dict[str, Any]] = []
+    by_key = {}
+    for idx, item in enumerate(files):
+        row = SimpleNamespace(
+            wav_abs=str(item.get("audio", "") or ""),
+            row_index=int(item.get("row_index_in_wav", 0) or 0),
+            alias=str(item.get("alias", "") or ""),
+            alias_role=str(item.get("alias_role", "") or ""),
+        )
+        state = {
+            "row": row,
+            "params": dict((item.get("runtime") or {}).get("params") or {}),
+            "duration_ms": float(item.get("duration_ms", 0.0) or 0.0),
+            "sequence_candidate_times_ms": list(item.get("sequence_candidate_times_ms") or []),
+            "sequence_candidate_scores": list(item.get("sequence_candidate_scores") or []),
+            "sequence_candidate_classes": list(item.get("sequence_candidate_classes") or []),
+            "sequence_aligned": False,
+            "sequence_alignment_hold": False,
+            "sequence_alignment_reason": "",
+        }
+        states.append(state)
+        by_key[id(state)] = idx
+    moved, held = decode_sequence_alignment_for_states(
+        row_states=states,
+        language="",
+        role_resolver=lambda row: str(getattr(row, "alias_role", "") or ""),
+        candidate_getter=lambda wav_abs: _get_audio_candidates(str(wav_abs), cache=audio_candidate_cache, config=model_config),
+        max_shift_ms=max(0.0, _env_float("UTOA_OTO_CRNN_SEQUENCE_ALIGN_MAX_SHIFT_MS", 220.0)),
+        anchor_blend=_clamp(_env_float("UTOA_OTO_CRNN_SEQUENCE_ALIGN_ANCHOR_BLEND", 0.60), 0.0, 1.0),
+        boundary_blend=_clamp(_env_float("UTOA_OTO_CRNN_SEQUENCE_ALIGN_BOUNDARY_BLEND", 0.45), 0.0, 1.0),
+        min_move_ms=max(0.0, _env_float("UTOA_OTO_CRNN_SEQUENCE_ALIGN_MIN_MOVE_MS", 8.0)),
+        model_score_blend=_clamp(_env_float("UTOA_OTO_CRNN_SEQUENCE_ALIGN_MODEL_SCORE_BLEND", 0.35), 0.0, 1.0),
+        allowed_roles=parse_sequence_role_allowlist(os.environ.get("UTOA_OTO_CRNN_SEQUENCE_ALIGN_ROLES", "vc,vv")),
+    )
+    for state in states:
+        idx = by_key[id(state)]
+        item = files[idx]
+        item["sequence_aligned"] = bool(state.get("sequence_aligned", False))
+        item["sequence_alignment_hold"] = bool(state.get("sequence_alignment_hold", False))
+        item["sequence_alignment_reason"] = str(state.get("sequence_alignment_reason", ""))
+        item["sequence_alignment_applied"] = bool(state.get("sequence_aligned", False) or state.get("sequence_alignment_hold", False))
+        item["sequence_alignment_moved_total"] = int(moved)
+        item["sequence_alignment_held_total"] = int(held)
+        if not bool(state.get("sequence_aligned", False)):
+            continue
+        params = dict(state.get("params") or {})
+        duration_ms = float(item.get("duration_ms", 0.0) or 0.0)
+        anchors = oto_params_to_anchors(
+            offset=float(params.get("offset", 0.0) or 0.0),
+            consonant=float(params.get("consonant", 0.0) or 0.0),
+            cutoff=float(params.get("cutoff", 0.0) or 0.0),
+            preutterance=float(params.get("preutterance", 0.0) or 0.0),
+            overlap=float(params.get("overlap", 0.0) or 0.0),
+            duration_ms=duration_ms,
+        )
+        target_anchors = OtoAnchors(**dict(item.get("target_anchors") or {}))
+        target_params = dict(item.get("target_params") or {})
+        profile = dict(item.get("activity_profile") or {})
+        item["runtime"] = _variant_result(anchors, params, target_anchors, target_params, duration_ms, profile)
+        item["runtime_moved"] = True
+
+
+def _runtime_counters(files: list[dict[str, Any]]) -> dict[str, int]:
+    counters = {
+        "right_guard_changed": 0,
+        "low_confidence_fallback": 0,
+        "activity_fallback": 0,
+        "boundary_slot_graph": 0,
+        "candidate_snap": 0,
+        "vc_matcher": 0,
+        "sequence_aligned": 0,
+        "sequence_alignment_hold": 0,
+        "runtime_moved": 0,
+        "offset_improved": 0,
+        "offset_worse": 0,
+        "offset_same": 0,
+        "preutterance_improved": 0,
+        "preutterance_worse": 0,
+        "preutterance_same": 0,
+    }
+    for item in files:
+        for key in (
+            "right_guard_changed",
+            "low_confidence_fallback",
+            "activity_fallback",
+            "boundary_slot_graph",
+            "candidate_snap",
+            "vc_matcher",
+            "sequence_aligned",
+            "sequence_alignment_hold",
+            "runtime_moved",
+        ):
+            counters[key] += 1 if bool(item.get(key, False)) else 0
+        for field, prefix in (("offset", "offset"), ("preutterance", "preutterance")):
+            raw_err = float(item["raw"]["param_abs_errors_ms"][field])
+            runtime_err = float(item["runtime"]["param_abs_errors_ms"][field])
+            if runtime_err < raw_err - 1e-6:
+                counters[f"{prefix}_improved"] += 1
+            elif runtime_err > raw_err + 1e-6:
+                counters[f"{prefix}_worse"] += 1
+            else:
+                counters[f"{prefix}_same"] += 1
+    return counters
 
 
 def _variant_result(
@@ -401,6 +515,8 @@ def _summarize_variant(files: list[dict[str, Any]]) -> dict[str, Any]:
         "param_mae_ms": {key: _mean(values) for key, values in param_errors.items()},
         "preutterance_acc_20ms": _hit_rate(pre_errors, 20.0),
         "preutterance_acc_50ms": _hit_rate(pre_errors, 50.0),
+        "position_bad_rate_100ms": _position_bad_rate(files, 100.0),
+        "position_bad_rate_250ms": _position_bad_rate(files, 250.0),
         "hard_failure_rate": float(sum(1 for row in files if bool(row.get("hard_failure")))) / float(len(files)),
     }
 
@@ -418,7 +534,13 @@ def _summary_delta(raw_files: list[dict[str, Any]], runtime_files: list[dict[str
                 if raw_value is not None and runtime_value is not None
                 else None
             )
-    for key in ("preutterance_acc_20ms", "preutterance_acc_50ms", "hard_failure_rate"):
+    for key in (
+        "preutterance_acc_20ms",
+        "preutterance_acc_50ms",
+        "position_bad_rate_100ms",
+        "position_bad_rate_250ms",
+        "hard_failure_rate",
+    ):
         raw_value = raw.get(key)
         runtime_value = runtime.get(key)
         out[key] = float(runtime_value) - float(raw_value) if raw_value is not None and runtime_value is not None else None
@@ -447,6 +569,7 @@ def _aggregate_by_language_format_role(files: list[dict[str, Any]]) -> dict[str,
             "deltas": _summary_delta(raw_files, runtime_files),
             "moved": sum(1 for row in rows if bool(row.get("runtime_moved"))),
             "candidate_snap": sum(1 for row in rows if bool(row.get("candidate_snap"))),
+            "boundary_slot_graph": sum(1 for row in rows if bool(row.get("boundary_slot_graph"))),
             "vc_matcher": sum(1 for row in rows if bool(row.get("vc_matcher"))),
             "activity_fallback": sum(1 for row in rows if bool(row.get("activity_fallback"))),
         }
@@ -511,6 +634,27 @@ def _hit_rate(values: list[float], threshold: float) -> float | None:
     if not values:
         return None
     return float(np.mean(np.asarray(values, dtype=np.float32) <= float(threshold)))
+
+
+def _is_position_bad(param_errors: dict[str, float], threshold_ms: float) -> bool:
+    return any(
+        float(param_errors.get(key, 0.0) or 0.0) > float(threshold_ms)
+        for key in ("offset", "consonant", "cutoff_abs", "preutterance")
+    )
+
+
+def _position_bad_rate(files: list[dict[str, Any]], threshold_ms: float) -> float | None:
+    if not files:
+        return None
+    bad = sum(1 for row in files if _is_position_bad(dict(row.get("param_abs_errors_ms") or {}), threshold_ms))
+    return float(bad) / float(len(files))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw not in {"0", "false", "off", "no"}
 
 
 if __name__ == "__main__":

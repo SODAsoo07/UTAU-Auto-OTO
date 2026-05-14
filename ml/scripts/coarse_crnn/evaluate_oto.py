@@ -28,6 +28,7 @@ def main() -> int:
     parser.add_argument("--gate-alias-context-min-files", type=int, default=25)
     parser.add_argument("--gate-alias-context-min-preutterance-acc-50ms", type=float, default=0.55)
     parser.add_argument("--gate-max-hard-failure-rate", type=float, default=0.08)
+    parser.add_argument("--gate-max-position-bad-rate-250ms", type=float, default=0.30)
     parser.add_argument("--gate-min-worst-voicebank-preutterance-acc-50ms", type=float, default=0.45)
     parser.add_argument("--gate-max-worst-voicebank-hard-failure-rate", type=float, default=0.22)
     args = parser.parse_args()
@@ -49,6 +50,7 @@ def main() -> int:
         gate_alias_context_min_files=int(args.gate_alias_context_min_files),
         gate_alias_context_min_preutterance_acc_50ms=float(args.gate_alias_context_min_preutterance_acc_50ms),
         gate_max_hard_failure_rate=float(args.gate_max_hard_failure_rate),
+        gate_max_position_bad_rate_250ms=float(args.gate_max_position_bad_rate_250ms),
         gate_min_worst_voicebank_preutterance_acc_50ms=float(args.gate_min_worst_voicebank_preutterance_acc_50ms),
         gate_max_worst_voicebank_hard_failure_rate=float(args.gate_max_worst_voicebank_hard_failure_rate),
     )
