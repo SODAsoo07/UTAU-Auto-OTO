@@ -2,9 +2,16 @@
 
 This workflow is intentionally separate from the existing `sequence` aligner.
 
-The same audio/CRNN code also has an OTO-anchor mode. For UTAU voicebanks this
-is the preferred direction: train directly against `oto.ini` parameters instead
-of using coarse phone boundaries as the final target.
+Deprecated OTO note: the direct-parameter OTO CRNN stack has moved under
+`core/coarse_crnn/deprecated/direct_param/`. The old `core.coarse_crnn.oto_*`
+import paths are compatibility wrappers only. New OTO model work should target
+a frame-level boundary scorer plus wav-level monotonic decoder instead of direct
+`offset/consonant/cutoff/preutterance/overlap` regression.
+
+The same audio/CRNN code also has a deprecated OTO-anchor mode that trained
+directly against `oto.ini` parameters. Keep it for reproduction only; the next
+production OTO direction is boundary scoring plus decoder-side parameter
+construction.
 
 Build a Korean/Japanese manifest:
 
@@ -247,6 +254,11 @@ $env:UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_MAX_SHIFT_MS='3000'
 $env:UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_MIN_MOVE_MS='30'
 $env:UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_VC_TARGET_RATIO='0.62'
 $env:UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_VC_FALLBACK_RATIO='0.62'
+$env:UTOA_OTO_CRNN_VC_ANCHOR_ROLES='-cv,cv,v,special'
+$env:UTOA_OTO_CRNN_VC_ANCHOR_MIN_CONFIDENCE='0.20'
+$env:UTOA_OTO_CRNN_VC_ANCHOR_LEFT_PAD_MS='45'
+$env:UTOA_OTO_CRNN_VC_ANCHOR_RIGHT_PAD_MS='60'
+$env:UTOA_OTO_CRNN_VC_ANCHOR_MIN_GAP_MS='24'
 $env:UTOA_OTO_CRNN_FINAL_RIGHT_GUARD_ENABLE='1'
 ```
 
@@ -275,6 +287,13 @@ the left syllable onset; it is locked near the transition from the left vowel
 tail to the next onset. The default target is
 `vowel_end + (next_onset - vowel_end) * 0.62`, with the same ratio used between
 neighboring filename slots when no stable vowel segment is available.
+
+When usable CV/V anchors exist in the same wav, VC placement is constrained by
+that anchor timeline first. Non-VC anchor rows are locked before VC rows; then a
+VC row at slot `i` searches only between anchor `i` and the next available
+anchor. This prevents a VC row from drifting to a later onset elsewhere in the
+file. If the anchor pair is unavailable or too narrow, the older VC slot fallback
+above is used.
 
 Final right-boundary guard is enabled by default after all slot/sequence
 movement. It clamps `consonant` and `cutoff` by alias role so rows moved to the
@@ -374,5 +393,6 @@ Recent patch notes (2026-05-14):
 - Alias-slot lock now uses a VC-specific transition target. VC rows no longer land on the left syllable onset; they land near the vowel-tail-to-next-onset transition.
 - Korean filename-slot matching now has a vowel-key fallback for V/VC/VV/V-CV rows, so aliases like `a k` can map to filename syllables like `ga` instead of falling back to raw row order.
 - Final right-boundary guard now runs after slot/sequence movement by default to reduce overlong/stretched timing after relocation.
+- VC alias-slot lock now uses the already locked CV/V anchor timeline when possible. VC rows are constrained between the left anchor and next anchor before falling back to the older slot-based VC target.
 
-Last edited: 2026-05-14 15:24 KST
+Last edited: 2026-05-14 15:32 KST

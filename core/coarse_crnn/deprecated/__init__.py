@@ -1,0 +1,2 @@
+"""Deprecated coarse CRNN implementations."""
+

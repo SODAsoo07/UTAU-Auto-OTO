@@ -502,6 +502,53 @@ def test_alias_slot_lock_vc_uses_transition_target_instead_of_slot_onset(tmp_pat
     assert state["params"]["offset"] + state["params"]["preutterance"] == 260.0
 
 
+def test_alias_slot_lock_vc_anchor_pair_constrains_target_window(tmp_path, monkeypatch):
+    from core.coarse_crnn import oto_predictor_generator as gen
+    from core.coarse_crnn.oto_audio_candidates import AudioCandidates, OnsetPeak, VowelSegmentCandidate
+
+    wav_path = tmp_path / "a_ka.wav"
+    wav_path.write_bytes(b"fake")
+    wav_abs = str(wav_path.resolve())
+    audio = AudioCandidates(
+        wav_path=wav_abs,
+        duration_ms=700.0,
+        active_start_ms=40.0,
+        active_end_ms=620.0,
+        onset_peaks=[
+            OnsetPeak(time_ms=60.0, strength=0.95),
+            OnsetPeak(time_ms=540.0, strength=0.92),
+        ],
+        stable_vowel_segments=[
+            VowelSegmentCandidate(
+                segment_id=0,
+                start_ms=130.0,
+                end_ms=220.0,
+                center_ms=175.0,
+                vowel_id="a",
+                vowel_confidence=0.92,
+                voiced_score=0.90,
+                stability_score=0.88,
+                energy_mean=0.60,
+                mel_delta_mean=0.05,
+            )
+        ],
+        mel_delta_peaks=[],
+    )
+    monkeypatch.setenv("UTOA_OTO_CRNN_ALIAS_SLOT_LOCK_VC_TARGET_RATIO", "0.50")
+
+    target = gen._alias_slot_lock_target_time(
+        audio,
+        role="vc",
+        target_slot_idx=0,
+        slot_times=[60.0, 540.0],
+        anchor_times=[120.0, 300.0],
+    )
+
+    # The next onset at 540 ms is outside the CV-anchor pair window, so VC must
+    # stay inside the [120, 300] anchor pair instead of drifting toward 540 ms.
+    assert target == 220.0
+
+
 def test_crnn_oto_generator_does_not_use_base_oto_fallback_by_default(tmp_path, monkeypatch):
     from core.coarse_crnn import oto_predictor_generator as gen
 
