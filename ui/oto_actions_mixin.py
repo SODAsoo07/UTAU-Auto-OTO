@@ -639,6 +639,11 @@ class OtoActionsMixin:
                                     if hasattr(self, "oto_crnn_device_var")
                                     else "auto"
                                 ),
+                                engine=(
+                                    self._get_oto_crnn_engine_code()
+                                    if hasattr(self, "_get_oto_crnn_engine_code")
+                                    else "legacy_direct"
+                                ),
                                 special_aliases=_crnn_special_aliases or None,
                                 callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                             )
