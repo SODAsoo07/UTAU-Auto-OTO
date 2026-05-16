@@ -2571,6 +2571,14 @@ class PipelineActionsMixin:
                     _set_stage_progress("oto", 0.03)
                     if no_mfa_mode_code == "crnn":
                         self._set_status("4/5 - CRNN OTO 직접 예측 중...")
+                        _crnn_engine_code = (
+                            self._get_oto_crnn_engine_code()
+                            if hasattr(self, "_get_oto_crnn_engine_code")
+                            else "legacy_direct"
+                        )
+                        self._append_log(
+                            f"[CRNN-OTO] aligner={aligner_engine} mode={no_mfa_mode_code} engine={_crnn_engine_code}"
+                        )
                         _crnn_special_raw = (
                             self.oto_crnn_special_aliases_var.get()
                             if hasattr(self, "oto_crnn_special_aliases_var")
@@ -2598,11 +2606,7 @@ class PipelineActionsMixin:
                                 if hasattr(self, "oto_crnn_device_var")
                                 else "auto"
                             ),
-                            engine=(
-                                self._get_oto_crnn_engine_code()
-                                if hasattr(self, "_get_oto_crnn_engine_code")
-                                else "legacy_direct"
-                            ),
+                            engine=_crnn_engine_code,
                             special_aliases=_crnn_special_aliases or None,
                             callback=_make_stage_callback("oto"),
                         )

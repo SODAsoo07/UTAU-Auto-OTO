@@ -50,6 +50,7 @@ class BoundaryFrameScores:
     wav_path: str
     times_ms: list[float]
     scores: dict[str, list[float]]
+    quality_scores: list[float] | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,7 @@ class DecodedOtoRow:
     selected_time_ms: float
     fallback_used: bool
     reason: str
+    quality_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -149,4 +151,3 @@ __all__ = [
     "normalize_boundary_label",
     "role_label_preferences",
 ]
-
