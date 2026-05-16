@@ -10,7 +10,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.oto_ml_export import export_multiple_model_bundles, resolve_bundle_dir
-from core.runtime_encoding import bootstrap_utf8_runtime
+from core.runtime.runtime_encoding import bootstrap_utf8_runtime
 
 
 def _resolve_model_dir_arg(asset_root: str, bundle_arg: str) -> str:

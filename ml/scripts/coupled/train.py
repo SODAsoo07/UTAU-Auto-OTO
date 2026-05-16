@@ -11,7 +11,7 @@ if ROOT not in sys.path:
 
 from core.oto_ml_coupled import train_coupled_bundle, train_coupled_bundle_rawmel
 from core.oto_ml.features.mel_patches import resolve_rawmel_cache_dir
-from core.runtime_encoding import bootstrap_utf8_runtime
+from core.runtime.runtime_encoding import bootstrap_utf8_runtime
 
 
 def main():

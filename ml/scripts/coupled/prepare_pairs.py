@@ -9,8 +9,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.a
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from core.oto_ml_batch_prepare import prepare_staged_auto_pairs, write_prepare_report
-from core.runtime_encoding import bootstrap_utf8_runtime
+from core.oto_ml.oto_ml_batch_prepare import prepare_staged_auto_pairs, write_prepare_report
+from core.runtime.runtime_encoding import bootstrap_utf8_runtime
 
 
 def _escape_unusual_chars(text: str) -> str:

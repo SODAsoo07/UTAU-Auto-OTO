@@ -50,6 +50,11 @@ jobs:
           pip install --no-build-isolation -r requirements-preview.txt
           pip install nuitka ordered-set zstandard
 
+      - name: Core Wrapper Lifecycle Guard
+        shell: pwsh
+        run: |
+          python scripts/audit_core_wrapper_lifecycle.py --enforce-clean
+
       - name: Build App (preview)
         shell: pwsh
         timeout-minutes: 70

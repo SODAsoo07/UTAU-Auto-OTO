@@ -17,7 +17,7 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-ONE_STAGE_SCRIPT = os.path.join(ROOT_DIR, "scripts", "run_coupled_experiment_matrix.py")
+ONE_STAGE_SCRIPT = os.path.join(ROOT_DIR, "scripts", "evaluate", "run_coupled_experiment_matrix.py")
 
 
 def _load_yaml(path: str):

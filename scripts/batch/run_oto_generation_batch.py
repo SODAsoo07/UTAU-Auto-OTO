@@ -22,7 +22,7 @@ from core.ja_lab_generator import generate_ja_dictionary, generate_ja_labs
 from core.alignment_pipeline import run_alignment_with_fallback
 from core.oto_generator import generate_oto
 from core.lab_generator import generate_dictionary, generate_labs
-from core.runtime_encoding import bootstrap_utf8_runtime
+from core.runtime.runtime_encoding import bootstrap_utf8_runtime
 from core.pipeline_status import (
     ALIGN_SKIPPED,
     EXCEPTION,

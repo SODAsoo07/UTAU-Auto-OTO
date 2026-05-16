@@ -29,7 +29,7 @@ from core.oto_ml.features.mel_patches import (
     find_wav_path,
     extract_patches_for_row,
 )
-from core.runtime_encoding import bootstrap_utf8_runtime
+from core.runtime.runtime_encoding import bootstrap_utf8_runtime
 
 
 def _parse_window(text: str, default: Tuple[float, float]) -> Tuple[float, float]:

@@ -10,7 +10,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.mapping_supervised_training import train_mapping_supervised_model
-from core.runtime_encoding import bootstrap_utf8_runtime
+from core.runtime.runtime_encoding import bootstrap_utf8_runtime
 
 
 def main() -> int:

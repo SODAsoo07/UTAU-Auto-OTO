@@ -14,7 +14,7 @@ from core.oto_ml_staging import (
     write_stage_manifest_csv,
     write_stage_manifest_json,
 )
-from core.runtime_encoding import bootstrap_utf8_runtime
+from core.runtime.runtime_encoding import bootstrap_utf8_runtime
 
 
 def main():

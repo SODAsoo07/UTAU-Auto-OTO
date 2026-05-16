@@ -1,19 +1,11 @@
-from __future__ import annotations
+"""Compatibility wrapper: moved to `core.oto_ml.oto_ml_prepare_types`."""
 
-from dataclasses import dataclass
+from importlib import import_module as _import_module
 
+_impl = _import_module("core.oto_ml.oto_ml_prepare_types")
+for _name, _value in _impl.__dict__.items():
+    if _name.startswith("__"):
+        continue
+    globals()[_name] = _value
 
-@dataclass
-class PreparedAutoPair:
-    language: str
-    format_type: str
-    stage_root: str
-    work_dir: str
-    manual_oto: str
-    auto_oto: str = ""
-    tg_dir: str = ""
-    dict_path: str = ""
-    mfa_path: str = ""
-    status: str = "pending"
-    reason: str = ""
-
+del _import_module, _impl, _name, _value
