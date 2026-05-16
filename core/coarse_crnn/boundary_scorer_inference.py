@@ -29,15 +29,25 @@ def infer_boundary_scores_with_model(
         hop_ms=float(config.hop_ms),
     )
     if features.shape[0] <= 0:
-        return BoundaryFrameScores(wav_path=wav_path, times_ms=[], scores={label: [] for label in config.labels})
+        return BoundaryFrameScores(
+            wav_path=wav_path,
+            times_ms=[],
+            scores={label: [] for label in config.labels},
+            quality_scores=[],
+        )
     with torch.no_grad():
         x = torch.from_numpy(features.astype(np.float32)).unsqueeze(0).to(torch_device)
         out = model.to(torch_device)(x)
         logits = out["boundary_logits"].squeeze(0)
         probs = torch.sigmoid(logits).detach().cpu().numpy().astype(np.float32)
+        q_logits = out.get("quality_logits")
+        q_probs = None
+        if q_logits is not None:
+            q_probs = torch.sigmoid(q_logits.squeeze(0)).detach().cpu().numpy().astype(np.float32)
     times = (np.arange(probs.shape[0], dtype=np.float32) * (float(hop_sec) * 1000.0)).tolist()
     scores = {label: probs[:, idx].tolist() for idx, label in enumerate(config.labels)}
-    return BoundaryFrameScores(wav_path=wav_path, times_ms=times, scores=scores)
+    quality_scores = q_probs.tolist() if q_probs is not None else []
+    return BoundaryFrameScores(wav_path=wav_path, times_ms=times, scores=scores, quality_scores=quality_scores)
 
 
 def predict_boundary_scores(*, model_path: str, wav_path: str, device: str = "auto") -> BoundaryFrameScores:
@@ -52,6 +62,7 @@ def write_boundary_scores_json(path: str, score_map: BoundaryFrameScores, *, met
         "wav_path": score_map.wav_path,
         "times_ms": list(score_map.times_ms),
         "scores": {k: list(v) for k, v in score_map.scores.items()},
+        "quality_scores": list(score_map.quality_scores or []),
         "meta": dict(meta or {}),
     }
     with open(path, "w", encoding="utf-8") as handle:
@@ -63,4 +74,3 @@ __all__ = [
     "predict_boundary_scores",
     "write_boundary_scores_json",
 ]
-

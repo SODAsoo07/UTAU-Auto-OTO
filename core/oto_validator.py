@@ -24,6 +24,7 @@ from core.textio_utils import read_text_auto
 from core.ja_lab_generator import parse_ja_filename
 from core.kr_oto_rules import should_ignore_korean_alias, classify_alias as _classify_kr_alias
 from core.oto_normalization import normalize_wav_key
+from core.coarse_crnn.oto_targets import resolve_cutoff_abs_ms
 
 
 SIL_MARKS = {"", "sil", "sp", "spn", "pau"}
@@ -701,7 +702,11 @@ def validate_oto_timing(
             ovl = off + row["ovl"]
             pre = off + row["pre"]
             cons = off + row["cons"]
-            cut = off + abs(row["cutoff"])
+            cut = resolve_cutoff_abs_ms(
+                offset_ms=float(off),
+                cutoff=float(row["cutoff"]),
+                duration_ms=float(mel_sig["duration_ms"]),
+            )
             pre_abs_seq.append(pre)
             if alias_type not in ("vc", "vv"):
                 anchor_pre_abs_seq.append(pre)

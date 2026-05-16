@@ -44,6 +44,11 @@ def main() -> int:
     ap.add_argument("--conv-channels", type=int, default=96)
     ap.add_argument("--pos-weight", type=float, default=2.5)
     ap.add_argument("--quality-loss-weight", type=float, default=0.06)
+    ap.add_argument("--boundary-time-loss-weight", type=float, default=0.08)
+    ap.add_argument("--hard-case-oversample", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--hard-case-weight", type=float, default=1.8)
+    ap.add_argument("--hard-case-min-ratio", type=float, default=0.10)
+    ap.add_argument("--hard-case-alias-regex", default="")
     ap.add_argument("--max-rows", type=int, default=0)
     args = ap.parse_args()
 
@@ -67,6 +72,11 @@ def main() -> int:
         val_ratio=float(args.val_ratio),
         quality_loss_weight=float(args.quality_loss_weight),
         pos_weight=float(args.pos_weight),
+        boundary_time_loss_weight=float(args.boundary_time_loss_weight),
+        hard_case_oversample=bool(args.hard_case_oversample),
+        hard_case_weight=float(args.hard_case_weight),
+        hard_case_min_ratio=float(args.hard_case_min_ratio),
+        hard_case_alias_regex=str(args.hard_case_alias_regex or ""),
     )
     result = train_boundary_from_manifest(rows, args.out, train_config=tcfg, model_config=cfg)
     print(json.dumps(result, ensure_ascii=False, indent=2))

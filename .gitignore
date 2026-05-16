@@ -24,6 +24,9 @@
 !run_prepare_pairs.ps1
 !UTAU_Auto_OTO.spec
 !release_channel.json
+!AGENTS.md
+!plans/
+!plans/**
 
 # 4) Keep source directories
 !core/
@@ -34,6 +37,8 @@
 !ml/**
 !scripts/
 !scripts/**
+!tests/
+!tests/**
 !.github/
 !.github/**
 
@@ -41,6 +46,12 @@
 ml/notebooks/
 ml/notebooks/**
 *.ipynb
+
+# A/B listening run output is per-cycle data, not source.
+# Manifests, labels CSV, and reports stay tracked; only runs/<run_id>/<version>/<voicebank>/oto.ini
+# and the per-run summary are gitignored.
+ml/eval/ab_listening/runs/**
+!ml/eval/ab_listening/runs/.gitkeep
 
 # 6) Explicitly exclude local artifacts and private/training data roots
 .cache/
@@ -119,3 +130,4 @@ MANIFEST
 *.dist/
 *.build/
 *.onefile-build/
+/ml/eval

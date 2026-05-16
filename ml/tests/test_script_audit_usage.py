@@ -42,3 +42,12 @@ def test_candidate_delete_rows_are_strictly_unreferenced():
         assert int(row.get("external_ref_count", 0)) == 0
         assert int(row.get("internal_ref_count", 0)) == 0
         assert bool(row.get("safe_delete_candidate", False)) is True
+
+
+def test_manual_scripts_live_under_tests_scripts():
+    payload = _run_audit_json()
+    for row in payload.get("scripts", []):
+        if str(row.get("status", "")) != "manual":
+            continue
+        path = str(row.get("path", ""))
+        assert path.startswith("tests/scripts/"), path

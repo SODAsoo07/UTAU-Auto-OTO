@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import os
 import random
+import re
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 from core.coarse_crnn.audio import load_wav_mono, log_mel_spectrogram
+from core.coarse_crnn.alias_role import normalize_role
 from core.coarse_crnn.boundary_scorer_model import (
     BoundaryScorerConfig,
     build_boundary_scorer,
     save_boundary_checkpoint,
 )
 from core.coarse_crnn.boundary_targets import build_boundary_target_map, training_rows_to_wav_groups
+from core.coarse_crnn.boundary_types import TRANSITION_ROLES
 from core.coarse_crnn.training import resolve_torch_device
 
 
@@ -31,14 +34,35 @@ class BoundaryTrainConfig:
     val_ratio: float = 0.08
     quality_loss_weight: float = 0.06
     pos_weight: float = 2.5
+    boundary_time_loss_weight: float = 0.08
+    hard_case_oversample: bool = True
+    hard_case_weight: float = 1.8
+    hard_case_min_ratio: float = 0.10
+    hard_case_alias_regex: str = ""
 
 
 class _BoundaryDataset:
-    def __init__(self, grouped_rows: dict[str, list[tuple[Any, Any]]], model_cfg: BoundaryScorerConfig, *, max_frames: int, train: bool):
+    def __init__(
+        self,
+        grouped_rows: dict[str, list[tuple[Any, Any]]],
+        model_cfg: BoundaryScorerConfig,
+        *,
+        max_frames: int,
+        train: bool,
+        hard_case_weight: float = 1.8,
+        hard_case_min_ratio: float = 0.10,
+        hard_case_alias_regex: str = "",
+    ):
         self.items = list(grouped_rows.items())
         self.cfg = model_cfg
         self.max_frames = int(max_frames)
         self.train = bool(train)
+        self.sample_weights = _build_sample_weights(
+            self.items,
+            hard_case_weight=float(hard_case_weight),
+            hard_case_min_ratio=float(hard_case_min_ratio),
+            hard_case_alias_regex=str(hard_case_alias_regex or ""),
+        )
 
     def __len__(self) -> int:
         return len(self.items)
@@ -119,12 +143,32 @@ def train_boundary_from_manifest(
         train_groups = grouped
         val_groups = {}
 
-    train_ds = _BoundaryDataset(train_groups, model_cfg, max_frames=int(cfg.max_frames), train=True)
+    train_ds = _BoundaryDataset(
+        train_groups,
+        model_cfg,
+        max_frames=int(cfg.max_frames),
+        train=True,
+        hard_case_weight=float(cfg.hard_case_weight),
+        hard_case_min_ratio=float(cfg.hard_case_min_ratio),
+        hard_case_alias_regex=str(cfg.hard_case_alias_regex or ""),
+    )
     val_ds = _BoundaryDataset(val_groups, model_cfg, max_frames=int(cfg.max_frames), train=False) if val_groups else None
+    sampler = None
+    shuffle = True
+    if bool(cfg.hard_case_oversample) and len(train_ds) > 1:
+        weights = train_ds.sample_weights
+        if any(float(w) > 1.0001 for w in weights):
+            sampler = torch.utils.data.WeightedRandomSampler(
+                weights=torch.tensor(weights, dtype=torch.double),
+                num_samples=len(weights),
+                replacement=True,
+            )
+            shuffle = False
     train_loader = torch.utils.data.DataLoader(
         train_ds,
         batch_size=int(cfg.batch_size),
-        shuffle=True,
+        shuffle=bool(shuffle),
+        sampler=sampler,
         collate_fn=_collate,
         num_workers=max(0, int(cfg.num_workers)),
         pin_memory=True,
@@ -178,6 +222,9 @@ def train_boundary_from_manifest(
                     q_raw = torch.nn.functional.binary_cross_entropy_with_logits(q_logits, q_target, reduction="none")
                     q_loss = (q_raw * mask).sum() / torch.clamp(mask.sum(), min=1.0)
                     loss = loss + (q_loss * float(cfg.quality_loss_weight))
+                if float(cfg.boundary_time_loss_weight) > 0.0:
+                    t_loss = _boundary_time_regression_loss(logits, y, mask, hop_ms=float(model_cfg.hop_ms))
+                    loss = loss + (t_loss * float(cfg.boundary_time_loss_weight))
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -214,6 +261,10 @@ def train_boundary_from_manifest(
             "train_wavs": len(train_groups),
             "val_wavs": len(val_groups),
             "device": str(device),
+            "hard_case_oversample": bool(cfg.hard_case_oversample),
+            "hard_case_weight": float(cfg.hard_case_weight),
+            "hard_case_min_ratio": float(cfg.hard_case_min_ratio),
+            "boundary_time_loss_weight": float(cfg.boundary_time_loss_weight),
         },
     )
     return {
@@ -249,5 +300,71 @@ def _evaluate(model, loader, *, device, pos_weight) -> float:
     return float(total_loss / max(1.0, total_weight))
 
 
-__all__ = ["BoundaryTrainConfig", "train_boundary_from_manifest"]
+def _build_sample_weights(
+    items: list[tuple[str, list[tuple[Any, Any]]]],
+    *,
+    hard_case_weight: float,
+    hard_case_min_ratio: float,
+    hard_case_alias_regex: str,
+) -> list[float]:
+    regex = None
+    if str(hard_case_alias_regex or "").strip():
+        try:
+            regex = re.compile(str(hard_case_alias_regex), flags=re.IGNORECASE)
+        except Exception:
+            regex = None
+    out: list[float] = []
+    add_weight = max(0.0, float(hard_case_weight))
+    min_ratio = max(0.0, min(1.0, float(hard_case_min_ratio)))
+    for _wav_path, rows in items:
+        if not rows:
+            out.append(1.0)
+            continue
+        score = 0.0
+        for spec, _anchors in rows:
+            role = normalize_role(getattr(spec, "role", "other"))
+            alias = str(getattr(spec, "alias", "") or "")
+            meta = getattr(spec, "meta", {}) or {}
+            alias_type = str(meta.get("alias_type", "") or "").strip().lower()
+            transition_type = str(meta.get("transition_type", "") or "").strip().lower()
+            row_hard = 0.0
+            if role in TRANSITION_ROLES:
+                row_hard += 1.0
+            if alias_type in {"vc", "vv", "vcv"}:
+                row_hard += 0.8
+            if transition_type in {"vc", "vv"}:
+                row_hard += 0.5
+            if regex is not None and regex.search(alias):
+                row_hard += 1.2
+            score += row_hard
+        ratio = score / max(1.0, float(len(rows)))
+        if ratio < min_ratio:
+            out.append(1.0)
+        else:
+            out.append(1.0 + (add_weight * ratio))
+    return out
 
+
+def _boundary_time_regression_loss(logits, target, mask, *, hop_ms: float):
+    torch = __import__("torch")
+    bsz, tmax, labels = logits.shape
+    if tmax <= 1 or labels <= 0:
+        return logits.new_tensor(0.0)
+    time_idx = torch.arange(tmax, device=logits.device, dtype=logits.dtype).view(1, tmax, 1)
+    valid_mask = mask[:, :, None]
+    pred_prob = torch.sigmoid(logits) * valid_mask
+    tgt_prob = target * valid_mask
+    pred_mass = pred_prob.sum(dim=1)
+    tgt_mass = tgt_prob.sum(dim=1)
+    pred_center = (pred_prob * time_idx).sum(dim=1) / torch.clamp(pred_mass, min=1e-6)
+    tgt_center = (tgt_prob * time_idx).sum(dim=1) / torch.clamp(tgt_mass, min=1e-6)
+    valid = tgt_mass > 0.20
+    if not bool(valid.any()):
+        return logits.new_tensor(0.0)
+    pred_ms = pred_center * float(hop_ms)
+    tgt_ms = tgt_center * float(hop_ms)
+    raw = torch.nn.functional.smooth_l1_loss(pred_ms, tgt_ms, reduction="none")
+    return raw[valid].mean()
+
+
+__all__ = ["BoundaryTrainConfig", "train_boundary_from_manifest"]
