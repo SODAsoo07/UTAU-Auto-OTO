@@ -11,7 +11,7 @@ if ROOT not in sys.path:
 
 from core.coarse_crnn.alias_role import normalize_role
 from core.coarse_crnn.boundary_residual import DEFAULT_DELTA_CLIPS, RESIDUAL_TARGET_NAMES
-from core.runtime_encoding import bootstrap_utf8_runtime
+from core.runtime.runtime_encoding import bootstrap_utf8_runtime
 
 try:
     import pandas as pd

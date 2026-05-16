@@ -11,7 +11,7 @@ if ROOT not in sys.path:
 
 from core.oto_ml_autofree import build_rows_for_training
 from core.oto_ml.autofree.schema import write_dataset_csv
-from core.runtime_encoding import bootstrap_utf8_runtime
+from core.runtime.runtime_encoding import bootstrap_utf8_runtime
 
 
 def main() -> None:

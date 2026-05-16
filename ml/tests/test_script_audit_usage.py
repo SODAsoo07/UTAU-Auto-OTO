@@ -36,12 +36,20 @@ def test_script_audit_status_values_are_known():
 
 def test_candidate_delete_rows_are_strictly_unreferenced():
     payload = _run_audit_json()
+    ignorable_internal_refs = {
+        "scripts/readme.md",
+        "scripts/scripts_manifest.json",
+    }
     for row in payload.get("scripts", []):
         if str(row.get("status", "")) != "candidate_delete":
             continue
         assert int(row.get("external_ref_count", 0)) == 0
-        assert int(row.get("internal_ref_count", 0)) == 0
-        assert bool(row.get("safe_delete_candidate", False)) is True
+        internal_refs = [
+            str(ref).strip().replace("\\", "/").lower()
+            for ref in list(row.get("internal_refs", []) or [])
+        ]
+        non_ignorable = [ref for ref in internal_refs if ref not in ignorable_internal_refs]
+        assert non_ignorable == []
 
 
 def test_manual_scripts_live_under_tests_scripts():

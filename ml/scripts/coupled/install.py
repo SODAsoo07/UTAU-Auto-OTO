@@ -9,8 +9,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.a
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from core.oto_ml_bundle_install import install_exported_bundle
-from core.runtime_encoding import bootstrap_utf8_runtime
+from core.oto_ml.oto_ml_bundle_install import install_exported_bundle
+from core.runtime.runtime_encoding import bootstrap_utf8_runtime
 
 
 def main():

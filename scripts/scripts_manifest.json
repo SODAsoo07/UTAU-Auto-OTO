@@ -15,6 +15,24 @@
       "note": "Root wrapper entrypoint for tests/scripts unified runner."
     },
     {
+      "path": "scripts/analyze_legacy_wrappers.py",
+      "status": "active",
+      "owner": "infra",
+      "note": "Root wrapper entrypoint for legacy-wrapper usage audit."
+    },
+    {
+      "path": "scripts/dry_run_candidate_delete.py",
+      "status": "active",
+      "owner": "infra",
+      "note": "Root wrapper entrypoint for candidate_delete dry-run report."
+    },
+    {
+      "path": "scripts/audit_core_wrapper_lifecycle.py",
+      "status": "active",
+      "owner": "infra",
+      "note": "Root wrapper entrypoint for core root-wrapper lifecycle audit."
+    },
+    {
       "path": "tests/scripts/training/data/auto_classify_training_data.py",
       "status": "manual",
       "owner": "ml",
@@ -87,24 +105,6 @@
       "note": "Manual preprocessing helper for Sinsy label sequence training data."
     },
     {
-      "path": "scripts/run_coupled_experiment_matrix.py",
-      "status": "active",
-      "owner": "ml",
-      "note": "Called by run_coupled_two_stage_tune.py."
-    },
-    {
-      "path": "scripts/run_coupled_two_stage_tune.py",
-      "status": "active",
-      "owner": "ml",
-      "note": "Documented tuning entrypoint."
-    },
-    {
-      "path": "scripts/run_kr_regression_suite.py",
-      "status": "active",
-      "owner": "ml",
-      "note": "Documented regression entrypoint."
-    },
-    {
       "path": "scripts/run_oto_generation_batch.py",
       "status": "protected",
       "owner": "pipeline",
@@ -169,6 +169,24 @@
       "status": "active",
       "owner": "infra",
       "note": "Implementation path for tests/scripts unified runner."
+    },
+    {
+      "path": "scripts/dev/analyze_legacy_wrappers.py",
+      "status": "active",
+      "owner": "infra",
+      "note": "Implementation path for legacy-wrapper usage audit report."
+    },
+    {
+      "path": "scripts/dev/dry_run_candidate_delete.py",
+      "status": "active",
+      "owner": "infra",
+      "note": "Implementation path for candidate_delete dry-run planner."
+    },
+    {
+      "path": "scripts/dev/audit_core_wrapper_lifecycle.py",
+      "status": "active",
+      "owner": "infra",
+      "note": "Implementation path for core root-wrapper lifecycle audit."
     },
     {
       "path": "scripts/batch/run_oto_generation_batch.py",

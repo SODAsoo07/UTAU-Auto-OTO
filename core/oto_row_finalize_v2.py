@@ -1,32 +1,11 @@
-from __future__ import annotations
+"""Compatibility wrapper: moved to `core.generation.common.oto_row_finalize_v2`."""
 
+from importlib import import_module as _import_module
 
-def apply_anchor_record(anchor_store, anchor_record):
-    if anchor_store is None or anchor_record is None:
-        return False
-    idx, payload = anchor_record
-    anchor_store[idx] = payload
-    return True
+_impl = _import_module("core.generation.common.oto_row_finalize_v2")
+for _name, _value in _impl.__dict__.items():
+    if _name.startswith("__"):
+        continue
+    globals()[_name] = _value
 
-
-def commit_row_artifacts(
-    final_lines,
-    rows,
-    *,
-    anchor_store=None,
-    anchor_record=None,
-    log_fn=None,
-    messages=None,
-):
-    apply_anchor_record(anchor_store, anchor_record)
-    if log_fn is not None:
-        for message in messages or ():
-            if message:
-                log_fn(message)
-    final_lines.extend(rows or [])
-
-
-__all__ = [
-    "apply_anchor_record",
-    "commit_row_artifacts",
-]
+del _import_module, _impl, _name, _value

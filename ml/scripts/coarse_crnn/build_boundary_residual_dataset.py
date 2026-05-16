@@ -27,7 +27,7 @@ from core.coarse_crnn.oto_targets import resolve_cutoff_abs_ms
 from core.coarse_crnn.oto_audio_candidates import compute_audio_candidates
 from core.coarse_crnn.training import resolve_torch_device
 from core.coarse_crnn.wav_decoder import decode_wav_rows
-from core.runtime_encoding import bootstrap_utf8_runtime
+from core.runtime.runtime_encoding import bootstrap_utf8_runtime
 
 
 def _read_jsonl(path: str) -> list[dict[str, Any]]:

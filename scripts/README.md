@@ -42,18 +42,42 @@
 - `scripts/build_installer.ps1` -> `scripts/build/build_installer.ps1`
 - `scripts/build_portable_with_models.ps1` -> `scripts/build/build_portable_with_models.ps1`
 - `scripts/run_oto_generation_batch.py` -> `scripts/batch/run_oto_generation_batch.py`
-- `scripts/run_kr_regression_suite.py` -> `scripts/benchmark/run_kr_regression_suite.py`
-- `scripts/run_coupled_experiment_matrix.py` -> `scripts/evaluate/run_coupled_experiment_matrix.py`
-- `scripts/run_coupled_two_stage_tune.py` -> `scripts/evaluate/run_coupled_two_stage_tune.py`
 - `scripts/train_cvn_backend.py` -> `scripts/train/train_cvn_backend.py`
 - `scripts/audit_script_usage.py` -> `scripts/dev/audit_script_usage.py`
 - `scripts/run_test_tools.py` -> `scripts/dev/run_test_tools.py`
+- `scripts/analyze_legacy_wrappers.py` -> `scripts/dev/analyze_legacy_wrappers.py`
+- `scripts/dry_run_candidate_delete.py` -> `scripts/dev/dry_run_candidate_delete.py`
+
+운영 기준:
+
+- CI/배포 계약 경로: `protected`
+- 새 실행 경로를 이미 가진 루트 호환 래퍼: `legacy`
+- 실제 구현 파일: `active`
 
 ## 테스트 도구 통합 실행
 
 - 목록: `python scripts/run_test_tools.py list`
 - 실행: `python scripts/run_test_tools.py run <tool-key> -- <tool-args>`
 - 경로 확인: `python scripts/run_test_tools.py path <tool-key>`
+
+## 레거시 래퍼 사용 감사
+
+- 실행: `python scripts/analyze_legacy_wrappers.py`
+- JSON 출력: `python scripts/analyze_legacy_wrappers.py --json`
+- 기본 리포트 파일: `scripts/logs/legacy_wrapper_usage_report.json`
+
+## 삭제 드라이런
+
+- 실행: `python scripts/dry_run_candidate_delete.py`
+- JSON 출력: `python scripts/dry_run_candidate_delete.py --json`
+- 기본 리포트 파일: `scripts/logs/candidate_delete_dry_run.json`
+
+## core 래퍼 lifecycle 감사
+
+- 실행: `python scripts/audit_core_wrapper_lifecycle.py`
+- JSON 출력: `python scripts/audit_core_wrapper_lifecycle.py --json`
+- 기본 리포트 파일: `scripts/logs/core_wrapper_lifecycle_report.json`
+- CI 강제 체크: `python scripts/audit_core_wrapper_lifecycle.py --enforce-clean`
 
 ## 금지 규칙
 

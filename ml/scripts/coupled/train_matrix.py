@@ -19,7 +19,7 @@ from core.oto_ml_collection_discovery import discover_training_candidates_from_d
 from core.oto_ml_coupled import evaluate_coupled_bundle, train_coupled_bundle, train_coupled_bundle_rawmel
 from core.oto_ml_lightgbm import evaluate_lightgbm_selector_bundle, train_lightgbm_selector_bundle
 from core.oto_ml_selector import build_selector_dataset_csv_from_delta_dataset
-from core.runtime_encoding import bootstrap_utf8_runtime
+from core.runtime.runtime_encoding import bootstrap_utf8_runtime
 
 
 def _split_csv_tokens(raw: str) -> List[str]:

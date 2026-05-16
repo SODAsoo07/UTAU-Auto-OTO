@@ -17,7 +17,7 @@ from core.coarse_crnn.boundary_residual import (
     RESIDUAL_TARGET_NAMES,
 )
 from core.coarse_crnn.alias_role import normalize_role
-from core.runtime_encoding import bootstrap_utf8_runtime
+from core.runtime.runtime_encoding import bootstrap_utf8_runtime
 
 try:
     import lightgbm as lgb
