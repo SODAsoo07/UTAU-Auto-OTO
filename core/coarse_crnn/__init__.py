@@ -4,9 +4,10 @@ from core.coarse_crnn.labels import COARSE_LABELS, LABEL_TO_ID, coarse_for_phone
 
 
 def predict_oto(*args, **kwargs):
-    from core.coarse_crnn.oto_inference import predict_oto as _predict_oto
-
-    return _predict_oto(*args, **kwargs)
+    raise RuntimeError(
+        "Direct-parameter OTO CRNN is deprecated. Use boundary_decoder via "
+        "core.coarse_crnn.oto_predictor_generator.generate_oto_with_crnn_predictor."
+    )
 
 
 def check_coarse_crnn_ready(*args, **kwargs):

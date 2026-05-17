@@ -166,10 +166,15 @@ def test_apply_env_preset_sets_and_restore_clears(monkeypatch):
     assert "UTOA_AUTO_OTO_TEST_VAR" not in os.environ
 
 
-def test_apply_env_preset_restores_prior_value(monkeypatch):
+def test_apply_env_preset_skips_existing_env(monkeypatch):
+    """Pre-existing env vars take precedence over preset values — this lets
+    ``UTOA_BOUNDARY_SHIFT_VC_MS=200 python auto_oto.py --variant F3 ...``
+    actually override the F3 preset instead of being silently clobbered."""
     monkeypatch.setenv("UTOA_AUTO_OTO_TEST_VAR", "before")
     restore = apply_env_preset({"UTOA_AUTO_OTO_TEST_VAR": "during"})
-    assert os.environ["UTOA_AUTO_OTO_TEST_VAR"] == "during"
+    # Pre-existing value preserved
+    assert os.environ["UTOA_AUTO_OTO_TEST_VAR"] == "before"
+    # Restore is a no-op for keys we didn't touch
     restore_env(restore)
     assert os.environ["UTOA_AUTO_OTO_TEST_VAR"] == "before"
 
@@ -194,6 +199,13 @@ def test_variant_F3_enables_filename_anchor_timeline():
     assert env.get("UTOA_BOUNDARY_ANCHOR_TIMELINE") == "filename"
     assert env.get("UTOA_BOUNDARY_CONS_MIN_MS") == "40"  # inherited from F2
     assert env.get("UTOA_BOUNDARY_LWC_ENABLE") == "on"  # inherited from F1
+    # VC-focused constraints to avoid VC rows collapsing toward CV onset.
+    assert env.get("UTOA_BOUNDARY_VC_TARGET_RATIO") == "0.58"
+    assert env.get("UTOA_BOUNDARY_VC_CLAMP_RIGHT_RATIO") == "0.80"
+    assert env.get("UTOA_BOUNDARY_TRANSITION_PRE_CONS_MIN_GAP_MS") == "24"
+    # Row-shift rollback disabled by design — source-OTO values must not
+    # influence inference output (2026-05-17 contract).
+    assert env.get("UTOA_BOUNDARY_ROW_SHIFT_ROLLBACK_ENABLE") == "off"
 
 
 def test_variant_baseline_has_no_env_overrides():
@@ -203,15 +215,15 @@ def test_variant_baseline_has_no_env_overrides():
 def test_variant_F1_enables_lwc_and_residual():
     env = VARIANT_PRESETS["F1"]
     assert env.get("UTOA_BOUNDARY_LWC_ENABLE") == "on"
-    assert env.get("UTOA_BOUNDARY_RESIDUAL_CONDITIONAL_ENABLE") == "off"
-    assert "delta_cutoff" in env.get("UTOA_BOUNDARY_RESIDUAL_TARGETS", "")
+    assert env.get("UTOA_BOUNDARY_RESIDUAL_CONDITIONAL_ENABLE") == "on"
+    assert env.get("UTOA_BOUNDARY_RESIDUAL_TARGETS") == "delta_overlap,delta_cutoff"
 
 
 def test_variant_F2_extends_cons_and_tail():
     env = VARIANT_PRESETS["F2"]
     # F2 inherits F1's keys
     assert env.get("UTOA_BOUNDARY_LWC_ENABLE") == "on"
-    assert env.get("UTOA_BOUNDARY_RESIDUAL_CONDITIONAL_ENABLE") == "off"
+    assert env.get("UTOA_BOUNDARY_RESIDUAL_CONDITIONAL_ENABLE") == "on"
     # Plus the cap extensions
     assert env.get("UTOA_BOUNDARY_CONS_MIN_MS") == "40"
     assert env.get("UTOA_BOUNDARY_CONS_MAX_MS") == "140"

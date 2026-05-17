@@ -23,6 +23,7 @@ else:
 
 from core.coarse_crnn.alias_role import normalize_role
 from core.coarse_crnn.boundary_targets import absolute_anchors_to_oto_params, oto_row_to_absolute_anchors
+from core.coarse_crnn.boundary_types import AbsoluteOtoAnchors, TRANSITION_ROLES
 from core.coarse_crnn.oto_param_builder import (
     apply_pre_cons_gap_guard,
     apply_right_boundary_guard,
@@ -282,8 +283,11 @@ def apply_residual_to_decoded_row(
         deltas=deltas,
     )
     slot_idx = max(0, int(row.spec.slot_index))
+    has_left_anchor = slot_idx < len(anchor_timeline_ms or [])
+    left_anchor = float(anchor_timeline_ms[slot_idx]) if has_left_anchor else None
     has_right_anchor = (slot_idx + 1) < len(anchor_timeline_ms or [])
     right_anchor = float(anchor_timeline_ms[slot_idx + 1]) if has_right_anchor else None
+    role_key = normalize_role(row.spec.role)
     anchors = oto_row_to_absolute_anchors(
         offset=float(corrected.get("offset", 0.0) or 0.0),
         consonant=float(corrected.get("consonant", 0.0) or 0.0),
@@ -292,20 +296,27 @@ def apply_residual_to_decoded_row(
         overlap=float(corrected.get("overlap", 0.0) or 0.0),
         duration_ms=float(row.spec.duration_ms),
     )
+    anchors = apply_transition_anchor_envelope_guard(
+        anchors=anchors,
+        role=role_key,
+        duration_ms=float(row.spec.duration_ms),
+        left_anchor_ms=left_anchor,
+        right_anchor_ms=right_anchor,
+    )
     anchors = apply_right_boundary_guard(
         anchors=anchors,
-        role=normalize_role(row.spec.role),
+        role=role_key,
         duration_ms=float(row.spec.duration_ms),
         right_anchor_ms=right_anchor,
     )
     anchors = apply_span_length_guard(
         anchors=anchors,
-        role=normalize_role(row.spec.role),
+        role=role_key,
         duration_ms=float(row.spec.duration_ms),
     )
     anchors = apply_pre_cons_gap_guard(
         anchors=anchors,
-        role=normalize_role(row.spec.role),
+        role=role_key,
         duration_ms=float(row.spec.duration_ms),
         active_start_ms=0.0,
     )
@@ -323,6 +334,96 @@ def apply_residual_to_decoded_row(
     audit["stage1_delta_cutoff"] = float(stage1_deltas.get("delta_cutoff", 0.0))
     audit["has_right_anchor"] = bool(has_right_anchor)
     return final_params, audit
+
+
+def apply_transition_anchor_envelope_guard(
+    *,
+    anchors: AbsoluteOtoAnchors,
+    role: str,
+    duration_ms: float,
+    left_anchor_ms: float | None,
+    right_anchor_ms: float | None,
+) -> AbsoluteOtoAnchors:
+    """Keep transition-row preutterance inside the slot's anchor envelope.
+
+    Residual deltas are predicted in parameter space and can over-shift
+    transition rows toward the next CV onset. This guard re-projects transition
+    rows (`vc`/`vv`/`v-cv`) back into a conservative anchor-relative band.
+    """
+    if not _env_bool("UTOA_BOUNDARY_TRANSITION_ENVELOPE_GUARD_ENABLE", True):
+        return anchors
+    role_key = normalize_role(role)
+    if role_key not in TRANSITION_ROLES:
+        return anchors
+    if left_anchor_ms is None or right_anchor_ms is None:
+        return anchors
+    duration = max(1.0, float(duration_ms))
+    left = _clamp(float(left_anchor_ms), 0.0, duration)
+    right = _clamp(float(right_anchor_ms), left + 1.0, duration)
+    span = max(1.0, right - left)
+
+    lo_ratio = _env_float("UTOA_BOUNDARY_TRANSITION_PRE_MIN_RATIO", 0.38)
+    hi_ratio = _env_float("UTOA_BOUNDARY_TRANSITION_PRE_MAX_RATIO", 0.90)
+    if role_key == "vc":
+        lo_ratio = _env_float("UTOA_BOUNDARY_VC_PRE_MIN_RATIO", lo_ratio)
+        hi_ratio = _env_float("UTOA_BOUNDARY_VC_PRE_MAX_RATIO", 0.80)
+    elif role_key == "vv":
+        lo_ratio = _env_float("UTOA_BOUNDARY_VV_PRE_MIN_RATIO", lo_ratio)
+        hi_ratio = _env_float("UTOA_BOUNDARY_VV_PRE_MAX_RATIO", hi_ratio)
+    elif role_key == "v-cv":
+        lo_ratio = _env_float("UTOA_BOUNDARY_VCV_PRE_MIN_RATIO", lo_ratio)
+        hi_ratio = _env_float("UTOA_BOUNDARY_VCV_PRE_MAX_RATIO", hi_ratio)
+    lo_ratio = _clamp(float(lo_ratio), 0.0, 0.95)
+    hi_ratio = _clamp(float(hi_ratio), lo_ratio + 0.02, 0.98)
+
+    right_margin = max(0.0, _env_float("UTOA_BOUNDARY_TRANSITION_PRE_RIGHT_MARGIN_MS", 10.0))
+    lo = _clamp(left + (lo_ratio * span), 0.0, duration)
+    hi = _clamp(
+        min(left + (hi_ratio * span), right - right_margin),
+        lo + 1.0,
+        duration,
+    )
+    if hi <= lo:
+        hi = min(duration, max(lo + 1.0, right - 2.0))
+    pre_abs = _clamp(float(anchors.pre_abs), lo, hi)
+
+    offset_min_ratio = _clamp(_env_float("UTOA_BOUNDARY_TRANSITION_OFFSET_MIN_RATIO", 0.02), 0.0, 0.90)
+    if role_key == "vc":
+        offset_min_ratio = _clamp(_env_float("UTOA_BOUNDARY_VC_OFFSET_MIN_RATIO", 0.12), 0.0, 0.95)
+    offset_lo = _clamp(left + (offset_min_ratio * span), 0.0, pre_abs)
+    offset_abs = _clamp(float(anchors.offset_abs), offset_lo, pre_abs)
+    overlap_abs = _clamp(float(anchors.overlap_abs), offset_abs, pre_abs)
+
+    cons_max_ratio = _clamp(_env_float("UTOA_BOUNDARY_TRANSITION_CONS_MAX_RATIO", 0.95), 0.40, 0.995)
+    if role_key == "vc":
+        cons_max_ratio = _clamp(_env_float("UTOA_BOUNDARY_VC_CONS_MAX_RATIO", 0.90), 0.40, 0.995)
+    cons_right_margin = max(0.0, _env_float("UTOA_BOUNDARY_TRANSITION_CONS_RIGHT_MARGIN_MS", 8.0))
+    cons_hi = _clamp(
+        min(right - cons_right_margin, left + (cons_max_ratio * span)),
+        pre_abs + 1.0,
+        duration - 1.0,
+    )
+    consonant_abs = _clamp(float(anchors.consonant_abs), pre_abs + 1.0, cons_hi)
+
+    cutoff_max_ratio = _clamp(_env_float("UTOA_BOUNDARY_TRANSITION_CUTOFF_MAX_RATIO", 0.985), 0.50, 0.999)
+    if role_key == "vc":
+        cutoff_max_ratio = _clamp(_env_float("UTOA_BOUNDARY_VC_CUTOFF_MAX_RATIO", 0.955), 0.50, 0.999)
+    cutoff_right_margin = max(0.0, _env_float("UTOA_BOUNDARY_TRANSITION_CUTOFF_RIGHT_MARGIN_MS", 4.0))
+    cutoff_hi = _clamp(
+        min(right - cutoff_right_margin, left + (cutoff_max_ratio * span)),
+        consonant_abs + 1.0,
+        duration,
+    )
+    cutoff_abs = _clamp(float(anchors.cutoff_abs), consonant_abs + 1.0, cutoff_hi)
+    return AbsoluteOtoAnchors(
+        offset_abs=offset_abs,
+        overlap_abs=overlap_abs,
+        pre_abs=pre_abs,
+        consonant_abs=consonant_abs,
+        cutoff_abs=cutoff_abs,
+        confidence=float(anchors.confidence),
+        reason=str(anchors.reason),
+    )
 
 
 def should_apply_residual_for_row(
@@ -385,8 +486,13 @@ def should_apply_residual_for_row(
 
 def predict_boundary_stage1_role_bias(bundle: BoundaryResidualBundle, feature_row: dict[str, Any]) -> dict[str, float]:
     role = normalize_role(feature_row.get("role", "other"))
+    active_targets = set(bundle.active_targets or RESIDUAL_TARGET_NAMES)
+    gate_by_active = not _env_bool("UTOA_BOUNDARY_STAGE1_ROLE_BIAS_IGNORE_ACTIVE_TARGETS", False)
     out: dict[str, float] = {}
     for target in RESIDUAL_TARGET_NAMES:
+        if gate_by_active and target not in active_targets:
+            out[target] = 0.0
+            continue
         target_map = bundle.stage1_role_bias.get(target, {})
         out[target] = float(target_map.get(role, target_map.get("default", 0.0)))
     return out
@@ -496,6 +602,10 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except Exception:
         return float(default)
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(float(lo), min(float(hi), float(value)))
 
 
 def _env_bool(name: str, default: bool) -> bool:

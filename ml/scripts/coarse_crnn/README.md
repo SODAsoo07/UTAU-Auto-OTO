@@ -8,6 +8,10 @@ import paths are compatibility wrappers only. New OTO model work should target
 a frame-level boundary scorer plus wav-level monotonic decoder instead of direct
 `offset/consonant/cutoff/preutterance/overlap` regression.
 
+Deprecated script note: direct-parameter training/eval CLIs were moved under
+`ml/scripts/coarse_crnn/deprecated/direct_param/`. The old top-level script
+paths now fail closed with a deprecation error so they are not used by accident.
+
 The same audio/CRNN code also has a deprecated OTO-anchor mode that trained
 directly against `oto.ini` parameters. Keep it for reproduction only; the next
 production OTO direction is boundary scoring plus decoder-side parameter
@@ -75,70 +79,100 @@ python -m ml.scripts.coarse_crnn.evaluate_alignment `
   --out ml_workspace\coarse_crnn\alignment_eval.json
 ```
 
-Build and train the OTO parameter predictor:
+Build and train the active boundary-decoder OTO scorer:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
+$env:UTOA_BOUNDARY_PHONE_AUX_IDENTITY_LANGS='korean,japanese'
 python -m ml.scripts.coarse_crnn.build_oto_manifest `
   --dataset-staged dataset_staged `
   --out ml_workspace\coarse_crnn\oto_manifest.jsonl
 python -m ml.scripts.coarse_crnn.build_oto_splits `
   --manifest ml_workspace\coarse_crnn\oto_manifest.jsonl `
   --out-dir ml_workspace\coarse_crnn\oto_splits
-python -m ml.scripts.coarse_crnn.train_oto `
-  --manifest ml_workspace\coarse_crnn\oto_splits\oto_train.jsonl `
-  --val-manifest ml_workspace\coarse_crnn\oto_splits\oto_val.jsonl `
-  --out ml_workspace\models\coarse_crnn\oto_anchor_crnn.pt `
+python -m ml.scripts.coarse_crnn.train_boundary_oto `
+  --manifest ml_workspace\coarse_crnn\oto_splits_full\oto_train.jsonl `
+  --out ml_workspace\models\coarse_crnn\oto_boundary_scorer_phone_family_aux_20260518.pt `
   --device cuda `
-  --batch-size 16 `
-  --max-frames 1200
-python -m ml.scripts.coarse_crnn.evaluate_oto `
-  --manifest ml_workspace\coarse_crnn\oto_splits\oto_test.jsonl `
-  --model ml_workspace\models\coarse_crnn\oto_anchor_crnn.pt `
+  --batch-size 8 `
+  --max-frames 1600 `
+  --enable-phone-aux-heads `
+  --enable-phone-family-heads `
+  --init-from ml_workspace\models\coarse_crnn\oto_boundary_scorer_v5_codabridge_20260517.pt `
+  --freeze-non-phone-aux `
+  --cvs-loss-weight 0.08 `
+  --consonant-id-loss-weight 0.0 `
+  --vowel-id-loss-weight 0.0 `
+  --consonant-family-loss-weight 0.05 `
+  --vowel-nucleus-loss-weight 0.05 `
+  --vowel-glide-loss-weight 0.03 `
+  --phone-aux-class-balanced `
+  --lr 5e-4
+python -m ml.scripts.coarse_crnn.evaluate_boundary_manifest `
+  --manifest ml_workspace\coarse_crnn\oto_splits_full\oto_val.jsonl `
+  --model ml_workspace\models\coarse_crnn\oto_boundary_scorer_phone_family_aux_20260518.pt `
   --device cuda `
-  --max-items 0 `
-  --out ml_workspace\coarse_crnn\oto_eval.json
+  --out ml_workspace\coarse_crnn\boundary_eval_phone_aux_val.json
+python -m ml.scripts.coarse_crnn.evaluate_phone_aux_targets `
+  --manifest ml_workspace\coarse_crnn\oto_splits_full\oto_val.jsonl `
+  --model ml_workspace\models\coarse_crnn\oto_boundary_scorer_phone_family_aux_20260518.pt `
+  --device cuda `
+  --identity-languages korean,japanese `
+  --out ml_workspace\coarse_crnn\phone_family_aux_eval_val.json
 ```
 
-Train with the experimental sequence candidate scoring head:
+Inspect a CVVC phone-aware pseudo-target before a full training run:
+
+```powershell
+python -m ml.scripts.coarse_crnn.plot_phone_aware_debug `
+  --manifest ml_workspace\coarse_crnn\oto_splits_full\oto_val.jsonl `
+  --wav "C:\path\to\voicebank\_ba'ba'_'bya'bya'_'bwa'bwa.wav" `
+  --alias "a b" `
+  --line-index 21 `
+  --model ml_workspace\models\coarse_crnn\oto_boundary_scorer_v5_codabridge_20260517.pt `
+  --device cpu `
+  --out ml_workspace\coarse_crnn\phone_aware_debug_v5_val_korean_vc.png
+```
+
+The plot shows mel, boundary posterior/target, source OTO row spans, CVS class
+targets, and consonant/vowel identity targets. Older checkpoints without
+phone-aware aux heads still render boundary posterior plus pseudo-targets; aux
+posterior lines appear only after training with `--enable-phone-aux-heads`.
+
+Phone-aware identity targets cover Korean and Japanese by default. Japanese
+kana/romaji aliases are normalized into the shared consonant/vowel inventory,
+and pitch suffixes such as `C4P`, `A3`, or frame-like vowel suffixes are stripped
+before identity lookup. CVS class targets remain language-agnostic. Set
+`UTOA_BOUNDARY_PHONE_AUX_IDENTITY_LANGS=korean` to restrict identity loss back to
+Korean-only, or `UTOA_BOUNDARY_PHONE_AUX_IDENTITY_LANGS=all` only for an explicit
+experiment with a broader identity inventory.
+
+Runtime decoder scoring uses CVS phone class posterior plus the broad family
+heads by default when the checkpoint has them. Fine consonant/vowel identity
+posterior is diagnostic-only by default (`UTOA_BOUNDARY_PHONE_AUX_ID_WEIGHT=0`).
+Tune family contribution with `UTOA_BOUNDARY_PHONE_AUX_FAMILY_WEIGHT`; enable
+fine identity only for an explicit A/B run.
+
+`evaluate_phone_aux_targets` now reports `decoder_useful_metrics` first:
+CVS consonant/vowel separation, `consonant_family`, `vowel_nucleus`, and
+`vowel_glide`. Fine consonant/vowel top-1 accuracy is still reported, but it is
+reference-only for runtime promotion decisions.
+
+Model auto-discovery does not pick experimental `phone_aux` checkpoints by
+default. Pass the checkpoint explicitly, set `UTOA_BOUNDARY_SCORER_MODEL_PATH`,
+or opt in with `UTOA_BOUNDARY_SCORER_ALLOW_EXPERIMENTAL=1`.
+
+Generate a full voicebank OTO with the active decoder:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-python -m ml.scripts.coarse_crnn.train_oto `
-  --manifest ml_workspace\coarse_crnn\oto_splits\oto_train.jsonl `
-  --val-manifest ml_workspace\coarse_crnn\oto_splits\oto_val.jsonl `
-  --out ml_workspace\models\coarse_crnn\oto_sequence_candidate_crnn.pt `
-  --device cuda `
-  --batch-size 16 `
-  --max-frames 1200 `
-  --alias-role-embedding `
-  --sequence-candidate-head `
-  --sequence-candidate-loss-weight 0.22
-```
-
-Predict one `oto.ini` row:
-
-```powershell
-python -m ml.scripts.coarse_crnn.predict_oto `
-  --audio path\to\sample.wav `
-  --alias "ka" `
-  --language japanese `
-  --format-type cv `
-  --model ml_workspace\models\coarse_crnn\oto_anchor_crnn.pt
-```
-
-Runtime-style OTO evaluation (with generator-like base fallback):
-
-```powershell
-$env:PYTHONPATH='.'
-python ml/scripts/coarse_crnn/evaluate_oto_runtime.py `
-  --model ml_workspace/models/coarse_crnn/oto_anchor_crnn_active_context_focusboost_rand3000_e2.pt `
-  --max-items 300 `
-  --seed 20260512 `
-  --device cpu `
-  --use-row-base-fallback `
-  --preserve-audio-groups `
-  --out ml_workspace/coarse_crnn/oto_runtime_eval_300.json
+python -m ml.scripts.coarse_crnn.generate_boundary_oto `
+  --wav-dir path\to\voicebank `
+  --source-oto path\to\voicebank\source_oto.ini `
+  --out path\to\voicebank\oto.ini `
+  --language korean `
+  --model ml_workspace\models\coarse_crnn\oto_boundary_scorer_phone_aux.pt `
+  --device cuda
 ```
 
 Audio-candidate snap risk gate (recommended default):
@@ -340,6 +374,70 @@ python ml/scripts/coarse_crnn/compare_generated_oto_ab.py `
   - `one_step_shift_rate`
   - `mis_mapping_rate`
 - If source oto timing is low quality, treat `one_step_shift_rate`/`mis_mapping_rate` as relative signals only.
+
+Dataset-staged visual benchmark (sample 3 banks per language/format):
+
+```powershell
+# Full run: auto-generate OTO for sampled banks, compare vs reference oto.ini,
+# and export per-row waveform+spectrogram SVG overlays.
+.\.venv\Scripts\python.exe -m ml.scripts.coarse_crnn.benchmark_dataset_staged_oto_visual `
+  --dataset-staged dataset_staged `
+  --per-group 3 `
+  --variant F3 `
+  --out-root ml/eval/oto_visual_benchmark `
+  --max-plots-per-bank 8 `
+  --verbose
+```
+
+Fast dry-style check using existing `oto_auto_ml.ini` (no generation):
+
+```powershell
+.\.venv\Scripts\python.exe -m ml.scripts.coarse_crnn.benchmark_dataset_staged_oto_visual `
+  --dataset-staged dataset_staged `
+  --per-group 1 `
+  --max-banks 1 `
+  --skip-generation `
+  --existing-auto-name oto_auto_ml.ini `
+  --out-root ml/eval/oto_visual_benchmark `
+  --verbose
+```
+
+Outputs:
+
+- `summary.json`: full metrics (`overall`, `transition_only`, `n_like_only`, `weak_wav_only`, `by_role`)
+- `bank_summary.csv`: per-bank summary table
+- `index.html`: visual report index
+- `banks/<language>__<format>/<bank>/plots/*.svg`: waveform+spectrogram overlays with GT vs AUTO boundaries
+
+Boundary-manifest release gates (catastrophic shift focused):
+
+```powershell
+.\.venv\Scripts\python.exe -m ml.scripts.coarse_crnn.evaluate_boundary_manifest `
+  --manifest ml_workspace/coarse_crnn/oto_splits_full/oto_eval.jsonl `
+  --model ml_workspace/models/coarse_crnn/oto_boundary_scorer_v3_slotfix.pt `
+  --out ml_workspace/coarse_crnn/boundary_eval_gate.json `
+  --gate-max-mis-mapping-rate 0.18 `
+  --gate-max-one-step-shift-rate 0.12 `
+  --gate-max-vc-pre-ge-80ms-rate 0.45
+```
+
+- Gate fail returns exit code `1` and writes all metrics to `--out`.
+- New shift metrics: `mis_mapping_rate`, `one_step_shift_rate`, `vc_pre_ge_80ms_rate`.
+
+Boundary-scorer training (target normalization + n-like/weak weighting):
+
+```powershell
+.\.venv\Scripts\python.exe -m ml.scripts.coarse_crnn.train_boundary_oto `
+  --manifest ml_workspace/coarse_crnn/oto_splits_full/oto_train.jsonl `
+  --out ml_workspace/models/coarse_crnn/oto_boundary_scorer_v3_slotfix.pt `
+  --normalize-target-fields `
+  --drop-invalid-target-rows `
+  --drop-wav-backward-rows `
+  --n-like-weight 0.80 `
+  --weak-wav-weight 0.65 `
+  --weak-wav-rms-db-threshold -32 `
+  --clean-summary ml_workspace/coarse_crnn/boundary_manifest_clean_summary.json
+```
 
 Recent patch notes (2026-05-13):
 

@@ -435,7 +435,7 @@ class App(
         self.aligner_var = ctk.StringVar(value="MFA")
         self.no_mfa_oto_mode_var = ctk.StringVar(value="베이스 OTO 재매핑 + 보정")
         self.oto_crnn_model_path_var = ctk.StringVar(value="")
-        self.oto_crnn_engine_var = ctk.StringVar(value="legacy_direct")
+        self.oto_crnn_engine_var = ctk.StringVar(value="boundary_decoder")
         self.oto_crnn_device_var = ctk.StringVar(value="auto")
         self.oto_crnn_special_aliases_var = ctk.StringVar(value="")
         self.mfa_align_profile_var = ctk.StringVar(value="기본")

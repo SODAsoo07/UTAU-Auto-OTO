@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import os
 import wave
 
-from core.coarse_crnn.boundary_targets import build_boundary_target_map, load_row_specs_from_source_oto
+from core.coarse_crnn.boundary_targets import build_boundary_target_map, build_phone_aware_target_map, load_row_specs_from_source_oto
 from core.coarse_crnn import boundary_targets as bt
 from core.coarse_crnn.boundary_types import AbsoluteOtoAnchors, BoundaryCandidate, OtoRowSpec
-from core.coarse_crnn.wav_decoder import decode_wav_rows
+from core.coarse_crnn.wav_decoder import _phone_aux_posterior_term, decode_wav_rows
 
 
 def _spec(role: str, *, slot_index: int, line_index: int) -> OtoRowSpec:
@@ -68,6 +69,399 @@ def test_boundary_target_map_contains_vc_labels():
     assert float(target[:, 4].max()) > 0.5
     assert float(target[:, 5].max()) > 0.5
     assert float(target[:, 6].max()) > 0.5
+
+
+def test_phone_aware_target_map_marks_vc_transition_identity():
+    spec = OtoRowSpec(
+        wav_name="ga_gi.wav",
+        wav_path=r"C:\tmp\ga_gi.wav",
+        alias="a g",
+        role="vc",
+        slot_index=0,
+        slot_count=2,
+        prev_alias="",
+        next_alias="",
+        language="korean",
+        format_type="cvvc",
+        line_index=0,
+        duration_ms=500.0,
+        source_params={},
+        meta={"left_vowel": "a", "right_consonant": "g"},
+    )
+    anchors = AbsoluteOtoAnchors(
+        offset_abs=120.0,
+        overlap_abs=150.0,
+        pre_abs=190.0,
+        consonant_abs=230.0,
+        cutoff_abs=320.0,
+    )
+    _times, phone = build_phone_aware_target_map([(spec, anchors)], duration_ms=500.0, hop_ms=10.0, frame_count=64)
+    assert int(phone.cvs_mask.sum()) > 0
+    assert int(phone.consonant_mask.sum()) > 0
+    assert int(phone.vowel_mask.sum()) > 0
+    assert int(phone.consonant_family_mask.sum()) > 0
+    assert int(phone.vowel_nucleus_mask.sum()) > 0
+    assert int(phone.vowel_glide_mask.sum()) > 0
+    from core.coarse_crnn.boundary_types import (
+        PHONE_AWARE_CONSONANT_FAMILY_LABELS,
+        PHONE_AWARE_VOWEL_GLIDE_LABELS,
+        PHONE_AWARE_VOWEL_NUCLEUS_LABELS,
+    )
+
+    assert PHONE_AWARE_CONSONANT_FAMILY_LABELS[int(phone.consonant_family_target[23])] == "plosive"
+    assert PHONE_AWARE_VOWEL_NUCLEUS_LABELS[int(phone.vowel_nucleus_target[18])] == "a"
+    assert PHONE_AWARE_VOWEL_GLIDE_LABELS[int(phone.vowel_glide_target[18])] == "none"
+
+
+def test_phone_aware_target_map_splits_korean_cv_syllable_identity():
+    spec = OtoRowSpec(
+        wav_name="bwa.wav",
+        wav_path=r"C:\tmp\bwa.wav",
+        alias="bwa",
+        role="cv",
+        slot_index=0,
+        slot_count=1,
+        prev_alias="",
+        next_alias="",
+        language="korean",
+        format_type="cvvc",
+        line_index=0,
+        duration_ms=500.0,
+        source_params={},
+        meta={},
+    )
+    anchors = AbsoluteOtoAnchors(
+        offset_abs=120.0,
+        overlap_abs=140.0,
+        pre_abs=180.0,
+        consonant_abs=230.0,
+        cutoff_abs=340.0,
+    )
+    _times, phone = build_phone_aware_target_map([(spec, anchors)], duration_ms=500.0, hop_ms=10.0, frame_count=64)
+    assert int(phone.consonant_mask.sum()) > 0
+    assert int(phone.vowel_mask.sum()) > 0
+    from core.coarse_crnn.boundary_types import PHONE_AWARE_CONSONANT_LABELS, PHONE_AWARE_VOWEL_LABELS
+
+    assert PHONE_AWARE_CONSONANT_LABELS[int(phone.consonant_target[12])] == "b"
+    assert PHONE_AWARE_VOWEL_LABELS[int(phone.vowel_target[18])] == "wa"
+
+
+def test_phone_aware_target_map_covers_foreign_transition_consonants():
+    spec = OtoRowSpec(
+        wav_name="a_v.wav",
+        wav_path=r"C:\tmp\a_v.wav",
+        alias="a v",
+        role="v-cv",
+        slot_index=0,
+        slot_count=2,
+        prev_alias="a",
+        next_alias="va",
+        language="korean",
+        format_type="cvvc",
+        line_index=0,
+        duration_ms=500.0,
+        source_params={},
+        meta={},
+    )
+    anchors = AbsoluteOtoAnchors(
+        offset_abs=100.0,
+        overlap_abs=140.0,
+        pre_abs=180.0,
+        consonant_abs=240.0,
+        cutoff_abs=340.0,
+    )
+    _times, phone = build_phone_aware_target_map([(spec, anchors)], duration_ms=500.0, hop_ms=10.0, frame_count=64)
+    from core.coarse_crnn.boundary_types import PHONE_AWARE_CONSONANT_LABELS
+
+    assert int(phone.consonant_mask.sum()) > 0
+    assert PHONE_AWARE_CONSONANT_LABELS[int(phone.consonant_target[24])] == "v"
+
+
+def test_phone_aware_target_map_normalizes_eui_vowel_identity():
+    spec = OtoRowSpec(
+        wav_name="beui.wav",
+        wav_path=r"C:\tmp\beui.wav",
+        alias="beui",
+        role="cv",
+        slot_index=0,
+        slot_count=1,
+        prev_alias="",
+        next_alias="",
+        language="korean",
+        format_type="cvvc",
+        line_index=0,
+        duration_ms=500.0,
+        source_params={},
+        meta={},
+    )
+    anchors = AbsoluteOtoAnchors(
+        offset_abs=120.0,
+        overlap_abs=140.0,
+        pre_abs=180.0,
+        consonant_abs=230.0,
+        cutoff_abs=340.0,
+    )
+    _times, phone = build_phone_aware_target_map([(spec, anchors)], duration_ms=500.0, hop_ms=10.0, frame_count=64)
+    from core.coarse_crnn.boundary_types import PHONE_AWARE_VOWEL_LABELS
+
+    assert int(phone.vowel_mask.sum()) > 0
+    assert PHONE_AWARE_VOWEL_LABELS[int(phone.vowel_target[18])] == "ui"
+
+
+def test_phone_aware_identity_defaults_to_korean_and_japanese():
+    spec = OtoRowSpec(
+        wav_name="a_ka.wav",
+        wav_path=r"C:\tmp\a_ka.wav",
+        alias="a kC4P",
+        role="vc",
+        slot_index=0,
+        slot_count=2,
+        prev_alias="a",
+        next_alias="ka",
+        language="japanese",
+        format_type="cvvc",
+        line_index=0,
+        duration_ms=500.0,
+        source_params={},
+        meta={"left_vowel": "a", "right_consonant": "k"},
+    )
+    anchors = AbsoluteOtoAnchors(
+        offset_abs=100.0,
+        overlap_abs=140.0,
+        pre_abs=180.0,
+        consonant_abs=240.0,
+        cutoff_abs=340.0,
+    )
+    _times, phone = build_phone_aware_target_map([(spec, anchors)], duration_ms=500.0, hop_ms=10.0, frame_count=64)
+    assert int(phone.cvs_mask.sum()) > 0
+    assert int(phone.consonant_mask.sum()) > 0
+
+
+def test_phone_aware_identity_language_gate_can_restrict_japanese(monkeypatch):
+    monkeypatch.setenv("UTOA_BOUNDARY_PHONE_AUX_IDENTITY_LANGS", "korean")
+    spec = OtoRowSpec(
+        wav_name="a_ka.wav",
+        wav_path=r"C:\tmp\a_ka.wav",
+        alias="a kC4P",
+        role="vc",
+        slot_index=0,
+        slot_count=2,
+        prev_alias="a",
+        next_alias="ka",
+        language="japanese",
+        format_type="cvvc",
+        line_index=0,
+        duration_ms=500.0,
+        source_params={},
+        meta={},
+    )
+    anchors = AbsoluteOtoAnchors(
+        offset_abs=100.0,
+        overlap_abs=140.0,
+        pre_abs=180.0,
+        consonant_abs=240.0,
+        cutoff_abs=340.0,
+    )
+    _times, phone = build_phone_aware_target_map([(spec, anchors)], duration_ms=500.0, hop_ms=10.0, frame_count=64)
+    assert int(phone.cvs_mask.sum()) > 0
+    assert int(phone.consonant_mask.sum()) == 0
+
+
+def test_phone_aware_japanese_pitch_suffix_kana_cv_identity():
+    spec = OtoRowSpec(
+        wav_name="ki.wav",
+        wav_path=r"C:\tmp\ki.wav",
+        alias="きC4P",
+        role="cv",
+        slot_index=0,
+        slot_count=1,
+        prev_alias="",
+        next_alias="",
+        language="japanese",
+        format_type="cvvc",
+        line_index=0,
+        duration_ms=500.0,
+        source_params={},
+        meta={},
+    )
+    anchors = AbsoluteOtoAnchors(
+        offset_abs=120.0,
+        overlap_abs=140.0,
+        pre_abs=180.0,
+        consonant_abs=230.0,
+        cutoff_abs=340.0,
+    )
+    _times, phone = build_phone_aware_target_map([(spec, anchors)], duration_ms=500.0, hop_ms=10.0, frame_count=64)
+    from core.coarse_crnn.boundary_types import PHONE_AWARE_CONSONANT_LABELS, PHONE_AWARE_VOWEL_LABELS
+
+    assert int(phone.consonant_mask.sum()) > 0
+    assert int(phone.vowel_mask.sum()) > 0
+    assert PHONE_AWARE_CONSONANT_LABELS[int(phone.consonant_target[12])] == "k"
+    assert PHONE_AWARE_VOWEL_LABELS[int(phone.vowel_target[18])] == "i"
+
+
+def test_phone_aware_japanese_pitch_suffix_palatalized_identity():
+    spec = OtoRowSpec(
+        wav_name="kyu.wav",
+        wav_path=r"C:\tmp\kyu.wav",
+        alias="きゅC4P",
+        role="cv",
+        slot_index=0,
+        slot_count=1,
+        prev_alias="",
+        next_alias="",
+        language="japanese",
+        format_type="cvvc",
+        line_index=0,
+        duration_ms=500.0,
+        source_params={},
+        meta={},
+    )
+    anchors = AbsoluteOtoAnchors(
+        offset_abs=120.0,
+        overlap_abs=140.0,
+        pre_abs=180.0,
+        consonant_abs=230.0,
+        cutoff_abs=340.0,
+    )
+    _times, phone = build_phone_aware_target_map([(spec, anchors)], duration_ms=500.0, hop_ms=10.0, frame_count=64)
+    from core.coarse_crnn.boundary_types import PHONE_AWARE_CONSONANT_LABELS, PHONE_AWARE_VOWEL_LABELS
+
+    assert int(phone.consonant_mask.sum()) > 0
+    assert int(phone.vowel_mask.sum()) > 0
+    assert PHONE_AWARE_CONSONANT_LABELS[int(phone.consonant_target[12])] == "ky"
+    assert PHONE_AWARE_VOWEL_LABELS[int(phone.vowel_target[18])] == "u"
+
+
+def test_phone_aware_pitch_suffix_strips_for_all_identity_languages(monkeypatch):
+    monkeypatch.setenv("UTOA_BOUNDARY_PHONE_AUX_IDENTITY_LANGS", "all")
+    spec = OtoRowSpec(
+        wav_name="a_b.wav",
+        wav_path=r"C:\tmp\a_b.wav",
+        alias="a bC4P",
+        role="vc",
+        slot_index=0,
+        slot_count=1,
+        prev_alias="a",
+        next_alias="b",
+        language="english",
+        format_type="cvvc",
+        line_index=0,
+        duration_ms=500.0,
+        source_params={},
+        meta={},
+    )
+    anchors = AbsoluteOtoAnchors(
+        offset_abs=100.0,
+        overlap_abs=140.0,
+        pre_abs=180.0,
+        consonant_abs=240.0,
+        cutoff_abs=340.0,
+    )
+    _times, phone = build_phone_aware_target_map([(spec, anchors)], duration_ms=500.0, hop_ms=10.0, frame_count=64)
+    from core.coarse_crnn.boundary_types import PHONE_AWARE_CONSONANT_LABELS
+
+    assert int(phone.consonant_mask.sum()) > 0
+    painted = {PHONE_AWARE_CONSONANT_LABELS[int(idx)] for idx in phone.consonant_target[phone.consonant_mask > 0]}
+    assert "b" in painted
+
+
+def test_boundary_scorer_phone_aux_heads_are_optional():
+    torch = __import__("torch")
+    from core.coarse_crnn.boundary_scorer_model import BoundaryScorerConfig, build_boundary_scorer
+
+    off = build_boundary_scorer(BoundaryScorerConfig(enable_phone_aux_heads=False))
+    off_out = off(torch.randn(2, 12, 64))
+    assert off_out["cvs_logits"] is None
+
+    on = build_boundary_scorer(BoundaryScorerConfig(enable_phone_aux_heads=True))
+    on_out = on(torch.randn(2, 12, 64))
+    assert on_out["cvs_logits"].shape[:2] == (2, 12)
+    assert on_out["consonant_logits"].shape[:2] == (2, 12)
+    assert on_out["vowel_logits"].shape[:2] == (2, 12)
+    assert on_out["consonant_family_logits"] is None
+
+    family = build_boundary_scorer(BoundaryScorerConfig(enable_phone_aux_heads=True, enable_phone_family_heads=True))
+    family_out = family(torch.randn(2, 12, 64))
+    assert family_out["consonant_family_logits"].shape[:2] == (2, 12)
+    assert family_out["vowel_nucleus_logits"].shape[:2] == (2, 12)
+    assert family_out["vowel_glide_logits"].shape[:2] == (2, 12)
+
+
+def test_phone_aware_debug_plot_renders_target_only(tmp_path):
+    from ml.scripts.coarse_crnn import plot_phone_aware_debug
+
+    wav_path = tmp_path / "ba.wav"
+    _write_wav(wav_path)
+    manifest = tmp_path / "manifest.jsonl"
+    rows = [
+        {
+            "audio": str(wav_path),
+            "wav": wav_path.name,
+            "alias": "ba",
+            "alias_role": "cv",
+            "format_type": "cvvc",
+            "language": "korean",
+            "line_index": 0,
+            "duration_ms": 500.0,
+            "target_offset_ms": 40.0,
+            "target_preutterance_ms": 40.0,
+            "target_consonant_ms": 80.0,
+            "target_overlap_ms": 20.0,
+            "target_cutoff": -140.0,
+        },
+        {
+            "audio": str(wav_path),
+            "wav": wav_path.name,
+            "alias": "a b",
+            "alias_role": "vc",
+            "format_type": "cvvc",
+            "language": "korean",
+            "line_index": 1,
+            "duration_ms": 500.0,
+            "target_offset_ms": 160.0,
+            "target_preutterance_ms": 30.0,
+            "target_consonant_ms": 70.0,
+            "target_overlap_ms": 10.0,
+            "target_cutoff": -160.0,
+        },
+        {
+            "audio": str(wav_path),
+            "wav": wav_path.name,
+            "alias": "be",
+            "alias_role": "cv",
+            "format_type": "cvvc",
+            "language": "korean",
+            "line_index": 2,
+            "duration_ms": 500.0,
+            "target_offset_ms": 300.0,
+            "target_preutterance_ms": 40.0,
+            "target_consonant_ms": 80.0,
+            "target_overlap_ms": 20.0,
+            "target_cutoff": -140.0,
+        },
+    ]
+    manifest.write_text("\n".join(__import__("json").dumps(row) for row in rows), encoding="utf-8")
+    out = tmp_path / "debug.png"
+    rc = plot_phone_aware_debug.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--wav",
+            str(wav_path),
+            "--alias",
+            "a b",
+            "--line-index",
+            "1",
+            "--out",
+            str(out),
+            "--dpi",
+            "72",
+        ]
+    )
+    assert rc == 0
+    assert out.is_file()
+    assert out.stat().st_size > 1000
 
 
 def test_wav_decoder_keeps_vc_inside_anchor_pair():
@@ -147,6 +541,133 @@ def test_wav_decoder_vc_penalizes_early_vowel_end_even_when_score_is_higher():
     assert len(decoded.rows) == 3
     vc_row = decoded.rows[1]
     assert float(vc_row.selected_time_ms) >= 500.0
+
+
+def test_wav_decoder_uses_posterior_channel_for_n_like_transition(monkeypatch):
+    monkeypatch.setenv("UTOA_BOUNDARY_POSTERIOR_CONS_WEIGHT", "2.0")
+    monkeypatch.setenv("UTOA_BOUNDARY_POSTERIOR_VOWEL_WEIGHT", "1.0")
+    monkeypatch.setenv("UTOA_BOUNDARY_NLIKE_POSTERIOR_CONS_BONUS", "0.8")
+    rows = [
+        _spec("cv", slot_index=0, line_index=0),
+        OtoRowSpec(
+            wav_name="ga_gi_gu.wav",
+            wav_path=r"C:\tmp\ga_gi_gu.wav",
+            alias="a n",
+            role="vc",
+            slot_index=0,
+            slot_count=3,
+            prev_alias="a",
+            next_alias="na",
+            language="korean",
+            format_type="cvvc",
+            line_index=1,
+            duration_ms=1500.0,
+            source_params={},
+            meta={"right_consonant": "n"},
+        ),
+        _spec("cv", slot_index=1, line_index=2),
+    ]
+    cands = [
+        BoundaryCandidate(time_ms=200.0, kind="syllable_onset", score=0.95, source="model"),
+        BoundaryCandidate(time_ms=600.0, kind="syllable_onset", score=0.95, source="model"),
+        # Raw score favors earlier vowel_end.
+        BoundaryCandidate(time_ms=430.0, kind="vowel_end", score=0.99, source="model"),
+        BoundaryCandidate(time_ms=520.0, kind="next_onset", score=0.70, source="model"),
+    ]
+    times = [360.0, 430.0, 500.0, 520.0, 560.0]
+    posterior = {
+        "consonant_onset": [0.10, 0.20, 0.82, 0.90, 0.50],
+        "next_onset": [0.12, 0.20, 0.86, 0.95, 0.62],
+        "vowel_start": [0.76, 0.78, 0.30, 0.22, 0.20],
+        "vowel_stable": [0.70, 0.74, 0.25, 0.20, 0.18],
+        "vowel_end": [0.84, 0.90, 0.32, 0.26, 0.20],
+        "transition_peak": [0.30, 0.40, 0.72, 0.80, 0.52],
+    }
+    decoded = decode_wav_rows(
+        wav_path=r"C:\tmp\ga_gi_gu.wav",
+        duration_ms=1200.0,
+        row_specs=rows,
+        candidates=cands,
+        active_start_ms=120.0,
+        active_end_ms=980.0,
+        posterior_scores=posterior,
+        posterior_times_ms=times,
+    )
+    vc_row = decoded.rows[1]
+    assert float(vc_row.selected_time_ms) >= 500.0
+
+
+def test_phone_aux_posterior_uses_cvs_but_gates_identity_by_default(monkeypatch):
+    monkeypatch.delenv("UTOA_BOUNDARY_PHONE_AUX_ID_WEIGHT", raising=False)
+    term = _phone_aux_posterior_term(
+        role="vc",
+        time_ms=100.0,
+        left_anchor=60.0,
+        right_anchor=160.0,
+        cvs_scores={"consonant": [0.90], "vowel": [0.10]},
+        consonant_scores={"b": [0.95]},
+        vowel_scores={"a": [0.95]},
+        posterior_times_ms=[100.0],
+        row_meta={"right_consonant": "b", "left_vowel": "a"},
+        n_like=False,
+        weak_audio=False,
+    )
+    assert term > 0.0
+
+    identity_only = _phone_aux_posterior_term(
+        role="vc",
+        time_ms=100.0,
+        left_anchor=60.0,
+        right_anchor=160.0,
+        cvs_scores={"consonant": [0.0], "vowel": [0.0]},
+        consonant_scores={"b": [0.95]},
+        vowel_scores={"a": [0.95]},
+        posterior_times_ms=[100.0],
+        row_meta={"right_consonant": "b", "left_vowel": "a"},
+        n_like=False,
+        weak_audio=False,
+    )
+    assert identity_only == 0.0
+
+    monkeypatch.setenv("UTOA_BOUNDARY_PHONE_AUX_ID_WEIGHT", "1.0")
+    identity_enabled = _phone_aux_posterior_term(
+        role="vc",
+        time_ms=100.0,
+        left_anchor=60.0,
+        right_anchor=160.0,
+        cvs_scores={"consonant": [0.0], "vowel": [0.0]},
+        consonant_scores={"b": [0.95]},
+        vowel_scores={"a": [0.95]},
+        posterior_times_ms=[100.0],
+        row_meta={"right_consonant": "b", "left_vowel": "a"},
+        n_like=False,
+        weak_audio=False,
+    )
+    assert identity_enabled > 0.0
+
+
+def test_phone_aux_posterior_uses_family_head_by_default(monkeypatch):
+    monkeypatch.delenv("UTOA_BOUNDARY_PHONE_AUX_ID_WEIGHT", raising=False)
+    monkeypatch.setenv("UTOA_BOUNDARY_PHONE_AUX_WEIGHT", "1.0")
+    monkeypatch.setenv("UTOA_BOUNDARY_PHONE_AUX_CVS_WEIGHT", "0.0")
+    monkeypatch.setenv("UTOA_BOUNDARY_PHONE_AUX_FAMILY_WEIGHT", "1.0")
+    term = _phone_aux_posterior_term(
+        role="vc",
+        time_ms=100.0,
+        left_anchor=60.0,
+        right_anchor=160.0,
+        cvs_scores={"consonant": [0.0], "vowel": [0.0]},
+        consonant_scores={"b": [0.95]},
+        vowel_scores={"a": [0.95]},
+        consonant_family_scores={"plosive": [0.95]},
+        vowel_nucleus_scores={"a": [0.80]},
+        vowel_glide_scores={"none": [0.70]},
+        posterior_times_ms=[100.0],
+        row_meta={"right_consonant": "b", "left_vowel": "a"},
+        n_like=False,
+        weak_audio=False,
+    )
+    assert term > 0.0
 
 
 def test_wav_decoder_right_guard_limits_cutoff_for_dense_cv():
@@ -253,18 +774,13 @@ def test_wav_decoder_anchor_shift_moves_timeline_forward(monkeypatch):
 def test_predictor_dispatch_prefers_boundary_engine(monkeypatch):
     from core.coarse_crnn import oto_predictor_generator as mod
 
-    called = {"boundary": 0, "legacy": 0}
+    called = {"boundary": 0}
 
     def _fake_boundary(**kwargs):
         called["boundary"] += 1
         return 1, 1, []
 
-    def _fake_legacy(**kwargs):
-        called["legacy"] += 1
-        return 0, 1, ["legacy called"]
-
     monkeypatch.setattr(mod, "generate_oto_with_boundary_decoder", _fake_boundary)
-    monkeypatch.setattr(mod._legacy, "generate_oto_with_crnn_predictor", _fake_legacy)
 
     processed, total, errors = mod.generate_oto_with_crnn_predictor(
         wav_dir=".",
@@ -275,7 +791,41 @@ def test_predictor_dispatch_prefers_boundary_engine(monkeypatch):
     )
     assert (processed, total, errors) == (1, 1, [])
     assert called["boundary"] == 1
-    assert called["legacy"] == 0
+
+
+def test_predictor_dispatch_rejects_legacy_direct_engine():
+    from core.coarse_crnn import oto_predictor_generator as mod
+
+    processed, total, errors = mod.generate_oto_with_crnn_predictor(
+        wav_dir=".",
+        out_path=".",
+        source_oto_path=".",
+        language="korean",
+        engine="direct",
+    )
+    assert processed == 0
+    assert total == 0
+    assert errors
+    assert "폐기" in errors[0]
+
+
+def test_boundary_model_resolver_skips_experimental_auto_pick(tmp_path, monkeypatch):
+    from core.coarse_crnn import oto_predictor_generator as mod
+
+    stable = tmp_path / "oto_boundary_scorer_v5.pt"
+    phone_aux = tmp_path / "oto_boundary_scorer_phone_aux.pt"
+    stable.write_bytes(b"stable")
+    phone_aux.write_bytes(b"phone")
+    os.utime(stable, (1000, 1000))
+    os.utime(phone_aux, (2000, 2000))
+    monkeypatch.setattr(mod, "_boundary_model_roots", lambda: [str(tmp_path)])
+    monkeypatch.delenv("UTOA_BOUNDARY_SCORER_ALLOW_EXPERIMENTAL", raising=False)
+    assert mod.resolve_boundary_scorer_model_path() == str(stable.resolve())
+
+    monkeypatch.setenv("UTOA_BOUNDARY_SCORER_ALLOW_EXPERIMENTAL", "1")
+    assert mod.resolve_boundary_scorer_model_path() == str(phone_aux.resolve())
+    monkeypatch.delenv("UTOA_BOUNDARY_SCORER_ALLOW_EXPERIMENTAL", raising=False)
+    assert mod.resolve_boundary_scorer_model_path(str(phone_aux)) == str(phone_aux.resolve())
 
 
 def test_slot_count_fallback_uses_anchor_roles_when_filename_slots_missing():
@@ -428,22 +978,99 @@ def test_korean_v_plus_c_space_alias_is_vc():
     assert role == "vc"
 
 
-def test_korean_coda_bridge_alias_is_vcv_bridge():
+def test_korean_coda_bridge_alias_routes_to_vc_by_default(monkeypatch):
+    """KO coda-bridge aliases (``NG g``/``L d``) route to 'vc' by default
+    after 2026-05-17: the old 'v-cv' lane contributed 31% of total |Δ| in
+    raw-model output. Compound-token slot matcher handles their slot mapping
+    now. Set ``UTOA_BOUNDARY_KO_CODA_BRIDGE_ROLE_VCV=on`` to restore the
+    legacy lane for diagnostic comparison."""
+    monkeypatch.delenv("UTOA_BOUNDARY_KO_CODA_BRIDGE_ROLE_VCV", raising=False)
     alias = "NG g"
     alias_type = bt._infer_alias_type(alias, language="korean")
-    transition_type = bt._infer_transition_type(alias, language="korean")
     role = bt.normalize_role(
         bt.classify_alias_role(
             "korean",
             alias,
             alias_type=alias_type,
-            transition_type=transition_type,
+            is_special=False,
+        )
+    )
+    assert alias_type == "vc"
+    assert role == "vc"
+
+
+def test_korean_coda_bridge_alias_opt_in_vcv(monkeypatch):
+    """Opt-in env restores legacy v-cv routing for coda-bridge."""
+    monkeypatch.setenv("UTOA_BOUNDARY_KO_CODA_BRIDGE_ROLE_VCV", "on")
+    alias = "NG g"
+    alias_type = bt._infer_alias_type(alias, language="korean")
+    role = bt.normalize_role(
+        bt.classify_alias_role(
+            "korean",
+            alias,
+            alias_type=alias_type,
             is_special=False,
         )
     )
     assert alias_type == "vcv"
-    assert transition_type == "cv"
     assert role == "v-cv"
+
+
+def test_normalize_ko_coda_uppercase_to_lowercase():
+    """P1-a + P4-a: KO uppercase coda tokens in 2-token aliases normalize
+    to lowercase so the 377 uppercase coda-bridge rows merge into the
+    13.7k lowercase supervision lane (2026-05-17 wall analysis)."""
+    from core.coarse_crnn.boundary_targets import normalize_ko_coda_in_alias
+    assert normalize_ko_coda_in_alias("NG g") == "ng g"
+    assert normalize_ko_coda_in_alias("L H") == "l H"  # right preserved
+    assert normalize_ko_coda_in_alias("M b") == "m b"
+    assert normalize_ko_coda_in_alias("K p") == "k p"
+    # Suffix on left token preserved (color tag e.g. ``L_W p``)
+    assert normalize_ko_coda_in_alias("L_W p") == "l_W p"
+    # Already-lowercase passes through
+    assert normalize_ko_coda_in_alias("ng g") == "ng g"
+    # Single token unchanged
+    assert normalize_ko_coda_in_alias("NG") == "NG"
+    assert normalize_ko_coda_in_alias("ga") == "ga"
+    # Vowel left unchanged
+    assert normalize_ko_coda_in_alias("a bw") == "a bw"
+    # 3-token unchanged
+    assert normalize_ko_coda_in_alias("a ki a") == "a ki a"
+    # Empty
+    assert normalize_ko_coda_in_alias("") == ""
+
+
+def test_uppercase_coda_bridge_alias_normalizes_at_inference():
+    """P4-a: ``NG g`` at inference is normalized to ``ng g`` before role
+    classification, so it lands in the same lane as the lowercase
+    training supervision."""
+    alias_type = bt._infer_alias_type("NG g", language="korean")
+    # After normalization, it's 'ng g' which routes to 'vc' (post-2026-05-17
+    # coda-bridge re-routing; opt-in env restores 'vcv').
+    assert alias_type == "vc"
+
+
+def test_coda_bridge_onset_bonus_plosive_only():
+    """P2-c: plosive/aspirate right-onset on KO coda-bridge gets +1.5 hard
+    score; sonorant/fricative right-onset gets 0."""
+    from core.coarse_crnn.boundary_scorer_training import _coda_bridge_onset_bonus
+    # Plosive: g/b/d/p/k/t (+ tense + aspirated) → +1.5
+    assert _coda_bridge_onset_bonus("ng g") == 1.5
+    assert _coda_bridge_onset_bonus("l p") == 1.5
+    assert _coda_bridge_onset_bonus("m b") == 1.5
+    assert _coda_bridge_onset_bonus("n kk") == 1.5
+    assert _coda_bridge_onset_bonus("NG H") == 1.5  # aspirate
+    assert _coda_bridge_onset_bonus("L R") == 1.5
+    # Sonorant/fricative right-onset → 0
+    assert _coda_bridge_onset_bonus("ng s") == 0.0
+    assert _coda_bridge_onset_bonus("l m") == 0.0
+    assert _coda_bridge_onset_bonus("n l") == 0.0
+    # Non-coda left → 0
+    assert _coda_bridge_onset_bonus("a bw") == 0.0
+    assert _coda_bridge_onset_bonus("eu g") == 0.0
+    # Single token → 0
+    assert _coda_bridge_onset_bonus("ga") == 0.0
+    assert _coda_bridge_onset_bonus("") == 0.0
 
 
 def test_korean_v_plus_glide_consonant_alias_is_vc():

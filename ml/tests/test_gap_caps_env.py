@@ -252,3 +252,17 @@ def test_pre_cons_gap_guard_prevents_near_equal_pre_and_consonant(monkeypatch):
         active_end_ms=700.0,
     )
     assert (a.consonant_abs - a.pre_abs) >= 24.0 - 1e-3
+
+
+def test_pre_cons_gap_guard_clamps_excessive_gap_for_transition(monkeypatch):
+    monkeypatch.setenv("UTOA_BOUNDARY_TRANSITION_PRE_CONS_MAX_GAP_MS", "40")
+    a = build_absolute_anchors_for_role(
+        role="vc",
+        center_ms=500.0,
+        duration_ms=1400.0,
+        left_anchor_ms=100.0,
+        right_anchor_ms=900.0,
+        active_start_ms=0.0,
+        active_end_ms=1300.0,
+    )
+    assert (a.consonant_abs - a.pre_abs) <= 40.0 + 1e-3

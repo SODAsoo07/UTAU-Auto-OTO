@@ -49,6 +49,17 @@ ROLE_MIN_PRE_CONS_GAP_MS: dict[str, float] = {
     "other": 16.0,
 }
 
+ROLE_MAX_PRE_CONS_GAP_MS: dict[str, float] = {
+    # Upper guard to avoid VC/V-CV rows behaving like wide CV anchors.
+    "cv": 180.0,
+    "v": 120.0,
+    "vc": 66.0,
+    "vv": 84.0,
+    "v-cv": 90.0,
+    "br": 40.0,
+    "other": 130.0,
+}
+
 
 def build_absolute_anchors_for_role(
     *,
@@ -282,10 +293,11 @@ def apply_pre_cons_gap_guard(
     duration_ms: float,
     active_start_ms: float = 0.0,
 ) -> AbsoluteOtoAnchors:
-    """Keep a practical minimum gap between preutterance and consonant."""
+    """Keep a practical min/max gap between preutterance and consonant."""
     role_key = normalize_role(role)
     duration = max(1.0, float(duration_ms))
     min_gap = _resolve_min_pre_cons_gap_ms(role_key)
+    max_gap = _resolve_max_pre_cons_gap_ms(role_key)
 
     offset_abs = _clamp(float(anchors.offset_abs), 0.0, duration)
     overlap_abs = _clamp(float(anchors.overlap_abs), offset_abs, duration)
@@ -316,6 +328,13 @@ def apply_pre_cons_gap_guard(
         consonant_abs = min(duration - 1.0, cons_target)
     if cutoff_abs < consonant_abs + 1.0:
         cutoff_abs = min(duration, consonant_abs + 1.0)
+
+    # Hard clamp upper gap for transition-heavy rows to prevent CV-like spreads.
+    gap = float(consonant_abs - pre_abs)
+    if gap > float(max_gap) + 1e-6:
+        consonant_abs = min(duration - 1.0, pre_abs + float(max_gap))
+        if cutoff_abs < consonant_abs + 1.0:
+            cutoff_abs = min(duration, consonant_abs + 1.0)
 
     # Re-apply invariants.
     offset_abs = _clamp(offset_abs, 0.0, duration)
@@ -380,6 +399,14 @@ def _resolve_min_pre_cons_gap_ms(role_key: str) -> float:
     return max(1.0, float(base))
 
 
+def _resolve_max_pre_cons_gap_ms(role_key: str) -> float:
+    default_gap = ROLE_MAX_PRE_CONS_GAP_MS.get(role_key, ROLE_MAX_PRE_CONS_GAP_MS["other"])
+    base = _env_float("UTOA_BOUNDARY_PRE_CONS_MAX_GAP_MS", default_gap)
+    if role_key in TRANSITION_ROLES:
+        base = _env_float("UTOA_BOUNDARY_TRANSITION_PRE_CONS_MAX_GAP_MS", base)
+    return max(4.0, float(base))
+
+
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
@@ -404,6 +431,7 @@ def _env_bool(name: str, default: bool) -> bool:
 __all__ = [
     "ROLE_GAP_RULES_MS",
     "ROLE_MIN_PRE_CONS_GAP_MS",
+    "ROLE_MAX_PRE_CONS_GAP_MS",
     "ROLE_RIGHT_GUARD_MARGIN_MS",
     "ROLE_MAX_SPAN_MS",
     "apply_pre_cons_gap_guard",

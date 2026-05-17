@@ -407,26 +407,7 @@ class LayoutMixin:
         )
         self.no_mfa_oto_mode_hint_label.pack(side="left", fill="x", expand=True)
         self.row_oto_crnn_model = build_form_row(form_body)
-        self.oto_crnn_engine_menu = ctk.CTkOptionMenu(
-            self.row_oto_crnn_model,
-            values=[
-                "Legacy direct CRNN (deprecated)",
-                "Boundary scorer decoder (new)",
-            ],
-            variable=self.oto_crnn_engine_var,
-            width=230,
-            command=lambda _v: self._on_oto_crnn_engine_change(),
-        )
-        _style_blue_menu(self.oto_crnn_engine_menu)
-        self.oto_crnn_engine_menu.pack(side="left", padx=(6, 6))
-        build_left_label(self.row_oto_crnn_model, t("CRNN 모델:")).pack(side="left")
-        self.oto_crnn_model_entry = ctk.CTkEntry(
-            self.row_oto_crnn_model,
-            textvariable=self.oto_crnn_model_path_var,
-            placeholder_text="비워두면 기본 학습 모델 사용",
-        )
-        self.oto_crnn_model_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
-        self.oto_crnn_model_entry.pack(side="left", fill="x", expand=True, padx=(6, 6))
+        build_left_label(self.row_oto_crnn_model, t("CRNN Device:")).pack(side="left")
         self.oto_crnn_device_menu = ctk.CTkOptionMenu(
             self.row_oto_crnn_model,
             values=["auto", "cuda", "cpu"],
@@ -435,18 +416,13 @@ class LayoutMixin:
             command=lambda _v: self._save_config(),
         )
         _style_blue_menu(self.oto_crnn_device_menu)
-        self.oto_crnn_device_menu.pack(side="left", padx=(0, 6))
-        self.oto_crnn_model_browse_btn = ctk.CTkButton(
+        self.oto_crnn_device_menu.pack(side="left", padx=(6, 8))
+        self.oto_crnn_model_hint_label = ctk.CTkLabel(
             self.row_oto_crnn_model,
-            text=t("찾아보기"),
-            width=90,
-            command=lambda: self._browse_file_by_var(
-                self.oto_crnn_model_path_var,
-                [("PyTorch checkpoint", "*.pt"), ("All files", "*.*")],
-            ),
+            text=t("(Boundary scorer checkpoint is auto-resolved)"),
+            text_color=PALETTE.neutral_text,
         )
-        _style_primary_button(self.oto_crnn_model_browse_btn)
-        self.oto_crnn_model_browse_btn.pack(side="right")
+        self.oto_crnn_model_hint_label.pack(side="left", fill="x", expand=True)
         self.row_oto_crnn_model.pack_forget()
         self.row_oto_crnn_special_aliases = build_form_row(form_body)
         build_left_label(self.row_oto_crnn_special_aliases, t("특수 에일리어스:")).pack(side="left")
@@ -1234,16 +1210,12 @@ class LayoutMixin:
 
     @staticmethod
     def _normalize_oto_crnn_engine_code(value):
-        raw = str(value or "").strip().lower()
-        if raw in {"boundary", "boundary_decoder", "boundary-scorer", "scorer", "new"}:
-            return "boundary_decoder"
-        if str(value or "").strip() == "Boundary scorer decoder (new)":
-            return "boundary_decoder"
-        return "legacy_direct"
+        # Legacy direct CRNN path is removed from UI routing.
+        return "boundary_decoder"
 
     def _set_oto_crnn_engine_from_code(self, code):
         normalized = self._normalize_oto_crnn_engine_code(code)
-        label = "Boundary scorer decoder (new)" if normalized == "boundary_decoder" else "Legacy direct CRNN (deprecated)"
+        label = "Boundary scorer decoder (new)"
         if hasattr(self, "oto_crnn_engine_var"):
             try:
                 self.oto_crnn_engine_var.set(label)
@@ -1253,7 +1225,7 @@ class LayoutMixin:
 
     def _get_oto_crnn_engine_code(self):
         if not hasattr(self, "oto_crnn_engine_var"):
-            return "legacy_direct"
+            return "boundary_decoder"
         try:
             current = self.oto_crnn_engine_var.get()
         except Exception:
@@ -1397,7 +1369,7 @@ class LayoutMixin:
         crnn_engine_code = (
             self._get_oto_crnn_engine_code()
             if hasattr(self, "_get_oto_crnn_engine_code")
-            else "legacy_direct"
+            else "boundary_decoder"
         )
         if no_mfa_mode_code == "crnn" and not developer_enabled:
             no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("remap")
@@ -1415,16 +1387,9 @@ class LayoutMixin:
         if hasattr(self, "oto_crnn_engine_menu"):
             try:
                 self.oto_crnn_engine_menu.configure(
-                    values=[
-                        "Legacy direct CRNN (deprecated)",
-                        "Boundary scorer decoder (new)",
-                    ]
+                    values=["Boundary scorer decoder (new)"]
                 )
-                self.oto_crnn_engine_menu.set(
-                    "Boundary scorer decoder (new)"
-                    if crnn_engine_code == "boundary_decoder"
-                    else "Legacy direct CRNN (deprecated)"
-                )
+                self.oto_crnn_engine_menu.set("Boundary scorer decoder (new)")
             except Exception:
                 pass
         no_mfa_mode_desc = (
