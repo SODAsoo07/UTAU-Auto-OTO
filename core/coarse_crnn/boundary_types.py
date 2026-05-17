@@ -26,6 +26,110 @@ BOUNDARY_LABEL_SIGMA_MS: dict[str, float] = {
     "silence_boundary": 30.0,
 }
 
+PHONE_AWARE_CVS_LABELS: tuple[str, ...] = ("silence", "consonant", "vowel")
+PHONE_AWARE_CONSONANT_LABELS: tuple[str, ...] = (
+    "b",
+    "bb",
+    "by",
+    "c",
+    "ch",
+    "cl",
+    "d",
+    "dd",
+    "dy",
+    "dz",
+    "f",
+    "g",
+    "gg",
+    "gy",
+    "gw",
+    "h",
+    "hy",
+    "j",
+    "jj",
+    "k",
+    "kh",
+    "ky",
+    "kk",
+    "l",
+    "m",
+    "my",
+    "n",
+    "ng",
+    "ny",
+    "p",
+    "ph",
+    "pp",
+    "py",
+    "r",
+    "ry",
+    "s",
+    "sh",
+    "ss",
+    "t",
+    "th",
+    "tt",
+    "ts",
+    "ty",
+    "v",
+    "w",
+    "y",
+    "z",
+)
+PHONE_AWARE_VOWEL_LABELS: tuple[str, ...] = (
+    "a",
+    "ae",
+    "e",
+    "eo",
+    "eu",
+    "i",
+    "o",
+    "oe",
+    "u",
+    "ui",
+    "wa",
+    "wae",
+    "we",
+    "weo",
+    "wi",
+    "wo",
+    "ya",
+    "yae",
+    "ye",
+    "yeo",
+    "yo",
+    "yu",
+)
+PHONE_AWARE_CONSONANT_FAMILY_LABELS: tuple[str, ...] = (
+    "plosive",
+    "aspirate",
+    "nasal",
+    "liquid",
+    "fricative",
+    "affricate",
+    "glide",
+    "closure",
+    "other",
+)
+PHONE_AWARE_VOWEL_NUCLEUS_LABELS: tuple[str, ...] = (
+    "a",
+    "e",
+    "i",
+    "o",
+    "u",
+    "eo",
+    "eu",
+    "other",
+)
+PHONE_AWARE_VOWEL_GLIDE_LABELS: tuple[str, ...] = (
+    "none",
+    "y",
+    "w",
+    "ui",
+    "other",
+)
+PHONE_AWARE_IGNORE_INDEX = -100
+
 ANCHOR_ROLES: frozenset[str] = frozenset({"-cv", "cv", "v", "special"})
 TRANSITION_ROLES: frozenset[str] = frozenset({"vc", "vv", "v-cv"})
 
@@ -51,6 +155,12 @@ class BoundaryFrameScores:
     times_ms: list[float]
     scores: dict[str, list[float]]
     quality_scores: list[float] | None = None
+    cvs_scores: dict[str, list[float]] | None = None
+    consonant_scores: dict[str, list[float]] | None = None
+    vowel_scores: dict[str, list[float]] | None = None
+    consonant_family_scores: dict[str, list[float]] | None = None
+    vowel_nucleus_scores: dict[str, list[float]] | None = None
+    vowel_glide_scores: dict[str, list[float]] | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +250,13 @@ __all__ = [
     "ANCHOR_ROLES",
     "BOUNDARY_LABELS",
     "BOUNDARY_LABEL_SIGMA_MS",
+    "PHONE_AWARE_CONSONANT_LABELS",
+    "PHONE_AWARE_CONSONANT_FAMILY_LABELS",
+    "PHONE_AWARE_CVS_LABELS",
+    "PHONE_AWARE_VOWEL_GLIDE_LABELS",
+    "PHONE_AWARE_IGNORE_INDEX",
+    "PHONE_AWARE_VOWEL_LABELS",
+    "PHONE_AWARE_VOWEL_NUCLEUS_LABELS",
     "TRANSITION_ROLES",
     "AbsoluteOtoAnchors",
     "BoundaryCandidate",

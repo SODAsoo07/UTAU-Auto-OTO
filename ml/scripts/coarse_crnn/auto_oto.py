@@ -53,17 +53,17 @@ VARIANT_PRESETS: dict[str, dict[str, str]] = {
     "F1": {
         "UTOA_BOUNDARY_LWC_ENABLE": "on",
         "UTOA_BOUNDARY_RESIDUAL_ENABLE": "on",
-        "UTOA_BOUNDARY_RESIDUAL_CONDITIONAL_ENABLE": "off",
+        "UTOA_BOUNDARY_RESIDUAL_CONDITIONAL_ENABLE": "on",
         "UTOA_BOUNDARY_RESIDUAL_MODEL_DIR": "ml_workspace/models/coarse_crnn/boundary_residual_v3_slotfix",
-        "UTOA_BOUNDARY_RESIDUAL_TARGETS": "delta_offset,delta_preutterance,delta_overlap,delta_cutoff",
+        "UTOA_BOUNDARY_RESIDUAL_TARGETS": "delta_overlap,delta_cutoff",
     },
     # F-2: F-1 + extended consonant/tail caps (Quick Win A+B from listening cycle).
     "F2": {
         "UTOA_BOUNDARY_LWC_ENABLE": "on",
         "UTOA_BOUNDARY_RESIDUAL_ENABLE": "on",
-        "UTOA_BOUNDARY_RESIDUAL_CONDITIONAL_ENABLE": "off",
+        "UTOA_BOUNDARY_RESIDUAL_CONDITIONAL_ENABLE": "on",
         "UTOA_BOUNDARY_RESIDUAL_MODEL_DIR": "ml_workspace/models/coarse_crnn/boundary_residual_v3_slotfix",
-        "UTOA_BOUNDARY_RESIDUAL_TARGETS": "delta_offset,delta_preutterance,delta_overlap,delta_cutoff",
+        "UTOA_BOUNDARY_RESIDUAL_TARGETS": "delta_overlap,delta_cutoff",
         "UTOA_BOUNDARY_CONS_MIN_MS": "40",
         "UTOA_BOUNDARY_CONS_MAX_MS": "140",
         "UTOA_BOUNDARY_TAIL_MIN_MS": "60",
@@ -78,15 +78,100 @@ VARIANT_PRESETS: dict[str, dict[str, str]] = {
     "F3": {
         "UTOA_BOUNDARY_LWC_ENABLE": "on",
         "UTOA_BOUNDARY_RESIDUAL_ENABLE": "on",
-        "UTOA_BOUNDARY_RESIDUAL_CONDITIONAL_ENABLE": "off",
+        "UTOA_BOUNDARY_RESIDUAL_CONDITIONAL_ENABLE": "on",
         "UTOA_BOUNDARY_RESIDUAL_MODEL_DIR": "ml_workspace/models/coarse_crnn/boundary_residual_v3_slotfix",
-        "UTOA_BOUNDARY_RESIDUAL_TARGETS": "delta_offset,delta_preutterance,delta_overlap,delta_cutoff",
+        "UTOA_BOUNDARY_RESIDUAL_TARGETS": "delta_overlap,delta_cutoff",
         "UTOA_BOUNDARY_CONS_MIN_MS": "40",
         "UTOA_BOUNDARY_CONS_MAX_MS": "140",
         "UTOA_BOUNDARY_TAIL_MIN_MS": "60",
         "UTOA_BOUNDARY_TAIL_MAX_MS": "220",
         "UTOA_BOUNDARY_MAX_SPAN_MS": "600",
         "UTOA_BOUNDARY_ANCHOR_TIMELINE": "filename",
+        # Two-token transition aliases (`u k`, `i p`, etc.) on 8-mora
+        # tense+coda wavs collapsed to slot 0 in the 2026-05-17 val gate
+        # (mis_mapping_rate 0.697). Compound matcher resolves them to the
+        # bare-CV → next-CV adjacency in the filename token list.
+        "UTOA_BOUNDARY_COMPOUND_TOKEN_SLOT_MATCH_ENABLE": "on",
+        # Per-consonant-class runtime offset shift — all zeroed after the
+        # 2026-05-17 source-OTO regeneration. Earlier "voiced stops −200ms
+        # early / sonorants +150ms late" diagnostic was driven by row-shift
+        # rollback to a broken source-OTO; with a correct source the model's
+        # raw output sits within ±100ms for ~74% of VC rows and within ±50ms
+        # for the majority of CV/-cv/v-cv. Class-shift values of
+        # (200/-150/100/120) drop ±50% match from ~84% to ~25%.
+        # Keep knobs exposed so future model checkpoints can re-tune via
+        # env override (apply_env_preset now respects pre-existing env).
+        "UTOA_BOUNDARY_SHIFT_VOICED_STOP_MS": "0",
+        "UTOA_BOUNDARY_SHIFT_SONORANT_MS": "0",
+        "UTOA_BOUNDARY_SHIFT_AFFRICATE_MS": "0",
+        "UTOA_BOUNDARY_SHIFT_FRICATIVE_MS": "0",
+        "UTOA_BOUNDARY_SHIFT_LIQUID_R_MS": "0",
+        # Glide multiplier still in place for safety — no-op when all class
+        # shifts are 0, but preserves correct scaling if any class shift is
+        # re-enabled via env override.
+        "UTOA_BOUNDARY_SHIFT_GLIDE_MULTIPLIER": "0.5",
+        # VC role shift kept at 0 after the 2026-05-17 sweep against
+        # regenerated source-OTO: VC_MS=0 → onset VC meanΔ=+45ms / ±200ms
+        # 90%; VC_MS=400 → meanΔ=+314ms / ±200ms 25%. The earlier "−500 to
+        # −800 ms early" diagnostic that motivated +400 was an artifact of
+        # the broken source-OTO (compounded with row-shift rollback). Keep
+        # the knob exposed so future model checkpoints can re-tune.
+        "UTOA_BOUNDARY_SHIFT_VC_MS": "0",
+        # Coda VC per articulation class. The v16 single −40 knob fixed the
+        # +41 ms aggregate mean but over-corrected sonorant codas (which
+        # were already perfect via source rollback) while under-correcting
+        # plosive codas (still +40~+148 ms late). v17 sweep 0/−60/−90/−120/
+        # −150 on plosive showed −150 wins on coda ±50% (77.1%), ±100%
+        # (90.0%), and plosive ±100% (71.4%). Class-specific:
+        #   - Sonorant (L/M/N/NG/R/ng): 0 — source rollback already correct
+        #   - Plosive (K/T/P): −150 — model's V→tense-coda boundary biased late
+        #   - Aspirate (H): 0 — near-centered, individual wav outliers only
+        "UTOA_BOUNDARY_SHIFT_VC_CODA_SONORANT_MS": "0",
+        "UTOA_BOUNDARY_SHIFT_VC_CODA_PLOSIVE_MS": "-150",
+        "UTOA_BOUNDARY_SHIFT_VC_CODA_ASPIRATE_MS": "0",
+        # VC rows drifting to next-CV onset was still frequent in listening.
+        # Keep VC centers away from the far-right edge of the slot and
+        # re-center slightly earlier than the old default.
+        "UTOA_BOUNDARY_VC_TARGET_RATIO": "0.58",
+        "UTOA_BOUNDARY_VC_CLAMP_RIGHT_RATIO": "0.80",
+        "UTOA_BOUNDARY_VC_LATE_PENALTY_START_RATIO": "0.76",
+        "UTOA_BOUNDARY_VC_LATE_PENALTY_WEIGHT": "1.35",
+        # Prevent preutterance/fixed-end near-collapse on transition rows.
+        "UTOA_BOUNDARY_TRANSITION_PRE_CONS_MIN_GAP_MS": "24",
+        "UTOA_BOUNDARY_TRANSITION_PRE_CONS_MAX_GAP_MS": "72",
+        # Keep residual-adjusted transition preutterance inside anchor envelope.
+        "UTOA_BOUNDARY_TRANSITION_ENVELOPE_GUARD_ENABLE": "on",
+        "UTOA_BOUNDARY_VC_PRE_MAX_RATIO": "0.80",
+        # Row-shift rollback intentionally disabled (2026-05-17): source-OTO
+        # numerical values must not influence inference output. boundary_
+        # generator skips the entire guard path now (empty source dicts),
+        # so these flags are inert — kept here for backward-compat with
+        # operators who pass UTOA_BOUNDARY_ROW_SHIFT_ROLLBACK_ENABLE=on from
+        # the shell (apply_env_preset respects pre-existing env, but the
+        # generator ignores the read regardless).
+        "UTOA_BOUNDARY_ROW_SHIFT_ROLLBACK_ENABLE": "off",
+        # Weak/n-like robustness.
+        "UTOA_BOUNDARY_WEAK_AUDIO_RELIABILITY_MAX": "0.42",
+        "UTOA_BOUNDARY_LWC_WEAK_THRESHOLD_RELAX": "0.06",
+        "UTOA_BOUNDARY_NLIKE_POSTERIOR_CONS_BONUS": "0.45",
+        "UTOA_BOUNDARY_NLIKE_POSTERIOR_VOWEL_PENALTY": "0.20",
+        # BPM beat-grid prior (2026-05-17): infrastructure ready but
+        # disabled by default. KO TABI 8mora diagnostic showed snap REGRESSES
+        # accuracy (ALL ±50% 30.9 → 27.3%) because lead-in detection + tail-
+        # buffer assumption produce beat grid with 50–150 ms cumulative
+        # error — snap then pulls already-correct rows to wrong beats. The
+        # acoustic BPM detection itself is accurate (120 BPM at 0.9 conf for
+        # TABI bw wav) but phase calibration is the bottleneck.
+        # Opt-in for voicebanks recorded with stable BGM + consistent lead-
+        # in (will be re-enabled per-voicebank when verified clean):
+        #   UTOA_BOUNDARY_BPM_PRIOR_ENABLE=on
+        #   UTOA_BOUNDARY_BPM_MS=120     # manual override (more reliable)
+        #   UTOA_BOUNDARY_BPM_LEAD_IN_MS=250
+        "UTOA_BOUNDARY_BPM_PRIOR_ENABLE": "off",
+        "UTOA_BOUNDARY_BPM_RANGE_MIN": "100",
+        "UTOA_BOUNDARY_BPM_RANGE_MAX": "150",
+        "UTOA_BOUNDARY_BPM_SNAP_TOLERANCE_MS": "120",
+        "UTOA_BOUNDARY_BPM_MIN_CONFIDENCE": "0.5",
     },
 }
 
@@ -163,11 +248,21 @@ def backup_existing_oto(output_path: str, timestamp: str) -> str | None:
 
 
 def apply_env_preset(preset: dict[str, str]) -> dict[str, str | None]:
-    """Apply env overrides and return a restore map for the caller to undo with `restore_env`."""
+    """Apply env overrides and return a restore map for the caller to undo with `restore_env`.
+
+    Preset values do NOT overwrite env vars already set by the caller — this
+    lets ``UTOA_BOUNDARY_SHIFT_VC_MS=200 python auto_oto.py --variant F3 ...``
+    actually override the F3 preset's baked-in value, instead of being silently
+    clobbered. The shell-set env takes precedence; the preset only fills in
+    keys the caller hasn't already provided.
+    """
     restore: dict[str, str | None] = {}
     for key, value in preset.items():
-        restore[str(key)] = os.environ.get(str(key))
-        os.environ[str(key)] = str(value)
+        key_s = str(key)
+        if key_s in os.environ:
+            continue
+        restore[key_s] = os.environ.get(key_s)
+        os.environ[key_s] = str(value)
     return restore
 
 

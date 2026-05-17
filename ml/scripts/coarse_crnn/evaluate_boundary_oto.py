@@ -120,6 +120,14 @@ def main() -> int:
             active_end_ms=float(audio.active_end_ms),
             model_quality=model_quality,
             audio_reliability=audio_reliability,
+            posterior_scores=score_map.scores,
+            posterior_times_ms=score_map.times_ms,
+            cvs_scores=score_map.cvs_scores,
+            consonant_scores=score_map.consonant_scores,
+            vowel_scores=score_map.vowel_scores,
+            consonant_family_scores=score_map.consonant_family_scores,
+            vowel_nucleus_scores=score_map.vowel_nucleus_scores,
+            vowel_glide_scores=score_map.vowel_glide_scores,
         )
         decoded_rows.extend(decoded.rows)
 

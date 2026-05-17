@@ -1335,7 +1335,7 @@ class AppRuntimeMixin:
             "aligner_var": "MFA",
             "no_mfa_oto_mode_var": "베이스 OTO 재매핑 + 보정",
             "oto_crnn_model_path_var": "",
-            "oto_crnn_engine_var": "legacy_direct",
+            "oto_crnn_engine_var": "boundary_decoder",
             "oto_crnn_device_var": "auto",
             "oto_crnn_special_aliases_var": "",
             "enable_ml_correction_var": True,
@@ -3382,11 +3382,11 @@ class ConfigMixin:
             "ml_anchor_mel_gamma": self.ml_anchor_mel_gamma_var.get() if hasattr(self, "ml_anchor_mel_gamma_var") else "",
             "ml_model_root_kr": self.ml_model_root_kr_var.get() if hasattr(self, "ml_model_root_kr_var") else "",
             "ml_model_root_ja": self.ml_model_root_ja_var.get() if hasattr(self, "ml_model_root_ja_var") else "",
-            "oto_crnn_model_path": self.oto_crnn_model_path_var.get() if hasattr(self, "oto_crnn_model_path_var") else "",
+            "oto_crnn_model_path": "",
             "oto_crnn_engine": (
                 self._get_oto_crnn_engine_code()
                 if hasattr(self, "_get_oto_crnn_engine_code")
-                else "legacy_direct"
+                else "boundary_decoder"
             ),
             "oto_crnn_device": self.oto_crnn_device_var.get() if hasattr(self, "oto_crnn_device_var") else "auto",
             "oto_crnn_special_aliases": self.oto_crnn_special_aliases_var.get() if hasattr(self, "oto_crnn_special_aliases_var") else "",
@@ -3977,12 +3977,12 @@ class ConfigMixin:
             if "ml_model_root_ja" in config and hasattr(self, "ml_model_root_ja_var"):
                 self.ml_model_root_ja_var.set(str(config.get("ml_model_root_ja", "") or ""))
             if "oto_crnn_model_path" in config and hasattr(self, "oto_crnn_model_path_var"):
-                self.oto_crnn_model_path_var.set(str(config.get("oto_crnn_model_path", "") or ""))
+                self.oto_crnn_model_path_var.set("")
             if "oto_crnn_engine" in config and hasattr(self, "oto_crnn_engine_var"):
                 if hasattr(self, "_set_oto_crnn_engine_from_code"):
-                    self._set_oto_crnn_engine_from_code(config.get("oto_crnn_engine", "legacy_direct"))
+                    self._set_oto_crnn_engine_from_code(config.get("oto_crnn_engine", "boundary_decoder"))
                 else:
-                    self.oto_crnn_engine_var.set(str(config.get("oto_crnn_engine", "legacy_direct") or "legacy_direct"))
+                    self.oto_crnn_engine_var.set(str(config.get("oto_crnn_engine", "boundary_decoder") or "boundary_decoder"))
             if "oto_crnn_device" in config and hasattr(self, "oto_crnn_device_var"):
                 device = str(config.get("oto_crnn_device", "auto") or "auto").strip().lower()
                 self.oto_crnn_device_var.set(device if device in {"auto", "cpu", "cuda"} else "auto")

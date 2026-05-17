@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from collections import defaultdict
+from typing import Any
 
 from core.coarse_crnn.boundary_candidates import (
     audio_candidates_to_boundary_candidates,
@@ -50,6 +51,12 @@ def main() -> int:
     ap.add_argument("--device", default="auto")
     ap.add_argument("--max-wavs", type=int, default=0)
     ap.add_argument("--residual-model-dir", default="", help="Optional LightGBM residual model dir.")
+    ap.add_argument("--mapping-match-max-ms", type=float, default=120.0)
+    ap.add_argument("--mapping-mismatch-min-ms", type=float, default=120.0)
+    ap.add_argument("--mapping-severe-abs-ms", type=float, default=260.0)
+    ap.add_argument("--gate-max-mis-mapping-rate", type=float, default=-1.0)
+    ap.add_argument("--gate-max-one-step-shift-rate", type=float, default=-1.0)
+    ap.add_argument("--gate-max-vc-pre-ge-80ms-rate", type=float, default=-1.0)
     args = ap.parse_args()
 
     rows = _read_jsonl(args.manifest)
@@ -114,6 +121,14 @@ def main() -> int:
             active_end_ms=float(audio.active_end_ms),
             model_quality=model_quality,
             audio_reliability=audio_reliability,
+            posterior_scores=score_map.scores,
+            posterior_times_ms=score_map.times_ms,
+            cvs_scores=score_map.cvs_scores,
+            consonant_scores=score_map.consonant_scores,
+            vowel_scores=score_map.vowel_scores,
+            consonant_family_scores=score_map.consonant_family_scores,
+            vowel_nucleus_scores=score_map.vowel_nucleus_scores,
+            vowel_glide_scores=score_map.vowel_glide_scores,
         )
         if residual_bundle is None:
             decoded_rows.extend(decoded.rows)
@@ -162,6 +177,21 @@ def main() -> int:
                     decoded_rows.append(row)
 
     report = evaluate_decoded_rows(decoded_rows, reference_rows=reference_rows)
+    shift_metrics = _evaluate_shift_metrics(
+        decoded_rows,
+        reference_rows=reference_rows,
+        mapping_match_max_ms=float(args.mapping_match_max_ms),
+        mapping_mismatch_min_ms=float(args.mapping_mismatch_min_ms),
+        mapping_severe_abs_ms=float(args.mapping_severe_abs_ms),
+    )
+    report["shift_metrics"] = shift_metrics
+    gate = _evaluate_release_gates(
+        shift_metrics=shift_metrics,
+        max_mis_mapping_rate=float(args.gate_max_mis_mapping_rate),
+        max_one_step_shift_rate=float(args.gate_max_one_step_shift_rate),
+        max_vc_pre_ge_80ms_rate=float(args.gate_max_vc_pre_ge_80ms_rate),
+    )
+    report["gates"] = gate
     report["wavs"] = len(wav_items)
     report["role_counts"] = dict(sorted(role_counter.items(), key=lambda kv: (-kv[1], kv[0])))
     report["residual_model_dir"] = residual_dir
@@ -172,7 +202,128 @@ def main() -> int:
     with open(args.out, "w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    return 0
+    return 1 if not bool(gate.get("passed", True)) else 0
+
+
+def _evaluate_shift_metrics(
+    decoded_rows: list[DecodedOtoRow],
+    *,
+    reference_rows: dict[tuple[str, str, int], dict[str, float]],
+    mapping_match_max_ms: float,
+    mapping_mismatch_min_ms: float,
+    mapping_severe_abs_ms: float,
+) -> dict[str, Any]:
+    by_wav_pred: dict[str, list[DecodedOtoRow]] = defaultdict(list)
+    for row in decoded_rows:
+        by_wav_pred[str(row.spec.wav_name or "")].append(row)
+
+    one_step = 0
+    mis_map = 0
+    supported = 0
+    vc_total = 0
+    vc_bad_80 = 0
+    for wav_name, rows in by_wav_pred.items():
+        pred_non_sil: list[tuple[int, float, str]] = []
+        ref_non_sil: list[float] = []
+        for row in sorted(rows, key=lambda r: int(r.spec.line_index)):
+            if _is_blank_or_silence_alias(str(row.spec.alias or "")):
+                continue
+            key = (row.spec.wav_name, row.spec.alias, int(row.spec.line_index))
+            ref = reference_rows.get(key)
+            if not ref:
+                continue
+            pred_pre = float(row.anchors.pre_abs)
+            ref_pre = float(ref.get("pre_abs", pred_pre))
+            pred_non_sil.append((int(row.spec.line_index), pred_pre, str(row.spec.role or "other")))
+            ref_non_sil.append(ref_pre)
+        if not pred_non_sil or not ref_non_sil:
+            continue
+        for idx, (_line_idx, pred_pre, role) in enumerate(pred_non_sil):
+            if idx >= len(ref_non_sil):
+                continue
+            supported += 1
+            own_delta = abs(float(pred_pre) - float(ref_non_sil[idx]))
+            nearest_idx, nearest_delta = _nearest_index(ref_non_sil, float(pred_pre))
+            idx_gap = abs(int(nearest_idx) - int(idx))
+            nearest_ok = float(nearest_delta) <= float(mapping_match_max_ms)
+            own_bad = float(own_delta) >= float(mapping_mismatch_min_ms)
+            if idx_gap == 1 and own_bad and nearest_ok:
+                one_step += 1
+            if (idx_gap >= 1 and own_bad and nearest_ok) or float(own_delta) >= float(mapping_severe_abs_ms):
+                mis_map += 1
+            if str(role).strip().lower() == "vc":
+                vc_total += 1
+                if own_delta >= 80.0:
+                    vc_bad_80 += 1
+    return {
+        "mapping_supported_rows": int(supported),
+        "one_step_shift_count": int(one_step),
+        "mis_mapping_count": int(mis_map),
+        "one_step_shift_rate": _rate(one_step, supported),
+        "mis_mapping_rate": _rate(mis_map, supported),
+        "vc_rows_with_ref": int(vc_total),
+        "vc_pre_ge_80ms_count": int(vc_bad_80),
+        "vc_pre_ge_80ms_rate": _rate(vc_bad_80, vc_total),
+    }
+
+
+def _evaluate_release_gates(
+    *,
+    shift_metrics: dict[str, Any],
+    max_mis_mapping_rate: float,
+    max_one_step_shift_rate: float,
+    max_vc_pre_ge_80ms_rate: float,
+) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+
+    def _maybe_check(metric: str, limit: float) -> None:
+        if float(limit) < 0.0:
+            return
+        value = float(shift_metrics.get(metric, 0.0) or 0.0)
+        checks.append(
+            {
+                "metric": metric,
+                "value": value,
+                "limit": float(limit),
+                "pass": bool(value <= float(limit)),
+            }
+        )
+
+    _maybe_check("mis_mapping_rate", max_mis_mapping_rate)
+    _maybe_check("one_step_shift_rate", max_one_step_shift_rate)
+    _maybe_check("vc_pre_ge_80ms_rate", max_vc_pre_ge_80ms_rate)
+    passed = all(bool(item.get("pass", False)) for item in checks) if checks else True
+    return {"passed": bool(passed), "checks": checks}
+
+
+def _nearest_index(values: list[float], target: float) -> tuple[int, float]:
+    best_idx = -1
+    best_delta = None
+    for idx, value in enumerate(values):
+        delta = abs(float(target) - float(value))
+        if best_delta is None or delta < best_delta:
+            best_idx = idx
+            best_delta = delta
+    return int(best_idx), float(best_delta if best_delta is not None else 0.0)
+
+
+def _is_blank_or_silence_alias(alias: str) -> bool:
+    text = str(alias or "").strip().lower()
+    if not text:
+        return True
+    if text.startswith("-"):
+        text = text[1:].strip()
+    if not text:
+        return True
+    silence_tokens = {"r", "br", "pau", "sil", "rest"}
+    parts = [token for token in text.split() if token]
+    return bool(parts) and all(token in silence_tokens for token in parts)
+
+
+def _rate(numer: int, denom: int) -> float:
+    if int(denom) <= 0:
+        return 0.0
+    return float(int(numer)) / float(int(denom))
 
 
 def _quality_at_time(score_map, time_ms: float, *, default: float) -> float:

@@ -3,6 +3,10 @@ from __future__ import annotations
 import wave
 from types import SimpleNamespace
 import numpy as np
+import pytest
+
+
+pytestmark = pytest.mark.skip(reason="direct-parameter OTO CRNN stack is deprecated; boundary_decoder tests cover the active path")
 
 
 def _write_wav(path):
