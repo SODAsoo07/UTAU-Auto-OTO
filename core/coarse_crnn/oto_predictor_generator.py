@@ -4,6 +4,7 @@ import glob
 import os
 
 from core.coarse_crnn.boundary_generator import generate_oto_with_boundary_decoder
+from core.coarse_crnn.stage2_oto import list_available_stage2_models, resolve_stage2_model_path
 
 DEFAULT_OTO_CRNN_MODEL_NAME = "deprecated_direct_param_oto_crnn.pt"
 DEFAULT_BOUNDARY_SCORER_MODEL_NAME = "oto_boundary_scorer_v3_slotfix.pt"
@@ -24,6 +25,9 @@ def generate_oto_with_crnn_predictor(
     language: str,
     format_type: str = "",
     model_path: str = "",
+    stage2_model_path: str = "",
+    stage2_enable: bool | None = None,
+    phoneme_boundary_model_path: str = "",
     device: str = "auto",
     alias_suffix: str = "",
     callback=None,
@@ -46,6 +50,9 @@ def generate_oto_with_crnn_predictor(
             language=language,
             format_type=format_type,
             model_path=resolved_model,
+            stage2_model_path=stage2_model_path,
+            stage2_enable=stage2_enable,
+            phoneme_boundary_model_path=phoneme_boundary_model_path,
             device=device,
             alias_suffix=alias_suffix,
             callback=callback,
@@ -130,6 +137,14 @@ def list_available_boundary_scorer_models() -> list[dict[str, object]]:
             )
     items.sort(key=lambda item: float(item.get("mtime") or 0.0), reverse=True)
     return items
+
+
+def list_available_stage2_oto_models() -> list[dict[str, object]]:
+    return list_available_stage2_models()
+
+
+def resolve_stage2_oto_model_path(path_hint: str = "") -> str:
+    return resolve_stage2_model_path(path_hint)
 
 
 def _friendly_boundary_model_label(name: str) -> str:

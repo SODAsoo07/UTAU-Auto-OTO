@@ -632,6 +632,20 @@ class OtoActionsMixin:
                                 else "auto"
                             )
                             _crnn_model_path = "" if (not _crnn_model_choice or _crnn_model_choice == "auto") else _crnn_model_choice
+                            _stage2_enabled = (
+                                bool(self.oto_stage2_enable_var.get())
+                                if hasattr(self, "oto_stage2_enable_var")
+                                else False
+                            )
+                            _stage2_choice = (
+                                self._get_oto_stage2_model_choice_code()
+                                if hasattr(self, "_get_oto_stage2_model_choice_code")
+                                else "auto"
+                            )
+                            _stage2_model_path = "" if (not _stage2_choice or _stage2_choice == "auto") else _stage2_choice
+                            _pb_model_path = self._get_selected_phoneme_boundary_model_path() if (
+                                _stage2_enabled and hasattr(self, "_get_selected_phoneme_boundary_model_path")
+                            ) else ""
                             processed, total, errors = generate_oto_with_crnn_predictor(
                                 wav_dir=target_wav_dir,
                                 out_path=target_out_path,
@@ -640,6 +654,9 @@ class OtoActionsMixin:
                                 language=lang,
                                 format_type=selected_format,
                                 model_path=_crnn_model_path,
+                                stage2_model_path=_stage2_model_path,
+                                stage2_enable=_stage2_enabled,
+                                phoneme_boundary_model_path=_pb_model_path,
                                 device=(
                                     self.oto_crnn_device_var.get().strip()
                                     if hasattr(self, "oto_crnn_device_var")
