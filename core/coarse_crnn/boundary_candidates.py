@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from collections import defaultdict
 from statistics import mean
 
@@ -89,6 +90,7 @@ def merge_candidates(
     audio_weight: float = 0.55,
     model_quality: float | None = None,
     audio_reliability: float | None = None,
+    source_weight_overrides: Mapping[str, float] | None = None,
 ) -> list[BoundaryCandidate]:
     resolved_model_quality = _clamp01(
         float(model_quality) if model_quality is not None else _estimate_model_quality(model_candidates)
@@ -127,6 +129,7 @@ def merge_candidates(
                     bucket=bucket,
                     model_weight=model_weight_eff,
                     audio_weight=audio_weight_eff,
+                    source_weight_overrides=source_weight_overrides,
                 )
             )
             bucket = [row]
@@ -137,19 +140,32 @@ def merge_candidates(
                     bucket=bucket,
                     model_weight=model_weight_eff,
                     audio_weight=audio_weight_eff,
+                    source_weight_overrides=source_weight_overrides,
                 )
             )
     merged.sort(key=lambda item: item.time_ms)
     return merged
 
 
-def _collapse_bucket(*, kind: str, bucket: list[BoundaryCandidate], model_weight: float, audio_weight: float) -> BoundaryCandidate:
+def _collapse_bucket(
+    *,
+    kind: str,
+    bucket: list[BoundaryCandidate],
+    model_weight: float,
+    audio_weight: float,
+    source_weight_overrides: Mapping[str, float] | None = None,
+) -> BoundaryCandidate:
     total_w = 0.0
     total_t = 0.0
     total_s = 0.0
     sources: list[str] = []
     for item in bucket:
-        w = float(model_weight) if item.source.startswith("model") else float(audio_weight)
+        w = _source_weight(
+            item.source,
+            model_weight=float(model_weight),
+            audio_weight=float(audio_weight),
+            source_weight_overrides=source_weight_overrides,
+        )
         s = max(0.0, min(1.0, float(item.score)))
         total_w += w
         total_t += float(item.time_ms) * w
@@ -164,6 +180,26 @@ def _collapse_bucket(*, kind: str, bucket: list[BoundaryCandidate], model_weight
         score=max(0.0, min(1.0, float(total_s / total_w))),
         source=merged_source,
     )
+
+
+def _source_weight(
+    source: str,
+    *,
+    model_weight: float,
+    audio_weight: float,
+    source_weight_overrides: Mapping[str, float] | None,
+) -> float:
+    text = str(source or "")
+    if source_weight_overrides:
+        ordered = sorted(
+            source_weight_overrides.items(),
+            key=lambda item: len(str(item[0])),
+            reverse=True,
+        )
+        for prefix, weight in ordered:
+            if text.startswith(str(prefix)):
+                return _clamp(float(weight), 0.0, 5.0)
+    return float(model_weight) if text.startswith("model") else float(audio_weight)
 
 
 def _label_min_score(label: str, *, base_min_score: float, global_quality: float) -> float:

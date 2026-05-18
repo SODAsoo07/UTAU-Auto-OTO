@@ -19,6 +19,7 @@ from core.coarse_crnn.boundary_candidates import (
     merge_candidates,
     peak_candidates_from_scores,
 )
+from core.coarse_crnn.boundary_types import BoundaryCandidate
 from core.coarse_crnn.bpm_prior import (
     bpm_min_confidence,
     bpm_prior_enabled,
@@ -45,6 +46,12 @@ from core.coarse_crnn.oto_param_builder import build_absolute_anchors_for_role
 from core.coarse_crnn.boundary_scorer_inference import infer_boundary_scores_with_model
 from core.coarse_crnn.boundary_scorer_model import load_boundary_checkpoint
 from core.coarse_crnn.boundary_targets import absolute_anchors_to_oto_params, load_row_specs_from_source_oto
+from core.coarse_crnn.stage2_oto import (
+    apply_stage2_to_decode,
+    load_stage2_bundle,
+    resolve_stage2_model_path,
+    stage2_enabled_from_env,
+)
 from core.coarse_crnn.training import resolve_torch_device
 from core.coarse_crnn.wav_decoder import decode_wav_rows
 from core.no_mfa_oto_builder import resolve_no_mfa_source_oto
@@ -60,6 +67,9 @@ def generate_oto_with_boundary_decoder(
     language: str,
     format_type: str = "",
     model_path: str = "",
+    stage2_model_path: str = "",
+    stage2_enable: bool | None = None,
+    phoneme_boundary_model_path: str = "",
     device: str = "auto",
     alias_suffix: str = "",
     callback: Callable[[str], None] | None = None,
@@ -123,9 +133,60 @@ def generate_oto_with_boundary_decoder(
     torch_device = resolve_torch_device(torch, device)
     model, config, _meta = load_boundary_checkpoint(model_file, map_location=str(torch_device))
     model = model.to(torch_device).eval()
+    stage2_bundle = None
+    stage2_requested = bool(stage2_enable) if stage2_enable is not None else stage2_enabled_from_env(default=False)
+    stage2_model_file = ""
+    stage2_load_error = ""
+    if stage2_requested or str(stage2_model_path or "").strip():
+        stage2_model_file = resolve_stage2_model_path(stage2_model_path)
+        if stage2_model_file:
+            try:
+                stage2_bundle = load_stage2_bundle(
+                    stage2_model_file,
+                    map_location=str(torch_device),
+                    device=str(torch_device),
+                )
+            except Exception as exc:
+                stage2_load_error = str(exc)
+        elif stage2_requested or str(stage2_model_path or "").strip():
+            stage2_load_error = "Stage2 OTO 모델을 찾지 못했습니다."
+    pb_model = None
+    pb_config = None
+    pb_model_file = ""
+    pb_load_error = ""
+    pb_requested = _env_bool("UTOA_STAGE2_OTO_USE_PHONEME_BOUNDARY", False) or bool(
+        str(phoneme_boundary_model_path or "").strip()
+    )
+    if pb_requested and (stage2_requested or stage2_bundle is not None):
+        pb_model_file = _resolve_phoneme_boundary_model_path(phoneme_boundary_model_path)
+        if pb_model_file:
+            try:
+                from core.phoneme_boundary.model import load_phoneme_boundary_checkpoint
+
+                pb_model, pb_config, _pb_meta = load_phoneme_boundary_checkpoint(
+                    pb_model_file,
+                    map_location=str(torch_device),
+                )
+                pb_model = pb_model.to(torch_device).eval()
+            except Exception as exc:
+                pb_model = None
+                pb_config = None
+                pb_load_error = str(exc)
+        else:
+            pb_load_error = "PhonemeBoundary 모델을 찾지 못했습니다."
     _log(callback, f"[OTO-Boundary] source={source}")
     _log(callback, f"[OTO-Boundary] model={model_file}")
     _log(callback, f"[OTO-Boundary] device={torch_device} wavs={len(rows_by_wav)} rows={total}")
+    if stage2_bundle is not None:
+        _log(callback, f"[OTO-Stage2] enabled=1 model={stage2_model_file}")
+        if pb_model is not None:
+            _log(callback, f"[OTO-Stage2] phoneme_boundary=1 model={pb_model_file}")
+        elif pb_requested:
+            _log(callback, f"[OTO-Stage2] phoneme_boundary=0 load_error={pb_load_error or 'unknown'}")
+    elif stage2_requested or str(stage2_model_path or "").strip():
+        _log(callback, f"[OTO-Stage2] enabled=0 load_error={stage2_load_error or 'unknown'}")
+    else:
+        _log(callback, "[OTO-Stage2] enabled=0")
     _log(
         callback,
         f"[OTO-Boundary] slot_summary single_slot_wavs={single_slot_wavs}/{len(rows_by_wav)} "
@@ -200,6 +261,19 @@ def generate_oto_with_boundary_decoder(
             audio_reliability = _estimate_audio_reliability(audio)
             model_cands = peak_candidates_from_scores(score_map)
             audio_cands = audio_candidates_to_boundary_candidates(audio)
+            pb_cand_count = 0
+            if stage2_bundle is not None and pb_model is not None and pb_config is not None:
+                try:
+                    pb_cands = _phoneme_boundary_candidates_for_wav(
+                        model=pb_model,
+                        config=pb_config,
+                        wav_path=wav_path,
+                        device=str(torch_device),
+                    )
+                    pb_cand_count = len(pb_cands)
+                    model_cands = model_cands + pb_cands
+                except Exception as exc:
+                    errors.append(f"{os.path.basename(wav_path)} phoneme_boundary_failed: {exc}")
             lwc_cand_count = 0
             if lwc_enabled_by_env(default=True):
                 try:
@@ -228,6 +302,10 @@ def generate_oto_with_boundary_decoder(
                 audio_candidates=audio_cands,
                 model_quality=model_quality,
                 audio_reliability=audio_reliability,
+                source_weight_overrides=_stage2_source_weight_overrides(
+                    pb_candidate_count=pb_cand_count,
+                    boundary_scorer_quality=model_quality,
+                ),
             )
             decoded = decode_wav_rows(
                 wav_path=wav_path,
@@ -247,13 +325,35 @@ def generate_oto_with_boundary_decoder(
                 vowel_nucleus_scores=score_map.vowel_nucleus_scores,
                 vowel_glide_scores=score_map.vowel_glide_scores,
             )
+            if stage2_bundle is not None:
+                try:
+                    stage2_result = apply_stage2_to_decode(
+                        decoded=decoded,
+                        candidates=merged,
+                        bundle=stage2_bundle,
+                        active_start_ms=float(audio.active_start_ms),
+                        active_end_ms=float(audio.active_end_ms),
+                        model_quality=model_quality,
+                        audio_reliability=audio_reliability,
+                    )
+                    decoded = stage2_result.decoded
+                    if stage2_result.errors:
+                        errors.extend(f"{os.path.basename(wav_path)} stage2_failed: {msg}" for msg in stage2_result.errors)
+                    _log(
+                        callback,
+                        f"[OTO-Stage2] wav={wav_idx}/{len(rows_by_wav)} "
+                        f"accepted={stage2_result.accepted_rows}/{len(decoded.rows)} "
+                        f"fallback={stage2_result.fallback_rows}",
+                    )
+                except Exception as exc:
+                    errors.append(f"{os.path.basename(wav_path)} stage2_failed: {exc}")
             selected_times = [round(float(item.selected_time_ms), 1) for item in decoded.rows]
             unique_selected = len(set(selected_times))
             reused_selected = max(0, len(selected_times) - unique_selected)
             _log(
                 callback,
                 f"[OTO-Boundary] wav={wav_idx}/{len(rows_by_wav)} peaks={len(model_cands)} "
-                f"lwc={lwc_cand_count} merged={len(merged)} "
+                f"pb={pb_cand_count} lwc={lwc_cand_count} merged={len(merged)} "
                 f"fallback={decoded.fallback_count}/{len(decoded.rows)} "
                 f"selected_unique={unique_selected}/{len(selected_times)} reused={reused_selected} "
                 f"quality={model_quality:.3f} audio_rel={audio_reliability:.3f}",
@@ -439,6 +539,113 @@ def _normalize_output_oto_path(out_path: str) -> str:
     if raw.lower().endswith(".ini"):
         return os.path.abspath(raw)
     return os.path.join(os.path.abspath(raw), "oto.ini")
+
+
+_PB_TO_BOUNDARY_KIND = {
+    "phone_start": "syllable_onset",
+    "phone_end": "vowel_end",
+    "consonant_onset": "consonant_onset",
+    "vowel_onset": "vowel_start",
+    "vowel_nucleus": "vowel_stable",
+    "vowel_end": "vowel_end",
+    "silence_boundary": "silence_boundary",
+}
+
+_PB_LABEL_SCORE_WEIGHTS = {
+    "phone_start": 0.84,
+    "phone_end": 0.78,
+    "consonant_onset": 0.92,
+    "vowel_onset": 1.00,
+    "vowel_nucleus": 0.96,
+    "vowel_end": 0.90,
+    "silence_boundary": 0.58,
+}
+
+
+def _stage2_source_weight_overrides(
+    *,
+    pb_candidate_count: int,
+    boundary_scorer_quality: float,
+) -> dict[str, float] | None:
+    if int(pb_candidate_count or 0) <= 0:
+        return None
+    pb_weight = _clamp(_env_float("UTOA_STAGE2_OTO_PB_MERGE_WEIGHT", 1.10), 0.0, 5.0)
+    bs_weight = _clamp(_env_float("UTOA_STAGE2_OTO_BS_MERGE_WEIGHT", 0.56), 0.0, 5.0)
+    low_quality_threshold = _env_float("UTOA_STAGE2_OTO_BS_LOW_QUALITY_THRESHOLD", 0.45)
+    if float(boundary_scorer_quality or 0.0) < float(low_quality_threshold):
+        scale = _clamp(_env_float("UTOA_STAGE2_OTO_BS_LOW_QUALITY_SCALE", 0.72), 0.0, 1.0)
+        bs_weight *= scale
+    return {
+        "model:phoneme_boundary": pb_weight,
+        "model": bs_weight,
+    }
+
+
+def _phoneme_boundary_candidates_for_wav(*, model, config, wav_path: str, device: str) -> list[BoundaryCandidate]:
+    from core.phoneme_boundary.inference import infer_boundary_scores_with_model, peak_events_from_scores
+
+    score_map = infer_boundary_scores_with_model(
+        model=model,
+        config=config,
+        wav_path=wav_path,
+        device=device,
+        use_acoustic_heuristics=_env_bool("UTOA_STAGE2_OTO_PB_HEURISTICS_ENABLE", True),
+        heuristic_weight=_env_float("UTOA_STAGE2_OTO_PB_HEURISTIC_WEIGHT", 0.22),
+    )
+    min_score = _env_float("UTOA_STAGE2_OTO_PB_MIN_SCORE", 0.38)
+    min_gap = _env_float("UTOA_STAGE2_OTO_PB_MIN_GAP_MS", 28.0)
+    weight = _clamp(_env_float("UTOA_STAGE2_OTO_PB_SCORE_WEIGHT", 0.92), 0.0, 1.0)
+    out: list[BoundaryCandidate] = []
+    for event in peak_events_from_scores(score_map, min_score=min_score, min_gap_ms=min_gap):
+        label = str(event.label)
+        kind = _PB_TO_BOUNDARY_KIND.get(label, "")
+        if not kind:
+            continue
+        label_weight = _phoneme_boundary_label_score_weight(label)
+        out.append(
+            BoundaryCandidate(
+                time_ms=float(event.time_ms),
+                kind=kind,
+                score=_clamp(float(event.confidence) * weight * label_weight, 0.0, 1.0),
+                source=f"model:phoneme_boundary:{label}",
+            )
+        )
+    return out
+
+
+def _phoneme_boundary_label_score_weight(label: str) -> float:
+    key = str(label or "").strip()
+    default = float(_PB_LABEL_SCORE_WEIGHTS.get(key, 0.84))
+    if key == "silence_boundary":
+        default = _env_float("UTOA_STAGE2_OTO_PB_SILENCE_SCORE_WEIGHT", default)
+    return _clamp(default, 0.0, 1.0)
+
+
+def _resolve_phoneme_boundary_model_path(path_hint: str = "") -> str:
+    candidates: list[str] = []
+    for raw in (
+        path_hint,
+        os.environ.get("UTOA_STAGE2_OTO_PHONEME_BOUNDARY_MODEL_PATH", ""),
+        os.environ.get("UTOA_PHONEME_BOUNDARY_MODEL_PATH", ""),
+    ):
+        text = str(raw or "").strip()
+        if text:
+            candidates.append(text)
+    for candidate in candidates:
+        expanded = os.path.abspath(os.path.expandvars(os.path.expanduser(candidate)))
+        if os.path.isfile(expanded):
+            return expanded
+    try:
+        from core.phoneme_boundary.discovery import list_available_phoneme_boundary_models
+
+        models = list_available_phoneme_boundary_models()
+    except Exception:
+        models = []
+    for item in models:
+        path = str(item.get("path", "") or "").strip() if isinstance(item, dict) else ""
+        if path and os.path.isfile(path):
+            return os.path.abspath(path)
+    return ""
 
 
 def _read_source_rows_for_shift_guard(source_path: str) -> tuple[dict[tuple[str, str, int], dict[str, float]], dict[str, list[float]]]:

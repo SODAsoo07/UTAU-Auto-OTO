@@ -15,6 +15,9 @@ def main() -> int:
     ap.add_argument("--language", default="korean")
     ap.add_argument("--format-type", default="")
     ap.add_argument("--device", default="auto")
+    ap.add_argument("--stage2-model", default="", help="Optional Stage2 OTO assigner checkpoint")
+    ap.add_argument("--stage2-enable", action="store_true", help="Enable Stage2 OTO assigner when a model can be resolved")
+    ap.add_argument("--phoneme-boundary-model", default="", help="Optional PhonemeBoundary checkpoint used as Stage2 candidate input")
     ap.add_argument("--alias-suffix", default="")
     ap.add_argument("--special-aliases", default="", help="Comma-separated special alias list")
     args = ap.parse_args()
@@ -27,6 +30,9 @@ def main() -> int:
         language=args.language,
         format_type=args.format_type,
         model_path=args.model,
+        stage2_model_path=args.stage2_model,
+        stage2_enable=bool(args.stage2_enable or args.stage2_model),
+        phoneme_boundary_model_path=args.phoneme_boundary_model,
         device=args.device,
         alias_suffix=args.alias_suffix,
         special_aliases=special,
@@ -37,4 +43,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

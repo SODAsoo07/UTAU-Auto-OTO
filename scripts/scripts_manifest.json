@@ -261,6 +261,18 @@
       "note": "Evaluate phoneme-boundary detector timing error against explicit boundary events."
     },
     {
+      "path": "ml/scripts/coarse_crnn/train_stage2_oto.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Train the source-independent Stage2 OTO Assigner from gold oto.ini + wav pairs."
+    },
+    {
+      "path": "ml/scripts/coarse_crnn/evaluate_stage2_oto.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Evaluate Stage2 OTO Assigner against gold oto.ini with Boundary Decoder fallback metrics."
+    },
+    {
       "path": "scripts/build/build_installer.ps1",
       "status": "active",
       "owner": "release",

@@ -441,6 +441,37 @@ class LayoutMixin:
         )
         self.oto_crnn_scorer_model_hint.pack(side="left", fill="x", expand=True)
         self.row_oto_crnn_scorer_model.pack_forget()
+        self.row_oto_stage2_model = build_form_row(form_body)
+        self.oto_stage2_enable_checkbox = ctk.CTkCheckBox(
+            self.row_oto_stage2_model,
+            text=t("Stage2 OTO Assigner"),
+            variable=self.oto_stage2_enable_var,
+            command=lambda: self._on_oto_stage2_setting_change(),
+            checkbox_width=18,
+            checkbox_height=18,
+        )
+        self.oto_stage2_enable_checkbox.pack(side="left", padx=(0, 8))
+        stage2_choices = (
+            self._oto_stage2_model_choice_options()
+            if hasattr(self, "_oto_stage2_model_choice_options")
+            else ["자동 (auto)"]
+        )
+        self.oto_stage2_model_menu = ctk.CTkOptionMenu(
+            self.row_oto_stage2_model,
+            values=stage2_choices,
+            variable=self.oto_stage2_model_choice_var,
+            width=330,
+            command=lambda _v: self._on_oto_stage2_model_choice_change(_v),
+        )
+        _style_blue_menu(self.oto_stage2_model_menu)
+        self.oto_stage2_model_menu.pack(side="left", padx=(6, 8))
+        self.oto_stage2_model_hint = ctk.CTkLabel(
+            self.row_oto_stage2_model,
+            text=t("(선택 시 Boundary Decoder 뒤에서 2단계 OTO anchor를 재지정)"),
+            text_color=PALETTE.neutral_text,
+        )
+        self.oto_stage2_model_hint.pack(side="left", fill="x", expand=True)
+        self.row_oto_stage2_model.pack_forget()
         self.row_oto_crnn_model = build_form_row(form_body)
         build_left_label(self.row_oto_crnn_model, t("CRNN Device:")).pack(side="left")
         self.oto_crnn_device_menu = ctk.CTkOptionMenu(
@@ -1351,6 +1382,102 @@ class LayoutMixin:
         if hasattr(self, "_save_config"):
             self._save_config()
 
+    _OTO_STAGE2_MODEL_CHOICE_AUTO_LABEL = "자동 (auto)"
+
+    def _list_oto_stage2_model_choices(self) -> list[dict[str, object]]:
+        try:
+            from core.coarse_crnn.oto_predictor_generator import (
+                list_available_stage2_oto_models,
+            )
+        except Exception:
+            return []
+        try:
+            return list_available_stage2_oto_models()
+        except Exception:
+            return []
+
+    def _oto_stage2_model_choice_options(self) -> list[str]:
+        labels = [self._OTO_STAGE2_MODEL_CHOICE_AUTO_LABEL]
+        for item in self._list_oto_stage2_model_choices():
+            label = str(item.get("label") or item.get("name") or "").strip()
+            if label and label not in labels:
+                labels.append(label)
+        return labels
+
+    def _oto_stage2_label_to_code(self, label: object) -> str:
+        text = str(label or "").strip()
+        if not text or text == self._OTO_STAGE2_MODEL_CHOICE_AUTO_LABEL or text.lower() == "auto":
+            return "auto"
+        for item in self._list_oto_stage2_model_choices():
+            if str(item.get("label") or "") == text:
+                return str(item.get("name") or "auto")
+            if str(item.get("name") or "") == text:
+                return str(item.get("name") or "auto")
+        return "auto"
+
+    def _oto_stage2_code_to_label(self, code: object) -> str:
+        text = str(code or "").strip()
+        if not text or text.lower() == "auto":
+            return self._OTO_STAGE2_MODEL_CHOICE_AUTO_LABEL
+        for item in self._list_oto_stage2_model_choices():
+            if str(item.get("name") or "") == text:
+                return str(item.get("label") or item.get("name") or text)
+        return self._OTO_STAGE2_MODEL_CHOICE_AUTO_LABEL
+
+    def _set_oto_stage2_model_choice_from_code(self, code) -> str:
+        label = self._oto_stage2_code_to_label(code)
+        if hasattr(self, "oto_stage2_model_choice_var"):
+            try:
+                self.oto_stage2_model_choice_var.set(label)
+            except Exception:
+                pass
+        return self._oto_stage2_label_to_code(label)
+
+    def _get_oto_stage2_model_choice_code(self) -> str:
+        if not hasattr(self, "oto_stage2_model_choice_var"):
+            return "auto"
+        try:
+            current = self.oto_stage2_model_choice_var.get()
+        except Exception:
+            current = ""
+        return self._oto_stage2_label_to_code(current)
+
+    def _on_oto_stage2_model_choice_change(self, _value=None):
+        code = self._get_oto_stage2_model_choice_code()
+        if hasattr(self, "_append_log"):
+            try:
+                self._append_log(f"[CRNN-OTO] stage2 model = {code}")
+            except Exception:
+                pass
+        if hasattr(self, "_save_config"):
+            self._save_config()
+
+    def _on_oto_stage2_setting_change(self):
+        if hasattr(self, "_append_log"):
+            try:
+                enabled = bool(self.oto_stage2_enable_var.get()) if hasattr(self, "oto_stage2_enable_var") else False
+                self._append_log(f"[CRNN-OTO] Stage2 OTO Assigner {'ON' if enabled else 'OFF'}")
+            except Exception:
+                pass
+        if hasattr(self, "_save_config"):
+            self._save_config()
+
+    def _get_selected_phoneme_boundary_model_path(self) -> str:
+        models = getattr(self, "_phoneme_boundary_models", []) or []
+        try:
+            selected = str(self.phoneme_boundary_model_var.get() if hasattr(self, "phoneme_boundary_model_var") else "").strip()
+        except Exception:
+            selected = ""
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or item.get("name") or "").strip()
+            name = str(item.get("name") or "").strip()
+            if selected and selected in {label, name}:
+                path = str(item.get("path") or "").strip()
+                return path if os.path.isfile(path) else ""
+        return ""
+
     def _set_no_mfa_oto_mode_from_code(self, code):
         normalized = self._normalize_no_mfa_oto_mode_code(code)
         label = "CRNN OTO 예측기(실험)" if normalized == "crnn" else "베이스 OTO 재매핑 + 보정"
@@ -1568,6 +1695,32 @@ class LayoutMixin:
                         self.row_oto_crnn_model.pack(**pack_kwargs)
                 else:
                     self.row_oto_crnn_model.pack_forget()
+            except Exception:
+                pass
+        if hasattr(self, "row_oto_stage2_model") and self.row_oto_stage2_model is not None:
+            try:
+                if show_crnn_model_row:
+                    if hasattr(self, "oto_stage2_model_menu") and hasattr(self, "_oto_stage2_model_choice_options"):
+                        try:
+                            choices = self._oto_stage2_model_choice_options()
+                            self.oto_stage2_model_menu.configure(values=choices)
+                            if hasattr(self, "oto_stage2_model_choice_var"):
+                                current_label = ""
+                                try:
+                                    current_label = self.oto_stage2_model_choice_var.get()
+                                except Exception:
+                                    current_label = ""
+                                if current_label not in choices:
+                                    self._set_oto_stage2_model_choice_from_code("auto")
+                        except Exception:
+                            pass
+                    if not self.row_oto_stage2_model.winfo_ismapped():
+                        pack_kwargs = {"fill": "x", "pady": 4}
+                        if hasattr(self, "row_align_extra") and self.row_align_extra is not None:
+                            pack_kwargs["before"] = self.row_align_extra
+                        self.row_oto_stage2_model.pack(**pack_kwargs)
+                else:
+                    self.row_oto_stage2_model.pack_forget()
             except Exception:
                 pass
         if hasattr(self, "row_oto_crnn_special_aliases") and self.row_oto_crnn_special_aliases is not None:
