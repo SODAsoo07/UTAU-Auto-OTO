@@ -242,6 +242,46 @@ class TabBuildersMixin:
         self.boundary_smoke_hint_label.pack(anchor="w", pady=(0, 2))
 
         ctk.CTkLabel(
+            left_actions,
+            text=t("PhonemeBoundary 시각화"),
+            font=("", 12, "bold"),
+            text_color=PALETTE.neutral_text,
+        ).pack(anchor="w", pady=(10, 4))
+
+        try:
+            from core.phoneme_boundary.discovery import list_available_phoneme_boundary_models
+            _pb_models = list_available_phoneme_boundary_models()
+        except Exception:
+            _pb_models = []
+        _pb_choices = [m["label"] for m in _pb_models] or [t("(모델 없음)")]
+        self._phoneme_boundary_models = _pb_models
+        self.phoneme_boundary_model_var = ctk.StringVar(value=_pb_choices[0])
+        self.phoneme_boundary_model_menu = ctk.CTkOptionMenu(
+            left_actions,
+            values=_pb_choices,
+            variable=self.phoneme_boundary_model_var,
+            width=240,
+        )
+        self.phoneme_boundary_model_menu.pack(anchor="w", pady=(0, 2))
+
+        self.phoneme_boundary_visualize_btn = ctk.CTkButton(
+            left_actions,
+            text=t("경계 예측 시각화 (PNG)"),
+            width=222,
+            command=self._run_phoneme_boundary_visualize,
+        )
+        self._style_primary_button(self.phoneme_boundary_visualize_btn)
+        self.phoneme_boundary_visualize_btn.pack(anchor="w", pady=(0, 2))
+
+        self.phoneme_boundary_visualize_hint = ctk.CTkLabel(
+            left_actions,
+            text=t("현재 WAV 폴더의 wav마다 boundary 예측 JSON + PNG 생성"),
+            text_color=PALETTE.hint_text,
+            justify="left",
+        )
+        self.phoneme_boundary_visualize_hint.pack(anchor="w", pady=(0, 2))
+
+        ctk.CTkLabel(
             right_actions,
             text=t("순서대로 실행"),
             font=("", 13, "bold"),

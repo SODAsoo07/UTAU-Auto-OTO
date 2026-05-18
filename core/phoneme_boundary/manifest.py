@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from core.coarse_crnn.audio import load_wav_mono
-from core.generation.common.oto_file_utils import read_text_with_fallback
+from core.generation.common.oto_file_utils import parse_oto_line, read_text_with_fallback
 from core.phoneme_boundary.plan import build_phoneme_plan
 
 
@@ -18,8 +18,6 @@ class BoundaryManifestBuildConfig:
     language: str = ""
     source_oto_path: str = ""
     sidecar_path: str = ""
-    textgrid_dir: str = ""
-    use_textgrids: bool = False
     recursive: bool = False
     alias_separator: str = "|"
     split_whitespace: bool = False
@@ -54,11 +52,12 @@ def build_boundary_manifest(config: BoundaryManifestBuildConfig) -> BoundaryMani
         alias_rows = []
         alias_source = ""
     sidecar = load_sidecar_rows(config.sidecar_path) if str(config.sidecar_path or "").strip() else {}
-    textgrid_dir = str(config.textgrid_dir or "").strip() or str(config.wav_dir or "")
+    source_oto_timing = load_source_oto_rows(config.source_oto_path) if str(config.source_oto_path or "").strip() else {}
     manifest_dir = os.path.dirname(os.path.abspath(config.out_path)) if config.out_path else os.getcwd()
     rows: list[dict[str, Any]] = []
     missing_alias = 0
     missing_targets = 0
+    source_oto_event_rows = 0
     sidecar_row_ids = {id(row) for row in sidecar.values()}
     used_sidecar: set[int] = set()
 
@@ -83,10 +82,17 @@ def build_boundary_manifest(config: BoundaryManifestBuildConfig) -> BoundaryMani
             sidecar_row = dict(matches[0])
             used_sidecar.add(id(matches[0]))
             _merge_sidecar_targets(row, sidecar_row)
-        elif bool(config.use_textgrids):
-            intervals = load_matching_textgrid_phone_intervals(wav_path, textgrid_dir=textgrid_dir)
-            if intervals:
-                row["phones"] = intervals
+        elif source_oto_timing:
+            oto_rows = _source_oto_matches(source_oto_timing, wav_path=wav_path, index=idx)
+            if oto_rows:
+                events = _events_from_source_oto_rows(
+                    row,
+                    oto_rows,
+                    duration_ms=float(duration_ms),
+                )
+                if events:
+                    row["events"] = events
+                    source_oto_event_rows += 1
         trainable = _row_has_training_targets(row)
         row["trainable"] = bool(trainable)
         if not trainable:
@@ -107,8 +113,7 @@ def build_boundary_manifest(config: BoundaryManifestBuildConfig) -> BoundaryMani
         "source_oto_path": os.path.abspath(config.source_oto_path) if str(config.source_oto_path or "").strip() else "",
         "alias_source": alias_source,
         "sidecar_path": os.path.abspath(config.sidecar_path) if str(config.sidecar_path or "").strip() else "",
-        "textgrid_dir": os.path.abspath(textgrid_dir) if bool(config.use_textgrids) else "",
-        "use_textgrids": bool(config.use_textgrids),
+        "source_oto_timing_rows": int(source_oto_event_rows),
         "rows": int(len(rows)),
         "wav_count": int(len(wav_paths)),
         "alias_rows": int(len(alias_rows)),
@@ -231,6 +236,256 @@ def load_sidecar_rows(path: str) -> dict[str, dict[str, Any]]:
         for key in _sidecar_keys(row, index=idx):
             out.setdefault(key, row)
     return out
+
+
+def load_source_oto_rows(path: str) -> dict[str, list[dict[str, Any]]]:
+    if not path or not os.path.isfile(path):
+        return {}
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    text = read_text_with_fallback(path)
+    for raw in text.splitlines():
+        parsed = parse_oto_line(raw)
+        if not parsed:
+            continue
+        wav_name = str(parsed.get("wav", "") or "").strip()
+        alias = str(parsed.get("alias", "") or "").strip()
+        if not wav_name or not alias:
+            continue
+        item = {
+            "wav": wav_name,
+            "alias": alias,
+            "offset": _safe_float(parsed.get("offset", 0.0), 0.0),
+            "cons": _safe_float(parsed.get("cons", 0.0), 0.0),
+            "cutoff": _safe_float(parsed.get("cutoff", 0.0), 0.0),
+            "pre": _safe_float(parsed.get("pre", 0.0), 0.0),
+            "ovl": _safe_float(parsed.get("ovl", 0.0), 0.0),
+        }
+        for key in _path_lookup_keys(wav_name, index=-1):
+            if key.startswith("index:") or key == "-1":
+                continue
+            grouped.setdefault(key, []).append(item)
+    return grouped
+
+
+def _source_oto_matches(source_oto_rows: dict[str, list[dict[str, Any]]], *, wav_path: str, index: int) -> list[dict[str, Any]]:
+    keys = _path_lookup_keys(wav_path, index=index)
+    for key in keys:
+        if key.startswith("index:") or key == str(index):
+            continue
+        rows = source_oto_rows.get(key)
+        if rows:
+            return [dict(item) for item in rows]
+    return []
+
+
+def _events_from_source_oto_rows(row: dict[str, Any], source_rows: list[dict[str, Any]], *, duration_ms: float) -> list[dict[str, Any]]:
+    aliases = [str(item or "").strip() for item in list(row.get("aliases", []) or [])]
+    expected = _expected_phones_by_alias(list(row.get("expected_phones", []) or []))
+    events: list[dict[str, Any]] = []
+    for alias_index, source_row in enumerate(source_rows):
+        if aliases and alias_index >= len(aliases):
+            break
+        alias = aliases[alias_index] if alias_index < len(aliases) else str(source_row.get("alias", "") or "")
+        alias_phones = expected.get(alias_index, [])
+        events.extend(
+            _events_from_source_oto_rule_row(
+                source_row=source_row,
+                alias=alias,
+                alias_index=alias_index,
+                alias_phones=alias_phones,
+                duration_ms=float(duration_ms),
+            )
+        )
+    return events
+
+
+def _events_from_source_oto_rule_row(
+    *,
+    source_row: dict[str, Any],
+    alias: str,
+    alias_index: int,
+    alias_phones: list[dict[str, Any]],
+    duration_ms: float,
+) -> list[dict[str, Any]]:
+    offset_ms = max(0.0, _safe_float(source_row.get("offset", 0.0), 0.0))
+    cutoff_abs_ms = _safe_cutoff_abs_ms(
+        offset_ms,
+        _safe_float(source_row.get("cutoff", 0.0), 0.0),
+        float(duration_ms),
+    )
+    if cutoff_abs_ms <= (offset_ms + 2.0):
+        return []
+
+    pre_abs_ms = _clamp(
+        offset_ms + max(0.0, _safe_float(source_row.get("pre", 0.0), 0.0)),
+        offset_ms + 1.0,
+        cutoff_abs_ms - 1.0,
+    )
+    cons_abs_ms = _clamp(
+        offset_ms + max(0.0, _safe_float(source_row.get("cons", 0.0), 0.0)),
+        offset_ms + 1.0,
+        cutoff_abs_ms - 1.0,
+    )
+    if pre_abs_ms <= (offset_ms + 1.5):
+        pre_abs_ms = _clamp(cons_abs_ms, offset_ms + 1.0, cutoff_abs_ms - 1.0)
+
+    role = _infer_alias_role(alias, alias_phones)
+    vowel_phone = _select_vowel_phone(alias_phones, role=role)
+    consonant_phone = _select_consonant_phone(alias_phones)
+    cons_span_ms = pre_abs_ms - offset_ms
+    vowel_span_ms = cutoff_abs_ms - pre_abs_ms
+    cv_boundary_reliable = cons_span_ms >= 8.0 and vowel_span_ms >= 18.0
+    can_split_c_v = cv_boundary_reliable and abs(cons_abs_ms - pre_abs_ms) <= 26.0
+    events: list[dict[str, Any]] = []
+
+    events.append(_make_event("phone_start", offset_ms, alias_index, "", 0.70, rule=0))
+    events.append(_make_event("phone_end", cutoff_abs_ms, alias_index, "", 0.70, rule=0))
+
+    if role in {"cv", "cv_head", "vcv"}:
+        # Rule 1: prioritize CV boundary (vowel onset) reliability first.
+        events.append(_make_event("vowel_onset", pre_abs_ms, alias_index, vowel_phone, 1.00, rule=1))
+        events.append(_make_event("vowel_end", cutoff_abs_ms, alias_index, vowel_phone, 0.80, rule=1))
+        nucleus_ms = _estimate_vowel_nucleus_ms(pre_abs_ms, cutoff_abs_ms, role=role)
+        events.append(_make_event("vowel_nucleus", nucleus_ms, alias_index, vowel_phone, 0.84, rule=1))
+        # Rule 3: split C/V only when CV boundary reliability is sufficient.
+        if can_split_c_v:
+            events.append(_make_event("consonant_onset", offset_ms, alias_index, consonant_phone, 0.92, rule=3))
+    elif role == "vv":
+        # Rule 2: for VV, prioritize vowel nucleus localization.
+        onset = _clamp(pre_abs_ms, offset_ms + 1.0, cutoff_abs_ms - 1.0)
+        nucleus_ms = _estimate_vowel_nucleus_ms(onset, cutoff_abs_ms, role=role)
+        events.append(_make_event("vowel_onset", onset, alias_index, vowel_phone, 0.78, rule=2))
+        events.append(_make_event("vowel_nucleus", nucleus_ms, alias_index, vowel_phone, 1.00, rule=2))
+        events.append(_make_event("vowel_end", cutoff_abs_ms, alias_index, vowel_phone, 0.84, rule=2))
+    elif role in {"mono", "v"}:
+        onset = _clamp(pre_abs_ms, offset_ms + 1.0, cutoff_abs_ms - 1.0)
+        nucleus_ms = _estimate_vowel_nucleus_ms(onset, cutoff_abs_ms, role=role)
+        events.append(_make_event("vowel_onset", onset, alias_index, vowel_phone, 0.86, rule=1))
+        events.append(_make_event("vowel_nucleus", nucleus_ms, alias_index, vowel_phone, 0.88, rule=1))
+        events.append(_make_event("vowel_end", cutoff_abs_ms, alias_index, vowel_phone, 0.80, rule=1))
+    elif role == "vc":
+        events.append(_make_event("vowel_end", pre_abs_ms, alias_index, vowel_phone, 0.74, rule=1))
+    return events
+
+
+def _expected_phones_by_alias(expected_phones: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
+    out: dict[int, list[dict[str, Any]]] = {}
+    for item in expected_phones:
+        if not isinstance(item, dict):
+            continue
+        idx = _safe_int(item.get("alias_index", -1), -1)
+        if idx < 0:
+            continue
+        out.setdefault(idx, []).append(item)
+    for idx, items in out.items():
+        items.sort(key=lambda row: _safe_int(row.get("phone_index", 0), 0))
+        out[idx] = items
+    return out
+
+
+def _infer_alias_role(alias: str, alias_phones: list[dict[str, Any]]) -> str:
+    states: list[str] = []
+    for item in alias_phones:
+        state = _coarse_state(item.get("coarse", ""))
+        if state != "silence":
+            states.append(state)
+    if not states:
+        text = str(alias or "").strip().lower()
+        if not text:
+            return "unknown"
+        if text.startswith("- "):
+            return "cv_head"
+        return "unknown"
+    if len(states) >= 2:
+        if states[0] == "consonant" and "vowel" in states[1:]:
+            text = str(alias or "").strip()
+            return "cv_head" if text.startswith("-") else "cv"
+        if states[0] == "vowel":
+            if "vowel" in states[1:]:
+                return "vv"
+            if "consonant" in states[1:]:
+                return "vc"
+    if states[0] == "vowel":
+        return "mono"
+    if states[0] == "consonant":
+        return "cons"
+    return "unknown"
+
+
+def _coarse_state(coarse: object) -> str:
+    text = str(coarse or "").strip().upper()
+    if text.startswith("C_"):
+        return "consonant"
+    if text == "V":
+        return "vowel"
+    return "silence"
+
+
+def _select_vowel_phone(alias_phones: list[dict[str, Any]], *, role: str) -> str:
+    vowels = [str(item.get("phone", "") or "") for item in alias_phones if _coarse_state(item.get("coarse", "")) == "vowel"]
+    if not vowels:
+        return ""
+    if role == "vv":
+        return vowels[-1]
+    return vowels[0]
+
+
+def _select_consonant_phone(alias_phones: list[dict[str, Any]]) -> str:
+    for item in alias_phones:
+        if _coarse_state(item.get("coarse", "")) == "consonant":
+            return str(item.get("phone", "") or "")
+    return ""
+
+
+def _estimate_vowel_nucleus_ms(vowel_onset_ms: float, vowel_end_ms: float, *, role: str) -> float:
+    start = float(vowel_onset_ms)
+    end = float(vowel_end_ms)
+    span = max(1.0, end - start)
+    if role == "vv":
+        ratio = 0.58
+    elif role in {"cv", "cv_head", "vcv"}:
+        ratio = 0.54
+    else:
+        ratio = 0.50
+    return _clamp(start + (span * ratio), start + 4.0, end - 4.0)
+
+
+def _make_event(label: str, time_ms: float, alias_index: int, phone: str, confidence: float, *, rule: int) -> dict[str, Any]:
+    return {
+        "label": str(label),
+        "time_ms": max(0.0, float(time_ms)),
+        "alias_index": int(alias_index),
+        "phone": str(phone or ""),
+        "confidence": _clamp(float(confidence), 0.0, 1.0),
+        "source": "source_oto_timing_rules",
+        "rule": int(rule),
+    }
+
+
+def _safe_cutoff_abs_ms(offset_ms: float, cutoff: float, wav_duration_ms: float) -> float:
+    off = max(0.0, float(offset_ms))
+    cut = float(cutoff)
+    wav_dur = max(0.0, float(wav_duration_ms))
+    if cut < 0.0:
+        resolved = off + abs(cut)
+    else:
+        rel = off + cut
+        abs_candidate = cut
+        candidates = [rel]
+        if abs_candidate > off:
+            candidates.append(abs_candidate)
+        if wav_dur > 1.0:
+            candidates = [cand for cand in candidates if cand <= (wav_dur + 2.0)] or candidates
+        resolved = min(candidates, key=lambda cand: abs(float(cand) - rel))
+    if wav_dur > 1.0:
+        resolved = min(resolved, wav_dur - 1.0)
+    return max(off + 1.0, float(resolved))
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    lower = min(float(lo), float(hi))
+    upper = max(float(lo), float(hi))
+    return max(lower, min(upper, float(value)))
 
 
 def load_matching_textgrid_phone_intervals(wav_path: str, *, textgrid_dir: str = "") -> list[dict[str, Any]]:
@@ -551,6 +806,20 @@ def _duration_ms(path: str, *, sample_rate: int) -> float:
         return 0.0
 
 
+def _safe_float(value: object, default: float) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _safe_int(value: object, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
 def _natural_key(text: str) -> list[object]:
     parts: list[object] = []
     buf = ""
@@ -573,6 +842,7 @@ __all__ = [
     "discover_wavs",
     "load_alias_rows",
     "load_alias_rows_from_oto",
+    "load_source_oto_rows",
     "load_matching_textgrid_phone_intervals",
     "load_sidecar_rows",
     "load_textgrid_phone_intervals",

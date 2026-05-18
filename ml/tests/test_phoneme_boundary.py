@@ -200,13 +200,13 @@ def test_manifest_builder_accepts_frame_phone_sidecar(tmp_path):
     assert phones[2]["end_ms"] == 70.0
 
 
-def test_manifest_builder_uses_source_oto_aliases_and_textgrid(tmp_path):
+def test_manifest_builder_uses_source_oto_aliases_and_timing_rules(tmp_path):
     wav_dir = tmp_path / "vb"
     wav_dir.mkdir()
     wav_path = wav_dir / "001_ga.wav"
     _write_tone_wav(wav_path)
     (wav_dir / "oto.ini").write_text(
-        "001_ga.wav=g a,10,20,-30,15,5\n001_ga.wav=a g,40,50,-60,45,15\n",
+        "001_ga.wav=g a,10,20,-60,15,5\n001_ga.wav=a g,40,50,-60,45,15\n",
         encoding="utf-8",
     )
     (wav_dir / "001_ga.TextGrid").write_text(
@@ -240,14 +240,56 @@ item []:
             source_oto_path=str(wav_dir / "oto.ini"),
             out_path=str(out),
             language="korean",
-            use_textgrids=True,
             require_targets=True,
         )
     )
     assert result.summary["alias_source"] == "source_oto_alias_only"
+    assert result.summary["source_oto_timing_rows"] == 1
     assert result.summary["trainable_rows"] == 1
     assert result.rows[0]["aliases"] == ["g a", "a g"]
-    assert [item["phone"] for item in result.rows[0]["phones"]] == ["sil", "g", "a"]
+    events = result.rows[0]["events"]
+    labels = {item["label"] for item in events}
+    assert "vowel_onset" in labels
+    assert "vowel_nucleus" in labels
+    assert "consonant_onset" in labels
+    assert "phones" not in result.rows[0]
+
+
+def test_manifest_builder_does_not_use_textgrid_labels_without_sidecar(tmp_path):
+    wav_dir = tmp_path / "vb"
+    wav_dir.mkdir()
+    wav_path = wav_dir / "001_ga.wav"
+    _write_tone_wav(wav_path)
+    aliases = tmp_path / "aliases.txt"
+    aliases.write_text("g a\n", encoding="utf-8")
+    (wav_dir / "001_ga.TextGrid").write_text(
+        """File type = \"ooTextFile\"
+Object class = \"TextGrid\"
+item []:
+    item [1]:
+        class = \"IntervalTier\"
+        name = \"phones\"
+        intervals: size = 1
+        intervals [1]:
+            xmin = 0.0
+            xmax = 0.1
+            text = \"a\"
+""",
+        encoding="utf-8",
+    )
+    out = tmp_path / "manifest.jsonl"
+    result = build_boundary_manifest(
+        BoundaryManifestBuildConfig(
+            wav_dir=str(wav_dir),
+            aliases_path=str(aliases),
+            out_path=str(out),
+            language="korean",
+            require_targets=True,
+        )
+    )
+    assert result.summary["missing_target_rows"] == 1
+    assert result.summary["trainable_rows"] == 0
+    assert len(result.rows) == 0
 
 
 def test_source_oto_alias_loader_ignores_timing_values(tmp_path):

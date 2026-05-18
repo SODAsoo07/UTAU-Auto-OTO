@@ -15,7 +15,7 @@ try:
 except Exception:  # pragma: no cover
     parse_ja_filename = None
 
-PAUSE_LABELS = {
+BASE_PAUSE_LABELS = {
     "",
     "sp",
     "spn",
@@ -37,6 +37,14 @@ class LabRow:
     start: int
     end: int
     label: str
+
+
+@dataclass
+class PairItem:
+    key: str
+    base: str
+    wav_path: str
+    lab_path: str
 
 
 def _read_wav_duration_100ns(path: str) -> int:
@@ -76,6 +84,8 @@ def _normalize_training_label(
     *,
     label_scheme: str,
     pause_like_phone_labels: Set[str],
+    pause_labels: Set[str],
+    ap_labels: Set[str],
 ) -> str:
     raw = str(label or "").strip()
     if not raw:
@@ -84,8 +94,8 @@ def _normalize_training_label(
     scheme = str(label_scheme or "none").strip().lower()
     if scheme == "none":
         return raw
-    if low in PAUSE_LABELS:
-        return "AP" if low in AP_LABELS else "SP"
+    if low in pause_labels:
+        return "AP" if low in ap_labels else "SP"
     if low in pause_like_phone_labels:
         return "AP"
     return raw
@@ -96,6 +106,8 @@ def _apply_label_normalization(
     *,
     label_scheme: str,
     pause_like_phone_labels: Set[str],
+    pause_labels: Set[str],
+    ap_labels: Set[str],
 ) -> Tuple[List[LabRow], int, Dict[str, int]]:
     out: List[LabRow] = []
     remapped = 0
@@ -105,6 +117,8 @@ def _apply_label_normalization(
             row.label,
             label_scheme=label_scheme,
             pause_like_phone_labels=pause_like_phone_labels,
+            pause_labels=pause_labels,
+            ap_labels=ap_labels,
         )
         out.append(LabRow(start=int(row.start), end=int(row.end), label=str(new_label)))
         if str(new_label) != str(row.label):
@@ -114,8 +128,8 @@ def _apply_label_normalization(
     return out, int(remapped), remap_pairs
 
 
-def _is_pause(label: str) -> bool:
-    return _normalize_label(label) in PAUSE_LABELS
+def _is_pause(label: str, pause_labels: Set[str]) -> bool:
+    return _normalize_label(label) in pause_labels
 
 
 def _infer_expected_word_count(base: str, language: str) -> int:
@@ -154,6 +168,8 @@ def _infer_expected_word_count(base: str, language: str) -> int:
 def _scale_rows_to_wav(
     rows: Sequence[LabRow],
     wav_end_100ns: int,
+    *,
+    pause_labels: Set[str],
 ) -> Tuple[List[LabRow], float, bool, int]:
     if not rows:
         return [], 1.0, False, 0
@@ -173,7 +189,7 @@ def _scale_rows_to_wav(
 
     last_non_pause_end = 0
     for row in reversed(sorted_rows):
-        if not _is_pause(row.label):
+        if not _is_pause(row.label, pause_labels):
             last_non_pause_end = int(row.end)
             break
 
@@ -233,8 +249,16 @@ def _write_lab(path: str, rows: Sequence[LabRow]) -> None:
             f.write(f"{int(row.start)} {int(row.end)} {row.label}\n")
 
 
-def _quality_report(rows: Sequence[LabRow], wav_end_100ns: int, expected_words: int, scale_factor: float) -> Dict[str, object]:
-    non_pause = [r for r in rows if not _is_pause(r.label)]
+def _quality_report(
+    rows: Sequence[LabRow],
+    wav_end_100ns: int,
+    expected_words: int,
+    scale_factor: float,
+    *,
+    pause_labels: Set[str],
+    enforce_expected_words_gate: bool,
+) -> Dict[str, object]:
+    non_pause = [r for r in rows if not _is_pause(r.label, pause_labels)]
     speech_100ns = sum(max(0, int(r.end) - int(r.start)) for r in non_pause)
     speech_ratio = float(speech_100ns) / float(max(1, wav_end_100ns))
     non_pause_count = int(len(non_pause))
@@ -246,7 +270,7 @@ def _quality_report(rows: Sequence[LabRow], wav_end_100ns: int, expected_words: 
         errors.append("speech_ratio_too_low")
     if speech_ratio > 0.995:
         errors.append("speech_ratio_too_high")
-    if expected_words > 0:
+    if enforce_expected_words_gate and expected_words > 0:
         if non_pause_count < max(2, int(round(expected_words * 0.35))):
             errors.append("non_pause_under_expected")
         if non_pause_count > int(expected_words * 6.0 + 6):
@@ -254,8 +278,8 @@ def _quality_report(rows: Sequence[LabRow], wav_end_100ns: int, expected_words: 
     if scale_factor < 0.12 or scale_factor > 1.2:
         errors.append("scale_factor_outlier")
 
-    first_non_pause = next((r for r in rows if not _is_pause(r.label)), None)
-    last_non_pause = next((r for r in reversed(rows) if not _is_pause(r.label)), None)
+    first_non_pause = next((r for r in rows if not _is_pause(r.label, pause_labels)), None)
+    last_non_pause = next((r for r in reversed(rows) if not _is_pause(r.label, pause_labels)), None)
     first_ratio = (
         float(first_non_pause.start) / float(max(1, wav_end_100ns))
         if first_non_pause is not None
@@ -281,12 +305,44 @@ def _quality_report(rows: Sequence[LabRow], wav_end_100ns: int, expected_words: 
     }
 
 
-def _iter_bases(wav_folder: str, lab_folder: str) -> List[str]:
-    wav_names = os.listdir(wav_folder) if os.path.isdir(wav_folder) else []
-    lab_names = os.listdir(lab_folder) if os.path.isdir(lab_folder) else []
-    wav_bases = {os.path.splitext(n)[0] for n in wav_names if n.lower().endswith(".wav")}
-    lab_bases = {os.path.splitext(n)[0] for n in lab_names if n.lower().endswith(".lab")}
-    return sorted(wav_bases & lab_bases)
+def _collect_files_by_key(folder: str, ext: str, *, recursive: bool) -> Dict[str, tuple[str, str]]:
+    root = os.path.abspath(folder)
+    out: Dict[str, tuple[str, str]] = {}
+    if not os.path.isdir(root):
+        return out
+    ext_low = str(ext or "").lower()
+    if recursive:
+        for dirpath, _dirs, files in os.walk(root):
+            for name in files:
+                if not str(name).lower().endswith(ext_low):
+                    continue
+                abs_path = os.path.join(dirpath, name)
+                rel_stem = os.path.splitext(os.path.relpath(abs_path, root))[0]
+                key = str(rel_stem).strip().lower()
+                base = os.path.splitext(os.path.basename(name))[0]
+                out[key] = (abs_path, base)
+        return out
+
+    for name in os.listdir(root):
+        if not str(name).lower().endswith(ext_low):
+            continue
+        abs_path = os.path.join(root, name)
+        stem = os.path.splitext(name)[0]
+        key = str(stem).strip().lower()
+        out[key] = (abs_path, stem)
+    return out
+
+
+def _iter_pairs(wav_folder: str, lab_folder: str, *, recursive: bool) -> List[PairItem]:
+    wav_map = _collect_files_by_key(wav_folder, ".wav", recursive=recursive)
+    lab_map = _collect_files_by_key(lab_folder, ".lab", recursive=recursive)
+    keys = sorted(set(wav_map.keys()) & set(lab_map.keys()))
+    rows: List[PairItem] = []
+    for key in keys:
+        wav_path, wav_base = wav_map[key]
+        lab_path, _lab_base = lab_map[key]
+        rows.append(PairItem(key=key, base=wav_base, wav_path=wav_path, lab_path=lab_path))
+    return rows
 
 
 def _write_json(path: str, payload: Dict[str, object]) -> None:
@@ -307,9 +363,21 @@ def main() -> int:
     parser.add_argument("--source", required=True, help="Folder with paired wav/lab files")
     parser.add_argument("--wav-dir", default="", help="Optional explicit wav folder (when split layout is used)")
     parser.add_argument("--lab-dir", default="", help="Optional explicit lab folder (when split layout is used)")
+    parser.add_argument("--recursive", action="store_true", help="Recursively scan wav/lab files under wav-dir/lab-dir.")
     parser.add_argument("--language", default="japanese", choices=["japanese", "korean"], help="Language hint")
     parser.add_argument("--out-root", default="", help="Output root folder")
     parser.add_argument("--val-ratio", type=float, default=0.2, help="Validation split ratio")
+    parser.add_argument(
+        "--disable-expected-words-gate",
+        action="store_true",
+        help="Disable filename-based expected word-count quality gate (recommended for singing corpora).",
+    )
+    parser.add_argument(
+        "--r-as-pause",
+        default="on",
+        choices=["on", "off"],
+        help="Treat 'r/R' label as pause (on) or phone (off).",
+    )
     parser.add_argument(
         "--label-scheme",
         default="none",
@@ -365,24 +433,42 @@ def main() -> int:
     }
     if not pause_like_phone_labels:
         pause_like_phone_labels = set(DEFAULT_PAUSE_LIKE_PHONE_LABELS)
+    pause_labels = set(BASE_PAUSE_LABELS)
+    if str(args.r_as_pause or "on").strip().lower() == "off":
+        pause_labels.discard("r")
+    ap_labels = set(AP_LABELS)
 
-    for base in _iter_bases(wav_dir, lab_dir):
-        wav_path = os.path.join(wav_dir, base + ".wav")
-        lab_path = os.path.join(lab_dir, base + ".lab")
+    for pair in _iter_pairs(wav_dir, lab_dir, recursive=bool(args.recursive)):
+        base = str(pair.base or "")
+        wav_path = str(pair.wav_path or "")
+        lab_path = str(pair.lab_path or "")
         wav_end = _read_wav_duration_100ns(wav_path)
         raw_rows = _read_lab_rows(lab_path)
         norm_rows, remapped_count, remap_pairs = _apply_label_normalization(
             raw_rows,
             label_scheme=str(args.label_scheme),
             pause_like_phone_labels=pause_like_phone_labels,
+            pause_labels=pause_labels,
+            ap_labels=ap_labels,
         )
         remapped_total += int(remapped_count)
         for key, value in remap_pairs.items():
             remap_hist[key] = int(remap_hist.get(key, 0) + int(value))
-        scaled_rows, scale_factor, tail_repaired, scale_anchor_end = _scale_rows_to_wav(norm_rows, wav_end)
+        scaled_rows, scale_factor, tail_repaired, scale_anchor_end = _scale_rows_to_wav(
+            norm_rows,
+            wav_end,
+            pause_labels=pause_labels,
+        )
         clean_rows = _compress_adjacent(scaled_rows)
         expected_words = _infer_expected_word_count(base, args.language)
-        quality = _quality_report(clean_rows, wav_end, expected_words, scale_factor)
+        quality = _quality_report(
+            clean_rows,
+            wav_end,
+            expected_words,
+            scale_factor,
+            pause_labels=pause_labels,
+            enforce_expected_words_gate=bool(not args.disable_expected_words_gate),
+        )
         if bool(tail_repaired):
             tail_repaired_count += 1
 
@@ -394,6 +480,7 @@ def main() -> int:
             "wav_path": wav_path,
             "raw_lab_path": lab_path,
             "clean_lab_path": clean_lab_path,
+            "pair_key": str(pair.key),
             "wav_end_100ns": int(wav_end),
             "label_scheme": str(args.label_scheme),
             "label_remapped_count": int(remapped_count),
@@ -433,6 +520,10 @@ def main() -> int:
         "out_root": out_root,
         "label_scheme": str(args.label_scheme),
         "pause_like_phone_labels": sorted(list(pause_like_phone_labels)),
+        "pause_labels": sorted(list(pause_labels)),
+        "recursive": bool(args.recursive),
+        "disable_expected_words_gate": bool(args.disable_expected_words_gate),
+        "r_as_pause": str(args.r_as_pause),
         "total_pairs": int(len(all_rows)),
         "accepted_pairs": int(len(accepted_rows)),
         "rejected_pairs": int(len(all_rows) - len(accepted_rows)),

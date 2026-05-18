@@ -10,10 +10,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TOOLS = {
     "alignment.build_folder": REPO_ROOT / "tests/scripts/alignment/build_alignment_test_folder.py",
     "alignment.compare_visual": REPO_ROOT / "tests/scripts/alignment/compare_alignment_visual.py",
+    "alignment.visualize_tg_oto": REPO_ROOT / "tests/scripts/alignment/visualize_textgrid_oto_overlay.py",
     "benchmark.sequence_residual": REPO_ROOT / "tests/scripts/benchmark/benchmark_sequence_residual_datasets.py",
     "smoke.sandbox": REPO_ROOT / "tests/scripts/smoke/sandbox_smoke_check.ps1",
     "training.alignment.export_textgrid": REPO_ROOT / "tests/scripts/training/alignment/export_textgrid_to_sinsy_lab.py",
     "training.alignment.preprocess_sinsy": REPO_ROOT / "tests/scripts/training/alignment/preprocess_sinsy_labels_for_sequence_training.py",
+    "training.alignment.split_match_manifest": REPO_ROOT / "tests/scripts/training/alignment/split_filename_lab_match_manifest.py",
     "training.alignment.train_profile": REPO_ROOT / "tests/scripts/training/alignment/train_sequence_aligner_profile_from_sinsy.py",
     "training.data.auto_classify": REPO_ROOT / "tests/scripts/training/data/auto_classify_training_data.py",
     "training.data.generate_shared_profiles": REPO_ROOT / "tests/scripts/training/data/generate_shared_oto_profiles.py",

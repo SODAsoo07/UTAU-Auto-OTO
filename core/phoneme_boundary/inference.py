@@ -6,7 +6,11 @@ from typing import Any
 import numpy as np
 
 from core.phoneme_boundary.features import FeatureConfig, load_boundary_features
-from core.phoneme_boundary.heuristics import blend_boundary_scores, compute_acoustic_boundary_scores
+from core.phoneme_boundary.heuristics import (
+    blend_boundary_scores,
+    blend_boundary_scores_adaptive,
+    compute_acoustic_boundary_scores,
+)
 from core.phoneme_boundary.model import PhonemeBoundaryDetectorConfig, load_phoneme_boundary_checkpoint
 from core.phoneme_boundary.types import BOUNDARY_LABELS, BoundaryEvent, BoundaryFrameScores, normalize_boundary_label
 
@@ -69,7 +73,17 @@ def infer_boundary_scores_with_model(
         frame_count=int(probs.shape[0]),
     )
     if bool(use_acoustic_heuristics):
-        scores = blend_boundary_scores(scores, heuristic_scores, heuristic_weight=float(heuristic_weight))
+        if q_probs is not None and len(q_probs) == int(probs.shape[0]):
+            scores = blend_boundary_scores_adaptive(
+                scores,
+                heuristic_scores,
+                quality_scores=q_probs.tolist(),
+                base_weight=max(0.0, float(heuristic_weight) * 0.35),
+                low_conf_threshold=0.55,
+                max_weight=max(0.0, float(heuristic_weight)),
+            )
+        else:
+            scores = blend_boundary_scores(scores, heuristic_scores, heuristic_weight=float(heuristic_weight))
     return BoundaryFrameScores(
         wav_path=str(wav_path),
         times_ms=times,
