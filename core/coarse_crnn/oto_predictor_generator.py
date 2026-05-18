@@ -70,6 +70,12 @@ def resolve_boundary_scorer_model_path(path_hint: str = "") -> str:
         expanded = os.path.abspath(os.path.expandvars(os.path.expanduser(candidate)))
         if os.path.isfile(expanded):
             return expanded
+        # Plain basename (no separators) → search the standard roots.
+        if not any(sep in candidate for sep in ("/", "\\", os.sep)):
+            for root in _boundary_model_roots():
+                attempt = os.path.abspath(os.path.join(root, candidate))
+                if os.path.isfile(attempt):
+                    return attempt
 
     roots = _boundary_model_roots()
     for root in roots:
@@ -88,6 +94,70 @@ def resolve_boundary_scorer_model_path(path_hint: str = "") -> str:
         discovered.sort(key=lambda path: (os.path.getmtime(path), path.lower()), reverse=True)
         return discovered[0]
     return ""
+
+
+def list_available_boundary_scorer_models() -> list[dict[str, object]]:
+    """Enumerate boundary scorer checkpoints discoverable in the standard roots.
+
+    Returns dicts with keys:
+        - name (str)            : basename, used as the UI choice token
+        - path (str)            : absolute path
+        - label (str)           : human-readable label for the dropdown
+        - is_experimental (bool): matches the auto-pick exclusion list
+        - mtime (float)         : last-modified time
+
+    Sorted newest-mtime first. Used by the UI to populate a model picker.
+    """
+    seen: set[str] = set()
+    items: list[dict[str, object]] = []
+    for root in _boundary_model_roots():
+        pattern = os.path.join(root, _BOUNDARY_SCORER_MODEL_GLOB)
+        for path in glob.glob(pattern):
+            full = os.path.abspath(path)
+            key = full.lower()
+            if key in seen or not os.path.isfile(full):
+                continue
+            seen.add(key)
+            name = os.path.basename(full)
+            items.append(
+                {
+                    "name": name,
+                    "path": full,
+                    "label": _friendly_boundary_model_label(name),
+                    "is_experimental": _is_experimental_boundary_model(full),
+                    "mtime": float(os.path.getmtime(full)),
+                }
+            )
+    items.sort(key=lambda item: float(item.get("mtime") or 0.0), reverse=True)
+    return items
+
+
+def _friendly_boundary_model_label(name: str) -> str:
+    """Short human label for the dropdown. Falls back to the raw filename."""
+    text = str(name or "").strip()
+    if not text:
+        return ""
+    lower = text.lower()
+    tags: list[str] = []
+    if "convonly" in lower or "conv_only" in lower:
+        tags.append("conv-only")
+    if "selfdistill" in lower or "self_distill" in lower or "distill" in lower:
+        tags.append("증류")
+    if "phone_aux_warm" in lower:
+        tags.append("phone-aware warm")
+    elif "phone_aux" in lower:
+        tags.append("phone-aware")
+    if "v5_codabridge" in lower or "codabridge" in lower:
+        tags.append("v5 codabridge")
+    if "v4" in lower and "boundary_scorer_v4" in lower:
+        tags.append("v4")
+    if "v3_slotfix" in lower:
+        tags.append("v3 slotfix (기본)")
+    if "_smoke" in lower:
+        tags.append("smoke")
+    if not tags:
+        return text
+    return f"{text}  ·  {', '.join(tags)}"
 
 
 def _boundary_model_roots() -> list[str]:
@@ -131,5 +201,6 @@ __all__ = [
     "DEFAULT_BOUNDARY_SCORER_MODEL_NAME",
     "DEFAULT_OTO_CRNN_MODEL_NAME",
     "generate_oto_with_crnn_predictor",
+    "list_available_boundary_scorer_models",
     "resolve_boundary_scorer_model_path",
 ]

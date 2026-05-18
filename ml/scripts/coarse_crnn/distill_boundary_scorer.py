@@ -137,14 +137,17 @@ def _distill_loss(student_out, teacher_out, *, mask, alpha: float, temperature: 
     """Returns alpha * sum_of_per_head_KL, or None if no head pair is active.
 
     Per-head KL is masked by `mask` (frame validity) and scaled by `tau^2` per
-    the standard Hinton distillation formulation.
+    the standard Hinton distillation formulation. Computed in fp32 regardless
+    of autocast context: under AMP+T=1.0 the teacher sigmoid/softmax can
+    saturate in fp16 (probabilities exactly 0 or 1), producing 0*(-inf) NaNs
+    in the entropy terms.
     """
     import torch
     import torch.nn.functional as F
 
     total = None
     tau = max(1e-3, float(temperature))
-    frame_mask_2d = mask
+    frame_mask_2d = mask.float()
     denom_2d = torch.clamp(frame_mask_2d.sum(), min=1.0)
 
     for key in _SIGMOID_LOGIT_KEYS:
@@ -152,12 +155,14 @@ def _distill_loss(student_out, teacher_out, *, mask, alpha: float, temperature: 
         t_logits = teacher_out.get(key)
         if s_logits is None or t_logits is None:
             continue
-        s_log_p = F.logsigmoid(s_logits / tau)
-        s_log_1mp = F.logsigmoid(-s_logits / tau)
-        t_p = torch.sigmoid(t_logits / tau).detach()
-        kl = t_p * (torch.log(t_p.clamp(min=1e-8)) - s_log_p) + (1.0 - t_p) * (
-            torch.log((1.0 - t_p).clamp(min=1e-8)) - s_log_1mp
-        )
+        s_f = s_logits.float()
+        t_f = t_logits.float()
+        s_log_p = F.logsigmoid(s_f / tau)
+        s_log_1mp = F.logsigmoid(-s_f / tau)
+        t_p = torch.sigmoid(t_f / tau).detach().clamp(min=1e-6, max=1.0 - 1e-6)
+        t_log = torch.log(t_p)
+        t_log_1m = torch.log1p(-t_p)
+        kl = t_p * (t_log - s_log_p) + (1.0 - t_p) * (t_log_1m - s_log_1mp)
         per_frame = kl.mean(dim=-1)
         loss = (per_frame * frame_mask_2d).sum() / denom_2d * (tau * tau)
         total = loss if total is None else total + loss
@@ -167,9 +172,15 @@ def _distill_loss(student_out, teacher_out, *, mask, alpha: float, temperature: 
         t_logits = teacher_out.get(key)
         if s_logits is None or t_logits is None:
             continue
-        s_log_p = F.log_softmax(s_logits / tau, dim=-1)
-        t_p = F.softmax(t_logits / tau, dim=-1).detach()
-        kl_per_frame = (t_p * (t_p.clamp(min=1e-8).log() - s_log_p)).sum(dim=-1)
+        s_f = s_logits.float()
+        t_f = t_logits.float()
+        s_log_p = F.log_softmax(s_f / tau, dim=-1)
+        t_p = F.softmax(t_f / tau, dim=-1).detach().clamp(min=1e-6)
+        # Renormalize after clamp so the row sums stay ~1 (loose; the bias
+        # is bounded by class_count * 1e-6).
+        t_p = t_p / t_p.sum(dim=-1, keepdim=True)
+        t_log = torch.log(t_p)
+        kl_per_frame = (t_p * (t_log - s_log_p)).sum(dim=-1)
         loss = (kl_per_frame * frame_mask_2d).sum() / denom_2d * (tau * tau)
         total = loss if total is None else total + loss
 

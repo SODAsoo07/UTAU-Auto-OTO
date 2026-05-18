@@ -2585,6 +2585,12 @@ class PipelineActionsMixin:
                             for item in str(_crnn_special_raw or "").split(",")
                             if item.strip()
                         }
+                        _crnn_model_choice = (
+                            self._get_oto_crnn_model_choice_code()
+                            if hasattr(self, "_get_oto_crnn_model_choice_code")
+                            else "auto"
+                        )
+                        _crnn_model_path = "" if (not _crnn_model_choice or _crnn_model_choice == "auto") else _crnn_model_choice
                         _processed, _total, oto_errors = generate_oto_with_crnn_predictor(
                             wav_dir=wav_dir,
                             out_path=out_path,
@@ -2592,7 +2598,7 @@ class PipelineActionsMixin:
                             alias_suffix=self.alias_suffix_var.get().strip(),
                             language=lang,
                             format_type=selected_format,
-                            model_path="",
+                            model_path=_crnn_model_path,
                             device=(
                                 self.oto_crnn_device_var.get().strip()
                                 if hasattr(self, "oto_crnn_device_var")
