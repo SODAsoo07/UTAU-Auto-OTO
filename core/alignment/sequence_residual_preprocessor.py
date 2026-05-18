@@ -538,6 +538,7 @@ def _analyze_wav_sequence(
             labels=labels,
             cvn_c_prob=cvn_c_prob,
             hop_sec=float(hop_sec),
+            format_hint=format_hint,
         )
     except Exception:
         phone_rows = []

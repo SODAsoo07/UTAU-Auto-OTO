@@ -13,6 +13,7 @@ from core.sequence_aligner import (
     _apply_uniform_boundary_advance,
     _build_ap_sp_mask,
     _build_frame_voicing_mask,
+    _build_phone_rows,
     _inject_ap_labels,
     _insert_internal_pause_rows,
     _prepare_analysis_signal,
@@ -519,3 +520,78 @@ def test_refine_filename_soft_lock_clamps_low_conf_shift():
     lock_boundary = float(refined_locked[0][1])
     assert free_boundary >= 0.53
     assert lock_boundary <= 0.51
+
+
+def test_build_phone_rows_viterbi_refines_cvc_boundaries_with_label_cues():
+    word_rows = [(0.0, 1.0, "gak")]
+    labels = ["sil"] * 10 + ["voiced_onset"] * 12 + ["stable_vowel"] * 46 + ["unvoiced_onset"] * 22 + ["sil"] * 10
+    cvn = np.full((len(labels),), 0.25, dtype=np.float32)
+    cvn[10:24] = 0.85
+    cvn[68:90] = 0.82
+    hop = 0.01
+
+    base = _build_phone_rows(
+        word_rows,
+        duration_sec=1.0,
+        language="korean",
+        labels=labels,
+        cvn_c_prob=cvn,
+        hop_sec=hop,
+        format_hint="cvc",
+        viterbi_enable=False,
+    )
+    refined = _build_phone_rows(
+        word_rows,
+        duration_sec=1.0,
+        language="korean",
+        labels=labels,
+        cvn_c_prob=cvn,
+        hop_sec=hop,
+        format_hint="cvc",
+        viterbi_enable=True,
+    )
+    assert len(base) >= 3
+    assert len(refined) >= 3
+    base_b1 = float(base[0][1])
+    base_b2 = float(base[1][1])
+    ref_b1 = float(refined[0][1])
+    ref_b2 = float(refined[1][1])
+    assert ref_b1 < base_b1
+    assert ref_b2 > base_b2
+    assert 0.16 <= ref_b1 <= 0.34
+    assert 0.60 <= ref_b2 <= 0.84
+
+
+def test_build_phone_rows_viterbi_cv_short_wav_caps_consonant_ratio():
+    word_rows = [(0.0, 0.24, "ka")]
+    labels = ["unvoiced_onset"] * 14 + ["stable_vowel"] * 10
+    cvn = np.full((24,), 0.35, dtype=np.float32)
+    cvn[:14] = 0.88
+    hop = 0.01
+
+    base = _build_phone_rows(
+        word_rows,
+        duration_sec=0.24,
+        language="japanese",
+        labels=labels,
+        cvn_c_prob=cvn,
+        hop_sec=hop,
+        format_hint="cv",
+        viterbi_enable=False,
+    )
+    refined = _build_phone_rows(
+        word_rows,
+        duration_sec=0.24,
+        language="japanese",
+        labels=labels,
+        cvn_c_prob=cvn,
+        hop_sec=hop,
+        format_hint="cv",
+        viterbi_enable=True,
+        viterbi_short_wav_threshold_ms=500.0,
+    )
+    base_cons = float(base[0][1] - base[0][0])
+    ref_cons = float(refined[0][1] - refined[0][0])
+    assert ref_cons < base_cons
+    assert ref_cons <= 0.115
+    assert ref_cons >= 0.040

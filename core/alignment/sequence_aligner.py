@@ -2392,6 +2392,436 @@ def _estimate_cv_split_ratio_from_labels(
     return float(np.clip(blended, 0.16, 0.58))
 
 
+def _phone_state_of_mark(mark: str) -> str:
+    token = str(mark or "").strip().lower()
+    if (not token) or token in _PAUSE_MARKERS or token in {"spn", "sil", "pau", "br", "breath"}:
+        return "sil"
+    if token in {"y", "w"}:
+        return "c"
+    if re.search(r"[aeiou]", token):
+        return "v"
+    return "c"
+
+
+def _build_frame_state_score_vectors(
+    labels: Sequence[str],
+    cvn_c_prob: Sequence[float] | None,
+) -> Dict[str, np.ndarray]:
+    label_seq = [str(x or "").strip().lower() for x in (labels or [])]
+    n = len(label_seq)
+    c_scores = np.zeros((n,), dtype=np.float32)
+    v_scores = np.zeros((n,), dtype=np.float32)
+    s_scores = np.zeros((n,), dtype=np.float32)
+    cvn = np.asarray(cvn_c_prob, dtype=np.float32).reshape(-1) if cvn_c_prob is not None else np.zeros((0,), dtype=np.float32)
+    has_cvn = bool(cvn.size == n)
+
+    for i, lb in enumerate(label_seq):
+        if lb == "unvoiced_onset":
+            c, v, s = 2.1, -0.9, -0.6
+        elif lb == "voiced_onset":
+            c, v, s = 1.7, -0.5, -0.5
+        elif lb == "bridge":
+            c, v, s = 0.9, 0.2, -0.4
+        elif lb == "vowel_transition":
+            c, v, s = -0.4, 1.2, -0.5
+        elif lb == "stable_vowel":
+            c, v, s = -1.0, 2.0, -0.7
+        elif lb == "tail":
+            c, v, s = -0.7, 0.9, -0.4
+        elif lb == "breath":
+            c, v, s = 0.2, -0.2, 1.2
+        elif lb == "weak_noise":
+            c, v, s = -0.2, -0.8, 1.0
+        elif lb == "sil":
+            c, v, s = -0.7, -1.2, 2.0
+        else:
+            c, v, s = -0.2, -0.2, -0.2
+        if has_cvn:
+            cp = float(np.clip(cvn[i], 0.0, 1.0))
+            c += 0.85 * ((cp * 2.0) - 1.0)
+            v += 0.85 * (((1.0 - cp) * 2.0) - 1.0)
+        c_scores[i] = float(c)
+        v_scores[i] = float(v)
+        s_scores[i] = float(s)
+
+    return {"c": c_scores, "v": v_scores, "sil": s_scores}
+
+
+def _build_phone_duration_priors(
+    phone_marks: Sequence[str],
+    phone_states: Sequence[str],
+    *,
+    total_frames: int,
+    format_hint: str,
+    short_wav: bool,
+) -> List[Tuple[int, int, float]]:
+    count = max(1, len(phone_marks))
+    total = max(count, int(total_frames))
+    avg = float(total) / float(count)
+
+    mins: List[int] = []
+    maxs: List[int] = []
+    targets: List[float] = []
+    for idx in range(count):
+        state = str((phone_states or [""])[idx] or "c").strip().lower()
+        mark = str((phone_marks or [""])[idx] or "").strip().lower()
+        if state == "v":
+            min_f = max(1, int(np.floor(avg * 0.28)))
+            max_f = max(min_f + 1, int(np.ceil(avg * (2.00 if short_wav else 2.35))))
+            target = avg * 1.15
+        elif state == "sil":
+            min_f = 1
+            max_f = max(min_f + 1, int(np.ceil(avg * (1.55 if short_wav else 1.85))))
+            target = avg * 0.72
+        else:
+            onset_kind = _onset_bucket(mark)
+            min_f = max(1, int(np.floor(avg * 0.10)))
+            max_scale = 1.15 if short_wav else 1.45
+            target_scale = 0.58
+            if onset_kind == "sonorant":
+                max_scale += 0.25
+                target_scale += 0.12
+            elif onset_kind == "voiced":
+                max_scale += 0.10
+                target_scale += 0.06
+            if _is_plosive_onset(mark):
+                max_scale += 0.08
+                target_scale += 0.04
+            max_f = max(min_f + 1, int(np.ceil(avg * max_scale)))
+            target = avg * target_scale
+        mins.append(int(min_f))
+        maxs.append(int(max_f))
+        targets.append(float(target))
+
+    def _apply_ratio(idx: int, lo: float, hi: float, target_ratio: float | None = None) -> None:
+        if idx < 0 or idx >= count:
+            return
+        lo_abs = max(1, int(round(float(total) * float(lo))))
+        hi_abs = max(lo_abs + 1, int(round(float(total) * float(hi))))
+        mins[idx] = max(mins[idx], lo_abs)
+        maxs[idx] = min(maxs[idx], hi_abs)
+        if mins[idx] > maxs[idx]:
+            mins[idx] = max(1, min(mins[idx], hi_abs))
+            maxs[idx] = max(mins[idx] + 1, hi_abs)
+        if target_ratio is not None:
+            targets[idx] = float(total) * float(target_ratio)
+
+    fmt = _normalize_sequence_format_hint(format_hint)
+    if fmt == "cv" and count == 2 and list(phone_states) == ["c", "v"]:
+        c_hi = 0.46 if short_wav else 0.50
+        _apply_ratio(0, 0.08, c_hi, 0.34)
+        _apply_ratio(1, 1.0 - c_hi, 0.92, 0.66)
+    elif fmt == "vc" and count == 2 and list(phone_states) == ["v", "c"]:
+        c_hi = 0.44 if short_wav else 0.52
+        _apply_ratio(0, 0.46, 0.90, 0.64)
+        _apply_ratio(1, 0.10, c_hi, 0.36)
+    elif fmt == "cvc" and count == 3 and list(phone_states) == ["c", "v", "c"]:
+        c_hi = 0.34 if short_wav else 0.40
+        _apply_ratio(0, 0.08, c_hi, 0.24)
+        _apply_ratio(1, 0.28, 0.70, 0.52)
+        _apply_ratio(2, 0.10, c_hi, 0.24)
+    elif fmt == "vcv" and count == 3 and list(phone_states) == ["v", "c", "v"]:
+        c_hi = 0.30 if short_wav else 0.36
+        _apply_ratio(0, 0.18, 0.48, 0.33)
+        _apply_ratio(1, 0.10, c_hi, 0.20)
+        _apply_ratio(2, 0.20, 0.58, 0.47)
+    elif fmt == "cvvc" and count >= 4:
+        if phone_states[0] == "c":
+            _apply_ratio(0, 0.06, 0.30 if short_wav else 0.34, 0.16)
+        if phone_states[-1] == "c":
+            _apply_ratio(count - 1, 0.06, 0.32 if short_wav else 0.38, 0.18)
+        mid_idx = [i for i in range(1, count - 1) if phone_states[i] == "v"]
+        for i in mid_idx:
+            _apply_ratio(i, 0.12, 0.58, 0.22)
+
+    min_sum = int(sum(mins))
+    if min_sum > total:
+        overflow = min_sum - total
+        adjustable = sorted(
+            [i for i, v in enumerate(mins) if v > 1],
+            key=lambda i: mins[i],
+            reverse=True,
+        )
+        for idx in adjustable:
+            if overflow <= 0:
+                break
+            cut = min(overflow, mins[idx] - 1)
+            mins[idx] -= int(cut)
+            overflow -= int(cut)
+
+    max_sum = int(sum(maxs))
+    if max_sum < total:
+        deficit = total - max_sum
+        step = max(1, int(np.ceil(float(deficit) / float(count))))
+        for idx in range(count):
+            maxs[idx] += step
+            deficit -= step
+            if deficit <= 0:
+                break
+
+    out: List[Tuple[int, int, float]] = []
+    for idx in range(count):
+        min_f = max(1, int(mins[idx]))
+        max_f = max(min_f + 1, int(maxs[idx]))
+        target = float(np.clip(float(targets[idx]), float(min_f), float(max_f)))
+        out.append((min_f, max_f, target))
+    return out
+
+
+def _boundary_search_window_frames(
+    *,
+    right_state: str,
+    right_mark: str,
+    hop_sec: float,
+    short_wav: bool,
+    format_hint: str,
+) -> int:
+    if hop_sec <= 0.0:
+        return 4
+    state = str(right_state or "").strip().lower()
+    mark = str(right_mark or "").strip().lower()
+    base_ms = 22.0 if state == "v" else 34.0
+    if state == "sil":
+        base_ms = 18.0
+    if _is_plosive_onset(mark):
+        base_ms += 8.0
+    if short_wav:
+        base_ms *= 0.72
+    if _normalize_sequence_format_hint(format_hint) in {"cv", "vc", "cvc", "vcv", "cvvc"}:
+        base_ms *= 0.90
+    frames = int(round((float(base_ms) / 1000.0) / max(float(hop_sec), 1e-6)))
+    return max(2, min(28, frames))
+
+
+def _boundary_alignment_score(
+    boundary_idx: int,
+    *,
+    left_state: str,
+    right_state: str,
+    right_mark: str,
+    labels: Sequence[str],
+    cvn_c_prob: Sequence[float] | None,
+) -> float:
+    n = len(labels or [])
+    if n <= 0:
+        return 0.0
+    idx = max(0, min(n - 1, int(boundary_idx)))
+    label_seq = [str(x or "").strip().lower() for x in labels]
+    cvn = np.asarray(cvn_c_prob, dtype=np.float32).reshape(-1) if cvn_c_prob is not None else np.zeros((0,), dtype=np.float32)
+    has_cvn = bool(cvn.size == n)
+
+    left = str(left_state or "").strip().lower()
+    right = str(right_state or "").strip().lower()
+    mark = str(right_mark or "").strip().lower()
+    right_window = label_seq[idx : min(n, idx + 4)]
+    left_window = label_seq[max(0, idx - 3) : idx + 1]
+
+    score = 0.0
+    if right == "c":
+        onset_hits = sum(1 for lb in right_window if lb in {"unvoiced_onset", "voiced_onset", "bridge"})
+        score += 0.70 * float(onset_hits)
+        if has_cvn:
+            cvn_peak = float(np.max(cvn[max(0, idx - 1) : min(n, idx + 2)]))
+            score += 1.10 * (cvn_peak - 0.50)
+        if _is_plosive_onset(mark):
+            score += 0.16
+        if "stable_vowel" in right_window:
+            score -= 0.28
+    elif right == "v":
+        vow_hits = sum(1 for lb in right_window if lb in {"vowel_transition", "stable_vowel", "tail"})
+        score += 0.60 * float(vow_hits)
+        if any(lb in {"unvoiced_onset", "voiced_onset", "bridge"} for lb in left_window):
+            score += 0.45
+        if has_cvn:
+            cvn_local = float(np.mean(cvn[max(0, idx - 1) : min(n, idx + 2)]))
+            score += 0.90 * (0.50 - cvn_local)
+    else:
+        sil_hits = sum(1 for lb in right_window if lb in {"sil", "weak_noise", "breath"})
+        score += 0.75 * float(sil_hits)
+
+    if left == "v" and right == "v":
+        if label_seq[idx] in {"vowel_transition", "tail"}:
+            score += 0.45
+        elif label_seq[idx] in {"unvoiced_onset", "voiced_onset"}:
+            score -= 0.25
+    return float(score)
+
+
+def _decode_phone_boundaries_viterbi(
+    phone_rows: Sequence[Tuple[float, float, str]],
+    *,
+    duration_sec: float,
+    labels: Sequence[str],
+    cvn_c_prob: Sequence[float] | None,
+    hop_sec: float,
+    format_hint: str,
+    duration_penalty_scale: float = 0.95,
+    short_wav_threshold_ms: float = 430.0,
+) -> List[Tuple[float, float, str]]:
+    rows = [(float(s), float(e), str(m or "")) for s, e, m in (phone_rows or [])]
+    if len(rows) <= 1 or hop_sec <= 0.0:
+        return rows
+    n_frames = len(labels or [])
+    if n_frames <= 2:
+        return rows
+
+    phone_count = len(rows)
+    marks = [str(m or "").strip() for _, _, m in rows]
+    states = [_phone_state_of_mark(m) for m in marks]
+    base_boundaries = [int(np.floor(float(rows[0][0]) / float(hop_sec)))]
+    for i in range(phone_count - 1):
+        b = int(round(float(rows[i][1]) / float(hop_sec)))
+        base_boundaries.append(b)
+    base_boundaries.append(int(np.ceil(float(rows[-1][1]) / float(hop_sec))))
+    start_idx = max(0, min(n_frames - 2, base_boundaries[0]))
+    end_idx = max(start_idx + phone_count, min(n_frames, base_boundaries[-1]))
+    if end_idx - start_idx < phone_count:
+        return rows
+
+    short_wav = bool(float(duration_sec) * 1000.0 <= float(short_wav_threshold_ms) or (end_idx - start_idx) <= 84)
+    priors = _build_phone_duration_priors(
+        marks,
+        states,
+        total_frames=int(end_idx - start_idx),
+        format_hint=format_hint,
+        short_wav=short_wav,
+    )
+    if len(priors) != phone_count:
+        return rows
+
+    state_scores = _build_frame_state_score_vectors(labels, cvn_c_prob)
+    cumsum: Dict[str, np.ndarray] = {}
+    for key, arr in state_scores.items():
+        cumsum[key] = np.concatenate(([0.0], np.cumsum(np.asarray(arr, dtype=np.float64))))
+
+    def _segment_score(phone_idx: int, seg_start: int, seg_end: int) -> float:
+        state = str(states[phone_idx] or "c")
+        pref = cumsum.get(state, cumsum["c"])
+        s = max(0, min(n_frames, int(seg_start)))
+        e = max(s, min(n_frames, int(seg_end)))
+        base = float(pref[e] - pref[s])
+        min_f, max_f, target = priors[phone_idx]
+        dur = max(1, int(e - s))
+        if dur < int(min_f) or dur > int(max_f):
+            return float("-inf")
+        penalty = -abs(float(dur) - float(target)) / max(float(target), 1.0)
+        return base + float(duration_penalty_scale) * float(penalty)
+
+    candidates: Dict[int, List[int]] = {}
+    for j in range(1, phone_count):
+        right_state = states[j]
+        right_mark = marks[j]
+        win = _boundary_search_window_frames(
+            right_state=right_state,
+            right_mark=right_mark,
+            hop_sec=float(hop_sec),
+            short_wav=short_wav,
+            format_hint=format_hint,
+        )
+        base = max(start_idx + j, min(end_idx - (phone_count - j), int(base_boundaries[j])))
+        lo = max(start_idx + j, base - win)
+        hi = min(end_idx - (phone_count - j), base + win)
+        if hi < lo:
+            return rows
+        cands = set(range(lo, hi + 1))
+        # Cue-concentrated candidates for stability on short WAVs.
+        for k in range(lo, hi + 1):
+            lb = str(labels[k] or "").strip().lower()
+            if right_state == "c":
+                is_onset = lb in {"unvoiced_onset", "voiced_onset", "bridge"}
+                if not is_onset and cvn_c_prob is not None:
+                    cvn_arr = np.asarray(cvn_c_prob, dtype=np.float32).reshape(-1)
+                    if cvn_arr.size == n_frames:
+                        is_onset = bool(float(cvn_arr[k]) >= 0.58)
+                if is_onset:
+                    cands.add(k)
+            elif right_state == "v":
+                if lb in {"vowel_transition", "stable_vowel", "tail"}:
+                    cands.add(k)
+            else:
+                if lb in {"sil", "weak_noise", "breath"}:
+                    cands.add(k)
+        candidates[j] = sorted(cands)
+        if not candidates[j]:
+            return rows
+
+    stage_scores: Dict[int, Dict[int, float]] = {0: {start_idx: 0.0}}
+    stage_back: Dict[int, Dict[int, int]] = {}
+    for j in range(1, phone_count):
+        prev_stage = stage_scores.get(j - 1, {})
+        if not prev_stage:
+            return rows
+        cur_scores: Dict[int, float] = {}
+        cur_back: Dict[int, int] = {}
+        for cand in candidates[j]:
+            best_score = float("-inf")
+            best_prev = -1
+            for prev_boundary, prev_score in prev_stage.items():
+                seg = _segment_score(j - 1, int(prev_boundary), int(cand))
+                if not np.isfinite(seg):
+                    continue
+                trans = _boundary_alignment_score(
+                    int(cand),
+                    left_state=states[j - 1],
+                    right_state=states[j],
+                    right_mark=marks[j],
+                    labels=labels,
+                    cvn_c_prob=cvn_c_prob,
+                )
+                cur = float(prev_score) + float(seg) + float(trans)
+                if cur > best_score:
+                    best_score = cur
+                    best_prev = int(prev_boundary)
+            if best_prev >= 0:
+                cur_scores[int(cand)] = float(best_score)
+                cur_back[int(cand)] = int(best_prev)
+        if not cur_scores:
+            return rows
+        stage_scores[j] = cur_scores
+        stage_back[j] = cur_back
+
+    last_stage = stage_scores.get(phone_count - 1, {})
+    if not last_stage:
+        return rows
+    final_best = float("-inf")
+    final_boundary = -1
+    for prev_boundary, prev_score in last_stage.items():
+        seg = _segment_score(phone_count - 1, int(prev_boundary), int(end_idx))
+        if not np.isfinite(seg):
+            continue
+        cur = float(prev_score) + float(seg)
+        if cur > final_best:
+            final_best = cur
+            final_boundary = int(prev_boundary)
+    if final_boundary < 0:
+        return rows
+
+    boundaries = [0] * (phone_count + 1)
+    boundaries[0] = int(start_idx)
+    boundaries[-1] = int(end_idx)
+    boundaries[phone_count - 1] = int(final_boundary)
+    for j in range(phone_count - 1, 0, -1):
+        cur = boundaries[j]
+        prev = stage_back.get(j, {}).get(int(cur))
+        if prev is None:
+            return rows
+        boundaries[j - 1] = int(prev)
+    boundaries[0] = int(start_idx)
+
+    for i in range(phone_count):
+        if boundaries[i + 1] <= boundaries[i]:
+            return rows
+
+    refined: List[Tuple[float, float, str]] = []
+    for i, mark in enumerate(marks):
+        st = max(0, min(n_frames, int(boundaries[i])))
+        en = max(st + 1, min(n_frames, int(boundaries[i + 1])))
+        start_sec = float(st) * float(hop_sec)
+        end_sec = float(en) * float(hop_sec)
+        refined.append((start_sec, end_sec, mark))
+    return _sanitize_rows(refined, duration_sec=float(duration_sec), filler_mark="pau")
+
+
 def _build_phone_rows(
     word_rows: Sequence[Tuple[float, float, str]],
     *,
@@ -2400,6 +2830,10 @@ def _build_phone_rows(
     labels: Sequence[str] | None = None,
     cvn_c_prob: Sequence[float] | None = None,
     hop_sec: float = 0.0,
+    format_hint: str = "",
+    viterbi_enable: bool = True,
+    viterbi_duration_penalty_scale: float = 0.95,
+    viterbi_short_wav_threshold_ms: float = 430.0,
 ) -> List[Tuple[float, float, str]]:
     rows: List[Tuple[float, float, str]] = []
     for start, end, mark in word_rows:
@@ -2436,7 +2870,22 @@ def _build_phone_rows(
             next_cursor = float(end) if idx == len(parts) - 1 else min(float(end), cursor + step)
             rows.append((cursor, next_cursor, str(part)))
             cursor = next_cursor
-    return _sanitize_rows(rows, duration_sec=duration_sec, filler_mark="pau")
+    rows = _sanitize_rows(rows, duration_sec=duration_sec, filler_mark="pau")
+    if (not viterbi_enable) or len(rows) <= 1 or (not labels) or hop_sec <= 0.0:
+        return rows
+    refined = _decode_phone_boundaries_viterbi(
+        rows,
+        duration_sec=float(duration_sec),
+        labels=labels,
+        cvn_c_prob=cvn_c_prob,
+        hop_sec=float(hop_sec),
+        format_hint=str(format_hint or ""),
+        duration_penalty_scale=float(viterbi_duration_penalty_scale),
+        short_wav_threshold_ms=float(viterbi_short_wav_threshold_ms),
+    )
+    if len(refined) != len(rows):
+        return rows
+    return refined
 
 
 def _label_distribution(labels: Sequence[str]) -> Dict[str, int]:
@@ -2767,6 +3216,22 @@ def run_sequence_align(
         min_value=0.0,
         max_value=1.0,
     )
+    phone_viterbi_enable = _env_bool(
+        "UTOA_SEQUENCE_PHONE_VITERBI_ENABLE",
+        default=_profile_bool(profile, "phone_viterbi_enable", True),
+    )
+    phone_viterbi_duration_penalty_scale = _env_float(
+        "UTOA_SEQUENCE_PHONE_VITERBI_DURATION_PENALTY",
+        _profile_float(profile, "phone_viterbi_duration_penalty_scale", 0.95),
+        min_value=0.10,
+        max_value=3.00,
+    )
+    phone_viterbi_short_wav_threshold_ms = _env_float(
+        "UTOA_SEQUENCE_PHONE_VITERBI_SHORT_WAV_MS",
+        _profile_float(profile, "phone_viterbi_short_wav_threshold_ms", 430.0),
+        min_value=120.0,
+        max_value=1200.0,
+    )
     cvn_backend = str(os.environ.get("UTOA_SEQUENCE_CVN_BACKEND", str(profile.get("cvn_backend", "") or "")) or "").strip().lower()
     if cvn_backend not in {"", "rule", "logreg", "gbdt"}:
         cvn_backend = ""
@@ -2983,6 +3448,10 @@ def run_sequence_align(
                 labels=labels,
                 cvn_c_prob=cvn_c_prob,
                 hop_sec=hop_sec,
+                format_hint=format_norm,
+                viterbi_enable=bool(phone_viterbi_enable),
+                viterbi_duration_penalty_scale=float(phone_viterbi_duration_penalty_scale),
+                viterbi_short_wav_threshold_ms=float(phone_viterbi_short_wav_threshold_ms),
             )
 
             textgrid_name = os.path.splitext(wav_name)[0] + ".TextGrid"
