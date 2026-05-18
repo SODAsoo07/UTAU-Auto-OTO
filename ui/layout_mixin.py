@@ -1672,6 +1672,19 @@ class LayoutMixin:
                     self.advanced_developer_frame.pack_forget()
                 except Exception:
                     pass
+        if hasattr(self, "boundary_smoke_btn") and self.boundary_smoke_btn is not None:
+            try:
+                is_running = bool(getattr(self, "is_running", False))
+                self.boundary_smoke_btn.configure(state="normal" if (enabled and not is_running) else "disabled")
+            except Exception:
+                pass
+        if hasattr(self, "boundary_smoke_hint_label") and self.boundary_smoke_hint_label is not None:
+            try:
+                self.boundary_smoke_hint_label.configure(
+                    text_color=PALETTE.hint_text if enabled else "#AEB7C6"
+                )
+            except Exception:
+                pass
         detail_frames = getattr(self, "vc_neighbor_detail_frames", [])
         for frame in detail_frames:
             if frame is None:

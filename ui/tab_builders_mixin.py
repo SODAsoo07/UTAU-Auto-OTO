@@ -218,6 +218,30 @@ class TabBuildersMixin:
         self.mfa_install_btn.grid(row=0, column=1, padx=(6, 0), pady=1, sticky="w")
 
         ctk.CTkLabel(
+            left_actions,
+            text=t("실보이스 경계 스모크"),
+            font=("", 12, "bold"),
+            text_color=PALETTE.neutral_text,
+        ).pack(anchor="w", pady=(10, 4))
+
+        self.boundary_smoke_btn = ctk.CTkButton(
+            left_actions,
+            text=t("경계 모델 스모크 테스트"),
+            width=222,
+            command=self._run_phoneme_boundary_smoke,
+        )
+        self._style_primary_button(self.boundary_smoke_btn)
+        self.boundary_smoke_btn.pack(anchor="w", pady=(0, 2))
+
+        self.boundary_smoke_hint_label = ctk.CTkLabel(
+            left_actions,
+            text=t("현재 WAV 경로 기준으로 manifest→train→eval 1회 실행"),
+            text_color=PALETTE.hint_text,
+            justify="left",
+        )
+        self.boundary_smoke_hint_label.pack(anchor="w", pady=(0, 2))
+
+        ctk.CTkLabel(
             right_actions,
             text=t("순서대로 실행"),
             font=("", 13, "bold"),
