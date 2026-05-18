@@ -18,9 +18,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Run a real voicebank smoke: build phoneme-boundary manifest, train one small model, then evaluate it."
     )
-    ap.add_argument("--voicebank-dir", required=True, help="Voicebank/staged folder containing wavs and usually oto.ini/TextGrid files.")
-    ap.add_argument("--source-oto", default="", help="oto.ini used only for aliases. Defaults to <voicebank-dir>/oto.ini.")
-    ap.add_argument("--sidecar", default="", help="Optional JSON/JSONL phone/boundary sidecar. TextGrid is used when this is absent.")
+    ap.add_argument("--voicebank-dir", required=True, help="Voicebank/staged folder containing wavs and usually oto.ini.")
+    ap.add_argument("--source-oto", default="", help="oto.ini used for aliases and OTO-timing-derived boundary events.")
+    ap.add_argument("--sidecar", default="", help="Optional JSON/JSONL phone/boundary sidecar (overrides source-oto timing targets when present).")
     ap.add_argument("--out-dir", default=os.path.join("ml_workspace", "phoneme_boundary", "real_voicebank_smoke"))
     ap.add_argument("--language", default="")
     ap.add_argument("--max-rows", type=int, default=80)
@@ -35,7 +35,6 @@ def main() -> int:
     ap.add_argument("--num-workers", type=int, default=0)
     ap.add_argument("--val-ratio", type=float, default=0.08)
     ap.add_argument("--log-every", type=int, default=10)
-    ap.add_argument("--use-textgrids", action=argparse.BooleanOptionalAction, default=True)
     args = ap.parse_args()
 
     voicebank_dir = os.path.abspath(str(args.voicebank_dir))
@@ -53,8 +52,6 @@ def main() -> int:
             aliases_path="",
             source_oto_path=source_oto,
             sidecar_path=str(args.sidecar or ""),
-            textgrid_dir=voicebank_dir,
-            use_textgrids=bool(args.use_textgrids),
             out_path=manifest_path,
             language=str(args.language or ""),
             require_targets=True,

@@ -17,10 +17,12 @@ def main() -> int:
     )
     ap.add_argument("--wav-dir", required=True, help="Directory containing wav files in recording order.")
     ap.add_argument("--aliases", default="", help="User-provided alias rows. One row must match one wav.")
-    ap.add_argument("--source-oto", default="", help="Optional oto.ini used only for wav->alias strings; timing values are ignored.")
+    ap.add_argument(
+        "--source-oto",
+        default="",
+        help="Optional oto.ini for wav->alias mapping and OTO-timing-derived boundary events when sidecar is absent.",
+    )
     ap.add_argument("--sidecar", default="", help="Optional JSON/JSONL with phone intervals or boundary events.")
-    ap.add_argument("--textgrid-dir", default="", help="Optional directory containing matching .TextGrid files.")
-    ap.add_argument("--use-textgrids", action="store_true", help="Use matching TextGrid phone tier as phone intervals when no sidecar row exists.")
     ap.add_argument("--out", default=os.path.join("ml_workspace", "phoneme_boundary", "manifest.jsonl"))
     ap.add_argument("--language", default="")
     ap.add_argument("--recursive", action="store_true")
@@ -41,8 +43,6 @@ def main() -> int:
             aliases_path=str(args.aliases),
             source_oto_path=str(args.source_oto),
             sidecar_path=str(args.sidecar),
-            textgrid_dir=str(args.textgrid_dir),
-            use_textgrids=bool(args.use_textgrids),
             out_path=str(args.out),
             language=str(args.language),
             recursive=bool(args.recursive),

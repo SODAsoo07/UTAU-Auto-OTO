@@ -101,6 +101,44 @@ def blend_boundary_scores(
     return out
 
 
+def blend_boundary_scores_adaptive(
+    model_scores: dict[str, list[float]],
+    heuristic_scores: dict[str, list[float]],
+    *,
+    quality_scores: list[float] | None,
+    base_weight: float = 0.10,
+    low_conf_threshold: float = 0.55,
+    max_weight: float = 0.28,
+) -> dict[str, list[float]]:
+    if quality_scores is None:
+        return blend_boundary_scores(model_scores, heuristic_scores, heuristic_weight=float(max_weight))
+    q = np.asarray(list(quality_scores or []), dtype=np.float32)
+    if q.size <= 0:
+        return blend_boundary_scores(model_scores, heuristic_scores, heuristic_weight=float(max_weight))
+    base = max(0.0, min(0.95, float(base_weight)))
+    max_w = max(base, min(0.95, float(max_weight)))
+    threshold = max(0.05, min(0.95, float(low_conf_threshold)))
+    ratio = np.clip((threshold - q) / threshold, 0.0, 1.0)
+    weights = base + (max_w - base) * ratio
+    if weights.size >= 3:
+        smooth = weights.copy()
+        smooth[1:-1] = 0.2 * weights[:-2] + 0.6 * weights[1:-1] + 0.2 * weights[2:]
+        weights = smooth
+    out: dict[str, list[float]] = {}
+    for label, values in model_scores.items():
+        h_values = np.asarray(list(heuristic_scores.get(label, []) or []), dtype=np.float32)
+        m_values = np.asarray(list(values or []), dtype=np.float32)
+        n = int(min(m_values.size, h_values.size, weights.size))
+        if n <= 0:
+            out[label] = m_values.astype(np.float32).tolist()
+            continue
+        blended = (1.0 - weights[:n]) * m_values[:n] + weights[:n] * h_values[:n]
+        if m_values.size > n:
+            blended = np.concatenate([blended, m_values[n:]], axis=0)
+        out[label] = np.clip(blended, 0.0, 1.0).astype(np.float32).tolist()
+    return out
+
+
 def _normalize(values: np.ndarray) -> np.ndarray:
     arr = np.asarray(values, dtype=np.float32)
     if arr.size <= 0:
@@ -111,5 +149,4 @@ def _normalize(values: np.ndarray) -> np.ndarray:
         return np.zeros_like(arr, dtype=np.float32)
     return np.clip((arr - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
 
-
-__all__ = ["blend_boundary_scores", "compute_acoustic_boundary_scores"]
+__all__ = ["blend_boundary_scores", "blend_boundary_scores_adaptive", "compute_acoustic_boundary_scores"]

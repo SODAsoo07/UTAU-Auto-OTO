@@ -8,6 +8,14 @@ from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
+from core.alignment.sequence_calibration import (
+    VoicebankCalibration,
+    WavCalibSample,
+    aggregate_calibration,
+    extract_wav_calib_sample,
+    reclist_duration_bias,
+    resolve_effective_silence_threshold,
+)
 from core.ja_lab_generator import parse_ja_filename, split_ja_romaji_syllable
 from core.kr_oto_rules import _split_kr_syllable_parts
 from core.lab_generator import decompose_hangul_to_roman
@@ -2454,10 +2462,15 @@ def _build_phone_duration_priors(
     total_frames: int,
     format_hint: str,
     short_wav: bool,
+    calibration: VoicebankCalibration | None = None,
+    alias_key: str = "",
+    hop_sec: float = 0.0,
+    reclist_prior_weight: float = 1.0,
 ) -> List[Tuple[int, int, float]]:
     count = max(1, len(phone_marks))
     total = max(count, int(total_frames))
     avg = float(total) / float(count)
+    prior_weight = float(np.clip(float(reclist_prior_weight), 0.0, 1.0))
 
     mins: List[int] = []
     maxs: List[int] = []
@@ -2496,15 +2509,22 @@ def _build_phone_duration_priors(
     def _apply_ratio(idx: int, lo: float, hi: float, target_ratio: float | None = None) -> None:
         if idx < 0 or idx >= count:
             return
+        if prior_weight <= 0.0:
+            return
         lo_abs = max(1, int(round(float(total) * float(lo))))
         hi_abs = max(lo_abs + 1, int(round(float(total) * float(hi))))
-        mins[idx] = max(mins[idx], lo_abs)
-        maxs[idx] = min(maxs[idx], hi_abs)
+        prior_min = max(mins[idx], lo_abs)
+        prior_max = min(maxs[idx], hi_abs)
+        if prior_min > prior_max:
+            prior_min = max(1, min(prior_min, hi_abs))
+            prior_max = max(prior_min + 1, hi_abs)
+        mins[idx] = int(round(float(mins[idx]) * (1.0 - prior_weight) + float(prior_min) * prior_weight))
+        maxs[idx] = int(round(float(maxs[idx]) * (1.0 - prior_weight) + float(prior_max) * prior_weight))
         if mins[idx] > maxs[idx]:
-            mins[idx] = max(1, min(mins[idx], hi_abs))
-            maxs[idx] = max(mins[idx] + 1, hi_abs)
+            maxs[idx] = mins[idx] + 1
         if target_ratio is not None:
-            targets[idx] = float(total) * float(target_ratio)
+            prior_target = float(total) * float(target_ratio)
+            targets[idx] = float(targets[idx]) * (1.0 - prior_weight) + prior_target * prior_weight
 
     fmt = _normalize_sequence_format_hint(format_hint)
     if fmt == "cv" and count == 2 and list(phone_states) == ["c", "v"]:
@@ -2533,6 +2553,16 @@ def _build_phone_duration_priors(
         mid_idx = [i for i in range(1, count - 1) if phone_states[i] == "v"]
         for i in mid_idx:
             _apply_ratio(i, 0.12, 0.58, 0.22)
+
+    duration_bias = reclist_duration_bias(
+        calibration=calibration,
+        alias_key=alias_key,
+        nominal_total_frames=int(total),
+        hop_sec=float(hop_sec),
+    )
+    if abs(float(duration_bias) - 1.0) > 1e-4 and prior_weight > 0.0:
+        target_scale = 1.0 + (float(duration_bias) - 1.0) * prior_weight
+        targets = [float(v) * float(target_scale) for v in targets]
 
     min_sum = int(sum(mins))
     if min_sum > total:
@@ -2657,6 +2687,9 @@ def _decode_phone_boundaries_viterbi(
     format_hint: str,
     duration_penalty_scale: float = 0.95,
     short_wav_threshold_ms: float = 430.0,
+    calibration: VoicebankCalibration | None = None,
+    alias_key: str = "",
+    reclist_prior_weight: float = 1.0,
 ) -> List[Tuple[float, float, str]]:
     rows = [(float(s), float(e), str(m or "")) for s, e, m in (phone_rows or [])]
     if len(rows) <= 1 or hop_sec <= 0.0:
@@ -2685,6 +2718,10 @@ def _decode_phone_boundaries_viterbi(
         total_frames=int(end_idx - start_idx),
         format_hint=format_hint,
         short_wav=short_wav,
+        calibration=calibration,
+        alias_key=alias_key,
+        hop_sec=float(hop_sec),
+        reclist_prior_weight=float(reclist_prior_weight),
     )
     if len(priors) != phone_count:
         return rows
@@ -2834,6 +2871,9 @@ def _build_phone_rows(
     viterbi_enable: bool = True,
     viterbi_duration_penalty_scale: float = 0.95,
     viterbi_short_wav_threshold_ms: float = 430.0,
+    calibration: VoicebankCalibration | None = None,
+    alias_key: str = "",
+    reclist_prior_weight: float = 1.0,
 ) -> List[Tuple[float, float, str]]:
     rows: List[Tuple[float, float, str]] = []
     for start, end, mark in word_rows:
@@ -2882,6 +2922,9 @@ def _build_phone_rows(
         format_hint=str(format_hint or ""),
         duration_penalty_scale=float(viterbi_duration_penalty_scale),
         short_wav_threshold_ms=float(viterbi_short_wav_threshold_ms),
+        calibration=calibration,
+        alias_key=str(alias_key or ""),
+        reclist_prior_weight=float(reclist_prior_weight),
     )
     if len(refined) != len(rows):
         return rows
@@ -2998,6 +3041,85 @@ def check_sequence_aligner_ready(
         ready=True,
         wav_count=int(len(wav_files)),
     )
+
+
+def _alias_key_for_calibration(words: Sequence[str], wav_path: str) -> str:
+    toks = [str(w or "").strip().lower() for w in (words or []) if str(w or "").strip()]
+    if toks:
+        return " ".join(toks)
+    base = os.path.splitext(os.path.basename(str(wav_path or "")))[0]
+    return str(base).strip().lower()
+
+
+def _compute_voicebank_calibration(
+    wav_files: Sequence[str],
+    *,
+    language: str,
+    frame_ms: int,
+    hop_ms: int,
+    analysis_dc_remove: bool,
+    analysis_highpass_hz: float,
+    analysis_max_gain_db: float,
+    analysis_target_rms: float,
+    silence_q: float,
+    silence_scale: float,
+    min_active_ratio: float,
+    max_active_ratio: float,
+    callback=None,
+) -> VoicebankCalibration:
+    samples: List[WavCalibSample] = []
+    for wav_path in wav_files:
+        try:
+            words, _source = _load_transcript_words(wav_path, language)
+            signal, sr, _duration = _read_pcm_as_float_mono(wav_path)
+            if signal.size <= 0:
+                continue
+            analysis_signal = _prepare_analysis_signal(
+                signal,
+                sr,
+                dc_remove=bool(analysis_dc_remove),
+                highpass_hz=float(analysis_highpass_hz),
+                max_gain_db=float(analysis_max_gain_db),
+                target_rms=float(analysis_target_rms),
+            )
+            rms, hop_sec = _framewise_rms(
+                analysis_signal,
+                sr,
+                frame_ms=int(frame_ms),
+                hop_ms=int(hop_ms),
+            )
+            if rms.size <= 0 or hop_sec <= 0.0:
+                continue
+            threshold = _resolve_silence_threshold(
+                rms,
+                base_quantile=float(silence_q),
+                scale=float(silence_scale),
+                min_active_ratio=float(min_active_ratio),
+                max_active_ratio=float(max_active_ratio),
+            )
+            samples.append(
+                extract_wav_calib_sample(
+                    rms,
+                    hop_sec=float(hop_sec),
+                    silence_threshold=float(threshold),
+                    words=words,
+                    alias_key=_alias_key_for_calibration(words, wav_path),
+                )
+            )
+        except Exception as exc:
+            _emit(callback, f"[SEQ-CALIB] skip {os.path.basename(str(wav_path))}: {exc}")
+            continue
+
+    calibration = aggregate_calibration(samples)
+    if calibration.is_active():
+        _emit(
+            callback,
+            f"[SEQ-CALIB] samples={calibration.sample_count} "
+            f"sil_floor={calibration.silence_floor_rms:.4f} "
+            f"voiced_floor={calibration.voiced_floor_rms:.4f} "
+            f"reclist={calibration.reclist_kind}",
+        )
+    return calibration
 
 
 def run_sequence_align(
@@ -3232,6 +3354,22 @@ def run_sequence_align(
         min_value=120.0,
         max_value=1200.0,
     )
+    vb_calibration_enable = _env_bool(
+        "UTOA_SEQUENCE_VB_CALIBRATION_ENABLE",
+        default=_profile_bool(profile, "vb_calibration_enable", True),
+    )
+    vb_silence_floor_weight = _env_float(
+        "UTOA_SEQUENCE_VB_SILENCE_FLOOR_WEIGHT",
+        _profile_float(profile, "vb_silence_floor_weight", 0.7),
+        min_value=0.0,
+        max_value=1.0,
+    )
+    vb_reclist_prior_weight = _env_float(
+        "UTOA_SEQUENCE_VB_RECLIST_PRIOR_WEIGHT",
+        _profile_float(profile, "vb_reclist_prior_weight", 0.5),
+        min_value=0.0,
+        max_value=1.0,
+    )
     cvn_backend = str(os.environ.get("UTOA_SEQUENCE_CVN_BACKEND", str(profile.get("cvn_backend", "") or "")) or "").strip().lower()
     if cvn_backend not in {"", "rule", "logreg", "gbdt"}:
         cvn_backend = ""
@@ -3263,6 +3401,30 @@ def run_sequence_align(
         cvn_c_threshold = float(np.clip(float(cvn_c_threshold), 0.01, 0.99))
 
     os.makedirs(output_folder, exist_ok=True)
+
+    calibration: VoicebankCalibration | None = None
+    calibration_auto_format = False
+    if bool(vb_calibration_enable):
+        calibration = _compute_voicebank_calibration(
+            wav_files,
+            language=lang,
+            frame_ms=int(frame_ms),
+            hop_ms=int(hop_ms),
+            analysis_dc_remove=bool(analysis_dc_remove),
+            analysis_highpass_hz=float(analysis_highpass_hz),
+            analysis_max_gain_db=float(analysis_max_gain_db),
+            analysis_target_rms=float(analysis_target_rms),
+            silence_q=float(silence_q),
+            silence_scale=float(silence_scale),
+            min_active_ratio=float(min_active_ratio),
+            max_active_ratio=float(max_active_ratio),
+            callback=callback,
+        )
+        if calibration is not None and calibration.is_active():
+            if not format_norm and calibration.reclist_kind not in {"", "unknown"}:
+                format_norm = calibration.reclist_kind
+                calibration_auto_format = True
+                _emit(callback, f"[SEQ-CALIB] format_norm auto-set to {format_norm}")
 
     ok_count = 0
     errors: List[str] = []
@@ -3332,6 +3494,15 @@ def run_sequence_align(
                 min_active_ratio=local_min_active_ratio,
                 max_active_ratio=local_max_active_ratio,
             )
+            if calibration is not None and calibration.is_active():
+                silence_threshold = resolve_effective_silence_threshold(
+                    silence_threshold,
+                    calibration=calibration,
+                    floor_weight=float(vb_silence_floor_weight),
+                    values=rms,
+                    min_active_ratio=local_min_active_ratio,
+                    max_active_ratio=local_max_active_ratio,
+                )
             min_active_frames = max(1, int(round((float(min_active_ms) / 1000.0) / max(hop_sec, 1e-4))))
             max_gap_frames = max(0, int(round((float(max_gap_ms) / 1000.0) / max(hop_sec, 1e-4))))
             voicing_mask = _build_frame_voicing_mask(
@@ -3452,6 +3623,13 @@ def run_sequence_align(
                 viterbi_enable=bool(phone_viterbi_enable),
                 viterbi_duration_penalty_scale=float(phone_viterbi_duration_penalty_scale),
                 viterbi_short_wav_threshold_ms=float(phone_viterbi_short_wav_threshold_ms),
+                calibration=calibration,
+                alias_key=_alias_key_for_calibration(words, wav_path),
+                reclist_prior_weight=(
+                    float(vb_reclist_prior_weight)
+                    if bool(calibration_auto_format)
+                    else 1.0
+                ),
             )
 
             textgrid_name = os.path.splitext(wav_name)[0] + ".TextGrid"

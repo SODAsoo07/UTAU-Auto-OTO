@@ -13,6 +13,7 @@ from core.sequence_aligner import (
     _apply_uniform_boundary_advance,
     _build_ap_sp_mask,
     _build_frame_voicing_mask,
+    _build_phone_duration_priors,
     _build_phone_rows,
     _inject_ap_labels,
     _insert_internal_pause_rows,
@@ -595,3 +596,33 @@ def test_build_phone_rows_viterbi_cv_short_wav_caps_consonant_ratio():
     assert ref_cons < base_cons
     assert ref_cons <= 0.115
     assert ref_cons >= 0.040
+
+
+def test_build_phone_duration_priors_blends_reclist_prior_weight():
+    generic = _build_phone_duration_priors(
+        ["k", "a"],
+        ["c", "v"],
+        total_frames=100,
+        format_hint="cv",
+        short_wav=False,
+        reclist_prior_weight=0.0,
+    )
+    half = _build_phone_duration_priors(
+        ["k", "a"],
+        ["c", "v"],
+        total_frames=100,
+        format_hint="cv",
+        short_wav=False,
+        reclist_prior_weight=0.5,
+    )
+    full = _build_phone_duration_priors(
+        ["k", "a"],
+        ["c", "v"],
+        total_frames=100,
+        format_hint="cv",
+        short_wav=False,
+        reclist_prior_weight=1.0,
+    )
+
+    assert generic[0][2] < half[0][2] < full[0][2]
+    assert full[0][1] < half[0][1] < generic[0][1]

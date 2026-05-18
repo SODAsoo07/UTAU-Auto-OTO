@@ -39,6 +39,8 @@ class PhonemeBoundaryTrainConfig:
     phone_state_loss_weight: float = 0.35
     consonant_loss_weight: float = 0.20
     vowel_loss_weight: float = 0.20
+    boundary_vowel_onset_weight: float = 1.0
+    boundary_vowel_nucleus_weight: float = 1.0
 
 
 class PhonemeBoundaryDataset:
@@ -120,6 +122,7 @@ def train_phoneme_boundary_from_manifest(
     manifest_dir: str = "",
     train_config: PhonemeBoundaryTrainConfig | None = None,
     model_config: PhonemeBoundaryDetectorConfig | None = None,
+    init_checkpoint: str | None = None,
 ) -> dict[str, Any]:
     torch = __import__("torch")
     nn = __import__("torch.nn").nn
@@ -181,8 +184,22 @@ def train_phoneme_boundary_from_manifest(
     use_amp = bool(cfg.amp and device.type == "cuda")
     scaler = _make_grad_scaler(torch, enabled=use_amp)
     model = build_phoneme_boundary_detector(model_cfg).to(device)
+    if init_checkpoint:
+        payload = torch.load(str(init_checkpoint), map_location=str(device))
+        state = payload.get("state_dict") if isinstance(payload, dict) else None
+        if not isinstance(state, dict):
+            raise ValueError(f"init_checkpoint missing state_dict: {init_checkpoint}")
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        print(f"[phoneme_boundary][init] loaded {init_checkpoint} missing={len(missing)} unexpected={len(unexpected)}", flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg.lr), weight_decay=1e-4)
     pos_weight = torch.full((len(model_cfg.labels),), float(cfg.pos_weight), dtype=torch.float32, device=device)
+    boundary_label_weight = _boundary_label_weight_tensor(
+        torch,
+        labels=tuple(model_cfg.labels),
+        vowel_onset_weight=float(cfg.boundary_vowel_onset_weight),
+        vowel_nucleus_weight=float(cfg.boundary_vowel_nucleus_weight),
+        device=device,
+    )
     history: list[dict[str, float]] = []
     best_val: float | None = None
     best_state = None
@@ -206,6 +223,7 @@ def train_phoneme_boundary_from_manifest(
                     reduction="none",
                     pos_weight=pos_weight,
                 )
+                raw = raw * boundary_label_weight.view(1, 1, -1)
                 denom = torch.clamp(mask.sum() * y.shape[-1], min=1.0)
                 loss = (raw * mask[:, :, None]).sum() / denom
                 if out.get("quality_logits") is not None and float(cfg.quality_loss_weight) > 0.0:
@@ -246,6 +264,7 @@ def train_phoneme_boundary_from_manifest(
                 model,
                 val_loader,
                 pos_weight,
+                boundary_label_weight,
                 device,
                 torch,
                 nn,
@@ -329,6 +348,7 @@ def _evaluate(
     model,
     loader,
     pos_weight,
+    boundary_label_weight,
     device,
     torch,
     nn,
@@ -355,6 +375,7 @@ def _evaluate(
                 reduction="none",
                 pos_weight=pos_weight,
             )
+            raw = raw * boundary_label_weight.view(1, 1, -1)
             loss = (raw * mask[:, :, None]).sum() / torch.clamp(mask.sum() * y.shape[-1], min=1.0)
             if out.get("quality_logits") is not None and float(quality_weight) > 0.0:
                 q_raw = nn.functional.binary_cross_entropy_with_logits(out["quality_logits"], q, reduction="none")
@@ -452,6 +473,26 @@ def _autocast(torch, *, enabled: bool):
         except TypeError:
             return amp.autocast(enabled=True)
     return torch.cuda.amp.autocast(enabled=True)
+
+
+def _boundary_label_weight_tensor(
+    torch,
+    *,
+    labels: tuple[str, ...],
+    vowel_onset_weight: float,
+    vowel_nucleus_weight: float,
+    device,
+):
+    weights = np.ones((len(labels),), dtype=np.float32)
+    onset_w = max(0.1, float(vowel_onset_weight))
+    nucleus_w = max(0.1, float(vowel_nucleus_weight))
+    for idx, label in enumerate(labels):
+        text = str(label or "").strip().lower()
+        if text == "vowel_onset":
+            weights[idx] *= onset_w
+        elif text == "vowel_nucleus":
+            weights[idx] *= nucleus_w
+    return torch.from_numpy(weights).to(device)
 
 
 __all__ = [

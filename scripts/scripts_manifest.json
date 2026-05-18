@@ -75,6 +75,12 @@
       "note": "Manual alignment visualization/comparison helper."
     },
     {
+      "path": "tests/scripts/alignment/visualize_textgrid_oto_overlay.py",
+      "status": "manual",
+      "owner": "align",
+      "note": "Visualize TextGrid phones and source OTO anchor positions together."
+    },
+    {
       "path": "tests/scripts/evaluate/coupled/export_coupled_onnx.py",
       "status": "manual",
       "owner": "ml",
@@ -103,6 +109,12 @@
       "status": "manual",
       "owner": "ml",
       "note": "Manual preprocessing helper for Sinsy label sequence training data."
+    },
+    {
+      "path": "tests/scripts/training/alignment/split_filename_lab_match_manifest.py",
+      "status": "manual",
+      "owner": "align",
+      "note": "Split wav/lab pairs into filename-match and mismatch manifests."
     },
     {
       "path": "scripts/run_oto_generation_batch.py",

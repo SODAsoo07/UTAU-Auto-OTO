@@ -33,6 +33,8 @@ def main() -> int:
     ap.add_argument("--phone-state-loss-weight", type=float, default=0.35)
     ap.add_argument("--consonant-loss-weight", type=float, default=0.20)
     ap.add_argument("--vowel-loss-weight", type=float, default=0.20)
+    ap.add_argument("--boundary-vowel-onset-weight", type=float, default=1.0)
+    ap.add_argument("--boundary-vowel-nucleus-weight", type=float, default=1.0)
     args = ap.parse_args()
 
     rows = read_boundary_manifest(args.manifest)
@@ -59,6 +61,8 @@ def main() -> int:
         phone_state_loss_weight=float(args.phone_state_loss_weight),
         consonant_loss_weight=float(args.consonant_loss_weight),
         vowel_loss_weight=float(args.vowel_loss_weight),
+        boundary_vowel_onset_weight=float(args.boundary_vowel_onset_weight),
+        boundary_vowel_nucleus_weight=float(args.boundary_vowel_nucleus_weight),
     )
     result = train_phoneme_boundary_from_manifest(
         rows,

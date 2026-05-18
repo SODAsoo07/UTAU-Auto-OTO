@@ -1685,6 +1685,24 @@ class LayoutMixin:
                 )
             except Exception:
                 pass
+        if hasattr(self, "phoneme_boundary_visualize_btn") and self.phoneme_boundary_visualize_btn is not None:
+            try:
+                is_running = bool(getattr(self, "is_running", False))
+                self.phoneme_boundary_visualize_btn.configure(state="normal" if (enabled and not is_running) else "disabled")
+            except Exception:
+                pass
+        if hasattr(self, "phoneme_boundary_model_menu") and self.phoneme_boundary_model_menu is not None:
+            try:
+                self.phoneme_boundary_model_menu.configure(state="normal" if enabled else "disabled")
+            except Exception:
+                pass
+        if hasattr(self, "phoneme_boundary_visualize_hint") and self.phoneme_boundary_visualize_hint is not None:
+            try:
+                self.phoneme_boundary_visualize_hint.configure(
+                    text_color=PALETTE.hint_text if enabled else "#AEB7C6"
+                )
+            except Exception:
+                pass
         detail_frames = getattr(self, "vc_neighbor_detail_frames", [])
         for frame in detail_frames:
             if frame is None:

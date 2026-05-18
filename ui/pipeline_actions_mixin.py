@@ -2246,10 +2246,29 @@ class PipelineActionsMixin:
 
                 bank_name = os.path.basename(os.path.normpath(voicebank_dir)) or "voicebank"
                 timestamp = time.strftime("%Y%m%d_%H%M%S")
-                out_dir = os.path.abspath(
-                    os.path.join("ml_workspace", "phoneme_boundary", "ui_smoke", f"{bank_name}_{timestamp}")
+                smoke_rel_dir = os.path.join(
+                    "ml_workspace", "phoneme_boundary", "ui_smoke", f"{bank_name}_{timestamp}"
                 )
-                os.makedirs(out_dir, exist_ok=True)
+                base_dir = (
+                    str(getattr(self, "writable_data_dir", "") or "").strip()
+                    or str(getattr(self, "app_data_dir", "") or "").strip()
+                    or str(getattr(self, "app_dir", "") or "").strip()
+                    or os.getcwd()
+                )
+                out_dir = os.path.abspath(os.path.join(base_dir, smoke_rel_dir))
+                try:
+                    os.makedirs(out_dir, exist_ok=True)
+                except PermissionError:
+                    fallback_base = (
+                        str(os.environ.get("LOCALAPPDATA", "") or "").strip()
+                        or str(os.environ.get("TEMP", "") or "").strip()
+                        or os.getcwd()
+                    )
+                    out_dir = os.path.abspath(
+                        os.path.join(fallback_base, "UTAU_Auto_OTO_v3", smoke_rel_dir)
+                    )
+                    os.makedirs(out_dir, exist_ok=True)
+                    self._append_log(f"[Boundary Smoke] 출력 경로 권한 문제로 폴백 경로를 사용합니다: {out_dir}")
 
                 module_args = [
                     "-m",
@@ -2276,7 +2295,6 @@ class PipelineActionsMixin:
                     "0",
                     "--device",
                     "auto",
-                    "--use-textgrids",
                 ]
                 if source_oto:
                     module_args.extend(["--source-oto", source_oto])
@@ -2329,7 +2347,7 @@ class PipelineActionsMixin:
                     self._set_status("❌ Python 런너 없음")
                     return
 
-                if int(last_return_code or -1) != 0:
+                if last_return_code is None or int(last_return_code) != 0:
                     self._append_log(f"❌ 경계 스모크 테스트 실패 (code={last_return_code})")
                     self._append_log(f"   출력 폴더: {out_dir}")
                     self._set_status("❌ 경계 스모크 실패")
@@ -2359,6 +2377,118 @@ class PipelineActionsMixin:
                 self._set_status("✅ 경계 스모크 테스트 완료")
             except Exception as e:
                 self._handle_error("경계 스모크 테스트", e)
+            finally:
+                self._set_running(False)
+
+        self._run_in_thread(task)
+
+    def _run_phoneme_boundary_visualize(self):
+        """현재 WAV 폴더에 대해 선택한 PhonemeBoundary 모델로 예측 JSON+PNG를 생성합니다."""
+
+        def task():
+            self._set_running(True)
+            self._set_status("PhonemeBoundary 시각화 준비 중...")
+            try:
+                if hasattr(self, "developer_mode_enabled_var") and not bool(self.developer_mode_enabled_var.get()):
+                    self._append_log("⚠ PhonemeBoundary 시각화는 개발자 모드에서만 실행할 수 있습니다.")
+                    self._set_status("⚠ 개발자 모드를 먼저 켜 주세요.")
+                    return
+
+                wav_dir = str(self.wav_entry.get() if hasattr(self, "wav_entry") else "").strip()
+                if not wav_dir or not os.path.isdir(wav_dir):
+                    self._append_log("❌ WAV 폴더를 먼저 지정해 주세요.")
+                    self._set_status("❌ WAV 경로 누락")
+                    return
+                wav_dir = os.path.abspath(wav_dir)
+
+                models = getattr(self, "_phoneme_boundary_models", []) or []
+                selected_label = str(self.phoneme_boundary_model_var.get() if hasattr(self, "phoneme_boundary_model_var") else "").strip()
+                chosen = next((m for m in models if m.get("label") == selected_label), None)
+                if chosen is None:
+                    self._append_log("❌ 사용 가능한 PhonemeBoundary 모델이 없습니다. ml_workspace/models/phoneme_boundary/*.pt 를 확인해 주세요.")
+                    self._set_status("❌ 모델 없음")
+                    return
+                model_path = str(chosen.get("path") or "").strip()
+
+                bank_name = os.path.basename(os.path.normpath(wav_dir)) or "voicebank"
+                model_stem = os.path.splitext(os.path.basename(model_path))[0]
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                rel = os.path.join("ml_workspace", "phoneme_boundary", "ui_visualize", f"{bank_name}_{model_stem}_{timestamp}")
+                base_dir = (
+                    str(getattr(self, "writable_data_dir", "") or "").strip()
+                    or str(getattr(self, "app_data_dir", "") or "").strip()
+                    or str(getattr(self, "app_dir", "") or "").strip()
+                    or os.getcwd()
+                )
+                out_dir = os.path.abspath(os.path.join(base_dir, rel))
+                try:
+                    os.makedirs(out_dir, exist_ok=True)
+                except PermissionError:
+                    fallback = str(os.environ.get("LOCALAPPDATA", "") or os.environ.get("TEMP", "") or os.getcwd())
+                    out_dir = os.path.abspath(os.path.join(fallback, "UTAU_Auto_OTO_v3", rel))
+                    os.makedirs(out_dir, exist_ok=True)
+
+                runner_candidates = []
+                if str(getattr(sys, "executable", "") or "").strip():
+                    runner_candidates.append([str(sys.executable)])
+                runner_candidates.append(["py", "-3.11"])
+                runner_candidates.append(["python"])
+
+                def _run(module_args, tag):
+                    last_code = None
+                    for runner in runner_candidates:
+                        cmd = list(runner) + module_args
+                        pretty = " ".join(f'"{p}"' if " " in str(p) else str(p) for p in cmd)
+                        self._append_log(f"[{tag}] 실행: {pretty}")
+                        try:
+                            proc = self._popen_subprocess_hidden(
+                                cmd,
+                                cwd=str(getattr(self, "app_dir", "") or os.getcwd()),
+                                stdout=sp.PIPE, stderr=sp.STDOUT, text=False,
+                            )
+                        except FileNotFoundError as e:
+                            self._append_log(f"[{tag}] 런너 실패({runner[0]}): {e}")
+                            continue
+                        for line in self._iter_decoded_stdout_lines(proc):
+                            self._append_log(f"[{tag}] {line}")
+                        proc.wait()
+                        last_code = int(proc.returncode)
+                        if last_code == 0:
+                            return 0
+                        self._append_log(f"[{tag}] 실행 실패(code={last_code}), 다음 런너 시도")
+                    return last_code if last_code is not None else -1
+
+                predict_args = [
+                    "-m", "scripts.dev.predict_phoneme_boundary_dir",
+                    "--model", model_path,
+                    "--wav-dir", wav_dir,
+                    "--out-dir", out_dir,
+                    "--device", "auto",
+                ]
+                rc = _run(predict_args, "PB Predict")
+                if rc != 0:
+                    self._append_log(f"❌ 예측 단계 실패 (code={rc})")
+                    self._set_status("❌ 예측 실패")
+                    return
+
+                viz_args = [
+                    "-m", "scripts.dev.visualize_phoneme_boundary",
+                    "--batch", out_dir,
+                    "--out-dir", out_dir,
+                ]
+                rc = _run(viz_args, "PB Visualize")
+                if rc != 0:
+                    self._append_log(f"⚠ 시각화 단계 실패 (code={rc}). JSON은 출력 폴더에 남아 있습니다.")
+                    self._set_status("⚠ 시각화 실패 (JSON만 생성)")
+                else:
+                    self._append_log(f"✅ 완료. 결과 폴더: {out_dir}")
+                    self._set_status("✅ PhonemeBoundary 시각화 완료")
+                try:
+                    os.startfile(out_dir)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            except Exception as e:
+                self._handle_error("PhonemeBoundary 시각화", e)
             finally:
                 self._set_running(False)
 
