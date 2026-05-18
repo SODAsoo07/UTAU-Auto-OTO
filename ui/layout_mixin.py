@@ -406,6 +406,41 @@ class LayoutMixin:
             text_color=PALETTE.neutral_text,
         )
         self.no_mfa_oto_mode_hint_label.pack(side="left", fill="x", expand=True)
+        # Boundary scorer checkpoint picker. Discovered model files appear as
+        # additional options; "자동 (auto)" defers to the resolver's default
+        # (mtime-newest non-experimental). Hidden together with the device row
+        # under the same developer-mode + CRNN-engine gate (see _sync_aligner_ui).
+        self.row_oto_crnn_scorer_model = build_form_row(form_body)
+        build_left_label(self.row_oto_crnn_scorer_model, t("Boundary scorer:")).pack(side="left")
+        scorer_choices = (
+            self._oto_crnn_model_choice_options()
+            if hasattr(self, "_oto_crnn_model_choice_options")
+            else ["자동 (auto)"]
+        )
+        if hasattr(self, "_set_oto_crnn_model_choice_from_code"):
+            initial_code = ""
+            if hasattr(self, "oto_crnn_model_choice_var"):
+                try:
+                    initial_code = self.oto_crnn_model_choice_var.get()
+                except Exception:
+                    initial_code = ""
+            self._set_oto_crnn_model_choice_from_code(initial_code or "auto")
+        self.oto_crnn_scorer_model_menu = ctk.CTkOptionMenu(
+            self.row_oto_crnn_scorer_model,
+            values=scorer_choices,
+            variable=self.oto_crnn_model_choice_var,
+            width=460,
+            command=lambda _v: self._on_oto_crnn_model_choice_change(_v),
+        )
+        _style_blue_menu(self.oto_crnn_scorer_model_menu)
+        self.oto_crnn_scorer_model_menu.pack(side="left", padx=(6, 8))
+        self.oto_crnn_scorer_model_hint = ctk.CTkLabel(
+            self.row_oto_crnn_scorer_model,
+            text=t("(자동=기본 모델, 다른 .pt 선택 시 추론에 즉시 반영)"),
+            text_color=PALETTE.neutral_text,
+        )
+        self.oto_crnn_scorer_model_hint.pack(side="left", fill="x", expand=True)
+        self.row_oto_crnn_scorer_model.pack_forget()
         self.row_oto_crnn_model = build_form_row(form_body)
         build_left_label(self.row_oto_crnn_model, t("CRNN Device:")).pack(side="left")
         self.oto_crnn_device_menu = ctk.CTkOptionMenu(
@@ -419,7 +454,7 @@ class LayoutMixin:
         self.oto_crnn_device_menu.pack(side="left", padx=(6, 8))
         self.oto_crnn_model_hint_label = ctk.CTkLabel(
             self.row_oto_crnn_model,
-            text=t("(Boundary scorer checkpoint is auto-resolved)"),
+            text=t("(추론 디바이스. auto = GPU 가용 시 GPU 사용)"),
             text_color=PALETTE.neutral_text,
         )
         self.oto_crnn_model_hint_label.pack(side="left", fill="x", expand=True)
@@ -1238,6 +1273,84 @@ class LayoutMixin:
         )
         self._save_config()
 
+    # --- Boundary scorer model choice --------------------------------
+    # The dropdown label is "자동 (auto)" or a friendly label produced by
+    # `list_available_boundary_scorer_models`. The persisted code is either
+    # "auto" or the model basename. The resolver in
+    # `core.coarse_crnn.oto_predictor_generator` accepts a basename and
+    # searches the standard roots, so we never store an absolute path.
+
+    _OTO_CRNN_MODEL_CHOICE_AUTO_LABEL = "자동 (auto)"
+
+    def _list_oto_crnn_model_choices(self) -> list[dict[str, object]]:
+        try:
+            from core.coarse_crnn.oto_predictor_generator import (
+                list_available_boundary_scorer_models,
+            )
+        except Exception:
+            return []
+        try:
+            return list_available_boundary_scorer_models()
+        except Exception:
+            return []
+
+    def _oto_crnn_model_choice_options(self) -> list[str]:
+        labels = [self._OTO_CRNN_MODEL_CHOICE_AUTO_LABEL]
+        for item in self._list_oto_crnn_model_choices():
+            label = str(item.get("label") or item.get("name") or "").strip()
+            if label and label not in labels:
+                labels.append(label)
+        return labels
+
+    def _oto_crnn_label_to_code(self, label: object) -> str:
+        text = str(label or "").strip()
+        if not text or text == self._OTO_CRNN_MODEL_CHOICE_AUTO_LABEL or text.lower() == "auto":
+            return "auto"
+        for item in self._list_oto_crnn_model_choices():
+            if str(item.get("label") or "") == text:
+                return str(item.get("name") or "auto")
+            if str(item.get("name") or "") == text:
+                return str(item.get("name") or "auto")
+        # Unknown label (e.g. stale config) → fall back to auto-resolve.
+        return "auto"
+
+    def _oto_crnn_code_to_label(self, code: object) -> str:
+        text = str(code or "").strip()
+        if not text or text.lower() == "auto":
+            return self._OTO_CRNN_MODEL_CHOICE_AUTO_LABEL
+        for item in self._list_oto_crnn_model_choices():
+            if str(item.get("name") or "") == text:
+                return str(item.get("label") or item.get("name") or text)
+        return self._OTO_CRNN_MODEL_CHOICE_AUTO_LABEL
+
+    def _set_oto_crnn_model_choice_from_code(self, code) -> str:
+        label = self._oto_crnn_code_to_label(code)
+        if hasattr(self, "oto_crnn_model_choice_var"):
+            try:
+                self.oto_crnn_model_choice_var.set(label)
+            except Exception:
+                pass
+        return self._oto_crnn_label_to_code(label)
+
+    def _get_oto_crnn_model_choice_code(self) -> str:
+        if not hasattr(self, "oto_crnn_model_choice_var"):
+            return "auto"
+        try:
+            current = self.oto_crnn_model_choice_var.get()
+        except Exception:
+            current = ""
+        return self._oto_crnn_label_to_code(current)
+
+    def _on_oto_crnn_model_choice_change(self, _value=None):
+        code = self._get_oto_crnn_model_choice_code()
+        if hasattr(self, "_append_log"):
+            try:
+                self._append_log(f"[CRNN-OTO] boundary scorer model = {code}")
+            except Exception:
+                pass
+        if hasattr(self, "_save_config"):
+            self._save_config()
+
     def _set_no_mfa_oto_mode_from_code(self, code):
         normalized = self._normalize_no_mfa_oto_mode_code(code)
         label = "CRNN OTO 예측기(실험)" if normalized == "crnn" else "베이스 OTO 재매핑 + 보정"
@@ -1419,6 +1532,32 @@ class LayoutMixin:
         show_crnn_model_row = bool(
             developer_enabled and (use_coarse_crnn or (show_no_mfa_mode_row and no_mfa_mode_code == "crnn"))
         )
+        if hasattr(self, "row_oto_crnn_scorer_model") and self.row_oto_crnn_scorer_model is not None:
+            try:
+                if show_crnn_model_row:
+                    if hasattr(self, "oto_crnn_scorer_model_menu") and hasattr(self, "_oto_crnn_model_choice_options"):
+                        try:
+                            choices = self._oto_crnn_model_choice_options()
+                            self.oto_crnn_scorer_model_menu.configure(values=choices)
+                            if hasattr(self, "oto_crnn_model_choice_var"):
+                                current_label = ""
+                                try:
+                                    current_label = self.oto_crnn_model_choice_var.get()
+                                except Exception:
+                                    current_label = ""
+                                if current_label not in choices:
+                                    self._set_oto_crnn_model_choice_from_code("auto")
+                        except Exception:
+                            pass
+                    if not self.row_oto_crnn_scorer_model.winfo_ismapped():
+                        pack_kwargs = {"fill": "x", "pady": 4}
+                        if hasattr(self, "row_align_extra") and self.row_align_extra is not None:
+                            pack_kwargs["before"] = self.row_align_extra
+                        self.row_oto_crnn_scorer_model.pack(**pack_kwargs)
+                else:
+                    self.row_oto_crnn_scorer_model.pack_forget()
+            except Exception:
+                pass
         if hasattr(self, "row_oto_crnn_model") and self.row_oto_crnn_model is not None:
             try:
                 if show_crnn_model_row:

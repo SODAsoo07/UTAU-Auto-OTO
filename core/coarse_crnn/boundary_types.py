@@ -199,6 +199,15 @@ class AbsoluteOtoAnchors:
     cutoff_abs: float
     confidence: float = 0.0
     reason: str = ""
+    # Audio-driven window anchors (target generation only). When set, the
+    # target painter uses these instead of `offset_abs` / `cutoff_abs` for the
+    # `syllable_onset` and `silence_boundary` labels respectively, so the
+    # boundary scorer learns to mark the natural acoustic edges rather than
+    # the (often tight) source-OTO edges. `None` means "fall back to the
+    # source-OTO anchor". These do NOT flow into runtime params — they only
+    # shape the training signal.
+    syllable_audio_start_abs: float | None = None
+    silence_audio_end_abs: float | None = None
 
 
 @dataclass(frozen=True)

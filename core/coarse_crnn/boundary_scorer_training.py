@@ -16,7 +16,13 @@ from core.coarse_crnn.boundary_scorer_model import (
     build_boundary_scorer,
     save_boundary_checkpoint,
 )
-from core.coarse_crnn.boundary_targets import build_boundary_target_map, build_phone_aware_target_map, training_rows_to_wav_groups
+from core.coarse_crnn.boundary_targets import (
+    build_boundary_target_map,
+    build_phone_aware_target_map,
+    compute_per_row_audio_extents,
+    inject_audio_anchors_into_rows,
+    training_rows_to_wav_groups,
+)
 from core.coarse_crnn.boundary_types import PHONE_AWARE_IGNORE_INDEX, TRANSITION_ROLES
 from core.coarse_crnn.training import resolve_torch_device
 
@@ -104,8 +110,21 @@ class _BoundaryDataset:
         )
         frame_count = int(features.shape[0])
         duration_ms = max(1.0, float(duration) * 1000.0)
+        # Audio-driven syllable_onset / silence_boundary anchors. Computed
+        # once per wav from the mel features and injected into a per-row copy
+        # of the anchors so target builders see the natural acoustic edges
+        # instead of the (often tight) source-OTO offsets/cutoffs.
+        try:
+            extents = compute_per_row_audio_extents(
+                features=features,
+                hop_ms=float(hop_sec) * 1000.0,
+                rows=rows,
+            )
+            rows_for_targets = inject_audio_anchors_into_rows(rows, extents)
+        except Exception:
+            rows_for_targets = rows
         _times, target = build_boundary_target_map(
-            rows,
+            rows_for_targets,
             duration_ms=duration_ms,
             hop_ms=float(hop_sec) * 1000.0,
             frame_count=frame_count,
@@ -113,7 +132,7 @@ class _BoundaryDataset:
         phone_target = None
         if bool(getattr(self.cfg, "enable_phone_aux_heads", False)) or bool(getattr(self.cfg, "enable_phone_family_heads", False)):
             _phone_times, phone_target = build_phone_aware_target_map(
-                rows,
+                rows_for_targets,
                 duration_ms=duration_ms,
                 hop_ms=float(hop_sec) * 1000.0,
                 frame_count=frame_count,

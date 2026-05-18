@@ -1336,6 +1336,7 @@ class AppRuntimeMixin:
             "no_mfa_oto_mode_var": "베이스 OTO 재매핑 + 보정",
             "oto_crnn_model_path_var": "",
             "oto_crnn_engine_var": "boundary_decoder",
+            "oto_crnn_model_choice_var": "auto",
             "oto_crnn_device_var": "auto",
             "oto_crnn_special_aliases_var": "",
             "enable_ml_correction_var": True,
@@ -3388,6 +3389,11 @@ class ConfigMixin:
                 if hasattr(self, "_get_oto_crnn_engine_code")
                 else "boundary_decoder"
             ),
+            "oto_crnn_model_choice": (
+                self._get_oto_crnn_model_choice_code()
+                if hasattr(self, "_get_oto_crnn_model_choice_code")
+                else "auto"
+            ),
             "oto_crnn_device": self.oto_crnn_device_var.get() if hasattr(self, "oto_crnn_device_var") else "auto",
             "oto_crnn_special_aliases": self.oto_crnn_special_aliases_var.get() if hasattr(self, "oto_crnn_special_aliases_var") else "",
             "cvn_correction_enable": self.cvn_correction_enable_var.get() if hasattr(self, "cvn_correction_enable_var") else True,
@@ -3986,6 +3992,8 @@ class ConfigMixin:
             if "oto_crnn_device" in config and hasattr(self, "oto_crnn_device_var"):
                 device = str(config.get("oto_crnn_device", "auto") or "auto").strip().lower()
                 self.oto_crnn_device_var.set(device if device in {"auto", "cpu", "cuda"} else "auto")
+            if "oto_crnn_model_choice" in config and hasattr(self, "_set_oto_crnn_model_choice_from_code"):
+                self._set_oto_crnn_model_choice_from_code(config.get("oto_crnn_model_choice", "auto"))
             if "oto_crnn_special_aliases" in config and hasattr(self, "oto_crnn_special_aliases_var"):
                 self.oto_crnn_special_aliases_var.set(str(config.get("oto_crnn_special_aliases", "") or ""))
 

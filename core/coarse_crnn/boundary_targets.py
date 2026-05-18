@@ -87,52 +87,222 @@ class PhoneAwareTargetMap:
 
 
 def boundary_events_for_row(spec: OtoRowSpec, anchors: AbsoluteOtoAnchors) -> list[tuple[str, float, float]]:
+    """Return (label_name, center_ms, sigma_ms) for the boundary scorer
+    targets of one row.
+
+    2026-05-18 audio-driven window edges: `syllable_onset` and
+    `silence_boundary` are now painted for ALL non-silence roles, anchored at
+    the audio-driven `syllable_audio_start_abs` / `silence_audio_end_abs` when
+    set, otherwise falling back to the source-OTO `offset_abs` / `cutoff_abs`.
+    This fixes the systematic "window too tight" failure where the previous
+    target set never supervised cutoff for cv/vc/vv/v-cv rows, leaving the
+    `silence_boundary` head un-trained and the decoder forced to use
+    `transition_peak`/`next_onset` (clustered around the consonant burst) as
+    a proxy. The audio-driven anchors are set by `_inject_audio_anchors_into_rows`
+    inside the dataset loader; for rows where the wav isn't available
+    (eval-only paths) the source-OTO anchors are used as before.
+    """
     role = normalize_role(spec.role)
+    syllable_onset_ms = anchors.syllable_audio_start_abs if anchors.syllable_audio_start_abs is not None else anchors.offset_abs
+    silence_boundary_ms = anchors.silence_audio_end_abs if anchors.silence_audio_end_abs is not None else anchors.cutoff_abs
+    syllable_onset_sigma = label_sigma_ms("syllable_onset")
+    silence_boundary_sigma = label_sigma_ms("silence_boundary")
     if role == "-cv":
         return [
-            ("syllable_onset", anchors.offset_abs, label_sigma_ms("syllable_onset")),
+            ("syllable_onset", syllable_onset_ms, syllable_onset_sigma),
             ("vowel_start", anchors.pre_abs, label_sigma_ms("vowel_start")),
+            ("silence_boundary", silence_boundary_ms, silence_boundary_sigma),
         ]
     if role in {"cv", SPECIAL_ROLE}:
         return [
+            ("syllable_onset", syllable_onset_ms, syllable_onset_sigma),
             ("consonant_onset", anchors.offset_abs, label_sigma_ms("consonant_onset")),
             ("vowel_start", anchors.pre_abs, label_sigma_ms("vowel_start")),
             ("vowel_stable", 0.5 * (anchors.pre_abs + anchors.consonant_abs), label_sigma_ms("vowel_stable")),
+            ("silence_boundary", silence_boundary_ms, silence_boundary_sigma),
         ]
     if role == "v":
         return [
+            ("syllable_onset", syllable_onset_ms, syllable_onset_sigma),
             ("vowel_start", anchors.pre_abs, label_sigma_ms("vowel_start")),
             ("vowel_stable", 0.5 * (anchors.pre_abs + anchors.consonant_abs), label_sigma_ms("vowel_stable")),
+            ("silence_boundary", silence_boundary_ms, silence_boundary_sigma),
         ]
     if role == "vc":
         return [
+            ("syllable_onset", syllable_onset_ms, syllable_onset_sigma),
             ("vowel_end", anchors.pre_abs, label_sigma_ms("vowel_end")),
             ("transition_peak", anchors.pre_abs, label_sigma_ms("transition_peak")),
             ("next_onset", anchors.consonant_abs, label_sigma_ms("next_onset")),
+            ("silence_boundary", silence_boundary_ms, silence_boundary_sigma),
         ]
     if role == "vv":
         return [
+            ("syllable_onset", syllable_onset_ms, syllable_onset_sigma),
             ("vowel_end", anchors.pre_abs, label_sigma_ms("vowel_end")),
             ("transition_peak", anchors.pre_abs, label_sigma_ms("transition_peak")),
             ("vowel_start", anchors.consonant_abs, label_sigma_ms("vowel_start")),
+            ("silence_boundary", silence_boundary_ms, silence_boundary_sigma),
         ]
     if role == "v-cv":
         return [
+            ("syllable_onset", syllable_onset_ms, syllable_onset_sigma),
             ("transition_peak", anchors.pre_abs, label_sigma_ms("transition_peak")),
             ("next_onset", anchors.consonant_abs, label_sigma_ms("next_onset")),
             ("consonant_onset", anchors.consonant_abs, label_sigma_ms("consonant_onset")),
+            ("silence_boundary", silence_boundary_ms, silence_boundary_sigma),
         ]
     if role in {"v-", "cv-"}:
         return [
             ("vowel_end", anchors.pre_abs, label_sigma_ms("vowel_end")),
-            ("silence_boundary", anchors.cutoff_abs, label_sigma_ms("silence_boundary")),
+            ("silence_boundary", silence_boundary_ms, silence_boundary_sigma),
         ]
     if role in {"br", "endbr"}:
-        return [("silence_boundary", anchors.pre_abs, label_sigma_ms("silence_boundary"))]
+        return [("silence_boundary", anchors.pre_abs, silence_boundary_sigma)]
     return [
+        ("syllable_onset", syllable_onset_ms, syllable_onset_sigma),
         ("vowel_start", anchors.pre_abs, label_sigma_ms("vowel_start")),
         ("transition_peak", anchors.consonant_abs, label_sigma_ms("transition_peak")),
+        ("silence_boundary", silence_boundary_ms, silence_boundary_sigma),
     ]
+
+
+def compute_per_row_audio_extents(
+    *,
+    features: np.ndarray,
+    hop_ms: float,
+    rows: list[tuple[OtoRowSpec, AbsoluteOtoAnchors]],
+    energy_floor_percentile: float = 0.15,
+    voiced_percentile: float = 0.70,
+    rel_db_threshold: float = 1.5,
+    search_left_ms: float = 250.0,
+    search_right_ms: float = 350.0,
+    gap_between_rows_ms: float = 25.0,
+) -> list[tuple[float, float]]:
+    """Per-row (audio_start_ms, audio_end_ms) extracted from the wav's log-mel
+    energy profile. Used to relabel `syllable_onset` / `silence_boundary` at
+    the natural acoustic edges of each syllable instead of the source-OTO's
+    (often tight) offset/cutoff.
+
+    Algorithm (per row):
+      1. Compute per-frame energy = mean of log-mel bins.
+      2. Per-wav baseline:
+         - `floor_db`   = `energy_floor_percentile` percentile (noise floor).
+         - `voiced_db`  = `voiced_percentile` percentile (typical voice level).
+      3. Threshold = `voiced_db - rel_db_threshold` (log-magnitude, ~15 dB
+         below voiced peak by default). This avoids classifying low-energy
+         vowel decay tails as silence.
+      4. Per row, search backward from `anchors.offset_abs` up to
+         `search_left_ms` for the first frame whose energy crosses below
+         threshold — the frame just after that is `audio_start`. Cap by the
+         previous row's `audio_end + gap_between_rows_ms` so adjacent rows
+         don't overlap.
+      5. Symmetric forward search from `anchors.cutoff_abs` for `audio_end`,
+         capped by the next row's offset_abs.
+      6. If the search fails (energy never crosses threshold), fall back to
+         `offset_abs` / `cutoff_abs`.
+
+    Returns one (start_ms, end_ms) tuple per input row, in the input order.
+    """
+    n_frames = int(features.shape[0]) if features is not None else 0
+    if n_frames <= 0 or not rows:
+        return [(float(spec_anchor[1].offset_abs), float(spec_anchor[1].cutoff_abs)) for spec_anchor in rows]
+    energy = np.asarray(features, dtype=np.float32).mean(axis=1)
+    if energy.size == 0:
+        return [(float(spec_anchor[1].offset_abs), float(spec_anchor[1].cutoff_abs)) for spec_anchor in rows]
+    floor_db = float(np.quantile(energy, max(0.01, min(0.40, float(energy_floor_percentile)))))
+    voiced_db = float(np.quantile(energy, max(0.40, min(0.95, float(voiced_percentile)))))
+    if not np.isfinite(voiced_db) or voiced_db - floor_db < 0.2:
+        # Wav looks nearly silent or monotonous — fall back to source OTO.
+        return [(float(spec_anchor[1].offset_abs), float(spec_anchor[1].cutoff_abs)) for spec_anchor in rows]
+    threshold = float(voiced_db - max(0.1, float(rel_db_threshold)))
+    hop = max(2.0, float(hop_ms))
+
+    def _ms_to_frame(ms: float) -> int:
+        return int(round(float(ms) / hop))
+
+    def _frame_to_ms(frame: int) -> float:
+        return float(frame) * hop
+
+    # Sort row indices by anchor offset to apply neighbor caps.
+    sorted_idx = sorted(range(len(rows)), key=lambda i: float(rows[i][1].offset_abs))
+    audio_starts: dict[int, float] = {}
+    audio_ends: dict[int, float] = {}
+    for order_pos, row_idx in enumerate(sorted_idx):
+        _spec, anchors = rows[row_idx]
+        offset_frame = max(0, min(n_frames - 1, _ms_to_frame(anchors.offset_abs)))
+        cutoff_frame = max(0, min(n_frames - 1, _ms_to_frame(anchors.cutoff_abs)))
+
+        # Backward search bound: previous row's audio_end + gap (if any).
+        prev_bound_frame = 0
+        if order_pos > 0:
+            prev_idx = sorted_idx[order_pos - 1]
+            prev_end_ms = audio_ends.get(prev_idx, float(rows[prev_idx][1].cutoff_abs))
+            prev_bound_frame = max(prev_bound_frame, _ms_to_frame(prev_end_ms + float(gap_between_rows_ms)))
+        prev_bound_frame = max(prev_bound_frame, _ms_to_frame(float(anchors.offset_abs) - float(search_left_ms)))
+        prev_bound_frame = max(0, min(offset_frame, prev_bound_frame))
+
+        # Forward search bound: next row's offset_abs - gap (if any).
+        next_bound_frame = n_frames - 1
+        if order_pos + 1 < len(sorted_idx):
+            next_idx = sorted_idx[order_pos + 1]
+            next_offset_ms = float(rows[next_idx][1].offset_abs)
+            next_bound_frame = min(next_bound_frame, _ms_to_frame(next_offset_ms - float(gap_between_rows_ms)))
+        next_bound_frame = min(next_bound_frame, _ms_to_frame(float(anchors.cutoff_abs) + float(search_right_ms)))
+        next_bound_frame = max(cutoff_frame, min(n_frames - 1, next_bound_frame))
+
+        # Search backward from offset for first frame where energy drops below
+        # threshold (silence). audio_start = the frame just after that.
+        start_frame = offset_frame
+        for f in range(offset_frame, prev_bound_frame - 1, -1):
+            if energy[f] < threshold:
+                start_frame = min(offset_frame, f + 1)
+                break
+        else:
+            # Never crossed threshold; audio is voiced all the way to prev bound.
+            start_frame = prev_bound_frame
+
+        # Search forward from cutoff for first frame where energy drops below
+        # threshold. audio_end = the frame just before that.
+        end_frame = cutoff_frame
+        for f in range(cutoff_frame, next_bound_frame + 1):
+            if energy[f] < threshold:
+                end_frame = max(cutoff_frame, f - 1)
+                break
+        else:
+            end_frame = next_bound_frame
+
+        # Safety: never narrow the window relative to source OTO. Only widen.
+        start_frame = min(start_frame, offset_frame)
+        end_frame = max(end_frame, cutoff_frame)
+
+        audio_starts[row_idx] = _frame_to_ms(start_frame)
+        audio_ends[row_idx] = _frame_to_ms(end_frame)
+
+    return [(audio_starts[i], audio_ends[i]) for i in range(len(rows))]
+
+
+def inject_audio_anchors_into_rows(
+    rows: list[tuple[OtoRowSpec, AbsoluteOtoAnchors]],
+    extents: list[tuple[float, float]],
+) -> list[tuple[OtoRowSpec, AbsoluteOtoAnchors]]:
+    """Return a new rows list where each AbsoluteOtoAnchors carries the
+    audio-driven `syllable_audio_start_abs` / `silence_audio_end_abs` fields
+    populated from `extents`. The original anchors are kept unchanged; this
+    only adds the two optional fields used by `boundary_events_for_row`."""
+    from dataclasses import replace as _dc_replace
+
+    if not rows or not extents or len(rows) != len(extents):
+        return rows
+    updated: list[tuple[OtoRowSpec, AbsoluteOtoAnchors]] = []
+    for (spec, anchors), (start_ms, end_ms) in zip(rows, extents):
+        new_anchors = _dc_replace(
+            anchors,
+            syllable_audio_start_abs=float(start_ms),
+            silence_audio_end_abs=float(end_ms),
+        )
+        updated.append((spec, new_anchors))
+    return updated
 
 
 def build_boundary_target_map(rows: list[tuple[OtoRowSpec, AbsoluteOtoAnchors]], *, duration_ms: float, hop_ms: float, frame_count: int | None = None) -> tuple[list[float], np.ndarray]:
@@ -1698,6 +1868,8 @@ __all__ = [
     "boundary_events_for_row",
     "build_boundary_target_map",
     "build_phone_aware_target_map",
+    "compute_per_row_audio_extents",
+    "inject_audio_anchors_into_rows",
     "consonant_family_identity",
     "load_row_specs_from_source_oto",
     "normalize_ko_coda_in_alias",
