@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Iterable
 
 
@@ -18,6 +19,23 @@ FATAL_GENERATION_FAILURE_REASONS = frozenset(
         "file_exception",
     }
 )
+
+_SKIP_EMPTY_INTERVALS_SPECIAL_STEMS = frozenset(
+    {
+        "br",
+        "br2",
+        "br3",
+        "bre",
+        "breath",
+    }
+)
+
+
+def _stem_for_special_skip(fname: str) -> str:
+    stem = os.path.splitext(os.path.basename(str(fname or "").strip()))[0].strip().lower()
+    while stem.startswith("_"):
+        stem = stem[1:]
+    return stem
 
 
 def is_zero_placeholder_line(line: str) -> bool:
@@ -46,6 +64,14 @@ def build_auto_placeholder_block_error(
     use_template: bool,
 ) -> str:
     reason_key = str(reason or "").strip().lower()
+    stem = _stem_for_special_skip(fname)
+    if (
+        reason_key in {"empty_intervals", "mapping_failed_empty_intervals"}
+        and stem in _SKIP_EMPTY_INTERVALS_SPECIAL_STEMS
+    ):
+        # Breath-like dedicated files can legitimately have sparse/empty intervals.
+        # Treat these as skip targets instead of blocking the entire generation save.
+        return ""
     is_zero_placeholder = lines_are_zero_placeholders(lines)
     is_fatal_generation_failure = reason_key in FATAL_GENERATION_FAILURE_REASONS
     if not is_zero_placeholder and not is_fatal_generation_failure:

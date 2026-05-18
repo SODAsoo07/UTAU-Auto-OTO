@@ -3064,6 +3064,18 @@ class AppRuntimeMixin:
         def _do():
             state = "disabled" if running else "normal"
             self.run_btn.configure(state=state)
+            if hasattr(self, "boundary_smoke_btn") and self.boundary_smoke_btn is not None:
+                try:
+                    dev_enabled = (
+                        bool(self.developer_mode_enabled_var.get())
+                        if hasattr(self, "developer_mode_enabled_var")
+                        else False
+                    )
+                    self.boundary_smoke_btn.configure(
+                        state="normal" if (dev_enabled and not bool(running)) else "disabled"
+                    )
+                except Exception:
+                    pass
             if hasattr(self, "status_label"):
                 current_text = self.status_label.cget("text")
                 self.status_label.configure(text_color=self._status_color_for_message(current_text))

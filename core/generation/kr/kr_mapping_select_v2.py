@@ -1049,7 +1049,7 @@ def select_kr_vcv_index(
             }
             if debug_logging and vcv_selected_w_idx != expected_vcv_idx:
                 log_fn(
-                    f"ｧｭ {fname}: KR VCV ・・溜 anchor plan ・・圸 "
+                    f"[MAP] {fname}: KR VCV anchor-plan remap "
                     f"({expected_vcv_idx + 1}->{vcv_selected_w_idx + 1}, {alias})"
                 )
         else:
@@ -1069,7 +1069,7 @@ def select_kr_vcv_index(
             row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.12)
             if debug_logging:
                 log_fn(
-                    f"孱・・{fname}: KR VCV ・､﨑・・・ｧ・・戦売 ・ｨ・ｨ "
+                    f"[MAP] {fname}: KR VCV jump guard remap "
                     f"({int(vcv_meta.get('raw_chosen_idx', vcv_selected_w_idx)) + 1}"
                     f"->{int(vcv_meta.get('chosen_idx', vcv_selected_w_idx)) + 1}, {alias})"
                 )
@@ -1086,7 +1086,7 @@ def select_kr_vcv_index(
             row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.10)
             if debug_logging:
                 log_fn(
-                    f"孱・・{fname}: KR VCV ・懍・ ・・・"
+                    f"[MAP] {fname}: KR VCV order guard remap "
                     f"({expected_vcv_idx + 1}->{ordered_vcv_idx + 1}, {alias})"
                 )
         mono_idx, mono_guarded, _mono_reason = _strong_vcv_monotonic_guard(
@@ -1129,7 +1129,7 @@ def select_kr_vcv_index(
                     if fixed_idx != vcv_selected_w_idx:
                         if debug_logging:
                             log_fn(
-                                f"ｧｭ {fname}: KR VCV ・ｨ・・・溢攵・・・ｴ・・"
+                                f"[MAP] {fname}: KR VCV vowel-fix remap "
                                 f"{vcv_selected_w_idx + 1}->{fixed_idx + 1} ({alias})"
                             )
                         vcv_selected_w_idx = fixed_idx
@@ -1140,7 +1140,7 @@ def select_kr_vcv_index(
                     if e_vowel == t_vowel and _is_kr_glide_vowel(e_vowel) == _is_kr_glide_vowel(t_vowel):
                         if debug_logging:
                             log_fn(
-                                f"孱・・{fname}: KR VCV 嶹懍搆 ・溢攵・・・ｨ・ｨ "
+                                f"[MAP] {fname}: KR VCV glide guard remap "
                                 f"{vcv_selected_w_idx + 1}->{expected_vcv_idx + 1} ({alias})"
                             )
                         vcv_selected_w_idx = expected_vcv_idx
@@ -1153,7 +1153,7 @@ def select_kr_vcv_index(
         if guarded and guarded_idx != vcv_selected_w_idx:
             if debug_logging:
                 log_fn(
-                    f"孱・・{fname}: KR VCV blank guard ・・圸 "
+                    f"[MAP] {fname}: KR VCV blank guard remap "
                     f"({vcv_selected_w_idx + 1}->{guarded_idx + 1}, {alias})"
                 )
             vcv_selected_w_idx = int(guarded_idx)
@@ -1176,7 +1176,7 @@ def select_kr_vcv_index(
         if mel_adjusted and mel_idx != vcv_selected_w_idx:
             if debug_logging:
                 log_fn(
-                    f"ｧｭ {fname}: KR VCV mel-guided remap "
+                    f"[MAP] {fname}: KR VCV mel-guided remap "
                     f"({vcv_selected_w_idx + 1}->{mel_idx + 1}, {alias})"
                 )
             vcv_selected_w_idx = int(mel_idx)
@@ -1197,7 +1197,7 @@ def select_kr_vcv_index(
         if invariant_guarded and invariant_idx != vcv_selected_w_idx:
             if debug_logging:
                 log_fn(
-                    f"孱・・{fname}: KR VCV token invariant guard "
+                    f"[MAP] {fname}: KR VCV token-invariant guard remap "
                     f"({vcv_selected_w_idx + 1}->{invariant_idx + 1}, {alias})"
                 )
             vcv_selected_w_idx = int(invariant_idx)
@@ -1351,14 +1351,14 @@ def select_kr_general_cv_index(
         if remapped_idx is not None:
             if debug_logging:
                 log_fn(
-                    f"ｧｭ {fname}: KR ・菩・・ｸ・ｱ・､ ・肥怱 ・ｴ・・"
+                    f"[MAP] {fname}: KR forced index remap "
                     f"({forced_selected_idx + 1}->{remapped_idx + 1}, {alias})"
                 )
             forced_selected_idx = remapped_idx
         else:
             if debug_logging:
                 log_fn(
-                    f"孱・・{fname}: KR ・菩・・ｸ・ｱ・､ ・ｴ巐ｨ嶹・"
+                    f"[MAP] {fname}: KR forced index rejected "
                     f"(idx={forced_selected_idx + 1}, {alias})"
                 )
             forced_selected_idx = None
@@ -1433,7 +1433,7 @@ def select_kr_general_cv_index(
         row_jump_blocked = int(resolve_meta.get("jump_blocked", 0) or 0)
         if row_jump_blocked and debug_logging:
             log_fn(
-                f"孱・・{fname}: KR ・､﨑・・・ｧ・・戦売 ・ｨ・ｨ "
+                f"[MAP] {fname}: KR jump guard remap "
                 f"({int(resolve_meta.get('raw_chosen_idx', selected_w_idx)) + 1}"
                 f"->{int(resolve_meta.get('chosen_idx', selected_w_idx)) + 1}, {alias})"
             )
@@ -1532,12 +1532,12 @@ def select_kr_general_cv_index(
                     row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.14)
                     if debug_logging:
                         log_fn(
-                            f"孱・・{fname}: KR ・ｨ・・・ｴ・・・戦売 ・ｨ・ｨ "
+                            f"[MAP] {fname}: KR vowel-fix jump guard remap "
                             f"({raw_fixed_idx + 1}->{fixed_idx + 1}, {alias})"
                         )
                 if fixed_idx != selected_w_idx and abs(fixed_idx - expected_cv_idx) <= 2:
                     log_fn(
-                        f"ｧｭ {fname}: CV ・ｨ・・・溢攵・・・ｴ・・"
+                        f"[MAP] {fname}: KR CV vowel-fix remap "
                         f"{expected_cv_idx + 1}->{fixed_idx + 1} ({alias})"
                     )
                 selected_w_idx = int(fixed_idx)
@@ -1558,7 +1558,7 @@ def select_kr_general_cv_index(
             if candidate_idx is not None and candidate_idx != selected_w_idx:
                 if debug_logging:
                     log_fn(
-                        f"孱・・{fname}: VV pair ・､・ｭ ・ｴ・・"
+                        f"[MAP] {fname}: KR VV pair guard remap "
                         f"{(selected_w_idx + 1) if selected_w_idx is not None else '?'}->{candidate_idx + 1} ({alias})"
                     )
                 selected_w_idx = int(candidate_idx)
@@ -1573,7 +1573,7 @@ def select_kr_general_cv_index(
     if ordered_idx != selected_w_idx:
         if debug_logging:
             log_fn(
-                f"孱・・{fname}: KR CV ・懍・ ・・・"
+                f"[MAP] {fname}: KR CV order guard remap "
                 f"({selected_w_idx + 1}->{ordered_idx + 1}, {alias})"
             )
         row_jump_blocked = 1
@@ -1588,7 +1588,7 @@ def select_kr_general_cv_index(
     if guarded and guarded_idx != selected_w_idx:
         if debug_logging:
             log_fn(
-                f"孱・・{fname}: KR blank guard ・・圸 "
+                f"[MAP] {fname}: KR blank guard remap "
                 f"({selected_w_idx + 1}->{guarded_idx + 1}, {alias})"
             )
         row_jump_blocked = 1
@@ -1615,7 +1615,7 @@ def select_kr_general_cv_index(
     if mel_adjusted and mel_idx != selected_w_idx:
         if debug_logging:
             log_fn(
-                f"ｧｭ {fname}: KR {alias_type.upper()} mel-guided remap "
+                f"[MAP] {fname}: KR {alias_type.upper()} mel-guided remap "
                 f"({selected_w_idx + 1}->{mel_idx + 1}, {alias})"
             )
         selected_w_idx = int(mel_idx)
@@ -1638,7 +1638,7 @@ def select_kr_general_cv_index(
         if plan_guarded and guarded_plan_idx != selected_w_idx:
             if debug_logging:
                 log_fn(
-                    f"孱・・{fname}: KR global-plan guard "
+                    f"[MAP] {fname}: KR global-plan guard remap "
                     f"({selected_w_idx + 1}->{guarded_plan_idx + 1}, {alias})"
                 )
             row_jump_blocked = 1
@@ -1661,7 +1661,7 @@ def select_kr_general_cv_index(
     if invariant_guarded and invariant_idx != selected_w_idx:
         if debug_logging:
             log_fn(
-                f"孱・・{fname}: KR {str(alias_type or '').upper()} token invariant guard "
+                f"[MAP] {fname}: KR {str(alias_type or '').upper()} token-invariant guard remap "
                 f"({selected_w_idx + 1}->{invariant_idx + 1}, {alias})"
             )
         row_jump_blocked = 1
@@ -1707,6 +1707,45 @@ def select_kr_general_cv_index(
                 row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.08)
                 selected_w_idx = int(expected_guard_idx)
                 cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
+    # KR CV/CV_HEAD in order-locked formats: prevent occasional -1 backward drift
+    # unless the backward index is clearly better.
+    if (
+        selected_w_idx is not None
+        and alias_type in {"cv", "cv_head"}
+        and str(file_format or "").strip().lower() in {"cvvc", "cvc", "vcv"}
+        and _env_bool("UTOA_KR_CVVC_BACKWARD_ONE_STEP_GUARD", True)
+        and romaji_syllables
+    ):
+        n_syl = int(len(romaji_syllables))
+        expected_guard_idx = int(max(0, min(int(expected_cv_idx), n_syl - 1)))
+        selected_guard_idx = int(max(0, min(int(selected_w_idx), n_syl - 1)))
+        if selected_guard_idx == (expected_guard_idx - 1):
+            exp_tok = str(romaji_syllables[expected_guard_idx] or "")
+            sel_tok = str(romaji_syllables[selected_guard_idx] or "")
+            exp_score = float(cv_match_score_fn(target_clean, exp_tok)) if target_clean else 0.0
+            sel_score = float(cv_match_score_fn(target_clean, sel_tok)) if target_clean else 0.0
+            exp_blank = _blank_conf_at(syllable_blank_confidences, expected_guard_idx)
+            sel_blank = _blank_conf_at(syllable_blank_confidences, selected_guard_idx)
+            t_on, t_v, _t_c = split_syllable_parts_fn(target_clean)
+            e_on, e_v, _e_c = split_syllable_parts_fn(exp_tok)
+            s_on, s_v, _s_c = split_syllable_parts_fn(sel_tok)
+            keep_backward = False
+            if (sel_score >= (exp_score + 16.0)) and (sel_blank <= (exp_blank - 0.05)):
+                keep_backward = True
+            if t_v and (s_v == t_v) and (e_v != t_v) and (sel_score >= (exp_score + 10.0)):
+                keep_backward = True
+            if t_on and (s_on == t_on) and (e_on != t_on) and (sel_score >= (exp_score + 10.0)):
+                keep_backward = True
+            if not keep_backward:
+                if debug_logging:
+                    log_fn(
+                        f"[KR] {fname}: CV -1 backward guard "
+                        f"({selected_guard_idx + 1}->{expected_guard_idx + 1}, {alias})"
+                    )
+                row_jump_blocked = 1
+                row_mapping_confidence = apply_row_confidence_penalty_fn(row_mapping_confidence, 0.08)
+                selected_w_idx = int(expected_guard_idx)
+                cv_seq_idx = max(cv_seq_idx, selected_w_idx + 1)
     if (
         selected_w_idx is not None
         and alias_type in {"cv", "cv_head", "vcv"}
@@ -1729,7 +1768,7 @@ def select_kr_general_cv_index(
                 if fallback_idx is not None and int(fallback_idx) != int(selected_w_idx):
                     if debug_logging:
                         log_fn(
-                            f"ｧｭ {fname}: KR ・ｽ・ｽ・・・・攷 ・・剩 fallback "
+                            f"[MAP] {fname}: KR weak-boundary fallback remap "
                             f"({selected_w_idx + 1}->{int(fallback_idx) + 1}, {alias})"
                         )
                     selected_w_idx = int(fallback_idx)

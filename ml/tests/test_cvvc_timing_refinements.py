@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from core.ja_mapping_select_v2 import _mel_guided_ja_cvvc_adjustment
-from core.kr_mapping_select_v2 import _mel_guided_cvvc_adjustment, _token_invariant_guard_idx
+from core.kr_mapping_select_v2 import _mel_guided_cvvc_adjustment, _token_invariant_guard_idx, select_kr_general_cv_index
 import core.kr_oto_bridge as kr_bridge
 from core.kr_oto_postprocess import guard_kr_vcv_pre_to_cv_boundary
 from core.kr_timing_v2 import prepare_vcv_syllable_timing
@@ -218,6 +218,49 @@ def test_kr_token_invariant_guard_reverts_vowel_mismatch():
     )
     assert guarded is True
     assert out_idx == 0
+
+
+def test_kr_general_cv_selection_backward_one_step_guard_reverts_shift():
+    romaji = ["ga", "ge", "go"]
+    syllables_info = [
+        {"mel_silence_sparse_conf": 0.05},
+        {"mel_silence_sparse_conf": 0.05},
+        {"mel_silence_sparse_conf": 0.05},
+    ]
+
+    out = select_kr_general_cv_index(
+        alias="ge",
+        alias_type="cv",
+        fname="dummy.wav",
+        file_format="cvvc",
+        target_clean="ge",
+        current_w_idx=1,
+        cv_seq_idx=1,
+        row_mapping_confidence=0.70,
+        row_jump_default=1,
+        row_jump_high_conf=2,
+        file_mapping_conf_th=0.60,
+        file_mapping_low_conf=False,
+        romaji_syllables=romaji,
+        forced_vv_idx=None,
+        planned_vv_idx=None,
+        planned_cv_idx=None,
+        forced_cvvc_idx=None,
+        remap_forced_cv_index_fn=lambda target, seq, expected: None,
+        cv_match_score_fn=lambda target, cand: 100.0 if target == cand else 70.0,
+        split_syllable_parts_fn=_split_syllable_parts,
+        apply_row_confidence_penalty_fn=lambda conf, pen: float(conf) - float(pen),
+        resolve_cv_syllable_index_fn=lambda *args, **kwargs: (0, 1, {"jump_blocked": 0, "best_score": 86.0}),
+        should_allow_exact_vowel_fix_fn=lambda *args, **kwargs: False,
+        find_cv_vowel_match_index_fn=lambda *args, **kwargs: None,
+        clamp_cv_index_to_order_fn=lambda fmt, target, seq, expected, selected: selected,
+        log_fn=lambda *_args, **_kwargs: None,
+        debug_logging=False,
+        syllable_blank_confidences=[0.05, 0.05, 0.05],
+        syllables_info=syllables_info,
+    )
+    assert int(out["expected_cv_idx"]) == 1
+    assert int(out["selected_w_idx"]) == 1
 
 
 def test_kr_vcv_pre_guard_aligns_to_current_onset():

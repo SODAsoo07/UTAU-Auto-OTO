@@ -6004,6 +6004,7 @@ def generate_oto(
                         target_clean=target_clean,
                         current_w_idx=current_w_idx,
                         cv_seq_idx=cv_seq_idx,
+                        bridge_pair=bridge_pair,
                         row_mapping_confidence=row_mapping_confidence,
                         row_jump_default=row_jump_default,
                         row_jump_high_conf=row_jump_high_conf,

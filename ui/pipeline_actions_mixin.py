@@ -2207,6 +2207,163 @@ class PipelineActionsMixin:
                 self._set_running(False)
         self._run_in_thread(task)
 
+    def _run_phoneme_boundary_smoke(self):
+        """실보이스뱅크 경계 검출 스모크(매니페스트→학습→평가)를 UI에서 바로 실행합니다."""
+
+        def task():
+            self._set_running(True)
+            self._set_status("경계 스모크 테스트 준비 중...")
+            try:
+                if not is_training_paths_enabled():
+                    self._append_log("⚠ 배포 빌드에서는 경계 스모크 테스트 기능이 비활성화되어 있습니다.")
+                    self._set_status("⚠ 배포 빌드에서는 경계 스모크 테스트를 사용할 수 없습니다.")
+                    return
+
+                if hasattr(self, "developer_mode_enabled_var") and not bool(self.developer_mode_enabled_var.get()):
+                    self._append_log("⚠ 경계 스모크 테스트는 개발자 모드에서만 실행할 수 있습니다.")
+                    self._set_status("⚠ 개발자 모드를 먼저 켜 주세요.")
+                    return
+
+                wav_dir = str(self.wav_entry.get() if hasattr(self, "wav_entry") else "").strip()
+                if not wav_dir:
+                    self._append_log("❌ WAV 경로를 먼저 지정해 주세요.")
+                    self._set_status("❌ WAV 경로 누락")
+                    return
+                voicebank_dir = os.path.abspath(wav_dir)
+                if not os.path.isdir(voicebank_dir):
+                    self._append_log(f"❌ WAV 폴더가 존재하지 않습니다: {voicebank_dir}")
+                    self._set_status("❌ WAV 경로 오류")
+                    return
+
+                source_oto = ""
+                tpl_hint = str(self.tpl_entry.get() if hasattr(self, "tpl_entry") else "").strip()
+                if tpl_hint and os.path.isfile(tpl_hint) and str(tpl_hint).lower().endswith(".ini"):
+                    source_oto = os.path.abspath(tpl_hint)
+                else:
+                    candidate = os.path.join(voicebank_dir, "oto.ini")
+                    if os.path.isfile(candidate):
+                        source_oto = os.path.abspath(candidate)
+
+                bank_name = os.path.basename(os.path.normpath(voicebank_dir)) or "voicebank"
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                out_dir = os.path.abspath(
+                    os.path.join("ml_workspace", "phoneme_boundary", "ui_smoke", f"{bank_name}_{timestamp}")
+                )
+                os.makedirs(out_dir, exist_ok=True)
+
+                module_args = [
+                    "-m",
+                    "ml.scripts.phoneme_boundary.smoke_voicebank",
+                    "--voicebank-dir",
+                    voicebank_dir,
+                    "--out-dir",
+                    out_dir,
+                    "--max-rows",
+                    "80",
+                    "--epochs",
+                    "1",
+                    "--batch-size",
+                    "2",
+                    "--max-frames",
+                    "240",
+                    "--n-mels",
+                    "16",
+                    "--hidden",
+                    "8",
+                    "--conv-channels",
+                    "8",
+                    "--num-workers",
+                    "0",
+                    "--device",
+                    "auto",
+                    "--use-textgrids",
+                ]
+                if source_oto:
+                    module_args.extend(["--source-oto", source_oto])
+
+                runner_candidates = []
+                if str(getattr(sys, "executable", "") or "").strip():
+                    runner_candidates.append([str(sys.executable)])
+                runner_candidates.append(["py", "-3.11"])
+                runner_candidates.append(["python"])
+
+                last_return_code = None
+                launch_errors = []
+                ran = False
+                for runner in runner_candidates:
+                    cmd = list(runner) + module_args
+                    pretty_cmd = " ".join(
+                        f'"{part}"' if (" " in str(part) or "\t" in str(part)) else str(part) for part in cmd
+                    )
+                    self._append_log(f"[Boundary Smoke] 실행: {pretty_cmd}")
+                    try:
+                        process = self._popen_subprocess_hidden(
+                            cmd,
+                            cwd=str(getattr(self, "app_dir", "") or os.getcwd()),
+                            stdout=sp.PIPE,
+                            stderr=sp.STDOUT,
+                            text=False,
+                        )
+                    except FileNotFoundError as e:
+                        launch_errors.append(f"{runner[0]}: {e}")
+                        continue
+                    except Exception as e:
+                        launch_errors.append(f"{runner[0]}: {e}")
+                        continue
+
+                    ran = True
+                    for line in self._iter_decoded_stdout_lines(process):
+                        self._append_log(f"[Boundary Smoke] {line}")
+                    process.wait()
+                    last_return_code = int(process.returncode)
+                    if last_return_code == 0:
+                        break
+                    self._append_log(
+                        f"[Boundary Smoke] 실행 실패(code={last_return_code}). 다음 Python 런너를 시도합니다."
+                    )
+
+                if not ran:
+                    self._append_log("❌ 경계 스모크 테스트를 시작할 Python 런너를 찾지 못했습니다.")
+                    for detail in launch_errors:
+                        self._append_log(f"   - {detail}")
+                    self._set_status("❌ Python 런너 없음")
+                    return
+
+                if int(last_return_code or -1) != 0:
+                    self._append_log(f"❌ 경계 스모크 테스트 실패 (code={last_return_code})")
+                    self._append_log(f"   출력 폴더: {out_dir}")
+                    self._set_status("❌ 경계 스모크 실패")
+                    return
+
+                summary_path = os.path.join(out_dir, "summary.json")
+                self._append_log(f"✅ 경계 스모크 테스트 완료")
+                self._append_log(f"   결과 폴더: {out_dir}")
+                if os.path.isfile(summary_path):
+                    try:
+                        with open(summary_path, "r", encoding="utf-8") as handle:
+                            payload = json.load(handle)
+                        eval_summary = payload.get("eval_summary") or {}
+                        rows = int(eval_summary.get("rows", 0) or 0)
+                        mae_ms = float(eval_summary.get("mae_ms", 0.0) or 0.0)
+                        p90_ms = float(eval_summary.get("p90_ms", 0.0) or 0.0)
+                        by_label = eval_summary.get("by_label") or {}
+                        vowel_onset = by_label.get("vowel_onset") or {}
+                        vowel_nucleus = by_label.get("vowel_nucleus") or {}
+                        self._append_log(
+                            f"[Boundary Smoke] rows={rows}, MAE={mae_ms:.2f}ms, P90={p90_ms:.2f}ms, "
+                            f"vowel_onset_MAE={float(vowel_onset.get('mae_ms', 0.0) or 0.0):.2f}ms, "
+                            f"vowel_nucleus_MAE={float(vowel_nucleus.get('mae_ms', 0.0) or 0.0):.2f}ms"
+                        )
+                    except Exception as e:
+                        self._append_log(f"⚠ summary.json 파싱 실패: {e}")
+                self._set_status("✅ 경계 스모크 테스트 완료")
+            except Exception as e:
+                self._handle_error("경계 스모크 테스트", e)
+            finally:
+                self._set_running(False)
+
+        self._run_in_thread(task)
+
     def _run_full_pipeline(self):
         """Lab 생성 → 정렬 → OTO 생성 → 검증 순서로 전체 파이프라인을 실행합니다."""
         def task():
