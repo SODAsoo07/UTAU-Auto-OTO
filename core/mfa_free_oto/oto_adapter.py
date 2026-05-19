@@ -11,6 +11,7 @@ from core.timing.timing_anchor_profiles import get_anchor_profile
 from core.timing.timing_anchor_runtime import AnchorTimingContext, apply_anchor_lock
 
 from .kana import parse_kana_text
+from .slot_viterbi import ExpectedSlot
 from .types import DecodedEvent, FramePosterior, is_vowel_phone
 
 
@@ -285,8 +286,12 @@ def bootstrap_row(
     pre = max(anchor_abs - offset, 0.0)
     overlap = max(0.0, pre - cfg.ovl_gap_ms)
     consonant = pre + cfg.cons_gap_ms
-    vowel_end = anchor.vowel_end_abs_ms if anchor.vowel_end_abs_ms is not None else min(file_duration_ms, anchor_abs + 180.0)
-    cutoff = -(max(consonant + 8.0, float(vowel_end) - offset + cfg.tail_margin_ms))
+    if alias_type == "vc":
+        cut_gap = _role_cut_gap_ms(cfg, alias_type)
+        cutoff = -(max(consonant + 8.0, consonant + cut_gap))
+    else:
+        vowel_end = anchor.vowel_end_abs_ms if anchor.vowel_end_abs_ms is not None else min(file_duration_ms, anchor_abs + 180.0)
+        cutoff = -(max(consonant + 8.0, float(vowel_end) - offset + cfg.tail_margin_ms))
     timing = _validate_timing(
         OtoTiming(offset=offset, consonant=consonant, cutoff=cutoff, preutterance=pre, overlap=overlap),
         file_duration_ms=file_duration_ms,
@@ -383,7 +388,12 @@ def assign_template_row_anchors(
                 and candidate.expected_phone_index == target_phone_index
                 and last_target_phone_index == target_phone_index
             )
-            if candidate.anchor_abs_ms + 1e-5 < last_time + 4.0 and not same_target_reuse:
+            target_backtrack = (
+                target_phone_index is not None
+                and last_target_phone_index is not None
+                and target_phone_index < last_target_phone_index
+            )
+            if candidate.anchor_abs_ms + 1e-5 < last_time + 4.0 and not same_target_reuse and not target_backtrack:
                 continue
             if target_phone_index is not None and candidate.expected_phone_index != target_phone_index:
                 continue
@@ -431,12 +441,19 @@ def assign_template_row_anchors(
             used.add(best_idx)
         chosen = candidates[best_idx]
         span = estimate_vowel_span(posterior, chosen.anchor_abs_ms)
+        warnings = _anchor_warnings_with_target(chosen, role, target_phone_index)
+        if (
+            target_phone_index is not None
+            and last_target_phone_index is not None
+            and target_phone_index < last_target_phone_index
+        ):
+            warnings.append("alias_target_backtrack")
         chosen = replace(
             chosen,
             role=role,
             vowel_start_abs_ms=span.get("vowel_start_abs_ms", chosen.vowel_start_abs_ms),
             vowel_end_abs_ms=span.get("vowel_end_abs_ms", chosen.vowel_end_abs_ms),
-            warnings=tuple(dict.fromkeys(_anchor_warnings_with_target(chosen, role, target_phone_index))),
+            warnings=tuple(dict.fromkeys(warnings)),
         )
         if out:
             prev = next((item for item in reversed(out) if item is not None), None)
@@ -446,6 +463,67 @@ def assign_template_row_anchors(
         last_time = chosen.anchor_abs_ms
         last_target_phone_index = chosen.expected_phone_index
     return out
+
+
+def expected_slots_for_template_rows(
+    template_rows: Sequence[OtoTemplateRow],
+    expected_phones: Sequence[str],
+) -> list[ExpectedSlot]:
+    expected = [str(phone or "").strip().lower() for phone in expected_phones]
+    if not template_rows or not expected:
+        return []
+    targets = _assign_alias_target_indices(template_rows, expected)
+    out: list[ExpectedSlot] = []
+    seen: set[tuple[int, str]] = set()
+    for row, target_index in zip(template_rows, targets):
+        if target_index is None or target_index < 0 or target_index >= len(expected):
+            continue
+        role = _alias_type_for_row(row.alias, "auto")
+        event_label = _slot_event_label_for_alias_role(role)
+        _append_expected_slot(
+            out,
+            seen,
+            phone_index=int(target_index),
+            phone=expected[target_index],
+            role=role,
+            event_label=event_label,
+        )
+        if role == "vc":
+            next_vowel_index = _next_vowel_index(expected, int(target_index))
+            if next_vowel_index is not None:
+                _append_expected_slot(
+                    out,
+                    seen,
+                    phone_index=int(next_vowel_index),
+                    phone=expected[next_vowel_index],
+                    role="implicit_cv",
+                    event_label="cv_boundary",
+                )
+    return out
+
+
+def _append_expected_slot(
+    out: list[ExpectedSlot],
+    seen: set[tuple[int, str]],
+    *,
+    phone_index: int,
+    phone: str,
+    role: str,
+    event_label: str,
+) -> None:
+    key = (phone_index, event_label)
+    if key in seen:
+        return
+    seen.add(key)
+    out.append(
+        ExpectedSlot(
+            slot_index=len(out),
+            phone_index=phone_index,
+            phone=phone,
+            role=role,
+            event_label=event_label,
+        )
+    )
 
 
 def estimate_vowel_span(posterior: FramePosterior, anchor_abs_ms: float, *, threshold: float = 0.35) -> dict:
@@ -557,6 +635,15 @@ def _fallback_anchor_for_row(
     )
 
 
+def _role_cut_gap_ms(config: OtoAdapterConfig, alias_type: str) -> float:
+    profile = get_anchor_profile(config.language, config.format_type, alias_type)
+    if profile is not None:
+        return max(8.0, float(profile.cut_gap_target_ms))
+    if alias_type == "vc":
+        return 28.0
+    return max(8.0, float(config.tail_margin_ms))
+
+
 def _direct_anchor_shift(timing: OtoTiming, anchor_abs_ms: float) -> OtoTiming:
     cons_gap = max(timing.consonant - timing.preutterance, 30.0)
     cut_gap = max(abs(timing.cutoff) - timing.consonant, 50.0)
@@ -606,7 +693,7 @@ def _alias_type_for_row(alias: str, default_alias_type: str) -> str:
         second = _alias_phones(tokens[1]) if len(tokens) >= 2 else []
         first_vowel = bool(first and is_vowel_phone(first[-1]))
         if first_vowel and second:
-            if is_vowel_phone(second[0]):
+            if len(second) == 1 and is_vowel_phone(second[0]):
                 return "vv"
             return "vcv" if is_vowel_phone(second[-1]) else "vc"
         return "vcv"
@@ -621,6 +708,8 @@ def _alias_phones(text: str) -> list[str]:
     normalized = str(text or "").strip().lower()
     if not normalized:
         return []
+    if normalized in {"を", "ヲ"}:
+        return ["o"]
     if any("\u3040" <= char <= "\u30ff" for char in normalized):
         parsed_kana = parse_kana_text(normalized)
         if parsed_kana:
@@ -633,11 +722,29 @@ def _alias_phones(text: str) -> list[str]:
         return [normalized]
     phones: list[str] = []
     pos = 0
-    clusters = ("ky", "gy", "sh", "ch", "ts", "ny", "hy", "by", "py", "my", "ry", "jy", "dh")
+    y_clusters = {
+        "ky": ("k", "y"),
+        "gy": ("g", "y"),
+        "ny": ("n", "y"),
+        "hy": ("h", "y"),
+        "by": ("b", "y"),
+        "py": ("p", "y"),
+        "my": ("m", "y"),
+        "ry": ("r", "y"),
+        "jy": ("j", "y"),
+        "dy": ("d", "y"),
+        "ty": ("t", "y"),
+    }
+    clusters = ("sh", "ch", "ts", "dh")
     while pos < len(normalized):
         if normalized[pos] in vowels:
             phones.append(normalized[pos])
             pos += 1
+            continue
+        y_cluster = next((item for item in y_clusters if normalized.startswith(item, pos)), None)
+        if y_cluster:
+            phones.extend(y_clusters[y_cluster])
+            pos += len(y_cluster)
             continue
         cluster = next((item for item in clusters if normalized.startswith(item, pos)), None)
         if cluster:
@@ -678,6 +785,14 @@ def _event_labels_for_alias_role(role: str) -> tuple[str, ...]:
     if role == "vc":
         return ("phone_change", "cv_boundary", "vowel_nucleus")
     return ("cv_boundary", "phone_change", "vowel_nucleus")
+
+
+def _slot_event_label_for_alias_role(role: str) -> str:
+    if role == "vc":
+        return "phone_change"
+    if role in {"v", "vv"}:
+        return "vowel_nucleus"
+    return "cv_boundary"
 
 
 def _anchor_warnings_with_target(anchor: OtoAnchor, role: str, target_phone_index: int | None) -> list[str]:
@@ -736,7 +851,7 @@ def _assign_alias_target_indices(
         dp.append(row_dp)
     final_scores = [score for score, _ in dp[-1]]
     if not final_scores or max(final_scores) <= -1e8:
-        return [None for _ in rows]
+        return _assign_alias_target_indices_greedy(rows, expected)
     selected: list[int] = []
     cand_idx = int(np.argmax(np.asarray(final_scores, dtype=np.float32)))
     for row_idx in range(len(candidate_steps) - 1, -1, -1):
@@ -747,8 +862,50 @@ def _assign_alias_target_indices(
         cand_idx = prev_idx
     selected.reverse()
     if len(selected) != len(rows):
-        return [None for _ in rows]
+        return _assign_alias_target_indices_greedy(rows, expected)
     return [candidate_steps[row_idx][cand_idx].phone_index for row_idx, cand_idx in enumerate(selected)]
+
+
+def _assign_alias_target_indices_greedy(
+    rows: Sequence[OtoTemplateRow],
+    expected: Sequence[str],
+) -> list[int | None]:
+    out: list[int | None] = []
+    last_target: int | None = None
+    last_role = ""
+    row_count = len(rows)
+    for row_idx, row in enumerate(rows):
+        role = _alias_type_for_row(row.alias, "auto")
+        candidates = _alias_target_candidates(row.alias, role, expected)
+        candidates = sorted(
+            candidates,
+            key=lambda candidate: candidate.score
+            + _alias_target_order_score(
+                candidate.phone_index,
+                row_idx=row_idx,
+                row_count=row_count,
+                expected_count=len(expected),
+            ),
+            reverse=True,
+        )
+        chosen: int | None = None
+        for candidate in candidates:
+            transition = _alias_target_transition_score(
+                last_target,
+                candidate.phone_index,
+                prev_role=last_role,
+                role=role,
+            )
+            if last_target is None or transition > -1e8:
+                chosen = candidate.phone_index
+                break
+        if chosen is None and candidates:
+            chosen = candidates[0].phone_index
+        out.append(chosen)
+        if chosen is not None:
+            last_target = chosen
+            last_role = role
+    return out
 
 
 def _alias_target_candidates(alias: str, role: str, expected: Sequence[str]) -> list[AliasTargetCandidate]:
@@ -758,18 +915,23 @@ def _alias_target_candidates(alias: str, role: str, expected: Sequence[str]) -> 
     out: list[AliasTargetCandidate] = []
     if role == "vc" and len(phones) >= 2:
         left = phones[0]
-        right = phones[-1]
+        right = phones[1:]
         for idx in range(0, max(0, len(expected) - 1)):
-            if expected[idx] != left or expected[idx + 1] != right:
+            if not _phone_matches(expected[idx], left):
                 continue
-            target = _next_vowel_index(expected, idx + 1)
-            if target is not None:
-                out.append(AliasTargetCandidate(target, 4.0, "vc_next_vowel"))
+            if not _vc_right_matches(expected, idx + 1, right):
+                continue
+            out.append(AliasTargetCandidate(idx + 1, 4.0, "vc_right_consonant"))
         return out
     if role in {"v", "vv"}:
+        if role == "vv" and len(phones) >= 2:
+            for start in _find_all_phone_sequences(expected, phones):
+                out.append(AliasTargetCandidate(start + len(phones) - 1, 3.2, "vv_exact_sequence"))
+            if out:
+                return out
         target_phone = phones[-1]
         for idx, phone in enumerate(expected):
-            if phone == target_phone and is_vowel_phone(phone):
+            if _phone_matches(phone, target_phone) and is_vowel_phone(phone):
                 out.append(AliasTargetCandidate(idx, 2.3 if role == "vv" else 1.8, role))
         return out
     for start in _find_all_phone_sequences(expected, phones):
@@ -778,7 +940,7 @@ def _alias_target_candidates(alias: str, role: str, expected: Sequence[str]) -> 
         return out
     target_phone = next((phone for phone in reversed(phones) if is_vowel_phone(phone)), phones[-1])
     for idx, phone in enumerate(expected):
-        if phone == target_phone and is_vowel_phone(phone):
+        if _phone_matches(phone, target_phone) and is_vowel_phone(phone):
             out.append(AliasTargetCandidate(idx, 1.1, "target_phone_fallback"))
     return out
 
@@ -816,8 +978,6 @@ def _alias_target_transition_score(
 
 
 def _can_share_alias_target(prev_role: str, role: str) -> bool:
-    if prev_role == "vc" and role in {"cv", "cv_head", "vcv"}:
-        return True
     if prev_role in {"v", "vv"} and role in {"vv", "v"}:
         return True
     return False
@@ -836,18 +996,24 @@ def _alias_target_phone_index(
         return None
     if role == "vc" and len(phones) >= 2:
         left = phones[0]
-        right = phones[-1]
+        right = phones[1:]
         for idx in range(0, max(0, len(expected) - 1)):
-            if expected[idx] != left or expected[idx + 1] != right:
+            if not _phone_matches(expected[idx], left):
                 continue
-            target = _next_vowel_index(expected, idx + 1)
-            if target is not None and target >= min_target_index:
+            if not _vc_right_matches(expected, idx + 1, right):
+                continue
+            target = idx + 1
+            if target >= min_target_index:
                 return target
         return None
     if role in {"v", "vv"}:
+        if role == "vv" and len(phones) >= 2:
+            match = _find_phone_sequence(expected, phones, min_target_index=min_target_index)
+            if match is not None:
+                return match + len(phones) - 1
         target_phone = phones[-1]
         for idx, phone in enumerate(expected):
-            if idx >= min_target_index and phone == target_phone and is_vowel_phone(phone):
+            if idx >= min_target_index and _phone_matches(phone, target_phone) and is_vowel_phone(phone):
                 return idx
         return None
     match = _find_phone_sequence(expected, phones, min_target_index=min_target_index)
@@ -855,7 +1021,7 @@ def _alias_target_phone_index(
         return match + len(phones) - 1
     target_phone = next((phone for phone in reversed(phones) if is_vowel_phone(phone)), phones[-1])
     for idx, phone in enumerate(expected):
-        if idx >= min_target_index and phone == target_phone and is_vowel_phone(phone):
+        if idx >= min_target_index and _phone_matches(phone, target_phone) and is_vowel_phone(phone):
             return idx
     return None
 
@@ -879,9 +1045,39 @@ def _find_phone_sequence(expected: Sequence[str], phones: Sequence[str], *, min_
         target = start + len(phones) - 1
         if target < min_target_index:
             continue
-        if list(expected[start : start + len(phones)]) == list(phones):
+        if _phone_sequence_matches(expected[start : start + len(phones)], phones):
             return start
     return None
+
+
+def _vc_right_matches(expected: Sequence[str], start_idx: int, right: Sequence[str]) -> bool:
+    if not right or start_idx >= len(expected):
+        return False
+    if _phone_sequence_matches(expected[start_idx : start_idx + len(right)], right):
+        return True
+    if len(right) == 2 and right[1] == "y" and _phone_matches(expected[start_idx], right[0]):
+        return True
+    return False
+
+
+def _phone_sequence_matches(expected: Sequence[str], phones: Sequence[str]) -> bool:
+    if len(expected) != len(phones):
+        return False
+    return all(_phone_matches(expected_phone, phone) for expected_phone, phone in zip(expected, phones))
+
+
+def _phone_matches(expected_phone: str, alias_phone: str) -> bool:
+    expected_norm = str(expected_phone or "").strip().lower()
+    alias_norm = str(alias_phone or "").strip().lower()
+    if expected_norm == alias_norm:
+        return True
+    equivalent = {
+        "j": {"z", "j"},
+        "z": {"z", "j"},
+        "h": {"h", "f"},
+        "f": {"h", "f"},
+    }
+    return expected_norm in equivalent.get(alias_norm, set())
 
 
 def _find_all_phone_sequences(expected: Sequence[str], phones: Sequence[str]) -> list[int]:
@@ -889,7 +1085,7 @@ def _find_all_phone_sequences(expected: Sequence[str], phones: Sequence[str]) ->
         return []
     out: list[int] = []
     for start in range(0, len(expected) - len(phones) + 1):
-        if list(expected[start : start + len(phones)]) == list(phones):
+        if _phone_sequence_matches(expected[start : start + len(phones)], phones):
             out.append(start)
     return out
 

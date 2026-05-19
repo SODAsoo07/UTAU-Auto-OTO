@@ -8,7 +8,7 @@ from typing import Sequence
 from .decode import decode_monotonic_events
 from .features import extract_features
 from .model import MfaFreeFrameModelConfig, build_frame_model
-from .slot_viterbi import SlotViterbiResult, assign_slots_viterbi, slot_assignments_to_decoded_events
+from .slot_viterbi import ExpectedSlot, SlotViterbiResult, assign_slots_viterbi, slot_assignments_to_decoded_events
 from .types import DecodedEvent, EVENT_LABELS, FRAME_LABELS, FramePosterior
 
 
@@ -68,6 +68,7 @@ def predict_wav(
     *,
     checkpoint_path: str | Path,
     expected_phones: Sequence[str] | None = None,
+    expected_slots: Sequence[ExpectedSlot] | None = None,
     encoder: str | None = None,
     device: str | None = None,
     use_slot_viterbi: bool = True,
@@ -83,8 +84,8 @@ def predict_wav(
         requested_device=device,
     )
     slot_result = (
-        assign_slots_viterbi(posterior, expected_phones=expected_phones)
-        if use_slot_viterbi and expected_phones
+        assign_slots_viterbi(posterior, expected_phones=expected_phones, expected_slots=expected_slots)
+        if use_slot_viterbi and (expected_slots or expected_phones)
         else None
     )
     decoded = (

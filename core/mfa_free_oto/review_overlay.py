@@ -20,6 +20,13 @@ EVENT_COLORS = {
     "cv_boundary": "#dc2626",
     "vowel_nucleus": "#16a34a",
     "phone_change": "#0f766e",
+    "cv": "#dc2626",
+    "cv_head": "#dc2626",
+    "vc": "#9333ea",
+    "vcv": "#dc2626",
+    "v": "#16a34a",
+    "vv": "#16a34a",
+    "oto_anchor": "#9333ea",
 }
 
 
@@ -74,7 +81,7 @@ pre {{ background: #111827; color: #e5e7eb; padding: 12px; overflow: auto; font-
 <h2>Manual events</h2>
 {events_svg}
 {posterior_svg}
-<h2>Decoded OTO anchors</h2>
+<h2>Assigned OTO anchors</h2>
 {decoded_svg}
 <h2>Generated OTO params</h2>
 {generated_oto_svg}
@@ -218,10 +225,12 @@ def _render_decoded_events(events: Sequence[DecodedEvent | dict], duration_ms: f
             label = str(event.get("label"))
             time_ms = float(event.get("selected_time_ms", event.get("time_ms", 0.0)))
             score = float(event.get("score", 0.0))
+            alias = str(event.get("alias") or event.get("expected_phone") or "")
         x = time_ms / duration_ms * width
         color = EVENT_COLORS.get(label, "#111827")
         items.append(f'<line x1="{x:.2f}" y1="0" x2="{x:.2f}" y2="{height}" stroke="{color}" stroke-width="2" stroke-dasharray="4 3"/>')
-        items.append(f'<text x="{x + 4:.2f}" y="16" font-size="12" fill="{color}">{html.escape(label)} {score:.2f}</text>')
+        text = f"{label} {score:.2f}" if isinstance(event, DecodedEvent) else f"{label} {alias} {score:.2f}".strip()
+        items.append(f'<text x="{x + 4:.2f}" y="16" font-size="12" fill="{color}">{html.escape(text)}</text>')
     return f'<svg viewBox="0 0 {width} {height}" role="img">{"".join(items)}{_time_ticks(duration_ms, width, height)}</svg>'
 
 
