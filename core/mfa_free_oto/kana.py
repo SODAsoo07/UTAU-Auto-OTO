@@ -66,7 +66,7 @@ def parse_kana_text(text: str) -> list[str]:
         if char in _SMALL_YOON:
             if not phones:
                 return []
-            if phones[-1] == "i":
+            if phones[-1] in {"i", "e"}:
                 phones.pop()
             phones.extend(("y", _SMALL_YOON[char]))
             seen_kana = True

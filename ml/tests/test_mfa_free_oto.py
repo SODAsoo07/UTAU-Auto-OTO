@@ -31,6 +31,7 @@ from core.mfa_free_oto.oto_adapter import (
     adapt_template_row,
     assign_template_row_anchors,
     bootstrap_row,
+    expected_slots_for_template_rows,
     parse_template_oto_line,
 )
 from core.mfa_free_oto.review_overlay import render_review_html
@@ -274,9 +275,130 @@ def test_filename_parser_handles_japanese_kana_sequence():
         "s",
         "a",
     ]
+    assert infer_filename_phone_sequence("_てゅてゅ_でゅでゅ.wav") == [
+        "t",
+        "y",
+        "u",
+        "t",
+        "y",
+        "u",
+        "d",
+        "y",
+        "u",
+        "d",
+        "y",
+        "u",
+    ]
     assert _alias_type_for_row("ヴぁ", "auto") == "cv"
     assert _alias_type_for_row("すぃ", "auto") == "cv"
+    assert _alias_type_for_row("てゅ", "auto") == "cv"
     assert _alias_type_for_row("a v", "auto") == "vc"
+    assert _alias_type_for_row("a ky", "auto") == "vc"
+    assert _alias_type_for_row("a ny", "auto") == "vc"
+    assert _alias_type_for_row("u を", "auto") == "vv"
+
+
+def test_template_rows_define_oto_slots_without_extra_filename_vowels():
+    rows = [
+        parse_template_oto_line("_き.wav=き,0,0,0,0,0"),
+        parse_template_oto_line("_き.wav=i k,0,0,0,0,0"),
+        parse_template_oto_line("_き.wav=か,0,0,0,0,0"),
+        parse_template_oto_line("_き.wav=a k,0,0,0,0,0"),
+        parse_template_oto_line("_き.wav=く,0,0,0,0,0"),
+        parse_template_oto_line("_き.wav=u k,0,0,0,0,0"),
+        parse_template_oto_line("_き.wav=け,0,0,0,0,0"),
+        parse_template_oto_line("_き.wav=e k,0,0,0,0,0"),
+        parse_template_oto_line("_き.wav=こ,0,0,0,0,0"),
+        parse_template_oto_line("_き.wav=o k,0,0,0,0,0"),
+        parse_template_oto_line("_き.wav=n k,0,0,0,0,0"),
+    ]
+    slots = expected_slots_for_template_rows(
+        [row for row in rows if row is not None],
+        ["k", "i", "k", "a", "k", "u", "k", "e", "k", "o", "k", "a", "n", "k", "a"],
+    )
+    assert [(slot.phone_index, slot.event_label) for slot in slots] == [
+        (1, "cv_boundary"),
+        (2, "phone_change"),
+        (3, "cv_boundary"),
+        (4, "phone_change"),
+        (5, "cv_boundary"),
+        (6, "phone_change"),
+        (7, "cv_boundary"),
+        (8, "phone_change"),
+        (9, "cv_boundary"),
+        (10, "phone_change"),
+        (11, "cv_boundary"),
+        (13, "phone_change"),
+        (14, "cv_boundary"),
+    ]
+
+
+def test_template_vowel_rows_define_vowel_nucleus_slots_in_row_order():
+    rows = [
+        parse_template_oto_line("_a.wav=あ,0,0,0,0,0"),
+        parse_template_oto_line("_a.wav=a あ,0,0,0,0,0"),
+        parse_template_oto_line("_a.wav=a い,0,0,0,0,0"),
+    ]
+    slots = expected_slots_for_template_rows([row for row in rows if row is not None], ["a", "a", "i"])
+    assert [(slot.phone_index, slot.event_label) for slot in slots] == [
+        (1, "vowel_nucleus"),
+        (2, "vowel_nucleus"),
+    ]
+
+
+def test_template_rows_keep_out_of_order_alternate_alias_target():
+    rows = [
+        parse_template_oto_line("_u.wav=う,0,0,0,0,0"),
+        parse_template_oto_line("_u.wav=u い,0,0,0,0,0"),
+        parse_template_oto_line("_u.wav=o い,0,0,0,0,0"),
+        parse_template_oto_line("_u.wav=u を,0,0,0,0,0"),
+    ]
+    slots = expected_slots_for_template_rows([row for row in rows if row is not None], ["u", "u", "i", "o", "i"])
+    assert [(slot.phone_index, slot.event_label) for slot in slots] == [
+        (0, "vowel_nucleus"),
+        (2, "vowel_nucleus"),
+        (4, "vowel_nucleus"),
+        (3, "vowel_nucleus"),
+    ]
+
+
+def test_template_yoon_vc_alias_targets_first_consonant_of_cluster():
+    rows = [
+        parse_template_oto_line("_kya.wav=きゃ,0,0,0,0,0"),
+        parse_template_oto_line("_kya.wav=a ky,0,0,0,0,0"),
+        parse_template_oto_line("_kya.wav=きゅ,0,0,0,0,0"),
+    ]
+    slots = expected_slots_for_template_rows(
+        [row for row in rows if row is not None],
+        ["k", "y", "a", "k", "i", "k", "y", "u"],
+    )
+    assert [(slot.phone_index, slot.event_label) for slot in slots] == [
+        (2, "cv_boundary"),
+        (3, "phone_change"),
+        (4, "cv_boundary"),
+        (7, "cv_boundary"),
+    ]
+
+
+def test_template_alias_consonant_equivalents_cover_bank_spellings():
+    rows = [
+        parse_template_oto_line("_z.wav=ずぃ,0,0,0,0,0"),
+        parse_template_oto_line("_z.wav=i j,0,0,0,0,0"),
+        parse_template_oto_line("_h.wav=ふ,0,0,0,0,0"),
+        parse_template_oto_line("_h.wav=u h,0,0,0,0,0"),
+    ]
+    slots = expected_slots_for_template_rows(
+        [row for row in rows if row is not None],
+        ["z", "i", "z", "a", "f", "u", "h", "e"],
+    )
+    assert [(slot.phone_index, slot.event_label) for slot in slots] == [
+        (1, "cv_boundary"),
+        (2, "phone_change"),
+        (3, "cv_boundary"),
+        (5, "cv_boundary"),
+        (6, "phone_change"),
+        (7, "cv_boundary"),
+    ]
 
 
 def test_template_anchor_assignment_covers_vcv_vowel_rows():
@@ -358,19 +480,26 @@ def test_template_anchor_assignment_can_ignore_bad_source_timing_for_slots():
     assert all("slot_decoded_event" in anchor.warnings for anchor in anchors if anchor is not None)
 
 
-def test_cvvc_vc_and_next_cv_can_share_filename_slot_boundary():
+def test_cvvc_vc_and_next_cv_use_separate_filename_slots():
     times = [float(idx * 20) for idx in range(81)]
     event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
     class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
     expected = ["v", "a", "v", "i", "v", "u"]
     decoded = []
-    for slot_index, (phone_index, phone, center) in enumerate([(1, "a", 200.0), (3, "i", 500.0), (5, "u", 800.0)]):
+    slot_defs = [
+        (1, "a", "cv_boundary", 200.0),
+        (2, "v", "phone_change", 380.0),
+        (3, "i", "cv_boundary", 500.0),
+        (4, "v", "phone_change", 680.0),
+        (5, "u", "cv_boundary", 800.0),
+    ]
+    for slot_index, (phone_index, phone, label, center) in enumerate(slot_defs):
         frame_index = min(range(len(times)), key=lambda idx: abs(times[idx] - center))
-        event_scores["cv_boundary"][frame_index] = 0.95
+        event_scores[label][frame_index] = 0.95
         class_probs["vowel"][frame_index] = 0.85
         decoded.append(
             {
-                "label": "cv_boundary",
+                "label": label,
                 "selected_time_ms": center,
                 "score": 0.95,
                 "frame_index": frame_index,
@@ -400,9 +529,10 @@ def test_cvvc_vc_and_next_cv_can_share_filename_slot_boundary():
         expected_phones=expected,
     )
     assert [anchor.anchor_abs_ms for anchor in anchors if anchor is not None] == pytest.approx(
-        [200.0, 500.0, 500.0, 800.0, 800.0]
+        [200.0, 380.0, 500.0, 680.0, 800.0]
     )
-    assert [anchor.expected_phone_index for anchor in anchors if anchor is not None] == [1, 3, 3, 5, 5]
+    assert [anchor.expected_phone_index for anchor in anchors if anchor is not None] == [1, 2, 3, 4, 5]
+    assert [anchor.role for anchor in anchors if anchor is not None] == ["cv", "vc", "cv", "vc", "cv"]
 
 
 def test_template_preserve_allows_large_filename_slot_reanchor():
@@ -418,6 +548,21 @@ def test_template_preserve_allows_large_filename_slot_reanchor():
     assert absolute["preutterance_abs"] == pytest.approx(420.0, abs=35.0)
     assert adapted.source_timing is None
     assert "source_timing_discarded" in adapted.warnings
+
+
+def test_vc_bootstrap_cuts_before_next_cv_vowel_body():
+    adapted = bootstrap_row(
+        "v.wav",
+        "a v",
+        OtoAnchor(anchor_abs_ms=1365.0, score=0.95, vowel_end_abs_ms=1796.0),
+        file_duration_ms=4600.0,
+        config=OtoAdapterConfig(language="japanese", format_type="cvvc", alias_type="auto"),
+    )
+    absolute = adapted.to_json_dict()["absolute"]
+    assert absolute["preutterance_abs"] == pytest.approx(1365.0)
+    assert absolute["cutoff_abs"] < 1435.0
+    assert absolute["cutoff_abs"] < 1796.0
+    assert adapted.timing.cutoff == pytest.approx(-(adapted.timing.consonant + 26.0))
 
 
 def test_zero_template_uses_bootstrap_fallback_instead_of_preserving_zeros():

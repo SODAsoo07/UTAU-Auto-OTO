@@ -19,6 +19,7 @@ from core.mfa_free_oto.oto_adapter import (
     assign_template_row_anchors,
     anchors_from_prediction,
     bootstrap_row,
+    expected_slots_for_template_rows,
     load_oto_template_rows,
 )
 from core.mfa_free_oto.review_overlay import write_review_html
@@ -75,10 +76,13 @@ def main() -> int:
 
     for wav_path in targets:
         expected_phones = infer_filename_phone_sequence(wav_path.name)
+        template_rows = template_by_wav.get(wav_path.name.lower()) or []
+        expected_slots = expected_slots_for_template_rows(template_rows, expected_phones) if template_rows else None
         prediction = predict_wav(
             wav_path,
             checkpoint_path=args.checkpoint,
             expected_phones=expected_phones,
+            expected_slots=expected_slots,
             encoder=args.encoder,
             device=args.device,
             use_slot_viterbi=not args.disable_slot_viterbi,
@@ -86,7 +90,6 @@ def main() -> int:
         event_source = _slot_events_for_oto(prediction)
         anchors = anchors_from_prediction(prediction.posterior, event_source)
         file_duration_ms = _duration_ms(wav_path)
-        template_rows = template_by_wav.get(wav_path.name.lower()) or []
         adapted = []
         if mode == "template-preserve" and template_rows:
             row_anchors = assign_template_row_anchors(
@@ -124,10 +127,22 @@ def main() -> int:
                 )
             )
         out_lines.extend(row.format_line() for row in adapted)
+        generated_rows_json = [row.to_json_dict() for row in adapted]
+        assigned_anchor_events = _assigned_anchor_events(generated_rows_json)
         record = {
             "wav": wav_path.name,
             "wav_path": str(wav_path),
             "expected_phones": expected_phones,
+            "expected_oto_slots": [
+                {
+                    "slot_index": slot.slot_index,
+                    "phone_index": slot.phone_index,
+                    "phone": slot.phone,
+                    "role": slot.role,
+                    "event_label": slot.event_label,
+                }
+                for slot in (expected_slots or [])
+            ],
             "prediction": prediction.to_json_dict(),
             "anchors": [
                 {
@@ -141,7 +156,8 @@ def main() -> int:
                 }
                 for anchor in anchors
             ],
-            "generated_oto_rows": [row.to_json_dict() for row in adapted],
+            "assigned_anchors": assigned_anchor_events,
+            "generated_oto_rows": generated_rows_json,
         }
         records.append(record)
         if overlay_dir:
@@ -208,7 +224,7 @@ def _write_overlay(
         overlay_dir / f"{wav_path.stem}.html",
         row,
         posterior=prediction.posterior,
-        decoded_events=prediction.decoded_events,
+        decoded_events=record.get("assigned_anchors") or [],
         generated_oto_rows=record["generated_oto_rows"],
     )
 
@@ -228,6 +244,30 @@ def _slot_events_for_oto(prediction: RuntimePrediction):
         }
         for assignment in prediction.slot_result.assignments
     ]
+
+
+def _assigned_anchor_events(generated_rows: list[dict]) -> list[dict]:
+    events: list[dict] = []
+    for row in generated_rows:
+        anchor = row.get("anchor") if isinstance(row, dict) else None
+        if not isinstance(anchor, dict):
+            continue
+        anchor_ms = anchor.get("anchor_abs_ms")
+        if anchor_ms is None:
+            continue
+        events.append(
+            {
+                "label": str(anchor.get("role") or "oto_anchor"),
+                "time_ms": float(anchor_ms),
+                "score": float(anchor.get("score") or 0.0),
+                "alias": str(row.get("alias") or ""),
+                "expected_phone": anchor.get("expected_phone"),
+                "expected_phone_index": anchor.get("expected_phone_index"),
+                "slot_index": anchor.get("slot_index"),
+                "warnings": list(anchor.get("warnings") or []),
+            }
+        )
+    return events
 
 
 if __name__ == "__main__":
