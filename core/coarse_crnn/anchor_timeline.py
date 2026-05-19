@@ -368,6 +368,10 @@ def anchor_timeline_mode_from_env(default: str = "linear") -> str:
     raw = str(os.environ.get("UTOA_BOUNDARY_ANCHOR_TIMELINE", "") or "").strip().lower()
     if raw in {"filename", "tokens", "token"}:
         return "filename"
+    if raw in {"cv_slot", "cv_slots", "cv-segment", "cv_segment", "slot_cv"}:
+        return "cv_slot"
+    if raw in {"auto", "format_auto", "format-auto"}:
+        return "auto"
     if raw in {"hybrid", "ab", "valley_onset"}:
         return "hybrid"
     if raw in {"linear", "legacy"}:

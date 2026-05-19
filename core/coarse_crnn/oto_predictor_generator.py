@@ -35,7 +35,7 @@ def generate_oto_with_crnn_predictor(
     engine: str = "",
 ):
     engine_code = _normalize_engine(engine or os.environ.get("UTOA_OTO_CRNN_ENGINE", ""))
-    if engine_code == "boundary_decoder":
+    if engine_code in {"boundary_decoder", "stage1_heuristic"}:
         resolved_model = resolve_boundary_scorer_model_path(model_path)
         if not resolved_model:
             return 0, 0, [
@@ -51,12 +51,13 @@ def generate_oto_with_crnn_predictor(
             format_type=format_type,
             model_path=resolved_model,
             stage2_model_path=stage2_model_path,
-            stage2_enable=stage2_enable,
+            stage2_enable=False if engine_code == "stage1_heuristic" else stage2_enable,
             phoneme_boundary_model_path=phoneme_boundary_model_path,
             device=device,
             alias_suffix=alias_suffix,
             callback=callback,
             special_aliases=special_aliases,
+            heuristic_only=bool(engine_code == "stage1_heuristic"),
         )
     return 0, 0, [_DIRECT_PARAM_DEPRECATED_ERROR]
 
@@ -197,6 +198,18 @@ def _normalize_engine(value: object) -> str:
     text = str(value or "").strip().lower()
     if text in {"legacy", "legacy_direct", "legacy-direct", "direct", "old"}:
         return "legacy_direct"
+    if text in {
+        "stage1",
+        "stage1_heuristic",
+        "stage1-heuristic",
+        "heuristic",
+        "heuristic_only",
+        "heuristic-only",
+        "boundary_heuristic",
+        "boundary-heuristic",
+        "stage1 heuristic only",
+    }:
+        return "stage1_heuristic"
     if text in {"", "boundary", "boundary_decoder", "boundary-scorer", "scorer", "new"}:
         return "boundary_decoder"
     return "boundary_decoder"

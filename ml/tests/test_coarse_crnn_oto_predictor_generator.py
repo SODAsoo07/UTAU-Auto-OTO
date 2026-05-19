@@ -733,7 +733,7 @@ def test_crnn_oto_generator_blocks_base_fallback_on_low_order_quality(tmp_path, 
 
 
 def test_filename_alias_order_score_cvvc_uses_core_alias_tokens():
-    from core.coarse_crnn.oto_predictor_generator import _estimate_filename_alias_order_ratio
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _estimate_filename_alias_order_ratio
 
     score, expected_count, is_cvvc = _estimate_filename_alias_order_ratio(
         "_beu'bwa'bwi'bo'bwe'bu'bweo'bwa.wav",
@@ -760,7 +760,7 @@ def test_filename_alias_order_score_cvvc_uses_core_alias_tokens():
 
 
 def test_filename_alias_order_score_non_cvvc_remains_strict():
-    from core.coarse_crnn.oto_predictor_generator import _estimate_filename_alias_order_ratio
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _estimate_filename_alias_order_ratio
 
     score, expected_count, is_cvvc = _estimate_filename_alias_order_ratio(
         "a_b_c_d.wav",
@@ -773,7 +773,7 @@ def test_filename_alias_order_score_non_cvvc_remains_strict():
 
 
 def test_crnn_right_boundary_guard_shortens_overlong_cutoff():
-    from core.coarse_crnn.oto_predictor_generator import _apply_conservative_right_boundary_guard
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _apply_conservative_right_boundary_guard
 
     params, changed = _apply_conservative_right_boundary_guard(
         {
@@ -797,7 +797,7 @@ def test_crnn_right_boundary_guard_shortens_overlong_cutoff():
 
 
 def test_role_guard_limits_diphthong_lengthens_cv_cap():
-    from core.coarse_crnn.oto_predictor_generator import _right_guard_limits_for_role
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _right_guard_limits_for_role
 
     base = _right_guard_limits_for_role("cv", alias_type="cv")
     diph = _right_guard_limits_for_role("cv", alias_type="cv", is_diphthong=True)
@@ -808,7 +808,7 @@ def test_role_guard_limits_diphthong_lengthens_cv_cap():
 
 
 def test_role_guard_limits_special_v_borrows_cv_floor():
-    from core.coarse_crnn.oto_predictor_generator import _right_guard_limits_for_role
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _right_guard_limits_for_role
 
     pure_v = _right_guard_limits_for_role("v", alias_type="vowel")
     special_v = _right_guard_limits_for_role("v", alias_type="vowel", is_special=True)
@@ -821,7 +821,7 @@ def test_role_guard_limits_special_v_borrows_cv_floor():
 
 
 def test_normalize_special_aliases_handles_iterables():
-    from core.coarse_crnn.oto_predictor_generator import _alias_is_special, _normalize_special_aliases
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _alias_is_special, _normalize_special_aliases
 
     special = _normalize_special_aliases({"tt", "Pf"})
 
@@ -834,7 +834,7 @@ def test_normalize_special_aliases_handles_iterables():
 
 
 def test_low_confidence_fallback_ignores_model_flag_by_default(monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _apply_low_confidence_fallback
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _apply_low_confidence_fallback
 
     monkeypatch.delenv("UTOA_OTO_CRNN_LOW_CONF_USE_MODEL_FLAG", raising=False)
     out, reason = _apply_low_confidence_fallback(
@@ -867,7 +867,7 @@ def test_low_confidence_fallback_ignores_model_flag_by_default(monkeypatch):
 
 
 def test_low_confidence_fallback_requires_low_heatmap_for_error(monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _apply_low_confidence_fallback
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _apply_low_confidence_fallback
 
     monkeypatch.delenv("UTOA_OTO_CRNN_LOW_CONF_REQUIRE_LOW_HEATMAP_FOR_ERROR", raising=False)
     out, reason = _apply_low_confidence_fallback(
@@ -900,7 +900,7 @@ def test_low_confidence_fallback_requires_low_heatmap_for_error(monkeypatch):
 
 
 def test_low_confidence_fallback_requires_multi_signal_votes(monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _apply_low_confidence_fallback
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _apply_low_confidence_fallback
 
     monkeypatch.delenv("UTOA_OTO_CRNN_LOW_CONF_MIN_TRIGGER_VOTES", raising=False)
     out, reason = _apply_low_confidence_fallback(
@@ -934,7 +934,7 @@ def test_low_confidence_fallback_requires_multi_signal_votes(monkeypatch):
 
 
 def test_low_confidence_fallback_does_not_trigger_on_single_signal(monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _apply_low_confidence_fallback
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _apply_low_confidence_fallback
 
     monkeypatch.delenv("UTOA_OTO_CRNN_LOW_CONF_MIN_TRIGGER_VOTES", raising=False)
     out, reason = _apply_low_confidence_fallback(
@@ -967,7 +967,7 @@ def test_low_confidence_fallback_does_not_trigger_on_single_signal(monkeypatch):
 
 
 def test_low_confidence_fallback_role_adapt_relaxes_threshold(monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _apply_low_confidence_fallback
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _apply_low_confidence_fallback
 
     monkeypatch.setenv("UTOA_OTO_CRNN_LOW_CONF_ROLE_RELAX_ROLES", "other,cv,v,vc,vv,v-cv,special")
     monkeypatch.setenv("UTOA_OTO_CRNN_LOW_CONF_ROLE_RELAX_CONF_DELTA", "0.05")
@@ -1003,7 +1003,7 @@ def test_low_confidence_fallback_role_adapt_relaxes_threshold(monkeypatch):
 
 
 def test_shift_params_into_activity_window_moves_early_anchor():
-    from core.coarse_crnn.oto_predictor_generator import _shift_params_into_activity_window
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _shift_params_into_activity_window
 
     out = _shift_params_into_activity_window(
         predicted_anchors={
@@ -1027,7 +1027,7 @@ def test_shift_params_into_activity_window_moves_early_anchor():
 
 
 def test_activity_indices_can_pick_strongest_run():
-    from core.coarse_crnn.oto_predictor_generator import _sustained_frame_indices
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _sustained_frame_indices
 
     mask = np.asarray([False, True, True, False, True, True, True, False], dtype=bool)
     rms = np.asarray([0.01, 0.08, 0.09, 0.02, 0.22, 0.24, 0.20, 0.01], dtype=np.float32)
@@ -1039,7 +1039,7 @@ def test_activity_indices_can_pick_strongest_run():
 
 
 def test_row_activity_shift_is_disabled_by_default(monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _shift_params_into_row_activity_window
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _shift_params_into_row_activity_window
 
     monkeypatch.delenv("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_ENABLE", raising=False)
 
@@ -1062,7 +1062,7 @@ def test_row_activity_shift_is_disabled_by_default(monkeypatch):
 
 
 def test_row_activity_shift_moves_first_row_back_from_next_syllable_when_enabled(monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _shift_params_into_row_activity_window
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _shift_params_into_row_activity_window
 
     monkeypatch.setenv("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_ENABLE", "1")
 
@@ -1088,7 +1088,7 @@ def test_row_activity_shift_moves_first_row_back_from_next_syllable_when_enabled
 
 
 def test_row_activity_shift_auto_enables_on_low_snr(monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _shift_params_into_row_activity_window
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _shift_params_into_row_activity_window
 
     monkeypatch.delenv("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_ENABLE", raising=False)
     monkeypatch.setenv("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_AUTO_LOW_SNR_ENABLE", "1")
@@ -1119,7 +1119,7 @@ def test_row_activity_shift_auto_enables_on_low_snr(monkeypatch):
 
 
 def test_row_activity_shift_auto_enables_on_front_early_prediction(monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _shift_params_into_row_activity_window
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _shift_params_into_row_activity_window
 
     monkeypatch.delenv("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_ENABLE", raising=False)
     monkeypatch.setenv("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_AUTO_FRONT_EARLY_ENABLE", "1")
@@ -1149,7 +1149,7 @@ def test_row_activity_shift_auto_enables_on_front_early_prediction(monkeypatch):
 
 
 def test_row_activity_shift_auto_respects_role_allowlist(monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _shift_params_into_row_activity_window
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _shift_params_into_row_activity_window
 
     monkeypatch.delenv("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_ENABLE", raising=False)
     monkeypatch.delenv("UTOA_OTO_CRNN_ACTIVITY_ROW_SHIFT_AUTO_LOW_SNR_ENABLE", raising=False)
@@ -1178,7 +1178,7 @@ def test_row_activity_shift_auto_respects_role_allowlist(monkeypatch):
 
 
 def test_audio_candidate_snap_moves_only_nearby_onset(tmp_path, monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _apply_audio_candidate_snap
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _apply_audio_candidate_snap
 
     wav_path = tmp_path / "a.wav"
     wav_path.write_bytes(b"fake")
@@ -1216,7 +1216,7 @@ def test_audio_candidate_snap_moves_only_nearby_onset(tmp_path, monkeypatch):
 
 
 def test_audio_candidate_snap_uses_monotonic_sequence_state(tmp_path, monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _apply_audio_candidate_snap
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _apply_audio_candidate_snap
 
     wav_path = tmp_path / "a.wav"
     wav_path.write_bytes(b"fake")
@@ -1257,7 +1257,7 @@ def test_audio_candidate_snap_uses_monotonic_sequence_state(tmp_path, monkeypatc
 
 
 def test_audio_candidate_snap_ignores_far_onset(tmp_path):
-    from core.coarse_crnn.oto_predictor_generator import _apply_audio_candidate_snap
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _apply_audio_candidate_snap
 
     wav_path = tmp_path / "a.wav"
     wav_path.write_bytes(b"fake")
@@ -1290,7 +1290,7 @@ def test_audio_candidate_snap_ignores_far_onset(tmp_path):
 
 
 def test_audio_candidate_snap_requires_risky_prediction_by_default(tmp_path, monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _apply_audio_candidate_snap
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _apply_audio_candidate_snap
 
     wav_path = tmp_path / "a.wav"
     wav_path.write_bytes(b"fake")
@@ -1329,7 +1329,7 @@ def test_audio_candidate_snap_requires_risky_prediction_by_default(tmp_path, mon
 
 
 def test_audio_candidate_snap_applies_when_prediction_is_early_outside_activity(tmp_path, monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _apply_audio_candidate_snap
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _apply_audio_candidate_snap
 
     wav_path = tmp_path / "a.wav"
     wav_path.write_bytes(b"fake")
@@ -1369,7 +1369,7 @@ def test_audio_candidate_snap_applies_when_prediction_is_early_outside_activity(
 
 
 def test_audio_candidate_snap_cvvc_role_cap_blocks_large_forward_jump(tmp_path, monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _apply_audio_candidate_snap
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _apply_audio_candidate_snap
 
     wav_path = tmp_path / "cvvc.wav"
     wav_path.write_bytes(b"fake")
@@ -1407,7 +1407,7 @@ def test_audio_candidate_snap_cvvc_role_cap_blocks_large_forward_jump(tmp_path, 
 
 
 def test_audio_candidate_snap_blocks_regressive_format_role_pair(tmp_path, monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _apply_audio_candidate_snap
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _apply_audio_candidate_snap
 
     wav_path = tmp_path / "a.wav"
     wav_path.write_bytes(b"fake")
@@ -1443,7 +1443,7 @@ def test_audio_candidate_snap_blocks_regressive_format_role_pair(tmp_path, monke
 
 def test_row_order_alignment_enforces_monotonic_onset_mapping(tmp_path):
     from core.coarse_crnn.oto_audio_candidates import AudioCandidates, OnsetPeak
-    from core.coarse_crnn.oto_predictor_generator import _PredictRow, _apply_monotonic_row_order_alignment
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _PredictRow, _apply_monotonic_row_order_alignment
 
     wav_path = tmp_path / "a.wav"
     wav_path.write_bytes(b"fake")
@@ -1498,7 +1498,7 @@ def test_row_order_alignment_enforces_monotonic_onset_mapping(tmp_path):
 
 def test_row_order_alignment_holds_large_jump(tmp_path):
     from core.coarse_crnn.oto_audio_candidates import AudioCandidates, OnsetPeak
-    from core.coarse_crnn.oto_predictor_generator import _PredictRow, _apply_monotonic_row_order_alignment
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _PredictRow, _apply_monotonic_row_order_alignment
 
     wav_path = tmp_path / "b.wav"
     wav_path.write_bytes(b"fake")
@@ -1552,7 +1552,7 @@ def test_row_order_alignment_holds_large_jump(tmp_path):
 
 def test_row_order_alignment_skips_vc_boundary_rows_by_default(tmp_path):
     from core.coarse_crnn.oto_audio_candidates import AudioCandidates, OnsetPeak
-    from core.coarse_crnn.oto_predictor_generator import _PredictRow, _apply_monotonic_row_order_alignment
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _PredictRow, _apply_monotonic_row_order_alignment
 
     wav_path = tmp_path / "vc-order.wav"
     wav_path.write_bytes(b"fake")
@@ -1598,7 +1598,7 @@ def test_row_order_alignment_skips_vc_boundary_rows_by_default(tmp_path):
 
 def test_vc_candidate_matcher_moves_toward_vc_transition(tmp_path, monkeypatch):
     from core.coarse_crnn.oto_audio_candidates import AudioCandidates, OnsetPeak, VowelSegmentCandidate
-    from core.coarse_crnn.oto_predictor_generator import _apply_vc_candidate_matcher
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _apply_vc_candidate_matcher
 
     wav_path = tmp_path / "vc.wav"
     wav_path.write_bytes(b"fake")
@@ -1657,7 +1657,7 @@ def test_vc_candidate_matcher_moves_toward_vc_transition(tmp_path, monkeypatch):
 
 
 def test_vc_candidate_matcher_skips_non_vc_role(tmp_path, monkeypatch):
-    from core.coarse_crnn.oto_predictor_generator import _apply_vc_candidate_matcher
+    from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import _apply_vc_candidate_matcher
 
     wav_path = tmp_path / "nonvc.wav"
     wav_path.write_bytes(b"fake")

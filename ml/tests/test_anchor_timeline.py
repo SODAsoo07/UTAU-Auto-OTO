@@ -380,6 +380,13 @@ def test_mode_from_env_recognizes_hybrid(monkeypatch):
     assert anchor_timeline_mode_from_env() == "hybrid"
 
 
+def test_mode_from_env_recognizes_auto(monkeypatch):
+    monkeypatch.setenv("UTOA_BOUNDARY_ANCHOR_TIMELINE", "auto")
+    assert anchor_timeline_mode_from_env() == "auto"
+    monkeypatch.setenv("UTOA_BOUNDARY_ANCHOR_TIMELINE", "format-auto")
+    assert anchor_timeline_mode_from_env() == "auto"
+
+
 def test_mode_from_env_recognizes_linear(monkeypatch):
     monkeypatch.setenv("UTOA_BOUNDARY_ANCHOR_TIMELINE", "linear")
     assert anchor_timeline_mode_from_env() == "linear"

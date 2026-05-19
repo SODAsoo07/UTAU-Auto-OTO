@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -14,7 +14,7 @@ from core.coarse_crnn.boundary_scorer_inference import infer_boundary_scores_wit
 from core.coarse_crnn.boundary_scorer_model import load_boundary_checkpoint
 from core.coarse_crnn.boundary_targets import load_row_specs_from_source_oto, oto_row_to_absolute_anchors
 from core.coarse_crnn.oto_audio_candidates import compute_audio_candidates
-from core.coarse_crnn.training import resolve_torch_device
+from core.coarse_crnn.torch_utils import resolve_torch_device
 from core.coarse_crnn.wav_decoder import decode_wav_rows
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 
@@ -145,3 +145,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

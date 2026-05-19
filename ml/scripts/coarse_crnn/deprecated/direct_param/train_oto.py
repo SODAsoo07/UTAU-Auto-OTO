@@ -1,13 +1,13 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
 import os
 import random
 
-from core.coarse_crnn.oto_model import OtoCrnnConfig
+from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig
 from core.coarse_crnn.oto_targets import read_jsonl
-from core.coarse_crnn.oto_training import OtoTrainConfig, train_oto_from_manifest
+from core.coarse_crnn.deprecated.direct_param.oto_training import OtoTrainConfig, train_oto_from_manifest
 
 
 def main() -> int:
@@ -124,7 +124,7 @@ def main() -> int:
     parser.add_argument("--cvvc-vc-multi-sampling-boost", type=float, default=1.0)
     parser.add_argument("--language-format-role-sampling-boosts", default="", help="Comma-separated 'lang/fmt/role=N' boost specs")
     parser.add_argument("--voicebank-sampling-boosts", default="", help="Comma-separated 'voicebank_id=N' boost specs")
-    parser.add_argument("--row-order-violation-alpha", type=float, default=0.0, help=">0이면 순서 이상 row의 loss를 down-weight")
+    parser.add_argument("--row-order-violation-alpha", type=float, default=0.0, help=">0・ｴ・ｴ ・懍・ ・ｴ・・row・・loss・ｼ down-weight")
     parser.add_argument("--hard-case-mining", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hard-case-top-ratio", type=float, default=0.25)
     parser.add_argument("--hard-case-boost", type=float, default=2.5)
@@ -133,8 +133,8 @@ def main() -> int:
     parser.add_argument("--selection-hard-failure-weight", type=float, default=2.5)
     parser.add_argument("--selection-worst-voicebank-weight", type=float, default=1.5)
     parser.add_argument("--selection-worst-voicebank-target-acc50", type=float, default=0.50)
-    parser.add_argument("--checkpoint-save-every-epochs", type=int, default=0, help=">0이면 N epoch마다 중간 체크포인트 저장")
-    parser.add_argument("--init-from", default="", help="기존 체크포인트에서 가중치를 불러와 fine-tune 시작 (compatible 전략)")
+    parser.add_argument("--checkpoint-save-every-epochs", type=int, default=0, help=">0・ｴ・ｴ N epoch・壱共 ・滝ｰ・・ｴ增ｬ尞ｬ・ｸ孖ｸ ・・･")
+    parser.add_argument("--init-from", default="", help="・ｰ・ｴ ・ｴ增ｬ尞ｬ・ｸ孖ｸ・川・ ・・卓ｹ俯･ｼ ・壱洳・ fine-tune ・懍梠 (compatible ・・楫)")
     parser.add_argument("--two-stage-refine", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--two-stage-refine-window-frames", type=int, default=320)
     parser.add_argument(
@@ -261,3 +261,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

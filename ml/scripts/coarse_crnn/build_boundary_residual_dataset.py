@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -25,7 +25,7 @@ from core.coarse_crnn.boundary_targets import absolute_anchors_to_oto_params, tr
 from core.coarse_crnn.boundary_types import AbsoluteOtoAnchors
 from core.coarse_crnn.oto_targets import resolve_cutoff_abs_ms
 from core.coarse_crnn.oto_audio_candidates import compute_audio_candidates
-from core.coarse_crnn.training import resolve_torch_device
+from core.coarse_crnn.torch_utils import resolve_torch_device
 from core.coarse_crnn.wav_decoder import decode_wav_rows
 from core.runtime.runtime_encoding import bootstrap_utf8_runtime
 
@@ -272,3 +272,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

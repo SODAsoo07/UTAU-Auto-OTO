@@ -1,9 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import os
 
-from core.coarse_crnn.oto_inference import format_oto_line, predict_oto, write_prediction_json
+from core.coarse_crnn.deprecated.direct_param.oto_inference import format_oto_line, predict_oto, write_prediction_json
 
 
 def main() -> int:
@@ -53,3 +53,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

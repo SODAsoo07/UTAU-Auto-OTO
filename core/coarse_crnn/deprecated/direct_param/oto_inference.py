@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -9,7 +9,7 @@ import numpy as np
 
 from core.coarse_crnn.alias_role import normalize_role
 from core.coarse_crnn.audio import add_log_mel_deltas, load_wav_mono, log_mel_spectrogram
-from core.coarse_crnn.oto_model import (
+from core.coarse_crnn.deprecated.direct_param.oto_model import (
     alias_role_id,
     alias_type_id,
     format_id,
@@ -21,11 +21,11 @@ from core.coarse_crnn.oto_model import (
     uses_relative_param_head,
 )
 from core.coarse_crnn.oto_param_priors import decode_relative_oto_params, relative_params_to_anchors
-from core.coarse_crnn.oto_sequence_alignment import SEQUENCE_BOUNDARY_KINDS
+from core.coarse_crnn.deprecated.direct_param.oto_sequence_alignment import SEQUENCE_BOUNDARY_KINDS
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES, OtoAnchors, anchors_to_oto_params, extract_alias_features, repair_anchors
 from core.coarse_crnn.slot_graph import slot_context_from_role
-from core.coarse_crnn.oto_windowing import crop_oto_target_window, should_use_vcv_target_window, target_window_frames_for
-from core.coarse_crnn.training import resolve_torch_device
+from core.coarse_crnn.deprecated.direct_param.oto_windowing import crop_oto_target_window, should_use_vcv_target_window, target_window_frames_for
+from core.coarse_crnn.torch_utils import resolve_torch_device
 
 
 @dataclass
@@ -202,7 +202,7 @@ def predict_oto_with_model(
                 1.0 if int(row_index_in_wav) <= 0 else 0.0,
                 1.0 if int(row_index_in_wav) >= max(0, int(file_row_count) - 1) else 0.0,
                 float(prev_alias_features.get("alias_ends_vowel", 0.0) or 0.0),
-                # dim 12: current alias left vowel id (a/i/u/e/o → 1/6~5/6, none=0)
+                # dim 12: current alias left vowel id (a/i/u/e/o 竊・1/6~5/6, none=0)
                 max(0.0, min(1.0, float(alias_features.get("left_vowel_id_norm", 0.0) or 0.0))),
                 # dim 13: prev alias right vowel id (VC context: what vowel precedes the consonant)
                 max(0.0, min(1.0, float(prev_alias_features.get("right_vowel_id_norm", 0.0) or 0.0))),
@@ -570,8 +570,8 @@ def _heatmap_to_anchor_ms(heat: np.ndarray, *, hop_sec: float) -> tuple[np.ndarr
         center = int(np.argmax(col))
         conf[idx] = float(col[center])
         # Soft-argmax via parabolic interpolation through the 3-point peak
-        # neighbourhood. The model's heatmap target is a σ≈2-frame Gaussian, so
-        # argmax alone snaps to the 10 ms frame grid and leaves ±1-frame
+        # neighbourhood. The model's heatmap target is a ﾏ・沿2-frame Gaussian, so
+        # argmax alone snaps to the 10 ms frame grid and leaves ﾂｱ1-frame
         # placement jitter. Fitting a parabola to (center-1, center, center+1)
         # recovers a continuous sub-frame peak.
         if 0 < center < n - 1:
@@ -579,7 +579,7 @@ def _heatmap_to_anchor_ms(heat: np.ndarray, *, hop_sec: float) -> tuple[np.ndarr
             y1 = float(col[center])
             y2 = float(col[center + 1])
             denom = y0 - (2.0 * y1) + y2
-            if denom < -1e-6:  # strictly concave → a real peak
+            if denom < -1e-6:  # strictly concave 竊・a real peak
                 delta = 0.5 * (y0 - y2) / denom
                 delta = max(-0.5, min(0.5, delta))
                 out[idx] = (float(center) + delta) * hop_ms
@@ -966,3 +966,4 @@ def _env_float(name: str, default: float) -> float:
 
 
 __all__ = ["OtoPrediction", "format_oto_line", "predict_oto", "predict_oto_with_model", "write_prediction_json"]
+

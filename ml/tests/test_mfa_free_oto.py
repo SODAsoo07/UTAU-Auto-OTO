@@ -1,0 +1,633 @@
+from __future__ import annotations
+
+import json
+import math
+import wave
+
+import numpy as np
+import pytest
+
+from core.mfa_free_oto.decode import decode_monotonic_events
+from core.mfa_free_oto.features import extract_features
+from core.mfa_free_oto.htk_lab import (
+    build_gold_manifest_from_htk_lab_dirs,
+    classify_htk_phone,
+    parse_htk_lab,
+    row_from_htk_lab,
+)
+from core.mfa_free_oto.manifest import (
+    ManifestValidationError,
+    build_goldset_scaffold,
+    load_manifest_jsonl,
+    validate_manifest_row,
+    write_manifest_jsonl,
+)
+from core.mfa_free_oto.manifest_audit import audit_manifest_path, infer_filename_phone_sequence
+from core.mfa_free_oto.metrics import boundary_error_metrics, frame_classification_metrics
+from core.mfa_free_oto.oto_adapter import (
+    OtoAdapterConfig,
+    OtoAnchor,
+    _alias_type_for_row,
+    adapt_template_row,
+    assign_template_row_anchors,
+    bootstrap_row,
+    parse_template_oto_line,
+)
+from core.mfa_free_oto.review_overlay import render_review_html
+from core.mfa_free_oto.slot_viterbi import (
+    assign_slots_viterbi,
+    expected_cv_slots_from_phones,
+    slot_assignments_to_decoded_events,
+)
+from core.mfa_free_oto.targets import rasterize_targets
+from core.mfa_free_oto.types import EVENT_LABELS, FRAME_LABELS, FramePosterior
+
+
+def test_goldset_scaffold_marks_rows_for_manual_labelling(tmp_path):
+    wav_dir = tmp_path / "wav"
+    wav_dir.mkdir()
+    wav_path = wav_dir / "001_ka.wav"
+    _write_tone_wav(wav_path)
+    aliases = tmp_path / "aliases.tsv"
+    aliases.write_text("wav_name\taliases\texpected_phones\n001_ka.wav\tka|a k\tk a\n", encoding="utf-8")
+
+    rows, summary = build_goldset_scaffold(
+        wav_dir,
+        language="korean",
+        format_type="CV",
+        aliases_path=aliases,
+    )
+    assert summary.rows == 1
+    assert summary.needs_manual_labels == 1
+    assert rows[0]["label_source"] == "manual_gold"
+    assert rows[0]["needs_manual_labels"] is True
+    assert rows[0]["aliases"] == ["ka", "a k"]
+    assert rows[0]["expected_phones"] == ["k", "a"]
+
+    manifest = tmp_path / "manifest.jsonl"
+    assert write_manifest_jsonl(manifest, rows) == 1
+    loaded = load_manifest_jsonl(manifest, require_manual=True, require_labels=False)
+    assert loaded[0]["wav_name"] == "001_ka.wav"
+
+
+def test_manifest_rejects_oto_or_mfa_pseudo_labels():
+    row = _labelled_row("source_oto")
+    with pytest.raises(ManifestValidationError):
+        validate_manifest_row(row, require_manual=True, require_labels=True)
+    row = _labelled_row("mfa_textgrid")
+    with pytest.raises(ManifestValidationError):
+        validate_manifest_row(row, require_manual=True, require_labels=True)
+
+
+def test_targets_and_metrics_cover_frame_and_boundary_gates():
+    row = _labelled_row("manual_gold")
+    times = np.arange(0.0, 240.0, 10.0, dtype=np.float32)
+    targets = rasterize_targets(row, times)
+    assert targets.frame_class.shape == (24,)
+    assert targets.event_targets.shape == (24, len(EVENT_LABELS))
+    assert FRAME_LABELS[int(targets.frame_class[2])] == "silence"
+    assert FRAME_LABELS[int(targets.frame_class[7])] == "consonant"
+    assert FRAME_LABELS[int(targets.frame_class[14])] == "vowel"
+    assert float(targets.event_targets[:, EVENT_LABELS.index("cv_boundary")].max()) > 0.9
+
+    frame_metrics = frame_classification_metrics(targets.frame_class, targets.frame_class)
+    assert frame_metrics["macro_f1"] == pytest.approx(1.0)
+    boundary_metrics = boundary_error_metrics([100.0, 250.0], [112.0, 245.0])
+    assert boundary_metrics["median_error_ms"] == pytest.approx(8.5)
+    assert boundary_metrics["p90_error_ms"] == pytest.approx(11.3)
+
+
+def test_decoder_uses_monotonic_event_order():
+    times = [float(idx * 10) for idx in range(31)]
+    event_scores = {label: [0.0 for _ in times] for label in EVENT_LABELS}
+    for label, center in {"cv_boundary": 90.0, "vowel_nucleus": 150.0}.items():
+        for idx, time_ms in enumerate(times):
+            event_scores[label][idx] = math.exp(-0.5 * ((time_ms - center) / 10.0) ** 2)
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs={label: [0.25 for _ in times] for label in FRAME_LABELS},
+        event_scores=event_scores,
+    )
+    decoded = decode_monotonic_events(
+        posterior,
+        expected_events=["cv_boundary", "vowel_nucleus"],
+        min_score=0.05,
+    )
+    assert [event.label for event in decoded] == ["cv_boundary", "vowel_nucleus"]
+    assert decoded[0].selected_time_ms < decoded[1].selected_time_ms
+    assert decoded[0].selected_time_ms == pytest.approx(90.0)
+
+
+def test_slot_viterbi_assigns_filename_slots_in_order():
+    times = [float(idx * 10) for idx in range(41)]
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    class_probs = {label: [0.02 for _ in times] for label in FRAME_LABELS}
+    for idx, time_ms in enumerate(times):
+        class_probs["consonant"][idx] = 0.85 if 50.0 <= time_ms <= 90.0 or 170.0 <= time_ms <= 210.0 else 0.05
+        class_probs["vowel"][idx] = 0.90 if 100.0 <= time_ms <= 155.0 or 220.0 <= time_ms <= 285.0 else 0.05
+    for label, centers in {"cv_boundary": [100.0, 220.0], "vowel_nucleus": [145.0, 270.0]}.items():
+        for center in centers:
+            for idx, time_ms in enumerate(times):
+                event_scores[label][idx] = max(
+                    event_scores[label][idx],
+                    math.exp(-0.5 * ((time_ms - center) / 9.0) ** 2),
+                )
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+        acoustic_scores={
+            "transition_likelihood": [0.9 if time_ms in {100.0, 220.0} else 0.2 for time_ms in times],
+            "flux_likelihood": [0.9 if time_ms in {100.0, 220.0} else 0.2 for time_ms in times],
+            "voicing": [0.9 if time_ms in {150.0, 270.0} else 0.2 for time_ms in times],
+            "silence_likelihood": [0.05 for _ in times],
+        },
+    )
+    slots = expected_cv_slots_from_phones(["k", "a", "k", "i"])
+    assert [(slot.phone, slot.role) for slot in slots] == [
+        ("a", "cv_boundary"),
+        ("a", "vowel_nucleus"),
+        ("i", "cv_boundary"),
+        ("i", "vowel_nucleus"),
+    ]
+    result = assign_slots_viterbi(posterior, expected_phones=["k", "a", "k", "i"], min_event_score=0.05)
+    assert result.ok
+    assert [assignment.phone for assignment in result.assignments] == ["a", "a", "i", "i"]
+    assert [assignment.role for assignment in result.assignments] == [
+        "cv_boundary",
+        "vowel_nucleus",
+        "cv_boundary",
+        "vowel_nucleus",
+    ]
+    assert [assignment.selected_time_ms for assignment in result.assignments] == pytest.approx([100.0, 150.0, 220.0, 270.0])
+    decoded = slot_assignments_to_decoded_events(result)
+    assert [event.label for event in decoded] == ["cv_boundary", "vowel_nucleus", "cv_boundary", "vowel_nucleus"]
+
+
+def test_acoustic_aux_features_preserve_absolute_gate_tracks(tmp_path):
+    wav_path = tmp_path / "tone.wav"
+    _write_tone_wav(wav_path, duration_s=0.35)
+    acoustic = extract_features(wav_path, encoder="acoustic")
+    aux = extract_features(wav_path, encoder="acoustic-aux")
+    assert acoustic.features.shape[1] == 29
+    assert aux.features.shape[1] > acoustic.features.shape[1]
+    assert aux.times_ms.shape[0] == aux.features.shape[0]
+    assert {"rms", "spectral_flux", "voicing", "silence_likelihood", "transition_likelihood"}.issubset(aux.acoustic_scores)
+    assert float(np.max(aux.acoustic_scores["rms"])) > 0.0
+    assert float(np.max(aux.acoustic_scores["voicing"])) >= 0.0
+
+
+def test_manifest_audit_flags_slot_eligibility_and_clean_rows(tmp_path):
+    wav_path = tmp_path / "a-ba.wav"
+    _write_tone_wav(wav_path, duration_s=0.45)
+    row = {
+        "row_id": "a-ba",
+        "wav_name": "a-ba.wav",
+        "wav_path": str(wav_path),
+        "duration_ms": 450.0,
+        "label_source": "manual_gold",
+        "expected_phones": ["a", "b", "a", "exh"],
+        "frame_labels": [
+            {"label": "silence", "start_ms": 0.0, "end_ms": 60.0, "phone": "AP"},
+            {"label": "vowel", "start_ms": 60.0, "end_ms": 180.0, "phone": "a"},
+            {"label": "consonant", "start_ms": 180.0, "end_ms": 240.0, "phone": "b"},
+            {"label": "vowel", "start_ms": 240.0, "end_ms": 380.0, "phone": "a"},
+            {"label": "other", "start_ms": 380.0, "end_ms": 430.0, "phone": "exh"},
+        ],
+        "events": [
+            {"label": "cv_boundary", "time_ms": 240.0, "phone": "a"},
+            {"label": "vowel_nucleus", "time_ms": 310.0, "phone": "a"},
+        ],
+    }
+    manifest = tmp_path / "gold.jsonl"
+    clean = tmp_path / "gold.clean.jsonl"
+    write_manifest_jsonl(manifest, [row])
+
+    assert infer_filename_phone_sequence("a-ba.wav") == ["a", "b", "a"]
+    report = audit_manifest_path(manifest, clean_out=clean)
+    assert report["rows"] == 1
+    assert report["clean_rows"] == 1
+    assert report["slot_metric_eligible_rows"] == 1
+    assert report["row_reports"][0]["filename_match_ratio"] == pytest.approx(1.0)
+    assert load_manifest_jsonl(clean, require_labels=True)[0]["row_id"] == "a-ba"
+
+
+def test_filename_parser_handles_japanese_kana_sequence():
+    assert infer_filename_phone_sequence("_ああいあうえあ.wav") == ["a", "a", "i", "a", "u", "e", "a"]
+    assert infer_filename_phone_sequence("あか.wav") == ["a", "k", "a"]
+    assert infer_filename_phone_sequence("_ヴぁヴぃヴヴぇヴぉヴぁんヴぁ.wav") == [
+        "v",
+        "a",
+        "v",
+        "i",
+        "v",
+        "u",
+        "v",
+        "e",
+        "v",
+        "o",
+        "v",
+        "a",
+        "n",
+        "v",
+        "a",
+    ]
+    assert infer_filename_phone_sequence("_きゃききゅきぇきょきゃんきゃ.wav") == [
+        "k",
+        "y",
+        "a",
+        "k",
+        "i",
+        "k",
+        "y",
+        "u",
+        "k",
+        "y",
+        "e",
+        "k",
+        "y",
+        "o",
+        "k",
+        "y",
+        "a",
+        "n",
+        "k",
+        "y",
+        "a",
+    ]
+    assert infer_filename_phone_sequence("_すぃさすせそさんさ.wav") == [
+        "s",
+        "i",
+        "s",
+        "a",
+        "s",
+        "u",
+        "s",
+        "e",
+        "s",
+        "o",
+        "s",
+        "a",
+        "n",
+        "s",
+        "a",
+    ]
+    assert _alias_type_for_row("ヴぁ", "auto") == "cv"
+    assert _alias_type_for_row("すぃ", "auto") == "cv"
+    assert _alias_type_for_row("a v", "auto") == "vc"
+
+
+def test_template_anchor_assignment_covers_vcv_vowel_rows():
+    times = [float(idx * 10) for idx in range(61)]
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+    for idx, time_ms in enumerate(times):
+        class_probs["vowel"][idx] = 0.85 if 90.0 <= time_ms <= 500.0 else 0.05
+        for label, centers in {
+            "phone_change": [120.0, 300.0, 470.0],
+            "vowel_nucleus": [150.0, 330.0, 500.0],
+            "cv_boundary": [115.0, 295.0, 465.0],
+        }.items():
+            event_scores[label][idx] = max(
+                event_scores[label][idx],
+                max(math.exp(-0.5 * ((time_ms - center) / 9.0) ** 2) for center in centers),
+            )
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+    )
+    rows = [
+        parse_template_oto_line("v.wav=あ,0,0,0,0,0"),
+        parse_template_oto_line("v.wav=a あ,0,0,0,0,0"),
+        parse_template_oto_line("v.wav=a い,0,0,0,0,0"),
+    ]
+    assert all(row is not None for row in rows)
+    anchors = assign_template_row_anchors(posterior, [], [row for row in rows if row is not None])
+    assert len(anchors) == 3
+    assert all(anchor is not None for anchor in anchors)
+    assert [anchor.anchor_abs_ms for anchor in anchors if anchor is not None] == sorted(
+        anchor.anchor_abs_ms for anchor in anchors if anchor is not None
+    )
+    assert {anchor.role for anchor in anchors if anchor is not None}.issubset({"v", "vv", "vcv"})
+
+
+def test_template_anchor_assignment_can_ignore_bad_source_timing_for_slots():
+    times = [float(idx * 20) for idx in range(151)]
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+    decoded = []
+    for slot_idx, center in enumerate([420.0, 840.0, 1260.0]):
+        frame_index = min(range(len(times)), key=lambda idx: abs(times[idx] - center))
+        event_scores["cv_boundary"][frame_index] = 0.95
+        class_probs["vowel"][frame_index] = 0.85
+        decoded.append(
+            {
+                "label": "cv_boundary",
+                "selected_time_ms": center,
+                "score": 0.95,
+                "frame_index": frame_index,
+                "expected_phone": ["a", "i", "u"][slot_idx],
+                "expected_phone_index": [1, 3, 5][slot_idx],
+                "slot_index": slot_idx,
+            }
+        )
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+    )
+    rows = [
+        parse_template_oto_line("v.wav=ka,2200,160,-520,120,85"),
+        parse_template_oto_line("v.wav=ki,2300,160,-520,120,85"),
+        parse_template_oto_line("v.wav=ku,2400,160,-520,120,85"),
+    ]
+    assert all(row is not None for row in rows)
+    anchors = assign_template_row_anchors(
+        posterior,
+        decoded,
+        [row for row in rows if row is not None],
+        use_source_timing_prior=False,
+        expected_phones=["k", "a", "k", "i", "k", "u"],
+    )
+    assert [anchor.anchor_abs_ms for anchor in anchors if anchor is not None] == pytest.approx([420.0, 840.0, 1260.0])
+    assert all("slot_decoded_event" in anchor.warnings for anchor in anchors if anchor is not None)
+
+
+def test_cvvc_vc_and_next_cv_can_share_filename_slot_boundary():
+    times = [float(idx * 20) for idx in range(81)]
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+    expected = ["v", "a", "v", "i", "v", "u"]
+    decoded = []
+    for slot_index, (phone_index, phone, center) in enumerate([(1, "a", 200.0), (3, "i", 500.0), (5, "u", 800.0)]):
+        frame_index = min(range(len(times)), key=lambda idx: abs(times[idx] - center))
+        event_scores["cv_boundary"][frame_index] = 0.95
+        class_probs["vowel"][frame_index] = 0.85
+        decoded.append(
+            {
+                "label": "cv_boundary",
+                "selected_time_ms": center,
+                "score": 0.95,
+                "frame_index": frame_index,
+                "expected_phone": phone,
+                "expected_phone_index": phone_index,
+                "slot_index": slot_index,
+            }
+        )
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+    )
+    rows = [
+        parse_template_oto_line("v.wav=ヴぁ,0,0,0,0,0"),
+        parse_template_oto_line("v.wav=a v,0,0,0,0,0"),
+        parse_template_oto_line("v.wav=ヴぃ,0,0,0,0,0"),
+        parse_template_oto_line("v.wav=i v,0,0,0,0,0"),
+        parse_template_oto_line("v.wav=ヴ,0,0,0,0,0"),
+    ]
+    anchors = assign_template_row_anchors(
+        posterior,
+        decoded,
+        [row for row in rows if row is not None],
+        use_source_timing_prior=False,
+        expected_phones=expected,
+    )
+    assert [anchor.anchor_abs_ms for anchor in anchors if anchor is not None] == pytest.approx(
+        [200.0, 500.0, 500.0, 800.0, 800.0]
+    )
+    assert [anchor.expected_phone_index for anchor in anchors if anchor is not None] == [1, 3, 3, 5, 5]
+
+
+def test_template_preserve_allows_large_filename_slot_reanchor():
+    row = parse_template_oto_line("v.wav=ka,2200,160,-520,120,85")
+    assert row is not None
+    adapted = adapt_template_row(
+        row,
+        OtoAnchor(anchor_abs_ms=420.0, score=0.95, warnings=("slot_decoded_event",)),
+        file_duration_ms=3000.0,
+        config=OtoAdapterConfig(language="japanese", format_type="CV", alias_type="auto", max_anchor_shift_ms=160.0),
+    )
+    absolute = adapted.to_json_dict()["absolute"]
+    assert absolute["preutterance_abs"] == pytest.approx(420.0, abs=35.0)
+    assert adapted.source_timing is None
+    assert "source_timing_discarded" in adapted.warnings
+
+
+def test_zero_template_uses_bootstrap_fallback_instead_of_preserving_zeros():
+    row = parse_template_oto_line("a-ka.wav=a ka,0,0,0,0,0")
+    assert row is not None
+    adapted = adapt_template_row(
+        row,
+        OtoAnchor(anchor_abs_ms=240.0, score=0.0, warnings=("synthetic_anchor:no_candidate",)),
+        file_duration_ms=700.0,
+        config=OtoAdapterConfig(language="japanese", format_type="VCV", alias_type="auto"),
+    )
+    absolute = adapted.to_json_dict()["absolute"]
+    assert adapted.mode == "template-bootstrap"
+    assert absolute["preutterance_abs"] == pytest.approx(240.0)
+    assert adapted.timing.consonant > adapted.timing.preutterance
+    assert adapted.timing.overlap <= adapted.timing.preutterance
+    assert adapted.timing.cutoff < 0.0
+    assert "zero_template_bootstrap" in adapted.warnings
+    assert any(warning.startswith("low_anchor_score:") for warning in adapted.warnings)
+
+
+def test_slot_viterbi_reports_no_monotonic_path_for_shifted_candidates():
+    times = [float(idx * 10) for idx in range(31)]
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+    for idx, time_ms in enumerate(times):
+        class_probs["vowel"][idx] = 0.9
+        event_scores["cv_boundary"][idx] = math.exp(-0.5 * ((time_ms - 200.0) / 8.0) ** 2)
+        event_scores["vowel_nucleus"][idx] = math.exp(-0.5 * ((time_ms - 100.0) / 8.0) ** 2)
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+    )
+    result = assign_slots_viterbi(
+        posterior,
+        expected_phones=["k", "a"],
+        min_event_score=0.05,
+        same_phone_min_gap_ms=20.0,
+    )
+    assert not result.ok
+    assert "hard_no_monotonic_path" in result.warnings
+
+
+def test_review_overlay_contains_manual_and_prediction_tracks(tmp_path):
+    wav_path = tmp_path / "001_ka.wav"
+    _write_tone_wav(wav_path)
+    row = _labelled_row("manual_gold")
+    row["wav_path"] = str(wav_path)
+    times = [float(idx * 10) for idx in range(20)]
+    posterior = FramePosterior(
+        wav_path=str(wav_path),
+        times_ms=times,
+        class_probs={label: [0.25 for _ in times] for label in FRAME_LABELS},
+        event_scores={label: [0.1 for _ in times] for label in EVENT_LABELS},
+    )
+    html = render_review_html(row, posterior=posterior)
+    assert "Manual frame labels" in html
+    assert "Predicted posteriors" in html
+    assert "cv_boundary" in html
+    assert "spectrogram" in html.lower()
+
+
+def test_oto_adapter_reanchors_template_row_to_predicted_anchor():
+    row = parse_template_oto_line("a-ka.wav=a ka,100,90,-260,60,25")
+    assert row is not None
+    adapted = adapt_template_row(
+        row,
+        OtoAnchor(anchor_abs_ms=190.0, score=0.92),
+        file_duration_ms=480.0,
+        config=OtoAdapterConfig(language="japanese", format_type="CV", alias_type="cv"),
+    )
+    absolute = adapted.to_json_dict()["absolute"]
+    assert absolute["preutterance_abs"] == pytest.approx(190.0, abs=35.0)
+    assert adapted.timing.overlap <= adapted.timing.preutterance
+    assert adapted.timing.consonant > adapted.timing.preutterance
+    assert adapted.format_line().startswith("a-ka.wav=a ka,")
+
+
+def test_oto_adapter_bootstraps_cv_row_from_anchor():
+    adapted = bootstrap_row(
+        "ka.wav",
+        "ka",
+        OtoAnchor(anchor_abs_ms=210.0, score=0.84, vowel_end_abs_ms=340.0),
+        file_duration_ms=520.0,
+        config=OtoAdapterConfig(mode="bootstrap", alias_type="cv"),
+    )
+    absolute = adapted.to_json_dict()["absolute"]
+    assert absolute["preutterance_abs"] == pytest.approx(210.0)
+    assert adapted.timing.offset == pytest.approx(90.0)
+    assert adapted.timing.consonant > adapted.timing.preutterance
+    assert adapted.timing.cutoff < 0.0
+
+
+def test_review_overlay_renders_generated_oto_params(tmp_path):
+    wav_path = tmp_path / "001_ka.wav"
+    _write_tone_wav(wav_path)
+    row = _labelled_row("manual_gold")
+    row["wav_path"] = str(wav_path)
+    html = render_review_html(
+        row,
+        generated_oto_rows=[
+            {
+                "alias": "ka",
+                "absolute": {
+                    "offset_abs": 20.0,
+                    "overlap_abs": 70.0,
+                    "preutterance_abs": 100.0,
+                    "consonant_abs": 135.0,
+                    "cutoff_abs": 260.0,
+                },
+            }
+        ],
+    )
+    assert "Generated OTO params" in html
+    assert "preutterance" in html
+
+
+def test_model_forward_shape_when_torch_available():
+    torch = pytest.importorskip("torch")
+    from core.mfa_free_oto.model import MfaFreeFrameModelConfig, build_frame_model
+
+    model = build_frame_model(MfaFreeFrameModelConfig(input_dim=8, hidden_dim=16, layers=1))
+    out = model(torch.zeros((2, 12, 8), dtype=torch.float32))
+    assert tuple(out["frame_logits"].shape) == (2, 12, len(FRAME_LABELS))
+    assert tuple(out["event_logits"].shape) == (2, 12, len(EVENT_LABELS))
+
+
+def test_htk_lab_manifest_uses_lab_as_manual_gold(tmp_path):
+    lab_root = tmp_path / "lab"
+    lab_root.mkdir()
+    wav_path = lab_root / "a-ka.wav"
+    lab_path = lab_root / "a-ka.lab"
+    _write_tone_wav(wav_path)
+    lab_path.write_text(
+        "\n".join(
+            [
+                "0 5000000 AP",
+                "5000000 6000000 vf",
+                "6000000 9000000 a",
+                "9000000 10000000 k",
+                "10000000 14000000 a",
+                "14000000 15000000 exh",
+                "15000000 16000000 SP",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    segments, dropped = parse_htk_lab(lab_path)
+    assert len(dropped) == 1
+    assert classify_htk_phone("AP") == "silence"
+    assert classify_htk_phone("exh") == "other"
+    assert classify_htk_phone("ɯ") == "vowel"
+    assert [segment.frame_label for segment in segments] == [
+        "silence",
+        "vowel",
+        "consonant",
+        "vowel",
+        "other",
+        "silence",
+    ]
+
+    row = row_from_htk_lab(lab_path, language="japanese", format_type="CV")
+    assert row["label_source"] == "manual_gold"
+    assert row["label_format"] == "htk_lab"
+    assert row["expected_phones"] == ["a", "k", "a", "exh"]
+    assert any(event["label"] == "cv_boundary" and event["time_ms"] == pytest.approx(1000.0) for event in row["events"])
+    assert row["dropped_lab_segments"][0]["phone"] == "vf"
+
+    out = tmp_path / "gold.jsonl"
+    rows, summary = build_gold_manifest_from_htk_lab_dirs(
+        [lab_root],
+        out_path=out,
+        language="japanese",
+        format_type="CV",
+    )
+    assert summary.rows == 1
+    assert summary.dropped_segments == 1
+    assert rows[0]["wav_name"] == "a-ka.wav"
+    assert json.loads(out.read_text(encoding="utf-8").splitlines()[0])["label_source"] == "manual_gold"
+
+
+def _labelled_row(source: str) -> dict:
+    return {
+        "row_id": "001_ka",
+        "wav_path": "001_ka.wav",
+        "duration_ms": 240.0,
+        "label_source": source,
+        "expected_phones": ["k", "a"],
+        "frame_labels": [
+            {"label": "silence", "start_ms": 0.0, "end_ms": 50.0},
+            {"label": "consonant", "start_ms": 50.0, "end_ms": 100.0},
+            {"label": "vowel", "start_ms": 100.0, "end_ms": 220.0},
+        ],
+        "events": [
+            {"label": "cv_boundary", "time_ms": 100.0, "phone": "a"},
+            {"label": "vowel_nucleus", "time_ms": 160.0, "phone": "a"},
+            {"label": "phone_change", "time_ms": 100.0, "phone": "a"},
+        ],
+    }
+
+
+def _write_tone_wav(path, *, sample_rate: int = 16000, duration_s: float = 0.25) -> None:
+    samples = []
+    for idx in range(int(sample_rate * duration_s)):
+        value = int(12000 * math.sin(2.0 * math.pi * 220.0 * idx / sample_rate))
+        samples.append(value)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(np.asarray(samples, dtype="<i2").tobytes())

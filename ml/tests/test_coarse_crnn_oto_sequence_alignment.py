@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 def test_sequence_alignment_maps_late_vc_row_between_anchor_slots(tmp_path):
     from core.coarse_crnn.oto_audio_candidates import AudioCandidates, MelDeltaPeak, OnsetPeak, VowelSegmentCandidate
-    from core.coarse_crnn.oto_sequence_alignment import decode_sequence_alignment_for_states
+    from core.coarse_crnn.deprecated.direct_param.oto_sequence_alignment import decode_sequence_alignment_for_states
 
     wav_path = tmp_path / "a_ka.wav"
     wav_path.write_bytes(b"fake")
@@ -79,7 +79,7 @@ def test_sequence_alignment_maps_late_vc_row_between_anchor_slots(tmp_path):
 
 def test_sequence_alignment_collects_candidate_types():
     from core.coarse_crnn.oto_audio_candidates import AudioCandidates, MelDeltaPeak, OnsetPeak, VowelSegmentCandidate
-    from core.coarse_crnn.oto_sequence_alignment import collect_sequence_boundary_candidates
+    from core.coarse_crnn.deprecated.direct_param.oto_sequence_alignment import collect_sequence_boundary_candidates
 
     audio = AudioCandidates(
         wav_path="x.wav",
@@ -112,7 +112,7 @@ def test_sequence_alignment_collects_candidate_types():
 
 def test_sequence_alignment_uses_model_candidate_score_when_available(tmp_path):
     from core.coarse_crnn.oto_audio_candidates import AudioCandidates, OnsetPeak
-    from core.coarse_crnn.oto_sequence_alignment import decode_sequence_alignment_for_states
+    from core.coarse_crnn.deprecated.direct_param.oto_sequence_alignment import decode_sequence_alignment_for_states
 
     wav_path = tmp_path / "a_ka.wav"
     wav_path.write_bytes(b"fake")
@@ -163,7 +163,7 @@ def test_sequence_alignment_uses_model_candidate_score_when_available(tmp_path):
 
 def test_sequence_alignment_role_allowlist_keeps_anchor_rows_fixed(tmp_path):
     from core.coarse_crnn.oto_audio_candidates import AudioCandidates, OnsetPeak, VowelSegmentCandidate
-    from core.coarse_crnn.oto_sequence_alignment import decode_sequence_alignment_for_states
+    from core.coarse_crnn.deprecated.direct_param.oto_sequence_alignment import decode_sequence_alignment_for_states
 
     wav_path = tmp_path / "a_ka.wav"
     wav_path.write_bytes(b"fake")

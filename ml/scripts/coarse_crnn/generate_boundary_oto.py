@@ -17,7 +17,16 @@ def main() -> int:
     ap.add_argument("--device", default="auto")
     ap.add_argument("--stage2-model", default="", help="Optional Stage2 OTO assigner checkpoint")
     ap.add_argument("--stage2-enable", action="store_true", help="Enable Stage2 OTO assigner when a model can be resolved")
-    ap.add_argument("--phoneme-boundary-model", default="", help="Optional PhonemeBoundary checkpoint used as Stage2 candidate input")
+    ap.add_argument(
+        "--phoneme-boundary-model",
+        default="",
+        help="Optional PhonemeBoundary checkpoint used as boundary-candidate assist input.",
+    )
+    ap.add_argument(
+        "--stage1-heuristic-only",
+        action="store_true",
+        help="Use only Boundary Scorer candidates plus deterministic OTO heuristics; disable Stage2/residual/BPM post-correction.",
+    )
     ap.add_argument("--alias-suffix", default="")
     ap.add_argument("--special-aliases", default="", help="Comma-separated special alias list")
     args = ap.parse_args()
@@ -36,6 +45,7 @@ def main() -> int:
         device=args.device,
         alias_suffix=args.alias_suffix,
         special_aliases=special,
+        heuristic_only=bool(args.stage1_heuristic_only),
     )
     print(json.dumps({"processed": processed, "total": total, "errors": errors}, ensure_ascii=False, indent=2))
     return 0 if (processed > 0 and not errors) else 1

@@ -91,9 +91,37 @@ class Stage2OtoAssigner(_torch().nn.Module):
         x = torch.cat([numeric, emb], dim=-1)
         x = self.input_proj(x)
         y, _ = self.encoder(x)
-        anchors_norm = torch.sigmoid(self.anchor_head(y))
+        raw = self.anchor_head(y)
+        anchors_norm = _structured_anchors_norm(torch, raw)
         confidence = torch.sigmoid(self.confidence_head(y)).squeeze(-1)
         return anchors_norm, confidence
+
+
+def _structured_anchors_norm(torch, raw):
+    """Map unconstrained logits to monotonic normalized anchors.
+
+    This keeps output ordering stable in-model:
+    offset <= overlap <= pre <= consonant <= cutoff <= 1.
+    """
+    offset = torch.sigmoid(raw[..., 0]).clamp(0.0, 0.995)
+
+    remain = (1.0 - offset).clamp(min=1.0e-5)
+    step = torch.sigmoid(raw[..., 1]) * remain
+    overlap = offset + step
+
+    remain = (1.0 - overlap).clamp(min=1.0e-5)
+    step = torch.sigmoid(raw[..., 2]) * remain
+    pre = overlap + step
+
+    remain = (1.0 - pre).clamp(min=1.0e-5)
+    step = torch.sigmoid(raw[..., 3]) * remain
+    consonant = pre + step
+
+    remain = (1.0 - consonant).clamp(min=1.0e-5)
+    step = torch.sigmoid(raw[..., 4]) * remain
+    cutoff = consonant + step
+
+    return torch.stack([offset, overlap, pre, consonant, cutoff], dim=-1)
 
 
 def build_stage2_model(config: Stage2ModelConfig) -> Stage2OtoAssigner:

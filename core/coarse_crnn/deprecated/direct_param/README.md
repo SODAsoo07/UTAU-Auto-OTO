@@ -9,7 +9,5 @@ Use this code only for compatibility, old checkpoint reproduction, and A/B
 comparison. New OTO work should use a frame-level boundary scorer plus a
 wav-level monotonic decoder.
 
-Compatibility wrappers remain at the old `core.coarse_crnn.oto_*` import paths
-so existing UI, CLI, and tests keep running while the new boundary-scorer stack
-is developed.
-
+The old `core.coarse_crnn.oto_*` root import paths are intentionally closed.
+Import this package directly only when reproducing the deprecated stack.

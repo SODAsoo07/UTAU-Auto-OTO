@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 import os
@@ -24,7 +24,7 @@ from core.coarse_crnn.boundary_targets import (
     training_rows_to_wav_groups,
 )
 from core.coarse_crnn.boundary_types import PHONE_AWARE_IGNORE_INDEX, TRANSITION_ROLES
-from core.coarse_crnn.training import resolve_torch_device
+from core.coarse_crnn.torch_utils import resolve_torch_device
 
 
 @dataclass
@@ -41,6 +41,12 @@ class BoundaryTrainConfig:
     val_ratio: float = 0.08
     quality_loss_weight: float = 0.06
     pos_weight: float = 2.5
+    boundary_label_pos_weights: tuple[str, ...] = (
+        "syllable_onset=1.55",
+        "vowel_start=1.50",
+        "consonant_onset=1.35",
+        "next_onset=1.25",
+    )
     boundary_time_loss_weight: float = 0.08
     hard_case_oversample: bool = True
     hard_case_weight: float = 1.8
@@ -330,7 +336,13 @@ def train_boundary_from_manifest(
     history: list[dict[str, float]] = []
     best_val = None
     best_state = None
-    pos_weight = torch.tensor(float(cfg.pos_weight), device=device)
+    pos_weight = _boundary_pos_weight_tensor(
+        torch,
+        labels=tuple(model_cfg.labels),
+        base_pos_weight=float(cfg.pos_weight),
+        label_weights=tuple(cfg.boundary_label_pos_weights or ()),
+        device=device,
+    )
 
     for epoch in range(1, int(cfg.epochs) + 1):
         model.train()
@@ -409,6 +421,8 @@ def train_boundary_from_manifest(
             "weak_wav_weight": float(cfg.weak_wav_weight),
             "weak_wav_rms_db_threshold": float(cfg.weak_wav_rms_db_threshold),
             "weak_wav_auto_percentile": float(cfg.weak_wav_auto_percentile),
+            "pos_weight": float(cfg.pos_weight),
+            "boundary_label_pos_weights": list(cfg.boundary_label_pos_weights or ()),
             "boundary_time_loss_weight": float(cfg.boundary_time_loss_weight),
             "phone_aux_enabled": bool(model_cfg.enable_phone_aux_heads),
             "phone_family_enabled": bool(model_cfg.enable_phone_family_heads),
@@ -467,6 +481,46 @@ def _evaluate(model, loader, *, device, pos_weight, cfg: BoundaryTrainConfig | N
             total_loss += float(loss.detach().cpu().item()) * max(1.0, frames)
             total_weight += max(1.0, frames)
     return float(total_loss / max(1.0, total_weight))
+
+
+def _boundary_pos_weight_tensor(
+    torch,
+    *,
+    labels: tuple[str, ...],
+    base_pos_weight: float,
+    label_weights: tuple[str, ...],
+    device,
+):
+    base = max(0.01, float(base_pos_weight))
+    weights = [base for _label in labels]
+    multipliers = _parse_label_weight_overrides(label_weights)
+    for idx, label in enumerate(labels):
+        key = str(label or "").strip().lower()
+        if key in multipliers:
+            weights[idx] = base * float(multipliers[key])
+    return torch.tensor(weights, dtype=torch.float32, device=device).view(1, 1, len(weights))
+
+
+def _parse_label_weight_overrides(items: tuple[str, ...]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for raw in items:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if "=" in text:
+            key, value = text.split("=", 1)
+        elif ":" in text:
+            key, value = text.split(":", 1)
+        else:
+            continue
+        key = key.strip().lower()
+        if not key:
+            continue
+        try:
+            out[key] = max(0.05, min(8.0, float(value)))
+        except Exception:
+            continue
+    return out
 
 
 def _unpack_batch(batch):
@@ -680,9 +734,9 @@ def _build_sample_weights(
                 row_hard += 0.5
             if _is_n_like_alias(alias, meta=meta):
                 row_hard += n_like_add
-            # P2-a: bumped 1.2 → 2.0. With the default coda-bridge regex
+            # P2-a: bumped 1.2 竊・2.0. With the default coda-bridge regex
             # (set in train_boundary_oto.py), this lifts the 14.7k KO coda-
-            # bridge rows to ~3× the weight of generic transitions — the
+            # bridge rows to ~3ﾃ・the weight of generic transitions 窶・the
             # 2026-05-17 wall analysis showed they need disproportionate
             # supervision because the model decoder treats their plosive
             # closure as the boundary instead of the burst.
@@ -690,8 +744,8 @@ def _build_sample_weights(
                 row_hard += 2.0
             # P2-c: right-onset class differentiation. Plosive/aspirate
             # right-onsets in coda-bridge aliases (``L p``, ``NG H``,
-            # ``M b``, ``L k``) cause −300~−1700 ms early decoding bias
-            # vs sonorant/fricative which stay within ±300 ms. Add extra
+            # ``M b``, ``L k``) cause 竏・00~竏・700 ms early decoding bias
+            # vs sonorant/fricative which stay within ﾂｱ300 ms. Add extra
             # supervision specifically for those patterns.
             row_hard += _coda_bridge_onset_bonus(alias)
             if weak_wav:
@@ -710,9 +764,9 @@ _KO_CODA_LEFT_TOKENS: frozenset[str] = frozenset({
     "N", "M", "L", "NG", "H", "T", "P", "K", "R",
 })
 # Plosive/aspirate right-onsets cause the worst decoding bias on coda-bridge
-# (2026-05-17 wall analysis: −300~−1700 ms early). Includes basic + tense +
+# (2026-05-17 wall analysis: 竏・00~竏・700 ms early). Includes basic + tense +
 # aspirated stops + ``h``/``H`` + ``R``. Sonorants/fricatives intentionally
-# excluded — they decode within ±300 ms without extra supervision.
+# excluded 窶・they decode within ﾂｱ300 ms without extra supervision.
 _KO_HARD_RIGHT_ONSETS: frozenset[str] = frozenset({
     "g", "gg", "k", "kk", "kh",
     "d", "dd", "t", "tt", "th",
@@ -726,7 +780,7 @@ def _coda_bridge_onset_bonus(alias: str) -> float:
 
     Returns 1.5 when the alias matches `<KO_coda> <plosive_or_aspirate>`,
     otherwise 0.0. Designed to overweight specifically the patterns that
-    underperformed in the 2026-05-17 raw-model diagnostic — keeping the
+    underperformed in the 2026-05-17 raw-model diagnostic 窶・keeping the
     bonus narrow avoids inflating already-easy categories.
     """
     text = str(alias or "").strip()
@@ -801,3 +855,4 @@ def _boundary_time_regression_loss(logits, target, mask, *, hop_ms: float):
 
 
 __all__ = ["BoundaryTrainConfig", "train_boundary_from_manifest"]
+

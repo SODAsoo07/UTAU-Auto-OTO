@@ -18,6 +18,8 @@ from ui.theme_tokens import (
 from ui.i18n import t
 
 EN_CVVC_UI_ENABLED = False
+NO_MFA_REMAP_LABEL = "베이스 OTO 재매핑 + 보정"
+NO_MFA_SSL_SLOT_LABEL = "MFA-Free SSL 슬롯 어댑터(실험)"
 
 
 class LayoutMixin:
@@ -392,7 +394,7 @@ class LayoutMixin:
         self.no_mfa_oto_mode_menu = ctk.CTkOptionMenu(
             self.row_no_mfa_oto_mode,
             values=[
-                "베이스 OTO 재매핑 + 보정",
+                NO_MFA_REMAP_LABEL,
             ],
             variable=self.no_mfa_oto_mode_var,
             width=280,
@@ -441,6 +443,24 @@ class LayoutMixin:
         )
         self.oto_crnn_scorer_model_hint.pack(side="left", fill="x", expand=True)
         self.row_oto_crnn_scorer_model.pack_forget()
+        self.row_oto_crnn_engine = build_form_row(form_body)
+        build_left_label(self.row_oto_crnn_engine, t("CRNN Mode:")).pack(side="left")
+        self.oto_crnn_engine_menu = ctk.CTkOptionMenu(
+            self.row_oto_crnn_engine,
+            values=["Stage1 heuristic only", "Boundary decoder + optional corrections"],
+            variable=self.oto_crnn_engine_var,
+            width=280,
+            command=lambda _v: self._on_oto_crnn_engine_change(),
+        )
+        _style_blue_menu(self.oto_crnn_engine_menu)
+        self.oto_crnn_engine_menu.pack(side="left", padx=(6, 8))
+        self.oto_crnn_engine_hint = ctk.CTkLabel(
+            self.row_oto_crnn_engine,
+            text=t("(Stage1 = Boundary scorer + deterministic OTO heuristics only)"),
+            text_color=PALETTE.neutral_text,
+        )
+        self.oto_crnn_engine_hint.pack(side="left", fill="x", expand=True)
+        self.row_oto_crnn_engine.pack_forget()
         self.row_oto_stage2_model = build_form_row(form_body)
         self.oto_stage2_enable_checkbox = ctk.CTkCheckBox(
             self.row_oto_stage2_model,
@@ -1264,24 +1284,43 @@ class LayoutMixin:
     def _normalize_no_mfa_oto_mode_code(value):
         raw = str(value or "").strip().lower()
         if raw in {"crnn", "oto_crnn", "oto-crnn", "crnn_oto", "crnn-oto"}:
-            return "crnn"
+            return "remap"
+        if raw in {"mfa_free", "mfa-free", "ssl_slot", "ssl-slot", "mfa_free_ssl_slot"}:
+            return "mfa_free_ssl_slot"
         if raw in {"remap", "base_remap", "base"}:
             return "remap"
         text = str(value or "").strip()
+        if text == NO_MFA_SSL_SLOT_LABEL:
+            return "mfa_free_ssl_slot"
         if text == "CRNN OTO 예측기(실험)":
-            return "crnn"
-        if text == "베이스 OTO 재매핑 + 보정":
+            return "remap"
+        if text in {"베이스 OTO 재매핑 + 보정", NO_MFA_REMAP_LABEL}:
             return "remap"
         return "remap"
 
     @staticmethod
     def _normalize_oto_crnn_engine_code(value):
+        raw = str(value or "").strip().lower()
+        if raw in {
+            "stage1",
+            "stage1_heuristic",
+            "stage1-heuristic",
+            "stage1 heuristic only",
+            "heuristic",
+            "heuristic_only",
+            "boundary heuristic",
+        }:
+            return "stage1_heuristic"
         # Legacy direct CRNN path is removed from UI routing.
         return "boundary_decoder"
 
     def _set_oto_crnn_engine_from_code(self, code):
         normalized = self._normalize_oto_crnn_engine_code(code)
-        label = "Boundary scorer decoder (new)"
+        label = (
+            "Stage1 heuristic only"
+            if normalized == "stage1_heuristic"
+            else "Boundary decoder + optional corrections"
+        )
         if hasattr(self, "oto_crnn_engine_var"):
             try:
                 self.oto_crnn_engine_var.set(label)
@@ -1480,7 +1519,7 @@ class LayoutMixin:
 
     def _set_no_mfa_oto_mode_from_code(self, code):
         normalized = self._normalize_no_mfa_oto_mode_code(code)
-        label = "CRNN OTO 예측기(실험)" if normalized == "crnn" else "베이스 OTO 재매핑 + 보정"
+        label = NO_MFA_SSL_SLOT_LABEL if normalized == "mfa_free_ssl_slot" else NO_MFA_REMAP_LABEL
         if hasattr(self, "no_mfa_oto_mode_var"):
             try:
                 self.no_mfa_oto_mode_var.set(label)
@@ -1544,8 +1583,6 @@ class LayoutMixin:
             else False
         )
         options = ["MFA", "전용(시퀀스)"]
-        if developer_enabled:
-            options.append("CRNN(실험적)")
         lang = self._get_language()
         current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA").strip()
         fmt = normalize_auto_format_value(lang, self.auto_format_var.get()) if hasattr(self, "auto_format_var") else ""
@@ -1611,31 +1648,38 @@ class LayoutMixin:
             if hasattr(self, "_get_oto_crnn_engine_code")
             else "boundary_decoder"
         )
-        if no_mfa_mode_code == "crnn" and not developer_enabled:
+        if no_mfa_mode_code == "mfa_free_ssl_slot" and not developer_enabled:
             no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("remap")
-        no_mfa_values = ["베이스 OTO 재매핑 + 보정"]
+        if no_mfa_mode_code == "crnn":
+            no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("remap")
+        no_mfa_values = [NO_MFA_REMAP_LABEL]
         if developer_enabled:
-            no_mfa_values.append("CRNN OTO 예측기(실험)")
+            no_mfa_values.append(NO_MFA_SSL_SLOT_LABEL)
         if hasattr(self, "no_mfa_oto_mode_menu"):
             try:
                 self.no_mfa_oto_mode_menu.configure(values=no_mfa_values)
                 self.no_mfa_oto_mode_menu.set(
-                    "CRNN OTO 예측기(실험)" if no_mfa_mode_code == "crnn" else "베이스 OTO 재매핑 + 보정"
+                    NO_MFA_SSL_SLOT_LABEL if no_mfa_mode_code == "mfa_free_ssl_slot" else NO_MFA_REMAP_LABEL
                 )
             except Exception:
                 pass
         if hasattr(self, "oto_crnn_engine_menu"):
             try:
+                engine_values = ["Stage1 heuristic only", "Boundary decoder + optional corrections"]
                 self.oto_crnn_engine_menu.configure(
-                    values=["Boundary scorer decoder (new)"]
+                    values=engine_values
                 )
-                self.oto_crnn_engine_menu.set("Boundary scorer decoder (new)")
+                self.oto_crnn_engine_menu.set(
+                    "Stage1 heuristic only"
+                    if crnn_engine_code == "stage1_heuristic"
+                    else "Boundary decoder + optional corrections"
+                )
             except Exception:
                 pass
         no_mfa_mode_desc = (
-            "CRNN OTO 예측기(실험)"
-            if no_mfa_mode_code == "crnn"
-            else "베이스 OTO 재매핑 + 보정"
+            NO_MFA_SSL_SLOT_LABEL
+            if no_mfa_mode_code == "mfa_free_ssl_slot"
+            else NO_MFA_REMAP_LABEL
         )
         if hasattr(self, "mfa_align_profile_menu"):
             self.mfa_align_profile_menu.configure(
@@ -1656,9 +1700,7 @@ class LayoutMixin:
                     self.row_no_mfa_oto_mode.pack_forget()
             except Exception:
                 pass
-        show_crnn_model_row = bool(
-            developer_enabled and (use_coarse_crnn or (show_no_mfa_mode_row and no_mfa_mode_code == "crnn"))
-        )
+        show_crnn_model_row = False
         if hasattr(self, "row_oto_crnn_scorer_model") and self.row_oto_crnn_scorer_model is not None:
             try:
                 if show_crnn_model_row:
@@ -1685,6 +1727,18 @@ class LayoutMixin:
                     self.row_oto_crnn_scorer_model.pack_forget()
             except Exception:
                 pass
+        if hasattr(self, "row_oto_crnn_engine") and self.row_oto_crnn_engine is not None:
+            try:
+                if show_crnn_model_row:
+                    if not self.row_oto_crnn_engine.winfo_ismapped():
+                        pack_kwargs = {"fill": "x", "pady": 4}
+                        if hasattr(self, "row_align_extra") and self.row_align_extra is not None:
+                            pack_kwargs["before"] = self.row_align_extra
+                        self.row_oto_crnn_engine.pack(**pack_kwargs)
+                else:
+                    self.row_oto_crnn_engine.pack_forget()
+            except Exception:
+                pass
         if hasattr(self, "row_oto_crnn_model") and self.row_oto_crnn_model is not None:
             try:
                 if show_crnn_model_row:
@@ -1699,7 +1753,7 @@ class LayoutMixin:
                 pass
         if hasattr(self, "row_oto_stage2_model") and self.row_oto_stage2_model is not None:
             try:
-                if show_crnn_model_row:
+                if show_crnn_model_row and crnn_engine_code != "stage1_heuristic":
                     if hasattr(self, "oto_stage2_model_menu") and hasattr(self, "_oto_stage2_model_choice_options"):
                         try:
                             choices = self._oto_stage2_model_choice_options()
@@ -1829,6 +1883,19 @@ class LayoutMixin:
             try:
                 is_running = bool(getattr(self, "is_running", False))
                 self.boundary_smoke_btn.configure(state="normal" if (enabled and not is_running) else "disabled")
+            except Exception:
+                pass
+        if hasattr(self, "mfa_free_oto_preview_btn") and self.mfa_free_oto_preview_btn is not None:
+            try:
+                is_running = bool(getattr(self, "is_running", False))
+                self.mfa_free_oto_preview_btn.configure(state="normal" if (enabled and not is_running) else "disabled")
+            except Exception:
+                pass
+        if hasattr(self, "mfa_free_oto_preview_hint") and self.mfa_free_oto_preview_hint is not None:
+            try:
+                self.mfa_free_oto_preview_hint.configure(
+                    text_color=PALETTE.hint_text if enabled else "#AEB7C6"
+                )
             except Exception:
                 pass
         if hasattr(self, "boundary_smoke_hint_label") and self.boundary_smoke_hint_label is not None:

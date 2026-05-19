@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from core.coarse_crnn.evaluate import _boundary_errors, _cv_transition_errors, _vowel_onset_errors
-from core.coarse_crnn.types import PhoneSegment, Segment
+from core.coarse_crnn.deprecated.coarse_alignment.evaluate import _boundary_errors, _cv_transition_errors, _vowel_onset_errors
+from core.coarse_crnn.deprecated.coarse_alignment.types import PhoneSegment, Segment
 
 
 def test_boundary_errors_compare_matched_phone_edges():
@@ -41,8 +41,8 @@ def test_oto_anchor_metrics_focus_on_vowel_onsets_and_cv_transitions():
 
 
 def test_oto_eval_position_bad_rate_uses_full_placement_params():
-    from core.coarse_crnn.oto_evaluate import _is_position_bad, _position_bad_rate
-    from ml.scripts.coarse_crnn.evaluate_oto_runtime import _summarize_variant
+    from core.coarse_crnn.deprecated.direct_param.oto_evaluate import _is_position_bad, _position_bad_rate
+    from ml.scripts.coarse_crnn.deprecated.direct_param.evaluate_oto_runtime import _summarize_variant
 
     good = {
         "param_abs_errors_ms": {

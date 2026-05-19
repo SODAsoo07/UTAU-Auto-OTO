@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from bisect import bisect_left
 from collections import defaultdict
 import os
@@ -15,6 +16,7 @@ from core.coarse_crnn.anchor_timeline import (
 )
 from core.coarse_crnn.boundary_types import (
     TRANSITION_ROLES,
+    AbsoluteOtoAnchors,
     BoundaryCandidate,
     BoundaryDecodeResult,
     DecodedOtoRow,
@@ -26,6 +28,7 @@ from core.coarse_crnn.boundary_targets import (
     vowel_glide_identity,
     vowel_nucleus_identity,
 )
+from core.coarse_crnn.cv_slot_segmenter import cv_slot_timeline_from_slots, segment_cv_slots
 from core.coarse_crnn.filename_anchor_timeline import build_filename_anchor_timeline
 from core.coarse_crnn.lang import infer_language_from_path
 from core.coarse_crnn.oto_param_builder import build_absolute_anchors_for_role
@@ -61,12 +64,27 @@ def decode_wav_rows(
         )
     slot_count = max(1, max(int(spec.slot_count) for spec in row_specs))
     anchor_timeline: list[float] | None = None
-    timeline_mode = anchor_timeline_mode_from_env(default="linear")
+    timeline_mode = _resolve_anchor_timeline_mode(
+        anchor_timeline_mode_from_env(default="linear"),
+        row_specs=row_specs,
+    )
     active_end_base = float(active_end_ms) if active_end_ms is not None else float(duration_ms)
     active_end_pad_ms = max(0.0, _env_float("UTOA_BOUNDARY_ACTIVE_END_PAD_MS", 0.0))
     active_end_eff = min(float(duration_ms), active_end_base + active_end_pad_ms)
     filename_end_pad_ms = max(0.0, _env_float("UTOA_BOUNDARY_FILENAME_END_PAD_MS", 0.0))
-    if timeline_mode == "filename" and wav_path:
+    if timeline_mode == "cv_slot":
+        slots = segment_cv_slots(
+            wav_name=os.path.basename(str(wav_path or "")),
+            slot_count=slot_count,
+            duration_ms=float(duration_ms),
+            candidates=candidates,
+            active_start_ms=float(active_start_ms),
+            active_end_ms=float(active_end_eff),
+            min_slot_gap_ms=float(min_anchor_gap_ms),
+        )
+        if slots:
+            anchor_timeline = cv_slot_timeline_from_slots(slots)
+    elif timeline_mode == "filename" and wav_path:
         try:
             language = (
                 str(row_specs[0].language)
@@ -148,6 +166,7 @@ def decode_wav_rows(
         options = _build_row_options(
             role=role,
             row_alias=str(spec.alias or ""),
+            format_type=str(spec.format_type or ""),
             row_meta=dict(spec.meta or {}),
             left_anchor=left_anchor,
                 right_anchor=right_anchor,
@@ -223,6 +242,7 @@ def decode_wav_rows(
                 quality_score=quality_score,
             )
         )
+    rows = _derive_internal_vc_rows_from_primary_pairs(rows=rows, duration_ms=float(duration_ms))
     return BoundaryDecodeResult(
         wav_path=wav_path,
         duration_ms=float(duration_ms),
@@ -258,6 +278,50 @@ def _build_anchor_timeline(
     if timeline:
         timeline[-1] = min(timeline[-1], duration)
     return timeline
+
+
+def _resolve_anchor_timeline_mode(mode: str, *, row_specs: list[OtoRowSpec]) -> str:
+    text = str(mode or "").strip().lower()
+    if text != "auto":
+        return text
+    return _auto_anchor_timeline_mode(row_specs=row_specs)
+
+
+def _auto_anchor_timeline_mode(*, row_specs: list[OtoRowSpec]) -> str:
+    first = row_specs[0] if row_specs else None
+    language = str(getattr(first, "language", "") or "").strip().lower()
+    format_type = str(getattr(first, "format_type", "") or "").strip().lower()
+    if language:
+        override = _anchor_mode_override(f"UTOA_BOUNDARY_ANCHOR_TIMELINE_AUTO_{language.upper()}_{format_type.upper()}")
+        if override:
+            return override
+    override = _anchor_mode_override(f"UTOA_BOUNDARY_ANCHOR_TIMELINE_AUTO_{format_type.upper()}")
+    if override:
+        return override
+    if format_type == "vcv":
+        return "linear"
+    if format_type in {"cvvc", "cvc", "cmpx"}:
+        return "hybrid"
+    if format_type == "cv":
+        if language == "korean":
+            return "filename"
+        if language == "japanese":
+            return "hybrid"
+        return "filename"
+    return "linear"
+
+
+def _anchor_mode_override(env_name: str) -> str:
+    raw = str(os.environ.get(str(env_name), "") or "").strip().lower()
+    if raw in {"linear", "legacy"}:
+        return "linear"
+    if raw in {"filename", "tokens", "token"}:
+        return "filename"
+    if raw in {"hybrid", "ab", "valley_onset"}:
+        return "hybrid"
+    if raw in {"cv_slot", "cv_slots", "cv-segment", "cv_segment", "slot_cv"}:
+        return "cv_slot"
+    return ""
 
 
 def _shift_anchor_timeline(
@@ -296,6 +360,7 @@ def _build_row_options(
     *,
     role: str,
     row_alias: str,
+    format_type: str,
     row_meta: dict[str, str],
     left_anchor: float,
     right_anchor: float,
@@ -365,6 +430,7 @@ def _build_row_options(
                 quality_hint=quality_hint,
                 source=str(cand.source),
                 kind=str(cand.kind),
+                format_type=format_type,
                 left_anchor=left_anchor,
                 right_anchor=right_anchor,
                 posterior_scores=posterior_scores,
@@ -423,6 +489,7 @@ def _build_row_options(
         quality_hint=fallback_quality,
         source="fallback:anchor_pair",
         kind="fallback",
+        format_type=format_type,
         left_anchor=left_anchor,
         right_anchor=right_anchor,
         posterior_scores=posterior_scores,
@@ -450,6 +517,113 @@ def _build_row_options(
         }
     )
     return _dedupe_options(options)
+
+
+def _derive_internal_vc_rows_from_primary_pairs(
+    *,
+    rows: list[DecodedOtoRow],
+    duration_ms: float,
+) -> list[DecodedOtoRow]:
+    if not rows or not _env_bool("UTOA_BOUNDARY_DERIVE_INTERNAL_VC_FROM_PRIMARY", False):
+        return rows
+    out = list(rows)
+    for idx, row in enumerate(rows):
+        if normalize_role(row.spec.role) != "vc":
+            continue
+        prev_primary = _nearest_primary_row(rows, idx, direction=-1)
+        next_primary = _nearest_primary_row(rows, idx, direction=1)
+        if prev_primary is None or next_primary is None:
+            continue
+        anchors = _derive_vc_anchors_from_primary_pair(
+            row=row,
+            prev_primary=prev_primary,
+            next_primary=next_primary,
+            duration_ms=duration_ms,
+        )
+        if anchors is None:
+            continue
+        out[idx] = replace(
+            row,
+            anchors=anchors,
+            selected_time_ms=float(anchors.pre_abs),
+            fallback_used=False,
+            reason=str(anchors.reason),
+            quality_score=max(
+                float(row.quality_score),
+                min(float(prev_primary.quality_score), float(next_primary.quality_score)),
+            ),
+        )
+    return out
+
+
+_VC_PREV_PRIMARY_ROLES = frozenset({"-cv", "cv", "v", "v-cv", "special", "other"})
+_VC_NEXT_PRIMARY_ROLES = frozenset({"-cv", "cv", "v-cv", "special", "other"})
+
+
+def _nearest_primary_row(rows: list[DecodedOtoRow], idx: int, *, direction: int) -> DecodedOtoRow | None:
+    step = -1 if int(direction) < 0 else 1
+    allowed = _VC_PREV_PRIMARY_ROLES if step < 0 else _VC_NEXT_PRIMARY_ROLES
+    pos = int(idx) + step
+    while 0 <= pos < len(rows):
+        role = normalize_role(rows[pos].spec.role)
+        if role in {"cv-", "v-", "endbr", "br"}:
+            return None
+        if role in allowed:
+            return rows[pos]
+        pos += step
+    return None
+
+
+def _derive_vc_anchors_from_primary_pair(
+    *,
+    row: DecodedOtoRow,
+    prev_primary: DecodedOtoRow,
+    next_primary: DecodedOtoRow,
+    duration_ms: float,
+) -> AbsoluteOtoAnchors | None:
+    duration = max(1.0, float(duration_ms))
+    left_pad = max(0.0, _env_float("UTOA_BOUNDARY_DERIVED_VC_LEFT_PAD_MS", 0.0))
+    right_pad = max(0.0, _env_float("UTOA_BOUNDARY_DERIVED_VC_RIGHT_PAD_MS", 0.0))
+    left = _clamp(float(prev_primary.anchors.cutoff_abs) + left_pad, 0.0, duration)
+    right = _clamp(float(next_primary.anchors.offset_abs) - right_pad, 0.0, duration)
+    min_span = _clamp(_env_float("UTOA_BOUNDARY_DERIVED_VC_MIN_SPAN_MS", 28.0), 8.0, 140.0)
+    if right <= left + min_span:
+        return None
+    max_span = _clamp(_env_float("UTOA_BOUNDARY_DERIVED_VC_MAX_SPAN_MS", 220.0), min_span + 1.0, 520.0)
+    if right - left > max_span:
+        left = right - max_span
+    span = max(1.0, right - left)
+    pre_ratio = _clamp(_env_float("UTOA_BOUNDARY_DERIVED_VC_PRE_RATIO", 0.82), 0.35, 0.94)
+    tail_ratio = _clamp(_env_float("UTOA_BOUNDARY_DERIVED_VC_TAIL_RATIO", 0.05), 0.02, 0.45)
+    tail_gap = _clamp(span * tail_ratio, 8.0, 48.0)
+    cons_gap = _clamp(
+        _env_float("UTOA_BOUNDARY_DERIVED_VC_CONS_GAP_MS", max(18.0, min(62.0, span * 0.13))),
+        8.0,
+        96.0,
+    )
+    consonant_abs = _clamp(right - tail_gap, left + 2.0, right - 1.0)
+    pre_abs = _clamp(left + (span * pre_ratio), left + 1.0, consonant_abs - 1.0)
+    if consonant_abs - pre_abs < cons_gap:
+        pre_abs = _clamp(consonant_abs - cons_gap, left + 1.0, consonant_abs - 1.0)
+    max_pre_shift = _clamp(_env_float("UTOA_BOUNDARY_DERIVED_VC_MAX_PRE_SHIFT_MS", 180.0), 24.0, 720.0)
+    if abs(float(pre_abs) - float(row.anchors.pre_abs)) > max_pre_shift:
+        return None
+    overlap_lead = _clamp(span * 0.22, 12.0, 52.0)
+    overlap_abs = _clamp(pre_abs - overlap_lead, left, pre_abs)
+    confidence = _clamp01(
+        0.34 * float(row.anchors.confidence)
+        + 0.33 * float(prev_primary.anchors.confidence)
+        + 0.33 * float(next_primary.anchors.confidence)
+    )
+    return AbsoluteOtoAnchors(
+        offset_abs=float(left),
+        overlap_abs=float(overlap_abs),
+        pre_abs=float(pre_abs),
+        consonant_abs=float(consonant_abs),
+        cutoff_abs=float(right),
+        confidence=float(confidence),
+        reason="derived:internal_vc_primary_pair",
+    )
 
 
 def _decode_global_path(
@@ -551,6 +725,7 @@ def _option_emission_score(
     quality_hint: float,
     source: str,
     kind: str,
+    format_type: str,
     left_anchor: float,
     right_anchor: float,
     posterior_scores: dict[str, list[float]] | None,
@@ -582,6 +757,11 @@ def _option_emission_score(
         source_term += 0.06
     elif "merged" in text:
         source_term += 0.04
+    source_term += _pb_assist_role_format_term(
+        role=role_key,
+        format_type=format_type,
+        source=text,
+    )
     vc_shape_term = 0.0
     if role_key == "vc":
         ratio = (float(time_ms) - float(left_anchor)) / float(span)
@@ -656,6 +836,21 @@ def _infer_candidate_quality(*, candidate: BoundaryCandidate, model_quality: flo
         return _clamp01((0.65 * _clamp01(float(candidate.score))) + (0.35 * _clamp01(audio_reliability)))
     blend = 0.5 * (_clamp01(model_quality) + _clamp01(audio_reliability))
     return _clamp01((0.70 * _clamp01(float(candidate.score))) + (0.30 * blend))
+
+
+def _pb_assist_role_format_term(*, role: str, format_type: str, source: str) -> float:
+    if "model:phoneme_boundary" not in str(source or ""):
+        return 0.0
+    role_key = normalize_role(role)
+    format_key = str(format_type or "").strip().lower()
+    allowed_formats = _env_set("UTOA_BOUNDARY_PB_ASSIST_FORMATS", ("cvvc", "cvc", "cmpx"))
+    allowed_roles = _env_set("UTOA_BOUNDARY_PB_ASSIST_ROLES", ("-cv", "cv", "vc", "v-cv", "cv-"))
+    penalty = _clamp(_env_float("UTOA_BOUNDARY_PB_ASSIST_GUARD_PENALTY", 0.85), 0.0, 4.0)
+    if allowed_formats and format_key not in allowed_formats:
+        return -penalty
+    if allowed_roles and role_key not in allowed_roles:
+        return -penalty
+    return _clamp(_env_float("UTOA_BOUNDARY_PB_ASSIST_SOURCE_BONUS", 0.08), 0.0, 1.0)
 
 
 def _dedupe_options(options: list[dict[str, float | str | bool | int]]) -> list[dict[str, float | str | bool | int]]:
@@ -1054,6 +1249,26 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except Exception:
         return float(default)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _env_set(name: str, default: tuple[str, ...]) -> set[str]:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return {str(item).strip().lower() for item in default if str(item).strip()}
+    if raw in {"*", "all"}:
+        return set()
+    return {item.strip().lower() for item in raw.replace(";", ",").split(",") if item.strip()}
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:

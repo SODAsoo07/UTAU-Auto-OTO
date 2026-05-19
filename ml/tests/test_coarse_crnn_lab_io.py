@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.coarse_crnn.lab_io import frame_targets_from_segments, parse_timed_lab
+from core.coarse_crnn.deprecated.coarse_alignment.lab_io import frame_targets_from_segments, parse_timed_lab
 from core.coarse_crnn.labels import LABEL_TO_ID
 
 

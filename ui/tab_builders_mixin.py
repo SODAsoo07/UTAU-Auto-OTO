@@ -217,69 +217,6 @@ class TabBuildersMixin:
             self.mfa_install_btn.configure(text=t("✅ 설치 완료"), state="disabled", fg_color="#388E3C")
         self.mfa_install_btn.grid(row=0, column=1, padx=(6, 0), pady=1, sticky="w")
 
-        ctk.CTkLabel(
-            left_actions,
-            text=t("실보이스 경계 스모크"),
-            font=("", 12, "bold"),
-            text_color=PALETTE.neutral_text,
-        ).pack(anchor="w", pady=(10, 4))
-
-        self.boundary_smoke_btn = ctk.CTkButton(
-            left_actions,
-            text=t("경계 모델 스모크 테스트"),
-            width=222,
-            command=self._run_phoneme_boundary_smoke,
-        )
-        self._style_primary_button(self.boundary_smoke_btn)
-        self.boundary_smoke_btn.pack(anchor="w", pady=(0, 2))
-
-        self.boundary_smoke_hint_label = ctk.CTkLabel(
-            left_actions,
-            text=t("현재 WAV 경로 기준으로 manifest→train→eval 1회 실행"),
-            text_color=PALETTE.hint_text,
-            justify="left",
-        )
-        self.boundary_smoke_hint_label.pack(anchor="w", pady=(0, 2))
-
-        ctk.CTkLabel(
-            left_actions,
-            text=t("PhonemeBoundary 시각화"),
-            font=("", 12, "bold"),
-            text_color=PALETTE.neutral_text,
-        ).pack(anchor="w", pady=(10, 4))
-
-        try:
-            from core.phoneme_boundary.discovery import list_available_phoneme_boundary_models
-            _pb_models = list_available_phoneme_boundary_models()
-        except Exception:
-            _pb_models = []
-        _pb_choices = [m["label"] for m in _pb_models] or [t("(모델 없음)")]
-        self._phoneme_boundary_models = _pb_models
-        self.phoneme_boundary_model_var = ctk.StringVar(value=_pb_choices[0])
-        self.phoneme_boundary_model_menu = ctk.CTkOptionMenu(
-            left_actions,
-            values=_pb_choices,
-            variable=self.phoneme_boundary_model_var,
-            width=240,
-        )
-        self.phoneme_boundary_model_menu.pack(anchor="w", pady=(0, 2))
-
-        self.phoneme_boundary_visualize_btn = ctk.CTkButton(
-            left_actions,
-            text=t("경계 예측 시각화 (PNG)"),
-            width=222,
-            command=self._run_phoneme_boundary_visualize,
-        )
-        self._style_primary_button(self.phoneme_boundary_visualize_btn)
-        self.phoneme_boundary_visualize_btn.pack(anchor="w", pady=(0, 2))
-
-        self.phoneme_boundary_visualize_hint = ctk.CTkLabel(
-            left_actions,
-            text=t("현재 WAV 폴더의 wav마다 boundary 예측 JSON + PNG 생성"),
-            text_color=PALETTE.hint_text,
-            justify="left",
-        )
-        self.phoneme_boundary_visualize_hint.pack(anchor="w", pady=(0, 2))
 
         ctk.CTkLabel(
             right_actions,
@@ -1674,6 +1611,25 @@ class TabBuildersMixin:
             wraplength=740,
             justify="left",
         ).pack(anchor="w", padx=12, pady=(10, 10))
+        mfa_free_preview_row = ctk.CTkFrame(aligner_frame, fg_color="transparent")
+        mfa_free_preview_row.pack(fill="x", padx=12, pady=(0, 10))
+        self.mfa_free_oto_preview_btn = ctk.CTkButton(
+            mfa_free_preview_row,
+            text=t("MFA-Free SSL 슬롯 어댑터 테스트"),
+            width=230,
+            height=28,
+            command=lambda: self._run_mfa_free_oto_preview_from_ui(),
+        )
+        _style_primary_button(self.mfa_free_oto_preview_btn)
+        self.mfa_free_oto_preview_btn.pack(side="left", padx=(0, 10))
+        self.mfa_free_oto_preview_hint = ctk.CTkLabel(
+            mfa_free_preview_row,
+            text=t("현재 WAV/템플릿 기준으로 preview oto.ini, anchor JSON, overlay HTML을 생성합니다."),
+            text_color=PALETTE.hint_text,
+            wraplength=620,
+            justify="left",
+        )
+        self.mfa_free_oto_preview_hint.pack(side="left", fill="x", expand=True)
 
         dev_reset_row = ctk.CTkFrame(dev_container, fg_color="transparent")
         dev_reset_row.pack(fill="x", padx=10, pady=(8, 10))
@@ -2926,6 +2882,25 @@ class TabBuildersMixin:
             wraplength=740,
             justify="left",
         ).pack(anchor="w", padx=12, pady=(10, 10))
+        mfa_free_preview_row = ctk.CTkFrame(aligner_frame, fg_color="transparent")
+        mfa_free_preview_row.pack(fill="x", padx=12, pady=(0, 10))
+        self.mfa_free_oto_preview_btn = ctk.CTkButton(
+            mfa_free_preview_row,
+            text=t("MFA-Free SSL 슬롯 어댑터 테스트"),
+            width=230,
+            height=28,
+            command=lambda: self._run_mfa_free_oto_preview_from_ui(),
+        )
+        _style_primary_button(self.mfa_free_oto_preview_btn)
+        self.mfa_free_oto_preview_btn.pack(side="left", padx=(0, 10))
+        self.mfa_free_oto_preview_hint = ctk.CTkLabel(
+            mfa_free_preview_row,
+            text=t("현재 WAV/템플릿 기준으로 preview oto.ini, anchor JSON, overlay HTML을 생성합니다."),
+            text_color=PALETTE.hint_text,
+            wraplength=620,
+            justify="left",
+        )
+        self.mfa_free_oto_preview_hint.pack(side="left", fill="x", expand=True)
 
         dev_reset_row = ctk.CTkFrame(dev_container, fg_color="transparent")
         dev_reset_row.pack(fill="x", padx=10, pady=(8, 10))

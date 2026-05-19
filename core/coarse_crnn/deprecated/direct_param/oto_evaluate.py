@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -9,10 +9,10 @@ from typing import Any
 import numpy as np
 
 from core.coarse_crnn.audio import load_wav_mono
-from core.coarse_crnn.oto_inference import predict_oto_with_model
-from core.coarse_crnn.oto_model import load_oto_checkpoint
+from core.coarse_crnn.deprecated.direct_param.oto_inference import predict_oto_with_model
+from core.coarse_crnn.deprecated.direct_param.oto_model import load_oto_checkpoint
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES, OtoAnchors, anchors_to_oto_params, extract_alias_features
-from core.coarse_crnn.training import resolve_torch_device
+from core.coarse_crnn.torch_utils import resolve_torch_device
 
 
 @dataclass
@@ -156,7 +156,7 @@ def _evaluate_one(
     target_anchor_dict = target_anchors.to_dict()
     # Signed error = pred - target. Positive means the model over-predicts
     # (anchor placed later / region longer than ground truth). Averaged over
-    # the eval set this exposes systematic bias — e.g. a consistently positive
+    # the eval set this exposes systematic bias 窶・e.g. a consistently positive
     # consonant signed bias is the "dragged/stretched" symptom.
     anchor_signed = {
         name: float(pred_anchor_dict[name]) - float(target_anchor_dict[name]) for name in OTO_ANCHOR_NAMES
@@ -631,3 +631,4 @@ def write_oto_eval_json(path: str, payload: dict[str, Any]) -> None:
 
 
 __all__ = ["OtoEvalConfig", "evaluate_oto_manifest", "write_oto_eval_json"]
+

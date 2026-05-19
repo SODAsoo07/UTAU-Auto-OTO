@@ -82,9 +82,7 @@ class AlignActionsMixin:
                     default="mfa",
                 )
                 if primary_engine == "coarse_crnn":
-                    self._append_log("ℹ CRNN(실험적): 정렬 단계는 건너뛰고 OTO 단계에서 직접 예측 모델을 사용합니다.")
-                    self._set_status("CRNN OTO 직접 예측은 OTO 생성 단계에서 실행됩니다")
-                    return
+                    primary_engine = "mfa"
                 if hasattr(self, "_validate_alignment_input_files"):
                     needs_lab_dict = primary_engine == "mfa"
                     if needs_lab_dict and (not self._validate_alignment_input_files(wav_dir, dict_path)):

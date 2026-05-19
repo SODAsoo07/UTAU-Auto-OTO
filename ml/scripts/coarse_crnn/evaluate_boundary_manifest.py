@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -23,7 +23,7 @@ from core.coarse_crnn.boundary_targets import absolute_anchors_to_oto_params, ot
 from core.coarse_crnn.boundary_targets import training_rows_to_wav_groups
 from core.coarse_crnn.boundary_types import DecodedOtoRow
 from core.coarse_crnn.oto_audio_candidates import compute_audio_candidates
-from core.coarse_crnn.training import resolve_torch_device
+from core.coarse_crnn.torch_utils import resolve_torch_device
 from core.coarse_crnn.wav_decoder import decode_wav_rows
 
 
@@ -339,3 +339,4 @@ def _quality_at_time(score_map, time_ms: float, *, default: float) -> float:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

@@ -121,7 +121,7 @@ class Stage2ModelConfig:
 @dataclass(frozen=True)
 class Stage2CheckpointMeta:
     feature_schema_version: int = 1
-    target_mode: str = "absolute_anchor_from_boundary_candidates"
+    target_mode: str = "boundary_candidate_residual_adapter"
     role_vocab: tuple[str, ...] = field(default_factory=lambda: ROLE_VOCAB)
     alias_type_vocab: tuple[str, ...] = field(default_factory=lambda: ALIAS_TYPE_VOCAB)
     language_vocab: tuple[str, ...] = field(default_factory=lambda: LANGUAGE_VOCAB)

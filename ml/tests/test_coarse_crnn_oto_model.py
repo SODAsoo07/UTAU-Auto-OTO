@@ -4,7 +4,7 @@ from __future__ import annotations
 def test_oto_model_forward_shapes():
     import torch
 
-    from core.coarse_crnn.oto_model import OtoCrnnConfig, build_oto_model
+    from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig, build_oto_model
 
     cfg = OtoCrnnConfig(n_mels=8, feature_deltas=False, hidden=4, conv_channels=6, cond_dim=3)
     model = build_oto_model(cfg)
@@ -19,7 +19,7 @@ def test_oto_model_forward_shapes():
 def test_oto_model_forward_accepts_row_context():
     import torch
 
-    from core.coarse_crnn.oto_model import OtoCrnnConfig, build_oto_model
+    from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig, build_oto_model
 
     cfg = OtoCrnnConfig(n_mels=8, feature_deltas=False, hidden=4, conv_channels=6, cond_dim=3, numeric_context_dim=2)
     model = build_oto_model(cfg)
@@ -44,7 +44,7 @@ def test_oto_model_forward_accepts_row_context():
 def test_oto_model_forward_accepts_shared_heads_config():
     import torch
 
-    from core.coarse_crnn.oto_model import OtoCrnnConfig, build_oto_model
+    from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig, build_oto_model
 
     cfg = OtoCrnnConfig(
         n_mels=8,
@@ -62,7 +62,7 @@ def test_oto_model_forward_accepts_shared_heads_config():
 
 
 def test_oto_model_config_defaults_to_relative_params_for_new_training():
-    from core.coarse_crnn.oto_model import OtoCrnnConfig, uses_relative_param_head
+    from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig, uses_relative_param_head
 
     cfg = OtoCrnnConfig()
 
@@ -74,7 +74,7 @@ def test_oto_model_config_defaults_to_relative_params_for_new_training():
 
 
 def test_oto_model_config_keeps_old_checkpoints_absolute():
-    from core.coarse_crnn.oto_model import OtoCrnnConfig, uses_relative_param_head
+    from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig, uses_relative_param_head
 
     cfg = OtoCrnnConfig.from_dict({"n_mels": 8, "hidden": 4, "conv_channels": 6})
 
@@ -86,7 +86,7 @@ def test_oto_model_config_keeps_old_checkpoints_absolute():
 
 
 def test_oto_model_config_defaults_role_features_off_for_old_payloads():
-    from core.coarse_crnn.oto_model import OtoCrnnConfig
+    from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig
 
     cfg = OtoCrnnConfig.from_dict({"n_mels": 8, "hidden": 4, "conv_channels": 6})
 
@@ -95,7 +95,7 @@ def test_oto_model_config_defaults_role_features_off_for_old_payloads():
 
 
 def test_oto_model_config_expands_active_audio_context_dim():
-    from core.coarse_crnn.oto_model import OtoCrnnConfig
+    from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig
 
     cfg = OtoCrnnConfig.from_dict({"enable_active_audio_context": True, "numeric_context_dim": 15})
 
@@ -104,7 +104,7 @@ def test_oto_model_config_expands_active_audio_context_dim():
 
 
 def test_oto_model_config_expands_slot_context_dim():
-    from core.coarse_crnn.oto_model import OtoCrnnConfig
+    from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig
 
     cfg = OtoCrnnConfig.from_dict({"enable_slot_context": True, "numeric_context_dim": 15})
 
@@ -113,7 +113,7 @@ def test_oto_model_config_expands_slot_context_dim():
 
 
 def test_oto_model_config_expands_active_slot_context_dim():
-    from core.coarse_crnn.oto_model import OtoCrnnConfig
+    from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig
 
     cfg = OtoCrnnConfig.from_dict(
         {"enable_active_audio_context": True, "enable_slot_context": True, "numeric_context_dim": 15}
@@ -125,7 +125,7 @@ def test_oto_model_config_expands_active_slot_context_dim():
 
 
 def test_oto_model_active_relative_mode_forces_active_context():
-    from core.coarse_crnn.oto_model import OtoCrnnConfig, uses_active_relative_param_head, uses_relative_param_head
+    from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig, uses_active_relative_param_head, uses_relative_param_head
 
     cfg = OtoCrnnConfig.from_dict({"scalar_target_mode": "active_relative_params", "numeric_context_dim": 15})
 
@@ -138,7 +138,7 @@ def test_oto_model_active_relative_mode_forces_active_context():
 def test_oto_model_role_embedding_branch_only_when_enabled():
     import torch
 
-    from core.coarse_crnn.oto_model import OtoCrnnConfig, build_oto_model
+    from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig, build_oto_model
 
     cfg_off = OtoCrnnConfig(n_mels=8, feature_deltas=False, hidden=4, conv_channels=6, cond_dim=3)
     cfg_on = OtoCrnnConfig(
@@ -179,7 +179,7 @@ def test_oto_model_role_embedding_branch_only_when_enabled():
 def test_oto_model_boundary_slot_head_is_optional():
     import torch
 
-    from core.coarse_crnn.oto_model import OtoCrnnConfig, build_oto_model
+    from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig, build_oto_model
 
     cfg_off = OtoCrnnConfig(n_mels=8, feature_deltas=False, hidden=4, conv_channels=6, cond_dim=3)
     cfg_on = OtoCrnnConfig(
@@ -201,7 +201,7 @@ def test_oto_model_boundary_slot_head_is_optional():
 def test_oto_model_sequence_candidate_head_is_optional():
     import torch
 
-    from core.coarse_crnn.oto_model import OtoCrnnConfig, build_oto_model
+    from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig, build_oto_model
 
     cfg_off = OtoCrnnConfig(n_mels=8, feature_deltas=False, hidden=4, conv_channels=6, cond_dim=3)
     cfg_on = OtoCrnnConfig(
@@ -221,7 +221,7 @@ def test_oto_model_sequence_candidate_head_is_optional():
 
 
 def test_oto_model_alias_role_id_normalizes_legacy_names():
-    from core.coarse_crnn.oto_model import OtoCrnnConfig, alias_role_id
+    from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig, alias_role_id
 
     cfg = OtoCrnnConfig()
 

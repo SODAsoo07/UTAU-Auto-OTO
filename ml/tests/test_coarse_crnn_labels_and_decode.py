@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from core.coarse_crnn.decode import viterbi_align_phones
+from core.coarse_crnn.deprecated.coarse_alignment.decode import viterbi_align_phones
 from core.coarse_crnn.labels import LABEL_TO_ID, coarse_for_phone
 
 
