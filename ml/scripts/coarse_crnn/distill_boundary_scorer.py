@@ -1,4 +1,4 @@
-"""Distillation trainer for the boundary scorer student (conv_only arch).
+﻿"""Distillation trainer for the boundary scorer student (conv_only arch).
 
 Status: Phase 2 (CRNN -> conv_only self-distillation) working.
 
@@ -10,7 +10,7 @@ Two teacher backends:
    distillation loop itself.
 
 2. `ssl` (stub, raises NotImplementedError): wav2vec2 / HuBERT teacher. Full
-   design in `14-8-SSL-백본-이식-계획서.md`.
+   design in `14-8-SSL-・ｱ・ｸ-・ｴ・・・・嚶・・md`.
 
 Loss composition (per logits group):
 
@@ -47,6 +47,7 @@ from core.coarse_crnn.boundary_scorer_model import (
 from core.coarse_crnn.boundary_scorer_training import (
     BoundaryTrainConfig,
     _BoundaryDataset,
+    _boundary_pos_weight_tensor,
     _boundary_time_regression_loss,
     _collate,
     _load_matching_state_from_checkpoint,
@@ -55,7 +56,7 @@ from core.coarse_crnn.boundary_scorer_training import (
     _unpack_batch,
 )
 from core.coarse_crnn.boundary_targets import training_rows_to_wav_groups
-from core.coarse_crnn.training import resolve_torch_device
+from core.coarse_crnn.torch_utils import resolve_torch_device
 
 
 # Heads that participate in distillation. Boundary is BCE (per-class
@@ -114,7 +115,7 @@ class SSLBackboneTeacher(_Teacher):
 
     def __init__(self, *_args, **_kwargs):
         raise NotImplementedError(
-            "SSL teacher is not wired yet. See 14-8-SSL-백본-이식-계획서.md."
+            "SSL teacher is not wired yet. See 14-8-SSL-・ｱ・ｸ-・ｴ・・・・嚶・・md."
         )
 
 
@@ -277,6 +278,11 @@ def main() -> int:
     ap.add_argument("--phone-aux-class-balance-power", type=float, default=0.5)
     ap.add_argument("--phone-aux-class-balance-max", type=float, default=8.0)
     ap.add_argument("--pos-weight", type=float, default=2.5)
+    ap.add_argument(
+        "--boundary-label-pos-weights",
+        default="syllable_onset=1.55,vowel_start=1.50,consonant_onset=1.35,next_onset=1.25",
+        help="Comma-separated label positive-weight multipliers applied on top of --pos-weight.",
+    )
     ap.add_argument("--quality-loss-weight", type=float, default=0.06)
     ap.add_argument("--boundary-time-loss-weight", type=float, default=0.20)
     ap.add_argument("--hard-case-oversample", action=argparse.BooleanOptionalAction, default=True)
@@ -327,6 +333,11 @@ def main() -> int:
         val_ratio=float(args.val_ratio),
         quality_loss_weight=float(args.quality_loss_weight),
         pos_weight=float(args.pos_weight),
+        boundary_label_pos_weights=tuple(
+            item.strip()
+            for item in str(args.boundary_label_pos_weights or "").split(",")
+            if item.strip()
+        ),
         boundary_time_loss_weight=float(args.boundary_time_loss_weight),
         hard_case_oversample=bool(args.hard_case_oversample),
         hard_case_weight=float(args.hard_case_weight),
@@ -430,7 +441,13 @@ def main() -> int:
     teacher = _resolve_teacher(args, device=device)
 
     use_amp = bool(tcfg.amp and device.type == "cuda")
-    pos_weight = torch.tensor(float(tcfg.pos_weight), device=device)
+    pos_weight = _boundary_pos_weight_tensor(
+        torch,
+        labels=tuple(student_cfg.labels),
+        base_pos_weight=float(tcfg.pos_weight),
+        label_weights=tuple(tcfg.boundary_label_pos_weights or ()),
+        device=device,
+    )
     trainable_params = [p for p in student.parameters() if bool(getattr(p, "requires_grad", True))]
     if not trainable_params:
         raise SystemExit("student has no trainable parameters")
@@ -585,6 +602,8 @@ def main() -> int:
         "vowel_glide_loss_weight": float(tcfg.vowel_glide_loss_weight),
         "phone_aux_class_balanced": bool(tcfg.phone_aux_class_balanced),
         "boundary_time_loss_weight": float(tcfg.boundary_time_loss_weight),
+        "pos_weight": float(tcfg.pos_weight),
+        "boundary_label_pos_weights": list(tcfg.boundary_label_pos_weights or ()),
         "hard_case_oversample": bool(tcfg.hard_case_oversample),
         "hard_case_weight": float(tcfg.hard_case_weight),
         "init_from": str(tcfg.init_from or ""),
@@ -597,3 +616,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

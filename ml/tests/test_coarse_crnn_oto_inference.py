@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from core.coarse_crnn.oto_inference import _first_sustained_indices, _trim_leading_silence_for_inference
+from core.coarse_crnn.deprecated.direct_param.oto_inference import _first_sustained_indices, _trim_leading_silence_for_inference
 
 
 def test_trim_leading_silence_keeps_padding_before_active_audio(monkeypatch):

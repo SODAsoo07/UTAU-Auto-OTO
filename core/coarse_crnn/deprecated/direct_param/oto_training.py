@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import random
@@ -12,7 +12,7 @@ import numpy as np
 
 from core.coarse_crnn.alias_role import normalize_role
 from core.coarse_crnn.audio import add_log_mel_deltas, augment_log_mel, load_wav_mono, log_mel_spectrogram
-from core.coarse_crnn.oto_model import (
+from core.coarse_crnn.deprecated.direct_param.oto_model import (
     OtoCrnnConfig,
     alias_role_id,
     alias_type_id,
@@ -25,13 +25,13 @@ from core.coarse_crnn.oto_model import (
     uses_relative_param_head,
     right_boundary_prior_blend_for_context,
 )
-from core.coarse_crnn.oto_boundary_decoding import boundary_slot_target_id
+from core.coarse_crnn.deprecated.direct_param.oto_boundary_decoding import boundary_slot_target_id
 from core.coarse_crnn.slot_graph import slot_context_from_row
 from core.coarse_crnn.oto_param_priors import decode_relative_oto_params, normalize_relative_oto_target, relative_params_to_anchors
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES, extract_alias_features
-from core.coarse_crnn.oto_windowing import crop_oto_target_window, row_window_args, should_use_vcv_target_window, target_window_frames_for
-from core.coarse_crnn.training import _autocast, _make_grad_scaler, _pin_memory_enabled, resolve_torch_device
-from core.coarse_crnn.oto_sequence_alignment import SEQUENCE_BOUNDARY_KINDS
+from core.coarse_crnn.deprecated.direct_param.oto_windowing import crop_oto_target_window, row_window_args, should_use_vcv_target_window, target_window_frames_for
+from core.coarse_crnn.torch_utils import _autocast, _make_grad_scaler, _pin_memory_enabled, resolve_torch_device
+from core.coarse_crnn.deprecated.direct_param.oto_sequence_alignment import SEQUENCE_BOUNDARY_KINDS
 
 
 @dataclass
@@ -41,7 +41,7 @@ class OtoTrainConfig:
     # LR schedule. "cosine" applies a short linear warmup then cosine decay to
     # lr * lr_min_ratio over the whole run; "none" keeps lr flat (legacy).
     # A flat 1e-3 across epochs let the model leave the generalizing basin after
-    # epoch 1 — train loss kept dropping while val collapsed.
+    # epoch 1 窶・train loss kept dropping while val collapsed.
     lr_schedule: str = "cosine"
     lr_warmup_ratio: float = 0.03
     lr_min_ratio: float = 0.05
@@ -259,7 +259,7 @@ class OtoAnchorDataset:
         if features.shape[0] <= 0:
             features = np.zeros((1, int(self.model_config.n_mels)), dtype=np.float32)
         # Train-time SpecAugment / gain / pitch on the raw [T, n_mels] log-mel,
-        # before Δ/Δ² so the deltas reflect the perturbed signal.
+        # before ﾎ・ﾎ板ｲ so the deltas reflect the perturbed signal.
         # UTOA_OTO_DISABLE_AUGMENT=1 turns it off for A/C-only ablation runs.
         if self.train and os.environ.get("UTOA_OTO_DISABLE_AUGMENT", "") != "1":
             features = augment_log_mel(features)
@@ -522,9 +522,9 @@ def train_oto_from_manifest(
                       f"partial_shape={init_summary.get('partial_shape_count', 0)} "
                       f"missing_after_load={len(incompatible.missing_keys)}")
             else:
-                print(f"[oto_anchor][train] init_checkpoint {init_checkpoint} has no recognizable state_dict — skipped")
+                print(f"[oto_anchor][train] init_checkpoint {init_checkpoint} has no recognizable state_dict 窶・skipped")
         except Exception as exc:
-            print(f"[oto_anchor][train] WARNING: init_checkpoint load failed ({exc}) — training from scratch")
+            print(f"[oto_anchor][train] WARNING: init_checkpoint load failed ({exc}) 窶・training from scratch")
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg.lr), weight_decay=1e-4)
 
     history: list[dict[str, float]] = []
@@ -631,7 +631,7 @@ def train_oto_from_manifest(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
                 # GradScaler skips optimizer.step() when fp16 grads overflow
                 # (common during early-step scale calibration). A drop in the
-                # scale signals a skipped step — keep the LR schedule aligned by
+                # scale signals a skipped step 窶・keep the LR schedule aligned by
                 # only advancing it when the optimizer actually stepped.
                 scale_before = scaler.get_scale()
                 scaler.step(optimizer)
@@ -1224,12 +1224,12 @@ def _context_array_from_row(row: dict[str, Any]) -> np.ndarray:
             max(0.0, min(1.0, float(row.get("is_head_row", 0.0) or 0.0))),
             max(0.0, min(1.0, float(row.get("is_tail_row", 0.0) or 0.0))),
             max(0.0, min(1.0, float(row.get("prev_alias_ends_vowel", 0.0) or 0.0))),
-            # --- new 3 dims: vowel identity context (VC/VV 개선) ---
-            # dim 12: current alias left vowel id (a/i/u/e/o → 1/6~5/6, none=0)
+            # --- new 3 dims: vowel identity context (VC/VV ・懍│) ---
+            # dim 12: current alias left vowel id (a/i/u/e/o 竊・1/6~5/6, none=0)
             max(0.0, min(1.0, float(row.get("left_vowel_id_norm", 0.0) or 0.0))),
-            # dim 13: prev alias right vowel id (VC에서 앞 CV의 모음이 뭔지)
+            # dim 13: prev alias right vowel id (VC・川・ ・・CV・・・ｨ・護擽 ・肥ｧ)
             max(0.0, min(1.0, float(row.get("prev_right_vowel_id_norm", 0.0) or 0.0))),
-            # dim 14: next alias left vowel id (VV에서 다음 모음이 뭔지)
+            # dim 14: next alias left vowel id (VV・川・ ・､・・・ｨ・護擽 ・肥ｧ)
             max(0.0, min(1.0, float(row.get("next_left_vowel_id_norm", 0.0) or 0.0))),
         ],
         dtype=np.float32,
@@ -1799,8 +1799,8 @@ def _feature_cache_path(
         mtime_ns = -1
     key_src = {
         # v2: log_mel_spectrogram normalization changed (peak-normalize + median/MAD,
-        # fmin 30→60). v3: MAD floored at 0.5 + output clip ±10 to stop silence-
-        # dominated clips from exploding to ~1e6 (fp16 overflow → NaN). Entries
+        # fmin 30竊・0). v3: MAD floored at 0.5 + output clip ﾂｱ10 to stop silence-
+        # dominated clips from exploding to ~1e6 (fp16 overflow 竊・NaN). Entries
         # from earlier versions are not interchangeable and must be regenerated.
         "v": 3,
         "wav": abs_wav.lower(),
@@ -1849,3 +1849,4 @@ def _save_feature_cache(path: str, features: np.ndarray, hop_sec: float, duratio
 
 
 __all__ = ["OtoAnchorDataset", "OtoTrainConfig", "train_oto_from_manifest"]
+

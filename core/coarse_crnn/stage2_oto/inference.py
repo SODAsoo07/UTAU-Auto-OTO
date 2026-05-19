@@ -8,8 +8,9 @@ from core.coarse_crnn.boundary_types import BoundaryCandidate, BoundaryDecodeRes
 from core.coarse_crnn.stage2_oto.constraints import (
     anchors_to_dataclass,
     apply_stage2_gate,
-    max_candidate_distance_from_env,
+    max_candidate_distance_policy_from_env,
     min_confidence_from_env,
+    resolve_max_candidate_distance_ms,
 )
 from core.coarse_crnn.stage2_oto.features import build_stage2_feature_batch
 from core.coarse_crnn.stage2_oto.model import Stage2OtoAssigner, load_stage2_checkpoint
@@ -91,22 +92,32 @@ def apply_stage2_to_decode(
     accepted = 0
     fallback = 0
     min_conf = min_confidence_from_env() if min_confidence is None else float(min_confidence)
-    max_dist = (
-        max_candidate_distance_from_env()
+    distance_policy = (
+        max_candidate_distance_policy_from_env()
         if max_candidate_distance_ms is None
-        else float(max_candidate_distance_ms)
+        else {
+            "default": float(max_candidate_distance_ms),
+            "by_role": {},
+            "by_format": {},
+            "by_format_role": {},
+        }
     )
     for idx, row in enumerate(decoded.rows):
         duration = max(1.0, float(row.spec.duration_ms or decoded.duration_ms or 0.0))
         pred = tuple(float(v) * duration for v in anchors_norm[idx])
         conf = float(confidence_values[idx])
+        row_max_dist = resolve_max_candidate_distance_ms(
+            role=row.spec.role,
+            format_type=row.spec.format_type,
+            policy=distance_policy,
+        )
         decision = apply_stage2_gate(
             row=row,
             predicted_anchors_ms=pred,  # type: ignore[arg-type]
             confidence=conf,
             candidates=candidates,
             min_confidence=min_conf,
-            max_candidate_distance_ms=max_dist,
+            max_candidate_distance_ms=row_max_dist,
         )
         if decision.accepted:
             accepted += 1

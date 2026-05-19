@@ -2,19 +2,23 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from collections import defaultdict
+import os
 from statistics import mean
 
 from core.coarse_crnn.boundary_types import BoundaryCandidate, BoundaryFrameScores, normalize_boundary_label
 from core.coarse_crnn.oto_audio_candidates import AudioCandidates
 
 LABEL_MIN_SCORE_OFFSETS: dict[str, float] = {
-    "syllable_onset": 0.00,
-    "consonant_onset": 0.01,
-    "vowel_start": 0.00,
+    # Runtime candidate extraction is recall-first. The decoder and Stage2
+    # assigner can reject extra candidates, but a missed syllable cannot be
+    # recovered after this point.
+    "syllable_onset": -0.04,
+    "consonant_onset": -0.03,
+    "vowel_start": -0.04,
     "vowel_stable": 0.03,
     "vowel_end": 0.02,
-    "transition_peak": 0.04,
-    "next_onset": 0.03,
+    "transition_peak": 0.02,
+    "next_onset": -0.02,
     "silence_boundary": 0.06,
 }
 
@@ -22,16 +26,18 @@ LABEL_MIN_SCORE_OFFSETS: dict[str, float] = {
 def peak_candidates_from_scores(
     score_map: BoundaryFrameScores,
     *,
-    min_score: float = 0.32,
-    min_gap_ms: float = 16.0,
+    min_score: float = 0.28,
+    min_gap_ms: float = 12.0,
 ) -> list[BoundaryCandidate]:
     candidates: list[BoundaryCandidate] = []
     global_quality = _global_quality(score_map)
+    base_score = _env_float("UTOA_BOUNDARY_PEAK_MIN_SCORE", float(min_score), lo=0.05, hi=0.95)
+    base_gap_ms = _env_float("UTOA_BOUNDARY_PEAK_MIN_GAP_MS", float(min_gap_ms), lo=2.0, hi=80.0)
     gap_scale = _clamp(1.20 - (0.45 * global_quality), 0.80, 1.35)
     for label, values in score_map.scores.items():
         label_key = normalize_boundary_label(label)
-        label_floor = _label_min_score(label_key, base_min_score=float(min_score), global_quality=global_quality)
-        label_gap = float(min_gap_ms) * gap_scale
+        label_floor = _label_min_score(label_key, base_min_score=float(base_score), global_quality=global_quality)
+        label_gap = float(base_gap_ms) * gap_scale
         times = list(score_map.times_ms)
         if len(values) < 3 or len(values) != len(times):
             continue
@@ -206,6 +212,14 @@ def _label_min_score(label: str, *, base_min_score: float, global_quality: float
     offset = float(LABEL_MIN_SCORE_OFFSETS.get(str(label or "").strip().lower(), 0.0))
     quality_scale = _clamp(1.18 - (0.58 * float(global_quality)), 0.88, 1.35)
     return max(0.05, float(base_min_score) * quality_scale + offset)
+
+
+def _env_float(name: str, default: float, *, lo: float, hi: float) -> float:
+    try:
+        value = float(os.environ.get(str(name), str(default)))
+    except Exception:
+        value = float(default)
+    return _clamp(value, float(lo), float(hi))
 
 
 def _quality_at_frame(score_map: BoundaryFrameScores, frame_index: int, *, default: float) -> float:

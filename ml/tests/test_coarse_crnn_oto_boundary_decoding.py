@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 def test_collect_boundary_candidates_prefers_role_sources():
     from core.coarse_crnn.oto_audio_candidates import AudioCandidates, MelDeltaPeak, OnsetPeak, VowelSegmentCandidate
-    from core.coarse_crnn.oto_boundary_decoding import collect_boundary_candidates
+    from core.coarse_crnn.deprecated.direct_param.oto_boundary_decoding import collect_boundary_candidates
 
     candidates = AudioCandidates(
         wav_path="x.wav",
@@ -39,7 +39,7 @@ def test_collect_boundary_candidates_prefers_role_sources():
 
 def test_correct_boundary_params_moves_right_side_only_for_vc():
     from core.coarse_crnn.oto_audio_candidates import AudioCandidates, OnsetPeak, VowelSegmentCandidate
-    from core.coarse_crnn.oto_boundary_decoding import correct_boundary_params_from_candidates
+    from core.coarse_crnn.deprecated.direct_param.oto_boundary_decoding import correct_boundary_params_from_candidates
 
     candidates = AudioCandidates(
         wav_path="x.wav",
@@ -88,7 +88,7 @@ def test_correct_boundary_params_moves_right_side_only_for_vc():
 
 def test_decode_boundary_slot_graph_updates_boundary_state(tmp_path):
     from core.coarse_crnn.oto_audio_candidates import AudioCandidates, MelDeltaPeak, OnsetPeak, VowelSegmentCandidate
-    from core.coarse_crnn.oto_boundary_decoding import decode_boundary_slot_graph_for_states
+    from core.coarse_crnn.deprecated.direct_param.oto_boundary_decoding import decode_boundary_slot_graph_for_states
 
     wav_path = tmp_path / "graph.wav"
     wav_path.write_bytes(b"fake")

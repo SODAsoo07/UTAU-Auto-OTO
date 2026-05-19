@@ -273,6 +273,138 @@
       "note": "Evaluate Stage2 OTO Assigner against gold oto.ini with Boundary Decoder fallback metrics."
     },
     {
+      "path": "ml/scripts/coarse_crnn/visualize_boundary_decode.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Render Boundary Scorer posterior and decoded OTO anchors for one wav as dependency-free SVG."
+    },
+    {
+      "path": "ml/scripts/coarse_crnn/deprecated/coarse_alignment/align.py",
+      "status": "deprecated",
+      "owner": "ml",
+      "note": "Deprecated CoarseCRNN TextGrid alignment CLI retained only for old checkpoint reproduction."
+    },
+    {
+      "path": "ml/scripts/coarse_crnn/deprecated/coarse_alignment/build_manifest.py",
+      "status": "deprecated",
+      "owner": "ml",
+      "note": "Deprecated CoarseCRNN alignment manifest builder."
+    },
+    {
+      "path": "ml/scripts/coarse_crnn/deprecated/coarse_alignment/build_eval_splits.py",
+      "status": "deprecated",
+      "owner": "ml",
+      "note": "Deprecated CoarseCRNN alignment split helper."
+    },
+    {
+      "path": "ml/scripts/coarse_crnn/deprecated/coarse_alignment/build_clean_manifest.py",
+      "status": "deprecated",
+      "owner": "ml",
+      "note": "Deprecated CoarseCRNN clean-manifest helper."
+    },
+    {
+      "path": "ml/scripts/coarse_crnn/deprecated/coarse_alignment/evaluate_alignment.py",
+      "status": "deprecated",
+      "owner": "ml",
+      "note": "Deprecated CoarseCRNN alignment evaluator."
+    },
+    {
+      "path": "ml/scripts/coarse_crnn/deprecated/coarse_alignment/train.py",
+      "status": "deprecated",
+      "owner": "ml",
+      "note": "Deprecated CoarseCRNN alignment trainer."
+    },
+    {
+      "path": "ml/scripts/coarse_crnn/deprecated/direct_param/evaluate_oto.py",
+      "status": "deprecated",
+      "owner": "ml",
+      "note": "Deprecated direct-parameter OTO CRNN evaluator."
+    },
+    {
+      "path": "ml/scripts/coarse_crnn/deprecated/direct_param/evaluate_oto_runtime.py",
+      "status": "deprecated",
+      "owner": "ml",
+      "note": "Deprecated direct-parameter OTO CRNN runtime evaluator."
+    },
+    {
+      "path": "ml/scripts/coarse_crnn/deprecated/direct_param/evaluate_oto_voicebank_holdout.py",
+      "status": "deprecated",
+      "owner": "ml",
+      "note": "Deprecated direct-parameter OTO CRNN voicebank holdout evaluator."
+    },
+    {
+      "path": "ml/scripts/coarse_crnn/deprecated/direct_param/predict_oto.py",
+      "status": "deprecated",
+      "owner": "ml",
+      "note": "Deprecated direct-parameter OTO CRNN predictor CLI."
+    },
+    {
+      "path": "ml/scripts/coarse_crnn/deprecated/direct_param/train_oto.py",
+      "status": "deprecated",
+      "owner": "ml",
+      "note": "Deprecated direct-parameter OTO CRNN trainer."
+    },
+    {
+      "path": "ml/scripts/mfa_free_oto/build_goldset_scaffold.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Builds manual-gold MFA-free OTO manifest scaffolds; does not create pseudo-labels."
+    },
+    {
+      "path": "ml/scripts/mfa_free_oto/build_lab_gold_manifest.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Converts paired HTK .lab/.wav directories into MFA-free OTO manual_gold manifests using lab phones as source of truth."
+    },
+    {
+      "path": "ml/scripts/mfa_free_oto/audit_gold_manifest.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Audits MFA-free OTO manual_gold manifests for span validity, label balance, acoustic label suspicion, and filename-slot eligibility before training."
+    },
+    {
+      "path": "ml/scripts/mfa_free_oto/split_gold_manifest.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Creates deterministic train/eval splits for MFA-free OTO manual_gold manifests before ablation runs."
+    },
+    {
+      "path": "ml/scripts/mfa_free_oto/train_ssl_poc.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Trains the separated MFA-free OTO shared-encoder frame/event PoC from manual-gold labels."
+    },
+    {
+      "path": "ml/scripts/mfa_free_oto/evaluate_ssl_poc.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Evaluates MFA-free OTO PoC checkpoints with frame, boundary, and hard-failure gates."
+    },
+    {
+      "path": "ml/scripts/mfa_free_oto/run_feature_ablation.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Runs limited-data feature ablations across acoustic, acoustic-aux, SSL, SSL+aux, and slot-Viterbi evaluation modes."
+    },
+    {
+      "path": "ml/scripts/mfa_free_oto/render_review_overlay.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Renders browser review overlays for waveform, spectrogram, manual labels, posteriors, and decoded anchors."
+    },
+    {
+      "path": "ml/scripts/mfa_free_oto/render_failure_overlays.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Renders review overlays for failed or tagged rows from MFA-free OTO evaluation JSON outputs."
+    },
+    {
+      "path": "ml/scripts/mfa_free_oto/predict_oto_preview.py",
+      "status": "active",
+      "owner": "ml",
+      "note": "Runs MFA-free OTO checkpoint inference and writes preview oto.ini, anchor JSON, and review overlays for slot-aware testing."
+    },
+    {
       "path": "scripts/build/build_installer.ps1",
       "status": "active",
       "owner": "release",

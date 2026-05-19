@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from typing import Any
@@ -8,7 +8,7 @@ import numpy as np
 from core.coarse_crnn.audio import load_wav_mono, log_mel_spectrogram
 from core.coarse_crnn.boundary_scorer_model import BoundaryScorerConfig, load_boundary_checkpoint
 from core.coarse_crnn.boundary_types import BoundaryFrameScores
-from core.coarse_crnn.training import resolve_torch_device
+from core.coarse_crnn.torch_utils import resolve_torch_device
 
 
 def infer_boundary_scores_with_model(
@@ -128,3 +128,4 @@ def _prob_dict(labels, probs) -> dict[str, list[float]] | None:
     if probs is None:
         return None
     return {label: probs[:, idx].tolist() for idx, label in enumerate(labels)}
+

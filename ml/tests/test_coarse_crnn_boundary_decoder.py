@@ -6,7 +6,12 @@ import wave
 from core.coarse_crnn.boundary_targets import build_boundary_target_map, build_phone_aware_target_map, load_row_specs_from_source_oto
 from core.coarse_crnn import boundary_targets as bt
 from core.coarse_crnn.boundary_types import AbsoluteOtoAnchors, BoundaryCandidate, OtoRowSpec
-from core.coarse_crnn.wav_decoder import _phone_aux_posterior_term, decode_wav_rows
+from core.coarse_crnn.wav_decoder import (
+    _auto_anchor_timeline_mode,
+    _pb_assist_role_format_term,
+    _phone_aux_posterior_term,
+    decode_wav_rows,
+)
 
 
 def _spec(role: str, *, slot_index: int, line_index: int) -> OtoRowSpec:
@@ -389,6 +394,10 @@ def test_boundary_scorer_phone_aux_heads_are_optional():
 
 
 def test_phone_aware_debug_plot_renders_target_only(tmp_path):
+    import pytest
+
+    pytest.importorskip("matplotlib")
+
     from ml.scripts.coarse_crnn import plot_phone_aware_debug
 
     wav_path = tmp_path / "ba.wav"
@@ -515,6 +524,101 @@ def test_wav_decoder_vc_prefers_late_transition_to_reduce_front_v():
     vc_row = decoded.rows[1]
     # VC target is intentionally right-leaning to avoid over-long preceding vowel.
     assert float(vc_row.selected_time_ms) >= 480.0
+
+
+def test_wav_decoder_derives_internal_vc_from_neighbor_primary_rows(monkeypatch):
+    monkeypatch.setenv("UTOA_BOUNDARY_DERIVE_INTERNAL_VC_FROM_PRIMARY", "1")
+    rows = [
+        _spec("cv", slot_index=0, line_index=0),
+        _spec("vc", slot_index=0, line_index=1),
+        _spec("cv", slot_index=1, line_index=2),
+    ]
+    cands = [
+        BoundaryCandidate(time_ms=200.0, kind="syllable_onset", score=0.95, source="model"),
+        BoundaryCandidate(time_ms=600.0, kind="syllable_onset", score=0.95, source="model"),
+        BoundaryCandidate(time_ms=520.0, kind="transition_peak", score=0.92, source="model"),
+    ]
+    decoded = decode_wav_rows(
+        wav_path=r"C:\tmp\ga_gi_gu.wav",
+        duration_ms=1200.0,
+        row_specs=rows,
+        candidates=cands,
+        active_start_ms=120.0,
+        active_end_ms=980.0,
+    )
+    prev_cv, vc_row, next_cv = decoded.rows
+    assert vc_row.reason == "derived:internal_vc_primary_pair"
+    assert vc_row.fallback_used is False
+    assert float(vc_row.anchors.offset_abs) == float(prev_cv.anchors.cutoff_abs)
+    assert float(vc_row.anchors.cutoff_abs) == float(next_cv.anchors.offset_abs)
+    assert float(vc_row.anchors.offset_abs) < float(vc_row.anchors.overlap_abs)
+    assert float(vc_row.anchors.overlap_abs) <= float(vc_row.anchors.pre_abs)
+    assert float(vc_row.anchors.pre_abs) <= float(vc_row.anchors.consonant_abs)
+    assert float(vc_row.anchors.consonant_abs) < float(vc_row.anchors.cutoff_abs)
+
+
+def test_wav_decoder_keeps_internal_vc_derivation_disabled_by_default():
+    rows = [
+        _spec("cv", slot_index=0, line_index=0),
+        _spec("vc", slot_index=0, line_index=1),
+        _spec("cv", slot_index=1, line_index=2),
+    ]
+    cands = [
+        BoundaryCandidate(time_ms=200.0, kind="syllable_onset", score=0.95, source="model"),
+        BoundaryCandidate(time_ms=600.0, kind="syllable_onset", score=0.95, source="model"),
+        BoundaryCandidate(time_ms=520.0, kind="transition_peak", score=0.92, source="model"),
+    ]
+    decoded = decode_wav_rows(
+        wav_path=r"C:\tmp\ga_gi_gu.wav",
+        duration_ms=1200.0,
+        row_specs=rows,
+        candidates=cands,
+        active_start_ms=120.0,
+        active_end_ms=980.0,
+    )
+    assert decoded.rows[1].reason != "derived:internal_vc_primary_pair"
+
+
+def test_wav_decoder_keeps_final_vc_on_existing_policy():
+    rows = [
+        _spec("cv", slot_index=0, line_index=0),
+        _spec("vc", slot_index=0, line_index=1),
+    ]
+    cands = [
+        BoundaryCandidate(time_ms=200.0, kind="syllable_onset", score=0.95, source="model"),
+        BoundaryCandidate(time_ms=520.0, kind="transition_peak", score=0.92, source="model"),
+    ]
+    decoded = decode_wav_rows(
+        wav_path=r"C:\tmp\ga_gi_gu.wav",
+        duration_ms=1200.0,
+        row_specs=rows,
+        candidates=cands,
+        active_start_ms=120.0,
+        active_end_ms=980.0,
+    )
+    assert decoded.rows[1].reason != "derived:internal_vc_primary_pair"
+
+
+def test_wav_decoder_keeps_vc_before_cv_tail_on_existing_policy():
+    rows = [
+        _spec("cv", slot_index=0, line_index=0),
+        _spec("vc", slot_index=0, line_index=1),
+        _spec("cv-", slot_index=1, line_index=2),
+    ]
+    cands = [
+        BoundaryCandidate(time_ms=200.0, kind="syllable_onset", score=0.95, source="model"),
+        BoundaryCandidate(time_ms=600.0, kind="syllable_onset", score=0.95, source="model"),
+        BoundaryCandidate(time_ms=520.0, kind="transition_peak", score=0.92, source="model"),
+    ]
+    decoded = decode_wav_rows(
+        wav_path=r"C:\tmp\ga_gi_gu.wav",
+        duration_ms=1200.0,
+        row_specs=rows,
+        candidates=cands,
+        active_start_ms=120.0,
+        active_end_ms=980.0,
+    )
+    assert decoded.rows[1].reason != "derived:internal_vc_primary_pair"
 
 
 def test_wav_decoder_vc_penalizes_early_vowel_end_even_when_score_is_higher():
@@ -670,6 +774,38 @@ def test_phone_aux_posterior_uses_family_head_by_default(monkeypatch):
     assert term > 0.0
 
 
+def test_pb_assist_guard_allows_cvvc_transition_and_blocks_v_vcv(monkeypatch):
+    monkeypatch.delenv("UTOA_BOUNDARY_PB_ASSIST_FORMATS", raising=False)
+    monkeypatch.delenv("UTOA_BOUNDARY_PB_ASSIST_ROLES", raising=False)
+
+    assert _pb_assist_role_format_term(
+        role="vc",
+        format_type="cvvc",
+        source="merged:model:phoneme_boundary:vowel_end+audio",
+    ) > 0.0
+    assert _pb_assist_role_format_term(
+        role="v",
+        format_type="cvvc",
+        source="merged:model:phoneme_boundary:vowel_onset+audio",
+    ) < 0.0
+    assert _pb_assist_role_format_term(
+        role="vc",
+        format_type="vcv",
+        source="merged:model:phoneme_boundary:vowel_end+audio",
+    ) < 0.0
+
+
+def test_pb_assist_guard_can_be_overridden(monkeypatch):
+    monkeypatch.setenv("UTOA_BOUNDARY_PB_ASSIST_FORMATS", "all")
+    monkeypatch.setenv("UTOA_BOUNDARY_PB_ASSIST_ROLES", "v")
+
+    assert _pb_assist_role_format_term(
+        role="v",
+        format_type="vcv",
+        source="model:phoneme_boundary:vowel_onset",
+    ) > 0.0
+
+
 def test_wav_decoder_right_guard_limits_cutoff_for_dense_cv():
     rows = [
         _spec("cv", slot_index=0, line_index=0),
@@ -752,6 +888,78 @@ def test_wav_decoder_active_end_pad_extends_anchor_timeline(monkeypatch):
     assert decoded.anchor_timeline_ms[-1] > 700.0
 
 
+def test_cv_slot_segmenter_assigns_filename_order_without_phone_identity():
+    from core.coarse_crnn.cv_slot_segmenter import segment_cv_slots
+
+    cands = [
+        BoundaryCandidate(time_ms=205.0, kind="syllable_onset", score=0.91, source="model"),
+        BoundaryCandidate(time_ms=240.0, kind="vowel_start", score=0.72, source="model"),
+        BoundaryCandidate(time_ms=505.0, kind="consonant_onset", score=0.88, source="model"),
+        BoundaryCandidate(time_ms=545.0, kind="vowel_stable", score=0.66, source="model"),
+        BoundaryCandidate(time_ms=810.0, kind="syllable_onset", score=0.93, source="model"),
+        BoundaryCandidate(time_ms=850.0, kind="vowel_start", score=0.71, source="model"),
+    ]
+    slots = segment_cv_slots(
+        wav_name="slot_order.wav",
+        slot_count=3,
+        duration_ms=1000.0,
+        candidates=cands,
+        active_start_ms=120.0,
+        active_end_ms=900.0,
+    )
+    assert len(slots) == 3
+    assert [slot.index for slot in slots] == [0, 1, 2]
+    assert [slot.start_ms for slot in slots] == sorted(slot.start_ms for slot in slots)
+    assert abs(slots[0].start_ms - 205.0) <= 1.0
+    assert abs(slots[1].start_ms - 505.0) <= 1.0
+    assert abs(slots[2].start_ms - 810.0) <= 1.0
+
+
+def test_wav_decoder_cv_slot_timeline_mode_uses_cv_segment_starts(monkeypatch):
+    monkeypatch.setenv("UTOA_BOUNDARY_ANCHOR_TIMELINE", "cv_slot")
+    rows = [
+        _spec("cv", slot_index=0, line_index=0),
+        _spec("cv", slot_index=1, line_index=1),
+        _spec("cv", slot_index=2, line_index=2),
+    ]
+    cands = [
+        BoundaryCandidate(time_ms=205.0, kind="syllable_onset", score=0.91, source="model"),
+        BoundaryCandidate(time_ms=505.0, kind="consonant_onset", score=0.88, source="model"),
+        BoundaryCandidate(time_ms=810.0, kind="syllable_onset", score=0.93, source="model"),
+    ]
+    decoded = decode_wav_rows(
+        wav_path=r"C:\tmp\cv_slot.wav",
+        duration_ms=1000.0,
+        row_specs=rows,
+        candidates=cands,
+        active_start_ms=120.0,
+        active_end_ms=900.0,
+    )
+    assert len(decoded.anchor_timeline_ms) == 3
+    assert abs(decoded.anchor_timeline_ms[0] - 205.0) <= 1.0
+    assert abs(decoded.anchor_timeline_ms[1] - 505.0) <= 1.0
+    assert abs(decoded.anchor_timeline_ms[2] - 810.0) <= 1.0
+
+
+def test_wav_decoder_auto_timeline_policy_is_format_scoped(monkeypatch):
+    monkeypatch.delenv("UTOA_BOUNDARY_ANCHOR_TIMELINE_AUTO_KOREAN_CV", raising=False)
+    ko_cv = OtoRowSpec(**{**_spec("cv", slot_index=0, line_index=0).__dict__, "language": "korean", "format_type": "cv"})
+    jp_cv = OtoRowSpec(**{**_spec("cv", slot_index=0, line_index=0).__dict__, "language": "japanese", "format_type": "cv"})
+    jp_vcv = OtoRowSpec(**{**_spec("v-cv", slot_index=0, line_index=0).__dict__, "language": "japanese", "format_type": "vcv"})
+    jp_cvvc = OtoRowSpec(**{**_spec("vc", slot_index=0, line_index=0).__dict__, "language": "japanese", "format_type": "cvvc"})
+
+    assert _auto_anchor_timeline_mode(row_specs=[ko_cv]) == "filename"
+    assert _auto_anchor_timeline_mode(row_specs=[jp_cv]) == "hybrid"
+    assert _auto_anchor_timeline_mode(row_specs=[jp_vcv]) == "linear"
+    assert _auto_anchor_timeline_mode(row_specs=[jp_cvvc]) == "hybrid"
+
+
+def test_wav_decoder_auto_timeline_policy_has_env_override(monkeypatch):
+    monkeypatch.setenv("UTOA_BOUNDARY_ANCHOR_TIMELINE_AUTO_KOREAN_CV", "cv_slot")
+    ko_cv = OtoRowSpec(**{**_spec("cv", slot_index=0, line_index=0).__dict__, "language": "korean", "format_type": "cv"})
+    assert _auto_anchor_timeline_mode(row_specs=[ko_cv]) == "cv_slot"
+
+
 def test_wav_decoder_anchor_shift_moves_timeline_forward(monkeypatch):
     monkeypatch.setenv("UTOA_BOUNDARY_ANCHOR_SHIFT_MS", "120")
     rows = [
@@ -791,6 +999,32 @@ def test_predictor_dispatch_prefers_boundary_engine(monkeypatch):
     )
     assert (processed, total, errors) == (1, 1, [])
     assert called["boundary"] == 1
+
+
+def test_predictor_dispatch_stage1_heuristic_disables_stage2(monkeypatch):
+    from core.coarse_crnn import oto_predictor_generator as mod
+
+    captured = {}
+
+    def _fake_boundary(**kwargs):
+        captured.update(kwargs)
+        return 1, 1, []
+
+    monkeypatch.setattr(mod, "generate_oto_with_boundary_decoder", _fake_boundary)
+    monkeypatch.setattr(mod, "resolve_boundary_scorer_model_path", lambda _path="": "boundary.pt")
+
+    processed, total, errors = mod.generate_oto_with_crnn_predictor(
+        wav_dir=".",
+        out_path=".",
+        source_oto_path=".",
+        language="korean",
+        engine="stage1_heuristic",
+        stage2_model_path="stage2.pt",
+        stage2_enable=True,
+    )
+    assert (processed, total, errors) == (1, 1, [])
+    assert captured["heuristic_only"] is True
+    assert captured["stage2_enable"] is False
 
 
 def test_predictor_dispatch_rejects_legacy_direct_engine():

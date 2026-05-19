@@ -1,0 +1,2 @@
+"""Deprecated CoarseCRNN alignment scripts."""
+

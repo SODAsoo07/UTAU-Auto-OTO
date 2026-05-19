@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -10,11 +10,11 @@ from typing import Any
 
 import numpy as np
 
-from core.coarse_crnn.oto_evaluate import _analyze_activity_profile, _is_hard_failure, _resolve_alias_role_fields
-from core.coarse_crnn.oto_boundary_decoding import correct_boundary_params_from_candidates
-from core.coarse_crnn.oto_inference import predict_oto_with_model
-from core.coarse_crnn.oto_model import load_oto_checkpoint
-from core.coarse_crnn.oto_predictor_generator import (
+from core.coarse_crnn.deprecated.direct_param.oto_evaluate import _analyze_activity_profile, _is_hard_failure, _resolve_alias_role_fields
+from core.coarse_crnn.deprecated.direct_param.oto_boundary_decoding import correct_boundary_params_from_candidates
+from core.coarse_crnn.deprecated.direct_param.oto_inference import predict_oto_with_model
+from core.coarse_crnn.deprecated.direct_param.oto_model import load_oto_checkpoint
+from core.coarse_crnn.deprecated.direct_param.oto_predictor_generator import (
     _apply_audio_candidate_snap,
     _apply_vc_candidate_matcher,
     _apply_conservative_right_boundary_guard,
@@ -25,9 +25,9 @@ from core.coarse_crnn.oto_predictor_generator import (
     _env_float,
     _clamp,
 )
-from core.coarse_crnn.oto_sequence_alignment import decode_sequence_alignment_for_states, parse_sequence_role_allowlist
+from core.coarse_crnn.deprecated.direct_param.oto_sequence_alignment import decode_sequence_alignment_for_states, parse_sequence_role_allowlist
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES, OtoAnchors, anchors_to_oto_params, oto_params_to_anchors, read_jsonl
-from core.coarse_crnn.training import resolve_torch_device
+from core.coarse_crnn.torch_utils import resolve_torch_device
 
 
 def main() -> int:
@@ -659,3 +659,5 @@ def _env_bool(name: str, default: bool) -> bool:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

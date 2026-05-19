@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import re
@@ -15,13 +15,13 @@ from core.coarse_crnn.oto_audio_candidates import (
     find_best_vowel_segment,
     find_nearest_onset_after,
 )
-from core.coarse_crnn.oto_boundary_decoding import decode_boundary_slot_graph_for_states
-from core.coarse_crnn.oto_inference import predict_oto_with_model
-from core.coarse_crnn.oto_model import load_oto_checkpoint
-from core.coarse_crnn.oto_sequence_alignment import decode_sequence_alignment_for_states, parse_sequence_role_allowlist
+from core.coarse_crnn.deprecated.direct_param.oto_boundary_decoding import decode_boundary_slot_graph_for_states
+from core.coarse_crnn.deprecated.direct_param.oto_inference import predict_oto_with_model
+from core.coarse_crnn.deprecated.direct_param.oto_model import load_oto_checkpoint
+from core.coarse_crnn.deprecated.direct_param.oto_sequence_alignment import decode_sequence_alignment_for_states, parse_sequence_role_allowlist
 from core.coarse_crnn.oto_targets import OtoAnchors, anchors_to_oto_params, oto_params_to_anchors, parse_alias_components
 from core.coarse_crnn.slot_graph import slot_role_order_norm, slot_type_for_role
-from core.coarse_crnn.training import resolve_torch_device
+from core.coarse_crnn.torch_utils import resolve_torch_device
 from core.no_mfa_oto_builder import resolve_no_mfa_source_oto
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 from core.oto_ml_features import classify_alias_type, detect_format_type
@@ -80,13 +80,13 @@ def generate_oto_with_crnn_predictor(
 ) -> tuple[int, int, list[str]]:
     source = resolve_no_mfa_source_oto(wav_dir=wav_dir, source_hint=source_oto_path)
     if not source:
-        return 0, 0, ["CRNN OTO 예측용 베이스 OTO를 찾지 못했습니다."]
+        return 0, 0, ["CRNN OTO ・溢ｸ｡・ｩ ・・ｴ・､ OTO・ｼ ・ｾ・ ・ｻ嵂溢慣・壱共."]
     model_file = resolve_oto_crnn_model_path(model_path)
     if not model_file:
-        return 0, 0, ["CRNN OTO 예측 모델을 찾지 못했습니다. 모델 경로를 지정해 주세요."]
+        return 0, 0, ["CRNN OTO ・溢ｸ｡ ・ｨ・ｸ・・・ｾ・ ・ｻ嵂溢慣・壱共. ・ｨ・ｸ ・ｽ・罹･ｼ ・・倣紛 ・ｼ・ｸ・・"]
     output_file = _normalize_output_oto_path(out_path)
     if not output_file:
-        return 0, 0, ["출력 OTO 경로가 비어 있습니다."]
+        return 0, 0, ["・罹･ OTO ・ｽ・懋ｰ ・・牟 ・溢慣・壱共."]
 
     lang = str(language or "").strip().lower() or "korean"
     rows, total, missing = _prepare_prediction_rows(
@@ -98,8 +98,8 @@ def generate_oto_with_crnn_predictor(
     if not rows:
         if missing:
             sample = ", ".join(sorted(missing)[:5])
-            return 0, total, [f"CRNN OTO 예측 대상 WAV 매칭 실패: {sample}"]
-        return 0, total, ["CRNN OTO 예측 대상 행이 비어 있습니다."]
+            return 0, total, [f"CRNN OTO ・溢ｸ｡ ・・・WAV ・､・ｭ ・､甯ｨ: {sample}"]
+        return 0, total, ["CRNN OTO ・溢ｸ｡ ・・・嵂餓擽 ・・牟 ・溢慣・壱共."]
 
     _log(callback, f"[OTO-CRNN] source={source}")
     _log(callback, f"[OTO-CRNN] model={model_file}")
@@ -130,7 +130,7 @@ def generate_oto_with_crnn_predictor(
             )
         model = model.to(torch_device).eval()
     except Exception as exc:
-        return 0, total, [f"CRNN OTO 모델 로드 실패: {exc}"]
+        return 0, total, [f"CRNN OTO ・ｨ・ｸ ・罹糖 ・､甯ｨ: {exc}"]
 
     out_lines: list[str] = []
     row_states: list[dict[str, Any]] = []
@@ -259,7 +259,7 @@ def generate_oto_with_crnn_predictor(
     if errors:
         return len(row_states), total, errors[:20]
     if not row_states:
-        return 0, total, ["CRNN OTO 예측 결과가 비었습니다."]
+        return 0, total, ["CRNN OTO ・溢ｸ｡ ・ｰ・ｼ・ ・・来・ｵ・壱共."]
 
     sequence_align_enable = _env_bool("UTOA_OTO_CRNN_SEQUENCE_ALIGN_ENABLE", True)
     if row_order_align_enable and not sequence_align_enable:
@@ -407,12 +407,12 @@ def generate_oto_with_crnn_predictor(
         with open(output_file, "w", encoding="utf-8") as handle:
             handle.write("\n".join(out_lines).rstrip() + "\n")
     except OSError as exc:
-        return 0, total, [f"CRNN OTO 출력 저장 실패: {output_file} ({exc})"]
+        return 0, total, [f"CRNN OTO ・罹･ ・・･ ・､甯ｨ: {output_file} ({exc})"]
 
     if missing:
         sample = ", ".join(sorted(missing)[:5])
         suffix_text = "..." if len(missing) > 5 else ""
-        _log(callback, f"[OTO-CRNN] 매칭 실패 wav: {sample}{suffix_text}")
+        _log(callback, f"[OTO-CRNN] ・､・ｭ ・､甯ｨ wav: {sample}{suffix_text}")
     if guard_changed:
         _log(callback, f"[OTO-CRNN] right-boundary guard adjusted rows={guard_changed}/{len(out_lines)}")
     if low_conf_fallback_count:
@@ -474,7 +474,7 @@ def resolve_oto_crnn_model_path(path_hint: str = "") -> str:
 
 def _is_experimental_oto_crnn_model(model_path: str, config: object) -> bool:
     # NOTE: enable_boundary_slot_head used to gate here, but the boundary slot
-    # head became the train_oto default — every standard model now ships with
+    # head became the train_oto default 窶・every standard model now ships with
     # it, so config-based gating blocked all of them. Experimental models are
     # now flagged explicitly via a filename marker instead.
     name = os.path.basename(str(model_path or "")).lower()
@@ -1326,7 +1326,7 @@ def _right_guard_limits_for_role(
         max_cons, min_cons, max_cut, min_cut = _ROLE_GUARD_LIMITS[role_text]
     else:
         # Fall back to the legacy alias_type table for any role this code
-        # path hasn't enumerated yet — keeps unknown rows under the old guard.
+        # path hasn't enumerated yet 窶・keeps unknown rows under the old guard.
         max_cons, min_cons, max_cut, min_cut = _right_guard_limits(alias_type)
     if bool(is_diphthong) and role_text in {"cv", "-cv", "cv-", "v-cv", "vv"}:
         max_cons *= 1.30
@@ -2807,3 +2807,4 @@ __all__ = [
     "generate_oto_with_crnn_predictor",
     "resolve_oto_crnn_model_path",
 ]
+

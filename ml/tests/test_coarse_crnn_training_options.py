@@ -3,14 +3,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from core.coarse_crnn.oto_training import (
+from core.coarse_crnn.deprecated.direct_param.oto_training import (
     OtoTrainConfig,
     _build_train_sampling_weights,
     _context_array_from_row_with_active,
     _filter_compatible_init_state,
     _iter_device_batches,
 )
-from core.coarse_crnn.training import _boundary_targets_from_frame_targets
+from core.coarse_crnn.deprecated.coarse_alignment.training import _boundary_targets_from_frame_targets
 
 
 def test_boundary_targets_mark_local_frame_transitions():
@@ -211,9 +211,9 @@ def test_active_audio_context_extends_numeric_context_to_18_dims():
 def test_boundary_slot_targets_follow_role_ids():
     import torch
 
-    from core.coarse_crnn.oto_boundary_decoding import BOUNDARY_SLOT_CLASSES
-    from core.coarse_crnn.oto_model import OtoCrnnConfig, alias_role_id
-    from core.coarse_crnn.oto_training import _boundary_slot_targets_from_role_ids
+    from core.coarse_crnn.deprecated.direct_param.oto_boundary_decoding import BOUNDARY_SLOT_CLASSES
+    from core.coarse_crnn.deprecated.direct_param.oto_model import OtoCrnnConfig, alias_role_id
+    from core.coarse_crnn.deprecated.direct_param.oto_training import _boundary_slot_targets_from_role_ids
 
     cfg = OtoCrnnConfig()
     role_ids = torch.tensor(
@@ -233,8 +233,8 @@ def test_boundary_slot_targets_follow_role_ids():
 
 
 def test_sequence_candidate_heatmap_targets_role_boundary_kind():
-    from core.coarse_crnn.oto_sequence_alignment import SEQUENCE_BOUNDARY_KINDS
-    from core.coarse_crnn.oto_training import _make_sequence_candidate_heatmap
+    from core.coarse_crnn.deprecated.direct_param.oto_sequence_alignment import SEQUENCE_BOUNDARY_KINDS
+    from core.coarse_crnn.deprecated.direct_param.oto_training import _make_sequence_candidate_heatmap
 
     anchors = np.asarray([20.0, 40.0, 100.0, 140.0, 260.0], dtype=np.float32)
 
@@ -265,7 +265,7 @@ def test_sequence_candidate_heatmap_targets_role_boundary_kind():
 
 
 def test_collate_keeps_sequence_candidate_heatmap_after_anchor_heatmap():
-    from core.coarse_crnn.oto_training import _collate
+    from core.coarse_crnn.deprecated.direct_param.oto_training import _collate
 
     item = (
         np.zeros((3, 4), dtype=np.float32),  # features
@@ -302,7 +302,7 @@ def test_collate_keeps_sequence_candidate_heatmap_after_anchor_heatmap():
 
 def test_row_order_violation_multiplier_disabled_returns_one():
     """alpha=0 (default) keeps the legacy behaviour for every row."""
-    from core.coarse_crnn.oto_training import _row_order_violation_multiplier
+    from core.coarse_crnn.deprecated.direct_param.oto_training import _row_order_violation_multiplier
 
     cfg = OtoTrainConfig(row_order_violation_alpha=0.0)
     # High violation row should still get multiplier 1.0 when alpha is 0.
@@ -312,7 +312,7 @@ def test_row_order_violation_multiplier_disabled_returns_one():
 
 def test_row_order_violation_multiplier_scales_high_score_down():
     """alpha=0.5 + clipped score 1.0 should give multiplier 1/(1+0.5*1)=0.667."""
-    from core.coarse_crnn.oto_training import _row_order_violation_multiplier
+    from core.coarse_crnn.deprecated.direct_param.oto_training import _row_order_violation_multiplier
 
     cfg = OtoTrainConfig(row_order_violation_alpha=0.5)
     row = {"row_order_violation_score": 1.0}
@@ -322,7 +322,7 @@ def test_row_order_violation_multiplier_scales_high_score_down():
 
 def test_row_order_violation_multiplier_clips_extreme_score():
     """Score above 3 must be clipped to keep weight from collapsing to 0."""
-    from core.coarse_crnn.oto_training import _row_order_violation_multiplier
+    from core.coarse_crnn.deprecated.direct_param.oto_training import _row_order_violation_multiplier
 
     cfg = OtoTrainConfig(row_order_violation_alpha=1.0)
     # Without clip, score=10 would give 1/11 ≈ 0.09. With clip(0,3) → 1/(1+3) = 0.25.
@@ -333,7 +333,7 @@ def test_row_order_violation_multiplier_clips_extreme_score():
 
 def test_row_order_violation_multiplier_missing_column_falls_back_to_one():
     """Older manifests without the score column should not break training."""
-    from core.coarse_crnn.oto_training import _row_order_violation_multiplier
+    from core.coarse_crnn.deprecated.direct_param.oto_training import _row_order_violation_multiplier
 
     cfg = OtoTrainConfig(row_order_violation_alpha=0.5)
     # No row_order_violation_score key → 1.0 fallback.
@@ -344,7 +344,7 @@ def test_row_order_violation_multiplier_missing_column_falls_back_to_one():
 
 def test_row_order_violation_multiplier_zero_score_returns_one():
     """A row whose order is perfectly aligned (score=0) gets unchanged weight."""
-    from core.coarse_crnn.oto_training import _row_order_violation_multiplier
+    from core.coarse_crnn.deprecated.direct_param.oto_training import _row_order_violation_multiplier
 
     cfg = OtoTrainConfig(row_order_violation_alpha=0.5)
     row = {"row_order_violation_score": 0.0}

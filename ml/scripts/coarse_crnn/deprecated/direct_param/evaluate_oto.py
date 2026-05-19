@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
 import os
 
-from core.coarse_crnn.oto_evaluate import OtoEvalConfig, evaluate_oto_manifest, write_oto_eval_json
+from core.coarse_crnn.deprecated.direct_param.oto_evaluate import OtoEvalConfig, evaluate_oto_manifest, write_oto_eval_json
 from core.coarse_crnn.oto_targets import read_jsonl
 
 
@@ -70,3 +70,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

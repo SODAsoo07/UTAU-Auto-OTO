@@ -1,4 +1,4 @@
-"""Render per-row diagnostic PNGs of the boundary-decoder window decisions.
+﻿"""Render per-row diagnostic PNGs of the boundary-decoder window decisions.
 
 Unlike `plot_phone_aware_debug.py` (which renders training targets), this script
 runs the **inference pipeline** end-to-end and visualizes what the decoder
@@ -9,11 +9,11 @@ Use this to localize the cause when CV/VC windows fail to enclose the alias
 content in listening tests:
 
   - Are the model's score peaks already in the wrong place?
-    → encoder/head training issue.
+    竊・encoder/head training issue.
   - Are the score peaks roughly correct but the decoder picks wrong frames?
-    → decoder heuristic issue (most common).
+    竊・decoder heuristic issue (most common).
   - Is the window peak-tight without safety padding for attack/release?
-    → decoder padding policy issue.
+    竊・decoder padding policy issue.
 
 Inputs match the production runtime exactly: wav_dir + source OTO + model path.
 Source OTO numerics never enter the rendered window (source contract is
@@ -55,7 +55,7 @@ from core.coarse_crnn.boundary_targets import (
 )
 from core.coarse_crnn.oto_audio_candidates import compute_audio_candidates
 from core.coarse_crnn.oto_predictor_generator import resolve_boundary_scorer_model_path
-from core.coarse_crnn.training import resolve_torch_device
+from core.coarse_crnn.torch_utils import resolve_torch_device
 from core.coarse_crnn.wav_decoder import decode_wav_rows
 from core.no_mfa_oto_builder import resolve_no_mfa_source_oto
 
@@ -201,7 +201,7 @@ def _render_wav_panel(
     for row in rows:
         anchors = row.anchors
         params = absolute_anchors_to_oto_params(anchors, duration_ms=duration_ms)
-        # Window window: pad ±150ms around offset..cutoff for context.
+        # Window window: pad ﾂｱ150ms around offset..cutoff for context.
         pad_ms = 150.0
         win_start = max(0.0, float(anchors.offset_abs) - pad_ms)
         win_end = min(duration_ms, float(anchors.cutoff_abs) + pad_ms)
@@ -228,7 +228,7 @@ def _render_wav_panel(
         ax_mel.imshow(mel_crop, origin="lower", aspect="auto", extent=extent, cmap="magma")
         ax_mel.set_ylabel("mel bin")
         ax_mel.set_title(
-            f"{os.path.basename(wav_path)}  ·  alias={row.spec.alias!r}  "
+            f"{os.path.basename(wav_path)}  ﾂｷ  alias={row.spec.alias!r}  "
             f"role={row.spec.role}  slot={row.spec.slot_index}/{row.spec.slot_count}  "
             f"model={model_tag}",
             fontsize=10,
@@ -305,7 +305,7 @@ def _render_wav_panel(
             (
                 f"params: offset={params['offset']:.1f}  overlap={params['overlap']:.1f}  "
                 f"preutt={params['preutterance']:.1f}  consonant={params['consonant']:.1f}  "
-                f"cutoff={params['cutoff']:.1f}  ·  "
+                f"cutoff={params['cutoff']:.1f}  ﾂｷ  "
                 f"window={win_len:.1f}ms  consonant_dur={consonant_dur:.1f}ms  "
                 f"selected_peak={row.selected_time_ms:.1f}ms  "
                 f"fallback={row.fallback_used}  reason={anchors.reason!r}"
@@ -373,10 +373,10 @@ def main() -> int:
         wav_dir=str(args.wav_dir), source_hint=str(args.source_oto or "")
     )
     if not source:
-        raise SystemExit("source oto.ini를 찾지 못했습니다. --source-oto로 명시하세요.")
+        raise SystemExit("source oto.ini・ｼ ・ｾ・ ・ｻ嵂溢慣・壱共. --source-oto・・・・亨﨑們┷・・")
     model_path = resolve_boundary_scorer_model_path(str(args.model or ""))
     if not model_path:
-        raise SystemExit("boundary scorer 모델 경로를 찾지 못했습니다.")
+        raise SystemExit("boundary scorer ・ｨ・ｸ ・ｽ・罹･ｼ ・ｾ・ ・ｻ嵂溢慣・壱共.")
     print(f"[diagnose] source = {source}")
     print(f"[diagnose] model  = {model_path}")
 
@@ -394,7 +394,7 @@ def main() -> int:
         alias_suffix=str(args.alias_suffix),
     )
     if not rows_by_wav:
-        raise SystemExit("source oto에서 row가 추출되지 않았습니다.")
+        raise SystemExit("source oto・川・ row・ ・肥ｶ罹据・ ・喜葺・ｵ・壱共.")
 
     role_filter = {item.strip().lower() for item in str(args.role_filter or "").split(",") if item.strip()}
     alias_substr = str(args.alias_substring or "").strip()
@@ -428,7 +428,7 @@ def main() -> int:
                 specs=kept,
             )
         except Exception as exc:
-            print(f"[diagnose] {os.path.basename(wav_path)}: failed — {exc}")
+            print(f"[diagnose] {os.path.basename(wav_path)}: failed 窶・{exc}")
             continue
         paths = _render_wav_panel(
             wav_path=wav_path,
@@ -452,3 +452,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

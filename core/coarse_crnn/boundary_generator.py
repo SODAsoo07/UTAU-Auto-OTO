@@ -52,7 +52,7 @@ from core.coarse_crnn.stage2_oto import (
     resolve_stage2_model_path,
     stage2_enabled_from_env,
 )
-from core.coarse_crnn.training import resolve_torch_device
+from core.coarse_crnn.torch_utils import resolve_torch_device
 from core.coarse_crnn.wav_decoder import decode_wav_rows
 from core.no_mfa_oto_builder import resolve_no_mfa_source_oto
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
@@ -74,19 +74,20 @@ def generate_oto_with_boundary_decoder(
     alias_suffix: str = "",
     callback: Callable[[str], None] | None = None,
     special_aliases: set[str] | list[str] | tuple[str, ...] | None = None,
+    heuristic_only: bool = False,
 ) -> tuple[int, int, list[str]]:
     source = resolve_no_mfa_source_oto(wav_dir=wav_dir, source_hint=source_oto_path)
     if not source:
-        return 0, 0, ["Boundary scorer OTO 생성용 source oto.ini를 찾지 못했습니다."]
+        return 0, 0, ["Boundary scorer OTO ・晧┳・ｩ source oto.ini・ｼ ・ｾ・ ・ｻ嵂溢慣・壱共."]
     model_file = str(model_path or "").strip()
     if not model_file:
-        return 0, 0, ["Boundary scorer 모델 경로가 비어 있습니다."]
+        return 0, 0, ["Boundary scorer ・ｨ・ｸ ・ｽ・懋ｰ ・・牟 ・溢慣・壱共."]
     if not os.path.isfile(model_file):
-        return 0, 0, [f"Boundary scorer 모델을 찾지 못했습니다: {model_file}"]
+        return 0, 0, [f"Boundary scorer ・ｨ・ｸ・・・ｾ・ ・ｻ嵂溢慣・壱共: {model_file}"]
 
     output_file = _normalize_output_oto_path(out_path)
     if not output_file:
-        return 0, 0, ["출력 oto.ini 경로가 유효하지 않습니다."]
+        return 0, 0, ["・罹･ oto.ini ・ｽ・懋ｰ ・巐ｨ﨑們ｧ ・喜慣・壱共."]
 
     rows_by_wav = load_row_specs_from_source_oto(
         source_oto_path=source,
@@ -98,18 +99,18 @@ def generate_oto_with_boundary_decoder(
     )
     total = sum(len(items) for items in rows_by_wav.values())
     if total <= 0:
-        return 0, 0, ["source oto.ini에서 처리 가능한 행을 찾지 못했습니다."]
+        return 0, 0, ["source oto.ini・川・ ・俯ｦｬ ・・･﨑・嵂餓揆 ・ｾ・ ・ｻ嵂溢慣・壱共."]
     # Source-OTO contract (2026-05-17): only alias identity and slot order
     # are read from the source file. Numerical fields (offset/preutterance/
-    # overlap/consonant/cutoff) MUST NOT influence inference output —
-    # otherwise a broken source-OTO would silently degrade final quality.
+    # overlap/consonant/cutoff) MUST NOT influence inference output 窶・    # otherwise a broken source-OTO would silently degrade final quality.
     # The row-shift guard below is therefore kept inert (empty dicts) and
     # its rollback code path is never reached at runtime. Class/role/coda
     # shifts still apply; those are model-derived, not source-derived.
     # BPM-prior config (read once per generation). Manual env wins; otherwise
     # auto-detect per wav. Disabled wavs (low confidence) fall through to the
     # decoded offset unchanged.
-    bpm_prior_on = bool(bpm_prior_enabled())
+    heuristic_only = bool(heuristic_only)
+    bpm_prior_on = bool(False if heuristic_only else bpm_prior_enabled())
     bpm_manual = parse_manual_bpm_env() if bpm_prior_on else None
     bpm_range_cfg = bpm_range_from_env()
     snap_tol_ms = bpm_snap_tolerance_ms()
@@ -134,7 +135,11 @@ def generate_oto_with_boundary_decoder(
     model, config, _meta = load_boundary_checkpoint(model_file, map_location=str(torch_device))
     model = model.to(torch_device).eval()
     stage2_bundle = None
-    stage2_requested = bool(stage2_enable) if stage2_enable is not None else stage2_enabled_from_env(default=False)
+    stage2_requested = (
+        False
+        if heuristic_only
+        else bool(stage2_enable) if stage2_enable is not None else stage2_enabled_from_env(default=False)
+    )
     stage2_model_file = ""
     stage2_load_error = ""
     if stage2_requested or str(stage2_model_path or "").strip():
@@ -149,15 +154,14 @@ def generate_oto_with_boundary_decoder(
             except Exception as exc:
                 stage2_load_error = str(exc)
         elif stage2_requested or str(stage2_model_path or "").strip():
-            stage2_load_error = "Stage2 OTO 모델을 찾지 못했습니다."
+            stage2_load_error = "Stage2 OTO ・ｨ・ｸ・・・ｾ・ ・ｻ嵂溢慣・壱共."
     pb_model = None
     pb_config = None
     pb_model_file = ""
     pb_load_error = ""
-    pb_requested = _env_bool("UTOA_STAGE2_OTO_USE_PHONEME_BOUNDARY", False) or bool(
-        str(phoneme_boundary_model_path or "").strip()
-    )
-    if pb_requested and (stage2_requested or stage2_bundle is not None):
+    pb_assist_requested = _phoneme_boundary_assist_requested(phoneme_boundary_model_path)
+    pb_requested = pb_assist_requested or _env_bool("UTOA_STAGE2_OTO_USE_PHONEME_BOUNDARY", False)
+    if pb_requested:
         pb_model_file = _resolve_phoneme_boundary_model_path(phoneme_boundary_model_path)
         if pb_model_file:
             try:
@@ -173,10 +177,21 @@ def generate_oto_with_boundary_decoder(
                 pb_config = None
                 pb_load_error = str(exc)
         else:
-            pb_load_error = "PhonemeBoundary 모델을 찾지 못했습니다."
+            pb_load_error = "PhonemeBoundary ・ｨ・ｸ・・・ｾ・ ・ｻ嵂溢慣・壱共."
     _log(callback, f"[OTO-Boundary] source={source}")
     _log(callback, f"[OTO-Boundary] model={model_file}")
     _log(callback, f"[OTO-Boundary] device={torch_device} wavs={len(rows_by_wav)} rows={total}")
+    _log(callback, f"[OTO-Boundary] mode={'stage1_heuristic_only' if heuristic_only else 'boundary_decoder'}")
+    if pb_model is not None:
+        _log(
+            callback,
+            f"[OTO-Boundary] phoneme_boundary_assist=1 model={pb_model_file} "
+            f"stage2_scope={1 if stage2_bundle is not None else 0}",
+        )
+    elif pb_requested:
+        _log(callback, f"[OTO-Boundary] phoneme_boundary_assist=0 load_error={pb_load_error or 'unknown'}")
+    else:
+        _log(callback, "[OTO-Boundary] phoneme_boundary_assist=0")
     if stage2_bundle is not None:
         _log(callback, f"[OTO-Stage2] enabled=1 model={stage2_model_file}")
         if pb_model is not None:
@@ -215,7 +230,7 @@ def generate_oto_with_boundary_decoder(
     residual_rows_total = 0
     residual_load_error = ""
     residual_model_dir = resolve_boundary_residual_model_dir(boundary_model_path=model_file)
-    residual_on = residual_enabled_by_env(default=True)
+    residual_on = False if heuristic_only else residual_enabled_by_env(default=True)
     if residual_on and residual_model_dir and os.path.isdir(residual_model_dir):
         try:
             residual_bundle = load_boundary_residual_bundle(residual_model_dir)
@@ -262,7 +277,7 @@ def generate_oto_with_boundary_decoder(
             model_cands = peak_candidates_from_scores(score_map)
             audio_cands = audio_candidates_to_boundary_candidates(audio)
             pb_cand_count = 0
-            if stage2_bundle is not None and pb_model is not None and pb_config is not None:
+            if pb_model is not None and pb_config is not None and _pb_assist_format_enabled(_format_for_specs(specs)):
                 try:
                     pb_cands = _phoneme_boundary_candidates_for_wav(
                         model=pb_model,
@@ -407,7 +422,7 @@ def generate_oto_with_boundary_decoder(
                 # compensation: voiced stops detected early, sonorants late;
                 # V-CV rows lose the consonant transient and need a positive
                 # role shift to land on the next syllable). All shifts default
-                # to 0 — only applies when env table set.
+                # to 0 窶・only applies when env table set.
                 shift_ms = combined_shift_ms(
                     alias=str(row_obj.spec.alias or ""),
                     role=str(row_obj.spec.role or ""),
@@ -581,6 +596,28 @@ def _stage2_source_weight_overrides(
     }
 
 
+def _phoneme_boundary_assist_requested(path_hint: str = "") -> bool:
+    if str(path_hint or "").strip():
+        return True
+    if _env_bool("UTOA_BOUNDARY_PB_ASSIST_ENABLE", False):
+        return True
+    # Backward-compatible alias used by the first Stage2 prototype.
+    return _env_bool("UTOA_STAGE2_OTO_USE_PHONEME_BOUNDARY", False)
+
+
+def _pb_assist_format_enabled(format_type: str) -> bool:
+    allowed = _env_set("UTOA_BOUNDARY_PB_ASSIST_FORMATS", ("cvvc", "cvc", "cmpx"))
+    if not allowed:
+        return True
+    return str(format_type or "").strip().lower() in allowed
+
+
+def _format_for_specs(specs) -> str:
+    if not specs:
+        return ""
+    return str(getattr(specs[0], "format_type", "") or "")
+
+
 def _phoneme_boundary_candidates_for_wav(*, model, config, wav_path: str, device: str) -> list[BoundaryCandidate]:
     from core.phoneme_boundary.inference import infer_boundary_scores_with_model, peak_events_from_scores
 
@@ -589,12 +626,21 @@ def _phoneme_boundary_candidates_for_wav(*, model, config, wav_path: str, device
         config=config,
         wav_path=wav_path,
         device=device,
-        use_acoustic_heuristics=_env_bool("UTOA_STAGE2_OTO_PB_HEURISTICS_ENABLE", True),
-        heuristic_weight=_env_float("UTOA_STAGE2_OTO_PB_HEURISTIC_WEIGHT", 0.22),
+        use_acoustic_heuristics=_env_bool("UTOA_BOUNDARY_PB_HEURISTICS_ENABLE", _env_bool("UTOA_STAGE2_OTO_PB_HEURISTICS_ENABLE", True)),
+        heuristic_weight=_env_float_alias(
+            "UTOA_BOUNDARY_PB_HEURISTIC_WEIGHT",
+            "UTOA_STAGE2_OTO_PB_HEURISTIC_WEIGHT",
+            0.22,
+        ),
     )
-    min_score = _env_float("UTOA_STAGE2_OTO_PB_MIN_SCORE", 0.38)
-    min_gap = _env_float("UTOA_STAGE2_OTO_PB_MIN_GAP_MS", 28.0)
-    weight = _clamp(_env_float("UTOA_STAGE2_OTO_PB_SCORE_WEIGHT", 0.92), 0.0, 1.0)
+    min_score = _env_float_alias("UTOA_BOUNDARY_PB_MIN_SCORE", "UTOA_STAGE2_OTO_PB_MIN_SCORE", 0.38)
+    min_gap = _env_float_alias("UTOA_BOUNDARY_PB_MIN_GAP_MS", "UTOA_STAGE2_OTO_PB_MIN_GAP_MS", 28.0)
+    weight = _clamp(
+        _env_float_alias("UTOA_BOUNDARY_PB_SCORE_WEIGHT", "UTOA_STAGE2_OTO_PB_SCORE_WEIGHT", 0.92),
+        0.0,
+        1.0,
+    )
+    state_weight = _clamp(_env_float("UTOA_BOUNDARY_PB_STATE_SCORE_WEIGHT", 0.22), 0.0, 1.0)
     out: list[BoundaryCandidate] = []
     for event in peak_events_from_scores(score_map, min_score=min_score, min_gap_ms=min_gap):
         label = str(event.label)
@@ -602,12 +648,14 @@ def _phoneme_boundary_candidates_for_wav(*, model, config, wav_path: str, device
         if not kind:
             continue
         label_weight = _phoneme_boundary_label_score_weight(label)
+        state_score = _phoneme_boundary_state_score(score_map, label=label, time_ms=float(event.time_ms))
+        state_scale = 1.0 + (float(state_weight) * (float(state_score) - 0.5))
         out.append(
             BoundaryCandidate(
                 time_ms=float(event.time_ms),
                 kind=kind,
-                score=_clamp(float(event.confidence) * weight * label_weight, 0.0, 1.0),
-                source=f"model:phoneme_boundary:{label}",
+                score=_clamp(float(event.confidence) * weight * label_weight * state_scale, 0.0, 1.0),
+                source=f"model:phoneme_boundary:{label}:state={state_score:.3f}",
             )
         )
     return out
@@ -617,8 +665,37 @@ def _phoneme_boundary_label_score_weight(label: str) -> float:
     key = str(label or "").strip()
     default = float(_PB_LABEL_SCORE_WEIGHTS.get(key, 0.84))
     if key == "silence_boundary":
-        default = _env_float("UTOA_STAGE2_OTO_PB_SILENCE_SCORE_WEIGHT", default)
+        default = _env_float_alias(
+            "UTOA_BOUNDARY_PB_SILENCE_SCORE_WEIGHT",
+            "UTOA_STAGE2_OTO_PB_SILENCE_SCORE_WEIGHT",
+            default,
+        )
     return _clamp(default, 0.0, 1.0)
+
+
+def _phoneme_boundary_state_score(score_map, *, label: str, time_ms: float) -> float:
+    states = getattr(score_map, "phone_state_scores", None) or {}
+    times = list(getattr(score_map, "times_ms", []) or [])
+    if not states or not times:
+        return 0.50
+    idx = min(range(len(times)), key=lambda i: abs(float(times[i]) - float(time_ms)))
+
+    def _at(name: str) -> float:
+        values = list(states.get(name, []) or [])
+        if idx < 0 or idx >= len(values):
+            return 0.0
+        return _clamp(float(values[idx]), 0.0, 1.0)
+
+    key = str(label or "").strip()
+    if key in {"consonant_onset", "phone_start"}:
+        return max(_at("consonant"), 0.50 * _at("vowel"), 0.30 * _at("silence"))
+    if key in {"vowel_onset", "vowel_nucleus", "vowel_end"}:
+        return max(_at("vowel"), 0.35 * _at("consonant"))
+    if key == "phone_end":
+        return max(_at("consonant"), _at("vowel"))
+    if key == "silence_boundary":
+        return max(_at("silence"), 0.30 * max(_at("consonant"), _at("vowel")))
+    return 0.50
 
 
 def _resolve_phoneme_boundary_model_path(path_hint: str = "") -> str:
@@ -708,10 +785,10 @@ def _apply_row_shift_guard_for_wav(
     mismatch_min = max(match_max, _env_float("UTOA_BOUNDARY_ROW_SHIFT_MISMATCH_MIN_MS", 120.0))
     severe_abs = max(mismatch_min, _env_float("UTOA_BOUNDARY_ROW_SHIFT_SEVERE_ABS_MS", 260.0))
     # VV-specific tighter severe-abs threshold. On vowel-only wavs the CRNN
-    # cannot find a transient and decoded VV offsets drift ±150~250 ms while
+    # cannot find a transient and decoded VV offsets drift ﾂｱ150~250 ms while
     # source-OTO holds the correct slot. The default severe_abs=260 misses
-    # these (2026-05-17 KO TABI: only 53% of VV within ±50 ms, bimodal
-    # ±200 ms tail). 140 ms catches the tail without dragging in tight rows.
+    # these (2026-05-17 KO TABI: only 53% of VV within ﾂｱ50 ms, bimodal
+    # ﾂｱ200 ms tail). 140 ms catches the tail without dragging in tight rows.
     severe_abs_vv = max(mismatch_min, _env_float("UTOA_BOUNDARY_ROW_SHIFT_VV_SEVERE_ABS_MS", 140.0))
     rollback_only_transitions = _env_bool("UTOA_BOUNDARY_ROW_SHIFT_ONLY_TRANSITIONS", True)
     use_source_row = _env_bool("UTOA_BOUNDARY_ROW_SHIFT_USE_SOURCE_ROW", True)
@@ -734,10 +811,10 @@ def _apply_row_shift_guard_for_wav(
 
     flagged_indices: set[int] = set()
     # Track transition vs non-transition flags separately. Wav-level
-    # rollback only escalates from transition flags (vc/vv/v-cv) — including
+    # rollback only escalates from transition flags (vc/vv/v-cv) 窶・including
     # 'other'-role flags in the rate would cascade into intact vc_onset
-    # rows on KO 8-mora wavs (2026-05-17 v14 regression: vc_onset ±50%
-    # 73.9% → 66.8% when 'other' counted toward wav-level rate).
+    # rows on KO 8-mora wavs (2026-05-17 v14 regression: vc_onset ﾂｱ50%
+    # 73.9% 竊・66.8% when 'other' counted toward wav-level rate).
     transition_supported = 0
     transition_flagged: set[int] = set()
     for idx, item in enumerate(non_sil_entries):
@@ -748,9 +825,9 @@ def _apply_row_shift_guard_for_wav(
         role = normalize_role(str(row.spec.role or "other"))
         # 'other' role is where bare KO CV aliases (`geu`/`ga`/`ge`) end up
         # because phones_from_text doesn't decompose single-token KO syllables.
-        # These show −50 ms mean / 101 ms |Δ| in the 2026-05-17 KO TABI
+        # These show 竏・0 ms mean / 101 ms |ﾎ培 in the 2026-05-17 KO TABI
         # diagnostic; row-shift rollback to source-OTO catches the worst
-        # spread cases (D ≥ severe_abs=260) and source matches manual on
+        # spread cases (D 竕･ severe_abs=260) and source matches manual on
         # the head CV rows where alias-type misclassification is most common.
         if rollback_only_transitions and role not in {"vc", "vv", "v-cv", "other"}:
             continue
@@ -901,6 +978,16 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
+def _env_float_alias(primary: str, legacy: str, default: float) -> float:
+    raw = str(os.environ.get(primary, "") or "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except Exception:
+            return float(default)
+    return _env_float(legacy, default)
+
+
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(float(lo), min(float(hi), float(value)))
 
@@ -910,6 +997,15 @@ def _env_bool(name: str, default: bool) -> bool:
     if not raw:
         return bool(default)
     return raw in {"1", "true", "yes", "on"}
+
+
+def _env_set(name: str, default: tuple[str, ...]) -> set[str]:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return {str(item).strip().lower() for item in default if str(item).strip()}
+    if raw in {"*", "all"}:
+        return set()
+    return {item.strip().lower() for item in raw.replace(";", ",").split(",") if item.strip()}
 
 
 def _mean_quality(values: list[float] | None) -> float:

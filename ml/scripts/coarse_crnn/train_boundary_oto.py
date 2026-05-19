@@ -72,6 +72,14 @@ def main() -> int:
         help="Train only phone auxiliary heads after warm-starting the boundary scorer.",
     )
     ap.add_argument("--pos-weight", type=float, default=2.5)
+    ap.add_argument(
+        "--boundary-label-pos-weights",
+        default="syllable_onset=1.55,vowel_start=1.50,consonant_onset=1.35,next_onset=1.25",
+        help=(
+            "Comma-separated label positive-weight multipliers applied on top of --pos-weight. "
+            "Use this to bias training toward syllable/onset recall."
+        ),
+    )
     ap.add_argument("--quality-loss-weight", type=float, default=0.06)
     # P2-b: was 0.08 — frame-level BCE dominated and boundary timing was
     # under-supervised, contributing to the coda-bridge ±200 ms tail.
@@ -142,6 +150,11 @@ def main() -> int:
         val_ratio=float(args.val_ratio),
         quality_loss_weight=float(args.quality_loss_weight),
         pos_weight=float(args.pos_weight),
+        boundary_label_pos_weights=tuple(
+            item.strip()
+            for item in str(args.boundary_label_pos_weights or "").split(",")
+            if item.strip()
+        ),
         boundary_time_loss_weight=float(args.boundary_time_loss_weight),
         hard_case_oversample=bool(args.hard_case_oversample),
         hard_case_weight=float(args.hard_case_weight),

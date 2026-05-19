@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -13,7 +13,7 @@ from core.coarse_crnn.boundary_scorer_inference import infer_boundary_scores_wit
 from core.coarse_crnn.boundary_scorer_model import load_boundary_checkpoint
 from core.coarse_crnn.boundary_targets import build_phone_aware_target_map, training_rows_to_wav_groups
 from core.coarse_crnn.boundary_types import PHONE_AWARE_IGNORE_INDEX
-from core.coarse_crnn.training import resolve_torch_device
+from core.coarse_crnn.torch_utils import resolve_torch_device
 
 
 def _read_jsonl(path: str) -> list[dict[str, Any]]:
@@ -345,3 +345,4 @@ def _mean(total: float, denom: int) -> float:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

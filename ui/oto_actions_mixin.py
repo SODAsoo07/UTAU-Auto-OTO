@@ -13,7 +13,6 @@ from core.no_mfa_oto_builder import (
     generate_no_mfa_auto_oto,
     resolve_no_mfa_source_oto,
 )
-from core.coarse_crnn.oto_predictor_generator import generate_oto_with_crnn_predictor
 from core.oto_generator import generate_oto
 from core.pipeline_status import normalize_aligner_name
 from core.preflight_common import collect_runtime_preflight_issues
@@ -445,10 +444,10 @@ class OtoActionsMixin:
                         else "remap"
                     )
                     if aligner_engine == "coarse_crnn":
-                        no_mfa_mode_code = "crnn"
+                        no_mfa_mode_code = "remap"
                     no_mfa_mode_text = (
-                        "CRNN OTO 예측기(실험)"
-                        if no_mfa_mode_code == "crnn"
+                        "MFA-Free SSL 슬롯 어댑터(실험)"
+                        if no_mfa_mode_code == "mfa_free_ssl_slot"
                         else "베이스 OTO 재매핑 + 보정"
                     )
                     no_mfa_source_oto = ""
@@ -610,60 +609,14 @@ class OtoActionsMixin:
                             callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                         )
                     elif no_mfa_auto_mode:
-                        if no_mfa_mode_code == "crnn":
-                            _update_oto_local("CRNN OTO 예측 생성", 0.22, force=True)
-                            _crnn_engine_code = "boundary_decoder"
-                            self._append_log(
-                                f"[CRNN-OTO] aligner={aligner_engine} mode={no_mfa_mode_code} engine={_crnn_engine_code}"
-                            )
-                            _crnn_special_raw = (
-                                self.oto_crnn_special_aliases_var.get()
-                                if hasattr(self, "oto_crnn_special_aliases_var")
-                                else ""
-                            )
-                            _crnn_special_aliases: set[str] = {
-                                item.strip()
-                                for item in str(_crnn_special_raw or "").split(",")
-                                if item.strip()
-                            }
-                            _crnn_model_choice = (
-                                self._get_oto_crnn_model_choice_code()
-                                if hasattr(self, "_get_oto_crnn_model_choice_code")
-                                else "auto"
-                            )
-                            _crnn_model_path = "" if (not _crnn_model_choice or _crnn_model_choice == "auto") else _crnn_model_choice
-                            _stage2_enabled = (
-                                bool(self.oto_stage2_enable_var.get())
-                                if hasattr(self, "oto_stage2_enable_var")
-                                else False
-                            )
-                            _stage2_choice = (
-                                self._get_oto_stage2_model_choice_code()
-                                if hasattr(self, "_get_oto_stage2_model_choice_code")
-                                else "auto"
-                            )
-                            _stage2_model_path = "" if (not _stage2_choice or _stage2_choice == "auto") else _stage2_choice
-                            _pb_model_path = self._get_selected_phoneme_boundary_model_path() if (
-                                _stage2_enabled and hasattr(self, "_get_selected_phoneme_boundary_model_path")
-                            ) else ""
-                            processed, total, errors = generate_oto_with_crnn_predictor(
+                        if no_mfa_mode_code == "mfa_free_ssl_slot":
+                            _update_oto_local("MFA-Free SSL 슬롯 어댑터 생성", 0.22, force=True)
+                            processed, total, errors = self._run_mfa_free_oto_preview_generation(
                                 wav_dir=target_wav_dir,
                                 out_path=target_out_path,
                                 source_oto_path=no_mfa_source_oto or tpl_path,
-                                alias_suffix=alias_suffix,
                                 language=lang,
                                 format_type=selected_format,
-                                model_path=_crnn_model_path,
-                                stage2_model_path=_stage2_model_path,
-                                stage2_enable=_stage2_enabled,
-                                phoneme_boundary_model_path=_pb_model_path,
-                                device=(
-                                    self.oto_crnn_device_var.get().strip()
-                                    if hasattr(self, "oto_crnn_device_var")
-                                    else "auto"
-                                ),
-                                engine=_crnn_engine_code,
-                                special_aliases=_crnn_special_aliases or None,
                                 callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                             )
                         else:

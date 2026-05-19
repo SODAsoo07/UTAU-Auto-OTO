@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from core.coarse_crnn.alias_role import ALIAS_ROLES, DEFAULT_ROLE, normalize_role
-from core.coarse_crnn.oto_boundary_decoding import BOUNDARY_SLOT_CLASSES
-from core.coarse_crnn.oto_sequence_alignment import SEQUENCE_BOUNDARY_KINDS
+from core.coarse_crnn.deprecated.direct_param.oto_boundary_decoding import BOUNDARY_SLOT_CLASSES
+from core.coarse_crnn.deprecated.direct_param.oto_sequence_alignment import SEQUENCE_BOUNDARY_KINDS
 from core.coarse_crnn.oto_targets import OTO_ANCHOR_NAMES
 
 
@@ -28,7 +28,7 @@ class OtoCrnnConfig:
     vcv_target_window_frames: int = 240
     # cvvc is excluded from windowing: cvvc vc/vv aliases are NOT uniformly
     # distributed across the audio (CV rows come first, VC rows later), so
-    # row_ratio-based window centering produces 1000–2500 ms offset errors.
+    # row_ratio-based window centering produces 1000窶・500 ms offset errors.
     # Full-audio heatmap finds the correct position reliably instead.
     target_window_formats: tuple[str, ...] = ("vcv",)
     target_window_frame_overrides: tuple[str, ...] = ("vcv=240",)
@@ -142,7 +142,7 @@ class OtoCrnnConfig:
             data["alias_roles"] = ()
         if payload is not None and "enable_alias_role_embedding" not in data:
             data["enable_alias_role_embedding"] = False
-        # Old checkpoints predate the Δ/Δ² channel stack. Default off so legacy
+        # Old checkpoints predate the ﾎ・ﾎ板ｲ channel stack. Default off so legacy
         # state dicts keep their original Conv1d input width.
         if payload is not None and "feature_deltas" not in data:
             data["feature_deltas"] = False
@@ -230,7 +230,7 @@ def build_oto_model(config: OtoCrnnConfig):
             self.next_alias_emb = nn.Embedding(alias_count, int(cfg.cond_dim))
             self.prev_transition_emb = nn.Embedding(transition_count, int(cfg.cond_dim))
             self.next_transition_emb = nn.Embedding(transition_count, int(cfg.cond_dim))
-            # New role-based embeddings — instantiated only when the flag is on.
+            # New role-based embeddings 窶・instantiated only when the flag is on.
             # Old checkpoints saved with the flag off omit these modules and
             # therefore round-trip cleanly through `load_state_dict`.
             self.use_role_embedding = bool(cfg.enable_alias_role_embedding) and role_count > 1
@@ -558,3 +558,4 @@ __all__ = [
     "uses_active_relative_param_head",
     "uses_relative_param_head",
 ]
+

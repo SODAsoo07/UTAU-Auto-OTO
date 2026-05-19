@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from core.coarse_crnn.oto_evaluate import _analyze_activity_profile, _is_hard_failure
+from core.coarse_crnn.deprecated.direct_param.oto_evaluate import _analyze_activity_profile, _is_hard_failure
 from core.coarse_crnn.oto_targets import resolve_cutoff_abs_ms
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 
@@ -482,3 +482,4 @@ def _console_summary(report: dict[str, Any]) -> dict[str, Any]:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

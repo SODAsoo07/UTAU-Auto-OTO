@@ -3657,7 +3657,7 @@ class ConfigMixin:
                 aligner_label_map = {
                     "none": "MFA",
                     "sequence": "전용(시퀀스)",
-                    "coarse_crnn": "CRNN(실험적)",
+                    "coarse_crnn": "MFA",
                     "mfa": "MFA",
                 }
                 self.aligner_var.set(aligner_label_map.get(saved_aligner, "MFA"))

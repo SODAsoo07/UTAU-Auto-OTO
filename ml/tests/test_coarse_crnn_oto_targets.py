@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from core.coarse_crnn.oto_targets import _apply_row_context, anchors_to_oto_params, extract_alias_features, oto_params_to_anchors, resolve_cutoff_abs_ms
-from core.coarse_crnn.oto_windowing import crop_oto_target_window, should_use_vcv_target_window, target_window_start_frame
+from core.coarse_crnn.deprecated.direct_param.oto_windowing import crop_oto_target_window, should_use_vcv_target_window, target_window_start_frame
 
 
 def test_oto_params_roundtrip_negative_cutoff_coordinate_system():
@@ -84,7 +84,7 @@ def test_vcv_target_window_is_format_specific_not_vowel_transition_specific():
 def test_target_window_frames_can_be_format_specific():
     from types import SimpleNamespace
 
-    from core.coarse_crnn.oto_windowing import target_window_frames_for
+    from core.coarse_crnn.deprecated.direct_param.oto_windowing import target_window_frames_for
 
     cfg = SimpleNamespace(target_window_frame_overrides=("vcv=240", "cvvc=360"))
 

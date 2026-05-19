@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.coarse_crnn.reclist import estimate_reclist_phone_bounds
+from core.coarse_crnn.deprecated.coarse_alignment.reclist import estimate_reclist_phone_bounds
 
 
 def test_reclist_bounds_use_filename_when_phone_shape_matches():

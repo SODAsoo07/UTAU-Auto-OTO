@@ -20,7 +20,6 @@ from core.no_mfa_oto_builder import (
     generate_no_mfa_auto_oto,
     resolve_no_mfa_source_oto,
 )
-from core.coarse_crnn.oto_predictor_generator import generate_oto_with_crnn_predictor
 from core.mfa_runner import (
     ALERT_MSVC_REQUIRED,
     MFA_PORTABLE_PYTHON_VERSION,
@@ -58,6 +57,192 @@ from ui.i18n import t
 
 
 class PipelineActionsMixin:
+    def _resolve_mfa_free_oto_checkpoint(self) -> str:
+        candidates = []
+        env_path = str(os.environ.get("UTOA_MFA_FREE_OTO_CHECKPOINT", "") or "").strip()
+        if env_path:
+            candidates.append(env_path)
+        for base in (
+            str(getattr(self, "app_dir", "") or "").strip(),
+            os.getcwd(),
+        ):
+            if not base:
+                continue
+            root = os.path.join(base, "ml_workspace", "mfa_free_oto")
+            if os.path.isdir(root):
+                for dirpath, _dirnames, filenames in os.walk(root):
+                    for name in filenames:
+                        if name.lower().endswith(".pt") and "wavlm" in name.lower():
+                            candidates.append(os.path.join(dirpath, name))
+        existing = [os.path.abspath(path) for path in candidates if path and os.path.isfile(path)]
+        if not existing:
+            return ""
+        existing.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+        return existing[0]
+
+    def _run_mfa_free_oto_preview_generation(
+        self,
+        *,
+        wav_dir: str,
+        out_path: str,
+        source_oto_path: str = "",
+        language: str = "japanese",
+        format_type: str = "CV",
+        callback=None,
+    ):
+        checkpoint = self._resolve_mfa_free_oto_checkpoint()
+        if not checkpoint:
+            raise RuntimeError(
+                "MFA-Free OTO checkpoint를 찾지 못했습니다. "
+                "UTOA_MFA_FREE_OTO_CHECKPOINT 또는 ml_workspace/mfa_free_oto 아래의 wavlm *.pt를 지정해 주세요."
+            )
+        base_dir = (
+            str(getattr(self, "writable_data_dir", "") or "").strip()
+            or str(getattr(self, "app_data_dir", "") or "").strip()
+            or str(getattr(self, "app_dir", "") or "").strip()
+            or os.getcwd()
+        )
+        bank_name = os.path.basename(os.path.normpath(wav_dir)) or "voicebank"
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        preview_dir = os.path.abspath(
+            os.path.join(base_dir, "ml_workspace", "mfa_free_oto", "ui_preview", f"{bank_name}_{timestamp}")
+        )
+        os.makedirs(preview_dir, exist_ok=True)
+        anchor_json = os.path.join(preview_dir, "anchors.json")
+        overlay_dir = os.path.join(preview_dir, "overlays")
+        cmd = [
+            sys.executable or "python",
+            "-m",
+            "ml.scripts.mfa_free_oto.predict_oto_preview",
+            "--checkpoint",
+            checkpoint,
+            "--wav-dir",
+            os.path.abspath(wav_dir),
+            "--out-oto",
+            os.path.abspath(out_path),
+            "--out-json",
+            anchor_json,
+            "--overlay-dir",
+            overlay_dir,
+            "--language",
+            language,
+            "--format-type",
+            format_type,
+        ]
+        if source_oto_path and os.path.isfile(source_oto_path):
+            cmd.extend(["--source-oto", os.path.abspath(source_oto_path), "--mode", "template-preserve"])
+        else:
+            cmd.extend(["--mode", "bootstrap"])
+        device = ""
+        if hasattr(self, "oto_crnn_device_var"):
+            try:
+                device = str(self.oto_crnn_device_var.get() or "").strip().lower()
+            except Exception:
+                device = ""
+        if device in {"cpu", "cuda"}:
+            cmd.extend(["--device", device])
+
+        if callback:
+            try:
+                callback("[MFA-Free OTO] progress 0/1")
+            except Exception:
+                pass
+        self._append_log(f"[MFA-Free OTO] checkpoint: {checkpoint}")
+        self._append_log(f"[MFA-Free OTO] preview artifacts: {preview_dir}")
+        pretty = " ".join(f'"{part}"' if (" " in str(part) or "\t" in str(part)) else str(part) for part in cmd)
+        self._append_log(f"[MFA-Free OTO] 실행: {pretty}")
+        proc = self._popen_subprocess_hidden(
+            cmd,
+            cwd=str(getattr(self, "app_dir", "") or os.getcwd()),
+            stdout=sp.PIPE,
+            stderr=sp.STDOUT,
+            text=False,
+        )
+        for line in self._iter_decoded_stdout_lines(proc):
+            self._append_log(f"[MFA-Free OTO] {line}")
+        proc.wait()
+        if int(proc.returncode) != 0:
+            return 0, 0, [f"MFA-Free OTO preview failed (code={int(proc.returncode)})"]
+        row_count = 0
+        try:
+            with open(out_path, "r", encoding="utf-8-sig") as handle:
+                row_count = sum(1 for line in handle if line.strip() and "=" in line)
+        except Exception:
+            row_count = 0
+        if callback:
+            try:
+                callback(f"[MFA-Free OTO] progress {row_count}/{row_count or 1}")
+            except Exception:
+                pass
+        self._append_log(f"[MFA-Free OTO] preview oto: {os.path.abspath(out_path)}")
+        self._append_log(f"[MFA-Free OTO] anchors: {anchor_json}")
+        self._append_log(f"[MFA-Free OTO] overlays: {overlay_dir}")
+        return row_count, row_count, []
+
+    def _run_mfa_free_oto_preview_from_ui(self):
+        def task():
+            self._set_running(True)
+            self._set_status("MFA-Free SSL 슬롯 어댑터 준비 중...")
+            try:
+                if hasattr(self, "developer_mode_enabled_var") and not bool(self.developer_mode_enabled_var.get()):
+                    self._append_log("⚠ MFA-Free SSL 슬롯 어댑터는 개발자 모드에서만 실행할 수 있습니다.")
+                    self._set_status("⚠ 개발자 모드를 먼저 켜 주세요.")
+                    return
+                wav_dir = str(self.wav_entry.get() if hasattr(self, "wav_entry") else "").strip()
+                if not wav_dir or not os.path.isdir(wav_dir):
+                    self._append_log("❌ WAV 폴더를 먼저 지정해 주세요.")
+                    self._set_status("❌ WAV 경로 누락")
+                    return
+                wav_dir = os.path.abspath(wav_dir)
+                out_path = str(self.out_entry.get() if hasattr(self, "out_entry") else "").strip()
+                if not out_path:
+                    base_dir = (
+                        str(getattr(self, "writable_data_dir", "") or "").strip()
+                        or str(getattr(self, "app_data_dir", "") or "").strip()
+                        or str(getattr(self, "app_dir", "") or "").strip()
+                        or os.getcwd()
+                    )
+                    out_path = os.path.join(base_dir, "ml_workspace", "mfa_free_oto", "ui_preview", "oto.preview.ini")
+                out_path = os.path.abspath(out_path)
+                source_oto = ""
+                tpl_hint = str(self.tpl_entry.get() if hasattr(self, "tpl_entry") else "").strip()
+                if tpl_hint and os.path.isfile(tpl_hint) and tpl_hint.lower().endswith(".ini"):
+                    source_oto = os.path.abspath(tpl_hint)
+                else:
+                    candidate = os.path.join(wav_dir, "oto.ini")
+                    if os.path.isfile(candidate):
+                        source_oto = os.path.abspath(candidate)
+                lang = self._get_language() if hasattr(self, "_get_language") else "japanese"
+                fmt = (
+                    normalize_auto_format_value(lang, self.auto_format_var.get())
+                    if hasattr(self, "auto_format_var")
+                    else "CV"
+                )
+                processed, total, errors = self._run_mfa_free_oto_preview_generation(
+                    wav_dir=wav_dir,
+                    out_path=out_path,
+                    source_oto_path=source_oto,
+                    language=lang,
+                    format_type=fmt,
+                )
+                if errors:
+                    for error in errors:
+                        self._append_log(f"❌ {error}")
+                    self._set_status("❌ MFA-Free SSL 슬롯 어댑터 실패")
+                    return
+                self._append_log(f"✅ MFA-Free SSL 슬롯 어댑터 완료: {processed}/{total} rows")
+                self._set_status("✅ MFA-Free SSL 슬롯 어댑터 완료")
+                try:
+                    os.startfile(os.path.dirname(out_path))  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            except Exception as e:
+                self._handle_error("MFA-Free SSL 슬롯 어댑터", e)
+            finally:
+                self._set_running(False)
+
+        self._run_in_thread(task)
+
     @staticmethod
     def _is_mfa_module_missing_error(code: str, message: str) -> bool:
         c = str(code or "").strip().upper()
@@ -2591,8 +2776,12 @@ class PipelineActionsMixin:
                     else "remap"
                 )
                 if aligner_engine == "coarse_crnn":
-                    no_mfa_mode_code = "crnn"
-                no_mfa_mode_text = "CRNN OTO 예측기(실험)" if no_mfa_mode_code == "crnn" else "베이스 OTO 재매핑 + 보정"
+                    no_mfa_mode_code = "remap"
+                no_mfa_mode_text = (
+                    "MFA-Free SSL 슬롯 어댑터(실험)"
+                    if no_mfa_mode_code == "mfa_free_ssl_slot"
+                    else "베이스 OTO 재매핑 + 보정"
+                )
                 no_mfa_source_oto = ""
                 if no_mfa_auto_mode:
                     if bool(self.no_base_oto_var.get()):
@@ -2843,8 +3032,8 @@ class PipelineActionsMixin:
                     return
 
                 if no_mfa_auto_mode:
-                    if no_mfa_mode_code == "crnn":
-                        self._append_log("ℹ CRNN(실험적): Lab/사전/정렬 단계를 건너뛰고 OTO를 직접 예측합니다.")
+                    if no_mfa_mode_code == "mfa_free_ssl_slot":
+                        self._append_log("ℹ MFA-Free SSL 슬롯 어댑터: Lab/사전/정렬 단계를 건너뛰고 모델 anchor preview로 OTO를 생성합니다.")
                     else:
                         self._append_log("ℹ No-MFA 모드: Lab/사전/정렬 단계를 건너뜁니다.")
                     if has_textgrid:
@@ -2856,60 +3045,14 @@ class PipelineActionsMixin:
                     _set_stage_progress("align", 1.0)
 
                     _set_stage_progress("oto", 0.03)
-                    if no_mfa_mode_code == "crnn":
-                        self._set_status("4/5 - CRNN OTO 직접 예측 중...")
-                        _crnn_engine_code = "boundary_decoder"
-                        self._append_log(
-                            f"[CRNN-OTO] aligner={aligner_engine} mode={no_mfa_mode_code} engine={_crnn_engine_code}"
-                        )
-                        _crnn_special_raw = (
-                            self.oto_crnn_special_aliases_var.get()
-                            if hasattr(self, "oto_crnn_special_aliases_var")
-                            else ""
-                        )
-                        _crnn_special_aliases = {
-                            item.strip()
-                            for item in str(_crnn_special_raw or "").split(",")
-                            if item.strip()
-                        }
-                        _crnn_model_choice = (
-                            self._get_oto_crnn_model_choice_code()
-                            if hasattr(self, "_get_oto_crnn_model_choice_code")
-                            else "auto"
-                        )
-                        _crnn_model_path = "" if (not _crnn_model_choice or _crnn_model_choice == "auto") else _crnn_model_choice
-                        _stage2_enabled = (
-                            bool(self.oto_stage2_enable_var.get())
-                            if hasattr(self, "oto_stage2_enable_var")
-                            else False
-                        )
-                        _stage2_choice = (
-                            self._get_oto_stage2_model_choice_code()
-                            if hasattr(self, "_get_oto_stage2_model_choice_code")
-                            else "auto"
-                        )
-                        _stage2_model_path = "" if (not _stage2_choice or _stage2_choice == "auto") else _stage2_choice
-                        _pb_model_path = self._get_selected_phoneme_boundary_model_path() if (
-                            _stage2_enabled and hasattr(self, "_get_selected_phoneme_boundary_model_path")
-                        ) else ""
-                        _processed, _total, oto_errors = generate_oto_with_crnn_predictor(
+                    if no_mfa_mode_code == "mfa_free_ssl_slot":
+                        self._set_status("4/5 - MFA-Free SSL 슬롯 어댑터 실행 중...")
+                        _processed, _total, oto_errors = self._run_mfa_free_oto_preview_generation(
                             wav_dir=wav_dir,
                             out_path=out_path,
                             source_oto_path=no_mfa_source_oto,
-                            alias_suffix=self.alias_suffix_var.get().strip(),
                             language=lang,
                             format_type=selected_format,
-                            model_path=_crnn_model_path,
-                            stage2_model_path=_stage2_model_path,
-                            stage2_enable=_stage2_enabled,
-                            phoneme_boundary_model_path=_pb_model_path,
-                            device=(
-                                self.oto_crnn_device_var.get().strip()
-                                if hasattr(self, "oto_crnn_device_var")
-                                else "auto"
-                            ),
-                            engine=_crnn_engine_code,
-                            special_aliases=_crnn_special_aliases or None,
                             callback=_make_stage_callback("oto"),
                         )
                     else:
@@ -2988,6 +3131,8 @@ class PipelineActionsMixin:
                 align_err = ""
                 align_engine = self.aligner_var.get()
                 primary_engine = normalize_aligner_name(align_engine, default="mfa")
+                if primary_engine == "coarse_crnn":
+                    primary_engine = "mfa"
                 use_oto_crnn_direct = primary_engine == "coarse_crnn"
                 fallback_engine = ""
                 _set_stage_progress("align", 0.05)
@@ -3015,7 +3160,7 @@ class PipelineActionsMixin:
                 elif primary_engine == "sequence":
                     self._append_log("ℹ 정렬 엔진: 전용 시퀀스 baseline")
                 elif use_oto_crnn_direct:
-                    self._append_log("ℹ CRNN(실험적): TextGrid 정렬 대신 OTO 직접 예측 모델을 사용합니다.")
+                    self._append_log("ℹ 레거시 직접 예측 정렬 경로는 비활성화되어 MFA로 폴백합니다.")
                 else:
                     self._append_log("ℹ 정렬 엔진: none (MFA 비사용)")
                 if hasattr(self, "_apply_advanced_tuning_envs"):
