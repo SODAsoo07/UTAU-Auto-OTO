@@ -147,12 +147,6 @@
                         "note":  "Bundled into installer/release."
                     },
                     {
-                        "path":  "deprecated/scripts/train_cvn_backend.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CVN training wrapper moved out of active workflow."
-                    },
-                    {
                         "path":  "tests/scripts/training/coupled/train_ensemble_bundle.py",
                         "status":  "manual",
                         "owner":  "ml",
@@ -225,186 +219,6 @@
                         "note":  "Implementation path for two-stage coupled tuning runner."
                     },
                     {
-                        "path":  "deprecated/scripts/train/train_cvn_backend.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CVN training implementation moved out of active workflow."
-                    },
-                    {
-                        "path":  "ml/scripts/phoneme_boundary/train.py",
-                        "status":  "active",
-                        "owner":  "ml",
-                        "note":  "Train the standalone phoneme-boundary detector; does not train OTO parameters."
-                    },
-                    {
-                        "path":  "ml/scripts/phoneme_boundary/build_manifest.py",
-                        "status":  "active",
-                        "owner":  "ml",
-                        "note":  "Build phoneme-boundary manifests from WAV order, user aliases, and optional phone/boundary sidecars."
-                    },
-                    {
-                        "path":  "ml/scripts/phoneme_boundary/smoke_voicebank.py",
-                        "status":  "active",
-                        "owner":  "ml",
-                        "note":  "Run a real voicebank smoke by building a manifest, training a small boundary detector, and evaluating it."
-                    },
-                    {
-                        "path":  "ml/scripts/phoneme_boundary/predict.py",
-                        "status":  "active",
-                        "owner":  "ml",
-                        "note":  "Predict frame-level phoneme boundary scores and optional alias-order decoded events for one WAV."
-                    },
-                    {
-                        "path":  "ml/scripts/phoneme_boundary/evaluate.py",
-                        "status":  "active",
-                        "owner":  "ml",
-                        "note":  "Evaluate phoneme-boundary detector timing error against explicit boundary events."
-                    },
-                    {
-                        "path":  "deprecated/ml/scripts/coarse_crnn/train_stage2_oto.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Train the source-independent Stage2 OTO Assigner from gold oto.ini + wav pairs."
-                    },
-                    {
-                        "path":  "deprecated/ml/scripts/coarse_crnn/evaluate_stage2_oto.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Evaluate Stage2 OTO Assigner against gold oto.ini with Boundary Decoder fallback metrics."
-                    },
-                    {
-                        "path":  "deprecated/ml/scripts/coarse_crnn/visualize_boundary_decode.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Render Boundary Scorer posterior and decoded OTO anchors for one wav as dependency-free SVG."
-                    },
-                    {
-                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/coarse_alignment/align.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated CoarseCRNN TextGrid alignment CLI retained only for old checkpoint reproduction."
-                    },
-                    {
-                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/coarse_alignment/build_manifest.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated CoarseCRNN alignment manifest builder."
-                    },
-                    {
-                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/coarse_alignment/build_eval_splits.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated CoarseCRNN alignment split helper."
-                    },
-                    {
-                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/coarse_alignment/build_clean_manifest.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated CoarseCRNN clean-manifest helper."
-                    },
-                    {
-                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/coarse_alignment/evaluate_alignment.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated CoarseCRNN alignment evaluator."
-                    },
-                    {
-                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/coarse_alignment/train.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated CoarseCRNN alignment trainer."
-                    },
-                    {
-                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/direct_param/evaluate_oto.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated direct-parameter OTO CRNN evaluator."
-                    },
-                    {
-                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/direct_param/evaluate_oto_runtime.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated direct-parameter OTO CRNN runtime evaluator."
-                    },
-                    {
-                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/direct_param/evaluate_oto_voicebank_holdout.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated direct-parameter OTO CRNN voicebank holdout evaluator."
-                    },
-                    {
-                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/direct_param/predict_oto.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated direct-parameter OTO CRNN predictor CLI."
-                    },
-                    {
-                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/direct_param/train_oto.py",
-                        "status":  "deprecated",
-                        "owner":  "ml",
-                        "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated direct-parameter OTO CRNN trainer."
-                    },
-                    {
-                        "path":  "ml/scripts/mfa_free_oto/build_goldset_scaffold.py",
-                        "status":  "active",
-                        "owner":  "ml",
-                        "note":  "Builds manual-gold MFA-free OTO manifest scaffolds; does not create pseudo-labels."
-                    },
-                    {
-                        "path":  "ml/scripts/mfa_free_oto/build_lab_gold_manifest.py",
-                        "status":  "active",
-                        "owner":  "ml",
-                        "note":  "Converts paired HTK .lab/.wav directories into MFA-free OTO manual_gold manifests using lab phones as source of truth."
-                    },
-                    {
-                        "path":  "ml/scripts/mfa_free_oto/audit_gold_manifest.py",
-                        "status":  "active",
-                        "owner":  "ml",
-                        "note":  "Audits MFA-free OTO manual_gold manifests for span validity, label balance, acoustic label suspicion, and filename-slot eligibility before training."
-                    },
-                    {
-                        "path":  "ml/scripts/mfa_free_oto/split_gold_manifest.py",
-                        "status":  "active",
-                        "owner":  "ml",
-                        "note":  "Creates deterministic train/eval splits for MFA-free OTO manual_gold manifests before ablation runs."
-                    },
-                    {
-                        "path":  "ml/scripts/mfa_free_oto/train_ssl_poc.py",
-                        "status":  "active",
-                        "owner":  "ml",
-                        "note":  "Trains the separated MFA-free OTO shared-encoder frame/event PoC from manual-gold labels."
-                    },
-                    {
-                        "path":  "ml/scripts/mfa_free_oto/evaluate_ssl_poc.py",
-                        "status":  "active",
-                        "owner":  "ml",
-                        "note":  "Evaluates MFA-free OTO PoC checkpoints with frame, boundary, and hard-failure gates."
-                    },
-                    {
-                        "path":  "ml/scripts/mfa_free_oto/run_feature_ablation.py",
-                        "status":  "active",
-                        "owner":  "ml",
-                        "note":  "Runs limited-data feature ablations across acoustic, acoustic-aux, SSL, SSL+aux, and slot-Viterbi evaluation modes."
-                    },
-                    {
-                        "path":  "ml/scripts/mfa_free_oto/render_review_overlay.py",
-                        "status":  "active",
-                        "owner":  "ml",
-                        "note":  "Renders browser review overlays for waveform, spectrogram, manual labels, posteriors, and decoded anchors."
-                    },
-                    {
-                        "path":  "ml/scripts/mfa_free_oto/render_failure_overlays.py",
-                        "status":  "active",
-                        "owner":  "ml",
-                        "note":  "Renders review overlays for failed or tagged rows from MFA-free OTO evaluation JSON outputs."
-                    },
-                    {
-                        "path":  "ml/scripts/mfa_free_oto/predict_oto_preview.py",
-                        "status":  "active",
-                        "owner":  "ml",
-                        "note":  "Runs MFA-free OTO checkpoint inference and writes preview oto.ini, anchor JSON, and review overlays for slot-aware testing."
-                    },
-                    {
                         "path":  "scripts/build/build_installer.ps1",
                         "status":  "active",
                         "owner":  "release",
@@ -415,6 +229,78 @@
                         "status":  "active",
                         "owner":  "release",
                         "note":  "Implementation path for portable build script (root wrapper remains CI path)."
+                    },
+                    {
+                        "path":  "scripts/dev/compare_pred_vs_lab.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Compare phoneme-boundary prediction JSONs against HTK lab ground truth."
+                    },
+                    {
+                        "path":  "scripts/dev/convert_htk_lab_to_manifest.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Convert HTK-style .lab files plus matching .wav into a boundary manifest."
+                    },
+                    {
+                        "path":  "scripts/dev/diff_oto.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Diff two oto.ini files row-by-row matched by wav and alias."
+                    },
+                    {
+                        "path":  "scripts/dev/dump_phoneme_boundary_failures.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Dump per-row/per-event boundary prediction failures for a checkpoint."
+                    },
+                    {
+                        "path":  "scripts/dev/eval_phoneme_boundary.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Evaluate a phoneme-boundary checkpoint against a manifest."
+                    },
+                    {
+                        "path":  "scripts/dev/finetune_phoneme_boundary.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Fine-tune an existing phoneme-boundary checkpoint on a gold manifest."
+                    },
+                    {
+                        "path":  "scripts/dev/predict_phoneme_boundary_dir.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Run a phoneme-boundary checkpoint over a wav directory and dump predictions."
+                    },
+                    {
+                        "path":  "scripts/dev/probe_silence_noise.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Probe RMS of HTK-lab silence regions to gauge the noise floor."
+                    },
+                    {
+                        "path":  "scripts/dev/score_dual_vs_lab.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Head-to-head accuracy comparison of BoundaryScorer vs PhonemeBoundary against lab."
+                    },
+                    {
+                        "path":  "scripts/dev/split_boundary_manifest.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Split a phoneme-boundary manifest JSONL into train/heldout with a fixed seed."
+                    },
+                    {
+                        "path":  "scripts/dev/visualize_dual_boundary.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Render dual-boundary predictions (BoundaryScorer + PhonemeBoundary) into a PNG."
+                    },
+                    {
+                        "path":  "scripts/dev/visualize_phoneme_boundary.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Render a phoneme-boundary prediction JSON into a debug PNG."
                     }
                 ]
 }
