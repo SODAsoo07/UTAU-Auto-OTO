@@ -51,7 +51,7 @@ def phones_from_text(text: object, language: object = "") -> list[str]:
     raw = str(text or "").strip()
     if not raw:
         return []
-    tokens = filename_order_tokens(raw, language=normalize_language(language))
+    tokens = filename_order_tokens(raw)
     if tokens:
         return [str(token).strip() for token in tokens if str(token).strip()]
     return [item for item in re.split(r"[\s,_\-/|']+", raw) if item]
