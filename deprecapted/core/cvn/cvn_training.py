@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import random
-import wave
 from dataclasses import dataclass
 from typing import Callable, Iterable, Sequence
 
@@ -12,6 +11,8 @@ import numpy as np
 
 from core.cvn_classifier import CVN_LABELS, predict_cvn
 from core.cvn_feature_extractor import extract_frame_features
+from core.model_context.audio import build_wav_index
+from core.model_context.oto_params import safe_cutoff_abs_ms, wav_duration_ms
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 from core.oto_ml_collection_discovery import discover_training_candidates_from_dataset_root
 from core.oto_ml_features import classify_alias_type
@@ -58,18 +59,6 @@ class CvnDatasetBundle:
     rule_baseline_confusion: np.ndarray
 
 
-def _wav_duration_ms(path: str) -> float:
-    try:
-        with wave.open(path, "rb") as wav_file:
-            nframes = int(wav_file.getnframes() or 0)
-            sr = int(wav_file.getframerate() or 0)
-    except Exception:
-        return 0.0
-    if nframes <= 0 or sr <= 0:
-        return 0.0
-    return float(nframes) * 1000.0 / float(sr)
-
-
 def _normalize_alias(alias: str) -> str:
     text = str(alias or "").strip().lower()
     text = "".join(ch for ch in text if not ch.isspace())
@@ -83,29 +72,6 @@ def _is_pause_alias(alias: str) -> bool:
     if norm.startswith("br"):
         return True
     return False
-
-
-def _safe_cutoff_abs_ms(offset_ms: float, cutoff: float, wav_duration_ms: float) -> float:
-    off = max(0.0, float(offset_ms))
-    cut = float(cutoff)
-    wav_dur = max(0.0, float(wav_duration_ms))
-
-    if cut < 0.0:
-        resolved = off + abs(cut)
-    else:
-        rel = off + cut
-        abs_candidate = cut
-        candidates = [rel]
-        if abs_candidate > off:
-            candidates.append(abs_candidate)
-        if wav_dur > 1.0:
-            candidates = [c for c in candidates if c <= (wav_dur + 2.0)] or candidates
-        target = rel
-        resolved = min(candidates, key=lambda c: abs(float(c) - target))
-
-    if wav_dur > 1.0:
-        resolved = min(resolved, wav_dur - 1.0)
-    return max(off + 1.0, float(resolved))
 
 
 def _safe_alias_type(language: str, alias: str) -> str:
@@ -194,21 +160,6 @@ def _group_rows_by_wav(rows: Sequence[OtoRow]) -> dict[str, list[OtoRow]]:
     return grouped
 
 
-def _build_wav_index(root: str) -> dict[str, str]:
-    index: dict[str, str] = {}
-    if not root or not os.path.isdir(root):
-        return index
-    for dp, _dns, fns in os.walk(root):
-        for fn in fns:
-            if not str(fn).lower().endswith(".wav"):
-                continue
-            full = os.path.join(dp, fn)
-            key = str(fn).strip().lower()
-            if key not in index:
-                index[key] = full
-    return index
-
-
 def label_frames_from_oto_rows(
     *,
     times_ms: np.ndarray,
@@ -224,7 +175,7 @@ def label_frames_from_oto_rows(
     votes = np.zeros((times.size, len(CVN_LABELS)), dtype=np.float32)
     for row in oto_rows:
         onset = max(0.0, float(row.offset_ms))
-        cutoff_abs = _safe_cutoff_abs_ms(onset, float(row.cutoff), float(wav_duration_ms))
+        cutoff_abs = safe_cutoff_abs_ms(onset, float(row.cutoff), float(wav_duration_ms), convention="legacy_candidate")
         if cutoff_abs <= (onset + 1.0):
             continue
 
@@ -460,7 +411,10 @@ def build_cvn_dataset_from_staged_root(
         by_wav = _group_rows_by_wav(rows)
         if not by_wav:
             continue
-        wav_index = _build_wav_index(str(cand.wav_dir))
+        wav_index = build_wav_index(
+            str(cand.wav_dir),
+            normalize_key_fn=lambda name: str(name or "").strip().lower(),
+        )
         if not wav_index:
             continue
 
@@ -490,7 +444,7 @@ def build_cvn_dataset_from_staged_root(
                 stats["wav_feature_fail"] = int(stats["wav_feature_fail"]) + 1
                 continue
 
-            wav_dur = _wav_duration_ms(wav_path)
+            wav_dur = wav_duration_ms(wav_path)
             if wav_dur <= 0.0:
                 approx_end = float(features.times_ms[-1]) + (float(features.frame_ms) * 0.5)
                 wav_dur = max(approx_end, 1.0)

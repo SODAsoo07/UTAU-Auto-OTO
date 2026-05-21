@@ -9,11 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from core.coarse_crnn.boundary_candidates import audio_candidates_to_boundary_candidates, merge_candidates
-from core.coarse_crnn.boundary_targets import (
+from core.model_context.oto_params import (
     absolute_anchors_to_oto_params,
-    load_row_specs_from_source_oto,
     oto_row_to_absolute_anchors,
+    wav_duration_ms,
 )
+from core.model_context.oto_rows import load_row_specs_from_source_oto
 from core.coarse_crnn.oto_audio_candidates import compute_audio_candidates
 from core.coarse_crnn.stage2_oto.features import build_stage2_feature_batch
 from core.coarse_crnn.stage2_oto.model import build_stage2_model, checkpoint_payload
@@ -737,7 +738,7 @@ def _load_gold_targets(oto_path: str, wav_dir: str):
             continue
         wav_name = str(parsed.get("wav", "") or "")
         wav_path = os.path.join(wav_dir, wav_name)
-        duration = _wav_duration_ms(wav_path)
+        duration = wav_duration_ms(wav_path, missing_value=1.0)
         anchors = oto_row_to_absolute_anchors(
             offset=float(parsed.get("offset", 0.0) or 0.0),
             consonant=float(parsed.get("consonant", 0.0) or 0.0),
@@ -748,18 +749,6 @@ def _load_gold_targets(oto_path: str, wav_dir: str):
         )
         targets[(wav_name, str(parsed.get("alias", "") or ""), int(line_idx))] = anchors
     return targets
-
-
-def _wav_duration_ms(path: str) -> float:
-    import wave
-
-    if not path or not os.path.isfile(path):
-        return 1.0
-    with wave.open(path, "rb") as wf:
-        frames = int(wf.getnframes() or 0)
-        sr = int(wf.getframerate() or 0)
-    return float(frames) * 1000.0 / float(sr) if frames > 0 and sr > 0 else 1.0
-
 
 def _infer_language(path: Path, fallback: str) -> str:
     if fallback:

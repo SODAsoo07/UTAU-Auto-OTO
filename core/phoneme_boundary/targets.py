@@ -7,7 +7,6 @@ from typing import Any
 
 import numpy as np
 
-from core.coarse_crnn.labels import coarse_for_phone
 from core.phoneme_boundary.types import (
     BOUNDARY_LABELS,
     CONSONANT_LABELS,
@@ -19,6 +18,7 @@ from core.phoneme_boundary.types import (
     label_sigma_ms,
     normalize_boundary_label,
 )
+from core.phoneme_boundary.phones import coarse_for_phone
 
 
 @dataclass(frozen=True)

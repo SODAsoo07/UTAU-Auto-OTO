@@ -3,18 +3,22 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, List, Sequence
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", "..", ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from core.ja_lab_generator import parse_ja_filename, split_ja_romaji_syllable
+from core.model_context.filename import (
+    canonicalize_order_tokens,
+    edit_distance,
+    filename_expected_tokens,
+    read_lab_tokens,
+)
 
 
 _DEFAULT_IGNORE_LABELS = {
@@ -31,27 +35,6 @@ _DEFAULT_IGNORE_LABELS = {
     "vf",
 }
 
-_ROMAJI_CANON = {
-    "shi": "sh",
-    "si": "sh",
-    "chi": "ch",
-    "ti": "ch",
-    "ji": "j",
-    "zi": "j",
-    "tsu": "ts",
-    "tu": "ts",
-    "fu": "f",
-    "hu": "f",
-    "nn": "n",
-    "xn": "n",
-    "ltsu": "q",
-    "ltu": "q",
-    "xtsu": "q",
-    "xtu": "q",
-    "cl": "q",
-}
-
-
 @dataclass
 class PairRow:
     base: str
@@ -61,99 +44,6 @@ class PairRow:
 
 def _norm(s: str) -> str:
     return str(s or "").strip().lower()
-
-
-def _read_lab_tokens(path: str) -> List[str]:
-    out: List[str] = []
-    with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
-        for raw in f:
-            line = str(raw or "").strip()
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) < 3:
-                continue
-            label = _norm(" ".join(parts[2:]))
-            if label:
-                out.append(label)
-    return out
-
-
-def _explode_onset(onset: str) -> List[str]:
-    o = _norm(onset)
-    if not o:
-        return []
-    split_map = {
-        "ky": ["k", "y"],
-        "gy": ["g", "y"],
-        "ny": ["n", "y"],
-        "hy": ["h", "y"],
-        "my": ["m", "y"],
-        "ry": ["r", "y"],
-        "by": ["b", "y"],
-        "py": ["p", "y"],
-        "dy": ["d", "y"],
-        "ty": ["t", "y"],
-    }
-    if o in split_map:
-        return list(split_map[o])
-    return [_ROMAJI_CANON.get(o, o)]
-
-
-def _filename_expected_tokens(base: str) -> List[str]:
-    tokens: List[str] = []
-    for syllable in parse_ja_filename(base):
-        s = _norm(syllable)
-        if not s or s in {"r", "br", "bre", "breath"}:
-            continue
-        onset, vowel = split_ja_romaji_syllable(s)
-        onset = _norm(onset)
-        vowel = _norm(vowel)
-        if onset:
-            tokens.extend(_explode_onset(onset))
-        if vowel:
-            tokens.append(_ROMAJI_CANON.get(vowel, vowel))
-        if (not onset) and (not vowel):
-            tokens.append(_ROMAJI_CANON.get(s, s))
-    return [t for t in tokens if t]
-
-
-def _canonicalize_tokens(tokens: Iterable[str], *, ignore_labels: set[str]) -> List[str]:
-    out: List[str] = []
-    for raw in tokens:
-        t = _norm(raw)
-        if (not t) or (t in ignore_labels):
-            continue
-        c = _ROMAJI_CANON.get(t, t)
-        if c in ignore_labels:
-            continue
-        out.append(c)
-    return out
-
-
-def _edit_distance(a: Sequence[str], b: Sequence[str]) -> int:
-    n = len(a)
-    m = len(b)
-    if n == 0:
-        return int(m)
-    if m == 0:
-        return int(n)
-    dp = [[0] * (m + 1) for _ in range(n + 1)]
-    for i in range(n + 1):
-        dp[i][0] = i
-    for j in range(m + 1):
-        dp[0][j] = j
-    for i in range(1, n + 1):
-        ai = a[i - 1]
-        for j in range(1, m + 1):
-            bj = b[j - 1]
-            cost = 0 if ai == bj else 1
-            dp[i][j] = min(
-                dp[i - 1][j] + 1,
-                dp[i][j - 1] + 1,
-                dp[i - 1][j - 1] + cost,
-            )
-    return int(dp[n][m])
 
 
 def _iter_pairs(source: str) -> List[PairRow]:
@@ -239,12 +129,12 @@ def main() -> int:
     boundary_only_rows: List[Dict[str, object]] = []
 
     for pair in pairs:
-        observed_raw = _read_lab_tokens(pair.lab_path)
-        expected_raw = _filename_expected_tokens(pair.base)
-        observed = _canonicalize_tokens(observed_raw, ignore_labels=ignore_labels)
-        expected = _canonicalize_tokens(expected_raw, ignore_labels=ignore_labels)
+        observed_raw = read_lab_tokens(pair.lab_path)
+        expected_raw = filename_expected_tokens(pair.base, language="ja")
+        observed = canonicalize_order_tokens(observed_raw, ignore_labels=ignore_labels)
+        expected = canonicalize_order_tokens(expected_raw, ignore_labels=ignore_labels)
 
-        dist = _edit_distance(expected, observed)
+        dist = edit_distance(expected, observed)
         denom = max(1, len(expected), len(observed))
         norm_dist = float(dist) / float(denom)
         gap = abs(len(expected) - len(observed))

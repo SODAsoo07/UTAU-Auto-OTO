@@ -2766,7 +2766,7 @@ class PipelineActionsMixin:
                     default="mfa",
                 )
                 no_mfa_auto_mode = (
-                    aligner_engine in {"none", "coarse_crnn"}
+                    aligner_engine == "none"
                     and lang != "english"
                     and not (lang == "korean" and selected_format in {"cmpx", "c_plus_v"})
                 )
@@ -2775,8 +2775,6 @@ class PipelineActionsMixin:
                     if hasattr(self, "_get_no_mfa_oto_mode_code")
                     else "remap"
                 )
-                if aligner_engine == "coarse_crnn":
-                    no_mfa_mode_code = "remap"
                 no_mfa_mode_text = (
                     "MFA-Free SSL 슬롯 어댑터(실험)"
                     if no_mfa_mode_code == "mfa_free_ssl_slot"
@@ -3131,17 +3129,12 @@ class PipelineActionsMixin:
                 align_err = ""
                 align_engine = self.aligner_var.get()
                 primary_engine = normalize_aligner_name(align_engine, default="mfa")
-                if primary_engine == "coarse_crnn":
-                    primary_engine = "mfa"
-                use_oto_crnn_direct = primary_engine == "coarse_crnn"
                 fallback_engine = ""
                 _set_stage_progress("align", 0.05)
                 if primary_engine == "none":
                     self._set_status("3/5 - 정렬 건너뛰기(no-MFA)")
                 elif primary_engine == "sequence":
                     self._set_status("3/5 - 전용 시퀀스 정렬 준비 중...")
-                elif use_oto_crnn_direct:
-                    self._set_status("3/5 - 정렬 건너뛰기(CRNN OTO 직접 예측)")
                 else:
                     self._set_status("3/5 - MFA 정렬 준비 중...")
                     if not self._ensure_mfa_ready_for_language(lang):
@@ -3159,38 +3152,31 @@ class PipelineActionsMixin:
                     self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
                 elif primary_engine == "sequence":
                     self._append_log("ℹ 정렬 엔진: 전용 시퀀스 baseline")
-                elif use_oto_crnn_direct:
-                    self._append_log("ℹ 레거시 직접 예측 정렬 경로는 비활성화되어 MFA로 폴백합니다.")
                 else:
                     self._append_log("ℹ 정렬 엔진: none (MFA 비사용)")
                 if hasattr(self, "_apply_advanced_tuning_envs"):
                     self._apply_advanced_tuning_envs()
 
-                if use_oto_crnn_direct:
-                    align_result = {"code": "OK", "message": "alignment skipped for CRNN OTO predictor", "ok": True}
-                    align_ok = True
-                    align_err = ""
-                else:
-                    align_result = run_alignment_with_fallback(
-                        language=lang,
-                        wav_folder=wav_dir,
-                        dictionary_path=dict_path,
-                        output_folder=output_dir,
-                        primary_aligner=primary_engine,
-                        fallback_aligner=fallback_engine,
-                        mfa_path=self.mfa_path or "",
-                        mfa_align_profile=(
-                            self._get_mfa_align_profile_code()
-                            if hasattr(self, "_get_mfa_align_profile_code")
-                            else "accurate"
-                        ),
-                        format_hint=selected_format,
-                        callback=_make_stage_callback("align"),
-                    )
-                    align_ok = bool(align_result.get("ok", False))
-                    align_err = str(align_result.get("message", "") or "")
-                    if align_result.get("fallback_used"):
-                        self._append_log(f"ℹ 정렬 fallback 경로: {align_result.get('fallback_path', '')}")
+                align_result = run_alignment_with_fallback(
+                    language=lang,
+                    wav_folder=wav_dir,
+                    dictionary_path=dict_path,
+                    output_folder=output_dir,
+                    primary_aligner=primary_engine,
+                    fallback_aligner=fallback_engine,
+                    mfa_path=self.mfa_path or "",
+                    mfa_align_profile=(
+                        self._get_mfa_align_profile_code()
+                        if hasattr(self, "_get_mfa_align_profile_code")
+                        else "accurate"
+                    ),
+                    format_hint=selected_format,
+                    callback=_make_stage_callback("align"),
+                )
+                align_ok = bool(align_result.get("ok", False))
+                align_err = str(align_result.get("message", "") or "")
+                if align_result.get("fallback_used"):
+                    self._append_log(f"ℹ 정렬 fallback 경로: {align_result.get('fallback_path', '')}")
                 if primary_engine == "none":
                     has_textgrid = False
                     if os.path.isdir(output_dir):

@@ -24,7 +24,7 @@ from core.textio_utils import read_text_auto
 from core.ja_lab_generator import parse_ja_filename
 from core.kr_oto_rules import should_ignore_korean_alias, classify_alias as _classify_kr_alias
 from core.oto_normalization import normalize_wav_key
-from core.coarse_crnn.oto_targets import resolve_cutoff_abs_ms
+from core.model_context.oto_params import resolve_cutoff_abs_ms
 
 
 SIL_MARKS = {"", "sil", "sp", "spn", "pau"}

@@ -57,6 +57,28 @@ def build_stage2_feature_batch(
     return Stage2FeatureBatch(rows=rows, numeric_dim=int(numeric_dim))
 
 
+def build_stage2_feature_batch_from_contexts(
+    *,
+    contexts,
+    candidates: list[BoundaryCandidate],
+    active_start_ms: float = 0.0,
+    active_end_ms: float | None = None,
+    model_quality: float | None = None,
+    audio_reliability: float | None = None,
+) -> Stage2FeatureBatch:
+    from core.model_context.builder import contexts_to_boundary_decode_result
+
+    decoded = contexts_to_boundary_decode_result(contexts)
+    return build_stage2_feature_batch(
+        decoded=decoded,
+        candidates=candidates,
+        active_start_ms=active_start_ms,
+        active_end_ms=active_end_ms,
+        model_quality=model_quality,
+        audio_reliability=audio_reliability,
+    )
+
+
 def build_stage2_feature_row(
     *,
     row: DecodedOtoRow,

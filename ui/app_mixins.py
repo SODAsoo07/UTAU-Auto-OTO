@@ -787,19 +787,9 @@ class AppRuntimeMixin:
         )
         os.environ["UTOA_KR_VC_NEIGHBOR_ENABLE"] = "1" if kr_vc_enabled else "0"
         os.environ["UTOA_JA_VC_NEIGHBOR_ENABLE"] = "1" if ja_vc_enabled else "0"
-        cvn_correction_enabled = (
-            bool(self.cvn_correction_enable_var.get())
-            if hasattr(self, "cvn_correction_enable_var")
-            else True
-        )
-        os.environ["UTOA_CVN_CORRECTION_ENABLE"] = "1" if cvn_correction_enabled else "0"
-        cvn_low_conf_only = (
-            bool(self.cvn_low_conf_only_var.get())
-            if hasattr(self, "cvn_low_conf_only_var")
-            else False
-        )
-        os.environ["UTOA_CVN_LOW_CONF_ONLY"] = "1" if cvn_low_conf_only else "0"
-        os.environ["UTOA_CVN_C_THRESHOLD"] = "0.4"
+        os.environ["UTOA_CVN_CORRECTION_ENABLE"] = "0"
+        os.environ["UTOA_CVN_LOW_CONF_ONLY"] = "0"
+        os.environ.pop("UTOA_CVN_C_THRESHOLD", None)
         mapping_supervised_enabled = (
             bool(self.mapping_supervised_enable_var.get())
             if hasattr(self, "mapping_supervised_enable_var")
@@ -1373,7 +1363,7 @@ class AppRuntimeMixin:
             "kr_continuity_enable_var": True,
             "kr_continuity_max_offset_adj_var": "",
             "vc_correction_enable_var": True,
-            "cvn_correction_enable_var": True,
+            "cvn_correction_enable_var": False,
             "cvn_low_conf_only_var": False,
             "mapping_supervised_enable_var": True,
             "mapping_supervised_mode_var": "자동(권장)",
@@ -3416,7 +3406,7 @@ class ConfigMixin:
             ),
             "oto_crnn_device": self.oto_crnn_device_var.get() if hasattr(self, "oto_crnn_device_var") else "auto",
             "oto_crnn_special_aliases": self.oto_crnn_special_aliases_var.get() if hasattr(self, "oto_crnn_special_aliases_var") else "",
-            "cvn_correction_enable": self.cvn_correction_enable_var.get() if hasattr(self, "cvn_correction_enable_var") else True,
+            "cvn_correction_enable": False,
             "cvn_low_conf_only": self.cvn_low_conf_only_var.get() if hasattr(self, "cvn_low_conf_only_var") else False,
             "mapping_supervised_enable": self.mapping_supervised_enable_var.get() if hasattr(self, "mapping_supervised_enable_var") else True,
             "mapping_supervised_mode": (
@@ -3585,9 +3575,9 @@ class ConfigMixin:
             if hasattr(self, "enable_ml_correction_var"):
                 self.enable_ml_correction_var.set(bool(config.get("enable_ml_correction", True)))
             if hasattr(self, "cvn_correction_enable_var"):
-                self.cvn_correction_enable_var.set(bool(config.get("cvn_correction_enable", True)))
+                self.cvn_correction_enable_var.set(False)
             if hasattr(self, "cvn_low_conf_only_var"):
-                self.cvn_low_conf_only_var.set(bool(config.get("cvn_low_conf_only", False)))
+                self.cvn_low_conf_only_var.set(False)
             if hasattr(self, "mapping_supervised_enable_var"):
                 self.mapping_supervised_enable_var.set(bool(config.get("mapping_supervised_enable", True)))
             if hasattr(self, "mapping_supervised_mode_var"):
@@ -3657,7 +3647,6 @@ class ConfigMixin:
                 aligner_label_map = {
                     "none": "MFA",
                     "sequence": "전용(시퀀스)",
-                    "coarse_crnn": "MFA",
                     "mfa": "MFA",
                 }
                 self.aligner_var.set(aligner_label_map.get(saved_aligner, "MFA"))

@@ -51,7 +51,6 @@ EXCLUDED_MODULES = [
     "tests",
 ]
 EXCLUDED_TRAINING_MODULES = [
-    "core.cvn_training",
     "core.mapping_supervised_training",
     "core.oto_ml.coupled.training",
     "core.oto_ml_collection",
@@ -90,17 +89,6 @@ RUNTIME_DATA_PATHS = [
     (
         os.path.join(APP_DIR, "models", "_build_included_oto_correction_models", "assets", "models", "oto_ml"),
         "assets/models/oto_ml",
-    ),
-    (
-        os.path.join(
-            APP_DIR,
-            "models",
-            "_build_included_oto_correction_models",
-            "models",
-            "coarse_crnn",
-            "oto_anchor_crnn_role_v2.pt",
-        ),
-        "models/coarse_crnn",
     ),
     (os.path.join(APP_DIR, "assets", "bootstrap", "get-pip.py"), "assets/bootstrap"),
     # ml/configs: include only the two files that are actually read at runtime.
@@ -204,9 +192,7 @@ RELEASE_MODEL_PRUNE_FILE_EXTENSIONS = {
     ".pth",
     ".pt",
 }
-RELEASE_ALLOWED_MODEL_FILE_PATHS = {
-    "models/coarse_crnn/oto_anchor_crnn_role_v2.pt",
-}
+RELEASE_ALLOWED_MODEL_FILE_PATHS = set()
 APP_ICON_CANDIDATES = [
     os.path.join(APP_DIR, "release_assets", "AutoOTO-icon.ico"),
     os.path.join(APP_DIR, "AutoOTO-icon.ico"),

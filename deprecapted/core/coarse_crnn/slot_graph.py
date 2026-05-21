@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import os
-import re
 from typing import Any, Sequence
 
 from core.coarse_crnn.alias_role import normalize_role
+from core.model_context.filename import filename_order_tokens as _model_context_filename_order_tokens
 
 
 SLOT_TYPES: tuple[str, ...] = ("other", "anchor", "boundary", "final", "silence")
 
-_ORDER_TOKEN_RE = re.compile(r"[A-Za-z0-9\uAC00-\uD7A3]+")
 _ANCHOR_ROLES = {"-cv", "cv", "v", "special"}
 _BOUNDARY_ROLES = {"vc", "vv", "v-cv"}
 _FINAL_ROLES = {"cv-", "v-", "endbr"}
@@ -32,13 +30,7 @@ _ROLE_ORDER = {
 
 
 def filename_order_tokens(wav_name: object) -> list[str]:
-    stem = os.path.splitext(os.path.basename(str(wav_name or "")))[0]
-    out: list[str] = []
-    for raw in _ORDER_TOKEN_RE.findall(stem):
-        token = str(raw or "").strip().lower().strip("*-_")
-        if token:
-            out.append(token)
-    return out
+    return _model_context_filename_order_tokens(wav_name)
 
 
 def slot_type_for_role(alias_role: object) -> str:

@@ -6,7 +6,6 @@ import os
 import re
 import statistics
 import sys
-import wave
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,6 +18,7 @@ if _REPO_ROOT not in sys.path:
 
 from core.ja_lab_generator import parse_ja_filename
 from core.ja_oto_mapping import classify_ja_alias
+from core.model_context.oto_params import safe_cutoff_abs_ms, wav_duration_ms
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 
 PAUSE_LABELS = {
@@ -53,45 +53,6 @@ class LabRow:
     start: int
     end: int
     label: str
-
-
-def _wav_duration_ms(path: str) -> float:
-    try:
-        with wave.open(path, "rb") as wf:
-            nframes = int(wf.getnframes() or 0)
-            sr = int(wf.getframerate() or 0)
-    except Exception:
-        return 0.0
-    if nframes <= 0 or sr <= 0:
-        return 0.0
-    return float(nframes) * 1000.0 / float(sr)
-
-
-def _wav_duration_100ns(path: str) -> int:
-    return int(round(_wav_duration_ms(path) * 10_000.0))
-
-
-def _safe_cutoff_abs_ms(offset_ms: float, cutoff: float, wav_duration_ms: float) -> float:
-    off = max(0.0, float(offset_ms))
-    cut = float(cutoff)
-    wav_dur = max(0.0, float(wav_duration_ms))
-
-    if cut < 0.0:
-        resolved = off + abs(cut)
-    else:
-        rel = off + cut
-        abs_candidate = cut
-        candidates = [rel]
-        if abs_candidate > off:
-            candidates.append(abs_candidate)
-        if wav_dur > 1.0:
-            candidates = [c for c in candidates if c <= (wav_dur + 2.0)] or candidates
-        target = rel
-        resolved = min(candidates, key=lambda c: abs(float(c) - target))
-
-    if wav_dur > 1.0:
-        resolved = min(resolved, wav_dur - 1.0)
-    return max(off + 1.0, float(resolved))
 
 
 def _iter_wavs(root: str) -> List[str]:
@@ -356,8 +317,8 @@ def main() -> int:
             wav_key = wav_name.strip().lower()
             source_base = os.path.splitext(wav_name)[0]
             base = f"{rel_key}__{source_base}"
-            wav_duration_ms = _wav_duration_ms(wav_path)
-            wav_end_100ns = int(round(wav_duration_ms * 10_000.0))
+            wav_duration_ms_value = wav_duration_ms(wav_path)
+            wav_end_100ns = int(round(wav_duration_ms_value * 10_000.0))
             if wav_end_100ns <= 0:
                 continue
 
@@ -373,14 +334,19 @@ def main() -> int:
             if cv_rows:
                 start_ms = min(max(0.0, float(r.offset_ms)) for r in cv_rows)
                 end_ms = max(
-                    _safe_cutoff_abs_ms(float(r.offset_ms), float(r.cutoff), wav_duration_ms)
+                    safe_cutoff_abs_ms(
+                        float(r.offset_ms),
+                        float(r.cutoff),
+                        wav_duration_ms_value,
+                        convention="legacy_candidate",
+                    )
                     for r in cv_rows
                 )
-                start_ms = max(0.0, min(start_ms, wav_duration_ms))
-                end_ms = max(start_ms + 1.0, min(end_ms, wav_duration_ms))
+                start_ms = max(0.0, min(start_ms, wav_duration_ms_value))
+                end_ms = max(start_ms + 1.0, min(end_ms, wav_duration_ms_value))
             else:
                 start_ms = 0.0
-                end_ms = wav_duration_ms
+                end_ms = wav_duration_ms_value
 
             start_100ns = int(round(start_ms * 10_000.0))
             end_100ns = int(round(end_ms * 10_000.0))

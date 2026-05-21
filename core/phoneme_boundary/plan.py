@@ -3,8 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 
-from core.coarse_crnn.labels import coarse_for_phone
-from core.coarse_crnn.lang import normalize_language, phones_from_text
+from core.phoneme_boundary.phones import coarse_for_phone, normalize_language, phones_from_text
 from core.phoneme_boundary.types import AliasPlan, PhonemePlan, PhoneToken
 
 

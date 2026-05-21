@@ -11,6 +11,8 @@ from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
+from core.model_context.audio import build_wav_index
+from core.model_context.oto_params import safe_cutoff_abs_ms, wav_duration_ms
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 from core.oto_ml_features import classify_alias_type
 from core.oto_normalization import canonicalize_alias_for_matching, normalize_wav_key
@@ -103,31 +105,6 @@ def _safe_float(value: object, default: float = 0.0) -> float:
     except Exception:
         pass
     return float(default)
-
-
-def _safe_cutoff_abs_ms(
-    offset_ms: float,
-    cutoff: float,
-    wav_duration_ms: float,
-    *,
-    convention: str = "auto",
-) -> float:
-    off = max(0.0, _safe_float(offset_ms))
-    cut = _safe_float(cutoff)
-    dur = max(0.0, _safe_float(wav_duration_ms))
-    if cut < 0.0:
-        resolved = off + abs(cut)
-    elif convention == "positive_tail" and dur > 1.0:
-        resolved = dur - cut
-    elif convention == "positive_relative":
-        resolved = off + cut
-    elif dur > 1.0 and cut > max(300.0, dur * 0.45):
-        resolved = dur - cut
-    else:
-        resolved = off + cut
-    if dur > 1.0:
-        resolved = min(resolved, max(off + 1.0, dur - 1.0))
-    return max(off + 1.0, resolved)
 
 
 def _manual_timing_looks_configured(
@@ -254,35 +231,6 @@ def _read_manual_oto_rows(path: str, language: str) -> List[ManualOtoRow]:
     return rows
 
 
-def _build_wav_index(voicebank_dir: str) -> Dict[str, str]:
-    root = os.path.abspath(str(voicebank_dir or "").strip())
-    index: Dict[str, str] = {}
-    if not os.path.isdir(root):
-        return index
-    for dp, _dns, fns in os.walk(root):
-        for fn in fns:
-            if not fn.lower().endswith(".wav"):
-                continue
-            path = os.path.join(dp, fn)
-            rel = os.path.relpath(path, root)
-            for key in {
-                normalize_wav_key(fn),
-                normalize_wav_key(rel),
-                normalize_wav_key(os.path.splitext(rel)[0]),
-            }:
-                if key and key not in index:
-                    index[key] = path
-    return index
-
-
-def _wav_duration_ms(path: str) -> float:
-    try:
-        _signal, _sr, duration_sec = _read_pcm_as_float_mono(path)
-        return max(0.0, float(duration_sec) * 1000.0)
-    except Exception:
-        return 0.0
-
-
 def _resolve_voicebank_cutoff_convention(
     rows_by_wav: Dict[str, List[ManualOtoRow]],
     wav_index: Dict[str, str],
@@ -290,7 +238,7 @@ def _resolve_voicebank_cutoff_convention(
     counts: Counter[str] = Counter()
     for wav_norm, rows in rows_by_wav.items():
         wav_path = wav_index.get(wav_norm)
-        dur = _wav_duration_ms(wav_path) if wav_path else 0.0
+        dur = wav_duration_ms(wav_path) if wav_path else 0.0
         if dur <= 1.0:
             continue
         for row in rows:
@@ -584,7 +532,7 @@ def _pick_teacher_anchor(
     anchors = _non_pause_word_rows(analysis)
     if not anchors:
         return 0.0, analysis.duration_ms, "fallback_full_file", 0, "spn"
-    manual_cutoff_abs = _safe_cutoff_abs_ms(
+    manual_cutoff_abs = safe_cutoff_abs_ms(
         row.offset_ms,
         row.cutoff,
         analysis.duration_ms,
@@ -806,7 +754,7 @@ def _row_to_record(
         language=language,
     )
     base = _baseline_params_from_anchor(anchor_start, anchor_end, row.alias_type)
-    manual_cutoff_abs = _safe_cutoff_abs_ms(
+    manual_cutoff_abs = safe_cutoff_abs_ms(
         row.offset_ms,
         row.cutoff,
         analysis.duration_ms,
@@ -1011,7 +959,12 @@ def build_sequence_residual_dataset(
     oto_abs = os.path.abspath(str(manual_oto_path or "").strip())
     voicebank_id = re.sub(r"[^0-9A-Za-z_.-]+", "_", os.path.basename(voicebank_abs).strip()) or "voicebank"
     rows = _read_manual_oto_rows(oto_abs, lang)
-    wav_index = _build_wav_index(voicebank_abs)
+    wav_index = build_wav_index(
+        voicebank_abs,
+        normalize_key_fn=normalize_wav_key,
+        include_relative=True,
+        include_stem=True,
+    )
     grouped: Dict[str, List[ManualOtoRow]] = defaultdict(list)
     for row in rows:
         grouped[row.wav_norm].append(row)

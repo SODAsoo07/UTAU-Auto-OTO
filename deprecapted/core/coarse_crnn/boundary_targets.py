@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import wave
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from typing import Any
@@ -28,46 +27,27 @@ from core.coarse_crnn.lang import normalize_language
 from core.coarse_crnn.labels import coarse_for_phone
 from core.coarse_crnn.lang import phones_from_text
 from core.coarse_crnn.slot_graph import filename_order_tokens
+from core.model_context.oto_params import (
+    absolute_anchors_to_oto_params as _model_context_absolute_anchors_to_oto_params,
+    oto_row_to_absolute_anchors as _model_context_oto_row_to_absolute_anchors,
+    wav_duration_ms as _model_context_wav_duration_ms,
+)
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 
 
 def oto_row_to_absolute_anchors(*, offset: float, consonant: float, cutoff: float, preutterance: float, overlap: float, duration_ms: float) -> AbsoluteOtoAnchors:
-    offset_abs = max(0.0, float(offset))
-    pre_abs = max(offset_abs, offset_abs + max(0.0, float(preutterance)))
-    overlap_abs = min(pre_abs, max(offset_abs, offset_abs + max(0.0, float(overlap))))
-    consonant_abs = max(pre_abs, offset_abs + max(0.0, float(consonant)))
-    if float(cutoff) < 0.0:
-        # Runtime convention in this project: negative cutoff is offset-relative.
-        cutoff_abs = max(consonant_abs + 1.0, offset_abs + abs(float(cutoff)))
-    else:
-        cutoff_abs = max(consonant_abs + 1.0, offset_abs + float(cutoff))
-    duration = max(1.0, float(duration_ms))
-    cutoff_abs = min(max(consonant_abs + 1.0, cutoff_abs), duration)
-    return AbsoluteOtoAnchors(
-        offset_abs=offset_abs,
-        overlap_abs=overlap_abs,
-        pre_abs=pre_abs,
-        consonant_abs=consonant_abs,
-        cutoff_abs=cutoff_abs,
-        confidence=1.0,
-        reason="source",
+    return _model_context_oto_row_to_absolute_anchors(
+        offset=offset,
+        consonant=consonant,
+        cutoff=cutoff,
+        preutterance=preutterance,
+        overlap=overlap,
+        duration_ms=duration_ms,
     )
 
 
 def absolute_anchors_to_oto_params(anchors: AbsoluteOtoAnchors, *, duration_ms: float) -> dict[str, float]:
-    offset = max(0.0, float(anchors.offset_abs))
-    pre = max(offset, float(anchors.pre_abs))
-    ovl = min(pre, max(offset, float(anchors.overlap_abs)))
-    cons = max(pre, float(anchors.consonant_abs))
-    cutoff_abs = max(cons + 1.0, min(float(duration_ms), float(anchors.cutoff_abs)))
-    return {
-        "offset": offset,
-        "preutterance": max(0.0, pre - offset),
-        "overlap": max(0.0, ovl - offset),
-        "consonant": max(1.0, cons - offset),
-        # Runtime convention: store cutoff as negative offset-relative distance.
-        "cutoff": -max(1.0, cutoff_abs - offset),
-    }
+    return _model_context_absolute_anchors_to_oto_params(anchors, duration_ms=duration_ms)
 
 
 @dataclass(frozen=True)
@@ -671,15 +651,7 @@ def training_rows_to_wav_groups(rows: list[dict[str, Any]]) -> dict[str, list[tu
 
 
 def _wav_duration_ms(path: str) -> float:
-    if not path or not os.path.isfile(path):
-        return 0.0
-    try:
-        with wave.open(str(path), "rb") as wf:
-            frames = int(wf.getnframes() or 0)
-            sr = int(wf.getframerate() or 0)
-        return float(frames) * 1000.0 / float(sr) if frames > 0 and sr > 0 else 0.0
-    except Exception:
-        return 0.0
+    return _model_context_wav_duration_ms(path)
 
 
 def _parse_alias_components(alias: str, language: str) -> dict[str, str | None]:
