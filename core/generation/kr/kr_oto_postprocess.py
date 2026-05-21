@@ -322,6 +322,13 @@ def guard_kr_vcv_pre_to_cv_boundary(
                     offset, consonant, cutoff, pre, ovl, new_offset=new_offset
                 )
 
+    # The previous-vowel tail guard above may have moved Offset. Pre is
+    # Offset-relative, so re-anchor it to the current CV boundary; otherwise
+    # preutterance drifts off the boundary and produces slurred VCV output.
+    anchored_pre = onset_abs - float(offset)
+    if anchored_pre > 0.0 and abs((float(offset) + float(pre)) - onset_abs) > 4.0:
+        pre = anchored_pre
+
     # Maintain consonant and cutoff around current vowel body.
     onset_rel = max(onset_abs - float(offset), float(pre))
     vowel_end_rel = max(vowel_end_abs - float(offset), onset_rel + 20.0)
