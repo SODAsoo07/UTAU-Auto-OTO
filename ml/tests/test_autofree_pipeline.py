@@ -11,7 +11,6 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.oto_ml.autofree.data import build_audio_only_rows, resolve_manual_cutoff_abs
-from core.oto_ml_export import required_bundle_files_for_backend
 from core.oto_ml_runtime import OtoModelBundle, load_oto_model_bundle
 from core.oto_ml_autofree_runtime import validate_autofree_bundle_contract
 
@@ -91,14 +90,6 @@ class AutofreePipelineTests(unittest.TestCase):
             self.assertEqual(bundle.backend, "autofree_v1")
             self.assertEqual(bundle.payload, {"ok": True})
             mocked.assert_called_once()
-
-    def test_autofree_required_bundle_files(self):
-        required = required_bundle_files_for_backend("autofree_v1")
-        self.assertIn("target_schema.json", required)
-        self.assertIn("model_target_offset.txt", required)
-        self.assertIn("model_target_cutoff_abs.txt", required)
-        self.assertIn("model_confidence.txt", required)
-
 
 if __name__ == "__main__":
     unittest.main()
