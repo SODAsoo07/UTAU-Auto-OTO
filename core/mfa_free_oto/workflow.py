@@ -7,6 +7,7 @@ from pathlib import Path
 from statistics import mean
 from typing import Callable, Iterable, Mapping
 
+from core.generation.common.oto_file_utils import apply_alias_suffix
 from core.model_context.builder import row_specs_to_model_contexts
 from core.model_context.oto_rows import load_row_specs_from_source_oto
 
@@ -21,6 +22,20 @@ from .oto_adapter import (
     load_oto_template_rows_alias_only,
 )
 from .runtime_inference import RuntimePrediction, predict_wav
+
+# Weights for the aggregate NoMfaWorkflowReport.confidence score. Must sum to 1.0.
+_CONF_WEIGHT_ANCHOR = 0.30
+_CONF_WEIGHT_SLOT = 0.28
+_CONF_WEIGHT_CV_BOUNDARY = 0.22
+_CONF_WEIGHT_NUCLEUS = 0.20
+# Slot warnings beyond _CONF_SLOT_WARNING_FREE each subtract _CONF_SLOT_WARNING_PENALTY.
+_CONF_SLOT_WARNING_FREE = 2
+_CONF_SLOT_WARNING_PENALTY = 0.02
+
+# Boundary-evidence repair offsets (ms).
+_C_ONSET_LEAD_MS = 18.0  # consonant onset placed this far before the vowel start
+_C_ONSET_REPAIR_MS = 6.0  # fallback gap when c_onset lands after the cv boundary
+_V_OFFSET_REPAIR_MS = 8.0  # fallback gap when v_offset lands before the cv boundary
 
 
 @dataclass(frozen=True)
@@ -151,7 +166,7 @@ def generate_no_mfa_oto_with_model_context(
             _collect_prediction_metrics(prediction, slot_scores, warnings)
             slot_warning_count += len(prediction.slot_result.warnings if prediction.slot_result is not None else ())
             decoded_source = _event_source_for_oto(prediction)
-            file_duration_ms = _wav_duration_ms(wav_path)
+            file_duration_ms = _wav_duration_ms(wav_path, warnings)
             row_anchors = assign_template_row_anchors(
                 prediction.posterior,
                 decoded_source,
@@ -200,7 +215,7 @@ def generate_no_mfa_oto_with_model_context(
                         warnings=tuple(dict.fromkeys((*adapted.warnings, *evidence.warnings))),
                     )
                 )
-                all_lines.append(_append_alias_suffix(adapted.format_line(), alias_suffix))
+                all_lines.append(apply_alias_suffix(adapted.format_line(), alias_suffix))
     else:
         wav_files = sorted(Path(wav_root).glob("*.wav"))
         for wav_path in wav_files:
@@ -219,7 +234,7 @@ def generate_no_mfa_oto_with_model_context(
                 wav_path.name,
                 wav_path.stem,
                 anchors[0] if anchors else None,
-                file_duration_ms=_wav_duration_ms(str(wav_path)),
+                file_duration_ms=_wav_duration_ms(str(wav_path), warnings),
                 config=OtoAdapterConfig(
                     mode="bootstrap",
                     language=language,
@@ -252,7 +267,7 @@ def generate_no_mfa_oto_with_model_context(
                     warnings=tuple(dict.fromkeys((*adapted.warnings, *evidence.warnings))),
                 )
             )
-            all_lines.append(_append_alias_suffix(adapted.format_line(), alias_suffix))
+            all_lines.append(apply_alias_suffix(adapted.format_line(), alias_suffix))
 
     if rows_total <= 0 or not all_lines:
         errors.append("no_rows_generated")
@@ -281,11 +296,11 @@ def generate_no_mfa_oto_with_model_context(
         0.0,
         min(
             1.0,
-            (0.30 * avg_anchor)
-            + (0.28 * avg_slot)
-            + (0.22 * avg_cv_conf)
-            + (0.20 * avg_nucleus_conf)
-            - (0.02 * float(max(0, slot_warning_count - 2))),
+            (_CONF_WEIGHT_ANCHOR * avg_anchor)
+            + (_CONF_WEIGHT_SLOT * avg_slot)
+            + (_CONF_WEIGHT_CV_BOUNDARY * avg_cv_conf)
+            + (_CONF_WEIGHT_NUCLEUS * avg_nucleus_conf)
+            - (_CONF_SLOT_WARNING_PENALTY * float(max(0, slot_warning_count - _CONF_SLOT_WARNING_FREE))),
         ),
     )
     guard_reasons: list[str] = []
@@ -441,15 +456,15 @@ def _build_boundary_evidence(posterior, adapted) -> BoundaryEvidence:
     c_onset = None
     cv_boundary = float(anchor.anchor_abs_ms)
     if anchor.vowel_start_abs_ms is not None:
-        c_onset = max(0.0, float(anchor.vowel_start_abs_ms) - 18.0)
+        c_onset = max(0.0, float(anchor.vowel_start_abs_ms) - _C_ONSET_LEAD_MS)
     v_offset = float(anchor.vowel_end_abs_ms) if anchor.vowel_end_abs_ms is not None else None
     nucleus = float(anchor.vowel_nucleus_abs_ms) if anchor.vowel_nucleus_abs_ms is not None else cv_boundary
     warnings: list[str] = []
     if c_onset is not None and cv_boundary is not None and c_onset > cv_boundary:
-        c_onset = max(0.0, cv_boundary - 6.0)
+        c_onset = max(0.0, cv_boundary - _C_ONSET_REPAIR_MS)
         warnings.append("c_onset_repaired")
     if v_offset is not None and cv_boundary is not None and v_offset < cv_boundary:
-        v_offset = cv_boundary + 8.0
+        v_offset = cv_boundary + _V_OFFSET_REPAIR_MS
         warnings.append("v_offset_repaired")
     if nucleus is not None and cv_boundary is not None and nucleus < cv_boundary:
         nucleus = cv_boundary
@@ -473,30 +488,13 @@ def _row_confidence(adapted, evidence: BoundaryEvidence) -> float:
     return _safe_conf((0.55 * base_anchor) + (0.45 * evidence.confidence) - warning_penalty)
 
 
-def _append_alias_suffix(line: str, suffix: str) -> str:
-    normalized = str(suffix or "").strip()
-    if normalized.startswith("_"):
-        normalized = normalized[1:]
-    if not normalized or "=" not in str(line or ""):
-        return line
-    left, right = str(line).split("=", 1)
-    if "," in right:
-        alias, rest = right.split(",", 1)
-        alias = str(alias or "").strip()
-        if alias:
-            alias = f"{alias}_{normalized}"
-        return f"{left}={alias},{rest}"
-    alias = str(right or "").strip()
-    if alias:
-        alias = f"{alias}_{normalized}"
-    return f"{left}={alias}"
-
-
-def _wav_duration_ms(path: str) -> float:
+def _wav_duration_ms(path: str, warnings: list[str] | None = None) -> float:
     try:
         with wave.open(str(path), "rb") as handle:
             rate = max(1, int(handle.getframerate()))
             frames = max(0, int(handle.getnframes()))
             return 1000.0 * float(frames) / float(rate)
-    except Exception:
+    except (wave.Error, EOFError, OSError) as exc:
+        if warnings is not None:
+            warnings.append(f"wav_duration_unavailable:{os.path.basename(str(path))}:{exc}")
         return 0.0

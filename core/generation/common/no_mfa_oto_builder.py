@@ -9,7 +9,7 @@ import wave
 from statistics import median
 from typing import Callable
 
-from core.oto_file_utils import parse_oto_line, read_text_with_fallback
+from core.oto_file_utils import apply_alias_suffix, parse_oto_line, read_text_with_fallback
 from core.oto_normalization import normalize_wav_key
 
 _CLASSIFY_ALIAS_TYPE_FN = None
@@ -19,30 +19,6 @@ _LAST_NO_MFA_RUNTIME_META: dict[str, object] = {}
 def _log(callback: Callable[[str], None] | None, message: str) -> None:
     if callable(callback):
         callback(message)
-
-
-def _normalize_alias_suffix(suffix: str) -> str:
-    text = str(suffix or "").strip()
-    if not text:
-        return ""
-    return text[1:] if text.startswith("_") else text
-
-
-def _apply_suffix_to_oto_line(line: str, suffix: str) -> str:
-    normalized_suffix = _normalize_alias_suffix(suffix)
-    if not normalized_suffix or "=" not in str(line or ""):
-        return line
-    left, right = str(line).split("=", 1)
-    if "," in right:
-        alias, rest = right.split(",", 1)
-        alias = alias.strip()
-        if alias:
-            alias = f"{alias}_{normalized_suffix}"
-        return f"{left}={alias},{rest}"
-    alias = right.strip()
-    if alias:
-        alias = f"{alias}_{normalized_suffix}"
-    return f"{left}={alias}"
 
 
 def _pick_existing_oto(path: str) -> str:
@@ -137,10 +113,14 @@ def resolve_no_mfa_stats_oto(*, stats_hint: str = "") -> str:
     return ""
 
 
-def _load_oto_lines(source_oto_path: str) -> list[str]:
+def _load_oto_lines(source_oto_path: str, callback: Callable[[str], None] | None = None) -> list[str]:
     path = str(source_oto_path or "").strip()
     if not path:
         return []
+    if not os.path.isfile(path):
+        _log(callback, f"[No-MFA] base OTO not found: {path}")
+        return []
+    last_error = ""
     for encoding in ("utf-8-sig", "cp932", "cp949", "euc-kr", "utf-8"):
         try:
             with open(path, "r", encoding=encoding) as handle:
@@ -150,9 +130,16 @@ def _load_oto_lines(source_oto_path: str) -> list[str]:
                     if not line or "=" not in line:
                         continue
                     rows.append(line)
-                return rows
-        except Exception:
+            if encoding not in ("utf-8-sig", "utf-8"):
+                _log(callback, f"[No-MFA] base OTO decoded as {encoding}: {path}")
+            return rows
+        except UnicodeDecodeError as exc:
+            last_error = f"{encoding}: {exc}"
             continue
+        except OSError as exc:
+            _log(callback, f"[No-MFA] base OTO read error: {exc}")
+            return []
+    _log(callback, f"[No-MFA] base OTO decode failed for all encodings ({last_error})")
     return []
 
 
@@ -1535,7 +1522,7 @@ def generate_no_mfa_auto_oto(
     if not source:
         return 0, 0, ["No-MFA 자동설정용 베이스 OTO를 찾지 못했습니다."]
 
-    source_rows = _load_oto_lines(source)
+    source_rows = _load_oto_lines(source, callback)
     if not source_rows:
         return 0, 0, [f"No-MFA 자동설정용 베이스 OTO를 읽지 못했습니다: {source}"]
 
@@ -1731,7 +1718,7 @@ def generate_no_mfa_auto_oto(
             if seq_changed:
                 candidate = seq_line
                 sequence_residual_changed += 1
-        candidate = _apply_suffix_to_oto_line(candidate, alias_suffix)
+        candidate = apply_alias_suffix(candidate, alias_suffix)
         if "=" not in candidate:
             continue
         left_out, right_out = candidate.split("=", 1)
