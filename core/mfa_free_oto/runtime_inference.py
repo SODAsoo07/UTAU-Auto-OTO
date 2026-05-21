@@ -14,6 +14,11 @@ from .model import MfaFreeFrameModelConfig, build_frame_model
 from .slot_viterbi import ExpectedSlot, SlotViterbiResult, assign_slots_viterbi, slot_assignments_to_decoded_events
 from .types import DecodedEvent, EVENT_LABELS, FRAME_LABELS, FramePosterior
 
+WORLD_V1_CHECKPOINT_FORMAT = "mfa_free_oto_frame_model_world_v1_v1"
+WORLD_V1_FEATURE_SET = "world_v1"
+WORLD_V1_FRAME_MS = 25.0
+WORLD_V1_HOP_MS = 10.0
+
 
 @dataclass(frozen=True)
 class RuntimeInferenceConfig:
@@ -83,7 +88,8 @@ def predict_wav(
     if checkpoint_file and os.path.isfile(checkpoint_file):
         try:
             checkpoint, model, target_device = _load_runtime_checkpoint(checkpoint_file, device)
-            encoder_name = encoder or str(checkpoint.get("encoder") or encoder_name)
+            encoder_name = str(encoder or checkpoint.get("encoder") or encoder_name)
+            _validate_checkpoint_metadata_for_world_v1(checkpoint=checkpoint, encoder_name=encoder_name)
             posterior = _predict_posterior_with_loaded_model(
                 wav_path,
                 checkpoint=checkpoint,
@@ -196,7 +202,9 @@ def _predict_posterior_with_loaded_model(
         metadata={
             "encoder": encoder,
             "checkpoint_encoder": checkpoint.get("encoder"),
-            "acoustic_feature_set": "world_v1" if "world" in str(encoder).lower() else "",
+            "checkpoint_format_version": checkpoint.get("format_version") or checkpoint.get("format"),
+            "checkpoint_acoustic_feature_set": checkpoint.get("acoustic_feature_set"),
+            "acoustic_feature_set": WORLD_V1_FEATURE_SET if "world" in str(encoder).lower() else "",
             "rule_based": False,
         },
     )
@@ -261,7 +269,7 @@ def _predict_posterior_rule_based(
         metadata={
             "encoder": encoder,
             "rule_based": True,
-            "acoustic_feature_set": "world_v1",
+            "acoustic_feature_set": WORLD_V1_FEATURE_SET,
             **(metadata or {}),
         },
     )
@@ -281,3 +289,55 @@ def _expected_phones(row: dict) -> list[str]:
         if phone:
             phones.append(phone)
     return phones
+
+
+def _validate_checkpoint_metadata_for_world_v1(*, checkpoint: dict, encoder_name: str) -> None:
+    normalized_encoder = str(encoder_name or "").strip().lower().replace("_", "-")
+    if "world" not in normalized_encoder:
+        return
+    format_version = _required_checkpoint_str(checkpoint, "format_version", fallback_key="format")
+    if format_version != WORLD_V1_CHECKPOINT_FORMAT:
+        raise RuntimeError(
+            f"checkpoint_format_mismatch:{format_version}!= {WORLD_V1_CHECKPOINT_FORMAT}"
+        )
+    feature_set = _required_checkpoint_str(checkpoint, "acoustic_feature_set")
+    if feature_set.lower() != WORLD_V1_FEATURE_SET:
+        raise RuntimeError(f"checkpoint_feature_set_mismatch:{feature_set}!={WORLD_V1_FEATURE_SET}")
+    frame_labels = tuple(str(item) for item in checkpoint.get("frame_labels") or ())
+    event_labels = tuple(str(item) for item in checkpoint.get("event_labels") or ())
+    if frame_labels != FRAME_LABELS:
+        raise RuntimeError("checkpoint_frame_labels_mismatch")
+    if event_labels != EVENT_LABELS:
+        raise RuntimeError("checkpoint_event_labels_mismatch")
+    acoustic_cfg = checkpoint.get("acoustic_config")
+    if not isinstance(acoustic_cfg, dict):
+        raise RuntimeError("checkpoint_missing:acoustic_config")
+    frame_ms = _required_checkpoint_float(acoustic_cfg, "frame_ms")
+    hop_ms = _required_checkpoint_float(acoustic_cfg, "hop_ms")
+    if abs(frame_ms - WORLD_V1_FRAME_MS) > 1e-6:
+        raise RuntimeError(f"checkpoint_frame_ms_mismatch:{frame_ms}!={WORLD_V1_FRAME_MS}")
+    if abs(hop_ms - WORLD_V1_HOP_MS) > 1e-6:
+        raise RuntimeError(f"checkpoint_hop_ms_mismatch:{hop_ms}!={WORLD_V1_HOP_MS}")
+
+
+def _required_checkpoint_str(payload: dict, key: str, *, fallback_key: str | None = None) -> str:
+    if key in payload:
+        value = payload.get(key)
+    elif fallback_key and fallback_key in payload:
+        value = payload.get(fallback_key)
+    else:
+        raise RuntimeError(f"checkpoint_missing:{key}")
+    text = str(value or "").strip()
+    if not text:
+        raise RuntimeError(f"checkpoint_invalid:{key}")
+    return text
+
+
+def _required_checkpoint_float(payload: dict, key: str) -> float:
+    if key not in payload:
+        raise RuntimeError(f"checkpoint_missing:{key}")
+    raw = payload.get(key)
+    try:
+        return float(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"checkpoint_invalid:{key}") from exc

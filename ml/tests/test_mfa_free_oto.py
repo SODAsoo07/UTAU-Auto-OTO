@@ -35,6 +35,7 @@ from core.mfa_free_oto.oto_adapter import (
     parse_template_oto_line,
 )
 from core.mfa_free_oto.review_overlay import render_review_html
+from core.mfa_free_oto import runtime_inference as runtime_inference_module
 from core.mfa_free_oto.slot_viterbi import (
     SlotAssignment,
     SlotViterbiResult,
@@ -822,6 +823,10 @@ def test_model_context_runtime_workflow_generates_oto_and_quality_meta(tmp_path,
     assert report.confidence > 0.5
     assert out_oto.is_file()
     assert "a.wav=" in out_oto.read_text(encoding="utf-8")
+    assert report.rows
+    evidence = report.rows[0].boundary_evidence
+    assert 0.0 <= evidence.cv_confidence <= 1.0
+    assert 0.0 <= evidence.nucleus_confidence <= 1.0
 
 
 def test_model_context_runtime_workflow_ignores_source_timing_values(tmp_path, monkeypatch):
@@ -882,6 +887,47 @@ def test_model_context_runtime_workflow_ignores_source_timing_values(tmp_path, m
         assert be.c_onset <= be.cv_boundary
     if be.cv_boundary is not None and be.nucleus is not None:
         assert be.cv_boundary <= be.nucleus
+    assert 0.0 <= be.cv_confidence <= 1.0
+    assert 0.0 <= be.nucleus_confidence <= 1.0
+
+
+def test_runtime_rejects_checkpoint_metadata_mismatch_and_falls_back_rule_based(tmp_path, monkeypatch):
+    wav_path = tmp_path / "a.wav"
+    _write_tone_wav(wav_path, duration_s=0.30)
+    checkpoint_path = tmp_path / "mismatch.pt"
+    checkpoint_path.write_bytes(b"stub")
+
+    fake_checkpoint = {
+        "format_version": "mfa_free_oto_frame_model_v1",
+        "acoustic_feature_set": "world_v1",
+        "frame_labels": list(FRAME_LABELS),
+        "event_labels": list(EVENT_LABELS),
+        "acoustic_config": {"frame_ms": 25.0, "hop_ms": 10.0},
+        "encoder": "acoustic_world_v1",
+    }
+    called = {"model_infer": False}
+
+    def _fake_load(*_args, **_kwargs):
+        return fake_checkpoint, object(), "cpu"
+
+    def _fake_model_infer(*_args, **_kwargs):
+        called["model_infer"] = True
+        raise AssertionError("model inference should be skipped when metadata mismatches")
+
+    monkeypatch.setattr(runtime_inference_module, "_load_runtime_checkpoint", _fake_load)
+    monkeypatch.setattr(runtime_inference_module, "_predict_posterior_with_loaded_model", _fake_model_infer)
+
+    result = runtime_inference_module.predict_wav(
+        wav_path,
+        checkpoint_path=checkpoint_path,
+        encoder="acoustic_world_v1",
+        use_slot_viterbi=False,
+    )
+    assert called["model_infer"] is False
+    assert bool(result.posterior.metadata.get("rule_based")) is True
+    reason = str(result.posterior.metadata.get("rule_fallback_reason") or "")
+    assert "checkpoint_inference_failed" in reason
+    assert "checkpoint_format_mismatch" in reason
 
 
 def _labelled_row(source: str) -> dict:

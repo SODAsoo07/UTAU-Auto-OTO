@@ -14,8 +14,8 @@ def main() -> int:
     parser.add_argument("--out", required=True, help="Output checkpoint path.")
     parser.add_argument(
         "--encoder",
-        default="acoustic",
-        help="Feature encoder: acoustic, wavlm-base-plus, xlsr-300m, or a Hugging Face model id.",
+        default="acoustic_world_v1",
+        help="Feature encoder: acoustic_world_v1 (default), acoustic, wavlm-base-plus, xlsr-300m, or a Hugging Face model id.",
     )
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -36,6 +36,15 @@ def main() -> int:
         choices=("none", "balanced"),
         help="Frame CE class weighting. Use balanced for very small imbalanced goldsets.",
     )
+    parser.add_argument(
+        "--frame-focus-weighting",
+        default="none",
+        choices=("none", "boundary_focus"),
+        help="Optional extra frame weighting around cv_boundary/vowel_nucleus targets.",
+    )
+    parser.add_argument("--focus-cv-radius-frames", type=int, default=3)
+    parser.add_argument("--focus-nucleus-radius-frames", type=int, default=4)
+    parser.add_argument("--focus-weight-max", type=float, default=2.0)
     args = parser.parse_args()
 
     result = train_poc(
@@ -57,6 +66,10 @@ def main() -> int:
             freq_mask_bins=args.freq_mask_bins,
             mask_count=args.mask_count,
             frame_class_weighting=args.frame_class_weighting,
+            frame_focus_weighting=args.frame_focus_weighting,
+            focus_cv_radius_frames=args.focus_cv_radius_frames,
+            focus_nucleus_radius_frames=args.focus_nucleus_radius_frames,
+            focus_weight_max=args.focus_weight_max,
         )
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
