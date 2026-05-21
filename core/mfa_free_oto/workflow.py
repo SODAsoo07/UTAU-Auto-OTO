@@ -44,6 +44,8 @@ class BoundaryEvidence:
     cv_boundary: float | None
     v_offset: float | None
     nucleus: float | None
+    cv_confidence: float
+    nucleus_confidence: float
     confidence: float
     warnings: tuple[str, ...] = ()
 
@@ -67,6 +69,21 @@ class NoMfaWorkflowGuard:
     vowel_nucleus_min_conf: float = 0.34
     vc_pre_max_ms: float = 80.0
     one_step_shift_repair_enabled: bool = True
+
+
+@dataclass(frozen=True)
+class WorldV1RuntimePolicy:
+    cv_anchor_weight: float = 0.62
+    cv_posterior_weight: float = 0.38
+    nucleus_anchor_weight: float = 0.58
+    nucleus_posterior_weight: float = 0.42
+    row_anchor_weight: float = 0.55
+    row_boundary_weight: float = 0.45
+    boundary_evidence_low_confidence: float = 0.35
+    cv_boundary_min_conf: float | None = None
+    vowel_nucleus_min_conf: float | None = None
+    vc_pre_max_ms: float | None = None
+    one_step_shift_repair_enabled: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -97,9 +114,27 @@ def generate_no_mfa_oto_with_model_context(
     device: str | None = None,
     use_slot_viterbi: bool = True,
     guard: NoMfaWorkflowGuard | None = None,
+    runtime_policy: WorldV1RuntimePolicy | None = None,
     callback: Callable[[str], None] | None = None,
 ) -> NoMfaWorkflowReport:
     cfg = guard or NoMfaWorkflowGuard()
+    policy = runtime_policy or WorldV1RuntimePolicy()
+    cv_boundary_min_conf = (
+        float(policy.cv_boundary_min_conf)
+        if policy.cv_boundary_min_conf is not None
+        else float(cfg.cv_boundary_min_conf)
+    )
+    nucleus_min_conf = (
+        float(policy.vowel_nucleus_min_conf)
+        if policy.vowel_nucleus_min_conf is not None
+        else float(cfg.vowel_nucleus_min_conf)
+    )
+    vc_pre_max_ms = float(policy.vc_pre_max_ms) if policy.vc_pre_max_ms is not None else float(cfg.vc_pre_max_ms)
+    one_step_shift_repair_enabled = (
+        bool(policy.one_step_shift_repair_enabled)
+        if policy.one_step_shift_repair_enabled is not None
+        else bool(cfg.one_step_shift_repair_enabled)
+    )
     wav_root = os.path.abspath(str(wav_dir or "").strip())
     if not os.path.isdir(wav_root):
         return NoMfaWorkflowReport(
@@ -177,14 +212,14 @@ def generate_no_mfa_oto_with_model_context(
                 use_source_timing_prior=False,
                 expected_phones=expected_phones,
             )
-            if cfg.one_step_shift_repair_enabled:
+            if one_step_shift_repair_enabled:
                 row_anchors = _repair_anchor_monotonicity(row_anchors)
             adapter_config = OtoAdapterConfig(
                 mode="template-preserve",
                 language=language,
                 format_type=format_type,
                 alias_type=alias_type,
-                vc_pre_max_ms=float(cfg.vc_pre_max_ms),
+                vc_pre_max_ms=vc_pre_max_ms,
             )
             for template_row, anchor in zip(template_group, row_anchors):
                 adapted = adapt_template_row(
@@ -197,10 +232,10 @@ def generate_no_mfa_oto_with_model_context(
                 if adapted.anchor is not None:
                     row_anchor_hits += 1
                     anchor_scores.append(float(adapted.anchor.score))
-                evidence = _build_boundary_evidence(prediction.posterior, adapted)
-                row_conf = _row_confidence(adapted, evidence)
-                cv_conf_values.append(_safe_conf(evidence.confidence if evidence.cv_boundary is not None else 0.0))
-                nucleus_conf_values.append(_safe_conf(_nucleus_confidence_of(adapted)))
+                evidence = _build_boundary_evidence(prediction.posterior, adapted, policy=policy)
+                row_conf = _row_confidence(adapted, evidence, policy=policy)
+                cv_conf_values.append(_safe_conf(evidence.cv_confidence if evidence.cv_boundary is not None else 0.0))
+                nucleus_conf_values.append(_safe_conf(evidence.nucleus_confidence if evidence.nucleus is not None else 0.0))
                 row_results.append(
                     NoMfaRowResult(
                         wav_key=wav_key,
@@ -243,17 +278,17 @@ def generate_no_mfa_oto_with_model_context(
                     language=language,
                     format_type=format_type,
                     alias_type=alias_type,
-                    vc_pre_max_ms=float(cfg.vc_pre_max_ms),
+                    vc_pre_max_ms=vc_pre_max_ms,
                 ),
             )
             rows_total += 1
             if adapted.anchor is not None:
                 row_anchor_hits += 1
                 anchor_scores.append(float(adapted.anchor.score))
-            evidence = _build_boundary_evidence(prediction.posterior, adapted)
-            row_conf = _row_confidence(adapted, evidence)
-            cv_conf_values.append(_safe_conf(evidence.confidence if evidence.cv_boundary is not None else 0.0))
-            nucleus_conf_values.append(_safe_conf(_nucleus_confidence_of(adapted)))
+            evidence = _build_boundary_evidence(prediction.posterior, adapted, policy=policy)
+            row_conf = _row_confidence(adapted, evidence, policy=policy)
+            cv_conf_values.append(_safe_conf(evidence.cv_confidence if evidence.cv_boundary is not None else 0.0))
+            nucleus_conf_values.append(_safe_conf(evidence.nucleus_confidence if evidence.nucleus is not None else 0.0))
             row_results.append(
                 NoMfaRowResult(
                     wav_key=str(wav_path.name).lower(),
@@ -313,9 +348,9 @@ def generate_no_mfa_oto_with_model_context(
         guard_reasons.append(f"low_anchor_ratio:{anchor_ratio:.3f}")
     if slot_warning_count > int(cfg.max_slot_warnings):
         guard_reasons.append(f"slot_warning_overflow:{slot_warning_count}")
-    if avg_cv_conf < float(cfg.cv_boundary_min_conf):
+    if avg_cv_conf < cv_boundary_min_conf:
         guard_reasons.append(f"cv_boundary_confidence_low:{avg_cv_conf:.3f}")
-    if avg_nucleus_conf < float(cfg.vowel_nucleus_min_conf):
+    if avg_nucleus_conf < nucleus_min_conf:
         guard_reasons.append(f"vowel_nucleus_confidence_low:{avg_nucleus_conf:.3f}")
 
     predicted_wavs = len(rule_based_per_wav)
@@ -360,6 +395,12 @@ def generate_no_mfa_oto_with_model_context(
             "vowel_nucleus_confidence": float(avg_nucleus_conf),
             "rule_based_ratio": float(rule_based_ratio),
             "acoustic_feature_set_world_v1": 1.0,
+            "runtime_policy_cv_anchor_weight": float(policy.cv_anchor_weight),
+            "runtime_policy_cv_posterior_weight": float(policy.cv_posterior_weight),
+            "runtime_policy_nucleus_anchor_weight": float(policy.nucleus_anchor_weight),
+            "runtime_policy_nucleus_posterior_weight": float(policy.nucleus_posterior_weight),
+            "runtime_policy_row_anchor_weight": float(policy.row_anchor_weight),
+            "runtime_policy_row_boundary_weight": float(policy.row_boundary_weight),
         },
         rows=tuple(row_results),
     )
@@ -467,13 +508,7 @@ def _safe_conf(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
-def _nucleus_confidence_of(adapted) -> float:
-    if adapted.anchor is None:
-        return 0.0
-    return _safe_conf(float(adapted.anchor.nucleus_confidence))
-
-
-def _build_boundary_evidence(posterior, adapted) -> BoundaryEvidence:
+def _build_boundary_evidence(posterior, adapted, *, policy: WorldV1RuntimePolicy) -> BoundaryEvidence:
     anchor = adapted.anchor
     if anchor is None:
         return BoundaryEvidence(
@@ -481,6 +516,8 @@ def _build_boundary_evidence(posterior, adapted) -> BoundaryEvidence:
             cv_boundary=None,
             v_offset=None,
             nucleus=None,
+            cv_confidence=0.0,
+            nucleus_confidence=0.0,
             confidence=0.0,
             warnings=("missing_anchor",),
         )
@@ -500,23 +537,56 @@ def _build_boundary_evidence(posterior, adapted) -> BoundaryEvidence:
     if nucleus is not None and cv_boundary is not None and nucleus < cv_boundary:
         nucleus = cv_boundary
         warnings.append("nucleus_repaired")
-    conf = _safe_conf(0.55 * float(anchor.boundary_confidence) + 0.45 * float(anchor.nucleus_confidence))
-    if conf < 0.35:
+    cv_anchor_conf = _safe_conf(float(anchor.boundary_confidence))
+    nucleus_anchor_conf = _safe_conf(float(anchor.nucleus_confidence))
+    cv_event_score = _event_score_at_ms(posterior, "cv_boundary", cv_boundary)
+    nucleus_event_score = _event_score_at_ms(posterior, "vowel_nucleus", nucleus if nucleus is not None else cv_boundary)
+    cv_wa, cv_wp = _normalized_pair(policy.cv_anchor_weight, policy.cv_posterior_weight)
+    vn_wa, vn_wp = _normalized_pair(policy.nucleus_anchor_weight, policy.nucleus_posterior_weight)
+    cv_conf = _safe_conf((cv_wa * cv_anchor_conf) + (cv_wp * cv_event_score))
+    nucleus_conf = _safe_conf((vn_wa * nucleus_anchor_conf) + (vn_wp * nucleus_event_score))
+    conf = _safe_conf((0.5 * cv_conf) + (0.5 * nucleus_conf))
+    if conf < float(policy.boundary_evidence_low_confidence):
         warnings.append(f"low_boundary_evidence_confidence:{conf:.3f}")
     return BoundaryEvidence(
         c_onset=c_onset,
         cv_boundary=cv_boundary,
         v_offset=v_offset,
         nucleus=nucleus,
+        cv_confidence=cv_conf,
+        nucleus_confidence=nucleus_conf,
         confidence=conf,
         warnings=tuple(dict.fromkeys((*anchor.warnings, *warnings))),
     )
 
 
-def _row_confidence(adapted, evidence: BoundaryEvidence) -> float:
+def _row_confidence(adapted, evidence: BoundaryEvidence, *, policy: WorldV1RuntimePolicy) -> float:
     base_anchor = float(adapted.anchor.score) if adapted.anchor is not None else 0.0
+    row_wa, row_wb = _normalized_pair(policy.row_anchor_weight, policy.row_boundary_weight)
     warning_penalty = 0.04 * float(len(adapted.warnings))
-    return _safe_conf((0.55 * base_anchor) + (0.45 * evidence.confidence) - warning_penalty)
+    return _safe_conf((row_wa * base_anchor) + (row_wb * evidence.confidence) - warning_penalty)
+
+
+def _event_score_at_ms(posterior, event_label: str, time_ms: float | None) -> float:
+    if time_ms is None:
+        return 0.0
+    times = posterior.times_ms or []
+    scores = posterior.event_scores.get(event_label) or []
+    if not times or not scores:
+        return 0.0
+    if len(times) != len(scores):
+        return 0.0
+    nearest = min(range(len(times)), key=lambda idx: abs(float(times[idx]) - float(time_ms)))
+    return _safe_conf(float(scores[nearest]))
+
+
+def _normalized_pair(a: float, b: float) -> tuple[float, float]:
+    wa = max(0.0, float(a))
+    wb = max(0.0, float(b))
+    total = wa + wb
+    if total <= 1e-9:
+        return 0.5, 0.5
+    return wa / total, wb / total
 
 
 def _wav_duration_ms(path: str, warnings: list[str] | None = None) -> float:

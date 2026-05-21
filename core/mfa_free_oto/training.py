@@ -19,7 +19,7 @@ from .types import EVENT_LABELS, FRAME_LABELS
 class TrainPocConfig:
     manifest_path: str
     out_path: str
-    encoder: str = "acoustic"
+    encoder: str = "acoustic_world_v1"
     epochs: int = 8
     learning_rate: float = 1e-3
     hidden_dim: int = 128
@@ -34,6 +34,10 @@ class TrainPocConfig:
     freq_mask_bins: int = 8
     mask_count: int = 1
     frame_class_weighting: str = "none"
+    frame_focus_weighting: str = "none"
+    focus_cv_radius_frames: int = 3
+    focus_nucleus_radius_frames: int = 4
+    focus_weight_max: float = 2.0
 
 
 def train_poc(config: TrainPocConfig) -> dict:
@@ -94,6 +98,15 @@ def train_poc(config: TrainPocConfig) -> dict:
             frame_class = torch.from_numpy(targets.frame_class[None, :]).long().to(device)
             frame_mask = torch.from_numpy(targets.frame_mask[None, :]).float().to(device)
             event_targets = torch.from_numpy(targets.event_targets[None, :, :]).float().to(device)
+            frame_weights = torch.from_numpy(
+                _frame_focus_weights(
+                    targets,
+                    mode=config.frame_focus_weighting,
+                    cv_radius_frames=config.focus_cv_radius_frames,
+                    nucleus_radius_frames=config.focus_nucleus_radius_frames,
+                    max_weight=config.focus_weight_max,
+                )[None, :]
+            ).float().to(device)
             output = model(x)
             frame_logits = output["frame_logits"]
             event_logits = output["event_logits"]
@@ -105,7 +118,8 @@ def train_poc(config: TrainPocConfig) -> dict:
                 reduction="none",
             ).reshape_as(frame_class).float()
             valid = (frame_class != IGNORE_INDEX).float() * torch.clamp(frame_mask, min=0.0, max=1.0)
-            class_loss = (flat_loss * valid).sum() / torch.clamp(valid.sum(), min=1.0)
+            weighted_valid = valid * torch.clamp(frame_weights, min=1.0)
+            class_loss = (flat_loss * weighted_valid).sum() / torch.clamp(weighted_valid.sum(), min=1.0)
             event_loss = F.binary_cross_entropy_with_logits(event_logits, event_targets)
             loss = class_loss + float(config.event_loss_weight) * event_loss
             optimizer.zero_grad(set_to_none=True)
@@ -125,13 +139,22 @@ def train_poc(config: TrainPocConfig) -> dict:
         )
     out_path = Path(config.out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    acoustic_cfg = asdict(AcousticFeatureConfig())
+    acoustic_feature_set = _acoustic_feature_set_of(config.encoder)
+    format_version = (
+        "mfa_free_oto_frame_model_world_v1_v1"
+        if acoustic_feature_set == "world_v1"
+        else "mfa_free_oto_frame_model_v1"
+    )
     torch.save(
         {
-            "format": "mfa_free_oto_frame_model_v1",
+            "format": format_version,
+            "format_version": format_version,
             "model_config": model_cfg.to_dict(),
             "state_dict": model.state_dict(),
             "encoder": config.encoder,
-            "acoustic_config": asdict(AcousticFeatureConfig()),
+            "acoustic_config": acoustic_cfg,
+            "acoustic_feature_set": acoustic_feature_set,
             "frame_labels": list(FRAME_LABELS),
             "event_labels": list(EVENT_LABELS),
             "train_config": asdict(config),
@@ -143,6 +166,8 @@ def train_poc(config: TrainPocConfig) -> dict:
         "rows": len(rows),
         "checkpoint": str(out_path),
         "encoder": config.encoder,
+        "format_version": format_version,
+        "acoustic_feature_set": acoustic_feature_set,
         "input_dim": input_dim,
         "history": history,
     }
@@ -200,6 +225,62 @@ def _apply_feature_masking(
             start = random.randint(0, max(0, out.shape[1] - width))
             out[:, start : start + width] = 0.0
     return out.astype(np.float32)
+
+
+def _frame_focus_weights(
+    targets,
+    *,
+    mode: str,
+    cv_radius_frames: int,
+    nucleus_radius_frames: int,
+    max_weight: float,
+) -> np.ndarray:
+    size = int(targets.frame_class.shape[0])
+    if size <= 0:
+        return np.zeros((0,), dtype=np.float32)
+    normalized = str(mode or "none").strip().lower()
+    if normalized in {"", "none", "off", "false"}:
+        return np.ones((size,), dtype=np.float32)
+    if normalized != "boundary_focus":
+        raise ValueError(f"Unsupported frame_focus_weighting: {mode}")
+    weights = np.ones((size,), dtype=np.float32)
+    cv_idx = EVENT_LABELS.index("cv_boundary")
+    nucleus_idx = EVENT_LABELS.index("vowel_nucleus")
+    focus_max = max(1.0, float(max_weight))
+    _apply_focus_weights(weights, targets.event_targets[:, cv_idx], radius=max(0, int(cv_radius_frames)), max_weight=focus_max)
+    _apply_focus_weights(
+        weights,
+        targets.event_targets[:, nucleus_idx],
+        radius=max(0, int(nucleus_radius_frames)),
+        max_weight=focus_max,
+    )
+    return weights
+
+
+def _apply_focus_weights(weights: np.ndarray, targets: np.ndarray, *, radius: int, max_weight: float) -> None:
+    centers = np.where(np.asarray(targets, dtype=np.float32) >= 0.5)[0]
+    if centers.size == 0:
+        return
+    if radius <= 0:
+        for center in centers:
+            weights[int(center)] = max(weights[int(center)], float(max_weight))
+        return
+    for center in centers:
+        for idx in range(max(0, int(center) - radius), min(weights.shape[0], int(center) + radius + 1)):
+            distance = abs(int(idx) - int(center))
+            gain = (float(max_weight) - 1.0) * max(0.0, 1.0 - (float(distance) / float(radius + 1)))
+            weights[int(idx)] = max(weights[int(idx)], min(float(max_weight), 1.0 + gain))
+
+
+def _acoustic_feature_set_of(encoder: str) -> str:
+    normalized = str(encoder or "").strip().lower().replace("_", "-")
+    if "world" in normalized:
+        return "world_v1"
+    if normalized == "acoustic":
+        return "acoustic_v1"
+    if normalized in {"acoustic-aux", "aux", "logmel-aux"}:
+        return "acoustic_aux_v1"
+    return "ssl_or_custom"
 
 
 def save_json(path: str | Path, data: dict) -> None:

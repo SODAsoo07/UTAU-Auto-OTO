@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -109,6 +110,8 @@ def assign_slots_viterbi(
     local_window_slots: float = 2.6,
     nucleus_min_peak_distance_ms: float = 26.0,
     language: str = "",
+    cv_local_refine_enabled: bool = True,
+    cv_local_refine_window_ms: float = 55.0,
 ) -> SlotViterbiResult:
     slots = (
         list(expected_slots)
@@ -238,6 +241,20 @@ def assign_slots_viterbi(
             posterior,
             warnings,
         )
+    if cv_local_refine_enabled and _should_run_cv_local_refine(assignments, warnings):
+        refined_assignments = _refine_cv_assignments_locally(
+            assignments=assignments,
+            slots=slots,
+            posterior=posterior,
+            expected_times=expected_times,
+            min_gap_ms=min_gap_ms,
+            same_phone_min_gap_ms=same_phone_min_gap_ms,
+            window_ms=max(20.0, float(cv_local_refine_window_ms)),
+        )
+        if refined_assignments != assignments:
+            assignments = refined_assignments
+            warnings.append("cv_local_refined")
+            raw_scores = [float(item.score) for item in assignments]
     _append_gap_warnings(assignments, warnings, min_gap_ms=min_gap_ms, same_phone_min_gap_ms=same_phone_min_gap_ms)
     return SlotViterbiResult(
         assignments=tuple(assignments),
@@ -362,12 +379,13 @@ def _slot_acoustic_prior(posterior: FramePosterior, slot: ExpectedSlot) -> np.nd
             1.0,
         )
     if slot.role == "vowel_nucleus":
+        weights = _nucleus_prior_weights()
         return np.clip(
-            (0.34 * voicing)
-            + (0.34 * nucleus)
-            + (0.18 * periodicity)
-            + (0.08 * spectral_stability)
-            + (0.06 * non_silence),
+            (weights["voicing"] * voicing)
+            + (weights["nucleus"] * nucleus)
+            + (weights["periodicity"] * periodicity)
+            + (weights["stability"] * spectral_stability)
+            + (weights["non_silence"] * non_silence),
             0.0,
             1.0,
         )
@@ -651,3 +669,150 @@ def _is_feasible_overlap_assignment(
         if float(next_assigned.selected_time_ms) + 1e-5 < float(assignment.selected_time_ms + required):
             return False
     return True
+
+
+def _should_run_cv_local_refine(assignments: Sequence[SlotAssignment], warnings: Sequence[str]) -> bool:
+    if not assignments:
+        return False
+    avg_score = float(np.mean(np.asarray([float(item.score) for item in assignments], dtype=np.float32)))
+    low_score_count = sum(1 for item in assignments if float(item.score) < 0.22)
+    has_gap_warning = any(str(w).startswith("tight_gap:") for w in warnings)
+    has_low_score_warning = any(str(w).startswith("low_score_slot:") for w in warnings)
+    return bool(avg_score < 0.44 or low_score_count >= 2 or has_gap_warning or has_low_score_warning)
+
+
+def _refine_cv_assignments_locally(
+    *,
+    assignments: Sequence[SlotAssignment],
+    slots: Sequence[ExpectedSlot],
+    posterior: FramePosterior,
+    expected_times: Mapping[int, float],
+    min_gap_ms: float,
+    same_phone_min_gap_ms: float,
+    window_ms: float,
+) -> list[SlotAssignment]:
+    times = np.asarray(posterior.times_ms, dtype=np.float32)
+    event_values = np.asarray(posterior.event_scores.get("cv_boundary", []), dtype=np.float32)
+    if event_values.shape[0] != times.shape[0]:
+        return list(assignments)
+    transition = _score_track(posterior, "transition_likelihood", times)
+    flux = _score_track(posterior, "flux_likelihood", times)
+    sonorant = _score_track(posterior, "sonorant_onset_likelihood", times)
+    silence = _score_track(posterior, "silence_likelihood", times)
+    blended = np.clip(
+        (0.60 * np.clip(event_values, 0.0, 1.0))
+        + (0.17 * transition)
+        + (0.13 * flux)
+        + (0.10 * np.clip(sonorant + (1.0 - silence), 0.0, 1.0)),
+        0.0,
+        1.0,
+    )
+
+    out = list(assignments)
+    for idx, assignment in enumerate(out):
+        if assignment.role != "cv_boundary":
+            continue
+        slot = slots[assignment.slot_index]
+        expected_time = expected_times.get(assignment.slot_index)
+        min_allowed: float | None = None
+        max_allowed: float | None = None
+        if idx - 1 >= 0:
+            prev = out[idx - 1]
+            prev_slot = slots[prev.slot_index]
+            min_allowed = float(prev.selected_time_ms) + _required_gap_ms(
+                prev_slot,
+                slot,
+                min_gap_ms=min_gap_ms,
+                same_phone_min_gap_ms=same_phone_min_gap_ms,
+            )
+        if idx + 1 < len(out):
+            nxt = out[idx + 1]
+            nxt_slot = slots[nxt.slot_index]
+            max_allowed = float(nxt.selected_time_ms) - _required_gap_ms(
+                slot,
+                nxt_slot,
+                min_gap_ms=min_gap_ms,
+                same_phone_min_gap_ms=same_phone_min_gap_ms,
+            )
+        center = float(assignment.selected_time_ms if expected_time is None else expected_time)
+        left = center - float(window_ms)
+        right = center + float(window_ms)
+        if min_allowed is not None:
+            left = max(left, min_allowed)
+        if max_allowed is not None:
+            right = min(right, max_allowed)
+        if right <= left + 1e-4:
+            continue
+        best_idx: int | None = None
+        best_score = -1.0
+        for frame_idx, time_value in enumerate(times):
+            t_ms = float(time_value)
+            if t_ms + 1e-5 < left or t_ms - 1e-5 > right:
+                continue
+            score = float(blended[frame_idx])
+            if expected_time is not None:
+                score -= min(0.30, abs(t_ms - float(expected_time)) * 0.0025)
+            if score > best_score:
+                best_score = score
+                best_idx = frame_idx
+        if best_idx is None:
+            continue
+        candidate_time = float(times[best_idx])
+        candidate_score = float(blended[best_idx])
+        current_event_score = float(event_values[max(0, min(len(event_values) - 1, int(assignment.frame_index)))])
+        candidate_event_score = float(event_values[best_idx])
+        move_ms = abs(candidate_time - float(assignment.selected_time_ms))
+        current_score = float(assignment.score)
+        current_dist = abs(float(assignment.selected_time_ms) - float(expected_time)) if expected_time is not None else 0.0
+        candidate_dist = abs(candidate_time - float(expected_time)) if expected_time is not None else 0.0
+        better = (
+            (candidate_score > current_score + 0.03)
+            or (expected_time is not None and candidate_dist + 6.0 < current_dist)
+        )
+        if move_ms > 28.0:
+            better = False
+        if candidate_event_score + 0.01 < current_event_score:
+            better = False
+        if move_ms > 18.0 and candidate_event_score < current_event_score + 0.04:
+            better = False
+        if not better:
+            continue
+        out[idx] = SlotAssignment(
+            slot_index=assignment.slot_index,
+            phone_index=assignment.phone_index,
+            phone=assignment.phone,
+            role=assignment.role,
+            event_label=assignment.event_label,
+            selected_time_ms=candidate_time,
+            score=max(current_score, candidate_score),
+            frame_index=int(best_idx),
+            expected_time_ms=assignment.expected_time_ms,
+        )
+    return out
+
+
+def _nucleus_prior_weights() -> dict[str, float]:
+    weights = {
+        "voicing": _env_float("UTOA_NO_MFA_NUCLEUS_W_VOICING", 0.34),
+        "nucleus": _env_float("UTOA_NO_MFA_NUCLEUS_W_NUCLEUS", 0.34),
+        "periodicity": _env_float("UTOA_NO_MFA_NUCLEUS_W_PERIODICITY", 0.18),
+        "stability": _env_float("UTOA_NO_MFA_NUCLEUS_W_STABILITY", 0.08),
+        "non_silence": _env_float("UTOA_NO_MFA_NUCLEUS_W_NONSILENCE", 0.06),
+    }
+    total = float(sum(max(0.0, value) for value in weights.values()))
+    if total <= 1e-9:
+        return {"voicing": 0.34, "nucleus": 0.34, "periodicity": 0.18, "stability": 0.08, "non_silence": 0.06}
+    return {key: max(0.0, value) / total for key, value in weights.items()}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return float(default)
+    text = str(raw).strip()
+    if not text:
+        return float(default)
+    try:
+        return float(text)
+    except ValueError:
+        return float(default)
