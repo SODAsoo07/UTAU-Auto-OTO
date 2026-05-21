@@ -90,11 +90,15 @@ def assign_slots_viterbi(
     expected_slots: Sequence[ExpectedSlot] | None = None,
     min_event_score: float = 0.03,
     top_k_per_slot: int = 32,
-    min_gap_ms: float = 8.0,
-    same_phone_min_gap_ms: float = 20.0,
+    min_gap_ms: float = 10.0,
+    same_phone_min_gap_ms: float = 24.0,
     expected_time_weight: float = 0.20,
     transition_weight: float = 0.0003,
     low_score_warning: float = 0.20,
+    long_row_segment_size: int = 10,
+    segment_overlap_slots: int = 1,
+    local_window_slots: float = 2.6,
+    nucleus_min_peak_distance_ms: float = 26.0,
 ) -> SlotViterbiResult:
     slots = list(expected_slots) if expected_slots is not None else expected_cv_slots_from_phones(expected_phones or [])
     warnings: list[str] = []
@@ -106,81 +110,70 @@ def assign_slots_viterbi(
 
     duration_ms = float(times[-1]) if times.size == 1 else float(max(times[-1], times[1] - times[0]))
     expected_times = _expected_slot_times(slots, duration_ms)
-    candidate_steps = [
-        _slot_candidates(
-            posterior,
-            slot,
-            min_event_score=min_event_score,
-            top_k=top_k_per_slot,
-            expected_time_ms=expected_times.get(slot.slot_index),
-            expected_time_weight=expected_time_weight,
-        )
-        for slot in slots
-    ]
-    if any(not candidates for candidates in candidate_steps):
-        missing = [str(slot.slot_index) for slot, candidates in zip(slots, candidate_steps) if not candidates]
-        return (
-            SlotViterbiResult(
+    selected_by_slot: dict[int, SlotAssignment] = {}
+    path_score_total = 0.0
+    segment_bounds = _segment_slot_ranges(
+        len(slots),
+        max(2, int(long_row_segment_size)),
+        overlap=max(0, int(segment_overlap_slots)),
+    )
+    if len(segment_bounds) > 1:
+        warnings.append(f"segmented_decode:{len(segment_bounds)} overlap={max(0, int(segment_overlap_slots))}")
+    slot_period_ms = float(duration_ms) / float(max(1, len(slots) + 1))
+    window_ms = max(45.0, slot_period_ms * float(max(1.6, local_window_slots)))
+    dense_row = bool(slot_period_ms <= 72.0)
+    previous_assignment: SlotAssignment | None = None
+    previous_slot: ExpectedSlot | None = None
+    for seg_idx, (start, end) in enumerate(segment_bounds):
+        seg_slots = slots[start:end]
+        candidate_steps: list[list[SlotCandidate]] = []
+        for local_idx, slot in enumerate(seg_slots):
+            expected_time = expected_times.get(slot.slot_index)
+            min_time_ms: float | None = None
+            if local_idx == 0 and previous_assignment is not None and previous_slot is not None:
+                required = _required_gap_ms(
+                    previous_slot,
+                    slot,
+                    min_gap_ms=min_gap_ms,
+                    same_phone_min_gap_ms=same_phone_min_gap_ms,
+                )
+                min_time_ms = float(previous_assignment.selected_time_ms + required)
+            candidates = _slot_candidates(
+                posterior,
+                slot,
+                min_event_score=min_event_score,
+                top_k=top_k_per_slot,
+                expected_time_ms=expected_time,
+                expected_time_weight=expected_time_weight,
+                min_time_ms=min_time_ms,
+                max_time_ms=None,
+                window_ms=window_ms,
+                nucleus_min_peak_distance_ms=nucleus_min_peak_distance_ms,
+                dense_row=dense_row,
+            )
+            candidate_steps.append(candidates)
+        if any(not candidates for candidates in candidate_steps):
+            missing = [str(slot.slot_index) for slot, candidates in zip(seg_slots, candidate_steps) if not candidates]
+            return SlotViterbiResult(
                 assignments=(),
                 path_score=-1e9,
                 average_score=0.0,
                 warnings=(f"hard_missing_candidates:{','.join(missing)}",),
             )
+        selected, seg_path_score = _solve_viterbi_path(
+            seg_slots,
+            candidate_steps,
+            min_gap_ms=min_gap_ms,
+            same_phone_min_gap_ms=same_phone_min_gap_ms,
+            transition_weight=transition_weight,
         )
-
-    dp: list[list[tuple[float, int | None]]] = []
-    for step_idx, candidates in enumerate(candidate_steps):
-        row: list[tuple[float, int | None]] = []
-        slot = slots[step_idx]
-        for candidate in candidates:
-            if step_idx == 0:
-                row.append((candidate.score, None))
-                continue
-            best_score = -1e9
-            best_prev: int | None = None
-            prev_slot = slots[step_idx - 1]
-            required_gap = same_phone_min_gap_ms if prev_slot.phone_index == slot.phone_index else min_gap_ms
-            for prev_idx, prev_candidate in enumerate(candidate_steps[step_idx - 1]):
-                prev_score, _ = dp[step_idx - 1][prev_idx]
-                gap = candidate.time_ms - prev_candidate.time_ms
-                if gap + 1e-5 < required_gap:
-                    continue
-                transition_penalty = transition_weight * max(0.0, gap)
-                score = prev_score + candidate.score - transition_penalty
-                if score > best_score:
-                    best_score = score
-                    best_prev = prev_idx
-            row.append((best_score, best_prev))
-        dp.append(row)
-
-    final_scores = [score for score, _ in dp[-1]]
-    final_idx = int(np.argmax(np.asarray(final_scores, dtype=np.float32)))
-    path_score = float(final_scores[final_idx])
-    if path_score <= -1e8:
-        return SlotViterbiResult(assignments=(), path_score=path_score, average_score=0.0, warnings=("hard_no_monotonic_path",))
-
-    selected: list[int] = []
-    idx = final_idx
-    for step_idx in range(len(candidate_steps) - 1, -1, -1):
-        selected.append(idx)
-        _score, prev_idx = dp[step_idx][idx]
-        if prev_idx is None:
-            break
-        idx = prev_idx
-    selected.reverse()
-    if len(selected) != len(slots):
-        return SlotViterbiResult(assignments=(), path_score=path_score, average_score=0.0, warnings=("hard_incomplete_backtrace",))
-
-    assignments: list[SlotAssignment] = []
-    raw_scores: list[float] = []
-    for slot, candidates, selected_idx in zip(slots, candidate_steps, selected):
-        candidate = candidates[selected_idx]
-        raw_scores.append(candidate.score)
-        if candidate.score < low_score_warning:
-            warnings.append(f"low_score_slot:{slot.slot_index}:{candidate.score:.3f}")
-        _append_acoustic_warnings(slot, candidate, posterior, warnings)
-        assignments.append(
-            SlotAssignment(
+        if not selected:
+            return SlotViterbiResult(assignments=(), path_score=-1e9, average_score=0.0, warnings=("hard_no_monotonic_path",))
+        path_score_total += float(seg_path_score)
+        seg_assignments: list[SlotAssignment] = []
+        for slot, candidates, selected_idx in zip(seg_slots, candidate_steps, selected):
+            candidate = candidates[selected_idx]
+            assigned = SlotAssignment(
                 slot_index=slot.slot_index,
                 phone_index=slot.phone_index,
                 phone=slot.phone,
@@ -191,13 +184,52 @@ def assign_slots_viterbi(
                 frame_index=candidate.frame_index,
                 expected_time_ms=expected_times.get(slot.slot_index),
             )
+            seg_assignments.append(assigned)
+        for assigned in seg_assignments:
+            slot = slots[assigned.slot_index]
+            existing = selected_by_slot.get(assigned.slot_index)
+            if existing is None:
+                selected_by_slot[assigned.slot_index] = assigned
+                continue
+            chosen = _select_overlap_assignment(
+                existing,
+                assigned,
+                expected_time_ms=expected_times.get(assigned.slot_index),
+                slot=slot,
+                slots=slots,
+                selected_by_slot=selected_by_slot,
+                min_gap_ms=min_gap_ms,
+                same_phone_min_gap_ms=same_phone_min_gap_ms,
+            )
+            selected_by_slot[assigned.slot_index] = chosen
+        if end - 1 in selected_by_slot:
+            previous_assignment = selected_by_slot[end - 1]
+            previous_slot = slots[end - 1]
+
+    assignments: list[SlotAssignment] = []
+    for slot_idx in range(len(slots)):
+        assigned = selected_by_slot.get(slot_idx)
+        if assigned is None:
+            return SlotViterbiResult(assignments=(), path_score=-1e9, average_score=0.0, warnings=("hard_incomplete_stitch",))
+        assignments.append(assigned)
+
+    raw_scores: list[float] = []
+    for assigned in assignments:
+        raw_scores.append(float(assigned.score))
+        if float(assigned.score) < low_score_warning:
+            warnings.append(f"low_score_slot:{assigned.slot_index}:{assigned.score:.3f}")
+        _append_acoustic_warnings(
+            slots[assigned.slot_index],
+            SlotCandidate(frame_index=assigned.frame_index, time_ms=assigned.selected_time_ms, score=assigned.score),
+            posterior,
+            warnings,
         )
     _append_gap_warnings(assignments, warnings, min_gap_ms=min_gap_ms, same_phone_min_gap_ms=same_phone_min_gap_ms)
     return SlotViterbiResult(
         assignments=tuple(assignments),
-        path_score=path_score,
+        path_score=float(path_score_total),
         average_score=float(np.mean(np.asarray(raw_scores, dtype=np.float32))) if raw_scores else 0.0,
-        warnings=tuple(warnings),
+        warnings=tuple(dict.fromkeys(warnings)),
     )
 
 
@@ -224,6 +256,11 @@ def _slot_candidates(
     top_k: int,
     expected_time_ms: float | None,
     expected_time_weight: float,
+    min_time_ms: float | None,
+    max_time_ms: float | None,
+    window_ms: float,
+    nucleus_min_peak_distance_ms: float,
+    dense_row: bool,
 ) -> list[SlotCandidate]:
     if slot.event_label not in EVENT_LABELS:
         return []
@@ -234,16 +271,42 @@ def _slot_candidates(
     class_prior = _slot_class_prior(posterior, slot)
     acoustic_prior = _slot_acoustic_prior(posterior, slot)
     values = np.clip(event_values, 0.0, 1.0) * 0.62 + class_prior * 0.24 + acoustic_prior * 0.14
-    peak_indices = _local_peak_indices(event_values, min_score=min_event_score)
+    peak_indices = _local_peak_indices(values, min_score=min_event_score)
+    if slot.role == "vowel_nucleus" and dense_row:
+        peak_indices = _suppress_peak_indices(
+            peak_indices,
+            values,
+            times,
+            min_distance_ms=max(12.0, float(nucleus_min_peak_distance_ms * 0.78)),
+        )
+    if slot.role == "vowel_nucleus":
+        peak_indices = _suppress_peak_indices(
+            peak_indices,
+            values,
+            times,
+            min_distance_ms=max(12.0, float(nucleus_min_peak_distance_ms)),
+        )
     if not peak_indices:
-        peak_indices = [int(np.argmax(values))]
+        best_event_idx = int(np.argmax(event_values))
+        if float(event_values[best_event_idx]) >= float(min_event_score):
+            peak_indices = [best_event_idx]
+        else:
+            return []
     duration_ms = float(max(times[-1], 1.0))
     candidates: list[SlotCandidate] = []
     for idx in peak_indices:
         score = float(values[idx])
+        if float(event_values[idx]) < float(min_event_score):
+            continue
         if expected_time_ms is not None and duration_ms > 0.0:
             distance = abs(float(times[idx]) - expected_time_ms) / duration_ms
             score -= expected_time_weight * distance
+            if abs(float(times[idx]) - expected_time_ms) > float(window_ms):
+                score -= 0.22
+        if min_time_ms is not None and float(times[idx]) + 1e-5 < float(min_time_ms):
+            continue
+        if max_time_ms is not None and float(times[idx]) - 1e-5 > float(max_time_ms):
+            continue
         candidates.append(SlotCandidate(frame_index=idx, time_ms=float(times[idx]), score=score))
     candidates = sorted(candidates, key=lambda candidate: candidate.score, reverse=True)[:top_k]
     return sorted(candidates, key=lambda candidate: candidate.time_ms)
@@ -270,12 +333,23 @@ def _slot_acoustic_prior(posterior: FramePosterior, slot: ExpectedSlot) -> np.nd
     transition = _score_track(posterior, "transition_likelihood", times)
     flux = _score_track(posterior, "flux_likelihood", times)
     voicing = _score_track(posterior, "voicing", times)
+    nucleus = np.maximum(_score_track(posterior, "nucleus_likelihood", times), _score_track(posterior, "world_nucleus", times))
+    periodicity = _score_track(posterior, "world_periodicity", times)
+    spectral_stability = _score_track(posterior, "world_spectral_stability", times)
     silence = _score_track(posterior, "silence_likelihood", times)
     non_silence = 1.0 - silence
     if slot.role == "cv_boundary":
         return np.clip(0.50 * transition + 0.30 * flux + 0.20 * non_silence, 0.0, 1.0)
     if slot.role == "vowel_nucleus":
-        return np.clip(0.55 * voicing + 0.45 * non_silence, 0.0, 1.0)
+        return np.clip(
+            (0.34 * voicing)
+            + (0.34 * nucleus)
+            + (0.18 * periodicity)
+            + (0.08 * spectral_stability)
+            + (0.06 * non_silence),
+            0.0,
+            1.0,
+        )
     return np.zeros_like(times)
 
 
@@ -347,6 +421,212 @@ def _append_gap_warnings(
 ) -> None:
     for prev, cur in zip(assignments[:-1], assignments[1:]):
         gap = cur.selected_time_ms - prev.selected_time_ms
-        required = same_phone_min_gap_ms if prev.phone_index == cur.phone_index else min_gap_ms
+        required = _required_gap_ms(
+            ExpectedSlot(
+                slot_index=prev.slot_index,
+                phone_index=prev.phone_index,
+                phone=prev.phone,
+                role=prev.role,
+                event_label=prev.event_label,
+            ),
+            ExpectedSlot(
+                slot_index=cur.slot_index,
+                phone_index=cur.phone_index,
+                phone=cur.phone,
+                role=cur.role,
+                event_label=cur.event_label,
+            ),
+            min_gap_ms=min_gap_ms,
+            same_phone_min_gap_ms=same_phone_min_gap_ms,
+        )
         if gap < required + 1e-5:
             warnings.append(f"tight_gap:{prev.slot_index}->{cur.slot_index}:{gap:.1f}ms")
+
+
+def _required_gap_ms(
+    prev_slot: ExpectedSlot,
+    cur_slot: ExpectedSlot,
+    *,
+    min_gap_ms: float,
+    same_phone_min_gap_ms: float,
+) -> float:
+    required = same_phone_min_gap_ms if prev_slot.phone_index == cur_slot.phone_index else min_gap_ms
+    if prev_slot.role == "cv_boundary" and cur_slot.role == "vowel_nucleus":
+        required = max(required, 18.0)
+    elif prev_slot.role == "vowel_nucleus" and cur_slot.role == "cv_boundary":
+        required = max(required, 22.0)
+    elif prev_slot.role == "vowel_nucleus" and cur_slot.role == "vowel_nucleus":
+        required = max(required, 26.0)
+    return float(required)
+
+
+def _segment_slot_ranges(total: int, segment_size: int, *, overlap: int) -> list[tuple[int, int]]:
+    if total <= 0:
+        return []
+    if total <= segment_size:
+        return [(0, total)]
+    out: list[tuple[int, int]] = []
+    step = max(1, int(segment_size) - max(0, int(overlap)))
+    start = 0
+    while start < total:
+        end = min(total, start + segment_size)
+        out.append((start, end))
+        if end >= total:
+            break
+        start += step
+    return out
+
+
+def _solve_viterbi_path(
+    slots: Sequence[ExpectedSlot],
+    candidate_steps: Sequence[Sequence[SlotCandidate]],
+    *,
+    min_gap_ms: float,
+    same_phone_min_gap_ms: float,
+    transition_weight: float,
+) -> tuple[list[int], float]:
+    dp: list[list[tuple[float, int | None]]] = []
+    for step_idx, candidates in enumerate(candidate_steps):
+        row: list[tuple[float, int | None]] = []
+        slot = slots[step_idx]
+        for candidate in candidates:
+            if step_idx == 0:
+                row.append((candidate.score, None))
+                continue
+            best_score = -1e9
+            best_prev: int | None = None
+            prev_slot = slots[step_idx - 1]
+            required_gap = _required_gap_ms(
+                prev_slot,
+                slot,
+                min_gap_ms=min_gap_ms,
+                same_phone_min_gap_ms=same_phone_min_gap_ms,
+            )
+            for prev_idx, prev_candidate in enumerate(candidate_steps[step_idx - 1]):
+                prev_score, _ = dp[step_idx - 1][prev_idx]
+                gap = candidate.time_ms - prev_candidate.time_ms
+                if gap + 1e-5 < required_gap:
+                    continue
+                transition_penalty = transition_weight * max(0.0, gap)
+                score = prev_score + candidate.score - transition_penalty
+                if score > best_score:
+                    best_score = score
+                    best_prev = prev_idx
+            row.append((best_score, best_prev))
+        dp.append(row)
+
+    if not dp:
+        return [], -1e9
+    final_scores = [score for score, _ in dp[-1]]
+    final_idx = int(np.argmax(np.asarray(final_scores, dtype=np.float32)))
+    path_score = float(final_scores[final_idx])
+    if path_score <= -1e8:
+        return [], path_score
+    selected: list[int] = []
+    idx = final_idx
+    for step_idx in range(len(candidate_steps) - 1, -1, -1):
+        selected.append(idx)
+        _score, prev_idx = dp[step_idx][idx]
+        if prev_idx is None:
+            break
+        idx = prev_idx
+    selected.reverse()
+    if len(selected) != len(candidate_steps):
+        return [], -1e9
+    return selected, path_score
+
+
+def _suppress_peak_indices(
+    peak_indices: Sequence[int],
+    values: np.ndarray,
+    times: np.ndarray,
+    *,
+    min_distance_ms: float,
+) -> list[int]:
+    if not peak_indices:
+        return []
+    ordered = sorted(peak_indices, key=lambda idx: float(values[idx]), reverse=True)
+    selected: list[int] = []
+    for idx in ordered:
+        t = float(times[idx])
+        if any(abs(t - float(times[prev])) < min_distance_ms for prev in selected):
+            continue
+        selected.append(idx)
+    return sorted(selected)
+
+
+def _select_overlap_assignment(
+    current: SlotAssignment,
+    incoming: SlotAssignment,
+    *,
+    expected_time_ms: float | None,
+    slot: ExpectedSlot,
+    slots: Sequence[ExpectedSlot],
+    selected_by_slot: Mapping[int, SlotAssignment],
+    min_gap_ms: float,
+    same_phone_min_gap_ms: float,
+) -> SlotAssignment:
+    current_ok = _is_feasible_overlap_assignment(
+        current,
+        slot=slot,
+        slots=slots,
+        selected_by_slot=selected_by_slot,
+        min_gap_ms=min_gap_ms,
+        same_phone_min_gap_ms=same_phone_min_gap_ms,
+    )
+    incoming_ok = _is_feasible_overlap_assignment(
+        incoming,
+        slot=slot,
+        slots=slots,
+        selected_by_slot=selected_by_slot,
+        min_gap_ms=min_gap_ms,
+        same_phone_min_gap_ms=same_phone_min_gap_ms,
+    )
+    if incoming_ok and not current_ok:
+        return incoming
+    if current_ok and not incoming_ok:
+        return current
+    exp = float(expected_time_ms) if expected_time_ms is not None else None
+    if slot.role == "cv_boundary":
+        if exp is not None:
+            cur_dist = abs(float(current.selected_time_ms) - exp)
+            inc_dist = abs(float(incoming.selected_time_ms) - exp)
+            if inc_dist > cur_dist + 6.0:
+                return current
+        if float(incoming.score) < float(current.score) + 0.08:
+            return current
+    current_cost = _assignment_cost(current, expected_time_ms=exp)
+    incoming_cost = _assignment_cost(incoming, expected_time_ms=exp)
+    return incoming if incoming_cost < current_cost else current
+
+
+def _assignment_cost(assignment: SlotAssignment, *, expected_time_ms: float | None) -> float:
+    score_term = 1.0 - float(max(0.0, min(1.0, assignment.score)))
+    if expected_time_ms is None:
+        return score_term
+    time_term = abs(float(assignment.selected_time_ms) - float(expected_time_ms)) * 0.0022
+    return score_term + time_term
+
+
+def _is_feasible_overlap_assignment(
+    assignment: SlotAssignment,
+    *,
+    slot: ExpectedSlot,
+    slots: Sequence[ExpectedSlot],
+    selected_by_slot: Mapping[int, SlotAssignment],
+    min_gap_ms: float,
+    same_phone_min_gap_ms: float,
+) -> bool:
+    prev_assigned = selected_by_slot.get(slot.slot_index - 1)
+    if prev_assigned is not None:
+        prev_slot = slots[slot.slot_index - 1]
+        required = _required_gap_ms(prev_slot, slot, min_gap_ms=min_gap_ms, same_phone_min_gap_ms=same_phone_min_gap_ms)
+        if float(assignment.selected_time_ms) + 1e-5 < float(prev_assigned.selected_time_ms + required):
+            return False
+    next_assigned = selected_by_slot.get(slot.slot_index + 1)
+    if next_assigned is not None:
+        next_slot = slots[slot.slot_index + 1]
+        required = _required_gap_ms(slot, next_slot, min_gap_ms=min_gap_ms, same_phone_min_gap_ms=same_phone_min_gap_ms)
+        if float(next_assigned.selected_time_ms) + 1e-5 < float(assignment.selected_time_ms + required):
+            return False
+    return True
