@@ -120,9 +120,35 @@ def build_occurrence_map(
     return mapped
 
 
+def normalize_alias_suffix(suffix: str) -> str:
+    text = str(suffix or "").strip()
+    if not text:
+        return ""
+    return text[1:] if text.startswith("_") else text
+
+
+def apply_alias_suffix(line: str, suffix: str) -> str:
+    normalized = normalize_alias_suffix(suffix)
+    if not normalized or "=" not in str(line or ""):
+        return line
+    left, right = str(line).split("=", 1)
+    if "," in right:
+        alias, rest = right.split(",", 1)
+        alias = alias.strip()
+        if alias:
+            alias = f"{alias}_{normalized}"
+        return f"{left}={alias},{rest}"
+    alias = right.strip()
+    if alias:
+        alias = f"{alias}_{normalized}"
+    return f"{left}={alias}"
+
+
 __all__ = [
+    "apply_alias_suffix",
     "build_occurrence_map",
     "extract_base_timing_shape",
+    "normalize_alias_suffix",
     "parse_oto_line",
     "read_oto_rows_for_profile",
     "read_text_with_fallback",

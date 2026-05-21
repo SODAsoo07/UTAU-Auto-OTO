@@ -7,6 +7,14 @@ import numpy as np
 
 from .types import EVENT_LABELS, FramePosterior, is_vowel_phone
 
+# Minimum spacing (ms) enforced between adjacent slots, keyed by role transition.
+_ROLE_GAP_CV_TO_NUCLEUS_MS = 18.0
+_ROLE_GAP_NUCLEUS_TO_CV_MS = 22.0
+_ROLE_GAP_NUCLEUS_TO_NUCLEUS_MS = 26.0
+# A row whose mean slot period is at or below this is treated as "dense", which
+# enables extra nucleus peak suppression.
+_DENSE_ROW_SLOT_PERIOD_MS = 72.0
+
 
 @dataclass(frozen=True)
 class ExpectedSlot:
@@ -121,7 +129,7 @@ def assign_slots_viterbi(
         warnings.append(f"segmented_decode:{len(segment_bounds)} overlap={max(0, int(segment_overlap_slots))}")
     slot_period_ms = float(duration_ms) / float(max(1, len(slots) + 1))
     window_ms = max(45.0, slot_period_ms * float(max(1.6, local_window_slots)))
-    dense_row = bool(slot_period_ms <= 72.0)
+    dense_row = bool(slot_period_ms <= _DENSE_ROW_SLOT_PERIOD_MS)
     previous_assignment: SlotAssignment | None = None
     previous_slot: ExpectedSlot | None = None
     for seg_idx, (start, end) in enumerate(segment_bounds):
@@ -452,11 +460,11 @@ def _required_gap_ms(
 ) -> float:
     required = same_phone_min_gap_ms if prev_slot.phone_index == cur_slot.phone_index else min_gap_ms
     if prev_slot.role == "cv_boundary" and cur_slot.role == "vowel_nucleus":
-        required = max(required, 18.0)
+        required = max(required, _ROLE_GAP_CV_TO_NUCLEUS_MS)
     elif prev_slot.role == "vowel_nucleus" and cur_slot.role == "cv_boundary":
-        required = max(required, 22.0)
+        required = max(required, _ROLE_GAP_NUCLEUS_TO_CV_MS)
     elif prev_slot.role == "vowel_nucleus" and cur_slot.role == "vowel_nucleus":
-        required = max(required, 26.0)
+        required = max(required, _ROLE_GAP_NUCLEUS_TO_NUCLEUS_MS)
     return float(required)
 
 
