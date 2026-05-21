@@ -34,7 +34,7 @@ class AlignmentPipelineTests(unittest.TestCase):
     def test_unknown_primary_still_falls_back_to_mfa(self):
         with tempfile.TemporaryDirectory() as td:
             with mock.patch(
-                "core.alignment_pipeline.check_mfa_ready",
+                "core.alignment.alignment_pipeline.check_mfa_ready",
                 return_value={"code": "ALIGN_NOT_READY", "message": "not ready", "mfa_path": ""},
             ) as mocked_ready:
                 result = run_alignment_with_fallback(
@@ -66,10 +66,10 @@ class AlignmentPipelineTests(unittest.TestCase):
                 return True, ""
 
             with mock.patch(
-                "core.alignment_pipeline.check_mfa_ready",
+                "core.alignment.alignment_pipeline.check_mfa_ready",
                 return_value={"code": ALIGN_NOT_READY, "message": "model probe failed", "mfa_path": "fake_mfa"},
             ) as mocked_ready, mock.patch(
-                "core.alignment_pipeline.run_mfa_align",
+                "core.alignment.alignment_pipeline.run_mfa_align",
                 side_effect=_fake_mfa_align,
             ) as mocked_mfa_align:
                 result = run_alignment_with_fallback(
@@ -93,7 +93,7 @@ class AlignmentPipelineTests(unittest.TestCase):
             with open(dict_path, "w", encoding="utf-8") as handle:
                 handle.write("a a\n")
             with mock.patch(
-                "core.alignment_pipeline.check_mfa_ready",
+                "core.alignment.alignment_pipeline.check_mfa_ready",
                 return_value={"code": ALIGN_EXEC_MISSING, "message": "mfa executable missing", "mfa_path": ""},
             ):
                 result = run_alignment_with_fallback(
@@ -120,10 +120,10 @@ class AlignmentPipelineTests(unittest.TestCase):
             with patch.dict(os.environ, {"UTOA_MFA_SOFT_GATE_RETRY_LIMIT": "2"}, clear=False):
                 alignment_pipeline._MFA_SOFT_GATE_FAIL_CACHE.clear()
                 with mock.patch(
-                    "core.alignment_pipeline.check_mfa_ready",
+                    "core.alignment.alignment_pipeline.check_mfa_ready",
                     return_value={"code": ALIGN_NOT_READY, "message": "precheck unstable", "mfa_path": "fake_mfa"},
                 ), mock.patch(
-                    "core.alignment_pipeline.run_mfa_align",
+                    "core.alignment.alignment_pipeline.run_mfa_align",
                     return_value=(False, "MFA alignment failed"),
                 ) as mocked_mfa_align:
                     for _ in range(3):
