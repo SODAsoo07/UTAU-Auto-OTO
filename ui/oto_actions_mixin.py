@@ -11,6 +11,7 @@ from core.kr_cmpx_preview_builder import (
 )
 from core.no_mfa_oto_builder import (
     generate_no_mfa_auto_oto,
+    get_last_no_mfa_runtime_meta,
     resolve_no_mfa_source_oto,
 )
 from core.oto_generator import generate_oto
@@ -607,27 +608,22 @@ class OtoActionsMixin:
                             callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                         )
                     elif no_mfa_auto_mode:
-                        if no_mfa_mode_code == "mfa_free_ssl_slot":
-                            _update_oto_local("MFA-Free SSL ・ｬ・ｯ ・ｴ・啄┣ ・晧┳", 0.22, force=True)
-                            processed, total, errors = self._run_mfa_free_oto_preview_generation(
-                                wav_dir=target_wav_dir,
-                                out_path=target_out_path,
-                                source_oto_path=no_mfa_source_oto or tpl_path,
-                                language=lang,
-                                format_type=selected_format,
-                                callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
-                            )
-                        else:
-                            _update_oto_local("No-MFA ・尖徐・､・・・晧┳", 0.22, force=True)
-                            processed, total, errors = generate_no_mfa_auto_oto(
-                                wav_dir=target_wav_dir,
-                                out_path=target_out_path,
-                                source_oto_path=no_mfa_source_oto or tpl_path,
-                                alias_suffix=alias_suffix,
-                                language=lang,
-                                stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
-                                generation_mode=no_mfa_mode_code,
-                                callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
+                        _update_oto_local("No-MFA ・尖徐・､・・・晧┳", 0.22, force=True)
+                        processed, total, errors = generate_no_mfa_auto_oto(
+                            wav_dir=target_wav_dir,
+                            out_path=target_out_path,
+                            source_oto_path=no_mfa_source_oto or tpl_path,
+                            alias_suffix=alias_suffix,
+                            language=lang,
+                            stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
+                            generation_mode=no_mfa_mode_code,
+                            callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
+                        )
+                        runtime_meta = get_last_no_mfa_runtime_meta()
+                        if runtime_meta:
+                            self._append_log(
+                                f"{prefix}[No-MFA] confidence={float(runtime_meta.get('confidence', 0.0) or 0.0):.2f} "
+                                f"fallback_hint={str(runtime_meta.get('fallback_hint', '') or '-')}"
                             )
                     elif lang == "japanese":
                         self._append_log(f"・､・・ ・ｼ・ｸ・ｴ ・川攵・ｬ・ｴ・､ ・､夋・ｼ = {self.ja_alias_style_var.get()}")

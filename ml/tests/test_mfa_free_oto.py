@@ -36,12 +36,15 @@ from core.mfa_free_oto.oto_adapter import (
 )
 from core.mfa_free_oto.review_overlay import render_review_html
 from core.mfa_free_oto.slot_viterbi import (
+    SlotAssignment,
+    SlotViterbiResult,
     assign_slots_viterbi,
     expected_cv_slots_from_phones,
     slot_assignments_to_decoded_events,
 )
 from core.mfa_free_oto.targets import rasterize_targets
-from core.mfa_free_oto.types import EVENT_LABELS, FRAME_LABELS, FramePosterior
+from core.mfa_free_oto.types import DecodedEvent, EVENT_LABELS, FRAME_LABELS, FramePosterior
+from core.mfa_free_oto.workflow import generate_no_mfa_oto_with_model_context
 
 
 def test_goldset_scaffold_marks_rows_for_manual_labelling(tmp_path):
@@ -178,6 +181,21 @@ def test_acoustic_aux_features_preserve_absolute_gate_tracks(tmp_path):
     assert {"rms", "spectral_flux", "voicing", "silence_likelihood", "transition_likelihood"}.issubset(aux.acoustic_scores)
     assert float(np.max(aux.acoustic_scores["rms"])) > 0.0
     assert float(np.max(aux.acoustic_scores["voicing"])) >= 0.0
+
+
+def test_acoustic_world_v1_features_available_when_dependencies_installed(tmp_path):
+    wav_path = tmp_path / "tone_world.wav"
+    _write_tone_wav(wav_path, duration_s=0.42)
+    try:
+        world = extract_features(wav_path, encoder="acoustic_world_v1")
+    except RuntimeError as exc:
+        pytest.skip(f"world stack unavailable in current env: {exc}")
+    assert world.features.shape[0] == world.times_ms.shape[0]
+    assert world.features.shape[1] > 0
+    assert "world_voicing" in world.acoustic_scores
+    assert "world_nucleus" in world.acoustic_scores
+    assert "transition_likelihood" in world.acoustic_scores
+    assert float(np.max(np.asarray(world.acoustic_scores["world_voicing"], dtype=np.float32))) >= 0.0
 
 
 def test_manifest_audit_flags_slot_eligibility_and_clean_rows(tmp_path):
@@ -744,6 +762,123 @@ def test_htk_lab_manifest_uses_lab_as_manual_gold(tmp_path):
     assert summary.dropped_segments == 1
     assert rows[0]["wav_name"] == "a-ka.wav"
     assert json.loads(out.read_text(encoding="utf-8").splitlines()[0])["label_source"] == "manual_gold"
+
+
+def test_model_context_runtime_workflow_generates_oto_and_quality_meta(tmp_path, monkeypatch):
+    wav_dir = tmp_path / "wav"
+    wav_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = wav_dir / "a.wav"
+    _write_tone_wav(wav_path, duration_s=0.40)
+    source_oto = tmp_path / "source.ini"
+    source_oto.write_text("a.wav=ka,0,0,0,0,0\n", encoding="utf-8")
+    out_oto = tmp_path / "out.ini"
+
+    posterior = FramePosterior(
+        wav_path=str(wav_path),
+        times_ms=[0.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0],
+        class_probs={label: [0.2] * 7 for label in FRAME_LABELS},
+        event_scores={label: [0.0] * 7 for label in EVENT_LABELS},
+    )
+    prediction = type("RuntimePredictionStub", (), {})()
+    prediction.posterior = posterior
+    prediction.decoded_events = (
+        DecodedEvent(label="cv_boundary", selected_time_ms=120.0, score=0.88, frame_index=2),
+    )
+    prediction.slot_result = SlotViterbiResult(
+        assignments=(
+            SlotAssignment(
+                slot_index=0,
+                phone_index=1,
+                phone="a",
+                role="cv_boundary",
+                event_label="cv_boundary",
+                selected_time_ms=120.0,
+                score=0.88,
+                frame_index=2,
+                expected_time_ms=120.0,
+            ),
+        ),
+        path_score=0.88,
+        average_score=0.88,
+        warnings=(),
+    )
+
+    monkeypatch.setattr("core.mfa_free_oto.workflow.predict_wav", lambda *args, **kwargs: prediction)
+
+    report = generate_no_mfa_oto_with_model_context(
+        wav_dir=str(wav_dir),
+        out_path=str(out_oto),
+        source_oto_path=str(source_oto),
+        checkpoint_path=str(tmp_path / "dummy.pt"),
+        language="japanese",
+        format_type="CV",
+    )
+    assert report.processed == 1
+    assert report.total == 1
+    assert not report.errors
+    assert report.confidence > 0.5
+    assert out_oto.is_file()
+    assert "a.wav=" in out_oto.read_text(encoding="utf-8")
+
+
+def test_model_context_runtime_workflow_ignores_source_timing_values(tmp_path, monkeypatch):
+    wav_dir = tmp_path / "wav"
+    wav_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = wav_dir / "a.wav"
+    _write_tone_wav(wav_path, duration_s=0.40)
+    source_oto_a = tmp_path / "source_a.ini"
+    source_oto_b = tmp_path / "source_b.ini"
+    source_oto_a.write_text("a.wav=ka,0,0,0,0,0\n", encoding="utf-8")
+    source_oto_b.write_text("a.wav=ka,1234,987,-654,321,210\n", encoding="utf-8")
+    out_a = tmp_path / "out_a.ini"
+    out_b = tmp_path / "out_b.ini"
+
+    posterior = FramePosterior(
+        wav_path=str(wav_path),
+        times_ms=[0.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0],
+        class_probs={label: [0.2] * 7 for label in FRAME_LABELS},
+        event_scores={label: [0.0] * 7 for label in EVENT_LABELS},
+        acoustic_scores={
+            "transition_likelihood": [0.2, 0.2, 0.9, 0.3, 0.2, 0.2, 0.2],
+            "voicing": [0.1, 0.2, 0.5, 0.9, 0.7, 0.3, 0.2],
+            "nucleus_likelihood": [0.1, 0.2, 0.4, 0.95, 0.8, 0.3, 0.2],
+            "silence_likelihood": [0.8, 0.5, 0.2, 0.1, 0.2, 0.4, 0.7],
+        },
+    )
+    prediction = type("RuntimePredictionStub", (), {})()
+    prediction.posterior = posterior
+    prediction.decoded_events = (
+        DecodedEvent(label="cv_boundary", selected_time_ms=120.0, score=0.88, frame_index=2),
+        DecodedEvent(label="vowel_nucleus", selected_time_ms=160.0, score=0.91, frame_index=3),
+    )
+    prediction.slot_result = None
+    monkeypatch.setattr("core.mfa_free_oto.workflow.predict_wav", lambda *args, **kwargs: prediction)
+
+    report_a = generate_no_mfa_oto_with_model_context(
+        wav_dir=str(wav_dir),
+        out_path=str(out_a),
+        source_oto_path=str(source_oto_a),
+        checkpoint_path="",
+        language="japanese",
+        format_type="CV",
+    )
+    report_b = generate_no_mfa_oto_with_model_context(
+        wav_dir=str(wav_dir),
+        out_path=str(out_b),
+        source_oto_path=str(source_oto_b),
+        checkpoint_path="",
+        language="japanese",
+        format_type="CV",
+    )
+    assert report_a.processed == 1 and report_b.processed == 1
+    assert out_a.read_text(encoding="utf-8") == out_b.read_text(encoding="utf-8")
+    assert report_a.rows and report_b.rows
+    assert report_a.rows[0].oto_params["preutterance"] >= 0.0
+    be = report_a.rows[0].boundary_evidence
+    if be.c_onset is not None and be.cv_boundary is not None:
+        assert be.c_onset <= be.cv_boundary
+    if be.cv_boundary is not None and be.nucleus is not None:
+        assert be.cv_boundary <= be.nucleus
 
 
 def _labelled_row(source: str) -> dict:

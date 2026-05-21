@@ -15,6 +15,13 @@ from .types import (
 )
 from .slot_viterbi import ExpectedSlot, SlotAssignment, SlotViterbiResult, assign_slots_viterbi
 from .runtime_inference import RuntimePrediction, predict_wav
+from .workflow import (
+    BoundaryEvidence,
+    NoMfaWorkflowGuard,
+    NoMfaRowResult,
+    NoMfaWorkflowReport,
+    generate_no_mfa_oto_with_model_context,
+)
 
 __all__ = [
     "DecodedEvent",
@@ -28,4 +35,9 @@ __all__ = [
     "assign_slots_viterbi",
     "RuntimePrediction",
     "predict_wav",
+    "BoundaryEvidence",
+    "NoMfaRowResult",
+    "NoMfaWorkflowGuard",
+    "NoMfaWorkflowReport",
+    "generate_no_mfa_oto_with_model_context",
 ]

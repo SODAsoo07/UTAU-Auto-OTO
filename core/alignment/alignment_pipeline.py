@@ -4,7 +4,7 @@ import os
 from typing import Dict, List
 
 from core.mfa_runner import check_mfa_ready, run_mfa_align
-from core.sequence_aligner import check_sequence_aligner_ready, run_sequence_align
+from core.sequence_aligner import check_sequence_aligner_ready, get_last_sequence_align_meta, run_sequence_align
 from core.pipeline_status import (
     ALIGN_EXEC_MISSING,
     ALIGN_OUTPUT_EMPTY,
@@ -140,6 +140,9 @@ def run_alignment_with_fallback(
     last_code = ALIGN_RUN_FAILED
     used_engine = ""
     fallback_notes: List[str] = []
+    used_confidence = 0.0
+    used_warnings: List[str] = []
+    used_fallback_hint = ""
 
     for engine in chain:
         if engine == "none":
@@ -186,6 +189,26 @@ def run_alignment_with_fallback(
                 format_hint=format_hint,
                 callback=callback,
             )
+            sequence_meta = get_last_sequence_align_meta()
+            has_sequence_confidence = "confidence" in sequence_meta
+            sequence_confidence = float(sequence_meta.get("confidence", 1.0) or 1.0)
+            sequence_warnings = list(sequence_meta.get("warnings") or [])
+            sequence_fallback_hint = str(sequence_meta.get("fallback_hint", "") or "")
+            seq_fallback_threshold = max(
+                0.0,
+                min(1.0, float(os.environ.get("UTOA_SEQUENCE_ALIGN_FALLBACK_CONF_THRESHOLD", "0.56") or "0.56")),
+            )
+            if (
+                ok
+                and has_sequence_confidence
+                and ("mfa" in chain)
+                and sequence_confidence < seq_fallback_threshold
+            ):
+                ok = False
+                err = (
+                    "sequence_confidence_low:"
+                    f"{sequence_confidence:.3f}<{seq_fallback_threshold:.3f}"
+                )
             if ok and not has_textgrid_files(output_folder):
                 ok = False
                 err = "TextGrid output missing after alignment."
@@ -202,10 +225,16 @@ def run_alignment_with_fallback(
                     attempt_index=len(attempts) + 1,
                     ready=True,
                     ok=bool(ok),
+                    confidence=sequence_confidence,
+                    warnings=sequence_warnings,
+                    fallback_hint=sequence_fallback_hint,
                 )
             )
             if ok:
                 used_engine = "sequence"
+                used_confidence = sequence_confidence
+                used_warnings = sequence_warnings
+                used_fallback_hint = sequence_fallback_hint
                 break
 
             last_err = str(err or "")
@@ -313,6 +342,9 @@ def run_alignment_with_fallback(
 
         if used_profile:
             used_engine = "mfa"
+            used_confidence = 1.0
+            used_warnings = []
+            used_fallback_hint = ""
             if used_profile != profile_chain[0]:
                 fallback_notes.append(f"mfa_profile:{profile_chain[0]}->{used_profile}")
             break
@@ -325,6 +357,10 @@ def run_alignment_with_fallback(
         # TICKET-001: Compute and attach a quality score so downstream stages
         # (OTO generation, UI) can calibrate based on alignment confidence.
         alignment_quality_score = compute_alignment_quality_score(used_engine, fallback_notes)
+        if used_engine != "sequence":
+            used_confidence = float(alignment_quality_score)
+        if fallback_used and used_fallback_hint == "":
+            used_fallback_hint = "mfa"
         message = "alignment complete"
         if fallback_used:
             message = f"alignment complete (fallback: {fallback_path})"
@@ -340,6 +376,9 @@ def run_alignment_with_fallback(
             attempt_count=max(run_attempt_count, 1),
             fallback_path=fallback_path,
             alignment_quality_score=alignment_quality_score,
+            confidence=float(used_confidence),
+            warnings=list(dict.fromkeys([*used_warnings, *fallback_notes])),
+            fallback_hint=(used_fallback_hint or ("none" if not fallback_used else "mfa")),
         )
 
     return make_runtime_report(
@@ -353,6 +392,9 @@ def run_alignment_with_fallback(
         fallback_used=False,
         attempt_count=max(run_attempt_count, 1),
         fallback_path="",
+        confidence=0.0,
+        warnings=["alignment_failed"],
+        fallback_hint="mfa",
     )
 
 

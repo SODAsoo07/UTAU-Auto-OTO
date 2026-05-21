@@ -18,6 +18,7 @@ from core.ja_oto_generator import generate_ja_oto
 from core.lab_generator import generate_dictionary, generate_labs
 from core.no_mfa_oto_builder import (
     generate_no_mfa_auto_oto,
+    get_last_no_mfa_runtime_meta,
     resolve_no_mfa_source_oto,
 )
 from core.mfa_runner import (
@@ -3030,10 +3031,7 @@ class PipelineActionsMixin:
                     return
 
                 if no_mfa_auto_mode:
-                    if no_mfa_mode_code == "mfa_free_ssl_slot":
-                        self._append_log("ℹ MFA-Free SSL 슬롯 어댑터: Lab/사전/정렬 단계를 건너뛰고 모델 anchor preview로 OTO를 생성합니다.")
-                    else:
-                        self._append_log("ℹ No-MFA 모드: Lab/사전/정렬 단계를 건너뜁니다.")
+                    self._append_log("ℹ No-MFA 모드: Lab/사전/정렬 단계를 건너뜁니다.")
                     if has_textgrid:
                         self._append_log("ℹ TextGrid가 있어도 No-MFA 선택 시에는 선택한 No-MFA 생성 방식으로 진행합니다.")
                     self._append_log(f"ℹ No-MFA 생성 방식: {no_mfa_mode_text}")
@@ -3043,27 +3041,25 @@ class PipelineActionsMixin:
                     _set_stage_progress("align", 1.0)
 
                     _set_stage_progress("oto", 0.03)
-                    if no_mfa_mode_code == "mfa_free_ssl_slot":
-                        self._set_status("4/5 - MFA-Free SSL 슬롯 어댑터 실행 중...")
-                        _processed, _total, oto_errors = self._run_mfa_free_oto_preview_generation(
-                            wav_dir=wav_dir,
-                            out_path=out_path,
-                            source_oto_path=no_mfa_source_oto,
-                            language=lang,
-                            format_type=selected_format,
-                            callback=_make_stage_callback("oto"),
-                        )
-                    else:
-                        self._set_status("4/5 - No-MFA 자동설정 OTO 생성 중...")
-                        _processed, _total, oto_errors = generate_no_mfa_auto_oto(
-                            wav_dir=wav_dir,
-                            out_path=out_path,
-                            source_oto_path=no_mfa_source_oto,
-                            alias_suffix=self.alias_suffix_var.get().strip(),
-                            language=lang,
-                            stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
-                            generation_mode=no_mfa_mode_code,
-                            callback=_make_stage_callback("oto"),
+                    self._set_status("4/5 - No-MFA 자동설정 OTO 생성 중...")
+                    _processed, _total, oto_errors = generate_no_mfa_auto_oto(
+                        wav_dir=wav_dir,
+                        out_path=out_path,
+                        source_oto_path=no_mfa_source_oto,
+                        alias_suffix=self.alias_suffix_var.get().strip(),
+                        language=lang,
+                        stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
+                        generation_mode=no_mfa_mode_code,
+                        callback=_make_stage_callback("oto"),
+                    )
+                    runtime_meta = get_last_no_mfa_runtime_meta()
+                    confidence = float(runtime_meta.get("confidence", 0.0) or 0.0)
+                    fallback_hint = str(runtime_meta.get("fallback_hint", "") or "")
+                    fallback_used = bool(runtime_meta.get("fallback_used", False))
+                    if runtime_meta:
+                        self._append_log(
+                            f"[No-MFA] confidence={confidence:.2f} "
+                            f"fallback_hint={fallback_hint or '-'} fallback_used={'yes' if fallback_used else 'no'}"
                         )
                     if _total:
                         _set_stage_progress("oto", float(_processed) / float(_total))

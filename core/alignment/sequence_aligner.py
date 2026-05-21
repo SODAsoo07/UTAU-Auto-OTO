@@ -105,6 +105,7 @@ _VOICED_ONSETS = {
 }
 _SONORANT_ONSETS = {"m", "my", "n", "ny", "r", "ry", "w", "y", "l", "ly"}
 _JP_NASAL_G_ONSETS = {"g", "gy", "gw"}
+_LAST_SEQUENCE_ALIGN_META: Dict[str, object] = {}
 _PLOSIVE_ONSETS = {
     "k",
     "ky",
@@ -2835,7 +2836,7 @@ def _build_phone_rows(
             cursor = next_cursor
     rows = _sanitize_rows(rows, duration_sec=duration_sec, filler_mark="pau")
     if (not viterbi_enable) or len(rows) <= 1 or (not labels) or hop_sec <= 0.0:
-        return rows
+        return _enforce_utau_phone_row_constraints(rows, duration_sec=float(duration_sec), language=language)
     refined = _decode_phone_boundaries_viterbi(
         rows,
         duration_sec=float(duration_sec),
@@ -2850,8 +2851,50 @@ def _build_phone_rows(
         reclist_prior_weight=float(reclist_prior_weight),
     )
     if len(refined) != len(rows):
-        return rows
-    return refined
+        return _enforce_utau_phone_row_constraints(rows, duration_sec=float(duration_sec), language=language)
+    return _enforce_utau_phone_row_constraints(refined, duration_sec=float(duration_sec), language=language)
+
+
+def _enforce_utau_phone_row_constraints(
+    rows: Sequence[Tuple[float, float, str]],
+    *,
+    duration_sec: float,
+    language: str,
+    min_span_ms: float = 4.0,
+    vc_pre_max_ms: float = 80.0,
+) -> List[Tuple[float, float, str]]:
+    out = _sanitize_rows(rows, duration_sec=float(duration_sec), filler_mark="pau")
+    if len(out) <= 1:
+        return out
+    min_span_sec = max(0.001, float(min_span_ms) / 1000.0)
+    vc_pre_max_sec = max(min_span_sec, float(vc_pre_max_ms) / 1000.0)
+    updated = list(out)
+    for i in range(len(updated) - 1):
+        left_start, left_end, left_mark = updated[i]
+        right_start, right_end, right_mark = updated[i + 1]
+        if str(left_mark).strip().lower() in _PAUSE_MARKERS or str(right_mark).strip().lower() in _PAUSE_MARKERS:
+            continue
+
+        boundary = max(float(left_start) + min_span_sec, min(float(left_end), float(right_end) - min_span_sec))
+        if (abs(boundary - float(left_end)) > 1e-9) or (abs(boundary - float(right_start)) > 1e-9):
+            updated[i] = (float(left_start), float(boundary), left_mark)
+            updated[i + 1] = (float(boundary), float(right_end), right_mark)
+
+        left_text = str(left_mark)
+        left_onset = _token_onset(language, left_text)
+        left_parts = _split_token_to_phone_parts(language, left_text)
+        left_single = str(left_parts[0] or "").strip().lower() if len(left_parts) == 1 else ""
+        left_is_single_vowel = left_single in {"a", "i", "u", "e", "o", "n"}
+        left_is_consonant_like = bool(left_onset) or (len(left_parts) == 1 and not left_is_single_vowel)
+        right_is_vowel = _is_vowel_only_token(language, str(right_mark))
+        if left_is_consonant_like and right_is_vowel:
+            cons_span = float(updated[i][1]) - float(updated[i][0])
+            if cons_span > vc_pre_max_sec:
+                new_boundary = float(updated[i][0]) + vc_pre_max_sec
+                if new_boundary < float(updated[i + 1][1]) - min_span_sec:
+                    updated[i] = (float(updated[i][0]), float(new_boundary), left_mark)
+                    updated[i + 1] = (float(new_boundary), float(updated[i + 1][1]), right_mark)
+    return _sanitize_rows(updated, duration_sec=float(duration_sec), filler_mark="pau")
 
 
 def _label_distribution(labels: Sequence[str]) -> Dict[str, int]:
@@ -2860,6 +2903,15 @@ def _label_distribution(labels: Sequence[str]) -> Dict[str, int]:
         key = str(label or "").strip() or "unknown"
         dist[key] = int(dist.get(key, 0)) + 1
     return dist
+
+
+def _set_last_sequence_align_meta(meta: Dict[str, object]) -> None:
+    _LAST_SEQUENCE_ALIGN_META.clear()
+    _LAST_SEQUENCE_ALIGN_META.update(meta)
+
+
+def get_last_sequence_align_meta() -> Dict[str, object]:
+    return dict(_LAST_SEQUENCE_ALIGN_META)
 
 
 def _write_textgrid(
@@ -3055,6 +3107,7 @@ def run_sequence_align(
     format_hint: str = "",
     callback=None,
 ) -> Tuple[bool, str]:
+    _set_last_sequence_align_meta({})
     lang = str(language or "").strip().lower() or "korean"
     ready = check_sequence_aligner_ready(language=lang, wav_folder=wav_folder, callback=callback)
     if str(ready.get("code", "")).upper() != OK:
@@ -3351,6 +3404,13 @@ def run_sequence_align(
 
     ok_count = 0
     errors: List[str] = []
+    source_fallback_count = 0
+    source_filename_count = 0
+    order_ratio_values: List[float] = []
+    mis_mapping_hits = 0
+    one_step_hits = 0
+    vc_pre_ge_80ms_hits = 0
+    vc_candidate_count = 0
 
     for wav_path in wav_files:
         wav_name = os.path.basename(wav_path)
@@ -3360,6 +3420,14 @@ def run_sequence_align(
                 words = ["spn"]
                 source = "fallback"
             filename_words = _filename_words_for_wav(wav_path, lang)
+            order_match_ratio = 1.0
+            if filename_words and words:
+                order_match_ratio = float(_order_match_ratio(lang, words, filename_words))
+                order_ratio_values.append(order_match_ratio)
+                if order_match_ratio < 0.45:
+                    mis_mapping_hits += 1
+                elif order_match_ratio < 0.80:
+                    one_step_hits += 1
             token_count = max(1, len(words))
             local_min_active_ratio = float(min_active_ratio)
             local_max_active_ratio = float(max_active_ratio)
@@ -3488,7 +3556,6 @@ def run_sequence_align(
             )
             soft_lock_ready = False
             if bool(filename_soft_lock_enable) and filename_words and len(words) >= 2:
-                order_match_ratio = _order_match_ratio(lang, words, filename_words)
                 soft_lock_ready = bool(source == "filename" or order_match_ratio >= 0.70)
             word_rows = _refine_word_boundaries_with_onset_cues(
                 word_rows,
@@ -3554,6 +3621,21 @@ def run_sequence_align(
                     else 1.0
                 ),
             )
+            if source == "fallback":
+                source_fallback_count += 1
+            elif source == "filename":
+                source_filename_count += 1
+            for idx in range(len(phone_rows) - 1):
+                cur = phone_rows[idx]
+                nxt = phone_rows[idx + 1]
+                cur_mark = str(cur[2] or "").strip().lower()
+                nxt_mark = str(nxt[2] or "").strip().lower()
+                if cur_mark in _PAUSE_MARKERS or nxt_mark in _PAUSE_MARKERS:
+                    continue
+                if _token_onset(lang, cur_mark) and _is_vowel_only_token(lang, nxt_mark):
+                    vc_candidate_count += 1
+                    if (float(cur[1]) - float(cur[0])) >= 0.080:
+                        vc_pre_ge_80ms_hits += 1
 
             textgrid_name = os.path.splitext(wav_name)[0] + ".TextGrid"
             textgrid_path = os.path.join(output_folder, textgrid_name)
@@ -3578,10 +3660,82 @@ def run_sequence_align(
 
     if ok_count <= 0:
         if errors:
+            _set_last_sequence_align_meta(
+                {
+                    "confidence": 0.0,
+                    "warnings": ["sequence_failed"],
+                    "fallback_hint": "mfa",
+                    "metrics": {
+                        "mis_mapping_rate": 1.0,
+                        "one_step_shift_rate": 1.0,
+                        "vc_pre_ge_80ms_rate": 1.0,
+                        "ok_ratio": 0.0,
+                    },
+                }
+            )
             return False, f"Sequence alignment failed: {errors[0]}"
+        _set_last_sequence_align_meta(
+            {
+                "confidence": 0.0,
+                "warnings": ["sequence_failed"],
+                "fallback_hint": "mfa",
+                "metrics": {
+                    "mis_mapping_rate": 1.0,
+                    "one_step_shift_rate": 1.0,
+                    "vc_pre_ge_80ms_rate": 1.0,
+                    "ok_ratio": 0.0,
+                },
+            }
+        )
         return False, "Sequence alignment failed."
 
+    total = max(1, len(wav_files))
+    mis_mapping_rate = float(mis_mapping_hits) / float(total)
+    one_step_shift_rate = float(one_step_hits) / float(total)
+    vc_pre_ge_80ms_rate = float(vc_pre_ge_80ms_hits) / float(max(1, vc_candidate_count))
+    fallback_source_rate = float(source_fallback_count) / float(total)
+    ok_ratio = float(ok_count) / float(total)
+    mean_order_ratio = float(sum(order_ratio_values) / float(len(order_ratio_values))) if order_ratio_values else 1.0
+    confidence = max(
+        0.0,
+        min(
+            1.0,
+            1.0
+            - (0.65 * mis_mapping_rate)
+            - (0.50 * one_step_shift_rate)
+            - (0.40 * vc_pre_ge_80ms_rate)
+            - (0.25 * fallback_source_rate)
+            - (0.20 * max(0.0, 1.0 - mean_order_ratio))
+            - (0.35 * (1.0 - ok_ratio)),
+        ),
+    )
+    warnings: List[str] = []
+    if mis_mapping_rate >= 0.10:
+        warnings.append(f"mis_mapping_rate_high:{mis_mapping_rate:.3f}")
+    if one_step_shift_rate >= 0.10:
+        warnings.append(f"one_step_shift_rate_high:{one_step_shift_rate:.3f}")
+    if vc_pre_ge_80ms_rate >= 0.10:
+        warnings.append(f"vc_pre_ge_80ms_rate_high:{vc_pre_ge_80ms_rate:.3f}")
+    if fallback_source_rate > 0.0:
+        warnings.append(f"fallback_transcript_source_rate:{fallback_source_rate:.3f}")
+    fallback_hint = "mfa" if confidence < _env_float("UTOA_SEQUENCE_ALIGN_FALLBACK_HINT_CONFIDENCE", 0.56) else ""
+    _set_last_sequence_align_meta(
+        {
+            "confidence": float(confidence),
+            "warnings": warnings,
+            "fallback_hint": fallback_hint,
+            "metrics": {
+                "mis_mapping_rate": float(mis_mapping_rate),
+                "one_step_shift_rate": float(one_step_shift_rate),
+                "vc_pre_ge_80ms_rate": float(vc_pre_ge_80ms_rate),
+                "ok_ratio": float(ok_ratio),
+                "filename_source_rate": float(source_filename_count) / float(total),
+            },
+        }
+    )
+
     summary = f"sequence alignment complete ({ok_count}/{len(wav_files)})"
+    summary += f" conf={confidence:.2f}"
     if errors:
         summary += f"; {len(errors)} file(s) failed"
     return True, summary
@@ -3589,5 +3743,6 @@ def run_sequence_align(
 
 __all__ = [
     "check_sequence_aligner_ready",
+    "get_last_sequence_align_meta",
     "run_sequence_align",
 ]

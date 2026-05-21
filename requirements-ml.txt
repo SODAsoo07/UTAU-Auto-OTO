@@ -1,3 +1,6 @@
 lightgbm>=4.3
 pandas>=2.0
 onnxruntime>=1.18
+pyworld>=0.3.5
+librosa>=0.10.2
+scipy>=1.11

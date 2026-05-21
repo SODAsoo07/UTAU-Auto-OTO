@@ -64,6 +64,19 @@ def extract_features(
     device: str | None = None,
 ) -> FeatureBatch:
     normalized_encoder = encoder.replace("_", "-").lower()
+    if normalized_encoder in {"acoustic-world", "acoustic-world-v1", "world", "world-v1"}:
+        config = acoustic_config or AcousticFeatureConfig()
+        samples, sample_rate = read_wav_mono(wav_path, target_sample_rate=config.sample_rate)
+        world = acoustic_world_features(samples, sample_rate, config=config)
+        duration_ms = 1000.0 * float(samples.shape[0]) / float(sample_rate)
+        return FeatureBatch(
+            times_ms=world.times_ms,
+            features=world.features,
+            sample_rate=sample_rate,
+            duration_ms=duration_ms,
+            encoder="acoustic_world_v1",
+            acoustic_scores=world.scores,
+        )
     if normalized_encoder == "acoustic":
         config = acoustic_config or AcousticFeatureConfig()
         samples, sample_rate = read_wav_mono(wav_path, target_sample_rate=config.sample_rate)
@@ -107,6 +120,100 @@ class AcousticAuxFeatures:
     times_ms: np.ndarray
     features: np.ndarray
     scores: Mapping[str, np.ndarray]
+
+
+def acoustic_world_features(
+    samples: np.ndarray,
+    sample_rate: int,
+    *,
+    config: AcousticFeatureConfig | None = None,
+) -> AcousticAuxFeatures:
+    cfg = config or AcousticFeatureConfig(sample_rate=sample_rate)
+    aux = acoustic_aux_features(samples, sample_rate, config=cfg)
+    try:
+        import librosa
+        import pyworld as pw
+        from scipy.ndimage import gaussian_filter1d
+    except ImportError as exc:
+        raise RuntimeError(
+            "acoustic_world_v1 encoder requires pyworld, librosa, and scipy."
+        ) from exc
+
+    wav64 = samples.astype(np.float64)
+    frame_period = float(cfg.hop_ms)
+    raw_f0, time_axis = pw.dio(wav64, sample_rate, frame_period=frame_period)
+    f0 = pw.stonemask(wav64, raw_f0, time_axis, sample_rate)
+    sp = pw.cheaptrick(wav64, f0, time_axis, sample_rate)
+    ap = pw.d4c(wav64, f0, time_axis, sample_rate)
+
+    world_times_ms = (np.asarray(time_axis, dtype=np.float64) * 1000.0).astype(np.float32)
+    voiced = (np.asarray(f0, dtype=np.float32) > 55.0).astype(np.float32)
+    periodicity = 1.0 - np.clip(np.mean(np.asarray(ap, dtype=np.float32), axis=1), 0.0, 1.0)
+    log_sp = np.log(np.maximum(np.asarray(sp, dtype=np.float32), 1e-7))
+    sp_delta = np.mean(np.abs(np.diff(log_sp, axis=0)), axis=1).astype(np.float32)
+    sp_delta = np.pad(sp_delta, (1, 0), mode="edge")
+    spectral_stability = 1.0 - _robust_unit(sp_delta)
+
+    hop = max(1, int(round(sample_rate * cfg.hop_ms / 1000.0)))
+    onset = librosa.onset.onset_strength(y=samples.astype(np.float32), sr=sample_rate, hop_length=hop)
+    rms = librosa.feature.rms(y=samples.astype(np.float32), frame_length=max(1, int(round(sample_rate * cfg.frame_ms / 1000.0))), hop_length=hop).squeeze(0)
+    onset = _safe_smooth_track(onset.astype(np.float32), gaussian_filter1d)
+    rms = _safe_smooth_track(rms.astype(np.float32), gaussian_filter1d)
+
+    world_voicing = _interp_vector(world_times_ms, _safe_smooth_track(voiced, gaussian_filter1d), aux.times_ms)
+    world_periodicity = _interp_vector(world_times_ms, _safe_smooth_track(periodicity.astype(np.float32), gaussian_filter1d), aux.times_ms)
+    world_stability = _interp_vector(world_times_ms, _safe_smooth_track(spectral_stability.astype(np.float32), gaussian_filter1d), aux.times_ms)
+    onset_times = (np.arange(onset.shape[0], dtype=np.float32) * float(hop) * 1000.0) / float(sample_rate)
+    rms_times = (np.arange(rms.shape[0], dtype=np.float32) * float(hop) * 1000.0) / float(sample_rate)
+    onset_interp = _interp_vector(onset_times, _robust_unit(onset), aux.times_ms)
+    rms_interp = _interp_vector(rms_times, _robust_unit(rms), aux.times_ms)
+
+    voiced_delta = np.abs(np.gradient(world_voicing.astype(np.float32))).astype(np.float32)
+    transition_world = np.clip(
+        0.45 * onset_interp + 0.25 * _positive_unit(voiced_delta) + 0.30 * (1.0 - world_stability),
+        0.0,
+        1.0,
+    ).astype(np.float32)
+    nucleus_world = np.clip(
+        0.36 * world_voicing + 0.30 * world_periodicity + 0.20 * world_stability + 0.14 * rms_interp,
+        0.0,
+        1.0,
+    ).astype(np.float32)
+
+    merged_scores = dict(aux.scores)
+    merged_scores.update(
+        {
+            "world_f0_hz": _interp_vector(world_times_ms, np.asarray(f0, dtype=np.float32), aux.times_ms),
+            "world_voicing": world_voicing,
+            "world_periodicity": world_periodicity,
+            "world_spectral_stability": world_stability,
+            "world_transition": transition_world,
+            "world_nucleus": nucleus_world,
+            "transition_likelihood": np.clip(0.55 * merged_scores["transition_likelihood"] + 0.45 * transition_world, 0.0, 1.0).astype(np.float32),
+            "voicing": np.clip(0.55 * merged_scores["voicing"] + 0.45 * world_voicing, 0.0, 1.0).astype(np.float32),
+            "nucleus_likelihood": nucleus_world,
+            "onset_strength": onset_interp,
+            "acoustic_feature_set_world_v1": np.ones_like(nucleus_world, dtype=np.float32),
+        }
+    )
+    world_cols = np.stack(
+        [
+            world_voicing,
+            world_periodicity,
+            world_stability,
+            transition_world,
+            nucleus_world,
+            onset_interp,
+            rms_interp,
+        ],
+        axis=1,
+    ).astype(np.float32)
+    features = np.concatenate([aux.features, _standardize(world_cols)], axis=1).astype(np.float32)
+    return AcousticAuxFeatures(
+        times_ms=aux.times_ms,
+        features=features,
+        scores=merged_scores,
+    )
 
 
 def acoustic_frame_features(
@@ -415,3 +522,9 @@ def _positive_unit(values: np.ndarray) -> np.ndarray:
 def _silence_likelihood(rms: np.ndarray) -> np.ndarray:
     speech = _robust_unit(rms)
     return np.clip(1.0 - speech, 0.0, 1.0).astype(np.float32)
+
+
+def _safe_smooth_track(values: np.ndarray, gaussian_filter1d_func) -> np.ndarray:
+    if values.size <= 2:
+        return values.astype(np.float32)
+    return gaussian_filter1d_func(values.astype(np.float32), sigma=1.0, mode="nearest").astype(np.float32)

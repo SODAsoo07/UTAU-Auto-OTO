@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Sequence
+
+import numpy as np
 
 from .decode import decode_monotonic_events
 from .features import extract_features
@@ -66,23 +69,48 @@ class RuntimePrediction:
 def predict_wav(
     wav_path: str | Path,
     *,
-    checkpoint_path: str | Path,
+    checkpoint_path: str | Path | None = None,
     expected_phones: Sequence[str] | None = None,
     expected_slots: Sequence[ExpectedSlot] | None = None,
     encoder: str | None = None,
     device: str | None = None,
     use_slot_viterbi: bool = True,
 ) -> RuntimePrediction:
-    checkpoint, model, target_device = _load_runtime_checkpoint(str(Path(checkpoint_path)), device)
-    encoder_name = encoder or str(checkpoint.get("encoder") or "acoustic")
-    posterior = _predict_posterior_with_loaded_model(
-        wav_path,
-        checkpoint=checkpoint,
-        model=model,
-        target_device=target_device,
-        encoder=encoder_name,
-        requested_device=device,
-    )
+    checkpoint_file = str(Path(checkpoint_path)) if checkpoint_path else ""
+    encoder_name = str(encoder or "acoustic_world_v1")
+    checkpoint = None
+    if checkpoint_file and os.path.isfile(checkpoint_file):
+        try:
+            checkpoint, model, target_device = _load_runtime_checkpoint(checkpoint_file, device)
+            encoder_name = encoder or str(checkpoint.get("encoder") or encoder_name)
+            posterior = _predict_posterior_with_loaded_model(
+                wav_path,
+                checkpoint=checkpoint,
+                model=model,
+                target_device=target_device,
+                encoder=encoder_name,
+                requested_device=device,
+            )
+        except Exception as exc:
+            posterior = _predict_posterior_rule_based(
+                wav_path,
+                encoder=encoder_name,
+                metadata={
+                    "rule_based": True,
+                    "rule_fallback_reason": f"checkpoint_inference_failed:{exc}",
+                    "acoustic_feature_set": "world_v1",
+                },
+            )
+    else:
+        posterior = _predict_posterior_rule_based(
+            wav_path,
+            encoder=encoder_name,
+            metadata={
+                "rule_based": True,
+                "rule_fallback_reason": "checkpoint_missing_or_unset",
+                "acoustic_feature_set": "world_v1",
+            },
+        )
     slot_result = (
         assign_slots_viterbi(posterior, expected_phones=expected_phones, expected_slots=expected_slots)
         if use_slot_viterbi and (expected_slots or expected_phones)
@@ -159,8 +187,80 @@ def _predict_posterior_with_loaded_model(
         class_probs={label: frame_probs[:, idx].astype(float).tolist() for idx, label in enumerate(FRAME_LABELS)},
         event_scores={label: event_scores[:, idx].astype(float).tolist() for idx, label in enumerate(EVENT_LABELS)},
         acoustic_scores={key: value.astype(float).tolist() for key, value in batch.acoustic_scores.items()},
-        metadata={"encoder": encoder, "checkpoint_encoder": checkpoint.get("encoder")},
+        metadata={
+            "encoder": encoder,
+            "checkpoint_encoder": checkpoint.get("encoder"),
+            "acoustic_feature_set": "world_v1" if "world" in str(encoder).lower() else "",
+            "rule_based": False,
+        },
     )
+
+
+def _predict_posterior_rule_based(
+    wav_path: str | Path,
+    *,
+    encoder: str,
+    metadata: dict[str, object] | None = None,
+) -> FramePosterior:
+    batch = extract_features(wav_path, encoder=encoder)
+    times = np.asarray(batch.times_ms, dtype=np.float32)
+    frame_count = int(times.shape[0])
+    if frame_count <= 0:
+        return FramePosterior(
+            wav_path=str(wav_path),
+            times_ms=[],
+            class_probs={label: [] for label in FRAME_LABELS},
+            event_scores={label: [] for label in EVENT_LABELS},
+            acoustic_scores={},
+            metadata={**(metadata or {}), "encoder": encoder, "rule_based": True},
+        )
+    silence = _track(batch.acoustic_scores, "silence_likelihood", frame_count)
+    voicing = _track(batch.acoustic_scores, "voicing", frame_count)
+    transition = _track(batch.acoustic_scores, "transition_likelihood", frame_count)
+    nucleus = _track(batch.acoustic_scores, "nucleus_likelihood", frame_count)
+    if not np.any(nucleus):
+        nucleus = _track(batch.acoustic_scores, "world_nucleus", frame_count)
+    if not np.any(nucleus):
+        nucleus = voicing
+    vowel = np.clip((0.58 * voicing) + (0.22 * nucleus) + (0.20 * (1.0 - silence)), 0.0, 1.0)
+    consonant = np.clip((0.52 * transition) + (0.28 * (1.0 - voicing)) + (0.20 * (1.0 - silence)), 0.0, 1.0)
+    raw_other = np.clip(1.0 - (silence + vowel + consonant), 0.0, 1.0)
+    class_stack = np.stack([silence, consonant, vowel, raw_other], axis=1)
+    denom = np.maximum(np.sum(class_stack, axis=1, keepdims=True), 1e-6)
+    class_norm = (class_stack / denom).astype(np.float32)
+    cv = np.clip((0.46 * transition) + (0.34 * class_norm[:, 2]) + (0.20 * (1.0 - silence)), 0.0, 1.0)
+    vn = np.clip((0.55 * nucleus) + (0.30 * voicing) + (0.15 * (1.0 - silence)), 0.0, 1.0)
+    pc = np.clip((0.58 * transition) + (0.22 * (1.0 - silence)) + (0.20 * (1.0 - voicing)), 0.0, 1.0)
+    acoustic_scores = {key: np.asarray(value, dtype=np.float32).tolist() for key, value in batch.acoustic_scores.items()}
+    return FramePosterior(
+        wav_path=str(wav_path),
+        times_ms=times.astype(float).tolist(),
+        class_probs={
+            "silence": class_norm[:, 0].astype(float).tolist(),
+            "consonant": class_norm[:, 1].astype(float).tolist(),
+            "vowel": class_norm[:, 2].astype(float).tolist(),
+            "other": class_norm[:, 3].astype(float).tolist(),
+        },
+        event_scores={
+            "cv_boundary": cv.astype(float).tolist(),
+            "vowel_nucleus": vn.astype(float).tolist(),
+            "phone_change": pc.astype(float).tolist(),
+        },
+        acoustic_scores=acoustic_scores,
+        metadata={
+            "encoder": encoder,
+            "rule_based": True,
+            "acoustic_feature_set": "world_v1",
+            **(metadata or {}),
+        },
+    )
+
+
+def _track(scores: dict[str, np.ndarray] | dict[str, object], key: str, frame_count: int) -> np.ndarray:
+    values = np.asarray(scores.get(key, []), dtype=np.float32)
+    if values.shape[0] != frame_count:
+        return np.zeros((frame_count,), dtype=np.float32)
+    return np.clip(values, 0.0, 1.0).astype(np.float32)
 
 
 def _expected_phones(row: dict) -> list[str]:

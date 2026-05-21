@@ -18,8 +18,8 @@ from ui.theme_tokens import (
 from ui.i18n import t
 
 EN_CVVC_UI_ENABLED = False
-NO_MFA_REMAP_LABEL = "Base OTO remap"
-NO_MFA_SSL_SLOT_LABEL = "MFA-Free SSL slot adapter"
+NO_MFA_REMAP_LABEL = "Base OTO remap (legacy fallback)"
+NO_MFA_SSL_SLOT_LABEL = "MFA-Free auto + fallback"
 
 
 class LayoutMixin:
@@ -394,6 +394,7 @@ class LayoutMixin:
         self.no_mfa_oto_mode_menu = ctk.CTkOptionMenu(
             self.row_no_mfa_oto_mode,
             values=[
+                NO_MFA_SSL_SLOT_LABEL,
                 NO_MFA_REMAP_LABEL,
             ],
             variable=self.no_mfa_oto_mode_var,
@@ -404,7 +405,7 @@ class LayoutMixin:
         self.no_mfa_oto_mode_menu.pack(side="left", padx=(6, 8))
         self.no_mfa_oto_mode_hint_label = ctk.CTkLabel(
             self.row_no_mfa_oto_mode,
-            text=t("(・・ｴ・､ OTO 﨑・・, TextGrid ・・擽 ・醐箕 弡・ｳｴ ・川・・・・ｴ・・"),
+            text=t("(기본: MFA-Free 모델 기반 자동 지정, 낮은 신뢰도는 자동 fallback)"),
             text_color=PALETTE.neutral_text,
         )
         self.no_mfa_oto_mode_hint_label.pack(side="left", fill="x", expand=True)
@@ -1508,7 +1509,7 @@ class LayoutMixin:
 
     def _get_no_mfa_oto_mode_code(self):
         if not hasattr(self, "no_mfa_oto_mode_var"):
-            return "remap"
+            return "mfa_free_ssl_slot"
         try:
             current = self.no_mfa_oto_mode_var.get()
         except Exception:
@@ -1626,13 +1627,9 @@ class LayoutMixin:
             if hasattr(self, "_get_oto_crnn_engine_code")
             else "boundary_decoder"
         )
-        if no_mfa_mode_code == "mfa_free_ssl_slot" and not developer_enabled:
-            no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("remap")
         if no_mfa_mode_code == "crnn":
-            no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("remap")
-        no_mfa_values = [NO_MFA_REMAP_LABEL]
-        if developer_enabled:
-            no_mfa_values.append(NO_MFA_SSL_SLOT_LABEL)
+            no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("mfa_free_ssl_slot")
+        no_mfa_values = [NO_MFA_SSL_SLOT_LABEL, NO_MFA_REMAP_LABEL]
         if hasattr(self, "no_mfa_oto_mode_menu"):
             try:
                 self.no_mfa_oto_mode_menu.configure(values=no_mfa_values)

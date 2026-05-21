@@ -13,6 +13,7 @@ from core.oto_file_utils import parse_oto_line, read_text_with_fallback
 from core.oto_normalization import normalize_wav_key
 
 _CLASSIFY_ALIAS_TYPE_FN = None
+_LAST_NO_MFA_RUNTIME_META: dict[str, object] = {}
 
 
 def _log(callback: Callable[[str], None] | None, message: str) -> None:
@@ -195,11 +196,25 @@ def _env_float(name: str, default: float) -> float:
 
 def _normalize_generation_mode(value: str) -> str:
     raw = str(value or "").strip().lower()
+    if raw in {"mfa_free", "mfa-free", "ssl_slot", "ssl-slot", "mfa_free_ssl_slot", "default"}:
+        return "mfa_free_ssl_slot"
     if raw in {"alias_auto", "alias-only", "alias_only", "blank_auto", "blank"}:
         return "remap"
     if raw in {"remap", "base_remap", "base"}:
         return "remap"
+    mode_default = str(os.environ.get("UTOA_NO_MFA_DEFAULT_MODE", "mfa_free_ssl_slot") or "").strip().lower()
+    if mode_default in {"mfa_free_ssl_slot", "mfa_free", "mfa-free", "ssl_slot", "ssl-slot"}:
+        return "mfa_free_ssl_slot"
     return "remap"
+
+
+def _set_last_no_mfa_runtime_meta(**kwargs) -> None:
+    _LAST_NO_MFA_RUNTIME_META.clear()
+    _LAST_NO_MFA_RUNTIME_META.update(kwargs)
+
+
+def get_last_no_mfa_runtime_meta() -> dict[str, object]:
+    return dict(_LAST_NO_MFA_RUNTIME_META)
 
 
 def _median_of(values: list[float], default: float = 0.0) -> float:
@@ -1416,6 +1431,99 @@ def generate_no_mfa_auto_oto(
 ) -> tuple[int, int, list[str]]:
     normalized_out_path = _normalize_output_oto_path(out_path)
     mode = _normalize_generation_mode(generation_mode)
+    _set_last_no_mfa_runtime_meta(
+        requested_mode=str(generation_mode or ""),
+        resolved_mode=str(mode),
+        confidence=0.0,
+        warnings=[],
+        fallback_hint="",
+        fallback_used=False,
+    )
+    if mode == "mfa_free_ssl_slot":
+        checkpoint = str(os.environ.get("UTOA_MFA_FREE_OTO_CHECKPOINT", "") or "").strip()
+        if not checkpoint:
+            # Keep previous UI behavior: discover from ml_workspace/mfa_free_oto.
+            roots = [
+                str(os.environ.get("UTOA_APP_DIR", "") or "").strip(),
+                os.getcwd(),
+            ]
+            candidates: list[str] = []
+            for base in roots:
+                if not base:
+                    continue
+                root = os.path.join(base, "ml_workspace", "mfa_free_oto")
+                if not os.path.isdir(root):
+                    continue
+                for dirpath, _dirnames, filenames in os.walk(root):
+                    for name in filenames:
+                        low = str(name).lower()
+                        if low.endswith(".pt") and "wavlm" in low:
+                            candidates.append(os.path.join(dirpath, name))
+            if candidates:
+                candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                checkpoint = os.path.abspath(candidates[0])
+        try:
+            from core.mfa_free_oto.workflow import (
+                NoMfaWorkflowGuard,
+                generate_no_mfa_oto_with_model_context,
+            )
+
+            runtime_report = generate_no_mfa_oto_with_model_context(
+                wav_dir=wav_dir,
+                out_path=normalized_out_path,
+                source_oto_path=source_oto_path,
+                alias_suffix=alias_suffix,
+                checkpoint_path=checkpoint if (checkpoint and os.path.isfile(checkpoint)) else "",
+                language=str(language or "japanese"),
+                format_type=(
+                    str(os.environ.get("UTOA_NO_MFA_FORMAT_TYPE", "") or "").strip()
+                    or str(os.environ.get("UTOA_AUTO_FORMAT", "") or "").strip()
+                    or "CV"
+                ),
+                alias_type=str(os.environ.get("UTOA_NO_MFA_ALIAS_TYPE", "auto") or "auto"),
+                encoder=(str(os.environ.get("UTOA_MFA_FREE_OTO_ENCODER", "") or "").strip() or "acoustic_world_v1"),
+                device=(str(os.environ.get("UTOA_MFA_FREE_OTO_DEVICE", "") or "").strip() or None),
+                use_slot_viterbi=not _env_bool("UTOA_MFA_FREE_OTO_DISABLE_SLOT_VITERBI", False),
+                guard=NoMfaWorkflowGuard(
+                    min_confidence=_env_float("UTOA_NO_MFA_RUNTIME_MIN_CONFIDENCE", 0.52),
+                    min_anchor_ratio=_env_float("UTOA_NO_MFA_RUNTIME_MIN_ANCHOR_RATIO", 0.65),
+                    max_slot_warnings=max(1, _env_int("UTOA_NO_MFA_RUNTIME_MAX_SLOT_WARNINGS", 6)),
+                    cv_boundary_min_conf=_env_float("UTOA_NO_MFA_RUNTIME_MIN_CV_CONFIDENCE", 0.32),
+                    vowel_nucleus_min_conf=_env_float("UTOA_NO_MFA_RUNTIME_MIN_NUCLEUS_CONFIDENCE", 0.34),
+                    vc_pre_max_ms=_env_float("UTOA_NO_MFA_RUNTIME_VC_PRE_MAX_MS", 80.0),
+                    one_step_shift_repair_enabled=_env_bool("UTOA_NO_MFA_RUNTIME_ONE_STEP_REPAIR", True),
+                ),
+                callback=callback,
+            )
+            _set_last_no_mfa_runtime_meta(
+                requested_mode=str(generation_mode or ""),
+                resolved_mode="mfa_free_ssl_slot",
+                confidence=float(runtime_report.confidence),
+                warnings=list(runtime_report.warnings),
+                fallback_hint=str(runtime_report.fallback_hint or "manual_review_required"),
+                fallback_used=bool(runtime_report.guard_failed),
+                fallback_reason="manual_review_required" if runtime_report.guard_failed else "",
+                metrics=dict(runtime_report.metrics or {}),
+            )
+            _log(
+                callback,
+                f"[No-MFA/MFA-Free] generated={runtime_report.processed}/{runtime_report.total} "
+                f"confidence={runtime_report.confidence:.2f} guard={'fail' if runtime_report.guard_failed else 'pass'}",
+            )
+            return int(runtime_report.processed), int(runtime_report.total), list(runtime_report.errors)
+        except Exception as exc:
+            _log(callback, f"[No-MFA/MFA-Free] runtime failed ({exc})")
+            _set_last_no_mfa_runtime_meta(
+                requested_mode=str(generation_mode or ""),
+                resolved_mode="mfa_free_ssl_slot",
+                confidence=0.0,
+                warnings=[f"runtime_exception:{exc}"],
+                fallback_hint="manual_review_required",
+                fallback_used=True,
+                fallback_reason="runtime_exception",
+            )
+            return 0, 0, [f"MFA-Free runtime failed: {exc}"]
+
     _log(
         callback,
         "[No-MFA] generation mode: remap (base OTO timing remap + acoustic correction)",
@@ -1710,6 +1818,7 @@ def generate_no_mfa_auto_oto(
 
 __all__ = [
     "generate_no_mfa_auto_oto",
+    "get_last_no_mfa_runtime_meta",
     "resolve_no_mfa_source_oto",
     "resolve_no_mfa_stats_oto",
 ]

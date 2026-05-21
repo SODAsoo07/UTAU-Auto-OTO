@@ -46,7 +46,6 @@ EXCLUDED_MODULES = [
     "ml.scripts",
     "ml.tests",
     "pytest",
-    "librosa",
     "scripts",
     "tests",
 ]
