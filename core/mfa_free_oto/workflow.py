@@ -128,6 +128,7 @@ def generate_no_mfa_oto_with_model_context(
     row_results: list[NoMfaRowResult] = []
     cv_conf_values: list[float] = []
     nucleus_conf_values: list[float] = []
+    rule_based_per_wav: list[str] = []
 
     if source_oto:
         template_rows = load_oto_template_rows_alias_only(source_oto)
@@ -162,8 +163,9 @@ def generate_no_mfa_oto_with_model_context(
                 encoder=encoder,
                 device=device,
                 use_slot_viterbi=use_slot_viterbi,
+                language=language,
             )
-            _collect_prediction_metrics(prediction, slot_scores, warnings)
+            _collect_prediction_metrics(prediction, slot_scores, warnings, rule_based_per_wav)
             slot_warning_count += len(prediction.slot_result.warnings if prediction.slot_result is not None else ())
             decoded_source = _event_source_for_oto(prediction)
             file_duration_ms = _wav_duration_ms(wav_path, warnings)
@@ -226,8 +228,9 @@ def generate_no_mfa_oto_with_model_context(
                 encoder=encoder,
                 device=device,
                 use_slot_viterbi=use_slot_viterbi,
+                language=language,
             )
-            _collect_prediction_metrics(prediction, slot_scores, warnings)
+            _collect_prediction_metrics(prediction, slot_scores, warnings, rule_based_per_wav)
             slot_warning_count += len(prediction.slot_result.warnings if prediction.slot_result is not None else ())
             anchors = anchors_from_prediction(prediction.posterior, _event_source_for_oto(prediction))
             adapted = bootstrap_row(
@@ -315,6 +318,20 @@ def generate_no_mfa_oto_with_model_context(
     if avg_nucleus_conf < float(cfg.vowel_nucleus_min_conf):
         guard_reasons.append(f"vowel_nucleus_confidence_low:{avg_nucleus_conf:.3f}")
 
+    predicted_wavs = len(rule_based_per_wav)
+    rule_based_count = sum(1 for reason in rule_based_per_wav if reason)
+    rule_based_ratio = float(rule_based_count) / float(max(1, predicted_wavs))
+    inference_failures = sorted(
+        {reason for reason in rule_based_per_wav if reason.startswith("checkpoint_inference_failed")}
+    )
+    if rule_based_count:
+        warnings.append(f"rule_based_inference:{rule_based_count}/{predicted_wavs}")
+    if inference_failures:
+        # A checkpoint was configured but failed to load/run: the run silently
+        # degraded to the lower-quality rule-based path, so fail the guard.
+        guard_reasons.append(f"checkpoint_inference_failed:{rule_based_count}/{predicted_wavs}")
+        warnings.extend(inference_failures)
+
     guard_failed = bool(guard_reasons)
     if guard_failed:
         warnings.extend(guard_reasons)
@@ -341,13 +358,27 @@ def generate_no_mfa_oto_with_model_context(
             "avg_slot_score": float(avg_slot),
             "cv_boundary_confidence": float(avg_cv_conf),
             "vowel_nucleus_confidence": float(avg_nucleus_conf),
+            "rule_based_ratio": float(rule_based_ratio),
             "acoustic_feature_set_world_v1": 1.0,
         },
         rows=tuple(row_results),
     )
 
 
-def _collect_prediction_metrics(prediction: RuntimePrediction, slot_scores: list[float], warnings: list[str]) -> None:
+def _posterior_rule_based_reason(prediction: RuntimePrediction) -> str:
+    meta = prediction.posterior.metadata or {}
+    if not bool(meta.get("rule_based")):
+        return ""
+    return str(meta.get("rule_fallback_reason") or "rule_based")
+
+
+def _collect_prediction_metrics(
+    prediction: RuntimePrediction,
+    slot_scores: list[float],
+    warnings: list[str],
+    rule_based_per_wav: list[str],
+) -> None:
+    rule_based_per_wav.append(_posterior_rule_based_reason(prediction))
     slot_result = prediction.slot_result
     if slot_result is None:
         warnings.append("slot_result_missing")

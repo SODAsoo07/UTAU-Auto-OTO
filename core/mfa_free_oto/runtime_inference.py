@@ -75,6 +75,7 @@ def predict_wav(
     encoder: str | None = None,
     device: str | None = None,
     use_slot_viterbi: bool = True,
+    language: str = "",
 ) -> RuntimePrediction:
     checkpoint_file = str(Path(checkpoint_path)) if checkpoint_path else ""
     encoder_name = str(encoder or "acoustic_world_v1")
@@ -112,14 +113,19 @@ def predict_wav(
             },
         )
     slot_result = (
-        assign_slots_viterbi(posterior, expected_phones=expected_phones, expected_slots=expected_slots)
+        assign_slots_viterbi(
+            posterior,
+            expected_phones=expected_phones,
+            expected_slots=expected_slots,
+            language=language,
+        )
         if use_slot_viterbi and (expected_slots or expected_phones)
         else None
     )
     decoded = (
         slot_assignments_to_decoded_events(slot_result)
         if slot_result is not None and slot_result.assignments
-        else decode_monotonic_events(posterior, expected_phones=expected_phones)
+        else decode_monotonic_events(posterior, expected_phones=expected_phones, language=language)
     )
     return RuntimePrediction(
         posterior=posterior,
@@ -217,6 +223,7 @@ def _predict_posterior_rule_based(
     silence = _track(batch.acoustic_scores, "silence_likelihood", frame_count)
     voicing = _track(batch.acoustic_scores, "voicing", frame_count)
     transition = _track(batch.acoustic_scores, "transition_likelihood", frame_count)
+    sonorant = _track(batch.acoustic_scores, "sonorant_onset_likelihood", frame_count)
     nucleus = _track(batch.acoustic_scores, "nucleus_likelihood", frame_count)
     if not np.any(nucleus):
         nucleus = _track(batch.acoustic_scores, "world_nucleus", frame_count)
@@ -228,7 +235,11 @@ def _predict_posterior_rule_based(
     class_stack = np.stack([silence, consonant, vowel, raw_other], axis=1)
     denom = np.maximum(np.sum(class_stack, axis=1, keepdims=True), 1e-6)
     class_norm = (class_stack / denom).astype(np.float32)
-    cv = np.clip((0.46 * transition) + (0.34 * class_norm[:, 2]) + (0.20 * (1.0 - silence)), 0.0, 1.0)
+    cv = np.clip(
+        (0.38 * transition) + (0.30 * class_norm[:, 2]) + (0.16 * (1.0 - silence)) + (0.16 * sonorant),
+        0.0,
+        1.0,
+    )
     vn = np.clip((0.55 * nucleus) + (0.30 * voicing) + (0.15 * (1.0 - silence)), 0.0, 1.0)
     pc = np.clip((0.58 * transition) + (0.22 * (1.0 - silence)) + (0.20 * (1.0 - voicing)), 0.0, 1.0)
     acoustic_scores = {key: np.asarray(value, dtype=np.float32).tolist() for key, value in batch.acoustic_scores.items()}

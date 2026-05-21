@@ -14,12 +14,12 @@ class ExpectedEvent:
     phone: str | None = None
 
 
-def expected_events_from_phones(phones: Sequence[str]) -> list[ExpectedEvent]:
+def expected_events_from_phones(phones: Sequence[str], *, language: str = "") -> list[ExpectedEvent]:
     events: list[ExpectedEvent] = []
     previous_phone: str | None = None
     previous_was_consonant = False
     for phone in phones:
-        vowel = is_vowel_phone(str(phone))
+        vowel = is_vowel_phone(str(phone), language)
         if previous_phone is not None:
             events.append(ExpectedEvent("phone_change", str(phone)))
         if vowel:
@@ -39,9 +39,10 @@ def decode_monotonic_events(
     min_score: float = 0.05,
     min_gap_ms: float = 10.0,
     top_k_per_event: int = 24,
+    language: str = "",
 ) -> list[DecodedEvent]:
     if expected_events is None:
-        expected_events = expected_events_from_phones(expected_phones or [])
+        expected_events = expected_events_from_phones(expected_phones or [], language=language)
     normalized_events = [
         event if isinstance(event, ExpectedEvent) else ExpectedEvent(str(event), None)
         for event in expected_events
@@ -115,6 +116,23 @@ class _Candidate:
     score: float
 
 
+def refine_peak_time(times: np.ndarray, values: np.ndarray, index: int) -> float:
+    """Sub-frame-refined time (ms) of a peak at ``index`` via 3-point quadratic
+    interpolation. Returns the raw frame time unchanged at the array edges."""
+    base = float(times[index])
+    if index <= 0 or index >= int(times.shape[0]) - 1:
+        return base
+    left = float(values[index - 1])
+    center = float(values[index])
+    right = float(values[index + 1])
+    denom = left - 2.0 * center + right
+    if abs(denom) < 1e-9:
+        return base
+    offset = max(-0.5, min(0.5, 0.5 * (left - right) / denom))
+    period = (float(times[index + 1]) - base) if offset >= 0.0 else (base - float(times[index - 1]))
+    return base + offset * max(0.0, period)
+
+
 def _event_candidates(
     posterior: FramePosterior,
     label: str,
@@ -138,7 +156,7 @@ def _event_candidates(
         local_maxima = [int(np.argmax(values))]
     local_maxima = sorted(local_maxima, key=lambda idx: float(values[idx]), reverse=True)[:top_k]
     candidates = [
-        _Candidate(frame_index=idx, time_ms=float(times[idx]), score=float(values[idx]))
+        _Candidate(frame_index=idx, time_ms=refine_peak_time(times, values, idx), score=float(values[idx]))
         for idx in local_maxima
     ]
     return sorted(candidates, key=lambda candidate: candidate.time_ms)

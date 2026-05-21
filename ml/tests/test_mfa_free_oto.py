@@ -165,7 +165,10 @@ def test_slot_viterbi_assigns_filename_slots_in_order():
         "cv_boundary",
         "vowel_nucleus",
     ]
-    assert [assignment.selected_time_ms for assignment in result.assignments] == pytest.approx([100.0, 150.0, 220.0, 270.0])
+    # Times carry sub-frame parabolic refinement, so allow up to half a frame of drift.
+    assert [assignment.selected_time_ms for assignment in result.assignments] == pytest.approx(
+        [100.0, 150.0, 220.0, 270.0], abs=6.0
+    )
     decoded = slot_assignments_to_decoded_events(result)
     assert [event.label for event in decoded] == ["cv_boundary", "vowel_nucleus", "cv_boundary", "vowel_nucleus"]
 

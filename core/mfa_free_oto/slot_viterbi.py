@@ -5,6 +5,7 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
+from .decode import refine_peak_time
 from .types import EVENT_LABELS, FramePosterior, is_vowel_phone
 
 # Minimum spacing (ms) enforced between adjacent slots, keyed by role transition.
@@ -57,7 +58,7 @@ class SlotCandidate:
     score: float
 
 
-def expected_cv_slots_from_phones(phones: Sequence[str]) -> list[ExpectedSlot]:
+def expected_cv_slots_from_phones(phones: Sequence[str], *, language: str = "") -> list[ExpectedSlot]:
     slots: list[ExpectedSlot] = []
     previous_phone: str | None = None
     previous_was_consonant = False
@@ -65,7 +66,7 @@ def expected_cv_slots_from_phones(phones: Sequence[str]) -> list[ExpectedSlot]:
         phone = str(raw_phone).strip()
         if not phone:
             continue
-        is_vowel = is_vowel_phone(phone)
+        is_vowel = is_vowel_phone(phone, language)
         if is_vowel and previous_phone is not None and previous_was_consonant:
             slots.append(
                 ExpectedSlot(
@@ -107,8 +108,13 @@ def assign_slots_viterbi(
     segment_overlap_slots: int = 1,
     local_window_slots: float = 2.6,
     nucleus_min_peak_distance_ms: float = 26.0,
+    language: str = "",
 ) -> SlotViterbiResult:
-    slots = list(expected_slots) if expected_slots is not None else expected_cv_slots_from_phones(expected_phones or [])
+    slots = (
+        list(expected_slots)
+        if expected_slots is not None
+        else expected_cv_slots_from_phones(expected_phones or [], language=language)
+    )
     warnings: list[str] = []
     times = np.asarray(posterior.times_ms, dtype=np.float32)
     if times.size == 0:
@@ -315,7 +321,9 @@ def _slot_candidates(
             continue
         if max_time_ms is not None and float(times[idx]) - 1e-5 > float(max_time_ms):
             continue
-        candidates.append(SlotCandidate(frame_index=idx, time_ms=float(times[idx]), score=score))
+        candidates.append(
+            SlotCandidate(frame_index=idx, time_ms=refine_peak_time(times, values, idx), score=score)
+        )
     candidates = sorted(candidates, key=lambda candidate: candidate.score, reverse=True)[:top_k]
     return sorted(candidates, key=lambda candidate: candidate.time_ms)
 
@@ -340,6 +348,7 @@ def _slot_acoustic_prior(posterior: FramePosterior, slot: ExpectedSlot) -> np.nd
     times = np.asarray(posterior.times_ms, dtype=np.float32)
     transition = _score_track(posterior, "transition_likelihood", times)
     flux = _score_track(posterior, "flux_likelihood", times)
+    sonorant = _score_track(posterior, "sonorant_onset_likelihood", times)
     voicing = _score_track(posterior, "voicing", times)
     nucleus = np.maximum(_score_track(posterior, "nucleus_likelihood", times), _score_track(posterior, "world_nucleus", times))
     periodicity = _score_track(posterior, "world_periodicity", times)
@@ -347,7 +356,11 @@ def _slot_acoustic_prior(posterior: FramePosterior, slot: ExpectedSlot) -> np.nd
     silence = _score_track(posterior, "silence_likelihood", times)
     non_silence = 1.0 - silence
     if slot.role == "cv_boundary":
-        return np.clip(0.50 * transition + 0.30 * flux + 0.20 * non_silence, 0.0, 1.0)
+        return np.clip(
+            0.42 * transition + 0.24 * flux + 0.18 * non_silence + 0.16 * sonorant,
+            0.0,
+            1.0,
+        )
     if slot.role == "vowel_nucleus":
         return np.clip(
             (0.34 * voicing)

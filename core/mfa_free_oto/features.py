@@ -303,7 +303,12 @@ def acoustic_aux_features(
     silence_score = _silence_likelihood(raw[:, 0])
     flux_score = _robust_unit(raw[:, 5])
     voicing_score = np.clip(raw[:, 6], 0.0, 1.0).astype(np.float32)
-    transition_score = np.clip(0.65 * flux_score + 0.35 * _positive_unit(raw[:, 2]), 0.0, 1.0).astype(np.float32)
+    energy_rise = _positive_unit(raw[:, 2])
+    transition_score = np.clip(0.65 * flux_score + 0.35 * energy_rise, 0.0, 1.0).astype(np.float32)
+    # Sonorant (m/n/l/r/w/y) onsets carry little spectral flux because voicing
+    # is continuous across the boundary; an energy rise gated by voicing keeps a
+    # cv-boundary cue where the flux-based transition score under-fires.
+    sonorant_onset_score = np.clip(voicing_score * energy_rise, 0.0, 1.0).astype(np.float32)
     features = np.concatenate(
         [
             _standardize(raw),
@@ -330,6 +335,7 @@ def acoustic_aux_features(
             "silence_likelihood": silence_score,
             "flux_likelihood": flux_score,
             "transition_likelihood": transition_score,
+            "sonorant_onset_likelihood": sonorant_onset_score,
         },
     )
 
@@ -495,12 +501,16 @@ def _autocorr_harmonicity(frame: np.ndarray, sample_rate: int) -> float:
     max_lag = min(centered.shape[0] - 1, int(round(sample_rate / 70.0)))
     if max_lag <= min_lag:
         return 0.0
-    best = 0.0
-    for lag in range(min_lag, max_lag + 1):
-        val = float(np.dot(centered[:-lag], centered[lag:]) / energy)
-        if val > best:
-            best = val
-    return max(0.0, min(1.0, best))
+    # FFT-based linear autocorrelation: autocorr[lag] == dot(centered[:-lag], centered[lag:]).
+    # Zero-padding to >= 2*n avoids circular wrap-around.
+    n = int(centered.shape[0])
+    fft_size = 1 << int(np.ceil(np.log2(max(2, 2 * n))))
+    spectrum = np.fft.rfft(centered, fft_size)
+    autocorr = np.fft.irfft(spectrum * np.conjugate(spectrum), fft_size)
+    lag_scores = autocorr[min_lag : max_lag + 1] / energy
+    if lag_scores.size == 0:
+        return 0.0
+    return max(0.0, min(1.0, float(np.max(lag_scores))))
 
 
 def _robust_unit(values: np.ndarray) -> np.ndarray:

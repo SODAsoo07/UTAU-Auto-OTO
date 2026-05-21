@@ -69,14 +69,12 @@ class FramePosterior:
         return len(self.times_ms)
 
 
-def is_vowel_phone(phone: str) -> bool:
-    normalized = phone.strip().lower()
-    return normalized in {
+_VOWEL_PHONES: frozenset[str] = frozenset(
+    {
         "a",
         "e",
         "i",
         "o",
-        "n",
         "u",
         "eo",
         "eu",
@@ -104,3 +102,16 @@ def is_vowel_phone(phone: str) -> bool:
         "ə",
         "ɑ",
     }
+)
+
+
+def is_vowel_phone(phone: str, language: str = "") -> bool:
+    normalized = phone.strip().lower()
+    if normalized in _VOWEL_PHONES:
+        return True
+    if normalized == "n":
+        # Bare 'n' is the syllabic moraic nasal in Japanese (vowel-like for
+        # CV-boundary purposes), but a consonant onset/coda in Korean.
+        lang = (language or "").strip().lower()
+        return not (lang.startswith("ko") or lang.startswith("kr"))
+    return False
