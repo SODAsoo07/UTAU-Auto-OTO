@@ -47,6 +47,8 @@ class OtoAnchor:
     previous_vowel_end_abs_ms: float | None = None
     next_onset_abs_ms: float | None = None
     next_vowel_abs_ms: float | None = None
+    boundary_confidence: float = 0.0
+    nucleus_confidence: float = 0.0
     expected_phone: str | None = None
     expected_phone_index: int | None = None
     slot_index: int | None = None
@@ -73,6 +75,9 @@ class OtoAdapterConfig:
     cons_gap_ms: float = 40.0
     tail_margin_ms: float = 50.0
     previous_tail_keep_ms: float = 40.0
+    vowel_nucleus_left_ratio: float = 0.46
+    vowel_nucleus_right_ratio: float = 0.54
+    vc_pre_max_ms: float = 80.0
     preserve_source_timing: bool = False
 
 
@@ -115,6 +120,8 @@ class AdaptedOtoRow:
                 "previous_vowel_end_abs_ms": self.anchor.previous_vowel_end_abs_ms,
                 "next_onset_abs_ms": self.anchor.next_onset_abs_ms,
                 "next_vowel_abs_ms": self.anchor.next_vowel_abs_ms,
+                "boundary_confidence": self.anchor.boundary_confidence,
+                "nucleus_confidence": self.anchor.nucleus_confidence,
                 "expected_phone": self.anchor.expected_phone,
                 "expected_phone_index": self.anchor.expected_phone_index,
                 "slot_index": self.anchor.slot_index,
@@ -130,6 +137,23 @@ def load_oto_template_rows(path: str | Path) -> list[OtoTemplateRow]:
         if row is not None:
             rows.append(row)
     return rows
+
+
+def load_oto_template_rows_alias_only(path: str | Path) -> list[OtoTemplateRow]:
+    rows = load_oto_template_rows(path)
+    return [
+        replace(
+            row,
+            timing=OtoTiming(
+                offset=0.0,
+                consonant=0.0,
+                cutoff=0.0,
+                preutterance=0.0,
+                overlap=0.0,
+            ),
+        )
+        for row in rows
+    ]
 
 
 def parse_template_oto_line(line: str) -> OtoTemplateRow | None:
@@ -274,7 +298,39 @@ def bootstrap_row(
 
     anchor_abs = _clamp(anchor.anchor_abs_ms, 0.0, file_duration_ms)
     alias_type = _alias_type_for_row(alias, cfg.alias_type)
-    if alias_type == "vcv":
+    if alias_type == "v":
+        nucleus_abs = _clamp(anchor.vowel_nucleus_abs_ms if anchor.vowel_nucleus_abs_ms is not None else anchor_abs, 0.0, file_duration_ms)
+        vowel_start = _clamp(
+            anchor.vowel_start_abs_ms if anchor.vowel_start_abs_ms is not None else max(0.0, nucleus_abs - 120.0),
+            0.0,
+            file_duration_ms,
+        )
+        vowel_end = _clamp(
+            anchor.vowel_end_abs_ms if anchor.vowel_end_abs_ms is not None else min(file_duration_ms, nucleus_abs + 180.0),
+            vowel_start,
+            file_duration_ms,
+        )
+        left_span = max(28.0, nucleus_abs - vowel_start)
+        right_span = max(36.0, vowel_end - nucleus_abs)
+        pre = max(56.0, left_span * (1.0 + max(0.0, min(1.0, cfg.vowel_nucleus_left_ratio))))
+        offset = max(nucleus_abs - pre, 0.0)
+        overlap = max(0.0, pre - max(18.0, left_span * 0.72))
+        consonant = pre + max(24.0, right_span * max(0.35, min(1.0, cfg.vowel_nucleus_right_ratio)))
+        cutoff = -(max(consonant + 8.0, (vowel_end - offset) + cfg.tail_margin_ms))
+        timing = _validate_timing(
+            OtoTiming(offset=offset, consonant=consonant, cutoff=cutoff, preutterance=pre, overlap=overlap),
+            file_duration_ms=file_duration_ms,
+        )
+        return AdaptedOtoRow(
+            wav=wav,
+            alias=alias,
+            timing=timing,
+            source_timing=None,
+            anchor=anchor,
+            mode="bootstrap",
+            warnings=anchor.warnings,
+        )
+    elif alias_type == "vcv":
         prev_end = anchor.previous_vowel_end_abs_ms
         if prev_end is None:
             prev_end = max(0.0, anchor_abs - cfg.pre_target_ms)
@@ -284,6 +340,9 @@ def bootstrap_row(
     else:
         offset = max(anchor_abs - cfg.pre_target_ms, 0.0)
     pre = max(anchor_abs - offset, 0.0)
+    if alias_type == "vc":
+        pre = min(pre, max(12.0, float(cfg.vc_pre_max_ms)))
+        offset = max(anchor_abs - pre, 0.0)
     overlap = max(0.0, pre - cfg.ovl_gap_ms)
     consonant = pre + cfg.cons_gap_ms
     if alias_type == "vc":
@@ -319,22 +378,44 @@ def anchors_from_prediction(
             continue
         anchor_ms = float(event["time_ms"])
         span = estimate_vowel_span(posterior, anchor_ms)
+        nucleus_time, nucleus_conf, nucleus_warnings = estimate_vowel_nucleus(
+            posterior,
+            anchor_ms,
+            vowel_start_abs_ms=span.get("vowel_start_abs_ms"),
+            vowel_end_abs_ms=span.get("vowel_end_abs_ms"),
+        )
         next_vowel = next((float(item["time_ms"]) for item in decoded[idx + 1 :] if item["label"] == "vowel_nucleus"), None)
         warning = "slot_decoded_event" if event.get("expected_phone") else "decoded_event"
+        role = str(event["label"])
+        boundary_conf = _anchor_boundary_confidence(posterior, anchor_ms, role=role)
+        if role == "vowel_nucleus":
+            selected_nucleus = anchor_ms
+            selected_nucleus_conf = max(float(event.get("score") or 0.0), nucleus_conf)
+        else:
+            selected_nucleus = nucleus_time if nucleus_time is not None else next_vowel
+            selected_nucleus_conf = nucleus_conf
+        anchor_warnings = [warning, f"decoded_order:{idx}"]
+        anchor_warnings.extend(nucleus_warnings)
+        if selected_nucleus_conf < 0.35:
+            anchor_warnings.append(f"low_nucleus_confidence:{selected_nucleus_conf:.3f}")
+        if boundary_conf < 0.30:
+            anchor_warnings.append(f"low_boundary_confidence:{boundary_conf:.3f}")
         anchor = OtoAnchor(
             anchor_abs_ms=anchor_ms,
             score=float(event.get("score") or 0.0),
-            role=str(event["label"]),
+            role=role,
             frame_index=event.get("frame_index"),
-            vowel_nucleus_abs_ms=next_vowel,
+            vowel_nucleus_abs_ms=selected_nucleus,
             vowel_start_abs_ms=span.get("vowel_start_abs_ms"),
             vowel_end_abs_ms=span.get("vowel_end_abs_ms"),
             previous_vowel_end_abs_ms=previous_vowel_end,
             next_vowel_abs_ms=next_vowel,
+            boundary_confidence=boundary_conf,
+            nucleus_confidence=selected_nucleus_conf,
             expected_phone=str(event.get("expected_phone") or "") or None,
             expected_phone_index=_int_or_none(event.get("expected_phone_index")),
             slot_index=_int_or_none(event.get("slot_index")),
-            warnings=(warning, f"decoded_order:{idx}"),
+            warnings=tuple(anchor_warnings),
         )
         anchors.append(anchor)
         previous_vowel_end = anchor.vowel_end_abs_ms or previous_vowel_end
@@ -543,6 +624,86 @@ def estimate_vowel_span(posterior: FramePosterior, anchor_abs_ms: float, *, thre
         "vowel_start_abs_ms": float(times[start_idx]),
         "vowel_end_abs_ms": float(times[end_idx]),
     }
+
+
+def estimate_vowel_nucleus(
+    posterior: FramePosterior,
+    anchor_abs_ms: float,
+    *,
+    vowel_start_abs_ms: float | None = None,
+    vowel_end_abs_ms: float | None = None,
+) -> tuple[float | None, float, tuple[str, ...]]:
+    times = np.asarray(posterior.times_ms, dtype=np.float32)
+    if times.size == 0:
+        return None, 0.0, ("empty_posterior",)
+    vowel = np.asarray(posterior.class_probs.get("vowel", []), dtype=np.float32)
+    if vowel.shape[0] != times.shape[0]:
+        vowel = np.zeros_like(times)
+    rms_track = _normalized_track(posterior, "rms", times)
+    voicing_track = _normalized_track(posterior, "voicing", times)
+    centroid = _normalized_track(posterior, "spectral_centroid", times)
+    formant_stability = 1.0 - np.clip(np.abs(np.gradient(centroid.astype(np.float32))), 0.0, 1.0)
+
+    if vowel_start_abs_ms is None or vowel_end_abs_ms is None:
+        span = estimate_vowel_span(posterior, anchor_abs_ms)
+        vowel_start_abs_ms = span.get("vowel_start_abs_ms")
+        vowel_end_abs_ms = span.get("vowel_end_abs_ms")
+    if vowel_start_abs_ms is None or vowel_end_abs_ms is None:
+        center_idx = int(np.searchsorted(times, anchor_abs_ms, side="left"))
+        center_idx = max(0, min(center_idx, times.shape[0] - 1))
+        start_idx = max(0, center_idx - 3)
+        end_idx = min(times.shape[0] - 1, center_idx + 3)
+    else:
+        start_idx = int(np.searchsorted(times, float(vowel_start_abs_ms), side="left"))
+        end_idx = int(np.searchsorted(times, float(vowel_end_abs_ms), side="right")) - 1
+        start_idx = max(0, min(start_idx, times.shape[0] - 1))
+        end_idx = max(start_idx, min(end_idx, times.shape[0] - 1))
+
+    if end_idx <= start_idx:
+        return float(times[start_idx]), 0.0, ("nucleus_span_too_short",)
+
+    idx_slice = slice(start_idx, end_idx + 1)
+    local_vowel = np.clip(vowel[idx_slice], 0.0, 1.0)
+    local_energy = np.clip(rms_track[idx_slice], 0.0, 1.0)
+    local_voicing = np.clip(voicing_track[idx_slice], 0.0, 1.0)
+    local_formant = np.clip(formant_stability[idx_slice], 0.0, 1.0)
+    continuity = np.minimum(local_voicing, _left_context_max(local_voicing, frames=2))
+    score = np.clip(
+        0.34 * local_vowel + 0.30 * local_energy + 0.22 * local_formant + 0.14 * continuity,
+        0.0,
+        1.0,
+    )
+    local_idx = int(np.argmax(score))
+    global_idx = int(start_idx + local_idx)
+    warnings: list[str] = []
+    conf = float(score[local_idx])
+    if conf < 0.35:
+        warnings.append(f"low_vowel_nucleus_confidence:{conf:.3f}")
+    if float(local_voicing[local_idx]) < 0.25:
+        warnings.append("weak_voicing_nucleus")
+    if float(local_formant[local_idx]) < 0.20:
+        warnings.append("unstable_formant_nucleus")
+    return float(times[global_idx]), conf, tuple(warnings)
+
+
+def _anchor_boundary_confidence(
+    posterior: FramePosterior,
+    anchor_abs_ms: float,
+    *,
+    role: str,
+) -> float:
+    times = np.asarray(posterior.times_ms, dtype=np.float32)
+    if times.size == 0:
+        return 0.0
+    idx = _window_idx(times, anchor_abs_ms)
+    vowel = _normalized_track(posterior, "vowel", times, source="class")
+    consonant = _normalized_track(posterior, "consonant", times, source="class")
+    transition = _normalized_track(posterior, "transition_likelihood", times)
+    voicing = _normalized_track(posterior, "voicing", times)
+    if role == "vowel_nucleus":
+        return float(np.clip((0.55 * voicing[idx]) + (0.45 * vowel[idx]), 0.0, 1.0))
+    left_cons = float(np.max(consonant[max(0, idx - 3) : idx + 1])) if idx >= 0 else 0.0
+    return float(np.clip((0.42 * transition[idx]) + (0.33 * vowel[idx]) + (0.25 * left_cons), 0.0, 1.0))
 
 
 def format_oto_line(wav: str, alias: str, timing: OtoTiming) -> str:
@@ -1160,14 +1321,28 @@ def _posterior_anchor_candidates(posterior: FramePosterior, *, min_score: float)
             peak_indices = [int(np.argmax(values))]
         for idx in peak_indices:
             span = estimate_vowel_span(posterior, float(times[idx]))
+            nucleus_time, nucleus_conf, nucleus_warnings = estimate_vowel_nucleus(
+                posterior,
+                float(times[idx]),
+                vowel_start_abs_ms=span.get("vowel_start_abs_ms"),
+                vowel_end_abs_ms=span.get("vowel_end_abs_ms"),
+            )
+            boundary_conf = _anchor_boundary_confidence(posterior, float(times[idx]), role=label)
+            anchor_warnings = list(nucleus_warnings)
+            if boundary_conf < 0.30:
+                anchor_warnings.append(f"low_boundary_confidence:{boundary_conf:.3f}")
             out.append(
                 OtoAnchor(
                     anchor_abs_ms=float(times[idx]),
                     score=float(values[idx]),
                     role=label,
                     frame_index=int(idx),
+                    vowel_nucleus_abs_ms=(float(times[idx]) if label == "vowel_nucleus" else nucleus_time),
                     vowel_start_abs_ms=span.get("vowel_start_abs_ms"),
                     vowel_end_abs_ms=span.get("vowel_end_abs_ms"),
+                    boundary_confidence=boundary_conf,
+                    nucleus_confidence=(max(float(values[idx]), nucleus_conf) if label == "vowel_nucleus" else nucleus_conf),
+                    warnings=tuple(anchor_warnings),
                 )
             )
     return out
@@ -1183,6 +1358,40 @@ def _local_peak_indices(values: np.ndarray, *, min_score: float) -> list[int]:
         if value >= left and value >= right:
             peaks.append(idx)
     return peaks
+
+
+def _window_idx(times: np.ndarray, time_ms: float) -> int:
+    idx = int(np.searchsorted(times, float(time_ms), side="left"))
+    return max(0, min(idx, times.shape[0] - 1))
+
+
+def _normalized_track(
+    posterior: FramePosterior,
+    key: str,
+    times: np.ndarray,
+    *,
+    source: str = "acoustic",
+) -> np.ndarray:
+    if source == "class":
+        values = np.asarray(posterior.class_probs.get(key, []), dtype=np.float32)
+    else:
+        values = np.asarray(posterior.acoustic_scores.get(key, []), dtype=np.float32)
+    if values.shape[0] != times.shape[0]:
+        return np.zeros_like(times)
+    arr = values.astype(np.float32)
+    lo = float(np.min(arr))
+    hi = float(np.max(arr))
+    if hi - lo < 1e-6:
+        return np.zeros_like(arr, dtype=np.float32)
+    return np.clip((arr - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
+
+
+def _left_context_max(values: np.ndarray, *, frames: int) -> np.ndarray:
+    out = np.zeros_like(values, dtype=np.float32)
+    for idx in range(values.shape[0]):
+        start = max(0, idx - frames)
+        out[idx] = float(np.max(values[start : idx + 1])) if idx + 1 > start else float(values[idx])
+    return out
 
 
 def _event_to_dict(event: DecodedEvent | Mapping[str, object]) -> dict:

@@ -1323,7 +1323,7 @@ class AppRuntimeMixin:
         defaults = {
             "developer_mode_enabled_var": False,
             "aligner_var": "MFA",
-            "no_mfa_oto_mode_var": "베이스 OTO 재매핑 + 보정",
+            "no_mfa_oto_mode_var": "MFA-Free auto + fallback",
             "oto_crnn_model_path_var": "",
             "oto_crnn_engine_var": "boundary_decoder",
             "oto_crnn_model_choice_var": "auto",
@@ -3548,9 +3548,9 @@ class ConfigMixin:
                 self.no_base_oto_var.set(bool(config.get("no_base_oto", False)))
             if "no_mfa_oto_mode" in config and hasattr(self, "no_mfa_oto_mode_var"):
                 if hasattr(self, "_set_no_mfa_oto_mode_from_code"):
-                    self._set_no_mfa_oto_mode_from_code(config.get("no_mfa_oto_mode", "remap"))
+                    self._set_no_mfa_oto_mode_from_code(config.get("no_mfa_oto_mode", "mfa_free_ssl_slot"))
                 else:
-                    self.no_mfa_oto_mode_var.set(str(config.get("no_mfa_oto_mode", "remap") or "remap"))
+                    self.no_mfa_oto_mode_var.set(str(config.get("no_mfa_oto_mode", "mfa_free_ssl_slot") or "mfa_free_ssl_slot"))
             if "soft_bank_mode" in config and hasattr(self, "soft_bank_mode_var"):
                 self.soft_bank_mode_var.set(bool(config.get("soft_bank_mode", False)))
             if "low_rms_gain_enable" in config and hasattr(self, "low_rms_gain_enable_var"):

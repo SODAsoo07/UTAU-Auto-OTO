@@ -71,6 +71,7 @@ def load_row_specs_from_source_oto(
     language: str = "",
     format_type: str = "",
     alias_suffix: str = "",
+    ignore_source_timing: bool = True,
 ) -> dict[str, list[OtoRowSpec]]:
     text = read_text_with_fallback(str(source_oto_path or ""))
     grouped: dict[str, list[OtoRowSpec]] = {}
@@ -114,15 +115,28 @@ def load_row_specs_from_source_oto(
                     format_type=str(format_type or ""),
                     line_index=int(row.get("line_index", 0) or 0),
                     duration_ms=duration,
-                    source_params={
-                        "offset": float(parsed.get("offset", 0.0) or 0.0),
-                        "consonant": float(parsed.get("consonant", parsed.get("cons", 0.0)) or 0.0),
-                        "cutoff": float(parsed.get("cutoff", 0.0) or 0.0),
-                        "preutterance": float(parsed.get("preutterance", parsed.get("pre", 0.0)) or 0.0),
-                        "overlap": float(parsed.get("overlap", parsed.get("ovl", 0.0)) or 0.0),
-                    },
+                    source_params=(
+                        {
+                            "offset": 0.0,
+                            "consonant": 0.0,
+                            "cutoff": 0.0,
+                            "preutterance": 0.0,
+                            "overlap": 0.0,
+                        }
+                        if ignore_source_timing
+                        else {
+                            "offset": float(parsed.get("offset", 0.0) or 0.0),
+                            "consonant": float(parsed.get("consonant", parsed.get("cons", 0.0)) or 0.0),
+                            "cutoff": float(parsed.get("cutoff", 0.0) or 0.0),
+                            "preutterance": float(parsed.get("preutterance", parsed.get("pre", 0.0)) or 0.0),
+                            "overlap": float(parsed.get("overlap", parsed.get("ovl", 0.0)) or 0.0),
+                        }
+                    ),
                     alias_suffix=str(alias_suffix or ""),
-                    meta={"alias_type": role},
+                    meta={
+                        "alias_type": role,
+                        "source_timing_ignored": bool(ignore_source_timing),
+                    },
                 )
             )
         grouped[wav_path] = specs

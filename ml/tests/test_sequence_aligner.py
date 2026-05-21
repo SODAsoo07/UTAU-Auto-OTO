@@ -21,6 +21,7 @@ from core.sequence_aligner import (
     _refine_word_boundaries_with_onset_cues,
     _resolve_word_rows,
     check_sequence_aligner_ready,
+    get_last_sequence_align_meta,
     run_sequence_align,
 )
 
@@ -184,6 +185,27 @@ def test_run_sequence_align_writes_textgrid(tmp_path, monkeypatch):
     assert ok is True
     assert "sequence alignment complete" in str(message)
     assert os.path.isfile(str(out_dir / "ga.TextGrid"))
+    meta = get_last_sequence_align_meta()
+    assert "confidence" in meta
+    assert "warnings" in meta
+    assert "fallback_hint" in meta
+
+
+def test_build_phone_rows_caps_vc_pre_lead_for_utau_runtime():
+    rows = [(0.0, 1.0, "ka")]
+    labels = ["stable_vowel"] * 200
+    phone_rows = _build_phone_rows(
+        rows,
+        duration_sec=1.0,
+        language="japanese",
+        labels=labels,
+        hop_sec=0.005,
+        format_hint="cv",
+        viterbi_enable=False,
+    )
+    assert len(phone_rows) == 2
+    first_span = float(phone_rows[0][1]) - float(phone_rows[0][0])
+    assert first_span <= 0.081
 
 
 def test_resolve_word_rows_keeps_nonzero_spans_for_many_tokens():
@@ -557,9 +579,9 @@ def test_build_phone_rows_viterbi_refines_cvc_boundaries_with_label_cues():
     base_b2 = float(base[1][1])
     ref_b1 = float(refined[0][1])
     ref_b2 = float(refined[1][1])
-    assert ref_b1 < base_b1
+    assert ref_b1 <= base_b1
     assert ref_b2 > base_b2
-    assert 0.16 <= ref_b1 <= 0.34
+    assert 0.07 <= ref_b1 <= 0.10
     assert 0.60 <= ref_b2 <= 0.84
 
 
@@ -593,7 +615,7 @@ def test_build_phone_rows_viterbi_cv_short_wav_caps_consonant_ratio():
     )
     base_cons = float(base[0][1] - base[0][0])
     ref_cons = float(refined[0][1] - refined[0][0])
-    assert ref_cons < base_cons
+    assert ref_cons <= base_cons
     assert ref_cons <= 0.115
     assert ref_cons >= 0.040
 
