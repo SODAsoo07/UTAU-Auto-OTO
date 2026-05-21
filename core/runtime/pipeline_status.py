@@ -9,7 +9,6 @@ OK = "OK"
 # A profile downgrade (e.g. accurate→fast) subtracts an additional 0.10.
 ALIGNER_QUALITY_TIER: Dict[str, float] = {
     "mfa": 1.0,
-    "coarse_crnn": 0.70,
     "sequence": 0.55,
     "none": 0.0,
     "existing": 0.85,
@@ -91,7 +90,7 @@ def normalize_aligner_name(value, default: str = "mfa") -> str:
         "utau-coarse",
         "utau_coarse",
     }:
-        return "coarse_crnn"
+        return "sequence"
     if text in {
         "sequence",
         "seq",
@@ -110,7 +109,7 @@ def normalize_aligner_name(value, default: str = "mfa") -> str:
     if "no-mfa" in text or "nomfa" in text:
         return "none"
     if "coarse" in text or "crnn" in text or "constrained" in text:
-        return "coarse_crnn"
+        return "sequence"
     if "sequence" in text or "dedicated" in text or "시퀀스" in text:
         return "sequence"
     return default
@@ -178,8 +177,6 @@ def classify_alignment_error(engine: str, message: str) -> str:
         return ALIGN_EXEC_MISSING
     if eng == "sequence" and ("python-textgrid" in lowered or "textgrid import" in lowered):
         return ALIGN_NOT_READY
-    if eng == "coarse_crnn" and ("model not found" in lowered or "pytorch import" in lowered):
-        return ALIGN_MODEL_MISSING if "model not found" in lowered else ALIGN_NOT_READY
     return ALIGN_RUN_FAILED
 
 

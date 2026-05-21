@@ -4,6 +4,7 @@ from dataclasses import replace
 from bisect import bisect_left
 from collections import defaultdict
 import os
+import re
 from statistics import mean
 
 from core.coarse_crnn.alias_role import normalize_role
@@ -15,6 +16,7 @@ from core.coarse_crnn.anchor_timeline import (
     env_float as _anchor_env_float,
 )
 from core.coarse_crnn.boundary_types import (
+    ANCHOR_ROLES,
     TRANSITION_ROLES,
     AbsoluteOtoAnchors,
     BoundaryCandidate,
@@ -32,6 +34,114 @@ from core.coarse_crnn.cv_slot_segmenter import cv_slot_timeline_from_slots, segm
 from core.coarse_crnn.filename_anchor_timeline import build_filename_anchor_timeline
 from core.coarse_crnn.lang import infer_language_from_path
 from core.coarse_crnn.oto_param_builder import build_absolute_anchors_for_role
+from core.coarse_crnn.slot_graph import filename_order_tokens
+from core.mfa_free_oto.kana import parse_kana_text
+
+
+# Trailing musical-pitch suffix glued onto aliases by multi-pitch voicebanks
+# (``siC4``, ``swiG4``, ``i syC4``, ``ば_A2``). Note letter + optional
+# accidental + octave digit, with an optional leading space/underscore.
+_PITCH_SUFFIX_RE = re.compile(r"[\s_]*[A-G][#b]?\d\s*$")
+
+
+def _strip_alias_decorations(text: str) -> str:
+    """Reduce an alias to its bare syllable text for filename-token matching.
+
+    Drops the trailing pitch suffix (``siC4`` -> ``si``), any ``_color`` tag,
+    and the UTAU utterance-start/end markers (``- si`` -> ``si``,
+    ``si -`` -> ``si``).
+    """
+    core = str(text or "").strip()
+    if not core:
+        return ""
+    core = _PITCH_SUFFIX_RE.sub("", core).strip()
+    if "_" in core:
+        head = core.split("_", 1)[0].strip()
+        if head:
+            core = head
+    core = re.sub(r"^-\s+", "", core)
+    core = re.sub(r"\s+-$", "", core)
+    return core.strip()
+
+
+def _filename_slot_alias_key(text: str) -> str:
+    """Romaji-normalized key for matching an alias or filename token.
+
+    Japanese kana aliases (``ば``) are romanized via ``parse_kana_text`` so they
+    can match romaji filename tokens (``ba``). Romaji aliases fall back to a
+    whitespace-stripped lowercase form; hangul and other non-kana scripts that
+    do not romanize return their raw lowercase form (and simply will not match
+    romaji tokens, which is handled conservatively by the caller). Pitch/color
+    suffixes (``siC4``, ``ば_A2``, ``ga_W``) are dropped before matching.
+    """
+    core = _strip_alias_decorations(text)
+    if not core:
+        return ""
+    try:
+        kana = "".join(parse_kana_text(core))
+    except Exception:
+        kana = ""
+    if kana:
+        return kana
+    return core.lower().replace(" ", "").replace("\t", "")
+
+
+def _align_specs_to_filename_tokens(
+    sorted_specs: list[OtoRowSpec], *, wav_path: str
+) -> list[OtoRowSpec]:
+    """Re-derive anchor rows' ``slot_index`` by aligning aliases to filename tokens.
+
+    Connected (rentan) wavs often contain a bare leading vowel or breath that
+    has no OTO alias; idx-based slot assignment then shifts every anchor row one
+    syllable early (the leading-vowel ``mis_mapping`` signature). This aligns the
+    anchor rows (CV/-cv/v) to the filename syllable tokens as a strict monotonic
+    subsequence so unaliased leading/trailing slots are skipped.
+
+    Conservative: ``slot_index`` is overridden only when *every* anchor row
+    matches a filename token in monotonic order. Non-anchor transition rows
+    (v-cv/vc/vv) keep their existing ``slot_index`` — a measured aggregate
+    regression showed the available phonetic cues are too ambiguous to place
+    them reliably, so CVVC transition placement is deliberately left untouched.
+    """
+    if not _env_bool("UTOA_BOUNDARY_FILENAME_SLOT_ALIGN_ENABLE", True):
+        return sorted_specs
+    if not sorted_specs or not wav_path:
+        return sorted_specs
+    tokens = filename_order_tokens(os.path.basename(str(wav_path)))
+    if len(tokens) < 2:
+        return sorted_specs
+    token_keys = [_filename_slot_alias_key(tok) for tok in tokens]
+
+    n = len(sorted_specs)
+    roles = [normalize_role(spec.role) for spec in sorted_specs]
+    anchor_positions = [i for i in range(n) if roles[i] in ANCHOR_ROLES]
+    if not anchor_positions or len(anchor_positions) > len(tokens):
+        return sorted_specs
+
+    # Anchor rows -> filename tokens as a strict monotonic subsequence.
+    slot_of: dict[int, int] = {}
+    cursor = 0
+    for i in anchor_positions:
+        key = _filename_slot_alias_key(str(sorted_specs[i].alias or ""))
+        if not key:
+            return sorted_specs
+        found = -1
+        for j in range(cursor, len(token_keys)):
+            if token_keys[j] and token_keys[j] == key:
+                found = j
+                break
+        if found < 0:
+            return sorted_specs
+        slot_of[i] = found
+        cursor = found + 1
+
+    new_slots = [int(slot_of.get(i, sorted_specs[i].slot_index)) for i in range(n)]
+    if new_slots == [int(spec.slot_index) for spec in sorted_specs]:
+        return sorted_specs
+    return [
+        replace(spec, slot_index=slot)
+        for spec, slot in zip(sorted_specs, new_slots)
+    ]
 
 
 def decode_wav_rows(
@@ -147,6 +257,7 @@ def decode_wav_rows(
         bucket.sort(key=lambda item: item.time_ms)
 
     sorted_specs = sorted(row_specs, key=lambda item: int(item.line_index))
+    sorted_specs = _align_specs_to_filename_tokens(sorted_specs, wav_path=wav_path)
     resolved_model_quality = _resolve_model_quality(candidates, fallback=model_quality)
     resolved_audio_reliability = _resolve_audio_reliability(candidates, fallback=audio_reliability)
 

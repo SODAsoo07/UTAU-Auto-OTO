@@ -16,6 +16,7 @@ from core.alignment.sequence_calibration import (
     reclist_duration_bias,
     resolve_effective_silence_threshold,
 )
+from core.model_context.alignment import filename_alignment_tokens
 from core.ja_lab_generator import parse_ja_filename, split_ja_romaji_syllable
 from core.kr_oto_rules import _split_kr_syllable_parts
 from core.lab_generator import decompose_hangul_to_roman
@@ -607,16 +608,8 @@ def _normalize_transcript_words(language: str, raw_text: str) -> List[str]:
 
 
 def _filename_words_for_wav(wav_path: str, language: str) -> List[str]:
-    wav_abs = os.path.abspath(str(wav_path or "").strip())
-    base = os.path.splitext(os.path.basename(wav_abs))[0]
-    lang = str(language or "").strip().lower()
-    if lang == "japanese":
-        filename_words = _normalize_japanese_token(base)
-    elif lang == "korean":
-        filename_words = _normalize_korean_token(base)
-    else:
-        filename_words = _split_ascii_tokens(base)
-    return [w for w in filename_words if w and w not in _PAUSE_MARKERS]
+    tokens = filename_alignment_tokens(wav_path, language=language, ignore_labels=_PAUSE_MARKERS)
+    return [str(w or "").strip().lower() for w in tokens if str(w or "").strip()]
 
 
 def _load_transcript_words(wav_path: str, language: str) -> Tuple[List[str], str]:
@@ -874,78 +867,8 @@ def _compute_sequence_cvn_consonant_prob(
 ) -> Tuple[np.ndarray | None, str]:
     if not _seq_cvn_enabled():
         return None, "disabled"
-
-    try:
-        from core.cvn_classifier import predict_cvn
-        from core.cvn_feature_extractor import extract_frame_features
-    except Exception as exc:
-        _emit(callback, f"[SEQ][CVN] import failed: {exc}")
-        return None, "import_failed"
-
-    model_path = _resolve_cvn_model_path(language)
-    backend_seed = str(backend_override or "").strip().lower()
-    backend = str(os.environ.get("UTOA_SEQUENCE_CVN_BACKEND", backend_seed) or "").strip().lower()
-    if backend not in {"rule", "logreg", "gbdt"}:
-        backend = "logreg" if model_path else "rule"
-
-    smooth_window_val = _env_int(
-        "UTOA_SEQUENCE_CVN_SMOOTH_WINDOW",
-        int(smooth_window if smooth_window is not None else 5),
-        min_value=1,
-        max_value=25,
-    )
-    min_run_frames_val = _env_int(
-        "UTOA_SEQUENCE_CVN_MIN_RUN_FRAMES",
-        int(min_run_frames if min_run_frames is not None else 3),
-        min_value=1,
-        max_value=40,
-    )
-    c_threshold_raw = str(os.environ.get("UTOA_SEQUENCE_CVN_C_THRESHOLD", "") or "").strip()
-    if c_threshold_raw:
-        try:
-            c_threshold_val = float(c_threshold_raw)
-        except Exception:
-            c_threshold_val = None
-    else:
-        c_threshold_val = c_threshold
-
-    try:
-        features = extract_frame_features(
-            wav_path,
-            frame_ms=float(frame_ms),
-            hop_ms=float(hop_ms),
-        )
-        posterior = predict_cvn(
-            features,
-            model_path=model_path,
-            backend=backend,  # type: ignore[arg-type]
-            smooth_window=int(smooth_window_val),
-            min_run_frames=int(min_run_frames_val),
-            c_threshold=c_threshold_val,
-        )
-    except Exception as exc:
-        _emit(callback, f"[SEQ][CVN] inference failed: {exc}")
-        return None, "infer_failed"
-
-    try:
-        order = [str(x) for x in list(getattr(posterior, "label_order", ("C", "V")) or ("C", "V"))]
-        c_idx = int(order.index("C"))
-        probs = np.asarray(getattr(posterior, "probs"), dtype=np.float32)
-        if probs.ndim != 2 or probs.shape[0] <= 0 or probs.shape[1] <= c_idx:
-            return None, "invalid_posterior"
-        c_prob = np.asarray(probs[:, c_idx], dtype=np.float32)
-        t_sec = np.asarray(getattr(posterior, "times_ms"), dtype=np.float32).reshape(-1) / 1000.0
-        aligned = _align_series_to_frames(
-            c_prob,
-            times_sec=t_sec,
-            frame_count=int(frame_count),
-            hop_sec=float(hop_sec),
-        )
-        model_name = "learned" if model_path else "rule"
-        return aligned, f"{model_name}/{backend}"
-    except Exception as exc:
-        _emit(callback, f"[SEQ][CVN] posterior parse failed: {exc}")
-        return None, "parse_failed"
+    _emit(callback, "[SEQ][CVN] deprecated CV classifier disabled; using model_context filename/audio context only.")
+    return None, "deprecated_disabled"
 
 
 def _resolve_silence_threshold(

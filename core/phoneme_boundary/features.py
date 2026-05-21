@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from core.coarse_crnn.audio import load_wav_mono, log_mel_spectrogram
+from core.phoneme_boundary.audio import load_wav_mono, log_mel_spectrogram
 
 
 @dataclass(frozen=True)

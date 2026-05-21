@@ -18,7 +18,7 @@ import wave
 import importlib.util
 import urllib.error
 import urllib.request
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -2342,29 +2342,7 @@ def _resolve_mfa_runtime_options(
 
 
 def _collect_alignment_token_sequence(corpus_dir: str) -> List[str]:
-    tokens: List[str] = []
-    seen: Set[str] = set()
-    if not os.path.isdir(corpus_dir):
-        return tokens
-    for filename in sorted(os.listdir(corpus_dir)):
-        low = filename.lower()
-        if not (low.endswith(".lab") or low.endswith(".txt")):
-            continue
-        path = os.path.join(corpus_dir, filename)
-        if not os.path.isfile(path):
-            continue
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                text = f.read()
-        except Exception:
-            continue
-        for tok in str(text or "").replace("\n", " ").replace("\t", " ").split():
-            token = str(tok or "").strip()
-            if not token or token in seen:
-                continue
-            seen.add(token)
-            tokens.append(token)
-    return tokens
+    return collect_alignment_token_sequence(corpus_dir)
 
 
 def _build_constrained_dictionary(
@@ -3133,3 +3111,4 @@ except (ImportError, ModuleNotFoundError):
     except Exception as e:
         log(f"[MFA] Korean patch error: {e}")
         return False
+from core.model_context.alignment import collect_alignment_token_sequence

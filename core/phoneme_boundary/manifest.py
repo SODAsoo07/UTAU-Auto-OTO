@@ -5,8 +5,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from core.coarse_crnn.audio import load_wav_mono
 from core.generation.common.oto_file_utils import parse_oto_line, read_text_with_fallback
+from core.phoneme_boundary.audio import load_wav_mono
 from core.phoneme_boundary.plan import build_phoneme_plan
 
 

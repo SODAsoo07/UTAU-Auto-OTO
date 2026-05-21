@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import json
 import os
 
@@ -18,8 +18,8 @@ from ui.theme_tokens import (
 from ui.i18n import t
 
 EN_CVVC_UI_ENABLED = False
-NO_MFA_REMAP_LABEL = "베이스 OTO 재매핑 + 보정"
-NO_MFA_SSL_SLOT_LABEL = "MFA-Free SSL 슬롯 어댑터(실험)"
+NO_MFA_REMAP_LABEL = "Base OTO remap"
+NO_MFA_SSL_SLOT_LABEL = "MFA-Free SSL slot adapter"
 
 
 class LayoutMixin:
@@ -35,7 +35,7 @@ class LayoutMixin:
         self._lazy_prewarm_queue = []
         self._tab_build_pending = set()
         if not hasattr(self, "auto_format_var"):
-            self.auto_format_var = ctk.StringVar(value="자동 감지 (권장)")
+            self.auto_format_var = ctk.StringVar(value="・尖徐 ・川ｧ (・護棗)")
 
         main_body = tk.PanedWindow(
             self,
@@ -114,17 +114,17 @@ class LayoutMixin:
             text_color=PALETTE.header_accent,
         ).pack(side="left")
 
-        # Machine-translation notice — shown only when UI language is English or Japanese
+        # Machine-translation notice 窶・shown only when UI language is English or Japanese
         from ui.i18n import get_language as _get_ui_lang_now
         _mt_notice_texts = {
             "en": "Some translations are machine-generated and may contain errors.",
-            "ja": "一部の翻訳は機械翻訳であり、誤りが含まれる場合があります。",
+            "ja": "Some translations are machine-generated and may contain errors.",
         }
         _mt_text = _mt_notice_texts.get(_get_ui_lang_now(), "")
         if _mt_text:
             ctk.CTkLabel(
                 header_row,
-                text=f"  ⚠ {_mt_text}",
+                text=f"  笞 {_mt_text}",
                 font=("", 11),
                 text_color=PALETTE.neutral_text,
                 anchor="w",
@@ -134,14 +134,14 @@ class LayoutMixin:
         from ui.i18n import get_language as _get_ui_lang
         ui_lang_top_row = ctk.CTkFrame(path_frame, fg_color="transparent")
         ui_lang_top_row.pack(fill="x", padx=12, pady=(0, 6))
-        ctk.CTkLabel(ui_lang_top_row, text=t("UI 언어 (UI Language"), width=115, anchor="w").pack(side="left")
+        ctk.CTkLabel(ui_lang_top_row, text=t("UI Language"), width=115, anchor="w").pack(side="left")
         if not hasattr(self, "ui_lang_var"):
             _cur_lang = _get_ui_lang()
-            _ui_lang_display = "English" if _cur_lang == "en" else ("日本語" if _cur_lang == "ja" else "한국어")
+            _ui_lang_display = "English" if _cur_lang == "en" else ("Japanese" if _cur_lang == "ja" else "Korean")
             self.ui_lang_var = ctk.StringVar(value=_ui_lang_display)
         self.ui_lang_dropdown = ctk.CTkOptionMenu(
             ui_lang_top_row,
-            values=["한국어", "English", "日本語"],
+            values=["Korean", "English", "Japanese"],
             variable=self.ui_lang_var,
             command=self._on_ui_language_change,
             width=200,
@@ -175,10 +175,10 @@ class LayoutMixin:
             return ctk.CTkLabel(parent, text=text, width=width, anchor="w")
 
         lang_row = build_form_row(form_body)
-        build_left_label(lang_row, t("언어"), width=115).pack(side="left")
+        build_left_label(lang_row, t("・ｸ・ｴ"), width=115).pack(side="left")
         if not hasattr(self, "lang_var"):
-            self.lang_var = ctk.StringVar(value="Korean (한국어)")
-        language_values = ["Korean (한국어)", "Japanese (日本語)"]
+            self.lang_var = ctk.StringVar(value="Korean (﨑懋ｵｭ・ｴ)")
+        language_values = ["Korean (﨑懋ｵｭ・ｴ)", "Japanese (譌･譛ｬ隱・"]
         if str(getattr(self, "release_channel", "stable")).strip().lower() == "preview":
             language_values.append("English (Preview CVVC)")
         self.lang_dropdown = ctk.CTkOptionMenu(
@@ -202,11 +202,11 @@ class LayoutMixin:
         self.lang_info_label.pack(side="left", fill="x", expand=True)
 
         row1 = build_form_row(form_body)
-        build_left_label(row1, t("WAV 폴더:")).pack(side="left")
-        self.wav_entry = ctk.CTkEntry(row1, placeholder_text=t("WAV 파일이 있는 폴더 경로"))
+        build_left_label(row1, t("WAV 尞ｴ・・")).pack(side="left")
+        self.wav_entry = ctk.CTkEntry(row1, placeholder_text=t("Select a WAV folder"))
         self.wav_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.wav_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
-        wav_browse_btn = ctk.CTkButton(row1, text=t("찾아보기"), width=90, command=lambda: self._browse_folder(self.wav_entry))
+        wav_browse_btn = ctk.CTkButton(row1, text=t("・ｾ・・ｳｴ・ｰ"), width=90, command=lambda: self._browse_folder(self.wav_entry))
         _style_primary_button(wav_browse_btn)
         wav_browse_btn.pack(side="right")
 
@@ -214,22 +214,22 @@ class LayoutMixin:
         ctk.CTkLabel(row1b, text="", width=115).pack(side="left")
         self.recursive_voicebank_scan_checkbox = ctk.CTkCheckBox(
             row1b,
-            text=t("하위 폴더 자동 탐색(배치 처리)"),
+            text=t("﨑們怱 尞ｴ・・・尖徐 夋川ラ(・ｰ・・・俯ｦｬ)"),
             variable=self.recursive_voicebank_scan_var,
             command=self._save_config,
         )
         self.recursive_voicebank_scan_checkbox.pack(side="left", padx=(6, 0))
 
         row2 = build_form_row(form_body)
-        build_left_label(row2, t("템플릿 OTO:")).pack(side="left")
-        self.tpl_entry = ctk.CTkEntry(row2, placeholder_text=t("선택 사항 (없을 시 파일명/라벨 기반 자동 생성)"))
+        build_left_label(row2, t("奛懦伯・ｿ OTO:")).pack(side="left")
+        self.tpl_entry = ctk.CTkEntry(row2, placeholder_text=t("・夋・・ｬ﨑ｭ (・・揆 ・・甯護攵・・・ｼ・ｨ ・ｰ・・・尖徐 ・晧┳)"))
         self.tpl_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.tpl_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
         self.tpl_browse_btn = ctk.CTkButton(
             row2,
-            text=t("찾아보기"),
+            text=t("・ｾ・・ｳｴ・ｰ"),
             width=90,
-            command=lambda: self._browse_file(self.tpl_entry, [("OTO 파일", "*.ini")]),
+            command=lambda: self._browse_file(self.tpl_entry, [("OTO 甯護攵", "*.ini")]),
         )
         _style_primary_button(self.tpl_browse_btn)
         self.tpl_browse_btn.pack(side="right")
@@ -238,7 +238,7 @@ class LayoutMixin:
         ctk.CTkLabel(row2b, text="", width=115).pack(side="left")
         self.no_base_oto_checkbox = ctk.CTkCheckBox(
             row2b,
-            text=t("템플릿 OTO 없음 (OpenUtau 호환 에일리어스 자동 생성)"),
+            text=t("奛懦伯・ｿ OTO ・・搆 (OpenUtau 嶸ｸ嶹・・川攵・ｬ・ｴ・､ ・尖徐 ・晧┳)"),
             variable=self.no_base_oto_var,
             command=self._on_no_base_oto_toggle,
             text_color=PALETTE.success_text,
@@ -246,36 +246,36 @@ class LayoutMixin:
         self.no_base_oto_checkbox.pack(side="left", padx=(6, 0))
 
         row3 = build_form_row(form_body)
-        build_left_label(row3, t("출력 경로:")).pack(side="left")
-        self.out_entry = ctk.CTkEntry(row3, placeholder_text=t("생성된 oto.ini 저장 경로"))
+        build_left_label(row3, t("・罹･ ・ｽ・・")).pack(side="left")
+        self.out_entry = ctk.CTkEntry(row3, placeholder_text=t("Output oto.ini path"))
         self.out_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.out_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
         out_save_btn = ctk.CTkButton(
             row3,
-            text=t("저장"),
+            text=t("・・･"),
             width=90,
-            command=lambda: self._browser_save(self.out_entry, [("OTO 파일", "*.ini")]),
+            command=lambda: self._browser_save(self.out_entry, [("OTO 甯護攵", "*.ini")]),
         )
         _style_primary_button(out_save_btn)
         out_save_btn.pack(side="right")
 
         row_suffix = build_form_row(form_body)
-        build_left_label(row_suffix, t("접미사:")).pack(side="left")
+        build_left_label(row_suffix, t("・瀧ｯｸ・ｬ:")).pack(side="left")
         self.suffix_entry = ctk.CTkEntry(
             row_suffix,
-            placeholder_text=t("선택 사항: 예: C4 (모든 에일리어스 끝에 _C4 형태로 부여)"),
+            placeholder_text=t("・夋・・ｬ﨑ｭ: ・・ C4 (・ｨ・ ・川攵・ｬ・ｴ・､ ・晧乱 _C4 嶸倣・・・・・ｬ)"),
             textvariable=self.alias_suffix_var,
         )
         self.suffix_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.suffix_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
         ctk.CTkLabel(
             row_suffix,
-            text=t("(출력 alias 접미사)"),
+            text=t("(・罹･ alias ・瀧ｯｸ・ｬ)"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left")
 
         row_format = build_form_row(form_body)
-        build_left_label(row_format, t("형식 지정:")).pack(side="left")
+        build_left_label(row_format, t("嶸菩享 ・・・")).pack(side="left")
         format_options = self._get_auto_format_options("korean")
         self.format_dropdown = ctk.CTkOptionMenu(
             row_format,
@@ -288,14 +288,14 @@ class LayoutMixin:
         self.format_dropdown.pack(side="left", padx=(6, 8))
         ctk.CTkLabel(
             row_format,
-            text=t("(템플릿 유무와 무관하게 우선 적용)"),
+            text=t("(奛懦伯・ｿ ・・ｴ・ ・ｴ・﨑俾ｲ・・ｰ・ ・・圸)"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left", fill="x", expand=True)
         self.ja_alias_row = build_form_row(form_body)
-        build_left_label(self.ja_alias_row, t("JP 에일리어스:")).pack(side="left")
+        build_left_label(self.ja_alias_row, t("JP ・川攵・ｬ・ｴ・､:")).pack(side="left")
         self.ja_alias_style_menu = ctk.CTkOptionMenu(
             self.ja_alias_row,
-            values=["원본 그대로", "히라가나", "로마자"],
+            values=["auto", "hiragana", "romaji"],
             variable=self.ja_alias_style_var,
             width=190,
             command=lambda _v: self._save_config(),
@@ -304,7 +304,7 @@ class LayoutMixin:
         self.ja_alias_style_menu.pack(side="left", padx=(6, 8))
         self.ja_alias_hint_label = ctk.CTkLabel(
             self.ja_alias_row,
-            text=t("(일본어 OTO 적용)"),
+            text=t("(・ｼ・ｸ・ｴ OTO ・・圸)"),
             text_color=PALETTE.neutral_text,
         )
         self.ja_alias_hint_label.pack(side="left", fill="x", expand=True)
@@ -345,7 +345,7 @@ class LayoutMixin:
 
             self.en_cvvc_list_fallback_checkbox = ctk.CTkCheckBox(
                 self.en_cvvc_row,
-                text=t("List-only 합성(실험)"),
+                text=t("List-only 﨑ｩ・ｱ(・､嵭・"),
                 variable=self.en_cvvc_list_fallback_var,
                 command=self._save_config,
                 width=140,
@@ -354,7 +354,7 @@ class LayoutMixin:
 
             self.en_cvvc_hint_label = ctk.CTkLabel(
                 self.en_cvvc_row,
-                text=t("(Preview: 기본 OTO + 옵션 시 list-only(vv/cc/alt) 합성)"),
+                text=t("(Preview: ・ｰ・ｸ OTO + ・ｵ・・・・list-only(vv/cc/alt) 﨑ｩ・ｱ)"),
                 text_color=PALETTE.neutral_text,
             )
             self.en_cvvc_hint_label.pack(side="left", fill="x", expand=True)
@@ -373,10 +373,10 @@ class LayoutMixin:
 
         self.row_aligner = ctk.CTkFrame(row_align, fg_color="transparent")
         self.row_aligner.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        build_left_label(self.row_aligner, t("정렬 엔진:")).pack(side="left")
+        build_left_label(self.row_aligner, t("・簿ｬ ・肥ｧ・")).pack(side="left")
         self.aligner_menu = ctk.CTkOptionMenu(
             self.row_aligner,
-            values=["MFA", "전용(시퀀스)"],
+            values=["MFA", "・・圸(・懦・､)"],
             variable=self.aligner_var,
             width=190,
             command=self._on_aligner_change,
@@ -385,12 +385,12 @@ class LayoutMixin:
         self.aligner_menu.pack(side="left", padx=(6, 8))
         self.aligner_help_label = ctk.CTkLabel(
             self.row_aligner,
-            text=t("(기본은 MFA입니다. 필요 시 자동 설치됩니다.)"),
+            text=t("(・ｰ・ｸ・ MFA・・笈・､. 﨑・囈 ・・・尖徐 ・､・俯姓・壱共.)"),
             text_color=PALETTE.neutral_text,
         )
         self.aligner_help_label.pack(side="left", fill="x", expand=True)
         self.row_no_mfa_oto_mode = build_form_row(form_body)
-        build_left_label(self.row_no_mfa_oto_mode, t("No-MFA 생성:")).pack(side="left")
+        build_left_label(self.row_no_mfa_oto_mode, t("No-MFA ・晧┳:")).pack(side="left")
         self.no_mfa_oto_mode_menu = ctk.CTkOptionMenu(
             self.row_no_mfa_oto_mode,
             values=[
@@ -404,20 +404,20 @@ class LayoutMixin:
         self.no_mfa_oto_mode_menu.pack(side="left", padx=(6, 8))
         self.no_mfa_oto_mode_hint_label = ctk.CTkLabel(
             self.row_no_mfa_oto_mode,
-            text=t("(베이스 OTO 필수, TextGrid 없이 음향 후보 점수로 보정)"),
+            text=t("(・・ｴ・､ OTO 﨑・・, TextGrid ・・擽 ・醐箕 弡・ｳｴ ・川・・・・ｴ・・"),
             text_color=PALETTE.neutral_text,
         )
         self.no_mfa_oto_mode_hint_label.pack(side="left", fill="x", expand=True)
         # Boundary scorer checkpoint picker. Discovered model files appear as
-        # additional options; "자동 (auto)" defers to the resolver's default
+        # additional options; "・尖徐 (auto)" defers to the resolver's default
         # (mtime-newest non-experimental). Hidden together with the device row
-        # under the same developer-mode + CRNN-engine gate (see _sync_aligner_ui).
+        # under the same developer-mode + retired-model gate (see _sync_aligner_ui).
         self.row_oto_crnn_scorer_model = build_form_row(form_body)
         build_left_label(self.row_oto_crnn_scorer_model, t("Boundary scorer:")).pack(side="left")
         scorer_choices = (
             self._oto_crnn_model_choice_options()
             if hasattr(self, "_oto_crnn_model_choice_options")
-            else ["자동 (auto)"]
+            else ["・尖徐 (auto)"]
         )
         if hasattr(self, "_set_oto_crnn_model_choice_from_code"):
             initial_code = ""
@@ -438,13 +438,13 @@ class LayoutMixin:
         self.oto_crnn_scorer_model_menu.pack(side="left", padx=(6, 8))
         self.oto_crnn_scorer_model_hint = ctk.CTkLabel(
             self.row_oto_crnn_scorer_model,
-            text=t("(자동=기본 모델, 다른 .pt 선택 시 추론에 즉시 반영)"),
+            text=t("(・尖徐=・ｰ・ｸ ・ｨ・ｸ, ・､・ｸ .pt ・夋・・・・罷｡・・・餓亨 ・們・)"),
             text_color=PALETTE.neutral_text,
         )
         self.oto_crnn_scorer_model_hint.pack(side="left", fill="x", expand=True)
         self.row_oto_crnn_scorer_model.pack_forget()
         self.row_oto_crnn_engine = build_form_row(form_body)
-        build_left_label(self.row_oto_crnn_engine, t("CRNN Mode:")).pack(side="left")
+        build_left_label(self.row_oto_crnn_engine, t("Retired model mode:")).pack(side="left")
         self.oto_crnn_engine_menu = ctk.CTkOptionMenu(
             self.row_oto_crnn_engine,
             values=["Stage1 heuristic only", "Boundary decoder + optional corrections"],
@@ -474,7 +474,7 @@ class LayoutMixin:
         stage2_choices = (
             self._oto_stage2_model_choice_options()
             if hasattr(self, "_oto_stage2_model_choice_options")
-            else ["자동 (auto)"]
+            else ["・尖徐 (auto)"]
         )
         self.oto_stage2_model_menu = ctk.CTkOptionMenu(
             self.row_oto_stage2_model,
@@ -487,13 +487,13 @@ class LayoutMixin:
         self.oto_stage2_model_menu.pack(side="left", padx=(6, 8))
         self.oto_stage2_model_hint = ctk.CTkLabel(
             self.row_oto_stage2_model,
-            text=t("(선택 시 Boundary Decoder 뒤에서 2단계 OTO anchor를 재지정)"),
+            text=t("(・夋・・・Boundary Decoder ・､・川・ 2・ｨ・・OTO anchor・ｼ ・ｬ・・・"),
             text_color=PALETTE.neutral_text,
         )
         self.oto_stage2_model_hint.pack(side="left", fill="x", expand=True)
         self.row_oto_stage2_model.pack_forget()
         self.row_oto_crnn_model = build_form_row(form_body)
-        build_left_label(self.row_oto_crnn_model, t("CRNN Device:")).pack(side="left")
+        build_left_label(self.row_oto_crnn_model, t("Retired model device:")).pack(side="left")
         self.oto_crnn_device_menu = ctk.CTkOptionMenu(
             self.row_oto_crnn_model,
             values=["auto", "cuda", "cpu"],
@@ -505,26 +505,26 @@ class LayoutMixin:
         self.oto_crnn_device_menu.pack(side="left", padx=(6, 8))
         self.oto_crnn_model_hint_label = ctk.CTkLabel(
             self.row_oto_crnn_model,
-            text=t("(추론 디바이스. auto = GPU 가용 시 GPU 사용)"),
+            text=t("(・罷｡ ・罷ｰ肥擽・､. auto = GPU ・・ｩ ・・GPU ・ｬ・ｩ)"),
             text_color=PALETTE.neutral_text,
         )
         self.oto_crnn_model_hint_label.pack(side="left", fill="x", expand=True)
         self.row_oto_crnn_model.pack_forget()
         self.row_oto_crnn_special_aliases = build_form_row(form_body)
-        build_left_label(self.row_oto_crnn_special_aliases, t("특수 에일리어스:")).pack(side="left")
+        build_left_label(self.row_oto_crnn_special_aliases, t("孖ｹ・・・川攵・ｬ・ｴ・､:")).pack(side="left")
         self.oto_crnn_special_aliases_entry = ctk.CTkEntry(
             self.row_oto_crnn_special_aliases,
             textvariable=self.oto_crnn_special_aliases_var,
-            placeholder_text="쉼표로 구분 (예: Sp, br, cl)",
+            placeholder_text="・ｼ岺罹｡・・ｬ・・(・・ Sp, br, cl)",
         )
         self.oto_crnn_special_aliases_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.oto_crnn_special_aliases_entry.pack(side="left", fill="x", expand=True, padx=(6, 6))
         self.row_oto_crnn_special_aliases.pack_forget()
         self.row_align_extra = build_form_row(form_body)
-        build_left_label(self.row_align_extra, t("MFA 정렬 프로필:")).pack(side="left")
+        build_left_label(self.row_align_extra, t("MFA ・簿ｬ 嵓・｡懦符:")).pack(side="left")
         self.mfa_align_profile_menu = ctk.CTkOptionMenu(
             self.row_align_extra,
-            values=["기본", "정밀", "정밀 + 화자 적응", "빠름"],
+            values=["accurate", "fast", "fast + fallback", "normal"],
             variable=self.mfa_align_profile_var,
             width=220,
             command=lambda _v: self._save_config(),
@@ -533,7 +533,7 @@ class LayoutMixin:
         self.mfa_align_profile_menu.pack(side="left", padx=(6, 8))
         ctk.CTkLabel(
             self.row_align_extra,
-            text=t("(기본=정확도 균형)"),
+            text=t("(・ｰ・ｸ=・倣剳・・・嶸・"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left", fill="x", expand=True)
 
@@ -544,7 +544,7 @@ class LayoutMixin:
         self.row_aligner_advanced = build_form_row(form_body)
         ctk.CTkLabel(
             self.row_aligner_advanced,
-            text=t("정렬 고급 옵션은 자동으로 조정됩니다."),
+            text=t("・簿ｬ ・・・・ｵ・們捩 ・尖徐・ｼ・・・ｰ・簿姓・壱共."),
             text_color=PALETTE.neutral_text,
             anchor="w",
         ).pack(side="left", padx=(121, 0))
@@ -552,7 +552,7 @@ class LayoutMixin:
         advanced_row = build_form_row(path_frame)
         self.advanced_toggle_btn = ctk.CTkButton(
             advanced_row,
-            text=t("▶ 추가 옵션 (특수 발음)"),
+            text=t("笆ｶ ・緋ｰ ・ｵ・・(孖ｹ・・・懍搆)"),
             width=260,
             fg_color=PALETTE.advanced_toggle_bg,
             hover_color=PALETTE.advanced_toggle_hover,
@@ -564,7 +564,7 @@ class LayoutMixin:
         self.advanced_toggle_btn.pack(side="right", padx=(0, 12), pady=(0, 4))
         self.advanced_hint_label = ctk.CTkLabel(
             path_frame,
-            text=t("필요한 경우에만 사용하세요."),
+            text=t("﨑・囈﨑・・ｽ・ｰ・尖ｧ・・ｬ・ｩ﨑們┷・・"),
             text_color=PALETTE.hint_text,
             anchor="e",
         )
@@ -574,11 +574,11 @@ class LayoutMixin:
 
         row0 = ctk.CTkFrame(self.advanced_options_frame, fg_color="transparent")
         row0.pack(fill="x", padx=0, pady=3)
-        ctk.CTkLabel(row0, text=t("특수 발음 (선택):"), width=120, anchor="w").pack(side="left")
-        self.custom_entry = ctk.CTkEntry(row0, placeholder_text=t("커스텀 매핑 규칙 파일 (.txt)"), textvariable=self.custom_phoneme_var)
+        ctk.CTkLabel(row0, text=t("孖ｹ・・・懍搆 (・夋・:"), width=120, anchor="w").pack(side="left")
+        self.custom_entry = ctk.CTkEntry(row0, placeholder_text=t("・､・､奛 ・､﨑・・懍ｹ・甯護攵 (.txt)"), textvariable=self.custom_phoneme_var)
         self.custom_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.custom_entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
-        custom_browse_btn = ctk.CTkButton(row0, text=t("찾아보기"), width=90, command=lambda: self._browse_file(self.custom_entry, [("Text 파일", "*.txt")]))
+        custom_browse_btn = ctk.CTkButton(row0, text=t("・ｾ・・ｳｴ・ｰ"), width=90, command=lambda: self._browse_file(self.custom_entry, [("Text 甯護攵", "*.txt")]))
         _style_primary_button(custom_browse_btn)
         custom_browse_btn.pack(side="right")
 
@@ -597,7 +597,7 @@ class LayoutMixin:
         tab_header.pack(fill="x", padx=0, pady=(0, 4))
         self.dev_mode_btn = ctk.CTkButton(
             tab_header,
-            text=t("개발자 설정 OFF"),
+            text=t("・罹ｰ懍梵 ・､・・OFF"),
             width=110,
             height=24,
             corner_radius=6,
@@ -633,12 +633,12 @@ class LayoutMixin:
         self.tabview.pack(fill="both", expand=True, padx=0, pady=0)
 
         self._lazy_tab_builders = {
-            "파이프라인": self._build_pipeline_tab,
-            "고급 설정": self._build_advanced_settings_tab,
-            "파라미터 조정": self._build_params_tab,
-            "로그": self._build_log_tab,
-            "상세 로그": self._build_detail_log_tab,
-            "크레딧": self._build_credits_tab,
+            "甯護擽嵓・攵・ｸ": self._build_pipeline_tab,
+            "Advanced": self._build_advanced_settings_tab,
+            "Parameters": self._build_params_tab,
+            "・懋ｷｸ": self._build_log_tab,
+            "・・┷ ・懋ｷｸ": self._build_detail_log_tab,
+            "增ｬ・壱肌": self._build_credits_tab,
         }
         self._built_tabs = set()
         # Keep all tab headers visible from startup, but build content lazily.
@@ -647,9 +647,9 @@ class LayoutMixin:
                 self._get_or_add_tab(tab_name)
             except Exception:
                 pass
-        for tab_name in ("파이프라인",):
+        for tab_name in ("甯護擽嵓・攵・ｸ",):
             self._ensure_tab_built(tab_name)
-        self.tabview.set("파이프라인")
+        self.tabview.set("甯護擽嵓・攵・ｸ")
         self._on_tabview_change()
         self._schedule_lazy_tab_prewarm()
         self._sync_developer_mode_ui()
@@ -662,7 +662,7 @@ class LayoutMixin:
         status_group.pack(side="left", fill="x", expand=True, padx=(10, 6))
         self.bottom_status_group = status_group
 
-        self.status_label = ctk.CTkLabel(status_group, text=t("대기 중"), anchor="w", text_color=PALETTE.neutral_text)
+        self.status_label = ctk.CTkLabel(status_group, text=t("Ready"), anchor="w", text_color=PALETTE.neutral_text)
         self.status_label.pack(fill="x")
 
         progress_row = ctk.CTkFrame(status_group, fg_color="transparent")
@@ -679,7 +679,7 @@ class LayoutMixin:
 
         self.run_btn = ctk.CTkButton(
             actions_group,
-            text=t("▶ 전체 실행"),
+            text=t("Run"),
             font=("", 14, "bold"),
             width=150,
             height=40,
@@ -689,7 +689,7 @@ class LayoutMixin:
 
         self.report_btn = ctk.CTkButton(
             actions_group,
-            text=t("🐛 제보 리포트 복사"),
+            text=t("菅 ・罹ｳｴ ・ｬ尞ｬ孖ｸ ・ｵ・ｬ"),
             width=120,
             height=40,
             fg_color=PALETTE.danger_button_bg,
@@ -752,8 +752,8 @@ class LayoutMixin:
             "wav_dir": _safe_entry_get("wav_entry", ""),
             "tpl_path": _safe_entry_get("tpl_entry", ""),
             "out_path": _safe_entry_get("out_entry", ""),
-            "lang": _safe_var_get("lang_var", "Korean (한국어)"),
-            "format": _safe_var_get("auto_format_var", "자동 감지 (권장)"),
+            "lang": _safe_var_get("lang_var", "Korean (﨑懋ｵｭ・ｴ)"),
+            "format": _safe_var_get("auto_format_var", "・尖徐 ・川ｧ (・護棗)"),
         }
 
     def _restore_ui_state_after_theme_change(self, state):
@@ -857,9 +857,9 @@ class LayoutMixin:
         builder()
         built_tabs.add(name)
 
-        if name == "파이프라인" and hasattr(self, "_sync_aligner_ui"):
+        if name == "甯護擽嵓・攵・ｸ" and hasattr(self, "_sync_aligner_ui"):
             self._sync_aligner_ui()
-        if name == "고급 설정":
+        if name == "Advanced":
             if hasattr(self, "_sync_developer_mode_ui"):
                 self._sync_developer_mode_ui()
             if hasattr(self, "_sync_consistency_toggle_label"):
@@ -882,7 +882,7 @@ class LayoutMixin:
     def _schedule_lazy_tab_prewarm(self):
         builders = getattr(self, "_lazy_tab_builders", None) or {}
         built_tabs = getattr(self, "_built_tabs", None) or set()
-        preferred_order = ("로그", "고급 설정", "파라미터 조정", "상세 로그", "크레딧", "파이프라인")
+        preferred_order = tuple(builders.keys())
         queue = [name for name in preferred_order if name in builders and name not in built_tabs]
         for name in builders.keys():
             if name not in built_tabs and name not in queue:
@@ -919,7 +919,7 @@ class LayoutMixin:
     def _rebuild_ui_for_theme_change(self):
         if bool(getattr(self, "is_running", False)):
             if hasattr(self, "_append_log"):
-                self._append_log("[UI] 작업 중에는 테마를 변경할 수 없습니다.")
+                self._append_log("[UI] ・卓羅 ・卓乱・・奛誤ｧ壱･ｼ ・・ｽ﨑 ・・・・慣・壱共.")
             return
         if bool(getattr(self, "_theme_rebuild_pending", False)):
             return
@@ -1006,29 +1006,29 @@ class LayoutMixin:
         if hint is not None:
             try:
                 if not show:
-                    hint.configure(text=t("(영어 선택 시 표시되는 Preview 전용 설정)"))
+                    hint.configure(text=t("(・・牟 ・夋・・・岺懍亨・俯株 Preview ・・圸 ・､・・"))
                 else:
-                    hint.configure(text=t("(Preview: 기본 OTO + 옵션 시 list-only(vv/cc/alt) 합성)"))
+                    hint.configure(text=t("(Preview: ・ｰ・ｸ OTO + ・ｵ・・・・list-only(vv/cc/alt) 﨑ｩ・ｱ)"))
             except Exception:
                 pass
 
     def _get_language(self):
-        """UI 언어 선택값을 내부 코드('korean'/'japanese'/'english')로 정규화합니다."""
+        """UI ・ｸ・ｴ ・夋晝ｰ廷揆 ・ｴ・ ・罷糖('korean'/'japanese'/'english')・・・母ｷ懦剩﨑ｩ・壱共."""
         sel = str(self.lang_var.get() or "")
         low = sel.strip().lower()
-        if "english" in low or "영어" in sel or low in {"en", "eng"}:
+        if "english" in low or "・・牟" in sel or low in {"en", "eng"}:
             return "english" if self._is_preview_channel() else "korean"
         if (
             "japanese" in low
-            or "日本" in sel
-            or "にほん" in sel
+            or "譌･譛ｬ" in sel
+            or "japanese" in sel
             or low in {"ja", "jp"}
         ):
             return "japanese"
         if (
             "korean" in low
-            or "한국" in sel
-            or "조선" in sel
+            or "﨑懋ｵｭ" in sel
+            or "・ｰ・" in sel
             or low in {"ko", "kr"}
         ):
             return "korean"
@@ -1038,20 +1038,20 @@ class LayoutMixin:
         lang = language or self._get_language()
         if lang == "korean":
             values = [
-                "자동 감지 (권장)",
-                "CV/연단음",
-                "CVC (한국어 전용)",
-                "COC (한국어 CVC 파생형)",
+                "・尖徐 ・川ｧ (・護棗)",
+                "CV",
+                "CVC (﨑懋ｵｭ・ｴ ・・圸)",
+                "COC (﨑懋ｵｭ・ｴ CVC 甯護・嶸・",
                 "CVVC",
-                "VCV (연속음)",
+                "VCV (・ｰ・作搆)",
             ]
             if self._is_preview_channel():
-                values.append("C+V (템플릿 전용)")
-                values.append("CMPX (프리뷰)")
+                values.append("C+V (奛懦伯・ｿ ・・圸)")
+                values.append("CMPX (嵓・ｦｬ・ｰ)")
             return values
         if lang == "english":
             return ["CVVC"]
-        return ["자동 감지 (권장)", "CV/연단음", "CVVC", "VCV (연속음)"]
+        return ["auto", "CV", "CVVC", "VCV"]
 
     def _set_auto_format_from_code(self, format_code, language=None):
         lang = language or self._get_language()
@@ -1062,23 +1062,23 @@ class LayoutMixin:
             self.auto_format_var.set("CVVC")
             return
         label_map = {
-            "": "자동 감지 (권장)",
-            "cv": "CV/연단음",
-            "c_plus_v": "C+V (템플릿 전용)",
-            "cvc": "CVC (한국어 전용)",
-            "coc": "COC (한국어 파생형)",
+            "": "・尖徐 ・川ｧ (・護棗)",
+            "cv": "CV",
+            "c_plus_v": "C+V (奛懦伯・ｿ ・・圸)",
+            "cvc": "CVC (﨑懋ｵｭ・ｴ ・・圸)",
+            "coc": "COC (﨑懋ｵｭ・ｴ 甯護・嶸・",
             "cvvc": "CVVC",
-            "vcv": "VCV (연속음)",
-            "cmpx": "CMPX (프리뷰)",
+            "vcv": "VCV (・ｰ・作搆)",
+            "cmpx": "CMPX (嵓・ｦｬ・ｰ)",
         }
-        label = label_map.get(str(format_code or "").strip().lower(), "자동 감지 (권장)")
+        label = label_map.get(str(format_code or "").strip().lower(), "・尖徐 ・川ｧ (・護棗)")
         if label not in values:
-            if label in {"CVC (한국어 전용)", "COC (한국어 파생형)", "C+V (템플릿 전용)"} and lang != "korean":
-                label = "CV/연단음"
-            elif label == "C+V (템플릿 전용)" and not self._is_preview_channel():
-                label = "CV/연단음"
+            if label in {"CVC (﨑懋ｵｭ・ｴ ・・圸)", "COC (﨑懋ｵｭ・ｴ 甯護・嶸・", "C+V (奛懦伯・ｿ ・・圸)"} and lang != "korean":
+                label = "CV"
+            elif label == "C+V (奛懦伯・ｿ ・・圸)" and not self._is_preview_channel():
+                label = "CV"
             else:
-                label = "자동 감지 (권장)"
+                label = "・尖徐 ・川ｧ (・護棗)"
         self.auto_format_var.set(label)
 
     def _on_ui_language_change(self, value: str) -> None:
@@ -1087,7 +1087,7 @@ class LayoutMixin:
         lowered = normalized.lower()
         if lowered in {"english", "en"}:
             lang_code = "en"
-        elif lowered in {"japanese", "ja"} or ("日" in normalized):
+        elif lowered in {"japanese", "ja"} or ("譌･" in normalized):
             lang_code = "ja"
         else:
             lang_code = "ko"
@@ -1096,17 +1096,17 @@ class LayoutMixin:
             self._save_config()
         if hasattr(self, "_ui_lang_hint_label"):
             from ui.i18n import t as _t
-            self._ui_lang_hint_label.configure(text=_t("재시작 후 적용됩니다."))
+            self._ui_lang_hint_label.configure(text=_t("・ｬ・懍梠 弡・・・圸・ｩ・壱共."))
 
     def _on_language_change(self, value):
         lang = self._get_language()
         if lang == "korean":
-            self.lang_info_label.configure(text=t("한국어 단위(a, k, ga 등) 에일리어스를 기준으로 생성합니다."))
+            self.lang_info_label.configure(text=t("﨑懋ｵｭ・ｴ ・ｨ・・a, k, ga ・ｱ) ・川攵・ｬ・ｴ・､・ｼ ・ｰ・・ｼ・・・晧┳﨑ｩ・壱共."))
             self.lang_notice_label.configure(
                 text=(
-                    "현재 언어: 한국어\n"
-                    "Lab 생성, 사전 생성, 정렬, OTO 계산이 모두 한국어 규칙으로 진행됩니다.\n"
-                    "기본 인코딩: UTF-8"
+                    "嶸・椪 ・ｸ・ｴ: 﨑懋ｵｭ・ｴ\n"
+                    "Lab ・晧┳, ・ｬ・・・晧┳, ・簿ｬ, OTO ・・げ・ｴ ・ｨ・・﨑懋ｵｭ・ｴ ・懍ｹ呷愍・・・・哩・ｩ・壱共.\n"
+                    "・ｰ・ｸ ・ｸ・罷畠: UTF-8"
                 ),
                 fg_color=LANGUAGE_NOTICE_THEME["korean"]["fg_color"],
                 text_color=LANGUAGE_NOTICE_THEME["korean"]["text_color"],
@@ -1123,12 +1123,12 @@ class LayoutMixin:
             if hasattr(self, "ja_alias_style_menu"):
                 self.ja_alias_style_menu.configure(state="disabled")
         elif lang == "japanese":
-            self.lang_info_label.configure(text=t("일본어 단위(a, k, ka 등) 에일리어스를 기준으로 생성합니다."))
+            self.lang_info_label.configure(text=t("・ｼ・ｸ・ｴ ・ｨ・・a, k, ka ・ｱ) ・川攵・ｬ・ｴ・､・ｼ ・ｰ・・ｼ・・・晧┳﨑ｩ・壱共."))
             self.lang_notice_label.configure(
                 text=(
-                    "현재 언어: 일본어\n"
-                    "특수 발음 기호가 섞인 파일은 Lab 생성 전에 언어 선택을 다시 확인하세요.\n"
-                    "기본 인코딩: UTF-8"
+                    "嶸・椪 ・ｸ・ｴ: ・ｼ・ｸ・ｴ\n"
+                    "孖ｹ・・・懍搆 ・ｰ嶸ｸ・ ・樌攤 甯護攵・ Lab ・晧┳ ・・乱 ・ｸ・ｴ ・夋晧揆 ・､・・嶹菩攤﨑們┷・・\n"
+                    "・ｰ・ｸ ・ｸ・罷畠: UTF-8"
                 ),
                 fg_color=LANGUAGE_NOTICE_THEME["japanese"]["fg_color"],
                 text_color=LANGUAGE_NOTICE_THEME["japanese"]["text_color"],
@@ -1145,12 +1145,12 @@ class LayoutMixin:
             if hasattr(self, "ja_alias_style_menu"):
                 self.ja_alias_style_menu.configure(state="normal")
         else:
-            self.lang_info_label.configure(text=t("영어 CVVC base OTO를 불러와 생성합니다. (프리뷰 전용)"))
+            self.lang_info_label.configure(text=t("・・牟 CVVC base OTO・ｼ ・壱洳・ ・晧┳﨑ｩ・壱共. (嵓・ｦｬ・ｰ ・・圸)"))
             self.lang_notice_label.configure(
                 text=(
-                    "현재 언어: 영어(프리뷰)\n"
-                    "Lab/사전/MFA를 건너뛰고, 선택한 EN CVVC 리스트의 base OTO를 조합해 생성합니다.\n"
-                    "list-only(vv/cc/alt) 섹션은 옵션으로 합성 생성할 수 있습니다."
+                    "嶸・椪 ・ｸ・ｴ: ・・牟(嵓・ｦｬ・ｰ)\n"
+                    "Lab/・ｬ・・MFA・ｼ ・ｴ・壱峅・, ・夋晨復 EN CVVC ・ｬ・､孖ｸ・・base OTO・ｼ ・ｰ﨑ｩ﨑ｴ ・晧┳﨑ｩ・壱共.\n"
+                    "list-only(vv/cc/alt) ・ｹ・們捩 ・ｵ・們愍・・﨑ｩ・ｱ ・晧┳﨑 ・・・溢慣・壱共."
                 ),
                 fg_color=LANGUAGE_NOTICE_THEME["english"]["fg_color"],
                 text_color=LANGUAGE_NOTICE_THEME["english"]["text_color"],
@@ -1188,11 +1188,11 @@ class LayoutMixin:
             return
         lang = self._get_language() if hasattr(self, "_get_language") else "korean"
         if lang == "japanese":
-            text = t("일관성 보정 사용")
+            text = t("・ｼ・・ｱ ・ｴ・・・ｬ・ｩ")
         elif lang == "korean":
-            text = t("연속성 보정 사용")
+            text = t("・ｰ・作┳ ・ｴ・・・ｬ・ｩ")
         else:
-            text = t("연속성/파일 일관성 보정 사용")
+            text = t("・ｰ・作┳/甯護攵 ・ｼ・・ｱ ・ｴ・・・ｬ・ｩ")
         try:
             checkbox.configure(text=text)
         except Exception:
@@ -1212,9 +1212,9 @@ class LayoutMixin:
         if requires_base and hasattr(self, "no_base_oto_var"):
             self.no_base_oto_var.set(False)
         if hasattr(self, "no_base_oto_checkbox"):
-            label = "템플릿 OTO 없음 (OpenUtau 호환 에일리어스 자동 생성)"
+            label = "奛懦伯・ｿ OTO ・・搆 (OpenUtau 嶸ｸ嶹・・川攵・ｬ・ｴ・､ ・尖徐 ・晧┳)"
             if requires_base:
-                label = "템플릿 OTO 필수 (현재 모드)"
+                label = "奛懦伯・ｿ OTO 﨑・・ (嶸・椪 ・ｨ・・"
             try:
                 self.no_base_oto_checkbox.configure(
                     state="disabled" if requires_base else "normal",
@@ -1252,7 +1252,7 @@ class LayoutMixin:
             fmt = normalize_auto_format_value(lang, self.auto_format_var.get()) if hasattr(self, "auto_format_var") else ""
             if lang == "korean" and fmt == "c_plus_v" and not self._is_preview_channel():
                 try:
-                    self.auto_format_var.set("CV/연단음")
+                    self.auto_format_var.set("CV")
                     fmt = "cv"
                 except Exception:
                     fmt = "cv"
@@ -1274,9 +1274,9 @@ class LayoutMixin:
                 pass
     def _get_ja_alias_style_code(self):
         style = self.ja_alias_style_var.get().strip()
-        if style == "히라가나":
+        if style == "hiragana":
             return "hiragana"
-        if style == "로마자":
+        if style == "・罹ｧ溢梵":
             return "romaji"
         return "original"
 
@@ -1292,9 +1292,9 @@ class LayoutMixin:
         text = str(value or "").strip()
         if text == NO_MFA_SSL_SLOT_LABEL:
             return "mfa_free_ssl_slot"
-        if text == "CRNN OTO 예측기(실험)":
+        if text == "Retired OTO predictor":
             return "remap"
-        if text in {"베이스 OTO 재매핑 + 보정", NO_MFA_REMAP_LABEL}:
+        if text == NO_MFA_REMAP_LABEL:
             return "remap"
         return "remap"
 
@@ -1311,7 +1311,7 @@ class LayoutMixin:
             "boundary heuristic",
         }:
             return "stage1_heuristic"
-        # Legacy direct CRNN path is removed from UI routing.
+        # Legacy direct model path is removed from UI routing.
         return "boundary_decoder"
 
     def _set_oto_crnn_engine_from_code(self, code):
@@ -1344,28 +1344,16 @@ class LayoutMixin:
         self._save_config()
 
     # --- Boundary scorer model choice --------------------------------
-    # The dropdown label is "자동 (auto)" or a friendly label produced by
-    # `list_available_boundary_scorer_models`. The persisted code is either
-    # "auto" or the model basename. The resolver in
-    # `core.coarse_crnn.oto_predictor_generator` accepts a basename and
-    # searches the standard roots, so we never store an absolute path.
+    # The dropdown label is "・尖徐 (auto)" or a friendly label produced by
+    # Retired model controls are kept as inert config compatibility helpers.
 
-    _OTO_CRNN_MODEL_CHOICE_AUTO_LABEL = "자동 (auto)"
+    _RETIRED_OTO_MODEL_CHOICE_AUTO_LABEL = "・尖徐 (auto)"
 
     def _list_oto_crnn_model_choices(self) -> list[dict[str, object]]:
-        try:
-            from core.coarse_crnn.oto_predictor_generator import (
-                list_available_boundary_scorer_models,
-            )
-        except Exception:
-            return []
-        try:
-            return list_available_boundary_scorer_models()
-        except Exception:
-            return []
+        return []
 
     def _oto_crnn_model_choice_options(self) -> list[str]:
-        labels = [self._OTO_CRNN_MODEL_CHOICE_AUTO_LABEL]
+        labels = [self._RETIRED_OTO_MODEL_CHOICE_AUTO_LABEL]
         for item in self._list_oto_crnn_model_choices():
             label = str(item.get("label") or item.get("name") or "").strip()
             if label and label not in labels:
@@ -1374,24 +1362,24 @@ class LayoutMixin:
 
     def _oto_crnn_label_to_code(self, label: object) -> str:
         text = str(label or "").strip()
-        if not text or text == self._OTO_CRNN_MODEL_CHOICE_AUTO_LABEL or text.lower() == "auto":
+        if not text or text == self._RETIRED_OTO_MODEL_CHOICE_AUTO_LABEL or text.lower() == "auto":
             return "auto"
         for item in self._list_oto_crnn_model_choices():
             if str(item.get("label") or "") == text:
                 return str(item.get("name") or "auto")
             if str(item.get("name") or "") == text:
                 return str(item.get("name") or "auto")
-        # Unknown label (e.g. stale config) → fall back to auto-resolve.
+        # Unknown label (e.g. stale config) 竊・fall back to auto-resolve.
         return "auto"
 
     def _oto_crnn_code_to_label(self, code: object) -> str:
         text = str(code or "").strip()
         if not text or text.lower() == "auto":
-            return self._OTO_CRNN_MODEL_CHOICE_AUTO_LABEL
+            return self._RETIRED_OTO_MODEL_CHOICE_AUTO_LABEL
         for item in self._list_oto_crnn_model_choices():
             if str(item.get("name") or "") == text:
                 return str(item.get("label") or item.get("name") or text)
-        return self._OTO_CRNN_MODEL_CHOICE_AUTO_LABEL
+        return self._RETIRED_OTO_MODEL_CHOICE_AUTO_LABEL
 
     def _set_oto_crnn_model_choice_from_code(self, code) -> str:
         label = self._oto_crnn_code_to_label(code)
@@ -1415,25 +1403,16 @@ class LayoutMixin:
         code = self._get_oto_crnn_model_choice_code()
         if hasattr(self, "_append_log"):
             try:
-                self._append_log(f"[CRNN-OTO] boundary scorer model = {code}")
+                self._append_log(f"[retired-oto] boundary scorer model = {code}")
             except Exception:
                 pass
         if hasattr(self, "_save_config"):
             self._save_config()
 
-    _OTO_STAGE2_MODEL_CHOICE_AUTO_LABEL = "자동 (auto)"
+    _OTO_STAGE2_MODEL_CHOICE_AUTO_LABEL = "・尖徐 (auto)"
 
     def _list_oto_stage2_model_choices(self) -> list[dict[str, object]]:
-        try:
-            from core.coarse_crnn.oto_predictor_generator import (
-                list_available_stage2_oto_models,
-            )
-        except Exception:
-            return []
-        try:
-            return list_available_stage2_oto_models()
-        except Exception:
-            return []
+        return []
 
     def _oto_stage2_model_choice_options(self) -> list[str]:
         labels = [self._OTO_STAGE2_MODEL_CHOICE_AUTO_LABEL]
@@ -1485,7 +1464,7 @@ class LayoutMixin:
         code = self._get_oto_stage2_model_choice_code()
         if hasattr(self, "_append_log"):
             try:
-                self._append_log(f"[CRNN-OTO] stage2 model = {code}")
+                self._append_log(f"[retired-oto] stage2 model = {code}")
             except Exception:
                 pass
         if hasattr(self, "_save_config"):
@@ -1495,7 +1474,7 @@ class LayoutMixin:
         if hasattr(self, "_append_log"):
             try:
                 enabled = bool(self.oto_stage2_enable_var.get()) if hasattr(self, "oto_stage2_enable_var") else False
-                self._append_log(f"[CRNN-OTO] Stage2 OTO Assigner {'ON' if enabled else 'OFF'}")
+                self._append_log(f"[retired-oto] Stage2 OTO Assigner {'ON' if enabled else 'OFF'}")
             except Exception:
                 pass
         if hasattr(self, "_save_config"):
@@ -1546,19 +1525,19 @@ class LayoutMixin:
 
     def _get_mfa_align_profile_code(self):
         profile = str(self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "").strip()
-        if profile in {"빠름", "빠름 (저사양 추천)", "fast"}:
+        if profile in {"fast", "normal"}:
             return "fast"
         if profile in {
-            "정밀 + 화자 적응",
-            "정확도 우선 + 화자 적응",
+            "・簿ｰ + 嶹肥梵 ・・搗",
+            "・倣剳・・・ｰ・ + 嶹肥梵 ・・搗",
             "accurate_adapted",
             "speaker_adapted",
             "speaker_adaptation",
         }:
             return "accurate_adapted"
-        if profile in {"정밀", "정확도 우선", "정확도 우선 (정밀)", "accurate"}:
+        if profile in {"・簿ｰ", "・倣剳・・・ｰ・", "・倣剳・・・ｰ・ (・簿ｰ)", "accurate"}:
             return "accurate"
-        if profile in {"기본", "default", "정확도 우선 (기본)"}:
+        if profile in {"・ｰ・ｸ", "default", "・倣剳・・・ｰ・ (・ｰ・ｸ)"}:
             return "default"
         return "default"
 
@@ -1582,7 +1561,7 @@ class LayoutMixin:
             if hasattr(self, "developer_mode_enabled_var")
             else False
         )
-        options = ["MFA", "전용(시퀀스)"]
+        options = ["MFA", "・・圸(・懦・､)"]
         lang = self._get_language()
         current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA").strip()
         fmt = normalize_auto_format_value(lang, self.auto_format_var.get()) if hasattr(self, "auto_format_var") else ""
@@ -1603,8 +1582,7 @@ class LayoutMixin:
             except Exception:
                 pass
         use_no_mfa = forced_no_mfa
-        use_sequence = current == "전용(시퀀스)"
-        use_coarse_crnn = normalize_aligner_name(current, default="mfa") == "coarse_crnn"
+        use_sequence = current == "・・圸(・懦・､)"
         is_cmpx_preview = (lang == "korean" and fmt == "cmpx")
         is_c_plus_v_mode = (lang == "korean" and fmt == "c_plus_v")
         limit_ml_routes_for_no_mfa = use_no_mfa and not (
@@ -1623,7 +1601,7 @@ class LayoutMixin:
         route_values = (
             self._get_ml_route_option_labels(no_mfa_only=limit_ml_routes_for_no_mfa)
             if hasattr(self, "_get_ml_route_option_labels")
-            else ["자동(자동 라우팅)", "No-MFA", "v1", "v2", "E2E 하이브리드(실험)"]
+            else ["・尖徐(・尖徐 ・ｼ・ｰ甯・", "No-MFA", "v1", "v2", "E2E 﨑們擽・誤ｦｬ・・・､嵭・"]
         )
         route_label = (
             self._ml_route_label_from_code(current_route_code)
@@ -1683,7 +1661,7 @@ class LayoutMixin:
         )
         if hasattr(self, "mfa_align_profile_menu"):
             self.mfa_align_profile_menu.configure(
-                state="disabled" if (use_no_mfa or use_sequence or use_coarse_crnn) else "normal"
+                state="disabled" if (use_no_mfa or use_sequence) else "normal"
             )
         show_no_mfa_mode_row = use_no_mfa and not (
             lang == "english" or is_kr_template_only
@@ -1792,21 +1770,19 @@ class LayoutMixin:
         if hasattr(self, "aligner_help_label"):
             if use_no_mfa:
                 if lang == "english":
-                    self.aligner_help_label.configure(text=t("(영어 Preview CVVC 모드에서는 정렬을 사용하지 않습니다.)"))
+                    self.aligner_help_label.configure(text=t("(・・牟 Preview CVVC ・ｨ・懍乱・罹株 ・簿ｬ・・・ｬ・ｩ﨑們ｧ ・喜慣・壱共.)"))
                 elif lang == "korean" and fmt == "cmpx":
-                    self.aligner_help_label.configure(text=t("(CMPX Preview 모드에서는 정렬을 사용하지 않습니다.)"))
+                    self.aligner_help_label.configure(text=t("(CMPX Preview ・ｨ・懍乱・罹株 ・簿ｬ・・・ｬ・ｩ﨑們ｧ ・喜慣・壱共.)"))
                 elif is_c_plus_v_mode:
-                    self.aligner_help_label.configure(text=t("(한국어 C+V 모드는 템플릿 기반 생성으로 정렬을 사용하지 않습니다.)"))
+                    self.aligner_help_label.configure(text=t("(﨑懋ｵｭ・ｴ C+V ・ｨ・罹株 奛懦伯・ｿ ・ｰ・・・晧┳・ｼ・・・簿ｬ・・・ｬ・ｩ﨑們ｧ ・喜慣・壱共.)"))
                 else:
                     self.aligner_help_label.configure(
-                        text=f"(No-MFA 생성 방식: {no_mfa_mode_desc})"
+                        text=f"(No-MFA ・晧┳ ・ｩ・・ {no_mfa_mode_desc})"
                     )
             elif use_sequence:
-                self.aligner_help_label.configure(text=t("(시퀀스 라벨 기반 전용 aligner baseline을 사용합니다.)"))
-            elif use_coarse_crnn:
-                self.aligner_help_label.configure(text=t("(CRNN OTO 직접 예측을 사용합니다. TextGrid 정렬 단계는 건너뜁니다.)"))
+                self.aligner_help_label.configure(text=t("(・懦・､ ・ｼ・ｨ ・ｰ・・・・圸 aligner baseline・・・ｬ・ｩ﨑ｩ・壱共.)"))
             else:
-                self.aligner_help_label.configure(text=t("(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)"))
+                self.aligner_help_label.configure(text=t("(・ｰ・ｸ・ MFA・・笈・､. ・簿ｬ ・・款・・・・･ｴ・ｴ 﨑・囈 ・・・尖徐 ・､・俯姓・壱共.)"))
         if hasattr(self, "pipeline_step_align_btn") and self.pipeline_step_align_btn is not None:
             try:
                 if use_no_mfa:
@@ -1828,29 +1804,26 @@ class LayoutMixin:
         if hasattr(self, "align_step_title_label") and hasattr(self, "align_step_desc_label"):
             if use_no_mfa:
                 if lang == "english":
-                    self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (영어 Preview)"))
-                    self.align_step_desc_label.configure(text=t("영어 CVVC Preview 모드는 Lab/사전/MFA 없이 base OTO 목록으로 생성합니다."))
+                    self.align_step_title_label.configure(text=t("2. ・簿ｬ ・ｨ・・・ｴ・壱怙 (・・牟 Preview)"))
+                    self.align_step_desc_label.configure(text=t("・・牟 CVVC Preview ・ｨ・罹株 Lab/・ｬ・・MFA ・・擽 base OTO ・ｩ・晧愍・・・晧┳﨑ｩ・壱共."))
                 elif lang == "korean" and fmt == "cmpx":
-                    self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (CMPX Preview)"))
-                    self.align_step_desc_label.configure(text=t("한국어 CMPX Preview 모드는 Lab/사전/MFA 없이 base OTO를 WAV에 재매핑해 생성합니다."))
+                    self.align_step_title_label.configure(text=t("2. ・簿ｬ ・ｨ・・・ｴ・壱怙 (CMPX Preview)"))
+                    self.align_step_desc_label.configure(text=t("﨑懋ｵｭ・ｴ CMPX Preview ・ｨ・罹株 Lab/・ｬ・・MFA ・・擽 base OTO・ｼ WAV・・・ｬ・､﨑啄紛 ・晧┳﨑ｩ・壱共."))
                 elif is_c_plus_v_mode:
-                    self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (한국어 C+V)"))
-                    self.align_step_desc_label.configure(text=t("한국어 C+V 모드는 템플릿 OTO를 WAV에 재매핑하는 방식으로 생성합니다."))
+                    self.align_step_title_label.configure(text=t("2. ・簿ｬ ・ｨ・・・ｴ・壱怙 (﨑懋ｵｭ・ｴ C+V)"))
+                    self.align_step_desc_label.configure(text=t("﨑懋ｵｭ・ｴ C+V ・ｨ・罹株 奛懦伯・ｿ OTO・ｼ WAV・・・ｬ・､﨑啄葺・・・ｩ・晧愍・・・晧┳﨑ｩ・壱共."))
                 else:
-                    self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (No-MFA)"))
+                    self.align_step_title_label.configure(text=t("2. ・簿ｬ ・ｨ・・・ｴ・壱怙 (No-MFA)"))
                     self.align_step_desc_label.configure(
-                        text=t("MFA 정렬 없이 진행합니다. 베이스 OTO를 WAV에 재매핑하고 저신뢰 라인은 음향 후보 점수로 보정합니다.")
+                        text=t("MFA ・簿ｬ ・・擽 ・・哩﨑ｩ・壱共. ・・ｴ・､ OTO・ｼ WAV・・・ｬ・､﨑啄葺・ ・・・ｰ ・ｼ・ｸ・ ・醐箕 弡・ｳｴ ・川・・・・ｴ・倣鮒・壱共.")
                     )
             else:
                 if use_sequence:
-                    self.align_step_title_label.configure(text=t("2. 음성 정렬 (전용 시퀀스)"))
-                    self.align_step_desc_label.configure(text=t("frame-hop 시퀀스 라벨 기반으로 TextGrid를 생성합니다. 실패 시 MFA fallback을 사용합니다."))
-                elif use_coarse_crnn:
-                    self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (CRNN OTO)"))
-                    self.align_step_desc_label.configure(text=t("OTO 생성 단계에서 CRNN 직접 예측 모델로 oto.ini를 생성합니다."))
+                    self.align_step_title_label.configure(text=t("2. ・護┳ ・簿ｬ (・・圸 ・懦・､)"))
+                    self.align_step_desc_label.configure(text=t("frame-hop ・懦・､ ・ｼ・ｨ ・ｰ・們愍・・TextGrid・ｼ ・晧┳﨑ｩ・壱共. ・､甯ｨ ・・MFA fallback・・・ｬ・ｩ﨑ｩ・壱共."))
                 else:
-                    self.align_step_title_label.configure(text=t("2. 음성 정렬"))
-                    self.align_step_desc_label.configure(text=t("MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다."))
+                    self.align_step_title_label.configure(text=t("2. ・護┳ ・簿ｬ"))
+                    self.align_step_desc_label.configure(text=t("MFA・・TextGrid・ｼ ・晧┳﨑ｩ・壱共. MFA・ ・・愍・ｴ ・尖徐 ・､・・弡・・・・ ・・哩﨑ｩ・壱共."))
 
     def _toggle_developer_mode(self):
         if not hasattr(self, "developer_mode_enabled_var"):
@@ -1863,7 +1836,7 @@ class LayoutMixin:
         enabled = bool(self.developer_mode_enabled_var.get()) if hasattr(self, "developer_mode_enabled_var") else False
         if hasattr(self, "dev_mode_btn"):
             self.dev_mode_btn.configure(
-                text=t("개발자 설정 ON") if enabled else "개발자 설정 OFF",
+                text=t("・罹ｰ懍梵 ・､・・ON") if enabled else "・罹ｰ懍梵 ・､・・OFF",
                 fg_color="#7E91AD" if enabled else "#C2CFDF",
                 text_color=PALETTE.primary_button_text if enabled else "#2A3A50",
             )
@@ -2181,7 +2154,7 @@ class LayoutMixin:
         if hasattr(self, "auto_format_var"):
             fmt = normalize_auto_format_value(lang, self.auto_format_var.get())
         if lang == "english":
-            self.ml_coupled_status_label.configure(text=t("현재 포맷: cvvc | 영어 Preview 모드에서는 ML 보정을 사용하지 않습니다."))
+            self.ml_coupled_status_label.configure(text=t("嶸・椪 尞ｬ・ｷ: cvvc | ・・牟 Preview ・ｨ・懍乱・罹株 ML ・ｴ・菩揆 ・ｬ・ｩ﨑們ｧ ・喜慣・壱共."))
             if hasattr(self, "ml_coupled_status_detail_label"):
                 self.ml_coupled_status_detail_label.configure(text="")
             return
@@ -2189,14 +2162,14 @@ class LayoutMixin:
         if hasattr(self, "auto_format_var"):
             fmt = normalize_auto_format_value(lang, self.auto_format_var.get())
         if lang == "english":
-            self.ml_coupled_status_label.configure(text=t("현재 포맷: cvvc | 영어 Preview 모드에서는 ML 보정을 사용하지 않습니다."))
+            self.ml_coupled_status_label.configure(text=t("嶸・椪 尞ｬ・ｷ: cvvc | ・・牟 Preview ・ｨ・懍乱・罹株 ML ・ｴ・菩揆 ・ｬ・ｩ﨑們ｧ ・喜慣・壱共."))
             if hasattr(self, "ml_coupled_status_detail_label"):
                 self.ml_coupled_status_detail_label.configure(text="")
             return
         if lang == "korean" and fmt in {"cmpx", "c_plus_v"}:
             mode_label = "cmpx" if fmt == "cmpx" else "c_plus_v"
             self.ml_coupled_status_label.configure(
-                text=f"현재 포맷: {mode_label} | 템플릿 전용 모드에서는 ML 보정을 사용하지 않습니다."
+                text=f"嶸・椪 尞ｬ・ｷ: {mode_label} | 奛懦伯・ｿ ・・圸 ・ｨ・懍乱・罹株 ML ・ｴ・菩揆 ・ｬ・ｩ﨑們ｧ ・喜慣・壱共."
             )
             if hasattr(self, "ml_coupled_status_detail_label"):
                 self.ml_coupled_status_detail_label.configure(text="")
@@ -2235,13 +2208,13 @@ class LayoutMixin:
         }.get(selected, selected or "auto")
 
         text = (
-            f"현재 포맷: {fmt_display} | ensemble {_status_icon(ensemble_dir)} / "
+            f"嶸・椪 尞ｬ・ｷ: {fmt_display} | ensemble {_status_icon(ensemble_dir)} / "
             f"lightgbm {_status_icon(lightgbm_dir)}"
         )
         if selected:
-            text += f" | 선택: {selected}"
+            text += f" | ・夋・ {selected}"
         if override:
-            text += " | 사용자 경로 사용"
+            text += " | ・ｬ・ｩ・・・ｽ・・・ｬ・ｩ"
         self.ml_coupled_status_label.configure(text=text)
 
         if not hasattr(self, "ml_coupled_status_detail_label"):
@@ -2270,7 +2243,7 @@ class LayoutMixin:
 
         def _fmt_line(label: str, model_dir: str, meta: dict) -> str:
             if not model_dir:
-                return f"{label}: (없음)"
+                return f"{label}: (・・搆)"
             version = str(meta.get("model_version", "") or meta.get("version", "") or "unknown")
             backend = str(meta.get("backend", "") or "unknown")
             created = str(meta.get("created_at", "") or "unknown")
@@ -2292,16 +2265,19 @@ class LayoutMixin:
             self.advanced_options_expanded = bool(force)
 
         if self.advanced_options_expanded:
-            self.advanced_toggle_btn.configure(text=t("▼ 고급 옵션 (특수 발음)"))
+            self.advanced_toggle_btn.configure(text=t("笆ｼ ・・・・ｵ・・(孖ｹ・・・懍搆)"))
             self.advanced_options_frame.pack(fill="x", padx=10, pady=(0, 3))
         else:
-            self.advanced_toggle_btn.configure(text=t("▶ 고급 옵션 (특수 발음)"))
+            self.advanced_toggle_btn.configure(text=t("笆ｶ ・・・・ｵ・・(孖ｹ・・・懍搆)"))
             self.advanced_options_frame.pack_forget()
 
     def _get_params(self):
-        """현재 슬라이더 값으로 파라미터 딕셔너리 생성"""
+        """嶸・椪 ・ｬ・ｼ・ｴ・・・廷愍・・甯誤攵・ｸ奓ｰ ・菩・・壱ｦｬ ・晧┳"""
         if hasattr(self, "param_vars") and self.param_vars:
             return {key: var.get() for key, var in self.param_vars.items()}
         return None
 
-    # ── MFA 설치 (GUI 내장) ──
+    # 笏笏 MFA ・､・・(GUI ・ｴ・･) 笏笏
+
+
+

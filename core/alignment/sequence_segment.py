@@ -97,11 +97,6 @@ def _build_emission(features) -> np.ndarray:
       col 2 (SIL) — silence
       col 3 (VC) — voiced consonant: 0.35·p_C + 0.65·p_V  (nasal/liquid blend)
     """
-    from core.cvn_classifier import predict_cvn
-
-    posterior = predict_cvn(features, smooth_window=3, min_run_frames=1)
-    p_cv = posterior.probs.astype(np.float64)  # (T, 2): [P(C), P(V)]
-
     rms = np.asarray(features.rms, dtype=np.float64)
     rms_ref = float(np.percentile(rms, 90)) if rms.size else 1.0
     if rms_ref < 1e-8:
@@ -111,8 +106,15 @@ def _build_emission(features) -> np.ndarray:
     sil_th = _sil_threshold()
     p_sil = np.clip(1.0 / (1.0 + np.exp(30.0 * (rms_norm - sil_th))), 0.0, 0.97)
 
-    p_c = p_cv[:, 0] * (1.0 - p_sil)
-    p_v = p_cv[:, 1] * (1.0 - p_sil)
+    zcr = np.asarray(getattr(features, "zcr", np.zeros_like(rms)), dtype=np.float64)
+    zcr_ref = float(np.percentile(zcr, 90)) if zcr.size else 1.0
+    if zcr_ref < 1e-8:
+        zcr_ref = 1e-8
+    zcr_norm = np.clip(zcr / zcr_ref, 0.0, 1.0)
+    p_c_base = np.clip(0.35 + 0.55 * zcr_norm, 0.05, 0.95)
+    p_v_base = 1.0 - p_c_base
+    p_c = p_c_base * (1.0 - p_sil)
+    p_v = p_v_base * (1.0 - p_sil)
     p_vc = 0.35 * p_c + 0.65 * p_v  # voiced-consonant blend
 
     eps = 1e-9
@@ -312,8 +314,9 @@ def correct_phone_intervals_by_viterbi(
         return list(phone_intervals)
 
     try:
-        from core.cvn_feature_extractor import extract_frame_features
-        features = extract_frame_features(wav_path, hop_ms=10.0, frame_ms=25.0)
+        from core.model_context.sequence_features import extract_basic_frame_features
+
+        features = extract_basic_frame_features(wav_path, hop_ms=10.0, frame_ms=25.0)
     except Exception:
         return list(phone_intervals)
 

@@ -3,31 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 from collections import defaultdict
 
+from core.model_context.filename import filename_order_tokens, ordered_token_match
 from core.oto_file_utils import parse_oto_line, read_text_with_fallback
-
-
-_TOKEN_RE = re.compile(r"[A-Za-z0-9\uAC00-\uD7A3]+")
-
-
-def _tokens(text: str) -> list[str]:
-    return [tok.lower() for tok in _TOKEN_RE.findall(str(text or ""))]
-
-
-def _ordered_match(expected: list[str], observed: list[str]) -> tuple[int, float]:
-    if not expected:
-        return 0, 1.0
-    cursor = 0
-    matched = 0
-    for tok in observed:
-        if cursor >= len(expected):
-            break
-        if tok == expected[cursor]:
-            matched += 1
-            cursor += 1
-    return matched, float(matched) / float(len(expected))
 
 
 def run(source_oto: str, out_path: str, min_ratio: float) -> dict:
@@ -44,11 +23,11 @@ def run(source_oto: str, out_path: str, min_ratio: float) -> dict:
 
     mismatches = []
     for wav, aliases in sorted(per_wav.items()):
-        expected = _tokens(os.path.splitext(wav)[0])
+        expected = filename_order_tokens(os.path.splitext(wav)[0])
         observed = []
         for alias in aliases:
-            observed.extend(_tokens(alias))
-        matched, ratio = _ordered_match(expected, observed)
+            observed.extend(filename_order_tokens(alias))
+        matched, ratio = ordered_token_match(expected, observed)
         if len(expected) >= 2 and ratio < float(min_ratio):
             mismatches.append(
                 {

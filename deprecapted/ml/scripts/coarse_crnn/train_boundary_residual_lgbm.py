@@ -96,6 +96,23 @@ def main() -> int:
     ap.add_argument("--stage1-role-column", default="role")
     ap.add_argument("--stage1-min-role-rows", type=int, default=40)
     ap.add_argument("--stage1-shrink", type=float, default=80.0)
+    # Held-out validation against a residual dataset built from a *separate*
+    # manifest (e.g. the val split). When given, this CSV is used for LightGBM
+    # early stopping instead of an internal voicebank GroupShuffleSplit — this
+    # is the honest generalization check for unseen voicebanks.
+    ap.add_argument("--valid-csv", default="", help="Optional separate residual CSV used as the LightGBM validation set.")
+    # Regularization knobs (defaults reproduce the legacy high-capacity model).
+    ap.add_argument("--num-leaves", type=int, default=63)
+    ap.add_argument("--learning-rate", type=float, default=0.05)
+    ap.add_argument("--min-data-in-leaf", type=int, default=40)
+    ap.add_argument("--feature-fraction", type=float, default=0.9)
+    ap.add_argument("--bagging-fraction", type=float, default=0.9)
+    ap.add_argument("--max-depth", type=int, default=-1)
+    ap.add_argument("--lambda-l1", type=float, default=0.0)
+    ap.add_argument("--lambda-l2", type=float, default=0.0)
+    # Shrinks DEFAULT_DELTA_CLIPS so per-target corrections cannot push params
+    # as far — limits constraint-breaking over-correction (stretch/monotonic).
+    ap.add_argument("--delta-clip-scale", type=float, default=1.0)
     args = ap.parse_args()
 
     csv_path = os.path.abspath(str(args.dataset_csv))
@@ -104,36 +121,56 @@ def main() -> int:
         raise SystemExit(f"Not enough rows: {len(df)} < min_rows({int(args.min_rows)})")
 
     frame = _prepare_frame(df)
-    train_idx, valid_idx = _split_indices(df, str(args.group_column or "").strip())
-    X_train = frame.iloc[train_idx]
-    X_valid = frame.iloc[valid_idx]
+    valid_csv = str(args.valid_csv or "").strip()
+    if valid_csv:
+        valid_csv_path = os.path.abspath(valid_csv)
+        df_valid = pd.read_csv(valid_csv_path, encoding="utf-8").reset_index(drop=True)
+        df_train = df.reset_index(drop=True)
+        X_train = _prepare_frame(df_train)
+        X_valid = _prepare_frame(df_valid)
+        split_mode = f"external_valid_csv:{valid_csv_path}"
+    else:
+        valid_csv_path = ""
+        train_idx, valid_idx = _split_indices(df, str(args.group_column or "").strip())
+        df_train = df.iloc[train_idx].reset_index(drop=True)
+        df_valid = df.iloc[valid_idx].reset_index(drop=True)
+        X_train = frame.iloc[train_idx].reset_index(drop=True)
+        X_valid = frame.iloc[valid_idx].reset_index(drop=True)
+        split_mode = "internal_group_shuffle_split"
     target_stats: dict[str, Any] = {}
     metrics: dict[str, Any] = {}
 
     out_dir = os.path.abspath(str(args.out_dir))
     os.makedirs(out_dir, exist_ok=True)
 
+    clip_scale = max(0.05, float(args.delta_clip_scale))
+    delta_clips = {
+        key: (float(lo) * clip_scale, float(hi) * clip_scale)
+        for key, (lo, hi) in DEFAULT_DELTA_CLIPS.items()
+    }
+
     default_params = {
         "objective": "regression_l1",
         "boosting_type": "gbdt",
-        "num_leaves": 63,
-        "learning_rate": 0.05,
-        "feature_fraction": 0.9,
-        "bagging_fraction": 0.9,
+        "num_leaves": int(args.num_leaves),
+        "learning_rate": float(args.learning_rate),
+        "feature_fraction": float(args.feature_fraction),
+        "bagging_fraction": float(args.bagging_fraction),
         "bagging_freq": 1,
-        "min_data_in_leaf": 40,
+        "min_data_in_leaf": int(args.min_data_in_leaf),
+        "max_depth": int(args.max_depth),
+        "lambda_l1": float(args.lambda_l1),
+        "lambda_l2": float(args.lambda_l2),
         "verbosity": -1,
     }
 
     trained_targets: list[str] = []
     for target in RESIDUAL_TARGET_NAMES:
-        if target not in df.columns:
+        if target not in df_train.columns or target not in df_valid.columns:
             continue
-        y_all = pd.to_numeric(df[target], errors="coerce").fillna(0.0)
-        lo, hi = DEFAULT_DELTA_CLIPS.get(target, (-500.0, 500.0))
-        y_all = y_all.clip(lower=float(lo), upper=float(hi))
-        y_train = y_all.iloc[train_idx]
-        y_valid = y_all.iloc[valid_idx]
+        lo, hi = delta_clips.get(target, (-500.0, 500.0))
+        y_train = pd.to_numeric(df_train[target], errors="coerce").fillna(0.0).clip(lower=float(lo), upper=float(hi))
+        y_valid = pd.to_numeric(df_valid[target], errors="coerce").fillna(0.0).clip(lower=float(lo), upper=float(hi))
 
         train_set = lgb.Dataset(
             X_train,
@@ -176,7 +213,7 @@ def main() -> int:
             "train_rows": int(len(y_train)),
             "valid_rows": int(len(y_valid)),
             "clip": [float(lo), float(hi)],
-            "mean_abs_delta": float(y_all.abs().mean()),
+            "mean_abs_delta": float(y_train.abs().mean()),
         }
         booster.save_model(os.path.join(out_dir, f"model_{target}.txt"))
         trained_targets.append(target)
@@ -195,12 +232,16 @@ def main() -> int:
         "backend": "boundary_residual_lightgbm_v1",
         "model_version": "v1",
         "dataset_csv": csv_path,
+        "valid_csv": valid_csv_path,
+        "split_mode": split_mode,
         "rows": int(len(df)),
-        "train_rows": int(len(train_idx)),
-        "valid_rows": int(len(valid_idx)),
+        "train_rows": int(len(df_train)),
+        "valid_rows": int(len(df_valid)),
         "group_column": str(args.group_column or ""),
         "feature_version": "boundary_residual_v1",
-        "delta_clips": {k: [float(v[0]), float(v[1])] for k, v in DEFAULT_DELTA_CLIPS.items()},
+        "lgbm_params": {k: v for k, v in default_params.items() if k != "verbosity"},
+        "delta_clip_scale": float(clip_scale),
+        "delta_clips": {k: [float(v[0]), float(v[1])] for k, v in delta_clips.items()},
         "metrics": metrics,
         "target_stats": target_stats,
         "trained_targets": trained_targets,
@@ -218,7 +259,7 @@ def main() -> int:
                 if target not in df.columns:
                     continue
                 target_raw = pd.to_numeric(df[target], errors="coerce").fillna(0.0)
-                lo, hi = DEFAULT_DELTA_CLIPS.get(target, (-500.0, 500.0))
+                lo, hi = delta_clips.get(target, (-500.0, 500.0))
                 target_vals = target_raw.clip(lower=float(lo), upper=float(hi))
                 global_median = float(target_vals.median())
                 by_role = {}
