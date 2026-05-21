@@ -147,7 +147,7 @@
                         "note":  "Bundled into installer/release."
                     },
                     {
-                        "path":  "deprecapted/scripts/train_cvn_backend.py",
+                        "path":  "deprecated/scripts/train_cvn_backend.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CVN training wrapper moved out of active workflow."
@@ -225,7 +225,7 @@
                         "note":  "Implementation path for two-stage coupled tuning runner."
                     },
                     {
-                        "path":  "deprecapted/scripts/train/train_cvn_backend.py",
+                        "path":  "deprecated/scripts/train/train_cvn_backend.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CVN training implementation moved out of active workflow."
@@ -261,85 +261,85 @@
                         "note":  "Evaluate phoneme-boundary detector timing error against explicit boundary events."
                     },
                     {
-                        "path":  "deprecapted/ml/scripts/coarse_crnn/train_stage2_oto.py",
+                        "path":  "deprecated/ml/scripts/coarse_crnn/train_stage2_oto.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Train the source-independent Stage2 OTO Assigner from gold oto.ini + wav pairs."
                     },
                     {
-                        "path":  "deprecapted/ml/scripts/coarse_crnn/evaluate_stage2_oto.py",
+                        "path":  "deprecated/ml/scripts/coarse_crnn/evaluate_stage2_oto.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Evaluate Stage2 OTO Assigner against gold oto.ini with Boundary Decoder fallback metrics."
                     },
                     {
-                        "path":  "deprecapted/ml/scripts/coarse_crnn/visualize_boundary_decode.py",
+                        "path":  "deprecated/ml/scripts/coarse_crnn/visualize_boundary_decode.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Render Boundary Scorer posterior and decoded OTO anchors for one wav as dependency-free SVG."
                     },
                     {
-                        "path":  "deprecapted/ml/scripts/coarse_crnn/deprecated/coarse_alignment/align.py",
+                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/coarse_alignment/align.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated CoarseCRNN TextGrid alignment CLI retained only for old checkpoint reproduction."
                     },
                     {
-                        "path":  "deprecapted/ml/scripts/coarse_crnn/deprecated/coarse_alignment/build_manifest.py",
+                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/coarse_alignment/build_manifest.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated CoarseCRNN alignment manifest builder."
                     },
                     {
-                        "path":  "deprecapted/ml/scripts/coarse_crnn/deprecated/coarse_alignment/build_eval_splits.py",
+                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/coarse_alignment/build_eval_splits.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated CoarseCRNN alignment split helper."
                     },
                     {
-                        "path":  "deprecapted/ml/scripts/coarse_crnn/deprecated/coarse_alignment/build_clean_manifest.py",
+                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/coarse_alignment/build_clean_manifest.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated CoarseCRNN clean-manifest helper."
                     },
                     {
-                        "path":  "deprecapted/ml/scripts/coarse_crnn/deprecated/coarse_alignment/evaluate_alignment.py",
+                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/coarse_alignment/evaluate_alignment.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated CoarseCRNN alignment evaluator."
                     },
                     {
-                        "path":  "deprecapted/ml/scripts/coarse_crnn/deprecated/coarse_alignment/train.py",
+                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/coarse_alignment/train.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated CoarseCRNN alignment trainer."
                     },
                     {
-                        "path":  "deprecapted/ml/scripts/coarse_crnn/deprecated/direct_param/evaluate_oto.py",
+                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/direct_param/evaluate_oto.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated direct-parameter OTO CRNN evaluator."
                     },
                     {
-                        "path":  "deprecapted/ml/scripts/coarse_crnn/deprecated/direct_param/evaluate_oto_runtime.py",
+                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/direct_param/evaluate_oto_runtime.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated direct-parameter OTO CRNN runtime evaluator."
                     },
                     {
-                        "path":  "deprecapted/ml/scripts/coarse_crnn/deprecated/direct_param/evaluate_oto_voicebank_holdout.py",
+                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/direct_param/evaluate_oto_voicebank_holdout.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated direct-parameter OTO CRNN voicebank holdout evaluator."
                     },
                     {
-                        "path":  "deprecapted/ml/scripts/coarse_crnn/deprecated/direct_param/predict_oto.py",
+                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/direct_param/predict_oto.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated direct-parameter OTO CRNN predictor CLI."
                     },
                     {
-                        "path":  "deprecapted/ml/scripts/coarse_crnn/deprecated/direct_param/train_oto.py",
+                        "path":  "deprecated/ml/scripts/coarse_crnn/deprecated/direct_param/train_oto.py",
                         "status":  "deprecated",
                         "owner":  "ml",
                         "note":  "Retired CRNN/Stage2 OTO script moved out of active workflow. Deprecated direct-parameter OTO CRNN trainer."

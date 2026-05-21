@@ -39,8 +39,8 @@
 !scripts/**
 !tests/
 !tests/**
-!deprecapted/
-!deprecapted/**
+!deprecated/
+!deprecated/**
 !.github/
 !.github/**
 
