@@ -57,12 +57,12 @@ class MappingPolicyGuardsTests(unittest.TestCase):
             "UTOA_ML_SKIP_HIGH_CONF_MAX_BLANK": "0.18",
         }
         with mock.patch.dict(os.environ, env, clear=False):
-            with mock.patch("core.oto_ml_refiner._get_validate_func", return_value=lambda *a, **k: True):
+            with mock.patch("core.oto_ml.oto_ml_refiner._get_validate_func", return_value=lambda *a, **k: True):
                 with mock.patch(
-                    "core.oto_ml_refiner._finalize_ml_params",
+                    "core.oto_ml.oto_ml_refiner._finalize_ml_params",
                     side_effect=lambda language, row_context, params, *_args, **_kwargs: params,
                 ):
-                    with mock.patch("core.oto_ml_refiner.predict_oto_deltas") as pred_mock:
+                    with mock.patch("core.oto_ml.oto_ml_refiner.predict_oto_deltas") as pred_mock:
                         out = apply_oto_ml_delta("korean", row_context, bundle=mock.Mock(backend="lightgbm"))
         pred_mock.assert_not_called()
         self.assertEqual(out, (10.0, 20.0, -20.0, 40.0, 50.0))
