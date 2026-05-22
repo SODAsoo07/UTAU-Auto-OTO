@@ -118,6 +118,7 @@ def row_from_htk_lab(
             "other": sorted(OTHER_LABELS),
             "dropped": sorted(DROP_LABELS),
             "filename_is_not_label_source": True,
+            "vowel_nucleus": "htk_vowel_segment_midpoint_pseudo_gold",
         },
         "expected_phones": expected_phones_from_segments(segments),
         "frame_labels": frame_labels_from_segments(segments),
@@ -223,7 +224,10 @@ def events_from_segments(segments: Sequence[HtkLabSegment]) -> list[dict]:
                     "label": "vowel_nucleus",
                     "time_ms": (segment.start_ms + segment.end_ms) * 0.5,
                     "phone": segment.phone,
-                    "confidence": 1.0,
+                    "confidence": 0.75,
+                    "source": "htk_vowel_segment_midpoint_pseudo_gold",
+                    "vowel_start_ms": segment.start_ms,
+                    "vowel_end_ms": segment.end_ms,
                 }
             )
         previous_trainable = segment

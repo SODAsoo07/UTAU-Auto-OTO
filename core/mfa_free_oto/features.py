@@ -44,6 +44,15 @@ def read_wav_mono(path: str | Path, *, target_sample_rate: int | None = None) ->
         data = (np.frombuffer(frames, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
     elif sample_width == 2:
         data = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    elif sample_width == 3:
+        raw = np.frombuffer(frames, dtype=np.uint8)
+        if raw.size % 3 != 0:
+            raise ValueError(f"Malformed 24-bit wav byte count: {raw.size}")
+        triples = raw.reshape(-1, 3)
+        padded = np.zeros((triples.shape[0], 4), dtype=np.uint8)
+        padded[:, :3] = triples
+        padded[:, 3] = np.where(triples[:, 2] >= 128, 255, 0).astype(np.uint8)
+        data = padded.reshape(-1, 4).view("<i4").reshape(-1).astype(np.float32) / 8388608.0
     elif sample_width == 4:
         data = np.frombuffer(frames, dtype="<i4").astype(np.float32) / 2147483648.0
     else:

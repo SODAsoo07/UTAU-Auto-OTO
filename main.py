@@ -434,6 +434,7 @@ class App(
         self.en_cvvc_list_fallback_var = ctk.BooleanVar(value=True)
         self.aligner_var = ctk.StringVar(value="MFA")
         self.no_mfa_oto_mode_var = ctk.StringVar(value="베이스 OTO 재매핑 + 보정")
+        self.no_mfa_checkpoint_choice_var = ctk.StringVar(value="tune_d (default)")
         self.oto_crnn_model_path_var = ctk.StringVar(value="")
         self.oto_crnn_engine_var = ctk.StringVar(value="boundary_decoder")
         self.oto_crnn_model_choice_var = ctk.StringVar(value="자동 (auto)")

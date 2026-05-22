@@ -137,6 +137,32 @@ def filename_expected_tokens(base: str, *, language: str = "ja") -> list[str]:
     return filename_order_tokens(base)
 
 
+def filename_syllable_order_tokens(
+    wav_name: object,
+    *,
+    language: str = "",
+) -> list[str]:
+    tokens = filename_order_tokens(wav_name)
+    lang = str(language or "").strip().lower()
+    if tokens:
+        return tokens
+    if lang not in {"ja", "japanese", "jp"}:
+        return []
+    try:
+        from core.ja_lab_generator import parse_ja_filename
+
+        parsed = parse_ja_filename(str(wav_name or ""))
+    except Exception:
+        parsed = []
+    if isinstance(parsed, dict):
+        items = list(parsed.get("syllables") or [])
+    elif isinstance(parsed, (list, tuple)):
+        items = list(parsed)
+    else:
+        items = []
+    return [canonicalize_order_token(item) for item in items if canonicalize_order_token(item)]
+
+
 def ordered_token_match(expected: Sequence[object], observed: Sequence[object]) -> tuple[int, float]:
     exp = [canonicalize_order_token(item) for item in expected if canonicalize_order_token(item)]
     obs = [canonicalize_order_token(item) for item in observed if canonicalize_order_token(item)]
@@ -178,7 +204,7 @@ def parse_filename_context(
     language: str = "",
     format_type: str = "",
 ) -> FilenameTokenContext:
-    tokens = tuple(filename_order_tokens(wav_name))
+    tokens = tuple(filename_syllable_order_tokens(wav_name, language=language))
     canonical = tuple(canonicalize_order_tokens(tokens))
     return FilenameTokenContext(
         raw=str(wav_name or ""),

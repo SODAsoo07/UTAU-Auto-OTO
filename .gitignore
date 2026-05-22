@@ -133,3 +133,6 @@ MANIFEST
 *.build/
 *.onefile-build/
 /ml/eval
+ml/workspace/mfa_free_oto/c4_manual_gold_manifest.jsonl
+ml/workspace/mfa_free_oto/c4_manual_gold_summary.json
+/plans

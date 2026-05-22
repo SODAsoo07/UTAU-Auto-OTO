@@ -58,6 +58,41 @@ from ui.i18n import t
 
 
 class PipelineActionsMixin:
+    def _apply_no_mfa_checkpoint_env_from_ui(self) -> str:
+        code = (
+            self._get_no_mfa_checkpoint_choice_code()
+            if hasattr(self, "_get_no_mfa_checkpoint_choice_code")
+            else "tune_d"
+        )
+        normalized = str(code or "tune_d").strip()
+        resolved = ""
+        if normalized == "auto":
+            os.environ.pop("UTOA_MFA_FREE_OTO_CHECKPOINT", None)
+            return ""
+        if normalized.startswith("path:"):
+            candidate = os.path.abspath(normalized[5:])
+            if os.path.isfile(candidate):
+                resolved = candidate
+        else:
+            for base in (
+                str(getattr(self, "app_dir", "") or "").strip(),
+                os.getcwd(),
+            ):
+                if not base:
+                    continue
+                root = os.path.join(base, "ml_workspace", "mfa_free_oto")
+                if not os.path.isdir(root):
+                    continue
+                target = os.path.join(root, "world_v1_light_c4_tune_d.pt")
+                if os.path.isfile(target):
+                    resolved = os.path.abspath(target)
+                    break
+        if resolved:
+            os.environ["UTOA_MFA_FREE_OTO_CHECKPOINT"] = resolved
+            return resolved
+        os.environ.pop("UTOA_MFA_FREE_OTO_CHECKPOINT", None)
+        return ""
+
     def _resolve_mfa_free_oto_checkpoint(self) -> str:
         candidates = []
         env_path = str(os.environ.get("UTOA_MFA_FREE_OTO_CHECKPOINT", "") or "").strip()
@@ -2781,6 +2816,9 @@ class PipelineActionsMixin:
                     if no_mfa_mode_code == "mfa_free_ssl_slot"
                     else "베이스 OTO 재매핑 + 보정"
                 )
+                selected_no_mfa_checkpoint = self._apply_no_mfa_checkpoint_env_from_ui()
+                if selected_no_mfa_checkpoint:
+                    self._append_log(f"[No-MFA] UI checkpoint={selected_no_mfa_checkpoint}")
                 no_mfa_source_oto = ""
                 if no_mfa_auto_mode:
                     if bool(self.no_base_oto_var.get()):

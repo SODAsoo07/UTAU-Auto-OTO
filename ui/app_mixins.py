@@ -1324,6 +1324,7 @@ class AppRuntimeMixin:
             "developer_mode_enabled_var": False,
             "aligner_var": "MFA",
             "no_mfa_oto_mode_var": "MFA-Free auto + fallback",
+            "no_mfa_checkpoint_choice_var": "tune_d (default)",
             "oto_crnn_model_path_var": "",
             "oto_crnn_engine_var": "boundary_decoder",
             "oto_crnn_model_choice_var": "auto",
@@ -3356,6 +3357,11 @@ class ConfigMixin:
                 if hasattr(self, "_get_no_mfa_oto_mode_code")
                 else "remap"
             ),
+            "no_mfa_checkpoint_choice": (
+                self._get_no_mfa_checkpoint_choice_code()
+                if hasattr(self, "_get_no_mfa_checkpoint_choice_code")
+                else "tune_d"
+            ),
             "recursive_voicebank_scan": self.recursive_voicebank_scan_var.get() if hasattr(self, "recursive_voicebank_scan_var") else False,
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
             "ml_route": self._get_ml_route_code() if hasattr(self, "_get_ml_route_code") else "auto",
@@ -3551,6 +3557,11 @@ class ConfigMixin:
                     self._set_no_mfa_oto_mode_from_code(config.get("no_mfa_oto_mode", "mfa_free_ssl_slot"))
                 else:
                     self.no_mfa_oto_mode_var.set(str(config.get("no_mfa_oto_mode", "mfa_free_ssl_slot") or "mfa_free_ssl_slot"))
+            if "no_mfa_checkpoint_choice" in config and hasattr(self, "no_mfa_checkpoint_choice_var"):
+                if hasattr(self, "_set_no_mfa_checkpoint_choice_from_code"):
+                    self._set_no_mfa_checkpoint_choice_from_code(config.get("no_mfa_checkpoint_choice", "tune_d"))
+                else:
+                    self.no_mfa_checkpoint_choice_var.set(str(config.get("no_mfa_checkpoint_choice", "tune_d") or "tune_d"))
             if "soft_bank_mode" in config and hasattr(self, "soft_bank_mode_var"):
                 self.soft_bank_mode_var.set(bool(config.get("soft_bank_mode", False)))
             if "low_rms_gain_enable" in config and hasattr(self, "low_rms_gain_enable_var"):
