@@ -16,6 +16,7 @@ def main() -> int:
     parser.add_argument("--encoder", help="Override encoder stored in checkpoint.")
     parser.add_argument("--device", help="torch device, e.g. cpu or cuda.")
     parser.add_argument("--boundary-tolerance-ms", type=float, default=100.0)
+    parser.add_argument("--nucleus-tolerance-ms", type=float, default=100.0)
     parser.add_argument("--disable-slot-viterbi", action="store_true", help="Evaluate generic event decoding without filename-slot Viterbi.")
     args = parser.parse_args()
 
@@ -25,6 +26,7 @@ def main() -> int:
         encoder=args.encoder,
         device=args.device,
         boundary_tolerance_ms=args.boundary_tolerance_ms,
+        nucleus_tolerance_ms=args.nucleus_tolerance_ms,
         use_slot_viterbi=not args.disable_slot_viterbi,
     )
     if args.out:

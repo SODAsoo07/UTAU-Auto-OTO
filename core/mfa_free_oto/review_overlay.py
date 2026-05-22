@@ -27,6 +27,14 @@ EVENT_COLORS = {
     "v": "#16a34a",
     "vv": "#16a34a",
     "oto_anchor": "#9333ea",
+    "manual_anchor": "#111827",
+    "model_pred_anchor": "#ea580c",
+    "joint_pred_anchor": "#0891b2",
+    "vowel_island_start": "#f59e0b",
+    "vowel_island_nucleus": "#16a34a",
+    "vowel_island_end": "#d97706",
+    "vowel_nucleus_lab_midpoint": "#84cc16",
+    "vowel_nucleus_acoustic": "#15803d",
 }
 
 
@@ -46,6 +54,7 @@ def render_review_html(
     spectrogram_svg = _render_spectrogram(spec_times, spec, duration_ms, width=width, height=180)
     labels_svg = _render_frame_labels(row.get("frame_labels") or [], duration_ms, width=width, height=56)
     events_svg = _render_events(row.get("events") or [], duration_ms, width=width, height=72)
+    auxiliary_events_svg = _render_events(row.get("auxiliary_events") or [], duration_ms, width=width, height=72)
     posterior_svg = _render_posterior(posterior, duration_ms, width=width, height=160) if posterior else ""
     decoded_svg = _render_decoded_events(decoded_events or [], duration_ms, width=width, height=64)
     generated_oto_svg = _render_generated_oto_rows(generated_oto_rows or [], duration_ms, width=width, height=92)
@@ -80,6 +89,8 @@ pre {{ background: #111827; color: #e5e7eb; padding: 12px; overflow: auto; font-
 {labels_svg}
 <h2>Manual events</h2>
 {events_svg}
+<h2>Auxiliary landmark events</h2>
+{auxiliary_events_svg}
 {posterior_svg}
 <h2>Assigned OTO anchors</h2>
 {decoded_svg}
@@ -301,6 +312,9 @@ def _compact_row(row: dict) -> dict:
         "expected_phones",
         "frame_labels",
         "events",
+        "auxiliary_events",
+        "vowel_nucleus_diagnostics",
+        "landmark_metadata",
         "label_source",
     ]
     return {key: row.get(key) for key in keep if key in row}

@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.mfa_free_oto.acoustic_nucleus import AcousticNucleusConfig, relabel_vowel_nuclei_manifest
 from core.mfa_free_oto.htk_lab import build_gold_manifest_from_htk_lab_dirs
 from core.mfa_free_oto.metrics import boundary_error_metrics
 from core.mfa_free_oto.review_overlay import write_review_html
@@ -64,6 +65,13 @@ def main() -> int:
     parser.add_argument("--gate-max-nucleus-p90-ms", type=float, default=40.0)
     parser.add_argument("--gate-max-hard-fail-rate", type=float, default=0.35)
     parser.add_argument("--max-overlays", type=int, default=80, help="Render overlays for worst N rows.")
+    parser.add_argument(
+        "--nucleus-reference",
+        choices=("lab-midpoint", "acoustic"),
+        default="lab-midpoint",
+        help="Reference vowel_nucleus policy. acoustic recomputes nuclei from acoustic evidence and keeps lab midpoint diagnostics.",
+    )
+    parser.add_argument("--nucleus-encoder", default="", help="Encoder for acoustic nucleus reference. Defaults to --encoder.")
     parser.add_argument("--disable-slot-viterbi", action="store_true")
     args = parser.parse_args()
 
@@ -80,6 +88,18 @@ def main() -> int:
         dataset_id="C4",
         relative_to=None,
     )
+    if args.nucleus_reference == "acoustic":
+        acoustic_manifest_path = out_dir / "manual_gold_manifest.acoustic_nucleus.jsonl"
+        rows, nucleus_summary = relabel_vowel_nuclei_manifest(
+            manifest_path,
+            acoustic_manifest_path,
+            encoder=(args.nucleus_encoder or args.encoder),
+            device=(args.device or None),
+            config=AcousticNucleusConfig(),
+        )
+        manifest_path = acoustic_manifest_path
+    else:
+        nucleus_summary = None
 
     if not rows:
         raise SystemExit(f"No .lab/.wav rows found: {args.lab_root}")
@@ -246,6 +266,8 @@ def main() -> int:
                 "skipped_without_wav": int(build_summary.skipped_without_wav),
                 "dropped_segments": int(build_summary.dropped_segments),
             },
+            "nucleus_reference": args.nucleus_reference,
+            "nucleus_summary": nucleus_summary.__dict__ if nucleus_summary is not None else None,
         },
         "runtime": {
             "encoder": args.encoder,

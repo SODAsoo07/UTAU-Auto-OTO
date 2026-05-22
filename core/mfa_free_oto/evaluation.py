@@ -67,6 +67,7 @@ def evaluate_manifest(
     encoder: str | None = None,
     device: str | None = None,
     boundary_tolerance_ms: float = 100.0,
+    nucleus_tolerance_ms: float = 100.0,
     use_slot_viterbi: bool = True,
 ) -> dict:
     try:
@@ -80,6 +81,8 @@ def evaluate_manifest(
     y_pred: list[int] = []
     all_reference_cv: list[float] = []
     all_predicted_cv: list[float] = []
+    all_reference_vn: list[float] = []
+    all_predicted_vn: list[float] = []
     row_results: list[dict] = []
     predictions: list[dict] = []
     for row in rows:
@@ -115,9 +118,18 @@ def evaluate_manifest(
                 if str(event.get("label")) == "cv_boundary"
             ]
             predicted_cv = [event.selected_time_ms for event in decoded if event.label == "cv_boundary"]
+            reference_vn = [
+                float(event["time_ms"])
+                for event in row.get("events") or []
+                if str(event.get("label")) == "vowel_nucleus"
+            ]
+            predicted_vn = [event.selected_time_ms for event in decoded if event.label == "vowel_nucleus"]
             all_reference_cv.extend(reference_cv)
             all_predicted_cv.extend(predicted_cv)
+            all_reference_vn.extend(reference_vn)
+            all_predicted_vn.extend(predicted_vn)
             row_error = boundary_error_metrics(reference_cv, predicted_cv, tolerance_ms=boundary_tolerance_ms)
+            row_nucleus_error = boundary_error_metrics(reference_vn, predicted_vn, tolerance_ms=nucleus_tolerance_ms)
             hard_failure = bool(reference_cv and not predicted_cv)
             catastrophic = hard_failure or (
                 row_error["median_error_ms"] is not None and float(row_error["median_error_ms"]) > boundary_tolerance_ms
@@ -130,6 +142,7 @@ def evaluate_manifest(
                     "catastrophic": catastrophic,
                     "failure_tags": failure_tags,
                     "cv_boundary": row_error,
+                    "vowel_nucleus": row_nucleus_error,
                 }
             )
             predictions.append(
@@ -180,6 +193,11 @@ def evaluate_manifest(
         all_predicted_cv,
         tolerance_ms=boundary_tolerance_ms,
     )
+    nucleus_metrics = boundary_error_metrics(
+        all_reference_vn,
+        all_predicted_vn,
+        tolerance_ms=nucleus_tolerance_ms,
+    )
     failure_metrics = row_failure_metrics(row_results)
     metrics = {
         "rows": len(rows),
@@ -190,6 +208,9 @@ def evaluate_manifest(
         "cv_boundary_median_error_ms": boundary_metrics["median_error_ms"],
         "cv_boundary_p90_error_ms": boundary_metrics["p90_error_ms"],
         "cv_boundary": boundary_metrics,
+        "vowel_nucleus_median_error_ms": nucleus_metrics["median_error_ms"],
+        "vowel_nucleus_p90_error_ms": nucleus_metrics["p90_error_ms"],
+        "vowel_nucleus": nucleus_metrics,
         **failure_metrics,
         "gate_report": {},
         "row_results": row_results,

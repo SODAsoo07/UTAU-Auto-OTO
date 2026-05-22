@@ -1,4 +1,4 @@
-﻿import os
+import os
 import re
 
 from ui.i18n import t
@@ -20,6 +20,41 @@ from core.preflight_common import collect_runtime_preflight_issues
 
 
 class OtoActionsMixin:
+    def _apply_no_mfa_checkpoint_env_from_ui(self) -> str:
+        code = (
+            self._get_no_mfa_checkpoint_choice_code()
+            if hasattr(self, "_get_no_mfa_checkpoint_choice_code")
+            else "tune_d"
+        )
+        normalized = str(code or "tune_d").strip()
+        resolved = ""
+        if normalized == "auto":
+            os.environ.pop("UTOA_MFA_FREE_OTO_CHECKPOINT", None)
+            return ""
+        if normalized.startswith("path:"):
+            candidate = os.path.abspath(normalized[5:])
+            if os.path.isfile(candidate):
+                resolved = candidate
+        else:
+            for base in (
+                str(getattr(self, "app_dir", "") or "").strip(),
+                os.getcwd(),
+            ):
+                if not base:
+                    continue
+                root = os.path.join(base, "ml_workspace", "mfa_free_oto")
+                if not os.path.isdir(root):
+                    continue
+                target = os.path.join(root, "world_v1_light_c4_tune_d.pt")
+                if os.path.isfile(target):
+                    resolved = os.path.abspath(target)
+                    break
+        if resolved:
+            os.environ["UTOA_MFA_FREE_OTO_CHECKPOINT"] = resolved
+            return resolved
+        os.environ.pop("UTOA_MFA_FREE_OTO_CHECKPOINT", None)
+        return ""
+
     @staticmethod
     def _recommended_format_env_preset() -> dict[str, str]:
         # Keep as conservative defaults; users can still override by explicitly setting env/UI values.
@@ -141,7 +176,7 @@ class OtoActionsMixin:
     def _run_oto_gen(self):
         def task():
             self._set_running(True)
-            self._set_status("4・ｨ・・OTO.ini ・晧┳ ・・..")
+            self._set_status("4단계 OTO.ini 생성 중...")
             progress_state = {"oto": 0.0, "validate": 0.0}
             progress_detail_state = {"oto_last": -1.0, "validate_last": -1.0}
 
@@ -168,14 +203,14 @@ class OtoActionsMixin:
                 _set_progress_part(oto_ratio=rr)
                 if force or abs(rr - progress_detail_state["oto_last"]) >= 0.03:
                     progress_detail_state["oto_last"] = rr
-                    _set_stage_status("4・ｨ・・OTO.ini ・晧┳ ・・..", detail, rr)
+                    _set_stage_status("4단계 OTO.ini 생성 중...", detail, rr)
 
             def _update_validate_stage(detail: str, ratio: float, *, force: bool = False) -> None:
                 rr = _safe_ratio(ratio)
                 _set_progress_part(validate_ratio=rr)
                 if force or abs(rr - progress_detail_state["validate_last"]) >= 0.03:
                     progress_detail_state["validate_last"] = rr
-                    _set_stage_status("5・ｨ・・OTO ・尖徐 ・・・・・..", detail, rr)
+                    _set_stage_status("5단계 OTO 자동 검증 중...", detail, rr)
 
             def _batch_ratio(batch_index: int, batch_total: int, local_ratio: float) -> float:
                 r = _safe_ratio(local_ratio)
@@ -203,10 +238,10 @@ class OtoActionsMixin:
                         return
                     scaled = _batch_ratio(batch_index, batch_total, ratio)
                     if stage == "oto":
-                        detail = t("・晧┳ ・・哩") if batch_total <= 1 else f"{t('・晧┳ ・・哩')} ({batch_index + 1}/{batch_total})"
+                        detail = t("생성 진행") if batch_total <= 1 else f"{t('생성 진행')} ({batch_index + 1}/{batch_total})"
                         _update_oto_stage(detail, scaled)
                     else:
-                        detail = t("・・・・・哩") if batch_total <= 1 else f"{t('・・・・・哩')} ({batch_index + 1}/{batch_total})"
+                        detail = t("검증 진행") if batch_total <= 1 else f"{t('검증 진행')} ({batch_index + 1}/{batch_total})"
                         _update_validate_stage(detail, scaled)
                 return _cb
 
@@ -218,7 +253,7 @@ class OtoActionsMixin:
                     return -1
 
             try:
-                _update_oto_stage(t("・・･ ・・ｬ"), 0.02, force=True)
+                _update_oto_stage(t("입력 검사"), 0.02, force=True)
                 root_wav_dir = str(self.wav_entry.get() or "").strip()
                 base_tpl_path = "" if self.no_base_oto_var.get() else str(self.tpl_entry.get() or "").strip()
                 base_out_path = str(self.out_entry.get() or "").strip()
@@ -229,58 +264,58 @@ class OtoActionsMixin:
                 )
                 lang = self._get_language()
                 self._append_log(
-                    f"邃ｹ 嶸・椪 ・ｸ・ｴ: {'・ｼ・ｸ・ｴ' if lang == 'japanese' else '﨑懋ｵｭ・ｴ' if lang == 'korean' else '・・牟'}"
+                    f"ℹ 현재 언어: {'일본어' if lang == 'japanese' else '한국어' if lang == 'korean' else '영어'}"
                 )
                 selected_format = normalize_auto_format_value(
                     lang,
                     self.auto_format_var.get() if hasattr(self, "auto_format_var") else "",
                 )
                 if lang in {"korean", "japanese"} and hasattr(self, "_confirm_language_script_mismatch"):
-                    if not self._confirm_language_script_mismatch(lang, root_wav_dir, stage_name="OTO ・晧┳"):
-                        self._set_status("・ｨ・誤勢: ・ｸ・ｴ ・､・・嶹菩攤")
+                    if not self._confirm_language_script_mismatch(lang, root_wav_dir, stage_name="OTO 생성"):
+                        self._set_status("취소됨: 언어 설정 확인")
                         return
 
                 if not root_wav_dir:
-                    self._append_log("・､・・ WAV 尞ｴ・罷･ｼ ・・･﨑ｴ ・ｼ・ｸ・・")
+                    self._append_log("오류: WAV 폴더를 입력해 주세요.")
                     return
                 if not base_out_path and not batch_scan_enabled:
-                    self._append_log("・､・・ ・罹･ ・ｽ・罹･ｼ ・・･﨑ｴ ・ｼ・ｸ・・")
+                    self._append_log("오류: 출력 경로를 입력해 주세요.")
                     return
 
                 if batch_scan_enabled:
                     target_wav_dirs = self._discover_recursive_voicebank_dirs(root_wav_dir)
                     if not target_wav_dirs:
-                        self._append_log("・､・・ 﨑們怱 尞ｴ・肥乱・・WAV 甯護攵・ｴ ・壱株 ・ｴ・ｴ・､ 尞ｴ・罷･ｼ ・ｾ・ ・ｻ嵂溢慣・壱共.")
-                        self._set_status("・､・・ ・ｰ・・・・・・・搆")
+                        self._append_log("오류: 하위 폴더에서 WAV 파일이 있는 보이스 폴더를 찾지 못했습니다.")
+                        self._set_status("오류: 배치 대상 없음")
                         return
                 else:
                     target_wav_dirs = [os.path.abspath(root_wav_dir)]
 
                 target_count = len(target_wav_dirs)
                 if target_count > 1:
-                    self._append_log(f"邃ｹ 﨑們怱 尞ｴ・・・尖徐 夋川ラ 嶹懍┳嶹・ ・・{target_count}・・・ｴ・ｴ・､ 尞ｴ・罷･ｼ ・懍ｰｨ ・俯ｦｬ﨑ｩ・壱共.")
+                    self._append_log(f"ℹ 하위 폴더 자동 탐색 활성화: 총 {target_count}개 보이스 폴더를 순차 처리합니다.")
                 elif batch_scan_enabled:
-                    self._append_log("邃ｹ 﨑們怱 尞ｴ・・・尖徐 夋川ラ 嶹懍┳嶹・ ・俯ｦｬ ・・・1・罹･ｼ ・ｾ・們慣・壱共.")
-                _update_oto_stage(t("Checking output path"), 0.07, force=True)
+                    self._append_log("ℹ 하위 폴더 자동 탐색 활성화: 처리 대상 1개를 찾았습니다.")
+                _update_oto_stage(t("입력 경로 확인 완료"), 0.07, force=True)
 
                 if batch_scan_enabled:
                     target_wav_dirs = self._discover_recursive_voicebank_dirs(root_wav_dir)
                     if not target_wav_dirs:
-                        self._append_log("・､・・ 﨑們怱 尞ｴ・肥乱・・WAV 甯護攵・ｴ ・壱株 ・ｴ・ｴ・､ 尞ｴ・罷･ｼ ・ｾ・ ・ｻ嵂溢慣・壱共.")
-                        self._set_status("・､・・ ・ｰ・・・・・・・搆")
+                        self._append_log("오류: 하위 폴더에서 WAV 파일이 있는 보이스 폴더를 찾지 못했습니다.")
+                        self._set_status("오류: 배치 대상 없음")
                         return
                 else:
                     target_wav_dirs = [os.path.abspath(root_wav_dir)]
 
                 target_count = len(target_wav_dirs)
                 if target_count > 1:
-                    self._append_log(f"邃ｹ 﨑們怱 尞ｴ・・・尖徐 夋川ラ 嶹懍┳嶹・ ・・{target_count}・・・ｴ・ｴ・､ 尞ｴ・罷･ｼ ・懍ｰｨ ・俯ｦｬ﨑ｩ・壱共.")
+                    self._append_log(f"ℹ 하위 폴더 자동 탐색 활성화: 총 {target_count}개 보이스 폴더를 순차 처리합니다.")
                 elif batch_scan_enabled:
-                    self._append_log("邃ｹ 﨑們怱 尞ｴ・・・尖徐 夋川ラ 嶹懍┳嶹・ ・俯ｦｬ ・・・1・罹･ｼ ・ｾ・們慣・壱共.")
-                _update_oto_stage(t("Checking output path"), 0.07, force=True)
+                    self._append_log("ℹ 하위 폴더 자동 탐색 활성화: 처리 대상 1개를 찾았습니다.")
+                _update_oto_stage(t("입력 경로 확인 완료"), 0.07, force=True)
 
-                # ・ｼ・・OTO ・ｽ・懍乱・罹株 甯護擽嵓・攵・ｸ・ｼ ・呷攵﨑・・ｬ・・・専ｲ・・・ｼ・ ・倆哩﨑ｩ・壱共.
-                # (・・牟 Preview / 﨑懋ｵｭ・ｴ 奛懦伯・ｿ ・・圸 尞ｬ・ｷ・ ・・巡 ・・圸 ・・ｸｰ・川・ ・・ｬ)
+                # 일반 OTO 경로에서는 파이프라인과 동일한 사전 점검을 먼저 수행합니다.
+                # (영어 Preview / 한국어 템플릿 전용 포맷은 별도 전용 분기에서 검사)
                 if not (
                     lang == "english"
                     or (lang == "korean" and selected_format in {"cmpx", "c_plus_v"})
@@ -307,12 +342,12 @@ class OtoActionsMixin:
                     warning_records = list(preflight.get("warning_records") or [])
                     error_records = list(preflight.get("error_records") or [])
                     for item in warning_records:
-                        self._append_log(f"笞 {item.get('display')}")
+                        self._append_log(f"⚠ {item.get('display')}")
                     if error_records:
                         for item in error_records:
-                            self._append_log(f"笶・{item.get('display')}")
+                            self._append_log(f"❌ {item.get('display')}")
                         first_code = str((error_records or [{}])[0].get("code", "PRECHECK_FAILED"))
-                        self._set_status(f"・､・・ ・ｬ・・・専ｲ ・､甯ｨ ({first_code})")
+                        self._set_status(f"오류: 사전 점검 실패 ({first_code})")
                         return
 
                 params = self._get_params()
@@ -372,7 +407,7 @@ class OtoActionsMixin:
                     else 2
                 )
 
-                _update_oto_stage("・ｵ・・・菩ｱ・・・圸", 0.12, force=True)
+                _update_oto_stage("옵션/정책 적용", 0.12, force=True)
                 auto_policy = self._apply_auto_ml_policy_env(
                     lang,
                     auto_format,
@@ -402,14 +437,14 @@ class OtoActionsMixin:
                     f"hybrid={'ON' if auto_policy.get('hybrid_routing') else 'OFF'}"
                 )
                 if not enable_ml_correction:
-                    self._append_log("[OTO-ML] ML ・ｨ・ｸ・ｴ ・・牟 ・ｴ・菩揆 ・ｴ・壱怐・壱共.")
+                    self._append_log("[OTO-ML] ML 모델이 없어 보정을 건너뜁니다.")
                 route_code = str(auto_policy.get("route", "") or "").strip().lower()
                 if route_code in {"nomfa", "v2"}:
                     self._append_log(f"[OTO-ML] route policy: {route_code} (coupled primary + autofree auxiliary)")
                 if lang == "korean":
                     self._append_log("[KR-MAP] confidence_threshold=default(by format)")
                 if self.no_base_oto_var.get():
-                    self._append_log("・､・・ '・ｰ・ｸ OTO ・・擽 ・晧┳' ・ｬ・ｩ ・卓桿・壱共.")
+                    self._append_log("설정: '기본 OTO 없이 생성' 사용 중입니다.")
 
                 def _run_single_target(target_wav_dir: str, target_out_path: str, batch_index: int, batch_total: int):
                     prefix = f"[Batch {batch_index + 1}/{batch_total}] " if batch_total > 1 else ""
@@ -420,7 +455,7 @@ class OtoActionsMixin:
                     def _update_validate_local(detail: str, ratio: float, *, force: bool = False):
                         _update_validate_stage(detail, _batch_ratio(batch_index, batch_total, ratio), force=force)
 
-                    _update_oto_local(t("Preparing generation"), 0.18, force=True)
+                    _update_oto_local(t("생성 준비 완료"), 0.18, force=True)
                     tpl_path = "" if self.no_base_oto_var.get() else base_tpl_path
                     cleanup_snapshot = self._snapshot_output_tree_for_cleanup(target_out_path)
                     tg_folder = os.path.join(target_wav_dir, "textgrids")
@@ -435,7 +470,7 @@ class OtoActionsMixin:
                         default="mfa",
                     )
                     no_mfa_auto_mode = (
-                        aligner_engine == "none"
+                        aligner_engine in {"none", "coarse_crnn"}
                         and lang != "english"
                         and selected_format not in {"cmpx", "c_plus_v"}
                     )
@@ -444,34 +479,39 @@ class OtoActionsMixin:
                         if hasattr(self, "_get_no_mfa_oto_mode_code")
                         else "remap"
                     )
+                    if aligner_engine == "coarse_crnn":
+                        no_mfa_mode_code = "remap"
                     no_mfa_mode_text = (
-                        "MFA-Free SSL ・ｬ・ｯ ・ｴ・啄┣(・､嵭・"
+                        "MFA-Free SSL 슬롯 어댑터(실험)"
                         if no_mfa_mode_code == "mfa_free_ssl_slot"
-                        else "Base OTO remap"
+                        else "베이스 OTO 재매핑 + 보정"
                     )
+                    selected_no_mfa_checkpoint = self._apply_no_mfa_checkpoint_env_from_ui()
+                    if selected_no_mfa_checkpoint:
+                        self._append_log(f"[No-MFA] UI checkpoint={selected_no_mfa_checkpoint}")
                     no_mfa_source_oto = ""
                     if no_mfa_auto_mode:
                         if bool(self.no_base_oto_var.get()):
-                            self._append_log(f"{prefix}・､・・ No-MFA ・尖徐・､・・・ｨ・懍乱・罹株 ・・ｴ・､ OTO(奛懦伯・ｿ ini)・ 﨑・囈﨑ｩ・壱共.")
-                            self._set_status("・､・・ ・・ｴ・､ OTO 﨑・囈")
+                            self._append_log(f"{prefix}오류: No-MFA 자동설정 모드에서는 베이스 OTO(템플릿 ini)가 필요합니다.")
+                            self._set_status("오류: 베이스 OTO 필요")
                             return False, False, 0, 0
                         no_mfa_source_oto = resolve_no_mfa_source_oto(
                             wav_dir=target_wav_dir,
                             source_hint=tpl_path,
                         )
                         if not no_mfa_source_oto:
-                            self._append_log(f"{prefix}・､・・ No-MFA ・尖徐・､・菩圸 ・・ｴ・､ OTO・ｼ ・ｾ・ ・ｻ嵂溢慣・壱共.")
-                            self._append_log("   奛懦伯・ｿ OTO ・ｽ・懍乱 baseoto.ini ・尖株 oto.ini・ｼ ・・倣紛 ・ｼ・ｸ・・")
-                            self._set_status("・､・・ ・・ｴ・､ OTO 﨑・囈")
+                            self._append_log(f"{prefix}오류: No-MFA 자동설정용 베이스 OTO를 찾지 못했습니다.")
+                            self._append_log("   템플릿 OTO 경로에 baseoto.ini 또는 oto.ini를 지정해 주세요.")
+                            self._set_status("오류: 베이스 OTO 필요")
                             return False, False, 0, 0
                         tpl_path = no_mfa_source_oto
-                        self._append_log("邃ｹ No-MFA ・ｨ・・ ・夋晨復 ・晧┳ ・ｩ・晧愍・・OTO・ｼ ・晧┳﨑ｩ・壱共.")
+                        self._append_log("ℹ No-MFA 모드: 선택한 생성 방식으로 OTO를 생성합니다.")
                         if has_textgrid:
-                            self._append_log(f"{prefix}邃ｹ TextGrid・ ・溢牟・・No-MFA ・夋・・懍乱・・・夋晨復 No-MFA ・晧┳ ・ｩ・晧愍・・・・哩﨑ｩ・壱共.")
-                        self._append_log(f"邃ｹ No-MFA ・晧┳ ・ｩ・・ {no_mfa_mode_text}")
+                            self._append_log(f"{prefix}ℹ TextGrid가 있어도 No-MFA 선택 시에는 선택한 No-MFA 생성 방식으로 진행합니다.")
+                        self._append_log(f"ℹ No-MFA 생성 방식: {no_mfa_mode_text}")
                         self._append_log(f"[No-MFA] base oto: {no_mfa_source_oto}")
                     elif lang != "english" and selected_format not in {"cmpx", "c_plus_v"} and not has_textgrid:
-                        self._append_log(f"{prefix}・ｽ・: textgrids 尞ｴ・緋ｰ ・・慣・壱共. 3・ｨ・・・簿ｬ/・ｼ・ｨ ・晧┳・・・ｼ・ ・､嵂駕葺・ｸ・・")
+                        self._append_log(f"{prefix}경고: textgrids 폴더가 없습니다. 3단계 정렬/라벨 생성을 먼저 실행하세요.")
 
                     if not (
                         lang == "english"
@@ -491,21 +531,21 @@ class OtoActionsMixin:
                         warning_records = list(preflight.get("warning_records") or [])
                         error_records = list(preflight.get("error_records") or [])
                         for item in warning_records:
-                            self._append_log(f"笞 {item.get('display')}")
+                            self._append_log(f"⚠ {item.get('display')}")
                         if error_records:
                             for item in error_records:
-                                self._append_log(f"笶・{item.get('display')}")
+                                self._append_log(f"❌ {item.get('display')}")
                             first_code = str((error_records or [{}])[0].get("code", "PRECHECK_FAILED"))
-                            self._set_status(f"・､・・ ・ｬ・・・専ｲ ・､甯ｨ ({first_code})")
+                            self._set_status(f"오류: 사전 점검 실패 ({first_code})")
                             return False, False, 0, 0
 
                     if lang == "english":
                         if not getattr(self, "_is_preview_channel", lambda: False)():
-                            self._append_log(f"{prefix}・､・・ ・・牟 CVVC ・ｨ・罹株 Preview ・・ю・川・・・・ｬ・ｩ﨑 ・・・溢慣・壱共.")
-                            self._set_status("・､・・ Preview ・・圸 ・ｰ・･")
+                            self._append_log(f"{prefix}오류: 영어 CVVC 모드는 Preview 채널에서만 사용할 수 있습니다.")
+                            self._set_status("오류: Preview 전용 기능")
                             return False, True, 0, 0
                         if (not self.no_base_oto_var.get()) and str(tpl_path or "").strip():
-                            self._append_log("邃ｹ ・・牟 Preview CVVC ・ｨ・懍乱・罹株 奛懦伯・ｿ OTO ・・･・・・ｬ・ｩ﨑們ｧ ・喜慣・壱共.")
+                            self._append_log("ℹ 영어 Preview CVVC 모드에서는 템플릿 OTO 입력을 사용하지 않습니다.")
                         en_pack = self.en_cvvc_pack_var.get() if hasattr(self, "en_cvvc_pack_var") else "LITE"
                         en_beat = self.en_cvvc_beat_var.get() if hasattr(self, "en_cvvc_beat_var") else "8-beat"
                         en_preset = self.en_cvvc_preset_var.get() if hasattr(self, "en_cvvc_preset_var") else "Core"
@@ -518,7 +558,7 @@ class OtoActionsMixin:
                             f"[EN-CVVC] pack={en_pack} beat={en_beat} preset={en_preset} "
                             f"list_only_synth={'ON' if en_list_fallback else 'OFF'}"
                         )
-                        _update_oto_local("・・牟 CVVC ・晧┳", 0.22, force=True)
+                        _update_oto_local("영어 CVVC 생성", 0.22, force=True)
                         processed, total, errors = generate_en_cvvc_oto(
                             wav_dir=target_wav_dir,
                             out_path=target_out_path,
@@ -531,8 +571,8 @@ class OtoActionsMixin:
                         )
                     elif lang == "korean" and selected_format == "cmpx":
                         if not getattr(self, "_is_preview_channel", lambda: False)():
-                            self._append_log(f"{prefix}・､・・ 﨑懋ｵｭ・ｴ CMPX ・ｨ・罹株 Preview ・・ю・川・・・・ｬ・ｩ﨑 ・・・溢慣・壱共.")
-                            self._set_status("・､・・ Preview ・・圸 ・ｰ・･")
+                            self._append_log(f"{prefix}오류: 한국어 CMPX 모드는 Preview 채널에서만 사용할 수 있습니다.")
+                            self._set_status("오류: Preview 전용 기능")
                             return False, True, 0, 0
                         if hasattr(self, "ml_route_var"):
                             try:
@@ -551,27 +591,27 @@ class OtoActionsMixin:
                                         self.ml_route_var.set("No-MFA")
                                 except Exception:
                                     pass
-                                self._append_log("邃ｹ CMPX ・ｨ・・・懦復: ML route・ｼ No-MFA・・・・倣鮒・壱共.")
+                                self._append_log("ℹ CMPX 모드 제한: ML route를 No-MFA로 고정합니다.")
                         os.environ["UTOA_ML_ROUTE"] = "autofree_v1"
                         os.environ["UTOA_ML_AUTOFREE_AUX_ENABLE"] = "1"
                         os.environ["UTOA_ML_LEGACY_FALLBACK_ENABLE"] = "0"
                         if self.no_base_oto_var.get():
-                            self._append_log(f"{prefix}・､・・ 﨑懋ｵｭ・ｴ CMPX Preview ・ｨ・罹株 ・・ｴ・､ OTO(奛懦伯・ｿ ini)・ 﨑・・・・笈・､.")
-                            self._set_status("・､・・ ・・ｴ・､ OTO 﨑・囈")
+                            self._append_log(f"{prefix}오류: 한국어 CMPX Preview 모드는 베이스 OTO(템플릿 ini)가 필수입니다.")
+                            self._set_status("오류: 베이스 OTO 필요")
                             return False, False, 0, 0
                         source_oto = resolve_kr_cmpx_preview_source_oto(
                             wav_dir=target_wav_dir,
                             source_hint=tpl_path,
                         )
                         if not source_oto:
-                            self._append_log(f"{prefix}・､・・ 﨑懋ｵｭ・ｴ CMPX Preview・ｩ ・・ｴ・､ OTO・ｼ ・ｾ・ ・ｻ嵂溢慣・壱共.")
-                            self._append_log("   奛懦伯・ｿ OTO・・・・ｵ川圸 oto.ini ・尖株 baseoto.ini・ｼ ・・倣紛 ・ｼ・ｸ・・")
-                            self._set_status("・､・・ ・・ｴ・､ OTO 﨑・囈")
+                            self._append_log(f"{prefix}오류: 한국어 CMPX Preview용 베이스 OTO를 찾지 못했습니다.")
+                            self._append_log("   템플릿 OTO에 비교용 oto.ini 또는 baseoto.ini를 지정해 주세요.")
+                            self._set_status("오류: 베이스 OTO 필요")
                             return False, False, 0, 0
 
-                        self._append_log("邃ｹ 﨑懋ｵｭ・ｴ CMPX Preview ・ｨ・・ ・簿ｬ ・ｨ・・･ｼ ・ｴ・壱怐・壱共.")
+                        self._append_log("ℹ 한국어 CMPX Preview 모드: 정렬 단계를 건너뜁니다.")
                         self._append_log(f"[KR-CMPX] base oto: {source_oto}")
-                        _update_oto_local("CMPX ・・ｴ・､ ・､﨑・・晧┳", 0.22, force=True)
+                        _update_oto_local("CMPX 베이스 매핑 생성", 0.22, force=True)
                         processed, total, errors = generate_kr_cmpx_preview_oto(
                             wav_dir=target_wav_dir,
                             out_path=target_out_path,
@@ -581,22 +621,22 @@ class OtoActionsMixin:
                         )
                     elif lang == "korean" and selected_format == "c_plus_v":
                         if self.no_base_oto_var.get():
-                            self._append_log(f"{prefix}・､・・ 﨑懋ｵｭ・ｴ C+V ・ｨ・罹株 ・・ｴ・､ OTO(奛懦伯・ｿ ini)・ 﨑・・・・笈・､.")
-                            self._set_status("・､・・ ・・ｴ・､ OTO 﨑・囈")
+                            self._append_log(f"{prefix}오류: 한국어 C+V 모드는 베이스 OTO(템플릿 ini)가 필수입니다.")
+                            self._set_status("오류: 베이스 OTO 필요")
                             return False, False, 0, 0
                         source_oto = resolve_no_mfa_source_oto(
                             wav_dir=target_wav_dir,
                             source_hint=tpl_path,
                         )
                         if not source_oto:
-                            self._append_log(f"{prefix}・､・・ 﨑懋ｵｭ・ｴ C+V ・ｨ・懍圸 ・・ｴ・､ OTO・ｼ ・ｾ・ ・ｻ嵂溢慣・壱共.")
-                            self._append_log("   奛懦伯・ｿ OTO・・baseoto.ini ・尖株 oto.ini・ｼ ・・倣紛 ・ｼ・ｸ・・")
-                            self._set_status("・､・・ ・・ｴ・､ OTO 﨑・囈")
+                            self._append_log(f"{prefix}오류: 한국어 C+V 모드용 베이스 OTO를 찾지 못했습니다.")
+                            self._append_log("   템플릿 OTO에 baseoto.ini 또는 oto.ini를 지정해 주세요.")
+                            self._set_status("오류: 베이스 OTO 필요")
                             return False, False, 0, 0
 
-                        self._append_log("邃ｹ 﨑懋ｵｭ・ｴ C+V ・ｨ・・ ・簿ｬ ・・擽 奛懦伯・ｿ OTO ・ｬ・､﨑卓愍・・・晧┳﨑ｩ・壱共.")
+                        self._append_log("ℹ 한국어 C+V 모드: 정렬 없이 템플릿 OTO 재매핑으로 생성합니다.")
                         self._append_log(f"[KR-C+V] base oto: {source_oto}")
-                        _update_oto_local("C+V 奛懦伯・ｿ ・ｬ・､﨑・・晧┳", 0.22, force=True)
+                        _update_oto_local("C+V 템플릿 재매핑 생성", 0.22, force=True)
                         processed, total, errors = generate_no_mfa_auto_oto(
                             wav_dir=target_wav_dir,
                             out_path=target_out_path,
@@ -608,26 +648,31 @@ class OtoActionsMixin:
                             callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                         )
                     elif no_mfa_auto_mode:
-                        _update_oto_local("No-MFA ・尖徐・､・・・晧┳", 0.22, force=True)
-                        processed, total, errors = generate_no_mfa_auto_oto(
-                            wav_dir=target_wav_dir,
-                            out_path=target_out_path,
-                            source_oto_path=no_mfa_source_oto or tpl_path,
-                            alias_suffix=alias_suffix,
-                            language=lang,
-                            stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
-                            generation_mode=no_mfa_mode_code,
-                            callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
-                        )
-                        runtime_meta = get_last_no_mfa_runtime_meta()
-                        if runtime_meta:
-                            self._append_log(
-                                f"{prefix}[No-MFA] confidence={float(runtime_meta.get('confidence', 0.0) or 0.0):.2f} "
-                                f"fallback_hint={str(runtime_meta.get('fallback_hint', '') or '-')}"
+                        if no_mfa_mode_code == "mfa_free_ssl_slot":
+                            _update_oto_local("MFA-Free SSL 슬롯 어댑터 생성", 0.22, force=True)
+                            processed, total, errors = self._run_mfa_free_oto_preview_generation(
+                                wav_dir=target_wav_dir,
+                                out_path=target_out_path,
+                                source_oto_path=no_mfa_source_oto or tpl_path,
+                                language=lang,
+                                format_type=selected_format,
+                                callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
+                            )
+                        else:
+                            _update_oto_local("No-MFA 자동설정 생성", 0.22, force=True)
+                            processed, total, errors = generate_no_mfa_auto_oto(
+                                wav_dir=target_wav_dir,
+                                out_path=target_out_path,
+                                source_oto_path=no_mfa_source_oto or tpl_path,
+                                alias_suffix=alias_suffix,
+                                language=lang,
+                                stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
+                                generation_mode=no_mfa_mode_code,
+                                callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                             )
                     elif lang == "japanese":
-                        self._append_log(f"・､・・ ・ｼ・ｸ・ｴ ・川攵・ｬ・ｴ・､ ・､夋・ｼ = {self.ja_alias_style_var.get()}")
-                        _update_oto_local("・ｼ・ｸ・ｴ OTO ・晧┳", 0.22, force=True)
+                        self._append_log(f"설정: 일본어 에일리어스 스타일 = {self.ja_alias_style_var.get()}")
+                        _update_oto_local("일본어 OTO 생성", 0.22, force=True)
                         processed, total, errors = generate_ja_oto(
                             tg_folder,
                             tpl_path,
@@ -647,7 +692,7 @@ class OtoActionsMixin:
                             callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                         )
                     else:
-                        _update_oto_local("﨑懋ｵｭ・ｴ OTO ・晧┳", 0.22, force=True)
+                        _update_oto_local("한국어 OTO 생성", 0.22, force=True)
                         processed, total, errors = generate_oto(
                             tg_folder,
                             tpl_path,
@@ -667,45 +712,45 @@ class OtoActionsMixin:
                         )
 
                     if total:
-                        _update_oto_local(t("・晧┳ ・ｰ・ｼ ・簿ｦｬ"), float(processed) / float(total))
-                    _update_oto_local(t("・晧┳ ・ｰ・ｼ ・簿ｦｬ"), 0.92, force=True)
+                        _update_oto_local(t("생성 결과 정리"), float(processed) / float(total))
+                    _update_oto_local(t("생성 결과 정리"), 0.92, force=True)
 
                     out_exists = os.path.isfile(target_out_path)
                     out_lines = _read_oto_line_count(target_out_path) if out_exists else -1
                     if out_exists:
                         line_info = f"{out_lines}" if out_lines >= 0 else "unknown"
                         self._append_log(
-                            f"{prefix}1・ｨ ・晧┳ ・・｣・ OTO 甯護攵 ・・･ -> {target_out_path} "
+                            f"{prefix}1차 생성 완료: OTO 파일 저장 -> {target_out_path} "
                             f"(processed={processed}/{total}, lines={line_info})"
                         )
-                        _update_oto_local("OTO 甯護攵 ・・･ 嶹菩攤", 1.0, force=True)
+                        _update_oto_local("OTO 파일 저장 확인", 1.0, force=True)
                     else:
-                        self._append_log(f"{prefix}・､・・ OTO 甯護攵 ・・･ ・､甯ｨ -> {target_out_path}")
-                        self._set_status("・､・・ OTO ・・･ ・､甯ｨ")
+                        self._append_log(f"{prefix}오류: OTO 파일 저장 실패 -> {target_out_path}")
+                        self._set_status("오류: OTO 저장 실패")
                         return False, False, int(processed or 0), int(total or 0)
 
                     if int(processed or 0) <= 0 and int(total or 0) <= 0:
-                        self._append_log(f"{prefix}[ERROR] ・､・・ OTO ・晧┳ ・ｰ・ｼ・ ・・牟 ・溢牟 ・尖徐 ・・晧揆 ・ｴ・壱怐・壱共.")
-                        self._set_status("・､・・ OTO ・晧┳ ・ｰ・ｼ ・・搆")
+                        self._append_log(f"{prefix}[ERROR] 오류: OTO 생성 결과가 비어 있어 자동 검증을 건너뜁니다.")
+                        self._set_status("오류: OTO 생성 결과 없음")
                         return False, False, int(processed or 0), int(total or 0)
 
-                    _update_validate_local(t("Validating"), 0.05, force=True)
+                    _update_validate_local(t("검증 준비"), 0.05, force=True)
                     self._run_auto_validation(
                         target_wav_dir,
                         tg_folder,
                         target_out_path,
                         callback=_make_progress_callback("validate", batch_index=batch_index, batch_total=batch_total),
                     )
-                    _update_validate_local(t("Validation complete"), 1.0, force=True)
+                    _update_validate_local(t("검증 완료"), 1.0, force=True)
                     if not errors:
                         self._cleanup_generated_output_artifacts(target_out_path, snapshot=cleanup_snapshot)
                     if errors:
                         for err in errors:
                             self._append_log(f"  - {err}")
-                        self._set_status(f"・､・・ OTO ・晧┳ ・､甯ｨ {len(errors)}・ｴ ({processed}/{total})")
+                        self._set_status(f"오류: OTO 생성 실패 {len(errors)}건 ({processed}/{total})")
                         return False, False, int(processed or 0), int(total or 0)
 
-                    self._set_status(f"・・｣・ OTO ・晧┳ ・ｱ・ｵ ({processed}/{total})")
+                    self._set_status(f"완료: OTO 생성 성공 ({processed}/{total})")
                     return True, False, int(processed or 0), int(total or 0)
 
                 success_count = 0
@@ -722,11 +767,11 @@ class OtoActionsMixin:
                     )
                     if not target_out_path:
                         failed_count += 1
-                        self._append_log(f"[Batch {idx + 1}/{target_count}] ・､・・ ・罹･ ・ｽ・・・・げ ・､甯ｨ")
+                        self._append_log(f"[Batch {idx + 1}/{target_count}] 오류: 출력 경로 계산 실패")
                         continue
                     if target_count > 1:
-                        self._append_log(f"[Batch {idx + 1}/{target_count}] ・・・尞ｴ・・ {target_wav_dir}")
-                        self._append_log(f"[Batch {idx + 1}/{target_count}] ・罹･ ・ｽ・・ {target_out_path}")
+                        self._append_log(f"[Batch {idx + 1}/{target_count}] 대상 폴더: {target_wav_dir}")
+                        self._append_log(f"[Batch {idx + 1}/{target_count}] 출력 경로: {target_out_path}")
                     ok, fatal, processed, total = _run_single_target(
                         target_wav_dir,
                         target_out_path,
@@ -746,18 +791,18 @@ class OtoActionsMixin:
                 if target_count > 1:
                     if success_count <= 0:
                         if fatal_stop:
-                            self._set_status("・､・・ ・ｰ・・OTO ・晧┳ ・瀧卿")
+                            self._set_status("오류: 배치 OTO 생성 중단")
                         else:
-                            self._set_status(f"・､・・ ・ｰ・・OTO ・晧┳ ・､甯ｨ (0/{target_count})")
+                            self._set_status(f"오류: 배치 OTO 생성 실패 (0/{target_count})")
                     elif failed_count > 0:
-                        self._set_status(f"・・｣・・・・・ｱ・ｵ): ・ｰ・・OTO ・晧┳ {success_count}/{target_count}")
+                        self._set_status(f"완료(부분 성공): 배치 OTO 생성 {success_count}/{target_count}")
                     else:
-                        self._set_status(f"・・｣・ ・ｰ・・OTO ・晧┳ ・ｱ・ｵ ({success_count}/{target_count})")
+                        self._set_status(f"완료: 배치 OTO 생성 성공 ({success_count}/{target_count})")
                 elif failed_count > 0 and last_total <= 0:
-                    self._set_status("・､・・ OTO ・晧┳ ・､甯ｨ")
+                    self._set_status("오류: OTO 생성 실패")
 
             except Exception as e:
-                self._handle_error("OTO ・晧┳", e)
+                self._handle_error("OTO 생성", e)
             finally:
                 self._set_running(False)
 

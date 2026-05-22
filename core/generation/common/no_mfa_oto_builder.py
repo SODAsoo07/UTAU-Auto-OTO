@@ -204,6 +204,87 @@ def get_last_no_mfa_runtime_meta() -> dict[str, object]:
     return dict(_LAST_NO_MFA_RUNTIME_META)
 
 
+def _resolve_default_mfa_free_checkpoint() -> str:
+    env_path = str(os.environ.get("UTOA_MFA_FREE_OTO_CHECKPOINT", "") or "").strip()
+    if env_path and os.path.isfile(env_path):
+        return os.path.abspath(env_path)
+    roots = [
+        str(os.environ.get("UTOA_APP_DIR", "") or "").strip(),
+        os.getcwd(),
+    ]
+    candidates: list[str] = []
+    preferred_names = {
+        "world_v1_light_c4_tune_d.pt",
+        "world_v1_light_c4.pt",
+    }
+    for base in roots:
+        if not base:
+            continue
+        root = os.path.join(base, "ml_workspace", "mfa_free_oto")
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                low = str(name).lower()
+                if not low.endswith(".pt"):
+                    continue
+                full = os.path.join(dirpath, name)
+                if low in preferred_names:
+                    return os.path.abspath(full)
+                if "world_v1" in low or "worldv1" in low:
+                    candidates.append(full)
+                elif "wavlm" in low:
+                    candidates.append(full)
+    if not candidates:
+        return ""
+    candidates = [os.path.abspath(path) for path in candidates if os.path.isfile(path)]
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return candidates[0]
+
+
+def _load_runtime_baseline_metrics() -> dict[str, float]:
+    hint = str(os.environ.get("UTOA_NO_MFA_BASELINE_METRICS_JSON", "") or "").strip()
+    candidates: list[str] = []
+    if hint:
+        candidates.append(hint)
+    roots = [
+        str(os.environ.get("UTOA_APP_DIR", "") or "").strip(),
+        os.getcwd(),
+    ]
+    for base in roots:
+        if not base:
+            continue
+        candidates.append(os.path.join(base, "ml", "eval", "no_mfa_runtime_c4_lab", "metrics.json"))
+    for candidate in candidates:
+        path = os.path.abspath(str(candidate or "").strip())
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            metrics = dict(payload.get("metrics") or {})
+            out: dict[str, float] = {}
+            for key in ("mis_mapping_rate", "hard_fail_rate", "nucleus_miss_rate", "one_step_shift_rate", "vc_pre_ge_80ms_rate"):
+                if key in metrics:
+                    out[key] = float(metrics.get(key))
+            return out
+        except Exception:
+            continue
+    return {}
+
+
+def _build_runtime_delta(metrics: dict[str, float], baseline: dict[str, float]) -> dict[str, float]:
+    if not metrics or not baseline:
+        return {}
+    out: dict[str, float] = {}
+    for key in ("mis_mapping_rate", "hard_fail_rate", "nucleus_miss_rate", "one_step_shift_rate", "vc_pre_ge_80ms_rate"):
+        if key in metrics and key in baseline:
+            out[f"delta_{key}"] = float(metrics[key]) - float(baseline[key])
+    return out
+
+
 def _median_of(values: list[float], default: float = 0.0) -> float:
     if not values:
         return float(default)
@@ -1427,28 +1508,7 @@ def generate_no_mfa_auto_oto(
         fallback_used=False,
     )
     if mode == "mfa_free_ssl_slot":
-        checkpoint = str(os.environ.get("UTOA_MFA_FREE_OTO_CHECKPOINT", "") or "").strip()
-        if not checkpoint:
-            # Keep previous UI behavior: discover from ml_workspace/mfa_free_oto.
-            roots = [
-                str(os.environ.get("UTOA_APP_DIR", "") or "").strip(),
-                os.getcwd(),
-            ]
-            candidates: list[str] = []
-            for base in roots:
-                if not base:
-                    continue
-                root = os.path.join(base, "ml_workspace", "mfa_free_oto")
-                if not os.path.isdir(root):
-                    continue
-                for dirpath, _dirnames, filenames in os.walk(root):
-                    for name in filenames:
-                        low = str(name).lower()
-                        if low.endswith(".pt") and "wavlm" in low:
-                            candidates.append(os.path.join(dirpath, name))
-            if candidates:
-                candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-                checkpoint = os.path.abspath(candidates[0])
+        checkpoint = _resolve_default_mfa_free_checkpoint()
         try:
             from core.mfa_free_oto.workflow import (
                 NoMfaWorkflowGuard,
@@ -1482,6 +1542,9 @@ def generate_no_mfa_auto_oto(
                 ),
                 callback=callback,
             )
+            runtime_metrics = dict(runtime_report.metrics or {})
+            baseline_metrics = _load_runtime_baseline_metrics()
+            runtime_delta = _build_runtime_delta(runtime_metrics, baseline_metrics)
             _set_last_no_mfa_runtime_meta(
                 requested_mode=str(generation_mode or ""),
                 resolved_mode="mfa_free_ssl_slot",
@@ -1490,7 +1553,10 @@ def generate_no_mfa_auto_oto(
                 fallback_hint=str(runtime_report.fallback_hint or "manual_review_required"),
                 fallback_used=bool(runtime_report.guard_failed),
                 fallback_reason="manual_review_required" if runtime_report.guard_failed else "",
-                metrics=dict(runtime_report.metrics or {}),
+                checkpoint_path=str(checkpoint or ""),
+                metrics=runtime_metrics,
+                baseline_metrics=baseline_metrics,
+                comparison=runtime_delta,
             )
             _log(
                 callback,

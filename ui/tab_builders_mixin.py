@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import os
 
 import customtkinter as ctk
@@ -104,7 +104,7 @@ class TabBuildersMixin:
         return os.path.join(os.path.dirname(__file__), "ui_layout.json")
 
     def _build_pipeline_tab(self):
-        tab_name = "甯護擽嵓・攵・ｸ"
+        tab_name = "파이프라인"
         tab = self._get_or_add_tab(tab_name)
         overlay = self._tab_overlay_color(tab_name)
         tab.configure(fg_color=overlay)
@@ -132,20 +132,20 @@ class TabBuildersMixin:
         return [
             (
                 "lab_dict",
-                "1. Lab+・ｬ・・・晧┳",
-                "WAV 甯護攵・川・ Lab・・・晧┳﨑俾ｳ, ・ｴ・ｴ・・・懍搆 ・ｬ・・甯護攵・護ｧ 﨑・・溢乱 ・晧┳﨑ｩ・壱共.",
+                "1. Lab+사전 생성",
+                "WAV 파일에서 Lab을 생성하고, 이어서 발음 사전 파일까지 한 번에 생성합니다.",
                 self._run_lab_dict_gen,
             ),
             (
                 "align",
-                "2. ・護┳ ・簿ｬ",
-                "MFA・・TextGrid・ｼ ・晧┳﨑ｩ・壱共. MFA・ ・・愍・ｴ ・尖徐 ・､・・弡・・・・ ・・哩﨑ｩ・壱共.",
+                "2. 음성 정렬",
+                "MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.",
                 self._run_mfa,
             ),
             (
                 "oto",
-                "3. OTO.ini ・晧┳",
-                "TextGrid ・ｰ・們愍・・OTO 甯誤攵・ｸ奓ｰ・ｼ ・・げ﨑ｴ ・・･﨑ｩ・壱共.",
+                "3. OTO.ini 생성",
+                "TextGrid 기반으로 OTO 파라미터를 계산해 저장합니다.",
                 self._run_oto_gen,
             ),
         ]
@@ -178,7 +178,7 @@ class TabBuildersMixin:
 
         ctk.CTkLabel(
             left_actions,
-            text=t("Option"),
+            text=t("실행"),
             font=("", 13, "bold"),
             text_color=PALETTE.header_accent,
         ).pack(anchor="w", pady=(0, 4))
@@ -190,7 +190,7 @@ class TabBuildersMixin:
 
         self.mfa_repair_btn = ctk.CTkButton(
             mfa_btn_row,
-            text=t("剥 MFA ・・卿/・ｵ・ｬ"),
+            text=t("🔍 MFA 진단/복구"),
             width=108,
             fg_color="#B0BEC5",
             hover_color="#90A4AE",
@@ -201,7 +201,7 @@ class TabBuildersMixin:
 
         self.mfa_install_btn = ctk.CTkButton(
             mfa_btn_row,
-            text=t("Option"),
+            text=t("⬇ MFA 원클릭 설치"),
             width=108,
             fg_color="#FFA726",
             hover_color="#FB8C00",
@@ -210,17 +210,17 @@ class TabBuildersMixin:
         )
         mfa_ready = bool(getattr(self, "_mfa_ui_ready", False))
         if getattr(self, "_mfa_install_in_progress", False):
-            self.mfa_install_btn.configure(text=t("肌 ・､・・・・.."), state="disabled", fg_color="#B0BEC5")
+            self.mfa_install_btn.configure(text=t("🔧 설치 중..."), state="disabled", fg_color="#B0BEC5")
         elif getattr(self, "_mfa_path_probe_pending", False):
-            self.mfa_install_btn.configure(text=t("嶹菩攤 ・・.."), state="disabled", fg_color="#B0BEC5")
+            self.mfa_install_btn.configure(text=t("확인 중..."), state="disabled", fg_color="#B0BEC5")
         elif mfa_ready:
-            self.mfa_install_btn.configure(text=t("Done"), state="disabled", fg_color="#388E3C")
+            self.mfa_install_btn.configure(text=t("✅ 설치 완료"), state="disabled", fg_color="#388E3C")
         self.mfa_install_btn.grid(row=0, column=1, padx=(6, 0), pady=1, sticky="w")
 
 
         ctk.CTkLabel(
             right_actions,
-            text=t("Option"),
+            text=t("순서대로 실행"),
             font=("", 13, "bold"),
             text_color=PALETTE.neutral_text,
         ).pack(anchor="w", pady=(0, 4))
@@ -245,7 +245,7 @@ class TabBuildersMixin:
             if idx < len(steps) - 1:
                 ctk.CTkLabel(
                     steps_grid,
-                    # retired corrupted UI text removed
+                    text="↓",
                     font=("", 14, "bold"),
                     text_color=PALETTE.hint_text,
                     anchor="w",
@@ -271,19 +271,19 @@ class TabBuildersMixin:
         mfa_ready = bool(getattr(self, "_mfa_ui_ready", False))
         if getattr(self, "_mfa_install_in_progress", False):
             self.mfa_status_label = ctk.CTkLabel(
-                status_group, text=t("肌 MFA ・､・・・・.."), font=("", 13, "bold"), text_color="#C27803"
+                status_group, text=t("🔧 MFA 설치 중..."), font=("", 13, "bold"), text_color="#C27803"
             )
         elif getattr(self, "_mfa_path_probe_pending", False):
             self.mfa_status_label = ctk.CTkLabel(
-                status_group, text=t("竢ｳ MFA 嶹菩攤 ・・.."), font=("", 13, "bold"), text_color=PALETTE.hint_text
+                status_group, text=t("⏳ MFA 확인 중..."), font=("", 13, "bold"), text_color=PALETTE.hint_text
             )
         elif mfa_ready:
             self.mfa_status_label = ctk.CTkLabel(
-                status_group, text=t("笨・MFA ・､・俯勢"), font=("", 13, "bold"), text_color="#4F8F61"
+                status_group, text=t("✅ MFA 설치됨"), font=("", 13, "bold"), text_color="#4F8F61"
             )
         else:
             self.mfa_status_label = ctk.CTkLabel(
-                text=t("Option"),
+                status_group, text=t("⚪ MFA 미완료"), font=("", 13, "bold"), text_color="#90A4AE"
             )
         self.mfa_status_label.pack(side="left")
         return mfa_inner
@@ -292,8 +292,8 @@ class TabBuildersMixin:
         intro_label = ctk.CTkLabel(
             parent,
             text=(
-                "・們搆 ・､・俯ｘ 'MFA ・・卿/・ｵ・ｬ'・・嶹俾ｲｽ ・ｬ・ｱ・ｼ 嶸・椪 ・ｸ・ｴ ・ｨ・ｸ ・､・ｴ・罹糖 ・誤ｬｸ・・10~20・・・ｴ・・・ｸ・ｴ ・・・溢慣・壱共.\n"
-                "・ｸ・懋ｰ ・晝ｸｰ・ｴ ・ｼ・ 'MFA ・・卿/・ｵ・ｬ'・ｼ ・誤洳 ・尖徐 ・ｵ・ｬ・ｼ ・罹巡﨑・・､ ・簿ｬ・・・､・・・､嵂駕葺・ｸ・・"
+                "처음 설치나 'MFA 진단/복구'는 환경 구성과 현재 언어 모델 다운로드 때문에 10~20분 이상 걸릴 수 있습니다.\n"
+                "문제가 생기면 먼저 'MFA 진단/복구'를 눌러 자동 복구를 시도한 뒤 정렬을 다시 실행하세요."
             ),
             text_color=PALETTE.neutral_text,
             wraplength=760,
@@ -324,7 +324,7 @@ class TabBuildersMixin:
                 opt_frame.pack(fill="x", pady=(5, 0))
                 ctk.CTkCheckBox(
                     opt_frame,
-                    text=t("OpenUtau 嶸ｸ嶹・・・巡 ・川攵・ｬ・ｴ・､ ・尖徐 ・晧┳"),
+                    text=t("OpenUtau 호환 별도 에일리어스 자동 생성"),
                     text_color="#5E7E95",
                     variable=self.openutau_var,
                     command=self._save_config,
@@ -332,7 +332,7 @@ class TabBuildersMixin:
 
                 self.gen_missing_vowels_checkbox = ctk.CTkCheckBox(
                     opt_frame,
-                    text=t("・・攷・・・ｨ・・・ｨ・護龍(VV) ・川攵・ｬ・ｴ・､ ・ｴ・・・晧┳"),
+                    text=t("누락된 모음/모음열(VV) 에일리어스 보완 생성"),
                     text_color="#64866F",
                     variable=self.gen_missing_vowels_var,
                     command=self._save_config,
@@ -340,7 +340,7 @@ class TabBuildersMixin:
                 self.gen_missing_vowels_checkbox.pack(anchor="w", pady=(5, 0))
                 self.gen_dash_alias_checkbox = ctk.CTkCheckBox(
                     opt_frame,
-                    text=t("・ｴ・・・ｴ・ｸ '-' ・川攵・ｬ・ｴ・､ ・晧┳"),
+                    text=t("어두/어미 '-' 에일리어스 생성"),
                     text_color=PALETTE.neutral_text,
                     variable=self.gen_dash_alias_var,
                     command=self._save_config,
@@ -349,13 +349,13 @@ class TabBuildersMixin:
 
                 ctk.CTkLabel(
                     opt_frame,
-                    text=t("ML ・ｴ・菩捩 ・尖徐・ｼ・・・・圸・俯ｩｰ ・ｨ・ｸ・ｴ ・・愍・ｴ ・尖徐・ｼ・・・ｴ・壱怐・壱共."),
+                    text=t("ML 보정은 자동으로 적용되며 모델이 없으면 자동으로 건너뜁니다."),
                     text_color=PALETTE.hint_text,
                 ).pack(anchor="w", pady=(6, 0))
         return None
 
     def _build_params_tab(self):
-        tab_name = "Parameters"
+        tab_name = "파라미터 조정"
         tab = self._get_or_add_tab(tab_name)
         overlay = self._tab_overlay_color(tab_name)
         tab.configure(fg_color=overlay)
@@ -364,7 +364,7 @@ class TabBuildersMixin:
 
         summary = ctk.CTkLabel(
             scroll,
-            text=t("甯誤攵・ｸ奓ｰ ・ｰ・・夋ｭ・川・ OTO ・ｴ・・・・・・ｼ ・ｰ・倣腹 ・・・溢慣・壱共. ・ｰ・ｸ・・・ｬ・ｩ・・・護棗﨑ｩ・壱共."),
+            text=t("파라미터 조정 탭에서 OTO 보정 계수를 조정할 수 있습니다. 기본값 사용을 권장합니다."),
             text_color=PALETTE.neutral_text,
             justify="left",
             wraplength=760,
@@ -375,33 +375,33 @@ class TabBuildersMixin:
         self.param_vars = {}
         param_groups = [
             (
-                "・ｰ・ｸ VC 甯誤攵・ｸ奓ｰ",
+                "기본 VC 파라미터",
                 [
-                    ("VC_CONSONANT_RATIO", "VC ・川搆 ・ｬ・・・・惠", 0.1, 1.0, 0.05),
-                    ("VC_VOWEL_START", "VC ・ｨ・・・懍梠 ・・惠", 0.1, 1.0, 0.05),
-                    ("VC_PRE_OFFSET", "VC ・嵂雅ｰ懍搆 ・､嵓・・ (ms)", 0, 50, 1),
-                    ("VC_OVL_RATIO", "VC ・､・・棠 ・・惠", 0.1, 1.0, 0.05),
+                    ("VC_CONSONANT_RATIO", "VC 자음 구간 비율", 0.1, 1.0, 0.05),
+                    ("VC_VOWEL_START", "VC 모음 시작 비율", 0.1, 1.0, 0.05),
+                    ("VC_PRE_OFFSET", "VC 선행발음 오프셋 (ms)", 0, 50, 1),
+                    ("VC_OVL_RATIO", "VC 오버랩 비율", 0.1, 1.0, 0.05),
                 ],
             ),
             (
-                "・ｰ・ｸ CV 甯誤攵・ｸ奓ｰ",
+                "기본 CV 파라미터",
                 [
-                    ("CV_PRE_RATIO", "CV ・嵂雅ｰ懍搆 ・・惠", 0.1, 1.0, 0.05),
-                    ("CV_OVL_RATIO", "CV ・､・・棠 ・・惠", 0.1, 1.0, 0.05),
+                    ("CV_PRE_RATIO", "CV 선행발음 비율", 0.1, 1.0, 0.05),
+                    ("CV_OVL_RATIO", "CV 오버랩 비율", 0.1, 1.0, 0.05),
                 ],
             ),
             (
-                "・ｴ・瀧ｪｨ・・CV 甯誤攵・ｸ奓ｰ",
+                "이중모음 CV 파라미터",
                 [
-                    ("DIPHTHONG_CV_PRE_RATIO", "・ｴ・瀧ｪｨ・・CV ・嵂雅ｰ懍搆 ・・惠", 0.1, 1.0, 0.05),
-                    ("DIPHTHONG_CV_CONSONANT_RATIO", "・ｴ・瀧ｪｨ・・CV ・川搆 ・・惠", 0.1, 1.0, 0.05),
+                    ("DIPHTHONG_CV_PRE_RATIO", "이중모음 CV 선행발음 비율", 0.1, 1.0, 0.05),
+                    ("DIPHTHONG_CV_CONSONANT_RATIO", "이중모음 CV 자음 비율", 0.1, 1.0, 0.05),
                 ],
             ),
             (
-                "・ｴ・瀧ｪｨ・・VC 甯誤攵・ｸ奓ｰ",
+                "이중모음 VC 파라미터",
                 [
-                    ("DIPHTHONG_VC_VOWEL_START", "・ｴ・瀧ｪｨ・・VC ・ｨ・・・懍梠", 0.1, 1.0, 0.05),
-                    ("DIPHTHONG_VC_CONSONANT", "・ｴ・瀧ｪｨ・・VC ・川搆 ・・惠", 0.1, 1.0, 0.05),
+                    ("DIPHTHONG_VC_VOWEL_START", "이중모음 VC 모음 시작", 0.1, 1.0, 0.05),
+                    ("DIPHTHONG_VC_CONSONANT", "이중모음 VC 자음 비율", 0.1, 1.0, 0.05),
                 ],
             ),
         ]
@@ -428,7 +428,7 @@ class TabBuildersMixin:
                 slider.pack(side="right", fill="x", expand=True, padx=5)
 
     def _build_log_tab(self):
-        tab_name = "・懋ｷｸ"
+        tab_name = "로그"
         tab = self._get_or_add_tab(tab_name)
         overlay = self._tab_overlay_color(tab_name)
         tab.configure(fg_color=overlay)
@@ -447,12 +447,12 @@ class TabBuildersMixin:
 
         btn_frame = ctk.CTkFrame(tab, fg_color="transparent")
         btn_frame.pack(fill="x", padx=5, pady=5)
-        clear_btn = ctk.CTkButton(btn_frame, text=t("・懋ｷｸ ・・ｰ・ｰ"), width=100, command=self._clear_log)
+        clear_btn = ctk.CTkButton(btn_frame, text=t("로그 지우기"), width=100, command=self._clear_log)
         _style_primary_button(clear_btn)
         clear_btn.pack(side="left")
         open_btn = ctk.CTkButton(
             btn_frame,
-            text=t("・懋ｷｸ 甯護攵 ・ｴ・ｰ"),
+            text=t("로그 파일 열기"),
             width=120,
             command=lambda: os.startfile(self.log_path) if os.path.exists(self.log_path) else None,
         )
@@ -460,14 +460,14 @@ class TabBuildersMixin:
         open_btn.pack(side="left", padx=5)
 
     def _build_detail_log_tab(self):
-        tab_name = "・・┷ ・懋ｷｸ"
+        tab_name = "상세 로그"
         tab = self._get_or_add_tab(tab_name)
         overlay = self._tab_overlay_color(tab_name)
         tab.configure(fg_color=overlay)
 
         desc = ctk.CTkLabel(
             tab,
-            text=t("CMD/・罹ｸ醐売・懍┷・､ ・尖ｳｸ ・懋ｷｸ・ｼ ・懋ｰ・・・ｼ・・岺懍亨﨑ｩ・壱共. (・・﨑・・・詐 嵓誤洳・・"),
+            text=t("CMD/서브프로세스 원본 로그를 시간순으로 표시합니다. (저부하 버퍼 플러시)"),
             text_color=PALETTE.neutral_text,
             anchor="w",
         )
@@ -490,7 +490,7 @@ class TabBuildersMixin:
         btn_frame.pack(fill="x", padx=5, pady=5)
         clear_btn = ctk.CTkButton(
             btn_frame,
-            text=t("・・┷ ・懋ｷｸ ・・ｰ・ｰ"),
+            text=t("상세 로그 지우기"),
             width=120,
             command=lambda: self.detail_log_text.delete("1.0", "end"),
         )
@@ -498,7 +498,7 @@ class TabBuildersMixin:
         clear_btn.pack(side="left")
         open_btn = ctk.CTkButton(
             btn_frame,
-            text=t("・懋ｷｸ 甯護攵 ・ｴ・ｰ"),
+            text=t("로그 파일 열기"),
             width=120,
             command=lambda: os.startfile(self.log_path) if os.path.exists(self.log_path) else None,
         )
@@ -506,7 +506,7 @@ class TabBuildersMixin:
         open_btn.pack(side="left", padx=5)
 
     def _build_credits_tab(self):
-        tab_name = "增ｬ・壱肌"
+        tab_name = "크레딧"
         tab = self._get_or_add_tab(tab_name)
         overlay = self._tab_overlay_color(tab_name)
         tab.configure(fg_color=overlay)
@@ -516,7 +516,7 @@ class TabBuildersMixin:
 
         ctk.CTkLabel(
             scroll,
-            text=t("-・ｴ・・・ｨ・ｸ ・ｰ・ｴ奓ｰ ・懋ｳｵ・・・・它 ・ｼ・ ・・豆"),
+            text=t("-보정 모델 데이터 제공에 도움 주신 분들"),
             font=("", 15, "bold"),
             text_color=PALETTE.header_accent,
             anchor="w",
@@ -524,24 +524,24 @@ class TabBuildersMixin:
         ).pack(fill="x", padx=10, pady=(6, 10))
 
         credit_lines = [
-            "・ｴ・罷ｹ・Kamebit",
+            "카메비 Kamebit",
             "22 twotwosibi",
-            "・呰ム・ｬ/・ｵ・・攪 ・護┳・懋ｳｵ・・infinityecho00&Anonymous Voice Provider",
-            "・壱ｹ・2xbin",
-            "・們亨・・Lyusia",
+            "촙타러/익명의 음성제공자 infinityecho00&Anonymous Voice Provider",
+            "빈빈 2xbin",
+            "류시아 Lyusia",
             "HUEY",
-            "・瀧Η Ironic_SP",
-            "・ｼ・ｬ・ｰ RARIU",
-            "・罹舶嶸ｸ neohyajach",
-            "・俯ｯｸ・・Namini",
-            "・ｸ・・ｸ Nowano",
-            "・､・一ｰ・AngaeSil1115",
-            "・ｬ奝 ・ｼ・俾ｸｰ Sato Yanagi",
-            "嶸懍┳ Comet",
-            "・・ざ BUTCHER_TUNING",
-            "寬懍ｴ・ianharuesaone",
-            "・､・ DAU_Multiverse",
-            "・瀧Η Blue",
+            "집냥 Ironic_SP",
+            "라리우 RARIU",
+            "서딕호 neohyajach",
+            "나미니 Namini",
+            "노와노 Nowano",
+            "실안개 AngaeSil1115",
+            "사토 야나기 Sato Yanagi",
+            "혜성 Comet",
+            "도살 BUTCHER_TUNING",
+            "펜촉 ianharuesaone",
+            "다유 DAU_Multiverse",
+            "집냥 Blue",
         ]
 
         for line in credit_lines:
@@ -555,7 +555,7 @@ class TabBuildersMixin:
 
         ctk.CTkLabel(
             scroll,
-            text=t("・川ぎ﨑ｩ・壱共!"),
+            text=t("감사합니다!"),
             font=("", 14, "bold"),
             text_color=PALETTE.success_text,
             anchor="w",
@@ -563,7 +563,7 @@ class TabBuildersMixin:
         ).pack(fill="x", padx=10, pady=(12, 6))
 
     def _build_advanced_settings_tab_legacy(self):
-        tab_name = "Parameters"
+        tab_name = "고급 설정"
         tab = self._get_or_add_tab(tab_name)
         overlay = self._tab_overlay_color(tab_name)
         tab.configure(fg_color=overlay)
@@ -573,7 +573,7 @@ class TabBuildersMixin:
 
         adv_intro_label = ctk.CTkLabel(
             container,
-            text=t("・・・・､・菩捩 ・罹ｰ・孖罹享・ｩ 﨑ｭ・ｩ・・笈・､. ・､・ｬ・ｩ・川・・・・ｰ・ｸ・・・・ 弡・﨑・囈﨑・・ｽ・ｰ・・・ｰ・倣葺・ｸ・・"),
+            text=t("고급 설정은 개발/튜닝용 항목입니다. 실사용에서는 기본값 유지 후 필요한 경우만 조정하세요."),
             text_color=PALETTE.neutral_text,
             wraplength=760,
             justify="left",
@@ -592,14 +592,14 @@ class TabBuildersMixin:
         self.advanced_basic_frame = basic_toggle_frame
         ctk.CTkLabel(
             basic_toggle_frame,
-            text=t("Option"),
+            text=t("핵심 옵션"),
             font=("", 14, "bold"),
             text_color=PALETTE.header_accent,
         ).pack(anchor="w", padx=12, pady=(10, 6))
 
         self.enable_ml_correction_checkbox = ctk.CTkCheckBox(
             basic_toggle_frame,
-            text=t("ML ・ｴ・・・ｬ・ｩ"),
+            text=t("ML 보정 사용"),
             text_color="#9A8250",
             variable=self.enable_ml_correction_var,
             command=(
@@ -612,7 +612,7 @@ class TabBuildersMixin:
 
         self.kr_continuity_enable_checkbox = ctk.CTkCheckBox(
             basic_toggle_frame,
-            text=t("・ｰ・作┳/甯護攵 ・ｼ・・ｱ ・ｴ・・・ｬ・ｩ"),
+            text=t("연속성/파일 일관성 보정 사용"),
             text_color="#64866F",
             variable=self.vc_correction_enable_var,
             command=self._on_vc_correction_toggle,
@@ -620,7 +620,7 @@ class TabBuildersMixin:
         self.kr_continuity_enable_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
         continuity_help_label = ctk.CTkLabel(
             basic_toggle_frame,
-            text=t("嶸菩享 ・・ｽ ・・・肥ｲ懋ｰ廷擽 ・尖徐 ・・圸・ｩ・壱共. 﨑・囈﨑・・ｽ・ｰ ・・椈 ・罹ｰ懍梵 ・ｬ・ｼ・ｴ・肥乱・・・ｸ・・庭ｧ・・ｸ・ｸ ・ｰ・倣葺・ｸ・・"),
+            text=t("형식 변경 시 추천값이 자동 적용됩니다. 필요한 경우 아래 개발자 슬라이더에서 세부값만 미세 조정하세요."),
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=730,
@@ -637,7 +637,7 @@ class TabBuildersMixin:
         post_frame.pack(fill="x", padx=10, pady=(0, 8))
         ctk.CTkLabel(
             post_frame,
-            text=t("Option"),
+            text=t("후처리(연속성) 옵션"),
             font=("", 14, "bold"),
             text_color=PALETTE.header_accent,
         ).pack(anchor="w", padx=12, pady=(10, 6))
@@ -646,20 +646,20 @@ class TabBuildersMixin:
         cont_row.pack(anchor="w", padx=12, pady=(0, 8), fill="x")
         ctk.CTkLabel(
             cont_row,
-            text=t("・ｰ・作┳ offset ・ｴ・・・・復 (ms)"),
+            text=t("연속성 offset 보정 상한 (ms)"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left")
         cont_entry = ctk.CTkEntry(
             cont_row,
             width=90,
             textvariable=self.kr_continuity_max_offset_adj_var,
-            placeholder_text=t("・ｰ・ｸ・・180)"),
+            placeholder_text=t("기본값(180)"),
         )
         cont_entry.pack(side="left", padx=(10, 8))
         cont_entry.bind("<FocusOut>", lambda _e: self._save_config())
         ctk.CTkLabel(
             cont_row,
-            text=t("增ｬ・・・｡・・・・・・ｰ・作┳ ・ｴ・菩擽 ・倣紛・・, ・滝ｲ・・｡・・・・・・ｴ・菩擽 ・ｽ﨑ｴ・瀧笈・､."),
+            text=t("크게 잡을수록 연속성 보정이 강해지고, 작게 잡을수록 보정이 약해집니다."),
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(4, 0))
 
@@ -667,13 +667,13 @@ class TabBuildersMixin:
         bank_preset_frame.pack(fill="x", padx=12, pady=(0, 8))
         ctk.CTkLabel(
             bank_preset_frame,
-            text=t("Option"),
+            text=t("보이스뱅크 튜닝 프리셋"),
             text_color=PALETTE.neutral_text,
             font=("", 13, "bold"),
         ).pack(anchor="w", pady=(0, 4))
         bank_preset_help_label = ctk.CTkLabel(
             bank_preset_frame,
-            text=t("soft/・ｼ・・・・〓・ｩ 嵓・ｦｬ・駆揆 﨑・・溢乱 ・・圸﨑ｩ・壱共. ・ｼ・戦・・ ・ｴ・菩揆 ・倣葺・・ ・ｼ・們捩 ・溢菩・愍・・・呷梠﨑ｩ・壱共."),
+            text=t("soft/일반 뱅크용 프리셋을 한 번에 적용합니다. 민감형은 보정을 강하게, 일반은 안정적으로 동작합니다."),
             text_color=PALETTE.hint_text,
             wraplength=730,
             justify="left",
@@ -690,7 +690,7 @@ class TabBuildersMixin:
 
         btn_soft_agg = ctk.CTkButton(
             preset_grid,
-            text=t("soft ・・〓 ﾂｷ ・ｼ・戦・"),
+            text=t("soft 뱅크 · 민감형"),
             width=170,
             command=lambda: self._on_voicebank_preset_button("soft", "aggressive"),
         )
@@ -699,7 +699,7 @@ class TabBuildersMixin:
 
         btn_soft_cons = ctk.CTkButton(
             preset_grid,
-            text=t("Option"),
+            text=t("soft 뱅크 · 일반"),
             width=170,
             command=lambda: self._on_voicebank_preset_button("soft", "conservative"),
         )
@@ -708,7 +708,7 @@ class TabBuildersMixin:
 
         btn_normal_agg = ctk.CTkButton(
             preset_grid,
-            text=t("・ｼ・・・・〓 ﾂｷ ・ｼ・戦・"),
+            text=t("일반 뱅크 · 민감형"),
             width=170,
             command=lambda: self._on_voicebank_preset_button("normal", "aggressive"),
         )
@@ -717,7 +717,7 @@ class TabBuildersMixin:
 
         btn_normal_cons = ctk.CTkButton(
             preset_grid,
-            text=t("Option"),
+            text=t("일반 뱅크 · 일반"),
             width=170,
             command=lambda: self._on_voicebank_preset_button("normal", "conservative"),
         )
@@ -735,7 +735,7 @@ class TabBuildersMixin:
 
         self.soft_bank_mode_checkbox = ctk.CTkCheckBox(
             basic_toggle_frame,
-            text=t("Option"),
+            text=t("발음 누락 줄이기 추천"),
             text_color="#6F819A",
             variable=self.soft_bank_mode_var,
             command=self._save_config,
@@ -743,7 +743,7 @@ class TabBuildersMixin:
         self.soft_bank_mode_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
         soft_bank_help_label = ctk.CTkLabel(
             basic_toggle_frame,
-            text=t("・ｨ・誤ｦｬ・ ・珠擽 ・樌擽・ｰ・・・懍┳・ｴ ・ｽ﨑・・護寳・川・ ・懍搆 ・・攷・ｼ ・ｵ・ｱ ・､・・懍揆 ・・攵 ・・・罹株 ・ｵ・們桿・壱共."),
+            text=t("숨소리가 많이 섞이거나 발성이 약한 음원에서 발음 누락과 공백 오검출을 줄일 때 켜는 옵션입니다."),
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=730,
@@ -753,7 +753,7 @@ class TabBuildersMixin:
 
         self.low_rms_gain_enable_checkbox = ctk.CTkCheckBox(
             basic_toggle_frame,
-            text=t("・・ｼ・ｨ WAV ・尖徐 ・晨少/・母ｷ懦剩 (RMS ・ｰ・・ ・尖ｳｸ ・ｴ・ｴ)"),
+            text=t("저볼륨 WAV 자동 증폭/정규화 (RMS 기반, 원본 보존)"),
             text_color="#6F819A",
             variable=self.low_rms_gain_enable_var,
             command=self._save_config,
@@ -761,7 +761,7 @@ class TabBuildersMixin:
         self.low_rms_gain_enable_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
         low_rms_help_label = ctk.CTkLabel(
             basic_toggle_frame,
-            text=t("・簿ｬ ・ｨ・・乱・罹ｧ・・・亨 ・卓羅 ・ｵ・ｬ・ｸ・・・ｼ・ｨ ・ｴ・菩揆 ・・圸﨑ｩ・壱共. ・尖ｳｸ WAV 甯護攵・ ・壱劇 ・・ｽ﨑們ｧ ・喜慣・壱共."),
+            text=t("정렬 단계에서만 임시 작업 복사본에 볼륨 보정을 적용합니다. 원본 WAV 파일은 절대 변경하지 않습니다."),
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=730,
@@ -771,7 +771,7 @@ class TabBuildersMixin:
 
         self.weak_voice_assist_enable_checkbox = ctk.CTkCheckBox(
             basic_toggle_frame,
-            text=t("・懍搆・ｴ 彧尖ｦｰ ・護寳・・・肥ｲ・(・尖ｪｨ ・ｬ・・・倣剩)"),
+            text=t("발음이 흐린 음원에 추천 (자모 구분 강화)"),
             text_color="#6F819A",
             variable=self.weak_voice_assist_enable_var,
             command=(
@@ -783,7 +783,7 @@ class TabBuildersMixin:
         self.weak_voice_assist_enable_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
         weak_voice_help_label = ctk.CTkLabel(
             basic_toggle_frame,
-            text=t("・・名・ｰ・ｼ・俯涵 ・､・ｬ・ｰ・・・川搆/・ｨ・・・ｬ・・擽 彧尖ｦｰ ・護寳・川・ ・簿ｬ ・倣剳・・･ｼ ・廷擽・ｰ ・・復 ・肥ｲ・・ｵ・們桿・壱共. (・尖ｳｸ WAV ・ｴ・ｴ)"),
+            text=t("웅얼거림처럼 들리거나 자음/모음 구분이 흐린 음원에서 정렬 정확도를 높이기 위한 추천 옵션입니다. (원본 WAV 보존)"),
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=730,
@@ -795,7 +795,7 @@ class TabBuildersMixin:
         weak_voice_strength_row.pack(fill="x", padx=34, pady=(0, 10))
         self.weak_voice_strength_title_label = ctk.CTkLabel(
             weak_voice_strength_row,
-            text=t("・尖ｪｨ ・・・・簿巡"),
+            text=t("자모 대비 강도"),
             width=130,
             anchor="w",
             text_color=PALETTE.neutral_text,
@@ -856,7 +856,7 @@ class TabBuildersMixin:
         mapping_strict_row.pack(fill="x", padx=12, pady=(0, 4))
         ctk.CTkLabel(
             mapping_strict_row,
-            text=t("・護・・､・､﨑・・ｨ・ｨ"),
+            text=t("음절 오매핑 차단"),
             text_color=PALETTE.neutral_text,
             width=130,
             anchor="w",
@@ -866,7 +866,7 @@ class TabBuildersMixin:
             values=(
                 self._get_mapping_strict_mode_option_labels()
                 if hasattr(self, "_get_mapping_strict_mode_option_labels")
-                else ["・・・・・ｲｩ", "・・胸德・・・ｲｩ(・・攷 嵂餓捩 尞ｴ・ｱ)", "off"]
+                else ["완전 엄격", "적당히 엄격(누락 행은 폴백)", "off"]
             ),
             variable=self.mapping_strict_mode_var,
             width=260,
@@ -876,7 +876,7 @@ class TabBuildersMixin:
         mapping_strict_menu.pack(side="left", padx=(10, 0))
         mapping_strict_help_label = ctk.CTkLabel(
             basic_toggle_frame,
-            text=t("・護溢揆 寀・ｴ ・・･・ｱ・・・・擽・・・・, ・尖徐 ・､・菩乱・・・､墲ｵ・俯株 ・川攵・ｬ・ｴ・､・ ・們牟・ ・・・溢慣・壱共."),
+            text=t("음절을 틀릴 가능성을 줄이는 대신, 자동 설정에서 스킵되는 에일리어스가 늘어날 수 있습니다."),
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=730,
@@ -884,7 +884,7 @@ class TabBuildersMixin:
         mapping_strict_help_label.pack(anchor="w", padx=34, pady=(0, 8))
         self.low_conf_force_lock_mode_checkbox = ctk.CTkCheckBox(
             basic_toggle_frame,
-            text=t("Option"),
+            text=t("저신뢰 구간 강제 고정 모드"),
             text_color=PALETTE.neutral_text,
             variable=self.low_conf_force_lock_mode_var,
             command=self._save_config,
@@ -892,7 +892,7 @@ class TabBuildersMixin:
         self.low_conf_force_lock_mode_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
         low_conf_force_lock_help_label = ctk.CTkLabel(
             basic_toggle_frame,
-            text=t("・簿ｬ ・・ｰ・ ・ｮ・ ・ｬ・・乱・罹株 弡・ｳｴ ・戦売・ｼ ・賀ｳ ・溢メ ・・ｹ們乱 ・・倣鮒・壱共."),
+            text=t("정렬 신뢰가 낮은 구간에서는 후보 점프를 막고 예상 위치에 고정합니다."),
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=730,
@@ -931,9 +931,31 @@ class TabBuildersMixin:
         if not hasattr(self, "mapping_supervised_enable_var"):
             self.mapping_supervised_enable_var = ctk.BooleanVar(value=True)
 
+        self.cvn_correction_enable_checkbox = self._ui_checkbox(
+            ml_frame,
+            text=t("자음 구분기(C/V) 보정 사용"),
+            text_color="#5F8C87",
+            variable=self.cvn_correction_enable_var,
+            command=(
+                self._on_cvn_correction_toggle
+                if hasattr(self, "_on_cvn_correction_toggle")
+                else self._save_config
+            ),
+        )
+
+        self.cvn_low_conf_only_checkbox = self._ui_checkbox(
+            ml_frame,
+            text=t("정렬 저신뢰 샘플에만 C/V 후보정 적용"),
+            text_color=PALETTE.neutral_text,
+            variable=self.cvn_low_conf_only_var,
+            command=self._save_config,
+            padx=34,
+            pady=(0, 4),
+        )
+
         self.mapping_supervised_enable_checkbox = ctk.CTkCheckBox(
             ml_frame,
-            text=t("・､﨑・・ｨ・ｸ(・ｨ・ｰ ・肥ｽ罷畠 ・ｬ・､・肥牟) ・ｬ・ｩ"),
+            text=t("매핑 모델(단조 디코딩 리스코어) 사용"),
             text_color=PALETTE.neutral_text,
             variable=self.mapping_supervised_enable_var,
             command=(
@@ -948,7 +970,7 @@ class TabBuildersMixin:
         mapping_mode_row.pack(anchor="w", padx=12, pady=(0, 4), fill="x")
         ctk.CTkLabel(
             mapping_mode_row,
-            text=t("Option"),
+            text=t("매핑 모델 모드"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left")
         mapping_mode_menu = ctk.CTkOptionMenu(
@@ -956,7 +978,7 @@ class TabBuildersMixin:
             values=(
                 self._get_mapping_supervised_mode_option_labels()
                 if hasattr(self, "_get_mapping_supervised_mode_option_labels")
-                else ["・尖徐(・護棗)", "尞ｬ・ｷ ・ｰ・", "・・溜 ・ｰ・"]
+                else ["자동(권장)", "포맷 우선", "전역 우선"]
             ),
             variable=self.mapping_supervised_mode_var,
             width=220,
@@ -973,7 +995,7 @@ class TabBuildersMixin:
         cv_order_prior_row.pack(anchor="w", padx=12, pady=(2, 0), fill="x")
         self.cv_order_prior_enable_checkbox = ctk.CTkCheckBox(
             cv_order_prior_row,
-            text=t("CV 甯護攵 ・懍・ ・ｰ・・・､﨑・・ｰ﨑ｩ ・ｬ・ｩ"),
+            text=t("CV 파일 순서 기반 매핑 결합 사용"),
             text_color=PALETTE.neutral_text,
             variable=self.cv_order_prior_enable_var,
             command=self._save_config,
@@ -981,20 +1003,20 @@ class TabBuildersMixin:
         self.cv_order_prior_enable_checkbox.pack(side="left")
         ctk.CTkLabel(
             cv_order_prior_row,
-            text=t("・簿巡"),
+            text=t("강도"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left", padx=(12, 4))
         cv_order_prior_strength_entry = ctk.CTkEntry(
             cv_order_prior_row,
             width=72,
             textvariable=self.cv_order_prior_strength_var,
-            placeholder_text=t("auto"),
+            placeholder_text=t("기본값"),
         )
         cv_order_prior_strength_entry.pack(side="left")
         cv_order_prior_strength_entry.bind("<FocusOut>", lambda _e: self._save_config())
         ctk.CTkLabel(
             cv_order_prior_row,
-            text=t("(0.0~1.0, ・廷揆・俯｡・・懍・ prior ・倣剩)"),
+            text=t("(0.0~1.0, 높을수록 순서 prior 강화)"),
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(8, 0))
         self.mapping_supervised_dependent_frames = [mapping_mode_row, cv_order_prior_row]
@@ -1003,12 +1025,12 @@ class TabBuildersMixin:
         selector_mode_row.pack(anchor="w", padx=12, pady=(4, 0), fill="x")
         ctk.CTkLabel(
             selector_mode_row,
-            text=t("Option"),
+            text=t("ML 보정 모드"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left")
         self.ml_selector_mode_segment = ctk.CTkSegmentedButton(
             selector_mode_row,
-            values=["auto", "additive"],
+            values=["상대적 보정", "+셀렉터"],
             variable=self.ml_selector_mode_var,
             command=lambda _value: self._save_config(),
         )
@@ -1018,7 +1040,7 @@ class TabBuildersMixin:
         route_row.pack(anchor="w", padx=12, pady=(6, 0), fill="x")
         ctk.CTkLabel(
             route_row,
-            text=t("Option"),
+            text=t("ML 방식"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left")
         route_menu = ctk.CTkOptionMenu(
@@ -1026,7 +1048,7 @@ class TabBuildersMixin:
             values=(
                 self._get_ml_route_option_labels(no_mfa_only=False)
                 if hasattr(self, "_get_ml_route_option_labels")
-                else ["・尖徐(・尖徐 ・ｼ・ｰ甯・", "No-MFA", "v1", "v2", "E2E 﨑們擽・誤ｦｬ・・・､嵭・"]
+                else ["자동(자동 라우팅)", "No-MFA", "v1", "v2", "E2E 하이브리드(실험)"]
             ),
             variable=self.ml_route_var,
             width=180,
@@ -1037,13 +1059,13 @@ class TabBuildersMixin:
         route_menu.pack(side="left", padx=(10, 8))
         ctk.CTkLabel(
             route_row,
-            text=t("Option"),
+            text=t("자동=환경 기반 라우팅, No-MFA=정렬 없이 보정, v1=기존, v2=확장, E2E=실험"),
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(4, 0))
 
         coupled_enable_checkbox = ctk.CTkCheckBox(
             ml_frame,
-            text=t("・・OTO ・ｴ・・・ｬ・ｩ"),
+            text=t("멜+OTO 보정 사용"),
             text_color="#5F8C87",
             variable=self.ml_coupled_enable_var,
             command=self._save_config,
@@ -1054,14 +1076,14 @@ class TabBuildersMixin:
         coupled_row.pack(anchor="w", padx=12, pady=(6, 0), fill="x")
         ctk.CTkLabel(
             coupled_row,
-            text=t("Option"),
+            text=t("Coupled 최소 신뢰도"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left")
         coupled_conf_entry = ctk.CTkEntry(
             coupled_row,
             width=70,
             textvariable=self.ml_coupled_min_conf_var,
-            placeholder_text=t("auto"),
+            placeholder_text=t("기본값"),
         )
         coupled_conf_entry.pack(side="left", padx=(10, 8))
         coupled_conf_entry.bind("<FocusOut>", lambda _e: self._save_config())
@@ -1081,7 +1103,7 @@ class TabBuildersMixin:
         coupled_device_menu.pack(side="left", padx=(0, 8))
         ctk.CTkCheckBox(
             coupled_row,
-            text=t("Strict ・懍平"),
+            text=t("Strict 제약"),
             text_color=PALETTE.neutral_text,
             variable=self.ml_coupled_strict_constraint_var,
             command=self._save_config,
@@ -1091,7 +1113,7 @@ class TabBuildersMixin:
         model_conf_row.pack(anchor="w", padx=12, pady=(4, 0), fill="x")
         ctk.CTkCheckBox(
             model_conf_row,
-            text=t("Model-aware min_conf (model_meta) ・ｬ・ｩ"),
+            text=t("Model-aware min_conf (model_meta) 사용"),
             text_color="#5F8C87",
             variable=self.ml_coupled_min_conf_use_model_meta_var,
             command=self._save_config,
@@ -1161,13 +1183,13 @@ class TabBuildersMixin:
         backend_menu.pack(side="left", padx=(10, 0))
         ctk.CTkLabel(
             backend_row,
-            text=t("(auto=ensemble ・ｰ・)"),
+            text=t("(auto=ensemble 우선)"),
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(8, 0))
 
         batch_enable_checkbox = ctk.CTkCheckBox(
             ml_frame,
-            text=t("Batch inference (coupled v2) ・ｬ・ｩ"),
+            text=t("Batch inference (coupled v2) 사용"),
             text_color="#5F8C87",
             variable=self.ml_batch_inference_enable_var,
             command=self._save_config,
@@ -1191,13 +1213,13 @@ class TabBuildersMixin:
         batch_size_entry.bind("<FocusOut>", lambda _e: self._save_config())
         ctk.CTkLabel(
             batch_row,
-            text=t("(・護棗 128~512, ・懍・ 32)"),
+            text=t("(권장 128~512, 최소 32)"),
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(4, 0))
 
         legacy_fallback_checkbox = ctk.CTkCheckBox(
             ml_frame,
-            text=t("v1 fallback(lightgbm) ・ｴ・ｸ ・ｬ・ｩ"),
+            text=t("v1 fallback(lightgbm) 체인 사용"),
             text_color=PALETTE.neutral_text,
             variable=self.ml_legacy_fallback_enable_var,
             command=self._save_config,
@@ -1206,7 +1228,7 @@ class TabBuildersMixin:
 
         hybrid_routing_checkbox = ctk.CTkCheckBox(
             ml_frame,
-            text=t("﨑們擽・誤ｦｬ・・・ｼ・ｰ甯・・・卓ｹ・・護擽孖ｸ) ・ｬ・ｩ"),
+            text=t("하이브리드 라우팅(가중치 게이트) 사용"),
             text_color="#5F8C87",
             variable=self.ml_hybrid_routing_enable_var,
             command=self._save_config,
@@ -1215,7 +1237,7 @@ class TabBuildersMixin:
 
         e2e_toggle_checkbox = ctk.CTkCheckBox(
             ml_frame,
-            text=t("Option"),
+            text=t("E2E 하이브리드(실험) 활성화"),
             text_color="#5F8C87",
             variable=self.ml_e2e_enable_var,
             command=(
@@ -1230,7 +1252,7 @@ class TabBuildersMixin:
         e2e_mode_row.pack(anchor="w", padx=12, pady=(2, 0), fill="x")
         ctk.CTkLabel(
             e2e_mode_row,
-            text=t("Option"),
+            text=t("E2E 모드"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left")
         e2e_mode_menu = ctk.CTkOptionMenu(
@@ -1244,7 +1266,7 @@ class TabBuildersMixin:
         e2e_mode_menu.pack(side="left", padx=(10, 8))
         ctk.CTkLabel(
             e2e_mode_row,
-            text=t("(・護棗: hybrid)"),
+            text=t("(권장: hybrid)"),
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(2, 0))
 
@@ -1306,7 +1328,7 @@ class TabBuildersMixin:
             self.ml_coupled_status_detail_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             detail_row,
-            text=t("・川┷德・・ｴ・ｰ (・ｽ・・・・・・晧┳・ｼ)"),
+            text=t("자세히 보기 (경로/버전/생성일)"),
             text_color=PALETTE.neutral_text,
             variable=self.ml_coupled_status_detail_var,
             command=lambda: self._on_ml_backend_detail_toggle(),
@@ -1324,7 +1346,7 @@ class TabBuildersMixin:
             btn_width = 90
             browse_btn = ctk.CTkButton(
                 btn_row,
-                text=t("・ｾ・・ｳｴ・ｰ"),
+                text=t("찾아보기"),
                 width=btn_width,
                 command=lambda v=var: (
                     self._browse_folder_by_var(v, initial_dir=self._preferred_ml_model_browse_dir(v)),
@@ -1335,7 +1357,7 @@ class TabBuildersMixin:
             browse_btn.pack(side="right")
             open_btn = ctk.CTkButton(
                 btn_row,
-                text=t("・ｴ・ｰ"),
+                text=t("열기"),
                 width=btn_width,
                 command=lambda v=var: os.startfile(str(v.get()).strip()) if os.path.isdir(str(v.get()).strip()) else None,
             )
@@ -1344,12 +1366,12 @@ class TabBuildersMixin:
             return ent
 
         if hasattr(self, "ml_model_root_kr_var"):
-            _model_root_row("・ｨ・ｸ ・ｽ・・(﨑懋ｵｭ・ｴ)", self.ml_model_root_kr_var)
+            _model_root_row("모델 경로 (한국어)", self.ml_model_root_kr_var)
         if hasattr(self, "ml_model_root_ja_var"):
-            _model_root_row("・ｨ・ｸ ・ｽ・・(・ｼ・ｸ・ｴ)", self.ml_model_root_ja_var)
+            _model_root_row("모델 경로 (일본어)", self.ml_model_root_ja_var)
         ctk.CTkLabel(
             ml_frame,
-            text=t("・ｽ・罹株 ・ｨ・ｸ 尞ｴ・・・ｴ・・・model_meta.json) ・尖株 ・・怱 ・ｨ孖ｸ・ｼ ・・倣腹 ・・・溢慣・壱共."),
+            text=t("경로는 모델 폴더(내부에 model_meta.json) 또는 상위 루트를 지정할 수 있습니다."),
             text_color=PALETTE.hint_text,
             wraplength=740,
             justify="left",
@@ -1382,8 +1404,8 @@ class TabBuildersMixin:
 
         vc_frame = self._ui_section(
             dev_container,
-            "Option",
-            "・ｰ・ｸ UI・川・・・・ｴ・・・ｬ・ｩ ・ｬ・・・・夋晨鮒・壱共. ・ｸ・ ・ｬ・ｼ・ｴ・罷株 ・罹ｰ懍梵 ・､・・ON・ｼ ・誤ｧ・嶹懍┳嶹罷姓・壱共.",
+            "VC 보정",
+            "기본 UI에서는 보정 사용 여부만 선택합니다. 세부 슬라이더는 개발자 설정 ON일 때만 활성화됩니다.",
         )
 
         self.vc_neighbor_detail_controls = []
@@ -1421,7 +1443,7 @@ class TabBuildersMixin:
             slider.pack(side="right", fill="x", expand=True, padx=8)
             ctk.CTkLabel(
                 row,
-                text=f"嶹俾ｲｽ・・・ {env_key}",
+                text=f"환경변수: {env_key}",
                 text_color=PALETTE.hint_text,
                 anchor="w",
             ).pack(side="left", padx=(6, 0))
@@ -1439,10 +1461,10 @@ class TabBuildersMixin:
 
         kr_box = ctk.CTkFrame(vc_frame)
         kr_box.pack(fill="x", padx=10, pady=(2, 8))
-        ctk.CTkLabel(kr_box, text=t("﨑懋ｵｭ・ｴ (KR)"), font=("", 13, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
+        ctk.CTkLabel(kr_box, text=t("한국어 (KR)"), font=("", 13, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
         ctk.CTkCheckBox(
             kr_box,
-            text=t("VC ・ｴ・・・ｴ・・・ｬ・ｩ"),
+            text=t("VC 이웃 보정 사용"),
             variable=self.kr_vc_neighbor_enable_var,
             command=self._on_vc_neighbor_language_toggle,
         ).pack(anchor="w", padx=15, pady=(0, 4))
@@ -1450,7 +1472,7 @@ class TabBuildersMixin:
         self.vc_neighbor_detail_frames.append(kr_detail)
         _add_env_slider(
             kr_detail,
-            "・ｴ・・・簿巡(Blend)",
+            "보정 강도(Blend)",
             "UTOA_KR_VC_NEIGHBOR_BLEND",
             self.kr_vc_neighbor_blend_var,
             min_val=0.0,
@@ -1461,7 +1483,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             kr_detail,
-            "・罹劇 ・ｴ・・ms)",
+            "최대 이동(ms)",
             "UTOA_KR_VC_NEIGHBOR_MAX_SHIFT",
             self.kr_vc_neighbor_max_shift_var,
             min_val=0.0,
@@ -1472,7 +1494,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             kr_detail,
-            "・ｴ・・・ｷ・､嵓・・ｰ・ ・ｬ・(ms)",
+            "이전 컷오프 기준 여유(ms)",
             "UTOA_KR_VC_NEIGHBOR_LEAD_MS",
             self.kr_vc_neighbor_lead_ms_var,
             min_val=0.0,
@@ -1483,7 +1505,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             kr_detail,
-            "・､・・・､嵓・・ ・ｰ・ ・ｬ・(ms)",
+            "다음 오프셋 기준 여유(ms)",
             "UTOA_KR_VC_NEIGHBOR_TAIL_MS",
             self.kr_vc_neighbor_tail_ms_var,
             min_val=0.0,
@@ -1494,7 +1516,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             kr_detail,
-            "・懍・ VC ・ｸ・ｴ(ms)",
+            "최소 VC 길이(ms)",
             "UTOA_KR_VC_NEIGHBOR_MIN_LEN",
             self.kr_vc_neighbor_min_len_var,
             min_val=0.0,
@@ -1506,10 +1528,10 @@ class TabBuildersMixin:
 
         ja_box = ctk.CTkFrame(vc_frame)
         ja_box.pack(fill="x", padx=10, pady=(2, 8))
-        ctk.CTkLabel(ja_box, text=t("・ｼ・ｸ・ｴ (JA)"), font=("", 13, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
+        ctk.CTkLabel(ja_box, text=t("일본어 (JA)"), font=("", 13, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
         ctk.CTkCheckBox(
             ja_box,
-            text=t("VC ・ｴ・・・ｴ・・・ｬ・ｩ"),
+            text=t("VC 이웃 보정 사용"),
             variable=self.ja_vc_neighbor_enable_var,
             command=self._on_vc_neighbor_language_toggle,
         ).pack(anchor="w", padx=15, pady=(0, 4))
@@ -1517,7 +1539,7 @@ class TabBuildersMixin:
         self.vc_neighbor_detail_frames.append(ja_detail)
         _add_env_slider(
             ja_detail,
-            "・ｴ・・・簿巡(Blend)",
+            "보정 강도(Blend)",
             "UTOA_JA_VC_NEIGHBOR_BLEND",
             self.ja_vc_neighbor_blend_var,
             min_val=0.0,
@@ -1528,7 +1550,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             ja_detail,
-            "・罹劇 ・ｴ・・ms)",
+            "최대 이동(ms)",
             "UTOA_JA_VC_NEIGHBOR_MAX_SHIFT",
             self.ja_vc_neighbor_max_shift_var,
             min_val=0.0,
@@ -1539,7 +1561,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             ja_detail,
-            "・ｴ・・・ｷ・､嵓・・ｰ・ ・ｬ・(ms)",
+            "이전 컷오프 기준 여유(ms)",
             "UTOA_JA_VC_NEIGHBOR_LEAD_MS",
             self.ja_vc_neighbor_lead_ms_var,
             min_val=0.0,
@@ -1550,7 +1572,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             ja_detail,
-            "・､・・・､嵓・・ ・ｰ・ ・ｬ・(ms)",
+            "다음 오프셋 기준 여유(ms)",
             "UTOA_JA_VC_NEIGHBOR_TAIL_MS",
             self.ja_vc_neighbor_tail_ms_var,
             min_val=0.0,
@@ -1561,7 +1583,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             ja_detail,
-            "・懍・ VC ・ｸ・ｴ(ms)",
+            "최소 VC 길이(ms)",
             "UTOA_JA_VC_NEIGHBOR_MIN_LEN",
             self.ja_vc_neighbor_min_len_var,
             min_val=0.0,
@@ -1584,7 +1606,7 @@ class TabBuildersMixin:
         aligner_frame.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(
             aligner_frame,
-            text=t("・・・・簿ｬ ・肥ｧ・・ｵ・們捩 嶸・椪 ・懋ｳｵ﨑們ｧ ・喜慣・壱共."),
+            text=t("고급 정렬 엔진 옵션은 현재 제공하지 않습니다."),
             text_color=PALETTE.neutral_text,
             wraplength=740,
             justify="left",
@@ -1593,7 +1615,7 @@ class TabBuildersMixin:
         mfa_free_preview_row.pack(fill="x", padx=12, pady=(0, 10))
         self.mfa_free_oto_preview_btn = ctk.CTkButton(
             mfa_free_preview_row,
-            text=t("MFA-Free SSL ・ｬ・ｯ ・ｴ・啄┣ 奛護侃孖ｸ"),
+            text=t("MFA-Free SSL 슬롯 어댑터 테스트"),
             width=230,
             height=28,
             command=lambda: self._run_mfa_free_oto_preview_from_ui(),
@@ -1602,7 +1624,7 @@ class TabBuildersMixin:
         self.mfa_free_oto_preview_btn.pack(side="left", padx=(0, 10))
         self.mfa_free_oto_preview_hint = ctk.CTkLabel(
             mfa_free_preview_row,
-            text=t("嶸・椪 WAV/奛懦伯・ｿ ・ｰ・・ｼ・・preview oto.ini, anchor JSON, overlay HTML・・・晧┳﨑ｩ・壱共."),
+            text=t("현재 WAV/템플릿 기준으로 preview oto.ini, anchor JSON, overlay HTML을 생성합니다."),
             text_color=PALETTE.hint_text,
             wraplength=620,
             justify="left",
@@ -1613,7 +1635,7 @@ class TabBuildersMixin:
         dev_reset_row.pack(fill="x", padx=10, pady=(8, 10))
         reset_btn = ctk.CTkButton(
             dev_reset_row,
-            text=t("Option"),
+            text=t("개발자 설정 초기화"),
             width=170,
             height=28,
             fg_color=PALETTE.danger_button_bg,
@@ -1629,7 +1651,7 @@ class TabBuildersMixin:
             self._sync_advanced_tuning_slider_controls()
 
     def _build_profile_tune_tab(self):
-        # VC ・ｴ・母ｰ・・ｰ・・UI・・・・・・､・・夋ｭ・ｼ・・奝ｵ﨑ｩ・們来・ｵ・壱共.
+        # VC 보정값 조절 UI는 고급 설정 탭으로 통합되었습니다.
         return
 
     def _ensure_advanced_setting_vars(self) -> None:
@@ -1640,7 +1662,7 @@ class TabBuildersMixin:
             "enable_ml_correction_var": ("bool", True),
             "vc_correction_enable_var": ("bool", True),
             "kr_continuity_enable_var": ("bool", True),
-            "cvn_correction_enable_var": ("bool", False),
+            "cvn_correction_enable_var": ("bool", True),
             "cvn_low_conf_only_var": ("bool", False),
             "mapping_supervised_enable_var": ("bool", True),
             "cv_order_prior_enable_var": ("bool", True),
@@ -1661,12 +1683,12 @@ class TabBuildersMixin:
             "low_conf_force_lock_mode_var": ("bool", False),
             "kr_continuity_max_offset_adj_var": ("str", ""),
             "weak_voice_assist_strength_var": ("str", ""),
-            "mapping_strict_mode_var": ("str", "・・胸德・・・ｲｩ(・・攷 嵂餓捩 尞ｴ・ｱ)"),
-            "mapping_supervised_mode_var": ("str", "・尖徐(・護棗)"),
+            "mapping_strict_mode_var": ("str", "적당히 엄격(누락 행은 폴백)"),
+            "mapping_supervised_mode_var": ("str", "자동(권장)"),
             "cv_order_prior_strength_var": ("str", ""),
             "kr_mapping_confidence_threshold_var": ("str", ""),
-            "ml_route_var": ("str", "・尖徐(・尖徐 ・ｼ・ｰ甯・"),
-            "ml_selector_mode_var": ("str", "+・・駕┣"),
+            "ml_route_var": ("str", "자동(자동 라우팅)"),
+            "ml_selector_mode_var": ("str", "+셀렉터"),
             "ml_e2e_mode_var": ("str", "hybrid"),
             "ml_e2e_t_low_var": ("str", ""),
             "ml_e2e_t_high_var": ("str", ""),
@@ -1737,7 +1759,7 @@ class TabBuildersMixin:
 
         ctk.CTkLabel(
             frame,
-            text=t("・､嵂・・ｱ・罷糖"),
+            text=t("실행 백엔드"),
             font=("", 14, "bold"),
             text_color=PALETTE.header_accent,
         ).pack(anchor="w", padx=12, pady=(10, 6))
@@ -1764,14 +1786,14 @@ class TabBuildersMixin:
         backend_menu.pack(side="left", padx=(10, 8))
         ctk.CTkLabel(
             top_row,
-            text=t("(auto=ensemble ・ｰ・)"),
+            text=t("(auto=ensemble 우선)"),
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(2, 0))
 
         return frame
 
     def _build_advanced_settings_tab(self):
-        tab_name = "Advanced"
+        tab_name = "고급 설정"
         tab = self._get_or_add_tab(tab_name)
         overlay = self._tab_overlay_color(tab_name)
         tab.configure(fg_color=overlay)
@@ -1814,14 +1836,14 @@ class TabBuildersMixin:
         self.advanced_basic_frame = basic_toggle_frame
         ctk.CTkLabel(
             basic_toggle_frame,
-            text=t("Option"),
+            text=t("핵심 옵션"),
             font=("", 14, "bold"),
             text_color=PALETTE.header_accent,
         ).pack(anchor="w", padx=12, pady=(10, 6))
 
         self.enable_ml_correction_checkbox = ctk.CTkCheckBox(
             basic_toggle_frame,
-            text=t("ML ・ｴ・・・ｬ・ｩ"),
+            text=t("ML 보정 사용"),
             text_color="#9A8250",
             variable=self.enable_ml_correction_var,
             command=(
@@ -1834,7 +1856,7 @@ class TabBuildersMixin:
 
         self.kr_continuity_enable_checkbox = ctk.CTkCheckBox(
             basic_toggle_frame,
-            text=t("・ｰ・作┳/甯護攵 ・ｼ・・ｱ ・ｴ・・・ｬ・ｩ"),
+            text=t("연속성/파일 일관성 보정 사용"),
             text_color="#64866F",
             variable=self.vc_correction_enable_var,
             command=self._on_vc_correction_toggle,
@@ -1842,7 +1864,7 @@ class TabBuildersMixin:
         self.kr_continuity_enable_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
         continuity_help_label = ctk.CTkLabel(
             basic_toggle_frame,
-            text=t("嶸菩享 ・・ｽ ・・・肥ｲ懋ｰ廷擽 ・尖徐 ・・圸・ｩ・壱共. 﨑・囈﨑・・ｽ・ｰ ・・椈 ・罹ｰ懍梵 ・ｬ・ｼ・ｴ・肥乱・・・ｸ・・庭ｧ・・ｸ・ｸ ・ｰ・倣葺・ｸ・・"),
+            text=t("형식 변경 시 추천값이 자동 적용됩니다. 필요한 경우 아래 개발자 슬라이더에서 세부값만 미세 조정하세요."),
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=730,
@@ -1859,7 +1881,7 @@ class TabBuildersMixin:
         post_frame.pack(fill="x", padx=10, pady=(0, 8))
         ctk.CTkLabel(
             post_frame,
-            text=t("Option"),
+            text=t("후처리(연속성) 옵션"),
             font=("", 14, "bold"),
             text_color=PALETTE.header_accent,
         ).pack(anchor="w", padx=12, pady=(10, 6))
@@ -1868,20 +1890,20 @@ class TabBuildersMixin:
         cont_row.pack(anchor="w", padx=12, pady=(0, 8), fill="x")
         ctk.CTkLabel(
             cont_row,
-            text=t("・ｰ・作┳ offset ・ｴ・・・・復 (ms)"),
+            text=t("연속성 offset 보정 상한 (ms)"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left")
         cont_entry = ctk.CTkEntry(
             cont_row,
             width=90,
             textvariable=self.kr_continuity_max_offset_adj_var,
-            placeholder_text=t("・ｰ・ｸ・・180)"),
+            placeholder_text=t("기본값(180)"),
         )
         cont_entry.pack(side="left", padx=(10, 8))
         cont_entry.bind("<FocusOut>", lambda _e: self._save_config())
         ctk.CTkLabel(
             cont_row,
-            text=t("增ｬ・・・｡・・・・・・ｰ・作┳ ・ｴ・菩擽 ・倣紛・・, ・滝ｲ・・｡・・・・・・ｴ・菩擽 ・ｽ﨑ｴ・瀧笈・､."),
+            text=t("크게 잡을수록 연속성 보정이 강해지고, 작게 잡을수록 보정이 약해집니다."),
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(4, 0))
 
@@ -1889,13 +1911,13 @@ class TabBuildersMixin:
         bank_preset_frame.pack(fill="x", padx=12, pady=(0, 8))
         ctk.CTkLabel(
             bank_preset_frame,
-            text=t("Option"),
+            text=t("보이스뱅크 튜닝 프리셋"),
             text_color=PALETTE.neutral_text,
             font=("", 13, "bold"),
         ).pack(anchor="w", pady=(0, 4))
         bank_preset_help_label = ctk.CTkLabel(
             bank_preset_frame,
-            text=t("soft/・ｼ・・・・〓・ｩ 嵓・ｦｬ・駆揆 﨑・・溢乱 ・・圸﨑ｩ・壱共. ・ｼ・戦・・ ・ｴ・菩揆 ・倣葺・・ ・ｼ・們捩 ・溢菩・愍・・・呷梠﨑ｩ・壱共."),
+            text=t("soft/일반 뱅크용 프리셋을 한 번에 적용합니다. 민감형은 보정을 강하게, 일반은 안정적으로 동작합니다."),
             text_color=PALETTE.hint_text,
             wraplength=730,
             justify="left",
@@ -1912,7 +1934,7 @@ class TabBuildersMixin:
 
         btn_soft_agg = ctk.CTkButton(
             preset_grid,
-            text=t("soft ・・〓 ﾂｷ ・ｼ・戦・"),
+            text=t("soft 뱅크 · 민감형"),
             width=170,
             command=lambda: self._on_voicebank_preset_button("soft", "aggressive"),
         )
@@ -1921,7 +1943,7 @@ class TabBuildersMixin:
 
         btn_soft_cons = ctk.CTkButton(
             preset_grid,
-            text=t("Option"),
+            text=t("soft 뱅크 · 일반"),
             width=170,
             command=lambda: self._on_voicebank_preset_button("soft", "conservative"),
         )
@@ -1930,7 +1952,7 @@ class TabBuildersMixin:
 
         btn_normal_agg = ctk.CTkButton(
             preset_grid,
-            text=t("・ｼ・・・・〓 ﾂｷ ・ｼ・戦・"),
+            text=t("일반 뱅크 · 민감형"),
             width=170,
             command=lambda: self._on_voicebank_preset_button("normal", "aggressive"),
         )
@@ -1939,7 +1961,7 @@ class TabBuildersMixin:
 
         btn_normal_cons = ctk.CTkButton(
             preset_grid,
-            text=t("Option"),
+            text=t("일반 뱅크 · 일반"),
             width=170,
             command=lambda: self._on_voicebank_preset_button("normal", "conservative"),
         )
@@ -1980,7 +2002,7 @@ class TabBuildersMixin:
         _sync_pronunciation_missing_reduce_state()
         self.soft_bank_mode_checkbox = ctk.CTkCheckBox(
             basic_toggle_frame,
-            text=t("・懍搆 ・・攷 ・・擽・ｰ"),
+            text=t("발음 누락 줄이기"),
             text_color="#6F819A",
             variable=self.soft_bank_mode_var,
             command=_on_pronunciation_missing_reduce_toggle,
@@ -1988,7 +2010,7 @@ class TabBuildersMixin:
         self.soft_bank_mode_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
         soft_bank_help_label = ctk.CTkLabel(
             basic_toggle_frame,
-            text=t("・ｨ・誤ｦｬ/・ｽ﨑・・懍┳・川・ ・・攷ﾂｷ・ｵ・ｱ ・､・・懍揆 ・・桿・壱共. (soft ・・〓 + ・尖ｪｨ ・・・・ｴ・・﨑ｨ・・・・圸)"),
+            text=t("숨소리/약한 발성에서 누락·공백 오검출을 줄입니다. (soft 뱅크 + 자모 대비 보정 함께 적용)"),
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=730,
@@ -1998,7 +2020,7 @@ class TabBuildersMixin:
 
         self.low_rms_gain_enable_checkbox = ctk.CTkCheckBox(
             basic_toggle_frame,
-            text=t("・・ｼ・ｨ WAV ・尖徐 ・晨少/・母ｷ懦剩 (RMS ・ｰ・・ ・尖ｳｸ ・ｴ・ｴ)"),
+            text=t("저볼륨 WAV 자동 증폭/정규화 (RMS 기반, 원본 보존)"),
             text_color="#6F819A",
             variable=self.low_rms_gain_enable_var,
             command=self._save_config,
@@ -2006,7 +2028,7 @@ class TabBuildersMixin:
         self.low_rms_gain_enable_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
         low_rms_help_label = ctk.CTkLabel(
             basic_toggle_frame,
-            text=t("・簿ｬ ・ｨ・・乱・罹ｧ・・・亨 ・卓羅 ・ｵ・ｬ・ｸ・・・ｼ・ｨ ・ｴ・菩揆 ・・圸﨑ｩ・壱共. ・尖ｳｸ WAV 甯護攵・ ・壱劇 ・・ｽ﨑們ｧ ・喜慣・壱共."),
+            text=t("정렬 단계에서만 임시 작업 복사본에 볼륨 보정을 적용합니다. 원본 WAV 파일은 절대 변경하지 않습니다."),
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=730,
@@ -2018,7 +2040,7 @@ class TabBuildersMixin:
         weak_voice_strength_row.pack(fill="x", padx=34, pady=(0, 10))
         self.weak_voice_strength_title_label = ctk.CTkLabel(
             weak_voice_strength_row,
-            text=t("・尖ｪｨ ・・・・簿巡"),
+            text=t("자모 대비 강도"),
             width=130,
             anchor="w",
             text_color=PALETTE.neutral_text,
@@ -2079,7 +2101,7 @@ class TabBuildersMixin:
         mapping_strict_row.pack(fill="x", padx=12, pady=(0, 4))
         ctk.CTkLabel(
             mapping_strict_row,
-            text=t("・護・・､・､﨑・・ｨ・ｨ"),
+            text=t("음절 오매핑 차단"),
             text_color=PALETTE.neutral_text,
             width=130,
             anchor="w",
@@ -2089,7 +2111,7 @@ class TabBuildersMixin:
             values=(
                 self._get_mapping_strict_mode_option_labels()
                 if hasattr(self, "_get_mapping_strict_mode_option_labels")
-                else ["・・・・・ｲｩ", "・・胸德・・・ｲｩ(・・攷 嵂餓捩 尞ｴ・ｱ)", "off"]
+                else ["완전 엄격", "적당히 엄격(누락 행은 폴백)", "off"]
             ),
             variable=self.mapping_strict_mode_var,
             width=260,
@@ -2099,7 +2121,7 @@ class TabBuildersMixin:
         mapping_strict_menu.pack(side="left", padx=(10, 0))
         mapping_strict_help_label = ctk.CTkLabel(
             basic_toggle_frame,
-            text=t("・護溢揆 寀・ｴ ・・･・ｱ・・・・擽・・・・, ・尖徐 ・､・菩乱・・・､墲ｵ・俯株 ・川攵・ｬ・ｴ・､・ ・們牟・ ・・・溢慣・壱共."),
+            text=t("음절을 틀릴 가능성을 줄이는 대신, 자동 설정에서 스킵되는 에일리어스가 늘어날 수 있습니다."),
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=730,
@@ -2107,7 +2129,7 @@ class TabBuildersMixin:
         mapping_strict_help_label.pack(anchor="w", padx=34, pady=(0, 8))
         self.low_conf_force_lock_mode_checkbox = ctk.CTkCheckBox(
             basic_toggle_frame,
-            text=t("Option"),
+            text=t("저신뢰 구간 강제 고정 모드"),
             text_color=PALETTE.neutral_text,
             variable=self.low_conf_force_lock_mode_var,
             command=self._save_config,
@@ -2115,7 +2137,7 @@ class TabBuildersMixin:
         self.low_conf_force_lock_mode_checkbox.pack(anchor="w", padx=12, pady=(0, 4))
         low_conf_force_lock_help_label = ctk.CTkLabel(
             basic_toggle_frame,
-            text=t("・簿ｬ ・・ｰ・ ・ｮ・ ・ｬ・・乱・罹株 弡・ｳｴ ・戦売・ｼ ・賀ｳ ・溢メ ・・ｹ們乱 ・・倣鮒・壱共."),
+            text=t("정렬 신뢰가 낮은 구간에서는 후보 점프를 막고 예상 위치에 고정합니다."),
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=730,
@@ -2145,8 +2167,8 @@ class TabBuildersMixin:
     def _slot_advanced_ml_section(self, parent, _layout_root, _node):
         public_ml_frame = self._ui_section(
             parent,
-            "Option",
-            "・ｰ・ｸ ・ｴ・・・ｨ・懍凰 ・・OTO ・ｴ・菩揆 ・・ｴ・・・ｰ・逸鮒・壱共.",
+            "ML 보정 옵션",
+            "기본 보정 모드와 멜+OTO 보정을 빠르게 조절합니다.",
         )
         self.advanced_ml_public_frame = public_ml_frame
 
@@ -2154,7 +2176,7 @@ class TabBuildersMixin:
         selector_row.pack(anchor="w", padx=12, pady=(2, 6), fill="x")
         ctk.CTkLabel(
             selector_row,
-            text=t("Option"),
+            text=t("ML 보정 모드"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left")
 
@@ -2163,13 +2185,13 @@ class TabBuildersMixin:
             mode_code = self._normalize_ml_selector_mode(
                 self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "selector"
             )
-        mode_label = "delta" if mode_code == "delta" else "additive"
+        mode_label = "상대적 보정" if mode_code == "delta" else "+셀렉터"
         if hasattr(self, "ml_selector_mode_var"):
             self.ml_selector_mode_var.set(mode_label)
 
         self.ml_selector_mode_segment = ctk.CTkSegmentedButton(
             selector_row,
-            values=["auto", "additive"],
+            values=["상대적 보정", "+셀렉터"],
             variable=self.ml_selector_mode_var,
             command=lambda _value: self._save_config(),
         )
@@ -2177,7 +2199,7 @@ class TabBuildersMixin:
 
         selector_help = ctk.CTkLabel(
             public_ml_frame,
-            text=t("Option"),
+            text=t("상대적 보정=델타 기반, +셀렉터=후보 비교로 안정 보정"),
             text_color=PALETTE.hint_text,
             justify="left",
             wraplength=720,
@@ -2187,7 +2209,7 @@ class TabBuildersMixin:
 
         self.ml_coupled_enable_checkbox = ctk.CTkCheckBox(
             public_ml_frame,
-            text=t("・・OTO ・ｴ・・・ｬ・ｩ"),
+            text=t("멜+OTO 보정 사용"),
             text_color="#5F8C87",
             variable=self.ml_coupled_enable_var,
             command=self._save_config,
@@ -2206,9 +2228,31 @@ class TabBuildersMixin:
         if not hasattr(self, "mapping_supervised_enable_var"):
             self.mapping_supervised_enable_var = ctk.BooleanVar(value=True)
 
+        self.cvn_correction_enable_checkbox = self._ui_checkbox(
+            ml_frame,
+            text=t("자음 구분기(C/V) 보정 사용"),
+            text_color="#5F8C87",
+            variable=self.cvn_correction_enable_var,
+            command=(
+                self._on_cvn_correction_toggle
+                if hasattr(self, "_on_cvn_correction_toggle")
+                else self._save_config
+            ),
+        )
+
+        self.cvn_low_conf_only_checkbox = self._ui_checkbox(
+            ml_frame,
+            text=t("정렬 저신뢰 샘플에만 C/V 후보정 적용"),
+            text_color=PALETTE.neutral_text,
+            variable=self.cvn_low_conf_only_var,
+            command=self._save_config,
+            padx=34,
+            pady=(0, 4),
+        )
+
         self.mapping_supervised_enable_checkbox = ctk.CTkCheckBox(
             ml_frame,
-            text=t("Syllable 弡・ｳｴ・・・ｬ・ｩ (・簿ｬ ・ｰ・・・・・ｵ・､)"),
+            text=t("Syllable 후보정 사용 (정렬 기반 멜 앵커)"),
             text_color="#5F8C87",
             variable=self.mapping_supervised_enable_var,
             command=(
@@ -2223,7 +2267,7 @@ class TabBuildersMixin:
         mapping_supervised_row.pack(anchor="w", padx=12, pady=(4, 8), fill="x")
         ctk.CTkLabel(
             mapping_supervised_row,
-            text=t("Option"),
+            text=t("Syllable 후보정 모드"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left")
         self.mapping_supervised_mode_menu = ctk.CTkOptionMenu(
@@ -2231,7 +2275,7 @@ class TabBuildersMixin:
             values=(
                 self._get_mapping_supervised_mode_option_labels()
                 if hasattr(self, "_get_mapping_supervised_mode_option_labels")
-                else ["・尖徐(・護棗)", "・・・ｵ・､ ・卓峡", "mel+aic", "mel+align"]
+                else ["자동(권장)", "멜 앵커 중심", "mel+aic", "mel+align"]
             ),
             variable=self.mapping_supervised_mode_var,
             width=200,
@@ -2244,7 +2288,7 @@ class TabBuildersMixin:
         cv_order_row.pack(anchor="w", padx=12, pady=(0, 8), fill="x")
         self.cv_order_prior_enable_checkbox = ctk.CTkCheckBox(
             cv_order_row,
-            text=t("CV ・懍・ prior ・ｴ・・・ｬ・ｩ"),
+            text=t("CV 순서 prior 보정 사용"),
             text_color="#5F8C87",
             variable=self.cv_order_prior_enable_var,
             command=self._save_config,
@@ -2252,14 +2296,14 @@ class TabBuildersMixin:
         self.cv_order_prior_enable_checkbox.pack(side="left")
         ctk.CTkLabel(
             cv_order_row,
-            text=t("・簿巡"),
+            text=t("강도"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left", padx=(10, 4))
         cv_prior_entry = ctk.CTkEntry(
             cv_order_row,
             width=70,
             textvariable=self.cv_order_prior_strength_var,
-            placeholder_text=t("auto"),
+            placeholder_text=t("기본값"),
         )
         cv_prior_entry.pack(side="left", padx=(0, 6))
         cv_prior_entry.bind("<FocusOut>", lambda _e: self._save_config())
@@ -2268,20 +2312,20 @@ class TabBuildersMixin:
         threshold_row.pack(anchor="w", padx=12, pady=(0, 8), fill="x")
         ctk.CTkLabel(
             threshold_row,
-            text=t("Option"),
+            text=t("Syllable 후보정 임계값"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left")
         threshold_entry = ctk.CTkEntry(
             threshold_row,
             width=70,
             textvariable=self.kr_mapping_confidence_threshold_var,
-            placeholder_text=t("auto"),
+            placeholder_text=t("기본값"),
         )
         threshold_entry.pack(side="left", padx=(10, 6))
         threshold_entry.bind("<FocusOut>", lambda _e: self._save_config())
         ctk.CTkLabel(
             threshold_row,
-            text=t("・廷擽 ・廷揆・俯｡・弡・ｳｴ・・・・圸 ・肥怱・ｼ ・・棘・壱共."),
+            text=t("값이 높을수록 후보정 적용 범위를 좁힙니다."),
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(4, 0))
         self.mapping_supervised_dependent_frames = [
@@ -2294,7 +2338,7 @@ class TabBuildersMixin:
         route_row.pack(anchor="w", padx=12, pady=(4, 8), fill="x")
         ctk.CTkLabel(
             route_row,
-            text=t("Option"),
+            text=t("ML 라우팅"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left")
         route_menu = ctk.CTkOptionMenu(
@@ -2302,7 +2346,7 @@ class TabBuildersMixin:
             values=(
                 self._get_ml_route_option_labels()
                 if hasattr(self, "_get_ml_route_option_labels")
-                else ["・尖徐(・尖徐 ・ｼ・ｰ甯・", "No-MFA", "v1", "v2", "E2E 﨑們擽・誤ｦｬ・・・､嵭・"]
+                else ["자동(자동 라우팅)", "No-MFA", "v1", "v2", "E2E 하이브리드(실험)"]
             ),
             variable=self.ml_route_var,
             width=180,
@@ -2313,7 +2357,7 @@ class TabBuildersMixin:
         route_menu.pack(side="left", padx=(10, 8))
         ctk.CTkLabel(
             route_row,
-            text=t("Option"),
+            text=t("자동=환경 기반 라우팅, No-MFA=정렬 없이 보정, v1=기존, v2=확장, E2E=실험"),
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(4, 0))
 
@@ -2321,14 +2365,14 @@ class TabBuildersMixin:
         coupled_row.pack(anchor="w", padx=12, pady=(6, 0), fill="x")
         ctk.CTkLabel(
             coupled_row,
-            text=t("Option"),
+            text=t("Coupled 최소 신뢰도"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left")
         coupled_conf_entry = ctk.CTkEntry(
             coupled_row,
             width=70,
             textvariable=self.ml_coupled_min_conf_var,
-            placeholder_text=t("auto"),
+            placeholder_text=t("기본값"),
         )
         coupled_conf_entry.pack(side="left", padx=(10, 8))
         coupled_conf_entry.bind("<FocusOut>", lambda _e: self._save_config())
@@ -2348,7 +2392,7 @@ class TabBuildersMixin:
         coupled_device_menu.pack(side="left", padx=(0, 8))
         ctk.CTkCheckBox(
             coupled_row,
-            text=t("Strict ・懍平"),
+            text=t("Strict 제약"),
             text_color=PALETTE.neutral_text,
             variable=self.ml_coupled_strict_constraint_var,
             command=self._save_config,
@@ -2358,7 +2402,7 @@ class TabBuildersMixin:
         model_conf_row.pack(anchor="w", padx=12, pady=(4, 0), fill="x")
         ctk.CTkCheckBox(
             model_conf_row,
-            text=t("Model-aware min_conf (model_meta) ・ｬ・ｩ"),
+            text=t("Model-aware min_conf (model_meta) 사용"),
             text_color="#5F8C87",
             variable=self.ml_coupled_min_conf_use_model_meta_var,
             command=self._save_config,
@@ -2412,7 +2456,7 @@ class TabBuildersMixin:
 
         batch_enable_checkbox = ctk.CTkCheckBox(
             ml_frame,
-            text=t("Batch inference (coupled v2) ・ｬ・ｩ"),
+            text=t("Batch inference (coupled v2) 사용"),
             text_color="#5F8C87",
             variable=self.ml_batch_inference_enable_var,
             command=self._save_config,
@@ -2436,13 +2480,13 @@ class TabBuildersMixin:
         batch_size_entry.bind("<FocusOut>", lambda _e: self._save_config())
         ctk.CTkLabel(
             batch_row,
-            text=t("(・護棗 128~512, ・懍・ 32)"),
+            text=t("(권장 128~512, 최소 32)"),
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(4, 0))
 
         legacy_fallback_checkbox = ctk.CTkCheckBox(
             ml_frame,
-            text=t("v1 fallback(lightgbm) ・ｴ・ｸ ・ｬ・ｩ"),
+            text=t("v1 fallback(lightgbm) 체인 사용"),
             text_color=PALETTE.neutral_text,
             variable=self.ml_legacy_fallback_enable_var,
             command=self._save_config,
@@ -2451,7 +2495,7 @@ class TabBuildersMixin:
 
         hybrid_routing_checkbox = ctk.CTkCheckBox(
             ml_frame,
-            text=t("﨑們擽・誤ｦｬ・・・ｼ・ｰ甯・・・卓ｹ・・護擽孖ｸ) ・ｬ・ｩ"),
+            text=t("하이브리드 라우팅(가중치 게이트) 사용"),
             text_color="#5F8C87",
             variable=self.ml_hybrid_routing_enable_var,
             command=self._save_config,
@@ -2460,7 +2504,7 @@ class TabBuildersMixin:
 
         e2e_toggle_checkbox = ctk.CTkCheckBox(
             ml_frame,
-            text=t("Option"),
+            text=t("E2E 하이브리드(실험) 활성화"),
             text_color="#5F8C87",
             variable=self.ml_e2e_enable_var,
             command=(
@@ -2475,7 +2519,7 @@ class TabBuildersMixin:
         e2e_mode_row.pack(anchor="w", padx=12, pady=(2, 0), fill="x")
         ctk.CTkLabel(
             e2e_mode_row,
-            text=t("Option"),
+            text=t("E2E 모드"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left")
         e2e_mode_menu = ctk.CTkOptionMenu(
@@ -2489,7 +2533,7 @@ class TabBuildersMixin:
         e2e_mode_menu.pack(side="left", padx=(10, 8))
         ctk.CTkLabel(
             e2e_mode_row,
-            text=t("(・護棗: hybrid)"),
+            text=t("(권장: hybrid)"),
             text_color=PALETTE.hint_text,
         ).pack(side="left", padx=(2, 0))
 
@@ -2551,7 +2595,7 @@ class TabBuildersMixin:
             self.ml_coupled_status_detail_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             detail_row,
-            text=t("・川┷德・・ｴ・ｰ (・ｽ・・・・・・晧┳・ｼ)"),
+            text=t("자세히 보기 (경로/버전/생성일)"),
             text_color=PALETTE.neutral_text,
             variable=self.ml_coupled_status_detail_var,
             command=lambda: self._on_ml_backend_detail_toggle(),
@@ -2569,7 +2613,7 @@ class TabBuildersMixin:
             btn_width = 90
             browse_btn = ctk.CTkButton(
                 btn_row,
-                text=t("・ｾ・・ｳｴ・ｰ"),
+                text=t("찾아보기"),
                 width=btn_width,
                 command=lambda v=var: (
                     self._browse_folder_by_var(v, initial_dir=self._preferred_ml_model_browse_dir(v)),
@@ -2580,7 +2624,7 @@ class TabBuildersMixin:
             browse_btn.pack(side="right")
             open_btn = ctk.CTkButton(
                 btn_row,
-                text=t("・ｴ・ｰ"),
+                text=t("열기"),
                 width=btn_width,
                 command=lambda v=var: os.startfile(str(v.get()).strip()) if os.path.isdir(str(v.get()).strip()) else None,
             )
@@ -2589,12 +2633,12 @@ class TabBuildersMixin:
             return ent
 
         if hasattr(self, "ml_model_root_kr_var"):
-            _model_root_row("・ｨ・ｸ ・ｽ・・(﨑懋ｵｭ・ｴ)", self.ml_model_root_kr_var)
+            _model_root_row("모델 경로 (한국어)", self.ml_model_root_kr_var)
         if hasattr(self, "ml_model_root_ja_var"):
-            _model_root_row("・ｨ・ｸ ・ｽ・・(・ｼ・ｸ・ｴ)", self.ml_model_root_ja_var)
+            _model_root_row("모델 경로 (일본어)", self.ml_model_root_ja_var)
         ctk.CTkLabel(
             ml_frame,
-            text=t("・ｽ・罹株 ・ｨ・ｸ 尞ｴ・・・ｴ・・・model_meta.json) ・尖株 ・・怱 ・ｨ孖ｸ・ｼ ・・倣腹 ・・・溢慣・壱共."),
+            text=t("경로는 모델 폴더(내부에 model_meta.json) 또는 상위 루트를 지정할 수 있습니다."),
             text_color=PALETTE.hint_text,
             wraplength=740,
             justify="left",
@@ -2631,8 +2675,8 @@ class TabBuildersMixin:
 
         vc_frame = self._ui_section(
             dev_container,
-            "Option",
-            "・ｰ・ｸ UI・川・・・・ｴ・・・ｬ・ｩ ・ｬ・・・・夋晨鮒・壱共. ・ｸ・ ・ｬ・ｼ・ｴ・罷株 ・罹ｰ懍梵 ・､・・ON・ｼ ・誤ｧ・嶹懍┳嶹罷姓・壱共.",
+            "VC 보정",
+            "기본 UI에서는 보정 사용 여부만 선택합니다. 세부 슬라이더는 개발자 설정 ON일 때만 활성화됩니다.",
         )
 
         self.vc_neighbor_detail_controls = []
@@ -2670,7 +2714,7 @@ class TabBuildersMixin:
             slider.pack(side="right", fill="x", expand=True, padx=8)
             ctk.CTkLabel(
                 row,
-                text=f"嶹俾ｲｽ・・・ {env_key}",
+                text=f"환경변수: {env_key}",
                 text_color=PALETTE.hint_text,
                 anchor="w",
             ).pack(side="left", padx=(6, 0))
@@ -2688,10 +2732,10 @@ class TabBuildersMixin:
 
         kr_box = ctk.CTkFrame(vc_frame)
         kr_box.pack(fill="x", padx=10, pady=(2, 8))
-        ctk.CTkLabel(kr_box, text=t("﨑懋ｵｭ・ｴ (KR)"), font=("", 13, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
+        ctk.CTkLabel(kr_box, text=t("한국어 (KR)"), font=("", 13, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
         ctk.CTkCheckBox(
             kr_box,
-            text=t("VC ・ｴ・・・ｴ・・・ｬ・ｩ"),
+            text=t("VC 이웃 보정 사용"),
             variable=self.kr_vc_neighbor_enable_var,
             command=self._on_vc_neighbor_language_toggle,
         ).pack(anchor="w", padx=15, pady=(0, 4))
@@ -2699,7 +2743,7 @@ class TabBuildersMixin:
         self.vc_neighbor_detail_frames.append(kr_detail)
         _add_env_slider(
             kr_detail,
-            "・ｴ・・・簿巡(Blend)",
+            "보정 강도(Blend)",
             "UTOA_KR_VC_NEIGHBOR_BLEND",
             self.kr_vc_neighbor_blend_var,
             min_val=0.0,
@@ -2710,7 +2754,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             kr_detail,
-            "・罹劇 ・ｴ・・ms)",
+            "최대 이동(ms)",
             "UTOA_KR_VC_NEIGHBOR_MAX_SHIFT",
             self.kr_vc_neighbor_max_shift_var,
             min_val=0.0,
@@ -2721,7 +2765,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             kr_detail,
-            "・ｴ・・・ｷ・､嵓・・ｰ・ ・ｬ・(ms)",
+            "이전 컷오프 기준 여유(ms)",
             "UTOA_KR_VC_NEIGHBOR_LEAD_MS",
             self.kr_vc_neighbor_lead_ms_var,
             min_val=0.0,
@@ -2732,7 +2776,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             kr_detail,
-            "・､・・・､嵓・・ ・ｰ・ ・ｬ・(ms)",
+            "다음 오프셋 기준 여유(ms)",
             "UTOA_KR_VC_NEIGHBOR_TAIL_MS",
             self.kr_vc_neighbor_tail_ms_var,
             min_val=0.0,
@@ -2743,7 +2787,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             kr_detail,
-            "・懍・ VC ・ｸ・ｴ(ms)",
+            "최소 VC 길이(ms)",
             "UTOA_KR_VC_NEIGHBOR_MIN_LEN",
             self.kr_vc_neighbor_min_len_var,
             min_val=0.0,
@@ -2755,10 +2799,10 @@ class TabBuildersMixin:
 
         ja_box = ctk.CTkFrame(vc_frame)
         ja_box.pack(fill="x", padx=10, pady=(2, 8))
-        ctk.CTkLabel(ja_box, text=t("・ｼ・ｸ・ｴ (JA)"), font=("", 13, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
+        ctk.CTkLabel(ja_box, text=t("일본어 (JA)"), font=("", 13, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
         ctk.CTkCheckBox(
             ja_box,
-            text=t("VC ・ｴ・・・ｴ・・・ｬ・ｩ"),
+            text=t("VC 이웃 보정 사용"),
             variable=self.ja_vc_neighbor_enable_var,
             command=self._on_vc_neighbor_language_toggle,
         ).pack(anchor="w", padx=15, pady=(0, 4))
@@ -2766,7 +2810,7 @@ class TabBuildersMixin:
         self.vc_neighbor_detail_frames.append(ja_detail)
         _add_env_slider(
             ja_detail,
-            "・ｴ・・・簿巡(Blend)",
+            "보정 강도(Blend)",
             "UTOA_JA_VC_NEIGHBOR_BLEND",
             self.ja_vc_neighbor_blend_var,
             min_val=0.0,
@@ -2777,7 +2821,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             ja_detail,
-            "・罹劇 ・ｴ・・ms)",
+            "최대 이동(ms)",
             "UTOA_JA_VC_NEIGHBOR_MAX_SHIFT",
             self.ja_vc_neighbor_max_shift_var,
             min_val=0.0,
@@ -2788,7 +2832,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             ja_detail,
-            "・ｴ・・・ｷ・､嵓・・ｰ・ ・ｬ・(ms)",
+            "이전 컷오프 기준 여유(ms)",
             "UTOA_JA_VC_NEIGHBOR_LEAD_MS",
             self.ja_vc_neighbor_lead_ms_var,
             min_val=0.0,
@@ -2799,7 +2843,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             ja_detail,
-            "・､・・・､嵓・・ ・ｰ・ ・ｬ・(ms)",
+            "다음 오프셋 기준 여유(ms)",
             "UTOA_JA_VC_NEIGHBOR_TAIL_MS",
             self.ja_vc_neighbor_tail_ms_var,
             min_val=0.0,
@@ -2810,7 +2854,7 @@ class TabBuildersMixin:
         )
         _add_env_slider(
             ja_detail,
-            "・懍・ VC ・ｸ・ｴ(ms)",
+            "최소 VC 길이(ms)",
             "UTOA_JA_VC_NEIGHBOR_MIN_LEN",
             self.ja_vc_neighbor_min_len_var,
             min_val=0.0,
@@ -2833,7 +2877,7 @@ class TabBuildersMixin:
         aligner_frame.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(
             aligner_frame,
-            text=t("・・・・簿ｬ ・肥ｧ・・ｵ・們捩 嶸・椪 ・懋ｳｵ﨑們ｧ ・喜慣・壱共."),
+            text=t("고급 정렬 엔진 옵션은 현재 제공하지 않습니다."),
             text_color=PALETTE.neutral_text,
             wraplength=740,
             justify="left",
@@ -2842,7 +2886,7 @@ class TabBuildersMixin:
         mfa_free_preview_row.pack(fill="x", padx=12, pady=(0, 10))
         self.mfa_free_oto_preview_btn = ctk.CTkButton(
             mfa_free_preview_row,
-            text=t("MFA-Free SSL ・ｬ・ｯ ・ｴ・啄┣ 奛護侃孖ｸ"),
+            text=t("MFA-Free SSL 슬롯 어댑터 테스트"),
             width=230,
             height=28,
             command=lambda: self._run_mfa_free_oto_preview_from_ui(),
@@ -2851,7 +2895,7 @@ class TabBuildersMixin:
         self.mfa_free_oto_preview_btn.pack(side="left", padx=(0, 10))
         self.mfa_free_oto_preview_hint = ctk.CTkLabel(
             mfa_free_preview_row,
-            text=t("嶸・椪 WAV/奛懦伯・ｿ ・ｰ・・ｼ・・preview oto.ini, anchor JSON, overlay HTML・・・晧┳﨑ｩ・壱共."),
+            text=t("현재 WAV/템플릿 기준으로 preview oto.ini, anchor JSON, overlay HTML을 생성합니다."),
             text_color=PALETTE.hint_text,
             wraplength=620,
             justify="left",
@@ -2862,7 +2906,7 @@ class TabBuildersMixin:
         dev_reset_row.pack(fill="x", padx=10, pady=(8, 10))
         reset_btn = ctk.CTkButton(
             dev_reset_row,
-            text=t("Option"),
+            text=t("개발자 설정 초기화"),
             width=170,
             height=28,
             fg_color=PALETTE.danger_button_bg,

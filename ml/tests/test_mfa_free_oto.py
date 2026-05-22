@@ -8,7 +8,13 @@ import numpy as np
 import pytest
 
 from core.mfa_free_oto.decode import decode_monotonic_events
+from core.mfa_free_oto.acoustic_nucleus import (
+    AcousticNucleusConfig,
+    relabel_vowel_nuclei_from_batch,
+    select_acoustic_nucleus,
+)
 from core.mfa_free_oto.features import extract_features
+from core.mfa_free_oto.features import FeatureBatch
 from core.mfa_free_oto.htk_lab import (
     build_gold_manifest_from_htk_lab_dirs,
     classify_htk_phone,
@@ -200,6 +206,80 @@ def test_acoustic_world_v1_features_available_when_dependencies_installed(tmp_pa
     assert "world_nucleus" in world.acoustic_scores
     assert "transition_likelihood" in world.acoustic_scores
     assert float(np.max(np.asarray(world.acoustic_scores["world_voicing"], dtype=np.float32))) >= 0.0
+
+
+def test_acoustic_nucleus_relabel_preserves_lab_midpoint_diagnostic():
+    times = np.asarray([0.0, 40.0, 80.0, 120.0, 160.0, 200.0], dtype=np.float32)
+    batch = FeatureBatch(
+        times_ms=times,
+        features=np.zeros((len(times), 4), dtype=np.float32),
+        sample_rate=16000,
+        duration_ms=220.0,
+        encoder="test",
+        acoustic_scores={
+            "world_nucleus": np.asarray([0.0, 0.1, 0.4, 1.0, 0.5, 0.0], dtype=np.float32),
+            "world_voicing": np.asarray([0.0, 0.2, 0.6, 1.0, 0.6, 0.0], dtype=np.float32),
+            "world_periodicity": np.asarray([0.0, 0.1, 0.5, 1.0, 0.7, 0.0], dtype=np.float32),
+            "world_spectral_stability": np.asarray([0.0, 0.2, 0.5, 0.9, 0.6, 0.0], dtype=np.float32),
+            "rms": np.asarray([0.0, 0.2, 0.6, 0.9, 0.6, 0.0], dtype=np.float32),
+            "silence_likelihood": np.asarray([1.0, 0.4, 0.1, 0.0, 0.1, 0.8], dtype=np.float32),
+        },
+    )
+    row = {
+        "row_id": "a-ka",
+        "wav_path": "a-ka.wav",
+        "label_source": "manual_gold",
+        "frame_labels": [
+            {"label": "vowel", "start_ms": 40.0, "end_ms": 200.0, "phone": "a"},
+        ],
+        "events": [
+            {
+                "label": "vowel_nucleus",
+                "time_ms": 120.0,
+                "phone": "a",
+                "source": "htk_vowel_segment_midpoint_pseudo_gold",
+            }
+        ],
+    }
+    selected = select_acoustic_nucleus(
+        batch,
+        start_ms=40.0,
+        end_ms=200.0,
+        config=AcousticNucleusConfig(edge_margin_ms=0.0),
+    )
+    assert selected["time_ms"] == pytest.approx(120.0)
+
+    shifted_scores = {
+        key: np.asarray([0.0, 0.1, 1.0, 0.3, 0.2, 0.0], dtype=np.float32)
+        for key in (
+            "world_nucleus",
+            "world_voicing",
+            "world_periodicity",
+            "world_spectral_stability",
+            "rms",
+        )
+    }
+    shifted_scores["silence_likelihood"] = np.asarray([1.0, 0.4, 0.0, 0.1, 0.2, 0.8], dtype=np.float32)
+    shifted = FeatureBatch(
+        times_ms=times,
+        features=batch.features,
+        sample_rate=batch.sample_rate,
+        duration_ms=batch.duration_ms,
+        encoder=batch.encoder,
+        acoustic_scores=shifted_scores,
+    )
+    relabelled, summary = relabel_vowel_nuclei_from_batch(
+        row,
+        shifted,
+        config=AcousticNucleusConfig(edge_margin_ms=0.0),
+    )
+    nucleus = [event for event in relabelled["events"] if event["label"] == "vowel_nucleus"][0]
+    assert nucleus["source"] == "acoustic_recomputed"
+    assert nucleus["time_ms"] == pytest.approx(80.0)
+    assert nucleus["lab_midpoint_time_ms"] == pytest.approx(120.0)
+    assert nucleus["lab_midpoint_shift_ms"] == pytest.approx(-40.0)
+    assert any(event["label"] == "vowel_nucleus_lab_midpoint" for event in relabelled["auxiliary_events"])
+    assert summary["relabelled_events"] == 1
 
 
 def test_manifest_audit_flags_slot_eligibility_and_clean_rows(tmp_path):
@@ -928,6 +1008,217 @@ def test_runtime_rejects_checkpoint_metadata_mismatch_and_falls_back_rule_based(
     reason = str(result.posterior.metadata.get("rule_fallback_reason") or "")
     assert "checkpoint_inference_failed" in reason
     assert "checkpoint_format_mismatch" in reason
+
+
+def test_read_wav_mono_supports_24bit_pcm(tmp_path):
+    from core.mfa_free_oto.features import read_wav_mono
+
+    wav_path = tmp_path / "pcm24.wav"
+    values = [-8388608, -1024, 0, 1024, 8388607]
+    payload = bytearray()
+    for value in values:
+        raw = int(value).to_bytes(4, byteorder="little", signed=True)
+        payload.extend(raw[:3])
+    with wave.open(str(wav_path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(3)
+        handle.setframerate(16000)
+        handle.writeframes(bytes(payload))
+
+    samples, sample_rate = read_wav_mono(wav_path)
+    assert sample_rate == 16000
+    assert samples.shape == (len(values),)
+    assert samples[0] == pytest.approx(-1.0)
+    assert samples[-1] == pytest.approx(8388607 / 8388608.0)
+
+
+def test_manual_oto_monotonic_decoder_prefers_ordered_path():
+    from core.mfa_free_oto.manual_oto_decoder import CandidateOption, decode_monotonic_candidate_indices
+
+    rows = [
+        [
+            CandidateOption(candidate_index=0, time_ms=100.0, score=0.60, order_norm=0.0, slot_pos_norm=0.0),
+            CandidateOption(candidate_index=9, time_ms=900.0, score=0.95, order_norm=1.0, slot_pos_norm=0.0),
+        ],
+        [
+            CandidateOption(candidate_index=1, time_ms=200.0, score=0.90, order_norm=0.0, slot_pos_norm=0.5),
+        ],
+        [
+            CandidateOption(candidate_index=2, time_ms=300.0, score=0.92, order_norm=0.0, slot_pos_norm=1.0),
+        ],
+    ]
+    selected = decode_monotonic_candidate_indices(rows, order_penalty=0.0)
+    assert selected == [0, 1, 2]
+
+
+def test_manual_oto_joint_anchor_lattice_enforces_anchor_order():
+    from core.mfa_free_oto.manual_oto_decoder import (
+        CandidateOption,
+        build_joint_anchor_options,
+        decode_joint_anchor_lattice,
+    )
+
+    row0 = build_joint_anchor_options(
+        {
+            "offset": [
+                CandidateOption(candidate_index=10, time_ms=180.0, score=0.99),
+                CandidateOption(candidate_index=1, time_ms=100.0, score=0.80),
+            ],
+            "overlap": [CandidateOption(candidate_index=2, time_ms=120.0, score=0.80)],
+            "preutterance": [CandidateOption(candidate_index=3, time_ms=150.0, score=0.80)],
+            "fixed_end": [CandidateOption(candidate_index=4, time_ms=210.0, score=0.80)],
+        },
+        top_per_anchor=2,
+    )
+    assert row0
+    assert row0[0].anchor_indices["offset"] == 1
+    assert row0[0].anchor_times_ms["offset"] <= row0[0].anchor_times_ms["overlap"]
+
+    row1 = build_joint_anchor_options(
+        {
+            "offset": [CandidateOption(candidate_index=5, time_ms=300.0, score=0.80)],
+            "overlap": [CandidateOption(candidate_index=6, time_ms=320.0, score=0.80)],
+            "preutterance": [CandidateOption(candidate_index=7, time_ms=350.0, score=0.80)],
+            "fixed_end": [CandidateOption(candidate_index=8, time_ms=410.0, score=0.80)],
+        }
+    )
+    decoded = decode_joint_anchor_lattice([row0, row1])
+    assert decoded[0] is not None
+    assert decoded[1] is not None
+    assert decoded[0].center_time_ms <= decoded[1].center_time_ms
+
+
+def test_manual_oto_joint_lattice_prefers_filename_time_order():
+    from core.mfa_free_oto.manual_oto_decoder import JointAnchorOption, decode_joint_anchor_lattice
+
+    rows = [
+        [
+            JointAnchorOption({"preutterance": 10}, {"preutterance": 800.0}, score=2.0, time_order_norm=0.80, slot_pos_norm=0.20),
+            JointAnchorOption({"preutterance": 1}, {"preutterance": 200.0}, score=1.7, time_order_norm=0.20, slot_pos_norm=0.20),
+        ],
+        [
+            JointAnchorOption({"preutterance": 2}, {"preutterance": 250.0}, score=2.0, time_order_norm=0.25, slot_pos_norm=0.80),
+            JointAnchorOption({"preutterance": 11}, {"preutterance": 820.0}, score=1.7, time_order_norm=0.82, slot_pos_norm=0.80),
+        ],
+    ]
+    decoded = decode_joint_anchor_lattice(rows, time_backward_penalty=12.0, slot_order_penalty=2.0, slot_transition_penalty=2.0)
+    assert decoded[0] is not None
+    assert decoded[1] is not None
+    assert decoded[0].anchor_indices["preutterance"] == 1
+    assert decoded[1].anchor_indices["preutterance"] == 11
+
+
+def test_manual_oto_filename_ordered_rows_use_filename_tokens():
+    from ml.scripts.mfa_free_oto.train_manual_oto_anchor_scorer import _filename_ordered_rows
+
+    rows = [
+        {"wav_name": "ka-ki-ku.wav", "alias": "ku", "slot_index": 0, "slot_count": 3, "language": "japanese"},
+        {"wav_name": "ka-ki-ku.wav", "alias": "ka", "slot_index": 1, "slot_count": 3, "language": "japanese"},
+        {"wav_name": "ka-ki-ku.wav", "alias": "ki", "slot_index": 2, "slot_count": 3, "language": "japanese"},
+    ]
+    ordered = _filename_ordered_rows(rows, require_primary_transition_token=True)
+    assert [row["alias"] for row, _pos in ordered] == ["ka", "ki", "ku"]
+
+
+def test_manual_oto_filename_order_ignores_transition_fallback_only_match():
+    from ml.scripts.mfa_free_oto.train_manual_oto_anchor_scorer import _filename_ordered_rows
+
+    rows = [
+        {
+            "wav_name": "_n-ma-mi-mu-me-mo-mu.wav",
+            "filename_canonical_tokens": ["n", "ma", "mi", "mu", "me", "mo", "mu"],
+            "alias": "n m_E4",
+            "alias_role": "vc",
+            "format_type": "cvvc",
+            "slot_index": 0,
+            "slot_count": 13,
+            "language": "japanese",
+        },
+        {
+            "wav_name": "_n-ma-mi-mu-me-mo-mu.wav",
+            "filename_canonical_tokens": ["n", "ma", "mi", "mu", "me", "mo", "mu"],
+            "alias": "u m_E4",
+            "alias_role": "vc",
+            "format_type": "cvvc",
+            "slot_index": 5,
+            "slot_count": 13,
+            "language": "japanese",
+        },
+        {
+            "wav_name": "_n-ma-mi-mu-me-mo-mu.wav",
+            "filename_canonical_tokens": ["n", "ma", "mi", "mu", "me", "mo", "mu"],
+            "alias": "n my_E4",
+            "alias_role": "vc",
+            "format_type": "cvvc",
+            "slot_index": 10,
+            "slot_count": 13,
+            "language": "japanese",
+        },
+        {
+            "wav_name": "_n-ma-mi-mu-me-mo-mu.wav",
+            "filename_canonical_tokens": ["n", "ma", "mi", "mu", "me", "mo", "mu"],
+            "alias": "i my_E4",
+            "alias_role": "vc",
+            "format_type": "cvvc",
+            "slot_index": 11,
+            "slot_count": 13,
+            "language": "japanese",
+        },
+    ]
+    ordered = _filename_ordered_rows(rows, require_primary_transition_token=True)
+    aliases = [row["alias"] for row, _pos in ordered]
+    assert aliases.index("n my_E4") < aliases.index("u m_E4")
+    assert aliases.index("i my_E4") < aliases.index("u m_E4")
+
+
+def test_manual_oto_row_slot_order_preserves_manifest_slot_index():
+    from ml.scripts.mfa_free_oto.train_manual_oto_anchor_scorer import _row_slot_ordered_rows
+
+    rows = [
+        {"alias": "late", "slot_index": 2, "slot_count": 3},
+        {"alias": "early", "slot_index": 0, "slot_count": 3},
+        {"alias": "middle", "slot_index": 1, "slot_count": 3},
+    ]
+    ordered = _row_slot_ordered_rows(rows)
+    assert [row["alias"] for row, _pos in ordered] == ["early", "middle", "late"]
+    assert [round(pos, 3) for _row, pos in ordered] == [0.167, 0.5, 0.833]
+
+
+def test_manual_oto_alias_family_buckets_cover_common_suffixes():
+    from core.mfa_free_oto.manual_oto_candidates import manual_oto_alias_family
+
+    assert manual_oto_alias_family("ka") == "plain"
+    assert manual_oto_alias_family("ka C4") == "pitch_suffix"
+    assert manual_oto_alias_family("goF4P") == "power_suffix"
+    assert manual_oto_alias_family("ka weak") == "weak_suffix"
+    assert manual_oto_alias_family("a k") == "vowel_transition"
+    assert manual_oto_alias_family("n a") == "leading_n"
+    assert manual_oto_alias_family("br1") == "breath_silence"
+
+
+def test_manual_oto_family_anchor_prior_prefers_transition_side():
+    from ml.scripts.mfa_free_oto.train_manual_oto_anchor_scorer import _family_anchor_prior_score
+
+    row = {
+        "alias": "a k",
+        "alias_role": "vc",
+        "slot_count": 8,
+    }
+    earlier = _family_anchor_prior_score(
+        row,
+        "offset",
+        candidate_time_norm=0.45,
+        slot_pos_norm=0.50,
+        weight=1.0,
+    )
+    much_later = _family_anchor_prior_score(
+        row,
+        "offset",
+        candidate_time_norm=0.72,
+        slot_pos_norm=0.50,
+        weight=1.0,
+    )
+    assert earlier > much_later
 
 
 def _labelled_row(source: str) -> dict:
