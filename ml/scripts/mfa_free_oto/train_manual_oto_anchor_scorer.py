@@ -124,6 +124,32 @@ def _thresholds_arg(value: str) -> tuple[float, ...]:
     return tuple(sorted(set(thresholds)))
 
 
+def _thresholds_by_anchor_arg(value: str) -> dict[str, float]:
+    if not value.strip():
+        return {}
+    thresholds: dict[str, float] = {}
+    for item in value.split(","):
+        text = item.strip()
+        if not text:
+            continue
+        if "=" not in text:
+            raise ValueError("Anchor gate threshold entries must use anchor=value.")
+        anchor, raw_threshold = (part.strip() for part in text.split("=", 1))
+        if anchor not in SCORABLE_ANCHORS:
+            raise ValueError(f"Unsupported anchor threshold key: {anchor!r}; allowed={SCORABLE_ANCHORS}")
+        threshold = float(raw_threshold)
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError(f"Gate threshold must be in [0, 1], got {threshold!r}.")
+        thresholds[anchor] = threshold
+    return thresholds
+
+
+def _threshold_for_anchor(anchor: str, default: float, thresholds_by_anchor: dict[str, float] | None) -> float:
+    if not thresholds_by_anchor:
+        return float(default)
+    return float(thresholds_by_anchor.get(anchor, default))
+
+
 def _target_ms(row: dict[str, object], anchor: str) -> float | None:
     anchors = row.get("anchors_abs_ms") or {}
     if not isinstance(anchors, dict) or anchor not in anchors:
@@ -142,17 +168,68 @@ def _relative_gap_bucket_keys(row: dict[str, object]) -> list[str]:
     format_type = str(row.get("format_type", "") or "").strip().lower() or "*"
     role = str(row.get("alias_role", "") or "").strip().lower() or "*"
     family = manual_oto_alias_family(row.get("alias", ""))
+    bank = str(row.get("voicebank_id", "") or "").strip().lower() or "*"
     return [
+        f"{language}|{format_type}|{role}|{family}|{bank}",
+        f"{language}|{format_type}|{role}|*|{bank}",
         f"{language}|{format_type}|{role}|{family}",
         f"{language}|{format_type}|{role}|*",
+        f"{format_type}|{role}|{family}|{bank}",
+        f"{format_type}|{role}|*|{bank}",
         f"{format_type}|{role}|*",
         f"{role}|*",
         "*",
     ]
 
 
+def _relative_prior_stats(values: list[float], *, ratio: bool = False) -> dict[str, object]:
+    arr = np.asarray(values, dtype=np.float32)
+    if not arr.size:
+        return {
+            "n": 0,
+            "median": None,
+            "p10": None,
+            "p90": None,
+            "iqr": None,
+            "p90_p10": None,
+            "mad": None,
+            "outlier_rate": 1.0,
+            "stable": False,
+        }
+    med = float(np.median(arr))
+    p10 = float(np.percentile(arr, 10.0))
+    p25 = float(np.percentile(arr, 25.0))
+    p75 = float(np.percentile(arr, 75.0))
+    p90 = float(np.percentile(arr, 90.0))
+    iqr = float(p75 - p25)
+    spread = float(p90 - p10)
+    mad = float(np.median(np.abs(arr - med)))
+    if ratio:
+        outlier_band = 0.20
+        stable = arr.size >= 10 and iqr <= 0.18 and spread <= 0.40 and float(np.mean(np.abs(arr - med) > outlier_band)) <= 0.25
+    else:
+        outlier_band = 80.0
+        stable = arr.size >= 12 and iqr <= 70.0 and spread <= 160.0 and float(np.mean(np.abs(arr - med) > outlier_band)) <= 0.25
+    return {
+        "n": int(arr.size),
+        "median": med,
+        "p10": p10,
+        "p90": p90,
+        "iqr": iqr,
+        "p90_p10": spread,
+        "mad": mad,
+        "outlier_rate": float(np.mean(np.abs(arr - med) > outlier_band)),
+        "stable": bool(stable),
+    }
+
+
 def _fit_relative_anchor_priors(rows: list[dict[str, object]]) -> dict[str, object]:
-    kinds = ("offset_from_preutterance", "overlap_from_preutterance", "fixed_end_from_preutterance")
+    kinds = (
+        "offset_from_preutterance",
+        "overlap_from_preutterance",
+        "fixed_end_from_preutterance",
+        "overlap_ratio_from_offset_preutterance",
+    )
     samples: dict[str, dict[str, list[float]]] = {kind: defaultdict(list) for kind in kinds}
     for row in rows:
         pre = _target_ms(row, "preutterance")
@@ -174,20 +251,42 @@ def _fit_relative_anchor_priors(rows: list[dict[str, object]]) -> dict[str, obje
                 continue
             for key in _relative_gap_bucket_keys(row):
                 samples[kind][key].append(float(gap))
+        offset = _target_ms(row, "offset")
+        overlap = _target_ms(row, "overlap")
+        if offset is not None and overlap is not None:
+            span = float(pre) - float(offset)
+            if span > 8.0:
+                ratio = (float(overlap) - float(offset)) / span
+                if np.isfinite(ratio) and -0.10 <= ratio <= 1.25:
+                    for key in _relative_gap_bucket_keys(row):
+                        samples["overlap_ratio_from_offset_preutterance"][key].append(float(ratio))
 
     buckets: dict[str, dict[str, float]] = {}
     counts: dict[str, dict[str, int]] = {}
+    stats: dict[str, dict[str, dict[str, object]]] = {}
     for kind, by_key in samples.items():
         buckets[kind] = {key: float(median(values)) for key, values in by_key.items() if values}
         counts[kind] = {key: int(len(values)) for key, values in by_key.items() if values}
+        stats[kind] = {
+            key: _relative_prior_stats(values, ratio=kind == "overlap_ratio_from_offset_preutterance")
+            for key, values in by_key.items()
+            if values
+        }
     return {
-        "schema_version": "relative_anchor_gap_priors_v1",
+        "schema_version": "relative_anchor_gap_priors_v3",
         "buckets": buckets,
         "counts": counts,
+        "stats": stats,
     }
 
 
-def _relative_anchor_gap_ms(priors: dict[str, object] | None, kind: str, row: dict[str, object]) -> float | None:
+def _relative_anchor_prior_record(
+    priors: dict[str, object] | None,
+    kind: str,
+    row: dict[str, object],
+    *,
+    require_stable: bool = False,
+) -> dict[str, object] | None:
     if not isinstance(priors, dict):
         return None
     buckets = priors.get("buckets")
@@ -196,6 +295,11 @@ def _relative_anchor_gap_ms(priors: dict[str, object] | None, kind: str, row: di
     by_kind = buckets.get(kind)
     if not isinstance(by_kind, dict):
         return None
+    stats_by_kind = priors.get("stats")
+    kind_stats = stats_by_kind.get(kind) if isinstance(stats_by_kind, dict) else {}
+    if not isinstance(kind_stats, dict):
+        kind_stats = {}
+    first_valid: dict[str, object] | None = None
     for key in _relative_gap_bucket_keys(row):
         value = by_kind.get(key)
         if value is None:
@@ -204,9 +308,85 @@ def _relative_anchor_gap_ms(priors: dict[str, object] | None, kind: str, row: di
             gap = float(value)
         except Exception:
             continue
-        if np.isfinite(gap):
-            return gap
+        if not np.isfinite(gap):
+            continue
+        stat = kind_stats.get(key)
+        if not isinstance(stat, dict):
+            stat = {}
+        record = {
+            "kind": kind,
+            "key": key,
+            "value": gap,
+            "stats": stat,
+            "stable": bool(stat.get("stable", False)),
+        }
+        if first_valid is None:
+            first_valid = record
+        if bool(require_stable):
+            return record if bool(record["stable"]) else None
+        if not require_stable:
+            return record
+    if require_stable:
+        return None
+    return first_valid
+
+
+def _relative_anchor_gap_ms(
+    priors: dict[str, object] | None,
+    kind: str,
+    row: dict[str, object],
+    *,
+    require_stable: bool = False,
+) -> float | None:
+    record = _relative_anchor_prior_record(priors, kind, row, require_stable=bool(require_stable))
+    if record is None:
+        return None
+    try:
+        gap = float(record.get("value"))
+    except Exception:
+        return None
+    if np.isfinite(gap):
+        return gap
     return None
+
+
+def _relative_anchor_ratio(
+    priors: dict[str, object] | None,
+    kind: str,
+    row: dict[str, object],
+    *,
+    require_stable: bool = False,
+) -> float | None:
+    value = _relative_anchor_gap_ms(priors, kind, row, require_stable=bool(require_stable))
+    if value is None:
+        return None
+    if not np.isfinite(value):
+        return None
+    return float(value)
+
+
+def _relative_prior_bucket_summary(priors: dict[str, object]) -> dict[str, object]:
+    buckets = priors.get("buckets", {})
+    stats = priors.get("stats", {})
+    if not isinstance(buckets, dict):
+        buckets = {}
+    if not isinstance(stats, dict):
+        stats = {}
+    stable_counts: dict[str, int] = {}
+    for kind, by_key in stats.items():
+        if not isinstance(by_key, dict):
+            continue
+        stable_counts[str(kind)] = int(
+            sum(1 for item in by_key.values() if isinstance(item, dict) and bool(item.get("stable", False)))
+        )
+    return {
+        "schema_version": str(priors.get("schema_version", "")),
+        "bucket_counts": {
+            kind: len(values) if isinstance(values, dict) else 0
+            for kind, values in dict(buckets).items()
+        },
+        "stable_bucket_counts": stable_counts,
+    }
 
 
 def _group_rows_by_wav(rows: list[dict[str, object]]) -> dict[str, list[dict[str, object]]]:
@@ -606,6 +786,478 @@ def _predict_island_anchor_ms(
     return None
 
 
+def _supervised_safe_probability(
+    row: dict[str, object],
+    anchor: str,
+    prediction: dict[str, object] | None,
+    *,
+    gate_model: object | None,
+    filename_pred: dict[str, object] | None,
+    joint_pred: dict[str, object] | None,
+    require_primary_transition_token: bool,
+) -> float | None:
+    if gate_model is None or prediction is None:
+        return None
+    filename_tokens = _filename_tokens_for_row(row)
+    filename_slot_pos = _infer_filename_slot_pos(
+        row,
+        filename_tokens,
+        require_primary_transition_token=bool(require_primary_transition_token),
+    )
+    gate_features = _gate_features(
+        row,
+        anchor,
+        prediction,
+        filename_pred=filename_pred,
+        joint_pred=joint_pred,
+        filename_slot_pos=filename_slot_pos,
+        filename_tokens=filename_tokens,
+    )
+    try:
+        return float(gate_model.predict_proba(gate_features.reshape(1, -1))[0, 1])
+    except Exception:
+        try:
+            return float(gate_model.predict(gate_features.reshape(1, -1))[0])
+        except Exception:
+            return None
+
+
+def _routed_preutterance_decision(
+    row: dict[str, object],
+    *,
+    constrained_predictions: dict[tuple[int, str], dict[str, object]],
+    filename_slot_predictions: dict[tuple[int, str], dict[str, object]],
+    joint_predictions: dict[tuple[int, str], dict[str, object]],
+    supervised_gate_models: dict[str, object] | None,
+    supervised_gate_threshold: float,
+    supervised_gate_thresholds_by_anchor: dict[str, float] | None,
+    require_primary_transition_token: bool,
+    use_heuristic_gate: bool,
+    gate_slot_disagreement: float,
+    gate_pred_disagreement_ms: float,
+    gate_joint_disagreement_ms: float,
+    gate_order_disagreement: float,
+    gate_joint_score_min: float,
+    gate_review_mojibake: bool,
+    gate_review_duplicate_tokens: bool,
+) -> tuple[float | None, float | None, tuple[str, ...]]:
+    primary = constrained_predictions.get((id(row), "preutterance"))
+    filename_tokens = _filename_tokens_for_row(row)
+    filename_slot_pos = _infer_filename_slot_pos(
+        row,
+        filename_tokens,
+        require_primary_transition_token=bool(require_primary_transition_token),
+    )
+    if bool(use_heuristic_gate):
+        reasons = _gate_constrained_prediction(
+            row,
+            "preutterance",
+            primary,
+            filename_pred=filename_slot_predictions.get((id(row), "preutterance")),
+            joint_pred=joint_predictions.get((id(row), "preutterance")),
+            filename_slot_pos=filename_slot_pos,
+            filename_tokens=filename_tokens,
+            slot_disagreement_threshold=float(gate_slot_disagreement),
+            pred_disagreement_ms=float(gate_pred_disagreement_ms),
+            joint_disagreement_ms=float(gate_joint_disagreement_ms),
+            order_disagreement_threshold=float(gate_order_disagreement),
+            joint_score_min=float(gate_joint_score_min),
+            review_mojibake=bool(gate_review_mojibake),
+            review_duplicate_tokens=bool(gate_review_duplicate_tokens),
+        )
+    else:
+        reasons = ["missing_constrained_prediction"] if primary is None else []
+
+    gate_model = (supervised_gate_models or {}).get("preutterance")
+    safe_prob = _supervised_safe_probability(
+        row,
+        "preutterance",
+        primary,
+        gate_model=gate_model,
+        filename_pred=filename_slot_predictions.get((id(row), "preutterance")),
+        joint_pred=joint_predictions.get((id(row), "preutterance")),
+        require_primary_transition_token=bool(require_primary_transition_token),
+    )
+    if supervised_gate_models:
+        threshold = _threshold_for_anchor("preutterance", float(supervised_gate_threshold), supervised_gate_thresholds_by_anchor)
+        if gate_model is None:
+            reasons.append("missing_supervised_gate_model")
+        elif safe_prob is None or safe_prob < float(threshold):
+            reasons.append("supervised_failure_risk")
+
+    if reasons or primary is None:
+        return None, safe_prob, tuple(dict.fromkeys(reasons or ["missing_constrained_prediction"]))
+    return float(primary.get("pred_ms", 0.0) or 0.0), safe_prob, ()
+
+
+def _dependent_preutterance_ms(
+    row: dict[str, object],
+    tracks: ManualOtoCandidateTracks,
+    *,
+    constrained_predictions: dict[tuple[int, str], dict[str, object]],
+    filename_slot_predictions: dict[tuple[int, str], dict[str, object]],
+    joint_predictions: dict[tuple[int, str], dict[str, object]],
+    supervised_gate_models: dict[str, object] | None,
+    supervised_gate_threshold: float,
+    supervised_gate_thresholds_by_anchor: dict[str, float] | None,
+    require_primary_transition_token: bool,
+    fallback_pre_ms: float | None = None,
+    slot_count: int | None = None,
+    slot_index: int | None = None,
+) -> tuple[float | None, str, float | None]:
+    primary = constrained_predictions.get((id(row), "preutterance"))
+    threshold = _threshold_for_anchor("preutterance", float(supervised_gate_threshold), supervised_gate_thresholds_by_anchor)
+    safe_prob = _supervised_safe_probability(
+        row,
+        "preutterance",
+        primary,
+        gate_model=(supervised_gate_models or {}).get("preutterance"),
+        filename_pred=filename_slot_predictions.get((id(row), "preutterance")),
+        joint_pred=joint_predictions.get((id(row), "preutterance")),
+        require_primary_transition_token=bool(require_primary_transition_token),
+    )
+    if primary is not None:
+        primary_ms = float(primary.get("pred_ms", 0.0) or 0.0)
+        if safe_prob is not None and safe_prob >= float(threshold):
+            return primary_ms, "gated_constrained_preutterance", safe_prob
+        primary_delta = _slot_shift_delta(
+            row,
+            pred_ms=primary_ms,
+            duration_ms=float(tracks.duration_ms),
+            slot_count=slot_count,
+            slot_index=slot_index,
+        )
+        if safe_prob is None and primary_delta == 0:
+            return primary_ms, "slot_exact_constrained_preutterance", safe_prob
+        return primary_ms, "fallback_constrained_preutterance", safe_prob
+    if fallback_pre_ms is not None and np.isfinite(float(fallback_pre_ms)):
+        return float(fallback_pre_ms), "fallback_vowel_island_preutterance", safe_prob
+    return None, "missing_preutterance", safe_prob
+
+
+def _default_offset_gap_ms(row: dict[str, object]) -> float:
+    role = str(row.get("alias_role", "") or "").strip().lower()
+    family = manual_oto_alias_family(row.get("alias", ""))
+    if role in {"v", "vv"}:
+        return 70.0
+    if role in {"vc", "vcv"} or family in {"vowel_transition", "leading_n"}:
+        return 150.0
+    if family == "breath_silence":
+        return 40.0
+    return 120.0
+
+
+def _dependent_offset_ms(
+    row: dict[str, object],
+    tracks: ManualOtoCandidateTracks,
+    *,
+    preutterance_ms: float,
+    relative_anchor_priors: dict[str, object] | None,
+    require_stable_prior: bool = False,
+) -> float | None:
+    duration_ms = max(1.0, float(row.get("duration_ms", tracks.duration_ms) or tracks.duration_ms or 1.0))
+    gap = _relative_anchor_gap_ms(
+        relative_anchor_priors,
+        "offset_from_preutterance",
+        row,
+        require_stable=bool(require_stable_prior),
+    )
+    if gap is None:
+        if bool(require_stable_prior):
+            return None
+        gap = _default_offset_gap_ms(row)
+    expected = float(preutterance_ms) - max(0.0, float(gap))
+    window = max(55.0, min(190.0, abs(float(gap)) * 0.75 + 35.0))
+    min_gap = 8.0 if str(row.get("alias_role", "") or "").strip().lower() in {"v", "vv"} else 16.0
+    times = np.asarray(tracks.times_ms, dtype=np.float32)
+    if times.size:
+        start = max(0.0, expected - window)
+        end = min(float(preutterance_ms) - min_gap, expected + window)
+        mask = (times >= start) & (times <= end)
+        if np.any(mask):
+            idxs = np.flatnonzero(mask)
+            size = int(times.size)
+            offset_score = _unit_vector(
+                np.asarray(tracks.anchor_scores.get("offset", np.zeros((size,), dtype=np.float32)), dtype=np.float32)
+            )
+            transition = _unit_vector(np.asarray(tracks.tracks.get("transition", np.zeros((size,), dtype=np.float32)), dtype=np.float32))
+            activity_edge = _unit_vector(
+                np.asarray(tracks.tracks.get("activity_edge", np.zeros((size,), dtype=np.float32)), dtype=np.float32)
+            )
+            distance = np.abs(times[idxs] - expected) / max(1.0, window)
+            score = (
+                0.08 * offset_score[idxs]
+                + 0.06 * transition[idxs]
+                + 0.04 * activity_edge[idxs]
+                - 1.00 * np.clip(distance, 0.0, 2.0)
+            )
+            pred = float(times[int(idxs[int(np.argmax(score))])])
+        else:
+            pred = expected
+    else:
+        pred = expected
+    return min(duration_ms, max(0.0, min(float(pred), float(preutterance_ms) - min_gap)))
+
+
+def _default_overlap_ratio(row: dict[str, object]) -> float:
+    role = str(row.get("alias_role", "") or "").strip().lower()
+    family = manual_oto_alias_family(row.get("alias", ""))
+    if role in {"v", "vv"}:
+        return 0.50
+    if role in {"vc", "vcv"} or family in {"vowel_transition", "leading_n"}:
+        return 1.0 / 3.0
+    if family == "breath_silence":
+        return 0.0
+    return 1.0 / 3.0
+
+
+def _overlap_ratio_candidate_keys(row: dict[str, object]) -> list[tuple[str, int, bool]]:
+    language = str(row.get("language", "") or "").strip().lower() or "*"
+    format_type = str(row.get("format_type", "") or "").strip().lower() or "*"
+    role = str(row.get("alias_role", "") or "").strip().lower() or "*"
+    family = manual_oto_alias_family(row.get("alias", ""))
+    bank = str(row.get("voicebank_id", "") or "").strip().lower() or "*"
+    return [
+        (f"{language}|{format_type}|{role}|{family}|{bank}", 8, True),
+        (f"{language}|{format_type}|{role}|*|{bank}", 10, True),
+        (f"{format_type}|{role}|{family}|{bank}", 8, True),
+        (f"{format_type}|{role}|*|{bank}", 10, True),
+        (f"{language}|{format_type}|{role}|{family}", 10, False),
+        (f"{language}|{format_type}|{role}|*", 14, False),
+        (f"{format_type}|{role}|*", 14, False),
+        (f"{role}|*", 18, False),
+        ("*", 24, False),
+    ]
+
+
+def _overlap_span_ratio_prior(
+    priors: dict[str, object] | None,
+    row: dict[str, object],
+) -> tuple[float, str, dict[str, object]]:
+    default_ratio = _default_overlap_ratio(row)
+    if not isinstance(priors, dict):
+        return default_ratio, "default_overlap_ratio", {}
+    buckets = priors.get("buckets")
+    stats = priors.get("stats")
+    if not isinstance(buckets, dict) or not isinstance(stats, dict):
+        return default_ratio, "default_overlap_ratio", {}
+    by_kind = buckets.get("overlap_ratio_from_offset_preutterance")
+    stats_by_kind = stats.get("overlap_ratio_from_offset_preutterance")
+    if not isinstance(by_kind, dict) or not isinstance(stats_by_kind, dict):
+        return default_ratio, "default_overlap_ratio", {}
+    for key, min_count, require_stable_if_bank in _overlap_ratio_candidate_keys(row):
+        value = by_kind.get(key)
+        stat = stats_by_kind.get(key)
+        if value is None or not isinstance(stat, dict):
+            continue
+        try:
+            ratio = float(value)
+            n = int(stat.get("n", 0) or 0)
+        except Exception:
+            continue
+        if not np.isfinite(ratio) or n < int(min_count):
+            continue
+        if require_stable_if_bank and not bool(stat.get("stable", False)):
+            continue
+        blended = (0.65 * ratio) + (0.35 * default_ratio)
+        return min(0.92, max(0.02, float(blended))), key, stat
+    return default_ratio, "default_overlap_ratio", {}
+
+
+def _overlap_span_ratio_ms(
+    row: dict[str, object],
+    *,
+    offset_ms: float,
+    preutterance_ms: float,
+    relative_anchor_priors: dict[str, object] | None,
+) -> tuple[float, str, dict[str, object]]:
+    offset = float(offset_ms)
+    pre = max(offset, float(preutterance_ms))
+    span = max(0.0, pre - offset)
+    ratio, source, stat = _overlap_span_ratio_prior(relative_anchor_priors, row)
+    pred = offset + ratio * span
+    return min(pre, max(offset, float(pred))), source, stat
+
+
+def _safe_overlap_gap_config(row: dict[str, object], span_ms: float) -> tuple[float, float, float, str]:
+    role = str(row.get("alias_role", "") or "").strip().lower()
+    family = manual_oto_alias_family(row.get("alias", ""))
+    span = max(0.0, float(span_ms))
+    if family == "breath_silence":
+        min_gap, role_gap, ratio = 0.0, 0.0, 0.0
+        label = "breath_silence"
+    elif role in {"vc", "vcv"} or family in {"leading_n", "vowel_transition"}:
+        min_gap, role_gap, ratio = 30.0, 85.0, 0.50
+        label = "transition"
+    elif role in {"v", "vv"}:
+        min_gap, role_gap, ratio = 20.0, 55.0, 0.50
+        label = "vowel"
+    else:
+        min_gap, role_gap, ratio = 18.0, 45.0, 0.38
+        label = "cv"
+    if span <= 0.0:
+        return 0.0, 0.0, 0.0, label
+    target_gap = min(float(role_gap), span * float(ratio))
+    max_gap = min(span, max(float(min_gap), max(float(role_gap), span * 0.72)))
+    min_gap = min(float(min_gap), max_gap)
+    gap = min(max_gap, max(min_gap, target_gap))
+    return float(gap), float(min_gap), float(max_gap), label
+
+
+def _safe_overlap_ms(
+    row: dict[str, object],
+    *,
+    offset_ms: float,
+    preutterance_ms: float,
+    preferred_overlap_ms: float | None = None,
+) -> tuple[float, dict[str, object]]:
+    offset = float(offset_ms)
+    pre = max(offset, float(preutterance_ms))
+    span = max(0.0, pre - offset)
+    gap, min_gap, max_gap, label = _safe_overlap_gap_config(row, span)
+    if preferred_overlap_ms is None or not np.isfinite(float(preferred_overlap_ms)):
+        preferred_overlap = pre - gap
+    else:
+        preferred_overlap = min(pre, max(offset, float(preferred_overlap_ms)))
+    preferred_gap = max(0.0, pre - preferred_overlap)
+    clamped_gap = min(max_gap, max(min_gap, preferred_gap))
+    overlap = min(pre, max(offset, pre - clamped_gap))
+    return overlap, {
+        "policy": label,
+        "span_ms": float(span),
+        "gap_ms": float(pre - overlap),
+        "preferred_gap_ms": float(preferred_gap),
+        "min_gap_ms": float(min_gap),
+        "max_gap_ms": float(max_gap),
+        "clamped": bool(abs(float(pre - overlap) - preferred_gap) > 1e-6),
+        "ratio": float((overlap - offset) / span) if span > 0.0 else 0.0,
+    }
+
+
+def _record_overlap_safety(
+    records: list[dict[str, object]],
+    *,
+    series: str,
+    row: dict[str, object],
+    offset_ms: float | None,
+    overlap_ms: float | None,
+    preutterance_ms: float | None,
+    fixed_end_ms: float | None,
+    accepted: bool,
+    policy: str = "",
+) -> None:
+    if offset_ms is None or overlap_ms is None or preutterance_ms is None:
+        records.append(
+            {
+                "series": series,
+                "accepted": bool(accepted),
+                "safe": False,
+                "order_valid": False,
+                "gap_ok": False,
+                "ratio_ok": False,
+                "missing": True,
+                "policy": policy or "missing",
+                "format_type": str(row.get("format_type", "") or "<unknown>"),
+                "alias_role": str(row.get("alias_role", "") or "<unknown>"),
+                "alias_family": manual_oto_alias_family(row.get("alias", "")),
+            }
+        )
+        return
+    offset = float(offset_ms)
+    overlap = float(overlap_ms)
+    pre = float(preutterance_ms)
+    fixed = float(fixed_end_ms) if fixed_end_ms is not None else pre
+    span = max(0.0, pre - offset)
+    gap = max(0.0, pre - overlap)
+    _, min_gap, max_gap, default_policy = _safe_overlap_gap_config(row, span)
+    ratio = (overlap - offset) / span if span > 0.0 else 0.0
+    order_valid = bool(offset <= overlap <= pre <= fixed)
+    gap_ok = bool(min_gap - 1e-6 <= gap <= max_gap + 1e-6)
+    ratio_ok = bool(0.0 <= ratio <= 1.0)
+    records.append(
+        {
+            "series": series,
+            "accepted": bool(accepted),
+            "safe": bool(order_valid and gap_ok and ratio_ok),
+            "order_valid": order_valid,
+            "gap_ok": gap_ok,
+            "ratio_ok": ratio_ok,
+            "missing": False,
+            "policy": policy or default_policy,
+            "format_type": str(row.get("format_type", "") or "<unknown>"),
+            "alias_role": str(row.get("alias_role", "") or "<unknown>"),
+            "alias_family": manual_oto_alias_family(row.get("alias", "")),
+            "gap_ms": float(gap),
+            "span_ms": float(span),
+            "ratio": float(ratio),
+            "min_gap_ms": float(min_gap),
+            "max_gap_ms": float(max_gap),
+        }
+    )
+
+
+def _dependent_overlap_ms(
+    row: dict[str, object],
+    *,
+    offset_ms: float,
+    preutterance_ms: float,
+    relative_anchor_priors: dict[str, object] | None,
+    require_stable_prior: bool = False,
+) -> float | None:
+    offset = float(offset_ms)
+    pre = max(offset, float(preutterance_ms))
+    span = max(0.0, pre - offset)
+    ratio = _relative_anchor_ratio(
+        relative_anchor_priors,
+        "overlap_ratio_from_offset_preutterance",
+        row,
+        require_stable=bool(require_stable_prior),
+    )
+    if ratio is None:
+        ratio = _default_overlap_ratio(row)
+    ratio = min(1.0, max(0.0, float(ratio)))
+    ratio_pred = offset + ratio * span
+    gap = _relative_anchor_gap_ms(
+        relative_anchor_priors,
+        "overlap_from_preutterance",
+        row,
+        require_stable=bool(require_stable_prior),
+    )
+    if gap is not None:
+        gap_pred = pre - float(gap)
+        pred = (0.10 * ratio_pred) + (0.90 * gap_pred)
+    elif bool(require_stable_prior):
+        return None
+    else:
+        pred = ratio_pred
+    return min(pre, max(offset, float(pred)))
+
+
+def _dependent_fixed_end_ms(
+    row: dict[str, object],
+    tracks: ManualOtoCandidateTracks,
+    *,
+    preutterance_ms: float,
+    relative_anchor_priors: dict[str, object] | None,
+    require_stable_prior: bool = False,
+) -> float | None:
+    duration_ms = max(1.0, float(row.get("duration_ms", tracks.duration_ms) or tracks.duration_ms or 1.0))
+    gap = _relative_anchor_gap_ms(
+        relative_anchor_priors,
+        "fixed_end_from_preutterance",
+        row,
+        require_stable=bool(require_stable_prior),
+    )
+    if gap is None:
+        if bool(require_stable_prior):
+            return None
+        gap = _default_fixed_gap_ms(row)
+    expected = min(duration_ms, max(0.0, float(preutterance_ms) + float(gap)))
+    window = max(55.0, min(240.0, abs(float(gap)) * 0.70 + 45.0))
+    pred = _candidate_near_expected_ms(tracks, "fixed_end", expected, window_ms=window)
+    return min(duration_ms, max(float(preutterance_ms) + 8.0, float(pred)))
+
+
 def _island_row_safe(
     assignment: SlotIslandAssignment | None,
     island: VowelIsland | None,
@@ -719,6 +1371,16 @@ def _record_slot_shift(
     delta = _slot_shift_delta(row, pred_ms=pred_ms, duration_ms=duration_ms, slot_count=slot_count, slot_index=slot_index)
     if delta is not None:
         store[series][anchor].append(int(delta))
+
+
+def _slot_shift_bucket(delta: int | None) -> str:
+    if delta is None:
+        return "unknown"
+    if int(delta) == 0:
+        return "exact"
+    if abs(int(delta)) == 1:
+        return "one_step"
+    return "multi_step"
 
 
 def _slot_expected_anchor_ms(
@@ -881,6 +1543,183 @@ def _profile_worst_examples(examples: list[dict[str, object]]) -> dict[str, obje
     return {
         key: dict(counter.most_common(12))
         for key, counter in counters.items()
+    }
+
+
+def _record_failure_breakdown(
+    records: list[dict[str, object]],
+    *,
+    series: str,
+    anchor: str,
+    row: dict[str, object],
+    error_ms: float,
+    pred_ms: float,
+    duration_ms: float,
+    dependent_preutterance_source: str,
+    slot_count: int | None = None,
+    slot_index: int | None = None,
+) -> None:
+    delta = _slot_shift_delta(
+        row,
+        pred_ms=float(pred_ms),
+        duration_ms=float(duration_ms),
+        slot_count=slot_count,
+        slot_index=slot_index,
+    )
+    voicebank_id = str(row.get("voicebank_id", "") or "<unknown>")
+    format_type = str(row.get("format_type", "") or "<unknown>")
+    records.append(
+        {
+            "series": str(series),
+            "anchor": str(anchor),
+            "error_ms": float(error_ms),
+            "reject_gt80": bool(float(error_ms) > 80.0),
+            "voicebank_id": voicebank_id,
+            "format_type": format_type,
+            "voicebank_format": f"{voicebank_id}|{format_type}",
+            "language": str(row.get("language", "") or "<unknown>"),
+            "alias_role": str(row.get("alias_role", "") or "<unknown>"),
+            "alias_family": manual_oto_alias_family(row.get("alias", "")),
+            "dependent_preutterance_source": str(dependent_preutterance_source or "<unknown>"),
+            "slot_shift_bucket": _slot_shift_bucket(delta),
+        }
+    )
+
+
+def _summarize_failure_breakdown(records: list[dict[str, object]], *, top_n: int = 80) -> dict[str, object]:
+    dimensions = (
+        "voicebank_id",
+        "format_type",
+        "voicebank_format",
+        "alias_role",
+        "alias_family",
+        "dependent_preutterance_source",
+        "slot_shift_bucket",
+    )
+    grouped: dict[tuple[str, str, str, str], list[float]] = defaultdict(list)
+    for record in records:
+        series = str(record.get("series", "") or "<unknown>")
+        anchor = str(record.get("anchor", "") or "<unknown>")
+        error = float(record.get("error_ms", 0.0) or 0.0)
+        for dimension in dimensions:
+            value = str(record.get(dimension, "") or "<unknown>")
+            grouped[(series, anchor, dimension, value)].append(error)
+
+    rows: list[dict[str, object]] = []
+    for (series, anchor, dimension, value), values in grouped.items():
+        arr = np.asarray(values, dtype=np.float32)
+        reject = int(np.sum(arr > 80.0)) if arr.size else 0
+        rows.append(
+            {
+                "series": series,
+                "anchor": anchor,
+                "dimension": dimension,
+                "value": value,
+                "total": int(arr.size),
+                "reject_gt80": reject,
+                "reject_gt80_rate": float(reject / arr.size) if arr.size else 0.0,
+                "pass_le10_rate": float(np.mean(arr <= 10.0)) if arr.size else 0.0,
+                "recall30": float(np.mean(arr <= 30.0)) if arr.size else 0.0,
+                "median_error_ms": float(np.median(arr)) if arr.size else None,
+                "p90_error_ms": float(np.percentile(arr, 90.0)) if arr.size else None,
+            }
+        )
+
+    top_reject = [
+        item
+        for item in sorted(
+            rows,
+            key=lambda item: (
+                int(item.get("reject_gt80", 0) or 0),
+                float(item.get("reject_gt80_rate", 0.0) or 0.0),
+                int(item.get("total", 0) or 0),
+            ),
+            reverse=True,
+        )
+        if int(item.get("reject_gt80", 0) or 0) > 0
+    ][: int(top_n)]
+    by_dimension: dict[str, list[dict[str, object]]] = {}
+    for dimension in dimensions:
+        dimension_rows = [item for item in rows if item.get("dimension") == dimension]
+        by_dimension[dimension] = sorted(
+            dimension_rows,
+            key=lambda item: (
+                int(item.get("reject_gt80", 0) or 0),
+                float(item.get("reject_gt80_rate", 0.0) or 0.0),
+                int(item.get("total", 0) or 0),
+            ),
+            reverse=True,
+        )[: min(int(top_n), 30)]
+    return {
+        "record_count": int(len(records)),
+        "top_reject_gt80": top_reject,
+        "by_dimension": by_dimension,
+    }
+
+
+def _summarize_overlap_safety(records: list[dict[str, object]]) -> dict[str, object]:
+    def summarize_items(items: list[dict[str, object]]) -> dict[str, object]:
+        accepted = [item for item in items if bool(item.get("accepted", False))]
+        gaps = [
+            float(item.get("gap_ms", 0.0) or 0.0)
+            for item in accepted
+            if not bool(item.get("missing", False)) and item.get("gap_ms") is not None
+        ]
+        ratios = [
+            float(item.get("ratio", 0.0) or 0.0)
+            for item in accepted
+            if not bool(item.get("missing", False)) and item.get("ratio") is not None
+        ]
+        total = len(items)
+        accepted_n = len(accepted)
+        return {
+            "total": int(total),
+            "accepted": int(accepted_n),
+            "accept_rate": float(accepted_n / total) if total else 0.0,
+            "safe": int(sum(1 for item in accepted if bool(item.get("safe", False)))),
+            "safe_rate": float(np.mean([bool(item.get("safe", False)) for item in accepted])) if accepted else 0.0,
+            "order_valid_rate": float(np.mean([bool(item.get("order_valid", False)) for item in accepted])) if accepted else 0.0,
+            "gap_ok_rate": float(np.mean([bool(item.get("gap_ok", False)) for item in accepted])) if accepted else 0.0,
+            "ratio_ok_rate": float(np.mean([bool(item.get("ratio_ok", False)) for item in accepted])) if accepted else 0.0,
+            "median_gap_ms": float(np.median(np.asarray(gaps, dtype=np.float32))) if gaps else None,
+            "p10_gap_ms": float(np.percentile(np.asarray(gaps, dtype=np.float32), 10.0)) if gaps else None,
+            "p90_gap_ms": float(np.percentile(np.asarray(gaps, dtype=np.float32), 90.0)) if gaps else None,
+            "median_ratio": float(np.median(np.asarray(ratios, dtype=np.float32))) if ratios else None,
+        }
+
+    by_series_raw: dict[str, list[dict[str, object]]] = defaultdict(list)
+    by_policy_raw: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    by_role_raw: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    for record in records:
+        series = str(record.get("series", "") or "<unknown>")
+        policy = str(record.get("policy", "") or "<unknown>")
+        role = str(record.get("alias_role", "") or "<unknown>")
+        by_series_raw[series].append(record)
+        by_policy_raw[(series, policy)].append(record)
+        by_role_raw[(series, role)].append(record)
+
+    by_policy = [
+        {"series": series, "policy": policy, **summarize_items(items)}
+        for (series, policy), items in sorted(by_policy_raw.items())
+    ]
+    by_role = [
+        {"series": series, "alias_role": role, **summarize_items(items)}
+        for (series, role), items in sorted(by_role_raw.items())
+    ]
+    return {
+        "record_count": int(len(records)),
+        "by_series": {
+            series: summarize_items(items)
+            for series, items in sorted(by_series_raw.items())
+        },
+        "by_policy": sorted(
+            by_policy,
+            key=lambda item: (str(item.get("series", "")), -int(item.get("accepted", 0) or 0), str(item.get("policy", ""))),
+        ),
+        "by_alias_role": sorted(
+            by_role,
+            key=lambda item: (str(item.get("series", "")), -int(item.get("accepted", 0) or 0), str(item.get("alias_role", ""))),
+        ),
     }
 
 
@@ -1714,6 +2553,7 @@ def evaluate_models(
     use_heuristic_gate: bool = True,
     supervised_gate_models: dict[str, object] | None = None,
     supervised_gate_threshold: float = 0.80,
+    supervised_gate_thresholds_by_anchor: dict[str, float] | None = None,
     gate_threshold_sweep: tuple[float, ...] = (0.50, 0.60, 0.70, 0.80, 0.85, 0.90, 0.95),
     relative_anchor_priors: dict[str, object] | None = None,
     island_anchor_priors: dict[str, object] | None = None,
@@ -1732,6 +2572,37 @@ def evaluate_models(
     gated_constrained_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
     offset_gap_model_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
     overlap_relative_gap_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
+    fixed_end_relative_gap_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
+    routed_dependent_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
+    routed_dependent_total_by_anchor: Counter[str] = Counter()
+    routed_dependent_accept_by_anchor: Counter[str] = Counter()
+    routed_dependent_review_by_anchor: Counter[str] = Counter()
+    routed_dependent_review_reason_by_anchor: Counter[str] = Counter()
+    routed_calibrated_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
+    routed_calibrated_total_by_anchor: Counter[str] = Counter()
+    routed_calibrated_accept_by_anchor: Counter[str] = Counter()
+    routed_calibrated_review_by_anchor: Counter[str] = Counter()
+    routed_calibrated_review_reason_by_anchor: Counter[str] = Counter()
+    routed_overlap_span_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
+    routed_overlap_span_total_by_anchor: Counter[str] = Counter()
+    routed_overlap_span_accept_by_anchor: Counter[str] = Counter()
+    routed_overlap_span_review_by_anchor: Counter[str] = Counter()
+    routed_overlap_span_review_reason_by_anchor: Counter[str] = Counter()
+    routed_safe_overlap_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
+    routed_safe_overlap_total_by_anchor: Counter[str] = Counter()
+    routed_safe_overlap_accept_by_anchor: Counter[str] = Counter()
+    routed_safe_overlap_review_by_anchor: Counter[str] = Counter()
+    routed_safe_overlap_review_reason_by_anchor: Counter[str] = Counter()
+    routed_slot_exact_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
+    routed_slot_exact_total_by_anchor: Counter[str] = Counter()
+    routed_slot_exact_accept_by_anchor: Counter[str] = Counter()
+    routed_slot_exact_review_by_anchor: Counter[str] = Counter()
+    routed_slot_exact_review_reason_by_anchor: Counter[str] = Counter()
+    routed_boundary_slot_exact_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
+    routed_boundary_slot_exact_total_by_anchor: Counter[str] = Counter()
+    routed_boundary_slot_exact_accept_by_anchor: Counter[str] = Counter()
+    routed_boundary_slot_exact_review_by_anchor: Counter[str] = Counter()
+    routed_boundary_slot_exact_review_reason_by_anchor: Counter[str] = Counter()
     vowel_island_lattice_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
     local_offset_from_island_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
     overlap_relative_on_island_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
@@ -1760,8 +2631,16 @@ def evaluate_models(
     worst_filename_slot: list[dict[str, object]] = []
     worst_constrained: list[dict[str, object]] = []
     worst_gated_constrained: list[dict[str, object]] = []
+    worst_routed_dependent: list[dict[str, object]] = []
+    worst_routed_calibrated: list[dict[str, object]] = []
+    worst_routed_overlap_span: list[dict[str, object]] = []
+    worst_routed_safe_overlap: list[dict[str, object]] = []
+    worst_routed_slot_exact: list[dict[str, object]] = []
+    worst_routed_boundary_slot_exact: list[dict[str, object]] = []
     worst_vowel_island: list[dict[str, object]] = []
     worst_vowel_island_gated: list[dict[str, object]] = []
+    failure_breakdown_records: list[dict[str, object]] = []
+    overlap_safety_records: list[dict[str, object]] = []
     wav_failures: list[dict[str, str]] = []
 
     for wav_path, wav_rows in _group_rows_by_wav(rows).items():
@@ -2049,42 +2928,6 @@ def evaluate_models(
                             }
                         )
 
-        if relative_anchor_priors:
-            for row in wav_rows:
-                pre_prediction = constrained_predictions.get((id(row), "preutterance"))
-                if pre_prediction is None:
-                    continue
-                pre_pred_ms = float(pre_prediction.get("pred_ms", 0.0) or 0.0)
-                duration_ms = max(1.0, float(row.get("duration_ms", tracks.duration_ms) or tracks.duration_ms or 1.0))
-                if "offset" in anchors:
-                    target = _target_ms(row, "offset")
-                    gap = _relative_anchor_gap_ms(relative_anchor_priors, "offset_from_preutterance", row)
-                    if target is not None and gap is not None:
-                        pred_ms = min(duration_ms, max(0.0, pre_pred_ms - float(gap)))
-                        offset_gap_model_errors_by_anchor["offset"].append(abs(pred_ms - float(target)))
-                        _record_slot_shift(
-                            slot_shift_by_series_anchor,
-                            "model_offset_gap_from_preutterance",
-                            "offset",
-                            row,
-                            pred_ms=pred_ms,
-                            duration_ms=duration_ms,
-                        )
-                if "overlap" in anchors:
-                    target = _target_ms(row, "overlap")
-                    gap = _relative_anchor_gap_ms(relative_anchor_priors, "overlap_from_preutterance", row)
-                    if target is not None and gap is not None:
-                        pred_ms = min(duration_ms, max(0.0, pre_pred_ms - float(gap)))
-                        overlap_relative_gap_errors_by_anchor["overlap"].append(abs(pred_ms - float(target)))
-                        _record_slot_shift(
-                            slot_shift_by_series_anchor,
-                            "model_overlap_relative_from_preutterance",
-                            "overlap",
-                            row,
-                            pred_ms=pred_ms,
-                            duration_ms=duration_ms,
-                        )
-
         slot_count_for_islands = _vowel_island_slot_count(wav_rows)
         raw_islands = extract_vowel_islands(tracks)
         islands = fit_islands_to_slot_count(
@@ -2117,6 +2960,7 @@ def evaluate_models(
             )
         island_events = island_overlay_events(island_decode)
         for row in wav_rows:
+            duration_ms = max(1.0, float(row.get("duration_ms", tracks.duration_ms) or tracks.duration_ms or 1.0))
             slot_idx = _row_vowel_island_slot_index(row, slot_count_for_islands)
             assignment = _island_assignment_for_row(row, island_decode.assignments, slot_count_for_islands)
             island = _island_for_assignment(assignment, island_decode.islands)
@@ -2140,6 +2984,11 @@ def evaluate_models(
                         else:
                             gate_model = (supervised_gate_models or {}).get(anchor)
                             if gate_model is not None:
+                                anchor_gate_threshold = _threshold_for_anchor(
+                                    anchor,
+                                    float(supervised_gate_threshold),
+                                    supervised_gate_thresholds_by_anchor,
+                                )
                                 filename_tokens = _filename_tokens_for_row(row)
                                 filename_slot_pos = _infer_filename_slot_pos(
                                     row,
@@ -2159,7 +3008,7 @@ def evaluate_models(
                                     safe_prob = float(gate_model.predict_proba(gate_features.reshape(1, -1))[0, 1])
                                 except Exception:
                                     safe_prob = float(gate_model.predict(gate_features.reshape(1, -1))[0])
-                                if safe_prob >= 0.90:
+                                if safe_prob >= float(anchor_gate_threshold):
                                     apply_slot_guard = False
                     if pred is None:
                         pred = _predict_island_anchor_ms(
@@ -2181,6 +3030,745 @@ def evaluate_models(
                                 slot_index=slot_idx,
                             )
                         predictions[anchor] = float(pred)
+            dependent_pre_ms, dependent_pre_source, dependent_pre_safe_prob = _dependent_preutterance_ms(
+                row,
+                tracks,
+                constrained_predictions=constrained_predictions,
+                filename_slot_predictions=filename_slot_predictions,
+                joint_predictions=joint_predictions,
+                supervised_gate_models=supervised_gate_models,
+                supervised_gate_threshold=float(supervised_gate_threshold),
+                supervised_gate_thresholds_by_anchor=supervised_gate_thresholds_by_anchor,
+                require_primary_transition_token=bool(require_primary_transition_token),
+                fallback_pre_ms=predictions.get("preutterance"),
+                slot_count=slot_count_for_islands,
+                slot_index=slot_idx,
+            )
+            dependent_offset_ms: float | None = None
+            if dependent_pre_ms is not None:
+                duration_ms = max(1.0, float(row.get("duration_ms", tracks.duration_ms) or tracks.duration_ms or 1.0))
+                if "offset" in anchors or "overlap" in anchors:
+                    dependent_offset_ms = _dependent_offset_ms(
+                        row,
+                        tracks,
+                        preutterance_ms=float(dependent_pre_ms),
+                        relative_anchor_priors=relative_anchor_priors,
+                    )
+                if "offset" in anchors and dependent_offset_ms is not None:
+                    target = _target_ms(row, "offset")
+                    if target is not None:
+                        err = abs(float(dependent_offset_ms) - float(target))
+                        offset_gap_model_errors_by_anchor["offset"].append(err)
+                        _record_slot_shift(
+                            slot_shift_by_series_anchor,
+                            "model_offset_gap_from_preutterance",
+                            "offset",
+                            row,
+                            pred_ms=float(dependent_offset_ms),
+                            duration_ms=duration_ms,
+                            slot_count=slot_count_for_islands,
+                            slot_index=slot_idx,
+                        )
+                        _record_failure_breakdown(
+                            failure_breakdown_records,
+                            series="model_offset_gap_from_preutterance",
+                            anchor="offset",
+                            row=row,
+                            error_ms=err,
+                            pred_ms=float(dependent_offset_ms),
+                            duration_ms=duration_ms,
+                            dependent_preutterance_source=dependent_pre_source,
+                            slot_count=slot_count_for_islands,
+                            slot_index=slot_idx,
+                        )
+                if "overlap" in anchors and dependent_offset_ms is not None:
+                    target = _target_ms(row, "overlap")
+                    if target is not None:
+                        dependent_overlap_ms = _dependent_overlap_ms(
+                            row,
+                            offset_ms=float(dependent_offset_ms),
+                            preutterance_ms=float(dependent_pre_ms),
+                            relative_anchor_priors=relative_anchor_priors,
+                        )
+                        err = abs(float(dependent_overlap_ms) - float(target))
+                        overlap_relative_gap_errors_by_anchor["overlap"].append(err)
+                        _record_slot_shift(
+                            slot_shift_by_series_anchor,
+                            "model_overlap_relative_from_preutterance",
+                            "overlap",
+                            row,
+                            pred_ms=float(dependent_overlap_ms),
+                            duration_ms=duration_ms,
+                            slot_count=slot_count_for_islands,
+                            slot_index=slot_idx,
+                        )
+                        _record_failure_breakdown(
+                            failure_breakdown_records,
+                            series="model_overlap_relative_from_preutterance",
+                            anchor="overlap",
+                            row=row,
+                            error_ms=err,
+                            pred_ms=float(dependent_overlap_ms),
+                            duration_ms=duration_ms,
+                            dependent_preutterance_source=dependent_pre_source,
+                            slot_count=slot_count_for_islands,
+                            slot_index=slot_idx,
+                        )
+                if "fixed_end" in anchors:
+                    target = _target_ms(row, "fixed_end")
+                    if target is not None:
+                        dependent_fixed_ms = _dependent_fixed_end_ms(
+                            row,
+                            tracks,
+                            preutterance_ms=float(dependent_pre_ms),
+                            relative_anchor_priors=relative_anchor_priors,
+                        )
+                        err = abs(float(dependent_fixed_ms) - float(target))
+                        fixed_end_relative_gap_errors_by_anchor["fixed_end"].append(err)
+                        _record_slot_shift(
+                            slot_shift_by_series_anchor,
+                            "model_fixed_end_relative_from_preutterance",
+                            "fixed_end",
+                            row,
+                            pred_ms=float(dependent_fixed_ms),
+                            duration_ms=duration_ms,
+                            slot_count=slot_count_for_islands,
+                            slot_index=slot_idx,
+                        )
+                        _record_failure_breakdown(
+                            failure_breakdown_records,
+                            series="model_fixed_end_relative_from_preutterance",
+                            anchor="fixed_end",
+                            row=row,
+                            error_ms=err,
+                            pred_ms=float(dependent_fixed_ms),
+                            duration_ms=duration_ms,
+                            dependent_preutterance_source=dependent_pre_source,
+                            slot_count=slot_count_for_islands,
+                            slot_index=slot_idx,
+                        )
+            routed_pre_ms, routed_pre_safe_prob, routed_reasons = _routed_preutterance_decision(
+                row,
+                constrained_predictions=constrained_predictions,
+                filename_slot_predictions=filename_slot_predictions,
+                joint_predictions=joint_predictions,
+                supervised_gate_models=supervised_gate_models,
+                supervised_gate_threshold=float(supervised_gate_threshold),
+                supervised_gate_thresholds_by_anchor=supervised_gate_thresholds_by_anchor,
+                require_primary_transition_token=bool(require_primary_transition_token),
+                use_heuristic_gate=bool(use_heuristic_gate),
+                gate_slot_disagreement=float(gate_slot_disagreement),
+                gate_pred_disagreement_ms=float(gate_pred_disagreement_ms),
+                gate_joint_disagreement_ms=float(gate_joint_disagreement_ms),
+                gate_order_disagreement=float(gate_order_disagreement),
+                gate_joint_score_min=float(gate_joint_score_min),
+                gate_review_mojibake=bool(gate_review_mojibake),
+                gate_review_duplicate_tokens=bool(gate_review_duplicate_tokens),
+            )
+            routed_predictions: dict[str, float] = {}
+            routed_source = "routed_gated_constrained_preutterance"
+            if routed_pre_ms is not None:
+                duration_ms = max(1.0, float(row.get("duration_ms", tracks.duration_ms) or tracks.duration_ms or 1.0))
+                routed_predictions["preutterance"] = float(routed_pre_ms)
+                routed_offset_ms: float | None = None
+                if "offset" in anchors or "overlap" in anchors:
+                    routed_offset_ms = _dependent_offset_ms(
+                        row,
+                        tracks,
+                        preutterance_ms=float(routed_pre_ms),
+                        relative_anchor_priors=relative_anchor_priors,
+                    )
+                    routed_predictions["offset"] = float(routed_offset_ms)
+                if "overlap" in anchors and routed_offset_ms is not None:
+                    routed_predictions["overlap"] = _dependent_overlap_ms(
+                        row,
+                        offset_ms=float(routed_offset_ms),
+                        preutterance_ms=float(routed_pre_ms),
+                        relative_anchor_priors=relative_anchor_priors,
+                    )
+                if "fixed_end" in anchors:
+                    routed_predictions["fixed_end"] = _dependent_fixed_end_ms(
+                        row,
+                        tracks,
+                        preutterance_ms=float(routed_pre_ms),
+                        relative_anchor_priors=relative_anchor_priors,
+                    )
+            if "overlap" in anchors:
+                _record_overlap_safety(
+                    overlap_safety_records,
+                    series="model_routed_dependent_params",
+                    row=row,
+                    offset_ms=routed_predictions.get("offset"),
+                    overlap_ms=routed_predictions.get("overlap"),
+                    preutterance_ms=routed_predictions.get("preutterance"),
+                    fixed_end_ms=routed_predictions.get("fixed_end"),
+                    accepted=routed_predictions.get("overlap") is not None,
+                    policy="manual_gap_dependent",
+                )
+            for anchor in anchors:
+                target = _target_ms(row, anchor)
+                if target is None:
+                    continue
+                routed_dependent_total_by_anchor[anchor] += 1
+                routed_pred = routed_predictions.get(anchor)
+                if routed_pred is None:
+                    routed_dependent_review_by_anchor[anchor] += 1
+                    reasons = routed_reasons or ("missing_routed_prediction",)
+                    for reason in reasons:
+                        routed_dependent_review_reason_by_anchor[f"{anchor}|{reason}"] += 1
+                    continue
+                routed_dependent_accept_by_anchor[anchor] += 1
+                routed_err = abs(float(routed_pred) - float(target))
+                routed_dependent_errors_by_anchor[anchor].append(routed_err)
+                _record_slot_shift(
+                    slot_shift_by_series_anchor,
+                    "model_routed_dependent_params",
+                    anchor,
+                    row,
+                    pred_ms=float(routed_pred),
+                    duration_ms=duration_ms,
+                    slot_count=slot_count_for_islands,
+                    slot_index=slot_idx,
+                )
+                _record_failure_breakdown(
+                    failure_breakdown_records,
+                    series="model_routed_dependent_params",
+                    anchor=anchor,
+                    row=row,
+                    error_ms=routed_err,
+                    pred_ms=float(routed_pred),
+                    duration_ms=duration_ms,
+                    dependent_preutterance_source=routed_source,
+                    slot_count=slot_count_for_islands,
+                    slot_index=slot_idx,
+                )
+                if routed_err > 60.0 and len(worst_routed_dependent) < 200:
+                    worst_routed_dependent.append(
+                        {
+                            **_failure_example_base(
+                                row,
+                                wav_path=wav_path,
+                                anchor=anchor,
+                                target_ms=float(target),
+                                pred_ms=float(routed_pred),
+                                error_ms=routed_err,
+                                slot_pos_norm=float(slot_idx + 0.5) / max(1.0, float(slot_count_for_islands)),
+                            ),
+                            "source_series": "model_routed_dependent_params",
+                            "dependent_preutterance_source": routed_source,
+                            "dependent_preutterance_safe_prob": routed_pre_safe_prob,
+                            "route_decision": "accept",
+                        }
+                    )
+            calibrated_predictions: dict[str, float] = {}
+            calibrated_reasons: list[str] = []
+            calibrated_source = "routed_calibrated_preutterance"
+            if routed_pre_ms is None:
+                calibrated_reasons.extend(routed_reasons or ("missing_routed_preutterance",))
+            else:
+                duration_ms = max(1.0, float(row.get("duration_ms", tracks.duration_ms) or tracks.duration_ms or 1.0))
+                calibrated_offset_ms: float | None = None
+                if "offset" in anchors or "overlap" in anchors:
+                    calibrated_offset_ms = _dependent_offset_ms(
+                        row,
+                        tracks,
+                        preutterance_ms=float(routed_pre_ms),
+                        relative_anchor_priors=relative_anchor_priors,
+                        require_stable_prior=True,
+                    )
+                    if calibrated_offset_ms is None:
+                        calibrated_reasons.append("unstable_offset_gap_prior")
+                    else:
+                        calibrated_predictions["offset"] = float(calibrated_offset_ms)
+                if "overlap" in anchors:
+                    if calibrated_offset_ms is None:
+                        calibrated_reasons.append("missing_calibrated_offset_for_overlap")
+                    else:
+                        calibrated_overlap_ms = _dependent_overlap_ms(
+                            row,
+                            offset_ms=float(calibrated_offset_ms),
+                            preutterance_ms=float(routed_pre_ms),
+                            relative_anchor_priors=relative_anchor_priors,
+                            require_stable_prior=True,
+                        )
+                        if calibrated_overlap_ms is None:
+                            calibrated_reasons.append("unstable_overlap_gap_prior")
+                        else:
+                            calibrated_predictions["overlap"] = float(calibrated_overlap_ms)
+                if "fixed_end" in anchors:
+                    calibrated_fixed_ms = _dependent_fixed_end_ms(
+                        row,
+                        tracks,
+                        preutterance_ms=float(routed_pre_ms),
+                        relative_anchor_priors=relative_anchor_priors,
+                        require_stable_prior=True,
+                    )
+                    if calibrated_fixed_ms is None:
+                        calibrated_reasons.append("unstable_fixed_end_gap_prior")
+                    else:
+                        calibrated_predictions["fixed_end"] = float(calibrated_fixed_ms)
+                if not calibrated_reasons:
+                    calibrated_predictions["preutterance"] = float(routed_pre_ms)
+            calibrated_reasons = list(dict.fromkeys(calibrated_reasons))
+            for anchor in anchors:
+                target = _target_ms(row, anchor)
+                if target is None:
+                    continue
+                routed_calibrated_total_by_anchor[anchor] += 1
+                calibrated_pred = calibrated_predictions.get(anchor)
+                if calibrated_pred is None:
+                    routed_calibrated_review_by_anchor[anchor] += 1
+                    reasons = calibrated_reasons or ("missing_calibrated_prediction",)
+                    for reason in reasons:
+                        routed_calibrated_review_reason_by_anchor[f"{anchor}|{reason}"] += 1
+                    continue
+                routed_calibrated_accept_by_anchor[anchor] += 1
+                calibrated_err = abs(float(calibrated_pred) - float(target))
+                routed_calibrated_errors_by_anchor[anchor].append(calibrated_err)
+                _record_slot_shift(
+                    slot_shift_by_series_anchor,
+                    "model_routed_calibrated_params",
+                    anchor,
+                    row,
+                    pred_ms=float(calibrated_pred),
+                    duration_ms=duration_ms,
+                    slot_count=slot_count_for_islands,
+                    slot_index=slot_idx,
+                )
+                _record_failure_breakdown(
+                    failure_breakdown_records,
+                    series="model_routed_calibrated_params",
+                    anchor=anchor,
+                    row=row,
+                    error_ms=calibrated_err,
+                    pred_ms=float(calibrated_pred),
+                    duration_ms=duration_ms,
+                    dependent_preutterance_source=calibrated_source,
+                    slot_count=slot_count_for_islands,
+                    slot_index=slot_idx,
+                )
+                if calibrated_err > 60.0 and len(worst_routed_calibrated) < 200:
+                    worst_routed_calibrated.append(
+                        {
+                            **_failure_example_base(
+                                row,
+                                wav_path=wav_path,
+                                anchor=anchor,
+                                target_ms=float(target),
+                                pred_ms=float(calibrated_pred),
+                                error_ms=calibrated_err,
+                                slot_pos_norm=float(slot_idx + 0.5) / max(1.0, float(slot_count_for_islands)),
+                            ),
+                            "source_series": "model_routed_calibrated_params",
+                            "dependent_preutterance_source": calibrated_source,
+                            "dependent_preutterance_safe_prob": routed_pre_safe_prob,
+                            "route_decision": "accept",
+                        }
+                    )
+            span_predictions: dict[str, float] = {}
+            span_ratio_source = "missing_overlap_span_ratio"
+            span_ratio_stats: dict[str, object] = {}
+            if routed_pre_ms is None:
+                span_reasons = tuple(routed_reasons or ("missing_routed_preutterance",))
+            else:
+                duration_ms = max(1.0, float(row.get("duration_ms", tracks.duration_ms) or tracks.duration_ms or 1.0))
+                span_reasons = ()
+                span_predictions["preutterance"] = float(routed_pre_ms)
+                span_offset_ms = routed_predictions.get("offset")
+                if span_offset_ms is None:
+                    span_offset_ms = _dependent_offset_ms(
+                        row,
+                        tracks,
+                        preutterance_ms=float(routed_pre_ms),
+                        relative_anchor_priors=relative_anchor_priors,
+                    )
+                if span_offset_ms is None:
+                    span_reasons = ("missing_span_offset",)
+                else:
+                    span_predictions["offset"] = float(span_offset_ms)
+                    span_overlap_ms, span_ratio_source, span_ratio_stats = _overlap_span_ratio_ms(
+                        row,
+                        offset_ms=float(span_offset_ms),
+                        preutterance_ms=float(routed_pre_ms),
+                        relative_anchor_priors=relative_anchor_priors,
+                    )
+                    span_predictions["overlap"] = float(span_overlap_ms)
+                if "fixed_end" in anchors:
+                    span_fixed_ms = routed_predictions.get("fixed_end")
+                    if span_fixed_ms is None:
+                        span_fixed_ms = _dependent_fixed_end_ms(
+                            row,
+                            tracks,
+                            preutterance_ms=float(routed_pre_ms),
+                            relative_anchor_priors=relative_anchor_priors,
+                        )
+                    if span_fixed_ms is not None:
+                        span_predictions["fixed_end"] = float(span_fixed_ms)
+            if "overlap" in anchors:
+                _record_overlap_safety(
+                    overlap_safety_records,
+                    series="model_routed_overlap_span_params",
+                    row=row,
+                    offset_ms=span_predictions.get("offset"),
+                    overlap_ms=span_predictions.get("overlap"),
+                    preutterance_ms=span_predictions.get("preutterance"),
+                    fixed_end_ms=span_predictions.get("fixed_end"),
+                    accepted=span_predictions.get("overlap") is not None,
+                    policy=f"span_ratio:{span_ratio_source}",
+                )
+            for anchor in anchors:
+                target = _target_ms(row, anchor)
+                if target is None:
+                    continue
+                routed_overlap_span_total_by_anchor[anchor] += 1
+                span_pred = span_predictions.get(anchor)
+                if span_pred is None:
+                    routed_overlap_span_review_by_anchor[anchor] += 1
+                    reasons = span_reasons or ("missing_overlap_span_prediction",)
+                    for reason in reasons:
+                        routed_overlap_span_review_reason_by_anchor[f"{anchor}|{reason}"] += 1
+                    continue
+                routed_overlap_span_accept_by_anchor[anchor] += 1
+                span_err = abs(float(span_pred) - float(target))
+                routed_overlap_span_errors_by_anchor[anchor].append(span_err)
+                _record_slot_shift(
+                    slot_shift_by_series_anchor,
+                    "model_routed_overlap_span_params",
+                    anchor,
+                    row,
+                    pred_ms=float(span_pred),
+                    duration_ms=duration_ms,
+                    slot_count=slot_count_for_islands,
+                    slot_index=slot_idx,
+                )
+                _record_failure_breakdown(
+                    failure_breakdown_records,
+                    series="model_routed_overlap_span_params",
+                    anchor=anchor,
+                    row=row,
+                    error_ms=span_err,
+                    pred_ms=float(span_pred),
+                    duration_ms=duration_ms,
+                    dependent_preutterance_source=f"overlap_span_ratio:{span_ratio_source}",
+                    slot_count=slot_count_for_islands,
+                    slot_index=slot_idx,
+                )
+                if span_err > 60.0 and len(worst_routed_overlap_span) < 200:
+                    worst_routed_overlap_span.append(
+                        {
+                            **_failure_example_base(
+                                row,
+                                wav_path=wav_path,
+                                anchor=anchor,
+                                target_ms=float(target),
+                                pred_ms=float(span_pred),
+                                error_ms=span_err,
+                                slot_pos_norm=float(slot_idx + 0.5) / max(1.0, float(slot_count_for_islands)),
+                            ),
+                            "source_series": "model_routed_overlap_span_params",
+                            "dependent_preutterance_source": f"overlap_span_ratio:{span_ratio_source}",
+                            "overlap_ratio_prior_stats": span_ratio_stats,
+                            "route_decision": "accept",
+                        }
+                    )
+            safe_predictions: dict[str, float] = {}
+            safe_reasons: list[str] = []
+            safe_overlap_context: dict[str, object] = {}
+            safe_source = "safe_overlap_policy"
+            if routed_pre_ms is None:
+                safe_reasons.extend(routed_reasons or ("missing_routed_preutterance",))
+            else:
+                safe_predictions["preutterance"] = float(routed_pre_ms)
+                safe_offset_ms = routed_predictions.get("offset")
+                if safe_offset_ms is None:
+                    safe_offset_ms = _dependent_offset_ms(
+                        row,
+                        tracks,
+                        preutterance_ms=float(routed_pre_ms),
+                        relative_anchor_priors=relative_anchor_priors,
+                    )
+                if safe_offset_ms is None:
+                    safe_reasons.append("missing_safe_overlap_offset")
+                else:
+                    safe_predictions["offset"] = float(safe_offset_ms)
+                    if "overlap" in anchors:
+                        safe_overlap_ms, safe_overlap_context = _safe_overlap_ms(
+                            row,
+                            offset_ms=float(safe_offset_ms),
+                            preutterance_ms=float(routed_pre_ms),
+                            preferred_overlap_ms=span_predictions.get("overlap", routed_predictions.get("overlap")),
+                        )
+                        safe_predictions["overlap"] = float(safe_overlap_ms)
+                        safe_source = f"safe_overlap:{safe_overlap_context.get('policy', 'unknown')}"
+                safe_fixed_ms = routed_predictions.get("fixed_end")
+                if safe_fixed_ms is None:
+                    safe_fixed_ms = _dependent_fixed_end_ms(
+                        row,
+                        tracks,
+                        preutterance_ms=float(routed_pre_ms),
+                        relative_anchor_priors=relative_anchor_priors,
+                    )
+                if safe_fixed_ms is None:
+                    safe_reasons.append("missing_safe_overlap_fixed_end")
+                else:
+                    safe_predictions["fixed_end"] = float(safe_fixed_ms)
+            safe_reasons = list(dict.fromkeys(safe_reasons))
+            if "overlap" in anchors:
+                _record_overlap_safety(
+                    overlap_safety_records,
+                    series="model_routed_safe_overlap_params",
+                    row=row,
+                    offset_ms=safe_predictions.get("offset"),
+                    overlap_ms=safe_predictions.get("overlap"),
+                    preutterance_ms=safe_predictions.get("preutterance"),
+                    fixed_end_ms=safe_predictions.get("fixed_end"),
+                    accepted=safe_predictions.get("overlap") is not None and safe_predictions.get("fixed_end") is not None,
+                    policy=str(safe_overlap_context.get("policy", "safe_overlap")),
+                )
+            slot_exact_reasons: list[str] = list(safe_reasons)
+            for gate_anchor in anchors:
+                gate_pred = safe_predictions.get(gate_anchor)
+                if gate_pred is None:
+                    slot_exact_reasons.append(f"missing_slot_exact_prediction:{gate_anchor}")
+                    continue
+                gate_delta = _slot_shift_delta(
+                    row,
+                    pred_ms=float(gate_pred),
+                    duration_ms=duration_ms,
+                    slot_count=slot_count_for_islands,
+                    slot_index=slot_idx,
+                )
+                if gate_delta is None:
+                    slot_exact_reasons.append(f"unknown_slot_delta:{gate_anchor}")
+                elif int(gate_delta) != 0:
+                    slot_exact_reasons.append(f"slot_not_exact:{gate_anchor}:{_slot_shift_bucket(gate_delta)}")
+            slot_exact_reasons = list(dict.fromkeys(slot_exact_reasons))
+            slot_exact_accept = not slot_exact_reasons
+            boundary_slot_exact_reasons: list[str] = list(safe_reasons)
+            boundary_gate_anchors = [anchor for anchor in anchors if anchor in {"preutterance", "overlap", "fixed_end"}]
+            if not boundary_gate_anchors:
+                boundary_gate_anchors = list(anchors)
+            for gate_anchor in boundary_gate_anchors:
+                gate_pred = safe_predictions.get(gate_anchor)
+                if gate_pred is None:
+                    boundary_slot_exact_reasons.append(f"missing_boundary_slot_prediction:{gate_anchor}")
+                    continue
+                gate_delta = _slot_shift_delta(
+                    row,
+                    pred_ms=float(gate_pred),
+                    duration_ms=duration_ms,
+                    slot_count=slot_count_for_islands,
+                    slot_index=slot_idx,
+                )
+                if gate_delta is None:
+                    boundary_slot_exact_reasons.append(f"unknown_boundary_slot_delta:{gate_anchor}")
+                elif int(gate_delta) != 0:
+                    boundary_slot_exact_reasons.append(
+                        f"boundary_slot_not_exact:{gate_anchor}:{_slot_shift_bucket(gate_delta)}"
+                    )
+            boundary_slot_exact_reasons = list(dict.fromkeys(boundary_slot_exact_reasons))
+            boundary_slot_exact_accept = not boundary_slot_exact_reasons
+            if "overlap" in anchors:
+                _record_overlap_safety(
+                    overlap_safety_records,
+                    series="model_routed_slot_exact_safe_params",
+                    row=row,
+                    offset_ms=safe_predictions.get("offset"),
+                    overlap_ms=safe_predictions.get("overlap"),
+                    preutterance_ms=safe_predictions.get("preutterance"),
+                    fixed_end_ms=safe_predictions.get("fixed_end"),
+                    accepted=bool(slot_exact_accept),
+                    policy=str(safe_overlap_context.get("policy", "safe_overlap")),
+                )
+                _record_overlap_safety(
+                    overlap_safety_records,
+                    series="model_routed_boundary_slot_exact_params",
+                    row=row,
+                    offset_ms=safe_predictions.get("offset"),
+                    overlap_ms=safe_predictions.get("overlap"),
+                    preutterance_ms=safe_predictions.get("preutterance"),
+                    fixed_end_ms=safe_predictions.get("fixed_end"),
+                    accepted=bool(boundary_slot_exact_accept),
+                    policy=str(safe_overlap_context.get("policy", "safe_overlap")),
+                )
+            for anchor in anchors:
+                target = _target_ms(row, anchor)
+                if target is None:
+                    continue
+                routed_safe_overlap_total_by_anchor[anchor] += 1
+                routed_slot_exact_total_by_anchor[anchor] += 1
+                routed_boundary_slot_exact_total_by_anchor[anchor] += 1
+                safe_pred = safe_predictions.get(anchor)
+                if safe_pred is None:
+                    routed_safe_overlap_review_by_anchor[anchor] += 1
+                    reasons = safe_reasons or ("missing_safe_overlap_prediction",)
+                    for reason in reasons:
+                        routed_safe_overlap_review_reason_by_anchor[f"{anchor}|{reason}"] += 1
+                    routed_slot_exact_review_by_anchor[anchor] += 1
+                    slot_reasons = slot_exact_reasons or ("missing_safe_overlap_prediction",)
+                    for reason in slot_reasons:
+                        routed_slot_exact_review_reason_by_anchor[f"{anchor}|{reason}"] += 1
+                    routed_boundary_slot_exact_review_by_anchor[anchor] += 1
+                    boundary_reasons = boundary_slot_exact_reasons or ("missing_safe_overlap_prediction",)
+                    for reason in boundary_reasons:
+                        routed_boundary_slot_exact_review_reason_by_anchor[f"{anchor}|{reason}"] += 1
+                    continue
+                routed_safe_overlap_accept_by_anchor[anchor] += 1
+                safe_err = abs(float(safe_pred) - float(target))
+                routed_safe_overlap_errors_by_anchor[anchor].append(safe_err)
+                _record_slot_shift(
+                    slot_shift_by_series_anchor,
+                    "model_routed_safe_overlap_params",
+                    anchor,
+                    row,
+                    pred_ms=float(safe_pred),
+                    duration_ms=duration_ms,
+                    slot_count=slot_count_for_islands,
+                    slot_index=slot_idx,
+                )
+                _record_failure_breakdown(
+                    failure_breakdown_records,
+                    series="model_routed_safe_overlap_params",
+                    anchor=anchor,
+                    row=row,
+                    error_ms=safe_err,
+                    pred_ms=float(safe_pred),
+                    duration_ms=duration_ms,
+                    dependent_preutterance_source=safe_source if anchor == "overlap" else "routed_safe_overlap",
+                    slot_count=slot_count_for_islands,
+                    slot_index=slot_idx,
+                )
+                if safe_err > 60.0 and len(worst_routed_safe_overlap) < 200:
+                    worst_routed_safe_overlap.append(
+                        {
+                            **_failure_example_base(
+                                row,
+                                wav_path=wav_path,
+                                anchor=anchor,
+                                target_ms=float(target),
+                                pred_ms=float(safe_pred),
+                                error_ms=safe_err,
+                                slot_pos_norm=float(slot_idx + 0.5) / max(1.0, float(slot_count_for_islands)),
+                            ),
+                            "source_series": "model_routed_safe_overlap_params",
+                            "dependent_preutterance_source": safe_source,
+                            "dependent_preutterance_safe_prob": routed_pre_safe_prob,
+                            "safe_overlap_context": safe_overlap_context,
+                            "route_decision": "accept",
+                        }
+                    )
+                if not boundary_slot_exact_accept:
+                    routed_boundary_slot_exact_review_by_anchor[anchor] += 1
+                    reasons = boundary_slot_exact_reasons or ("boundary_slot_exact_rejected",)
+                    for reason in reasons:
+                        routed_boundary_slot_exact_review_reason_by_anchor[f"{anchor}|{reason}"] += 1
+                else:
+                    routed_boundary_slot_exact_accept_by_anchor[anchor] += 1
+                    boundary_pred = safe_predictions.get(anchor)
+                    if boundary_pred is None:
+                        routed_boundary_slot_exact_review_by_anchor[anchor] += 1
+                        routed_boundary_slot_exact_review_reason_by_anchor[
+                            f"{anchor}|missing_boundary_slot_exact_prediction"
+                        ] += 1
+                    else:
+                        boundary_err = abs(float(boundary_pred) - float(target))
+                        routed_boundary_slot_exact_errors_by_anchor[anchor].append(boundary_err)
+                        _record_slot_shift(
+                            slot_shift_by_series_anchor,
+                            "model_routed_boundary_slot_exact_params",
+                            anchor,
+                            row,
+                            pred_ms=float(boundary_pred),
+                            duration_ms=duration_ms,
+                            slot_count=slot_count_for_islands,
+                            slot_index=slot_idx,
+                        )
+                        _record_failure_breakdown(
+                            failure_breakdown_records,
+                            series="model_routed_boundary_slot_exact_params",
+                            anchor=anchor,
+                            row=row,
+                            error_ms=boundary_err,
+                            pred_ms=float(boundary_pred),
+                            duration_ms=duration_ms,
+                            dependent_preutterance_source=safe_source if anchor == "overlap" else "boundary_slot_exact",
+                            slot_count=slot_count_for_islands,
+                            slot_index=slot_idx,
+                        )
+                        if boundary_err > 60.0 and len(worst_routed_boundary_slot_exact) < 200:
+                            worst_routed_boundary_slot_exact.append(
+                                {
+                                    **_failure_example_base(
+                                        row,
+                                        wav_path=wav_path,
+                                        anchor=anchor,
+                                        target_ms=float(target),
+                                        pred_ms=float(boundary_pred),
+                                        error_ms=boundary_err,
+                                        slot_pos_norm=float(slot_idx + 0.5) / max(1.0, float(slot_count_for_islands)),
+                                    ),
+                                    "source_series": "model_routed_boundary_slot_exact_params",
+                                    "dependent_preutterance_source": safe_source,
+                                    "dependent_preutterance_safe_prob": routed_pre_safe_prob,
+                                    "safe_overlap_context": safe_overlap_context,
+                                    "route_decision": "accept",
+                                }
+                            )
+                if not slot_exact_accept:
+                    routed_slot_exact_review_by_anchor[anchor] += 1
+                    reasons = slot_exact_reasons or ("slot_exact_rejected",)
+                    for reason in reasons:
+                        routed_slot_exact_review_reason_by_anchor[f"{anchor}|{reason}"] += 1
+                    continue
+                routed_slot_exact_accept_by_anchor[anchor] += 1
+                slot_exact_pred = safe_predictions.get(anchor)
+                if slot_exact_pred is None:
+                    routed_slot_exact_review_by_anchor[anchor] += 1
+                    routed_slot_exact_review_reason_by_anchor[f"{anchor}|missing_slot_exact_prediction"] += 1
+                    continue
+                slot_exact_err = abs(float(slot_exact_pred) - float(target))
+                routed_slot_exact_errors_by_anchor[anchor].append(slot_exact_err)
+                _record_slot_shift(
+                    slot_shift_by_series_anchor,
+                    "model_routed_slot_exact_safe_params",
+                    anchor,
+                    row,
+                    pred_ms=float(slot_exact_pred),
+                    duration_ms=duration_ms,
+                    slot_count=slot_count_for_islands,
+                    slot_index=slot_idx,
+                )
+                _record_failure_breakdown(
+                    failure_breakdown_records,
+                    series="model_routed_slot_exact_safe_params",
+                    anchor=anchor,
+                    row=row,
+                    error_ms=slot_exact_err,
+                    pred_ms=float(slot_exact_pred),
+                    duration_ms=duration_ms,
+                    dependent_preutterance_source=safe_source if anchor == "overlap" else "slot_exact_safe_overlap",
+                    slot_count=slot_count_for_islands,
+                    slot_index=slot_idx,
+                )
+                if slot_exact_err > 60.0 and len(worst_routed_slot_exact) < 200:
+                    worst_routed_slot_exact.append(
+                        {
+                            **_failure_example_base(
+                                row,
+                                wav_path=wav_path,
+                                anchor=anchor,
+                                target_ms=float(target),
+                                pred_ms=float(slot_exact_pred),
+                                error_ms=slot_exact_err,
+                                slot_pos_norm=float(slot_idx + 0.5) / max(1.0, float(slot_count_for_islands)),
+                            ),
+                            "source_series": "model_routed_slot_exact_safe_params",
+                            "dependent_preutterance_source": safe_source,
+                            "dependent_preutterance_safe_prob": routed_pre_safe_prob,
+                            "safe_overlap_context": safe_overlap_context,
+                            "route_decision": "accept",
+                        }
+                    )
             row_safe, row_safety_warnings = _island_row_safe(assignment, island, predictions)
             island_context = _island_prediction_context(
                 island_decode,
@@ -2190,6 +3778,8 @@ def evaluate_models(
                 slot_count=slot_count_for_islands,
                 safety_warnings=row_safety_warnings,
             )
+            island_context["dependent_preutterance_source"] = dependent_pre_source
+            island_context["dependent_preutterance_safe_prob"] = dependent_pre_safe_prob
             for anchor in anchors:
                 target = _target_ms(row, anchor)
                 if target is None:
@@ -2393,7 +3983,12 @@ def evaluate_models(
                             "heuristic_rejected": bool(reasons),
                         }
                     )
-                    if safe_prob < float(supervised_gate_threshold):
+                    anchor_gate_threshold = _threshold_for_anchor(
+                        anchor,
+                        float(supervised_gate_threshold),
+                        supervised_gate_thresholds_by_anchor,
+                    )
+                    if safe_prob < float(anchor_gate_threshold):
                         reasons.append("supervised_failure_risk")
                 elif supervised_gate_models:
                     gate_sweep_records_by_anchor[anchor].append(
@@ -2654,6 +4249,144 @@ def evaluate_models(
                 },
             }
         )
+        routed_dependent_summary = summarize(
+            routed_dependent_errors_by_anchor[anchor],
+            int(routed_dependent_total_by_anchor[anchor]),
+            int(routed_dependent_review_by_anchor[anchor]),
+        )
+        routed_dependent_summary.update(
+            {
+                "accepted": int(routed_dependent_accept_by_anchor[anchor]),
+                "reviewed": int(routed_dependent_review_by_anchor[anchor]),
+                "accept_rate": float(routed_dependent_accept_by_anchor[anchor] / routed_dependent_total_by_anchor[anchor])
+                if routed_dependent_total_by_anchor[anchor]
+                else 0.0,
+                "review_rate": float(routed_dependent_review_by_anchor[anchor] / routed_dependent_total_by_anchor[anchor])
+                if routed_dependent_total_by_anchor[anchor]
+                else 0.0,
+                "review_reasons": {
+                    key.split("|", 1)[1]: int(value)
+                    for key, value in sorted(routed_dependent_review_reason_by_anchor.items())
+                    if key.startswith(f"{anchor}|")
+                },
+            }
+        )
+        routed_calibrated_summary = summarize(
+            routed_calibrated_errors_by_anchor[anchor],
+            int(routed_calibrated_total_by_anchor[anchor]),
+            int(routed_calibrated_review_by_anchor[anchor]),
+        )
+        routed_calibrated_summary.update(
+            {
+                "accepted": int(routed_calibrated_accept_by_anchor[anchor]),
+                "reviewed": int(routed_calibrated_review_by_anchor[anchor]),
+                "accept_rate": float(routed_calibrated_accept_by_anchor[anchor] / routed_calibrated_total_by_anchor[anchor])
+                if routed_calibrated_total_by_anchor[anchor]
+                else 0.0,
+                "review_rate": float(routed_calibrated_review_by_anchor[anchor] / routed_calibrated_total_by_anchor[anchor])
+                if routed_calibrated_total_by_anchor[anchor]
+                else 0.0,
+                "review_reasons": {
+                    key.split("|", 1)[1]: int(value)
+                    for key, value in sorted(routed_calibrated_review_reason_by_anchor.items())
+                    if key.startswith(f"{anchor}|")
+                },
+            }
+        )
+        routed_overlap_span_summary = summarize(
+            routed_overlap_span_errors_by_anchor[anchor],
+            int(routed_overlap_span_total_by_anchor[anchor]),
+            int(routed_overlap_span_review_by_anchor[anchor]),
+        )
+        routed_overlap_span_summary.update(
+            {
+                "accepted": int(routed_overlap_span_accept_by_anchor[anchor]),
+                "reviewed": int(routed_overlap_span_review_by_anchor[anchor]),
+                "accept_rate": float(routed_overlap_span_accept_by_anchor[anchor] / routed_overlap_span_total_by_anchor[anchor])
+                if routed_overlap_span_total_by_anchor[anchor]
+                else 0.0,
+                "review_rate": float(routed_overlap_span_review_by_anchor[anchor] / routed_overlap_span_total_by_anchor[anchor])
+                if routed_overlap_span_total_by_anchor[anchor]
+                else 0.0,
+                "review_reasons": {
+                    key.split("|", 1)[1]: int(value)
+                    for key, value in sorted(routed_overlap_span_review_reason_by_anchor.items())
+                    if key.startswith(f"{anchor}|")
+                },
+            }
+        )
+        routed_safe_overlap_summary = summarize(
+            routed_safe_overlap_errors_by_anchor[anchor],
+            int(routed_safe_overlap_total_by_anchor[anchor]),
+            int(routed_safe_overlap_review_by_anchor[anchor]),
+        )
+        routed_safe_overlap_summary.update(
+            {
+                "accepted": int(routed_safe_overlap_accept_by_anchor[anchor]),
+                "reviewed": int(routed_safe_overlap_review_by_anchor[anchor]),
+                "accept_rate": float(routed_safe_overlap_accept_by_anchor[anchor] / routed_safe_overlap_total_by_anchor[anchor])
+                if routed_safe_overlap_total_by_anchor[anchor]
+                else 0.0,
+                "review_rate": float(routed_safe_overlap_review_by_anchor[anchor] / routed_safe_overlap_total_by_anchor[anchor])
+                if routed_safe_overlap_total_by_anchor[anchor]
+                else 0.0,
+                "review_reasons": {
+                    key.split("|", 1)[1]: int(value)
+                    for key, value in sorted(routed_safe_overlap_review_reason_by_anchor.items())
+                    if key.startswith(f"{anchor}|")
+                },
+            }
+        )
+        routed_slot_exact_summary = summarize(
+            routed_slot_exact_errors_by_anchor[anchor],
+            int(routed_slot_exact_total_by_anchor[anchor]),
+            int(routed_slot_exact_review_by_anchor[anchor]),
+        )
+        routed_slot_exact_summary.update(
+            {
+                "accepted": int(routed_slot_exact_accept_by_anchor[anchor]),
+                "reviewed": int(routed_slot_exact_review_by_anchor[anchor]),
+                "accept_rate": float(routed_slot_exact_accept_by_anchor[anchor] / routed_slot_exact_total_by_anchor[anchor])
+                if routed_slot_exact_total_by_anchor[anchor]
+                else 0.0,
+                "review_rate": float(routed_slot_exact_review_by_anchor[anchor] / routed_slot_exact_total_by_anchor[anchor])
+                if routed_slot_exact_total_by_anchor[anchor]
+                else 0.0,
+                "review_reasons": {
+                    key.split("|", 1)[1]: int(value)
+                    for key, value in sorted(routed_slot_exact_review_reason_by_anchor.items())
+                    if key.startswith(f"{anchor}|")
+                },
+            }
+        )
+        routed_boundary_slot_exact_summary = summarize(
+            routed_boundary_slot_exact_errors_by_anchor[anchor],
+            int(routed_boundary_slot_exact_total_by_anchor[anchor]),
+            int(routed_boundary_slot_exact_review_by_anchor[anchor]),
+        )
+        routed_boundary_slot_exact_summary.update(
+            {
+                "accepted": int(routed_boundary_slot_exact_accept_by_anchor[anchor]),
+                "reviewed": int(routed_boundary_slot_exact_review_by_anchor[anchor]),
+                "accept_rate": float(
+                    routed_boundary_slot_exact_accept_by_anchor[anchor]
+                    / routed_boundary_slot_exact_total_by_anchor[anchor]
+                )
+                if routed_boundary_slot_exact_total_by_anchor[anchor]
+                else 0.0,
+                "review_rate": float(
+                    routed_boundary_slot_exact_review_by_anchor[anchor]
+                    / routed_boundary_slot_exact_total_by_anchor[anchor]
+                )
+                if routed_boundary_slot_exact_total_by_anchor[anchor]
+                else 0.0,
+                "review_reasons": {
+                    key.split("|", 1)[1]: int(value)
+                    for key, value in sorted(routed_boundary_slot_exact_review_reason_by_anchor.items())
+                    if key.startswith(f"{anchor}|")
+                },
+            }
+        )
         by_anchor[anchor] = {
             "model": summarize(errors_by_anchor[anchor], total, int(missing_by_anchor[anchor])),
             "model_family_prior": summarize(family_prior_errors_by_anchor[anchor], total, int(missing_by_anchor[anchor])),
@@ -2662,6 +4395,12 @@ def evaluate_models(
             "model_filename_slot_lattice": summarize(filename_slot_lattice_errors_by_anchor[anchor], total, int(missing_by_anchor[anchor])),
             "model_constrained_slot_lattice": summarize(constrained_slot_lattice_errors_by_anchor[anchor], total, int(missing_by_anchor[anchor])),
             "model_gated_constrained_accept": gated_summary,
+            "model_routed_dependent_params": routed_dependent_summary,
+            "model_routed_calibrated_params": routed_calibrated_summary,
+            "model_routed_overlap_span_params": routed_overlap_span_summary,
+            "model_routed_safe_overlap_params": routed_safe_overlap_summary,
+            "model_routed_slot_exact_safe_params": routed_slot_exact_summary,
+            "model_routed_boundary_slot_exact_params": routed_boundary_slot_exact_summary,
             "model_offset_gap_from_preutterance": summarize(
                 offset_gap_model_errors_by_anchor[anchor],
                 total,
@@ -2671,6 +4410,11 @@ def evaluate_models(
                 overlap_relative_gap_errors_by_anchor[anchor],
                 total,
                 max(0, total - len(overlap_relative_gap_errors_by_anchor[anchor])),
+            ),
+            "model_fixed_end_relative_from_preutterance": summarize(
+                fixed_end_relative_gap_errors_by_anchor[anchor],
+                total,
+                max(0, total - len(fixed_end_relative_gap_errors_by_anchor[anchor])),
             ),
             "model_vowel_island_lattice": summarize(
                 vowel_island_lattice_errors_by_anchor[anchor],
@@ -2708,6 +4452,36 @@ def evaluate_models(
     )[:200]
     worst_gated_constrained_examples = sorted(
         worst_gated_constrained,
+        key=lambda item: float(item.get("error_ms", 0.0)),
+        reverse=True,
+    )[:200]
+    worst_routed_dependent_examples = sorted(
+        worst_routed_dependent,
+        key=lambda item: float(item.get("error_ms", 0.0)),
+        reverse=True,
+    )[:200]
+    worst_routed_calibrated_examples = sorted(
+        worst_routed_calibrated,
+        key=lambda item: float(item.get("error_ms", 0.0)),
+        reverse=True,
+    )[:200]
+    worst_routed_overlap_span_examples = sorted(
+        worst_routed_overlap_span,
+        key=lambda item: float(item.get("error_ms", 0.0)),
+        reverse=True,
+    )[:200]
+    worst_routed_safe_overlap_examples = sorted(
+        worst_routed_safe_overlap,
+        key=lambda item: float(item.get("error_ms", 0.0)),
+        reverse=True,
+    )[:200]
+    worst_routed_slot_exact_examples = sorted(
+        worst_routed_slot_exact,
+        key=lambda item: float(item.get("error_ms", 0.0)),
+        reverse=True,
+    )[:200]
+    worst_routed_boundary_slot_exact_examples = sorted(
+        worst_routed_boundary_slot_exact,
         key=lambda item: float(item.get("error_ms", 0.0)),
         reverse=True,
     )[:200]
@@ -2750,6 +4524,10 @@ def evaluate_models(
             "review_duplicate_tokens": bool(gate_review_duplicate_tokens),
             "heuristic_gate_enabled": bool(use_heuristic_gate),
             "supervised_gate_threshold": float(supervised_gate_threshold),
+            "supervised_gate_thresholds_by_anchor": {
+                str(anchor): float(value)
+                for anchor, value in sorted((supervised_gate_thresholds_by_anchor or {}).items())
+            },
             "supervised_gate_enabled": bool(supervised_gate_models),
             "threshold_sweep": [float(value) for value in sorted(set(gate_threshold_sweep))],
         },
@@ -2794,14 +4572,28 @@ def evaluate_models(
         "worst_filename_slot_lattice_examples": worst_filename_slot_examples,
         "worst_constrained_slot_lattice_examples": worst_constrained_examples,
         "worst_gated_constrained_accept_examples": worst_gated_constrained_examples,
+        "worst_routed_dependent_params_examples": worst_routed_dependent_examples,
+        "worst_routed_calibrated_params_examples": worst_routed_calibrated_examples,
+        "worst_routed_overlap_span_params_examples": worst_routed_overlap_span_examples,
+        "worst_routed_safe_overlap_params_examples": worst_routed_safe_overlap_examples,
+        "worst_routed_slot_exact_safe_params_examples": worst_routed_slot_exact_examples,
+        "worst_routed_boundary_slot_exact_params_examples": worst_routed_boundary_slot_exact_examples,
         "worst_vowel_island_lattice_examples": worst_vowel_island_examples,
         "worst_vowel_island_gated_accept_examples": worst_vowel_island_gated_examples,
+        "failure_breakdown": _summarize_failure_breakdown(failure_breakdown_records),
+        "overlap_safety_summary": _summarize_overlap_safety(overlap_safety_records),
         "worst_example_profile": {
             "model": _profile_worst_examples(worst_model_examples),
             "joint_lattice": _profile_worst_examples(worst_joint_examples),
             "filename_slot_lattice": _profile_worst_examples(worst_filename_slot_examples),
             "constrained_slot_lattice": _profile_worst_examples(worst_constrained_examples),
             "gated_constrained_accept": _profile_worst_examples(worst_gated_constrained_examples),
+            "routed_dependent_params": _profile_worst_examples(worst_routed_dependent_examples),
+            "routed_calibrated_params": _profile_worst_examples(worst_routed_calibrated_examples),
+            "routed_overlap_span_params": _profile_worst_examples(worst_routed_overlap_span_examples),
+            "routed_safe_overlap_params": _profile_worst_examples(worst_routed_safe_overlap_examples),
+            "routed_slot_exact_safe_params": _profile_worst_examples(worst_routed_slot_exact_examples),
+            "routed_boundary_slot_exact_params": _profile_worst_examples(worst_routed_boundary_slot_exact_examples),
             "vowel_island_lattice": _profile_worst_examples(worst_vowel_island_examples),
             "vowel_island_gated_accept": _profile_worst_examples(worst_vowel_island_gated_examples),
         },
@@ -2844,6 +4636,7 @@ def train_manual_oto_anchor_scorer(
     gate_review_duplicate_tokens: bool = True,
     failure_gate: str = "heuristic",
     supervised_gate_threshold: float = 0.80,
+    supervised_gate_thresholds_by_anchor: dict[str, float] | None = None,
     gate_threshold_sweep: tuple[float, ...] = (0.50, 0.60, 0.70, 0.80, 0.85, 0.90, 0.95),
     seed: int = 20260522,
 ) -> dict[str, object]:
@@ -2971,6 +4764,7 @@ def train_manual_oto_anchor_scorer(
         use_heuristic_gate=failure_gate in {"heuristic", "combined"},
         supervised_gate_models=supervised_gate_models,
         supervised_gate_threshold=float(supervised_gate_threshold),
+        supervised_gate_thresholds_by_anchor=supervised_gate_thresholds_by_anchor,
         gate_threshold_sweep=tuple(gate_threshold_sweep),
         relative_anchor_priors=relative_anchor_priors,
         island_anchor_priors=island_anchor_priors,
@@ -3010,14 +4804,12 @@ def train_manual_oto_anchor_scorer(
         "gate_review_duplicate_tokens": bool(gate_review_duplicate_tokens),
         "failure_gate": failure_gate,
         "supervised_gate_threshold": float(supervised_gate_threshold),
-        "gate_threshold_sweep": [float(value) for value in sorted(set(gate_threshold_sweep))],
-        "relative_anchor_priors": {
-            "schema_version": str(relative_anchor_priors.get("schema_version", "")),
-            "bucket_counts": {
-                kind: len(values) if isinstance(values, dict) else 0
-                for kind, values in dict(relative_anchor_priors.get("buckets", {})).items()
-            },
+        "supervised_gate_thresholds_by_anchor": {
+            str(anchor): float(value)
+            for anchor, value in sorted((supervised_gate_thresholds_by_anchor or {}).items())
         },
+        "gate_threshold_sweep": [float(value) for value in sorted(set(gate_threshold_sweep))],
+        "relative_anchor_priors": _relative_prior_bucket_summary(relative_anchor_priors),
         "island_anchor_priors": {
             "schema_version": str(island_anchor_priors.get("schema_version", "")),
             "bucket_count": len(dict(island_anchor_priors.get("buckets", {}))),
@@ -3040,6 +4832,11 @@ def train_manual_oto_anchor_scorer(
         "models_trained": sorted(models),
         "failure_gate": failure_gate,
         "failure_gate_models_trained": sorted(supervised_gate_models),
+        "supervised_gate_threshold": float(supervised_gate_threshold),
+        "supervised_gate_thresholds_by_anchor": {
+            str(anchor): float(value)
+            for anchor, value in sorted((supervised_gate_thresholds_by_anchor or {}).items())
+        },
         "failure_gate_train": {
             "sample_counts": (gate_train_summary or {}).get("gate_training", {}).get("sample_counts", {})
             if isinstance((gate_train_summary or {}).get("gate_training", {}), dict)
@@ -3049,13 +4846,7 @@ def train_manual_oto_anchor_scorer(
             else {},
         },
         "sample_wavs": bool(sample_wavs),
-        "relative_anchor_priors": {
-            "schema_version": str(relative_anchor_priors.get("schema_version", "")),
-            "bucket_counts": {
-                kind: len(values) if isinstance(values, dict) else 0
-                for kind, values in dict(relative_anchor_priors.get("buckets", {})).items()
-            },
-        },
+        "relative_anchor_priors": _relative_prior_bucket_summary(relative_anchor_priors),
         "island_anchor_priors": {
             "schema_version": str(island_anchor_priors.get("schema_version", "")),
             "bucket_count": len(dict(island_anchor_priors.get("buckets", {}))),
@@ -3107,6 +4898,11 @@ def main() -> int:
     parser.add_argument("--failure-gate", choices=("off", "heuristic", "supervised", "combined"), default="heuristic")
     parser.add_argument("--supervised-gate-threshold", type=float, default=0.80)
     parser.add_argument(
+        "--supervised-gate-threshold-by-anchor",
+        default="",
+        help="Comma-separated anchor=value overrides, for example preutterance=0.80,fixed_end=0.85.",
+    )
+    parser.add_argument(
         "--gate-threshold-sweep",
         default="0.50,0.60,0.70,0.80,0.85,0.90,0.95",
         help="Comma-separated supervised gate thresholds to summarize without rerunning eval.",
@@ -3153,6 +4949,9 @@ def main() -> int:
         gate_review_duplicate_tokens=not bool(args.no_gate_review_duplicate_tokens),
         failure_gate=str(args.failure_gate),
         supervised_gate_threshold=float(args.supervised_gate_threshold),
+        supervised_gate_thresholds_by_anchor=_thresholds_by_anchor_arg(
+            str(args.supervised_gate_threshold_by_anchor or "")
+        ),
         gate_threshold_sweep=_thresholds_arg(str(args.gate_threshold_sweep or "")),
         seed=int(args.seed),
     )
