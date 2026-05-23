@@ -25,8 +25,15 @@ SERIES = (
     "model_filename_slot_lattice",
     "model_constrained_slot_lattice",
     "model_gated_constrained_accept",
+    "model_routed_dependent_params",
+    "model_routed_calibrated_params",
+    "model_routed_overlap_span_params",
+    "model_routed_safe_overlap_params",
+    "model_routed_slot_exact_safe_params",
+    "model_routed_boundary_slot_exact_params",
     "model_offset_gap_from_preutterance",
     "model_overlap_relative_from_preutterance",
+    "model_fixed_end_relative_from_preutterance",
     "model_vowel_island_lattice",
     "model_local_offset_from_island_pre",
     "model_overlap_relative_on_island",
@@ -44,8 +51,15 @@ SERIES_LABELS = {
     "model_filename_slot_lattice": "filename slot lattice",
     "model_constrained_slot_lattice": "slot lattice",
     "model_gated_constrained_accept": "gated accept",
-    "model_offset_gap_from_preutterance": "offset gap model",
-    "model_overlap_relative_from_preutterance": "overlap relative",
+    "model_routed_dependent_params": "routed dependent",
+    "model_routed_calibrated_params": "routed calibrated",
+    "model_routed_overlap_span_params": "routed overlap span",
+    "model_routed_safe_overlap_params": "routed safe overlap",
+    "model_routed_slot_exact_safe_params": "routed slot-exact",
+    "model_routed_boundary_slot_exact_params": "routed boundary-exact",
+    "model_offset_gap_from_preutterance": "offset local from pre",
+    "model_overlap_relative_from_preutterance": "overlap dependent",
+    "model_fixed_end_relative_from_preutterance": "fixed dependent",
     "model_vowel_island_lattice": "vowel island",
     "model_local_offset_from_island_pre": "local offset island",
     "model_overlap_relative_on_island": "overlap island",
@@ -63,8 +77,15 @@ SERIES_COLORS = {
     "model_filename_slot_lattice": "#0891b2",
     "model_constrained_slot_lattice": "#ea580c",
     "model_gated_constrained_accept": "#059669",
+    "model_routed_dependent_params": "#16a34a",
+    "model_routed_calibrated_params": "#22c55e",
+    "model_routed_overlap_span_params": "#65a30d",
+    "model_routed_safe_overlap_params": "#15803d",
+    "model_routed_slot_exact_safe_params": "#047857",
+    "model_routed_boundary_slot_exact_params": "#0f766e",
     "model_offset_gap_from_preutterance": "#be123c",
     "model_overlap_relative_from_preutterance": "#0d9488",
+    "model_fixed_end_relative_from_preutterance": "#9333ea",
     "model_vowel_island_lattice": "#f59e0b",
     "model_local_offset_from_island_pre": "#e11d48",
     "model_overlap_relative_on_island": "#14b8a6",
@@ -150,7 +171,7 @@ def _bar_svg(
                 f'<rect x="{left}" y="{yy + 4}" width="{bar_w:.1f}" height="{bar_h}" fill="{SERIES_COLORS.get(key, "#94a3b8")}"/>'
             )
             text = f"{value:.3f}" if not suffix else f"{value:.1f}{suffix}"
-            if metric.startswith("recall"):
+            if metric.startswith("recall") or metric.endswith("_rate"):
                 text = f"{value * 100.0:.1f}%"
             parts.append(
                 f'<text x="{left + plot_w + 8}" y="{yy + 16}" fill="#d1d5db" font-size="11" font-family="Segoe UI, Arial">{html.escape(text)}</text>'
@@ -198,21 +219,70 @@ def _summary_table(summary: dict[str, object], anchors: list[str]) -> str:
     rows = []
     for anchor in anchors:
         for series in SERIES:
+            le10 = _metric(summary, anchor, series, "pass_le10_rate")
             recall30 = _metric(summary, anchor, series, "recall30")
+            ordinary = _metric(summary, anchor, series, "ordinary_30_60_rate")
+            review60 = _metric(summary, anchor, series, "review_gt60_rate")
+            warning = _metric(summary, anchor, series, "warning_60_80_rate")
+            reject80 = _metric(summary, anchor, series, "reject_gt80_rate")
             median_ms = _metric(summary, anchor, series, "median_error_ms")
             p90_ms = _metric(summary, anchor, series, "p90_error_ms")
             rows.append(
                 "<tr>"
                 f"<td>{html.escape(anchor)}</td>"
                 f"<td>{html.escape(SERIES_LABELS.get(series, series))}</td>"
+                f"<td>{le10 * 100.0:.1f}%</td>"
                 f"<td>{recall30 * 100.0:.1f}%</td>"
+                f"<td>{ordinary * 100.0:.1f}%</td>"
+                f"<td>{review60 * 100.0:.1f}%</td>"
+                f"<td>{warning * 100.0:.1f}%</td>"
+                f"<td>{reject80 * 100.0:.1f}%</td>"
                 f"<td>{median_ms:.1f}</td>"
                 f"<td>{p90_ms:.1f}</td>"
                 "</tr>"
             )
     return (
         '<table class="metric-table">'
-        "<thead><tr><th>anchor</th><th>series</th><th>recall30</th><th>median ms</th><th>p90 ms</th></tr></thead>"
+        "<thead><tr><th>anchor</th><th>series</th><th>&lt;=10ms</th><th>&lt;=30ms</th><th>30-60ms</th><th>&gt;60ms</th><th>60-80ms</th><th>&gt;80ms</th><th>median ms</th><th>p90 ms</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
+def _slot_shift_table(summary: dict[str, object]) -> str:
+    eval_summary = summary.get("eval") if isinstance(summary.get("eval"), dict) else {}
+    shift_summary = eval_summary.get("slot_shift_summary") if isinstance(eval_summary.get("slot_shift_summary"), dict) else {}
+    if not shift_summary:
+        return "<p>No slot-shift data.</p>"
+    rows = []
+    for series in SERIES:
+        by_anchor = shift_summary.get(series)
+        if not isinstance(by_anchor, dict):
+            continue
+        ordered_anchors = ["__all__", *sorted(str(anchor) for anchor in by_anchor if str(anchor) != "__all__")]
+        for anchor in ordered_anchors:
+            item = by_anchor.get(anchor)
+            if not isinstance(item, dict):
+                continue
+            total = int(item.get("total", 0) or 0)
+            exact = float(item.get("exact_slot_rate", 0.0) or 0.0)
+            one_step = float(item.get("one_step_shift_rate", 0.0) or 0.0)
+            multi_step = float(item.get("multi_step_shift_rate", 0.0) or 0.0)
+            label = "all" if anchor == "__all__" else anchor
+            rows.append(
+                "<tr>"
+                f"<td>{html.escape(SERIES_LABELS.get(series, series))}</td>"
+                f"<td>{html.escape(label)}</td>"
+                f"<td>{total}</td>"
+                f"<td>{exact * 100.0:.1f}%</td>"
+                f"<td>{one_step * 100.0:.1f}%</td>"
+                f"<td>{multi_step * 100.0:.1f}%</td>"
+                "</tr>"
+            )
+    if not rows:
+        return "<p>No slot-shift data.</p>"
+    return (
+        '<table class="metric-table">'
+        "<thead><tr><th>series</th><th>anchor</th><th>n</th><th>exact slot</th><th>one-step shift</th><th>multi-step shift</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
 
@@ -233,7 +303,10 @@ def _gate_sweep_table(summary: dict[str, object], anchors: list[str]) -> str:
             threshold = float(item.get("threshold", 0.0) or 0.0)
             accept_rate = float(item.get("accept_rate", 0.0) or 0.0)
             hard_fail = float(item.get("hard_fail_gt100_rate", 0.0) or 0.0)
+            le10 = float(item.get("pass_le10_rate", 0.0) or 0.0)
             recall30 = float(item.get("recall30", 0.0) or 0.0)
+            review60 = float(item.get("review_gt60_rate", 0.0) or 0.0)
+            reject80 = float(item.get("reject_gt80_rate", 0.0) or 0.0)
             median = item.get("median_error_ms")
             p90 = item.get("p90_error_ms")
             median_cell = f"<td>{float(median):.1f}</td>" if median is not None else "<td></td>"
@@ -244,7 +317,10 @@ def _gate_sweep_table(summary: dict[str, object], anchors: list[str]) -> str:
                 f"<td>{threshold:.2f}</td>"
                 f"<td>{accept_rate * 100.0:.1f}%</td>"
                 f"<td>{hard_fail * 100.0:.1f}%</td>"
+                f"<td>{le10 * 100.0:.1f}%</td>"
                 f"<td>{recall30 * 100.0:.1f}%</td>"
+                f"<td>{review60 * 100.0:.1f}%</td>"
+                f"<td>{reject80 * 100.0:.1f}%</td>"
                 f"{median_cell}"
                 f"{p90_cell}"
                 "</tr>"
@@ -253,7 +329,103 @@ def _gate_sweep_table(summary: dict[str, object], anchors: list[str]) -> str:
         return "<p>No supervised gate threshold sweep data.</p>"
     return (
         '<table class="metric-table">'
-        "<thead><tr><th>anchor</th><th>threshold</th><th>accept</th><th>hard &gt;100ms</th><th>recall30</th><th>median ms</th><th>p90 ms</th></tr></thead>"
+        "<thead><tr><th>anchor</th><th>threshold</th><th>accept</th><th>hard &gt;100ms</th><th>&lt;=10ms</th><th>&lt;=30ms</th><th>&gt;60ms</th><th>&gt;80ms</th><th>median ms</th><th>p90 ms</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
+def _failure_breakdown_table(summary: dict[str, object]) -> str:
+    eval_summary = summary.get("eval") if isinstance(summary.get("eval"), dict) else {}
+    breakdown = eval_summary.get("failure_breakdown") if isinstance(eval_summary.get("failure_breakdown"), dict) else {}
+    rows_data = breakdown.get("top_reject_gt80") if isinstance(breakdown.get("top_reject_gt80"), list) else []
+    rows = []
+    for item in rows_data[:80]:
+        if not isinstance(item, dict):
+            continue
+        series = str(item.get("series", "") or "")
+        anchor = str(item.get("anchor", "") or "")
+        dimension = str(item.get("dimension", "") or "")
+        value = str(item.get("value", "") or "")
+        total = int(item.get("total", 0) or 0)
+        reject = int(item.get("reject_gt80", 0) or 0)
+        reject_rate = float(item.get("reject_gt80_rate", 0.0) or 0.0)
+        recall30 = float(item.get("recall30", 0.0) or 0.0)
+        median = item.get("median_error_ms")
+        p90 = item.get("p90_error_ms")
+        median_cell = f"<td>{float(median):.1f}</td>" if median is not None else "<td></td>"
+        p90_cell = f"<td>{float(p90):.1f}</td>" if p90 is not None else "<td></td>"
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(SERIES_LABELS.get(series, series))}</td>"
+            f"<td>{html.escape(anchor)}</td>"
+            f"<td>{html.escape(dimension)}</td>"
+            f"<td>{html.escape(value)}</td>"
+            f"<td>{total}</td>"
+            f"<td>{reject}</td>"
+            f"<td>{reject_rate * 100.0:.1f}%</td>"
+            f"<td>{recall30 * 100.0:.1f}%</td>"
+            f"{median_cell}"
+            f"{p90_cell}"
+            "</tr>"
+        )
+    if not rows:
+        return "<p>No failure breakdown data.</p>"
+    return (
+        '<table class="metric-table">'
+        "<thead><tr><th>series</th><th>anchor</th><th>dimension</th><th>value</th><th>n</th><th>&gt;80ms</th><th>&gt;80ms rate</th><th>&lt;=30ms</th><th>median ms</th><th>p90 ms</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
+def _overlap_safety_table(summary: dict[str, object]) -> str:
+    eval_summary = summary.get("eval") if isinstance(summary.get("eval"), dict) else {}
+    safety = eval_summary.get("overlap_safety_summary") if isinstance(eval_summary.get("overlap_safety_summary"), dict) else {}
+    by_series = safety.get("by_series") if isinstance(safety.get("by_series"), dict) else {}
+    if not by_series:
+        return "<p>No overlap safety data.</p>"
+    rows = []
+    for series in SERIES:
+        item = by_series.get(series)
+        if not isinstance(item, dict):
+            continue
+        total = int(item.get("total", 0) or 0)
+        accepted = int(item.get("accepted", 0) or 0)
+        accept_rate = float(item.get("accept_rate", 0.0) or 0.0)
+        safe = int(item.get("safe", 0) or 0)
+        safe_rate = float(item.get("safe_rate", 0.0) or 0.0)
+        order_rate = float(item.get("order_valid_rate", 0.0) or 0.0)
+        gap_rate = float(item.get("gap_ok_rate", 0.0) or 0.0)
+        ratio_rate = float(item.get("ratio_ok_rate", 0.0) or 0.0)
+        median_gap = item.get("median_gap_ms")
+        p10_gap = item.get("p10_gap_ms")
+        p90_gap = item.get("p90_gap_ms")
+        median_ratio = item.get("median_ratio")
+        median_gap_cell = f"<td>{float(median_gap):.1f}</td>" if median_gap is not None else "<td></td>"
+        p10_gap_cell = f"<td>{float(p10_gap):.1f}</td>" if p10_gap is not None else "<td></td>"
+        p90_gap_cell = f"<td>{float(p90_gap):.1f}</td>" if p90_gap is not None else "<td></td>"
+        ratio_cell = f"<td>{float(median_ratio):.3f}</td>" if median_ratio is not None else "<td></td>"
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(SERIES_LABELS.get(series, series))}</td>"
+            f"<td>{total}</td>"
+            f"<td>{accepted}</td>"
+            f"<td>{accept_rate * 100.0:.1f}%</td>"
+            f"<td>{safe}</td>"
+            f"<td>{safe_rate * 100.0:.1f}%</td>"
+            f"<td>{order_rate * 100.0:.1f}%</td>"
+            f"<td>{gap_rate * 100.0:.1f}%</td>"
+            f"<td>{ratio_rate * 100.0:.1f}%</td>"
+            f"{median_gap_cell}"
+            f"{p10_gap_cell}"
+            f"{p90_gap_cell}"
+            f"{ratio_cell}"
+            "</tr>"
+        )
+    if not rows:
+        return "<p>No overlap safety data.</p>"
+    return (
+        '<table class="metric-table">'
+        "<thead><tr><th>series</th><th>rows</th><th>accepted</th><th>accept</th><th>safe</th><th>safe rate</th><th>order ok</th><th>gap ok</th><th>ratio ok</th><th>median gap</th><th>p10 gap</th><th>p90 gap</th><th>median ratio</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
 
@@ -287,11 +459,20 @@ code {{ color: #bfdbfe; }}
 <h1>Manual OTO Anchor Eval Report</h1>
 <p>summary: <code>{html.escape(str(summary_path))}</code></p>
 <p>rows={html.escape(str(eval_summary.get("rows", "")))} wavs={html.escape(str(eval_summary.get("wavs", "")))} family_prior_weight={html.escape(str(eval_summary.get("family_prior_weight", "")))} joint_family_prior_weight={html.escape(str(eval_summary.get("joint_family_prior_weight", "")))} require_primary_transition_token={html.escape(str(eval_summary.get("require_primary_transition_token", "")))}</p>
+<p>gate_policy={html.escape(json.dumps(eval_summary.get("gate_policy", {}), ensure_ascii=False, sort_keys=True))}</p>
+<section class="panel">{_bar_svg(summary, anchors=anchors, metric="pass_le10_rate", title="Pass <= 10 ms", scale_max=1.0)}</section>
 <section class="panel">{_bar_svg(summary, anchors=anchors, metric="recall30", title="Recall <= 30 ms", scale_max=1.0)}</section>
+<section class="panel">{_bar_svg(summary, anchors=anchors, metric="reject_gt80_rate", title="Reject > 80 ms", scale_max=1.0, invert=True)}</section>
 <section class="panel">{_bar_svg(summary, anchors=anchors, metric="median_error_ms", title="Median Error", scale_max=600.0, invert=True, suffix=" ms")}</section>
 <section class="panel">{_bar_svg(summary, anchors=anchors, metric="p90_error_ms", title="P90 Error", scale_max=1200.0, invert=True, suffix=" ms")}</section>
 <h2>Metric Table</h2>
 <section class="panel">{_summary_table(summary, anchors)}</section>
+<h2>Slot Shift</h2>
+<section class="panel">{_slot_shift_table(summary)}</section>
+<h2>Failure Breakdown</h2>
+<section class="panel">{_failure_breakdown_table(summary)}</section>
+<h2>Overlap Safety</h2>
+<section class="panel">{_overlap_safety_table(summary)}</section>
 <h2>Gate Threshold Sweep</h2>
 <section class="panel">{_gate_sweep_table(summary, anchors)}</section>
 <h2>Alias Family Recall</h2>
