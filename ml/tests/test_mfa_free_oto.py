@@ -1360,6 +1360,74 @@ def test_manual_oto_anchor_vcv_sonorant_preutterance_policy_is_conservative():
     assert reason == "vcv_sonorant_transition_review"
 
 
+def test_manual_oto_anchor_slot_exact_island_start_preutterance_policy_requires_agreement():
+    import numpy as np
+
+    from core.mfa_free_oto.manual_oto_candidates import ManualOtoCandidateTracks
+    from core.mfa_free_oto.vowel_island import VowelIsland
+    from ml.scripts.mfa_free_oto.train_manual_oto_anchor_scorer import (
+        _slot_exact_island_start_preutterance_policy,
+    )
+
+    row = {
+        "alias": "ka",
+        "alias_role": "cv",
+        "format_type": "cv",
+        "duration_ms": 1800.0,
+        "slot_index": 0,
+        "slot_count": 3,
+    }
+    island = VowelIsland(
+        start_ms=260.0,
+        nucleus_ms=340.0,
+        end_ms=520.0,
+        confidence=0.92,
+        left_valley_ms=230.0,
+        right_valley_ms=550.0,
+        start_index=26,
+        nucleus_index=34,
+        end_index=52,
+    )
+    tracks = ManualOtoCandidateTracks(
+        times_ms=np.asarray([250.0, 285.0, 980.0], dtype=np.float32),
+        candidate_indices={"preutterance": (0, 1, 2)},
+        anchor_scores={"preutterance": np.asarray([0.98, 0.96, 1.0], dtype=np.float32)},
+        tracks={},
+        duration_ms=1800.0,
+        encoder="test",
+    )
+
+    pred, source, reason = _slot_exact_island_start_preutterance_policy(
+        row,
+        tracks,
+        island=island,
+        fallback_pred_ms=285.0,
+        fallback_safe_prob=0.86,
+        duration_ms=1800.0,
+        slot_count=3,
+        slot_index=0,
+    )
+
+    assert pred == 250.0
+    assert source.startswith("slot_exact_island_start_preutterance")
+    assert reason == ""
+
+    pred, source, reason = _slot_exact_island_start_preutterance_policy(
+        row,
+        tracks,
+        island=island,
+        fallback_pred_ms=980.0,
+        fallback_safe_prob=0.86,
+        duration_ms=1800.0,
+        slot_count=3,
+        slot_index=0,
+    )
+
+    assert pred is None
+    assert source == ""
+    assert reason == "slot_exact_island_start_fallback_not_exact:one_step"
+
+
 def test_manual_oto_alias_family_buckets_cover_common_suffixes():
     from core.mfa_free_oto.manual_oto_candidates import manual_oto_alias_family
 
