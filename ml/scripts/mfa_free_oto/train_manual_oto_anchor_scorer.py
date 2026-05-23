@@ -2101,6 +2101,41 @@ def _fit_failure_gate_models(gate_training: dict[str, object], *, seed: int) -> 
     return models
 
 
+def _fit_local_failure_models(local_training: dict[str, object], *, seed: int) -> dict[str, object]:
+    try:
+        from sklearn.ensemble import HistGradientBoostingClassifier
+    except ImportError as exc:
+        raise RuntimeError("local hard-fail gate training requires scikit-learn.") from exc
+
+    features_by_anchor = local_training.get("features_by_anchor") if isinstance(local_training, dict) else {}
+    labels_by_anchor = local_training.get("labels_by_anchor") if isinstance(local_training, dict) else {}
+    models: dict[str, object] = {}
+    if not isinstance(features_by_anchor, dict) or not isinstance(labels_by_anchor, dict):
+        return models
+    for anchor in SCORABLE_ANCHORS:
+        features = features_by_anchor.get(anchor, [])
+        labels = labels_by_anchor.get(anchor, [])
+        if not features or not labels:
+            continue
+        x = np.asarray(features, dtype=np.float32)
+        y = np.asarray(labels, dtype=np.int64)
+        if x.ndim != 2 or y.size != x.shape[0] or len(set(int(value) for value in y.tolist())) < 2:
+            continue
+        safe = max(1, int(np.sum(y == 1)))
+        hard = max(1, int(np.sum(y == 0)))
+        weights = np.where(y == 1, 0.5 * (safe + hard) / safe, 0.5 * (safe + hard) / hard).astype(np.float32)
+        model = HistGradientBoostingClassifier(
+            max_iter=90,
+            learning_rate=0.05,
+            max_leaf_nodes=15,
+            l2_regularization=0.10,
+            random_state=int(seed),
+        )
+        model.fit(x, y, sample_weight=weights)
+        models[anchor] = model
+    return models
+
+
 def _summarize_gate_threshold_sweep(
     records_by_anchor: dict[str, list[dict[str, object]]],
     *,
@@ -2376,6 +2411,176 @@ def _gate_features(
     return np.asarray(values, dtype=np.float32)
 
 
+def _nearest_track_value(tracks: ManualOtoCandidateTracks, values: object, pred_ms: float) -> float:
+    times = np.asarray(tracks.times_ms, dtype=np.float32)
+    arr = np.asarray(values, dtype=np.float32)
+    if times.size == 0 or arr.size == 0:
+        return 0.0
+    if arr.size != times.size:
+        arr = np.resize(arr, (times.size,)).astype(np.float32)
+    idx = int(np.searchsorted(times, float(pred_ms), side="left"))
+    if idx <= 0:
+        best_idx = 0
+    elif idx >= times.size:
+        best_idx = int(times.size - 1)
+    else:
+        left = idx - 1
+        best_idx = left if abs(float(times[left]) - float(pred_ms)) <= abs(float(times[idx]) - float(pred_ms)) else idx
+    return float(arr[best_idx])
+
+
+def _local_failure_feature_names() -> list[str]:
+    names: list[str] = []
+    names.extend(f"anchor={value}" for value in SCORABLE_ANCHORS)
+    names.extend(f"role={value}" for value in ROLE_VALUES)
+    names.extend(f"format={value}" for value in FORMAT_VALUES)
+    names.extend(f"language={value}" for value in LANGUAGE_VALUES)
+    names.extend(f"alias_family={value}" for value in ALIAS_FAMILY_VALUES)
+    names.extend(
+        [
+            "slot_index_norm",
+            "slot_count_norm",
+            "duration_norm",
+            "pred_norm",
+            "expected_slot_pos",
+            "pred_slot_gap",
+            "slot_delta_abs",
+            "slot_delta_sign",
+            "pre_safe_prob_available",
+            "pre_safe_prob",
+            "offset_available",
+            "overlap_available",
+            "preutterance_available",
+            "fixed_end_available",
+            "offset_pre_gap_norm",
+            "overlap_pre_gap_norm",
+            "fixed_pre_gap_norm",
+            "overlap_ratio",
+            "pred_from_offset_norm",
+            "pred_from_pre_norm",
+            "safe_overlap_gap_norm",
+            "safe_overlap_ratio",
+            "safe_overlap_clamped",
+            "all_slot_exact",
+            "boundary_slot_exact",
+            "anchor_score_at_pred",
+            "transition_at_pred",
+            "nucleus_at_pred",
+            "rms_at_pred",
+            "activity_edge_at_pred",
+            "silence_at_pred",
+            "voicing_at_pred",
+            "flux_at_pred",
+            "onset_at_pred",
+            "world_stability_at_pred",
+        ]
+    )
+    return names
+
+
+def _local_failure_features(
+    row: dict[str, object],
+    tracks: ManualOtoCandidateTracks,
+    anchor: str,
+    *,
+    pred_ms: float,
+    predictions: dict[str, float],
+    safe_overlap_context: dict[str, object],
+    pre_safe_prob: float | None,
+    slot_count: int,
+    slot_index: int,
+    all_slot_exact: bool,
+    boundary_slot_exact: bool,
+) -> np.ndarray:
+    try:
+        count = max(1, int(slot_count))
+        index = max(0, min(count - 1, int(slot_index)))
+    except Exception:
+        count = 1
+        index = 0
+    duration = max(1.0, float(row.get("duration_ms", tracks.duration_ms) or tracks.duration_ms or 1.0))
+    pred = min(duration, max(0.0, float(pred_ms)))
+    expected_slot_pos = 0.5 if count <= 1 else (float(index) + 0.5) / float(count)
+    pred_pos = pred / duration
+    delta = _slot_shift_delta(
+        row,
+        pred_ms=pred,
+        duration_ms=duration,
+        slot_count=count,
+        slot_index=index,
+    )
+    offset = predictions.get("offset")
+    overlap = predictions.get("overlap")
+    pre = predictions.get("preutterance")
+    fixed = predictions.get("fixed_end")
+    offset_f = float(offset) if offset is not None else pred
+    pre_f = float(pre) if pre is not None else pred
+    span = max(1.0, pre_f - offset_f)
+    overlap_f = float(overlap) if overlap is not None else offset_f
+    fixed_f = float(fixed) if fixed is not None else pre_f
+    alias_family = manual_oto_alias_family(row.get("alias", ""))
+
+    anchor_scores = tracks.anchor_scores.get(anchor, np.zeros((np.asarray(tracks.times_ms).size,), dtype=np.float32))
+    values: list[float] = []
+    values.extend(_gate_one_hot(anchor, SCORABLE_ANCHORS))
+    values.extend(_gate_one_hot(row.get("alias_role", ""), ROLE_VALUES))
+    values.extend(_gate_one_hot(row.get("format_type", ""), FORMAT_VALUES))
+    values.extend(_gate_one_hot(row.get("language", ""), LANGUAGE_VALUES))
+    values.extend(_gate_one_hot(alias_family, ALIAS_FAMILY_VALUES))
+    values.extend(
+        [
+            index / max(1.0, count - 1.0),
+            min(count, 64.0) / 64.0,
+            min(duration, 10000.0) / 10000.0,
+            pred_pos,
+            expected_slot_pos,
+            abs(pred_pos - expected_slot_pos),
+            min(4.0, abs(float(delta if delta is not None else 0))) / 4.0,
+            max(-1.0, min(1.0, float(delta if delta is not None else 0))),
+            1.0 if pre_safe_prob is not None else 0.0,
+            float(pre_safe_prob) if pre_safe_prob is not None and np.isfinite(float(pre_safe_prob)) else 0.0,
+            1.0 if offset is not None else 0.0,
+            1.0 if overlap is not None else 0.0,
+            1.0 if pre is not None else 0.0,
+            1.0 if fixed is not None else 0.0,
+            max(-1.0, min(1.0, (pre_f - offset_f) / duration)),
+            max(-1.0, min(1.0, (pre_f - overlap_f) / duration)),
+            max(-1.0, min(1.0, (fixed_f - pre_f) / duration)),
+            max(-0.5, min(1.5, (overlap_f - offset_f) / span)),
+            max(-1.0, min(1.0, (pred - offset_f) / duration)),
+            max(-1.0, min(1.0, (pred - pre_f) / duration)),
+            max(0.0, min(1.0, float(safe_overlap_context.get("gap_ms", 0.0) or 0.0) / duration)),
+            max(0.0, min(1.0, float(safe_overlap_context.get("ratio", 0.0) or 0.0))),
+            1.0 if bool(safe_overlap_context.get("clamped", False)) else 0.0,
+            1.0 if bool(all_slot_exact) else 0.0,
+            1.0 if bool(boundary_slot_exact) else 0.0,
+            _nearest_track_value(tracks, anchor_scores, pred),
+            _nearest_track_value(tracks, tracks.tracks.get("transition", ()), pred),
+            _nearest_track_value(tracks, tracks.tracks.get("nucleus", ()), pred),
+            _nearest_track_value(tracks, tracks.tracks.get("rms", ()), pred),
+            _nearest_track_value(tracks, tracks.tracks.get("activity_edge", ()), pred),
+            _nearest_track_value(tracks, tracks.tracks.get("silence", ()), pred),
+            _nearest_track_value(tracks, tracks.tracks.get("voicing", ()), pred),
+            _nearest_track_value(tracks, tracks.tracks.get("flux", ()), pred),
+            _nearest_track_value(tracks, tracks.tracks.get("onset", ()), pred),
+            _nearest_track_value(tracks, tracks.tracks.get("world_stability", ()), pred),
+        ]
+    )
+    return np.asarray(values, dtype=np.float32)
+
+
+def _local_failure_safe_probability(model: object | None, features: np.ndarray | None) -> float | None:
+    if model is None or features is None:
+        return None
+    try:
+        return float(model.predict_proba(features.reshape(1, -1))[0, 1])
+    except Exception:
+        try:
+            return float(model.predict(features.reshape(1, -1))[0])
+        except Exception:
+            return None
+
+
 def _gate_constrained_prediction(
     row: dict[str, object],
     anchor: str,
@@ -2554,10 +2759,13 @@ def evaluate_models(
     supervised_gate_models: dict[str, object] | None = None,
     supervised_gate_threshold: float = 0.80,
     supervised_gate_thresholds_by_anchor: dict[str, float] | None = None,
+    local_failure_models: dict[str, object] | None = None,
+    local_gate_threshold: float = 0.80,
     gate_threshold_sweep: tuple[float, ...] = (0.50, 0.60, 0.70, 0.80, 0.85, 0.90, 0.95),
     relative_anchor_priors: dict[str, object] | None = None,
     island_anchor_priors: dict[str, object] | None = None,
     collect_gate_training: bool = False,
+    collect_local_failure_training: bool = False,
 ) -> dict[str, object]:
     cache: dict[str, ManualOtoCandidateTracks] = {}
     errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
@@ -2603,6 +2811,11 @@ def evaluate_models(
     routed_boundary_slot_exact_accept_by_anchor: Counter[str] = Counter()
     routed_boundary_slot_exact_review_by_anchor: Counter[str] = Counter()
     routed_boundary_slot_exact_review_reason_by_anchor: Counter[str] = Counter()
+    routed_local_gate_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
+    routed_local_gate_total_by_anchor: Counter[str] = Counter()
+    routed_local_gate_accept_by_anchor: Counter[str] = Counter()
+    routed_local_gate_review_by_anchor: Counter[str] = Counter()
+    routed_local_gate_review_reason_by_anchor: Counter[str] = Counter()
     vowel_island_lattice_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
     local_offset_from_island_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
     overlap_relative_on_island_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
@@ -2621,6 +2834,8 @@ def evaluate_models(
     gate_reason_by_anchor: Counter[str] = Counter()
     gate_feature_samples: dict[str, list[np.ndarray]] = {anchor: [] for anchor in anchors}
     gate_feature_labels: dict[str, list[int]] = {anchor: [] for anchor in anchors}
+    local_failure_feature_samples: dict[str, list[np.ndarray]] = {anchor: [] for anchor in anchors}
+    local_failure_feature_labels: dict[str, list[int]] = {anchor: [] for anchor in anchors}
     gate_sweep_records_by_anchor: dict[str, list[dict[str, object]]] = {anchor: [] for anchor in anchors}
     by_role_anchor_total: Counter[str] = Counter()
     by_role_anchor_hit30: Counter[str] = Counter()
@@ -2637,6 +2852,7 @@ def evaluate_models(
     worst_routed_safe_overlap: list[dict[str, object]] = []
     worst_routed_slot_exact: list[dict[str, object]] = []
     worst_routed_boundary_slot_exact: list[dict[str, object]] = []
+    worst_routed_local_gate: list[dict[str, object]] = []
     worst_vowel_island: list[dict[str, object]] = []
     worst_vowel_island_gated: list[dict[str, object]] = []
     failure_breakdown_records: list[dict[str, object]] = []
@@ -3045,8 +3261,10 @@ def evaluate_models(
                 slot_index=slot_idx,
             )
             dependent_offset_ms: float | None = None
+            dependent_predictions: dict[str, float] = {}
             if dependent_pre_ms is not None:
                 duration_ms = max(1.0, float(row.get("duration_ms", tracks.duration_ms) or tracks.duration_ms or 1.0))
+                dependent_predictions["preutterance"] = float(dependent_pre_ms)
                 if "offset" in anchors or "overlap" in anchors:
                     dependent_offset_ms = _dependent_offset_ms(
                         row,
@@ -3054,6 +3272,8 @@ def evaluate_models(
                         preutterance_ms=float(dependent_pre_ms),
                         relative_anchor_priors=relative_anchor_priors,
                     )
+                    if dependent_offset_ms is not None:
+                        dependent_predictions["offset"] = float(dependent_offset_ms)
                 if "offset" in anchors and dependent_offset_ms is not None:
                     target = _target_ms(row, "offset")
                     if target is not None:
@@ -3090,6 +3310,7 @@ def evaluate_models(
                             preutterance_ms=float(dependent_pre_ms),
                             relative_anchor_priors=relative_anchor_priors,
                         )
+                        dependent_predictions["overlap"] = float(dependent_overlap_ms)
                         err = abs(float(dependent_overlap_ms) - float(target))
                         overlap_relative_gap_errors_by_anchor["overlap"].append(err)
                         _record_slot_shift(
@@ -3123,6 +3344,7 @@ def evaluate_models(
                             preutterance_ms=float(dependent_pre_ms),
                             relative_anchor_priors=relative_anchor_priors,
                         )
+                        dependent_predictions["fixed_end"] = float(dependent_fixed_ms)
                         err = abs(float(dependent_fixed_ms) - float(target))
                         fixed_end_relative_gap_errors_by_anchor["fixed_end"].append(err)
                         _record_slot_shift(
@@ -3147,6 +3369,55 @@ def evaluate_models(
                             slot_count=slot_count_for_islands,
                             slot_index=slot_idx,
                         )
+            if bool(collect_local_failure_training) and dependent_predictions:
+                broad_safe_context: dict[str, object] = {}
+                if dependent_predictions.get("offset") is not None and dependent_predictions.get("preutterance") is not None:
+                    _broad_overlap, broad_safe_context = _safe_overlap_ms(
+                        row,
+                        offset_ms=float(dependent_predictions["offset"]),
+                        preutterance_ms=float(dependent_predictions["preutterance"]),
+                        preferred_overlap_ms=dependent_predictions.get("overlap"),
+                    )
+                    if "overlap" in dependent_predictions:
+                        dependent_predictions["overlap"] = float(_broad_overlap)
+                broad_slot_exact = True
+                broad_boundary_exact = True
+                for gate_anchor, gate_pred in dependent_predictions.items():
+                    gate_delta = _slot_shift_delta(
+                        row,
+                        pred_ms=float(gate_pred),
+                        duration_ms=duration_ms,
+                        slot_count=slot_count_for_islands,
+                        slot_index=slot_idx,
+                    )
+                    if gate_delta is None or int(gate_delta) != 0:
+                        broad_slot_exact = False
+                        if gate_anchor in {"preutterance", "overlap", "fixed_end"}:
+                            broad_boundary_exact = False
+                for train_anchor, train_pred in dependent_predictions.items():
+                    if train_anchor not in anchors:
+                        continue
+                    train_target = _target_ms(row, train_anchor)
+                    if train_target is None:
+                        continue
+                    local_failure_feature_samples[train_anchor].append(
+                        _local_failure_features(
+                            row,
+                            tracks,
+                            train_anchor,
+                            pred_ms=float(train_pred),
+                            predictions=dependent_predictions,
+                            safe_overlap_context=broad_safe_context,
+                            pre_safe_prob=dependent_pre_safe_prob,
+                            slot_count=slot_count_for_islands,
+                            slot_index=slot_idx,
+                            all_slot_exact=bool(broad_slot_exact),
+                            boundary_slot_exact=bool(broad_boundary_exact),
+                        )
+                    )
+                    local_failure_feature_labels[train_anchor].append(
+                        1 if abs(float(train_pred) - float(train_target)) <= 80.0 else 0
+                    )
             routed_pre_ms, routed_pre_safe_prob, routed_reasons = _routed_preutterance_decision(
                 row,
                 constrained_predictions=constrained_predictions,
@@ -3598,6 +3869,7 @@ def evaluate_models(
                 routed_safe_overlap_total_by_anchor[anchor] += 1
                 routed_slot_exact_total_by_anchor[anchor] += 1
                 routed_boundary_slot_exact_total_by_anchor[anchor] += 1
+                routed_local_gate_total_by_anchor[anchor] += 1
                 safe_pred = safe_predictions.get(anchor)
                 if safe_pred is None:
                     routed_safe_overlap_review_by_anchor[anchor] += 1
@@ -3612,6 +3884,10 @@ def evaluate_models(
                     boundary_reasons = boundary_slot_exact_reasons or ("missing_safe_overlap_prediction",)
                     for reason in boundary_reasons:
                         routed_boundary_slot_exact_review_reason_by_anchor[f"{anchor}|{reason}"] += 1
+                    routed_local_gate_review_by_anchor[anchor] += 1
+                    local_reasons = boundary_slot_exact_reasons or safe_reasons or ("missing_safe_overlap_prediction",)
+                    for reason in local_reasons:
+                        routed_local_gate_review_reason_by_anchor[f"{anchor}|{reason}"] += 1
                     continue
                 routed_safe_overlap_accept_by_anchor[anchor] += 1
                 safe_err = abs(float(safe_pred) - float(target))
@@ -3657,6 +3933,77 @@ def evaluate_models(
                             "route_decision": "accept",
                         }
                     )
+                local_features = _local_failure_features(
+                    row,
+                    tracks,
+                    anchor,
+                    pred_ms=float(safe_pred),
+                    predictions=safe_predictions,
+                    safe_overlap_context=safe_overlap_context,
+                    pre_safe_prob=routed_pre_safe_prob,
+                    slot_count=slot_count_for_islands,
+                    slot_index=slot_idx,
+                    all_slot_exact=bool(slot_exact_accept),
+                    boundary_slot_exact=bool(boundary_slot_exact_accept),
+                )
+                local_model = (local_failure_models or {}).get(anchor)
+                local_safe_prob = _local_failure_safe_probability(local_model, local_features)
+                if not boundary_slot_exact_accept:
+                    routed_local_gate_review_by_anchor[anchor] += 1
+                    reasons = boundary_slot_exact_reasons or ("boundary_slot_exact_rejected",)
+                    for reason in reasons:
+                        routed_local_gate_review_reason_by_anchor[f"{anchor}|{reason}"] += 1
+                elif local_model is None:
+                    routed_local_gate_review_by_anchor[anchor] += 1
+                    routed_local_gate_review_reason_by_anchor[f"{anchor}|missing_local_failure_model"] += 1
+                elif local_safe_prob is None or local_safe_prob < float(local_gate_threshold):
+                    routed_local_gate_review_by_anchor[anchor] += 1
+                    routed_local_gate_review_reason_by_anchor[f"{anchor}|local_hardfail_risk"] += 1
+                else:
+                    routed_local_gate_accept_by_anchor[anchor] += 1
+                    routed_local_gate_errors_by_anchor[anchor].append(safe_err)
+                    _record_slot_shift(
+                        slot_shift_by_series_anchor,
+                        "model_routed_local_hardfail_gate_params",
+                        anchor,
+                        row,
+                        pred_ms=float(safe_pred),
+                        duration_ms=duration_ms,
+                        slot_count=slot_count_for_islands,
+                        slot_index=slot_idx,
+                    )
+                    _record_failure_breakdown(
+                        failure_breakdown_records,
+                        series="model_routed_local_hardfail_gate_params",
+                        anchor=anchor,
+                        row=row,
+                        error_ms=safe_err,
+                        pred_ms=float(safe_pred),
+                        duration_ms=duration_ms,
+                        dependent_preutterance_source=f"local_hardfail_gate:{local_safe_prob:.3f}",
+                        slot_count=slot_count_for_islands,
+                        slot_index=slot_idx,
+                    )
+                    if safe_err > 60.0 and len(worst_routed_local_gate) < 200:
+                        worst_routed_local_gate.append(
+                            {
+                                **_failure_example_base(
+                                    row,
+                                    wav_path=wav_path,
+                                    anchor=anchor,
+                                    target_ms=float(target),
+                                    pred_ms=float(safe_pred),
+                                    error_ms=safe_err,
+                                    slot_pos_norm=float(slot_idx + 0.5) / max(1.0, float(slot_count_for_islands)),
+                                ),
+                                "source_series": "model_routed_local_hardfail_gate_params",
+                                "dependent_preutterance_source": "local_hardfail_gate",
+                                "dependent_preutterance_safe_prob": routed_pre_safe_prob,
+                                "local_failure_safe_prob": local_safe_prob,
+                                "safe_overlap_context": safe_overlap_context,
+                                "route_decision": "accept",
+                            }
+                        )
                 if not boundary_slot_exact_accept:
                     routed_boundary_slot_exact_review_by_anchor[anchor] += 1
                     reasons = boundary_slot_exact_reasons or ("boundary_slot_exact_rejected",)
@@ -4387,6 +4734,28 @@ def evaluate_models(
                 },
             }
         )
+        routed_local_gate_summary = summarize(
+            routed_local_gate_errors_by_anchor[anchor],
+            int(routed_local_gate_total_by_anchor[anchor]),
+            int(routed_local_gate_review_by_anchor[anchor]),
+        )
+        routed_local_gate_summary.update(
+            {
+                "accepted": int(routed_local_gate_accept_by_anchor[anchor]),
+                "reviewed": int(routed_local_gate_review_by_anchor[anchor]),
+                "accept_rate": float(routed_local_gate_accept_by_anchor[anchor] / routed_local_gate_total_by_anchor[anchor])
+                if routed_local_gate_total_by_anchor[anchor]
+                else 0.0,
+                "review_rate": float(routed_local_gate_review_by_anchor[anchor] / routed_local_gate_total_by_anchor[anchor])
+                if routed_local_gate_total_by_anchor[anchor]
+                else 0.0,
+                "review_reasons": {
+                    key.split("|", 1)[1]: int(value)
+                    for key, value in sorted(routed_local_gate_review_reason_by_anchor.items())
+                    if key.startswith(f"{anchor}|")
+                },
+            }
+        )
         by_anchor[anchor] = {
             "model": summarize(errors_by_anchor[anchor], total, int(missing_by_anchor[anchor])),
             "model_family_prior": summarize(family_prior_errors_by_anchor[anchor], total, int(missing_by_anchor[anchor])),
@@ -4401,6 +4770,7 @@ def evaluate_models(
             "model_routed_safe_overlap_params": routed_safe_overlap_summary,
             "model_routed_slot_exact_safe_params": routed_slot_exact_summary,
             "model_routed_boundary_slot_exact_params": routed_boundary_slot_exact_summary,
+            "model_routed_local_hardfail_gate_params": routed_local_gate_summary,
             "model_offset_gap_from_preutterance": summarize(
                 offset_gap_model_errors_by_anchor[anchor],
                 total,
@@ -4485,6 +4855,11 @@ def evaluate_models(
         key=lambda item: float(item.get("error_ms", 0.0)),
         reverse=True,
     )[:200]
+    worst_routed_local_gate_examples = sorted(
+        worst_routed_local_gate,
+        key=lambda item: float(item.get("error_ms", 0.0)),
+        reverse=True,
+    )[:200]
     worst_vowel_island_examples = sorted(
         worst_vowel_island,
         key=lambda item: float(item.get("error_ms", 0.0)),
@@ -4529,6 +4904,8 @@ def evaluate_models(
                 for anchor, value in sorted((supervised_gate_thresholds_by_anchor or {}).items())
             },
             "supervised_gate_enabled": bool(supervised_gate_models),
+            "local_failure_gate_enabled": bool(local_failure_models),
+            "local_gate_threshold": float(local_gate_threshold),
             "threshold_sweep": [float(value) for value in sorted(set(gate_threshold_sweep))],
         },
         "gate_threshold_sweep": gate_threshold_sweep_summary,
@@ -4556,6 +4933,29 @@ def evaluate_models(
             "sample_counts": {anchor: 0 for anchor in anchors},
             "safe_counts": {anchor: 0 for anchor in anchors},
         },
+        "local_failure_training": {
+            "feature_names": _local_failure_feature_names(),
+            "sample_counts": {anchor: len(local_failure_feature_labels[anchor]) for anchor in anchors},
+            "safe_counts": {anchor: int(sum(local_failure_feature_labels[anchor])) for anchor in anchors},
+            "features_by_anchor": {
+                anchor: np.stack(local_failure_feature_samples[anchor], axis=0).astype(np.float32).tolist()
+                if bool(collect_local_failure_training) and local_failure_feature_samples[anchor]
+                else []
+                for anchor in anchors
+            },
+            "labels_by_anchor": {
+                anchor: [int(value) for value in local_failure_feature_labels[anchor]]
+                if bool(collect_local_failure_training)
+                else []
+                for anchor in anchors
+            },
+        }
+        if bool(collect_local_failure_training)
+        else {
+            "feature_names": _local_failure_feature_names(),
+            "sample_counts": {anchor: 0 for anchor in anchors},
+            "safe_counts": {anchor: 0 for anchor in anchors},
+        },
         "wav_failures": wav_failures,
         "by_anchor": by_anchor,
         "by_role_anchor_recall30": {
@@ -4578,6 +4978,7 @@ def evaluate_models(
         "worst_routed_safe_overlap_params_examples": worst_routed_safe_overlap_examples,
         "worst_routed_slot_exact_safe_params_examples": worst_routed_slot_exact_examples,
         "worst_routed_boundary_slot_exact_params_examples": worst_routed_boundary_slot_exact_examples,
+        "worst_routed_local_hardfail_gate_params_examples": worst_routed_local_gate_examples,
         "worst_vowel_island_lattice_examples": worst_vowel_island_examples,
         "worst_vowel_island_gated_accept_examples": worst_vowel_island_gated_examples,
         "failure_breakdown": _summarize_failure_breakdown(failure_breakdown_records),
@@ -4594,6 +4995,7 @@ def evaluate_models(
             "routed_safe_overlap_params": _profile_worst_examples(worst_routed_safe_overlap_examples),
             "routed_slot_exact_safe_params": _profile_worst_examples(worst_routed_slot_exact_examples),
             "routed_boundary_slot_exact_params": _profile_worst_examples(worst_routed_boundary_slot_exact_examples),
+            "routed_local_hardfail_gate_params": _profile_worst_examples(worst_routed_local_gate_examples),
             "vowel_island_lattice": _profile_worst_examples(worst_vowel_island_examples),
             "vowel_island_gated_accept": _profile_worst_examples(worst_vowel_island_gated_examples),
         },
@@ -4637,6 +5039,7 @@ def train_manual_oto_anchor_scorer(
     failure_gate: str = "heuristic",
     supervised_gate_threshold: float = 0.80,
     supervised_gate_thresholds_by_anchor: dict[str, float] | None = None,
+    local_gate_threshold: float = 0.80,
     gate_threshold_sweep: tuple[float, ...] = (0.50, 0.60, 0.70, 0.80, 0.85, 0.90, 0.95),
     seed: int = 20260522,
 ) -> dict[str, object]:
@@ -4710,6 +5113,8 @@ def train_manual_oto_anchor_scorer(
         raise ValueError("Unsupported failure_gate; use off, heuristic, supervised, or combined.")
     supervised_gate_models: dict[str, object] = {}
     gate_train_summary: dict[str, object] | None = None
+    local_failure_models: dict[str, object] = {}
+    local_failure_train_summary: dict[str, object] | None = None
     if failure_gate in {"supervised", "combined"}:
         gate_train_summary = evaluate_models(
             train_rows,
@@ -4741,6 +5146,42 @@ def train_manual_oto_anchor_scorer(
             gate_train_summary.get("gate_training", {}) if isinstance(gate_train_summary, dict) else {},
             seed=int(seed) + 31,
         )
+        local_failure_train_summary = evaluate_models(
+            train_rows,
+            models=models,
+            anchors=anchors,
+            encoder=encoder,
+            min_score=float(min_score),
+            top_k_fallback=int(top_k_fallback),
+            order_window=float(order_window),
+            joint_top_per_anchor=int(joint_top_per_anchor),
+            joint_max_options_per_row=int(joint_max_options_per_row),
+            family_prior_weight=float(family_prior_weight),
+            joint_family_prior_weight=float(joint_family_prior_weight),
+            require_primary_transition_token=bool(require_primary_transition_token),
+            gate_slot_disagreement=float(gate_slot_disagreement),
+            gate_pred_disagreement_ms=float(gate_pred_disagreement_ms),
+            gate_joint_disagreement_ms=float(gate_joint_disagreement_ms),
+            gate_order_disagreement=float(gate_order_disagreement),
+            gate_joint_score_min=float(gate_joint_score_min),
+            gate_review_mojibake=bool(gate_review_mojibake),
+            gate_review_duplicate_tokens=bool(gate_review_duplicate_tokens),
+            use_heuristic_gate=failure_gate == "combined",
+            supervised_gate_models=supervised_gate_models,
+            supervised_gate_threshold=float(supervised_gate_threshold),
+            supervised_gate_thresholds_by_anchor=supervised_gate_thresholds_by_anchor,
+            local_gate_threshold=float(local_gate_threshold),
+            gate_threshold_sweep=tuple(gate_threshold_sweep),
+            relative_anchor_priors=relative_anchor_priors,
+            island_anchor_priors=island_anchor_priors,
+            collect_local_failure_training=True,
+        )
+        local_failure_models = _fit_local_failure_models(
+            local_failure_train_summary.get("local_failure_training", {})
+            if isinstance(local_failure_train_summary, dict)
+            else {},
+            seed=int(seed) + 47,
+        )
     eval_summary = evaluate_models(
         eval_rows,
         models=models,
@@ -4765,6 +5206,8 @@ def train_manual_oto_anchor_scorer(
         supervised_gate_models=supervised_gate_models,
         supervised_gate_threshold=float(supervised_gate_threshold),
         supervised_gate_thresholds_by_anchor=supervised_gate_thresholds_by_anchor,
+        local_failure_models=local_failure_models,
+        local_gate_threshold=float(local_gate_threshold),
         gate_threshold_sweep=tuple(gate_threshold_sweep),
         relative_anchor_priors=relative_anchor_priors,
         island_anchor_priors=island_anchor_priors,
@@ -4779,6 +5222,8 @@ def train_manual_oto_anchor_scorer(
         "models": models,
         "failure_gate_models": supervised_gate_models,
         "failure_gate_feature_names": _gate_feature_names(),
+        "local_failure_models": local_failure_models,
+        "local_failure_feature_names": _local_failure_feature_names(),
         "relative_anchor_gap_priors": relative_anchor_priors,
         "island_anchor_position_priors": island_anchor_priors,
         "encoder": encoder,
@@ -4804,6 +5249,7 @@ def train_manual_oto_anchor_scorer(
         "gate_review_duplicate_tokens": bool(gate_review_duplicate_tokens),
         "failure_gate": failure_gate,
         "supervised_gate_threshold": float(supervised_gate_threshold),
+        "local_gate_threshold": float(local_gate_threshold),
         "supervised_gate_thresholds_by_anchor": {
             str(anchor): float(value)
             for anchor, value in sorted((supervised_gate_thresholds_by_anchor or {}).items())
@@ -4832,7 +5278,9 @@ def train_manual_oto_anchor_scorer(
         "models_trained": sorted(models),
         "failure_gate": failure_gate,
         "failure_gate_models_trained": sorted(supervised_gate_models),
+        "local_failure_models_trained": sorted(local_failure_models),
         "supervised_gate_threshold": float(supervised_gate_threshold),
+        "local_gate_threshold": float(local_gate_threshold),
         "supervised_gate_thresholds_by_anchor": {
             str(anchor): float(value)
             for anchor, value in sorted((supervised_gate_thresholds_by_anchor or {}).items())
@@ -4843,6 +5291,14 @@ def train_manual_oto_anchor_scorer(
             else {},
             "safe_counts": (gate_train_summary or {}).get("gate_training", {}).get("safe_counts", {})
             if isinstance((gate_train_summary or {}).get("gate_training", {}), dict)
+            else {},
+        },
+        "local_failure_train": {
+            "sample_counts": (local_failure_train_summary or {}).get("local_failure_training", {}).get("sample_counts", {})
+            if isinstance((local_failure_train_summary or {}).get("local_failure_training", {}), dict)
+            else {},
+            "safe_counts": (local_failure_train_summary or {}).get("local_failure_training", {}).get("safe_counts", {})
+            if isinstance((local_failure_train_summary or {}).get("local_failure_training", {}), dict)
             else {},
         },
         "sample_wavs": bool(sample_wavs),
@@ -4898,6 +5354,12 @@ def main() -> int:
     parser.add_argument("--failure-gate", choices=("off", "heuristic", "supervised", "combined"), default="heuristic")
     parser.add_argument("--supervised-gate-threshold", type=float, default=0.80)
     parser.add_argument(
+        "--local-gate-threshold",
+        type=float,
+        default=0.80,
+        help="Safe probability threshold for routed local hard-fail gate.",
+    )
+    parser.add_argument(
         "--supervised-gate-threshold-by-anchor",
         default="",
         help="Comma-separated anchor=value overrides, for example preutterance=0.80,fixed_end=0.85.",
@@ -4949,6 +5411,7 @@ def main() -> int:
         gate_review_duplicate_tokens=not bool(args.no_gate_review_duplicate_tokens),
         failure_gate=str(args.failure_gate),
         supervised_gate_threshold=float(args.supervised_gate_threshold),
+        local_gate_threshold=float(args.local_gate_threshold),
         supervised_gate_thresholds_by_anchor=_thresholds_by_anchor_arg(
             str(args.supervised_gate_threshold_by_anchor or "")
         ),
