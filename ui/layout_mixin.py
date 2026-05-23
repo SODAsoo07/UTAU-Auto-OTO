@@ -20,6 +20,7 @@ from ui.i18n import t
 EN_CVVC_UI_ENABLED = False
 NO_MFA_REMAP_LABEL = "베이스 OTO 재매핑 + 보정"
 NO_MFA_SSL_SLOT_LABEL = "MFA-Free SSL 슬롯 어댑터(실험)"
+NO_MFA_MANUAL_ANCHOR_LABEL = "Manual OTO anchor scorer(실험)"
 NO_MFA_TUNED_LABEL = "No-MFA (학습 모델)"
 NO_MFA_CHECKPOINT_TUNE_D_LABEL = "tune_d (default)"
 NO_MFA_CHECKPOINT_AUTO_LABEL = "auto (latest checkpoint)"
@@ -1307,11 +1308,15 @@ class LayoutMixin:
             return "remap"
         if raw in {"mfa_free", "mfa-free", "ssl_slot", "ssl-slot", "mfa_free_ssl_slot"}:
             return "mfa_free_ssl_slot"
+        if raw in {"manual_oto_anchor", "manual_anchor", "manual-anchor", "manual_oto_anchor_scorer"}:
+            return "manual_oto_anchor"
         if raw in {"remap", "base_remap", "base"}:
             return "remap"
         text = str(value or "").strip()
         if text == NO_MFA_SSL_SLOT_LABEL:
             return "mfa_free_ssl_slot"
+        if text == NO_MFA_MANUAL_ANCHOR_LABEL:
+            return "manual_oto_anchor"
         if text == "CRNN OTO 예측기(실험)":
             return "remap"
         if text in {"베이스 OTO 재매핑 + 보정", NO_MFA_REMAP_LABEL}:
@@ -1623,7 +1628,12 @@ class LayoutMixin:
 
     def _set_no_mfa_oto_mode_from_code(self, code):
         normalized = self._normalize_no_mfa_oto_mode_code(code)
-        label = NO_MFA_SSL_SLOT_LABEL if normalized == "mfa_free_ssl_slot" else NO_MFA_REMAP_LABEL
+        if normalized == "mfa_free_ssl_slot":
+            label = NO_MFA_SSL_SLOT_LABEL
+        elif normalized == "manual_oto_anchor":
+            label = NO_MFA_MANUAL_ANCHOR_LABEL
+        else:
+            label = NO_MFA_REMAP_LABEL
         if hasattr(self, "no_mfa_oto_mode_var"):
             try:
                 self.no_mfa_oto_mode_var.set(label)
@@ -1753,21 +1763,28 @@ class LayoutMixin:
             if hasattr(self, "_get_oto_crnn_engine_code")
             else "boundary_decoder"
         )
-        if use_no_mfa_tuned and no_mfa_mode_code != "mfa_free_ssl_slot":
+        if use_no_mfa_tuned and no_mfa_mode_code not in {"mfa_free_ssl_slot", "manual_oto_anchor"}:
             no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("mfa_free_ssl_slot")
-        if no_mfa_mode_code == "mfa_free_ssl_slot" and not developer_enabled and not use_no_mfa_tuned:
+        if use_no_mfa_tuned and no_mfa_mode_code == "manual_oto_anchor" and not developer_enabled:
+            no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("mfa_free_ssl_slot")
+        if no_mfa_mode_code in {"mfa_free_ssl_slot", "manual_oto_anchor"} and not developer_enabled and not use_no_mfa_tuned:
             no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("remap")
         if no_mfa_mode_code == "crnn":
             no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("remap")
         no_mfa_values = [NO_MFA_REMAP_LABEL]
         if developer_enabled or use_no_mfa_tuned:
             no_mfa_values.append(NO_MFA_SSL_SLOT_LABEL)
+        if developer_enabled:
+            no_mfa_values.append(NO_MFA_MANUAL_ANCHOR_LABEL)
         if hasattr(self, "no_mfa_oto_mode_menu"):
             try:
                 self.no_mfa_oto_mode_menu.configure(values=no_mfa_values)
-                self.no_mfa_oto_mode_menu.set(
-                    NO_MFA_SSL_SLOT_LABEL if no_mfa_mode_code == "mfa_free_ssl_slot" else NO_MFA_REMAP_LABEL
-                )
+                if no_mfa_mode_code == "mfa_free_ssl_slot":
+                    self.no_mfa_oto_mode_menu.set(NO_MFA_SSL_SLOT_LABEL)
+                elif no_mfa_mode_code == "manual_oto_anchor":
+                    self.no_mfa_oto_mode_menu.set(NO_MFA_MANUAL_ANCHOR_LABEL)
+                else:
+                    self.no_mfa_oto_mode_menu.set(NO_MFA_REMAP_LABEL)
             except Exception:
                 pass
         if hasattr(self, "oto_crnn_engine_menu"):
@@ -1783,11 +1800,12 @@ class LayoutMixin:
                 )
             except Exception:
                 pass
-        no_mfa_mode_desc = (
-            NO_MFA_SSL_SLOT_LABEL
-            if no_mfa_mode_code == "mfa_free_ssl_slot"
-            else NO_MFA_REMAP_LABEL
-        )
+        if no_mfa_mode_code == "mfa_free_ssl_slot":
+            no_mfa_mode_desc = NO_MFA_SSL_SLOT_LABEL
+        elif no_mfa_mode_code == "manual_oto_anchor":
+            no_mfa_mode_desc = NO_MFA_MANUAL_ANCHOR_LABEL
+        else:
+            no_mfa_mode_desc = NO_MFA_REMAP_LABEL
         if hasattr(self, "mfa_align_profile_menu"):
             self.mfa_align_profile_menu.configure(
                 state="disabled" if (use_no_mfa or use_sequence or use_coarse_crnn) else "normal"
@@ -2023,6 +2041,19 @@ class LayoutMixin:
         if hasattr(self, "mfa_free_oto_preview_hint") and self.mfa_free_oto_preview_hint is not None:
             try:
                 self.mfa_free_oto_preview_hint.configure(
+                    text_color=PALETTE.hint_text if enabled else "#AEB7C6"
+                )
+            except Exception:
+                pass
+        if hasattr(self, "manual_oto_anchor_preview_btn") and self.manual_oto_anchor_preview_btn is not None:
+            try:
+                is_running = bool(getattr(self, "is_running", False))
+                self.manual_oto_anchor_preview_btn.configure(state="normal" if (enabled and not is_running) else "disabled")
+            except Exception:
+                pass
+        if hasattr(self, "manual_oto_anchor_preview_hint") and self.manual_oto_anchor_preview_hint is not None:
+            try:
+                self.manual_oto_anchor_preview_hint.configure(
                     text_color=PALETTE.hint_text if enabled else "#AEB7C6"
                 )
             except Exception:
