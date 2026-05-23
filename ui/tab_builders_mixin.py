@@ -1622,6 +1622,15 @@ class TabBuildersMixin:
         )
         _style_primary_button(self.mfa_free_oto_preview_btn)
         self.mfa_free_oto_preview_btn.pack(side="left", padx=(0, 10))
+        self.manual_oto_anchor_preview_btn = ctk.CTkButton(
+            mfa_free_preview_row,
+            text=t("Manual OTO anchor 테스트"),
+            width=220,
+            height=28,
+            command=lambda: self._run_manual_oto_anchor_preview_from_ui(),
+        )
+        _style_primary_button(self.manual_oto_anchor_preview_btn)
+        self.manual_oto_anchor_preview_btn.pack(side="left", padx=(0, 10))
         self.mfa_free_oto_preview_hint = ctk.CTkLabel(
             mfa_free_preview_row,
             text=t("현재 WAV/템플릿 기준으로 preview oto.ini, anchor JSON, overlay HTML을 생성합니다."),
@@ -2893,6 +2902,15 @@ class TabBuildersMixin:
         )
         _style_primary_button(self.mfa_free_oto_preview_btn)
         self.mfa_free_oto_preview_btn.pack(side="left", padx=(0, 10))
+        self.manual_oto_anchor_preview_btn = ctk.CTkButton(
+            mfa_free_preview_row,
+            text=t("Manual OTO anchor 테스트"),
+            width=220,
+            height=28,
+            command=lambda: self._run_manual_oto_anchor_preview_from_ui(),
+        )
+        _style_primary_button(self.manual_oto_anchor_preview_btn)
+        self.manual_oto_anchor_preview_btn.pack(side="left", padx=(0, 10))
         self.mfa_free_oto_preview_hint = ctk.CTkLabel(
             mfa_free_preview_row,
             text=t("현재 WAV/템플릿 기준으로 preview oto.ini, anchor JSON, overlay HTML을 생성합니다."),

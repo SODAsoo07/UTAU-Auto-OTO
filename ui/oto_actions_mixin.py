@@ -481,11 +481,12 @@ class OtoActionsMixin:
                     )
                     if aligner_engine == "coarse_crnn":
                         no_mfa_mode_code = "remap"
-                    no_mfa_mode_text = (
-                        "MFA-Free SSL 슬롯 어댑터(실험)"
-                        if no_mfa_mode_code == "mfa_free_ssl_slot"
-                        else "베이스 OTO 재매핑 + 보정"
-                    )
+                    if no_mfa_mode_code == "mfa_free_ssl_slot":
+                        no_mfa_mode_text = "MFA-Free SSL 슬롯 어댑터(실험)"
+                    elif no_mfa_mode_code == "manual_oto_anchor":
+                        no_mfa_mode_text = "Manual OTO anchor scorer(실험)"
+                    else:
+                        no_mfa_mode_text = "베이스 OTO 재매핑 + 보정"
                     selected_no_mfa_checkpoint = self._apply_no_mfa_checkpoint_env_from_ui()
                     if selected_no_mfa_checkpoint:
                         self._append_log(f"[No-MFA] UI checkpoint={selected_no_mfa_checkpoint}")
@@ -658,6 +659,16 @@ class OtoActionsMixin:
                                 format_type=selected_format,
                                 callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                             )
+                        elif no_mfa_mode_code == "manual_oto_anchor":
+                            _update_oto_local("Manual OTO anchor scorer 생성", 0.22, force=True)
+                            processed, total, errors = self._run_manual_oto_anchor_preview_generation(
+                                wav_dir=target_wav_dir,
+                                out_path=target_out_path,
+                                source_oto_path=no_mfa_source_oto or tpl_path,
+                                language=lang,
+                                format_type=selected_format,
+                                callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
+                            )
                         else:
                             _update_oto_local("No-MFA 자동설정 생성", 0.22, force=True)
                             processed, total, errors = generate_no_mfa_auto_oto(
@@ -711,6 +722,12 @@ class OtoActionsMixin:
                             callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                         )
 
+                    if errors:
+                        for err in errors:
+                            self._append_log(f"  - {err}")
+                        self._set_status(f"오류: OTO 생성 실패 {len(errors)}건 ({processed}/{total})")
+                        return False, False, int(processed or 0), int(total or 0)
+
                     if total:
                         _update_oto_local(t("생성 결과 정리"), float(processed) / float(total))
                     _update_oto_local(t("생성 결과 정리"), 0.92, force=True)
@@ -742,13 +759,7 @@ class OtoActionsMixin:
                         callback=_make_progress_callback("validate", batch_index=batch_index, batch_total=batch_total),
                     )
                     _update_validate_local(t("검증 완료"), 1.0, force=True)
-                    if not errors:
-                        self._cleanup_generated_output_artifacts(target_out_path, snapshot=cleanup_snapshot)
-                    if errors:
-                        for err in errors:
-                            self._append_log(f"  - {err}")
-                        self._set_status(f"오류: OTO 생성 실패 {len(errors)}건 ({processed}/{total})")
-                        return False, False, int(processed or 0), int(total or 0)
+                    self._cleanup_generated_output_artifacts(target_out_path, snapshot=cleanup_snapshot)
 
                     self._set_status(f"완료: OTO 생성 성공 ({processed}/{total})")
                     return True, False, int(processed or 0), int(total or 0)
