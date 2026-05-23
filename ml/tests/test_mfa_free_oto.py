@@ -1283,6 +1283,83 @@ def test_manual_oto_anchor_vcv_initial_cv_preutterance_policy_prefers_safe_islan
     assert reason == ""
 
 
+def test_manual_oto_anchor_vcv_sonorant_preutterance_policy_is_conservative():
+    import numpy as np
+
+    from core.mfa_free_oto.manual_oto_candidates import ManualOtoCandidateTracks
+    from core.mfa_free_oto.vowel_island import VowelIsland
+    from ml.scripts.mfa_free_oto.train_manual_oto_anchor_scorer import _vcv_sonorant_preutterance_policy
+
+    tracks = ManualOtoCandidateTracks(
+        times_ms=np.asarray([420.0, 630.0, 690.0], dtype=np.float32),
+        candidate_indices={"preutterance": (0, 1, 2)},
+        anchor_scores={"preutterance": np.asarray([0.99, 1.0, 1.0], dtype=np.float32)},
+        tracks={},
+        duration_ms=3000.0,
+        encoder="test",
+    )
+    row = {
+        "alias": "n bweo",
+        "alias_role": "vcv",
+        "format_type": "vcv",
+        "duration_ms": 3000.0,
+        "slot_index": 0,
+        "slot_count": 3,
+    }
+    island = VowelIsland(
+        start_ms=180.0,
+        nucleus_ms=700.0,
+        end_ms=1430.0,
+        confidence=0.95,
+        left_valley_ms=180.0,
+        right_valley_ms=1430.0,
+        start_index=18,
+        nucleus_index=70,
+        end_index=143,
+    )
+
+    pred, source, reason = _vcv_sonorant_preutterance_policy(
+        row,
+        tracks,
+        island=island,
+        fallback_pred_ms=630.0,
+        fallback_safe_prob=0.95,
+        duration_ms=3000.0,
+        slot_count=3,
+        slot_index=0,
+    )
+
+    assert pred == 690.0
+    assert source.startswith("vcv_sonorant_nasal_nucleus")
+    assert reason == ""
+
+    low_conf_inside = VowelIsland(
+        start_ms=80.0,
+        nucleus_ms=940.0,
+        end_ms=1070.0,
+        confidence=0.62,
+        left_valley_ms=40.0,
+        right_valley_ms=1110.0,
+        start_index=8,
+        nucleus_index=94,
+        end_index=107,
+    )
+    pred, source, reason = _vcv_sonorant_preutterance_policy(
+        {"alias": "l ma", "alias_role": "vcv", "format_type": "vcv", "duration_ms": 1600.0},
+        tracks,
+        island=low_conf_inside,
+        fallback_pred_ms=550.0,
+        fallback_safe_prob=0.99,
+        duration_ms=3000.0,
+        slot_count=3,
+        slot_index=0,
+    )
+
+    assert pred is None
+    assert source == ""
+    assert reason == "vcv_sonorant_transition_review"
+
+
 def test_manual_oto_alias_family_buckets_cover_common_suffixes():
     from core.mfa_free_oto.manual_oto_candidates import manual_oto_alias_family
 

@@ -816,6 +816,93 @@ def _vcv_initial_cv_preutterance_policy(
     return None, "", "vcv_initial_cv_late_preutterance"
 
 
+def _vcv_sonorant_preutterance_policy(
+    row: dict[str, object],
+    tracks: ManualOtoCandidateTracks,
+    *,
+    island: VowelIsland | None,
+    fallback_pred_ms: float,
+    fallback_safe_prob: float | None,
+    duration_ms: float,
+    slot_count: int,
+    slot_index: int,
+) -> tuple[float | None, str, str]:
+    format_type = str(row.get("format_type", "") or "").strip().lower()
+    role = str(row.get("alias_role", "") or "").strip().lower()
+    leading = str(row.get("alias_norm") or row.get("alias") or "").strip().lower().split()
+    leading_token = leading[0].strip("-_") if leading else ""
+    if format_type != "vcv" or role == "cv" or leading_token not in {"l", "r", "m", "n", "ng"}:
+        return None, "", "not_vcv_sonorant"
+    safe_prob = float(fallback_safe_prob) if fallback_safe_prob is not None else 0.0
+    fallback_delta = _slot_shift_delta(
+        row,
+        pred_ms=float(fallback_pred_ms),
+        duration_ms=duration_ms,
+        slot_count=slot_count,
+        slot_index=slot_index,
+    )
+    if fallback_delta != 0:
+        return None, "", f"vcv_sonorant_slot_not_exact:{_slot_shift_bucket(fallback_delta)}"
+    if island is None:
+        if safe_prob >= 0.98:
+            return float(fallback_pred_ms), f"vcv_sonorant_safe_constrained:{safe_prob:.3f}", ""
+        return None, "", "vcv_sonorant_missing_island"
+
+    span_ms = max(1.0, float(island.end_ms) - float(island.start_ms))
+    if (
+        leading_token in {"n", "ng"}
+        and float(island.confidence) >= 0.90
+        and safe_prob >= 0.90
+    ):
+        nucleus_pred = _candidate_near_expected_ms(
+            tracks,
+            "preutterance",
+            float(island.nucleus_ms),
+            window_ms=180.0,
+        )
+        nucleus_score = _nearest_track_value(
+            tracks,
+            tracks.anchor_scores.get("preutterance", ()),
+            float(nucleus_pred),
+        )
+        nucleus_delta = _slot_shift_delta(
+            row,
+            pred_ms=float(nucleus_pred),
+            duration_ms=duration_ms,
+            slot_count=slot_count,
+            slot_index=slot_index,
+        )
+        if (
+            nucleus_delta == 0
+            and float(nucleus_score) >= 0.95
+            and abs(float(nucleus_pred) - float(fallback_pred_ms)) <= 90.0
+        ):
+            return float(nucleus_pred), f"vcv_sonorant_nasal_nucleus:{nucleus_score:.3f}", ""
+
+    fallback_outside_island = (
+        float(fallback_pred_ms) <= float(island.start_ms) or float(fallback_pred_ms) >= float(island.end_ms)
+    )
+    if safe_prob >= 0.98 and (float(island.confidence) >= 0.85 or fallback_outside_island):
+        return float(fallback_pred_ms), f"vcv_sonorant_safe_constrained:{safe_prob:.3f}", ""
+    if safe_prob >= 0.95 and fallback_outside_island:
+        return float(fallback_pred_ms), f"vcv_sonorant_outside_island:{safe_prob:.3f}", ""
+    if safe_prob >= 0.95:
+        r33_pred = _candidate_near_expected_ms(
+            tracks,
+            "preutterance",
+            float(island.start_ms) + 0.33 * span_ms,
+            window_ms=180.0,
+        )
+        r33_score = _nearest_track_value(
+            tracks,
+            tracks.anchor_scores.get("preutterance", ()),
+            float(r33_pred),
+        )
+        if abs(float(r33_pred) - float(fallback_pred_ms)) <= 35.0 and float(r33_score) >= 0.95:
+            return float(fallback_pred_ms), f"vcv_sonorant_r33_agree:{r33_score:.3f}", ""
+    return None, "", "vcv_sonorant_transition_review"
+
+
 def _unit_vector(values: np.ndarray) -> np.ndarray:
     arr = np.asarray(values, dtype=np.float32)
     if arr.size == 0:
@@ -4037,6 +4124,66 @@ def evaluate_models(
                                 policy_missing_accepted = True
                             elif vcv_reason != "not_vcv_initial_cv":
                                 local_reasons = tuple(dict.fromkeys((*local_reasons, vcv_reason)))
+                            if not policy_missing_accepted:
+                                vcv_pred, vcv_source, vcv_reason = _vcv_sonorant_preutterance_policy(
+                                    row,
+                                    tracks,
+                                    island=island,
+                                    fallback_pred_ms=fallback_pre,
+                                    fallback_safe_prob=routed_pre_safe_prob,
+                                    duration_ms=duration_ms,
+                                    slot_count=slot_count_for_islands,
+                                    slot_index=slot_idx,
+                                )
+                                if vcv_pred is not None:
+                                    policy_err = abs(float(vcv_pred) - float(target))
+                                    routed_parameter_policy_accept_by_anchor[anchor] += 1
+                                    routed_parameter_policy_errors_by_anchor[anchor].append(policy_err)
+                                    _record_slot_shift(
+                                        slot_shift_by_series_anchor,
+                                        "model_routed_parameter_policy_params",
+                                        anchor,
+                                        row,
+                                        pred_ms=float(vcv_pred),
+                                        duration_ms=duration_ms,
+                                        slot_count=slot_count_for_islands,
+                                        slot_index=slot_idx,
+                                    )
+                                    _record_failure_breakdown(
+                                        failure_breakdown_records,
+                                        series="model_routed_parameter_policy_params",
+                                        anchor=anchor,
+                                        row=row,
+                                        error_ms=policy_err,
+                                        pred_ms=float(vcv_pred),
+                                        duration_ms=duration_ms,
+                                        dependent_preutterance_source=vcv_source,
+                                        slot_count=slot_count_for_islands,
+                                        slot_index=slot_idx,
+                                    )
+                                    if policy_err > 60.0 and len(worst_routed_parameter_policy) < 200:
+                                        worst_routed_parameter_policy.append(
+                                            {
+                                                **_failure_example_base(
+                                                    row,
+                                                    wav_path=wav_path,
+                                                    anchor=anchor,
+                                                    target_ms=float(target),
+                                                    pred_ms=float(vcv_pred),
+                                                    error_ms=policy_err,
+                                                    slot_pos_norm=float(slot_idx + 0.5)
+                                                    / max(1.0, float(slot_count_for_islands)),
+                                                ),
+                                                "source_series": "model_routed_parameter_policy_params",
+                                                "dependent_preutterance_source": vcv_source,
+                                                "dependent_preutterance_safe_prob": routed_pre_safe_prob,
+                                                "safe_overlap_context": safe_overlap_context,
+                                                "route_decision": "accept",
+                                            }
+                                        )
+                                    policy_missing_accepted = True
+                                elif vcv_reason != "not_vcv_sonorant":
+                                    local_reasons = tuple(dict.fromkeys((*local_reasons, vcv_reason)))
                     if not policy_missing_accepted:
                         routed_parameter_policy_review_by_anchor[anchor] += 1
                         for reason in local_reasons:
@@ -4239,10 +4386,21 @@ def evaluate_models(
                             else:
                                 policy_reasons.append(vcv_reason)
                         elif format_type == "vcv" and role != "cv":
-                            leading = str(row.get("alias_norm") or row.get("alias") or "").strip().lower().split()
-                            leading_token = leading[0].strip("-_") if leading else ""
-                            if leading_token in {"l", "r", "m", "n", "ng"}:
-                                policy_reasons.append("vcv_sonorant_transition_review")
+                            vcv_pred, vcv_source, vcv_reason = _vcv_sonorant_preutterance_policy(
+                                row,
+                                tracks,
+                                island=island,
+                                fallback_pred_ms=float(safe_pred),
+                                fallback_safe_prob=routed_pre_safe_prob,
+                                duration_ms=duration_ms,
+                                slot_count=slot_count_for_islands,
+                                slot_index=slot_idx,
+                            )
+                            if vcv_pred is not None:
+                                policy_pred = float(vcv_pred)
+                                policy_source = vcv_source
+                            elif vcv_reason != "not_vcv_sonorant":
+                                policy_reasons.append(vcv_reason)
                             elif routed_pre_safe_prob is None or routed_pre_safe_prob < 0.98:
                                 policy_reasons.append("vcv_transition_preutterance_low_margin")
                             else:
@@ -4266,9 +4424,25 @@ def evaluate_models(
                             policy_pred = float(vcv_pred)
                             policy_source = vcv_source
                         else:
-                            policy_reasons.extend(boundary_slot_exact_reasons or ("boundary_slot_exact_rejected",))
                             if vcv_reason != "not_vcv_initial_cv":
                                 policy_reasons.append(vcv_reason)
+                            vcv_pred, vcv_source, sonorant_reason = _vcv_sonorant_preutterance_policy(
+                                row,
+                                tracks,
+                                island=island,
+                                fallback_pred_ms=float(safe_pred),
+                                fallback_safe_prob=routed_pre_safe_prob,
+                                duration_ms=duration_ms,
+                                slot_count=slot_count_for_islands,
+                                slot_index=slot_idx,
+                            )
+                            if vcv_pred is not None:
+                                policy_pred = float(vcv_pred)
+                                policy_source = vcv_source
+                            else:
+                                policy_reasons.extend(boundary_slot_exact_reasons or ("boundary_slot_exact_rejected",))
+                                if sonorant_reason != "not_vcv_sonorant":
+                                    policy_reasons.append(sonorant_reason)
                 elif anchor in {"offset", "overlap"}:
                     if not boundary_slot_exact_accept:
                         policy_reasons.extend(boundary_slot_exact_reasons or ("boundary_slot_exact_rejected",))
