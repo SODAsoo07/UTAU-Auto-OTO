@@ -1232,6 +1232,57 @@ def test_manual_oto_anchor_vowel_island_slots_include_cv_leading_context_only():
     assert _row_vowel_island_slot_index(vcv_rows[0], 5) == 0
 
 
+def test_manual_oto_anchor_vcv_initial_cv_preutterance_policy_prefers_safe_island_start():
+    import numpy as np
+
+    from core.mfa_free_oto.manual_oto_candidates import ManualOtoCandidateTracks
+    from core.mfa_free_oto.vowel_island import VowelIsland
+    from ml.scripts.mfa_free_oto.train_manual_oto_anchor_scorer import _vcv_initial_cv_preutterance_policy
+
+    row = {
+        "alias": "- pwi",
+        "alias_role": "cv",
+        "format_type": "vcv",
+        "duration_ms": 1000.0,
+        "slot_index": 0,
+        "slot_count": 3,
+    }
+    island = VowelIsland(
+        start_ms=120.0,
+        nucleus_ms=180.0,
+        end_ms=420.0,
+        confidence=0.95,
+        left_valley_ms=110.0,
+        right_valley_ms=440.0,
+        start_index=12,
+        nucleus_index=18,
+        end_index=42,
+    )
+    tracks = ManualOtoCandidateTracks(
+        times_ms=np.asarray([100.0, 140.0, 500.0], dtype=np.float32),
+        candidate_indices={"preutterance": (1, 2)},
+        anchor_scores={"preutterance": np.asarray([0.1, 0.99, 1.0], dtype=np.float32)},
+        tracks={},
+        duration_ms=1000.0,
+        encoder="test",
+    )
+
+    pred, source, reason = _vcv_initial_cv_preutterance_policy(
+        row,
+        tracks,
+        island=island,
+        fallback_pred_ms=500.0,
+        fallback_safe_prob=0.99,
+        duration_ms=1000.0,
+        slot_count=3,
+        slot_index=0,
+    )
+
+    assert pred == 140.0
+    assert source.startswith("vcv_initial_cv_island_start")
+    assert reason == ""
+
+
 def test_manual_oto_alias_family_buckets_cover_common_suffixes():
     from core.mfa_free_oto.manual_oto_candidates import manual_oto_alias_family
 
