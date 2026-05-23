@@ -1184,6 +1184,54 @@ def test_manual_oto_row_slot_order_preserves_manifest_slot_index():
     assert [round(pos, 3) for _row, pos in ordered] == [0.167, 0.5, 0.833]
 
 
+def test_manual_oto_anchor_vowel_island_slots_include_cv_leading_context_only():
+    from ml.scripts.mfa_free_oto.train_manual_oto_anchor_scorer import (
+        _row_vowel_island_slot_index,
+        _vowel_island_slot_count,
+    )
+
+    cv_rows = [
+        {
+            "wav_name": "a-rya-ryu-ryo.wav",
+            "filename_canonical_tokens": ["a", "rya", "ryu", "ryo"],
+            "alias": "rya",
+            "alias_role": "cv",
+            "format_type": "cv",
+            "slot_index": 0,
+            "slot_count": 3,
+            "language": "japanese",
+        },
+        {
+            "wav_name": "a-rya-ryu-ryo.wav",
+            "filename_canonical_tokens": ["a", "rya", "ryu", "ryo"],
+            "alias": "ryu",
+            "alias_role": "cv",
+            "format_type": "cv",
+            "slot_index": 1,
+            "slot_count": 3,
+            "language": "japanese",
+        },
+    ]
+    assert _vowel_island_slot_count(cv_rows) == 4
+    assert _row_vowel_island_slot_index(cv_rows[0], 4) == 1
+    assert _row_vowel_island_slot_index(cv_rows[1], 4) == 2
+
+    vcv_rows = [
+        {
+            "wav_name": "_pwi'pwi'o'pwi'u'pwi'pweo.wav",
+            "filename_canonical_tokens": ["pwi", "pwi", "o", "pwi", "u", "pwi", "pweo"],
+            "alias": "- pwi",
+            "alias_role": "cv",
+            "format_type": "vcv",
+            "slot_index": 0,
+            "slot_count": 5,
+            "language": "korean",
+        }
+    ]
+    assert _vowel_island_slot_count(vcv_rows) == 5
+    assert _row_vowel_island_slot_index(vcv_rows[0], 5) == 0
+
+
 def test_manual_oto_alias_family_buckets_cover_common_suffixes():
     from core.mfa_free_oto.manual_oto_candidates import manual_oto_alias_family
 

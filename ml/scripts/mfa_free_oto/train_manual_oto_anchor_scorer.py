@@ -534,9 +534,21 @@ def _vowel_island_slot_count(wav_rows: list[dict[str, object]]) -> int:
         except Exception:
             continue
     manifest_count = max(1, max(max_count, max_index + 1))
+    tokens = _filename_tokens_for_row(wav_rows[0])
+    format_type = str(wav_rows[0].get("format_type", "") or "").strip().lower()
+    if format_type in {"cv", "cvvc", "cvc"} and len(tokens) == manifest_count + 1:
+        inferred_token_indices: list[int] = []
+        for row in wav_rows:
+            pos = _infer_filename_slot_pos(row, tokens)
+            if pos is None:
+                continue
+            idx = int(round(float(pos) * float(len(tokens)) - 0.5))
+            if 0 <= idx < len(tokens):
+                inferred_token_indices.append(idx)
+        if inferred_token_indices and min(inferred_token_indices) >= 1:
+            return len(tokens)
     if manifest_count >= 2:
         return manifest_count
-    tokens = _filename_tokens_for_row(wav_rows[0])
     if len(tokens) >= 2:
         return len(tokens)
     return manifest_count
@@ -544,16 +556,21 @@ def _vowel_island_slot_count(wav_rows: list[dict[str, object]]) -> int:
 
 def _row_vowel_island_slot_index(row: dict[str, object], slot_count: int) -> int:
     count = max(1, int(slot_count))
+    tokens = _filename_tokens_for_row(row)
     try:
         row_count = max(1, int(row.get("slot_count", count) or count))
         row_index = int(row.get("slot_index", 0) or 0)
+        if count != row_count and len(tokens) == count:
+            pos = _infer_filename_slot_pos(row, tokens)
+            if pos is not None:
+                idx = int(round(float(pos) * float(count) - 0.5))
+                return max(0, min(count - 1, idx))
         if 0 <= row_index < row_count:
             pos = (float(row_index) + 0.5) / max(1.0, float(row_count))
             idx = int(round(pos * float(count) - 0.5))
             return max(0, min(count - 1, idx))
     except Exception:
         pass
-    tokens = _filename_tokens_for_row(row)
     pos = _infer_filename_slot_pos(row, tokens)
     if pos is None:
         pos = _centered_slot_pos(row)
@@ -2816,6 +2833,11 @@ def evaluate_models(
     routed_local_gate_accept_by_anchor: Counter[str] = Counter()
     routed_local_gate_review_by_anchor: Counter[str] = Counter()
     routed_local_gate_review_reason_by_anchor: Counter[str] = Counter()
+    routed_parameter_policy_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
+    routed_parameter_policy_total_by_anchor: Counter[str] = Counter()
+    routed_parameter_policy_accept_by_anchor: Counter[str] = Counter()
+    routed_parameter_policy_review_by_anchor: Counter[str] = Counter()
+    routed_parameter_policy_review_reason_by_anchor: Counter[str] = Counter()
     vowel_island_lattice_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
     local_offset_from_island_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
     overlap_relative_on_island_errors_by_anchor: dict[str, list[float]] = {anchor: [] for anchor in anchors}
@@ -2853,6 +2875,7 @@ def evaluate_models(
     worst_routed_slot_exact: list[dict[str, object]] = []
     worst_routed_boundary_slot_exact: list[dict[str, object]] = []
     worst_routed_local_gate: list[dict[str, object]] = []
+    worst_routed_parameter_policy: list[dict[str, object]] = []
     worst_vowel_island: list[dict[str, object]] = []
     worst_vowel_island_gated: list[dict[str, object]] = []
     failure_breakdown_records: list[dict[str, object]] = []
@@ -3870,6 +3893,7 @@ def evaluate_models(
                 routed_slot_exact_total_by_anchor[anchor] += 1
                 routed_boundary_slot_exact_total_by_anchor[anchor] += 1
                 routed_local_gate_total_by_anchor[anchor] += 1
+                routed_parameter_policy_total_by_anchor[anchor] += 1
                 safe_pred = safe_predictions.get(anchor)
                 if safe_pred is None:
                     routed_safe_overlap_review_by_anchor[anchor] += 1
@@ -3888,6 +3912,9 @@ def evaluate_models(
                     local_reasons = boundary_slot_exact_reasons or safe_reasons or ("missing_safe_overlap_prediction",)
                     for reason in local_reasons:
                         routed_local_gate_review_reason_by_anchor[f"{anchor}|{reason}"] += 1
+                    routed_parameter_policy_review_by_anchor[anchor] += 1
+                    for reason in local_reasons:
+                        routed_parameter_policy_review_reason_by_anchor[f"{anchor}|{reason}"] += 1
                     continue
                 routed_safe_overlap_accept_by_anchor[anchor] += 1
                 safe_err = abs(float(safe_pred) - float(target))
@@ -4061,6 +4088,127 @@ def evaluate_models(
                                     "route_decision": "accept",
                                 }
                             )
+                policy_pred: float | None = None
+                policy_source = ""
+                policy_reasons: list[str] = []
+                policy_local_threshold = max(0.99, float(local_gate_threshold))
+                if anchor == "preutterance":
+                    if boundary_slot_exact_accept:
+                        format_type = str(row.get("format_type", "") or "").strip().lower()
+                        role = str(row.get("alias_role", "") or "").strip().lower()
+                        if format_type == "vcv" and role == "cv" and float(safe_pred) > 150.0:
+                            policy_reasons.append("vcv_initial_cv_late_preutterance")
+                        elif format_type == "vcv" and role != "cv":
+                            leading = str(row.get("alias_norm") or row.get("alias") or "").strip().lower().split()
+                            leading_token = leading[0].strip("-_") if leading else ""
+                            if leading_token in {"l", "r", "m", "n", "ng"}:
+                                policy_reasons.append("vcv_sonorant_transition_review")
+                            elif routed_pre_safe_prob is None or routed_pre_safe_prob < 0.98:
+                                policy_reasons.append("vcv_transition_preutterance_low_margin")
+                            else:
+                                policy_pred = float(safe_pred)
+                                policy_source = "boundary_exact_preutterance"
+                        else:
+                            policy_pred = float(safe_pred)
+                            policy_source = "boundary_exact_preutterance"
+                    else:
+                        policy_reasons.extend(boundary_slot_exact_reasons or ("boundary_slot_exact_rejected",))
+                elif anchor in {"offset", "overlap"}:
+                    if not boundary_slot_exact_accept:
+                        policy_reasons.extend(boundary_slot_exact_reasons or ("boundary_slot_exact_rejected",))
+                    elif local_model is None:
+                        policy_reasons.append("missing_local_failure_model")
+                    elif local_safe_prob is None or local_safe_prob < float(policy_local_threshold):
+                        policy_reasons.append("policy_local_hardfail_risk")
+                    else:
+                        policy_pred = float(safe_pred)
+                        policy_source = f"local_gate_ge_{policy_local_threshold:.2f}"
+                elif anchor == "fixed_end":
+                    primary_fixed = constrained_predictions.get((id(row), "fixed_end"))
+                    fixed_prob = _supervised_safe_probability(
+                        row,
+                        "fixed_end",
+                        primary_fixed,
+                        gate_model=(supervised_gate_models or {}).get("fixed_end"),
+                        filename_pred=filename_slot_predictions.get((id(row), "fixed_end")),
+                        joint_pred=joint_predictions.get((id(row), "fixed_end")),
+                        require_primary_transition_token=bool(require_primary_transition_token),
+                    )
+                    if primary_fixed is None:
+                        policy_reasons.append("missing_fixed_end_constrained_prediction")
+                    elif fixed_prob is None or fixed_prob < _threshold_for_anchor(
+                        "fixed_end",
+                        float(supervised_gate_threshold),
+                        supervised_gate_thresholds_by_anchor,
+                    ):
+                        policy_reasons.append("fixed_end_supervised_failure_risk")
+                    else:
+                        fixed_pred = float(primary_fixed.get("pred_ms", 0.0) or 0.0)
+                        fixed_delta = _slot_shift_delta(
+                            row,
+                            pred_ms=fixed_pred,
+                            duration_ms=duration_ms,
+                            slot_count=slot_count_for_islands,
+                            slot_index=slot_idx,
+                        )
+                        if fixed_delta is None or int(fixed_delta) != 0:
+                            policy_reasons.append(f"fixed_end_slot_not_exact:{_slot_shift_bucket(fixed_delta)}")
+                        else:
+                            policy_pred = fixed_pred
+                            policy_source = f"fixed_end_gated_constrained:{fixed_prob:.3f}"
+                else:
+                    policy_reasons.append("unsupported_policy_anchor")
+
+                if policy_pred is None:
+                    routed_parameter_policy_review_by_anchor[anchor] += 1
+                    for reason in dict.fromkeys(policy_reasons or ("missing_policy_prediction",)):
+                        routed_parameter_policy_review_reason_by_anchor[f"{anchor}|{reason}"] += 1
+                else:
+                    policy_err = abs(float(policy_pred) - float(target))
+                    routed_parameter_policy_accept_by_anchor[anchor] += 1
+                    routed_parameter_policy_errors_by_anchor[anchor].append(policy_err)
+                    _record_slot_shift(
+                        slot_shift_by_series_anchor,
+                        "model_routed_parameter_policy_params",
+                        anchor,
+                        row,
+                        pred_ms=float(policy_pred),
+                        duration_ms=duration_ms,
+                        slot_count=slot_count_for_islands,
+                        slot_index=slot_idx,
+                    )
+                    _record_failure_breakdown(
+                        failure_breakdown_records,
+                        series="model_routed_parameter_policy_params",
+                        anchor=anchor,
+                        row=row,
+                        error_ms=policy_err,
+                        pred_ms=float(policy_pred),
+                        duration_ms=duration_ms,
+                        dependent_preutterance_source=policy_source,
+                        slot_count=slot_count_for_islands,
+                        slot_index=slot_idx,
+                    )
+                    if policy_err > 60.0 and len(worst_routed_parameter_policy) < 200:
+                        worst_routed_parameter_policy.append(
+                            {
+                                **_failure_example_base(
+                                    row,
+                                    wav_path=wav_path,
+                                    anchor=anchor,
+                                    target_ms=float(target),
+                                    pred_ms=float(policy_pred),
+                                    error_ms=policy_err,
+                                    slot_pos_norm=float(slot_idx + 0.5) / max(1.0, float(slot_count_for_islands)),
+                                ),
+                                "source_series": "model_routed_parameter_policy_params",
+                                "dependent_preutterance_source": policy_source,
+                                "dependent_preutterance_safe_prob": routed_pre_safe_prob,
+                                "local_failure_safe_prob": local_safe_prob,
+                                "safe_overlap_context": safe_overlap_context,
+                                "route_decision": "accept",
+                            }
+                        )
                 if not slot_exact_accept:
                     routed_slot_exact_review_by_anchor[anchor] += 1
                     reasons = slot_exact_reasons or ("slot_exact_rejected",)
@@ -4756,6 +4904,34 @@ def evaluate_models(
                 },
             }
         )
+        routed_parameter_policy_summary = summarize(
+            routed_parameter_policy_errors_by_anchor[anchor],
+            int(routed_parameter_policy_total_by_anchor[anchor]),
+            int(routed_parameter_policy_review_by_anchor[anchor]),
+        )
+        routed_parameter_policy_summary.update(
+            {
+                "accepted": int(routed_parameter_policy_accept_by_anchor[anchor]),
+                "reviewed": int(routed_parameter_policy_review_by_anchor[anchor]),
+                "accept_rate": float(
+                    routed_parameter_policy_accept_by_anchor[anchor]
+                    / routed_parameter_policy_total_by_anchor[anchor]
+                )
+                if routed_parameter_policy_total_by_anchor[anchor]
+                else 0.0,
+                "review_rate": float(
+                    routed_parameter_policy_review_by_anchor[anchor]
+                    / routed_parameter_policy_total_by_anchor[anchor]
+                )
+                if routed_parameter_policy_total_by_anchor[anchor]
+                else 0.0,
+                "review_reasons": {
+                    key.split("|", 1)[1]: int(value)
+                    for key, value in sorted(routed_parameter_policy_review_reason_by_anchor.items())
+                    if key.startswith(f"{anchor}|")
+                },
+            }
+        )
         by_anchor[anchor] = {
             "model": summarize(errors_by_anchor[anchor], total, int(missing_by_anchor[anchor])),
             "model_family_prior": summarize(family_prior_errors_by_anchor[anchor], total, int(missing_by_anchor[anchor])),
@@ -4771,6 +4947,7 @@ def evaluate_models(
             "model_routed_slot_exact_safe_params": routed_slot_exact_summary,
             "model_routed_boundary_slot_exact_params": routed_boundary_slot_exact_summary,
             "model_routed_local_hardfail_gate_params": routed_local_gate_summary,
+            "model_routed_parameter_policy_params": routed_parameter_policy_summary,
             "model_offset_gap_from_preutterance": summarize(
                 offset_gap_model_errors_by_anchor[anchor],
                 total,
@@ -4857,6 +5034,11 @@ def evaluate_models(
     )[:200]
     worst_routed_local_gate_examples = sorted(
         worst_routed_local_gate,
+        key=lambda item: float(item.get("error_ms", 0.0)),
+        reverse=True,
+    )[:200]
+    worst_routed_parameter_policy_examples = sorted(
+        worst_routed_parameter_policy,
         key=lambda item: float(item.get("error_ms", 0.0)),
         reverse=True,
     )[:200]
@@ -4979,6 +5161,7 @@ def evaluate_models(
         "worst_routed_slot_exact_safe_params_examples": worst_routed_slot_exact_examples,
         "worst_routed_boundary_slot_exact_params_examples": worst_routed_boundary_slot_exact_examples,
         "worst_routed_local_hardfail_gate_params_examples": worst_routed_local_gate_examples,
+        "worst_routed_parameter_policy_params_examples": worst_routed_parameter_policy_examples,
         "worst_vowel_island_lattice_examples": worst_vowel_island_examples,
         "worst_vowel_island_gated_accept_examples": worst_vowel_island_gated_examples,
         "failure_breakdown": _summarize_failure_breakdown(failure_breakdown_records),
@@ -4996,6 +5179,7 @@ def evaluate_models(
             "routed_slot_exact_safe_params": _profile_worst_examples(worst_routed_slot_exact_examples),
             "routed_boundary_slot_exact_params": _profile_worst_examples(worst_routed_boundary_slot_exact_examples),
             "routed_local_hardfail_gate_params": _profile_worst_examples(worst_routed_local_gate_examples),
+            "routed_parameter_policy_params": _profile_worst_examples(worst_routed_parameter_policy_examples),
             "vowel_island_lattice": _profile_worst_examples(worst_vowel_island_examples),
             "vowel_island_gated_accept": _profile_worst_examples(worst_vowel_island_gated_examples),
         },
