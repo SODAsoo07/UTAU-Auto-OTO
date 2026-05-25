@@ -11,6 +11,11 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from core.generation.common.validation_diagnostics import (
+    adapter_warning_validation_metrics,
+    runtime_metadata_validation_metrics,
+)
+from core.generation.common.validation_splitter import split_oto_file
 from core.mfa_free_oto.manifest_audit import infer_filename_phone_sequence
 from core.mfa_free_oto.oto_adapter import (
     OtoAdapterConfig,
@@ -22,6 +27,7 @@ from core.mfa_free_oto.oto_adapter import (
     expected_slots_for_template_rows,
     load_oto_template_rows,
 )
+from core.mfa_free_oto.row_plan import build_filename_template_rows
 from core.mfa_free_oto.review_overlay import write_review_html
 from core.mfa_free_oto.runtime_inference import RuntimePrediction, predict_wav
 
@@ -30,13 +36,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run MFA-free OTO checkpoint inference and write preview oto.ini/anchor JSON/review overlays."
     )
-    parser.add_argument("--checkpoint", required=True, help="MFA-free OTO PoC checkpoint.")
+    parser.add_argument(
+        "--checkpoint",
+        default="",
+        help="Optional MFA-free OTO checkpoint. When omitted, uses the rule-based acoustic fallback.",
+    )
     parser.add_argument("--wav-dir", help="Directory containing WAV files.")
     parser.add_argument("--wav", action="append", help="Single WAV path. May be passed multiple times.")
     parser.add_argument("--source-oto", help="Existing/template oto.ini for template-preserve mode.")
     parser.add_argument("--out-oto", required=True, help="Preview oto.ini output.")
     parser.add_argument("--out-json", required=True, help="Anchor/adaptation JSON output.")
     parser.add_argument("--overlay-dir", help="Optional directory for one HTML review overlay per WAV.")
+    parser.add_argument("--review-out-dir", help="Optional directory for validation split outputs.")
+    parser.add_argument("--review-name", default="", help="Optional stem for validation split files.")
     parser.add_argument("--mode", choices=("template-preserve", "bootstrap"), help="Defaults to template-preserve when --source-oto is set, otherwise bootstrap.")
     parser.add_argument("--language", default="japanese")
     parser.add_argument("--format-type", default="CV")
@@ -70,13 +82,24 @@ def main() -> int:
 
     out_lines: list[str] = []
     records: list[dict] = []
+    durations_by_wav: dict[str, float] = {}
+    review_row_diagnostics: dict[int, dict[str, object]] = {}
     overlay_dir = Path(args.overlay_dir) if args.overlay_dir else None
     if overlay_dir:
         overlay_dir.mkdir(parents=True, exist_ok=True)
 
     for wav_path in targets:
-        expected_phones = infer_filename_phone_sequence(wav_path.name)
-        template_rows = template_by_wav.get(wav_path.name.lower()) or []
+        row_plan_records = []
+        if args.source_oto:
+            expected_phones = infer_filename_phone_sequence(wav_path.name)
+            template_rows = template_by_wav.get(wav_path.name.lower()) or []
+        else:
+            template_rows, row_plan_phones, row_plan_records = build_filename_template_rows(
+                wav_path.name,
+                language=args.language,
+                format_type=args.format_type,
+            )
+            expected_phones = list(row_plan_phones or infer_filename_phone_sequence(wav_path.name))
         expected_slots = expected_slots_for_template_rows(template_rows, expected_phones) if template_rows else None
         prediction = predict_wav(
             wav_path,
@@ -90,8 +113,9 @@ def main() -> int:
         event_source = _slot_events_for_oto(prediction)
         anchors = anchors_from_prediction(prediction.posterior, event_source)
         file_duration_ms = _duration_ms(wav_path)
+        durations_by_wav[wav_path.name] = file_duration_ms
         adapted = []
-        if mode == "template-preserve" and template_rows:
+        if template_rows:
             row_anchors = assign_template_row_anchors(
                 prediction.posterior,
                 event_source,
@@ -126,8 +150,17 @@ def main() -> int:
                     ),
                 )
             )
-        out_lines.extend(row.format_line() for row in adapted)
         generated_rows_json = [row.to_json_dict() for row in adapted]
+        line_base = len(out_lines)
+        out_lines.extend(row.format_line() for row in adapted)
+        runtime_diagnostics = runtime_metadata_validation_metrics(prediction.posterior.metadata)
+        for local_index, row_json in enumerate(generated_rows_json):
+            diagnostics = {
+                **runtime_diagnostics,
+                **adapter_warning_validation_metrics(row_json),
+            }
+            if diagnostics:
+                review_row_diagnostics[line_base + local_index] = diagnostics
         assigned_anchor_events = _assigned_anchor_events(generated_rows_json)
         record = {
             "wav": wav_path.name,
@@ -159,6 +192,8 @@ def main() -> int:
             "assigned_anchors": assigned_anchor_events,
             "generated_oto_rows": generated_rows_json,
         }
+        if row_plan_records:
+            record["row_plan"] = [row.to_json_dict() for row in row_plan_records]
         records.append(record)
         if overlay_dir:
             _write_overlay(overlay_dir, wav_path, expected_phones, prediction, record)
@@ -181,7 +216,53 @@ def main() -> int:
         ),
         encoding="utf-8",
     )
-    print(json.dumps({"wav_count": len(targets), "oto_rows": len(out_lines), "out_oto": args.out_oto, "out_json": args.out_json}, ensure_ascii=False, indent=2))
+    split_payload: dict[str, object] = {}
+    if args.review_out_dir:
+        review_name = str(args.review_name or Path(args.out_oto).stem or "preview").strip() or "preview"
+        split = split_oto_file(
+            args.out_oto,
+            args.review_out_dir,
+            name=review_name,
+            language=args.language,
+            wav_root=str(args.wav_dir or ""),
+            wav_durations_ms=durations_by_wav,
+            row_diagnostics=review_row_diagnostics,
+            session_metadata={
+                "created_by": "predict_oto_preview",
+                "pipeline": "ui_preview",
+                "checkpoint": str(args.checkpoint),
+                "out_json": str(args.out_json),
+                "overlay_dir": str(args.overlay_dir or ""),
+                "mode": mode,
+                "language": args.language,
+                "format_type": args.format_type,
+                "alias_type": args.alias_type,
+                "source_oto": str(args.source_oto or ""),
+                "source_timing_trusted": False,
+                "wav_dir": str(args.wav_dir or ""),
+                "wav_count": len(targets),
+                "oto_rows": len(out_lines),
+            },
+        )
+        split_payload = {
+            "review_split_counts": dict(split.counts),
+            "review_split_output_paths": dict(split.output_paths),
+            "review_summary_path": str(split.output_paths.get("summary", "")),
+            "review_session_path": str(split.output_paths.get("review_session", "")),
+        }
+    print(
+        json.dumps(
+            {
+                "wav_count": len(targets),
+                "oto_rows": len(out_lines),
+                "out_oto": args.out_oto,
+                "out_json": args.out_json,
+                **split_payload,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 

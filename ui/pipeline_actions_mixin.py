@@ -150,11 +150,6 @@ class PipelineActionsMixin:
         callback=None,
     ):
         checkpoint = self._resolve_mfa_free_oto_checkpoint()
-        if not checkpoint:
-            raise RuntimeError(
-                "MFA-Free OTO checkpoint를 찾지 못했습니다. "
-                "UTOA_MFA_FREE_OTO_CHECKPOINT 또는 ml_workspace/mfa_free_oto 아래의 wavlm *.pt를 지정해 주세요."
-            )
         base_dir = (
             str(getattr(self, "writable_data_dir", "") or "").strip()
             or str(getattr(self, "app_data_dir", "") or "").strip()
@@ -173,8 +168,6 @@ class PipelineActionsMixin:
             sys.executable or "python",
             "-m",
             "ml.scripts.mfa_free_oto.predict_oto_preview",
-            "--checkpoint",
-            checkpoint,
             "--wav-dir",
             os.path.abspath(wav_dir),
             "--out-oto",
@@ -183,11 +176,17 @@ class PipelineActionsMixin:
             anchor_json,
             "--overlay-dir",
             overlay_dir,
+            "--review-out-dir",
+            preview_dir,
+            "--review-name",
+            bank_name,
             "--language",
             language,
             "--format-type",
             format_type,
         ]
+        if checkpoint:
+            cmd.extend(["--checkpoint", checkpoint])
         if source_oto_path and os.path.isfile(source_oto_path):
             cmd.extend(["--source-oto", os.path.abspath(source_oto_path), "--mode", "template-preserve"])
         else:
@@ -206,7 +205,10 @@ class PipelineActionsMixin:
                 callback("[MFA-Free OTO] progress 0/1")
             except Exception:
                 pass
-        self._append_log(f"[MFA-Free OTO] checkpoint: {checkpoint}")
+        if checkpoint:
+            self._append_log(f"[MFA-Free OTO] checkpoint: {checkpoint}")
+        else:
+            self._append_log("[MFA-Free OTO] checkpoint: none; using rule-based acoustic fallback")
         self._append_log(f"[MFA-Free OTO] preview artifacts: {preview_dir}")
         pretty = " ".join(f'"{part}"' if (" " in str(part) or "\t" in str(part)) else str(part) for part in cmd)
         self._append_log(f"[MFA-Free OTO] 실행: {pretty}")
@@ -217,17 +219,22 @@ class PipelineActionsMixin:
             stderr=sp.STDOUT,
             text=False,
         )
+        stdout_lines = []
         for line in self._iter_decoded_stdout_lines(proc):
+            stdout_lines.append(line)
             self._append_log(f"[MFA-Free OTO] {line}")
         proc.wait()
         if int(proc.returncode) != 0:
             return 0, 0, [f"MFA-Free OTO preview failed (code={int(proc.returncode)})"]
+        preview_summary = self._parse_mfa_free_preview_summary(stdout_lines)
         row_count = 0
         try:
             with open(out_path, "r", encoding="utf-8-sig") as handle:
                 row_count = sum(1 for line in handle if line.strip() and "=" in line)
         except Exception:
             row_count = 0
+        if isinstance(preview_summary, dict):
+            row_count = int(preview_summary.get("oto_rows") or row_count or 0)
         if callback:
             try:
                 callback(f"[MFA-Free OTO] progress {row_count}/{row_count or 1}")
@@ -236,7 +243,50 @@ class PipelineActionsMixin:
         self._append_log(f"[MFA-Free OTO] preview oto: {os.path.abspath(out_path)}")
         self._append_log(f"[MFA-Free OTO] anchors: {anchor_json}")
         self._append_log(f"[MFA-Free OTO] overlays: {overlay_dir}")
+        self._append_log(f"[MFA-Free OTO] review split: {preview_dir}")
+        self._log_mfa_free_preview_split_summary(preview_summary)
         return row_count, row_count, []
+
+    def _parse_mfa_free_preview_summary(self, stdout_lines):
+        text = "\n".join(str(line or "") for line in (stdout_lines or []) if str(line or "").strip())
+        if not text:
+            return {}
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            return {}
+        try:
+            payload = json.loads(text[start : end + 1])
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _log_mfa_free_preview_split_summary(self, payload):
+        if not isinstance(payload, dict):
+            return
+        counts = payload.get("review_split_counts")
+        if isinstance(counts, dict) and counts:
+            self._append_log(
+                "[MFA-Free OTO] review split counts: "
+                f"fix_required={int(counts.get('fix_required') or 0)}, "
+                f"attention_only={int(counts.get('attention_only') or 0)}, "
+                f"clean={int(counts.get('clean') or 0)}, "
+                f"total={int(counts.get('total') or 0)}"
+            )
+        paths = payload.get("review_split_output_paths")
+        if isinstance(paths, dict) and paths:
+            for key in (
+                "fix_required",
+                "attention_only",
+                "clean",
+                "review_all",
+                "validation_jsonl",
+                "summary",
+                "review_session",
+            ):
+                value = str(paths.get(key) or "").strip()
+                if value:
+                    self._append_log(f"[MFA-Free OTO] {key}: {value}")
 
     def _run_manual_oto_anchor_preview_generation(
         self,
@@ -3014,21 +3064,24 @@ class PipelineActionsMixin:
                 if selected_no_mfa_checkpoint:
                     self._append_log(f"[No-MFA] UI checkpoint={selected_no_mfa_checkpoint}")
                 no_mfa_source_oto = ""
+                source_oto_required_for_no_mfa = no_mfa_mode_code != "mfa_free_ssl_slot"
                 if no_mfa_auto_mode:
-                    if bool(self.no_base_oto_var.get()):
+                    if source_oto_required_for_no_mfa and bool(self.no_base_oto_var.get()):
                         self._append_log("❌ No-MFA 자동설정 모드에서는 베이스 OTO(템플릿 ini)가 필요합니다.")
                         self._set_status("❌ 베이스 OTO 필요")
                         return
-                    no_mfa_source_oto = resolve_no_mfa_source_oto(
-                        wav_dir=wav_dir,
-                        source_hint=tpl_path_preflight,
-                    )
-                    if not no_mfa_source_oto:
+                    if source_oto_required_for_no_mfa or not bool(self.no_base_oto_var.get()):
+                        no_mfa_source_oto = resolve_no_mfa_source_oto(
+                            wav_dir=wav_dir,
+                            source_hint=tpl_path_preflight,
+                        )
+                    if source_oto_required_for_no_mfa and not no_mfa_source_oto:
                         self._append_log("❌ No-MFA 자동설정용 베이스 OTO를 찾지 못했습니다.")
                         self._append_log("   템플릿 OTO 경로에 baseoto.ini 또는 oto.ini를 지정해 주세요.")
                         self._set_status("❌ 베이스 OTO 필요")
                         return
-                    tpl_path_preflight = no_mfa_source_oto
+                    if no_mfa_source_oto:
+                        tpl_path_preflight = no_mfa_source_oto
 
                 if lang == "english":
                     if not getattr(self, "_is_preview_channel", lambda: False)():
@@ -3247,6 +3300,7 @@ class PipelineActionsMixin:
                     aligner=self.aligner_var.get(),
                     textgrid_dir=textgrid_dir,
                     tpl_path=tpl_path_preflight,
+                    no_mfa_oto_mode=no_mfa_mode_code,
                     no_base_oto=bool(self.no_base_oto_var.get()),
                     custom_phonemes_path=custom_phonemes_path,
                     require_output=False,
@@ -3267,7 +3321,10 @@ class PipelineActionsMixin:
                     if has_textgrid:
                         self._append_log("ℹ TextGrid가 있어도 No-MFA 선택 시에는 선택한 No-MFA 생성 방식으로 진행합니다.")
                     self._append_log(f"ℹ No-MFA 생성 방식: {no_mfa_mode_text}")
-                    self._append_log(f"[No-MFA] base oto: {no_mfa_source_oto}")
+                    if no_mfa_source_oto:
+                        self._append_log(f"[No-MFA] base oto: {no_mfa_source_oto}")
+                    else:
+                        self._append_log("[No-MFA/MFA-Free] source oto not used; filename row plan will be used.")
                     _set_stage_progress("lab", 1.0)
                     _set_stage_progress("dict", 1.0)
                     _set_stage_progress("align", 1.0)

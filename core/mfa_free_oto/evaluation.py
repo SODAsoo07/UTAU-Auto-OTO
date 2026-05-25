@@ -7,7 +7,7 @@ from typing import Sequence
 import numpy as np
 
 from .decode import decode_monotonic_events
-from .features import extract_features
+from .features import extract_features, feature_timebase_metadata
 from .manifest import load_manifest_jsonl
 from .metrics import boundary_error_metrics, frame_classification_metrics, gate_report, row_failure_metrics
 from .model import MfaFreeFrameModelConfig, build_frame_model
@@ -56,7 +56,7 @@ def predict_row_posterior(
         class_probs={label: frame_probs[:, idx].astype(float).tolist() for idx, label in enumerate(FRAME_LABELS)},
         event_scores={label: event_scores[:, idx].astype(float).tolist() for idx, label in enumerate(EVENT_LABELS)},
         acoustic_scores={key: value.astype(float).tolist() for key, value in batch.acoustic_scores.items()},
-        metadata={"encoder": encoder_name},
+        metadata={"encoder": encoder_name, **feature_timebase_metadata(batch)},
     )
 
 
@@ -103,7 +103,7 @@ def evaluate_manifest(
                 class_probs={label: frame_probs[:, idx].astype(float).tolist() for idx, label in enumerate(FRAME_LABELS)},
                 event_scores={label: event_scores[:, idx].astype(float).tolist() for idx, label in enumerate(EVENT_LABELS)},
                 acoustic_scores={key: value.astype(float).tolist() for key, value in batch.acoustic_scores.items()},
-                metadata={"encoder": encoder_name},
+                metadata={"encoder": encoder_name, **feature_timebase_metadata(batch)},
             )
             expected_phones = _expected_phones(row)
             slot_result = assign_slots_viterbi(posterior, expected_phones=expected_phones) if use_slot_viterbi and expected_phones else None

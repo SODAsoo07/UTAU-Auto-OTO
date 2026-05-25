@@ -10,14 +10,36 @@ def read_text_with_fallback(path: str) -> str:
             raw = f.read()
     except Exception:
         return ""
-    for enc in ("utf-8-sig", "cp932", "utf-8", "euc-kr", "latin-1"):
+    for enc in ("utf-8-sig", "utf-8"):
         try:
             text = raw.decode(enc)
             if "=" in text:
                 return text
         except Exception:
             continue
+    candidates: list[tuple[float, str]] = []
+    for enc in ("cp932", "cp949", "euc-kr", "latin-1"):
+        try:
+            text = raw.decode(enc, errors="replace")
+        except Exception:
+            continue
+        if "=" not in text:
+            continue
+        candidates.append((_decoded_text_score(text), text))
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
     return raw.decode("utf-8", errors="replace")
+
+
+def _decoded_text_score(text: str) -> float:
+    replacements = text.count("\ufffd")
+    c1_controls = sum(1 for char in text if 0x80 <= ord(char) <= 0x9F)
+    japanese = sum(1 for char in text if 0x3040 <= ord(char) <= 0x30FF or 0x4E00 <= ord(char) <= 0x9FFF)
+    hangul = sum(1 for char in text if 0xAC00 <= ord(char) <= 0xD7AF or 0x3130 <= ord(char) <= 0x318F)
+    line_markers = text.count("=") + text.count(",")
+    return float(line_markers) + (0.8 * float(japanese)) + (0.4 * float(hangul)) - (40.0 * float(replacements)) - (
+        8.0 * float(c1_controls)
+    )
 
 
 def parse_oto_line(

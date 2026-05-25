@@ -249,6 +249,12 @@
                         "note":  "Diff two oto.ini files row-by-row matched by wav and alias."
                     },
                     {
+                        "path":  "scripts/dev/mfa_free_oto_review.py",
+                        "status":  "active",
+                        "owner":  "pipeline",
+                        "note":  "Generate/split/merge MFA-free OTO review files, compare baseline vs HSMM outputs, replay HSMM diagnostics/timeline/diagnostic OTO review splits/reference comparisons from evidence, record quality evidence reports with required manual-reference/listening proof artifacts, evaluate artifact safety/default-on gates, and dry-run/install gated final.ini with backup/hash guards."
+                    },
+                    {
                         "path":  "scripts/dev/dump_phoneme_boundary_failures.py",
                         "status":  "active",
                         "owner":  "ml",

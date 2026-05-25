@@ -48,6 +48,7 @@ def validate_runtime_preflight(
     aligner: str,
     textgrid_dir: str,
     tpl_path: str = "",
+    no_mfa_oto_mode: str = "",
     no_base_oto: bool = False,
     custom_phonemes_path: str = "",
     require_output: bool = False,
@@ -61,6 +62,7 @@ def validate_runtime_preflight(
     align_name = normalize_aligner_name(aligner, default="mfa")
     tg_dir = str(textgrid_dir or "").strip()
     template_path = str(tpl_path or "").strip()
+    no_mfa_mode = _normalize_no_mfa_oto_mode(no_mfa_oto_mode)
     custom_path = str(custom_phonemes_path or "").strip()
 
     if (not wav_path) or (not os.path.isdir(wav_path)):
@@ -72,8 +74,9 @@ def validate_runtime_preflight(
         warnings.append(_issue("PRE_OUTPUT_PATH_MISSING", "출력 경로가 없어 OTO 생성 단계는 건너뜁니다.", level="warning"))
 
     no_mfa_without_textgrid = align_name == "none" and (not has_textgrid_files(tg_dir))
+    source_oto_optional_no_mfa = no_mfa_mode == "mfa_free_ssl_slot"
     template_checked_in_no_mfa_path = False
-    if no_mfa_without_textgrid:
+    if no_mfa_without_textgrid and not source_oto_optional_no_mfa:
         errors.append(
             _issue(
                 "PRE_TEXTGRID_REQUIRED",
@@ -113,6 +116,7 @@ def validate_runtime_preflight(
 
     if (
         (not no_base_oto)
+        and (not source_oto_optional_no_mfa)
         and template_path
         and (not os.path.exists(template_path))
         and (not template_checked_in_no_mfa_path)
@@ -133,6 +137,7 @@ def collect_runtime_preflight_issue_records(
     aligner: str,
     textgrid_dir: str,
     tpl_path: str = "",
+    no_mfa_oto_mode: str = "",
     no_base_oto: bool = False,
     custom_phonemes_path: str = "",
     require_output: bool = False,
@@ -144,6 +149,7 @@ def collect_runtime_preflight_issue_records(
         aligner=aligner,
         textgrid_dir=textgrid_dir,
         tpl_path=tpl_path,
+        no_mfa_oto_mode=no_mfa_oto_mode,
         no_base_oto=no_base_oto,
         custom_phonemes_path=custom_phonemes_path,
         require_output=require_output,
@@ -158,6 +164,7 @@ def collect_runtime_preflight_issues(
     aligner: str,
     textgrid_dir: str,
     tpl_path: str = "",
+    no_mfa_oto_mode: str = "",
     no_base_oto: bool = False,
     custom_phonemes_path: str = "",
     require_output: bool = False,
@@ -169,11 +176,23 @@ def collect_runtime_preflight_issues(
         aligner=aligner,
         textgrid_dir=textgrid_dir,
         tpl_path=tpl_path,
+        no_mfa_oto_mode=no_mfa_oto_mode,
         no_base_oto=no_base_oto,
         custom_phonemes_path=custom_phonemes_path,
         require_output=require_output,
     )
     return build_preflight_issue_payload(records)
+
+
+def _normalize_no_mfa_oto_mode(value: object) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_")
+    if raw in {"mfa_free", "ssl_slot", "mfa_free_ssl_slot"}:
+        return "mfa_free_ssl_slot"
+    if raw in {"manual_oto_anchor", "manual_anchor", "manual_oto_anchor_scorer"}:
+        return "manual_oto_anchor"
+    if raw in {"remap", "base_remap", "base", "crnn", "oto_crnn"}:
+        return "remap"
+    return ""
 
 
 def validate_batch_case_settings_records(case_info: Dict[str, object]) -> Dict[str, List[Dict[str, str]]]:

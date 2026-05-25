@@ -335,6 +335,11 @@ class OtoActionsMixin:
                         aligner=self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA",
                         textgrid_dir=preflight_tg_folder,
                         tpl_path=preflight_tpl_path,
+                        no_mfa_oto_mode=(
+                            self._get_no_mfa_oto_mode_code()
+                            if hasattr(self, "_get_no_mfa_oto_mode_code")
+                            else ""
+                        ),
                         no_base_oto=bool(self.no_base_oto_var.get()),
                         custom_phonemes_path=self.custom_phoneme_var.get().strip(),
                         require_output=True,
@@ -491,26 +496,32 @@ class OtoActionsMixin:
                     if selected_no_mfa_checkpoint:
                         self._append_log(f"[No-MFA] UI checkpoint={selected_no_mfa_checkpoint}")
                     no_mfa_source_oto = ""
+                    source_oto_required_for_no_mfa = no_mfa_mode_code != "mfa_free_ssl_slot"
                     if no_mfa_auto_mode:
-                        if bool(self.no_base_oto_var.get()):
+                        if source_oto_required_for_no_mfa and bool(self.no_base_oto_var.get()):
                             self._append_log(f"{prefix}오류: No-MFA 자동설정 모드에서는 베이스 OTO(템플릿 ini)가 필요합니다.")
                             self._set_status("오류: 베이스 OTO 필요")
                             return False, False, 0, 0
-                        no_mfa_source_oto = resolve_no_mfa_source_oto(
-                            wav_dir=target_wav_dir,
-                            source_hint=tpl_path,
-                        )
-                        if not no_mfa_source_oto:
+                        if source_oto_required_for_no_mfa or not bool(self.no_base_oto_var.get()):
+                            no_mfa_source_oto = resolve_no_mfa_source_oto(
+                                wav_dir=target_wav_dir,
+                                source_hint=tpl_path,
+                            )
+                        if source_oto_required_for_no_mfa and not no_mfa_source_oto:
                             self._append_log(f"{prefix}오류: No-MFA 자동설정용 베이스 OTO를 찾지 못했습니다.")
                             self._append_log("   템플릿 OTO 경로에 baseoto.ini 또는 oto.ini를 지정해 주세요.")
                             self._set_status("오류: 베이스 OTO 필요")
                             return False, False, 0, 0
-                        tpl_path = no_mfa_source_oto
+                        if no_mfa_source_oto:
+                            tpl_path = no_mfa_source_oto
                         self._append_log("ℹ No-MFA 모드: 선택한 생성 방식으로 OTO를 생성합니다.")
                         if has_textgrid:
                             self._append_log(f"{prefix}ℹ TextGrid가 있어도 No-MFA 선택 시에는 선택한 No-MFA 생성 방식으로 진행합니다.")
                         self._append_log(f"ℹ No-MFA 생성 방식: {no_mfa_mode_text}")
-                        self._append_log(f"[No-MFA] base oto: {no_mfa_source_oto}")
+                        if no_mfa_source_oto:
+                            self._append_log(f"[No-MFA] base oto: {no_mfa_source_oto}")
+                        else:
+                            self._append_log("[No-MFA/MFA-Free] source oto not used; filename row plan will be used.")
                     elif lang != "english" and selected_format not in {"cmpx", "c_plus_v"} and not has_textgrid:
                         self._append_log(f"{prefix}경고: textgrids 폴더가 없습니다. 3단계 정렬/라벨 생성을 먼저 실행하세요.")
 
@@ -525,6 +536,7 @@ class OtoActionsMixin:
                             aligner=self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA",
                             textgrid_dir=tg_folder,
                             tpl_path=tpl_path,
+                            no_mfa_oto_mode=no_mfa_mode_code,
                             no_base_oto=bool(self.no_base_oto_var.get()),
                             custom_phonemes_path=custom_phonemes_path,
                             require_output=True,
@@ -664,7 +676,7 @@ class OtoActionsMixin:
                             processed, total, errors = self._run_manual_oto_anchor_preview_generation(
                                 wav_dir=target_wav_dir,
                                 out_path=target_out_path,
-                                source_oto_path=no_mfa_source_oto or tpl_path,
+                                source_oto_path=no_mfa_source_oto,
                                 language=lang,
                                 format_type=selected_format,
                                 callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),

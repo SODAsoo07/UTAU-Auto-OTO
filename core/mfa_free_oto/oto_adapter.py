@@ -15,6 +15,21 @@ from .slot_viterbi import ExpectedSlot
 from .types import DecodedEvent, FramePosterior, is_vowel_phone
 
 
+TIMING_CLAMP_LARGE_DELTA_MS = 12.0
+JAPANESE_VCV_CUTOFF_TRIM_CAP_MS = 650.0
+KOREAN_VCV_CUTOFF_TRIM_CAP_MS = 1100.0
+JAPANESE_VCV_BOOTSTRAP_PROFILE = {
+    "cv_head": (82.0, 53.0, 78.0),
+    "vcv": (150.0, 100.0, 100.0),
+    "vv": (150.0, 100.0, 100.0),
+}
+KOREAN_VCV_BOOTSTRAP_PROFILE = {
+    "cv_head": (76.0, 55.0, 104.0),
+    "vcv": (300.0, 220.0, 150.0),
+    "vv": (360.0, 260.0, 145.0),
+}
+
+
 @dataclass(frozen=True)
 class OtoTiming:
     offset: float
@@ -33,6 +48,7 @@ class OtoTemplateRow:
     alias: str
     timing: OtoTiming
     raw_line: str = ""
+    source_row_index: int = -1
 
 
 @dataclass(frozen=True)
@@ -41,6 +57,10 @@ class OtoAnchor:
     score: float = 1.0
     role: str = "cv_boundary"
     frame_index: int | None = None
+    refined_from_abs_ms: float | None = None
+    local_refine_delta_ms: float | None = None
+    local_refine_margin: float | None = None
+    local_refine_window_ms: float | None = None
     vowel_nucleus_abs_ms: float | None = None
     vowel_start_abs_ms: float | None = None
     vowel_end_abs_ms: float | None = None
@@ -114,6 +134,10 @@ class AdaptedOtoRow:
                 "score": self.anchor.score,
                 "role": self.anchor.role,
                 "frame_index": self.anchor.frame_index,
+                "refined_from_abs_ms": self.anchor.refined_from_abs_ms,
+                "local_refine_delta_ms": self.anchor.local_refine_delta_ms,
+                "local_refine_margin": self.anchor.local_refine_margin,
+                "local_refine_window_ms": self.anchor.local_refine_window_ms,
                 "vowel_nucleus_abs_ms": self.anchor.vowel_nucleus_abs_ms,
                 "vowel_start_abs_ms": self.anchor.vowel_start_abs_ms,
                 "vowel_end_abs_ms": self.anchor.vowel_end_abs_ms,
@@ -132,8 +156,8 @@ class AdaptedOtoRow:
 
 def load_oto_template_rows(path: str | Path) -> list[OtoTemplateRow]:
     rows: list[OtoTemplateRow] = []
-    for line in read_text_with_fallback(str(path)).splitlines():
-        row = parse_template_oto_line(line)
+    for line_index, line in enumerate(read_text_with_fallback(str(path)).splitlines()):
+        row = parse_template_oto_line(line, source_row_index=line_index)
         if row is not None:
             rows.append(row)
     return rows
@@ -156,7 +180,7 @@ def load_oto_template_rows_alias_only(path: str | Path) -> list[OtoTemplateRow]:
     ]
 
 
-def parse_template_oto_line(line: str) -> OtoTemplateRow | None:
+def parse_template_oto_line(line: str, *, source_row_index: int = -1) -> OtoTemplateRow | None:
     parsed = parse_oto_line(line)
     if not parsed:
         return None
@@ -171,6 +195,7 @@ def parse_template_oto_line(line: str) -> OtoTemplateRow | None:
             overlap=float(parsed["ovl"]),
         ),
         raw_line=line.rstrip("\n"),
+        source_row_index=int(source_row_index),
     )
 
 
@@ -268,14 +293,16 @@ def adapt_template_row(
     if profile is None:
         timing = _direct_anchor_shift(row.timing, anchor.anchor_abs_ms)
         warnings.append("profile_missing_direct_anchor")
+    timing, timing_warnings = _validate_timing_with_warnings(timing, file_duration_ms=file_duration_ms)
+    warnings.extend(timing_warnings)
     return AdaptedOtoRow(
         wav=row.wav,
         alias=row.alias,
-        timing=_validate_timing(timing, file_duration_ms=file_duration_ms),
+        timing=timing,
         source_timing=row.timing,
         anchor=anchor,
         mode="template-preserve",
-        warnings=tuple(warnings),
+        warnings=tuple(dict.fromkeys(warnings)),
         applied_rules=tuple(result.applied_rules),
     )
 
@@ -289,15 +316,25 @@ def bootstrap_row(
     config: OtoAdapterConfig | None = None,
 ) -> AdaptedOtoRow:
     cfg = config or OtoAdapterConfig(mode="bootstrap")
+    alias_type = _alias_type_for_row(alias, cfg.alias_type)
+    pre_target_ms, ovl_gap_ms, cons_gap_ms = _bootstrap_role_profile(cfg, alias_type)
     if anchor is None:
-        timing = _validate_timing(
-            OtoTiming(0.0, cfg.pre_target_ms + cfg.cons_gap_ms, -max(180.0, file_duration_ms), cfg.pre_target_ms, max(0.0, cfg.pre_target_ms - cfg.ovl_gap_ms)),
+        timing, timing_warnings = _validate_timing_with_warnings(
+            OtoTiming(0.0, pre_target_ms + cons_gap_ms, -max(180.0, file_duration_ms), pre_target_ms, max(0.0, pre_target_ms - ovl_gap_ms)),
             file_duration_ms=file_duration_ms,
         )
-        return AdaptedOtoRow(wav=wav, alias=alias, timing=timing, source_timing=None, anchor=None, mode="bootstrap", warnings=("missing_anchor",))
+        return AdaptedOtoRow(
+            wav=wav,
+            alias=alias,
+            timing=timing,
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+            warnings=tuple(dict.fromkeys(("missing_anchor", *timing_warnings))),
+        )
 
     anchor_abs = _clamp(anchor.anchor_abs_ms, 0.0, file_duration_ms)
-    alias_type = _alias_type_for_row(alias, cfg.alias_type)
+    anchor_warnings = list(anchor.warnings)
     if alias_type == "v":
         nucleus_abs = _clamp(anchor.vowel_nucleus_abs_ms if anchor.vowel_nucleus_abs_ms is not None else anchor_abs, 0.0, file_duration_ms)
         vowel_start = _clamp(
@@ -316,8 +353,15 @@ def bootstrap_row(
         offset = max(nucleus_abs - pre, 0.0)
         overlap = max(0.0, pre - max(18.0, left_span * 0.72))
         consonant = pre + max(24.0, right_span * max(0.35, min(1.0, cfg.vowel_nucleus_right_ratio)))
-        cutoff = -(max(consonant + 8.0, (vowel_end - offset) + cfg.tail_margin_ms))
-        timing = _validate_timing(
+        cutoff_trim, cutoff_warnings = _bootstrap_cutoff_trim_ms(
+            cfg,
+            "v",
+            max(consonant + 8.0, (vowel_end - offset) + cfg.tail_margin_ms),
+            min_trim_ms=consonant + 8.0,
+            file_duration_ms=file_duration_ms,
+        )
+        cutoff = -cutoff_trim
+        timing, timing_warnings = _validate_timing_with_warnings(
             OtoTiming(offset=offset, consonant=consonant, cutoff=cutoff, preutterance=pre, overlap=overlap),
             file_duration_ms=file_duration_ms,
         )
@@ -328,12 +372,16 @@ def bootstrap_row(
             source_timing=None,
             anchor=anchor,
             mode="bootstrap",
-            warnings=anchor.warnings,
+            warnings=tuple(dict.fromkeys((*anchor.warnings, *cutoff_warnings, *timing_warnings))),
         )
     elif alias_type == "vcv":
         prev_end = anchor.previous_vowel_end_abs_ms
         if prev_end is None:
             prev_end = max(0.0, anchor_abs - cfg.pre_target_ms)
+        max_prev_end = max(0.0, anchor_abs - max(24.0, cfg.pre_target_ms))
+        if float(prev_end) > max_prev_end:
+            anchor_warnings.append(f"vcv_previous_vowel_end_clamped:{float(prev_end):.1f}->{max_prev_end:.1f}")
+            prev_end = max_prev_end
         offset = max(float(prev_end) - cfg.previous_tail_keep_ms, 0.0)
     elif alias_type == "vc":
         offset = max(anchor_abs - (cfg.pre_target_ms * 0.75), 0.0)
@@ -343,15 +391,27 @@ def bootstrap_row(
     if alias_type == "vc":
         pre = min(pre, max(12.0, float(cfg.vc_pre_max_ms)))
         offset = max(anchor_abs - pre, 0.0)
-    overlap = max(0.0, pre - cfg.ovl_gap_ms)
-    consonant = pre + cfg.cons_gap_ms
+    elif alias_type in {"cv_head", "vcv", "vv"}:
+        target_pre = min(float(pre_target_ms), anchor_abs)
+        offset = max(anchor_abs - target_pre, 0.0)
+        pre = max(anchor_abs - offset, 0.0)
+    overlap = max(0.0, pre - ovl_gap_ms)
+    consonant = pre + cons_gap_ms
+    cutoff_warnings: tuple[str, ...] = ()
     if alias_type == "vc":
         cut_gap = _role_cut_gap_ms(cfg, alias_type)
         cutoff = -(max(consonant + 8.0, consonant + cut_gap))
     else:
         vowel_end = anchor.vowel_end_abs_ms if anchor.vowel_end_abs_ms is not None else min(file_duration_ms, anchor_abs + 180.0)
-        cutoff = -(max(consonant + 8.0, float(vowel_end) - offset + cfg.tail_margin_ms))
-    timing = _validate_timing(
+        cutoff_trim, cutoff_warnings = _bootstrap_cutoff_trim_ms(
+            cfg,
+            alias_type,
+            max(consonant + 8.0, float(vowel_end) - offset + cfg.tail_margin_ms),
+            min_trim_ms=consonant + 8.0,
+            file_duration_ms=file_duration_ms,
+        )
+        cutoff = -cutoff_trim
+    timing, timing_warnings = _validate_timing_with_warnings(
         OtoTiming(offset=offset, consonant=consonant, cutoff=cutoff, preutterance=pre, overlap=overlap),
         file_duration_ms=file_duration_ms,
     )
@@ -362,7 +422,7 @@ def bootstrap_row(
         source_timing=None,
         anchor=anchor,
         mode="bootstrap",
-        warnings=anchor.warnings,
+        warnings=tuple(dict.fromkeys((*anchor_warnings, *cutoff_warnings, *timing_warnings))),
     )
 
 
@@ -543,7 +603,7 @@ def assign_template_row_anchors(
         out.append(chosen)
         last_time = chosen.anchor_abs_ms
         last_target_phone_index = chosen.expected_phone_index
-    return out
+    return _refine_anchor_sequence_locally(posterior, out)
 
 
 def expected_slots_for_template_rows(
@@ -805,6 +865,63 @@ def _role_cut_gap_ms(config: OtoAdapterConfig, alias_type: str) -> float:
     return max(8.0, float(config.tail_margin_ms))
 
 
+def _bootstrap_role_profile(config: OtoAdapterConfig, alias_type: str) -> tuple[float, float, float]:
+    role = str(alias_type or "").strip().lower()
+    fmt = str(config.format_type or "").strip().lower()
+    language = str(config.language or "").strip().lower()
+    if fmt == "vcv":
+        if language == "japanese" and role in JAPANESE_VCV_BOOTSTRAP_PROFILE:
+            return JAPANESE_VCV_BOOTSTRAP_PROFILE[role]
+        if language == "korean" and role in KOREAN_VCV_BOOTSTRAP_PROFILE:
+            return KOREAN_VCV_BOOTSTRAP_PROFILE[role]
+    return (
+        float(config.pre_target_ms),
+        float(config.ovl_gap_ms),
+        float(config.cons_gap_ms),
+    )
+
+
+def _bootstrap_cutoff_trim_ms(
+    config: OtoAdapterConfig,
+    alias_type: str,
+    raw_trim_ms: float,
+    *,
+    min_trim_ms: float,
+    file_duration_ms: float,
+) -> tuple[float, tuple[str, ...]]:
+    trim = max(float(min_trim_ms), float(raw_trim_ms))
+    cap = _bootstrap_cutoff_trim_cap_ms(config, alias_type, file_duration_ms=file_duration_ms)
+    if cap is None:
+        return trim, ()
+    clamped = max(float(min_trim_ms), float(cap))
+    if trim <= clamped + 1e-6:
+        return trim, ()
+    return clamped, (f"bootstrap_cutoff_tail_clamped:{trim:.1f}->{clamped:.1f}",)
+
+
+def _bootstrap_cutoff_trim_cap_ms(
+    config: OtoAdapterConfig,
+    alias_type: str,
+    *,
+    file_duration_ms: float,
+) -> float | None:
+    if str(config.format_type or "").strip().lower() != "vcv":
+        return None
+    if str(alias_type or "").strip().lower() not in {"cv_head", "vcv", "vv", "v"}:
+        return None
+    duration_cap = max(0.0, float(file_duration_ms)) * 0.35 if file_duration_ms > 0.0 else 0.0
+    language = str(config.language or "").strip().lower()
+    if language == "japanese":
+        base = JAPANESE_VCV_CUTOFF_TRIM_CAP_MS
+    elif language == "korean":
+        base = KOREAN_VCV_CUTOFF_TRIM_CAP_MS
+    else:
+        base = 900.0
+    if duration_cap > 0.0:
+        return max(240.0, min(float(base), duration_cap))
+    return float(base)
+
+
 def _direct_anchor_shift(timing: OtoTiming, anchor_abs_ms: float) -> OtoTiming:
     cons_gap = max(timing.consonant - timing.preutterance, 30.0)
     cut_gap = max(abs(timing.cutoff) - timing.consonant, 50.0)
@@ -821,14 +938,48 @@ def _direct_anchor_shift(timing: OtoTiming, anchor_abs_ms: float) -> OtoTiming:
 
 
 def _validate_timing(timing: OtoTiming, *, file_duration_ms: float) -> OtoTiming:
-    offset = max(float(timing.offset), 0.0)
-    pre = max(float(timing.preutterance), 0.0)
-    ovl = max(0.0, min(float(timing.overlap), pre))
-    consonant = max(float(timing.consonant), pre + 8.0)
-    cutoff_abs = max(abs(float(timing.cutoff)), consonant + 8.0)
+    validated, _warnings = _validate_timing_with_warnings(timing, file_duration_ms=file_duration_ms)
+    return validated
+
+
+def _validate_timing_with_warnings(timing: OtoTiming, *, file_duration_ms: float) -> tuple[OtoTiming, tuple[str, ...]]:
+    raw_offset = float(timing.offset)
+    raw_pre = float(timing.preutterance)
+    raw_overlap = float(timing.overlap)
+    raw_consonant = float(timing.consonant)
+    raw_cutoff = float(timing.cutoff)
+    raw_cutoff_abs = abs(raw_cutoff)
+
+    offset = max(raw_offset, 0.0)
+    pre = max(raw_pre, 0.0)
+    ovl = max(0.0, min(raw_overlap, pre))
+    consonant = max(raw_consonant, pre + 8.0)
+    cutoff_abs = max(raw_cutoff_abs, consonant + 8.0)
     if file_duration_ms > 0.0:
         cutoff_abs = min(max(cutoff_abs, consonant + 8.0), max(consonant + 8.0, file_duration_ms - offset + 80.0))
-    return OtoTiming(offset=offset, consonant=consonant, cutoff=-cutoff_abs, preutterance=pre, overlap=ovl)
+    validated = OtoTiming(offset=offset, consonant=consonant, cutoff=-cutoff_abs, preutterance=pre, overlap=ovl)
+
+    warnings: list[str] = []
+    deltas: list[float] = []
+    for field, raw_value, clamped_value in (
+        ("offset", raw_offset, offset),
+        ("preutterance", raw_pre, pre),
+        ("overlap", raw_overlap, ovl),
+        ("consonant", raw_consonant, consonant),
+        ("cutoff", raw_cutoff_abs, cutoff_abs),
+    ):
+        delta = abs(float(clamped_value) - float(raw_value))
+        if delta > 1e-6:
+            warnings.append(f"timing_clamped.{field}")
+            deltas.append(delta)
+    if raw_cutoff > 0.0:
+        warnings.append("timing_clamped.cutoff_sign")
+    if deltas:
+        max_delta = max(deltas)
+        warnings.append(f"timing_clamp_delta_ms:{max_delta:.1f}")
+        if max_delta >= TIMING_CLAMP_LARGE_DELTA_MS:
+            warnings.append("timing_clamp_large_delta")
+    return validated, tuple(dict.fromkeys(warnings))
 
 
 def _is_degenerate_timing(timing: OtoTiming) -> bool:
@@ -878,7 +1029,31 @@ def _alias_phones(text: str) -> list[str]:
     kana = _KANA_ALIAS_PHONES.get(normalized)
     if kana is not None:
         return list(kana)
-    vowels = {"a", "i", "u", "e", "o", "n"}
+    vowels = {
+        "yeo",
+        "yae",
+        "wae",
+        "weo",
+        "eo",
+        "eu",
+        "ae",
+        "ya",
+        "ye",
+        "yo",
+        "yu",
+        "wa",
+        "wo",
+        "we",
+        "wi",
+        "ui",
+        "a",
+        "i",
+        "u",
+        "e",
+        "o",
+        "n",
+    }
+    vowel_units = tuple(sorted(vowels, key=len, reverse=True))
     if normalized in vowels:
         return [normalized]
     phones: list[str] = []
@@ -898,9 +1073,10 @@ def _alias_phones(text: str) -> list[str]:
     }
     clusters = ("sh", "ch", "ts", "dh")
     while pos < len(normalized):
-        if normalized[pos] in vowels:
-            phones.append(normalized[pos])
-            pos += 1
+        vowel = next((item for item in vowel_units if normalized.startswith(item, pos)), None)
+        if vowel:
+            phones.append(vowel)
+            pos += len(vowel)
             continue
         y_cluster = next((item for item in y_clusters if normalized.startswith(item, pos)), None)
         if y_cluster:
@@ -1095,11 +1271,12 @@ def _alias_target_candidates(alias: str, role: str, expected: Sequence[str]) -> 
             if _phone_matches(phone, target_phone) and is_vowel_phone(phone):
                 out.append(AliasTargetCandidate(idx, 2.3 if role == "vv" else 1.8, role))
         return out
-    for start in _find_all_phone_sequences(expected, phones):
-        out.append(AliasTargetCandidate(start + len(phones) - 1, 4.2, "exact_alias_sequence"))
+    match_phones = _alias_match_phone_variants(phones)
+    for start, matched_phones in _find_all_phone_sequence_variants(expected, match_phones):
+        out.append(AliasTargetCandidate(start + len(matched_phones) - 1, 4.2, "exact_alias_sequence"))
     if out:
         return out
-    target_phone = next((phone for phone in reversed(phones) if is_vowel_phone(phone)), phones[-1])
+    target_phone = next((phone for phone in reversed(match_phones[0]) if is_vowel_phone(phone)), match_phones[0][-1])
     for idx, phone in enumerate(expected):
         if _phone_matches(phone, target_phone) and is_vowel_phone(phone):
             out.append(AliasTargetCandidate(idx, 1.1, "target_phone_fallback"))
@@ -1177,10 +1354,12 @@ def _alias_target_phone_index(
             if idx >= min_target_index and _phone_matches(phone, target_phone) and is_vowel_phone(phone):
                 return idx
         return None
-    match = _find_phone_sequence(expected, phones, min_target_index=min_target_index)
+    match = _find_phone_sequence_variant(expected, _alias_match_phone_variants(phones), min_target_index=min_target_index)
     if match is not None:
-        return match + len(phones) - 1
-    target_phone = next((phone for phone in reversed(phones) if is_vowel_phone(phone)), phones[-1])
+        start, matched_phones = match
+        return start + len(matched_phones) - 1
+    match_phones = _alias_match_phone_variants(phones)[0]
+    target_phone = next((phone for phone in reversed(match_phones) if is_vowel_phone(phone)), match_phones[-1])
     for idx, phone in enumerate(expected):
         if idx >= min_target_index and _phone_matches(phone, target_phone) and is_vowel_phone(phone):
             return idx
@@ -1211,11 +1390,41 @@ def _find_phone_sequence(expected: Sequence[str], phones: Sequence[str], *, min_
     return None
 
 
+def _find_phone_sequence_variant(
+    expected: Sequence[str],
+    phone_variants: Sequence[Sequence[str]],
+    *,
+    min_target_index: int,
+) -> tuple[int, Sequence[str]] | None:
+    for phones in phone_variants:
+        start = _find_phone_sequence(expected, phones, min_target_index=min_target_index)
+        if start is not None:
+            return start, phones
+    return None
+
+
+def _find_all_phone_sequence_variants(
+    expected: Sequence[str],
+    phone_variants: Sequence[Sequence[str]],
+) -> list[tuple[int, Sequence[str]]]:
+    out: list[tuple[int, Sequence[str]]] = []
+    seen: set[tuple[int, tuple[str, ...]]] = set()
+    for phones in phone_variants:
+        for start in _find_all_phone_sequences(expected, phones):
+            key = (start, tuple(phones))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((start, phones))
+    return out
+
+
 def _vc_right_matches(expected: Sequence[str], start_idx: int, right: Sequence[str]) -> bool:
     if not right or start_idx >= len(expected):
         return False
-    if _phone_sequence_matches(expected[start_idx : start_idx + len(right)], right):
-        return True
+    for phones in _alias_match_phone_variants(right):
+        if _phone_sequence_matches(expected[start_idx : start_idx + len(phones)], phones):
+            return True
     if len(right) == 2 and right[1] == "y" and _phone_matches(expected[start_idx], right[0]):
         return True
     return False
@@ -1249,6 +1458,37 @@ def _find_all_phone_sequences(expected: Sequence[str], phones: Sequence[str]) ->
         if _phone_sequence_matches(expected[start : start + len(phones)], phones):
             out.append(start)
     return out
+
+
+def _alias_match_phone_variants(phones: Sequence[str]) -> tuple[tuple[str, ...], ...]:
+    base = tuple(str(phone or "").strip().lower() for phone in phones if str(phone or "").strip())
+    collapsed = _collapse_y_vowel_phones(base)
+    if collapsed == base:
+        return (base,)
+    return (collapsed, base)
+
+
+def _collapse_y_vowel_phones(phones: Sequence[str]) -> tuple[str, ...]:
+    y_vowels = {
+        "a": "ya",
+        "ae": "yae",
+        "eo": "yeo",
+        "e": "ye",
+        "o": "yo",
+        "u": "yu",
+    }
+    out: list[str] = []
+    idx = 0
+    while idx < len(phones):
+        phone = str(phones[idx] or "").strip().lower()
+        next_phone = str(phones[idx + 1] or "").strip().lower() if idx + 1 < len(phones) else ""
+        if phone == "y" and next_phone in y_vowels:
+            out.append(y_vowels[next_phone])
+            idx += 2
+            continue
+        out.append(phone)
+        idx += 1
+    return tuple(out)
 
 
 def _next_vowel_index(expected: Sequence[str], start_idx: int) -> int | None:
@@ -1305,6 +1545,118 @@ def _synthetic_anchor_from_expected(
         vowel_end_abs_ms=span.get("vowel_end_abs_ms"),
         warnings=("synthetic_anchor:no_candidate", f"template_role:{role}"),
     )
+
+
+def _refine_anchor_sequence_locally(
+    posterior: FramePosterior,
+    anchors: Sequence[OtoAnchor | None],
+    *,
+    window_ms: float = 25.0,
+    attention_delta_ms: float = 12.0,
+    low_margin_threshold: float = 0.04,
+    min_order_gap_ms: float = 4.0,
+) -> list[OtoAnchor | None]:
+    if not anchors:
+        return []
+    times = np.asarray(posterior.times_ms, dtype=np.float32)
+    if times.size == 0:
+        return list(anchors)
+    refined: list[OtoAnchor | None] = list(anchors)
+    max_window = max(1.0, float(window_ms))
+    for idx, anchor in enumerate(refined):
+        if anchor is None:
+            continue
+        scores = _local_refine_scores(posterior, anchor.role, times)
+        if scores.shape[0] != times.shape[0] or not np.any(scores):
+            continue
+        source_time = float(anchor.anchor_abs_ms)
+        prev_anchor = next((item for item in reversed(refined[:idx]) if item is not None), None)
+        next_anchor = next((item for item in refined[idx + 1 :] if item is not None), None)
+        lower = float(prev_anchor.anchor_abs_ms) + float(min_order_gap_ms) if prev_anchor is not None else -float("inf")
+        upper = float(next_anchor.anchor_abs_ms) - float(min_order_gap_ms) if next_anchor is not None else float("inf")
+        unrestricted = np.where((times >= source_time - max_window) & (times <= source_time + max_window))[0]
+        if unrestricted.size == 0:
+            continue
+        unrestricted_best = int(unrestricted[int(np.argmax(scores[unrestricted]))])
+        unrestricted_time = float(times[unrestricted_best])
+        warnings = list(anchor.warnings)
+        if unrestricted_time < lower - 1e-6 or unrestricted_time > upper + 1e-6:
+            warnings.append("local_refine_rejected_slot_boundary")
+            refined[idx] = replace(anchor, warnings=tuple(dict.fromkeys(warnings)))
+            continue
+        allowed = np.where(
+            (times >= source_time - max_window)
+            & (times <= source_time + max_window)
+            & (times >= lower)
+            & (times <= upper)
+        )[0]
+        if allowed.size == 0:
+            continue
+        best_idx = int(allowed[int(np.argmax(scores[allowed]))])
+        ordered_scores = sorted((float(scores[item]) for item in allowed), reverse=True)
+        best_score = float(scores[best_idx])
+        second_score = ordered_scores[1] if len(ordered_scores) > 1 else best_score
+        margin = max(0.0, best_score - float(second_score))
+        refined_time = float(times[best_idx])
+        delta = refined_time - source_time
+        if abs(delta) <= 1e-6:
+            continue
+        span = estimate_vowel_span(posterior, refined_time)
+        nucleus_time, nucleus_conf, nucleus_warnings = estimate_vowel_nucleus(
+            posterior,
+            refined_time,
+            vowel_start_abs_ms=span.get("vowel_start_abs_ms"),
+            vowel_end_abs_ms=span.get("vowel_end_abs_ms"),
+        )
+        warnings.append(f"local_refined_anchor:{source_time:.1f}->{refined_time:.1f}")
+        warnings.append(f"local_refine_delta_ms:{delta:.1f}")
+        if abs(delta) >= float(attention_delta_ms):
+            warnings.append("local_refine_changed_anchor")
+        if margin < float(low_margin_threshold):
+            warnings.append("local_refine_low_margin")
+        warnings.extend(nucleus_warnings)
+        refined[idx] = replace(
+            anchor,
+            anchor_abs_ms=refined_time,
+            frame_index=int(best_idx),
+            refined_from_abs_ms=source_time,
+            local_refine_delta_ms=float(delta),
+            local_refine_margin=float(margin),
+            local_refine_window_ms=max_window,
+            vowel_start_abs_ms=span.get("vowel_start_abs_ms", anchor.vowel_start_abs_ms),
+            vowel_end_abs_ms=span.get("vowel_end_abs_ms", anchor.vowel_end_abs_ms),
+            vowel_nucleus_abs_ms=nucleus_time if nucleus_time is not None else anchor.vowel_nucleus_abs_ms,
+            boundary_confidence=_anchor_boundary_confidence(posterior, refined_time, role=anchor.role),
+            nucleus_confidence=max(float(anchor.nucleus_confidence or 0.0), float(nucleus_conf)),
+            warnings=tuple(dict.fromkeys(warnings)),
+        )
+    return refined
+
+
+def _local_refine_scores(posterior: FramePosterior, role: str, times: np.ndarray) -> np.ndarray:
+    role_norm = str(role or "").strip().lower()
+    frame_count = int(times.shape[0])
+    zeros = np.zeros((frame_count,), dtype=np.float32)
+    vowel = _normalized_track(posterior, "vowel", times, source="class")
+    consonant = _normalized_track(posterior, "consonant", times, source="class")
+    transition = _normalized_track(posterior, "transition_likelihood", times)
+    nucleus = _normalized_track(posterior, "nucleus_likelihood", times)
+    voicing = _normalized_track(posterior, "voicing", times)
+    if role_norm in {"v", "vv", "vowel_nucleus"}:
+        event = _event_track(posterior, "vowel_nucleus", frame_count)
+        return np.clip((0.62 * event) + (0.20 * vowel) + (0.12 * nucleus) + (0.06 * voicing), 0.0, 1.0)
+    if role_norm == "vc":
+        event = _event_track(posterior, "phone_change", frame_count)
+        return np.clip((0.66 * event) + (0.20 * transition) + (0.14 * consonant), 0.0, 1.0)
+    event = _event_track(posterior, "cv_boundary", frame_count)
+    return np.clip((0.66 * event) + (0.16 * transition) + (0.10 * vowel) + (0.08 * consonant), 0.0, 1.0) if frame_count else zeros
+
+
+def _event_track(posterior: FramePosterior, key: str, frame_count: int) -> np.ndarray:
+    values = np.asarray(posterior.event_scores.get(key, []), dtype=np.float32)
+    if values.shape[0] != frame_count:
+        return np.zeros((frame_count,), dtype=np.float32)
+    return np.clip(values.astype(np.float32), 0.0, 1.0)
 
 
 def _posterior_anchor_candidates(posterior: FramePosterior, *, min_score: float) -> list[OtoAnchor]:
