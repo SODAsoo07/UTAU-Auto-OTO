@@ -9,7 +9,7 @@ from typing import Sequence
 import numpy as np
 
 from .decode import decode_monotonic_events
-from .features import extract_features
+from .features import extract_features, feature_timebase_metadata
 from .model import MfaFreeFrameModelConfig, build_frame_model
 from .slot_viterbi import ExpectedSlot, SlotViterbiResult, assign_slots_viterbi, slot_assignments_to_decoded_events
 from .types import DecodedEvent, EVENT_LABELS, FRAME_LABELS, FramePosterior
@@ -188,6 +188,7 @@ def _predict_posterior_with_loaded_model(
     except ImportError as exc:
         raise RuntimeError("MFA-free OTO runtime inference requires torch.") from exc
     batch = extract_features(wav_path, encoder=encoder, device=requested_device)
+    timebase_metadata = feature_timebase_metadata(batch)
     with torch.no_grad():
         x = torch.from_numpy(batch.features[None, :, :]).float().to(target_device)
         output = model(x)
@@ -206,6 +207,7 @@ def _predict_posterior_with_loaded_model(
             "checkpoint_acoustic_feature_set": checkpoint.get("acoustic_feature_set"),
             "acoustic_feature_set": WORLD_V1_FEATURE_SET if "world" in str(encoder).lower() else "",
             "rule_based": False,
+            **timebase_metadata,
         },
     )
 
@@ -217,6 +219,7 @@ def _predict_posterior_rule_based(
     metadata: dict[str, object] | None = None,
 ) -> FramePosterior:
     batch = extract_features(wav_path, encoder=encoder)
+    timebase_metadata = feature_timebase_metadata(batch)
     times = np.asarray(batch.times_ms, dtype=np.float32)
     frame_count = int(times.shape[0])
     if frame_count <= 0:
@@ -226,7 +229,7 @@ def _predict_posterior_rule_based(
             class_probs={label: [] for label in FRAME_LABELS},
             event_scores={label: [] for label in EVENT_LABELS},
             acoustic_scores={},
-            metadata={**(metadata or {}), "encoder": encoder, "rule_based": True},
+            metadata={**timebase_metadata, **(metadata or {}), "encoder": encoder, "rule_based": True},
         )
     silence = _track(batch.acoustic_scores, "silence_likelihood", frame_count)
     voicing = _track(batch.acoustic_scores, "voicing", frame_count)
@@ -270,6 +273,7 @@ def _predict_posterior_rule_based(
             "encoder": encoder,
             "rule_based": True,
             "acoustic_feature_set": WORLD_V1_FEATURE_SET,
+            **timebase_metadata,
             **(metadata or {}),
         },
     )

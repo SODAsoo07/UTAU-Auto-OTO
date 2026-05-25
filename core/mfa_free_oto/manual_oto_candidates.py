@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
 
 import numpy as np
 
-from .features import extract_features
+from .features import extract_features, feature_timebase_metadata
 
 
 SCORABLE_ANCHORS = ("offset", "overlap", "preutterance", "fixed_end")
@@ -35,6 +35,7 @@ class ManualOtoCandidateTracks:
     tracks: Mapping[str, np.ndarray]
     duration_ms: float
     encoder: str
+    timebase_metadata: Mapping[str, object] = field(default_factory=dict)
 
     def candidate_times_ms(self, anchor: str) -> list[float]:
         indices = self.candidate_indices.get(anchor, ())
@@ -105,7 +106,19 @@ def extract_manual_oto_candidate_tracks(
         + 0.10 * _track(scores, "rms", size)
     )
     rms = _unit(_track(scores, "rms", size))
-    activity_edge = _unit(np.abs(np.gradient(rms)) if rms.size else rms)
+    activity_edge = _unit(np.abs(np.gradient(rms)) if rms.size > 1 else rms)
+    voicing = _track(scores, "voicing", size)
+    stability = _track(scores, "world_spectral_stability", size)
+    flux = _track(scores, "flux_likelihood", size)
+    onset = _track(scores, "onset_strength", size)
+    silence = _track(scores, "silence", size)
+    vowel_energy = _unit(0.36 * nucleus + 0.24 * _unit(voicing) + 0.22 * rms + 0.18 * _unit(stability))
+    vowel_rise = _unit(np.maximum(0.0, np.gradient(vowel_energy)) if vowel_energy.size > 1 else vowel_energy)
+    vowel_fall = _unit(np.maximum(0.0, -np.gradient(vowel_energy)) if vowel_energy.size > 1 else vowel_energy)
+    transient = _unit(0.42 * onset + 0.26 * flux + 0.22 * transition + 0.10 * activity_edge)
+    vowel_onset = _unit(0.36 * transition + 0.24 * transient + 0.20 * vowel_rise + 0.12 * activity_edge + 0.08 * rms)
+    stable_vowel = _unit(0.36 * nucleus + 0.24 * _unit(stability) + 0.22 * _unit(voicing) + 0.18 * rms)
+    vowel_offset = _unit(0.34 * transition + 0.24 * vowel_fall + 0.18 * activity_edge + 0.14 * (1.0 - rms) + 0.10 * silence)
     tail = _unit(0.55 * (1.0 - _track(scores, "silence", size)) + 0.45 * activity_edge)
     anchor_scores = {
         "offset": _unit(0.65 * transition + 0.35 * activity_edge),
@@ -126,12 +139,17 @@ def extract_manual_oto_candidate_tracks(
         "nucleus": nucleus,
         "rms": rms,
         "activity_edge": activity_edge,
-        "silence": _track(scores, "silence", size),
-        "voicing": _track(scores, "voicing", size),
-        "flux": _track(scores, "flux_likelihood", size),
-        "onset": _track(scores, "onset_strength", size),
+        "silence": silence,
+        "voicing": voicing,
+        "flux": flux,
+        "onset": onset,
         "sonorant_onset": _track(scores, "sonorant_onset_likelihood", size),
-        "world_stability": _track(scores, "world_spectral_stability", size),
+        "world_stability": stability,
+        "vowel_energy": vowel_energy,
+        "vowel_onset": vowel_onset,
+        "stable_vowel": stable_vowel,
+        "vowel_offset": vowel_offset,
+        "transient": transient,
     }
     return ManualOtoCandidateTracks(
         times_ms=times,
@@ -140,6 +158,7 @@ def extract_manual_oto_candidate_tracks(
         tracks=tracks,
         duration_ms=float(batch.duration_ms),
         encoder=str(batch.encoder),
+        timebase_metadata=feature_timebase_metadata(batch),
     )
 
 

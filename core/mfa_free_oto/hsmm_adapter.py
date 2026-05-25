@@ -1,0 +1,726 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Iterable, Mapping, Sequence
+
+import numpy as np
+
+from core.alignment.hsmm_decoder import HSMMDecodeResult, HSMMStateSpec, decode_segmental_hsmm
+
+from .row_plan import FilenameSlot
+from .types import FramePosterior
+
+
+HSMM_ADAPTER_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class FilenameHSMMDecode:
+    result: HSMMDecodeResult
+    events: tuple[dict[str, object], ...]
+    states: tuple[HSMMStateSpec, ...]
+    frame_scores: Mapping[str, tuple[float, ...]]
+    state_interval_priors: Mapping[str, tuple[float, ...]]
+    diagnostics: Mapping[str, object]
+    schema_version: int = HSMM_ADAPTER_SCHEMA_VERSION
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.result.ok)
+
+
+def build_hsmm_states_for_slots(
+    slots: Sequence[FilenameSlot],
+    *,
+    duration_ms: float = 0.0,
+) -> tuple[HSMMStateSpec, ...]:
+    if not slots:
+        return ()
+    state_count = sum(1 + (1 if slot.onset_phones else 0) for slot in slots)
+    base_duration = float(duration_ms or 0.0) / float(max(1, state_count)) if duration_ms > 0.0 else 90.0
+    states: list[HSMMStateSpec] = []
+    for slot in slots:
+        if slot.onset_phones:
+            cons_mode = _clamp(base_duration * 0.65, 28.0, 95.0)
+            states.append(
+                HSMMStateSpec(
+                    state_id=_state_id(slot, "onset"),
+                    state_type="consonant",
+                    min_duration_ms=max(8.0, min(24.0, cons_mode * 0.45)),
+                    max_duration_ms=max(48.0, min(240.0, cons_mode * 2.8)),
+                    mode_duration_ms=cons_mode,
+                    duration_sigma_ms=max(12.0, cons_mode * 0.55),
+                )
+            )
+        vowel_mode = _clamp(base_duration * (1.20 if slot.onset_phones else 1.55), 48.0, 240.0)
+        states.append(
+            HSMMStateSpec(
+                state_id=_state_id(slot, "vowel"),
+                state_type="vowel",
+                min_duration_ms=max(18.0, min(52.0, vowel_mode * 0.40)),
+                max_duration_ms=max(80.0, min(420.0, vowel_mode * 2.8)),
+                mode_duration_ms=vowel_mode,
+                duration_sigma_ms=max(20.0, vowel_mode * 0.62),
+            )
+        )
+    return tuple(states)
+
+
+def build_hsmm_frame_scores(
+    posterior: FramePosterior,
+    states: Sequence[HSMMStateSpec],
+    *,
+    state_interval_priors: Mapping[str, Sequence[float]] | None = None,
+) -> dict[str, tuple[float, ...]]:
+    times = np.asarray(posterior.times_ms, dtype=np.float32)
+    frame_count = int(times.size)
+    if frame_count <= 0:
+        return {state.state_id: () for state in states}
+
+    silence = _track(posterior.class_probs, "silence", frame_count)
+    consonant = _track(posterior.class_probs, "consonant", frame_count)
+    vowel = _track(posterior.class_probs, "vowel", frame_count)
+    transition = _first_track(
+        frame_count,
+        posterior.acoustic_scores,
+        posterior.event_scores,
+        keys=("transition_likelihood", "cv_boundary", "phone_change", "flux_likelihood"),
+    )
+    onset = _first_track(
+        frame_count,
+        posterior.acoustic_scores,
+        posterior.event_scores,
+        keys=("onset_strength", "sonorant_onset_likelihood", "phone_change", "cv_boundary"),
+    )
+    voicing = _first_track(frame_count, posterior.acoustic_scores, keys=("voicing", "world_voicing"))
+    nucleus = _first_track(
+        frame_count,
+        posterior.acoustic_scores,
+        posterior.event_scores,
+        keys=("nucleus_likelihood", "world_nucleus", "vowel_nucleus"),
+    )
+    active = np.clip(1.0 - silence, 0.0, 1.0)
+    consonant_score = np.clip(
+        (0.44 * consonant) + (0.24 * transition) + (0.18 * onset) + (0.14 * active),
+        0.0,
+        1.0,
+    )
+    vowel_score = np.clip(
+        (0.50 * vowel) + (0.22 * voicing) + (0.18 * nucleus) + (0.10 * active),
+        0.0,
+        1.0,
+    )
+
+    out: dict[str, tuple[float, ...]] = {}
+    duration = _posterior_duration_ms(times)
+    order_count = max(1, len(states))
+    for order, state in enumerate(states):
+        base = consonant_score if state.state_type == "consonant" else vowel_score
+        prior = _position_prior(times, expected_ms=(order + 0.5) * duration / float(order_count), sigma_ms=max(40.0, duration / float(order_count + 1)))
+        event_prior = _track(state_interval_priors or {}, state.state_id, frame_count)
+        if np.any(event_prior):
+            scored = np.clip((0.58 * base) + (0.12 * prior) + (0.30 * event_prior), 0.0, 1.0)
+        else:
+            scored = np.clip((0.86 * base) + (0.14 * prior), 0.0, 1.0)
+        out[state.state_id] = tuple(float(value) for value in scored)
+    return out
+
+
+def decode_filename_slots_with_hsmm(
+    posterior: FramePosterior,
+    slots: Sequence[FilenameSlot],
+    *,
+    beam_width_per_state: int = 64,
+    timeout_ms: int = 5000,
+    event_priors: Iterable[Mapping[str, object]] = (),
+) -> FilenameHSMMDecode:
+    event_prior_items = tuple(dict(event or {}) for event in event_priors)
+    times = [float(value) for value in posterior.times_ms]
+    duration = _posterior_duration_ms(np.asarray(times, dtype=np.float32))
+    states = build_hsmm_states_for_slots(slots, duration_ms=duration)
+    state_interval_priors = build_state_interval_priors_for_slots(
+        posterior,
+        slots,
+        states,
+        event_priors=event_prior_items,
+    )
+    frame_scores = build_hsmm_frame_scores(
+        posterior,
+        states,
+        state_interval_priors=state_interval_priors,
+    )
+    result = decode_segmental_hsmm(
+        states,
+        times,
+        frame_scores,
+        beam_width_per_state=beam_width_per_state,
+        timeout_ms=timeout_ms,
+        allow_leading_gap=True,
+        allow_trailing_gap=True,
+        leading_gap_penalty_per_ms=0.00005,
+        trailing_gap_penalty_per_ms=0.00002,
+        allow_internal_gaps=True,
+        internal_gap_penalty_per_ms=0.00006,
+        max_internal_gap_ms=900.0,
+    )
+    events = hsmm_result_to_slot_events(result, slots) if result.ok else ()
+    diagnostics = build_hsmm_diagnostics(
+        result,
+        states,
+        frame_scores,
+        state_interval_priors=state_interval_priors,
+        event_prior_summary=summarize_hsmm_event_priors_for_slots(slots, event_prior_items),
+    )
+    return FilenameHSMMDecode(
+        result=result,
+        events=tuple(events),
+        states=states,
+        frame_scores=frame_scores,
+        state_interval_priors=state_interval_priors,
+        diagnostics=diagnostics,
+    )
+
+
+def build_hsmm_diagnostics(
+    result: HSMMDecodeResult,
+    states: Sequence[HSMMStateSpec],
+    frame_scores: Mapping[str, Sequence[float]],
+    *,
+    state_interval_priors: Mapping[str, Sequence[float]] | None = None,
+    event_prior_summary: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    frame_shift = _float_from_mapping(result.meta, "frame_shift_ms", default=5.0)
+    state_specs = {state.state_id: state for state in states}
+    prior_summary = _normalize_event_prior_summary(event_prior_summary)
+    prior_states = dict(prior_summary.get("states", {}) or {})
+    state_diagnostics: list[dict[str, object]] = []
+    for decoded in result.states:
+        spec = state_specs.get(decoded.state_id)
+        scores = np.asarray(frame_scores.get(decoded.state_id, ()), dtype=np.float32)
+        if spec is None or scores.size == 0:
+            continue
+        state_prior_summary = dict(prior_states.get(str(decoded.state_id), {}) or {})
+        state_source_counts = _string_int_counts(state_prior_summary.get("source_counts", {}))
+        state_label_counts = _string_int_counts(state_prior_summary.get("label_counts", {}))
+        state_candidate_count = int(state_source_counts.get("evidence_candidate", 0))
+        state_mapped_count = int(state_prior_summary.get("mapped_count", 0) or 0)
+        start_frame = max(0, min(int(decoded.start_frame), int(scores.size)))
+        end_frame = max(start_frame + 1, min(int(decoded.end_frame), int(scores.size)))
+        selected_duration_ms = float(end_frame - start_frame) * frame_shift
+        selected_mean = _segment_mean_array(scores, start_frame, end_frame)
+        duration_score = _state_duration_score(spec, selected_duration_ms)
+        selected_total = selected_mean + duration_score
+        local = _best_local_state_segments(
+            scores,
+            spec,
+            frame_shift_ms=frame_shift,
+            selected_start_frame=start_frame,
+            selected_end_frame=end_frame,
+        )
+        prior = np.asarray((state_interval_priors or {}).get(decoded.state_id, ()), dtype=np.float32)
+        prior_selected_mean = _segment_mean_array(prior, start_frame, min(end_frame, int(prior.size))) if prior.size else 0.0
+        duration_z = _state_duration_z(spec, selected_duration_ms)
+        state_diagnostics.append(
+            {
+                "state_id": str(decoded.state_id),
+                "state_type": str(decoded.state_type),
+                "selected_mean_score": float(selected_mean),
+                "selected_duration_score": float(duration_score),
+                "selected_total_score": float(selected_total),
+                "best_local_total_score": float(local["best_total_score"]),
+                "second_local_total_score": float(local["second_total_score"]),
+                "selected_vs_best_local_margin": float(selected_total - float(local["best_total_score"])),
+                "selected_vs_second_local_margin": float(selected_total - float(local["second_total_score"])),
+                "best_local_start_frame": int(local["best_start_frame"]),
+                "best_local_end_frame": int(local["best_end_frame"]),
+                "duration_mode_delta_ms": float(selected_duration_ms - float(spec.mode_duration_ms or 0.0)),
+                "duration_z_abs": float(abs(duration_z)),
+                "has_event_prior": bool(prior.size and np.any(prior > 0.0)),
+                "event_prior_peak_score": float(np.max(prior)) if prior.size else 0.0,
+                "event_prior_selected_mean": float(prior_selected_mean),
+                "event_prior_mapped_count": state_mapped_count,
+                "event_prior_source_counts": dict(state_source_counts),
+                "event_prior_label_counts": dict(state_label_counts),
+                "evidence_candidate_prior_count": state_candidate_count,
+                "runtime_prior_count": max(0, state_mapped_count - state_candidate_count),
+            }
+        )
+    selected_vs_best = [float(item["selected_vs_best_local_margin"]) for item in state_diagnostics]
+    selected_vs_second = [float(item["selected_vs_second_local_margin"]) for item in state_diagnostics]
+    duration_z_values = [float(item["duration_z_abs"]) for item in state_diagnostics]
+    source_counts = _string_int_counts(prior_summary.get("source_counts", {}))
+    candidate_count = int(source_counts.get("evidence_candidate", 0))
+    mapped_count = int(prior_summary.get("mapped_count", 0) or 0)
+    return {
+        "ok": bool(result.ok),
+        "state_count": int(len(states)),
+        "decoded_state_count": int(len(result.states)),
+        "event_prior_state_count": int(sum(1 for item in state_diagnostics if bool(item["has_event_prior"]))),
+        "event_prior_input_count": int(prior_summary.get("input_count", 0) or 0),
+        "event_prior_mapped_count": mapped_count,
+        "event_prior_ignored_count": int(prior_summary.get("ignored_count", 0) or 0),
+        "event_prior_source_counts": dict(source_counts),
+        "event_prior_label_counts": _string_int_counts(prior_summary.get("label_counts", {})),
+        "candidate_prior_count": candidate_count,
+        "runtime_prior_count": max(0, mapped_count - candidate_count),
+        "event_prior_summary": prior_summary,
+        "min_selected_vs_best_local_margin": float(min(selected_vs_best)) if selected_vs_best else 0.0,
+        "min_selected_vs_second_local_margin": float(min(selected_vs_second)) if selected_vs_second else 0.0,
+        "max_duration_z_abs": float(max(duration_z_values)) if duration_z_values else 0.0,
+        "states": tuple(state_diagnostics),
+    }
+
+
+def summarize_hsmm_event_priors_for_slots(
+    slots: Sequence[FilenameSlot],
+    event_priors: Iterable[Mapping[str, object]] = (),
+) -> dict[str, object]:
+    input_count = 0
+    ignored_count = 0
+    source_counts: dict[str, int] = {}
+    label_counts: dict[str, int] = {}
+    states: dict[str, dict[str, object]] = {}
+
+    for event in event_priors:
+        input_count += 1
+        label = str(event.get("label", "") or "")
+        phone_index = _int_or_none(event.get("expected_phone_index"))
+        state_id = _state_id_for_event_prior(slots, label, phone_index)
+        if not state_id:
+            ignored_count += 1
+            continue
+        source = _event_source(event)
+        _increment(source_counts, source)
+        _increment(label_counts, label)
+        state_summary = states.setdefault(
+            state_id,
+            {
+                "state_id": state_id,
+                "mapped_count": 0,
+                "source_counts": {},
+                "label_counts": {},
+            },
+        )
+        state_summary["mapped_count"] = int(state_summary.get("mapped_count", 0) or 0) + 1
+        _increment(state_summary["source_counts"], source)
+        _increment(state_summary["label_counts"], label)
+
+    mapped_count = sum(int(item.get("mapped_count", 0) or 0) for item in states.values())
+    return {
+        "input_count": int(input_count),
+        "mapped_count": int(mapped_count),
+        "ignored_count": int(ignored_count),
+        "source_counts": dict(sorted(source_counts.items())),
+        "label_counts": dict(sorted(label_counts.items())),
+        "states": {key: _normalize_event_prior_state_summary(value) for key, value in sorted(states.items())},
+    }
+
+
+def build_state_interval_priors_for_slots(
+    posterior: FramePosterior,
+    slots: Sequence[FilenameSlot],
+    states: Sequence[HSMMStateSpec],
+    *,
+    event_priors: Iterable[Mapping[str, object]] = (),
+) -> dict[str, tuple[float, ...]]:
+    times = np.asarray(posterior.times_ms, dtype=np.float32)
+    frame_count = int(times.size)
+    if frame_count <= 0:
+        return {}
+    priors_by_state: dict[str, np.ndarray] = {}
+    state_by_id = {state.state_id: state for state in states}
+    events_by_key: dict[tuple[str, int], list[Mapping[str, object]]] = {}
+    for event in event_priors:
+        label = str(event.get("label", ""))
+        phone_index = _int_or_none(event.get("expected_phone_index"))
+        if not label or phone_index is None:
+            continue
+        events_by_key.setdefault((label, int(phone_index)), []).append(event)
+
+    for slot in slots:
+        onset_state_id = _state_id(slot, "onset")
+        vowel_state_id = _state_id(slot, "vowel")
+        onset_state = state_by_id.get(onset_state_id)
+        vowel_state = state_by_id.get(vowel_state_id)
+        if onset_state is not None and slot.onset_phones:
+            onset_events = [
+                *events_by_key.get(("phone_change", int(slot.phone_start_index)), []),
+                *events_by_key.get(("sonorant_constriction", int(slot.phone_start_index)), []),
+            ]
+            for event in onset_events:
+                event_time = _event_time_ms(event)
+                priors_by_state[onset_state_id] = np.maximum(
+                    priors_by_state.get(onset_state_id, np.zeros((frame_count,), dtype=np.float32)),
+                    _event_weight(event) * _interval_prior_from_start(times, event_time, onset_state.mode_duration_ms),
+                )
+        if vowel_state is not None:
+            start_events: list[Mapping[str, object]] = []
+            if slot.onset_phones:
+                start_events.extend(events_by_key.get(("cv_boundary", int(slot.vowel_phone_index)), []))
+            else:
+                start_events.extend(events_by_key.get(("vv_boundary", int(slot.vowel_phone_index)), []))
+            for event in start_events:
+                event_time = _event_time_ms(event)
+                priors_by_state[vowel_state_id] = np.maximum(
+                    priors_by_state.get(vowel_state_id, np.zeros((frame_count,), dtype=np.float32)),
+                    _event_weight(event) * _interval_prior_from_start(times, event_time, vowel_state.mode_duration_ms),
+                )
+        if vowel_state is not None:
+            for event in events_by_key.get(("vowel_nucleus", int(slot.vowel_phone_index)), []):
+                event_time = _event_time_ms(event)
+                priors_by_state[vowel_state_id] = np.maximum(
+                    priors_by_state.get(vowel_state_id, np.zeros((frame_count,), dtype=np.float32)),
+                    _event_weight(event) * _interval_prior_from_nucleus(times, event_time, vowel_state.mode_duration_ms),
+                )
+    return {key: tuple(float(value) for value in np.clip(value, 0.0, 1.0)) for key, value in priors_by_state.items()}
+
+
+def hsmm_result_to_slot_events(
+    result: HSMMDecodeResult,
+    slots: Sequence[FilenameSlot],
+) -> tuple[dict[str, object], ...]:
+    if not result.ok:
+        return ()
+    by_id = {state.state_id: state for state in result.states}
+    events: list[dict[str, object]] = []
+    event_index = 0
+    for slot in slots:
+        onset_state = by_id.get(_state_id(slot, "onset"))
+        vowel_state = by_id.get(_state_id(slot, "vowel"))
+        if onset_state is not None and slot.onset_phones:
+            events.append(
+                _event(
+                    label="phone_change",
+                    time_ms=onset_state.start_ms,
+                    score=onset_state.score,
+                    expected_phone=slot.onset_phones[0],
+                    expected_phone_index=slot.phone_start_index,
+                    slot_index=event_index,
+                    frame_index=onset_state.start_frame,
+                )
+            )
+            event_index += 1
+        if vowel_state is not None and slot.onset_phones:
+            events.append(
+                _event(
+                    label="cv_boundary",
+                    time_ms=vowel_state.start_ms,
+                    score=vowel_state.score,
+                    expected_phone=slot.vowel_phone,
+                    expected_phone_index=slot.vowel_phone_index,
+                    slot_index=event_index,
+                    frame_index=vowel_state.start_frame,
+                )
+            )
+            event_index += 1
+        if vowel_state is not None:
+            nucleus_time = vowel_state.start_ms + (0.55 * max(0.0, vowel_state.duration_ms))
+            events.append(
+                _event(
+                    label="vowel_nucleus",
+                    time_ms=nucleus_time,
+                    score=vowel_state.score,
+                    expected_phone=slot.vowel_phone,
+                    expected_phone_index=slot.vowel_phone_index,
+                    slot_index=event_index,
+                    frame_index=max(vowel_state.start_frame, min(vowel_state.end_frame - 1, int(round((vowel_state.start_frame + vowel_state.end_frame - 1) * 0.55)))),
+                )
+            )
+            event_index += 1
+    return tuple(events)
+
+
+def _event(
+    *,
+    label: str,
+    time_ms: float,
+    score: float,
+    expected_phone: str,
+    expected_phone_index: int,
+    slot_index: int,
+    frame_index: int,
+) -> dict[str, object]:
+    return {
+        "label": label,
+        "selected_time_ms": float(time_ms),
+        "score": float(max(0.0, min(1.0, score))),
+        "expected_phone": str(expected_phone),
+        "expected_phone_index": int(expected_phone_index),
+        "slot_index": int(slot_index),
+        "frame_index": int(frame_index),
+        "source": "filename_hsmm",
+    }
+
+
+def _state_id(slot: FilenameSlot, kind: str) -> str:
+    return f"slot{int(slot.slot_index)}.{kind}"
+
+
+def _track(mapping: Mapping[str, Sequence[float]], key: str, frame_count: int) -> np.ndarray:
+    values = mapping.get(key)
+    if values is None:
+        return np.zeros((frame_count,), dtype=np.float32)
+    arr = np.asarray(values, dtype=np.float32)
+    if arr.size < frame_count:
+        arr = np.pad(arr, (0, frame_count - arr.size), mode="constant")
+    return np.clip(arr[:frame_count], 0.0, 1.0).astype(np.float32)
+
+
+def _first_track(
+    frame_count: int,
+    *mappings: Mapping[str, Sequence[float]],
+    keys: Sequence[str],
+) -> np.ndarray:
+    for key in keys:
+        for mapping in mappings:
+            arr = _track(mapping, key, frame_count)
+            if np.any(arr):
+                return arr
+    return np.zeros((frame_count,), dtype=np.float32)
+
+
+def _position_prior(times: np.ndarray, *, expected_ms: float, sigma_ms: float) -> np.ndarray:
+    if times.size == 0:
+        return times.astype(np.float32)
+    sigma = max(1.0, float(sigma_ms))
+    z = (times.astype(np.float32) - float(expected_ms)) / sigma
+    return np.exp(-0.5 * z * z).astype(np.float32)
+
+
+def _interval_prior_from_start(times: np.ndarray, start_ms: float, mode_duration_ms: float) -> np.ndarray:
+    duration = max(20.0, float(mode_duration_ms or 0.0))
+    center = float(start_ms) + (0.50 * duration)
+    sigma = max(18.0, duration * 0.36)
+    return _position_prior(times, expected_ms=center, sigma_ms=sigma)
+
+
+def _interval_prior_from_nucleus(times: np.ndarray, nucleus_ms: float, mode_duration_ms: float) -> np.ndarray:
+    duration = max(20.0, float(mode_duration_ms or 0.0))
+    start = float(nucleus_ms) - (0.55 * duration)
+    center = start + (0.50 * duration)
+    sigma = max(18.0, duration * 0.36)
+    return _position_prior(times, expected_ms=center, sigma_ms=sigma)
+
+
+def _state_id_for_event_prior(
+    slots: Sequence[FilenameSlot],
+    label: str,
+    phone_index: int | None,
+) -> str:
+    if phone_index is None:
+        return ""
+    label = str(label or "")
+    for slot in slots:
+        if label in {"phone_change", "sonorant_constriction"}:
+            if slot.onset_phones and int(slot.phone_start_index) == int(phone_index):
+                return _state_id(slot, "onset")
+            continue
+        if label == "cv_boundary":
+            if slot.onset_phones and int(slot.vowel_phone_index) == int(phone_index):
+                return _state_id(slot, "vowel")
+            continue
+        if label == "vv_boundary":
+            if not slot.onset_phones and int(slot.vowel_phone_index) == int(phone_index):
+                return _state_id(slot, "vowel")
+            continue
+        if label == "vowel_nucleus" and int(slot.vowel_phone_index) == int(phone_index):
+            return _state_id(slot, "vowel")
+    return ""
+
+
+def _event_source(event: Mapping[str, object]) -> str:
+    source = str(event.get("source", "") or "").strip()
+    return source or "runtime_event"
+
+
+def _increment(counts: dict[str, int], key: str) -> None:
+    if not key:
+        return
+    counts[key] = int(counts.get(key, 0) or 0) + 1
+
+
+def _normalize_event_prior_summary(summary: Mapping[str, object] | None) -> dict[str, object]:
+    if not isinstance(summary, Mapping):
+        return {
+            "input_count": 0,
+            "mapped_count": 0,
+            "ignored_count": 0,
+            "source_counts": {},
+            "label_counts": {},
+            "states": {},
+        }
+    states = summary.get("states", {})
+    state_items = states.items() if isinstance(states, Mapping) else ()
+    return {
+        "input_count": int(summary.get("input_count", 0) or 0),
+        "mapped_count": int(summary.get("mapped_count", 0) or 0),
+        "ignored_count": int(summary.get("ignored_count", 0) or 0),
+        "source_counts": _string_int_counts(summary.get("source_counts", {})),
+        "label_counts": _string_int_counts(summary.get("label_counts", {})),
+        "states": {
+            str(state_id): _normalize_event_prior_state_summary(state_summary)
+            for state_id, state_summary in state_items
+        },
+    }
+
+
+def _normalize_event_prior_state_summary(summary: object) -> dict[str, object]:
+    if not isinstance(summary, Mapping):
+        return {
+            "state_id": "",
+            "mapped_count": 0,
+            "source_counts": {},
+            "label_counts": {},
+        }
+    return {
+        "state_id": str(summary.get("state_id", "") or ""),
+        "mapped_count": int(summary.get("mapped_count", 0) or 0),
+        "source_counts": _string_int_counts(summary.get("source_counts", {})),
+        "label_counts": _string_int_counts(summary.get("label_counts", {})),
+    }
+
+
+def _string_int_counts(value: object) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        return {}
+    out: dict[str, int] = {}
+    for key, count in value.items():
+        try:
+            int_count = int(count or 0)
+        except Exception:
+            continue
+        if int_count:
+            out[str(key)] = int_count
+    return dict(sorted(out.items()))
+
+
+def _best_local_state_segments(
+    scores: np.ndarray,
+    spec: HSMMStateSpec,
+    *,
+    frame_shift_ms: float,
+    selected_start_frame: int,
+    selected_end_frame: int,
+) -> dict[str, float | int]:
+    frame_count = int(scores.size)
+    min_frames = max(1, int(np.ceil(float(spec.min_duration_ms) / max(0.001, frame_shift_ms))))
+    max_frames = max(min_frames, int(np.ceil(float(spec.max_duration_ms) / max(0.001, frame_shift_ms))))
+    max_frames = min(max_frames, frame_count)
+    best = {"score": float("-inf"), "start": 0, "end": 0}
+    second = {"score": float("-inf"), "start": 0, "end": 0}
+    prefix = np.concatenate(([0.0], np.cumsum(scores.astype(np.float64))))
+    for start in range(0, max(0, frame_count - min_frames + 1)):
+        for end in range(start + min_frames, min(frame_count, start + max_frames) + 1):
+            duration_ms = float(end - start) * frame_shift_ms
+            mean_score = float((prefix[end] - prefix[start]) / float(end - start))
+            total = mean_score + _state_duration_score(spec, duration_ms)
+            same_segment = start == int(selected_start_frame) and end == int(selected_end_frame)
+            if total > best["score"]:
+                if best["score"] != float("-inf"):
+                    second = best
+                best = {"score": float(total), "start": int(start), "end": int(end)}
+                continue
+            if not same_segment and total > second["score"]:
+                second = {"score": float(total), "start": int(start), "end": int(end)}
+    if best["score"] == float("-inf"):
+        return {
+            "best_total_score": 0.0,
+            "best_start_frame": int(selected_start_frame),
+            "best_end_frame": int(selected_end_frame),
+            "second_total_score": 0.0,
+            "second_start_frame": int(selected_start_frame),
+            "second_end_frame": int(selected_end_frame),
+        }
+    if second["score"] == float("-inf"):
+        second = best
+    return {
+        "best_total_score": float(best["score"]),
+        "best_start_frame": int(best["start"]),
+        "best_end_frame": int(best["end"]),
+        "second_total_score": float(second["score"]),
+        "second_start_frame": int(second["start"]),
+        "second_end_frame": int(second["end"]),
+    }
+
+
+def _segment_mean_array(values: np.ndarray, start_frame: int, end_frame: int) -> float:
+    if values.size == 0:
+        return 0.0
+    start = max(0, min(int(start_frame), int(values.size)))
+    if start >= int(values.size):
+        return 0.0
+    end = max(start + 1, min(int(end_frame), int(values.size)))
+    if end <= start:
+        return 0.0
+    return float(np.mean(values[start:end]))
+
+
+def _state_duration_score(spec: HSMMStateSpec, duration_ms: float) -> float:
+    z = _state_duration_z(spec, duration_ms)
+    return -0.5 * z * z
+
+
+def _state_duration_z(spec: HSMMStateSpec, duration_ms: float) -> float:
+    mode = float(spec.mode_duration_ms or 0.0)
+    if mode <= 0.0:
+        return 0.0
+    sigma = max(1.0, float(spec.duration_sigma_ms or 40.0))
+    return (float(duration_ms) - mode) / sigma
+
+
+def _event_time_ms(event: Mapping[str, object]) -> float:
+    try:
+        return float(event.get("selected_time_ms", event.get("time_ms", 0.0)) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _event_weight(event: Mapping[str, object]) -> float:
+    try:
+        return max(0.0, min(1.0, float(event.get("score", 1.0) or 1.0)))
+    except Exception:
+        return 1.0
+
+
+def _int_or_none(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _float_from_mapping(mapping: Mapping[str, object], key: str, *, default: float) -> float:
+    try:
+        return float(mapping.get(key, default))
+    except Exception:
+        return float(default)
+
+
+def _posterior_duration_ms(times: np.ndarray) -> float:
+    if times.size == 0:
+        return 0.0
+    if times.size == 1:
+        return max(1.0, float(times[0]))
+    diffs = np.diff(times.astype(np.float32))
+    positive = diffs[diffs > 0.0]
+    shift = float(np.median(positive)) if positive.size else 5.0
+    return float(times[-1]) + max(0.001, shift)
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(float(lo), min(float(hi), float(value)))
+
+
+__all__ = [
+    "FilenameHSMMDecode",
+    "HSMM_ADAPTER_SCHEMA_VERSION",
+    "build_hsmm_diagnostics",
+    "build_hsmm_frame_scores",
+    "build_hsmm_states_for_slots",
+    "build_state_interval_priors_for_slots",
+    "decode_filename_slots_with_hsmm",
+    "hsmm_result_to_slot_events",
+    "summarize_hsmm_event_priors_for_slots",
+]

@@ -204,6 +204,10 @@ def fit_islands_to_slot_count(
     if not current:
         return current if target <= 0 else tuple(current)
     while len(current) < target:
+        inserted = _insert_likely_missing_gap_island(current, tracks, times, energy)
+        if inserted is not None:
+            current = inserted
+            continue
         durations = [float(item.end_ms) - float(item.start_ms) for item in current]
         idx = int(np.argmax(durations))
         item = current[idx]
@@ -375,6 +379,79 @@ def _merge_island_pair(
     return merged
 
 
+def _insert_likely_missing_gap_island(
+    islands: list[VowelIsland],
+    tracks: ManualOtoCandidateTracks,
+    times: np.ndarray,
+    energy: np.ndarray,
+) -> list[VowelIsland] | None:
+    if len(islands) < 2 or times.size == 0:
+        return None
+    nucleus_gaps = [
+        float(islands[idx + 1].nucleus_ms) - float(islands[idx].nucleus_ms)
+        for idx in range(len(islands) - 1)
+        if float(islands[idx + 1].nucleus_ms) > float(islands[idx].nucleus_ms)
+    ]
+    median_nucleus_gap = float(np.median(nucleus_gaps)) if nucleus_gaps else 0.0
+    min_gap_ms = max(170.0, min(360.0, 0.58 * median_nucleus_gap if median_nucleus_gap > 0.0 else 210.0))
+    candidates: list[tuple[float, int, int, int]] = []
+    size = int(times.size)
+    stable = _unit(_track(tracks, "stable_vowel", size))
+    nucleus = _unit(_track(tracks, "nucleus", size))
+    rms = _unit(_track(tracks, "rms", size))
+    silence = np.clip(_track(tracks, "silence", size), 0.0, 1.0)
+    weak_vowel_score = _unit(0.46 * _unit(energy) + 0.24 * stable + 0.18 * nucleus + 0.08 * rms + 0.04 * (1.0 - silence))
+    for idx in range(len(islands) - 1):
+        left = islands[idx]
+        right = islands[idx + 1]
+        gap_ms = float(right.start_ms) - float(left.end_ms)
+        if gap_ms < min_gap_ms:
+            continue
+        start_idx = max(0, int(left.end_index) + 1)
+        end_idx = min(size - 1, int(right.start_index) - 1)
+        if end_idx - start_idx < 3:
+            continue
+        local = weak_vowel_score[start_idx : end_idx + 1]
+        if local.size == 0:
+            continue
+        peak_rel = int(np.argmax(local))
+        peak_idx = start_idx + peak_rel
+        peak_score = float(local[peak_rel])
+        if peak_score < 0.12:
+            continue
+        edge_gap = min(float(times[peak_idx]) - float(left.end_ms), float(right.start_ms) - float(times[peak_idx]))
+        if edge_gap < 28.0:
+            continue
+        candidates.append((gap_ms * max(0.35, peak_score), idx, peak_idx, start_idx))
+    if not candidates:
+        return None
+    _score, insert_after, peak_idx, _start_idx = max(candidates, key=lambda item: item[0])
+    left = islands[insert_after]
+    right = islands[insert_after + 1]
+    threshold = max(0.10, min(0.42, float(weak_vowel_score[peak_idx]) * 0.46))
+    start = int(peak_idx)
+    while start > int(left.end_index) + 1 and weak_vowel_score[start - 1] >= threshold:
+        if float(times[peak_idx]) - float(times[start - 1]) > 190.0:
+            break
+        start -= 1
+    end = int(peak_idx)
+    while end + 1 < int(right.start_index) and weak_vowel_score[end + 1] >= threshold:
+        if float(times[end + 1]) - float(times[peak_idx]) > 210.0:
+            break
+        end += 1
+    if end <= start:
+        start = max(int(left.end_index) + 1, int(peak_idx) - 2)
+        end = min(int(right.start_index) - 1, int(peak_idx) + 2)
+    inserted = _island_from_indices(start, end, times, weak_vowel_score)
+    if inserted is None:
+        return None
+    if float(inserted.end_ms) - float(inserted.start_ms) < 18.0:
+        return None
+    out = list(islands)
+    out.insert(insert_after + 1, inserted)
+    return sorted(out, key=lambda item: item.start_ms)
+
+
 def _slot_island_score(
     slot_index: int,
     slot_count: int,
@@ -385,7 +462,13 @@ def _slot_island_score(
 ) -> float:
     island = islands[int(island_index)]
     duration = max(1.0, float(duration_ms))
-    expected_time = (float(slot_index) + 0.5) / max(1.0, float(slot_count)) * duration
+    if len(islands) > 1 and slot_count > 1:
+        observed_start = float(islands[0].nucleus_ms)
+        observed_end = float(islands[-1].nucleus_ms)
+        observed_span = max(1.0, observed_end - observed_start)
+        expected_time = observed_start + (float(slot_index) / float(slot_count - 1)) * observed_span
+    else:
+        expected_time = (float(slot_index) + 0.5) / max(1.0, float(slot_count)) * duration
     distance = abs(float(island.nucleus_ms) - expected_time) / duration
     if len(islands) > 1 and slot_count > 1:
         expected_order = float(slot_index) / float(slot_count - 1)

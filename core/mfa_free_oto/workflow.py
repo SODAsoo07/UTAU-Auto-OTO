@@ -11,6 +11,12 @@ from core.generation.common.oto_file_utils import apply_alias_suffix
 from core.model_context.builder import row_specs_to_model_contexts
 from core.model_context.oto_rows import load_row_specs_from_source_oto
 
+from .evidence_pack import (
+    build_acoustic_evidence_pack,
+    candidate_priors_from_evidence_pack,
+    summarize_event_candidate_reliability,
+)
+from .hsmm_adapter import decode_filename_slots_with_hsmm
 from .manifest_audit import infer_filename_phone_sequence
 from .oto_adapter import (
     OtoAdapterConfig,
@@ -21,6 +27,7 @@ from .oto_adapter import (
     expected_slots_for_template_rows,
     load_oto_template_rows_alias_only,
 )
+from .row_plan import build_filename_slots, build_filename_template_rows
 from .runtime_inference import RuntimePrediction, predict_wav
 
 # Weights for the aggregate NoMfaWorkflowReport.confidence score. Must sum to 1.0.
@@ -36,6 +43,7 @@ _CONF_SLOT_WARNING_PENALTY = 0.02
 _C_ONSET_LEAD_MS = 18.0  # consonant onset placed this far before the vowel start
 _C_ONSET_REPAIR_MS = 6.0  # fallback gap when c_onset lands after the cv boundary
 _V_OFFSET_REPAIR_MS = 8.0  # fallback gap when v_offset lands before the cv boundary
+TIMELINE_DEBUG_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -98,6 +106,8 @@ class NoMfaWorkflowReport:
     guard_failed: bool
     metrics: dict[str, float] = field(default_factory=dict)
     rows: tuple[NoMfaRowResult, ...] = ()
+    timeline_debug: tuple[Mapping[str, object], ...] = ()
+    evidence_debug: tuple[Mapping[str, object], ...] = ()
 
 
 def generate_no_mfa_oto_with_model_context(
@@ -113,6 +123,7 @@ def generate_no_mfa_oto_with_model_context(
     encoder: str | None = None,
     device: str | None = None,
     use_slot_viterbi: bool = True,
+    use_hsmm_decoder: bool = False,
     guard: NoMfaWorkflowGuard | None = None,
     runtime_policy: WorldV1RuntimePolicy | None = None,
     callback: Callable[[str], None] | None = None,
@@ -164,6 +175,8 @@ def generate_no_mfa_oto_with_model_context(
     cv_conf_values: list[float] = []
     nucleus_conf_values: list[float] = []
     rule_based_per_wav: list[str] = []
+    timeline_debug: list[dict[str, object]] = []
+    evidence_debug: list[dict[str, object]] = []
 
     if source_oto:
         template_rows = load_oto_template_rows_alias_only(source_oto)
@@ -200,9 +213,18 @@ def generate_no_mfa_oto_with_model_context(
                 use_slot_viterbi=use_slot_viterbi,
                 language=language,
             )
+            prediction_events = list(_event_source_for_oto(prediction))
+            evidence_pack = build_acoustic_evidence_pack(
+                prediction.posterior,
+                wav_name=wav_key,
+                expected_phones=expected_phones,
+                filename_slots=(),
+                runtime_events=prediction_events,
+            )
+            evidence_debug.append(evidence_pack)
             _collect_prediction_metrics(prediction, slot_scores, warnings, rule_based_per_wav)
             slot_warning_count += len(prediction.slot_result.warnings if prediction.slot_result is not None else ())
-            decoded_source = _event_source_for_oto(prediction)
+            decoded_source = list(prediction_events)
             file_duration_ms = _wav_duration_ms(wav_path, warnings)
             row_anchors = assign_template_row_anchors(
                 prediction.posterior,
@@ -221,12 +243,20 @@ def generate_no_mfa_oto_with_model_context(
                 alias_type=alias_type,
                 vc_pre_max_ms=vc_pre_max_ms,
             )
+            timeline_rows: list[dict[str, object]] = []
             for template_row, anchor in zip(template_group, row_anchors):
                 adapted = adapt_template_row(
                     template_row,
                     anchor,
                     file_duration_ms=file_duration_ms,
                     config=adapter_config,
+                )
+                timeline_rows.append(
+                    _adapted_row_debug(
+                        adapted,
+                        row_index=len(timeline_rows),
+                        row_plan_record=_template_row_plan_context(template_row, len(timeline_rows)),
+                    )
                 )
                 rows_total += 1
                 if adapted.anchor is not None:
@@ -253,59 +283,182 @@ def generate_no_mfa_oto_with_model_context(
                     )
                 )
                 all_lines.append(apply_alias_suffix(adapted.format_line(), alias_suffix))
+            timeline_debug.append(
+                _build_timeline_debug_record(
+                    wav_name=wav_key,
+                    wav_path=wav_path,
+                    use_hsmm_decoder_requested=False,
+                    selected_event_source="runtime_prediction",
+                    expected_phones=expected_phones,
+                    filename_slots=(),
+                    expected_slots=expected_slots or (),
+                    prediction=prediction,
+                    prediction_events=prediction_events,
+                    selected_events=decoded_source,
+                    hsmm=None,
+                    adapted_rows=timeline_rows,
+                    evidence=evidence_pack,
+                )
+            )
     else:
         wav_files = sorted(Path(wav_root).glob("*.wav"))
         for wav_path in wav_files:
+            template_group, row_plan_phones, row_plan_records = build_filename_template_rows(
+                wav_path.name,
+                language=language,
+                format_type=format_type,
+            )
+            row_plan_slots = build_filename_slots(wav_path.name, language=language, format_type=format_type)
+            expected_phones = list(row_plan_phones or infer_filename_phone_sequence(wav_path.name))
+            expected_slots = (
+                expected_slots_for_template_rows(template_group, expected_phones)
+                if template_group and expected_phones
+                else None
+            )
             prediction = predict_wav(
                 wav_path,
                 checkpoint_path=checkpoint_path,
-                expected_phones=infer_filename_phone_sequence(wav_path.name),
+                expected_phones=expected_phones,
+                expected_slots=expected_slots,
                 encoder=encoder,
                 device=device,
                 use_slot_viterbi=use_slot_viterbi,
                 language=language,
             )
+            prediction_events = list(_event_source_for_oto(prediction))
+            evidence_pack = build_acoustic_evidence_pack(
+                prediction.posterior,
+                wav_name=wav_path.name,
+                expected_phones=expected_phones,
+                filename_slots=row_plan_slots,
+                runtime_events=prediction_events,
+            )
+            evidence_debug.append(evidence_pack)
             _collect_prediction_metrics(prediction, slot_scores, warnings, rule_based_per_wav)
             slot_warning_count += len(prediction.slot_result.warnings if prediction.slot_result is not None else ())
-            anchors = anchors_from_prediction(prediction.posterior, _event_source_for_oto(prediction))
-            adapted = bootstrap_row(
-                wav_path.name,
-                wav_path.stem,
-                anchors[0] if anchors else None,
-                file_duration_ms=_wav_duration_ms(str(wav_path), warnings),
-                config=OtoAdapterConfig(
-                    mode="bootstrap",
-                    language=language,
-                    format_type=format_type,
-                    alias_type=alias_type,
-                    vc_pre_max_ms=vc_pre_max_ms,
-                ),
+            decoded_source = list(prediction_events)
+            selected_event_source = "runtime_prediction"
+            hsmm = None
+            if use_hsmm_decoder and row_plan_slots:
+                candidate_priors = candidate_priors_from_evidence_pack(evidence_pack, row_plan_slots)
+                hsmm = decode_filename_slots_with_hsmm(
+                    prediction.posterior,
+                    row_plan_slots,
+                    event_priors=(*prediction_events, *candidate_priors),
+                )
+                if hsmm.ok and hsmm.events:
+                    if _hsmm_event_sequence_matches_expected(
+                        expected_slots or (),
+                        hsmm.events,
+                        runtime_events=_runtime_events_for_hsmm_guard(prediction, prediction_events),
+                    ):
+                        decoded_source = list(hsmm.events)
+                        selected_event_source = "filename_hsmm"
+                        warnings.append("filename_hsmm_decoder_used")
+                    else:
+                        warnings.append("filename_hsmm_decoder_rejected:event_sequence_mismatch")
+                else:
+                    warnings.append(f"filename_hsmm_decoder_failed:{hsmm.result.reason}")
+            file_duration_ms = _wav_duration_ms(str(wav_path), warnings)
+            adapter_config = OtoAdapterConfig(
+                mode="template-preserve" if template_group else "bootstrap",
+                language=language,
+                format_type=format_type,
+                alias_type=alias_type,
+                vc_pre_max_ms=vc_pre_max_ms,
             )
-            rows_total += 1
-            if adapted.anchor is not None:
-                row_anchor_hits += 1
-                anchor_scores.append(float(adapted.anchor.score))
-            evidence = _build_boundary_evidence(prediction.posterior, adapted, policy=policy)
-            row_conf = _row_confidence(adapted, evidence, policy=policy)
-            cv_conf_values.append(_safe_conf(evidence.cv_confidence if evidence.cv_boundary is not None else 0.0))
-            nucleus_conf_values.append(_safe_conf(evidence.nucleus_confidence if evidence.nucleus is not None else 0.0))
-            row_results.append(
-                NoMfaRowResult(
-                    wav_key=str(wav_path.name).lower(),
-                    alias=str(adapted.alias or ""),
-                    oto_params={
-                        "offset": float(adapted.timing.offset),
-                        "consonant": float(adapted.timing.consonant),
-                        "cutoff": float(adapted.timing.cutoff),
-                        "preutterance": float(adapted.timing.preutterance),
-                        "overlap": float(adapted.timing.overlap),
-                    },
-                    confidence=row_conf,
-                    boundary_evidence=evidence,
-                    warnings=tuple(dict.fromkeys((*adapted.warnings, *evidence.warnings))),
+            adapted_rows = []
+            if template_group:
+                row_anchors = assign_template_row_anchors(
+                    prediction.posterior,
+                    decoded_source,
+                    template_group,
+                    min_score=0.02,
+                    use_source_timing_prior=False,
+                    expected_phones=expected_phones,
+                )
+                if one_step_shift_repair_enabled:
+                    row_anchors = _repair_anchor_monotonicity(row_anchors)
+                for template_row, anchor in zip(template_group, row_anchors):
+                    row_index = len(adapted_rows)
+                    adapted_rows.append(
+                        adapt_template_row(
+                            template_row,
+                            anchor,
+                            file_duration_ms=file_duration_ms,
+                            config=_adapter_config_for_row_plan_record(
+                                adapter_config,
+                                row_plan_records[row_index] if row_index < len(row_plan_records) else None,
+                            ),
+                        )
+                    )
+            else:
+                anchors = anchors_from_prediction(prediction.posterior, decoded_source)
+                adapted_rows.append(
+                    bootstrap_row(
+                        wav_path.name,
+                        wav_path.stem,
+                        anchors[0] if anchors else None,
+                        file_duration_ms=file_duration_ms,
+                        config=OtoAdapterConfig(
+                            mode="bootstrap",
+                            language=language,
+                            format_type=format_type,
+                            alias_type=alias_type,
+                            vc_pre_max_ms=vc_pre_max_ms,
+                        ),
+                    )
+                )
+            for adapted in adapted_rows:
+                rows_total += 1
+                if adapted.anchor is not None:
+                    row_anchor_hits += 1
+                    anchor_scores.append(float(adapted.anchor.score))
+                evidence = _build_boundary_evidence(prediction.posterior, adapted, policy=policy)
+                row_conf = _row_confidence(adapted, evidence, policy=policy)
+                cv_conf_values.append(_safe_conf(evidence.cv_confidence if evidence.cv_boundary is not None else 0.0))
+                nucleus_conf_values.append(_safe_conf(evidence.nucleus_confidence if evidence.nucleus is not None else 0.0))
+                row_results.append(
+                    NoMfaRowResult(
+                        wav_key=str(wav_path.name).lower(),
+                        alias=str(adapted.alias or ""),
+                        oto_params={
+                            "offset": float(adapted.timing.offset),
+                            "consonant": float(adapted.timing.consonant),
+                            "cutoff": float(adapted.timing.cutoff),
+                            "preutterance": float(adapted.timing.preutterance),
+                            "overlap": float(adapted.timing.overlap),
+                        },
+                        confidence=row_conf,
+                        boundary_evidence=evidence,
+                        warnings=tuple(dict.fromkeys((*adapted.warnings, *evidence.warnings))),
+                    )
+                )
+                all_lines.append(apply_alias_suffix(adapted.format_line(), alias_suffix))
+            timeline_debug.append(
+                _build_timeline_debug_record(
+                    wav_name=wav_path.name,
+                    wav_path=str(wav_path),
+                    use_hsmm_decoder_requested=bool(use_hsmm_decoder),
+                    selected_event_source=selected_event_source,
+                    expected_phones=expected_phones,
+                    filename_slots=row_plan_slots,
+                    expected_slots=expected_slots or (),
+                    prediction=prediction,
+                    prediction_events=prediction_events,
+                    selected_events=decoded_source,
+                    hsmm=hsmm,
+                    adapted_rows=[
+                        _adapted_row_debug(
+                            adapted,
+                            row_index=row_index,
+                            row_plan_record=row_plan_records[row_index] if row_index < len(row_plan_records) else None,
+                        )
+                        for row_index, adapted in enumerate(adapted_rows)
+                    ],
+                    evidence=evidence_pack,
                 )
             )
-            all_lines.append(apply_alias_suffix(adapted.format_line(), alias_suffix))
 
     if rows_total <= 0 or not all_lines:
         errors.append("no_rows_generated")
@@ -403,7 +556,240 @@ def generate_no_mfa_oto_with_model_context(
             "runtime_policy_row_boundary_weight": float(policy.row_boundary_weight),
         },
         rows=tuple(row_results),
+        timeline_debug=tuple(timeline_debug),
+        evidence_debug=tuple(evidence_debug),
     )
+
+
+def _build_timeline_debug_record(
+    *,
+    wav_name: str,
+    wav_path: str,
+    use_hsmm_decoder_requested: bool,
+    selected_event_source: str,
+    expected_phones: Iterable[str],
+    filename_slots: Iterable[object],
+    expected_slots: Iterable[object],
+    prediction: RuntimePrediction,
+    prediction_events: Iterable[Mapping[str, object]],
+    selected_events: Iterable[Mapping[str, object]],
+    hsmm: object | None,
+    adapted_rows: Iterable[Mapping[str, object]],
+    evidence: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": TIMELINE_DEBUG_SCHEMA_VERSION,
+        "wav": str(wav_name or ""),
+        "wav_path": os.path.abspath(str(wav_path or "")),
+        "use_hsmm_decoder_requested": bool(use_hsmm_decoder_requested),
+        "selected_event_source": str(selected_event_source or ""),
+        "expected_phones": [str(phone) for phone in expected_phones],
+        "filename_slots": [_json_safe(item) for item in filename_slots],
+        "expected_slots": [_expected_slot_debug(item) for item in expected_slots],
+        "posterior_summary": _posterior_summary(prediction.posterior),
+        "prediction_events": [_event_debug(event) for event in prediction_events],
+        "selected_events": [_event_debug(event) for event in selected_events],
+        "slot_assignments": [
+            {
+                "slot_index": int(assignment.slot_index),
+                "phone_index": int(assignment.phone_index),
+                "phone": str(assignment.phone),
+                "role": str(assignment.role),
+                "event_label": str(assignment.event_label),
+                "selected_time_ms": _round_ms(assignment.selected_time_ms),
+                "score": _round_score(assignment.score),
+                "frame_index": int(assignment.frame_index),
+                "expected_time_ms": (
+                    _round_ms(assignment.expected_time_ms)
+                    if assignment.expected_time_ms is not None
+                    else None
+                ),
+            }
+            for assignment in (prediction.slot_result.assignments if prediction.slot_result is not None else ())
+        ],
+        "slot_warnings": list(prediction.slot_result.warnings if prediction.slot_result is not None else ()),
+        "slot_average_score": (
+            _round_score(prediction.slot_result.average_score)
+            if prediction.slot_result is not None
+            else None
+        ),
+        "hsmm": _hsmm_debug(hsmm) if hsmm is not None else None,
+        "evidence": _evidence_debug(evidence),
+        "adapted_rows": [dict(row) for row in adapted_rows],
+    }
+
+
+def _evidence_debug(evidence: Mapping[str, object] | None) -> dict[str, object]:
+    if not isinstance(evidence, Mapping):
+        return {}
+    return {
+        "schema_version": evidence.get("schema_version", ""),
+        "wav_sha256": evidence.get("wav_sha256", ""),
+        "extractor_version": evidence.get("extractor_version", ""),
+        "decoder_version": evidence.get("decoder_version", ""),
+        "timebase": dict(evidence.get("timebase", {}) or {}) if isinstance(evidence.get("timebase"), Mapping) else {},
+        "reliability": dict(evidence.get("reliability", {}) or {}) if isinstance(evidence.get("reliability"), Mapping) else {},
+        "event_candidate_count": len(list(evidence.get("event_candidates", []) or [])),
+        "event_candidate_summary": summarize_event_candidate_reliability(evidence),
+    }
+
+
+def _posterior_summary(posterior) -> dict[str, object]:
+    frame_count = int(posterior.frame_count())
+    times = list(posterior.times_ms)
+    duration_ms = float(times[-1]) if times else 0.0
+    if len(times) >= 2:
+        duration_ms += max(0.0, float(times[-1]) - float(times[-2]))
+    return {
+        "frame_count": frame_count,
+        "duration_ms": _round_ms(duration_ms),
+        "metadata": dict(posterior.metadata or {}),
+        "event_peaks": {
+            label: _top_track_peaks(posterior.times_ms, posterior.event_scores.get(label, ()))
+            for label in ("phone_change", "cv_boundary", "vowel_nucleus")
+        },
+        "class_peaks": {
+            label: _top_track_peaks(posterior.times_ms, posterior.class_probs.get(label, ()), limit=3)
+            for label in ("consonant", "vowel")
+        },
+    }
+
+
+def _hsmm_debug(hsmm) -> dict[str, object]:
+    return {
+        "ok": bool(hsmm.ok),
+        "reason": str(hsmm.result.reason),
+        "score": _round_score(hsmm.result.score),
+        "timeout": bool(hsmm.result.timeout),
+        "pruned_endpoint_count": int(hsmm.result.pruned_endpoint_count),
+        "meta": dict(hsmm.result.meta or {}),
+        "states": [
+            {
+                "state_id": str(state.state_id),
+                "state_type": str(state.state_type),
+                "start_ms": _round_ms(state.start_ms),
+                "end_ms": _round_ms(state.end_ms),
+                "duration_ms": _round_ms(state.duration_ms),
+                "score": _round_score(state.score),
+                "start_frame": int(state.start_frame),
+                "end_frame": int(state.end_frame),
+            }
+            for state in hsmm.result.states
+        ],
+        "events": [_event_debug(event) for event in hsmm.events],
+        "diagnostics": _json_safe(getattr(hsmm, "diagnostics", {})),
+        "state_specs": [
+            {
+                "state_id": str(state.state_id),
+                "state_type": str(state.state_type),
+                "min_duration_ms": _round_ms(state.min_duration_ms),
+                "max_duration_ms": _round_ms(state.max_duration_ms),
+                "mode_duration_ms": _round_ms(state.mode_duration_ms),
+                "duration_sigma_ms": _round_ms(state.duration_sigma_ms),
+            }
+            for state in hsmm.states
+        ],
+    }
+
+
+def _adapted_row_debug(adapted, *, row_index: int, row_plan_record: object | None = None) -> dict[str, object]:
+    payload = adapted.to_json_dict()
+    payload["row_index"] = int(row_index)
+    payload["raw_line"] = adapted.format_line()
+    if row_plan_record is not None:
+        payload["row_plan"] = _json_safe(row_plan_record)
+    return payload
+
+
+def _template_row_plan_context(template_row: object, row_index: int) -> dict[str, object]:
+    return {
+        "wav": str(getattr(template_row, "wav", "") or ""),
+        "alias": str(getattr(template_row, "alias", "") or ""),
+        "row_index": int(row_index),
+        "slot_index": -1,
+        "left_slot_index": -1,
+        "right_slot_index": -1,
+        "source_row_index": int(getattr(template_row, "source_row_index", -1)),
+        "source_timing_trusted": False,
+        "warnings": ["template_source_timing_untrusted"],
+    }
+
+
+def _expected_slot_debug(slot: object) -> dict[str, object]:
+    return {
+        "slot_index": int(getattr(slot, "slot_index", -1)),
+        "phone_index": int(getattr(slot, "phone_index", -1)),
+        "phone": str(getattr(slot, "phone", "")),
+        "role": str(getattr(slot, "role", "")),
+        "event_label": str(getattr(slot, "event_label", "")),
+    }
+
+
+def _event_debug(event: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "label": str(event.get("label", "")),
+        "selected_time_ms": _round_ms(event.get("selected_time_ms", event.get("time_ms", 0.0))),
+        "score": _round_score(event.get("score", 0.0)),
+        "expected_phone": str(event.get("expected_phone", "") or ""),
+        "expected_phone_index": _int_or_none(event.get("expected_phone_index")),
+        "slot_index": _int_or_none(event.get("slot_index")),
+        "frame_index": _int_or_none(event.get("frame_index")),
+        "source": str(event.get("source", "") or ""),
+    }
+
+
+def _top_track_peaks(
+    times: Iterable[float],
+    values: Iterable[float],
+    *,
+    limit: int = 5,
+) -> list[dict[str, object]]:
+    pairs = [
+        (idx, float(time_ms), float(score))
+        for idx, (time_ms, score) in enumerate(zip(times, values))
+    ]
+    pairs.sort(key=lambda item: item[2], reverse=True)
+    return [
+        {
+            "frame_index": int(idx),
+            "time_ms": _round_ms(time_ms),
+            "score": _round_score(score),
+        }
+        for idx, time_ms, score in pairs[: max(0, int(limit))]
+    ]
+
+
+def _json_safe(value: object) -> object:
+    if hasattr(value, "to_json_dict"):
+        return value.to_json_dict()
+    if isinstance(value, Mapping):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _round_ms(value: object) -> float:
+    try:
+        return round(float(value), 3)
+    except Exception:
+        return 0.0
+
+
+def _round_score(value: object) -> float:
+    try:
+        return round(float(value), 6)
+    except Exception:
+        return 0.0
+
+
+def _int_or_none(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
 
 
 def _posterior_rule_based_reason(prediction: RuntimePrediction) -> str:
@@ -453,6 +839,111 @@ def _event_source_for_oto(prediction: RuntimePrediction) -> Iterable[dict[str, o
         }
         for assignment in prediction.slot_result.assignments
     ]
+
+
+def _runtime_events_for_hsmm_guard(
+    prediction: RuntimePrediction,
+    prediction_events: Iterable[Mapping[str, object]],
+) -> tuple[Mapping[str, object], ...]:
+    meta = prediction.posterior.metadata or {}
+    if bool(meta.get("rule_based")):
+        return ()
+    return tuple(prediction_events)
+
+
+def _adapter_config_for_row_plan_record(
+    config: OtoAdapterConfig,
+    row_plan_record: object | None,
+) -> OtoAdapterConfig:
+    role = str(getattr(row_plan_record, "role_family", "") or "").strip().lower()
+    if role in {"cv", "cv_head", "vcv", "vc", "vv", "v"} and role != str(config.alias_type or "").strip().lower():
+        return replace(config, alias_type=role)
+    return config
+
+
+def _hsmm_event_sequence_matches_expected(
+    expected_slots: Iterable[object],
+    hsmm_events: Iterable[Mapping[str, object]],
+    *,
+    runtime_events: Iterable[Mapping[str, object]] = (),
+    max_runtime_delta_ms: float = 250.0,
+) -> bool:
+    expected = [
+        (
+            str(getattr(slot, "event_label", "")),
+            _int_field(getattr(slot, "phone_index", -1), default=-1),
+            str(getattr(slot, "role", "") or ""),
+        )
+        for slot in expected_slots
+    ]
+    expected = [item for item in expected if item[0]]
+    if not expected:
+        return True
+    hsmm_items: list[tuple[tuple[str, int], Mapping[str, object]]] = []
+    hsmm_cursor = 0
+    hsmm_list = list(hsmm_events)
+    for expected_key in expected:
+        matched: tuple[tuple[str, int], Mapping[str, object]] | None = None
+        for idx in range(hsmm_cursor, len(hsmm_list)):
+            event = hsmm_list[idx]
+            label = str(event.get("label", ""))
+            if label not in {"phone_change", "cv_boundary", "vowel_nucleus"}:
+                continue
+            key = (label, _int_field(event.get("expected_phone_index", -1), default=-1))
+            if _hsmm_event_matches_expected_slot(expected_key, key):
+                matched = ((expected_key[0], expected_key[1]), event)
+                hsmm_cursor = idx + 1
+                break
+        if matched is None:
+            return False
+        hsmm_items.append(matched)
+
+    runtime_by_key: dict[tuple[str, int], list[float]] = {}
+    for event in runtime_events:
+        label = str(event.get("label", ""))
+        if label not in {"phone_change", "cv_boundary", "vowel_nucleus"}:
+            continue
+        key = (label, _int_field(event.get("expected_phone_index", -1), default=-1))
+        runtime_by_key.setdefault(key, []).append(float(event.get("selected_time_ms", 0.0) or 0.0))
+    for key, event in hsmm_items:
+        runtime_times = runtime_by_key.get(key) or []
+        if not runtime_times:
+            continue
+        hsmm_time = float(event.get("selected_time_ms", 0.0) or 0.0)
+        if min(abs(hsmm_time - runtime_time) for runtime_time in runtime_times) > float(max_runtime_delta_ms):
+            return False
+    return True
+
+
+def _hsmm_event_matches_expected_slot(
+    expected: tuple[str, int, str],
+    actual: tuple[str, int],
+) -> bool:
+    expected_label, expected_phone_index, expected_role = expected
+    actual_label, actual_phone_index = actual
+    if int(actual_phone_index) != int(expected_phone_index):
+        return False
+    if actual_label == expected_label:
+        return True
+    # A vowel-only first slot has no consonant state, so the filename HSMM
+    # emits its only reliable anchor as a nucleus. For a cv_head row that is
+    # still the right ordered slot; later local refinement can pull it to the
+    # nearest boundary evidence. Do not apply this to implicit/interior CV
+    # boundaries, where losing the consonant boundary would be unsafe.
+    return (
+        str(expected_label) == "cv_boundary"
+        and str(expected_role).strip().lower() == "cv_head"
+        and str(actual_label) == "vowel_nucleus"
+    )
+
+
+def _int_field(value: object, *, default: int = -1) -> int:
+    if value is None:
+        return int(default)
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
 
 
 def _expected_phones(wav_name: str, contexts: list) -> list[str]:

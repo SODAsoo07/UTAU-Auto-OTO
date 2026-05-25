@@ -142,25 +142,27 @@ def filename_syllable_order_tokens(
     *,
     language: str = "",
 ) -> list[str]:
-    tokens = filename_order_tokens(wav_name)
     lang = str(language or "").strip().lower()
+    if lang in {"ja", "japanese", "jp"}:
+        try:
+            from core.ja_lab_generator import parse_ja_filename
+
+            parsed = parse_ja_filename(str(wav_name or ""))
+        except Exception:
+            parsed = []
+        if isinstance(parsed, dict):
+            items = list(parsed.get("syllables") or [])
+        elif isinstance(parsed, (list, tuple)):
+            items = list(parsed)
+        else:
+            items = []
+        parsed_tokens = [_plain_order_token(item) for item in items if _plain_order_token(item)]
+        if parsed_tokens:
+            return parsed_tokens
+    tokens = filename_order_tokens(wav_name)
     if tokens:
         return tokens
-    if lang not in {"ja", "japanese", "jp"}:
-        return []
-    try:
-        from core.ja_lab_generator import parse_ja_filename
-
-        parsed = parse_ja_filename(str(wav_name or ""))
-    except Exception:
-        parsed = []
-    if isinstance(parsed, dict):
-        items = list(parsed.get("syllables") or [])
-    elif isinstance(parsed, (list, tuple)):
-        items = list(parsed)
-    else:
-        items = []
-    return [canonicalize_order_token(item) for item in items if canonicalize_order_token(item)]
+    return []
 
 
 def ordered_token_match(expected: Sequence[object], observed: Sequence[object]) -> tuple[int, float]:

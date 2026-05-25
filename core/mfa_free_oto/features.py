@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import struct
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +24,9 @@ class FeatureBatch:
     duration_ms: float
     encoder: str
     acoustic_scores: Mapping[str, np.ndarray] = field(default_factory=dict)
+    source_sample_rate: int = 0
+    frame_ms: float = 0.0
+    hop_ms: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -35,11 +39,21 @@ class AcousticFeatureConfig:
 
 
 def read_wav_mono(path: str | Path, *, target_sample_rate: int | None = None) -> tuple[np.ndarray, int]:
-    with wave.open(str(path), "rb") as handle:
-        channels = handle.getnchannels()
-        sample_width = handle.getsampwidth()
-        sample_rate = handle.getframerate()
-        frames = handle.readframes(handle.getnframes())
+    try:
+        with wave.open(str(path), "rb") as handle:
+            channels = handle.getnchannels()
+            sample_width = handle.getsampwidth()
+            sample_rate = handle.getframerate()
+            frames = handle.readframes(handle.getnframes())
+    except wave.Error as exc:
+        try:
+            data, sample_rate = _read_ieee_float_wav_mono(path)
+        except ValueError:
+            raise exc
+        if target_sample_rate and target_sample_rate != sample_rate:
+            data = _resample_linear(data, sample_rate, target_sample_rate)
+            sample_rate = target_sample_rate
+        return np.asarray(data, dtype=np.float32), int(sample_rate)
     if sample_width == 1:
         data = (np.frombuffer(frames, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
     elif sample_width == 2:
@@ -65,6 +79,60 @@ def read_wav_mono(path: str | Path, *, target_sample_rate: int | None = None) ->
     return np.asarray(data, dtype=np.float32), int(sample_rate)
 
 
+def _read_ieee_float_wav_mono(path: str | Path) -> tuple[np.ndarray, int]:
+    raw = Path(path).read_bytes()
+    if len(raw) < 12 or raw[:4] != b"RIFF" or raw[8:12] != b"WAVE":
+        raise ValueError("not_riff_wave")
+
+    fmt: bytes | None = None
+    data_chunk: bytes | None = None
+    offset = 12
+    while offset + 8 <= len(raw):
+        chunk_id = raw[offset : offset + 4]
+        chunk_size = int.from_bytes(raw[offset + 4 : offset + 8], "little", signed=False)
+        data_start = offset + 8
+        data_end = min(data_start + chunk_size, len(raw))
+        if chunk_id == b"fmt ":
+            fmt = raw[data_start:data_end]
+        elif chunk_id == b"data":
+            data_chunk = raw[data_start:data_end]
+        offset = data_start + chunk_size + (chunk_size % 2)
+
+    if fmt is None or data_chunk is None or len(fmt) < 16:
+        raise ValueError("missing_float_wav_chunks")
+    format_tag, channels, sample_rate, _byte_rate, block_align, bits_per_sample = struct.unpack_from("<HHIIHH", fmt, 0)
+    if format_tag == 0xFFFE and len(fmt) >= 40:
+        subtype = fmt[24:40]
+        ieee_float_guid = bytes.fromhex("0300000000001000800000aa00389b71")
+        if subtype == ieee_float_guid:
+            format_tag = 3
+    if format_tag != 3:
+        raise ValueError(f"unsupported_wave_format:{format_tag}")
+    if channels <= 0 or sample_rate <= 0:
+        raise ValueError("invalid_float_wav_format")
+
+    if bits_per_sample == 32:
+        dtype = "<f4"
+    elif bits_per_sample == 64:
+        dtype = "<f8"
+    else:
+        raise ValueError(f"unsupported_float_wav_bits:{bits_per_sample}")
+    bytes_per_sample = bits_per_sample // 8
+    if block_align and block_align != channels * bytes_per_sample:
+        raise ValueError("float_wav_block_align_mismatch")
+    usable = (len(data_chunk) // bytes_per_sample) * bytes_per_sample
+    if usable <= 0:
+        raise ValueError("empty_float_wav_data")
+    data = np.frombuffer(data_chunk[:usable], dtype=dtype).astype(np.float32)
+    if data.size % channels != 0:
+        data = data[: data.size - (data.size % channels)]
+    if data.size == 0:
+        raise ValueError("empty_float_wav_samples")
+    if channels > 1:
+        data = data.reshape(-1, channels).mean(axis=1)
+    return np.clip(np.nan_to_num(data, nan=0.0, posinf=1.0, neginf=-1.0), -1.0, 1.0).astype(np.float32), int(sample_rate)
+
+
 def extract_features(
     wav_path: str | Path,
     *,
@@ -73,6 +141,7 @@ def extract_features(
     device: str | None = None,
 ) -> FeatureBatch:
     normalized_encoder = encoder.replace("_", "-").lower()
+    source_sample_rate = _wav_sample_rate_if_available(wav_path)
     if normalized_encoder in {"acoustic-world", "acoustic-world-v1", "world", "world-v1"}:
         config = acoustic_config or AcousticFeatureConfig()
         samples, sample_rate = read_wav_mono(wav_path, target_sample_rate=config.sample_rate)
@@ -85,6 +154,9 @@ def extract_features(
             duration_ms=duration_ms,
             encoder="acoustic_world_v1",
             acoustic_scores=world.scores,
+            source_sample_rate=source_sample_rate or sample_rate,
+            frame_ms=float(config.frame_ms),
+            hop_ms=float(config.hop_ms),
         )
     if normalized_encoder == "acoustic":
         config = acoustic_config or AcousticFeatureConfig()
@@ -99,6 +171,9 @@ def extract_features(
             duration_ms=duration_ms,
             encoder=encoder,
             acoustic_scores=aux.scores,
+            source_sample_rate=source_sample_rate or sample_rate,
+            frame_ms=float(config.frame_ms),
+            hop_ms=float(config.hop_ms),
         )
     if normalized_encoder in {"acoustic-aux", "aux", "logmel-aux"}:
         config = acoustic_config or AcousticFeatureConfig()
@@ -112,6 +187,9 @@ def extract_features(
             duration_ms=duration_ms,
             encoder=encoder,
             acoustic_scores=aux.scores,
+            source_sample_rate=source_sample_rate or sample_rate,
+            frame_ms=float(config.frame_ms),
+            hop_ms=float(config.hop_ms),
         )
     if normalized_encoder.endswith("+aux"):
         base_encoder = encoder[: -len("+aux")]
@@ -122,6 +200,26 @@ def extract_features(
             device=device,
         )
     return extract_ssl_features(wav_path, encoder=encoder, device=device)
+
+
+def feature_timebase_metadata(batch: FeatureBatch) -> dict[str, object]:
+    source_sample_rate = int(batch.source_sample_rate or batch.sample_rate or 0)
+    analysis_sample_rate = int(batch.sample_rate or source_sample_rate or 0)
+    metadata: dict[str, object] = {
+        "source_sample_rate": source_sample_rate,
+        "analysis_sample_rate": analysis_sample_rate,
+        "frame_time_anchor": "left",
+        "feature_latency_ms": 0.0,
+        "padding_policy": "reflect",
+        "rounding": "round_half_up_0.01ms",
+    }
+    if float(batch.frame_ms or 0.0) > 0.0:
+        metadata["window_size_ms"] = float(batch.frame_ms)
+    if float(batch.hop_ms or 0.0) > 0.0:
+        metadata["frame_shift_ms"] = float(batch.hop_ms)
+    if source_sample_rate and analysis_sample_rate and source_sample_rate != analysis_sample_rate:
+        metadata["resample_method"] = "linear"
+    return metadata
 
 
 @dataclass(frozen=True)
@@ -391,6 +489,7 @@ def extract_ssl_features(
         raise RuntimeError(
             "SSL encoder mode requires torch and transformers. Install ML dependencies or use --encoder acoustic."
         ) from exc
+    source_sample_rate = _wav_sample_rate_if_available(wav_path)
     samples, sample_rate = read_wav_mono(wav_path, target_sample_rate=16000)
     processor, model = _get_ssl_model(model_id, device=device)
     target_device = next(model.parameters()).device
@@ -407,6 +506,7 @@ def extract_ssl_features(
         sample_rate=sample_rate,
         duration_ms=duration_ms,
         encoder=encoder,
+        source_sample_rate=source_sample_rate or sample_rate,
     )
 
 
@@ -454,7 +554,18 @@ def extract_ssl_plus_aux_features(
         duration_ms=ssl.duration_ms,
         encoder=f"{encoder}+aux",
         acoustic_scores=scores,
+        source_sample_rate=ssl.source_sample_rate or ssl.sample_rate,
+        frame_ms=ssl.frame_ms,
+        hop_ms=ssl.hop_ms,
     )
+
+
+def _wav_sample_rate_if_available(path: str | Path) -> int:
+    try:
+        with wave.open(str(path), "rb") as handle:
+            return int(handle.getframerate())
+    except Exception:
+        return 0
 
 
 def _resample_linear(samples: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
