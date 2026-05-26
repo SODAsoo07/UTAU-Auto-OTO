@@ -16,6 +16,12 @@ from core.no_mfa_oto_builder import (
 from core.oto_generator import generate_oto
 from core.pipeline_status import normalize_aligner_name
 from core.preflight_common import collect_runtime_preflight_issues
+from ui.voicebank_batch import (
+    discover_recursive_voicebank_dirs,
+    has_top_level_wavs,
+    resolve_recursive_out_path,
+    resolve_voicebank_batch_targets,
+)
 
 
 class OtoActionsMixin:
@@ -62,41 +68,10 @@ class OtoActionsMixin:
 
     @staticmethod
     def _has_top_level_wavs(folder_path: str) -> bool:
-        try:
-            return any(str(name).lower().endswith(".wav") for name in os.listdir(folder_path))
-        except Exception:
-            return False
+        return has_top_level_wavs(folder_path)
 
     def _discover_recursive_voicebank_dirs(self, root_dir: str) -> list[str]:
-        root = os.path.abspath(str(root_dir or "").strip())
-        if not root or not os.path.isdir(root):
-            return []
-
-        candidates: list[str] = []
-        for cur_root, _dirs, files in os.walk(root):
-            if any(str(name).lower().endswith(".wav") for name in files):
-                candidates.append(os.path.abspath(cur_root))
-
-        if not candidates:
-            return []
-
-        deduped = sorted(set(candidates), key=lambda path: (len(path), path.lower()))
-        leaf_only: list[str] = []
-        for current in deduped:
-            current_norm = os.path.normcase(os.path.abspath(current)).rstrip("\\/")
-            child_prefix = current_norm + os.sep
-            has_child_candidate = False
-            for other in deduped:
-                if other == current:
-                    continue
-                other_norm = os.path.normcase(os.path.abspath(other))
-                if other_norm.startswith(child_prefix):
-                    has_child_candidate = True
-                    break
-            if not has_child_candidate:
-                leaf_only.append(current)
-
-        return leaf_only or deduped
+        return discover_recursive_voicebank_dirs(root_dir)
 
     @staticmethod
     def _resolve_recursive_out_path(
@@ -105,37 +80,7 @@ class OtoActionsMixin:
         target_wav_dir: str,
         target_count: int,
     ) -> str:
-        target_abs = os.path.abspath(str(target_wav_dir or "").strip())
-        out_raw = str(base_out_path or "").strip()
-        if target_count <= 1:
-            if out_raw:
-                if os.path.isdir(out_raw) or out_raw.endswith(("\\", "/")):
-                    return os.path.join(os.path.abspath(out_raw), "oto.ini")
-                return out_raw
-            return os.path.join(target_abs, "oto.ini")
-
-        if not out_raw:
-            return os.path.join(target_abs, "oto.ini")
-
-        out_abs = os.path.abspath(out_raw)
-        out_ext = str(os.path.splitext(out_abs)[1] or "").lower()
-        if out_ext == ".ini":
-            out_root = os.path.dirname(out_abs)
-            out_name = os.path.basename(out_abs) or "oto.ini"
-        else:
-            out_root = out_abs
-            out_name = "oto.ini"
-        root_abs = os.path.abspath(str(root_wav_dir or "").strip())
-        rel = ""
-        try:
-            rel = os.path.relpath(target_abs, root_abs)
-        except Exception:
-            rel = ""
-        if not rel or rel.startswith(".."):
-            rel = os.path.basename(target_abs)
-        if rel in {".", ""}:
-            return os.path.join(out_root, out_name)
-        return os.path.join(out_root, rel, out_name)
+        return resolve_recursive_out_path(root_wav_dir, base_out_path, target_wav_dir, target_count)
 
     def _run_oto_gen(self):
         def task():
@@ -246,30 +191,19 @@ class OtoActionsMixin:
                     self._append_log("오류: 출력 경로를 입력해 주세요.")
                     return
 
-                if batch_scan_enabled:
-                    target_wav_dirs = self._discover_recursive_voicebank_dirs(root_wav_dir)
-                    if not target_wav_dirs:
+                batch_targets = resolve_voicebank_batch_targets(
+                    root_wav_dir,
+                    base_out_path,
+                    batch_scan_enabled=batch_scan_enabled,
+                )
+                if not batch_targets:
+                    if batch_scan_enabled:
                         self._append_log("오류: 하위 폴더에서 WAV 파일이 있는 보이스 폴더를 찾지 못했습니다.")
-                        self._set_status("오류: 배치 대상 없음")
-                        return
-                else:
-                    target_wav_dirs = [os.path.abspath(root_wav_dir)]
-
-                target_count = len(target_wav_dirs)
-                if target_count > 1:
-                    self._append_log(f"ℹ 하위 폴더 자동 탐색 활성화: 총 {target_count}개 보이스 폴더를 순차 처리합니다.")
-                elif batch_scan_enabled:
-                    self._append_log("ℹ 하위 폴더 자동 탐색 활성화: 처리 대상 1개를 찾았습니다.")
-                _update_oto_stage(t("입력 경로 확인 완료"), 0.07, force=True)
-
-                if batch_scan_enabled:
-                    target_wav_dirs = self._discover_recursive_voicebank_dirs(root_wav_dir)
-                    if not target_wav_dirs:
-                        self._append_log("오류: 하위 폴더에서 WAV 파일이 있는 보이스 폴더를 찾지 못했습니다.")
-                        self._set_status("오류: 배치 대상 없음")
-                        return
-                else:
-                    target_wav_dirs = [os.path.abspath(root_wav_dir)]
+                    else:
+                        self._append_log("오류: WAV 폴더를 찾지 못했습니다.")
+                    self._set_status("오류: 배치 대상 없음")
+                    return
+                target_wav_dirs = [target.wav_dir for target in batch_targets]
 
                 target_count = len(target_wav_dirs)
                 if target_count > 1:
@@ -280,7 +214,7 @@ class OtoActionsMixin:
 
                 # 일반 OTO 경로에서는 파이프라인과 동일한 사전 점검을 먼저 수행합니다.
                 # (영어 Preview / 한국어 템플릿 전용 포맷은 별도 전용 분기에서 검사)
-                if not (
+                if (not batch_scan_enabled) and not (
                     lang == "english"
                     or (lang == "korean" and selected_format in {"cmpx", "c_plus_v"})
                 ):
@@ -626,6 +560,14 @@ class OtoActionsMixin:
                                 wav_dir=target_wav_dir,
                                 source_hint=tpl_path,
                             )
+                        self._append_log(
+                            f"{prefix}HSMM OTO 시작: target={target_wav_dir}, "
+                            f"format={selected_format}, lightgbm={'ON' if enable_ml_correction else 'OFF'}"
+                        )
+                        if hsmm_source_oto:
+                            self._append_log(f"{prefix}[HSMM] base oto: {hsmm_source_oto}")
+                        else:
+                            self._append_log(f"{prefix}[HSMM] no base oto: filename slots will be used.")
                         _update_oto_local("HSMM OTO generation", 0.22, force=True)
                         processed, total, errors = self._run_hsmm_oto_preview_generation(
                             wav_dir=target_wav_dir,
@@ -636,6 +578,7 @@ class OtoActionsMixin:
                             apply_lightgbm=enable_ml_correction,
                             callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                         )
+                        self._append_log(f"{prefix}HSMM OTO 완료: processed={processed}/{total}, errors={len(errors or [])}")
                     elif no_mfa_auto_mode:
                         _update_oto_local("No-MFA OTO generation", 0.22, force=True)
                         processed, total, errors = generate_no_mfa_auto_oto(

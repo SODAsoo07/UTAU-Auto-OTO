@@ -55,10 +55,53 @@ from core.generation.mapping_runtime import (
     format_mapping_summary,
 )
 from ui.i18n import t
+from ui.voicebank_batch import (
+    VoicebankBatchTarget,
+    resolve_voicebank_batch_targets,
+)
 
 
 
 class PipelineActionsMixin:
+    def _is_recursive_voicebank_scan_enabled(self) -> bool:
+        try:
+            return bool(self.recursive_voicebank_scan_var.get()) if hasattr(self, "recursive_voicebank_scan_var") else False
+        except Exception:
+            return False
+
+    def _resolve_voicebank_batch_targets_for_ui(
+        self,
+        root_wav_dir: str,
+        base_out_path: str = "",
+    ) -> tuple[list[VoicebankBatchTarget], bool]:
+        batch_scan_enabled = self._is_recursive_voicebank_scan_enabled()
+        targets = resolve_voicebank_batch_targets(
+            root_wav_dir,
+            base_out_path,
+            batch_scan_enabled=batch_scan_enabled,
+        )
+        if batch_scan_enabled and not targets:
+            self._append_log("❌ 하위 폴더에서 WAV 파일이 있는 보이스 폴더를 찾지 못했습니다.")
+            self._set_status("❌ 배치 대상 없음")
+        elif (not batch_scan_enabled) and not targets:
+            self._append_log(f"❌ WAV 폴더가 존재하지 않습니다: {root_wav_dir}")
+            self._set_status("❌ WAV 경로 오류")
+        return targets, batch_scan_enabled
+
+    def _append_voicebank_batch_summary(
+        self,
+        targets: list[VoicebankBatchTarget],
+        *,
+        batch_scan_enabled: bool,
+        stage_name: str,
+    ) -> None:
+        if not batch_scan_enabled:
+            return
+        if len(targets) > 1:
+            self._append_log(f"ℹ {stage_name}: 하위 WAV 폴더 {len(targets)}개를 pitch별로 순차 처리합니다.")
+        elif targets:
+            self._append_log(f"ℹ {stage_name}: 하위 WAV 폴더 1개를 처리합니다.")
+
     def _run_hsmm_oto_preview_generation(
         self,
         *,
@@ -145,9 +188,12 @@ class PipelineActionsMixin:
             self._append_log("[HSMM OTO] no base oto; filename row-plan and acoustic events are used.")
         if bool(apply_lightgbm):
             self._append_log(f"[HSMM OTO] LightGBM postprocess requested (policy={policy}).")
+        self._append_log(f"[HSMM OTO] input wav dir: {os.path.abspath(wav_dir)}")
         self._append_log(f"[HSMM OTO] preview artifacts: {preview_dir}")
+        self._append_log("[HSMM OTO] stage 1/4: prepare decoder workspace")
         pretty = " ".join(f'"{part}"' if (" " in str(part) or "\t" in str(part)) else str(part) for part in cmd)
         self._append_log(f"[HSMM OTO] 실행: {pretty}")
+        self._append_log("[HSMM OTO] stage 2/4: run HSMM/acoustic decoder")
         proc = self._popen_subprocess_hidden(
             cmd,
             cwd=str(getattr(self, "app_dir", "") or os.getcwd()),
@@ -160,9 +206,11 @@ class PipelineActionsMixin:
             stdout_lines.append(line)
             self._append_log(f"[HSMM OTO] {line}")
         proc.wait()
+        self._append_log(f"[HSMM OTO] decoder process finished: code={int(proc.returncode)}")
         if int(proc.returncode) != 0:
             return 0, 0, [f"HSMM OTO generation failed (code={int(proc.returncode)})"]
 
+        self._append_log("[HSMM OTO] stage 3/4: copy generated oto")
         preview_summary = self._parse_hsmm_oto_preview_summary(stdout_lines)
         generated_path = str(preview_summary.get("generated_oto_path") or "").strip()
         out_path_abs = os.path.abspath(out_path)
@@ -189,6 +237,7 @@ class PipelineActionsMixin:
         self._append_log(f"[HSMM OTO] preview oto: {out_path_abs}")
         if generated_path:
             self._append_log(f"[HSMM OTO] generated source: {generated_path}")
+        self._append_log("[HSMM OTO] stage 4/4: summarize review split")
         self._log_hsmm_oto_preview_split_summary(preview_summary)
         return row_count, total_count or row_count, []
 
@@ -2226,46 +2275,65 @@ class PipelineActionsMixin:
                         return
 
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
+                targets, batch_scan_enabled = self._resolve_voicebank_batch_targets_for_ui(wav_dir)
+                if not targets:
+                    return
+                self._append_voicebank_batch_summary(
+                    targets,
+                    batch_scan_enabled=batch_scan_enabled,
+                    stage_name="Lab+사전 생성",
+                )
 
-                if lang == "japanese":
-                    lab_count, lab_total, lab_errors = generate_ja_labs(
-                        wav_dir,
-                        custom_phonemes_path=custom_phonemes_path,
-                        callback=self._append_log,
-                    )
-                else:
-                    lab_count, lab_total, lab_errors = generate_labs(
-                        wav_dir,
-                        custom_phonemes_path=custom_phonemes_path,
-                        callback=self._append_log,
-                    )
-                if lab_errors:
-                    for err in lab_errors:
-                        self._append_log(f"  ⚠ {err}")
-                self._append_log(f"🧪 Lab 생성 완료 ({lab_count}/{lab_total})")
+                total_lab_count = 0
+                total_lab_files = 0
+                total_entries = 0
+                for target in targets:
+                    prefix = f"[Batch {target.index + 1}/{target.total}] " if target.total > 1 else ""
+                    target_wav_dir = target.wav_dir
+                    if target.total > 1:
+                        self._append_log(f"{prefix}대상 폴더: {target_wav_dir}")
+                    if lang == "japanese":
+                        lab_count, lab_total, lab_errors = generate_ja_labs(
+                            target_wav_dir,
+                            custom_phonemes_path=custom_phonemes_path,
+                            callback=self._append_log,
+                        )
+                    else:
+                        lab_count, lab_total, lab_errors = generate_labs(
+                            target_wav_dir,
+                            custom_phonemes_path=custom_phonemes_path,
+                            callback=self._append_log,
+                        )
+                    if lab_errors:
+                        for err in lab_errors:
+                            self._append_log(f"  ⚠ {err}")
+                    self._append_log(f"{prefix}🧪 Lab 생성 완료 ({lab_count}/{lab_total})")
+                    total_lab_count += int(lab_count or 0)
+                    total_lab_files += int(lab_total or 0)
 
-                dict_filename = "japanese_dict.txt" if lang == "japanese" else "korean_dict.txt"
-                dict_path = os.path.join(wav_dir, dict_filename)
-                if lang == "japanese":
-                    _count, entries, dict_errors = generate_ja_dictionary(
-                        wav_dir,
-                        dict_path,
-                        custom_phonemes_path=custom_phonemes_path,
-                        callback=self._append_log,
-                    )
-                else:
-                    _count, entries, dict_errors = generate_dictionary(
-                        wav_dir,
-                        dict_path,
-                        custom_phonemes_path=custom_phonemes_path,
-                        callback=self._append_log,
-                    )
-                if dict_errors:
-                    for err in dict_errors:
-                        self._append_log(f"  ⚠ {err}")
-                self._append_log(f"📝 사전 저장 경로: {dict_path}")
+                    dict_filename = "japanese_dict.txt" if lang == "japanese" else "korean_dict.txt"
+                    dict_path = os.path.join(target_wav_dir, dict_filename)
+                    if lang == "japanese":
+                        _count, entries, dict_errors = generate_ja_dictionary(
+                            target_wav_dir,
+                            dict_path,
+                            custom_phonemes_path=custom_phonemes_path,
+                            callback=self._append_log,
+                        )
+                    else:
+                        _count, entries, dict_errors = generate_dictionary(
+                            target_wav_dir,
+                            dict_path,
+                            custom_phonemes_path=custom_phonemes_path,
+                            callback=self._append_log,
+                        )
+                    if dict_errors:
+                        for err in dict_errors:
+                            self._append_log(f"  ⚠ {err}")
+                    total_entries += int(entries or 0)
+                    self._append_log(f"{prefix}📝 사전 저장 경로: {dict_path}")
                 self._set_status(
-                    f"✅ Lab+사전 생성 완료 (Lab {lab_count}/{lab_total}, Dict {entries}개 항목)"
+                    f"✅ Lab+사전 생성 완료 (Lab {total_lab_count}/{total_lab_files}, Dict {total_entries}개 항목)"
                 )
             except Exception as e:
                 self._handle_error("Lab+사전 생성", e)
@@ -2291,14 +2359,39 @@ class PipelineActionsMixin:
                     return
 
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
+                targets, batch_scan_enabled = self._resolve_voicebank_batch_targets_for_ui(wav_dir)
+                if not targets:
+                    return
+                self._append_voicebank_batch_summary(
+                    targets,
+                    batch_scan_enabled=batch_scan_enabled,
+                    stage_name="Lab 생성",
+                )
 
-                if lang == "japanese":
-                    count, total, errors = generate_ja_labs(wav_dir, custom_phonemes_path=custom_phonemes_path, callback=self._append_log)
-                else:
-                    count, total, errors = generate_labs(wav_dir, custom_phonemes_path=custom_phonemes_path, callback=self._append_log)
-                if errors:
-                    for e in errors:
-                        self._append_log(f"  ⚠ {e}")
+                count = 0
+                total = 0
+                for target in targets:
+                    prefix = f"[Batch {target.index + 1}/{target.total}] " if target.total > 1 else ""
+                    if target.total > 1:
+                        self._append_log(f"{prefix}대상 폴더: {target.wav_dir}")
+                    if lang == "japanese":
+                        c, t, errors = generate_ja_labs(
+                            target.wav_dir,
+                            custom_phonemes_path=custom_phonemes_path,
+                            callback=self._append_log,
+                        )
+                    else:
+                        c, t, errors = generate_labs(
+                            target.wav_dir,
+                            custom_phonemes_path=custom_phonemes_path,
+                            callback=self._append_log,
+                        )
+                    count += int(c or 0)
+                    total += int(t or 0)
+                    if errors:
+                        for e in errors:
+                            self._append_log(f"  ⚠ {e}")
+                    self._append_log(f"{prefix}Lab 생성 완료 ({c}/{t})")
                 self._set_status(f"✅ Lab 생성 완료 ({count}/{total})")
             except Exception as e:
                 self._handle_error("Lab 생성", e)
@@ -2327,21 +2420,46 @@ class PipelineActionsMixin:
                     if not self._confirm_language_script_mismatch(lang, wav_dir, stage_name=t("사전 생성")):
                         self._set_status("취소됨: 언어 설정 확인")
                         return
-                if lang == 'japanese':
-                    dict_filename = "japanese_dict.txt"
-                else:
-                    dict_filename = "korean_dict.txt"
-                dict_path = os.path.join(wav_dir, dict_filename)
-                
-                if lang == 'japanese':
-                    count, entries, errors = generate_ja_dictionary(wav_dir, dict_path, custom_phonemes_path=custom_phonemes_path, callback=self._append_log)
-                else:
-                    count, entries, errors = generate_dictionary(wav_dir, dict_path, custom_phonemes_path=custom_phonemes_path, callback=self._append_log)
-                if errors:
-                    for e in errors:
-                        self._append_log(f"  ⚠ {e}")
-                self._append_log(f"📝 사전 저장 경로: {dict_path}")
-                self._set_status(f"✅ 사전 생성 완료 ({entries}개 항목)")
+                targets, batch_scan_enabled = self._resolve_voicebank_batch_targets_for_ui(wav_dir)
+                if not targets:
+                    return
+                self._append_voicebank_batch_summary(
+                    targets,
+                    batch_scan_enabled=batch_scan_enabled,
+                    stage_name="사전 생성",
+                )
+
+                total_entries = 0
+                for target in targets:
+                    prefix = f"[Batch {target.index + 1}/{target.total}] " if target.total > 1 else ""
+                    if target.total > 1:
+                        self._append_log(f"{prefix}대상 폴더: {target.wav_dir}")
+                    if lang == 'japanese':
+                        dict_filename = "japanese_dict.txt"
+                    else:
+                        dict_filename = "korean_dict.txt"
+                    dict_path = os.path.join(target.wav_dir, dict_filename)
+
+                    if lang == 'japanese':
+                        _count, entries, errors = generate_ja_dictionary(
+                            target.wav_dir,
+                            dict_path,
+                            custom_phonemes_path=custom_phonemes_path,
+                            callback=self._append_log,
+                        )
+                    else:
+                        _count, entries, errors = generate_dictionary(
+                            target.wav_dir,
+                            dict_path,
+                            custom_phonemes_path=custom_phonemes_path,
+                            callback=self._append_log,
+                        )
+                    if errors:
+                        for e in errors:
+                            self._append_log(f"  ⚠ {e}")
+                    total_entries += int(entries or 0)
+                    self._append_log(f"{prefix}📝 사전 저장 경로: {dict_path}")
+                self._set_status(f"✅ 사전 생성 완료 ({total_entries}개 항목)")
             except Exception as e:
                 self._handle_error(t("사전 생성"), e)
             finally:
@@ -2723,6 +2841,330 @@ class PipelineActionsMixin:
 
         self._run_in_thread(task)
 
+    def _run_full_pipeline_batch_targets(
+        self,
+        targets: list[VoicebankBatchTarget],
+        *,
+        lang: str,
+        selected_format: str,
+        base_tpl_path: str,
+        aligner_engine: str,
+        no_mfa_mode_code: str,
+        custom_phonemes_path: str,
+    ) -> tuple[int, int]:
+        success_count = 0
+        failed_count = 0
+        gen_dash_alias = self.gen_dash_alias_var.get() if hasattr(self, "gen_dash_alias_var") else True
+        enable_ml_correction = self.enable_ml_correction_var.get()
+        auto_format = self.auto_format_var.get()
+        alias_suffix = self.alias_suffix_var.get().strip()
+        auto_policy = self._apply_auto_ml_policy_env(
+            lang,
+            auto_format,
+            enable_ml_default=enable_ml_correction,
+            gen_dash_alias=gen_dash_alias,
+        )
+        enable_ml_correction = bool(auto_policy.get("enable_ml"))
+        self._apply_advanced_tuning_envs()
+        self._append_log(
+            f"[OTO-ML] auto policy: ml={'ON' if enable_ml_correction else 'OFF'}, "
+            f"route={auto_policy.get('route')}, coupled={'ON' if auto_policy.get('has_coupled') else 'OFF'}, "
+            f"hybrid={'ON' if auto_policy.get('hybrid_routing') else 'OFF'}"
+        )
+
+        for target in targets:
+            prefix = f"[Batch {target.index + 1}/{target.total}] " if target.total > 1 else ""
+            target_wav_dir = target.wav_dir
+            target_out_path = target.out_path
+            target_tpl_path = "" if self.no_base_oto_var.get() else str(base_tpl_path or "").strip()
+            textgrid_dir = os.path.join(target_wav_dir, "textgrids")
+            self._append_log(f"{prefix}대상 폴더: {target_wav_dir}")
+            self._append_log(f"{prefix}출력 경로: {target_out_path}")
+
+            def _set_target_progress(local_ratio: float) -> None:
+                try:
+                    local = max(0.0, min(1.0, float(local_ratio)))
+                except Exception:
+                    local = 0.0
+                self._set_progress((float(target.index) + local) / float(max(1, target.total)))
+
+            def _make_target_callback(stage_start: float, stage_span: float):
+                def _cb(msg):
+                    text = str(msg or "")
+                    self._append_log(f"{prefix}{text}")
+                    ratio = self._parse_progress_ratio_from_status(text) if hasattr(self, "_parse_progress_ratio_from_status") else None
+                    if ratio is not None:
+                        _set_target_progress(stage_start + stage_span * float(ratio))
+                return _cb
+
+            cleanup_snapshot = self._snapshot_output_tree_for_cleanup(target_out_path)
+            processed = 0
+            total = 0
+            errors: list[str] = []
+            ok = False
+            try:
+                if lang == "english":
+                    errors = ["영어 Preview CVVC는 배치 전체 실행에서 지원하지 않습니다."]
+                elif lang == "korean" and selected_format == "cmpx":
+                    source_oto = resolve_kr_cmpx_preview_source_oto(
+                        wav_dir=target_wav_dir,
+                        source_hint=target_tpl_path,
+                    )
+                    if not source_oto:
+                        errors = ["한국어 CMPX Preview용 베이스 OTO를 찾지 못했습니다."]
+                    else:
+                        self._set_status(f"{prefix}KR CMPX Preview OTO 생성 중...")
+                        processed, total, errors = generate_kr_cmpx_preview_oto(
+                            wav_dir=target_wav_dir,
+                            out_path=target_out_path,
+                            source_oto_path=source_oto,
+                            alias_suffix=alias_suffix,
+                            callback=_make_target_callback(0.20, 0.65),
+                        )
+                elif lang == "korean" and selected_format == "c_plus_v":
+                    source_oto = resolve_no_mfa_source_oto(
+                        wav_dir=target_wav_dir,
+                        source_hint=target_tpl_path,
+                    )
+                    if not source_oto:
+                        errors = ["한국어 C+V 모드용 베이스 OTO를 찾지 못했습니다."]
+                    else:
+                        self._set_status(f"{prefix}KR C+V OTO 생성 중...")
+                        processed, total, errors = generate_no_mfa_auto_oto(
+                            wav_dir=target_wav_dir,
+                            out_path=target_out_path,
+                            source_oto_path=source_oto,
+                            alias_suffix=alias_suffix,
+                            language=lang,
+                            stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
+                            generation_mode="remap",
+                            callback=_make_target_callback(0.20, 0.65),
+                        )
+                elif aligner_engine == "hsmm_oto":
+                    hsmm_source_oto = ""
+                    if not bool(self.no_base_oto_var.get()):
+                        hsmm_source_oto = resolve_no_mfa_source_oto(
+                            wav_dir=target_wav_dir,
+                            source_hint=target_tpl_path,
+                        )
+                    self._append_log(
+                        f"{prefix}HSMM OTO 시작: language={lang}, format={selected_format}, "
+                        f"lightgbm={'ON' if enable_ml_correction else 'OFF'}"
+                    )
+                    if hsmm_source_oto:
+                        self._append_log(f"{prefix}[HSMM] base oto: {hsmm_source_oto}")
+                    else:
+                        self._append_log(f"{prefix}[HSMM] no base oto: filename slots will be used.")
+                    self._set_status(f"{prefix}HSMM OTO 생성 중...")
+                    _set_target_progress(0.20)
+                    processed, total, errors = self._run_hsmm_oto_preview_generation(
+                        wav_dir=target_wav_dir,
+                        out_path=target_out_path,
+                        source_oto_path=hsmm_source_oto,
+                        language=lang,
+                        format_type=selected_format,
+                        apply_lightgbm=enable_ml_correction,
+                        callback=_make_target_callback(0.20, 0.65),
+                    )
+                    self._append_log(f"{prefix}HSMM OTO 완료: processed={processed}/{total}, errors={len(errors or [])}")
+                elif aligner_engine == "none":
+                    if bool(self.no_base_oto_var.get()):
+                        errors = ["No-MFA 자동설정 모드에서는 베이스 OTO가 필요합니다."]
+                    else:
+                        source_oto = resolve_no_mfa_source_oto(
+                            wav_dir=target_wav_dir,
+                            source_hint=target_tpl_path,
+                        )
+                        if not source_oto:
+                            errors = ["No-MFA 자동설정용 베이스 OTO를 찾지 못했습니다."]
+                        else:
+                            self._set_status(f"{prefix}No-MFA OTO 생성 중...")
+                            processed, total, errors = generate_no_mfa_auto_oto(
+                                wav_dir=target_wav_dir,
+                                out_path=target_out_path,
+                                source_oto_path=source_oto,
+                                alias_suffix=alias_suffix,
+                                language=lang,
+                                stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
+                                generation_mode=no_mfa_mode_code,
+                                callback=_make_target_callback(0.20, 0.65),
+                            )
+                else:
+                    self._set_status(f"{prefix}Lab 파일 생성 중...")
+                    if lang == "japanese":
+                        lab_count, lab_total, lab_errors = generate_ja_labs(
+                            target_wav_dir,
+                            custom_phonemes_path=custom_phonemes_path,
+                            callback=_make_target_callback(0.02, 0.18),
+                        )
+                    else:
+                        lab_count, lab_total, lab_errors = generate_labs(
+                            target_wav_dir,
+                            custom_phonemes_path=custom_phonemes_path,
+                            callback=_make_target_callback(0.02, 0.18),
+                        )
+                    if lab_errors:
+                        for err in lab_errors:
+                            self._append_log(f"{prefix}⚠ {err}")
+                    self._append_log(f"{prefix}Lab 생성 완료 ({lab_count}/{lab_total})")
+                    _set_target_progress(0.22)
+
+                    dict_filename = "japanese_dict.txt" if lang == "japanese" else "korean_dict.txt"
+                    dict_path = os.path.join(target_wav_dir, dict_filename)
+                    self._set_status(f"{prefix}사전 파일 생성 중...")
+                    if lang == "japanese":
+                        generate_ja_dictionary(
+                            target_wav_dir,
+                            dict_path,
+                            custom_phonemes_path=custom_phonemes_path,
+                            callback=_make_target_callback(0.22, 0.12),
+                        )
+                    else:
+                        generate_dictionary(
+                            target_wav_dir,
+                            dict_path,
+                            custom_phonemes_path=custom_phonemes_path,
+                            callback=_make_target_callback(0.22, 0.12),
+                        )
+                    _set_target_progress(0.36)
+
+                    primary_engine = normalize_aligner_name(aligner_engine, default="mfa")
+                    if primary_engine == "mfa":
+                        if not self._ensure_mfa_ready_for_language(lang):
+                            errors = ["MFA 설치/모델 준비 실패"]
+                        elif not self._validate_alignment_input_files(target_wav_dir, dict_path):
+                            errors = ["정렬 입력 파일 점검 실패"]
+                    if not errors:
+                        self._set_status(f"{prefix}정렬 실행 중...")
+                        align_result = run_alignment_with_fallback(
+                            language=lang,
+                            wav_folder=target_wav_dir,
+                            dictionary_path=dict_path,
+                            output_folder=textgrid_dir,
+                            primary_aligner=primary_engine,
+                            fallback_aligner="",
+                            mfa_path=self.mfa_path or "",
+                            mfa_align_profile=(
+                                self._get_mfa_align_profile_code()
+                                if hasattr(self, "_get_mfa_align_profile_code")
+                                else "accurate"
+                            ),
+                            format_hint=selected_format,
+                            callback=_make_target_callback(0.36, 0.24),
+                        )
+                        if not bool(align_result.get("ok", False)):
+                            self._append_log(
+                                f"{prefix}⚠ 정렬 실패 상태로 OTO 생성을 계속합니다: {align_result.get('message', '')}"
+                            )
+                    _set_target_progress(0.62)
+
+                    if not errors:
+                        preflight = collect_runtime_preflight_issues(
+                            language=lang,
+                            wav_dir=target_wav_dir,
+                            out_path=target_out_path,
+                            aligner=self.aligner_var.get(),
+                            textgrid_dir=textgrid_dir,
+                            tpl_path=target_tpl_path,
+                            no_mfa_oto_mode=no_mfa_mode_code,
+                            no_base_oto=bool(self.no_base_oto_var.get()),
+                            custom_phonemes_path=custom_phonemes_path,
+                            require_output=True,
+                        )
+                        error_records = list(preflight.get("error_records") or [])
+                        if error_records:
+                            for item in error_records:
+                                self._append_log(f"{prefix}❌ {item.get('display')}")
+                            errors = ["사전 점검 실패"]
+
+                    if not errors:
+                        self._set_status(f"{prefix}OTO 생성 중...")
+                        gen_ou = self.openutau_var.get()
+                        gen_missing = self.gen_missing_vowels_var.get()
+                        if lang == "japanese":
+                            processed, total, errors = generate_ja_oto(
+                                textgrid_dir,
+                                target_tpl_path,
+                                target_out_path,
+                                params=None,
+                                generate_openutau=gen_ou,
+                                gen_missing_vowels=gen_missing,
+                                enable_ml_correction=enable_ml_correction,
+                                alias_style=self._get_ja_alias_style_code(),
+                                ja_mapping_words_fallback_enabled=bool(
+                                    self.ja_mapping_words_fallback_enabled_var.get()
+                                    if hasattr(self, "ja_mapping_words_fallback_enabled_var")
+                                    else True
+                                ),
+                                ja_mapping_spn_ratio_threshold=float(
+                                    self.ja_mapping_spn_ratio_threshold_var.get()
+                                    if hasattr(self, "ja_mapping_spn_ratio_threshold_var")
+                                    else 0.35
+                                ),
+                                ja_mapping_min_vowel_phone_ratio=float(
+                                    self.ja_mapping_min_vowel_phone_ratio_var.get()
+                                    if hasattr(self, "ja_mapping_min_vowel_phone_ratio_var")
+                                    else 0.5
+                                ),
+                                ja_mapping_debug_reason_logging=bool(
+                                    self.ja_mapping_debug_reason_logging_var.get()
+                                    if hasattr(self, "ja_mapping_debug_reason_logging_var")
+                                    else True
+                                ),
+                                auto_format=auto_format,
+                                custom_phonemes_path=custom_phonemes_path,
+                                alias_suffix=alias_suffix,
+                                callback=_make_target_callback(0.62, 0.26),
+                            )
+                        else:
+                            processed, total, errors = generate_oto(
+                                textgrid_dir,
+                                target_tpl_path,
+                                target_out_path,
+                                self._get_params(),
+                                gen_ou,
+                                gen_missing,
+                                enable_ml_correction=enable_ml_correction,
+                                auto_format=auto_format,
+                                custom_phonemes_path=custom_phonemes_path,
+                                alias_suffix=alias_suffix,
+                                callback=_make_target_callback(0.62, 0.26),
+                            )
+
+                if errors:
+                    self._append_log(f"{prefix}❌ 실패: {len(errors)}건")
+                    for err in errors:
+                        self._append_log(f"{prefix}  - {err}")
+                elif not os.path.isfile(target_out_path):
+                    errors = [f"OTO 파일 저장 실패: {target_out_path}"]
+                    self._append_log(f"{prefix}❌ {errors[0]}")
+                else:
+                    _set_target_progress(0.90)
+                    self._set_status(f"{prefix}OTO 자동 검증 중...")
+                    self._run_auto_validation(
+                        target_wav_dir,
+                        textgrid_dir,
+                        target_out_path,
+                        callback=_make_target_callback(0.90, 0.08),
+                    )
+                    self._cleanup_generated_output_artifacts(target_out_path, snapshot=cleanup_snapshot)
+                    _set_target_progress(1.0)
+                    self._append_log(f"{prefix}✅ 완료: {target_out_path} ({processed}/{total})")
+                    ok = True
+            except Exception as exc:
+                self._append_log(f"{prefix}❌ 배치 처리 실패: {exc}")
+
+            if ok:
+                success_count += 1
+            else:
+                failed_count += 1
+
+        if failed_count:
+            self._set_status(f"완료(부분 성공): 배치 전체 실행 {success_count}/{len(targets)}")
+        else:
+            self._set_status(f"✅ 배치 전체 실행 완료 ({success_count}/{len(targets)})")
+        return success_count, failed_count
+
     def _run_full_pipeline(self):
         """Lab 생성 → 정렬 → OTO 생성 → 검증 순서로 전체 파이프라인을 실행합니다."""
         def task():
@@ -2825,6 +3267,28 @@ class PipelineActionsMixin:
                 no_mfa_mode_text = "베이스 OTO 재매핑 + 보정"
                 no_mfa_source_oto = ""
                 source_oto_required_for_no_mfa = True
+                if self._is_recursive_voicebank_scan_enabled():
+                    batch_targets, batch_scan_enabled = self._resolve_voicebank_batch_targets_for_ui(
+                        wav_dir,
+                        out_path,
+                    )
+                    if not batch_targets:
+                        return
+                    self._append_voicebank_batch_summary(
+                        batch_targets,
+                        batch_scan_enabled=batch_scan_enabled,
+                        stage_name="전체 실행",
+                    )
+                    self._run_full_pipeline_batch_targets(
+                        batch_targets,
+                        lang=lang,
+                        selected_format=selected_format,
+                        base_tpl_path=tpl_path_preflight,
+                        aligner_engine=aligner_engine,
+                        no_mfa_mode_code=no_mfa_mode_code,
+                        custom_phonemes_path=custom_phonemes_path,
+                    )
+                    return
                 if no_mfa_auto_mode:
                     if source_oto_required_for_no_mfa and bool(self.no_base_oto_var.get()):
                         self._append_log("❌ No-MFA 자동설정 모드에서는 베이스 OTO(템플릿 ini)가 필요합니다.")
