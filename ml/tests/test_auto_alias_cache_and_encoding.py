@@ -2,7 +2,7 @@ import importlib
 import sys
 import types
 
-from core.auto_alias_reference import _ALIAS_REFERENCE_CACHE, collect_auto_alias_reference
+from core.generation.common.auto_alias_reference import _ALIAS_REFERENCE_CACHE, collect_auto_alias_reference
 from core.oto_encoding import detect_text_file_encoding, is_shift_jis_family_encoding
 
 
@@ -36,7 +36,7 @@ def test_auto_alias_reference_uses_cache_on_second_call(tmp_path, monkeypatch):
     assert first["matched_files"] >= 1
     assert len(first["aliases"]) >= 6
 
-    import core.auto_alias_reference as auto_alias_reference
+    import core.generation.common.auto_alias_reference as auto_alias_reference
 
     def _must_not_scan(*_args, **_kwargs):
         raise AssertionError("reference scan should not run on cache hit")

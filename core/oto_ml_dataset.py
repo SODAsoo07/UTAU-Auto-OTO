@@ -1,66 +1,11 @@
-﻿"""
-Dataset builders for OTO ML correction.
-"""
+"""Compatibility wrapper: moved to `core.oto_ml.oto_ml_dataset`."""
 
-from __future__ import annotations
+from importlib import import_module as _import_module
 
-import os
-from typing import Dict, List, Tuple
+_impl = _import_module("core.oto_ml.oto_ml_dataset")
+for _name, _value in _impl.__dict__.items():
+    if _name.startswith("__"):
+        continue
+    globals()[_name] = _value
 
-from core.oto_ml_features import build_training_rows, write_dataset_csv
-
-
-def build_oto_ml_dataset(
-    language: str,
-    auto_oto_path: str,
-    manual_oto_path: str,
-    tg_dir: str,
-    wav_dir: str,
-    custom_phonemes_path: str = "",
-    voicebank_id: str = "",
-    format_type_override: str = "",
-    auto_oto_policy: str = "",
-) -> Tuple[List[Dict[str, object]], Dict[str, int]]:
-    return build_training_rows(
-        language=language,
-        auto_oto_path=auto_oto_path,
-        manual_oto_path=manual_oto_path,
-        tg_dir=tg_dir,
-        wav_dir=wav_dir,
-        custom_phonemes_path=custom_phonemes_path,
-        voicebank_id=voicebank_id,
-        format_type_override=format_type_override,
-        auto_oto_policy=auto_oto_policy,
-    )
-
-
-def build_and_save_oto_ml_dataset(
-    language: str,
-    auto_oto_path: str,
-    manual_oto_path: str,
-    tg_dir: str,
-    wav_dir: str,
-    out_csv: str,
-    custom_phonemes_path: str = "",
-    voicebank_id: str = "",
-    append: bool = False,
-    format_type_override: str = "",
-    auto_oto_policy: str = "",
-) -> Dict[str, int]:
-    rows, stats = build_oto_ml_dataset(
-        language=language,
-        auto_oto_path=auto_oto_path,
-        manual_oto_path=manual_oto_path,
-        tg_dir=tg_dir,
-        wav_dir=wav_dir,
-        custom_phonemes_path=custom_phonemes_path,
-        voicebank_id=voicebank_id,
-        format_type_override=format_type_override,
-        auto_oto_policy=auto_oto_policy,
-    )
-    if rows:
-        write_dataset_csv(out_csv, rows, append=append)
-    stats = dict(stats)
-    stats["saved_rows"] = len(rows)
-    stats["out_csv"] = os.path.abspath(out_csv)
-    return stats
+del _import_module, _impl, _name, _value

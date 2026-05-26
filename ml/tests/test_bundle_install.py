@@ -7,7 +7,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from core.oto_ml_bundle_install import install_exported_bundle
+from core.oto_ml.oto_ml_bundle_install import install_exported_bundle
 from core.oto_ml_export import export_model_bundle
 
 

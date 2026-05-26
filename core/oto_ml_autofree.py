@@ -1,29 +1,11 @@
-from __future__ import annotations
+"""Compatibility wrapper: moved to `core.oto_ml.oto_ml_autofree`."""
 
-from core.oto_ml.autofree import (  # noqa: F401
-    AUTOFREE_BACKEND,
-    FEATURE_SCHEMA_VERSION,
-    TARGET_SCHEMA_VERSION,
-    build_audio_only_rows,
-    build_rows_for_inference,
-    build_rows_for_training,
-    build_textgrid_rows,
-    load_autofree_bundle,
-    predict_autofree_abs,
-    resolve_manual_cutoff_abs,
-    train_autofree_bundle,
-)
+from importlib import import_module as _import_module
 
-__all__ = [
-    "AUTOFREE_BACKEND",
-    "FEATURE_SCHEMA_VERSION",
-    "TARGET_SCHEMA_VERSION",
-    "build_audio_only_rows",
-    "build_rows_for_inference",
-    "build_rows_for_training",
-    "build_textgrid_rows",
-    "load_autofree_bundle",
-    "predict_autofree_abs",
-    "resolve_manual_cutoff_abs",
-    "train_autofree_bundle",
-]
+_impl = _import_module("core.oto_ml.oto_ml_autofree")
+for _name, _value in _impl.__dict__.items():
+    if _name.startswith("__"):
+        continue
+    globals()[_name] = _value
+
+del _import_module, _impl, _name, _value

@@ -62,6 +62,42 @@ def test_runtime_preflight_no_mfa_requires_textgrid(tmp_path):
     assert "PRE_TEXTGRID_REQUIRED" in codes
 
 
+def test_runtime_preflight_mfa_free_ssl_slot_allows_no_source_oto(tmp_path):
+    wav_dir = tmp_path / "vb"
+    wav_dir.mkdir(parents=True, exist_ok=True)
+    result = validate_runtime_preflight(
+        language="japanese",
+        wav_dir=str(wav_dir),
+        out_path=str(tmp_path / "out.ini"),
+        aligner="none",
+        textgrid_dir=str(tmp_path / "missing_textgrids"),
+        no_mfa_oto_mode="mfa_free_ssl_slot",
+        no_base_oto=True,
+        require_output=True,
+    )
+    codes = {entry.get("code") for entry in result.get("errors", [])}
+    assert "PRE_TEXTGRID_REQUIRED" not in codes
+    assert "PRE_TEMPLATE_MISSING" not in codes
+
+
+def test_runtime_preflight_hsmm_oto_allows_no_textgrid_or_source_oto(tmp_path):
+    wav_dir = tmp_path / "vb"
+    wav_dir.mkdir(parents=True, exist_ok=True)
+    result = validate_runtime_preflight(
+        language="japanese",
+        wav_dir=str(wav_dir),
+        out_path=str(tmp_path / "out.ini"),
+        aligner="HSMM OTO",
+        textgrid_dir=str(tmp_path / "missing_textgrids"),
+        no_mfa_oto_mode="hsmm_oto",
+        no_base_oto=True,
+        require_output=True,
+    )
+    codes = {entry.get("code") for entry in result.get("errors", [])}
+    assert "PRE_TEXTGRID_REQUIRED" not in codes
+    assert "PRE_TEMPLATE_MISSING" not in codes
+
+
 def test_validate_batch_case_settings_records(tmp_path):
     case_info = {
         "enabled": True,

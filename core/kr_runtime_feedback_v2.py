@@ -1,25 +1,11 @@
-from __future__ import annotations
+"""Compatibility wrapper: moved to `core.generation.kr.kr_runtime_feedback_v2`."""
 
+from importlib import import_module as _import_module
 
-def build_kr_cv_head_guard_messages(fname, alias, *, offset_reduced=0.0, cutoff_extended=0.0):
-    messages = []
-    if float(offset_reduced or 0.0) > 1.0:
-        messages.append(f"🛡️ {fname}: CV_HEAD 오프셋 과선행 보정(+{float(offset_reduced):.1f}ms) [{alias}]")
-    if float(cutoff_extended or 0.0) > 1.0:
-        messages.append(f"🛡️ {fname}: CV_HEAD 모음 길이 보정(+{float(cutoff_extended):.1f}ms) [{alias}]")
-    return messages
+_impl = _import_module("core.generation.kr.kr_runtime_feedback_v2")
+for _name, _value in _impl.__dict__.items():
+    if _name.startswith("__"):
+        continue
+    globals()[_name] = _value
 
-
-def build_kr_bridge_adjust_message(fname, alias, alias_type, bridge_shift, *, threshold=6.0):
-    if str(alias_type or "").strip().lower() not in {"vc", "vv"}:
-        return None
-    shift = float(bridge_shift or 0.0)
-    if abs(shift) <= float(threshold):
-        return None
-    return f"🧭 {fname}: KR 브리지 앵커 미세보정 ({shift:+.1f}ms) [{alias}]"
-
-
-__all__ = [
-    "build_kr_bridge_adjust_message",
-    "build_kr_cv_head_guard_messages",
-]
+del _import_module, _impl, _name, _value

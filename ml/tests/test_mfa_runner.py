@@ -6,7 +6,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from core import mfa_runner
+from core.alignment import mfa_runner
 
 
 def test_safe_env_subprocess_cwd_returns_env_dir(tmp_path):

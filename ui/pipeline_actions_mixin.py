@@ -1,9 +1,10 @@
-﻿import os
+import os
 import sys
 import locale
 import subprocess as sp
 import json
 import re
+import shutil
 import time
 import threading
 
@@ -18,9 +19,9 @@ from core.ja_oto_generator import generate_ja_oto
 from core.lab_generator import generate_dictionary, generate_labs
 from core.no_mfa_oto_builder import (
     generate_no_mfa_auto_oto,
+    get_last_no_mfa_runtime_meta,
     resolve_no_mfa_source_oto,
 )
-from core.coarse_crnn.oto_predictor_generator import generate_oto_with_crnn_predictor
 from core.mfa_runner import (
     ALERT_MSVC_REQUIRED,
     MFA_PORTABLE_PYTHON_VERSION,
@@ -58,6 +59,204 @@ from ui.i18n import t
 
 
 class PipelineActionsMixin:
+    def _run_hsmm_oto_preview_generation(
+        self,
+        *,
+        wav_dir: str,
+        out_path: str,
+        source_oto_path: str = "",
+        language: str = "japanese",
+        format_type: str = "CV",
+        apply_lightgbm: bool = False,
+        lightgbm_policy: str = "auto",
+        lightgbm_model_dir: str = "",
+        callback=None,
+    ):
+        base_dir = (
+            str(getattr(self, "writable_data_dir", "") or "").strip()
+            or str(getattr(self, "app_data_dir", "") or "").strip()
+            or str(getattr(self, "app_dir", "") or "").strip()
+            or os.getcwd()
+        )
+        bank_name = os.path.basename(os.path.normpath(wav_dir)) or "voicebank"
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        preview_dir = os.path.abspath(
+            os.path.join(base_dir, "ml_workspace", "mfa_free_oto", "ui_hsmm_oto", f"{bank_name}_{timestamp}")
+        )
+        os.makedirs(preview_dir, exist_ok=True)
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", bank_name).strip("._") or "voicebank"
+        cmd = [
+            sys.executable or "python",
+            "-m",
+            "scripts.dev.mfa_free_oto_review",
+            "generate",
+            "--wav-dir",
+            os.path.abspath(wav_dir),
+            "--out-dir",
+            preview_dir,
+            "--name",
+            safe_name,
+            "--language",
+            language,
+            "--format-type",
+            format_type,
+            "--alias-type",
+            "auto",
+            "--encoder",
+            "acoustic",
+            "--use-hsmm-decoder",
+        ]
+        if bool(apply_lightgbm):
+            cmd.append("--apply-lightgbm")
+            policy = str(lightgbm_policy or "auto").strip().lower() or "auto"
+            cmd.extend(["--lightgbm-policy", policy])
+            model_dir = str(lightgbm_model_dir or "").strip()
+            if model_dir:
+                cmd.extend(["--lightgbm-model-dir", os.path.abspath(model_dir)])
+        device = ""
+        if hasattr(self, "oto_crnn_device_var"):
+            try:
+                device = str(self.oto_crnn_device_var.get() or "").strip().lower()
+            except Exception:
+                device = ""
+        if device in {"cpu", "cuda"}:
+            cmd.extend(["--device", device])
+
+        base_oto = (
+            resolve_no_mfa_source_oto(
+                wav_dir=wav_dir,
+                source_hint=source_oto_path,
+            )
+            if str(source_oto_path or "").strip()
+            else ""
+        )
+        if base_oto:
+            cmd.extend(["--template-oto", base_oto])
+
+        if callback:
+            try:
+                callback("[HSMM OTO] progress 0/1")
+            except Exception:
+                pass
+        if base_oto:
+            self._append_log(f"[HSMM OTO] base oto alias list: {base_oto}")
+            self._append_log("[HSMM OTO] base oto timing ignored; HSMM/acoustic events assign parameters.")
+        else:
+            self._append_log("[HSMM OTO] no base oto; filename row-plan and acoustic events are used.")
+        if bool(apply_lightgbm):
+            self._append_log(f"[HSMM OTO] LightGBM postprocess requested (policy={policy}).")
+        self._append_log(f"[HSMM OTO] preview artifacts: {preview_dir}")
+        pretty = " ".join(f'"{part}"' if (" " in str(part) or "\t" in str(part)) else str(part) for part in cmd)
+        self._append_log(f"[HSMM OTO] 실행: {pretty}")
+        proc = self._popen_subprocess_hidden(
+            cmd,
+            cwd=str(getattr(self, "app_dir", "") or os.getcwd()),
+            stdout=sp.PIPE,
+            stderr=sp.STDOUT,
+            text=False,
+        )
+        stdout_lines = []
+        for line in self._iter_decoded_stdout_lines(proc):
+            stdout_lines.append(line)
+            self._append_log(f"[HSMM OTO] {line}")
+        proc.wait()
+        if int(proc.returncode) != 0:
+            return 0, 0, [f"HSMM OTO generation failed (code={int(proc.returncode)})"]
+
+        preview_summary = self._parse_hsmm_oto_preview_summary(stdout_lines)
+        generated_path = str(preview_summary.get("generated_oto_path") or "").strip()
+        out_path_abs = os.path.abspath(out_path)
+        if generated_path and os.path.isfile(generated_path):
+            out_dir = os.path.dirname(out_path_abs)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+            if os.path.abspath(generated_path) != out_path_abs:
+                shutil.copyfile(generated_path, out_path_abs)
+
+        row_count = 0
+        try:
+            with open(out_path_abs, "r", encoding="utf-8-sig") as handle:
+                row_count = sum(1 for line in handle if line.strip() and "=" in line)
+        except Exception:
+            row_count = 0
+        row_count = int(preview_summary.get("processed") or preview_summary.get("oto_rows") or row_count or 0)
+        total_count = int(preview_summary.get("total") or row_count or 0)
+        if callback:
+            try:
+                callback(f"[HSMM OTO] progress {row_count}/{total_count or row_count or 1}")
+            except Exception:
+                pass
+        self._append_log(f"[HSMM OTO] preview oto: {out_path_abs}")
+        if generated_path:
+            self._append_log(f"[HSMM OTO] generated source: {generated_path}")
+        self._log_hsmm_oto_preview_split_summary(preview_summary)
+        return row_count, total_count or row_count, []
+
+    def _parse_hsmm_oto_preview_summary(self, stdout_lines):
+        text = "\n".join(str(line or "") for line in (stdout_lines or []) if str(line or "").strip())
+        if not text:
+            return {}
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            return {}
+        try:
+            payload = json.loads(text[start : end + 1])
+        except Exception:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        if "review_split_counts" not in payload and isinstance(payload.get("split_counts"), dict):
+            payload["review_split_counts"] = payload.get("split_counts")
+        if "review_split_output_paths" not in payload and isinstance(payload.get("split_output_paths"), dict):
+            payload["review_split_output_paths"] = payload.get("split_output_paths")
+        if "oto_rows" not in payload and payload.get("processed") is not None:
+            payload["oto_rows"] = payload.get("processed")
+        return payload
+
+    def _parse_mfa_free_preview_summary(self, stdout_lines):
+        return self._parse_hsmm_oto_preview_summary(stdout_lines)
+
+    def _log_hsmm_oto_preview_split_summary(self, payload):
+        if not isinstance(payload, dict):
+            return
+        counts = payload.get("review_split_counts")
+        if isinstance(counts, dict) and counts:
+            self._append_log(
+                "[HSMM OTO] review split counts: "
+                f"fix_required={int(counts.get('fix_required') or 0)}, "
+                f"attention_only={int(counts.get('attention_only') or 0)}, "
+                f"clean={int(counts.get('clean') or 0)}, "
+                f"total={int(counts.get('total') or 0)}"
+            )
+        paths = payload.get("review_split_output_paths")
+        if isinstance(paths, dict) and paths:
+            for key in (
+                "fix_required",
+                "attention_only",
+                "clean",
+                "review_all",
+                "validation_jsonl",
+                "summary",
+                "review_session",
+            ):
+                value = str(paths.get(key) or "").strip()
+                if value:
+                    self._append_log(f"[HSMM OTO] {key}: {value}")
+        lightgbm = payload.get("lightgbm_postprocess")
+        if isinstance(lightgbm, dict) and lightgbm.get("enabled"):
+            status = str(lightgbm.get("status") or "unknown")
+            changed = int(lightgbm.get("changed") or 0)
+            reason = str(lightgbm.get("reason") or "").strip()
+            suffix = f", reason={reason}" if reason else ""
+            self._append_log(f"[HSMM OTO] LightGBM postprocess: status={status}, changed={changed}{suffix}")
+            pre_path = str(lightgbm.get("pre_lightgbm_path") or "").strip()
+            if pre_path:
+                self._append_log(f"[HSMM OTO] pre-LightGBM oto: {pre_path}")
+
+    def _log_mfa_free_preview_split_summary(self, payload):
+        return self._log_hsmm_oto_preview_split_summary(payload)
+
     @staticmethod
     def _is_mfa_module_missing_error(code: str, message: str) -> bool:
         c = str(code or "").strip().upper()
@@ -1156,12 +1355,12 @@ class PipelineActionsMixin:
         if resolved and os.path.exists(resolved):
             self.mfa_path = resolved
         if not self.mfa_path or not os.path.exists(self.mfa_path):
-            self._notify_long_install_time("MFA")
-            self._append_log("ℹ MFA가 없어 지금 자동 설치를 시작합니다.")
+            self._append_log("ℹ MFA 실행 환경이 없어 설치/복구 확인이 필요합니다.")
             if not self._confirm_mfa_install_action(language=lang, reason="missing_runtime"):
                 self._mfa_ready_cache_ok = False
                 self._last_mfa_install_declined = True
                 return False
+            self._notify_long_install_time("MFA")
             install_ok = False
             self._set_mfa_install_progress_state(True)
             try:
@@ -1233,6 +1432,34 @@ class PipelineActionsMixin:
         self._mfa_ready_cache_key = cache_key
         self._mfa_ready_cache_ok = True
         return True
+
+    def _prompt_mfa_install_for_explicit_selection(self):
+        if bool(getattr(self, "_mfa_selection_install_prompt_seen", False)):
+            return
+        self._mfa_selection_install_prompt_seen = True
+        lang = self._get_language() if hasattr(self, "_get_language") else "korean"
+        resolved = self.mfa_path if (self.mfa_path and os.path.exists(self.mfa_path)) else (find_mfa_executable() or "")
+        if resolved and os.path.exists(resolved):
+            self.mfa_path = resolved
+        try:
+            report = diagnose_mfa_runtime(self.mfa_path or "", language=lang)
+        except Exception:
+            report = {"ready": False}
+        if bool(report.get("ready", False)):
+            if hasattr(self, "_update_mfa_status"):
+                self._update_mfa_status(True)
+            return
+        reason = "install_required"
+        checks = report.get("checks") if isinstance(report.get("checks"), dict) else {}
+        if not checks.get("mfa_executable"):
+            reason = "missing_runtime"
+        elif checks.get("python_rebuild_required"):
+            reason = "python_rebuild"
+        elif not checks.get("model_ready", True):
+            reason = "model_download"
+        if not self._confirm_mfa_install_action(language=lang, reason=reason):
+            return
+        self._run_mfa_diagnose_repair()
 
     def _mfa_startup_repair_state_path(self):
         base_dir = (
@@ -1428,15 +1655,17 @@ class PipelineActionsMixin:
         return True
 
     def _schedule_startup_mfa_auto_repair(self):
+        if str(os.environ.get("UTOA_ENABLE_STARTUP_MFA_AUTO_REPAIR", "")).strip().lower() not in {"1", "true", "yes", "on"}:
+            return
         if str(os.environ.get("UTOA_DISABLE_STARTUP_MFA_AUTO_REPAIR", "")).strip().lower() in {"1", "true", "yes", "on"}:
             return
         if getattr(self, "_startup_mfa_auto_repair_scheduled", False):
             return
         try:
-            if normalize_aligner_name(self.aligner_var.get(), default="mfa") == "none":
+            if normalize_aligner_name(self.aligner_var.get(), default="hsmm_oto") != "mfa":
                 return
         except Exception:
-            pass
+            return
 
         state = self._load_mfa_startup_repair_state()
         # Run startup MFA+ML check only once per install/runtime.
@@ -2207,6 +2436,293 @@ class PipelineActionsMixin:
                 self._set_running(False)
         self._run_in_thread(task)
 
+    def _run_phoneme_boundary_smoke(self):
+        """실보이스뱅크 경계 검출 스모크(매니페스트→학습→평가)를 UI에서 바로 실행합니다."""
+
+        def task():
+            self._set_running(True)
+            self._set_status("경계 스모크 테스트 준비 중...")
+            try:
+                if not is_training_paths_enabled():
+                    self._append_log("⚠ 배포 빌드에서는 경계 스모크 테스트 기능이 비활성화되어 있습니다.")
+                    self._set_status("⚠ 배포 빌드에서는 경계 스모크 테스트를 사용할 수 없습니다.")
+                    return
+
+                if hasattr(self, "developer_mode_enabled_var") and not bool(self.developer_mode_enabled_var.get()):
+                    self._append_log("⚠ 경계 스모크 테스트는 개발자 모드에서만 실행할 수 있습니다.")
+                    self._set_status("⚠ 개발자 모드를 먼저 켜 주세요.")
+                    return
+
+                wav_dir = str(self.wav_entry.get() if hasattr(self, "wav_entry") else "").strip()
+                if not wav_dir:
+                    self._append_log("❌ WAV 경로를 먼저 지정해 주세요.")
+                    self._set_status("❌ WAV 경로 누락")
+                    return
+                voicebank_dir = os.path.abspath(wav_dir)
+                if not os.path.isdir(voicebank_dir):
+                    self._append_log(f"❌ WAV 폴더가 존재하지 않습니다: {voicebank_dir}")
+                    self._set_status("❌ WAV 경로 오류")
+                    return
+
+                source_oto = ""
+                tpl_hint = str(self.tpl_entry.get() if hasattr(self, "tpl_entry") else "").strip()
+                if tpl_hint and os.path.isfile(tpl_hint) and str(tpl_hint).lower().endswith(".ini"):
+                    source_oto = os.path.abspath(tpl_hint)
+                else:
+                    candidate = os.path.join(voicebank_dir, "oto.ini")
+                    if os.path.isfile(candidate):
+                        source_oto = os.path.abspath(candidate)
+
+                bank_name = os.path.basename(os.path.normpath(voicebank_dir)) or "voicebank"
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                smoke_rel_dir = os.path.join(
+                    "ml_workspace", "phoneme_boundary", "ui_smoke", f"{bank_name}_{timestamp}"
+                )
+                base_dir = (
+                    str(getattr(self, "writable_data_dir", "") or "").strip()
+                    or str(getattr(self, "app_data_dir", "") or "").strip()
+                    or str(getattr(self, "app_dir", "") or "").strip()
+                    or os.getcwd()
+                )
+                out_dir = os.path.abspath(os.path.join(base_dir, smoke_rel_dir))
+                try:
+                    os.makedirs(out_dir, exist_ok=True)
+                except PermissionError:
+                    fallback_base = (
+                        str(os.environ.get("LOCALAPPDATA", "") or "").strip()
+                        or str(os.environ.get("TEMP", "") or "").strip()
+                        or os.getcwd()
+                    )
+                    out_dir = os.path.abspath(
+                        os.path.join(fallback_base, "UTAU_Auto_OTO_v3", smoke_rel_dir)
+                    )
+                    os.makedirs(out_dir, exist_ok=True)
+                    self._append_log(f"[Boundary Smoke] 출력 경로 권한 문제로 폴백 경로를 사용합니다: {out_dir}")
+
+                module_args = [
+                    "-m",
+                    "ml.scripts.phoneme_boundary.smoke_voicebank",
+                    "--voicebank-dir",
+                    voicebank_dir,
+                    "--out-dir",
+                    out_dir,
+                    "--max-rows",
+                    "80",
+                    "--epochs",
+                    "1",
+                    "--batch-size",
+                    "2",
+                    "--max-frames",
+                    "240",
+                    "--n-mels",
+                    "16",
+                    "--hidden",
+                    "8",
+                    "--conv-channels",
+                    "8",
+                    "--num-workers",
+                    "0",
+                    "--device",
+                    "auto",
+                ]
+                if source_oto:
+                    module_args.extend(["--source-oto", source_oto])
+
+                runner_candidates = []
+                if str(getattr(sys, "executable", "") or "").strip():
+                    runner_candidates.append([str(sys.executable)])
+                runner_candidates.append(["py", "-3.11"])
+                runner_candidates.append(["python"])
+
+                last_return_code = None
+                launch_errors = []
+                ran = False
+                for runner in runner_candidates:
+                    cmd = list(runner) + module_args
+                    pretty_cmd = " ".join(
+                        f'"{part}"' if (" " in str(part) or "\t" in str(part)) else str(part) for part in cmd
+                    )
+                    self._append_log(f"[Boundary Smoke] 실행: {pretty_cmd}")
+                    try:
+                        process = self._popen_subprocess_hidden(
+                            cmd,
+                            cwd=str(getattr(self, "app_dir", "") or os.getcwd()),
+                            stdout=sp.PIPE,
+                            stderr=sp.STDOUT,
+                            text=False,
+                        )
+                    except FileNotFoundError as e:
+                        launch_errors.append(f"{runner[0]}: {e}")
+                        continue
+                    except Exception as e:
+                        launch_errors.append(f"{runner[0]}: {e}")
+                        continue
+
+                    ran = True
+                    for line in self._iter_decoded_stdout_lines(process):
+                        self._append_log(f"[Boundary Smoke] {line}")
+                    process.wait()
+                    last_return_code = int(process.returncode)
+                    if last_return_code == 0:
+                        break
+                    self._append_log(
+                        f"[Boundary Smoke] 실행 실패(code={last_return_code}). 다음 Python 런너를 시도합니다."
+                    )
+
+                if not ran:
+                    self._append_log("❌ 경계 스모크 테스트를 시작할 Python 런너를 찾지 못했습니다.")
+                    for detail in launch_errors:
+                        self._append_log(f"   - {detail}")
+                    self._set_status("❌ Python 런너 없음")
+                    return
+
+                if last_return_code is None or int(last_return_code) != 0:
+                    self._append_log(f"❌ 경계 스모크 테스트 실패 (code={last_return_code})")
+                    self._append_log(f"   출력 폴더: {out_dir}")
+                    self._set_status("❌ 경계 스모크 실패")
+                    return
+
+                summary_path = os.path.join(out_dir, "summary.json")
+                self._append_log(f"✅ 경계 스모크 테스트 완료")
+                self._append_log(f"   결과 폴더: {out_dir}")
+                if os.path.isfile(summary_path):
+                    try:
+                        with open(summary_path, "r", encoding="utf-8") as handle:
+                            payload = json.load(handle)
+                        eval_summary = payload.get("eval_summary") or {}
+                        rows = int(eval_summary.get("rows", 0) or 0)
+                        mae_ms = float(eval_summary.get("mae_ms", 0.0) or 0.0)
+                        p90_ms = float(eval_summary.get("p90_ms", 0.0) or 0.0)
+                        by_label = eval_summary.get("by_label") or {}
+                        vowel_onset = by_label.get("vowel_onset") or {}
+                        vowel_nucleus = by_label.get("vowel_nucleus") or {}
+                        self._append_log(
+                            f"[Boundary Smoke] rows={rows}, MAE={mae_ms:.2f}ms, P90={p90_ms:.2f}ms, "
+                            f"vowel_onset_MAE={float(vowel_onset.get('mae_ms', 0.0) or 0.0):.2f}ms, "
+                            f"vowel_nucleus_MAE={float(vowel_nucleus.get('mae_ms', 0.0) or 0.0):.2f}ms"
+                        )
+                    except Exception as e:
+                        self._append_log(f"⚠ summary.json 파싱 실패: {e}")
+                self._set_status("✅ 경계 스모크 테스트 완료")
+            except Exception as e:
+                self._handle_error("경계 스모크 테스트", e)
+            finally:
+                self._set_running(False)
+
+        self._run_in_thread(task)
+
+    def _run_phoneme_boundary_visualize(self):
+        """현재 WAV 폴더에 대해 선택한 PhonemeBoundary 모델로 예측 JSON+PNG를 생성합니다."""
+
+        def task():
+            self._set_running(True)
+            self._set_status("PhonemeBoundary 시각화 준비 중...")
+            try:
+                if hasattr(self, "developer_mode_enabled_var") and not bool(self.developer_mode_enabled_var.get()):
+                    self._append_log("⚠ PhonemeBoundary 시각화는 개발자 모드에서만 실행할 수 있습니다.")
+                    self._set_status("⚠ 개발자 모드를 먼저 켜 주세요.")
+                    return
+
+                wav_dir = str(self.wav_entry.get() if hasattr(self, "wav_entry") else "").strip()
+                if not wav_dir or not os.path.isdir(wav_dir):
+                    self._append_log("❌ WAV 폴더를 먼저 지정해 주세요.")
+                    self._set_status("❌ WAV 경로 누락")
+                    return
+                wav_dir = os.path.abspath(wav_dir)
+
+                models = getattr(self, "_phoneme_boundary_models", []) or []
+                selected_label = str(self.phoneme_boundary_model_var.get() if hasattr(self, "phoneme_boundary_model_var") else "").strip()
+                chosen = next((m for m in models if m.get("label") == selected_label), None)
+                if chosen is None:
+                    self._append_log("❌ 사용 가능한 PhonemeBoundary 모델이 없습니다. ml_workspace/models/phoneme_boundary/*.pt 를 확인해 주세요.")
+                    self._set_status("❌ 모델 없음")
+                    return
+                model_path = str(chosen.get("path") or "").strip()
+
+                bank_name = os.path.basename(os.path.normpath(wav_dir)) or "voicebank"
+                model_stem = os.path.splitext(os.path.basename(model_path))[0]
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                rel = os.path.join("ml_workspace", "phoneme_boundary", "ui_visualize", f"{bank_name}_{model_stem}_{timestamp}")
+                base_dir = (
+                    str(getattr(self, "writable_data_dir", "") or "").strip()
+                    or str(getattr(self, "app_data_dir", "") or "").strip()
+                    or str(getattr(self, "app_dir", "") or "").strip()
+                    or os.getcwd()
+                )
+                out_dir = os.path.abspath(os.path.join(base_dir, rel))
+                try:
+                    os.makedirs(out_dir, exist_ok=True)
+                except PermissionError:
+                    fallback = str(os.environ.get("LOCALAPPDATA", "") or os.environ.get("TEMP", "") or os.getcwd())
+                    out_dir = os.path.abspath(os.path.join(fallback, "UTAU_Auto_OTO_v3", rel))
+                    os.makedirs(out_dir, exist_ok=True)
+
+                runner_candidates = []
+                if str(getattr(sys, "executable", "") or "").strip():
+                    runner_candidates.append([str(sys.executable)])
+                runner_candidates.append(["py", "-3.11"])
+                runner_candidates.append(["python"])
+
+                def _run(module_args, tag):
+                    last_code = None
+                    for runner in runner_candidates:
+                        cmd = list(runner) + module_args
+                        pretty = " ".join(f'"{p}"' if " " in str(p) else str(p) for p in cmd)
+                        self._append_log(f"[{tag}] 실행: {pretty}")
+                        try:
+                            proc = self._popen_subprocess_hidden(
+                                cmd,
+                                cwd=str(getattr(self, "app_dir", "") or os.getcwd()),
+                                stdout=sp.PIPE, stderr=sp.STDOUT, text=False,
+                            )
+                        except FileNotFoundError as e:
+                            self._append_log(f"[{tag}] 런너 실패({runner[0]}): {e}")
+                            continue
+                        for line in self._iter_decoded_stdout_lines(proc):
+                            self._append_log(f"[{tag}] {line}")
+                        proc.wait()
+                        last_code = int(proc.returncode)
+                        if last_code == 0:
+                            return 0
+                        self._append_log(f"[{tag}] 실행 실패(code={last_code}), 다음 런너 시도")
+                    return last_code if last_code is not None else -1
+
+                predict_args = [
+                    "-m", "scripts.dev.predict_phoneme_boundary_dir",
+                    "--model", model_path,
+                    "--wav-dir", wav_dir,
+                    "--out-dir", out_dir,
+                    "--device", "auto",
+                ]
+                rc = _run(predict_args, "PB Predict")
+                if rc != 0:
+                    self._append_log(f"❌ 예측 단계 실패 (code={rc})")
+                    self._set_status("❌ 예측 실패")
+                    return
+
+                viz_args = [
+                    "-m", "scripts.dev.visualize_phoneme_boundary",
+                    "--batch", out_dir,
+                    "--out-dir", out_dir,
+                ]
+                rc = _run(viz_args, "PB Visualize")
+                if rc != 0:
+                    self._append_log(f"⚠ 시각화 단계 실패 (code={rc}). JSON은 출력 폴더에 남아 있습니다.")
+                    self._set_status("⚠ 시각화 실패 (JSON만 생성)")
+                else:
+                    self._append_log(f"✅ 완료. 결과 폴더: {out_dir}")
+                    self._set_status("✅ PhonemeBoundary 시각화 완료")
+                try:
+                    os.startfile(out_dir)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            except Exception as e:
+                self._handle_error("PhonemeBoundary 시각화", e)
+            finally:
+                self._set_running(False)
+
+        self._run_in_thread(task)
+
     def _run_full_pipeline(self):
         """Lab 생성 → 정렬 → OTO 생성 → 검증 순서로 전체 파이프라인을 실행합니다."""
         def task():
@@ -2290,11 +2806,12 @@ class PipelineActionsMixin:
                 tpl_path_preflight = "" if self.no_base_oto_var.get() else self.tpl_entry.get().strip()
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
                 aligner_engine = normalize_aligner_name(
-                    self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
-                    default="mfa",
+                    self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO",
+                    default="hsmm_oto",
                 )
+                hsmm_oto_mode = aligner_engine == "hsmm_oto"
                 no_mfa_auto_mode = (
-                    aligner_engine in {"none", "coarse_crnn"}
+                    aligner_engine == "none"
                     and lang != "english"
                     and not (lang == "korean" and selected_format in {"cmpx", "c_plus_v"})
                 )
@@ -2303,25 +2820,28 @@ class PipelineActionsMixin:
                     if hasattr(self, "_get_no_mfa_oto_mode_code")
                     else "remap"
                 )
-                if aligner_engine == "coarse_crnn":
-                    no_mfa_mode_code = "crnn"
-                no_mfa_mode_text = "CRNN OTO 예측기(실험)" if no_mfa_mode_code == "crnn" else "베이스 OTO 재매핑 + 보정"
+                if no_mfa_mode_code != "remap":
+                    no_mfa_mode_code = "remap"
+                no_mfa_mode_text = "베이스 OTO 재매핑 + 보정"
                 no_mfa_source_oto = ""
+                source_oto_required_for_no_mfa = True
                 if no_mfa_auto_mode:
-                    if bool(self.no_base_oto_var.get()):
+                    if source_oto_required_for_no_mfa and bool(self.no_base_oto_var.get()):
                         self._append_log("❌ No-MFA 자동설정 모드에서는 베이스 OTO(템플릿 ini)가 필요합니다.")
                         self._set_status("❌ 베이스 OTO 필요")
                         return
-                    no_mfa_source_oto = resolve_no_mfa_source_oto(
-                        wav_dir=wav_dir,
-                        source_hint=tpl_path_preflight,
-                    )
-                    if not no_mfa_source_oto:
+                    if source_oto_required_for_no_mfa or not bool(self.no_base_oto_var.get()):
+                        no_mfa_source_oto = resolve_no_mfa_source_oto(
+                            wav_dir=wav_dir,
+                            source_hint=tpl_path_preflight,
+                        )
+                    if source_oto_required_for_no_mfa and not no_mfa_source_oto:
                         self._append_log("❌ No-MFA 자동설정용 베이스 OTO를 찾지 못했습니다.")
                         self._append_log("   템플릿 OTO 경로에 baseoto.ini 또는 oto.ini를 지정해 주세요.")
                         self._set_status("❌ 베이스 OTO 필요")
                         return
-                    tpl_path_preflight = no_mfa_source_oto
+                    if no_mfa_source_oto:
+                        tpl_path_preflight = no_mfa_source_oto
 
                 if lang == "english":
                     if not getattr(self, "_is_preview_channel", lambda: False)():
@@ -2533,6 +3053,56 @@ class PipelineActionsMixin:
                     self._append_log("=" * 50)
                     return
 
+                if hsmm_oto_mode:
+                    hsmm_source_oto = ""
+                    if not bool(self.no_base_oto_var.get()):
+                        hsmm_source_oto = resolve_no_mfa_source_oto(
+                            wav_dir=wav_dir,
+                            source_hint=tpl_path_preflight,
+                        )
+                    if not out_path:
+                        self._append_log("❌ 출력 경로를 먼저 지정해 주세요.")
+                        self._set_status("❌ 출력 경로 누락")
+                        return
+                    self._append_log("ℹ HSMM OTO 모드: Lab/사전/정렬 단계를 건너뜁니다.")
+                    self._append_log("ℹ 파일명 슬롯 순서와 음향 이벤트를 사용하며 source oto timing은 사용하지 않습니다.")
+                    _set_stage_progress("lab", 1.0)
+                    _set_stage_progress("dict", 1.0)
+                    _set_stage_progress("align", 1.0)
+
+                    _set_stage_progress("oto", 0.03)
+                    self._set_status("4/5 - HSMM OTO 생성 중...")
+                    _processed, _total, oto_errors = self._run_hsmm_oto_preview_generation(
+                        wav_dir=wav_dir,
+                        out_path=out_path,
+                        source_oto_path=hsmm_source_oto,
+                        language=lang,
+                        format_type=selected_format,
+                        apply_lightgbm=enable_ml_correction,
+                        callback=_make_stage_callback("oto"),
+                    )
+                    if oto_errors:
+                        self._append_log(f"❌ OTO 생성 실패: {len(oto_errors)}건")
+                        for err in oto_errors:
+                            self._append_log(f"  - {err}")
+                        self._set_status(f"❌ OTO 생성 실패 ({_processed}/{_total})")
+                        return
+                    if _total:
+                        _set_stage_progress("oto", float(_processed) / float(_total))
+                    _set_stage_progress("oto", 1.0)
+
+                    _set_stage_progress("validate", 0.05)
+                    self._set_status("5/5 - OTO 자동 검증 중...")
+                    self._run_auto_validation(wav_dir, textgrid_dir, out_path, callback=_make_stage_callback("validate"))
+                    _set_stage_progress("validate", 1.0)
+                    self._cleanup_generated_output_artifacts(out_path, snapshot=cleanup_snapshot)
+
+                    self._set_status("✅ 전체 파이프라인 완료")
+                    self._append_log("\n" + "=" * 50)
+                    self._append_log("✅ 모든 작업이 정상적으로 완료되었습니다!")
+                    self._append_log("=" * 50)
+                    return
+
                 preflight = collect_runtime_preflight_issues(
                     language=lang,
                     wav_dir=wav_dir,
@@ -2540,6 +3110,7 @@ class PipelineActionsMixin:
                     aligner=self.aligner_var.get(),
                     textgrid_dir=textgrid_dir,
                     tpl_path=tpl_path_preflight,
+                    no_mfa_oto_mode=no_mfa_mode_code,
                     no_base_oto=bool(self.no_base_oto_var.get()),
                     custom_phonemes_path=custom_phonemes_path,
                     require_output=False,
@@ -2556,62 +3127,44 @@ class PipelineActionsMixin:
                     return
 
                 if no_mfa_auto_mode:
-                    if no_mfa_mode_code == "crnn":
-                        self._append_log("ℹ CRNN(실험적): Lab/사전/정렬 단계를 건너뛰고 OTO를 직접 예측합니다.")
-                    else:
-                        self._append_log("ℹ No-MFA 모드: Lab/사전/정렬 단계를 건너뜁니다.")
+                    self._append_log("ℹ No-MFA 모드: Lab/사전/정렬 단계를 건너뜁니다.")
                     if has_textgrid:
                         self._append_log("ℹ TextGrid가 있어도 No-MFA 선택 시에는 선택한 No-MFA 생성 방식으로 진행합니다.")
                     self._append_log(f"ℹ No-MFA 생성 방식: {no_mfa_mode_text}")
-                    self._append_log(f"[No-MFA] base oto: {no_mfa_source_oto}")
+                    if no_mfa_source_oto:
+                        self._append_log(f"[No-MFA] base oto: {no_mfa_source_oto}")
+                    else:
+                        self._append_log("[No-MFA] source oto not used.")
                     _set_stage_progress("lab", 1.0)
                     _set_stage_progress("dict", 1.0)
                     _set_stage_progress("align", 1.0)
 
                     _set_stage_progress("oto", 0.03)
-                    if no_mfa_mode_code == "crnn":
-                        self._set_status("4/5 - CRNN OTO 직접 예측 중...")
-                        _crnn_special_raw = (
-                            self.oto_crnn_special_aliases_var.get()
-                            if hasattr(self, "oto_crnn_special_aliases_var")
-                            else ""
-                        )
-                        _crnn_special_aliases = {
-                            item.strip()
-                            for item in str(_crnn_special_raw or "").split(",")
-                            if item.strip()
-                        }
-                        _processed, _total, oto_errors = generate_oto_with_crnn_predictor(
-                            wav_dir=wav_dir,
-                            out_path=out_path,
-                            source_oto_path=no_mfa_source_oto,
-                            alias_suffix=self.alias_suffix_var.get().strip(),
-                            language=lang,
-                            format_type=selected_format,
-                            model_path=(
-                                self.oto_crnn_model_path_var.get().strip()
-                                if hasattr(self, "oto_crnn_model_path_var")
-                                else ""
-                            ),
-                            device=(
-                                self.oto_crnn_device_var.get().strip()
-                                if hasattr(self, "oto_crnn_device_var")
-                                else "auto"
-                            ),
-                            special_aliases=_crnn_special_aliases or None,
-                            callback=_make_stage_callback("oto"),
-                        )
-                    else:
-                        self._set_status("4/5 - No-MFA 자동설정 OTO 생성 중...")
-                        _processed, _total, oto_errors = generate_no_mfa_auto_oto(
-                            wav_dir=wav_dir,
-                            out_path=out_path,
-                            source_oto_path=no_mfa_source_oto,
-                            alias_suffix=self.alias_suffix_var.get().strip(),
-                            language=lang,
-                            stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
-                            generation_mode=no_mfa_mode_code,
-                            callback=_make_stage_callback("oto"),
+                    self._set_status("4/5 - No-MFA 자동설정 OTO 생성 중...")
+                    _processed, _total, oto_errors = generate_no_mfa_auto_oto(
+                        wav_dir=wav_dir,
+                        out_path=out_path,
+                        source_oto_path=no_mfa_source_oto,
+                        alias_suffix=self.alias_suffix_var.get().strip(),
+                        language=lang,
+                        stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
+                        generation_mode=no_mfa_mode_code,
+                        callback=_make_stage_callback("oto"),
+                    )
+                    if oto_errors:
+                        self._append_log(f"❌ OTO 생성 실패: {len(oto_errors)}건")
+                        for err in oto_errors:
+                            self._append_log(f"  - {err}")
+                        self._set_status(f"❌ OTO 생성 실패 ({_processed}/{_total})")
+                        return
+                    runtime_meta = get_last_no_mfa_runtime_meta()
+                    confidence = float(runtime_meta.get("confidence", 0.0) or 0.0)
+                    fallback_hint = str(runtime_meta.get("fallback_hint", "") or "")
+                    fallback_used = bool(runtime_meta.get("fallback_used", False))
+                    if runtime_meta:
+                        self._append_log(
+                            f"[No-MFA] confidence={confidence:.2f} "
+                            f"fallback_hint={fallback_hint or '-'} fallback_used={'yes' if fallback_used else 'no'}"
                         )
                     if _total:
                         _set_stage_progress("oto", float(_processed) / float(_total))
@@ -2621,12 +3174,7 @@ class PipelineActionsMixin:
                     self._set_status("5/5 - OTO 자동 검증 중...")
                     self._run_auto_validation(wav_dir, textgrid_dir, out_path, callback=_make_stage_callback("validate"))
                     _set_stage_progress("validate", 1.0)
-                    if oto_errors:
-                        self._append_log(f"⚠ OTO 생성 중 오류가 있습니다. ({len(oto_errors)}건)")
-                        for err in oto_errors:
-                            self._append_log(f"  - {err}")
-                    else:
-                        self._cleanup_generated_output_artifacts(out_path, snapshot=cleanup_snapshot)
+                    self._cleanup_generated_output_artifacts(out_path, snapshot=cleanup_snapshot)
 
                     self._set_status("✅ 전체 파이프라인 완료")
                     self._append_log("\n" + "=" * 50)
@@ -2675,17 +3223,14 @@ class PipelineActionsMixin:
                 output_dir = os.path.join(wav_dir, "textgrids")
                 align_ok = False
                 align_err = ""
-                align_engine = self.aligner_var.get()
-                primary_engine = normalize_aligner_name(align_engine, default="mfa")
-                use_oto_crnn_direct = primary_engine == "coarse_crnn"
+                align_engine = self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO"
+                primary_engine = normalize_aligner_name(align_engine, default="hsmm_oto")
                 fallback_engine = ""
                 _set_stage_progress("align", 0.05)
-                if primary_engine == "none":
+                if primary_engine in {"none", "hsmm_oto"}:
                     self._set_status("3/5 - 정렬 건너뛰기(no-MFA)")
                 elif primary_engine == "sequence":
                     self._set_status("3/5 - 전용 시퀀스 정렬 준비 중...")
-                elif use_oto_crnn_direct:
-                    self._set_status("3/5 - 정렬 건너뛰기(CRNN OTO 직접 예측)")
                 else:
                     self._set_status("3/5 - MFA 정렬 준비 중...")
                     if not self._ensure_mfa_ready_for_language(lang):
@@ -2703,38 +3248,31 @@ class PipelineActionsMixin:
                     self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
                 elif primary_engine == "sequence":
                     self._append_log("ℹ 정렬 엔진: 전용 시퀀스 baseline")
-                elif use_oto_crnn_direct:
-                    self._append_log("ℹ CRNN(실험적): TextGrid 정렬 대신 OTO 직접 예측 모델을 사용합니다.")
                 else:
                     self._append_log("ℹ 정렬 엔진: none (MFA 비사용)")
                 if hasattr(self, "_apply_advanced_tuning_envs"):
                     self._apply_advanced_tuning_envs()
 
-                if use_oto_crnn_direct:
-                    align_result = {"code": "OK", "message": "alignment skipped for CRNN OTO predictor", "ok": True}
-                    align_ok = True
-                    align_err = ""
-                else:
-                    align_result = run_alignment_with_fallback(
-                        language=lang,
-                        wav_folder=wav_dir,
-                        dictionary_path=dict_path,
-                        output_folder=output_dir,
-                        primary_aligner=primary_engine,
-                        fallback_aligner=fallback_engine,
-                        mfa_path=self.mfa_path or "",
-                        mfa_align_profile=(
-                            self._get_mfa_align_profile_code()
-                            if hasattr(self, "_get_mfa_align_profile_code")
-                            else "accurate"
-                        ),
-                        format_hint=selected_format,
-                        callback=_make_stage_callback("align"),
-                    )
-                    align_ok = bool(align_result.get("ok", False))
-                    align_err = str(align_result.get("message", "") or "")
-                    if align_result.get("fallback_used"):
-                        self._append_log(f"ℹ 정렬 fallback 경로: {align_result.get('fallback_path', '')}")
+                align_result = run_alignment_with_fallback(
+                    language=lang,
+                    wav_folder=wav_dir,
+                    dictionary_path=dict_path,
+                    output_folder=output_dir,
+                    primary_aligner=primary_engine,
+                    fallback_aligner=fallback_engine,
+                    mfa_path=self.mfa_path or "",
+                    mfa_align_profile=(
+                        self._get_mfa_align_profile_code()
+                        if hasattr(self, "_get_mfa_align_profile_code")
+                        else "accurate"
+                    ),
+                    format_hint=selected_format,
+                    callback=_make_stage_callback("align"),
+                )
+                align_ok = bool(align_result.get("ok", False))
+                align_err = str(align_result.get("message", "") or "")
+                if align_result.get("fallback_used"):
+                    self._append_log(f"ℹ 정렬 fallback 경로: {align_result.get('fallback_path', '')}")
                 if primary_engine == "none":
                     has_textgrid = False
                     if os.path.isdir(output_dir):
@@ -3045,5 +3583,3 @@ class PipelineActionsMixin:
             finally:
                 self._set_running(False)
         self._run_in_thread(task)
-
-

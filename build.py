@@ -46,12 +46,10 @@ EXCLUDED_MODULES = [
     "ml.scripts",
     "ml.tests",
     "pytest",
-    "librosa",
     "scripts",
     "tests",
 ]
 EXCLUDED_TRAINING_MODULES = [
-    "core.cvn_training",
     "core.mapping_supervised_training",
     "core.oto_ml.coupled.training",
     "core.oto_ml_collection",
@@ -90,17 +88,6 @@ RUNTIME_DATA_PATHS = [
     (
         os.path.join(APP_DIR, "models", "_build_included_oto_correction_models", "assets", "models", "oto_ml"),
         "assets/models/oto_ml",
-    ),
-    (
-        os.path.join(
-            APP_DIR,
-            "models",
-            "_build_included_oto_correction_models",
-            "models",
-            "coarse_crnn",
-            "oto_anchor_crnn_role_v2.pt",
-        ),
-        "models/coarse_crnn",
     ),
     (os.path.join(APP_DIR, "assets", "bootstrap", "get-pip.py"), "assets/bootstrap"),
     # ml/configs: include only the two files that are actually read at runtime.
@@ -204,9 +191,7 @@ RELEASE_MODEL_PRUNE_FILE_EXTENSIONS = {
     ".pth",
     ".pt",
 }
-RELEASE_ALLOWED_MODEL_FILE_PATHS = {
-    "models/coarse_crnn/oto_anchor_crnn_role_v2.pt",
-}
+RELEASE_ALLOWED_MODEL_FILE_PATHS = set()
 APP_ICON_CANDIDATES = [
     os.path.join(APP_DIR, "release_assets", "AutoOTO-icon.ico"),
     os.path.join(APP_DIR, "AutoOTO-icon.ico"),
@@ -714,9 +699,10 @@ def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, dev
         f"--nofollow-import-to={','.join(_excluded_build_modules())}",
     ]
     if dev:
-        # Dev mode: ccache for incremental recompilation, no LTO, no source cleanup.
-        cmd += ["--enable-ccache", "--lto=no"]
-        print("[INFO] --dev mode: ccache enabled, LTO disabled, incremental build active.")
+        # Nuitka 4.x enables compiler caches through its cache control layer;
+        # the old --enable-ccache switch is no longer accepted.
+        cmd += ["--lto=no"]
+        print("[INFO] --dev mode: LTO disabled, incremental build output retained.")
     else:
         # Release mode: clean C source tree after build to save disk space.
         cmd.append("--remove-output")

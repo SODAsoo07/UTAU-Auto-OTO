@@ -787,19 +787,9 @@ class AppRuntimeMixin:
         )
         os.environ["UTOA_KR_VC_NEIGHBOR_ENABLE"] = "1" if kr_vc_enabled else "0"
         os.environ["UTOA_JA_VC_NEIGHBOR_ENABLE"] = "1" if ja_vc_enabled else "0"
-        cvn_correction_enabled = (
-            bool(self.cvn_correction_enable_var.get())
-            if hasattr(self, "cvn_correction_enable_var")
-            else True
-        )
-        os.environ["UTOA_CVN_CORRECTION_ENABLE"] = "1" if cvn_correction_enabled else "0"
-        cvn_low_conf_only = (
-            bool(self.cvn_low_conf_only_var.get())
-            if hasattr(self, "cvn_low_conf_only_var")
-            else False
-        )
-        os.environ["UTOA_CVN_LOW_CONF_ONLY"] = "1" if cvn_low_conf_only else "0"
-        os.environ["UTOA_CVN_C_THRESHOLD"] = "0.4"
+        os.environ["UTOA_CVN_CORRECTION_ENABLE"] = "0"
+        os.environ["UTOA_CVN_LOW_CONF_ONLY"] = "0"
+        os.environ.pop("UTOA_CVN_C_THRESHOLD", None)
         mapping_supervised_enabled = (
             bool(self.mapping_supervised_enable_var.get())
             if hasattr(self, "mapping_supervised_enable_var")
@@ -1332,9 +1322,13 @@ class AppRuntimeMixin:
     def _reset_developer_settings_defaults(self) -> None:
         defaults = {
             "developer_mode_enabled_var": False,
-            "aligner_var": "MFA",
+            "aligner_var": "HSMM OTO",
             "no_mfa_oto_mode_var": "베이스 OTO 재매핑 + 보정",
             "oto_crnn_model_path_var": "",
+            "oto_crnn_engine_var": "boundary_decoder",
+            "oto_crnn_model_choice_var": "auto",
+            "oto_stage2_enable_var": False,
+            "oto_stage2_model_choice_var": "auto",
             "oto_crnn_device_var": "auto",
             "oto_crnn_special_aliases_var": "",
             "enable_ml_correction_var": True,
@@ -1369,7 +1363,7 @@ class AppRuntimeMixin:
             "kr_continuity_enable_var": True,
             "kr_continuity_max_offset_adj_var": "",
             "vc_correction_enable_var": True,
-            "cvn_correction_enable_var": True,
+            "cvn_correction_enable_var": False,
             "cvn_low_conf_only_var": False,
             "mapping_supervised_enable_var": True,
             "mapping_supervised_mode_var": "자동(권장)",
@@ -1990,12 +1984,16 @@ class AppRuntimeMixin:
             if hasattr(self, "ml_hybrid_routing_enable_var")
             else True
         )
-        aligner_raw = (
-            str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA")
-            .strip()
-            .lower()
-        )
-        aligner_no_mfa = aligner_raw in {"no-mfa", "no_mfa", "none", "none-mfa", "nomfa", "no mfa"}
+        try:
+            from core.pipeline_status import normalize_aligner_name
+
+            aligner_code = normalize_aligner_name(
+                self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO",
+                default="hsmm_oto",
+            )
+        except Exception:
+            aligner_code = "hsmm_oto"
+        aligner_no_mfa = aligner_code in {"none", "hsmm_oto"}
         no_mfa_generation_mode = bool(
             aligner_no_mfa
             and lang in {"korean", "japanese"}
@@ -3062,6 +3060,18 @@ class AppRuntimeMixin:
         def _do():
             state = "disabled" if running else "normal"
             self.run_btn.configure(state=state)
+            if hasattr(self, "boundary_smoke_btn") and self.boundary_smoke_btn is not None:
+                try:
+                    dev_enabled = (
+                        bool(self.developer_mode_enabled_var.get())
+                        if hasattr(self, "developer_mode_enabled_var")
+                        else False
+                    )
+                    self.boundary_smoke_btn.configure(
+                        state="normal" if (dev_enabled and not bool(running)) else "disabled"
+                    )
+                except Exception:
+                    pass
             if hasattr(self, "status_label"):
                 current_text = self.status_label.cget("text")
                 self.status_label.configure(text_color=self._status_color_for_message(current_text))
@@ -3381,10 +3391,26 @@ class ConfigMixin:
             "ml_anchor_mel_gamma": self.ml_anchor_mel_gamma_var.get() if hasattr(self, "ml_anchor_mel_gamma_var") else "",
             "ml_model_root_kr": self.ml_model_root_kr_var.get() if hasattr(self, "ml_model_root_kr_var") else "",
             "ml_model_root_ja": self.ml_model_root_ja_var.get() if hasattr(self, "ml_model_root_ja_var") else "",
-            "oto_crnn_model_path": self.oto_crnn_model_path_var.get() if hasattr(self, "oto_crnn_model_path_var") else "",
+            "oto_crnn_model_path": "",
+            "oto_crnn_engine": (
+                self._get_oto_crnn_engine_code()
+                if hasattr(self, "_get_oto_crnn_engine_code")
+                else "boundary_decoder"
+            ),
+            "oto_crnn_model_choice": (
+                self._get_oto_crnn_model_choice_code()
+                if hasattr(self, "_get_oto_crnn_model_choice_code")
+                else "auto"
+            ),
+            "oto_stage2_enable": self.oto_stage2_enable_var.get() if hasattr(self, "oto_stage2_enable_var") else False,
+            "oto_stage2_model_choice": (
+                self._get_oto_stage2_model_choice_code()
+                if hasattr(self, "_get_oto_stage2_model_choice_code")
+                else "auto"
+            ),
             "oto_crnn_device": self.oto_crnn_device_var.get() if hasattr(self, "oto_crnn_device_var") else "auto",
             "oto_crnn_special_aliases": self.oto_crnn_special_aliases_var.get() if hasattr(self, "oto_crnn_special_aliases_var") else "",
-            "cvn_correction_enable": self.cvn_correction_enable_var.get() if hasattr(self, "cvn_correction_enable_var") else True,
+            "cvn_correction_enable": False,
             "cvn_low_conf_only": self.cvn_low_conf_only_var.get() if hasattr(self, "cvn_low_conf_only_var") else False,
             "mapping_supervised_enable": self.mapping_supervised_enable_var.get() if hasattr(self, "mapping_supervised_enable_var") else True,
             "mapping_supervised_mode": (
@@ -3440,6 +3466,7 @@ class ConfigMixin:
             "show_advanced_aligner": self.show_advanced_aligner_var.get() if hasattr(self, "show_advanced_aligner_var") else False,
             "developer_mode_enabled": self.developer_mode_enabled_var.get() if hasattr(self, "developer_mode_enabled_var") else False,
             "aligner": self.aligner_var.get(),
+            "mfa_explicitly_selected": bool(getattr(self, "_mfa_explicitly_selected", False)),
             "mfa_align_profile": self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "\uae30\ubcf8",
             "mfa_align_profile_code": self._get_mfa_align_profile_code() if hasattr(self, "_get_mfa_align_profile_code") else "default",
             "whisperx_profile": self.whisperx_profile_var.get() if hasattr(self, "whisperx_profile_var") else "balanced",
@@ -3553,9 +3580,9 @@ class ConfigMixin:
             if hasattr(self, "enable_ml_correction_var"):
                 self.enable_ml_correction_var.set(bool(config.get("enable_ml_correction", True)))
             if hasattr(self, "cvn_correction_enable_var"):
-                self.cvn_correction_enable_var.set(bool(config.get("cvn_correction_enable", True)))
+                self.cvn_correction_enable_var.set(False)
             if hasattr(self, "cvn_low_conf_only_var"):
-                self.cvn_low_conf_only_var.set(bool(config.get("cvn_low_conf_only", False)))
+                self.cvn_low_conf_only_var.set(False)
             if hasattr(self, "mapping_supervised_enable_var"):
                 self.mapping_supervised_enable_var.set(bool(config.get("mapping_supervised_enable", True)))
             if hasattr(self, "mapping_supervised_mode_var"):
@@ -3619,16 +3646,19 @@ class ConfigMixin:
                 try:
                     from core.pipeline_status import normalize_aligner_name
 
-                    saved_aligner = normalize_aligner_name(config.get("aligner", "mfa"), default="mfa")
+                    saved_aligner = normalize_aligner_name(config.get("aligner", "hsmm_oto"), default="hsmm_oto")
                 except Exception:
-                    saved_aligner = "mfa"
+                    saved_aligner = "hsmm_oto"
+                self._mfa_explicitly_selected = bool(config.get("mfa_explicitly_selected", False))
+                if saved_aligner == "mfa" and not self._mfa_explicitly_selected:
+                    saved_aligner = "hsmm_oto"
                 aligner_label_map = {
-                    "none": "MFA",
+                    "none": "HSMM OTO",
                     "sequence": "전용(시퀀스)",
-                    "coarse_crnn": "CRNN(실험적)",
+                    "hsmm_oto": "HSMM OTO",
                     "mfa": "MFA",
                 }
-                self.aligner_var.set(aligner_label_map.get(saved_aligner, "MFA"))
+                self.aligner_var.set(aligner_label_map.get(saved_aligner, "HSMM OTO"))
             if "developer_mode_enabled" in config and hasattr(self, "developer_mode_enabled_var"):
                 allow_persist_dev = str(os.environ.get("UTOA_ALLOW_PERSISTENT_DEVELOPER_MODE", "")).strip().lower() in {
                     "1", "true", "yes", "on"
@@ -3971,10 +4001,21 @@ class ConfigMixin:
             if "ml_model_root_ja" in config and hasattr(self, "ml_model_root_ja_var"):
                 self.ml_model_root_ja_var.set(str(config.get("ml_model_root_ja", "") or ""))
             if "oto_crnn_model_path" in config and hasattr(self, "oto_crnn_model_path_var"):
-                self.oto_crnn_model_path_var.set(str(config.get("oto_crnn_model_path", "") or ""))
+                self.oto_crnn_model_path_var.set("")
+            if "oto_crnn_engine" in config and hasattr(self, "oto_crnn_engine_var"):
+                if hasattr(self, "_set_oto_crnn_engine_from_code"):
+                    self._set_oto_crnn_engine_from_code(config.get("oto_crnn_engine", "boundary_decoder"))
+                else:
+                    self.oto_crnn_engine_var.set(str(config.get("oto_crnn_engine", "boundary_decoder") or "boundary_decoder"))
             if "oto_crnn_device" in config and hasattr(self, "oto_crnn_device_var"):
                 device = str(config.get("oto_crnn_device", "auto") or "auto").strip().lower()
                 self.oto_crnn_device_var.set(device if device in {"auto", "cpu", "cuda"} else "auto")
+            if "oto_crnn_model_choice" in config and hasattr(self, "_set_oto_crnn_model_choice_from_code"):
+                self._set_oto_crnn_model_choice_from_code(config.get("oto_crnn_model_choice", "auto"))
+            if "oto_stage2_enable" in config and hasattr(self, "oto_stage2_enable_var"):
+                self.oto_stage2_enable_var.set(bool(config.get("oto_stage2_enable", False)))
+            if "oto_stage2_model_choice" in config and hasattr(self, "_set_oto_stage2_model_choice_from_code"):
+                self._set_oto_stage2_model_choice_from_code(config.get("oto_stage2_model_choice", "auto"))
             if "oto_crnn_special_aliases" in config and hasattr(self, "oto_crnn_special_aliases_var"):
                 self.oto_crnn_special_aliases_var.set(str(config.get("oto_crnn_special_aliases", "") or ""))
 

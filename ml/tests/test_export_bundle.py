@@ -41,39 +41,6 @@ class ExportBundleTests(unittest.TestCase):
                     f.write("{}")
         return model_dir
 
-    def _make_coupled_bundle(self, root: str) -> str:
-        model_dir = os.path.join(root, "korean", "vcv", "v1")
-        os.makedirs(model_dir, exist_ok=True)
-        for name in [
-            "feature_schema.json",
-            "model_meta.json",
-            "eval_summary.json",
-            "coupled_model.pt",
-        ]:
-            path = os.path.join(model_dir, name)
-            if name == "model_meta.json":
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(
-                        {
-                            "language": "korean",
-                            "format_type": "vcv",
-                            "backend": "coupled_nn_v1",
-                            "model_version": "v2",
-                            "feature_version": "v7",
-                            "head_mode": "split",
-                            "anchor_targets": ["delta_offset", "delta_pre", "delta_cutoff"],
-                            "delta_targets": ["delta_cons", "delta_ovl"],
-                        },
-                        f,
-                    )
-            elif name == "coupled_model.pt":
-                with open(path, "wb") as f:
-                    f.write(b"pt")
-            else:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write("{}")
-        return model_dir
-
     def _make_ensemble_bundle(self, root: str) -> str:
         model_dir = os.path.join(root, "korean", "cvc", "v1")
         os.makedirs(model_dir, exist_ok=True)
@@ -153,11 +120,6 @@ class ExportBundleTests(unittest.TestCase):
             model_dir = self._make_bundle(td)
             self.assertEqual(validate_bundle_dir(model_dir), [])
 
-    def test_validate_bundle_dir_coupled(self):
-        with tempfile.TemporaryDirectory() as td:
-            model_dir = self._make_coupled_bundle(td)
-            self.assertEqual(validate_bundle_dir(model_dir), [])
-
     def test_export_model_bundle_with_zip(self):
         with tempfile.TemporaryDirectory() as td:
             model_dir = self._make_bundle(td)
@@ -198,16 +160,6 @@ class ExportBundleTests(unittest.TestCase):
             self.assertEqual(manifest["alias_family"], "cv")
             self.assertEqual(manifest["bundle_slug"], "japanese_cvvc_cv_v1")
             self.assertEqual(manifest["install_subdir"], "japanese/cvvc/families/cv/v1")
-
-    def test_export_model_bundle_coupled_uses_coupled_required_files(self):
-        with tempfile.TemporaryDirectory() as td:
-            model_dir = self._make_coupled_bundle(td)
-            manifest = export_model_bundle(model_dir, os.path.join(td, "exports"))
-            self.assertEqual(manifest["backend"], "coupled_nn_v1")
-            self.assertIn("coupled_model.pt", manifest["required_files"])
-            names = {entry["name"] for entry in manifest["files"]}
-            self.assertIn("coupled_model.pt", names)
-            self.assertNotIn("model_offset.txt", names)
 
     def test_export_model_bundle_ensemble_keeps_nested_files(self):
         with tempfile.TemporaryDirectory() as td:

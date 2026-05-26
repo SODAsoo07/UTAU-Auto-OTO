@@ -31,12 +31,12 @@ class AlignActionsMixin:
                 self._set_status(t("정렬 취소됨"))
                 return
         primary_engine_for_prompt = normalize_aligner_name(
-            self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
-            default="mfa",
+            self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO",
+            default="hsmm_oto",
         )
         if (
             wav_dir_for_prompt
-            and primary_engine_for_prompt not in {"none", "coarse_crnn"}
+            and primary_engine_for_prompt in {"mfa", "sequence"}
             and lang_for_prompt != "english"
         ):
             textgrid_dir_for_prompt = os.path.join(wav_dir_for_prompt, "textgrids")
@@ -78,12 +78,12 @@ class AlignActionsMixin:
                 dict_path = os.path.join(wav_dir, dict_filename)
                 output_dir = os.path.join(wav_dir, "textgrids")
                 primary_engine = normalize_aligner_name(
-                    self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
-                    default="mfa",
+                    self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO",
+                    default="hsmm_oto",
                 )
-                if primary_engine == "coarse_crnn":
-                    self._append_log("ℹ CRNN(실험적): 정렬 단계는 건너뛰고 OTO 단계에서 직접 예측 모델을 사용합니다.")
-                    self._set_status("CRNN OTO 직접 예측은 OTO 생성 단계에서 실행됩니다")
+                if primary_engine == "hsmm_oto":
+                    self._append_log("ℹ HSMM OTO 모드에서는 별도 TextGrid 정렬 단계를 건너뜁니다.")
+                    self._set_status("Alignment skipped (HSMM OTO)")
                     return
                 if hasattr(self, "_validate_alignment_input_files"):
                     needs_lab_dict = primary_engine == "mfa"
@@ -114,15 +114,10 @@ class AlignActionsMixin:
                             return
                 elif primary_engine == "sequence":
                     self._append_log("ℹ 전용 시퀀스 aligner 엔진 선택: frame-hop 라벨 기반 정렬을 실행합니다.")
-                elif primary_engine == "coarse_crnn":
-                    self._append_log("ℹ CRNN aligner 엔진 선택: SIL/C/V 경계 정렬을 실행합니다.")
-
                 if primary_engine == "mfa":
                     self._append_log(f"MFA profile: {mfa_profile}")
                 elif primary_engine == "sequence":
                     self._append_log("Alignment engine: Dedicated Sequence")
-                elif primary_engine == "coarse_crnn":
-                    self._append_log("Alignment engine: CRNN (experimental)")
                 else:
                     self._append_log("Alignment engine: none (MFA bypass)")
                 if hasattr(self, "_apply_advanced_tuning_envs"):

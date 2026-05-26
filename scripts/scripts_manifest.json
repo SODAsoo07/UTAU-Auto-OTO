@@ -1,156 +1,312 @@
 {
-  "version": 1,
-  "description": "Script usage and ownership registry for safe cleanup/refactoring.",
-  "entries": [
-    {
-      "path": "scripts/audit_script_usage.py",
-      "status": "protected",
-      "owner": "infra",
-      "note": "Script usage audit CLI for safe cleanup checks."
-    },
-    {
-      "path": "scripts/ml/data/auto_classify_training_data.py",
-      "status": "manual",
-      "owner": "ml",
-      "note": "Manual helper for staged data auto-classification."
-    },
-    {
-      "path": "scripts/ml/sequence/benchmark_sequence_residual_datasets.py",
-      "status": "manual",
-      "owner": "ml",
-      "note": "Leave-one-voicebank-out benchmark for sequence residual JSONL datasets."
-    },
-    {
-      "path": "scripts/alignment/tools/build_alignment_test_folder.py",
-      "status": "manual",
-      "owner": "align",
-      "note": "Manual helper to assemble alignment sample/test folders."
-    },
-    {
-      "path": "scripts/build_installer.ps1",
-      "status": "protected",
-      "owner": "release",
-      "note": "Called by CI workflows."
-    },
-    {
-      "path": "scripts/build_portable_with_models.ps1",
-      "status": "protected",
-      "owner": "release",
-      "note": "Called by CI workflows."
-    },
-    {
-      "path": "scripts/ml/sequence/build_sequence_residual_dataset.py",
-      "status": "manual",
-      "owner": "ml",
-      "note": "Build sequence residual JSONL rows for No-MFA sequence residual correction experiments."
-    },
-    {
-      "path": "scripts/alignment/tools/compare_alignment_visual.py",
-      "status": "manual",
-      "owner": "align",
-      "note": "Manual alignment visualization/comparison helper."
-    },
-    {
-      "path": "scripts/ml/coupled/export_coupled_onnx.py",
-      "status": "manual",
-      "owner": "ml",
-      "note": "Manual ONNX export helper."
-    },
-    {
-      "path": "scripts/alignment/tools/export_textgrid_to_sinsy_lab.py",
-      "status": "manual",
-      "owner": "align",
-      "note": "Manual TextGrid-to-Sinsy LAB conversion helper."
-    },
-    {
-      "path": "scripts/ml/data/generate_shared_oto_profiles.py",
-      "status": "manual",
-      "owner": "ml",
-      "note": "Manual utility to generate shared OTO timing profiles."
-    },
-    {
-      "path": "scripts/ml/sequence/preprocess_oto_cv_for_sequence_training.py",
-      "status": "manual",
-      "owner": "ml",
-      "note": "Manual preprocessing helper for CV-based sequence aligner training data."
-    },
-    {
-      "path": "scripts/alignment/tools/preprocess_sinsy_labels_for_sequence_training.py",
-      "status": "manual",
-      "owner": "ml",
-      "note": "Manual preprocessing helper for Sinsy label sequence training data."
-    },
-    {
-      "path": "scripts/run_coupled_experiment_matrix.py",
-      "status": "active",
-      "owner": "ml",
-      "note": "Called by run_coupled_two_stage_tune.py."
-    },
-    {
-      "path": "scripts/run_coupled_two_stage_tune.py",
-      "status": "active",
-      "owner": "ml",
-      "note": "Documented tuning entrypoint."
-    },
-    {
-      "path": "scripts/run_kr_regression_suite.py",
-      "status": "active",
-      "owner": "ml",
-      "note": "Documented regression entrypoint."
-    },
-    {
-      "path": "scripts/run_oto_generation_batch.py",
-      "status": "protected",
-      "owner": "pipeline",
-      "note": "Batch generation runtime entrypoint."
-    },
-    {
-      "path": "scripts/runtime_recovery.ps1",
-      "status": "protected",
-      "owner": "runtime",
-      "note": "Referenced by setup_mfa.bat and packaging."
-    },
-    {
-      "path": "scripts/testing/sandbox_smoke_check.ps1",
-      "status": "manual",
-      "owner": "test",
-      "note": "Internal smoke-check script; intentionally excluded from release build payload."
-    },
-    {
-      "path": "scripts/startup_diagnose.bat",
-      "status": "protected",
-      "owner": "runtime",
-      "note": "Bundled into installer/release."
-    },
-    {
-      "path": "scripts/startup_diagnose.ps1",
-      "status": "protected",
-      "owner": "runtime",
-      "note": "Bundled into installer/release."
-    },
-    {
-      "path": "scripts/train_cvn_backend.py",
-      "status": "protected",
-      "owner": "ml",
-      "note": "Primary CVN training entrypoint used in real workflow."
-    },
-    {
-      "path": "scripts/ml/coupled/train_ensemble_bundle.py",
-      "status": "manual",
-      "owner": "ml",
-      "note": "Manual ensemble model training helper."
-    },
-    {
-      "path": "scripts/alignment/tools/train_sequence_aligner_profile_from_sinsy.py",
-      "status": "manual",
-      "owner": "ml",
-      "note": "Manual sequence aligner profile training helper from corrected Sinsy labels."
-    },
-    {
-      "path": "scripts/ml/sequence/train_sequence_residual_baseline.py",
-      "status": "manual",
-      "owner": "ml",
-      "note": "Train lightweight ridge baseline model for sequence residual correction."
-    }
-  ]
+    "version":  1,
+    "description":  "Script usage and ownership registry for safe cleanup/refactoring.",
+    "entries":  [
+                    {
+                        "path":  "scripts/audit_script_usage.py",
+                        "status":  "protected",
+                        "owner":  "infra",
+                        "note":  "Script usage audit CLI for safe cleanup checks."
+                    },
+                    {
+                        "path":  "scripts/run_test_tools.py",
+                        "status":  "active",
+                        "owner":  "infra",
+                        "note":  "Root wrapper entrypoint for tests/scripts unified runner."
+                    },
+                    {
+                        "path":  "scripts/analyze_legacy_wrappers.py",
+                        "status":  "active",
+                        "owner":  "infra",
+                        "note":  "Root wrapper entrypoint for legacy-wrapper usage audit."
+                    },
+                    {
+                        "path":  "scripts/dry_run_candidate_delete.py",
+                        "status":  "active",
+                        "owner":  "infra",
+                        "note":  "Root wrapper entrypoint for candidate_delete dry-run report."
+                    },
+                    {
+                        "path":  "scripts/audit_core_wrapper_lifecycle.py",
+                        "status":  "active",
+                        "owner":  "infra",
+                        "note":  "Root wrapper entrypoint for core root-wrapper lifecycle audit."
+                    },
+                    {
+                        "path":  "tests/scripts/training/data/auto_classify_training_data.py",
+                        "status":  "manual",
+                        "owner":  "ml",
+                        "note":  "Manual helper for staged data auto-classification."
+                    },
+                    {
+                        "path":  "tests/scripts/benchmark/benchmark_sequence_residual_datasets.py",
+                        "status":  "manual",
+                        "owner":  "ml",
+                        "note":  "Leave-one-voicebank-out benchmark for sequence residual JSONL datasets."
+                    },
+                    {
+                        "path":  "tests/scripts/alignment/build_alignment_test_folder.py",
+                        "status":  "manual",
+                        "owner":  "align",
+                        "note":  "Manual helper to assemble alignment sample/test folders."
+                    },
+                    {
+                        "path":  "scripts/build_installer.ps1",
+                        "status":  "protected",
+                        "owner":  "release",
+                        "note":  "Called by CI workflows."
+                    },
+                    {
+                        "path":  "scripts/build_portable_with_models.ps1",
+                        "status":  "protected",
+                        "owner":  "release",
+                        "note":  "Called by CI workflows."
+                    },
+                    {
+                        "path":  "tests/scripts/training/sequence/build_sequence_residual_dataset.py",
+                        "status":  "manual",
+                        "owner":  "ml",
+                        "note":  "Build sequence residual JSONL rows for sequence residual correction experiments."
+                    },
+                    {
+                        "path":  "tests/scripts/alignment/compare_alignment_visual.py",
+                        "status":  "manual",
+                        "owner":  "align",
+                        "note":  "Manual alignment visualization/comparison helper."
+                    },
+                    {
+                        "path":  "tests/scripts/alignment/visualize_textgrid_oto_overlay.py",
+                        "status":  "manual",
+                        "owner":  "align",
+                        "note":  "Visualize TextGrid phones and source OTO anchor positions together."
+                    },
+                    {
+                        "path":  "tests/scripts/evaluate/coupled/export_coupled_onnx.py",
+                        "status":  "manual",
+                        "owner":  "ml",
+                        "note":  "Manual ONNX export helper."
+                    },
+                    {
+                        "path":  "tests/scripts/training/alignment/export_textgrid_to_sinsy_lab.py",
+                        "status":  "manual",
+                        "owner":  "align",
+                        "note":  "Manual TextGrid-to-Sinsy LAB conversion helper."
+                    },
+                    {
+                        "path":  "tests/scripts/training/data/generate_shared_oto_profiles.py",
+                        "status":  "manual",
+                        "owner":  "ml",
+                        "note":  "Manual utility to generate shared OTO timing profiles."
+                    },
+                    {
+                        "path":  "tests/scripts/training/sequence/preprocess_oto_cv_for_sequence_training.py",
+                        "status":  "manual",
+                        "owner":  "ml",
+                        "note":  "Manual preprocessing helper for CV-based sequence aligner training data."
+                    },
+                    {
+                        "path":  "tests/scripts/training/alignment/preprocess_sinsy_labels_for_sequence_training.py",
+                        "status":  "manual",
+                        "owner":  "ml",
+                        "note":  "Manual preprocessing helper for Sinsy label sequence training data."
+                    },
+                    {
+                        "path":  "tests/scripts/training/alignment/split_filename_lab_match_manifest.py",
+                        "status":  "manual",
+                        "owner":  "align",
+                        "note":  "Split wav/lab pairs into filename-match and mismatch manifests."
+                    },
+                    {
+                        "path":  "scripts/run_oto_generation_batch.py",
+                        "status":  "protected",
+                        "owner":  "pipeline",
+                        "note":  "Batch generation runtime entrypoint."
+                    },
+                    {
+                        "path":  "scripts/runtime_recovery.ps1",
+                        "status":  "protected",
+                        "owner":  "runtime",
+                        "note":  "Referenced by setup_mfa.bat and packaging."
+                    },
+                    {
+                        "path":  "tests/scripts/smoke/sandbox_smoke_check.ps1",
+                        "status":  "manual",
+                        "owner":  "test",
+                        "note":  "Internal smoke-check script; intentionally excluded from release build payload."
+                    },
+                    {
+                        "path":  "scripts/startup_diagnose.bat",
+                        "status":  "protected",
+                        "owner":  "runtime",
+                        "note":  "Bundled into installer/release."
+                    },
+                    {
+                        "path":  "scripts/startup_diagnose.ps1",
+                        "status":  "protected",
+                        "owner":  "runtime",
+                        "note":  "Bundled into installer/release."
+                    },
+                    {
+                        "path":  "tests/scripts/training/coupled/train_ensemble_bundle.py",
+                        "status":  "manual",
+                        "owner":  "ml",
+                        "note":  "Manual ensemble model training helper."
+                    },
+                    {
+                        "path":  "tests/scripts/training/alignment/train_sequence_aligner_profile_from_sinsy.py",
+                        "status":  "manual",
+                        "owner":  "ml",
+                        "note":  "Manual sequence aligner profile training helper from corrected Sinsy labels."
+                    },
+                    {
+                        "path":  "tests/scripts/training/sequence/train_sequence_residual_baseline.py",
+                        "status":  "manual",
+                        "owner":  "ml",
+                        "note":  "Train lightweight ridge baseline model for sequence residual correction."
+                    },
+                    {
+                        "path":  "scripts/dev/audit_script_usage.py",
+                        "status":  "active",
+                        "owner":  "infra",
+                        "note":  "Implementation path for audit_script_usage root wrapper."
+                    },
+                    {
+                        "path":  "scripts/dev/run_test_tools.py",
+                        "status":  "active",
+                        "owner":  "infra",
+                        "note":  "Implementation path for tests/scripts unified runner."
+                    },
+                    {
+                        "path":  "scripts/dev/analyze_legacy_wrappers.py",
+                        "status":  "active",
+                        "owner":  "infra",
+                        "note":  "Implementation path for legacy-wrapper usage audit report."
+                    },
+                    {
+                        "path":  "scripts/dev/dry_run_candidate_delete.py",
+                        "status":  "active",
+                        "owner":  "infra",
+                        "note":  "Implementation path for candidate_delete dry-run planner."
+                    },
+                    {
+                        "path":  "scripts/dev/audit_core_wrapper_lifecycle.py",
+                        "status":  "active",
+                        "owner":  "infra",
+                        "note":  "Implementation path for core root-wrapper lifecycle audit."
+                    },
+                    {
+                        "path":  "scripts/batch/run_oto_generation_batch.py",
+                        "status":  "active",
+                        "owner":  "pipeline",
+                        "note":  "Implementation path for batch OTO generation entrypoint."
+                    },
+                    {
+                        "path":  "scripts/benchmark/run_kr_regression_suite.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Implementation path for KR regression benchmark entrypoint."
+                    },
+                    {
+                        "path":  "scripts/evaluate/run_coupled_experiment_matrix.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Implementation path for coupled experiment matrix runner."
+                    },
+                    {
+                        "path":  "scripts/evaluate/run_coupled_two_stage_tune.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Implementation path for two-stage coupled tuning runner."
+                    },
+                    {
+                        "path":  "scripts/build/build_installer.ps1",
+                        "status":  "active",
+                        "owner":  "release",
+                        "note":  "Implementation path for installer build script (root wrapper remains CI path)."
+                    },
+                    {
+                        "path":  "scripts/build/build_portable_with_models.ps1",
+                        "status":  "active",
+                        "owner":  "release",
+                        "note":  "Implementation path for portable build script (root wrapper remains CI path)."
+                    },
+                    {
+                        "path":  "scripts/dev/compare_pred_vs_lab.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Compare phoneme-boundary prediction JSONs against HTK lab ground truth."
+                    },
+                    {
+                        "path":  "scripts/dev/convert_htk_lab_to_manifest.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Convert HTK-style .lab files plus matching .wav into a boundary manifest."
+                    },
+                    {
+                        "path":  "scripts/dev/diff_oto.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Diff two oto.ini files row-by-row matched by wav and alias."
+                    },
+                    {
+                        "path":  "scripts/dev/mfa_free_oto_review.py",
+                        "status":  "active",
+                        "owner":  "pipeline",
+                        "note":  "Generate/split/merge MFA-free OTO review files, compare baseline vs HSMM outputs, replay HSMM diagnostics/timeline/diagnostic OTO review splits/reference comparisons from evidence, record quality evidence reports with required manual-reference/listening proof artifacts, evaluate artifact safety/default-on gates, and dry-run/install gated final.ini with backup/hash guards."
+                    },
+                    {
+                        "path":  "scripts/dev/dump_phoneme_boundary_failures.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Dump per-row/per-event boundary prediction failures for a checkpoint."
+                    },
+                    {
+                        "path":  "scripts/dev/eval_phoneme_boundary.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Evaluate a phoneme-boundary checkpoint against a manifest."
+                    },
+                    {
+                        "path":  "scripts/dev/finetune_phoneme_boundary.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Fine-tune an existing phoneme-boundary checkpoint on a gold manifest."
+                    },
+                    {
+                        "path":  "scripts/dev/predict_phoneme_boundary_dir.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Run a phoneme-boundary checkpoint over a wav directory and dump predictions."
+                    },
+                    {
+                        "path":  "scripts/dev/probe_silence_noise.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Probe RMS of HTK-lab silence regions to gauge the noise floor."
+                    },
+                    {
+                        "path":  "scripts/dev/score_dual_vs_lab.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Head-to-head accuracy comparison of BoundaryScorer vs PhonemeBoundary against lab."
+                    },
+                    {
+                        "path":  "scripts/dev/split_boundary_manifest.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Split a phoneme-boundary manifest JSONL into train/heldout with a fixed seed."
+                    },
+                    {
+                        "path":  "scripts/dev/visualize_dual_boundary.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Render dual-boundary predictions (BoundaryScorer + PhonemeBoundary) into a PNG."
+                    },
+                    {
+                        "path":  "scripts/dev/visualize_phoneme_boundary.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Render a phoneme-boundary prediction JSON into a debug PNG."
+                    }
+                ]
 }

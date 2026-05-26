@@ -138,14 +138,14 @@ class TabBuildersMixin:
             ),
             (
                 "align",
-                "2. 음성 정렬",
-                "MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.",
+                "2. 정렬 단계",
+                "기본 HSMM OTO에서는 건너뜁니다. MFA를 선택한 경우에만 TextGrid를 생성합니다.",
                 self._run_mfa,
             ),
             (
                 "oto",
                 "3. OTO.ini 생성",
-                "TextGrid 기반으로 OTO 파라미터를 계산해 저장합니다.",
+                "HSMM OTO 또는 TextGrid 기반으로 OTO 파라미터를 계산해 저장합니다.",
                 self._run_oto_gen,
             ),
         ]
@@ -216,6 +216,7 @@ class TabBuildersMixin:
         elif mfa_ready:
             self.mfa_install_btn.configure(text=t("✅ 설치 완료"), state="disabled", fg_color="#388E3C")
         self.mfa_install_btn.grid(row=0, column=1, padx=(6, 0), pady=1, sticky="w")
+
 
         ctk.CTkLabel(
             right_actions,
@@ -1610,7 +1611,6 @@ class TabBuildersMixin:
             wraplength=740,
             justify="left",
         ).pack(anchor="w", padx=12, pady=(10, 10))
-
         dev_reset_row = ctk.CTkFrame(dev_container, fg_color="transparent")
         dev_reset_row.pack(fill="x", padx=10, pady=(8, 10))
         reset_btn = ctk.CTkButton(
@@ -2862,7 +2862,6 @@ class TabBuildersMixin:
             wraplength=740,
             justify="left",
         ).pack(anchor="w", padx=12, pady=(10, 10))
-
         dev_reset_row = ctk.CTkFrame(dev_container, fg_color="transparent")
         dev_reset_row.pack(fill="x", padx=10, pady=(8, 10))
         reset_btn = ctk.CTkButton(

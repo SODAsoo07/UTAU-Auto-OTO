@@ -13,7 +13,6 @@ from core.no_mfa_oto_builder import (
     generate_no_mfa_auto_oto,
     resolve_no_mfa_source_oto,
 )
-from core.coarse_crnn.oto_predictor_generator import generate_oto_with_crnn_predictor
 from core.oto_generator import generate_oto
 from core.pipeline_status import normalize_aligner_name
 from core.preflight_common import collect_runtime_preflight_issues
@@ -297,9 +296,14 @@ class OtoActionsMixin:
                         language=lang,
                         wav_dir=preflight_wav_dir,
                         out_path=preflight_out_path,
-                        aligner=self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA",
+                        aligner=self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO",
                         textgrid_dir=preflight_tg_folder,
                         tpl_path=preflight_tpl_path,
+                        no_mfa_oto_mode=(
+                            self._get_no_mfa_oto_mode_code()
+                            if hasattr(self, "_get_no_mfa_oto_mode_code")
+                            else ""
+                        ),
                         no_base_oto=bool(self.no_base_oto_var.get()),
                         custom_phonemes_path=self.custom_phoneme_var.get().strip(),
                         require_output=True,
@@ -431,9 +435,10 @@ class OtoActionsMixin:
                         except Exception:
                             has_textgrid = False
                     aligner_engine = normalize_aligner_name(
-                        self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
-                        default="mfa",
+                        self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO",
+                        default="hsmm_oto",
                     )
+                    hsmm_oto_mode = aligner_engine == "hsmm_oto"
                     no_mfa_auto_mode = (
                         aligner_engine in {"none", "coarse_crnn"}
                         and lang != "english"
@@ -445,33 +450,37 @@ class OtoActionsMixin:
                         else "remap"
                     )
                     if aligner_engine == "coarse_crnn":
-                        no_mfa_mode_code = "crnn"
-                    no_mfa_mode_text = (
-                        "CRNN OTO 예측기(실험)"
-                        if no_mfa_mode_code == "crnn"
-                        else "베이스 OTO 재매핑 + 보정"
-                    )
+                        no_mfa_mode_code = "remap"
+                    if no_mfa_mode_code != "remap":
+                        no_mfa_mode_code = "remap"
+                    no_mfa_mode_text = "base OTO remap + correction"
                     no_mfa_source_oto = ""
+                    source_oto_required_for_no_mfa = True
                     if no_mfa_auto_mode:
-                        if bool(self.no_base_oto_var.get()):
+                        if source_oto_required_for_no_mfa and bool(self.no_base_oto_var.get()):
                             self._append_log(f"{prefix}오류: No-MFA 자동설정 모드에서는 베이스 OTO(템플릿 ini)가 필요합니다.")
                             self._set_status("오류: 베이스 OTO 필요")
                             return False, False, 0, 0
-                        no_mfa_source_oto = resolve_no_mfa_source_oto(
-                            wav_dir=target_wav_dir,
-                            source_hint=tpl_path,
-                        )
-                        if not no_mfa_source_oto:
+                        if source_oto_required_for_no_mfa or not bool(self.no_base_oto_var.get()):
+                            no_mfa_source_oto = resolve_no_mfa_source_oto(
+                                wav_dir=target_wav_dir,
+                                source_hint=tpl_path,
+                            )
+                        if source_oto_required_for_no_mfa and not no_mfa_source_oto:
                             self._append_log(f"{prefix}오류: No-MFA 자동설정용 베이스 OTO를 찾지 못했습니다.")
                             self._append_log("   템플릿 OTO 경로에 baseoto.ini 또는 oto.ini를 지정해 주세요.")
                             self._set_status("오류: 베이스 OTO 필요")
                             return False, False, 0, 0
-                        tpl_path = no_mfa_source_oto
+                        if no_mfa_source_oto:
+                            tpl_path = no_mfa_source_oto
                         self._append_log("ℹ No-MFA 모드: 선택한 생성 방식으로 OTO를 생성합니다.")
                         if has_textgrid:
                             self._append_log(f"{prefix}ℹ TextGrid가 있어도 No-MFA 선택 시에는 선택한 No-MFA 생성 방식으로 진행합니다.")
                         self._append_log(f"ℹ No-MFA 생성 방식: {no_mfa_mode_text}")
-                        self._append_log(f"[No-MFA] base oto: {no_mfa_source_oto}")
+                        if no_mfa_source_oto:
+                            self._append_log(f"[No-MFA] base oto: {no_mfa_source_oto}")
+                        else:
+                            self._append_log("[No-MFA] source oto not used.")
                     elif lang != "english" and selected_format not in {"cmpx", "c_plus_v"} and not has_textgrid:
                         self._append_log(f"{prefix}경고: textgrids 폴더가 없습니다. 3단계 정렬/라벨 생성을 먼저 실행하세요.")
 
@@ -483,9 +492,10 @@ class OtoActionsMixin:
                             language=lang,
                             wav_dir=target_wav_dir,
                             out_path=target_out_path,
-                            aligner=self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA",
+                            aligner=self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO",
                             textgrid_dir=tg_folder,
                             tpl_path=tpl_path,
+                            no_mfa_oto_mode=no_mfa_mode_code,
                             no_base_oto=bool(self.no_base_oto_var.get()),
                             custom_phonemes_path=custom_phonemes_path,
                             require_output=True,
@@ -609,51 +619,35 @@ class OtoActionsMixin:
                             generation_mode="remap",
                             callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                         )
+                    elif hsmm_oto_mode:
+                        hsmm_source_oto = ""
+                        if not bool(self.no_base_oto_var.get()):
+                            hsmm_source_oto = resolve_no_mfa_source_oto(
+                                wav_dir=target_wav_dir,
+                                source_hint=tpl_path,
+                            )
+                        _update_oto_local("HSMM OTO generation", 0.22, force=True)
+                        processed, total, errors = self._run_hsmm_oto_preview_generation(
+                            wav_dir=target_wav_dir,
+                            out_path=target_out_path,
+                            source_oto_path=hsmm_source_oto,
+                            language=lang,
+                            format_type=selected_format,
+                            apply_lightgbm=enable_ml_correction,
+                            callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
+                        )
                     elif no_mfa_auto_mode:
-                        if no_mfa_mode_code == "crnn":
-                            _update_oto_local("CRNN OTO 예측 생성", 0.22, force=True)
-                            _crnn_special_raw = (
-                                self.oto_crnn_special_aliases_var.get()
-                                if hasattr(self, "oto_crnn_special_aliases_var")
-                                else ""
-                            )
-                            _crnn_special_aliases: set[str] = {
-                                item.strip()
-                                for item in str(_crnn_special_raw or "").split(",")
-                                if item.strip()
-                            }
-                            processed, total, errors = generate_oto_with_crnn_predictor(
-                                wav_dir=target_wav_dir,
-                                out_path=target_out_path,
-                                source_oto_path=no_mfa_source_oto or tpl_path,
-                                alias_suffix=alias_suffix,
-                                language=lang,
-                                format_type=selected_format,
-                                model_path=(
-                                    self.oto_crnn_model_path_var.get().strip()
-                                    if hasattr(self, "oto_crnn_model_path_var")
-                                    else ""
-                                ),
-                                device=(
-                                    self.oto_crnn_device_var.get().strip()
-                                    if hasattr(self, "oto_crnn_device_var")
-                                    else "auto"
-                                ),
-                                special_aliases=_crnn_special_aliases or None,
-                                callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
-                            )
-                        else:
-                            _update_oto_local("No-MFA 자동설정 생성", 0.22, force=True)
-                            processed, total, errors = generate_no_mfa_auto_oto(
-                                wav_dir=target_wav_dir,
-                                out_path=target_out_path,
-                                source_oto_path=no_mfa_source_oto or tpl_path,
-                                alias_suffix=alias_suffix,
-                                language=lang,
-                                stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
-                                generation_mode=no_mfa_mode_code,
-                                callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
-                            )
+                        _update_oto_local("No-MFA OTO generation", 0.22, force=True)
+                        processed, total, errors = generate_no_mfa_auto_oto(
+                            wav_dir=target_wav_dir,
+                            out_path=target_out_path,
+                            source_oto_path=no_mfa_source_oto or tpl_path,
+                            alias_suffix=alias_suffix,
+                            language=lang,
+                            stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
+                            generation_mode=no_mfa_mode_code,
+                            callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
+                        )
                     elif lang == "japanese":
                         self._append_log(f"설정: 일본어 에일리어스 스타일 = {self.ja_alias_style_var.get()}")
                         _update_oto_local("일본어 OTO 생성", 0.22, force=True)
@@ -695,6 +689,12 @@ class OtoActionsMixin:
                             callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                         )
 
+                    if errors:
+                        for err in errors:
+                            self._append_log(f"  - {err}")
+                        self._set_status(f"오류: OTO 생성 실패 {len(errors)}건 ({processed}/{total})")
+                        return False, False, int(processed or 0), int(total or 0)
+
                     if total:
                         _update_oto_local(t("생성 결과 정리"), float(processed) / float(total))
                     _update_oto_local(t("생성 결과 정리"), 0.92, force=True)
@@ -726,13 +726,7 @@ class OtoActionsMixin:
                         callback=_make_progress_callback("validate", batch_index=batch_index, batch_total=batch_total),
                     )
                     _update_validate_local(t("검증 완료"), 1.0, force=True)
-                    if not errors:
-                        self._cleanup_generated_output_artifacts(target_out_path, snapshot=cleanup_snapshot)
-                    if errors:
-                        for err in errors:
-                            self._append_log(f"  - {err}")
-                        self._set_status(f"오류: OTO 생성 실패 {len(errors)}건 ({processed}/{total})")
-                        return False, False, int(processed or 0), int(total or 0)
+                    self._cleanup_generated_output_artifacts(target_out_path, snapshot=cleanup_snapshot)
 
                     self._set_status(f"완료: OTO 생성 성공 ({processed}/{total})")
                     return True, False, int(processed or 0), int(total or 0)

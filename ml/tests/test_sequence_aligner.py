@@ -13,12 +13,15 @@ from core.sequence_aligner import (
     _apply_uniform_boundary_advance,
     _build_ap_sp_mask,
     _build_frame_voicing_mask,
+    _build_phone_duration_priors,
+    _build_phone_rows,
     _inject_ap_labels,
     _insert_internal_pause_rows,
     _prepare_analysis_signal,
     _refine_word_boundaries_with_onset_cues,
     _resolve_word_rows,
     check_sequence_aligner_ready,
+    get_last_sequence_align_meta,
     run_sequence_align,
 )
 
@@ -182,6 +185,27 @@ def test_run_sequence_align_writes_textgrid(tmp_path, monkeypatch):
     assert ok is True
     assert "sequence alignment complete" in str(message)
     assert os.path.isfile(str(out_dir / "ga.TextGrid"))
+    meta = get_last_sequence_align_meta()
+    assert "confidence" in meta
+    assert "warnings" in meta
+    assert "fallback_hint" in meta
+
+
+def test_build_phone_rows_caps_vc_pre_lead_for_utau_runtime():
+    rows = [(0.0, 1.0, "ka")]
+    labels = ["stable_vowel"] * 200
+    phone_rows = _build_phone_rows(
+        rows,
+        duration_sec=1.0,
+        language="japanese",
+        labels=labels,
+        hop_sec=0.005,
+        format_hint="cv",
+        viterbi_enable=False,
+    )
+    assert len(phone_rows) == 2
+    first_span = float(phone_rows[0][1]) - float(phone_rows[0][0])
+    assert first_span <= 0.081
 
 
 def test_resolve_word_rows_keeps_nonzero_spans_for_many_tokens():
@@ -519,3 +543,108 @@ def test_refine_filename_soft_lock_clamps_low_conf_shift():
     lock_boundary = float(refined_locked[0][1])
     assert free_boundary >= 0.53
     assert lock_boundary <= 0.51
+
+
+def test_build_phone_rows_viterbi_refines_cvc_boundaries_with_label_cues():
+    word_rows = [(0.0, 1.0, "gak")]
+    labels = ["sil"] * 10 + ["voiced_onset"] * 12 + ["stable_vowel"] * 46 + ["unvoiced_onset"] * 22 + ["sil"] * 10
+    cvn = np.full((len(labels),), 0.25, dtype=np.float32)
+    cvn[10:24] = 0.85
+    cvn[68:90] = 0.82
+    hop = 0.01
+
+    base = _build_phone_rows(
+        word_rows,
+        duration_sec=1.0,
+        language="korean",
+        labels=labels,
+        cvn_c_prob=cvn,
+        hop_sec=hop,
+        format_hint="cvc",
+        viterbi_enable=False,
+    )
+    refined = _build_phone_rows(
+        word_rows,
+        duration_sec=1.0,
+        language="korean",
+        labels=labels,
+        cvn_c_prob=cvn,
+        hop_sec=hop,
+        format_hint="cvc",
+        viterbi_enable=True,
+    )
+    assert len(base) >= 3
+    assert len(refined) >= 3
+    base_b1 = float(base[0][1])
+    base_b2 = float(base[1][1])
+    ref_b1 = float(refined[0][1])
+    ref_b2 = float(refined[1][1])
+    assert ref_b1 <= base_b1
+    assert ref_b2 > base_b2
+    assert 0.07 <= ref_b1 <= 0.10
+    assert 0.60 <= ref_b2 <= 0.84
+
+
+def test_build_phone_rows_viterbi_cv_short_wav_caps_consonant_ratio():
+    word_rows = [(0.0, 0.24, "ka")]
+    labels = ["unvoiced_onset"] * 14 + ["stable_vowel"] * 10
+    cvn = np.full((24,), 0.35, dtype=np.float32)
+    cvn[:14] = 0.88
+    hop = 0.01
+
+    base = _build_phone_rows(
+        word_rows,
+        duration_sec=0.24,
+        language="japanese",
+        labels=labels,
+        cvn_c_prob=cvn,
+        hop_sec=hop,
+        format_hint="cv",
+        viterbi_enable=False,
+    )
+    refined = _build_phone_rows(
+        word_rows,
+        duration_sec=0.24,
+        language="japanese",
+        labels=labels,
+        cvn_c_prob=cvn,
+        hop_sec=hop,
+        format_hint="cv",
+        viterbi_enable=True,
+        viterbi_short_wav_threshold_ms=500.0,
+    )
+    base_cons = float(base[0][1] - base[0][0])
+    ref_cons = float(refined[0][1] - refined[0][0])
+    assert ref_cons <= base_cons
+    assert ref_cons <= 0.115
+    assert ref_cons >= 0.040
+
+
+def test_build_phone_duration_priors_blends_reclist_prior_weight():
+    generic = _build_phone_duration_priors(
+        ["k", "a"],
+        ["c", "v"],
+        total_frames=100,
+        format_hint="cv",
+        short_wav=False,
+        reclist_prior_weight=0.0,
+    )
+    half = _build_phone_duration_priors(
+        ["k", "a"],
+        ["c", "v"],
+        total_frames=100,
+        format_hint="cv",
+        short_wav=False,
+        reclist_prior_weight=0.5,
+    )
+    full = _build_phone_duration_priors(
+        ["k", "a"],
+        ["c", "v"],
+        total_frames=100,
+        format_hint="cv",
+        short_wav=False,
+        reclist_prior_weight=1.0,
+    )
+
+    assert generic[0][2] < half[0][2] < full[0][2]
+    assert full[0][1] < half[0][1] < generic[0][1]

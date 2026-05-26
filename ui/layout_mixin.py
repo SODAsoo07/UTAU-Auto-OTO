@@ -18,6 +18,8 @@ from ui.theme_tokens import (
 from ui.i18n import t
 
 EN_CVVC_UI_ENABLED = False
+NO_MFA_REMAP_LABEL = "베이스 OTO 재매핑 + 보정"
+HSMM_OTO_LABEL = "HSMM OTO"
 
 
 class LayoutMixin:
@@ -257,6 +259,21 @@ class LayoutMixin:
         _style_primary_button(out_save_btn)
         out_save_btn.pack(side="right")
 
+        row_suffix = build_form_row(form_body)
+        build_left_label(row_suffix, t("접미사:")).pack(side="left")
+        self.suffix_entry = ctk.CTkEntry(
+            row_suffix,
+            placeholder_text=t("선택 사항: 예: C4 (모든 에일리어스 끝에 _C4 형태로 부여)"),
+            textvariable=self.alias_suffix_var,
+        )
+        self.suffix_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
+        self.suffix_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
+        ctk.CTkLabel(
+            row_suffix,
+            text=t("(출력 alias 접미사)"),
+            text_color=PALETTE.neutral_text,
+        ).pack(side="left")
+
         row_format = build_form_row(form_body)
         build_left_label(row_format, t("형식 지정:")).pack(side="left")
         format_options = self._get_auto_format_options("korean")
@@ -359,7 +376,7 @@ class LayoutMixin:
         build_left_label(self.row_aligner, t("정렬 엔진:")).pack(side="left")
         self.aligner_menu = ctk.CTkOptionMenu(
             self.row_aligner,
-            values=["MFA", "전용(시퀀스)"],
+            values=[HSMM_OTO_LABEL, "MFA", "전용(시퀀스)"],
             variable=self.aligner_var,
             width=190,
             command=self._on_aligner_change,
@@ -368,7 +385,7 @@ class LayoutMixin:
         self.aligner_menu.pack(side="left", padx=(6, 8))
         self.aligner_help_label = ctk.CTkLabel(
             self.row_aligner,
-            text=t("(기본은 MFA입니다. 필요 시 자동 설치됩니다.)"),
+            text=t("(기본은 HSMM OTO입니다. MFA는 선택한 경우에만 설치 여부를 확인합니다.)"),
             text_color=PALETTE.neutral_text,
         )
         self.aligner_help_label.pack(side="left", fill="x", expand=True)
@@ -377,7 +394,7 @@ class LayoutMixin:
         self.no_mfa_oto_mode_menu = ctk.CTkOptionMenu(
             self.row_no_mfa_oto_mode,
             values=[
-                "베이스 OTO 재매핑 + 보정",
+                NO_MFA_REMAP_LABEL,
             ],
             variable=self.no_mfa_oto_mode_var,
             width=280,
@@ -391,15 +408,92 @@ class LayoutMixin:
             text_color=PALETTE.neutral_text,
         )
         self.no_mfa_oto_mode_hint_label.pack(side="left", fill="x", expand=True)
-        self.row_oto_crnn_model = build_form_row(form_body)
-        build_left_label(self.row_oto_crnn_model, t("CRNN 모델:")).pack(side="left")
-        self.oto_crnn_model_entry = ctk.CTkEntry(
-            self.row_oto_crnn_model,
-            textvariable=self.oto_crnn_model_path_var,
-            placeholder_text="비워두면 기본 학습 모델 사용",
+        # Boundary scorer checkpoint picker. Discovered model files appear as
+        # additional options; "자동 (auto)" defers to the resolver's default
+        # (mtime-newest non-experimental). Hidden together with the device row
+        # under the same developer-mode + CRNN-engine gate (see _sync_aligner_ui).
+        self.row_oto_crnn_scorer_model = build_form_row(form_body)
+        build_left_label(self.row_oto_crnn_scorer_model, t("Boundary scorer:")).pack(side="left")
+        scorer_choices = (
+            self._oto_crnn_model_choice_options()
+            if hasattr(self, "_oto_crnn_model_choice_options")
+            else ["자동 (auto)"]
         )
-        self.oto_crnn_model_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
-        self.oto_crnn_model_entry.pack(side="left", fill="x", expand=True, padx=(6, 6))
+        if hasattr(self, "_set_oto_crnn_model_choice_from_code"):
+            initial_code = ""
+            if hasattr(self, "oto_crnn_model_choice_var"):
+                try:
+                    initial_code = self.oto_crnn_model_choice_var.get()
+                except Exception:
+                    initial_code = ""
+            self._set_oto_crnn_model_choice_from_code(initial_code or "auto")
+        self.oto_crnn_scorer_model_menu = ctk.CTkOptionMenu(
+            self.row_oto_crnn_scorer_model,
+            values=scorer_choices,
+            variable=self.oto_crnn_model_choice_var,
+            width=460,
+            command=lambda _v: self._on_oto_crnn_model_choice_change(_v),
+        )
+        _style_blue_menu(self.oto_crnn_scorer_model_menu)
+        self.oto_crnn_scorer_model_menu.pack(side="left", padx=(6, 8))
+        self.oto_crnn_scorer_model_hint = ctk.CTkLabel(
+            self.row_oto_crnn_scorer_model,
+            text=t("(자동=기본 모델, 다른 .pt 선택 시 추론에 즉시 반영)"),
+            text_color=PALETTE.neutral_text,
+        )
+        self.oto_crnn_scorer_model_hint.pack(side="left", fill="x", expand=True)
+        self.row_oto_crnn_scorer_model.pack_forget()
+        self.row_oto_crnn_engine = build_form_row(form_body)
+        build_left_label(self.row_oto_crnn_engine, t("CRNN Mode:")).pack(side="left")
+        self.oto_crnn_engine_menu = ctk.CTkOptionMenu(
+            self.row_oto_crnn_engine,
+            values=["Stage1 heuristic only", "Boundary decoder + optional corrections"],
+            variable=self.oto_crnn_engine_var,
+            width=280,
+            command=lambda _v: self._on_oto_crnn_engine_change(),
+        )
+        _style_blue_menu(self.oto_crnn_engine_menu)
+        self.oto_crnn_engine_menu.pack(side="left", padx=(6, 8))
+        self.oto_crnn_engine_hint = ctk.CTkLabel(
+            self.row_oto_crnn_engine,
+            text=t("(Stage1 = Boundary scorer + deterministic OTO heuristics only)"),
+            text_color=PALETTE.neutral_text,
+        )
+        self.oto_crnn_engine_hint.pack(side="left", fill="x", expand=True)
+        self.row_oto_crnn_engine.pack_forget()
+        self.row_oto_stage2_model = build_form_row(form_body)
+        self.oto_stage2_enable_checkbox = ctk.CTkCheckBox(
+            self.row_oto_stage2_model,
+            text=t("Stage2 OTO Assigner"),
+            variable=self.oto_stage2_enable_var,
+            command=lambda: self._on_oto_stage2_setting_change(),
+            checkbox_width=18,
+            checkbox_height=18,
+        )
+        self.oto_stage2_enable_checkbox.pack(side="left", padx=(0, 8))
+        stage2_choices = (
+            self._oto_stage2_model_choice_options()
+            if hasattr(self, "_oto_stage2_model_choice_options")
+            else ["자동 (auto)"]
+        )
+        self.oto_stage2_model_menu = ctk.CTkOptionMenu(
+            self.row_oto_stage2_model,
+            values=stage2_choices,
+            variable=self.oto_stage2_model_choice_var,
+            width=330,
+            command=lambda _v: self._on_oto_stage2_model_choice_change(_v),
+        )
+        _style_blue_menu(self.oto_stage2_model_menu)
+        self.oto_stage2_model_menu.pack(side="left", padx=(6, 8))
+        self.oto_stage2_model_hint = ctk.CTkLabel(
+            self.row_oto_stage2_model,
+            text=t("(선택 시 Boundary Decoder 뒤에서 2단계 OTO anchor를 재지정)"),
+            text_color=PALETTE.neutral_text,
+        )
+        self.oto_stage2_model_hint.pack(side="left", fill="x", expand=True)
+        self.row_oto_stage2_model.pack_forget()
+        self.row_oto_crnn_model = build_form_row(form_body)
+        build_left_label(self.row_oto_crnn_model, t("CRNN Device:")).pack(side="left")
         self.oto_crnn_device_menu = ctk.CTkOptionMenu(
             self.row_oto_crnn_model,
             values=["auto", "cuda", "cpu"],
@@ -408,18 +502,13 @@ class LayoutMixin:
             command=lambda _v: self._save_config(),
         )
         _style_blue_menu(self.oto_crnn_device_menu)
-        self.oto_crnn_device_menu.pack(side="left", padx=(0, 6))
-        self.oto_crnn_model_browse_btn = ctk.CTkButton(
+        self.oto_crnn_device_menu.pack(side="left", padx=(6, 8))
+        self.oto_crnn_model_hint_label = ctk.CTkLabel(
             self.row_oto_crnn_model,
-            text=t("찾아보기"),
-            width=90,
-            command=lambda: self._browse_file_by_var(
-                self.oto_crnn_model_path_var,
-                [("PyTorch checkpoint", "*.pt"), ("All files", "*.*")],
-            ),
+            text=t("(추론 디바이스. auto = GPU 가용 시 GPU 사용)"),
+            text_color=PALETTE.neutral_text,
         )
-        _style_primary_button(self.oto_crnn_model_browse_btn)
-        self.oto_crnn_model_browse_btn.pack(side="right")
+        self.oto_crnn_model_hint_label.pack(side="left", fill="x", expand=True)
         self.row_oto_crnn_model.pack_forget()
         self.row_oto_crnn_special_aliases = build_form_row(form_body)
         build_left_label(self.row_oto_crnn_special_aliases, t("특수 에일리어스:")).pack(side="left")
@@ -463,7 +552,7 @@ class LayoutMixin:
         advanced_row = build_form_row(path_frame)
         self.advanced_toggle_btn = ctk.CTkButton(
             advanced_row,
-            text=t("▶ 추가 옵션 (특수 발음/접미사)"),
+            text=t("▶ 추가 옵션 (특수 발음)"),
             width=260,
             fg_color=PALETTE.advanced_toggle_bg,
             hover_color=PALETTE.advanced_toggle_hover,
@@ -492,13 +581,6 @@ class LayoutMixin:
         custom_browse_btn = ctk.CTkButton(row0, text=t("찾아보기"), width=90, command=lambda: self._browse_file(self.custom_entry, [("Text 파일", "*.txt")]))
         _style_primary_button(custom_browse_btn)
         custom_browse_btn.pack(side="right")
-
-        row0b = ctk.CTkFrame(self.advanced_options_frame, fg_color="transparent")
-        row0b.pack(fill="x", padx=0, pady=3)
-        ctk.CTkLabel(row0b, text=t("접미사 (선택):"), width=120, anchor="w").pack(side="left")
-        self.suffix_entry = ctk.CTkEntry(row0b, placeholder_text=t("예: C4 (모든 에일리어스 끝에 _C4 형태로 부여)"), textvariable=self.alias_suffix_var)
-        self.suffix_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
-        self.suffix_entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
 
         self._toggle_advanced_options(force=False)
 
@@ -1085,7 +1167,7 @@ class LayoutMixin:
             if hasattr(self, "ja_alias_style_menu"):
                 self.ja_alias_style_menu.configure(state="disabled")
             if hasattr(self, "aligner_var"):
-                self.aligner_var.set("MFA")
+                self.aligner_var.set(HSMM_OTO_LABEL)
         current_code = normalize_auto_format_value(self._get_language(), self.auto_format_var.get())
         self._set_auto_format_from_code(current_code, self._get_language())
         if hasattr(self, "_apply_recommended_ml_model_defaults"):
@@ -1202,19 +1284,238 @@ class LayoutMixin:
     def _normalize_no_mfa_oto_mode_code(value):
         raw = str(value or "").strip().lower()
         if raw in {"crnn", "oto_crnn", "oto-crnn", "crnn_oto", "crnn-oto"}:
-            return "crnn"
+            return "remap"
         if raw in {"remap", "base_remap", "base"}:
             return "remap"
         text = str(value or "").strip()
         if text == "CRNN OTO 예측기(실험)":
-            return "crnn"
-        if text == "베이스 OTO 재매핑 + 보정":
+            return "remap"
+        if text in {"베이스 OTO 재매핑 + 보정", NO_MFA_REMAP_LABEL}:
             return "remap"
         return "remap"
 
+    @staticmethod
+    def _normalize_oto_crnn_engine_code(value):
+        raw = str(value or "").strip().lower()
+        if raw in {
+            "stage1",
+            "stage1_heuristic",
+            "stage1-heuristic",
+            "stage1 heuristic only",
+            "heuristic",
+            "heuristic_only",
+            "boundary heuristic",
+        }:
+            return "stage1_heuristic"
+        # Legacy direct CRNN path is removed from UI routing.
+        return "boundary_decoder"
+
+    def _set_oto_crnn_engine_from_code(self, code):
+        normalized = self._normalize_oto_crnn_engine_code(code)
+        label = (
+            "Stage1 heuristic only"
+            if normalized == "stage1_heuristic"
+            else "Boundary decoder + optional corrections"
+        )
+        if hasattr(self, "oto_crnn_engine_var"):
+            try:
+                self.oto_crnn_engine_var.set(label)
+            except Exception:
+                pass
+        return normalized
+
+    def _get_oto_crnn_engine_code(self):
+        if not hasattr(self, "oto_crnn_engine_var"):
+            return "boundary_decoder"
+        try:
+            current = self.oto_crnn_engine_var.get()
+        except Exception:
+            current = ""
+        return self._set_oto_crnn_engine_from_code(current)
+
+    def _on_oto_crnn_engine_change(self):
+        self._set_oto_crnn_engine_from_code(
+            self.oto_crnn_engine_var.get() if hasattr(self, "oto_crnn_engine_var") else ""
+        )
+        self._save_config()
+
+    # --- Boundary scorer model choice --------------------------------
+    # The dropdown label is "자동 (auto)" or a friendly label produced by
+    # `list_available_boundary_scorer_models`. The persisted code is either
+    # "auto" or the model basename. The resolver in
+    # `core.coarse_crnn.oto_predictor_generator` accepts a basename and
+    # searches the standard roots, so we never store an absolute path.
+
+    _OTO_CRNN_MODEL_CHOICE_AUTO_LABEL = "자동 (auto)"
+
+    def _list_oto_crnn_model_choices(self) -> list[dict[str, object]]:
+        try:
+            from core.coarse_crnn.oto_predictor_generator import (
+                list_available_boundary_scorer_models,
+            )
+        except Exception:
+            return []
+        try:
+            return list_available_boundary_scorer_models()
+        except Exception:
+            return []
+
+    def _oto_crnn_model_choice_options(self) -> list[str]:
+        labels = [self._OTO_CRNN_MODEL_CHOICE_AUTO_LABEL]
+        for item in self._list_oto_crnn_model_choices():
+            label = str(item.get("label") or item.get("name") or "").strip()
+            if label and label not in labels:
+                labels.append(label)
+        return labels
+
+    def _oto_crnn_label_to_code(self, label: object) -> str:
+        text = str(label or "").strip()
+        if not text or text == self._OTO_CRNN_MODEL_CHOICE_AUTO_LABEL or text.lower() == "auto":
+            return "auto"
+        for item in self._list_oto_crnn_model_choices():
+            if str(item.get("label") or "") == text:
+                return str(item.get("name") or "auto")
+            if str(item.get("name") or "") == text:
+                return str(item.get("name") or "auto")
+        # Unknown label (e.g. stale config) → fall back to auto-resolve.
+        return "auto"
+
+    def _oto_crnn_code_to_label(self, code: object) -> str:
+        text = str(code or "").strip()
+        if not text or text.lower() == "auto":
+            return self._OTO_CRNN_MODEL_CHOICE_AUTO_LABEL
+        for item in self._list_oto_crnn_model_choices():
+            if str(item.get("name") or "") == text:
+                return str(item.get("label") or item.get("name") or text)
+        return self._OTO_CRNN_MODEL_CHOICE_AUTO_LABEL
+
+    def _set_oto_crnn_model_choice_from_code(self, code) -> str:
+        label = self._oto_crnn_code_to_label(code)
+        if hasattr(self, "oto_crnn_model_choice_var"):
+            try:
+                self.oto_crnn_model_choice_var.set(label)
+            except Exception:
+                pass
+        return self._oto_crnn_label_to_code(label)
+
+    def _get_oto_crnn_model_choice_code(self) -> str:
+        if not hasattr(self, "oto_crnn_model_choice_var"):
+            return "auto"
+        try:
+            current = self.oto_crnn_model_choice_var.get()
+        except Exception:
+            current = ""
+        return self._oto_crnn_label_to_code(current)
+
+    def _on_oto_crnn_model_choice_change(self, _value=None):
+        code = self._get_oto_crnn_model_choice_code()
+        if hasattr(self, "_append_log"):
+            try:
+                self._append_log(f"[CRNN-OTO] boundary scorer model = {code}")
+            except Exception:
+                pass
+        if hasattr(self, "_save_config"):
+            self._save_config()
+
+    _OTO_STAGE2_MODEL_CHOICE_AUTO_LABEL = "자동 (auto)"
+
+    def _list_oto_stage2_model_choices(self) -> list[dict[str, object]]:
+        try:
+            from core.coarse_crnn.oto_predictor_generator import (
+                list_available_stage2_oto_models,
+            )
+        except Exception:
+            return []
+        try:
+            return list_available_stage2_oto_models()
+        except Exception:
+            return []
+
+    def _oto_stage2_model_choice_options(self) -> list[str]:
+        labels = [self._OTO_STAGE2_MODEL_CHOICE_AUTO_LABEL]
+        for item in self._list_oto_stage2_model_choices():
+            label = str(item.get("label") or item.get("name") or "").strip()
+            if label and label not in labels:
+                labels.append(label)
+        return labels
+
+    def _oto_stage2_label_to_code(self, label: object) -> str:
+        text = str(label or "").strip()
+        if not text or text == self._OTO_STAGE2_MODEL_CHOICE_AUTO_LABEL or text.lower() == "auto":
+            return "auto"
+        for item in self._list_oto_stage2_model_choices():
+            if str(item.get("label") or "") == text:
+                return str(item.get("name") or "auto")
+            if str(item.get("name") or "") == text:
+                return str(item.get("name") or "auto")
+        return "auto"
+
+    def _oto_stage2_code_to_label(self, code: object) -> str:
+        text = str(code or "").strip()
+        if not text or text.lower() == "auto":
+            return self._OTO_STAGE2_MODEL_CHOICE_AUTO_LABEL
+        for item in self._list_oto_stage2_model_choices():
+            if str(item.get("name") or "") == text:
+                return str(item.get("label") or item.get("name") or text)
+        return self._OTO_STAGE2_MODEL_CHOICE_AUTO_LABEL
+
+    def _set_oto_stage2_model_choice_from_code(self, code) -> str:
+        label = self._oto_stage2_code_to_label(code)
+        if hasattr(self, "oto_stage2_model_choice_var"):
+            try:
+                self.oto_stage2_model_choice_var.set(label)
+            except Exception:
+                pass
+        return self._oto_stage2_label_to_code(label)
+
+    def _get_oto_stage2_model_choice_code(self) -> str:
+        if not hasattr(self, "oto_stage2_model_choice_var"):
+            return "auto"
+        try:
+            current = self.oto_stage2_model_choice_var.get()
+        except Exception:
+            current = ""
+        return self._oto_stage2_label_to_code(current)
+
+    def _on_oto_stage2_model_choice_change(self, _value=None):
+        code = self._get_oto_stage2_model_choice_code()
+        if hasattr(self, "_append_log"):
+            try:
+                self._append_log(f"[CRNN-OTO] stage2 model = {code}")
+            except Exception:
+                pass
+        if hasattr(self, "_save_config"):
+            self._save_config()
+
+    def _on_oto_stage2_setting_change(self):
+        if hasattr(self, "_append_log"):
+            try:
+                enabled = bool(self.oto_stage2_enable_var.get()) if hasattr(self, "oto_stage2_enable_var") else False
+                self._append_log(f"[CRNN-OTO] Stage2 OTO Assigner {'ON' if enabled else 'OFF'}")
+            except Exception:
+                pass
+        if hasattr(self, "_save_config"):
+            self._save_config()
+
+    def _get_selected_phoneme_boundary_model_path(self) -> str:
+        models = getattr(self, "_phoneme_boundary_models", []) or []
+        try:
+            selected = str(self.phoneme_boundary_model_var.get() if hasattr(self, "phoneme_boundary_model_var") else "").strip()
+        except Exception:
+            selected = ""
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or item.get("name") or "").strip()
+            name = str(item.get("name") or "").strip()
+            if selected and selected in {label, name}:
+                path = str(item.get("path") or "").strip()
+                return path if os.path.isfile(path) else ""
+        return ""
+
     def _set_no_mfa_oto_mode_from_code(self, code):
         normalized = self._normalize_no_mfa_oto_mode_code(code)
-        label = "CRNN OTO 예측기(실험)" if normalized == "crnn" else "베이스 OTO 재매핑 + 보정"
+        label = NO_MFA_REMAP_LABEL
         if hasattr(self, "no_mfa_oto_mode_var"):
             try:
                 self.no_mfa_oto_mode_var.set(label)
@@ -1259,6 +1560,16 @@ class LayoutMixin:
 
     def _on_aligner_change(self, _value=None):
         self._sync_aligner_ui()
+        try:
+            selected = normalize_aligner_name(
+                self.aligner_var.get() if hasattr(self, "aligner_var") else "",
+                default="hsmm_oto",
+            )
+        except Exception:
+            selected = "hsmm_oto"
+        self._mfa_explicitly_selected = selected == "mfa"
+        if selected == "mfa" and hasattr(self, "_prompt_mfa_install_for_explicit_selection"):
+            self._prompt_mfa_install_for_explicit_selection()
         self._save_config()
 
     def _on_ml_route_change(self, _value=None):
@@ -1277,20 +1588,18 @@ class LayoutMixin:
             if hasattr(self, "developer_mode_enabled_var")
             else False
         )
-        options = ["MFA", "전용(시퀀스)"]
-        if developer_enabled:
-            options.append("CRNN(실험적)")
+        options = [HSMM_OTO_LABEL, "MFA", "전용(시퀀스)"]
         lang = self._get_language()
-        current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA").strip()
+        current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else HSMM_OTO_LABEL).strip()
         fmt = normalize_auto_format_value(lang, self.auto_format_var.get()) if hasattr(self, "auto_format_var") else ""
         is_kr_template_only = (lang == "korean" and fmt in {"cmpx", "c_plus_v"})
         forced_no_mfa = bool(lang == "english" or is_kr_template_only)
         if current in {"No-MFA", "No-MFA (Experimental)"}:
-            current = "MFA"
+            current = HSMM_OTO_LABEL
         if forced_no_mfa:
-            current = "MFA"
+            current = HSMM_OTO_LABEL
         if current not in options:
-            current = "MFA"
+            current = HSMM_OTO_LABEL
         if hasattr(self, "aligner_var"):
             self.aligner_var.set(current)
         if hasattr(self, "aligner_menu"):
@@ -1299,9 +1608,10 @@ class LayoutMixin:
                 self.aligner_menu.set(current)
             except Exception:
                 pass
+        use_hsmm_oto = current == HSMM_OTO_LABEL
         use_no_mfa = forced_no_mfa
         use_sequence = current == "전용(시퀀스)"
-        use_coarse_crnn = normalize_aligner_name(current, default="mfa") == "coarse_crnn"
+        use_coarse_crnn = normalize_aligner_name(current, default="hsmm_oto") == "coarse_crnn"
         is_cmpx_preview = (lang == "korean" and fmt == "cmpx")
         is_c_plus_v_mode = (lang == "korean" and fmt == "c_plus_v")
         limit_ml_routes_for_no_mfa = use_no_mfa and not (
@@ -1340,27 +1650,39 @@ class LayoutMixin:
                 pass
 
         no_mfa_mode_code = self._get_no_mfa_oto_mode_code()
-        if no_mfa_mode_code == "crnn" and not developer_enabled:
+        crnn_engine_code = (
+            self._get_oto_crnn_engine_code()
+            if hasattr(self, "_get_oto_crnn_engine_code")
+            else "boundary_decoder"
+        )
+        if no_mfa_mode_code != "remap":
             no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("remap")
-        no_mfa_values = ["베이스 OTO 재매핑 + 보정"]
-        if developer_enabled:
-            no_mfa_values.append("CRNN OTO 예측기(실험)")
+        if no_mfa_mode_code == "crnn":
+            no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("remap")
+        no_mfa_values = [NO_MFA_REMAP_LABEL]
         if hasattr(self, "no_mfa_oto_mode_menu"):
             try:
                 self.no_mfa_oto_mode_menu.configure(values=no_mfa_values)
-                self.no_mfa_oto_mode_menu.set(
-                    "CRNN OTO 예측기(실험)" if no_mfa_mode_code == "crnn" else "베이스 OTO 재매핑 + 보정"
+                self.no_mfa_oto_mode_menu.set(NO_MFA_REMAP_LABEL)
+            except Exception:
+                pass
+        if hasattr(self, "oto_crnn_engine_menu"):
+            try:
+                engine_values = ["Stage1 heuristic only", "Boundary decoder + optional corrections"]
+                self.oto_crnn_engine_menu.configure(
+                    values=engine_values
+                )
+                self.oto_crnn_engine_menu.set(
+                    "Stage1 heuristic only"
+                    if crnn_engine_code == "stage1_heuristic"
+                    else "Boundary decoder + optional corrections"
                 )
             except Exception:
                 pass
-        no_mfa_mode_desc = (
-            "CRNN OTO 예측기(실험)"
-            if no_mfa_mode_code == "crnn"
-            else "베이스 OTO 재매핑 + 보정"
-        )
+        no_mfa_mode_desc = NO_MFA_REMAP_LABEL
         if hasattr(self, "mfa_align_profile_menu"):
             self.mfa_align_profile_menu.configure(
-                state="disabled" if (use_no_mfa or use_sequence or use_coarse_crnn) else "normal"
+                state="disabled" if (use_no_mfa or use_sequence or use_coarse_crnn or use_hsmm_oto) else "normal"
             )
         show_no_mfa_mode_row = use_no_mfa and not (
             lang == "english" or is_kr_template_only
@@ -1377,9 +1699,45 @@ class LayoutMixin:
                     self.row_no_mfa_oto_mode.pack_forget()
             except Exception:
                 pass
-        show_crnn_model_row = bool(
-            developer_enabled and (use_coarse_crnn or (show_no_mfa_mode_row and no_mfa_mode_code == "crnn"))
-        )
+        show_crnn_model_row = False
+        if hasattr(self, "row_oto_crnn_scorer_model") and self.row_oto_crnn_scorer_model is not None:
+            try:
+                if show_crnn_model_row:
+                    if hasattr(self, "oto_crnn_scorer_model_menu") and hasattr(self, "_oto_crnn_model_choice_options"):
+                        try:
+                            choices = self._oto_crnn_model_choice_options()
+                            self.oto_crnn_scorer_model_menu.configure(values=choices)
+                            if hasattr(self, "oto_crnn_model_choice_var"):
+                                current_label = ""
+                                try:
+                                    current_label = self.oto_crnn_model_choice_var.get()
+                                except Exception:
+                                    current_label = ""
+                                if current_label not in choices:
+                                    self._set_oto_crnn_model_choice_from_code("auto")
+                        except Exception:
+                            pass
+                    if not self.row_oto_crnn_scorer_model.winfo_ismapped():
+                        pack_kwargs = {"fill": "x", "pady": 4}
+                        if hasattr(self, "row_align_extra") and self.row_align_extra is not None:
+                            pack_kwargs["before"] = self.row_align_extra
+                        self.row_oto_crnn_scorer_model.pack(**pack_kwargs)
+                else:
+                    self.row_oto_crnn_scorer_model.pack_forget()
+            except Exception:
+                pass
+        if hasattr(self, "row_oto_crnn_engine") and self.row_oto_crnn_engine is not None:
+            try:
+                if show_crnn_model_row:
+                    if not self.row_oto_crnn_engine.winfo_ismapped():
+                        pack_kwargs = {"fill": "x", "pady": 4}
+                        if hasattr(self, "row_align_extra") and self.row_align_extra is not None:
+                            pack_kwargs["before"] = self.row_align_extra
+                        self.row_oto_crnn_engine.pack(**pack_kwargs)
+                else:
+                    self.row_oto_crnn_engine.pack_forget()
+            except Exception:
+                pass
         if hasattr(self, "row_oto_crnn_model") and self.row_oto_crnn_model is not None:
             try:
                 if show_crnn_model_row:
@@ -1390,6 +1748,32 @@ class LayoutMixin:
                         self.row_oto_crnn_model.pack(**pack_kwargs)
                 else:
                     self.row_oto_crnn_model.pack_forget()
+            except Exception:
+                pass
+        if hasattr(self, "row_oto_stage2_model") and self.row_oto_stage2_model is not None:
+            try:
+                if show_crnn_model_row and crnn_engine_code != "stage1_heuristic":
+                    if hasattr(self, "oto_stage2_model_menu") and hasattr(self, "_oto_stage2_model_choice_options"):
+                        try:
+                            choices = self._oto_stage2_model_choice_options()
+                            self.oto_stage2_model_menu.configure(values=choices)
+                            if hasattr(self, "oto_stage2_model_choice_var"):
+                                current_label = ""
+                                try:
+                                    current_label = self.oto_stage2_model_choice_var.get()
+                                except Exception:
+                                    current_label = ""
+                                if current_label not in choices:
+                                    self._set_oto_stage2_model_choice_from_code("auto")
+                        except Exception:
+                            pass
+                    if not self.row_oto_stage2_model.winfo_ismapped():
+                        pack_kwargs = {"fill": "x", "pady": 4}
+                        if hasattr(self, "row_align_extra") and self.row_align_extra is not None:
+                            pack_kwargs["before"] = self.row_align_extra
+                        self.row_oto_stage2_model.pack(**pack_kwargs)
+                else:
+                    self.row_oto_stage2_model.pack_forget()
             except Exception:
                 pass
         if hasattr(self, "row_oto_crnn_special_aliases") and self.row_oto_crnn_special_aliases is not None:
@@ -1418,13 +1802,15 @@ class LayoutMixin:
                     )
             elif use_sequence:
                 self.aligner_help_label.configure(text=t("(시퀀스 라벨 기반 전용 aligner baseline을 사용합니다.)"))
+            elif use_hsmm_oto:
+                self.aligner_help_label.configure(text=t("(TextGrid 없이 파일명 순서 기반 HSMM OTO를 생성합니다.)"))
             elif use_coarse_crnn:
                 self.aligner_help_label.configure(text=t("(CRNN OTO 직접 예측을 사용합니다. TextGrid 정렬 단계는 건너뜁니다.)"))
             else:
-                self.aligner_help_label.configure(text=t("(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)"))
+                self.aligner_help_label.configure(text=t("(MFA 정렬을 사용합니다. MFA가 없으면 설치 여부를 먼저 확인합니다.)"))
         if hasattr(self, "pipeline_step_align_btn") and self.pipeline_step_align_btn is not None:
             try:
-                if use_no_mfa:
+                if use_no_mfa or use_hsmm_oto:
                     self.pipeline_step_align_btn.configure(
                         state="disabled",
                         fg_color="#8E98A6",
@@ -1460,12 +1846,15 @@ class LayoutMixin:
                 if use_sequence:
                     self.align_step_title_label.configure(text=t("2. 음성 정렬 (전용 시퀀스)"))
                     self.align_step_desc_label.configure(text=t("frame-hop 시퀀스 라벨 기반으로 TextGrid를 생성합니다. 실패 시 MFA fallback을 사용합니다."))
+                elif use_hsmm_oto:
+                    self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (HSMM OTO)"))
+                    self.align_step_desc_label.configure(text=t("OTO 생성 단계에서 파일명 슬롯 기반 HSMM 디코더로 oto.ini를 생성합니다."))
                 elif use_coarse_crnn:
                     self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (CRNN OTO)"))
                     self.align_step_desc_label.configure(text=t("OTO 생성 단계에서 CRNN 직접 예측 모델로 oto.ini를 생성합니다."))
                 else:
                     self.align_step_title_label.configure(text=t("2. 음성 정렬"))
-                    self.align_step_desc_label.configure(text=t("MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다."))
+                    self.align_step_desc_label.configure(text=t("MFA로 TextGrid를 생성합니다. MFA가 없으면 설치 여부를 먼저 확인합니다."))
 
     def _toggle_developer_mode(self):
         if not hasattr(self, "developer_mode_enabled_var"):
@@ -1494,6 +1883,37 @@ class LayoutMixin:
                     self.advanced_developer_frame.pack_forget()
                 except Exception:
                     pass
+        if hasattr(self, "boundary_smoke_btn") and self.boundary_smoke_btn is not None:
+            try:
+                is_running = bool(getattr(self, "is_running", False))
+                self.boundary_smoke_btn.configure(state="normal" if (enabled and not is_running) else "disabled")
+            except Exception:
+                pass
+        if hasattr(self, "boundary_smoke_hint_label") and self.boundary_smoke_hint_label is not None:
+            try:
+                self.boundary_smoke_hint_label.configure(
+                    text_color=PALETTE.hint_text if enabled else "#AEB7C6"
+                )
+            except Exception:
+                pass
+        if hasattr(self, "phoneme_boundary_visualize_btn") and self.phoneme_boundary_visualize_btn is not None:
+            try:
+                is_running = bool(getattr(self, "is_running", False))
+                self.phoneme_boundary_visualize_btn.configure(state="normal" if (enabled and not is_running) else "disabled")
+            except Exception:
+                pass
+        if hasattr(self, "phoneme_boundary_model_menu") and self.phoneme_boundary_model_menu is not None:
+            try:
+                self.phoneme_boundary_model_menu.configure(state="normal" if enabled else "disabled")
+            except Exception:
+                pass
+        if hasattr(self, "phoneme_boundary_visualize_hint") and self.phoneme_boundary_visualize_hint is not None:
+            try:
+                self.phoneme_boundary_visualize_hint.configure(
+                    text_color=PALETTE.hint_text if enabled else "#AEB7C6"
+                )
+            except Exception:
+                pass
         detail_frames = getattr(self, "vc_neighbor_detail_frames", [])
         for frame in detail_frames:
             if frame is None:
@@ -1863,10 +2283,10 @@ class LayoutMixin:
             self.advanced_options_expanded = bool(force)
 
         if self.advanced_options_expanded:
-            self.advanced_toggle_btn.configure(text=t("▼ 고급 옵션 (특수 발음/접미사)"))
+            self.advanced_toggle_btn.configure(text=t("▼ 고급 옵션 (특수 발음)"))
             self.advanced_options_frame.pack(fill="x", padx=10, pady=(0, 3))
         else:
-            self.advanced_toggle_btn.configure(text=t("▶ 고급 옵션 (특수 발음/접미사)"))
+            self.advanced_toggle_btn.configure(text=t("▶ 고급 옵션 (특수 발음)"))
             self.advanced_options_frame.pack_forget()
 
     def _get_params(self):
