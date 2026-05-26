@@ -160,6 +160,21 @@ def run_alignment_with_fallback(
             used_engine = "none"
             break
 
+        if engine == "hsmm_oto":
+            attempts.append(
+                make_runtime_report(
+                    "align",
+                    ALIGN_USING_EXISTING,
+                    "Alignment skipped; HSMM OTO generation runs in the OTO stage.",
+                    engine="hsmm_oto",
+                    attempt_index=len(attempts) + 1,
+                    ready=True,
+                    ok=True,
+                )
+            )
+            used_engine = "hsmm_oto"
+            break
+
         if engine == "sequence":
             ready = check_sequence_aligner_ready(
                 language=lang,

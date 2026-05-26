@@ -8,6 +8,7 @@ from typing import Iterable, Sequence
 
 from core.model_context.filename import filename_syllable_order_tokens
 
+from .kana import parse_kana_slots
 from .manifest_audit import infer_filename_phone_sequence
 from .oto_adapter import OtoTemplateRow, OtoTiming
 from .types import is_vowel_phone
@@ -117,6 +118,11 @@ def build_filename_slots(
     format_type: str = "",
 ) -> tuple[FilenameSlot, ...]:
     wav = os.path.basename(str(wav_name or ""))
+    if _is_japanese_language(language):
+        stem = os.path.splitext(wav)[0]
+        kana_phone_slots = parse_kana_slots(stem)
+        if kana_phone_slots:
+            return _slots_from_kana_phone_slots(wav, kana_phone_slots)
     tokens = filename_syllable_order_tokens(wav, language=language)
     if not tokens:
         return _slots_from_phone_sequence(wav, infer_filename_phone_sequence(wav), language=language)
@@ -167,6 +173,34 @@ def build_filename_slots(
         )
         slots.append(slot)
         phone_index += len(slot.phones)
+    return tuple(slots)
+
+
+def _slots_from_kana_phone_slots(wav: str, phone_slots: Sequence[Sequence[str]]) -> tuple[FilenameSlot, ...]:
+    slots: list[FilenameSlot] = []
+    phone_index = 0
+    for raw_slot in phone_slots:
+        phones = tuple(str(phone or "").strip().lower() for phone in raw_slot if str(phone or "").strip())
+        if not phones:
+            continue
+        onset_phones = phones[:-1]
+        vowel = phones[-1]
+        onset = "".join(onset_phones)
+        token = f"{onset}{vowel}" if onset else vowel
+        slot = FilenameSlot(
+            wav=wav,
+            slot_index=len(slots),
+            token=token,
+            onset=onset,
+            vowel=vowel,
+            onset_phones=onset_phones,
+            vowel_phone=vowel,
+            phone_start_index=phone_index,
+            vowel_phone_index=phone_index + len(onset_phones),
+            warnings=("kana_filename_slot",),
+        )
+        slots.append(slot)
+        phone_index += len(phones)
     return tuple(slots)
 
 
@@ -349,7 +383,7 @@ def _slots_from_phone_sequence(
     pending_onset: list[str] = []
     for local_idx, phone in enumerate(normalized):
         phone_index = start_phone_index + local_idx
-        if is_vowel_phone(phone, language):
+        if _is_phone_sequence_slot_vowel(normalized, local_idx, language=language):
             onset = "".join(pending_onset)
             token = f"{onset}{phone}" if onset else phone
             slots.append(
@@ -370,6 +404,17 @@ def _slots_from_phone_sequence(
         else:
             pending_onset.append(phone)
     return tuple(slots)
+
+
+def _is_phone_sequence_slot_vowel(phones: Sequence[str], index: int, *, language: str) -> bool:
+    phone = str(phones[index] or "").strip().lower()
+    if not is_vowel_phone(phone, language):
+        return False
+    if _is_japanese_language(language) and phone == "n" and index + 1 < len(phones):
+        next_phone = str(phones[index + 1] or "").strip().lower()
+        if next_phone == "y":
+            return False
+    return True
 
 
 def _split_syllable_token(
@@ -402,6 +447,8 @@ def _split_syllable_token(
 def _vowel_inventory(*, language: str, format_type: str) -> tuple[str, ...]:
     lang = str(language or "").strip().lower()
     fmt = str(format_type or "").strip().lower()
+    if _is_japanese_language(language):
+        return _JA_VOWELS
     values: list[str] = []
     if lang in {"ko", "kr", "korean"} or fmt in {"cvc", "cvvc", "cv-vc"}:
         values.extend(_KOREAN_VOWELS)
@@ -411,6 +458,10 @@ def _vowel_inventory(*, language: str, format_type: str) -> tuple[str, ...]:
         if item not in seen:
             seen.append(item)
     return tuple(seen)
+
+
+def _is_japanese_language(language: str) -> bool:
+    return str(language or "").strip().lower() in {"ja", "japanese", "jp"}
 
 
 def _split_onset_phones(onset: str) -> list[str]:

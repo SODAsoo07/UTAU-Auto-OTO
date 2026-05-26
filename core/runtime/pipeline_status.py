@@ -10,6 +10,7 @@ OK = "OK"
 ALIGNER_QUALITY_TIER: Dict[str, float] = {
     "mfa": 1.0,
     "sequence": 0.55,
+    "hsmm_oto": 0.35,
     "none": 0.0,
     "existing": 0.85,
 }
@@ -81,6 +82,16 @@ def normalize_aligner_name(value, default: str = "mfa") -> str:
     if text in {"mfa", "montreal"}:
         return "mfa"
     if text in {
+        "hsmm",
+        "hsmm_oto",
+        "hsmm-oto",
+        "hsmm oto",
+        "hsmm oto 지정",
+        "hsmm oto preview",
+        "hsmm oto test",
+    }:
+        return "hsmm_oto"
+    if text in {
         "coarse_crnn",
         "coarse-crnn",
         "coarse",
@@ -108,6 +119,8 @@ def normalize_aligner_name(value, default: str = "mfa") -> str:
         return "sequence"
     if "no-mfa" in text or "nomfa" in text:
         return "none"
+    if "hsmm" in text and "oto" in text:
+        return "hsmm_oto"
     if "coarse" in text or "crnn" in text or "constrained" in text:
         return "sequence"
     if "sequence" in text or "dedicated" in text or "시퀀스" in text:

@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime
 import hashlib
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -95,6 +96,369 @@ def _write_text_lines(path: str | Path, lines: list[str] | tuple[str, ...]) -> N
     out.parent.mkdir(parents=True, exist_ok=True)
     text = "\n".join(str(line).rstrip("\n") for line in lines if str(line).strip())
     out.write_text((text + "\n") if text else "", encoding="utf-8")
+
+
+def _apply_generate_lightgbm_postprocess(
+    args: argparse.Namespace,
+    *,
+    generated_path: Path,
+    out_dir: Path,
+    stem: str,
+    messages: list[str],
+) -> dict[str, object]:
+    if not bool(getattr(args, "apply_lightgbm", False)):
+        return {"enabled": False}
+    language = str(getattr(args, "language", "") or "").strip().lower() or "japanese"
+    format_type = str(getattr(args, "format_type", "") or "").strip().lower()
+    if not generated_path.is_file():
+        return {"enabled": True, "status": "skipped", "reason": "generated_oto_missing"}
+
+    pre_path = out_dir / f"{stem}.pre_lightgbm.ini"
+    shutil.copyfile(generated_path, pre_path)
+    before_sha = _sha256_file(pre_path)
+    lightgbm_report: dict[str, object] = {}
+    env_keys = (
+        "UTOA_ML_ENSEMBLE_ENABLE",
+        "UTOA_ML_ROUTE",
+        "UTOA_JA_OTO_ML_DIR",
+        "UTOA_KR_OTO_ML_DIR",
+    )
+    previous_env = {key: os.environ.get(key) for key in env_keys}
+
+    try:
+        model_dir_arg = str(getattr(args, "lightgbm_model_dir", "") or "").strip()
+        if model_dir_arg:
+            model_dir_arg = str(Path(model_dir_arg).resolve())
+            if language == "japanese":
+                os.environ["UTOA_JA_OTO_ML_DIR"] = model_dir_arg
+            else:
+                os.environ["UTOA_KR_OTO_ML_DIR"] = model_dir_arg
+        os.environ["UTOA_ML_ENSEMBLE_ENABLE"] = "0"
+        os.environ["UTOA_ML_ROUTE"] = "legacy"
+
+        from core.runtime.runtime_config import reset_ml_config
+        from core.oto_ml_refiner import _resolve_lightgbm_model_dir, apply_oto_ml_to_oto_file
+
+        reset_ml_config()
+        resolved_lightgbm_dir = _resolve_lightgbm_model_dir(language, format_type) or ""
+        if not resolved_lightgbm_dir:
+            messages.append("[No-MFA] LightGBM postprocess skipped: model not found.")
+            return {
+                "enabled": True,
+                "status": "skipped",
+                "reason": "lightgbm_model_not_found",
+                "pre_lightgbm_path": str(pre_path),
+                "pre_lightgbm_sha256": before_sha,
+                "model_dir": "",
+                "changed": 0,
+            }
+
+        policy = str(getattr(args, "lightgbm_policy", "") or "auto").strip().lower() or "auto"
+        changed = int(
+            apply_oto_ml_to_oto_file(
+                language,
+                str(generated_path),
+                tg_dir="",
+                wav_dir=str(getattr(args, "wav_dir", "") or ""),
+                custom_phonemes_path="",
+                callback=messages.append,
+                enabled=True,
+                format_override=format_type,
+                policy=policy,
+                report=lightgbm_report,
+                ml_route="legacy",
+            )
+            or 0
+        )
+        from core.generation.common.oto_ml_safety import apply_no_mfa_lightgbm_safety_filter
+
+        safety_report = apply_no_mfa_lightgbm_safety_filter(
+            pre_oto_path=str(pre_path),
+            post_oto_path=str(generated_path),
+            language=language,
+            format_type=format_type,
+        )
+        after_sha = _sha256_file(generated_path)
+        status = str(lightgbm_report.get("status", "") or ("applied" if changed else "no_change"))
+        messages.append(f"[No-MFA] LightGBM postprocess: status={status}, changed={changed}.")
+        if bool(safety_report.get("enabled")) and int(safety_report.get("changed_rows", 0) or 0) > 0:
+            messages.append(
+                "[No-MFA] LightGBM safety filter: "
+                f"restored_terminal={int(safety_report.get('restored_terminal_rows', 0) or 0)}, "
+                f"restored_breath={int(safety_report.get('restored_breath_rows', 0) or 0)}, "
+                f"restored_pure_vowel={int(safety_report.get('restored_pure_vowel_sequence_rows', 0) or 0)}, "
+                f"restored_pure_vowel_onset={int(safety_report.get('restored_pure_vowel_onset_sequence_rows', 0) or 0)}, "
+                f"restored_middle_dot_transition={int(safety_report.get('restored_middle_dot_transition_rows', 0) or 0)}, "
+                f"restored_headless_vc_onset={int(safety_report.get('restored_headless_vc_onset_sequence_rows', 0) or 0)}, "
+                f"restored_regular_pair_onset={int(safety_report.get('restored_regular_pair_onset_sequence_rows', 0) or 0)}, "
+                f"restored_terminal_release_r={int(safety_report.get('restored_terminal_release_r_rows', 0) or 0)}, "
+                f"restored_terminal_release_r_terminal_copy={int(safety_report.get('restored_terminal_release_r_terminal_copy_rows', 0) or 0)}, "
+                f"restored_standalone_release_r_offset={int(safety_report.get('restored_standalone_release_r_offset_rows', 0) or 0)}, "
+                f"capped_standalone_release_r_cutoff={int(safety_report.get('capped_standalone_release_r_cutoff_rows', 0) or 0)}, "
+                f"capped_pitch_regular_pair_cv_pre_overlap={int(safety_report.get('capped_pitch_regular_pair_cv_pre_overlap_rows', 0) or 0)}, "
+                f"clamped_pitch_regular_pair_cv_cutoff={int(safety_report.get('clamped_pitch_regular_pair_cv_cutoff_rows', 0) or 0)}, "
+                f"restored_terminal_v={int(safety_report.get('restored_terminal_standalone_vowel_rows', 0) or 0)}, "
+                f"retimed_terminal_v={int(safety_report.get('retimed_terminal_standalone_vowel_companion_rows', 0) or 0)}, "
+                f"restored_initial_v={int(safety_report.get('restored_initial_standalone_vowel_rows', 0) or 0)}, "
+                f"restored_cv_fixed_cutoff={int(safety_report.get('restored_cv_fixed_cutoff_rows', 0) or 0)}, "
+                f"repaired_vc_cutoff_order={int(safety_report.get('repaired_vc_cutoff_order_rows', 0) or 0)}, "
+                f"restored_underscore_vc_positive_offset_shift={int(safety_report.get('restored_underscore_vc_positive_offset_shift_rows', 0) or 0)}, "
+                f"regularized_following_cv_block_offset={int(safety_report.get('regularized_following_cv_block_offset_rows', 0) or 0)}, "
+                f"retimed_romaji_vc_following_cv={int(safety_report.get('retimed_romaji_vc_following_cv_rows', 0) or 0)}, "
+                f"shifted_pitch_missing_cv_slot={int(safety_report.get('shifted_pitch_missing_cv_slot_rows', 0) or 0)}, "
+                f"shifted_pitch_headless_initial_slot={int(safety_report.get('shifted_pitch_headless_initial_slot_rows', 0) or 0)}, "
+                f"shifted_pitch_katakana_n_grid={int(safety_report.get('shifted_pitch_katakana_n_grid_rows', 0) or 0)}, "
+                f"shifted_underscore_kana_slot1={int(safety_report.get('shifted_underscore_kana_slot1_rows', 0) or 0)}, "
+                f"shifted_underscore_kana_delayed_slot={int(safety_report.get('shifted_underscore_kana_delayed_slot_rows', 0) or 0)}, "
+                f"capped_cv_next_transition_cutoff={int(safety_report.get('capped_cv_next_transition_cutoff_rows', 0) or 0)}, "
+                f"capped_cv_head_vowel_pre_overlap={int(safety_report.get('capped_cv_head_vowel_pre_overlap_rows', 0) or 0)}, "
+                f"capped_cv_pre_overlap={int(safety_report.get('capped_cv_pre_overlap_rows', 0) or 0)}, "
+                f"capped_overlap={int(safety_report.get('capped_overlap_rows', 0) or 0)}."
+            )
+        return {
+            "enabled": True,
+            "status": status,
+            "policy": policy,
+            "pre_lightgbm_path": str(pre_path),
+            "pre_lightgbm_sha256": before_sha,
+            "generated_oto_sha256_before": before_sha,
+            "generated_oto_sha256_after": after_sha,
+            "model_dir": str(resolved_lightgbm_dir),
+            "changed": int(changed),
+            "report": dict(lightgbm_report),
+            "safety_filter": dict(safety_report),
+        }
+    except Exception as exc:
+        if pre_path.is_file():
+            shutil.copyfile(pre_path, generated_path)
+        messages.append(f"[No-MFA] LightGBM postprocess failed; restored pre-LightGBM OTO: {exc}")
+        return {
+            "enabled": True,
+            "status": "failed",
+            "reason": str(exc),
+            "pre_lightgbm_path": str(pre_path),
+            "pre_lightgbm_sha256": before_sha,
+            "restored_pre_lightgbm": True,
+            "changed": 0,
+            "report": dict(lightgbm_report),
+        }
+    finally:
+        for key, value in previous_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        try:
+            from core.runtime.runtime_config import reset_ml_config
+
+            reset_ml_config()
+        except Exception:
+            pass
+
+
+def _cmd_evaluate_lightgbm_postprocess(args: argparse.Namespace) -> int:
+    from scripts.dev.diff_oto import build_report as _build_oto_diff_report
+
+    reference_oto = Path(str(args.reference_oto or ""))
+    pre_oto = Path(str(args.pre_lightgbm_oto or ""))
+    post_oto = Path(str(args.post_lightgbm_oto or ""))
+    cutoff_mode = str(args.cutoff_end_mode or "compatible").strip().lower() or "compatible"
+    wav_dir = str(args.wav_dir or "")
+    row_delta_limit = max(0, int(args.row_delta_limit))
+
+    missing = [
+        str(path)
+        for path in (reference_oto, pre_oto, post_oto)
+        if not path.is_file()
+    ]
+    if missing:
+        payload = {
+            "ok": False,
+            "command": "evaluate-lightgbm-postprocess",
+            "reason": "missing_input_oto",
+            "missing_paths": missing,
+        }
+        if args.out:
+            _write_json(args.out, payload)
+        _print_json(payload)
+        return 2
+
+    pre_report, _pre_rows = _build_oto_diff_report(
+        gold_path=str(reference_oto),
+        pred_path=str(pre_oto),
+        cutoff_end_mode=cutoff_mode,
+        wav_dir=wav_dir,
+    )
+    post_report, _post_rows = _build_oto_diff_report(
+        gold_path=str(reference_oto),
+        pred_path=str(post_oto),
+        cutoff_end_mode=cutoff_mode,
+        wav_dir=wav_dir,
+    )
+    pre_vs_post = _compare_generated_oto_params(
+        str(pre_oto),
+        str(post_oto),
+        row_delta_limit=row_delta_limit,
+    )
+    improvement = _lightgbm_postprocess_improvement(pre_report, post_report)
+    payload = {
+        "ok": True,
+        "command": "evaluate-lightgbm-postprocess",
+        "reference_oto_path": str(reference_oto),
+        "reference_oto_sha256": _sha256_file(reference_oto),
+        "pre_lightgbm_oto_path": str(pre_oto),
+        "pre_lightgbm_oto_sha256": _sha256_file(pre_oto),
+        "post_lightgbm_oto_path": str(post_oto),
+        "post_lightgbm_oto_sha256": _sha256_file(post_oto),
+        "wav_dir": str(wav_dir),
+        "cutoff_end_mode": cutoff_mode,
+        "pre_vs_reference": pre_report,
+        "post_vs_reference": post_report,
+        "pre_vs_post": pre_vs_post,
+        "improvement": improvement,
+        "recommended_use": _lightgbm_postprocess_recommendation(improvement, pre_vs_post),
+    }
+    if args.out:
+        _write_json(args.out, payload)
+        payload["output_path"] = str(args.out)
+    _print_json(payload)
+    return 0
+
+
+def _lightgbm_postprocess_improvement(
+    pre_report: Mapping[str, object],
+    post_report: Mapping[str, object],
+) -> dict[str, object]:
+    pre_by_param = pre_report.get("by_param") if isinstance(pre_report.get("by_param"), Mapping) else {}
+    post_by_param = post_report.get("by_param") if isinstance(post_report.get("by_param"), Mapping) else {}
+    params = sorted(set(str(key) for key in pre_by_param) | set(str(key) for key in post_by_param))
+    by_param: dict[str, dict[str, float]] = {}
+    improved: list[str] = []
+    worsened: list[str] = []
+    unchanged: list[str] = []
+    for param in params:
+        pre_stats = pre_by_param.get(param) if isinstance(pre_by_param.get(param), Mapping) else {}
+        post_stats = post_by_param.get(param) if isinstance(post_by_param.get(param), Mapping) else {}
+        pre_mae = float(pre_stats.get("MAE_ms", 0.0) or 0.0)
+        post_mae = float(post_stats.get("MAE_ms", 0.0) or 0.0)
+        delta = post_mae - pre_mae
+        by_param[param] = {
+            "pre_mae_ms": round(pre_mae, 4),
+            "post_mae_ms": round(post_mae, 4),
+            "delta_mae_ms": round(delta, 4),
+        }
+        if delta < -0.05:
+            improved.append(param)
+        elif delta > 0.05:
+            worsened.append(param)
+        else:
+            unchanged.append(param)
+
+    pre_rows = int(pre_report.get("rows_matched", 0) or 0)
+    post_rows = int(post_report.get("rows_matched", 0) or 0)
+    row_consistent = (
+        pre_rows == post_rows
+        and int(pre_report.get("only_in_gold", 0) or 0) == int(post_report.get("only_in_gold", 0) or 0)
+        and int(pre_report.get("only_in_pred", 0) or 0) == int(post_report.get("only_in_pred", 0) or 0)
+    )
+    pre_by_family = pre_report.get("by_alias_family") if isinstance(pre_report.get("by_alias_family"), Mapping) else {}
+    post_by_family = post_report.get("by_alias_family") if isinstance(post_report.get("by_alias_family"), Mapping) else {}
+    by_alias_family: dict[str, dict[str, object]] = {}
+    for family in sorted(set(str(key) for key in pre_by_family) | set(str(key) for key in post_by_family)):
+        pre_family = pre_by_family.get(family) if isinstance(pre_by_family.get(family), Mapping) else {}
+        post_family = post_by_family.get(family) if isinstance(post_by_family.get(family), Mapping) else {}
+        pre_family_params = pre_family.get("by_param") if isinstance(pre_family.get("by_param"), Mapping) else {}
+        post_family_params = post_family.get("by_param") if isinstance(post_family.get("by_param"), Mapping) else {}
+        family_params: dict[str, dict[str, float]] = {}
+        family_worsened: list[str] = []
+        family_improved: list[str] = []
+        for param in sorted(set(str(key) for key in pre_family_params) | set(str(key) for key in post_family_params)):
+            pre_stats = pre_family_params.get(param) if isinstance(pre_family_params.get(param), Mapping) else {}
+            post_stats = post_family_params.get(param) if isinstance(post_family_params.get(param), Mapping) else {}
+            pre_mae = float(pre_stats.get("MAE_ms", 0.0) or 0.0)
+            post_mae = float(post_stats.get("MAE_ms", 0.0) or 0.0)
+            delta = post_mae - pre_mae
+            family_params[param] = {
+                "pre_mae_ms": round(pre_mae, 4),
+                "post_mae_ms": round(post_mae, 4),
+                "delta_mae_ms": round(delta, 4),
+            }
+            if delta < -0.5:
+                family_improved.append(param)
+            elif delta > 0.5:
+                family_worsened.append(param)
+        by_alias_family[family] = {
+            "n": int(post_family.get("n", pre_family.get("n", 0)) or 0),
+            "by_param": family_params,
+            "improved_params": family_improved,
+            "worsened_params": family_worsened,
+        }
+    return {
+        "row_consistent": bool(row_consistent),
+        "matched_rows": post_rows,
+        "by_param": by_param,
+        "by_alias_family": by_alias_family,
+        "improved_params": improved,
+        "worsened_params": worsened,
+        "unchanged_params": unchanged,
+    }
+
+
+def _lightgbm_postprocess_recommendation(
+    improvement: Mapping[str, object],
+    pre_vs_post: Mapping[str, object],
+) -> dict[str, object]:
+    by_param = improvement.get("by_param") if isinstance(improvement.get("by_param"), Mapping) else {}
+    changed_rows = int(pre_vs_post.get("changed_rows", 0) or 0)
+    matched_rows = int(pre_vs_post.get("matched_rows", 0) or 0)
+    changed_ratio = float(changed_rows) / float(max(1, matched_rows))
+    critical_params = ("offset", "preutterance", "overlap", "consonant", "cutoff_end_abs")
+    worsened_critical_threshold_ms = 5.0
+    worsened_critical = [
+        param
+        for param in critical_params
+        if isinstance(by_param.get(param), Mapping)
+        and float(by_param[param].get("delta_mae_ms", 0.0) or 0.0) > worsened_critical_threshold_ms
+    ]
+    improved_critical = [
+        param
+        for param in critical_params
+        if isinstance(by_param.get(param), Mapping)
+        and float(by_param[param].get("delta_mae_ms", 0.0) or 0.0) < -0.5
+    ]
+    by_alias_family = improvement.get("by_alias_family") if isinstance(improvement.get("by_alias_family"), Mapping) else {}
+    worsened_families: list[str] = []
+    for family, family_payload in sorted(by_alias_family.items()):
+        if not isinstance(family_payload, Mapping):
+            continue
+        family_params = family_payload.get("by_param") if isinstance(family_payload.get("by_param"), Mapping) else {}
+        critical_worse = [
+            param
+            for param in critical_params
+            if isinstance(family_params.get(param), Mapping)
+            and float(family_params[param].get("delta_mae_ms", 0.0) or 0.0) > 20.0
+        ]
+        if critical_worse:
+            worsened_families.append(f"{family}:{','.join(critical_worse)}")
+    safe_candidate = bool(
+        improvement.get("row_consistent", False)
+        and not worsened_critical
+        and not worsened_families
+        and improved_critical
+        and changed_ratio <= 0.80
+    )
+    reason = "candidate" if safe_candidate else "manual_review_or_more_eval_required"
+    return {
+        "safe_candidate": safe_candidate,
+        "reason": reason,
+        "changed_rows": changed_rows,
+        "matched_rows": matched_rows,
+        "changed_ratio": round(changed_ratio, 4),
+        "worsened_critical_threshold_ms": worsened_critical_threshold_ms,
+        "improved_critical_params": improved_critical,
+        "worsened_critical_params": worsened_critical,
+        "worsened_alias_families": worsened_families,
+    }
 
 
 def _row_diagnostics_from_timeline_path(path: str) -> dict[int, dict[str, object]]:
@@ -359,6 +723,14 @@ def _run_generate_review(
             "use_hsmm_decoder": bool(use_hsmm_decoder),
         }
 
+    lightgbm_postprocess = _apply_generate_lightgbm_postprocess(
+        args,
+        generated_path=generated_path,
+        out_dir=out_dir,
+        stem=stem,
+        messages=messages,
+    )
+
     timeline_rows = list(report.timeline_debug or ())
     evidence_rows = list(report.evidence_debug or ())
     row_plan_records = []
@@ -420,6 +792,7 @@ def _run_generate_review(
             "evidence_path": evidence_path,
             "evidence_sha256": evidence_sha256,
             "evidence_wavs": evidence_wavs,
+            "lightgbm_postprocess": dict(lightgbm_postprocess),
             "preferred_encoding_source": str(generated_path),
         },
     )
@@ -443,6 +816,7 @@ def _run_generate_review(
         "evidence_path": evidence_path,
         "evidence_sha256": evidence_sha256,
         "evidence_wavs": evidence_wavs,
+        "lightgbm_postprocess": dict(lightgbm_postprocess),
         "split_counts": dict(split.counts),
         "split_output_paths": dict(split.output_paths),
         "use_hsmm_decoder": bool(use_hsmm_decoder),
@@ -4569,7 +4943,46 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--device", default="", help="Torch device when a checkpoint is used.")
     generate_parser.add_argument("--disable-slot-viterbi", action="store_true")
     generate_parser.add_argument("--use-hsmm-decoder", action="store_true", help="Use filename row-plan HSMM events for no-template generation.")
+    generate_parser.add_argument(
+        "--apply-lightgbm",
+        action="store_true",
+        help="Apply the existing LightGBM OTO-ML refiner after HSMM/rule generation. Off by default.",
+    )
+    generate_parser.add_argument(
+        "--lightgbm-model-dir",
+        default="",
+        help="Optional explicit LightGBM model directory for --apply-lightgbm.",
+    )
+    generate_parser.add_argument(
+        "--lightgbm-policy",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="OTO-ML policy used by --apply-lightgbm.",
+    )
     generate_parser.set_defaults(func=_cmd_generate)
+
+    lightgbm_eval_parser = subparsers.add_parser(
+        "evaluate-lightgbm-postprocess",
+        help="Compare pre/post-LightGBM OTO against a manual reference and summarize residual MAE changes.",
+    )
+    lightgbm_eval_parser.add_argument("--reference-oto", required=True, help="Manual/reference oto.ini.")
+    lightgbm_eval_parser.add_argument("--pre-lightgbm-oto", required=True, help="OTO before LightGBM postprocess.")
+    lightgbm_eval_parser.add_argument("--post-lightgbm-oto", required=True, help="OTO after LightGBM postprocess.")
+    lightgbm_eval_parser.add_argument("--wav-dir", default="", help="WAV root for cutoff end comparison.")
+    lightgbm_eval_parser.add_argument(
+        "--cutoff-end-mode",
+        choices=("raw", "relative", "utau", "compatible"),
+        default="compatible",
+        help="Cutoff/end interpretation for the extra cutoff_end_abs MAE metric.",
+    )
+    lightgbm_eval_parser.add_argument(
+        "--row-delta-limit",
+        type=int,
+        default=100,
+        help="Maximum pre-vs-post changed row records embedded in the report. Use 0 for all rows.",
+    )
+    lightgbm_eval_parser.add_argument("--out", default="", help="Optional JSON report path.")
+    lightgbm_eval_parser.set_defaults(func=_cmd_evaluate_lightgbm_postprocess)
 
     compare_parser = subparsers.add_parser(
         "compare-hsmm",

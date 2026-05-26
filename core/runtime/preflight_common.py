@@ -73,8 +73,8 @@ def validate_runtime_preflight(
     elif not output_path:
         warnings.append(_issue("PRE_OUTPUT_PATH_MISSING", "출력 경로가 없어 OTO 생성 단계는 건너뜁니다.", level="warning"))
 
-    no_mfa_without_textgrid = align_name == "none" and (not has_textgrid_files(tg_dir))
-    source_oto_optional_no_mfa = no_mfa_mode == "mfa_free_ssl_slot"
+    no_mfa_without_textgrid = align_name in {"none", "hsmm_oto"} and (not has_textgrid_files(tg_dir))
+    source_oto_optional_no_mfa = no_mfa_mode in {"mfa_free_ssl_slot", "hsmm_oto"} or align_name == "hsmm_oto"
     template_checked_in_no_mfa_path = False
     if no_mfa_without_textgrid and not source_oto_optional_no_mfa:
         errors.append(
@@ -190,6 +190,8 @@ def _normalize_no_mfa_oto_mode(value: object) -> str:
         return "mfa_free_ssl_slot"
     if raw in {"manual_oto_anchor", "manual_anchor", "manual_oto_anchor_scorer"}:
         return "manual_oto_anchor"
+    if raw in {"hsmm", "hsmm_oto", "hsmmoto"}:
+        return "hsmm_oto"
     if raw in {"remap", "base_remap", "base", "crnn", "oto_crnn"}:
         return "remap"
     return ""

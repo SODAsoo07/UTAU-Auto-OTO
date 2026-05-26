@@ -1,9 +1,10 @@
-﻿import os
+import os
 import sys
 import locale
 import subprocess as sp
 import json
 import re
+import shutil
 import time
 import threading
 
@@ -58,88 +59,7 @@ from ui.i18n import t
 
 
 class PipelineActionsMixin:
-    def _apply_no_mfa_checkpoint_env_from_ui(self) -> str:
-        code = (
-            self._get_no_mfa_checkpoint_choice_code()
-            if hasattr(self, "_get_no_mfa_checkpoint_choice_code")
-            else "tune_d"
-        )
-        normalized = str(code or "tune_d").strip()
-        resolved = ""
-        if normalized == "auto":
-            os.environ.pop("UTOA_MFA_FREE_OTO_CHECKPOINT", None)
-            return ""
-        if normalized.startswith("path:"):
-            candidate = os.path.abspath(normalized[5:])
-            if os.path.isfile(candidate):
-                resolved = candidate
-        else:
-            for base in (
-                str(getattr(self, "app_dir", "") or "").strip(),
-                os.getcwd(),
-            ):
-                if not base:
-                    continue
-                root = os.path.join(base, "ml_workspace", "mfa_free_oto")
-                if not os.path.isdir(root):
-                    continue
-                target = os.path.join(root, "world_v1_light_c4_tune_d.pt")
-                if os.path.isfile(target):
-                    resolved = os.path.abspath(target)
-                    break
-        if resolved:
-            os.environ["UTOA_MFA_FREE_OTO_CHECKPOINT"] = resolved
-            return resolved
-        os.environ.pop("UTOA_MFA_FREE_OTO_CHECKPOINT", None)
-        return ""
-
-    def _resolve_mfa_free_oto_checkpoint(self) -> str:
-        candidates = []
-        env_path = str(os.environ.get("UTOA_MFA_FREE_OTO_CHECKPOINT", "") or "").strip()
-        if env_path:
-            candidates.append(env_path)
-        for base in (
-            str(getattr(self, "app_dir", "") or "").strip(),
-            os.getcwd(),
-        ):
-            if not base:
-                continue
-            root = os.path.join(base, "ml_workspace", "mfa_free_oto")
-            if os.path.isdir(root):
-                for dirpath, _dirnames, filenames in os.walk(root):
-                    for name in filenames:
-                        if name.lower().endswith(".pt") and "wavlm" in name.lower():
-                            candidates.append(os.path.join(dirpath, name))
-        existing = [os.path.abspath(path) for path in candidates if path and os.path.isfile(path)]
-        if not existing:
-            return ""
-        existing.sort(key=lambda path: os.path.getmtime(path), reverse=True)
-        return existing[0]
-
-    def _resolve_manual_oto_anchor_scorer(self) -> str:
-        candidates = []
-        env_path = str(os.environ.get("UTOA_MANUAL_OTO_ANCHOR_SCORER", "") or "").strip()
-        if env_path:
-            candidates.append(env_path)
-        for base in (
-            str(getattr(self, "app_dir", "") or "").strip(),
-            os.getcwd(),
-        ):
-            if not base:
-                continue
-            root = os.path.join(base, "ml_workspace", "manual_oto_anchor")
-            if os.path.isdir(root):
-                for dirpath, _dirnames, filenames in os.walk(root):
-                    for name in filenames:
-                        if name.lower() == "manual_oto_anchor_scorer.pkl":
-                            candidates.append(os.path.join(dirpath, name))
-        existing = [os.path.abspath(path) for path in candidates if path and os.path.isfile(path)]
-        if not existing:
-            return ""
-        existing.sort(key=lambda path: os.path.getmtime(path), reverse=True)
-        return existing[0]
-
-    def _run_mfa_free_oto_preview_generation(
+    def _run_hsmm_oto_preview_generation(
         self,
         *,
         wav_dir: str,
@@ -147,9 +67,11 @@ class PipelineActionsMixin:
         source_oto_path: str = "",
         language: str = "japanese",
         format_type: str = "CV",
+        apply_lightgbm: bool = False,
+        lightgbm_policy: str = "auto",
+        lightgbm_model_dir: str = "",
         callback=None,
     ):
-        checkpoint = self._resolve_mfa_free_oto_checkpoint()
         base_dir = (
             str(getattr(self, "writable_data_dir", "") or "").strip()
             or str(getattr(self, "app_data_dir", "") or "").strip()
@@ -159,38 +81,38 @@ class PipelineActionsMixin:
         bank_name = os.path.basename(os.path.normpath(wav_dir)) or "voicebank"
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         preview_dir = os.path.abspath(
-            os.path.join(base_dir, "ml_workspace", "mfa_free_oto", "ui_preview", f"{bank_name}_{timestamp}")
+            os.path.join(base_dir, "ml_workspace", "mfa_free_oto", "ui_hsmm_oto", f"{bank_name}_{timestamp}")
         )
         os.makedirs(preview_dir, exist_ok=True)
-        anchor_json = os.path.join(preview_dir, "anchors.json")
-        overlay_dir = os.path.join(preview_dir, "overlays")
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", bank_name).strip("._") or "voicebank"
         cmd = [
             sys.executable or "python",
             "-m",
-            "ml.scripts.mfa_free_oto.predict_oto_preview",
+            "scripts.dev.mfa_free_oto_review",
+            "generate",
             "--wav-dir",
             os.path.abspath(wav_dir),
-            "--out-oto",
-            os.path.abspath(out_path),
-            "--out-json",
-            anchor_json,
-            "--overlay-dir",
-            overlay_dir,
-            "--review-out-dir",
+            "--out-dir",
             preview_dir,
-            "--review-name",
-            bank_name,
+            "--name",
+            safe_name,
             "--language",
             language,
             "--format-type",
             format_type,
+            "--alias-type",
+            "auto",
+            "--encoder",
+            "acoustic",
+            "--use-hsmm-decoder",
         ]
-        if checkpoint:
-            cmd.extend(["--checkpoint", checkpoint])
-        if source_oto_path and os.path.isfile(source_oto_path):
-            cmd.extend(["--source-oto", os.path.abspath(source_oto_path), "--mode", "template-preserve"])
-        else:
-            cmd.extend(["--mode", "bootstrap"])
+        if bool(apply_lightgbm):
+            cmd.append("--apply-lightgbm")
+            policy = str(lightgbm_policy or "auto").strip().lower() or "auto"
+            cmd.extend(["--lightgbm-policy", policy])
+            model_dir = str(lightgbm_model_dir or "").strip()
+            if model_dir:
+                cmd.extend(["--lightgbm-model-dir", os.path.abspath(model_dir)])
         device = ""
         if hasattr(self, "oto_crnn_device_var"):
             try:
@@ -200,18 +122,32 @@ class PipelineActionsMixin:
         if device in {"cpu", "cuda"}:
             cmd.extend(["--device", device])
 
+        base_oto = (
+            resolve_no_mfa_source_oto(
+                wav_dir=wav_dir,
+                source_hint=source_oto_path,
+            )
+            if str(source_oto_path or "").strip()
+            else ""
+        )
+        if base_oto:
+            cmd.extend(["--template-oto", base_oto])
+
         if callback:
             try:
-                callback("[MFA-Free OTO] progress 0/1")
+                callback("[HSMM OTO] progress 0/1")
             except Exception:
                 pass
-        if checkpoint:
-            self._append_log(f"[MFA-Free OTO] checkpoint: {checkpoint}")
+        if base_oto:
+            self._append_log(f"[HSMM OTO] base oto alias list: {base_oto}")
+            self._append_log("[HSMM OTO] base oto timing ignored; HSMM/acoustic events assign parameters.")
         else:
-            self._append_log("[MFA-Free OTO] checkpoint: none; using rule-based acoustic fallback")
-        self._append_log(f"[MFA-Free OTO] preview artifacts: {preview_dir}")
+            self._append_log("[HSMM OTO] no base oto; filename row-plan and acoustic events are used.")
+        if bool(apply_lightgbm):
+            self._append_log(f"[HSMM OTO] LightGBM postprocess requested (policy={policy}).")
+        self._append_log(f"[HSMM OTO] preview artifacts: {preview_dir}")
         pretty = " ".join(f'"{part}"' if (" " in str(part) or "\t" in str(part)) else str(part) for part in cmd)
-        self._append_log(f"[MFA-Free OTO] 실행: {pretty}")
+        self._append_log(f"[HSMM OTO] 실행: {pretty}")
         proc = self._popen_subprocess_hidden(
             cmd,
             cwd=str(getattr(self, "app_dir", "") or os.getcwd()),
@@ -222,32 +158,41 @@ class PipelineActionsMixin:
         stdout_lines = []
         for line in self._iter_decoded_stdout_lines(proc):
             stdout_lines.append(line)
-            self._append_log(f"[MFA-Free OTO] {line}")
+            self._append_log(f"[HSMM OTO] {line}")
         proc.wait()
         if int(proc.returncode) != 0:
-            return 0, 0, [f"MFA-Free OTO preview failed (code={int(proc.returncode)})"]
-        preview_summary = self._parse_mfa_free_preview_summary(stdout_lines)
+            return 0, 0, [f"HSMM OTO generation failed (code={int(proc.returncode)})"]
+
+        preview_summary = self._parse_hsmm_oto_preview_summary(stdout_lines)
+        generated_path = str(preview_summary.get("generated_oto_path") or "").strip()
+        out_path_abs = os.path.abspath(out_path)
+        if generated_path and os.path.isfile(generated_path):
+            out_dir = os.path.dirname(out_path_abs)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+            if os.path.abspath(generated_path) != out_path_abs:
+                shutil.copyfile(generated_path, out_path_abs)
+
         row_count = 0
         try:
-            with open(out_path, "r", encoding="utf-8-sig") as handle:
+            with open(out_path_abs, "r", encoding="utf-8-sig") as handle:
                 row_count = sum(1 for line in handle if line.strip() and "=" in line)
         except Exception:
             row_count = 0
-        if isinstance(preview_summary, dict):
-            row_count = int(preview_summary.get("oto_rows") or row_count or 0)
+        row_count = int(preview_summary.get("processed") or preview_summary.get("oto_rows") or row_count or 0)
+        total_count = int(preview_summary.get("total") or row_count or 0)
         if callback:
             try:
-                callback(f"[MFA-Free OTO] progress {row_count}/{row_count or 1}")
+                callback(f"[HSMM OTO] progress {row_count}/{total_count or row_count or 1}")
             except Exception:
                 pass
-        self._append_log(f"[MFA-Free OTO] preview oto: {os.path.abspath(out_path)}")
-        self._append_log(f"[MFA-Free OTO] anchors: {anchor_json}")
-        self._append_log(f"[MFA-Free OTO] overlays: {overlay_dir}")
-        self._append_log(f"[MFA-Free OTO] review split: {preview_dir}")
-        self._log_mfa_free_preview_split_summary(preview_summary)
-        return row_count, row_count, []
+        self._append_log(f"[HSMM OTO] preview oto: {out_path_abs}")
+        if generated_path:
+            self._append_log(f"[HSMM OTO] generated source: {generated_path}")
+        self._log_hsmm_oto_preview_split_summary(preview_summary)
+        return row_count, total_count or row_count, []
 
-    def _parse_mfa_free_preview_summary(self, stdout_lines):
+    def _parse_hsmm_oto_preview_summary(self, stdout_lines):
         text = "\n".join(str(line or "") for line in (stdout_lines or []) if str(line or "").strip())
         if not text:
             return {}
@@ -259,15 +204,26 @@ class PipelineActionsMixin:
             payload = json.loads(text[start : end + 1])
         except Exception:
             return {}
-        return payload if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            return {}
+        if "review_split_counts" not in payload and isinstance(payload.get("split_counts"), dict):
+            payload["review_split_counts"] = payload.get("split_counts")
+        if "review_split_output_paths" not in payload and isinstance(payload.get("split_output_paths"), dict):
+            payload["review_split_output_paths"] = payload.get("split_output_paths")
+        if "oto_rows" not in payload and payload.get("processed") is not None:
+            payload["oto_rows"] = payload.get("processed")
+        return payload
 
-    def _log_mfa_free_preview_split_summary(self, payload):
+    def _parse_mfa_free_preview_summary(self, stdout_lines):
+        return self._parse_hsmm_oto_preview_summary(stdout_lines)
+
+    def _log_hsmm_oto_preview_split_summary(self, payload):
         if not isinstance(payload, dict):
             return
         counts = payload.get("review_split_counts")
         if isinstance(counts, dict) and counts:
             self._append_log(
-                "[MFA-Free OTO] review split counts: "
+                "[HSMM OTO] review split counts: "
                 f"fix_required={int(counts.get('fix_required') or 0)}, "
                 f"attention_only={int(counts.get('attention_only') or 0)}, "
                 f"clean={int(counts.get('clean') or 0)}, "
@@ -286,241 +242,20 @@ class PipelineActionsMixin:
             ):
                 value = str(paths.get(key) or "").strip()
                 if value:
-                    self._append_log(f"[MFA-Free OTO] {key}: {value}")
+                    self._append_log(f"[HSMM OTO] {key}: {value}")
+        lightgbm = payload.get("lightgbm_postprocess")
+        if isinstance(lightgbm, dict) and lightgbm.get("enabled"):
+            status = str(lightgbm.get("status") or "unknown")
+            changed = int(lightgbm.get("changed") or 0)
+            reason = str(lightgbm.get("reason") or "").strip()
+            suffix = f", reason={reason}" if reason else ""
+            self._append_log(f"[HSMM OTO] LightGBM postprocess: status={status}, changed={changed}{suffix}")
+            pre_path = str(lightgbm.get("pre_lightgbm_path") or "").strip()
+            if pre_path:
+                self._append_log(f"[HSMM OTO] pre-LightGBM oto: {pre_path}")
 
-    def _run_manual_oto_anchor_preview_generation(
-        self,
-        *,
-        wav_dir: str,
-        out_path: str,
-        source_oto_path: str = "",
-        language: str = "japanese",
-        format_type: str = "CV",
-        callback=None,
-    ):
-        scorer = self._resolve_manual_oto_anchor_scorer()
-        if not scorer:
-            raise RuntimeError(
-                "manual_oto_anchor_scorer.pkl을 찾지 못했습니다. "
-                "UTOA_MANUAL_OTO_ANCHOR_SCORER 또는 ml_workspace/manual_oto_anchor 아래의 scorer를 지정해 주세요."
-            )
-        if not source_oto_path or not os.path.isfile(source_oto_path):
-            raise RuntimeError("Manual OTO anchor scorer preview에는 베이스/source oto.ini가 필요합니다.")
-
-        base_dir = (
-            str(getattr(self, "writable_data_dir", "") or "").strip()
-            or str(getattr(self, "app_data_dir", "") or "").strip()
-            or str(getattr(self, "app_dir", "") or "").strip()
-            or os.getcwd()
-        )
-        bank_name = os.path.basename(os.path.normpath(wav_dir)) or "voicebank"
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        preview_dir = os.path.abspath(
-            os.path.join(base_dir, "ml_workspace", "manual_oto_anchor", "ui_preview", f"{bank_name}_{timestamp}")
-        )
-        os.makedirs(preview_dir, exist_ok=True)
-        anchor_json = os.path.join(preview_dir, "anchors.json")
-        overlay_dir = os.path.join(preview_dir, "overlays")
-        cmd = [
-            sys.executable or "python",
-            "-m",
-            "ml.scripts.mfa_free_oto.predict_manual_oto_anchor_preview",
-            "--scorer",
-            scorer,
-            "--wav-dir",
-            os.path.abspath(wav_dir),
-            "--source-oto",
-            os.path.abspath(source_oto_path),
-            "--out-oto",
-            os.path.abspath(out_path),
-            "--out-json",
-            anchor_json,
-            "--overlay-dir",
-            overlay_dir,
-            "--language",
-            language,
-            "--format-type",
-            format_type,
-        ]
-        if callback:
-            try:
-                callback("[Manual OTO Anchor] progress 0/1")
-            except Exception:
-                pass
-        self._append_log(f"[Manual OTO Anchor] scorer: {scorer}")
-        self._append_log(f"[Manual OTO Anchor] source oto: {source_oto_path}")
-        self._append_log(f"[Manual OTO Anchor] preview artifacts: {preview_dir}")
-        pretty = " ".join(f'"{part}"' if (" " in str(part) or "\t" in str(part)) else str(part) for part in cmd)
-        self._append_log(f"[Manual OTO Anchor] 실행: {pretty}")
-        proc = self._popen_subprocess_hidden(
-            cmd,
-            cwd=str(getattr(self, "app_dir", "") or os.getcwd()),
-            stdout=sp.PIPE,
-            stderr=sp.STDOUT,
-            text=False,
-        )
-        for line in self._iter_decoded_stdout_lines(proc):
-            if str(line).startswith("[progress] "):
-                message = f"[Manual OTO Anchor] {str(line)[11:].strip()}"
-                if callback:
-                    try:
-                        callback(message)
-                    except Exception:
-                        self._append_log(message)
-                else:
-                    self._append_log(message)
-            else:
-                self._append_log(f"[Manual OTO Anchor] {line}")
-        proc.wait()
-        if int(proc.returncode) != 0:
-            return 0, 0, [f"Manual OTO anchor preview failed (code={int(proc.returncode)})"]
-        row_count = 0
-        try:
-            with open(out_path, "r", encoding="utf-8-sig") as handle:
-                row_count = sum(1 for line in handle if line.strip() and "=" in line)
-        except Exception:
-            row_count = 0
-        if callback:
-            try:
-                callback(f"[Manual OTO Anchor] progress {row_count}/{row_count or 1}")
-            except Exception:
-                pass
-        self._append_log(f"[Manual OTO Anchor] preview oto: {os.path.abspath(out_path)}")
-        self._append_log(f"[Manual OTO Anchor] anchors: {anchor_json}")
-        self._append_log(f"[Manual OTO Anchor] overlays: {overlay_dir}")
-        return row_count, row_count, []
-
-    def _run_mfa_free_oto_preview_from_ui(self):
-        def task():
-            self._set_running(True)
-            self._set_status("MFA-Free SSL 슬롯 어댑터 준비 중...")
-            try:
-                if hasattr(self, "developer_mode_enabled_var") and not bool(self.developer_mode_enabled_var.get()):
-                    self._append_log("⚠ MFA-Free SSL 슬롯 어댑터는 개발자 모드에서만 실행할 수 있습니다.")
-                    self._set_status("⚠ 개발자 모드를 먼저 켜 주세요.")
-                    return
-                wav_dir = str(self.wav_entry.get() if hasattr(self, "wav_entry") else "").strip()
-                if not wav_dir or not os.path.isdir(wav_dir):
-                    self._append_log("❌ WAV 폴더를 먼저 지정해 주세요.")
-                    self._set_status("❌ WAV 경로 누락")
-                    return
-                wav_dir = os.path.abspath(wav_dir)
-                out_path = str(self.out_entry.get() if hasattr(self, "out_entry") else "").strip()
-                if not out_path:
-                    base_dir = (
-                        str(getattr(self, "writable_data_dir", "") or "").strip()
-                        or str(getattr(self, "app_data_dir", "") or "").strip()
-                        or str(getattr(self, "app_dir", "") or "").strip()
-                        or os.getcwd()
-                    )
-                    out_path = os.path.join(base_dir, "ml_workspace", "mfa_free_oto", "ui_preview", "oto.preview.ini")
-                out_path = os.path.abspath(out_path)
-                source_oto = ""
-                tpl_hint = str(self.tpl_entry.get() if hasattr(self, "tpl_entry") else "").strip()
-                if tpl_hint and os.path.isfile(tpl_hint) and tpl_hint.lower().endswith(".ini"):
-                    source_oto = os.path.abspath(tpl_hint)
-                else:
-                    candidate = os.path.join(wav_dir, "oto.ini")
-                    if os.path.isfile(candidate):
-                        source_oto = os.path.abspath(candidate)
-                lang = self._get_language() if hasattr(self, "_get_language") else "japanese"
-                fmt = (
-                    normalize_auto_format_value(lang, self.auto_format_var.get())
-                    if hasattr(self, "auto_format_var")
-                    else "CV"
-                )
-                processed, total, errors = self._run_mfa_free_oto_preview_generation(
-                    wav_dir=wav_dir,
-                    out_path=out_path,
-                    source_oto_path=source_oto,
-                    language=lang,
-                    format_type=fmt,
-                )
-                if errors:
-                    for error in errors:
-                        self._append_log(f"❌ {error}")
-                    self._set_status("❌ MFA-Free SSL 슬롯 어댑터 실패")
-                    return
-                self._append_log(f"✅ MFA-Free SSL 슬롯 어댑터 완료: {processed}/{total} rows")
-                self._set_status("✅ MFA-Free SSL 슬롯 어댑터 완료")
-                try:
-                    os.startfile(os.path.dirname(out_path))  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-            except Exception as e:
-                self._handle_error("MFA-Free SSL 슬롯 어댑터", e)
-            finally:
-                self._set_running(False)
-
-        self._run_in_thread(task)
-
-    def _run_manual_oto_anchor_preview_from_ui(self):
-        def task():
-            self._set_running(True)
-            self._set_status("Manual OTO anchor scorer 준비 중...")
-            try:
-                if hasattr(self, "developer_mode_enabled_var") and not bool(self.developer_mode_enabled_var.get()):
-                    self._append_log("⚠ Manual OTO anchor scorer는 개발자 모드에서만 실행할 수 있습니다.")
-                    self._set_status("⚠ 개발자 모드를 먼저 켜 주세요.")
-                    return
-                wav_dir = str(self.wav_entry.get() if hasattr(self, "wav_entry") else "").strip()
-                if not wav_dir or not os.path.isdir(wav_dir):
-                    self._append_log("❌ WAV 폴더를 먼저 지정해 주세요.")
-                    self._set_status("❌ WAV 경로 누락")
-                    return
-                wav_dir = os.path.abspath(wav_dir)
-                out_path = str(self.out_entry.get() if hasattr(self, "out_entry") else "").strip()
-                if not out_path:
-                    base_dir = (
-                        str(getattr(self, "writable_data_dir", "") or "").strip()
-                        or str(getattr(self, "app_data_dir", "") or "").strip()
-                        or str(getattr(self, "app_dir", "") or "").strip()
-                        or os.getcwd()
-                    )
-                    out_path = os.path.join(base_dir, "ml_workspace", "manual_oto_anchor", "ui_preview", "oto.preview.ini")
-                out_path = os.path.abspath(out_path)
-                source_oto = ""
-                tpl_hint = str(self.tpl_entry.get() if hasattr(self, "tpl_entry") else "").strip()
-                if tpl_hint and os.path.isfile(tpl_hint) and tpl_hint.lower().endswith(".ini"):
-                    source_oto = os.path.abspath(tpl_hint)
-                else:
-                    candidate = os.path.join(wav_dir, "oto.ini")
-                    if os.path.isfile(candidate):
-                        source_oto = os.path.abspath(candidate)
-                if not source_oto:
-                    self._append_log("❌ Manual OTO anchor scorer preview에는 베이스/source oto.ini가 필요합니다.")
-                    self._set_status("❌ 베이스 OTO 필요")
-                    return
-                lang = self._get_language() if hasattr(self, "_get_language") else "japanese"
-                fmt = (
-                    normalize_auto_format_value(lang, self.auto_format_var.get())
-                    if hasattr(self, "auto_format_var")
-                    else "CV"
-                )
-                processed, total, errors = self._run_manual_oto_anchor_preview_generation(
-                    wav_dir=wav_dir,
-                    out_path=out_path,
-                    source_oto_path=source_oto,
-                    language=lang,
-                    format_type=fmt,
-                )
-                if errors:
-                    for error in errors:
-                        self._append_log(f"❌ {error}")
-                    self._set_status("❌ Manual OTO anchor scorer 실패")
-                    return
-                self._append_log(f"✅ Manual OTO anchor scorer 완료: {processed}/{total} rows")
-                self._set_status("✅ Manual OTO anchor scorer 완료")
-                try:
-                    os.startfile(os.path.dirname(out_path))  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-            except Exception as e:
-                self._handle_error("Manual OTO anchor scorer", e)
-            finally:
-                self._set_running(False)
-
-        self._run_in_thread(task)
+    def _log_mfa_free_preview_split_summary(self, payload):
+        return self._log_hsmm_oto_preview_split_summary(payload)
 
     @staticmethod
     def _is_mfa_module_missing_error(code: str, message: str) -> bool:
@@ -1620,12 +1355,12 @@ class PipelineActionsMixin:
         if resolved and os.path.exists(resolved):
             self.mfa_path = resolved
         if not self.mfa_path or not os.path.exists(self.mfa_path):
-            self._notify_long_install_time("MFA")
-            self._append_log("ℹ MFA가 없어 지금 자동 설치를 시작합니다.")
+            self._append_log("ℹ MFA 실행 환경이 없어 설치/복구 확인이 필요합니다.")
             if not self._confirm_mfa_install_action(language=lang, reason="missing_runtime"):
                 self._mfa_ready_cache_ok = False
                 self._last_mfa_install_declined = True
                 return False
+            self._notify_long_install_time("MFA")
             install_ok = False
             self._set_mfa_install_progress_state(True)
             try:
@@ -1697,6 +1432,34 @@ class PipelineActionsMixin:
         self._mfa_ready_cache_key = cache_key
         self._mfa_ready_cache_ok = True
         return True
+
+    def _prompt_mfa_install_for_explicit_selection(self):
+        if bool(getattr(self, "_mfa_selection_install_prompt_seen", False)):
+            return
+        self._mfa_selection_install_prompt_seen = True
+        lang = self._get_language() if hasattr(self, "_get_language") else "korean"
+        resolved = self.mfa_path if (self.mfa_path and os.path.exists(self.mfa_path)) else (find_mfa_executable() or "")
+        if resolved and os.path.exists(resolved):
+            self.mfa_path = resolved
+        try:
+            report = diagnose_mfa_runtime(self.mfa_path or "", language=lang)
+        except Exception:
+            report = {"ready": False}
+        if bool(report.get("ready", False)):
+            if hasattr(self, "_update_mfa_status"):
+                self._update_mfa_status(True)
+            return
+        reason = "install_required"
+        checks = report.get("checks") if isinstance(report.get("checks"), dict) else {}
+        if not checks.get("mfa_executable"):
+            reason = "missing_runtime"
+        elif checks.get("python_rebuild_required"):
+            reason = "python_rebuild"
+        elif not checks.get("model_ready", True):
+            reason = "model_download"
+        if not self._confirm_mfa_install_action(language=lang, reason=reason):
+            return
+        self._run_mfa_diagnose_repair()
 
     def _mfa_startup_repair_state_path(self):
         base_dir = (
@@ -1892,15 +1655,17 @@ class PipelineActionsMixin:
         return True
 
     def _schedule_startup_mfa_auto_repair(self):
+        if str(os.environ.get("UTOA_ENABLE_STARTUP_MFA_AUTO_REPAIR", "")).strip().lower() not in {"1", "true", "yes", "on"}:
+            return
         if str(os.environ.get("UTOA_DISABLE_STARTUP_MFA_AUTO_REPAIR", "")).strip().lower() in {"1", "true", "yes", "on"}:
             return
         if getattr(self, "_startup_mfa_auto_repair_scheduled", False):
             return
         try:
-            if normalize_aligner_name(self.aligner_var.get(), default="mfa") == "none":
+            if normalize_aligner_name(self.aligner_var.get(), default="hsmm_oto") != "mfa":
                 return
         except Exception:
-            pass
+            return
 
         state = self._load_mfa_startup_repair_state()
         # Run startup MFA+ML check only once per install/runtime.
@@ -3041,9 +2806,10 @@ class PipelineActionsMixin:
                 tpl_path_preflight = "" if self.no_base_oto_var.get() else self.tpl_entry.get().strip()
                 custom_phonemes_path = self.custom_phoneme_var.get().strip()
                 aligner_engine = normalize_aligner_name(
-                    self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
-                    default="mfa",
+                    self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO",
+                    default="hsmm_oto",
                 )
+                hsmm_oto_mode = aligner_engine == "hsmm_oto"
                 no_mfa_auto_mode = (
                     aligner_engine == "none"
                     and lang != "english"
@@ -3054,17 +2820,11 @@ class PipelineActionsMixin:
                     if hasattr(self, "_get_no_mfa_oto_mode_code")
                     else "remap"
                 )
-                if no_mfa_mode_code == "mfa_free_ssl_slot":
-                    no_mfa_mode_text = "MFA-Free SSL 슬롯 어댑터(실험)"
-                elif no_mfa_mode_code == "manual_oto_anchor":
-                    no_mfa_mode_text = "Manual OTO anchor scorer(실험)"
-                else:
-                    no_mfa_mode_text = "베이스 OTO 재매핑 + 보정"
-                selected_no_mfa_checkpoint = self._apply_no_mfa_checkpoint_env_from_ui()
-                if selected_no_mfa_checkpoint:
-                    self._append_log(f"[No-MFA] UI checkpoint={selected_no_mfa_checkpoint}")
+                if no_mfa_mode_code != "remap":
+                    no_mfa_mode_code = "remap"
+                no_mfa_mode_text = "베이스 OTO 재매핑 + 보정"
                 no_mfa_source_oto = ""
-                source_oto_required_for_no_mfa = no_mfa_mode_code != "mfa_free_ssl_slot"
+                source_oto_required_for_no_mfa = True
                 if no_mfa_auto_mode:
                     if source_oto_required_for_no_mfa and bool(self.no_base_oto_var.get()):
                         self._append_log("❌ No-MFA 자동설정 모드에서는 베이스 OTO(템플릿 ini)가 필요합니다.")
@@ -3293,6 +3053,56 @@ class PipelineActionsMixin:
                     self._append_log("=" * 50)
                     return
 
+                if hsmm_oto_mode:
+                    hsmm_source_oto = ""
+                    if not bool(self.no_base_oto_var.get()):
+                        hsmm_source_oto = resolve_no_mfa_source_oto(
+                            wav_dir=wav_dir,
+                            source_hint=tpl_path_preflight,
+                        )
+                    if not out_path:
+                        self._append_log("❌ 출력 경로를 먼저 지정해 주세요.")
+                        self._set_status("❌ 출력 경로 누락")
+                        return
+                    self._append_log("ℹ HSMM OTO 모드: Lab/사전/정렬 단계를 건너뜁니다.")
+                    self._append_log("ℹ 파일명 슬롯 순서와 음향 이벤트를 사용하며 source oto timing은 사용하지 않습니다.")
+                    _set_stage_progress("lab", 1.0)
+                    _set_stage_progress("dict", 1.0)
+                    _set_stage_progress("align", 1.0)
+
+                    _set_stage_progress("oto", 0.03)
+                    self._set_status("4/5 - HSMM OTO 생성 중...")
+                    _processed, _total, oto_errors = self._run_hsmm_oto_preview_generation(
+                        wav_dir=wav_dir,
+                        out_path=out_path,
+                        source_oto_path=hsmm_source_oto,
+                        language=lang,
+                        format_type=selected_format,
+                        apply_lightgbm=enable_ml_correction,
+                        callback=_make_stage_callback("oto"),
+                    )
+                    if oto_errors:
+                        self._append_log(f"❌ OTO 생성 실패: {len(oto_errors)}건")
+                        for err in oto_errors:
+                            self._append_log(f"  - {err}")
+                        self._set_status(f"❌ OTO 생성 실패 ({_processed}/{_total})")
+                        return
+                    if _total:
+                        _set_stage_progress("oto", float(_processed) / float(_total))
+                    _set_stage_progress("oto", 1.0)
+
+                    _set_stage_progress("validate", 0.05)
+                    self._set_status("5/5 - OTO 자동 검증 중...")
+                    self._run_auto_validation(wav_dir, textgrid_dir, out_path, callback=_make_stage_callback("validate"))
+                    _set_stage_progress("validate", 1.0)
+                    self._cleanup_generated_output_artifacts(out_path, snapshot=cleanup_snapshot)
+
+                    self._set_status("✅ 전체 파이프라인 완료")
+                    self._append_log("\n" + "=" * 50)
+                    self._append_log("✅ 모든 작업이 정상적으로 완료되었습니다!")
+                    self._append_log("=" * 50)
+                    return
+
                 preflight = collect_runtime_preflight_issues(
                     language=lang,
                     wav_dir=wav_dir,
@@ -3324,49 +3134,30 @@ class PipelineActionsMixin:
                     if no_mfa_source_oto:
                         self._append_log(f"[No-MFA] base oto: {no_mfa_source_oto}")
                     else:
-                        self._append_log("[No-MFA/MFA-Free] source oto not used; filename row plan will be used.")
+                        self._append_log("[No-MFA] source oto not used.")
                     _set_stage_progress("lab", 1.0)
                     _set_stage_progress("dict", 1.0)
                     _set_stage_progress("align", 1.0)
 
                     _set_stage_progress("oto", 0.03)
                     self._set_status("4/5 - No-MFA 자동설정 OTO 생성 중...")
-                    if no_mfa_mode_code == "mfa_free_ssl_slot":
-                        _processed, _total, oto_errors = self._run_mfa_free_oto_preview_generation(
-                            wav_dir=wav_dir,
-                            out_path=out_path,
-                            source_oto_path=no_mfa_source_oto,
-                            language=lang,
-                            format_type=selected_format,
-                            callback=_make_stage_callback("oto"),
-                        )
-                    elif no_mfa_mode_code == "manual_oto_anchor":
-                        _processed, _total, oto_errors = self._run_manual_oto_anchor_preview_generation(
-                            wav_dir=wav_dir,
-                            out_path=out_path,
-                            source_oto_path=no_mfa_source_oto,
-                            language=lang,
-                            format_type=selected_format,
-                            callback=_make_stage_callback("oto"),
-                        )
-                    else:
-                        _processed, _total, oto_errors = generate_no_mfa_auto_oto(
-                            wav_dir=wav_dir,
-                            out_path=out_path,
-                            source_oto_path=no_mfa_source_oto,
-                            alias_suffix=self.alias_suffix_var.get().strip(),
-                            language=lang,
-                            stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
-                            generation_mode=no_mfa_mode_code,
-                            callback=_make_stage_callback("oto"),
-                        )
+                    _processed, _total, oto_errors = generate_no_mfa_auto_oto(
+                        wav_dir=wav_dir,
+                        out_path=out_path,
+                        source_oto_path=no_mfa_source_oto,
+                        alias_suffix=self.alias_suffix_var.get().strip(),
+                        language=lang,
+                        stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
+                        generation_mode=no_mfa_mode_code,
+                        callback=_make_stage_callback("oto"),
+                    )
                     if oto_errors:
                         self._append_log(f"❌ OTO 생성 실패: {len(oto_errors)}건")
                         for err in oto_errors:
                             self._append_log(f"  - {err}")
                         self._set_status(f"❌ OTO 생성 실패 ({_processed}/{_total})")
                         return
-                    runtime_meta = {} if no_mfa_mode_code in {"mfa_free_ssl_slot", "manual_oto_anchor"} else get_last_no_mfa_runtime_meta()
+                    runtime_meta = get_last_no_mfa_runtime_meta()
                     confidence = float(runtime_meta.get("confidence", 0.0) or 0.0)
                     fallback_hint = str(runtime_meta.get("fallback_hint", "") or "")
                     fallback_used = bool(runtime_meta.get("fallback_used", False))
@@ -3432,11 +3223,11 @@ class PipelineActionsMixin:
                 output_dir = os.path.join(wav_dir, "textgrids")
                 align_ok = False
                 align_err = ""
-                align_engine = self.aligner_var.get()
-                primary_engine = normalize_aligner_name(align_engine, default="mfa")
+                align_engine = self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO"
+                primary_engine = normalize_aligner_name(align_engine, default="hsmm_oto")
                 fallback_engine = ""
                 _set_stage_progress("align", 0.05)
-                if primary_engine == "none":
+                if primary_engine in {"none", "hsmm_oto"}:
                     self._set_status("3/5 - 정렬 건너뛰기(no-MFA)")
                 elif primary_engine == "sequence":
                     self._set_status("3/5 - 전용 시퀀스 정렬 준비 중...")

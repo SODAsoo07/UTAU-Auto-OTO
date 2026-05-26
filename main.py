@@ -432,7 +432,8 @@ class App(
         self.en_cvvc_beat_var = ctk.StringVar(value="8-beat")
         self.en_cvvc_preset_var = ctk.StringVar(value="Core")
         self.en_cvvc_list_fallback_var = ctk.BooleanVar(value=True)
-        self.aligner_var = ctk.StringVar(value="MFA")
+        self.aligner_var = ctk.StringVar(value="HSMM OTO")
+        self._mfa_explicitly_selected = False
         self.no_mfa_oto_mode_var = ctk.StringVar(value="베이스 OTO 재매핑 + 보정")
         self.no_mfa_checkpoint_choice_var = ctk.StringVar(value="tune_d (default)")
         self.oto_crnn_model_path_var = ctk.StringVar(value="")

@@ -55,11 +55,11 @@ def parse_oto_line(
     if len(parts) < 6:
         return None
     try:
-        offset = float(parts[1].strip())
-        cons = float(parts[2].strip())
-        cutoff = float(parts[3].strip())
-        pre = float(parts[4].strip())
-        ovl = float(parts[5].strip())
+        offset = _parse_oto_number(parts[1])
+        cons = _parse_oto_number(parts[2])
+        cutoff = _parse_oto_number(parts[3])
+        pre = _parse_oto_number(parts[4])
+        ovl = _parse_oto_number(parts[5])
     except ValueError:
         return None
     alias = parts[0].strip()
@@ -74,6 +74,13 @@ def parse_oto_line(
         "pre": pre,
         "ovl": ovl,
     }
+
+
+def _parse_oto_number(value: str) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    return float(text)
 
 
 def extract_base_timing_shape(

@@ -88,6 +88,49 @@ def parse_kana_text(text: str) -> list[str]:
     return phones if seen_kana else []
 
 
+def parse_kana_slots(text: str) -> list[tuple[str, ...]]:
+    normalized = unicodedata.normalize("NFKC", str(text or "")).strip().lower()
+    if not normalized:
+        return []
+    slots: list[list[str]] = []
+    pending_geminate = False
+    seen_kana = False
+    for raw_char in normalized:
+        char = _katakana_to_hiragana(raw_char)
+        if char in _SEPARATORS:
+            continue
+        if raw_char.isascii():
+            if raw_char in _ASCII_SKIP:
+                continue
+            return []
+        if char == "\u3063":
+            pending_geminate = True
+            seen_kana = True
+            continue
+        if char in _SMALL_YOON:
+            if not slots:
+                return []
+            _apply_small_yoon_slot(slots[-1], _SMALL_YOON[char])
+            seen_kana = True
+            continue
+        if char in _SMALL_VOWELS:
+            _apply_small_vowel_slot(slots, _SMALL_VOWELS[char])
+            seen_kana = True
+            continue
+        parsed = _BASE_PHONES.get(char)
+        if parsed is None:
+            return []
+        slot = list(parsed)
+        if pending_geminate:
+            first = parsed[0]
+            if first not in _VOWELS:
+                slot.insert(0, first)
+            pending_geminate = False
+        slots.append(slot)
+        seen_kana = True
+    return [tuple(slot) for slot in slots] if seen_kana else []
+
+
 def _apply_small_vowel(phones: list[str], vowel: str) -> None:
     if not phones:
         phones.append(vowel)
@@ -97,6 +140,9 @@ def _apply_small_vowel(phones: list[str], vowel: str) -> None:
     if last == "i":
         phones.pop()
         phones.extend(("y", vowel))
+    elif last == "u" and prev in {"k", "g"}:
+        phones.pop()
+        phones.extend(("w", vowel))
     elif last == "u" and (not prev or prev in _VOWELS):
         phones.pop()
         phones.extend(("w", vowel))
@@ -107,6 +153,41 @@ def _apply_small_vowel(phones: list[str], vowel: str) -> None:
         phones.append(vowel)
 
 
+def _apply_small_yoon_slot(slot: list[str], vowel: str) -> None:
+    if not slot:
+        slot.append(vowel)
+        return
+    if slot[-1] in {"i", "e"}:
+        slot.pop()
+    slot.extend(("y", vowel))
+
+
+def _apply_small_vowel_slot(slots: list[list[str]], vowel: str) -> None:
+    if not slots:
+        slots.append([vowel])
+        return
+    slot = slots[-1]
+    if not slot:
+        slot.append(vowel)
+        return
+    last = slot[-1]
+    prev = slot[-2] if len(slot) >= 2 else ""
+    if last == "i":
+        slot.pop()
+        slot.extend(("y", vowel))
+    elif last == "u" and prev in {"k", "g"}:
+        slot.pop()
+        slot.extend(("w", vowel))
+    elif last == "u" and (not prev or prev in _VOWELS):
+        slot.pop()
+        slot.extend(("w", vowel))
+    elif last in {"a", "i", "u", "e", "o"}:
+        slot.pop()
+        slot.append(vowel)
+    else:
+        slot.append(vowel)
+
+
 def _katakana_to_hiragana(char: str) -> str:
     code = ord(char)
     if 0x30A1 <= code <= 0x30F6:
@@ -114,4 +195,4 @@ def _katakana_to_hiragana(char: str) -> str:
     return char
 
 
-__all__ = ["parse_kana_text"]
+__all__ = ["parse_kana_slots", "parse_kana_text"]
